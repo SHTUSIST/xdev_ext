@@ -9,7 +9,7 @@ TESTS := nv_xdev_ext_gpu_policy_test nv_xdev_ext_gpu_binding_test nv_xdev_ext_gp
 	 nv_xdev_ext_gpu_identity_test nv_xdev_ext_ce_classify_test \
 	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test
 
-.PHONY: all run run-async clean
+.PHONY: all run run-async run-host-bookkeeping clean
 
 all: $(TESTS)
 
@@ -67,11 +67,15 @@ run-async: nv_xdev_ext_ce_async_test
 	@status=0; ./nv_xdev_ext_ce_async_test || status=1; \
 		python3 nv_xdev_ext_ce_async_source_test.py || status=1; exit $$status
 
+run-host-bookkeeping:
+	CC=$(CC) python3 nv_xdev_ext_umem_host_contract_test.py -v
+
 run: $(TESTS)
 	@for test in $(TESTS); do ./$$test || exit $$?; done
 	python3 nv_xdev_ext_gpu_source_test.py
 	python3 nv_xdev_ext_ce_async_source_test.py
 	python3 nv_xdev_ext_ce_fence_algorithm_test.py
+	$(MAKE) run-host-bookkeeping
 
 clean:
 	rm -f $(TESTS)

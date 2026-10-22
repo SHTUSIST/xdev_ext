@@ -1364,6 +1364,7 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
     cxl_pinned_buffer_t *pBuffer = NULL;
     unsigned long startAddr;
     NvU32 pageCount;
+    NvU64 pages64;
     int ret;
     NvU32 i;
     NV_STATUS status;
@@ -1377,8 +1378,16 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
         return NV_ERR_INVALID_ARGUMENT;
     }
 
-    // Check for overflow
-    if (unlikely(userVirtAddr > ULONG_MAX - size))
+    *ppHandle = NULL;
+
+#if NV_P2P_UMEM_STRICT_SECURITY_CHECKS
+    if (unlikely(size > NV_P2P_UMEM_MAX_PIN_SIZE))
+        return NV_ERR_INVALID_ARGUMENT;
+#endif
+
+    // Validate the range before subtracting or narrowing to unsigned long.
+    if (unlikely(size > (NvU64)ULONG_MAX ||
+                 userVirtAddr > (NvU64)ULONG_MAX - size))
     {
         nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: address overflow (addr=0x%llx, size=0x%llx)\n",
                   (unsigned long long)userVirtAddr, (unsigned long long)size);
@@ -1386,15 +1395,19 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
     }
 
     startAddr = userVirtAddr & PAGE_MASK;
-    pageCount = ((userVirtAddr + size - 1) >> PAGE_SHIFT) - (startAddr >> PAGE_SHIFT) + 1;
+    pages64 = ((userVirtAddr + size - 1) >> PAGE_SHIFT) - (startAddr >> PAGE_SHIFT) + 1;
 
-    // Sanity check (max ~1TB)
-    if (unlikely(pageCount == 0 || pageCount > (1UL << 28)))
+    // GUP, quota and both arrays count PAGE_SIZE base pages.
+    if (unlikely(pages64 == 0 || pages64 > NV_P2P_UMEM_MAX_PIN_PAGES ||
+                 pages64 > (NvU32)~0U ||
+                 pages64 > (size_t)-1 / sizeof(struct page *) ||
+                 pages64 > (size_t)-1 / sizeof(NvU64)))
     {
-        nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: invalid page count %u (size=0x%llx)\n",
-                  pageCount, (unsigned long long)size);
+        nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: invalid page count %llu (size=0x%llx)\n",
+                  (unsigned long long)pages64, (unsigned long long)size);
         return NV_ERR_INVALID_ARGUMENT;
     }
+    pageCount = (NvU32)pages64;
 
     // Check limits before allocating
     status = cxl_reserve_quota(size, pageCount);
@@ -1446,8 +1459,11 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
                   ret, pageCount, startAddr);
         if (ret > 0)
         {
-            for (i = 0; i < ret; i++)
-                NV_UNPIN_USER_PAGE(pBuffer->pages[i]);
+            for (i = 0; i < (NvU32)ret; i++)
+            {
+                if (pBuffer->pages[i])
+                    NV_UNPIN_USER_PAGE(pBuffer->pages[i]);
+            }
         }
         goto fail_alloc;
     }
@@ -1458,10 +1474,7 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
         if (unlikely(pBuffer->pages[i] == NULL))
         {
             nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: NULL page at index %u\n", i);
-            // Unpin pages we've processed so far
-            for (; i > 0; i--)
-                NV_UNPIN_USER_PAGE(pBuffer->pages[i - 1]);
-            goto fail_alloc;
+            goto fail_unpin;
         }
         pBuffer->physAddrs[i] = page_to_phys(pBuffer->pages[i]);
 
@@ -1481,6 +1494,14 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
 
     *ppHandle = pBuffer;
     return NV_OK;
+
+fail_unpin:
+    // Full GUP success owns the complete range, including entries after a NULL.
+    for (i = 0; i < pageCount; i++)
+    {
+        if (pBuffer->pages[i])
+            NV_UNPIN_USER_PAGE(pBuffer->pages[i]);
+    }
 
 fail_alloc:
     if (pBuffer->physAddrs)
@@ -1569,10 +1590,10 @@ NV_STATUS NV_API_CALL nv_get_cxl_buffer_pages(
 }
 
 /*
- * CXL Buffer Huge Page Pinning (2MB pages)
+ * CXL Buffer Pinning with a Huge Page Hint
  *
- * Pins user pages using huge pages (2MB) for CXL buffer DMA.
- * Huge pages significantly reduce page table overhead for large transfers.
+ * Registration currently falls back to PAGE_SIZE entries: address alignment
+ * alone does not establish physically contiguous huge-page segments.
  */
 #define CXL_HUGEPAGE_SIZE       (2ULL * 1024 * 1024)  // 2MB
 #define CXL_HUGEPAGE_SHIFT      21
@@ -1587,12 +1608,11 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
     cxl_pinned_buffer_t *pBuffer = NULL;
     unsigned long startAddr;
     NvU32 pageCount;
-    NvU32 actualPageSize;
+    NvU64 pages64;
     int ret;
     NvU32 i;
     NV_STATUS status;
     NvBool bLargeAlloc;
-    NvBool bUseHugePages = NV_FALSE;
     NvBool bReserved = NV_FALSE;
 
     if (unlikely(size == 0 || ppHandle == NULL))
@@ -1600,6 +1620,8 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
         nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: invalid argument\n");
         return NV_ERR_INVALID_ARGUMENT;
     }
+
+    *ppHandle = NULL;
 
 #if NV_P2P_UMEM_STRICT_SECURITY_CHECKS
     if (unlikely(size > NV_P2P_UMEM_MAX_PIN_SIZE))
@@ -1611,7 +1633,8 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
     }
 #endif
 
-    if (unlikely(userVirtAddr > ULONG_MAX - size))
+    if (unlikely(size > (NvU64)ULONG_MAX ||
+                 userVirtAddr > (NvU64)ULONG_MAX - size))
     {
         nv_printf(NV_DBG_ERRORS,
                   "NVRM: CXL hugepage pin: invalid range (addr=0x%llx, size=0x%llx)\n",
@@ -1619,33 +1642,23 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
         return NV_ERR_INVALID_ARGUMENT;
     }
 
-    // Check if we can use huge pages (both address and size must be 2MB aligned)
-    if (requestedPageSize == CXL_HUGEPAGE_SIZE &&
-        (userVirtAddr & (CXL_HUGEPAGE_SIZE - 1)) == 0 &&
-        (size & (CXL_HUGEPAGE_SIZE - 1)) == 0 &&
-        size >= CXL_HUGEPAGE_SIZE)
-    {
-        bUseHugePages = NV_TRUE;
-        actualPageSize = CXL_HUGEPAGE_SIZE;
-        startAddr = userVirtAddr;
-        pageCount = (NvU32)(size >> CXL_HUGEPAGE_SHIFT);
-        nv_printf(NV_DBG_INFO, "NVRM: CXL hugepage pin: using 2MB pages (%u pages)\n", pageCount);
-    }
-    else
-    {
-        // Fall back to 4K pages
-        actualPageSize = PAGE_SIZE;
-        startAddr = userVirtAddr & PAGE_MASK;
-        pageCount = ((userVirtAddr + size - 1) >> PAGE_SHIFT) - (startAddr >> PAGE_SHIFT) + 1;
-        nv_printf(NV_DBG_INFO, "NVRM: CXL hugepage pin: falling back to 4K pages (%u pages)\n", pageCount);
-    }
+    /* The hint does not prove physical continuity. Keep every base-page pin
+     * and report the existing PAGE_SIZE fallback until a verified segment
+     * table is available. */
+    (void)requestedPageSize;
+    startAddr = userVirtAddr & PAGE_MASK;
+    pages64 = ((userVirtAddr + size - 1) >> PAGE_SHIFT) - (startAddr >> PAGE_SHIFT) + 1;
 
-    if (unlikely(pageCount == 0 || pageCount > NV_P2P_UMEM_MAX_PIN_PAGES))
+    if (unlikely(pages64 == 0 || pages64 > NV_P2P_UMEM_MAX_PIN_PAGES ||
+                 pages64 > (NvU32)~0U ||
+                 pages64 > (size_t)-1 / sizeof(struct page *) ||
+                 pages64 > (size_t)-1 / sizeof(NvU64)))
     {
-        nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: invalid page count %u\n",
-                  pageCount);
+        nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: invalid page count %llu\n",
+                  (unsigned long long)pages64);
         return NV_ERR_INVALID_ARGUMENT;
     }
+    pageCount = (NvU32)pages64;
 
     // Check limits
     status = cxl_reserve_quota(size, pageCount);
@@ -1669,8 +1682,8 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
     pBuffer->userVirtAddr = userVirtAddr;
     pBuffer->size = size;
     pBuffer->pageCount = pageCount;
-    pBuffer->pageSize = actualPageSize;
-    pBuffer->bHugePages = bUseHugePages;
+    pBuffer->pageSize = PAGE_SIZE;
+    pBuffer->bHugePages = NV_FALSE;
     pBuffer->refCount = 1;
 
     bLargeAlloc = (pageCount > 512);
@@ -1698,8 +1711,10 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
 
     // Pin pages using pin_user_pages
     // NV_PIN_USER_PAGES macro handles the vmas argument internally based on kernel version
+    nv_mmap_read_lock(current->mm);
     ret = NV_PIN_USER_PAGES(startAddr, pageCount, FOLL_LONGTERM | FOLL_WRITE,
                            pBuffer->pages);
+    nv_mmap_read_unlock(current->mm);
     if (ret != pageCount)
     {
         nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: failed - got %d, expected %u\n",
@@ -1734,8 +1749,8 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
 
     *ppHandle = pBuffer;
 
-    nv_printf(NV_DBG_INFO, "NVRM: CXL hugepage pin: success - %u %s pages, size=0x%llx\n",
-              pageCount, bUseHugePages ? "2MB" : "4K", (unsigned long long)size);
+    nv_printf(NV_DBG_INFO, "NVRM: CXL hugepage pin: success - %u base pages, size=0x%llx\n",
+              pageCount, (unsigned long long)size);
 
     return NV_OK;
 
@@ -2741,9 +2756,20 @@ NV_STATUS NV_API_CALL nv_get_umem_buffer_info(
 )
 {
     nv_p2p_umem_buffer_t *pBuffer = (nv_p2p_umem_buffer_t *)pHandle;
+    NvU64 frameCount = 0;
 
     if (pBuffer == NULL)
         return NV_ERR_INVALID_ARGUMENT;
+
+    // Validate optional frame metadata before writing any output.
+    if (pFrameCount)
+    {
+        if (pBuffer->frameSize == 0 || pBuffer->size % pBuffer->frameSize != 0)
+            return NV_ERR_INVALID_STATE;
+        frameCount = pBuffer->size / pBuffer->frameSize;
+        if (frameCount > (NvU32)~0U)
+            return NV_ERR_INVALID_STATE;
+    }
 
     if (pBufferType)
         *pBufferType = pBuffer->bufferType;
@@ -2752,7 +2778,7 @@ NV_STATUS NV_API_CALL nv_get_umem_buffer_info(
     if (pFrameSize)
         *pFrameSize = pBuffer->frameSize;
     if (pFrameCount)
-        *pFrameCount = pBuffer->size / pBuffer->frameSize;
+        *pFrameCount = (NvU32)frameCount;
     if (pIsGpuBacked)
         *pIsGpuBacked = pBuffer->bGpuBacked;
 

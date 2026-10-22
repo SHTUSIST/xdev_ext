@@ -45,6 +45,8 @@ jobs:
         run: python3 tests/eval/gds/test_gds.py -v
       - name: IAA syscall and lifetime contracts
         run: make -C tests/iaa all check
+      - name: GPU host-page bookkeeping contracts
+        run: make -C gpu/tests run-host-bookkeeping
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |
