@@ -1890,6 +1890,36 @@ ssize_t sendto(int fd, const void *buffer, size_t count, int flags,
 	return ret;
 }
 
+/* Inspect only bounded local metadata. A fault, short copy or unsupported
+ * shape must reach libc with the original message before any publication;
+ * libc/kernel retain responsibility for descriptor/error precedence.
+ */
+static bool xdev_ext_sendmsg_snapshot(const struct msghdr *message,
+				 const void **buffer, size_t *count)
+{
+	struct msghdr header;
+	struct iovec iov, local, remote;
+	pid_t pid = getpid();
+
+	local = (struct iovec){ .iov_base = &header, .iov_len = sizeof(header) };
+	remote = (struct iovec){ .iov_base = (void *)message,
+				 .iov_len = sizeof(header) };
+	if (syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0) !=
+	    (ssize_t)sizeof(header))
+		return false;
+	if (header.msg_name || header.msg_namelen || header.msg_control ||
+	    header.msg_controllen || !header.msg_iov || header.msg_iovlen != 1)
+		return false;
+	local = (struct iovec){ .iov_base = &iov, .iov_len = sizeof(iov) };
+	remote = (struct iovec){ .iov_base = header.msg_iov,
+				 .iov_len = sizeof(iov) };
+	if (syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0) !=
+	    (ssize_t)sizeof(iov))
+		return false;
+	header.msg_iov = &iov;
+	return xdev_ext_preload_sendmsg_shape_supported(&header, buffer, count);
+}
+
 ssize_t sendmsg(int fd, const struct msghdr *message, int flags)
 {
 	const void *buffer = NULL;
@@ -1898,17 +1928,23 @@ ssize_t sendmsg(int fd, const struct msghdr *message, int flags)
 	ssize_t ret;
 
 	pthread_once(&xdev_ext_real_once, xdev_ext_resolve_real_functions);
-	if (xdev_ext_in_hook ||
-	    !xdev_ext_preload_sendmsg_shape_supported(message, &buffer, &count)) {
-		ret = xdev_ext_real.sendmsg_fn(fd, message, flags);
-		if (ret >= 0)
-			errno = saved_errno;
-		return ret;
-	}
+	if (xdev_ext_in_hook)
+		goto fallback;
+	pthread_once(&xdev_ext_config_once, xdev_ext_load_config);
+	if (!xdev_ext_cfg.socket_enabled ||
+	    !xdev_ext_preload_send_flags_supported((uint32_t)flags) ||
+	    !xdev_ext_sendmsg_snapshot(message, &buffer, &count))
+		goto fallback;
 	xdev_ext_cancel_point_enter();
 	ret = xdev_ext_socket_send(XDEV_EXT_SOCKET_CALL_SENDMSG, fd, buffer, count, flags,
 			      NULL, 0, message, saved_errno);
 	xdev_ext_in_hook--;
+	return ret;
+
+fallback:
+	ret = xdev_ext_real.sendmsg_fn(fd, message, flags);
+	if (ret >= 0)
+		errno = saved_errno;
 	return ret;
 }
 

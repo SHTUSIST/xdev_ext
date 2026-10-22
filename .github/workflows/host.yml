@@ -25,6 +25,8 @@ jobs:
         run: python3 scripts/test_host.py
       - name: Concurrent frontend workload and evidence checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
+      - name: Frontend invalid-memory semantics
+        run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
       - name: Portable comparison workloads and frontend call shapes
         run: |
           make -C tests/eval check
