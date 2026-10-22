@@ -50,4 +50,4 @@ Performance claims require an explicit workload, actual physical devices, topolo
 
 ## Repository CI
 
-The [host workflow](../.github/workflows/host.yml) is configured to run the compact checks with GCC and Clang, plus source preparation/layout regressions, peer lifetime checks, integration harness/validator regressions, and GPU source/fence checks. These jobs do not boot a guest or execute physical device DMA.
+The [host workflow](../.github/workflows/host.yml) is configured to run the compact checks with GCC and Clang, plus source preparation/layout regressions, mechanism and CE source contracts, peer lifetime checks, integration harness/validator regressions, and GPU source/fence checks. The mechanism source step runs 49 checks directly from the tracked overlay, needs no upstream Linux tree, and rejects failures or skips in its captured output. These jobs do not boot a guest or execute physical device DMA.

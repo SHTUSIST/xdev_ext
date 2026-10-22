@@ -25,6 +25,18 @@ jobs:
       - name: Source layout and preparation regressions
         if: matrix.cc == 'gcc'
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Mechanism source contracts
+        if: matrix.cc == 'gcc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/xdev-ext-mechanism-source.log"
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_source_test.py 2>&1 | tee "$log"
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py 2>&1 | tee -a "$log"
+          if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)' "$log"; then
+            echo "Mechanism source checks reported failed or skipped cases"
+            exit 1
+          fi
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: make -C kernel/tools/testing/selftests/xdev_ext_peer run_tests
