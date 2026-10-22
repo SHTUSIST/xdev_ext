@@ -3,7 +3,8 @@
 #define XDEV_EXT_PRELOAD_CORE_H
 
 /*
- * Pure policy and request encoding for io_uring_unified_preload.c.  Keep this
+ * Policy, fault-reporting host copies and request encoding for the frontend.
+ * Keep this
  * header independent of liburing so host tests can exercise every fallback
  * and completion decision with a fake submit seam.
  */
@@ -17,6 +18,8 @@
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/syscall.h>
+#include <unistd.h>
 #include <sys/uio.h>
 
 /* Always consume the ABI from this source tree. */
@@ -379,6 +382,25 @@ xdev_ext_preload_iov_is_eligible(const struct xdev_ext_preload_fd_meta *meta,
 	return true;
 }
 
+/* Kernel-mediated self copies report inaccessible caller memory without a
+ * process-wide signal handler. Never probe and then memcpy the caller pointer.
+ * A short copy is a real prefix, not permission to retry an accepted request.
+ */
+static inline ssize_t
+xdev_ext_preload_user_copy(void *local_buffer, void *user_buffer, size_t bytes,
+                          bool to_user)
+{
+	struct iovec local = { .iov_base = local_buffer, .iov_len = bytes };
+	struct iovec remote = { .iov_base = user_buffer, .iov_len = bytes };
+
+	if (!bytes)
+		return 0;
+	/* syscall() consumes machine words; in particular its stack-passed flags
+	 * must not leave the upper half of an argument slot uninitialized. */
+	return syscall(to_user ? SYS_process_vm_writev : SYS_process_vm_readv,
+		       (long)getpid(), &local, 1UL, &remote, 1UL, 0UL);
+}
+
 static inline bool
 xdev_ext_preload_iov_gather(void *staging, size_t staging_size,
 		       const struct iovec *iov, int iovcnt, size_t total)
@@ -400,15 +422,17 @@ xdev_ext_preload_iov_gather(void *staging, size_t staging_size,
 	for (i = 0; i < iovcnt; i++) {
 		if (!iov[i].iov_len)
 			continue;
-		memcpy((unsigned char *)staging + copied, iov[i].iov_base,
-		       iov[i].iov_len);
+		if (xdev_ext_preload_user_copy((unsigned char *)staging + copied,
+					  iov[i].iov_base, iov[i].iov_len, false) !=
+		    (ssize_t)iov[i].iov_len)
+			return false;
 		copied += iov[i].iov_len;
 	}
 	return true;
 }
 
-static inline bool
-xdev_ext_preload_iov_scatter(const struct iovec *iov, int iovcnt,
+static inline ssize_t
+xdev_ext_preload_iov_scatter_prefix(const struct iovec *iov, int iovcnt,
 			const void *staging, size_t bytes)
 {
 	size_t capacity = 0;
@@ -416,26 +440,40 @@ xdev_ext_preload_iov_scatter(const struct iovec *iov, int iovcnt,
 	int i;
 
 	if (!iov || iovcnt <= 0 || iovcnt > IOV_MAX || (!staging && bytes))
-		return false;
+		return -1;
 	for (i = 0; i < iovcnt; i++) {
 		if (iov[i].iov_len > SIZE_MAX - capacity)
-			return false;
+			return -1;
 		capacity += iov[i].iov_len;
 	}
 	if (bytes > capacity)
-		return false;
+		return -1;
 	for (i = 0; i < iovcnt && copied < bytes; i++) {
 		size_t length = iov[i].iov_len;
+		ssize_t ret;
 
 		if (length > bytes - copied)
 			length = bytes - copied;
 		if (!length)
 			continue;
-		memcpy(iov[i].iov_base, (const unsigned char *)staging + copied,
-		       length);
-		copied += length;
+		ret = xdev_ext_preload_user_copy(
+			(void *)((const unsigned char *)staging + copied),
+			iov[i].iov_base, length, true);
+
+		if (ret > 0)
+			copied += (size_t)ret;
+		if (ret != (ssize_t)length)
+			return copied ? (ssize_t)copied : -1;
 	}
-	return copied == bytes;
+	return (ssize_t)copied;
+}
+
+static inline bool
+xdev_ext_preload_iov_scatter(const struct iovec *iov, int iovcnt,
+			const void *staging, size_t bytes)
+{
+	return xdev_ext_preload_iov_scatter_prefix(iov, iovcnt, staging, bytes) ==
+	       (ssize_t)bytes;
 }
 
 /*
@@ -575,8 +613,10 @@ xdev_ext_preload_execute(const struct xdev_ext_preload_fd_meta *meta, int fd,
 		return seam->fallback(seam->opaque, fd, user_buffer, count,
 				      offset, write, error);
 
-	if (write)
-		memcpy(staging, user_buffer, count);
+	if (write && xdev_ext_preload_user_copy(staging, user_buffer, count, false) !=
+	    (ssize_t)count)
+		return seam->fallback(seam->opaque, fd, user_buffer, count,
+				      offset, write, error);
 	xdev_ext_preload_encode_sqe(&sqe, fd, (uint32_t)count, offset, write,
 			       user_data);
 	ret = seam->submit_and_wait(seam->opaque, &sqe, &cqe_res, &published);
@@ -595,8 +635,16 @@ xdev_ext_preload_execute(const struct xdev_ext_preload_fd_meta *meta, int fd,
 		*error = EIO;
 		return -1;
 	}
-	if (!write && cqe_res)
-		memcpy(user_buffer, staging, (size_t)cqe_res);
+	if (!write && cqe_res) {
+		ssize_t copied = xdev_ext_preload_user_copy(staging, user_buffer,
+						       (size_t)cqe_res, true);
+
+		if (copied <= 0) {
+			*error = EFAULT;
+			return -1;
+		}
+		return copied;
+	}
 	return cqe_res;
 }
 
@@ -641,10 +689,13 @@ xdev_ext_preload_execute_iov(const struct xdev_ext_preload_fd_meta *meta, int fd
 		*error = EIO;
 		return -1;
 	}
-	if (!write && cqe_res &&
-	    !xdev_ext_preload_iov_scatter(iov, iovcnt, staging, (size_t)cqe_res)) {
-		*error = EFAULT;
-		return -1;
+	if (!write && cqe_res) {
+		ssize_t copied = xdev_ext_preload_iov_scatter_prefix(iov, iovcnt,
+						staging, (size_t)cqe_res);
+
+		if (copied < 0)
+			*error = EFAULT;
+		return copied;
 	}
 	return cqe_res;
 }

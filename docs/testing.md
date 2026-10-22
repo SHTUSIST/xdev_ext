@@ -88,3 +88,30 @@ GPU correctness requires a separate device run; the scalar fixture certifies no
 pinning, DMA or performance result.
 
 Both compiler jobs also run the existing reliable control admission and native completion map teardown regressions: two STOP/ACK BUILD cases and five mapping/UNKNOWN ownership cases. The same scripts are registered in the mechanism selftest Makefile; they execute extracted production functions and require no device or guest.
+
+Both compiler jobs build the actual positional frontend and existing host kernel
+model before running the sendmsg metadata and positional scalar/vector
+invalid-memory regressions. The positional test compares all twelve exported
+API names against the host libc and direct syscalls, including complete file
+and mapping bytes, partial metadata, protected payload pages, and permissions
+changed after acceptance. Missing O_DIRECT/model takeover capability fails;
+it does not turn the test into all-skips. These checks establish host API and
+request-publication behavior, not custom-kernel execution, DMA or performance.
+
+Run the same pair directly from a clean overlay checkout:
+
+```bash
+make -C tests/eval/apps build/libio_uring_unified.so build/libxdev_ext_preload_kernel_model.so
+XDEV_EXT_PRELOAD_TEST_DIR="$PWD/tests/eval/apps/build" timeout 300 python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
+timeout 300 python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_positional_efault_test.py --build-dir "$PWD/tests/eval/apps/build"
+```
+
+Set `CC=gcc` or `CC=clang` for the build and test fixture compiler, and use a
+fresh build directory when switching compilers. With prepared Linux sources,
+both scripts also belong to the preload selftest's `run_tests` target. Inspect
+the complete TAP output for `not ok` and skips: the Linux selftest runner can
+return zero even when an individual test fails. The CI step runs these two
+scripts directly with pipefail and a 300-second timeout for each script, and
+additionally rejects failed or skipped cases in its captured output. The
+preload selftest directory also sets a 300-second per-test timeout for the
+882-child positional matrix; the global selftest runner is unchanged.

@@ -12,6 +12,7 @@ TEST_GEN_PROGS := xdev_ext_preload_core_test xdev_ext_preload_fd_shard_test \
 TEST_PROGS := xdev_ext_preload_vfs_source_test.sh \
 	xdev_ext_preload_concurrency_test.py \
 	xdev_ext_preload_efault_test.py \
+	xdev_ext_preload_positional_efault_test.py \
 	independent_mech_fork_inherited.py \
 	independent_mech_fork_teardown.py \
 	xdev_ext_preload_socket_source_test.py xdev_ext_preload_db_equivalence.sh

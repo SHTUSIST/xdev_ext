@@ -116,6 +116,7 @@ struct xdev_ext_call_ctx {
 	struct xdev_ext_thread_ctx *thread;
 	bool use_64;
 	bool use_v2;
+	const struct iovec *original_iov;
 };
 
 enum xdev_ext_socket_call_kind {
@@ -1323,6 +1324,11 @@ static ssize_t xdev_ext_iov_fallback(void *opaque, int fd,
 	struct xdev_ext_call_ctx *call = opaque;
 	ssize_t ret;
 
+	/* Admission and execution inspect only the owned snapshot. A delegation
+	 * still passes the caller's original metadata to libc exactly once. */
+	if (call->original_iov)
+		iov = call->original_iov;
+
 	if (write) {
 		if (call->use_v2) {
 			if (call->use_64 && xdev_ext_real.pwritev64v2_fn)
@@ -1390,6 +1396,77 @@ static ssize_t xdev_ext_recursive_iov_v2(int fd, const struct iovec *iov,
 	return ret;
 }
 
+/* O_DIRECT may reject the entire destination before transferring any bytes.
+ * This is advisory admission only: mappings can change immediately afterwards,
+ * so accepted reads must still use fault-reporting copyout and never replay.
+ * Failure to inspect mappings simply keeps the original request in libc.
+ */
+#define XDEV_EXT_MAPS_SCAN_LIMIT (1024U * 1024U)
+
+static bool xdev_ext_read_destinations_writable(const struct iovec *iov, int iovcnt)
+{
+	uintptr_t *cursor;
+	unsigned long low, high;
+	char permissions[5], line[512];
+	size_t scanned = 0;
+	FILE *maps;
+	bool writable = false, line_start = true;
+	int i;
+
+	if (!iov || iovcnt <= 0 || iovcnt > IOV_MAX)
+		return false;
+	cursor = malloc((size_t)iovcnt * sizeof(*cursor));
+	if (!cursor)
+		return false;
+	for (i = 0; i < iovcnt; i++) {
+		cursor[i] = (uintptr_t)iov[i].iov_base;
+		if (iov[i].iov_len > UINTPTR_MAX - cursor[i])
+			goto out;
+	}
+	maps = fopen("/proc/self/maps", "re");
+	if (!maps)
+		goto out;
+	/* One scan per call, with a fixed byte bound independent of map count.
+	 * Long pathname continuations are never interpreted as mapping headers. */
+	while (scanned < XDEV_EXT_MAPS_SCAN_LIMIT &&
+	       fgets(line, XDEV_EXT_MAPS_SCAN_LIMIT - scanned < sizeof(line) ?
+		     XDEV_EXT_MAPS_SCAN_LIMIT - scanned + 1 : sizeof(line), maps)) {
+		size_t length = strlen(line);
+		bool header = line_start;
+		bool complete = true;
+
+		scanned += length;
+		line_start = length && line[length - 1] == '\n';
+		if (!header || sscanf(line, "%lx-%lx %4s", &low, &high,
+				      permissions) != 3)
+			continue;
+		for (i = 0; i < iovcnt; i++) {
+			uintptr_t end = (uintptr_t)iov[i].iov_base + iov[i].iov_len;
+
+			if (cursor[i] == end)
+				continue;
+			if (low > cursor[i])
+				goto close;
+			if (high > cursor[i]) {
+				if (permissions[1] != 'w')
+					goto close;
+				cursor[i] = high < end ? high : end;
+			}
+			if (cursor[i] != end)
+				complete = false;
+		}
+		if (complete) {
+			writable = true;
+			break;
+		}
+	}
+close:
+	fclose(maps);
+out:
+	free(cursor);
+	return writable;
+}
+
 static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 				 int64_t offset, bool write, bool use_64)
 {
@@ -1397,6 +1474,7 @@ static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 	struct xdev_ext_preload_seam seam;
 	struct xdev_ext_call_ctx call = { .use_64 = use_64 };
 	struct xdev_ext_thread_ctx *thread;
+	struct iovec destination = { .iov_base = buffer, .iov_len = count };
 	uint64_t token;
 	ssize_t ret;
 	int request_fd = -1;
@@ -1423,6 +1501,12 @@ static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 		request_fd = -1;
 		goto restore_and_fallback;
 	}
+	if (!write && !xdev_ext_read_destinations_writable(&destination, 1)) {
+		(void)xdev_ext_real.close_fn(request_fd);
+		request_fd = -1;
+		goto restore_and_fallback;
+	}
+
 	thread = xdev_ext_get_thread();
 	if (!thread) {
 		(void)xdev_ext_real.close_fn(request_fd);
@@ -1469,8 +1553,10 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 	struct xdev_ext_call_ctx call = {
 		.use_64 = use_64,
 		.use_v2 = use_v2,
+		.original_iov = iov,
 	};
 	struct xdev_ext_thread_ctx *thread;
+	struct iovec *snapshot = NULL;
 	size_t total;
 	uint64_t token;
 	ssize_t ret;
@@ -1494,11 +1580,24 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 	request_fd = xdev_ext_duplicate_validated_fd(fd, &meta);
 	if (request_fd < 0)
 		goto restore_and_fallback;
-	if (!xdev_ext_preload_iov_is_eligible(&meta, iov, iovcnt, offset, &total)) {
+	/* Do not touch user metadata for descriptors that cannot be admitted. */
+	if (!meta.tracked || !meta.identity_matches || !meta.direct ||
+	    !meta.frame_size || !meta.dio_mem_align || !meta.dio_offset_align ||
+	    !iov || iovcnt <= 0 || iovcnt > IOV_MAX || offset < 0)
+		goto close_and_fallback;
+	snapshot = malloc((size_t)iovcnt * sizeof(*snapshot));
+	if (!snapshot || xdev_ext_preload_user_copy(snapshot, (void *)iov,
+			(size_t)iovcnt * sizeof(*snapshot), false) !=
+	    (ssize_t)((size_t)iovcnt * sizeof(*snapshot)))
+		goto close_and_fallback;
+	if (!xdev_ext_preload_iov_is_eligible(&meta, snapshot, iovcnt, offset, &total)) {
 		(void)xdev_ext_real.close_fn(request_fd);
 		request_fd = -1;
 		goto restore_and_fallback;
 	}
+	if (!write && !xdev_ext_read_destinations_writable(snapshot, iovcnt))
+		goto close_and_fallback;
+
 	thread = xdev_ext_get_thread();
 	if (!thread) {
 		(void)xdev_ext_real.close_fn(request_fd);
@@ -1513,11 +1612,12 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 	};
 	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)getpid(),
 				       (uint32_t)syscall(SYS_gettid));
-	ret = xdev_ext_preload_execute_iov(&meta, request_fd, iov, iovcnt, offset,
+	ret = xdev_ext_preload_execute_iov(&meta, request_fd, snapshot, iovcnt, offset,
 				      write, flags, thread->umem, token, &seam,
 				      &error);
 	if (!__atomic_load_n(&thread->quiescence_unknown, __ATOMIC_ACQUIRE))
 		(void)xdev_ext_real.close_fn(request_fd);
+	free(snapshot);
 	(void)pthread_setcancelstate(cancel_state, NULL);
 	if (ret < 0)
 		errno = error ? error : EIO;
@@ -1525,7 +1625,10 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 		errno = saved_errno;
 	return ret;
 
+close_and_fallback:
+	(void)xdev_ext_real.close_fn(request_fd);
 restore_and_fallback:
+	free(snapshot);
 	(void)pthread_setcancelstate(cancel_state, NULL);
 fallback:
 	ret = xdev_ext_iov_fallback(&call, fd, iov, iovcnt, offset, write, flags,
@@ -1904,7 +2007,7 @@ static bool xdev_ext_sendmsg_snapshot(const struct msghdr *message,
 	local = (struct iovec){ .iov_base = &header, .iov_len = sizeof(header) };
 	remote = (struct iovec){ .iov_base = (void *)message,
 				 .iov_len = sizeof(header) };
-	if (syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0) !=
+	if (syscall(SYS_process_vm_readv, (long)pid, &local, 1UL, &remote, 1UL, 0UL) !=
 	    (ssize_t)sizeof(header))
 		return false;
 	if (header.msg_name || header.msg_namelen || header.msg_control ||
@@ -1913,7 +2016,7 @@ static bool xdev_ext_sendmsg_snapshot(const struct msghdr *message,
 	local = (struct iovec){ .iov_base = &iov, .iov_len = sizeof(iov) };
 	remote = (struct iovec){ .iov_base = header.msg_iov,
 				 .iov_len = sizeof(iov) };
-	if (syscall(SYS_process_vm_readv, pid, &local, 1, &remote, 1, 0) !=
+	if (syscall(SYS_process_vm_readv, (long)pid, &local, 1UL, &remote, 1UL, 0UL) !=
 	    (ssize_t)sizeof(iov))
 		return false;
 	header.msg_iov = &iov;

@@ -30,10 +30,19 @@ jobs:
         run: |
           set -euo pipefail
           output="$PWD/tests/eval/apps/build"
+          log="$RUNNER_TEMP/xdev-ext-frontend-invalid-memory.log"
           make -C tests/eval/apps \
             build/libio_uring_unified.so build/libxdev_ext_preload_kernel_model.so
-          XDEV_EXT_PRELOAD_TEST_DIR="$output" python3 \
-            kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
+          XDEV_EXT_PRELOAD_TEST_DIR="$output" timeout 300 python3 \
+            kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py 2>&1 | tee "$log"
+          timeout 300 python3 \
+            kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_positional_efault_test.py \
+            --build-dir "$output" \
+            --results "$RUNNER_TEMP/xdev-ext-positional-fault.json" 2>&1 | tee -a "$log"
+          if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
+            echo "Frontend invalid-memory checks reported failed or skipped cases"
+            exit 1
+          fi
       - name: Portable comparison workloads and frontend call shapes
         run: |
           make -C tests/eval check
