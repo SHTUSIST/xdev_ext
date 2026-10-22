@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config XDP_SOCKETS
+	bool "XDP sockets"
+	depends on BPF_SYSCALL
+	default n
+	help
+	  XDP sockets allows a channel between XDP programs and
+	  userspace applications.
+
+config XDP_SOCKETS_DIAG
+	tristate "XDP sockets: monitoring interface"
+	depends on XDP_SOCKETS
+	default n
+	help
+	  Support for PF_XDP sockets monitoring interface used by the ss tool.
+	  If unsure, say Y.
+
+config XDP_SOCKETS_XDEV_EXT_POLICY
+	bool "XDEV_EXT policy for AF_XDP TX and RX rings"
+	depends on XDP_SOCKETS
+	depends on IO_URING_XDEV_EXT_BPF_POLICY
+	default n
+	help
+	  Interpose the XDEV_EXT AF_XDP policy at the kernel consumer boundary of
+	  userspace TX rings. A bounded per-pool journal pins the exact policy
+	  generation until ownership retirement and publishes completion entries
+	  only after the matching policy completion callback. RX-aware plugins may
+	  also opt in at registration. RX dispatch happens once per complete packet
+	  and completion follows the RX-ring publication release-store.

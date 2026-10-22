@@ -1,0 +1,213 @@
+# Makefile for NVMe to AF_XDP Pipeline
+
+CC = gcc
+CXX = g++
+CLANG = clang
+LLC = llc
+PKG_CONFIG ?= pkg-config
+UAPI_SHIM_DIR ?= $(CURDIR)/.pipeline-uapi
+UAPI_SHIM_HEADERS = \
+	$(UAPI_SHIM_DIR)/linux/io_uring.h \
+	$(UAPI_SHIM_DIR)/linux/nvme_ioctl.h
+LIBXDP_CFLAGS := $(shell $(PKG_CONFIG) --cflags libxdp 2>/dev/null)
+LIBXDP_LIBS := $(shell $(PKG_CONFIG) --libs libxdp 2>/dev/null || echo -lxdp)
+LIBBPF_CFLAGS := $(shell $(PKG_CONFIG) --cflags libbpf 2>/dev/null)
+LIBBPF_LIBS := $(shell $(PKG_CONFIG) --libs libbpf 2>/dev/null || echo -lbpf)
+CUDA_HOME ?= /usr/local/cuda
+CUDA_CPPFLAGS ?= -I$(CUDA_HOME)/include
+CUDA_LDLIBS ?= -L$(CUDA_HOME)/lib64 -lcuda
+NVCC ?= nvcc
+NVCC_HOST_COMPILER ?= $(CXX)
+
+# Compiler flags
+CFLAGS = -Wall -Wextra -O2 -g -pthread -I$(UAPI_SHIM_DIR) $(LIBXDP_CFLAGS) $(LIBBPF_CFLAGS) $(EXTRA_CFLAGS)
+LDFLAGS = -lpthread $(EXTRA_LDFLAGS)
+LDLIBS = $(LIBXDP_LIBS) $(LIBBPF_LIBS) -luring -ldl $(EXTRA_LDLIBS)
+
+# BPF flags
+BPF_CFLAGS = -O2 -target bpf -D__TARGET_ARCH_x86
+
+# Targets
+TARGETS = nvme_xdp_pipeline
+GPU_NIC_SAMPLE_DIR := drivers/gpu/nvidia-p2p/samples
+GPU_NIC_CUDA_OBJ := .gpu-xdp-p2p.cuda.o
+GPU_NIC_REDIRECT_OBJ := .gpu-xdp-xdev_ext-xsk-redirect.o
+GPU_IDENTITY_OBJ := .xdev_ext-gpu-identity.o
+
+.PHONY: all userspace gpu-chain gpu-chain-host gpu-nic gpu-nic-host \
+	gpu-nvme gpu-nvme-host \
+	legacy-demo legacy-xdp \
+	install uninstall clean help
+
+all: $(TARGETS)
+
+userspace: nvme_xdp_pipeline
+
+# Composite production path.  Both directions use the XSK UMEM as explicit
+# host staging and synchronously traverse the NVIDIA CE before sink publish.
+# The host target keeps the exact CLI/linkage available to build-only and KVM
+# tests, but its runtime rejects -g with EOPNOTSUPP because CUDA is absent.
+gpu-chain: nvme_gpu_nic_pipeline
+
+gpu-chain-host: nvme_gpu_nic_pipeline_host
+
+# Independent NIC<->GPU paths.  gpu-nic-host exercises AF_XDP ownership and
+# redirect lifetime without CUDA; gpu-nic builds the CE/CUDA implementation.
+gpu-nic: gpu_xdp_p2p
+
+gpu-nic-host: gpu_xdp_p2p_nocuda
+
+# Independent NVMe<->GPU staged path.  The host build preserves a portable,
+# fail-closed CLI for build and parser tests; the CUDA build enables the
+# NVIDIA driver API and canonical CE ioctl path.
+gpu-nvme: gpu_nvme_orchestrator
+
+gpu-nvme-host: gpu_nvme_orchestrator_host
+
+# Legacy demo; bypasses the canonical XDEV_EXT GPU entry in the NVIDIA CE/RM
+# overlay and is therefore never part of the supported/default pipeline.
+legacy-demo: nvme_gpu_nic_chain
+
+# Historical/manual XDP object.  Production binaries install their own private
+# XSK redirect program and will fail closed rather than replace an existing
+# program, so this target is mutually exclusive with a production run.
+legacy-xdp: xdp_sock_kern.o
+
+# Userspace program
+$(UAPI_SHIM_DIR)/linux/%.h: include/uapi/linux/%.h
+	mkdir -p $(dir $@)
+	cp $< $@
+
+nvme_xdp_pipeline: nvme_xdp_pipeline.c nvme_xdp_pipeline_core.h \
+		xdev_ext_frame_sm.h tools/xdev_ext_xsk_redirect.c \
+		tools/include/xdev_ext_xsk_redirect.h $(UAPI_SHIM_HEADERS)
+	$(CC) $(CFLAGS) -o $@ nvme_xdp_pipeline.c \
+		tools/xdev_ext_xsk_redirect.c $(LDFLAGS) $(LDLIBS)
+
+NVME_GPU_NIC_DEPS = nvme_xdp_pipeline_core.h xdev_ext_frame_sm.h \
+	tools/nvme_gpu_nic_chain_core.h tools/nvme_gpu_nic_runtime.h \
+	tools/include/xdev_ext_gpu_identity.h tools/xdev_ext_gpu_identity.c \
+	tools/include/xdev_ext_nv_p2p_ioctl.h tools/include/xdev_ext_xsk_redirect.h \
+	tools/xdev_ext_xsk_redirect.c $(UAPI_SHIM_HEADERS)
+
+GPU_NVME_DEPS = tools/gpu_nvme_orchestrator.c \
+	tools/gpu_nvme_orchestrator_core.h tools/xdev_ext_gpu_identity.c \
+	tools/include/xdev_ext_gpu_identity.h tools/include/xdev_ext_nv_p2p_ioctl.h \
+	nvme_xdp_pipeline_core.h include/uapi/linux/io_uring.h \
+	include/uapi/linux/nvme_ioctl.h
+
+gpu_nvme_orchestrator_host: $(GPU_NVME_DEPS)
+	$(CC) $(CFLAGS) -Werror -I. -Itools \
+		-o $@ tools/gpu_nvme_orchestrator.c \
+		tools/xdev_ext_gpu_identity.c $(LDFLAGS)
+
+gpu_nvme_orchestrator: $(GPU_NVME_DEPS)
+	$(CC) $(CFLAGS) -Werror $(CUDA_CPPFLAGS) \
+		-DXDEV_EXT_GPU_NVME_WITH_CUDA -I. -Itools \
+		-o $@ tools/gpu_nvme_orchestrator.c \
+		tools/xdev_ext_gpu_identity.c $(LDFLAGS) $(CUDA_LDLIBS)
+
+nvme_gpu_nic_pipeline_host: nvme_xdp_pipeline.c \
+		tools/nvme_gpu_nic_runtime.c $(NVME_GPU_NIC_DEPS)
+	$(CC) $(CFLAGS) -Werror -DXDEV_EXT_NVME_GPU_NIC_CHAIN \
+		-o $@ nvme_xdp_pipeline.c tools/nvme_gpu_nic_runtime.c \
+		tools/xdev_ext_gpu_identity.c \
+		tools/xdev_ext_xsk_redirect.c \
+		$(LDFLAGS) $(LDLIBS)
+
+nvme_gpu_nic_pipeline: nvme_xdp_pipeline.c \
+		tools/nvme_gpu_nic_runtime.c $(NVME_GPU_NIC_DEPS)
+	$(CC) $(CFLAGS) -Werror $(CUDA_CPPFLAGS) \
+		-DXDEV_EXT_NVME_GPU_NIC_CHAIN -DXDEV_EXT_NVME_GPU_NIC_WITH_CUDA \
+		-o $@ nvme_xdp_pipeline.c tools/nvme_gpu_nic_runtime.c \
+		tools/xdev_ext_gpu_identity.c \
+		tools/xdev_ext_xsk_redirect.c \
+		$(LDFLAGS) $(LDLIBS) $(CUDA_LDLIBS)
+
+nvme_gpu_nic_chain: nvme_gpu_nic_chain.c $(UAPI_SHIM_HEADERS)
+	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
+
+gpu_xdp_p2p_nocuda: $(GPU_NIC_SAMPLE_DIR)/gpu_xdp_p2p_nocuda.c \
+		$(GPU_NIC_SAMPLE_DIR)/gpu_xdp_frame_runtime.h \
+		tools/xdev_ext_xsk_redirect.c tools/xdev_ext_gpu_identity.c \
+		tools/include/xdev_ext_xsk_redirect.h \
+		tools/include/xdev_ext_xsk_frame_owner.h \
+		tools/include/xdev_ext_gpu_identity.h \
+		tools/include/xdev_ext_nv_p2p_ioctl.h
+	$(CC) $(CFLAGS) -Werror -o $@ \
+		$(GPU_NIC_SAMPLE_DIR)/gpu_xdp_p2p_nocuda.c \
+		tools/xdev_ext_xsk_redirect.c tools/xdev_ext_gpu_identity.c $(LDFLAGS) \
+		$(LIBXDP_LIBS) $(LIBBPF_LIBS)
+
+$(GPU_NIC_CUDA_OBJ): $(GPU_NIC_SAMPLE_DIR)/gpu_xdp_p2p.c \
+		$(GPU_NIC_SAMPLE_DIR)/gpu_xdp_frame_runtime.h \
+		tools/include/xdev_ext_xsk_redirect.h \
+		tools/include/xdev_ext_xsk_frame_owner.h \
+		tools/include/xdev_ext_gpu_identity.h \
+		tools/include/xdev_ext_nv_p2p_ioctl.h
+	$(NVCC) -ccbin $(NVCC_HOST_COMPILER) -x cu -std=c++17 -O2 -g \
+		$(CUDA_CPPFLAGS) \
+		$(LIBXDP_CFLAGS) $(LIBBPF_CFLAGS) \
+		-Xcompiler=-Wall,-Wextra,-Werror,-pthread \
+		-c $< -o $@
+
+$(GPU_NIC_REDIRECT_OBJ): tools/xdev_ext_xsk_redirect.c \
+		tools/include/xdev_ext_xsk_redirect.h
+	$(CC) $(CFLAGS) -Werror -c $< -o $@
+
+$(GPU_IDENTITY_OBJ): tools/xdev_ext_gpu_identity.c \
+		tools/include/xdev_ext_gpu_identity.h
+	$(CC) $(CFLAGS) -Werror -c $< -o $@
+
+gpu_xdp_p2p: $(GPU_NIC_CUDA_OBJ) $(GPU_NIC_REDIRECT_OBJ) \
+		$(GPU_IDENTITY_OBJ)
+	$(NVCC) -ccbin $(NVCC_HOST_COMPILER) -o $@ $^ \
+		$(LIBXDP_LIBS) $(LIBBPF_LIBS) -lpthread $(CUDA_LDLIBS)
+
+# XDP BPF program
+xdp_sock_kern.o: xdp_sock_kern.c
+	$(CLANG) $(BPF_CFLAGS) -c $< -o $@
+
+# Install XDP program
+install: xdp_sock_kern.o
+	@echo "Legacy/manual mode only; stop production pipeline processes first."
+	@echo "Load XDP program with:"
+	@echo "  ip link set dev <iface> xdp obj xdp_sock_kern.o sec xdp"
+
+# Uninstall XDP program
+uninstall:
+	@echo "Unload XDP program with:"
+	@echo "  ip link set dev <iface> xdp off"
+
+clean:
+	rm -rf nvme_xdp_pipeline nvme_gpu_nic_pipeline \
+		nvme_gpu_nic_pipeline_host nvme_gpu_nic_chain \
+		gpu_nvme_orchestrator gpu_nvme_orchestrator_host \
+		gpu_xdp_p2p gpu_xdp_p2p_nocuda $(GPU_NIC_CUDA_OBJ) \
+		$(GPU_NIC_REDIRECT_OBJ) $(GPU_IDENTITY_OBJ) xdp_sock_kern.o \
+		$(UAPI_SHIM_DIR)
+
+# Help
+help:
+	@echo "NVMe to AF_XDP Pipeline Build System"
+	@echo ""
+	@echo "Targets:"
+	@echo "  all         - Build the supported/default targets"
+	@echo "  userspace   - Build the supported nvme_xdp_pipeline"
+	@echo "  gpu-chain   - Build nvme_gpu_nic_pipeline with the CUDA driver API"
+	@echo "  gpu-chain-host - Build the fail-closed no-CUDA/KVM variant"
+	@echo "  gpu-nic     - Build the independent NIC<->GPU CE/CUDA path (requires nvcc)"
+	@echo "  gpu-nic-host - Build the CPU-only AF_XDP ownership/lifecycle path"
+	@echo "  gpu-nvme    - Build the independent NVMe<->GPU CUDA/CE path"
+	@echo "  gpu-nvme-host - Build its fail-closed no-CUDA variant"
+	@echo "  legacy-demo - Build the unmediated nvme_gpu_nic_chain demonstrator"
+	@echo "  legacy-xdp  - Build the mutually exclusive manual XDP program"
+	@echo "  clean     - Remove built files"
+	@echo "  install   - Show legacy/manual XDP installation command"
+	@echo "  uninstall - Show legacy/manual XDP removal command"
+	@echo ""
+	@echo "Usage:"
+	@echo "  1. Build userspace: make -f Makefile.pipeline userspace"
+	@echo "     Build staged NVMe<->GPU<->NIC: make -f Makefile.pipeline gpu-chain"
+	@echo "  2. Run:    sudo ./nvme_xdp_pipeline -d /dev/ng0n1 -i eth0"
+	@echo "     The process installs/removes its private queue redirect program."

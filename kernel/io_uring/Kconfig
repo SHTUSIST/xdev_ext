@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: GPL-2.0-only
+#
+# io_uring configuration
+#
+
+config IO_URING_ZCRX
+	def_bool y
+	depends on IO_URING
+	depends on PAGE_POOL
+	depends on INET
+	depends on NET_RX_BUSY_POLL
+
+config IO_URING_XDEV_EXT_BPF_POLICY
+	bool "XDEV_EXT BPF struct_ops policy"
+	default n
+	depends on IO_URING
+	depends on BPF_SYSCALL
+	depends on BPF_JIT
+	depends on DEBUG_INFO_BTF
+	help
+	  Enable the built-in XDEV_EXT policy boundary.  One struct_ops plugin can be
+	  attached per backend.  Its mandatory dispatch and complete callbacks
+	  each record exactly one bounded plan through the phase-specific XDEV_EXT
+	  kfunc collection.  Backend admission, descriptor construction,
+	  submission, completion, cancellation, and rollback remain in C.
+
+config IO_URING_XDEV_EXT_IAA
+	bool "XDEV_EXT Intel IAA compression operations"
+	default n
+	depends on IO_URING
+	depends on CRYPTO
+	select CRYPTO_ACOMP2
+	help
+	  Enable asynchronous IAA compress and decompress unified operations over
+	  registered XDEV_EXT UMEM.  The implementation allocates the deflate-iaa
+	  transform lazily, so an IAA provider loaded after ring creation remains
+	  usable.  A provider or device is not required at build time.
+
+config IO_URING_XDEV_EXT_AFXDP_COPY
+	bool "XDEV_EXT AF_XDP copy-mode send"
+	default n
+	depends on IO_URING
+	depends on XDP_SOCKETS
+	help
+	  Enable the unified SEND path for a bound, TX-capable AF_XDP socket.
+	  The kernel copies one XSK UMEM frame into an skb through
+	  xsk_kernel_xmit(); this does not make the kernel a producer of the
+	  userspace AF_XDP TX ring.  Registered io_uring UMEM remains rejected
+	  because it has no pool alias or lifetime contract with the XSK UMEM.
+
+config XDEV_EXT_MECH
+	bool "XDEV_EXT eBPF mechanism layer"
+	default n
+	depends on IO_URING_XDEV_EXT_BPF_POLICY && XDP_SOCKETS
+	select CRC32
+	help
+	  Enable in-kernel XDEV_EXT mechanism sessions, created through
+	  IORING_REGISTER_XDEV_EXT_MECH.  One struct_ops type per device class
+	  (NVMe, AF_XDP, copy engine) lets eBPF fill native descriptors in a
+	  bounded scratch area and interpret native completions.  C validates
+	  every descriptor field and keeps admission, DMA mapping, queues,
+	  doorbells, frame ownership and teardown; a session fails closed when
+	  a program is missing or misbehaves.
+
+config XDEV_EXT_MECH_CE
+	bool "XDEV_EXT mechanism copy-engine class"
+	default n
+	depends on XDEV_EXT_MECH
+	help
+	  Enable the copy-engine class of the mechanism layer and its backend
+	  registration interface for GPU copy-engine drivers.  A transfer whose
+	  outcome is ambiguous sequesters its frames for good.
+
+config XDEV_EXT_MECH_DMA
+	bool "XDEV_EXT mechanism registered DMA provider class"
+	default n
+	depends on XDEV_EXT_MECH
+	help
+	  Enable bounded window-to-host-pool copy plans over dynamically
+	  registered providers. Drivers own mappings and native completion;
+	  C validates plans and quarantines ambiguous submitted transfers.
+
+config XDEV_EXT_MECH_C_REFERENCE
+	bool "XDEV_EXT mechanism C reference callbacks"
+	default n
+	depends on XDEV_EXT_MECH
+	help
+	  Measurement builds only.  Allow a class's callbacks to be served by
+	  C functions with the same logic as the eBPF programs, so the cost
+	  of the language can be measured apart from the cost of the path.
+
+config XDEV_EXT_MECH_ZEROCOPY
+	bool "XDEV_EXT mechanism strict NVMe SGL data path"
+	default y
+	depends on XDEV_EXT_MECH
+	help
+	  Require a PCI NVMe controller with data SGL support for mechanism
+	  sessions. Submit the original UMEM pages with SGLs, including single
+	  segment requests; never fall back to PRP or kernel bounce buffers.
+	  Ordinary NVMe requests and admin queues keep their normal behavior.
+	  Disable this option to build the legacy PRP-compatible path. AF_XDP
+	  driver zero-copy is selected separately when binding the socket.
+
+config XDEV_EXT_MECH_KVM_BOUNCE
+	bool "XDEV_EXT mechanism NVMe bounce fallback for KVM tests"
+	default n
+	depends on XDEV_EXT_MECH && !XDEV_EXT_MECH_ZEROCOPY
+	help
+	  KVM test builds only.  When the emulated NVMe controller cannot take
+	  the batch frames as scatter-gather segments, copy them into kernel
+	  pages before submission instead of failing the batch.  Results from
+	  such a build make no claim about avoided copies.
+
+config XDEV_EXT_MECH_IAA
+ bool "XDEV_EXT mechanism variable-length IAA transform class"
+ default n
+ depends on XDEV_EXT_MECH && CRYPTO
+ select CRYPTO_ACOMP2
+ help
+   Bounded dual-lease compression/decompression through CryptoAPI acomp.
+   Hardware uses deflate-iaa; software tests must explicitly request software.
+
+config XDEV_EXT_MECH_SOCKET
+	bool "XDEV_EXT mechanism connected UDP compatibility sink"
+	default n
+	depends on XDEV_EXT_MECH && INET
+	help
+	  Send a bounded batch as one connected IPv4/IPv6 UDP datagram through
+	  the ordinary kernel socket path. This path performs native socket
+	  payload copying and completes locally; it provides no remote ACK.

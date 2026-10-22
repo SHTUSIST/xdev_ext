@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Traditional send-path baseline (UDP recv() -> O_DIRECT write) for the
+# NIC -> NVMe A/B.  Build out of tree with
+#   make -f Makefile.xdev_ext_sendpath BUILD_DIR=<dir> all
+
+CC ?= gcc
+BUILD_DIR ?= .xdev_ext-sendpath-build
+
+CFLAGS ?= -O2 -g
+CFLAGS += -std=gnu11 -Wall -Wextra -Werror
+LDLIBS += -luring
+
+BASELINE_SOURCE := xdev_ext_sendpath_baseline.c
+BASELINE := $(BUILD_DIR)/xdev_ext_sendpath_baseline
+
+.DEFAULT_GOAL := all
+
+all: $(BASELINE)
+
+$(BUILD_DIR):
+	mkdir -p $@
+
+$(BASELINE): $(BASELINE_SOURCE) xdev_ext_sendpath_baseline_core.h \
+		../nvme_xdp_pipeline_core.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+.PHONY: all clean

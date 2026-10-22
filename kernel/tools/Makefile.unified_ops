@@ -1,0 +1,95 @@
+# Makefile for io_uring unified operations
+#
+# Build with: make -f Makefile.unified_ops
+
+CC = gcc
+CFLAGS = -std=gnu11 -Wall -Wextra -Werror -O2 -g -D_FORTIFY_SOURCE=2
+LDLIBS = -ldl -pthread
+BUILD_DIR ?= .unified-build
+
+# Shared library for ld_preload
+PRELOAD_LIB = $(BUILD_DIR)/libio_uring_unified.so
+PRELOAD_SRC = io_uring_unified_preload.c
+
+# Test program
+TEST_PROG = $(BUILD_DIR)/test_xdev_ext_preload
+TEST_SRC = test_xdev_ext_preload.c
+SOCKET_TEST_PROG = $(BUILD_DIR)/test_xdev_ext_socket_preload
+SOCKET_TEST_SRC = testing/selftests/xdev_ext_preload/xdev_ext_preload_socket_smoke.c
+SOCKET_REUSE_TEST_PROG = $(BUILD_DIR)/test_xdev_ext_socket_fd_reuse
+SOCKET_REUSE_TEST_SRC = \
+	testing/selftests/xdev_ext_preload/xdev_ext_preload_socket_fd_reuse.c
+SOCKET_BARRIER_LIB = $(BUILD_DIR)/libxdev_ext_socket_barrier.so
+SOCKET_BARRIER_SRC = \
+	testing/selftests/xdev_ext_preload/xdev_ext_preload_socket_barrier.c
+
+all: $(PRELOAD_LIB) $(TEST_PROG) $(SOCKET_TEST_PROG) \
+	$(SOCKET_REUSE_TEST_PROG) $(SOCKET_BARRIER_LIB)
+
+$(PRELOAD_LIB): $(PRELOAD_SRC) xdev_ext_preload_core.h xdev_ext_preload_fd_shard.h \
+	xdev_ext_preload_socket_mech.h ../include/uapi/linux/xdev_ext_mech.h \
+	xdev_ext_preload_config.h xdev_ext_preload_config_backend.h \
+	xdev_ext_preload_admission.h \
+	../include/uapi/linux/io_uring.h ../include/uapi/linux/stat.h \
+	include/io_uring/mini_liburing.h
+	@echo "Building LD_PRELOAD library..."
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -shared -fPIC $(CFLAGS) -o $@ $< $(LDLIBS)
+
+$(TEST_PROG): $(TEST_SRC)
+	@echo "Building test program..."
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< -pthread
+
+$(SOCKET_TEST_PROG): $(SOCKET_TEST_SRC)
+	@echo "Building stock-host connected UDP test program..."
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $<
+
+$(SOCKET_REUSE_TEST_PROG): $(SOCKET_REUSE_TEST_SRC)
+	@echo "Building connected UDP fd-reuse test program..."
+	@mkdir -p $(BUILD_DIR)
+	$(CC) $(CFLAGS) -o $@ $< -ldl -pthread
+
+$(SOCKET_BARRIER_LIB): $(SOCKET_BARRIER_SRC)
+	@echo "Building connected UDP fd-reuse barrier..."
+	@mkdir -p $(BUILD_DIR)
+	$(CC) -shared -fPIC $(CFLAGS) -o $@ $< -ldl -pthread
+
+clean:
+	rm -rf $(BUILD_DIR)
+
+test: all
+	@nm -D $(PRELOAD_LIB) | grep -q ' T __open_2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T __open64_2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T __openat_2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T __openat64_2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T preadv$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T preadv64$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T preadv2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T preadv64v2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T pwritev$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T pwritev64$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T pwritev2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T pwritev64v2$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T fcntl64$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T send$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T sendto$$'
+	@nm -D $(PRELOAD_LIB) | grep -q ' T sendmsg$$'
+	@set -eu; \
+	file=$$(mktemp "$(CURDIR)/$(BUILD_DIR)/xdev_ext-preload.XXXXXX"); \
+	trap 'rm -f "$$file"' EXIT; \
+	truncate -s 16384 "$$file"; \
+	LD_PRELOAD=./$(PRELOAD_LIB) ./$(TEST_PROG) "$$file"; \
+		XDEV_EXT_PRELOAD_ENABLED=1 XDEV_EXT_PRELOAD_PATHS="$$file" \
+			XDEV_EXT_PRELOAD_REPORT=1 \
+		LD_PRELOAD=./$(PRELOAD_LIB) ./$(TEST_PROG) "$$file"
+	LD_PRELOAD=./$(PRELOAD_LIB) ./$(SOCKET_TEST_PROG)
+	XDEV_EXT_PRELOAD_SOCKET_ENABLED=1 XDEV_EXT_PRELOAD_REPORT=1 \
+		LD_PRELOAD=./$(PRELOAD_LIB) ./$(SOCKET_TEST_PROG)
+	XDEV_EXT_PRELOAD_SOCKET_ENABLED=1 \
+		LD_PRELOAD=./$(PRELOAD_LIB):./$(SOCKET_BARRIER_LIB) \
+		./$(SOCKET_REUSE_TEST_PROG)
+	$(MAKE) -C testing/selftests/xdev_ext_preload clean all run
+
+.PHONY: all clean test

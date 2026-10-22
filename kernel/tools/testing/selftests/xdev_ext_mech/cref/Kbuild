@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: GPL-2.0
+#
+# Out-of-tree kbuild of the C reference callbacks (measurement arm C):
+#   make -C <XDEV_EXT kernel build dir> M=<copy of this directory> modules
+# The kernel must have CONFIG_XDEV_EXT_MECH_C_REFERENCE=y.  The pure helpers come
+# from the kernel source tree: tools/xdev_ext_mech/xdev_ext_mech_prog.h and
+# net/xdp/xsk_xdev_ext_mech_core.h.
+
+obj-m := xdev_ext_mech_cref.o
+ccflags-y += -I$(srctree)
