@@ -1,22 +1,25 @@
 # xdev_ext
 
-**Compose cross-device I/O with Linux kernel extensions, bounded eBPF programs, and device providers.**
+**Coordinate DMA devices over shared, pinned host pages with Linux kernel extensions, bounded eBPF programs, and device providers.**
 
 **English** | [简体中文](README.zh-CN.md)
 
-xdev_ext is a research system for connecting storage, networking, and GPU I/O through a shared execution and ownership model. The kernel manages registered memory, descriptor admission, generations, backpressure, and completion. eBPF programs construct bounded transfer and protocol plans. Device providers supply mappings, native submissions, and completion callbacks.
+xdev_ext is a research system for coordinating storage, networking, and GPU DMA over the same shared, pinned host pages. Its common basis is registered host pages, native descriptors, DMA completion, and ownership handoff. NVMe, NIC, and GPU stages each use their own native descriptors to access these pages. The kernel manages the page pool, descriptor admission, generations, backpressure, and ownership; eBPF programs construct bounded transfer and protocol plans; device providers supply device-specific mappings, native submissions, synchronization, and completion callbacks.
 
 [Get started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Supported paths](docs/supported-paths.md) · [Documentation](docs/README.md)
 
 ## Why xdev_ext?
 
-A cross-device pipeline must coordinate buffer ownership, device mappings, queue acceptance, and completion across every stage. xdev_ext separates these responsibilities behind common kernel and provider contracts so that a supported device capability can participate in multiple pipelines.
+Storage, networking, and GPU stacks manage their buffers and completion semantics separately, making it difficult to reuse the same host pages across devices or compose their operations. xdev_ext coordinates registered host pages, native descriptors, DMA completion, and ownership handoff through common kernel and provider contracts, so a supported device capability can participate in multiple pipelines.
+
+The main path uses shared host memory and does not require direct P2P DMA between device-local memories. Registering a logical page pool once establishes page registration and lifetime; it does not give every device a single shared DMA mapping or address. Each device/provider needs the mappings appropriate to its device and IOMMU domain, with its own DMA addresses, reachability, transfer direction, synchronization, and completion lifetime.
 
 ## Features
 
-- **Kernel-managed memory and ownership:** registered pools, bounded windows, generations, and descriptor admission checks.
+- **Shared host-page DMA coordination:** NVMe, NIC, and GPU stages use their own native descriptors over registered, pinned host pages, with explicit completion and ownership handoff.
+- **Kernel-managed memory and ownership:** registered pools, bounded windows, generations, descriptor admission checks, and resource lifetimes.
 - **Programmable I/O plans:** eBPF programs construct bounded requests, copy plans, and protocol decisions within kernel-enforced contracts.
-- **Composable providers:** drivers supply device mapping, native submission, synchronization, and completion for a capability.
+- **Composable providers:** drivers supply per-device DMA mappings, native submission, synchronization, and completion for a capability through a common contract.
 - **Pipelined execution:** userspace configures and starts a session; the kernel drives normal batches and reports final or exceptional outcomes.
 - **Explicit failure handling:** accepted native commands are tracked through completion; uncertain completion or DMA quiescence retains the affected resources.
 
@@ -45,10 +48,12 @@ The preparation step fills missing upstream files in `kernel/` and `gpu/`, retai
 
 | Component | Responsibility |
 |---|---|
-| Userspace control | Register resources, configure stages, start sessions, and observe results |
+| Userspace control | Register shared host pages and other resources, configure stages, start sessions, and observe results |
 | eBPF programs | Construct bounded device and protocol plans and interpret permitted completion information |
-| Kernel core | Admit descriptors, enforce ownership and generations, apply backpressure, and drain or quarantine resources |
-| Device providers | Map supported memory, submit native work, synchronize DMA, and report completion or invalidation |
+| Kernel core | Manage the shared page pool, admit descriptors, enforce ownership and generations, apply backpressure, and drain or quarantine resources |
+| Device providers | Map pages for each device and IOMMU domain, submit native descriptors, synchronize DMA, and report completion or invalidation |
+
+Across stages, DMA completion and ownership handoff govern when the next device may use the same host pages. GPU copy-engine transfers still move data between host memory and VRAM; avoiding CPU payload copies depends on the supported path. An ordinary socket sink performs native socket copying. Optional peer-memory paths use a separate device-memory allocation and mapping contract.
 
 The [architecture guide](docs/architecture.md) explains stage composition. [Supported paths](docs/supported-paths.md) describes memory routes, device prerequisites, and compatibility limits.
 
