@@ -20,6 +20,8 @@ Native NIC peer transmit requires separate CPU-visible headers and a supported d
 
 ## Compatibility frontend
 
+The supported implementation is `kernel/tools/io_uring_unified_preload.c`. The older single-application `libio_uring_clickhouse` prototype has been retired; its interface and batching behavior are not supported.
+
 The opt-in preload frontend targets supported dynamically linked libc calls. Positional file I/O requires an explicitly allowed path, `O_DIRECT`, suitable reported alignment, and a request that fits the registered frame. Ordinary `read`/`write` retain their shared-file-position semantics through libc. This interface does not cover every binary or every database I/O API.
 
 The mechanism socket frontend admits a limited connected UDP call shape. Unsupported call shapes or setup failures before publication can use libc fallback. An accepted request must reach its own terminal outcome without fallback replay. Native socket sending includes payload copies and provides local send completion rather than protocol ACK.

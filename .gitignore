@@ -244,7 +244,6 @@
 !/kernel/tools/include/xdev_ext_xsk_redirect_prog.h
 !/kernel/tools/io_uring_unified_preload.c
 !/kernel/tools/lib/bpf/libbpf.c
-!/kernel/tools/libio_uring_clickhouse.c
 !/kernel/tools/nvme_gpu_nic_chain_core.h
 !/kernel/tools/nvme_gpu_nic_runtime.c
 !/kernel/tools/nvme_gpu_nic_runtime.h
