@@ -47,3 +47,7 @@ A guest fixture can exercise the actual kernel path while using a software devic
 For a transfer, check complete destination bytes, source immutability where required, guard regions, native submission/completion counts, final ownership, and STOP results. For a fault-injection case, state the expected refusal, failure, or UNKNOWN outcome before running it. A deliberately failed transfer can pass its fault test without becoming a successful transfer.
 
 Performance claims require an explicit workload, actual physical devices, topology, timing definition, repetitions, and retained output. Module compilation and software-device guest correctness do not supply those measurements.
+
+## Repository CI
+
+The [host workflow](../.github/workflows/host.yml) is configured to run the compact checks with GCC and Clang, plus source preparation/layout regressions, peer lifetime checks, integration harness/validator regressions, and GPU source/fence checks. These jobs do not boot a guest or execute physical device DMA.

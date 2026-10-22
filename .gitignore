@@ -537,3 +537,4 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_source_test.py
 !/gpu/kernel-open/common/inc/nvstatuscodes.h
 !/kernel/include/uapi/linux/if_xdp.h
+!/gpu/src/nvidia/generated/g_ce_utils_nvoc.h

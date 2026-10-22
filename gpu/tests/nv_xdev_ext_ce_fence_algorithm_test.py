@@ -301,8 +301,12 @@ def main():
         local = args.repo / path
         if args.revision is None and local.exists():
             return local.read_text()
-        return subprocess.check_output(["git", "-C", str(args.repo), "show",
-                                        f"{args.revision or 'HEAD'}:{path}"], text=True)
+        git_root = subprocess.check_output(["git", "-C", str(args.repo),
+                                            "rev-parse", "--show-toplevel"], text=True).rstrip("\n")
+        prefix = subprocess.check_output(["git", "-C", str(args.repo),
+                                          "rev-parse", "--show-prefix"], text=True).rstrip("\n")
+        return subprocess.check_output(["git", "-C", git_root, "show",
+                                        f"{args.revision or 'HEAD'}:{prefix}{path}"], text=True)
 
     ce, channel, p2p = read(CE), read(CHANNEL), read(P2P)
     callback = re.search(r"typedef struct\s*\{[^{}]*\}\s*CeUtilsCallback;", read(CALLBACK))

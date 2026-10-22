@@ -22,6 +22,18 @@ jobs:
           persist-credentials: false
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
-      - name: Pinned source preparation regression
+      - name: Source layout and preparation regressions
         if: matrix.cc == 'gcc'
-        run: python3 -m unittest discover -s tests -p test_prepare_sources.py -v
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Peer control and lifetime checks
+        if: matrix.cc == 'gcc'
+        run: make -C kernel/tools/testing/selftests/xdev_ext_peer run_tests
+      - name: Integration harness and verdict checks
+        if: matrix.cc == 'gcc'
+        run: python3 -m unittest discover -s kernel/tools/testing/selftests/xdev_ext_integration -p '*_test.py' -v
+      - name: GPU source and fence checks
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 gpu/tests/nv_xdev_ext_gpu_source_test.py
+          python3 gpu/tests/nv_xdev_ext_ce_async_source_test.py
+          python3 gpu/tests/nv_xdev_ext_ce_fence_algorithm_test.py
