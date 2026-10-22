@@ -498,9 +498,61 @@ ip link set lo up
 ip link set eth0 up
 ip link set eth1 up
 ip link show
-cat /sys/class/nvme/nvme0/serial /sys/class/nvme/nvme1/serial
-grep -q '^UBRZCSRC01 *$' /sys/class/nvme/nvme0/serial
-grep -q '^UBRZCDST01 *$' /sys/class/nvme/nvme1/serial
+# NVMe controllers may probe asynchronously. Device numbers are not roles.
+resolve_nvme_roles() {
+    nvme_role_sysfs=$1
+    nvme_role_dev=$2
+    nvme_role_peer=$3
+    nvme_source= nvme_destination= nvme_peer=
+    source_block= source_ng= destination_block= destination_ng= peer_block= peer_ng=
+    case "$nvme_role_peer" in 0|1) ;; *) echo 'FAIL NVMe role invalid peer flag' >&2; return 1 ;; esac
+    for nvme_serial_file in "$nvme_role_sysfs"/nvme*/serial; do
+        [ -f "$nvme_serial_file" ] || continue
+        nvme_controller=${nvme_serial_file%/serial}
+        nvme_controller=${nvme_controller##*/}
+        case "${nvme_controller#nvme}" in
+            ''|*[!0-9]*) echo 'FAIL NVMe role invalid controller name' >&2; return 1 ;;
+        esac
+        nvme_serial=$(sed 's/[[:space:]]*$//' "$nvme_serial_file") || return 1
+        case "$nvme_serial" in
+            UBRZCSRC01)
+                [ -z "$nvme_source" ] || { echo 'FAIL NVMe role duplicate source serial' >&2; return 1; }
+                nvme_source=$nvme_controller ;;
+            UBRZCDST01)
+                [ -z "$nvme_destination" ] || { echo 'FAIL NVMe role duplicate destination serial' >&2; return 1; }
+                nvme_destination=$nvme_controller ;;
+            XDEVPEER01)
+                [ "$nvme_role_peer" = 1 ] || { echo 'FAIL NVMe role unexpected peer serial' >&2; return 1; }
+                [ -z "$nvme_peer" ] || { echo 'FAIL NVMe role duplicate peer serial' >&2; return 1; }
+                nvme_peer=$nvme_controller ;;
+            *) echo 'FAIL NVMe role unknown serial' >&2; return 1 ;;
+        esac
+    done
+    [ -n "$nvme_source" ] && [ -n "$nvme_destination" ] || {
+        echo 'FAIL NVMe role missing source or destination serial' >&2; return 1;
+    }
+    if [ "$nvme_role_peer" = 1 ] && [ -z "$nvme_peer" ]; then
+        echo 'FAIL NVMe role missing peer serial' >&2; return 1
+    fi
+    source_block=$nvme_role_dev/${nvme_source}n1
+    source_ng=$nvme_role_dev/ng${nvme_source#nvme}n1
+    destination_block=$nvme_role_dev/${nvme_destination}n1
+    destination_ng=$nvme_role_dev/ng${nvme_destination#nvme}n1
+    [ -b "$source_block" ] && [ -c "$source_ng" ] &&
+    [ -b "$destination_block" ] && [ -c "$destination_ng" ] || {
+        echo 'FAIL NVMe role missing or wrong namespace node type' >&2; return 1;
+    }
+    if [ "$nvme_role_peer" = 1 ]; then
+        peer_block=$nvme_role_dev/${nvme_peer}n1
+        peer_ng=$nvme_role_dev/ng${nvme_peer#nvme}n1
+        [ -b "$peer_block" ] && [ -c "$peer_ng" ] || {
+            echo 'FAIL NVMe role missing or wrong peer namespace node type' >&2; return 1;
+        }
+    fi
+    printf 'XDEV_EXT_ZC_NVME_ROLES=PASS source=%s source_ng=%s destination=%s destination_ng=%s peer=%s peer_ng=%s\n' \
+        "$source_block" "$source_ng" "$destination_block" "$destination_ng" "$peer_block" "$peer_ng"
+}
+resolve_nvme_roles /sys/class/nvme /dev "$peer"
 trace=/sys/kernel/tracing
 echo 0 >"$trace/tracing_on"
 echo >"$trace/set_ftrace_filter"
@@ -527,7 +579,7 @@ $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
 if [ "$peer" = 1 ]; then
     XDEV_EXT_PEER_GUEST=1 sh /opt/xdev_ext/peer_guest/run-guest.sh \
-        /dev/nvme0n1 /dev/ng0n1 /dev/nvme2n1 /dev/ng2n1 "$source_slba"
+        "$source_block" "$source_ng" "$peer_block" "$peer_ng" "$source_slba"
     echo 'XDEV_EXT_PEER_SOFTWARE_GUEST=PASS native=NVMe-SGL memory=host-RAM-standin gpu=none'
 fi
 if [ "$ce_sim" = 1 ]; then
@@ -543,7 +595,7 @@ if [ "$ce_sim" = 1 ]; then
     echo 'XDEV_EXT_IAA_SOFTWARE=PASS cases=5 groups=257 depth=8 backend=deflate-generic dma_backend=CPU-memcpy-standin'
     if [ "$compat" = 1 ]; then
         sh /opt/xdev_ext/socket_guest/run-guest.sh /opt/xdev_ext/socket_guest \
-            /opt/xdev_ext/xdev_ext_ce_sim.ko /opt/xdev_ext/socket_sink.bpf.o "$source_slba"
+            /opt/xdev_ext/xdev_ext_ce_sim.ko /opt/xdev_ext/socket_sink.bpf.o "$source_slba" "$source_ng" "$source_block"
         insmod /opt/xdev_ext/xdev_ext_ce_sim.ko fail_mode=none delay_us="$ce_delay_us"
         $ctl attach --obj /opt/xdev_ext/socket_sink.bpf.o --map socket_sink_ops --pin /sys/fs/bpf/compat-socket
         $ctl attach --obj /opt/xdev_ext/ce_plan.bpf.o --map ce_plan_ops --pin /sys/fs/bpf/compat-ce
@@ -571,8 +623,8 @@ if [ "$ce_sim" = 1 ]; then
 	echo 'XDEV_EXT_ZC_CE_BACKEND=CPU-memcpy-standin gpu=none performance_claim=none'
 	$ctl attach --obj /opt/xdev_ext/ce_plan.bpf.o --map ce_plan_ops --pin /sys/fs/bpf/zc-ce
 	$ctl ce-chain --chain a --ce-dev /dev/xdev_ext_ce_sim --ce-len "$ce_len" \
-		--src-ng /dev/ng0n1 --slba "$source_slba" --nlb "$window_nlb" \
-		--dst-ng /dev/ng1n1 --dst-slba "$ce_slba" --dst-nlb "$window_nlb" \
+		--src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
+		--dst-ng "$destination_ng" --dst-slba "$ce_slba" --dst-nlb "$window_nlb" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
 		--timeout-ms "$cli_timeout_ms" >/tmp/ce-a.log 2>&1
 	ce_check /tmp/ce-a.log a
@@ -590,7 +642,7 @@ fi
 if [ "$reliable" = 1 ]; then set -- "$@" --reliable --remote-window "$remote_window"; fi
 rx_timeout=$rx_timeout_ms
 rx_started=$(date +%s)
-$ctl nic-nvme "$@" --ifname eth1 --dst-ng /dev/ng1n1 --slba "$rx_slba" --nlb "$window_nlb" \
+$ctl nic-nvme "$@" --ifname eth1 --dst-ng "$destination_ng" --slba "$rx_slba" --nlb "$window_nlb" \
 	--peer-mac 02:00:00:00:00:01 --local-ip 192.0.2.2 --peer-ip 192.0.2.1 \
 	--local-port 12345 --peer-port 54321 --groups "$groups" --depth "$depth" --group-bytes 8192 \
 	--timeout-ms "$rx_timeout" >/tmp/rx.log 2>&1 &
@@ -610,7 +662,7 @@ fi
 if [ "$reliable" = 1 ]; then set -- "$@" --reliable --remote-window "$remote_window"; fi
 tx_started=$(date +%s)
 set +e
-$ctl "$@" --ifname eth0 --src-ng /dev/ng0n1 --slba "$source_slba" --nlb "$window_nlb" \
+$ctl "$@" --ifname eth0 --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
 	--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 \
 	--local-port 54321 --peer-port 12345 --groups "$groups" --depth "$depth" --group-bytes 8192 \
 	--timeout-ms "$cli_timeout_ms" >/tmp/tx.log 2>&1

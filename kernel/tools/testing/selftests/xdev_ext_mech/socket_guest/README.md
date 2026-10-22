@@ -23,12 +23,14 @@ read-only, snapshots and compares the **entire** source block device, and never
 writes any source span or disk. It rejects periodic/repeated source groups.
 
 Place the following command after the provider/IAA guest campaigns have
-unloaded their CE module and before the main harness loads CE:
+unloaded their CE module and before the main harness loads CE. The main
+harness resolves `source_ng` and `source_block` by the unique `UBRZCSRC01`
+serial; pass the generic namespace before the block namespace:
 
 ```sh
 sh /opt/xdev_ext/socket_guest/run-guest.sh \
   /opt/xdev_ext/socket_guest /opt/xdev_ext/xdev_ext_ce_sim.ko \
-  /opt/xdev_ext/socket_sink.bpf.o "$source_slba"
+  /opt/xdev_ext/socket_sink.bpf.o "$source_slba" "$source_ng" "$source_block"
 ```
 
 The guest starts keys 1 through 257, which the NVMe program maps to source

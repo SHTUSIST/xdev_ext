@@ -3,10 +3,12 @@
 """Small wiring guards supplement the console/image/wire behavior tests."""
 
 import importlib.util
+import itertools
 import os
 from pathlib import Path
 import re
 import subprocess
+import stat
 import tempfile
 import unittest
 
@@ -15,6 +17,139 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[3]
 HARNESS = HERE / "xdev_ext_mech_zc_kvm.sh"
 SIM = ROOT / "tools/testing/selftests/xdev_ext_mech/simulate/xdev_ext_ce_sim.c"
+
+
+@unittest.skipUnless(os.geteuid() == 0, 'namespace type fixtures require private mknod')
+class NvmeRoleSelection(unittest.TestCase):
+    def select(self, serials, peer, shell=('sh',), missing=None):
+        script = HARNESS.read_text()
+        selector = re.search(r'(?ms)^resolve_nvme_roles\(\) \{\n.*?^\}', script)
+        self.assertIsNotNone(selector, 'guest must resolve unique serials before selecting namespaces')
+        with tempfile.TemporaryDirectory(prefix='xdev-nvme-roles-') as directory:
+            base = Path(directory)
+            sysfs, devices = base/'sysfs', base/'dev'
+            sysfs.mkdir()
+            devices.mkdir()
+            for index, serial in enumerate(serials):
+                controller = sysfs/f'nvme{index}'
+                controller.mkdir()
+                (controller/'serial').write_text(serial+'   \n')
+                for name, mode in ((f'nvme{index}n1', stat.S_IFBLK), (f'ng{index}n1', stat.S_IFCHR)):
+                    if name != missing:
+                        os.mknod(devices/name, mode|0o600, os.makedev(240, index))
+            before = {p.name: (p.stat().st_ino, p.stat().st_mode, p.stat().st_rdev)
+                      for p in devices.iterdir()}
+            # Execute actual downstream command expansions. Substitute only
+            # unavailable guest entry points with argument capture, never I/O.
+            capture = base/'capture'
+            capture.write_text('''#!/bin/sh
+printf '%s' "$CAPTURE_KIND" >>"$NVME_CAPTURE"
+for arg do printf '\\t%s' "$arg" >>"$NVME_CAPTURE"; done
+printf '\\n' >>"$NVME_CAPTURE"
+''')
+            capture.chmod(0o700)
+            socket_dir = base/'socket'
+            socket_dir.mkdir()
+            (socket_dir/'socket_runtime').symlink_to(capture)
+            socket_script = (ROOT/'tools/testing/selftests/xdev_ext_mech/socket_guest/run-guest.sh').read_text()
+            argument_names = ('fixture_dir=', 'ce_module=', 'socket_object=',
+                              'source_slba=', 'source_ng=', 'source_block=')
+            argument_setup = '\n'.join(line for line in socket_script.splitlines()
+                                       if line.startswith(argument_names))
+            runtime_command = next(line for line in socket_script.splitlines()
+                                   if line.startswith('"$fixture_dir/socket_runtime"'))
+            socket_runner = base/'socket-runner'
+            socket_runner.write_text('#!/bin/sh\nset -eu\n'+argument_setup+'\n'+runtime_command+'\n')
+            logical = [line.strip() for line in script.replace('\\\n', ' ').splitlines()]
+            peer_command = next(line for line in logical
+                                if line.startswith('XDEV_EXT_PEER_GUEST=1 sh /opt/xdev_ext/peer_guest/'))
+            peer_command = peer_command.replace('/opt/xdev_ext/peer_guest/run-guest.sh', str(capture))
+            socket_command = next(line for line in logical
+                                  if line.startswith('sh /opt/xdev_ext/socket_guest/'))
+            socket_command = socket_command.replace('/opt/xdev_ext/socket_guest/run-guest.sh', str(socket_runner))
+            socket_command = socket_command.replace('/opt/xdev_ext/socket_guest', str(socket_dir))
+            commands = [('ce', '$ctl ce-chain --chain a'), ('rx', '$ctl nic-nvme "$@"'),
+                        ('tx', '$ctl "$@" --ifname eth0')]
+            downstream = 'source_slba=2048; window_nlb=4112; ce_slba=8192; rx_slba=4096\n'
+            downstream += 'ce_len=65536; groups=257; depth=8; cli_timeout_ms=60000; rx_timeout=15000\n'
+            downstream += 'if [ "$NVME_TEST_PEER" = 1 ]; then CAPTURE_KIND=peer '+peer_command+'; fi\n'
+            downstream += 'CAPTURE_KIND=socket '+socket_command+'\n'
+            for kind, prefix in commands:
+                command = next(line for line in logical if line.startswith(prefix)).split('>/tmp/', 1)[0]
+                downstream += 'set --\nCAPTURE_KIND='+kind+' '+command+'\n'
+            output = '''
+resolve_nvme_roles "$NVME_TEST_SYSFS" "$NVME_TEST_DEV" "$NVME_TEST_PEER"
+for role in source_block source_ng destination_block destination_ng peer_block peer_ng; do
+ eval "value=\\${$role}"
+ printf '%s\\t%s\\n' "$role" "$value"
+done
+'''
+            result = subprocess.run([*shell, '-euc', selector.group()+output+downstream],
+                env=dict(os.environ, NVME_TEST_SYSFS=str(sysfs), NVME_TEST_DEV=str(devices),
+                         NVME_TEST_PEER=str(peer), NVME_CAPTURE=str(base/'arguments'),
+                         ctl=str(capture)), capture_output=True, text=True)
+            after = {p.name: (p.stat().st_ino, p.stat().st_mode, p.stat().st_rdev)
+                     for p in devices.iterdir()}
+            self.assertEqual(before, after, 'selection must preserve every original namespace node')
+            mapped = dict(line.split('\t', 1) for line in result.stdout.splitlines() if '\t' in line)
+            if result.returncode == 0:
+                for role, serial in (('source', 'UBRZCSRC01'), ('destination', 'UBRZCDST01')):
+                    index = serials.index(serial)
+                    self.assertEqual(mapped[role+'_block'], str(devices/f'nvme{index}n1'))
+                    self.assertEqual(mapped[role+'_ng'], str(devices/f'ng{index}n1'))
+                if peer:
+                    index = serials.index('XDEVPEER01')
+                    self.assertEqual(mapped['peer_block'], str(devices/f'nvme{index}n1'))
+                    self.assertEqual(mapped['peer_ng'], str(devices/f'ng{index}n1'))
+                else:
+                    self.assertEqual(mapped['peer_block'], '')
+                    self.assertEqual(mapped['peer_ng'], '')
+                arguments = dict((parts[0], parts[1:]) for parts in
+                                 (line.split('\t') for line in (base/'arguments').read_text().splitlines()))
+                self.assertEqual(arguments['socket'][-3:],
+                                 [mapped['source_ng'], mapped['source_block'], '2048'])
+                if peer:
+                    self.assertEqual(arguments['peer'], [mapped['source_block'], mapped['source_ng'],
+                                     mapped['peer_block'], mapped['peer_ng'], '2048'])
+                for kind, role in (('ce', 'source_ng'), ('tx', 'source_ng')):
+                    self.assertEqual(arguments[kind][arguments[kind].index('--src-ng')+1], mapped[role])
+                for kind in ('ce', 'rx'):
+                    self.assertEqual(arguments[kind][arguments[kind].index('--dst-ng')+1],
+                                     mapped['destination_ng'])
+            return result
+
+    def test_all_normal_and_peer_enumerations_on_both_shells(self):
+        for shell in (('sh',), ('/bin/busybox', 'sh')):
+            for peer in (0, 1):
+                serials = ['UBRZCSRC01', 'UBRZCDST01']+(['XDEVPEER01'] if peer else [])
+                for order in itertools.permutations(serials):
+                    with self.subTest(shell=shell, peer=peer, order=order):
+                        result = self.select(order, peer, shell)
+                        self.assertEqual(result.returncode, 0, result.stdout+result.stderr)
+
+    def test_absent_duplicate_unknown_and_unexpected_serials_are_rejected(self):
+        cases = (([], 0), (['UBRZCSRC01'], 0), (['UBRZCDST01'], 0),
+                 (['UBRZCSRC01', 'UBRZCDST01'], 1),
+                 (['UBRZCSRC01', 'UBRZCSRC01', 'UBRZCDST01'], 0),
+                 (['UBRZCSRC01', 'UBRZCDST01', 'UBRZCDST01'], 0),
+                 (['UBRZCSRC01', 'UBRZCDST01', 'XDEVPEER01', 'XDEVPEER01'], 1),
+                 (['UBRZCSRC01', 'UBRZCDST01', 'UNKNOWN'], 0),
+                 (['UBRZCSRC01', 'UBRZCDST01', 'XDEVPEER01'], 0))
+        for shell in (('sh',), ('/bin/busybox', 'sh')):
+            for serials, peer in cases:
+                with self.subTest(shell=shell, serials=serials, peer=peer):
+                    result = self.select(serials, peer, shell)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('FAIL NVMe role', result.stderr)
+
+    def test_missing_selected_block_or_generic_node_is_rejected(self):
+        for shell in (('sh',), ('/bin/busybox', 'sh')):
+            for node in ('nvme0n1', 'ng0n1', 'nvme1n1', 'ng1n1', 'nvme2n1', 'ng2n1'):
+                with self.subTest(shell=shell, missing=node):
+                    result = self.select(['UBRZCSRC01', 'UBRZCDST01', 'XDEVPEER01'], 1,
+                                         shell, missing=node)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn('FAIL NVMe role', result.stderr)
 
 
 class HarnessWiringTest(unittest.TestCase):
