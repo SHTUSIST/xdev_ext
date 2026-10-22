@@ -527,3 +527,5 @@
 !/gpu/tests/nv_xdev_ext_handle_lifetime_test.c
 !/gpu/tests/nv_xdev_ext_umem_quota_test.c
 !/gpu/tests/nv_xdev_ext_vidmem_offset_test.c
+!/gpu/kernel-open/nvidia/nvidia.Kbuild
+!/gpu/src/nvidia/exports_link_command.txt
