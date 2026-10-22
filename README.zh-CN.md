@@ -62,6 +62,8 @@ python3 scripts/prepare_sources.py --component nvidia
 | 路径 | 内容 |
 |---|---|
 | `kernel/` | Linux 改动、UAPI、BPF 程序、用户态工具与 selftests |
+| [`kernel/io_uring/iaa/`](kernel/io_uring/iaa/) | IAA io_uring 操作、准入与生命周期核心、机制变换适配器 |
+| [`tests/iaa/`](tests/iaa/) | IAA 系统调用合同门禁与独立主机检查 |
 | `gpu/` | NVIDIA 开放内核模块改动与主机测试 |
 | `scripts/` | 主机测试与固定上游源码准备入口 |
 | `tests/eval/` | 可复现对照负载与透明前端调用形状核对 |

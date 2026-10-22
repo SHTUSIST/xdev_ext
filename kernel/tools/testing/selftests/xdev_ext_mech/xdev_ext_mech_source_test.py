@@ -40,7 +40,7 @@ def function_body(path: Path, signature: str) -> str:
 
 
 def mech_sources():
-    return sorted((ROOT / "io_uring").glob("xdev_ext_mech*.c"))
+    return sorted((ROOT / "io_uring").rglob("xdev_ext_mech*.c"))
 
 
 def kernel_part(text: str) -> str:
@@ -82,7 +82,7 @@ class UbrMechSourceTest(unittest.TestCase):
                       kconfig_block(text, "IO_URING_XDEV_EXT_BPF_POLICY"))
 
     def test_no_build_line_without_a_source(self):
-        for makefile in ("io_uring/Makefile", "net/xdp/Makefile",
+        for makefile in ("io_uring/Makefile", "io_uring/iaa/Makefile", "net/xdp/Makefile",
                          "drivers/nvme/host/Makefile"):
             text = (ROOT / makefile).read_text(encoding="utf-8")
             for line in text.splitlines():

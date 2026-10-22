@@ -20,7 +20,7 @@
 #define XDEV_EXT_IAA_PAGE_SIZE 4096U
 #endif
 
-#include "../xdev_ext_frame_sm.h"
+#include "../../xdev_ext_frame_sm.h"
 
 #define XDEV_EXT_IAA_OP_COMPRESS	4U
 #define XDEV_EXT_IAA_OP_DECOMPRESS	5U

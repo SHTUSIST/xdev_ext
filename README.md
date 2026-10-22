@@ -62,6 +62,8 @@ The [architecture guide](docs/architecture.md) explains stage composition. [Supp
 | Path | Contents |
 |---|---|
 | `kernel/` | Linux changes, UAPI, BPF programs, userspace tools, and selftests |
+| [`kernel/io_uring/iaa/`](kernel/io_uring/iaa/) | IAA io_uring operations, admission/lifetime core, and mechanism transform adapter |
+| [`tests/iaa/`](tests/iaa/) | IAA syscall contract gate and standalone host checks |
 | `gpu/` | NVIDIA open kernel module changes and host tests |
 | `scripts/` | Host-test and pinned-source preparation entry points |
 | `tests/eval/` | Reproducible comparison workloads and transparent frontend call-shape checks |

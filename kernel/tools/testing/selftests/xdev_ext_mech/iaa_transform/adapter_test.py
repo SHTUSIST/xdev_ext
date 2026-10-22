@@ -52,7 +52,7 @@ def build_source(adapter, core):
 class AdapterScheduling(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.adapter = Path(os.environ.get('XDEV_EXT_IAA_ADAPTER_SOURCE', ROOT / 'io_uring/xdev_ext_mech_iaa.c')).read_text()
+        cls.adapter = Path(os.environ.get('XDEV_EXT_IAA_ADAPTER_SOURCE', ROOT / 'io_uring/iaa/xdev_ext_mech_iaa.c')).read_text()
         cls.core = Path(os.environ.get('XDEV_EXT_IAA_ADAPTER_CORE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-adapter-')
         cls.addClassCleanup(cls.temp.cleanup)

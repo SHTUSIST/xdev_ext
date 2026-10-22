@@ -6,7 +6,7 @@ CFLAGS ?= -O2 -g
 STRICT_FLAGS := -std=gnu11 -Wall -Wextra -Werror
 LDLIBS := -lz
 UAPI := ../../kernel/include/uapi/linux/io_uring.h
-CORE := ../../kernel/io_uring/xdev_ext_iaa_core.h ../../kernel/xdev_ext_frame_sm.h
+CORE := ../../kernel/io_uring/iaa/xdev_ext_iaa_core.h ../../kernel/xdev_ext_frame_sm.h
 MINI := ../../kernel/tools/include/io_uring/mini_liburing.h
 .PHONY: all check preflight run clean
 all: test_iaa_unified_ops test_contract test_lifetime

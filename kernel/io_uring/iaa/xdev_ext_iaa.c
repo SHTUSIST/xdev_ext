@@ -5,7 +5,7 @@
  * hidden bounce buffer is used.
  */
 
-#include "xdev_ext_config.h"
+#include "../xdev_ext_config.h"
 
 #if defined(XDEV_EXT_UMEM_ZEROCOPY) && defined(XDEV_EXT_LIFECYCLE_SM)
 
@@ -21,9 +21,9 @@
 #include <linux/xdev_ext_binding.h>
 #include <linux/xarray.h>
 
-#include "io_uring.h"
+#include "../io_uring.h"
 #include "xdev_ext_iaa.h"
-#include "xdev_ext_umem.h"
+#include "../xdev_ext_umem.h"
 
 struct io_xdev_ext_iaa_async {
 	struct io_kiocb *io_req;

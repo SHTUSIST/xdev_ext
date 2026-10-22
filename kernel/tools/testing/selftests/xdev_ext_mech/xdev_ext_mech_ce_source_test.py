@@ -200,7 +200,7 @@ class CeSimulateTest(unittest.TestCase):
         self.assertRegex(makefile, r"(?m)^obj-m\s*:=\s*xdev_ext_ce_sim\.o$")
 
     def test_real_implementation_never_names_the_stand_in(self):
-        paths = sorted((ROOT / "io_uring").glob("*"))
+        paths = sorted((ROOT / "io_uring").rglob("*"))
         paths += [ROOT / "include/linux/xdev_ext_mech.h",
                   ROOT / "include/uapi/linux/xdev_ext_mech.h"]
         for path in paths:

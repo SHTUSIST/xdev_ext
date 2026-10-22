@@ -8,7 +8,7 @@
 #include <string.h>
 
 #include "include/uapi/linux/io_uring.h"
-#include "io_uring/xdev_ext_iaa_core.h"
+#include "io_uring/iaa/xdev_ext_iaa_core.h"
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 

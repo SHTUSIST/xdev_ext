@@ -3,7 +3,7 @@
 #define main iaa_program_main
 #include "test_iaa_unified_ops.c"
 #undef main
-#include "../../kernel/io_uring/xdev_ext_iaa_core.h"
+#include "../../kernel/io_uring/iaa/xdev_ext_iaa_core.h"
 
 #define REQUIRE(x) do { if (!(x)) { fprintf(stderr, "contract failure at line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
