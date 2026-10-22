@@ -85,6 +85,20 @@ def generate(mutation=None):
              "xdev_ext_mech_session_destroy"]
     ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
+    # These native-cookie/provider fault cases have one uncontended CE owner.
+    # Shared-window admission is exercised by independent_ce_lease.py using
+    # the actual registry functions, including process and quarantine cases.
+    # Keep that admission boundary explicit while preserving real submit and
+    # completion decisions below (including stale-ticket mutation checks).
+    ce_adapter += """
+static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
+                               struct xdev_ext_mech_batch *b)
+{
+    (void)cs;
+    (void)b;
+    return 0; /* Fixture precondition: uncontended registered CE window. */
+}
+"""
     ce_adapter += "\n\n".join(function(ce,n) for n in ("xdev_ext_ce_stage_xfers", "xdev_ext_ce_submit", "xdev_ext_ce_complete"))
     blocks = {"CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
               "OPS": "\n\n".join(function(ops, n) for n in

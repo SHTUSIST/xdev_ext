@@ -19,6 +19,8 @@
 #include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/init.h>
+#include <linux/limits.h>
+#include <linux/list.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/printk.h>
@@ -27,12 +29,35 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_ce_core.h"
+#include "xdev_ext_mech_ce_lease.h"
 #include "xdev_ext_mech_native_cookie.h"
 
 #define XDEV_EXT_CE_MAX_BACKENDS	4
 
+/* A session atomically owns ALL its bound CE windows while any batch can
+ * use them. Reentrant batches keep the existing per-slot depth parallelism.
+ * Numeric windows are compared across every device of the same backend,
+ * conservatively merging device-node aliases and independent GPU VAs.
+ * Distinct VAs aliasing the same physical bytes require backend canonical
+ * identity; this contract covers overlapping configured address windows.
+ */
+struct xdev_ext_ce_lease_group {
+	struct list_head node;
+	struct list_head regions;
+	struct xdev_ext_mech_session *session;
+	struct xdev_ext_ce_lease_state state;
+	u32 depth;
+	struct xdev_ext_ce_lease_slot slots[];
+};
+
+static DEFINE_MUTEX(xdev_ext_ce_lease_lock);
+static LIST_HEAD(xdev_ext_ce_lease_groups);
+
 /* One CE stage from bind to unbind; parked for good after AMBIGUOUS. */
 struct xdev_ext_ce_stage {
+	struct list_head lease_node;
+	struct xdev_ext_ce_lease_group *lease_group;
+	u64 window_start;
 	struct xdev_ext_ce_region region;
 	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_ce_geom geom;
@@ -130,6 +155,113 @@ static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file
 	return ops;
 }
 
+/* CREATE cannot activate a session until every bound region is registered. */
+static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
+		struct xdev_ext_ce_stage *cs, u64 start)
+{
+	struct xdev_ext_ce_lease_group *group, *found = NULL;
+	u32 depth = xdev_ext_mech_session_depth(st->s);
+
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	list_for_each_entry(group, &xdev_ext_ce_lease_groups, node)
+		if (group->session == st->s) {
+			found = group;
+			break;
+		}
+	if (!found) {
+		found = kvzalloc(struct_size(found, slots, depth), GFP_KERNEL);
+		if (!found) {
+			mutex_unlock(&xdev_ext_ce_lease_lock);
+			return -ENOMEM;
+		}
+		INIT_LIST_HEAD(&found->regions);
+		found->session = st->s;
+		found->depth = depth;
+		list_add_tail(&found->node, &xdev_ext_ce_lease_groups);
+	}
+	cs->lease_group = found;
+	cs->window_start = start;
+	list_add_tail(&cs->lease_node, &found->regions);
+	mutex_unlock(&xdev_ext_ce_lease_lock);
+	return 0;
+}
+
+/* Worker: acquire all ranges in one transaction, before any native CE work.
+ * EAGAIN uses the core's preaccept retry; no accepted command is replayed.
+ */
+static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
+		struct xdev_ext_mech_batch *b)
+{
+	struct xdev_ext_ce_lease_group *group = cs->lease_group, *other;
+	struct xdev_ext_ce_stage *a, *held;
+	u32 slot = xdev_ext_mech_batch_slot(b);
+	bool conflict = false;
+	int ret;
+
+	if (slot >= group->depth)
+		return -ERANGE;
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	if (!group->state.active_batches)
+		list_for_each_entry(other, &xdev_ext_ce_lease_groups, node) {
+			if (other == group || !other->state.active_batches)
+				continue;
+			list_for_each_entry(a, &group->regions, lease_node)
+				list_for_each_entry(held, &other->regions, lease_node)
+					if (xdev_ext_ce_lease_overlap(a->region.ops,
+						a->window_start, a->region.len,
+						held->region.ops, held->window_start,
+						held->region.len)) {
+						conflict = true;
+						goto checked;
+					}
+		}
+checked:
+	ret = xdev_ext_ce_lease_acquire(&group->state, &group->slots[slot],
+				      xdev_ext_mech_batch_id(b), conflict);
+	mutex_unlock(&xdev_ext_ce_lease_lock);
+	return ret;
+}
+
+/* All CE stages see the same final batch fate. The slot marker releases
+ * exactly once, and an unknown batch keeps the entire group quarantined.
+ */
+static void xdev_ext_ce_batch_release(struct xdev_ext_mech_stage *st,
+		struct xdev_ext_mech_batch *b, bool sequestered)
+{
+	struct xdev_ext_ce_stage *cs = st->priv;
+	struct xdev_ext_ce_lease_group *group = cs->lease_group;
+	u32 slot = xdev_ext_mech_batch_slot(b);
+	int ret;
+
+	if (WARN_ON_ONCE(slot >= group->depth))
+		return;
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	ret = xdev_ext_ce_lease_finish(&group->state, &group->slots[slot],
+				     xdev_ext_mech_batch_id(b), sequestered);
+	WARN_ON_ONCE(ret && ret != -EBUSY);
+	mutex_unlock(&xdev_ext_ce_lease_lock);
+}
+
+static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs)
+{
+	struct xdev_ext_ce_lease_group *group = cs->lease_group;
+	bool empty;
+
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	if (WARN_ON_ONCE(group->state.active_batches || group->state.quarantined)) {
+		mutex_unlock(&xdev_ext_ce_lease_lock);
+		return false;
+	}
+	list_del(&cs->lease_node);
+	empty = list_empty(&group->regions);
+	if (empty)
+		list_del(&group->node);
+	mutex_unlock(&xdev_ext_ce_lease_lock);
+	if (empty)
+		kvfree(group);
+	return true;
+}
+
 static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 		       const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -143,6 +275,8 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 			 st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 		return -EINVAL;
 	if (!pool || !pool->pages)
+		return -EINVAL;
+	if (!u->arg1 || u->arg0 > U64_MAX - u->arg1)
 		return -EINVAL;
 
 	cs = kzalloc(sizeof(*cs), GFP_KERNEL);
@@ -174,9 +308,14 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 			     &cs->host);
 	if (err)
 		goto unbind_region;
+	err = xdev_ext_ce_lease_bind(st, cs, u->arg0);
+	if (err)
+		goto unbind_host;
 	st->priv = cs;
 	return 0;
 
+unbind_host:
+	ops->unbind_host(cs->host);
 unbind_region:
 	ops->unbind_region(&cs->region);
 put:
@@ -197,6 +336,8 @@ static void xdev_ext_ce_unbind(struct xdev_ext_mech_stage *st)
 	 * pinned for good.
 	 */
 	if (atomic_read(&cs->ambiguous))
+		return;
+	if (!xdev_ext_ce_lease_unbind(cs))
 		return;
 	ops->unbind_host(cs->host);
 	ops->unbind_region(&cs->region);
@@ -314,6 +455,9 @@ static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_me
 	struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);
 	int err;
 
+	err = xdev_ext_ce_lease_get(cs, b);
+	if (err)
+		return err;
 	if (!xdev_ext_ce_cookie_arm(&ck->state))
 		return -EBUSY;
 	if (!ck->b)
@@ -399,6 +543,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.submit		= xdev_ext_ce_submit,
 	.fill_cqe	= xdev_ext_ce_fill_cqe,
 	.mark_dead	= xdev_ext_ce_mark_dead,
+	.batch_release	= xdev_ext_ce_batch_release,
 };
 
 /* After every late_initcall, so the core's own initialisation has run. */

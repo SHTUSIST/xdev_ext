@@ -33,6 +33,7 @@ jobs:
           log="$RUNNER_TEMP/xdev-ext-mechanism-source.log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_source_test.py 2>&1 | tee "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py 2>&1 | tee -a "$log"
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py 2>&1 | tee -a "$log"
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)' "$log"; then
             echo "Mechanism source checks reported failed or skipped cases"
             exit 1

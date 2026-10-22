@@ -22,6 +22,12 @@ Release mappings only after their native users are quiescent. A native completio
 
 A peer-memory provider supplies actual device-memory authority and mappings. CPU-copy fixtures can exercise admission and ownership but do not implement physical peer DMA. A driver must reject unsupported directions or mapping combinations explicitly.
 
+## Copy-engine window ownership
+
+Before native CE submission, the kernel atomically claims all configured CE windows of a session. Overlapping windows held by another active session cause preaccept backpressure. Batches in the owning session retain their existing depth and slot layout; the frontend can reuse its session across calls.
+
+The claim remains until the batch's final frame disposition is known. Repeated stage cleanup releases it once; uncertainty retains the session's window claims. The range comparison uses backend identity and configured addresses. It does not establish physical equivalence between distinct GPU virtual aliases.
+
 ## Adding a capability
 
 Implement the class's bind, map, submit, completion and teardown contract, then compose it through the existing kernel boundary. Test refusal before acceptance, synchronous and asynchronous completion, short/ambiguous accepted results, stale tickets, invalidation and STOP. For a physical-device claim, record actual device execution in addition to host tests and module builds.

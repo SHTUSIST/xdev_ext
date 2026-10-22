@@ -11,6 +11,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 KERNEL_TESTS = (
     'xdev_ext_mech_core_test', 'xdev_ext_mech_ce_core_test',
+    'xdev_ext_mech_ce_lease_test',
     'xdev_ext_mech_step_test', 'xdev_ext_mech_lifecycle_test',
     'xdev_ext_mech_rx_stages_test', 'xdev_ext_mech_window_offset_test',
     'xdev_ext_mech_window_pipeline_test', 'xdev_ext_mech_ce_exact_completion_test',
@@ -51,6 +52,10 @@ def main():
         folder = ROOT/'kernel/tools/testing/selftests/xdev_ext_mech'
         for name in KERNEL_TESTS:
             cases.append((folder/(name+'.c'), ['-std=gnu11', '-I'+str(ROOT/'kernel')]))
+        cases.append((ROOT/'kernel/tools/testing/selftests/xdev_ext_preload'/
+                      'xdev_ext_preload_ce_concurrency_test.c',
+                      ['-std=gnu11', '-I'+str(ROOT/'kernel'),
+                       '-I'+str(ROOT/'kernel/tools')]))
     if args.component in ('all', 'gpu'):
         for name in GPU_TESTS:
             extra = ['-std=c11']

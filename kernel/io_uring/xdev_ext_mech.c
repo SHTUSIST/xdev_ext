@@ -1155,6 +1155,7 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
 {
 	unsigned long flags;
 	bool last, kick;
+	u32 i;
 
  if (s->st[0].cls->batch_end)
   s->st[0].cls->batch_end(&s->st[0], b,
@@ -1168,6 +1169,13 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
 		b->bs.state = XDEV_EXT_MECH_B_SEQUESTERED;
 		xdev_ext_mech_session_stop(s, err);
 	}
+	/* Frame release can itself discover uncertainty. Resource leases may
+	 * become reusable only after that final disposition is known.
+	 */
+	for (i = 0; i < s->nr_stages; i++)
+		if (s->st[i].cls->batch_release)
+			s->st[i].cls->batch_release(&s->st[i], b,
+				how == XDEV_EXT_MECH_END_SEQUESTER);
 	if (how != XDEV_EXT_MECH_END_DONE && s->start_recycle &&
 	    xdev_ext_mech_session_admits(s))
 		xdev_ext_mech_session_stop(s, err ?: -EIO);

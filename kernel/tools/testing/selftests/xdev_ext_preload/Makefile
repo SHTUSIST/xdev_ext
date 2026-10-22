@@ -3,6 +3,7 @@
 TEST_GEN_PROGS := xdev_ext_preload_core_test xdev_ext_preload_fd_shard_test \
 	xdev_ext_preload_socket_core_test xdev_ext_preload_socket_smoke \
 	xdev_ext_preload_socket_mech_test \
+	xdev_ext_preload_ce_concurrency_test \
 	xdev_ext_preload_config_test xdev_ext_preload_admission_test \
 	xdev_ext_preload_reg_test \
 	xdev_ext_preload_ring128_test xdev_ext_preload_ring128_model_check \
@@ -33,6 +34,7 @@ LDLIBS += -pthread
 
 LOCAL_HDRS += $(abspath ../../../xdev_ext_preload_core.h)
 LOCAL_HDRS += $(abspath ../../../xdev_ext_preload_socket_mech.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_ce_lease.h)
 LOCAL_HDRS += $(abspath ../../../../include/uapi/linux/xdev_ext_mech.h)
 LOCAL_HDRS += $(abspath ../../../xdev_ext_preload_fd_shard.h)
 LOCAL_HDRS += $(abspath ../../../xdev_ext_preload_config.h)

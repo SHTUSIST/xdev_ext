@@ -49,10 +49,12 @@ struct xdev_ext_mech_batch;
 struct xdev_ext_mech_class_ops {
  u32 flags;
  void (*batch_end)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *,int);
+ void (*batch_release)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *,bool);
  unsigned long (*progress)(struct xdev_ext_mech_stage *);
 };
 struct xdev_ext_mech_stage { u32 direction; const struct xdev_ext_mech_class_ops *cls; };
-static const struct xdev_ext_mech_class_ops no_class_callbacks = {0};
+static void verify_final_release(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *,bool);
+static const struct xdev_ext_mech_class_ops class_callbacks = {.batch_release=verify_final_release};
 struct xdev_ext_mech_session {
  int lock,worker,evfd,stop_err,last_err; bool worker_gone;
  int native_controls,drain_wq;
@@ -78,6 +80,17 @@ struct xdev_ext_mech_batch {
 };
 enum {XDEV_EXT_MECH_END_DONE, XDEV_EXT_MECH_END_ABORT, XDEV_EXT_MECH_END_SEQUESTER};
 static struct xdev_ext_mech_session *event_session;
+/* The extracted terminal path must settle frame custody before allowing a
+ * class to release its resource lease. Unknown fate must never pass as safe.
+ */
+static void verify_final_release(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b,bool sequestered) {
+ (void)st;assert(!test_lock_depth);
+ if(sequestered)return;
+ for(u32 i=0;i<b->nr_frames;i++)if(b->present&BIT(i)) {
+  __u8 phase=event_session->pool.state[b->f[i].index];
+  assert(phase==XDEV_EXT_MECH_F_USER || phase==XDEV_EXT_MECH_F_K_FREE);
+ }
+}
 static unsigned events,at_event_published,at_event_queued,stopwork_queued;
 static int system_unbound_wq;
 static void eventfd_signal(int ignored) {
@@ -174,7 +187,7 @@ static void setup_n(struct xdev_ext_mech_session *s,struct io_xdev_ext_umem_mech
  memset(s,0,sizeof(*s)); memset(m,0,sizeof(*m)); memset(state,XDEV_EXT_MECH_F_USER,capacity);
  m->idx=calloc(capacity,sizeof(*m->idx));s->life=calloc(capacity,sizeof(*s->life));s->transform_owner=calloc(capacity,1);assert(m->idx&&s->life&&s->transform_owner);
  xdev_ext_mech_sess_init(&s->ss); s->pool=(struct xdev_ext_mech_pool){.nr_frames=capacity,.state=state,.priv=m,.ops=&ops};
- s->st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;s->st[0].cls=&no_class_callbacks;s->nr_stages=1;s->start_recycle=true;s->start_return_pending=true;
+ s->st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;s->st[0].cls=&class_callbacks;s->nr_stages=1;s->start_recycle=true;s->start_return_pending=true;
  s->layout=(struct xdev_ext_mech_layout){.frame_size=1,.group_bytes=1,.seg_len=1};
  s->frames=1;s->start_left=1;s->evfd=1;event_session=s;events=0;stopwork_queued=0;
  for(u32 i=0;i<lent;i++) {u64 token;assert(!xdev_ext_mech_life_begin_produce(&s->life[i],false,&token));assert(!xdev_ext_mech_life_publish(&s->life[i],token,1));}

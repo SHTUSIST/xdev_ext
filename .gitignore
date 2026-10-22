@@ -664,3 +664,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/quality_cli_bpf_mapping.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/quality_unquiesced_completion.py
 !/kernel/tools/testing/selftests/xdev_ext_peer/.gitignore
+!/kernel/io_uring/xdev_ext_mech_ce_lease.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_lease_test.c
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ce_concurrency_test.c

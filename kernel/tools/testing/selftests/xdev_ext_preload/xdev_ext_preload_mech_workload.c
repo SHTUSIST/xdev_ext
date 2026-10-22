@@ -42,8 +42,24 @@ static int campaign(unsigned nr, unsigned seed)
 		if(i%3==0)sent=send(alias,payload,len,MSG_NOSIGNAL);
 		else if(i%3==1)sent=sendto(tx,payload,len,0,NULL,0);
 		else sent=sendmsg(alias,&msg,0);
-		if(sent!=(ssize_t)len || errno!=EDOM ||
-		   recv(rx,received,sizeof(received),0)!=(ssize_t)len || memcmp(payload,received,len))goto out;
+		int send_errno=errno;
+		if(sent!=(ssize_t)len || send_errno!=EDOM) {
+			fprintf(stderr,"XDEV_EXT_MECH_APP_FAILURE seed=%u index=%u check=send expected=%zu actual=%zd errno=%d expected_errno=%d\n",
+				seed,i,len,sent,send_errno,EDOM);
+			goto out;
+		}
+		ssize_t got=recv(rx,received,sizeof(received),0);
+		if(got!=(ssize_t)len) {
+			fprintf(stderr,"XDEV_EXT_MECH_APP_FAILURE seed=%u index=%u check=recv expected=%zu actual=%zd errno=%d\n",
+				seed,i,len,got,errno);
+			goto out;
+		}
+		if(memcmp(payload,received,len)) {
+			for(j=0;j<len && payload[j]==received[j];j++) {}
+			fprintf(stderr,"XDEV_EXT_MECH_APP_FAILURE seed=%u index=%u check=payload len=%zu offset=%u expected=%u actual=%u\n",
+				seed,i,len,j,payload[j],received[j]);
+			goto out;
+		}
 		bytes+=len;
 	}
 	/* Explicitly outside the first mechanism surface: still real datagrams. */

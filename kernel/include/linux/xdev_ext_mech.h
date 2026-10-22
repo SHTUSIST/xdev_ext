@@ -303,6 +303,11 @@ struct xdev_ext_mech_class_ops {
 	void (*mark_dead)(struct xdev_ext_mech_stage *st);
  /* Same session worker, before final frame release; terminal chain outcome. */
  void (*batch_end)(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, int err);
+ /* All stages, after final frame disposition; uncertainty must retain leases.
+  * Multiple stages sharing a resource must make this callback idempotent.
+  */
+ void (*batch_release)(struct xdev_ext_mech_stage *st,
+                       struct xdev_ext_mech_batch *b, bool sequestered);
  /* Same session worker, bounded transport progress; returns next poll delay. */
  unsigned long (*progress)(struct xdev_ext_mech_stage *st);
  /* Observational snapshot, provider lock only; both outputs start at zero. */
