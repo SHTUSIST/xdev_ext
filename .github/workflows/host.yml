@@ -39,6 +39,10 @@ jobs:
           make -C tests/eval check
           python3 tests/eval/run.py --suite portable
           make -C tests/eval/apps check
+      # SDK-dependent build checks skip explicitly on this SDK-free runner;
+      # CLI, refusal and result contracts still run.
+      - name: GDS CLI and capability contracts
+        run: python3 tests/eval/gds/test_gds.py -v
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

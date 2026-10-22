@@ -1,4 +1,4 @@
-# Portable evaluation workloads
+# Evaluation workloads
 
 This directory ports selected workload ideas from the earlier
 `bench_nvme_pipeline_compare.c`, `bench_nvme_pipeline_cost.c`,
@@ -15,6 +15,14 @@ correctness and concurrent session tests live in
 [`xdev_ext_preload` selftests](../../kernel/tools/testing/selftests/xdev_ext_preload/).
 [Application call-shape checks](apps/README.md) separately distinguish custom
 operations from compatible libc fallback.
+
+The optional [cuFile storage/GPU comparison](gds/README.md) ports the original
+cuFile load/checkpoint source. It requires a real CUDA device, an official SDK
+and exact per-process native-path counters; missing capabilities return exit4
+without a result or timing. Its direct storage↔VRAM route differs from xdev_ext's
+shared pinned host pages. Build and capability-contract checks can run without
+certifying physical DMA; performance comparisons require actual devices and
+matching I/O, cache and completion semantics.
 
 ## Build and run
 

@@ -687,3 +687,10 @@
 !/tests/eval/apps/test_contract.py
 !/tests/eval/apps/mixed_hft_shape.c
 !/tests/eval/apps/test_mixed_hft.py
+!/tests/eval/gds/
+!/tests/eval/gds/Makefile
+!/tests/eval/gds/README.md
+!/tests/eval/gds/bench_cufile.cc
+!/tests/eval/gds/run.py
+!/tests/eval/gds/test_gds.py
+/tests/eval/gds/build/
