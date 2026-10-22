@@ -58,11 +58,14 @@ static int campaign(unsigned nr, unsigned seed)
 				seed,i,len,got,errno);
 			goto out;
 		}
-		if(memcmp(payload,received,len)) {
-			for(j=0;j<len && payload[j]==received[j];j++) {}
-			fprintf(stderr,"XDEV_EXT_MECH_APP_FAILURE seed=%u index=%u check=payload len=%zu offset=%u expected=%u actual=%u\n",
-				seed,i,len,j,payload[j],received[j]);
-			goto out;
+		/* Neither endpoint is a reference: the send may have changed both. */
+		for(j=0;j<len;j++) {
+			unsigned char expected=(unsigned char)(i+j*11U+seed);
+			if(payload[j]!=expected || received[j]!=expected) {
+				fprintf(stderr,"XDEV_EXT_MECH_APP_FAILURE seed=%u index=%u check=payload len=%zu offset=%u expected=%u source=%u actual=%u\n",
+					seed,i,len,j,expected,payload[j],received[j]);
+				goto out;
+			}
 		}
 		bytes+=len;
 	}
@@ -70,10 +73,13 @@ static int campaign(unsigned nr, unsigned seed)
 	if(send(tx,NULL,0,0)!=0 || recv(rx,received,sizeof(received),0)!=0)goto out;
 	memset(payload,0xa7,sizeof(payload));
 	if(send(tx,payload,sizeof(payload),0)!=(ssize_t)sizeof(payload) ||
-	   recv(rx,received,sizeof(received),0)!=(ssize_t)sizeof(payload) ||
-	   memcmp(payload,received,sizeof(payload)))goto out;
+	   recv(rx,received,sizeof(received),0)!=(ssize_t)sizeof(payload))goto out;
+	for(j=0;j<sizeof(payload);j++)
+		if(payload[j]!=0xa7 || received[j]!=0xa7)goto out;
 	if(fcntl(tx,F_SETFL,O_NONBLOCK) || send(tx,payload,7,MSG_DONTWAIT)!=7 ||
-	   recv(rx,received,sizeof(received),0)!=7 || memcmp(payload,received,7))goto out;
+	   recv(rx,received,sizeof(received),0)!=7)goto out;
+	for(j=0;j<7;j++)
+		if(payload[j]!=0xa7 || received[j]!=0xa7)goto out;
 	rc=0;
 out:
 	if(rc)perror("mechanism ordinary UDP app");
@@ -207,7 +213,14 @@ static void *concurrent_actor(void *opaque)
 		if(sent!=(ssize_t)len || saved!=EDOM)goto out;
 		got=recv(rx,received.data,sizeof(received.data),0);
 		/* concurrency receive fault point */
-		if(got!=(ssize_t)len || memcmp(payload,received.data,len))goto out;
+		if(got!=(ssize_t)len)goto out;
+		for(j=0;j<len;j++) {
+			unsigned char expected=(unsigned char)(arg->actor*19+round*7+j*11);
+			if(j==0)expected=(unsigned char)arg->actor;
+			else if(j==1)expected=(unsigned char)round;
+			else if(j==2)expected=(unsigned char)(round>>8);
+			if(payload[j]!=expected || received.data[j]!=expected)goto out;
+		}
 		for(j=0;j<sizeof(received.pre);j++)
 			if(received.pre[j]!=0xa5 || received.post[j]!=0xa5)goto out;
 		for(j=(unsigned)len;j<sizeof(received.data);j++)if(received.data[j]!=0xa5)goto out;

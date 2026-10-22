@@ -675,6 +675,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_positional_efault_test.py
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_payload_integrity_test.py
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_payload_fault_fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_preload/settings
 !/kernel/include/uapi/linux/stat.h
 /tests/eval/**

@@ -39,6 +39,8 @@ jobs:
             kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_positional_efault_test.py \
             --build-dir "$output" \
             --results "$RUNNER_TEMP/xdev-ext-positional-fault.json" 2>&1 | tee -a "$log"
+          timeout 300 python3 \
+            kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_payload_integrity_test.py 2>&1 | tee -a "$log"
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
             echo "Frontend invalid-memory checks reported failed or skipped cases"
             exit 1
