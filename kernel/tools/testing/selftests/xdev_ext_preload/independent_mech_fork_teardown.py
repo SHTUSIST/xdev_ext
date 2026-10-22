@@ -80,7 +80,7 @@ def main():
     parser.add_argument("--revision", help="also reproduce against a specific production preload revision")
     args = parser.parse_args()
     function = BASE["function"]
-    preload = subprocess.check_output(["git", "show", args.revision + ":tools/io_uring_unified_preload.c"], cwd=KERNEL, text=True) if args.revision else (KERNEL / "tools/io_uring_unified_preload.c").read_text()
+    preload = subprocess.check_output(["git", "show", args.revision + ":./tools/io_uring_unified_preload.c"], cwd=KERNEL, text=True) if args.revision else (KERNEL / "tools/io_uring_unified_preload.c").read_text()
     header = (KERNEL / "tools/xdev_ext_preload_socket_mech.h").read_text()
     runtime_start = header.index("struct xdev_ext_socket_mech_runtime {")
     runtime = header[runtime_start:header.index("\n};", runtime_start) + 3]

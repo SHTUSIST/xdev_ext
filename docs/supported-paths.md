@@ -29,3 +29,5 @@ The mechanism socket frontend admits a limited connected UDP call shape. Unsuppo
 IAA produces an actual output length into an independent bounded destination. Capacity is not payload length. A stage whose format requires the original fixed group size rejects a transformed group of a different length; a compression/decompression pair can restore that size before such a stage.
 
 For exact structures and flags, use the [session API reference](reference/session-api.md) and the linked source headers.
+
+The physical IAA adapter requires each side of an admitted transform to map to one DMA segment. CryptoAPI provider fallback can affect where execution occurs; selecting `deflate-iaa` alone does not establish hardware execution. Record the actual provider and hardware path for measurements.

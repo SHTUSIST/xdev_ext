@@ -85,7 +85,7 @@ class Admission(unittest.TestCase):
             for filename in ("io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_core.h", "include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h"):
                 target = include_root / filename
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(subprocess.check_output(["git", "show", TEST_REVISION + ":" + filename], cwd=KERNEL))
+                target.write_bytes(subprocess.check_output(["git", "show", TEST_REVISION + ":./" + filename], cwd=KERNEL))
         source.write_text(C_SOURCE)
         subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(include_root), str(source), "-o", str(cls.binary)], check=True)
 

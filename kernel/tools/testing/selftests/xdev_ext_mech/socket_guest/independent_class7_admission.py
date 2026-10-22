@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory(prefix='independent-class7-') as temp:
     tree=Path(temp)
     for name in files:
         out=tree/name;out.parent.mkdir(parents=True,exist_ok=True)
-        data=subprocess.check_output(['git','show',a.revision+':'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
+        data=subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
         out.write_bytes(data)
     source=tree/'admission.c';binary=tree/'admission'
     source.write_text(r'''

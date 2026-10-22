@@ -18,7 +18,7 @@ A negative submit result guarantees no native submission and no callback. In par
 
 Binding holds the required owner, mapping and allocation references. A generation identifies the bound allocation; a native ticket identifies the admitted operation. An old callback must not advance a new operation or release its resources.
 
-Release mappings only after their native users are quiescent. STOP, invalidation and module teardown must agree with in-flight ownership. Unknown completion must not permit early unpin, unmap, allocation destruction or module unload.
+Release mappings only after their native users are quiescent. A native completion whose quiescence flag is false remains unsafe even if its status value is zero; the common NET boundary converts that combination to failure and retains accepted resources. STOP, invalidation and module teardown must agree with in-flight ownership. Unknown completion must not permit early unpin, unmap, allocation destruction or module unload.
 
 A peer-memory provider supplies actual device-memory authority and mappings. CPU-copy fixtures can exercise admission and ownership but do not implement physical peer DMA. A driver must reject unsupported directions or mapping combinations explicitly.
 

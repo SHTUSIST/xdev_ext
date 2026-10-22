@@ -24,7 +24,7 @@ REF = None
 
 def source(path):
     if REF:
-        return subprocess.check_output(["git", "show", f"{REF}:{path}"],
+        return subprocess.check_output(["git", "show", f"{REF}:./{path}"],
                                        cwd=ROOT, text=True)
     return (ROOT / path).read_text()
 

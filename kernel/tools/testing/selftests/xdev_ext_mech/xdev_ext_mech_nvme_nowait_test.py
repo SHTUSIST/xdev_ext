@@ -32,7 +32,7 @@ class NvmeNowait(unittest.TestCase):
         if source_path.is_file():
             source = source_path.read_text()
         else:
-            source = subprocess.run(["git", "show", "HEAD:" + RELATIVE_SOURCE],
+            source = subprocess.run(["git", "show", "HEAD:./" + RELATIVE_SOURCE],
                                     cwd=ROOT, check=True, text=True,
                                     capture_output=True).stdout
         # Retain every statement in the real function; only dependencies are faked.
