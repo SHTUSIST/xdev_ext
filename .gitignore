@@ -529,3 +529,4 @@
 !/gpu/tests/nv_xdev_ext_vidmem_offset_test.c
 !/gpu/kernel-open/nvidia/nvidia.Kbuild
 !/gpu/src/nvidia/exports_link_command.txt
+!/kernel/arch/x86/entry/syscalls/syscall_64.tbl
