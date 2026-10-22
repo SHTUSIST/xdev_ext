@@ -46,6 +46,10 @@ Read the selected target's Makefile and requirements before choosing it. Some te
 
 [`tests/eval/apps/`](../tests/eval/apps/README.md) reuses the current positional-file and UDP workloads with the test-only userspace kernel model, and checks compatible TCP/buffered-file/small-direct-I/O fallback. Exact counters distinguish custom requests from fallback. These are reproducible call shapes; actual Redis/FIO application runs and actual guest execution require separate evidence.
 
+[`tests/eval/gds/`](../tests/eval/gds/README.md) provides an optional native cuFile load/checkpoint comparison, with official SDK types, exact bytes and native-path counters. Missing dependencies or devices refuse execution; SDK-dependent host checks cannot certify a GPU transfer.
+
+[`tests/iaa/`](../tests/iaa/README.md) adapts the five-case IAA syscall gate to the current UAPI. `make -C tests/iaa all check` builds the native executable and runs host observation/lifetime fixtures. Its separate native command requires a matching kernel and provider, and checks exact completion, produced length, full bytes, guards, statistics and teardown. CryptoAPI software fallback means that even native syscall success requires separate evidence before attributing execution to IAA hardware.
+
 ## Guest and device runs
 
 A guest fixture can exercise the actual kernel path while using a software device or simulated provider. Report that device model with the result. Verify the tested kernel, BPF objects and providers match the intended revision and configuration.

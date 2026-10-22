@@ -43,6 +43,8 @@ jobs:
       # CLI, refusal and result contracts still run.
       - name: GDS CLI and capability contracts
         run: python3 tests/eval/gds/test_gds.py -v
+      - name: IAA syscall and lifetime contracts
+        run: make -C tests/iaa all check
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

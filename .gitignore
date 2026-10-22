@@ -694,3 +694,12 @@
 !/tests/eval/gds/run.py
 !/tests/eval/gds/test_gds.py
 /tests/eval/gds/build/
+!/tests/iaa/
+!/tests/iaa/Makefile
+!/tests/iaa/README.md
+!/tests/iaa/test_iaa_unified_ops.c
+!/tests/iaa/test_contract.c
+!/tests/iaa/test_lifetime.c
+/tests/iaa/test_iaa_unified_ops
+/tests/iaa/test_contract
+/tests/iaa/test_lifetime
