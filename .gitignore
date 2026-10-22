@@ -668,3 +668,4 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_lease_test.c
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ce_concurrency_test.c
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py

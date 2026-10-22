@@ -17,7 +17,9 @@ class CompatibilityConsole(unittest.TestCase):
     def names():
         return ('compat-udp.log','compat-dio-off.log','compat-dio-on.log',
                 'mech-socket-base.log','mech-socket-lifecycle.log',
-                'mech-ce-socket-base.log','mech-ce-socket-lifecycle.log')
+                'mech-ce-socket-base.log','mech-ce-socket-lifecycle.log',
+                'mech-socket-threads.log','mech-socket-processes.log',
+                'mech-ce-socket-threads.log','mech-ce-socket-processes.log')
 
     def test_socket_missing_or_corrupt_evidence_rejected(self):
         with self.assertRaises(ValueError):

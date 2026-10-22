@@ -44,6 +44,16 @@ Read the selected target's Makefile and requirements before choosing it. Some te
 
 A guest fixture can exercise the actual kernel path while using a software device or simulated provider. Report that device model with the result. Verify the tested kernel, BPF objects and providers match the intended revision and configuration.
 
+The integration harness's `--compat` run also exercises four simultaneous frontend workloads: four threads in one process and four independent processes with two threads each, using both the socket-only route and the existing CE–CE–socket route. Every actor sends 65 datagrams with distinct actor/round data at 31, 257 and 1023 bytes. Validation checks all destination bytes and guards, exact per-actor session/stage/STOP counts, process file-descriptor counts, and observed overlapping call intervals. Cross-process runs also require overlap across distinct process IDs. Caller overlap establishes concurrent application execution; it does not establish simultaneous native DMA acceptance. Keep the whole-guest timeout enabled for blocked calls or teardown.
+
+The standalone workload and evidence-validator checks need no custom kernel:
+
+```bash
+python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
+```
+
+This host command uses ordinary loopback UDP and deliberately corrupted/serialized variants. Runtime counter fixtures test the validator; actual custom-kernel execution requires the guest run.
+
 For a transfer, check complete destination bytes, source immutability where required, guard regions, native submission/completion counts, final ownership, and STOP results. For a fault-injection case, state the expected refusal, failure, or UNKNOWN outcome before running it. A deliberately failed transfer can pass its fault test without becoming a successful transfer.
 
 Performance claims require an explicit workload, actual physical devices, topology, timing definition, repetitions, and retained output. Module compilation and software-device guest correctness do not supply those measurements.

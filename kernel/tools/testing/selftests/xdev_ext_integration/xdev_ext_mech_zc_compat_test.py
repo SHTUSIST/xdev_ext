@@ -61,6 +61,8 @@ class CompatibilityFailureLogs(unittest.TestCase):
     """Run the real guest shell; only unavailable custom-kernel apps are fixtures."""
     names = ('compat-udp.log', 'mech-socket-base.log', 'mech-ce-socket-base.log',
              'mech-socket-lifecycle.log', 'mech-ce-socket-lifecycle.log',
+             'mech-socket-threads.log', 'mech-ce-socket-threads.log',
+             'mech-socket-processes.log', 'mech-ce-socket-processes.log',
              'compat-dio-off.log', 'compat-dio-on.log')
 
     def run_guest(self, fail='', bad_udp=False, shell=('sh',), cat_failure=False):
@@ -82,7 +84,11 @@ case "${0##*/}" in
  xdev_ext_preload_socket_smoke) name=compat-udp.log ;;
  xdev_ext_preload_mech_workload)
   if [ -n "${XDEV_EXT_PRELOAD_SOCKET_CE_DEVICE:-}" ]; then arm=ce-socket; else arm=socket; fi
-  name=mech-$arm-$1.log ;;
+  mode=$1
+  if [ "$mode" = concurrency ]; then
+   if [ "$3" = 1 ]; then mode=threads; else mode=processes; fi
+  fi
+  name=mech-$arm-$mode.log ;;
  *) if [ "$XDEV_EXT_PRELOAD_ENABLED" = 1 ]; then mode=on; else mode=off; fi
   name=compat-dio-$mode.log ;;
 esac

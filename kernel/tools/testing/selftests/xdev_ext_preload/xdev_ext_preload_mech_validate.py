@@ -27,10 +27,49 @@ def validate_mech(text, stages, lifecycle):
     if lifecycle:
         assert 'XDEV_EXT_MECH_APP_LIFECYCLE=PASS fork=1 threads=2 fd_reuse=PASS' in text
 
+def validate_concurrency(text, stages, threads, processes, rounds=65):
+    """Match every actor to its own runtime; totals cannot hide fallback."""
+    actors=records(text,'XDEV_EXT_MECH_ACTOR=PASS')
+    reports=records(text,'XDEV_EXT_PRELOAD_MECH_REPORT')
+    finals=records(text,'XDEV_EXT_MECH_CONCURRENCY=PASS')
+    fds=records(text,'XDEV_EXT_MECH_FDS=PASS')
+    count=threads*processes
+    assert len(actors)==len(reports)==count, 'missing/duplicate actor or runtime'
+    assert len(finals)==1, 'missing/duplicate concurrency verdict'
+    final=finals[0]
+    for key,value in dict(processes=processes,threads=threads,actors=count,rounds=rounds,
+                          per_round_gate=1,fd_leaks=0).items():
+        assert int(final[key])==value, 'concurrency shape or gate mismatch'
+    assert int(final['overlap_pairs'])>0, 'no actual overlapping send calls'
+    cross_process=int(final['cross_process_overlap_pairs'])
+    assert (cross_process>0 if processes>1 else cross_process==0), 'no cross-process send overlap'
+    assert {int(a['actor']) for a in actors}==set(range(count)), 'actor identity missing'
+    keys=lambda rows: {(r['pid'],r['tid']) for r in rows}
+    assert len(keys(actors))==count and keys(actors)==keys(reports), 'per actor runtime identity mismatch'
+    assert len({a['pid'] for a in actors})==processes, 'independent process count mismatch'
+    assert all(sum(a['pid']==pid for a in actors)==threads for pid in {a['pid'] for a in actors}), 'thread distribution mismatch'
+    assert len(fds)==processes and {int(f['process']) for f in fds}==set(range(processes)), 'FD audit missing'
+    assert {f['pid'] for f in fds}=={a['pid'] for a in actors}, 'FD audit process mismatch'
+    assert all(int(f['before'])==int(f['after']) and int(f['before'])>0 for f in fds), 'FD leak'
+    want_bytes=sum((31,257,1023)[i%3] for i in range(rounds))
+    by_key={(r['pid'],r['tid']):r for r in reports}
+    for actor in actors:
+        runtime=by_key[(actor['pid'],actor['tid'])]
+        for key,value in dict(calls=rounds,bytes=want_bytes,ready=rounds,entered=rounds,
+                              exited=rounds,full_compare=1,guards=1,extra_datagrams=0).items():
+            assert int(actor[key])==value, 'incomplete data/round/guard comparison'
+        for key,value in dict(creates=1,calls=rounds,bytes=want_bytes,errors=0,stops=1,stop_errors=0).items():
+            assert int(runtime[key])==value, 'actor fallback, error, or teardown mismatch'
+        for stage in range(3):
+            for kind in ('submitted','completed'):
+                assert int(runtime[f'{kind}{stage}'])==(rounds if stage<stages else 0), 'actor stage count mismatch'
+
 def validate(directory, ce):
     for arm, stages in [('socket',1)]+([('ce-socket',3)] if ce else []):
         for mode in ('base','lifecycle'):
             validate_mech((directory/f'mech-{arm}-{mode}.log').read_text(),stages,mode=='lifecycle')
+        for mode, threads, processes in [('threads',4,1),('processes',2,4)]:
+            validate_concurrency((directory/f'mech-{arm}-{mode}.log').read_text(),stages,threads,processes)
     udp=(directory/'compat-udp.log').read_text()
     assert 'XDEV_EXT_TRANSPARENT_SOCKET_PAYLOAD=PASS sends=3 bytes=25' in udp
     rows=records(udp,'XDEV_EXT_PRELOAD_REPORT')

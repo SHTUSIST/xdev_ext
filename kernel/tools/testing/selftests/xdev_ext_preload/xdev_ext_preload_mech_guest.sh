@@ -19,7 +19,9 @@ publish_logs() {
 	set +e
 	for name in compat-udp.log compat-dio-off.log compat-dio-on.log \
 		mech-socket-base.log mech-socket-lifecycle.log \
-		mech-ce-socket-base.log mech-ce-socket-lifecycle.log; do
+		mech-ce-socket-base.log mech-ce-socket-lifecycle.log \
+		mech-socket-threads.log mech-ce-socket-threads.log \
+		mech-socket-processes.log mech-ce-socket-processes.log; do
 		log="$logs/$name"
 		[ -f "$log" ] || continue
 		printf 'XDEV_EXT_PRELOAD_LOG_BEGIN name=%s\n' "$name"
@@ -59,6 +61,23 @@ for mode in base lifecycle; do
 		XDEV_EXT_PRELOAD_SOCKET_ENABLED=1 XDEV_EXT_PRELOAD_SOCKET_MECH=1 \
 		XDEV_EXT_PRELOAD_REPORT=1 LD_PRELOAD="$lib" \
 			"$bin/xdev_ext_preload_mech_workload" "$mode" >"$logs/mech-ce-socket-$mode.log" 2>&1
+	fi
+done
+
+for mode in threads processes; do
+	if [ "$mode" = threads ]; then threads=4; processes=1; else threads=2; processes=4; fi
+	step=mech-socket-$mode.log
+	env -u XDEV_EXT_PRELOAD_SOCKET_CE_DEVICE -u XDEV_EXT_PRELOAD_SOCKET_CE_ADDR \
+	-u XDEV_EXT_PRELOAD_SOCKET_CE_LEN XDEV_EXT_PRELOAD_SOCKET_ENABLED=1 \
+	XDEV_EXT_PRELOAD_SOCKET_MECH=1 XDEV_EXT_PRELOAD_REPORT=1 LD_PRELOAD="$lib" \
+		"$bin/xdev_ext_preload_mech_workload" concurrency "$threads" "$processes" 65 \
+		>"$logs/mech-socket-$mode.log" 2>&1
+	if [ -n "${XDEV_EXT_PRELOAD_SOCKET_CE_DEVICE:-}" ]; then
+		step=mech-ce-socket-$mode.log
+		XDEV_EXT_PRELOAD_SOCKET_ENABLED=1 XDEV_EXT_PRELOAD_SOCKET_MECH=1 \
+		XDEV_EXT_PRELOAD_REPORT=1 LD_PRELOAD="$lib" \
+			"$bin/xdev_ext_preload_mech_workload" concurrency "$threads" "$processes" 65 \
+			>"$logs/mech-ce-socket-$mode.log" 2>&1
 	fi
 done
 
