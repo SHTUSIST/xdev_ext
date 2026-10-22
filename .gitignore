@@ -705,6 +705,15 @@
 /tests/iaa/test_iaa_unified_ops
 /tests/iaa/test_contract
 /tests/iaa/test_lifetime
+!/tests/eval/cuda_host_compute/
+!/tests/eval/cuda_host_compute/Makefile
+!/tests/eval/cuda_host_compute/README.md
+!/tests/eval/cuda_host_compute/workload.h
+!/tests/eval/cuda_host_compute/bench_host_compute.cu
+!/tests/eval/cuda_host_compute/host_fixture.cpp
+!/tests/eval/cuda_host_compute/run.py
+!/tests/eval/cuda_host_compute/build.py
+!/tests/eval/cuda_host_compute/test_contract.py
 !/tests/eval/hft/
 !/tests/eval/hft/Makefile
 !/tests/eval/hft/README.md

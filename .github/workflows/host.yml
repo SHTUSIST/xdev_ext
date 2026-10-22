@@ -45,6 +45,16 @@ jobs:
         run: python3 tests/eval/gds/test_gds.py -v
       - name: HFT-shaped replay correctness and ownership
         run: make -C tests/eval hft-check
+      - name: Registered-host compute offline contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "$CC" in
+            gcc) export CXX=g++ ;;
+            clang) export CXX=clang++ ;;
+            *) exit 1 ;;
+          esac
+          make -C tests/eval cuda-host-check
       - name: IAA syscall and lifetime contracts
         run: make -C tests/iaa all check
       - name: GPU host-page bookkeeping contracts

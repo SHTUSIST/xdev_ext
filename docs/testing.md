@@ -80,4 +80,11 @@ SEND_ZC ownership, replay-isolation and hardware-entry contract checks. Physical
 execution uses its separate admission-gated entry and an actual remote peer;
 host fixtures and capability refusals do not establish DMA or performance.
 
+`make -C tests/eval cuda-host-check` tests the registered-host compute workload's
+scalar orchestration, full-round oracle, guard corruption, error/UNKNOWN retention
+and missing-compiler handling. `cuda_host_compute/build.py` separately compiles
+the real CUDA kernel with official NVCC without running it. Physical mapped-host
+GPU correctness requires a separate device run; the scalar fixture certifies no
+pinning, DMA or performance result.
+
 Both compiler jobs also run the existing reliable control admission and native completion map teardown regressions: two STOP/ACK BUILD cases and five mapping/UNKNOWN ownership cases. The same scripts are registered in the mechanism selftest Makefile; they execute extracted production functions and require no device or guest.

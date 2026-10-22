@@ -32,6 +32,14 @@ ownership checks; the separate physical entry requires matching provisioned
 devices and a remote peer. Software results establish no physical DMA or
 performance advantage.
 
+The [registered-host compute workload](cuda_host_compute/README.md) preserves the
+earlier GPU XOR workload and its per-frame, batched and single-launch shapes.
+Both mapped-host and staged routes reuse registered host buffers; each round
+checks complete output and guards. `make -C tests/eval cuda-host-check` runs an
+explicit scalar fixture and fault contracts. The separate official-NVCC build
+and CUDA execution commands require their stated SDK/device capabilities.
+This workload emits correctness records and no performance measurements.
+
 ## Build and run
 
 Linux, a C11 compiler, make, pthreads, and Python 3 are required. The default
