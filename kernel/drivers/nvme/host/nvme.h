@@ -588,7 +588,7 @@ struct nvme_ctrl_ops {
 	bool (*supports_pci_p2pdma)(struct nvme_ctrl *ctrl);
 	unsigned long (*get_virt_boundary)(struct nvme_ctrl *ctrl, bool is_admin);
 #ifdef CONFIG_XDEV_EXT_MECH
-	int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *);
+	int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *accepted);
 #endif
 };
 

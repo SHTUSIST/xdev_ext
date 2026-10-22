@@ -38,7 +38,11 @@ static void xdev_ext_peer_tx_work(struct work_struct *work)
 static void xdev_ext_peer_tx_finish(struct xdev_ext_peer_tx_wait *p, int status, bool quiesced)
 {
  if (atomic_cmpxchg(&p->claimed, 0, 1)) return;
- p->status = status; p->quiesced = quiesced;
+ /* Native ownership is authoritative even when the driver reports zero
+  * status. Never expose an unquiesced command as successful/reusable.
+  */
+ p->status = !quiesced && !status ? -EIO : status;
+ p->quiesced = quiesced;
  refcount_inc(&p->refs);
  queue_work(system_unbound_wq, &p->work);
 }
@@ -50,10 +54,11 @@ static void xdev_ext_peer_tx_complete(struct xdev_ext_peer_tx *tx, int status, b
 }
 static int xdev_ext_peer_net_one(struct net_device *dev, struct pci_dev *peer,
                                 struct file *allocation, u64 generation, u32 queue,
-                                const struct xdev_ext_peer_net_desc *d)
+                                const struct xdev_ext_peer_net_desc *d, bool *accepted)
 {
  struct xdev_ext_peer_tx_wait *p;
  int ret;
+ if (accepted) *accepted = false;
  p = kzalloc(sizeof(*p), GFP_KERNEL);
  if (!p) return -ENOMEM;
  init_completion(&p->done); INIT_WORK(&p->work, xdev_ext_peer_tx_work);
@@ -70,6 +75,7 @@ static int xdev_ext_peer_net_one(struct net_device *dev, struct pci_dev *peer,
  if (!netif_running(dev) || !netif_device_present(dev)) ret = -ENETDOWN;
  else ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);
  rtnl_unlock();
+ if (!ret && accepted) *accepted = true;
  if (ret) {
   xdev_ext_peer_tx_finish(p, ret, true);
   xdev_ext_peer_tx_put(p); /* refused request: no native owner */
@@ -84,6 +90,62 @@ static int xdev_ext_peer_net_one(struct net_device *dev, struct pci_dev *peer,
  xdev_ext_peer_tx_put(p);
  return ret;
 }
+/* A configured native endpoint is reusable by every device-memory producer.
+ * Namespace and device authority are captured once in the CREATE caller.
+ */
+struct xdev_ext_peer_net_endpoint {
+ struct net_device *dev;
+ struct pci_dev *peer;
+ u32 queue;
+};
+struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind(u32 ifindex, u32 queue)
+{
+ struct xdev_ext_peer_net_endpoint *endpoint;
+ struct net_device *dev;
+ struct pci_dev *peer = NULL;
+ int ret = 0;
+ if (!capable(CAP_SYS_RAWIO) || !capable(CAP_NET_RAW)) return ERR_PTR(-EPERM);
+ dev = dev_get_by_index(current->nsproxy->net_ns, ifindex);
+ if (!dev) return ERR_PTR(-ENODEV);
+ endpoint = kzalloc(sizeof(*endpoint), GFP_KERNEL);
+ if (!endpoint) { dev_put(dev); return ERR_PTR(-ENOMEM); }
+ rtnl_lock();
+ if (!dev->netdev_ops->ndo_xdev_ext_peer_device || !dev->netdev_ops->ndo_xdev_ext_peer_tx)
+  ret = -EOPNOTSUPP;
+ else if (queue >= dev->real_num_tx_queues) ret = -EINVAL;
+ else if (!netif_running(dev) || !netif_device_present(dev)) ret = -ENETDOWN;
+ else {
+  peer = dev->netdev_ops->ndo_xdev_ext_peer_device(dev);
+  if (!peer) ret = -EOPNOTSUPP;
+  else pci_dev_get(peer);
+ }
+ rtnl_unlock();
+ if (ret) { kfree(endpoint); dev_put(dev); return ERR_PTR(ret); }
+ endpoint->dev = dev; endpoint->peer = peer; endpoint->queue = queue;
+ return endpoint;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_bind);
+void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *endpoint)
+{
+ pci_dev_put(endpoint->peer); dev_put(endpoint->dev); kfree(endpoint);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_unbind);
+u32 xdev_ext_peer_net_mtu(struct xdev_ext_peer_net_endpoint *endpoint)
+{ return READ_ONCE(endpoint->dev->mtu); }
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_mtu);
+int xdev_ext_peer_net_send(struct xdev_ext_peer_net_endpoint *endpoint,
+                           struct file *allocation, u64 generation,
+                           const struct xdev_ext_peer_net_desc *desc, bool *accepted)
+{
+ int ret;
+ if (accepted) *accepted = false;
+ if (!endpoint || !desc || desc->reserved) return -EINVAL;
+ ret = xdev_ext_peer_net_check(xdev_ext_peer_net_mtu(endpoint), desc->header_len, desc->bytes, 0);
+ if (ret) return ret;
+ return xdev_ext_peer_net_one(endpoint->dev, endpoint->peer, allocation,
+                              generation, endpoint->queue, desc, accepted);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_send);
 long xdev_ext_peer_net_ioctl(unsigned long arg)
 {
  struct xdev_ext_peer_net_batch *u;
@@ -118,7 +180,7 @@ long xdev_ext_peer_net_ioctl(unsigned long arg)
  allocation = fget(u->allocation_fd);
  if (!allocation) { ret = -EBADF; goto out; }
  for (i = 0; i < u->nr; i++) {
-  ret = xdev_ext_peer_net_one(dev, peer, allocation, u->generation, u->queue, &u->desc[i]);
+  ret = xdev_ext_peer_net_one(dev, peer, allocation, u->generation, u->queue, &u->desc[i], NULL);
   u->status = ret;
   if (ret) break;
   u->completed++;

@@ -32,7 +32,17 @@ struct nvme_xdev_ext_mech_stage {
 	struct { uint32_t nsid; } identity;
 	struct nvme_ns *ns;
 };
-struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; };
+struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; void *s; };
+#define XDEV_EXT_MECH_POOL_PEER 3
+struct xdev_ext_mech_pool { unsigned int kind; };
+static struct xdev_ext_mech_pool host_pool = { .kind = 2 };
+static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(void *session)
+{ (void)session; return &host_pool; }
+/* The GPU branch has an independent actual-function test. This host-only
+ * NOWAIT fixture must never divert to it or report a synthetic completion. */
+static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
+                                    struct xdev_ext_mech_batch *b)
+{ (void)st; (void)b; abort(); }
 struct nvme_command {
 	struct { unsigned char opcode; uint32_t nsid; } rw;
 	struct { uint32_t cdw10, cdw11, cdw12; } common;

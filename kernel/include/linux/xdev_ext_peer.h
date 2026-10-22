@@ -40,6 +40,7 @@ struct xdev_ext_peer_lease {
 /* Native TX ownership: negative submit means no callback/DMA. Zero means
  * exactly one complete(), possibly synchronous, and no command resubmission.
  * Completion is any context; common code defers sleepable lease release.
+ * A false quiesced always forbids reuse, including with a zero status.
  */
 struct xdev_ext_peer_tx {
  u64 dma_address;
@@ -57,7 +58,18 @@ int xdev_ext_peer_file_acquire(struct file *, struct pci_dev *, u64 generation, 
 int xdev_ext_peer_fd_acquire(int fd, struct pci_dev *, u64 generation, u64 offset,
                             u32 len, enum dma_data_direction, struct xdev_ext_peer_fd_lease *);
 void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *, bool quiesced);
+struct xdev_ext_peer_net_endpoint;
+struct xdev_ext_peer_net_desc;
+struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind(u32 ifindex, u32 queue);
+void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *);
+u32 xdev_ext_peer_net_mtu(struct xdev_ext_peer_net_endpoint *);
+int xdev_ext_peer_net_send(struct xdev_ext_peer_net_endpoint *, struct file *, u64 generation,
+                           const struct xdev_ext_peer_net_desc *, bool *accepted);
 long xdev_ext_peer_net_ioctl(unsigned long arg);
+struct file *xdev_ext_peer_file_claim(struct file *, u64 *len, u64 *generation);
+int xdev_ext_peer_file_info(struct file *, u64 *len, u64 *generation);
+bool xdev_ext_peer_control_file(struct file *);
+int xdev_ext_peer_info(struct xdev_ext_peer_region *, u64 *len, u64 *generation, bool idle);
 int xdev_ext_peer_provider_register(const struct xdev_ext_peer_provider_ops *);
 int xdev_ext_peer_provider_unregister(const struct xdev_ext_peer_provider_ops *);
 int xdev_ext_peer_pin(struct file *, u64 gpu_va, u64 len, struct xdev_ext_peer_region **);

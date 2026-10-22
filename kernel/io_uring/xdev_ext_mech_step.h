@@ -47,6 +47,7 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 	    c->nr_stages > XDEV_EXT_MECH_MAX_STAGES)
 		return -EINVAL;
 	switch (c->pool_kind) {
+	case XDEV_EXT_MECH_POOL_PEER:
 	case XDEV_EXT_MECH_POOL_XSK:
 		if (c->pool_fd < 0)
 			return -EBADF;
@@ -64,6 +65,11 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 	if (nr < 0)
 		return nr;
 
+ if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+     (c->layout.frame_size != 65536 || c->layout.hdr_room || nr != 1 ||
+      c->st[0].class_id != XDEV_EXT_MECH_CLASS_NVME ||
+      c->st[0].direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
+  return -EOPNOTSUPP;
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
 		const struct xdev_ext_mech_stage_uapi *u = &c->st[i];
 
@@ -72,6 +78,12 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 				return -EINVAL;
 			continue;
 		}
+  if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+      (u->class_id != XDEV_EXT_MECH_CLASS_NVME && u->class_id != XDEV_EXT_MECH_CLASS_NET))
+   return -EOPNOTSUPP;
+  if (u->class_id == XDEV_EXT_MECH_CLASS_NET &&
+      (c->pool_kind != XDEV_EXT_MECH_POOL_PEER || u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
+   return -EOPNOTSUPP;
 		if (!xdev_ext_mech_class_known(u->class_id) ||
 		    (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_IAA &&
              (u->flags & ~XDEV_EXT_IAA_F_SOFTWARE)) ||

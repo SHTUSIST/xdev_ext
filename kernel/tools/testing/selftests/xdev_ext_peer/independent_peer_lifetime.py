@@ -31,6 +31,15 @@ SHIM = "#include <assert.h>\n#include <stdio.h>\n#include <string.h>\n" + SHIM +
 SHIM += r'''
 #define THIS_MODULE NULL
 #define list_for_each_entry_safe(p,n,h,m) for (p=container_of((h)->next,__typeof__(*p),m), n=container_of(p->m.next,__typeof__(*p),m); &p->m!=(h); p=n,n=container_of(n->m.next,__typeof__(*n),m))
+#define O_RDWR 2
+#define CAP_SYS_RAWIO 17
+#define ERR_PTR(n) ((void *)(intptr_t)(n))
+#define IS_ERR(p) ((uintptr_t)(p) > (uintptr_t)-4096)
+#define PTR_ERR(p) ((int)(intptr_t)(p))
+static bool rawio=true;
+static bool capable(int cap) { (void)cap; return rawio; }
+static struct file *anon_inode_getfile(const char *name, const struct file_operations *ops, void *private, int flags)
+{ (void)name; (void)flags; struct file *f=calloc(1,sizeof(*f)); assert(f); f->f_op=ops; f->refs=1; f->private_data=private; return f; }
 static struct file *fd_table[16];
 static struct file *fget(int fd) { struct file *f=fd>=0 && fd<16?fd_table[fd]:NULL; if(f)get_file(f); return f; }
 '''
@@ -149,7 +158,7 @@ def main():
         ("generation bypass", core.replace("generation != r->generation", "(generation && false)"), fd),
         ("cross GPU page span", core.replace("len > page_size - (offset & (page_size - 1))", "page_size == 0"), fd),
         ("uncertain completion cleanup", core.replace("if (!quiesced) r->invalid = r->quarantined = true;", "(void)quiesced;"), fd),
-        ("fd type confusion", core, fd.replace("if (file->f_op != &xdev_ext_peer_allocation_fops) return -EINVAL;", "if (file->f_op != &xdev_ext_peer_allocation_fops) return -EBADF;")),
+        ("fd type confusion", core, fd.replace("} else return -EINVAL;", "} else return -EBADF;")),
         ("module pin removed", core.replace("try_module_get(p->ops->owner)", "true"), fd),
     ]
     with tempfile.TemporaryDirectory(prefix="independent-peer-life-") as tmp:

@@ -86,20 +86,20 @@ int main(void)
 {
  const struct net_device_ops ops={driver_tx};struct net_device dev={&ops};struct file f={};struct pci_dev peer={};
  struct xdev_ext_peer_net_desc d={.offset=4096,.bytes=512,.header_len=42,.header={0xAB}};
- reset(1);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-EAGAIN && submitted==1 && released==1 && released_quiesced && freed==1);
- reset(0);device_running=false;assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-ENETDOWN && !submitted && released==1 && released_quiesced && freed==1);
+ reset(1);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-EAGAIN && submitted==1 && released==1 && released_quiesced && freed==1);
+ reset(0);device_running=false;assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-ENETDOWN && !submitted && released==1 && released_quiesced && freed==1);
  puts("ok 1 - actual net control: preaccept refusal/down releases exactly once after all native ownership is excluded");
- for(int mode=2;mode<=4;mode++){reset(mode);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==0 && submitted==1 && released==1 && released_quiesced && freed==1);}
+ for(int mode=2;mode<=4;mode++){reset(mode);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==0 && submitted==1 && released==1 && released_quiesced && freed==1);}
  puts("ok 2 - actual net control: synchronous CQE/work, synchronous CQE/deferred work, and asynchronous CQE all free once");
- reset(0);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-ETIMEDOUT && submitted==1 && released==1 && !released_quiesced && !freed);
+ reset(0);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-ETIMEDOUT && submitted==1 && released==1 && !released_quiesced && !freed);
  assert(((struct xdev_ext_peer_tx_wait*)live_context)->refs.value==1);
  native_tx->complete(native_tx,0,true);
  assert(freed==1 && released==1 && !pending_work && !released_quiesced);
  puts("ok 3 - actual net control: timeout claims unknown, quarantines lease once, late success only releases remaining native context");
- reset(6);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-EIO && released==1 && !released_quiesced && freed==1);
- reset(0);acquire_error=-ESTALE;assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-ESTALE && !submitted && !released && freed==1);
+ reset(6);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-EIO && released==1 && !released_quiesced && freed==1);
+ reset(0);acquire_error=-ESTALE;assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-ESTALE && !submitted && !released && freed==1);
  puts("ok 4 - actual net control: error CQE retains DMA resources and stale allocation never reaches the native driver");
- reset(0);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d)==-ETIMEDOUT && !freed);
+ reset(0);assert(xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,NULL)==-ETIMEDOUT && !freed);
  native_tx->complete(native_tx,-ECANCELED,false);assert(freed==1 && released==1 && !pending_work);
  puts("ok 5 - actual net control: timeout followed by native teardown cannot double release or turn quarantine into success");
  free(live_context);return 0;
@@ -118,7 +118,7 @@ def execute(code, directory, name):
 
 def main():
     source = (KERNEL / "io_uring/xdev_ext_peer_net.c").read_text()
-    code = source[source.index("struct xdev_ext_peer_tx_wait {"):source.index("long xdev_ext_peer_net_ioctl(")]
+    code = source[source.index("struct xdev_ext_peer_tx_wait {"):source.index("/* A configured native endpoint")]
     mutations = [
         ("timeout falsely quiesced", code.replace("xdev_ext_peer_tx_finish(p, -ETIMEDOUT, false);", "xdev_ext_peer_tx_finish(p, -ETIMEDOUT, true);")),
         ("native context dropped on timeout", code.replace("xdev_ext_peer_tx_finish(p, -ETIMEDOUT, false);", "xdev_ext_peer_tx_finish(p, -ETIMEDOUT, false); xdev_ext_peer_tx_put(p);")),

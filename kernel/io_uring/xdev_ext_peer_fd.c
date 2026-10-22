@@ -16,10 +16,16 @@
 #include <linux/uaccess.h>
 #include <linux/xdev_ext_peer.h>
 #include <uapi/linux/xdev_ext_peer.h>
+struct xdev_ext_peer_authority;
 struct xdev_ext_peer_fd {
  struct mutex lock;
  struct xdev_ext_peer_region *region;
  struct list_head maps;
+ struct xdev_ext_peer_authority *claimed;
+};
+struct xdev_ext_peer_authority {
+ struct file *original;
+ struct xdev_ext_peer_fd *parent;
 };
 struct xdev_ext_peer_fd_map {
  struct list_head node;
@@ -47,19 +53,80 @@ static int xdev_ext_peer_fd_close(struct inode *inode, struct file *file)
 static const struct file_operations xdev_ext_peer_allocation_fops = {
  .owner = THIS_MODULE, .release = xdev_ext_peer_fd_close,
 };
+static int xdev_ext_peer_authority_close(struct inode *inode, struct file *file)
+{
+ struct xdev_ext_peer_authority *a = file->private_data;
+ struct xdev_ext_peer_fd *p = a->parent;
+ u64 len, generation;
+ (void)inode;
+ mutex_lock(&p->lock);
+ /* Unknown DMA keeps its owner and original file, even after the last
+  * visible authority reference closes. No new claimant can reuse it.
+  */
+ if (xdev_ext_peer_info(p->region, &len, &generation, true)) {
+  mutex_unlock(&p->lock); return 0;
+ }
+ p->claimed = NULL;
+ mutex_unlock(&p->lock);
+ fput(a->original); kfree(a);
+ return 0;
+}
+static const struct file_operations xdev_ext_peer_authority_fops = {
+ .owner = THIS_MODULE, .release = xdev_ext_peer_authority_close,
+};
+struct file *xdev_ext_peer_file_claim(struct file *file, u64 *len, u64 *generation)
+{
+ struct xdev_ext_peer_fd *p;
+ struct xdev_ext_peer_authority *a;
+ struct file *authority;
+ int ret;
+ if (!capable(CAP_SYS_RAWIO)) return ERR_PTR(-EPERM);
+ if (!file || file->f_op != &xdev_ext_peer_allocation_fops || !len || !generation)
+  return ERR_PTR(-EINVAL);
+ a = kzalloc(sizeof(*a), GFP_KERNEL);
+ if (!a) return ERR_PTR(-ENOMEM);
+ p = file->private_data;
+ mutex_lock(&p->lock);
+ if (p->claimed) { ret = -EBUSY; goto fail; }
+ ret = xdev_ext_peer_info(p->region, len, generation, true);
+ if (ret) goto fail;
+ a->original = file; a->parent = p;
+ p->claimed = a; get_file(file);
+ authority = anon_inode_getfile("xdev_ext_peer_authority", &xdev_ext_peer_authority_fops, a, O_RDWR);
+ if (IS_ERR(authority)) {
+  p->claimed = NULL; fput(file); ret = PTR_ERR(authority); goto fail;
+ }
+ mutex_unlock(&p->lock);
+ return authority;
+fail:
+ mutex_unlock(&p->lock); kfree(a); return ERR_PTR(ret);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_file_claim);
+int xdev_ext_peer_file_info(struct file *file, u64 *len, u64 *generation)
+{
+ struct xdev_ext_peer_authority *a;
+ if (!file || file->f_op != &xdev_ext_peer_authority_fops) return -EINVAL;
+ a = file->private_data;
+ return xdev_ext_peer_info(a->parent->region, len, generation, false);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_file_info);
 int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 generation,
                             u64 offset, u32 len, enum dma_data_direction dir,
                             struct xdev_ext_peer_fd_lease *handle)
 {
  struct xdev_ext_peer_fd *p;
  struct xdev_ext_peer_fd_map *m;
+ struct xdev_ext_peer_authority *a = NULL;
  int ret;
  if (!handle || handle->file || handle->lease.mapping) return -EINVAL;
  if (!file) return -EBADF;
- if (file->f_op != &xdev_ext_peer_allocation_fops) return -EINVAL;
+ if (file->f_op == &xdev_ext_peer_allocation_fops) p = file->private_data;
+ else if (file->f_op == &xdev_ext_peer_authority_fops) {
+  a = file->private_data; p = a->parent;
+ } else return -EINVAL;
  get_file(file);
- p = file->private_data;
  mutex_lock(&p->lock);
+ if (p->claimed != a) { ret = -EBUSY; goto unlock; }
  list_for_each_entry(m, &p->maps, node)
   if (m->peer == peer) goto acquire;
  m = kzalloc(sizeof(*m), GFP_KERNEL);
@@ -136,6 +203,9 @@ static const struct file_operations xdev_ext_peer_ctl_fops = {
  .owner = THIS_MODULE, .unlocked_ioctl = xdev_ext_peer_ctl_ioctl,
  .compat_ioctl = compat_ptr_ioctl,
 };
+bool xdev_ext_peer_control_file(struct file *file)
+{ return file && file->f_op == &xdev_ext_peer_ctl_fops; }
+EXPORT_SYMBOL_GPL(xdev_ext_peer_control_file);
 static struct miscdevice xdev_ext_peer_ctl = {
  .minor = MISC_DYNAMIC_MINOR, .name = "xdev_ext_peer", .mode = 0600,
  .fops = &xdev_ext_peer_ctl_fops,

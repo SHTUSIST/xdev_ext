@@ -3145,7 +3145,7 @@ static unsigned long nvme_pci_get_virt_boundary(struct nvme_ctrl *ctrl,
  * nvme_prep_rq must neither dma_map a host page nor unmap this peer mapping.
  */
 static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_rw *u,
-                            struct file *allocation)
+                            struct file *allocation, bool *accepted)
 {
  struct nvme_dev *dev = to_nvme_dev(ns->ctrl);
  struct xdev_ext_peer_nvme_plan plan;
@@ -3154,6 +3154,7 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  struct request *req;
  bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE;
  int ret;
+ if (accepted) *accepted = false;
  if (nvme_ctrl_state(ns->ctrl) != NVME_CTRL_LIVE ||
      !test_bit(NVME_NS_READY, &ns->flags) || test_bit(NVME_NS_REMOVING, &ns->flags))
   return -ENODEV;
@@ -3186,6 +3187,7 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
  req->cmd_flags |= REQ_FAILFAST_MASK;
  nvme_req(req)->flags |= NVME_REQ_USERCMD;
+ if (accepted) *accepted = true;
  ret = nvme_execute_rq(req, false);
  blk_mq_free_request(req);
  /* Errors/cancellation do not prove that no peer DMA can still arrive.

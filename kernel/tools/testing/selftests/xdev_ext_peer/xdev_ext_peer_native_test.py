@@ -86,19 +86,19 @@ int main(void)
  struct head head={.lba_shift=9,.ns_id=7}; struct disk disk={1000,false}; struct queue queue={128};
  struct nvme_ns ns={&ctrl,1UL<<NVME_NS_READY,&head,&disk,&queue}; struct file f={0};
  struct xdev_ext_peer_nvme_rw u={.allocation_fd=3,.generation=2,.offset=0,.slba=10,.bytes=4096};
- assert(nvme_pci_peer_rw(&ns,&u,&f)==0);
+ assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==0);
  assert(executed==1 && freed==1 && released==1 && last_quiesced);
  assert(command.rw.opcode==2 && command.rw.nsid==7 && command.rw.slba==10 && command.rw.length==7);
  assert(command.rw.dptr.sgl.addr==0x700000 && command.rw.dptr.sgl.length==4096 && command.common.flags==NVME_CMD_SGL_METABUF);
  puts("ok 1 - real PCI function submits pre-mapped GPU SGL through native queue without bio");
  u.flags=XDEV_EXT_PEER_NVME_F_WRITE; execute_result=-EIO;
- assert(nvme_pci_peer_rw(&ns,&u,&f)==-EIO);
+ assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-EIO);
  assert(command.rw.opcode==1 && executed==2 && freed==2 && released==2 && !last_quiesced);
  puts("ok 2 - accepted failure is not resent and keeps peer DMA resources quarantined");
- ctrl.sgl=false; assert(nvme_pci_peer_rw(&ns,&u,&f)==-EOPNOTSUPP && acquired==2);
- ctrl.sgl=true; disk.ro=true; assert(nvme_pci_peer_rw(&ns,&u,&f)==-EROFS && acquired==2);
- disk.ro=false; head.ms=8; assert(nvme_pci_peer_rw(&ns,&u,&f)==-EOPNOTSUPP && acquired==2);
- head.ms=0; u.slba=999; assert(nvme_pci_peer_rw(&ns,&u,&f)==-ERANGE && acquired==2);
+ ctrl.sgl=false; assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-EOPNOTSUPP && acquired==2);
+ ctrl.sgl=true; disk.ro=true; assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-EROFS && acquired==2);
+ disk.ro=false; head.ms=8; assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-EOPNOTSUPP && acquired==2);
+ head.ms=0; u.slba=999; assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-ERANGE && acquired==2);
  puts("ok 3 - native capability, read-only, metadata and namespace bounds reject before mapping");
  return 0;
 }

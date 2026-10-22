@@ -31,7 +31,8 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_IAA	= 4,
 	XDEV_EXT_MECH_CLASS_DMA	= 6,
 	XDEV_EXT_MECH_CLASS_SOCKET = 7,
-	XDEV_EXT_MECH_CLASS_MAX	= 8,
+	XDEV_EXT_MECH_CLASS_NET = 8,
+	XDEV_EXT_MECH_CLASS_MAX	= 9,
 };
 
 /* Stage direction, relative to the stage's device. */
@@ -286,6 +287,28 @@ struct xdev_ext_socket_mech_cqe {
 	__u32 bytes_sent, reserved[2];
 };
 
+/* Native NIC peer TX, separate CPU headers and device-memory payload.
+ * The program writes offsets within the current frame, never DMA addresses.
+ */
+#define XDEV_EXT_NET_MAX_ENTRIES 16U
+#define XDEV_EXT_NET_HEADER_MAX 128U
+struct xdev_ext_net_send_desc {
+ __u32 frame_pos, frame_off, len, flags;
+ __u32 header_len, reserved;
+ __u8 header[XDEV_EXT_NET_HEADER_MAX];
+};
+struct xdev_ext_net_mech_info {
+ struct xdev_ext_mech_layout l;
+ __aligned_u64 generation;
+ __u32 nr_frames, mtu;
+ struct xdev_ext_mech_peer peer;
+ struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+};
+struct xdev_ext_net_mech_cqe {
+ __s32 status;
+ __u32 bytes_sent, entries_done, outcome; /* 0 OK; 1 refused; 2 ambiguous */
+};
+
 enum xdev_ext_mech_build_ret {
 	XDEV_EXT_MECH_BUILD_DEFAULT	= 0,	/* class default_build, if it has one */
 	XDEV_EXT_MECH_BUILD_SUBMIT	= 1,
@@ -340,6 +363,7 @@ struct io_uring_xdev_ext_mech {
 enum xdev_ext_mech_pool_kind {
 	XDEV_EXT_MECH_POOL_XSK	= 1,	/* the socket's AF_XDP UMEM, aligned, copy mode */
 	XDEV_EXT_MECH_POOL_IOU_UMEM	= 2,	/* this ring's IORING_REGISTER_XDEV_EXT_UMEM */
+	XDEV_EXT_MECH_POOL_PEER = 3, /* authoritative allocation fd, no CPU pages */
 };
 
 /*

@@ -1236,7 +1236,7 @@ static int nvme_peer_rw_allowed(struct nvme_ns *ns,
  cmd.rw.opcode = write ? nvme_cmd_write : nvme_cmd_read;
  cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
  if (!nvme_cmd_allowed(ns, &cmd, flags, open_for_write)) return -EACCES;
- return ns->ctrl->ops->peer_rw(ns, u, allocation);
+ return ns->ctrl->ops->peer_rw(ns, u, allocation, NULL);
 }
 static int nvme_peer_ioctl(struct nvme_ns *ns, unsigned int cmd,
                            void __user *argp, unsigned int flags, bool open_for_write)

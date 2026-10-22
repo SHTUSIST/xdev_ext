@@ -21,6 +21,9 @@
 #include <linux/nvme_xdev_ext_passthru.h>
 #include <linux/slab.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_peer.h>
+#include <uapi/linux/xdev_ext_peer.h>
+#include <linux/capability.h>
 #include "nvme.h"
 
 struct nvme_xdev_ext_mech_slot;
@@ -117,6 +120,8 @@ static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st)
 	u64 pieces;
 	u32 i;
 
+	if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
+		return 0;
 	p->nr_slots = xdev_ext_mech_session_depth(st->s);
 	if (!p->nr_slots || !l->seg_len || !l->group_bytes || !l->frame_size)
 		return -EINVAL;
@@ -370,6 +375,12 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 	    !nvme_ctrl_sgl_supported(ns->ctrl) || queue_virt_boundary(ns->queue))
 		return -EOPNOTSUPP;
 #endif
+ if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
+  if (!capable(CAP_SYS_RAWIO)) return -EPERM;
+  if (!ns->ctrl->ops->peer_rw || strcmp(ns->ctrl->ops->name, "pcie") ||
+      !nvme_ctrl_sgl_supported(ns->ctrl)) return -EOPNOTSUPP;
+  if (!write && !(st->file->f_mode & FMODE_READ)) return -EBADF;
+ }
 	if (write && !(st->file->f_mode & FMODE_WRITE))
 		return -EBADF;
 	if (!nvme_xdev_ext_mech_cmd_allowed(ns, st->file, write))
@@ -646,6 +657,37 @@ static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 	return RQ_END_IO_FREE;
 }
 
+static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
+                                    struct xdev_ext_mech_batch *b)
+{
+ struct nvme_xdev_ext_mech_stage *p = st->priv;
+ struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+ struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
+ struct xdev_ext_mech_frame f;
+ struct xdev_ext_peer_nvme_rw u = {};
+ bool accepted = false;
+ int ret;
+ if (xdev_ext_mech_batch_nr_frames(b) != 1 || xdev_ext_mech_batch_frame(b, 0, &f))
+  return -EINVAL;
+ if (f.kaddr || !f.data_len || f.data_off > pool->frame_size ||
+     f.data_len > pool->frame_size - f.data_off ||
+     f.umem_addr != (u64)f.index * pool->frame_size) return -EPROTO;
+ u.allocation_fd = -1;
+ u.generation = xdev_ext_peer_mech_pool_generation(pool);
+ u.offset = f.umem_addr + f.data_off;
+ u.bytes = xdev_ext_mech_batch_bytes(b);
+ if (u.bytes != f.data_len) return -EINVAL;
+ u.flags = p->write ? XDEV_EXT_PEER_NVME_F_WRITE : 0;
+ u.slba = (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 10) |
+          (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 11) << 32;
+ ret = p->ns->ctrl->ops->peer_rw(p->ns, &u, xdev_ext_peer_mech_pool_file(pool), &accepted);
+ if (!accepted) return ret ? ret : -EPROTO;
+ nvme_xdev_ext_mech_cqe(ret, 0, &bp->cqe);
+ if (ret) xdev_ext_mech_batch_sequester(b, xdev_ext_mech_batch_ticket(b), ret);
+ else xdev_ext_mech_batch_complete(b, xdev_ext_mech_batch_ticket(b), 0);
+ return 0;
+}
+
 static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 				 struct xdev_ext_mech_batch *b)
 {
@@ -665,6 +707,8 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	if (ret)
 		return ret;
 
+ if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
+  return nvme_xdev_ext_peer_submit(st, b);
 	/* Only the admitted opcode, SLBA and NLB; C owns every other field. */
 	cmd.rw.opcode = bp->sqe[0];
 	cmd.rw.nsid = cpu_to_le32(p->identity.nsid);

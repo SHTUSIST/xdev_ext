@@ -245,6 +245,7 @@ static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_m
 				xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, 0);
 	case XDEV_EXT_MECH_CLASS_IAA:
 	case XDEV_EXT_MECH_CLASS_SOCKET:
+	case XDEV_EXT_MECH_CLASS_NET:
 	case XDEV_EXT_MECH_CLASS_DMA:
 		/* Common metadata only; DMA never enters the legacy policy validator. */
 		return (struct xdev_ext_binding_ctx_v2) {
@@ -2084,6 +2085,9 @@ static int xdev_ext_mech_pool_bind(struct xdev_ext_mech_session *s,
 		s->pool_file = fget(c->pool_fd);
 		if (!s->pool_file)
 			return -EBADF;
+  if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER)
+   ret = xdev_ext_peer_mech_pool_bind(&s->pool, s->pool_file, &s->layout);
+  else
 		ret = xsk_xdev_ext_mech_pool_bind(&s->pool, s->pool_file,
 					     &s->layout);
 	}

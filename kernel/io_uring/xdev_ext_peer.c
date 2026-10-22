@@ -106,6 +106,21 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_pin);
 u64 xdev_ext_peer_generation(struct xdev_ext_peer_region *r)
 { return r ? r->generation : 0; }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_generation);
+int xdev_ext_peer_info(struct xdev_ext_peer_region *r, u64 *len, u64 *generation, bool idle)
+{
+ struct xdev_ext_peer_mapping *m;
+ int ret = 0;
+ if (!r || !len || !generation) return -EINVAL;
+ mutex_lock(&r->lock);
+ if (r->invalid || r->quarantined) ret = -ESTALE;
+ if (!ret && idle)
+  list_for_each_entry(m, &r->maps, node)
+   if (m->active) { ret = -EBUSY; break; }
+ if (!ret) { *len = r->len; *generation = r->generation; }
+ mutex_unlock(&r->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_info);
 static bool xdev_ext_peer_direction_valid(enum dma_data_direction dir)
 { return dir == DMA_BIDIRECTIONAL || dir == DMA_TO_DEVICE || dir == DMA_FROM_DEVICE; }
 int xdev_ext_peer_map(struct xdev_ext_peer_region *r, struct pci_dev *peer,

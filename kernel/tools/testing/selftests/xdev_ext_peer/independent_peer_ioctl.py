@@ -31,7 +31,7 @@ typedef uint32_t u32;
 struct file { int refs, identity; };
 struct nvme_command { struct { unsigned char opcode; u32 nsid; } rw; };
 struct nvme_ns;
-struct ctrl_ops { int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *); };
+struct ctrl_ops { int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *); };
 struct ctrl { struct ctrl_ops *ops; };
 struct head { u32 ns_id; };
 struct nvme_ns { struct ctrl *ctrl; struct head *head; };
@@ -52,8 +52,9 @@ static void *memdup_user(const void *src,size_t n)
 { void *p;if(bad_copyin)return NULL;p=malloc(n);assert(p);memcpy(p,src,n);return p; }
 static struct file *fget(int fd) { if(fd!=3 || !fd_slot)return NULL;fd_slot->refs++;return fd_slot; }
 static void fput(struct file *f) { assert(f->refs>0);f->refs--; }
-static int native(struct nvme_ns *ns,const struct xdev_ext_peer_nvme_rw *u,struct file *f)
+static int native(struct nvme_ns *ns,const struct xdev_ext_peer_nvme_rw *u,struct file *f,bool *accepted)
 {
+ (void)accepted;
  int i=calls++;
  assert(ns->head->ns_id==23 && f==&original && f->identity==7 && f->refs>=1);
  assert(u->generation==55 && u->offset==(uint64_t)i*65536 && u->slba==(uint64_t)i*8 && u->bytes==4096);

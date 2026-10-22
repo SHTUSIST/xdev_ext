@@ -453,6 +453,8 @@ XDEV_EXT_MECH_STRUCT_OPS(iaa, XDEV_EXT_MECH_CLASS_IAA,
 
 XDEV_EXT_MECH_STRUCT_OPS(socket, XDEV_EXT_MECH_CLASS_SOCKET,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
+XDEV_EXT_MECH_STRUCT_OPS(net, XDEV_EXT_MECH_CLASS_NET,
+                    xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 
 static const struct bpf_struct_ops *const xdev_ext_mech_st_ops[] = {
 	&bpf_xdev_ext_nvme_mech_ops,
@@ -461,6 +463,7 @@ static const struct bpf_struct_ops *const xdev_ext_mech_st_ops[] = {
 	&bpf_xdev_ext_dma_mech_ops,
 	&bpf_xdev_ext_iaa_mech_ops,
 	&bpf_xdev_ext_socket_mech_ops,
+	&bpf_xdev_ext_net_mech_ops,
 };
 
 static const struct bpf_struct_ops *xdev_ext_mech_st_ops_of(u32 class_id)
@@ -478,6 +481,8 @@ static const struct bpf_struct_ops *xdev_ext_mech_st_ops_of(u32 class_id)
 		return &bpf_xdev_ext_iaa_mech_ops;
 	case XDEV_EXT_MECH_CLASS_SOCKET:
 		return &bpf_xdev_ext_socket_mech_ops;
+	case XDEV_EXT_MECH_CLASS_NET:
+		return &bpf_xdev_ext_net_mech_ops;
 	default:
 		return NULL;
 	}
@@ -761,6 +766,9 @@ static void __init xdev_ext_mech_emit_btf_types(void)
  BTF_TYPE_EMIT(struct xdev_ext_socket_send_desc);
  BTF_TYPE_EMIT(struct xdev_ext_socket_mech_info);
  BTF_TYPE_EMIT(struct xdev_ext_socket_mech_cqe);
+ BTF_TYPE_EMIT(struct xdev_ext_net_send_desc);
+ BTF_TYPE_EMIT(struct xdev_ext_net_mech_info);
+ BTF_TYPE_EMIT(struct xdev_ext_net_mech_cqe);
  BTF_TYPE_EMIT(struct xdev_ext_iaa_mech_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_dma_mech_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_nvme_mech_cqe);
@@ -791,6 +799,8 @@ static int __init xdev_ext_mech_ops_init(void)
   ret = register_bpf_struct_ops(&bpf_xdev_ext_iaa_mech_ops, xdev_ext_iaa_mech_ops);
  if (!ret)
   ret = register_bpf_struct_ops(&bpf_xdev_ext_socket_mech_ops, xdev_ext_socket_mech_ops);
+ if (!ret)
+  ret = register_bpf_struct_ops(&bpf_xdev_ext_net_mech_ops, xdev_ext_net_mech_ops);
 	if (!ret && !xdev_ext_mech_types_findable())
 		ret = -ENOENT;
 	if (ret) {

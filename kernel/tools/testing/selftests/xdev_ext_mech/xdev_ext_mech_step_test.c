@@ -111,7 +111,7 @@ static void test_create_check(void)
 	c.pool_kind = 0;
 	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	c = s1();
-	c.pool_kind = 3;
+	c.pool_kind = XDEV_EXT_MECH_POOL_PEER + 1;
 	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	c = s1();
 	c.pool_fd = -1;

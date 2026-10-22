@@ -50,7 +50,8 @@ struct nvme_command {
 struct xdev_ext_mech_batch;
 struct nvme_xdev_ext_mech_slot;
 /* PRODUCTION_TYPES */
-struct xdev_ext_mech_pool { struct page pages[2]; };
+#define XDEV_EXT_MECH_POOL_PEER 3
+struct xdev_ext_mech_pool { struct page pages[2]; unsigned int kind; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; struct xdev_ext_mech_layout layout; unsigned int depth,state; };
 struct xdev_ext_mech_frame { void *kaddr; u64 umem_addr; u32 index,data_off,data_len; void *pool_priv; };
 struct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; u64 id,ticket; bool claimed,uncertain; int status; };
@@ -64,6 +65,10 @@ struct request {
  enum rq_end_io_ret (*end_io)(struct request *,blk_status_t);
  void *end_io_data;
 };
+/* Host-page pool tests must never execute the separately tested GPU branch. */
+static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
+                                    struct xdev_ext_mech_batch *b)
+{ (void)st; (void)b; abort(); }
 static const char *mode;
 static unsigned int hot,hot_allocs,cold_allocs,submitted,completed,live,bio_endios;
 static struct request *pending[4];

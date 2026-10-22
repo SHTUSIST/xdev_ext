@@ -22,14 +22,15 @@ BPF_ARCH ?= x86
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf \
 	-D__TARGET_ARCH_$(BPF_ARCH)
 
-BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink
+BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer
 BPF_OBJECTS := $(BPF_NAMES:%=$(BUILD_DIR)/%.bpf.o)
 VMLINUX_H := $(BUILD_DIR)/vmlinux.h
 CTL := $(BUILD_DIR)/xdev_ext_mech_ctl
+PEER_CTL := $(BUILD_DIR)/xdev_ext_peer_chain
 
 .DEFAULT_GOAL := all
 
-all: $(CTL) $(BPF_OBJECTS)
+all: $(CTL) $(PEER_CTL) $(BPF_OBJECTS)
 
 ctl: $(CTL)
 
@@ -60,3 +61,6 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 .PHONY: all bpf clean ctl
+
+$(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/xdev_ext_peer.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)

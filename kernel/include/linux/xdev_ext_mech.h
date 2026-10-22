@@ -126,6 +126,7 @@ XDEV_EXT_MECH_OPS_TYPE(xdev_ext_ce_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_dma_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_iaa_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_socket_mech_ops);
+XDEV_EXT_MECH_OPS_TYPE(xdev_ext_net_mech_ops);
 
 /*
  * A frame resolved to kernel memory.  [kaddr, kaddr + frame_size) is one
@@ -389,6 +390,14 @@ int xsk_xdev_ext_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *fi
 int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool,
 			       struct io_ring_ctx *ctx,
 			       const struct xdev_ext_mech_layout *l);
+
+/* CREATE, process context: device-memory frames have no CPU pages/address. */
+int xdev_ext_peer_mech_pool_bind(struct xdev_ext_mech_pool *, struct file *,
+                                const struct xdev_ext_mech_layout *);
+/* Worker context: borrowed authority while the session retains its pool. */
+struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *);
+/* Worker context: generation captured by the exclusive CREATE claim. */
+u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *);
 
 /* Any context: compare-and-exchange of chunk @index's ownership word. */
 int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool *pool, u32 index, u32 from,
