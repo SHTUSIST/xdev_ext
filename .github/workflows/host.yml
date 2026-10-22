@@ -12,6 +12,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     strategy:
+      fail-fast: false
       matrix:
         cc: [gcc, clang]
     env:
@@ -24,6 +25,11 @@ jobs:
         run: python3 scripts/test_host.py
       - name: Concurrent frontend workload and evidence checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
+      - name: Portable comparison workloads and frontend call shapes
+        run: |
+          make -C tests/eval check
+          python3 tests/eval/run.py --suite portable
+          make -C tests/eval/apps check
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

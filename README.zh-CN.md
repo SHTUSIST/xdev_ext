@@ -64,6 +64,7 @@ python3 scripts/prepare_sources.py --component nvidia
 | `kernel/` | Linux 改动、UAPI、BPF 程序、用户态工具与 selftests |
 | `gpu/` | NVIDIA 开放内核模块改动与主机测试 |
 | `scripts/` | 主机测试与固定上游源码准备入口 |
+| `tests/eval/` | 可复现对照负载与透明前端调用形状核对 |
 | `docs/` | 构建、架构、支持路径、测试及接口参考 |
 | `sources.lock.json` | 完整源码树所需的公共上游版本 |
 

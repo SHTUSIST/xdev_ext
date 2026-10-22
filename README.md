@@ -64,6 +64,7 @@ The [architecture guide](docs/architecture.md) explains stage composition. [Supp
 | `kernel/` | Linux changes, UAPI, BPF programs, userspace tools, and selftests |
 | `gpu/` | NVIDIA open kernel module changes and host tests |
 | `scripts/` | Host-test and pinned-source preparation entry points |
+| `tests/eval/` | Reproducible comparison workloads and transparent frontend call-shape checks |
 | `docs/` | Build instructions, architecture, supported paths, testing, and API references |
 | `sources.lock.json` | Pinned public upstream sources used to assemble the complete trees |
 

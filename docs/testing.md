@@ -40,6 +40,12 @@ make -C kernel/tools/testing/selftests/xdev_ext_mech_tools run_tests
 
 Read the selected target's Makefile and requirements before choosing it. Some tests require sanitizer runtimes, libbpf, matching BTF, root capabilities, a custom kernel, or devices. The full kernel selftest framework is supplied by source preparation.
 
+## Comparison workloads and application call shapes
+
+[`tests/eval/`](../tests/eval/README.md) provides file-to-loopback-TCP comparisons using POSIX or optional io_uring, plus optional CUDA pageable/pinned staging. Programs compare every byte and reject failed, truncated or corrupted runs. Their documented timing includes validation work; they do not measure the current shared-page session or physical device performance.
+
+[`tests/eval/apps/`](../tests/eval/apps/README.md) reuses the current positional-file and UDP workloads with the test-only userspace kernel model, and checks compatible TCP/buffered-file/small-direct-I/O fallback. Exact counters distinguish custom requests from fallback. These are reproducible call shapes; actual Redis/FIO application runs and actual guest execution require separate evidence.
+
 ## Guest and device runs
 
 A guest fixture can exercise the actual kernel path while using a software device or simulated provider. Report that device model with the result. Verify the tested kernel, BPF objects and providers match the intended revision and configuration.
@@ -52,7 +58,7 @@ The standalone workload and evidence-validator checks need no custom kernel:
 python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
 ```
 
-This host command uses ordinary loopback UDP and deliberately corrupted/serialized variants. Runtime counter fixtures test the validator; actual custom-kernel execution requires the guest run.
+This host command uses ordinary loopback UDP and deliberately corrupted/serialized variants. Fast libc sends may finish without observed call overlap; the host profile reports that separately after checking complete actor data and resources. The guest verdict still requires measured overlap. Synthetic runtime counter fixtures test the validator; actual custom-kernel execution requires the guest run.
 
 For a transfer, check complete destination bytes, source immutability where required, guard regions, native submission/completion counts, final ownership, and STOP results. For a fault-injection case, state the expected refusal, failure, or UNKNOWN outcome before running it. A deliberately failed transfer can pass its fault test without becoming a successful transfer.
 

@@ -9,6 +9,7 @@ Start with [getting started](getting-started.md), check [supported paths](suppor
 | Understand stage composition and ownership | [Architecture](architecture.md) |
 | Check devices, call shapes, and memory routes | [Supported paths](supported-paths.md) |
 | Run and interpret tests | [Testing](testing.md) |
+| Run comparison workloads and application call shapes | [Evaluation workloads](../tests/eval/README.md) |
 | Diagnose setup and runtime errors | [Troubleshooting](troubleshooting.md) |
 | Use the session interface | [Session API](reference/session-api.md) |
 | Write a bounded eBPF plan | [BPF contract](reference/bpf-contract.md) |
