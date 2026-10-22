@@ -686,3 +686,5 @@
 !/tests/eval/apps/fallback_shapes.c
 !/tests/eval/apps/run.py
 !/tests/eval/apps/test_contract.py
+!/tests/eval/apps/mixed_hft_shape.c
+!/tests/eval/apps/test_mixed_hft.py

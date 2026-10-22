@@ -3,10 +3,13 @@
 """Execute deterministic libc call shapes, with exact model/counter checks."""
 import argparse
 import hashlib
+import json
 import os
 from pathlib import Path
 import subprocess
 import tempfile
+
+from test_mixed_hft import validate_result as validate_mixed_result
 
 HERE = Path(__file__).resolve().parent
 BUILD = HERE / 'build'
@@ -72,6 +75,24 @@ def validate_model(report, expected):
     return actual
 
 
+def validate_mixed_counters(report):
+    validate_model(report, dict.fromkeys(MODEL_COUNTERS, 0))
+    present = bool(rows(report, 'XDEV_EXT_PRELOAD_REPORT'))
+    if present:
+        validate_counts(report, dict.fromkeys(COUNTERS, 0))
+    return present
+
+
+def validate_mixed_config(report, settings):
+    for option in ('XDEV_EXT_PRELOAD_ENABLED', 'XDEV_EXT_PRELOAD_SOCKET_ENABLED',
+                   'XDEV_EXT_PRELOAD_REQUIRE_ARMED'):
+        if settings.get(option) != '1':
+            raise ValueError(f'mixed workload requires {option}=1')
+    config = rows(report, 'XDEV_EXT_PRELOAD_CONFIG')
+    if config != [{'state': 'armed', 'error': 'none', 'var': 'none'}]:
+        raise ValueError('mixed workload frontend not armed with valid configuration')
+
+
 def db_summary(text):
     found = rows(text, 'XDEV_EXT_DB_WORKLOAD_RESULT=PASS')
     if len(found) != 1:
@@ -99,7 +120,7 @@ def run_suite(work):
     work = work.resolve()
     model = str(BUILD / 'libxdev_ext_preload_kernel_model.so')
     frontend = str(BUILD / 'libio_uring_unified.so')
-    for artifact in ('fallback_shapes', 'xdev_ext_preload_db_workload',
+    for artifact in ('fallback_shapes', 'mixed_hft_shape', 'xdev_ext_preload_db_workload',
                      'xdev_ext_preload_socket_smoke', 'libio_uring_unified.so',
                      'libxdev_ext_preload_kernel_model.so'):
         if not (BUILD / artifact).is_file():
@@ -159,7 +180,46 @@ def run_suite(work):
     if rows(report, 'XDEV_EXT_PRELOAD_REPORT'):
         validate_counts(report, dict.fromkeys(COUNTERS, 0))
     print('PASS shape=tcp-send-write-writev-buffered-file-direct64 evidence=host-model custom_requests=0 scope=compatibility')
-    print('PASS application_call_shapes=3 real_thirdparty_app_runs=0 physical_dma_evidence=0')
+
+    # An existing anchor allows the frontend constructor to resolve its file
+    # configuration before the fixture creates its O_EXCL outputs. Audit data
+    # itself remains a new buffered file, outside the anchor's allowlist.
+    anchor = work / 'mixed-allowlist-anchor'
+    with anchor.open('xb'):
+        pass
+    mixed_reports = []
+    for name, takeover in (('mixed-libc', False), ('mixed-model', True)):
+        audit, capture = work / f'{name}.audit', work / f'{name}.capture'
+        settings = dict(common, LD_PRELOAD=f'{frontend}:{model}',
+                        XDEV_EXT_PRELOAD_ENABLED='1',
+                        XDEV_EXT_PRELOAD_SOCKET_ENABLED='1',
+                        XDEV_EXT_PRELOAD_REQUIRE_ARMED='1',
+                        XDEV_EXT_PRELOAD_PATHS=str(anchor)) if takeover else {}
+        (work / f'{name}.config.json').write_text(json.dumps({
+            'explicit_environment': settings, 'count': 65, 'record_bytes': 48,
+            'audit_buffered': True, 'audit_allowlisted': False,
+            'allowlist_anchor': str(anchor) if takeover else None,
+            'baseline': not takeover}, indent=2) + '\n')
+        completed = subprocess.run([str(BUILD / 'mixed_hft_shape'), str(audit), str(capture)],
+                                   env=dict(clean, **settings), capture_output=True,
+                                   text=True, timeout=30)
+        (work / f'{name}.out').write_text(completed.stdout)
+        (work / f'{name}.err').write_text(completed.stderr)
+        check_exit(completed.returncode, completed.stdout + completed.stderr)
+        validate_mixed_result(completed.returncode, completed.stdout,
+                              audit.read_bytes(), capture.read_bytes(), 65)
+        mixed_reports.append(completed.stderr)
+    validate_mixed_config(mixed_reports[1], settings)
+    runtime_present = validate_mixed_counters(mixed_reports[1])
+    equal_bytes((work / 'mixed-libc.audit').read_bytes(),
+                (work / 'mixed-model.audit').read_bytes(), 'mixed whole audit')
+    equal_bytes((work / 'mixed-libc.capture').read_bytes(),
+                (work / 'mixed-model.capture').read_bytes(), 'mixed whole TCP capture')
+    print('PASS shape=udp-ingress-ema-buffered48-pwrite-tcp48 evidence=host-model '
+          'scope=compatibility records=65 custom_requests=0 '
+          f'frontend_runtime={"present" if runtime_present else "absent"} '
+          'model_summary=present full_oracle_compare=1 audit_allowlisted=0')
+    print('PASS application_call_shapes=4 real_thirdparty_app_runs=0 physical_dma_evidence=0')
 
 
 def main():
