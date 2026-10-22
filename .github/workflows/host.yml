@@ -26,7 +26,15 @@ jobs:
       - name: Concurrent frontend workload and evidence checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
       - name: Frontend invalid-memory semantics
-        run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
+        shell: bash
+        run: |
+          set -euo pipefail
+          output="$RUNNER_TEMP/xdev-ext-efault"
+          mkdir -p "$output"
+          make -C kernel/tools/testing/selftests/xdev_ext_preload OUTPUT="$output" \
+            "$output/libio_uring_unified.so" "$output/libxdev_ext_preload_kernel_model.so"
+          XDEV_EXT_PRELOAD_TEST_DIR="$output" python3 \
+            kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_efault_test.py
       - name: Portable comparison workloads and frontend call shapes
         run: |
           make -C tests/eval check
