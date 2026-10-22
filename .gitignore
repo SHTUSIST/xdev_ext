@@ -654,3 +654,4 @@
 !/gpu/kernel-open/common/inc/nvstatuscodes.h
 !/kernel/include/uapi/linux/if_xdp.h
 !/gpu/src/nvidia/generated/g_ce_utils_nvoc.h
+!/kernel/.gitignore
