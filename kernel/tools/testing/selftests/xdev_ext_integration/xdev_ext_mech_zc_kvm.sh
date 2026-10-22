@@ -84,10 +84,54 @@ if (( PEER )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none && "$GROUP
 [[ "$SCRATCH" =~ ^/tmp/xdev-ext-e2e\.[A-Za-z0-9]+$ ]]
 [[ $(stat -c %a "$SCRATCH") == 700 && ! -L "$SCRATCH" ]]
 SRC=${SOURCE_OVERRIDE:-$SCRATCH/src}
-[[ -d "$SRC/.git" && ! -L "$SRC" ]]
-git -C "$SRC" diff --quiet
-git -C "$SRC" diff --cached --quiet
-[[ -z $(git -C "$SRC" ls-files --others --exclude-standard) ]]
+verify_source_checkout() {
+    local anchor prefix=''
+    [[ -d "$SRC" && ! -L "$SRC" ]] || {
+        echo 'FAIL source must be a real checkout directory' >&2; return 1;
+    }
+    SRC=$(cd "$SRC" && pwd -P)
+    SOURCE_GIT_ROOT=$(git -C "$SRC" rev-parse --show-toplevel) || {
+        echo 'FAIL source is not a Git checkout' >&2; return 1;
+    }
+    SOURCE_GIT_ROOT=$(cd "$SOURCE_GIT_ROOT" && pwd -P)
+    if [[ "$SOURCE_GIT_ROOT" == "$SRC" ]]; then
+        SOURCE_LAYOUT=kernelgit
+    elif [[ "$SOURCE_GIT_ROOT/kernel" == "$SRC" ]]; then
+        SOURCE_LAYOUT=overlay
+        prefix=kernel/
+        git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- \
+            sources.lock.json scripts/prepare_sources.py >/dev/null || {
+            echo 'FAIL overlay source lacks tracked preparation metadata' >&2; return 1;
+        }
+    else
+        echo 'FAIL source must be the Git root or its prepared kernel directory' >&2; return 1;
+    fi
+    for anchor in net/xdp/xsk_xdev_ext_mech_zc_core.h \
+        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
+        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire.py \
+        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py; do
+        git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- "$prefix$anchor" >/dev/null || {
+            echo "FAIL source lacks tracked kernel anchor: $anchor" >&2; return 1;
+        }
+    done
+    git -C "$SOURCE_GIT_ROOT" diff --quiet
+    git -C "$SOURCE_GIT_ROOT" diff --cached --quiet
+    [[ -z $(git -C "$SOURCE_GIT_ROOT" ls-files --others --exclude-standard) ]] || {
+        echo 'FAIL source Git root contains untracked files' >&2; return 1;
+    }
+    if [[ "$SOURCE_LAYOUT" == overlay ]]; then
+        python3 - "$SOURCE_GIT_ROOT/sources.lock.json" <<'PYSOURCEPATH'
+import json, sys
+with open(sys.argv[1]) as source:
+    lock = json.load(source)
+if lock.get('components', {}).get('linux', {}).get('path') != 'kernel':
+    raise SystemExit('FAIL overlay preparation must describe kernel/')
+PYSOURCEPATH
+        python3 "$SOURCE_GIT_ROOT/scripts/prepare_sources.py" --component linux --check
+    fi
+    SOURCE_COMMIT=$(git -C "$SOURCE_GIT_ROOT" rev-parse --verify 'HEAD^{commit}')
+}
+verify_source_checkout
 # Use the same campaign geometry for native commands, image creation and
 # the strict full-image validator. The two destination spans never alias.
 read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" <<'PYLAYOUT'
@@ -119,7 +163,6 @@ clear_derived_results() {
 clear_derived_results
 exec > >(tee -a "$EV/harness.log") 2>&1
 DEBUG_HELPER=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py
-SOURCE_COMMIT=$(git -C "$SRC" rev-parse HEAD)
 # Reusing an older CE-only build cannot certify the new transform campaign.
 verify_iaa_identity() {
     local symbol artifact
@@ -193,7 +236,9 @@ printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\nimage_bytes=%s\n' \
     "$SOURCE_SLBA" "$RX_SLBA" "$CE_SLBA" "$IMAGE_BYTES" >>"$EV/provenance.txt"
-git -C "$SRC" rev-parse HEAD >>"$EV/provenance.txt"
+printf 'source_git_root=%s\nsource_directory=%s\nsource_layout=%s\nsource_commit=%s\n' \
+    "$SOURCE_GIT_ROOT" "$SRC" "$SOURCE_LAYOUT" "$SOURCE_COMMIT" >>"$EV/provenance.txt"
+printf '%s\n' "$SOURCE_COMMIT" >>"$EV/provenance.txt"
 (cd "$SRC"
 	git diff --binary
 	# A patch-applied checkout has new headers as untracked files. Include
@@ -202,7 +247,7 @@ git -C "$SRC" rev-parse HEAD >>"$EV/provenance.txt"
 		git diff --no-index --binary -- /dev/null "$path" || [[ $? == 1 ]]
 	done < <(git ls-files --others --exclude-standard -z)
 ) >"$EV/source.patch"
-git -C "$SRC" status --porcelain=v1 >"$EV/source-status.txt"
+git -C "$SOURCE_GIT_ROOT" status --porcelain=v1 >"$EV/source-status.txt"
 (cd "$SRC"; { git diff --name-only --diff-filter=ACMRTUXB -z;
 	git ls-files --others --exclude-standard -z; } | sort -zu | xargs -0 -r sha256sum;
 	sha256sum net/xdp/xsk_xdev_ext_mech_zc_core.h \

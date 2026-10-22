@@ -530,3 +530,8 @@
 !/gpu/kernel-open/nvidia/nvidia.Kbuild
 !/gpu/src/nvidia/exports_link_command.txt
 !/kernel/arch/x86/entry/syscalls/syscall_64.tbl
+!/kernel/drivers/gpu/nvidia-p2p/README.md
+!/kernel/drivers/gpu/nvidia-p2p/samples/gpu_xdp_frame_runtime.h
+!/kernel/drivers/gpu/nvidia-p2p/samples/gpu_xdp_p2p.c
+!/kernel/drivers/gpu/nvidia-p2p/samples/gpu_xdp_p2p_nocuda.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_source_test.py

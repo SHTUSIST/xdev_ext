@@ -36,7 +36,7 @@ GPU_IDENTITY_OBJ := .xdev_ext-gpu-identity.o
 
 .PHONY: all userspace gpu-chain gpu-chain-host gpu-nic gpu-nic-host \
 	gpu-nvme gpu-nvme-host \
-	legacy-demo legacy-xdp \
+	legacy-xdp \
 	install uninstall clean help
 
 all: $(TARGETS)
@@ -63,10 +63,6 @@ gpu-nic-host: gpu_xdp_p2p_nocuda
 gpu-nvme: gpu_nvme_orchestrator
 
 gpu-nvme-host: gpu_nvme_orchestrator_host
-
-# Legacy demo; bypasses the canonical XDEV_EXT GPU entry in the NVIDIA CE/RM
-# overlay and is therefore never part of the supported/default pipeline.
-legacy-demo: nvme_gpu_nic_chain
 
 # Historical/manual XDP object.  Production binaries install their own private
 # XSK redirect program and will fail closed rather than replace an existing
@@ -124,9 +120,6 @@ nvme_gpu_nic_pipeline: nvme_xdp_pipeline.c \
 		tools/xdev_ext_xsk_redirect.c \
 		$(LDFLAGS) $(LDLIBS) $(CUDA_LDLIBS)
 
-nvme_gpu_nic_chain: nvme_gpu_nic_chain.c $(UAPI_SHIM_HEADERS)
-	$(CC) $(CFLAGS) -o $@ $< $(LDFLAGS) $(LDLIBS)
-
 gpu_xdp_p2p_nocuda: $(GPU_NIC_SAMPLE_DIR)/gpu_xdp_p2p_nocuda.c \
 		$(GPU_NIC_SAMPLE_DIR)/gpu_xdp_frame_runtime.h \
 		tools/xdev_ext_xsk_redirect.c tools/xdev_ext_gpu_identity.c \
@@ -181,7 +174,7 @@ uninstall:
 
 clean:
 	rm -rf nvme_xdp_pipeline nvme_gpu_nic_pipeline \
-		nvme_gpu_nic_pipeline_host nvme_gpu_nic_chain \
+		nvme_gpu_nic_pipeline_host \
 		gpu_nvme_orchestrator gpu_nvme_orchestrator_host \
 		gpu_xdp_p2p gpu_xdp_p2p_nocuda $(GPU_NIC_CUDA_OBJ) \
 		$(GPU_NIC_REDIRECT_OBJ) $(GPU_IDENTITY_OBJ) xdp_sock_kern.o \
@@ -200,7 +193,6 @@ help:
 	@echo "  gpu-nic-host - Build the CPU-only AF_XDP ownership/lifecycle path"
 	@echo "  gpu-nvme    - Build the independent NVMe<->GPU CUDA/CE path"
 	@echo "  gpu-nvme-host - Build its fail-closed no-CUDA variant"
-	@echo "  legacy-demo - Build the unmediated nvme_gpu_nic_chain demonstrator"
 	@echo "  legacy-xdp  - Build the mutually exclusive manual XDP program"
 	@echo "  clean     - Remove built files"
 	@echo "  install   - Show legacy/manual XDP installation command"
