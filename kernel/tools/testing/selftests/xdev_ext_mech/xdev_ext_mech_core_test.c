@@ -41,7 +41,7 @@ static unsigned int failures;
 		       "struct " #type " has implicit padding or grew")
 #define U64(type, member)						\
 	_Static_assert(offsetof(struct type, member) % 8 == 0 &&	\
-		       _Alignof(((struct type *)0)->member) == 8,	\
+		       __alignof__(((struct type *)0)->member) == 8,	\
 		       #type "." #member " is not an aligned u64")
 
 _Static_assert(XDEV_EXT_MECH_ABI_VERSION == 1, "mechanism ABI changed");

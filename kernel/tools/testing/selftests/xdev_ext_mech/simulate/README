@@ -1,0 +1,16 @@
+Copy-engine test backend
+========================
+
+This out-of-tree module is a CPU stand-in for the mechanism copy-engine
+provider. It uses a vmalloc window and memcpy in a workqueue. It exercises
+CE plan validation, completion classification, ownership and quarantine;
+it does not establish GPU DMA execution or hardware performance.
+
+Build against a matching xdev_ext kernel with CONFIG_XDEV_EXT_MECH_CE=y.
+The Makefile produces xdev_ext_ce_sim.ko. The integration guest harness
+builds and loads this module inside its isolated guest.
+
+Existing module parameters select the window and segment sizes, delayed
+completion (delay_us), and fail_mode=none, pre_submit or ambiguous.
+Ambiguous completion deliberately retains resources; use a fresh guest for
+that failure case. See the repository testing guide for evidence checks.
