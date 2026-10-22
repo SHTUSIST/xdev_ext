@@ -27,6 +27,7 @@ TEST_PROGS += iaa_transform/run.sh xdev_ext_mech_variable_length_test.py
 TEST_FILES += $(wildcard iaa_transform/*.py iaa_transform/*.c iaa_transform/*.h iaa_transform/*.md)
 
 TEST_PROGS += socket_sink/adapter_test.py
+TEST_PROGS += socket_guest/key_contract_test.py
 TEST_PROGS += socket_sink/independent_credentials.py
 TEST_PROGS += user_spans/test_user_spans.py user_spans/independent_start_boundaries.py
 TEST_FILES += socket_sink/shim.h socket_sink/fixture.c

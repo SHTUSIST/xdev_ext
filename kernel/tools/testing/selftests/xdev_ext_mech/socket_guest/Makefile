@@ -13,6 +13,7 @@ socket_runtime: socket_runtime.c observations.h
 ce_observe.bpf.o: ce_observe.bpf.c observations.h
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_SRC) -idirafter /usr/include/$(MULTIARCH) -c $< -o $@
 check:
+	python3 key_contract_test.py
 	python3 independent_adapter_test.py
 	python3 independent_class7_admission.py
 clean:

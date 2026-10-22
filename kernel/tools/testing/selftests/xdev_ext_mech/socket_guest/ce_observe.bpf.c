@@ -22,20 +22,24 @@ __s32 BPF_PROG(socket_guest_ce_build,const struct xdev_ext_mech_ctx *m)
  __u32 key=0;
  struct socket_guest_observations *o=bpf_map_lookup_elem(&socket_observations,&key);
  const struct xdev_ext_ce_mech_info *info=(void *)bpf_xdev_ext_info(m,sizeof(*info));
- __u64 off;
+ __u64 off, group;
  __u32 slot;
  (void)ctx;
  if(!o)return XDEV_EXT_MECH_BUILD_ABORT;
  __sync_fetch_and_add(&o->build,1);
  if(!info) return XDEV_EXT_MECH_BUILD_ABORT;
  slot=info->window_slot;
+ group=m->base.src_offset;
  if(!info->lease_generation || info->window_depth!=8 || slot>=8 ||
     info->nr_frames!=4 || info->l.group_bytes!=8192 || info->gpu_window_len<8*8192 ||
-    m->base.src_offset>=257) {
+    !group || group>257) {
   __sync_fetch_and_add(&o->invalid,1);return XDEV_EXT_MECH_BUILD_ABORT;
  }
  __sync_fetch_and_or(&o->slot_mask,1ULL<<slot);
- o->last_group[slot]=m->base.src_offset;
+ /* The attached NVMe program's default key_base is one; source array
+  * indices remain zero-based, including the final group 256 (key 257).
+  */
+ o->last_group[slot]=group-1;
  off=(__u64)slot*8192;
  for(__u32 i=0;i<4;i++) {
   struct xdev_ext_ce_copy_desc *d=(void *)bpf_xdev_ext_desc(m,i,sizeof(*d));

@@ -83,7 +83,7 @@ int main(int argc,char **argv)
   .pool_kind=XDEV_EXT_MECH_POOL_IOU_UMEM,.pool_fd=-1,.depth=DEPTH,.eventfd=-1,
   .layout={.frame_size=FRAME,.hdr_room=HEAD,.seg_len=SEG,.group_bytes=PAYLOAD}};
  __u32 indices[DEPTH*FRAMES];
- struct xdev_ext_mech_start start={.nr_batches=GROUPS,.first_seq=0,
+ struct xdev_ext_mech_start start={.nr_batches=GROUPS,.first_seq=1,
   .flags=XDEV_EXT_MECH_START_F_USER_FRAMES|XDEV_EXT_MECH_START_F_RECYCLE,
   .nr_user_frames=DEPTH*FRAMES,.user_frames=(uintptr_t)indices};
  struct xdev_ext_mech_stats stats={0};

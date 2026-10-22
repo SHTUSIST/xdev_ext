@@ -285,9 +285,11 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/simulate/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_mech/simulate/xdev_ext_ce_sim.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/README.md
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/ce_observe.bpf.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/independent_adapter_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/independent_class7_admission.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/key_contract_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/observations.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/socket_runtime.c
