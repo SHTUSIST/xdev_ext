@@ -91,7 +91,10 @@ static long model_syscall(long nr, ...)
 	else if(nr==SYS_process_vm_readv) {
 		pid_t pid=va_arg(ap,pid_t);void *local=va_arg(ap,void *);int ln=va_arg(ap,int);
 		void *remote=va_arg(ap,void *);int rn=va_arg(ap,int);int flags=va_arg(ap,int);
-		ret=syscall(nr,pid,local,ln,remote,rn,flags);
+		/* syscall consumes a full word for its sixth argument, on the stack
+		 * on x86-64.  Forwarding an int can leave its upper half undefined.
+		 */
+		ret=syscall(nr,pid,local,ln,remote,rn,(unsigned long)flags);
 	} else {assert(0);ret=-1;}
 	va_end(ap);return ret;
 }

@@ -7,6 +7,7 @@ context already removed from the registry. No payload I/O/DMA is simulated.
 """
 from pathlib import Path
 import argparse
+import os
 import runpy
 import subprocess
 import tempfile
@@ -82,9 +83,8 @@ def main():
     function = BASE["function"]
     preload = subprocess.check_output(["git", "show", args.revision + ":./tools/io_uring_unified_preload.c"], cwd=KERNEL, text=True) if args.revision else (KERNEL / "tools/io_uring_unified_preload.c").read_text()
     header = (KERNEL / "tools/xdev_ext_preload_socket_mech.h").read_text()
-    runtime_start = header.index("struct xdev_ext_socket_mech_runtime {")
-    runtime = header[runtime_start:header.index("\n};", runtime_start) + 3]
-    globals_ = BASE["GLOBAL"].replace("pid_t owner_pid;", "pid_t owner_pid; bool quiescence_unknown,umem_registered,ring_ready; struct {int ring_fd;} ring; void *shared,*umem;")
+    types = BASE["fixture_types"](preload, header)
+    globals_ = BASE["GLOBAL"]
     hooks = "".join(function(preload, "static void " + name + "(void)") for name in ("xdev_ext_atfork_prepare", "xdev_ext_atfork_parent", "xdev_ext_atfork_child"))
     remove = function(preload, "static void xdev_ext_remove_thread_locked(")
     remove = remove.replace("static void xdev_ext_remove_thread_locked(", "static void actual_remove(")
@@ -94,8 +94,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="independent-mech-fork-teardown-") as tmp:
         source = Path(tmp) / "actual.c"
         binary = Path(tmp) / "actual"
-        source.write_text(BASE["SHIM"] + '#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_mech.h") + '"\n' + runtime + globals_ + EXTRA + remove + helpers + hooks + destructor + MAIN)
-        compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-pthread", str(source), "-o", str(binary)], capture_output=True, text=True)
+        source.write_text(BASE["SHIM"] + types + globals_ + "\n#define io_uring_queue_exit forbidden_queue_exit\n" + EXTRA + remove + helpers + BASE["ordinary_child_helper"](preload) + hooks + destructor + MAIN)
+        compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-pthread", str(source), "-o", str(binary)], capture_output=True, text=True, timeout=30)
         assert compiled.returncode == 0, compiled.stderr
         result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
         print(result.stdout, end="")

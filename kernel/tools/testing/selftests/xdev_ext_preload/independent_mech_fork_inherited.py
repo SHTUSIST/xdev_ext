@@ -7,6 +7,7 @@ all six parent descriptors must remain valid. This catches an orphan runtime
 from a non-forking thread even if the child refreshes its own TLS lazily.
 """
 from pathlib import Path
+import os
 import subprocess
 import tempfile
 
@@ -54,12 +55,7 @@ GLOBAL = r'''
 /* Only the atfork registry boundary is substituted. Descriptors and VMAs are
  * real kernel objects, allocated by main and an actual second pthread.
  */
-struct xdev_ext_thread_ctx {
- struct xdev_ext_socket_mech_runtime socket_mech;
- pthread_mutex_t socket_mech_lock;
- pid_t owner_pid;
- struct xdev_ext_thread_ctx *next;
-};
+
 static pthread_mutex_t xdev_ext_thread_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_mutex_t xdev_ext_fd_locks=PTHREAD_MUTEX_INITIALIZER;
 static struct xdev_ext_thread_ctx *xdev_ext_threads;
@@ -122,20 +118,38 @@ int main(void)
 '''
 
 
+def structure(source, name):
+    start = source.index("struct " + name + " {")
+    return source[start:source.index("\n};", start) + 3] + "\n"
+
+
+def fixture_types(preload, header):
+    # Use the actual context layout: atfork also handles ordinary ring fields.
+    headers = "".join('#include "' + str(KERNEL / path) + '"\n' for path in (
+        "include/uapi/linux/xdev_ext_mech.h", "tools/xdev_ext_preload_core.h",
+        "tools/include/io_uring/mini_liburing.h"))
+    return (headers + structure(header, "xdev_ext_socket_mech_runtime") +
+            structure(preload, "xdev_ext_thread_ctx"))
+
+
+def ordinary_child_helper(preload):
+    signature = "static void xdev_ext_forget_child_ring("
+    return function(preload, signature) if signature in preload else ""
+
+
 def main():
     preload = (KERNEL / "tools/io_uring_unified_preload.c").read_text()
     header = (KERNEL / "tools/xdev_ext_preload_socket_mech.h").read_text()
-    runtime_start = header.index("struct xdev_ext_socket_mech_runtime {")
-    runtime = header[runtime_start:header.index("\n};", runtime_start) + 3]
+    types = fixture_types(preload, header)
     hooks = "".join(function(preload, "static void " + name + "(void)") for name in ("xdev_ext_atfork_prepare", "xdev_ext_atfork_parent", "xdev_ext_atfork_child"))
     child_cleanup = function(header, "static inline void xdev_ext_socket_mech_forget_child(")
     with tempfile.TemporaryDirectory(prefix="independent-mech-fork-") as tmp:
         source = Path(tmp) / "actual.c"
         binary = Path(tmp) / "actual"
-        source.write_text(SHIM + '#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_mech.h") + '"\n' + runtime + child_cleanup + GLOBAL + hooks + MAIN)
-        compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-pthread", str(source), "-o", str(binary)], capture_output=True, text=True)
+        source.write_text(SHIM + types + child_cleanup + GLOBAL + ordinary_child_helper(preload) + hooks + MAIN)
+        compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-pthread", str(source), "-o", str(binary)], capture_output=True, text=True, timeout=30)
         assert compiled.returncode == 0, compiled.stderr
-        result = subprocess.run([str(binary)], capture_output=True, text=True)
+        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=20)
         print(result.stdout, end="")
         print(result.stderr, end="")
         raise SystemExit(result.returncode)

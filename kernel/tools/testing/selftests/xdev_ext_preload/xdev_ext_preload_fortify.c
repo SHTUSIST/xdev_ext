@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * A fortified build (-D_FORTIFY_SOURCE) turns pread/pread64 into a buffer of
- * known size with a run-time count into __pread_chk/__pread64_chk.  Those are
+ * Fortified pread/pread64 calls with a known buffer size and a run-time count
+ * use __pread_chk/__pread64_chk.  Those are
  * the entry points an unmodified, distribution-hardened application reaches,
  * so the front end must take them over exactly as it takes over pread and
  * pread64, and it must keep glibc's check: a count larger than the buffer
- * aborts the process.
+ * aborts the process.  Exercise those checked ABI entry points explicitly:
+ * glibc 2.35's inline wrappers lose the buffer's object size with Clang 14,
+ * even with -O2 -D_FORTIFY_SOURCE=2, and otherwise emit unchecked calls.
  *
  * Built with -O2 -D_FORTIFY_SOURCE=2.  Run under the front end and
  * xdev_ext_preload_kernel_model with XDEV_EXT_MODEL_UMEM=1 to check takeover, or with
@@ -62,11 +64,11 @@ int main(int argc, char **argv)
 	if (read_requests)
 		before = read_requests();
 	errno = EDOM;
-	if (pread(fd, header, length, 0) != (ssize_t)length || errno != EDOM ||
+	if (__pread_chk(fd, header, length, 0, sizeof(header)) != (ssize_t)length || errno != EDOM ||
 	    memcmp(header, pattern, sizeof(header)))
 		return fail("fortified pread");
 	memset(header, 0, sizeof(header));
-	if (pread64(fd, header, length, 0) != (ssize_t)length || errno != EDOM ||
+	if (__pread64_chk(fd, header, length, 0, sizeof(header)) != (ssize_t)length || errno != EDOM ||
 	    memcmp(header, pattern, sizeof(header)))
 		return fail("fortified pread64");
 	if (!strcmp(argv[2], "takeover") &&
@@ -80,7 +82,7 @@ int main(int argc, char **argv)
 		return fail("fork");
 	if (!child) {
 		length = 2 * FORTIFY_HEADER_BYTES;
-		(void)!pread(fd, header, length, 0);
+		(void)!__pread_chk(fd, header, length, 0, sizeof(header));
 		_exit(0);
 	}
 	if (waitpid(child, &status, 0) != child || !WIFSIGNALED(status) ||

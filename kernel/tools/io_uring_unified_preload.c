@@ -198,18 +198,41 @@ static void xdev_ext_atfork_parent(void)
 	xdev_ext_preload_fd_unlock_all(&xdev_ext_fd_locks);
 }
 
+static void xdev_ext_forget_child_ring(struct xdev_ext_thread_ctx *thread)
+{
+	struct io_uring_sq *sq = &thread->ring.sq;
+	struct io_uring_cq *cq = &thread->ring.cq;
+
+	if (!thread->ring_ready)
+		return;
+	/* Match mini_liburing's queue_exit mappings, but bypass interposed
+	 * close: it can take locks and is a cancellation point after fork.
+	 * Drop inherited references only, without unregistering parent UMEM.
+	 */
+	(void)munmap(sq->sqes,
+		     *sq->kring_entries * sizeof(struct io_uring_sqe));
+	(void)munmap(sq->ring_ptr, sq->ring_sz);
+	if (cq->ring_ptr != sq->ring_ptr)
+		(void)munmap(cq->ring_ptr, cq->ring_sz);
+	(void)syscall(SYS_close, thread->ring.ring_fd);
+	thread->ring_ready = false;
+	thread->umem_registered = false;
+}
+
 static void xdev_ext_atfork_child(void)
 {
 	struct xdev_ext_thread_ctx *thread;
 
 	/* Other threads vanished. Their contexts cannot be found through this
-	 * thread's TLS, so discard every inherited mechanism handle/mapping now.
+	 * thread's TLS, so discard every inherited handle/mapping now.
 	 * This closes child references only; it never STOPs or unregisters the
-	 * parent's live sessions. Lazy TLS refresh remains responsible for the
-	 * surviving thread's ordinary compatibility context.
+	 * parent's live sessions. Keep metadata allocated here: allocator locks
+	 * can belong to vanished threads. The surviving TLS context frees its
+	 * metadata at lazy refresh; ring_ready prevents a duplicate close.
 	 */
 	for (thread = xdev_ext_threads; thread; thread = thread->next) {
 		xdev_ext_socket_mech_forget_child(&thread->socket_mech);
+		xdev_ext_forget_child_ring(thread);
 		pthread_mutex_unlock(&thread->socket_mech_lock);
 	}
 	pthread_mutex_unlock(&xdev_ext_thread_lock);
@@ -771,10 +794,9 @@ static void xdev_ext_refresh_fd_flags(int fd)
 
 static void xdev_ext_register_thread(struct xdev_ext_thread_ctx *thread)
 {
-	pthread_mutex_lock(&xdev_ext_thread_lock);
+	/* The initializer holds the registry lock from before ring creation. */
 	thread->next = xdev_ext_threads;
 	xdev_ext_threads = thread;
-	pthread_mutex_unlock(&xdev_ext_thread_lock);
 }
 
 static void xdev_ext_remove_thread_locked(struct xdev_ext_thread_ctx *thread)
@@ -911,7 +933,6 @@ static void xdev_ext_thread_destroy(void *opaque)
 		return;
 	}
 	xdev_ext_remove_thread_locked(thread);
-	pthread_mutex_unlock(&xdev_ext_thread_lock);
 	xdev_ext_in_hook++;
 	if (thread->umem_registered && thread->owner_pid == getpid())
 		syscall(SYS_io_uring_register, thread->ring.ring_fd,
@@ -921,6 +942,10 @@ static void xdev_ext_thread_destroy(void *opaque)
 	free(thread->shared);
 	free(thread->umem);
 	xdev_ext_in_hook--;
+	/* Fork must not inherit a ring removed from the registry but still
+	 * open. Keep the registry locked through ordinary-ring teardown too.
+	 */
+	pthread_mutex_unlock(&xdev_ext_thread_lock);
 	(void)pthread_mutex_destroy(&thread->socket_mech_lock);
 	free(thread);
 	(void)pthread_setcancelstate(cancel_state, NULL);
@@ -956,9 +981,15 @@ static int xdev_ext_thread_init(struct xdev_ext_thread_ctx *thread)
 	struct io_uring_xdev_ext_umem_reg registration;
 	int ret;
 
+	/* Also cover queue_init's partial failure cleanup: even before it
+	 * returns, its descriptor and mappings are inheritable resources.
+	 */
+	pthread_mutex_lock(&xdev_ext_thread_lock);
 	if (posix_memalign(&thread->umem, xdev_ext_cfg.frame_size,
-			   xdev_ext_cfg.frame_size))
+			   xdev_ext_cfg.frame_size)) {
+		pthread_mutex_unlock(&xdev_ext_thread_lock);
 		return -ENOMEM;
+	}
 	memset(thread->umem, 0, xdev_ext_cfg.frame_size);
 	thread->shared = calloc(1, sizeof(*thread->shared));
 	if (!thread->shared) {
@@ -987,6 +1018,7 @@ static int xdev_ext_thread_init(struct xdev_ext_thread_ctx *thread)
 	thread->owner_tid = (pid_t)syscall(SYS_gettid);
 	thread->socket_mech_lock = (pthread_mutex_t)PTHREAD_MUTEX_INITIALIZER;
 	xdev_ext_register_thread(thread);
+	pthread_mutex_unlock(&xdev_ext_thread_lock);
 	return 0;
 
 fail:
@@ -995,6 +1027,7 @@ fail:
 	free(thread->shared);
 	free(thread->umem);
 	memset(thread, 0, sizeof(*thread));
+	pthread_mutex_unlock(&xdev_ext_thread_lock);
 	return ret;
 }
 

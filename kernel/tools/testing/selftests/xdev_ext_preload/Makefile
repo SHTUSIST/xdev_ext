@@ -16,6 +16,7 @@ TEST_PROGS := xdev_ext_preload_vfs_source_test.sh \
 	xdev_ext_preload_payload_integrity_test.py \
 	independent_mech_fork_inherited.py \
 	independent_mech_fork_teardown.py \
+	independent_ordinary_fork_lifetime.py \
 	xdev_ext_preload_socket_source_test.py xdev_ext_preload_db_equivalence.sh
 # Run by xdev_ext_preload_db_equivalence.sh.  The KVM harness copies only
 # xdev_ext_preload_db_workload into the guest and runs it in phase
@@ -26,7 +27,10 @@ TEST_GEN_PROGS_EXTENDED := xdev_ext_preload_db_workload xdev_ext_preload_cancel_
 	xdev_ext_preload_fortify xdev_ext_preload_buffered_cost
 TEST_GEN_FILES := libio_uring_unified.so libxdev_ext_preload_kernel_model.so
 TEST_FILES += xdev_ext_preload_payload_fault_fixture.c \
-	xdev_ext_preload_mech_workload.c
+	xdev_ext_preload_mech_workload.c \
+	independent_ordinary_fork_lifetime_fixture.c
+# The independent fork tests extract production functions and require the
+# kernel source tree; copying TEST_PROGS/TEST_FILES alone is not sufficient.
 
 # lib.mk only supplies this default at MAKELEVEL=0.  This test is also run by
 # tools/Makefile.unified_ops through a recursive make.

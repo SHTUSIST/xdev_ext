@@ -25,6 +25,23 @@ jobs:
         run: python3 scripts/test_host.py
       - name: Concurrent frontend workload and evidence checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
+      - name: Frontend fork ownership and publication windows
+        shell: bash
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # These source-extraction tests require this checked-out source tree.
+          tests="kernel/tools/testing/selftests/xdev_ext_preload"
+          log="$RUNNER_TEMP/xdev-ext-frontend-fork.log"
+          timeout 180 python3 "$tests/independent_ordinary_fork_lifetime.py" 2>&1 | tee "$log"
+          timeout 60 python3 "$tests/independent_mech_fork_inherited.py" 2>&1 | tee -a "$log"
+          timeout 60 python3 "$tests/independent_mech_fork_teardown.py" 2>&1 | tee -a "$log"
+          if grep -Eiq '(^not ok([[:space:]]|$)|#[[:space:]]*SKIP([[:space:]]|$)|OK[[:space:]]+\(skipped=|\.\.\. skipped)' "$log"; then
+            echo "Frontend fork checks reported failed or skipped cases"
+            exit 1
+          fi
+          test "$(grep -c '^ok [0-9][0-9]* - ' "$log")" -eq 13
+          test "$(grep -c '^ok - actual ' "$log")" -eq 2
       - name: Frontend invalid-memory semantics
         shell: bash
         run: |
