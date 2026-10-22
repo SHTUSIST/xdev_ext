@@ -43,6 +43,8 @@ jobs:
       # CLI, refusal and result contracts still run.
       - name: GDS CLI and capability contracts
         run: python3 tests/eval/gds/test_gds.py -v
+      - name: HFT-shaped replay correctness and ownership
+        run: make -C tests/eval hft-check
       - name: IAA syscall and lifetime contracts
         run: make -C tests/iaa all check
       - name: GPU host-page bookkeeping contracts

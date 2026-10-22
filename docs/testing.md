@@ -74,4 +74,10 @@ The [host workflow](../.github/workflows/host.yml) is configured to run the comp
 
 `make -C gpu/tests run-host-bookkeeping` extracts the actual host registration and metadata-query function bodies and checks base-page counts, allocation and quota rollback, pin ownership, lock pairing, and optional frame metadata. It compiles four integer configurations with UBSan, using allocation/GUP stubs; it does not pin kernel pages or run a GPU. Huge-page hints use base-page registration until physical segment continuity is established.
 
+`make -C tests/eval hft-check` runs the [HFT-shaped replay](../tests/eval/hft/README.md)
+software producer/receiver, independent complete-packet oracle, concurrent actor,
+SEND_ZC ownership, replay-isolation and hardware-entry contract checks. Physical
+execution uses its separate admission-gated entry and an actual remote peer;
+host fixtures and capability refusals do not establish DMA or performance.
+
 Both compiler jobs also run the existing reliable control admission and native completion map teardown regressions: two STOP/ACK BUILD cases and five mapping/UNKNOWN ownership cases. The same scripts are registered in the mechanism selftest Makefile; they execute extracted production functions and require no device or guest.

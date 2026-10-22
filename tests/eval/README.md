@@ -24,6 +24,14 @@ shared pinned host pages. Build and capability-contract checks can run without
 certifying physical DMA; performance comparisons require actual devices and
 matching I/O, cache and completion semantics.
 
+The [HFT-shaped replay microbenchmark](hft/README.md) compares bounded market-data
+replay using POSIX, once-registered READ_FIXED/SEND_ZC buffers, and the current
+native NVMe/AF_XDP shared-host-page session. It verifies full remote payloads and
+buffer release. `make -C tests/eval hft-check` runs software correctness and
+ownership checks; the separate physical entry requires matching provisioned
+devices and a remote peer. Software results establish no physical DMA or
+performance advantage.
+
 ## Build and run
 
 Linux, a C11 compiler, make, pthreads, and Python 3 are required. The default

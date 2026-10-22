@@ -13,7 +13,7 @@ URING_CPPFLAGS = -DEVAL_HAVE_LIBURING $(shell pkg-config --cflags liburing)
 URING_LIBS = $(shell pkg-config --libs liburing)
 endif
 
-.PHONY: all check run clean FORCE gds-check
+.PHONY: all check run clean FORCE gds-check hft hft-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -36,6 +36,12 @@ run: all
 
 gds-check:
 	$(MAKE) -C gds check
+
+hft:
+	$(MAKE) -C hft all
+
+hft-check:
+	$(MAKE) -C hft check
 
 clean:
 	rm -rf $(BUILD) __pycache__
