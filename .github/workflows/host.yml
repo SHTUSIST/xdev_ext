@@ -22,6 +22,17 @@ jobs:
           persist-credentials: false
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
+      - name: Reliable control admission and map teardown regressions
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/xdev-ext-reliable-regressions.log"
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/control_stop_admission_test.py 2>&1 | tee "$log"
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/native_done_map_teardown_test.py 2>&1 | tee -a "$log"
+          if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
+            echo "Reliable regressions reported failed or skipped cases"
+            exit 1
+          fi
       - name: Source layout and preparation regressions
         if: matrix.cc == 'gcc'
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v

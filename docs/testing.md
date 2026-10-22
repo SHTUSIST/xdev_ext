@@ -51,3 +51,5 @@ Performance claims require an explicit workload, actual physical devices, topolo
 ## Repository CI
 
 The [host workflow](../.github/workflows/host.yml) is configured to run the compact checks with GCC and Clang, plus source preparation/layout regressions, mechanism and CE source contracts, peer lifetime checks, integration harness/validator regressions, and GPU source/fence checks. The mechanism source step runs 49 source checks and the actual CE registry admission/cleanup checks directly from the tracked overlay, needs no upstream Linux tree, and rejects failures or skips in its captured output. The compact checks also include CE ownership and concurrent frontend payload regressions. These jobs do not boot a guest or execute physical device DMA.
+
+Both compiler jobs also run the existing reliable control admission and native completion map teardown regressions: two STOP/ACK BUILD cases and five mapping/UNKNOWN ownership cases. The same scripts are registered in the mechanism selftest Makefile; they execute extracted production functions and require no device or guest.
