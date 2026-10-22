@@ -1,0 +1,27 @@
+name: Host checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  host:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    strategy:
+      matrix:
+        cc: [gcc, clang]
+    env:
+      CC: ${{ matrix.cc }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Standalone production-rule checks
+        run: python3 scripts/test_host.py
+      - name: Pinned source preparation regression
+        if: matrix.cc == 'gcc'
+        run: python3 -m unittest discover -s tests -p test_prepare_sources.py -v

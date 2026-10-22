@@ -1,0 +1,34 @@
+name: Bug report
+description: Report a reproducible build, test, or runtime problem.
+title: "[Bug] "
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem and expected behavior
+      description: Describe what happened and the result you expected.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Include the project revision, exact commands, configuration, and exit status.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment and test scope
+      description: State host, software-device guest, or physical-device execution. Include kernel, toolchain, driver versions, and relevant device/topology details.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Complete diagnostic output
+      description: Include build errors or runtime/verifier logs. Remove credentials and unrelated private data.
+      render: text
+    validations:
+      required: true

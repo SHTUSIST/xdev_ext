@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "components": {
+    "linux": {
+      "url": "https://github.com/torvalds/linux.git",
+      "ref": "refs/tags/v6.16-rc7",
+      "commit": "89be9a83ccf1f88522317ce02f854f30d6115c41",
+      "path": "kernel"
+    },
+    "nvidia": {
+      "url": "https://github.com/NVIDIA/open-gpu-kernel-modules.git",
+      "ref": "refs/tags/590.48.01",
+      "commit": "2ccbad25e1af6a6ee6f38cf569f89f8b65d658ab",
+      "path": "gpu"
+    }
+  }
+}

@@ -1,0 +1,25 @@
+name: Feature request
+description: Propose an I/O route, capability, or usability improvement.
+title: "[Feature] "
+body:
+  - type: textarea
+    id: use_case
+    attributes:
+      label: Use case
+      description: Describe the task and the behavior you need.
+    validations:
+      required: true
+  - type: textarea
+    id: route
+    attributes:
+      label: Route and requirements
+      description: Identify input/output devices, memory types, stages, and any mapping or compatibility requirements.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the interface or workflow and how you would check its result.
+    validations:
+      required: true
