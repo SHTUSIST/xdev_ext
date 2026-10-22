@@ -21,6 +21,8 @@ struct xdev_ext_ce_lease_slot {
 struct xdev_ext_ce_lease_state {
 	__u32 active_batches;
 	bool quarantined;
+	/* Shifted overlapping stage bases can alias different batch slots. */
+	bool serial_batches;
 };
 
 static inline bool xdev_ext_ce_lease_overlap(const void *backend_a,
@@ -45,6 +47,8 @@ static inline int xdev_ext_ce_lease_acquire(struct xdev_ext_ce_lease_state *stat
 		return -EBUSY;
 	if (slot->active)
 		return slot->generation == generation ? 0 : -EBUSY;
+	if (state->serial_batches && state->active_batches)
+		return -EAGAIN;
 	if (!state->active_batches && conflict)
 		return -EAGAIN;
 	if (state->active_batches == ~(__u32)0)

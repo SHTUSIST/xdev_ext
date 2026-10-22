@@ -436,11 +436,21 @@ if (( ${COMPAT:-0} )); then
     GUEST_PROGRAMS+=("$SOCKET_OUT/socket_runtime" "$PRELOAD_OUT/libio_uring_unified.so" \
         "$PRELOAD_OUT/xdev_ext_preload_mech_workload" "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" \
         "$PRELOAD_OUT/xdev_ext_preload_db_workload")
+    # glibc dlopens this runtime for pthread_cancel; ldd of the applications
+    # does not list it. Resolve it with the compiler used for these tools.
+    GUEST_CANCEL_RUNTIME=$(gcc-14 -print-file-name=libgcc_s.so.1)
+    [[ "$GUEST_CANCEL_RUNTIME" = /* && -f "$GUEST_CANCEL_RUNTIME" ]] || {
+        echo 'FAIL compatibility cancellation runtime libgcc_s.so.1 is unresolved' >&2
+        exit 1
+    }
+    GUEST_CANCEL_RUNTIME=$(readlink -f "$GUEST_CANCEL_RUNTIME")
+    GUEST_PROGRAMS+=("$GUEST_CANCEL_RUNTIME")
 fi
 # One ldd invocation per executable avoids multi-file "executable:" headers.
 # Keep each report and propagate ldd failures before copying the merged paths.
 GUEST_LIBRARIES=$EV/guest-library-paths.txt
 : >"$GUEST_LIBRARIES"
+if (( ${COMPAT:-0} )); then printf '%s\n' "$GUEST_CANCEL_RUNTIME" >>"$GUEST_LIBRARIES"; fi
 for program in "${GUEST_PROGRAMS[@]}"; do
     dependency_report=$EV/ldd.$(basename "$program").txt
     ldd "$program" >"$dependency_report"

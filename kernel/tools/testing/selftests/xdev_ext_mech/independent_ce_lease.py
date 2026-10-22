@@ -34,6 +34,7 @@ SHIM = r'''
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <sys/wait.h>
@@ -86,8 +87,79 @@ struct xdev_ext_ce_stage {
 '''
 MAIN = r'''
 static const int provider;
+static void bind_window(struct xdev_ext_mech_stage *st,struct xdev_ext_ce_stage *cs,u64 start,u64 len)
+{st->priv=cs;cs->region.ops=&provider;cs->region.len=len;assert(!xdev_ext_ce_lease_bind(st,cs,start));}
 static void bind_region(struct xdev_ext_mech_stage *st,struct xdev_ext_ce_stage *cs,u64 start)
-{st->priv=cs;cs->region.ops=&provider;cs->region.len=4096;assert(!xdev_ext_ce_lease_bind(st,cs,start));}
+{bind_window(st,cs,start,4096);}
+static void same_base_preserves_depth(void)
+{
+ struct xdev_ext_mech_session session={8};
+ struct xdev_ext_ce_stage regions[2]={0};
+ struct xdev_ext_mech_stage stages[2]={{.s=&session},{.s=&session}};
+ struct xdev_ext_mech_batch batches[8];
+ bind_window(&stages[0],&regions[0],131072,65536);
+ bind_window(&stages[1],&regions[1],131072,65536);
+ for(unsigned i=0;i<8;i++) {
+  batches[i]=(struct xdev_ext_mech_batch){.slot=i,.generation=1+i};
+  assert(!xdev_ext_ce_lease_get(&regions[0],&batches[i]));
+  assert(!xdev_ext_ce_lease_get(&regions[1],&batches[i]));
+ }
+ assert(regions[0].lease_group->state.active_batches==8);
+ for(unsigned i=0;i<8;i++) {
+  xdev_ext_ce_batch_release(&stages[0],&batches[i],false);
+  xdev_ext_ce_batch_release(&stages[1],&batches[i],false);
+ }
+ assert(xdev_ext_ce_lease_unbind(&regions[1]));
+ assert(xdev_ext_ce_lease_unbind(&regions[0]));
+ assert(list_empty(&xdev_ext_ce_lease_groups));
+}
+static void shifted_windows_serialize_slots(void)
+{
+ struct xdev_ext_mech_session session={2};
+ struct xdev_ext_ce_stage regions[2]={0};
+ struct xdev_ext_mech_stage stages[2]={{.s=&session},{.s=&session}};
+ struct xdev_ext_mech_batch first={.slot=0,.generation=1},next={.slot=1,.generation=2};
+ struct xdev_ext_ce_geom geom;
+ struct xdev_ext_ce_plan plan;
+ struct xdev_ext_mech_frame_info frame={.data_off=0,.data_len=8192};
+ struct xdev_ext_ce_copy_desc desc={.frame_pos=0,.frame_off=0,.gpu_off=8192,.len=8192};
+ u32 index=1;
+ unsigned char device[24576]={0};
+ bind_window(&stages[0],&regions[0],262144,16384);
+ bind_window(&stages[1],&regions[1],270336,16384);
+ /* Both stage plans are individually valid, yet A slot1 aliases B slot0. */
+ assert(!xdev_ext_ce_geom_init(&geom,16384,16384,0,0,16384,0,8192,2));
+ assert(!xdev_ext_ce_plan_check(&geom,&frame,&index,1,&desc,1,&plan));
+ index=0;desc.gpu_off=0;
+ assert(!xdev_ext_ce_plan_check(&geom,&frame,&index,1,&desc,1,&plan));
+ assert(regions[0].window_start+8192==regions[1].window_start);
+ assert(!xdev_ext_ce_lease_get(&regions[0],&first));
+ assert(!xdev_ext_ce_lease_get(&regions[1],&first));
+ memset(device+8192,0x11,8192); /* First batch's still-live B slot0 payload. */
+ int admission=xdev_ext_ce_lease_get(&regions[0],&next);
+ if(!admission)memset(device+8192,0x22,8192); /* A slot1 native write. */
+ for(unsigned i=8192;i<16384;i++)assert(device[i]==0x11);
+ assert(admission==-EAGAIN);
+ assert(regions[0].lease_group->state.active_batches==1);
+ xdev_ext_ce_batch_release(&stages[0],&first,false);
+ xdev_ext_ce_batch_release(&stages[1],&first,false);
+ assert(!regions[0].lease_group->state.active_batches);
+ assert(!xdev_ext_ce_lease_get(&regions[0],&next));
+ assert(!xdev_ext_ce_lease_get(&regions[1],&next));
+ memset(device+8192,0x22,8192);
+ for(unsigned i=8192;i<16384;i++)assert(device[i]==0x22);
+ xdev_ext_ce_batch_release(&stages[0],&next,false);
+ xdev_ext_ce_batch_release(&stages[1],&next,false);
+ first.generation=3;next.generation=4;
+ assert(!xdev_ext_ce_lease_get(&regions[0],&first));
+ xdev_ext_ce_batch_release(&stages[0],&first,true);
+ xdev_ext_ce_batch_release(&stages[1],&first,true);
+ assert(xdev_ext_ce_lease_get(&regions[0],&next)==-EBUSY);
+ assert(regions[0].lease_group->state.active_batches==1);
+ assert(!xdev_ext_ce_lease_unbind(&regions[1]));
+ assert(!xdev_ext_ce_lease_unbind(&regions[0]));
+ puts("ok - actual CE registry: valid shifted-window plans serialize slots, preserve payload, retry after final release and retain unknown ownership");
+}
 int main(void)
 {
  pthread_mutexattr_t attr;pid_t child;int status;
@@ -100,6 +172,7 @@ int main(void)
  pthread_mutex_t *shared=mmap(NULL,sizeof(*shared),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
  assert(shared!=MAP_FAILED);assert(!pthread_mutex_init(shared,&attr));
  xdev_ext_ce_lease_mutex=shared;
+ same_base_preserves_depth();
  fail_allocation=true;assert(xdev_ext_ce_lease_bind(&f,&fr,0)==-ENOMEM);fail_allocation=false;
  assert(list_empty(&xdev_ext_ce_lease_groups)); /* Failed CREATE registered nothing. */
  bind_region(&a[0],&ar[0],0);bind_region(&a[1],&ar[1],8192);
@@ -139,6 +212,7 @@ int main(void)
  assert(!xdev_ext_ce_lease_unbind(&ar[0]) && !xdev_ext_ce_lease_unbind(&ar[1]));
  assert(ar[0].lease_group->state.active_batches==1 && warnings>=4);
  puts("ok - actual CE registry: depth8, all-range ABBA exclusion, failed bind cleanup, fork contention, stale/duplicate terminal and unknown retention");
+ shifted_windows_serialize_slots();
  return 0;
 }
 '''
@@ -204,7 +278,11 @@ def main():
     assert submit.index('xdev_ext_ce_lease_get(') < submit.index('region.ops->submit(')
     with tempfile.TemporaryDirectory(prefix='independent-ce-lease-') as tmp:
         c, binary = Path(tmp)/'actual.c', Path(tmp)/'actual'
-        c.write_text(SHIM+'\n#include "'+str(KERNEL/'io_uring/xdev_ext_mech_ce_lease.h')+'"\n'+group+STAGE+functions+MAIN)
+        headers = ('include/uapi/linux/xdev_ext_mech.h',
+                   'io_uring/xdev_ext_mech_ce_core.h',
+                   'io_uring/xdev_ext_mech_ce_lease.h')
+        c.write_text(SHIM+''.join('\n#include "'+str(KERNEL/header)+'"\n'
+                                 for header in headers)+group+STAGE+functions+MAIN)
         compiled = subprocess.run(['cc','-std=gnu11','-O1','-Wall','-Wextra','-Werror',
             '-fsanitize=undefined','-pthread',str(c),'-o',str(binary)], capture_output=True,text=True)
         assert compiled.returncode == 0, compiled.stderr

@@ -35,7 +35,8 @@
 #define XDEV_EXT_CE_MAX_BACKENDS	4
 
 /* A session atomically owns ALL its bound CE windows while any batch can
- * use them. Reentrant batches keep the existing per-slot depth parallelism.
+ * use them. Reentrant batches keep per-slot depth parallelism for matching
+ * bases or disjoint windows; shifted overlapping bases serialize batches.
  * Numeric windows are compared across every device of the same backend,
  * conservatively merging device-node aliases and independent GPU VAs.
  * Distinct VAs aliasing the same physical bytes require backend canonical
@@ -160,6 +161,7 @@ static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
 		struct xdev_ext_ce_stage *cs, u64 start)
 {
 	struct xdev_ext_ce_lease_group *group, *found = NULL;
+	struct xdev_ext_ce_stage *other;
 	u32 depth = xdev_ext_mech_session_depth(st->s);
 
 	mutex_lock(&xdev_ext_ce_lease_lock);
@@ -179,6 +181,16 @@ static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
 		found->depth = depth;
 		list_add_tail(&found->node, &xdev_ext_ce_lease_groups);
 	}
+	/* Relative slot offsets are shared across stages. With shifted bases,
+	 * slot N of one stage may overlap slot M of another. Bind finishes
+	 * before ACTIVE, so this conservative group policy is then immutable.
+	 */
+	list_for_each_entry(other, &found->regions, lease_node)
+		if (other->window_start != start &&
+		    xdev_ext_ce_lease_overlap(other->region.ops,
+			other->window_start, other->region.len,
+			cs->region.ops, start, cs->region.len))
+			found->state.serial_batches = true;
 	cs->lease_group = found;
 	cs->window_start = start;
 	list_add_tail(&cs->lease_node, &found->regions);

@@ -24,7 +24,7 @@ A peer-memory provider supplies actual device-memory authority and mappings. CPU
 
 ## Copy-engine window ownership
 
-Before native CE submission, the kernel atomically claims all configured CE windows of a session. Overlapping windows held by another active session cause preaccept backpressure. Batches in the owning session retain their existing depth and slot layout; the frontend can reuse its session across calls.
+Before native CE submission, the kernel atomically claims all configured CE windows of a session. Overlapping windows held by another active session cause preaccept backpressure. Matching-base or disjoint windows retain their existing depth and slot parallelism. Shifted overlapping windows serialize batches to prevent different relative slots from naming the same bytes. The frontend can reuse its session across calls.
 
 The claim remains until the batch's final frame disposition is known. Repeated stage cleanup releases it once; uncertainty retains the session's window claims. The range comparison uses backend identity and configured addresses. It does not establish physical equivalence between distinct GPU virtual aliases.
 
