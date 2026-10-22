@@ -535,3 +535,4 @@
 !/kernel/drivers/gpu/nvidia-p2p/samples/gpu_xdp_p2p.c
 !/kernel/drivers/gpu/nvidia-p2p/samples/gpu_xdp_p2p_nocuda.c
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_source_test.py
+!/gpu/kernel-open/common/inc/nvstatuscodes.h
