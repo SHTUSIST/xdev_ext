@@ -506,6 +506,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_mech_validate.py
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_mech_workload.c
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_nvme_pt_test.c
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ordinary_fork_guest.c
+!/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ordinary_fork_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_reg_test.c
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ring128_model_check.c
 !/kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_ring128_test.c

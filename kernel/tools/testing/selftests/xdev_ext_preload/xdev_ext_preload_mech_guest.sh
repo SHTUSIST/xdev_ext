@@ -17,7 +17,7 @@ publish_logs() {
 	result=$?
 	trap - EXIT
 	set +e
-	for name in compat-udp.log compat-dio-off.log compat-dio-on.log \
+	for name in compat-udp.log compat-dio-off.log compat-dio-on.log compat-ordinary-fork.log \
 		mech-socket-base.log mech-socket-lifecycle.log \
 		mech-ce-socket-base.log mech-ce-socket-lifecycle.log \
 		mech-socket-threads.log mech-ce-socket-threads.log \
@@ -94,3 +94,13 @@ for mode in off on; do
 done
 step=compat-dio-compare
 cmp "$logs/compat-dio-off.result" "$logs/compat-dio-on.result"
+
+step=compat-ordinary-fork.log
+ordinary_file="$file.ordinary-fork"
+: > "$ordinary_file"
+XDEV_EXT_PRELOAD_ENABLED=1 XDEV_EXT_PRELOAD_SOCKET_ENABLED=0 \
+XDEV_EXT_PRELOAD_SOCKET_MECH=0 XDEV_EXT_PRELOAD_PATHS="$ordinary_file" \
+XDEV_EXT_PRELOAD_FRAME_SIZE=4096 XDEV_EXT_PRELOAD_REPORT=1 LD_PRELOAD="$lib" \
+    "$bin/xdev_ext_preload_ordinary_fork_guest" "$ordinary_file" \
+    >"$logs/compat-ordinary-fork.log" 2>&1
+grep -q '^XDEV_EXT_ORDINARY_FORK=PASS ' "$logs/compat-ordinary-fork.log"

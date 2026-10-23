@@ -9,6 +9,7 @@ class CompatibilityConsole(unittest.TestCase):
         self.assertEqual(set(extract_logs(text)), set(self.names()))
         for bad in (text.replace('END name=compat-udp.log', 'END name=wrong.log'),
                     text+text, text.replace('name=compat-udp.log','name=../compat-udp.log'),
+                    text.replace('XDEV_EXT_PRELOAD_LOG_BEGIN name=compat-ordinary-fork.log\nbody\nXDEV_EXT_PRELOAD_LOG_END name=compat-ordinary-fork.log\n',''),
                     text.replace('XDEV_EXT_PRELOAD_LOG_BEGIN name=compat-udp.log\nbody\nXDEV_EXT_PRELOAD_LOG_END name=compat-udp.log\n','')):
             with self.subTest(text=bad[:80]), self.assertRaises(ValueError):
                 extract_logs(bad)
@@ -19,7 +20,7 @@ class CompatibilityConsole(unittest.TestCase):
                 'mech-socket-base.log','mech-socket-lifecycle.log',
                 'mech-ce-socket-base.log','mech-ce-socket-lifecycle.log',
                 'mech-socket-threads.log','mech-socket-processes.log',
-                'mech-ce-socket-threads.log','mech-ce-socket-processes.log')
+                'mech-ce-socket-threads.log','mech-ce-socket-processes.log','compat-ordinary-fork.log')
 
     def test_socket_missing_or_corrupt_evidence_rejected(self):
         with self.assertRaises(ValueError):

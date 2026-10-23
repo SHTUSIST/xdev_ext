@@ -64,6 +64,66 @@ def validate_concurrency(text, stages, threads, processes, rounds=65):
             for kind in ('submitted','completed'):
                 assert int(runtime[f'{kind}{stage}'])==(rounds if stage<stages else 0), 'actor stage count mismatch'
 
+def validate_ordinary_fork(text):
+    """Require real proc resources, every byte verdict, and per-thread takeover."""
+    assert '=FAIL' not in text and 'XDEV_EXT_ORDINARY_FORK_CHILD_ERROR' not in text
+    assert 'XDEV_EXT_ORDINARY_FORK_SELFTEST=' not in text
+    finals=records(text,'XDEV_EXT_ORDINARY_FORK=PASS')
+    want=dict(XDEV_EXT_ORDINARY_FORK='PASS',workers='2',forks='3',main_eligible='0',
+        parent_reads='16',parent_writes='8',child_reads='6',child_writes='3',bytes='49152',
+        source='unchanged',received='complete',guards='complete',
+        first_child_call='observed-real-proc',exit='normal')
+    assert len(finals)==1 and finals[0]==want, 'ordinary fork bytes or completion missing'
+    live=records(text,'XDEV_EXT_ORDINARY_FORK_LIVE')
+    allowed=records(text,'XDEV_EXT_ORDINARY_FORK_ALLOWED')
+    rings=records(text,'XDEV_EXT_ORDINARY_FORK_RING')
+    maps=records(text,'XDEV_EXT_ORDINARY_FORK_MAP')
+    children=records(text,'XDEV_EXT_ORDINARY_FORK_CHILD')
+    assert len(live)==1 and live[0]['workers']=='2' and live[0]['rings']=='2'
+    assert live[0]['allowed']=='baseline+2-rings'
+    assert len(allowed)==int(live[0]['baseline_fds']) and len(allowed)>=3
+    baseline={int(row['fd']) for row in allowed}
+    assert len(baseline)==len(allowed) and min(baseline)>=0, 'duplicate allowed FD'
+    assert all(set(row)=={'fd','dev','ino','flags','target'} and
+        int(row['dev'])>=0 and int(row['ino'])>=0 and int(row['flags'])>=0 for row in allowed)
+    ring_fds={int(row['fd']) for row in rings}
+    assert len(rings)==len(ring_fds)==2 and not baseline & ring_fds
+    assert all(row['target']=='anon_inode:[io_uring]' and
+        row['fdinfo']=='SqMask:0x1,CqMask' and int(row['ino'])>=0 for row in rings)
+    assert len(maps)==int(live[0]['maps']) and 4<=len(maps)<=6
+    ranges=[]
+    offsets=[]
+    for row in maps:
+        lo,hi=(int(value,16) for value in row['range'].split('-'))
+        assert lo<hi and all(hi<=oldlo or oldhi<=lo for oldlo,oldhi in ranges), 'overlapping or invalid ring VMA'
+        ranges.append((lo,hi))
+        offsets.append(int(row['offset'],16))
+        assert int(row['ino'])>=0
+    assert offsets.count(0)==offsets.count(0x10000000)==2
+    assert all(offset in (0,0x8000000,0x10000000) for offset in offsets)
+    assert offsets.count(0x8000000)<=2
+    assert len(children)==3 and {row['round'] for row in children}=={'0','1','2'}
+    assert all(row['before_rings']=='0' and row['after_rings']=='1' and
+        int(row['inherited_maps_removed'])==len(maps) and row['allowed']=='exact-baseline'
+        for row in children), 'inherited ordinary ring FD/VMA survived first child call'
+    reports=records(text,'XDEV_EXT_PRELOAD_REPORT')
+    assert len(reports)==5 and len({(row['pid'],row['tid']) for row in reports})==5
+    by_pid={}
+    for row in reports:
+        assert int(row['pid'])>0 and int(row['tid'])>0
+        by_pid.setdefault(row['pid'],[]).append(row)
+        assert all(int(row[key])==0 for key in ('read_errors','write_errors',
+            'custom_send_count','custom_send_bytes','custom_send_errors'))
+        for kind in ('read','write'):
+            assert int(row[kind+'_bytes'])==int(row[kind+'_count'])*4096, 'takeover bytes mismatch'
+    assert sorted(len(rows) for rows in by_pid.values())==[1,1,1,2], 'parent/child report identity mismatch'
+    for rows in by_pid.values():
+        parent=len(rows)==2
+        for row in rows:
+            assert (row['tid']!=row['pid']) if parent else (row['tid']==row['pid'])
+            assert int(row['read_count'])==(8 if parent else 2), 'ordinary read silent fallback'
+            assert int(row['write_count'])==(4 if parent else 1), 'ordinary write silent fallback'
+
 def validate(directory, ce):
     for arm, stages in [('socket',1)]+([('ce-socket',3)] if ce else []):
         for mode in ('base','lifecycle'):
@@ -87,6 +147,7 @@ def validate(directory, ce):
         errors=sum(int(r[f'{kind}_errors']) for r in reports)
         assert count+errors==int(want[f'eligible_{kind}s']), 'O_DIRECT silent fallback'
         assert errors==int(want[f'eligible_{kind}_errors']), 'O_DIRECT error mismatch'
+    validate_ordinary_fork((directory/'compat-ordinary-fork.log').read_text())
     print(f'XDEV_EXT_PRELOAD_VM_VALIDATION=PASS socket=1 ce_socket={int(ce)} dio=1')
 
 if __name__=='__main__':
