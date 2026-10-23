@@ -156,6 +156,44 @@ class NicFallbackChoice(unittest.TestCase):
             print(run.stdout, end='')
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_actual_ctl_nxp_create(self):
+        ctl = (ROOT / 'tools/xdev_ext_mech/xdev_ext_mech_ctl.c').read_text()
+        fn = re.search(r'^static int ctl_nic_nxp_create\([^;{}]*\)\s*\{.*?^\}', ctl, re.M | re.S)[0]
+        pre = r'''
+#include <assert.h>
+#include <net/if.h>
+#include <sys/ioctl.h>
+struct ctl_opts {const char *ifname;__u64 wire_session;};
+/* Native interface query only. CREATE mutation and policy are production. */
+static int ctl_if_query(const char *name,unsigned long req,struct ifreq *out)
+{assert(!strcmp(name,"fixture")&&req==SIOCGIFMTU);out->ifr_mtu=1500;return 0;}
+'''
+        body = r'''
+int main(void)
+{
+ struct ctl_opts o={"fixture",270019};
+ for(unsigned tx=0;tx<2;tx++){
+  struct xdev_ext_mech_create before=tx?afxdp_tx_create():afxdp_rx_create(),after=before;
+  __u32 stage=tx?2:0,path,frames;
+  assert(!path_of(XDEV_EXT_MECH_CTL_NIC_AUTO,false,-EOPNOTSUPP,0,&path)&&path==XDEV_EXT_MECH_CTL_NIC_SOCKET);
+  assert(!ctl_nic_nxp_create(&o,&after,stage,21));
+  assert(after.st[stage].flags==XDEV_EXT_SOCKET_F_NXP&&after.st[stage].arg0==270019&&after.st[stage].arg1==1500);
+  assert(only_nic_changed(&before,&after,stage));
+  assert(!xdev_ext_mech_create_check(&after,&frames));
+ }
+ puts("PASS actual AUTO refusal -> NXP socket CREATE changes only NIC and pool, preserves other stages");return 0;
+}
+'''
+        prefix = FIXTURE.split('int main(void)', 1)[0]
+        with tempfile.TemporaryDirectory(prefix='nic-nxp-create-') as tmp:
+            c = Path(tmp) / 'create.c'; exe = Path(tmp) / 'create'
+            c.write_text(prefix + pre + fn + body)
+            build = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                                    '-Wno-unused-variable', '-I' + str(ROOT), str(c), '-o', str(exe)], capture_output=True, text=True)
+            self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+            run = subprocess.run([str(exe)], capture_output=True, text=True)
+            print(run.stdout, end=''); self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_ctl_wiring(self):
         ctl = (ROOT / 'tools/xdev_ext_mech/xdev_ext_mech_ctl.c').read_text()
         checks = (

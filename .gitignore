@@ -924,3 +924,6 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/produced_core_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/ctl_socket_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_core_fifo_test.py
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_fixture.c

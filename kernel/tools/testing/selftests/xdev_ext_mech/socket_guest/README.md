@@ -55,3 +55,26 @@ The actual guest output must be recorded before claiming the VM passes.
 A local successful runtime/BPF compilation is not guest execution. CPU CE
 simulation and socket native copying remain explicit; local UDP completion
 never certifies remote delivery or a remote protocol ACK.
+
+NIC fallback uses the existing NXP2 UDP wire format and configured peer tuple.
+The plain SOCKET class remains available with zero flags and arguments. AUTO
+and forced NIC substitution select `XDEV_EXT_SOCKET_F_NXP`, the existing
+`--wire-session` value and interface MTU. Reliable NXP3 is refused. The finite
+NXP2 path requires ordered groups/segments, discards foreign/duplicate/out-of-order
+packets and never publishes a partial or CRC-invalid group. It provides no
+retransmission or remote delivery guarantee.
+
+`../socket_sink/nxp_interop_test.py` executes production socket adapter and BPF
+functions with real UDP sockets against the AF_XDP reference wire encoder/parser.
+It checks exact bytes, distinct groups, CRC, malformed and forged plans, a reader
+race, truncation, STOP, accepted TX-prefix preservation, and bounded allocation.
+`../socket_sink/ctl_socket_test.py` checks rejection of wrong source IP and port.
+These are host boundary tests, not AF_XDP hook or kernel verifier execution.
+
+The existing NIC fallback guest section now also checks both mixed directions.
+It uses the guest's existing loopback interface at MTU 1500 to obtain a real AUTO
+zero-copy refusal, while data traverses the existing eth0/eth1 pair. Only the
+socket side is assigned its IP address, and socket TX uses a static peer neighbor,
+so local routing cannot bypass the opposite AF_XDP endpoint. Each direction
+requires the full destination byte comparison and its own AUTO_INTEROP marker.
+The guest must be run before reporting those markers as observed results.

@@ -819,10 +819,9 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
     grep -Eq '^XDEV_EXT_MECH_READY mode=source .* xsk=socket( |$)' /tmp/nicfb-socket-tx.log
     grep -Eq '^XDEV_EXT_MECH_NIC_NVME_E2E=PASS .* errors=0 sequestered=0 inflight=0$' /tmp/nicfb-socket-rx.log
     for log in /tmp/nicfb-socket-rx.log /tmp/nicfb-socket-tx.log; do
-        grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=socket nic_copy_ops=$groups nic_copy_bytes=$nicfb_bytes nic_zc_ops=0 nic_zc_bytes=0\$" "$log"
+        grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=socket nic_copy_ops=$((groups * nicfb_frames)) nic_copy_bytes=$nicfb_bytes nic_zc_ops=0 nic_zc_bytes=0\$" "$log"
     done
     nicfb_compare
-    $ctl detach --pin /sys/fs/bpf/nicfb-socket
     # 2. AF_XDP sockets opened without zero-copy: copy-mode counters only.
     nicfb_clear
     $ctl nic-nvme --copy --ifname eth1 --dst-ng "$destination_ng" --slba "$rx_slba" --nlb "$window_nlb" \
@@ -850,6 +849,59 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
         grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=copy nic_copy_ops=$((groups * nicfb_frames)) nic_copy_bytes=$nicfb_bytes nic_zc_ops=0 nic_zc_bytes=0\$" "$log"
     done
     nicfb_compare
+    # 3/4. Actual AUTO ZC refusal on existing loopback, with a single socket
+    # boundary and the unchanged AF_XDP peer on the existing QEMU NIC pair.
+    # Only the socket side owns an IP address, so socket TX traverses eth0
+    # instead of taking the local route and bypassing the AF_XDP RX hook.
+    nicfb_lo_mtu=$(cat /sys/class/net/lo/mtu)
+    ip link set lo mtu 1500
+    for nicfb_mixed in rx tx; do
+        nicfb_clear
+        if [ "$nicfb_mixed" = rx ]; then
+            ip addr add 192.0.2.2/24 dev eth1
+            nicfb_rx_if=lo; nicfb_rx_policy=auto; nicfb_rx_path=socket
+            nicfb_tx_if=eth0; nicfb_tx_policy=off; nicfb_tx_path=zc
+        else
+            ip addr add 192.0.2.1/24 dev eth0
+            ip neigh replace 192.0.2.2 lladdr 02:00:00:00:00:02 nud permanent dev eth0
+            nicfb_rx_if=eth1; nicfb_rx_policy=off; nicfb_rx_path=zc
+            nicfb_tx_if=lo; nicfb_tx_policy=auto; nicfb_tx_path=socket
+        fi
+        $ctl nic-nvme --nic-fallback "$nicfb_rx_policy" --ifname "$nicfb_rx_if" \
+            --dst-ng "$destination_ng" --slba "$rx_slba" --nlb "$window_nlb" \
+            --peer-mac 02:00:00:00:00:01 --local-ip 192.0.2.2 --peer-ip 192.0.2.1 \
+            --local-port 12345 --peer-port 54321 --groups "$groups" --depth "$depth" \
+            --group-bytes 8192 --timeout-ms "$rx_timeout_ms" >/tmp/nicfb-mixed-rx.log 2>&1 &
+        nicfb_rx=$!
+        nicfb_ready /tmp/nicfb-mixed-rx.log "$nicfb_rx_path"
+        set +e
+        $ctl nvme-nic --nic-fallback "$nicfb_tx_policy" --ifname "$nicfb_tx_if" \
+            --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
+            --peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 \
+            --local-port 54321 --peer-port 12345 --groups "$groups" --depth "$depth" \
+            --group-bytes 8192 --timeout-ms "$cli_timeout_ms" >/tmp/nicfb-mixed-tx.log 2>&1
+        nicfb_tx_exit=$?
+        wait "$nicfb_rx"
+        nicfb_rx_exit=$?
+        set -e
+        nicfb_log "auto-$nicfb_mixed-rx" /tmp/nicfb-mixed-rx.log
+        nicfb_log "auto-$nicfb_mixed-tx" /tmp/nicfb-mixed-tx.log
+        test "$nicfb_tx_exit" = 0
+        test "$nicfb_rx_exit" = 0
+        grep -Eq "^XDEV_EXT_MECH_READY mode=source .* xsk=$nicfb_tx_path( |\$)" /tmp/nicfb-mixed-tx.log
+        grep -Eq '^XDEV_EXT_MECH_NIC_NVME_E2E=PASS .* errors=0 sequestered=0 inflight=0$' /tmp/nicfb-mixed-rx.log
+        grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=socket nic_copy_ops=$((groups * nicfb_frames)) nic_copy_bytes=$nicfb_bytes nic_zc_ops=0 nic_zc_bytes=0\$" "/tmp/nicfb-mixed-$nicfb_mixed.log"
+        nicfb_compare
+        if [ "$nicfb_mixed" = rx ]; then
+            ip addr del 192.0.2.2/24 dev eth1
+        else
+            ip neigh del 192.0.2.2 dev eth0
+            ip addr del 192.0.2.1/24 dev eth0
+        fi
+        echo "XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS socket_side=$nicfb_mixed groups=$groups"
+    done
+    ip link set lo mtu "$nicfb_lo_mtu"
+    $ctl detach --pin /sys/fs/bpf/nicfb-socket
     echo "XDEV_EXT_ZC_NIC_FALLBACK=PASS socket_groups=$groups copy_groups=$groups zc_copy_ops=0"
 fi
 # --- end track S section
@@ -1029,6 +1081,8 @@ grep -Fxq 'XDEV_EXT_ZC_COPY_FALLBACK=PASS calls=0' "$EV/guest.log"
 # --- Track S (appended): the NIC-boundary fallback section must have passed.
 if (( NIC_FALLBACK )); then
     grep -Fxq "XDEV_EXT_ZC_NIC_FALLBACK=PASS socket_groups=$GROUP_COUNT copy_groups=$GROUP_COUNT zc_copy_ops=0" "$EV/guest.log"
+    grep -Fxq "XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS socket_side=rx groups=$GROUP_COUNT" "$EV/guest.log"
+    grep -Fxq "XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS socket_side=tx groups=$GROUP_COUNT" "$EV/guest.log"
 fi
 # --- end track S section
 if (( CE_SIM )); then

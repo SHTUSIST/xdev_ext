@@ -9,6 +9,7 @@ so tools/xdev_ext_mech/socket_sink.bpf.c must accept both completion kinds
 host with the C-owned kfunc views stubbed.
 """
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -50,6 +51,12 @@ static __u8 *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *c, __u32 slot, siz
 { (void)c; assert(!slot && n == sizeof(cqe)); return (void *)&cqe; }
 '''
 
+PRELUDE += r'''
+static __u32 bpf_xdev_ext_crc32c(const void *p, __u32 n, __u32 s)
+{(void)p;(void)n;return s;}
+static __u32 bpf_xdev_ext_frame_crc32c(const struct xdev_ext_mech_ctx *c,__u32 i,__u32 o,__u32 n,__u32 s)
+{(void)c;(void)i;(void)o;(void)n;return s;}
+'''
 MAIN = r'''
 static int failures;
 #define EXPECT(c) do { if (!(c)) { printf("not ok - line %d: %s\n", __LINE__, #c); failures++; } } while (0)
@@ -95,8 +102,9 @@ int main(void)
 class SocketProgramBothDirections(unittest.TestCase):
     def test_build_and_complete(self):
         source = (ROOT / 'tools/xdev_ext_mech/socket_sink.bpf.c').read_text()
-        code = PRELUDE + function(source, 'socket_sink_build') + '\n' + \
-            function(source, 'socket_sink_complete') + '\n' + MAIN
+        bodies = re.sub(r'^#(?:include|define BPF_NO_KFUNC_PROTOTYPES)[^\n]*\n', '', source, flags=re.M).split('SEC(".struct_ops.link")')[0]
+        bodies = re.sub(r'^SEC\([^\n]+\)\n', '', bodies, flags=re.M)
+        code = PRELUDE + bodies + MAIN
         with tempfile.TemporaryDirectory(prefix='socket-bpf-') as tmp:
             cfile = Path(tmp) / 'prog.c'
             exe = Path(tmp) / 'prog'

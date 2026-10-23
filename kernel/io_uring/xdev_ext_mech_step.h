@@ -87,7 +87,10 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		if (!xdev_ext_mech_class_known(u->class_id) ||
 		    (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_IAA &&
              (u->flags & ~XDEV_EXT_IAA_F_SOFTWARE)) ||
-            (u->flags && u->class_id != XDEV_EXT_MECH_CLASS_IAA &&
+            (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
+             (u->flags & ~XDEV_EXT_SOCKET_F_NXP)) ||
+            (u->flags && u->class_id != XDEV_EXT_MECH_CLASS_SOCKET &&
+             u->class_id != XDEV_EXT_MECH_CLASS_IAA &&
              (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
 		     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE)) ||
 		     ((u->flags & XDEV_EXT_AFXDP_F_FINITE) &&
@@ -95,6 +98,10 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		    (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
 		     u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 			return -EINVAL;
+  if (u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
+      (u->flags & XDEV_EXT_SOCKET_F_NXP) &&
+      (!u->arg0 || u->arg1 <= 68 || u->arg1 > 0xffffffffULL))
+   return -EINVAL;
 		if (u->fd < 0)
 			return -EBADF;
 		if (u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&

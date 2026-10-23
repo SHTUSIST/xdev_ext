@@ -13,6 +13,7 @@
 #include "include/linux/xdev_ext_mech.h"
 /* Boundary stubs a given fixture may not call (clang -Wunused-function). */
 #define SHIM_INLINE static inline __attribute__((unused))
+typedef int32_t s32;
 typedef uint32_t u32;
 typedef uint64_t u64;
 typedef uint8_t u8;
@@ -90,7 +91,7 @@ struct xdev_ext_mech_pool {u32 frame_size,nr_frames;u8 state[256];};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;u32 depth;bool admits;};
 struct xdev_ext_mech_stage {void *priv;struct file *file;struct xdev_ext_mech_session *s;u32 direction;u32 class_id,flags,index;u64 arg0,arg1;};
 struct xdev_ext_mech_batch {u32 nr,bytes,slot;u64 ticket;struct xdev_ext_mech_frame f[32];int status;u64 completed_ticket;u32 completions;
- u64 key;u32 produced,cancelled,stale,order;};
+ u64 key,id;u32 produced,cancelled,stale,order;};
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->l;}
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s){return s->depth;}
 static bool xdev_ext_mech_session_admits(struct xdev_ext_mech_session *s){return s->admits;}
@@ -112,10 +113,37 @@ SHIM_INLINE void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batc
 SHIM_INLINE void xdev_ext_mech_batch_complete_cancelled(struct xdev_ext_mech_batch *b,u64 t,int e)
 {if(t!=b->ticket){b->stale++;return;}b->status=e;b->produced=0;b->cancelled++;b->completions++;b->completed_ticket=t;b->order=++shim_completion_order;}
 SHIM_INLINE u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b){return b->produced;}
+SHIM_INLINE u64 xdev_ext_mech_batch_id(const struct xdev_ext_mech_batch *b){return b->id;}
 SHIM_INLINE u64 xdev_ext_mech_batch_key(const struct xdev_ext_mech_batch *b){return b->key;}
 SHIM_INLINE void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st){(void)st;__atomic_add_fetch(&shim_kicks,1,__ATOMIC_SEQ_CST);}
 SHIM_INLINE void xdev_ext_mech_count(struct xdev_ext_mech_session *s,enum xdev_ext_mech_counter c,u64 n)
 {(void)s;assert((unsigned)c<64);__atomic_add_fetch(&shim_counters[c],n,__ATOMIC_RELAXED);}
+
+struct xdev_ext_mech_call_args {
+	u32 member;			/* enum xdev_ext_mech_member */
+	u32 callsite;			/* enum xdev_ext_mech_callsite */
+	const struct xdev_ext_binding_ctx_v2 *base;
+	struct xdev_ext_mech_batch *b;
+	u64 batch_id;
+	const struct xdev_ext_mech_frame *frames;
+	u32 nr_frames;
+	u32 frame_size;
+	u32 hdr_room;
+	u32 batch_frames;
+	u32 info_size;
+	const void *info;
+	u8 *scratch;
+	u32 desc_size;
+	u32 desc_cap;
+	const void *cqe;
+	u32 cqe_size;
+	u32 cqe_cap;
+};
+static int (*shim_packet_call)(struct xdev_ext_mech_stage *, const struct xdev_ext_mech_call_args *, s32 *);
+SHIM_INLINE int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,
+ const struct xdev_ext_mech_call_args *a, s32 *ret, struct xdev_ext_mech_hold_intent *hold)
+{(void)hold;return shim_packet_call?shim_packet_call(st,a,ret):-EOPNOTSUPP;}
+
 static int forced_send = 999999,send_calls,last_send_flags;
 /* The independent credential oracle replaces this section completely. */
 struct cred {unsigned refs;};

@@ -623,7 +623,7 @@ static int ctl_socket_open(const struct ctl_opts *o, bool rx)
 		64U << 20 : 2 * o->groups * o->group_bytes;
 	int fd, err, bytes = wanted < (4U << 20) ? 4 << 20 : (int)wanted;
 
-	if (o->reliable || o->group_bytes > XDEV_EXT_SOCKET_MAX_DATAGRAM)
+	if (o->reliable)
 		return -EOPNOTSUPP;
 	fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
 	if (fd < 0)
@@ -632,7 +632,7 @@ static int ctl_socket_open(const struct ctl_opts *o, bool rx)
 	    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes)))
 		goto fail;
 	if (bind(fd, (void *)&local, sizeof(local)) ||
-	    (!rx && connect(fd, (void *)&peer, sizeof(peer))))
+	    connect(fd, (void *)&peer, sizeof(peer)))
 		goto fail;
 	return fd;
 fail:
@@ -786,6 +786,22 @@ static int ctl_layout(const struct ctl_opts *o, const char *ifname,
  }
 	*frames = (__u32)xdev_ext_mech_layout_frames(l);
 	return 0;
+}
+
+/* Preserve the AF_XDP wire contract when only its NIC boundary is replaced. */
+static int ctl_nic_nxp_create(const struct ctl_opts *o,
+ struct xdev_ext_mech_create *c, __u32 index, int fd)
+{
+ struct ifreq ifr;
+ int err = ctl_if_query(o->ifname, SIOCGIFMTU, &ifr);
+ if (err) return err;
+ err = xdev_ext_mech_ctl_nic_fallback_create(c, index, fd);
+ if (!err) {
+  c->st[index].flags = XDEV_EXT_SOCKET_F_NXP;
+  c->st[index].arg0 = o->wire_session;
+  c->st[index].arg1 = (__u32)ifr.ifr_mtu;
+ }
+ return err;
 }
 
 static void ctl_reliable_config(const struct ctl_opts *o,struct xdev_ext_mech_create *c,
@@ -1239,7 +1255,7 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	c.peer = o->peer;
 	ctl_reliable_config(o,&c,&reliable_config);
 	if (path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
-		ret = xdev_ext_mech_ctl_nic_fallback_create(&c, 0, socket_fd);
+		ret = ctl_nic_nxp_create(o, &c, 0, socket_fd);
 		if (ret)
 			goto out;
 	}
@@ -1569,7 +1585,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	memcpy(c.st, src->st, sizeof(c.st));
 	ctl_reliable_config(o,&c,&reliable_config);
 	if (src->nic_path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
-		ret = xdev_ext_mech_ctl_nic_fallback_create(&c, c.nr_stages - 1, socket_fd);
+		ret = ctl_nic_nxp_create(o, &c, c.nr_stages - 1, socket_fd);
 		if (ret)
 			goto out;
 	}
@@ -1899,7 +1915,7 @@ static void usage(FILE *f)
 " [--max-attempts N] [--retry-timeout-ms N] (ACK means chain completion)\n"
 "COMMON: [--groups N] [--depth N] [--group-bytes N] [--mtu N]\n"
 "        [--timeout-ms N] [--copy] [--nic-fallback auto|off|force]\n"
-"        auto: socket on ZC refusal; off: require ZC; force: socket (plain UDP only)\n"
+"        auto: socket on ZC refusal; off: require ZC; force: socket (NXP2; reliable mode refused)\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
 "        b NVMe READ -> CE H2D -> CE D2H -> AF_XDP TX (AF_XDP UMEM)\n"

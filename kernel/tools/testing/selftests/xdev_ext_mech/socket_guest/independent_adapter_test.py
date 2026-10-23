@@ -38,7 +38,7 @@ PREAMBLE=r'''
 #include <netinet/in.h>
 #include <netinet/udp.h>
 #include "io_uring/xdev_ext_mech_core.h"
-typedef __u8 u8;typedef __u32 u32;typedef __u64 u64;
+typedef __u8 u8;typedef __u32 u32;typedef __u64 u64;typedef __s32 s32;
 #define GFP_KERNEL 0
 #define SEND_SHUTDOWN 2
 #define TCP_ESTABLISHED 1
@@ -78,6 +78,8 @@ static struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext
 static u32 xdev_ext_mech_batch_nr_frames(struct xdev_ext_mech_batch *b){return b->nr;}
 static u32 xdev_ext_mech_batch_bytes(struct xdev_ext_mech_batch *b){return b->bytes;}
 static u32 xdev_ext_mech_batch_slot(struct xdev_ext_mech_batch *b){return b->slot;}
+static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->ticket;}
+static u64 xdev_ext_mech_batch_key(struct xdev_ext_mech_batch *b){return b->ticket;}
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b){return b->ticket;}
 static int xdev_ext_mech_batch_status(struct xdev_ext_mech_batch *b){return b->status;}
 static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b,u32 i,struct xdev_ext_mech_frame *f){if(i>=b->nr)return -EINVAL;*f=b->f[i];return 0;}
@@ -182,8 +184,15 @@ class IndependentAdapter(unittest.TestCase):
         cls.tmp=tempfile.TemporaryDirectory(prefix='independent-socket-')
         text=(ROOT/'io_uring/xdev_ext_mech_socket.c').read_text()
         structs=text[text.index('struct xdev_ext_socket_request {'):text.index('static int xdev_ext_socket_ready')]
-        names=('ready','bind','unbind','fill_info','validate','submit','fill_cqe','mark_dead')
-        code=PREAMBLE+structs+'\n'+'\n'.join(function(text,'xdev_ext_socket_'+n) for n in names)+TESTS
+        names=('ready','bind','unbind','fill_info','validate','packet_call','packet_admit','packet_send','submit','fill_cqe','mark_dead')
+        contract=(ROOT/'include/linux/xdev_ext_mech.h').read_text()
+        callargs=re.search(r'struct xdev_ext_mech_call_args \{.*?\n\};',contract,re.S)[0]
+        boundary='''
+/* Plain UDP fixture never enters the NXP BPF boundary. */
+static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_call_args *a,s32 *r,struct xdev_ext_mech_hold_intent *h)
+{(void)st;(void)a;(void)r;(void)h;return -EOPNOTSUPP;}
+'''
+        code=PREAMBLE+callargs+boundary+structs+'\n'+'\n'.join(function(text,'xdev_ext_socket_'+n) for n in names)+TESTS
         cls.code=code
         source=Path(cls.tmp.name)/'adapter.c';source.write_text(code);cls.binary=Path(cls.tmp.name)/'adapter'
         r=subprocess.run([os.getenv('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-Wno-unused-function','-I',str(ROOT),str(source),'-o',str(cls.binary)],capture_output=True,text=True)

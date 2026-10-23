@@ -36,12 +36,15 @@ class NicFallbackHarness(unittest.TestCase):
         self.assertRegex(s, r'\[ "\$fault" = none \] && \[ "\$reliable" = 0 \] && \[ "\$rx_ce" = 0 \]')
         self.assertEqual(len(re.findall(r'--nic-fallback force', s)), 2)
         self.assertEqual(len(re.findall(r'\$ctl (nic-nvme|nvme-nic) --copy ', s)), 2)
-        self.assertEqual(s.count('nicfb_compare\n'), 2)
-        self.assertEqual(s.count('nicfb_clear\n'), 2)
-        self.assertIn('path=socket nic_copy_ops=$groups', s)
+        self.assertEqual(s.count('nicfb_compare\n'), 3)
+        self.assertEqual(s.count('nicfb_clear\n'), 3)
+        self.assertIn('path=socket nic_copy_ops=$((groups * nicfb_frames))', s)
         self.assertIn('path=copy nic_copy_ops=$((groups * nicfb_frames))', s)
         self.assertIn('path=zc nic_copy_ops=0 nic_copy_bytes=0', s)
         self.assertIn('XDEV_EXT_ZC_NIC_FALLBACK=PASS', s)
+        self.assertIn('XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS', s)
+        self.assertIn('nicfb_rx_policy=auto', s)
+        self.assertIn('nicfb_tx_policy=auto', s)
         self.assertNotRegex(s, r'elapsed|latency|throughput|Gbps|MB/s')
 
     def test_host_checks_marker(self):

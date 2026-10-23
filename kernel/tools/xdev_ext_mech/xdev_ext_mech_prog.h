@@ -35,6 +35,9 @@
 #define XDEV_EXT_MP_ABI_VERSION		1U
 #define XDEV_EXT_MP_CE_ABI_VERSION		2U
 #define XDEV_EXT_MP_MAX_FRAMES		32U
+#define XDEV_EXT_MP_SOCKET_PACKET_TX 1U
+#define XDEV_EXT_MP_SOCKET_PACKET_RX_PLAN 2U
+#define XDEV_EXT_MP_SOCKET_PACKET_RX_CHECK 3U
 
 /* enum xdev_ext_mech_build_ret, enum xdev_ext_mech_next */
 #define XDEV_EXT_MP_BUILD_SUBMIT		1
@@ -222,6 +225,64 @@ enum xdev_ext_mp_rx_class {
 	XDEV_EXT_MP_RX_BAD,		/* NXP traffic failing a check: recycle it */
 };
 
+/* UDP sockets already validate the L3/L4 envelope. Share the exact NXP
+ * decoder with AF_XDP; only its packet representation differs. */
+XDEV_EXT_MP_INLINE int xdev_ext_mp_nxp_parse(const __u8 *nxp, __u32 data_len,
+ const struct xdev_ext_mp_rx_cfg *cfg, struct xdev_ext_mp_segment *seg)
+{
+ __u32 payload_len, limit, count, offset, end, direction;
+ __u16 index, nr;
+ if (data_len < XDEV_EXT_MP_NXP_LEN ||
+     xdev_ext_mp_get_be32(nxp) != XDEV_EXT_MP_NXP_MAGIC)
+  return XDEV_EXT_MP_RX_FOREIGN;
+	/* nxp_wire_header_parse() */
+	if (nxp[4] != XDEV_EXT_MP_NXP_VERSION || nxp[5] != XDEV_EXT_MP_NXP_LEN || nxp[7])
+		return XDEV_EXT_MP_RX_BAD;
+	payload_len = data_len - XDEV_EXT_MP_NXP_LEN;
+	if (!payload_len || payload_len != xdev_ext_mp_get_be32(nxp + 32))
+		return XDEV_EXT_MP_RX_BAD;
+	direction = nxp[6];
+	seg->session_id = xdev_ext_mp_get_be64(nxp + 8);
+	seg->generation = xdev_ext_mp_get_be32(nxp + 16);
+	seg->index = index = xdev_ext_mp_get_be16(nxp + 20);
+	seg->count = nr = xdev_ext_mp_get_be16(nxp + 22);
+	seg->total_len = xdev_ext_mp_get_be32(nxp + 24);
+	seg->relative_offset = xdev_ext_mp_get_be32(nxp + 28);
+	seg->payload_len = payload_len;
+	seg->payload_off = cfg->hdr_room;
+
+	/* nxp_wire_segment_validate(); offsets are in u64 there. */
+	if (!seg->session_id || !seg->generation ||
+	    (direction != XDEV_EXT_MP_NXP_DIR_READ &&
+	     direction != XDEV_EXT_MP_NXP_DIR_WRITE) ||
+	    !nr || nr > XDEV_EXT_MP_NXP_MAX_SEGMENTS || index >= nr ||
+	    !seg->total_len ||
+	    seg->relative_offset > seg->total_len ||
+	    payload_len > seg->total_len - seg->relative_offset)
+		return XDEV_EXT_MP_RX_BAD;
+	end = seg->relative_offset + payload_len;
+	if ((!index && seg->relative_offset) ||
+	    (index == nr - 1 ? end != seg->total_len : end >= seg->total_len))
+		return XDEV_EXT_MP_RX_BAD;
+
+	/* pipeline_validate_rx_packet(): this session's layout, segment @index */
+	if (direction != XDEV_EXT_MP_NXP_DIR_WRITE ||
+	    seg->total_len != cfg->group_bytes ||
+	    seg->session_id != cfg->session_id ||
+	    xdev_ext_mp_seg_limit(cfg->mtu, cfg->frame_size, cfg->hdr_room, &limit) ||
+	    limit != cfg->seg_len)
+		return XDEV_EXT_MP_RX_BAD;
+	count = 1 + (cfg->group_bytes - 1) / limit;
+	if (count > XDEV_EXT_MP_NXP_MAX_SEGMENTS || nr != count)
+		return XDEV_EXT_MP_RX_BAD;
+	offset = index * limit;
+	if (seg->relative_offset != offset ||
+	    payload_len != (cfg->group_bytes - offset < limit ?
+			    cfg->group_bytes - offset : limit))
+		return XDEV_EXT_MP_RX_BAD;
+	return XDEV_EXT_MP_RX_SEGMENT;
+}
+
 /*
  * Classify a received frame from its first XDEV_EXT_MP_PKT_HDR_LEN bytes @pkt,
  * found at chunk offset @data_off with packet length @data_len.  Frames
@@ -243,9 +304,7 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_rx_parse(const __u8 *pkt, __u32 data_off,
 	const __u8 *ip = pkt + XDEV_EXT_MP_ETH_LEN;
 	const __u8 *udp = ip + XDEV_EXT_MP_IP_LEN;
 	const __u8 *nxp = udp + XDEV_EXT_MP_UDP_LEN;
-	__u32 ip_len, udp_len, payload_len, limit, count, offset, end;
-	__u32 direction;
-	__u16 index, nr;
+	__u32 ip_len, udp_len;
 
 	if (data_len < XDEV_EXT_MP_PKT_HDR_LEN ||
 	    xdev_ext_mp_get_be16(pkt + 12) != XDEV_EXT_MP_ETH_P_IP ||
@@ -280,52 +339,7 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_rx_parse(const __u8 *pkt, __u32 data_off,
 	    udp_len < XDEV_EXT_MP_UDP_LEN + XDEV_EXT_MP_NXP_LEN)
 		return XDEV_EXT_MP_RX_BAD;
 
-	/* nxp_wire_header_parse() */
-	if (nxp[4] != XDEV_EXT_MP_NXP_VERSION || nxp[5] != XDEV_EXT_MP_NXP_LEN || nxp[7])
-		return XDEV_EXT_MP_RX_BAD;
-	payload_len = udp_len - XDEV_EXT_MP_UDP_LEN - XDEV_EXT_MP_NXP_LEN;
-	if (!payload_len || payload_len != xdev_ext_mp_get_be32(nxp + 32))
-		return XDEV_EXT_MP_RX_BAD;
-	direction = nxp[6];
-	seg->session_id = xdev_ext_mp_get_be64(nxp + 8);
-	seg->generation = xdev_ext_mp_get_be32(nxp + 16);
-	seg->index = index = xdev_ext_mp_get_be16(nxp + 20);
-	seg->count = nr = xdev_ext_mp_get_be16(nxp + 22);
-	seg->total_len = xdev_ext_mp_get_be32(nxp + 24);
-	seg->relative_offset = xdev_ext_mp_get_be32(nxp + 28);
-	seg->payload_len = payload_len;
-	seg->payload_off = data_off + XDEV_EXT_MP_PKT_HDR_LEN;
-
-	/* nxp_wire_segment_validate(); offsets are in u64 there. */
-	if (!seg->session_id || !seg->generation ||
-	    (direction != XDEV_EXT_MP_NXP_DIR_READ &&
-	     direction != XDEV_EXT_MP_NXP_DIR_WRITE) ||
-	    !nr || nr > XDEV_EXT_MP_NXP_MAX_SEGMENTS || index >= nr ||
-	    !seg->total_len ||
-	    seg->relative_offset > seg->total_len ||
-	    payload_len > seg->total_len - seg->relative_offset)
-		return XDEV_EXT_MP_RX_BAD;
-	end = seg->relative_offset + payload_len;
-	if ((!index && seg->relative_offset) ||
-	    (index == nr - 1 ? end != seg->total_len : end >= seg->total_len))
-		return XDEV_EXT_MP_RX_BAD;
-
-	/* pipeline_validate_rx_packet(): this session's layout, segment @index */
-	if (direction != XDEV_EXT_MP_NXP_DIR_WRITE ||
-	    seg->total_len != cfg->group_bytes ||
-	    seg->session_id != cfg->session_id ||
-	    xdev_ext_mp_seg_limit(cfg->mtu, cfg->frame_size, cfg->hdr_room, &limit) ||
-	    limit != cfg->seg_len)
-		return XDEV_EXT_MP_RX_BAD;
-	count = 1 + (cfg->group_bytes - 1) / limit;
-	if (count > XDEV_EXT_MP_NXP_MAX_SEGMENTS || nr != count)
-		return XDEV_EXT_MP_RX_BAD;
-	offset = index * limit;
-	if (seg->relative_offset != offset ||
-	    payload_len != (cfg->group_bytes - offset < limit ?
-			    cfg->group_bytes - offset : limit))
-		return XDEV_EXT_MP_RX_BAD;
-	return XDEV_EXT_MP_RX_SEGMENT;
+	return xdev_ext_mp_nxp_parse(nxp, udp_len - XDEV_EXT_MP_UDP_LEN, cfg, seg);
 }
 
 /*

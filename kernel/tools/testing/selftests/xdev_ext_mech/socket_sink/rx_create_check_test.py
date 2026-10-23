@@ -73,7 +73,14 @@ int main(void)
  expect("second socket RX later in the chain", &c, -EINVAL, 0);
  c = base(); c.nr_stages = 2; stage(&c, 0, SOCK, FROM, 3); stage(&c, 1, XDEV_EXT_MECH_CLASS_NVME, TO, 4);
  c.st[0].flags = 1;
- expect("socket RX flags must be zero", &c, -EINVAL, 0);
+ expect("socket NXP requires session and MTU", &c, -EINVAL, 0);
+ c.st[0].arg0=270019;c.st[0].arg1=1500;
+ expect("socket NXP flag admitted", &c, 0, 4);
+ c.st[0].arg1=65536;expect("large link MTU allowed; datagram limits apply per frame", &c, 0, 4);
+ c.st[0].arg1=0x100000000ULL;expect("MTU overflow refused", &c, -EINVAL, 0);
+ c.st[0].arg1=1500;
+ c.st[0].flags=2;
+ expect("socket unknown flag rejected", &c, -EINVAL, 0);
  c = base(); c.nr_stages = 2; stage(&c, 0, SOCK, FROM, -1); stage(&c, 1, XDEV_EXT_MECH_CLASS_NVME, TO, 4);
  expect("socket RX needs an fd", &c, -EBADF, 0);
  c = base(); c.pool_kind = XDEV_EXT_MECH_POOL_PEER; c.pool_fd = 7; c.nr_stages = 2;

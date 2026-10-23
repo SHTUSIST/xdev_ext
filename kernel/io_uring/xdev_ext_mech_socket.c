@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Ordinary UDP compatibility sink over the common mechanism stage contract.
+/* Plain UDP and NXP2 NIC-boundary adapter over the common stage contract.
  * kernel_sendmsg copies from the original mapped pool spans into socket-owned
  * skb storage. No private payload bounce, MSG_ZEROCOPY or MSG_SPLICE_PAGES.
  * Its return is the local native lifetime boundary, never a remote ACK.
+ * NXP2 framing/CRC are provided by the pinned BPF program. C seals packet
+ * plans to registered frame coordinates and strict group/segment order.
  */
 #include <linux/cred.h>
 #include <linux/init.h>
@@ -17,7 +19,9 @@
 
 struct xdev_ext_socket_request {
 	struct kvec vec[XDEV_EXT_MECH_MAX_FRAMES];
-	u32 nr, bytes;
+	u32 nr, bytes, cursor;
+ u64 batch_id;
+ struct xdev_ext_mech_frame frame[XDEV_EXT_MECH_MAX_FRAMES];
 };
 struct xdev_ext_socket_stage {
 	struct socket *sock; /* st->file owns the original socket until unbind */
@@ -26,7 +30,20 @@ struct xdev_ext_socket_stage {
 	u32 depth;
 	bool dead;
 	struct xdev_ext_socket_rx *rx;
+ u64 wire_session;
+ u32 mtu;
+ /* Worker-only bounded metadata; payload always stays in registered frames. */
+ struct xdev_ext_socket_mech_info packet;
+ struct xdev_ext_socket_packet_desc plan;
+ u8 received_header[XDEV_EXT_SOCKET_HEADER_SIZE];
 };
+
+static bool xdev_ext_socket_config_ok(const struct xdev_ext_mech_stage_uapi *u)
+{
+ if (!u->flags) return !u->arg0 && !u->arg1;
+ return u->flags == XDEV_EXT_SOCKET_F_NXP && u->arg0 &&
+        u->arg1 > 68 && u->arg1 <= 0xffffffffULL;
+}
 
 static int xdev_ext_socket_ready(struct socket *sock)
 {
@@ -57,7 +74,7 @@ static int xdev_ext_socket_bind(struct xdev_ext_mech_stage *st,
 	int err;
 
 	if (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||
-	    u->flags || u->arg0 || u->arg1)
+	    !xdev_ext_socket_config_ok(u))
 		return -EINVAL;
 	sock = sock_from_file(st->file);
 	if (!sock)
@@ -75,6 +92,8 @@ static int xdev_ext_socket_bind(struct xdev_ext_mech_stage *st,
 		return -ENOMEM;
 	}
 	ss->sock = sock;
+ ss->wire_session = u->arg0;
+ ss->mtu = u->arg1;
 	ss->cred = get_current_cred();
 	st->priv = ss;
 	return 0;
@@ -104,6 +123,8 @@ static void xdev_ext_socket_fill_info(struct xdev_ext_mech_stage *st,
 		.l = *xdev_ext_mech_session_layout(st->s),
 		.nr_frames = b ? xdev_ext_mech_batch_nr_frames(b) : 0,
 		.max_datagram = XDEV_EXT_SOCKET_MAX_DATAGRAM,
+  .wire_session = ((struct xdev_ext_socket_stage *)st->priv)->wire_session,
+  .mtu = ((struct xdev_ext_socket_stage *)st->priv)->mtu,
 	};
 	for (i = 0; i < out->nr_frames; i++) {
 		if (xdev_ext_mech_batch_frame(b, i, &f)) {
@@ -128,7 +149,7 @@ static int xdev_ext_socket_validate(struct xdev_ext_mech_stage *st,
 	u32 i, bytes = 0, slot = xdev_ext_mech_batch_slot(b);
 
 	if (!xdev_ext_mech_batch_bytes(b) ||
-	    xdev_ext_mech_batch_bytes(b) > XDEV_EXT_SOCKET_MAX_DATAGRAM)
+	    (!ss->wire_session && xdev_ext_mech_batch_bytes(b) > XDEV_EXT_SOCKET_MAX_DATAGRAM))
 		return -EMSGSIZE;
 	if (slot >= ss->depth || !n || n > XDEV_EXT_MECH_MAX_FRAMES ||
 	    n != xdev_ext_mech_batch_nr_frames(b))
@@ -141,8 +162,9 @@ static int xdev_ext_socket_validate(struct xdev_ext_mech_stage *st,
 		    f.data_len > pool->frame_size - f.data_off ||
 		    d[i].flags || d[i].frame_pos != i ||
 		    d[i].frame_off != f.data_off || d[i].len != f.data_len ||
-		    f.data_len > XDEV_EXT_SOCKET_MAX_DATAGRAM - bytes)
+		    (!ss->wire_session && f.data_len > XDEV_EXT_SOCKET_MAX_DATAGRAM - bytes))
 			return -EINVAL;
+		r->frame[i] = f;
 		r->vec[i] = (struct kvec) {
 			.iov_base = (u8 *)f.kaddr + f.data_off,
 			.iov_len = f.data_len,
@@ -151,9 +173,84 @@ static int xdev_ext_socket_validate(struct xdev_ext_mech_stage *st,
 	}
 	if (bytes != xdev_ext_mech_batch_bytes(b))
 		return -EINVAL;
+ if (r->batch_id != xdev_ext_mech_batch_id(b)) {
+  r->batch_id = xdev_ext_mech_batch_id(b);
+  r->cursor = 0;
+ }
 	r->nr = n;
 	r->bytes = bytes;
 	return 0;
+}
+
+static int xdev_ext_socket_packet_call(struct xdev_ext_mech_stage *st,
+ struct xdev_ext_mech_batch *b, struct xdev_ext_socket_request *r, u32 phase)
+{
+ struct xdev_ext_socket_stage *ss = st->priv;
+ struct xdev_ext_binding_ctx_v2 base = { .direction = st->direction };
+ struct xdev_ext_mech_call_args a = {
+  .member = phase == XDEV_EXT_SOCKET_PACKET_RX_CHECK ?
+   XDEV_EXT_MECH_MEMBER_COMPLETE : XDEV_EXT_MECH_MEMBER_BUILD,
+  .callsite = XDEV_EXT_MECH_SITE_WORKER, .base = &base, .b = b,
+  .frames = r->frame, .nr_frames = r->nr,
+  .info = &ss->packet, .info_size = sizeof(ss->packet),
+  .scratch = (u8 *)&ss->plan, .desc_size = sizeof(ss->plan), .desc_cap = 1,
+ };
+ s32 verdict;
+ int err;
+ ss->packet.phase = phase;
+ ss->packet.cursor = r->cursor;
+ memset(&ss->plan, 0, sizeof(ss->plan));
+ err = xdev_ext_mech_call(st, &a, &verdict, NULL);
+ if (err) return err;
+ return verdict == (phase == XDEV_EXT_SOCKET_PACKET_RX_CHECK ?
+  XDEV_EXT_MECH_NEXT : XDEV_EXT_MECH_BUILD_SUBMIT) ? 0 : -EBADMSG;
+}
+
+/* C admits a single next segment, never a BPF-selected foreign batch/frame.
+ * Strict order is the existing finite NXP2 contract. */
+static int xdev_ext_socket_packet_admit(struct xdev_ext_socket_stage *ss,
+ struct xdev_ext_mech_batch *b, struct xdev_ext_socket_request *r)
+{
+ const struct xdev_ext_socket_packet_desc *d = &ss->plan;
+ const struct xdev_ext_mech_frame *f;
+ if (r->cursor >= r->nr) return -EINVAL;
+ f = &r->frame[r->cursor];
+ if (d->reserved || d->header_len != XDEV_EXT_SOCKET_HEADER_SIZE ||
+     d->key != xdev_ext_mech_batch_key(b) || d->frame_pos != r->cursor ||
+     d->frame_off != f->data_off || d->len != f->data_len ||
+     d->relative_offset != r->cursor * ss->packet.l.seg_len ||
+     d->len > XDEV_EXT_SOCKET_MAX_DATAGRAM - XDEV_EXT_SOCKET_HEADER_SIZE)
+  return -EBADMSG;
+ return 0;
+}
+
+static int xdev_ext_socket_packet_send(struct xdev_ext_mech_stage *st,
+ struct xdev_ext_mech_batch *b, struct xdev_ext_socket_request *r)
+{
+ struct xdev_ext_socket_stage *ss = st->priv;
+ struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
+ const struct cred *old;
+ int err;
+ xdev_ext_socket_fill_info(st, b, &ss->packet);
+ while (r->cursor < r->nr) {
+  struct kvec v[2];
+  if (READ_ONCE(ss->dead) || !xdev_ext_mech_session_admits(st->s))
+   return -ESHUTDOWN;
+  err = xdev_ext_socket_packet_call(st, b, r, XDEV_EXT_SOCKET_PACKET_TX);
+  if (!err) err = xdev_ext_socket_packet_admit(ss, b, r);
+  if (err) return err;
+  v[0] = (struct kvec){ss->plan.header, XDEV_EXT_SOCKET_HEADER_SIZE};
+  v[1] = r->vec[r->cursor];
+  old = override_creds(ss->cred);
+  err = kernel_sendmsg(ss->sock, &msg, v, 2, v[0].iov_len + v[1].iov_len);
+  revert_creds(old);
+  if (err < 0) return err;
+  if ((size_t)err != v[0].iov_len + v[1].iov_len) return -EIO;
+  xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_OPS, 1);
+  xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_BYTES, v[1].iov_len);
+  r->cursor++;
+ }
+ return 0;
 }
 
 static int xdev_ext_socket_submit(struct xdev_ext_mech_stage *st,
@@ -183,6 +280,12 @@ static int xdev_ext_socket_submit(struct xdev_ext_mech_stage *st,
 		if (xdev_ext_mech_batch_frame(b, i, &f) ||
 		    xdev_ext_mech_pool_frame_state(pool, f.index) != XDEV_EXT_MECH_F_INFLIGHT)
 			return -EBUSY;
+ if (ss->wire_session) {
+  err = xdev_ext_socket_packet_send(st, b, r);
+  if (err == -EAGAIN) return err;
+  xdev_ext_mech_batch_complete(b, ticket, err);
+  return 0;
+ }
 	/* Native socket LSM checks must see the session's bound caller, not
 	 * the shared kernel worker's credentials. Restore before every exit,
 	 * including preaccept EAGAIN and native errors.
@@ -263,7 +366,7 @@ static int xdev_ext_socket_class_bind(struct xdev_ext_mech_stage *st,
 	if (st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE)
 		return xdev_ext_socket_bind(st, u);
 	if (st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE ||
-	    u->flags || u->arg0 || u->arg1)
+	    !xdev_ext_socket_config_ok(u))
 		return -EINVAL;
 	sock = sock_from_file(st->file);
 	if (!sock)
@@ -273,6 +376,8 @@ static int xdev_ext_socket_class_bind(struct xdev_ext_mech_stage *st,
 	    (sk->sk_family != AF_INET && sk->sk_family != AF_INET6) ||
 	    sk->sk_protocol != IPPROTO_UDP)
 		return -EPROTONOSUPPORT;
+	if (u->flags && READ_ONCE(sk->sk_state) != TCP_ESTABLISHED)
+  return -ENOTCONN;
 	if (READ_ONCE(sk->sk_shutdown) & RCV_SHUTDOWN)
 		return -ESHUTDOWN;
 	if (udp_test_bit(GRO_ENABLED, sk) || udp_test_bit(ENCAP_ENABLED, sk))
@@ -284,6 +389,8 @@ static int xdev_ext_socket_class_bind(struct xdev_ext_mech_stage *st,
 		return -ENOMEM;
 	ss->depth = xdev_ext_mech_session_depth(st->s);
 	ss->sock = sock;
+ ss->wire_session = u->arg0;
+ ss->mtu = u->arg1;
 	ss->request = kvcalloc(ss->depth, sizeof(*ss->request), GFP_KERNEL);
 	ss->rx = kzalloc(sizeof(*ss->rx), GFP_KERNEL);
 	rx = ss->rx;
@@ -375,6 +482,70 @@ static int xdev_ext_socket_class_submit(struct xdev_ext_mech_stage *st,
 	return 0;
 }
 
+/* Peek bounded metadata, plan, then scatter [header,payload] directly into
+ * the current registered frame. The loaned socket has one reader until STOP;
+ * comparing consumed metadata detects a competing reader instead of publishing
+ * that datagram under the peeked plan. No per-datagram allocation. */
+static int xdev_ext_socket_packet_receive(struct xdev_ext_mech_stage *st,
+ struct xdev_ext_mech_batch *b, struct xdev_ext_socket_request *r)
+{
+ struct xdev_ext_socket_stage *ss = st->priv;
+ struct msghdr msg = {};
+ struct kvec v[2];
+ const struct cred *old;
+ unsigned int budget = 64;
+ int err, count;
+ xdev_ext_socket_fill_info(st, b, &ss->packet);
+ while (r->cursor < r->nr && budget--) {
+  if (READ_ONCE(ss->dead) || !xdev_ext_mech_session_admits(st->s))
+   return -ESHUTDOWN;
+  v[0] = (struct kvec){ss->packet.header, XDEV_EXT_SOCKET_HEADER_SIZE};
+  old = override_creds(ss->cred);
+  count = kernel_recvmsg(ss->sock, &msg, v, 1, v[0].iov_len,
+                        MSG_DONTWAIT | MSG_PEEK | MSG_TRUNC);
+  revert_creds(old);
+  if (count < 0) return count;
+  ss->packet.packet_len = count;
+  err = (u32)count < XDEV_EXT_SOCKET_HEADER_SIZE ? -EBADMSG :
+        xdev_ext_socket_packet_call(st, b, r, XDEV_EXT_SOCKET_PACKET_RX_PLAN);
+  if (!err) err = xdev_ext_socket_packet_admit(ss, b, r);
+  if (!err && (u32)count != XDEV_EXT_SOCKET_HEADER_SIZE + ss->plan.len)
+   err = -EBADMSG;
+  if (err) {
+   /* Foreign/duplicate/out-of-order packet: consume only bounded metadata,
+    * without touching any frame or advancing the expected group. */
+   msg = (struct msghdr){};
+   old = override_creds(ss->cred);
+   count = kernel_recvmsg(ss->sock, &msg, v, 1, v[0].iov_len, MSG_DONTWAIT | MSG_TRUNC);
+   revert_creds(old);
+   if (count < 0) return count;
+   continue;
+  }
+  v[0] = (struct kvec){ss->received_header, XDEV_EXT_SOCKET_HEADER_SIZE};
+  v[1] = r->vec[r->cursor];
+  msg = (struct msghdr){};
+  old = override_creds(ss->cred);
+  count = kernel_recvmsg(ss->sock, &msg, v, 2, v[0].iov_len + v[1].iov_len, MSG_DONTWAIT);
+  revert_creds(old);
+  if (count < 0) return count;
+  if ((u32)count > XDEV_EXT_SOCKET_HEADER_SIZE) {
+   xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_OPS, 1);
+   xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_BYTES,
+                     count - XDEV_EXT_SOCKET_HEADER_SIZE);
+  }
+  if ((msg.msg_flags & MSG_TRUNC) || (size_t)count != v[0].iov_len + v[1].iov_len ||
+      memcmp(ss->received_header, ss->packet.header, XDEV_EXT_SOCKET_HEADER_SIZE))
+   return -EPROTO;
+  err = xdev_ext_socket_packet_call(st, b, r, XDEV_EXT_SOCKET_PACKET_RX_CHECK);
+  if (err) return err;
+  r->cursor++;
+ }
+ if (r->cursor == r->nr) return r->bytes;
+ /* A bounded fairness yield, only when work was consumed, never idle polling. */
+ xdev_ext_mech_stage_kick(st);
+ return -EAGAIN;
+}
+
 static unsigned long xdev_ext_socket_progress(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_socket_stage *ss = st->priv;
@@ -394,10 +565,14 @@ static unsigned long xdev_ext_socket_progress(struct xdev_ext_mech_stage *st)
 		if (err) {
 			xdev_ext_mech_batch_complete_cancelled(slot->batch, slot->ticket, err);
 		} else {
+   if (ss->wire_session) {
+    err = xdev_ext_socket_packet_receive(st, slot->batch, r);
+   } else {
 			old_cred = override_creds(ss->cred);
 			err = kernel_recvmsg(ss->sock, &msg, r->vec, r->nr,
 					     r->bytes, MSG_DONTWAIT);
 			revert_creds(old_cred);
+   }
 			if (err == -EAGAIN)
 				break;
 			if (err >= 0 && (msg.msg_flags & MSG_TRUNC)) {
@@ -406,7 +581,7 @@ static unsigned long xdev_ext_socket_progress(struct xdev_ext_mech_stage *st)
 			} else if (!err) {
 				err = -ENODATA;
 			}
-			if (err > 0) {
+			if (err > 0 && !ss->wire_session) {
 				xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_OPS, 1);
 				xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_BYTES, err);
 			}
