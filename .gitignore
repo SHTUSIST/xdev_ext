@@ -910,3 +910,10 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+!/tests/eval/spdk/
+!/tests/eval/spdk/README.md
+!/tests/eval/spdk/Makefile
+!/tests/eval/spdk/bench_nvme_pipeline.c
+!/tests/eval/spdk/build.py
+!/tests/eval/spdk/run.py
+!/tests/eval/spdk/test_contract.py
