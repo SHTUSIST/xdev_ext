@@ -68,6 +68,7 @@ struct xdev_ext_mech_session {
  struct xdev_ext_mech_life *life;
  __u8 *transform_owner;
  struct xdev_ext_mech_stage st[1];
+ struct xdev_ext_mech_stage_uapi plan[1];
  u32 frames, depth, nr_stages; u64 start_seq; bool start_to_user;
  struct list_head open,retry;
  struct kthread_work stop_work,kick_work,reap_work,retry_work,progress_work;
@@ -190,7 +191,7 @@ static void setup_n(struct xdev_ext_mech_session *s,struct io_xdev_ext_umem_mech
  s->st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;s->st[0].cls=&class_callbacks;s->nr_stages=1;s->start_recycle=true;s->start_return_pending=true;
  s->layout=(struct xdev_ext_mech_layout){.frame_size=1,.group_bytes=1,.seg_len=1};
  s->frames=1;s->start_left=1;s->evfd=1;event_session=s;events=0;stopwork_queued=0;
- for(u32 i=0;i<lent;i++) {u64 token;assert(!xdev_ext_mech_life_begin_produce(&s->life[i],false,&token));assert(!xdev_ext_mech_life_publish(&s->life[i],token,1));}
+ for(u32 i=0;i<lent;i++) {u64 token;assert(!xdev_ext_mech_life_claim(&s->life[i],0,&token));assert(!xdev_ext_mech_life_publish(&s->life[i],token,1,1));}
  for(u32 i=0;i<lent;i++){struct xdev_ext_mech_frame f={.index=i};state[i]=XDEV_EXT_MECH_F_K_FREE;ops.recycle(&s->pool,&f);}
  struct xdev_ext_mech_notify_arm arm={.session_id=1,.batches_target=groups};assert(!xdev_ext_mech_notify_arm(&s->notify,&arm));
 }

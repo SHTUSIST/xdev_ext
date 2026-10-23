@@ -2,6 +2,7 @@
 /* Exercise production portable helpers; this fixture is an event schedule,
  * not an allocator or replacement implementation of the batch state machine.
  */
+/* L11: H2D final put recycles FREE before the D2H producer claims it. */
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -63,15 +64,14 @@ static bool submit_stage(struct batch_fixture *b)
 	REQUIRE(xdev_ext_mech_batch_step(&b->state, XDEV_EXT_MECH_EV_SUBMIT, 0) == 0);
 	REQUIRE(xdev_ext_mech_batch_step(&b->state, XDEV_EXT_MECH_EV_RELEASE, 0) == -EINVAL);
 	if (b->state.stage == 0 || b->state.stage == 2)
-		REQUIRE(xdev_ext_mech_life_begin_produce(&b->frame,
-			b->state.stage == 2, &b->life_token) == 0);
+		REQUIRE(xdev_ext_mech_life_claim(&b->frame, b->state.stage, &b->life_token) == 0);
 	else
-		REQUIRE(xdev_ext_mech_life_begin_consume(&b->frame, &b->life_token) == 0);
-	REQUIRE(xdev_ext_mech_life_begin_produce(&b->frame, false, &ignored) == -EBUSY);
-	REQUIRE(xdev_ext_mech_life_release(&b->frame, b->life_token) == -EBUSY);
+		REQUIRE(xdev_ext_mech_life_acquire(&b->frame, b->state.stage, 0, &b->life_token) == 0);
+	REQUIRE(xdev_ext_mech_life_claim(&b->frame, 0, &ignored) == -EBUSY);
+	REQUIRE(xdev_ext_mech_life_release(&b->frame, xdev_ext_mech_life_claim_gen(b->life_token)) == -EBUSY);
 	if (b->retired_life) {
 		__u64 ctrl = b->frame.ctrl;
-		REQUIRE(xdev_ext_mech_life_release(&b->frame, b->retired_life) == -ESTALE);
+		REQUIRE(xdev_ext_mech_life_release(&b->frame, b->retired_life) == -EBUSY);
 		REQUIRE(b->frame.ctrl == ctrl);
 	}
 	REQUIRE(xdev_ext_mech_completion_begin(&b->completion, &b->ticket) == 0);
@@ -115,9 +115,9 @@ static bool complete_stage(struct batch_fixture *b, bool *finished)
 		REQUIRE(err == 0);
 	}
 	if (stage == 0 || stage == 2)
-		REQUIRE(xdev_ext_mech_life_publish(&b->frame, b->life_token, BYTES) == 0);
+		REQUIRE(xdev_ext_mech_life_publish(&b->frame, b->life_token, 1, BYTES) == 0);
 	else
-		REQUIRE(xdev_ext_mech_life_complete_consume(&b->frame, b->life_token) == 0);
+		REQUIRE(xdev_ext_mech_life_put(&b->frame, b->life_token) == XDEV_EXT_MECH_L_FREED);
 	REQUIRE(xdev_ext_mech_completion_publish(&b->completion, b->ticket, status) == 0);
 	REQUIRE(xdev_ext_mech_completion_consume(&b->completion, b->ticket, &result) == 0);
 	REQUIRE(result == 0);
@@ -129,8 +129,8 @@ static bool complete_stage(struct batch_fixture *b, bool *finished)
 	if (b->state.state != XDEV_EXT_MECH_B_DONE)
 		return submit_stage(b);
 	REQUIRE(stage == 3);
-	REQUIRE(xdev_ext_mech_life_release(&b->frame, b->life_token) == 0);
-	b->retired_life = b->life_token;
+	REQUIRE(xdev_ext_mech_life_phase(&b->frame) == XDEV_EXT_MECH_L_FREE);
+	b->retired_life = xdev_ext_mech_life_claim_gen(b->life_token);
 	REQUIRE(xdev_ext_mech_batch_step(&b->state, XDEV_EXT_MECH_EV_RELEASE, 0) == 0);
 	*finished = true;
 	return true;
@@ -213,7 +213,7 @@ static bool ambiguous_keeps_slot(void)
 	for (unsigned int retry = 0; retry < 256; retry++) {
 		REQUIRE(xdev_ext_mech_batch_step(&b.state, XDEV_EXT_MECH_EV_RELEASE, 0) == -EINVAL);
 		REQUIRE(xdev_ext_mech_batch_step(&b.state, XDEV_EXT_MECH_EV_READY, 0) == -EINVAL);
-		REQUIRE(xdev_ext_mech_life_release(&b.frame, b.life_token) == -EBUSY);
+		REQUIRE(xdev_ext_mech_life_release(&b.frame, xdev_ext_mech_life_claim_gen(b.life_token)) == -EBUSY);
 		REQUIRE(xdev_ext_mech_completion_claim(&b.completion, b.ticket) == -ESTALE);
 		REQUIRE(xdev_ext_mech_frame_move(&frame_state, XDEV_EXT_MECH_F_SEQUESTERED,
 			XDEV_EXT_MECH_F_K_FREE) == -EINVAL);

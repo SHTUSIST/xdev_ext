@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
+/* L11: native CE classification still gates four-state producer publication. */
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -12,13 +13,13 @@ static unsigned int checks, failures;
 static void rejected_success(bool submitted, __u64 bytes)
 {
 	struct xdev_ext_mech_life frame;
-	__u64 token;
+	__u64 token = 0;
 	int status, err;
 	__u32 outcome;
 	bool quarantine;
 
 	xdev_ext_mech_life_init(&frame);
-	CHECK(xdev_ext_mech_life_begin_produce(&frame, false, &token) == 0);
+	CHECK(xdev_ext_mech_life_claim(&frame, 0, &token) == 0);
 	status = xdev_ext_ce_completion_status(0, submitted, bytes, 8192);
 	CHECK(status == -EIO);
 	outcome = xdev_ext_ce_classify(status, submitted);
@@ -28,7 +29,7 @@ static void rejected_success(bool submitted, __u64 bytes)
 	CHECK(err != 0);
 	/* The success publication branch must never become reachable. */
 	if (outcome == XDEV_EXT_CE_OK)
-		CHECK(xdev_ext_mech_life_publish(&frame, token, 8192) == 0);
+		CHECK(xdev_ext_mech_life_publish(&frame, token, 1, 8192) == 0);
 	CHECK(xdev_ext_mech_life_phase(&frame) == XDEV_EXT_MECH_L_IO_PENDING);
 	CHECK(frame.valid_len == 0);
 }

@@ -15,7 +15,9 @@ FUNCTIONS = (
     'xdev_ext_mech_transform_alias_free',
     'xdev_ext_mech_transform_reserve', 'xdev_ext_mech_transform_unreserve',
     'xdev_ext_mech_transform_alias', 'xdev_ext_mech_batch_transform_begin',
-    'xdev_ext_mech_batch_completion_claim', 'xdev_ext_mech_batch_completion_publish',
+    'xdev_ext_mech_batch_completion_claim', 'xdev_ext_mech_sync_for_cpu',
+    'xdev_ext_mech_trim_produced', 'xdev_ext_mech_batch_handoff',
+    'xdev_ext_mech_batch_completion_publish',
     'xdev_ext_mech_batch_transform_complete', 'xdev_ext_mech_batch_transform_produced',
     'xdev_ext_mech_transform_landed', 'xdev_ext_mech_transform_undo', 'xdev_ext_mech_submit',
 )

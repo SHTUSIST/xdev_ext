@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Host-only tests of the public lifecycle and native-completion contracts. */
+/* L11: four-state reference release replaces per-claim generations; native
+ * completion tickets still serialize publication and reject duplicate callbacks. */
 #include <errno.h>
 #include <pthread.h>
 #include <sched.h>
@@ -34,43 +35,32 @@ static bool unchanged(const struct xdev_ext_mech_life *life, __u64 ctrl, __u32 l
 static bool ready(struct xdev_ext_mech_life *life, __u32 len, __u64 *token)
 {
 	xdev_ext_mech_life_init(life);
-	return !xdev_ext_mech_life_begin_produce(life, false, token) &&
-	       !xdev_ext_mech_life_publish(life, *token, len);
+	return !xdev_ext_mech_life_claim(life, 0, token) &&
+	       !xdev_ext_mech_life_publish(life, *token, 1, len);
 }
 
 static bool test_serialized_chain(void)
 {
-	struct xdev_ext_mech_life life;
-	__u64 producer, consumer, overwrite;
-
-	xdev_ext_mech_life_init(&life);
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_FREE);
-	CHECK(xdev_ext_mech_life_token(&life) == 0);
-	CHECK(life.valid_len == 0);
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &producer));
-	CHECK(producer != 0);
-	CHECK(xdev_ext_mech_life_token(&life) == producer);
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_IO_PENDING);
-	CHECK(!xdev_ext_mech_life_publish(&life, producer, 4093));
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_READY);
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &consumer));
-	CHECK(consumer > producer);
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_OUT_PENDING);
-	/* Metadata is read only after the consumer owns OUT_PENDING. */
-	CHECK(life.valid_len == 4093);
-	CHECK(!xdev_ext_mech_life_complete_consume(&life, consumer));
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_READY);
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, true, &overwrite));
-	CHECK(overwrite > consumer);
-	CHECK(!xdev_ext_mech_life_publish(&life, overwrite, 0));
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &consumer));
-	CHECK(life.valid_len == 0);
-	CHECK(!xdev_ext_mech_life_complete_consume(&life, consumer));
-	CHECK(!xdev_ext_mech_life_release(&life, consumer));
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_FREE);
-	/* Terminal release is idempotent only for the same generation. */
-	CHECK(!xdev_ext_mech_life_release(&life, consumer));
-	return true;
+ struct xdev_ext_mech_life life;__u64 producer,consumer,overwrite;
+ xdev_ext_mech_life_init(&life);
+ CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE && !xdev_ext_mech_life_gen(&life));
+ CHECK(!xdev_ext_mech_life_claim(&life,0,&producer));
+ CHECK(xdev_ext_mech_life_claim_owner(producer)==0 && !xdev_ext_mech_life_claim_gen(producer));
+ CHECK(!xdev_ext_mech_life_publish(&life,producer,1,4093));
+ CHECK(!xdev_ext_mech_life_acquire(&life,1,0,&consumer));
+ CHECK(xdev_ext_mech_life_claim_gen(consumer)==xdev_ext_mech_life_claim_gen(producer));
+ CHECK(life.valid_len==4093 && xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_OUT_PENDING);
+ CHECK(xdev_ext_mech_life_put(&life,consumer)==XDEV_EXT_MECH_L_FREED);
+ CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE && xdev_ext_mech_life_gen(&life)==1);
+ CHECK(!xdev_ext_mech_life_claim(&life,2,&overwrite));
+ CHECK(xdev_ext_mech_life_claim_gen(overwrite)==1);
+ CHECK(!xdev_ext_mech_life_publish(&life,overwrite,1,0));
+ CHECK(!xdev_ext_mech_life_acquire(&life,3,0,&consumer));
+ CHECK(!life.valid_len);
+ CHECK(xdev_ext_mech_life_put(&life,consumer)==XDEV_EXT_MECH_L_FREED);
+ CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE && xdev_ext_mech_life_gen(&life)==2);
+ CHECK(xdev_ext_mech_life_release(&life,2)==-ENOENT);
+ return true;
 }
 
 static bool test_illegal_edges_do_not_mutate(void)
@@ -80,33 +70,33 @@ static bool test_illegal_edges_do_not_mutate(void)
 	__u32 len;
 
 	xdev_ext_mech_life_init(&life);
-	CHECK(xdev_ext_mech_life_publish(&life, 0, 23) < 0);
-	CHECK(xdev_ext_mech_life_complete_consume(&life, 0) < 0);
+	CHECK(xdev_ext_mech_life_publish(&life, 0, 1, 23) < 0);
+	CHECK(xdev_ext_mech_life_put(&life, 0) < 0);
 	CHECK(xdev_ext_mech_life_release(&life, 0) < 0);
-	CHECK(xdev_ext_mech_life_begin_consume(&life, &other) < 0);
-	CHECK(xdev_ext_mech_life_begin_produce(&life, true, &other) < 0);
+	CHECK(xdev_ext_mech_life_acquire(&life, 1, 0, &other) < 0);
+	CHECK(xdev_ext_mech_life_claim(&life, XDEV_EXT_MECH_L_OWNER_MAX+1, &other)==-EINVAL);
 	CHECK(life.valid_len == 0);
-	CHECK(xdev_ext_mech_life_token(&life) == 0);
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &token));
+	CHECK(xdev_ext_mech_life_gen(&life) == 0);
+	CHECK(!xdev_ext_mech_life_claim(&life, 0, &token));
 	ctrl = life.ctrl;
 	len = life.valid_len;
 	CHECK(xdev_ext_mech_life_release(&life, token) < 0);
-	CHECK(xdev_ext_mech_life_complete_consume(&life, token) < 0);
-	CHECK(xdev_ext_mech_life_begin_consume(&life, &other) < 0);
-	CHECK(xdev_ext_mech_life_begin_produce(&life, false, &other) < 0);
-	CHECK(xdev_ext_mech_life_begin_produce(&life, true, &other) < 0);
+	CHECK(xdev_ext_mech_life_put(&life, token) < 0);
+	CHECK(xdev_ext_mech_life_acquire(&life, 1, 0, &other) < 0);
+	CHECK(xdev_ext_mech_life_claim(&life, 0, &other) < 0);
+	CHECK(xdev_ext_mech_life_claim(&life, 0, &other) < 0);
 	CHECK(unchanged(&life, ctrl, len));
-	CHECK(!xdev_ext_mech_life_publish(&life, token, UINT32_MAX));
+	CHECK(!xdev_ext_mech_life_publish(&life, token, 1, UINT32_MAX));
 	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_begin_produce(&life, false, &other) < 0);
-	CHECK(xdev_ext_mech_life_complete_consume(&life, token) < 0);
+	CHECK(xdev_ext_mech_life_claim(&life, 0, &other) < 0);
+	CHECK(xdev_ext_mech_life_put(&life, token) < 0);
 	CHECK(unchanged(&life, ctrl, UINT32_MAX));
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &token));
+	CHECK(!xdev_ext_mech_life_acquire(&life, 1, 0, &token));
 	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_publish(&life, token, 17) < 0);
+	CHECK(xdev_ext_mech_life_publish(&life, token, 1, 17) < 0);
 	CHECK(xdev_ext_mech_life_release(&life, token) < 0);
-	CHECK(xdev_ext_mech_life_begin_consume(&life, &other) < 0);
-	CHECK(xdev_ext_mech_life_begin_produce(&life, true, &other) < 0);
+	CHECK(xdev_ext_mech_life_acquire(&life, 1, 0, &other) < 0);
+	CHECK(xdev_ext_mech_life_claim(&life, 0, &other) < 0);
 	CHECK(unchanged(&life, ctrl, UINT32_MAX));
 	return true;
 }
@@ -118,13 +108,13 @@ static bool test_duplicate_publish_preserves_metadata(void)
 
 	CHECK(ready(&life, 123, &token));
 	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_publish(&life, token, 456) < 0);
+	CHECK(xdev_ext_mech_life_publish(&life, token, 1, 456) < 0);
 	CHECK(unchanged(&life, ctrl, 123));
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &token));
+	CHECK(!xdev_ext_mech_life_acquire(&life, 1, 0, &token));
 	CHECK(life.valid_len == 123);
-	CHECK(!xdev_ext_mech_life_complete_consume(&life, token));
+	CHECK(xdev_ext_mech_life_put(&life, token)==XDEV_EXT_MECH_L_FREED);
 	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_complete_consume(&life, token) < 0);
+	CHECK(xdev_ext_mech_life_put(&life, token) < 0);
 	CHECK(unchanged(&life, ctrl, 123));
 	return true;
 }
@@ -137,88 +127,76 @@ static bool test_stale_after_reuse(void)
 	unsigned int i;
 
 	CHECK(ready(&life, 100, &old_producer));
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &old_consumer));
-	CHECK(!xdev_ext_mech_life_complete_consume(&life, old_consumer));
-	CHECK(!xdev_ext_mech_life_release(&life, old_consumer));
+	CHECK(!xdev_ext_mech_life_acquire(&life, 1, 0, &old_consumer));
+	CHECK(xdev_ext_mech_life_put(&life, old_consumer)==XDEV_EXT_MECH_L_FREED);
 	for (i = 0; i < 32; i++) {
-		CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &current));
+		CHECK(!xdev_ext_mech_life_claim(&life, 0, &current));
 		CHECK(current > old_consumer);
 		ctrl = life.ctrl;
 		len = life.valid_len;
-		CHECK(xdev_ext_mech_life_publish(&life, old_producer, 9999) < 0);
-		CHECK(xdev_ext_mech_life_rollback(&life, old_producer,
-					 XDEV_EXT_MECH_L_FREE) < 0);
-		CHECK(xdev_ext_mech_life_release(&life, old_consumer) < 0);
+		CHECK(xdev_ext_mech_life_publish(&life, old_producer, 1, 9999) < 0);
+		CHECK(xdev_ext_mech_life_rollback(&life, old_producer) < 0);
+		CHECK(xdev_ext_mech_life_release(&life, xdev_ext_mech_life_claim_gen(old_consumer)) < 0);
 		CHECK(unchanged(&life, ctrl, len));
-		CHECK(!xdev_ext_mech_life_publish(&life, current, i + 1));
+		CHECK(!xdev_ext_mech_life_publish(&life, current, 1, i + 1));
 		ctrl = life.ctrl;
-		CHECK(xdev_ext_mech_life_release(&life, old_consumer) < 0);
+		CHECK(xdev_ext_mech_life_release(&life, xdev_ext_mech_life_claim_gen(old_consumer)) < 0);
 		CHECK(unchanged(&life, ctrl, i + 1));
-		CHECK(!xdev_ext_mech_life_begin_consume(&life, &current));
+		CHECK(!xdev_ext_mech_life_acquire(&life, 1, 0, &current));
 		CHECK(life.valid_len == i + 1);
 		ctrl = life.ctrl;
-		CHECK(xdev_ext_mech_life_complete_consume(&life, old_consumer) < 0);
-		CHECK(xdev_ext_mech_life_rollback(&life, old_consumer,
-					 XDEV_EXT_MECH_L_READY) < 0);
+		CHECK(xdev_ext_mech_life_put(&life, old_consumer) < 0);
+		CHECK(xdev_ext_mech_life_rollback(&life, old_consumer) < 0);
 		CHECK(unchanged(&life, ctrl, i + 1));
-		CHECK(!xdev_ext_mech_life_complete_consume(&life, current));
-		CHECK(!xdev_ext_mech_life_release(&life, current));
+		CHECK(xdev_ext_mech_life_put(&life, current)==XDEV_EXT_MECH_L_FREED);
 	}
 	return true;
 }
 
 static bool test_preaccept_rollback(void)
 {
-	struct xdev_ext_mech_life life;
-	__u64 token, retry, ctrl;
-
-	xdev_ext_mech_life_init(&life);
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &token));
-	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_OUT_PENDING) < 0);
-	CHECK(unchanged(&life, ctrl, 0));
-	CHECK(!xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_FREE));
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_FREE);
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &retry));
-	CHECK(retry > token);
-	CHECK(xdev_ext_mech_life_publish(&life, token, 33) < 0);
-	CHECK(!xdev_ext_mech_life_publish(&life, retry, 2048));
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, true, &token));
-	CHECK(!xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_READY));
-	CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_READY);
-	CHECK(life.valid_len == 2048);
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &token));
-	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_FREE) < 0);
-	CHECK(unchanged(&life, ctrl, 2048));
-	CHECK(!xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_READY));
-	CHECK(!xdev_ext_mech_life_begin_consume(&life, &retry));
-	CHECK(retry > token);
-	CHECK(xdev_ext_mech_life_complete_consume(&life, token) < 0);
-	CHECK(life.valid_len == 2048);
-	return true;
+ struct xdev_ext_mech_life life;struct xdev_ext_mech_completion completion;
+ __u64 token,retry,ctrl,old_ticket,ticket;
+ xdev_ext_mech_life_init(&life);xdev_ext_mech_completion_init(&completion);
+ CHECK(!xdev_ext_mech_life_claim(&life,0,&token));
+ CHECK(!xdev_ext_mech_completion_begin(&completion,&old_ticket));
+ CHECK(!xdev_ext_mech_completion_cancel(&completion,old_ticket));
+ CHECK(!xdev_ext_mech_life_rollback(&life,token));
+ CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE && !xdev_ext_mech_life_gen(&life));
+ CHECK(xdev_ext_mech_life_publish(&life,token,1,33)==-ESTALE);
+ CHECK(!xdev_ext_mech_life_claim(&life,0,&retry));
+ CHECK(retry==token); /* Preaccept undo has no completed version to recycle. */
+ CHECK(!xdev_ext_mech_completion_begin(&completion,&ticket));
+ CHECK(ticket>old_ticket && xdev_ext_mech_completion_claim(&completion,old_ticket)==-ESTALE);
+ CHECK(!xdev_ext_mech_completion_claim(&completion,ticket));
+ CHECK(!xdev_ext_mech_life_publish(&life,retry,1,2048));
+ CHECK(xdev_ext_mech_life_claim(&life,0,&token)==-EBUSY);
+ CHECK(!xdev_ext_mech_life_acquire(&life,1,0,&token));ctrl=life.ctrl;
+ CHECK(xdev_ext_mech_life_rollback(&life,retry)==-ESTALE);
+ CHECK(unchanged(&life,ctrl,2048));
+ CHECK(!xdev_ext_mech_life_rollback(&life,token));
+ CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_READY && xdev_ext_mech_life_refs(&life)==1);
+ CHECK(xdev_ext_mech_life_put(&life,token)==-ESTALE);
+ CHECK(!xdev_ext_mech_life_acquire(&life,1,0,&retry));CHECK(retry==token);
+ return true;
 }
 
 static bool test_generation_exhaustion(void)
 {
-	struct xdev_ext_mech_life life;
-	__u64 token, ctrl;
-
-	xdev_ext_mech_life_init(&life);
-	life.ctrl = ((XDEV_EXT_MECH_L_GEN_MAX - 1) << PHASE_BITS) | XDEV_EXT_MECH_L_FREE;
-	life.valid_len = 91;
-	CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &token));
-	CHECK(token == XDEV_EXT_MECH_L_GEN_MAX);
-	CHECK(!xdev_ext_mech_life_rollback(&life, token, XDEV_EXT_MECH_L_FREE));
-	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_begin_produce(&life, false, &token) == -EOVERFLOW);
-	CHECK(unchanged(&life, ctrl, 91));
-	life.ctrl = (XDEV_EXT_MECH_L_GEN_MAX << PHASE_BITS) | XDEV_EXT_MECH_L_READY;
-	ctrl = life.ctrl;
-	CHECK(xdev_ext_mech_life_begin_produce(&life, true, &token) == -EOVERFLOW);
-	CHECK(xdev_ext_mech_life_begin_consume(&life, &token) == -EOVERFLOW);
-	CHECK(unchanged(&life, ctrl, 91));
-	return true;
+ struct xdev_ext_mech_life life;__u64 token,ctrl;
+ xdev_ext_mech_life_init(&life);
+ life.ctrl=(XDEV_EXT_MECH_L_GEN_MAX-1)<<XDEV_EXT_MECH_L_GEN_SHIFT;life.valid_len=91;
+ CHECK(!xdev_ext_mech_life_claim(&life,0,&token));
+ CHECK(xdev_ext_mech_life_claim_gen(token)==XDEV_EXT_MECH_L_GEN_MAX-1);
+ CHECK(!xdev_ext_mech_life_rollback(&life,token));
+ CHECK(xdev_ext_mech_life_gen(&life)==XDEV_EXT_MECH_L_GEN_MAX-1);
+ CHECK(!xdev_ext_mech_life_claim(&life,0,&token));
+ CHECK(!xdev_ext_mech_life_publish(&life,token,1,91));
+ CHECK(!xdev_ext_mech_life_acquire(&life,1,0,&token));
+ CHECK(xdev_ext_mech_life_put(&life,token)==XDEV_EXT_MECH_L_FREED);
+ CHECK(xdev_ext_mech_life_gen(&life)==XDEV_EXT_MECH_L_GEN_MAX);ctrl=life.ctrl;
+ CHECK(xdev_ext_mech_life_claim(&life,0,&token)==-EOVERFLOW);
+ CHECK(unchanged(&life,ctrl,91));return true;
 }
 
 enum race_op {
@@ -232,7 +210,7 @@ struct racer {
 	struct xdev_ext_mech_life *life;
 	struct xdev_ext_mech_completion *completion;
 	enum race_op op;
-	__u64 token;
+	__u64 token, claim_ticket;
 	unsigned int index;
 	int rc;
 	int result;
@@ -245,19 +223,22 @@ static void *race(void *arg)
 	pthread_barrier_wait(r->barrier);
 	switch (r->op) {
 	case BEGIN_PRODUCE:
-		r->rc = xdev_ext_mech_life_begin_produce(r->life, false, &r->token);
+		r->rc = xdev_ext_mech_life_claim(r->life, 0, &r->token);
 		break;
 	case BEGIN_CONSUME:
-		r->rc = xdev_ext_mech_life_begin_consume(r->life, &r->token);
+		r->rc = xdev_ext_mech_life_acquire(r->life, 1, 0, &r->token);
 		break;
 	case PUBLISH:
-		r->rc = xdev_ext_mech_life_publish(r->life, r->token, 1000 + r->index);
+		r->rc = xdev_ext_mech_completion_claim(r->completion, r->claim_ticket);
+		if (!r->rc)
+			r->rc = xdev_ext_mech_life_publish(r->life, r->token, 1, 1000 + r->index);
 		break;
 	case COMPLETE_CONSUME:
-		r->rc = xdev_ext_mech_life_complete_consume(r->life, r->token);
+		r->rc = xdev_ext_mech_life_put(r->life, r->token);
+		if (r->rc == XDEV_EXT_MECH_L_FREED) r->rc = 0;
 		break;
 	case ROLLBACK:
-		r->rc = xdev_ext_mech_life_rollback(r->life, r->token, XDEV_EXT_MECH_L_FREE);
+		r->rc = xdev_ext_mech_life_rollback(r->life, r->token);
 		break;
 	case COMPLETION_BEGIN:
 		r->rc = xdev_ext_mech_completion_begin(r->completion, &r->token);
@@ -297,6 +278,7 @@ static bool contend(struct racer racers[RACERS], enum race_op op,
 		racers[i] = (struct racer) {
 			.barrier = &barrier, .op = op, .life = life,
 			.completion = completion, .token = token, .index = i,
+            .claim_ticket = completion ? completion->ctrl >> PHASE_BITS : 0,
 			.result = -987654321,
 		};
 		/* Failure is fatal: a partially populated barrier cannot progress. */
@@ -324,7 +306,8 @@ static bool test_lifecycle_competition(void)
 {
 	struct xdev_ext_mech_life life;
 	struct racer racers[RACERS];
-	__u64 token;
+    struct xdev_ext_mech_completion completion;
+	__u64 token, ticket;
 	unsigned int round, winner = 0, published_winner;
 
 	for (round = 0; round < RACE_ROUNDS; round++) {
@@ -332,14 +315,16 @@ static bool test_lifecycle_competition(void)
 		CHECK(contend(racers, BEGIN_PRODUCE, &life, NULL, 0, &winner));
 		token = racers[winner].token;
 		CHECK(token != 0);
-		CHECK(contend(racers, PUBLISH, &life, NULL, token, &published_winner));
+		xdev_ext_mech_completion_init(&completion);
+        CHECK(!xdev_ext_mech_completion_begin(&completion, &ticket));
+        CHECK(contend(racers, PUBLISH, &life, &completion, token, &published_winner));
 		CHECK(contend(racers, BEGIN_CONSUME, &life, NULL, token, &winner));
-		/* The winner of publish alone determines the metadata. */
+		/* Only the native completion-ticket winner may publish metadata. */
 		CHECK(life.valid_len == 1000 + published_winner);
 		token = racers[winner].token;
 		CHECK(contend(racers, COMPLETE_CONSUME, &life, NULL, token, &winner));
-		CHECK(!xdev_ext_mech_life_release(&life, token));
-		CHECK(!xdev_ext_mech_life_begin_produce(&life, false, &token));
+		CHECK(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE);
+		CHECK(!xdev_ext_mech_life_claim(&life, 0, &token));
 		CHECK(contend(racers, ROLLBACK, &life, NULL, token, &winner));
 		CHECK(xdev_ext_mech_life_phase(&life) == XDEV_EXT_MECH_L_FREE);
 	}
@@ -377,7 +362,7 @@ static void *read_publications(void *arg)
 	for (i = 0; i < PUBLICATIONS; i++) {
 		struct publication *slot = &run->slots[i];
 
-		while (xdev_ext_mech_life_begin_consume(&slot->life, &consumer)) {
+		while (xdev_ext_mech_life_acquire(&slot->life, 1, 0, &consumer)) {
 			if (!(++spins % 1024)) {
 				if (deadline_passed(&start))
 					return NULL;
@@ -389,7 +374,7 @@ static void *read_publications(void *arg)
 		for (j = 0; j < 4; j++)
 			if (slot->payload[j] != ((__u64)i << 32 | (j + 1)))
 				return NULL;
-		if (xdev_ext_mech_life_complete_consume(&slot->life, consumer))
+		if (xdev_ext_mech_life_put(&slot->life, consumer) != XDEV_EXT_MECH_L_FREED)
 			return NULL;
 	}
 	run->ok = true;
@@ -407,7 +392,7 @@ static bool test_consumer_acquires_metadata(void)
 	CHECK(run.slots != NULL);
 	for (i = 0; i < PUBLICATIONS; i++) {
 		xdev_ext_mech_life_init(&run.slots[i].life);
-		CHECK(!xdev_ext_mech_life_begin_produce(&run.slots[i].life, false,
+		CHECK(!xdev_ext_mech_life_claim(&run.slots[i].life, 0,
 						  &run.slots[i].token));
 	}
 	CHECK(!pthread_create(&reader, NULL, read_publications, &run));
@@ -415,7 +400,7 @@ static bool test_consumer_acquires_metadata(void)
 		/* These ordinary stores must become visible via publish/acquire. */
 		for (j = 0; j < 4; j++)
 			run.slots[i].payload[j] = ((__u64)i << 32) | (j + 1);
-		if (xdev_ext_mech_life_publish(&run.slots[i].life, run.slots[i].token, i + 1)) {
+		if (xdev_ext_mech_life_publish(&run.slots[i].life, run.slots[i].token, 1, i + 1)) {
 			published = false;
 			break;
 		}
@@ -502,9 +487,9 @@ static bool test_completion_generation_exhaustion(void)
 
 	xdev_ext_mech_completion_init(&completion);
 	/* init establishes the private IDLE phase; preserve its low bits. */
-	completion.ctrl |= (XDEV_EXT_MECH_L_GEN_MAX - 1) << PHASE_BITS;
+	completion.ctrl |= (XDEV_EXT_MECH_C_GEN_MAX - 1) << PHASE_BITS;
 	CHECK(!xdev_ext_mech_completion_begin(&completion, &token));
-	CHECK(token == XDEV_EXT_MECH_L_GEN_MAX);
+	CHECK(token == XDEV_EXT_MECH_C_GEN_MAX);
 	CHECK(!xdev_ext_mech_completion_cancel(&completion, token));
 	ctrl = completion.ctrl;
 	CHECK(xdev_ext_mech_completion_begin(&completion, &token) == -EOVERFLOW);
