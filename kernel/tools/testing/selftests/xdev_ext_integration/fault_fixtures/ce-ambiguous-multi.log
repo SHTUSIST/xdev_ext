@@ -1,0 +1,28 @@
+[    0.000000] Linux version 6.18.0-xdev-ext synthetic fixture, never a guest run
+XDEV_EXT_ZC_FAULT_EXPECT campaign=ce-ambiguous-multi findings=E2E-05 outcome=multi-group-quarantine-retained retention=required ce_fail_mode=ambiguous ce_delay_us=10000 destination=writable
+XDEV_EXT_ZC_FAULT_ENV campaign=ce-ambiguous-multi groups=4 depth=2
+XDEV_EXT_ZC_FAULT_PINS phase=before acquired=1000 released=1000 mlocked_kb=0
+XDEV_EXT_ZC_FAULT_CE_CONFIG phase=campaign fail_mode=ambiguous delay_us=10000
+XDEV_EXT_ZC_FAULT_LOG_BEGIN role=SRC exit=1
+XDEV_EXT_MECH_READY mode=source session=31 frames=2 seg_len=4096 xsk=none
+XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1
+XDEV_EXT_MECH_CE_SIM=FAIL chain=d
+XDEV_EXT_MECH_STATS session=31 state=ERROR last_err=-EIO batches_done=0 batches_abort=2 rejects=0 recycled=0 held=0 sequestered=4 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,0,0,0 completed=2,0,0,0
+XDEV_EXT_ZC_FAULT_LOG_END role=SRC
+[   12.500000] xdev_ext_mech: session 31 quarantined, inflight=0 sequestered=2; 3 references and 4 frames parked in all
+XDEV_EXT_ZC_FAULT_CE_CONFIG phase=after fail_mode=none delay_us=10000
+XDEV_EXT_ZC_FAULT_LOG_BEGIN role=AFTER exit=0
+XDEV_EXT_MECH_READY mode=source session=99 frames=2 seg_len=4096 xsk=none
+XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1
+XDEV_EXT_MECH_CE_SIM=PASS chain=a
+XDEV_EXT_MECH_STATS session=99 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=4 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=4 submitted=4,4,4,4 completed=4,4,4,4
+XDEV_EXT_ZC_FAULT_LOG_END role=AFTER
+XDEV_EXT_ZC_FAULT_SESSION role=SRC session=31 state=ZOMBIE inflight=0 sequestered=4
+XDEV_EXT_ZC_FAULT_SESSION role=AFTER session=99 state=FREED
+XDEV_EXT_ZC_FAULT_CE_SIM_STATS accepted=10 completed=10 pending=0 peak_pending=2 submit_before_first_complete=2
+XDEV_EXT_ZC_FAULT_CE_REFS refcnt=1 settled=0
+XDEV_EXT_ZC_FAULT_CE_UNLOAD result=refused
+XDEV_EXT_ZC_FAULT_PINS phase=after acquired=9004 released=9000 mlocked_kb=0
+XDEV_EXT_ZC_FAULT_TRACE copy_calls=0 zc_calls=0
+XDEV_EXT_ZC_FAULT_CAMPAIGN_DONE campaign=ce-ambiguous-multi
+XDEV_EXT_ZC_FAULT_GUEST_EXIT=0

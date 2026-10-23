@@ -906,3 +906,7 @@
 !/tests/eval/userspace_orchestrator/test_uo_core.c
 !/tests/eval/userspace_orchestrator/uo_bench.c
 !/tests/eval/userspace_orchestrator/uo_core.h
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
+!/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
