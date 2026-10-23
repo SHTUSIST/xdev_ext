@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
-/* v3 protocol glue; C owns admission, retained frames and native custody. */
+/* v3 protocol glue; C owns admission, retained frames and native custody.
+ * C also owns the payload CRC32C, once per direction: it writes the TX CRC
+ * after its identity check and verifies the RX CRC before this program runs,
+ * so neither callback reads payload bytes. */
 #define BPF_NO_KFUNC_PROTOTYPES
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
@@ -29,7 +32,7 @@ SEC("struct_ops/rel_afxdp_build")
 __s32 BPF_PROG(rel_afxdp_build,const struct xdev_ext_mech_ctx *ctxm)
 {
  const struct xdev_ext_afxdp_reliable_info *in;
- __u32 i,crc;
+ __u32 i;
  int k;
  (void)ctx;
  in=(const void *)bpf_xdev_ext_info(ctxm,sizeof(*in));
@@ -52,10 +55,8 @@ __s32 BPF_PROG(rel_afxdp_build,const struct xdev_ext_mech_ctx *ctxm)
    m.total_len=in->base.l.group_bytes;m.index=i;m.count=in->base.nr_frames;
    m.relative_offset=i*in->base.l.seg_len;m.payload_len=f->data_len;
   }
+  /* The encoded header leaves the CRC field zero for C to fill. */
   if(rel_packet(pkt,&in->base.peer,&m)) return XDEV_EXT_MP_BUILD_ABORT;
-  crc=bpf_xdev_ext_crc32c(pkt+42,64,0xffffffffU);
-  if(m.payload_len) crc=bpf_xdev_ext_frame_crc32c(ctxm,i,f->data_off,f->data_len,crc);
-  xdev_ext_rel_put(pkt+98,crc^0xffffffffU,4);
   d=(void *)bpf_xdev_ext_desc(ctxm,i,sizeof(*d));
   if(!d) return XDEV_EXT_MP_BUILD_ABORT;
   d->addr=f->umem_addr+f->data_off-106;d->len=106+f->data_len;d->options=0;
@@ -69,7 +70,6 @@ __s32 BPF_PROG(rel_afxdp_complete,const struct xdev_ext_mech_ctx *ctxm)
  struct xdev_ext_rel_cfg cfg={};
  struct xdev_ext_rel_msg m;
  const __u8 *pkt;
- __u8 header[64];
  __u32 i,crc,off,len;
  (void)ctx;
  if(ctxm->callsite==XDEV_EXT_MP_SITE_WORKER) {
@@ -91,10 +91,9 @@ __s32 BPF_PROG(rel_afxdp_complete,const struct xdev_ext_mech_ctx *ctxm)
  if(len<106) return XDEV_EXT_MP_RECYCLE;
  pkt=bpf_xdev_ext_frame(ctxm,0,off,106);
  if(!pkt) return XDEV_EXT_MP_RECYCLE;
- for(i=0;i<64;i++) header[i]=pkt[42+i];
- for(i=56;i<60;i++) header[i]=0;
- crc=bpf_xdev_ext_crc32c(header,64,0xffffffffU);
- crc=bpf_xdev_ext_frame_crc32c(ctxm,0,off+106,len-106,crc);
+ /* xsk_rel_decode() verified this stored CRC over these same bytes before
+  * calling here; decode the identity without a second payload pass. */
+ crc=(__u32)xdev_ext_rel_be(pkt+98,4)^0xffffffffU;
  cfg.session=in->wire_session;cfg.first_group=1;cfg.timeout_ns=1;
  cfg.window=1;cfg.max_attempts=1;cfg.group_bytes=in->base.l.group_bytes;cfg.seg_len=in->base.l.seg_len;
  if(xdev_ext_rel_wire_decode(pkt+42,len-106,crc,&cfg,&m) || m.type!=XDEV_EXT_REL_DATA)

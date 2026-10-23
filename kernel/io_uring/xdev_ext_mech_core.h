@@ -90,6 +90,103 @@ static inline int xdev_ext_mech_frame_move(__u8 *word, __u32 from, __u32 to)
 }
 
 /*
+ * Page bytes of frames, for proving once at CREATE that reserved output
+ * frames share no byte with any other frame.  The caller owns the table;
+ * @page is compared, never dereferenced.
+ */
+struct xdev_ext_mech_alias_seg {
+	const void *page;
+	__u32 off;
+	__u32 len;
+};
+
+static inline bool xdev_ext_mech_alias_before(const struct xdev_ext_mech_alias_seg *a,
+					 const struct xdev_ext_mech_alias_seg *b)
+{
+	if (a->page != b->page)
+		return (uintptr_t)a->page < (uintptr_t)b->page;
+	return a->off < b->off;
+}
+
+static inline void xdev_ext_mech_alias_sift(struct xdev_ext_mech_alias_seg *t,
+				       size_t root, size_t n)
+{
+	for (;;) {
+		struct xdev_ext_mech_alias_seg tmp;
+		size_t child = 2 * root + 1;
+
+		if (child >= n)
+			return;
+		if (child + 1 < n && xdev_ext_mech_alias_before(&t[child], &t[child + 1]))
+			child++;
+		if (!xdev_ext_mech_alias_before(&t[root], &t[child]))
+			return;
+		tmp = t[root];
+		t[root] = t[child];
+		t[child] = tmp;
+		root = child;
+	}
+}
+
+/* In place by (page, offset): O(n log n), bounded stack, no allocation. */
+static inline void xdev_ext_mech_alias_sort(struct xdev_ext_mech_alias_seg *t, size_t n)
+{
+	struct xdev_ext_mech_alias_seg tmp;
+	size_t i;
+
+	if (n < 2)
+		return;
+	for (i = n / 2; i-- > 0;)
+		xdev_ext_mech_alias_sift(t, i, n);
+	for (i = n - 1; i > 0; i--) {
+		tmp = t[0];
+		t[0] = t[i];
+		t[i] = tmp;
+		xdev_ext_mech_alias_sift(t, 0, i);
+	}
+}
+
+/* Sorted @t: true when two entries share a byte of one page. */
+static inline bool xdev_ext_mech_alias_overlapping(const struct xdev_ext_mech_alias_seg *t,
+					      size_t n)
+{
+	__u64 end = 0;
+	size_t i;
+
+	for (i = 0; i < n; i++) {
+		if (!i || t[i].page != t[i - 1].page)
+			end = 0;
+		else if (t[i].off < end)
+			return true;
+		if ((__u64)t[i].off + t[i].len > end)
+			end = (__u64)t[i].off + t[i].len;
+	}
+	return false;
+}
+
+/*
+ * Sorted @t without overlaps, so ends grow with offsets within a page:
+ * true when bytes [@off, @off + @len) of @page meet an entry.
+ */
+static inline bool xdev_ext_mech_alias_hits(const struct xdev_ext_mech_alias_seg *t,
+				       size_t n, const void *page, __u32 off,
+				       __u32 len)
+{
+	size_t lo = 0, hi = n;
+
+	while (lo < hi) {
+		size_t mid = lo + (hi - lo) / 2;
+
+		if ((uintptr_t)t[mid].page < (uintptr_t)page ||
+		    (t[mid].page == page && (__u64)t[mid].off + t[mid].len <= off))
+			lo = mid + 1;
+		else
+			hi = mid;
+	}
+	return lo < n && t[lo].page == page && t[lo].off < (__u64)off + len;
+}
+
+/*
  * Batch: FREE -> OPEN (RX grouping) -> READY(k) -> IN_FLIGHT(k) ->
  * READY(k + 1) ... -> DONE, with ABORT from any live state and SEQUESTERED
  * from IN_FLIGHT.  A START batch goes FREE -> READY(0) directly.  At most

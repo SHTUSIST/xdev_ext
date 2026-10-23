@@ -1,0 +1,94 @@
+Compatibility edits of the BaM baseline for Linux >= 6.5 and GCC 13.
+
+Upstream: https://github.com/ZaidQureshi/bam (commit not recorded at clone
+time; find it with find_upstream_commit.sh and upstream.lock).  Apply from the
+BaM repository root:  git apply bam-linux6-gcc13-compat.patch
+
+  module/map.c    get_user_pages() lost its vmas argument in Linux 6.5
+  module/pci.c    class_create() lost its owner argument in Linux 6.4
+  include/freestanding/libcxx/include/type_traits
+                  GCC 13 reserves __is_convertible as a built-in trait name;
+                  the internal helper is renamed __libcpp_is_convertible
+
+--- a/module/map.c
++++ b/module/map.c
+@@ -147,8 +147,10 @@
+ #elif LINUX_VERSION_CODE <= KERNEL_VERSION(4, 8, 17)
+ #warning "Building for older kernel, not properly tested"
+     retval = get_user_pages(map->vaddr, map->n_addrs, 1, 0, pages, NULL);
+-#else
++#elif LINUX_VERSION_CODE < KERNEL_VERSION(6, 5, 0)
+     retval = get_user_pages(map->vaddr, map->n_addrs, FOLL_WRITE, pages, NULL);
++#else
++    retval = get_user_pages(map->vaddr, map->n_addrs, FOLL_WRITE, pages);
+ #endif
+     if (retval <= 0)
+     {
+--- a/module/pci.c
++++ b/module/pci.c
+@@ -6,6 +6,7 @@
+ #include <linux/moduleparam.h>
+ #include <linux/kernel.h>
+ #include <linux/init.h>
++#include <linux/version.h>
+ #include <linux/slab.h>
+ #include <linux/pci.h>
+ #include <linux/fs.h>
+@@ -328,7 +329,11 @@
+     }
+ 
+     // Create character device class
++    #if LINUX_VERSION_CODE < KERNEL_VERSION(6, 4, 0)
+     dev_class = class_create(THIS_MODULE, DRIVER_NAME);
++    #else
++    dev_class = class_create(DRIVER_NAME);
++    #endif
+     if (IS_ERR(dev_class))
+     {
+         unregister_chrdev_region(dev_first, max_num_ctrls);
+--- a/include/freestanding/libcxx/include/type_traits
++++ b/include/freestanding/libcxx/include/type_traits
+@@ -1458,29 +1458,29 @@
+ template <class _T1, class _T2,
+     unsigned _T1_is_array_function_or_void = __is_convertible_imp::__is_array_function_or_void<_T1>::value,
+     unsigned _T2_is_array_function_or_void = __is_convertible_imp::__is_array_function_or_void<_T2>::value>
+-struct __is_convertible
++struct __libcpp_is_convertible
+     : public integral_constant<bool,
+         __is_convertible_imp::__is_convertible_test<_T1, _T2>::value
+     >
+ {};
+ 
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 0, 1> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 1, 1> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 2, 1> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 3, 1> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 0, 1> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 1, 1> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 2, 1> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 3, 1> : public false_type {};
+ 
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 0, 2> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 1, 2> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 2, 2> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 3, 2> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 0, 2> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 1, 2> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 2, 2> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 3, 2> : public false_type {};
+ 
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 0, 3> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 1, 3> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 2, 3> : public false_type {};
+-template <class _T1, class _T2> struct __is_convertible<_T1, _T2, 3, 3> : public true_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 0, 3> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 1, 3> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 2, 3> : public false_type {};
++template <class _T1, class _T2> struct __libcpp_is_convertible<_T1, _T2, 3, 3> : public true_type {};
+ 
+ template <class _T1, class _T2> struct _LIBCPP_TEMPLATE_VIS is_convertible
+-    : public __is_convertible<_T1, _T2>
++    : public __libcpp_is_convertible<_T1, _T2>
+ {
+     static const size_t __complete_check1 = __is_convertible_check<_T1>::__v;
+     static const size_t __complete_check2 = __is_convertible_check<_T2>::__v;

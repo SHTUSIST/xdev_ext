@@ -8,7 +8,8 @@ import subprocess
 import tempfile
 kernel = Path(__file__).resolve().parents[4]
 source = (kernel/'drivers/net/ethernet/mellanox/mlx5/core/en_tx.c').read_text()
-start = source.index('int mlx5e_peer_xmit(')
+marker = '#ifdef CONFIG_XDEV_EXT_MECH\n'
+start = source.rindex(marker, 0, source.index('struct pci_dev *mlx5e_peer_device(')) + len(marker)
 end = source.index('\n#endif', start)
 functions = source[start:end]
 shim = r'''
@@ -41,6 +42,7 @@ typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_
 #define cpu_to_be64(x) (x)
 #define unsafe_memcpy(d,s,n,why) memcpy(d,s,n)
 #define MLX5_UNSAFE_MEMCPY_DISCLAIMER "test header"
+struct pci_dev { int unused; };
 struct xdev_ext_peer_tx { u64 dma_address; u32 len; u16 header_len; const u8 *header; void (*complete)(struct xdev_ext_peer_tx *,int,bool); };
 struct mlx5e_tx_wqe_info { struct xdev_ext_peer_tx *peer; u32 num_bytes; u8 num_wqebbs, num_dma; };
 struct mlx5_wqe_data_seg { u32 byte_count, lkey; u64 addr; };
@@ -51,7 +53,7 @@ struct mlx5_wq_cyc { int unused; };
 struct netdev_queue { bool stopped; };
 struct mlx5e_sq_stats { u64 packets,bytes; };
 struct mlx5e_txqsq { struct mlx5_wq_cyc wq; u16 cc,pc,stop_room; u32 mkey_be,sqn; void *ptpsq; u8 min_inline_mode; unsigned long state; void *uar_map; struct mlx5e_sq_stats *stats; struct { struct mlx5e_tx_wqe_info *wqe_info; } db; };
-struct mdev { struct { struct { u32 mkey; } hw_objs; } mlx5e_res; };
+struct mdev { struct { struct { u32 mkey; } hw_objs; } mlx5e_res; struct pci_dev *pdev; };
 struct mlx5e_priv { struct mdev *mdev; struct mlx5e_txqsq **txq2sq; };
 struct net_device { u32 mtu,real_num_tx_queues; bool running; struct mlx5e_priv *priv; struct netdev_queue *txq; };
 static int cap_access_mode_4_2=0, cap_access_mode_1_0=0, cap_lr=1, cap_length64=1, query_result, notified, callbacks, last_status;
@@ -77,7 +79,7 @@ static void complete_tx(struct xdev_ext_peer_tx *t,int status,bool quiesced) { (
 main = r'''
 int main(void)
 {
- struct mdev m={.mlx5e_res.hw_objs.mkey=0x22}; struct mlx5e_tx_wqe_info wi={0}; struct mlx5e_sq_stats stats={0};
+ struct pci_dev pdev={0}; struct mdev m={.mlx5e_res.hw_objs.mkey=0x22,.pdev=&pdev}; struct mlx5e_tx_wqe_info wi={0}; struct mlx5e_sq_stats stats={0};
  struct mlx5e_txqsq sq={.mkey_be=0x22,.state=1,.stats=&stats,.db.wqe_info=&wi}; struct mlx5e_txqsq *sqs[]={&sq};
  struct mlx5e_priv priv={&m,sqs}; struct netdev_queue txq={0}; struct net_device d={1500,1,true,&priv,&txq};
  u8 header[82]; memset(header,0x5c,sizeof(header));
@@ -92,13 +94,15 @@ int main(void)
  puts("ok 1 - actual mlx5 CPU-inline/header GPU-data WQE, native doorbell, no host DMA unmap, exactly one completion");
  assert(mlx5e_peer_xmit(&d,0,&tx)==0 && notified==2);
  assert(mlx5e_peer_complete_wi(&wi,-ECANCELED,false) && callbacks==2 && !last_quiesced);
- puts("ok 2 - native teardown yields unknown DMA ownership without command resend");
- cap_access_mode_1_0=1; assert(mlx5e_peer_xmit(&d,0,&tx)==-EOPNOTSUPP && notified==2);
- cap_access_mode_1_0=0; cap_access_mode_4_2=1; assert(mlx5e_peer_xmit(&d,0,&tx)==-EOPNOTSUPP && notified==2);
- cap_access_mode_4_2=0; cap_lr=0; assert(mlx5e_peer_xmit(&d,0,&tx)==-EOPNOTSUPP && notified==2);
- cap_lr=1; room=false; assert(mlx5e_peer_xmit(&d,0,&tx)==-EAGAIN && notified==2);
+ puts("ok 2 - unquiesced native completion (error CQE) yields unknown DMA ownership without command resend");
+ assert(mlx5e_peer_device(&d)==&pdev);
+ cap_access_mode_1_0=1; assert(!mlx5e_peer_device(&d));
+ cap_access_mode_1_0=0; cap_access_mode_4_2=1; assert(!mlx5e_peer_device(&d));
+ cap_access_mode_4_2=0; cap_lr=0; assert(!mlx5e_peer_device(&d));
+ cap_lr=1; query_result=-EIO; assert(!mlx5e_peer_device(&d)); query_result=0;
+ room=false; assert(mlx5e_peer_xmit(&d,0,&tx)==-EAGAIN && notified==2);
  room=true; sq.state=3; assert(mlx5e_peer_xmit(&d,0,&tx)==-EAGAIN && notified==2);
- puts("ok 3 - actual MKEY mode/read permission, ring pressure and recovery admission precede native acceptance");
+ puts("ok 3 - actual bind-time MKEY mode/read permission, ring pressure and recovery admission precede native acceptance");
  return 0;
 }
 '''

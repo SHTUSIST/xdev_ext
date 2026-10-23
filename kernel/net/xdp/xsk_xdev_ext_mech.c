@@ -1268,6 +1268,7 @@ static const struct xdev_ext_mech_class_ops xsk_xdev_ext_mech_class_ops = {
 	.batch_priv_size = sizeof(struct xsk_xdev_ext_mech_tx_batch),
 	.owner = THIS_MODULE,
 	.transport_stats = xsk_rel_transport_stats,
+	.transport_counters = xsk_rel_transport_counters,
 	.bind = xsk_xdev_ext_mech_bind,
 	.unbind = xsk_xdev_ext_mech_unbind,
 	.fill_info = xsk_xdev_ext_mech_fill_info,

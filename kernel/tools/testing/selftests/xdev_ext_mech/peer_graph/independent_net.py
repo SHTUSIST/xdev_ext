@@ -35,14 +35,14 @@ struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_le
 struct xdev_ext_mech_pool {u32 kind,nr_frames,frame_size;};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_peer peer;bool admits;};
 struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction;};
-struct xdev_ext_mech_batch {void *priv;struct xdev_ext_mech_frame f;u32 frames,bytes;u64 ticket;};
+struct xdev_ext_mech_batch {void *priv;struct xdev_ext_mech_frame f;u32 frames,bytes;u64 ticket,id;};
 struct xdev_ext_peer_net_endpoint {u32 mtu;int refs;};
 static struct xdev_ext_peer_net_endpoint endpoint={1500,0};
 static int bind_error,calls,completed,sequestered,completion_status,results[16],accepted_results[16];
 static u64 observed_offsets[16];static u32 observed_bytes[16];static u8 observed_headers[16];
 static bool xdev_ext_peer_control_file(struct file *f){return f&&f->control;}
-static struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind(u32 ifindex,u32 queue)
-{assert(ifindex==4&&queue==2);if(bind_error)return ERR_PTR(bind_error);endpoint.refs++;return &endpoint;}
+static struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32 ifindex,u32 queue,void(*dead)(void*),void *arg)
+{assert(ifindex==4&&queue==2&&dead&&arg);if(bind_error)return ERR_PTR(bind_error);endpoint.refs++;return &endpoint;}
 static void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *e){assert(e==&endpoint&&e->refs>0);e->refs--;}
 static u32 xdev_ext_peer_net_mtu(struct xdev_ext_peer_net_endpoint *e){assert(e==&endpoint);return e->mtu;}
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s){return &s->pool;}
@@ -57,8 +57,11 @@ static void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b){return b->p
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b){return b->ticket;}
 static void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b,u64 ticket,int status){assert(ticket==b->ticket&&!completed&&!sequestered);completed++;completion_status=status;}
 static void xdev_ext_mech_batch_sequester(struct xdev_ext_mech_batch *b,u64 ticket,int status){assert(ticket==b->ticket&&!completed&&!sequestered);sequestered++;completion_status=status;}
-static int xdev_ext_peer_net_send(struct xdev_ext_peer_net_endpoint *e,struct file *f,u64 gen,const struct xdev_ext_peer_net_desc *d,bool *accepted)
-{int i=calls++;assert(i<16&&e==&endpoint&&f==&allocation&&gen==37&&!d->reserved);observed_offsets[i]=d->offset;observed_bytes[i]=d->bytes;observed_headers[i]=d->header[0];*accepted=accepted_results[i];return results[i];}
+static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->id;}
+static void xdev_ext_net_dead(struct xdev_ext_mech_stage *st);
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err){assert(err==-ENXIO);st->s->admits=false;xdev_ext_net_dead(st);}
+static int xdev_ext_peer_net_send_stoppable(struct xdev_ext_peer_net_endpoint *e,struct file *f,u64 gen,const struct xdev_ext_peer_net_desc *d,bool *accepted,bool(*stopped)(void*),void *arg)
+{int i=calls++;assert(stopped&&arg&&!stopped(arg));assert(i<16&&e==&endpoint&&f==&allocation&&gen==37&&!d->reserved);observed_offsets[i]=d->offset;observed_bytes[i]=d->bytes;observed_headers[i]=d->header[0];*accepted=accepted_results[i];return results[i];}
 '''
 MAIN = r'''
 struct fixture {struct xdev_ext_mech_session s;struct xdev_ext_mech_stage st;struct file control;struct xdev_ext_net_batch bp;struct xdev_ext_mech_batch b;struct xdev_ext_net_send_desc d[16];};
@@ -91,9 +94,14 @@ int main(void)
  initialize(&f);assert(!bind(&f)&&!validate(&f));results[0]=-EAGAIN;accepted_results[0]=false;
  assert(xdev_ext_net_submit(&f.st,&f.b)==-EAGAIN&&calls==1&&!completed&&!sequestered&&!f.bp.cqe.entries_done);xdev_ext_net_unbind(&f.st);
  initialize(&f);assert(!bind(&f)&&!validate(&f));results[1]=-EAGAIN;accepted_results[1]=false;
- assert(!xdev_ext_net_submit(&f.st,&f.b)&&calls==2&&completed==1&&!sequestered&&completion_status==-EAGAIN);
+ assert(xdev_ext_net_submit(&f.st,&f.b)==-EAGAIN&&calls==2&&!completed&&!sequestered);
+ assert(f.bp.cqe.bytes_sent==1000&&f.bp.cqe.entries_done==1&&f.bp.cqe.outcome==1);
+ memset(&f.bp,0,sizeof(f.bp));assert(!validate(&f)&&!xdev_ext_net_submit(&f.st,&f.b)&&calls==4&&completed==1&&!completion_status);
+ assert(observed_offsets[2]==66536&&observed_offsets[3]==67536&&f.bp.cqe.entries_done==3&&f.bp.cqe.bytes_sent==3000);xdev_ext_net_unbind(&f.st);
+ initialize(&f);assert(!bind(&f)&&!validate(&f));results[1]=-ENETDOWN;accepted_results[1]=false;
+ assert(!xdev_ext_net_submit(&f.st,&f.b)&&calls==2&&completed==1&&!sequestered&&completion_status==-ENETDOWN);
  assert(f.bp.cqe.bytes_sent==1000&&f.bp.cqe.entries_done==1&&f.bp.cqe.outcome==1);xdev_ext_net_unbind(&f.st);
- puts("ok 4 - actual NET distinguishes first preaccept backpressure from later refusal and never resends an accepted prefix");
+ puts("ok 4 - actual NET retries first and later transient backpressure from the refused entry, ends permanent refusal, and never resends an accepted prefix");
  initialize(&f);assert(!bind(&f)&&!validate(&f));results[1]=-EIO;
  assert(!xdev_ext_net_submit(&f.st,&f.b)&&calls==2&&!completed&&sequestered==1&&completion_status==-EIO);
  assert(f.bp.cqe.bytes_sent==1000&&f.bp.cqe.entries_done==1&&f.bp.cqe.outcome==2);xdev_ext_net_unbind(&f.st);
@@ -126,7 +134,7 @@ def main():
     mutations = [
         ("payload coverage omitted", code, plan.replace("return bytes == f->data_len ? 0 : -EMSGSIZE;", "return 0;")),
         ("plan gap/overlap accepted", code, plan.replace("(__u64)f->data_off + bytes != d[i].frame_off", "((__u64)f->data_off + bytes != d[i].frame_off && false)")),
-        ("accepted prefix replayed as refusal", code.replace("if (!accepted && !i) return ret;", "if (!accepted) return ret;"), plan),
+        ("accepted prefix replayed as refusal", code.replace("for (i = bp->cqe.entries_done; i < bp->nr; i++) {", "for (i = 0; i < bp->nr; i++) {"), plan),
         ("unknown error treated quiesced", code.replace("if (accepted) xdev_ext_mech_batch_sequester", "if (accepted && false) xdev_ext_mech_batch_sequester"), plan),
         ("GPU byte offset shifted", code.replace("f.umem_addr + bp->desc[i].frame_off", "f.umem_addr + bp->desc[i].frame_off + 1"), plan),
     ]

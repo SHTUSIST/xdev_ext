@@ -10,7 +10,7 @@ permissions:
 jobs:
   host:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     strategy:
       fail-fast: false
       matrix:
@@ -21,6 +21,8 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - name: Install host test dependencies
+        run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
       - name: Concurrent frontend workload and evidence checks
@@ -58,6 +60,10 @@ jobs:
             --results "$RUNNER_TEMP/xdev-ext-positional-fault.json" 2>&1 | tee -a "$log"
           timeout 300 python3 \
             kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_payload_integrity_test.py 2>&1 | tee -a "$log"
+          for t in socket_mech_table fallback_report fd_footprint; do
+            XDEV_EXT_PRELOAD_TEST_DIR="$output" timeout 300 python3 \
+              kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_${t}_test.py 2>&1 | tee -a "$log"
+          done
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
             echo "Frontend invalid-memory checks reported failed or skipped cases"
             exit 1
@@ -83,6 +89,8 @@ jobs:
             *) exit 1 ;;
           esac
           make -C tests/eval cuda-host-check
+      - name: Reviewer-driven evaluation harness contracts
+        run: make -C tests/eval reviewer-eval-check
       - name: IAA syscall and lifetime contracts
         run: make -C tests/iaa all check
       - name: GPU host-page bookkeeping contracts
@@ -94,6 +102,11 @@ jobs:
           log="$RUNNER_TEMP/xdev-ext-reliable-regressions.log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/control_stop_admission_test.py 2>&1 | tee "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/native_done_map_teardown_test.py 2>&1 | tee -a "$log"
+          sh kernel/tools/testing/selftests/xdev_ext_mech/reliable/slow_downstream_run.sh 2>&1 | tee -a "$log"
+          for t in downstream_failure_terminal held_reply_provider single_crc_pass backpressure_skip_payload; do
+            python3 kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/${t}_test.py 2>&1 | tee -a "$log"
+          done
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/transport_counters_test.py 2>&1 | tee -a "$log"
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
             echo "Reliable regressions reported failed or skipped cases"
             exit 1
@@ -110,6 +123,12 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_source_test.py 2>&1 | tee "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py 2>&1 | tee -a "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py 2>&1 | tee -a "$log"
+          for t in teardown stop_work_rearm start_keys frames_release transform_alias alias_table stage_get_cmd; do
+            python3 kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/${t}_test.py 2>&1 | tee -a "$log"
+          done
+          sh kernel/tools/testing/selftests/xdev_ext_mech/iaa_transform/run.sh 2>&1 | tee -a "$log"
+          python3 kernel/tools/testing/selftests/bpf/xdev_ext_hardening_source_test.py 2>&1 | tee -a "$log"
+          python3 kernel/tools/testing/selftests/xdev_ext_sendpath_baseline/pick_send_path_test.py 2>&1 | tee -a "$log"
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)' "$log"; then
             echo "Mechanism source checks reported failed or skipped cases"
             exit 1

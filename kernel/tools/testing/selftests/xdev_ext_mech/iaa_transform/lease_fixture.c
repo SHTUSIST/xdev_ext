@@ -27,6 +27,11 @@ static bool warn_once(bool c) {return c;}
 #define atomic64_dec(p) (--*(p))
 #define spin_lock_irqsave(l,f) do {(void)(l);(f)=0;} while(0)
 #define spin_unlock_irqrestore(l,f) do {(void)(l);(void)(f);} while(0)
+/* CREATE-time scratch of the reservation alias proof. */
+#define GFP_KERNEL 0
+#define cond_resched() ((void)0)
+static void *kvmalloc_array(size_t n,size_t size,int gfp) {(void)gfp;return calloc(n,size);}
+static void kvfree(void *p);
 #define N 80
 #define FS 1024U
 struct page {u32 id;};
@@ -81,6 +86,7 @@ static void xdev_ext_mech_batch_queue(struct xdev_ext_mech_batch *b) {(void)b;qu
 /* xdev_ext_mech_frames_move */
 /* xdev_ext_mech_frames_release */
 static bool xdev_ext_mech_transform_alias(struct xdev_ext_mech_pool *,const struct xdev_ext_mech_frame *,const struct xdev_ext_mech_frame *);
+/* xdev_ext_mech_transform_alias_free */
 /* xdev_ext_mech_transform_reserve */
 /* xdev_ext_mech_transform_unreserve */
 /* xdev_ext_mech_transform_alias */
@@ -134,13 +140,12 @@ int main(int argc,char **argv) {
   CHECK(s.transform_owner[10]==1&&s.pool.state[10]==XDEV_EXT_MECH_F_HELD,"wrong stage unreserved another stage's frame");return !!failures;
  }
  if(!strcmp(mode,"cross_batch_alias")) {
-  struct xdev_ext_mech_batch other;source(&s,&b,0);source(&s,&other,1);
-  assert(!xdev_ext_mech_transform_reserve(&s.st[0],10,2));page_map[11]=page_map[10];
-  struct xdev_ext_mech_frame first=frame(10,FS),second=frame(11,FS);
-  int a=xdev_ext_mech_batch_transform_begin(&b,&first,1);
-  int z=xdev_ext_mech_batch_transform_begin(&other,&second,1);
-  CHECK(a<0 || z<0,"different depth slots accepted overlapping physical destination leases");
-  CHECK(!(b.transform.active && other.transform.active),"overlapping physical destinations became concurrently active");
+  /* Pages are fixed for the session: CREATE refuses aliased output chunks
+   * before any depth slot can lease them. */
+  page_map[11]=page_map[10];
+  CHECK(xdev_ext_mech_transform_reserve(&s.st[0],10,2)<0,"overlapping physical destination chunks were reserved");
+  CHECK(!s.transform_owner[10]&&!s.transform_owner[11]&&s.pool.state[10]==XDEV_EXT_MECH_F_USER&&
+        s.pool.state[11]==XDEV_EXT_MECH_F_USER,"refused reservation changed custody");
   return !!failures;
  }
  if(!strcmp(mode,"reserve_fail")) {
@@ -228,7 +233,7 @@ int main(int argc,char **argv) {
  if(!strcmp(mode,"second_source_return_failure")) {
   CHECK(seq&&b.transform.active,"partial source return did not report retained transform lease");
   CHECK(s.pool.state[0]==XDEV_EXT_MECH_F_K_FREE&&released[0]==1&&xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_FREE,"safe completed first source was unnecessarily retained or returned twice");
-  CHECK(s.pool.state[1]==XDEV_EXT_MECH_F_HELD&&!released[1]&&xdev_ext_mech_life_phase(&s.life[1])==XDEV_EXT_MECH_L_FREE,"failed second source return was recycled or lost custody");
+  CHECK(s.pool.state[1]==XDEV_EXT_MECH_F_SEQUESTERED&&!released[1]&&xdev_ext_mech_life_phase(&s.life[1])==XDEV_EXT_MECH_L_FREE,"failed second source return was recycled or lost custody");
   CHECK(s.pool.state[10]==XDEV_EXT_MECH_F_SEQUESTERED&&s.pool.state[11]==XDEV_EXT_MECH_F_SEQUESTERED,"partial source return failed to quarantine every destination");
   CHECK(b.f[0].index==0&&b.f[1].index==1&&b.nr_frames==2&&b.bytes==1400,"partial source return advanced batch metadata");
  } else if(!strcmp(mode,"release_failure")||!strcmp(mode,"destination_generation")) {
@@ -255,3 +260,4 @@ int main(int argc,char **argv) {
  }
  return !!failures;
 }
+static void kvfree(void *p) {free(p);}

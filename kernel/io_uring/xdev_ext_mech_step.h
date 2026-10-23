@@ -113,7 +113,9 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
  * START of a session whose stage 0 is not AF_XDP RX.  User frames are for
  * the ring's UMEM only and must be exactly one span per batch, since every
  * batch hands its frames back to user space when it ends.  Explicit RECYCLE
- * instead keeps a depth-sized pool until the single START drains.
+ * instead keeps a depth-sized pool until the single START drains.  Keys
+ * first_seq .. first_seq + nr_batches - 1 and the next sequence must not
+ * wrap: an ordered stage holds a key only behind smaller keys.
  */
 static inline int xdev_ext_mech_start_check(const struct xdev_ext_mech_start *st,
 				       __u32 pool_kind, bool rx_first,
@@ -122,7 +124,7 @@ static inline int xdev_ext_mech_start_check(const struct xdev_ext_mech_start *st
 	__u64 need;
 
 	if ((st->flags & ~XDEV_EXT_MECH_START_KNOWN_FLAGS) || rx_first ||
-	    !st->nr_batches)
+	    !st->nr_batches || st->nr_batches > XDEV_EXT_MECH_U64_MAX - st->first_seq)
 		return -EINVAL;
 	if ((st->flags & XDEV_EXT_MECH_START_F_USER_SPANS) &&
 	    (!(st->flags & XDEV_EXT_MECH_START_F_USER_FRAMES) ||

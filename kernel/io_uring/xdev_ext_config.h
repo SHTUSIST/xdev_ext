@@ -10,12 +10,13 @@
 /*
  * UMEM zero-copy path for unified_ops (Approach 3).
  *
- * Must be defined with the SAME value (1) as the global -DXDEV_EXT_UMEM_ZEROCOPY in
- * io_uring/Makefile: that -D is what include/linux/io_uring_types.h sees to gate
- * the ->xdev_ext_umem member (this header is NOT included there). A bare
- * "#define XDEV_EXT_UMEM_ZEROCOPY" here would redefine the macro to empty and, under
- * -Werror, trip a redefinition warning vs the -D's implicit 1. See
- * afxdp_work/reports/FINDINGS.md PRE-2.
+ * The effective definition is the -DXDEV_EXT_UMEM_ZEROCOPY in io_uring/Makefile,
+ * which reaches every io_uring object, including files that never include this
+ * header; keep that -D.  This define must use the SAME value (1): a bare
+ * "#define XDEV_EXT_UMEM_ZEROCOPY" here would redefine the macro to empty, and
+ * -Werror turns the redefinition warning against the -D's implicit 1 into a
+ * build failure.  struct io_ring_ctx declares ->xdev_ext_umem unconditionally
+ * (include/linux/io_uring_types.h), so the macro gates only io_uring/ code.
  */
 #define XDEV_EXT_UMEM_ZEROCOPY 1
 
@@ -33,6 +34,13 @@
  * identically. Define (to 1) to compile in the per-frame state word and
  * the async UMEM READ whose I/O completion publishes the frame from
  * IRQ/softirq context. Requires XDEV_EXT_UMEM_ZEROCOPY.
+ *
+ * Kconfig builds do not use the line below: io_uring/Makefile passes
+ * -DXDEV_EXT_LIFECYCLE_SM=1 to every io_uring object when
+ * CONFIG_IO_URING_XDEV_EXT_IAA=y, so enabling IAA also switches unified_ops
+ * UMEM READ from the synchronous path to the asynchronous lifecycle variant.
+ * This state word has no generation token; the mechanism session lifecycle
+ * (xdev_ext_mech_lifecycle.h) is a separate implementation.
  */
 /* #define XDEV_EXT_LIFECYCLE_SM 1 */
 

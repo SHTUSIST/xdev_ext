@@ -1,9 +1,17 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Variable-length CryptoAPI transforms over independently leased pool pages.
  * No payload bounce or user progress calls. Software is explicitly selected.
+ *
+ * deflate-iaa maps each side with dma_map_sg() and fails with -EIO unless it
+ * gets exactly one DMA segment (iaa_comp_acompress/adecompress), and only its
+ * async_irq sync_mode returns -EINPROGRESS; sync and async modes poll inside
+ * ->submit, so depth then gives no overlap. A hardware stage is admitted at
+ * CREATE only when every source and destination it can be given is one
+ * physically contiguous range; IOMMU merging is not relied upon.
  */
 #include <crypto/acompress.h>
 #include <linux/init.h>
+#include <linux/mm.h>
 #include <linux/module.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
@@ -42,6 +50,75 @@ static void xdev_ext_iaa_crypto_done(void *opaque, int err)
  xdev_ext_mech_batch_transform_complete(r->b, r->ticket, err, produced, false);
 }
 
+/* Truthful page scatterlists; frame boundaries need not be page boundaries.
+ * Physically adjacent pieces extend one entry. Returns the entry count.
+ */
+static int xdev_ext_iaa_sg(struct xdev_ext_mech_pool *p,
+              struct scatterlist *sg, const struct xdev_ext_mech_frame *f, u32 nr)
+{
+ u32 i, off, po, len, n = 0;
+ struct page *page;
+ sg_init_table(sg, XDEV_EXT_IAA_SG_MAX);
+ for (i = 0; i < nr; i++) {
+  off = 0;
+  while (off < f[i].data_len) {
+   page = xdev_ext_mech_frame_page(p, &f[i], f[i].data_off + off, &po, &len);
+   if (!page) return -EFAULT;
+   len = min(len, f[i].data_len - off);
+   if (n && sg_phys(&sg[n - 1]) + sg[n - 1].length == page_to_phys(page) + po) {
+    sg[n - 1].length += len;
+   } else {
+    if (n >= XDEV_EXT_IAA_SG_MAX) return -E2BIG;
+    sg_set_page(&sg[n++], page, len, po);
+   }
+   off += len;
+  }
+ }
+ if (!n) return -EINVAL;
+ sg_mark_end(&sg[n - 1]);
+ return n;
+}
+
+/* Output window of request slot @slot: its reserved frames, capacity in order. */
+static void xdev_ext_iaa_output(const struct xdev_ext_iaa_stage *cs,
+                               const struct xdev_ext_mech_layout *l, u32 slot,
+                               struct xdev_ext_mech_frame *out)
+{
+ u32 i, left = cs->capacity;
+ for (i = 0; i < cs->nr; i++) {
+  out[i] = (struct xdev_ext_mech_frame) {
+   .index = cs->first + slot * cs->nr + i,
+   .data_off = l->hdr_room, .data_len = min(l->seg_len, left),
+  };
+  left -= out[i].data_len;
+ }
+}
+
+/* CREATE: sources are single frames ([hdr_room, hdr_room + seg_len) of any
+ * pool frame) and each slot's whole output window is one segment. A source
+ * from a preceding multi-frame transform is refused per batch at submit.
+ */
+static int xdev_ext_iaa_hw_admit(struct xdev_ext_mech_stage *st,
+                                struct xdev_ext_iaa_stage *cs)
+{
+ const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
+ struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
+ struct xdev_ext_iaa_request *r = &cs->requests[0];
+ u32 i;
+ if (DIV_ROUND_UP(l->group_bytes, l->seg_len) != 1) return -EOPNOTSUPP;
+ for (i = 0; i < pool->nr_frames; i++) {
+  struct xdev_ext_mech_frame f = {
+   .index = i, .data_off = l->hdr_room, .data_len = l->seg_len,
+  };
+  if (xdev_ext_iaa_sg(pool, r->src, &f, 1) != 1) return -EOPNOTSUPP;
+ }
+ for (i = 0; i < cs->depth; i++) {
+  xdev_ext_iaa_output(cs, l, i, r->output);
+  if (xdev_ext_iaa_sg(pool, r->dst, r->output, cs->nr) != 1) return -EOPNOTSUPP;
+ }
+ return 0;
+}
+
 static int xdev_ext_iaa_bind(struct xdev_ext_mech_stage *st,
                             const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -70,6 +147,13 @@ static int xdev_ext_iaa_bind(struct xdev_ext_mech_stage *st,
  }
  err = xdev_ext_mech_transform_reserve(st, cs->first, cs->depth * cs->nr);
  if (err) goto requests;
+ if (!(u->flags & XDEV_EXT_IAA_F_SOFTWARE)) {
+  err = xdev_ext_iaa_hw_admit(st, cs);
+  if (err) {
+   xdev_ext_mech_transform_unreserve(st, cs->first, cs->depth * cs->nr);
+   goto requests;
+  }
+ }
  st->priv = cs;
  return 0;
 requests:
@@ -128,29 +212,6 @@ static int xdev_ext_iaa_validate(struct xdev_ext_mech_stage *st,
  return 0;
 }
 
-/* Truthful page scatterlists; frame boundaries need not be page boundaries. */
-static int xdev_ext_iaa_sg(struct xdev_ext_mech_pool *p,
-              struct scatterlist *sg, const struct xdev_ext_mech_frame *f, u32 nr)
-{
- u32 i, off, po, len, n = 0;
- struct page *page;
- sg_init_table(sg, XDEV_EXT_IAA_SG_MAX);
- for (i = 0; i < nr; i++) {
-  off = 0;
-  while (off < f[i].data_len) {
-   if (n >= XDEV_EXT_IAA_SG_MAX) return -E2BIG;
-   page = xdev_ext_mech_frame_page(p, &f[i], f[i].data_off + off, &po, &len);
-   if (!page) return -EFAULT;
-   len = min(len, f[i].data_len - off);
-   sg_set_page(&sg[n++], page, len, po);
-   off += len;
-  }
- }
- if (!n) return -EINVAL;
- sg_mark_end(&sg[n - 1]);
- return 0;
-}
-
 static int xdev_ext_iaa_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 {
  struct xdev_ext_iaa_stage *cs = st->priv;
@@ -158,24 +219,21 @@ static int xdev_ext_iaa_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
  const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
  struct xdev_ext_mech_frame src[XDEV_EXT_MECH_MAX_FRAMES];
  struct xdev_ext_iaa_request *r = &cs->requests[xdev_ext_mech_batch_slot(b)];
- u32 i, left = cs->capacity, nr = xdev_ext_mech_batch_nr_frames(b);
- int err;
+ u32 i, nr = xdev_ext_mech_batch_nr_frames(b);
+ int err, nsrc, ndst;
  if (READ_ONCE(cs->dead)) return -ENODEV;
  for (i = 0; i < nr; i++) {
   err = xdev_ext_mech_batch_frame(b, i, &src[i]);
   if (err) return err;
  }
- for (i = 0; i < cs->nr; i++) {
-  r->output[i] = (struct xdev_ext_mech_frame) {
-   .index = cs->first + xdev_ext_mech_batch_slot(b) * cs->nr + i,
-   .data_off = l->hdr_room, .data_len = min(l->seg_len, left),
-  };
-  left -= r->output[i].data_len;
- }
- err = xdev_ext_iaa_sg(pool, r->src, src, nr);
- if (err) return err;
- err = xdev_ext_iaa_sg(pool, r->dst, r->output, cs->nr);
- if (err) return err;
+ xdev_ext_iaa_output(cs, l, xdev_ext_mech_batch_slot(b), r->output);
+ nsrc = xdev_ext_iaa_sg(pool, r->src, src, nr);
+ if (nsrc < 0) return nsrc;
+ ndst = xdev_ext_iaa_sg(pool, r->dst, r->output, cs->nr);
+ if (ndst < 0) return ndst;
+ /* Outside the CREATE-admitted shape deflate-iaa would fail with -EIO. */
+ if (!(st->flags & XDEV_EXT_IAA_F_SOFTWARE) && (nsrc != 1 || ndst != 1))
+  return -EOPNOTSUPP;
  err = xdev_ext_mech_batch_transform_begin(b, r->output, cs->nr);
  if (err) return err;
  r->b = b;
@@ -184,6 +242,13 @@ static int xdev_ext_iaa_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
  acomp_request_set_callback(r->req, CRYPTO_TFM_REQ_MAY_BACKLOG, xdev_ext_iaa_crypto_done, r);
  err = st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
        crypto_acomp_decompress(r->req) : crypto_acomp_compress(r->req);
+ /* A synchronous -EAGAIN is final, callback-free and returned before the
+  * provider accepted anything (idxd_submit_desc() could not enqueue on a
+  * shared work queue; the IAA driver has already unmapped both sides). The
+  * destination is unpublished and the source read-only, so the core restores
+  * both leases and resubmits later: scheduling backpressure, not a failure.
+  */
+ if (err == -EAGAIN) return -EAGAIN;
  if (err != -EINPROGRESS && err != -EBUSY)
   xdev_ext_iaa_crypto_done(r, err);
  /* Entered CryptoAPI: terminal failure is completed, never resubmitted. */

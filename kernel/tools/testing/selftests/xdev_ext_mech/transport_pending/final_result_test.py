@@ -39,6 +39,11 @@ static int tracked_notify_result(const struct xdev_ext_mech_stats *s,__u64 group
 static int ctl_transport_stats(int ring,__u64 id,struct xdev_ext_mech_transport_stats *s)
 { (void)ring;event('T');*s=(struct xdev_ext_mech_transport_stats){.size=sizeof(*s),.version=XDEV_EXT_MECH_TRANSPORT_STATS_VERSION,.session_id=id,.native_controls=controls,.pending_acks=pending,.uncertain_controls=unknown};return 0; }
 #endif
+#ifdef XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2
+/* Observational only: a failed counter query must not change the verdict. */
+static int ctl_transport_counters(int ring,__u64 id,struct xdev_ext_mech_transport_stats_v2 *s)
+{ (void)ring;(void)id;(void)s;return -EINVAL; }
+#endif
 /* PRODUCTION_HELPER */
 static int finalize(struct ctl_opts *o)
 {

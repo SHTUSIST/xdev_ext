@@ -40,8 +40,9 @@ struct list_head { struct list_head *next,*prev; };
 static void init_list(struct list_head *h) { h->next=h->prev=h; }
 static void add_list(struct list_head *n,struct list_head *h) { n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n; }
 struct xdev_ext_mech_stage;
-struct xdev_ext_mech_class_ops { void (*transport_stats)(struct xdev_ext_mech_stage *,u32 *,u32 *); };
-struct xdev_ext_mech_stage { const struct xdev_ext_mech_class_ops *cls; u32 pending,uncertain; };
+struct xdev_ext_mech_class_ops { void (*transport_stats)(struct xdev_ext_mech_stage *,u32 *,u32 *);
+ void (*transport_counters)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_transport_stats_v2 *); };
+struct xdev_ext_mech_stage { const struct xdev_ext_mech_class_ops *cls; u32 pending,uncertain,held; u64 retransmits; };
 struct xdev_ext_mech_session { struct list_head ring_node,live_node;u64 id;int uid,native_controls;u32 nr_stages;struct xdev_ext_mech_stage st[4]; };
 struct io_ring_ctx { struct list_head xdev_ext_mech_sessions; };
 static struct list_head xdev_ext_mech_live;
@@ -57,20 +58,29 @@ static int xdev_ext_mech_stop_op(struct io_ring_ctx *ctx,u64 id) { (void)ctx;(vo
 static int xdev_ext_mech_stats(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static void provider_stats(struct xdev_ext_mech_stage *st,u32 *pending,u32 *uncertain) { *pending=st->pending;*uncertain=st->uncertain; }
+static void provider_counters(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_transport_stats_v2 *out)
+{ out->retransmits+=st->retransmits;out->dup_suppressed+=2;out->held_acks+=1;out->held_unacked+=st->held; }
 /* PRODUCTION */
 #define CHECK(c) do { if(!(c)){fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#c);return 1;} } while(0)
 int main(int argc,char **argv)
 {
  const char *mode=argc>1?argv[1]:"valid";
  struct io_ring_ctx ctx;init_list(&ctx.xdev_ext_mech_sessions);init_list(&xdev_ext_mech_live);
- const struct xdev_ext_mech_class_ops ops={.transport_stats=provider_stats},empty_ops={0};
+ const struct xdev_ext_mech_class_ops ops={.transport_stats=provider_stats,.transport_counters=provider_counters},empty_ops={0};
  struct xdev_ext_mech_session s={.id=7,.uid=10,.native_controls=3,.nr_stages=3,
- .st={{.cls=&ops,.pending=2,.uncertain=1},{.cls=&ops,.pending=5,.uncertain=2},{.cls=&empty_ops}}};
+ .st={{.cls=&ops,.pending=2,.uncertain=1,.retransmits=4,.held=6},{.cls=&ops,.pending=5,.uncertain=2,.retransmits=1},{.cls=&empty_ops}}};
  init_list(&s.ring_node);init_list(&s.live_node);add_list(&s.live_node,&xdev_ext_mech_live);
  if(!strcmp(mode,"owner"))add_list(&s.ring_node,&ctx.xdev_ext_mech_sessions);
+ unsigned int nr=1;int expected=0;
+ struct xdev_ext_mech_transport_stats_v2 wire2={.v1={.size=64,.version=2,.session_id=7}};
  struct xdev_ext_mech_transport_stats wire={.size=32,.version=1,.session_id=7};
  struct io_uring_xdev_ext_mech req={.op=6,.arg=(uintptr_t)&wire};
- unsigned int nr=1;int expected=0;
+ bool v2=!strncmp(mode,"v2",2);
+ if(v2)req.arg=(uintptr_t)&wire2;
+ if(!strcmp(mode,"v2-size")){wire2.v1.size=32;expected=-EINVAL;}
+ if(!strcmp(mode,"v2-input")){wire2.retransmits=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v2-reserved")){wire2.rsvd2=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v2-copy")){fail_from=3;expected=-EFAULT;}
  if(!strcmp(mode,"uid")){caller_uid=11;expected=-ENOENT;}
  if(!strcmp(mode,"gone")){wire.session_id=8;expected=-ENOENT;}
  if(!strcmp(mode,"size")){wire.size=40;expected=-EINVAL;}
@@ -87,6 +97,10 @@ int main(int argc,char **argv)
  if(!strcmp(mode,"null")){req.arg=0;expected=-EFAULT;}
  if(!strcmp(mode,"saturate")){s.st[0].pending=U32_MAX;s.st[0].uncertain=U32_MAX;}
  int r=io_xdev_ext_mech_register(&ctx,&req,nr);CHECK(r==expected);CHECK(xdev_ext_mech_live_lock==0);
+ if(!r&&v2){CHECK(wire2.v1.size==64&&wire2.v1.version==2&&wire2.v1.session_id==7&&!wire2.v1.rsvd&&!wire2.rsvd2);
+  CHECK(wire2.v1.native_controls==3&&wire2.v1.pending_acks==7&&wire2.v1.uncertain_controls==3);
+  CHECK(wire2.retransmits==5&&wire2.dup_suppressed==4&&wire2.held_acks==2&&wire2.held_unacked==6);return 0;}
+ /* A version 1 caller never sees the appended counters. */
  if(!r){CHECK(wire.size==32&&wire.version==1&&wire.session_id==7&&!wire.rsvd);CHECK(wire.native_controls==3);CHECK(wire.pending_acks==(!strcmp(mode,"saturate")?U32_MAX:7));CHECK(wire.uncertain_controls==(!strcmp(mode,"saturate")?U32_MAX:3));}
  return 0;
 }
@@ -104,7 +118,7 @@ class Dispatch(unittest.TestCase):
   p=Path(cls.tmp.name);(p/'probe.c').write_text(FIXTURE.replace('/* PRODUCTION */',code));cls.binary=p/'probe'
   subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_production_api_contract(self):
-  for mode in ('valid','owner','uid','gone','size','version','controls','pending','uncertain','reserved','request-reserved','nr','copy-request','copy-input','copy-output','null','saturate'):
+  for mode in ('valid','owner','uid','gone','size','version','controls','pending','uncertain','reserved','request-reserved','nr','copy-request','copy-input','copy-output','null','saturate','v2','v2-size','v2-input','v2-reserved','v2-copy'):
    with self.subTest(mode=mode):
     p=subprocess.run([str(self.binary),mode],capture_output=True,text=True)
     self.assertEqual(p.returncode,0,p.stderr)

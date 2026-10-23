@@ -429,7 +429,8 @@ static int test_stop(const char *mode) {
   EQ(pool_releases,0,"STOP quarantine retains pinned pool");
   EQ(file_puts,0,"STOP quarantine retains provider fd");
   CHECK(s->st[0].priv==cs&&cs->host&&cs->region.priv,"quarantine handles still reachable");
-  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ZOMBIE,"unknown DMA keeps ZOMBIE");
+  if(!strcmp(mode,"stop_pending"))EQ(s->ss.state,XDEV_EXT_MECH_SESSION_STOPPING,"accepted command defers the release decision");
+  else EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ZOMBIE,"unknown DMA keeps ZOMBIE");
   if(!strcmp(mode,"stop_pending"))EQ(states[1],XDEV_EXT_MECH_F_INFLIGHT,"timeout cannot recycle device frame");
  }else {
   EQ(owner.refs,0,"safe STOP drops provider module pin");

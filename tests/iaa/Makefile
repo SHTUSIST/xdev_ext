@@ -19,6 +19,7 @@ test_lifetime: test_lifetime.c test_iaa_unified_ops.c $(UAPI) $(MINI)
 check: test_contract test_lifetime
 	./test_contract
 	./test_lifetime
+	python3 unified_provider_test.py
 preflight: test_iaa_unified_ops
 	./test_iaa_unified_ops --preflight
 run: test_iaa_unified_ops

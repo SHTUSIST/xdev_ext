@@ -12,6 +12,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 FUNCTIONS = (
     'xdev_ext_mech_frames_move', 'xdev_ext_mech_frames_release',
+    'xdev_ext_mech_transform_alias_free',
     'xdev_ext_mech_transform_reserve', 'xdev_ext_mech_transform_unreserve',
     'xdev_ext_mech_transform_alias', 'xdev_ext_mech_batch_transform_begin',
     'xdev_ext_mech_batch_completion_claim', 'xdev_ext_mech_batch_completion_publish',

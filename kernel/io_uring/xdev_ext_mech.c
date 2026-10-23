@@ -26,6 +26,7 @@
 #include <linux/mutex.h>
 #include <linux/nvme.h>
 #include <linux/printk.h>
+#include <linux/rculist.h>
 #include <linux/rcupdate.h>
 #include <linux/sched.h>
 #include <linux/slab.h>
@@ -99,7 +100,7 @@ struct xdev_ext_mech_batch {
 };
 
 struct xdev_ext_mech_session {
-	struct list_head ring_node;	/* ctx->xdev_ext_mech_sessions, uring_lock */
+	struct list_head ring_node;	/* ctx->xdev_ext_mech_sessions: uring_lock, RCU readers */
 	struct list_head all_node;	/* xdev_ext_mech_all, xdev_ext_mech_all_lock */
 	struct list_head quarantine_node;
 	struct list_head live_node;	/* xdev_ext_mech_live, xdev_ext_mech_live_lock */
@@ -124,6 +125,7 @@ struct xdev_ext_mech_session {
 	u32 start_legacy_events;	/* prior batches finishing during the handoff */
 	bool start_return_pending;	/* queued loans must precede terminal wake */
 	bool worker_gone;
+	bool release_deferred;		/* drain bound passed; the last batch decides */
 	u32 cmd_refs;			/* uring_cmd stage references */
 	int stop_err;			/* first reason the session stopped */
 	int last_err;
@@ -398,7 +400,7 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 	bool keep_ready = recycle && (s->st[0].direction == XDEV_EXT_MECH_DIR_TO_DEVICE ||
   (s->st[0].cls->flags & XDEV_EXT_MECH_CLASS_F_TRANSFORM));
 	u32 to = b->to_user && !recycle ? XDEV_EXT_MECH_F_USER : XDEV_EXT_MECH_F_K_FREE;
-	u32 pos;
+	u32 pos, done = 0, parked = 0;
 
 	/* Validate the whole batch before returning any provider custody. */
 	for (pos = 0; pos < b->nr_frames; pos++) {
@@ -423,6 +425,7 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
        xdev_ext_mech_life_release(&s->life[f->index],
                                 xdev_ext_mech_life_token(&s->life[f->index])))
     goto quarantine;
+   done |= BIT(pos);
    continue; /* stage lease remains HELD until unbind */
   }
 		/* FREE includes a failed producer or a not-yet-started batch. */
@@ -434,6 +437,7 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 		if (WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, f->index,
 							  XDEV_EXT_MECH_F_HELD, to)))
 			goto quarantine;
+		done |= BIT(pos);
 		if (to == XDEV_EXT_MECH_F_USER) {
 			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PUBLISHED, 1);
 		} else {
@@ -443,9 +447,17 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 	}
 	return 0;
 quarantine:
-	/* Never return an active/unknown lifecycle to the allocator. */
-	xdev_ext_mech_frames_move(s, b, XDEV_EXT_MECH_F_HELD, XDEV_EXT_MECH_F_SEQUESTERED);
-	xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, hweight32(b->present));
+	/* Never return an active/unknown lifecycle to the allocator.  Frames
+	 * already returned are user space's or the pool's again; park the
+	 * HELD rest one by one and count exactly those.
+	 */
+	for (pos = 0; pos < b->nr_frames; pos++)
+		if ((b->present & ~done & BIT(pos)) &&
+		    !xdev_ext_mech_pool_frame_move(&s->pool, b->f[pos].index,
+					      XDEV_EXT_MECH_F_HELD,
+					      XDEV_EXT_MECH_F_SEQUESTERED))
+			parked++;
+	xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, parked);
 	return -EIO;
 }
 
@@ -453,28 +465,75 @@ static bool xdev_ext_mech_transform_alias(struct xdev_ext_mech_pool *p,
                     const struct xdev_ext_mech_frame *a,
                     const struct xdev_ext_mech_frame *b);
 
-/* CREATE owns these output frames until unbind; START cannot lend them. */
+/*
+ * CREATE: a table of the page bytes of reserved frames [@first, @first + @nr),
+ * sorted, then one walk of every other frame: O((pool + table) log table).
+ */
+static int xdev_ext_mech_transform_alias_free(struct xdev_ext_mech_session *s,
+                        u32 first, u32 nr)
+{
+ struct xdev_ext_mech_alias_seg *table;
+ u32 i, j, off, po, len, fs = s->pool.frame_size;
+ size_t n = 0, cap = 0;
+ struct page *page;
+ int err = 0;
+ for (i = 0; i < nr; i++) {
+  struct xdev_ext_mech_frame out = { .index = first + i };
+  for (off = 0; off < fs; off += len) {
+   if (!xdev_ext_mech_frame_page(&s->pool, &out, off, &po, &len))
+    return -EINVAL;
+   len = min(len, fs - off);
+   cap++;
+  }
+ }
+ table = kvmalloc_array(cap, sizeof(*table), GFP_KERNEL);
+ if (!table)
+  return -ENOMEM;
+ for (i = 0; i < nr; i++) {
+  struct xdev_ext_mech_frame out = { .index = first + i };
+  for (off = 0; off < fs && n < cap; off += len, n++) {
+   page = xdev_ext_mech_frame_page(&s->pool, &out, off, &po, &len);
+   len = min(len, fs - off);
+   table[n] = (struct xdev_ext_mech_alias_seg){ .page = page, .off = po, .len = len };
+  }
+ }
+ xdev_ext_mech_alias_sort(table, n);
+ /* Two reserved outputs, or two pages of one, share bytes. */
+ if (xdev_ext_mech_alias_overlapping(table, n))
+  err = -EINVAL;
+ for (j = 0; !err && j < s->pool.nr_frames; j++) {
+  struct xdev_ext_mech_frame other = { .index = j };
+  if (j >= first && j - first < nr)
+   continue;
+  for (off = 0; off < fs; off += len) {
+   page = xdev_ext_mech_frame_page(&s->pool, &other, off, &po, &len);
+   if (!page) { err = -EINVAL; break; }
+   len = min(len, fs - off);
+   if (xdev_ext_mech_alias_hits(table, n, page, po, len)) { err = -EINVAL; break; }
+  }
+  cond_resched(); /* uring_lock is a mutex; a 1 GiB pool is many frames */
+ }
+ kvfree(table);
+ return err;
+}
+
+/*
+ * CREATE owns these output frames until unbind; START cannot lend them.
+ * The pool's pages are pinned at registration and fixed while the session
+ * holds it, so this one proof covers every later batch: a reserved output
+ * shares no page byte with any other frame, START sources included.
+ */
 int xdev_ext_mech_transform_reserve(struct xdev_ext_mech_stage *st, u32 first, u32 nr)
 {
  struct xdev_ext_mech_session *s = st->s;
- u32 i, j;
+ u32 i;
  int err;
  if (s->pool.kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !nr ||
      first >= s->pool.nr_frames || nr > s->pool.nr_frames - first)
   return -EINVAL;
- /* A reserved output must not alias a future START source either. */
- for (i = 0; i < nr; i++) {
-  struct xdev_ext_mech_frame out = {
-   .index = first + i, .data_len = s->pool.frame_size,
-  };
-  for (j = 0; j < s->pool.nr_frames; j++) {
-   struct xdev_ext_mech_frame other = {
-    .index = j, .data_len = s->pool.frame_size,
-   };
-   if (j != out.index && xdev_ext_mech_transform_alias(&s->pool, &out, &other))
-    return -EINVAL;
-  }
- }
+ err = xdev_ext_mech_transform_alias_free(s, first, nr);
+ if (err)
+  return err;
  for (i = 0; i < nr; i++) {
   if (s->transform_owner[first + i]) { err = -EBUSY; goto undo; }
   err = xdev_ext_mech_pool_frame_move(&s->pool, first + i,
@@ -560,17 +619,10 @@ int xdev_ext_mech_batch_transform_begin(struct xdev_ext_mech_batch *b,
    return -EINVAL;
   for (j = 0; j < b->nr_frames; j++)
    if (xdev_ext_mech_transform_alias(&s->pool, &dst[i], &b->f[j])) return -EINVAL;
-  /* Reserved windows of other slots/stages are independent leases too.
-   * Check their full chunks, including currently idle output capacity.
+  /* Reserved windows of other slots/stages are independent leases too;
+   * reserve proved at CREATE that no two reserved chunks share a page
+   * byte, so only the index, owner and state checks above run per batch.
    */
-  for (j = 0; j < s->pool.nr_frames; j++) {
-   struct xdev_ext_mech_frame other = {
-    .index = j, .data_len = s->pool.frame_size,
-   };
-   if (j != dst[i].index && s->transform_owner[j] &&
-       xdev_ext_mech_transform_alias(&s->pool, &dst[i], &other))
-    return -EINVAL;
-  }
   for (j = 0; j < i; j++)
    if (dst[i].index == dst[j].index ||
        xdev_ext_mech_transform_alias(&s->pool, &dst[i], &dst[j])) return -EINVAL;
@@ -809,12 +861,26 @@ static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s, int err)
 	spin_unlock_irqrestore(&s->lock, flags);
 }
 
-/* The last reference of a quarantined session: only its worker goes. */
+static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s);
+
+/*
+ * The last reference of a session that STOP did not release.  One whose
+ * drain bound passed with only accepted commands outstanding decides its
+ * fate now; of a quarantined one only the worker goes.  worker_gone is set,
+ * so only timers armed before it remain, and kthread_destroy_worker()
+ * flushes queued work but not armed timers.
+ */
 static void xdev_ext_mech_reap(struct work_struct *work)
 {
 	struct xdev_ext_mech_session *s = container_of(work, struct xdev_ext_mech_session,
 						  reap_work);
 
+	if (READ_ONCE(s->release_deferred)) {
+		xdev_ext_mech_release_late(s);
+		return;
+	}
+	kthread_cancel_delayed_work_sync(&s->retry_work);
+	kthread_cancel_delayed_work_sync(&s->progress_work);
 	synchronize_rcu();
 	kthread_destroy_worker(s->worker);
 }
@@ -838,16 +904,19 @@ struct xdev_ext_mech_stage *xdev_ext_mech_stage_get_cmd(struct io_uring_cmd *iou
 					      u32 class_id)
 {
 	struct xdev_ext_mech_stage *found = ERR_PTR(-EOPNOTSUPP);
-	void *ring = io_uring_cmd_ctx_handle(ioucmd);
+	struct io_ring_ctx *ctx = io_uring_cmd_ctx_handle(ioucmd);
 	struct xdev_ext_mech_session *s;
 	unsigned long flags;
 	u32 i;
 	int ret;
 
-	spin_lock(&xdev_ext_mech_all_lock);
-	list_for_each_entry(s, &xdev_ext_mech_all, all_node) {
-		if (s->ctx != ring)
-			continue;
+	/*
+	 * Only the issuing ring's sessions, per command and possibly from
+	 * io-wq without uring_lock: uring_lock orders the list writers, and a
+	 * session is freed only after a grace period that follows its removal.
+	 */
+	rcu_read_lock();
+	list_for_each_entry_rcu(s, &ctx->xdev_ext_mech_sessions, ring_node) {
 		for (i = 0; i < s->nr_stages; i++) {
 			struct xdev_ext_mech_stage *st = &s->st[i];
 
@@ -865,7 +934,7 @@ struct xdev_ext_mech_stage *xdev_ext_mech_stage_get_cmd(struct io_uring_cmd *iou
 		}
 	}
 out:
-	spin_unlock(&xdev_ext_mech_all_lock);
+	rcu_read_unlock();
 	return found;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_get_cmd);
@@ -1838,7 +1907,12 @@ static void xdev_ext_mech_stop_work(struct kthread_work *work)
   for (i = 0; i < s->nr_stages; i++)
    if (s->st[i].cls->progress) {
     unsigned long delay = s->st[i].cls->progress(&s->st[i]);
-    if (delay) kthread_mod_delayed_work(s->worker, &s->progress_work, delay);
+    /* This may run in the flush of kthread_destroy_worker(); a timer
+     * armed after worker_gone would outlive the worker. */
+    spin_lock_irqsave(&s->lock, flags);
+    if (delay && !s->worker_gone)
+     kthread_mod_delayed_work(s->worker, &s->progress_work, delay);
+    spin_unlock_irqrestore(&s->lock, flags);
    }
  }
 	xdev_ext_mech_return_idle(s, true);
@@ -2310,11 +2384,19 @@ static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s)
  * Process context, without uring_lock or an AF_XDP socket mutex; @s is off
  * its ring's list.  Stop, bounded drain, then release, or quarantine when a device may
  * still use the frames. Returns the synchronized final error, or -EBUSY
- * when quarantined.
+ * when quarantined or when the release waits for accepted commands.
+ *
+ * The drain bound is shorter than provider deadlines (CE and NET wait 30 s,
+ * NVMe its io_timeout).  A command still in flight at the bound is accepted,
+ * not known to be lost: if nothing is sequestered and no native control
+ * reference is held, the session stays STOPPING and the batch that drops
+ * the last reference makes the release decision (xdev_ext_mech_release_late).
+ * Nothing is reissued; any ambiguous outcome still quarantines.
  */
 static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 {
 	unsigned long flags;
+	u32 inflight = 0;
 	bool last;
 	int fate;
 
@@ -2328,8 +2410,15 @@ static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 			   XDEV_EXT_MECH_DRAIN_TIMEOUT);
 
 	spin_lock_irqsave(&s->lock, flags);
-	if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPING)
+	if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPING && s->ss.inflight &&
+	    !s->ss.sequestered && !atomic_read(&s->native_controls) &&
+	    !s->start_preparing && !s->start_return_pending) {
+		/* Only accepted commands remain: their completion decides. */
+		s->release_deferred = true;
+		inflight = s->ss.inflight;
+	} else if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPING) {
 		xdev_ext_mech_sess_drain(&s->ss, true);
+	}
 	xdev_ext_mech_notify_locked(s, false);
 	fate = xdev_ext_mech_sess_ref_fate(&s->ss);
  if (atomic_read(&s->native_controls)) {
@@ -2341,15 +2430,53 @@ static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 		s->worker_gone = true;
 	spin_unlock_irqrestore(&s->lock, flags);
 
+	if (inflight) {
+		/* In flight, so not last; @s may be gone once the lock is dropped. */
+		pr_warn("xdev_ext_mech: drain bound passed with %u batches in flight; release waits for their completion\n",
+			inflight);
+		return -EBUSY;
+	}
 	if (fate != XDEV_EXT_MECH_REFS_RELEASE || !last) {
 		xdev_ext_mech_quarantine(s);
 		if (last) {
+			kthread_cancel_delayed_work_sync(&s->retry_work);
+			kthread_cancel_delayed_work_sync(&s->progress_work);
 			synchronize_rcu();
 			kthread_destroy_worker(s->worker);
 		}
 		return -EBUSY;
 	}
 	return xdev_ext_mech_session_release(s);
+}
+
+/*
+ * System workqueue: the last batch of a session whose STOP passed the drain
+ * bound has ended.  Release only when every outcome was definite (nothing
+ * sequestered, no native control reference); otherwise quarantine as STOP
+ * would have.  A settle that could not run leaves STOPPING: fail closed.
+ */
+static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s)
+{
+	unsigned long flags;
+	int fate;
+
+	spin_lock_irqsave(&s->lock, flags);
+	if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPING || s->ss.inflight ||
+	    atomic_read(&s->native_controls))
+		s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
+	fate = xdev_ext_mech_sess_ref_fate(&s->ss);
+	xdev_ext_mech_notify_locked(s, false);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	if (fate == XDEV_EXT_MECH_REFS_RELEASE) {
+		xdev_ext_mech_session_release(s);
+		return;
+	}
+	xdev_ext_mech_quarantine(s);
+	kthread_cancel_delayed_work_sync(&s->retry_work);
+	kthread_cancel_delayed_work_sync(&s->progress_work);
+	synchronize_rcu();
+	kthread_destroy_worker(s->worker);
 }
 
 void xdev_ext_mech_generation_gone(u32 class_id, const void *ops)
@@ -2437,7 +2564,7 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 		xdev_ext_mech_session_release(s);
 		return ret;
 	}
-	list_add_tail(&s->ring_node, &ctx->xdev_ext_mech_sessions);
+	list_add_tail_rcu(&s->ring_node, &ctx->xdev_ext_mech_sessions);
 	spin_lock(&xdev_ext_mech_all_lock);
 	list_add_tail(&s->all_node, &xdev_ext_mech_all);
 	spin_unlock(&xdev_ext_mech_all_lock);
@@ -2639,7 +2766,8 @@ static int xdev_ext_mech_stop_op(struct io_ring_ctx *ctx, u64 id)
 	xdev_ext_mech_session_stop(s, 0);
 	if (READ_ONCE(s->cmd_refs))
 		return -EAGAIN;
-	list_del_init(&s->ring_node);
+	/* An io-wq uring_cmd lookup may still be walking past this node. */
+	list_del_rcu(&s->ring_node);
 	/* The drain may wait for completions; never under uring_lock. */
 	mutex_unlock(&ctx->uring_lock);
 	ret = xdev_ext_mech_session_destroy(s);
@@ -2718,17 +2846,19 @@ static int xdev_ext_mech_stats(struct io_ring_ctx *ctx, void __user *uarg)
 	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
+/* @out is the version 2 layout; a version 1 caller copies only out->v1. */
 static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
-				struct xdev_ext_mech_transport_stats *out)
+				struct xdev_ext_mech_transport_stats_v2 *out, u32 version)
 {
 	u32 i;
 	u64 pending = 0, uncertain = 0;
 
 	memset(out, 0, sizeof(*out));
-	out->size = sizeof(*out);
-	out->version = XDEV_EXT_MECH_TRANSPORT_STATS_VERSION;
-	out->session_id = s->id;
-	out->native_controls = atomic_read(&s->native_controls);
+	out->v1.size = version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
+		       sizeof(*out) : sizeof(out->v1);
+	out->v1.version = version;
+	out->v1.session_id = s->id;
+	out->v1.native_controls = atomic_read(&s->native_controls);
 	/* No session lock while acquiring a provider lock: RX admission uses
 	 * the opposite order. The synchronous STOP remains the final barrier. */
 	for (i = 0; i < s->nr_stages; i++) {
@@ -2736,37 +2866,49 @@ static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
 
 		if (s->st[i].cls->transport_stats)
 			s->st[i].cls->transport_stats(&s->st[i], &p, &u);
+		if (version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
+		    s->st[i].cls->transport_counters)
+			s->st[i].cls->transport_counters(&s->st[i], out);
 		pending += p;
 		uncertain += u;
 	}
-	out->pending_acks = min_t(u64, pending, U32_MAX);
-	out->uncertain_controls = min_t(u64, uncertain, U32_MAX);
+	out->v1.pending_acks = min_t(u64, pending, U32_MAX);
+	out->v1.uncertain_controls = min_t(u64, uncertain, U32_MAX);
 }
 
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *uarg)
 {
-	struct xdev_ext_mech_transport_stats out;
+	struct xdev_ext_mech_transport_stats_v2 out = {};
 	struct xdev_ext_mech_session *s;
+	u32 size;
 
-	if (copy_from_user(&out, uarg, sizeof(out)))
+	if (copy_from_user(&out.v1, uarg, sizeof(out.v1)))
 		return -EFAULT;
-	if (out.size != sizeof(out) ||
-	    out.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION ||
-	    out.native_controls || out.pending_acks || out.uncertain_controls || out.rsvd)
+	size = out.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
+	       sizeof(out) : sizeof(out.v1);
+	if ((out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION &&
+	     out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2) ||
+	    out.v1.size != size)
 		return -EINVAL;
-	s = xdev_ext_mech_find(ctx, out.session_id);
+	if (size == sizeof(out) && copy_from_user(&out, uarg, sizeof(out)))
+		return -EFAULT;
+	if (out.v1.native_controls || out.v1.pending_acks || out.v1.uncertain_controls ||
+	    out.v1.rsvd || out.retransmits || out.dup_suppressed || out.held_acks ||
+	    out.held_unacked || out.rsvd2)
+		return -EINVAL;
+	s = xdev_ext_mech_find(ctx, out.v1.session_id);
 	if (s) {
-		xdev_ext_mech_transport_stats_fill(s, &out);
+		xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
 	} else {
 		mutex_lock(&xdev_ext_mech_live_lock);
-		s = xdev_ext_mech_find_live(out.session_id);
+		s = xdev_ext_mech_find_live(out.v1.session_id);
 		if (s)
-			xdev_ext_mech_transport_stats_fill(s, &out);
+			xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
 		mutex_unlock(&xdev_ext_mech_live_lock);
 		if (!s)
 			return -ENOENT;
 	}
-	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
+	return copy_to_user(uarg, &out, size) ? -EFAULT : 0;
 }
 
 int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
@@ -2809,6 +2951,7 @@ void io_xdev_ext_mech_ring_exit(struct io_ring_ctx *ctx)
 	struct xdev_ext_mech_session *s, *n;
 	LIST_HEAD(list);
 
+	/* No uring_cmd of this ring is left to walk the list (ref_comp). */
 	mutex_lock(&ctx->uring_lock);
 	list_splice_init(&ctx->xdev_ext_mech_sessions, &list);
 	mutex_unlock(&ctx->uring_lock);

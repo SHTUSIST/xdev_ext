@@ -4,7 +4,8 @@
  *
  * Registers a user memory region, pins pages, and creates a kernel
  * virtual mapping (vmap).  unified_ops can then read/compute/send
- * directly on the pinned pages without copy_to/from_user.
+ * directly on the pinned pages without copy_to/from_user.  The long-term
+ * pins are charged to the locked-memory budget like registered buffers.
  */
 
 #include "xdev_ext_config.h"
@@ -16,11 +17,13 @@
 #include <linux/mm.h>
 #include <linux/refcount.h>
 #include <linux/sched/mm.h>
+#include <linux/sched/user.h>
 #include <linux/vmalloc.h>
 #include <linux/io_uring_types.h>
 #include <uapi/linux/io_uring.h>
 
 #include "io_uring.h"
+#include "rsrc.h"
 #include "xdev_ext_umem.h"
 
 #ifdef CONFIG_XDEV_EXT_MECH
@@ -109,6 +112,46 @@ static void xdev_ext_umem_remove_locked(struct io_xdev_ext_umem *umem)
 	}
 }
 
+/*
+ * Charge the pins of a new registry entry as io_account_mem() charges
+ * registered buffers: RLIMIT_MEMLOCK through ctx->user unless the ring
+ * creator had CAP_IPC_LOCK, and mm->pinned_vm.  Caller holds
+ * xdev_ext_umem_lock; nothing here sleeps.  A shared registration reuses
+ * the existing pins and is not charged again.
+ */
+static int xdev_ext_umem_account_locked(struct io_xdev_ext_umem *umem,
+				       struct io_ring_ctx *ctx)
+{
+	int ret;
+
+	if (ctx->user) {
+		ret = __io_account_mem(ctx->user, umem->nr_pages);
+		if (ret)
+			return ret;
+		umem->user = get_uid(ctx->user);
+	}
+	if (ctx->mm_account) {
+		atomic64_add(umem->nr_pages, &ctx->mm_account->pinned_vm);
+		mmgrab(ctx->mm_account);
+		umem->mm_account = ctx->mm_account;
+	}
+	umem->acct_pages = umem->nr_pages;
+	return 0;
+}
+
+/* Drops exactly what xdev_ext_umem_account_locked() charged, if anything. */
+static void xdev_ext_umem_unaccount(struct io_xdev_ext_umem *umem)
+{
+	if (umem->user) {
+		__io_unaccount_mem(umem->user, umem->acct_pages);
+		free_uid(umem->user);
+	}
+	if (umem->mm_account) {
+		atomic64_sub(umem->acct_pages, &umem->mm_account->pinned_vm);
+		mmdrop(umem->mm_account);
+	}
+}
+
 static void io_xdev_ext_umem_free(struct io_xdev_ext_umem *umem)
 {
 	if (umem->vmap_addr)
@@ -123,6 +166,7 @@ static void io_xdev_ext_umem_free(struct io_xdev_ext_umem *umem)
 		unpin_user_pages(umem->pages, umem->nr_pages);
 		kvfree(umem->pages);
 	}
+	xdev_ext_umem_unaccount(umem);
 	if (umem->mm)
 		mmdrop(umem->mm);
 	kfree(umem);
@@ -148,6 +192,20 @@ struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx_with_stats(
 		*shared = NULL;
 	mutex_lock(&xdev_ext_umem_lock);
 	umem = ctx->xdev_ext_umem;
+#ifdef CONFIG_XDEV_EXT_MECH
+	/*
+	 * Legacy unified ops address frames by UMEM offset and do not consult
+	 * the mechanism ownership words, so they could DMA into a frame that a
+	 * session holds INFLIGHT or SEQUESTERED.  Once a session has bound this
+	 * UMEM it is refused here; otherwise the mark keeps sessions off it.
+	 */
+	if (umem) {
+		if (umem->mech_state)
+			umem = NULL;
+		else
+			umem->legacy_used = true;
+	}
+#endif
 	if (umem) {
 		io_xdev_ext_umem_get(umem);
 		if (shared)
@@ -158,9 +216,18 @@ struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx_with_stats(
 	return umem;
 }
 
+/* Mechanism binding: no legacy mark, see io_xdev_ext_umem_mech_pool_bind(). */
 struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx(struct io_ring_ctx *ctx)
 {
-	return io_xdev_ext_umem_get_ctx_with_stats(ctx, NULL);
+	struct io_xdev_ext_umem *umem;
+
+	mutex_lock(&xdev_ext_umem_lock);
+	umem = ctx->xdev_ext_umem;
+	if (umem)
+		io_xdev_ext_umem_get(umem);
+	mutex_unlock(&xdev_ext_umem_lock);
+
+	return umem;
 }
 
 /* Task context only: may take xdev_ext_umem_lock and free the UMEM. */
@@ -285,7 +352,9 @@ int io_xdev_ext_umem_register(struct io_ring_ctx *ctx, void __user *arg)
 						(uintptr_t)reg.shared_addr;
 			ret = 0;
 		} else {
-			ret = xdev_ext_umem_add_locked(umem);
+			ret = xdev_ext_umem_account_locked(umem, ctx);
+			if (!ret)
+				ret = xdev_ext_umem_add_locked(umem);
 			if (!ret) {
 				ctx->xdev_ext_umem = umem;
 				ctx->xdev_ext_umem_shared =
@@ -295,6 +364,7 @@ int io_xdev_ext_umem_register(struct io_ring_ctx *ctx, void __user *arg)
 		}
 	}
 	mutex_unlock(&xdev_ext_umem_lock);
+	/* Also undoes the charge of a candidate whose add failed. */
 	if (ret < 0 || existing) {
 		io_xdev_ext_umem_free(umem);
 		if (ret < 0)
@@ -454,6 +524,13 @@ int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool,
 		goto err_put;
 
 	mutex_lock(&xdev_ext_umem_lock);
+	if (umem->legacy_used) {
+		/* Legacy ops ignore ownership words; see legacy_used. */
+		mutex_unlock(&xdev_ext_umem_lock);
+		kvfree(m);
+		ret = -EBUSY;
+		goto err_put;
+	}
 	if (!umem->mech_state)
 		umem->mech_state = kvzalloc(umem->nr_frames, GFP_KERNEL);
 	state = umem->mech_state;

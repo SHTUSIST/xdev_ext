@@ -523,7 +523,7 @@ class UbrMechSourceTest(unittest.TestCase):
         order = [stop.index(step) for step in (
             "xdev_ext_mech_session_stop(s, 0);",
             "if (READ_ONCE(s->cmd_refs))\n\t\treturn -EAGAIN;",
-            "list_del_init(&s->ring_node);",
+            "list_del_rcu(&s->ring_node);",
             "mutex_unlock(&ctx->uring_lock);")]
         self.assertEqual(order, sorted(order))
         get = function_body(path, "struct xdev_ext_mech_stage *xdev_ext_mech_stage_get_cmd(")
@@ -670,10 +670,10 @@ class UbrMechSourceTest(unittest.TestCase):
             "ret = xdev_ext_mech_sess_activate(&s->ss);",
             "spin_unlock_irqrestore(&s->lock, flags);",
             "ret = xdev_ext_mech_stop_reason(s);",
-            "list_add_tail(&s->ring_node, &ctx->xdev_ext_mech_sessions);")]
+            "list_add_tail_rcu(&s->ring_node, &ctx->xdev_ext_mech_sessions);")]
         self.assertEqual(order, sorted(order))
         refused = create[create.index("ret = xdev_ext_mech_stop_reason(s);"):
-                         create.index("list_add_tail(&s->ring_node,")]
+                         create.index("list_add_tail_rcu(&s->ring_node,")]
         self.assertIn("xdev_ext_mech_session_release(s);\n\t\treturn ret;",
                       refused)
         init = function_body(path, "static void xdev_ext_mech_session_init(")
@@ -702,10 +702,14 @@ class UbrMechSourceTest(unittest.TestCase):
         destroy = function_body(path, "static int xdev_ext_mech_session_destroy(")
         self.assertIn("if (fate != XDEV_EXT_MECH_REFS_RELEASE || !last) {",
                       destroy)
-        # A quarantined session's worker goes only after its last batch.
+        # A quarantined session's worker goes only after its last batch,
+        # after its armed timers; a deferred STOP decides its fate there.
         reap = function_body(path, "static void xdev_ext_mech_reap(")
         self.assertEqual(re.findall(r"^\s*(\w+)\(", reap, re.M),
-                         ["synchronize_rcu", "kthread_destroy_worker"])
+                         ["xdev_ext_mech_release_late",
+                          "kthread_cancel_delayed_work_sync",
+                          "kthread_cancel_delayed_work_sync",
+                          "synchronize_rcu", "kthread_destroy_worker"])
         self.assertIn("kthread_destroy_worker(s->worker);", reap)
 
     def test_batch_areas_are_u64_aligned(self):

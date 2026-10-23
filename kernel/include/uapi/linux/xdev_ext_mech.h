@@ -353,6 +353,21 @@ struct xdev_ext_mech_transport_stats {
 	__u32 rsvd;
 };
 
+/* Version 2 appends reliable-protocol counters; size and version select the
+ * layout, and a version 1 caller keeps the frozen 32-byte struct above.
+ * retransmits: DATA attempts after the first; dup_suppressed: received DATA
+ * segments not passed downstream again; held_acks: HELD replies the sender
+ * accepted; held_unacked: DATA frames retained by groups without an ACK. */
+#define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 2U
+struct xdev_ext_mech_transport_stats_v2 {
+	struct xdev_ext_mech_transport_stats v1;
+	__aligned_u64 retransmits;
+	__aligned_u64 dup_suppressed;
+	__aligned_u64 held_acks;
+	__u32 held_unacked;
+	__u32 rsvd2;
+};
+
 struct io_uring_xdev_ext_mech {
 	__u32 op;			/* enum xdev_ext_mech_op */
 	__u32 rsvd;

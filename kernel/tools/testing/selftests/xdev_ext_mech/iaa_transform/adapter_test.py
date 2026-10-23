@@ -17,11 +17,29 @@ from lease_test import FUNCTIONS
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
 ADAPTER_FUNCTIONS = ('xdev_ext_iaa_crypto_done', 'xdev_ext_iaa_sg',
+                     'xdev_ext_iaa_bind', 'xdev_ext_iaa_unbind',
                      'xdev_ext_iaa_submit', 'xdev_ext_iaa_mark_dead')
+# Helpers factored out of bind/submit; absent from older adapters.
+OPTIONAL_ADAPTER_FUNCTIONS = ('xdev_ext_iaa_output', 'xdev_ext_iaa_hw_admit')
 ACCESSORS = ('xdev_ext_mech_session_layout', 'xdev_ext_mech_session_pool',
+             'xdev_ext_mech_session_depth',
              'xdev_ext_mech_batch_slot', 'xdev_ext_mech_batch_nr_frames',
              'xdev_ext_mech_batch_bytes', 'xdev_ext_mech_batch_frame',
              'xdev_ext_mech_batch_ticket')
+# A frame window may be split at page_split; the tail lives in a distinct,
+# non-adjacent page that no other frame uses, so splitting creates no alias.
+FRAME_PAGE = '''static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,const struct xdev_ext_mech_frame *f,u32 off,u32 *po,u32 *len) {
+ if(f->index>=p->nr_frames || off>=FS)return NULL;
+ *po=off;*len=FS-off;return &pages[page_map[f->index]];
+}'''
+SPLIT_FRAME_PAGE = '''static u32 page_split;
+static struct page split_pages[N];
+static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,const struct xdev_ext_mech_frame *f,u32 off,u32 *po,u32 *len) {
+ if(f->index>=p->nr_frames || off>=FS)return NULL;
+ if(page_split && off<page_split){*po=off;*len=page_split-off;return &pages[page_map[f->index]];}
+ if(page_split){*po=off-page_split;*len=FS-off;split_pages[page_map[f->index]].id=N+page_map[f->index];return &split_pages[page_map[f->index]];}
+ *po=off;*len=FS-off;return &pages[page_map[f->index]];
+}'''
 
 
 def build_source(adapter, core):
@@ -31,7 +49,12 @@ def build_source(adapter, core):
     shared = shared.replace('const struct xdev_ext_mech_class_ops *cls;};',
                             'const struct xdev_ext_mech_class_ops *cls;void *priv;};')
     shared = shared.replace('struct xdev_ext_mech_session {\n',
-                            'struct xdev_ext_mech_session {\n struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch *batches;\n')
+                            'struct xdev_ext_mech_session {\n struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch *batches;u32 depth;\n')
+    shared = shared.replace('struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction;',
+                            'struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,flags;')
+    if FRAME_PAGE not in shared:
+        raise RuntimeError('lease fixture frame_page boundary changed')
+    shared = shared.replace(FRAME_PAGE, SPLIT_FRAME_PAGE)
     for name in FUNCTIONS:
         shared = shared.replace('/* ' + name + ' */', function(core, name))
     source = (HERE / 'adapter_fixture.c').read_text().replace('/* LEASE_BOUNDARY */', shared)
@@ -46,6 +69,9 @@ def build_source(adapter, core):
         source = source.replace('/* ' + name + ' */', function(core, name))
     for name in ADAPTER_FUNCTIONS:
         source = source.replace('/* ' + name + ' */', function(adapter, name))
+    for name in OPTIONAL_ADAPTER_FUNCTIONS:
+        if re.search(r'\b' + name + r'\(', adapter):
+            source = source.replace('/* ' + name + ' */', function(adapter, name))
     return source
 
 
@@ -90,8 +116,34 @@ class AdapterScheduling(unittest.TestCase):
     def test_inline_terminal_callback_wins_later_submit_return(self):
         self.probe('inline_callback')
 
-    def test_synchronous_eagain_is_one_terminal_failure_not_preaccept_retry(self):
+    def test_synchronous_eagain_before_acceptance_is_backpressure_then_retried_once(self):
+        # deflate-iaa returns -EAGAIN synchronously when idxd_submit_desc() could
+        # not enqueue on a shared work queue; no callback follows and its DMA
+        # mappings are already undone, so the core restores both leases and retries.
         self.probe('eagain')
+
+    def test_hardware_create_refuses_windows_mapping_to_several_segments(self):
+        # Upstream iaa_comp_acompress()/adecompress() fail with -EIO when
+        # dma_map_sg() returns more than one segment for either side.
+        for case in ('bind_hw_multi_dst', 'bind_hw_multi_src', 'bind_hw_split_window'):
+            with self.subTest(case=case):
+                self.probe(case)
+
+    def test_hardware_create_admits_single_segment_and_software_any_shape(self):
+        for case in ('bind_hw_single', 'bind_sw_multi'):
+            with self.subTest(case=case):
+                self.probe(case)
+
+    def test_hardware_batch_outside_admitted_shape_never_enters_cryptoapi(self):
+        for case in ('hw_multi_dst', 'hw_multi_src'):
+            with self.subTest(case=case):
+                self.probe(case)
+
+    def test_hardware_single_segment_batch_submits_one_entry_per_side(self):
+        self.probe('hw_single')
+
+    def test_physically_contiguous_pieces_share_one_scatterlist_entry(self):
+        self.probe('contiguous')
 
     def test_synchronous_native_error_discards_nonzero_dlen(self):
         self.probe('sync_error')

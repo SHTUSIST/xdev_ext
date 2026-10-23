@@ -70,8 +70,13 @@ int main(void)
  encode(pkt,&m);
  if(xsk_rel_packet_check(&st,&d,&fi,chunk,1,1,0,XDEV_EXT_REL_DATA,0)){ abort(); }
  checks++;
- chunk[384]^=1;
- if(!xsk_rel_packet_check(&st,&d,&fi,chunk,1,1,0,XDEV_EXT_REL_DATA,0)){ abort(); }
+ /* C is the only CRC writer: whatever a builder left in the field, the
+  * stored CRC covers exactly the bytes C admitted, payload included. */
+ chunk[384]^=1;memset(pkt+98,0,4);
+ if(xsk_rel_packet_check(&st,&d,&fi,chunk,1,1,0,XDEV_EXT_REL_DATA,0)){ abort(); }
+ { u32 crc;u8 hdr[64];memcpy(hdr,pkt+42,64);memset(hdr+56,0,4);
+   crc=crc32c(~0U,hdr,64);crc=crc32c(crc,pkt+106,512);
+   if(xdev_ext_rel_be(pkt+98,4)!=(crc^~0U)){ abort(); } }
  checks++;
  chunk[384]^=1;
  m.group=2;encode(pkt,&m);

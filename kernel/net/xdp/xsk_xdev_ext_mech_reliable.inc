@@ -21,6 +21,8 @@ struct xsk_mech_reliable {
  struct xsk_rel_control control[XDEV_EXT_REL_MAX_WINDOW];
  u64 ack_pending[XDEV_EXT_REL_MAX_WINDOW];
  u64 nr_groups; /* zero: legacy unbounded stream; otherwise explicit range */
+ /* Worker only: the staged initial DATA skipped its C pass under backpressure. */
+ bool initial_unchecked;
  /* Worker scratch is separate from the RX envelope. */
  struct xdev_ext_afxdp_reliable_info info;
  struct xdev_ext_mech_frame frames[XDEV_EXT_REL_MAX_SEGMENTS];
@@ -125,7 +127,8 @@ static void xsk_rel_info(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_ba
  spin_unlock_irqrestore(&p->tx_lock,flags);
 }
 /* Independently validate the complete Ethernet/IP/UDP envelope and v3 CRC.
- * BPF then supplies the HOLD intent, checked against this admitted message.
+ * This is the only RX payload pass: BPF runs after it on the same admitted
+ * bytes and supplies just the HOLD intent, checked against this message.
  */
 static int xsk_rel_decode(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_frame *f,
                           struct xdev_ext_rel_msg *msg)
@@ -163,24 +166,35 @@ static int xsk_rel_rx(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_frame
  struct xsk_mech_reliable *r=xst->rel;
  struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
  unsigned long flags;
+ bool control,reply=false;
  int action;
  if (xsk_rel_decode(st,f,m)) return XDEV_EXT_REL_BAD;
+ control=m->type==XDEV_EXT_REL_ACK || m->type==XDEV_EXT_REL_HELD;
  spin_lock_irqsave(&p->tx_lock,flags);
- if (m->type==XDEV_EXT_REL_ACK) action=xdev_ext_rel_tx_ack(&r->tx,m);
+ if (control) action=xdev_ext_rel_tx_ack(&r->tx,m);
  else if (st->direction!=XDEV_EXT_MECH_DIR_FROM_DEVICE) action=XDEV_EXT_REL_BAD;
  else if (r->nr_groups && (m->group<r->rx.cfg.first_group ||
           m->group-r->rx.cfg.first_group>=r->nr_groups)) action=XDEV_EXT_REL_BAD;
  else {
-  struct xdev_ext_rel_rx_entry *e=&r->rx.entry[m->group % r->rx.cfg.window];
+  u32 slot=m->group % r->rx.cfg.window;
+  struct xdev_ext_rel_rx_entry *e=&r->rx.entry[slot];
   action=xdev_ext_rel_rx_inspect(&r->rx,m);
   if (action!=XDEV_EXT_REL_BAD && e->group==m->group && m->attempt>e->latest_attempt)
    e->latest_attempt=m->attempt;
-  if (action==XDEV_EXT_REL_REPLAY_ACK)
-   r->ack_pending[m->group % r->rx.cfg.window]=m->group;
+  /* HELD never replaces an ACK the slot still owes, for this or an older group. */
+  reply=action==XDEV_EXT_REL_REPLAY_ACK ||
+        (action==XDEV_EXT_REL_REPLAY_HELD && !r->ack_pending[slot]);
+  if (reply) {
+   r->ack_pending[slot]=m->group;
+   xdev_ext_rel_rx_reply(&r->rx,m->group,action);
+  }
+  if (action==XDEV_EXT_REL_RECYCLE || action==XDEV_EXT_REL_STALE ||
+      action==XDEV_EXT_REL_REPLAY_ACK || action==XDEV_EXT_REL_REPLAY_HELD)
+   r->rx.dup_suppressed++;
  }
  spin_unlock_irqrestore(&p->tx_lock,flags);
- if (m->type==XDEV_EXT_REL_ACK || action==XDEV_EXT_REL_REPLAY_ACK) xdev_ext_mech_stage_kick(st);
- return m->type==XDEV_EXT_REL_ACK ? XDEV_EXT_REL_RECYCLE : action;
+ if (m->type==XDEV_EXT_REL_ACK || reply) xdev_ext_mech_stage_kick(st);
+ return control ? XDEV_EXT_REL_RECYCLE : action;
 }
 static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,const struct xdev_ext_rel_msg *m,
  const struct xdev_ext_mech_hold_intent *hold,const struct xdev_ext_mech_frame *f)
@@ -195,10 +209,14 @@ static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,const struct xdev_
  spin_unlock_irqrestore(&p->tx_lock,flags);
  return err;
 }
-/* C validates the requested protocol identity and CRC on every attempt.
+/* C validates the requested protocol identity on every attempt and is the
+ * only writer of the v3 CRC, like the IPv4/UDP checksums: one TX payload pass,
+ * over the final bytes, and BPF never computes it. A BPF CRC that C then
+ * recomputed would double that pass without adding a check, because the
+ * receiver verifies the CRC that leaves this host either way.
  * Initial core validation and network-only rebuilds share the same boundary. */
 static int xsk_rel_packet_check(struct xdev_ext_mech_stage *st,const struct xdp_desc *d,
- const struct xdev_ext_mech_frame_info *fi,const u8 *chunk,
+ const struct xdev_ext_mech_frame_info *fi,u8 *chunk,
  u64 group,u32 attempt,u64 credit,u8 type,u32 index)
 {
  struct xsk_xdev_ext_mech_stage *xst=st->priv;
@@ -207,7 +225,7 @@ static int xsk_rel_packet_check(struct xdev_ext_mech_stage *st,const struct xdp_
   .peer=*xdev_ext_mech_session_peer(st->s),
  };
  struct xdev_ext_rel_msg m;
- const u8 *pkt;
+ u8 *pkt;
  u8 hdr[64];
  u32 crc;
  int err=xsk_xdev_ext_mech_tx_check(d,fi,chunk,&bd);
@@ -217,6 +235,7 @@ static int xsk_rel_packet_check(struct xdev_ext_mech_stage *st,const struct xdp_
  pkt=chunk+(d->addr-fi->umem_addr);
  memcpy(hdr,pkt+42,64); memset(hdr+56,0,4);
  crc=crc32c(~0U,hdr,64); crc=crc32c(crc,pkt+106,fi->data_len);
+ xdev_ext_rel_put(pkt+98,crc^~0U,4);
  if (xdev_ext_rel_wire_decode(pkt+42,fi->data_len,crc,&xst->rel->tx.cfg,&m) ||
      m.group!=group || m.attempt!=attempt || m.credit!=credit ||
      m.type!=type || (type==XDEV_EXT_REL_DATA && m.index!=index)) return -EPROTO;
@@ -224,12 +243,24 @@ static int xsk_rel_packet_check(struct xdev_ext_mech_stage *st,const struct xdp_
 }
 
 /* Initial DATA already has exactly one core BPF BUILD. Validate its v3
- * fields before staging; submit retains and enqueues these admitted bytes. */
+ * fields before staging; submit retains and enqueues these admitted bytes.
+ * Without credit, submit refuses the batch and the core rebuilds it on the
+ * next retry, so skip the payload pass now and make submit refuse it. */
 static int xsk_rel_validate_initial(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b)
 {
  struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ u64 group=xdev_ext_mech_batch_key(b);
+ unsigned long flags;
  u32 i;
  int err;
+ spin_lock_irqsave(&p->tx_lock,flags);
+ r->initial_unchecked=!xdev_ext_rel_tx_find(&r->tx,group) &&
+  xdev_ext_rel_tx_can_open(&r->tx,group,xdev_ext_mech_batch_bytes(b),
+                           xdev_ext_mech_batch_nr_frames(b))==XDEV_EXT_REL_BACKPRESSURE;
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ if (r->initial_unchecked) return 0;
  for (i=0;i<xst->tx_n;i++) {
   err=xsk_rel_packet_check(st,&xst->tx_desc[i],&xst->tx_fi[i],xst->tx_kaddr[i],
                            xdev_ext_mech_batch_key(b),1,0,XDEV_EXT_REL_DATA,i);
@@ -255,12 +286,14 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
        .frame_size=pool->frame_size,.hdr_room=xdev_ext_mech_session_layout(st->s)->hdr_room,
        .info=&r->info,.info_size=sizeof(r->info),.scratch=(u8 *)r->scratch,
        .desc_size=sizeof(struct xdp_desc),.desc_cap=XDEV_EXT_REL_MAX_SEGMENTS};
+ /* Worker: batch_end, the only writer of DONE, cannot run during this call. */
+ u8 type=control ? xdev_ext_rel_rx_reply_type(&r->rx,group) : XDEV_EXT_REL_DATA;
  u32 i;
  s32 ret;
  int err;
  xsk_xdev_ext_mech_fill_info(st,b,&r->info);
  r->info.wire_group=group; r->info.wire_attempt=attempt;
- r->info.wire_credit=credit; r->info.wire_type=control ? XDEV_EXT_REL_ACK : XDEV_EXT_REL_DATA;
+ r->info.wire_credit=credit; r->info.wire_type=type;
  if (control) {
   r->frames[0]=control->frame;
   r->info.base.nr_frames=1;
@@ -274,7 +307,7 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
   struct xdev_ext_mech_frame_info *fi=&r->info.base.f[i];
   u8 *pkt;
   err=xsk_rel_packet_check(st,&r->scratch[i],fi,r->frames[i].kaddr,
-                           group,attempt,credit,control ? XDEV_EXT_REL_ACK : XDEV_EXT_REL_DATA,i);
+                           group,attempt,credit,type,i);
   if (err) return err;
   pkt=r->frames[i].kaddr+(r->scratch[i].addr-fi->umem_addr);
   xsk_xdev_ext_mech_tx_finish(pkt);
@@ -327,6 +360,7 @@ static int xsk_rel_submit(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_ba
  unsigned long flags;
  int action,err;
  spin_lock_irqsave(&p->tx_lock,flags);
+ if (r->initial_unchecked) { r->initial_unchecked=false; err=-EAGAIN; goto out; }
  e=xdev_ext_rel_tx_find(&r->tx,group);
  action=e ? XDEV_EXT_REL_SEND : xdev_ext_rel_tx_open(&r->tx,group,
                   xdev_ext_mech_batch_bytes(b),xdev_ext_mech_batch_nr_frames(b));
@@ -409,6 +443,28 @@ static void xsk_rel_transport_stats(struct xdev_ext_mech_stage *st,
  }
  spin_unlock_irqrestore(&p->tx_lock,flags);
 }
+/* Observational snapshot, provider lock only: adds this stage's protocol
+ * counters to @out. held_unacked counts DATA frames that the sender still
+ * retains because their group has no ACK yet (the retransmission source). */
+static void xsk_rel_transport_counters(struct xdev_ext_mech_stage *st,
+                                      struct xdev_ext_mech_transport_stats_v2 *out)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ unsigned long flags;
+ u64 held=out->held_unacked;
+ u32 i;
+ if (!r) return;
+ spin_lock_irqsave(&p->tx_lock,flags);
+ out->retransmits += r->tx.retransmits;
+ out->held_acks += r->tx.held_acks;
+ out->dup_suppressed += r->rx.dup_suppressed;
+ for(i=0;i<r->tx.cfg.window;i++)
+  if (r->data[i].batch && !r->tx.entry[i].acked) held += r->data[i].count;
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ out->held_unacked = held > U32_MAX ? U32_MAX : held;
+}
 static void xsk_rel_batch_end(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b,int err)
 {
  struct xsk_xdev_ext_mech_stage *xst=st->priv;
@@ -419,10 +475,18 @@ static void xsk_rel_batch_end(struct xdev_ext_mech_stage *st,struct xdev_ext_mec
  if (!xst->rel || st->direction!=XDEV_EXT_MECH_DIR_FROM_DEVICE) return;
  spin_lock_irqsave(&p->tx_lock,flags);
  action=xdev_ext_rel_rx_finish(&xst->rel->rx,group,err);
- if (action==XDEV_EXT_REL_REPLAY_ACK)
+ if (action==XDEV_EXT_REL_REPLAY_ACK) {
   xst->rel->ack_pending[group % xst->rel->rx.cfg.window]=group;
+  xdev_ext_rel_rx_reply(&xst->rel->rx,group,action);
+ }
  spin_unlock_irqrestore(&p->tx_lock,flags);
  if (action==XDEV_EXT_REL_REPLAY_ACK) xdev_ext_mech_stage_kick(st);
+ /* A FAILED group never ACKs and pins receiver credit for good, so the
+  * failure is terminal: stop the session and mark the failing stage dead
+  * instead of recycling all later traffic while ACTIVE. A STOP that already
+  * closed admission is cancelling batches, not reporting a device failure. */
+ else if (action==XDEV_EXT_REL_NONE && err && xdev_ext_mech_session_admits(st->s))
+  xdev_ext_mech_stage_dead(xdev_ext_mech_batch_stage(b),err);
 }
 static void xsk_rel_dead(struct xdev_ext_mech_stage *st)
 {

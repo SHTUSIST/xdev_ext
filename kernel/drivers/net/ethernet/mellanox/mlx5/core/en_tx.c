@@ -738,13 +738,33 @@ netdev_tx_t mlx5e_xmit(struct sk_buff *skb, struct net_device *dev)
 }
 
 #ifdef CONFIG_XDEV_EXT_MECH
+/* Process context, once per bind. Query the actual memory key before any
+ * peer address is published; a translated/non-readable MKEY cannot use this
+ * contract. The device-wide key only comes from mlx5e_create_mkey() (PA,
+ * local read, length64), so sends compare the SQ key instead of querying.
+ */
+static int mlx5e_peer_check_mkey(struct mlx5e_priv *priv)
+{
+ u32 out[MLX5_ST_SZ_DW(query_mkey_out)] = {};
+ void *mkc = MLX5_ADDR_OF(query_mkey_out, out, memory_key_mkey_entry);
+ int ret = mlx5_core_query_mkey(priv->mdev, priv->mdev->mlx5e_res.hw_objs.mkey,
+                                out, sizeof(out));
+ if (ret) return ret;
+ if (MLX5_GET(mkc, mkc, access_mode_4_2) ||
+     MLX5_GET(mkc, mkc, access_mode_1_0) != MLX5_MKC_ACCESS_MODE_PA ||
+     !MLX5_GET(mkc, mkc, lr) || !MLX5_GET(mkc, mkc, length64)) return -EOPNOTSUPP;
+ return 0;
+}
+/* RTNL (bind and the legacy batch ioctl). */
 struct pci_dev *mlx5e_peer_device(struct net_device *dev)
 {
  struct mlx5e_priv *priv = netdev_priv(dev);
+ if (mlx5e_peer_check_mkey(priv)) return NULL;
  return priv->mdev->pdev;
 }
-/* RTNL, process context. Query the actual memory key before publishing a
- * peer address; a translated/non-readable MKEY cannot use this contract.
+/* Process context, no RTNL. Like ndo_start_xmit this is serialized by the TX
+ * queue lock: channel deactivation stops the queue under that lock before the
+ * SQ, txq2sq or real_num_tx_queues change, so all of them are read under it.
  */
 int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *tx)
 {
@@ -754,30 +774,28 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  struct mlx5e_tx_wqe *wqe;
  struct mlx5e_tx_wqe_info *wi;
  struct mlx5_wqe_data_seg *dseg;
- u32 out[MLX5_ST_SZ_DW(query_mkey_out)] = {};
- void *mkc = MLX5_ADDR_OF(query_mkey_out, out, memory_key_mkey_entry);
- u32 mkey = priv->mdev->mlx5e_res.hw_objs.mkey;
  u16 pi, inl, ds, blocks;
+ u32 mkey;
  int ret;
  if (!tx || !tx->complete || tx->header_len < ETH_HLEN || tx->header_len > 128 ||
      !tx->len || (tx->len < ETH_ZLEN && tx->header_len + tx->len < ETH_ZLEN) ||
      tx->header_len > dev->mtu + ETH_HLEN ||
      tx->len > dev->mtu + ETH_HLEN - tx->header_len ||
      queue >= dev->real_num_tx_queues) return -EINVAL;
- ret = mlx5_core_query_mkey(priv->mdev, mkey, out, sizeof(out));
- if (ret) return ret;
- if (MLX5_GET(mkc, mkc, access_mode_4_2) ||
-     MLX5_GET(mkc, mkc, access_mode_1_0) != MLX5_MKC_ACCESS_MODE_PA ||
-     !MLX5_GET(mkc, mkc, lr) || !MLX5_GET(mkc, mkc, length64)) return -EOPNOTSUPP;
  inl = DIV_ROUND_UP(tx->header_len - INL_HDR_START_SZ, MLX5_SEND_WQE_DS);
  ds = MLX5E_TX_WQE_EMPTY_DS_COUNT + inl + 1;
  blocks = DIV_ROUND_UP(ds, MLX5_SEND_WQEBB_NUM_DS);
  txq = netdev_get_tx_queue(dev, queue);
  __netif_tx_lock_bh(txq);
+ if (queue >= dev->real_num_tx_queues || !netif_running(dev) ||
+     netif_tx_queue_stopped(txq)) { ret = -EAGAIN; goto unlock; }
  sq = priv->txq2sq[queue];
- if (!sq || !netif_running(dev) || netif_tx_queue_stopped(txq) ||
-     !test_bit(MLX5E_SQ_STATE_ENABLED, &sq->state) ||
+ if (!sq || !test_bit(MLX5E_SQ_STATE_ENABLED, &sq->state) ||
      test_bit(MLX5E_SQ_STATE_RECOVERING, &sq->state)) { ret = -EAGAIN; goto unlock; }
+ /* A profile change clears priv (and mdev) while the netdev stays
+  * registered; it is only read once the queue is known live.
+  */
+ mkey = priv->mdev->mlx5e_res.hw_objs.mkey;
  if (sq->mkey_be != cpu_to_be32(mkey) || sq->ptpsq ||
      sq->min_inline_mode > MLX5_INLINE_MODE_L2 ||
      test_bit(MLX5E_SQ_STATE_IPSEC, &sq->state)) { ret = -EOPNOTSUPP; goto unlock; }
@@ -1010,7 +1028,10 @@ void mlx5e_free_txqsq_descs(struct mlx5e_txqsq *sq)
 
 		sqcc += wi->num_wqebbs;
 #ifdef CONFIG_XDEV_EXT_MECH
-  if (mlx5e_peer_complete_wi(wi, -ECANCELED, false)) {
+  /* Both callers run after DESTROY_SQ, when the device no longer reads
+   * these WQEs; the skb branch below unmaps its DMA here for that reason.
+   */
+  if (mlx5e_peer_complete_wi(wi, -ECANCELED, true)) {
    npkts++; nbytes += wi->num_bytes;
    continue;
   }

@@ -30,7 +30,7 @@ struct xdp_desc { u64 addr; u32 len,options; };
 struct xsk_xdev_ext_mech_tx_batch { void *batch;u64 ticket;bool control;u32 attempt; };
 struct xdev_ext_mech_batch { struct xsk_xdev_ext_mech_tx_batch priv; };
 struct xsk_rel_data { struct xdev_ext_mech_batch *batch;u64 ticket;u32 count;struct xdp_desc desc[32]; };
-struct xsk_mech_reliable { struct xdev_ext_rel_tx tx;struct xsk_rel_data data[32];struct xdp_desc scratch[32]; };
+struct xsk_mech_reliable { struct xdev_ext_rel_tx tx;struct xsk_rel_data data[32];struct xdp_desc scratch[32];bool initial_unchecked; };
 struct xsk_xdev_ext_mech_provider { int tx_lock; };
 struct xdev_ext_mech_pool { struct xsk_xdev_ext_mech_provider *priv; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; };

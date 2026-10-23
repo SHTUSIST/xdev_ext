@@ -38,6 +38,11 @@
 #define COOKIE_BASE UINT64_C(0xDEC0DE0000)
 #define WAIT_MILLISECONDS 5000
 #define EXIT_UNAVAILABLE 4
+/* 2KiB history: deflate-generic inflates with an 11-bit window (crypto/deflate.c). */
+#define RAW_WINDOW_BITS 11
+#define SELECTION_PATH "/sys/module/xdev_ext_iaa/parameters/acomp_driver"
+#define SERVED_PATH "/sys/module/xdev_ext_iaa/parameters/acomp_served"
+#define DRIVER_MAX 128
 
 _Static_assert(FRAME_SIZE >= DST_CAP && FRAME_SIZE >= PLAIN_LEN, "logical output frame");
 _Static_assert(DST_OFF % FRAME_SIZE == 0, "output begins at frame boundary");
@@ -46,6 +51,14 @@ _Static_assert(IO_UNIFIED_OP_IAA_DECOMPRESS == 5, "decompression UAPI");
 enum case_id { CASE_A, CASE_B, CASE_C, CASE_D, CASE_E };
 struct case_spec { uint64_t src, dst, capacity; uint32_t length; };
 struct observation { uint64_t cookie; int result; uint32_t flags; };
+struct served { uint64_t requests, errors, bytes; };
+/* Per-driver result for a too-small destination; unknown drivers are not run. */
+struct provider_contract { const char *driver; int overflow; const char *execution; };
+static const struct provider_contract provider_contracts[] = {
+    {"deflate-iaa", EOVERFLOW, "IAA CryptoAPI driver; device execution still needs IAA/IDXD counters"},
+    {"deflate-generic", ENOSPC, "software CryptoAPI DEFLATE; no IAA device was used"},
+};
+static int overflow_errno = EOVERFLOW;
 struct context {
     struct io_uring ring;
     uint8_t *umem;
@@ -62,13 +75,14 @@ static void fill_plaintext(uint8_t *p, size_t n)
 
 // Raw DEFLATE (RFC1951, no zlib/gzip wrapper) so it matches IAA/QPL
 // qpl_op_decompress with QPL_FLAG_FIRST|QPL_FLAG_LAST (TEST_CONTRACT C1).
+// The 2KiB window keeps every match distance decodable by deflate-generic.
 static size_t raw_deflate(const uint8_t *in, size_t in_len,
                           uint8_t *out, size_t out_cap)
 {
     z_stream zs;
     memset(&zs, 0, sizeof(zs));
     if (deflateInit2(&zs, Z_BEST_COMPRESSION, Z_DEFLATED,
-                     -15 /* raw, 32K window */, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+                     -RAW_WINDOW_BITS, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
         fprintf(stderr, "deflateInit2 failed\n");
         exit(2);
     }
@@ -120,7 +134,7 @@ static bool validate_result(enum case_id id, uint64_t cookie,
                             const struct io_uring_unified_shared *s, bool report)
 {
     bool success = id == CASE_A;
-    int expected = success ? (int)PLAIN_LEN : id == CASE_B ? -EOVERFLOW : -EINVAL;
+    int expected = success ? (int)PLAIN_LEN : id == CASE_B ? -overflow_errno : -EINVAL;
     size_t allowed = success ? PLAIN_LEN : id == CASE_B ? TINY_CAP : 0;
     bool valid = c->cookie == cookie && c->flags == 0 && c->result == expected;
     valid &= s->calc_count == (success ? 1U : 0U);
@@ -160,37 +174,125 @@ static int open_ring(struct io_uring *ring)
     return ret == -1 ? -errno : ret;
 }
 
-static bool provider_in_stream(FILE *f)
+static bool provider_in_stream(FILE *f, const char *wanted)
 {
-    char line[512], driver[128];
+    char line[512], driver[DRIVER_MAX];
     while (fgets(line, sizeof(line), f))
-        if (sscanf(line, "driver : %127s", driver) == 1 && !strcmp(driver, "deflate-iaa"))
+        if (sscanf(line, "driver : %127s", driver) == 1 && !strcmp(driver, wanted))
             return true;
     return false;
 }
 
-static bool provider_registered(void)
+static bool provider_registered(const char *wanted)
 {
     FILE *f = fopen("/proc/crypto", "r");
     bool found;
     if (!f) return false;
-    found = provider_in_stream(f);
+    found = provider_in_stream(f, wanted);
     fclose(f);
     return found;
 }
 
-static int preflight(void)
+static const struct provider_contract *provider_contract(const char *driver)
+{
+    for (size_t i = 0; i < sizeof(provider_contracts) / sizeof(provider_contracts[0]); i++)
+        if (!strcmp(provider_contracts[i].driver, driver)) return &provider_contracts[i];
+    return NULL;
+}
+
+/* The kernel parameter names the selected driver followed by one newline. */
+static bool selection_from_stream(FILE *f, char *driver)
+{
+    char line[DRIVER_MAX + 2];
+    size_t n;
+    if (!fgets(line, sizeof(line), f)) return false;
+    n = strlen(line);
+    if (n < 2 || n > DRIVER_MAX || line[n - 1] != '\n' || fgetc(f) != EOF) return false;
+    line[n - 1] = 0;
+    memcpy(driver, line, n);
+    return true;
+}
+
+/* "<driver> requests=R errors=E bytes=B" per actual serving driver. */
+static int served_from_stream(FILE *f, const char *driver, struct served *out,
+                              struct served *others)
+{
+    char line[512], name[DRIVER_MAX];
+    unsigned long long r, e, b;
+    bool found = false;
+    memset(out, 0, sizeof(*out));
+    memset(others, 0, sizeof(*others));
+    while (fgets(line, sizeof(line), f)) {
+        if (sscanf(line, "untracked requests=%llu", &r) == 1) {
+            others->requests += r;
+            continue;
+        }
+        if (sscanf(line, "%127s requests=%llu errors=%llu bytes=%llu", name, &r, &e, &b) != 4)
+            return -1;
+        struct served *dst = !strcmp(name, driver) ? out : others;
+        if (dst == out) {
+            if (found) return -1;
+            found = true;
+        }
+        dst->requests += r; dst->errors += e; dst->bytes += b;
+    }
+    return 0;
+}
+
+static int read_served(const char *driver, struct served *out, struct served *others)
+{
+    FILE *f = fopen(SERVED_PATH, "r");
+    int ret;
+    if (!f) return -1;
+    ret = served_from_stream(f, driver, out, others);
+    fclose(f);
+    return ret;
+}
+
+/* A and B reach the provider; C-E are refused by the kernel before it. */
+static bool served_delta_valid(const struct served *before, const struct served *after,
+                               const struct served *others_before,
+                               const struct served *others_after)
+{
+    return after->requests - before->requests == 2 &&
+           after->errors - before->errors == 1 &&
+           after->bytes - before->bytes == PLAIN_LEN &&
+           !memcmp(others_before, others_after, sizeof(*others_after));
+}
+
+static int preflight(char *driver)
 {
     struct io_uring ring;
     struct io_uring_probe *probe;
+    const struct provider_contract *contract;
+    struct served served, others;
     bool supported = false;
+    FILE *f;
     int ret;
     if (sysconf(_SC_PAGESIZE) != 4096) {
         fprintf(stderr, "UNAVAILABLE: this three-physical-page case requires 4KiB host pages\n");
         return EXIT_UNAVAILABLE;
     }
-    if (!provider_registered()) {
-        fprintf(stderr, "UNAVAILABLE: no registered deflate-iaa CryptoAPI provider; no native request submitted\n");
+    f = fopen(SELECTION_PATH, "r");
+    if (!f) {
+        fprintf(stderr, "UNAVAILABLE: kernel exposes no acomp driver selection (%s)\n", SELECTION_PATH);
+        return EXIT_UNAVAILABLE;
+    }
+    ret = selection_from_stream(f, driver);
+    fclose(f);
+    if (!ret) { fprintf(stderr, "FAIL: unreadable acomp driver selection\n"); return 1; }
+    contract = provider_contract(driver);
+    if (!contract) {
+        fprintf(stderr, "UNAVAILABLE: selected acomp driver %s has no recorded overflow contract\n", driver);
+        return EXIT_UNAVAILABLE;
+    }
+    overflow_errno = contract->overflow;
+    if (!provider_registered(driver)) {
+        fprintf(stderr, "UNAVAILABLE: no registered %s CryptoAPI provider; no native request submitted\n", driver);
+        return EXIT_UNAVAILABLE;
+    }
+    if (read_served(driver, &served, &others)) {
+        fprintf(stderr, "UNAVAILABLE: kernel exposes no served-driver statistics (%s)\n", SERVED_PATH);
         return EXIT_UNAVAILABLE;
     }
     ret = open_ring(&ring);
@@ -212,7 +314,8 @@ static int preflight(void)
         fprintf(stderr, "UNAVAILABLE: canonical IORING_OP_UNIFIED_OPS not advertised (probe=%d)\n", ret);
         return EXIT_UNAVAILABLE;
     }
-    fprintf(stderr, "preflight: canonical opcode/provider visible; physical IAA execution is not certified\n");
+    fprintf(stderr, "preflight: canonical opcode and %s visible (%s); physical IAA execution is not certified\n",
+            driver, contract->execution);
     return 0;
 }
 
@@ -314,14 +417,17 @@ static struct observation submit_iaa_decompress(struct context *ctx,
 int main(int argc, char **argv)
 {
     uint8_t plain[PLAIN_LEN], blob[PLAIN_LEN + 1024], before[UMEM_SIZE] = {0};
+    char driver[DRIVER_MAX] = "";
+    struct served served_before, served_after, others_before, others_after;
     size_t blob_len;
     bool only_preflight = argc == 2 && !strcmp(argv[1], "--preflight");
     int failed = 0, ret;
     if (argc != 1 && !only_preflight) {
         fprintf(stderr, "usage: %s [--preflight]\n", argv[0]); return 2;
     }
-    ret = preflight();
+    ret = preflight(driver);
     if (ret || only_preflight) return ret;
+    if (read_served(driver, &served_before, &others_before)) return 1;
     fill_plaintext(plain, PLAIN_LEN);
     blob_len = raw_deflate(plain, PLAIN_LEN, blob, sizeof(blob));
     if (blob_len > FRAME_SIZE - GUARD_LEN) return 2;
@@ -345,7 +451,16 @@ int main(int argc, char **argv)
         if (release_context(&ctx)) failed = 1;
         if (failed) break;
     }
+    if (!failed && (read_served(driver, &served_after, &others_after) ||
+                    !served_delta_valid(&served_before, &served_after,
+                                        &others_before, &others_after))) {
+        fprintf(stderr, "FAIL: %s did not serve exactly cases A and B (or another driver/request interfered)\n",
+                driver);
+        failed = 1;
+    }
     if (failed) { fprintf(stderr, "RESULT: FAIL\n"); return 1; }
-    fprintf(stderr, "RESULT: PASS CryptoAPI syscall contract; physical IAA execution/performance not certified\n");
+    fprintf(stderr, "RESULT: PASS CryptoAPI syscall contract served-by=%s (%s); "
+            "physical IAA execution/performance not certified\n",
+            driver, provider_contract(driver)->execution);
     return 0;
 }

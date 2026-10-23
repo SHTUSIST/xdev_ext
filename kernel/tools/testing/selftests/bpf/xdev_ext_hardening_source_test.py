@@ -96,6 +96,10 @@ def mech_callbacks(path: Path):
 
 class UbrHardeningSourceTest(unittest.TestCase):
     def test_default_pipeline_excludes_unmediated_gpu_demo(self):
+        # The unmediated nvme_gpu_nic_chain.c demonstrator (cuMemHostRegister
+        # on the shared frames, no XDEV_EXT GPU entry) is not distributed.  The
+        # NVMe->GPU->NIC chain is built only from the mediated pipeline
+        # sources, and never as a default target.
         path = ROOT / "Makefile.pipeline"
         text = path.read_text(encoding="utf-8")
 
@@ -106,34 +110,46 @@ class UbrHardeningSourceTest(unittest.TestCase):
             line for line in text.splitlines() if line.startswith("userspace:")
         )
 
-        self.assertNotIn("nvme_gpu_nic_chain", targets)
-        self.assertNotIn("nvme_gpu_nic_chain", userspace)
-        self.assertIn("legacy-demo: nvme_gpu_nic_chain", text)
+        self.assertFalse((ROOT / "nvme_gpu_nic_chain.c").exists())
+        self.assertNotIn("nvme_gpu_nic_chain.c", text)
+        self.assertNotIn("legacy-demo", text)
+        for line in (targets, userspace):
+            self.assertNotIn("gpu", line)
+        self.assertIn("gpu-chain: nvme_gpu_nic_pipeline\n", text)
+        self.assertIn("gpu-chain-host: nvme_gpu_nic_pipeline_host\n", text)
+        for binary in ("nvme_gpu_nic_pipeline", "nvme_gpu_nic_pipeline_host"):
+            rule = re.search(rf"^{binary}: (.*?)\n\n", text, re.M | re.S)
+            self.assertIsNotNone(rule, binary)
+            self.assertIn("-DXDEV_EXT_NVME_GPU_NIC_CHAIN", rule.group(1))
+            self.assertIn("nvme_xdp_pipeline.c tools/nvme_gpu_nic_runtime.c",
+                          rule.group(1))
         self.assertIn(
-            "Legacy demo; bypasses the canonical XDEV_EXT GPU entry",
-            text,
+            "synchronously traverse the NVIDIA CE before sink publish",
+            " ".join(text.replace("#", " ").split()),
         )
 
     def test_gpu_artifact_labels_match_current_roles(self):
-        legacy_demo = (ROOT / "nvme_gpu_nic_chain.c").read_text(
-            encoding="utf-8"
-        )
         orchestrator = (ROOT / "tools/gpu_nvme_orchestrator.c").read_text(
             encoding="utf-8"
         )
-        snapshot = (ROOT / "drivers/gpu/nvidia-p2p/README.md").read_text(
-            encoding="utf-8"
-        )
+        samples = " ".join((ROOT / "drivers/gpu/nvidia-p2p/README.md")
+                           .read_text(encoding="utf-8").split())
 
-        self.assertIn("make -f Makefile.pipeline legacy-demo", legacy_demo)
-        # This excluded demonstrator is a historical reference whose original
-        # source bytes remain intact; active entry points use the current name.
-        self.assertIn("does not use the canonical UBR GPU", legacy_demo)
         self.assertNotIn("setup-only", orchestrator)
         self.assertIn("NVMe <-> GPU staged host-UMEM pipeline", orchestrator)
         self.assertNotIn("demonstrates the full zero-copy pipeline", orchestrator)
-        self.assertIn("Historical reference snapshot", snapshot)
-        self.assertIn("openpgu-p2p-v3", snapshot)
+        # The sample README labels the directory as userspace frontends over
+        # the canonical gpu/kernel-open driver, not as a driver snapshot, and
+        # states that the CE path still performs host<->VRAM DMA.
+        self.assertIn("use the canonical NVIDIA implementation in "
+                      "`gpu/kernel-open`", samples)
+        self.assertIn("This directory contains no NVIDIA kernel driver "
+                      "overlay.", samples)
+        self.assertIn("includes host↔VRAM DMA", samples)
+        self.assertIn("does not implement direct NIC-to-VRAM peer DMA",
+                      samples)
+        self.assertNotIn("Historical reference snapshot", samples)
+        self.assertNotIn("openpgu-p2p-v3", samples)
 
     def test_nvme_child_timeout_uses_pidfd_and_never_blocks_reaping(self):
         path = ROOT / "tools/testing/selftests/bpf/prog_tests/xdev_ext_binding.c"

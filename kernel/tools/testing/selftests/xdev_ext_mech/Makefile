@@ -15,6 +15,9 @@ TEST_PROGS += xdev_ext_mech_zc_source_test.py xdev_ext_mech_dma_test.py
 TEST_PROGS += xdev_ext_mech_nvme_nowait_test.py
 TEST_PROGS += xdev_ext_mech_recycle_tail_test.py xdev_ext_mech_ce_positive_test.py
 TEST_PROGS += reliable/run.sh reliable/wire_fault_test.py
+TEST_PROGS += model/run.sh
+TEST_FILES += model/life_explore.c model/mutants.py model/Makefile
+TEST_FILES += $(wildcard model/shim/linux/*.h)
 TEST_PROGS += reliable/regressions/control_stop_admission_test.py
 TEST_PROGS += reliable/regressions/native_done_map_teardown_test.py
 TEST_PROGS += provider/faults/run.py
@@ -29,6 +32,15 @@ TEST_PROGS += xdev_ext_mech_nvme_pool_test.py
 TEST_FILES += xdev_ext_mech_nvme_pool_fixture.c
 TEST_PROGS += iaa_transform/run.sh xdev_ext_mech_variable_length_test.py
 TEST_FILES += $(wildcard iaa_transform/*.py iaa_transform/*.c iaa_transform/*.h iaa_transform/*.md)
+
+TEST_PROGS += core_lifecycle/teardown_test.py core_lifecycle/stop_work_rearm_test.py core_lifecycle/start_keys_test.py
+TEST_PROGS += core_lifecycle/frames_release_test.py core_lifecycle/transform_alias_test.py core_lifecycle/alias_table_test.py core_lifecycle/stage_get_cmd_test.py
+TEST_FILES += core_lifecycle/lease_boundary.py
+TEST_PROGS += reliable/slow_downstream_run.sh
+TEST_FILES += reliable/slow_downstream_test.c
+TEST_PROGS += reliable/regressions/downstream_failure_terminal_test.py reliable/regressions/held_reply_provider_test.py
+TEST_PROGS += reliable/regressions/single_crc_pass_test.py reliable/regressions/backpressure_skip_payload_test.py
+TEST_PROGS += transport_pending/transport_counters_test.py
 
 TEST_PROGS += socket_sink/adapter_test.py
 TEST_PROGS += socket_guest/key_contract_test.py
@@ -72,5 +84,17 @@ $(OUTPUT)/xdev_ext_mech_lifecycle_test: CFLAGS += -pthread
 $(OUTPUT)/xdev_ext_mech_lifecycle_test: LDLIBS += -pthread
 $(OUTPUT)/xdev_ext_mech_rx_stages_test: $(abspath ../../../xdev_ext_mech/xdev_ext_mech_ctl_core.h)
 
-.PHONY: run
+# lib.mk links every program straight into $(OUTPUT)/<name>, so a program in a
+# subdirectory needs that subdirectory to exist below an out-of-tree OUTPUT.
+$(OUTPUT)/provider:
+	mkdir -p $@
+$(OUTPUT)/provider/xdev_ext_mech_dma_core_test: | $(OUTPUT)/provider
+
+.PHONY: run model-check
 run: run_tests
+
+# Bounded model check of the lifecycle, completion and teardown words; the
+# same check runs as model/run.sh under run_tests.
+model-check:
+	$(MAKE) -C model OUTPUT=$(OUTPUT)/model CC="$(CC)" \
+		XDEV_EXT_MECH_UBSAN=$(XDEV_EXT_MECH_UBSAN) model-check

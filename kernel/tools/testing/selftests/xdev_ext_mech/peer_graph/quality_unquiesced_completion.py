@@ -25,7 +25,9 @@ int main(void)
  struct file f={};struct pci_dev peer={};bool accepted=false;
  struct xdev_ext_peer_net_desc d={.offset=4096,.bytes=512,.header_len=42,.header={0xAB}};
  reset(6);
- int status=xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,&accepted);
+ struct xdev_ext_peer_tx_wait *spare=NULL;
+ int status=xdev_ext_peer_net_one(&dev,&peer,&f,5,2,&d,&accepted,&spare,NULL,NULL);
+ kfree(spare); /* the endpoint drops its reusable context */
  assert(accepted&&submitted==1&&released==1&&!released_quiesced&&freed==1);
  if(!status){fprintf(stderr,"RED native accepted callback status=0 quiesced=false became successful result; generic NET would NEXT/recycle\n");free(live_context);return 1;}
  free(live_context);

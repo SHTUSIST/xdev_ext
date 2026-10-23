@@ -12,21 +12,33 @@
  * result for the program's complete.  The program never sees a page, a DMA
  * address, a queue slot or a doorbell; nvme-pci maps the bio and writes the
  * SQ entry and doorbell as for any passthrough command.
+ *
+ * On a GPU-memory pool (XDEV_EXT_MECH_POOL_PEER) the frames are allocation
+ * offsets.  ->submit leases the controller's DMA address of each GPU page
+ * from the provider and issues one bio-less command whose SGL already names
+ * those addresses.  It completes through end_io like the host-page command;
+ * the worker releases the leases in ->fill_cqe, quiesced only on success.
  */
 
 #include <linux/bio.h>
 #include <linux/blk-mq.h>
+#include <linux/dma-mapping.h>
 #include <linux/highmem.h>
 #include <linux/moduleparam.h>
 #include <linux/nvme_xdev_ext_passthru.h>
+#include <linux/pci.h>
+#include <linux/sizes.h>
 #include <linux/slab.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_peer.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <linux/capability.h>
 #include "nvme.h"
+#include "xdev_ext_peer_nvme_core.h"
 
 struct nvme_xdev_ext_mech_slot;
+struct nvme_xdev_ext_peer_slot;
+struct nvme_xdev_ext_peer_res;
 
 struct nvme_xdev_ext_mech_stage {
 	struct nvme_ns *ns;		/* pinned by the stage file */
@@ -41,6 +53,7 @@ struct nvme_xdev_ext_mech_stage {
 	struct nvme_xdev_ext_mech_slot *slots, *free;
 	u32 nr_slots;
 	u16 nr_vecs;
+	struct nvme_xdev_ext_peer_res *peer;	/* GPU-memory pool only */
 };
 
 /* xdev_ext_mech_batch_priv(): ->validate fills it for ->submit of the same batch. */
@@ -53,6 +66,7 @@ struct nvme_xdev_ext_mech_batch {
 	struct page **bounce;
 	u32 nr_bounce;
 	struct xdev_ext_nvme_mech_cqe cqe;	/* written by end_io */
+	struct nvme_xdev_ext_peer_slot *peer_slot;
 };
 
 /* Owned by one native request until end_io; never re-read a reused batch ticket. */
@@ -207,6 +221,116 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
 	slot->busy = false;
 	slot->next = p->free;
 	p->free = slot;
+}
+
+/* At most one 4 KiB descriptor list per command, the size of an nvme-pci
+ * "nvme descriptor page" (NVME_CTRL_PAGE_SIZE / 16 SGL descriptors). */
+#define NVME_XDEV_EXT_PEER_MAX_PIECES	256U
+/* xdev_ext_peer_map() accepts no provider page smaller than 4 KiB. */
+#define NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT	12
+/* nvme-pci aligns its lists to 256 bytes, 512 under NVME_QUIRK_DMAPOOL_ALIGN_512. */
+#define NVME_XDEV_EXT_PEER_SGL_ALIGN	512U
+
+/*
+ * GPU-memory command context, one per possible live batch, allocated at
+ * CREATE like the host slots.  It holds the provider leases and the
+ * descriptor list from ->submit until the worker consumed the completion.
+ */
+struct nvme_xdev_ext_peer_slot {
+	struct nvme_xdev_ext_mech_completion done;
+	struct nvme_xdev_ext_peer_slot *next;
+	struct xdev_ext_peer_fd_lease *leases;	/* max_pieces, in payload order */
+	struct nvme_sgl_desc *sgl;		/* max_pieces, controller-readable */
+	dma_addr_t sgl_dma;
+	u32 nr_leases;
+	bool busy;
+};
+
+struct nvme_xdev_ext_peer_res {
+	struct device *dma_dev;			/* the controller's PCI function */
+	struct nvme_xdev_ext_peer_slot *slots, *free;	/* free: worker only */
+	struct xdev_ext_peer_fd_lease *leases;
+	struct nvme_sgl_desc *sgl;
+	dma_addr_t sgl_dma;
+	size_t sgl_bytes;
+	u32 nr_slots, max_pieces;
+};
+
+/* Process context: only after drain, or unwinding a failed CREATE. */
+static bool nvme_xdev_ext_peer_resources_free(struct nvme_xdev_ext_mech_stage *p)
+{
+	struct nvme_xdev_ext_peer_res *res = p->peer;
+	u32 i;
+
+	if (!res)
+		return true;
+	for (i = 0; i < res->nr_slots; i++)
+		if (WARN_ON_ONCE(res->slots[i].busy))
+			return false; /* The controller may still read the list. */
+	if (res->sgl)
+		dma_free_coherent(res->dma_dev, res->sgl_bytes, res->sgl,
+				  res->sgl_dma);
+	kvfree(res->leases);
+	kvfree(res->slots);
+	kfree(res);
+	p->peer = NULL;
+	return true;
+}
+
+/*
+ * CREATE, process context: slots, lease records and descriptor lists bounded
+ * by depth.  A frame of frame_size bytes spans at most frame_size / 4 KiB + 1
+ * provider pages.
+ */
+static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
+{
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
+	u32 i, stride, depth = xdev_ext_mech_session_depth(st->s);
+	struct device *dev = p->ns->ctrl->dev;
+	struct nvme_xdev_ext_peer_res *res;
+	u64 pieces;
+
+	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER)
+		return 0;
+	if (!dev || !dev_is_pci(dev))
+		return -EOPNOTSUPP;
+	if (!depth || !l->seg_len || !l->group_bytes || !l->frame_size)
+		return -EINVAL;
+	pieces = DIV_ROUND_UP((u64)l->group_bytes, l->seg_len) *
+		 (DIV_ROUND_UP((u64)l->frame_size, SZ_4K) + 1);
+	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	if (!res)
+		return -ENOMEM;
+	p->peer = res;
+	res->dma_dev = dev;
+	res->max_pieces = min_t(u64, pieces, NVME_XDEV_EXT_PEER_MAX_PIECES);
+	res->slots = kvcalloc(depth, sizeof(*res->slots), GFP_KERNEL);
+	res->leases = kvcalloc((size_t)depth * res->max_pieces,
+			       sizeof(*res->leases), GFP_KERNEL);
+	/* Each slot's list starts on the alignment nvme-pci gives its lists. */
+	stride = ALIGN(res->max_pieces * sizeof(*res->sgl),
+		       NVME_XDEV_EXT_PEER_SGL_ALIGN) / sizeof(*res->sgl);
+	res->sgl_bytes = (size_t)depth * stride * sizeof(*res->sgl);
+	if (res->slots && res->leases)
+		res->sgl = dma_alloc_coherent(dev, res->sgl_bytes, &res->sgl_dma,
+					      GFP_KERNEL);
+	if (!res->sgl) {
+		nvme_xdev_ext_peer_resources_free(p);
+		return -ENOMEM;
+	}
+	res->nr_slots = depth;
+	for (i = 0; i < depth; i++) {
+		struct nvme_xdev_ext_peer_slot *slot = &res->slots[i];
+
+		slot->leases = &res->leases[(size_t)i * res->max_pieces];
+		slot->sgl = &res->sgl[(size_t)i * stride];
+		slot->sgl_dma = res->sgl_dma +
+			(dma_addr_t)i * stride * sizeof(*slot->sgl);
+		slot->next = res->free;
+		res->free = slot;
+	}
+	return 0;
 }
 
 #ifndef CONFIG_XDEV_EXT_MECH_ZEROCOPY
@@ -402,6 +526,8 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 	}
 	st->priv = p;
 	ret = nvme_xdev_ext_class_resources_init(st);
+	if (!ret)
+		ret = nvme_xdev_ext_peer_resources_init(st);
 	if (ret) {
 		st->priv = NULL;
 		kfree(p);
@@ -411,7 +537,8 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 
 static void nvme_xdev_ext_class_unbind(struct xdev_ext_mech_stage *st)
 {
-	if (!nvme_xdev_ext_class_resources_free(st->priv))
+	if (!nvme_xdev_ext_peer_resources_free(st->priv) ||
+	    !nvme_xdev_ext_class_resources_free(st->priv))
 		return;
 	kfree(st->priv);
 	st->priv = NULL;
@@ -657,35 +784,264 @@ static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 	return RQ_END_IO_FREE;
 }
 
-static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
-                                    struct xdev_ext_mech_batch *b)
+/* Worker: a free GPU-memory slot, or preaccept backpressure. */
+static struct nvme_xdev_ext_peer_slot *
+nvme_xdev_ext_peer_slot_get(struct nvme_xdev_ext_peer_res *res,
+			    struct nvme_xdev_ext_mech_batch *bp)
 {
- struct nvme_xdev_ext_mech_stage *p = st->priv;
- struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
- struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
- struct xdev_ext_mech_frame f;
- struct xdev_ext_peer_nvme_rw u = {};
- bool accepted = false;
- int ret;
- if (xdev_ext_mech_batch_nr_frames(b) != 1 || xdev_ext_mech_batch_frame(b, 0, &f))
-  return -EINVAL;
- if (f.kaddr || !f.data_len || f.data_off > pool->frame_size ||
-     f.data_len > pool->frame_size - f.data_off ||
-     f.umem_addr != (u64)f.index * pool->frame_size) return -EPROTO;
- u.allocation_fd = -1;
- u.generation = xdev_ext_peer_mech_pool_generation(pool);
- u.offset = f.umem_addr + f.data_off;
- u.bytes = xdev_ext_mech_batch_bytes(b);
- if (u.bytes != f.data_len) return -EINVAL;
- u.flags = p->write ? XDEV_EXT_PEER_NVME_F_WRITE : 0;
- u.slba = (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 10) |
-          (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 11) << 32;
- ret = p->ns->ctrl->ops->peer_rw(p->ns, &u, xdev_ext_peer_mech_pool_file(pool), &accepted);
- if (!accepted) return ret ? ret : -EPROTO;
- nvme_xdev_ext_mech_cqe(ret, 0, &bp->cqe);
- if (ret) xdev_ext_mech_batch_sequester(b, xdev_ext_mech_batch_ticket(b), ret);
- else xdev_ext_mech_batch_complete(b, xdev_ext_mech_batch_ticket(b), 0);
- return 0;
+	struct nvme_xdev_ext_peer_slot *slot = res->free;
+
+	if (bp->peer_slot)
+		return ERR_PTR(-EBUSY);
+	if (!slot)
+		return ERR_PTR(-EAGAIN);
+	res->free = slot->next;
+	slot->next = NULL;
+	slot->busy = true;
+	slot->nr_leases = 0;
+	slot->done.uncertain = false;
+	bp->peer_slot = slot;
+	return slot;
+}
+
+/*
+ * Worker, process context: return the leases of a command that was never
+ * issued or whose completion the worker consumed.  After an uncertain
+ * outcome the controller may still access the GPU memory or the descriptor
+ * list: the leases retire unquiesced, which quarantines the allocation and
+ * its mapping for good (xdev_ext_peer_release()), and the slot stays busy.
+ */
+static void nvme_xdev_ext_peer_slot_put(struct nvme_xdev_ext_peer_res *res,
+					struct nvme_xdev_ext_mech_batch *bp)
+{
+	struct nvme_xdev_ext_peer_slot *slot = bp->peer_slot;
+	bool quiesced;
+	u32 i;
+
+	if (!slot)
+		return;
+	quiesced = !slot->done.uncertain;
+	for (i = 0; i < slot->nr_leases; i++)
+		xdev_ext_peer_fd_release(&slot->leases[i], quiesced);
+	slot->nr_leases = 0;
+	bp->peer_slot = NULL;
+	if (!quiesced)
+		return;
+	slot->busy = false;
+	slot->next = res->free;
+	res->free = slot;
+}
+
+/*
+ * Worker: lease GPU memory from @off, at most @left bytes, inside one
+ * provider page.  The page size is private to the provider mapping and at
+ * least 4 KiB; a span the provider refuses with -ERANGE is cut at the next
+ * smaller power-of-two boundary until it fits.
+ */
+static int nvme_xdev_ext_peer_lease(struct file *file, struct pci_dev *pdev,
+				    u64 generation, u64 off, u32 left,
+				    enum dma_data_direction dir,
+				    struct xdev_ext_peer_fd_lease *l)
+{
+	u32 shift = 31, len = left;
+	int ret;
+
+	for (;;) {
+		ret = xdev_ext_peer_file_acquire(file, pdev, generation, off, len,
+						 dir, l);
+		if (ret != -ERANGE)
+			return ret;
+		while (shift >= NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT &&
+		       ALIGN_DOWN(off, 1ULL << shift) + (1ULL << shift) - off >= len)
+			shift--;
+		if (shift < NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT)
+			return ret;
+		len = ALIGN_DOWN(off, 1ULL << shift) + (1ULL << shift) - off;
+	}
+}
+
+/*
+ * Worker: lease the batch payload page by page in frame order and describe
+ * it to the controller: one inline SGL data block when the leased pages are
+ * DMA-contiguous, else a last-segment list in the slot, the layout that
+ * nvme_pci_setup_sgls() builds for host pages.  Any error is before native
+ * acceptance; the caller returns what was leased.
+ */
+static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
+				  struct xdev_ext_mech_batch *b,
+				  struct nvme_xdev_ext_peer_slot *slot, u32 bytes,
+				  struct nvme_command *cmd)
+{
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct nvme_xdev_ext_peer_res *res = p->peer;
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
+	struct file *authority = xdev_ext_peer_mech_pool_file(pool);
+	u64 generation = xdev_ext_peer_mech_pool_generation(pool);
+	enum dma_data_direction dir = p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+	u32 pos, n = 0, run_len = 0, total = 0;
+	u32 nr = xdev_ext_mech_batch_nr_frames(b);
+	u64 run_end = 0;
+	int ret;
+
+	if (!authority || !nr)
+		return -EINVAL;
+	for (pos = 0; pos < nr; pos++) {
+		struct xdev_ext_mech_frame f;
+		u32 left, len;
+		u64 off;
+
+		ret = xdev_ext_mech_batch_frame(b, pos, &f);
+		if (ret)
+			return ret;
+		if (f.kaddr || !f.data_len || f.data_off > pool->frame_size ||
+		    f.data_len > pool->frame_size - f.data_off ||
+		    f.umem_addr != (u64)f.index * pool->frame_size)
+			return -EPROTO;
+		for (off = f.umem_addr + f.data_off, left = f.data_len; left;
+		     off += len, left -= len) {
+			struct xdev_ext_peer_fd_lease *l;
+
+			if (slot->nr_leases == res->max_pieces)
+				return -EREMOTEIO;
+			l = &slot->leases[slot->nr_leases];
+			ret = nvme_xdev_ext_peer_lease(authority,
+						       to_pci_dev(res->dma_dev),
+						       generation, off, left, dir, l);
+			if (ret)
+				return ret;
+			slot->nr_leases++;
+			len = l->lease.len;
+			/* SGL data blocks keep dword address and length. */
+			if ((l->lease.dma_address | len) & 3)
+				return -EINVAL;
+			if (n && run_end == l->lease.dma_address) {
+				run_len += len;
+				slot->sgl[n - 1].length = cpu_to_le32(run_len);
+			} else {
+				run_len = len;
+				slot->sgl[n++] = (struct nvme_sgl_desc) {
+					.addr = cpu_to_le64(l->lease.dma_address),
+					.length = cpu_to_le32(len),
+					.type = NVME_SGL_FMT_DATA_DESC << 4,
+				};
+			}
+			run_end = l->lease.dma_address + len;
+			total += len;
+		}
+	}
+	if (total != bytes)
+		return -EINVAL;
+	if (n == 1)
+		cmd->rw.dptr.sgl = slot->sgl[0];
+	else
+		cmd->rw.dptr.sgl = (struct nvme_sgl_desc) {
+			.addr = cpu_to_le64(slot->sgl_dma),
+			.length = cpu_to_le32(n * sizeof(*slot->sgl)),
+			.type = NVME_SGL_FMT_LAST_SEG_DESC << 4,
+		};
+	return 0;
+}
+
+/* Any context: the native completion, kept for the worker's fill_cqe. */
+static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req,
+						    blk_status_t err)
+{
+	struct nvme_xdev_ext_mech_completion *done = req->end_io_data;
+	struct xdev_ext_mech_batch *b = done->b;
+	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+	u64 ticket = done->ticket;
+	int status;
+
+	if (xdev_ext_mech_batch_completion_claim(b, ticket))
+		return RQ_END_IO_FREE;
+	if (nvme_req(req)->flags & NVME_REQ_CANCELLED)
+		status = -EINTR;
+	else
+		status = nvme_req(req)->status ?: blk_status_to_errno(err);
+	/* An error or a cancellation does not prove that peer DMA stopped. */
+	done->uncertain = status != 0;
+	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
+			       &bp->cqe);
+	xdev_ext_mech_batch_completion_publish(b, ticket, status, done->uncertain);
+	return RQ_END_IO_FREE;
+}
+
+/*
+ * Worker: one native command for the whole batch, issued like the host-page
+ * command.  The admission of nvme_pci_peer_rw() precedes acceptance; once
+ * blk_execute_rq_nowait() has the request only end_io and the worker's
+ * fill_cqe touch the slot, so up to depth commands are outstanding.
+ */
+static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
+				     struct xdev_ext_mech_batch *b)
+{
+	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct nvme_xdev_ext_peer_slot *slot;
+	struct xdev_ext_peer_nvme_plan plan;
+	struct nvme_command cmd = {};
+	struct nvme_ns *ns = p->ns;
+	struct request *req;
+	u64 slba;
+	int ret;
+
+	if (!p->peer)
+		return -EINVAL;
+	if (nvme_ctrl_state(ns->ctrl) != NVME_CTRL_LIVE ||
+	    !test_bit(NVME_NS_READY, &ns->flags) ||
+	    test_bit(NVME_NS_REMOVING, &ns->flags))
+		return -ENODEV;
+	if (ns->head->lba_shift < SECTOR_SHIFT || ns->head->lba_shift > 31)
+		return -EINVAL;
+	if (p->write && get_disk_ro(ns->disk))
+		return -EROFS;
+	slba = (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 10) |
+	       (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 11) << 32;
+	ret = xdev_ext_peer_nvme_plan(ns->head->lba_shift,
+			get_capacity(ns->disk) >> (ns->head->lba_shift - SECTOR_SHIFT),
+			ns->head->ms, ns->head->ids.csi, slba,
+			xdev_ext_mech_batch_bytes(b), p->write, &plan);
+	if (ret)
+		return ret;
+	if (plan.bytes > (u64)queue_max_hw_sectors(ns->queue) << SECTOR_SHIFT)
+		return -E2BIG;
+	cmd.rw.opcode = plan.opcode;
+	cmd.rw.nsid = cpu_to_le32(p->identity.nsid);
+	cmd.rw.slba = cpu_to_le64(plan.slba);
+	cmd.rw.length = cpu_to_le16(plan.nlb);
+
+	/* Tag pressure is preaccept backpressure, as for host pages. */
+	req = blk_mq_alloc_request(ns->queue, nvme_req_op(&cmd),
+				   BLK_MQ_REQ_NOWAIT);
+	if (IS_ERR(req))
+		return PTR_ERR(req);
+	slot = nvme_xdev_ext_peer_slot_get(p->peer, bp);
+	if (IS_ERR(slot)) {
+		blk_mq_free_request(req);
+		return PTR_ERR(slot);
+	}
+	ret = nvme_xdev_ext_peer_map(st, b, slot, plan.bytes, &cmd);
+	if (ret) {
+		nvme_xdev_ext_peer_slot_put(p->peer, bp);
+		blk_mq_free_request(req);
+		return ret;
+	}
+	nvme_init_request(req, &cmd);
+	/*
+	 * nvme_init_request() clears the SGL bits of ordinary passthrough. These
+	 * descriptors are already mapped for this PCI function, as in
+	 * nvme_pci_peer_rw(); without a bio nvme-pci neither maps nor unmaps.
+	 */
+	nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
+	req->cmd_flags |= REQ_FAILFAST_MASK;
+	nvme_req(req)->flags |= NVME_REQ_USERCMD;
+	slot->done.b = b;
+	slot->done.ticket = xdev_ext_mech_batch_ticket(b);
+	req->end_io = nvme_xdev_ext_peer_end_io;
+	req->end_io_data = &slot->done;
+	/* As for host pages, end_io may run before this returns. */
+	blk_execute_rq_nowait(req, false);
+	return 0;
 }
 
 static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
@@ -768,6 +1124,30 @@ static void nvme_xdev_ext_class_fill_cqe(struct xdev_ext_mech_stage *st,
 	bp->validated = false;
 }
 
+/* Worker: a GPU-memory completion; its leases go back here, never in end_io. */
+static void nvme_xdev_ext_peer_fill_cqe(struct xdev_ext_mech_stage *st,
+					struct xdev_ext_mech_batch *b, void *cqe)
+{
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+
+	/* After the drain timed out every lease stays with the session. */
+	if (xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+		nvme_xdev_ext_peer_slot_put(p->peer, bp);
+	memcpy(cqe, &bp->cqe, sizeof(bp->cqe));
+	bp->validated = false;
+}
+
+/* Worker: ->fill_cqe for either pool kind. */
+static void nvme_xdev_ext_stage_fill_cqe(struct xdev_ext_mech_stage *st,
+					 struct xdev_ext_mech_batch *b, void *cqe)
+{
+	if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
+		nvme_xdev_ext_peer_fill_cqe(st, b, cqe);
+	else
+		nvme_xdev_ext_class_fill_cqe(st, b, cqe);
+}
+
 static void nvme_xdev_ext_class_mark_dead(struct xdev_ext_mech_stage *st)
 {
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
@@ -790,7 +1170,7 @@ static const struct xdev_ext_mech_class_ops nvme_xdev_ext_mech_class = {
 	.fill_info = nvme_xdev_ext_mech_fill_info,
 	.validate = nvme_xdev_ext_class_validate,
 	.submit = nvme_xdev_ext_class_submit,
-	.fill_cqe = nvme_xdev_ext_class_fill_cqe,
+	.fill_cqe = nvme_xdev_ext_stage_fill_cqe,
 	.mark_dead = nvme_xdev_ext_class_mark_dead,
 };
 

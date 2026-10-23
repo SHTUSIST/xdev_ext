@@ -32,9 +32,25 @@ config IO_URING_XDEV_EXT_IAA
 	select CRYPTO_ACOMP2
 	help
 	  Enable asynchronous IAA compress and decompress unified operations over
-	  registered XDEV_EXT UMEM.  The implementation allocates the deflate-iaa
-	  transform lazily, so an IAA provider loaded after ring creation remains
-	  usable.  A provider or device is not required at build time.
+	  registered XDEV_EXT UMEM.  The acomp driver is selected by the
+	  xdev_ext_iaa.acomp_driver parameter (default deflate-iaa; the software
+	  deflate-generic driver is for functional tests).  One transform is
+	  looked up on first use and shared by later requests; a failed lookup
+	  is retried by the next request, so a provider loaded after ring
+	  creation remains usable, and the transform is released after a
+	  provider failure, a selection change or five idle seconds.
+	  xdev_ext_iaa.acomp_served counts requests per actual serving driver.
+	  deflate-iaa fails a request whose buffers map to more than one DMA
+	  segment, and overlaps requests only in its async_irq sync_mode.  A
+	  provider or device is not required at build time.
+
+	  This option also changes legacy UMEM READ: io_uring/Makefile defines
+	  XDEV_EXT_LIFECYCLE_SM for every io_uring object, so unified_ops
+	  completes UMEM READ asynchronously through the per-frame state words
+	  of xdev_ext_frame_sm.h instead of synchronously.  Each legacy window
+	  must then resolve to one owned frame and a producer must start at a
+	  frame boundary.  These state words carry no generation token; the
+	  mechanism session lifecycle is a separate implementation.
 
 config IO_URING_XDEV_EXT_AFXDP_COPY
 	bool "XDEV_EXT AF_XDP copy-mode send"
@@ -119,6 +135,10 @@ config XDEV_EXT_MECH_IAA
  help
    Bounded dual-lease compression/decompression through CryptoAPI acomp.
    Hardware uses deflate-iaa; software tests must explicitly request software.
+   A hardware stage is created only when every source frame window and each
+   request's whole output window is one physically contiguous range, because
+   deflate-iaa refuses multi-segment buffers; set the iaa_crypto sync_mode
+   to async_irq, otherwise each request polls inside submission.
 
 config XDEV_EXT_MECH_SOCKET
 	bool "XDEV_EXT mechanism connected UDP compatibility sink"

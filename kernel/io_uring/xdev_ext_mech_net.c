@@ -12,6 +12,14 @@
 #include "xdev_ext_mech_net_core.h"
 struct xdev_ext_net_stage {
  struct xdev_ext_peer_net_endpoint *endpoint;
+ /* Worker only. A group refused after a completed prefix resumes at the
+  * refused descriptor; NET is ordered, so at most one group is pending.
+  */
+ struct {
+  u64 batch; /* xdev_ext_mech_batch_id(); nr == 0 when none */
+  u32 nr, entries_done, bytes_sent;
+  struct xdev_ext_net_send_desc desc[XDEV_EXT_NET_MAX_ENTRIES];
+ } resume;
  bool dead;
 };
 struct xdev_ext_net_batch {
@@ -19,6 +27,11 @@ struct xdev_ext_net_batch {
  struct xdev_ext_net_mech_cqe cqe;
  u32 nr;
 };
+/* NETDEV_UNREGISTER of the bound device, under RTNL: never blocks. */
+static void xdev_ext_net_endpoint_dead(void *arg)
+{ xdev_ext_mech_stage_dead(arg, -ENXIO); }
+static bool xdev_ext_net_stopped(void *arg)
+{ return !xdev_ext_mech_session_admits(((struct xdev_ext_mech_stage *)arg)->s); }
 static int xdev_ext_net_bind(struct xdev_ext_mech_stage *st,
                              const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -29,11 +42,12 @@ static int xdev_ext_net_bind(struct xdev_ext_mech_stage *st,
      u->arg0 > U32_MAX || u->arg1 > U32_MAX) return -EINVAL;
  ns = kzalloc(sizeof(*ns), GFP_KERNEL);
  if (!ns) return -ENOMEM;
- ns->endpoint = xdev_ext_peer_net_bind(u->arg0, u->arg1);
- if (IS_ERR(ns->endpoint)) {
-  int ret = PTR_ERR(ns->endpoint); kfree(ns); return ret;
- }
+ /* Published first: removal may report the stage dead before bind returns. */
  st->priv = ns;
+ ns->endpoint = xdev_ext_peer_net_bind_stage(u->arg0, u->arg1, xdev_ext_net_endpoint_dead, st);
+ if (IS_ERR(ns->endpoint)) {
+  int ret = PTR_ERR(ns->endpoint); st->priv = NULL; kfree(ns); return ret;
+ }
  return 0;
 }
 static void xdev_ext_net_unbind(struct xdev_ext_mech_stage *st)
@@ -63,6 +77,7 @@ static void xdev_ext_net_fill_info(struct xdev_ext_mech_stage *st,
 static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
                                  struct xdev_ext_mech_batch *b, const u8 *scratch, u32 nr)
 {
+ struct xdev_ext_net_stage *ns = st->priv;
  struct xdev_ext_net_mech_info info;
  struct xdev_ext_net_batch *bp = xdev_ext_mech_batch_priv(b);
  struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
@@ -71,12 +86,24 @@ static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
  if (xdev_ext_mech_batch_frame(b, 0, &f) || f.kaddr || f.index >= pool->nr_frames ||
      f.umem_addr != (u64)f.index * pool->frame_size ||
      f.data_off > pool->frame_size || f.data_len > pool->frame_size - f.data_off)
-  return -EPROTO;
- xdev_ext_net_fill_info(st, b, &info);
- ret = xdev_ext_net_plan_check(&info, (const void *)scratch, nr);
- if (ret) return ret;
- memcpy(bp->desc, scratch, nr * sizeof(bp->desc[0])); bp->nr = nr;
- return 0;
+  ret = -EPROTO;
+ else {
+  xdev_ext_net_fill_info(st, b, &info);
+  ret = xdev_ext_net_plan_check(&info, (const void *)scratch, nr);
+ }
+ if (!ret) { memcpy(bp->desc, scratch, nr * sizeof(bp->desc[0])); bp->nr = nr; }
+ /* The core rebuilt a refused batch; any other batch ends a stale record. */
+ if (ns->resume.nr && ns->resume.batch != xdev_ext_mech_batch_id(b)) ns->resume.nr = 0;
+ if (!ns->resume.nr) return ret;
+ bp->cqe.entries_done = ns->resume.entries_done; bp->cqe.bytes_sent = ns->resume.bytes_sent;
+ if (!ret && (ns->resume.nr != nr ||
+              memcmp(ns->resume.desc, bp->desc, nr * sizeof(bp->desc[0]))))
+  ret = -EPROTO;
+ if (ret) {
+  /* The sent prefix belongs to the old plan: never complete it differently. */
+  ns->resume.nr = 0; bp->cqe.status = ret; bp->cqe.outcome = 1;
+ }
+ return ret;
 }
 static int xdev_ext_net_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 {
@@ -91,19 +118,34 @@ static int xdev_ext_net_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
  if (READ_ONCE(ns->dead) || !xdev_ext_mech_session_admits(st->s)) return -ESHUTDOWN;
  if (!bp->nr || bp->nr > XDEV_EXT_NET_MAX_ENTRIES || xdev_ext_mech_batch_frame(b, 0, &f))
   return -EPROTO;
- for (i = 0; i < bp->nr; i++) {
+ for (i = bp->cqe.entries_done; i < bp->nr; i++) {
   d = (struct xdev_ext_peer_net_desc){ .offset = f.umem_addr + bp->desc[i].frame_off,
          .bytes = bp->desc[i].len, .header_len = bp->desc[i].header_len };
   memcpy(d.header, bp->desc[i].header, d.header_len);
   accepted = false;
   if (!xdev_ext_mech_session_admits(st->s)) ret = -ESHUTDOWN;
-  else ret = xdev_ext_peer_net_send(ns->endpoint, xdev_ext_peer_mech_pool_file(pool),
-                    xdev_ext_peer_mech_pool_generation(pool), &d, &accepted);
+  else ret = xdev_ext_peer_net_send_stoppable(ns->endpoint, xdev_ext_peer_mech_pool_file(pool),
+                    xdev_ext_peer_mech_pool_generation(pool), &d, &accepted,
+                    xdev_ext_net_stopped, st);
   if (ret) {
-   /* Refusal before every native acceptance can be retried. A completed
-    * prefix is never resent, even if a later descriptor was only refused.
+   /* Refusal before native acceptance can be retried. Transient refusal
+    * after a completed prefix is retried from descriptor i, so the prefix
+    * (each entry already completed and quiesced) is never resent.
     */
-   if (!accepted && !i) return ret;
+   if (!accepted && (!i || ret == -EAGAIN)) {
+    if (i) {
+     ns->resume.batch = xdev_ext_mech_batch_id(b); ns->resume.nr = bp->nr;
+     ns->resume.entries_done = i; ns->resume.bytes_sent = bp->cqe.bytes_sent;
+     memcpy(ns->resume.desc, bp->desc, bp->nr * sizeof(bp->desc[0]));
+     /* Kept in the batch area for consistency only: an aborted batch
+      * gets no class CQE (the core reports just the session error), and a
+      * retry that fails in the core before ->validate loses this area.
+      */
+     bp->cqe.status = ret; bp->cqe.outcome = 1;
+    }
+    return ret;
+   }
+   ns->resume.nr = 0;
    bp->cqe.status = ret; bp->cqe.outcome = accepted ? 2 : 1;
    if (accepted) xdev_ext_mech_batch_sequester(b, xdev_ext_mech_batch_ticket(b), ret);
    else xdev_ext_mech_batch_complete(b, xdev_ext_mech_batch_ticket(b), ret);
@@ -111,6 +153,7 @@ static int xdev_ext_net_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
   }
   bp->cqe.bytes_sent += d.bytes; bp->cqe.entries_done++;
  }
+ ns->resume.nr = 0;
  xdev_ext_mech_batch_complete(b, xdev_ext_mech_batch_ticket(b), 0);
  return 0;
 }

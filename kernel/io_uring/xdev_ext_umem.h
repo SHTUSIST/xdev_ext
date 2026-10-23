@@ -16,6 +16,7 @@
 
 struct io_ring_ctx;
 struct io_uring_unified_shared;
+struct user_struct;
 
 struct io_xdev_ext_umem {
 	struct page	**pages;
@@ -33,13 +34,32 @@ struct io_xdev_ext_umem {
 	 */
 	struct mm_struct *mm;
 	refcount_t	refcount;	/* shared across io_ring_ctx instances */
+	/*
+	 * Locked-memory charge of the long-term pins, taken the way io_uring
+	 * registered buffers take it (io_account_mem()): @acct_pages against
+	 * the ring creator's RLIMIT_MEMLOCK through @user (NULL when the
+	 * creator had CAP_IPC_LOCK) and against @mm_account->pinned_vm.  The
+	 * UMEM can outlive the registering ring, so it holds its own uid and
+	 * mm_count references and drops the charge together with the pins.
+	 */
+	struct user_struct *user;
+	struct mm_struct *mm_account;
+	unsigned long	acct_pages;
 #ifdef CONFIG_XDEV_EXT_MECH
 	/*
 	 * One mechanism-layer ownership word per frame (enum
 	 * xdev_ext_mech_frame_state), allocated by the first session bound to this
-	 * UMEM and shared by all of them; freed with the UMEM.
+	 * UMEM and shared by all of them; freed with the UMEM.  Non-NULL also
+	 * means the UMEM belongs to mechanism sessions for the rest of its life.
 	 */
 	u8		*mech_state;
+	/*
+	 * Set by the first legacy unified op on this UMEM.  Legacy ops name
+	 * frames by UMEM offset and never consult @mech_state, so one UMEM
+	 * serves either legacy ops or mechanism sessions, never both.  Both
+	 * fields change under xdev_ext_umem_lock.
+	 */
+	bool		legacy_used;
 #endif
 #ifdef XDEV_EXT_LIFECYCLE_SM
 	/*
@@ -59,6 +79,11 @@ void io_xdev_ext_umem_destroy(struct io_ring_ctx *ctx);
 /*
  * Hold/release a UMEM across io-wq work or async I/O whose lifetime can
  * outlive unregister. put() may free and must run in task context.
+ *
+ * get_ctx_with_stats() is the legacy unified-op acquisition: it marks the
+ * UMEM legacy_used and returns NULL once a mechanism session has bound it
+ * (the op then fails as if no UMEM were registered).  get_ctx() is the
+ * mechanism-binding acquisition and leaves that mark alone.
  */
 struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx(struct io_ring_ctx *ctx);
 struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx_with_stats(

@@ -313,6 +313,9 @@ struct xdev_ext_mech_class_ops {
  /* Observational snapshot, provider lock only; both outputs start at zero. */
  void (*transport_stats)(struct xdev_ext_mech_stage *st, u32 *pending_acks,
                          u32 *uncertain_controls);
+ /* Same snapshot rules; adds this stage's version 2 counters into @out. */
+ void (*transport_counters)(struct xdev_ext_mech_stage *st,
+                            struct xdev_ext_mech_transport_stats_v2 *out);
 
 };
 

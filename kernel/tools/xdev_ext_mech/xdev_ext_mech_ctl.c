@@ -306,6 +306,18 @@ static int ctl_transport_stats(int ring, __u64 session,
 	return ctl_mech(ring, XDEV_EXT_MECH_OP_TRANSPORT_STATS, (uintptr_t)s);
 }
 
+/* Observational reliable-protocol counters; never part of a PASS decision. */
+static int ctl_transport_counters(int ring, __u64 session,
+				  struct xdev_ext_mech_transport_stats_v2 *s)
+{
+	*s = (struct xdev_ext_mech_transport_stats_v2) {
+		.v1.size = sizeof(*s),
+		.v1.version = XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2,
+		.v1.session_id = session,
+	};
+	return ctl_mech(ring, XDEV_EXT_MECH_OP_TRANSPORT_STATS, (uintptr_t)s);
+}
+
 static int ctl_create(int ring, struct xdev_ext_mech_create *c, __u64 *session)
 {
 	int ret;
@@ -672,6 +684,7 @@ static int ctl_finish_reliable(struct ctl_run *r,
                                const struct xdev_ext_mech_stats *s, int outcome)
 {
  struct xdev_ext_mech_transport_stats transport;
+ struct xdev_ext_mech_transport_stats_v2 counters;
  int query, stopped;
  __u64 session=r->session;
 
@@ -685,6 +698,14 @@ static int ctl_finish_reliable(struct ctl_run *r,
  printf("XDEV_EXT_MECH_TRANSPORT session=%llu native_controls=%u pending_acks=%u uncertain_controls=%u\n",
         (unsigned long long)transport.session_id,transport.native_controls,
         transport.pending_acks,transport.uncertain_controls);
+ /* A failed counter query is printed as unknown and changes no outcome. */
+ if (ctl_transport_counters(r->ring,session,&counters))
+  counters=(struct xdev_ext_mech_transport_stats_v2){.retransmits=UINT64_MAX,
+   .dup_suppressed=UINT64_MAX,.held_acks=UINT64_MAX,.held_unacked=UINT32_MAX};
+ printf("XDEV_EXT_MECH_TRANSPORT_COUNTERS session=%llu retransmits=%llu dup_suppressed=%llu "
+        "held_acks=%llu held_unacked=%u\n",(unsigned long long)session,
+        (unsigned long long)counters.retransmits,(unsigned long long)counters.dup_suppressed,
+        (unsigned long long)counters.held_acks,counters.held_unacked);
  if (!outcome && !xdev_ext_mech_ctl_transport_ok(&transport)) outcome=-EBUSY;
  stopped=ctl_mech(r->ring,XDEV_EXT_MECH_OP_STOP,session);
  printf("XDEV_EXT_MECH_FINALIZE session=%llu stop_ret=%d\n",

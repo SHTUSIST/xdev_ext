@@ -14,16 +14,26 @@
 #include <linux/err.h>
 #include <linux/errno.h>
 #include <linux/io_uring_types.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/moduleparam.h>
+#include <linux/mutex.h>
+#include <linux/refcount.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/string.h>
+#include <linux/sysfs.h>
+#include <linux/workqueue.h>
 #include <linux/xdev_ext_binding.h>
 #include <linux/xarray.h>
 
 #include "../io_uring.h"
 #include "xdev_ext_iaa.h"
 #include "../xdev_ext_umem.h"
+
+struct io_xdev_ext_iaa_tfm;
 
 struct io_xdev_ext_iaa_async {
 	struct io_kiocb *io_req;
@@ -33,6 +43,7 @@ struct io_xdev_ext_iaa_async {
 	struct io_xdev_ext_iaa_params params;
 	struct xdev_ext_iaa_window_plan windows;
 	struct xdev_ext_iaa_frame_claim frames;
+	struct io_xdev_ext_iaa_tfm *provider;
 	struct crypto_acomp *tfm;
 	struct acomp_req *acomp;
 	struct scatterlist *src_sg;
@@ -46,6 +57,285 @@ struct io_xdev_ext_iaa_async {
 };
 
 static atomic64_t io_xdev_ext_iaa_policy_errors;
+
+/*
+ * Transform selection and reuse.  The acomp driver is chosen by the
+ * xdev_ext_iaa.acomp_driver parameter (default deflate-iaa; deflate-generic is
+ * the software CryptoAPI implementation, not a device stand-in).  Concurrent
+ * requests share one transform: each acomp request carries its own state.
+ * The cached transform is looked up again after a provider-level failure, a
+ * selection change, or IO_XDEV_EXT_IAA_TFM_IDLE without requests, so an idle
+ * cache does not pin the provider module.  acomp_served reports, per actual
+ * serving driver name, the requests that reached the provider.
+ */
+#define IO_XDEV_EXT_IAA_DRIVER_DEFAULT "deflate-iaa"
+#define IO_XDEV_EXT_IAA_TFM_IDLE (5 * HZ)
+#define IO_XDEV_EXT_IAA_SERVED_MAX 8
+
+struct io_xdev_ext_iaa_served {
+	char driver[CRYPTO_MAX_ALG_NAME];
+	atomic64_t requests;
+	atomic64_t errors;
+	atomic64_t bytes;
+};
+
+struct io_xdev_ext_iaa_tfm {
+	struct crypto_acomp *tfm;
+	struct io_xdev_ext_iaa_served *served;
+	refcount_t ref;
+};
+
+/* tfm_lock: selection, cached pointer, last use.  tfm_mutex: lookups, slots. */
+static DEFINE_SPINLOCK(io_xdev_ext_iaa_tfm_lock);
+static DEFINE_MUTEX(io_xdev_ext_iaa_tfm_mutex);
+static char io_xdev_ext_iaa_driver[CRYPTO_MAX_ALG_NAME] = IO_XDEV_EXT_IAA_DRIVER_DEFAULT;
+static u64 io_xdev_ext_iaa_generation;
+static struct io_xdev_ext_iaa_tfm *io_xdev_ext_iaa_cached;
+static unsigned long io_xdev_ext_iaa_last_use;
+static struct io_xdev_ext_iaa_served io_xdev_ext_iaa_served[IO_XDEV_EXT_IAA_SERVED_MAX];
+static atomic64_t io_xdev_ext_iaa_served_untracked;
+static void io_xdev_ext_iaa_tfm_idle(struct work_struct *work);
+static DECLARE_DELAYED_WORK(io_xdev_ext_iaa_tfm_idle_work, io_xdev_ext_iaa_tfm_idle);
+
+static void io_xdev_ext_iaa_tfm_put(struct io_xdev_ext_iaa_tfm *t)
+{
+	if (!t || !refcount_dec_and_test(&t->ref))
+		return;
+	crypto_free_acomp(t->tfm);
+	kfree(t);
+}
+
+/* Caller holds tfm_mutex; a full table counts the driver as untracked. */
+static struct io_xdev_ext_iaa_served *io_xdev_ext_iaa_served_slot(const char *driver)
+{
+	struct io_xdev_ext_iaa_served *slot;
+	int i;
+
+	for (i = 0; i < IO_XDEV_EXT_IAA_SERVED_MAX; i++) {
+		slot = &io_xdev_ext_iaa_served[i];
+		if (!slot->driver[0]) {
+			strscpy(slot->driver, driver, sizeof(slot->driver));
+			return slot;
+		}
+		if (!strcmp(slot->driver, driver))
+			return slot;
+	}
+	return NULL;
+}
+
+/* Caller holds tfm_mutex.  Only raw DEFLATE satisfies the operation contract. */
+static struct io_xdev_ext_iaa_tfm *io_xdev_ext_iaa_tfm_alloc(const char *driver)
+{
+	struct io_xdev_ext_iaa_tfm *t;
+	struct crypto_acomp *tfm;
+
+	tfm = crypto_alloc_acomp(driver, 0, 0);
+	if (IS_ERR(tfm))
+		return ERR_CAST(tfm);
+	if (strcmp(crypto_tfm_alg_name(crypto_acomp_tfm(tfm)), "deflate")) {
+		crypto_free_acomp(tfm);
+		return ERR_PTR(-EOPNOTSUPP);
+	}
+	t = kzalloc(sizeof(*t), GFP_KERNEL);
+	if (!t) {
+		crypto_free_acomp(tfm);
+		return ERR_PTR(-ENOMEM);
+	}
+	t->tfm = tfm;
+	t->served = io_xdev_ext_iaa_served_slot(
+		crypto_tfm_alg_driver_name(crypto_acomp_tfm(tfm)));
+	refcount_set(&t->ref, 1);
+	return t;
+}
+
+/* Process context.  A failed lookup is not cached: a later provider is seen. */
+static struct io_xdev_ext_iaa_tfm *io_xdev_ext_iaa_tfm_get(void)
+{
+	struct io_xdev_ext_iaa_tfm *t;
+	char driver[CRYPTO_MAX_ALG_NAME];
+	bool installed = false;
+	u64 generation;
+
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	t = io_xdev_ext_iaa_cached;
+	if (t) {
+		refcount_inc(&t->ref);
+		io_xdev_ext_iaa_last_use = jiffies;
+	}
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	if (t)
+		return t;
+
+	mutex_lock(&io_xdev_ext_iaa_tfm_mutex);
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	t = io_xdev_ext_iaa_cached;
+	if (t)
+		refcount_inc(&t->ref);
+	strscpy(driver, io_xdev_ext_iaa_driver, sizeof(driver));
+	generation = io_xdev_ext_iaa_generation;
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	if (!t) {
+		t = io_xdev_ext_iaa_tfm_alloc(driver);
+		if (!IS_ERR(t)) {
+			spin_lock(&io_xdev_ext_iaa_tfm_lock);
+			/* A selection written during the lookup keeps its own cache. */
+			if (generation == io_xdev_ext_iaa_generation &&
+			    !io_xdev_ext_iaa_cached) {
+				refcount_inc(&t->ref);
+				io_xdev_ext_iaa_cached = t;
+				io_xdev_ext_iaa_last_use = jiffies;
+				installed = true;
+			}
+			spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+		}
+	}
+	mutex_unlock(&io_xdev_ext_iaa_tfm_mutex);
+	if (installed)
+		schedule_delayed_work(&io_xdev_ext_iaa_tfm_idle_work,
+				      IO_XDEV_EXT_IAA_TFM_IDLE);
+	return t;
+}
+
+static void io_xdev_ext_iaa_tfm_invalidate(struct io_xdev_ext_iaa_tfm *t)
+{
+	bool drop = false;
+
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	if (t && io_xdev_ext_iaa_cached == t) {
+		io_xdev_ext_iaa_cached = NULL;
+		drop = true;
+	}
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	if (drop)
+		io_xdev_ext_iaa_tfm_put(t);
+}
+
+static void io_xdev_ext_iaa_tfm_idle(struct work_struct *work)
+{
+	struct io_xdev_ext_iaa_tfm *t = NULL;
+	unsigned long delay = 0;
+
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	if (io_xdev_ext_iaa_cached) {
+		unsigned long expires = io_xdev_ext_iaa_last_use +
+					IO_XDEV_EXT_IAA_TFM_IDLE;
+
+		if (time_after_eq(jiffies, expires)) {
+			t = io_xdev_ext_iaa_cached;
+			io_xdev_ext_iaa_cached = NULL;
+		} else {
+			delay = expires - jiffies;
+		}
+	}
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	if (t)
+		io_xdev_ext_iaa_tfm_put(t);
+	else if (delay)
+		schedule_delayed_work(&io_xdev_ext_iaa_tfm_idle_work, delay);
+}
+
+/* Request-content outcomes say nothing about the provider's availability. */
+static bool io_xdev_ext_iaa_provider_failed(int crypto_result)
+{
+	switch (crypto_result) {
+	case 0:
+	case -EINVAL:
+	case -EOVERFLOW:
+	case -ENOSPC:
+	case -EBADMSG:
+	case -E2BIG:
+	case -EAGAIN:
+		return false;
+	default:
+		return crypto_result < 0;
+	}
+}
+
+static void io_xdev_ext_iaa_record_served(struct io_xdev_ext_iaa_tfm *t,
+				     int crypto_result, int result)
+{
+	if (!t)
+		return;
+	if (!t->served) {
+		atomic64_inc(&io_xdev_ext_iaa_served_untracked);
+	} else {
+		atomic64_inc(&t->served->requests);
+		if (result < 0)
+			atomic64_inc(&t->served->errors);
+		else
+			atomic64_add(result, &t->served->bytes);
+	}
+	if (io_xdev_ext_iaa_provider_failed(crypto_result))
+		io_xdev_ext_iaa_tfm_invalidate(t);
+}
+
+static int io_xdev_ext_iaa_driver_set(const char *val, const struct kernel_param *kp)
+{
+	struct io_xdev_ext_iaa_tfm *old;
+	size_t len = strlen(val);
+	size_t i;
+
+	if (len && val[len - 1] == '\n')
+		len--;
+	if (!len || len >= sizeof(io_xdev_ext_iaa_driver))
+		return -EINVAL;
+	for (i = 0; i < len; i++)
+		if (val[i] <= ' ' || val[i] > '~')
+			return -EINVAL;
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	memcpy(io_xdev_ext_iaa_driver, val, len);
+	io_xdev_ext_iaa_driver[len] = '\0';
+	io_xdev_ext_iaa_generation++;
+	old = io_xdev_ext_iaa_cached;
+	io_xdev_ext_iaa_cached = NULL;
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	io_xdev_ext_iaa_tfm_put(old);
+	return 0;
+}
+
+static int io_xdev_ext_iaa_driver_get(char *buf, const struct kernel_param *kp)
+{
+	int n;
+
+	spin_lock(&io_xdev_ext_iaa_tfm_lock);
+	n = sysfs_emit(buf, "%s\n", io_xdev_ext_iaa_driver);
+	spin_unlock(&io_xdev_ext_iaa_tfm_lock);
+	return n;
+}
+
+static int io_xdev_ext_iaa_served_get(char *buf, const struct kernel_param *kp)
+{
+	const struct io_xdev_ext_iaa_served *slot;
+	int i, n = 0;
+
+	mutex_lock(&io_xdev_ext_iaa_tfm_mutex);
+	for (i = 0; i < IO_XDEV_EXT_IAA_SERVED_MAX; i++) {
+		slot = &io_xdev_ext_iaa_served[i];
+		if (!slot->driver[0])
+			break;
+		n += sysfs_emit_at(buf, n, "%s requests=%lld errors=%lld bytes=%lld\n",
+				   slot->driver,
+				   (long long)atomic64_read(&slot->requests),
+				   (long long)atomic64_read(&slot->errors),
+				   (long long)atomic64_read(&slot->bytes));
+	}
+	n += sysfs_emit_at(buf, n, "untracked requests=%lld\n",
+			   (long long)atomic64_read(&io_xdev_ext_iaa_served_untracked));
+	mutex_unlock(&io_xdev_ext_iaa_tfm_mutex);
+	return n;
+}
+
+static const struct kernel_param_ops io_xdev_ext_iaa_driver_ops = {
+	.set = io_xdev_ext_iaa_driver_set,
+	.get = io_xdev_ext_iaa_driver_get,
+};
+static const struct kernel_param_ops io_xdev_ext_iaa_served_ops = {
+	.get = io_xdev_ext_iaa_served_get,
+};
+module_param_cb(acomp_driver, &io_xdev_ext_iaa_driver_ops, NULL, 0644);
+MODULE_PARM_DESC(acomp_driver, "CryptoAPI raw DEFLATE acomp driver or algorithm for unified IAA operations");
+module_param_cb(acomp_served, &io_xdev_ext_iaa_served_ops, NULL, 0444);
+MODULE_PARM_DESC(acomp_served, "Requests, errors and produced bytes per actual serving acomp driver");
 
 static void io_xdev_ext_iaa_task_work(struct io_kiocb *req, io_tw_token_t tw);
 
@@ -159,15 +449,14 @@ static int io_xdev_ext_iaa_runtime_dispatch(void *opaque)
 static int io_xdev_ext_iaa_runtime_prepare_provider(void *opaque)
 {
 	struct io_xdev_ext_iaa_async *state = opaque;
+	struct io_xdev_ext_iaa_tfm *t;
 
-	/* A fresh lookup per request observes a provider registered later. */
-	state->tfm = crypto_alloc_acomp("deflate-iaa", 0, 0);
-	if (IS_ERR(state->tfm)) {
-		int ret = PTR_ERR(state->tfm);
-
-		state->tfm = NULL;
-		return ret;
-	}
+	/* Cached across requests; an uncached lookup observes a later provider. */
+	t = io_xdev_ext_iaa_tfm_get();
+	if (IS_ERR(t))
+		return PTR_ERR(t);
+	state->provider = t;
+	state->tfm = t->tfm;
 	return 0;
 }
 
@@ -297,8 +586,9 @@ static void io_xdev_ext_iaa_release_resources(struct io_xdev_ext_iaa_async *stat
 	kfree(state->dst_sg);
 	state->dst_sg = NULL;
 	xdev_ext_iaa_runtime_release(&state->runtime);
-	crypto_free_acomp(state->tfm);
 	state->tfm = NULL;
+	io_xdev_ext_iaa_tfm_put(state->provider);
+	state->provider = NULL;
 }
 
 static void io_xdev_ext_iaa_uninstall(struct io_xdev_ext_iaa_async *state)
@@ -343,6 +633,7 @@ static int io_xdev_ext_iaa_finish_terminal(struct io_xdev_ext_iaa_async *state,
 	if (xdev_ext_iaa_runtime_complete(&state->runtime, result))
 		atomic64_inc(&io_xdev_ext_iaa_policy_errors);
 	io_xdev_ext_iaa_update_stats(state, result);
+	io_xdev_ext_iaa_record_served(state->provider, crypto_result, result);
 	return result;
 }
 

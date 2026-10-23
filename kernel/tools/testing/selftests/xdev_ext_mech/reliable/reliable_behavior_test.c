@@ -270,17 +270,20 @@ static void missing_data_retransmit_submits_once(void)
         int action;
         m = data_msg(1, i, 2);
         action = xdev_ext_rel_rx_inspect(&rx, &m);
-        EXPECT_EQ(action, i == 2 ? XDEV_EXT_REL_HOLD : XDEV_EXT_REL_RECYCLE);
+        /* After the missing segment submits, the rest of the attempt is HELD. */
+        EXPECT_EQ(action, i == 2 ? XDEV_EXT_REL_HOLD :
+                  i < 2 ? XDEV_EXT_REL_RECYCLE : XDEV_EXT_REL_REPLAY_HELD);
         if (action == XDEV_EXT_REL_HOLD) {
             action = xdev_ext_rel_rx_commit(&rx, &m);
             EXPECT_EQ(action, XDEV_EXT_REL_SUBMIT);
             submits += action == XDEV_EXT_REL_SUBMIT;
         }
     }
-    /* A full retransmit while devices are pending must not ACK or resubmit. */
+    /* A full retransmit while devices are pending must not ACK or resubmit;
+     * it only reports HELD, which neither completes nor credits. */
     for (i = 0; i < 6; i++) {
         m = data_msg(1, i, 3);
-        EXPECT_EQ(xdev_ext_rel_rx_inspect(&rx, &m), XDEV_EXT_REL_RECYCLE);
+        EXPECT_EQ(xdev_ext_rel_rx_inspect(&rx, &m), XDEV_EXT_REL_REPLAY_HELD);
     }
     EXPECT_EQ(xdev_ext_rel_rx_finish(&rx, 1, 0), XDEV_EXT_REL_REPLAY_ACK);
     EXPECT_EQ(rx.credit, 6);

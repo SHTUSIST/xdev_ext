@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -87,6 +88,8 @@ struct xdev_ext_fd_record {
 	int status_flags;
 	uint32_t dio_mem_align;
 	uint32_t dio_offset_align;
+	/* Inode change time when the path was last found allowlisted. */
+	struct timespec path_ctime;
 	uint64_t generation;
 	struct xdev_ext_fd_record *next;
 };
@@ -108,7 +111,16 @@ struct xdev_ext_thread_ctx {
 	uint32_t custom_send_errors;
 	struct xdev_ext_preload_token_source tokens;
 	struct xdev_ext_socket_mech_runtime socket_mech;
+	/* The thread's further sessions, one per connected socket. */
+	struct xdev_ext_socket_mech_runtime
+		socket_mech_more[XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS - 1];
+	uint64_t socket_mech_clock;
 	pthread_mutex_t socket_mech_lock;
+	/* Read buffer for the /proc/self/maps text of read admission. */
+	char *maps_buffer;
+	/* Calls this thread took over; folded into the fallback report. */
+	uint64_t file_qualified;
+	uint64_t socket_qualified;
 	struct xdev_ext_thread_ctx *next;
 };
 
@@ -116,6 +128,8 @@ struct xdev_ext_call_ctx {
 	struct xdev_ext_thread_ctx *thread;
 	bool use_64;
 	bool use_v2;
+	/* The call went to libc after all (set by the fallback seams). */
+	bool fell_back;
 	const struct iovec *original_iov;
 };
 
@@ -132,6 +146,7 @@ struct xdev_ext_socket_call_ctx {
 	socklen_t destination_length;
 	const struct msghdr *message;
 	bool custom_completed;
+	bool fell_back;
 	int custom_cqe_res;
 	int cancel_state;
 };
@@ -156,6 +171,16 @@ static struct xdev_ext_fd_record *xdev_ext_fds[XDEV_EXT_PRELOAD_FD_SHARDS];
 static struct xdev_ext_thread_ctx *xdev_ext_threads;
 static uint64_t xdev_ext_fd_generation;
 /*
+ * With XDEV_EXT_PRELOAD_REPORT=1: calls that stayed in libc, per reason, and
+ * the taken-over calls of threads already folded in by their report.  Each
+ * thread counts its own taken-over calls without a shared cache line.
+ */
+static uint64_t xdev_ext_fallbacks[XDEV_EXT_PRELOAD_FALLBACK_NR];
+static uint64_t xdev_ext_file_qualified;
+static uint64_t xdev_ext_socket_qualified;
+/* PROCMAP_QUERY is absent before Linux 6.11 (ENOTTY); then the text is read. */
+static int xdev_ext_procmap_query_absent;
+/*
  * initial-exec: a general-dynamic access can allocate on a thread's first use,
  * and the allocation's own calls would reach these wrappers before the guard
  * is readable.  This only holds for a library loaded at start-up, which is
@@ -172,7 +197,66 @@ static __thread unsigned int __attribute__((tls_model("initial-exec")))
 static __thread unsigned int __attribute__((tls_model("initial-exec")))
 	xdev_ext_ctl_depth;
 
+/*
+ * Per-thread cache of socket type, domain and protocol by SO_COOKIE.  A
+ * cookie names one socket for the life of the boot and these three never
+ * change, so a hit replaces three getsockopt calls with the cookie's one.  It
+ * holds no resource, so threads and forks need no cleanup.
+ */
+#define XDEV_EXT_SOCKET_KIND_CACHE 8
+struct xdev_ext_socket_kind {
+	uint64_t cookie;
+	int type;
+	int domain;
+	int protocol;
+};
+static __thread struct xdev_ext_socket_kind
+	__attribute__((tls_model("initial-exec")))
+	xdev_ext_socket_kinds[XDEV_EXT_SOCKET_KIND_CACHE];
+static __thread unsigned int __attribute__((tls_model("initial-exec")))
+	xdev_ext_socket_kind_next;
+
 static void xdev_ext_report_all_threads(void);
+
+static void xdev_ext_count_fallback(enum xdev_ext_preload_fallback_reason reason)
+{
+	if (xdev_ext_cfg.report && reason > XDEV_EXT_PRELOAD_FALLBACK_NONE &&
+	    reason < XDEV_EXT_PRELOAD_FALLBACK_NR)
+		__atomic_add_fetch(&xdev_ext_fallbacks[reason], 1, __ATOMIC_RELAXED);
+}
+
+/*
+ * Only the owning thread adds, but the exit report may exchange the counter
+ * from another thread while this one is still in a call: an atomic add keeps
+ * that increment in exactly one of the two totals.  It is uncontended.
+ */
+static void xdev_ext_count_qualified(uint64_t *counter)
+{
+	__atomic_add_fetch(counter, 1, __ATOMIC_RELAXED);
+}
+
+/* The call went to libc inside the request executor, before publication. */
+static void xdev_ext_count_executed(struct xdev_ext_thread_ctx *thread,
+				    bool fell_back, uint64_t *qualified,
+				    enum xdev_ext_preload_fallback_reason absent,
+				    enum xdev_ext_preload_fallback_reason other)
+{
+	if (!fell_back)
+		xdev_ext_count_qualified(qualified);
+	else
+		xdev_ext_count_fallback(thread->broken ? absent : other);
+}
+
+/* A child reports its own calls only. */
+static void xdev_ext_fallback_counts_child(void)
+{
+	unsigned int i;
+
+	for (i = 0; i < XDEV_EXT_PRELOAD_FALLBACK_NR; i++)
+		__atomic_store_n(&xdev_ext_fallbacks[i], 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&xdev_ext_file_qualified, 0, __ATOMIC_RELAXED);
+	__atomic_store_n(&xdev_ext_socket_qualified, 0, __ATOMIC_RELAXED);
+}
 
 static void xdev_ext_atfork_prepare(void)
 {
@@ -231,7 +315,11 @@ static void xdev_ext_atfork_child(void)
 	 * metadata at lazy refresh; ring_ready prevents a duplicate close.
 	 */
 	for (thread = xdev_ext_threads; thread; thread = thread->next) {
+		unsigned int i;
+
 		xdev_ext_socket_mech_forget_child(&thread->socket_mech);
+		for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS - 1; i++)
+			xdev_ext_socket_mech_forget_child(&thread->socket_mech_more[i]);
 		xdev_ext_forget_child_ring(thread);
 		pthread_mutex_unlock(&thread->socket_mech_lock);
 	}
@@ -384,6 +472,8 @@ static void xdev_ext_load_config(void)
 		xdev_ext_preload_config_disarm(&xdev_ext_cfg, -ret, NULL);
 		goto out;
 	}
+	if (xdev_ext_cfg.report)
+		(void)pthread_atfork(NULL, NULL, xdev_ext_fallback_counts_child);
 	if (xdev_ext_cfg.enabled)
 		xdev_ext_resolve_allowlist();
 	xdev_ext_preload_config_update_armed(&xdev_ext_cfg);
@@ -557,6 +647,7 @@ static void xdev_ext_track_open_fd(int fd)
 	record->ino = st.st_ino;
 	record->mode = st.st_mode;
 	record->status_flags = flags;
+	record->path_ctime = st.st_ctim;
 	xdev_ext_query_dio_alignment(fd, &record->dio_mem_align,
 				&record->dio_offset_align);
 
@@ -587,6 +678,16 @@ static int xdev_ext_finish_open(int fd)
 	return fd;
 }
 
+static bool xdev_ext_same_ctime(const struct timespec *a, const struct timespec *b)
+{
+	return a->tv_sec == b->tv_sec && a->tv_nsec == b->tv_nsec;
+}
+
+/*
+ * On failure meta->refused says why: no record for this descriptor (never
+ * opened at an allowlisted path, or retired), a buffered descriptor, or the
+ * duplicate itself failed.
+ */
 static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_meta *meta)
 {
 	struct xdev_ext_fd_record snapshot;
@@ -598,6 +699,8 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 	int duplicate = -1;
 	int flags;
 	bool path_allowed;
+	bool path_known;
+	bool buffered = false;
 	bool tracked;
 	bool matches;
 
@@ -612,10 +715,12 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 		 * keeps its calls from paying for the full validation below.
 		 */
 		flags = xdev_ext_real.fcntl_fn(fd, F_GETFL);
-		if (flags < 0 || !(flags & O_DIRECT))
+		if (flags < 0 || !(flags & O_DIRECT)) {
+			buffered = flags >= 0;
 			record = NULL;
-		else
+		} else {
 			record->status_flags = flags;
+		}
 	}
 	tracked = record != NULL;
 	if (record) {
@@ -632,12 +737,17 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 #endif
 	}
 	xdev_ext_preload_fd_unlock(&xdev_ext_fd_locks, fd);
-	if (!tracked || duplicate < 0)
+	if (!tracked || duplicate < 0) {
+		meta->refused = buffered ? XDEV_EXT_PRELOAD_FALLBACK_FILE_NOT_DIRECT :
+			tracked ? XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER :
+			XDEV_EXT_PRELOAD_FALLBACK_FILE_NOT_ALLOWLISTED;
 		return -1;
+	}
 	meta->tracked = true;
 	meta->frame_size = xdev_ext_cfg.frame_size;
 	meta->dio_mem_align = snapshot.dio_mem_align;
 	meta->dio_offset_align = snapshot.dio_offset_align;
+	meta->refused = XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER;
 	if (fstat(duplicate, &st))
 		goto invalid;
 	flags = xdev_ext_real.fcntl_fn(duplicate, F_GETFL);
@@ -653,11 +763,31 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 		.ino = st.st_ino,
 		.mode = st.st_mode,
 	};
-	path_allowed = xdev_ext_path_is_allowed(duplicate, &st);
+	/*
+	 * The record's path was allowlisted for this object at its last
+	 * validation.  Renaming, linking or unlinking the file changes its
+	 * ctime, and so does writing it; only then is the path read again.
+	 * This is advisory: a change within one ctime tick of the last one can
+	 * go unseen, and the request still names this same object.  Renaming a
+	 * directory above the file leaves the file's ctime unchanged, so the
+	 * exact-path allowlist then keeps passing for a path that no longer
+	 * names it; only the allowlisted inode is ever admitted.
+	 */
+	path_known = xdev_ext_preload_fd_identity_matches(&expected, &observed,
+							  true, O_DIRECT) &&
+		     xdev_ext_same_ctime(&st.st_ctim, &snapshot.path_ctime);
+	path_allowed = path_known || xdev_ext_path_is_allowed(duplicate, &st);
 	matches = xdev_ext_preload_fd_identity_matches(&expected, &observed,
 						  path_allowed, flags);
 	meta->identity_matches = matches;
 	meta->direct = matches;
+	if (matches && !path_known) {
+		xdev_ext_preload_fd_lock(&xdev_ext_fd_locks, fd);
+		record = xdev_ext_find_fd_locked(xdev_ext_fds[shard], fd);
+		if (record && record->generation == snapshot.generation)
+			record->path_ctime = st.st_ctim;
+		xdev_ext_preload_fd_unlock(&xdev_ext_fd_locks, fd);
+	}
 	if (!matches) {
 		/*
 		 * A clear O_DIRECT flag alone falls back but keeps the record,
@@ -666,6 +796,8 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 		bool stale = xdev_ext_preload_fd_record_stale(&expected, &observed,
 							 path_allowed);
 
+		meta->refused = stale ? XDEV_EXT_PRELOAD_FALLBACK_FILE_NOT_ALLOWLISTED :
+			XDEV_EXT_PRELOAD_FALLBACK_FILE_NOT_DIRECT;
 		xdev_ext_preload_fd_lock(&xdev_ext_fd_locks, fd);
 		record = xdev_ext_find_fd_locked(xdev_ext_fds[shard], fd);
 		if (record && record->generation == snapshot.generation) {
@@ -677,6 +809,7 @@ static int xdev_ext_duplicate_validated_fd(int fd, struct xdev_ext_preload_fd_me
 		xdev_ext_preload_fd_unlock(&xdev_ext_fd_locks, fd);
 		goto invalid;
 	}
+	meta->refused = XDEV_EXT_PRELOAD_FALLBACK_NONE;
 	return duplicate;
 
 invalid:
@@ -684,24 +817,71 @@ invalid:
 	return -1;
 }
 
+/* What a socket call learned about its duplicate. */
+struct xdev_ext_socket_identity {
+	uint64_t cookie;
+	bool has_cookie;
+	struct sockaddr_storage peer;
+	socklen_t peer_len;
+};
+
+static bool xdev_ext_socket_option(int fd, int option, int *value)
+{
+	socklen_t length = sizeof(*value);
+
+	return !xdev_ext_real.getsockopt_fn(fd, SOL_SOCKET, option, value, &length) &&
+	       length == sizeof(*value);
+}
+
+/* The socket's type, domain and protocol, through the cookie cache. */
+static bool xdev_ext_socket_kind(int fd, struct xdev_ext_socket_identity *id,
+				 struct xdev_ext_socket_kind *kind)
+{
+	socklen_t length = sizeof(id->cookie);
+	unsigned int i;
+	int ret;
+
+	ret = xdev_ext_real.getsockopt_fn(fd, SOL_SOCKET, SO_COOKIE, &id->cookie,
+					  &length);
+	if (!ret && length == sizeof(id->cookie) && id->cookie) {
+		id->has_cookie = true;
+		for (i = 0; i < XDEV_EXT_SOCKET_KIND_CACHE; i++) {
+			if (xdev_ext_socket_kinds[i].cookie == id->cookie) {
+				*kind = xdev_ext_socket_kinds[i];
+				return true;
+			}
+		}
+	} else if (ret && errno == ENOTSOCK) {
+		return false;
+	}
+	if (!xdev_ext_socket_option(fd, SO_TYPE, &kind->type) ||
+	    !xdev_ext_socket_option(fd, SO_DOMAIN, &kind->domain) ||
+	    !xdev_ext_socket_option(fd, SO_PROTOCOL, &kind->protocol))
+		return false;
+	if (id->has_cookie) {
+		kind->cookie = id->cookie;
+		xdev_ext_socket_kinds[xdev_ext_socket_kind_next++ %
+				      XDEV_EXT_SOCKET_KIND_CACHE] = *kind;
+	}
+	return true;
+}
+
 /* Keep an independent reference to the open-file-description for the whole
  * synchronous request.  Validation failures still return the duplicate so
  * the exact libc fallback cannot be redirected by a concurrent close/reuse. */
 static int xdev_ext_duplicate_connected_udp(int fd, int *status_flags,
-				       bool *eligible)
+				       bool *eligible,
+				       struct xdev_ext_socket_identity *id)
 {
-	struct sockaddr_storage peer;
-	socklen_t length;
+	struct xdev_ext_socket_kind kind;
 	int duplicate;
-	int domain;
-	int protocol;
-	int type;
 	int flags;
 
-	if (!status_flags || !eligible)
+	if (!status_flags || !eligible || !id)
 		return -1;
 	*status_flags = 0;
 	*eligible = false;
+	memset(id, 0, sizeof(*id));
 #ifdef F_DUPFD_CLOEXEC
 	duplicate = xdev_ext_real.fcntl_fn(fd, F_DUPFD_CLOEXEC, 3);
 #else
@@ -714,26 +894,17 @@ static int xdev_ext_duplicate_connected_udp(int fd, int *status_flags,
 	flags = xdev_ext_real.fcntl_fn(duplicate, F_GETFL);
 	if (flags < 0)
 		return duplicate;
-	length = sizeof(type);
-	if (xdev_ext_real.getsockopt_fn(duplicate, SOL_SOCKET, SO_TYPE, &type,
-				   &length) || length != sizeof(type) ||
-	    type != SOCK_DGRAM)
+	if (!xdev_ext_socket_kind(duplicate, id, &kind) ||
+	    kind.type != SOCK_DGRAM ||
+	    (kind.domain != AF_INET && kind.domain != AF_INET6) ||
+	    kind.protocol != IPPROTO_UDP)
 		return duplicate;
-	length = sizeof(domain);
-	if (xdev_ext_real.getsockopt_fn(duplicate, SOL_SOCKET, SO_DOMAIN, &domain,
-				   &length) || length != sizeof(domain) ||
-	    (domain != AF_INET && domain != AF_INET6))
-		return duplicate;
-	length = sizeof(protocol);
-	if (xdev_ext_real.getsockopt_fn(duplicate, SOL_SOCKET, SO_PROTOCOL, &protocol,
-				   &length) || length != sizeof(protocol) ||
-	    protocol != IPPROTO_UDP)
-		return duplicate;
-	memset(&peer, 0, sizeof(peer));
-	length = sizeof(peer);
-	if (xdev_ext_real.getpeername_fn(duplicate, (struct sockaddr *)&peer,
-				    &length) ||
-	    length < sizeof(peer.ss_family) || peer.ss_family != domain)
+	/* The peer can change with every connect(), so it is read each call. */
+	id->peer_len = sizeof(id->peer);
+	if (xdev_ext_real.getpeername_fn(duplicate, (struct sockaddr *)&id->peer,
+					 &id->peer_len) ||
+	    id->peer_len < sizeof(id->peer.ss_family) ||
+	    id->peer_len > sizeof(id->peer) || id->peer.ss_family != kind.domain)
 		return duplicate;
 	*status_flags = flags;
 	*eligible = true;
@@ -764,6 +935,8 @@ static void xdev_ext_copy_fd_record(int oldfd, int newfd)
 		free(copy);
 		copy = NULL;
 	}
+	if (copy)
+		copy->path_ctime = st.st_ctim;
 	new_shard = xdev_ext_preload_fd_shard(newfd);
 	xdev_ext_preload_fd_lock(&xdev_ext_fd_locks, newfd);
 	xdev_ext_remove_fd_locked(&xdev_ext_fds[new_shard], newfd);
@@ -813,28 +986,50 @@ static void xdev_ext_remove_thread_locked(struct xdev_ext_thread_ctx *thread)
 	}
 }
 
+/* Move a thread's taken-over counts into the process totals, once. */
+static void xdev_ext_fold_qualified(struct xdev_ext_thread_ctx *thread)
+{
+	__atomic_add_fetch(&xdev_ext_file_qualified,
+			   __atomic_exchange_n(&thread->file_qualified, 0,
+					       __ATOMIC_RELAXED),
+			   __ATOMIC_RELAXED);
+	__atomic_add_fetch(&xdev_ext_socket_qualified,
+			   __atomic_exchange_n(&thread->socket_qualified, 0,
+					       __ATOMIC_RELAXED),
+			   __ATOMIC_RELAXED);
+}
+
 static void xdev_ext_report_thread_locked(struct xdev_ext_thread_ctx *thread)
 {
+	struct xdev_ext_socket_mech_runtime *slots[XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS];
 	struct xdev_ext_preload_report_snapshot snapshot;
+	uint64_t mech[6 + 2 * 3] = { 0 };
 	uint64_t custom_send_count;
 	uint64_t custom_send_bytes;
 	uint32_t custom_send_errors;
+	unsigned int i, j;
 	char line[480];
 	int length;
 
+	if (thread->owner_pid == getpid())
+		xdev_ext_fold_qualified(thread);
 	if (thread->report_emitted || thread->owner_pid != getpid() ||
 	    !xdev_ext_preload_snapshot_report(
 		    xdev_ext_cfg.report,
 		    __atomic_load_n(&thread->quiescence_unknown, __ATOMIC_ACQUIRE),
 		    thread->shared, &snapshot))
 		return;
+	slots[0] = &thread->socket_mech;
+	for (i = 1; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS; i++)
+		slots[i] = &thread->socket_mech_more[i - 1];
 	/* At exit/destruction this thread has no application call in progress.
-	 * Drain its own session before reporting; never stop another live thread.
+	 * Drain its own sessions before reporting; never stop another live thread.
 	 */
 	if (xdev_ext_socket_mech_cfg.enabled &&
 	    thread->owner_tid == (pid_t)syscall(SYS_gettid)) {
 		pthread_mutex_lock(&thread->socket_mech_lock);
-		(void)xdev_ext_socket_mech_release(&thread->socket_mech);
+		for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS; i++)
+			(void)xdev_ext_socket_mech_release(slots[i]);
 		pthread_mutex_unlock(&thread->socket_mech_lock);
 	}
 	custom_send_count = __atomic_load_n(&thread->custom_send_count,
@@ -861,26 +1056,81 @@ static void xdev_ext_report_thread_locked(struct xdev_ext_thread_ctx *thread)
 		return;
 	thread->report_emitted = true;
 	(void)syscall(SYS_write, STDERR_FILENO, line, (size_t)length);
-	if (xdev_ext_socket_mech_cfg.enabled) {
-		struct xdev_ext_socket_mech_runtime *m = &thread->socket_mech;
+	if (!xdev_ext_socket_mech_cfg.enabled)
+		return;
+	/* One line per thread: the sum over its sessions. */
+	for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS; i++) {
+		struct xdev_ext_socket_mech_runtime *m = slots[i];
 #define XDEV_EXT_SM_COUNT(field) __atomic_load_n(&m->field, __ATOMIC_RELAXED)
-		length = snprintf(line, sizeof(line),
-			"XDEV_EXT_PRELOAD_MECH_REPORT pid=%ld tid=%ld creates=%" PRIu64
-			" calls=%" PRIu64 " bytes=%" PRIu64 " errors=%" PRIu64
-			" stops=%" PRIu64 " stop_errors=%" PRIu64
-			" submitted0=%" PRIu64 " submitted1=%" PRIu64 " submitted2=%" PRIu64
-			" completed0=%" PRIu64 " completed1=%" PRIu64 " completed2=%" PRIu64 "\n",
-			(long)thread->owner_pid, (long)thread->owner_tid,
-			XDEV_EXT_SM_COUNT(creates), XDEV_EXT_SM_COUNT(calls), XDEV_EXT_SM_COUNT(bytes),
-			XDEV_EXT_SM_COUNT(errors), XDEV_EXT_SM_COUNT(stops), XDEV_EXT_SM_COUNT(stop_errors),
-			XDEV_EXT_SM_COUNT(submitted[0]),
-			XDEV_EXT_SM_COUNT(submitted[1]), XDEV_EXT_SM_COUNT(submitted[2]),
-			XDEV_EXT_SM_COUNT(completed[0]), XDEV_EXT_SM_COUNT(completed[1]),
-			XDEV_EXT_SM_COUNT(completed[2]));
+		mech[0] += XDEV_EXT_SM_COUNT(creates);
+		mech[1] += XDEV_EXT_SM_COUNT(calls);
+		mech[2] += XDEV_EXT_SM_COUNT(bytes);
+		mech[3] += XDEV_EXT_SM_COUNT(errors);
+		mech[4] += XDEV_EXT_SM_COUNT(stops);
+		mech[5] += XDEV_EXT_SM_COUNT(stop_errors);
+		for (j = 0; j < 3; j++) {
+			mech[6 + j] += XDEV_EXT_SM_COUNT(submitted[j]);
+			mech[9 + j] += XDEV_EXT_SM_COUNT(completed[j]);
+		}
 #undef XDEV_EXT_SM_COUNT
-		if (length > 0 && (size_t)length < sizeof(line))
-			(void)syscall(SYS_write, STDERR_FILENO, line, (size_t)length);
 	}
+	length = snprintf(line, sizeof(line),
+		"XDEV_EXT_PRELOAD_MECH_REPORT pid=%ld tid=%ld creates=%" PRIu64
+		" calls=%" PRIu64 " bytes=%" PRIu64 " errors=%" PRIu64
+		" stops=%" PRIu64 " stop_errors=%" PRIu64
+		" submitted0=%" PRIu64 " submitted1=%" PRIu64 " submitted2=%" PRIu64
+		" completed0=%" PRIu64 " completed1=%" PRIu64 " completed2=%" PRIu64 "\n",
+		(long)thread->owner_pid, (long)thread->owner_tid,
+		mech[0], mech[1], mech[2], mech[3], mech[4], mech[5],
+		mech[6], mech[7], mech[8], mech[9], mech[10], mech[11]);
+	if (length > 0 && (size_t)length < sizeof(line))
+		(void)syscall(SYS_write, STDERR_FILENO, line, (size_t)length);
+}
+
+/*
+ * One line per process at exit: taken-over calls and, per reason, the calls
+ * that stayed in libc, for the qualified fraction of an application's I/O.
+ * The denominator is the calls the front end interposes: the positional
+ * read/write families, send/sendto/sendmsg, and read()/write() on tracked
+ * descriptors; readv()/writev() and memory-mapped I/O are not in it.
+ * A process whose calls never reached the front end prints none.
+ */
+static void xdev_ext_report_fallbacks(void)
+{
+	uint64_t seen;
+	char line[640];
+	size_t used;
+	int length;
+	unsigned int i;
+
+	seen = __atomic_load_n(&xdev_ext_file_qualified, __ATOMIC_RELAXED) |
+	       __atomic_load_n(&xdev_ext_socket_qualified, __ATOMIC_RELAXED);
+	for (i = 0; i < XDEV_EXT_PRELOAD_FALLBACK_NR; i++)
+		seen |= __atomic_load_n(&xdev_ext_fallbacks[i], __ATOMIC_RELAXED);
+	if (!seen)
+		return;
+	length = snprintf(line, sizeof(line),
+			  "XDEV_EXT_PRELOAD_FALLBACK_REPORT pid=%ld "
+			  "file_qualified=%" PRIu64 " socket_qualified=%" PRIu64,
+			  (long)getpid(),
+			  __atomic_load_n(&xdev_ext_file_qualified, __ATOMIC_RELAXED),
+			  __atomic_load_n(&xdev_ext_socket_qualified, __ATOMIC_RELAXED));
+	if (length <= 0 || (size_t)length >= sizeof(line))
+		return;
+	used = (size_t)length;
+	for (i = XDEV_EXT_PRELOAD_FALLBACK_NONE + 1; i < XDEV_EXT_PRELOAD_FALLBACK_NR; i++) {
+		length = snprintf(line + used, sizeof(line) - used, " %s=%" PRIu64,
+				  xdev_ext_preload_fallback_name(i),
+				  __atomic_load_n(&xdev_ext_fallbacks[i],
+						  __ATOMIC_RELAXED));
+		if (length <= 0 || (size_t)length >= sizeof(line) - used)
+			return;
+		used += (size_t)length;
+	}
+	if (used + 1 >= sizeof(line))
+		return;
+	line[used++] = '\n';
+	(void)syscall(SYS_write, STDERR_FILENO, line, used);
 }
 
 static void xdev_ext_report_all_threads(void)
@@ -891,12 +1141,15 @@ static void xdev_ext_report_all_threads(void)
 	for (thread = xdev_ext_threads; thread; thread = thread->next)
 		xdev_ext_report_thread_locked(thread);
 	pthread_mutex_unlock(&xdev_ext_thread_lock);
+	if (xdev_ext_cfg.armed)
+		xdev_ext_report_fallbacks();
 }
 
 static void xdev_ext_thread_destroy(void *opaque)
 {
 	struct xdev_ext_thread_ctx *thread = opaque;
 	int cancel_state, ret;
+	unsigned int i;
 
 	if (!thread)
 		return;
@@ -926,6 +1179,9 @@ static void xdev_ext_thread_destroy(void *opaque)
 	 */
 	pthread_mutex_lock(&thread->socket_mech_lock);
 	ret = xdev_ext_socket_mech_release(&thread->socket_mech);
+	for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS - 1; i++)
+		if (xdev_ext_socket_mech_release(&thread->socket_mech_more[i]))
+			ret = -EBUSY;
 	pthread_mutex_unlock(&thread->socket_mech_lock);
 	if (ret) {
 		pthread_mutex_unlock(&xdev_ext_thread_lock);
@@ -941,6 +1197,7 @@ static void xdev_ext_thread_destroy(void *opaque)
 		io_uring_queue_exit(&thread->ring);
 	free(thread->shared);
 	free(thread->umem);
+	free(thread->maps_buffer);
 	xdev_ext_in_hook--;
 	/* Fork must not inherit a ring removed from the registry but still
 	 * open. Keep the registry locked through ordinary-ring teardown too.
@@ -964,7 +1221,11 @@ static void xdev_ext_make_tls_key(void)
  */
 static void xdev_ext_discard_inherited_thread(struct xdev_ext_thread_ctx *thread)
 {
+	unsigned int i;
+
 	xdev_ext_socket_mech_forget_child(&thread->socket_mech);
+	for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS - 1; i++)
+		xdev_ext_socket_mech_forget_child(&thread->socket_mech_more[i]);
 	/* Unregistering here would mutate the parent's live, inherited ring. */
 	pthread_mutex_lock(&xdev_ext_thread_lock);
 	xdev_ext_remove_thread_locked(thread);
@@ -973,6 +1234,7 @@ static void xdev_ext_discard_inherited_thread(struct xdev_ext_thread_ctx *thread
 		io_uring_queue_exit(&thread->ring);
 	free(thread->shared);
 	free(thread->umem);
+	free(thread->maps_buffer);
 	memset(thread, 0, sizeof(*thread));
 }
 
@@ -1208,12 +1470,58 @@ static ssize_t xdev_ext_socket_duplicate_send(void *opaque, int fd,
 	struct xdev_ext_socket_call_ctx *call = opaque;
 	ssize_t ret;
 
+	call->fell_back = true;
 	pthread_cleanup_push(xdev_ext_close_duplicate, &fd);
 	(void)pthread_setcancelstate(call->cancel_state, NULL);
 	ret = xdev_ext_socket_libc_send(call, fd, buffer, count, flags, error);
 	(void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 	pthread_cleanup_pop(0);
 	return ret;
+}
+
+/*
+ * One send through this thread's session for the socket.  *unavailable asks
+ * for libc instead, with nothing started: the socket's own session, or the
+ * one its slot needed stopped, is in an unknown state after a failed STOP,
+ * and that slot keeps its resources.  Any other error is the call's result.
+ */
+static ssize_t xdev_ext_socket_mech_dispatch(struct xdev_ext_thread_ctx *thread,
+					    int fd,
+					    const struct xdev_ext_socket_identity *id,
+					    const void *buffer, size_t count,
+					    bool *unavailable)
+{
+	struct xdev_ext_socket_mech_runtime *slots[XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS];
+	struct xdev_ext_socket_mech_runtime *m;
+	unsigned int i;
+	int ret;
+
+	*unavailable = false;
+	if (!id->has_cookie)
+		return -ENOPROTOOPT;
+	slots[0] = &thread->socket_mech;
+	for (i = 1; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS; i++)
+		slots[i] = &thread->socket_mech_more[i - 1];
+	m = xdev_ext_socket_mech_select(slots, XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS,
+					id->cookie);
+	if (!m) {
+		*unavailable = true;
+		return 0;
+	}
+	ret = xdev_ext_socket_mech_prepare_identity(m, &xdev_ext_socket_mech_cfg, fd,
+						    thread->frame_size, id->cookie,
+						    &id->peer, id->peer_len);
+	if (ret) {
+		/* Stopping the session of the socket's previous peer failed. */
+		if (m->unknown) {
+			*unavailable = true;
+			return 0;
+		}
+		return ret;
+	}
+	m->last_use = ++thread->socket_mech_clock;
+	xdev_ext_count_qualified(&thread->socket_qualified);
+	return xdev_ext_socket_mech_transfer(m, buffer, count, thread->owner_pid);
 }
 
 static ssize_t
@@ -1228,6 +1536,7 @@ xdev_ext_socket_send(enum xdev_ext_socket_call_kind kind, int fd, const void *bu
 		.destination_length = destination_length,
 		.message = message,
 	};
+	struct xdev_ext_socket_identity identity;
 	struct xdev_ext_preload_send_seam seam;
 	struct xdev_ext_thread_ctx *thread = NULL;
 	uint32_t effective_flags;
@@ -1237,12 +1546,16 @@ xdev_ext_socket_send(enum xdev_ext_socket_call_kind kind, int fd, const void *bu
 	int status_flags = 0;
 	int error = 0;
 	bool socket_eligible = false;
+	bool unavailable;
 
 	pthread_once(&xdev_ext_config_once, xdev_ext_load_config);
-	if (!xdev_ext_cfg.socket_enabled ||
-	    !xdev_ext_preload_send_buffer_supported(buffer, count) ||
-	    !xdev_ext_preload_send_flags_supported((uint32_t)flags))
+	if (!xdev_ext_cfg.socket_enabled)
 		goto fallback;
+	if (!xdev_ext_preload_send_buffer_supported(buffer, count) ||
+	    !xdev_ext_preload_send_flags_supported((uint32_t)flags)) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
+		goto fallback;
+	}
 	/*
 	 * Entry already acted on a pending cancellation.  While the front end
 	 * holds its duplicate, a new request must not act inside the front end:
@@ -1253,23 +1566,36 @@ xdev_ext_socket_send(enum xdev_ext_socket_call_kind kind, int fd, const void *bu
 	(void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE,
 				     &call.cancel_state);
 	request_fd = xdev_ext_duplicate_connected_udp(fd, &status_flags,
-						 &socket_eligible);
-	if (request_fd < 0)
+						 &socket_eligible, &identity);
+	if (request_fd < 0) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
 		goto restore_and_fallback;
-	if (!socket_eligible)
+	}
+	if (!socket_eligible) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_INELIGIBLE);
 		goto duplicate_fallback;
+	}
 	if (xdev_ext_socket_mech_cfg.enabled &&
 	    (!count || count > xdev_ext_cfg.frame_size || count > 65507 ||
-	     (flags & ~MSG_NOSIGNAL) || (status_flags & O_NONBLOCK)))
+	     (flags & ~MSG_NOSIGNAL) || (status_flags & O_NONBLOCK))) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
 		goto duplicate_fallback;
+	}
 	thread = xdev_ext_get_thread();
-	if (!thread)
+	if (!thread) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_RUNTIME_ABSENT);
 		goto duplicate_fallback;
+	}
 	if (xdev_ext_socket_mech_cfg.enabled) {
 		pthread_mutex_lock(&thread->socket_mech_lock);
-		ret = xdev_ext_socket_mech_send(&thread->socket_mech,
-			&xdev_ext_socket_mech_cfg, request_fd, buffer, count, thread->frame_size);
+		ret = xdev_ext_socket_mech_dispatch(thread, request_fd, &identity,
+						    buffer, count, &unavailable);
 		pthread_mutex_unlock(&thread->socket_mech_lock);
+		if (unavailable) {
+			xdev_ext_count_fallback(
+				XDEV_EXT_PRELOAD_FALLBACK_SOCKET_MECH_UNAVAILABLE);
+			goto duplicate_fallback;
+		}
 		if (ret < 0) {error = -ret; ret = -1;}
 		goto completed;
 	}
@@ -1280,12 +1606,15 @@ xdev_ext_socket_send(enum xdev_ext_socket_call_kind kind, int fd, const void *bu
 		.submit_and_wait = xdev_ext_socket_submit_and_wait,
 		.fallback = xdev_ext_socket_duplicate_send,
 	};
-	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)getpid(),
-				       (uint32_t)syscall(SYS_gettid));
+	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)thread->owner_pid,
+				       (uint32_t)thread->owner_tid);
 	ret = xdev_ext_preload_execute_send(true, request_fd, buffer, count,
 				       effective_flags,
 				       (uintptr_t)thread->shared, token, &seam,
 				       &error);
+	xdev_ext_count_executed(thread, call.fell_back, &thread->socket_qualified,
+				XDEV_EXT_PRELOAD_FALLBACK_SOCKET_RUNTIME_ABSENT,
+				XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
 completed:
 	if (call.custom_completed) {
 		if (call.custom_cqe_res < 0 ||
@@ -1335,6 +1664,7 @@ static ssize_t xdev_ext_fallback(void *opaque, int fd, void *buffer, size_t coun
 	struct xdev_ext_call_ctx *call = opaque;
 	ssize_t ret;
 
+	call->fell_back = true;
 	if (write) {
 		if (call->use_64)
 			ret = xdev_ext_real.pwrite64_fn(fd, buffer, count, (off64_t)offset);
@@ -1357,6 +1687,7 @@ static ssize_t xdev_ext_iov_fallback(void *opaque, int fd,
 	struct xdev_ext_call_ctx *call = opaque;
 	ssize_t ret;
 
+	call->fell_back = true;
 	/* Admission and execution inspect only the owned snapshot. A delegation
 	 * still passes the caller's original metadata to libc exactly once. */
 	if (call->original_iov)
@@ -1433,76 +1764,126 @@ static ssize_t xdev_ext_recursive_iov_v2(int fd, const struct iovec *iov,
  * This is advisory admission only: mappings can change immediately afterwards,
  * so accepted reads must still use fault-reporting copyout and never replay.
  * Failure to inspect mappings simply keeps the original request in libc.
+ * /proc/self/maps is opened and closed inside each check, so that the only
+ * descriptor a thread keeps is its ring (the set the ordinary-fork oracle
+ * allows) and an application's close_range() or dup2() can never leave the
+ * check reading another file.  PROCMAP_QUERY asks for the VMAs covering the
+ * destinations directly; without it (or past its query budget) the text is
+ * read from offset 0 with pread, with no FILE buffer.  As with the fopen()
+ * this replaces, a fork by another thread during the check inherits the
+ * descriptor.
  */
-#define XDEV_EXT_MAPS_SCAN_LIMIT (1024U * 1024U)
+#define XDEV_EXT_MAPS_BUFFER_SIZE (16U * 1024U)
+#define XDEV_EXT_MAPS_LOCAL_CURSORS 4
 
-static bool xdev_ext_read_destinations_writable(const struct iovec *iov, int iovcnt)
+/* struct procmap_query of the UAPI <linux/fs.h>, which libc headers lack. */
+struct xdev_ext_procmap_query {
+	uint64_t size;
+	uint64_t query_flags;
+	uint64_t query_addr;
+	uint64_t vma_start;
+	uint64_t vma_end;
+	uint64_t vma_flags;
+	uint64_t vma_page_size;
+	uint64_t vma_offset;
+	uint64_t inode;
+	uint32_t dev_major;
+	uint32_t dev_minor;
+	uint32_t vma_name_size;
+	uint32_t build_id_size;
+	uint64_t vma_name_addr;
+	uint64_t build_id_addr;
+};
+_Static_assert(sizeof(struct xdev_ext_procmap_query) == 104, "struct procmap_query");
+#define XDEV_EXT_PROCMAP_QUERY _IOWR('f', 17, struct xdev_ext_procmap_query)
+
+static int xdev_ext_procmap_query(void *opaque, uint64_t address, uint64_t *end,
+				  uint64_t *flags)
 {
-	uintptr_t *cursor;
-	unsigned long low, high;
-	char permissions[5], line[512];
-	size_t scanned = 0;
-	FILE *maps;
-	bool writable = false, line_start = true;
-	int i;
+	struct xdev_ext_procmap_query query = {
+		.size = sizeof(query),
+		.query_addr = address,
+	};
+
+	if (ioctl(*(const int *)opaque, XDEV_EXT_PROCMAP_QUERY, &query))
+		return -errno;
+	*end = query.vma_end;
+	*flags = query.vma_flags;
+	return 0;
+}
+
+/* A raw read: an interposer after the front end sees only the caller's I/O. */
+static ssize_t xdev_ext_maps_read_at(void *opaque, void *buffer, size_t length,
+				     uint64_t offset)
+{
+	const int *fd = opaque;
+	ssize_t ret;
+
+	do {
+		ret = syscall(SYS_pread64, *fd, buffer, length, (off64_t)offset);
+	} while (ret < 0 && errno == EINTR);
+	return ret < 0 ? -errno : ret;
+}
+
+static bool xdev_ext_read_destinations_writable(struct xdev_ext_thread_ctx *thread,
+					       const struct iovec *iov, int iovcnt)
+{
+	struct xdev_ext_preload_maps_reader reader = {
+		.read_at = xdev_ext_maps_read_at,
+	};
+	uintptr_t local_cursor[XDEV_EXT_MAPS_LOCAL_CURSORS];
+	uintptr_t *cursor = local_cursor;
+	bool writable = false;
+	int fd;
+	int ret;
 
 	if (!iov || iovcnt <= 0 || iovcnt > IOV_MAX)
 		return false;
-	cursor = malloc((size_t)iovcnt * sizeof(*cursor));
-	if (!cursor)
+	if (!thread->maps_buffer) {
+		thread->maps_buffer = malloc(XDEV_EXT_MAPS_BUFFER_SIZE);
+		if (!thread->maps_buffer)
+			return false;
+	}
+	do {
+		fd = (int)syscall(SYS_openat, AT_FDCWD, "/proc/self/maps",
+				  O_RDONLY | O_CLOEXEC);
+	} while (fd < 0 && errno == EINTR);
+	if (fd < 0)
 		return false;
-	for (i = 0; i < iovcnt; i++) {
-		cursor[i] = (uintptr_t)iov[i].iov_base;
-		if (iov[i].iov_len > UINTPTR_MAX - cursor[i])
+	if (!__atomic_load_n(&xdev_ext_procmap_query_absent, __ATOMIC_RELAXED)) {
+		ret = xdev_ext_preload_maps_query_writable(xdev_ext_procmap_query,
+							   &fd, iov, iovcnt);
+		if (ret >= 0) {
+			writable = ret;
+			goto out;
+		}
+		/* Only a kernel without the ioctl stops later queries; any
+		 * other error, or the query budget, sends this call to the text.
+		 */
+		if (ret == -ENOTTY || ret == -EINVAL)
+			__atomic_store_n(&xdev_ext_procmap_query_absent, 1,
+					 __ATOMIC_RELAXED);
+	}
+	if (iovcnt > XDEV_EXT_MAPS_LOCAL_CURSORS) {
+		cursor = malloc((size_t)iovcnt * sizeof(*cursor));
+		if (!cursor)
 			goto out;
 	}
-	maps = fopen("/proc/self/maps", "re");
-	if (!maps)
-		goto out;
-	/* One scan per call, with a fixed byte bound independent of map count.
-	 * Long pathname continuations are never interpreted as mapping headers. */
-	while (scanned < XDEV_EXT_MAPS_SCAN_LIMIT &&
-	       fgets(line, XDEV_EXT_MAPS_SCAN_LIMIT - scanned < sizeof(line) ?
-		     XDEV_EXT_MAPS_SCAN_LIMIT - scanned + 1 : sizeof(line), maps)) {
-		size_t length = strlen(line);
-		bool header = line_start;
-		bool complete = true;
-
-		scanned += length;
-		line_start = length && line[length - 1] == '\n';
-		if (!header || sscanf(line, "%lx-%lx %4s", &low, &high,
-				      permissions) != 3)
-			continue;
-		for (i = 0; i < iovcnt; i++) {
-			uintptr_t end = (uintptr_t)iov[i].iov_base + iov[i].iov_len;
-
-			if (cursor[i] == end)
-				continue;
-			if (low > cursor[i])
-				goto close;
-			if (high > cursor[i]) {
-				if (permissions[1] != 'w')
-					goto close;
-				cursor[i] = high < end ? high : end;
-			}
-			if (cursor[i] != end)
-				complete = false;
-		}
-		if (complete) {
-			writable = true;
-			break;
-		}
-	}
-close:
-	fclose(maps);
+	reader.opaque = &fd;
+	reader.buffer = thread->maps_buffer;
+	reader.capacity = XDEV_EXT_MAPS_BUFFER_SIZE;
+	writable = xdev_ext_preload_maps_text_writable(&reader, iov, iovcnt, cursor);
+	if (cursor != local_cursor)
+		free(cursor);
 out:
-	free(cursor);
+	(void)syscall(SYS_close, fd);
 	return writable;
 }
 
 static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 				 int64_t offset, bool write, bool use_64)
 {
+	enum xdev_ext_preload_fallback_reason reason;
 	struct xdev_ext_preload_fd_meta meta;
 	struct xdev_ext_preload_seam seam;
 	struct xdev_ext_call_ctx call = { .use_64 = use_64 };
@@ -1527,21 +1908,27 @@ static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 	 */
 	(void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
 	request_fd = xdev_ext_duplicate_validated_fd(fd, &meta);
-	if (request_fd < 0)
+	if (request_fd < 0) {
+		xdev_ext_count_fallback(meta.refused);
 		goto restore_and_fallback;
-	if (!xdev_ext_preload_is_eligible(&meta, buffer, count, offset)) {
+	}
+	reason = xdev_ext_preload_fallback_reason(&meta, buffer, count, offset);
+	if (reason != XDEV_EXT_PRELOAD_FALLBACK_NONE) {
+		xdev_ext_count_fallback(reason);
 		(void)xdev_ext_real.close_fn(request_fd);
 		request_fd = -1;
 		goto restore_and_fallback;
 	}
-	if (!write && !xdev_ext_read_destinations_writable(&destination, 1)) {
-		(void)xdev_ext_real.close_fn(request_fd);
-		request_fd = -1;
-		goto restore_and_fallback;
-	}
-
+	/* The context's cached pid and tid are this call's from here on. */
 	thread = xdev_ext_get_thread();
 	if (!thread) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_RUNTIME_ABSENT);
+		(void)xdev_ext_real.close_fn(request_fd);
+		request_fd = -1;
+		goto restore_and_fallback;
+	}
+	if (!write && !xdev_ext_read_destinations_writable(thread, &destination, 1)) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
 		(void)xdev_ext_real.close_fn(request_fd);
 		request_fd = -1;
 		goto restore_and_fallback;
@@ -1552,11 +1939,15 @@ static ssize_t xdev_ext_positional_io(int fd, void *buffer, size_t count,
 		.opaque = &call,
 		.submit_and_wait = xdev_ext_submit_and_wait,
 		.fallback = xdev_ext_fallback,
+		.self_pid = thread->owner_pid,
 	};
-	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)getpid(),
-				       (uint32_t)syscall(SYS_gettid));
+	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)thread->owner_pid,
+				       (uint32_t)thread->owner_tid);
 	ret = xdev_ext_preload_execute(&meta, request_fd, buffer, count, offset, write,
 				  thread->umem, token, &seam, &error);
+	xdev_ext_count_executed(thread, call.fell_back, &thread->file_qualified,
+				XDEV_EXT_PRELOAD_FALLBACK_FILE_RUNTIME_ABSENT,
+				XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
 	if (!__atomic_load_n(&thread->quiescence_unknown, __ATOMIC_ACQUIRE))
 		(void)xdev_ext_real.close_fn(request_fd);
 	(void)pthread_setcancelstate(cancel_state, NULL);
@@ -1581,6 +1972,7 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 				  int64_t offset, bool write, bool use_64,
 				  bool use_v2, int flags)
 {
+	enum xdev_ext_preload_fallback_reason reason;
 	struct xdev_ext_preload_fd_meta meta;
 	struct xdev_ext_preload_iov_seam seam;
 	struct xdev_ext_call_ctx call = {
@@ -1600,8 +1992,12 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 
 	pthread_once(&xdev_ext_config_once, xdev_ext_load_config);
 	/* Only the exact positional flags=0 ABI maps to READ/WRITE_COMPAT. */
-	if (!xdev_ext_cfg.enabled || flags)
+	if (!xdev_ext_cfg.enabled)
 		goto fallback;
+	if (flags) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
+		goto fallback;
+	}
 	/*
 	 * Entry already acted on a pending cancellation.  Until the result is
 	 * known, a new request must not act inside the front end: a published
@@ -1611,43 +2007,62 @@ static ssize_t xdev_ext_positional_iov(int fd, const struct iovec *iov, int iovc
 	 */
 	(void)pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, &cancel_state);
 	request_fd = xdev_ext_duplicate_validated_fd(fd, &meta);
-	if (request_fd < 0)
-		goto restore_and_fallback;
-	/* Do not touch user metadata for descriptors that cannot be admitted. */
-	if (!meta.tracked || !meta.identity_matches || !meta.direct ||
-	    !meta.frame_size || !meta.dio_mem_align || !meta.dio_offset_align ||
-	    !iov || iovcnt <= 0 || iovcnt > IOV_MAX || offset < 0)
-		goto close_and_fallback;
-	snapshot = malloc((size_t)iovcnt * sizeof(*snapshot));
-	if (!snapshot || xdev_ext_preload_user_copy(snapshot, (void *)iov,
-			(size_t)iovcnt * sizeof(*snapshot), false) !=
-	    (ssize_t)((size_t)iovcnt * sizeof(*snapshot)))
-		goto close_and_fallback;
-	if (!xdev_ext_preload_iov_is_eligible(&meta, snapshot, iovcnt, offset, &total)) {
-		(void)xdev_ext_real.close_fn(request_fd);
-		request_fd = -1;
+	if (request_fd < 0) {
+		xdev_ext_count_fallback(meta.refused);
 		goto restore_and_fallback;
 	}
-	if (!write && !xdev_ext_read_destinations_writable(snapshot, iovcnt))
+	/* Do not touch user metadata for descriptors that cannot be admitted. */
+	reason = xdev_ext_preload_meta_fallback_reason(&meta);
+	if (reason == XDEV_EXT_PRELOAD_FALLBACK_NONE &&
+	    (!iov || iovcnt <= 0 || iovcnt > IOV_MAX || offset < 0))
+		reason = iovcnt > IOV_MAX || offset < 0 ?
+			XDEV_EXT_PRELOAD_FALLBACK_FILE_SIZE :
+			XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER;
+	if (reason != XDEV_EXT_PRELOAD_FALLBACK_NONE) {
+		xdev_ext_count_fallback(reason);
 		goto close_and_fallback;
-
+	}
+	/* The context's cached pid and tid are this call's from here on. */
 	thread = xdev_ext_get_thread();
 	if (!thread) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_RUNTIME_ABSENT);
+		goto close_and_fallback;
+	}
+	snapshot = malloc((size_t)iovcnt * sizeof(*snapshot));
+	if (!snapshot || xdev_ext_preload_user_copy_pid(thread->owner_pid, snapshot,
+			(void *)iov, (size_t)iovcnt * sizeof(*snapshot), false) !=
+	    (ssize_t)((size_t)iovcnt * sizeof(*snapshot))) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
+		goto close_and_fallback;
+	}
+	reason = xdev_ext_preload_iov_fallback_reason(&meta, snapshot, iovcnt, offset);
+	if (reason != XDEV_EXT_PRELOAD_FALLBACK_NONE ||
+	    !xdev_ext_preload_iov_is_eligible(&meta, snapshot, iovcnt, offset, &total)) {
+		xdev_ext_count_fallback(reason);
 		(void)xdev_ext_real.close_fn(request_fd);
 		request_fd = -1;
 		goto restore_and_fallback;
 	}
+	if (!write && !xdev_ext_read_destinations_writable(thread, snapshot, iovcnt)) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
+		goto close_and_fallback;
+	}
+
 	call.thread = thread;
 	seam = (struct xdev_ext_preload_iov_seam) {
 		.opaque = &call,
 		.submit_and_wait = xdev_ext_submit_and_wait,
 		.fallback = xdev_ext_iov_fallback,
+		.self_pid = thread->owner_pid,
 	};
-	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)getpid(),
-				       (uint32_t)syscall(SYS_gettid));
+	token = xdev_ext_preload_next_token(&thread->tokens, (uint32_t)thread->owner_pid,
+				       (uint32_t)thread->owner_tid);
 	ret = xdev_ext_preload_execute_iov(&meta, request_fd, snapshot, iovcnt, offset,
 				      write, flags, thread->umem, token, &seam,
 				      &error);
+	xdev_ext_count_executed(thread, call.fell_back, &thread->file_qualified,
+				XDEV_EXT_PRELOAD_FALLBACK_FILE_RUNTIME_ABSENT,
+				XDEV_EXT_PRELOAD_FALLBACK_FILE_OTHER);
 	if (!__atomic_load_n(&thread->quiescence_unknown, __ATOMIC_ACQUIRE))
 		(void)xdev_ext_real.close_fn(request_fd);
 	free(snapshot);
@@ -1797,6 +2212,8 @@ static void xdev_ext_socket_mech_forget_fd(int fd)
 	uint64_t cookie;
 	socklen_t size = sizeof(cookie);
 	int cancel_state, saved_errno = errno;
+	unsigned int i;
+
 	if (!xdev_ext_socket_mech_cfg.enabled ||
 	    syscall(SYS_getsockopt, fd, SOL_SOCKET, SO_COOKIE, &cookie, &size) ||
 	    size != sizeof(cookie))
@@ -1806,8 +2223,13 @@ static void xdev_ext_socket_mech_forget_fd(int fd)
 	for (thread = xdev_ext_threads; thread; thread = thread->next) {
 		if (thread->owner_pid != getpid()) continue;
 		pthread_mutex_lock(&thread->socket_mech_lock);
-		if (thread->socket_mech.session && thread->socket_mech.cookie == cookie)
-			(void)xdev_ext_socket_mech_release(&thread->socket_mech);
+		for (i = 0; i < XDEV_EXT_PRELOAD_SOCKET_MECH_SLOTS; i++) {
+			struct xdev_ext_socket_mech_runtime *m = i ?
+				&thread->socket_mech_more[i - 1] : &thread->socket_mech;
+
+			if (m->session && m->cookie == cookie)
+				(void)xdev_ext_socket_mech_release(m);
+		}
 		pthread_mutex_unlock(&thread->socket_mech_lock);
 	}
 	pthread_mutex_unlock(&xdev_ext_thread_lock);
@@ -1947,15 +2369,42 @@ int fcntl64(int fd, int command, ...)
 	return ret;
 }
 
+/*
+ * read() and write() always stay in libc.  With XDEV_EXT_PRELOAD_REPORT=1 a
+ * call on a descriptor the front end tracks counts as file_not_positional, so
+ * that the qualified fraction does not leave out an allowlisted file's
+ * non-positional I/O; other descriptors are not counted.
+ */
+static void xdev_ext_count_not_positional(int fd)
+{
+	bool tracked;
+
+	if (xdev_ext_in_hook || fd < 0)
+		return;
+	xdev_ext_in_hook++;
+	pthread_once(&xdev_ext_config_once, xdev_ext_load_config);
+	if (xdev_ext_cfg.enabled && xdev_ext_cfg.report) {
+		xdev_ext_preload_fd_lock(&xdev_ext_fd_locks, fd);
+		tracked = xdev_ext_find_fd_locked(
+			xdev_ext_fds[xdev_ext_preload_fd_shard(fd)], fd) != NULL;
+		xdev_ext_preload_fd_unlock(&xdev_ext_fd_locks, fd);
+		if (tracked)
+			xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_FILE_NOT_POSITIONAL);
+	}
+	xdev_ext_in_hook--;
+}
+
 ssize_t read(int fd, void *buffer, size_t count)
 {
 	pthread_once(&xdev_ext_real_once, xdev_ext_resolve_real_functions);
+	xdev_ext_count_not_positional(fd);
 	return xdev_ext_real.read_fn(fd, buffer, count);
 }
 
 ssize_t write(int fd, const void *buffer, size_t count)
 {
 	pthread_once(&xdev_ext_real_once, xdev_ext_resolve_real_functions);
+	xdev_ext_count_not_positional(fd);
 	return xdev_ext_real.write_fn(fd, buffer, count);
 }
 
@@ -2009,6 +2458,10 @@ ssize_t sendto(int fd, const void *buffer, size_t count, int flags,
 	ssize_t ret;
 
 	pthread_once(&xdev_ext_real_once, xdev_ext_resolve_real_functions);
+	if (!xdev_ext_in_hook && xdev_ext_cfg.socket_enabled &&
+	    !xdev_ext_preload_sendto_shape_supported(destination,
+						destination_length))
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
 	if (xdev_ext_in_hook ||
 	    !xdev_ext_preload_sendto_shape_supported(destination,
 						destination_length)) {
@@ -2067,10 +2520,13 @@ ssize_t sendmsg(int fd, const struct msghdr *message, int flags)
 	if (xdev_ext_in_hook)
 		goto fallback;
 	pthread_once(&xdev_ext_config_once, xdev_ext_load_config);
-	if (!xdev_ext_cfg.socket_enabled ||
-	    !xdev_ext_preload_send_flags_supported((uint32_t)flags) ||
-	    !xdev_ext_sendmsg_snapshot(message, &buffer, &count))
+	if (!xdev_ext_cfg.socket_enabled)
 		goto fallback;
+	if (!xdev_ext_preload_send_flags_supported((uint32_t)flags) ||
+	    !xdev_ext_sendmsg_snapshot(message, &buffer, &count)) {
+		xdev_ext_count_fallback(XDEV_EXT_PRELOAD_FALLBACK_SOCKET_OTHER);
+		goto fallback;
+	}
 	xdev_ext_cancel_point_enter();
 	ret = xdev_ext_socket_send(XDEV_EXT_SOCKET_CALL_SENDMSG, fd, buffer, count, flags,
 			      NULL, 0, message, saved_errno);

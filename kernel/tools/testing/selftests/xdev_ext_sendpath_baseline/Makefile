@@ -5,6 +5,10 @@ TEST_GEN_PROGS := sendpath_baseline_core_test sendpath_baseline_layout_test \
 # Pins call sites in ../../../xdev_ext_sendpath_baseline.c that the C tests cannot
 # observe: the receive guard, the partition check, and operation counting.
 TEST_PROGS := sendpath_baseline_source_test.py
+# Truth table of the SEND path selector (io_uring/unified_ops.c) and of the
+# xsk_kernel_tx_capable() probe its dispatch calls, compiled from production.
+TEST_PROGS += pick_send_path_test.py
+TEST_FILES := pick_send_path_fixture.c
 # The program under test; the runtime test executes it from $(OUTPUT).
 TEST_GEN_PROGS_EXTENDED := xdev_ext_sendpath_baseline
 
@@ -46,8 +50,11 @@ $(OUTPUT)/sendpath_baseline_layout_test: sendpath_baseline_layout_test.c \
 	$(CC) $(CFLAGS) $(PIPELINE_CFLAGS) $< ../../../xdev_ext_xsk_redirect.c \
 		-o $@ $(LDFLAGS) $(PIPELINE_LDLIBS)
 
-.PHONY: run sanitize
+.PHONY: run sanitize pick-send-path
 run: run_tests
+
+pick-send-path:
+	python3 ./pick_send_path_test.py
 
 sanitize: $(UAPI_SHIM_HEADERS)
 	@set -eu; \

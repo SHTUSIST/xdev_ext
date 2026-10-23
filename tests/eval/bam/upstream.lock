@@ -1,0 +1,8 @@
+# BaM baseline pin.  Fields: path, git blob of the file before the patch,
+# git blob after the patch.  The pre-patch blobs identify the upstream commit
+# (find_upstream_commit.sh); the post-patch blobs are the archived edited copies.
+url https://github.com/ZaidQureshi/bam
+commit unrecorded
+blob module/map.c fd90f1a33ab7466f9ffd7c7259624b14f20e5387 2abd1f933471a68c9436ed46d852b3f7cea2d96a
+blob module/pci.c c19f1f513b4aafb88e7c2b6c8528713528761c74 33367f09cdfb2a0254afe9394fbf97b5a37e972a
+blob include/freestanding/libcxx/include/type_traits 8f1aacb7afec09337aad772f963890f05c804918 6dc85a26fc7b7623a680168260dec0f487ea9443

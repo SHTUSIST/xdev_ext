@@ -3,6 +3,7 @@
 #define XDEV_EXT_UMEM_KERNEL_SHIM_H
 
 #define IOU_CORE_H
+#define IOU_RSRC_H
 #define IO_URING_XDEV_EXT_UMEM_H
 
 #include <errno.h>
@@ -24,6 +25,7 @@
 #define VM_MAP 0
 #define PAGE_KERNEL 0
 
+typedef uint8_t u8;
 typedef uint32_t u32;
 typedef uint64_t u64;
 
@@ -33,10 +35,87 @@ struct page { unsigned char unused; };
  * page identities returned by the next pin_user_pages_fast() call. */
 static atomic_uint test_page_generation;
 
+typedef struct {
+	_Atomic long long counter;
+} atomic64_t;
+
+static inline void atomic64_add(long long value, atomic64_t *v)
+{
+	atomic_fetch_add(&v->counter, value);
+}
+
+static inline void atomic64_sub(long long value, atomic64_t *v)
+{
+	atomic_fetch_sub(&v->counter, value);
+}
+
+static inline long long atomic64_read(atomic64_t *v)
+{
+	return atomic_load(&v->counter);
+}
+
 struct mm_struct {
 	atomic_int mm_count;
 	unsigned int id;
+	atomic64_t pinned_vm;
 };
+
+/*
+ * Locked-memory accounting as io_uring/rsrc.c does it for registered
+ * buffers: RLIMIT_MEMLOCK of the calling task bounds user->locked_vm, and a
+ * ring whose creator had CAP_IPC_LOCK has ctx->user == NULL.
+ */
+#define RLIMIT_MEMLOCK 8
+
+struct user_struct {
+	atomic_int __count;
+	atomic_long locked_vm;
+};
+
+static unsigned long test_memlock_limit = ~0UL;
+
+static inline unsigned long rlimit(int resource)
+{
+	(void)resource;
+	return test_memlock_limit;
+}
+
+static inline struct user_struct *get_uid(struct user_struct *user)
+{
+	atomic_fetch_add(&user->__count, 1);
+	return user;
+}
+
+static inline void free_uid(struct user_struct *user)
+{
+	if (user)
+		atomic_fetch_sub(&user->__count, 1);
+}
+
+/* Same rule as __io_account_mem() in io_uring/rsrc.c. */
+static inline int __io_account_mem(struct user_struct *user,
+				   unsigned long nr_pages)
+{
+	unsigned long page_limit, cur_pages, new_pages;
+
+	if (!nr_pages)
+		return 0;
+	page_limit = rlimit(RLIMIT_MEMLOCK) >> PAGE_SHIFT;
+	cur_pages = atomic_load(&user->locked_vm);
+	do {
+		new_pages = cur_pages + nr_pages;
+		if (new_pages > page_limit)
+			return -ENOMEM;
+	} while (!atomic_compare_exchange_weak(&user->locked_vm, &cur_pages,
+					       new_pages));
+	return 0;
+}
+
+static inline void __io_unaccount_mem(struct user_struct *user,
+				      unsigned long nr_pages)
+{
+	atomic_fetch_sub(&user->locked_vm, nr_pages);
+}
 
 struct task_struct {
 	struct mm_struct *mm;
@@ -234,6 +313,10 @@ static inline int copy_from_user(void *to, const void *from, size_t size)
 	return 0;
 }
 
+/* Failure injection: a short pin (>= 0 pages) and a failed vmap. */
+static int test_pin_short = -1;
+static bool test_vmap_fail;
+
 static inline int pin_user_pages_fast(unsigned long start, unsigned int nr_pages,
 				      unsigned int flags, struct page **pages)
 {
@@ -242,6 +325,8 @@ static inline int pin_user_pages_fast(unsigned long start, unsigned int nr_pages
 
 	(void)start;
 	(void)flags;
+	if (test_pin_short >= 0 && (unsigned int)test_pin_short < nr_pages)
+		nr_pages = test_pin_short;
 	for (i = 0; i < nr_pages; i++)
 		pages[i] = (struct page *)((generation << 20) + i + 1);
 	return nr_pages;
@@ -259,6 +344,8 @@ static inline void *vmap(struct page **pages, unsigned int nr_pages,
 	(void)pages;
 	(void)flags;
 	(void)prot;
+	if (test_vmap_fail)
+		return NULL;
 	return calloc(nr_pages, PAGE_SIZE);
 }
 
@@ -279,11 +366,20 @@ struct io_xdev_ext_umem {
 	struct io_uring_unified_shared __user *shared;
 	struct mm_struct *mm;
 	refcount_t refcount;
+	struct user_struct *user;
+	struct mm_struct *mm_account;
+	unsigned long acct_pages;
+#ifdef CONFIG_XDEV_EXT_MECH
+	u8 *mech_state;
+	bool legacy_used;
+#endif
 };
 
 struct io_ring_ctx {
 	struct io_xdev_ext_umem *xdev_ext_umem;
 	struct io_uring_unified_shared __user *xdev_ext_umem_shared;
+	struct user_struct *user;
+	struct mm_struct *mm_account;
 };
 
 #endif /* XDEV_EXT_UMEM_KERNEL_SHIM_H */

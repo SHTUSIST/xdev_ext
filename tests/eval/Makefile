@@ -14,6 +14,7 @@ URING_LIBS = $(shell pkg-config --libs liburing)
 endif
 
 .PHONY: all check run clean FORCE gds-check hft hft-check cuda-host-check
+.PHONY: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check reviewer-eval-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -45,6 +46,33 @@ hft-check:
 
 cuda-host-check:
 	$(MAKE) -C cuda_host_compute test
+
+chains-check:
+	$(MAKE) -C chains check
+
+uo-check:
+	$(MAKE) -C userspace_orchestrator check
+
+nvme-nic-check:
+	$(MAKE) -C nvme_nic check
+
+nvme-gpu-check:
+	$(MAKE) -C nvme_gpu check
+
+gpu-nic-check:
+	$(MAKE) -C gpu_nic check
+
+bam-check:
+	$(MAKE) -C bam check
+
+eval-cost-check:
+	$(MAKE) -C common check
+	$(MAKE) -C setup_cost check BUILD=$(abspath $(BUILD))/setup_cost
+	$(MAKE) -C breakdown check
+	$(MAKE) -C providers check
+
+# Host-side contracts of the reviewer-driven harnesses; no timing.
+reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check
 
 clean:
 	rm -rf $(BUILD) __pycache__
