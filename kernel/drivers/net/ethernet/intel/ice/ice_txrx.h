@@ -152,6 +152,13 @@ static inline int ice_skb_pad(void)
  * @ICE_TX_BUF_XDP_XMIT: &xdp_frame, unmap and xdp_return_frame(), stats
  * @ICE_TX_BUF_XSK_TX: &xdp_buff on XSk queue, xsk_buff_free(), stats
  */
+#ifdef CONFIG_XDEV_EXT_MECH
+struct xdev_ext_peer_tx;
+struct pci_dev *ice_peer_device(struct net_device *dev);
+int ice_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *);
+struct ice_tx_ring;
+bool ice_peer_clean_xdp(struct ice_tx_ring *ring);
+#endif
 enum ice_tx_buf_type {
 	ICE_TX_BUF_EMPTY	= 0U,
 	ICE_TX_BUF_DUMMY,
@@ -160,6 +167,10 @@ enum ice_tx_buf_type {
 	ICE_TX_BUF_XDP_TX,
 	ICE_TX_BUF_XDP_XMIT,
 	ICE_TX_BUF_XSK_TX,
+#ifdef CONFIG_XDEV_EXT_MECH
+ ICE_TX_BUF_PEER,
+ ICE_TX_BUF_PEER_DATA,
+#endif
 };
 
 struct ice_tx_buf {
@@ -168,6 +179,9 @@ struct ice_tx_buf {
 		u32 rs_idx;
 	};
 	union {
+#ifdef CONFIG_XDEV_EXT_MECH
+  struct xdev_ext_peer_tx *peer;
+#endif
 		void *raw_buf;		/* used for XDP_TX and FDir rules */
 		struct sk_buff *skb;	/* used for .ndo_start_xmit() */
 		struct xdp_frame *xdpf;	/* used for .ndo_xdp_xmit() */
@@ -374,6 +388,11 @@ struct ice_rx_ring {
 } ____cacheline_internodealigned_in_smp;
 
 struct ice_tx_ring {
+#ifdef CONFIG_XDEV_EXT_MECH
+ u8 *peer_headers;
+ dma_addr_t peer_headers_dma;
+ bool peer_quarantined;
+#endif
 	/* CL1 - 1st cacheline starts here */
 	struct ice_tx_ring *next;	/* pointer to next ring in q_vector */
 	void *desc;			/* Descriptor ring memory */

@@ -2,6 +2,9 @@
 /* Copyright (c) 2019, Intel Corporation. */
 
 #include <linux/filter.h>
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <linux/xdev_ext_peer.h>
+#endif
 #include <linux/net/intel/libie/rx.h>
 
 #include "ice_txrx_lib.h"
@@ -270,6 +273,14 @@ static void
 ice_clean_xdp_tx_buf(struct device *dev, struct ice_tx_buf *tx_buf,
 		     struct xdp_frame_bulk *bq)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (tx_buf->type == ICE_TX_BUF_PEER || tx_buf->type == ICE_TX_BUF_PEER_DATA) {
+  struct xdev_ext_peer_tx *tx = tx_buf->type == ICE_TX_BUF_PEER ? tx_buf->peer : NULL;
+  tx_buf->type = ICE_TX_BUF_EMPTY;
+  if (tx) tx->complete(tx, 0, true);
+  return;
+ }
+#endif
 	dma_unmap_single(dev, dma_unmap_addr(tx_buf, dma),
 			 dma_unmap_len(tx_buf, len), DMA_TO_DEVICE);
 	dma_unmap_len_set(tx_buf, len, 0);
@@ -358,6 +369,91 @@ static u32 ice_clean_xdp_irq(struct ice_tx_ring *xdp_ring)
 
 	return ret;
 }
+
+#ifdef CONFIG_XDEV_EXT_MECH
+struct pci_dev *ice_peer_device(struct net_device *dev)
+{
+ struct ice_netdev_priv *np = netdev_priv(dev);
+ struct ice_vsi *vsi = np->vsi;
+ struct ice_pf *pf = vsi->back;
+ u32 i;
+ if (test_bit(ICE_VSI_DOWN, vsi->state) || !ice_is_xdp_ena_vsi(vsi) || !vsi->xdp_rings)
+  return NULL;
+ for (i = 0; i < vsi->num_xdp_txq; i++)
+  if (vsi->xdp_rings[i] && vsi->xdp_rings[i]->peer_headers && !vsi->xdp_rings[i]->xsk_pool)
+   return pf->pdev;
+ return NULL;
+}
+/* Called under RCU: removal sets VSI_DOWN and waits for networking readers.
+ * All XDP producers and the NAPI cleaner share tx_lock in this configuration. */
+int ice_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *tx)
+{
+ struct ice_netdev_priv *np = netdev_priv(dev);
+ struct ice_vsi *vsi = np->vsi;
+ struct ice_tx_ring *xdp_ring;
+ struct xdev_ext_peer_tx *it;
+ u32 n = 0, first, ntu, tail = 0;
+ int ret = -EAGAIN;
+ if (!tx) return -EINVAL;
+ for (it = tx; it; it = it->next) {
+  if (++n > 16 || !it->complete || !it->header || it->header_len < ETH_HLEN ||
+      it->header_len > 128 || !it->len || it->len > 16383 ||
+      it->header_len + it->len < ETH_ZLEN || it->header_len > dev->mtu + ETH_HLEN ||
+      it->len > dev->mtu + ETH_HLEN - it->header_len) return -EINVAL;
+ }
+ if (test_bit(ICE_VSI_DOWN, vsi->state) || !ice_is_xdp_ena_vsi(vsi) ||
+     queue >= vsi->num_xdp_txq) return -ENETDOWN;
+ xdp_ring = READ_ONCE(vsi->xdp_rings[queue]);
+ if (!xdp_ring || !xdp_ring->peer_headers || xdp_ring->xsk_pool) return -EOPNOTSUPP;
+ spin_lock_bh(&xdp_ring->tx_lock);
+ if (test_bit(ICE_VSI_DOWN, vsi->state)) goto unlock;
+ ice_clean_xdp_irq(xdp_ring);
+ if (ICE_DESC_UNUSED(xdp_ring) < n * 2) goto unlock;
+ first = ntu = xdp_ring->next_to_use;
+ for (it = tx; it; it = it->next) {
+  struct ice_tx_buf *head = &xdp_ring->tx_buf[ntu], *payload;
+  struct ice_tx_desc *desc = ICE_TX_DESC(xdp_ring, ntu);
+  memcpy(xdp_ring->peer_headers + ntu * 128, it->header, it->header_len);
+  *head = (struct ice_tx_buf){ .type = ICE_TX_BUF_PEER, .peer = it,
+    .bytecount = it->header_len + it->len, .nr_frags = 1 };
+  desc->buf_addr = cpu_to_le64(xdp_ring->peer_headers_dma + ntu * 128);
+  desc->cmd_type_offset_bsz = ice_build_ctob(0, 0, it->header_len, 0);
+  if (++ntu == xdp_ring->count) ntu = 0;
+  payload = &xdp_ring->tx_buf[ntu];
+  *payload = (struct ice_tx_buf){ .type = ICE_TX_BUF_PEER_DATA };
+  desc = ICE_TX_DESC(xdp_ring, ntu);
+  desc->buf_addr = cpu_to_le64(it->dma_address);
+  desc->cmd_type_offset_bsz = ice_build_ctob(ICE_TX_DESC_CMD_EOP, 0, it->len, 0);
+  tail = ntu;
+  head->rs_idx = tail;
+  if (++ntu == xdp_ring->count) ntu = 0;
+ }
+ ICE_TX_DESC(xdp_ring, tail)->cmd_type_offset_bsz |=
+  cpu_to_le64(ICE_TX_DESC_CMD_RS << ICE_TXD_QW1_CMD_S);
+ xdp_ring->tx_buf[first].rs_idx = tail;
+ xdp_ring->next_to_use = ntu;
+ xdp_ring->xdp_tx_active += n;
+ /* Publish the entire chain once, after every header and descriptor. */
+ ice_xdp_ring_update_tail(xdp_ring);
+ ret = 0;
+unlock:
+ spin_unlock_bh(&xdp_ring->tx_lock);
+ return ret;
+}
+/* Native TX CQ progress, also when there is no subsequent XDP producer. */
+bool ice_peer_clean_xdp(struct ice_tx_ring *ring)
+{
+ u32 cleaned;
+ spin_lock(&ring->tx_lock);
+ do {
+  cleaned = ring->next_to_clean != ring->next_to_use ? ice_clean_xdp_irq(ring) : 0;
+ } while (cleaned);
+ spin_unlock(&ring->tx_lock);
+ /* Outstanding DMA without DD needs a later completion interrupt, not an
+  * indefinitely busy NAPI loop (which would also starve STOP workers). */
+ return true;
+}
+#endif
 
 /**
  * __ice_xmit_xdp_ring - submit frame to XDP ring for transmission
@@ -493,14 +589,14 @@ void ice_finalize_xdp_rx(struct ice_tx_ring *xdp_ring, unsigned int xdp_res,
 		xdp_do_flush();
 
 	if (xdp_res & ICE_XDP_TX) {
-		if (static_branch_unlikely(&ice_xdp_locking_key))
+		if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key)))
 			spin_lock(&xdp_ring->tx_lock);
 		/* store index of descriptor with RS bit set in the first
 		 * ice_tx_buf of given NAPI batch
 		 */
 		tx_buf->rs_idx = ice_set_rs_bit(xdp_ring);
 		ice_xdp_ring_update_tail(xdp_ring);
-		if (static_branch_unlikely(&ice_xdp_locking_key))
+		if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key)))
 			spin_unlock(&xdp_ring->tx_lock);
 	}
 }

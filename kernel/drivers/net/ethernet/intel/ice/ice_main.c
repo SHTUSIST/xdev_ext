@@ -2645,9 +2645,9 @@ static int ice_xdp_alloc_setup_rings(struct ice_vsi *vsi)
 		xdp_ring->dev = dev;
 		xdp_ring->count = vsi->num_tx_desc;
 		WRITE_ONCE(vsi->xdp_rings[i], xdp_ring);
+		ice_set_ring_xdp(xdp_ring);
 		if (ice_setup_tx_ring(xdp_ring))
 			goto free_xdp_rings;
-		ice_set_ring_xdp(xdp_ring);
 		spin_lock_init(&xdp_ring->tx_lock);
 		for (j = 0; j < xdp_ring->count; j++) {
 			tx_desc = ICE_TX_DESC(xdp_ring, j);
@@ -9743,6 +9743,10 @@ static const struct net_device_ops ice_netdev_safe_mode_ops = {
 };
 
 static const struct net_device_ops ice_netdev_ops = {
+#ifdef CONFIG_XDEV_EXT_MECH
+ .ndo_xdev_ext_peer_device = ice_peer_device,
+ .ndo_xdev_ext_peer_tx = ice_peer_xmit,
+#endif
 	.ndo_open = ice_open,
 	.ndo_stop = ice_stop,
 	.ndo_start_xmit = ice_start_xmit,

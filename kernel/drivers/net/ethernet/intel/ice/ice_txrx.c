@@ -3,6 +3,9 @@
 
 /* The driver transmit and receive code */
 
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <linux/xdev_ext_peer.h>
+#endif
 #include <linux/mm.h>
 #include <linux/netdevice.h>
 #include <linux/prefetch.h>
@@ -112,6 +115,19 @@ ice_prgm_fdir_fltr(struct ice_vsi *vsi, struct ice_fltr_desc *fdir_desc,
 static void
 ice_unmap_and_free_tx_buf(struct ice_tx_ring *ring, struct ice_tx_buf *tx_buf)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (tx_buf->type == ICE_TX_BUF_PEER || tx_buf->type == ICE_TX_BUF_PEER_DATA) {
+  struct xdev_ext_peer_tx *tx = tx_buf->type == ICE_TX_BUF_PEER ? tx_buf->peer : NULL;
+  bool quiesced = !!(ICE_TX_DESC(ring, tx_buf->rs_idx)->cmd_type_offset_bsz &
+                     cpu_to_le64(ICE_TX_DESC_DTYPE_DESC_DONE));
+  tx_buf->type = ICE_TX_BUF_EMPTY;
+  if (tx) {
+   if (!quiesced) ring->peer_quarantined = true;
+   tx->complete(tx, -ECANCELED, quiesced);
+  }
+  return;
+ }
+#endif
 	if (dma_unmap_len(tx_buf, len))
 		dma_unmap_page(ring->dev,
 			       dma_unmap_addr(tx_buf, dma),
@@ -195,6 +211,12 @@ void ice_free_tx_ring(struct ice_tx_ring *tx_ring)
 	u32 size;
 
 	ice_clean_tx_ring(tx_ring);
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (tx_ring->peer_headers && !tx_ring->peer_quarantined)
+  dma_free_coherent(tx_ring->dev, (size_t)tx_ring->count * 128,
+                    tx_ring->peer_headers, tx_ring->peer_headers_dma);
+ tx_ring->peer_headers = NULL; /* uncertain coherent storage stays pinned */
+#endif
 	devm_kfree(tx_ring->dev, tx_ring->tx_buf);
 	tx_ring->tx_buf = NULL;
 
@@ -368,6 +390,18 @@ int ice_setup_tx_ring(struct ice_tx_ring *tx_ring)
 	tx_ring->next_to_use = 0;
 	tx_ring->next_to_clean = 0;
 	tx_ring->ring_stats->tx_stats.prev_pkt = -1;
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (ice_ring_is_xdp(tx_ring)) {
+  tx_ring->peer_quarantined = false;
+  tx_ring->peer_headers = dma_alloc_coherent(dev, (size_t)tx_ring->count * 128,
+                                             &tx_ring->peer_headers_dma, GFP_KERNEL);
+  if (!tx_ring->peer_headers) {
+   dmam_free_coherent(dev, size, tx_ring->desc, tx_ring->dma);
+   tx_ring->desc = NULL;
+   goto err;
+  }
+ }
+#endif
 	return 0;
 
 err:
@@ -549,10 +583,10 @@ ice_run_xdp(struct ice_rx_ring *rx_ring, struct xdp_buff *xdp,
 	case XDP_PASS:
 		break;
 	case XDP_TX:
-		if (static_branch_unlikely(&ice_xdp_locking_key))
+		if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key)))
 			spin_lock(&xdp_ring->tx_lock);
 		ret = __ice_xmit_xdp_ring(xdp, xdp_ring, false);
-		if (static_branch_unlikely(&ice_xdp_locking_key))
+		if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key)))
 			spin_unlock(&xdp_ring->tx_lock);
 		if (ret == ICE_XDP_CONSUMED)
 			goto out_failure;
@@ -627,7 +661,7 @@ ice_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 	if (unlikely(flags & ~XDP_XMIT_FLAGS_MASK))
 		return -EINVAL;
 
-	if (static_branch_unlikely(&ice_xdp_locking_key)) {
+	if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key))) {
 		queue_index %= vsi->num_xdp_txq;
 		xdp_ring = vsi->xdp_rings[queue_index];
 		spin_lock(&xdp_ring->tx_lock);
@@ -653,7 +687,7 @@ ice_xdp_xmit(struct net_device *dev, int n, struct xdp_frame **frames,
 	if (unlikely(flags & XDP_XMIT_FLUSH))
 		ice_xdp_ring_update_tail(xdp_ring);
 
-	if (static_branch_unlikely(&ice_xdp_locking_key))
+	if ((IS_ENABLED(CONFIG_XDEV_EXT_MECH) || static_branch_unlikely(&ice_xdp_locking_key)))
 		spin_unlock(&xdp_ring->tx_lock);
 
 	return nxmit;
@@ -1543,8 +1577,13 @@ int ice_napi_poll(struct napi_struct *napi, int budget)
 
 		if (xsk_pool)
 			wd = ice_xmit_zc(tx_ring, xsk_pool);
-		else if (ice_ring_is_xdp(tx_ring))
-			wd = true;
+		else if (ice_ring_is_xdp(tx_ring)) {
+#ifdef CONFIG_XDEV_EXT_MECH
+   wd = ice_peer_clean_xdp(tx_ring);
+#else
+   wd = true;
+#endif
+  }
 		else
 			wd = ice_clean_tx_irq(tx_ring, budget);
 
