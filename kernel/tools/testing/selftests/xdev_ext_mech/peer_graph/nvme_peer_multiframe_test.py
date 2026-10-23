@@ -87,6 +87,26 @@ static void case_prp(void)
  ctrl_sgl = true;
  puts("ok 3 - without SGL support the same batch is one PRP command over the peer pages");
 }
+
+static void case_two_mib_prp(void)
+{
+ CHECK(nvme_xdev_ext_peer_resources_free(&priv), "drained resources can be resized for a 2 MiB peer frame");
+ session.pool.frame_size = session.l.frame_size = session.l.seg_len = session.l.group_bytes = 2 * 1024 * 1024;
+ CHECK(!nvme_xdev_ext_peer_resources_init(&st), "2 MiB PRP descriptor storage reserved at CREATE");
+ provider_page = 4096; ctrl_sgl = false; queue.max_hw_sectors = 8192;
+ batch_init(0, 0, 0, 2 * 1024 * 1024, 0);
+ int ret = SUBMIT(&st, &bs[0]);
+ CHECK(!ret, "2 MiB PRP command leases all 512 provider pages without a 256-SGL-entry lease cap");
+ if (ret) return;
+ struct request *r = nth_outstanding(0);
+ const u64 *list = coherent_host(r->nr.cmd->rw.dptr.prp2);
+ int bad = !list;
+ for (u32 k = 1; list && k < 512; k++) if (list[k - 1] != provider_dma((u64)k * 4096)) bad = 1;
+ CHECK(!bad && live_leases == 512, "2 MiB PRP contains 511 following pages, including provider discontinuity");
+ controller_complete(r, 0, 0, 0); worker_consume(0);
+ CHECK(!live_leases, "all 512 PRP leases released after completion");
+ puts("ok 4 - PRP lease capacity is independent of the 256-entry SGL descriptor capacity");
+}
 int main(void)
 {
  int rc;
@@ -99,6 +119,7 @@ int main(void)
  case_sgl_one_command(); if (failures) return 1;
  case_transfer_limit(); if (failures) return 1;
  case_prp(); if (failures) return 1;
+ case_two_mib_prp(); if (failures) return 1;
  return 0;
 }
 '''

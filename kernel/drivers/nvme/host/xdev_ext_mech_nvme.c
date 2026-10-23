@@ -226,6 +226,8 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
 /* At most one 4 KiB descriptor list per command, the size of an nvme-pci
  * "nvme descriptor page" (NVME_CTRL_PAGE_SIZE / 16 SGL descriptors). */
 #define NVME_XDEV_EXT_PEER_MAX_PIECES	256U
+/* A PRP list carries twice as many addresses as an SGL list has blocks. */
+#define NVME_XDEV_EXT_PEER_MAX_SPANS	512U
 /* xdev_ext_peer_map() accepts no provider page smaller than 4 KiB. */
 #define NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT	12
 /* nvme-pci aligns its lists to 256 bytes, 512 under NVME_QUIRK_DMAPOOL_ALIGN_512. */
@@ -237,7 +239,7 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
  * descriptor list from ->submit until the worker consumed the completion.
  */
 struct nvme_xdev_ext_peer_slot {
-	struct xdev_ext_peer_nvme_seg spans[NVME_XDEV_EXT_PEER_MAX_PIECES];
+	struct xdev_ext_peer_nvme_seg spans[NVME_XDEV_EXT_PEER_MAX_SPANS];
 	struct nvme_xdev_ext_mech_completion done;
 	struct nvme_xdev_ext_peer_slot *next;
 	struct xdev_ext_peer_fd_lease *leases;	/* max_pieces, in payload order */
@@ -305,7 +307,7 @@ static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
 		return -ENOMEM;
 	p->peer = res;
 	res->dma_dev = dev;
-	res->max_pieces = min_t(u64, pieces, NVME_XDEV_EXT_PEER_MAX_PIECES);
+	res->max_pieces = min_t(u64, pieces, NVME_XDEV_EXT_PEER_MAX_SPANS);
 	res->slots = kvcalloc(depth, sizeof(*res->slots), GFP_KERNEL);
 	res->leases = kvcalloc((size_t)depth * res->max_pieces,
 			       sizeof(*res->leases), GFP_KERNEL);
@@ -923,7 +925,7 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 		return -EINVAL;
 	if (nvme_ctrl_sgl_supported(p->ns->ctrl)) {
 		ret = xdev_ext_peer_nvme_sgl_build(slot->spans, slot->nr_leases,
-				slot->spans, res->max_pieces, &n);
+				slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);
 		if (ret)
 			return ret;
 		for (pos = 0; pos < n; pos++)

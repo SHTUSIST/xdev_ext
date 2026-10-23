@@ -503,8 +503,8 @@ def main():
         ("native write direction reversed",
          "p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE", "p->write ? DMA_FROM_DEVICE : DMA_TO_DEVICE"),
         # Merging moved into the pure builder; perturb its input adjacency instead.
-        ("DMA-contiguous pages not merged", "slot->spans, res->max_pieces, &n);",
-         "slot->spans, res->max_pieces, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
+        ("DMA-contiguous pages not merged", "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);",
+         "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
         ("provider page refusal not split", "if (ret != -ERANGE)", "if (true)"),
     ]
     with tempfile.TemporaryDirectory(prefix="nvme-peer-async-") as tmp:
