@@ -928,6 +928,8 @@
 !/kernel/io_uring/xdev_ext_mech_cpu.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/
 !/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
+!/kernel/io_uring/xdev_ext_mech_produced.h
+!/kernel/io_uring/xdev_ext_mech_life_pool.h
 
 # Fan-out scheduler execution and CPU/fan-out control workloads.
 !/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/
@@ -937,3 +939,6 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/produced_test.py
 !/kernel/tools/xdev_ext_mech/cpu_plan.bpf.c
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_lifecycle_guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/guest_harness_test.py

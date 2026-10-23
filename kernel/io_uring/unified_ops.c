@@ -301,7 +301,7 @@ struct io_unified_async_read {
 	struct io_kiocb	*req;
 	struct io_uring_unified_shared __user *shared;
 	struct io_xdev_ext_umem *umem;	/* ref held across the async I/O (SM-1) */
-	struct xdev_ext_pool	*pool;
+	struct xdev_ext_mech_life_pool	*pool;
 	struct xdev_ext_lifecycle_window window;
 	bool		recycle_on_completion;
 	u32		nr_bvecs;
@@ -338,7 +338,7 @@ static void io_unified_read_done(struct kiocb *kiocb, long res)
 
 	int state_ret;
 
-	state_ret = xdev_ext_unified_read_finish(ar->pool, ar->window.frame, res,
+	state_ret = xdev_ext_unified_read_finish(ar->pool, ar->window.frame, ar->window.claim, res,
 					 ar->recycle_on_completion);
 	if (state_ret)
 		res = -EIO;
@@ -363,7 +363,7 @@ static int io_unified_do_read_umem_async(struct io_kiocb *req,
 					 bool recycle_on_completion)
 {
 	struct io_unified_async_read *ar;
-	struct xdev_ext_pool *pool;
+	struct xdev_ext_mech_life_pool *pool;
 	struct xdev_ext_lifecycle_window window;
 	struct page *page;
 	u32 pgoff, nr_pages, remaining, i;
@@ -442,7 +442,7 @@ static int io_unified_do_read_umem_async(struct io_kiocb *req,
 
 	/* Completed synchronously (or failed to queue): publish/abort here;
 	 * ki_complete was not and will not be called (read_iter contract). */
-	state_ret = xdev_ext_unified_read_finish(pool, window.frame, ret,
+	state_ret = xdev_ext_unified_read_finish(pool, window.frame, window.claim, ret,
 					 recycle_on_completion);
 	if (state_ret)
 		ret = -EIO;

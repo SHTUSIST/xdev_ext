@@ -362,6 +362,7 @@ struct xdev_ext_mech_pool_ops {
 };
 
 struct xdev_ext_mech_pool {
+ struct xdev_ext_mech_life *life; /* optional provider-owned authoritative table */
 	const struct xdev_ext_mech_pool_ops *ops;
 	void *priv;			/* provider object */
 	u8 *state;			/* nr_frames enum xdev_ext_mech_frame_state words */
@@ -540,6 +541,11 @@ void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 t
  * Accepted commands are never resent by BPF RETRY; preaccept queue refusal is
  * rolled back and scheduled separately by the core.
  */
+void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
+                                         u64 ticket, int err, u32 produced);
+/* Any context after native publication: valid bytes reported by this stage. */
+u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b);
+/* Any context: publish one terminal native result using the immutable ticket. */
 void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int err);
 /* Any context: explicit local cancellation after proving no native owner remains. This
  * cannot report a hardware error; native failures use batch_complete(). */
@@ -571,11 +577,15 @@ struct xdev_ext_ce_xfer {
 	u32 flags;			/* XDEV_EXT_CE_F_* */
 };
 
+/* Worker context: record an exclusive CPU stage's bounded output length. */
 int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos, u32 len);
+/* Worker context: snapshot the current immutable per-frame claim. */
 int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch *b,
                                    u32 pos, u64 *owner, u64 *generation);
+/* Any context: validate the ticket before reading reusable batch claims. */
 bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
                                        u64 ticket, const struct xdev_ext_ce_xfer *x, u32 n);
+/* Any context: validate saved CE transfers against their live native ticket. */
 bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
                              const struct xdev_ext_ce_xfer *x, u32 n);
 

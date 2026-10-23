@@ -678,7 +678,6 @@ static int io_xdev_ext_iaa_final_validate(const struct io_xdev_ext_iaa_async *st
 		.dst_cap = state->params.dst_cap,
 	};
 	struct xdev_ext_iaa_window_plan windows;
-	u32 expected_source_state;
 	int ret;
 
 	ret = xdev_ext_iaa_decode_windows(&fields, state->umem->size,
@@ -694,14 +693,12 @@ static int io_xdev_ext_iaa_final_validate(const struct io_xdev_ext_iaa_async *st
 	    windows.src_frame_offset != state->windows.src_frame_offset)
 		return -ESTALE;
 
-	expected_source_state = state->frames.source_mode ==
-		XDEV_EXT_IAA_SOURCE_READY ? XDEV_EXT_FRAME_TX_PENDING : XDEV_EXT_FRAME_IO_PENDING;
-	if (!state->frames.source_owned || !state->frames.destination_owned ||
-	    xdev_ext_frame_state(&state->umem->frame_pool, windows.src_frame) !=
-		expected_source_state ||
-	    xdev_ext_frame_state(&state->umem->frame_pool, windows.dst_frame) !=
-		XDEV_EXT_FRAME_IO_PENDING)
-		return -ESTALE;
+ if (!state->frames.source_owned || !state->frames.destination_owned ||
+     !xdev_ext_mech_life_matches(smp_load_acquire(&state->umem->frames[windows.src_frame].ctrl),
+                                state->frames.source_claim) ||
+     !xdev_ext_mech_life_matches(smp_load_acquire(&state->umem->frames[windows.dst_frame].ctrl),
+                                state->frames.destination_claim))
+  return -ESTALE;
 	if (!state->src_sg || !state->dst_sg || !state->src_nents ||
 	    !state->dst_nents || !state->acomp ||
 	    !state->runtime.dispatch_accepted ||

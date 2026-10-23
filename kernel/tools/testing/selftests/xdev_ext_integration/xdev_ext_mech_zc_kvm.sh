@@ -15,6 +15,7 @@ RUN_ONLY=0
 PREPARE_ONLY=0
 DEBUG_LOCKING=0
 COMPAT=0
+LIFECYCLE=0
 PEER=0
 GROUP_COUNT=4
 DEPTH=''
@@ -33,6 +34,7 @@ while (($#)); do
 	--run-only) RUN_ONLY=1; shift ;;
 	--prepare-only) PREPARE_ONLY=1; shift ;;
 	--debug-locking) DEBUG_LOCKING=1; shift ;;
+	--lifecycle) LIFECYCLE=1; shift ;;
 	--compat) COMPAT=1; CE_SIM=1; shift ;;
 	--peer) PEER=1; CE_SIM=1; shift ;;
 	--groups) GROUP_COUNT=$2; shift 2 ;;
@@ -78,6 +80,9 @@ esac
 # private ext4 disk and CE module lifetime. Fault matrices stay independent.
 if (( COMPAT )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none ]]; fi
 if (( PEER )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none && "$GROUP_COUNT" -ge 257 ]]; fi
+if (( LIFECYCLE )); then
+    [[ "$FAULT" == none && "$PROVIDER_CASE" == normal && "$CE_SIM" == 0 && "$RELIABLE" == 0 ]]
+fi
 (( ! RX_CE || CE_SIM ))
 (( ! CE_DELAY_US || CE_SIM ))
 [[ "$FAULT" == none || "$GROUP_COUNT" -ge 2 ]]
@@ -231,6 +236,7 @@ printf 'groups=%s\ndepth=%s\nce_slots=%s\n' "$GROUP_COUNT" "$DEPTH" "$CE_SLOTS" 
 printf 'remote_window=%s\n' "$REMOTE_WINDOW" >>"$EV/provenance.txt"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
+printf 'lifecycle=%s\n' "$LIFECYCLE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
@@ -278,6 +284,7 @@ if (( ! RUN_ONLY )); then
     if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then
         cfg -e XDEV_EXT_MECH_IAA -e CRYPTO_DEFLATE
     fi
+    if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE; fi
     if (( COMPAT )); then cfg -e XDEV_EXT_MECH_SOCKET -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
     if (( DEBUG_LOCKING )); then
@@ -397,6 +404,15 @@ if (( CE_SIM )); then
     fi
 fi
 cp "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/nxp_reliable.bpf.o" "$ROOT/opt/xdev_ext/"
+if (( LIFECYCLE )); then
+    grep -Fxq CONFIG_XDEV_EXT_MECH_CPU=y "$BUILD/.config"
+    awk -v target="$TOOLS/cpu_plan.bpf.o" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256"
+    lifecycle_guest=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_lifecycle_guest.sh
+    for command in fanout cpu-chain verify-xform; do
+        grep -Fq "\"\$ctl\" $command " "$lifecycle_guest"
+    done
+    cp "$TOOLS/cpu_plan.bpf.o" "$lifecycle_guest" "$ROOT/opt/xdev_ext/"
+fi
 if (( COMPAT )); then
     mkdir -p "$ROOT/opt/xdev_ext/socket_guest" "$ROOT/opt/xdev_ext/preload"
     cp "$SOCKET_OUT/"{socket_runtime,ce_observe.bpf.o} \
@@ -577,6 +593,12 @@ else
 fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
+if [ "$lifecycle" = 1 ]; then
+    sh /opt/xdev_ext/xdev_ext_mech_lifecycle_guest.sh "$ctl" \
+        "$source_ng" "$source_block" "$destination_ng" "$destination_block" \
+        "$source_slba" "$rx_slba" "$groups" "$depth" /opt/xdev_ext/cpu_plan.bpf.o
+    exit 0
+fi
 if [ "$peer" = 1 ]; then
     XDEV_EXT_PEER_GUEST=1 sh /opt/xdev_ext/peer_guest/run-guest.sh \
         "$source_block" "$source_ng" "$peer_block" "$peer_ng" "$source_slba"
@@ -769,7 +791,7 @@ fi
 GUEST
 chmod 0700 "$ROOT/init"
 (cd "$ROOT" && find . -print0 | cpio --null -o -H newc 2>"$EV/cpio.log" | gzip -1) >"$SCRATCH/initramfs.cpio.gz"
-python3 - "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$FAULT" "$SRC" <<'PY'
+python3 - "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$FAULT" "$SRC" "$LIFECYCLE" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(pathlib.Path(sys.argv[5])/'tools/testing/selftests/xdev_ext_integration'))
@@ -777,7 +799,9 @@ from xdev_ext_mech_zc_validate import image_layout
 layout = image_layout(int(sys.argv[2]))
 source_offset, rx_offset, ce_offset = (layout[key] * 512 for key in
                                        ('source_slba', 'rx_slba', 'ce_slba'))
-src = bytearray(layout['image_bytes'])
+lifecycle = sys.argv[6] == '1'
+image_bytes = max(layout['image_bytes'], rx_offset + (4 * int(sys.argv[2]) + 1) * 8192) if lifecycle else layout['image_bytes']
+src = bytearray(image_bytes)
 data = hashlib.shake_256(b'XDEV_EXT strict SGL and AF_XDP ZC 20261019').digest(int(sys.argv[2]) * 8192)
 src[source_offset:source_offset+len(data)] = data
 (p/'source.raw').write_bytes(src)
@@ -789,6 +813,24 @@ rx_bytes = 8192 if sys.argv[4] == 'drop-middle' else len(data)
 expected[rx_offset:rx_offset+rx_bytes] = data[:rx_bytes]
 if sys.argv[3] == '1':
     expected[ce_offset:ce_offset+len(data)] = data
+if lifecycle:
+    # Independent bit-at-a-time Castagnoli oracle; each frame seals its own tail.
+    def seal(block):
+        result = bytearray(block)
+        for group in range(0, len(block), 8192):
+            for off in range(group, group + 8192, 1432):
+                end = min(off + 1432, group + 8192)
+                crc = 0xffffffff
+                for byte in block[off:end-4]:
+                    crc ^= byte
+                    for _ in range(8):
+                        crc = (crc >> 1) ^ (0x82f63b78 if crc & 1 else 0)
+                result[end-4:end] = (crc ^ 0xffffffff).to_bytes(4, 'little')
+        return result
+    expected = bytearray(len(src))
+    for index, payload in enumerate((data, data, seal(data), seal(data))):
+        off = rx_offset + index * len(data)
+        expected[off:off+len(data)] = payload
 (p/'expected.raw').write_bytes(expected)
 (p/'evidence/source-before.sha256').write_text(hashlib.sha256(src).hexdigest()+'\n')
 PY
@@ -884,6 +926,15 @@ ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
 [[ $rc == 0 ]]
+if (( LIFECYCLE )); then
+    grep -Fxq XDEV_EXT_ZC_GUEST_EXIT=0 "$EV/guest.log"
+    grep -Fxq XDEV_EXT_MECH_LIFECYCLE_GUEST=PASS "$EV/guest.log"
+    cmp "$SCRATCH/source-before.raw" "$SCRATCH/source.raw"
+    cmp "$SCRATCH/expected.raw" "$SCRATCH/destination.raw"
+    sha256sum "$SCRATCH/source.raw" "$SCRATCH/destination.raw" >"$EV/data.sha256"
+    echo 'XDEV_EXT_LIFECYCLE_KVM=PASS source=unchanged destination=whole-image' | tee "$EV/result.txt"
+    exit 0
+fi
 if (( COMPAT )); then
     python3 "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_compat_validate.py" \
         "$SRC" "$EV/guest.log" "$EV/preload-logs"

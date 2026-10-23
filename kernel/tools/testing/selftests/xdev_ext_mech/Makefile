@@ -83,6 +83,15 @@ CFLAGS += -fsanitize=undefined -fno-sanitize-recover=undefined
 LDFLAGS += -fsanitize=undefined
 endif
 
+# Native lifecycle scheduler and teardown extraction, with independent failure schedules.
+TEST_PROGS += fanout_scheduler/run.py fanout_scheduler/produced_test.py
+TEST_PROGS += lifecycle_runtime/guest_harness_test.py
+TEST_PROGS += lifecycle_runtime/recycle_input_test.py teardown_checked/test_ce_unbind.py
+TEST_FILES += fanout_scheduler/fixture.c fanout_scheduler/shim.h
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_cpu_core.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_life_pool.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_produced.h)
+
 include ../lib.mk
 
 $(OUTPUT)/xdev_ext_mech_lifecycle_test: CFLAGS += -pthread

@@ -39,8 +39,9 @@
  * -DXDEV_EXT_LIFECYCLE_SM=1 to every io_uring object when
  * CONFIG_IO_URING_XDEV_EXT_IAA=y, so enabling IAA also switches unified_ops
  * UMEM READ from the synchronous path to the asynchronous lifecycle variant.
- * This state word has no generation token; the mechanism session lifecycle
- * (xdev_ext_mech_lifecycle.h) is a separate implementation.
+ * Direct IAA/unified operations and mechanism bindings use the same packed
+ * xdev_ext_mech_lifecycle.h owner/generation/refcount table. UMEM admission
+ * still excludes simultaneous direct and mechanism users.
  */
 /* #define XDEV_EXT_LIFECYCLE_SM 1 */
 
