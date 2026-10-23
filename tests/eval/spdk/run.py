@@ -1,10 +1,17 @@
 #!/usr/bin/env python3
-"""Partial SPDK-workload port: plan and offline file→TCP correctness only."""
+"""SPDK NVMe->TCP QD1 pipeline: plan, offline file->TCP check, native modes.
+
+Modes: plan (metadata only), offline-check (regular file -> loopback TCP,
+no SPDK), native-correctness and native-performance (official SPDK against
+an externally provisioned, userspace-bound NVMe namespace).
+"""
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
+import selectors
 import stat
 import subprocess
 import sys
@@ -100,6 +107,106 @@ def slots(a):
         yield ((x * 2685821657736338717) & MAX64) % count
 
 
+def native_prerequisites(bdf, sysfs=Path("/sys"), proc=Path("/proc"), dev=Path("/dev")):
+    """None when @bdf is an NVMe function already bound to a userspace driver
+    with free hugepages; otherwise the reason.  Read-only: this never binds,
+    unbinds, allocates hugepages or loads a module."""
+    function = sysfs / "bus/pci/devices" / bdf
+    if not function.is_dir():
+        return "PCI function %s not present" % bdf
+    try:
+        pci_class = int((function / "class").read_text().strip(), 16)
+    except (OSError, ValueError):
+        return "PCI function %s has no readable class" % bdf
+    if pci_class >> 8 != 0x0108:
+        return "PCI function %s is not an NVMe controller (class 0x%06x)" % (bdf, pci_class)
+    driver = (function / "driver").resolve().name if (function / "driver").is_symlink() else None
+    if driver not in ("vfio-pci", "uio_pci_generic"):
+        return ("PCI function %s is bound to %s, not a userspace driver (vfio-pci or "
+                "uio_pci_generic); this program never rebinds a device" % (bdf, driver or "no driver"))
+    if driver == "vfio-pci":
+        link = function / "iommu_group"
+        node = dev / "vfio" / link.resolve().name if link.is_symlink() else None
+        if node is None or not node.exists() or not os.access(node, os.R_OK | os.W_OK):
+            return "vfio group node of %s unavailable or not accessible" % bdf
+    else:
+        nodes = sorted((function / "uio").glob("uio*")) if (function / "uio").is_dir() else []
+        if not nodes or not os.access(dev / nodes[0].name, os.R_OK | os.W_OK):
+            return "uio node of %s unavailable or not accessible" % bdf
+    free = 0
+    for counter in (sysfs / "kernel/mm/hugepages").glob("hugepages-*/free_hugepages"):
+        try:
+            free += int(counter.read_text())
+        except (OSError, ValueError):
+            pass
+    if not free:
+        return "no free hugepages (none are reserved by this program)"
+    try:
+        mounts = (proc / "mounts").read_text().split("\n")
+    except OSError:
+        mounts = []
+    if not any(len(line.split()) > 2 and line.split()[2] == "hugetlbfs" for line in mounts):
+        return "no hugetlbfs mount"
+    return None
+
+
+def virtual_machine():
+    try:
+        if Path("/sys/hypervisor/type").read_text().strip():
+            return True
+    except OSError:
+        pass
+    try:
+        return any(line.startswith("flags") and " hypervisor" in line
+                   for line in Path("/proc/cpuinfo").read_text().splitlines())
+    except OSError:
+        return False
+
+
+def digest(fd):
+    """Reference provenance, once, before any native command."""
+    h = hashlib.sha256()
+    offset = 0
+    while True:
+        chunk = os.pread(fd, 1 << 20, offset)
+        if not chunk:
+            return h.hexdigest()
+        h.update(chunk)
+        offset += len(chunk)
+
+
+def run_native(argv, ref):
+    """Run the native binary.  When it reports an UNKNOWN command it stays
+    alive as the quarantine owner of the DMA buffer, qpair and controller and
+    closes its output; this returns 1 then without waiting for or killing it."""
+    child = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                             pass_fds=(ref,), start_new_session=True)
+    streams = {child.stdout: bytearray(), child.stderr: bytearray()}
+    with selectors.DefaultSelector() as selector:
+        for stream in streams:
+            selector.register(stream, selectors.EVENT_READ)
+        while selector.get_map():
+            for key, _ in selector.select():
+                data = os.read(key.fileobj.fileno(), 65536)
+                if data:
+                    streams[key.fileobj] += data
+                    if key.fileobj is child.stderr:
+                        sys.stderr.buffer.write(data)
+                        sys.stderr.flush()
+                else:
+                    selector.unregister(key.fileobj)
+    child.stdout.close()
+    child.stderr.close()
+    if b"SPDK_PIPELINE_UNKNOWN" in streams[child.stderr]:
+        print("native read UNKNOWN: pid %d keeps its DMA buffer, qpair and controller until the "
+              "command completes; do not kill it" % child.pid, file=sys.stderr)
+        return 1
+    code = child.wait()
+    if code == 0:
+        sys.stdout.buffer.write(streams[child.stdout])
+    return code
+
+
 def main():
     a = parse(sys.argv[1:])
     if a.mode == "plan":
@@ -129,15 +236,22 @@ def main():
         if native:
             sdk = Path(a.spdk_root)
             if not all((sdk / "include/spdk" / name).is_file()
-                       for name in ("env.h", "nvme.h", "stdinc.h")):
-                fail("official SPDK SDK is unavailable", 4)
-            # This partial port deliberately has no native command admission.
-            # A CLI gate cannot prove DMA quiescence after an accepted timeout.
-            fail("SPDK native port not admitted: SDK link and bounded UNKNOWN ownership remain unqualified", 4)
+                       for name in ("env.h", "nvme.h", "stdinc.h")) or \
+                    not (sdk / "build/lib/pkgconfig/spdk_nvme.pc").is_file():
+                fail("official SPDK SDK is unavailable: %s needs include/spdk/{env,nvme,stdinc}.h "
+                     "and a built build/lib/pkgconfig/spdk_nvme.pc" % sdk, 4)
+            if a.mode == "native-performance" and virtual_machine():
+                fail("native performance refused inside a virtual machine", 4)
+            reason = native_prerequisites(a.traddr)
+            if reason:
+                fail("native target unavailable: " + reason, 4)
+            reference_sha256 = digest(ref)
         # Builds are outside any campaign/timing, in an invocation-owned directory.
         with tempfile.TemporaryDirectory(prefix=".spdk-pipeline-", dir=HERE) as tmp:
             binary = Path(tmp) / "pipeline"
             command = [sys.executable, str(HERE / "build.py"), "--output", str(binary)]
+            if native:
+                command += ["--spdk-root", str(sdk)]
             built = subprocess.run(command, capture_output=True, text=True)
             if built.returncode:
                 sys.stderr.write(built.stderr)
@@ -146,7 +260,9 @@ def main():
                       a.start_lba, a.window_lbas, a.block_bytes, a.iterations,
                       a.warmup, a.calc_bytes, a.deadline_ms, ref, a.capture,
                       a.send_max or 1048576, a.recv_max or 1048576, a.inject or "")
-            return subprocess.run([str(binary), *map(str, fields)], pass_fds=(ref,)).returncode
+            if not native:
+                return subprocess.run([str(binary), *map(str, fields)], pass_fds=(ref,)).returncode
+            return run_native([str(binary), *map(str, fields), reference_sha256], ref)
     finally:
         os.close(ref)
 

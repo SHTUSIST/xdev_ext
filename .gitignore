@@ -917,3 +917,6 @@
 !/tests/eval/spdk/build.py
 !/tests/eval/spdk/run.py
 !/tests/eval/spdk/test_contract.py
+!/tests/eval/spdk/spdk_owner.h
+!/tests/eval/spdk/test_owner.c
+!/tests/eval/spdk/test_native.py

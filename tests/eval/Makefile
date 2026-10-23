@@ -15,6 +15,7 @@ endif
 
 .PHONY: all check run clean FORCE gds-check hft hft-check cuda-host-check
 .PHONY: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check reviewer-eval-check
+.PHONY: spdk-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -65,6 +66,9 @@ gpu-nic-check:
 bam-check:
 	$(MAKE) -C bam check
 
+spdk-check:
+	$(MAKE) -C spdk check
+
 eval-cost-check:
 	$(MAKE) -C common check
 	$(MAKE) -C setup_cost check BUILD=$(abspath $(BUILD))/setup_cost
@@ -72,7 +76,8 @@ eval-cost-check:
 	$(MAKE) -C providers check
 
 # Host-side contracts of the reviewer-driven harnesses; no timing.
-reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check
+reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check \
+	spdk-check
 
 clean:
 	rm -rf $(BUILD) __pycache__
