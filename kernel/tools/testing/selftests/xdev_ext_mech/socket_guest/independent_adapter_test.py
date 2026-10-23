@@ -84,6 +84,9 @@ static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b,u32 i,struct 
 static u32 xdev_ext_mech_pool_frame_state(struct xdev_ext_mech_pool *p,u32 i){return i<p->nr_frames?p->states[i]:XDEV_EXT_MECH_F_NR;}
 static bool xdev_ext_mech_session_admits(struct xdev_ext_mech_session *s){return s->admits;}
 static void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b,u64 ticket,int err){completions++;complete_ticket=ticket;complete_error=err;b->status=err;}
+/* Session counter boundary: TX copy accounting (track S API.md 3.1) adds here. */
+static u64 counted[XDEV_EXT_MECH_CNT_NR+8];
+static void xdev_ext_mech_count(struct xdev_ext_mech_session *s,enum xdev_ext_mech_counter c,u64 n){(void)s;if((unsigned)c<sizeof(counted)/sizeof(counted[0]))counted[c]+=n;}
 static int kernel_sendmsg(struct socket *s,struct msghdr *m,struct kvec *v,u32 nr,size_t bytes){
  struct iovec iov[32];struct msghdr out={0};calls++;
  if(forced_result!=INT32_MAX)return forced_result;

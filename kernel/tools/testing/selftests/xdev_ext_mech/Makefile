@@ -47,6 +47,12 @@ TEST_PROGS += socket_guest/key_contract_test.py
 TEST_PROGS += socket_sink/independent_credentials.py
 TEST_PROGS += user_spans/test_user_spans.py user_spans/independent_start_boundaries.py
 TEST_FILES += socket_sink/shim.h socket_sink/fixture.c
+# Track S: NIC-boundary copy receive, fallback choice and copy-mode accounting.
+TEST_PROGS += socket_sink/rx_adapter_test.py socket_sink/rx_create_check_test.py
+TEST_PROGS += socket_sink/produced_trim_test.py socket_sink/bpf_both_directions_test.py
+TEST_PROGS += socket_sink/nic_accounting_test.py socket_sink/nic_fallback_choice_test.py
+TEST_PROGS += socket_guest/nic_fallback_harness_test.py
+TEST_FILES += socket_sink/rx_fixture.c
 
 LOCAL_HDRS += $(abspath ../../../../include/linux/xdev_ext_mech.h)
 LOCAL_HDRS += $(abspath ../../../../include/uapi/linux/xdev_ext_mech.h)

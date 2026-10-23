@@ -16,5 +16,6 @@ check:
 	python3 key_contract_test.py
 	python3 independent_adapter_test.py
 	python3 independent_class7_admission.py
+	python3 nic_fallback_harness_test.py
 clean:
 	rm -f socket_runtime ce_observe.bpf.o

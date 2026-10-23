@@ -45,7 +45,8 @@ class SocketAdapter(unittest.TestCase):
             cfile = Path(tmp) / 'adapter.c'
             exe = Path(tmp) / 'adapter'
             cfile.write_text((HERE/'shim.h').read_text() + '\n' + text + '\n' + (HERE/'fixture.c').read_text())
-            subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror',
+            # -Wno-unused-function: this TX fixture does not call the receive-direction entry points.
+            subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                             '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
                             '-I'+str(ROOT), str(cfile), '-o', str(exe)], check=True)
             run = subprocess.run([str(exe)], text=True, capture_output=True)

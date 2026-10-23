@@ -26,6 +26,11 @@ static inline void revert_creds(const struct cred *c){active_cred=c;}
 static int forced_result=8,observed_subject=-1,send_calls;
 static int kernel_sendmsg(struct socket *s,struct msghdr *m,struct kvec *v,size_t n,size_t bytes)
 {assert(s && m && v && n==1 && bytes==8);send_calls++;observed_subject=current_cred()->subject;return forced_result;}
+/* Receive boundary of the same LSM chain (kernel_recvmsg->sock_recvmsg->
+ * security_socket_recvmsg); needed once the adapter has a FROM_DEVICE path. */
+static int recv_subject=-1,recv_calls,forced_recv_result=-EAGAIN;
+static inline int kernel_recvmsg(struct socket *s,struct msghdr *m,struct kvec *v,size_t n,size_t len,int flags)
+{(void)s;(void)m;(void)v;(void)n;(void)len;assert(flags&MSG_DONTWAIT);recv_calls++;recv_subject=current_cred()->subject;return forced_recv_result;}
 '''
 MAIN = r'''
 int main(void)
@@ -68,7 +73,8 @@ def main():
         cfile = Path(tmp) / "actual.c"
         binary = Path(tmp) / "actual"
         cfile.write_text(shim + CREDENTIALS + source + MAIN)
-        compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(cfile), "-o", str(binary)], capture_output=True, text=True)
+        # -Wno-unused-function: this TX oracle does not call the receive-direction entry points.
+        compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fsanitize=undefined", "-I" + str(KERNEL), str(cfile), "-o", str(binary)], capture_output=True, text=True)
         assert compiled.returncode == 0, compiled.stderr
         result = subprocess.run([str(binary)], capture_output=True, text=True)
         print(result.stdout, end="")
