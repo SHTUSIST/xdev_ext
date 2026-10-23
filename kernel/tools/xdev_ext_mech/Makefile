@@ -50,7 +50,7 @@ $(BUILD_DIR)/%.bpf.o: %.bpf.c xdev_ext_mech_prog.h xdev_ext_mech_kfunc.h ../../i
 		| $(BUILD_DIR)
 	$(CLANG) $(BPF_CFLAGS) -I$(BUILD_DIR) -c $< -o $@
 
-$(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
+$(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
 		../xdev_ext_gpu_identity.c ../include/xdev_ext_gpu_identity.h \
 		../xdev_ext_xsk_redirect.c ../include/xdev_ext_xsk_redirect.h \
 		../include/xdev_ext_xsk_redirect_prog.h | $(BUILD_DIR)

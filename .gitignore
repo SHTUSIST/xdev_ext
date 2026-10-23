@@ -918,3 +918,9 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+
+!/kernel/io_uring/xdev_ext_mech_produced.h
+!/kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl_fallback.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/produced_core_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/ctl_socket_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_core_fifo_test.py

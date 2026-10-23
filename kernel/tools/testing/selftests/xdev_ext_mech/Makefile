@@ -51,6 +51,7 @@ TEST_FILES += socket_sink/shim.h socket_sink/fixture.c
 TEST_PROGS += socket_sink/rx_adapter_test.py socket_sink/rx_create_check_test.py
 TEST_PROGS += socket_sink/produced_trim_test.py socket_sink/bpf_both_directions_test.py
 TEST_PROGS += socket_sink/nic_accounting_test.py socket_sink/nic_fallback_choice_test.py
+TEST_PROGS += socket_sink/produced_core_test.py socket_sink/ctl_socket_test.py socket_sink/rx_core_fifo_test.py
 TEST_PROGS += socket_guest/nic_fallback_harness_test.py
 TEST_FILES += socket_sink/rx_fixture.c
 

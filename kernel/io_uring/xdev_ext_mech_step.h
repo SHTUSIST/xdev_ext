@@ -97,6 +97,10 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 			return -EINVAL;
 		if (u->fd < 0)
 			return -EBADF;
+		if (u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
+		    u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+		    (i || c->nr_stages < 2))
+			return -EINVAL;
 		if (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP)
 			continue;
 		if (c->pool_kind != XDEV_EXT_MECH_POOL_XSK)

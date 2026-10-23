@@ -47,7 +47,7 @@ struct xdev_ext_mech_stage;
 struct xdev_ext_mech_batch;
 struct xdev_ext_mech_class_ops {u32 flags;int (*submit)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *);};
 struct xdev_ext_mech_session;
-struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction;const struct xdev_ext_mech_class_ops *cls;};
+struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,class_id;const struct xdev_ext_mech_class_ops *cls;};
 struct xdev_ext_mech_session {
  struct xdev_ext_mech_pool pool;struct xdev_ext_mech_stage st[2];
  struct xdev_ext_mech_life life[N];u8 transform_owner[N];
@@ -55,6 +55,8 @@ struct xdev_ext_mech_session {
  int lock,last_err;bool admits;u64 submitted[2];
 };
 struct xdev_ext_mech_batch {
+ /* Variable producer result carried by the common submit path. */
+ bool produced_set; u32 produced;
  struct xdev_ext_mech_session *s;struct xdev_ext_mech_bstate bs;bool fifo_accepted;
  struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];
  u32 nr_frames,present,bytes;bool to_user,sequester,locally_cancelled;

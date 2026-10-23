@@ -40,7 +40,8 @@ __s32 BPF_PROG(socket_sink_complete, const struct xdev_ext_mech_ctx *mctx)
 
 	(void)ctx;
 	cqe = (const void *)bpf_xdev_ext_cqe(mctx, 0, sizeof(*cqe));
-	return cqe && !cqe->status && cqe->bytes_sent == mctx->base.length ?
+	return cqe && !cqe->status && (cqe->bytes_sent == mctx->base.length ||
+		(cqe->bytes_received && cqe->bytes_received <= mctx->base.length)) ?
 		XDEV_EXT_MP_NEXT : XDEV_EXT_MP_ABORT;
 }
 

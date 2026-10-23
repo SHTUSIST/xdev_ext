@@ -16,6 +16,7 @@ FIXTURE=r'''
 #include <time.h>
 #include <unistd.h>
 #include "tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h"
+#include "tools/xdev_ext_mech/xdev_ext_mech_ctl_fallback.h"
 enum { CTL_SETUP=2, CTL_FAIL=1 };
 struct ctl_opts { bool reliable,expect_window_reject,drv_mode,close_inflight,expect_timeout,fq_dup,shared_umem_probe; char *detach_pin; __u64 groups,ce_len,timeout_ms,max_attempts,retry_timeout_ms; };
 struct ctl_run { int ring; __u64 session; };
@@ -44,10 +45,20 @@ static int ctl_transport_stats(int ring,__u64 id,struct xdev_ext_mech_transport_
 static int ctl_transport_counters(int ring,__u64 id,struct xdev_ext_mech_transport_stats_v2 *s)
 { (void)ring;(void)id;(void)s;return -EINVAL; }
 #endif
+/* New observational NIC query is outside this reliable-control oracle. */
+static int ctl_nic_accounting(int ring,__u64 id,struct xdev_ext_mech_transport_stats_v3 *s)
+{ (void)ring;memset(s,0,sizeof(*s));s->v2.v1.session_id=id;return 0; }
+static void ctl_print_nic_accounting(__u32 path,const struct xdev_ext_mech_transport_stats_v3 *s)
+{ (void)path;(void)s; }
+/* PRODUCTION_SOCKET_REPORT */
 /* PRODUCTION_HELPER */
 static int finalize(struct ctl_opts *o)
 {
  struct ctl_run r={.ring=3,.session=7};
+ __u32 path=XDEV_EXT_MECH_CTL_NIC_AFXDP_ZC;
+ struct { __u32 nr; } pool={0};
+ struct xdev_ext_mech_create c={0};
+ struct xdev_ext_mech_transport_stats_v3 accounting;
  struct xdev_ext_mech_stats s={.session_id=7,.state=XDEV_EXT_MECH_SESSION_ACTIVE,.batches_done=2,.held=6,.recycled=6,.submitted={0,2},.completed={2,2}};
  bool freed=false,coarse=true;int ret=0,verdict=CTL_SETUP,probe=0;__u32 frames=3,pushed=0;char line[512];
  /* PRODUCTION_FINALIZATION */
@@ -78,7 +89,7 @@ class FinalResult(unittest.TestCase):
   block=fn[start.start():fn.index('\nout:',start.start())]
   cls.tmp=tempfile.TemporaryDirectory(prefix='transport-final-result-');cls.addClassCleanup(cls.tmp.cleanup)
   p=Path(cls.tmp.name);helper=re.search(r'^static int ctl_finish_reliable\([^;{}]*\)\s*\{.*?^\}',source,re.M|re.S)[0]
-  (p/'probe.c').write_text(FIXTURE.replace('/* PRODUCTION_HELPER */',helper).replace('/* PRODUCTION_FINALIZATION */',block));cls.bin=p/'probe'
+  (p/'probe.c').write_text(FIXTURE.replace('/* PRODUCTION_SOCKET_REPORT */',re.search(r'^static bool ctl_socket_rx_report\([^;{}]*\)\s*\{.*?^\}',source,re.M|re.S)[0]).replace('/* PRODUCTION_HELPER */',helper).replace('/* PRODUCTION_FINALIZATION */',block));cls.bin=p/'probe'
   subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=undefined','-fno-sanitize-recover=undefined','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.bin)],check=True)
  def case(self,name,pass_expected):
   p=subprocess.run([str(self.bin),name],check=True,capture_output=True,text=True)

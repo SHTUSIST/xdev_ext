@@ -132,6 +132,11 @@ static unsigned long xsk_rx_pending_drain(struct xdev_ext_mech_stage *st, bool s
 			spin_unlock_irqrestore(&q->lock, flags);
 			break;
 		}
+		if (!err && !cancel) {
+			xdev_ext_mech_count(st->s, xdev_ext_mech_nic_ops_counter(xst->xs->zc), 1);
+			xdev_ext_mech_count(st->s, xdev_ext_mech_nic_bytes_counter(xst->xs->zc),
+					    e->hold.span_len);
+		}
 		q->head = e->next;
 		e->queued = false;
 		q->count--;

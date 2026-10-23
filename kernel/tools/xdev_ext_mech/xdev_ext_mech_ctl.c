@@ -53,6 +53,7 @@
 #include "../include/xdev_ext_gpu_identity.h"
 #include "xdev_ext_mech_cuda.h"
 #include "xdev_ext_mech_ctl_core.h"
+#include "xdev_ext_mech_ctl_fallback.h"
 
 #ifndef AF_XDP
 #define AF_XDP			44
@@ -79,6 +80,7 @@ struct ctl_opts {
 	__u64 ce_va, ce_len, queue, depth, group_bytes, mtu;
 	struct xdev_ext_mech_peer peer;
 	char chain;
+	__u32 nic_policy;
 	bool copy_mode, drv_mode, expect_window_reject, fq_dup, shared_umem_probe;
 	bool close_inflight, expect_unbind, expect_timeout, quiet_wait;
 	bool have_slba, have_nlb, have_dst_slba, have_dst_nlb, have_session;
@@ -384,7 +386,7 @@ struct ctl_xring {
 
 struct ctl_xsk {
 	int fd;
-	bool zero_copy;
+	bool zero_copy, zc_refused;
 	void *umem;
 	size_t umem_size;
 	struct ctl_xring fq, cq, rx, tx;
@@ -493,8 +495,10 @@ static int ctl_xsk_open(struct ctl_xsk *x, const char *ifname, __u32 queue,
 		sxdp.sxdp_flags = XDP_SHARED_UMEM;
 		sxdp.sxdp_shared_umem_fd = (__u32)shared_fd;
 	}
-	if (bind(x->fd, (struct sockaddr *)&sxdp, sizeof(sxdp)))
+	if (bind(x->fd, (struct sockaddr *)&sxdp, sizeof(sxdp))) {
+		x->zc_refused = !copy_mode && errno == EOPNOTSUPP;
 		return -errno;
+	}
 	{
 		struct xdp_options options = {};
 
@@ -503,6 +507,7 @@ static int ctl_xsk_open(struct ctl_xsk *x, const char *ifname, __u32 queue,
 			return -errno;
 		x->zero_copy = !!(options.flags & XDP_OPTIONS_ZEROCOPY);
 		ret = xdev_ext_mech_ctl_xsk_mode_check(copy_mode, options.flags);
+		x->zc_refused = !copy_mode && ret == -EOPNOTSUPP;
 	}
 	return ret;
 }
@@ -579,6 +584,146 @@ static __u32 ctl_rx_recycle(struct ctl_xsk *x, bool *more)
 	__atomic_store_n(x->rx.consumer, cons + done, __ATOMIC_RELEASE);
 	*more = prod - cons > done;
 	return done;
+}
+
+static const char *ctl_nic_path_name(__u32 path)
+{
+	return path == XDEV_EXT_MECH_CTL_NIC_SOCKET ? "socket" :
+		path == XDEV_EXT_MECH_CTL_NIC_AFXDP_ZC ? "zc" : "copy";
+}
+
+/* Only the zero-copy bind/mode refusal authorizes substitution. An unrelated
+ * allocation, socket setup or permission error preserves its original errno. */
+static int ctl_nic_open(struct ctl_xsk *x, const struct ctl_opts *o, __u32 headroom,
+			bool rx, __u32 *path)
+{
+	int err = 0;
+
+	if (xdev_ext_mech_ctl_nic_try_afxdp(o->nic_policy)) {
+		err = ctl_xsk_open(x, o->ifname, (__u32)o->queue, headroom,
+				   rx || o->reliable, !rx || o->reliable,
+				   -1, o->copy_mode, CTL_NUM_FRAMES);
+		if (err && !x->zc_refused)
+			return err;
+	}
+	err = xdev_ext_mech_ctl_nic_path(o->nic_policy, o->copy_mode, err,
+				       x->zero_copy ? XDP_OPTIONS_ZEROCOPY : 0, path);
+	if (!err && *path == XDEV_EXT_MECH_CTL_NIC_SOCKET)
+		ctl_xsk_close(x);
+	return err;
+}
+
+static int ctl_socket_open(const struct ctl_opts *o, bool rx)
+{
+	struct sockaddr_in local = { .sin_family = AF_INET,
+		.sin_addr.s_addr = o->peer.local_ip, .sin_port = o->peer.local_port };
+	struct sockaddr_in peer = { .sin_family = AF_INET,
+		.sin_addr.s_addr = o->peer.peer_ip, .sin_port = o->peer.peer_port };
+	__u64 wanted = o->groups > (32U << 20) / o->group_bytes ?
+		64U << 20 : 2 * o->groups * o->group_bytes;
+	int fd, err, bytes = wanted < (4U << 20) ? 4 << 20 : (int)wanted;
+
+	if (o->reliable || o->group_bytes > XDEV_EXT_SOCKET_MAX_DATAGRAM)
+		return -EOPNOTSUPP;
+	fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+	if (fd < 0)
+		return -errno;
+	if (rx && setsockopt(fd, SOL_SOCKET, SO_RCVBUFFORCE, &bytes, sizeof(bytes)) &&
+	    setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &bytes, sizeof(bytes)))
+		goto fail;
+	if (bind(fd, (void *)&local, sizeof(local)) ||
+	    (!rx && connect(fd, (void *)&peer, sizeof(peer))))
+		goto fail;
+	return fd;
+fail:
+	err = -errno;
+	close(fd);
+	return err;
+}
+
+struct ctl_socket_pool {
+	void *addr;
+	size_t size;
+	__u32 *frames, nr;
+};
+static int ctl_socket_pool_open(int ring, const struct ctl_opts *o, __u32 frames,
+				struct ctl_socket_pool *pool)
+{
+	__u64 groups = o->groups < o->depth ? o->groups : o->depth;
+	struct io_uring_xdev_ext_umem_reg reg = {};
+	__u32 i;
+
+	if (!frames || groups > CTL_NUM_FRAMES / frames)
+		return -E2BIG;
+	pool->nr = groups * frames;
+	pool->size = (size_t)pool->nr * XDEV_EXT_MECH_CTL_FRAME_SIZE;
+	pool->addr = mmap(NULL, pool->size, PROT_READ | PROT_WRITE,
+			  MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+	if (pool->addr == MAP_FAILED) {
+		pool->addr = NULL;
+		return -errno;
+	}
+	pool->frames = calloc(pool->nr, sizeof(*pool->frames));
+	if (!pool->frames)
+		return -ENOMEM;
+	for (i = 0; i < pool->nr; i++)
+		pool->frames[i] = i;
+	reg.addr = (uintptr_t)pool->addr;
+	reg.size = pool->size;
+	reg.frame_size = XDEV_EXT_MECH_CTL_FRAME_SIZE;
+	return ctl_register(ring, IORING_REGISTER_XDEV_EXT_UMEM, &reg);
+}
+static void ctl_socket_pool_close(struct ctl_socket_pool *pool)
+{
+	free(pool->frames);
+	if (pool->addr)
+		munmap(pool->addr, pool->size);
+}
+static int ctl_nic_accounting(int ring, __u64 session,
+			      struct xdev_ext_mech_transport_stats_v3 *stats)
+{
+	*stats = (struct xdev_ext_mech_transport_stats_v3) {
+		.v2.v1 = { .size = sizeof(*stats),
+			.version = XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3,
+			.session_id = session },
+	};
+	return ctl_mech(ring, XDEV_EXT_MECH_OP_TRANSPORT_STATS, (uintptr_t)stats);
+}
+static void ctl_print_nic_accounting(__u32 path,
+				     const struct xdev_ext_mech_transport_stats_v3 *s)
+{
+	printf("XDEV_EXT_MECH_NIC_ACCOUNTING session=%llu path=%s nic_copy_ops=%llu nic_copy_bytes=%llu nic_zc_ops=%llu nic_zc_bytes=%llu\n",
+	       (unsigned long long)s->v2.v1.session_id, ctl_nic_path_name(path),
+	       (unsigned long long)s->nic_copy_ops, (unsigned long long)s->nic_copy_bytes,
+	       (unsigned long long)s->nic_zc_ops, (unsigned long long)s->nic_zc_bytes);
+}
+
+/* The START-driven socket producer uses IOU frame loans, not AF_XDP HOLDs.
+ * Preserve the public result marker while checking the actual loan ledger. */
+static bool ctl_socket_rx_report(char *line, size_t size,
+		const struct xdev_ext_mech_stats *s, __u64 groups,
+		__u32 frames, __u32 pool_frames, __u32 nr_stages)
+{
+	bool pass = s->state == XDEV_EXT_MECH_SESSION_ACTIVE &&
+		s->batches_done == groups && !s->batches_abort && !s->last_err &&
+		!s->rejects && !s->protocol_err && !s->held &&
+		s->published == pool_frames && s->recycled == groups * frames - pool_frames &&
+		xdev_ext_mech_ctl_settled(s);
+	__u32 i;
+
+	for (i = 0; i < nr_stages; i++)
+		pass = pass && s->submitted[i] == groups && s->completed[i] == groups;
+	if (nr_stages == 4)
+		return xdev_ext_mech_ctl_line(line, size, pass,
+			"XDEV_EXT_MECH_NIC_CE_NVME_E2E=%s groups=%llu",
+			XDEV_EXT_MECH_CTL_VERDICT(pass), (unsigned long long)groups);
+	return xdev_ext_mech_ctl_line(line, size, pass,
+		"XDEV_EXT_MECH_NIC_NVME_E2E=%s groups=%llu held=%llu nvme_submitted=%llu nvme_completed=%llu recycled=%llu published=%llu errors=%llu sequestered=%llu inflight=%llu",
+		XDEV_EXT_MECH_CTL_VERDICT(pass), (unsigned long long)groups,
+		(unsigned long long)s->held, (unsigned long long)s->submitted[1],
+		(unsigned long long)s->completed[1], (unsigned long long)s->recycled,
+		(unsigned long long)s->published, (unsigned long long)s->batches_abort,
+		(unsigned long long)s->sequestered, (unsigned long long)s->inflight);
 }
 
 /* --- device facts ------------------------------------------------------ */
@@ -1001,6 +1146,10 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	struct ctl_run r = { .ring = -1, .efd = -1, .poll_ms = CTL_POLL_MS,
 		.defer_stats = o->reliable };
 	struct ctl_xsk x = { .fd = -1 };
+	struct ctl_socket_pool pool = {};
+	struct xdev_ext_mech_transport_stats_v3 accounting;
+	__u32 path = 0;
+	int socket_fd = -1;
 	char line[512];
 	__u32 frames, headroom, pushed = 0;
 	__u64 target = o->groups;
@@ -1044,11 +1193,26 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 		ctl_err("ring/eventfd/%s: %s\n", o->dst_ng, strerror(errno));
 		goto out;
 	}
-	ret = ctl_xsk_open(&x, o->ifname, (__u32)o->queue, headroom, true,
-			   o->reliable, -1, o->copy_mode, CTL_NUM_FRAMES);
+	ret = ctl_nic_open(&x, o, headroom, true, &path);
 	if (ret) {
 		ctl_err("AF_XDP socket on %s: %s\n", o->ifname, strerror(-ret));
 		goto out;
+	}
+
+	if (path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+		/* AF_XDP fault/probe controls have no equivalent on a UDP socket. */
+		if (arms || o->shared_umem_probe) {
+			ret = -EOPNOTSUPP;
+			goto out;
+		}
+		socket_fd = ctl_socket_open(o, true);
+		if (socket_fd < 0) {
+			ret = socket_fd;
+			goto out;
+		}
+		ret = ctl_socket_pool_open(r.ring, o, frames, &pool);
+		if (ret)
+			goto out;
 	}
 
 	if (o->ce_len) {
@@ -1062,7 +1226,7 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	ret = ctl_cuda_open(&cuda, o, ce_to, ce_from);
 	if (ret)
 		goto out;
-	ret = xdev_ext_mech_ctl_rx_stages(c.st, x.fd, ng, ce_to, ce_from,
+	ret = xdev_ext_mech_ctl_rx_stages(c.st, socket_fd >= 0 ? socket_fd : x.fd, ng, ce_to, ce_from,
 				   o->slba, o->nlb, o->ce_va, o->ce_len);
 	if (ret < 0)
 		goto out;
@@ -1074,6 +1238,11 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	c.eventfd = r.efd;
 	c.peer = o->peer;
 	ctl_reliable_config(o,&c,&reliable_config);
+	if (path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+		ret = xdev_ext_mech_ctl_nic_fallback_create(&c, 0, socket_fd);
+		if (ret)
+			goto out;
+	}
  ret = ctl_create(r.ring, &c, &r.session);
 	if (ret) {
 		ctl_err("CREATE: %s\n", strerror(-ret));
@@ -1088,8 +1257,8 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	}
 	if (o->shared_umem_probe)
 		probe = ctl_shared_umem_probe(o, x.fd);
-	ret = ctl_fq_fill(&x);
-	if (!ret) {
+	ret = path == XDEV_EXT_MECH_CTL_NIC_SOCKET ? 0 : ctl_fq_fill(&x);
+	if (!ret && path != XDEV_EXT_MECH_CTL_NIC_SOCKET) {
 		const struct xdev_ext_xsk_flow_filter filter = {
 			.flags = XDEV_EXT_XSK_FILTER_F_ALL,
 			.src_ipv4 = ntohl(o->peer.peer_ip),
@@ -1110,17 +1279,22 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 			strerror(-ret));
 		goto out;
 	}
+	if (path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+		ret = ctl_start(r.ring, r.session, o->groups, pool.frames, pool.nr, 1);
+		if (ret)
+			goto out;
+	}
 	if (o->quiet_wait &&
 	    xdev_ext_mech_ctl_quiet_line(line, sizeof(line), (int)getpid(), r.efd,
 				    o->groups))
 		printf("%s\n", line);
 	printf("XDEV_EXT_MECH_READY mode=nic-nvme session=%llu frames=%u seg_len=%u xsk=%s%s\n",
 	       (unsigned long long)r.session, frames, l.seg_len,
-	       x.zero_copy ? "zc" : "copy",
+	       ctl_nic_path_name(path),
 	       o->ce_alloc ? " ce_allocation=native" : "");
 	fflush(stdout);
 
-	r.xsk = &x;
+	r.xsk = path == XDEV_EXT_MECH_CTL_NIC_SOCKET ? NULL : &x;
 	r.deadline_ns = ctl_now_ns() + o->timeout_ms * 1000000ULL;
 	if (o->quiet_wait) {
 		ret = ctl_quiet_wait(&r, &quiet_set, o->groups, &s);
@@ -1230,6 +1404,9 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 		verdict = ctl_report(xdev_ext_mech_ctl_report_fq_dup(
 			line, sizeof(line), &s, o->groups, frames, pushed),
 			line);
+	else if (path == XDEV_EXT_MECH_CTL_NIC_SOCKET)
+		verdict = ctl_report(ctl_socket_rx_report(line, sizeof(line), &s,
+			o->groups, frames, pool.nr, c.nr_stages), line);
 	else if (o->ce_len)
 		verdict = ctl_report(xdev_ext_mech_ctl_report_nic_ce_nvme(
 			line, sizeof(line), &s, o->groups, frames), line);
@@ -1242,6 +1419,12 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 		verdict = CTL_FAIL;
 	if (!freed && !o->reliable)
 		ctl_print_stats(&s);
+	if (!freed) {
+		if (ctl_nic_accounting(r.ring, r.session, &accounting))
+			verdict = CTL_FAIL;
+		else
+			ctl_print_nic_accounting(path, &accounting);
+	}
 out:
 	if (xdev_ext_xsk_redirect_is_active(&redirect))
 		xdev_ext_xsk_redirect_detach(&redirect);
@@ -1251,6 +1434,9 @@ out:
 		close(r.ring);
 	}
 	ctl_xsk_close(&x);
+	if (socket_fd >= 0)
+		close(socket_fd);
+	ctl_socket_pool_close(&pool);
 	if (ce_from >= 0)
 		close(ce_from);
 	if (ce_to >= 0)
@@ -1280,6 +1466,8 @@ struct ctl_source {
 	__u32 nr_stages;
 	bool iou_umem;			/* pool: the ring's XDEV_EXT UMEM */
 	bool user_pattern;		/* chain d: user fills and compares */
+	__u32 nic_path;
+	struct xdev_ext_mech_transport_stats_v3 accounting;
 };
 
 /*
@@ -1303,7 +1491,8 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	void *umem = NULL;
 	size_t umem_size;
 	__u64 pool_groups = o->groups < o->depth ? o->groups : o->depth;
-	int ret;
+	int ret, socket_fd = -1;
+	bool iou_umem = src->iou_umem;
 
 	*frames_ok = true;
 	ret = ctl_layout(o, src->ifname, &l, &frames);
@@ -1318,7 +1507,20 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		ret = -errno;
 		goto out;
 	}
-	if (src->iou_umem) {
+	if (src->ifname) {
+		ret = ctl_nic_open(&x, o, 0, false, &src->nic_path);
+		if (ret)
+			goto out;
+		if (src->nic_path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+			socket_fd = ctl_socket_open(o, false);
+			if (socket_fd < 0) {
+				ret = socket_fd;
+				goto out;
+			}
+			iou_umem = true;
+		}
+	}
+	if (iou_umem) {
 		struct io_uring_xdev_ext_umem_reg reg = {
 			.size = umem_size,
 			.frame_size = XDEV_EXT_MECH_CTL_FRAME_SIZE,
@@ -1353,10 +1555,6 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		c.pool_fd = -1;
 	} else {
 		/* Fixed XSK pool includes RX, source and reliable control partitions. */
-		ret = ctl_xsk_open(&x, src->ifname, (__u32)o->queue, 0, o->reliable,
-				   true, -1, o->copy_mode, CTL_NUM_FRAMES);
-		if (ret)
-			goto out;
 		c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
 		c.pool_fd = x.fd;
 		for (i = 0; i < src->nr_stages; i++)
@@ -1370,6 +1568,11 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	c.peer = o->peer;
 	memcpy(c.st, src->st, sizeof(c.st));
 	ctl_reliable_config(o,&c,&reliable_config);
+	if (src->nic_path == XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+		ret = xdev_ext_mech_ctl_nic_fallback_create(&c, c.nr_stages - 1, socket_fd);
+		if (ret)
+			goto out;
+	}
  ret = ctl_create(r.ring, &c, &r.session);
 	if (ret)
 		goto out;
@@ -1378,7 +1581,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		if (ret)
 			goto out;
 	}
-	if (!src->iou_umem) {
+	if (!iou_umem) {
 		ret = x.zero_copy && !o->reliable ? 0 : ctl_fq_fill(&x);
   if (!ret && o->reliable) {
    const struct xdev_ext_xsk_flow_filter filter={.flags=XDEV_EXT_XSK_FILTER_F_ALL,
@@ -1393,7 +1596,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	}
 	printf("XDEV_EXT_MECH_READY mode=source session=%llu frames=%u seg_len=%u xsk=%s%s\n",
 	       (unsigned long long)r.session, frames, l.seg_len,
-	       src->iou_umem ? "none" : x.zero_copy ? "zc" : "copy",
+	       src->nic_path ? ctl_nic_path_name(src->nic_path) : "none",
 	       o->ce_alloc ? " ce_allocation=native" : "");
 	fflush(stdout);
 	ret = ctl_start(r.ring, r.session, o->groups, user, nr_user, o->reliable ? o->first_group : 1);
@@ -1423,10 +1626,12 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		for (j = 0; *frames_ok && j < XDEV_EXT_MECH_CTL_FRAME_SIZE; j++)
 			*frames_ok = ((__u8 *)umem)[(size_t)i *
 				XDEV_EXT_MECH_CTL_FRAME_SIZE + j] == ctl_pattern(i, j);
-	if (!ret && !o->expect_unbind && src->iou_umem)
+	if (!ret && !o->expect_unbind && iou_umem)
 		*frames_ok = *frames_ok && s->published == nr_user &&
 			s->recycled >= (o->groups - pool_groups) * frames &&
 			s->recycled < o->groups * frames;
+	if (!ret && src->nic_path)
+		ret = ctl_nic_accounting(r.ring, r.session, &src->accounting);
 out:
 	if (r.ring >= 0) {
 		if (o->ce_alloc && r.session)
@@ -1437,6 +1642,8 @@ out:
 		close(r.efd);
 	if (xdev_ext_xsk_redirect_is_active(&redirect)) xdev_ext_xsk_redirect_detach(&redirect);
  ctl_xsk_close(&x);
+	if (socket_fd >= 0)
+		close(socket_fd);
 	free(user);
 	if (umem)
 		munmap(umem, umem_size);
@@ -1482,6 +1689,8 @@ static int cmd_nvme_nic(struct ctl_opts *o)
 			line, sizeof(line), &s, o->groups), line);
 	if (!o->reliable)
 		ctl_print_stats(&s);
+	if (src.nic_path)
+		ctl_print_nic_accounting(src.nic_path, &src.accounting);
 	return verdict;
 }
 
@@ -1569,6 +1778,8 @@ static int cmd_ce_chain(struct ctl_opts *o)
 		frames_ok), line);
 	if (!o->reliable)
 		ctl_print_stats(&s);
+	if (src.nic_path)
+		ctl_print_nic_accounting(src.nic_path, &src.accounting);
 out:
 	for (i = 0; i < 4; i++)
 		if (fds[i] >= 0)
@@ -1609,7 +1820,7 @@ enum {
 	OPT_LOCAL_PORT, OPT_PEER_PORT, OPT_CE_DEV, OPT_CE_VA, OPT_CE_LEN,
 	OPT_CHAIN, OPT_SESSION, OPT_WINDOW_REJECT, OPT_DETACH_MID_RUN,
 	OPT_FQ_DUP, OPT_SHARED_UMEM, OPT_CLOSE_INFLIGHT, OPT_EXPECT_UNBIND,
-	OPT_EXPECT_TIMEOUT, OPT_QUIET_WAIT, OPT_COPY, OPT_CE_ALLOC,
+	OPT_EXPECT_TIMEOUT, OPT_QUIET_WAIT, OPT_COPY, OPT_NIC_FALLBACK, OPT_CE_ALLOC,
  OPT_RELIABLE, OPT_WIRE_SESSION, OPT_FIRST_GROUP, OPT_REMOTE_WINDOW,
  OPT_MAX_ATTEMPTS, OPT_RETRY_TIMEOUT,
 };
@@ -1629,6 +1840,7 @@ static const struct option ctl_options[] = {
 	{ "queue", required_argument, NULL, OPT_QUEUE },
 	{ "drv-mode", no_argument, NULL, OPT_DRV_MODE },
 	{ "copy", no_argument, NULL, OPT_COPY },
+	{ "nic-fallback", required_argument, NULL, OPT_NIC_FALLBACK },
 	{ "src-ng", required_argument, NULL, OPT_SRC_NG },
 	{ "dst-ng", required_argument, NULL, OPT_DST_NG },
 	{ "slba", required_argument, NULL, OPT_SLBA },
@@ -1686,7 +1898,8 @@ static void usage(FILE *f)
 "RELIABLE: --reliable [--wire-session N] [--first-group N] [--remote-window N]\n"
 " [--max-attempts N] [--retry-timeout-ms N] (ACK means chain completion)\n"
 "COMMON: [--groups N] [--depth N] [--group-bytes N] [--mtu N]\n"
-"        [--timeout-ms N] [--copy] (default: required AF_XDP driver ZC)\n"
+"        [--timeout-ms N] [--copy] [--nic-fallback auto|off|force]\n"
+"        auto: socket on ZC refusal; off: require ZC; force: socket (plain UDP only)\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
 "        b NVMe READ -> CE H2D -> CE D2H -> AF_XDP TX (AF_XDP UMEM)\n"
@@ -1758,6 +1971,7 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 			break;
 		case OPT_DRV_MODE: o->drv_mode = true; break;
 		case OPT_COPY: o->copy_mode = true; break;
+		case OPT_NIC_FALLBACK: ret = xdev_ext_mech_ctl_nic_policy_parse(optarg, &o->nic_policy); break;
 		case OPT_SRC_NG: o->src_ng = optarg; break;
 		case OPT_DST_NG: o->dst_ng = optarg; break;
 		case OPT_SLBA:

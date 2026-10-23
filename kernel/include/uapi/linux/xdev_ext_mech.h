@@ -282,9 +282,10 @@ struct xdev_ext_socket_mech_info {
 	__u32 nr_frames, max_datagram;
 	struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
 };
+#define XDEV_EXT_SOCKET_CQE_F_TRUNC (1U << 0)
 struct xdev_ext_socket_mech_cqe {
 	__s32 status;
-	__u32 bytes_sent, reserved[2];
+	__u32 bytes_sent, bytes_received, flags;
 };
 
 /* Native NIC peer TX, separate CPU headers and device-memory payload.
@@ -368,6 +369,16 @@ struct xdev_ext_mech_transport_stats_v2 {
 	__u32 rsvd2;
 };
 
+/* Version 3 appends NIC payload accounting without changing v1/v2. */
+#define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 3U
+struct xdev_ext_mech_transport_stats_v3 {
+	struct xdev_ext_mech_transport_stats_v2 v2;
+	__aligned_u64 nic_copy_ops;
+	__aligned_u64 nic_copy_bytes;
+	__aligned_u64 nic_zc_ops;
+	__aligned_u64 nic_zc_bytes;
+};
+
 struct io_uring_xdev_ext_mech {
 	__u32 op;			/* enum xdev_ext_mech_op */
 	__u32 rsvd;
@@ -386,7 +397,8 @@ enum xdev_ext_mech_pool_kind {
  * AF_XDP: fd = bound AF_XDP socket.
  * CE: fd = backend device, arg0/arg1 = device VA/length of the window.
  * DMA: fd = provider device, arg0/arg1 = provider window offset/length.
- * SOCKET: fd = connected UDP socket, TO_DEVICE only; flags/arg0/arg1 = 0.
+ * SOCKET: fd = UDP socket; TO_DEVICE: connected sink; FROM_DEVICE: bound
+ * receiver, stage 0 of at least two stages, START-driven; flags/arg0/arg1 = 0.
  */
 struct xdev_ext_mech_stage_uapi {
 	__u32 class_id;			/* enum xdev_ext_mech_class */

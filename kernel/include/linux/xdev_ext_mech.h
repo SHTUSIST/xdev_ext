@@ -25,6 +25,7 @@
 #include <asm/page.h>
 #include <uapi/linux/xdev_ext_mech.h>
 #else
+#include <stdbool.h>
 #include <linux/types.h>
 #include "../uapi/linux/xdev_ext_mech.h"
 #endif
@@ -69,8 +70,21 @@ enum xdev_ext_mech_counter {
 	XDEV_EXT_MECH_CNT_NATIVE_PUBLISH,
 	XDEV_EXT_MECH_CNT_PROTOCOL_ERR,
 	XDEV_EXT_MECH_CNT_PUBLISHED,
+	XDEV_EXT_MECH_CNT_NIC_COPY_OPS,
+	XDEV_EXT_MECH_CNT_NIC_COPY_BYTES,
+	XDEV_EXT_MECH_CNT_NIC_ZC_OPS,
+	XDEV_EXT_MECH_CNT_NIC_ZC_BYTES,
 	XDEV_EXT_MECH_CNT_NR,
 };
+
+static inline enum xdev_ext_mech_counter xdev_ext_mech_nic_ops_counter(bool zero_copy)
+{
+	return zero_copy ? XDEV_EXT_MECH_CNT_NIC_ZC_OPS : XDEV_EXT_MECH_CNT_NIC_COPY_OPS;
+}
+static inline enum xdev_ext_mech_counter xdev_ext_mech_nic_bytes_counter(bool zero_copy)
+{
+	return zero_copy ? XDEV_EXT_MECH_CNT_NIC_ZC_BYTES : XDEV_EXT_MECH_CNT_NIC_COPY_BYTES;
+}
 
 #define XDEV_EXT_MECH_POOL_CPU_BATCH	1
 
@@ -537,6 +551,12 @@ void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 t
  * Accepted commands are never resent by BPF RETRY; preaccept queue refusal is
  * rolled back and scheduled separately by the core.
  */
+/* Any context: claim the native ticket before recording a variable producer length. */
+void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
+					 u64 ticket, int err, u32 produced);
+/* Any context, after the completion publication: recorded valid bytes. */
+u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b);
+/* Any context: complete the whole batch using the ticket rules above. */
 void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int err);
 /* Any context: explicit local cancellation after proving no native owner remains. This
  * cannot report a hardware error; native failures use batch_complete(). */

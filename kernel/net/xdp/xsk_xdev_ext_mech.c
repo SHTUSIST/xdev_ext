@@ -593,6 +593,10 @@ int xsk_xdev_ext_mech_rx(struct xdp_sock *xs, struct xdp_buff_xsk *xskb, u32 len
   else
    result.err = xst->pending.entries ? xsk_rx_pending_add(st, &hold, &f) :
        xdev_ext_mech_hold_commit(st, &hold, &f);
+		if (!result.err && (xst->rel || !xst->pending.entries)) {
+			xdev_ext_mech_count(st->s, xdev_ext_mech_nic_ops_counter(xs->zc), 1);
+			xdev_ext_mech_count(st->s, xdev_ext_mech_nic_bytes_counter(xs->zc), hold.span_len);
+		}
 		/* Still under the RX lock: no other packet can replace the candidate. */
 		ret = XDEV_EXT_MECH_ABORT;
 		err = xsk_xdev_ext_mech_rx_call(st, xst, &f,
@@ -846,12 +850,20 @@ static int xsk_xdev_ext_mech_tx_xmit(void *arg, u32 slot)
 {
 	struct xsk_xdev_ext_mech_stage *xst = arg;
 	const struct xdp_desc *d = &xst->tx_desc[slot];
+	struct xdev_ext_mech_stage *st = READ_ONCE(xst->xs->xdev_ext_mech_tx);
+	int err;
 
 	/* After mark_dead nothing more goes to the device. */
 	if (READ_ONCE(xst->dead))
 		return -ENXIO;
 	xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[slot]);
-	return xsk_kernel_xmit(xst->sock, d->addr, d->len, d->options);
+	err = xsk_kernel_xmit(xst->sock, d->addr, d->len, d->options);
+	if (!err && st) {
+		xdev_ext_mech_count(st->s, xdev_ext_mech_nic_ops_counter(xst->xs->zc), 1);
+		xdev_ext_mech_count(st->s, xdev_ext_mech_nic_bytes_counter(xst->xs->zc),
+				    xst->tx_fi[slot].data_len);
+	}
+	return err;
 }
 
 /* A completion owns the batch until it has left this local list. */
@@ -888,6 +900,17 @@ static void xsk_mech_zc_retire(struct xsk_xdev_ext_mech_provider *p, u32 at,
 
 	if (slot->state == XSK_MECH_ZC_DONE)
 		return;
+	if (slot->state == XSK_MECH_ZC_NATIVE && !result &&
+	    slot->owner == XSK_MECH_ZC_DATA && tb->batch) {
+		struct xdev_ext_mech_frame f;
+
+		if (!xdev_ext_mech_batch_frame(tb->batch, slot->slot, &f)) {
+			struct xdev_ext_mech_session *s = xdev_ext_mech_batch_session(tb->batch);
+
+			xdev_ext_mech_count(s, xdev_ext_mech_nic_ops_counter(p->zc), 1);
+			xdev_ext_mech_count(s, xdev_ext_mech_nic_bytes_counter(p->zc), f.data_len);
+		}
+	}
 	if (slot->state == XSK_MECH_ZC_NATIVE)
 		xsk_mech_zc_mark_done(&p->ring, p->slots, at);
 	else

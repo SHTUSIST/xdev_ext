@@ -432,6 +432,7 @@ printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
     "$SOURCE_SLBA" "$RX_SLBA" "$CE_SLBA" >>"$ROOT/opt/xdev_ext/zc.env"
 # --- Track S (appended): NIC-boundary fallback section switch and its tools.
 NIC_FALLBACK=${XDEV_EXT_ZC_NIC_FALLBACK:-1}
+[[ "$NIC_FALLBACK" == 0 || "$NIC_FALLBACK" == 1 ]]
 if [[ "$FAULT" != none || "$RELIABLE" != 0 || "$RX_CE" != 0 || "$PROVIDER_CASE" != normal ]]; then NIC_FALLBACK=0; fi
 printf 'nic_fallback=%s\n' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"
 if (( NIC_FALLBACK )); then

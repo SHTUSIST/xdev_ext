@@ -25,6 +25,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
+      - name: Socket NIC copy fallback and accounting contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          tests="kernel/tools/testing/selftests/xdev_ext_mech"
+          for t in adapter_test independent_credentials rx_adapter_test rx_create_check_test produced_trim_test produced_core_test bpf_both_directions_test nic_accounting_test nic_fallback_choice_test ctl_socket_test rx_core_fifo_test; do
+            python3 "$tests/socket_sink/$t.py"
+          done
+          make -C "$tests/socket_guest" check
       - name: Concurrent frontend workload and evidence checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_concurrency_test.py
       - name: Frontend fork ownership and publication windows

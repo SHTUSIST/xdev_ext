@@ -45,6 +45,7 @@
 #include "xdev_ext_mech_internal.h"
 #include "xdev_ext_mech_notify.h"
 #include "xdev_ext_mech_step.h"
+#include "xdev_ext_mech_produced.h"
 
 /* What the contract headers mirror from kernel definitions. */
 static_assert(XDEV_EXT_MECH_NVME_STATUS_DNR == NVME_STATUS_DNR);
@@ -81,6 +82,8 @@ struct xdev_ext_mech_batch {
 	u64 life_token[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 life_previous[XDEV_EXT_MECH_MAX_FRAMES];
 	bool producing;
+	bool produced_set;
+	u32 produced;
 	bool fifo_accepted;
 	u32 present;			/* frames held, one bit per position */
 	u32 nr_frames;
@@ -1096,6 +1099,25 @@ void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_complete);
 
+void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
+					 u64 ticket, int err, u32 produced)
+{
+	if (xdev_ext_mech_batch_completion_claim(b, ticket))
+		return;
+	if (!err && (!produced || produced > b->bytes))
+		err = -EOVERFLOW;
+	b->produced = err ? 0 : produced;
+	b->produced_set = true;
+	xdev_ext_mech_batch_completion_publish(b, ticket, err, false);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_complete_produced);
+
+u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b)
+{
+	return b->produced;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_produced);
+
 void xdev_ext_mech_batch_complete_cancelled(struct xdev_ext_mech_batch *b,
 					 u64 ticket, int err)
 {
@@ -1453,12 +1475,16 @@ static int xdev_ext_mech_submit(struct xdev_ext_mech_session *s, struct xdev_ext
 	b->status = 0;
 	b->sequester = false;
 	b->locally_cancelled = false;
+	b->produced_set = false;
+	b->produced = 0;
 	atomic64_inc(&s->submitted[k]);
 
 	ret = st->cls->submit(st, b);
 	if (!ret) {
 		b->fifo_accepted = (st->cls->flags & XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE) &&
-			(s->pool.capabilities & XDEV_EXT_BINDING_CAP_ZERO_COPY) &&
+			((s->pool.capabilities & XDEV_EXT_BINDING_CAP_ZERO_COPY) ||
+			 (st->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
+			  st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE)) &&
 			!READ_ONCE(b->sequester);
 		return 0;
 	}
@@ -1598,6 +1624,41 @@ static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session *s)
 	s->order_kicking = false;
 }
 
+/* Worker, after native ownership ended and CPU synchronization. Empty tail
+ * frames were claimed but never produced: cancel their producer and return
+ * their custody before publishing the remaining spans. */
+static int xdev_ext_mech_trim_produced(struct xdev_ext_mech_session *s,
+				     struct xdev_ext_mech_batch *b)
+{
+	u32 len[XDEV_EXT_MECH_MAX_FRAMES], i;
+	int used, err;
+
+	for (i = 0; i < b->nr_frames; i++)
+		len[i] = b->f[i].data_len;
+	used = xdev_ext_mech_produced_trim(len, b->nr_frames, b->produced);
+	if (used < 0)
+		return used;
+	for (i = used; i < b->nr_frames; i++) {
+		struct xdev_ext_mech_frame *f = &b->f[i];
+
+		err = xdev_ext_mech_life_fail_produce(&s->life[f->index], b->life_token[i]);
+		if (err)
+			return err;
+		err = xdev_ext_mech_pool_frame_move(&s->pool, f->index,
+						   XDEV_EXT_MECH_F_HELD, XDEV_EXT_MECH_F_K_FREE);
+		if (err)
+			return err;
+		b->present &= ~BIT(i);
+		s->pool.ops->recycle(&s->pool, f);
+		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_RECYCLED, 1);
+	}
+	for (i = 0; i < (u32)used; i++)
+		b->f[i].data_len = len[i];
+	b->nr_frames = used;
+	b->bytes = b->produced;
+	return 0;
+}
+
 /* Worker: the native command of an IN_FLIGHT batch came back. */
 static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 				  struct xdev_ext_mech_batch *b)
@@ -1628,6 +1689,15 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 	 */
 	if (!seq)
 		xdev_ext_mech_sync_for_cpu(s, b);
+	if (!seq && b->produced_set && !b->status &&
+	    (!b->producing || xdev_ext_mech_trim_produced(s, b))) {
+		seq = true;
+		b->sequester = true;
+		b->status = -EIO;
+		xdev_ext_mech_frames_move(s, b, XDEV_EXT_MECH_F_HELD,
+					 XDEV_EXT_MECH_F_SEQUESTERED);
+		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, hweight32(b->present));
+	}
 	if (!seq) {
 		u32 i;
 
@@ -2846,64 +2916,82 @@ static int xdev_ext_mech_stats(struct io_ring_ctx *ctx, void __user *uarg)
 	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
-/* @out is the version 2 layout; a version 1 caller copies only out->v1. */
+/* The prefix layouts remain frozen; fill only what the caller requested. */
 static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
-				struct xdev_ext_mech_transport_stats_v2 *out, u32 version)
+				struct xdev_ext_mech_transport_stats_v3 *out, u32 version)
 {
 	u32 i;
 	u64 pending = 0, uncertain = 0;
 
 	memset(out, 0, sizeof(*out));
-	out->v1.size = version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
-		       sizeof(*out) : sizeof(out->v1);
-	out->v1.version = version;
-	out->v1.session_id = s->id;
-	out->v1.native_controls = atomic_read(&s->native_controls);
-	/* No session lock while acquiring a provider lock: RX admission uses
-	 * the opposite order. The synchronous STOP remains the final barrier. */
+	out->v2.v1.size = version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 ?
+		sizeof(*out) : version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
+		sizeof(out->v2) : sizeof(out->v2.v1);
+	out->v2.v1.version = version;
+	out->v2.v1.session_id = s->id;
+	out->v2.v1.native_controls = atomic_read(&s->native_controls);
+	/* Provider locks must not nest inside the session lock. */
 	for (i = 0; i < s->nr_stages; i++) {
 		u32 p = 0, u = 0;
 
 		if (s->st[i].cls->transport_stats)
 			s->st[i].cls->transport_stats(&s->st[i], &p, &u);
-		if (version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
+		if (version >= XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
 		    s->st[i].cls->transport_counters)
-			s->st[i].cls->transport_counters(&s->st[i], out);
+			s->st[i].cls->transport_counters(&s->st[i], &out->v2);
 		pending += p;
 		uncertain += u;
 	}
-	out->v1.pending_acks = min_t(u64, pending, U32_MAX);
-	out->v1.uncertain_controls = min_t(u64, uncertain, U32_MAX);
+	out->v2.v1.pending_acks = min_t(u64, pending, U32_MAX);
+	out->v2.v1.uncertain_controls = min_t(u64, uncertain, U32_MAX);
+	if (version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3) {
+		out->nic_copy_ops = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_OPS]);
+		out->nic_copy_bytes = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_BYTES]);
+		out->nic_zc_ops = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_OPS]);
+		out->nic_zc_bytes = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_BYTES]);
+	}
 }
 
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *uarg)
 {
-	struct xdev_ext_mech_transport_stats_v2 out = {};
+	struct xdev_ext_mech_transport_stats_v3 in = {}, out;
 	struct xdev_ext_mech_session *s;
-	u32 size;
+	u32 size, version;
 
-	if (copy_from_user(&out.v1, uarg, sizeof(out.v1)))
+	if (copy_from_user(&in.v2.v1, uarg, sizeof(in.v2.v1)))
 		return -EFAULT;
-	size = out.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
-	       sizeof(out) : sizeof(out.v1);
-	if ((out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION &&
-	     out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2) ||
-	    out.v1.size != size)
+	version = in.v2.v1.version;
+	switch (version) {
+	case XDEV_EXT_MECH_TRANSPORT_STATS_VERSION:
+		size = sizeof(in.v2.v1);
+		break;
+	case XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2:
+		size = sizeof(in.v2);
+		break;
+	case XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3:
+		size = sizeof(in);
+		break;
+	default:
 		return -EINVAL;
-	if (size == sizeof(out) && copy_from_user(&out, uarg, sizeof(out)))
+	}
+	if (in.v2.v1.size != size)
+		return -EINVAL;
+	if (copy_from_user(&in, uarg, size))
 		return -EFAULT;
-	if (out.v1.native_controls || out.v1.pending_acks || out.v1.uncertain_controls ||
-	    out.v1.rsvd || out.retransmits || out.dup_suppressed || out.held_acks ||
-	    out.held_unacked || out.rsvd2)
+	if (in.v2.v1.version != version || in.v2.v1.size != size ||
+	    in.v2.v1.native_controls || in.v2.v1.pending_acks || in.v2.v1.uncertain_controls ||
+	    in.v2.v1.rsvd || in.v2.retransmits || in.v2.dup_suppressed || in.v2.held_acks ||
+	    in.v2.held_unacked || in.v2.rsvd2 || in.nic_copy_ops || in.nic_copy_bytes ||
+	    in.nic_zc_ops || in.nic_zc_bytes)
 		return -EINVAL;
-	s = xdev_ext_mech_find(ctx, out.v1.session_id);
+	s = xdev_ext_mech_find(ctx, in.v2.v1.session_id);
 	if (s) {
-		xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
+		xdev_ext_mech_transport_stats_fill(s, &out, version);
 	} else {
 		mutex_lock(&xdev_ext_mech_live_lock);
-		s = xdev_ext_mech_find_live(out.v1.session_id);
+		s = xdev_ext_mech_find_live(in.v2.v1.session_id);
 		if (s)
-			xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
+			xdev_ext_mech_transport_stats_fill(s, &out, version);
 		mutex_unlock(&xdev_ext_mech_live_lock);
 		if (!s)
 			return -ENOENT;
