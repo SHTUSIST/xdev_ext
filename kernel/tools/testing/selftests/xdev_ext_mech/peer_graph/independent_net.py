@@ -5,6 +5,7 @@
 Native-send/OS boundaries are deterministic adapters. No software device,
 payload provider, physical DMA or remote delivery is claimed by this test.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import tempfile
@@ -121,7 +122,7 @@ def execute(code, plan, directory, name):
     # without replacing any assertion or using a copied implementation oracle.
     preamble = SHIM.replace('#include "io_uring/xdev_ext_mech_net_core.h"', '#define xdev_ext_net_plan_check original_plan\n#include "io_uring/xdev_ext_mech_net_core.h"\n#undef xdev_ext_net_plan_check')
     source.write_text(preamble + plan + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
 

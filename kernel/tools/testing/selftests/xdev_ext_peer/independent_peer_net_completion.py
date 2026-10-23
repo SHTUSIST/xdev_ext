@@ -4,6 +4,7 @@
 
 Host reference-ownership proof only; this test never exercises physical DMA.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import tempfile
@@ -126,7 +127,7 @@ def execute(code, directory, name):
     source = directory / (name + ".c")
     source.write_text('#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_peer.h") + '"\n' + SHIM + code + MAIN)
     binary = directory / name
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True)
 

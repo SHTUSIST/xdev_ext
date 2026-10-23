@@ -8,6 +8,7 @@ notifier code of io_uring/xdev_ext_peer_net.c against deterministic OS
 adapters with a virtual clock. The native driver adapter only completes or
 withholds callbacks; no device, provider, DMA or wire is involved.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import sys
@@ -274,7 +275,7 @@ def build(code, directory, name):
     binary = directory / name
     source.write_text('#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_peer.h") + '"\n'
                       '#include "' + str(KERNEL / "io_uring/xdev_ext_peer_net_core.h") + '"\n' + SHIM + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-missing-field-initializers", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-missing-field-initializers", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 
