@@ -187,8 +187,10 @@ def endpoint(value):
 
 def parse():
     parser=argparse.ArgumentParser(description=__doc__,allow_abbrev=False)
-    parser.add_argument('action',choices=('measure','peer'))
+    parser.add_argument('action',choices=('measure','peer','qualify'))
     parser.add_argument('--directory',type=Path)
+    parser.add_argument('--qualification',type=Path)
+    parser.add_argument('--measurement-policy',default='benchmark-policy-v1',choices=('benchmark-policy-v1',))
     for key in ('ifname','kernel-config','product-sha','source-block','source-ng','local-ip','peer-ip','local-mac','peer-mac','bpf-object','reference'):
         parser.add_argument('--'+key,default='')
     for key in ('bind','data-bind','peer-control'):parser.add_argument('--'+key,type=endpoint)
@@ -202,9 +204,9 @@ def parse():
             if key in seen:parser.error('duplicate option '+key)
             seen.add(key)
     args=parser.parse_args()
-    common={'--help','--directory','--ifname','--kernel-config','--product-sha'}
+    common={'--help','--directory','--ifname','--kernel-config','--product-sha','--measurement-policy'}
     if args.action=='peer' and not seen<=common|{'--bind','--data-bind'}:parser.error('measure options are not peer options')
-    if args.action=='measure' and seen&{'--bind','--data-bind'}:parser.error('peer bind options are not measure options')
+    if args.action!='peer' and seen&{'--bind','--data-bind'}:parser.error('peer bind options are not measure options')
     if args.directory is not None and not args.directory.is_dir():parser.error('directory must exist')
     if args.product_sha and re.fullmatch('[0-9a-f]{40}',args.product_sha) is None:parser.error('product SHA must be lowercase40hex')
     if (args.records not in (64,128,256) or args.payload not in (512,1024,4096) or args.payload%args.records
@@ -226,7 +228,8 @@ def refusal(message,status='not_run_hardware'):raise correctness.Failure(status,
 def main():
     args=parse()
     try:
-        if args.action=='peer':serve_peer(args)
+        if args.action=='peer':serve_benchmark_peer(args)
+        elif args.action=='qualify':print(json.dumps(qualify_benchmark(args),separators=(',',':')))
         else:print(json.dumps(measure(args),separators=(',',':')))
         return 0
     except correctness.Failure as error:
@@ -272,12 +275,12 @@ def same_identity(reply,identity):
 
 def producer_command(args,p,backend,broker,mode='correctness'):
     from hardware_gate import BIN
-    command=[str(BIN),backend,args.reference,str(p['record_bytes']),str(p['payload_bytes']),str(p['burst_packets']),str(p['depth']),
+    command=[str(getattr(args,'_binary_fd_path',BIN)),backend,args.reference,str(p['record_bytes']),str(p['payload_bytes']),str(p['burst_packets']),str(p['depth']),
         str(p['bursts']),str(p['actors']),str(p['seed']),args.peer_ip,str(args.peer_port),broker[0],str(broker[1]),
         args.source_block,args.source_ng,str(args.slba),str(args.nlb),args.ifname,str(args.queue),args.local_ip,
         args.local_mac,args.peer_mac,str(args.local_port),args.bpf_object,args.kernel_config,
         str(args.slba*args._source_lba),mode,str(p['session_base'])]
-    if mode=='hardware':command.append(str(args.warmup_bursts))
+    if mode in ('hardware','benchmark-probe'):command.append(str(args.warmup_bursts) if mode=='hardware' else '0')
     return command
 
 
@@ -462,11 +465,11 @@ def serve_peer(args):
                     if state is not None:state.close()
 
 
-def run_producer(command,broker=None,artifact_dir=None):
+def run_producer(command,broker=None,artifact_dir=None,pass_fds=()):
     """Execute the admitted binary; never replay an accepted failed trial."""
     process=None;out=b'';err=b'';diagnostic=None
     try:
-        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+        process=subprocess.Popen(command,stdout=subprocess.PIPE,stderr=subprocess.PIPE,pass_fds=pass_fds)
         deadline=time.monotonic()+180
         while True:
             try:
@@ -573,7 +576,227 @@ def execute_remote(args,stream,admissions,p,backend,directory,measured=False):
     return raw
 
 
-def measure(args):
+def select_measurement_policy(name):
+    if name!='benchmark-policy-v1':raise ValueError('explicit benchmark-policy-v1 required')
+    return dict(measurement_policy=name,wire_version=1,map_names=['hftb_nvme_ops','hftb_afxdp_ops'],
+        bpf_source=str(ROOT/'kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c'))
+
+
+class BenchmarkCapture:
+    """Preallocated immutable-slot capture; online code inspects only 40 header bytes."""
+    def __init__(self,profile,identity,capacity_bytes,observer=None,reserved_storage=None):
+        from campaign_oracle import profile as check_profile
+        self.p=dict(profile);self.count=check_profile(self.p);self.identity=dict(identity)
+        require(self.identity.get('session_base')==self.p['session_base'] and bool(self.identity.get('token')),'capture identity')
+        self.stride=self.p['payload_bytes']+40
+        require(type(capacity_bytes) is int and capacity_bytes>=self.count*self.stride,'capture capacity before READY')
+        self.storage=bytearray(self.count*self.stride) if reserved_storage is None else reserved_storage
+        require(len(self.storage)==self.count*self.stride,"actual reserved storage size")
+        self.arrivals=[None]*self.count;self.seen=set();self.used=0;self.poisoned=False;self.observer=observer
+    @property
+    def packets(self):
+        return [bytes(self.storage[i*self.stride:(i+1)*self.stride]) for i in range(self.used)]
+    def capture_receive(self,data,truncation=False,arrival_metadata=None):
+        from campaign_oracle import header
+        try:
+            require(not self.poisoned and not truncation and len(data)==self.stride,'truncated/poisoned capture')
+            generation=int.from_bytes(data[16:20],'big')
+            require(1<=generation<=self.count and generation not in self.seen and self.used<self.count,'capture generation set')
+            require(bytes(data[:40])==header(self.p['session_base'],generation,self.p['payload_bytes']),'capture header identity')
+            slot=self.used;offset=slot*self.stride
+            self.storage[offset:offset+self.stride]=data
+            # Publish identity only after the complete copy into the reserved slot.
+            self.arrivals[slot]=(generation,arrival_metadata);self.seen.add(generation);self.used+=1
+            if self.observer:self.observer('capture_commit',dict(slot=slot,generation=generation))
+            return slot
+        except (ValueError,TypeError,OverflowError):
+            self.poisoned=True
+            raise ValueError('rejected receive poisons campaign capture')
+    def received_receipt(self,first,count,identity):
+        require(not self.poisoned and dict(identity)==self.identity,'receipt identity/poison')
+        require(type(first) is int and type(count) is int and first>=1 and count>=1 and first+count-1<=self.count,'receipt range')
+        require(all(g in self.seen for g in range(first,first+count)),'receipt before complete capture commit')
+        receipt=dict(version=2,op='BURST_RECEIPT',status='received',identity=dict(self.identity),
+            first_generation=first,packet_count=count,received_packets=count,received_bytes=count*self.p['payload_bytes'])
+        if self.observer:self.observer('received_receipt',dict(first_generation=first,packet_count=count))
+        return receipt
+
+
+def finalize_campaign(manifest,captures,guards,source_reference,observer=None,wire_frames=None):
+    require(manifest.get('workload_complete') is True and manifest.get('local_release_complete') is True,'campaign is not drained')
+    for trial in manifest.get('trials',[]):
+        require(trial.get('backend')!='session' or trial.get('stop_ret')==0,'native STOP failed')
+    if observer:observer('oracle_begin',{})
+    from campaign_oracle import verify_campaign
+    result=verify_campaign(manifest,captures,guards,source_reference)
+    if wire_frames is not None:_strict_final_wire(manifest,wire_frames,captures)
+    if observer:observer('oracle_done',result);observer('success_publish',result)
+    return result
+
+
+class BenchmarkPeerRun:
+    """HFT1 peer. Receipt certifies RAM capture, never payload validation."""
+    def __init__(self,args,profile,identity,storage,wire_storage):
+        self.p=dict(profile);self.identity=dict(identity);self.first=1
+        self.capture=BenchmarkCapture(profile,identity,len(storage),reserved_storage=storage)
+        self.wire_storage=wire_storage;self.wire_stride=profile['payload_bytes']+82
+        self.wire_arrivals=[None]*self.capture.count;self.wire_seen=set();self.wire_used=0
+        self.condition=threading.Condition();self.error=None;self.stop=threading.Event();self.finished=False
+        self.udp=socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+        self.raw=socket.socket(socket.AF_PACKET,socket.SOCK_RAW,socket.htons(0x0800))
+        try:
+            self.raw.bind((args.ifname,0));self.raw.settimeout(0.1)
+            self.udp.setsockopt(socket.SOL_SOCKET,socket.SO_RCVBUF,4*1024*1024)
+            self.udp.bind(args.data_bind);self.udp.settimeout(0.1)
+            self.thread=threading.Thread(target=self.receive,daemon=True)
+            self.raw_thread=threading.Thread(target=self.receive_wire,daemon=True)
+            self.raw_thread.start();self.thread.start()
+        except BaseException:self.udp.close();self.raw.close();raise
+    def receive(self):
+        try:
+            while not self.stop.is_set():
+                try:data,_,flags,_=self.udp.recvmsg(self.p['payload_bytes']+40,0)
+                except socket.timeout:continue
+                with self.condition:
+                    self.capture.capture_receive(data,bool(flags&socket.MSG_TRUNC))
+                    self.condition.notify_all()
+        except (OSError,ValueError) as error:
+            with self.condition:self.error=error;self.condition.notify_all()
+    def receive_wire(self):
+        try:
+            while not self.stop.is_set():
+                try:data,_,flags,_=self.raw.recvmsg(self.wire_stride+1,0)
+                except socket.timeout:continue
+                # Ignore unrelated traffic using only fixed headers. All candidate
+                # HFT1 frame bytes are retained, including malformed candidates.
+                if len(data)<82 or data[12:14]!=b'\x08\x00' or data[23]!=17 or data[42:46]!=b'HFT1':continue
+                if int.from_bytes(data[50:58],'big')!=self.p['session_base']:continue
+                with self.condition:
+                    require(not flags&socket.MSG_TRUNC and len(data)==self.wire_stride,'raw wire truncation/geometry')
+                    generation=int.from_bytes(data[58:62],'big')
+                    require(1<=generation<=self.capture.count and generation not in self.wire_seen,'wire generation set')
+                    off=self.wire_used*self.wire_stride
+                    self.wire_storage[off:off+self.wire_stride]=data
+                    self.wire_arrivals[self.wire_used]=generation;self.wire_seen.add(generation);self.wire_used+=1
+                    self.condition.notify_all()
+        except (OSError,ValueError) as error:
+            with self.condition:self.error=error;self.condition.notify_all()
+    def burst(self,request):
+        same_identity(request,self.identity)
+        require(request.get('version')==2 and request.get('op')=='BURST' and request.get('first_generation')==self.first and request.get('packet_count')==self.p['burst_packets'],'strict burst sequence')
+        first=self.first;count=self.p['burst_packets'];deadline=time.monotonic()+20
+        with self.condition:
+            while not all(g in self.capture.seen and g in self.wire_seen for g in range(first,first+count)):
+                if self.error:raise ValueError(str(self.error))
+                remaining=deadline-time.monotonic();require(remaining>0,'missing UDP/raw-wire burst')
+                self.condition.wait(min(remaining,0.1))
+            if self.error:raise ValueError(str(self.error))
+            reply=self.capture.received_receipt(first,count,self.identity)
+        self.first+=count;return reply
+    def finish(self):
+        require(self.first==self.capture.count+1,'missing burst receipt')
+        with self.condition:self.condition.wait(0.15)
+        self.stop.set();self.thread.join(timeout=2);self.raw_thread.join(timeout=2)
+        require(not self.thread.is_alive() and not self.raw_thread.is_alive(),'strict receiver stop')
+        if self.error:raise ValueError(str(self.error))
+        require(self.capture.used==self.capture.count and self.wire_used==self.capture.count,'complete receive set')
+        self.finished=True;self.udp.close();self.raw.close()
+    def close(self):
+        self.stop.set();self.thread.join(timeout=2);self.raw_thread.join(timeout=2);self.udp.close();self.raw.close()
+
+
+def benchmark_rpc(stream,request,op,status='ok'):
+    send_message(stream,request);reply=receive_message(stream)
+    require(type(reply.get('version')) is int and reply['version']==2 and reply.get('op')==op and reply.get('status')==status,'strict peer operation/status')
+    return reply
+
+
+def serve_benchmark_peer(args):
+    from hardware_gate import collect
+    admission=collect(args,'peer')
+    with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as listener:
+        listener.bind(args.bind);listener.listen(1)
+        connection,_=listener.accept()
+        with connection:
+            connection.settimeout(30);states={};active=None
+            try:
+                send_message(connection,dict(version=2,op='ADMISSION',status='ok',admission=admission,data_bind=list(args.data_bind)))
+                request=receive_message(connection)
+                require(request.get('version')==2 and request.get('op')=='CAMPAIGN' and request.get('measurement_policy')=='benchmark-policy-v1','explicit strict campaign')
+                plans=request['trials'];require(type(plans) is list and 3<=len(plans)<=300,'campaign trial bound')
+                total=0;wire_total=0;seen=set();trial_ids=set();geometry=None
+                from campaign_oracle import profile as check_profile
+                for row in plans:
+                    count=check_profile(row['profile']);p=row['profile'];identity=row['identity']
+                    require(row['trial_id'] not in trial_ids and identity.get('session_base')==p['session_base'] and identity.get('token') not in seen,'fresh campaign identity')
+                    require(type(identity.get('token')) is str and re.fullmatch('[0-9a-f]{32}',identity['token']) is not None,'fresh token format')
+                    require(p['session_base'] not in seen,'fresh wire session');seen.update((identity['token'],p['session_base']));trial_ids.add(row['trial_id'])
+                    shape={k:v for k,v in p.items() if k!='session_base'};require(geometry is None or shape==geometry,'campaign source/profile');geometry=shape
+                    total+=count*(p['payload_bytes']+40);wire_total+=count*(p['payload_bytes']+82)
+                # Actual reservations before CAMPAIGN_READY; no START has occurred.
+                require(total+wire_total<=1024*1024*1024,'campaign RAM bound')
+                storage=bytearray(total);wire_storage=bytearray(wire_total);off=0;wire_off=0
+                for row in plans:
+                    count=row['profile']['burst_packets']*row['profile']['bursts'];size=row['profile']['payload_bytes']
+                    row['storage']=memoryview(storage)[off:off+count*(size+40)];off+=count*(size+40)
+                    row['wire_storage']=memoryview(wire_storage)[wire_off:wire_off+count*(size+82)];wire_off+=count*(size+82)
+                send_message(connection,dict(version=2,op='CAMPAIGN_READY',status='ok',capture_bytes=total,wire_bytes=wire_total))
+                for row in plans:
+                    request=receive_message(connection);same_identity(request,row['identity'])
+                    require(request.get('op')=='HELLO' and request.get('version')==2 and request.get('trial_id')==row['trial_id'],'strict HELLO order')
+                    active=BenchmarkPeerRun(args,row['profile'],row['identity'],row['storage'],row['wire_storage']);states[row['trial_id']]=active
+                    send_message(connection,dict(version=2,op='READY',status='ok',identity=active.identity))
+                    while True:
+                        request=receive_message(connection);same_identity(request,active.identity)
+                        if request.get('op')=='BURST':send_message(connection,active.burst(request))
+                        elif request.get('op')=='FINISH':
+                            require(request.get('version')==2,'strict FINISH version');active.finish()
+                            send_message(connection,dict(version=2,op='FINISH_RECEIPT',status='received',identity=active.identity,packet_count=active.capture.count));active=None;break
+                        else:raise ValueError('unknown strict active operation')
+                request=receive_message(connection);require(request.get('version')==2 and request.get('op')=='CAMPAIGN_CAPTURE','capture after whole campaign')
+                for trial_id,state in states.items():
+                    for i,data in enumerate(state.capture.packets):
+                        off=i*state.wire_stride
+                        # Wire and UDP arrival order may differ; generation binds them
+                        # in the final byte oracle, never an online payload compare.
+                        wire=bytes(state.wire_storage[off:off+state.wire_stride])
+                        send_message(connection,dict(version=2,op='CAPTURE',status='received',trial_id=trial_id,data=base64.b64encode(data).decode(),wire=base64.b64encode(wire).decode()))
+                send_message(connection,dict(version=2,op='CAPTURE_END',status='received',packets=sum(s.capture.count for s in states.values())))
+                request=receive_message(connection);require(request.get('version')==2 and request.get('op')=='CLOSE','strict close')
+                send_message(connection,dict(version=2,op='CLOSED',status='ok'))
+            except (OSError,ValueError,KeyError,TypeError) as error:
+                try:send_message(connection,dict(version=2,op='ERROR',status='error',diagnostic=str(error)))
+                except OSError:pass
+                raise
+            finally:
+                for state in states.values():state.close()
+                evidence=Path(tempfile.mkdtemp(prefix='.hft-strict-peer-capture-',dir=args.directory or ROOT));os.chmod(evidence,0o700)
+                with oracle.exclusive(evidence/'raw-campaign.json') as output:
+                    output.write(canonical(dict(trials=[dict(trial_id=k,profile=v.p,identity=v.identity,error=str(v.error) if v.error else None,packets=[x.hex() for x in v.capture.packets],wire_frames=[bytes(v.wire_storage[i*v.wire_stride:(i+1)*v.wire_stride]).hex() for i in range(v.wire_used)]) for k,v in states.items()])))
+
+
+class BenchmarkBurstBroker(BurstBroker):
+    def work(self):
+        expected_first=0;client=None
+        try:
+            while not self.stop.is_set():
+                try:data,client=self.socket.recvfrom(4096)
+                except socket.timeout:continue
+                request=json.loads(data);fields(request,('op','actor','first','count','session_base'))
+                require(request==dict(op='receipt',actor=0,first=expected_first,count=self.p['burst_packets'],session_base=self.p['session_base']),'strict broker nonce/sequence')
+                reply=benchmark_rpc(self.stream,dict(version=2,op='BURST',identity=self.identity,first_generation=expected_first+1,packet_count=self.p['burst_packets']),'BURST_RECEIPT','received')
+                same_identity(reply,self.identity)
+                require(reply.get('first_generation')==expected_first+1 and reply.get('packet_count')==self.p['burst_packets'] and reply.get('received_packets')==self.p['burst_packets'] and reply.get('received_bytes')==self.p['burst_packets']*self.p['payload_bytes'] and not any(k.startswith('validated_') for k in reply),'received-only remote receipt')
+                response=dict(status='received',actor=0,first=expected_first,count=self.p['burst_packets'],received_bytes=reply['received_bytes'],session_base=self.p['session_base'])
+                self.socket.sendto(json.dumps(response,separators=(',',':')).encode(),client);expected_first+=self.p['burst_packets']
+        except (OSError,ValueError,KeyError,TypeError) as error:
+            self.error=error
+            if client is not None:
+                try:self.socket.sendto(b'{"status":"error"}',client)
+                except OSError:pass
+
+
+def legacy_measure(args):
     from hardware_gate import collect
     # Missing provisioning refuses before subprocesses, sockets or artifacts.
     p=dict(schema=1,record_bytes=args.records,payload_bytes=args.payload,burst_packets=args.burst,depth=args.depth,
@@ -637,6 +860,220 @@ def measure(args):
     validate_result(result)
     with oracle.exclusive(directory/'result.json') as out:out.write(canonical(result))
     return result
+
+
+def _strict_trial_observations(raw,trial,p):
+    require(raw.get('measurement_policy')=='benchmark-policy-v1' and raw.get('wire_version')==1,'producer policy dispatcher')
+    count=p['burst_packets']*p['bursts']
+    require(raw.get('read_submissions')==count and raw.get('send_submissions')==count and raw.get('local_release_complete') is True,'producer terminal count')
+    require(raw.get('registration_calls')==(0 if trial['backend']=='posix' else 1),'strong baseline registration count')
+    require(raw.get('stop_ret')==0,'native STOP/release evidence')
+    history=raw['guard_history'];require(type(history) is list and len(history)==count,'producer complete raw guard history')
+    guards=[]
+    for row in history:
+        item=dict(row);item.pop('payload_bytes',None)
+        item['raw_prefix']=bytes.fromhex(item['raw_prefix']);item['raw_tail']=bytes.fromhex(item['raw_tail']);item['trial_id']=trial['trial_id'];guards.append(item)
+    trial['frame_slots']=raw['frame_slots'];trial['stop_ret']=0 if trial['backend']=='session' else None
+    times=raw['measurements'];require(times['clock']=='CLOCK_MONOTONIC_RAW' and len(times['samples'])==p['bursts'],'all warmup/measured samples retained')
+    for b,row in enumerate(times['samples']):
+        require(row['burst']==b and row['first_generation']==b*p['burst_packets']+1 and row['packet_count']==p['burst_packets'],'timed sample identity')
+        require(times['setup_started_ns']<=times['setup_completed_ns']<=row['started_ns']<=row['local_release_ns']<=row['peer_receipt_ns']<=row['completed_ns']<=times['teardown_started_ns']<=times['teardown_completed_ns'],'timer covers terminal release and received receipt')
+        require(row['read_submissions']==p['burst_packets'] and row['send_submissions']==p['burst_packets'],'timed submissions')
+    return guards
+
+
+def _strict_final_wire(manifest,wire_frames,captures):
+    # This is part of the final oracle phase, never an online checksum/scan.
+    index={t['trial_id']:t for t in manifest['trials']};actual={}
+    for row in captures:
+        data=row['datagram'];actual[(row['trial_id'],int.from_bytes(data[16:20],'big'))]=data
+    require(len(wire_frames)==len(actual),'complete actual wire observation')
+    seen=set()
+    for row in wire_frames:
+        frame=row['frame'];trial=index.get(row['trial_id']);require(trial is not None and type(frame) is bytes,'actual wire trial')
+        network=trial['network'];p=trial['profile'];require(len(frame)==p['payload_bytes']+82,'actual wire length')
+        generation=int.from_bytes(frame[58:62],'big');key=(row['trial_id'],generation)
+        require(key in actual and key not in seen,'actual wire generation set');seen.add(key)
+        require(frame[:6]==bytes.fromhex(network['peer_mac'].replace(':','')) and frame[6:12]==bytes.fromhex(network['local_mac'].replace(':','')) and frame[12:14]==b'\x08\x00','actual wire Ethernet tuple')
+        require(frame[14]==0x45 and frame[23]==17 and int.from_bytes(frame[16:18],'big')==len(frame)-14 and int.from_bytes(frame[20:22],'big')&0x3fff==0,'actual wire IPv4 geometry')
+        require(frame[26:30]==socket.inet_aton(network['local_ip']) and frame[30:34]==socket.inet_aton(network['peer_ip']),'actual wire IP tuple')
+        require(frame[34:36]==struct.pack('!H',network['local_port']) and frame[36:38]==struct.pack('!H',network['peer_port']) and int.from_bytes(frame[38:40],'big')==len(frame)-34 and frame[40:42]==b'\0\0','actual wire UDP tuple/checksum zero')
+        require(frame[42:]==actual[key],'actual wire application bytes')
+    require(seen==set(actual),'all trial wire frames')
+
+
+def _strict_campaign_impl(args,producer,p,plans,directory,retained):
+    from hardware_gate import BIN
+    all_guards=retained['guards'];captures=retained['captures'];wire_frames=retained['wire_frames'];observations=retained['observations']
+    # Full source reference is reserved once before CAMPAIGN_READY. No digest.
+    source_reference=Path(args.reference).read_bytes()
+    required=sum(t['profile']['burst_packets']*t['profile']['bursts'] for t in plans)
+    require(required*(p['payload_bytes']+40+82)+len(source_reference)<=1024*1024*1024,'producer campaign RAM bound')
+    # Fixed source/artifact metadata is rechecked between trials without
+    # payload comparisons or hashing; complete final readback follows drain.
+    watched=[Path(args.reference),Path(args.bpf_object),BIN,Path(args.kernel_config)]
+    snapshots=[x.stat() for x in watched]
+    def unchanged():
+        for path,before in zip(watched,snapshots):
+            after=path.stat();require((before.st_dev,before.st_ino,before.st_size,before.st_mtime_ns,before.st_ctime_ns)==(after.st_dev,after.st_ino,after.st_size,after.st_mtime_ns,after.st_ctime_ns),'campaign source/artifact metadata changed')
+    with socket.create_connection(args.peer_control,timeout=30) as stream:
+        stream.settimeout(30);remote=receive_message(stream)
+        require(remote.get('version')==2 and remote.get('op')=='ADMISSION' and remote.get('status')=='ok','strict peer admission protocol')
+        peer=remote['admission'];validate_admission(peer,'peer')
+        require(peer['product_sha']==args.product_sha and remote.get('data_bind')==[args.peer_ip,args.peer_port],'strict peer SHA/endpoint')
+        require('observed NIC MAC='+args.peer_mac.lower() in peer['environment']['evidence'],'strict peer physical MAC')
+        prepared=benchmark_rpc(stream,dict(version=2,op='CAMPAIGN',measurement_policy='benchmark-policy-v1',trials=[{k:t[k] for k in ('trial_id','profile','identity')} for t in plans]),'CAMPAIGN_READY')
+        require(prepared.get('capture_bytes')==required*(p['payload_bytes']+40) and prepared.get('wire_bytes')==required*(p['payload_bytes']+82),'actual peer RAM reservations')
+        for t in plans:
+            unchanged();profile=t['profile'];identity=t['identity']
+            ready=benchmark_rpc(stream,dict(version=2,op='HELLO',trial_id=t['trial_id'],identity=identity),'READY');same_identity(ready,identity)
+            broker=BenchmarkBurstBroker(stream,profile,identity)
+            try:
+                trial_directory=directory/t['trial_id'];trial_directory.mkdir(mode=0o700)
+                raw=run_producer(producer_command(args,profile,t['backend'],broker.address,'hardware'),broker,artifact_dir=trial_directory,pass_fds=args._held_fds)
+                args._workload_issued=True
+            except correctness.Failure as error:
+                if getattr(args,'_workload_issued',False):raise ValueError('partial campaign capability loss: '+error.message) from error
+                raise
+            finally:broker.close()
+            finish=benchmark_rpc(stream,dict(version=2,op='FINISH',identity=identity),'FINISH_RECEIPT','received');same_identity(finish,identity)
+            require(finish.get('packet_count')==profile['burst_packets']*profile['bursts'],'complete received set')
+            observations.append(dict(trial_id=t['trial_id'],raw=raw))
+            all_guards.extend(_strict_trial_observations(raw,t,profile));unchanged()
+        send_message(stream,dict(version=2,op='CAMPAIGN_CAPTURE'))
+        while True:
+            reply=receive_message(stream)
+            require(reply.get('version')==2 and reply.get('status')=='received','raw campaign capture status')
+            if reply.get('op')=='CAPTURE_END':require(reply.get('packets')==required and len(captures)==required,'campaign terminal packet count');break
+            require(reply.get('op')=='CAPTURE' and len(captures)<required,'campaign capture bounds')
+            data=base64.b64decode(reply['data'],validate=True);wire=base64.b64decode(reply['wire'],validate=True)
+            captures.append(dict(trial_id=reply['trial_id'],datagram=data,truncated=False));wire_frames.append(dict(trial_id=reply['trial_id'],frame=wire))
+        benchmark_rpc(stream,dict(version=2,op='CLOSE'),'CLOSED')
+    unchanged()
+    manifest=dict(schema=1,measurement_policy='benchmark-policy-v1',workload_complete=True,local_release_complete=True,trials=plans)
+    # Final source readback is complete and outside all samples. Preserve raw
+    # source bytes; the independent oracle also checks the specified source.
+    with Path(args.source_block).open('rb',buffering=0) as stream:
+        stream.seek(args.slba*args._source_lba);readback=stream.read(len(source_reference))
+    require(readback==source_reference and Path(args.reference).read_bytes()==source_reference,'final complete source readback')
+    validated=finalize_campaign(manifest,captures,all_guards,source_reference,wire_frames=wire_frames)
+    # A single final artifact/source manifest. No per-trial/background digest.
+    artifact_manifest=dict(source_sha256=hashlib.sha256(source_reference).hexdigest(),binary_sha256=sha(BIN),bpf_sha256=sha(args.bpf_object),config_sha256=sha(args.kernel_config))
+    unchanged()
+    # All summaries derive only from fully retained and validated actual trials.
+    trials=[]
+    for t,ob in zip(plans,observations):
+        samples=ob['raw']['measurements']['samples'][args.warmup_bursts:]
+        trials.append(dict(trial_id=t['trial_id'],backend=t['backend'],pair=t['pair'],order=t['order'],total_completion_ns=sum(s['completed_ns']-s['started_ns'] for s in samples)))
+    paired=[]
+    for pair in range(args.pairs):
+        times={t['backend']:t['total_completion_ns'] for t in trials if t['pair']==pair};require(set(times)==set(ARMS) and all(v>0 for v in times.values()),'complete paired observations')
+        paired.append(dict(pair=pair,ratio_posix=times['session']/times['posix'],ratio_fixed=times['session']/times['uring-fixed-zc']))
+    result=dict(schema=2,status='ok',scenario='hft-style-scenario-microbenchmark',measurement_policy='benchmark-policy-v1',wire_version=1,scope='physical-paired-received-completion',validated=validated,trials=trials,paired_summary=paired,manifest=artifact_manifest)
+    with oracle.exclusive(directory/'result.json') as output:output.write(canonical(result))
+    return result
+
+
+
+
+def _strict_campaign(args,producer,p,plans,directory):
+    retained=dict(guards=[],captures=[],wire_frames=[],observations=[]);error=None
+    try:return _strict_campaign_impl(args,producer,p,plans,directory,retained)
+    except BaseException as failure:error=str(failure);raise
+    finally:
+        # Raw observations remain available on final-oracle failure and on
+        # partial/non-beneficial campaigns. No payload hash or comparison.
+        evidence=dict(measurement_policy='benchmark-policy-v1',trials=plans,diagnostic=error,observations=retained['observations'],
+            captures=[dict(trial_id=r['trial_id'],datagram=r['datagram'].hex(),truncated=r['truncated']) for r in retained['captures']],
+            guards=[dict(r,raw_prefix=r['raw_prefix'].hex(),raw_tail=r['raw_tail'].hex()) for r in retained['guards']],
+            wire_frames=[dict(trial_id=r['trial_id'],frame=r['frame'].hex()) for r in retained['wire_frames']])
+        with oracle.exclusive(directory/'campaign.json') as output:output.write(canonical(evidence))
+
+
+def _artifact_metadata(path):
+    st=Path(path).stat()
+    return dict(device=st.st_dev,inode=st.st_ino,bytes=st.st_size,mtime_ns=st.st_mtime_ns,ctime_ns=st.st_ctime_ns)
+
+
+def qualify_benchmark(args):
+    """Separate physical asset preparation, never a campaign or START trial.
+
+    Digests generated here are reused verbatim. Qualification is invalidated
+    by changed held-file metadata/product/config/device/profile. It does not
+    claim resistance to an untested concurrent malicious rewrite.
+    """
+    from hardware_gate import collect,BIN
+    import hardware_build as build
+    select_measurement_policy(args.measurement_policy)
+    p=dict(schema=1,record_bytes=args.records,payload_bytes=args.payload,burst_packets=args.burst,depth=args.depth,bursts=args.warmup_bursts+args.bursts,actors=args.actors,seed=args.seed)
+    validate_profile(p);require(args.qualification is not None,'explicit qualification output path required')
+    producer=collect(args,'producer',dict(p,session_base=secrets.randbelow(2**64-1)+1));args._source_lba=producer['source']['lba_bytes']
+    directory=Path(tempfile.mkdtemp(prefix='.hft-asset-qualification-',dir=args.directory or ROOT));os.chmod(directory,0o700)
+    with socket.socket(socket.AF_INET,socket.SOCK_DGRAM) as control:
+        control.bind(('127.0.0.1',0))
+        native=run_producer(producer_command(args,dict(p,session_base=secrets.randbelow(2**64-1)+1),'session',control.getsockname(),'benchmark-probe'),artifact_dir=directory)
+    require(native.get('read_submissions')==0 and native.get('send_submissions')==0 and native.get('stop_ret')==0,'qualification issued work or failed STOP')
+    observed=native.get('native',{})
+    require(observed.get('xdp_zero_copy') is True and observed.get('strict_create') is True and observed.get('nvme_map_id',0)>0 and observed.get('afxdp_map_id',0)>0,'strict new-policy native build/map/CREATE qualification')
+    paths=dict(binary=str(BIN),bpf=str(Path(args.bpf_object).resolve()),config=str(Path(args.kernel_config).resolve()),reference=str(Path(args.reference).resolve()))
+    files={name:dict(path=path,metadata=_artifact_metadata(path),sha256=sha(path)) for name,path in paths.items()}
+    result=dict(schema=1,status='qualified-assets-only',measurement_policy='benchmark-policy-v1',wire_version=1,product_sha=args.product_sha,profile=p,
+        producer=producer,native_probe=observed,files=files,source_sha256=build.binary_source_sha(),bpf_source_sha256=build.benchmark_bpf_source_sha(),start_issued=False)
+    with oracle.exclusive(args.qualification) as out:out.write(canonical(result))
+    return result
+
+
+def _qualified_assets(args,p):
+    from hardware_gate import physical,source,BIN,required
+    required(args,'producer')
+    if args.qualification is None:refusal('separate strict asset qualification receipt required before campaign','not_run_capability')
+    receipt=json.loads(args.qualification.read_text())
+    require(receipt.get('schema')==1 and receipt.get('status')=='qualified-assets-only' and receipt.get('measurement_policy')=='benchmark-policy-v1' and receipt.get('wire_version')==1 and receipt.get('product_sha')==args.product_sha and receipt.get('profile')==p and receipt.get('start_issued') is False,'strict asset qualification binding')
+    # Physical environment is freshly observed without digesting payload or
+    # artifacts. Exact compiled/source hashes come from the preparation phase.
+    require(physical(args.ifname)==receipt['producer']['environment'],'physical environment changed after qualification')
+    require(receipt['producer']['kernel']['release']==os.uname().release and receipt['producer']['kernel']['strict_zero_copy'] is True,'qualified running kernel')
+    expected=dict(binary=str(BIN),bpf=str(Path(args.bpf_object).resolve()),config=str(Path(args.kernel_config).resolve()),reference=str(Path(args.reference).resolve()))
+    held=[]
+    try:
+        for name,path in expected.items():
+            row=receipt['files'][name];require(row['path']==path and row['metadata']==_artifact_metadata(path),'qualified artifact changed')
+            fd=os.open(path,os.O_RDONLY|os.O_CLOEXEC);held.append(fd)
+            # Pin identity of the bytes used by producer across the campaign.
+            st=os.fstat(fd);require(row['metadata']==dict(device=st.st_dev,inode=st.st_ino,bytes=st.st_size,mtime_ns=st.st_mtime_ns,ctime_ns=st.st_ctime_ns),'qualified held artifact identity')
+            if name=='binary':args._binary_fd_path=f'/proc/self/fd/{fd}'
+            elif name=='bpf':args.bpf_object=f'/proc/self/fd/{fd}'
+            elif name=='config':args.kernel_config=f'/proc/self/fd/{fd}'
+            else:args.reference=f'/proc/self/fd/{fd}'
+        args._held_fds=tuple(held)
+        # The setup source admission remains a complete byte comparison.
+        observed=source(args,dict(p,session_base=1));require(observed==receipt['producer']['source'],'qualified source/window changed')
+        args._source_lba=observed['lba_bytes']
+        return receipt,held
+    except BaseException:
+        for fd in held:os.close(fd)
+        raise
+
+
+def measure(args):
+    select_measurement_policy(args.measurement_policy)
+    p=dict(schema=1,record_bytes=args.records,payload_bytes=args.payload,burst_packets=args.burst,depth=args.depth,bursts=args.warmup_bursts+args.bursts,actors=args.actors,seed=args.seed)
+    validate_profile(p)
+    receipt,held=_qualified_assets(args,p)
+    try:
+        plans=[];nonces=set()
+        for pair,order in enumerate(paired_order(args.pairs,args.order_seed)):
+            for position,backend in enumerate(order):
+                while True:
+                    nonce=secrets.randbelow(2**64-1)+1
+                    if nonce not in nonces:nonces.add(nonce);break
+                trial_profile=dict(p,session_base=nonce);trial_id=f'pair-{pair}-order-{position}-{backend}'
+                identity=dict(token=secrets.token_hex(16),session_base=nonce)
+                plans.append(dict(trial_id=trial_id,profile=trial_profile,identity=identity,backend=backend,pair=pair,order=position,network={k:getattr(args,k) for k in ('local_mac','peer_mac','local_ip','peer_ip','local_port','peer_port')}))
+        directory=Path(tempfile.mkdtemp(prefix='.hft-strict-campaign-',dir=args.directory or ROOT));os.chmod(directory,0o700)
+        return _strict_campaign(args,receipt['producer'],p,plans,directory)
+    finally:
+        for fd in held:os.close(fd)
 
 
 if __name__=='__main__':sys.exit(main())

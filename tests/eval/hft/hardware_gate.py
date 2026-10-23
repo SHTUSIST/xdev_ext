@@ -65,7 +65,7 @@ def product(expected,producer):
     remote=command(['git','-C',str(ROOT),'remote','get-url','origin'])
     if remote.lower() not in ('https://github.com/shtusist/xdev_ext.git','git@github.com:shtusist/xdev_ext.git'):
         refuse('predeploy from the pinned product GitHub repository','not_run_capability')
-    paths=['tests/eval/hft/'+name for name in (*build.C_SOURCES,'hardware_measure.py','hardware_gate.py','hardware_build.py','oracle.py','run.py')]+list(build.BPF_SOURCES)
+    paths=['tests/eval/hft/'+name for name in (*build.C_SOURCES,'hardware_measure.py','hardware_gate.py','hardware_build.py','oracle.py','run.py','campaign_oracle.py')]+list(build.BPF_SOURCES)+['kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c']
     command(['git','-C',str(ROOT),'ls-files','--error-unmatch','--',*paths])
     if command(['git','-C',str(ROOT),'status','--porcelain','--untracked-files=no','--',*paths]):refuse('predeployed measured source differs from pinned SHA','not_run_capability')
     if producer:
@@ -87,17 +87,18 @@ def source(args,p):
     if not geometry['lba_bytes'] or args.slba>geometry['capacity_bytes']//geometry['lba_bytes'] or args.nlb>geometry['capacity_bytes']//geometry['lba_bytes']-args.slba or args.nlb*geometry['lba_bytes']<length:
         refuse('read-only source window out of bounds','not_run_capability')
     import hashlib
-    observed=hashlib.sha256();expected=hashlib.sha256();saved=reference.stat()
+    strict=getattr(args,"measurement_policy",None)=="benchmark-policy-v1"
+    observed=None if strict else hashlib.sha256();expected=None if strict else hashlib.sha256();saved=reference.stat()
     with block.open('rb',buffering=0) as raw,reference.open('rb') as ref:
         raw.seek(args.slba*geometry['lba_bytes'])
         for group in range(groups):
             wanted=oracle.payload(p,0,group);data=ref.read(p['payload_bytes']);actual=raw.read(p['payload_bytes'])
             if data!=wanted or actual!=data:refuse('reference/source differs from full independent payload bytes','not_run_capability')
-            expected.update(data);observed.update(actual)
+            if not strict:expected.update(data);observed.update(actual)
     current=reference.stat()
     if (saved.st_dev,saved.st_ino,saved.st_size,saved.st_mtime_ns)!=(current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns):refuse('immutable reference changed during admission')
     return dict(block_namespace=str(b.resolve()),ng_namespace=str(n.resolve()),read_only=True,slba=args.slba,nlb=args.nlb,
-        **geometry,payload_bytes=p['payload_bytes'],groups=groups,observed_sha256=observed.hexdigest(),reference_sha256=expected.hexdigest())
+        **geometry,payload_bytes=p['payload_bytes'],groups=groups,observed_sha256=observed.hexdigest() if observed else None,reference_sha256=expected.hexdigest() if expected else None)
 
 
 def collect(args,role,p=None):
@@ -124,7 +125,8 @@ def collect(args,role,p=None):
             obj=Path(args.bpf_object);btf=Path('/sys/kernel/btf/vmlinux')
             sidecar=json.loads(Path(str(obj)+'.build.json').read_text())
             wanted=dict(schema=1,kind='bpf',artifact_sha256=build.sha(obj),product_sha=args.product_sha,
-                source_sha256=build.bpf_source_sha(),btf_sha256=build.sha(btf))
+                source_sha256=build.benchmark_bpf_source_sha() if getattr(args,"measurement_policy",None)=="benchmark-policy-v1" else build.bpf_source_sha(),btf_sha256=build.sha(btf))
+            if getattr(args,"measurement_policy",None)=="benchmark-policy-v1":wanted.update(schema=2,measurement_policy="benchmark-policy-v1",wire_version=1)
             if json.dumps(sidecar,sort_keys=True)!=json.dumps(wanted,sort_keys=True):refuse('BPF source/build/running-BTF receipt mismatch','not_run_capability')
             receipt['bpf']=dict(object_sha256=wanted['artifact_sha256'],btf_sha256=wanted['btf_sha256'],
                 source_sha256=wanted['source_sha256'],target_matches=True)

@@ -13,7 +13,7 @@ ROOT=HERE.parents[2]
 BPF_SOURCES=('kernel/tools/xdev_ext_mech/nxp_mech.bpf.c','kernel/tools/xdev_ext_mech/xdev_ext_mech_prog.h',
  'kernel/tools/xdev_ext_mech/xdev_ext_mech_kfunc.h','kernel/include/uapi/linux/xdev_ext_mech.h',
  'kernel/include/uapi/linux/xdev_ext_binding.h')
-C_SOURCES=('hft_replay.c','hft_posix.c','hft_uring.c','hft_session.c','hft_runtime.h','hft_core.h','hft_send_zc.h')
+C_SOURCES=('hft_replay.c','hft_posix.c','hft_uring.c','hft_session.c','hft_runtime.h','hft_core.h','hft_send_zc.h','benchmark_policy.h')
 
 
 def sha(path):
@@ -31,6 +31,7 @@ def source_digest(paths):
 
 
 def bpf_source_sha():return source_digest([ROOT/path for path in BPF_SOURCES])
+def benchmark_bpf_source_sha():return source_digest([ROOT/"kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c"]+[ROOT/path for path in BPF_SOURCES[1:]])
 def binary_source_sha():return source_digest([HERE/path for path in C_SOURCES]+[ROOT/path for path in ('kernel/include/uapi/linux/io_uring.h','kernel/include/uapi/linux/stat.h',*BPF_SOURCES[1:])])
 
 
@@ -47,12 +48,14 @@ def product_sha():
 
 def main():
     p=argparse.ArgumentParser(description=__doc__)
+    p.add_argument('--measurement-policy',choices=('benchmark-policy-v1',))
     p.add_argument('kind',choices=('binary','bpf'));p.add_argument('--artifact',required=True,type=Path)
     p.add_argument('--btf',type=Path);p.add_argument('--uring',default='0');p.add_argument('--session',default='0')
     a=p.parse_args()
     receipt=dict(schema=1,kind=a.kind,artifact_sha256=sha(a.artifact),
         product_sha=product_sha(),
-        source_sha256=binary_source_sha() if a.kind=='binary' else bpf_source_sha())
+        source_sha256=binary_source_sha() if a.kind=='binary' else (benchmark_bpf_source_sha() if a.measurement_policy else bpf_source_sha()))
+    if a.measurement_policy:receipt.update(schema=2,measurement_policy=a.measurement_policy,wire_version=1)
     if a.kind=='binary':receipt.update(uring=a.uring=='1',session=a.session=='1')
     else:receipt['btf_sha256']=sha(a.btf)
     path=Path(str(a.artifact)+'.build.json');temporary=Path(str(path)+'.tmp')
