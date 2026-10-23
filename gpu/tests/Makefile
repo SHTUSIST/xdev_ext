@@ -9,7 +9,7 @@ TESTS := nv_xdev_ext_gpu_policy_test nv_xdev_ext_gpu_binding_test nv_xdev_ext_gp
 	 nv_xdev_ext_gpu_identity_test nv_xdev_ext_ce_classify_test \
 	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test
 
-.PHONY: all run run-async run-host-bookkeeping clean
+.PHONY: all run run-async run-host-bookkeeping run-lifecycle-contract run-lifecycle-mutants clean
 
 all: $(TESTS)
 
@@ -69,6 +69,21 @@ run-async: nv_xdev_ext_ce_async_test
 
 run-host-bookkeeping:
 	CC=$(CC) python3 nv_xdev_ext_umem_host_contract_test.py -v
+
+# Opt-in actual-body lifecycle contract. Compilers:
+# XDEV_EXT_TEST_CCS=gcc,clang-14 (default: $(CC)).
+LIFECYCLE_TESTS := nv_xdev_ext_ce_backend_harness_test.py nv_xdev_ext_ce_rm_event_test.py \
+	nv_xdev_ext_host_region_dma_test.py nv_xdev_ext_ce_variant_source_test.py \
+	nv_xdev_ext_vidmem_owner_test.py nv_xdev_ext_native_peer_cleanup_test.py \
+	nv_xdev_ext_direct_dma_test.py nv_xdev_ext_gpu_export_test.py \
+	nv_xdev_ext_ce_owner_api_test.py
+
+run-lifecycle-contract:
+	@status=0; for test in $(LIFECYCLE_TESTS); do \
+		CC=$(CC) python3 $$test -v || status=1; done; exit $$status
+
+run-lifecycle-mutants:
+	CC=$(CC) python3 nv_xdev_ext_lifecycle_mutant_test.py -v
 
 run: $(TESTS)
 	@for test in $(TESTS); do ./$$test || exit $$?; done
