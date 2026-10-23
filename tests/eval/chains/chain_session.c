@@ -912,6 +912,10 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	if (!ret) {
 		const char *bad = chain_counters_bad(s, &st, target, frames, lent);
 
+		char stats_line[512];
+
+		if (xdev_ext_mech_ctl_stats_line(stats_line, sizeof(stats_line), &st) > 0)
+			fprintf(stderr, "%s\n", stats_line);
 		r->stats = st;
 		r->have_stats = true;
 		if (bad)
@@ -933,6 +937,7 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 stop:
 	if (c.session_id) {
 		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STOP, c.session_id, &r->syscalls);
+		fprintf(stderr, "EVAL_STOP=%s result=%d\n", ret ? "FAIL" : "PASS", ret);
 		if (ret) {
 			/* Accepted DMA may still own pool pages: keep everything. */
 			unsafe = true;

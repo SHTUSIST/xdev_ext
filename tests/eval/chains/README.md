@@ -309,3 +309,7 @@ guest:
 - IAA on a pool that also has `START` user frames;
 - the staged `SENDMSG_ZC` notification order;
 - `IORING_SETUP_COOP_TASKRUN` completions while spinning.
+
+The shared [session guest driver](../session_guest/README.md) builds this arm
+for the existing correctness-only KVM suite, with independent byte/guard
+oracles and strict counts, STOP and descriptor checks.

@@ -922,3 +922,16 @@
 !/tests/eval/spdk/test_native.py
 !/tests/eval/build_cuda_arms.py
 !/tests/eval/test_build_cuda_arms.py
+!/tests/eval/common/fd_check.h
+!/tests/eval/session_guest/
+!/tests/eval/session_guest/README.md
+!/tests/eval/session_guest/Makefile
+!/tests/eval/session_guest/eval_session_oracle.c
+!/tests/eval/session_guest/test_oracle.py
+!/tests/eval/session_guest/test_cleanup.py
+!/tests/eval/session_guest/test_fd_check.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/eval_session_fixtures/
+!/kernel/tools/testing/selftests/xdev_ext_integration/eval_session_fixtures/*.log

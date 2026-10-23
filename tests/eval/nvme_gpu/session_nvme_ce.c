@@ -48,6 +48,7 @@
  * failure, 2 usage, 4 unavailable capability (stdout empty unless 0).
  */
 #define _GNU_SOURCE
+#include "../common/fd_check.h"
 #include <getopt.h>
 #include <stdlib.h>
 #include <sys/stat.h>
@@ -380,6 +381,7 @@ static int sn_seed_slots(const struct sn_opts *o, struct es_ce *ce, unsigned cha
 
 int main(int argc, char **argv)
 {
+	int fd_before = eval_fd_count();
 	struct sn_opts o;
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
 	struct sn_pass p, total = { 0 };
@@ -493,5 +495,7 @@ out:
 		close(fd);
 	free(buf);
 	free(seen);
+	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
 	return ret;
 }

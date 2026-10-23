@@ -135,3 +135,7 @@ repository's checks.
 Not here: GPUDirect RDMA (`nvidia-peermem`), DPDK `gpudev`, devmem TCP with
 GPU memory and the NCCL network path, which the reviewer also listed, and a
 per-message latency measurement inside the session.
+
+The shared [session guest driver](../session_guest/README.md) builds this arm
+for the existing correctness-only KVM suite, with independent byte/guard
+oracles and strict counts, STOP and descriptor checks.

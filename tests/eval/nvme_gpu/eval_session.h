@@ -193,6 +193,7 @@ static inline int es_close(struct es_run *r)
 		ret = es_mech(r->ring, XDEV_EXT_MECH_OP_STOP, r->session);
 		if (ret == -ENOENT)
 			ret = 0;
+		fprintf(stderr, "EVAL_STOP=%s result=%d\n", ret ? "FAIL" : "PASS", ret);
 	}
 	if (r->ring >= 0)
 		close(r->ring);
