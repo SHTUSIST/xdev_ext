@@ -70,20 +70,58 @@ documents the statistics and driver properties; the
 [troubleshooting guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/)
 describes POSIX path counters.
 
-One registered CUDA chunk allocation is reused throughout the run. For each
-chunk, all4096 prefix guard bytes and the entire unused tail plus4096 suffix
-guard bytes are checked. Every payload byte uses the deterministic pattern
-`(absolute_file_index*37 + absolute_file_index/251 + iteration*53) % 256`,
-where `/` is integer division and iteration starts at zero. Every load receives
-full GPU readback validation. Every checkpoint receives full GPU readback and
-complete file reread after `fsync`. Exact short I/O fails the run. All resource
-cleanup must succeed before the executable emits its single JSON record.
+### Strict campaign (`gds-campaign-v1`, schema2)
 
-`io_ns` includes synchronous cuFile calls, CUDA completion and checkpoint
-`fsync`; it excludes seed preparation and full validation. Its counts and
-`verified_bytes` cover every requested iteration. Successful JSON is checked
-again by the runner before it is relayed. This implementation does not prove
-power-loss durability or application checkpoint consistency.
+Every cuFile operation of the whole campaign owns one guarded slot of a single
+CUDA allocation that is registered once before the first operation and reused
+for the run: a4096-byte prefix guard, the chunk area and a4096-byte suffix guard.
+History capacity (`operations*(chunk+8192)` bytes of device memory plus the host
+images for the final comparison) is admitted before any allocation or I/O;
+insufficient capacity exits4 with no result. Nothing is shrunk or validated
+early to fit. `llm-load` reseeds the same regular-file window for every
+iteration (outside `io_ns`) and reads each chunk into its own slot. `checkpoint`
+seeds all device state once (outside `io_ns`) and writes iteration `t` to its own
+file region at offset `t*bytes`, so a later clean iteration cannot overwrite an
+earlier iteration's stored bytes.
+
+During the campaign only exact I/O results and the native-path accounting are
+checked; an exact short I/O fails immediately. After the last operation, its
+completion and the checkpoint `fsync`, the benchmark reads the complete slot
+history back once and compares every payload byte, every unused chunk-tail byte
+and every guard byte; `checkpoint` also rereads the complete file once and
+compares every stored byte of every iteration. Every payload byte uses the
+deterministic pattern `(absolute_file_index*37 + absolute_file_index/251 +
+iteration*53) % 256`, where `/` is integer division, the index is relative to the
+logical window and iteration starts at zero. An early damaged byte therefore
+fails the run even when later operations are clean. Only after this comparison
+does it build the campaign manifest, release every resource and print its single
+schema2 JSON record.
+
+`io_ns` includes the synchronous cuFile calls, CUDA completion and checkpoint
+`fsync`; it excludes seeding, the history readback and the comparison. Slots are
+preallocated, so there is no history copy inside or outside the timer. The record
+carries the fairness evidence `input_id`, `source_window`, `output_residency`,
+`queue_depth=1`, `direct_io`, `buffer_registration=once-reused`,
+`registration_count=1`, `campaign_complete`, `validation_phase=post-campaign`,
+`full_byte_compare`, `history_operations`, `history_bytes`, `manifest_count=1`
+and `capture_in_timing`. `run.py` relays only an exact schema2 record for the
+requested campaign; `run.py:checked_comparison(left, right)` admits a pair of
+schema2 records (for example `linux-pinned` and `cufile-direct`) only when input,
+window, residency, depth, direct I/O and once-reused registration are identical
+and both were validated once after their complete campaign. Schema1 records are
+correctness-only and are refused for comparison. This implementation does not
+prove power-loss durability or application checkpoint consistency.
+
+The previous schema1 loop, which reused one chunk buffer and compared GPU
+contents (and reread the checkpoint file) after every chunk or iteration, remains
+in `bench_cufile.cc` under `#ifdef GDS_PER_CHUNK_ORACLE` and is not built by default.
+
+`test_campaign_timing.py` executes the actual benchmark body with the official
+SDK headers and controlled host dependencies (ordinary memory and disposable
+regular files) to check the order of operations, history retention and refusal
+paths: `GDS_CUDA_ROOT=/official/sdk python3 -B tests/eval/gds/test_campaign_timing.py -v`.
+`test_campaign_result.py` checks the runner relay. Neither runs a device, measures
+time or establishes any path, DMA or performance property.
 
 ## Comparison scope
 
