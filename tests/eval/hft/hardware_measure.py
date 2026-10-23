@@ -862,12 +862,44 @@ def legacy_measure(args):
     return result
 
 
+STRICT_SESSION_STATS=('batches_done','read_submitted','read_completed','send_submitted','send_completed','state',
+    'batches_abort','rejects','sequestered','timeouts','protocol_err','last_err','inflight')
+
+
+def _strict_completion_accounting(raw,backend,count):
+    """Per-arm completion evidence from the actual producer counters, checked online.
+
+    Counters only; no payload is read. Native arms also need the terminal stage
+    STATS the C adapter observed before STOP, and their own zero-copy/map proof.
+    """
+    def counter(value):return type(value) is int and value>=0
+    done=raw.get('completion')
+    require(type(done) is dict and set(done)=={'read_cqes','send_result_cqes','send_notif_cqes','zc_copied_packets'} and all(counter(v) for v in done.values()),'producer completion accounting')
+    require(type(raw.get('copied_packets')) is int and raw['copied_packets']==done['zc_copied_packets'],'copied-usage notifications reported')
+    if backend=='uring-fixed-zc':
+        require(done['read_cqes']==count and done['send_result_cqes']==count and done['zc_copied_packets']<=done['send_notif_cqes']<=count,'registered completion accounting')
+    else:
+        require(not any(done.values()),'no ring completions outside the registered arm')
+    if backend!='session':
+        require('session_stats' not in raw,'native statistics only for the native arm');return
+    stats=raw.get('session_stats')
+    wanted=dict(batches_done=count,read_submitted=count,read_completed=count,send_submitted=count,send_completed=count,
+        state='ACTIVE',batches_abort=0,rejects=0,sequestered=0,timeouts=0,protocol_err=0,last_err=0,inflight=0)
+    require(type(stats) is dict and set(stats)==set(STRICT_SESSION_STATS),'native stage statistics schema')
+    require(all(type(stats[k]) is type(v) and stats[k]==v for k,v in wanted.items()),'native terminal stage statistics')
+    native=raw.get('native')
+    require(type(native) is dict and native.get('xdp_zero_copy') is True and native.get('strict_create') is True and
+        type(native.get('nvme_map_id')) is int and native['nvme_map_id']>0 and type(native.get('afxdp_map_id')) is int and native['afxdp_map_id']>0,
+        'native zero-copy CREATE and map evidence')
+
+
 def _strict_trial_observations(raw,trial,p):
     require(raw.get('measurement_policy')=='benchmark-policy-v1' and raw.get('wire_version')==1,'producer policy dispatcher')
     count=p['burst_packets']*p['bursts']
     require(raw.get('read_submissions')==count and raw.get('send_submissions')==count and raw.get('local_release_complete') is True,'producer terminal count')
     require(raw.get('registration_calls')==(0 if trial['backend']=='posix' else 1),'strong baseline registration count')
     require(raw.get('stop_ret')==0,'native STOP/release evidence')
+    _strict_completion_accounting(raw,trial['backend'],count)
     history=raw['guard_history'];require(type(history) is list and len(history)==count,'producer complete raw guard history')
     guards=[]
     for row in history:

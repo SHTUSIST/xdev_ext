@@ -81,7 +81,14 @@ int main(int argc,char **argv)
    for(unsigned j=0;j<4096-512-c.payload;j++)printf("%02x",r->raw_tail[j]);
    fputs("\"}",stdout);
   }
-  printf("],\"native\":{\"xdp_zero_copy\":%s,\"strict_create\":%s,\"nvme_map_id\":%u,\"afxdp_map_id\":%u},\"measurements\":{\"clock\":\"CLOCK_MONOTONIC_RAW\",\"setup_started_ns\":%"PRIu64",\"setup_completed_ns\":%"PRIu64",\"teardown_started_ns\":%"PRIu64",\"teardown_completed_ns\":%"PRIu64",\"samples\":[",a->native_xdp_zc?"true":"false",a->native_create?"true":"false",a->nvme_map_id,a->afxdp_map_id,t->setup_started,t->setup_completed,t->teardown_started,t->teardown_completed);
+  printf("],\"native\":{\"xdp_zero_copy\":%s,\"strict_create\":%s,\"nvme_map_id\":%u,\"afxdp_map_id\":%u}",a->native_xdp_zc?"true":"false",a->native_create?"true":"false",a->nvme_map_id,a->afxdp_map_id);
+  /* Actual completion counters; the controller checks them per arm, online. */
+  printf(",\"completion\":{\"read_cqes\":%"PRIu64",\"send_result_cqes\":%"PRIu64",\"send_notif_cqes\":%"PRIu64",\"zc_copied_packets\":%"PRIu64"}",sum.read_cqes,sum.result_cqes,sum.notif_cqes,sum.copied);
+  if(!strcmp(c.backend,"session")) {
+   const struct hft_native_stats *s=&a->native;
+   printf(",\"session_stats\":{\"batches_done\":%"PRIu64",\"read_submitted\":%"PRIu64",\"read_completed\":%"PRIu64",\"send_submitted\":%"PRIu64",\"send_completed\":%"PRIu64",\"state\":\"%s\",\"batches_abort\":%"PRIu64",\"rejects\":%"PRIu64",\"sequestered\":%"PRIu64",\"timeouts\":%"PRIu64",\"protocol_err\":%"PRIu64",\"last_err\":%d,\"inflight\":%"PRIu64"}",s->batches_done,s->read_submitted,s->read_completed,s->send_submitted,s->send_completed,s->state==1?"ACTIVE":"UNKNOWN",s->batches_abort,s->rejects,s->sequestered,s->timeouts,s->protocol_err,s->last_err,s->inflight);
+  }
+  printf(",\"measurements\":{\"clock\":\"CLOCK_MONOTONIC_RAW\",\"setup_started_ns\":%"PRIu64",\"setup_completed_ns\":%"PRIu64",\"teardown_started_ns\":%"PRIu64",\"teardown_completed_ns\":%"PRIu64",\"samples\":[",t->setup_started,t->setup_completed,t->teardown_started,t->teardown_completed);
   for(unsigned i=0;!c.probe&&i<c.bursts;i++) {
    const struct hft_burst_sample *r=&t->samples[i];
    printf("%s{\"burst\":%u,\"warmup\":%s,\"first_generation\":%"PRIu64",\"packet_count\":%u,\"read_submissions\":%"PRIu64",\"send_submissions\":%"PRIu64",\"started_ns\":%"PRIu64",\"local_release_ns\":%"PRIu64",\"peer_receipt_ns\":%"PRIu64",\"completed_ns\":%"PRIu64"}",i?",":"",i,i<c.warmup?"true":"false",r->first,c.burst,r->reads,r->sends,r->started,r->local_release,r->peer_receipt,r->completed);

@@ -922,3 +922,4 @@
 !/tests/eval/hft/test_benchmark_bpf_body.c
 !/tests/eval/gds/test_campaign_timing.py
 !/tests/eval/gds/_campaign_fixture.cc
+!/tests/eval/hft/test_strict_trial_accounting.py
