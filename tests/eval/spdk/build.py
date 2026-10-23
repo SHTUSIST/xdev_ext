@@ -45,7 +45,7 @@ CONFIGURE_FLAGS = ("--disable-tests", "--disable-unit-tests", "--disable-example
                    "--disable-apps", "--without-shared", "--without-crypto",
                    "--without-vhost", "--without-virtio", "--without-vfio-user",
                    "--without-xnvme", "--without-rbd", "--without-rdma", "--without-ublk",
-                   "--without-iscsi-initiator")
+                   "--without-iscsi-initiator", "--without-nvme-cuse", "--without-fuse")
 PKG_MODULES = ("spdk_nvme", "spdk_env_dpdk")
 WARN = ("-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror")
 

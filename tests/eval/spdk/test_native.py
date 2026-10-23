@@ -158,7 +158,7 @@ class Build(unittest.TestCase):
         configure = self.build.configure_command(src)
         self.assertEqual(configure[0], str(src / "configure"))
         for flag in ("--disable-tests", "--disable-unit-tests", "--disable-examples",
-                     "--disable-apps", "--without-shared"):
+                     "--disable-apps", "--without-shared", "--without-nvme-cuse", "--without-fuse"):
             self.assertIn(flag, configure)
         everything = " ".join(clone + sub + configure + self.build.make_command(src, 4))
         for forbidden in ("pkgdep", "setup.sh", "sudo", "install"):
@@ -219,8 +219,12 @@ class Build(unittest.TestCase):
     @unittest.skipUnless(os.environ.get("SPDK_INCLUDE_DIR"),
                          "SPDK_INCLUDE_DIR (official include/ at the pinned release) not given")
     def test_official_checkout_without_build_refused(self):
-        root = Path(os.environ["SPDK_INCLUDE_DIR"]).parent
+        # The supplied official tree may already be built. Isolate a headers-only
+        # view so this refusal test does not depend on external build progress.
         with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "headers-only"
+            root.mkdir()
+            (root / "include").symlink_to(Path(os.environ["SPDK_INCLUDE_DIR"]))
             p = self.run_build("--output", str(Path(tmp) / "bin"), "--spdk-root", str(root))
             self.assertEqual(p.returncode, 4, p.stderr)
             self.assertIn("pkg-config", p.stderr)

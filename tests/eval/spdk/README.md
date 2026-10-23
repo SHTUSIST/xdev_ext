@@ -93,7 +93,7 @@ python3 tests/eval/spdk/run.py --mode native-correctness --traddr 0000:5e:00.0 -
 `--fetch-sdk` clones SPDK `v25.05.1` (commit
 `44b23be7c35469bc0aba4b942c08c935125e2315`, checked after the clone) with
 the `dpdk` and `isa-l` submodules into `DIR/spdk`, configures it without
-tests, examples, apps, shared libraries and optional modules, builds it, and
+tests, examples, apps, shared libraries, FUSE/NVMe-CUSE and optional modules, builds it, and
 links the arm the way SPDK's `doc/pkgconfig.md` links the static nvme
 library (`--whole-archive -Bstatic` around `pkg-config --libs spdk_nvme
 spdk_env_dpdk`, then `pkg-config --libs --static spdk_syslibs`). `DIR` must
