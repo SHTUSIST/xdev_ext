@@ -20,8 +20,6 @@ BASE = runpy.run_path(str(HERE / "nvme_peer_async_test.py"))
 KERNEL = BASE["KERNEL"]
 
 EXTRA_SHIM = r'''
-static bool ctrl_sgl = true;
-static bool nvme_ctrl_sgl_supported(struct nvme_ctrl *c) { (void)c; return ctrl_sgl; }
 /* PRODUCTION_FUNCTIONS */'''
 
 CASES = r'''
@@ -110,7 +108,6 @@ def main():
     shim = BASE["SHIM"]
     for old, new in (
         ("#define MAX_TEST_FRAMES 4", "#define MAX_TEST_FRAMES 16"),
-        ("union { struct nvme_sgl_desc sgl; } dptr; u64 slba;", "union { struct nvme_sgl_desc sgl; struct { u64 prp1, prp2; }; } dptr; u64 slba;"),
         ("{ (void)g; assert(d == &pci_device); coherent_live++; *dma = coherent_base; return calloc(1, n); }",
          "{ (void)g; assert(d == &pci_device); coherent_live++; *dma = coherent_base; coherent_len = n; return coherent_ptr = calloc(1, n); }"),
         ("/* PRODUCTION_FUNCTIONS */", EXTRA_SHIM),

@@ -237,6 +237,7 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
  * descriptor list from ->submit until the worker consumed the completion.
  */
 struct nvme_xdev_ext_peer_slot {
+	struct xdev_ext_peer_nvme_seg spans[NVME_XDEV_EXT_PEER_MAX_PIECES];
 	struct nvme_xdev_ext_mech_completion done;
 	struct nvme_xdev_ext_peer_slot *next;
 	struct xdev_ext_peer_fd_lease *leases;	/* max_pieces, in payload order */
@@ -309,8 +310,8 @@ static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
 	res->leases = kvcalloc((size_t)depth * res->max_pieces,
 			       sizeof(*res->leases), GFP_KERNEL);
 	/* Each slot's list starts on the alignment nvme-pci gives its lists. */
-	stride = ALIGN(res->max_pieces * sizeof(*res->sgl),
-		       NVME_XDEV_EXT_PEER_SGL_ALIGN) / sizeof(*res->sgl);
+	/* A PRP list must not cross a controller page, even for small batches. */
+	stride = SZ_4K / sizeof(*res->sgl);
 	res->sgl_bytes = (size_t)depth * stride * sizeof(*res->sgl);
 	if (res->slots && res->leases)
 		res->sgl = dma_alloc_coherent(dev, res->sgl_bytes, &res->sgl_dma,
@@ -495,14 +496,14 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 		return -EOPNOTSUPP;
 #ifdef CONFIG_XDEV_EXT_MECH_ZEROCOPY
 	/* Only PCI has the strict SGL/no-bounce transport contract below. */
-	if (strcmp(ns->ctrl->ops->name, "pcie") ||
-	    !nvme_ctrl_sgl_supported(ns->ctrl) || queue_virt_boundary(ns->queue))
+	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER &&
+	    (strcmp(ns->ctrl->ops->name, "pcie") ||
+	     !nvme_ctrl_sgl_supported(ns->ctrl) || queue_virt_boundary(ns->queue)))
 		return -EOPNOTSUPP;
 #endif
  if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
   if (!capable(CAP_SYS_RAWIO)) return -EPERM;
-  if (!ns->ctrl->ops->peer_rw || strcmp(ns->ctrl->ops->name, "pcie") ||
-      !nvme_ctrl_sgl_supported(ns->ctrl)) return -EOPNOTSUPP;
+  if (!ns->ctrl->ops->peer_rw || strcmp(ns->ctrl->ops->name, "pcie")) return -EOPNOTSUPP;
   if (!write && !(st->file->f_mode & FMODE_READ)) return -EBADF;
  }
 	if (write && !(st->file->f_mode & FMODE_WRITE))
@@ -878,9 +879,9 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 	struct file *authority = xdev_ext_peer_mech_pool_file(pool);
 	u64 generation = xdev_ext_peer_mech_pool_generation(pool);
 	enum dma_data_direction dir = p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
-	u32 pos, n = 0, run_len = 0, total = 0;
+	u32 pos, n = 0, total = 0;
 	u32 nr = xdev_ext_mech_batch_nr_frames(b);
-	u64 run_end = 0;
+	u64 prp1, prp2;
 	int ret;
 
 	if (!authority || !nr)
@@ -911,34 +912,47 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 				return ret;
 			slot->nr_leases++;
 			len = l->lease.len;
-			/* SGL data blocks keep dword address and length. */
-			if ((l->lease.dma_address | len) & 3)
-				return -EINVAL;
-			if (n && run_end == l->lease.dma_address) {
-				run_len += len;
-				slot->sgl[n - 1].length = cpu_to_le32(run_len);
-			} else {
-				run_len = len;
-				slot->sgl[n++] = (struct nvme_sgl_desc) {
-					.addr = cpu_to_le64(l->lease.dma_address),
-					.length = cpu_to_le32(len),
-					.type = NVME_SGL_FMT_DATA_DESC << 4,
-				};
-			}
-			run_end = l->lease.dma_address + len;
+			if (!len || len > left || total > bytes || len > bytes - total)
+				return -EPROTO;
+			slot->spans[slot->nr_leases - 1] =
+				(struct xdev_ext_peer_nvme_seg){ l->lease.dma_address, len };
 			total += len;
 		}
 	}
 	if (total != bytes)
 		return -EINVAL;
-	if (n == 1)
-		cmd->rw.dptr.sgl = slot->sgl[0];
-	else
-		cmd->rw.dptr.sgl = (struct nvme_sgl_desc) {
-			.addr = cpu_to_le64(slot->sgl_dma),
-			.length = cpu_to_le32(n * sizeof(*slot->sgl)),
-			.type = NVME_SGL_FMT_LAST_SEG_DESC << 4,
-		};
+	if (nvme_ctrl_sgl_supported(p->ns->ctrl)) {
+		ret = xdev_ext_peer_nvme_sgl_build(slot->spans, slot->nr_leases,
+				slot->spans, res->max_pieces, &n);
+		if (ret)
+			return ret;
+		for (pos = 0; pos < n; pos++)
+			slot->sgl[pos] = (struct nvme_sgl_desc) {
+				.addr = cpu_to_le64(slot->spans[pos].addr),
+				.length = cpu_to_le32(slot->spans[pos].len),
+				.type = NVME_SGL_FMT_DATA_DESC << 4,
+			};
+		if (n == 1)
+			cmd->rw.dptr.sgl = slot->sgl[0];
+		else
+			cmd->rw.dptr.sgl = (struct nvme_sgl_desc) {
+				.addr = cpu_to_le64(slot->sgl_dma),
+				.length = cpu_to_le32(n * sizeof(*slot->sgl)),
+				.type = NVME_SGL_FMT_LAST_SEG_DESC << 4,
+			};
+	} else {
+		u64 *list = (u64 *)slot->sgl;
+
+		ret = xdev_ext_peer_nvme_prp_build(slot->spans, slot->nr_leases,
+				NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT, slot->sgl_dma,
+				list, SZ_4K / sizeof(*list), &prp1, &prp2, &n);
+		if (ret)
+			return ret;
+		for (pos = 0; pos < n; pos++)
+			list[pos] = cpu_to_le64(list[pos]);
+		cmd->rw.dptr.prp1 = cpu_to_le64(prp1);
+		cmd->rw.dptr.prp2 = cpu_to_le64(prp2);
+	}
 	return 0;
 }
 
@@ -1032,7 +1046,8 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	 * descriptors are already mapped for this PCI function, as in
 	 * nvme_pci_peer_rw(); without a bio nvme-pci neither maps nor unmaps.
 	 */
-	nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
+	if (nvme_ctrl_sgl_supported(ns->ctrl))
+		nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
 	req->cmd_flags |= REQ_FAILFAST_MASK;
 	nvme_req(req)->flags |= NVME_REQ_USERCMD;
 	slot->done.b = b;
