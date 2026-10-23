@@ -17,5 +17,12 @@ int main(void)
  b.life.index=1;b.life.phase=HFT_WAIT_RELEASE;CHECK(hft_history_commit(&a,&b,3)<0&&!a.history[3].committed);
  b.life.phase=HFT_FREE;CHECK(!hft_history_commit(&a,&b,3));
  CHECK(a.history[3].raw_tail[3071]==0x5a);free(a.history);free(b.allocation);
+ /* Correctness mode still admits 4096-byte payloads: the frame must hold
+  * headroom, payload and a nonempty suffix guard, never a negative tail. */
+ for(unsigned payload=512;payload<=4096;payload*=2) {
+  CHECK(!hft_allocate(&b,0,payload)&&b.bytes>=512+payload+32&&b.bytes%4096==0);
+  CHECK(hft_buffer_ok(&b,payload));b.allocation[b.bytes-1]^=1;CHECK(!hft_buffer_ok(&b,payload));
+  free(b.allocation);
+ }
  puts("actual baseline history: full frame/earlier corruption/reuse/duplicate/late NOTIF PASS");return 0;
 }

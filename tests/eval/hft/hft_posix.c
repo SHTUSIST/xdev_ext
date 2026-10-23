@@ -69,10 +69,11 @@ int hft_source_geometry(const struct hft_config *c)
 }
 int hft_allocate(struct hft_buffer *b,unsigned index,unsigned payload)
 {
- memset(b,0,sizeof(*b)); b->bytes=4096;
+ /* One 4KiB frame (measured HFT1 layout) unless headroom+payload+guard need more. */
+ memset(b,0,sizeof(*b)); b->bytes=(512+payload+32+4095)/4096*4096;
  if(posix_memalign((void **)&b->allocation,4096,b->bytes)) return -1;
  memset(b->allocation,0xa5,512); b->payload=b->allocation+512;
- memset(b->payload+payload,0x5a,4096-512-payload); hft_slot_init(&b->life,index);return 0;
+ memset(b->payload+payload,0x5a,b->bytes-512-payload); hft_slot_init(&b->life,index);return 0;
 }
 int hft_buffer_ok(const struct hft_buffer *b,unsigned payload)
 {
