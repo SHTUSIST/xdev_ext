@@ -105,7 +105,11 @@ static int xdev_ext_peer_net_one(struct net_device *dev, struct pci_dev *peer,
   * and refuses a stopped, detached or reconfiguring queue.
   */
  if (!netif_running(dev) || !netif_device_present(dev)) ret = -ENETDOWN;
- else ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);
+ else {
+  rcu_read_lock();
+  ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);
+  rcu_read_unlock();
+ }
  if (!ret && accepted) *accepted = true;
  if (ret) {
   xdev_ext_peer_tx_finish(p, ret, true); /* refused: no native owner */

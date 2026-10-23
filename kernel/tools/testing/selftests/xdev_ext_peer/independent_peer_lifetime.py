@@ -20,6 +20,9 @@ def actual_fd_code():
 
 
 SHIM = (HERE / "xdev_ext_peer_test_shim.h").read_text()
+# The module-pin mutant intentionally removes this adapter's only call;
+# Clang must compile it so the unchanged reference-count oracle rejects it.
+SHIM = SHIM.replace("static inline bool try_module_get", "static inline __attribute__((unused)) bool try_module_get")
 SHIM = SHIM.replace("struct file_operations { int unused; };", """
 struct inode { int unused; };
 struct file;

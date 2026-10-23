@@ -172,10 +172,10 @@ static const struct net_device_ops ops={.ndo_xdev_ext_peer_device=driver_device,
 static bool stop_flag(void *arg){assert(arg==&stop_at);return now>=stop_at;}
 static void endpoint_dead(void *arg){assert(arg==&dead_calls&&rtnl_depth==1);dead_calls++;}
 int test_initcall(void) __attribute__((weak));
-'''
-MAIN = r'''
 struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32,u32,void(*)(void*),void*) __attribute__((weak));
 int xdev_ext_peer_net_send_stoppable(struct xdev_ext_peer_net_endpoint*,struct file*,u64,const struct xdev_ext_peer_net_desc*,bool*,bool(*)(void*),void*) __attribute__((weak));
+'''
+MAIN = r'''
 static struct file allocation;
 static struct xdev_ext_peer_net_desc desc(u32 i){return (struct xdev_ext_peer_net_desc){.offset=4096+512*(u64)i,.bytes=512,.header_len=42,.header={0xAB}};}
 static void reset(void)
@@ -294,7 +294,7 @@ def main():
     source = (KERNEL / "io_uring/xdev_ext_peer_net.c").read_text()
     code = source[source.index("struct xdev_ext_peer_tx_wait {"):source.index("long xdev_ext_peer_net_ioctl(")]
     mutations = [
-        ("RTNL around every native submission", "cost", code.replace(" else ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);", " else { rtnl_lock(); ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx); rtnl_unlock(); }")),
+        ("RTNL around every native submission", "cost", code.replace(" ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);", " { rtnl_lock(); ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx); rtnl_unlock(); }")),
         ("wait context never reused", "cost", code.replace(" else xdev_ext_peer_tx_keep(spare, p);\n return ret;", " else kfree(p);\n return ret;")),
         ("fresh wait context not zeroed", "cost", code.replace("  p = kzalloc(sizeof(*p), GFP_KERNEL);", "  p = kmalloc(sizeof(*p), GFP_KERNEL);")),
         ("completion consumed twice after a successful timed wait", "cost", code.replace(" if (!completed) wait_for_completion(&p->done);", " (void)completed; wait_for_completion(&p->done);")),
