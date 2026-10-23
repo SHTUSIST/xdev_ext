@@ -920,3 +920,15 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+!/kernel/io_uring/xdev_ext_peer_net_track.h
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c
+
+!/kernel/drivers/net/ethernet/intel/
+!/kernel/drivers/net/ethernet/intel/ice/
+!/kernel/drivers/net/ethernet/intel/ice/ice_main.c
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx.c
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx.h
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx_lib.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_async_stage_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/ice_peer_ring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/mlx5_peer_rx_ring_test.py

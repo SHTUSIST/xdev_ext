@@ -51,7 +51,13 @@ struct pci_dev {int refs;};struct file {int unused;};
  * refused release keeps the file and mapping, like xdev_ext_peer_fd.c. */
 struct xdev_ext_peer_lease {void *mapping;void *next;u64 ticket;u64 dma_address;u32 len;};
 struct xdev_ext_peer_fd_lease {struct xdev_ext_peer_lease lease;struct file *file;};
-struct xdev_ext_peer_tx {u64 dma_address;u32 len;u16 header_len;const u8 *header;void(*complete)(struct xdev_ext_peer_tx*,int,bool);};
+struct xdev_ext_peer_tx {u64 dma_address;u32 len;u16 header_len;const u8 *header;void(*complete)(struct xdev_ext_peer_tx*,int,bool);struct xdev_ext_peer_tx *next;};
+/* P3/P4 endpoint API shim additions; existing TX/refcount assertions unchanged. */
+struct xdev_ext_peer_rx {struct xdev_ext_peer_rx *next;u64 dma_address;u32 len;u16 header_room;u8 *header;void(*complete)(struct xdev_ext_peer_rx*,int,u32,u32,bool);};
+struct xdev_ext_peer_net_endpoint;
+int xdev_ext_peer_net_rx_flush(struct xdev_ext_peer_net_endpoint *);
+#define rcu_read_lock() do {} while(0)
+#define rcu_read_unlock() do {} while(0)
 struct list_head {struct list_head *next,*prev;};
 #define LIST_HEAD(n) struct list_head n={&(n),&(n)}
 static UNUSED void INIT_LIST_HEAD(struct list_head *l){l->next=l->prev=l;}
@@ -117,8 +123,8 @@ static struct net test_net;static struct nsproxy test_ns={&test_net};static stru
 #define NETREG_UNREGISTERING 2
 typedef struct {int unused;} netdevice_tracker;
 struct net_device;
-struct net_device_ops {struct pci_dev *(*ndo_xdev_ext_peer_device)(struct net_device*);int(*ndo_xdev_ext_peer_tx)(struct net_device*,u32,struct xdev_ext_peer_tx*);};
-struct net_device {const struct net_device_ops *netdev_ops;int refs,ifindex,reg_state;u32 mtu,real_num_tx_queues;bool running,present;};
+struct net_device_ops {struct pci_dev *(*ndo_xdev_ext_peer_device)(struct net_device*);int(*ndo_xdev_ext_peer_tx)(struct net_device*,u32,struct xdev_ext_peer_tx*);int(*ndo_xdev_ext_peer_rx)(struct net_device*,u32,struct xdev_ext_peer_rx*);int(*ndo_xdev_ext_peer_rx_flush)(struct net_device*,u32);int(*ndo_xdev_ext_peer_rx_open)(struct net_device*,u32);};
+struct net_device {const struct net_device_ops *netdev_ops;int refs,ifindex,reg_state;u32 mtu,real_num_tx_queues,real_num_rx_queues;bool running,present;};
 static struct net_device devices[2];
 static UNUSED struct net_device *dev_get_by_index(struct net *n,int ifindex){assert(n==&test_net);for(int i=0;i<2;i++)if(devices[i].ifindex==ifindex){devices[i].refs++;return &devices[i];}return NULL;}
 static UNUSED struct net_device *netdev_get_by_index(struct net *n,int ifindex,netdevice_tracker *t,int gfp){(void)t;(void)gfp;return dev_get_by_index(n,ifindex);}
@@ -162,7 +168,7 @@ static int driver_tx(struct net_device *dev,u32 q,struct xdev_ext_peer_tx *tx)
  if(native_mode==0){tx->complete(tx,0,true);return 0;}
  native_pending=true;native_status=0;native_quiesced=true;native_due=native_mode==1?now+native_delay:~0UL/2;return 0;
 }
-static const struct net_device_ops ops={driver_device,driver_tx};
+static const struct net_device_ops ops={.ndo_xdev_ext_peer_device=driver_device,.ndo_xdev_ext_peer_tx=driver_tx};
 static bool stop_flag(void *arg){assert(arg==&stop_at);return now>=stop_at;}
 static void endpoint_dead(void *arg){assert(arg==&dead_calls&&rtnl_depth==1);dead_calls++;}
 int test_initcall(void) __attribute__((weak));
@@ -175,8 +181,8 @@ static struct xdev_ext_peer_net_desc desc(u32 i){return (struct xdev_ext_peer_ne
 static void reset(void)
 {
  memset(devices,0,sizeof(devices));
- devices[0]=(struct net_device){&ops,0,4,NETREG_REGISTERED,1500,4,true,true};
- devices[1]=(struct net_device){&ops,0,5,NETREG_REGISTERED,1500,4,true,true};
+ devices[0]=(struct net_device){&ops,0,4,NETREG_REGISTERED,1500,4,4,true,true};
+ devices[1]=(struct net_device){&ops,0,5,NETREG_REGISTERED,1500,4,4,true,true};
  peer_pci.refs=0;now=0;stop_at=~0UL;native_pending=false;native_mode=0;native_delay=0;native_tx=NULL;
  allocs=frees=wait_allocs=rtnl_calls=ndo_calls=ndo_under_rtnl=acquired=released=released_quiesced=dead_calls=release_stale=stale_releases=0;
  wait_size=sizeof(struct xdev_ext_peer_tx_wait);assert(!pending_work&&!rtnl_depth&&!nlive);

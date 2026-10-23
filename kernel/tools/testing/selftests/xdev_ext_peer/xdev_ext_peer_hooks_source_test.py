@@ -40,9 +40,10 @@ def sources(root):
     return {p: p.read_text() for p in sorted(root.rglob("*")) if p.suffix in (".c", ".h")}
 
 
+# API callback parameters contain parentheses; match them without truncating the signature.
 def body(text, name):
     """Body of the definition of function @name in @text, or None."""
-    m = re.search(r"^[^\n;#]*\b" + re.escape(name) + r"\(([^)]*)\)\s*\{", text, re.M)
+    m = re.search(r"^[^\n;#]*\b" + re.escape(name) + r"\(((?:[^()]|\([^()]*\))*)\)\s*\{", text, re.M)
     if not m:
         return None, None
     i = m.end()
@@ -72,7 +73,7 @@ def functions_with(files, *needles):
     """(path, name) of every function whose body contains all @needles."""
     found = []
     for path, text in files.items():
-        for m in re.finditer(r"^(?:static\s+)?[\w\s\*]+?\b(\w+)\(([^)]*)\)\s*\{", text, re.M):
+        for m in re.finditer(r"^(?:static\s+)?[\w\s\*]+?\b(\w+)\(((?:[^()]|\([^()]*\))*)\)\s*\{", text, re.M):
             i, depth = m.end(), 1
             while depth and i < len(text):
                 depth += (text[i] == "{") - (text[i] == "}")

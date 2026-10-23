@@ -303,10 +303,21 @@ struct xdev_ext_net_mech_info {
  __u32 nr_frames, mtu;
  struct xdev_ext_mech_peer peer;
  struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+ __u32 direction, header_room;
 };
 struct xdev_ext_net_mech_cqe {
  __s32 status;
  __u32 bytes_sent, entries_done, outcome; /* 0 OK; 1 refused; 2 ambiguous */
+};
+
+/* NET FROM_DEVICE: per-frame packet placement for protocol completion BPF.
+ * The base remains compatible with TX completion readers. */
+struct xdev_ext_net_rx_mech_cqe {
+ struct xdev_ext_net_mech_cqe base;
+ struct {
+  __u32 header_len, payload_len;
+  __u8 header[XDEV_EXT_NET_HEADER_MAX];
+ } rx[XDEV_EXT_NET_MAX_ENTRIES];
 };
 
 enum xdev_ext_mech_build_ret {

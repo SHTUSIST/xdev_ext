@@ -133,7 +133,7 @@ def main():
     source = (KERNEL / "io_uring/xdev_ext_mech_net_core.h").read_text()
     plan = source[source.index("static inline int xdev_ext_net_plan_check("):source.index("\n#endif")]
     mutations = [
-        ("payload coverage omitted", code, plan.replace("return bytes == f->data_len ? 0 : -EMSGSIZE;", "return 0;")),
+        ("payload coverage omitted", code, plan.replace("return cur + 1 == info->nr_frames && bytes == f->data_len ? 0 : -EMSGSIZE;", "return 0;")),
         ("plan gap/overlap accepted", code, plan.replace("(__u64)f->data_off + bytes != d[i].frame_off", "((__u64)f->data_off + bytes != d[i].frame_off && false)")),
         ("accepted prefix replayed as refusal", code.replace("for (i = bp->cqe.entries_done; i < bp->nr; i++) {", "for (i = 0; i < bp->nr; i++) {"), plan),
         ("unknown error treated quiesced", code.replace("if (accepted) xdev_ext_mech_batch_sequester", "if (accepted && false) xdev_ext_mech_batch_sequester"), plan),
