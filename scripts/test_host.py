@@ -13,6 +13,9 @@ KERNEL_TESTS = (
     'xdev_ext_mech_core_test', 'xdev_ext_mech_ce_core_test',
     'xdev_ext_mech_ce_lease_test',
     'xdev_ext_mech_step_test', 'xdev_ext_mech_lifecycle_test',
+    'xdev_ext_mech_refs_test', 'xdev_ext_mech_lifecycle_contract_test',
+    'xdev_ext_mech_fanout_step_test', 'xdev_ext_mech_cpu_xform_test',
+    'xdev_ext_mech_ctl_chains_test',
     'xdev_ext_mech_rx_stages_test', 'xdev_ext_mech_window_offset_test',
     'xdev_ext_mech_window_pipeline_test', 'xdev_ext_mech_ce_exact_completion_test',
     'provider/xdev_ext_mech_dma_core_test',
@@ -51,7 +54,10 @@ def main():
     if args.component in ('all', 'kernel'):
         folder = ROOT/'kernel/tools/testing/selftests/xdev_ext_mech'
         for name in KERNEL_TESTS:
-            cases.append((folder/(name+'.c'), ['-std=gnu11', '-I'+str(ROOT/'kernel')]))
+            extra = ['-std=gnu11', '-I'+str(ROOT/'kernel')]
+            if name in ('xdev_ext_mech_refs_test', 'xdev_ext_mech_lifecycle_contract_test'):
+                extra += ['-I'+str(folder/'model'/'shim')]
+            cases.append((folder/(name+'.c'), extra))
         cases.append((ROOT/'kernel/tools/testing/selftests/xdev_ext_preload'/
                       'xdev_ext_preload_ce_concurrency_test.c',
                       ['-std=gnu11', '-I'+str(ROOT/'kernel'),

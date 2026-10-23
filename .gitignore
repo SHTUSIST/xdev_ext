@@ -910,3 +910,16 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+
+# Reference-counted lifecycle and bounded CPU transform contracts.
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_refs_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_fanout_step_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_cpu_xform_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ctl_chains_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_lifecycle_contract_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xform_oracle.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_refs_source_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_explore.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_mutants.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_run.sh
