@@ -920,3 +920,5 @@
 !/tests/eval/spdk/spdk_owner.h
 !/tests/eval/spdk/test_owner.c
 !/tests/eval/spdk/test_native.py
+!/tests/eval/build_cuda_arms.py
+!/tests/eval/test_build_cuda_arms.py
