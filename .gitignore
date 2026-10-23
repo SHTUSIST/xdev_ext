@@ -910,3 +910,19 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+
+# Track B independent RED tests (exact allow-list).
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/behavior_program_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/bpf_glue_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/core_enforcement_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/glue_common.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/host/
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/host/vmlinux.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/program_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/provider_boundary_test.py
+!/kernel/tools/testing/selftests/xdev_ext_policy/
+!/kernel/tools/testing/selftests/xdev_ext_policy/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_policy/policy_test.c
+!/kernel/tools/testing/selftests/xdev_ext_policy/policy_test.py
