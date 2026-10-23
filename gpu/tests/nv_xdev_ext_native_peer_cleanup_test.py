@@ -9,6 +9,8 @@ mapping record) and reports failure.  Host C only; no GPU or peer device.
 """
 from pathlib import Path
 import re
+import os
+import subprocess
 import sys
 import unittest
 
@@ -23,11 +25,12 @@ FIXTURE = ex.HERE / "nv_xdev_ext_native_peer_cleanup_harness.c"
 P2P_FUNCTIONS = ("nvidia_p2p_map_status", "nv_p2p_insert_dma_mapping",
                  "nv_p2p_remove_dma_mapping", "nv_p2p_free_dma_mapping",
                  "nv_p2p_free_page_table", "nv_p2p_put_pages",
-                 "nvidia_p2p_put_pages_persistent", "nvidia_p2p_dma_unmap_pages")
+                 "nvidia_p2p_put_pages_persistent", "nvidia_p2p_dma_map_pages",
+                 "nvidia_p2p_dma_unmap_pages")
 PEER_FUNCTIONS = ("nv_xdev_ext_peer_pin", "nv_xdev_ext_peer_unpin", "nv_xdev_ext_peer_unmap")
 CONTROLS = ("put-success", "unmap-success", "peer-pin-mismatch-put-ok")
 G15 = ("put-fail-keeps-ref", "peer-unpin-fail")
-G16 = ("unmap-alloc-fail", "unmap-os-fail", "peer-unmap-propagates")
+G16 = ("unmap-alloc-fail", "unmap-os-fail", "peer-unmap-propagates", "table-cleanup-failure", "map-owner-preallocated")
 G17 = ("peer-pin-mismatch-put-fail",)
 
 
@@ -61,8 +64,11 @@ def p2p_bodies(text):
 
 
 def peer_bodies(text):
-    return "\n\n".join([ex.struct(text, "nv_xdev_ext_peer_allocation")] +
-                       [ex.function(text, n) for n in PEER_FUNCTIONS]) + "\n"
+    parts = [ex.struct(text, "nv_xdev_ext_peer_allocation")]
+    if ex.has_function(text, "nv_xdev_ext_peer_quarantine"):
+        parts += re.findall(r"(?m)^static (?:LIST_HEAD|DEFINE_MUTEX)\([^\n]*\);$", text)
+        parts.append(ex.function(text, "nv_xdev_ext_peer_quarantine"))
+    return "\n\n".join(parts + [ex.function(text, n) for n in PEER_FUNCTIONS]) + "\n"
 
 
 class NativePeerCleanup(unittest.TestCase):
@@ -70,6 +76,11 @@ class NativePeerCleanup(unittest.TestCase):
     def setUpClass(cls):
         cls.build = ex.Build(".native-peer-")
         p2p, header, peer = ex.read(NV_P2P), ex.read(NV_P2P_H), ex.read(PEER)
+        revision = os.environ.get("XDEV_EXT_PEER_RED_REVISION")
+        if revision:
+            p2p = subprocess.check_output(["git", "-C", str(ex.REPO), "show",
+                revision + ":gpu/" + NV_P2P], text=True)
+        preallocated = int("*node" in ex.function(p2p, "nv_p2p_insert_dma_mapping").split("{")[0])
         cls.build.write("nv_xdev_ext_native_peer_public.h", public_header(header))
         cls.build.write("nv_xdev_ext_native_peer_p2p.inc", p2p_bodies(p2p))
         cls.build.write("nv_xdev_ext_native_peer_provider.inc", peer_bodies(peer))
@@ -79,6 +90,7 @@ class NativePeerCleanup(unittest.TestCase):
         for cc in ex.compilers():
             out = "native-peer-" + Path(cc).name
             result, command = cls.build.compile(FIXTURE, out, compiler=cc,
+                                                defines=(f"HARNESS_PREALLOC_API={preallocated}",),
                                                 extra=("-Wno-type-limits",))
             if result.returncode:
                 cls.errors[cc] = " ".join(command) + "\n" + result.stderr[:3000]

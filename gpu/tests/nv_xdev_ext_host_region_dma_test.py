@@ -17,10 +17,11 @@ import nv_xdev_ext_extract as ex  # noqa: E402
 
 NV_P2P = "kernel-open/nvidia/nv-p2p.c"
 FIXTURE = ex.HERE / "nv_xdev_ext_host_region_dma_harness.c"
-FUNCTIONS = ("nv_pin_host_region", "nv_unpin_host_region")
+FUNCTIONS = ("nv_pin_host_region", "nv_unpin_host_region",
+             "nv_get_host_region_pages", "nv_get_cxl_buffer_pages", "nv_get_cxl_buffer_hugepages")
 OPTIONAL = ("nv_host_region_dma_map",)
-IOVA_CASES = ("pin-no-phys", "map-iova", "map-twice", "map-fail", "unpin-order")
-PHYS_CASES = ("phys-pin", "phys-map")
+IOVA_CASES = ("pin-no-phys", "map-iova", "map-twice", "map-fail", "unpin-order", "unmapped-getters")
+PHYS_CASES = ("phys-pin", "phys-map", "unmapped-getters")
 
 
 def actual(text):
@@ -28,7 +29,8 @@ def actual(text):
     if not enum:
         raise AssertionError("actual buffer type enum missing")
     parts = [ex.license_header(text), enum.group(),
-             ex.typedef_struct(text, "nv_p2p_umem_buffer_t")]
+             ex.typedef_struct(text, "nv_p2p_umem_buffer_t"),
+             "typedef nv_p2p_umem_buffer_t cxl_pinned_buffer_t;"]
     have_map = ex.has_function(text, "nv_host_region_dma_map")
     names = FUNCTIONS + (OPTIONAL if have_map else ())
     # Static nv_host_region_* helpers called by these bodies stay with them.

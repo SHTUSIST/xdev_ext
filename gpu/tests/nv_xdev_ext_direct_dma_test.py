@@ -68,7 +68,9 @@ class DirectDma(unittest.TestCase):
         cls.binaries, cls.errors = {}, {}
         for cc in ex.compilers():
             out = "direct-dma-" + Path(cc).name
-            result, command = cls.build.compile(FIXTURE, out, compiler=cc)
+            # Preserve the historical aligned raw-path control; default refusal has its own export suite.
+            result, command = cls.build.compile(FIXTURE, out, compiler=cc,
+                defines=("NV_XDEV_EXT_LEGACY_RAW_GPU_OFFSET",))
             if result.returncode:
                 cls.errors[cc] = " ".join(command) + "\n" + result.stderr[:3000]
             else:

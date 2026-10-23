@@ -173,6 +173,8 @@ static int dma_map_sgtable(struct device *dev, struct sg_table *sgt,
 		F.iova[i] = 0xA00000000ULL + (u64)i * PAGE_SIZE;
 	return 0;
 }
+static void dma_sync_sgtable_for_cpu(struct device *d, struct sg_table *s, enum dma_data_direction dir)
+{ (void)d; (void)s; (void)dir; }
 static void dma_unmap_sgtable(struct device *dev, struct sg_table *sgt,
 			      enum dma_data_direction dir, unsigned long attrs)
 {
@@ -316,6 +318,27 @@ static void case_phys_map(void)
 	nv_unpin_host_region(b);
 }
 
+static void case_unmapped_getters(void)
+{
+    nv_p2p_umem_buffer_t *b = pin();
+    NvU64 *addresses = NULL;
+    NvU32 count = 0, size = 0;
+    NV_STATUS expected = VARIANT_IOVA ? NV_ERR_NOT_SUPPORTED : NV_OK;
+    REQUIRE(b, "pin");
+    CHECK(nv_get_host_region_pages(b, 0, PAGE_SIZE, &addresses, &count, &size) == expected,
+          "unmapped host pages were advertised as DMA addresses");
+    CHECK(nv_get_cxl_buffer_pages(b, &addresses, &count) == expected,
+          "legacy CXL getter advertised untranslated pages");
+    CHECK(nv_get_cxl_buffer_hugepages(b, &addresses, &count, &size) == expected,
+          "legacy CXL huge getter advertised untranslated pages");
+#if VARIANT_IOVA
+    REQUIRE(MAP(b, &gpu_dev) == NV_OK, "map");
+    CHECK(nv_get_host_region_pages(b, 0, PAGE_SIZE, &addresses, &count, &size) == NV_OK &&
+          addresses[0] == F.iova[0], "mapped host IOVA getter positive control");
+#endif
+    nv_unpin_host_region(b);
+}
+
 struct named_case { const char *name; void (*fn)(void); };
 static const struct named_case cases[] = {
 	{ "pin-no-phys", case_pin_no_phys },
@@ -325,6 +348,7 @@ static const struct named_case cases[] = {
 	{ "unpin-order", case_unpin_order },
 	{ "phys-pin", case_phys_pin },
 	{ "phys-map", case_phys_map },
+	{ "unmapped-getters", case_unmapped_getters },
 };
 
 int main(int argc, char **argv)

@@ -156,7 +156,7 @@ class BackendHarness(unittest.TestCase):
 
     # G12 composed at the backend: failed window unbind keeps the owner
     def test_g12_failed_window_unbind_retains_owner(self):
-        self.run_cases(("region-unbind-fail",))
+        self.run_cases(("region-unbind-fail", "host-released-region-failed"))
 
 
 if __name__ == "__main__":

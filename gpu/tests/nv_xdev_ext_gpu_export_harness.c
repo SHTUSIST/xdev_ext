@@ -36,7 +36,7 @@ typedef struct OBJGPU { NvBool bIsSOC; NvBool (*getProperty)(struct OBJGPU *, in
 typedef struct TRANSFER_SURFACE { MEMORY_DESCRIPTOR *pMemDesc; NvU64 offset; } TRANSFER_SURFACE;
 typedef NvU64 RmPhysAddr;
 static MemoryManager manager;
-static KernelBus bus;
+static KernelBus bus __attribute__((unused));
 #define GPU_GET_MEMORY_MANAGER(g) ((void)(g), &manager)
 #define GPU_GET_KERNEL_BUS(g) ((void)(g), &bus)
 static NvBool property(OBJGPU *gpu, int name) { (void)gpu; (void)name; return NV_FALSE; }

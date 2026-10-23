@@ -31,7 +31,7 @@ static struct {
 	NvU8 rm_uuid[16];
 	char order[256];
 	void *outer;
-	unsigned int lookups;
+	unsigned int lookups, wrong_gpu;
 	NvU64 allocation_offset;
 } T;
 static void order(const char *s)
@@ -122,7 +122,7 @@ static NV_STATUS RmP2PGetInfoWithoutToken(NvU64 va, NvU64 len, void *unused,
 	return NV_OK;
 }
 static NV_STATUS RmP2PValidateSubDevice(ThirdPartyP2P *p, OBJGPU **g)
-{ (void)p; *g = &gpu0; return NV_OK; }
+{ (void)p; *g = T.wrong_gpu ? &gpu1 : &gpu0; return NV_OK; }
 static NvBool gpuIsApmFeatureEnabled(OBJGPU *g) { (void)g; return NV_FALSE; }
 #define IS_MIG_ENABLED(g) ((void)(g), 0)
 static NV_STATUS CliGetThirdPartyP2PVidmemInfoFromAddress(ThirdPartyP2P *p,
@@ -160,6 +160,9 @@ static NV_STATUS rmapiLockAcquire(int flags, int module)
 	return NV_OK;
 }
 static void rmapiLockRelease(void) { T.lock_held = 0; T.lock_releases++; }
+#define DRF_DEF(a, b, c, d) 0
+static OBJGPU *gpumgrGetGpuFromUuid(const NvU8 *id, unsigned int flags)
+{ (void)id; (void)flags; return &gpu0; }
 #define NV_GET_NV_STATE(g) ((void *)(g))
 static const NvU8 *RmGetGpuUuidRaw(void *nv) { (void)nv; return T.uuid_null ? NULL : T.rm_uuid; }
 #define os_mem_copy(d, s, n) memcpy((d), (s), (n))
@@ -216,9 +219,14 @@ static void nvidia_dev_put_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
 #include "../kernel-open/nvidia/nv-p2p-gpu-identity.h"
 typedef struct nv_p2p_vidmem_binding nv_p2p_vidmem_binding_t;
 
+#define THIS_MODULE NULL
+#define __module_get(m) ((void)(m))
 #include "nv_xdev_ext_vidmem_owner_actual.inc"
 
 /* ================================================================ cases */
+static nv_p2p_vidmem_binding_t *outer_residual;
+static P2P_UMEM_VIDMEM_BINDING *inner_residual;
+static void *bridge_residual;
 static const NvU8 opened_uuid[16] = { 0x10, 0x20, 0x30 };
 
 static nv_p2p_vidmem_binding_t *bind_ok(void)
@@ -227,7 +235,7 @@ static nv_p2p_vidmem_binding_t *bind_ok(void)
 	NvU32 seg = 0;
 	NV_STATUS st;
 	memcpy(T.rm_uuid, opened_uuid, 16);
-	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, &seg);
+	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, &seg, &outer_residual);
 	if (st != NV_OK || !b)
 		printf("FAIL bind_ok: status 0x%x\n", st);
 	return b;
@@ -253,14 +261,14 @@ static void case_bind_range(void)
 	T.lock_held = 1;
 	for (i = 0; i < 3; i++) {
 		P2P_UMEM_VIDMEM_BINDING *b = (void *)1;
-		CHECK(RmP2PUmemVidmemBind(va[i], len[i], &b) == NV_ERR_INVALID_ARGUMENT && !b,
+		CHECK(RmP2PUmemVidmemBind(va[i], len[i], &gpu0, &b, &inner_residual) == NV_ERR_INVALID_ARGUMENT && !b,
 		      "G08: invalid VA range %u accepted", i);
 	}
 	CHECK(T.lookups == 0 && T.inner_allocs == 0, "G08: invalid VA reached allocation lookup");
 	T.allocation_offset = (1 << 22) - 4096;
 	{
 		P2P_UMEM_VIDMEM_BINDING *b = NULL;
-		CHECK(RmP2PUmemVidmemBind(4096, 8192, &b) == NV_ERR_INVALID_ARGUMENT && !b,
+		CHECK(RmP2PUmemVidmemBind(4096, 8192, &gpu0, &b, &inner_residual) == NV_ERR_INVALID_ARGUMENT && !b,
 		      "G08: allocation window overflow accepted");
 		CHECK(T.frees == 1, "G08: rejected window must release its acquired dup");
 	}
@@ -289,13 +297,26 @@ static void case_resolve(void)
 	      "G07: resolve without the API lock must fail");
 }
 
+static void case_bind_wrong_gpu_before_dup(void)
+{
+    nv_p2p_vidmem_binding_t *b = NULL;
+    NV_STATUS status;
+    memcpy(T.rm_uuid, opened_uuid, 16);
+    T.wrong_gpu = 1;
+    status = nv_p2p_vidmem_bind(opened_uuid, 4096, 4096, &b, NULL, &outer_residual);
+    CHECK(status == NV_ERR_INVALID_DEVICE && !b && !outer_residual,
+          "binding accepted an allocation on a GPU whose device is not held");
+    CHECK(T.inner_allocs == 0 && T.frees == 0 && T.dev_refs == 0,
+          "wrong GPU reached allocation dup before device identity check");
+}
+
 static void case_bind_uuid_mismatch(void)
 {
 	nv_p2p_vidmem_binding_t *b = (void *)0x1;
 	NV_STATUS st;
 	static const NvU8 other[16] = { 0x99 };
 	memcpy(T.rm_uuid, other, 16);
-	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, NULL);
+	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, NULL, &outer_residual);
 	CHECK(st == NV_ERR_INVALID_DEVICE && b == NULL, "G07: mismatched UUID status 0x%x", st);
 	CHECK(T.frees == 1 && T.inner_frees == 1, "G07: dup not dropped once (free=%u inner=%u)",
 	      T.frees, T.inner_frees);
@@ -336,7 +357,7 @@ static void case_bridge_lock_fail(void)
 	NvU8 uuid[16];
 	NvU32 seg;
 	memcpy(T.rm_uuid, opened_uuid, 16);
-	REQUIRE(rm_p2p_umem_vidmem_bind(sp, 1, 1 << 20, uuid, &seg, (void **)&inner) == NV_OK,
+	REQUIRE(rm_p2p_umem_vidmem_bind(sp, 1, 1 << 20, opened_uuid, uuid, &seg, (void **)&inner, &bridge_residual) == NV_OK,
 		"bridge bind");
 	T.lock_status = NV_ERR_INVALID_LOCK_STATE;
 	CHECK(rm_p2p_umem_vidmem_unbind(sp, inner) == NV_ERR_INVALID_LOCK_STATE,
@@ -387,8 +408,9 @@ static void case_bind_cleanup_free_fail(void)
 	NV_STATUS st;
 	memcpy(T.rm_uuid, other, 16);
 	T.free_status = NV_ERR_INVALID_OBJECT;
-	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, NULL);
+	st = nv_p2p_vidmem_bind(opened_uuid, 0x7f0000000000ULL, 1 << 20, &b, NULL, &outer_residual);
 	CHECK(st != NV_OK && b == NULL, "mismatch must fail");
+	CHECK(outer_residual && outer_residual->rm, "failed bind lost residual ownership");
 	CHECK(T.inner_frees == 0, "G13: mismatch cleanup freed the binding after Free failed");
 	CHECK(T.dev_puts == 0 && T.dev_refs == 1 && T.outer_frees == 0,
 	      "G12: mismatch cleanup dropped the device ref (%u) or outer binding (%u) after "
@@ -403,8 +425,9 @@ static void case_bridge_uuid_null_free_fail(void)
 	NvU32 seg;
 	T.uuid_null = 1;
 	T.free_status = NV_ERR_INVALID_OBJECT;
-	CHECK(rm_p2p_umem_vidmem_bind(sp, 1, 1 << 20, uuid, &seg, &inner) ==
+	CHECK(rm_p2p_umem_vidmem_bind(sp, 1, 1 << 20, opened_uuid, uuid, &seg, &inner, &bridge_residual) ==
 	      NV_ERR_GPU_UUID_NOT_FOUND && inner == NULL, "uuid lookup failure");
+	CHECK(bridge_residual != NULL, "UUID failure lost retained RM binding");
 	CHECK(T.inner_frees == 0, "G13: bridge cleanup freed a binding whose dup Free failed");
 	CHECK(T.lock_held == 0, "lock left held");
 }
@@ -449,6 +472,7 @@ static const struct named_case cases[] = {
 	{ "resolve", case_resolve },
 	{ "bind-range", case_bind_range },
 	{ "bind-uuid-mismatch", case_bind_uuid_mismatch },
+    { "bind-wrong-gpu-before-dup", case_bind_wrong_gpu_before_dup },
 	{ "unbind-lock-fail", case_unbind_lock_fail },
 	{ "bridge-lock-fail", case_bridge_lock_fail },
 	{ "rm-free-fail", case_rm_free_fail },

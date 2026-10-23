@@ -44,7 +44,11 @@ static int list_empty(const struct list_head *h) { return h->next == h; }
 	for (pos = container_of((head)->next, __typeof__(*pos), member); \
 	     &pos->member != (head); \
 	     pos = container_of(pos->member.next, __typeof__(*pos), member))
+#define LIST_HEAD(n) struct list_head n = { &(n), &(n) }
 struct semaphore { int count; };
+#define DEFINE_MUTEX(n) struct semaphore n
+#define mutex_lock(s) down(s)
+#define mutex_unlock(s) up(s)
 static void down(struct semaphore *s) { s->count--; }
 static void up(struct semaphore *s) { s->count++; }
 
@@ -67,7 +71,7 @@ static struct {
 	unsigned int os_allocs, os_frees, fail_os_alloc_at, warns;
 	int live_os;
 	NV_STATUS rm_put_status, unmap_status;
-	unsigned int rm_puts, unmap_alloc_calls, unmap_peer_calls;
+	unsigned int rm_puts, rm_maps, unmap_alloc_calls, unmap_peer_calls;
 	NvU64 unmap_count, unmap_addrs[64];
 	int dev_refs;
 	unsigned int dev_puts, kfrees, kallocs;
@@ -120,6 +124,12 @@ static void nvidia_dev_put_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
 { (void)uuid; (void)sp; S.dev_puts++; S.dev_refs--; }
 
 #include "nv_xdev_ext_native_peer_public.h"   /* nv-p2p.h public structs, exact bytes */
+static NV_STATUS rm_p2p_dma_map_pages(nvidia_stack_t *sp, nv_dma_device_t *dev,
+    NvU8 *uuid, NvU64 page_size, NvU32 count, NvU64 *addresses, void **private)
+{
+    (void)sp; (void)dev; (void)uuid; (void)page_size; (void)count; (void)addresses;
+    S.rm_maps++; *private = (void *)0x1234; return NV_OK;
+}
 #include "nv_xdev_ext_native_peer_p2p.inc"    /* nv-p2p.c actual bodies */
 
 /* ---------------------------------------------- owned provider environment */
@@ -215,7 +225,11 @@ static struct nvidia_p2p_dma_mapping *mapping(struct nvidia_p2p_page_table *pt)
 	os_alloc_mem((void **)&d->dma_addresses, 2 * sizeof(NvU64));
 	d->dma_addresses[0] = 0xC0000000ULL;
 	d->dma_addresses[1] = 0xC0100000ULL;
+	#if HARNESS_PREALLOC_API
+	if (nv_p2p_insert_dma_mapping(m, d, NULL) != NV_OK)
+#else
 	if (nv_p2p_insert_dma_mapping(m, d) != NV_OK)
+#endif
 		return NULL;
 	return d;
 }
@@ -249,6 +263,47 @@ static void case_put_fail_keeps_ref(void)
 	CHECK(rc == 0 && S.dev_puts == 1 && S.dev_refs == 0,
 	      "G15: retry must release the table and the device ref exactly once "
 	      "(rc=%d puts=%u refs=%d)", rc, S.dev_puts, S.dev_refs);
+}
+
+static void case_table_cleanup_failure(void)
+{
+    struct nvidia_p2p_page_table *pt = table();
+    struct nvidia_p2p_dma_mapping *d = mapping(pt);
+    int live = S.live_os;
+    REQUIRE(pt && d, "table and mapping");
+    S.unmap_status = NV_ERR_INVALID_STATE;
+    nv_p2p_free_page_table(pt);
+    CHECK(S.live_os == live, "failed native table cleanup released retained objects");
+    /* Avoid touching freed storage on a failing implementation. */
+    if (S.live_os == live)
+        CHECK(still_listed(pt, d), "failed native table cleanup lost mapping owner");
+}
+
+static void case_map_owner_preallocated(void)
+{
+    struct nvidia_p2p_page_table *pt = table();
+    struct nvidia_p2p_dma_mapping *d = NULL;
+    int live, rc;
+    REQUIRE(pt, "table");
+    os_alloc_mem((void **)&pt->pages, sizeof(*pt->pages));
+    os_alloc_mem((void **)&pt->pages[0], sizeof(*pt->pages[0]));
+    pt->entries = 1;
+    pt->pages[0]->physical_address = 0xb0000000;
+    live = S.live_os;
+    /* mapping record, address array, then owner node: the third failure must
+     * happen before the native RM mapping obtains device reachability. */
+    S.fail_os_alloc_at = S.os_allocs + 3;
+    rc = nvidia_p2p_dma_map_pages(&peer, pt, &d);
+    CHECK(rc != 0 && !d && S.rm_maps == 0 && S.live_os == live,
+          "native mapping acquired reachability before fallible owner allocation");
+    S.fail_os_alloc_at = 0;
+    CHECK(nvidia_p2p_dma_map_pages(&peer, pt, &d) == 0 && d && S.rm_maps == 1,
+          "native mapping positive control");
+    CHECK(nvidia_p2p_put_pages_persistent(0x10000, pt, 0) != 0 && S.rm_puts == 0,
+          "persistent allocation released with a live DMA mapping");
+    CHECK(nvidia_p2p_dma_unmap_pages(&peer, pt, d) == 0, "unmap");
+    CHECK(nvidia_p2p_put_pages_persistent(0x10000, pt, 0) == 0 && S.live_os == 0,
+          "unmap then put must release every owner");
 }
 
 static void case_put_success(void)
@@ -382,6 +437,7 @@ static void case_peer_pin_mismatch_put_fail(void)
 	rc = nv_xdev_ext_peer_pin(&gpu_file, 0x10000, 0x10000, &out);
 	CHECK(rc == -EXDEV && out == NULL, "mismatch rc=%d", rc);
 	CHECK(harness_module.refs == 1, "G17: module not pinned for the retained allocation");
+	CHECK(!list_empty(&nv_xdev_ext_peer_quarantined), "G17: retained allocation is not reachable from quarantine");
 	CHECK(S.dev_refs == 1, "G17: GPU device reference dropped although the persistent "
 	      "allocation could not be released (refs=%d)", S.dev_refs);
 	CHECK(S.live_os > 0, "G17: persistent page table freed after failed put");
@@ -406,6 +462,8 @@ struct named_case { const char *name; void (*fn)(void); };
 static const struct named_case cases[] = {
 	{ "put-fail-keeps-ref", case_put_fail_keeps_ref },
 	{ "put-success", case_put_success },
+    { "table-cleanup-failure", case_table_cleanup_failure },
+    { "map-owner-preallocated", case_map_owner_preallocated },
 	{ "unmap-alloc-fail", case_unmap_alloc_fail },
 	{ "unmap-os-fail", case_unmap_os_fail },
 	{ "unmap-success", case_unmap_success },

@@ -768,9 +768,10 @@ typedef struct nv_p2p_ce_host { int unused; } nv_p2p_ce_host_t;
 static nv_p2p_ce_host_t harness_rm_host;
 
 static NV_STATUS nv_p2p_vidmem_bind(const NvU8 *uuid, NvU64 va, NvU64 len,
-	nv_p2p_vidmem_binding_t **out, NvU32 *seg)
+	nv_p2p_vidmem_binding_t **out, NvU32 *seg, nv_p2p_vidmem_binding_t **residual)
 {
 	(void)uuid; (void)va; (void)len;
+	*residual = NULL;
 	might_sleep_check("nv_p2p_vidmem_bind");
 	*out = calloc(1, sizeof(**out));
 	(*out)->live = 1;
@@ -1293,9 +1294,13 @@ static void case_pre_submit_failure(void)
 	REQUIRE(bind(&fx, 4) == 0, "bind");
 	H.submit_status = NV_ERR_NO_MEMORY;
 	H.submit_issued = 0;
+	memset(H.synced_cpu, 0, sizeof(H.synced_cpu));
 	CHECK(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) < 0,
 	      "pre-submit failure must return an error");
 	CHECK(H.done[1].count == 0, "pre-submit failure completed");
+#if VARIANT_IOVA
+	CHECK(H.synced_cpu[0], "pre-submit refusal did not return streaming ownership to CPU");
+#endif
 	H.submit_status = NV_OK;
 	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "retry submit");
 	deliver(H.rm_last);
@@ -1635,6 +1640,23 @@ static void case_sync(void)
 #endif
 }
 
+static void case_host_released_region_failed(void)
+{
+    struct fixture fx;
+    REQUIRE(bind(&fx, 4) == 0, "bind");
+    CHECK(ops->unbind_host(fx.host) == 0, "host unbind");
+    fx.host = NULL; /* core checked teardown transfers ownership on success */
+    H.vidmem_unbind_status = NV_ERR_INVALID_LOCK_STATE;
+    CHECK(ops->unbind_region(&fx.r) < 0 && fx.r.priv, "region failure dropped owner");
+    CHECK(ops->unbind_host(fx.host) == 0, "NULL host retry");
+    CHECK(ops->unbind_region(&fx.r) < 0, "quarantined region retry");
+    CHECK(H.rm_unbind == 1 && H.vidmem_unbind == 1, "teardown repeated native release");
+#if VARIANT_IOVA
+    CHECK(H.dma_unmap == 1 && H.sg_free == 1, "host mapping released twice");
+#endif
+    common_checks();
+}
+
 static void case_region_unbind_fail(void)
 {
 	struct fixture fx;
@@ -1774,6 +1796,7 @@ static const struct named_case cases[] = {
 	{ "phys-identity", case_phys_identity },
 	{ "sync", case_sync },
 	{ "region-unbind-fail", case_region_unbind_fail },
+    { "host-released-region-failed", case_host_released_region_failed },
 	{ "race", case_race },
 };
 

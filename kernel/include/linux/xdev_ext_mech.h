@@ -564,6 +564,8 @@ struct xdev_ext_ce_xfer {
 	u64 gpu_off;			/* in the window */
 	u32 len;
 	u32 flags;			/* XDEV_EXT_CE_F_* */
+	u64 owner;
+	u64 generation;
 };
 
 /*
@@ -579,12 +581,12 @@ struct xdev_ext_ce_backend_ops {
 	int  (*bind_region)(struct file *f, u64 gpu_va, u64 len,
 			    struct xdev_ext_ce_region *out);
 	/* process context, may sleep; never after an AMBIGUOUS outcome */
-	void (*unbind_region)(struct xdev_ext_ce_region *r);
+	int (*unbind_region)(struct xdev_ext_ce_region *r);
 	/* CREATE, process context: pool pages, already pinned by their UMEM */
 	int  (*bind_host)(struct xdev_ext_ce_region *r, struct page **pages, u32 nr,
 			  void **host);
 	/* process context */
-	void (*unbind_host)(void *host);
+	int (*unbind_host)(void *host);
 	/* session worker, may sleep; dir is enum xdev_ext_mech_dir. Retain ticket
 	 * by value for the callback, never recover it from a mutable cookie. */
 	int  (*submit)(struct xdev_ext_ce_region *r, void *host, u32 dir,
@@ -601,6 +603,8 @@ void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops);
  * was written.  status 0 is OK; a failure is PRE_SUBMIT_FAILED without
  * hw_submitted and AMBIGUOUS with it.
  */
+bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
+		const struct xdev_ext_ce_xfer *x, u32 n);
 void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
 		     bool hw_submitted, u64 bytes_done);
 

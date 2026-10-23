@@ -14,7 +14,17 @@
 struct nv_xdev_ext_peer_allocation {
  struct nvidia_p2p_page_table *pages;
  u64 va;
+ struct list_head quarantine;
 };
+static LIST_HEAD(nv_xdev_ext_peer_quarantined);
+static DEFINE_MUTEX(nv_xdev_ext_peer_quarantine_lock);
+static void nv_xdev_ext_peer_quarantine(struct nv_xdev_ext_peer_allocation *a)
+{
+ __module_get(THIS_MODULE);
+ mutex_lock(&nv_xdev_ext_peer_quarantine_lock);
+ list_add_tail(&a->quarantine, &nv_xdev_ext_peer_quarantined);
+ mutex_unlock(&nv_xdev_ext_peer_quarantine_lock);
+}
 static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
 {
  nv_linux_file_private_t *nvlfp = NV_GET_LINUX_FILE_PRIVATE(f);
@@ -23,6 +33,8 @@ static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
  nvidia_stack_t *sp = NULL;
  const NvU8 *uuid;
  int rc;
+ if (!out) return -EINVAL;
+ *out = NULL;
  if ((va | len) & 65535 || !len || nv_is_control_device(NV_FILE_INODE(f)))
   return -EINVAL;
  rc = nv_wait_open_complete_interruptible(nvlfp);
@@ -48,7 +60,7 @@ static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
   rc = -EXDEV;
   /* A failed put cannot justify losing a persistent allocation handle. */
   if (nvidia_p2p_put_pages_persistent(va, a->pages, NVIDIA_P2P_FLAGS_DEFAULT)) {
-   __module_get(THIS_MODULE);
+   nv_xdev_ext_peer_quarantine(a);
    nv_printf(NV_DBG_ERRORS, "NVRM: XDEV_EXT peer pin cleanup failed; retaining allocation\n");
    a = NULL;
   }

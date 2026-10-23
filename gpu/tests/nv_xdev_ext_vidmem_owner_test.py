@@ -22,7 +22,7 @@ P2P_H = "src/nvidia/inc/kernel/mem_mgr/p2p.h"
 OSAPI = "src/nvidia/arch/nvalloc/unix/src/osapi.c"
 NV_P2P = "kernel-open/nvidia/nv-p2p.c"
 FIXTURE = ex.HERE / "nv_xdev_ext_vidmem_owner_harness.c"
-CONTROLS = ("resolve", "bind-uuid-mismatch", "bridge-lock-fail", "unbind-success-order",
+CONTROLS = ("resolve", "bind-uuid-mismatch", "bind-wrong-gpu-before-dup", "bridge-lock-fail", "unbind-success-order",
             "unbind-stack-fail")
 G12 = ("unbind-lock-fail", "bind-cleanup-free-fail")
 G13 = ("rm-free-fail", "outer-rm-free-fail", "bridge-uuid-null-free-fail")
