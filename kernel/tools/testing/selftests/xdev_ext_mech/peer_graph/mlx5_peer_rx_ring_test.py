@@ -7,6 +7,7 @@ import re
 import subprocess
 import tempfile
 KERNEL=Path(__file__).resolve().parents[5]
+# RX adapter now carries the owner token and the device-provided termination key.
 SHIM=r'''
 #include <assert.h>
 #include <stdint.h>
@@ -26,7 +27,7 @@ typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u6
 struct xdev_ext_peer_rx {struct xdev_ext_peer_rx *next;u64 dma_address;u32 len;u16 header_room;u8 *header;void(*complete)(struct xdev_ext_peer_rx*,int,u32,u32,bool);};
 struct mlx5_wqe_data_seg {u32 byte_count,lkey;u64 addr;};
 struct mlx5_wq_cyc {u16 head,used;struct mlx5_wqe_data_seg dseg[8][4];};
-struct mlx5e_peer_rq {int lock;struct xdev_ext_peer_rx **posted;u8 *headers;u64 headers_dma;u32 stride;};
+struct mlx5e_peer_rq {int lock;struct xdev_ext_peer_rx **posted;u8 *headers;u64 headers_dma;u32 stride;u64 owner;u32 terminate_lkey_be;};
 struct mlx5e_rq {struct mlx5e_peer_rq *peer;unsigned long state;u32 mkey_be;struct {struct mlx5_wq_cyc wq;}wqe;};
 struct channel {struct mlx5e_rq rq;};
 struct mlx5e_priv {int state_lock;unsigned long state;struct {u32 num;struct channel **c;}channels;};
@@ -50,18 +51,18 @@ MAIN=r'''
 int main(void)
 {
  u8 headers[8*128]={0},dest[2][42];struct xdev_ext_peer_rx *posted[8]={0};
- struct mlx5e_peer_rq peer={.posted=posted,.headers=headers,.headers_dma=0x500000,.stride=64};
+ struct mlx5e_peer_rq peer={.posted=posted,.headers=headers,.headers_dma=0x500000,.stride=64,.owner=1,.terminate_lkey_be=MLX5_TERMINATE_SCATTER_LIST_LKEY};
  struct channel ch={.rq={.peer=&peer,.state=1,.mkey_be=77}};struct channel *cp=&ch;
  struct mlx5e_priv priv={.state=1,.channels={1,&cp}};struct net_device dev={&priv,1500};
  struct xdev_ext_peer_rx rx[2]={{.dma_address=0x700000,.len=1472,.header_room=42,.header=dest[0],.complete=done},{.dma_address=0x800000,.len=1472,.header_room=42,.header=dest[1],.complete=done}};rx[0].next=&rx[1];
- assert(!mlx5e_peer_recv(&dev,0,rx)&&doorbells==1&&!callbacks&&ch.rq.wqe.wq.used==2);
+ assert(!mlx5e_peer_recv(&dev,0,1,rx)&&doorbells==1&&!callbacks&&ch.rq.wqe.wq.used==2);
  for(int i=0;i<2;i++){struct mlx5_wqe_data_seg *d=ch.rq.wqe.wq.dseg[i];assert(d[0].addr==0x500000+(u64)i*128&&d[0].byte_count==42&&d[0].lkey==77);assert(d[1].addr==rx[i].dma_address&&d[1].byte_count==1472&&d[1].lkey==77);assert(d[2].byte_count==0&&d[2].lkey==MLX5_TERMINATE_SCATTER_LIST_LKEY);}
  memset(headers,0xab,42);mlx5e_peer_rx_done(&ch.rq,0,0,1514);assert(callbacks==1&&!status_seen&&header_seen==42&&payload_seen==1472&&!memcmp(dest[0],headers,42));
  mlx5e_peer_rx_done(&ch.rq,0,0,1514);assert(callbacks==1);
  mlx5e_peer_rx_done(&ch.rq,1,0,2000);assert(callbacks==2&&status_seen==-EMSGSIZE&&!header_seen&&!payload_seen);
  puts("ok 1 - mlx5 RX posts two-segment header/peer WQEs with termination and one doorbell; CQ copies bounded header and retires each once");
- ch.rq.wqe.wq.used=7;assert(mlx5e_peer_recv(&dev,0,rx)==-EAGAIN&&doorbells==1&&!posted[2]);
- ch.rq.wqe.wq.used=0;rx[1].header_room=129;assert(mlx5e_peer_recv(&dev,0,rx)==-EINVAL&&doorbells==1&&!posted[2]);
+ ch.rq.wqe.wq.used=7;assert(mlx5e_peer_recv(&dev,0,1,rx)==-EAGAIN&&doorbells==1&&!posted[2]);
+ ch.rq.wqe.wq.used=0;rx[1].header_room=129;assert(mlx5e_peer_recv(&dev,0,1,rx)==-EINVAL&&doorbells==1&&!posted[2]);
  puts("ok 2 - mlx5 RX rejects insufficient whole-chain room and invalid later elements before writing WQEs");
  return 0;
 }

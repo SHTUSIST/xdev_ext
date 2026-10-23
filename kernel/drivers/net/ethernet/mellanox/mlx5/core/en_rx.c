@@ -392,7 +392,7 @@ static void mlx5e_xsk_free_rx_wqe(struct mlx5e_wqe_frag_info *wi)
 #ifdef CONFIG_XDEV_EXT_MECH
 /* The bind-owned RQ is exclusively filled here. CQ and posting serialize
  * just the cyclic indices; process-context channel teardown uses state_lock. */
-int mlx5e_peer_recv(struct net_device *dev, u32 queue, struct xdev_ext_peer_rx *rx)
+int mlx5e_peer_recv(struct net_device *dev, u32 queue, u64 owner, struct xdev_ext_peer_rx *rx)
 {
  struct mlx5e_priv *priv = netdev_priv(dev);
  struct xdev_ext_peer_rx *it;
@@ -413,7 +413,8 @@ int mlx5e_peer_recv(struct net_device *dev, u32 queue, struct xdev_ext_peer_rx *
  if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num) goto unlock;
  rq = &priv->channels.c[queue]->rq;
  peer = rq->peer;
- if (!peer || !test_bit(MLX5E_RQ_STATE_ENABLED, &rq->state) ||
+ if (!peer || peer->owner != owner) { ret = -ESTALE; goto unlock; }
+ if (!test_bit(MLX5E_RQ_STATE_ENABLED, &rq->state) ||
      test_bit(MLX5E_RQ_STATE_RECOVERING, &rq->state)) goto unlock;
  wq = &rq->wqe.wq;
  spin_lock_bh(&peer->lock);
@@ -429,7 +430,7 @@ int mlx5e_peer_recv(struct net_device *dev, u32 queue, struct xdev_ext_peer_rx *
   dseg[1].byte_count = cpu_to_be32(it->len);
   dseg[1].lkey = rq->mkey_be;
   if (peer->stride > 2 * sizeof(*dseg))
-   dseg[2].lkey = MLX5_TERMINATE_SCATTER_LIST_LKEY;
+   dseg[2].lkey = peer->terminate_lkey_be;
   peer->posted[ix] = it;
   mlx5_wq_cyc_push(wq);
  }

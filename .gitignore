@@ -932,3 +932,4 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_async_stage_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/ice_peer_ring_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/mlx5_peer_rx_ring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/quality_peer_review_regressions.py

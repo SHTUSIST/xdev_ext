@@ -106,11 +106,12 @@ def split_sync(text, macro="XDEV_EXT_PEER_NET_SYNC_ONE"):
 
 
 def netdevice():
+    # RX hooks carry an endpoint owner token to reject stale queue users.
     text = re.sub(r"\s+", " ", read(KERNEL / "include/linux/netdevice.h"))
-    check("P3", re.search(r"int \(\*ndo_xdev_ext_peer_rx\)\( ?struct net_device \*[^,]*, ?u32[^,]*, ?struct xdev_ext_peer_rx \*[^)]*\);", text),
-          "netdevice.h declares ndo_xdev_ext_peer_rx(dev, queue, struct xdev_ext_peer_rx *)")
-    check("P3", re.search(r"int \(\*ndo_xdev_ext_peer_rx_flush\)\( ?struct net_device \*[^,]*, ?u32[^)]*\);", text),
-          "netdevice.h declares ndo_xdev_ext_peer_rx_flush(dev, queue)")
+    check("P3", re.search(r"int \(\*ndo_xdev_ext_peer_rx\)\( ?struct net_device \*[^,]*, ?u32[^,]*, ?u64[^,]*, ?struct xdev_ext_peer_rx \*[^)]*\);", text),
+          "netdevice.h declares ndo_xdev_ext_peer_rx(dev, queue, owner, struct xdev_ext_peer_rx *)")
+    check("P3", re.search(r"int \(\*ndo_xdev_ext_peer_rx_flush\)\( ?struct net_device \*[^,]*, ?u32[^,]*, ?u64[^)]*\);", text),
+          "netdevice.h declares ndo_xdev_ext_peer_rx_flush(dev, queue, owner)")
     check("P3", "struct xdev_ext_peer_rx;" in text, "netdevice.h forward-declares struct xdev_ext_peer_rx")
     check("P5", re.search(r"int \(\*ndo_xdev_ext_peer_tx\)\( ?struct net_device \*[^,]*, ?u32[^,]*, ?struct xdev_ext_peer_tx \*[^)]*\);", text),
           "ndo_xdev_ext_peer_tx keeps its signature for every driver")
@@ -130,12 +131,12 @@ def mlx5():
     check("P3", rx, "mlx5e netdev ops set .ndo_xdev_ext_peer_rx")
     check("P3", flush, "mlx5e netdev ops set .ndo_xdev_ext_peer_rx_flush")
     _, params, code = find(files, rx) if rx else (None, None, None)
-    check("P3", code is not None and params_match(params, "struct net_device", "u32", "struct xdev_ext_peer_rx"),
+    check("P3", code is not None and params_match(params, "struct net_device", "u32", "u64", "struct xdev_ext_peer_rx"),
           "mlx5 RX post hook defined with the netdevice signature")
     check("P3", code is not None and "->next" in code, "mlx5 RX post walks the whole element chain")
     check("P3", code is not None and re.search(r"mkey|lkey", code), "mlx5 RX WQE data segment carries the peer MKEY")
     _, params, fcode = find(files, flush) if flush else (None, None, None)
-    check("P3", fcode is not None and params_match(params, "struct net_device", "u32"), "mlx5 RX flush defined with the netdevice signature")
+    check("P3", fcode is not None and params_match(params, "struct net_device", "u32", "u64"), "mlx5 RX flush defined with the netdevice signature")
     completers = [n for p, n, c in functions_with(files, "xdev_ext_peer_rx", "->complete(") if n not in (rx, flush)]
     check("P3", completers, "an mlx5 RX completion function calls rx->complete() outside the post path")
     poll = [n for p, n, c in functions_with(files) if re.search(r"poll_rx_cq|handle_rx_cqe|rx_cqe", n)

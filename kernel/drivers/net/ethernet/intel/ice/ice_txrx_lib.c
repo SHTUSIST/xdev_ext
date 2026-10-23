@@ -425,12 +425,17 @@ int ice_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *tx
   desc->buf_addr = cpu_to_le64(it->dma_address);
   desc->cmd_type_offset_bsz = ice_build_ctob(ICE_TX_DESC_CMD_EOP, 0, it->len, 0);
   tail = ntu;
-  head->rs_idx = tail;
   if (++ntu == xdp_ring->count) ntu = 0;
  }
  ICE_TX_DESC(xdp_ring, tail)->cmd_type_offset_bsz |=
   cpu_to_le64(ICE_TX_DESC_CMD_RS << ICE_TXD_QW1_CMD_S);
- xdp_ring->tx_buf[first].rs_idx = tail;
+ /* The final RS proves completion of every packet in this FIFO chain.
+  * Teardown inspects heads individually, including interior/wrapped heads. */
+ for (u32 i = 0, head = first; i < n; i++) {
+  xdp_ring->tx_buf[head].rs_idx = tail;
+  head += 2;
+  if (head >= xdp_ring->count) head -= xdp_ring->count;
+ }
  xdp_ring->next_to_use = ntu;
  xdp_ring->xdp_tx_active += n;
  /* Publish the entire chain once, after every header and descriptor. */

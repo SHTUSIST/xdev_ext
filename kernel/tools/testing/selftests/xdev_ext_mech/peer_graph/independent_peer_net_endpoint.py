@@ -26,6 +26,7 @@ SHIM = r'''
 #include <errno.h>
 #include <linux/types.h>
 typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u64;
+#define U64_MAX UINT64_MAX
 #define UNUSED __attribute__((unused))
 #define GFP_KERNEL 0
 #define GFP_ATOMIC 1
@@ -52,7 +53,7 @@ struct pci_dev {int refs;};struct file {int unused;};
 struct xdev_ext_peer_lease {void *mapping;void *next;u64 ticket;u64 dma_address;u32 len;};
 struct xdev_ext_peer_fd_lease {struct xdev_ext_peer_lease lease;struct file *file;};
 struct xdev_ext_peer_tx {u64 dma_address;u32 len;u16 header_len;const u8 *header;void(*complete)(struct xdev_ext_peer_tx*,int,bool);struct xdev_ext_peer_tx *next;};
-/* P3/P4 endpoint API shim additions; existing TX/refcount assertions unchanged. */
+/* RX owner-token API adapter; existing TX/refcount assertions unchanged. */
 struct xdev_ext_peer_rx {struct xdev_ext_peer_rx *next;u64 dma_address;u32 len;u16 header_room;u8 *header;void(*complete)(struct xdev_ext_peer_rx*,int,u32,u32,bool);};
 struct xdev_ext_peer_net_endpoint;
 int xdev_ext_peer_net_rx_flush(struct xdev_ext_peer_net_endpoint *);
@@ -123,7 +124,7 @@ static struct net test_net;static struct nsproxy test_ns={&test_net};static stru
 #define NETREG_UNREGISTERING 2
 typedef struct {int unused;} netdevice_tracker;
 struct net_device;
-struct net_device_ops {struct pci_dev *(*ndo_xdev_ext_peer_device)(struct net_device*);int(*ndo_xdev_ext_peer_tx)(struct net_device*,u32,struct xdev_ext_peer_tx*);int(*ndo_xdev_ext_peer_rx)(struct net_device*,u32,struct xdev_ext_peer_rx*);int(*ndo_xdev_ext_peer_rx_flush)(struct net_device*,u32);int(*ndo_xdev_ext_peer_rx_open)(struct net_device*,u32);};
+struct net_device_ops {struct pci_dev *(*ndo_xdev_ext_peer_device)(struct net_device*);int(*ndo_xdev_ext_peer_tx)(struct net_device*,u32,struct xdev_ext_peer_tx*);int(*ndo_xdev_ext_peer_rx)(struct net_device*,u32,u64,struct xdev_ext_peer_rx*);int(*ndo_xdev_ext_peer_rx_flush)(struct net_device*,u32,u64);int(*ndo_xdev_ext_peer_rx_open)(struct net_device*,u32,u64);};
 struct net_device {const struct net_device_ops *netdev_ops;int refs,ifindex,reg_state;u32 mtu,real_num_tx_queues,real_num_rx_queues;bool running,present;};
 static struct net_device devices[2];
 static UNUSED struct net_device *dev_get_by_index(struct net *n,int ifindex){assert(n==&test_net);for(int i=0;i<2;i++)if(devices[i].ifindex==ifindex){devices[i].refs++;return &devices[i];}return NULL;}

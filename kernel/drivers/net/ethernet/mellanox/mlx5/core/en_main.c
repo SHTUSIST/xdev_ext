@@ -1164,7 +1164,7 @@ int mlx5e_flush_rq(struct mlx5e_rq *rq, int curr_state)
 #ifdef CONFIG_XDEV_EXT_MECH
 /* RTNL + state_lock: bind claims a dedicated cyclic RQ. Normal RX refills
  * stop until flush releases it. No peer DMA has been posted during setup. */
-int mlx5e_peer_rx_open(struct net_device *dev, u32 queue)
+int mlx5e_peer_rx_open(struct net_device *dev, u32 queue, u64 owner)
 {
  struct mlx5e_priv *priv = netdev_priv(dev);
  struct mlx5e_peer_rq *peer;
@@ -1173,6 +1173,7 @@ int mlx5e_peer_rx_open(struct net_device *dev, u32 queue)
  int ret = -EOPNOTSUPP;
  u32 out[MLX5_ST_SZ_DW(query_mkey_out)] = {};
  void *mkc = MLX5_ADDR_OF(query_mkey_out, out, memory_key_mkey_entry);
+ if (!owner) return -EINVAL;
  mutex_lock(&priv->state_lock);
  if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num)
   goto unlock;
@@ -1192,7 +1193,9 @@ int mlx5e_peer_rx_open(struct net_device *dev, u32 queue)
  stride = 1U << rq->wqe.wq.fbc.log_stride;
  peer = kzalloc(sizeof(*peer), GFP_KERNEL);
  if (!peer) { ret = -ENOMEM; goto unlock; }
- peer->size = n; peer->stride = stride;
+ peer->size = n; peer->stride = stride; peer->owner = owner;
+ /* Same firmware-provided key (or capability fallback) as host RX WQEs. */
+ peer->terminate_lkey_be = priv->channels.params.terminate_lkey_be;
  spin_lock_init(&peer->lock);
  peer->posted = kvcalloc(n, sizeof(*peer->posted), GFP_KERNEL);
  peer->saved = kvcalloc(n, stride, GFP_KERNEL);
@@ -1228,7 +1231,7 @@ static void mlx5e_peer_rx_free(struct mlx5e_rq *rq)
  dma_free_coherent(rq->pdev, peer->size * 128, peer->headers, peer->headers_dma);
  kvfree(peer->saved); kvfree(peer->posted); kfree(peer);
 }
-int mlx5e_peer_rx_flush(struct net_device *dev, u32 queue)
+int mlx5e_peer_rx_flush(struct net_device *dev, u32 queue, u64 owner)
 {
  struct mlx5e_priv *priv = netdev_priv(dev);
  struct mlx5e_rq *rq;
@@ -1236,7 +1239,8 @@ int mlx5e_peer_rx_flush(struct net_device *dev, u32 queue)
  mutex_lock(&priv->state_lock);
  if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num) goto unlock;
  rq = &priv->channels.c[queue]->rq;
- if (!rq->peer) { ret = 0; goto unlock; }
+ /* Reset/reconfiguration may already have retired this endpoint. */
+ if (!rq->peer || rq->peer->owner != owner) { ret = 0; goto unlock; }
  napi_disable(rq->cq.napi);
  ret = mlx5e_flush_rq(rq, MLX5_RQC_STATE_RDY);
  if (!ret) mlx5e_peer_rx_free(rq);
