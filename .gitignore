@@ -908,5 +908,11 @@
 !/tests/eval/userspace_orchestrator/uo_core.h
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_matrix.sh
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_matrix.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_matrix_test.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_uid.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_README.md
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log

@@ -26,6 +26,7 @@ RX_CE=0
 RELIABLE=0
 REMOTE_WINDOW=''
 PROVIDER_CASE=normal
+FAULT_CAMPAIGN=''
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -45,6 +46,7 @@ while (($#)); do
  --reliable) RELIABLE=1; shift ;;
  --remote-window) REMOTE_WINDOW=$2; shift 2 ;;
  --provider-case) PROVIDER_CASE=$2; CE_SIM=1; shift 2 ;;
+ --fault-campaign) FAULT_CAMPAIGN=$2; CE_SIM=1; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -78,6 +80,10 @@ esac
 # private ext4 disk and CE module lifetime. Fault matrices stay independent.
 if (( COMPAT )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none ]]; fi
 if (( PEER )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none && "$GROUP_COUNT" -ge 257 ]]; fi
+if [[ -n "$FAULT_CAMPAIGN" ]]; then
+    [[ "$FAULT" == none && "$PROVIDER_CASE" == normal && "$RELIABLE" == 0 && "$RX_CE" == 0 && "$COMPAT" == 0 && "$PEER" == 0 ]]
+    (( GROUP_COUNT >= 2 && GROUP_COUNT <= 256 && DEPTH <= 8 && DEPTH <= GROUP_COUNT ))
+fi
 (( ! RX_CE || CE_SIM ))
 (( ! CE_DELAY_US || CE_SIM ))
 [[ "$FAULT" == none || "$GROUP_COUNT" -ge 2 ]]
@@ -134,11 +140,17 @@ PYSOURCEPATH
 verify_source_checkout
 # Use the same campaign geometry for native commands, image creation and
 # the strict full-image validator. The two destination spans never alias.
-read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" <<'PYLAYOUT'
+read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" "${FAULT_CAMPAIGN:-}" <<'PYLAYOUT'
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1])/'tools/testing/selftests/xdev_ext_integration'))
 from xdev_ext_mech_zc_validate import image_layout
-layout = image_layout(int(sys.argv[2]))
+if sys.argv[3]:
+    from xdev_ext_mech_zc_fault_validate import CAMPAIGNS, fault_layout
+    if sys.argv[3] not in CAMPAIGNS:
+        raise SystemExit('unknown fault campaign')
+    layout = fault_layout(int(sys.argv[2]))
+else:
+    layout = image_layout(int(sys.argv[2]))
 print(*(layout[key] for key in ('source_slba', 'rx_slba', 'ce_slba', 'image_bytes')))
 PYLAYOUT
 )"
@@ -383,7 +395,7 @@ mkdir -p "$ROOT"/{bin,sbin,dev,proc,sys,tmp,run,etc,usr/bin,opt/xdev_ext}
 [[ -e "$ROOT/dev/console" ]] || mknod -m 600 "$ROOT/dev/console" c 5 1
 [[ -e "$ROOT/dev/null" ]] || mknod -m 666 "$ROOT/dev/null" c 1 3
 cp /bin/busybox "$ROOT/bin/busybox"
-for app in sh mount umount mkdir cat echo sleep poweroff ip grep dmesg sync readlink timeout date tail sed rmdir mktemp env wc cmp id basename cut mknod; do
+for app in sh mount umount mkdir cat echo sleep poweroff ip grep dmesg sync readlink timeout date tail head sed rmdir mktemp env wc cmp id basename cut mknod; do
 	ln -sf /bin/busybox "$ROOT/bin/$app"
 done
 if (( CE_SIM )); then
@@ -397,6 +409,27 @@ if (( CE_SIM )); then
     fi
 fi
 cp "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/nxp_reliable.bpf.o" "$ROOT/opt/xdev_ext/"
+DESTINATION_READONLY=0
+if [[ -n "$FAULT_CAMPAIGN" ]]; then
+    cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_guest.sh" "$ROOT/opt/xdev_ext/"
+    gcc-14 -O2 -Wall -Wextra -Werror \
+        "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_uid.c" \
+        -o "$TOOLS/fault_uid"
+    cp "$TOOLS/fault_uid" "$ROOT/opt/xdev_ext/"
+    python3 - "$SRC" "$ROOT/opt/xdev_ext/fault.env" "$FAULT_CAMPAIGN" "$GROUP_COUNT" <<'PYFAULTENV'
+import pathlib, shlex, sys
+sys.path.insert(0, str(pathlib.Path(sys.argv[1])/'tools/testing/selftests/xdev_ext_integration'))
+from xdev_ext_mech_zc_fault_validate import CAMPAIGNS, expectation_line, fault_layout
+name = sys.argv[3]
+case = CAMPAIGNS[name]
+values = fault_layout(int(sys.argv[4]))
+values.update(fault_campaign=name, fault_expectation=expectation_line(name),
+              fault_after=int(case['after']), ce_fail_mode=case['fail_mode'],
+              ce_fault_delay_us=case['delay_us'], nvme_mode=case['nvme_mode'])
+pathlib.Path(sys.argv[2]).write_text(''.join(k+'='+shlex.quote(str(v))+'\n' for k, v in values.items()))
+PYFAULTENV
+    [[ "$FAULT_CAMPAIGN" != nvme-readonly-dest ]] || DESTINATION_READONLY=1
+fi
 if (( COMPAT )); then
     mkdir -p "$ROOT/opt/xdev_ext/socket_guest" "$ROOT/opt/xdev_ext/preload"
     cp "$SOCKET_OUT/"{socket_runtime,ce_observe.bpf.o} \
@@ -424,6 +457,7 @@ printf 'groups=%s\nwindow_nlb=%s\nce_sim=%s\nce_len=%s\nce_delay_us=%s\nfault=%s
 	"$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "$REMOTE_WINDOW" \
 	>"$ROOT/opt/xdev_ext/zc.env"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\n' \
@@ -431,6 +465,7 @@ printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
     "$SOURCE_SLBA" "$RX_SLBA" "$CE_SLBA" >>"$ROOT/opt/xdev_ext/zc.env"
 GUEST_PROGRAMS=("$TOOLS/xdev_ext_mech_ctl")
+if [[ -n "${FAULT_CAMPAIGN:-}" ]]; then GUEST_PROGRAMS+=("$TOOLS/fault_uid"); fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then GUEST_PROGRAMS+=("$IAA_OUT/iaa_runtime"); fi
 if (( ${COMPAT:-0} )); then
     GUEST_PROGRAMS+=("$SOCKET_OUT/socket_runtime" "$PRELOAD_OUT/libio_uring_unified.so" \
@@ -553,6 +588,11 @@ resolve_nvme_roles() {
         "$source_block" "$source_ng" "$destination_block" "$destination_ng" "$peer_block" "$peer_ng"
 }
 resolve_nvme_roles /sys/class/nvme /dev "$peer"
+if [ -n "$fault_campaign" ]; then
+    export source_block source_ng destination_block destination_ng nvme_source nvme_destination
+    sh /opt/xdev_ext/xdev_ext_mech_zc_fault_guest.sh
+    exit 0
+fi
 trace=/sys/kernel/tracing
 echo 0 >"$trace/tracing_on"
 echo >"$trace/set_ftrace_filter"
@@ -769,11 +809,16 @@ fi
 GUEST
 chmod 0700 "$ROOT/init"
 (cd "$ROOT" && find . -print0 | cpio --null -o -H newc 2>"$EV/cpio.log" | gzip -1) >"$SCRATCH/initramfs.cpio.gz"
-python3 - "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$FAULT" "$SRC" <<'PY'
+python3 - "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$FAULT" "$SRC" "${FAULT_CAMPAIGN:-}" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])
 sys.path.insert(0, str(pathlib.Path(sys.argv[5])/'tools/testing/selftests/xdev_ext_integration'))
 from xdev_ext_mech_zc_validate import image_layout
+if sys.argv[6]:
+    from xdev_ext_mech_zc_fault_validate import make_images
+    make_images(p, int(sys.argv[2]))
+    (p/'evidence/source-before.sha256').write_text(hashlib.sha256((p/'source-before.raw').read_bytes()).hexdigest()+'\n')
+    raise SystemExit(0)
 layout = image_layout(int(sys.argv[2]))
 source_offset, rx_offset, ce_offset = (layout[key] * 512 for key in
                                        ('source_slba', 'rx_slba', 'ce_slba'))
@@ -823,6 +868,8 @@ if [[ "$FAULT" != none ]]; then
 	wire_args=(-netdev "stream,id=wire0,server=off,addr.type=unix,addr.path=$SCRATCH/wire0.sock"
 		-netdev "stream,id=wire1,server=off,addr.type=unix,addr.path=$SCRATCH/wire1.sock")
 fi
+destination_drive="file=$SCRATCH/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"
+if (( DESTINATION_READONLY )); then destination_drive+=,readonly=on; fi
 args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
 	-kernel "$BUILD/arch/x86/boot/bzImage" -initrd "$SCRATCH/initramfs.cpio.gz"
 	-append 'console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr ipv6.disable=1'
@@ -831,7 +878,7 @@ args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
 	-device virtio-net-pci,netdev=wire1,mac=02:00:00:00:00:02,iommu_platform=on,disable-legacy=on,rx_queue_size=1024
 	-drive "file=$SCRATCH/source.raw,if=none,id=src,format=raw,cache=none,aio=threads"
 	-device nvme,drive=src,serial=UBRZCSRC01
-	-drive "file=$SCRATCH/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"
+	-drive "$destination_drive"
 	-device nvme,drive=dst,serial=UBRZCDST01)
 if (( COMPAT )); then
     args+=(-drive "file=$SCRATCH/compat.raw,if=none,id=compat,format=raw,cache=none,aio=threads"
@@ -845,6 +892,9 @@ printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"
 printf '\n' >>"$EV/qemu.command"
 sha256sum "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$TOOLS/xdev_ext_mech_ctl" \
 	"$TOOLS/nxp_mech.bpf.o" "$SCRATCH/initramfs.cpio.gz" >"$EV/artifacts.sha256"
+if [[ -n "$FAULT_CAMPAIGN" ]]; then
+    sha256sum "$TOOLS/fault_uid" "$ROOT/opt/xdev_ext/xdev_ext_mech_zc_fault_guest.sh" >>"$EV/artifacts.sha256"
+fi
 if (( CE_SIM )); then
 	sha256sum "$CE_SIM_OUT/xdev_ext_ce_sim.ko" "$TOOLS/ce_plan.bpf.o" >>"$EV/artifacts.sha256"
     if [[ "$PROVIDER_CASE" == normal ]]; then
@@ -875,7 +925,7 @@ import json, pathlib, sys
 stats = json.loads(pathlib.Path(sys.argv[1]).read_text())
 assert not stats['errors'], stats
 PYWIRE
-else
+elif [[ -z "$FAULT_CAMPAIGN" ]]; then
 	echo 'XDEV_EXT_ZC_FAULT_COUNTS mode=none matched=0 dropped=0 duplicated=0 session=270019 generation=2 index=2 count=6' >>"$EV/guest.log"
 fi
 printf '%s\n' "$rc" >"$EV/qemu.exit"
@@ -884,6 +934,13 @@ ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
 [[ $rc == 0 ]]
+if [[ -n "$FAULT_CAMPAIGN" ]]; then
+    # The matrix owns the full-image/pin/session oracle and foreign-QEMU
+    # snapshots. A clean boot alone is never reported as a campaign PASS.
+    grep -Fxq XDEV_EXT_ZC_FAULT_GUEST_EXIT=0 "$EV/guest.log"
+    echo "XDEV_EXT_ZC_FAULT_BOOT=COMPLETE campaign=$FAULT_CAMPAIGN validation=matrix-required" | tee "$EV/result.txt"
+    exit 0
+fi
 if (( COMPAT )); then
     python3 "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_compat_validate.py" \
         "$SRC" "$EV/guest.log" "$EV/preload-logs"
