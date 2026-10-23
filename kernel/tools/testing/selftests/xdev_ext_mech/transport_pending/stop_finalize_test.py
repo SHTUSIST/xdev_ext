@@ -71,7 +71,7 @@ class FinalStop(unittest.TestCase):
   code=code.replace('if(argc!=2)return 2;','if(argc!=2)return 2;\n return final_stop(argv[1]);')
   cls.tmp=tempfile.TemporaryDirectory(prefix='stop-finalize-');cls.addClassCleanup(cls.tmp.cleanup)
   p=Path(cls.tmp.name);(p/'probe.c').write_text(code);cls.binary=p/'probe'
-  subprocess.run(['cc','-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread','-I'+str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
+  subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread','-I'+str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_drain_and_synchronized_final_errors(self):
   for mode in ('idle','first','late','unbind','pending-fatal','native-error','published-before-stop','published-before-fatal','cancelled-native','cancel'):
    with self.subTest(mode=mode):

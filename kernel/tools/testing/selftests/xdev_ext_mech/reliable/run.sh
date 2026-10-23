@@ -9,7 +9,8 @@ if [ -n "${RELIABLE_HEADER:-}" ]; then
 else
     set --
 fi
-${CC:-cc} -std=gnu11 -O1 -g -Wall -Wextra -Werror \
+ # Exercise the preserved C protocol oracle, not the default BPF path.
+${CC:-cc} -DXDEV_EXT_REL_C_GLUE -std=gnu11 -O1 -g -Wall -Wextra -Werror \
     -fsanitize=undefined -fno-sanitize-recover=all \
     -I "$kernel_dir" "$@" "$test_dir/reliable_behavior_test.c" \
     -o "$build_dir/reliable_behavior_test"

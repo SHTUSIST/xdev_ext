@@ -25,6 +25,7 @@ FAULT=none
 RX_CE=0
 RELIABLE=0
 REMOTE_WINDOW=''
+REL_POLICY=default
 PROVIDER_CASE=normal
 while (($#)); do
 	case "$1" in
@@ -44,6 +45,7 @@ while (($#)); do
 	--rx-ce) RX_CE=1; shift ;;
  --reliable) RELIABLE=1; shift ;;
  --remote-window) REMOTE_WINDOW=$2; shift 2 ;;
+ --rel-policy) REL_POLICY=$2; shift 2 ;;
  --provider-case) PROVIDER_CASE=$2; CE_SIM=1; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
@@ -64,6 +66,11 @@ QEMU_TIMEOUT_SECONDS=$((150 * TIMEOUT_FACTOR))
 [[ "$REMOTE_WINDOW" =~ ^[1-9][0-9]?$ && "$REMOTE_WINDOW" -le 32 || "$RELIABLE" == 0 ]]
 [[ "$CE_SLOTS" =~ ^[1-9][0-9]{0,3}$ && "$CE_SLOTS" -ge "$DEPTH" && "$CE_SLOTS" -le 1024 ]]
 [[ "$CE_DELAY_US" =~ ^[0-9]+$ && "$CE_DELAY_US" -le 10000000 ]]
+case "$REL_POLICY" in
+ default) ;;
+ window1|window8|every-n|delayed|exponential|oldest|round-robin) (( RELIABLE )) ;;
+ *) echo 'invalid reliable policy case' >&2; exit 2 ;;
+esac
 case "$FAULT" in
 none|drop-middle|duplicate-middle) [[ "$RELIABLE" == 0 || "$FAULT" == none ]] ;;
 reliable-drop-data|reliable-drop-ack|reliable-duplicate-ack|reliable-replay-group|reliable-reorder-group|reliable-budget-unknown) (( RELIABLE )) ;;
@@ -228,7 +235,7 @@ printf 'date_utc=%s\nhost=%s\nscratch=%s\nclaim=KVM correctness only; software N
 	"$(date -u +%FT%TZ)" "$(hostname)" "$SCRATCH" >"$EV/provenance.txt"
 printf 'ce_sim=%s\nce_delay_us=%s\nfault=%s\nrx_ce=%s\nreliable=%s\ndepth=%s\nce_backend=CPU-memcpy stand-in; no GPU claim\n' "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" >>"$EV/provenance.txt"
 printf 'groups=%s\ndepth=%s\nce_slots=%s\n' "$GROUP_COUNT" "$DEPTH" "$CE_SLOTS" >>"$EV/provenance.txt"
-printf 'remote_window=%s\n' "$REMOTE_WINDOW" >>"$EV/provenance.txt"
+printf 'remote_window=%s\nrel_policy=%s\n' "$REMOTE_WINDOW" "$REL_POLICY" >>"$EV/provenance.txt"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
@@ -418,11 +425,13 @@ cp "$TOOLS/verifier/"*.bpf.o \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run.sh" \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_state.sh" \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_abi.sh" \
+	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_reliable.sh" \
 	"$ROOT/opt/xdev_ext/verifier/"
 printf 'groups=%s\nwindow_nlb=%s\nce_sim=%s\nce_len=%s\nce_delay_us=%s\nfault=%s\nrx_ce=%s\nreliable=%s\ndepth=%s\nce_slots=%s\nremote_window=%s\n' \
 	"$GROUP_COUNT" "$((GROUP_COUNT * 16))" "$CE_SIM" "$((CE_SLOTS * 8192))" \
 	"$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "$REMOTE_WINDOW" \
 	>"$ROOT/opt/xdev_ext/zc.env"
+printf 'rel_policy=%s\n' "$REL_POLICY" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -640,6 +649,16 @@ else
 	set --
 fi
 if [ "$reliable" = 1 ]; then set -- "$@" --reliable --remote-window "$remote_window"; fi
+# Each policy class uses the same CREATE path on both peers.
+case "$rel_policy" in
+ default) ;;
+ window1) set -- "$@" --rel-window 1 --rel-initial-credit 1 ;;
+ window8) set -- "$@" --rel-window 8 --rel-initial-credit 8 ;;
+ every-n) set -- "$@" --rel-ack-rule every-n --rel-ack-every 4 --rel-ack-delay-us 1000 ;;
+ delayed) set -- "$@" --rel-ack-rule delayed --rel-ack-delay-us 1000 ;;
+ exponential) set -- "$@" --rel-rto-us 10000 --rel-rto-max-us 80000 --rel-backoff exponential ;;
+ oldest|round-robin) set -- "$@" --rel-resend-order "$rel_policy" ;;
+esac
 rx_timeout=$rx_timeout_ms
 rx_started=$(date +%s)
 $ctl nic-nvme "$@" --ifname eth1 --dst-ng "$destination_ng" --slba "$rx_slba" --nlb "$window_nlb" \
@@ -660,6 +679,16 @@ else
 	set -- nvme-nic
 fi
 if [ "$reliable" = 1 ]; then set -- "$@" --reliable --remote-window "$remote_window"; fi
+# Each policy class uses the same CREATE path on both peers.
+case "$rel_policy" in
+ default) ;;
+ window1) set -- "$@" --rel-window 1 --rel-initial-credit 1 ;;
+ window8) set -- "$@" --rel-window 8 --rel-initial-credit 8 ;;
+ every-n) set -- "$@" --rel-ack-rule every-n --rel-ack-every 4 --rel-ack-delay-us 1000 ;;
+ delayed) set -- "$@" --rel-ack-rule delayed --rel-ack-delay-us 1000 ;;
+ exponential) set -- "$@" --rel-rto-us 10000 --rel-rto-max-us 80000 --rel-backoff exponential ;;
+ oldest|round-robin) set -- "$@" --rel-resend-order "$rel_policy" ;;
+esac
 tx_started=$(date +%s)
 set +e
 $ctl "$@" --ifname eth0 --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
@@ -755,8 +784,9 @@ verifier_status=0
 LOG_DIR=/tmp/verifier-evidence sh /opt/xdev_ext/verifier/run.sh || verifier_status=$?
 LOG_DIR=/tmp/verifier-state-evidence sh /opt/xdev_ext/verifier/run_state.sh || verifier_status=$?
 LOG_DIR=/tmp/verifier-abi-evidence sh /opt/xdev_ext/verifier/run_abi.sh || verifier_status=$?
+LOG_DIR=/tmp/verifier-reliable-evidence sh /opt/xdev_ext/verifier/run_reliable.sh || verifier_status=$?
 echo XDEV_EXT_ZC_VERIFIER_LOG_BEGIN
-cat /tmp/verifier-evidence/*.log /tmp/verifier-state-evidence/*.log /tmp/verifier-abi-evidence/*.log
+cat /tmp/verifier-evidence/*.log /tmp/verifier-state-evidence/*.log /tmp/verifier-abi-evidence/*.log /tmp/verifier-reliable-evidence/*.log
 echo XDEV_EXT_ZC_VERIFIER_LOG_END
 test "$verifier_status" = 0
 if [ "$fault" = reliable-budget-unknown ]; then

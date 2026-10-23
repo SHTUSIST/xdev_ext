@@ -41,6 +41,9 @@ static struct {
 } K;
 static int view_rc, data_rc, control_rc;
 
+static const void *TX_VIEW;
+__u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *c,const size_t n)
+{ (void)c; return n==528 ? (__u8 *)TX_VIEW : NULL; }
 #include PROGRAM
 
 static struct xdev_ext_rel_rx_view VIEW;
@@ -385,8 +388,9 @@ static void undecodable_frames_ask_nothing(void)
 
 	reset();
 	view_set(0, 0, 0, 1, 5, 0);
-	m.relative_offset = 1408;		/* index 0 must start at 0 */
-	receive(&m, 0, 0);
+	/* Construct a malformed wire offset after the encoder accepts the valid message. */
+	receive(&m, 42 + 39, 1);		/* index 0 must start at 0 */
+	EXPECT_EQ(chunk[0][RX_OFF + 42 + 39], 1);
 	EXPECT_EQ(rx_complete(), XDEV_EXT_MP_RECYCLE);
 	EXPECT_EQ(K.view + K.data + K.control + K.hold, 0);
 	EXPECT_EQ(K.crc, 0);
@@ -644,8 +648,23 @@ static void resend_selection_is_bpf_and_wrap_aware(void)
  v=before; v.candidate[1]=v.candidate[0]; EXPECT_EQ(rel_choose_resend(&v,&p),0);
 }
 
+static void select_callback_uses_readonly_snapshot(void)
+{
+ struct xdev_ext_rel_tx_view v={.count=2,.window=4,.rr_next=1,
+  .candidate={{.group=8,.slot=0,.attempt=2},{.group=5,.slot=1,.attempt=2}}};
+ reset();TX_VIEW=&v;M.ctx.callsite=XDEV_EXT_MP_SITE_WORKER_SELECT;
+ EXPECT_EQ(rel_afxdp_build(NULL,&M.ctx),1); /* default SLOT */
+ POLICY.resend_order=XDEV_EXT_REL_RESEND_OLDEST;
+ EXPECT_EQ(rel_afxdp_build(NULL,&M.ctx),2);
+ POLICY.resend_order=XDEV_EXT_REL_RESEND_ROUND_ROBIN;
+ EXPECT_EQ(rel_afxdp_build(NULL,&M.ctx),2);
+ EXPECT_EQ(K.hold+K.data+K.control+K.view+K.crc,0);
+ EXPECT_EQ(desc[0].addr|desc[0].len,0);
+ TX_VIEW=NULL;EXPECT_EQ(rel_afxdp_build(NULL,&M.ctx),-EINVAL);
+}
 int main(void)
 {
+ select_callback_uses_readonly_snapshot();
 	resend_selection_is_bpf_and_wrap_aware();
 	new_segment_is_held_with_one_decision();
 	refused_claim_is_not_held();

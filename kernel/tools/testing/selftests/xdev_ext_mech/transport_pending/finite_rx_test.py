@@ -18,6 +18,9 @@ FIXTURE=r'''
 #include "include/uapi/linux/xdev_ext_mech.h"
 #include "include/linux/xdev_ext_mech_reliable_core.h"
 #include "io_uring/xdev_ext_mech_step.h"
+#include "io_uring/xdev_ext_policy.h"
+#define put_user(v,p) (*(p)=(v),0)
+static struct xdev_ext_rel_policy policy;
 typedef __u32 u32;typedef __u64 u64;
 #define __user
 #define u64_to_user_ptr(v) ((void *)(uintptr_t)(v))
@@ -61,13 +64,29 @@ int main(int argc,char **argv) {
   struct xdev_ext_mech_stage_uapi u={.flags=XDEV_EXT_AFXDP_F_RELIABLE,.arg1=(uintptr_t)&input};
   struct xdev_ext_afxdp_reliable_config cfg;u64 nr=99;
   CHECK(sizeof(input.base)==24&&sizeof(input)==32&&offsetof(__typeof__(input),nr_groups)==24);
-  CHECK(!xsk_rel_config_load(&u,&cfg,&nr)&&copy_size==24&&!nr);
-  u.flags|=XDEV_EXT_AFXDP_F_FINITE;CHECK(!xsk_rel_config_load(&u,&cfg,&nr)&&copy_size==32&&nr==2&&cfg.first_group==101);
-  input.nr_groups=0;CHECK(xsk_rel_config_load(&u,&cfg,&nr)==-EINVAL);
-  input.nr_groups=~0ULL;CHECK(xsk_rel_config_load(&u,&cfg,&nr)==-EOVERFLOW);
-  input.nr_groups=2;input.base.first_group=~0ULL-4;CHECK(xsk_rel_config_load(&u,&cfg,&nr)==-EOVERFLOW);
-  copy_error=true;CHECK(xsk_rel_config_load(&u,&cfg,&nr)==-EFAULT);
-  copy_error=false;u.flags=XDEV_EXT_AFXDP_F_FINITE;CHECK(xsk_rel_config_load(&u,&cfg,&nr)==-EINVAL);
+  CHECK(!xsk_rel_config_load(&u,&cfg,&nr,&policy)&&copy_size==24&&!nr);
+  u.flags|=XDEV_EXT_AFXDP_F_FINITE;CHECK(!xsk_rel_config_load(&u,&cfg,&nr,&policy)&&copy_size==32&&nr==2&&cfg.first_group==101);
+  input.nr_groups=0;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EINVAL);
+  input.nr_groups=~0ULL;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EOVERFLOW);
+  input.nr_groups=2;input.base.first_group=~0ULL-4;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EOVERFLOW);
+  copy_error=true;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EFAULT);
+  copy_error=false;u.flags=XDEV_EXT_AFXDP_F_FINITE;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EINVAL);
+  return 0;
+ }
+ if(!strcmp(mode,"policy")) {
+  struct xdev_ext_afxdp_reliable_policy_config input={.finite={.base={.first_group=101},.nr_groups=2}};
+  struct xdev_ext_mech_stage_uapi u={.flags=XDEV_EXT_AFXDP_F_RELIABLE|XDEV_EXT_AFXDP_F_FINITE|XDEV_EXT_AFXDP_F_POLICY,.arg1=(uintptr_t)&input};
+  struct xdev_ext_afxdp_reliable_config cfg;u64 nr;
+  xdev_ext_rel_policy_defaults(&input.policy);
+  CHECK(!xsk_rel_config_load(&u,&cfg,&nr,&policy)&&copy_size==152&&nr==2&&cfg.window==4);
+  CHECK(!memcmp(&input.policy,&policy,sizeof(policy)));
+  input.policy.window=0;CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EINVAL);
+  CHECK(input.policy.bad_field==XDEV_EXT_POLICY_F_WINDOW);
+  xdev_ext_rel_policy_defaults(&input.policy);input.finite.base.window=4;
+  CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EINVAL);
+  input.finite.base.window=0;u.flags &= ~XDEV_EXT_AFXDP_F_FINITE;
+  CHECK(xsk_rel_config_load(&u,&cfg,&nr,&policy)==-EINVAL);
+  input.finite.nr_groups=0;CHECK(!xsk_rel_config_load(&u,&cfg,&nr,&policy)&&!nr);
   return 0;
  }
  if(!strcmp(mode,"rx")) {
@@ -98,9 +117,9 @@ class FiniteRx(unittest.TestCase):
   code='\n'.join(re.search(r'^static int '+n+r'\([^;{}]*\)\s*\{.*?^\}',source,re.M|re.S)[0] for n in names)
   cls.tmp=tempfile.TemporaryDirectory(prefix='finite-rx-');cls.addClassCleanup(cls.tmp.cleanup)
   p=Path(cls.tmp.name);(p/'probe.c').write_text(FIXTURE.replace('/* PRODUCTION */',code));cls.binary=p/'probe'
-  subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
+  subprocess.run([os.environ.get('CC','cc'),'-DXDEV_EXT_REL_C_GLUE', '-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_real_create_and_finite_rx_contract(self):
-  for mode in ('create','config','rx'):
+  for mode in ('create','config','policy','rx'):
    with self.subTest(mode=mode):
     r=subprocess.run([str(self.binary),mode],capture_output=True,text=True);self.assertEqual(r.returncode,0,r.stderr)
 if __name__=='__main__':unittest.main(verbosity=2)

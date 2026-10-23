@@ -31,6 +31,6 @@ int main(void) {
 '''
   with tempfile.TemporaryDirectory(prefix='transport-provider-') as tmp:
    p=Path(tmp);(p/'probe.c').write_text(fixture)
-   subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(p/'probe')],check=True)
+   subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(p/'probe')],check=True)
    subprocess.run([str(p/'probe')],check=True)
 if __name__=='__main__':unittest.main(verbosity=2)

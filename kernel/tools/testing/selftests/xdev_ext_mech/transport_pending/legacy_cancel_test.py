@@ -79,7 +79,7 @@ class LegacyCancel(unittest.TestCase):
   source+=MAIN.replace('/* PRODUCTION_PROGRESS */',progress)
   cls.tmp=tempfile.TemporaryDirectory(prefix='legacy-mixed-cancel-');cls.addClassCleanup(cls.tmp.cleanup)
   p=Path(cls.tmp.name);(p/'probe.c').write_text(source);cls.binary=p/'probe'
-  subprocess.run(['cc','-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-fsanitize=undefined','-fno-sanitize-recover=undefined','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
+  subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-fsanitize=undefined','-fno-sanitize-recover=undefined','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_real_mixed_stage_stop_and_native_prefix(self):
   for mode in ('pending','prefix-ok','prefix-error','native','unknown'):
    with self.subTest(mode=mode):

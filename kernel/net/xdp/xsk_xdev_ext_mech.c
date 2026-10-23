@@ -23,6 +23,7 @@
 #include <linux/crc32c.h>
 #include <linux/uaccess.h>
 #include <linux/xdev_ext_mech_reliable_core.h>
+#include "../../io_uring/xdev_ext_policy.h"
 #include <linux/btf.h>
 #include <linux/btf_ids.h>
 #include <linux/file.h>
@@ -129,8 +130,13 @@ static void xsk_rel_info(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_ba
                          struct xdev_ext_afxdp_reliable_info *info);
 static int xsk_rel_rx(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_frame *f,
                       struct xdev_ext_rel_msg *msg);
+#ifdef XDEV_EXT_REL_C_GLUE
 static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st, const struct xdev_ext_rel_msg *m,
  const struct xdev_ext_mech_hold_intent *hold, const struct xdev_ext_mech_frame *f);
+#else
+static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,
+ const struct xdev_ext_mech_hold_intent *hold, const struct xdev_ext_mech_frame *f);
+#endif
 static int xsk_rel_validate_initial(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b);
 static int xsk_rel_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b);
 static void xsk_rel_native_done(struct xsk_xdev_ext_mech_tx_batch *tb);
@@ -584,12 +590,16 @@ int xsk_xdev_ext_mech_rx(struct xdp_sock *xs, struct xdp_buff_xsk *xskb, u32 len
 			.pos = hold.pos,
 		};
 
+#ifdef XDEV_EXT_REL_C_GLUE
 		if (xst->rel && (hold.key != reliable_msg.group ||
       hold.pos != reliable_msg.index || hold.count != reliable_msg.count ||
       hold.span_off != f.data_off + 106 || hold.span_len != reliable_msg.payload_len))
    result.err = -EPROTO;
   else if (xst->rel)
    result.err = xsk_rel_hold_commit(st, &reliable_msg, &hold, &f);
+#else
+  if (xst->rel) result.err=xsk_rel_hold_commit(st,&hold,&f);
+#endif
   else
    result.err = xst->pending.entries ? xsk_rx_pending_add(st, &hold, &f) :
        xdev_ext_mech_hold_commit(st, &hold, &f);
@@ -680,8 +690,8 @@ static int xsk_xdev_ext_mech_bind(struct xdev_ext_mech_stage *st,
 	struct xdp_sock *xs;
 	int err;
 
-	if ((u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE)) ||
-	    ((u->flags & XDEV_EXT_AFXDP_F_FINITE) &&
+	if ((u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) ||
+	    ((u->flags & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) &&
 	     !(u->flags & XDEV_EXT_AFXDP_F_RELIABLE)))
 		return -EINVAL;
 	sock = sock_from_file(st->file);
@@ -1269,6 +1279,7 @@ static const struct xdev_ext_mech_class_ops xsk_xdev_ext_mech_class_ops = {
 	.owner = THIS_MODULE,
 	.transport_stats = xsk_rel_transport_stats,
 	.transport_counters = xsk_rel_transport_counters,
+ .transport_policy = xsk_rel_transport_policy,
 	.bind = xsk_xdev_ext_mech_bind,
 	.unbind = xsk_xdev_ext_mech_unbind,
 	.fill_info = xsk_xdev_ext_mech_fill_info,
@@ -1350,6 +1361,127 @@ __bpf_kfunc int bpf_xdev_ext_afxdp_hold(const struct xdev_ext_mech_ctx *ctx, __u
 	return 0;
 }
 
+/* A sealed callback grants only the reliable instance of its own stage. */
+static struct xsk_mech_reliable *xsk_rel_call_state(struct xdev_ext_mech_call *c)
+{
+ struct xsk_xdev_ext_mech_stage *xst;
+ if (!c || !c->st || c->ctx.class_id!=XDEV_EXT_MECH_CLASS_AFXDP) return NULL;
+ xst=c->st->priv;
+ return xst ? xst->rel : NULL;
+}
+static bool xsk_rel_call_rx(const struct xdev_ext_mech_call *c)
+{
+ return c->member==XDEV_EXT_MECH_MEMBER_COMPLETE &&
+        (c->callsite==XDEV_EXT_MECH_SITE_RX_GENERIC || c->callsite==XDEV_EXT_MECH_SITE_RX_NATIVE);
+}
+__bpf_kfunc int bpf_xdev_ext_rel_rx_view(const struct xdev_ext_mech_ctx *ctx, u64 group,
+                                       void *view, u32 view__sz)
+{
+ struct xdev_ext_mech_call *c=xdev_ext_mech_call_of(ctx);
+ struct xsk_mech_reliable *r=xsk_rel_call_state(c);
+ struct xdev_ext_rel_rx_view *v=view;
+ struct xsk_xdev_ext_mech_provider *p;
+ unsigned long flags;
+ u32 i,slot;
+ bool build;
+ if (!c) return -EINVAL;
+ build=c->member==XDEV_EXT_MECH_MEMBER_BUILD && c->callsite==XDEV_EXT_MECH_SITE_WORKER;
+ if (!r || (!build && !xsk_rel_call_rx(c))) return -EOPNOTSUPP;
+ if (view__sz!=sizeof(*v)) return -EINVAL;
+ if (!group || group<r->rx.cfg.first_group || group>~0ULL-r->rx.cfg.window) return -ERANGE;
+ slot=group % r->rx.cfg.window;
+ if (build) {
+  p=xdev_ext_mech_session_pool(c->st->s)->priv;
+  spin_lock_irqsave(&p->tx_lock,flags);
+  xdev_ext_rel_rx_view_fill(&r->rx,r->ack_pending[slot],group,v);
+  for(i=0;i<r->rx.cfg.window;i++)
+   if (r->ack_pending[i] && r->rx.entry[i].reply!=XDEV_EXT_REL_HELD) v->owed_count++;
+  v->must_emit=r->build_must;
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+ } else {
+  /* Advisory RX snapshot only. Every decision is rechecked under tx_lock. */
+  data_race(({ xdev_ext_rel_rx_view_fill(&r->rx,r->ack_pending[slot],group,v); 0; }));
+ }
+ return 0;
+}
+__bpf_kfunc int bpf_xdev_ext_rel_rx_data(const struct xdev_ext_mech_ctx *ctx,u64 group,
+                                       u32 index,u32 attempt,u32 verdict)
+{
+ struct xdev_ext_mech_call *c=xdev_ext_mech_call_of(ctx);
+ struct xsk_mech_reliable *r=xsk_rel_call_state(c);
+ struct xsk_xdev_ext_mech_provider *p;
+ unsigned long flags;
+ u32 slot;
+ u64 owed;
+ int err;
+ bool kick=false;
+ if (!c) return -EINVAL;
+ if (!r || !xsk_rel_call_rx(c) || c->st->direction!=XDEV_EXT_MECH_DIR_FROM_DEVICE) return -EOPNOTSUPP;
+ p=xdev_ext_mech_session_pool(c->st->s)->priv;
+ spin_lock_irqsave(&p->tx_lock,flags);
+ if (r->rx_intent.calls) { c->protocol_error=1; err=-EALREADY; goto out; }
+ r->rx_intent.calls=1;
+ if (index>0xffff) { err=-EINVAL; goto out; }
+ if (r->nr_groups && (group<r->rx.cfg.first_group || group-r->rx.cfg.first_group>=r->nr_groups)) {
+  err=-ERANGE; goto out;
+ }
+ slot=group % r->rx.cfg.window;
+ /* Use a local owed value so first-owed timestamp is set before publication. */
+ owed=r->ack_pending[slot];
+ err=xdev_ext_rel_rx_verdict(&r->rx,&owed,group,index,attempt,verdict);
+ if (!err && verdict==XDEV_EXT_REL_HOLD) {
+  r->rx_intent.group=group; r->rx_intent.index=index; r->rx_intent.attempt=attempt; r->rx_intent.valid=1;
+ } else if (err==1) { xsk_rel_owe(r,group,true,ktime_get_ns()); kick=true; err=0; }
+out:
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ if (kick) xdev_ext_mech_stage_kick(c->st);
+ return err;
+}
+__bpf_kfunc int bpf_xdev_ext_rel_rx_control(const struct xdev_ext_mech_ctx *ctx,u64 group,
+                                          u32 attempt,u64 credit,u32 type)
+{
+ struct xdev_ext_mech_call *c=xdev_ext_mech_call_of(ctx);
+ struct xsk_mech_reliable *r=xsk_rel_call_state(c);
+ struct xsk_xdev_ext_mech_provider *p;
+ unsigned long flags;
+ int err;
+ if (!c) return -EINVAL;
+ if (!r || !xsk_rel_call_rx(c)) return -EOPNOTSUPP;
+ p=xdev_ext_mech_session_pool(c->st->s)->priv;
+ spin_lock_irqsave(&p->tx_lock,flags);
+ if (r->rx_intent.calls) { c->protocol_error=1; err=-EALREADY; }
+ else {
+  r->rx_intent.calls=1;
+  err=type>0xff ? -EINVAL : xdev_ext_rel_tx_control(&r->tx,group,attempt,credit,type);
+ }
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ if (err>=0 && (type==XDEV_EXT_REL_ACK || type==XDEV_EXT_REL_ACK_CUM)) xdev_ext_mech_stage_kick(c->st);
+ return err<0 ? err : 0;
+}
+__bpf_kfunc int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *ctx,void *policy,u32 policy__sz)
+{
+ struct xdev_ext_mech_call *c=xdev_ext_mech_call_of(ctx);
+ struct xsk_mech_reliable *r=xsk_rel_call_state(c);
+ if (!c) return -EINVAL;
+ if (!r || (c->callsite!=XDEV_EXT_MECH_SITE_WORKER &&
+     c->callsite!=XDEV_EXT_MECH_SITE_WORKER_SELECT && !xsk_rel_call_rx(c))) return -EOPNOTSUPP;
+ if (policy__sz!=sizeof(r->policy)) return -EINVAL;
+ memcpy(policy,&r->policy,sizeof(r->policy));
+ return 0;
+}
+/* rdonly_buf_size is the verifier's PTR_TO_MEM read-only size annotation. */
+__bpf_kfunc __u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *ctx,
+                                         const size_t rdonly_buf_size)
+{
+ struct xdev_ext_mech_call *c=xdev_ext_mech_call_of(ctx);
+ struct xsk_mech_reliable *r=xsk_rel_call_state(c);
+ if (!r || c->member!=XDEV_EXT_MECH_MEMBER_BUILD ||
+     c->callsite!=XDEV_EXT_MECH_SITE_WORKER_SELECT ||
+     c->b || c->frames || c->nr_frames || c->scratch || c->cqe ||
+     rdonly_buf_size!=sizeof(r->select_view) || c->info!=&r->select_view) return NULL;
+ return (__u8 *)&r->select_view;
+}
+
 __bpf_kfunc_end_defs();
 
 EXPORT_SYMBOL_GPL(bpf_xdev_ext_afxdp_state);
@@ -1358,15 +1490,27 @@ BTF_KFUNCS_START(xsk_xdev_ext_mech_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_xdev_ext_afxdp_hdr, KF_TRUSTED_ARGS | KF_RET_NULL)
 BTF_ID_FLAGS(func, bpf_xdev_ext_afxdp_hold, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_xdev_ext_afxdp_state, KF_TRUSTED_ARGS | KF_RET_NULL)
+BTF_ID_FLAGS(func, bpf_xdev_ext_rel_rx_view, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_rel_rx_data, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_rel_rx_control, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_rel_policy, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_rel_tx_view, KF_TRUSTED_ARGS | KF_RET_NULL)
 BTF_KFUNCS_END(xsk_xdev_ext_mech_kfunc_ids)
 
 BTF_SET_START(xsk_xdev_ext_mech_build_kfuncs)
 BTF_ID(func, bpf_xdev_ext_afxdp_hdr)
+BTF_ID(func, bpf_xdev_ext_rel_rx_view)
+BTF_ID(func, bpf_xdev_ext_rel_policy)
+BTF_ID(func, bpf_xdev_ext_rel_tx_view)
 BTF_SET_END(xsk_xdev_ext_mech_build_kfuncs)
 
 BTF_SET_START(xsk_xdev_ext_mech_complete_kfuncs)
 BTF_ID(func, bpf_xdev_ext_afxdp_hold)
 BTF_ID(func, bpf_xdev_ext_afxdp_state)
+BTF_ID(func, bpf_xdev_ext_rel_rx_view)
+BTF_ID(func, bpf_xdev_ext_rel_policy)
+BTF_ID(func, bpf_xdev_ext_rel_rx_data)
+BTF_ID(func, bpf_xdev_ext_rel_rx_control)
 BTF_SET_END(xsk_xdev_ext_mech_complete_kfuncs)
 
 static int xsk_xdev_ext_mech_kfunc_filter(const struct bpf_prog *prog,
@@ -1388,6 +1532,9 @@ static int __init xsk_xdev_ext_mech_init(void)
 {
 	int err;
 
+ BTF_TYPE_EMIT(struct xdev_ext_rel_rx_view);
+ BTF_TYPE_EMIT(struct xdev_ext_rel_policy);
+ BTF_TYPE_EMIT(struct xdev_ext_rel_tx_view);
 	err = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
 					&xsk_xdev_ext_mech_kfunc_set);
 	if (err)

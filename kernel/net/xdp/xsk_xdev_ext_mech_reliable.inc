@@ -14,7 +14,14 @@ struct xsk_rel_control {
  struct xdev_ext_mech_frame frame;
  bool busy, uncertain;
 };
+struct xsk_rel_rx_intent { u64 group; u32 index, attempt; u8 calls, valid; };
 struct xsk_mech_reliable {
+ struct xsk_rel_rx_intent rx_intent;
+ struct xdev_ext_rel_policy policy;
+ struct xdev_ext_rel_tx_view select_view;
+ u64 owed_since[XDEV_EXT_REL_MAX_WINDOW];
+ u8 owed_dup[XDEV_EXT_REL_MAX_WINDOW];
+ bool build_must;
  struct xdev_ext_rel_tx tx;
  struct xdev_ext_rel_rx rx;
  struct xsk_rel_data data[XDEV_EXT_REL_MAX_WINDOW];
@@ -30,22 +37,63 @@ struct xsk_mech_reliable {
 };
 
 static int xsk_rel_config_load(const struct xdev_ext_mech_stage_uapi *u,
-                              struct xdev_ext_afxdp_reliable_config *cfg,
-                              u64 *nr_groups)
+                               struct xdev_ext_afxdp_reliable_config *cfg,
+                               u64 *nr_groups, struct xdev_ext_rel_policy *pol)
 {
+ struct xdev_ext_afxdp_reliable_finite_config finite={};
  *nr_groups=0;
  if (!(u->flags & XDEV_EXT_AFXDP_F_RELIABLE) ||
-     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE))) return -EINVAL;
+     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)))
+  return -EINVAL;
+ if (u->flags & XDEV_EXT_AFXDP_F_POLICY) {
+  struct xdev_ext_afxdp_reliable_policy_config pc;
+  struct xdev_ext_afxdp_reliable_policy_config __user *arg=u64_to_user_ptr(u->arg1);
+  u32 field;
+  if (copy_from_user(&pc,arg,sizeof(pc))) return -EFAULT;
+  finite=pc.finite;
+  if (finite.base.window || finite.base.timeout_ns || finite.base.max_attempts ||
+      (!(u->flags & XDEV_EXT_AFXDP_F_FINITE) && finite.nr_groups)) return -EINVAL;
+  if (xdev_ext_rel_policy_validate(&pc.policy,&field)) {
+   if (put_user(field,&arg->policy.bad_field)) return -EFAULT;
+   return -EINVAL;
+  }
+  *pol=pc.policy; pol->bad_field=0;
+  finite.base.window=pol->window; finite.base.timeout_ns=pol->rto_ns;
+  finite.base.max_attempts=pol->max_attempts;
+ } else {
+  if (u->flags & XDEV_EXT_AFXDP_F_FINITE) {
+   if (copy_from_user(&finite,u64_to_user_ptr(u->arg1),sizeof(finite))) return -EFAULT;
+  } else if (copy_from_user(&finite.base,u64_to_user_ptr(u->arg1),sizeof(finite.base))) return -EFAULT;
+  xdev_ext_rel_policy_from_legacy(pol,finite.base.window,finite.base.timeout_ns,finite.base.max_attempts);
+ }
+ *cfg=finite.base;
  if (u->flags & XDEV_EXT_AFXDP_F_FINITE) {
-  struct xdev_ext_afxdp_reliable_finite_config finite;
-  if (copy_from_user(&finite,u64_to_user_ptr(u->arg1),sizeof(finite))) return -EFAULT;
-  *cfg=finite.base;
   if (!finite.nr_groups || !cfg->first_group || !cfg->window) return -EINVAL;
   if (cfg->first_group > ~0ULL-finite.nr_groups ||
       cfg->first_group+finite.nr_groups-1 > ~0ULL-cfg->window) return -EOVERFLOW;
   *nr_groups=finite.nr_groups;
- } else if (copy_from_user(cfg,u64_to_user_ptr(u->arg1),sizeof(*cfg))) return -EFAULT;
+ }
  return 0;
+}
+static void xsk_rel_owe(struct xsk_mech_reliable *r,u64 group,bool dup,u64 now)
+{
+ u32 slot=group % r->rx.cfg.window;
+ if (!r->ack_pending[slot]) { r->owed_since[slot]=now; r->owed_dup[slot]=dup; }
+ else r->owed_dup[slot] |= dup;
+ r->ack_pending[slot]=group;
+}
+static bool __maybe_unused xsk_rel_must_emit(const struct xsk_mech_reliable *r,u32 slot,u64 now)
+{
+ return !r->rx.cfg.ack_delay_ns || r->owed_dup[slot] ||
+        now-r->owed_since[slot]>=r->rx.cfg.ack_delay_ns;
+}
+static void __maybe_unused xsk_rel_owed_covered(struct xsk_mech_reliable *r,u64 upto)
+{
+ u32 i;
+ for(i=0;i<r->rx.cfg.window;i++)
+  if (r->ack_pending[i] && r->ack_pending[i]<=upto && r->ack_pending[i]<r->rx.base_group) {
+   r->ack_pending[i]=0; r->owed_since[i]=0; r->owed_dup[i]=0;
+  }
 }
 
 static int xsk_rel_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_stage_uapi *u)
@@ -56,6 +104,7 @@ static int xsk_rel_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_me
  const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
  struct xdev_ext_afxdp_reliable_config uc;
  struct xdev_ext_rel_cfg cfg;
+ struct xdev_ext_rel_policy pol;
  struct xsk_mech_reliable *r;
  u32 i;
  u64 nr_groups;
@@ -65,11 +114,12 @@ static int xsk_rel_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_me
      l->seg_len != ((xst->mtu - 20 - 8 - 64) & ~7U)) return -EINVAL;
  if (st->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE &&
      l->hdr_room != XDP_PACKET_HEADROOM+xst->xs->umem->headroom+106) return -EINVAL;
- err=xsk_rel_config_load(u,&uc,&nr_groups);
+ err=xsk_rel_config_load(u,&uc,&nr_groups,&pol);
  if (err) return err;
  cfg = (struct xdev_ext_rel_cfg){.session=u->arg0,.first_group=uc.first_group,
       .timeout_ns=uc.timeout_ns,.window=uc.window,.max_attempts=uc.max_attempts,
       .group_bytes=l->group_bytes,.seg_len=l->seg_len};
+ xdev_ext_rel_policy_cfg(&pol,&cfg);
  err=xdev_ext_rel_cfg_valid(&cfg);
  if (err) return err;
  if (cfg.window > xdev_ext_mech_session_depth(st->s) ||
@@ -77,7 +127,7 @@ static int xsk_rel_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_me
      pool->nr_frames - p->source_first) return -ENOSPC;
  r=kvzalloc(sizeof(*r),GFP_KERNEL);
  if (!r) return -ENOMEM;
- r->nr_groups=nr_groups;
+ r->nr_groups=nr_groups; r->policy=pol;
  xdev_ext_rel_tx_init(&r->tx,&cfg); xdev_ext_rel_rx_init(&r->rx,&cfg);
  for (i=0;i<cfg.window;i++) {
   struct xsk_rel_control *c=&r->control[i];
@@ -157,8 +207,14 @@ static int xsk_rel_decode(struct xdev_ext_mech_stage *st,const struct xdev_ext_m
  if (pkt[40] || pkt[41]) return XDEV_EXT_REL_BAD;
  memcpy(header,pkt+42,64); memset(header+56,0,4);
  crc=crc32c(~0U,header,64); crc=crc32c(crc,pkt+106,f->data_len-106);
+#ifdef XDEV_EXT_REL_C_GLUE
  return xdev_ext_rel_wire_decode(pkt+42,f->data_len-106,crc,&xst->rel->rx.cfg,msg);
+#else
+ (void)msg;
+ return xdev_ext_rel_wire_verify(pkt+42,crc) ? XDEV_EXT_REL_BAD : 0;
+#endif
 }
+#ifdef XDEV_EXT_REL_C_GLUE
 static int xsk_rel_rx(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_frame *f,
                       struct xdev_ext_rel_msg *m)
 {
@@ -209,6 +265,39 @@ static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,const struct xdev_
  spin_unlock_irqrestore(&p->tx_lock,flags);
  return err;
 }
+#else
+static int xsk_rel_rx(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_frame *f,
+                      struct xdev_ext_rel_msg *m)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ if (xsk_rel_decode(st,f,m)) return XDEV_EXT_REL_BAD;
+ xst->rel->rx_intent=(struct xsk_rel_rx_intent){};
+ return XDEV_EXT_REL_HOLD;
+}
+static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,
+ const struct xdev_ext_mech_hold_intent *hold,const struct xdev_ext_mech_frame *f)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ struct xsk_rel_rx_intent *in=&r->rx_intent;
+ unsigned long flags;
+ int err=-EPROTO;
+ spin_lock_irqsave(&p->tx_lock,flags);
+ if (!in->valid || hold->key!=in->group || hold->pos!=in->index ||
+     hold->count!=(r->rx.cfg.group_bytes-1)/r->rx.cfg.seg_len+1 ||
+     f->data_len<106 || hold->span_off!=f->data_off+106 || hold->span_len!=f->data_len-106)
+  goto out;
+ err=xdev_ext_rel_rx_claim_check(&r->rx,in->group,in->index,in->attempt);
+ if (err) goto out;
+ err=xdev_ext_mech_hold_commit(st,hold,f);
+ if (!err) WARN_ON_ONCE(xdev_ext_rel_rx_claim(&r->rx,in->group,in->index,in->attempt)<0);
+out:
+ in->valid=0;
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ return err;
+}
+#endif
 /* C validates the requested protocol identity on every attempt and is the
  * only writer of the v3 CRC, like the IPv4/UDP checksums: one TX payload pass,
  * over the final bytes, and BPF never computes it. A BPF CRC that C then
@@ -237,8 +326,9 @@ static int xsk_rel_packet_check(struct xdev_ext_mech_stage *st,const struct xdp_
  crc=crc32c(~0U,hdr,64); crc=crc32c(crc,pkt+106,fi->data_len);
  xdev_ext_rel_put(pkt+98,crc^~0U,4);
  if (xdev_ext_rel_wire_decode(pkt+42,fi->data_len,crc,&xst->rel->tx.cfg,&m) ||
-     m.group!=group || m.attempt!=attempt || m.credit!=credit ||
-     m.type!=type || (type==XDEV_EXT_REL_DATA && m.index!=index)) return -EPROTO;
+     (type && (m.group!=group || m.attempt!=attempt || m.credit!=credit ||
+      m.type!=type || (type==XDEV_EXT_REL_DATA && m.index!=index)))) return -EPROTO;
+ if (!type && xdev_ext_rel_rx_control_check(&xst->rel->rx,group,&m)) return -EPROTO;
  return 0;
 }
 
@@ -287,7 +377,11 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
        .info=&r->info,.info_size=sizeof(r->info),.scratch=(u8 *)r->scratch,
        .desc_size=sizeof(struct xdp_desc),.desc_cap=XDEV_EXT_REL_MAX_SEGMENTS};
  /* Worker: batch_end, the only writer of DONE, cannot run during this call. */
+#ifdef XDEV_EXT_REL_C_GLUE
  u8 type=control ? xdev_ext_rel_rx_reply_type(&r->rx,group) : XDEV_EXT_REL_DATA;
+#else
+ u8 type=control ? 0 : XDEV_EXT_REL_DATA;
+#endif
  u32 i;
  s32 ret;
  int err;
@@ -295,6 +389,14 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
  r->info.wire_group=group; r->info.wire_attempt=attempt;
  r->info.wire_credit=credit; r->info.wire_type=type;
  if (control) {
+#ifndef XDEV_EXT_REL_C_GLUE
+  struct xsk_xdev_ext_mech_provider *p=pool->priv;
+  unsigned long flags;
+  spin_lock_irqsave(&p->tx_lock,flags);
+  r->build_must=xsk_rel_must_emit(r,group % r->rx.cfg.window,ktime_get_ns());
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  r->info.wire_attempt=r->info.wire_credit=0;
+#endif
   r->frames[0]=control->frame;
   r->info.base.nr_frames=1;
   r->info.base.f[0]=(struct xdev_ext_mech_frame_info){.umem_addr=control->frame.umem_addr,
@@ -302,7 +404,11 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
  } else for(i=0;i<a.nr_frames;i++) xdev_ext_mech_batch_frame(b,i,&r->frames[i]);
  memset(r->scratch,0,sizeof(r->scratch));
  err=xdev_ext_mech_call(st,&a,&ret,NULL);
- if (err || ret!=XDEV_EXT_MECH_BUILD_SUBMIT) return err ?: -EPROTO;
+ if (err) return err;
+#ifndef XDEV_EXT_REL_C_GLUE
+ if (ret==XDEV_EXT_MECH_BUILD_DEFAULT) return control && r->build_must ? -EPROTO : 1;
+#endif
+ if (ret!=XDEV_EXT_MECH_BUILD_SUBMIT) return -EPROTO;
  for(i=0;i<a.nr_frames;i++) {
   struct xdev_ext_mech_frame_info *fi=&r->info.base.f[i];
   u8 *pkt;
@@ -465,6 +571,11 @@ static void xsk_rel_transport_counters(struct xdev_ext_mech_stage *st,
  spin_unlock_irqrestore(&p->tx_lock,flags);
  out->held_unacked = held > U32_MAX ? U32_MAX : held;
 }
+static void xsk_rel_transport_policy(struct xdev_ext_mech_stage *st,struct xdev_ext_rel_policy *out)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ if (xst->rel) { *out=xst->rel->policy; out->bad_field=0; }
+}
 static void xsk_rel_batch_end(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b,int err)
 {
  struct xsk_xdev_ext_mech_stage *xst=st->priv;
@@ -476,8 +587,13 @@ static void xsk_rel_batch_end(struct xdev_ext_mech_stage *st,struct xdev_ext_mec
  spin_lock_irqsave(&p->tx_lock,flags);
  action=xdev_ext_rel_rx_finish(&xst->rel->rx,group,err);
  if (action==XDEV_EXT_REL_REPLAY_ACK) {
+#ifdef XDEV_EXT_REL_C_GLUE
   xst->rel->ack_pending[group % xst->rel->rx.cfg.window]=group;
   xdev_ext_rel_rx_reply(&xst->rel->rx,group,action);
+#else
+  xsk_rel_owe(xst->rel,group,false,ktime_get_ns());
+  xst->rel->rx.entry[group % xst->rel->rx.cfg.window].reply=XDEV_EXT_REL_ACK;
+#endif
  }
  spin_unlock_irqrestore(&p->tx_lock,flags);
  if (action==XDEV_EXT_REL_REPLAY_ACK) xdev_ext_mech_stage_kick(st);
@@ -492,6 +608,7 @@ static void xsk_rel_dead(struct xdev_ext_mech_stage *st)
 {
  if (((struct xsk_xdev_ext_mech_stage *)st->priv)->rel) xdev_ext_mech_stage_kick(st);
 }
+#ifdef XDEV_EXT_REL_C_GLUE
 static unsigned long xsk_rel_progress(struct xdev_ext_mech_stage *st)
 {
  struct xsk_xdev_ext_mech_stage *xst=st->priv;
@@ -600,3 +717,185 @@ static unsigned long xsk_rel_progress(struct xdev_ext_mech_stage *st)
  if (wake) xsk_rel_wakeup(st);
  return again ? max_t(unsigned long,1,nsecs_to_jiffies(r->tx.cfg.timeout_ns/4)) : 0;
 }
+#else
+/* Same worker owns retirement and the selected batch throughout the build.
+ * RX/native callbacks may invalidate eligibility; never reuse another batch's descriptors. */
+static int xsk_rel_resend(struct xdev_ext_mech_stage *st,u32 slot,u64 group,u64 now,bool *wake)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ struct xsk_rel_data *d;
+ struct xsk_xdev_ext_mech_tx_batch *tb;
+ struct xdev_ext_mech_batch *batch;
+ unsigned long flags;
+ u32 attempt;
+ int err;
+ if (slot>=r->tx.cfg.window || slot!=group % r->tx.cfg.window) return -ERANGE;
+ d=&r->data[slot];
+ spin_lock_irqsave(&p->tx_lock,flags);
+ err=xdev_ext_rel_tx_select_check(&r->tx,group,now);
+ batch=d->batch; attempt=r->tx.entry[slot].attempt+1;
+ if (!batch || xdev_ext_mech_batch_key(batch)!=group) err=-ESTALE;
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ if (err) return err;
+ /* Rebuild the full sealed envelope only after choosing and checking batch. */
+ err=xsk_rel_build(st,batch,NULL,group,attempt,0);
+ if (err==1) {
+  spin_lock_irqsave(&p->tx_lock,flags);
+  xdev_ext_rel_tx_decline(&r->tx,group,ktime_get_ns());
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  return 0;
+ }
+ if (err) return err;
+ tb=xdev_ext_mech_batch_priv(batch);
+ spin_lock_irqsave(&p->tx_lock,flags);
+ err=xdev_ext_rel_tx_select_check(&r->tx,group,ktime_get_ns());
+ if (!err && d->batch==batch && r->tx.entry[slot].attempt+1==attempt) {
+  memcpy(d->desc,r->scratch,sizeof(*d->desc)*d->count);
+  err=xsk_rel_enqueue(st,tb,d->desc,d->count);
+  if (!err) {
+   WARN_ON_ONCE(xdev_ext_rel_tx_native_begin(&r->tx,group,ktime_get_ns())!=XDEV_EXT_REL_SEND);
+   tb->attempt=attempt; *wake=true;
+  }
+ } else if (!err) err=-ESTALE;
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ return err;
+}
+static unsigned long xsk_rel_progress(struct xdev_ext_mech_stage *st)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ unsigned long flags;
+ u32 i;
+ u64 now=ktime_get_ns();
+ bool again=false,wake=false;
+ if (!r) return 0;
+ if (!xdev_ext_mech_session_admits(st->s)) {
+  bool pending=false;
+  /* Cancel only the journal suffix that hardware never accepted. */
+  xsk_mech_zc_cancel_pending(p,-ECANCELED);
+  for(i=0;i<r->tx.cfg.window;i++) {
+   struct xdev_ext_mech_batch *b=NULL;
+   u64 ticket=0;
+   bool uncertain=false;
+   spin_lock_irqsave(&p->tx_lock,flags);
+   if (r->data[i].batch) {
+    uncertain=r->tx.entry[i].native_pending;
+    if (!uncertain || xst->dead) {
+     b=r->data[i].batch; ticket=r->data[i].ticket;
+     r->data[i].batch=NULL; r->tx.entry[i].terminal=XDEV_EXT_REL_UNKNOWN;
+    } else pending=true;
+   }
+   spin_unlock_irqrestore(&p->tx_lock,flags);
+   if (b) {
+    if (uncertain) xdev_ext_mech_batch_sequester(b,ticket,-ENXIO);
+    else xdev_ext_mech_batch_complete_cancelled(b,ticket,-ECANCELED);
+   }
+  }
+  return pending ? 1 : 0;
+ }
+ /* First retire terminal entries and expose only eligible retained groups. */
+ r->select_view=(struct xdev_ext_rel_tx_view){.window=r->tx.cfg.window,.rr_next=r->tx.rr_next};
+ for(i=0;i<r->tx.cfg.window;i++) {
+  struct xdev_ext_mech_batch *b=NULL;
+  u64 ticket=0,group;
+  int action;
+  spin_lock_irqsave(&p->tx_lock,flags);
+  group=r->tx.entry[i].group;
+  action=r->data[i].batch ? xdev_ext_rel_tx_poll(&r->tx,group,now) : XDEV_EXT_REL_NONE;
+  if (r->data[i].batch) again=true;
+  if ((action==XDEV_EXT_REL_COMPLETE || action==XDEV_EXT_REL_UNKNOWN) && !r->tx.entry[i].native_pending) {
+   b=r->data[i].batch; ticket=r->data[i].ticket; r->data[i].batch=NULL;
+   xdev_ext_rel_tx_retire(&r->tx,group);
+  } else if (action==XDEV_EXT_REL_SEND && !xdev_ext_rel_tx_select_check(&r->tx,group,now)) {
+   struct xdev_ext_rel_tx_candidate *candidate=&r->select_view.candidate[r->select_view.count++];
+   *candidate=(struct xdev_ext_rel_tx_candidate){.group=group,.slot=i,.attempt=r->tx.entry[i].attempt+1};
+  }
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  if (b) xdev_ext_mech_batch_complete(b,ticket,action==XDEV_EXT_REL_COMPLETE ? 0 : -EREMOTEIO);
+ }
+ if (r->select_view.count) {
+  struct xdev_ext_binding_ctx_v2 base={};
+  struct xdev_ext_mech_call_args a={.member=XDEV_EXT_MECH_MEMBER_BUILD,
+   .callsite=XDEV_EXT_MECH_SITE_WORKER_SELECT,.base=&base,
+   .info=&r->select_view,.info_size=sizeof(r->select_view)};
+  s32 selected;
+  int err=xdev_ext_mech_call(st,&a,&selected,NULL);
+  if (err || selected<0 || selected>(s32)r->tx.cfg.window) {
+   xdev_ext_mech_stage_dead(st,err ?: -EPROTO); return 0;
+  }
+  if (!selected) {
+   spin_lock_irqsave(&p->tx_lock,flags);
+   for(i=0;i<r->select_view.count;i++)
+    xdev_ext_rel_tx_decline(&r->tx,r->select_view.candidate[i].group,now);
+   spin_unlock_irqrestore(&p->tx_lock,flags);
+  } else {
+   u64 group=0;
+   for(i=0;i<r->select_view.count;i++)
+    if (r->select_view.candidate[i].slot==(u32)selected-1) group=r->select_view.candidate[i].group;
+   if (!group) { xdev_ext_mech_stage_dead(st,-EPROTO); return 0; }
+   err=xsk_rel_resend(st,(u32)selected-1,group,now,&wake);
+   if (err && err!=-EAGAIN && err!=-ESTALE) { xdev_ext_mech_stage_dead(st,err); return 0; }
+  }
+ }
+ for(i=0;i<r->rx.cfg.window;i++) {
+  struct xsk_rel_control *c=NULL;
+  u64 group,credit;
+  u32 j,attempt;
+  int err;
+  spin_lock_irqsave(&p->tx_lock,flags);
+  group=r->ack_pending[i]; credit=r->rx.credit;
+  attempt=r->rx.entry[i].latest_attempt;
+  if (group) {
+   again=true;
+   for(j=0;j<r->rx.cfg.window;j++)
+    if (!r->control[j].busy) { c=&r->control[j]; break; }
+  }
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  if (!c) continue;
+  err=xsk_rel_build(st,NULL,c,group,attempt,credit);
+  if (err==1) continue; /* The owed reply remains scheduled until its delay expires. */
+  if (err) { xdev_ext_mech_stage_dead(st,err); return 0; }
+  spin_lock_irqsave(&p->tx_lock,flags);
+  /* Lock order matches RX HOLD: provider -> session. STOP must either
+   * observe this lease before deciding release, or deny the admission. */
+  err=xdev_ext_mech_stage_native_get(st);
+  if (!err) {
+   err=xsk_rel_enqueue(st,&c->tb,r->scratch,1);
+   if (err) xdev_ext_mech_stage_native_put(st);
+   else {
+    c->busy=true;
+    xdev_ext_mech_pool_frame_move(xdev_ext_mech_session_pool(st->s),c->frame.index,
+                             XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_INFLIGHT);
+    {
+     const u8 *pkt=c->frame.kaddr+(r->scratch[0].addr-c->frame.umem_addr);
+     if (pkt[48]==XDEV_EXT_REL_ACK_CUM) xsk_rel_owed_covered(r,xdev_ext_rel_be(pkt+58,8));
+     else if (r->ack_pending[i]==group) {
+      r->ack_pending[i]=0; r->owed_since[i]=0; r->owed_dup[i]=0;
+     }
+    }
+    wake=true;
+   }
+  }
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  if (err==-ESHUTDOWN) return 0;
+  if (err && err!=-EAGAIN) { xdev_ext_mech_stage_dead(st,err); return 0; }
+ }
+ if (wake) xsk_rel_wakeup(st);
+ if (again) {
+  u64 delay=r->tx.cfg.timeout_ns/4;
+  now=ktime_get_ns();
+  spin_lock_irqsave(&p->tx_lock,flags);
+  for(i=0;i<r->rx.cfg.window;i++) if (r->ack_pending[i]) {
+   u64 elapsed=now-r->owed_since[i];
+   u64 left=elapsed<r->rx.cfg.ack_delay_ns ? r->rx.cfg.ack_delay_ns-elapsed : 0;
+   if (left<delay) delay=left;
+  }
+  spin_unlock_irqrestore(&p->tx_lock,flags);
+  return max_t(unsigned long,1,nsecs_to_jiffies(delay));
+ }
+ return 0;
+}
+#endif

@@ -98,5 +98,5 @@ int main(void) {
 source = out / 'rx-publication-regression.c'
 binary = out / 'rx-publication-regression'
 source.write_text(prefix + '\n' + settle + '\n' + published + '\n' + flush + '\n' + main)
-subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary)], check=True)
+subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', str(source), '-o', str(binary)], check=True)
 raise SystemExit(subprocess.run([str(binary)]).returncode)

@@ -17,7 +17,11 @@ static void defaults_and_boundaries(void)
  unsigned i;
  memset(&p,0xa5,sizeof(p)); xdev_ext_rel_policy_defaults(&p);
  CHECK(sizeof(struct xdev_ext_afxdp_reliable_policy_config)==152);
- CHECK(sizeof(struct xdev_ext_mech_transport_stats_v3)==184);
+ CHECK(sizeof(struct xdev_ext_mech_transport_stats)==32);
+ CHECK(sizeof(struct xdev_ext_mech_transport_stats_v2)==64);
+ CHECK(sizeof(struct xdev_ext_mech_transport_stats_v3)==96);
+ CHECK(sizeof(struct xdev_ext_mech_transport_stats_v4)==216);
+ CHECK(offsetof(struct xdev_ext_mech_transport_stats_v4,rel_policy)==96);
  CHECK(sizeof(p)==120); CHECK(p.version==1); CHECK(p.size==120);
  CHECK(p.window==4 && p.initial_credit==4); CHECK(p.rto_ns==100000000ULL);
  CHECK(p.backoff==XDEV_EXT_REL_BACKOFF_FIXED && p.rto_max_ns==0);

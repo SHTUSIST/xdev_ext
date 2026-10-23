@@ -926,3 +926,18 @@
 !/kernel/tools/testing/selftests/xdev_ext_policy/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_policy/policy_test.c
 !/kernel/tools/testing/selftests/xdev_ext_policy/policy_test.py
+
+# Reliable protocol policy and SELECT boundary
+!/kernel/io_uring/xdev_ext_policy.c
+!/kernel/io_uring/xdev_ext_policy.h
+!/kernel/include/uapi/linux/xdev_ext_policy.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/select_boundary_test.py
+!/kernel/tools/testing/selftests/xdev_ext_policy/ctl_policy_test.c
+!/kernel/tools/testing/selftests/xdev_ext_policy/ctl_policy_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/provider_kfunc_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/progress_boundary_test.py
+!/kernel/tools/testing/selftests/xdev_ext_policy/matrix_policy_cases.sh
+!/kernel/tools/testing/selftests/xdev_ext_integration/verifier/xdev_ext_mech_fail_rel_view_write.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/verifier/xdev_ext_mech_fail_rel_view_complete.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/verifier/run_reliable.sh
+!/kernel/tools/testing/selftests/xdev_ext_policy/matrix_policy_test.py

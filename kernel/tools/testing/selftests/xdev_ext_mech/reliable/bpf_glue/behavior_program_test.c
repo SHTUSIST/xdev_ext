@@ -46,6 +46,8 @@ int bpf_xdev_ext_rel_rx_control(const struct xdev_ext_mech_ctx *c, __u64 g, __u3
 { (void)c; (void)g; (void)a; (void)cr; (void)t; control_calls++; return -ERANGE; }
 int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *c, void *p, __u32 n)
 { (void)c; (void)p; (void)n; return -ERANGE; }
+__u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *c,const size_t n)
+{ (void)c; (void)n; return NULL; }
 #include PROGRAM
 static unsigned checks, failures;
 #define EXPECT(c) do { checks++; if (!(c)) { failures++; fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); } } while (0)

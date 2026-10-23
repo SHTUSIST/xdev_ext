@@ -56,6 +56,7 @@ enum xdev_ext_mech_callsite {
 	XDEV_EXT_MECH_SITE_URING_CMD		= 3,	/* NVMe uring_cmd issue and task_work */
 	XDEV_EXT_MECH_SITE_CREATE		= 4,	/* IORING_REGISTER_XDEV_EXT_MECH CREATE */
 	XDEV_EXT_MECH_SITE_RX_HOLD_RESULT	= 5,	/* admission result, RX lock held */
+	XDEV_EXT_MECH_SITE_WORKER_SELECT = 6, /* window scheduling; no batch or frames */
 };
 
 /*
@@ -121,6 +122,7 @@ struct xdev_ext_nvme_mech_info {
 
 /* Opt-in AF_XDP v3. arg0 is wire session, arg1 points to this CREATE-only config. */
 #define XDEV_EXT_AFXDP_F_RELIABLE (1U << 0)
+#define XDEV_EXT_AFXDP_F_POLICY (1U << 2)
 #define XDEV_EXT_AFXDP_F_FINITE (1U << 1) /* requires RELIABLE; extended config */
 struct xdev_ext_afxdp_reliable_config {
  __aligned_u64 first_group;
@@ -366,6 +368,15 @@ struct xdev_ext_mech_transport_stats_v2 {
 	__aligned_u64 held_acks;
 	__u32 held_unacked;
 	__u32 rsvd2;
+};
+
+#define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 3U
+struct xdev_ext_mech_transport_stats_v3 {
+	struct xdev_ext_mech_transport_stats_v2 v2;
+	__aligned_u64 nic_copy_ops;
+	__aligned_u64 nic_copy_bytes;
+	__aligned_u64 nic_zc_ops;
+	__aligned_u64 nic_zc_bytes;
 };
 
 struct io_uring_xdev_ext_mech {

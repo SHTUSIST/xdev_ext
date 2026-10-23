@@ -82,6 +82,6 @@ int main(void) {
 source = out / 'coarse-timeout-regression.c'
 binary = out / 'coarse-timeout-regression'
 source.write_text(prefix + text[source_start:source_end] + middle + text[nic_start:nic_end] + suffix)
-subprocess.run(['cc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-I' + str(root),
+subprocess.run([os.environ.get('CC','cc'), '-std=c11', '-Wall', '-Wextra', '-Werror', '-I' + str(root),
                 str(source), '-o', str(binary)], check=True)
 raise SystemExit(subprocess.run([str(binary)]).returncode)

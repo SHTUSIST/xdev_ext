@@ -58,7 +58,7 @@ def main():
         src = Path(tmp) / "test.c"
         binary = Path(tmp) / "test"
         src.write_text(source)
-        command = [os.environ.get("CC", "cc"), "-std=gnu11", "-O1", "-g",
+        command = [os.environ.get("CC", "cc"), "-DXDEV_EXT_REL_C_GLUE", "-std=gnu11", "-O1", "-g",
                    "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined",
                    "-fno-sanitize-recover=undefined", "-I" + str(ROOT),
                    "-I" + str(ROOT / "tools/testing/selftests/xdev_ext_mech/cref"),

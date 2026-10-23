@@ -249,7 +249,8 @@ static void held_wire_identity(void)
     EXPECT_EQ(got.credit, 9);
     m.payload_len = 1;
     EXPECT_EQ(xdev_ext_rel_wire_encode(hdr, &m), -EINVAL);
-    m = control_msg(4, 7, 3, 9);
+    /* Type 4 is now ACK_CUM; use an unassigned type for the same rejection. */
+    m = control_msg(255, 7, 3, 9);
     EXPECT_EQ(xdev_ext_rel_wire_encode(hdr, &m), -EINVAL);
 #endif
 }

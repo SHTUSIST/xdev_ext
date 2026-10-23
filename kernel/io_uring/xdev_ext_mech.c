@@ -43,6 +43,7 @@
 #include "xdev_ext_mech_core.h"
 #include "xdev_ext_mech_lifecycle.h"
 #include "xdev_ext_mech_internal.h"
+#include "xdev_ext_policy.h"
 #include "xdev_ext_mech_notify.h"
 #include "xdev_ext_mech_step.h"
 
@@ -2846,15 +2847,18 @@ static int xdev_ext_mech_stats(struct io_ring_ctx *ctx, void __user *uarg)
 	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
-/* @out is the version 2 layout; a version 1 caller copies only out->v1. */
+/* A full v4 snapshot; older callers copy only their exact versioned prefix. */
 static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
-				struct xdev_ext_mech_transport_stats_v2 *out, u32 version)
+				struct xdev_ext_mech_transport_stats_v4 *full, u32 version)
 {
+	struct xdev_ext_mech_transport_stats_v2 *out=&full->v3.v2;
 	u32 i;
 	u64 pending = 0, uncertain = 0;
 
-	memset(out, 0, sizeof(*out));
-	out->v1.size = version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
+	memset(full, 0, sizeof(*full));
+	out->v1.size = version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 ? sizeof(*full) :
+                   version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 ? sizeof(full->v3) :
+                   version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
 		       sizeof(*out) : sizeof(out->v1);
 	out->v1.version = version;
 	out->v1.session_id = s->id;
@@ -2866,9 +2870,12 @@ static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
 
 		if (s->st[i].cls->transport_stats)
 			s->st[i].cls->transport_stats(&s->st[i], &p, &u);
-		if (version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
+		if (version >= XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
 		    s->st[i].cls->transport_counters)
 			s->st[i].cls->transport_counters(&s->st[i], out);
+  if (version==XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 && !full->rel_policy.version &&
+      s->st[i].cls->transport_policy)
+   s->st[i].cls->transport_policy(&s->st[i],&full->rel_policy);
 		pending += p;
 		uncertain += u;
 	}
@@ -2878,32 +2885,37 @@ static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
 
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *uarg)
 {
-	struct xdev_ext_mech_transport_stats_v2 out = {};
+	struct xdev_ext_mech_transport_stats_v4 out = {};
 	struct xdev_ext_mech_session *s;
 	u32 size;
 
-	if (copy_from_user(&out.v1, uarg, sizeof(out.v1)))
+	if (copy_from_user(&out.v3.v2.v1, uarg, sizeof(out.v3.v2.v1)))
 		return -EFAULT;
-	size = out.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ?
-	       sizeof(out) : sizeof(out.v1);
-	if ((out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION &&
-	     out.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2) ||
-	    out.v1.size != size)
+	size = out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 ? sizeof(out) :
+        out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 ? sizeof(out.v3) :
+        out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ? sizeof(out.v3.v2) : sizeof(out.v3.v2.v1);
+	if ((out.v3.v2.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION &&
+	     out.v3.v2.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 &&
+      out.v3.v2.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 &&
+      out.v3.v2.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4) ||
+	    out.v3.v2.v1.size != size)
 		return -EINVAL;
-	if (size == sizeof(out) && copy_from_user(&out, uarg, sizeof(out)))
+	if (size > sizeof(out.v3.v2.v1) && copy_from_user(&out, uarg, size))
 		return -EFAULT;
-	if (out.v1.native_controls || out.v1.pending_acks || out.v1.uncertain_controls ||
-	    out.v1.rsvd || out.retransmits || out.dup_suppressed || out.held_acks ||
-	    out.held_unacked || out.rsvd2)
+	if (out.v3.v2.v1.native_controls || out.v3.v2.v1.pending_acks || out.v3.v2.v1.uncertain_controls ||
+	    out.v3.v2.v1.rsvd || out.v3.v2.retransmits || out.v3.v2.dup_suppressed || out.v3.v2.held_acks ||
+	    out.v3.v2.held_unacked || out.v3.v2.rsvd2 ||
+     out.v3.nic_copy_ops || out.v3.nic_copy_bytes || out.v3.nic_zc_ops || out.v3.nic_zc_bytes ||
+     memchr_inv(&out.rel_policy,0,sizeof(out.rel_policy)))
 		return -EINVAL;
-	s = xdev_ext_mech_find(ctx, out.v1.session_id);
+	s = xdev_ext_mech_find(ctx, out.v3.v2.v1.session_id);
 	if (s) {
-		xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
+		xdev_ext_mech_transport_stats_fill(s, &out, out.v3.v2.v1.version);
 	} else {
 		mutex_lock(&xdev_ext_mech_live_lock);
-		s = xdev_ext_mech_find_live(out.v1.session_id);
+		s = xdev_ext_mech_find_live(out.v3.v2.v1.session_id);
 		if (s)
-			xdev_ext_mech_transport_stats_fill(s, &out, out.v1.version);
+			xdev_ext_mech_transport_stats_fill(s, &out, out.v3.v2.v1.version);
 		mutex_unlock(&xdev_ext_mech_live_lock);
 		if (!s)
 			return -ENOENT;
