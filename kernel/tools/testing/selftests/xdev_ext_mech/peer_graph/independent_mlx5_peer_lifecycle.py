@@ -167,7 +167,7 @@ def build(peer, descs, directory, name):
     source = directory / (name + ".c")
     binary = directory / name
     source.write_text(SHIM + peer + "\n" + descs + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-unused-function", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 

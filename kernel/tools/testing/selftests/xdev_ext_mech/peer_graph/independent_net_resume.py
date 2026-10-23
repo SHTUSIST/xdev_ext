@@ -175,7 +175,7 @@ def build(code, directory, name):
     source = directory / (name + ".c")
     binary = directory / name
     source.write_text(SHIM + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 

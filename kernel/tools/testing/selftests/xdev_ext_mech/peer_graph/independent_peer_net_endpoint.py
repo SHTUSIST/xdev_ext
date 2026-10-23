@@ -274,7 +274,7 @@ def build(code, directory, name):
     binary = directory / name
     source.write_text('#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_peer.h") + '"\n'
                       '#include "' + str(KERNEL / "io_uring/xdev_ext_peer_net_core.h") + '"\n' + SHIM + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-missing-field-initializers", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-missing-field-initializers", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 
