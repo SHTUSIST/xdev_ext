@@ -53,16 +53,18 @@ namespace.
 none of them: `gpu_nic/afxdp_cuda.cu`, `gpu_nic/udp_pinned_cuda.cu`,
 `nvme_gpu/bench_uring_cuda.cc`, `nvme_gpu/bench_cufile_batch.cc`,
 `gds/bench_cufile.cc` and `cuda_host_compute/bench_host_compute.cu` through
-`CUDA_HOME/bin/nvcc`, and `bench_cuda_staging.c` with the host C compiler.
+`CUDA_HOME/bin/nvcc`, and `bench_cuda_staging.c` plus the chains `chain_bench` executable with the
+host C compiler. The chains build includes its actual dynamic-CUDA session
+and staged paths and requires libbpf >= 1.0.
 The CUDA driver entry points that `chains/chain_cuda.h`,
 `bench_cuda_staging.c` and `kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h`
 look up with `dlsym` must be exported by the SDK's driver stub
 (`lib64/stubs/libcuda.so`); prototypes are not compared.
 
 ```sh
-make -C tests/eval cuda-arms CUDA_HOME=/usr/local/cuda-12.8   # or -12.9, -13.0
+make -C tests/eval cuda-arms CUDA_HOME=/usr/local/cuda-12.8 CUDA_HOST_CXX=/usr/bin/g++-14
 python3 tests/eval/build_cuda_arms.py --cuda-home /usr/local/cuda-13.0 \
-    --out /tmp/cuda-arms-13.0 --arch sm_80
+    --out /abs/private/cuda-arms-13.0 --arch sm_80 --host-cxx /usr/bin/g++-14
 ```
 
 The receipt `OUT/cuda-arms-receipt.json` holds the `nvcc --version` text, the
@@ -219,3 +221,12 @@ power-loss persistence of the underlying device.
 missing counters, short totals, and invalid timing/count types. The functional
 checks mutate those records and exercise actual stream corruption/truncation.
 No performance threshold or historical result is embedded here.
+
+The CUDA builder passes `--host-cxx` explicitly to every nvcc command via
+`-ccbin` and records the compiler path, version and binary hash. Choose a
+host compiler supported by that SDK; no unsupported-compiler override is
+used. `CUDA_HOST_CXX` supplies the same setting to the make target.
+
+The [session guest suite](session_guest/README.md) runs all three session
+arm families with independent output/guard verification and strict lifecycle
+checks in the existing correctness-only KVM environment.

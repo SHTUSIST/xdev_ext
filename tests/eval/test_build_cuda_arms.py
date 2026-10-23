@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -78,6 +79,14 @@ class Coverage(unittest.TestCase):
         self.assertEqual(sources - covered, set())
         self.assertIn("bench_cuda_staging.c", covered)
 
+    def test_chain_dynamic_cuda_path_is_an_actual_build_arm(self):
+        arm = next((a for a in self.m.ARMS if a.name == 'chain_bench'), None)
+        self.assertIsNotNone(arm)
+        self.assertIn('chains/chain_bench.c', arm.sources)
+        self.assertIn('chains/chain_session.c', arm.sources)
+        self.assertIn('chains/chain_staged.c', arm.sources)
+        self.assertIn('bpf', arm.needs)
+
     def test_driver_symbol_sources(self):
         names = self.m.driver_symbols()
         for symbol in ("cuInit", "cuMemHostRegister_v2", "cuMemcpyHtoDAsync_v2",
@@ -100,6 +109,24 @@ class Commands(unittest.TestCase):
 
     def arm(self, name):
         return next(a for a in self.m.ARMS if a.name == name)
+
+    def test_chain_host_build_links_libbpf_and_cuda_loader(self):
+        arm = self.arm('chain_bench')
+        command = arm.commands(self.tc, self.out)[-1]
+        self.assertEqual(command[0], 'cc')
+        self.assertIn('-lbpf', command)
+        self.assertIn('-ldl', command)
+        self.assertTrue(any(p.endswith('chain_session.c') for p in command))
+
+    def test_explicit_host_cxx_is_passed_to_every_nvcc_arm(self):
+        self.tc.host_cxx = Path('/usr/bin/g++-14')
+        for arm in self.m.ARMS:
+            if arm.kind == 'host-c':
+                continue
+            command = arm.commands(self.tc, self.out)[-1]
+            self.assertIn('-ccbin', command)
+            self.assertEqual(command[command.index('-ccbin') + 1], '/usr/bin/g++-14')
+            self.assertNotIn('--allow-unsupported-compiler', command)
 
     def test_cuda_sources_compile_with_the_sdk_nvcc(self):
         for name in ("afxdp_cuda", "udp_pinned_cuda", "bench_host_compute"):
@@ -181,6 +208,16 @@ class FakeToolchainReceipt(unittest.TestCase):
         self.assertEqual(receipt["driver_symbols"]["missing"], [])
         self.assertEqual(p.returncode, 4, p.stdout + p.stderr)
         self.assertEqual(json.loads(p.stdout)["status"], receipt["status"])
+
+    def test_host_cxx_identity_is_recorded(self):
+        host_cxx = Path(shutil.which('g++')).resolve()
+        p = invoke('--cuda-home', str(self.home), '--out', str(self.out),
+                   '--host-cxx', str(host_cxx))
+        self.assertEqual(p.returncode, 4, p.stderr)
+        receipt = json.loads((self.out / 'cuda-arms-receipt.json').read_text())
+        self.assertEqual(receipt['host_cxx']['path'], str(host_cxx))
+        self.assertEqual(len(receipt['host_cxx']['sha256']), 64)
+        self.assertTrue(receipt['host_cxx']['version'])
 
     def test_missing_driver_symbol_fails(self):
         stub = self.home / "lib64/stubs/libcuda.so"

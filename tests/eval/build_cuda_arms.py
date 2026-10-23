@@ -2,7 +2,7 @@
 """Build every CUDA arm of tests/eval with one official CUDA SDK; run none.
 
   build_cuda_arms.py --cuda-home /usr/local/cuda-12.8 --out DIR [--arch sm_80]
-                     [--only NAME,...]
+                     [--only NAME,...] [--host-cxx /usr/bin/g++-14]
 
 Only CUDA_HOME/bin/nvcc is used (an nvcc elsewhere on PATH is ignored), so
 the receipt names exactly one SDK.  Every .cu and .cc arm compiles and links
@@ -47,6 +47,7 @@ class Toolchain:
     nvcc: Path
     arch: str
     cc: list
+    host_cxx: Path = None
     cufile_dir: Path = None		# directory holding libcufile.so, if any
     uring: list = None		# liburing flags, if available
     bpf: list = None		# libbpf link flags, if available
@@ -71,7 +72,7 @@ class Arm:
         if "uring" in self.needs and tc.uring is None:
             return "liburing development files unavailable (pkg-config liburing)"
         if "bpf" in self.needs and tc.bpf is None:
-            return "libbpf development files unavailable (pkg-config libbpf)"
+            return "libbpf >= 1.0 development files unavailable (pkg-config libbpf)"
         return None
 
     def commands(self, tc, out):
@@ -79,7 +80,8 @@ class Arm:
         srcs = [str(HERE / s) for s in self.sources]
         if self.kind == "host-c":
             return [[*tc.cc, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror", "-D_FILE_OFFSET_BITS=64",
-                     *srcs, "-o", output, "-ldl"]]
+                     *self.extra, *srcs, "-o", output,
+                     *(tc.bpf if "bpf" in self.needs else []), "-ldl"]]
         steps, objects, libs = [], [], []
         if "bpf" in self.needs:
             obj = str(out / (self.name + ".xdev_ext_xsk_redirect.o"))
@@ -93,6 +95,8 @@ class Arm:
             libs += ["-L" + str(tc.cufile_dir), "-lcufile"]
         command = [str(tc.nvcc), "-std=c++17", "-O2", "--cudart=shared", *self.defines,
                    "-I" + str((HERE / self.sources[0]).parent)]
+        if tc.host_cxx is not None:
+            command += ["-ccbin", str(tc.host_cxx)]
         if self.kind == "cu":
             command += ["-arch=" + tc.arch, "-Xcompiler", CU_HOST_FLAGS]
         else:
@@ -111,6 +115,9 @@ ARMS = (
         headers=("cuda.h", "cuda_runtime_api.h", "cufile.h"), defines=("-D_FILE_OFFSET_BITS=64",)),
     Arm("bench_host_compute", ("cuda_host_compute/bench_host_compute.cu",), "cu",
         headers=("cuda_runtime.h",)),
+    Arm("chain_bench", ("chains/chain_bench.c", "chains/chain_session.c", "chains/chain_staged.c",
+                        "../../kernel/tools/xdev_ext_xsk_redirect.c", "../../kernel/tools/xdev_ext_gpu_identity.c"),
+        "host-c", needs=("bpf",), headers=()),
     Arm("bench_cuda_staging", ("bench_cuda_staging.c",), "host-c", headers=()),
 )
 # host_fixture.cpp (cuda_host_compute) is the SDK-free host twin of the CUDA
@@ -129,8 +136,11 @@ def driver_symbols():
     return sorted(names)
 
 
-def pkg_flags(name):
+def pkg_flags(name, minimum=None):
     if not shutil.which("pkg-config"):
+        return None
+    if minimum and subprocess.run(["pkg-config", "--atleast-version=" + minimum, name],
+                                  capture_output=True).returncode:
         return None
     out = subprocess.run(["pkg-config", "--cflags", "--libs", name], capture_output=True, text=True)
     return shlex.split(out.stdout) if not out.returncode else None
@@ -195,6 +205,7 @@ def main(argv):
     p = argparse.ArgumentParser(description=__doc__.split("\n")[0], allow_abbrev=False)
     p.add_argument("--cuda-home", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)
+    p.add_argument("--host-cxx", default="c++", help="nvcc host C++ compiler (e.g. /usr/bin/g++-14)")
     p.add_argument("--arch", default="sm_80")
     p.add_argument("--only", default="")
     a = p.parse_args(argv)
@@ -209,13 +220,22 @@ def main(argv):
         print(json.dumps(dict(schema=SCHEMA, status="unavailable", cuda_home=str(home),
                               reason="nvcc absent: %s is not an executable file" % nvcc)))
         return 4
+    host = shutil.which(a.host_cxx)
+    if not host:
+        print(json.dumps(dict(schema=SCHEMA, status="unavailable", reason="host C++ compiler absent: " + a.host_cxx)))
+        return 4
+    host_cxx = Path(host).resolve()
+    host_version = subprocess.run([str(host_cxx), "--version"], capture_output=True, text=True)
     version = subprocess.run([str(nvcc), "--version"], capture_output=True, text=True)
+    if version.returncode or host_version.returncode:
+        print(json.dumps(dict(schema=SCHEMA, status="unavailable", reason="compiler version command failed")))
+        return 4
     a.out.mkdir(parents=True, exist_ok=True)
     out = a.out.resolve()
     tc = Toolchain(cuda_home=home, nvcc=nvcc, arch=a.arch,
-                   cc=shlex.split(os.environ.get("CC", "cc")),
+                   cc=shlex.split(os.environ.get("CC", "cc")), host_cxx=host_cxx,
                    cufile_dir=find_lib(home, "libcufile.so"),
-                   uring=pkg_flags("liburing"), bpf=pkg_flags("libbpf"))
+                   uring=pkg_flags("liburing"), bpf=pkg_flags("libbpf", "1.0"))
     if tc.bpf is not None:
         tc.bpf = tc.bpf + ["-lelf", "-lz"]
     arms = [build_arm(arm, tc, out) for arm in ARMS if not only or arm.name in only]
@@ -225,7 +245,8 @@ def main(argv):
     receipt = dict(schema=SCHEMA, status=status, execution="not-run", cuda_home=str(home),
                    nvcc=str(nvcc), nvcc_sha256=sha256(nvcc),
                    nvcc_version=(version.stdout + version.stderr).strip(), arch=a.arch,
-                   host_cc=tc.cc, arms=arms, driver_symbols=symbols, not_arms=list(NOT_ARMS))
+                   host_cc=tc.cc, host_cxx=dict(path=str(host_cxx), sha256=sha256(host_cxx),
+                                              version=(host_version.stdout + host_version.stderr).strip()), arms=arms, driver_symbols=symbols, not_arms=list(NOT_ARMS))
     (out / "cuda-arms-receipt.json").write_text(json.dumps(receipt, indent=1) + "\n")
     print(json.dumps(dict(schema=SCHEMA, status=status, receipt=str(out / "cuda-arms-receipt.json"),
                           built=sorted(x["name"] for x in arms if x["status"] == "built"),
