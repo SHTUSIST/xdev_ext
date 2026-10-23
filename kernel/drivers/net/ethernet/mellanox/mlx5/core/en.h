@@ -65,6 +65,10 @@
 extern const struct net_device_ops mlx5e_netdev_ops;
 #ifdef CONFIG_XDEV_EXT_MECH
 struct xdev_ext_peer_tx;
+struct xdev_ext_peer_rx;
+int mlx5e_peer_rx_open(struct net_device *dev, u32 queue);
+int mlx5e_peer_rx_flush(struct net_device *dev, u32 queue);
+int mlx5e_peer_recv(struct net_device *dev, u32 queue, struct xdev_ext_peer_rx *);
 struct pci_dev *mlx5e_peer_device(struct net_device *dev);
 int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *);
 #endif
@@ -663,7 +667,19 @@ enum mlx5e_mpwrq_umr_mode {
 	MLX5E_MPWRQ_UMR_MODE_TRIPLE,
 };
 
+#ifdef CONFIG_XDEV_EXT_MECH
+struct mlx5e_peer_rq {
+ spinlock_t lock;
+ struct xdev_ext_peer_rx **posted;
+ u8 *headers, *saved;
+ dma_addr_t headers_dma;
+ u32 size, stride;
+};
+#endif
 struct mlx5e_rq {
+#ifdef CONFIG_XDEV_EXT_MECH
+ struct mlx5e_peer_rq *peer;
+#endif
 	/* data path */
 	union {
 		struct {

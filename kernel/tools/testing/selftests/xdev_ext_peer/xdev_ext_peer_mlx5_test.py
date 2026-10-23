@@ -3,6 +3,7 @@
 """Execute actual mlx5 peer WQE/retirement code with a software SQ adapter.
 No physical NIC, GPU or hardware DMA assertion is made by this test.
 """
+# P3/P4: extend the native shim with the production TX-chain field; assertions unchanged.
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,7 +44,7 @@ typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_
 #define unsafe_memcpy(d,s,n,why) memcpy(d,s,n)
 #define MLX5_UNSAFE_MEMCPY_DISCLAIMER "test header"
 struct pci_dev { int unused; };
-struct xdev_ext_peer_tx { u64 dma_address; u32 len; u16 header_len; const u8 *header; void (*complete)(struct xdev_ext_peer_tx *,int,bool); };
+struct xdev_ext_peer_tx { u64 dma_address; u32 len; u16 header_len; const u8 *header; void (*complete)(struct xdev_ext_peer_tx *,int,bool); struct xdev_ext_peer_tx *next; };
 struct mlx5e_tx_wqe_info { struct xdev_ext_peer_tx *peer; u32 num_bytes; u8 num_wqebbs, num_dma; };
 struct mlx5_wqe_data_seg { u32 byte_count, lkey; u64 addr; };
 struct mlx5_wqe_ctrl_seg { u32 opmod_idx_opcode, qpn_ds; u64 reserved; };

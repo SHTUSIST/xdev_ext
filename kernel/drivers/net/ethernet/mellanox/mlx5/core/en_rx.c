@@ -30,6 +30,9 @@
  * SOFTWARE.
  */
 
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <linux/xdev_ext_peer.h>
+#endif
 #include <linux/ip.h>
 #include <linux/ipv6.h>
 #include <linux/tcp.h>
@@ -386,8 +389,81 @@ static void mlx5e_xsk_free_rx_wqe(struct mlx5e_wqe_frag_info *wi)
 		xsk_buff_free(*wi->xskp);
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/* The bind-owned RQ is exclusively filled here. CQ and posting serialize
+ * just the cyclic indices; process-context channel teardown uses state_lock. */
+int mlx5e_peer_recv(struct net_device *dev, u32 queue, struct xdev_ext_peer_rx *rx)
+{
+ struct mlx5e_priv *priv = netdev_priv(dev);
+ struct xdev_ext_peer_rx *it;
+ struct mlx5e_peer_rq *peer;
+ struct mlx5e_rq *rq;
+ struct mlx5_wq_cyc *wq;
+ u32 nr = 0;
+ int ret = -EAGAIN;
+ if (!rx) return -EINVAL;
+ for (it = rx; it; it = it->next) {
+  if (++nr > 16 || !it->complete || !it->header ||
+      it->header_room < ETH_HLEN || it->header_room > 128 || !it->len ||
+      it->header_room > dev->mtu + ETH_HLEN ||
+      it->len < dev->mtu + ETH_HLEN - it->header_room) return -EINVAL;
+ }
+ /* A post never waits for control-plane reconfiguration. */
+ if (!mutex_trylock(&priv->state_lock)) return -EAGAIN;
+ if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num) goto unlock;
+ rq = &priv->channels.c[queue]->rq;
+ peer = rq->peer;
+ if (!peer || !test_bit(MLX5E_RQ_STATE_ENABLED, &rq->state) ||
+     test_bit(MLX5E_RQ_STATE_RECOVERING, &rq->state)) goto unlock;
+ wq = &rq->wqe.wq;
+ spin_lock_bh(&peer->lock);
+ if (mlx5_wq_cyc_missing(wq) < nr) goto unlock_ring;
+ for (it = rx; it; it = it->next) {
+  u16 ix = mlx5_wq_cyc_get_head(wq);
+  struct mlx5_wqe_data_seg *dseg = mlx5_wq_cyc_get_wqe(wq, ix);
+  memset(dseg, 0, peer->stride);
+  dseg[0].addr = cpu_to_be64(peer->headers_dma + ix * 128);
+  dseg[0].byte_count = cpu_to_be32(it->header_room);
+  dseg[0].lkey = rq->mkey_be;
+  dseg[1].addr = cpu_to_be64(it->dma_address);
+  dseg[1].byte_count = cpu_to_be32(it->len);
+  dseg[1].lkey = rq->mkey_be;
+  if (peer->stride > 2 * sizeof(*dseg))
+   dseg[2].lkey = MLX5_TERMINATE_SCATTER_LIST_LKEY;
+  peer->posted[ix] = it;
+  mlx5_wq_cyc_push(wq);
+ }
+ dma_wmb();
+ mlx5_wq_cyc_update_db_record(wq);
+ ret = 0;
+unlock_ring:
+ spin_unlock_bh(&peer->lock);
+unlock:
+ mutex_unlock(&priv->state_lock);
+ return ret;
+}
+/* All data accesses precede exactly one callback. CQ ownership proves this
+ * WQE has retired; the NIC bounds writes to the two posted segment lengths. */
+static void mlx5e_peer_rx_done(struct mlx5e_rq *rq, u16 ix, int status, u32 bytes)
+{
+ struct mlx5e_peer_rq *peer = rq->peer;
+ struct xdev_ext_peer_rx *rx = peer->posted[ix];
+ u32 header_len, payload_len;
+ if (!rx) return;
+ peer->posted[ix] = NULL;
+ header_len = min_t(u32, bytes, rx->header_room);
+ payload_len = bytes - header_len;
+ if (payload_len > rx->len) status = -EMSGSIZE;
+ if (!status) memcpy(rx->header, peer->headers + ix * 128, header_len);
+ rx->complete(rx, status, status ? 0 : header_len, status ? 0 : payload_len, true);
+}
+#endif
+
 static void mlx5e_dealloc_rx_wqe(struct mlx5e_rq *rq, u16 ix)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (rq->peer) { mlx5e_peer_rx_done(rq, ix, -ECANCELED, 0); return; }
+#endif
 	struct mlx5e_wqe_frag_info *wi = get_frag(rq, ix);
 
 	if (rq->xsk_pool) {
@@ -883,6 +959,9 @@ static void mlx5e_dealloc_rx_mpwqe(struct mlx5e_rq *rq, u16 ix)
 
 INDIRECT_CALLABLE_SCOPE bool mlx5e_post_rx_wqes(struct mlx5e_rq *rq)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (rq->peer) return false;
+#endif
 	struct mlx5_wq_cyc *wq = &rq->wqe.wq;
 	int wqe_bulk, count;
 	bool busy = false;
@@ -1826,6 +1905,16 @@ static void mlx5e_handle_rx_cqe(struct mlx5e_rq *rq, struct mlx5_cqe64 *cqe)
 	u32 cqe_bcnt;
 	u16 ci;
 
+#ifdef CONFIG_XDEV_EXT_MECH
+ if (rq->peer) {
+  spin_lock(&rq->peer->lock);
+  ci = mlx5_wq_cyc_ctr2ix(wq, be16_to_cpu(cqe->wqe_counter));
+  mlx5e_peer_rx_done(rq, ci, MLX5E_RX_ERR_CQE(cqe) ? -EIO : 0, be32_to_cpu(cqe->byte_cnt));
+  mlx5_wq_cyc_pop(wq);
+  spin_unlock(&rq->peer->lock);
+  return;
+ }
+#endif
 	ci       = mlx5_wq_cyc_ctr2ix(wq, be16_to_cpu(cqe->wqe_counter));
 	wi       = get_frag(rq, ci);
 	cqe_bcnt = be32_to_cpu(cqe->byte_cnt);
