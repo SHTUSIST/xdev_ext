@@ -13,6 +13,23 @@ static void *actor(void *arg)
  else a->result=hft_session(a);
  return NULL;
 }
+/* Raw committed evidence survives failed trials. This is not a release
+ * certificate or a success/performance record; the controller saves stderr. */
+static void failed_history(const struct hft_actor *a)
+{
+ unsigned emitted=0;
+ fputs("{\"status\":\"error\",\"local_release_complete\":false,\"guard_history\":[",stderr);
+ for(unsigned i=0;a->history&&i<a->history_count;i++) {
+  const struct hft_guard_record *r=&a->history[i];
+  if(r->committed!=1)continue;
+  fprintf(stderr,"%s{\"generation\":%u,\"frame_pos\":%u,\"slot_addr\":%"PRIu64",\"payload_bytes\":%u,\"committed\":true,\"raw_prefix\":\"",emitted++?",":"",r->generation,r->frame_pos,r->slot_addr,r->payload_bytes);
+  for(unsigned j=0;j<430;j++)fprintf(stderr,"%02x",r->raw_prefix[j]);
+  fputs("\",\"raw_tail\":\"",stderr);
+  for(unsigned j=0;j<4096-512-a->c->payload;j++)fprintf(stderr,"%02x",r->raw_tail[j]);
+  fputs("\"}",stderr);
+ }
+ fputs("]}\n",stderr);
+}
 /* Private producer interface, validated a second time after the Python CLI. */
 static uint64_t number(const char *s)
 {
@@ -64,6 +81,8 @@ int main(int argc,char **argv)
  }
  pthread_barrier_destroy(&barrier);
  if(ret) {
+  if(c.measured&&!c.probe)failed_history(&actors[0]);
+  for(unsigned i=0;i<made;i++)free(actors[i].history);
   fprintf(stderr,"{\"status\":\"%s\",\"start_issued\":%s,\"diagnostic\":\"backend failed; no success record\"}\n",ret==4?"not_run_capability":"error",ret==4?"false":"true");return ret;
  }
  if(c.measured) {

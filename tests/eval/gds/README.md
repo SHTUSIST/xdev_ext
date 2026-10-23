@@ -94,8 +94,14 @@ deterministic pattern `(absolute_file_index*37 + absolute_file_index/251 +
 iteration*53) % 256`, where `/` is integer division, the index is relative to the
 logical window and iteration starts at zero. An early damaged byte therefore
 fails the run even when later operations are clean. Only after this comparison
-does it build the campaign manifest, release every resource and print its single
-schema2 JSON record.
+does it release every resource, serialize one real JSON manifest on stderr,
+and print its single schema2 JSON result on stdout. The manifest carries the
+input formula and iteration/window identity, complete memory geometry, observed
+history FNV-1a-64 fingerprint, and full device/file byte-comparison results.
+FNV-1a is a non-cryptographic evidence fingerprint, not a replacement for the
+complete byte comparison. `run.py` independently reconstructs that fingerprint
+and validates the manifest before relaying stdout. Save stderr with stdout to
+retain this manifest; the temporary data directory is still removed.
 
 `io_ns` includes the synchronous cuFile calls, CUDA completion and checkpoint
 `fsync`; it excludes seeding, the history readback and the comparison. Slots are

@@ -144,7 +144,10 @@ int hft_posix(struct hft_actor *a)
  hft_setup_begin(a);
  fd=open(c->source_block?c->source_block:c->reference,O_RDONLY|O_CLOEXEC|(c->source_block?O_DIRECT:0));
  sock=hft_data_connect(c);ctl=hft_connect(c->control_ip,c->control_port);
- for(;initialized<c->depth;initialized++) if(hft_allocate(&slots[initialized],initialized,c->payload)) break;
+ for(;initialized<c->depth;initialized++) {
+  if(hft_allocate(&slots[initialized],initialized,c->payload)) break;
+  a->frame_slots[initialized]=(uintptr_t)slots[initialized].allocation;
+ }
  /* All actors enter the barrier even on setup failure, preventing deadlock. */
  if(hft_history_setup(a)||fd<0||sock<0||ctl<0||initialized!=c->depth) atomic_store(a->startup_error,1);
  pthread_barrier_wait(a->barrier);

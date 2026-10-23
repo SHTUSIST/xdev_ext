@@ -924,3 +924,5 @@
 !/tests/eval/gds/_campaign_fixture.cc
 !/tests/eval/hft/test_strict_trial_accounting.py
 !/tests/eval/gds/test_campaign_result.py
+!/tests/eval/hft/test_failure_history.py
+!/tests/eval/gds/test_manifest_evidence.py

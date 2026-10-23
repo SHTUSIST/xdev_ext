@@ -438,8 +438,33 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
     if (!device_ok) { std::fprintf(stderr, "payload, unused chunk tail or GPU guard mismatch in campaign history\n"); return 1; }
     if (!file_ok_bytes) { std::fprintf(stderr, "checkpoint file payload mismatch in campaign history\n"); return 1; }
 
+    /* The complete observed image is identified only after full byte equality.
+     * FNV-1a is a non-cryptographic evidence fingerprint, not the oracle. */
+    uint64_t observed_identity = 14695981039346656037ULL;
+    for (unsigned char byte : observed)
+        observed_identity = (observed_identity ^ byte) * 1099511628211ULL;
     GDS_CAMPAIGN_EVENT("manifest");
     if (!res.close()) return 1;
+    // A separate JSON diagnostic preserves the exact schema2 result contract.
+    // Unlike the test observer marker this is real production output.
+    int manifest_written = std::fprintf(stderr,
+        "{\"kind\":\"gds-campaign-manifest\",\"schema_version\":1,\"workload\":\"%s\","
+        "\"input\":{\"id\":\"deterministic-pattern-v1\",\"formula\":\"(index*37+index/251+iteration*53)%%256\","
+        "\"index_window\":[0,%llu],\"iteration_window\":[0,%llu]},"
+        "\"geometry\":{\"bytes\":%llu,\"chunk\":%zu,\"iterations\":%llu,\"operations\":%llu,"
+        "\"history_bytes\":%zu,\"guard_bytes\":%zu},"
+        "\"verification\":{\"phase\":\"post-campaign\",\"payload_bytes\":%llu,\"device_history_bytes\":%zu,"
+        "\"file_bytes\":%llu,\"device_equal\":true,\"file_equal\":true,\"complete\":true},"
+        "\"observed_history_fnv1a64\":\"%016llx\"}\n", workload,
+        (unsigned long long)bytes, (unsigned long long)iterations,
+        (unsigned long long)bytes, chunk, (unsigned long long)iterations,
+        (unsigned long long)operations, history, guard,
+        (unsigned long long)io_bytes, history,
+        (unsigned long long)(checkpoint ? file_bytes : 0),
+        (unsigned long long)observed_identity);
+    if (manifest_written < 0 || std::fflush(stderr)) return 1;
+    unsigned manifest_count = 1; // One successfully serialized manifest above.
+
     std::printf("{\"schema_version\":2,\"measurement_policy\":\"gds-campaign-v1\",\"mode\":\"cufile-direct\",\"workload\":\"%s\","
         "\"bytes\":%llu,\"chunk\":%zu,\"iterations\":%llu,\"io_bytes\":%llu,"
         "\"verified_bytes\":%llu,\"operations\":%llu,\"native_operations\":%llu,"
@@ -449,12 +474,12 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
         "\"source_window\":[0,%llu],\"output_residency\":\"%s\",\"queue_depth\":1,\"direct_io\":true,"
         "\"buffer_registration\":\"once-reused\",\"registration_count\":1,\"campaign_complete\":true,"
         "\"validation_phase\":\"post-campaign\",\"full_byte_compare\":true,\"history_operations\":%llu,"
-        "\"history_bytes\":%llu,\"manifest_count\":1,\"capture_in_timing\":true}\n", workload,
+        "\"history_bytes\":%llu,\"manifest_count\":%u,\"capture_in_timing\":true}\n", workload,
         (unsigned long long)bytes, chunk, (unsigned long long)iterations,
         (unsigned long long)io_bytes, (unsigned long long)io_bytes,
         (unsigned long long)operations, (unsigned long long)native, (unsigned long long)io_ns,
         (unsigned long long)bytes, checkpoint ? "file" : "vram",
-        (unsigned long long)operations, (unsigned long long)history);
+        (unsigned long long)operations, (unsigned long long)history, manifest_count);
     return 0;
 }
 #endif

@@ -40,6 +40,7 @@ int hft_uring(struct hft_actor *a)
  sock=hft_data_connect(c);ctl=hft_connect(c->control_ip,c->control_port);
  for(;allocated<c->depth;allocated++) {
   if(hft_allocate(&slots[allocated],allocated,c->payload)) break;
+  a->frame_slots[allocated]=(uintptr_t)slots[allocated].allocation;
   iov[allocated]=(struct iovec){.iov_base=slots[allocated].allocation,.iov_len=slots[allocated].bytes};
  }
  if(fd<0||sock<0||ctl<0||allocated!=c->depth) goto setup_done;

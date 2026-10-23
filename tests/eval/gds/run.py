@@ -191,6 +191,54 @@ def checked_result(output, args):
     return record
 
 
+def checked_manifest(output, record):
+    """Require actual observed-byte identity and final verification evidence.
+
+    FNV-1a identifies the complete observed guard/payload image. It is not a
+    cryptographic integrity claim and never substitutes for the C++ byte oracle.
+    Reconstruct expected bytes outside measurement from the published formula.
+    """
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate manifest field")
+            result[key] = value
+        return result
+    rows = [json.loads(line, object_pairs_hook=pairs) for line in output.splitlines()
+            if line.startswith("{")]
+    if len(rows) != 1 or type(rows[0]) is not dict:
+        raise ValueError("expected one actual campaign manifest")
+    manifest = rows[0]
+    size, chunk, iterations = record["bytes"], record["chunk"], record["iterations"]
+    value = 14695981039346656037
+    mask = (1 << 64) - 1
+    # Keep reconstruction bounded to a single slot, never another full history.
+    for iteration in range(iterations):
+        for offset in range(0, size, chunk):
+            part = min(chunk, size - offset)
+            data = bytearray([0xa5]) * (chunk + 2 * GUARD)
+            for j in range(part):
+                index = offset + j
+                data[GUARD + j] = (index * 37 + index // 251 + iteration * 53) % 256
+            for byte in data:
+                value = ((value ^ byte) * 1099511628211) & mask
+    wanted = dict(kind="gds-campaign-manifest", schema_version=1, workload=record["workload"],
+        input=dict(id="deterministic-pattern-v1", formula="(index*37+index/251+iteration*53)%256",
+                   index_window=[0, size], iteration_window=[0, iterations]),
+        geometry=dict(bytes=size, chunk=chunk, iterations=iterations, operations=record["operations"],
+                      history_bytes=record["history_bytes"], guard_bytes=GUARD),
+        verification=dict(phase="post-campaign", payload_bytes=record["io_bytes"],
+                          device_history_bytes=record["history_bytes"],
+                          file_bytes=record["io_bytes"] if record["workload"] == "checkpoint" else 0,
+                          device_equal=True, file_equal=True, complete=True),
+        observed_history_fnv1a64=f"{value:016x}")
+    # JSON comparison preserves bool-vs-integer evidence types as well as keys.
+    if json.dumps(manifest, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+        raise ValueError("manifest identity or verification differs from the requested campaign")
+    return manifest
+
+
 def main():
     args = arguments()
     try:
@@ -212,6 +260,7 @@ def main():
             if result.returncode:
                 return result.returncode if result.returncode in (1, 2, 4) else 1
             record = checked_result(result.stdout, args)
+            checked_manifest(result.stderr, record)
         print(json.dumps(record, separators=(",", ":")))
         return 0
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:

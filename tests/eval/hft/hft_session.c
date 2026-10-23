@@ -356,6 +356,7 @@ int hft_session(struct hft_actor *a)
  for(unsigned i=0;i<(c->measured?2*c->depth:64);i++) {
   unsigned char *p=(unsigned char *)x.umem+i*4096;
   memset(p,0xa5,430);memset(p+512+c->payload,0x5a,4096-512-c->payload);
+  if(c->measured&&i>=c->depth)a->frame_slots[i-c->depth]=(uint64_t)i*4096;
  }
  guarded=1;
  create.abi_version=XDEV_EXT_MECH_ABI_VERSION;create.nr_stages=2;
@@ -414,13 +415,17 @@ int hft_session(struct hft_actor *a)
  }
  if(started&&ret) ret=1;
  if(!unsafe) {
-  if(c->measured&&a->history&&obj&&ret==0) {
+  if(c->measured&&!c->probe&&started&&a->history&&obj) {
    struct bpf_map *history=bpf_object__find_map_by_name(obj,"hftb_guard_history");
    if(!history)ret=1;
    else for(unsigned i=0;i<a->history_count;i++) {
     struct hft_guard_record *r=&a->history[i];
-    if(bpf_map_lookup_elem(bpf_map__fd(history),&i,r)||r->committed!=1||r->generation!=i+1||r->frame_pos!=i%c->depth||r->payload_bytes!=c->payload||r->slot_addr!=(uint64_t)(c->depth+i%c->depth)*4096){ret=1;break;}
-    a->frame_slots[r->frame_pos]=r->slot_addr;
+    /* STOP has drained writers. Preserve every available generation, even
+     * when the workload/peer failed or an earlier entry is absent. */
+    struct hft_guard_record observed={0};
+    if(bpf_map_lookup_elem(bpf_map__fd(history),&i,&observed)){ret=1;continue;}
+    if(observed.committed==1)*r=observed;
+    if(observed.committed!=1||observed.generation!=i+1||observed.frame_pos!=i%c->depth||observed.payload_bytes!=c->payload||observed.slot_addr!=(uint64_t)(c->depth+i%c->depth)*4096)ret=1;
    }
   }
   if(!c->measured&&guarded && x.umem) for(unsigned i=0;i<64;i++) {

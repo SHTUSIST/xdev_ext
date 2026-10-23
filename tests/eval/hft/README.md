@@ -202,3 +202,13 @@ The obsolete surrounding benchmark/ABI is not imported. Preparation uses current
 UAPI symbols and REPORT_USAGE; waiting dispatches stable tokens and explicit
 NOTIF/MORE. Session setup derives from the current GPL-2.0 control tool; framing
 uses its current pure encoder. Builds reference only active product sources.
+
+A benchmark admission probe issues no START and requires zero-submission
+statistics plus successful STOP, without requiring workload history. All
+configured frame-slot identities are recorded during setup, including slots
+unused by a short campaign. After a failed workload or peer receipt, a successful
+STOP allows the native arm to retrieve every available committed history entry;
+missing entries never become fabricated records. The producer writes those raw
+entries as error evidence to stderr, which the controller retains, and returns
+failure without success or performance output. A failed STOP keeps UNKNOWN
+resources retained and does not read potentially live native history.
