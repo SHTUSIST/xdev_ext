@@ -150,7 +150,10 @@ python3 tests/eval/nvme_nic/run.py --correctness-only --loopback --direction rev
   validator mutations.
 - `test_loopback.py`: real producer and peer over 127.0.0.1, including the
   `--fault` negative cases, which must fail, a failed `pthread_create` partway
-  through setup (exit 1, no hang), and peer GRO coalescing.
+  through setup (exit 1, no hang), and peer GRO coalescing.  `make check`
+  runs only `test_offline.py`; run `make loopback-check` on a dedicated host,
+  because unpaced loopback UDP loses datagrams when the receive buffer fills
+  and every loss is reported as an error.
 
 `--correctness-only` without `--loopback` runs the same arms, the session arm
 included, in a KVM guest against given devices and a peer, and emits no

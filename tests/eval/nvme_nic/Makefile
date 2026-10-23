@@ -45,7 +45,14 @@ check: all
 	$(BUILD_DIR)/test_bpf_body
 	$(BUILD_DIR)/test_latency
 	$(if $(URING_TESTS),$(BUILD_DIR)/test_uring_shape)
-	NNB_BUILD_DIR=$(abspath $(BUILD_DIR)) PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -p 'test_*.py'
+	NNB_BUILD_DIR=$(abspath $(BUILD_DIR)) PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -p 'test_offline.py'
+# Real producer and peer over 127.0.0.1 UDP.  Unpaced loopback UDP drops
+# datagrams when the receiver's socket buffer fills (seen on GitHub runners),
+# and the harness correctly reports any loss as an error, so this target is
+# run on a dedicated host rather than in CI.
+loopback-check: all
+	NNB_BUILD_DIR=$(abspath $(BUILD_DIR)) PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -p 'test_loopback.py'
+.PHONY: loopback-check
 clean:
 	rm -rf $(BUILD_DIR) __pycache__
 
