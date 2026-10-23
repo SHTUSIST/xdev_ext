@@ -5,6 +5,7 @@
 Runtime ring ownership is exercised by the C selftests; these checks ensure
 that the real device entry points use those rules and cannot select bounce.
 """
+import re
 import unittest
 from pathlib import Path
 
@@ -17,7 +18,11 @@ def read(path):
 
 def body(path, name):
     text = read(path)
-    start = text.index("{", text.index(name))
+    # L11: forward declarations precede helper definitions after native handoff.
+    definition = re.search(re.escape(name) + r"[^;{]*\)\s*\{", text)
+    if not definition:
+        raise AssertionError("missing function definition: " + name)
+    start = text.index("{", definition.start())
     level = 1
     end = start + 1
     while level:
@@ -71,10 +76,25 @@ class StrictDmaTest(unittest.TestCase):
                         b.index("XDEV_EXT_MECH_EV_ABORT"))
 
     def test_sync_before_cpu_build_and_complete(self):
-        for name, operation in (("static int xdev_ext_mech_build(", "xdev_ext_mech_call("),
-                                ("static void xdev_ext_mech_batch_landed(", "xdev_ext_mech_call(")):
-            b = body("io_uring/xdev_ext_mech.c", name)
-            self.assertLess(b.index("xdev_ext_mech_sync_for_cpu("), b.index(operation))
+        # L11: native callbacks synchronize before release-publication;
+        # the later worker only builds descriptors and interprets completion.
+        build = body("io_uring/xdev_ext_mech.c", "static int xdev_ext_mech_build(")
+        self.assertLess(build.index("xdev_ext_mech_sync_for_cpu("),
+                        build.index("xdev_ext_mech_call("))
+        handoff = body("io_uring/xdev_ext_mech.c", "static int xdev_ext_mech_batch_handoff(")
+        self.assertLess(handoff.index("xdev_ext_mech_sync_for_cpu("),
+                        handoff.index("xdev_ext_mech_life_publish("))
+        self.assertLess(handoff.index("xdev_ext_mech_sync_for_cpu("),
+                        handoff.index("xdev_ext_mech_life_republish("))
+        callback = body("io_uring/xdev_ext_mech.c", "void xdev_ext_mech_batch_completion_publish(")
+        self.assertLess(callback.index("xdev_ext_mech_completion_publish_begin("),
+                        callback.index("xdev_ext_mech_batch_handoff("))
+        self.assertLess(callback.index("xdev_ext_mech_batch_handoff("),
+                        callback.index("xdev_ext_mech_completion_publish_end("))
+        landed = body("io_uring/xdev_ext_mech.c", "static void xdev_ext_mech_batch_landed(")
+        landed = re.sub(r"#ifdef XDEV_EXT_MECH_HANDOFF_LEGACY.*?#endif", "", landed, flags=re.S)
+        self.assertNotIn("xdev_ext_mech_sync_for_cpu(", landed)
+        self.assertNotIn("xdev_ext_mech_life_publish(", landed)
         sync = body("io_uring/xdev_ext_mech.c", "static void xdev_ext_mech_sync_for_cpu(")
         self.assertIn("s->pool.ops->sync_for_cpu", sync)
 
