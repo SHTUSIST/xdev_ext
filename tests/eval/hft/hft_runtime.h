@@ -5,6 +5,8 @@
 #include <stdint.h>
 #include <stdatomic.h>
 #include <sys/types.h>
+#include <stdlib.h>
+#include <string.h>
 #include "hft_core.h"
 struct hft_config {
  const char *backend,*reference,*source_block,*source_ng,*ifname,*bpf_object,*kernel_config;
@@ -23,6 +25,10 @@ struct hft_burst_sample {
  uint64_t started,local_release,peer_receipt,completed,first,reads,sends,start_reads,start_sends;
 };
 struct hft_timing { uint64_t setup_started,setup_completed,teardown_started,teardown_completed;struct hft_burst_sample samples[32]; };
+struct hft_guard_record {
+ uint64_t slot_addr;uint32_t generation,frame_pos,payload_bytes,committed;
+ unsigned char raw_prefix[430],raw_tail[3072];
+};
 struct hft_actor {
  const struct hft_config *c; unsigned id;
  pthread_barrier_t *barrier;
@@ -31,9 +37,28 @@ struct hft_actor {
  struct hft_native_stats native;
  struct hft_timing timing;
  unsigned native_xdp_zc,native_create,nvme_map_id,afxdp_map_id;
+ struct hft_guard_record *history;unsigned history_count;uint64_t frame_slots[8];
  int result; /* 0 success, 4 capability, 1 execution error */
 };
 struct hft_buffer { unsigned char *allocation,*payload; size_t bytes; struct hft_slot life; unsigned group; };
+/* One record per generation, allocated before the setup barrier/READY. No
+ * content validation: terminal ownership evidence is checked by the caller. */
+static inline int hft_history_setup(struct hft_actor *a)
+{
+ if(!a->c->measured)return 0;
+ size_t n=(size_t)a->c->burst*a->c->bursts;
+ a->history=calloc(n,sizeof(*a->history));if(!a->history)return -1;
+ a->history_count=(unsigned)n;return 0;
+}
+static inline int hft_history_commit(struct hft_actor *a,const struct hft_buffer *b,unsigned group)
+{
+ if(!a->c->measured)return 0;
+ if(!a->history||group>=a->history_count||!hft_slot_reusable(&b->life)||b->bytes!=4096||b->life.index!=group%a->c->depth)return -1;
+ struct hft_guard_record *r=&a->history[group];if(r->committed)return -1;
+ r->slot_addr=(uintptr_t)b->allocation;r->generation=group+1;r->frame_pos=b->life.index;r->payload_bytes=a->c->payload;
+ memcpy(r->raw_prefix,b->allocation,430);memcpy(r->raw_tail,b->payload+a->c->payload,4096-512-a->c->payload);
+ r->committed=1;a->frame_slots[b->life.index]=r->slot_addr;return 0;
+}
 void hft_setup_begin(struct hft_actor *a);
 void hft_setup_done(struct hft_actor *a);
 void hft_burst_begin(struct hft_actor *a,unsigned burst);
