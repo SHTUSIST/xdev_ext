@@ -199,7 +199,8 @@ verify_compat_identity() {
     for artifact in "$SOCKET_OUT/socket_runtime" "$SOCKET_OUT/ce_observe.bpf.o" \
         "$TOOLS/socket_sink.bpf.o" "$PRELOAD_OUT/libio_uring_unified.so" \
         "$PRELOAD_OUT/xdev_ext_preload_mech_workload" \
-        "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" "$PRELOAD_OUT/xdev_ext_preload_db_workload"; do
+        "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" "$PRELOAD_OUT/xdev_ext_preload_db_workload" \
+        "$PRELOAD_OUT/xdev_ext_preload_ordinary_fork_guest"; do
         [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
             echo 'FAIL compatibility artifact identity absent; rebuild exact source' >&2; return 1;
         }
@@ -375,6 +376,7 @@ if (( ! RUN_ONLY )); then
         sha256sum "$SOCKET_OUT/socket_runtime" "$SOCKET_OUT/ce_observe.bpf.o" \
             "$PRELOAD_OUT/libio_uring_unified.so" "$PRELOAD_OUT/xdev_ext_preload_mech_workload" \
             "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" "$PRELOAD_OUT/xdev_ext_preload_db_workload" \
+        "$PRELOAD_OUT/xdev_ext_preload_ordinary_fork_guest" \
             >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
     if (( PEER )); then
@@ -435,7 +437,7 @@ if (( COMPAT )); then
     cp "$SOCKET_OUT/"{socket_runtime,ce_observe.bpf.o} \
         "$SRC/tools/testing/selftests/xdev_ext_mech/socket_guest/run-guest.sh" "$ROOT/opt/xdev_ext/socket_guest/"
     cp "$TOOLS/socket_sink.bpf.o" "$ROOT/opt/xdev_ext/"
-    cp "$PRELOAD_OUT/"{libio_uring_unified.so,xdev_ext_preload_mech_workload,xdev_ext_preload_socket_smoke,xdev_ext_preload_db_workload} \
+    cp "$PRELOAD_OUT/"{libio_uring_unified.so,xdev_ext_preload_mech_workload,xdev_ext_preload_socket_smoke,xdev_ext_preload_db_workload,xdev_ext_preload_ordinary_fork_guest} \
         "$SRC/tools/testing/selftests/xdev_ext_preload/xdev_ext_preload_mech_guest.sh" "$ROOT/opt/xdev_ext/preload/"
     truncate -s 64M "$SCRATCH/compat.raw"
     /usr/sbin/mkfs.ext4 -q -F "$SCRATCH/compat.raw"
@@ -470,7 +472,7 @@ if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then GUEST_PROGRAMS+=("$IAA
 if (( ${COMPAT:-0} )); then
     GUEST_PROGRAMS+=("$SOCKET_OUT/socket_runtime" "$PRELOAD_OUT/libio_uring_unified.so" \
         "$PRELOAD_OUT/xdev_ext_preload_mech_workload" "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" \
-        "$PRELOAD_OUT/xdev_ext_preload_db_workload")
+        "$PRELOAD_OUT/xdev_ext_preload_db_workload" "$PRELOAD_OUT/xdev_ext_preload_ordinary_fork_guest")
     # glibc dlopens this runtime for pthread_cancel; ldd of the applications
     # does not list it. Resolve it with the compiler used for these tools.
     GUEST_CANCEL_RUNTIME=$(gcc-14 -print-file-name=libgcc_s.so.1)
@@ -905,6 +907,7 @@ if (( COMPAT )); then
     sha256sum "$SOCKET_OUT/socket_runtime" "$SOCKET_OUT/ce_observe.bpf.o" \
         "$PRELOAD_OUT/libio_uring_unified.so" "$PRELOAD_OUT/xdev_ext_preload_mech_workload" \
         "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" "$PRELOAD_OUT/xdev_ext_preload_db_workload" \
+        "$PRELOAD_OUT/xdev_ext_preload_ordinary_fork_guest" \
         >>"$EV/artifacts.sha256"
 fi
 if (( PEER )); then

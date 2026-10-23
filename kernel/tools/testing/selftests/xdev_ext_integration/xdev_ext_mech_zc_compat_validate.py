@@ -7,6 +7,7 @@ import re
 import sys
 
 NAMES = frozenset(('compat-udp.log', 'compat-dio-off.log', 'compat-dio-on.log',
+    'compat-ordinary-fork.log',
     'mech-socket-base.log', 'mech-socket-lifecycle.log',
     'mech-ce-socket-base.log', 'mech-ce-socket-lifecycle.log',
     'mech-socket-threads.log', 'mech-socket-processes.log',

@@ -17,16 +17,17 @@ TEST_PROGS := xdev_ext_preload_vfs_source_test.sh \
 	independent_mech_fork_inherited.py \
 	independent_mech_fork_teardown.py \
 	independent_ordinary_fork_lifetime.py \
+	xdev_ext_preload_ordinary_fork_validate_test.py \
 	xdev_ext_preload_socket_source_test.py xdev_ext_preload_db_equivalence.sh
-# Run by xdev_ext_preload_db_equivalence.sh.  The KVM harness copies only
-# xdev_ext_preload_db_workload into the guest and runs it in phase
-# db-workload-preload-ext4; the guest does not run
-# xdev_ext_preload_db_equivalence.sh or xdev_ext_preload_cancel_wait.
+# Extended applications run through the equivalence or real-kernel guest
+# drivers; the ordinary fork binary requires the actual matching kernel.
+# The guest does not run the host kernel-model equivalence driver.
 TEST_GEN_PROGS_EXTENDED := xdev_ext_preload_db_workload xdev_ext_preload_cancel_wait \
-	xdev_ext_preload_mech_workload \
+	xdev_ext_preload_mech_workload xdev_ext_preload_ordinary_fork_guest \
 	xdev_ext_preload_fortify xdev_ext_preload_buffered_cost
 TEST_GEN_FILES := libio_uring_unified.so libxdev_ext_preload_kernel_model.so
 TEST_FILES += xdev_ext_preload_payload_fault_fixture.c \
+	xdev_ext_preload_mech_validate.py \
 	xdev_ext_preload_mech_workload.c \
 	independent_ordinary_fork_lifetime_fixture.c
 # The independent fork tests extract production functions and require the

@@ -55,7 +55,8 @@ int main(void) {
             linked = subprocess.run(['ldd', str(binary)], check=True, capture_output=True, text=True)
             self.assertNotIn('libgcc_s', linked.stdout, 'fixture must exercise a dlopen-only dependency')
             for path in (socket/'socket_runtime', preload/'xdev_ext_preload_mech_workload',
-                         preload/'xdev_ext_preload_socket_smoke', preload/'xdev_ext_preload_db_workload'):
+                         preload/'xdev_ext_preload_socket_smoke', preload/'xdev_ext_preload_db_workload',
+                         preload/'xdev_ext_preload_ordinary_fork_guest'):
                 shutil.copy2(binary, path)
             library_source = base/'library.c'
             library_source.write_text('#include <stdio.h>\nint probe(void) { return puts("probe"); }\n')

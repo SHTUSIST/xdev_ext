@@ -15,7 +15,8 @@ ARTIFACTS = ('socket/socket_runtime', 'socket/ce_observe.bpf.o',
              'tools/socket_sink.bpf.o', 'preload/libio_uring_unified.so',
              'preload/xdev_ext_preload_mech_workload',
              'preload/xdev_ext_preload_socket_smoke',
-             'preload/xdev_ext_preload_db_workload')
+             'preload/xdev_ext_preload_db_workload',
+             'preload/xdev_ext_preload_ordinary_fork_guest')
 
 
 class CompatibilityIdentity(unittest.TestCase):
@@ -63,7 +64,7 @@ class CompatibilityFailureLogs(unittest.TestCase):
              'mech-socket-lifecycle.log', 'mech-ce-socket-lifecycle.log',
              'mech-socket-threads.log', 'mech-ce-socket-threads.log',
              'mech-socket-processes.log', 'mech-ce-socket-processes.log',
-             'compat-dio-off.log', 'compat-dio-on.log')
+             'compat-dio-off.log', 'compat-dio-on.log', 'compat-ordinary-fork.log')
 
     def run_guest(self, fail='', bad_udp=False, shell=('sh',), cat_failure=False):
         with tempfile.TemporaryDirectory(prefix='xdev-compat-logs-') as directory:
@@ -82,6 +83,7 @@ class CompatibilityFailureLogs(unittest.TestCase):
             app = '''#!/bin/sh
 case "${0##*/}" in
  xdev_ext_preload_socket_smoke) name=compat-udp.log ;;
+ xdev_ext_preload_ordinary_fork_guest) name=compat-ordinary-fork.log ;;
  xdev_ext_preload_mech_workload)
   if [ -n "${XDEV_EXT_PRELOAD_SOCKET_CE_DEVICE:-}" ]; then arm=ce-socket; else arm=socket; fi
   mode=$1
@@ -99,10 +101,12 @@ case "$name" in
   if [ "$BAD_UDP" = 0 ]; then echo 'XDEV_EXT_TRANSPARENT_SOCKET_PAYLOAD=PASS sends=3 bytes=25'; fi
   echo 'XDEV_EXT_PRELOAD_REPORT custom_send_count=3 custom_send_bytes=25 custom_send_errors=0' ;;
  compat-dio-*) echo 'XDEV_EXT_DB_WORKLOAD_RESULT=PASS fixture=equal' ;;
+ compat-ordinary-fork.log) echo 'XDEV_EXT_ORDINARY_FORK=PASS fixture=log-publication-only' ;;
 esac
 '''
             for name in ('xdev_ext_preload_socket_smoke',
-                         'xdev_ext_preload_mech_workload', 'xdev_ext_preload_db_workload'):
+                         'xdev_ext_preload_mech_workload', 'xdev_ext_preload_db_workload',
+                         'xdev_ext_preload_ordinary_fork_guest'):
                 path = bin_dir/name
                 path.write_text(app)
                 path.chmod(0o700)
