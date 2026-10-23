@@ -1,0 +1,90 @@
+{
+  "fixture_only": true,
+  "manifest": {
+    "schema_version": 1,
+    "run_id": "fixture-U-poll-pair-1",
+    "pair_id": "pair-1",
+    "arm": "U-poll",
+    "exact_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "bpf_object_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "config_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "device_manifest": {
+      "nvme": "fixture",
+      "nic": "fixture"
+    },
+    "physical": false,
+    "environment": "fixture",
+    "evidence_kind": "fixture",
+    "correctness_pass": true,
+    "status": "ok",
+    "load": "closed",
+    "endpoint": "remote_receive",
+    "pool_bytes": 16777216,
+    "record_bytes": 4096,
+    "frame_bytes": 4096,
+    "depth": 8,
+    "batch": 1,
+    "mtu": 1500,
+    "protocol": "nxp-v1",
+    "crc": "crc32c",
+    "payload_copy_bytes": 0,
+    "setup_in_timing": false,
+    "oracle_in_timing": false,
+    "total_cpu_ns": 1200,
+    "cpu_accounting": "system_total",
+    "completed_records": 2,
+    "registration_calls": 1,
+    "registration_reused": true,
+    "shared_pages": true,
+    "afxdp_zero_copy": true,
+    "nvme_no_bounce": true,
+    "wait_strategy": "U-poll",
+    "metrics": {
+      "latency_ns": 400,
+      "throughput_bytes_per_second": 1000
+    },
+    "trace_dropped": 0,
+    "clock": "CLOCK_MONOTONIC",
+    "clock_domain": "host-fixture",
+    "complete_boundary": "native_observed",
+    "submit_boundary": "native_accepted",
+    "stages": [
+      {
+        "id": "read",
+        "after": []
+      },
+      {
+        "id": "send_a",
+        "after": [
+          "read"
+        ]
+      },
+      {
+        "id": "send_b",
+        "after": [
+          "read"
+        ]
+      }
+    ],
+    "records": [
+      {
+        "session_id": 7,
+        "record_id": 0,
+        "generation": 1,
+        "frame_ids": [
+          0
+        ]
+      },
+      {
+        "session_id": 7,
+        "record_id": 1,
+        "generation": 1,
+        "frame_ids": [
+          1
+        ]
+      }
+    ],
+    "commands": []
+  },
+  "events_file": "fanout-events.jsonl"
+}
