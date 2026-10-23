@@ -299,63 +299,65 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 		err = -ENODEV;
 		goto free;
 	}
-	err = ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
-	if (err)
-		goto put;
-	cs->region.ops = ops;
-	err = xdev_ext_ce_geom_init(&cs->geom, u->arg1, cs->region.len,
-			       cs->region.seg_size, cs->region.max_entry_len,
-			       (u64)pool->nr_pages << PAGE_SHIFT,
-			       pool->first_page_off, pool->frame_size,
-			       pool->nr_frames);
-	if (err)
-		goto unbind_region;
-	err = xdev_ext_mech_window_offset(0, xdev_ext_mech_session_depth(st->s),
-		xdev_ext_mech_session_layout(st->s)->group_bytes, cs->geom.window_len,
-		&offset);
-	if (err)
-		goto unbind_region;
-	/* The UMEM keeps the pages pinned; the backend does not pin again. */
-	err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages,
-			     &cs->host);
-	if (err)
-		goto unbind_region;
-	err = xdev_ext_ce_lease_bind(st, cs, u->arg0);
-	if (err)
-		goto unbind_host;
-	st->priv = cs;
-	return 0;
-
-unbind_host:
-	ops->unbind_host(cs->host);
-unbind_region:
-	ops->unbind_region(&cs->region);
-put:
-	module_put(ops->owner);
+ /* Publish residual ownership before either provider bind: a failed bind
+  * may have partially mapped pages. The core includes such a stage in checked
+  * CREATE rollback and retains the original UMEM pins on unmap refusal. */
+ cs->region.ops = ops;
+ st->priv = cs;
+ err = ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
+ if (err)
+  return err;
+ err = xdev_ext_ce_geom_init(&cs->geom, u->arg1, cs->region.len,
+             cs->region.seg_size, cs->region.max_entry_len,
+             (u64)pool->nr_pages << PAGE_SHIFT,
+             pool->first_page_off, pool->frame_size, pool->nr_frames);
+ if (err)
+  return err;
+ err = xdev_ext_mech_window_offset(0, xdev_ext_mech_session_depth(st->s),
+   xdev_ext_mech_session_layout(st->s)->group_bytes, cs->geom.window_len, &offset);
+ if (err)
+  return err;
+ err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
+ if (err)
+  return err;
+ return xdev_ext_ce_lease_bind(st, cs, u->arg0);
 free:
-	kfree(cs);
-	return err;
+ kfree(cs);
+ return err;
 }
 
-static void xdev_ext_ce_unbind(struct xdev_ext_mech_stage *st)
+static int xdev_ext_ce_unbind(struct xdev_ext_mech_stage *st)
 {
-	struct xdev_ext_ce_stage *cs = st->priv;
-	const struct xdev_ext_ce_backend_ops *ops = cs->region.ops;
+ struct xdev_ext_ce_stage *cs = st->priv;
+ const struct xdev_ext_ce_backend_ops *ops;
+ int err;
 
-	/*
-	 * After an AMBIGUOUS outcome the device may still read or write the
-	 * window and the pool pages: keep both bound and the backend module
-	 * pinned for good.
-	 */
-	if (atomic_read(&cs->ambiguous))
-		return;
-	if (!xdev_ext_ce_lease_unbind(cs))
-		return;
-	ops->unbind_host(cs->host);
-	ops->unbind_region(&cs->region);
-	st->priv = NULL;
-	kfree(cs);
-	module_put(ops->owner);
+ if (!cs)
+  return 0;
+ ops = cs->region.ops;
+ if (atomic_read(&cs->ambiguous))
+  return -EBUSY;
+ if (cs->lease_group) {
+  if (!xdev_ext_ce_lease_unbind(cs))
+   return -EBUSY;
+  cs->lease_group = NULL;
+ }
+ if (cs->host) {
+  err = ops->unbind_host(cs->host);
+  if (err)
+   return err;
+  cs->host = NULL;
+ }
+ if (cs->region.priv) {
+  err = ops->unbind_region(&cs->region);
+  if (err)
+   return err;
+  cs->region.priv = NULL;
+ }
+ st->priv = NULL;
+ kfree(cs);
+ module_put(ops->owner);
+ return 0;
 }
 
 /* Worker or CREATE: data spans and pool chunk indices of @b's frames. */
@@ -448,13 +450,17 @@ static int xdev_ext_ce_stage_xfers(struct xdev_ext_ce_stage *cs, struct xdev_ext
 		return -ENODEV;
 	if (staged != b)
 		return -EPROTO;
-	for (i = 0; i < cs->plan.n; i++)
+	for (i = 0; i < cs->plan.n; i++) {
 		cb->x[i] = (struct xdev_ext_ce_xfer){
 			.host_byte_off	= cs->plan.host_off[i],
 			.gpu_off	= cs->d[i].gpu_off,
 			.len		= cs->d[i].len,
 			.flags		= cs->d[i].flags,
 		};
+		if (xdev_ext_mech_batch_frame_claim(b, cs->d[i].frame_pos,
+			&cb->x[i].owner, &cb->x[i].generation))
+			return -ESTALE;
+	}
 	cb->n = cs->plan.n;
 	cb->total = cs->plan.total;
 	return 0;
@@ -490,6 +496,14 @@ static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_me
 	ck->status = err;
 	return err;
 }
+
+bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
+                             const struct xdev_ext_ce_xfer *x, u32 n)
+{
+ /* b is initialized once; all mutable cookie fields follow ticket admission. */
+ return ck && ck->b && xdev_ext_mech_batch_ce_owners_valid(ck->b, ticket, x, n);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_ce_owners_valid);
 
 void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
 		     bool hw_submitted, u64 bytes_done)
@@ -549,7 +563,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.batch_cookie_size = sizeof(struct xdev_ext_ce_cookie),
 	.owner		= THIS_MODULE,
 	.bind		= xdev_ext_ce_bind,
-	.unbind		= xdev_ext_ce_unbind,
+	.unbind_checked	= xdev_ext_ce_unbind,
 	.fill_info	= xdev_ext_ce_fill_info,
 	.validate	= xdev_ext_ce_validate,
 	.submit		= xdev_ext_ce_submit,

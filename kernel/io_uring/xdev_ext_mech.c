@@ -79,7 +79,7 @@ struct xdev_ext_mech_batch {
 	int status;			/* what the native command completed with */
 	u32 life_active;		/* lifecycle acquisitions for this step */
 	u64 life_token[XDEV_EXT_MECH_MAX_FRAMES];
-	u32 life_previous[XDEV_EXT_MECH_MAX_FRAMES];
+	u32 life_previous[XDEV_EXT_MECH_MAX_FRAMES]; /* legacy evidence only */
 	bool producing;
 	bool fifo_accepted;
 	u32 present;			/* frames held, one bit per position */
@@ -137,6 +137,7 @@ struct xdev_ext_mech_session {
 	u32 nr_stages;
 	u32 nr_bound;			/* stages whose ->bind succeeded */
 	struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
+ struct xdev_ext_mech_stage_uapi plan[XDEV_EXT_MECH_MAX_STAGES];
 	const void *ops[XDEV_EXT_MECH_CLASS_MAX];	/* per class, for life */
 	bool pinned[XDEV_EXT_MECH_CLASS_MAX];
 	struct module *c_owner[XDEV_EXT_MECH_CLASS_MAX];	/* C reference ops */
@@ -245,6 +246,7 @@ static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_m
 					xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, caps);
 		return to_dev ? xdev_ext_binding_make_afxdp_tx_ctx(bytes) :
 				xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, 0);
+	case XDEV_EXT_MECH_CLASS_CPU:
 	case XDEV_EXT_MECH_CLASS_IAA:
 	case XDEV_EXT_MECH_CLASS_SOCKET:
 	case XDEV_EXT_MECH_CLASS_NET:
@@ -423,7 +425,7 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
   if (s->transform_owner[f->index]) {
    if (xdev_ext_mech_life_phase(&s->life[f->index]) != XDEV_EXT_MECH_L_FREE &&
        xdev_ext_mech_life_release(&s->life[f->index],
-                                xdev_ext_mech_life_token(&s->life[f->index])))
+                                xdev_ext_mech_life_gen(&s->life[f->index])))
     goto quarantine;
    done |= BIT(pos);
    continue; /* stage lease remains HELD until unbind */
@@ -432,7 +434,7 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 		if (!keep_ready &&
 		    xdev_ext_mech_life_phase(&s->life[f->index]) != XDEV_EXT_MECH_L_FREE &&
 		    WARN_ON_ONCE(xdev_ext_mech_life_release(&s->life[f->index],
-				xdev_ext_mech_life_token(&s->life[f->index]))))
+				xdev_ext_mech_life_gen(&s->life[f->index]))))
 			goto quarantine;
 		if (WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, f->index,
 							  XDEV_EXT_MECH_F_HELD, to)))
@@ -631,7 +633,7 @@ int xdev_ext_mech_batch_transform_begin(struct xdev_ext_mech_batch *b,
   b->transform.dst[i] = dst[i];
   err = s->pool.ops->resolve(&s->pool, &b->transform.dst[i]);
   if (err) goto undo;
-  err = xdev_ext_mech_life_begin_produce(&s->life[dst[i].index], false,
+  err = xdev_ext_mech_life_claim(&s->life[dst[i].index], st->index,
                                         &b->transform.token[i]);
   if (err) goto undo;
   begun++;
@@ -650,7 +652,7 @@ undo:
                         XDEV_EXT_MECH_F_INFLIGHT, XDEV_EXT_MECH_F_HELD);
  for (i = 0; i < begun; i++)
   WARN_ON_ONCE(xdev_ext_mech_life_rollback(&s->life[dst[i].index],
-                        b->transform.token[i], XDEV_EXT_MECH_L_FREE));
+                        b->transform.token[i]));
  return err;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_transform_begin);
@@ -690,7 +692,7 @@ static void xdev_ext_mech_transform_undo(struct xdev_ext_mech_session *s,
  for (i = 0; i < b->transform.nr; i++) {
   struct xdev_ext_mech_frame *f = &b->transform.dst[i];
   WARN_ON_ONCE(xdev_ext_mech_life_rollback(&s->life[f->index],
-                    b->transform.token[i], XDEV_EXT_MECH_L_FREE));
+                    b->transform.token[i]));
   WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, f->index,
                     XDEV_EXT_MECH_F_INFLIGHT, XDEV_EXT_MECH_F_HELD));
  }
@@ -702,7 +704,6 @@ static bool xdev_ext_mech_transform_landed(struct xdev_ext_mech_session *s,
                                          struct xdev_ext_mech_batch *b, bool seq)
 {
  u32 i, left = b->transform.produced, used = 0;
- int err;
  for (i = 0; i < b->transform.nr; i++) {
   struct xdev_ext_mech_frame *f = &b->transform.dst[i];
   if (xdev_ext_mech_pool_frame_move(&s->pool, f->index, XDEV_EXT_MECH_F_INFLIGHT,
@@ -712,16 +713,10 @@ static bool xdev_ext_mech_transform_landed(struct xdev_ext_mech_session *s,
    xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, 1);
    continue;
   }
-  if (b->status || !left) {
-   err = xdev_ext_mech_life_fail_produce(&s->life[f->index], b->transform.token[i]);
-  } else {
-   f->data_len = min(f->data_len, left);
+  if (!b->status && left) {
    left -= f->data_len;
    used++;
-   if (s->pool.ops->sync_for_cpu) s->pool.ops->sync_for_cpu(&s->pool, f);
-   err = xdev_ext_mech_life_publish(&s->life[f->index], b->transform.token[i], f->data_len);
   }
-  if (WARN_ON_ONCE(err)) seq = true;
  }
  if (seq) {
 quarantine:
@@ -1017,6 +1012,88 @@ int xdev_ext_mech_batch_frame(const struct xdev_ext_mech_batch *b, u32 pos,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_frame);
 
+int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos, u32 len)
+{
+ struct xdev_ext_mech_frame *f;
+ u64 claim;
+
+ if (pos >= b->nr_frames || !(b->life_active & BIT(pos)))
+  return -EINVAL;
+ f = &b->f[pos];
+ claim = b->life_token[pos];
+ if ((claim & XDEV_EXT_MECH_L_STATE_MASK) != XDEV_EXT_MECH_L_CLAIM_EXCLUSIVE ||
+     !xdev_ext_mech_life_matches(smp_load_acquire(&b->s->life[f->index].ctrl), claim))
+  return -ESTALE;
+ if (len > b->s->pool.frame_size - f->data_off)
+  return -EMSGSIZE;
+ b->bytes = b->bytes - f->data_len + len;
+ f->data_len = len;
+ return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_cpu_length);
+
+int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch *b,
+                                   u32 pos, u64 *owner, u64 *generation)
+{
+ u64 claim;
+
+ if (pos >= b->nr_frames || !(b->life_active & BIT(pos)))
+  return -ESTALE;
+ claim = b->life_token[pos];
+ *owner = xdev_ext_mech_life_claim_owner(claim);
+ *generation = xdev_ext_mech_life_claim_gen(claim);
+ return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_frame_claim);
+
+/* Read-only admission: never steal the native callback's completion claim.
+ * The cookie's batch pointer is immutable. Check its ticket before reading any
+ * reusable batch metadata, and again after the bounded snapshot validation.
+ */
+bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
+                                       u64 ticket, const struct xdev_ext_ce_xfer *x, u32 n)
+{
+ const struct xdev_ext_mech_session *s;
+ u64 expected = (ticket << 3) | XDEV_EXT_MECH_C_SUBMITTED;
+ u32 i, j;
+
+ if (!ticket || !n || n > XDEV_EXT_MECH_MAX_FRAMES ||
+     smp_load_acquire(&b->completion.ctrl) != expected)
+  return false;
+ s = b->s;
+ for (i = 0; i < n; i++) {
+  bool found = false;
+
+  for (j = 0; j < b->nr_frames; j++) {
+   const struct xdev_ext_mech_frame *f = &b->f[j];
+   struct xdev_ext_mech_frame_rec rec;
+   u64 start = s->pool.first_page_off + (u64)f->index * s->pool.frame_size + f->data_off;
+   u64 claim = b->life_token[j], word;
+
+   if (x[i].host_byte_off < start || x[i].host_byte_off - start > f->data_len ||
+       !x[i].len || x[i].len > f->data_len - (x[i].host_byte_off - start))
+    continue;
+   if (!(b->life_active & BIT(j)) || x[i].owner != xdev_ext_mech_life_claim_owner(claim) ||
+       x[i].generation != xdev_ext_mech_life_claim_gen(claim))
+    return false;
+   xdev_ext_mech_frame_rec_fill(&rec, &s->life[f->index], f->index, s->pool.frame_size,
+     s->pool.first_page_off, PAGE_SHIFT, s->pool.capabilities,
+     s->pool.ops->sync_for_cpu != NULL, READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ZOMBIE);
+   word = smp_load_acquire(&s->life[f->index].ctrl);
+   if (rec.gen != x[i].generation || rec.closing || !xdev_ext_mech_life_matches(word, claim))
+    return false;
+   if ((claim & XDEV_EXT_MECH_L_STATE_MASK) != XDEV_EXT_MECH_L_CLAIM_PRODUCE && !rec.refs)
+    return false;
+   found = true;
+   break;
+  }
+  if (!found)
+   return false;
+ }
+ return smp_load_acquire(&b->completion.ctrl) == expected;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_ce_owners_valid);
+
 void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b)
 {
 	return b->priv;
@@ -1066,6 +1143,70 @@ int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b, u64 tick
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_completion_claim);
 
+static void xdev_ext_mech_sync_for_cpu(struct xdev_ext_mech_session *s,
+                                      struct xdev_ext_mech_batch *b);
+
+/* Native callback, after completion_publish_begin won. Provider sync hooks are
+ * IRQ-safe (XSK uses its existing mapping lifetime lock); no new lifecycle lock.
+ * Unknown DMA retains every claim and the pool's permanent quarantine custody.
+ * Destination custody transfer and descriptor construction remain in the worker.
+ */
+static int xdev_ext_mech_batch_handoff(struct xdev_ext_mech_batch *b,
+                                      int err, bool *sequester)
+{
+ struct xdev_ext_mech_session *s = b->s;
+ u32 i, refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, b->bs.stage + 1);
+ u32 left = b->transform.produced;
+ int rc;
+
+ if (*sequester || READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ZOMBIE) {
+  *sequester = true;
+  return err;
+ }
+ xdev_ext_mech_sync_for_cpu(s, b);
+ for (i = 0; i < b->nr_frames; i++) {
+  struct xdev_ext_mech_life *l = &s->life[b->f[i].index];
+  u64 claim = b->life_token[i];
+
+  if (!(b->life_active & BIT(i)))
+   continue;
+  if (b->producing)
+   rc = err ? xdev_ext_mech_life_fail_produce(l, claim) :
+    xdev_ext_mech_life_publish(l, claim, refs, b->f[i].data_len);
+  else if (!err && xdev_ext_mech_stage_role(&s->plan[b->bs.stage]) == XDEV_EXT_MECH_ROLE_INPLACE)
+   rc = xdev_ext_mech_life_republish(l, claim, refs, b->f[i].data_len);
+  else
+   rc = err ? xdev_ext_mech_life_fail_put(l, claim) : xdev_ext_mech_life_put(l, claim);
+  if (rc < 0) {
+   *sequester = true;
+   return -EIO;
+  }
+ }
+ b->life_active = 0;
+ if (!b->transform.active)
+  return err;
+ for (i = 0; i < b->transform.nr; i++) {
+  struct xdev_ext_mech_frame *f = &b->transform.dst[i];
+  struct xdev_ext_mech_life *l = &s->life[f->index];
+
+  if (err || !left) {
+   rc = xdev_ext_mech_life_fail_produce(l, b->transform.token[i]);
+   f->data_len = 0;
+  } else {
+   f->data_len = min(f->data_len, left);
+   left -= f->data_len;
+   if (s->pool.ops->sync_for_cpu)
+    s->pool.ops->sync_for_cpu(&s->pool, f);
+   rc = xdev_ext_mech_life_publish(l, b->transform.token[i], refs, f->data_len);
+  }
+  if (rc < 0) {
+   *sequester = true;
+   return -EIO;
+  }
+ }
+ return err;
+}
+
 /* Only the matching claim winner may call this and write class metadata. */
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket,
 				      int err, bool sequester)
@@ -1083,6 +1224,7 @@ void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 t
 			b->s->last_err = xdev_ext_mech_status_errno(err);
 		spin_unlock_irqrestore(&b->s->lock, flags);
 	}
+	err = xdev_ext_mech_batch_handoff(b, err, &sequester);
 	b->sequester = sequester;
 	xdev_ext_mech_completion_publish_end(&b->completion, ticket, err);
 	xdev_ext_mech_batch_queue(b);
@@ -1191,7 +1333,7 @@ static void xdev_ext_mech_return_idle(struct xdev_ext_mech_session *s, bool stop
 		if ((phase != XDEV_EXT_MECH_L_FREE && phase != XDEV_EXT_MECH_L_READY) ||
 		    (phase == XDEV_EXT_MECH_L_READY &&
 		     xdev_ext_mech_life_release(&s->life[f.index],
-			xdev_ext_mech_life_token(&s->life[f.index]))) ||
+			xdev_ext_mech_life_gen(&s->life[f.index]))) ||
 		    xdev_ext_mech_pool_frame_move(&s->pool, f.index,
 					XDEV_EXT_MECH_F_HELD, XDEV_EXT_MECH_F_USER)) {
 			xdev_ext_mech_pool_frame_move(&s->pool, f.index,
@@ -1396,11 +1538,11 @@ static void xdev_ext_mech_life_undo(struct xdev_ext_mech_session *s,
 	for (i = 0; i < b->nr_frames; i++)
 		if (b->life_active & BIT(i))
 			WARN_ON_ONCE(xdev_ext_mech_life_rollback(&s->life[b->f[i].index],
-				b->life_token[i], b->life_previous[i]));
+				b->life_token[i]));
 	b->life_active = 0;
 }
 
-static int xdev_ext_mech_life_acquire(struct xdev_ext_mech_session *s,
+static int xdev_ext_mech_batch_acquire(struct xdev_ext_mech_session *s,
 				 struct xdev_ext_mech_batch *b)
 {
 	struct xdev_ext_mech_stage *st = &s->st[b->bs.stage];
@@ -1416,10 +1558,14 @@ static int xdev_ext_mech_life_acquire(struct xdev_ext_mech_session *s,
 
 		b->life_previous[i] = phase;
 		if (b->producing)
-			ret = xdev_ext_mech_life_begin_produce(l, phase == XDEV_EXT_MECH_L_READY,
-						 &b->life_token[i]);
+			ret = xdev_ext_mech_life_claim(l, st->index, &b->life_token[i]);
 		else
-			ret = xdev_ext_mech_life_begin_consume(l, &b->life_token[i]);
+			ret = xdev_ext_mech_life_acquire(l, st->index,
+    xdev_ext_mech_stage_role(&s->plan[st->index]) == XDEV_EXT_MECH_ROLE_INPLACE ?
+    XDEV_EXT_MECH_L_ACQ_EXCLUSIVE :
+    ((s->plan[st->index].flags & XDEV_EXT_MECH_STAGE_F_FANOUT) ||
+     xdev_ext_mech_stage_group_end(s->plan, s->nr_stages, st->index) > st->index + 1) ?
+    XDEV_EXT_MECH_L_ACQ_FANOUT : 0, &b->life_token[i]);
 		if (ret) {
 			xdev_ext_mech_life_undo(s, b);
 			return ret;
@@ -1538,7 +1684,7 @@ static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,
 		xdev_ext_mech_order_park(s, b);
 		return;
 	}
-	err = xdev_ext_mech_life_acquire(s, b);
+	err = xdev_ext_mech_batch_acquire(s, b);
 	if (!err)
 		err = xdev_ext_mech_build(s, st, b);
 	if (!err)
@@ -1623,6 +1769,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 		memset(s->cqe, 0, cls->cqe_size * cls->cqe_cap);
 		cls->fill_cqe(st, b, s->cqe);
 	}
+#ifdef XDEV_EXT_MECH_HANDOFF_LEGACY
 	/* Complete compatibility payload fixups and DMA CPU synchronization
 	 * before release-publishing READY. Acquire/release is not a DMA fence.
 	 */
@@ -1654,6 +1801,8 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 		}
 		b->life_active = 0;
 	}
+#endif
+
  if (b->transform.active && xdev_ext_mech_transform_landed(s, b, seq)) {
   seq = true;
   b->sequester = true;
@@ -1995,10 +2144,10 @@ int xdev_ext_mech_hold_commit(struct xdev_ext_mech_stage *st,
 	{
 		u64 token;
 
-		ret = xdev_ext_mech_life_begin_produce(&s->life[f->index], false, &token);
+		ret = xdev_ext_mech_life_claim(&s->life[f->index], 0, &token);
 		if (!ret)
 			ret = xdev_ext_mech_life_publish(&s->life[f->index], token,
-						    hold->span_len);
+       xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 1), hold->span_len);
 		if (ret) {
 			xdev_ext_mech_pool_frame_move(&s->pool, f->index, XDEV_EXT_MECH_F_HELD, from);
 			b->group.present &= ~BIT(pos);
@@ -2089,6 +2238,7 @@ static void xdev_ext_mech_session_init(struct xdev_ext_mech_session *s,
 	s->depth = c->depth;
 	s->frames = frames;
 	s->nr_stages = c->nr_stages;
+ memcpy(s->plan, c->st, sizeof(s->plan));
 	init_llist_head(&s->inbox);
 	kthread_init_work(&s->drain_work, xdev_ext_mech_batch_drain);
 	kthread_init_delayed_work(&s->retry_work, xdev_ext_mech_retry_work);
@@ -2277,12 +2427,18 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		return ret;
 	for (i = 0; i < s->nr_stages; i++) {
 		st = &s->st[i];
-		st->file = fget(c->st[i].fd);
-		if (!st->file)
-			return -EBADF;
+		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU) {
+			st->file = fget(c->st[i].fd);
+			if (!st->file)
+				return -EBADF;
+		}
 		ret = st->cls->bind(st, &c->st[i]);
-		if (ret)
-			return ret;
+  if (ret) {
+   /* Checked classes publish any residual mapping in priv on failure. */
+   if (st->cls->unbind_checked && st->priv)
+    s->nr_bound++;
+   return ret;
+  }
 		s->nr_bound++;
 	}
 	for (i = 0; i < s->nr_stages; i++) {
@@ -2293,6 +2449,26 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 	return 0;
 }
 
+static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s);
+
+/* Both failed CREATE and normal DESTROY arrive here before pool release. */
+static int xdev_ext_mech_unbind_checked(struct xdev_ext_mech_session *s)
+{
+ u32 i;
+ int err;
+
+ for (i = s->nr_bound; i-- > 0;) {
+  struct xdev_ext_mech_stage *st = &s->st[i];
+
+  if (!st->cls->unbind_checked)
+   continue;
+  err = st->cls->unbind_checked(st);
+  if (err)
+   return err;
+ }
+ return 0;
+}
+
 /* Process context, nothing in flight: give every reference back. */
 static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
 {
@@ -2300,6 +2476,21 @@ static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
 	unsigned long flags;
 	u32 i;
 	int final_err;
+
+ final_err = xdev_ext_mech_unbind_checked(s);
+ if (final_err) {
+  /* Unmap failure is uncertainty, not permission to put the UMEM's original
+   * FOLL_PIN refs. Keep pool, files, callback storage and module refs intact. */
+  spin_lock_irqsave(&s->lock, flags);
+  s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
+  s->ss.sequestered++;
+  if (!s->last_err)
+   s->last_err = final_err;
+  spin_unlock_irqrestore(&s->lock, flags);
+  atomic64_add(s->pool.nr_frames, &s->cnt[XDEV_EXT_MECH_CNT_SEQUESTERED]);
+  xdev_ext_mech_quarantine(s);
+  return final_err;
+ }
 
 	/* STATS from another ring finds it no more. */
 	mutex_lock(&xdev_ext_mech_live_lock);
@@ -2619,9 +2810,10 @@ static int xdev_ext_mech_take_user_frames(struct xdev_ext_mech_session *s,
 			if (!ret && s->start_user_len)
 				len = s->start_user_len;
 			if (!ret)
-				ret = xdev_ext_mech_life_begin_produce(&s->life[idx[i]], false, &token);
+				ret = xdev_ext_mech_life_claim(&s->life[idx[i]], XDEV_EXT_MECH_L_OWNER_START, &token);
 			if (!ret)
-				ret = xdev_ext_mech_life_publish(&s->life[idx[i]], token, len);
+				ret = xdev_ext_mech_life_publish(&s->life[idx[i]], token,
+       xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0), len);
 			if (ret)
 				break;
 		}
@@ -2631,7 +2823,7 @@ static int xdev_ext_mech_take_user_frames(struct xdev_ext_mech_session *s,
 			for (j = 0; j < i; j++) {
 				cond_resched();
 				xdev_ext_mech_life_release(&s->life[idx[j]],
-					xdev_ext_mech_life_token(&s->life[idx[j]]));
+					xdev_ext_mech_life_gen(&s->life[idx[j]]));
 			}
 			for (j = 0; j < nr; j++) {
 				cond_resched();

@@ -125,6 +125,7 @@ XDEV_EXT_MECH_OPS_TYPE(xdev_ext_afxdp_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_ce_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_dma_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_iaa_mech_ops);
+XDEV_EXT_MECH_OPS_TYPE(xdev_ext_cpu_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_socket_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_net_mech_ops);
 
@@ -285,6 +286,8 @@ struct xdev_ext_mech_class_ops {
 		     const struct xdev_ext_mech_stage_uapi *u);
 	/* after drain, process context, may sleep; never for a quarantined stage */
 	void (*unbind)(struct xdev_ext_mech_stage *st);
+	/* Failure retains session/pool pins, including residual failed CREATE binds. */
+	int (*unbind_checked)(struct xdev_ext_mech_stage *st);
 	/* worker, or CREATE with b NULL; never sleeps */
 	void (*fill_info)(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
 			  void *info);
@@ -560,11 +563,21 @@ struct xdev_ext_ce_region {
 
 /* One copy, translated by C from a validated struct xdev_ext_ce_copy_desc. */
 struct xdev_ext_ce_xfer {
+	u64 owner;		/* immutable per-frame claim owner */
+	u64 generation;		/* immutable per-frame claim generation */
 	u64 host_byte_off;		/* from the start of the bind_host() pages */
 	u64 gpu_off;			/* in the window */
 	u32 len;
 	u32 flags;			/* XDEV_EXT_CE_F_* */
 };
+
+int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos, u32 len);
+int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch *b,
+                                   u32 pos, u64 *owner, u64 *generation);
+bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
+                                       u64 ticket, const struct xdev_ext_ce_xfer *x, u32 n);
+bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
+                             const struct xdev_ext_ce_xfer *x, u32 n);
 
 /*
  * A CE backend; a stage fd selects it by f_op.  ->submit returns 0 once it
@@ -579,12 +592,12 @@ struct xdev_ext_ce_backend_ops {
 	int  (*bind_region)(struct file *f, u64 gpu_va, u64 len,
 			    struct xdev_ext_ce_region *out);
 	/* process context, may sleep; never after an AMBIGUOUS outcome */
-	void (*unbind_region)(struct xdev_ext_ce_region *r);
+	int  (*unbind_region)(struct xdev_ext_ce_region *r);
 	/* CREATE, process context: pool pages, already pinned by their UMEM */
 	int  (*bind_host)(struct xdev_ext_ce_region *r, struct page **pages, u32 nr,
 			  void **host);
 	/* process context */
-	void (*unbind_host)(void *host);
+	int  (*unbind_host)(void *host);
 	/* session worker, may sleep; dir is enum xdev_ext_mech_dir. Retain ticket
 	 * by value for the callback, never recover it from a mutable cookie. */
 	int  (*submit)(struct xdev_ext_ce_region *r, void *host, u32 dir,
@@ -629,7 +642,7 @@ struct xdev_ext_dma_provider_ops {
 	void (*unbind_region)(struct xdev_ext_dma_region *r);
 	int (*bind_host)(struct xdev_ext_dma_region *r, struct page **pages, u32 nr,
 			 void **host);
-	void (*unbind_host)(void *host);
+	int  (*unbind_host)(void *host);
 	int (*submit)(struct xdev_ext_dma_region *r, void *host, u32 dir,
 		      const struct xdev_ext_dma_xfer *x, u32 n,
 		      struct xdev_ext_dma_cookie *cookie, u64 ticket);

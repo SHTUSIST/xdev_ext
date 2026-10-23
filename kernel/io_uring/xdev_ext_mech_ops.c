@@ -448,6 +448,9 @@ XDEV_EXT_MECH_STRUCT_OPS(ce, XDEV_EXT_MECH_CLASS_CE,
 XDEV_EXT_MECH_STRUCT_OPS(dma, XDEV_EXT_MECH_CLASS_DMA,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 
+XDEV_EXT_MECH_STRUCT_OPS(cpu, XDEV_EXT_MECH_CLASS_CPU,
+                    xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
+
 XDEV_EXT_MECH_STRUCT_OPS(iaa, XDEV_EXT_MECH_CLASS_IAA,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 
@@ -462,6 +465,7 @@ static const struct bpf_struct_ops *const xdev_ext_mech_st_ops[] = {
 	&bpf_xdev_ext_ce_mech_ops,
 	&bpf_xdev_ext_dma_mech_ops,
 	&bpf_xdev_ext_iaa_mech_ops,
+	&bpf_xdev_ext_cpu_mech_ops,
 	&bpf_xdev_ext_socket_mech_ops,
 	&bpf_xdev_ext_net_mech_ops,
 };
@@ -477,6 +481,8 @@ static const struct bpf_struct_ops *xdev_ext_mech_st_ops_of(u32 class_id)
 		return &bpf_xdev_ext_ce_mech_ops;
 	case XDEV_EXT_MECH_CLASS_DMA:
 		return &bpf_xdev_ext_dma_mech_ops;
+	case XDEV_EXT_MECH_CLASS_CPU:
+		return &bpf_xdev_ext_cpu_mech_ops;
 	case XDEV_EXT_MECH_CLASS_IAA:
 		return &bpf_xdev_ext_iaa_mech_ops;
 	case XDEV_EXT_MECH_CLASS_SOCKET:
@@ -797,6 +803,8 @@ static int __init xdev_ext_mech_ops_init(void)
 					      xdev_ext_dma_mech_ops);
  if (!ret)
   ret = register_bpf_struct_ops(&bpf_xdev_ext_iaa_mech_ops, xdev_ext_iaa_mech_ops);
+ if (!ret)
+  ret = register_bpf_struct_ops(&bpf_xdev_ext_cpu_mech_ops, xdev_ext_cpu_mech_ops);
  if (!ret)
   ret = register_bpf_struct_ops(&bpf_xdev_ext_socket_mech_ops, xdev_ext_socket_mech_ops);
  if (!ret)

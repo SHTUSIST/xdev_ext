@@ -11,6 +11,7 @@
  */
 
 #include "xdev_ext_mech_core.h"
+#include "xdev_ext_mech_cpu_core.h"
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
 #define XDEV_EXT_MECH_CLASS_SIZE_MAX		4096	/* info, scratch, copies, batch area */
@@ -30,6 +31,58 @@ static inline bool xdev_ext_mech_stage_zero(const struct xdev_ext_mech_stage_uap
 {
 	return !u->class_id && !u->direction && !u->fd && !u->flags &&
 	       !u->arg0 && !u->arg1;
+}
+
+enum xdev_ext_mech_stage_role {
+ XDEV_EXT_MECH_ROLE_PRODUCER = 1,
+ XDEV_EXT_MECH_ROLE_CONSUMER = 2,
+ XDEV_EXT_MECH_ROLE_INPLACE = 3,
+ XDEV_EXT_MECH_ROLE_TRANSFORM = 4,
+};
+
+static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi *u)
+{
+ if (!xdev_ext_mech_class_known(u->class_id) ||
+     (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE && u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
+  return -EINVAL;
+ if (u->class_id == XDEV_EXT_MECH_CLASS_IAA)
+  return XDEV_EXT_MECH_ROLE_TRANSFORM;
+ if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
+  if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
+   return -EINVAL;
+  if (xdev_ext_mech_cpu_xform_fixed(u->arg0))
+   return XDEV_EXT_MECH_ROLE_INPLACE;
+  return xdev_ext_mech_cpu_xform_variable(u->arg0) ? XDEV_EXT_MECH_ROLE_TRANSFORM : -EINVAL;
+ }
+ return u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
+  XDEV_EXT_MECH_ROLE_PRODUCER : XDEV_EXT_MECH_ROLE_CONSUMER;
+}
+
+static inline __u32 xdev_ext_mech_chain_refs(const struct xdev_ext_mech_stage_uapi *st,
+ __u32 nr_stages, __u32 from)
+{
+ __u32 refs = 0;
+
+ for (; from < nr_stages; from++) {
+  int role = xdev_ext_mech_stage_role(&st[from]);
+
+  if (role < 0 || role == XDEV_EXT_MECH_ROLE_PRODUCER)
+   break;
+  refs++;
+  if (role != XDEV_EXT_MECH_ROLE_CONSUMER)
+   break;
+ }
+ return refs;
+}
+
+static inline __u32 xdev_ext_mech_stage_group_end(const struct xdev_ext_mech_stage_uapi *st,
+ __u32 nr_stages, __u32 first)
+{
+ __u32 end = first + 1;
+
+ while (end < nr_stages && (st[end].flags & XDEV_EXT_MECH_STAGE_F_FANOUT))
+  end++;
+ return end;
 }
 
 /*
@@ -71,13 +124,20 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
       c->st[0].direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
   return -EOPNOTSUPP;
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
-		const struct xdev_ext_mech_stage_uapi *u = &c->st[i];
+		struct xdev_ext_mech_stage_uapi clean = c->st[i];
+		const struct xdev_ext_mech_stage_uapi *u = &clean;
 
 		if (i >= c->nr_stages) {
 			if (!xdev_ext_mech_stage_zero(u))
 				return -EINVAL;
 			continue;
 		}
+  if (u->flags & XDEV_EXT_MECH_STAGE_F_FANOUT) {
+   if (!i || xdev_ext_mech_stage_role(u) != XDEV_EXT_MECH_ROLE_CONSUMER ||
+       xdev_ext_mech_stage_role(&c->st[i - 1]) != XDEV_EXT_MECH_ROLE_CONSUMER)
+    return -EINVAL;
+   clean.flags &= ~XDEV_EXT_MECH_STAGE_F_FANOUT;
+  }
   if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
       (u->class_id != XDEV_EXT_MECH_CLASS_NVME && u->class_id != XDEV_EXT_MECH_CLASS_NET))
    return -EOPNOTSUPP;
@@ -95,6 +155,29 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		    (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
 		     u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 			return -EINVAL;
+  if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
+   __s64 delta;
+   __u32 j;
+
+   if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->fd != -1 || u->flags ||
+       u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
+    return -EINVAL;
+   if (xdev_ext_mech_cpu_xform_variable(u->arg0)) {
+    if (!u->arg1 || u->arg1 > (__u64)XDEV_EXT_MECH_MAX_FRAMES * c->layout.seg_len)
+     return -EINVAL;
+   } else {
+    if (xdev_ext_mech_cpu_len_delta(u->arg0, u->arg1, &delta))
+     return -EINVAL;
+    for (j = i + 1; delta && j < c->nr_stages; j++) {
+     if (xdev_ext_mech_stage_role(&c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
+      break;
+     if (c->st[j].class_id == XDEV_EXT_MECH_CLASS_NVME ||
+         c->st[j].class_id == XDEV_EXT_MECH_CLASS_AFXDP)
+      return -EOPNOTSUPP;
+    }
+   }
+   continue;
+  }
 		if (u->fd < 0)
 			return -EBADF;
 		if (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP)

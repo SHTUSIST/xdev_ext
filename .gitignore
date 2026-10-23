@@ -923,3 +923,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_explore.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_mutants.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_run.sh
+
+!/kernel/io_uring/xdev_ext_mech_cpu_core.h
+!/kernel/io_uring/xdev_ext_mech_cpu.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/
+!/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
