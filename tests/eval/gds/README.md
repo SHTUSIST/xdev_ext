@@ -103,6 +103,16 @@ complete byte comparison. `run.py` independently reconstructs that fingerprint
 and validates the manifest before relaying stdout. Save stderr with stdout to
 retain this manifest; the temporary data directory is still removed.
 
+The stderr contract is one LF-terminated JSON object line, with optional JSON
+whitespace (space, Tab or CR) around the object. Blank lines and ordinary SDK
+text diagnostics, including `[WARN]` messages, may surround it. Every line
+whose first non-JSON-whitespace character is `{` is reserved for evidence;
+malformed or unterminated objects are errors, never ignored diagnostics.
+Additional objects, duplicate keys, non-finite numbers and complete non-object
+JSON lines (including arrays, strings, numbers, booleans and null) are refused.
+Standalone `NaN`/`Infinity` lines are also refused. No success record is relayed
+until this stderr contract and the exact requested manifest both pass.
+
 `io_ns` includes the synchronous cuFile calls, CUDA completion and checkpoint
 `fsync`; it excludes seeding, the history readback and the comparison. Slots are
 preallocated, so there is no history copy inside or outside the timer. The record
@@ -128,6 +138,10 @@ regular files) to check the order of operations, history retention and refusal
 paths: `GDS_CUDA_ROOT=/official/sdk python3 -B tests/eval/gds/test_campaign_timing.py -v`.
 `test_campaign_result.py` checks the runner relay. Neither runs a device, measures
 time or establishes any path, DMA or performance property.
+`test_manifest_evidence.py` also exercises actual runner admission with the
+actual-body output, including whitespace-prefixed contradictory/duplicate and
+malformed records, non-object JSON, and accepted SDK diagnostics; it runs in
+`make check` with the same official SDK and compiler selection.
 
 ## Comparison scope
 

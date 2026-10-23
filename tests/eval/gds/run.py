@@ -205,8 +205,25 @@ def checked_manifest(output, record):
                 raise ValueError("duplicate manifest field")
             result[key] = value
         return result
-    rows = [json.loads(line, object_pairs_hook=pairs) for line in output.splitlines()
-            if line.startswith("{")]
+    rows = []
+    lines = output.split("\n")
+    for index, line in enumerate(lines):
+        # stderr multiplexes LF-delimited JSON evidence and SDK diagnostics.
+        # Only JSON whitespace may precede an object; a malformed object must
+        # never fall back to the diagnostic path. Keep non-JSON [WARN] text.
+        line = line.lstrip(" \t\r")
+        if not line:
+            continue
+        if not line.startswith("{"):
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            raise ValueError("non-object JSON evidence on stderr")
+        if index == len(lines) - 1:
+            raise ValueError("unterminated campaign manifest")
+        rows.append(json.loads(line, object_pairs_hook=pairs,
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite manifest number"))))
     if len(rows) != 1 or type(rows[0]) is not dict:
         raise ValueError("expected one actual campaign manifest")
     manifest = rows[0]
