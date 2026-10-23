@@ -13,6 +13,23 @@ static void *actor(void *arg)
  else a->result=hft_session(a);
  return NULL;
 }
+/* Raw committed evidence survives failed trials. This is not a release
+ * certificate or a success/performance record; the controller saves stderr. */
+static void failed_history(const struct hft_actor *a)
+{
+ unsigned emitted=0;
+ fputs("{\"status\":\"error\",\"local_release_complete\":false,\"guard_history\":[",stderr);
+ for(unsigned i=0;a->history&&i<a->history_count;i++) {
+  const struct hft_guard_record *r=&a->history[i];
+  if(r->committed!=1)continue;
+  fprintf(stderr,"%s{\"generation\":%u,\"frame_pos\":%u,\"slot_addr\":%"PRIu64",\"payload_bytes\":%u,\"committed\":true,\"raw_prefix\":\"",emitted++?",":"",r->generation,r->frame_pos,r->slot_addr,r->payload_bytes);
+  for(unsigned j=0;j<430;j++)fprintf(stderr,"%02x",r->raw_prefix[j]);
+  fputs("\",\"raw_tail\":\"",stderr);
+  for(unsigned j=0;j<4096-512-a->c->payload;j++)fprintf(stderr,"%02x",r->raw_tail[j]);
+  fputs("\"}",stderr);
+ }
+ fputs("]}\n",stderr);
+}
 /* Private producer interface, validated a second time after the Python CLI. */
 static uint64_t number(const char *s)
 {
@@ -33,7 +50,7 @@ int main(int argc,char **argv)
  c.source_block=*argv[14]?argv[14]:NULL;c.source_ng=*argv[15]?argv[15]:NULL;c.slba=number(argv[16]);c.nlb=number(argv[17]);
  c.ifname=argv[18];c.queue=number(argv[19]);c.local_ip=argv[20];c.local_mac=argv[21];c.peer_mac=argv[22];c.local_port=number(argv[23]);
  c.bpf_object=argv[24];c.kernel_config=argv[25];c.source_offset=number(argv[26]);c.session_base=number(argv[28]);
- c.measured=!strcmp(argv[27],"hardware");c.probe=!strcmp(argv[27],"probe");
+ c.measured=!strcmp(argv[27],"hardware")||!strcmp(argv[27],"benchmark-probe");c.probe=!strcmp(argv[27],"probe")||!strcmp(argv[27],"benchmark-probe");
  if(argc==30)c.warmup=number(argv[29]);
  if((strcmp(argv[27],"correctness") && !c.measured && !c.probe) || (c.measured && (argc!=30||c.actors!=1||c.warmup>=c.bursts)) || (strcmp(c.backend,"posix")&&strcmp(c.backend,"uring-fixed-zc")&&strcmp(c.backend,"session")) ||
     (c.record!=64&&c.record!=128&&c.record!=256)||(c.payload!=512&&c.payload!=1024&&c.payload!=4096)||c.payload%c.record||
@@ -64,7 +81,38 @@ int main(int argc,char **argv)
  }
  pthread_barrier_destroy(&barrier);
  if(ret) {
+  if(c.measured&&!c.probe)failed_history(&actors[0]);
+  for(unsigned i=0;i<made;i++)free(actors[i].history);
   fprintf(stderr,"{\"status\":\"%s\",\"start_issued\":%s,\"diagnostic\":\"backend failed; no success record\"}\n",ret==4?"not_run_capability":"error",ret==4?"false":"true");return ret;
+ }
+ if(c.measured) {
+  /* Private raw observations only. The controller publishes success/ratios
+   * only after every trial has drained and the campaign oracle has passed. */
+  const struct hft_actor *a=&actors[0];const struct hft_timing *t=&a->timing;
+  printf("{\"measurement_policy\":\"benchmark-policy-v1\",\"wire_version\":1,\"read_submissions\":%"PRIu64",\"send_submissions\":%"PRIu64",\"registration_calls\":%"PRIu64",\"local_release_complete\":true,\"stop_ret\":%d,\"copied_packets\":%"PRIu64",\"frame_slots\":[",sum.reads,sum.sends,sum.registrations,a->native.stop_ret,sum.copied);
+  for(unsigned i=0;i<c.depth;i++)printf("%s%"PRIu64,i?",":"",a->frame_slots[i]);
+  fputs("],\"guard_history\":[",stdout);
+  for(unsigned i=0;!c.probe&&i<a->history_count;i++) {
+   const struct hft_guard_record *r=&a->history[i];
+   printf("%s{\"generation\":%u,\"frame_pos\":%u,\"slot_addr\":%"PRIu64",\"payload_bytes\":%u,\"committed\":%s,\"terminal_phase\":\"post-send\",\"before_reuse\":true,\"notification_complete\":true,\"raw_prefix\":\"",i?",":"",r->generation,r->frame_pos,r->slot_addr,r->payload_bytes,r->committed==1?"true":"false");
+   for(unsigned j=0;j<430;j++)printf("%02x",r->raw_prefix[j]);
+   fputs("\",\"raw_tail\":\"",stdout);
+   for(unsigned j=0;j<4096-512-c.payload;j++)printf("%02x",r->raw_tail[j]);
+   fputs("\"}",stdout);
+  }
+  printf("],\"native\":{\"xdp_zero_copy\":%s,\"strict_create\":%s,\"nvme_map_id\":%u,\"afxdp_map_id\":%u}",a->native_xdp_zc?"true":"false",a->native_create?"true":"false",a->nvme_map_id,a->afxdp_map_id);
+  /* Actual completion counters; the controller checks them per arm, online. */
+  printf(",\"completion\":{\"read_cqes\":%"PRIu64",\"send_result_cqes\":%"PRIu64",\"send_notif_cqes\":%"PRIu64",\"zc_copied_packets\":%"PRIu64"}",sum.read_cqes,sum.result_cqes,sum.notif_cqes,sum.copied);
+  if(!strcmp(c.backend,"session")) {
+   const struct hft_native_stats *s=&a->native;
+   printf(",\"session_stats\":{\"batches_done\":%"PRIu64",\"read_submitted\":%"PRIu64",\"read_completed\":%"PRIu64",\"send_submitted\":%"PRIu64",\"send_completed\":%"PRIu64",\"state\":\"%s\",\"batches_abort\":%"PRIu64",\"rejects\":%"PRIu64",\"sequestered\":%"PRIu64",\"timeouts\":%"PRIu64",\"protocol_err\":%"PRIu64",\"last_err\":%d,\"inflight\":%"PRIu64"}",s->batches_done,s->read_submitted,s->read_completed,s->send_submitted,s->send_completed,s->state==1?"ACTIVE":"UNKNOWN",s->batches_abort,s->rejects,s->sequestered,s->timeouts,s->protocol_err,s->last_err,s->inflight);
+  }
+  printf(",\"measurements\":{\"clock\":\"CLOCK_MONOTONIC_RAW\",\"setup_started_ns\":%"PRIu64",\"setup_completed_ns\":%"PRIu64",\"teardown_started_ns\":%"PRIu64",\"teardown_completed_ns\":%"PRIu64",\"samples\":[",t->setup_started,t->setup_completed,t->teardown_started,t->teardown_completed);
+  for(unsigned i=0;!c.probe&&i<c.bursts;i++) {
+   const struct hft_burst_sample *r=&t->samples[i];
+   printf("%s{\"burst\":%u,\"warmup\":%s,\"first_generation\":%"PRIu64",\"packet_count\":%u,\"read_submissions\":%"PRIu64",\"send_submissions\":%"PRIu64",\"started_ns\":%"PRIu64",\"local_release_ns\":%"PRIu64",\"peer_receipt_ns\":%"PRIu64",\"completed_ns\":%"PRIu64"}",i?",":"",i,i<c.warmup?"true":"false",r->first,c.burst,r->reads,r->sends,r->started,r->local_release,r->peer_receipt,r->completed);
+  }
+  puts("]}}");free(actors[0].history);return 0;
  }
  printf("{\"read_submissions\":%"PRIu64",\"send_submissions\":%"PRIu64",\"read_cqes\":%"PRIu64",\"send_result_cqes\":%"PRIu64",\"send_notif_cqes\":%"PRIu64",\"zc_copied_packets\":%"PRIu64",\"registration_calls\":%"PRIu64",\"guards_ok\":true,\"local_release_complete\":true",sum.reads,sum.sends,sum.read_cqes,sum.result_cqes,sum.notif_cqes,sum.copied,sum.registrations);
  if(!strcmp(c.backend,"session")) {

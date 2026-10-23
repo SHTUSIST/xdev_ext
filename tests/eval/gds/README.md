@@ -70,20 +70,78 @@ documents the statistics and driver properties; the
 [troubleshooting guide](https://docs.nvidia.com/gpudirect-storage/troubleshooting-guide/)
 describes POSIX path counters.
 
-One registered CUDA chunk allocation is reused throughout the run. For each
-chunk, all4096 prefix guard bytes and the entire unused tail plus4096 suffix
-guard bytes are checked. Every payload byte uses the deterministic pattern
-`(absolute_file_index*37 + absolute_file_index/251 + iteration*53) % 256`,
-where `/` is integer division and iteration starts at zero. Every load receives
-full GPU readback validation. Every checkpoint receives full GPU readback and
-complete file reread after `fsync`. Exact short I/O fails the run. All resource
-cleanup must succeed before the executable emits its single JSON record.
+### Strict campaign (`gds-campaign-v1`, schema2)
 
-`io_ns` includes synchronous cuFile calls, CUDA completion and checkpoint
-`fsync`; it excludes seed preparation and full validation. Its counts and
-`verified_bytes` cover every requested iteration. Successful JSON is checked
-again by the runner before it is relayed. This implementation does not prove
-power-loss durability or application checkpoint consistency.
+Every cuFile operation of the whole campaign owns one guarded slot of a single
+CUDA allocation that is registered once before the first operation and reused
+for the run: a4096-byte prefix guard, the chunk area and a4096-byte suffix guard.
+History capacity (`operations*(chunk+8192)` bytes of device memory plus the host
+images for the final comparison) is admitted before any allocation or I/O;
+insufficient capacity exits4 with no result. Nothing is shrunk or validated
+early to fit. `llm-load` reseeds the same regular-file window for every
+iteration (outside `io_ns`) and reads each chunk into its own slot. `checkpoint`
+seeds all device state once (outside `io_ns`) and writes iteration `t` to its own
+file region at offset `t*bytes`, so a later clean iteration cannot overwrite an
+earlier iteration's stored bytes.
+
+During the campaign only exact I/O results and the native-path accounting are
+checked; an exact short I/O fails immediately. After the last operation, its
+completion and the checkpoint `fsync`, the benchmark reads the complete slot
+history back once and compares every payload byte, every unused chunk-tail byte
+and every guard byte; `checkpoint` also rereads the complete file once and
+compares every stored byte of every iteration. Every payload byte uses the
+deterministic pattern `(absolute_file_index*37 + absolute_file_index/251 +
+iteration*53) % 256`, where `/` is integer division, the index is relative to the
+logical window and iteration starts at zero. An early damaged byte therefore
+fails the run even when later operations are clean. Only after this comparison
+does it release every resource, serialize one real JSON manifest on stderr,
+and print its single schema2 JSON result on stdout. The manifest carries the
+input formula and iteration/window identity, complete memory geometry, observed
+history FNV-1a-64 fingerprint, and full device/file byte-comparison results.
+FNV-1a is a non-cryptographic evidence fingerprint, not a replacement for the
+complete byte comparison. `run.py` independently reconstructs that fingerprint
+and validates the manifest before relaying stdout. Save stderr with stdout to
+retain this manifest; the temporary data directory is still removed.
+
+The stderr contract is one LF-terminated JSON object line, with optional JSON
+whitespace (space, Tab or CR) around the object. Blank lines and ordinary SDK
+text diagnostics, including `[WARN]` messages, may surround it. Every line
+whose first non-JSON-whitespace character is `{` is reserved for evidence;
+malformed or unterminated objects are errors, never ignored diagnostics.
+Additional objects, duplicate keys, non-finite numbers and complete non-object
+JSON lines (including arrays, strings, numbers, booleans and null) are refused.
+Standalone `NaN`/`Infinity` lines are also refused. No success record is relayed
+until this stderr contract and the exact requested manifest both pass.
+
+`io_ns` includes the synchronous cuFile calls, CUDA completion and checkpoint
+`fsync`; it excludes seeding, the history readback and the comparison. Slots are
+preallocated, so there is no history copy inside or outside the timer. The record
+carries the fairness evidence `input_id`, `source_window`, `output_residency`,
+`queue_depth=1`, `direct_io`, `buffer_registration=once-reused`,
+`registration_count=1`, `campaign_complete`, `validation_phase=post-campaign`,
+`full_byte_compare`, `history_operations`, `history_bytes`, `manifest_count=1`
+and `capture_in_timing`. `run.py` relays only an exact schema2 record for the
+requested campaign; `run.py:checked_comparison(left, right)` admits a pair of
+schema2 records (for example `linux-pinned` and `cufile-direct`) only when input,
+window, residency, depth, direct I/O and once-reused registration are identical
+and both were validated once after their complete campaign. Schema1 records are
+correctness-only and are refused for comparison. This implementation does not
+prove power-loss durability or application checkpoint consistency.
+
+The previous schema1 loop, which reused one chunk buffer and compared GPU
+contents (and reread the checkpoint file) after every chunk or iteration, remains
+in `bench_cufile.cc` under `#ifdef GDS_PER_CHUNK_ORACLE` and is not built by default.
+
+`test_campaign_timing.py` executes the actual benchmark body with the official
+SDK headers and controlled host dependencies (ordinary memory and disposable
+regular files) to check the order of operations, history retention and refusal
+paths: `GDS_CUDA_ROOT=/official/sdk python3 -B tests/eval/gds/test_campaign_timing.py -v`.
+`test_campaign_result.py` checks the runner relay. Neither runs a device, measures
+time or establishes any path, DMA or performance property.
+`test_manifest_evidence.py` also exercises actual runner admission with the
+actual-body output, including whitespace-prefixed contradictory/duplicate and
+malformed records, non-object JSON, and accepted SDK diagnostics; it runs in
+`make check` with the same official SDK and compiler selection.
 
 ## Comparison scope
 

@@ -22,6 +22,7 @@
 #include <time.h>
 #include <linux/if_xdp.h>
 #include "hft_runtime.h"
+#include "benchmark_policy.h"
 #include "../../../kernel/include/uapi/linux/xdev_ext_mech.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_prog.h"
 
@@ -68,21 +69,23 @@ int hft_source_geometry(const struct hft_config *c)
 }
 int hft_allocate(struct hft_buffer *b,unsigned index,unsigned payload)
 {
- memset(b,0,sizeof(*b)); b->bytes=512+payload+32;
+ /* One 4KiB frame (measured HFT1 layout) unless headroom+payload+guard need more. */
+ memset(b,0,sizeof(*b)); b->bytes=(512+payload+32+4095)/4096*4096;
  if(posix_memalign((void **)&b->allocation,4096,b->bytes)) return -1;
  memset(b->allocation,0xa5,512); b->payload=b->allocation+512;
- memset(b->payload+payload,0x5a,32); hft_slot_init(&b->life,index);return 0;
+ memset(b->payload+payload,0x5a,b->bytes-512-payload); hft_slot_init(&b->life,index);return 0;
 }
 int hft_buffer_ok(const struct hft_buffer *b,unsigned payload)
 {
  /* Header span [430,512) is written by the encoder, outside both guards. */
  return hft_guards_ok(b->allocation,430,430,0) &&
-        hft_guards_ok(b->payload,payload+32,0,payload);
+        hft_guards_ok(b->payload,b->bytes-512,0,payload);
 }
 static uint32_t crc32c(uint32_t crc,const unsigned char *p,size_t n)
 { for(size_t i=0;i<n;i++) {crc^=p[i];for(unsigned k=0;k<8;k++) crc=(crc>>1)^((crc&1)?0x82f63b78U:0);}return crc;}
 int hft_encode(struct hft_buffer *b,const struct hft_actor *a,unsigned group)
 {
+ if(a->c->measured)return hftb_encode_header(b->payload-40,a->c->session_base+a->id,group+1,a->c->payload);
  struct xdev_ext_mech_peer peer={0};
  struct xdev_ext_mp_tx_seg seg={.session_id=a->c->session_base+a->id,
   .generation=group+1,.count=1,.total_len=a->c->payload,.payload_len=a->c->payload};
@@ -112,6 +115,10 @@ int hft_data_connect(const struct hft_config *c)
     setsockopt(fd,SOL_SOCKET,SO_BINDTODEVICE,c->ifname,strlen(c->ifname)+1)||bind(fd,(void *)&local,sizeof(local))||
     connect(fd,(void *)&peer,sizeof(peer))||setsockopt(fd,SOL_SOCKET,SO_RCVTIMEO,&timeout,sizeof(timeout))||
     setsockopt(fd,SOL_SOCKET,SO_SNDTIMEO,&timeout,sizeof(timeout))) {close(fd);return -1;}
+ if(c->measured) {
+  int value=1,observed=0;socklen_t length=sizeof(observed);
+  if(setsockopt(fd,SOL_SOCKET,SO_NO_CHECK,&value,sizeof(value))||getsockopt(fd,SOL_SOCKET,SO_NO_CHECK,&observed,&length)||length!=sizeof(observed)||observed!=1){close(fd);return -1;}
+ }
  return fd;
 }
 int hft_receipt(int fd,const struct hft_actor *a,unsigned first)
@@ -127,6 +134,7 @@ int hft_receipt(int fd,const struct hft_actor *a,unsigned first)
  for(unsigned j=0;j<(unsigned)n;j++) if(reply[j]!=' ' && reply[j]!='\n') reply[i++]=reply[j];
  reply[i]=0;
  snprintf(expected,sizeof(expected),"{\"status\":\"ok\",\"actor\":%u,\"first\":%u,\"count\":%u,\"validated_bytes\":%u,\"session_base\":%llu}",a->id,first,a->c->burst,a->c->burst*a->c->payload,(unsigned long long)a->c->session_base);
+ if(a->c->measured)snprintf(expected,sizeof(expected),"{\"status\":\"received\",\"actor\":%u,\"first\":%u,\"count\":%u,\"received_bytes\":%u,\"session_base\":%llu}",a->id,first,a->c->burst,a->c->burst*a->c->payload,(unsigned long long)a->c->session_base);
  return strcmp(reply,expected)?-1:0;
 }
 int hft_posix(struct hft_actor *a)
@@ -136,9 +144,12 @@ int hft_posix(struct hft_actor *a)
  hft_setup_begin(a);
  fd=open(c->source_block?c->source_block:c->reference,O_RDONLY|O_CLOEXEC|(c->source_block?O_DIRECT:0));
  sock=hft_data_connect(c);ctl=hft_connect(c->control_ip,c->control_port);
- for(;initialized<c->depth;initialized++) if(hft_allocate(&slots[initialized],initialized,c->payload)) break;
+ for(;initialized<c->depth;initialized++) {
+  if(hft_allocate(&slots[initialized],initialized,c->payload)) break;
+  a->frame_slots[initialized]=(uintptr_t)slots[initialized].allocation;
+ }
  /* All actors enter the barrier even on setup failure, preventing deadlock. */
- if(fd<0||sock<0||ctl<0||initialized!=c->depth) atomic_store(a->startup_error,1);
+ if(hft_history_setup(a)||fd<0||sock<0||ctl<0||initialized!=c->depth) atomic_store(a->startup_error,1);
  pthread_barrier_wait(a->barrier);
  if(atomic_load(a->startup_error)) goto out;
  hft_setup_done(a);
@@ -147,7 +158,7 @@ int hft_posix(struct hft_actor *a)
   for(unsigned base=0;base<c->burst;base+=c->depth) {
    unsigned count=c->burst-base<c->depth?c->burst-base:c->depth;
    for(unsigned i=0;i<count;i++) {
-    struct hft_buffer *b=&slots[i];unsigned g=burst*c->burst+base+i;
+    unsigned g=burst*c->burst+base+i;struct hft_buffer *b=&slots[g%c->depth];
     uint64_t token=(uint64_t)g*2+1,offset=c->source_offset+((uint64_t)a->id*c->bursts*c->burst+g)*c->payload;
     ssize_t n;
     if(hft_slot_read_begin(&b->life,token)) goto out;
@@ -156,13 +167,14 @@ int hft_posix(struct hft_actor *a)
     if(hft_slot_read_complete(&b->life,token,(int)n,c->payload)||hft_encode(b,a,g)) goto out;
    }
    for(unsigned i=0;i<count;i++) {
-    struct hft_buffer *b=&slots[i];unsigned g=burst*c->burst+base+i;
+    unsigned g=burst*c->burst+base+i;struct hft_buffer *b=&slots[g%c->depth];
     struct iovec iov[2]={{.iov_base=b->payload-40,.iov_len=40},{.iov_base=b->payload,.iov_len=c->payload}};
     struct msghdr msg={.msg_iov=iov,.msg_iovlen=2};ssize_t n;
     do {n=sendmsg(sock,&msg,MSG_NOSIGNAL);} while(n<0&&errno==EINTR);
     if(hft_slot_send_begin(&b->life,(uint64_t)g*2+2,c->payload+40)) goto out;
     a->counts.sends++;
-    if(hft_slot_cqe(&b->life,(uint64_t)g*2+2,(int)n,0)||!hft_buffer_ok(b,c->payload)) goto out;
+    if(hft_slot_cqe(&b->life,(uint64_t)g*2+2,(int)n,0)||hft_history_commit(a,b,g)) goto out;
+    if(!c->measured&&!hft_buffer_ok(b,c->payload)) goto out;
    }
   }
   hft_burst_release(a,burst);
@@ -172,7 +184,7 @@ int hft_posix(struct hft_actor *a)
  ret=0;
  out:
  hft_teardown_begin(a);
- for(unsigned i=0;i<initialized;i++) {if(!hft_buffer_ok(&slots[i],c->payload)) ret=1;free(slots[i].allocation);}
+ for(unsigned i=0;i<initialized;i++) {if(!c->measured&&!hft_buffer_ok(&slots[i],c->payload)) ret=1;free(slots[i].allocation);}
  if(fd>=0) close(fd);
  if(sock>=0) close(sock);
  if(ctl>=0) close(ctl);

@@ -40,6 +40,7 @@ int hft_uring(struct hft_actor *a)
  sock=hft_data_connect(c);ctl=hft_connect(c->control_ip,c->control_port);
  for(;allocated<c->depth;allocated++) {
   if(hft_allocate(&slots[allocated],allocated,c->payload)) break;
+  a->frame_slots[allocated]=(uintptr_t)slots[allocated].allocation;
   iov[allocated]=(struct iovec){.iov_base=slots[allocated].allocation,.iov_len=slots[allocated].bytes};
  }
  if(fd<0||sock<0||ctl<0||allocated!=c->depth) goto setup_done;
@@ -47,7 +48,7 @@ int hft_uring(struct hft_actor *a)
  initialized=1;probe=io_uring_get_probe_ring(&ring);
  if(!probe||!io_uring_opcode_supported(probe,IORING_OP_READ_FIXED)||!io_uring_opcode_supported(probe,IORING_OP_SEND_ZC)) goto setup_done;
  if(io_uring_register_buffers(&ring,iov,c->depth)<0) goto setup_done;
- registered=1;a->counts.registrations++;ret=0;
+ registered=1;a->counts.registrations++;ret=hft_history_setup(a)?4:0;
  setup_done:
  if(ret) atomic_store(a->startup_error,4);
  pthread_barrier_wait(a->barrier);
@@ -57,7 +58,7 @@ int hft_uring(struct hft_actor *a)
   hft_burst_begin(a,burst);
   unsigned next=0,done=0;
   for(unsigned i=0;i<c->depth && next<c->burst;i++,next++)
-   if(queue_read(&ring,&slots[i],a,fd,burst*c->burst+next)) goto unknown;
+   if(queue_read(&ring,&slots[(burst*c->burst+next)%c->depth],a,fd,burst*c->burst+next)) goto unknown;
   if(publish(&ring)) goto unknown;
   while(done<c->burst) {
    struct io_uring_cqe *ptr,cqe;struct hft_buffer *b=NULL;int n;
@@ -79,10 +80,11 @@ int hft_uring(struct hft_actor *a)
    } else {
     if(wait_zc_cqes(&b->life,&cqe,&a->counts)) goto unknown;
     if(hft_slot_reusable(&b->life)) {
-     if(!hft_buffer_ok(b,c->payload)) goto unknown;
+     if(hft_history_commit(a,b,b->group)||(!c->measured&&!hft_buffer_ok(b,c->payload))) goto unknown;
      done++;
-     if(next<c->burst) {
-      if(queue_read(&ring,b,a,fd,burst*c->burst+next++)) goto unknown;
+     while(next<c->burst&&hft_slot_reusable(&slots[(burst*c->burst+next)%c->depth].life)) {
+      struct hft_buffer *ready=&slots[(burst*c->burst+next)%c->depth];
+      if(queue_read(&ring,ready,a,fd,burst*c->burst+next++)) goto unknown;
       if(publish(&ring)) goto unknown;
      }
     }
@@ -110,7 +112,7 @@ int hft_uring(struct hft_actor *a)
  if(!unsafe) {
   if(registered && io_uring_unregister_buffers(&ring)<0) ret=1;
   if(initialized) io_uring_queue_exit(&ring);
-  for(unsigned i=0;i<allocated;i++) {if(!hft_buffer_ok(&slots[i],c->payload)) ret=1;free(slots[i].allocation);}
+  for(unsigned i=0;i<allocated;i++) {if(!c->measured&&!hft_buffer_ok(&slots[i],c->payload)) ret=1;free(slots[i].allocation);}
   if(fd>=0) close(fd);
   if(sock>=0) close(sock);
  }

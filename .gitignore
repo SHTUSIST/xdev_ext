@@ -918,3 +918,19 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_README.md
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/fault_fixtures/*.log
+
+# 2026-10-22 wave 2 track H: HFT benchmark-policy-v1 strict campaign and GDS strict campaign
+!/kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c
+!/tests/eval/hft/benchmark_policy.h
+!/tests/eval/hft/campaign_oracle.py
+!/tests/eval/hft/strict_fixture.py
+!/tests/eval/hft/test_measurement_policy.py
+!/tests/eval/hft/test_campaign_oracle.py
+!/tests/eval/hft/test_guard_history.c
+!/tests/eval/hft/test_benchmark_bpf_body.c
+!/tests/eval/gds/test_campaign_timing.py
+!/tests/eval/gds/_campaign_fixture.cc
+!/tests/eval/hft/test_strict_trial_accounting.py
+!/tests/eval/gds/test_campaign_result.py
+!/tests/eval/hft/test_failure_history.py
+!/tests/eval/gds/test_manifest_evidence.py

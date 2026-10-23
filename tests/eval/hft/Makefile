@@ -14,21 +14,27 @@ ifeq ($(ENABLE_SESSION),1)
 CPPFLAGS += -DHFT_HAVE_SESSION
 LDLIBS += -lbpf -lelf -lz
 endif
-all: $(BUILD_DIR)/hft_replay $(BUILD_DIR)/test_ownership $(BUILD_DIR)/test_send_zc
+all: $(BUILD_DIR)/hft_replay $(BUILD_DIR)/test_ownership $(BUILD_DIR)/test_send_zc $(BUILD_DIR)/test_guard_history $(BUILD_DIR)/test_benchmark_bpf_body
 $(BUILD_DIR):
 	mkdir -p $@
 # Rebuild when optional feature selection changes, as well as source changes.
 .PHONY: FORCE
-$(BUILD_DIR)/hft_replay: $(SOURCES) hft_core.h hft_runtime.h hft_send_zc.h FORCE | $(BUILD_DIR)
+$(BUILD_DIR)/hft_replay: $(SOURCES) hft_core.h hft_runtime.h hft_send_zc.h benchmark_policy.h FORCE | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(SOURCES) -o $@ $(LDFLAGS) $(LDLIBS)
 	python3 hardware_build.py binary --artifact $@ --uring $(ENABLE_URING) --session $(ENABLE_SESSION)
 $(BUILD_DIR)/test_ownership: test_ownership.c hft_core.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 $(BUILD_DIR)/test_send_zc: test_send_zc.c hft_send_zc.h hft_core.h hft_runtime.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
+$(BUILD_DIR)/test_guard_history: test_guard_history.c hft_posix.c hft_runtime.h hft_core.h benchmark_policy.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) test_guard_history.c hft_posix.c -o $@ $(LDFLAGS)
+$(BUILD_DIR)/test_benchmark_bpf_body: test_benchmark_bpf_body.c ../../../kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c hft_runtime.h benchmark_policy.h | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I../../../kernel/tools/testing/selftests/xdev_ext_mech/cref/host -I../../../kernel $< -o $@ $(LDFLAGS)
 check: all
 	$(BUILD_DIR)/test_ownership
 	$(BUILD_DIR)/test_send_zc
+	$(BUILD_DIR)/test_guard_history
+	$(BUILD_DIR)/test_benchmark_bpf_body
 	python3 -m unittest discover -s . -p 'test_*.py'
 clean:
 	rm -rf $(BUILD_DIR)
@@ -41,3 +47,9 @@ hardware-bpf:
 	$(MAKE) -C ../../../kernel/tools/xdev_ext_mech BUILD_DIR=$(BPF_BUILD_DIR) VMLINUX_BTF=$(VMLINUX_BTF) $(BPF_BUILD_DIR)/nxp_mech.bpf.o
 	python3 hardware_build.py bpf --artifact $(BPF_BUILD_DIR)/nxp_mech.bpf.o --btf $(VMLINUX_BTF)
 .PHONY: hardware-bpf
+
+# Independent HFT1 object, explicitly selected for strict measurements.
+hardware-benchmark-bpf:
+	$(MAKE) -C ../../../kernel/tools/xdev_ext_mech BUILD_DIR=$(BPF_BUILD_DIR) VMLINUX_BTF=$(VMLINUX_BTF) $(BPF_BUILD_DIR)/hft_benchmark.bpf.o
+	python3 hardware_build.py bpf --measurement-policy benchmark-policy-v1 --artifact $(BPF_BUILD_DIR)/hft_benchmark.bpf.o --btf $(VMLINUX_BTF)
+.PHONY: hardware-benchmark-bpf

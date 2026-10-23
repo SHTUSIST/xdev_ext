@@ -77,12 +77,16 @@ There is no fallback copy/native substitution. This is a strong registered
 network-stack baseline; it does not isolate DSL overhead against an unimplemented
 common-UMEM userspace AF_XDP baseline.
 
-Build the actual optional backends and existing NXP object against the running
-producer BTF. Build receipts bind the exact artifact/source/product/BTF hashes:
+Build the actual optional backends and the independent benchmark BPF object
+(`kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c`, maps `hftb_nvme_ops` and
+`hftb_afxdp_ops`) against the running producer BTF. Build receipts bind the exact
+artifact/source/product/BTF hashes and, for this object, `measurement_policy`
+`benchmark-policy-v1` and wire version1. `hardware-bpf` still builds the production
+NXP object for correctness runs; it is not accepted by the strict campaign:
 
 ```sh
 make -C tests/eval/hft ENABLE_URING=1 ENABLE_SESSION=1
-make -C tests/eval/hft hardware-bpf VMLINUX_BTF=/sys/kernel/btf/vmlinux
+make -C tests/eval/hft hardware-benchmark-bpf VMLINUX_BTF=/sys/kernel/btf/vmlinux
 python3 tests/eval/hft/hardware_measure.py --help
 ```
 
@@ -97,15 +101,26 @@ python3 tests/eval/hft/hardware_measure.py peer \
   --directory EXISTING_PRIVATE_DIRECTORY
 ```
 
+Qualify the producer assets once, without START or any workload. This runs a real
+no-START native setup probe with the benchmark object (XDP zero-copy, strict CREATE,
+both map IDs, STOP0) and records file identities, hashes and the admitted source
+window in an exclusive receipt:
+
+```sh
+python3 tests/eval/hft/hardware_measure.py qualify --measurement-policy benchmark-policy-v1 \
+  --qualification QUALIFICATION_RECEIPT ...same producer options as measure...
+```
+
 Then supply the producer's read-only namespace, intended physical NIC and peer:
 
 ```sh
-python3 tests/eval/hft/hardware_measure.py measure \
+python3 tests/eval/hft/hardware_measure.py measure --measurement-policy benchmark-policy-v1 \
+  --qualification QUALIFICATION_RECEIPT \
   --product-sha COMMIT --ifname PRODUCER_IFACE --kernel-config RUNNING_CONFIG \
   --peer-control CONTROL_IP:CONTROL_PORT --source-block BLOCK --source-ng NG \
   --slba SLBA --nlb NLB --queue QUEUE --local-ip LOCAL_IP --peer-ip PEER_IP \
   --local-mac LOCAL_MAC --peer-mac PEER_MAC --local-port LOCAL_PORT \
-  --peer-port PEER_PORT --bpf-object tests/eval/hft/.build/bpf/nxp_mech.bpf.o \
+  --peer-port PEER_PORT --bpf-object tests/eval/hft/.build/bpf/hft_benchmark.bpf.o \
   --reference PREPARED_READ_ONLY_REFERENCE --records 64 --payload 512 \
   --burst 32 --depth 8 --bursts 8 --warmup-bursts 1 --pairs 5 --order-seed 1 \
   --directory EXISTING_PRIVATE_DIRECTORY
@@ -129,24 +144,53 @@ CREATE/STATS0/STOP0; actual trials repeat runtime admission and record their own
 map IDs. Producer software/device/source and peer metadata are rechecked between
 runs. Caller-supplied metadata fixtures cannot unlock execution.
 
-Bounded u32-length TCP JSON binds READY/BURST/FINISH to fresh run/session identity,
-manifest/source/product digests and exact byte totals. Peer capture is reparsed,
-streamed back and independently reparsed on producer; cleanup follows producer
-capture acknowledgement. Peer failure retains the validated-prefix capture and
-diagnostic; the rejected datagram itself is not included in that prefix. Producer
-stdout/stderr and failures are retained privately. Private artifacts are exclusive
-under0700 run directories and are not product source.
+### Strict campaign policy `benchmark-policy-v1`
 
-Each arm gets fresh full correctness before measurement. One-time setup/registration
-and final teardown are separate from steady samples. The producer uses one
-CLOCK_MONOTONIC_RAW clock, starting before first read/START and ending after both
-local release and real remote byte receipt. Native STOP0 separately gates acceptance
-of all samples. Warmup is equal and excluded. Each pair uses a recorded seeded
-random permutation; raw samples and paired completion ratios retain slower and
-no-benefit results. These are burst completion round-trip measurements, not
-unsynchronized one-way NIC latency or statistical-significance claims. Building,
-software tests, offline metadata fixtures and no-hardware refusals cannot certify
-native DMA or physical performance; those require actual device execution.
+`measure` accepts only the explicit `benchmark-policy-v1` selector; there is no
+fallback to the production NXP2 object or encoder. Without a matching asset
+qualification and physical environment it exits4 before any START with no stdout
+and `start_issued=false`.
+
+- Wire: every arm sends the same independent 40-byte HFT1 application header
+  (magic `0x48465431`, version1, fixed fields, session, generation, payload length)
+  followed by the unmodified source payload. The measured encoders never read the
+  payload and compute no application CRC; the network template is built once at
+  setup. POSIX and registered sockets set `SO_NO_CHECK`; the native template sends a
+  zero UDP checksum. This covers the benchmark's own checksum only, not the whole
+  network stack (the native provider still finishes the IPv4 header checksum).
+- Capacity: the peer reserves RAM for every complete datagram and raw wire frame of
+  every trial before `CAMPAIGN_READY`; the producer allocates one raw guard record
+  per generation before its setup barrier (the native BPF history map holds up to
+  1024 generations). Insufficient capacity refuses before READY/START.
+- Online work is limited to header/identity/length/unique-generation checks and
+  received-only receipts (`status=received`, never `validated_*`). A datagram is
+  copied completely into its reserved slot before it can be receipted; a rejected
+  datagram poisons the trial. Producer arms record the raw 430-byte prefix and
+  full suffix guard of each frame at its terminal post-send point, before the slot
+  is reused (native: in the `hftb_afxdp_complete` callback), without comparing them.
+- Timing: one CLOCK_MONOTONIC_RAW sample per burst covers read/NOTIFY_ARM/START,
+  submission, completion, history capture, local release and the fresh peer receipt.
+  One-time registration and final teardown are recorded separately. The registered
+  arm registers its slots once and reuses them; no copy or re-registration is added.
+- Each trial reports actual submissions, registrations, completion counters
+  (READ/SEND results, NOTIF and copied usage) and, for the native arm, the exact
+  terminal stage STATS, zero-copy CREATE and map IDs plus STOP0; the controller
+  checks these per arm as they arrive.
+- After every trial has finished, drained and released, the controller reads the
+  whole source window back once and calls `campaign_oracle.verify_campaign` exactly
+  once. It compares every byte of every captured datagram (warmup included, all
+  trials) against bytes generated from the specification formula and every raw guard
+  record against the guard pattern, plus the complete generation sets, frame slots
+  and STOP evidence. Earlier damage cannot be hidden by later clean reuse of the same
+  slot. Only then is one artifact manifest written and the result, raw samples and
+  paired ratios published; a failed campaign publishes no ratio. Raw observations
+  are kept privately on success and failure.
+
+These are burst completion round-trip measurements of an HFT-style scenario
+microbenchmark, not a trading system, unsynchronized one-way NIC latency or
+statistical-significance claims. Building, software tests, offline fixtures and
+no-hardware refusals cannot certify native DMA or physical performance; those
+require actual device execution, which has not been run for this policy.
 
 Source promotion: `hft_send_zc.h` retains `prep_send_zc_fixed` from
 `bench_nvme_pipeline_compare.c`307–319 and adapts `wait_zc_cqes`325–348, commit
@@ -158,3 +202,13 @@ The obsolete surrounding benchmark/ABI is not imported. Preparation uses current
 UAPI symbols and REPORT_USAGE; waiting dispatches stable tokens and explicit
 NOTIF/MORE. Session setup derives from the current GPL-2.0 control tool; framing
 uses its current pure encoder. Builds reference only active product sources.
+
+A benchmark admission probe issues no START and requires zero-submission
+statistics plus successful STOP, without requiring workload history. All
+configured frame-slot identities are recorded during setup, including slots
+unused by a short campaign. After a failed workload or peer receipt, a successful
+STOP allows the native arm to retrieve every available committed history entry;
+missing entries never become fabricated records. The producer writes those raw
+entries as error evidence to stderr, which the controller retains, and returns
+failure without success or performance output. A failed STOP keeps UNKNOWN
+resources retained and does not read potentially live native history.

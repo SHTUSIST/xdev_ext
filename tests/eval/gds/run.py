@@ -81,6 +81,92 @@ def build(sdk):
     return final, None
 
 
+GUARD = 4096
+POLICY = "gds-campaign-v1"
+# Strict campaign evidence common to every compared mode (schema2).  Schema1
+# records are correctness-only and never admitted for performance comparison.
+CAMPAIGN_FIELDS = ("schema_version", "measurement_policy", "mode", "workload", "bytes", "chunk",
+                   "iterations", "io_bytes", "verified_bytes", "operations", "io_ns", "status",
+                   "guards_ok", "input_id", "source_window", "output_residency", "queue_depth",
+                   "direct_io", "buffer_registration", "registration_count", "campaign_complete",
+                   "validation_phase", "full_byte_compare", "history_operations", "history_bytes",
+                   "manifest_count", "capture_in_timing")
+# Additional native-path evidence that only the cuFile record carries.
+CUFILE_FIELDS = ("native_operations", "posix_operations", "execution", "path_evidence", "compat_allowed")
+# Fields that must be identical for a fair pair.
+PAIRED_FIELDS = ("workload", "bytes", "chunk", "iterations", "io_bytes", "operations", "input_id",
+                 "source_window", "output_residency", "queue_depth", "direct_io",
+                 "buffer_registration", "registration_count", "history_operations", "history_bytes")
+RESIDENCY = {"llm-load": "vram", "checkpoint": "file"}
+
+
+def _integer(record, key, minimum=0):
+    value = record[key]
+    if type(value) is not int or value < minimum:
+        raise ValueError("invalid integer evidence " + key)
+    return value
+
+
+def checked_campaign(record):
+    """Exact strict-campaign record check; no physical truth is inferred from it."""
+    if type(record) is not dict:
+        raise ValueError("campaign record must be an object")
+    mode = record.get("mode")
+    allowed = set(CAMPAIGN_FIELDS) | (set(CUFILE_FIELDS) if mode == "cufile-direct" else set())
+    if not set(CAMPAIGN_FIELDS) <= set(record) or not set(record) <= allowed:
+        raise ValueError("missing or unexpected strict campaign evidence")
+    if record["schema_version"] != 2 or type(record["schema_version"]) is not int or \
+            record["measurement_policy"] != POLICY or mode not in ("linux-pinned", "cufile-direct") or \
+            record["workload"] not in RESIDENCY:
+        raise ValueError("record is not a strict gds-campaign-v1 result")
+    size, chunk = _integer(record, "bytes", 1), _integer(record, "chunk", 1)
+    iterations = _integer(record, "iterations", 1)
+    operations = ((size + chunk - 1) // chunk) * iterations
+    if size % GUARD or chunk % GUARD or chunk > size:
+        raise ValueError("invalid campaign geometry")
+    for key, wanted in (("io_bytes", size * iterations), ("verified_bytes", size * iterations),
+                        ("operations", operations), ("history_operations", operations),
+                        ("history_bytes", operations * (chunk + 2 * GUARD)), ("queue_depth", 1),
+                        ("registration_count", 1), ("manifest_count", 1)):
+        if _integer(record, key) != wanted:
+            raise ValueError("incomplete or inconsistent campaign evidence " + key)
+    _integer(record, "io_ns", 1)
+    for key, wanted in (("status", "pass"), ("validation_phase", "post-campaign"),
+                        ("buffer_registration", "once-reused"),
+                        ("output_residency", RESIDENCY[record["workload"]])):
+        if type(record[key]) is not str or record[key] != wanted:
+            raise ValueError("invalid campaign evidence " + key)
+    for key in ("guards_ok", "campaign_complete", "full_byte_compare", "capture_in_timing", "direct_io"):
+        if type(record[key]) is not bool or (key != "direct_io" and record[key] is not True):
+            raise ValueError("invalid boolean evidence " + key)
+    if type(record["input_id"]) is not str or not record["input_id"]:
+        raise ValueError("invalid input identity")
+    window = record["source_window"]
+    if type(window) is not list or len(window) != 2 or any(type(v) is not int for v in window) or \
+            window[0] < 0 or window[1] - window[0] != size:
+        raise ValueError("invalid source window")
+    if mode == "cufile-direct" and set(CUFILE_FIELDS) <= set(record):
+        for key, wanted in (("native_operations", operations), ("posix_operations", 0),
+                            ("execution", "physical-cuda-cufile"),
+                            ("path_evidence", "cufile-l3-native-counters"), ("compat_allowed", False)):
+            if type(record[key]) is not type(wanted) or record[key] != wanted:
+                raise ValueError("invalid native path evidence " + key)
+    elif mode == "cufile-direct" and set(record) & set(CUFILE_FIELDS):
+        raise ValueError("partial native path evidence")
+    return record
+
+
+def checked_comparison(left, right):
+    """Admit a pair only with identical input, window, residency, depth, direct I/O and
+    once-reused registration, both validated once after their complete campaigns."""
+    left, right = checked_campaign(left), checked_campaign(right)
+    for key in PAIRED_FIELDS:
+        if type(left[key]) is not type(right[key]) or left[key] != right[key]:
+            raise ValueError("unfair comparison: " + key + " differs")
+    return dict(workload=left["workload"], left_mode=left["mode"], right_mode=right["mode"],
+                left_io_ns=left["io_ns"], right_io_ns=right["io_ns"])
+
+
 def checked_result(output, args):
     """Reject unexpected/partial output before relaying any measured result."""
     if not output.endswith("\n") or len(output.splitlines()) != 1:
@@ -92,22 +178,82 @@ def checked_result(output, args):
                 raise ValueError("duplicate result key")
             result[key] = value
         return result
-    record = json.loads(output, object_pairs_hook=pairs)
-    operations = ((args.bytes + args.chunk - 1) // args.chunk) * args.iterations
-    expected = dict(schema_version=1, mode="cufile-direct", workload=args.workload,
-                    bytes=args.bytes, chunk=args.chunk, iterations=args.iterations,
-                    io_bytes=args.bytes*args.iterations, verified_bytes=args.bytes*args.iterations,
-                    operations=operations, native_operations=operations, posix_operations=0,
-                    guards_ok=True, status="pass", execution="physical-cuda-cufile",
-                    path_evidence="cufile-l3-native-counters", compat_allowed=False)
-    if type(record) is not dict or set(record) != set(expected) | {"io_ns"}:
+    record = json.loads(output, object_pairs_hook=pairs,
+                        parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite number")))
+    if type(record) is not dict or set(record) != set(CAMPAIGN_FIELDS) | set(CUFILE_FIELDS):
         raise ValueError("unexpected result schema")
-    for key, value in expected.items():
-        if type(record[key]) is not type(value) or record[key] != value:
-            raise ValueError("invalid result field " + key)
-    if type(record["io_ns"]) is not int or record["io_ns"] <= 0:
-        raise ValueError("invalid I/O measurement")
+    checked_campaign(record)
+    if record["mode"] != "cufile-direct" or record["workload"] != args.workload or \
+            record["bytes"] != args.bytes or record["chunk"] != args.chunk or \
+            record["iterations"] != args.iterations or record["direct_io"] is not True or \
+            record["input_id"] != "deterministic-pattern-v1" or record["source_window"] != [0, args.bytes]:
+        raise ValueError("result does not match the requested campaign")
     return record
+
+
+def checked_manifest(output, record):
+    """Require actual observed-byte identity and final verification evidence.
+
+    FNV-1a identifies the complete observed guard/payload image. It is not a
+    cryptographic integrity claim and never substitutes for the C++ byte oracle.
+    Reconstruct expected bytes outside measurement from the published formula.
+    """
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate manifest field")
+            result[key] = value
+        return result
+    rows = []
+    lines = output.split("\n")
+    for index, line in enumerate(lines):
+        # stderr multiplexes LF-delimited JSON evidence and SDK diagnostics.
+        # Only JSON whitespace may precede an object; a malformed object must
+        # never fall back to the diagnostic path. Keep non-JSON [WARN] text.
+        line = line.lstrip(" \t\r")
+        if not line:
+            continue
+        if not line.startswith("{"):
+            try:
+                json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            raise ValueError("non-object JSON evidence on stderr")
+        if index == len(lines) - 1:
+            raise ValueError("unterminated campaign manifest")
+        rows.append(json.loads(line, object_pairs_hook=pairs,
+                    parse_constant=lambda _: (_ for _ in ()).throw(ValueError("non-finite manifest number"))))
+    if len(rows) != 1 or type(rows[0]) is not dict:
+        raise ValueError("expected one actual campaign manifest")
+    manifest = rows[0]
+    size, chunk, iterations = record["bytes"], record["chunk"], record["iterations"]
+    value = 14695981039346656037
+    mask = (1 << 64) - 1
+    # Keep reconstruction bounded to a single slot, never another full history.
+    for iteration in range(iterations):
+        for offset in range(0, size, chunk):
+            part = min(chunk, size - offset)
+            data = bytearray([0xa5]) * (chunk + 2 * GUARD)
+            for j in range(part):
+                index = offset + j
+                data[GUARD + j] = (index * 37 + index // 251 + iteration * 53) % 256
+            for byte in data:
+                value = ((value ^ byte) * 1099511628211) & mask
+    wanted = dict(kind="gds-campaign-manifest", schema_version=1, workload=record["workload"],
+        input=dict(id="deterministic-pattern-v1", formula="(index*37+index/251+iteration*53)%256",
+                   index_window=[0, size], iteration_window=[0, iterations]),
+        geometry=dict(bytes=size, chunk=chunk, iterations=iterations, operations=record["operations"],
+                      history_bytes=record["history_bytes"], guard_bytes=GUARD),
+        verification=dict(phase="post-campaign", payload_bytes=record["io_bytes"],
+                          device_history_bytes=record["history_bytes"],
+                          file_bytes=record["io_bytes"] if record["workload"] == "checkpoint" else 0,
+                          device_equal=True, file_equal=True, complete=True),
+        observed_history_fnv1a64=f"{value:016x}")
+    # JSON comparison preserves bool-vs-integer evidence types as well as keys.
+    if json.dumps(manifest, sort_keys=True) != json.dumps(wanted, sort_keys=True):
+        raise ValueError("manifest identity or verification differs from the requested campaign")
+    return manifest
 
 
 def main():
@@ -131,6 +277,7 @@ def main():
             if result.returncode:
                 return result.returncode if result.returncode in (1, 2, 4) else 1
             record = checked_result(result.stdout, args)
+            checked_manifest(result.stderr, record)
         print(json.dumps(record, separators=(",", ":")))
         return 0
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:

@@ -7,6 +7,9 @@ all:
 
 check:
 	$(PYTHON) test_gds.py -v
+	$(PYTHON) -B test_campaign_result.py -v
+	GDS_CUDA_ROOT=$(CUDA_ROOT) $(PYTHON) -B test_campaign_timing.py -v
+	GDS_CUDA_ROOT=$(CUDA_ROOT) $(PYTHON) -B test_manifest_evidence.py -v
 
 clean:
 	rm -rf build __pycache__

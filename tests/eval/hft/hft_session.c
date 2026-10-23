@@ -18,6 +18,7 @@
 #include <sys/syscall.h>
 #include <unistd.h>
 #include "hft_runtime.h"
+#include "benchmark_policy.h"
 #ifdef HFT_HAVE_SESSION
 #include <zlib.h>
 #include <bpf/bpf.h>
@@ -100,6 +101,25 @@ static int ctl_set_global(struct bpf_object *obj, const char *name,
 		}
 	}
 	return -ENOENT;
+}
+
+static int ctl_set_bytes(struct bpf_object *obj,const char *name,const void *bytes,size_t length)
+{
+ struct btf *btf=bpf_object__btf(obj);const char *sections[]={".bss",".data"};
+ if(!btf)return -ENOENT;
+ for(unsigned i=0;i<2;i++) {
+  int id=btf__find_by_name_kind(btf,sections[i],BTF_KIND_DATASEC);if(id<0)continue;
+  const struct btf_type *sec=btf__type_by_id(btf,id);const struct btf_var_secinfo *v=btf_var_secinfos(sec);
+  for(unsigned n=0;n<btf_vlen(sec);n++,v++) {
+   const struct btf_type *var=btf__type_by_id(btf,v->type);
+   if(strcmp(btf__name_by_offset(btf,var->name_off),name))continue;
+   struct bpf_map *map=ctl_section_map(obj,sections[i]);size_t size;const void *image=map?bpf_map__initial_value(map,&size):NULL;
+   if(!image||v->size!=length||v->offset>size||length>size-v->offset)return -EINVAL;
+   void *copy=malloc(size);if(!copy)return -ENOMEM;memcpy(copy,image,size);memcpy((char *)copy+v->offset,bytes,length);
+   int ret=bpf_map__set_initial_value(map,copy,size);free(copy);return ret;
+  }
+ }
+ return -ENOENT;
 }
 
 struct ctl_xring {
@@ -272,10 +292,19 @@ static int mac(const char *s,unsigned char *out)
 static int attach_maps(const struct hft_config *c,struct bpf_object **object,struct bpf_link **links,struct hft_actor *a)
 {
  struct bpf_object *obj=bpf_object__open_file(c->bpf_object,NULL);
- const char *names[]={"nxp_nvme_ops","nxp_afxdp_ops"};int err;
+ const char *names[]={c->measured?"hftb_nvme_ops":"nxp_nvme_ops",c->measured?"hftb_afxdp_ops":"nxp_afxdp_ops"};int err;
  err=(int)libbpf_get_error(obj);if(err) return err;
  *object=obj;
- if(ctl_set_global(obj,"nxp_session",c->session_base) || ctl_set_global(obj,"key_base",1) || ctl_set_global(obj,"nvme_mode",0)) return -EINVAL;
+ if(c->measured) {
+  unsigned char lm[6],pm[6],network[42];uint32_t lip,pip;
+  if(mac(c->local_mac,lm)||mac(c->peer_mac,pm)||inet_pton(AF_INET,c->local_ip,&lip)!=1||inet_pton(AF_INET,c->peer_ip,&pip)!=1||
+     hftb_setup_template(network,lm,pm,lip,pip,htons(c->local_port),htons(c->peer_port),c->payload)||
+     ctl_set_global(obj,"hftb_session",c->session_base)||ctl_set_global(obj,"hftb_payload",c->payload)||
+     ctl_set_global(obj,"hftb_depth",c->depth)||ctl_set_global(obj,"hftb_groups",(uint64_t)c->burst*c->bursts)||
+     ctl_set_bytes(obj,"hftb_network_template",network,sizeof(network)))return -EINVAL;
+  struct bpf_map *history=bpf_object__find_map_by_name(obj,"hftb_guard_history");
+  if(!history||bpf_map__value_size(history)!=sizeof(struct hft_guard_record)||bpf_map__max_entries(history)<(uint64_t)c->burst*c->bursts)return -EINVAL;
+ } else if(ctl_set_global(obj,"nxp_session",c->session_base)||ctl_set_global(obj,"key_base",1)||ctl_set_global(obj,"nvme_mode",0))return -EINVAL;
  if(bpf_object__load(obj)) return -EOPNOTSUPP;
  for(unsigned i=0;i<2;i++) {
   struct bpf_map *map=bpf_object__find_map_by_name(obj,names[i]);
@@ -320,13 +349,14 @@ int hft_session(struct hft_actor *a)
  ring=(int)syscall(__NR_io_uring_setup,8,&params);efd=eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
  ctl=hft_connect(c->control_ip,c->control_port);
  if(ring<0||efd<0||ctl<0) goto setup;
- if(attach_maps(c,&obj,links,a)||ctl_xsk_open(&x,c->ifname,c->queue,512,false,true,-1,false,64)) goto setup;
+ if(hft_history_setup(a)||attach_maps(c,&obj,links,a)||ctl_xsk_open(&x,c->ifname,c->queue,512,false,true,-1,false,c->measured?2*c->depth:64)) goto setup;
  a->native_xdp_zc=x.zero_copy;a->counts.registrations++;
  /* Source partition is the latter half, enough for bounded depth. No FQ
   * publication or userspace TX pumping is needed for the native source path. */
- for(unsigned i=0;i<64;i++) {
+ for(unsigned i=0;i<(c->measured?2*c->depth:64);i++) {
   unsigned char *p=(unsigned char *)x.umem+i*4096;
   memset(p,0xa5,430);memset(p+512+c->payload,0x5a,4096-512-c->payload);
+  if(c->measured&&i>=c->depth)a->frame_slots[i-c->depth]=(uint64_t)i*4096;
  }
  guarded=1;
  create.abi_version=XDEV_EXT_MECH_ABI_VERSION;create.nr_stages=2;
@@ -358,8 +388,8 @@ int hft_session(struct hft_actor *a)
   struct xdev_ext_mech_notify_arm arm={.session_id=create.session_id,.batches_target=target};
   struct xdev_ext_mech_start start={.session_id=create.session_id,.nr_batches=c->burst,.first_seq=(uint64_t)b*c->burst+1};
   struct pollfd wait={.fd=efd,.events=POLLIN};int n;
-  if(mech(ring,XDEV_EXT_MECH_OP_NOTIFY_ARM,(uintptr_t)&arm)) goto out;
   hft_burst_begin(a,b);
+  if(mech(ring,XDEV_EXT_MECH_OP_NOTIFY_ARM,(uintptr_t)&arm)) goto out;
   /* START errors cannot prove non-acceptance after an interrupted syscall. */
   started=1;
   if(mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start)) goto out;
@@ -385,7 +415,20 @@ int hft_session(struct hft_actor *a)
  }
  if(started&&ret) ret=1;
  if(!unsafe) {
-  if(guarded && x.umem) for(unsigned i=0;i<64;i++) {
+  if(c->measured&&!c->probe&&started&&a->history&&obj) {
+   struct bpf_map *history=bpf_object__find_map_by_name(obj,"hftb_guard_history");
+   if(!history)ret=1;
+   else for(unsigned i=0;i<a->history_count;i++) {
+    struct hft_guard_record *r=&a->history[i];
+    /* STOP has drained writers. Preserve every available generation, even
+     * when the workload/peer failed or an earlier entry is absent. */
+    struct hft_guard_record observed={0};
+    if(bpf_map_lookup_elem(bpf_map__fd(history),&i,&observed)){ret=1;continue;}
+    if(observed.committed==1)*r=observed;
+    if(observed.committed!=1||observed.generation!=i+1||observed.frame_pos!=i%c->depth||observed.payload_bytes!=c->payload||observed.slot_addr!=(uint64_t)(c->depth+i%c->depth)*4096)ret=1;
+   }
+  }
+  if(!c->measured&&guarded && x.umem) for(unsigned i=0;i<64;i++) {
    const unsigned char *p=(const unsigned char *)x.umem+i*4096;
    if(!hft_guards_ok(p,430,430,0)||!hft_guards_ok(p+512,c->payload+4096-512-c->payload,0,c->payload)) ret=1;
   }
