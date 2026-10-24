@@ -22,6 +22,16 @@ SHIM = r'''
 #include <errno.h>
 #include <stdio.h>
 typedef uint64_t u64; typedef uint8_t NvU8; typedef int nvidia_stack_t;
+struct list_head { struct list_head *next, *prev; };
+#define LIST_HEAD(name) struct list_head name = { &(name), &(name) }
+#define DEFINE_MUTEX(name) int name
+static void mutex_lock(int *lock) { assert(!*lock); *lock = 1; }
+static void mutex_unlock(int *lock) { assert(*lock); *lock = 0; }
+static void list_add_tail(struct list_head *entry, struct list_head *head)
+{
+ entry->prev = head->prev; entry->next = head;
+ head->prev->next = entry; head->prev = entry;
+}
 #define NVIDIA_P2P_GPU_UUID_LEN 16
 #define NVIDIA_P2P_FLAGS_DEFAULT 0
 #define NVIDIA_P2P_PAGE_SIZE_64KB 1
@@ -117,6 +127,8 @@ int main(void)
  page_uuid[0]=2;put_error=-EIO;a=NULL;before=frees;
  assert(nv_xdev_ext_peer_pin(&f,0x200000,131072,&a)==-EXDEV && !a && live_pages && frees==before && module_refs==1);
  assert(!pm_depth && !stacks);
+ assert(nv_xdev_ext_peer_quarantined.next != &nv_xdev_ext_peer_quarantined &&
+        !nv_xdev_ext_peer_quarantine_lock);
  puts("ok 5 - real NVIDIA adapter retains persistent allocation and module if mismatched GPU cleanup itself fails");
  return 0;
 }
