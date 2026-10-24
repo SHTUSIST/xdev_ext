@@ -273,13 +273,14 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 	ret = es_start(&r, n, user, (__u32)(groups * frames));
 	if (!ret)
 		ret = es_wait_terminal(&r, deadline);
-	t1 = es_now_ns();
-	p->cpu_us = es_cpu_us() - cpu0;
-	p->host_busy_us = xg_host_busy_us() - busy0;
+	/* A terminal notification alone does not prove the final drain. */
 	if (!ret)
 		ret = es_settle(&r, n, deadline, &p->stats);
 	else
 		es_stats(&r, &p->stats);
+	t1 = es_now_ns();
+	p->cpu_us = es_cpu_us() - cpu0;
+	p->host_busy_us = xg_host_busy_us() - busy0;
 	es_print_stats(&p->stats);
 	if (ret) {
 		fprintf(stderr, "session pass failed: %s\n", strerror(-ret));

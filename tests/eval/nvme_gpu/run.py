@@ -1,22 +1,27 @@
 #!/usr/bin/env python3
-"""Build and run the NVMe<->GPU comparison arms over one shared LBA window.
+"""Build and collect the NVMe<->GPU arms with explicit path contracts.
 
 Arms: session (xdev_ext [NVMe READ, CE H2D] / [CE D2H, NVMe WRITE]),
 uring-cuda (io_uring O_DIRECT READ_FIXED/WRITE_FIXED + cudaHostRegister +
 cudaMemcpyAsync), gds-batch and gds-async (cuFile batch / stream async), and
 gds-direct (synchronous cuFile, delegated to ../gds/run.py; qd 1, seq).
 
-Every arm uses the same temporary file, created once in --directory, with
-O_DIRECT, the same payload, the same schedule and a post-pass oracle.
---destination slot-ring (default) gives every arm the session's device
-layout, a ring of qd device slots; window places block b at device offset
+The session, staged and async/batch arms share one temporary file in --directory,
+with O_DIRECT, the same payload/schedule and a post-pass destination oracle.
+The synchronous gds-direct delegate creates its own file and guarded history;
+its call-interval timer includes checkpoint fsync. These are separate contracts.
+--destination slot-ring (default) gives the shared-file arms the session's
+device layout, a ring of qd device slots; gds-direct is window-only.
+Window places block b at device offset
 b*size and leaves the session (and slot-ring-only cells) not_run, so unlike
 layouts are never paired.  --completion-wait block (default) makes every
 baseline sleep for completions, as the session sleeps on its eventfd; poll
 records spin and their CPU fields are no CPU-cost data.  The
 session arm reaches the file's blocks through the NVMe namespace (--ng) at
 the LBA window derived from FIEMAP and the partition offset.  Cells run in
-paired order (pair i even: listed order; odd: reversed).  A missing SDK,
+alternating order (pair i even: listed order; odd: reversed). The pair field is
+only a repetition/order index, not proof of equivalent work; no ratio is emitted.
+A missing SDK,
 device or capability is reported as not_run (exit 4 if nothing ran); it is
 never a pass.  VM timings are not performance data.
 """
@@ -164,12 +169,30 @@ def compile_atomic(command, output):
 
 
 def build_arm(arm, args):
-    """(binary, None) or (None, reason); reasons are capability refusals."""
+    """(entrypoint, None) after building, or (None, capability refusal).
+
+    Fatal delegate errors raise RuntimeError; its script path is not a build.
+    """
     out = args.build_dir / {"session": "session_nvme_ce", "uring-cuda": "bench_uring_cuda",
                             "gds-batch": "bench_cufile_batch", "gds-async": "bench_cufile_batch",
                             "gds-direct": "gds-direct"}[arm]
     if arm == "gds-direct":
-        return HERE.parent / "gds" / "run.py", None
+        delegate = HERE.parent / "gds" / "run.py"
+        directory = args.directory
+        if directory is None or not directory.is_dir():
+            directory = args.build_dir
+            directory.mkdir(parents=True, exist_ok=True)
+        command = [sys.executable, str(delegate), "--mode", "cufile-direct",
+                   "--workload", "llm-load", "--bytes", "4096", "--chunk", "4096",
+                   "--iterations", "1", "--directory", str(directory.resolve()),
+                   "--cuda-root", str(args.cuda_root), "--build-only"]
+        result = subprocess.run(command, text=True, capture_output=True, timeout=120)
+        sys.stderr.write(result.stdout + result.stderr)
+        if result.returncode == 4:
+            return None, "delegated synchronous cuFile builder unavailable"
+        if result.returncode:
+            raise RuntimeError("gds-direct builder exited %d" % result.returncode)
+        return delegate, None
     if arm == "session":
         compiler = shutil.which(os.environ.get("CC", "cc"))
         if not compiler:
@@ -394,6 +417,8 @@ def cell_supported(arm, qd, pattern, destination):
         return "the session lands blocks in a ring of qd device slots only"
     if arm == "session" and (pattern != "seq" or qd > SESSION_MAX_DEPTH):
         return "session plan is linear with depth <= 64"
+    if arm == "gds-batch" and qd > 1 and qd % 2:
+        return "two ceil(qd/2) batch waves can admit qd+1 I/Os; not an equal-QD cell"
     if arm == "gds-direct" and destination != "window":
         return "the delegated synchronous cuFile arm fills the whole window"
     if arm == "gds-direct" and (pattern != "seq" or qd != 1):
@@ -405,7 +430,11 @@ def main(argv=None):
     args = arguments(argv)
     binaries, ran = {}, 0
     for arm in args.arms:
-        binary, reason = build_arm(arm, args)
+        try:
+            binary, reason = build_arm(arm, args)
+        except (OSError, RuntimeError, subprocess.TimeoutExpired) as error:
+            print("nvme_gpu build failed: " + str(error), file=sys.stderr)
+            return 1
         if reason:
             skip(arm + ": " + reason)
             continue

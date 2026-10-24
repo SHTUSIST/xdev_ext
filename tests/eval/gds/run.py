@@ -113,7 +113,7 @@ def checked_campaign(record):
         raise ValueError("campaign record must be an object")
     mode = record.get("mode")
     allowed = set(CAMPAIGN_FIELDS) | (set(CUFILE_FIELDS) if mode == "cufile-direct" else set())
-    if not set(CAMPAIGN_FIELDS) <= set(record) or not set(record) <= allowed:
+    if set(record) != allowed:
         raise ValueError("missing or unexpected strict campaign evidence")
     if record["schema_version"] != 2 or type(record["schema_version"]) is not int or \
             record["measurement_policy"] != POLICY or mode not in ("linux-pinned", "cufile-direct") or \
@@ -145,14 +145,12 @@ def checked_campaign(record):
     if type(window) is not list or len(window) != 2 or any(type(v) is not int for v in window) or \
             window[0] < 0 or window[1] - window[0] != size:
         raise ValueError("invalid source window")
-    if mode == "cufile-direct" and set(CUFILE_FIELDS) <= set(record):
+    if mode == "cufile-direct":
         for key, wanted in (("native_operations", operations), ("posix_operations", 0),
                             ("execution", "physical-cuda-cufile"),
                             ("path_evidence", "cufile-l3-native-counters"), ("compat_allowed", False)):
             if type(record[key]) is not type(wanted) or record[key] != wanted:
                 raise ValueError("invalid native path evidence " + key)
-    elif mode == "cufile-direct" and set(record) & set(CUFILE_FIELDS):
-        raise ValueError("partial native path evidence")
     return record
 
 

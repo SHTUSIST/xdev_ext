@@ -41,7 +41,7 @@ def runner():
 
 def comparison_record(mode="cufile-direct"):
     """Independent admission fixture; this does not purport to be a run."""
-    return dict(schema_version=2, measurement_policy="gds-campaign-v1", mode=mode,
+    record = dict(schema_version=2, measurement_policy="gds-campaign-v1", mode=mode,
                 workload="llm-load", bytes=SIZE, chunk=CHUNK, iterations=ITERATIONS,
                 io_bytes=SIZE * ITERATIONS, verified_bytes=SIZE * ITERATIONS,
                 operations=OPERATIONS, io_ns=1, status="pass", guards_ok=True,
@@ -51,6 +51,11 @@ def comparison_record(mode="cufile-direct"):
                 campaign_complete=True, validation_phase="post-campaign",
                 full_byte_compare=True, history_operations=OPERATIONS,
                 history_bytes=HISTORY_BYTES, manifest_count=1, capture_in_timing=True)
+    if mode == "cufile-direct":
+        record.update(native_operations=OPERATIONS, posix_operations=0,
+                      execution="physical-cuda-cufile",
+                      path_evidence="cufile-l3-native-counters", compat_allowed=False)
+    return record
 
 
 class ComparisonAdmissionTests(unittest.TestCase):
@@ -63,6 +68,16 @@ class ComparisonAdmissionTests(unittest.TestCase):
 
     def test_same_input_window_residency_qd_direct_and_once_registered_is_admitted(self):
         self.compare(comparison_record("linux-pinned"), comparison_record())
+
+    def test_missing_all_or_any_native_fields_is_rejected(self):
+        native = ("native_operations", "posix_operations", "execution",
+                  "path_evidence", "compat_allowed")
+        left, right = comparison_record("linux-pinned"), comparison_record()
+        with self.assertRaises(ValueError):
+            self.compare(left, {k: v for k, v in right.items() if k not in native})
+        for key in native:
+            with self.subTest(missing=key), self.assertRaises(ValueError):
+                self.compare(left, {k: v for k, v in right.items() if k != key})
 
     def test_unfair_input_window_residency_qd_direct_or_registration_is_rejected(self):
         mutations = dict(input_id="different-source", source_window=[4096, SIZE],

@@ -319,6 +319,23 @@ class RunnerPure(unittest.TestCase):
                 with self.subTest(arm=arm, destination=destination):
                     self.assertIsNone(RUN.cell_supported(arm, 256, "rand", destination))
 
+    def test_odd_batch_depth_is_not_an_equal_qd_cell(self):
+        for qd in (3, 5, 255):
+            for destination in ("slot-ring", "window"):
+                for pattern in ("seq", "rand"):
+                    with self.subTest(qd=qd, destination=destination, pattern=pattern):
+                        self.assertIsNotNone(RUN.cell_supported("gds-batch", qd,
+                                                               pattern, destination))
+
+    def test_batch_one_even_and_async_odd_depths_remain_supported(self):
+        for destination in ("slot-ring", "window"):
+            for arm, depths in (("gds-batch", (1, 2, 4, 256)),
+                                ("gds-async", (1, 3, 5, 255)),
+                                ("uring-cuda", (1, 3, 5, 255))):
+                for qd in depths:
+                    with self.subTest(arm=arm, qd=qd, destination=destination):
+                        self.assertIsNone(RUN.cell_supported(arm, qd, "seq", destination))
+
 
 class RunnerCLI(unittest.TestCase):
     def invoke(self, *args):

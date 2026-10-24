@@ -8,6 +8,8 @@ all:
 
 check:
 	$(PYTHON) test_contract.py -v
+	$(PYTHON) -B test_session_timing.py -v
+	$(PYTHON) -B test_delegate_build.py -v
 
 cuda-build:
 	$(PYTHON) run.py --arms uring-cuda,gds-batch,gds-async --sizes 4096 --qd 1 \

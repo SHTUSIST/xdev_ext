@@ -1,5 +1,7 @@
 # cuFile storage/GPU comparison
 
+[Performance evaluation policy](../PERFORMANCE_POLICY.md)
+
 This workload moves a regular file into CUDA device memory (`llm-load`) or
 writes synthetic device state to a regular file (`checkpoint`). It calls the
 real synchronous cuFile APIs. It is a storage/GPU microbenchmark, without a

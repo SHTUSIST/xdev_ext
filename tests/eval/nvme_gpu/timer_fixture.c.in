@@ -1,0 +1,38 @@
+// SPDX-License-Identifier: GPL-2.0
+// Actual sn_session with deterministic setup/terminal/drain host boundaries.
+#define _GNU_SOURCE
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <errno.h>
+#include <sys/mman.h>
+#include "nvme_gpu_core.h"
+#include "kernel/include/uapi/linux/io_uring.h"
+#include "kernel/io_uring/xdev_ext_mech_core.h"
+#define SN_MAX_SESSION_DEPTH 64ULL
+struct es_run {int ring,efd;__u64 session;};
+struct es_ce {int fd[2];__u64 va,len;};
+@SN_OPTS@
+@SN_PASS@
+static uint64_t tick=100;
+static unsigned settled,closed;
+static int settle_failure;
+static __u64 es_now_ns(void){return tick;}
+static __u64 es_cpu_us(void){return tick;}
+static __u64 test_busy_us(void){return tick;}
+#define xg_host_busy_us test_busy_us
+static int es_ring_open(struct es_run*r){r->ring=42;r->efd=43;return 0;}
+static int es_register(int ring,unsigned code,void*arg){(void)ring;(void)code;(void)arg;return 0;}
+static int es_create(struct es_run*r,struct xdev_ext_mech_create*c,__u64 n){(void)c;(void)n;r->session=1;return 0;}
+static int es_start(struct es_run*r,__u64 n,const __u32*u,__u32 nr){(void)r;(void)n;(void)u;(void)nr;tick+=10;return 0;}
+static int es_wait_terminal(struct es_run*r,__u64 deadline){(void)r;(void)deadline;tick+=20;return 0;}
+static int es_stats(struct es_run*r,struct xdev_ext_mech_stats*s){(void)r;(void)s;return 0;}
+static int es_settle(struct es_run*r,__u64 n,__u64 deadline,struct xdev_ext_mech_stats*s){(void)r;(void)deadline;settled++;tick+=100;memset(s,0,sizeof(*s));s->batches_done=n;s->completed[0]=s->submitted[0]=n;s->completed[1]=s->submitted[1]=n;return settle_failure?-EIO:0;}
+static void es_print_stats(struct xdev_ext_mech_stats*s){(void)s;}
+static int es_close(struct es_run*r){(void)r;closed++;return 0;}
+static bool sn_capability_errno(int e){(void)e;return false;}
+static int sn_unavailable(const char*msg,int e){(void)msg;(void)e;return 4;}
+@SN_SESSION@
+int main(int argc,char**argv){if(argc!=3)return 2;settle_failure=atoi(argv[2]);struct sn_opts o={.direction=atoi(argv[1])?XG_SAVE:XG_LOAD,.lba_size=512,.frame_size=4096,.timeout_ms=1000,.g={.size=4096,.qd=2,.window=16384,.passes=1}};struct es_ce ce={.fd={44,-1},.len=8192};struct sn_pass p={0};int rc=sn_session(&o,&ce,45,&p);printf("{\"rc\":%d,\"io_ns\":%llu,\"cpu_us\":%llu,\"host_busy_us\":%llu,\"settled\":%u,\"closed\":%u}\n",rc,(unsigned long long)p.io_ns,(unsigned long long)p.cpu_us,(unsigned long long)p.host_busy_us,settled,closed);return 0;}

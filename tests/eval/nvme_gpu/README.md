@@ -1,5 +1,7 @@
 # NVMe<->GPU comparison arms
 
+[Performance evaluation policy](../PERFORMANCE_POLICY.md)
+
 Programs and a runner that compare the xdev_ext session with the strongest
 host-staged path and with GPUDirect Storage, for loads (NVMe -> GPU) and
 saves (GPU -> NVMe) of 4 KiB to 4 MiB I/Os at queue depths 1 to 256,
@@ -29,6 +31,13 @@ every step of every group and the CPU copies no payload.
 - **Schedule.** Each pass visits every block of the window once: `seq` in
   order, `rand` as `(a*i + b) mod n` with `gcd(a, n) = 1`, `a` and `b` derived
   from the seed and the pass.
+- **Queue-depth meaning.** The staged baseline's `qd` bounds NVMe commands;
+  it retains its original `2*qd` host slots and overlapping CUDA copies.
+  NVMe QD is not the whole pipeline's logical depth, so equal numeric `qd`
+  values do not establish equal credits across arms. The original batch
+  implementation has two `ceil(qd/2)` waves; the runner excludes odd `qd > 1`
+  batch cells from equal-QD collection because they can admit `qd+1` I/Os.
+  Batch QD 1, even batch depths and odd async depths remain supported.
 - **Payload.** 64-bit word `w` of the window holds `(w ^ mix(seed)) * odd`, so
   every word encodes its own position: misplaced, stale or torn data never
   matches, and a block image names its block.
@@ -55,7 +64,8 @@ every step of every group and the CPU copies no payload.
   close to the wall time by construction, so they are excluded from any CPU
   cost comparison.
 - **Timed region.** First submission to last completion of a pass. Seeding
-  and the oracle are outside it; no arm checks data per I/O.
+  and the oracle are outside it; no arm checks data per I/O. Session wall,
+  process-CPU and host-busy intervals include its final `es_settle` check.
 - **Oracle.** After each pass the destination is read back once and compared
   completely. The destination starts each pass as a sentinel (the payload of
   the complemented seed). Staged and cuFile arms: on the slot ring, slot `d`
@@ -74,8 +84,9 @@ every step of every group and the CPU copies no payload.
 - **Exit codes.** 0 verified, 1 failure, 2 usage, 4 a missing capability
   (SDK, device, driver, filesystem feature, attached program), with `SKIP` on
   stderr and nothing on stdout.
-- **Durability.** No arm flushes inside the timed region: a save completes
-  when the NVMe write (or cuFile write) completes.
+- **Durability.** Shared-file arms do not flush inside the timed region: a
+  save completes when the NVMe or cuFile write completes. The synchronous
+  delegate checkpoint includes `fsync` and has a separate timing contract.
 
 ## Session arm specifics
 
@@ -134,13 +145,21 @@ python3 tests/eval/nvme_gpu/run.py --arms gds-direct,gds-batch,gds-async,uring-c
 `not_run`; run it in a separate `--destination window` campaign, which in
 turn leaves the session `not_run`.
 
-`run.py` creates one temporary file of `--window-bytes` in `DIR` for all
-arms, runs every cell `--pairs` times in alternating arm order, validates
-each record against an independent schema and count oracle, and prints the
+`run.py` creates one temporary file of `--window-bytes` in `DIR` for the
+session, staged and batch/async arms, runs every cell `--pairs` times in
+alternating arm order, validates each record against an independent schema
+and count oracle, and prints the
 records. Cells an arm cannot run (session with `rand`, `qd > 64` or
-`window`; `gds-direct` beyond qd 1 sequential or with `slot-ring`) are
-reported as `not_run`. Without an
+`window`; batch with odd `qd > 1`; `gds-direct` beyond qd 1 sequential or
+with `slot-ring`) are reported as `not_run`. Without an
 NVIDIA control device the CUDA arms are `not_run`; nothing ran means exit 4.
+The synchronous `gds-direct` delegate instead creates an independent file and
+retains guarded operation history. Its `io_ns` sums synchronous call/completion
+intervals and includes checkpoint `fsync`; the other arms use per-pass wall
+time without a timed flush. `pair` is an alternating repetition index, not an
+equivalence claim. The runner emits raw records and no equivalent-work ratio.
+Its build step invokes the actual delegate with `--build-only`: success is 0,
+an unavailable SDK/capability remains 4, and a fatal child failure remains 1.
 The CUDA arms compile with the host C++ compiler against the SDK's headers
 and `libcudart`/`libcufile`; see the [CUDA build compatibility notes](../README.md#cuda-arms-against-one-official-sdk)
 for official-SDK compile/link checks and older-SDK limits. Before any campaign on the GPU host, run

@@ -716,6 +716,7 @@
 !/kernel/include/uapi/linux/stat.h
 /tests/eval/**
 !/tests/eval/README.md
+!/tests/eval/PERFORMANCE_POLICY.md
 !/tests/eval/Makefile
 !/tests/eval/eval_common.h
 !/tests/eval/bench_file_pipeline.c
@@ -901,6 +902,9 @@
 !/tests/eval/nvme_gpu/run.py
 !/tests/eval/nvme_gpu/session_nvme_ce.c
 !/tests/eval/nvme_gpu/test_contract.py
+!/tests/eval/nvme_gpu/test_session_timing.py
+!/tests/eval/nvme_gpu/timer_fixture.c.in
+!/tests/eval/nvme_gpu/test_delegate_build.py
 !/tests/eval/nvme_gpu/test_core.c
 !/tests/eval/nvme_nic/
 !/tests/eval/nvme_nic/Makefile
