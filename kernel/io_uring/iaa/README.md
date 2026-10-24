@@ -1,5 +1,7 @@
 # IAA kernel component
 
+Performance comparisons follow the [evaluation policy](../../../tests/eval/PERFORMANCE_POLICY.md).
+
 This directory contains the project-owned Intel IAA integration built by
 `io_uring/Makefile`:
 

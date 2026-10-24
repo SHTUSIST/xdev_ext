@@ -1,5 +1,7 @@
 # Getting started
 
+Performance comparisons follow the [evaluation policy](../tests/eval/PERFORMANCE_POLICY.md).
+
 The first step is a host-only check. It needs Linux, Python 3, and a C compiler with C11 and pthread support. The default checks enable UndefinedBehaviorSanitizer; use `--no-sanitize` if your compiler/runtime does not provide it. It does not require a GPU, a custom kernel, or downloading the complete Linux sources.
 
 From the repository root:

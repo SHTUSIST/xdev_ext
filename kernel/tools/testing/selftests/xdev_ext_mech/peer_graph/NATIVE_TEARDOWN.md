@@ -1,5 +1,7 @@
 # Native mlx5 peer teardown ownership
 
+Performance comparisons follow the [evaluation policy](../../../../../../tests/eval/PERFORMANCE_POLICY.md).
+
 Host TX/NAPI deactivation does not prove that an accepted DMA operation has
 stopped. Peer-enabled SQ/RQ close therefore checks the actual native destroy
 command result before completing descriptors with `quiesced=true` or freeing

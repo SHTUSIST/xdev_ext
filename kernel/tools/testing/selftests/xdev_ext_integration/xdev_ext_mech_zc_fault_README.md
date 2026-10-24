@@ -1,5 +1,7 @@
 # Software-device fault campaigns
 
+Performance comparisons follow the [evaluation policy](../../../../../tests/eval/PERFORMANCE_POLICY.md).
+
 `xdev_ext_mech_zc_fault_matrix.sh` drives the 18 campaigns specified by the
 existing `xdev_ext_mech_zc_fault_validate.py` oracle. Each campaign boots a
 fresh private QEMU guest with file-backed NVMe namespaces, virtio-net on a

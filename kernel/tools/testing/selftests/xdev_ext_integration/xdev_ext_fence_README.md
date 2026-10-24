@@ -1,5 +1,7 @@
 # Matching-guest lifecycle/dma_fence checks
 
+Performance comparisons follow the [evaluation policy](../../../../../tests/eval/PERFORMANCE_POLICY.md).
+
 `xdev_ext_mech_zc_kvm.sh --fence-check` explicitly extends a normal correctness
 plan. The default 13-case fault matrix does not select it. `--fault-campaign`,
 non-normal providers and network fault cases are refused. It can accompany

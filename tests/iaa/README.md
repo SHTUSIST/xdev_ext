@@ -1,5 +1,7 @@
 # IAA syscall contract gate
 
+Performance comparisons follow the [evaluation policy](../eval/PERFORMANCE_POLICY.md).
+
 This MIT-licensed gate moves and adapts the historical
 `test_iaa_unified_ops.c` (original SHA-256
 `b38e590f25c93b7c8b3118330522c21f141b2758be46f18ff5d5be1b9a685691`).

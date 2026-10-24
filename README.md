@@ -1,5 +1,7 @@
 # xdev_ext
 
+Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_POLICY.md).
+
 **Coordinate DMA devices over shared, pinned host pages with Linux kernel extensions, bounded eBPF programs, and device providers.**
 
 **English** | [简体中文](README.zh-CN.md)

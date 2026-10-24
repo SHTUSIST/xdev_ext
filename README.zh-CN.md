@@ -1,5 +1,7 @@
 # xdev_ext
 
+Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_POLICY.md).
+
 **通过 Linux 内核扩展、有界 eBPF 程序和设备 provider，协调多种 DMA 设备使用共享、钉住的主机页。**
 
 [English](README.md) | **简体中文**

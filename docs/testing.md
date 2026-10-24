@@ -1,5 +1,7 @@
 # Testing
 
+Performance comparisons follow the [evaluation policy](../tests/eval/PERFORMANCE_POLICY.md).
+
 Tests have different requirements and establish different properties. Record the project revision, configuration, command, complete output, exit status and relevant tool versions for each run.
 
 | Tier | Entry point or location | Establishes |
