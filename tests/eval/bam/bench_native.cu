@@ -23,6 +23,7 @@
 #include "nvm_parallel_queue.h"
 #include "native_core.h"
 
+struct MissingCapability : std::runtime_error { using std::runtime_error::runtime_error; };
 struct Result { uint64_t logical, raw; unsigned error, status; };
 struct Pair { nvm_queue_t sq, cq; };
 // One command outstanding. PRP is always a controller-page aligned device page;
@@ -122,12 +123,12 @@ struct Session {
         ck(cudaMalloc(&m.original,m.size+65536));
         m.address=(void*)((uintptr_t(m.original)+65535)&~uintptr_t(65535));
         int e=nvm_dma_map_device(&m.dma,ctrl,m.address,m.size);
-        if(!nvm_ok(e)){ck(cudaFree(m.original));nv(e);}
+        if(!nvm_ok(e)){ck(cudaFree(m.original));throw MissingCapability("native P2P DMA mapping unavailable");}
         maps.push_back(m);ck(cudaMemset(m.address,0,m.size));return m;
     }
     void setup(const char* path,uint32_t nsid,uint64_t expected_capacity,uint32_t lba,uint32_t page) {
-        fd=open(path,O_RDWR|O_CLOEXEC);if(fd<0)throw std::runtime_error("controller open failed");
-        nv(nvm_ctrl_init(&ctrl,fd));
+        fd=open(path,O_RDWR|O_CLOEXEC);if(fd<0)throw MissingCapability("controller open unavailable");
+        if(!nvm_ok(nvm_ctrl_init(&ctrl,fd)))throw MissingCapability("libnvm controller mapping unavailable");
         if(posix_memalign(&admin_buffer,ctrl->page_size,ctrl->page_size*3))
             throw std::runtime_error("admin allocation failed");
         std::memset(admin_buffer,0,ctrl->page_size*3);
@@ -138,7 +139,9 @@ struct Session {
         if(ns.ns_id!=nsid || ns.size!=expected_capacity || ns.capacity<expected_capacity ||
            ns.lba_data_size!=lba || ns.metadata_size || ctrl->page_size!=page)
             throw std::runtime_error("namespace geometry differs from qualification");
-        ck(cudaHostRegister((void*)ctrl->mm_ptr,NVM_CTRL_MEM_MINSIZE,cudaHostRegisterIoMemory));registered=true;
+        if(cudaHostRegister((void*)ctrl->mm_ptr,NVM_CTRL_MEM_MINSIZE,cudaHostRegisterIoMemory)!=cudaSuccess)
+            throw MissingCapability("GPU MMIO registration unavailable");
+        registered=true;
         uint16_t cqs=1,sqs=1;admin_call([&]{return nvm_admin_request_num_queues(aq,&sqs,&cqs);});
         if(!sqs||!cqs||ctrl->max_qs<2)throw std::runtime_error("no native queue capacity");
         auto sqm=map(65536),cqm=map(65536);
@@ -251,6 +254,7 @@ int main(int argc,char** argv) {
         std::fprintf(stderr,"{\"backend\":\"bam-native\",\"state\":\"error\",\"original_restore_required\":%s}\n",changed?"true":"false");
         std::fprintf(stderr,"%s\n",e.what());
         try{s->close();}catch(const std::exception& cleanup){std::fprintf(stderr,"cleanup: %s\n",cleanup.what());}
-        delete s;return 1;
+        int code=dynamic_cast<const MissingCapability*>(&e)?4:1;
+        delete s;return code;
     }
 }
