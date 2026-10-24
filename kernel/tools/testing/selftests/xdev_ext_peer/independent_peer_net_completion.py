@@ -97,6 +97,13 @@ static unsigned long wait_for_completion_timeout(struct completion *c,unsigned l
 static void wait_for_completion(struct completion *c)
 {assert(!rtnl_depth);flush_work();if(!c->done){fprintf(stderr,"Assertion: wait_for_completion with done==0 sleeps uninterruptibly forever\n");exit(3);}c->done--;}
 '''
+# Compile the real policy getter alongside the extracted native wait path.
+import re as _policy_re
+_policy_source = (KERNEL / 'io_uring/xdev_ext_policy.c').read_text()
+_policy_getter = _policy_re.search(r'^unsigned long xdev_ext_policy_peer_net_timeout\(void\)\n\{.*?^\}', _policy_source, _policy_re.M | _policy_re.S)[0]
+SHIM += ('\n#include "' + str(KERNEL / 'io_uring/xdev_ext_policy.h') + '"\n'
+         '#define msecs_to_jiffies(n) (((unsigned long)(n)*HZ+999)/1000)\n' + _policy_getter + '\n')
+
 MAIN = r'''
 static struct xdev_ext_peer_tx_wait *spare;
 static int one(struct net_device *dev,struct pci_dev *peer,struct file *f,const struct xdev_ext_peer_net_desc *d)

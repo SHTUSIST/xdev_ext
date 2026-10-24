@@ -20,6 +20,7 @@
 #include <net/net_namespace.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include "xdev_ext_peer_net_core.h"
+#include "xdev_ext_policy.h"
 struct xdev_ext_peer_tx_wait {
  struct xdev_ext_peer_tx tx;
  struct xdev_ext_peer_fd_lease handle;
@@ -34,7 +35,7 @@ struct xdev_ext_peer_tx_wait {
 /* A native wait allows 30 s; once the caller stopped, at most a further grace
  * that keeps the session worker well inside its 5 s drain timeout.
  */
-#define XDEV_EXT_PEER_NET_TIMEOUT (30 * HZ)
+#define XDEV_EXT_PEER_NET_TIMEOUT xdev_ext_policy_peer_net_timeout()
 #define XDEV_EXT_PEER_NET_STOP_SLICE (HZ / 20)
 #define XDEV_EXT_PEER_NET_STOP_GRACE HZ
 static void xdev_ext_peer_tx_put(struct xdev_ext_peer_tx_wait *p)

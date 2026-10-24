@@ -32,6 +32,7 @@
 #include "../io_uring.h"
 #include "xdev_ext_iaa.h"
 #include "../xdev_ext_umem.h"
+#include "../xdev_ext_policy.h"
 
 struct io_xdev_ext_iaa_tfm;
 
@@ -69,7 +70,12 @@ static atomic64_t io_xdev_ext_iaa_policy_errors;
  * serving driver name, the requests that reached the provider.
  */
 #define IO_XDEV_EXT_IAA_DRIVER_DEFAULT "deflate-iaa"
-#define IO_XDEV_EXT_IAA_TFM_IDLE (5 * HZ)
+#ifdef CONFIG_XDEV_EXT_MECH
+#define IO_XDEV_EXT_IAA_TFM_IDLE xdev_ext_policy_iaa_tfm_idle()
+#else
+/* Direct IAA can be built without the mechanism policy object. */
+#define IO_XDEV_EXT_IAA_TFM_IDLE msecs_to_jiffies(XDEV_EXT_POLICY_IAA_TFM_IDLE_MS)
+#endif
 #define IO_XDEV_EXT_IAA_SERVED_MAX 8
 
 struct io_xdev_ext_iaa_served {

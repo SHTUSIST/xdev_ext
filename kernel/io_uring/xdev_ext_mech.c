@@ -56,7 +56,7 @@ static_assert(sizeof(struct nvme_command) == XDEV_EXT_NVME_MECH_DESC_SIZE);
 static_assert(offsetof(struct xdev_ext_mech_call, ctx) == 0);
 static_assert(__builtin_types_compatible_p(typeof(&crc32c), xdev_ext_mech_crc32c_fn));
 
-#define XDEV_EXT_MECH_GROUP_TIMEOUT	HZ		/* RX group, as user space waits */
+#define XDEV_EXT_MECH_GROUP_TIMEOUT	xdev_ext_policy_rx_group_timeout()
 #define XDEV_EXT_MECH_DRAIN_TIMEOUT	(5 * HZ)
 
 enum xdev_ext_mech_end {

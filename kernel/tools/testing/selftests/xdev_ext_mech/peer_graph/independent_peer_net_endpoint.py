@@ -176,6 +176,13 @@ int test_initcall(void) __attribute__((weak));
 struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32,u32,void(*)(void*),void*) __attribute__((weak));
 int xdev_ext_peer_net_send_stoppable(struct xdev_ext_peer_net_endpoint*,struct file*,u64,const struct xdev_ext_peer_net_desc*,bool*,bool(*)(void*),void*) __attribute__((weak));
 '''
+# Compile the real policy getter alongside the extracted native wait path.
+import re as _policy_re
+_policy_source = (KERNEL / 'io_uring/xdev_ext_policy.c').read_text()
+_policy_getter = _policy_re.search(r'^unsigned long xdev_ext_policy_peer_net_timeout\(void\)\n\{.*?^\}', _policy_source, _policy_re.M | _policy_re.S)[0]
+SHIM += ('\n#include "' + str(KERNEL / 'io_uring/xdev_ext_policy.h') + '"\n'
+         '#define msecs_to_jiffies(n) (((unsigned long)(n)*HZ+999)/1000)\n' + _policy_getter + '\n')
+
 MAIN = r'''
 static struct file allocation;
 static struct xdev_ext_peer_net_desc desc(u32 i){return (struct xdev_ext_peer_net_desc){.offset=4096+512*(u64)i,.bytes=512,.header_len=42,.header={0xAB}};}
