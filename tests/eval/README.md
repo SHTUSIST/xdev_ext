@@ -49,13 +49,18 @@ namespace.
 
 ### CUDA arms against one official SDK
 
-`build_cuda_arms.py` builds every CUDA arm of this tree with one SDK and runs
+`build_cuda_arms.py` builds eight shared CUDA arms with one SDK and runs
 none of them: `gpu_nic/afxdp_cuda.cu`, `gpu_nic/udp_pinned_cuda.cu`,
 `nvme_gpu/bench_uring_cuda.cc`, `nvme_gpu/bench_cufile_batch.cc`,
 `gds/bench_cufile.cc` and `cuda_host_compute/bench_host_compute.cu` through
 `CUDA_HOME/bin/nvcc`, and `bench_cuda_staging.c` plus the chains `chain_bench` executable with the
 host C compiler. The chains build includes its actual dynamic-CUDA session
 and staged paths and requires libbpf >= 1.0.
+Dependency-specific CUDA sources are registered in `cuda_builder_inventory.py`.
+`bam/bench_native.cu` uses the [dedicated BaM builder](bam/README.md#build-only),
+which requires `--upstream`, `--cuda-root` and `--output` plus the pristine
+dependencies pinned by `bam/native.lock.json`. It owns a separate build
+receipt; it is not executed or counted as built by the shared eight-arm command.
 The CUDA driver entry points that `chains/chain_cuda.h`,
 `bench_cuda_staging.c` and `kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h`
 look up with `dlsym` must be exported by the SDK's driver stub

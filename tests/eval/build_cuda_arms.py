@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build every CUDA arm of tests/eval with one official CUDA SDK; run none.
+"""Build the eight shared CUDA arms with one official CUDA SDK; run none.
+
+Dependency-specific CUDA builders are listed in cuda_builder_inventory.py;
+this command does not execute them or include them in its build receipt.
 
   build_cuda_arms.py --cuda-home /usr/local/cuda-12.8 --out DIR [--arch sm_80]
                      [--only NAME,...] [--host-cxx /usr/bin/g++-14]

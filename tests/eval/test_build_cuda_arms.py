@@ -20,6 +20,7 @@ import unittest
 
 HERE = Path(__file__).resolve().parent
 SCRIPT = HERE / "build_cuda_arms.py"
+INVENTORY = HERE / "cuda_builder_inventory.py"
 CC = shlex.split(os.environ.get("CC", "cc"))
 
 
@@ -72,13 +73,95 @@ class Coverage(unittest.TestCase):
     def setUp(self):
         self.m = load()
 
+    def dedicated(self):
+        self.assertTrue(INVENTORY.is_file(), "missing dedicated CUDA builder inventory")
+        spec = importlib.util.spec_from_file_location("cuda_builder_inventory", INVENTORY)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.DEDICATED_BUILDERS
+
     def test_every_cuda_source_is_an_arm(self):
         sources = {str(p.relative_to(HERE)) for p in HERE.rglob("*")
                    if p.suffix in (".cu", ".cc") and ".build" not in p.parts and "build" not in p.parts}
         covered = {src for arm in self.m.ARMS for src in arm.sources}
+        dedicated = [src for entry in self.dedicated() for src in entry["sources"]]
+        self.assertEqual(len(dedicated), len(set(dedicated)), "duplicate dedicated source")
+        self.assertFalse(covered & set(dedicated), "dedicated source also in ordinary builder")
+        covered.update(dedicated)
         # This observer compiles benchmark control flow on the host.
         self.assertEqual(sources - covered, {"gds/_campaign_fixture.cc"})
         self.assertIn("bench_cuda_staging.c", covered)
+
+    def test_dedicated_entries_have_real_cli_and_required_inputs(self):
+        for entry in self.dedicated():
+            with self.subTest(builder=entry["name"]):
+                script = HERE / entry["entrypoint"]
+                self.assertTrue(script.is_file())
+                for source in entry["sources"]:
+                    self.assertTrue((HERE / source).is_file())
+                    self.assertNotIn(source, self.m.NOT_ARMS)
+                self.assertTrue((HERE / entry["dependency_lock"]).is_file())
+                help_run = subprocess.run([sys.executable, str(script), "--help"],
+                    capture_output=True, text=True, timeout=10)
+                self.assertEqual(help_run.returncode, 0, help_run.stderr)
+                for option in entry["required_args"]:
+                    self.assertIn(option, help_run.stdout)
+                with tempfile.TemporaryDirectory() as tmp:
+                    out = Path(tmp) / "output"
+                    # Every required input must be enforced by the real CLI.
+                    for missing in entry["required_args"]:
+                        args = [value for option in entry["required_args"]
+                                if option != missing for value in (option, str(out))]
+                        refused = subprocess.run([sys.executable, str(script), *args],
+                            capture_output=True, text=True, timeout=10)
+                        self.assertEqual(refused.returncode, 2, refused.stderr)
+                        self.assertIn(missing, refused.stderr)
+                        self.assertFalse(out.exists())
+
+    def test_bam_entry_refuses_missing_sdk_without_artifact(self):
+        entry = next(e for e in self.dedicated() if e["name"] == "bam_native")
+        self.assertEqual(entry["sources"], ("bam/bench_native.cu",))
+        self.assertEqual(entry["entrypoint"], "bam/build_native.py")
+        self.assertEqual(entry["dependency_lock"], "bam/native.lock.json")
+        self.assertEqual(entry["required_args"], ("--upstream", "--cuda-root", "--output"))
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "output"
+            refused = subprocess.run([sys.executable, str(HERE / entry["entrypoint"]),
+                "--upstream", tmp, "--cuda-root", str(Path(tmp) / "missing-sdk"),
+                "--output", str(out)], capture_output=True, text=True, timeout=10)
+            self.assertEqual(refused.returncode, 4, refused.stderr)
+            self.assertIn("official CUDA SDK", refused.stderr)
+            self.assertEqual(refused.stdout, "")
+            self.assertFalse(out.exists())
+
+    def test_bam_entry_checks_real_git_pin_and_cleanliness(self):
+        entry = next(e for e in self.dedicated() if e["name"] == "bam_native")
+        script = HERE / entry["entrypoint"]
+        spec = importlib.util.spec_from_file_location("dedicated_bam_builder", script)
+        module = importlib.util.module_from_spec(spec)
+        sys.path.insert(0, str(script.parent))
+        try:
+            spec.loader.exec_module(module)
+        finally:
+            sys.path.pop(0)
+        # Exercise the actual Git dependency gate, without a CUDA stand-in.
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = Path(tmp)
+            def git(*args):
+                return subprocess.check_output(["git", "-C", tmp, *args],
+                    text=True, stderr=subprocess.STDOUT).strip()
+            git("init", "-q")
+            (tree / "input").write_text("clean input\n")
+            git("add", "input")
+            git("-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", "dependency gate fixture")
+            revision = git("rev-parse", "HEAD")
+            module.check_tree(tree, revision)
+            with self.assertRaisesRegex(ValueError, "wrong upstream/submodule revision"):
+                module.check_tree(tree, "0" * 40)
+            (tree / "input").write_text("dirty input\n")
+            with self.assertRaisesRegex(ValueError, "must be pristine"):
+                module.check_tree(tree, revision)
 
     def test_chain_dynamic_cuda_path_is_an_actual_build_arm(self):
         arm = next((a for a in self.m.ARMS if a.name == 'chain_bench'), None)
