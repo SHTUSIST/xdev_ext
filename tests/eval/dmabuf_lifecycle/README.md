@@ -31,7 +31,7 @@ A prepared headers/output tree without Module.symvers can compile the real
 symbol versions or suppress MODPOST errors. GCC and Clang object/module builds
 and actual matching-kernel execution are separate evidence.
 
-Host checks use the compiler command in `CC` (default: `cc`):
+Host checks use the compiler command in `CC` (default: `gcc`):
 
 ```
 CC=gcc python3 -m unittest discover -s tests/eval/dmabuf_lifecycle -p 'test_*.py' -v

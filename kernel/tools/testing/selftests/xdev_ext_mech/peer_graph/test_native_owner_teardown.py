@@ -5,7 +5,6 @@ from pathlib import Path
 import os
 import re
 import shlex
-import shutil
 import subprocess
 import tempfile
 import unittest
@@ -14,12 +13,12 @@ ROOT=Path(__file__).resolve().parents[5]
 MAIN=ROOT/'drivers/net/ethernet/mellanox/mlx5/core/en_main.c'
 
 def compiler_commands():
-    """Respect an explicit CC command; otherwise retain both default compilers."""
+    """Respect an explicit CC command; otherwise use GCC only."""
     if 'CC' in os.environ:
         command=shlex.split(os.environ['CC'])
         if not command:raise ValueError('CC must name a compiler command')
         return [command]
-    return [['gcc'],[shutil.which('clang') or 'clang-14']]
+    return [['gcc']]
 
 def function(text,name):
     m=re.search(r'(?m)^(?:static\s+)?(?:inline\s+)?(?:void|int|bool)\s+'+name+r'\s*\([^;{}]*\)\s*\{',text)

@@ -20,7 +20,7 @@ class BenchmarkCore(unittest.TestCase):
     def invoke(self, scenario, arm='fence'):
         core = HERE / 'lifecycle_core.h'
         self.assertTrue(core.is_file(), 'missing actual shared benchmark lifecycle_core.h')
-        for compiler in (shlex.split(os.environ.get('CC', 'cc')),):
+        for compiler in (shlex.split(os.environ.get('CC', 'gcc')),):
             with self.subTest(compiler=compiler, arm=arm):
                 self.assertTrue(compiler, 'CC must name a compiler command')
                 self.assertIsNotNone(shutil.which(compiler[0]), compiler[0] + ' required for host contract')
