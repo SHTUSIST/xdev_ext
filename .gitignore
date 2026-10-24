@@ -1083,3 +1083,20 @@
 
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py
 !/tests/eval/session_guest/test_rebuild.py
+
+# Real local Linux lifecycle/dma_fence primitive experiment.
+!/tests/eval/dmabuf_lifecycle/
+!/tests/eval/dmabuf_lifecycle/lifecycle_core.h
+!/tests/eval/dmabuf_lifecycle/lifecycle_bench.c
+!/tests/eval/dmabuf_lifecycle/Kbuild
+!/tests/eval/dmabuf_lifecycle/Makefile
+!/tests/eval/dmabuf_lifecycle/run.py
+!/tests/eval/dmabuf_lifecycle/README.md
+/tests/eval/dmabuf_lifecycle/*.o
+/tests/eval/dmabuf_lifecycle/*.ko
+/tests/eval/dmabuf_lifecycle/*.mod
+/tests/eval/dmabuf_lifecycle/*.mod.c
+/tests/eval/dmabuf_lifecycle/.*.cmd
+/tests/eval/dmabuf_lifecycle/Module.symvers
+/tests/eval/dmabuf_lifecycle/modules.order
+/tests/eval/dmabuf_lifecycle/__pycache__/
