@@ -89,6 +89,11 @@ static int resolve(struct xdev_ext_mech_pool *p,struct xdev_ext_mech_frame *f) {
 static void recycle(struct xdev_ext_mech_pool *p,struct xdev_ext_mech_frame *f) {(void)p;released[f->index]++;}
 static void sync_cpu(struct xdev_ext_mech_pool *p,const struct xdev_ext_mech_frame *f) {(void)p;synced[f->index]++;}
 static void xdev_ext_mech_batch_queue(struct xdev_ext_mech_batch *b) {(void)b;queues++;}
+/* Optional tracepoints are disabled in this lifetime-only host fixture. */
+static inline bool trace_native_event_enabled(void) { return false; }
+static inline void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
+ const char *phase, u32 pos, u64 ticket, int status)
+{ (void)b; (void)phase; (void)pos; (void)ticket; (void)status; }
 /* xdev_ext_mech_frames_move */
 /* xdev_ext_mech_frames_release */
 static bool xdev_ext_mech_transform_alias(struct xdev_ext_mech_pool *,const struct xdev_ext_mech_frame *,const struct xdev_ext_mech_frame *);

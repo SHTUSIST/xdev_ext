@@ -20,6 +20,11 @@ with tempfile.TemporaryDirectory(prefix='independent-class7-') as temp:
         out=tree/name;out.parent.mkdir(parents=True,exist_ok=True)
         data=subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
         out.write_bytes(data)
+    # Newer admission code uses the CPU contract; older revisions did not.
+    if '"xdev_ext_mech_cpu_core.h"' in (tree/'io_uring/xdev_ext_mech_step.h').read_text():
+        name = 'io_uring/xdev_ext_mech_cpu_core.h'
+        data = subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
+        (tree/name).write_bytes(data)
     source=tree/'admission.c';binary=tree/'admission'
     source.write_text(r'''
 #include <stdio.h>
