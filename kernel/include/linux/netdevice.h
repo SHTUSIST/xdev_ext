@@ -1404,12 +1404,19 @@ struct netdev_net_notifier {
  */
 #ifdef CONFIG_XDEV_EXT_MECH
 struct xdev_ext_peer_tx;
+struct xdev_ext_peer_rx;
 #endif
 struct net_device_ops {
 #ifdef CONFIG_XDEV_EXT_MECH
  /* Explicit native peer TX: no host struct page/UMEM, no RX implication. */
  struct pci_dev *(*ndo_xdev_ext_peer_device)(struct net_device *);
  int (*ndo_xdev_ext_peer_tx)(struct net_device *, u32 queue, struct xdev_ext_peer_tx *);
+ /* RX owner is a nonzero endpoint token, stable across queue replacement.
+  * Open claims it; post must reject stale tokens; flush is owner-specific and
+  * idempotent. A stale flush must never change the current queue owner. */
+ int (*ndo_xdev_ext_peer_rx)(struct net_device *, u32 queue, u64 owner, struct xdev_ext_peer_rx *);
+ int (*ndo_xdev_ext_peer_rx_open)(struct net_device *, u32 queue, u64 owner);
+ int (*ndo_xdev_ext_peer_rx_flush)(struct net_device *, u32 queue, u64 owner);
 #endif
 	int			(*ndo_init)(struct net_device *dev);
 	void			(*ndo_uninit)(struct net_device *dev);

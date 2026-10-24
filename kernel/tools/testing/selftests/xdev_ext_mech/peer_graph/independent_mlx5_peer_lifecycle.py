@@ -7,6 +7,7 @@ Compiles the xdev_ext block of en_tx.c and the real mlx5e_free_txqsq_descs()
 against a software SQ adapter. No NIC, GPU, firmware command or DMA is used;
 the MKEY query is an adapter that only counts calls and returns attributes.
 """
+# P3/P4: extend the native shim with the production TX-chain field; assertions unchanged.
 from pathlib import Path
 import subprocess
 import sys
@@ -49,7 +50,7 @@ typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_
 #define unlikely(x) (x)
 struct pci_dev { int unused; };
 struct sk_buff { int unused; };
-struct xdev_ext_peer_tx { u64 dma_address; u32 len; u16 header_len; const u8 *header; void (*complete)(struct xdev_ext_peer_tx *,int,bool); };
+struct xdev_ext_peer_tx { u64 dma_address; u32 len; u16 header_len; const u8 *header; void (*complete)(struct xdev_ext_peer_tx *,int,bool); struct xdev_ext_peer_tx *next; };
 struct mlx5e_tx_wqe_info { struct xdev_ext_peer_tx *peer; struct sk_buff *skb; u32 num_bytes; u8 num_wqebbs, num_dma, num_fifo_pkts; };
 struct mlx5_wqe_data_seg { u32 byte_count, lkey; u64 addr; };
 struct mlx5_wqe_ctrl_seg { u32 opmod_idx_opcode, qpn_ds; u64 reserved; };

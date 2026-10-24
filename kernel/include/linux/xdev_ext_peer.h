@@ -42,12 +42,27 @@ struct xdev_ext_peer_lease {
  * Completion is any context; common code defers sleepable lease release.
  * A false quiesced always forbids reuse, including with a zero status.
  */
+#define XDEV_EXT_PEER_RX_CONTRACT 1
+/* Chains contain at most 16 elements. The ndo posts all or none, with one
+ * doorbell. A negative return forbids both DMA and callbacks. */
 struct xdev_ext_peer_tx {
  u64 dma_address;
  u32 len;
  u16 header_len;
  const u8 *header;
  void (*complete)(struct xdev_ext_peer_tx *, int status, bool quiesced);
+ struct xdev_ext_peer_tx *next;
+};
+/* Header bytes land in the host slot; remaining packet bytes start at the
+ * peer address. Completion is exactly once, including flush/cancellation. */
+struct xdev_ext_peer_rx {
+ struct xdev_ext_peer_rx *next;
+ u64 dma_address;
+ u32 len;
+ u16 header_room;
+ u8 *header;
+ void (*complete)(struct xdev_ext_peer_rx *, int status, u32 header_len,
+                  u32 payload_len, bool quiesced);
 };
 struct xdev_ext_peer_fd_lease {
  struct xdev_ext_peer_lease lease;
@@ -60,6 +75,12 @@ int xdev_ext_peer_fd_acquire(int fd, struct pci_dev *, u64 generation, u64 offse
 void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *, bool quiesced);
 struct xdev_ext_peer_net_endpoint;
 struct xdev_ext_peer_net_desc;
+struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_dir(u32, u32, bool,
+                                                            void (*)(void *), void *);
+struct pci_dev *xdev_ext_peer_net_peer(struct xdev_ext_peer_net_endpoint *);
+int xdev_ext_peer_net_post_tx(struct xdev_ext_peer_net_endpoint *, struct xdev_ext_peer_tx *);
+int xdev_ext_peer_net_post_rx(struct xdev_ext_peer_net_endpoint *, struct xdev_ext_peer_rx *);
+int xdev_ext_peer_net_rx_flush(struct xdev_ext_peer_net_endpoint *);
 struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind(u32 ifindex, u32 queue);
 void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *);
 u32 xdev_ext_peer_net_mtu(struct xdev_ext_peer_net_endpoint *);

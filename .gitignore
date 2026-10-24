@@ -493,6 +493,15 @@
 !/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_test.c
 !/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test.c
 !/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h
+!/kernel/tools/testing/selftests/xdev_ext_peer/peer_caps_base.golden
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_caps_test.py
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_hooks_source_test.py
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_net_plan_frames_test.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_net_rx_test.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_net_track_test.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_dptr_test.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_pool_frames_test.py
+!/kernel/tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_rx_contract_test.c
 !/kernel/tools/testing/selftests/xdev_ext_policy_loader/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_policy_loader/xdev_ext_reference_policy_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_policy_loader/xdev_ext_reference_policy_source_test.py
@@ -785,6 +794,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/independent_net_resume.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/independent_peer_net_endpoint.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_multiframe_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/backpressure_skip_payload_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/downstream_failure_terminal_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/regressions/held_reply_provider_test.py
@@ -1037,3 +1047,16 @@
 
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_fixture.c
+!/kernel/io_uring/xdev_ext_peer_net_track.h
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/en_rx.c
+
+!/kernel/drivers/net/ethernet/intel/
+!/kernel/drivers/net/ethernet/intel/ice/
+!/kernel/drivers/net/ethernet/intel/ice/ice_main.c
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx.c
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx.h
+!/kernel/drivers/net/ethernet/intel/ice/ice_txrx_lib.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_async_stage_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/ice_peer_ring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/mlx5_peer_rx_ring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/quality_peer_review_regressions.py

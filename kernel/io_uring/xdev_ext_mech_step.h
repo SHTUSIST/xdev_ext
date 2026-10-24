@@ -86,9 +86,41 @@ static inline __u32 xdev_ext_mech_stage_group_end(const struct xdev_ext_mech_sta
 }
 
 /*
+ * Device-memory (PEER) pool: frames live in a provider allocation and have
+ * no CPU address.  Which classes may DMA such a frame, and in which
+ * direction, is one capability table per class; the chain shape is free.
+ * The device capability of the bound endpoint is checked again at bind.
+ * CE copies between host pages and a GPU window, so it never addresses a
+ * PEER frame.
+ */
+#define XDEV_EXT_MECH_PEER_CAPS 1
+#define XDEV_EXT_MECH_PEER_FRAME_MIN 4096U
+#define XDEV_EXT_MECH_PEER_FRAME_MAX 2097152U /* 2 MiB */
+/* XDEV_EXT_DMA_DIR_* bits each class implements over a PEER pool. */
+static inline __u32 xdev_ext_mech_peer_dirs(__u32 class_id)
+{
+ switch (class_id) {
+ case XDEV_EXT_MECH_CLASS_NVME:
+ case XDEV_EXT_MECH_CLASS_NET:
+  return XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE;
+ default:
+  return 0; /* AF_XDP, socket, IAA, DMA, CE: host-page classes */
+ }
+}
+/* 0, or -EOPNOTSUPP: frame_size not a power of two in [MIN, MAX], or hdr_room != 0. */
+static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_layout *l)
+{
+ if (!l || l->hdr_room || l->frame_size < XDEV_EXT_MECH_PEER_FRAME_MIN ||
+     l->frame_size > XDEV_EXT_MECH_PEER_FRAME_MAX || (l->frame_size & (l->frame_size - 1)))
+  return -EOPNOTSUPP;
+ return 0;
+}
+
+/*
  * CREATE: 0 with *@frames the frames per batch, or -errno.  An AF_XDP stage
  * needs the socket's UMEM as the pool; AF_XDP RX feeds a chain, so it is
- * stage 0 of at least two.
+ * stage 0 of at least two.  On a PEER pool the generic checks of every stage
+ * run first, then the geometry, then each stage's class capability.
  */
 static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *c,
 					__u32 *frames)
@@ -118,11 +150,6 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 	if (nr < 0)
 		return nr;
 
- if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
-     (c->layout.frame_size != 65536 || c->layout.hdr_room || nr != 1 ||
-      c->st[0].class_id != XDEV_EXT_MECH_CLASS_NVME ||
-      c->st[0].direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
-  return -EOPNOTSUPP;
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
 		struct xdev_ext_mech_stage_uapi clean = c->st[i];
 		const struct xdev_ext_mech_stage_uapi *u = &clean;
@@ -138,11 +165,8 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
     return -EINVAL;
    clean.flags &= ~XDEV_EXT_MECH_STAGE_F_FANOUT;
   }
-  if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
-      (u->class_id != XDEV_EXT_MECH_CLASS_NVME && u->class_id != XDEV_EXT_MECH_CLASS_NET))
-   return -EOPNOTSUPP;
-  if (u->class_id == XDEV_EXT_MECH_CLASS_NET &&
-      (c->pool_kind != XDEV_EXT_MECH_POOL_PEER || u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
+  /* NET DMAs device memory only. */
+  if (u->class_id == XDEV_EXT_MECH_CLASS_NET && c->pool_kind != XDEV_EXT_MECH_POOL_PEER)
    return -EOPNOTSUPP;
 		if (!xdev_ext_mech_class_known(u->class_id) ||
 		    (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_IAA &&
@@ -191,7 +215,8 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		    u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
 		    (i || c->nr_stages < 2))
 			return -EINVAL;
-		if (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP)
+		if (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
+      c->pool_kind == XDEV_EXT_MECH_POOL_PEER)
 			continue;
 		if (c->pool_kind != XDEV_EXT_MECH_POOL_XSK)
 			return -EINVAL;
@@ -199,6 +224,15 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		    (i || c->nr_stages < 2))
 			return -EINVAL;
 	}
+ if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER) {
+  int ret = xdev_ext_mech_peer_layout_check(&c->layout);
+
+  if (ret)
+   return ret;
+  for (i = 0; i < c->nr_stages; i++)
+   if (!(xdev_ext_mech_peer_dirs(c->st[i].class_id) & (1U << c->st[i].direction)))
+    return -EOPNOTSUPP;
+ }
 	*frames = (__u32)nr;
 	return 0;
 }

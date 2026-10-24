@@ -13,21 +13,34 @@ __s32 BPF_PROG(net_peer_build, const struct xdev_ext_mech_ctx *mctx)
 {
  const struct xdev_ext_net_mech_info *info;
  struct xdev_ext_net_send_desc *d;
- __u32 offset = 0, i, j;
+ __u32 offset = 0, frame = 0, i, j;
  __u64 key = mctx->base.src_offset;
  (void)ctx;
  info = (const void *)bpf_xdev_ext_info(mctx, sizeof(*info));
- if (!info || info->nr_frames != 1 || !info->generation || info->mtu < 1040 ||
-     !info->f[0].data_len || info->f[0].data_len > 16384)
+ if (!info || !info->nr_frames || info->nr_frames > 16 || !info->generation)
   return XDEV_EXT_MP_BUILD_ABORT;
+ if (info->direction == XDEV_EXT_MP_DIR_FROM_DEVICE) {
+  if (info->header_room < 14 || info->header_room > 128) return XDEV_EXT_MP_BUILD_ABORT;
+  for (i = 0; i < 16; i++) {
+   if (i >= info->nr_frames) break;
+   d = (void *)bpf_xdev_ext_desc(mctx, i, sizeof(*d));
+   if (!d || !info->f[i].data_len) return XDEV_EXT_MP_BUILD_ABORT;
+   d->frame_pos = i; d->frame_off = info->f[i].data_off;
+   d->len = info->f[i].data_len; d->header_len = info->header_room;
+  }
+  return XDEV_EXT_MP_BUILD_SUBMIT;
+ }
+ if (info->mtu < 1040) return XDEV_EXT_MP_BUILD_ABORT;
  for (i = 0; i < 16; i++) {
   __u32 len;
-  if (offset >= info->f[0].data_len) break;
-  len = info->f[0].data_len - offset;
+  if (frame >= info->nr_frames || frame >= 16) break;
+  if (!info->f[frame].data_len || info->f[frame].data_len > 16384)
+   return XDEV_EXT_MP_BUILD_ABORT;
+  len = info->f[frame].data_len - offset;
   if (len > 1024) len = 1024;
   d = (void *)bpf_xdev_ext_desc(mctx, i, sizeof(*d));
   if (!d) return XDEV_EXT_MP_BUILD_ABORT;
-  d->frame_pos = 0; d->frame_off = info->f[0].data_off + offset;
+  d->frame_pos = frame; d->frame_off = info->f[frame].data_off + offset;
   d->len = len; d->header_len = 30;
   for (j = 0; j < 6; j++) {
    d->header[j] = info->peer.peer_mac[j];
@@ -37,11 +50,12 @@ __s32 BPF_PROG(net_peer_build, const struct xdev_ext_mech_ctx *mctx)
   for (j = 0; j < 8; j++) d->header[14 + j] = key >> (56 - j * 8);
   for (j = 0; j < 4; j++) {
    d->header[22 + j] = offset >> (24 - j * 8);
-   d->header[26 + j] = info->f[0].data_len >> (24 - j * 8);
+   d->header[26 + j] = info->f[frame].data_len >> (24 - j * 8);
   }
   offset += len;
+  if (offset == info->f[frame].data_len) { frame++; offset = 0; }
  }
- return offset == info->f[0].data_len ? XDEV_EXT_MP_BUILD_SUBMIT : XDEV_EXT_MP_BUILD_ABORT;
+ return frame == info->nr_frames ? XDEV_EXT_MP_BUILD_SUBMIT : XDEV_EXT_MP_BUILD_ABORT;
 }
 SEC("struct_ops/net_peer_complete")
 __s32 BPF_PROG(net_peer_complete, const struct xdev_ext_mech_ctx *mctx)

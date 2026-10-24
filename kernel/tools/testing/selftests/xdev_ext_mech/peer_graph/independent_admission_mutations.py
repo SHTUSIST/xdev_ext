@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0
 """Fault mutations of real graph admission headers, independent oracle unchanged."""
 from pathlib import Path
+import re
 import runpy
 import subprocess
 import tempfile
@@ -25,28 +26,52 @@ def compile_and_run(directory, headers, cases):
     return [subprocess.run([str(binary), case], capture_output=True, text=True) for case in cases]
 
 
+def replace_body(text, name, body):
+    """Replace the body of static inline function @name; None when absent."""
+    m = re.search(r"static inline [^;{]*\b" + name + r"\(([^)]*)\)\s*\{", text)
+    if not m:
+        return None
+    i, depth = m.end(), 1
+    while depth:
+        depth += (text[i] == "{") - (text[i] == "}")
+        i += 1
+    param = re.findall(r"(\w+)\s*$", m.group(1).strip())[0]
+    return text[:m.end() - 1] + "{ " + body.replace("PARAM", param) + " }" + text[i:]
+
+
 def main():
     headers = {filename: (KERNEL / filename).read_text() for filename in FILES}
     step = headers[FILES[0]]
+    # Updated for P1: the 75b51c2 anchors (64 KiB frame, NVMe-read-first, NVMe/NET-only, TX-only NET)
+    # are replaced by the capability table and the geometry rule; mutate those instead.
     mutations = [
-        ("GPU frame size bypass", "c->layout.frame_size != 65536", "(c->layout.frame_size != 65536 && false)", "reject_geometry"),
-        ("initial GPU readiness bypass", "c->st[0].direction != XDEV_EXT_MECH_DIR_FROM_DEVICE", "(c->st[0].direction != XDEV_EXT_MECH_DIR_FROM_DEVICE && false)", "reject_unready_source"),
-        ("host class on GPU pool", "(u->class_id != XDEV_EXT_MECH_CLASS_NVME && u->class_id != XDEV_EXT_MECH_CLASS_NET)", "(false && u->class_id != XDEV_EXT_MECH_CLASS_NVME && u->class_id != XDEV_EXT_MECH_CLASS_NET)", "reject_host_stages"),
-        ("native NET RX bypass", "u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE)", "(u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE && false))", "reject_native_rx"),
-        ("host USER frame on GPU pool", "pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !frames", "(pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM && pool_kind != XDEV_EXT_MECH_POOL_PEER) || !frames", "bounded_start"),
+        ("every class claims peer capability", "xdev_ext_mech_peer_dirs", "(void)PARAM; return XDEV_EXT_DMA_DIR_KNOWN_MASK;", "reject_host_stages"),
+        ("NET RX capability dropped", "xdev_ext_mech_peer_dirs",
+         "return PARAM == XDEV_EXT_MECH_CLASS_NVME ? XDEV_EXT_DMA_DIR_KNOWN_MASK : PARAM == XDEV_EXT_MECH_CLASS_NET ? XDEV_EXT_DMA_DIR_TO_DEVICE : 0;", "native_rx"),
+        ("NVMe write capability dropped", "xdev_ext_mech_peer_dirs",
+         "return PARAM == XDEV_EXT_MECH_CLASS_NVME ? XDEV_EXT_DMA_DIR_FROM_DEVICE : PARAM == XDEV_EXT_MECH_CLASS_NET ? XDEV_EXT_DMA_DIR_KNOWN_MASK : 0;", "gpu_first"),
+        ("GPU geometry unchecked", "xdev_ext_mech_peer_layout_check", "(void)PARAM; return 0;", "reject_geometry"),
     ]
-    cases = ("peer_nvme", "peer_net", "native_class", "reject_host_stages", "reject_native_rx", "reject_unready_source", "reject_geometry", "bounded_start", "legacy_unchanged")
+    cases = ("peer_nvme", "peer_net", "native_class", "reject_host_stages", "native_rx", "gpu_first", "reject_geometry", "bounded_start", "legacy_unchanged")
     with tempfile.TemporaryDirectory(prefix="independent-peer-admission-mutations-") as tmp:
         directory = Path(tmp)
         baseline = compile_and_run(directory, headers, cases)
         assert all(result.returncode == 0 for result in baseline), [(result.stdout, result.stderr) for result in baseline]
-        for name, old, new, case in mutations:
-            assert step.count(old) == 1, (name, step.count(old))
+        for name, function, body, case in mutations:
+            changed_step = replace_body(step, function, body)
+            assert changed_step and changed_step != step, (name, function + "() missing from xdev_ext_mech_step.h")
             changed = dict(headers)
-            changed[FILES[0]] = step.replace(old, new)
+            changed[FILES[0]] = changed_step
             result = compile_and_run(directory, changed, (case,))[0]
             assert result.returncode != 0 and "expected=" in result.stderr, (name, result.stdout, result.stderr)
             print("ok mutation - " + name + " rejected by unchanged admission oracle")
+        old, new = "pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !frames", "(pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM && pool_kind != XDEV_EXT_MECH_POOL_PEER) || !frames"
+        assert step.count(old) == 1, ("host USER frame on GPU pool", step.count(old))
+        changed = dict(headers)
+        changed[FILES[0]] = step.replace(old, new)
+        result = compile_and_run(directory, changed, ("bounded_start",))[0]
+        assert result.returncode != 0 and "expected=" in result.stderr, ("host USER frame on GPU pool", result.stdout, result.stderr)
+        print("ok mutation - host USER frame on GPU pool rejected by unchanged admission oracle")
 
 
 if __name__ == "__main__":

@@ -37,6 +37,7 @@ SHIM = r'''
 #include <string.h>
 #include <pthread.h>
 #include "io_uring/xdev_ext_mech_core.h"
+#include "io_uring/xdev_ext_mech_step.h" /* P1: shared PEER geometry rule */
 typedef uint64_t u64;typedef uint32_t u32;typedef uint8_t u8;
 #define GFP_KERNEL 0
 #define U32_MAX UINT32_MAX
@@ -106,7 +107,8 @@ int main(void)
  assert(p.kind==3&&p.frame_size==65536&&p.size==8*65536ULL&&p.nr_frames==8&&p.state&&!p.pages&&!p.vaddr&&!p.nr_pages);
  assert(p.capabilities&XDEV_EXT_BINDING_CAP_ZERO_COPY);
  assert(xdev_ext_peer_mech_pool_file(&p)==&authority&&xdev_ext_peer_mech_pool_generation(&p)==19);
- assert(xdev_ext_peer_pool_alloc(&p,frames,2)==-EINVAL);
+ /* Updated for P1: multi-frame batches; 75b51c2 refused nr != 1 here. */
+ assert(!xdev_ext_peer_pool_alloc(&p,frames,2)&&frames[0].index==0&&frames[1].index==1);memset(p.state,XDEV_EXT_MECH_F_K_FREE,8);
  for(unsigned i=0;i<8;i++){
   u32 off=0,len=0;assert(!xdev_ext_peer_pool_alloc(&p,&frames[i],1)&&frames[i].index==i&&p.state[i]==XDEV_EXT_MECH_F_HELD);
   frames[i].kaddr=(void*)1;frames[i].pool_priv=(void*)1;

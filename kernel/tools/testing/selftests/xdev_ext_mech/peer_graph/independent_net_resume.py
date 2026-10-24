@@ -8,6 +8,7 @@ drives exactly that sequence through the real NET bind/validate/submit code
 with deterministic native-send adapters. It also checks the device-removal
 and STOP hooks the NET class registers. No device, DMA or wire is involved.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import sys
@@ -175,7 +176,7 @@ def build(code, directory, name):
     source = directory / (name + ".c")
     binary = directory / name
     source.write_text(SHIM + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 

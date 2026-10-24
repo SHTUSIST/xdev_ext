@@ -52,6 +52,13 @@ int main(void)
  completion.status=-EIO;assert(net_peer_complete(NULL,&ctx)==XDEV_EXT_MP_ABORT);completion.status=0;
  completion.bytes_sent--;assert(net_peer_complete(NULL,&ctx)==XDEV_EXT_MP_ABORT);
  puts("ok 2 - actual reference BPF refuses unrepresentable plans and interprets only full successful CQEs as NEXT");
+ memset(desc,0,sizeof(desc));info.nr_frames=2;info.f[0].data_len=2048;info.f[1].data_len=3072;info.f[1].data_off=32;
+ assert(net_peer_build(NULL,&ctx)==XDEV_EXT_MP_BUILD_SUBMIT);
+ assert(desc[0].frame_pos==0&&desc[1].frame_pos==0&&desc[2].frame_pos==1&&desc[2].frame_off==32&&desc[4].frame_off==2080&&!desc[5].len);
+ memset(desc,0,sizeof(desc));info.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE;info.header_room=42;info.f[0].data_len=1472;info.f[1].data_len=1472;
+ assert(net_peer_build(NULL,&ctx)==XDEV_EXT_MP_BUILD_SUBMIT);
+ assert(desc[0].frame_pos==0&&desc[0].len==1472&&desc[0].header_len==42&&desc[1].frame_pos==1&&desc[1].frame_off==32&&!desc[2].len);
+ puts("ok 3 - reference BPF builds bounded multi-frame TX and one RX packet descriptor per frame");
  return 0;
 }
 '''

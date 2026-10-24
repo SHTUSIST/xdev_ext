@@ -774,10 +774,14 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  struct mlx5e_tx_wqe *wqe;
  struct mlx5e_tx_wqe_info *wi;
  struct mlx5_wqe_data_seg *dseg;
- u16 pi, inl, ds, blocks;
+ u16 pi, inl, ds, blocks, need = 0;
+ struct xdev_ext_peer_tx *first = tx;
+ u32 count = 0, bytes = 0;
  u32 mkey;
  int ret;
- if (!tx || !tx->complete || tx->header_len < ETH_HLEN || tx->header_len > 128 ||
+ if (!tx) return -EINVAL;
+ for (; tx; tx = tx->next) {
+ if (++count > 16 || !tx->complete || tx->header_len < ETH_HLEN || tx->header_len > 128 ||
      !tx->len || (tx->len < ETH_ZLEN && tx->header_len + tx->len < ETH_ZLEN) ||
      tx->header_len > dev->mtu + ETH_HLEN ||
      tx->len > dev->mtu + ETH_HLEN - tx->header_len ||
@@ -785,6 +789,9 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  inl = DIV_ROUND_UP(tx->header_len - INL_HDR_START_SZ, MLX5_SEND_WQE_DS);
  ds = MLX5E_TX_WQE_EMPTY_DS_COUNT + inl + 1;
  blocks = DIV_ROUND_UP(ds, MLX5_SEND_WQEBB_NUM_DS);
+ need += 2 * blocks; /* includes worst-case page-boundary NOP padding */
+ }
+ tx = first;
  txq = netdev_get_tx_queue(dev, queue);
  __netif_tx_lock_bh(txq);
  if (queue >= dev->real_num_tx_queues || !netif_running(dev) ||
@@ -799,10 +806,14 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  if (sq->mkey_be != cpu_to_be32(mkey) || sq->ptpsq ||
      sq->min_inline_mode > MLX5_INLINE_MODE_L2 ||
      test_bit(MLX5E_SQ_STATE_IPSEC, &sq->state)) { ret = -EOPNOTSUPP; goto unlock; }
- if (!mlx5e_wqc_has_room_for(&sq->wq, sq->cc, sq->pc, sq->stop_room + 2 * blocks)) {
+ if (!mlx5e_wqc_has_room_for(&sq->wq, sq->cc, sq->pc, sq->stop_room + need)) {
   ret = -EAGAIN; goto unlock;
  }
  mlx5e_tx_mpwqe_ensure_complete(sq);
+ for (; tx; tx = tx->next) {
+ inl = DIV_ROUND_UP(tx->header_len - INL_HDR_START_SZ, MLX5_SEND_WQE_DS);
+ ds = MLX5E_TX_WQE_EMPTY_DS_COUNT + inl + 1;
+ blocks = DIV_ROUND_UP(ds, MLX5_SEND_WQEBB_NUM_DS);
  pi = mlx5e_txqsq_get_next_pi(sq, blocks);
  wqe = MLX5E_TX_FETCH_WQE(sq, pi);
  memset(wqe, 0, blocks * MLX5_SEND_WQE_BB);
@@ -820,8 +831,10 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  wqe->ctrl.qpn_ds = cpu_to_be32((sq->sqn << 8) | ds);
  sq->pc += blocks;
  sq->stats->packets++; sq->stats->bytes += wi->num_bytes;
+ bytes += wi->num_bytes;
+ }
  mlx5e_tx_check_stop(sq);
- __netdev_tx_sent_queue(txq, wi->num_bytes, false);
+ __netdev_tx_sent_queue(txq, bytes, false);
  mlx5e_notify_hw(&sq->wq, sq->pc, sq->uar_map, &wqe->ctrl);
  ret = 0; /* Native queue owns tx until its CQE or teardown callback. */
 unlock:

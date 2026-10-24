@@ -8,20 +8,48 @@
 #include <linux/vmalloc.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_peer.h>
+#include "xdev_ext_mech_step.h"
 struct xdev_ext_peer_mech_pool {
  struct file *authority;
  u64 generation;
 };
+/* Undo the takes of one alloc call; only this call moved them to HELD, so
+ * each move back cannot fail.
+ */
+static void xdev_ext_peer_pool_unwind(struct xdev_ext_mech_pool *pool,
+                                      struct xdev_ext_mech_frame *f, u32 n)
+{
+ while (n--)
+  xdev_ext_mech_pool_frame_move(pool, f[n].index, XDEV_EXT_MECH_F_HELD, XDEV_EXT_MECH_F_K_FREE);
+}
+/* Worker: @nr frames for one batch.  The lowest run of @nr consecutive free
+ * frames keeps a multi-frame NVMe command on one contiguous allocation span;
+ * otherwise the @nr lowest free frames in ascending order.  Each take is the
+ * ownership-word compare-and-exchange, so a concurrent taker never gets the
+ * same frame; -ENOSPC returns everything this call took.
+ */
 static int xdev_ext_peer_pool_alloc(struct xdev_ext_mech_pool *pool,
                                    struct xdev_ext_mech_frame *f, u32 nr)
 {
- u32 i;
- if (nr != 1) return -EINVAL;
- for (i = 0; i < pool->nr_frames; i++)
-  if (!xdev_ext_mech_pool_frame_move(pool, i, XDEV_EXT_MECH_F_K_FREE, XDEV_EXT_MECH_F_HELD)) {
-   *f = (struct xdev_ext_mech_frame){ .index = i };
-   return 0;
+ u32 i, n = 0;
+ if (!nr || nr > XDEV_EXT_MECH_MAX_FRAMES) return -EINVAL;
+ for (i = 0; i < pool->nr_frames && n < nr; i++) {
+  if (xdev_ext_mech_pool_frame_move(pool, i, XDEV_EXT_MECH_F_K_FREE, XDEV_EXT_MECH_F_HELD)) {
+   /* A taken or busy frame breaks the run. */
+   xdev_ext_peer_pool_unwind(pool, f, n);
+   n = 0;
+   continue;
   }
+  f[n++] = (struct xdev_ext_mech_frame){ .index = i };
+ }
+ if (n == nr) return 0;
+ xdev_ext_peer_pool_unwind(pool, f, n);
+ /* No run: the lowest free frames, ascending. */
+ for (i = 0, n = 0; i < pool->nr_frames && n < nr; i++)
+  if (!xdev_ext_mech_pool_frame_move(pool, i, XDEV_EXT_MECH_F_K_FREE, XDEV_EXT_MECH_F_HELD))
+   f[n++] = (struct xdev_ext_mech_frame){ .index = i };
+ if (n == nr) return 0;
+ xdev_ext_peer_pool_unwind(pool, f, n);
  return -ENOSPC;
 }
 static int xdev_ext_peer_pool_resolve(struct xdev_ext_mech_pool *pool,
@@ -51,9 +79,12 @@ int xdev_ext_peer_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *f
  struct xdev_ext_peer_mech_pool *p;
  u64 len, generation, frames;
  struct file *authority;
- if (!pool || !layout || layout->frame_size != 65536 || layout->hdr_room ||
-     !layout->group_bytes || layout->group_bytes > layout->seg_len ||
-     layout->seg_len > layout->frame_size) return -EOPNOTSUPP;
+ int nr;
+ if (!pool || !layout) return -EINVAL;
+ /* Geometry is exactly the CREATE capability rule; several frames per batch. */
+ if (xdev_ext_mech_peer_layout_check(layout)) return -EOPNOTSUPP;
+ nr = xdev_ext_mech_layout_frames(layout);
+ if (nr < 0) return nr;
  p = kzalloc(sizeof(*p), GFP_KERNEL);
  if (!p) return -ENOMEM;
  authority = xdev_ext_peer_file_claim(file, &len, &generation);

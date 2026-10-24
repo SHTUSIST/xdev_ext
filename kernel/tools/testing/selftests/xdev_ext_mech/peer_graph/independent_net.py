@@ -5,6 +5,7 @@
 Native-send/OS boundaries are deterministic adapters. No software device,
 payload provider, physical DMA or remote delivery is claimed by this test.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import tempfile
@@ -121,7 +122,7 @@ def execute(code, plan, directory, name):
     # without replacing any assertion or using a copied implementation oracle.
     preamble = SHIM.replace('#include "io_uring/xdev_ext_mech_net_core.h"', '#define xdev_ext_net_plan_check original_plan\n#include "io_uring/xdev_ext_mech_net_core.h"\n#undef xdev_ext_net_plan_check')
     source.write_text(preamble + plan + code + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True, timeout=15)
 
@@ -132,7 +133,7 @@ def main():
     source = (KERNEL / "io_uring/xdev_ext_mech_net_core.h").read_text()
     plan = source[source.index("static inline int xdev_ext_net_plan_check("):source.index("\n#endif")]
     mutations = [
-        ("payload coverage omitted", code, plan.replace("return bytes == f->data_len ? 0 : -EMSGSIZE;", "return 0;")),
+        ("payload coverage omitted", code, plan.replace("return cur + 1 == info->nr_frames && bytes == f->data_len ? 0 : -EMSGSIZE;", "return 0;")),
         ("plan gap/overlap accepted", code, plan.replace("(__u64)f->data_off + bytes != d[i].frame_off", "((__u64)f->data_off + bytes != d[i].frame_off && false)")),
         ("accepted prefix replayed as refusal", code.replace("for (i = bp->cqe.entries_done; i < bp->nr; i++) {", "for (i = 0; i < bp->nr; i++) {"), plan),
         ("unknown error treated quiesced", code.replace("if (accepted) xdev_ext_mech_batch_sequester", "if (accepted && false) xdev_ext_mech_batch_sequester"), plan),

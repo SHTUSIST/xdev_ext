@@ -6,6 +6,7 @@ Executes real native wait/finish/work functions. Existing OS-boundary adapters
 provide one accepted callback with status zero but no DMA-quiescence proof.
 No device, provider or physical DMA is created by this host check.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import runpy
 import subprocess
@@ -41,5 +42,5 @@ reset = BASE['MAIN'][BASE['MAIN'].index('static void reset('):BASE['MAIN'].index
 with tempfile.TemporaryDirectory(prefix='quality-peer-unquiesced-') as tmp:
     path = Path(tmp)
     (path/'actual.c').write_text('#include "'+str(ROOT/'include/uapi/linux/xdev_ext_peer.h')+'"\n'+shim+code+reset+main)
-    subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(path/'actual.c'),'-o',str(path/'actual')],check=True)
+    subprocess.run(['cc','-std=gnu11','-DXDEV_EXT_PEER_NET_SYNC_ONE','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(path/'actual.c'),'-o',str(path/'actual')],check=True)
     raise SystemExit(subprocess.run([str(path/'actual')]).returncode)

@@ -85,9 +85,9 @@ struct nvme_sgl_desc { u64 addr; u32 length; u8 rsvd[3]; u8 type; };
 struct nvme_command {
  union {
   struct { u8 opcode, flags; u16 command_id; u32 nsid; u64 rsvd2, metadata;
-           union { struct nvme_sgl_desc sgl; } dptr; u64 slba; u16 length, control; } rw;
+           union { struct nvme_sgl_desc sgl; struct { u64 prp1, prp2; }; } dptr; u64 slba; u16 length, control; } rw;
   struct { u8 opcode, flags; u16 command_id; u32 nsid; u32 cdw2[2]; u64 metadata;
-           union { struct nvme_sgl_desc sgl; } dptr; u32 cdw10, cdw11, cdw12; } common;
+           union { struct nvme_sgl_desc sgl; struct { u64 prp1, prp2; }; } dptr; u32 cdw10, cdw11, cdw12; } common;
  };
 };
 struct nvme_ns;
@@ -228,6 +228,9 @@ static void nvme_xdev_ext_class_bounce_release(struct xdev_ext_mech_batch *b, st
 { (void)b; (void)bp; (void)c; host_bounce_releases++; }
 static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st, struct nvme_xdev_ext_mech_batch *bp)
 { (void)st; (void)bp; host_slot_puts++; }
+/* PRP/SGL capability shim: production now selects either data pointer. */
+static bool ctrl_sgl = true;
+static bool nvme_ctrl_sgl_supported(struct nvme_ctrl *c) { (void)c; return ctrl_sgl; }
 /* PRODUCTION_FUNCTIONS */
 '''
 
@@ -499,8 +502,9 @@ def main():
         ("GPU subspan offset omitted", "off = f.umem_addr + f.data_off", "off = f.umem_addr"),
         ("native write direction reversed",
          "p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE", "p->write ? DMA_FROM_DEVICE : DMA_TO_DEVICE"),
-        ("DMA-contiguous pages not merged", "if (n && run_end == l->lease.dma_address)",
-         "if (n && run_end == l->lease.dma_address + 1)"),
+        # Merging moved into the pure builder; perturb its input adjacency instead.
+        ("DMA-contiguous pages not merged", "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);",
+         "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
         ("provider page refusal not split", "if (ret != -ERANGE)", "if (true)"),
     ]
     with tempfile.TemporaryDirectory(prefix="nvme-peer-async-") as tmp:

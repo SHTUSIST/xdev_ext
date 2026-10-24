@@ -4,6 +4,7 @@
 
 Host reference-ownership proof only; this test never exercises physical DMA.
 """
+# P4: this checks the one-at-a-time synchronous NET path, kept under XDEV_EXT_PEER_NET_SYNC_ONE.
 from pathlib import Path
 import subprocess
 import tempfile
@@ -49,6 +50,10 @@ static struct work_struct *pending_work;
 static void queue_work(int q,struct work_struct *w){(void)q;assert(!pending_work);pending_work=w;}
 static void flush_work(void){struct work_struct *w=pending_work;if(w){pending_work=NULL;w->fn(w);}}
 static int scenario,freed,released,submitted,acquired,acquire_error,rtnl_depth;
+/* Native XDP ring pointers are RCU-managed, including the legacy send path. */
+static int rcu_depth;
+static __attribute__((unused)) void rcu_read_lock(void){rcu_depth++;}
+static __attribute__((unused)) void rcu_read_unlock(void){assert(rcu_depth);rcu_depth--;}
 static bool released_quiesced,device_running=true,device_present=true;
 static void *live_context;
 static struct xdev_ext_peer_tx *native_tx;
@@ -72,6 +77,7 @@ static void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h,bool q)
 {assert(h->file && h->lease.mapping && !released);h->lease.mapping=NULL;h->lease.dma_address=0;h->file=NULL;released++;released_quiesced=q;}
 static int driver_tx(struct net_device *dev,u32 q,struct xdev_ext_peer_tx *tx)
 {
+ assert(rcu_depth == 1);
  assert(dev && q==2 && !rtnl_depth && tx->dma_address==0x700000 && tx->len==512 && tx->header_len==42 && tx->header[0]==0xAB);
  submitted++;native_tx=tx;
  if(scenario==1)return -EAGAIN;
@@ -126,7 +132,7 @@ def execute(code, directory, name):
     source = directory / (name + ".c")
     source.write_text('#include "' + str(KERNEL / "include/uapi/linux/xdev_ext_peer.h") + '"\n' + SHIM + code + MAIN)
     binary = directory / name
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-DXDEV_EXT_PEER_NET_SYNC_ONE", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True)
 

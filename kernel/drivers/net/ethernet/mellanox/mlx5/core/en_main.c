@@ -1010,8 +1010,14 @@ err_rq_xdp_prog:
 	return err;
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+static void mlx5e_peer_rx_free(struct mlx5e_rq *rq);
+#endif
 static void mlx5e_free_rq(struct mlx5e_rq *rq)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+ mlx5e_peer_rx_free(rq);
+#endif
 	kvfree(rq->dim);
 	page_pool_destroy(rq->page_pool);
 
@@ -1154,6 +1160,98 @@ int mlx5e_flush_rq(struct mlx5e_rq *rq, int curr_state)
 
 	return 0;
 }
+
+#ifdef CONFIG_XDEV_EXT_MECH
+/* RTNL + state_lock: bind claims a dedicated cyclic RQ. Normal RX refills
+ * stop until flush releases it. No peer DMA has been posted during setup. */
+int mlx5e_peer_rx_open(struct net_device *dev, u32 queue, u64 owner)
+{
+ struct mlx5e_priv *priv = netdev_priv(dev);
+ struct mlx5e_peer_rq *peer;
+ struct mlx5e_rq *rq;
+ u32 i, n, stride;
+ int ret = -EOPNOTSUPP;
+ u32 out[MLX5_ST_SZ_DW(query_mkey_out)] = {};
+ void *mkc = MLX5_ADDR_OF(query_mkey_out, out, memory_key_mkey_entry);
+ if (!owner) return -EINVAL;
+ mutex_lock(&priv->state_lock);
+ if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num)
+  goto unlock;
+ rq = &priv->channels.c[queue]->rq;
+ if (rq->peer) { ret = -EBUSY; goto unlock; }
+ if (rq->wq_type != MLX5_WQ_TYPE_CYCLIC || rq->xsk_pool ||
+     rcu_access_pointer(rq->xdp_prog) || rq->wqe.wq.fbc.log_stride < 5 ||
+     MLX5E_GET_PFLAG(&priv->channels.params, MLX5E_PFLAG_RX_CQE_COMPRESS)) goto unlock;
+ ret = mlx5_core_query_mkey(priv->mdev, be32_to_cpu(rq->mkey_be), out, sizeof(out));
+ if (ret) goto unlock;
+ if (MLX5_GET(mkc, mkc, access_mode_4_2) ||
+     MLX5_GET(mkc, mkc, access_mode_1_0) != MLX5_MKC_ACCESS_MODE_PA ||
+     !MLX5_GET(mkc, mkc, lw) || !MLX5_GET(mkc, mkc, length64)) {
+  ret = -EOPNOTSUPP; goto unlock;
+ }
+ n = mlx5_wq_cyc_get_size(&rq->wqe.wq);
+ stride = 1U << rq->wqe.wq.fbc.log_stride;
+ peer = kzalloc(sizeof(*peer), GFP_KERNEL);
+ if (!peer) { ret = -ENOMEM; goto unlock; }
+ peer->size = n; peer->stride = stride; peer->owner = owner;
+ /* Same firmware-provided key (or capability fallback) as host RX WQEs. */
+ peer->terminate_lkey_be = priv->channels.params.terminate_lkey_be;
+ spin_lock_init(&peer->lock);
+ peer->posted = kvcalloc(n, sizeof(*peer->posted), GFP_KERNEL);
+ peer->saved = kvcalloc(n, stride, GFP_KERNEL);
+ peer->headers = dma_alloc_coherent(rq->pdev, n * 128, &peer->headers_dma, GFP_KERNEL);
+ if (!peer->posted || !peer->saved || !peer->headers) {
+  ret = -ENOMEM; goto free;
+ }
+ napi_disable(rq->cq.napi);
+ ret = mlx5e_flush_rq(rq, MLX5_RQC_STATE_RDY);
+ if (!ret) {
+  for (i = 0; i < n; i++)
+   memcpy(peer->saved + i * stride, mlx5_wq_cyc_get_wqe(&rq->wqe.wq, i), stride);
+  rq->peer = peer;
+ }
+ napi_enable(rq->cq.napi);
+ if (!ret) goto unlock;
+free:
+ if (peer->headers) dma_free_coherent(rq->pdev, n * 128, peer->headers, peer->headers_dma);
+ kvfree(peer->saved); kvfree(peer->posted); kfree(peer);
+unlock:
+ mutex_unlock(&priv->state_lock);
+ return ret;
+}
+/* Called after reset/destroy, with NAPI quiesced and no posted peer WQEs. */
+static void mlx5e_peer_rx_free(struct mlx5e_rq *rq)
+{
+ struct mlx5e_peer_rq *peer = rq->peer;
+ u32 i;
+ if (!peer) return;
+ for (i = 0; i < peer->size; i++)
+  memcpy(mlx5_wq_cyc_get_wqe(&rq->wqe.wq, i), peer->saved + i * peer->stride, peer->stride);
+ rq->peer = NULL;
+ dma_free_coherent(rq->pdev, peer->size * 128, peer->headers, peer->headers_dma);
+ kvfree(peer->saved); kvfree(peer->posted); kfree(peer);
+}
+int mlx5e_peer_rx_flush(struct net_device *dev, u32 queue, u64 owner)
+{
+ struct mlx5e_priv *priv = netdev_priv(dev);
+ struct mlx5e_rq *rq;
+ int ret = -ENODEV;
+ mutex_lock(&priv->state_lock);
+ if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num) goto unlock;
+ rq = &priv->channels.c[queue]->rq;
+ /* Reset/reconfiguration may already have retired this endpoint. */
+ if (!rq->peer || rq->peer->owner != owner) { ret = 0; goto unlock; }
+ napi_disable(rq->cq.napi);
+ ret = mlx5e_flush_rq(rq, MLX5_RQC_STATE_RDY);
+ if (!ret) mlx5e_peer_rx_free(rq);
+ napi_enable(rq->cq.napi);
+ /* Refill ordinary host buffers after the queue is returned. */
+ if (!ret) napi_schedule(rq->cq.napi);
+unlock:
+ mutex_unlock(&priv->state_lock);
+ return ret;
+}
+#endif
 
 static int mlx5e_modify_rq_vsd(struct mlx5e_rq *rq, bool vsd)
 {
@@ -5166,6 +5264,9 @@ const struct net_device_ops mlx5e_netdev_ops = {
 #ifdef CONFIG_XDEV_EXT_MECH
  .ndo_xdev_ext_peer_device = mlx5e_peer_device,
  .ndo_xdev_ext_peer_tx = mlx5e_peer_xmit,
+ .ndo_xdev_ext_peer_rx_open = mlx5e_peer_rx_open,
+ .ndo_xdev_ext_peer_rx = mlx5e_peer_recv,
+ .ndo_xdev_ext_peer_rx_flush = mlx5e_peer_rx_flush,
 #endif
 	.ndo_open                = mlx5e_open,
 	.ndo_stop                = mlx5e_close,

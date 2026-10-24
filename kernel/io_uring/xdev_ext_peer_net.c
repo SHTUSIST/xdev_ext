@@ -105,7 +105,11 @@ static int xdev_ext_peer_net_one(struct net_device *dev, struct pci_dev *peer,
   * and refuses a stopped, detached or reconfiguring queue.
   */
  if (!netif_running(dev) || !netif_device_present(dev)) ret = -ENETDOWN;
- else ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);
+ else {
+  rcu_read_lock();
+  ret = dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, queue, &p->tx);
+  rcu_read_unlock();
+ }
  if (!ret && accepted) *accepted = true;
  if (ret) {
   xdev_ext_peer_tx_finish(p, ret, true); /* refused: no native owner */
@@ -154,12 +158,17 @@ struct xdev_ext_peer_net_endpoint {
  void (*dead)(void *arg);
  void *arg;
  u32 queue;
+ u64 rx_owner;
+ bool rx;
 };
 static LIST_HEAD(xdev_ext_peer_net_endpoints);
 static DEFINE_MUTEX(xdev_ext_peer_net_lock); /* the list; nests inside RTNL */
 static bool xdev_ext_peer_net_notifier_ready;
-struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32 ifindex, u32 queue,
-                                                              void (*dead)(void *), void *arg)
+/* RTNL serializes allocation. Never recycle tokens, even across native queue
+ * or device/profile replacement. Saturation refuses a bind rather than ABA. */
+static u64 xdev_ext_peer_net_rx_owner;
+struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_dir(u32 ifindex, u32 queue, bool rx,
+                                                            void (*dead)(void *), void *arg)
 {
  struct xdev_ext_peer_net_endpoint *endpoint;
  struct net_device *dev;
@@ -170,20 +179,31 @@ struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32 ifindex, u32
  endpoint = kzalloc(sizeof(*endpoint), GFP_KERNEL);
  if (!endpoint) return ERR_PTR(-ENOMEM);
  spin_lock_init(&endpoint->lock);
- endpoint->dead = dead; endpoint->arg = arg; endpoint->queue = queue;
+ endpoint->dead = dead; endpoint->arg = arg; endpoint->queue = queue; endpoint->rx = rx;
  dev = netdev_get_by_index(current->nsproxy->net_ns, ifindex, &endpoint->tracker, GFP_KERNEL);
  if (!dev) { kfree(endpoint); return ERR_PTR(-ENODEV); }
  rtnl_lock();
- if (!dev->netdev_ops->ndo_xdev_ext_peer_device || !dev->netdev_ops->ndo_xdev_ext_peer_tx)
+ if (xdev_ext_peer_net_cap_check(xdev_ext_peer_net_caps(
+      !!dev->netdev_ops->ndo_xdev_ext_peer_device, !!dev->netdev_ops->ndo_xdev_ext_peer_tx,
+      !!dev->netdev_ops->ndo_xdev_ext_peer_rx, !!dev->netdev_ops->ndo_xdev_ext_peer_rx_flush), rx))
   ret = -EOPNOTSUPP;
+ else if (rx && !dev->netdev_ops->ndo_xdev_ext_peer_rx_open) ret = -EOPNOTSUPP;
  /* NETDEV_UNREGISTER runs under RTNL after reg_state leaves REGISTERED. */
  else if (dev->reg_state != NETREG_REGISTERED) ret = -ENODEV;
- else if (queue >= dev->real_num_tx_queues) ret = -EINVAL;
+ else if (queue >= (rx ? dev->real_num_rx_queues : dev->real_num_tx_queues)) ret = -EINVAL;
  else if (!netif_running(dev) || !netif_device_present(dev)) ret = -ENETDOWN;
  else {
   peer = dev->netdev_ops->ndo_xdev_ext_peer_device(dev);
   if (!peer) ret = -EOPNOTSUPP;
   else pci_dev_get(peer);
+ }
+ if (!ret && rx) {
+  if (xdev_ext_peer_net_rx_owner == U64_MAX) ret = -EOVERFLOW;
+  else {
+   endpoint->rx_owner = ++xdev_ext_peer_net_rx_owner;
+   ret = dev->netdev_ops->ndo_xdev_ext_peer_rx_open(dev, queue, endpoint->rx_owner);
+  }
+  if (ret) pci_dev_put(peer);
  }
  if (!ret) {
   endpoint->dev = dev; endpoint->peer = peer;
@@ -195,6 +215,10 @@ struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32 ifindex, u32
  if (ret) { netdev_put(dev, &endpoint->tracker); kfree(endpoint); return ERR_PTR(ret); }
  return endpoint;
 }
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_bind_dir);
+struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_stage(u32 ifindex, u32 queue,
+                                                              void (*dead)(void *), void *arg)
+{ return xdev_ext_peer_net_bind_dir(ifindex, queue, false, dead, arg); }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_net_bind_stage);
 struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind(u32 ifindex, u32 queue)
 { return xdev_ext_peer_net_bind_stage(ifindex, queue, NULL, NULL); }
@@ -203,6 +227,7 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_net_bind);
 void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *endpoint)
 {
  struct net_device *dev;
+ if (endpoint->rx) xdev_ext_peer_net_rx_flush(endpoint);
  mutex_lock(&xdev_ext_peer_net_lock);
  list_del(&endpoint->node);
  mutex_unlock(&xdev_ext_peer_net_lock);
@@ -223,6 +248,60 @@ u32 xdev_ext_peer_net_mtu(struct xdev_ext_peer_net_endpoint *endpoint)
  return mtu;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_net_mtu);
+/* Each post holds a short netdev reference across the native hook. Accepted
+ * elements belong to the driver and are retired by CQ or queue teardown. */
+struct pci_dev *xdev_ext_peer_net_peer(struct xdev_ext_peer_net_endpoint *ep)
+{ return ep->peer; }
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_peer);
+int xdev_ext_peer_net_post_tx(struct xdev_ext_peer_net_endpoint *ep, struct xdev_ext_peer_tx *chain)
+{
+ netdevice_tracker tracker;
+ struct net_device *dev;
+ int ret;
+ if (!ep || !chain || ep->rx) return -EINVAL;
+ spin_lock(&ep->lock);
+ dev = ep->dev;
+ netdev_hold(dev, &tracker, GFP_ATOMIC);
+ spin_unlock(&ep->lock);
+ if (!dev) return -ENODEV;
+ rcu_read_lock();
+ ret = !netif_running(dev) || !netif_device_present(dev) ? -ENETDOWN :
+       dev->netdev_ops->ndo_xdev_ext_peer_tx(dev, ep->queue, chain);
+ rcu_read_unlock();
+ netdev_put(dev, &tracker);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_post_tx);
+int xdev_ext_peer_net_post_rx(struct xdev_ext_peer_net_endpoint *ep, struct xdev_ext_peer_rx *chain)
+{
+ netdevice_tracker tracker;
+ struct net_device *dev;
+ int ret;
+ if (!ep || !chain || !ep->rx) return -EINVAL;
+ spin_lock(&ep->lock);
+ dev = ep->dev;
+ netdev_hold(dev, &tracker, GFP_ATOMIC);
+ spin_unlock(&ep->lock);
+ if (!dev) return -ENODEV;
+ ret = !netif_running(dev) || !netif_device_present(dev) ? -ENETDOWN :
+       dev->netdev_ops->ndo_xdev_ext_peer_rx(dev, ep->queue, ep->rx_owner, chain);
+ netdev_put(dev, &tracker);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_post_rx);
+int xdev_ext_peer_net_rx_flush(struct xdev_ext_peer_net_endpoint *ep)
+{
+ struct net_device *dev;
+ int ret;
+ if (!ep || !ep->rx) return -EINVAL;
+ /* Flush may sleep and must not race native channel reconfiguration. */
+ rtnl_lock();
+ dev = ep->dev;
+ ret = dev ? dev->netdev_ops->ndo_xdev_ext_peer_rx_flush(dev, ep->queue, ep->rx_owner) : -ENODEV;
+ rtnl_unlock();
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_net_rx_flush);
 int xdev_ext_peer_net_send_stoppable(struct xdev_ext_peer_net_endpoint *endpoint,
                                      struct file *allocation, u64 generation,
                                      const struct xdev_ext_peer_net_desc *desc, bool *accepted,
