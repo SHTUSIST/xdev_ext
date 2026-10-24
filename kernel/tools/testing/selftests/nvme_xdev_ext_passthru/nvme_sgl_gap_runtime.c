@@ -848,10 +848,21 @@ static int profile_copy_hits(struct tracer *tracer, unsigned long long *hits,
 	     line = strtok_r(NULL, "\n", &save)) {
 		if (sscanf(line, "%127s %llu %llu", name, &hit, &miss) != 3)
 			continue;
-		if (strncmp(name, "xdev_ext_sgl_", 7))
+		if (strncmp(name, "xdev_ext_sgl_", sizeof("xdev_ext_sgl_") - 1))
+			continue;
+		const char *suffix = name + sizeof("xdev_ext_sgl_copy") - 1;
+		int is_copy = !strncmp(name, "xdev_ext_sgl_copy",
+				       sizeof("xdev_ext_sgl_copy") - 1) &&
+			      *suffix && !suffix[strspn(suffix, "0123456789")];
+
+		/* Only our exact probe names contribute misses; copy probes have
+		 * the decimal index assigned by tracer_setup(). */
+		if (!is_copy && strcmp(name, "xdev_ext_sgl_kmalloc") &&
+		    strcmp(name, "xdev_ext_sgl_freepages") &&
+		    strcmp(name, "xdev_ext_sgl_mapret"))
 			continue;
 		*missed += miss;
-		if (!strncmp(name, "xdev_ext_sgl_copy", 11))
+		if (is_copy)
 			*hits += hit;
 	}
 	free(text);
