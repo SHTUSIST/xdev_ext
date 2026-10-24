@@ -1175,3 +1175,4 @@
 !/tests/eval/mechanism_variants/validate_e2.py
 !/tests/eval/mechanism_variants/mv_policy_capture.h
 !/tests/eval/mechanism_variants/test_policy_capture.c
+!/tests/eval/native_views/test_runtime_import.py

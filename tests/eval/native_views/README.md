@@ -173,3 +173,70 @@ Physical native hooks, immutable U cookie mappings, steady-state whole-host
 CPU snapshots, verified backing/no-bounce observations, complete post-oracle
 capture and trace-on/off perturbation measurements are external prerequisites.
 The software test suite passing does not close these runtime requirements.
+
+## Predeclared logical workload and runtime ID binding
+
+Runtime capture explicitly declares `trace.sessions` with two fixed logical
+roles: `{logical_id: 7, role: "sender", measured: true}` and
+`{logical_id: 8, role: "receiver", measured: false}`. Each can also declare
+`protocol_session_id` for the actual fixed NXP session configuration. Actual
+kernel session numbers, allocated frame slots and process IDs are not guessed
+in advance. Both roles must be proven by hashed CREATE/U journal sideband and
+actual session/pool binding events before receiver observations can be excluded.
+Process identity includes TGID and process start identity; a cookie alone does
+not distinguish different user processes.
+
+Before capture, freeze recipe records, warmup, seed, bytes, stages and a complete
+`trace.layout`: ordered `{frame_id: ordinal, offset_bytes, length_bytes}` spans
+covering [0, record_bytes). Every expected record lists these logical frame
+ordinals. Records include warmup and measured entries: record_id and logical
+generation are the fixed range [0, warmup_records + records), and every entry
+explicitly sets `measured` false for warmup and true for the measured suffix.
+No successful subset is used to rebuild this denominator. Current runtime
+support is burst=1, nvme-nic. K explicitly fixes batch_key_origin=1 and
+`generation_mapping=batch_key_relative`; U fixes origin=0 and uses immutable
+journal generation. Actual first keys must match the predeclared origin;
+missing keys are never compressed or shifted into a successful range.
+
+The collector's pure `derive_mapped_manifest(manifest, raw, metadata)` preserves
+all original fields and appends exactly `runtime_mapping_version=1`,
+`runtime_bindings` and `runtime_frames`. It saves that output as the hashed
+`mapped_manifest` artifact. Native frame slots remain `native_frame_id`;
+logical `frame_id` stays the declared ordinal. Stage-local frame_generation,
+raw frame offset/length, native session, TGID and process start identity remain
+in the bindings. Per-operation native submit/completion identities, addresses,
+lengths and classes must match; raw resource reuse uses native allocation and
+owner identity, not an ordinal reused in every logical record.
+
+The importer reruns both pure decoder and mapper against retained raw trace and
+hashed K/U sideband, compares typed JSON exactly with the saved events/mapping,
+and checks every frozen expectation remains unchanged. False cannot replace
+integer generation zero. Layout spans must also agree with native backing
+proofs. `collection_manifest` preserves the original input plan separately from
+derived metrics; replay checks it rather than treating derived counters as new
+expectations. Warmup stays in completeness checks but is excluded from measured
+latency, throughput and completed-record statistics.
+
+Runtime imports additionally require hashed `oracle_spec`, `oracle_expected`
+and `oracle_readback` artifacts. They verify the actual receiver spec's frozen
+shape/count, full expected byte denominator and every retained readback byte,
+with bounded-memory comparisons and hashes checked during the comparison.
+Missing raw proof, whole-command CPU scope and absent native backing remain
+unavailable; no truth flag substitutes for those observations.
+
+`test_runtime_import.py` uses the actual sibling collector/mapper. An isolated
+implementation checkout can set `NATIVE_TRACE_COLLECTOR` to a read-only real
+collector path while dependencies are integrated. Its synthetic raw inputs and
+real software child receipt remain marked nonphysical; no test starts a device
+workload or certifies DMA/performance.
+
+Self-contained CI requires both `tests/eval/native_views/` and
+`tests/eval/native_trace/{collector.py,test_collector_behavior.py}` in the same
+checkout: the latter's `raw` helper supplies the frozen event ABI fixture.
+Run unittest discovery for each directory separately; no external device,
+privilege or tracing mount is needed for these software tests. An isolated
+checkout must explicitly locate that actual collector using the environment
+variable above. The decoder dependency must enforce numeric kernel `ts_ns`,
+immutable opcode/aux and request identities, and complete, unique per-frame
+record endpoints before any record-level collapse. Import/mapper GREEN results
+cannot certify a decoder version that fails those independent requirements.

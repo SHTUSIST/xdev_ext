@@ -6,6 +6,10 @@ import math
 from pathlib import Path
 import re
 
+COLLECTOR_ENTRY = Path(__file__).resolve().parent.parent / 'native_trace' / 'collector.py'
+RUNTIME_FIELDS = frozenset(('runtime_mapping_version', 'runtime_bindings', 'runtime_frames'))
+DERIVED_FIELDS = RUNTIME_FIELDS | frozenset(('collection_manifest', 'collection_receipt', 'metrics',
+    'completed_records', 'correctness_pass', 'status', 'total_cpu_ns'))
 # These must match in a paired comparison. Arm names and waiting strategy may differ.
 PAIR_FIELDS = (
     'pair_id', 'exact_sha', 'config_hash', 'device_manifest', 'endpoint', 'load',
@@ -40,6 +44,16 @@ def number(value, minimum=0):
     return (type(value) in (int, float) and math.isfinite(value) and value >= minimum)
 
 
+def _same_json(left, right):
+    """Compare retained JSON values without treating False as integer zero."""
+    import json
+    try:
+        return (json.dumps(left, sort_keys=True, allow_nan=False) ==
+                json.dumps(right, sort_keys=True, allow_nan=False))
+    except (TypeError, ValueError):
+        return False
+
+
 def parse_quantity(text, kind='bytes'):
     """Parse case-sensitive SI/IEC units; a bit rate is converted to bytes/s."""
     if kind not in ('bytes', 'bytes_per_second') or not isinstance(text, str):
@@ -67,7 +81,11 @@ def validate_artifact(artifact, field):
     if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-f]{64}', digest):
         return [field + ': invalid sha256']
     try:
-        actual = hashlib.sha256(Path(artifact['path']).read_bytes()).hexdigest()
+        hashed = hashlib.sha256()
+        with Path(artifact['path']).open('rb') as stream:
+            for chunk in iter(lambda: stream.read(1048576), b''):
+                hashed.update(chunk)
+        actual = hashed.hexdigest()
     except (OSError, TypeError, ValueError) as error:
         return [field + ': cannot read raw artifact: ' + str(error)]
     return [] if actual == digest else [field + ': raw artifact sha256 mismatch']
@@ -125,6 +143,8 @@ def validate_run(run, performance=False):
         for key, value in run['metrics'].items():
             if value is not None and not number(value):
                 errors.append('metrics.' + key + ': expected finite nonnegative number or null')
+    if isinstance(run.get('trace'), dict) and run['trace'].get('sessions'):
+        errors.extend(validate_runtime_plan(run))
     if performance:
         for name in ('physical', 'correctness_pass'):
             if run.get(name) is not True:
@@ -165,7 +185,9 @@ def validate_run(run, performance=False):
             from analyze import summarize_events
             checked = summarize_events(run, observed['events'], _admission=False)
             errors.extend(checked['errors'])
-            if len(checked['records']) != run.get('completed_records'):
+            count = sum(row['latency_ns'] is not None and row.get('measured', True)
+                        for row in checked['records'])
+            if count != run.get('completed_records'):
                 errors.append('completed_records: differs from raw matched records')
     return errors
 
@@ -181,6 +203,16 @@ def inspect_collection(run, receipt):
     import sys
 
     errors, data = [], {}
+    plan = run.get('collection_manifest', run)
+    if not isinstance(plan, dict):
+        errors.append('runtime_mapping: original collection manifest unavailable')
+        plan = run
+    for field in plan.keys() | run.keys():
+        if field not in DERIVED_FIELDS and (field not in plan or field not in run or plan[field] != run[field]):
+            errors.append('runtime_mapping: original expectation changed: ' + field)
+    runtime = bool(plan.get('trace', {}).get('sessions'))
+    if runtime:
+        errors.extend(validate_runtime_plan(plan))
     if not isinstance(receipt, dict):
         receipt = {}
     if (receipt.get('status') in ('failed', 'fail') or
@@ -193,17 +225,20 @@ def inspect_collection(run, receipt):
         artifacts = {}
     kinds = ['raw_trace', 'events', 'trace_metadata', 'system_cpu_before',
              'system_cpu_after', 'workload_stdout', 'workload_stderr', 'oracle', 'zero_copy']
-    if run.get('arm') in ('U-poll', 'U-event'):
+    if run.get('arm') in ('U-poll', 'U-event') or runtime:
         kinds.append('journal')
+    if runtime:
+        kinds += ['mapped_manifest', 'oracle_expected', 'oracle_readback', 'oracle_spec']
     for kind in kinds:
         problems = validate_artifact(artifacts.get(kind), kind)
         errors.extend(problems)
         if not problems:
             try:
-                data[kind] = Path(artifacts[kind]['path']).read_text()
+                data[kind] = (Path(artifacts[kind]['path']) if kind in ('oracle_expected', 'oracle_readback')
+                              else Path(artifacts[kind]['path']).read_text())
             except (OSError, UnicodeError) as error:
                 errors.append(kind + ': raw text unreadable: ' + str(error))
-    for kind in ('trace_metadata', 'oracle', 'zero_copy'):
+    for kind in ('trace_metadata', 'oracle', 'zero_copy', 'mapped_manifest', 'oracle_spec'):
         if kind in data:
             try:
                 data[kind] = json.loads(data[kind])
@@ -222,7 +257,7 @@ def inspect_collection(run, receipt):
             data.pop('events')
     metadata = data.get('trace_metadata', {})
     if metadata:
-        if run.get('arm') in ('U-poll', 'U-event'):
+        if run.get('arm') in ('U-poll', 'U-event') or runtime:
             if metadata.get('journal_artifact') != artifacts.get('journal') or 'journal' not in data:
                 errors.append('journal: immutable U cookie mapping raw artifact unavailable/mismatch')
         if metadata.get('schema_version') != 1:
@@ -247,8 +282,9 @@ def inspect_collection(run, receipt):
                     not isinstance(probe.get('source'), str) or not probe['source'] or
                     'cqe_observe' in probe['source'].lower()):
                 errors.append('trace_metadata.probes.' + event + ': same-layer native probe unavailable')
+    mapped_manifest = None
     if 'events' in data and 'raw_trace' in data and metadata:
-        collector = Path(__file__).resolve().parent.parent / 'native_trace' / 'collector.py'
+        collector = COLLECTOR_ENTRY
         try:
             if not collector.is_file():
                 raise ValueError('native_trace_probe_unavailable: collector/decoder missing')
@@ -259,15 +295,34 @@ def inspect_collection(run, receipt):
             decoder = getattr(module, 'decode_trace', None)
             if not callable(decoder):
                 raise ValueError('native_trace_probe_unavailable: raw native decoder missing')
-            decoded = decoder(run, data['raw_trace'], metadata)
-            if decoded != data['events']:
+            decoded = decoder(plan, data['raw_trace'], metadata)
+            if not _same_json(decoded, data['events']):
                 errors.append('events: raw trace re-decoding does not match events.jsonl')
+            if runtime:
+                mapper = getattr(module, 'derive_mapped_manifest', None)
+                if not callable(mapper):
+                    raise ValueError('runtime_mapping: raw runtime mapper unavailable')
+                mapped = mapper(plan, data['raw_trace'], metadata)
+                if not _same_json({key: value for key, value in mapped.items() if key not in RUNTIME_FIELDS}, plan):
+                    errors.append('runtime_mapping: mapper changed frozen expectations')
+                elif not _same_json(mapped, data.get('mapped_manifest')):
+                    errors.append('runtime_mapping: mapped manifest differs from raw/sideband reconstruction')
+                else:
+                    problems = validate_runtime_mapping(plan, mapped, decoded)
+                    errors.extend(problems)
+                    critical = ('raw_trace', 'events', 'trace_metadata', 'journal', 'mapped_manifest')
+                    if (not problems and all(kind in data for kind in critical) and
+                            _same_json(decoded, data['events']) and
+                            metadata.get('journal_artifact') == artifacts.get('journal')):
+                        mapped_manifest = mapped
         except (ImportError, OSError, ValueError, TypeError, KeyError, AttributeError) as error:
             errors.append('raw_trace: cannot verify native identity mapping: ' + str(error))
     if 'oracle' in data:
         errors.extend(_check_campaign(run, data['oracle']))
     if 'zero_copy' in data:
         errors.extend(_check_backing(run, data['zero_copy']))
+    if runtime and all(kind in data for kind in ('oracle_expected', 'oracle_readback', 'oracle_spec')):
+        errors.extend(_check_postoracle(plan, artifacts, data['oracle_spec']))
     cpu_ns = None
     if 'system_cpu_before' in data and 'system_cpu_after' in data:
         try:
@@ -276,6 +331,7 @@ def inspect_collection(run, receipt):
         except ValueError as error:
             errors.append('system_cpu: ' + str(error))
     return dict(errors=errors, events=data.get('events', []), metadata=metadata,
+                mapped_manifest=mapped_manifest,
                 total_cpu_ns=cpu_ns)
 
 
@@ -398,6 +454,12 @@ def _check_backing(run, proof):
                 errors.append('zero_copy.frames: explicit legal record/payload span required')
                 continue
             record_ranges.append((record_offset, record_offset + payload_bytes))
+            declared_layout = run.get('trace', {}).get('layout')
+            if declared_layout is not None:
+                declared = [span for span in declared_layout if span.get('frame_id') == frame]
+                if (len(declared) != 1 or
+                        (record_offset, payload_bytes) != (declared[0]['offset_bytes'], declared[0]['length_bytes'])):
+                    errors.append('zero_copy.frames: payload span changed predeclared logical frame layout')
             ranges = {'nvme': [], 'afxdp': []}
             for view in views:
                 if not isinstance(view, dict):
@@ -437,3 +499,136 @@ def _merge_ranges(ranges):
         else:
             merged.append((start, end))
     return merged
+
+
+def validate_runtime_plan(plan):
+    """Freeze the complete logical workload before binding any native IDs."""
+    errors = []
+    trace, recipe = plan.get('trace', {}), plan.get('recipe', {})
+    sessions = trace.get('sessions', [])
+    if (not isinstance(sessions, list) or len(sessions) != 2 or
+            any(not isinstance(s, dict) for s in sessions)):
+        return ['runtime_mapping: predeclare sender and receiver roles']
+    roles = {s.get('role'): s for s in sessions}
+    ids = [s.get('logical_id') for s in sessions]
+    if (set(roles) != {'sender', 'receiver'} or any(type(i) is not int or i < 0 for i in ids) or
+            len(set(ids)) != len(ids) or roles.get('sender', {}).get('measured') is not True or
+            roles.get('receiver', {}).get('measured') is not False):
+        return ['runtime_mapping: ambiguous logical roles/measurement scope']
+    count, warm = recipe.get('records'), recipe.get('warmup_records', 4)
+    if (type(count) is not int or not 1 <= count <= 65536 or
+            type(warm) is not int or not 0 <= warm <= 4096 or
+            type(recipe.get('seed')) is not int or not 0 <= recipe['seed'] < 1 << 64 or
+            recipe.get('chain') != 'nvme-nic' or
+            type(plan.get('record_bytes')) is not int or plan['record_bytes'] <= 0 or
+            type(trace.get('burst')) is not int or trace['burst'] != 1 or
+            type(trace.get('batch_key_origin')) is not int):
+        return ['runtime_mapping: predeclared count/warmup/seed/shape required (burst=1)']
+    if plan.get('arm', '').startswith('K'):
+        if trace.get('generation_mapping') != 'batch_key_relative' or trace.get('batch_key_origin') != 1:
+            errors.append('runtime_mapping: K origin=1 and relative generation must be fixed before capture')
+    elif trace.get('batch_key_origin') != 0:
+        errors.append('runtime_mapping: U origin=0 must be fixed before capture')
+    layout, offset = trace.get('layout'), 0
+    if not isinstance(layout, list) or not layout:
+        return [*errors, 'runtime_mapping: predeclared logical payload layout required']
+    for ordinal, span in enumerate(layout):
+        if (not isinstance(span, dict) or type(span.get('frame_id')) is not int or span['frame_id'] != ordinal or
+                span.get('offset_bytes') != offset or type(span.get('length_bytes')) is not int or
+                span['length_bytes'] <= 0):
+            return [*errors, 'runtime_mapping: logical frame layout has hole/overlap/ambiguous ordinal']
+        offset += span['length_bytes']
+    if offset != plan['record_bytes']:
+        errors.append('runtime_mapping: frame layout does not cover expected record bytes')
+    records = plan.get('records', [])
+    expected = [(roles['sender']['logical_id'], i, i, i >= warm) for i in range(count + warm)]
+    actual = [(r.get('session_id'), r.get('record_id'), r.get('generation'), r.get('measured'))
+              for r in records if isinstance(r, dict)]
+    if (not _same_json(actual, expected) or
+            any(r.get('frame_ids') != list(range(len(layout))) for r in records)):
+        errors.append('runtime_mapping: expected record keys/counts/measurement flags differ from frozen recipe')
+    return errors
+
+
+def validate_runtime_mapping(plan, mapped, events):
+    """Check that runtime fields only bind proven IDs to the frozen logical plan."""
+    errors = []
+    if mapped.get('runtime_mapping_version') != 1:
+        errors.append('runtime_mapping: unsupported mapping version')
+    plans = {s['logical_id']: s for s in plan.get('trace', {}).get('sessions', [])}
+    bindings = mapped.get('runtime_bindings', [])
+    if not isinstance(bindings, list) or len(bindings) != len(plans):
+        return [*errors, 'runtime_mapping: not every predeclared role was bound']
+    owners, seen = {}, set()
+    for row in bindings:
+        if not isinstance(row, dict):
+            return [*errors, 'runtime_mapping: malformed runtime role binding']
+        logical = row.get('logical_session_id')
+        expected = plans.get(logical)
+        if (expected is None or logical in seen or row.get('role') != expected['role'] or
+                row.get('measured') is not expected['measured'] or
+                any(type(row.get(k)) is not int or row[k] <= 0 for k in
+                    ('native_session_id', 'origin_tgid', 'process_start_ticks'))):
+            return [*errors, 'runtime_mapping: duplicate/foreign/unproven role binding']
+        seen.add(logical)
+        owners[logical] = row
+    fields = ('session_id', 'record_id', 'generation', 'frame_id', 'native_session_id',
+              'native_frame_id', 'frame_generation', 'frame_offset', 'frame_length',
+              'stage', 'origin_tgid', 'process_start_ticks')
+    observed = []
+    layout = {span['frame_id']: span for span in plan['trace']['layout']}
+    for event in events:
+        if event.get('event') != 'native_submit' or event.get('accepted') is not True:
+            continue
+        if any(field not in event for field in fields):
+            errors.append('runtime_mapping: accepted work missing raw identity/span')
+            continue
+        owner = owners.get(event['session_id'])
+        span = layout.get(event['frame_id'])
+        if (owner is None or span is None or not owner['measured'] or
+                any(event[k] != owner[k] for k in ('native_session_id', 'origin_tgid', 'process_start_ticks')) or
+                type(event['native_frame_id']) is not int or event['native_frame_id'] < 0 or
+                (event['frame_offset'], event['frame_length']) != (span['offset_bytes'], span['length_bytes'])):
+            errors.append('runtime_mapping: native frame owner/range differs from logical binding')
+        row = {field: event[field] for field in fields}
+        if row not in observed:
+            observed.append(row)
+    expected_frames = sorted(observed, key=lambda r: (r['session_id'], r['record_id'], r['frame_id'], r['stage']))
+    if mapped.get('runtime_frames') != expected_frames:
+        errors.append('runtime_mapping: native frame bindings differ from accepted raw operations')
+    return errors
+
+
+def _check_postoracle(plan, artifacts, spec):
+    """Compare every retained expected/readback byte with bounded memory."""
+    recipe, errors = plan['recipe'], []
+    count = recipe['records'] + recipe.get('warmup_records', 4)
+    expected_size = count * plan['record_bytes']
+    if (spec.get('chain') != 'nic-nvme' or spec.get('mode') != 'timing' or
+            spec.get('group_bytes') != plan['record_bytes'] or spec.get('burst') != 1 or
+            spec.get('batches') != recipe['records'] or
+            spec.get('warmup') != recipe.get('warmup_records', 4) or
+            not isinstance(spec.get('oracle'), dict) or spec['oracle'].get('kind') != 'file'):
+        errors.append('postoracle: actual receiver spec differs from frozen shape/byte count')
+    expected, actual = (Path(artifacts[kind]['path']) for kind in ('oracle_expected', 'oracle_readback'))
+    try:
+        if expected.stat().st_size != expected_size or actual.stat().st_size != expected_size:
+            errors.append('postoracle: incomplete expected/readback byte denominator')
+        left_hash, right_hash = hashlib.sha256(), hashlib.sha256()
+        differ = False
+        with expected.open('rb') as left, actual.open('rb') as right:
+            while True:
+                a, b = left.read(1048576), right.read(1048576)
+                left_hash.update(a)
+                right_hash.update(b)
+                differ |= a != b
+                if not a and not b:
+                    break
+        if differ:
+            errors.append('postoracle: actual retained readback bytes differ from expected bytes')
+        if (left_hash.hexdigest() != artifacts['oracle_expected']['sha256'] or
+                right_hash.hexdigest() != artifacts['oracle_readback']['sha256']):
+            errors.append('postoracle: retained file sha256 changed during comparison')
+    except OSError as error:
+        errors.append('postoracle: raw byte comparison unavailable: ' + str(error))
+    return errors

@@ -185,7 +185,10 @@ def summarize_events(manifest, events, *, _admission=True):
                     # Logical generation identifies the record across stages.
                     # The raw stage-local frame generation may advance between
                     # stages, but must not change within one accepted operation.
-                    for field in ('frame_generation', 'ticket', 'cookie'):
+                    for field in ('frame_generation', 'ticket', 'cookie', 'native_frame_id',
+                                  'native_session_id', 'origin_tgid', 'process_start_ticks',
+                                  'native_user_data', 'frame_offset', 'frame_length',
+                                  'address', 'bytes', 'class_id'):
                         before, after = submits[stage], completes[stage]
                         if field in before or field in after:
                             if field not in before or field not in after or before[field] != after[field]:
@@ -227,7 +230,14 @@ def summarize_events(manifest, events, *, _admission=True):
                         local_errors.extend('%s frame=%s recycle: %s' % (key, frame, why) for why in reasons)
             frame_submits = [s for s in submits.values() if s is not None]
             if frame_submits:
-                lifetimes[(key[0], frame)].append((key, min(s['ts_ns'] for s in frame_submits), recycle))
+                # A logical ordinal is reused in every expected record. Actual
+                # resource reuse is scoped to the observed allocation/owner,
+                # not that ordinal; old strict fixtures retain the logical key.
+                source = frame_submits[0]
+                allocation = ((source.get('native_session_id'), source.get('origin_tgid'),
+                               source.get('process_start_ticks'), source['native_frame_id'])
+                              if 'native_frame_id' in source else frame)
+                lifetimes[(key[0], allocation)].append((key, min(s['ts_ns'] for s in frame_submits), recycle))
         reasons = []
         latency = _difference(admit, terminal, reasons)
         local_errors.extend('%s record latency: %s' % (key, why) for why in reasons)
@@ -237,7 +247,7 @@ def summarize_events(manifest, events, *, _admission=True):
             terminal_events.append(terminal)
         errors.extend(local_errors)
         records.append(dict(run_id=manifest.get('run_id'), **identity, latency_ns=latency,
-                            reasons=local_errors))
+                            measured=row.get('measured', True), reasons=local_errors))
     # A reused frame in the same session cannot be admitted before last recycle.
     for frame, lives in lifetimes.items():
         lives.sort(key=lambda item: item[1])
@@ -314,16 +324,23 @@ def compare_pairs(pairs):
 def import_collection(manifest, receipt):
     """Import raw collector artifacts; derive metrics instead of using claimed ones."""
     observed = inspect_collection(manifest, receipt)
-    imported = dict(manifest, collection_receipt=copy.deepcopy(receipt))
+    plan = manifest.get('collection_manifest', manifest)
+    imported = copy.deepcopy(plan)
+    imported.update(collection_manifest=copy.deepcopy(plan), collection_receipt=copy.deepcopy(receipt))
+    if observed.get('mapped_manifest') is not None:
+        for field in ('runtime_mapping_version', 'runtime_bindings', 'runtime_frames'):
+            imported[field] = copy.deepcopy(observed['mapped_manifest'][field])
     if observed['total_cpu_ns'] is not None:
         imported['total_cpu_ns'] = observed['total_cpu_ns']
     summary = summarize_events(imported, observed['events'], _admission=False)
-    latencies = [r['latency_ns'] for r in summary['records']]
+    measured = [r for r in summary['records'] if r.get('measured', True)]
+    latencies = [r['latency_ns'] for r in measured]
     imported['completed_records'] = sum(v is not None for v in latencies)
     imported['correctness_pass'] = not observed['errors'] and not summary['errors']
     imported['status'] = 'ok' if imported['correctness_pass'] else 'failed'
     valid = latencies and all(number(v, 1) for v in latencies)
-    endpoints = [e for e in observed['events'] if e.get('accepted') is True and
+    measured_keys = {_key(row) for row in measured}
+    endpoints = [e for e in observed['events'] if _key(e) in measured_keys and e.get('accepted') is True and
                  e.get('status') == 0 and e.get('event') in ('record_admit', 'record_terminal')]
     admits = [e['ts_ns'] for e in endpoints if e['event'] == 'record_admit']
     terminals = [e['ts_ns'] for e in endpoints if e['event'] == 'record_terminal']
