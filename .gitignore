@@ -1137,3 +1137,19 @@
 !/tests/eval/native_trace/collector.py
 !/tests/eval/native_trace/test_collector_behavior.py
 !/tests/eval/native_trace/README.md
+# Bounded NVMe mechanism substitution functional evaluation.
+!/tests/eval/mechanism_variants/
+!/tests/eval/mechanism_variants/Makefile
+!/tests/eval/mechanism_variants/README.md
+!/tests/eval/mechanism_variants/nvme_reverse.bpf.c
+!/tests/eval/mechanism_variants/nvme_gray.bpf.c
+!/tests/eval/mechanism_variants/image.py
+!/tests/eval/mechanism_variants/mv_sink.c
+!/tests/eval/mechanism_variants/guest_run.sh
+!/tests/eval/mechanism_variants/test_helpers.py
+!/tests/eval/mechanism_variants/tests/
+!/tests/eval/mechanism_variants/tests/Makefile
+!/tests/eval/mechanism_variants/tests/bpf_body.c
+!/tests/eval/mechanism_variants/tests/test_guest_capture.py
+!/tests/eval/mechanism_variants/tests/test_assertion_selfcheck.py
+!/tests/eval/mechanism_variants/trace_ctl.sh
