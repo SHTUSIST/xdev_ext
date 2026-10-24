@@ -21,12 +21,29 @@ PHASES = ('class_validate','provider_accept','native_complete',
           'downstream_complete','frame_recycle')
 
 
-def parse(raw):
+def infer_session(raw):
+    candidates=set()
+    for line in raw.splitlines():
+        if 'native_event:' not in line: continue
+        f=dict(re.findall(r'(\w+)=([^\s]+)',line.split('native_event:',1)[1]))
+        if f.get('origin')=='K' and f.get('phase')=='class_validate' and f.get('class_id')=='3' and f.get('stage')=='0':
+            try: candidates.add(int(f['session_id']))
+            except (KeyError,ValueError): pass
+    if len(candidates)!=1: raise ValueError('ambiguous/missing CREATE session; supply actual session scope')
+    return candidates.pop()
+
+
+def parse(raw,session_id=None,audit=None):
     rows=[]
     for line_number,line in enumerate(raw.splitlines(),1):
         if 'native_event:' not in line:
             continue
         fields=dict(re.findall(r'(\w+)=([^\s]+)',line.split('native_event:',1)[1]))
+        try: row_session=int(fields['session_id'])
+        except (KeyError,ValueError) as exc: raise ValueError('missing/invalid row session') from exc
+        if session_id is not None and row_session!=session_id:
+            if audit is not None: audit.setdefault('excluded',[]).append(dict(raw_line=line_number,reason='different CREATE session',session_id=row_session))
+            continue
         if fields.get('abi') != ABI:
             raise ValueError(f'line {line_number}: unsupported trace ABI')
         if not fields.get('phase') or not fields.get('origin'):
@@ -36,20 +53,39 @@ def parse(raw):
                 fields[field]=int(fields[field],10)
         except (KeyError,ValueError) as exc:
             raise ValueError(f'line {line_number}: missing/invalid native fields') from exc
-        if any(fields[f] < 0 for f in NUMERIC if f not in ('status',)):
-            raise ValueError('negative unsigned native field')
+        widths={f:(32 if f in ('frame_id','stage','class_id','bytes') else 64) for f in NUMERIC}
+        if any(not 0<=fields[f]<(1<<widths[f]) for f in NUMERIC if f not in ('status','accepted')):
+            raise ValueError('out-of-range native unsigned field')
+        if not -(1<<31)<=fields['status']<(1<<31) or fields['accepted'] not in (0,1):
+            raise ValueError('out-of-range native status/acceptance')
         fields['raw_line']=line_number
         rows.append(fields)
     if not rows:
-        raise ValueError('no actual native_event rows')
+        raise ValueError('no actual native_event rows for CREATE session')
     return sorted(rows,key=lambda r:(r['ts_ns'],r['raw_line']))
 
 
-def groups(rows, final_stage):
+KNOWN_PHASES={'class_validate','native_submit','native_complete','downstream_complete',
+              'frame_recycle','record_admit','record_terminal','descriptor_bind'}
+
+
+def validate_scoped(rows,final_stage,positive=True):
+    expected_class={0:3,final_stage:2}
+    for stage in range(1,final_stage): expected_class[stage]=5
+    for r in rows:
+        if r['origin']!='K' or r['phase'] not in KNOWN_PHASES:
+            raise ValueError('unknown measured origin/phase in CREATE session')
+        if r['stage'] not in expected_class or r['class_id']!=expected_class[r['stage']]:
+            raise ValueError('measured phase has wrong configured class/stage')
+        if r['phase']=='class_validate' and (r['stage']!=0 or r['class_id']!=3):
+            raise ValueError('class validation is not at NVMe stage zero')
+        if positive and (r['status'] or r['accepted']!=1):
+            raise ValueError('failed measured operation in positive CREATE session')
+
+
+def groups(rows, final_stage,audit=None):
     selected=defaultdict(list)
     for r in rows:
-        if r['origin'] != 'K':
-            continue
         phase=r['phase']
         if r['class_id']==3 and r['stage']==0 and phase in (
                 'class_validate','native_submit','native_complete'):
@@ -57,6 +93,7 @@ def groups(rows, final_stage):
         elif phase in ('downstream_complete','frame_recycle') and r['stage']==final_stage:
             pass
         else:
+            if audit is not None: audit.setdefault('excluded',[]).append(dict(raw_line=r['raw_line'],phase=r['phase'],reason='audited diagnostic/intermediate stage, retained in raw'))
             continue
         key=(r['session_id'],r['batch_id'],phase)
         selected[key].append(r)
@@ -71,7 +108,8 @@ def groups(rows, final_stage):
         if len(frames) != len(set(frames)):
             raise ValueError('duplicate frame in native phase')
         event=dict(event=phase,session_id=session,batch_id=batch,request_id=batch,
-                   stage=first['stage'],ticket=first['ticket'],cookie=first['cookie'],
+                   stage=first['stage'],ticket=first['ticket'],cookie=first['cookie'],batch_key=first['batch_key'],
+                   native_aux=first['aux'],
                    frames=frames,frame_generations=[r['generation'] for r in rr],
                    raw_lines=[r['raw_line'] for r in rr],trace_ts_ns=first['ts_ns'],
                    frame_addresses=[r['address'] for r in rr],frame_bytes=[r['bytes'] for r in rr])
@@ -92,9 +130,12 @@ def groups(rows, final_stage):
     return events
 
 
-def decode(raw, chain):
+def decode(raw, chain,session_id=None,audit=None):
     final_stage={'nvme_nic':1,'nvme_ce_ce_nic':3}[chain]
-    events=groups(parse(raw),final_stage)
+    session_id=infer_session(raw) if session_id is None else session_id
+    rows=parse(raw,session_id,audit)
+    validate_scoped(rows,final_stage)
+    events=groups(rows,final_stage,audit)
     if not events or len({e['session_id'] for e in events}) != 1:
         raise ValueError('capture must contain exactly one real session')
     by_record=defaultdict(list)
@@ -106,10 +147,10 @@ def decode(raw, chain):
         validation,accepted,completed,downstream,recycled=record
         if validation['ticket'] != 0:
             raise ValueError('validation borrowed future native ticket')
-        for key in ('session_id','batch_id','request_id','stage','slba','nlb','bytes','direction','frames'):
+        for key in ('session_id','batch_id','request_id','stage','batch_key','slba','nlb','bytes','direction','frames'):
             if validation[key] != accepted[key]:
                 raise ValueError('native operation differs from validated plan')
-        for key in ('session_id','batch_id','request_id','stage','ticket','cookie','frames','frame_generations'):
+        for key in ('session_id','batch_id','request_id','stage','ticket','cookie','batch_key','native_aux','frames','frame_generations','frame_addresses','frame_bytes'):
             if accepted[key] != completed[key]:
                 raise ValueError('native completion differs from accepted claim')
         if not accepted['ticket'] or not accepted['cookie'] or not all(accepted['frame_generations']):
@@ -121,15 +162,26 @@ def decode(raw, chain):
     return events
 
 
-def decode_negative(raw):
-    rows=parse(raw)
+def decode_negative(raw,session_id=None,audit=None):
+    session_id=infer_session(raw) if session_id is None else session_id
+    rows=parse(raw,session_id,audit)
+    validate_scoped(rows,1,positive=False)
     accepts={(r['session_id'],r['batch_id'],r['ticket'],r['cookie']) for r in rows
              if r['origin']=='K' and r['phase']=='native_submit' and r['class_id']==3}
     validates=[r for r in rows if r['origin']=='K' and r['phase']=='class_validate' and r['class_id']==3]
     identities={(r['session_id'],r['batch_id'],r['stage'],r['status']) for r in validates}
     if accepts or len(identities)!=1 or not validates or any(r['accepted'] or r['ticket'] for r in validates):
         raise ValueError('negative has native acceptance, no rejection, or ambiguous validation')
+    if len({r['frame_id'] for r in validates})!=len(validates):
+        raise ValueError('duplicate rejected validation frame')
+    if any(r['phase'] not in ('class_validate','record_admit','record_terminal') for r in rows):
+        raise ValueError('negative contains unexpected measured operation')
+    stable=('batch_key','stage','ticket','cookie','address','bytes','aux','accepted','status')
+    if any(any(row[key]!=validates[0][key] for key in stable) for row in validates):
+        raise ValueError('rejected validation rows disagree on actual plan')
     result=validates[0]['status']
+    if any(r['status'] not in (0,result) for r in rows):
+        raise ValueError('negative diagnostic carries another measured failure')
     if result not in (-34,-1):
         raise ValueError('unexpected actual full-class rejection')
     return dict(entry='class_validate',result=result,accepted_during_capture=len(accepts),
@@ -138,11 +190,16 @@ def decode_negative(raw):
 
 
 def audit_collection(format_text, stats):
-    if ABI not in format_text or any(f' {f};' not in format_text for f in ('ticket','cookie','generation','ts_ns')):
+    required=NUMERIC+('phase','origin')
+    if ABI not in format_text or any(f' {f};' not in format_text for f in required):
         raise ValueError('actual target event format is missing the required ABI/fields')
-    values=re.findall(r'^(?:overrun|commit overrun|dropped events):\s*(\d+)\s*$',stats,re.M)
-    if not values or any(int(value) for value in values):
-        raise ValueError('trace statistics absent or events lost')
+    blocks=re.split(r'^.*?/per_cpu/cpu[0-9]+/stats\s*$',stats,flags=re.M)
+    blocks=[block for block in blocks if block.strip()]
+    if not blocks: raise ValueError('trace statistics absent')
+    for block in blocks:
+        losses=re.findall(r'^(overrun|commit overrun|dropped events):\s*(\d+)\s*$',block,re.M)
+        if len(losses)!=3 or {k for k,_ in losses}!={'overrun','commit overrun','dropped events'} or any(int(v) for _,v in losses):
+            raise ValueError('incomplete trace loss counters or events lost')
 
 
 def main():
@@ -158,14 +215,17 @@ def main():
     try:
         audit_collection(a.format.read_text(),a.stats.read_text())
         raw=a.trace.read_text()
-        result=decode_negative(raw) if a.negative else decode(raw,a.chain)
         from inspect_create import inspect
         session=inspect(a.create_prefix)['actual_session_id']
+        audit=dict(create_session=session,excluded=[])
+        result=decode_negative(raw,session,audit) if a.negative else decode(raw,a.chain,session,audit)
         sessions={result['session_id']} if a.negative else {e['session_id'] for e in result}
         if sessions!={session}:
             raise ValueError('trace does not match the actual successful CREATE session')
         with a.output.open('x') as out:
             json.dump(result,out,indent=2); out.write('\n')
+        with Path(str(a.output)+'.audit.json').open('x') as out:
+            json.dump(audit,out,indent=2); out.write('\n')
     except (OSError,ValueError,KeyError) as exc:
         p.exit(1,f'E2 trace decode FAIL: {exc}\n')
     print(f'E2_TRACE_DECODED sha256={hashlib.sha256(a.trace.read_bytes()).hexdigest()} performance_claim=none')

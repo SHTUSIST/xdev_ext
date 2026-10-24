@@ -1160,3 +1160,4 @@
 !/tests/eval/mechanism_variants/test_create_capture.c
 !/tests/eval/mechanism_variants/inspect_create.py
 !/tests/eval/mechanism_variants/test_inspect_create.py
+!/tests/eval/mechanism_variants/test_decode_regressions.py

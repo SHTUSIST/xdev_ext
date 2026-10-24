@@ -79,8 +79,8 @@ class Decode(unittest.TestCase):
             Path(str(prefix)+'.resources.json').write_text(json.dumps({k:resource for k in ('pool','eventfd','stage0')}))
             Path(str(prefix)+'.result.json').write_text(json.dumps(dict(syscall_return=0,errno=0,session_id=42)))
             (p/'trace').write_text(self.positive())
-            (p/'format').write_text('xdev-native-v1-nvme-xsk-batch u64 ticket; u64 cookie; u64 generation; u64 ts_ns;')
-            (p/'stats').write_text('overrun: 0\ncommit overrun: 0\n')
+            (p/'format').write_text('xdev-native-v1-nvme-xsk-batch '+' '.join('u64 '+f+';' for f in self.decoder.NUMERIC+('phase','origin')))
+            (p/'stats').write_text('overrun: 0\ncommit overrun: 0\ndropped events: 0\n')
             cmd=['python3',str(HERE/'decode_trace.py'),str(p/'trace'),str(p/'events'),
                  '--format',str(p/'format'),'--stats',str(p/'stats'),'--create-prefix',str(prefix)]
             run=subprocess.run(cmd,capture_output=True,text=True)
