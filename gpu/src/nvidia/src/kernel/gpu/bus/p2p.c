@@ -1602,7 +1602,9 @@ RmP2PUmemVidmemBind
 (
     NvU64                     address,
     NvU64                     length,
-    P2P_UMEM_VIDMEM_BINDING **ppBinding
+    OBJGPU                   *pExpectedGpu,
+    P2P_UMEM_VIDMEM_BINDING **ppBinding,
+    P2P_UMEM_VIDMEM_BINDING **ppResidual
 )
 {
     RM_API *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
@@ -1620,11 +1622,12 @@ RmP2PUmemVidmemBind
     NvU32 segSize = 0;
     NV_STATUS status;
 
-    NV_ASSERT_OR_RETURN(ppBinding != NULL, NV_ERR_INVALID_ARGUMENT);
+    NV_ASSERT_OR_RETURN(ppBinding != NULL && ppResidual != NULL, NV_ERR_INVALID_ARGUMENT);
     *ppBinding = NULL;
+    *ppResidual = NULL;
     NV_ASSERT_OR_RETURN(rmapiLockIsOwner(), NV_ERR_INVALID_LOCK_STATE);
 
-    if (!nvP2PVidmemRangeValid(address, length))
+    if (address == 0 || !nvP2PVidmemRangeValid(address, length))
         return NV_ERR_INVALID_ARGUMENT;
 
     status = RmP2PGetInfoWithoutToken(address, length, NULL,
@@ -1635,6 +1638,9 @@ RmP2PUmemVidmemBind
     status = RmP2PValidateSubDevice(pThirdPartyP2P, &pGpu);
     if (status != NV_OK)
         return status;
+
+    if (pGpu != pExpectedGpu)
+        return NV_ERR_INVALID_DEVICE;
 
     // The internal client below serves only the non-MIG, non-APM case.
     if (gpuIsApmFeatureEnabled(pGpu) || IS_MIG_ENABLED(pGpu))
@@ -1650,6 +1656,13 @@ RmP2PUmemVidmemBind
     if (status != NV_OK)
         return status;
 
+    /* Reserve a durable owner before taking the dup: even Free failure on a
+     * later validation error must return a recoverable residual handle. */
+    pBinding = portMemAllocNonPaged(sizeof(*pBinding));
+    if (pBinding == NULL) return NV_ERR_NO_MEMORY;
+    portMemSet(pBinding, 0, sizeof(*pBinding));
+    pBinding->pGpu = pGpu;
+    pBinding->hClient = pMemoryManager->hClient;
     status = pRmApi->DupObject(pRmApi, pMemoryManager->hClient,
                                pMemoryManager->hDevice, &hMemory,
                                pThirdPartyP2P->hClient, pVidmemInfo->hMemory, 0);
@@ -1662,7 +1675,11 @@ RmP2PUmemVidmemBind
                                    pVidmemInfo->hMemory, 0);
     }
     if (status != NV_OK)
+    {
+        portMemFree(pBinding);
         return status;
+    }
+    pBinding->hMemory = hMemory;
 
     status = serverGetClientUnderLock(&g_resServ, pMemoryManager->hClient,
                                       &pClient);
@@ -1682,15 +1699,12 @@ RmP2PUmemVidmemBind
                                      &segSize))
             status = NV_ERR_INVALID_STATE;
     }
-    if (status == NV_OK)
-    {
-        pBinding = portMemAllocNonPaged(sizeof(*pBinding));
-        if (pBinding == NULL)
-            status = NV_ERR_NO_MEMORY;
-    }
     if (status != NV_OK)
     {
-        NV_ASSERT_OK(pRmApi->Free(pRmApi, pMemoryManager->hClient, hMemory));
+        if (pRmApi->Free(pRmApi, pMemoryManager->hClient, hMemory) != NV_OK)
+            *ppResidual = pBinding;
+        else
+            portMemFree(pBinding);
         return status;
     }
 
@@ -1748,7 +1762,7 @@ RmP2PUmemVidmemResolve
  *  The caller holds the API lock.  Never called after an ambiguous CE outcome
  *  on the window: the allocation then stays referenced until reset.
  */
-void
+NV_STATUS
 RmP2PUmemVidmemUnbind
 (
     P2P_UMEM_VIDMEM_BINDING *pBinding
@@ -1756,12 +1770,17 @@ RmP2PUmemVidmemUnbind
 {
     RM_API *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
 
-    if (pBinding == NULL)
-        return;
+    NV_STATUS status;
 
-    NV_ASSERT(rmapiLockIsOwner());
-    NV_ASSERT_OK(pRmApi->Free(pRmApi, pBinding->hClient, pBinding->hMemory));
+    if (pBinding == NULL)
+        return NV_ERR_INVALID_ARGUMENT;
+
+    NV_ASSERT_OR_RETURN(rmapiLockIsOwner(), NV_ERR_INVALID_LOCK_STATE);
+    status = pRmApi->Free(pRmApi, pBinding->hClient, pBinding->hMemory);
+    if (status != NV_OK)
+        return status;
     portMemFree(pBinding);
+    return NV_OK;
 }
 
 NV_STATUS RmP2PRegisterCallback(

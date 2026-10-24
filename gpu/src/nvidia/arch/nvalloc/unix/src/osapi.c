@@ -4454,9 +4454,11 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind(
     nvidia_stack_t *sp,
     NvU64           gpuVirtualAddress,
     NvU64           length,
+    const NvU8     *pExpectedGpuUuid,
     NvU8           *pGpuUuid,
     NvU32          *pSegSize,
-    void          **ppBinding
+    void          **ppBinding,
+    void          **ppResidual
 )
 {
     THREAD_STATE_NODE threadState;
@@ -4466,9 +4468,10 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind(
 
     ct_assert(sizeof(pBinding->gpuUuid) == GPU_UUID_LEN);
 
-    if (pGpuUuid == NULL || pSegSize == NULL || ppBinding == NULL)
+    if (pExpectedGpuUuid == NULL || pGpuUuid == NULL || pSegSize == NULL || ppBinding == NULL || ppResidual == NULL)
         return NV_ERR_INVALID_ARGUMENT;
     *ppBinding = NULL;
+    *ppResidual = NULL;
 
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
@@ -4476,14 +4479,19 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind(
     rmStatus = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
     if (rmStatus == NV_OK)
     {
-        rmStatus = RmP2PUmemVidmemBind(gpuVirtualAddress, length, &pBinding);
+        OBJGPU *expected = gpumgrGetGpuFromUuid(pExpectedGpuUuid,
+            DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _TYPE, _SHA1) |
+            DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _FORMAT, _BINARY));
+        rmStatus = RmP2PUmemVidmemBind(gpuVirtualAddress, length, expected, &pBinding,
+                    (P2P_UMEM_VIDMEM_BINDING **)ppResidual);
         if (rmStatus == NV_OK)
         {
             const NvU8 *pGid = RmGetGpuUuidRaw(NV_GET_NV_STATE(pBinding->pGpu));
 
             if (pGid == NULL)
             {
-                RmP2PUmemVidmemUnbind(pBinding);
+                if (RmP2PUmemVidmemUnbind(pBinding) != NV_OK)
+                    *ppResidual = pBinding;
                 rmStatus = NV_ERR_GPU_UUID_NOT_FOUND;
             }
             else
@@ -4523,7 +4531,7 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_unbind(
     rmStatus = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
     if (rmStatus == NV_OK)
     {
-        RmP2PUmemVidmemUnbind(pBinding);
+        rmStatus = RmP2PUmemVidmemUnbind(pBinding);
         rmapiLockRelease();
     }
 
@@ -4620,7 +4628,7 @@ NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
 }
 
 /* The API lock covers CPU work only; no request-completion wait. */
-NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding, NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes, void **out)
+NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding, NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes, P2P_UMEM_CE_EVENT event, void *eventArg, void **out)
 {
     THREAD_STATE_NODE threadState;
     NV_STATUS status;
@@ -4629,7 +4637,7 @@ NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
     status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
     if (status == NV_OK) {
-        status = RmP2PUmemCeHostBind(binding, phys, count, pageSize, bytes, out);
+        status = RmP2PUmemCeHostBind(binding, phys, count, pageSize, bytes, event, eventArg, out);
         rmapiLockRelease();
     }
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);

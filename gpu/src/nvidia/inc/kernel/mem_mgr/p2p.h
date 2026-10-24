@@ -64,12 +64,13 @@ NV_STATUS  RmP2PRegisterCallback    (NvU64, NvU64, NvU64, void *, void (*)(void 
 NV_STATUS  RmP2PPutPages            (NvU64, NvU32, NvU64, void *);
 NV_STATUS  RmP2PGetGpuByAddress     (NvU64, NvU64, OBJGPU **);
 NV_STATUS  RmP2PPutPagesPersistent  (void *, void *, void *);
-NV_STATUS  RmP2PUmemVidmemBind      (NvU64, NvU64, P2P_UMEM_VIDMEM_BINDING **);
+NV_STATUS  RmP2PUmemVidmemBind      (NvU64, NvU64, OBJGPU *, P2P_UMEM_VIDMEM_BINDING **, P2P_UMEM_VIDMEM_BINDING **);
 NV_STATUS  RmP2PUmemVidmemResolve   (P2P_UMEM_VIDMEM_BINDING *, OBJGPU *, struct MEMORY_DESCRIPTOR **);
-void       RmP2PUmemVidmemUnbind    (P2P_UMEM_VIDMEM_BINDING *);
+NV_STATUS  RmP2PUmemVidmemUnbind    (P2P_UMEM_VIDMEM_BINDING *);
 NV_STATUS RmP2PUmemDmaRequestDirect(OBJGPU *, NvU64 *, NvU32, NvU32, NvU64, struct MEMORY_DESCRIPTOR *, NvU64, NvU64, const P2P_UMEM_XFER *, NvU32, NvU32, NvBool *, NvU64 *);
 
-NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *, NvU64 *, NvU32, NvU32, NvU64, void **);
+typedef void (*P2P_UMEM_CE_EVENT)(void *arg, NvU64 watermark);
+NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *, NvU64 *, NvU32, NvU32, NvU64, P2P_UMEM_CE_EVENT, void *, void **);
 NV_STATUS RmP2PUmemCeHostUnbind(void *);
 NV_STATUS RmP2PUmemCeAsyncSubmit(void *, const P2P_UMEM_XFER *, NvU32, NvU32, NvBool *, NvU64 *);
 NV_STATUS RmP2PUmemCeProgress(void *, NvU64 *);

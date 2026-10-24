@@ -265,6 +265,14 @@ RmP2PRegisterUmemBuffer
         return NV_ERR_INVALID_ARGUMENT;
     }
 
+    *ppBufferHandle = NULL;
+    /* No bound allocation/memdesc is supplied by this historical API. */
+    if (bufferType == NV_P2P_BUFFER_TYPE_GPU_EXPORT)
+        return NV_ERR_NOT_SUPPORTED;
+    /* Its descriptor starts at page zero, with no first-page-offset field. */
+    if (baseAddress & (P2P_PAGE_SIZE_4K - 1))
+        return NV_ERR_NOT_SUPPORTED;
+
     if (size > P2P_MAX_BUFFER_SIZE)
     {
         NV_PRINTF(LEVEL_ERROR, "P2P Register: buffer too large\n");
@@ -508,6 +516,9 @@ RmP2PGetUmemPages
         return NV_ERR_INVALID_ARGUMENT;
 
     if (pHandle->bGpuBacked)
+        return NV_ERR_NOT_SUPPORTED;
+#ifdef NV_XDEV_EXT_LEGACY_UNBOUND_GPU_EXPORT
+    if (pHandle->bGpuBacked)
     {
         NvU64 frameCount;
 
@@ -524,6 +535,7 @@ RmP2PGetUmemPages
         return NV_OK;
     }
 
+#endif
     if (pHandle->pageSize == 0)
         return NV_ERR_INVALID_STATE;
 
@@ -580,6 +592,13 @@ RmP2PUmemDmaRequest
     NvU32   flags
 )
 {
+#ifndef NV_XDEV_EXT_LEGACY_RAW_GPU_OFFSET
+    /* gpuOffset is not an allocation binding. Only the Direct/async APIs
+     * resolve a caller-owned vidmem descriptor; raw FB offsets are unsupported. */
+    (void)pGpu; (void)pBufferHandle; (void)gpuOffset;
+    (void)umemOffset; (void)size; (void)flags;
+    return NV_ERR_NOT_SUPPORTED;
+#else
     P2P_UMEM_BUFFER_HANDLE *pHandle = (P2P_UMEM_BUFFER_HANDLE *)pBufferHandle;
     NV_STATUS status = NV_OK;
     MemoryManager *pMemoryManager;
@@ -698,6 +717,7 @@ RmP2PUmemDmaRequest
     memdescDestroy(pGpuMemDesc);
 
     return status;
+#endif
 }
 
 // Backward compatibility
@@ -713,6 +733,8 @@ typedef struct P2P_UMEM_CE_HOST {
     CeUtils *pCeUtils;
     NvU64 bytes;
     NvBool poisoned;
+    P2P_UMEM_CE_EVENT event;
+    void *eventArg;
     struct P2P_UMEM_CE_HOST *pNext;
 } P2P_UMEM_CE_HOST;
 
@@ -727,7 +749,8 @@ void RmP2PUmemCeInvalidate(OBJGPU *pGpu)
 }
 
 NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *b,
-    NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes, void **out)
+    NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes,
+    P2P_UMEM_CE_EVENT event, void *eventArg, void **out)
 {
     P2P_UMEM_CE_HOST *h;
     NV0050_ALLOCATION_PARAMETERS params = {0};
@@ -749,6 +772,7 @@ NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *b,
     if (h == NULL) return NV_ERR_NO_MEMORY;
     portMemSet(h, 0, sizeof(*h));
     h->pBinding = b; h->bytes = bytes;
+    h->event = event; h->eventArg = eventArg;
     /* UMEM is ordinary cached CPU RAM. CE cache operations use this attribute. */
     status = memdescCreate(&h->pHostMemDesc, g, bytes, 0, NV_FALSE,
                           ADDR_SYSMEM, NV_MEMORY_CACHED, MEMDESC_FLAGS_NONE);
@@ -757,6 +781,8 @@ NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *b,
     memdescSetPageSize(h->pHostMemDesc, AT_GPU, pageSize);
     if (IsTURINGorBetter(g))
         params.flags |= DRF_DEF(0050_CEUTILS, _FLAGS, _NO_BAR1_USE, _TRUE);
+    if (event != NULL)
+        params.flags |= DRF_DEF(0050_CEUTILS, _FLAGS, _ENABLE_COMPLETION_CB, _TRUE);
     status = objCreate(&h->pCeUtils, mm, CeUtils, g, NULL, &params);
     if (status != NV_OK) goto fail;
     /* The shadow-transfer fallback can allocate (and issue synchronous copies)
@@ -796,6 +822,24 @@ static NV_STATUS _p2pXdevExtCeValid(P2P_UMEM_CE_HOST *h)
     return NV_OK;
 }
 
+/* CeUtils calls this after removing the payload callback from its list.
+ * It may run in interrupt context: never acquire RM locks or sleep here.
+ * Destruction disconnects the channel event and drains callback delivery before
+ * freeing this host. The callback only forwards an observed semaphore watermark. */
+static void _p2pXdevExtCeEvent(void *arg)
+{
+    P2P_UMEM_CE_HOST *h = arg;
+    NvU64 watermark;
+    if (h->event == NULL || _p2pXdevExtCeValid(h) != NV_OK) return;
+    watermark = ceutilsUpdateProgress(h->pCeUtils);
+    if (watermark > h->pCeUtils->lastSubmittedPayload)
+    {
+        h->poisoned = NV_TRUE;
+        return;
+    }
+    h->event(h->eventArg, watermark);
+}
+
 NV_STATUS RmP2PUmemCeAsyncSubmit(void *host, const P2P_UMEM_XFER *x,
     NvU32 n, NvU32 direction, NvBool *issued, NvU64 *token)
 {
@@ -833,6 +877,11 @@ NV_STATUS RmP2PUmemCeAsyncSubmit(void *host, const P2P_UMEM_XFER *x,
         p.dstOffset = direction ? h->pBinding->offset + x[i].gpuOffset : x[i].umemOffset;
         p.length = x[i].size;
         p.flags = NV0050_CTRL_MEMCOPY_FLAGS_ASYNC;
+        if (h->event != NULL && i == n - 1)
+        {
+            p.pCompletionCallback = _p2pXdevExtCeEvent;
+            p.pCompletionCallbackArg = h;
+        }
         /* No completion wait here. A full GPFIFO may still wait for space. */
         *issued = NV_TRUE;
         status = ceutilsMemcopy(h->pCeUtils, &p);
@@ -869,6 +918,7 @@ NV_STATUS RmP2PUmemCeHostUnbind(void *host)
     if (watermark != h->pCeUtils->lastSubmittedPayload) return NV_ERR_BUSY_RETRY;
     for (link = &g_pXdevExtCeHosts; *link != NULL; link = &(*link)->pNext)
         if (*link == h) { *link = h->pNext; break; }
+    h->event = NULL;
     /* Already drained: the CeUtils destructor's legacy wait observes completion. */
     objDelete(h->pCeUtils);
     memdescDestroy(h->pHostMemDesc);

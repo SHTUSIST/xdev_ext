@@ -80,7 +80,10 @@ run = xfer.index("nv_xdev_ext_gpu_run(")
 report = xfer.index("nv_xdev_ext_gpu_report_policy_errors(&xdev_ext_outcome)")
 unbind = xfer.index("nv_p2p_vidmem_unbind(vidmem)")
 assert bind < run < report < unbind
-assert "if (!ceAmbiguous)\n        nv_p2p_vidmem_unbind(vidmem);" in xfer
+# Unbind now reports failure and retains its residual instead of losing the owner.
+assert "if (!ceAmbiguous)\n    {" in xfer
+assert "releaseStatus = nv_p2p_vidmem_unbind(vidmem)" in xfer
+assert "if (ceAmbiguous) pBuffer->vidmemResidual = vidmem;" in xfer
 assert "rm_p2p_umem_dma_request(" not in xfer
 run_args = xfer[run:report]
 assert "NV_ERR_INVALID_STATE" in run_args
@@ -334,7 +337,7 @@ assert "&call->hwSubmitted" in submit
 # unbind releases them after RM drops the dup.  The ambiguous branch skips
 # unbind permanently.  The opened GPU must own the allocation.
 vbind = function_body(P2P, "NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(")
-vunbind = function_body(P2P, "void NV_API_CALL nv_p2p_vidmem_unbind(")
+vunbind = function_body(P2P, "NV_STATUS NV_API_CALL nv_p2p_vidmem_unbind(")
 dev_get = function_body(NV, "int nvidia_dev_get_uuid(")
 dev_put = function_body(NV, "void nvidia_dev_put_uuid(")
 dev_ref = vbind.index("nvidia_dev_get_uuid(pExpectedGpuUuid, sp)")
@@ -571,13 +574,14 @@ assert "nv_p2p_vidmem_bind(uuid, gpu_va, len, &region->vidmem," in bind_region
 assert "out->len = len;" in bind_region
 assert "out->seg_size = seg_size;" in bind_region
 
-# bind_host: the pool pages, already pinned by their UMEM, as CPU physical
-# addresses for an ADDR_SYSMEM surface; only without IOMMU translation.
+# bind_host keeps the identity-only variant; the default maps GPU-device IOVAs.
 bind_host = function_body(BACKEND, "static int nv_xdev_ext_ce_bind_host(")
 iommu = bind_host.index("!nv_p2p_umem_iommu_untranslated(region->dev)")
 assert "return -EOPNOTSUPP;" in bind_host[iommu:iommu + 80]
 assert iommu < bind_host.index("kvzalloc(")
 assert "page_to_phys(pages[i])" in bind_host
+assert "#ifdef NV_XDEV_EXT_CE_PHYS_ADDR" in bind_host
+assert "dma_map_sgtable(region->dev" in bind_host
 for pin in ("pin_user_pages", "NV_PIN_USER_PAGES", "get_page("):
     assert pin not in BACKEND, pin
 
@@ -598,7 +602,7 @@ assert "nv_p2p_ce_progress(h->rm, &watermark)" in progress_ce
 assert "nv_xdev_ext_ce_async_ready(" in progress_ce
 assert "xdev_ext_ce_complete(c->cookie, c->ticket" in progress_ce
 assert progress_ce.index("mutex_unlock(&h->lock)") < progress_ce.index("xdev_ext_ce_complete(")
-unbind_region = function_body(BACKEND, "static void nv_xdev_ext_ce_unbind_region(")
+unbind_region = function_body(BACKEND, "static int nv_xdev_ext_ce_unbind_region(")
 assert unbind_region.index("READ_ONCE(region->ambiguous)") < \
     unbind_region.index("nv_p2p_vidmem_unbind(region->vidmem)")
 

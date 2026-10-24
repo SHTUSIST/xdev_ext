@@ -503,6 +503,7 @@ NV_STATUS NV_API_CALL nv_pin_xsk_umem(struct socket *xskSocket,
                                       NvU32 frameSize, void **ppHandle);
 NV_STATUS NV_API_CALL nv_validate_xsk_umem(struct socket *xskSocket,
                                            void *pHandle);
+NV_STATUS NV_API_CALL nv_host_region_dma_map(void *handle, struct device *dev);
 NV_STATUS NV_API_CALL nv_unpin_host_region(void *pHandle);
 NV_STATUS NV_API_CALL nv_get_host_region_pages(void *pHandle, NvU64 offset,
                                                 NvU64 size,
@@ -526,8 +527,9 @@ struct nv_p2p_umem_xfer;
 NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(const NvU8 *pExpectedGpuUuid,
                                          NvU64 gpuVA, NvU64 length,
                                          nv_p2p_vidmem_binding_t **ppBinding,
-                                         NvU32 *pSegSize);
-void NV_API_CALL nv_p2p_vidmem_unbind(nv_p2p_vidmem_binding_t *pBinding);
+                                         NvU32 *pSegSize,
+                                         nv_p2p_vidmem_binding_t **ppResidual);
+NV_STATUS NV_API_CALL nv_p2p_vidmem_unbind(nv_p2p_vidmem_binding_t *pBinding);
 /* Process context: xferCount transfers in one RM request; see nv-p2p.c. */
 NV_STATUS NV_API_CALL nv_p2p_vidmem_dma_request(
     nv_p2p_vidmem_binding_t *pBinding, NvU64 *pPhysAddrs, NvU32 pageCount,
@@ -535,7 +537,8 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_dma_request(
     NvU32 xferCount, NvU32 direction, NvBool *pHwSubmitted, NvU64 *pBytesDone);
 /* Dedicated native-async context; caller serializes submit/progress/unbind. */
 typedef struct nv_p2p_ce_host nv_p2p_ce_host_t;
-NV_STATUS NV_API_CALL nv_p2p_ce_host_bind(nv_p2p_vidmem_binding_t *, NvU64 *, NvU32, NvU32, NvU64, nv_p2p_ce_host_t **);
+typedef void (*nv_p2p_ce_event_fn)(void *arg, NvU64 watermark);
+NV_STATUS NV_API_CALL nv_p2p_ce_host_bind(nv_p2p_vidmem_binding_t *, NvU64 *, NvU32, NvU32, NvU64, nv_p2p_ce_event_fn, void *, nv_p2p_ce_host_t **);
 NV_STATUS NV_API_CALL nv_p2p_ce_host_unbind(nv_p2p_ce_host_t *);
 NV_STATUS NV_API_CALL nv_p2p_ce_async_submit(nv_p2p_ce_host_t *, const struct nv_p2p_umem_xfer *, NvU32, NvU32, NvBool *, NvU64 *);
 NV_STATUS NV_API_CALL nv_p2p_ce_progress(nv_p2p_ce_host_t *, NvU64 *);

@@ -3118,12 +3118,14 @@ unlock:
                 break;
             }
 
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
             if (!nv_p2p_umem_iommu_untranslated(nvl->dev))
             {
                 params->status = NV_ERR_NOT_SUPPORTED;
                 break;
             }
 
+#endif
 #if NV_P2P_UMEM_STRICT_SECURITY_CHECKS
             if (params->size > NV_P2P_UMEM_MAX_PIN_SIZE)
             {
@@ -3155,6 +3157,13 @@ unlock:
             }
             if (params->status == NV_OK)
             {
+                params->status = nv_host_region_dma_map(handle, nvl->dev);
+                if (params->status != NV_OK)
+                {
+                    nv_unpin_host_region(handle);
+                    if (xskSocket != NULL) sockfd_put(xskSocket);
+                    break;
+                }
                 params->status = nv_p2p_umem_ioctl_handle_insert(
                     nvlfp, current->mm, xskSocket, handle, params->flags,
                     &userHandle);

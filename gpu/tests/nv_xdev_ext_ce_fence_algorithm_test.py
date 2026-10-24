@@ -133,12 +133,16 @@ typedef struct {
     MEMORY_DESCRIPTOR *pHostMemDesc;
     NvU64 bytes;
     NvBool poisoned;
+    void (*event)(void *, NvU64);
+    void *eventArg;
 } P2P_UMEM_CE_HOST;
 typedef struct { NvU64 umemOffset, gpuOffset, size; } P2P_UMEM_XFER;
 typedef struct {
     MEMORY_DESCRIPTOR *pSrcMemDesc, *pDstMemDesc;
     NvU64 srcOffset, dstOffset, length, submittedWorkId;
     NvU32 flags;
+    ChannelCompletionCallback pCompletionCallback;
+    void *pCompletionCallbackArg;
 } CEUTILS_MEMCOPY_PARAMS;
 #define P2P_UMEM_MAX_XFERS 1024
 #define NV0050_CTRL_MEMCOPY_FLAGS_ASYNC 1
@@ -322,7 +326,11 @@ def main():
     if not has_submit and not args.allow_missing_submit:
         raise ValueError("production async submit missing; use --allow-missing-submit only for historical RED")
     if has_submit:
-        sources += [P2P_FIXTURE, function(p2p, "RmP2PUmemCeAsyncSubmit")]
+        # Include the real event helper referenced by the newly callback-capable submit.
+        sources.append(P2P_FIXTURE)
+        if re.search(r"static void\s+_p2pXdevExtCeEvent\s*\(", p2p):
+            sources.append(function(p2p, "_p2pXdevExtCeEvent"))
+        sources.append(function(p2p, "RmP2PUmemCeAsyncSubmit"))
     sources.append(HARNESS)
     if has_submit:
         sources.append(GUARD_HARNESS)

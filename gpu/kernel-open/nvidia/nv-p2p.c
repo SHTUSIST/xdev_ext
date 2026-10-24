@@ -247,16 +247,16 @@ static NV_STATUS nvidia_p2p_map_page_size(NvU32 page_size, NvU32 *page_size_inde
 
 static NV_STATUS nv_p2p_insert_dma_mapping(
     struct nv_p2p_mem_info *mem_info,
-    struct nvidia_p2p_dma_mapping *dma_mapping
+    struct nvidia_p2p_dma_mapping *dma_mapping,
+    struct nv_p2p_dma_mapping *node
 )
 {
     NV_STATUS status;
-    struct nv_p2p_dma_mapping *node;
 
-    status = os_alloc_mem((void**)&node, sizeof(*node));
-    if (status != NV_OK)
+    if (node == NULL)
     {
-        return status;
+        status = os_alloc_mem((void**)&node, sizeof(*node));
+        if (status != NV_OK) return status;
     }
 
     down(&mem_info->dma_mapping_list.lock);
@@ -269,6 +269,7 @@ static NV_STATUS nv_p2p_insert_dma_mapping(
     return NV_OK;
 }
 
+#ifdef NV_XDEV_EXT_LEGACY_REMOVE_BEFORE_UNMAP
 static struct nvidia_p2p_dma_mapping* nv_p2p_remove_dma_mapping(
     struct nv_p2p_mem_info *mem_info,
     struct nvidia_p2p_dma_mapping *dma_mapping
@@ -294,8 +295,9 @@ static struct nvidia_p2p_dma_mapping* nv_p2p_remove_dma_mapping(
 
     return ret_dma_mapping;
 }
+#endif
 
-static void nv_p2p_free_dma_mapping(
+static NV_STATUS nv_p2p_free_dma_mapping(
     struct nvidia_p2p_dma_mapping *dma_mapping
 )
 {
@@ -330,7 +332,7 @@ static void nv_p2p_free_dma_mapping(
                         (os_page_count * sizeof(NvU64)));
             if(WARN_ON(status != NV_OK))
             {
-                goto failed;
+                return status;
             }
 
             index = 0;
@@ -353,6 +355,7 @@ static void nv_p2p_free_dma_mapping(
             WARN_ON(status != NV_OK);
 
             os_free_mem(os_dma_addresses);
+            if (status != NV_OK) return status;
         }
         else
         {
@@ -362,7 +365,7 @@ static void nv_p2p_free_dma_mapping(
                                         dma_mapping->entries,
                                         dma_mapping->dma_addresses,
                                         &dma_mapping->private);
-            WARN_ON(status != NV_OK);
+            if (WARN_ON(status != NV_OK)) return status;
         }
     }
     else
@@ -375,29 +378,38 @@ static void nv_p2p_free_dma_mapping(
         }
     }
 
-failed:
     os_free_mem(dma_mapping->dma_addresses);
 
     os_free_mem(dma_mapping);
+    return NV_OK;
 }
 
-static void nv_p2p_free_page_table(
+static NV_STATUS nv_p2p_free_page_table(
     struct nvidia_p2p_page_table *page_table
 )
 {
     NvU32 i;
-    struct nvidia_p2p_dma_mapping *dma_mapping;
+    struct nv_p2p_dma_mapping *node;
+    NV_STATUS status;
     struct nv_p2p_mem_info *mem_info = NULL;
 
     mem_info = container_of(page_table, nv_p2p_mem_info_t, page_table);
 
-    dma_mapping = nv_p2p_remove_dma_mapping(mem_info, NULL);
-    while (dma_mapping != NULL)
+    down(&mem_info->dma_mapping_list.lock);
+    while (!list_empty(&mem_info->dma_mapping_list.list_head))
     {
-        nv_p2p_free_dma_mapping(dma_mapping);
-
-        dma_mapping = nv_p2p_remove_dma_mapping(mem_info, NULL);
+        node = container_of(mem_info->dma_mapping_list.list_head.next,
+                            struct nv_p2p_dma_mapping, list_node);
+        status = nv_p2p_free_dma_mapping(node->dma_mapping);
+        if (status != NV_OK)
+        {
+            up(&mem_info->dma_mapping_list.lock);
+            return status; /* table still owns the mapping and its list node */
+        }
+        list_del(&node->list_node);
+        os_free_mem(node);
     }
+    up(&mem_info->dma_mapping_list.lock);
 
     for (i = 0; i < page_table->entries; i++)
     {
@@ -415,6 +427,7 @@ static void nv_p2p_free_page_table(
     }
 
     os_free_mem(mem_info);
+    return NV_OK;
 }
 
 static NV_STATUS nv_p2p_put_pages(
@@ -445,6 +458,13 @@ static NV_STATUS nv_p2p_put_pages(
          * callback which can free it unlike non-persistent page_table.
          */
         mem_info = container_of(*page_table, nv_p2p_mem_info_t, page_table);
+        down(&mem_info->dma_mapping_list.lock);
+        if (!list_empty(&mem_info->dma_mapping_list.list_head))
+        {
+            up(&mem_info->dma_mapping_list.lock);
+            return NV_ERR_STATE_IN_USE;
+        }
+        up(&mem_info->dma_mapping_list.lock);
         status = rm_p2p_put_pages_persistent(sp, mem_info->private, *page_table, mem_info->mig_info);
     }
     else
@@ -455,7 +475,8 @@ static NV_STATUS nv_p2p_put_pages(
 
     if (status == NV_OK)
     {
-        nv_p2p_free_page_table(*page_table);
+        status = nv_p2p_free_page_table(*page_table);
+        if (status != NV_OK) return status;
         *page_table = NULL;
     }
     else if ((pt_type == NV_P2P_PAGE_TABLE_TYPE_NON_PERSISTENT) &&
@@ -886,7 +907,8 @@ int nvidia_p2p_put_pages_persistent(
     status = nv_p2p_put_pages(NV_P2P_PAGE_TABLE_TYPE_PERSISTENT,
                               sp, 0, 0, virtual_address, &page_table);
 
-    nvidia_dev_put_uuid(uuid, sp);
+    if (status == NV_OK)
+        nvidia_dev_put_uuid(uuid, sp);
 
     nv_kmem_cache_free_stack(sp);
 
@@ -908,6 +930,7 @@ int nvidia_p2p_dma_map_pages(
     NvU32 page_size;
     enum nvidia_p2p_page_size_type page_size_type;
     struct nv_p2p_mem_info *mem_info = NULL;
+    struct nv_p2p_dma_mapping *node = NULL;
     NvU32 i;
     void *priv;
     int rc;
@@ -967,6 +990,11 @@ int nvidia_p2p_dma_map_pages(
         dma_addresses[i] = page_table->pages[i]->physical_address;
     }
 
+    /* Allocate the list owner before mapping: insertion cannot fail after
+     * DMA has acquired reachability to the allocation. */
+    status = os_alloc_mem((void **)&node, sizeof(*node));
+    if (status != NV_OK) goto failed;
+
     status = rm_p2p_dma_map_pages(sp, &peer_dma_dev,
             page_table->gpu_uuid, page_size, page_count, dma_addresses, &priv);
     if (status != NV_OK)
@@ -984,22 +1012,13 @@ int nvidia_p2p_dma_map_pages(
     /*
      * All success, it is safe to insert dma_mapping now.
      */
-    status = nv_p2p_insert_dma_mapping(mem_info, *dma_mapping);
-    if (status != NV_OK)
-    {
-        goto failed_insert;
-    }
-
+    /* The non-NULL node makes insertion infallible after the native map. */
+    (void)nv_p2p_insert_dma_mapping(mem_info, *dma_mapping, node);
     nv_kmem_cache_free_stack(sp);
-
     return 0;
 
-failed_insert:
-    nv_p2p_free_dma_mapping(*dma_mapping);
-    dma_addresses = NULL;
-    *dma_mapping = NULL;
-
 failed:
+    if (node != NULL) os_free_mem(node);
     if (dma_addresses != NULL)
     {
         os_free_mem(dma_addresses);
@@ -1024,36 +1043,30 @@ int nvidia_p2p_dma_unmap_pages(
     struct nvidia_p2p_dma_mapping *dma_mapping
 )
 {
-    struct nv_p2p_mem_info *mem_info = NULL;
+    struct nv_p2p_mem_info *mem_info;
+    struct nv_p2p_dma_mapping *node;
+    NV_STATUS status = NV_OK;
 
     if (peer == NULL || dma_mapping == NULL || page_table == NULL)
-    {
         return -EINVAL;
-    }
-
+    if (peer != dma_mapping->pci_dev ||
+        dma_mapping->page_size_type >= NVIDIA_P2P_PAGE_SIZE_COUNT)
+        return -EINVAL;
     mem_info = container_of(page_table, nv_p2p_mem_info_t, page_table);
-
-    /*
-     * nv_p2p_remove_dma_mapping returns dma_mapping if the dma_mapping was
-     * found and got unlinked from the mem_info->dma_mapping_list (atomically).
-     * This ensures that the RM's tear-down path does not race with this path.
-     *
-     * nv_p2p_remove_dma_mappings returns NULL if the dma_mapping was already
-     * unlinked.
-     */
-    if (nv_p2p_remove_dma_mapping(mem_info, dma_mapping) == NULL)
+    down(&mem_info->dma_mapping_list.lock);
+    list_for_each_entry(node, &mem_info->dma_mapping_list.list_head, list_node)
     {
-        return 0;
+        if (node->dma_mapping != dma_mapping) continue;
+        status = nv_p2p_free_dma_mapping(dma_mapping);
+        if (status == NV_OK)
+        {
+            list_del(&node->list_node);
+            os_free_mem(node);
+        }
+        break;
     }
-
-    WARN_ON(peer != dma_mapping->pci_dev);
-
-    BUG_ON((dma_mapping->page_size_type <= NVIDIA_P2P_PAGE_SIZE_4KB) ||
-           (dma_mapping->page_size_type >= NVIDIA_P2P_PAGE_SIZE_COUNT));
-
-    nv_p2p_free_dma_mapping(dma_mapping);
-
-    return 0;
+    up(&mem_info->dma_mapping_list.lock);
+    return nvidia_p2p_map_status(status);
 }
 
 NV_EXPORT_SYMBOL(nvidia_p2p_dma_unmap_pages);
@@ -1226,6 +1239,9 @@ typedef struct {
     void                   *gpuMemHandle;   // GPU memory handle (for GPU export)
     NvU64                   gpuOffset;      // GPU memory offset
     NvBool                  bGpuBacked;     // Whether backed by GPU memory
+    struct sg_table        *dmaSgt;        // GPU-device mapping, retained until unpin
+    struct device          *dmaDev;
+    struct nv_p2p_vidmem_binding *vidmemResidual; // failed cleanup/ambiguous CE owner
     struct mm_struct       *pinMm;          // Host region: mm charged in locked_vm
 } nv_p2p_umem_buffer_t;
 
@@ -1476,13 +1492,19 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer(
             nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: NULL page at index %u\n", i);
             goto fail_unpin;
         }
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
         pBuffer->physAddrs[i] = page_to_phys(pBuffer->pages[i]);
+#else
+        pBuffer->physAddrs[i] = 0;
+#endif
 
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
         // Sanity check physical address
         if (unlikely(pBuffer->physAddrs[i] == 0))
         {
             nv_printf(NV_DBG_ERRORS, "NVRM: CXL pin: zero physical address at page %u\n", i);
         }
+#endif
     }
 
     pBuffer->userVirtAddr = userVirtAddr;
@@ -1582,6 +1604,10 @@ NV_STATUS NV_API_CALL nv_get_cxl_buffer_pages(
 
     if (unlikely(pBuffer->physAddrs == NULL || pBuffer->pageCount == 0))
         return NV_ERR_INVALID_STATE;
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    /* This legacy registration has no GPU device to establish a DMA mapping. */
+    if (pBuffer->dmaDev == NULL) return NV_ERR_NOT_SUPPORTED;
+#endif
 
     *ppPhysAddrs = pBuffer->physAddrs;
     *pPageCount = pBuffer->pageCount;
@@ -1739,12 +1765,18 @@ NV_STATUS NV_API_CALL nv_pin_cxl_buffer_hugepages(
             nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: NULL page at index %u\n", i);
             goto fail_unpin;
         }
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
         pBuffer->physAddrs[i] = page_to_phys(pBuffer->pages[i]);
+#else
+        pBuffer->physAddrs[i] = 0;
+#endif
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
         if (pBuffer->physAddrs[i] == 0)
         {
             nv_printf(NV_DBG_ERRORS, "NVRM: CXL hugepage pin: zero phys addr at page %u\n", i);
             goto fail_unpin;
         }
+#endif
     }
 
     *ppHandle = pBuffer;
@@ -1797,6 +1829,10 @@ NV_STATUS NV_API_CALL nv_get_cxl_buffer_hugepages(
 
     if (unlikely(pBuffer->physAddrs == NULL || pBuffer->pageCount == 0))
         return NV_ERR_INVALID_STATE;
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    /* This legacy registration has no GPU device to establish a DMA mapping. */
+    if (pBuffer->dmaDev == NULL) return NV_ERR_NOT_SUPPORTED;
+#endif
 
     *ppPhysAddrs = pBuffer->physAddrs;
     *pPageCount = pBuffer->pageCount;
@@ -2006,7 +2042,11 @@ NV_STATUS NV_API_CALL nv_pin_host_region(
             nv_printf(NV_DBG_ERRORS, "NVRM: host region pin: NULL page at index %u\n", i);
             goto fail_unpin;
         }
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
         pBuffer->physAddrs[i] = page_to_phys(pBuffer->pages[i]);
+#else
+        pBuffer->physAddrs[i] = 0;
+#endif
     }
 
     pBuffer->userVirtAddr = umemAddr;
@@ -2052,6 +2092,58 @@ fail_alloc:
         nv_xdev_ext_pin_uncharge(&nv_p2p_umem_pin_charge_ops, current->mm,
                             size, pageCount);
     return NV_ERR_NO_MEMORY;
+}
+
+/* Mapping belongs to the GPU device, not the CPU address space. Call once
+ * before publishing a registration; its registry serializes later accesses. */
+NV_STATUS NV_API_CALL nv_host_region_dma_map(void *handle, struct device *dev)
+{
+    nv_p2p_umem_buffer_t *b = handle;
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    struct scatterlist *sg;
+    struct sg_table *table;
+    NvU32 i, page = 0;
+    int rc;
+#endif
+    if (b == NULL || dev == NULL || b->pages == NULL || b->physAddrs == NULL ||
+        b->pageCount == 0)
+        return NV_ERR_INVALID_ARGUMENT;
+#ifdef NV_XDEV_EXT_CE_PHYS_ADDR
+    if (b->dmaDev != NULL) return NV_ERR_STATE_IN_USE;
+    if (!nv_p2p_umem_iommu_untranslated(dev)) return NV_ERR_NOT_SUPPORTED;
+    b->dmaDev = dev;
+    return NV_OK;
+#else
+    if (b->dmaDev != NULL) return NV_ERR_STATE_IN_USE;
+    table = kzalloc(sizeof(*table), GFP_KERNEL);
+    if (table == NULL) return NV_ERR_NO_MEMORY;
+    rc = sg_alloc_table_from_pages(table, b->pages, b->pageCount, 0,
+                                  (NvU64)b->pageCount << PAGE_SHIFT, GFP_KERNEL);
+    if (rc) { kfree(table); return NV_ERR_NO_MEMORY; }
+    rc = dma_map_sgtable(dev, table, DMA_BIDIRECTIONAL, 0);
+    if (rc) { sg_free_table(table); kfree(table); return NV_ERR_NO_MEMORY; }
+    for_each_sgtable_dma_sg(table, sg, i)
+    {
+        NvU64 off;
+        if ((sg_dma_address(sg) | sg_dma_len(sg)) & (PAGE_SIZE - 1)) goto invalid;
+        for (off = 0; off < sg_dma_len(sg); off += PAGE_SIZE)
+        {
+            if (page == b->pageCount) goto invalid;
+            b->physAddrs[page++] = sg_dma_address(sg) + off;
+        }
+    }
+    if (page != b->pageCount) goto invalid;
+    dma_sync_sgtable_for_cpu(dev, table, DMA_BIDIRECTIONAL);
+    b->dmaSgt = table;
+    b->dmaDev = dev;
+    return NV_OK;
+invalid:
+    dma_unmap_sgtable(dev, table, DMA_BIDIRECTIONAL, 0);
+    sg_free_table(table);
+    kfree(table);
+    memset(b->physAddrs, 0, b->pageCount * sizeof(*b->physAddrs));
+    return NV_ERR_INVALID_STATE;
+#endif
 }
 
 NV_STATUS NV_API_CALL nv_pin_xsk_umem(
@@ -2174,6 +2266,14 @@ NV_STATUS NV_API_CALL nv_unpin_host_region(void *pHandle)
     pinMm = pBuffer->pinMm;
     bLargeAlloc = (savedPageCount > 512);
 
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    if (pBuffer->dmaSgt != NULL)
+    {
+        dma_unmap_sgtable(pBuffer->dmaDev, pBuffer->dmaSgt, DMA_BIDIRECTIONAL, 0);
+        sg_free_table(pBuffer->dmaSgt);
+        kfree(pBuffer->dmaSgt);
+    }
+#endif
     if (pBuffer->pages)
     {
         for (i = 0; i < savedPageCount; i++)
@@ -2221,7 +2321,8 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
     NvU64 gpuVA,
     NvU64 length,
     nv_p2p_vidmem_binding_t **ppBinding,
-    NvU32 *pSegSize
+    NvU32 *pSegSize,
+    nv_p2p_vidmem_binding_t **ppResidual
 )
 {
     nv_p2p_vidmem_binding_t *pBinding;
@@ -2229,10 +2330,12 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
     NvU8 gpu_uuid[NVIDIA_P2P_GPU_UUID_LEN];
     NvU32 seg_size;
     NV_STATUS status;
+    void *residual = NULL;
 
-    if (ppBinding == NULL || pExpectedGpuUuid == NULL)
+    if (ppBinding == NULL || ppResidual == NULL || pExpectedGpuUuid == NULL)
         return NV_ERR_INVALID_ARGUMENT;
     *ppBinding = NULL;
+    *ppResidual = NULL;
 
     pBinding = kzalloc(sizeof(*pBinding), GFP_KERNEL);
     if (pBinding == NULL)
@@ -2251,10 +2354,19 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
     }
     os_mem_copy(pBinding->gpu_uuid, pExpectedGpuUuid, NVIDIA_P2P_GPU_UUID_LEN);
 
-    status = rm_p2p_umem_vidmem_bind(sp, gpuVA, length, gpu_uuid, &seg_size,
-                                     &pBinding->rm);
+    status = rm_p2p_umem_vidmem_bind(sp, gpuVA, length, pExpectedGpuUuid, gpu_uuid, &seg_size,
+                                     &pBinding->rm, &residual);
     if (status != NV_OK)
+    {
+        if (residual != NULL)
+        {
+            pBinding->rm = residual;
+            *ppResidual = pBinding;
+            nv_kmem_cache_free_stack(sp);
+            return status;
+        }
         goto put_device;
+    }
 
     if (!nv_p2p_gpu_identity_matches(pExpectedGpuUuid, gpu_uuid))
     {
@@ -2271,7 +2383,12 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
     return NV_OK;
 
 unbind:
-    WARN_ON(rm_p2p_umem_vidmem_unbind(sp, pBinding->rm) != NV_OK);
+    if (rm_p2p_umem_vidmem_unbind(sp, pBinding->rm) != NV_OK)
+    {
+        *ppResidual = pBinding;
+        nv_kmem_cache_free_stack(sp);
+        return status; /* permanent quarantine: dup, owner and outer record */
+    }
 put_device:
     nvidia_dev_put_uuid(pBinding->gpu_uuid, sp);
 free_stack:
@@ -2287,24 +2404,31 @@ free_binding:
  * Drops the RM dup, then the device reference.  Never called after an
  * ambiguous CE outcome on the window: both then stay held until reboot.
  */
-void NV_API_CALL nv_p2p_vidmem_unbind(nv_p2p_vidmem_binding_t *pBinding)
+NV_STATUS NV_API_CALL nv_p2p_vidmem_unbind(nv_p2p_vidmem_binding_t *pBinding)
 {
     nvidia_stack_t *sp = NULL;
+    NV_STATUS status;
 
     if (pBinding == NULL)
-        return;
+        return NV_ERR_INVALID_ARGUMENT;
 
     if (nv_kmem_cache_alloc_stack(&sp) != 0)
     {
         nv_printf(NV_DBG_ERRORS,
                   "NVRM: XDEV_EXT CE window: no stack to unbind, window kept\n");
-        return;
+        return NV_ERR_NO_MEMORY;
     }
 
-    WARN_ON(rm_p2p_umem_vidmem_unbind(sp, pBinding->rm) != NV_OK);
+    status = rm_p2p_umem_vidmem_unbind(sp, pBinding->rm);
+    if (status != NV_OK)
+    {
+        nv_kmem_cache_free_stack(sp);
+        return status;
+    }
     nvidia_dev_put_uuid(pBinding->gpu_uuid, sp);
     nv_kmem_cache_free_stack(sp);
     kfree(pBinding);
+    return NV_OK;
 }
 
 /*
@@ -2356,7 +2480,7 @@ struct nv_p2p_ce_host {
 };
 NV_STATUS NV_API_CALL nv_p2p_ce_host_bind(nv_p2p_vidmem_binding_t *b,
     NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes,
-    nv_p2p_ce_host_t **out)
+    nv_p2p_ce_event_fn event, void *eventArg, nv_p2p_ce_host_t **out)
 {
     nv_p2p_ce_host_t *h;
     NV_STATUS status;
@@ -2369,7 +2493,7 @@ NV_STATUS NV_API_CALL nv_p2p_ce_host_bind(nv_p2p_vidmem_binding_t *b,
         return NV_ERR_NO_MEMORY;
     }
     status = rm_p2p_umem_ce_host_bind(h->sp, b->rm, phys, count, pageSize,
-                                    bytes, &h->rm);
+                                    bytes, event, eventArg, &h->rm);
     if (status != NV_OK) {
         nv_kmem_cache_free_stack(h->sp);
         kfree(h);
@@ -2438,7 +2562,7 @@ NV_STATUS NV_API_CALL nv_registered_region_dma_xfer(
 {
     nv_p2p_umem_buffer_t *pBuffer = (nv_p2p_umem_buffer_t *)pHandle;
     nvidia_stack_t *sp = NULL;
-    nv_p2p_vidmem_binding_t *vidmem = NULL;
+    nv_p2p_vidmem_binding_t *vidmem = NULL, *residual = NULL;
     struct nv_xdev_ext_gpu_rm_call xdev_ext_call = { 0 };
     struct nv_xdev_ext_gpu_request xdev_ext_request = { 0 };
     struct nv_xdev_ext_gpu_outcome xdev_ext_outcome = { 0 };
@@ -2491,15 +2615,21 @@ NV_STATUS NV_API_CALL nv_registered_region_dma_xfer(
         return NV_ERR_INVALID_ARGUMENT;
     }
 
-    if (pBuffer->physAddrs == NULL || pBuffer->pageCount == 0)
+    if (pBuffer->physAddrs == NULL || pBuffer->pageCount == 0 ||
+        pBuffer->dmaDev == NULL || pBuffer->vidmemResidual != NULL)
     {
         nv_printf(NV_DBG_ERRORS, "NVRM: XDP DMA xfer: no pinned pages\n");
         return NV_ERR_INVALID_STATE;
     }
 
-    status = nv_p2p_vidmem_bind(pExpectedGpuUuid, gpuVA, size, &vidmem, NULL);
+    status = nv_p2p_vidmem_bind(pExpectedGpuUuid, gpuVA, size, &vidmem, NULL, &residual);
     if (status != NV_OK)
     {
+        if (residual != NULL)
+        {
+            pBuffer->vidmemResidual = residual;
+            *pCeAmbiguous = NV_TRUE;
+        }
         nv_printf(NV_DBG_ERRORS,
                   "NVRM: XDP DMA xfer: GPU window bind failed: 0x%x\n", status);
         return status;
@@ -2541,6 +2671,9 @@ NV_STATUS NV_API_CALL nv_registered_region_dma_xfer(
     xdev_ext_request.length = size;
     xdev_ext_request.umem_capacity = pBuffer->size;
 
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    dma_sync_sgtable_for_device(pBuffer->dmaDev, pBuffer->dmaSgt, DMA_BIDIRECTIONAL);
+#endif
     status = (NV_STATUS)nv_xdev_ext_gpu_run(&xdev_ext_request,
                                        &nv_xdev_ext_gpu_policy_ops,
                                        &xdev_ext_call,
@@ -2549,13 +2682,26 @@ NV_STATUS NV_API_CALL nv_registered_region_dma_xfer(
                                        &xdev_ext_outcome);
     ceAmbiguous = nv_xdev_ext_ce_classify(status, xdev_ext_call.hwSubmitted) ==
                   NV_XDEV_EXT_CE_AMBIGUOUS;
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    if (!ceAmbiguous)
+        dma_sync_sgtable_for_cpu(pBuffer->dmaDev, pBuffer->dmaSgt, DMA_BIDIRECTIONAL);
+#endif
     *pCeAmbiguous = ceAmbiguous;
     nv_xdev_ext_gpu_report_policy_errors(&xdev_ext_outcome);
     nv_kmem_cache_free_stack(sp);
 
 unbind:
     if (!ceAmbiguous)
-        nv_p2p_vidmem_unbind(vidmem);
+    {
+        NV_STATUS releaseStatus = nv_p2p_vidmem_unbind(vidmem);
+        if (releaseStatus != NV_OK)
+        {
+            status = releaseStatus;
+            ceAmbiguous = NV_TRUE;
+            *pCeAmbiguous = NV_TRUE;
+        }
+    }
+    if (ceAmbiguous) pBuffer->vidmemResidual = vidmem;
     return status;
 }
 
@@ -2589,6 +2735,9 @@ NV_STATUS NV_API_CALL nv_get_host_region_pages(
 
     if (size == 0 || offset > pBuffer->size || size > pBuffer->size - offset)
         return NV_ERR_INVALID_ARGUMENT;
+#ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    if (pBuffer->dmaDev == NULL) return NV_ERR_NOT_SUPPORTED;
+#endif
 
     if (pBuffer->pageSize == 0)
         return NV_ERR_INVALID_STATE;
@@ -2634,6 +2783,11 @@ NV_STATUS NV_API_CALL nv_register_gpu_umem(
     void  **ppHandle
 )
 {
+#ifndef NV_XDEV_EXT_LEGACY_UNBOUND_GPU_EXPORT
+    (void)gpuMemHandle; (void)gpuOffset; (void)size; (void)frameSize;
+    if (ppHandle != NULL) *ppHandle = NULL;
+    return NV_ERR_NOT_SUPPORTED;
+#else
     nv_p2p_umem_buffer_t *pBuffer = NULL;
     NV_STATUS status;
     NvU64 frameCount64;
@@ -2708,6 +2862,7 @@ NV_STATUS NV_API_CALL nv_register_gpu_umem(
               frameCount, (unsigned long long)gpuOffset);
 
     return NV_OK;
+#endif
 }
 
 /*
