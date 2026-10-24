@@ -16,6 +16,7 @@ endif
 .PHONY: all check run clean FORCE gds-check hft hft-check cuda-host-check
 .PHONY: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check reviewer-eval-check
 .PHONY: spdk-check cuda-arms cuda-arms-check session-guest-check
+.PHONY: native-eval-check native-views-check native-trace-check dmabuf-lifecycle-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -68,6 +69,17 @@ bam-check:
 
 session-guest-check:
 	$(MAKE) -C session_guest check
+
+native-views-check:
+	python3 -m unittest discover -s native_views -p 'test_*.py' -v
+
+native-trace-check:
+	python3 -m unittest discover -s native_trace -p 'test_*.py' -v
+
+dmabuf-lifecycle-check:
+	$(MAKE) -C dmabuf_lifecycle test
+
+native-eval-check: native-views-check native-trace-check dmabuf-lifecycle-check
 
 spdk-check:
 	$(MAKE) -C spdk check
