@@ -450,7 +450,7 @@ static void test_read_compat_recycles_but_pipeline_read_publishes(void)
 	/* Original pipeline-read assertions: publish the completed byte count.
 	 * The new API carries the full producer claim, not just its generation. */
 	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
-	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, 0, &claim), 0);
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, false), 0);
 	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frame.valid_len, 4096);
@@ -466,7 +466,7 @@ static void test_read_compat_recycles_but_pipeline_read_publishes(void)
 
 	/* Original compat-read assertions: successful I/O recycles immediately. */
 	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
-	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, 0, &claim), 0);
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, true), 0);
 	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 0);
@@ -474,7 +474,7 @@ static void test_read_compat_recycles_but_pipeline_read_publishes(void)
 
 	/* Original producer-error assertions: never publish a failed read. */
 	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
-	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, 0, &claim), 0);
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, -EIO, false), 0);
 	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 0);
@@ -491,7 +491,7 @@ static void test_read_finish_rejects_stale_or_nonproducer_claims(void)
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, 0, 4096, false), -ESTALE);
 	EXPECT_EQ(frame.ctrl, 0);
 	EXPECT_EQ(frame.valid_len, 0);
-	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, 0, &claim), 0);
 	word = frame.ctrl;
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0,
 		claim + (1ULL << XDEV_EXT_MECH_L_GEN_SHIFT), 4096, false), -ESTALE);
@@ -509,7 +509,7 @@ static void test_read_finish_rejects_stale_or_nonproducer_claims(void)
 	EXPECT_EQ(frame.ctrl, word);
 	EXPECT_EQ(frame.valid_len, 512);
 	EXPECT_EQ(xdev_ext_mech_life_put(&frame, consumer), XDEV_EXT_MECH_L_FREED);
-	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &next), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, 0, &next), 0);
 	EXPECT_EQ(xdev_ext_mech_life_claim_gen(next), 1);
 	word = frame.ctrl;
 	/* Neither stale failure nor stale compat completion may free the next read. */
