@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 """Raw parser contracts; these fixtures are never physical DMA evidence."""
+from decimal import Decimal
 import hashlib
 import json
 import importlib.util
@@ -47,7 +48,8 @@ class RawDecoder(unittest.TestCase):
     def setUp(self):
         self.c = load()
         self.metadata = dict(clock='CLOCK_MONOTONIC', clock_domain='test-local',
-                             trace_dropped=0)
+                             trace_dropped=0, abi='xdev-native-fixture-text-v0',
+                             evidence_kind='fixture', physical=False, performance_eligible=False)
 
     def test_decodes_actual_text_precision_and_immutable_mapping(self):
         rows = self.c.decode_trace(manifest(), raw('native_submit', '12.000000001') +
@@ -337,6 +339,109 @@ class RawDecoder(unittest.TestCase):
             self.c.trace_loss({'cpu0': 'entries: 0\n'})
 
 
+class ReviewRegressions(unittest.TestCase):
+    def setUp(self):
+        self.c = load()
+        self.metadata = dict(clock='CLOCK_MONOTONIC', clock_domain='test-local',
+                             trace_dropped=0, abi='xdev-native-v1-nvme-xsk-batch')
+
+    def row(self, phase, stamp, **changes):
+        changes.setdefault('ts_ns', int(Decimal(stamp) * 1000000000))
+        changes.setdefault('aux', 2)
+        return raw(phase, stamp, **changes)
+
+    def pair(self, **changes):
+        return self.row('native_submit', '1.0', **changes) + self.row('native_complete', '1.1', **changes)
+
+    def two_frames(self):
+        m = manifest()
+        m['record_bytes'] = 4096
+        m['trace']['layout'] = [dict(frame_id=i, offset_bytes=i * 2048, length_bytes=2048) for i in (0, 1)]
+        m['records'][0]['frame_ids'] = [0, 1]
+        return m
+
+    def frame_row(self, phase, stamp, frame, **changes):
+        values = dict(frame_id=10 + frame, frame_ordinal=frame,
+                      frame_offset=frame * 2048, frame_length=2048)
+        values.update(changes)
+        return self.row(phase, stamp, **values)
+
+    def test_current_abi_requires_typed_native_ns_even_for_other_origin(self):
+        missing = raw('native_submit', '1.000000') + raw('native_complete', '1.000001')
+        with self.assertRaisesRegex(ValueError, 'ts_ns'):
+            self.c.decode_trace(manifest(), missing, self.metadata)
+        with self.assertRaisesRegex(ValueError, 'ts_ns'):
+            self.c.decode_trace(manifest(), self.pair() + raw('native_submit', '2.0', origin='U'), self.metadata)
+        with self.assertRaisesRegex(ValueError, 'ts_ns'):
+            self.c.decode_trace(manifest(), self.pair() + self.row('native_complete', '2.0', ts_ns='bad'), self.metadata)
+
+    def test_fixture_fallback_cannot_enable_current_physical_abi(self):
+        missing = raw('native_submit', '1.0') + raw('native_complete', '1.1')
+        legacy = dict(self.metadata, abi='xdev-native-fixture-text-v0', evidence_kind='fixture',
+                      physical=False, performance_eligible=False)
+        self.assertEqual(len(self.c.decode_trace(manifest(), missing, legacy)), 2)
+        for changes in (dict(physical=True), dict(performance_eligible=True),
+                        dict(formats={'xdev_ext:native_event': 'abi=xdev-native-v1-nvme-xsk-batch'})):
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'ts_ns'):
+                self.c.decode_trace(manifest(), missing, dict(legacy, **changes))
+
+    def test_duplicate_endpoint_is_rejected_before_aggregation(self):
+        text = (self.row('record_admit', '0.8') + self.row('record_admit', '0.9') +
+                self.pair() + self.row('record_terminal', '1.2'))
+        with self.assertRaisesRegex(ValueError, 'endpoint'):
+            self.c.decode_trace(manifest(), text, self.metadata)
+
+    def test_partial_endpoint_set_cannot_become_a_complete_record(self):
+        text = self.frame_row('record_admit', '0.8', 0)
+        for phase, stamp in (('native_submit', '1.0'), ('native_complete', '1.1')):
+            text += ''.join(self.frame_row(phase, stamp, frame) for frame in (0, 1))
+        text += self.frame_row('record_terminal', '1.2', 1)
+        with self.assertRaisesRegex(ValueError, 'endpoint'):
+            self.c.decode_trace(self.two_frames(), text, self.metadata)
+
+    def test_full_unique_endpoint_set_retains_each_frame_audit(self):
+        text = ''
+        for phase, stamp in (('record_admit', '0.8'), ('native_submit', '1.0'),
+                             ('native_complete', '1.1'), ('record_terminal', '1.2')):
+            text += ''.join(self.frame_row(phase, stamp, frame) for frame in (0, 1))
+        rows = self.c.decode_trace(self.two_frames(), text, self.metadata)
+        endpoints = [row for row in rows if row['event'].startswith('record_')]
+        self.assertEqual(len(endpoints), 2)
+        for endpoint in endpoints:
+            self.assertIn('endpoint_frames', endpoint, 'complete per-frame endpoint audit is missing')
+            self.assertEqual([row['endpoint_frame_id'] for row in endpoint['endpoint_frames']], [0, 1])
+            self.assertEqual([row['native_frame_id'] for row in endpoint['endpoint_frames']], [10, 11])
+
+    def test_endpoint_status_acceptance_and_unbound_owner_conflicts_are_rejected(self):
+        for changes in (dict(status=-5), dict(accepted=0), dict(origin_tgid=99)):
+            text = self.frame_row('record_admit', '0.8', 0) + self.frame_row('record_admit', '0.9', 1, **changes)
+            for phase, stamp in (('native_submit', '1.0'), ('native_complete', '1.1')):
+                text += ''.join(self.frame_row(phase, stamp, frame) for frame in (0, 1))
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'endpoint'):
+                self.c.decode_trace(self.two_frames(), text, self.metadata)
+
+    def test_nvme_direction_and_encoded_length_are_immutable(self):
+        for aux in (1, 2 | (7 << 8)):
+            with self.subTest(aux=aux), self.assertRaisesRegex(ValueError, 'NVMe'):
+                self.c.decode_trace(manifest(), self.row('native_submit', '1.0', aux=2) +
+                                    self.row('native_complete', '1.1', aux=aux), self.metadata)
+        m = manifest()
+        m['trace']['native_directions'] = {'read': 'read'}
+        with self.assertRaisesRegex(ValueError, 'direction'):
+            self.c.decode_trace(m, self.pair(aux=1), self.metadata)
+
+    def test_tx_batch_aux_may_differ_without_changing_descriptor_identity(self):
+        m = manifest()
+        m['trace']['generation_mapping'] = 'batch_key'
+        m['records'][0]['generation'] = 6
+        bind = self.row('descriptor_bind', '0.9', class_id=2, generation=2)
+        args = dict(class_id=2, session_id=0, batch_key=0, generation=0,
+                    frame_id=0, ticket=0, sequence=1)
+        text = bind + self.row('native_submit', '1.0', aux=1, **args) + self.row('native_complete', '1.1', aux=4, **args)
+        rows = self.c.decode_trace(m, text, self.metadata)
+        self.assertEqual([row['aux'] for row in rows], [1, 4])
+
+
 class CaptureEvidence(unittest.TestCase):
     def setUp(self):
         self.c = load()
@@ -344,7 +449,7 @@ class CaptureEvidence(unittest.TestCase):
     def test_native_format_checks_real_fields_and_batch_coverage_marker(self):
         fmt = 'name: native_event\n' + ''.join(
             'field:u64 %s; offset:0; size:8; signed:0;\n' % f
-            for f in self.c.FIELDS) + 'field:__data_loc char[] phase;\nfield:__data_loc char[] origin;\n'
+            for f in (*self.c.FIELDS, 'ts_ns')) + 'field:__data_loc char[] phase;\nfield:__data_loc char[] origin;\n'
         self.assertTrue(callable(getattr(self.c, 'validate_format', None)),
                         'native event format admission not implemented')
         with self.assertRaises(ValueError):

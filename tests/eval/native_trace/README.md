@@ -128,3 +128,23 @@ Their actual native session inherits owner identity only from the verified
 CREATE event and matching sideband. Nonzero conflicting owner fields are
 errors. `native_event_origin_tgid` and `native_event_process_start_ticks`
 preserve those raw per-point values alongside the bound origin identity.
+
+Record endpoints are aggregated only after each phase covers exactly the
+manifest's declared logical frame set, once per frame. Duplicate or partial
+sets and conflicting acceptance/status/owner values invalidate decoding.
+`endpoint_frames` retains every per-frame endpoint row, including native slot,
+lifecycle generation and timestamps. Entirely absent phases stay absent for
+an analyzer's unavailable result.
+
+The current native ABI requires an integer `ts_ns` on every raw event,
+including binding/resource events and events from other origins. It never
+falls back to trace text. Old parser fixtures can opt into the separate
+`xdev-native-fixture-text-v0` ABI only with explicit fixture evidence,
+physical=false, performance_eligible=false and no compiled event formats;
+that compatibility path cannot admit a current native/physical capture.
+
+NVMe submit/completion must preserve the complete class-specific `aux`
+opcode/length value. `trace.native_directions` may map stage IDs to `read` or
+`write`; the supported `nvme-nic` recipe also declares a measured NVMe read.
+XSK `aux` is the native batch count and can differ between submit and complete
+without changing the identity or byte span of the individual descriptor.

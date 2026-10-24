@@ -59,6 +59,13 @@ def decode_trace(manifest, raw_text, metadata):
     completion supplies a native completion timestamp.
     """
     trace = manifest.get('trace', {})
+    legacy_text_fixture = (metadata.get('abi') == 'xdev-native-fixture-text-v0' and
+                           metadata.get('evidence_kind') == 'fixture' and
+                           metadata.get('physical') is False and
+                           metadata.get('performance_eligible') is False and
+                           manifest.get('physical') is not True and
+                           manifest.get('evidence_kind') != 'physical' and
+                           not metadata.get('formats'))
     if metadata.get('clock') != 'CLOCK_MONOTONIC' or manifest.get('clock') != 'CLOCK_MONOTONIC':
         raise ValueError('clock must be CLOCK_MONOTONIC')
     if metadata.get('clock_domain') != manifest.get('clock_domain'):
@@ -152,7 +159,10 @@ def decode_trace(manifest, raw_text, metadata):
         if key not in records:
             raise ValueError('native event outside declared record identity set')
         native_frame = _integer(source['frame_id'])
-        frame = -1 if is_record else _integer(source['frame_ordinal'] if layout else source['frame_id'])
+        logical_frame = _integer(source['frame_ordinal'] if layout else source['frame_id'])
+        frame = -1 if is_record else logical_frame
+        if logical_frame not in records[key]:
+            raise ValueError('record endpoint/native frame is outside declared frame set')
         if layout:
             ordinal = _integer(source['frame_ordinal'])
             expected_span = layout.get(ordinal)
@@ -185,10 +195,23 @@ def decode_trace(manifest, raw_text, metadata):
             if expected_origin == 'U':
                 row['binding_cookie'] = _integer(source['cookie'])
         if is_record:
-            # Hooks emit each participating frame; collapse only after all raw
-            # rows were read. Admit is first acceptance, terminal last endpoint.
-            record_events.setdefault((key, phase), []).append(row)
+            # Keep every declared logical frame identity until completeness is
+            # checked. An earlier duplicate or a partial endpoint is not a
+            # complete record, regardless of the timestamps on other frames.
+            row['endpoint_frame_id'] = logical_frame
+            candidates = record_events.setdefault((key, phase), {})
+            if logical_frame in candidates:
+                raise ValueError('duplicate record endpoint frame ordinal')
+            candidates[logical_frame] = row
             return
+        if row['accepted'] and row['class_id'] == 3:
+            direction = trace.get('native_directions', {}).get(stage)
+            if direction is None and manifest.get('recipe', {}).get('chain') == 'nvme-nic':
+                direction = 'read'
+            if direction is not None:
+                expected_opcode = {'read': 2, 'write': 1}.get(direction)
+                if expected_opcode is None or row['aux'] & 0xff != expected_opcode:
+                    raise ValueError('NVMe opcode differs from declared stage direction')
         unique = (key, frame, stage, phase, row['ticket'], row['cookie'], row['sequence'])
         if unique in seen:
             raise ValueError('duplicate native identity event')
@@ -213,6 +236,8 @@ def decode_trace(manifest, raw_text, metadata):
                 for field in ('address', 'bytes', 'class_id', 'frame_generation', 'native_frame_id', 'frame_offset', 'frame_length'):
                     if row[field] != start[field]:
                         raise ValueError('native completion changed immutable request span/generation')
+                if row['class_id'] == 3 and row['aux'] != start['aux']:
+                    raise ValueError('NVMe native opcode/length changed across operation')
                 completed.add(request)
                 if not any(p[4] == row['cookie'] and p[5] == row['sequence'] for p in pending):
                     live_cookie.pop(scope, None)
@@ -237,10 +262,18 @@ def decode_trace(manifest, raw_text, metadata):
             item.update({name: _integer(item[name]) for name in FIELDS})
         except (KeyError, ValueError) as error:
             raise ValueError('native event lacks typed identity: %s' % error) from error
+        try:
+            if 'ts_ns' in item:
+                native_ts = _integer(item['ts_ns'])
+            elif legacy_text_fixture:
+                native_ts = int(Decimal(stamp) * 1000000000)
+            else:
+                raise ValueError('current native ABI requires ts_ns on every row')
+        except ValueError as error:
+            raise ValueError('native ts_ns unavailable/invalid: ' + str(error)) from error
         if item['origin'] != expected_origin:
             continue
-        item.update(cpu=int(cpu), ts_ns=(_integer(item['ts_ns']) if 'ts_ns' in item
-                                        else int(Decimal(stamp) * 1000000000)))
+        item.update(cpu=int(cpu), ts_ns=native_ts)
         if item['ts_ns'] < 0 or item['accepted'] not in (0, 1):
             raise ValueError('invalid native timestamp/accepted flag')
         phase = item['phase']
@@ -330,10 +363,24 @@ def decode_trace(manifest, raw_text, metadata):
         item.update(phase=binding['kind'], accepted=1, cpu=-1,
                     ts_ns=_integer(binding['ts_ns']), cookie=_integer(binding['cookie']))
         normalize(item, binding)
-    for (key, phase), candidates in record_events.items():
+    for (key, phase), by_frame in record_events.items():
+        if set(by_frame) != records[key]:
+            raise ValueError('record endpoint lacks complete declared frame set')
+        candidates = [by_frame[frame] for frame in sorted(by_frame)]
+        for field in ('accepted', 'status', 'origin', 'batch_key', 'batch_id', 'ticket', 'native_session_id'):
+            if len({value.get(field) for value in candidates}) != 1:
+                raise ValueError('record endpoint has conflicting ' + field)
+        owners = {(value.get('origin_tgid', value['native_event_origin_tgid']),
+                   value.get('process_start_ticks', value['native_event_process_start_ticks']))
+                  for value in candidates}
+        if len(owners) != 1:
+            raise ValueError('record endpoint has conflicting owner identity')
+        # Only a full unique per-frame endpoint permits the record-level first
+        # acceptance / last completion interpretation. Retain every input row.
         select = min if phase == 'record_admit' else max
         row = dict(select(candidates, key=lambda value: value['ts_ns']))
         row['frame_generations'] = sorted({value['frame_generation'] for value in candidates})
+        row['endpoint_frames'] = [dict(value) for value in candidates]
         output.append(row)
     if not output:
         raise ValueError('no resolved native events captured')
@@ -545,7 +592,7 @@ def validate_format(text):
     """Require the compiled event ABI declaring both XSK consumption paths."""
     if 'abi=xdev-native-v1-nvme-xsk-batch' not in text:
         raise ValueError('native event lacks matched NVMe/XSK single+batch ABI coverage')
-    for name in (*FIELDS, 'phase', 'origin'):
+    for name in (*FIELDS, 'phase', 'origin', 'ts_ns'):
         if not re.search(r'field:[^;\n]*\b' + name + r'(?:\[[^]]*\])?;', text):
             raise ValueError('native event format missing field ' + name)
 
@@ -774,7 +821,7 @@ def _native_preflight(manifest, root, correctness_only=False):
         note = directory / 'notes/.note.gnu.build-id'
         if note.is_file():
             modules[driver]['build_id'] = artifact(note)
-    return dict(formats={EVENT: fmt}, hardware=evidence, resolved_symbols=resolved,
+    return dict(abi='xdev-native-v1-nvme-xsk-batch', formats={EVENT: fmt}, hardware=evidence, resolved_symbols=resolved,
                 driver_modules=modules, kernel_release=os.uname().release,
                 kernel_notes=artifact('/sys/kernel/notes'), config_hash=config_hash,
                 collector_sha=source, timestamp_resolution_ns=(1 if 'ts_ns' in fmt else 1000),
