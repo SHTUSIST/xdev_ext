@@ -1188,3 +1188,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/probe.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/run.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/model/shim/linux/bitops.h
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/provider/unbind_api_test.py

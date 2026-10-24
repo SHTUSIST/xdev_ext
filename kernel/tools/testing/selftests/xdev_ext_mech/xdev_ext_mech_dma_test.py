@@ -227,7 +227,20 @@ class DmaHelperTest(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="xdev_ext-mech-dma-") as directory:
             source = Path(directory) / "dma_test.c"
             executable = Path(directory) / "dma_test"
-            source.write_text(FIXTURES + "\n" + helper + "\n" + cases)
+            # Each helper uses a different subset of OS boundary functions.
+            # Omit only unused fixture definitions; keep the production helper
+            # and strict compiler diagnostics unchanged.
+            fixtures = FIXTURES
+            for match in reversed(list(re.finditer(
+                    r"^static inline [^;{}]*?\b(\w+)\([^;{}]*\)\s*\{", fixtures, re.M))):
+                if re.search(r"\b" + match[1] + r"\b", helper + cases):
+                    continue
+                depth, end = 1, match.end()
+                while depth:
+                    depth += (fixtures[end] == "{") - (fixtures[end] == "}")
+                    end += 1
+                fixtures = fixtures[:match.start()] + fixtures[end:]
+            source.write_text(fixtures + "\n" + helper + "\n" + cases)
             command = shlex.split(os.environ.get("CC", "cc")) + [
                 "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
                 "-fsanitize=undefined", "-fno-sanitize-recover=undefined",

@@ -13,6 +13,7 @@ check: xdev_ext_mech_dma_core_test dma_campaign_test
 	python3 sim_work_test.py
 	python3 stats_frames_test.py
 	python3 mmap_test.py
+	python3 unbind_api_test.py
 dma_campaign_test: dma_campaign_test.c dma_campaign.h
 	$(CC) $(CFLAGS) $< -o $@
 clean:

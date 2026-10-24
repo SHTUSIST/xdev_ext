@@ -64,6 +64,8 @@ def generate(mutation=None):
         dma, n = re.subn(r"if \(p->ops->fops == ops->fops\)", "if (false)", dma)
         assert n == 1
     template = (HERE / "provider_fault_fixture.c").read_text()
+    template = template.replace("/* PRODUCTION_CLASS_FLAGS */",
+                                re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0])
     structs = [structure(abi, n) for n in (
         "xdev_ext_mech_frame", "xdev_ext_mech_stage", "xdev_ext_mech_class_ops",
         "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_dma_region",
@@ -78,10 +80,14 @@ def generate(mutation=None):
               "xdev_ext_mech_session_pool", "xdev_ext_mech_session_layout",
               "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_session_stop",
               "xdev_ext_mech_leave_locked", "xdev_ext_mech_batch_nr_frames",
-              "xdev_ext_mech_batch_frame", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
+              "xdev_ext_mech_batch_frame", "xdev_ext_mech_batch_frame_claim", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
               "xdev_ext_mech_batch_queue", "xdev_ext_mech_batch_ticket",
-              "xdev_ext_mech_batch_completion_claim", "xdev_ext_mech_batch_completion_publish"]
-    after = ["xdev_ext_mech_transform_undo", "xdev_ext_mech_submit", "xdev_ext_mech_session_release", "xdev_ext_mech_quarantine",
+              "xdev_ext_mech_batch_completion_claim", "xdev_ext_mech_sync_for_cpu",
+              "xdev_ext_mech_trim_produced", "xdev_ext_mech_batch_handoff",
+              "xdev_ext_mech_life_undo", "xdev_ext_mech_batch_acquire",
+              "xdev_ext_mech_batch_completion_publish"]
+    after = ["xdev_ext_mech_transform_undo", "xdev_ext_mech_submit",
+             "xdev_ext_mech_unbind_checked", "xdev_ext_mech_session_release", "xdev_ext_mech_quarantine",
              "xdev_ext_mech_session_destroy"]
     ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
@@ -132,7 +138,7 @@ class ProviderFaults(unittest.TestCase):
         if REF:
             for rel in ("include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h",
                         "io_uring/xdev_ext_mech_core.h", "io_uring/xdev_ext_mech_lifecycle.h",
-                        "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_step.h",
+                        "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h", "io_uring/xdev_ext_mech_step.h",
                         "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
                         "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h"):
                 p = cls.path / rel
@@ -217,7 +223,7 @@ if __name__ == "__main__":
     inputs = ("io_uring/xdev_ext_mech.c", "io_uring/xdev_ext_mech_ops.c", "io_uring/xdev_ext_mech_dma.c",
               "include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h",
               "include/uapi/linux/xdev_ext_binding.h", "io_uring/xdev_ext_mech_core.h",
-              "io_uring/xdev_ext_mech_lifecycle.h", "io_uring/xdev_ext_mech_notify.h",
+              "io_uring/xdev_ext_mech_lifecycle.h", "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h",
               "io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_dma_core.h",
               "io_uring/xdev_ext_mech_ce.c", "io_uring/xdev_ext_mech_ce_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")

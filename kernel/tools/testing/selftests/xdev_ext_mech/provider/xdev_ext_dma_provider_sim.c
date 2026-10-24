@@ -121,11 +121,12 @@ static int sim_bind_host(struct xdev_ext_dma_region *region,struct page **pages,
  mutex_lock(&h->dev->lock); h->dev->stats.host_binds++; mutex_unlock(&h->dev->lock);
  *host=h; return 0;
 }
-static void sim_unbind_host(void *host)
+static int sim_unbind_host(void *host)
 {
  struct sim_host *h=host;
  mutex_lock(&h->dev->lock); h->dev->stats.host_unbinds++; mutex_unlock(&h->dev->lock);
  vunmap(h->addr); kfree(h);
+ return 0;
 }
 static void sim_work(struct work_struct *work)
 {

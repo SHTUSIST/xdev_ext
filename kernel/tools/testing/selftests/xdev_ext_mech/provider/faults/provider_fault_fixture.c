@@ -15,6 +15,7 @@
 #include "io_uring/xdev_ext_mech_lifecycle.h"
 #include "io_uring/xdev_ext_mech_notify.h"
 #include "io_uring/xdev_ext_mech_step.h"
+#include "io_uring/xdev_ext_mech_produced.h"
 #include "io_uring/xdev_ext_mech_dma_core.h"
 #include "io_uring/xdev_ext_mech_ce_core.h"
 #include "io_uring/xdev_ext_mech_native_cookie.h"
@@ -80,7 +81,9 @@ static bool llist_add(struct llist_node *n,struct llist_head *h) {
 #define BIT(n) (1U<<(n))
 #define U32_MAX UINT32_MAX
 #define XDEV_EXT_MECH_DRAIN_TIMEOUT 5
+/* PRODUCTION_CLASS_FLAGS */
 #define XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE (1U<<1)
+#define min(a,b) ((a)<(b)?(a):(b))
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define kmalloc(n,g) malloc(n)
 #define kzalloc(n,g) calloc(1,n)
@@ -135,6 +138,7 @@ static void xdev_ext_ops_unpin(const void *p) {(void)p;assert(!"unexpected BPF p
 /* PRODUCTION_CORE_BEFORE */
 /* PRODUCTION_ADAPTER */
 /* PRODUCTION_CE_ADAPTER */
+static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s);
 /* PRODUCTION_CORE_AFTER */
 
 /* Native provider fixture: observable resource handles and externally selected
@@ -168,7 +172,7 @@ static int native_bind_host(struct xdev_ext_dma_region *r,struct page **pages,u3
  if(host_error)return host_error;
  *h=malloc(8);assert(*h);return 0;
 }
-static void native_unbind_host(void *h) {host_unbinds++;free(h);}
+static int native_unbind_host(void *h) {host_unbinds++;free(h);return 0;}
 static int native_submit(struct xdev_ext_dma_region *r,void *h,u32 dir,
  const struct xdev_ext_dma_xfer *x,u32 n,struct xdev_ext_dma_cookie *ck,u64 ticket) {
  (void)r;(void)h;(void)dir;native_calls++;
@@ -195,6 +199,7 @@ static struct xdev_ext_mech_session *session_new(void) {
  s->layout=(struct xdev_ext_mech_layout){.frame_size=4096,.hdr_room=64,.seg_len=128,.group_bytes=128};
  s->pool=(struct xdev_ext_mech_pool){.ops=&pool_ops,.pages=pages,.nr_pages=2,
   .nr_frames=2,.frame_size=4096,.state=calloc(2,1),.size=8192};
+ s->life=calloc(s->pool.nr_frames,sizeof(*s->life));assert(s->life);s->owns_life=true;
  assert(s->pool.state);s->pool.state[1]=XDEV_EXT_MECH_F_HELD;
  /* state is a boundary-owned allocation; production pool_release releases it
   * in the kernel. The host test keeps it separate for post-STOP observations. */
@@ -220,8 +225,20 @@ static int validate(struct xdev_ext_mech_batch *b) {
  struct xdev_ext_dma_copy_desc d={.frame_pos=0,.frame_off=64,.device_off=0,.len=128};
  return xdev_ext_dma_validate(&b->s->st[0],b,(const u8 *)&d,1);
 }
+/* The worker normally acquires lifecycle before native submission. Execute
+ * that same production helper; a refusal rolls it back with the real undo. */
+static int fixture_submit(struct xdev_ext_mech_session *s,struct xdev_ext_mech_stage *st,
+                          struct xdev_ext_mech_batch *b) {
+ for(u32 i=0;i<s->nr_stages;i++)s->plan[i]=(struct xdev_ext_mech_stage_uapi){
+  .class_id=s->st[i].class_id,.direction=s->st[i].direction};
+ int err=b->life_active?0:xdev_ext_mech_batch_acquire(s,b);
+ if(err)return err;
+ err=xdev_ext_mech_submit(s,st,b);
+ if(err)xdev_ext_mech_life_undo(s,b);
+ return err;
+}
 static int submit(struct xdev_ext_mech_batch *b) {
- int err=validate(b);if(err)return err;return xdev_ext_mech_submit(b->s,&b->s->st[0],b);
+ int err=validate(b);if(err)return err;return fixture_submit(b->s,&b->s->st[0],b);
 }
 static unsigned checks;
 #define CHECK(c,msg) do {checks++;if(!(c)){fprintf(stderr,"FAIL %s:%d %s\n",__func__,__LINE__,msg);return 1;}}while(0)
@@ -238,6 +255,14 @@ static void observe_retire(struct xdev_ext_mech_batch *b) {
  assert(!xdev_ext_mech_completion_consume(&b->completion,b->ticket,&result));b->status=result;
  assert(!xdev_ext_mech_frames_move(s,b,XDEV_EXT_MECH_F_INFLIGHT,
   b->sequester?XDEV_EXT_MECH_F_SEQUESTERED:XDEV_EXT_MECH_F_HELD));
+ /* A terminal producer's READY publication has no later consumer. The
+  * real worker closes it during frames_release before slot reuse. */
+ if(!b->sequester && (u32)b->bs.stage+1==s->nr_stages)
+  for(u32 i=0;i<b->nr_frames;i++) {
+   struct xdev_ext_mech_life *life=&s->life[b->f[i].index];
+   if(xdev_ext_mech_life_phase(life)==XDEV_EXT_MECH_L_READY)
+    assert(!xdev_ext_mech_life_release(life,xdev_ext_mech_life_gen(life)));
+  }
  assert(!xdev_ext_mech_leave_locked(s,b->sequester));
  b->queued=0;s->inbox.first=NULL;
 }
@@ -341,7 +366,7 @@ static int test_duplicate(bool stale,bool change_stage) {
    b->bs.nr_stages=2;b->bs.stage=1;
    struct xdev_ext_dma_copy_desc d={.frame_pos=0,.frame_off=64,.device_off=0,.len=128};
    EQ(xdev_ext_dma_validate(&s->st[1],b,(const u8 *)&d,1),0,"new stage valid plan");
-   EQ(xdev_ext_mech_submit(s,&s->st[1],b),0,"same cookie reused in different bound stage");
+   EQ(fixture_submit(s,&s->st[1],b),0,"same cookie reused in different bound stage");
   } else EQ(submit(b),0,"reuse same cookie for new ticket");
   CHECK(b->ticket>old,"ticket monotonically advances");
  }
@@ -398,7 +423,7 @@ static int test_outcome(const char *mode) {
 static int test_dead(void) {
  struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_mech_batch *b=batch_new(s);
  EQ(validate(b),0,"stage plan initially valid");xdev_ext_dma_mark_dead(&s->st[0]);
- EQ(xdev_ext_mech_submit(s,&s->st[0],b),-ENODEV,"dead stage refuses staged plan");
+ EQ(fixture_submit(s,&s->st[0],b),-ENODEV,"dead stage refuses staged plan");
  EQ(native_calls,0,"dead stage cannot call provider");EQ(s->submitted[0],0,"no accepted count");
  EQ(s->pool.state[1],XDEV_EXT_MECH_F_HELD,"dead stage rollback custody");return 0;
 }
@@ -465,7 +490,14 @@ static int ce_submit_admitted(struct xdev_ext_mech_session *s,struct xdev_ext_me
  struct xdev_ext_ce_stage *cs=s->st[1].priv;
  cs->staged=b;cs->plan.n=1;cs->plan.total=128;cs->plan.host_off[0]=4160;
  cs->d[0]=(struct xdev_ext_ce_copy_desc){.len=128};
- return xdev_ext_mech_submit(s,&s->st[1],b);
+ /* CE-first cases start with an independently produced input payload. */
+ struct xdev_ext_mech_life *life=&s->life[b->f[0].index];
+ if(xdev_ext_mech_life_phase(life)==XDEV_EXT_MECH_L_FREE) {
+  u64 claim;
+  assert(!xdev_ext_mech_life_claim(life,0,&claim));
+  assert(!xdev_ext_mech_life_publish(life,claim,1,b->f[0].data_len));
+ }
+ return fixture_submit(s,&s->st[1],b);
 }
 static int test_crossclass(bool ce_first) {
  struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_mech_batch *b=batch_new(s);

@@ -35,6 +35,9 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/guest_harness_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/provider/unbind_api_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/provider/faults/run.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/provider/stats_frames_test.py
       - name: Socket NIC copy fallback and accounting contracts
         shell: bash
         run: |

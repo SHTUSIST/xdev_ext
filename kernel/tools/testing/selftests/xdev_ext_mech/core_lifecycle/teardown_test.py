@@ -35,8 +35,6 @@ BOUNDARY = (
      'static unsigned armed_at_destroy;static unsigned (*armed_probe)(void);\n'
      'static void kthread_destroy_worker(struct kthread_worker *w) {(void)w;destroyed_workers++;'
      'if(armed_probe)armed_at_destroy+=armed_probe();}'),
-    ('static void native_unbind_host(void *h) {host_unbinds++;free(h);}',
-     'static int native_unbind_host(void *h) {host_unbinds++;free(h);return 0;}'),
 )
 
 SCENARIOS = r'''
@@ -57,7 +55,6 @@ static int lifecycle(const char *mode) {
  struct xdev_ext_mech_session *s=bound_session();u8 *states=s->pool.state;
  struct xdev_ext_mech_batch *b=batch_new(s);
  /* The worker acquires producer lifecycle before native submission. */
- s->life=calloc(s->pool.nr_frames,sizeof(*s->life));assert(s->life);s->owns_life=true;
  s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=s->st[0].class_id,
   .direction=s->st[0].direction};
  b->producing=true;
@@ -134,21 +131,6 @@ def build(root=None):
         extract.ROOT = Path(root).resolve()
     core = extract.source('io_uring/xdev_ext_mech.c')
     code = extract.generate()
-    # The shared provider fixture predates lifecycle completion handoff. Keep
-    # that decision, CPU synchronization and checked unbind in production C.
-    code = code.replace('#include "io_uring/xdev_ext_mech_step.h"',
-                        '#include "io_uring/xdev_ext_mech_step.h"\n'
-                        '#include "io_uring/xdev_ext_mech_produced.h"\n'
-                        '#define min(a,b) ((a)<(b)?(a):(b))', 1)
-    helpers = '\n\n'.join(extract.function(core, name) for name in (
-        'xdev_ext_mech_sync_for_cpu', 'xdev_ext_mech_trim_produced',
-        'xdev_ext_mech_batch_handoff', 'xdev_ext_mech_batch_frame_claim',
-        'xdev_ext_mech_unbind_checked'))
-    marker = extract.function(core, 'xdev_ext_mech_batch_completion_publish')
-    code = code.replace(marker, helpers + '\n' + marker, 1)
-    code = code.replace(extract.function(core, 'xdev_ext_mech_session_release'),
-                        'static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s);\n' +
-                        extract.function(core, 'xdev_ext_mech_session_release'), 1)
     for old, new in BOUNDARY:
         if old not in code:
             raise RuntimeError('fixture boundary changed: ' + old)
