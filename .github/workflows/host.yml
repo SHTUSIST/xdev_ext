@@ -118,6 +118,10 @@ jobs:
         run: make -C tests/iaa all check
       - name: GPU host-page bookkeeping contracts
         run: make -C gpu/tests run-host-bookkeeping
+      - name: GPU callback, DMA mapping and frame ownership contracts
+        run: |
+          python3 scripts/prepare_sources.py --component nvidia
+          make -C gpu/tests run-lifecycle-contract
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |
