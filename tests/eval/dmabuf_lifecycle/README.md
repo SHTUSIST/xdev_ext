@@ -91,3 +91,21 @@ unused fence storage in the life arm; this controls this experiment's storage
 layout, not the compact production pool's memory cost. Both orders are checked;
 reported time uses callback-first, with registration in prepare. Do not infer
 end-to-end speedup or dma-buf limitations from any local ratio.
+
+Each runner invocation requires a new output directory and refuses an existing
+`/sys/module/lifecycle_bench` or benchmark debugfs directory/result. It verifies
+`modinfo -F name` before loading. A fresh random `run_nonce` is passed to the
+module, then checked against that module's read-only sysfs parameter and its
+new debugfs document; sysfs and report mode/iterations must also match the
+request. An unverified module instance is retained and reported, never unloaded
+by guessing its ownership. This prevents accidental stale/wrong producer
+attribution; it does not defend against a hostile root-controlled kernel.
+
+`raw-report.json` preserves the module document unchanged. `result.json` starts
+as an unsealed, noneligible running receipt, then is atomically finalized only
+after validation and unload checks. Failed unload, loader exceptions, or
+surviving module/debugfs resources produce status failed and
+`performance_eligible=false`, while preserving raw and command receipts. No
+force unload is used. A refused reused output directory is left untouched;
+its existing files belong to the previous invocation, and the new invocation
+reports refusal on stdout.

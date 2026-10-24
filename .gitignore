@@ -1100,3 +1100,4 @@
 /tests/eval/dmabuf_lifecycle/Module.symvers
 /tests/eval/dmabuf_lifecycle/modules.order
 /tests/eval/dmabuf_lifecycle/__pycache__/
+!/tests/eval/dmabuf_lifecycle/test_runner_provenance.py

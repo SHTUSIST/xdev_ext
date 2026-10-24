@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 import platform
 import re
+import secrets
 import subprocess
 
 HERE = Path(__file__).resolve().parent
+MODULE_ROOT = Path('/sys/module/lifecycle_bench')
+RESULT_PATH = Path('/sys/kernel/debug/xdev_lifecycle_bench/result')
 CHECKS = ('two_phase', 'signal_before_add', 'identity', 'duplicates',
           'held_reference', 'independent_frames', 'allocation_failure',
           'callback_failure', 'teardown')
@@ -146,33 +149,120 @@ def main(argv=None):
     if source_status.strip():
         print(json.dumps(dict(plan, errors=['experiment sources must be committed before execution'])))
         return 2
-    # A missing debugfs mount is reported, never mounted by this runner.
-    args.output.mkdir(parents=True, exist_ok=True)
-    receipt = execute_command(command, args.output / 'load')
-    (args.output / 'load.json').write_text(json.dumps(receipt, indent=2))
-    if receipt['status'] != 'ok':
-        print(json.dumps(receipt))
-        return 1
-    success = False
+    # Never consume an old run or unload a module owned by another invocation.
+    if args.output.exists():
+        print(json.dumps(dict(plan, errors=['output directory already exists; use a fresh output directory'])))
+        return 2
+    if MODULE_ROOT.exists() or RESULT_PATH.parent.exists() or RESULT_PATH.exists():
+        print(json.dumps(dict(plan, errors=['existing benchmark module/debugfs; refusing stale producer'])))
+        return 2
     try:
-        report = json.loads(Path('/sys/kernel/debug/xdev_lifecycle_bench/result').read_text())
-        expected_sha = subprocess.check_output(['git', '-C', str(HERE), 'rev-parse', 'HEAD'], text=True).strip()
-        expected_header = hashlib.sha256((HERE.parents[2] / 'kernel/io_uring/xdev_ext_mech_lifecycle.h').read_bytes()).hexdigest()
-        if report.get('exact_sha') != expected_sha or report.get('lifecycle_header_sha256') != expected_header:
-            raise ValueError('module compiled source/header identity differs from current checkout')
-        report.update(module_sha256=hashlib.sha256(args.module.read_bytes()).hexdigest(),
-                      kernel_release=platform.release(), environment=env,
-                      kernel_runtime=True, evidence_kind='kernel-runtime')
-        errors = validate_result(report, performance=args.mode == 'time')
-        report.update(validation_errors=errors, performance_eligible=args.mode == 'time' and not errors)
-        (args.output / 'result.json').write_text(json.dumps(report, indent=2))
-        success = not errors
-    except (OSError, ValueError, subprocess.CalledProcessError) as error:
+        module_name = subprocess.check_output(
+            ['modinfo', '-F', 'name', str(args.module.resolve())], text=True).strip()
+    except (OSError, subprocess.CalledProcessError) as error:
+        print(json.dumps(dict(plan, errors=['module identity unavailable: ' + str(error)])))
+        return 2
+    if module_name != 'lifecycle_bench':
+        print(json.dumps(dict(plan, errors=['module identity must be lifecycle_bench'])))
+        return 2
+    nonce = secrets.token_hex(16)
+    command.append('run_nonce=' + nonce)
+    module_hash = hashlib.sha256(args.module.read_bytes()).hexdigest()
+    try:
+        args.output.mkdir(parents=True, exist_ok=False)
+    except FileExistsError:
+        print(json.dumps(dict(plan, errors=['output directory already exists; use a fresh output directory'])))
+        return 2
+    # Publish a failure-safe, unsealed receipt before crossing the loader boundary.
+    # Only this new, exclusively created output directory is ever written.
+    result = dict(status='running', mode=args.mode, iterations=args.iterations,
+                  run_nonce=nonce, module_sha256=module_hash, kernel_runtime=False,
+                  performance_eligible=False, sealed=False, teardown_complete=False,
+                  validation_errors=[])
+    def publish():
+        temporary = args.output / 'result.json.tmp'
+        temporary.write_text(json.dumps(result, indent=2))
+        temporary.replace(args.output / 'result.json')
+    publish()
+    errors = result['validation_errors']
+    owned = False
+    loaded = False
+    teardown_complete = False
+    report = None
+    validated = False
+    try:
+        receipt = execute_command(command, args.output / 'load')
+        (args.output / 'load.json').write_text(json.dumps(receipt, indent=2))
+        loaded = receipt['status'] == 'ok'
+        if not loaded:
+            errors.append('load failed or not run')
+        # The read-only sysfs nonce is from the named, newly loaded module,
+        # independent of the JSON document. Only that instance may be unloaded.
+        if MODULE_ROOT.exists():
+            owned = (MODULE_ROOT / 'parameters/run_nonce').read_text().strip() == nonce
+        if loaded and not owned:
+            errors.append('producer nonce identity is unverified; module ownership unknown')
+        if loaded and owned:
+            if (MODULE_ROOT / 'parameters/mode').read_text().strip() != args.mode:
+                errors.append('loaded module mode differs from requested mode')
+            if (MODULE_ROOT / 'parameters/iterations').read_text().strip() != str(args.iterations):
+                errors.append('loaded module iterations differ from requested iterations')
+            raw = RESULT_PATH.read_text()
+            (args.output / 'raw-report.json').write_text(raw)
+            parsed_report = json.loads(raw)
+            if not isinstance(parsed_report, dict):
+                raise ValueError('report must be a JSON object')
+            report = parsed_report
+            expected_sha = subprocess.check_output(
+                ['git', '-C', str(HERE), 'rev-parse', 'HEAD'], text=True).strip()
+            expected_header = hashlib.sha256(
+                (HERE.parents[2] / 'kernel/io_uring/xdev_ext_mech_lifecycle.h').read_bytes()).hexdigest()
+            if report.get('exact_sha') != expected_sha or report.get('lifecycle_header_sha256') != expected_header:
+                errors.append('module compiled source/header identity differs from current checkout')
+            if report.get('run_nonce') != nonce:
+                errors.append('report run nonce differs from this producer')
+            if report.get('mode') != args.mode:
+                errors.append('report mode differs from requested mode')
+            if report.get('iterations') != args.iterations:
+                errors.append('report iterations differ from requested iterations')
+            if hashlib.sha256(args.module.read_bytes()).hexdigest() != module_hash:
+                errors.append('module file changed during load')
+            report.update(module_sha256=module_hash, kernel_release=platform.release(), environment=env)
+            errors.extend(validate_result(report, performance=args.mode == 'time'))
+            validated = True
+    except (OSError, ValueError, TypeError, AttributeError, subprocess.CalledProcessError) as error:
+        errors.append(str(error))
         (args.output / 'error.txt').write_text(str(error))
     finally:
-        unload = execute_command(['rmmod', 'lifecycle_bench'], args.output / 'unload')
-        (args.output / 'unload.json').write_text(json.dumps(unload, indent=2))
-        success = success and unload['status'] == 'ok'
+        if owned:
+            try:
+                unload = execute_command(['rmmod', 'lifecycle_bench'], args.output / 'unload')
+                (args.output / 'unload.json').write_text(json.dumps(unload, indent=2))
+                if unload['status'] != 'ok':
+                    errors.append('unload failed or not run; resources retained')
+                elif MODULE_ROOT.exists() or RESULT_PATH.parent.exists() or RESULT_PATH.exists():
+                    errors.append('teardown incomplete: module/debugfs resources remain')
+                else:
+                    teardown_complete = True
+            except Exception as error:
+                # Any loader/receipt failure leaves ownership/resource state
+                # unresolved; preserve it and invalidate the final result.
+                errors.append('unload failed: ' + str(error))
+        elif MODULE_ROOT.exists() or RESULT_PATH.parent.exists() or RESULT_PATH.exists():
+            errors.append('teardown unverified: unknown producer resources retained; no unload attempted')
+        else:
+            teardown_complete = True
+        if loaded and not validated and not errors:
+            errors.append('report validation did not complete')
+        success = loaded and validated and not errors and teardown_complete
+        if report is not None:
+            result.update(report)
+        result.update(status='ok' if success else 'failed', validation_errors=errors,
+                      requested_mode=args.mode, requested_iterations=args.iterations,
+                      requested_run_nonce=nonce, module_sha256=module_hash,
+                      performance_eligible=success and args.mode == 'time',
+                      teardown_complete=teardown_complete, sealed=success)
+        publish()
     return 0 if success else 1
 
 

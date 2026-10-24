@@ -14,8 +14,11 @@
 #include "lifecycle_core.h"
 
 static char *mode = "check";
+static char *run_nonce = "";
 static unsigned int iterations = 8, fail_alloc_at, fail_callback_at;
 module_param(mode, charp, 0400);
+module_param(run_nonce, charp, 0400);
+MODULE_PARM_DESC(run_nonce, "Optional 32 hex invocation nonce, bound by runner to sysfs and debugfs");
 module_param(iterations, uint, 0400);
 module_param(fail_alloc_at, uint, 0400);
 module_param(fail_callback_at, uint, 0400);
@@ -243,7 +246,7 @@ static int xb_show(struct seq_file *s, void *unused)
 	(void)unused;
 	seq_printf(s, "{\"schema_version\":1,\"experiment_kind\":\"kernel_sync_primitive\","
 		"\"exact_sha\":\"" XB_BUILD_SHA "\",\"lifecycle_header_sha256\":\"" XB_LIFE_HASH "\","
-		"\"mode\":\"%s\",\"status\":\"ok\",\"iterations\":%u,"
+		"\"run_nonce\":\"%s\",\"mode\":\"%s\",\"status\":\"ok\",\"iterations\":%u,"
 		"\"execution_context\":\"serial-process\",\"kernel_runtime\":true,"
 		"\"evidence_kind\":\"kernel-runtime\",\"oracle_in_timing\":false,"
 		"\"oracle_checked_operations\":%u,\"concurrent_check\":{\"executed\":true,\"contexts\":2},"
@@ -251,7 +254,7 @@ static int xb_show(struct seq_file *s, void *unused)
 		"\"identity\":\"pass\",\"duplicates\":\"pass\",\"held_reference\":\"pass\","
 		"\"independent_frames\":\"pass\",\"allocation_failure\":\"pass\","
 		"\"callback_failure\":\"pass\",\"teardown\":\"pass\"},\"arms\":{",
-		mode, iterations, iterations * 2);
+		run_nonce, mode, iterations, iterations * 2);
 	for (i = 0; i < 2; i++) {
 		struct xb_totals *t = &totals[i];
 		seq_printf(s, "%s\"%s\":{\"attempted\":%u,\"successful\":%u,\"produced\":%u,"
@@ -285,7 +288,9 @@ static int __init xb_init(void)
 	unsigned int arm, order;
 	int ret;
 	struct xb_op *fault;
-	if (!iterations || iterations > 65536 ||
+	if ((*run_nonce && (strlen(run_nonce) != 32 ||
+	     strspn(run_nonce, "0123456789abcdef") != 32)) ||
+	    !iterations || iterations > 65536 ||
 	    (strcmp(mode, "check") && strcmp(mode, "time")) ||
 	    fail_alloc_at > 2 || fail_callback_at > 2)
 		return -EINVAL;
