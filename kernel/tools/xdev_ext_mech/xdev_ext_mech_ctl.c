@@ -853,7 +853,8 @@ struct ctl_run {
 /* One final snapshot and one synchronous STOP, for success and failure alike.
  * No PASS marker precedes this boundary. A failed query remains visibly unknown. */
 static int ctl_finish_reliable(struct ctl_run *r,
-                               const struct xdev_ext_mech_stats *s, int outcome)
+                               const struct xdev_ext_mech_stats *s, int outcome,
+                               struct xdev_ext_mech_transport_stats_v3 *accounting)
 {
  struct xdev_ext_mech_transport_stats transport;
  struct xdev_ext_mech_transport_stats_v2 counters;
@@ -876,6 +877,11 @@ static int ctl_finish_reliable(struct ctl_run *r,
    .dup_suppressed=UINT64_MAX,.held_acks=UINT64_MAX,.held_unacked=UINT32_MAX};
  xdev_ext_mech_ctl_print_transport_counters(session,&counters);
  if (!outcome && !xdev_ext_mech_ctl_transport_ok(&transport)) outcome=-EBUSY;
+ /* STOP releases the session: retain final NIC accounting while it is live. */
+ if (accounting) {
+  query=ctl_nic_accounting(r->ring,session,accounting);
+  if (!outcome) outcome=query;
+ }
  stopped=ctl_mech(r->ring,XDEV_EXT_MECH_OP_STOP,session);
  printf("XDEV_EXT_MECH_FINALIZE session=%llu stop_ret=%d\n",
         (unsigned long long)session,stopped);
@@ -1370,7 +1376,7 @@ static int cmd_nic_nvme(struct ctl_opts *o)
   observed=ctl_stats(r.ring,r.session,&s);
   if (!ret) ret=observed;
   if (!ret) ret=xdev_ext_mech_ctl_notify_result(&s,o->groups);
-  ret=ctl_finish_reliable(&r,&s,ret);
+  ret=ctl_finish_reliable(&r,&s,ret,&accounting);
  }
 
 	if (ret && (coarse || ret != -ETIMEDOUT)) {
@@ -1444,10 +1450,13 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	if (!freed && !o->reliable)
 		ctl_print_stats(&s);
 	if (!freed) {
-		if (ctl_nic_accounting(r.ring, r.session, &accounting))
-			verdict = CTL_FAIL;
-		else
-			ctl_print_nic_accounting(path, &accounting);
+		if (!o->reliable) {
+			if (ctl_nic_accounting(r.ring, r.session, &accounting)) {
+				verdict = CTL_FAIL;
+				goto out;
+			}
+		}
+		ctl_print_nic_accounting(path, &accounting);
 	}
 out:
 	if (xdev_ext_xsk_redirect_is_active(&redirect))
@@ -1637,7 +1646,10 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 			ret = observed;
 		if (!ret)
 			ret = xdev_ext_mech_ctl_notify_result(s, o->groups);
-		ret = ctl_finish_reliable(&r, s, ret);
+		if (src->nic_path)
+			ret = ctl_finish_reliable(&r, s, ret, &src->accounting);
+		else
+			ret = ctl_finish_reliable(&r, s, ret, NULL);
 	}
 
 	if (ret == -ETIMEDOUT) {
@@ -1654,7 +1666,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		*frames_ok = *frames_ok && s->published == nr_user &&
 			s->recycled >= (o->groups - pool_groups) * frames &&
 			s->recycled < o->groups * frames;
-	if (!ret && src->nic_path)
+	if (!ret && src->nic_path && !o->reliable)
 		ret = ctl_nic_accounting(r.ring, r.session, &src->accounting);
 out:
 	if (r.ring >= 0) {
