@@ -282,7 +282,7 @@ def inspect_collection(run, receipt):
                     not isinstance(probe.get('source'), str) or not probe['source'] or
                     'cqe_observe' in probe['source'].lower()):
                 errors.append('trace_metadata.probes.' + event + ': same-layer native probe unavailable')
-    mapped_manifest = None
+    mapped_manifest, verified_events = None, []
     if 'events' in data and 'raw_trace' in data and metadata:
         collector = COLLECTOR_ENTRY
         try:
@@ -298,6 +298,8 @@ def inspect_collection(run, receipt):
             decoded = decoder(plan, data['raw_trace'], metadata)
             if not _same_json(decoded, data['events']):
                 errors.append('events: raw trace re-decoding does not match events.jsonl')
+            else:
+                verified_events = decoded
             if runtime:
                 mapper = getattr(module, 'derive_mapped_manifest', None)
                 if not callable(mapper):
@@ -330,7 +332,7 @@ def inspect_collection(run, receipt):
                                     metadata.get('cpu_tick_hz'))
         except ValueError as error:
             errors.append('system_cpu: ' + str(error))
-    return dict(errors=errors, events=data.get('events', []), metadata=metadata,
+    return dict(errors=errors, events=verified_events, metadata=metadata,
                 mapped_manifest=mapped_manifest,
                 total_cpu_ns=cpu_ns)
 
@@ -602,6 +604,18 @@ def validate_runtime_mapping(plan, mapped, events):
 def _check_postoracle(plan, artifacts, spec):
     """Compare every retained expected/readback byte with bounded memory."""
     recipe, errors = plan['recipe'], []
+    userspace = plan['arm'] in ('U-poll', 'U-event')
+    expected_fields = dict(seed=recipe['seed'], depth=plan['depth'], load=plan['load'],
+                           schema='xdev-uo-spec-v1' if userspace else 'xdev-chain-spec-v1')
+    if userspace:
+        expected_fields['wait'] = 'poll' if plan['arm'] == 'U-poll' else 'eventfd'
+        if 'arm' in spec:
+            expected_fields['arm'] = 'userspace-shared'
+    else:
+        expected_fields['arm'] = 'session'
+    for field, value in expected_fields.items():
+        if field not in spec or not _same_json(spec[field], value):
+            errors.append('postoracle.%s: actual receiver work differs from frozen plan' % field)
     count = recipe['records'] + recipe.get('warmup_records', 4)
     expected_size = count * plan['record_bytes']
     if (spec.get('chain') != 'nic-nvme' or spec.get('mode') != 'timing' or
@@ -629,6 +643,20 @@ def _check_postoracle(plan, artifacts, spec):
         if (left_hash.hexdigest() != artifacts['oracle_expected']['sha256'] or
                 right_hash.hexdigest() != artifacts['oracle_readback']['sha256']):
             errors.append('postoracle: retained file sha256 changed during comparison')
+        # Existing chains oracle is an independent Python transcription of the
+        # device workload's byte pattern. Generate it from the frozen plan,
+        # never the receiver spec or either retained blob: two identically
+        # wrong files do not establish correctness for this seed/record range.
+        import importlib.util
+        oracle_path = Path(__file__).resolve().parent.parent / 'chains' / 'run.py'
+        module_spec = importlib.util.spec_from_file_location('native_views_plan_byte_oracle', oracle_path)
+        oracle = importlib.util.module_from_spec(module_spec)
+        module_spec.loader.exec_module(oracle)
+        canonical = hashlib.sha256()
+        for record in range(count):
+            canonical.update(oracle.group_bytes(recipe['seed'], record, plan['record_bytes']))
+        if left_hash.hexdigest() != canonical.hexdigest():
+            errors.append('postoracle: retained expected bytes differ from frozen plan seed/record oracle')
     except OSError as error:
         errors.append('postoracle: raw byte comparison unavailable: ' + str(error))
     return errors

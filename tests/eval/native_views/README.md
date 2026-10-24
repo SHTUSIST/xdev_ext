@@ -240,3 +240,15 @@ variable above. The decoder dependency must enforce numeric kernel `ts_ns`,
 immutable opcode/aux and request identities, and complete, unique per-frame
 record endpoints before any record-level collapse. Import/mapper GREEN results
 cannot certify a decoder version that fails those independent requirements.
+
+Post-oracle validation also binds receiver seed, depth, load and represented
+arm/wait fields to the input plan. It independently generates the canonical
+byte-pattern digest from that plan's seed and complete group range using the
+existing `tests/eval/chains/run.py::group_bytes` oracle. Two equally wrong
+retained files therefore fail. File comparisons stream in chunks; canonical
+pattern generation holds at most one declared record at a time. The chains
+runner is consequently another required same-checkout CI dependency.
+Raw events rejected by the current decoder, or differing from the retained
+JSONL, do not enter latency/throughput calculations. Current-ABI integration
+fixtures use explicit kernel `ts_ns` and read opcode; they do not request the
+collector's separately marked legacy text-fixture mode.

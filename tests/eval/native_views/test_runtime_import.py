@@ -6,6 +6,7 @@ An isolated implementer can set NATIVE_TRACE_COLLECTOR to the read-only collecto
 checkout. In the integrated tree the normal sibling implementation is used.
 """
 import copy
+from decimal import Decimal
 import hashlib
 import importlib.util
 import json
@@ -60,7 +61,7 @@ class RuntimeImport(unittest.TestCase):
 
     def artifact(self, kind, text):
         path = self.directory / (kind + '.txt')
-        path.write_text(text)
+        path.write_bytes(text if isinstance(text, bytes) else text.encode())
         self.receipt['artifacts'][kind] = dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
 
     def prepare(self):
@@ -74,7 +75,9 @@ class RuntimeImport(unittest.TestCase):
                  ((99, 7, 'sender', 47, 123), (100, 8, 'receiver', 48, 124))]
         self.artifact('journal', ''.join(json.dumps(row) + '\n' for row in binds))
         self.metadata['journal_artifact'] = self.receipt['artifacts']['journal']
-        raw = self.abi.raw
+        def raw(phase, stamp, **changes):
+            return self.abi.raw(phase, stamp, ts_ns=int(Decimal(stamp) * 1_000_000_000),
+                                aux=2, **changes)
         text = ''.join(raw('session_bind', '0.%d' % i, session_id=native, origin_tgid=pid,
                           process_start_ticks=start) for i, native, pid, start in
                        ((1, 99, 47, 123), (2, 100, 48, 124)))
@@ -167,6 +170,19 @@ class RuntimeImport(unittest.TestCase):
                 self.artifact('raw_trace', self.text.replace(old, new))
                 self.assertTrue(any('raw_trace' in e or 'runtime' in e for e in self.inspect()['errors']))
 
+    def test_actual_decoder_rejects_missing_or_duplicate_record_endpoints(self):
+        for phase in ('record_admit', 'record_terminal'):
+            lines = self.text.splitlines(keepends=True)
+            endpoint = next(line for line in lines if 'phase=' + phase + ' ' in line)
+            for variant in ('missing', 'duplicate'):
+                with self.subTest(phase=phase, variant=variant):
+                    raw = self.text.replace(endpoint, '') if variant == 'missing' else self.text + endpoint
+                    self.artifact('raw_trace', raw)
+                    result = self.import_run()
+                    self.assertTrue(result['errors'])
+                    self.assertIsNone(result['summary']['records'][0]['latency_ns'])
+                    self.assertFalse(result['performance_eligible'])
+
     def test_native_backing_cannot_change_predeclared_logical_frame_spans(self):
         manifest = copy.deepcopy(self.manifest)
         manifest['records'][0]['frame_ids'] = [0, 1]
@@ -184,16 +200,41 @@ class RuntimeImport(unittest.TestCase):
         self.assertTrue(contract._check_backing(manifest, proof))
 
     def test_postoracle_compares_actual_retained_bytes_not_a_pass_flag(self):
-        self.artifact('oracle_expected', 'x' * 4096)
-        self.artifact('oracle_readback', 'x' * 4096)
-        spec = dict(chain='nic-nvme', arm='session', mode='timing', group_bytes=4096,
+        spec_loader = importlib.util.spec_from_file_location('runtime_plan_expected_bytes', HERE.parent / 'chains/run.py')
+        oracle = importlib.util.module_from_spec(spec_loader)
+        spec_loader.loader.exec_module(oracle)
+        expected = oracle.group_bytes(self.manifest['recipe']['seed'], 0, 4096)
+        self.artifact('oracle_expected', expected)
+        self.artifact('oracle_readback', expected)
+        spec = dict(schema='xdev-chain-spec-v1', seed=17, depth=self.manifest['depth'],
+                    load=self.manifest['load'], chain='nic-nvme', arm='session', mode='timing', group_bytes=4096,
                     batches=1, warmup=0, burst=1,
                     oracle=dict(kind='file', path='/synthetic/nvme', offset=0,
                                 reference=self.receipt['artifacts']['oracle_expected']['path']))
         self.artifact('oracle_spec', json.dumps(spec))
         self.assertFalse(any('postoracle' in e for e in self.inspect()['errors']))
-        self.artifact('oracle_readback', 'x' * 4095 + '!')
+        changed = bytearray(expected)
+        changed[-1] ^= 1
+        self.artifact('oracle_readback', bytes(changed))
         self.assertTrue(any('postoracle' in e for e in self.inspect()['errors']))
+        self.artifact('oracle_readback', expected)
+        for field, value in (('seed', 18), ('depth', 99), ('load', 'open'), ('arm', 'staged')):
+            with self.subTest(actual_field=field):
+                altered = dict(spec, **{field: value})
+                self.artifact('oracle_spec', json.dumps(altered))
+                self.assertTrue(any('postoracle.' + field in e for e in self.inspect()['errors']))
+        self.artifact('oracle_spec', json.dumps(spec))
+        wrong = oracle.group_bytes(18, 0, 4096)
+        self.artifact('oracle_expected', wrong)
+        self.artifact('oracle_readback', wrong)
+        self.assertTrue(any('frozen plan seed' in e for e in self.inspect()['errors']))
+        # The real UO spec represents arm choice by schema+wait, without arm.
+        self.artifact('oracle_expected', expected)
+        self.artifact('oracle_readback', expected)
+        userspace = dict(self.manifest, arm='U-event')
+        userspace_spec = dict(spec, schema='xdev-uo-spec-v1', wait='eventfd')
+        del userspace_spec['arm']
+        self.assertEqual(contract._check_postoracle(userspace, self.receipt['artifacts'], userspace_spec), [])
 
     def test_real_software_process_receipt_can_be_imported_without_physical_claims(self):
         receipt = runner.execute_command([sys.executable, '-c',
