@@ -41,7 +41,7 @@ class OwnerTeardown(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             src=Path(td)/'actual-owner.c';src.write_text(code)
             for cc in ['gcc',shutil.which('clang') or 'clang-14']:
-                binary=Path(td)/cc
+                binary=Path(td)/Path(cc).name
                 subprocess.run([cc,'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function',
                     '-fsanitize=undefined',str(src),'-o',str(binary)],check=True)
                 for case in range(8):

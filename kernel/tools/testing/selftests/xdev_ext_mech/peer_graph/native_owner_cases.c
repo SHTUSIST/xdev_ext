@@ -2,7 +2,8 @@
 int main(int argc,char **argv)
 {
  struct device device={.refs=1};struct devlink devlink={.refs=1};struct net_device netdev={.refs=1};
- struct mlx5_core_dev mdev={.device=&device,.devlink=&devlink};struct mlx5e_priv priv={};
+ struct mlx5_eswitch esw={};
+ struct mlx5_core_dev mdev={.device=&device,.devlink=&devlink,.priv.eswitch=&esw};struct mlx5e_priv priv={};
  struct mlx5e_channel *c=calloc(1,sizeof(*c));assert(c&&argc==2);active_channel=c;
  c->mdev=&mdev;c->priv=&priv;c->netdev=&netdev;c->num_tc=2;
  priv.channels.c=&c;priv.channels.params.num_channels=1;
@@ -29,7 +30,7 @@ int main(int argc,char **argv)
   assert(mlx5e_peer_quarantine.next==&mlx5e_peer_quarantine);return 0;
  }
  assert(channel_frees==0);
- assert(c->peer_quarantined&&priv.peer_quarantined&&napi_deletes==1);
+ assert(c->peer_quarantined&&priv.peer_quarantined&&esw.peer_quarantined&&napi_deletes==1);
  assert(module_refs==1&&devlink.refs==2&&device.refs==2&&netdev.refs==2);
  assert(mlx5e_peer_quarantine.next==&c->peer_quarantine_node);
  if(mode==1){assert(rq_closes==1&&sq_closes==0&&cq_closes==0);}

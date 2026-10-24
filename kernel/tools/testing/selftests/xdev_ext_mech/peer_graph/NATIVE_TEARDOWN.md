@@ -64,3 +64,26 @@ close errors before CQ/SQ reclamation. Their unmodified baselines were not
 previous project contributions. The existing transobj wrappers and header
 remain unchanged; peer close constructs the same native destroy command while
 preserving its return status.
+
+Representor mode changes propagate the failed profile switch instead of freeing
+its still-owned private object. The sticky eswitch guard retains its rep,
+steering/mapping/metadata and mode backing after existing or newly discovered
+unknown teardown. These four new overlays use the same locked upstream revision:
+`en_rep.c`, `eswitch.c`, `eswitch_offloads.c`, `eswitch.h`. Normal cleanup and mode
+changes retain their original success behavior. A detach that discovers unknown
+during disable stops before profile inner cleanup; suspend returns an error
+before freeing the device resources used by that retained profile. Already
+bound RX endpoints reject both channel and private-owner quarantine.
+
+The five-second session drain wait is separate from these driver-owner pins.
+Unknown driver resources can remain pinned indefinitely. The full STOP syscall
+can additionally execute synchronous worker cancellation/native flush; the
+drain constant does not certify a hard five-second wall-clock bound.
+
+`test_native_rep_rx.py` extracts the actual RX post, profile/rep caller,
+eswitch parent and suspend functions against declared host boundaries. It keeps
+normal controls, failed and freshly failed paths, and an actual allocator/late
+reader check. `test_native_teardown.py` preserves the independent native-leaf
+and real peer lease-release assertions. Its two unchanged upstream command
+wrappers are explicit licensed fixture inputs, not a substitute for checked
+peer destroy. None of these tests certifies physical firmware stop or DMA.

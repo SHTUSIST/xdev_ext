@@ -17,6 +17,7 @@ SHIM=r'''
 #include <errno.h>
 typedef uint8_t u8;typedef uint16_t u16;typedef uint32_t u32;typedef uint64_t u64;
 #define ETH_HLEN 14
+#define READ_ONCE(x) (x)
 #define MLX5E_STATE_OPENED 0
 #define MLX5E_RQ_STATE_ENABLED 0
 #define MLX5E_RQ_STATE_RECOVERING 1
@@ -29,8 +30,8 @@ struct mlx5_wqe_data_seg {u32 byte_count,lkey;u64 addr;};
 struct mlx5_wq_cyc {u16 head,used;struct mlx5_wqe_data_seg dseg[8][4];};
 struct mlx5e_peer_rq {int lock;struct xdev_ext_peer_rx **posted;u8 *headers;u64 headers_dma;u32 stride;u64 owner;u32 terminate_lkey_be;};
 struct mlx5e_rq {struct mlx5e_peer_rq *peer;unsigned long state;u32 mkey_be;struct {struct mlx5_wq_cyc wq;}wqe;};
-struct channel {struct mlx5e_rq rq;};
-struct mlx5e_priv {int state_lock;unsigned long state;struct {u32 num;struct channel **c;}channels;};
+struct channel {bool peer_quarantined;struct mlx5e_rq rq;};
+struct mlx5e_priv {bool peer_quarantined;int state_lock;unsigned long state;struct {u32 num;struct channel **c;}channels;};
 struct net_device {struct mlx5e_priv *priv;u32 mtu;};
 static int doorbells,callbacks,status_seen;static u32 header_seen,payload_seen;
 static void *netdev_priv(struct net_device *d){return d->priv;}

@@ -140,7 +140,14 @@ static void mlx5e_peer_quarantine_channel(struct mlx5e_channel *c)
 	spin_lock_irqsave(&mlx5e_peer_owner_lock, flags);
 	if (!c->peer_quarantined) {
 		c->peer_quarantined = true;
-		c->priv->peer_quarantined = true;
+		WRITE_ONCE(c->priv->peer_quarantined, true);
+#if IS_ENABLED(CONFIG_MLX5_ESWITCH)
+		/* mode changes retain this esw; cleanup_once follows netdev
+		 * unregister, which is held by the pre-admission owner pin.
+		 */
+		if (c->mdev->priv.eswitch)
+			WRITE_ONCE(c->mdev->priv.eswitch->peer_quarantined, true);
+#endif
 		list_add_tail(&c->peer_quarantine_node, &mlx5e_peer_quarantine);
 		first = true;
 	}
@@ -6509,6 +6516,15 @@ void mlx5e_detach_netdev(struct mlx5e_priv *priv)
 	if (profile->disable)
 		profile->disable(priv);
 	flush_workqueue(priv->wq);
+#ifdef CONFIG_XDEV_EXT_MECH
+	/* disable can discover a failed native queue destroy. Retain the
+	 * profile's inner backing along with the quarantined channel.
+	 */
+	if (READ_ONCE(priv->peer_quarantined)) {
+		cancel_work_sync(&priv->update_stats_work);
+		return;
+	}
+#endif
 
 	profile->cleanup_rx(priv);
 	profile->cleanup_tx(priv);
@@ -6611,9 +6627,9 @@ rollback:
 	return err;
 }
 
-void mlx5e_netdev_attach_nic_profile(struct mlx5e_priv *priv)
+int mlx5e_netdev_attach_nic_profile(struct mlx5e_priv *priv)
 {
-	mlx5e_netdev_change_profile(priv, &mlx5e_nic_profile, NULL);
+	return mlx5e_netdev_change_profile(priv, &mlx5e_nic_profile, NULL);
 }
 
 void mlx5e_destroy_netdev(struct mlx5e_priv *priv)
@@ -6685,6 +6701,10 @@ static int _mlx5e_suspend(struct auxiliary_device *adev, bool pre_netdev_reg)
 	struct mlx5_core_dev *pos;
 	int i;
 
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (READ_ONCE(priv->peer_quarantined))
+		return -EIO;
+#endif
 	if (!pre_netdev_reg && !netif_device_present(netdev)) {
 		if (test_bit(MLX5E_STATE_DESTROYING, &priv->state))
 			mlx5_sd_for_each_dev(i, mdev, pos)
@@ -6693,6 +6713,10 @@ static int _mlx5e_suspend(struct auxiliary_device *adev, bool pre_netdev_reg)
 	}
 
 	mlx5e_detach_netdev(priv);
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (READ_ONCE(priv->peer_quarantined))
+		return -EIO;
+#endif
 	mlx5_sd_for_each_dev(i, mdev, pos)
 		mlx5e_destroy_mdev_resources(pos);
 

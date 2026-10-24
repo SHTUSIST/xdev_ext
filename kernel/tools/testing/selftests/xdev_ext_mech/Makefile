@@ -136,3 +136,6 @@ kernel-popcount-check:
 		{ echo 'Set KERNEL_SOURCE and KERNEL_OUTPUT to matching prepared kernel trees'; exit 2; }
 	python3 "$(CURDIR)/kernel_popcount/run.py" --kernel-source "$(KERNEL_SOURCE)" \
 		--kernel-output "$(KERNEL_OUTPUT)" --build-dir "$(OUTPUT)/.kernel-popcount" --cc "$(CC)"
+
+TEST_PROGS += peer_graph/test_native_rep_rx.py peer_graph/test_native_teardown.py
+TEST_FILES += peer_graph/native_rep_fixture.py peer_graph/native_eswitch_fixture.h peer_graph/native_eswitch_cases.c peer_graph/native_suspend_fixture.py peer_graph/fixtures/native_destroy_wrappers.c

@@ -7,6 +7,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #define CONFIG_XDEV_EXT_MECH 1
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define IS_ENABLED(x) 1
 #define netdev_err(d,...) ((void)(d))
 typedef unsigned short u16;
 #define THIS_MODULE ((void*)1)
@@ -25,7 +28,8 @@ static struct list_head mlx5e_peer_quarantine={&mlx5e_peer_quarantine,&mlx5e_pee
 struct device {int refs;};
 struct devlink {int refs;};
 struct net_device {int refs;};
-struct mlx5_core_dev {struct device *device;struct devlink *devlink;};
+struct mlx5_eswitch {bool peer_quarantined;};
+struct mlx5_core_dev {struct device *device;struct devlink *devlink;struct {struct mlx5_eswitch *eswitch;}priv;};
 struct mlx5e_channel;
 struct mlx5e_params {unsigned num_channels;};
 struct mlx5e_priv {bool peer_quarantined;int state_lock;struct {struct mlx5e_params params;struct mlx5e_channel **c;} channels;};

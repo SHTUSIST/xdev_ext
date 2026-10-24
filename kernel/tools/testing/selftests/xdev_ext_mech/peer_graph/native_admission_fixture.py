@@ -9,6 +9,7 @@ PROFILE = r'''
 #include <string.h>
 #include <errno.h>
 #define CONFIG_XDEV_EXT_MECH 1
+#define READ_ONCE(x) (x)
 #define MLX5E_STATE_OPENED 0
 #define MLX5E_STATE_DESTROYING 1
 #define MLX5_DEVICE_STATE_INTERNAL_ERROR 99
@@ -55,6 +56,7 @@ RX = r'''
 #include <string.h>
 #include <errno.h>
 #define CONFIG_XDEV_EXT_MECH 1
+#define READ_ONCE(x) (x)
 #define MLX5E_STATE_OPENED 0
 #define MLX5E_STATE_DESTROYING 1
 #define MLX5_DEVICE_STATE_INTERNAL_ERROR 99

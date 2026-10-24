@@ -411,6 +411,8 @@ int mlx5e_peer_recv(struct net_device *dev, u32 queue, u64 owner, struct xdev_ex
  /* A post never waits for control-plane reconfiguration. */
  if (!mutex_trylock(&priv->state_lock)) return -EAGAIN;
  if (!test_bit(MLX5E_STATE_OPENED, &priv->state) || queue >= priv->channels.num) goto unlock;
+ if (READ_ONCE(priv->peer_quarantined) ||
+     READ_ONCE(priv->channels.c[queue]->peer_quarantined)) { ret = -EIO; goto unlock; }
  rq = &priv->channels.c[queue]->rq;
  peer = rq->peer;
  if (!peer || peer->owner != owner) { ret = -ESTALE; goto unlock; }
