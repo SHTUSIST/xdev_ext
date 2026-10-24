@@ -49,6 +49,11 @@ interoperates with session or staged peers.
 device, one per segment. It is refused for the NXP layout at MTU 1500: 1432-byte
 segments at offset 360 are neither whole LBAs nor LBA-aligned.
 
+The passthrough SQEs retain per-command user-vector import and do not request
+`IORING_URING_CMD_FIXED`. Registration above describes setup; the `read-fixed`
+mode selects the registered buffers. The passthrough zero-copy qualification
+remains the SGL condition below.
+
 The vectored passthrough path needs an NVMe controller with SGL support. That
 is the same requirement the session's NVMe class has in ZEROCOPY builds. On
 such a controller the queue has no virt boundary, and 4-byte-aligned vectors
