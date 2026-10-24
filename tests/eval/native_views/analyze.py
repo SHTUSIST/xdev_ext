@@ -5,10 +5,14 @@ from collections import defaultdict
 import statistics
 import copy
 
-from contract import PAIR_FIELDS, inspect_collection, number, validate_run
+from contract import PAIR_FIELDS, canonical_recipe, inspect_collection, number, validate_run
 
 
 IDENTITY = ('session_id', 'record_id', 'generation')
+OBSERVATIONS = frozenset(('user_observe', 'view_build_begin', 'view_build_end',
+                          'cpu_stage_begin', 'cpu_stage_end', 'sync_begin', 'sync_end',
+                          'admission_begin', 'admission_end', 'queue_wait_begin', 'queue_wait_end'))
+DIAGNOSTICS = frozenset(('error', 'cancel', 'cancelled', 'stale', 'duplicate'))
 
 
 def _key(row):
@@ -80,10 +84,10 @@ def summarize_events(manifest, events, *, _admission=True):
     stages describe observed production topology. Supporting a fan-out trace here
     does not assert that a backend implements arbitrary dependency graphs.
     """
-    errors, records, gaps = [], [], []
+    errors, records, gaps, diagnostics = [], [], [], []
     graph = _stages(manifest, errors)
     if not graph:
-        return dict(records=[], gaps=[], inter_completion_ns=[], errors=errors,
+        return dict(records=[], gaps=[], diagnostics=[], inter_completion_ns=[], errors=errors,
                     performance_eligible=False)
     required = {}
     for row in manifest.get('records', []):
@@ -97,30 +101,57 @@ def summarize_events(manifest, events, *, _admission=True):
             errors.append('records: duplicate identity/frame_ids')
             continue
         required[key] = row
-    indexed = defaultdict(list)
+    indexed, event_errors = defaultdict(list), defaultdict(list)
     for e in events:
         if not isinstance(e, dict):
             errors.append('event: expected object')
             continue
         # Explicitly rejected stale/duplicate observations cannot complete work.
         if e.get('accepted') is False:
+            diagnostics.append(e)
             continue
         if (e.get('run_id') != manifest.get('run_id') or _key(e) not in required):
             errors.append('event: foreign run/session/record/generation')
             continue
         row = required[_key(e)]
+        key = _key(e)
+        if e.get('accepted') is not True:
+            event_errors[key].append('event: accepted must be boolean')
+            continue
         if (e.get('frame_id') not in [-1, *row['frame_ids']] or
                 any(type(e.get(k)) is not int for k in (*IDENTITY, 'frame_id'))):
-            errors.append('event: foreign or invalid frame identity')
+            event_errors[key].append('event: foreign or invalid frame identity')
             continue
-        indexed[(_key(e), e.get('frame_id'), e.get('stage'), e.get('event'))].append(e)
+        name, stage, frame = e.get('event'), e.get('stage'), e.get('frame_id')
+        if not isinstance(name, str) or not isinstance(stage, str):
+            event_errors[key].append('event: invalid event/stage name')
+            continue
+        if isinstance(name, str) and name.lower() in DIAGNOSTICS:
+            diagnostics.append(e)
+            continue
+        if name in ('native_submit', 'native_complete'):
+            placement_ok = frame >= 0 and stage in graph
+        elif name in ('record_admit', 'record_terminal'):
+            placement_ok = frame == -1 and stage == 'record'
+        elif name == 'recycle':
+            placement_ok = frame >= 0 and stage == 'frame'
+        elif name in OBSERVATIONS:
+            placement_ok = ((frame == -1 and stage == 'record') or
+                            (frame >= 0 and stage in graph))
+        else:
+            placement_ok = False
+        if not placement_ok:
+            event_errors[key].append('event: undeclared accepted work or invalid placement: %s stage=%s frame=%s' %
+                                     (name, stage, frame))
+            continue
+        indexed[(key, frame, stage, name)].append(e)
     dropped = manifest.get('trace_dropped') != 0
     if dropped:
         errors.append('trace_dropped: missing/dropped events invalidate intervals')
     terminal_events = []
     lifetimes = defaultdict(list)
     for key, row in required.items():
-        local_errors = []
+        local_errors = list(event_errors[key])
         identity = dict(zip(IDENTITY, key))
 
         def unique(frame, stage, name):
@@ -150,6 +181,17 @@ def summarize_events(manifest, events, *, _admission=True):
                 submits[stage] = unique(frame, stage, 'native_submit')
                 completes[stage] = unique(frame, stage, 'native_complete')
                 reasons = []
+                if submits[stage] is not None and completes[stage] is not None:
+                    # Logical generation identifies the record across stages.
+                    # The raw stage-local frame generation may advance between
+                    # stages, but must not change within one accepted operation.
+                    for field in ('frame_generation', 'ticket', 'cookie'):
+                        before, after = submits[stage], completes[stage]
+                        if field in before or field in after:
+                            if field not in before or field not in after or before[field] != after[field]:
+                                reasons.append('accepted native request %s identity mismatch' % field)
+                    if reasons:
+                        completes[stage] = None
                 _difference(admit, submits[stage], reasons)
                 _difference(submits[stage], completes[stage], reasons)
                 _difference(completes[stage], terminal, reasons)
@@ -214,7 +256,7 @@ def summarize_events(manifest, events, *, _admission=True):
         reasons = []
         completion_gaps.append(_difference(start, end, reasons))
         errors.extend(reasons)
-    return dict(records=records, gaps=gaps, inter_completion_ns=completion_gaps,
+    return dict(records=records, gaps=gaps, diagnostics=diagnostics, inter_completion_ns=completion_gaps,
                 errors=errors, performance_eligible=_admission and not errors and not validate_run(manifest, performance=True))
 
 
@@ -227,6 +269,14 @@ def compare_runs(left, right):
     for field in PAIR_FIELDS:
         if left.get(field) != right.get(field):
             errors.append(field + ': paired workload mismatch')
+    try:
+        left_recipe, right_recipe = canonical_recipe(left), canonical_recipe(right)
+        for field in left_recipe.keys() | right_recipe.keys():
+            if (field not in left_recipe or field not in right_recipe or
+                    left_recipe[field] != right_recipe[field]):
+                errors.append('recipe.' + field + ': paired workload mismatch')
+    except ValueError as error:
+        errors.append(str(error))
     if errors:
         return dict(eligible=False, errors=errors, delta=None, performance_eligible=False)
     delta = {}

@@ -53,8 +53,20 @@ generation and stage. Record-level admit/terminal events use frame -1 and stage
 matched native software completion boundary. Rejected duplicate/stale events
 do not complete work. Accepted foreign identities, failed or duplicate native
 completions, missing frames and premature recycling invalidate the record.
+Accepted work must use declared stages and the correct native-frame or
+record-endpoint scope. Unknown accepted event types are errors. Optional
+observations and explicit ERROR/cancel/stale diagnostics cannot stand in for
+native work; rejected/resource observations remain in `diagnostics`.
 Fan-out validates every declared consumer and releases after the last one;
 it does not assert that a backend supports arbitrary dependency graphs.
+
+Normalized `generation` identifies the immutable logical record. A raw
+`frame_generation` can advance between native stages. Within one stage,
+accepted submit and complete must retain the same supplied frame_generation,
+ticket and cookie. EC's explicit K mapping uses the immutable batch_key as
+logical generation and retains the raw stage-local token separately; U uses
+its immutable journal generation. Runtime-ID binding is a separate collector
+prerequisite and does not change the predeclared expected record denominator.
 
 A record's latency is terminal minus admit. Inter-completion gaps remain a
 separate statistic. A dependency gap uses predecessor native-complete and
@@ -127,12 +139,25 @@ oracle executes outside the timed region. A zero exit alone is insufficient.
 frame and generation with an observed `backing_id`, `valid_bytes`, and
 `native_views`: each view contains `kind` (`nvme`/`afxdp`), its `backing_id`,
 `offset_bytes` and `length_bytes`. Both native classes must reference the same
-backing and legal ranges. Different DMA-domain addresses need not be equal.
+backing and cover the full same measured payload span. Native views here
+describe payload byte ranges, excluding unrelated protocol-header ranges.
+IOV/SG pieces can differ in segmentation and ordering; their interval unions
+must agree. A one-frame record defaults to payload span [0, record_bytes).
+For multiple frames, each observation must explicitly provide
+`record_offset_bytes`, `payload_offset_bytes` and `payload_bytes`; all frame
+payloads together must cover every record byte without holes or overlaps.
+`valid_bytes` is a bound, not evidence that a tiny mapping covers a record.
+Different DMA-domain addresses need not be equal.
 The collector must obtain those observations from the measured native path;
 ordinary interface success or caller-supplied zero-copy flags do not suffice.
 Missing mapping/no-bounce instrumentation makes eligibility unavailable.
 
 Pair comparisons check the common workload/endpoint/clock/configuration and
+all visible recipe fields, including chain, rig, seed, records and warmup.
+The actual warmup default 4 is canonicalized; only intentional arm/wait
+selection differs. Unknown future recipe parameters are compared too, so an
+equal claimed configuration hash cannot conceal visible work differences.
+Stage topology and expected record/frame declarations also must match. They
 preserve right-minus-left negatives and unknowns. Pair aggregation uses each
 run pair once, unweighted by record count, and retains exclusions. It does not
 claim statistical confidence from a small pair count or turn thousands of

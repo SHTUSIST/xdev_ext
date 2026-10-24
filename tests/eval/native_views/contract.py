@@ -13,8 +13,27 @@ PAIR_FIELDS = (
     'protocol', 'crc', 'setup_in_timing', 'oracle_in_timing',
     'complete_boundary', 'submit_boundary', 'clock', 'clock_domain',
     'cpu_accounting', 'cpu_budget', 'completed_records', 'numa', 'iommu', 'group_bytes',
-    'segments_per_group', 'inflight_bytes', 'native_batch', 'processing',
+    'segments_per_group', 'inflight_bytes', 'native_batch', 'processing', 'stages',
+    'records', 'workload',
 )
+
+
+def canonical_recipe(run):
+    """Compare visible common work even when a claimed config hash is equal.
+
+    Preserve unknown recipe fields conservatively: a new work parameter cannot
+    silently evade pairing. Only the intentionally different arm/wait selection
+    is excluded. Materialize the one actual workload default accepted by chains.
+    """
+    recipe = run.get('recipe')
+    if recipe is None:
+        return {}
+    if not isinstance(recipe, dict):
+        raise ValueError('recipe: expected object')
+    common = {key: value for key, value in recipe.items()
+              if key not in ('arm', 'arms', 'wait', 'wait_strategy')}
+    common.setdefault('warmup_records', 4)
+    return common
 
 
 def number(value, minimum=0):
@@ -347,7 +366,11 @@ def _check_backing(run, proof):
     frames = proof.get('frames', [])
     if not isinstance(frames, list):
         return [*errors, 'zero_copy.frames: per-frame backing observations required']
+    record_bytes = run.get('record_bytes')
+    if type(record_bytes) is not int or record_bytes <= 0:
+        return [*errors, 'zero_copy.record_bytes: positive measured payload length required']
     for record in run.get('records', []):
+        record_ranges = []
         for frame in record['frame_ids']:
             matches = [f for f in frames if isinstance(f, dict) and
                        all(f.get(k) == record.get(k) for k in ('session_id', 'record_id', 'generation')) and f.get('frame_id') == frame]
@@ -359,17 +382,55 @@ def _check_backing(run, proof):
             if not observed.get('backing_id') or not isinstance(views, list):
                 errors.append('zero_copy.frames: missing backing/native views')
                 continue
-            kinds = set()
+            # A one-frame record has an unambiguous default payload span. For
+            # multiple frames the provider must observe the actual record/frame
+            # offsets; frame size is capacity, not an inferred payload length.
+            single_frame = len(record['frame_ids']) == 1
+            record_offset = observed.get('record_offset_bytes', 0 if single_frame else None)
+            payload_offset = observed.get('payload_offset_bytes', 0 if single_frame else None)
+            payload_bytes = observed.get('payload_bytes', record_bytes if single_frame else None)
+            valid_bytes = observed.get('valid_bytes')
+            if (any(type(value) is not int for value in
+                    (record_offset, payload_offset, payload_bytes, valid_bytes)) or
+                    min(record_offset, payload_offset) < 0 or payload_bytes <= 0 or
+                    valid_bytes <= 0 or record_offset + payload_bytes > record_bytes or
+                    payload_offset + payload_bytes > valid_bytes):
+                errors.append('zero_copy.frames: explicit legal record/payload span required')
+                continue
+            record_ranges.append((record_offset, record_offset + payload_bytes))
+            ranges = {'nvme': [], 'afxdp': []}
             for view in views:
                 if not isinstance(view, dict):
                     errors.append('zero_copy.native_views: invalid view')
                     continue
-                kinds.add(view.get('kind'))
+                kind = view.get('kind')
+                offset, length = view.get('offset_bytes'), view.get('length_bytes')
                 if (view.get('backing_id') != observed['backing_id'] or
-                        not number(view.get('offset_bytes')) or not number(view.get('length_bytes'), 1) or
-                        not number(observed.get('valid_bytes'), 1) or
-                        view['offset_bytes'] + view['length_bytes'] > observed['valid_bytes']):
+                        type(offset) is not int or type(length) is not int or
+                        offset < 0 or length <= 0 or offset + length > valid_bytes):
                     errors.append('zero_copy.native_views: foreign backing or illegal byte range')
-            if not {'nvme', 'afxdp'} <= kinds:
-                errors.append('zero_copy.native_views: both NVMe and AF_XDP mappings required')
+                    continue
+                if kind in ranges:
+                    ranges[kind].append((offset, offset + length))
+            required_span = [(payload_offset, payload_offset + payload_bytes)]
+            for kind, spans in ranges.items():
+                if _merge_ranges(spans) != required_span:
+                    errors.append('zero_copy.native_views.%s: full measured payload span must match backing/ranges' % kind)
+        # Every measured record byte must occur in exactly one frame payload.
+        # Different native descriptor segmentation within each frame is legal.
+        ordered = sorted(record_ranges)
+        if (_merge_ranges(ordered) != [(0, record_bytes)] or
+                any(left[1] > right[0] for left, right in zip(ordered, ordered[1:]))):
+            errors.append('zero_copy.frames: record payload coverage missing or overlapping')
     return errors
+
+
+def _merge_ranges(ranges):
+    """Canonical byte coverage, independent of legal IOV/SG segmentation."""
+    merged = []
+    for start, end in sorted(ranges):
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
