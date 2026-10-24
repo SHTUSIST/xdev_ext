@@ -441,7 +441,7 @@ def uo_spec(case, chain, rig, a, shape, seed, out_dir):
     spec = dict(schema='xdev-uo-spec-v1', chain=chain,
                 mode='correctness' if a.correctness_only else 'timing',
                 wait=case['wait'] or 'eventfd', afxdp_mode=case['var']['afxdp_mode'],
-                load=case.get('load', 'closed'),
+                load=case.get('load', 'closed'), seed=seed,
                 group_bytes=group, batches=a.records * burst, warmup=a.warmup_records * burst,
                 burst=burst, depth=case['var']['depth'], timeout_ms=rig.get('timeout_ms', 60000),
                 hugepage=rig.get('hugepage', True),

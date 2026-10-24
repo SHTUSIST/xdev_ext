@@ -17,6 +17,7 @@ import sys
 import tempfile
 import unittest
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import analyze
 import contract
@@ -231,10 +232,17 @@ class RuntimeImport(unittest.TestCase):
         # The real UO spec represents arm choice by schema+wait, without arm.
         self.artifact('oracle_expected', expected)
         self.artifact('oracle_readback', expected)
-        userspace = dict(self.manifest, arm='U-event')
-        userspace_spec = dict(spec, schema='xdev-uo-spec-v1', wait='eventfd')
-        del userspace_spec['arm']
-        self.assertEqual(contract._check_postoracle(userspace, self.receipt['artifacts'], userspace_spec), [])
+        rig = dict(nvme_dst=dict(ng='/synthetic/ng', block='/synthetic/nvme', slba=0, nlb=8, lba_bytes=512),
+                   rx=dict(ifname='synthetic0', queue=0, mac='02:00:00:00:00:01', ip='192.0.2.1', port=1111),
+                   tx=dict(mac='02:00:00:00:00:02', ip='192.0.2.2', port=2222))
+        for arm, wait in (('U-poll', 'poll'), ('U-event', 'eventfd')):
+            with self.subTest(actual_uo_arm=arm):
+                userspace = dict(self.manifest, arm=arm)
+                case = dict(wait=wait, load=userspace['load'], var=dict(afxdp_mode='zc', depth=userspace['depth']))
+                userspace_spec = oracle.uo_spec(case, 'nic-nvme', rig,
+                    SimpleNamespace(correctness_only=False, records=1, warmup_records=0),
+                    (4096, 1, 4096), 17, self.directory)
+                self.assertEqual(contract._check_postoracle(userspace, self.receipt['artifacts'], userspace_spec), [])
 
     def test_real_software_process_receipt_can_be_imported_without_physical_claims(self):
         receipt = runner.execute_command([sys.executable, '-c',
