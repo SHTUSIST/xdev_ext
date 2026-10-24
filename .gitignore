@@ -1202,3 +1202,12 @@
 !/tests/eval/bam/test_native_contract.py
 
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_optional_btf_test.py
+
+# Independently authored local Redis response correctness.
+!/tests/eval/redis_fragmented/
+!/tests/eval/redis_fragmented/Makefile
+!/tests/eval/redis_fragmented/README.md
+!/tests/eval/redis_fragmented/run_redis_fragmented_eval.py
+!/tests/eval/redis_fragmented/test_fragmented_contract.py
+!/tests/eval/redis_fragmented/test_lifecycle.py
+!/tests/eval/redis_fragmented/test_process_group.py

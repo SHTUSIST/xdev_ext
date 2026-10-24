@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install host test dependencies
-        run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config clang llvm
+        run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config clang llvm redis-server
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
       - name: CPU mechanism BPF target and scratch ABI contracts
@@ -104,6 +104,8 @@ jobs:
           make -C tests/eval/apps check
       # SDK-dependent build checks skip explicitly on this SDK-free runner;
       # CLI, refusal and result contracts still run.
+      - name: Migrated Redis fragmented response correctness
+        run: make -C tests/eval redis-fragmented-check
       - name: GDS CLI and capability contracts
         run: python3 tests/eval/gds/test_gds.py -v
       - name: HFT-shaped replay correctness and ownership

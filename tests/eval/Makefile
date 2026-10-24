@@ -108,3 +108,8 @@ reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic
 
 clean:
 	rm -rf $(BUILD) __pycache__
+
+# Isolated real local Redis response correctness; no device or timing run.
+.PHONY: redis-fragmented-check
+redis-fragmented-check:
+	$(MAKE) -C redis_fragmented check
