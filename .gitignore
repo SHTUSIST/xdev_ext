@@ -1028,6 +1028,8 @@
 # Track B independent RED tests (exact allow-list).
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/ack_envelope_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/ack_envelope_fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/behavior_program_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/bpf_glue_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/core_enforcement_test.c
