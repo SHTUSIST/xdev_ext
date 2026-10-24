@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: GPL-2.0
+// Actual registry/worker/stop functions; RCU wait is an explicit scheduler hook.
+#include <stdbool.h>
+#include <stdint.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <errno.h>
+#include "io_uring/xdev_ext_mech_core.h"
+#include "io_uring/xdev_ext_mech_notify.h"
+typedef uint32_t u32;typedef uint64_t u64;
+#define __rcu
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define spin_lock_irqsave(l,f) do{(void)(l);(f)=0;}while(0)
+#define spin_unlock_irqrestore(l,f) do{(void)(l);(void)(f);}while(0)
+#define spin_lock(l) ((void)(l))
+#define spin_unlock(l) ((void)(l))
+#define lockdep_assert_held(l) ((void)(l))
+#define atomic_read(p) (*(p))
+#define atomic64_read(p) (*(p))
+#define rcu_access_pointer(x) (x)
+#define rcu_assign_pointer(x,v) ((x)=(v))
+#define XDEV_EXT_MECH_CLASS_F_ORDERED 1
+struct mutex{int unused;};struct static_key_false{int unused;};
+static void mutex_lock(struct mutex*m){(void)m;}static void mutex_unlock(struct mutex*m){(void)m;}
+static void static_branch_disable(struct static_key_false*k){(void)k;}
+struct list_head{int unused;};
+struct kthread_work{int unused;};
+struct xdev_ext_mech_session;
+struct xdev_ext_mech_class_ops{unsigned flags;};
+struct xdev_ext_mech_stage{u32 class_id;const struct xdev_ext_mech_class_ops*cls;};
+struct xdev_ext_mech_batch{struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_batch*parent;int fan_error;u32 bytes;struct list_head node;};
+struct xdev_ext_mech_session{
+ struct xdev_ext_mech_sess ss;int lock,last_err,stop_err,native_controls;
+ bool start_preparing,start_return_pending,start_recycle,worker_gone;
+ u64 start_left,start_legacy_events,done,aborted,cnt[XDEV_EXT_MECH_CNT_NR];
+ const void*ops[XDEV_EXT_MECH_CLASS_MAX];bool pinned[XDEV_EXT_MECH_CLASS_MAX];
+ struct xdev_ext_mech_stage st[2];struct xdev_ext_mech_layout layout;void*plan;u32 nr_stages;
+ struct xdev_ext_mech_notify_state notify;int *evfd;int worker,drain_wq;
+ struct kthread_work stop_work,retry_work;struct list_head retry;
+ struct xdev_ext_mech_session*next_test;struct list_head all_node;
+};
+@REGISTRY_STRUCT@
+static const void *slots[XDEV_EXT_MECH_CLASS_MAX];
+#ifdef CONFIG_XDEV_EXT_MECH_C_REFERENCE
+static const void *xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_MAX];
+#endif
+static struct xdev_ext_ops_registry xdev_ext_mech_registry={.slots=slots,.nr_slots=XDEV_EXT_MECH_CLASS_MAX};
+static struct {struct xdev_ext_mech_session*first;} xdev_ext_mech_all;
+static int xdev_ext_mech_all_lock;
+#define list_for_each_entry(pos,head,member) for((pos)=(head)->first;(pos);(pos)=(pos)->next_test)
+#define list_add_tail(node,head) do{(void)(node);(void)(head);}while(0)
+static unsigned submit_calls,queued_stop;
+static int hook_mode,hook_error,hook_state,hook_inflight,replacement_token;
+static struct xdev_ext_mech_session *hook_session;
+static void wake_up(int*w){(void)w;}
+static void eventfd_signal(int*e){(*e)++;}
+static void kthread_queue_work(int worker,struct kthread_work*w){(void)worker;(void)w;queued_stop++;}
+static void kthread_mod_delayed_work(int worker,struct kthread_work*w,unsigned delay){(void)worker;(void)w;(void)delay;}
+static void synchronize_rcu(void);
+/* ACTUAL_PROTOTYPES */
+static void xdev_ext_mech_fanout_landed(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,int err,bool seq){(void)s;(void)b;(void)err;(void)seq;abort();}
+static bool xdev_ext_mech_order_blocked(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;return false;}
+static void xdev_ext_mech_order_park(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;}
+static u32 xdev_ext_mech_stage_group_end(const void*plan,u32 nr,u32 stage){(void)plan;(void)nr;return stage+1;}
+static void xdev_ext_mech_fanout_run(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;abort();}
+static int xdev_ext_mech_batch_acquire(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;return 0;}
+static int xdev_ext_mech_build(struct xdev_ext_mech_session*s,struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){(void)s;(void)st;(void)b;return 0;}
+static int xdev_ext_mech_submit(struct xdev_ext_mech_session*s,struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){(void)s;(void)st;(void)b;submit_calls++;return 0;}
+static void xdev_ext_mech_life_undo(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;}
+static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session*s){(void)s;}
+// Endpoint/frames-release OS boundary: the locally refused READY batch is
+// retired; accepted batches retain their actual pure-core session references.
+static void xdev_ext_mech_abort(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,int err){(void)b;s->aborted++;xdev_ext_mech_set_err_locked(s,err);xdev_ext_mech_sess_batch_end(&s->ss,false);xdev_ext_mech_notify_locked(s,true);}
+/* ACTUAL_FUNCTIONS */
+static void synchronize_rcu(void){
+ if(!hook_mode)return;
+ if(hook_mode==2)slots[XDEV_EXT_MECH_CLASS_AFXDP]=&replacement_token;
+ struct xdev_ext_mech_batch b={.bytes=8192};b.bs.stage=0;
+ xdev_ext_mech_batch_run(hook_session,&b);
+ hook_error=hook_session->last_err;hook_state=hook_session->ss.state;hook_inflight=hook_session->ss.inflight;
+}
+static unsigned checks,failures;
+#define CHECK(label,cond) do{checks++;if(!(cond)){failures++;printf("FAIL %s\n",label);}else printf("PASS %s\n",label);}while(0)
+static int token,event;
+static struct xdev_ext_mech_class_ops cls;
+static void setup(struct xdev_ext_mech_session*s){memset(s,0,sizeof(*s));memset(slots,0,sizeof(slots));event=0;submit_calls=queued_stop=0;
+ s->ss=(struct xdev_ext_mech_sess){.state=XDEV_EXT_MECH_SESSION_ACTIVE,.refs=4,.inflight=3};s->layout.group_bytes=8192;s->ops[XDEV_EXT_MECH_CLASS_AFXDP]=&token;s->pinned[XDEV_EXT_MECH_CLASS_AFXDP]=true;s->st[0]=(struct xdev_ext_mech_stage){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,.cls=&cls};s->evfd=&event;s->start_left=5;s->done=51;s->aborted=5;
+ s->notify=(struct xdev_ext_mech_notify_state){.coarse=true,.armed=true,.target={.session_id=2,.batches_target=64}};slots[XDEV_EXT_MECH_CLASS_AFXDP]=&token;xdev_ext_mech_registry.nr_active=1;xdev_ext_mech_all.first=s;hook_session=s;
+}
+static void finish_accepted(struct xdev_ext_mech_session*s){while(s->ss.inflight)xdev_ext_mech_sess_batch_end(&s->ss,false);xdev_ext_mech_settle_locked(s);}
+int main(void){struct xdev_ext_mech_session s;
+ setup(&s);hook_mode=0;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
+ CHECK("ordinary_detach_keeps_cancellation",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED);
+ CHECK("accepted_commands_remain_until_completion",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPING&&s.ss.inflight==3&&submit_calls==0);
+ finish_accepted(&s);CHECK("ordinary_detach_zero_inflight_STOPPED",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED&&!s.ss.inflight&&!s.ss.sequestered);
+ setup(&s);hook_mode=1;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
+ CHECK("registry_retired_before_worker_hook",!slots[XDEV_EXT_MECH_CLASS_AFXDP]);
+ CHECK("detached_READY_not_resubmitted",submit_calls==0&&s.aborted==6&&hook_inflight==2);
+ printf("OBSERVED_EARLY state=%d last_err=%d inflight=%d eventfd=%d\n",hook_state,hook_error,hook_inflight,event);
+ CHECK("local_generation_loss_is_cancellation",hook_error==-ECANCELED);
+ CHECK("generation_stop_retains_cancellation",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED);
+ CHECK("early_notice_is_not_drain",hook_inflight==2&&event>0);
+ CHECK("STOP_does_not_free_accepted_commands",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPING&&s.ss.inflight==2);
+ finish_accepted(&s);CHECK("late_accepted_completions_drain_without_replay",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED&&!s.ss.inflight&&!s.ss.sequestered&&submit_calls==0);
+ setup(&s);hook_mode=1;s.last_err=-EIO;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
+ CHECK("prior_real_native_error_not_overwritten",s.last_err==-EIO&&s.stop_err==-EIO&&xdev_ext_mech_stop_reason(&s)==-EIO);finish_accepted(&s);
+ setup(&s);hook_mode=0;xdev_ext_mech_session_stop(&s,0);s.native_controls=1;finish_accepted(&s);CHECK("native_control_ref_blocks_settle",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPING);s.native_controls=0;xdev_ext_mech_settle_locked(&s);CHECK("native_control_drain_then_settles",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED);
+ setup(&s);hook_mode=0;xdev_ext_mech_session_stop(&s,0);CHECK("ordinary_STOP0_stays_ESHUTDOWN",xdev_ext_mech_stop_reason(&s)==-ESHUTDOWN);finish_accepted(&s);
+ setup(&s);hook_mode=0;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_NVME,&token);CHECK("unrelated_class_detach_does_not_cancel",xdev_ext_mech_session_admits(&s)&&!s.last_err&&!s.stop_err);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
+ setup(&s);hook_mode=0;struct xdev_ext_mech_batch valid={.bytes=8192};xdev_ext_mech_batch_run(&s,&valid);CHECK("valid_generation_can_submit",submit_calls==1);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
+ setup(&s);hook_mode=2;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);CHECK("replacement_generation_cancels_old_only",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED&&slots[XDEV_EXT_MECH_CLASS_AFXDP]==&replacement_token);finish_accepted(&s);
+ setup(&s);hook_mode=0;s.ss.sequestered=1;xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);CHECK("unknown_custody_stays_quarantined",s.ss.state==XDEV_EXT_MECH_SESSION_ZOMBIE&&xdev_ext_mech_sess_ref_fate(&s.ss)==XDEV_EXT_MECH_REFS_QUARANTINE);
+#ifdef CONFIG_XDEV_EXT_MECH_C_REFERENCE
+ setup(&s);hook_mode=0;s.pinned[XDEV_EXT_MECH_CLASS_AFXDP]=false;xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_AFXDP]=&token;
+ CHECK("C_reference_current_generation_admits",xdev_ext_mech_session_admits(&s));xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_AFXDP]=NULL;
+ CHECK("C_reference_generation_loss_is_cancellation",xdev_ext_mech_stop_reason(&s)==-ECANCELED);xdev_ext_mech_session_stop(&s,-ECANCELED);finish_accepted(&s);
+#endif
+ printf("checks=%u failures=%u\n",checks,failures);return failures?1:0;}

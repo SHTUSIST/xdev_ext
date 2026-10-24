@@ -38,6 +38,8 @@ TEST_FILES += xdev_ext_mech_nvme_pool_fixture.c
 TEST_PROGS += iaa_transform/run.sh xdev_ext_mech_variable_length_test.py
 TEST_FILES += $(wildcard iaa_transform/*.py iaa_transform/*.c iaa_transform/*.h iaa_transform/*.md)
 
+TEST_PROGS += core_lifecycle/detach_generation_test.py
+TEST_FILES += core_lifecycle/detach_generation_fixture.c.in
 TEST_PROGS += core_lifecycle/teardown_test.py core_lifecycle/stop_work_rearm_test.py core_lifecycle/start_keys_test.py
 TEST_PROGS += core_lifecycle/frames_release_test.py core_lifecycle/transform_alias_test.py core_lifecycle/alias_table_test.py core_lifecycle/stage_get_cmd_test.py
 TEST_FILES += core_lifecycle/lease_boundary.py

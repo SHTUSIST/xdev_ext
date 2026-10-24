@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+"""Real retraction/worker/STOP bodies over an explicit RCU scheduler boundary.
+
+This checks cancellation cause, first-error precedence and reference decisions,
+not hardware timing, actual DMA, or kernel RCU/lock implementation correctness.
+"""
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import tempfile
+import unittest
+
+HERE = Path(__file__).resolve().parent
+ROOT = Path(os.environ.get('KERNEL_SRC', str(HERE.parents[4]))).resolve()
+
+
+def function(text, name):
+    match = re.search(r'^([^\n;#{}]*\b' + re.escape(name) +
+                      r'\s*\([^;]*?\))\s*\{', text, re.M)
+    if not match:
+        raise AssertionError('missing production definition: ' + name)
+    start, depth = match.start(), 0
+    for index in range(text.index('{', start), len(text)):
+        depth += {'{': 1, '}': -1}.get(text[index], 0)
+        if not depth:
+            return text[start:index + 1]
+    raise AssertionError('unbalanced production definition: ' + name)
+
+
+def generate(kernel=ROOT):
+    core = (kernel / 'io_uring/xdev_ext_mech.c').read_text()
+    ops = (kernel / 'io_uring/xdev_ext_mech_ops.c').read_text()
+    registry = (kernel / 'io_uring/xdev_ext_ops_core.c').read_text()
+    header = (kernel / 'io_uring/xdev_ext_ops_core.h').read_text()
+    source = (HERE / 'detach_generation_fixture.c.in').read_text()
+    start = header.index('struct xdev_ext_ops_registry {')
+    source = source.replace('@REGISTRY_STRUCT@', header[start:header.index('\n};', start) + 3])
+    names = [(header, 'xdev_ext_ops_is_current'), (registry, 'xdev_ext_ops_retract'),
+             (ops, 'xdev_ext_mech_ops_current'), (ops, 'xdev_ext_mech_unreg')]
+    names += [(core, name) for name in (
+        'xdev_ext_mech_session_admits', 'xdev_ext_mech_settle_locked',
+        'xdev_ext_mech_set_err_locked', 'xdev_ext_mech_stop_reason',
+        'xdev_ext_mech_session_stop', 'xdev_ext_mech_notify_locked',
+        'xdev_ext_mech_generation_gone', 'xdev_ext_mech_batch_run')]
+    bodies = [function(text, name) for text, name in names]
+    source = source.replace('/* ACTUAL_PROTOTYPES */', '\n'.join(
+        body[:body.index('{')].strip() + ';' for body in bodies))
+    return source.replace('/* ACTUAL_FUNCTIONS */', '\n'.join(bodies))
+
+
+class DetachGeneration(unittest.TestCase):
+    def test_retraction_reason_and_accepted_drain(self):
+        with tempfile.TemporaryDirectory(prefix='xdev-detach-generation-') as tmp:
+            path = Path(tmp)
+            source = path / 'detach.c'
+            source.write_text(generate())
+            for reference in (False, True):
+                with self.subTest(c_reference=reference):
+                    executable = path / ('reference' if reference else 'pinned')
+                    command = shlex.split(os.environ.get('CC', 'gcc')) + [
+                        '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+                        '-Wno-unused-function', '-fsanitize=undefined',
+                        '-fno-sanitize-recover=undefined', '-I', str(ROOT)]
+                    if reference:
+                        command += ['-DCONFIG_XDEV_EXT_MECH_C_REFERENCE=1']
+                    command += [str(source), '-o', str(executable)]
+                    build = subprocess.run(command, capture_output=True, text=True)
+                    self.assertEqual(build.returncode, 0, build.stdout + build.stderr)
+                    run = subprocess.run([str(executable)], capture_output=True,
+                                         text=True, timeout=10)
+                    self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                    self.assertIn('failures=0', run.stdout)
+                    print(run.stdout, end='')
+
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)

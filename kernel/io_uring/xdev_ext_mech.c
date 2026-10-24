@@ -843,8 +843,20 @@ static void xdev_ext_mech_set_err_locked(struct xdev_ext_mech_session *s, int er
 static int xdev_ext_mech_stop_reason(struct xdev_ext_mech_session *s)
 {
 	int err = READ_ONCE(s->stop_err);
+	u32 i;
 
-	return err ? err : -ESHUTDOWN;
+	if (err)
+		return err;
+	/* Retraction closes admission before generation_gone can visit every
+	 * session. A locally refused batch in that window is cancelled, not a
+	 * new transport failure that may win the first-error latch. The pinned
+	 * generation remains alive; only compare its registry identity here.
+	 */
+	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
+		if (s->ops[i] &&
+		    !xdev_ext_mech_ops_current(i, s->ops[i], s->pinned[i]))
+			return -ECANCELED;
+	return -ESHUTDOWN;
 }
 
 /*
