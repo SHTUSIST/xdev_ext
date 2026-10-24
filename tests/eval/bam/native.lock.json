@@ -1,0 +1,39 @@
+{
+  "url": "https://github.com/ZaidQureshi/bam.git",
+  "revision": "315fadfc5c5c018a64596157bfac94ecbb7d87a2",
+  "submodule": {
+    "path": "include/freestanding",
+    "url": "https://github.com/ogiroux/freestanding",
+    "revision": "6360203797a3601fa61f3580dc97b2535b2c232d"
+  },
+  "recursive_submodules": [
+    {
+      "path": "include/freestanding/libcxx",
+      "url": "https://github.com/ogiroux/libcxx",
+      "revision": "36156f0962149ef19ce778110642150b456a182b"
+    }
+  ],
+  "native_sources": [
+    "include/ctrl.h",
+    "include/queue.h",
+    "include/nvm_parallel_queue.h",
+    "include/page_cache.h",
+    "include/nvm_cmd.h",
+    "include/nvm_types.h",
+    "include/nvm_dma.h",
+    "src/admin.cpp",
+    "src/linux/dma.cpp",
+    "benchmarks/readwrite/main.cu"
+  ],
+  "license": {
+    "path": "LICENSE",
+    "provenance": "Official BaM root LICENSE at pinned revision; copied byte-for-byte to BaM-LICENSE",
+    "local_path": "BaM-LICENSE"
+  },
+  "native_patch": {
+    "path": "include/freestanding/libcxx/include/type_traits",
+    "operation": "whole-word __is_convertible -> __bam_libcpp_is_convertible",
+    "scope": "compiler identifier collision only; no queue/data-plane/module changes"
+  },
+  "historical_patch": "bam-linux6-gcc13-compat.patch and upstream.lock describe a distinct unrecorded archive; not byteequal to native pin"
+}
