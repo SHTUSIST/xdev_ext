@@ -1211,3 +1211,26 @@
 !/tests/eval/redis_fragmented/test_fragmented_contract.py
 !/tests/eval/redis_fragmented/test_lifecycle.py
 !/tests/eval/redis_fragmented/test_process_group.py
+
+# Native peer UNKNOWN teardown and its actual-source regressions.
+!/kernel/net/devlink/
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/fixtures/
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/en/qos.c
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/en_rep.c
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/eswitch.c
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/eswitch.h
+!/kernel/drivers/net/ethernet/mellanox/mlx5/core/eswitch_offloads.c
+!/kernel/net/devlink/core.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/NATIVE_TEARDOWN.md
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/fixtures/native_destroy_wrappers.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_admission_fixture.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_eswitch_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_eswitch_fixture.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_owner_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_owner_fixture.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_rep_fixture.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/native_suspend_fixture.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_admission_profile.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_owner_teardown.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_rep_rx.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_teardown.py

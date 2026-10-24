@@ -186,6 +186,15 @@ jobs:
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: make -C kernel/tools/testing/selftests/xdev_ext_peer run_tests
+      - name: Native peer teardown, owner and profile contracts
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_teardown.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_owner_teardown.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_admission_profile.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_rep_rx.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/mlx5_peer_rx_ring_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/independent_mlx5_peer_lifecycle.py
       - name: Fence guest evidence rejection controls
         run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py -v
       - name: Integration harness and verdict checks
