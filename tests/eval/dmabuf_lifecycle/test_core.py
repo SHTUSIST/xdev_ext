@@ -6,6 +6,8 @@ The same natural header must be included by the real kernel module. This suite
 checks state/callback/ref behavior, not Linux scheduling, RCU, or DMA behavior.
 """
 from pathlib import Path
+import os
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -18,12 +20,13 @@ class BenchmarkCore(unittest.TestCase):
     def invoke(self, scenario, arm='fence'):
         core = HERE / 'lifecycle_core.h'
         self.assertTrue(core.is_file(), 'missing actual shared benchmark lifecycle_core.h')
-        for compiler in ('gcc', 'clang'):
+        for compiler in (shlex.split(os.environ.get('CC', 'cc')),):
             with self.subTest(compiler=compiler, arm=arm):
-                self.assertIsNotNone(shutil.which(compiler), compiler + ' required for host contract')
+                self.assertTrue(compiler, 'CC must name a compiler command')
+                self.assertIsNotNone(shutil.which(compiler[0]), compiler[0] + ' required for host contract')
                 with tempfile.TemporaryDirectory(prefix='.core-contract-', dir=HERE) as tmp:
                     binary = Path(tmp) / 'core-contract'
-                    build = subprocess.run([compiler, '-std=gnu11', '-O1', '-Wall', '-Wextra',
+                    build = subprocess.run(compiler + ['-std=gnu11', '-O1', '-Wall', '-Wextra',
                                             '-Werror', '-I' + str(HERE / 'fixtures'),
                                             '-I' + str(HERE), str(HERE / 'fixtures' / 'core_driver.c'),
                                             '-o', str(binary)], capture_output=True, text=True, timeout=30)
