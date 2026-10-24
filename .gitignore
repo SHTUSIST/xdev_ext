@@ -1178,3 +1178,5 @@
 !/tests/eval/native_views/test_runtime_import.py
 !/tests/eval/mechanism_variants/driver_audit.py
 !/tests/eval/mechanism_variants/test_driver_audit.py
+!/tests/eval/mechanism_variants/test_driver_identity.py
+!/tests/eval/mechanism_variants/test_archive_relocation.py

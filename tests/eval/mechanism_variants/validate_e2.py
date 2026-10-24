@@ -153,7 +153,7 @@ def validate(source,scratch,evidence):
     require(result.wasSuccessful(),'independent frozen guest gate failed; see e2-frozen-gate.log')
     validation=dict(schema='xdev-ext-e2-validation-v1',status='pass',evidence_kind='guest-correctness',timing_claim='none',
         source_disk='whole-image unchanged',destination_disk='whole-image unchanged',umem_guards=guards,native_driver=drivers,
-        old_ticket_scope='actual-core-host-fixture',kernel_git_sha=sha_source,capture_directory=str(capture),
+        old_ticket_scope='actual-core-host-fixture',kernel_git_sha=sha_source,capture_directory=capture.relative_to(evidence).as_posix(),
         capture_sha256=sha(capture/'capture.json'))
     write_derived(evidence/'e2-validation.json',validation)
     return validation

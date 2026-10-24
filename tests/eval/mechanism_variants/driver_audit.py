@@ -31,6 +31,20 @@ def audit(raw,session_id,final_stage=1):
         else:
             terminal.setdefault(r['batch_id'],[]).append(r)
     if not binds:raise ValueError('no actual in-scope descriptor_bind pool observations')
+    terminal_by_frame={}
+    for cohort in terminal.values():
+        for end in cohort:
+            key=(end['batch_id'],end['frame_id'])
+            if key in terminal_by_frame:raise ValueError('duplicate terminal frame identity')
+            terminal_by_frame[key]=end
+    if {(b['batch_id'],b['frame_id']) for b in binds}!=set(terminal_by_frame):
+        raise ValueError('terminal frame cohort has no complete descriptor binding cohort')
+    for binding in binds:
+        end=terminal_by_frame.get((binding['batch_id'],binding['frame_id']))
+        if end is None or any(binding[k]!=end[k] for k in ('session_id','batch_id','batch_key','frame_id','generation','stage','ticket','class_id')):
+            raise ValueError('descriptor binding does not match the actual terminal native operation/frame claim')
+        if binding['address']+82!=end['address'] or binding['bytes']!=end['bytes']+82:
+            raise ValueError('descriptor wire span does not match terminal payload plus the actual NXP2 header')
     pools={b['cookie'] for b in binds}
     journal=[];excluded=[]
     for number,line,f in tokens:
@@ -65,8 +79,8 @@ def audit(raw,session_id,final_stage=1):
             accepted,binding=submitted[identity]
             if any(r[k]!=accepted[k] for k in ('cookie','address','bytes','sequence')) or r['ts_ns']<accepted['ts_ns']:
                 raise ValueError('native descriptor completion changed actual accepted span/identity')
-            ends=terminal.get(binding['batch_id'],[])
-            if not ends or r['ts_ns']>min(end['ts_ns'] for end in ends):
+            end=terminal_by_frame[(binding['batch_id'],binding['frame_id'])]
+            if r['ts_ns']>end['ts_ns']:
                 raise ValueError('terminal record completion precedes actual driver completion')
             completed[identity]=r
             binding_report.append(dict(pool=r['cookie'],sequence=r['sequence'],batch_id=binding['batch_id'],

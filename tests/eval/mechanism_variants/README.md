@@ -334,3 +334,11 @@ Other pools remain explicit raw-line exclusions. It does not assign the core's
 session/ticket to raw driver events. The host validator archives this audit as
 `VARIANT-driver-audit.json` and references it from the compact decoder's scope
 receipt, retaining all original rows unchanged.
+
+Descriptor bindings are checked against the same actual terminal operation's
+session, batch/key, stage, frame, lifecycle generation and ticket. Its wire
+span includes the 82-byte NXP2 header; the terminal span is payload, so the
+audit checks that exact relationship and the complete frame cohort. It does
+not require equality with the preceding NVMe stage's generation/ticket.
+`e2-validation.json` records `capture_directory` relative to its evidence
+directory, preserving identical result bytes when the frozen evidence moves.
