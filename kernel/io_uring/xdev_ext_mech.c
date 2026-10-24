@@ -1991,39 +1991,6 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 		memset(s->cqe, 0, cls->cqe_size * cls->cqe_cap);
 		cls->fill_cqe(st, b, s->cqe);
 	}
-#ifdef XDEV_EXT_MECH_HANDOFF_LEGACY
-	/* Complete compatibility payload fixups and DMA CPU synchronization
-	 * before release-publishing READY. Acquire/release is not a DMA fence.
-	 */
-	if (!seq)
-		xdev_ext_mech_sync_for_cpu(s, b);
-	if (!seq) {
-		u32 i;
-
-		for (i = 0; i < b->nr_frames; i++) {
-			struct xdev_ext_mech_life *l = &s->life[b->f[i].index];
-			u64 token = b->life_token[i];
-			int rc;
-
-			if (b->producing)
-				rc = b->status ? xdev_ext_mech_life_fail_produce(l, token) :
-					xdev_ext_mech_life_publish(l, token, b->f[i].data_len);
-			else
-				rc = xdev_ext_mech_life_complete_consume(l, token);
-			if (WARN_ON_ONCE(rc)) {
-				seq = true;
-				b->sequester = true;
-				b->status = -EIO;
-				xdev_ext_mech_frames_move(s, b, XDEV_EXT_MECH_F_HELD,
-						     XDEV_EXT_MECH_F_SEQUESTERED);
-				xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED,
-						 hweight32(b->present));
-				break;
-			}
-		}
-		b->life_active = 0;
-	}
-#endif
 
  if (b->transform.active && xdev_ext_mech_transform_landed(s, b, seq)) {
   seq = true;
@@ -3367,16 +3334,23 @@ static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
 	}
 	out->v1.pending_acks = min_t(u64, pending, U32_MAX);
 	out->v1.uncertain_controls = min_t(u64, uncertain, U32_MAX);
+ if (version >= XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3) {
+  full->v3.nic_copy_ops = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_OPS]);
+  full->v3.nic_copy_bytes = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_BYTES]);
+  full->v3.nic_zc_ops = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_OPS]);
+  full->v3.nic_zc_bytes = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_BYTES]);
+ }
 }
 
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *uarg)
 {
 	struct xdev_ext_mech_transport_stats_v4 out = {};
 	struct xdev_ext_mech_session *s;
-	u32 size;
+	u32 size, version;
 
 	if (copy_from_user(&out.v3.v2.v1, uarg, sizeof(out.v3.v2.v1)))
 		return -EFAULT;
+	version = out.v3.v2.v1.version;
 	size = out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 ? sizeof(out) :
         out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 ? sizeof(out.v3) :
         out.v3.v2.v1.version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_2 ? sizeof(out.v3.v2) : sizeof(out.v3.v2.v1);
@@ -3388,7 +3362,8 @@ static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *u
 		return -EINVAL;
 	if (size > sizeof(out.v3.v2.v1) && copy_from_user(&out, uarg, size))
 		return -EFAULT;
-	if (out.v3.v2.v1.native_controls || out.v3.v2.v1.pending_acks || out.v3.v2.v1.uncertain_controls ||
+	if (out.v3.v2.v1.version != version || out.v3.v2.v1.size != size ||
+     out.v3.v2.v1.native_controls || out.v3.v2.v1.pending_acks || out.v3.v2.v1.uncertain_controls ||
 	    out.v3.v2.v1.rsvd || out.v3.v2.retransmits || out.v3.v2.dup_suppressed || out.v3.v2.held_acks ||
 	    out.v3.v2.held_unacked || out.v3.v2.rsvd2 ||
      out.v3.nic_copy_ops || out.v3.nic_copy_bytes || out.v3.nic_zc_ops || out.v3.nic_zc_bytes ||

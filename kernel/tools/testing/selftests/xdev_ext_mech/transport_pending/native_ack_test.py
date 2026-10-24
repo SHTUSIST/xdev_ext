@@ -30,6 +30,13 @@ EXTERNAL=r'''
 #define rcu_read_unlock() do {} while(0)
 #define rcu_dereference(x) (x)
 static int wrong_locked_dead,dead_calls;
+static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b,u32 pos,struct xdev_ext_mech_frame *f)
+{ (void)b;(void)pos;(void)f;return -EINVAL; }
+static struct xdev_ext_mech_session *xdev_ext_mech_batch_session(struct xdev_ext_mech_batch *b)
+{ (void)b;return NULL; }
+static void xdev_ext_mech_count(struct xdev_ext_mech_session *s,enum xdev_ext_mech_counter c,u64 n)
+{ (void)s;(void)c;(void)n; }
+
 static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err)
 { dead_calls++; wrong_locked_dead+=st->s->pool.priv->tx_lock!=0; st->s->last_err=err; st->priv->dead=true; }
 static void xdev_ext_mech_batch_sequester(struct xdev_ext_mech_batch *b,u64 ticket,int err) { (void)b;(void)ticket;(void)err; }
@@ -88,7 +95,9 @@ class NativeAck(unittest.TestCase):
   src=src.replace('struct xdev_ext_mech_stage;','struct xdev_ext_mech_stage;\n'+LIST)
   src=src.replace('struct xdev_ext_mech_stage *reliable_stage;','struct xdev_ext_mech_stage *reliable_stage;\n struct list_head done; u64 ticket; __s32 err[32];')
   src=src.replace('struct xsk_xdev_ext_mech_provider { struct fake_xp *xp; bool stopped; int tx_lock; };',
-   'struct xdp_sock { struct xdev_ext_mech_stage *xdev_ext_mech_rx,*xdev_ext_mech_tx; };\nstruct xsk_xdev_ext_mech_provider { struct fake_xp *xp; bool stopped; int tx_lock; struct xdp_sock *xs; struct xsk_mech_zc_ring ring; struct xsk_mech_zc_slot *slots; };\nstruct xsk_buff_pool { struct xsk_xdev_ext_mech_provider *xdev_ext_mech_tx; };')
+   'struct xdp_sock { struct xdev_ext_mech_stage *xdev_ext_mech_rx,*xdev_ext_mech_tx; };\nstruct xsk_xdev_ext_mech_provider { struct fake_xp *xp; bool stopped,zc; int tx_lock; struct xdp_sock *xs; struct xsk_mech_zc_ring ring; struct xsk_mech_zc_slot *slots; };\nstruct xsk_buff_pool { struct xsk_xdev_ext_mech_provider *xdev_ext_mech_tx; };')
+  # New NIC ledger reads payload spans; this control-only fixture has none.
+  src=src.replace('u32 data_off;','u32 data_off,data_len;')
   src=src.replace('int native_controls;','int native_controls,last_err;')
   src=src.replace('(void)(p); (f)=0;','++*(p); (f)=0;').replace('(void)(p); (void)(f);','--*(p); (void)(f);')
   bodies='\n'.join(function(rel if name=='xsk_rel_native_done' else driver,name) for name in ('xsk_rel_native_done','xsk_mech_zc_done','xsk_mech_zc_retire','xsk_mech_zc_cancel_pending','xsk_xdev_ext_mech_tx_complete'))

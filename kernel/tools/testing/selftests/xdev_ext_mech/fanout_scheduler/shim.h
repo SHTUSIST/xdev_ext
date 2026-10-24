@@ -29,6 +29,7 @@ typedef int spinlock_t;
 typedef int wait_queue_head_t;
 typedef unsigned long atomic64_t;
 typedef int atomic_t;
+struct xdev_ext_rel_policy;
 struct module { int refs; bool going; };
 struct file_operations { int tag; };
 struct file { const struct file_operations *f_op; };

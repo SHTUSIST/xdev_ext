@@ -408,6 +408,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/independent_adapter_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/independent_class7_admission.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/key_contract_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/nic_fallback_harness_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/observations.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_guest/socket_runtime.c
@@ -415,6 +416,13 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/independent_credentials.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/shim.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/bpf_both_directions_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nic_accounting_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nic_fallback_choice_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/produced_trim_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_adapter_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_create_check_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/api_dispatch_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/final_result_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/finite_rx_test.py
@@ -1021,3 +1029,11 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/verifier/xdev_ext_mech_fail_rel_view_complete.c
 !/kernel/tools/testing/selftests/xdev_ext_integration/verifier/run_reliable.sh
 !/kernel/tools/testing/selftests/xdev_ext_policy/matrix_policy_test.py
+!/kernel/io_uring/xdev_ext_mech_produced.h
+!/kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl_fallback.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/produced_core_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/ctl_socket_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_core_fifo_test.py
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nxp_interop_fixture.c

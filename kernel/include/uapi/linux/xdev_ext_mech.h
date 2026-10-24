@@ -303,17 +303,34 @@ struct xdev_ext_iaa_mech_cqe { __s32 status; __u32 produced, capacity, reserved;
  * not reconnect, cork, segment, or concurrently send corked messages.
  */
 #define XDEV_EXT_SOCKET_MAX_DATAGRAM 65507U
+/* Internal NIC substitution: NXP2 UDP payload, arg0 wire session, arg1 MTU. */
+#define XDEV_EXT_SOCKET_F_NXP (1U << 0)
+#define XDEV_EXT_SOCKET_HEADER_SIZE 40U
+#define XDEV_EXT_SOCKET_PACKET_TX 1U
+#define XDEV_EXT_SOCKET_PACKET_RX_PLAN 2U
+#define XDEV_EXT_SOCKET_PACKET_RX_CHECK 3U
 struct xdev_ext_socket_send_desc {
 	__u32 frame_pos, frame_off, len, flags;
+};
+struct xdev_ext_socket_packet_desc {
+ __u64 key;
+ __u32 frame_pos, frame_off, len, relative_offset;
+ __u32 header_len, reserved;
+ __u8 header[XDEV_EXT_SOCKET_HEADER_SIZE];
 };
 struct xdev_ext_socket_mech_info {
 	struct xdev_ext_mech_layout l;
 	__u32 nr_frames, max_datagram;
 	struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+ /* Packet phases use one packet_desc; phase zero retains send_desc. */
+ __u64 wire_session;
+ __u32 mtu, phase, cursor, packet_len;
+ __u8 header[XDEV_EXT_SOCKET_HEADER_SIZE];
 };
+#define XDEV_EXT_SOCKET_CQE_F_TRUNC (1U << 0)
 struct xdev_ext_socket_mech_cqe {
 	__s32 status;
-	__u32 bytes_sent, reserved[2];
+	__u32 bytes_sent, bytes_received, flags;
 };
 
 /* Native NIC peer TX, separate CPU headers and device-memory payload.
@@ -397,6 +414,7 @@ struct xdev_ext_mech_transport_stats_v2 {
 	__u32 rsvd2;
 };
 
+/* Version 3 appends NIC payload accounting without changing v1/v2. */
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_3 3U
 struct xdev_ext_mech_transport_stats_v3 {
 	struct xdev_ext_mech_transport_stats_v2 v2;
@@ -424,13 +442,17 @@ enum xdev_ext_mech_pool_kind {
  * AF_XDP: fd = bound AF_XDP socket.
  * CE: fd = backend device, arg0/arg1 = device VA/length of the window.
  * DMA: fd = provider device, arg0/arg1 = provider window offset/length.
- * SOCKET: fd = connected UDP socket, TO_DEVICE only; flags/arg0/arg1 = 0.
+ * SOCKET: fd = UDP socket; TO_DEVICE: connected sink; FROM_DEVICE: bound
+ * receiver, stage 0 of at least two stages, START-driven. Zero flags/args
+ * select plain UDP. XDEV_EXT_SOCKET_F_NXP requires a connected socket in
+ * either direction; arg0 is the NXP2 wire session and arg1 the link MTU.
+ * The caller lends exclusive receiving/configuration rights until STOP.
  */
 struct xdev_ext_mech_stage_uapi {
 	__u32 class_id;			/* enum xdev_ext_mech_class */
 	__u32 direction;		/* enum xdev_ext_mech_dir */
 	__s32 fd;
-	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; others 0 */
+	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; SOCKET: XDEV_EXT_SOCKET_F_* */
 	__aligned_u64 arg0;
 	__aligned_u64 arg1;
 };

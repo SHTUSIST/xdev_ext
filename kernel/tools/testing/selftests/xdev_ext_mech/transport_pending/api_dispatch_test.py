@@ -20,6 +20,8 @@ FIXTURE=r'''
 #include <stdlib.h>
 #include <errno.h>
 #include "io_uring/xdev_ext_policy.h"
+#include "include/linux/xdev_ext_mech.h"
+#define atomic64_read(p) (*(p))
 typedef __u64 u64; typedef __u32 u32;
 #ifndef XDEV_EXT_MECH_TRANSPORT_STATS_VERSION
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1
@@ -44,7 +46,7 @@ struct xdev_ext_mech_class_ops { void (*transport_stats)(struct xdev_ext_mech_st
  void (*transport_counters)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_transport_stats_v2 *);
  void (*transport_policy)(struct xdev_ext_mech_stage *,struct xdev_ext_rel_policy *); };
 struct xdev_ext_mech_stage { const struct xdev_ext_mech_class_ops *cls; u32 pending,uncertain,held; u64 retransmits; };
-struct xdev_ext_mech_session { struct list_head ring_node,live_node;u64 id;int uid,native_controls;u32 nr_stages;struct xdev_ext_mech_stage st[4]; };
+struct xdev_ext_mech_session { struct list_head ring_node,live_node;u64 id;int uid,native_controls;u32 nr_stages;u64 cnt[XDEV_EXT_MECH_CNT_NR];struct xdev_ext_mech_stage st[4]; };
 struct io_ring_ctx { struct list_head xdev_ext_mech_sessions; };
 static struct list_head xdev_ext_mech_live;
 static int xdev_ext_mech_live_lock, caller_uid=10;
@@ -83,9 +85,20 @@ int main(int argc,char **argv)
  struct xdev_ext_mech_transport_stats_v2 wire2={.v1={.size=64,.version=2,.session_id=7}};
  struct xdev_ext_mech_transport_stats wire={.size=32,.version=1,.session_id=7};
  struct io_uring_xdev_ext_mech req={.op=6,.arg=(uintptr_t)&wire};
+ bool v3=!strncmp(mode,"v3",2);
+ s.cnt[XDEV_EXT_MECH_CNT_NIC_COPY_OPS]=11;s.cnt[XDEV_EXT_MECH_CNT_NIC_COPY_BYTES]=2200;
+ s.cnt[XDEV_EXT_MECH_CNT_NIC_ZC_OPS]=33;s.cnt[XDEV_EXT_MECH_CNT_NIC_ZC_BYTES]=4400;
+ if(v3)req.arg=(uintptr_t)&wire3;
+ if(!strcmp(mode,"v3-size")){wire3.v2.v1.size=64;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-copy-ops")){wire3.nic_copy_ops=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-copy-bytes")){wire3.nic_copy_bytes=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-zc-ops")){wire3.nic_zc_ops=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-zc-bytes")){wire3.nic_zc_bytes=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-v2-reserved")){wire3.v2.rsvd2=1;expected=-EINVAL;}
+ if(!strcmp(mode,"v3-copy-fault")){fail_from=3;expected=-EFAULT;}
  bool v2=!strncmp(mode,"v2",2);
  if(v2)req.arg=(uintptr_t)&wire2;
- bool v3=!strncmp(mode,"v3",2),v4=!strncmp(mode,"v4",2);
+ bool v4=!strncmp(mode,"v4",2);
  if(v3)req.arg=(uintptr_t)&wire3;
  if(v4)req.arg=(uintptr_t)&wire4;
  if(!strcmp(mode,"v3-size")){wire3.v2.v1.size=216;expected=-EINVAL;}
@@ -116,8 +129,13 @@ int main(int argc,char **argv)
  if(!r&&v2){CHECK(wire2.v1.size==64&&wire2.v1.version==2&&wire2.v1.session_id==7&&!wire2.v1.rsvd&&!wire2.rsvd2);
   CHECK(wire2.v1.native_controls==3&&wire2.v1.pending_acks==7&&wire2.v1.uncertain_controls==3);
   CHECK(wire2.retransmits==5&&wire2.dup_suppressed==4&&wire2.held_acks==2&&wire2.held_unacked==6);return 0;}
- if(!r&&v3){CHECK(wire3.v2.v1.size==96&&wire3.v2.v1.version==3);CHECK(wire3.v2.retransmits==5);return 0;}
+ if(!r&&v3){CHECK(wire3.v2.v1.size==96&&wire3.v2.v1.version==3&&wire3.v2.v1.session_id==7);
+  CHECK(wire3.v2.v1.native_controls==3&&wire3.v2.v1.pending_acks==7&&wire3.v2.v1.uncertain_controls==3);
+  CHECK(wire3.v2.retransmits==5&&wire3.v2.dup_suppressed==4&&wire3.v2.held_acks==2&&wire3.v2.held_unacked==6);
+  CHECK(wire3.nic_copy_ops==11&&wire3.nic_copy_bytes==2200&&wire3.nic_zc_ops==33&&wire3.nic_zc_bytes==4400);return 0;}
  if(!r&&v4){CHECK(wire4.v3.v2.v1.size==216&&wire4.v3.v2.v1.version==4);CHECK(wire4.v3.v2.retransmits==5);
+  CHECK(offsetof(struct xdev_ext_mech_transport_stats_v4,rel_policy)==96);
+  CHECK(wire4.v3.nic_copy_ops==11&&wire4.v3.nic_copy_bytes==2200&&wire4.v3.nic_zc_ops==33&&wire4.v3.nic_zc_bytes==4400);
   CHECK(wire4.rel_policy.version==1&&wire4.rel_policy.size==120&&wire4.rel_policy.window==7&&wire4.rel_policy.initial_credit==7);return 0;}
  /* A version 1 caller never sees the appended counters. */
  if(!r){CHECK(wire.size==32&&wire.version==1&&wire.session_id==7&&!wire.rsvd);CHECK(wire.native_controls==3);CHECK(wire.pending_acks==(!strcmp(mode,"saturate")?U32_MAX:7));CHECK(wire.uncertain_controls==(!strcmp(mode,"saturate")?U32_MAX:3));}
@@ -137,7 +155,7 @@ class Dispatch(unittest.TestCase):
   p=Path(cls.tmp.name);(p/'probe.c').write_text(FIXTURE.replace('/* PRODUCTION */',code));cls.binary=p/'probe'
   subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-I',str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_production_api_contract(self):
-  for mode in ('valid','owner','uid','gone','size','version','controls','pending','uncertain','reserved','request-reserved','nr','copy-request','copy-input','copy-output','null','saturate','v2','v2-size','v2-input','v2-reserved','v2-copy','v3','v3-size','v3-input','v4','v4-size','v4-input','v4-copy'):
+  for mode in ('valid','owner','uid','gone','size','version','controls','pending','uncertain','reserved','request-reserved','nr','copy-request','copy-input','copy-output','null','saturate','v2','v2-size','v2-input','v2-reserved','v2-copy','v3','v3-size','v3-input','v3-copy-ops','v3-copy-bytes','v3-zc-ops','v3-zc-bytes','v3-v2-reserved','v3-copy-fault','v4','v4-size','v4-input','v4-copy'):
    with self.subTest(mode=mode):
     p=subprocess.run([str(self.binary),mode],capture_output=True,text=True)
     self.assertEqual(p.returncode,0,p.stderr)
