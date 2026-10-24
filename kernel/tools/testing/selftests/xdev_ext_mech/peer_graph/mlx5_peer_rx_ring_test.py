@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import tempfile
 KERNEL=Path(__file__).resolve().parents[5]
@@ -74,6 +75,6 @@ def main():
  code=s[a:b]
  with tempfile.TemporaryDirectory(prefix='mlx5-peer-rx-') as tmp:
   p=Path(tmp);(p/'test.c').write_text(SHIM+code+MAIN)
-  subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-sign-compare','-fsanitize=undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
+  subprocess.run(shlex.split(os.environ.get('CC','cc'))+['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-sign-compare','-fsanitize=undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
   subprocess.run([str(p/'test')],check=True)
 if __name__=='__main__':main()

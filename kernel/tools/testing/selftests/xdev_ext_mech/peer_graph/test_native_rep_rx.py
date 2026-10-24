@@ -8,7 +8,7 @@ import shutil
 import subprocess
 import tempfile
 import unittest
-from test_native_owner_teardown import MAIN, function
+from test_native_owner_teardown import MAIN, function, compiler_commands
 from native_rep_fixture import REP_SHIM, REP_MAIN
 
 class RepRx(unittest.TestCase):
@@ -59,9 +59,9 @@ int main(int argc,char**argv){
     def run_cases(self,code,cases,address=False,unused_shim=False):
         with tempfile.TemporaryDirectory() as td:
             source=Path(td)/'actual.c';source.write_text(code)
-            for cc in ['gcc',shutil.which('clang') or 'clang-14']:
-                binary=Path(td)/Path(cc).name
-                command=[cc,'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
+            for compiler_index,cc in enumerate(compiler_commands()):
+                binary=Path(td)/('compiler-'+str(compiler_index))
+                command=cc+['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
                     '-Wno-unused-variable','-Wno-sign-compare','-fno-omit-frame-pointer',
                     '-fsanitize='+('address,undefined' if address else 'undefined'),str(source),'-o',str(binary)]
                 if unused_shim: command.insert(-3,"-Wno-unused-function")

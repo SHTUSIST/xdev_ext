@@ -10,6 +10,7 @@ Outer channel/CQ, rep/esw and owner-reference proofs require separate tests.
 import argparse,ast,json,pathlib,re,shutil,subprocess,sys,tempfile
 from pathlib import Path
 from types import SimpleNamespace
+from test_native_owner_teardown import compiler_commands
 HERE=Path(__file__).resolve().parent
 def function(text, name):
     m = re.search(r'(?m)^(?:static\s+)?(?:inline\s+)?(?:void|int|bool|u32|struct\s+\w+\s*\*)\s*' + re.escape(name) + r'\s*\([^;{}]*\)\s*\{', text)
@@ -75,12 +76,14 @@ def main():
  (out/'owner-preaccept.c').write_text(code+OWNER_MAIN)
  (out/'extractions.json').write_text(json.dumps(receipt,indent=2)+'\n')
  result={'source_kernel':str(k),'frozen_assertions_preserved':assertions,'owner_helper':'boundary adapter only, not a proof of real devlink/module/device/netdev pins','production_functions_unchanged':True,'scope':'actual source extraction; no hardware/VM/device/DMA/performance execution','compilers':[]}
- for cc in ['gcc','clang']:
-  exe=shutil.which(cc) or (next((shutil.which('clang-'+str(v)) for v in [18,17,16,15,14] if shutil.which('clang-'+str(v))),None) if cc=='clang' else None)
+ for compiler_index,command in enumerate(compiler_commands()):
+  exe=shutil.which(command[0])
   assert exe,'Required compiler absent'
+  command=[exe]+command[1:]
+  cc='compiler-'+str(compiler_index)
   c={'compiler':cc,'arms':[]};result['compilers'].append(c)
   for arm in ['actual-chain','actual-chain-repeat','owner-preaccept']:
-   binary=out/(arm+'-'+cc);cmd=[exe,'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-address','-Wno-sign-compare','-fsanitize=undefined','-pthread',str(out/(arm+'.c')),'-o',str(binary)]
+   binary=out/(arm+'-'+cc);cmd=command+['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-address','-Wno-sign-compare','-fsanitize=undefined','-pthread',str(out/(arm+'.c')),'-o',str(binary)]
    build=subprocess.run(cmd,text=True,capture_output=True);(out/(arm+'-'+cc+'-build.log')).write_text(build.stdout+build.stderr);r={'arm':arm,'build_command':cmd,'build_exit':build.returncode,'cases':[]};c['arms'].append(r)
    if build.returncode:print(build.stderr);continue
    args=([[d,str(s)] for d in ['tx','rx'] for s in [0,-5,-110]] if arm=='actual-chain' else [[d,str(s)] for d in ['tx','rx'] for s in [-5,-110]]) if arm.startswith('actual-chain') else [[]]

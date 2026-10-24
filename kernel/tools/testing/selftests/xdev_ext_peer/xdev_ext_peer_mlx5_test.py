@@ -5,6 +5,8 @@ No physical NIC, GPU or hardware DMA assertion is made by this test.
 """
 # P3/P4: extend the native shim with the production TX-chain field; assertions unchanged.
 from pathlib import Path
+import os
+import shlex
 import subprocess
 import tempfile
 kernel = Path(__file__).resolve().parents[4]
@@ -53,7 +55,15 @@ struct mlx5e_tx_wqe { struct mlx5_wqe_ctrl_seg ctrl; struct mlx5_wqe_eth_seg eth
 struct mlx5_wq_cyc { int unused; };
 struct netdev_queue { bool stopped; };
 struct mlx5e_sq_stats { u64 packets,bytes; };
-struct mlx5e_txqsq { struct mlx5_wq_cyc wq; u16 cc,pc,stop_room; u32 mkey_be,sqn; void *ptpsq; u8 min_inline_mode; unsigned long state; void *uar_map; struct mlx5e_sq_stats *stats; struct { struct mlx5e_tx_wqe_info *wqe_info; } db; };
+struct mlx5e_channel { int unused; };
+struct list_head { struct list_head *next, *prev; };
+#define INIT_LIST_HEAD(h) do { (h)->next=(h); (h)->prev=(h); } while (0)
+/* Only the owner API boundary is injected here. Actual owner references and
+ * parent teardown are exercised separately by test_native_owner_teardown.py. */
+static int owner_get_result=0, owner_get_calls;
+static int mlx5e_peer_channel_get(struct mlx5e_channel *channel)
+{ (void)channel; owner_get_calls++; return owner_get_result; }
+struct mlx5e_txqsq { struct mlx5e_channel *channel; bool peer_active; struct list_head peer_quarantine_node; struct mlx5_wq_cyc wq; u16 cc,pc,stop_room; u32 mkey_be,sqn; void *ptpsq; u8 min_inline_mode; unsigned long state; void *uar_map; struct mlx5e_sq_stats *stats; struct { struct mlx5e_tx_wqe_info *wqe_info; } db; };
 struct mdev { struct { struct { u32 mkey; } hw_objs; } mlx5e_res; struct pci_dev *pdev; };
 struct mlx5e_priv { struct mdev *mdev; struct mlx5e_txqsq **txq2sq; };
 struct net_device { u32 mtu,real_num_tx_queues; bool running; struct mlx5e_priv *priv; struct netdev_queue *txq; };
@@ -104,11 +114,23 @@ int main(void)
  room=false; assert(mlx5e_peer_xmit(&d,0,&tx)==-EAGAIN && notified==2);
  room=true; sq.state=3; assert(mlx5e_peer_xmit(&d,0,&tx)==-EAGAIN && notified==2);
  puts("ok 3 - actual bind-time MKEY mode/read permission, ring pressure and recovery admission precede native acceptance");
+ sq.state=1; sq.peer_active=false; sq.peer_quarantine_node=(struct list_head){0};
+ struct mlx5e_tx_wqe before_wqe=native_wqe;
+ struct mlx5e_tx_wqe_info before_wi=wi;
+ struct mlx5e_sq_stats before_stats=stats;
+ u16 before_pc=sq.pc; int before_owner_calls=owner_get_calls;
+ owner_get_result=-ENOMEM;
+ assert(mlx5e_peer_xmit(&d,0,&tx)==-ENOMEM && notified==2 && callbacks==2);
+ assert(owner_get_calls==before_owner_calls+1 && sq.pc==before_pc);
+ assert(!memcmp(&native_wqe,&before_wqe,sizeof(native_wqe)));
+ assert(!memcmp(&wi,&before_wi,sizeof(wi)) && !memcmp(&stats,&before_stats,sizeof(stats)));
+ assert(!sq.peer_active && !sq.peer_quarantine_node.next && !sq.peer_quarantine_node.prev);
+ puts("ok 4 - owner acquisition failure rejects before WQE, queue state, accounting or doorbell writes");
  return 0;
 }
 '''
 with tempfile.TemporaryDirectory(prefix='xdev-peer-mlx5-') as directory:
     p=Path(directory)
     (p/'test.c').write_text(shim+functions+main)
-    subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
+    subprocess.run(shlex.split(os.environ.get('CC', 'cc'))+['-std=gnu11','-Wall','-Wextra','-Werror','-fsanitize=undefined',str(p/'test.c'),'-o',str(p/'test')],check=True)
     subprocess.run([str(p/'test')],check=True)

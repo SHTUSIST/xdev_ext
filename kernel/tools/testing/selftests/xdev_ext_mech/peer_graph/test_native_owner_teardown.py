@@ -2,7 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Host-only actual mlx5 parent lifetime tests, without device/DMA emulation."""
 from pathlib import Path
+import os
 import re
+import shlex
 import shutil
 import subprocess
 import tempfile
@@ -10,6 +12,15 @@ import unittest
 
 ROOT=Path(__file__).resolve().parents[5]
 MAIN=ROOT/'drivers/net/ethernet/mellanox/mlx5/core/en_main.c'
+
+def compiler_commands():
+    """Respect an explicit CC command; otherwise retain both default compilers."""
+    if 'CC' in os.environ:
+        command=shlex.split(os.environ['CC'])
+        if not command:raise ValueError('CC must name a compiler command')
+        return [command]
+    return [['gcc'],[shutil.which('clang') or 'clang-14']]
+
 def function(text,name):
     m=re.search(r'(?m)^(?:static\s+)?(?:inline\s+)?(?:void|int|bool)\s+'+name+r'\s*\([^;{}]*\)\s*\{',text)
     if not m:raise AssertionError('missing production function '+name)
@@ -40,9 +51,9 @@ class OwnerTeardown(unittest.TestCase):
         code+=(here/'native_owner_cases.c').read_text()
         with tempfile.TemporaryDirectory() as td:
             src=Path(td)/'actual-owner.c';src.write_text(code)
-            for cc in ['gcc',shutil.which('clang') or 'clang-14']:
-                binary=Path(td)/Path(cc).name
-                subprocess.run([cc,'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function',
+            for compiler_index,cc in enumerate(compiler_commands()):
+                binary=Path(td)/('compiler-'+str(compiler_index))
+                subprocess.run(cc+['-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-function',
                     '-fsanitize=undefined',str(src),'-o',str(binary)],check=True)
                 for case in range(8):
                     with self.subTest(compiler=cc,case=case):

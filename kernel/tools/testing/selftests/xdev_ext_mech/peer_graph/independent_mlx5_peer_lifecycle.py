@@ -9,6 +9,8 @@ the MKEY query is an adapter that only counts calls and returns attributes.
 """
 # P3/P4: extend the native shim with the production TX-chain field; assertions unchanged.
 from pathlib import Path
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -174,7 +176,7 @@ def build(peer, descs, directory, name):
     source = directory / (name + ".c")
     binary = directory / name
     source.write_text(SHIM + peer + "\n" + descs + MAIN)
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-unused-function", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(shlex.split(os.environ.get("CC", "cc"))+["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-address", "-Wno-unused-function", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return binary
 

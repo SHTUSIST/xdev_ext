@@ -6,6 +6,7 @@ completion and reset evidence; assertions do not infer it from implementation.
 """
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import tempfile
 import ice_peer_ring_test as ice
@@ -19,7 +20,7 @@ def run(name, code):
     with tempfile.TemporaryDirectory(prefix=name + '-') as tmp:
         p = Path(tmp)
         (p / 'test.c').write_text(code)
-        subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
+        subprocess.run(shlex.split(os.environ.get('CC', 'cc'))+['-std=gnu11', '-Wall', '-Wextra',
                         '-Werror', '-Wno-unused-function', '-Wno-sign-compare',
                         '-fsanitize=undefined', '-pthread', str(p / 'test.c'),
                         '-o', str(p / 'test')], check=True)
@@ -30,7 +31,7 @@ def mlx5_test():
     shim = mlx5.SHIM.replace('#include <errno.h>', '#include <errno.h>\n#include <stdlib.h>\n#include <pthread.h>')
     shim = shim.replace('u16 head,used;', 'u16 head,used;struct {u32 log_stride;} fbc;')
     shim = shim.replace('u32 stride;u64 owner;', 'u32 stride,size;u8 *saved;u64 owner;')
-    shim = shim.replace('struct mlx5e_peer_rq *peer;unsigned long state;', 'struct mlx5e_peer_rq *peer;void *pdev,*xsk_pool,*xdp_prog;int wq_type;struct {void *napi;} cq;unsigned long state;')
+    shim = shim.replace('struct mlx5e_peer_rq *peer;unsigned long state;', 'struct mlx5e_peer_rq *peer;struct channel *channel;void *pdev,*xsk_pool,*xdp_prog;int wq_type;struct {void *napi;} cq;unsigned long state;')
     shim = shim.replace('int state_lock;unsigned long state;struct {u32 num;struct channel **c;}channels;', 'pthread_mutex_t state_lock;void *mdev;unsigned long state;struct {u32 num;struct channel **c;struct {u32 terminate_lkey_be;}params;}channels;')
     start = shim.index('static bool mutex_trylock(')
     end = shim.index('static void spin_lock_bh(', start)
@@ -52,6 +53,11 @@ static void mutex_unlock(pthread_mutex_t *l){assert(!pthread_mutex_unlock(l));}
 #define be32_to_cpu(v) (v)
 static int test_access_mode_4_2,test_access_mode_1_0,test_lw=1,test_length64=1;
 static int flushes,fail_reset,allocations,frees;
+/* Inject only the owner API result. Real owner references are covered by the
+ * independent owner/parent teardown test, not by this successful default. */
+static int owner_get_result=0,owner_get_calls;
+static int mlx5e_peer_channel_get(struct channel *channel)
+{(void)channel;owner_get_calls++;return owner_get_result;}
 static void *kzalloc(size_t n,int g){(void)g;allocations++;return calloc(1,n);}
 static void *kvcalloc(size_t n,size_t z,int g){return kzalloc(n*z,g);}
 static void kfree(void *p){if(p){frees++;free(p);}}
@@ -83,6 +89,11 @@ int main(void){
  struct xdev_ext_peer_rx rx={.dma_address=0x700000,.len=1472,.header_room=42,.header=dest,.complete=done};
  u32 keys[]={MLX5_TERMINATE_SCATTER_LIST_LKEY,0x12345600};
  assert(mlx5e_peer_rx_open(&dev,0,0)==-EINVAL&&!ch.rq.peer);
+ ch.rq.wqe.wq.fbc.log_stride=5;
+ owner_get_result=-ENOMEM;
+ assert(mlx5e_peer_rx_open(&dev,0,1)==-ENOMEM&&!ch.rq.peer);
+ assert(owner_get_calls==1&&!doorbells&&!allocations&&!flushes);
+ owner_get_result=0;
  for(int key=0;key<2;key++)for(int stride=5;stride<=6;stride++){
   priv.channels.params.terminate_lkey_be=keys[key];ch.rq.wqe.wq.fbc.log_stride=stride;
   assert(!mlx5e_peer_rx_open(&dev,0,1));
