@@ -1,18 +1,22 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""PEER-pool CREATE admission is a per-class capability table, not a chain shape.
+"""PEER-pool CREATE admission follows generic validity, then class capabilities.
 
 Requirement P1: a device-memory pool admits any number of frames, a power-of-two
 frame size in [4 KiB, 2 MiB] with no CPU header room, and any order of stages
 whose class implements the peer contract in that stage's direction (NVMe read
 and write, NET TX and RX; CE only if its table entry says so). Every other
-class/direction fails CREATE with -EOPNOTSUPP from the capability check.
-Non-PEER pools must keep exactly the 75b51c2 results: the same matrix is
-compared line by line with peer_caps_base.golden, produced from the 75b51c2
-headers (`--write-golden` regenerates it from git; CI checkouts are shallow).
+class/direction in a valid topology fails CREATE with -EOPNOTSUPP.
+Non-PEER pools keep the frozen 75b51c2 matrix except the explicit Track S
+SOCKET RX admission changes below. In 75b51c2 socket bind accepted TO_DEVICE
+only, so its pure CREATE successes for RX were never supported sessions.
+S API 2.4 adds RX at stage 0 of at least two stages; other RX placements now
+fail generic validation. The original golden is retained without regeneration.
 """
 from pathlib import Path
 import itertools
+import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -33,7 +37,7 @@ int main(int argc, char **argv)
 {
  struct xdev_ext_mech_create c;
  __u32 frames = 0;
- int i, ret;
+ int i, ret, fd_stage = -1, fd_value = 0;
  if (argc == 2 && !strcmp(argv[1], "table")) {
 #ifdef XDEV_EXT_MECH_PEER_CAPS
   for (i = 0; i < 16; i++) printf("dirs %d %u\n", i, xdev_ext_mech_peer_dirs((__u32)i));
@@ -41,6 +45,11 @@ int main(int argc, char **argv)
 #else
   return 3;
 #endif
+ }
+ /* Optional --fd stage value exercises argument-error precedence. */
+ if (argc >= 4 && !strcmp(argv[1], "--fd")) {
+  fd_stage = atoi(argv[2]); fd_value = atoi(argv[3]);
+  argv += 3; argc -= 3;
  }
  /* argv: pool frame hdr seg group nr_stages (class dir)* */
  if (argc < 7) return 2;
@@ -53,8 +62,11 @@ int main(int argc, char **argv)
  if (argc != 7 + 2 * (int)c.nr_stages) return 2;
  for (i = 0; i < (int)c.nr_stages; i++) {
   c.st[i].class_id = (__u32)atoi(argv[7 + 2 * i]); c.st[i].direction = (__u32)atoi(argv[8 + 2 * i]);
-  c.st[i].fd = 8 + i; c.st[i].arg1 = 128;
+  c.st[i].fd = 8 + i;
+  /* Plain SOCKET bind requires flags/arg0/arg1 zero. */
+  c.st[i].arg1 = c.st[i].class_id == XDEV_EXT_MECH_CLASS_SOCKET ? 0 : 128;
  }
+ if (fd_stage >= 0 && fd_stage < (int)c.nr_stages) c.st[fd_stage].fd = fd_value;
  ret = xdev_ext_mech_create_check(&c, &frames);
  printf("%d %u\n", ret, ret ? 0U : frames);
  return 0;
@@ -67,14 +79,31 @@ TO, FROM = 1, 2
 XSK, IOU, PEER = 1, 2, 3
 PINNED_DIRS = {NVME: (1 << TO) | (1 << FROM), NET: (1 << TO) | (1 << FROM),
                AFXDP: 0, IAA: 0, DMA: 0, SOCKET: 0}
-EOPNOTSUPP, EINVAL = -95, -22
+EOPNOTSUPP, EINVAL, EBADF = -95, -22, -9
+
+# Exact non-PEER exceptions to the old pure-check golden: SOCKET RX alone,
+# or after one of these stages. Existing AF_XDP/NET pool refusals stay frozen.
+# Two layouts yield 26 XSK + 22 IOU exceptions; all other 800 rows are unchanged.
+SOCKET_RX_INVALID_NONPEER = {
+    XSK: (((SOCKET, FROM),),) + tuple(((c, d), (SOCKET, FROM))
+                                   for c in (AFXDP, NVME, IAA, CE, DMA, SOCKET)
+                                   for d in (TO, FROM)),
+    IOU: (((SOCKET, FROM),),) + tuple(((c, d), (SOCKET, FROM))
+                                   for c in (NVME, IAA, CE, DMA, SOCKET)
+                                   for d in (TO, FROM)),
+}
+# On PEER, these 15 invalid shapes fail generic admission before capabilities.
+SOCKET_RX_INVALID_PEER = (((SOCKET, FROM),),) + tuple(
+    ((c, d), (SOCKET, FROM)) for c in (AFXDP, NVME, IAA, CE, DMA, SOCKET, NET)
+    for d in (TO, FROM))
 
 
 def build(directory, include_root, name):
     source = directory / (name + ".c")
     binary = directory / name
     source.write_text(DRIVER)
-    result = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined",
+    result = subprocess.run(shlex.split(os.environ.get("CC", "cc")) +
+                            ["-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined",
                              "-I" + str(include_root), str(source), "-o", str(binary)],
                             capture_output=True, text=True)
     if result.returncode:
@@ -82,8 +111,9 @@ def build(directory, include_root, name):
     return binary
 
 
-def run(binary, args):
-    out = subprocess.run([str(binary)] + [str(a) for a in args], capture_output=True, text=True, check=True)
+def run(binary, args, fd=None):
+    options = [] if fd is None else ["--fd", *fd]
+    out = subprocess.run([str(binary)] + [str(a) for a in options + args], capture_output=True, text=True, check=True)
     ret, frames = out.stdout.split()
     return int(ret), int(frames)
 
@@ -148,19 +178,28 @@ def main():
                 failures.append("CE peer directions must be none or both, got %#x" % ce_dirs)
             dirs[CE] = ce_dirs
 
-        # 1. Non-PEER pools: byte-identical to 75b51c2 over the whole matrix.
+        # 1. Non-PEER: frozen golden except exactly 48 newly invalid RX shapes.
+        overridden = 0
         for pool in (XSK, IOU):
             for layout in layouts(pool):
                 for stages in stage_matrix():
                     args = [pool, *layout, len(stages)] + [x for s in stages for x in s]
                     a = run(new, args)
                     b = tuple(int(x) for x in golden[" ".join(map(str, args))].split())
-                    if a != b:
-                        failures.append("pool %d %s changed: now %s, 75b51c2 %s" % (pool, stages, a, b))
+                    want = b
+                    if tuple(stages) in SOCKET_RX_INVALID_NONPEER[pool]:
+                        overridden += 1
+                        if b != (0, layout[3] // layout[2]):
+                            failures.append("SOCKET RX exception does not name an old pure-check success: " + str(args))
+                        want = (EINVAL, 0)
+                    if a != want:
+                        failures.append("pool %d %s: now %s, want %s (75b51c2 %s)" % (pool, stages, a, want, b))
                     else:
                         passed += 1
+        if overridden != 48:
+            failures.append("SOCKET RX exception set changed: %d rows, want 48" % overridden)
 
-        # 2. PEER pool: result follows the per-class table only, in any position.
+        # 2. PEER: generic topology validity precedes the per-class capability table.
         for stages in stage_matrix():
             args = [PEER, 65536, 0, 4096, 4096, len(stages)] + [x for s in stages for x in s]
             got = run(new, args)
@@ -168,6 +207,8 @@ def main():
                 continue
             ok = all(dirs[c] & (1 << d) for c, d in stages)
             want = (0, 1) if ok else (EOPNOTSUPP, 0)
+            if tuple(stages) in SOCKET_RX_INVALID_PEER:
+                want = (EINVAL, 0)
             label = " -> ".join("%s %s" % (NAMES[c], "TX/write" if d == TO else "RX/read") for c, d in stages)
             if got != want:
                 failures.append("PEER %s: got %s, want %s" % (label, got, want))
@@ -192,7 +233,21 @@ def main():
             else:
                 passed += 1
 
-        # 4. Argument errors stay -EINVAL / -EBADF, never masked as a capability refusal.
+        # 4. Real legal RX/consumer topologies still pass host-pool admission;
+        # PEER refuses their host-page class with EOPNOTSUPP, not EINVAL.
+        for stages in ([(SOCKET, FROM), (NVME, TO)],
+                       [(SOCKET, FROM), (CE, TO)],
+                       [(SOCKET, FROM), (SOCKET, TO)]):
+            for pool in (XSK, IOU, PEER):
+                for layout in layouts(pool):
+                    got = run(new, [pool, *layout, len(stages)] + [x for s in stages for x in s])
+                    want = (EOPNOTSUPP, 0) if pool == PEER else (0, layout[3] // layout[2])
+                    if got != want:
+                        failures.append("legal socket RX chain pool %d %s: got %s, want %s" % (pool, stages, got, want))
+                    else:
+                        passed += 1
+
+        # 5. Argument errors stay -EINVAL / -EBADF, never masked as a capability refusal.
         for stages, want, label in (([(1, TO), (NVME, TO)], EINVAL, "unknown class id 1"),
                                     ([(0, TO), (NVME, TO)], EINVAL, "class id 0"),
                                     ([(NVME, 3), (NVME, TO)], EINVAL, "direction 3"),
@@ -200,6 +255,22 @@ def main():
             got = run(new, [PEER, 65536, 0, 4096, 4096, 2] + [x for s in stages for x in s])
             if got[0] != want:
                 failures.append("PEER %s: got %d, want %d" % (label, got[0], want))
+            else:
+                passed += 1
+
+        for stages, fd, want, label in (
+                ([(SOCKET, FROM), (NVME, TO)], (0, -1), EBADF, "legal RX bad fd before capability"),
+                ([(SOCKET, FROM)], (0, -1), EBADF, "bad fd before RX-only topology"),
+                ([(NVME, TO), (SOCKET, FROM)], (1, -1), EBADF, "bad fd before late RX topology"),
+                ([(SOCKET, FROM), (NVME, TO)], (1, -1), EBADF, "later bad fd before unsupported socket class"),
+                ([(SOCKET, FROM), (1, TO)], None, EINVAL, "later unknown class before capability"),
+                ([(SOCKET, FROM), (NVME, 3)], None, EINVAL, "later invalid direction before capability"),
+                ([(SOCKET, 3), (NVME, TO)], (0, -1), EINVAL, "invalid direction before bad fd"),
+                ([(1, TO), (NVME, TO)], (0, -1), EINVAL, "unknown class before bad fd")):
+            args = [PEER, 65536, 0, 4096, 4096, len(stages)] + [x for s in stages for x in s]
+            got = run(new, args, fd=fd)
+            if got != (want, 0):
+                failures.append("PEER %s: got %s, want %s" % (label, got, (want, 0)))
             else:
                 passed += 1
 
@@ -216,7 +287,7 @@ def main():
     print("# peer capability admission: %d passed, %d failed" % (passed, len(failures)))
     if failures:
         sys.exit(1)
-    print("ok 1 - PEER admission follows the per-class capability table; other pools unchanged")
+    print("ok 1 - PEER generic validation precedes capabilities; 800 non-PEER golden rows unchanged, 48 explicit SOCKET RX refusals")
 
 
 if __name__ == "__main__":

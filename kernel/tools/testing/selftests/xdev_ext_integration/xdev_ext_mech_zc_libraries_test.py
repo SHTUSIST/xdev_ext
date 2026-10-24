@@ -64,7 +64,7 @@ int main(void) {
                             str(preload/'libio_uring_unified.so')], check=True, capture_output=True, text=True)
             env = dict(os.environ, PATH=str(compiler)+':'+os.environ['PATH'], TOOLS=str(tools),
                        IAA_OUT=str(iaa), SOCKET_OUT=str(socket), PRELOAD_OUT=str(preload),
-                       ROOT=str(root), EV=str(evidence), CE_SIM='0', PROVIDER_CASE='normal', COMPAT='1')
+                       ROOT=str(root), EV=str(evidence), CE_SIM='0', PROVIDER_CASE='normal', MECHANISM_VARIANTS='0', COMPAT='1')
             staged = subprocess.run(['bash', '-euc', fragment], env=env, capture_output=True, text=True)
             self.assertEqual(staged.returncode, 0, staged.stdout+staged.stderr)
             (root/'opt').mkdir()
@@ -128,7 +128,7 @@ int main(void) {
             self.assertIn(str(extra_library), dependencies[1], 'second executable must add its own real library')
             run = subprocess.run(['bash', '-euc', fragment],
                 env=dict(os.environ, TOOLS=str(tools), IAA_OUT=str(iaa), ROOT=str(root),
-                         EV=str(evidence), CE_SIM='1', PROVIDER_CASE='normal'),
+                         EV=str(evidence), CE_SIM='1', PROVIDER_CASE='normal', MECHANISM_VARIANTS='0'),
                 capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             expected = set.union(*dependencies)

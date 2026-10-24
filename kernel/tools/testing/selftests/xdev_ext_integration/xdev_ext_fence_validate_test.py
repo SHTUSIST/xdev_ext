@@ -125,7 +125,7 @@ class HarnessWiring(unittest.TestCase):
         end = s.index("printf 'source_slba=", start)
         with tempfile.TemporaryDirectory() as t:
             p = Path(t); (p / 'evidence').mkdir()
-            names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT LIFECYCLE PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS QEMU_TIMEOUT_SECONDS FENCE_CHECK EVAL_SESSION'
+            names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT LIFECYCLE PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS QEMU_TIMEOUT_SECONDS FENCE_CHECK EVAL_SESSION MECHANISM_VARIANTS'
             env = ' '.join(k + '=0' for k in names.split())
             cmd = f'ROOT={p}/initroot; EV={p}/evidence; SCRATCH={p}; FAULT=none; REL_POLICY=default; PROVIDER_CASE=normal; {env};\n' + s[start:end]
             r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
@@ -139,7 +139,7 @@ class HarnessWiring(unittest.TestCase):
         for lifecycle, fence in ((0, 0), (1, 0), (0, 1), (1, 1)):
             with tempfile.TemporaryDirectory() as t:
                 p = Path(t); (p / 'opt/xdev_ext').mkdir(parents=True)
-                names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS SOURCE_SLBA RX_SLBA CE_SLBA EVAL_SESSION'
+                names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS SOURCE_SLBA RX_SLBA CE_SLBA EVAL_SESSION MECHANISM_VARIANTS'
                 env = ' '.join(k + '=0' for k in names.split())
                 cmd = f'ROOT={p}; FAULT=none; FAULT_CAMPAIGN=; REL_POLICY=default; PROVIDER_CASE=normal; {env}; LIFECYCLE={lifecycle}; FENCE_CHECK={fence}; FENCE_NONCE_PREFIX={NONCE};\n' + s[start:end]
                 r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
@@ -193,7 +193,7 @@ class HarnessWiring(unittest.TestCase):
             manifest = subprocess.check_output(['sha256sum', str(dependency)], text=True)
             (p/'xdev-ext-artifacts.sha256').write_text(manifest)
             subprocess.run(['python3', str(debug), 'record', str(p/'.config'), str(p/'xdev-ext-debug-profile.json'), '0'], check=True)
-            cmd = f'RUN_ONLY=1; EVAL_SESSION=0; DEBUG_LOCKING=0; DEBUG_HELPER={debug}; BUILD={p}; EV={p}/evidence; SOURCE_COMMIT=' + 'b' * 40 + ';\n' + block
+            cmd = f'RUN_ONLY=1; EVAL_SESSION=0; MECHANISM_VARIANTS=0; DEBUG_LOCKING=0; DEBUG_HELPER={debug}; BUILD={p}; EV={p}/evidence; SOURCE_COMMIT=' + 'b' * 40 + ';\n' + block
             r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             dependency.write_text(dependency.read_text() + '# changed dependency\n')

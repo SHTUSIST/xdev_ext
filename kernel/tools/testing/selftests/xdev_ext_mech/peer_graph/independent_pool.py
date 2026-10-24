@@ -38,7 +38,8 @@ SHIM = r'''
 #include <pthread.h>
 #include "io_uring/xdev_ext_mech_core.h"
 #include "io_uring/xdev_ext_mech_step.h" /* P1: shared PEER geometry rule */
-typedef uint64_t u64;typedef uint32_t u32;typedef uint8_t u8;
+#include "io_uring/xdev_ext_mech_lifecycle.h"
+typedef __u64 u64;typedef __u32 u32;typedef __u8 u8;
 #define GFP_KERNEL 0
 #define U32_MAX UINT32_MAX
 #define EXPORT_SYMBOL_GPL(x)
@@ -74,7 +75,9 @@ SCHEDULER = r'''
 #define GENMASK_ULL(h,l) (((~0ULL)<<(l))&((~0ULL)>>(63-(h))))
 #define WARN_ON_ONCE(x) assert(!(x))
 struct xdev_ext_mech_batch {u64 key;bool to_user,busy;u32 nr_frames,present,bytes;struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_frame f[1];};
-struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user;u64 start_left,start_seq;u32 start_user_len,frames;struct {u32 inflight;}ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];};
+struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user,start_recycle;u64 start_left,start_seq;u32 start_user_len,frames,nr_stages;struct {u32 inflight;}ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];struct xdev_ext_mech_stage_uapi plan[2];struct xdev_ext_mech_life life[2];};
+/* Optional observer disabled; publication below executes the production helper. */
+#define xdev_ext_mech_trace_batch(b,event,status,flags) ((void)0)
 static int submitted,admission_error;
 static struct xdev_ext_mech_batch *xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *s)
 {for(unsigned i=0;i<2;i++)if(!s->batches[i].busy){struct xdev_ext_mech_batch *b=&s->batches[i];b->busy=true;s->ss.inflight++;xdev_ext_mech_bstate_init(&b->bs,2);return b;}return NULL;}
@@ -134,6 +137,25 @@ int main(void)
   s.pool.ops->release(&s.pool);
  }
  puts("ok 4 - actual START scheduling admits 257 groups through a two-frame GPU window from one initial START budget, no continuation or CPU backing");
+ {struct xdev_ext_mech_session s={.start_recycle=true,.nr_stages=1,.pool={.frame_size=65536}};
+  struct xdev_ext_mech_batch b={.nr_frames=1,.bytes=4096,.f={{.index=0,.data_off=16,.data_len=4096}}};
+  u64 token;
+  s.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
+  xdev_ext_mech_life_init(&s.life[0]);s.life[0].valid_len=32;
+  assert(!xdev_ext_mech_start_publication(&s,&b));
+  assert(b.bytes==32&&b.f[0].data_len==32&&s.life[0].valid_len==32);
+  assert(xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_READY);
+  assert(!xdev_ext_mech_life_acquire(&s.life[0],0,0,&token));
+  assert(xdev_ext_mech_life_put(&s.life[0],token)==XDEV_EXT_MECH_L_FREED);
+  assert(xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_FREE);
+  s.life[0].valid_len=65536-16+1;
+  assert(xdev_ext_mech_start_publication(&s,&b)==-EINVAL);
+  assert(xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_FREE);
+  s.life[0].valid_len=0;assert(xdev_ext_mech_start_publication(&s,&b)==-EINVAL);
+  s.life[0].valid_len=32;b.f[0].data_off=65537;
+  assert(xdev_ext_mech_start_publication(&s,&b)==-EINVAL);
+ }
+ puts("ok 5 - actual START publication retains valid length and rejects zero or out-of-frame recycled spans before publishing");
  return 0;
 }
 '''
@@ -155,12 +177,13 @@ def main():
     pool = (KERNEL / "io_uring/xdev_ext_mech_peer_pool.c").read_text()
     pool = pool[pool.index("struct xdev_ext_peer_mech_pool {"):]
     support = "".join(struct(contract, name) for name in ("xdev_ext_mech_frame", "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool")) + GLUE + function(contract, "static inline struct page *xdev_ext_mech_frame_page(") + function(ops, "static u8 *xdev_ext_mech_frame_bytes(")
-    start = function(core, "static void xdev_ext_mech_start_more(")
+    start = function(core, "static int xdev_ext_mech_start_publication(") + function(core, "static void xdev_ext_mech_start_more(")
     mutations = [
         ("GPU offset shifted", pool.replace("(u64)f->index * pool->frame_size", "(u64)(f->index + 1) * pool->frame_size"), start),
         ("fake CPU address exposed", pool.replace("f->kaddr = NULL", "f->kaddr = (void *)1"), start),
         ("allocation authority not released", pool.replace("fput(p->authority);", "(void)p->authority;"), start),
         ("START fills only one slot", pool, start.replace("for (;;) {", "for (int once = 0; once < 1; once++) {")),
+        ("START publication bypassed", pool, start.replace("if (!s->start_recycle ||", "if (1 || !s->start_recycle ||")),
     ]
     with tempfile.TemporaryDirectory(prefix="independent-peer-pool-") as tmp:
         directory = Path(tmp)

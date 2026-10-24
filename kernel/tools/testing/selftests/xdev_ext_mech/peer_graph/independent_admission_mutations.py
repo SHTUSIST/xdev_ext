@@ -42,6 +42,9 @@ def replace_body(text, name, body):
 def main():
     headers = {filename: (KERNEL / filename).read_text() for filename in FILES}
     step = headers[FILES[0]]
+    if '#include "xdev_ext_mech_cpu_core.h"' in step:
+        filename = "io_uring/xdev_ext_mech_cpu_core.h"
+        headers[filename] = (KERNEL / filename).read_text()
     # Updated for P1: the 75b51c2 anchors (64 KiB frame, NVMe-read-first, NVMe/NET-only, TX-only NET)
     # are replaced by the capability table and the geometry rule; mutate those instead.
     mutations = [

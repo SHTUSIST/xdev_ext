@@ -151,7 +151,7 @@ class EvalSessionHarness(unittest.TestCase):
             for name in FILES[4:]: (output/name).write_text(name)
             result = run(stage+'\nstage_eval_session_image\n'+libraries, EVAL_SESSION='1',
                          EVAL_SESSION_OUT=str(output), ROOT=str(root), TOOLS=str(tools), EV=str(evidence),
-                         CE_SIM='0', PROVIDER_CASE='normal')
+                         CE_SIM='0', PROVIDER_CASE='normal', MECHANISM_VARIANTS='0')
             self.assertEqual(result.returncode, 0, result.stderr)
             for name in FILES:
                 self.assertEqual((root/'opt/xdev_ext/eval'/name).read_bytes(), (output/name).read_bytes())

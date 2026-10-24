@@ -2,7 +2,7 @@
 /* Host fixture for the unified IAA operation's provider handling.
  * unified_provider_test.py inserts the actual declarations and function
  * bodies of kernel/io_uring/iaa/xdev_ext_iaa.c at the markers below. Only
- * CryptoAPI, locking, workqueue and sysfs boundaries are shims here: they
+ * CryptoAPI, locking, timer, workqueue and sysfs boundaries are shims here: they
  * record calls and never decide caching, selection or attribution. No
  * compression is performed and no device is emulated.
  */
@@ -15,11 +15,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include "../../kernel/io_uring/iaa/xdev_ext_iaa_core.h"
+#include "../../kernel/io_uring/xdev_ext_policy.h"
 
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define __user
 #define HZ 100
+/* Timer boundary: match jiffy rounding at the fixture's fixed HZ. */
+static unsigned long msecs_to_jiffies(unsigned int msecs)
+{
+	return ((unsigned long)msecs * HZ + 999) / 1000;
+}
 #define GFP_KERNEL 0
 #define CRYPTO_MAX_ALG_NAME 128
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
@@ -137,7 +143,6 @@ static void acomp_request_free(struct acomp_req *r) { if (r) req_frees++; }
 struct io_kiocb { int unused; };
 struct io_xdev_ext_umem { int unused; };
 struct io_uring_unified_shared { int unused; };
-struct xdev_ext_binding_ctx_v2 { int unused; };
 struct xdev_ext_binding_token { int unused; };
 
 /* PRODUCTION_DECLARATIONS */
@@ -147,7 +152,7 @@ struct xdev_ext_binding_token { int unused; };
 static int fake_op(void *opaque) { (void)opaque; return 0; }
 static void fake_void(void *opaque) { (void)opaque; }
 static int fake_complete(void *opaque, int result) { (void)opaque; (void)result; return 0; }
-static int fake_submit(void *opaque, bool decompress, xdev_ext_sm_u32 *produced)
+static int fake_submit(void *opaque, bool decompress, __u32 *produced)
 {
 	(void)opaque; (void)decompress; (void)produced;
 	return 0;
@@ -164,8 +169,8 @@ static int failures;
 
 struct op {
 	struct io_xdev_ext_iaa_async state;
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 };
 
 /* One request through the actual prepare_provider seam. */
@@ -185,7 +190,7 @@ static int finish(struct op *op, int crypto_result, u32 produced)
 	struct xdev_ext_iaa_window_plan plan;
 
 	assert(!xdev_ext_iaa_decode_windows(&fields, 16384, 4096, &plan));
-	assert(!xdev_ext_pool_init(&op->pool, op->frames, 4, false));
+	xdev_ext_mech_life_pool_init(&op->pool, op->frames, 4);
 	assert(!xdev_ext_iaa_frames_claim(&op->state.frames, &op->pool, &plan,
 				     XDEV_EXT_IAA_CLAIM_DEST_FIRST));
 	return io_xdev_ext_iaa_finish_terminal(&op->state, crypto_result, produced);

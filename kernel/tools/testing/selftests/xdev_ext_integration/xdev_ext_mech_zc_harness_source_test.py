@@ -249,7 +249,7 @@ class HarnessWiringTest(unittest.TestCase):
         for enabled, expected in ((0, '1 60000 15000 150'), (1, '4 240000 60000 600')):
             run = subprocess.run(['bash', '-euc', snippet +
                 '\nprintf "%s %s %s %s" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS"'],
-                env=dict(os.environ, DEBUG_LOCKING=str(enabled)), capture_output=True, text=True)
+                env=dict(os.environ, DEBUG_LOCKING=str(enabled), MECHANISM_VARIANTS_TIMEOUT=""), capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stderr)
             self.assertEqual(run.stdout, expected)
         self.assertIn('--debug-locking)', self.script)

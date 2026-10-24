@@ -35,6 +35,8 @@ BOUNDARY = (
      'static unsigned armed_at_destroy;static unsigned (*armed_probe)(void);\n'
      'static void kthread_destroy_worker(struct kthread_worker *w) {(void)w;destroyed_workers++;'
      'if(armed_probe)armed_at_destroy+=armed_probe();}'),
+    ('static void native_unbind_host(void *h) {host_unbinds++;free(h);}',
+     'static int native_unbind_host(void *h) {host_unbinds++;free(h);return 0;}'),
 )
 
 SCENARIOS = r'''
@@ -54,6 +56,13 @@ static bool retire(struct xdev_ext_mech_batch *b) {
 static int lifecycle(const char *mode) {
  struct xdev_ext_mech_session *s=bound_session();u8 *states=s->pool.state;
  struct xdev_ext_mech_batch *b=batch_new(s);
+ /* The worker acquires producer lifecycle before native submission. */
+ s->life=calloc(s->pool.nr_frames,sizeof(*s->life));assert(s->life);s->owns_life=true;
+ s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=s->st[0].class_id,
+  .direction=s->st[0].direction};
+ b->producing=true;
+ assert(!xdev_ext_mech_life_claim(&s->life[b->f[0].index],s->st[0].index,&b->life_token[0]));
+ b->life_active=BIT(0);
  tracked=s;armed_probe=tracked_armed;
  EQ(submit(b),0,"accepted native command before STOP");
  if(!strcmp(mode,"quarantine_armed")) {
@@ -78,9 +87,23 @@ static int lifecycle(const char *mode) {
  EQ(destroyed_workers,0,"the worker stays for the late completion");
  CHECK(s->ss.state!=XDEV_EXT_MECH_SESSION_ACTIVE,"STOP closed admission");
  if(!strcmp(mode,"pending"))return 0;
- bool exact=!strcmp(mode,"late_exact")||!strcmp(mode,"native_control");
+ bool native_control=!strcmp(mode,"native_control");
+ bool exact=!strcmp(mode,"late_exact")||native_control;
+ u64 life_ctrl=s->life[b->f[0].index].ctrl,claim=b->life_token[0];
+ if(native_control)
+  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ZOMBIE,"outstanding native control quarantines before completion");
  xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,exact?128:127);
- EQ(b->sequester,!exact,"provider classifies the late completion");
+ /* An exact provider completion cannot resolve another outstanding native
+  * control: the already-ZOMBIE session must retain lifecycle custody. */
+ EQ(b->sequester,!exact||native_control,"provider and session classify the late completion");
+ if(native_control) {
+  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ZOMBIE,"exact completion cannot revive a quarantined session");
+  EQ(s->life[b->f[0].index].ctrl,life_ctrl,"quarantine retains the lifecycle ownership word");
+  EQ(b->life_active,BIT(0),"quarantine keeps the native lifecycle claim active");
+  EQ(b->life_token[0],claim,"quarantine retains the native lifecycle claim token");
+  EQ(xdev_ext_mech_life_phase(&s->life[b->f[0].index]),XDEV_EXT_MECH_L_IO_PENDING,
+   "quarantine cannot recycle the device-owned lifecycle");
+ }
  s->progress_work.armed=1;
  EQ(retire(b),true,"late completion drops the last reference");
  xdev_ext_mech_reap(&s->reap_work);
@@ -111,6 +134,21 @@ def build(root=None):
         extract.ROOT = Path(root).resolve()
     core = extract.source('io_uring/xdev_ext_mech.c')
     code = extract.generate()
+    # The shared provider fixture predates lifecycle completion handoff. Keep
+    # that decision, CPU synchronization and checked unbind in production C.
+    code = code.replace('#include "io_uring/xdev_ext_mech_step.h"',
+                        '#include "io_uring/xdev_ext_mech_step.h"\n'
+                        '#include "io_uring/xdev_ext_mech_produced.h"\n'
+                        '#define min(a,b) ((a)<(b)?(a):(b))', 1)
+    helpers = '\n\n'.join(extract.function(core, name) for name in (
+        'xdev_ext_mech_sync_for_cpu', 'xdev_ext_mech_trim_produced',
+        'xdev_ext_mech_batch_handoff', 'xdev_ext_mech_batch_frame_claim',
+        'xdev_ext_mech_unbind_checked'))
+    marker = extract.function(core, 'xdev_ext_mech_batch_completion_publish')
+    code = code.replace(marker, helpers + '\n' + marker, 1)
+    code = code.replace(extract.function(core, 'xdev_ext_mech_session_release'),
+                        'static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s);\n' +
+                        extract.function(core, 'xdev_ext_mech_session_release'), 1)
     for old, new in BOUNDARY:
         if old not in code:
             raise RuntimeError('fixture boundary changed: ' + old)

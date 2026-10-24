@@ -76,7 +76,8 @@ class Coverage(unittest.TestCase):
         sources = {str(p.relative_to(HERE)) for p in HERE.rglob("*")
                    if p.suffix in (".cu", ".cc") and ".build" not in p.parts and "build" not in p.parts}
         covered = {src for arm in self.m.ARMS for src in arm.sources}
-        self.assertEqual(sources - covered, set())
+        # This observer compiles benchmark control flow on the host.
+        self.assertEqual(sources - covered, {"gds/_campaign_fixture.cc"})
         self.assertIn("bench_cuda_staging.c", covered)
 
     def test_chain_dynamic_cuda_path_is_an_actual_build_arm(self):

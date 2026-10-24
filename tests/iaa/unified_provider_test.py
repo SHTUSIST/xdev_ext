@@ -4,9 +4,12 @@
 
 The actual declarations and function bodies of kernel/io_uring/iaa/xdev_ext_iaa.c
 (transform lookup, reuse, release, terminal accounting, driver selection and
-served-driver statistics) are compiled into unified_provider_fixture.c, whose
-shims only record CryptoAPI/lock/workqueue calls. Nothing is compressed and no
-device is emulated, so a pass says nothing about IAA hardware execution.
+served-driver statistics) are compiled into unified_provider_fixture.c with
+the real lifecycle pool and policy definitions. Both direct and mechanism
+configurations run; only the latter links the production policy accessor.
+Shims record CryptoAPI/lock/workqueue calls and convert the fixed host timer.
+Nothing is compressed and no device is emulated, so a pass says nothing about
+IAA hardware execution.
 """
 import os
 from pathlib import Path
@@ -20,6 +23,7 @@ ROOT = HERE.parents[1]
 SOURCE = Path(os.environ.get('XDEV_EXT_IAA_UNIFIED_SOURCE',
                              ROOT / 'kernel/io_uring/iaa/xdev_ext_iaa.c'))
 HEADER = ROOT / 'kernel/io_uring/iaa/xdev_ext_iaa.h'
+POLICY = ROOT / 'kernel/io_uring/xdev_ext_policy.c'
 REQUIRED = ('io_xdev_ext_iaa_runtime_prepare_provider', 'io_xdev_ext_iaa_release_resources',
             'io_xdev_ext_iaa_update_stats', 'io_xdev_ext_iaa_finish_terminal')
 # Present once the transform is cached and the driver is selectable.
@@ -44,8 +48,15 @@ def function(text, name):
 
 def build_source(text):
     items = []
+    # Keep the production selection intact: direct IAA uses the default,
+    # while CONFIG_XDEV_EXT_MECH calls the policy object's accessor.
+    policy_guard = re.search(r'^#ifdef CONFIG_XDEV_EXT_MECH\n.*?^#endif$',
+                             text, re.M | re.S)
+    if policy_guard:
+        items.append((policy_guard.start(), policy_guard[0]))
     for pattern in DECLARATIONS:
-        items += [(m.start(), m[0]) for m in re.finditer(pattern, text, re.M | re.S)]
+        items += [(m.start(), m[0]) for m in re.finditer(pattern, text, re.M | re.S)
+                  if not policy_guard or not policy_guard.start() <= m.start() < policy_guard.end()]
     names = list(REQUIRED) + [n for n in OPTIONAL if re.search(r'\b' + n + r'\(', text)]
     for name in names:
         match = function(text, name)
@@ -60,7 +71,12 @@ def build_source(text):
     stats = re.search(r'^typedef [^;]*io_xdev_ext_iaa_stats_fn[^;]*;', header, re.M | re.S)
     if not params or not stats:
         raise RuntimeError('missing production interface in xdev_ext_iaa.h')
-    body = '\n'.join([params[0], stats[0]] + [code for _, code in sorted(set(items))])
+    policy = function(POLICY.read_text(), 'xdev_ext_policy_iaa_tfm_idle')
+    if not policy:
+        raise RuntimeError('missing production IAA policy accessor')
+    policy_body = '#ifdef CONFIG_XDEV_EXT_MECH\n' + policy[0] + '\n#endif'
+    body = '\n'.join([params[0], stats[0], policy_body] +
+                     [code for _, code in sorted(set(items))])
     fixture = (HERE / 'unified_provider_fixture.c').read_text()
     return fixture.replace('/* PRODUCTION_DECLARATIONS */\n/* PRODUCTION_FUNCTIONS */', body)
 
@@ -73,23 +89,28 @@ class UnifiedProvider(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         path = Path(cls.temp.name)
         (path / 'probe.c').write_text(build_source(text))
-        cls.binary = path / 'probe'
+        cls.binaries = []
         defines = []
         if 'io_xdev_ext_iaa_tfm_get(' in text:
             defines.append('-DHAVE_TFM_CACHE')
         if 'io_xdev_ext_iaa_driver_ops' in text:
             defines.append('-DHAVE_SELECTION')
-        result = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                                 '-Wno-unused-function', '-Wno-unused-parameter',
-                                 '-fsanitize=undefined,address', '-fno-sanitize-recover=all',
-                                 '-I' + str(HERE), *defines, str(path / 'probe.c'),
-                                 '-o', str(cls.binary)], capture_output=True, text=True)
-        if result.returncode:
-            raise RuntimeError(result.stdout + result.stderr)
+        for config, config_flags in (('direct', []), ('mechanism', ['-DCONFIG_XDEV_EXT_MECH'])):
+            binary = path / ('probe-' + config)
+            result = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
+                                     '-Wno-unused-function', '-Wno-unused-parameter',
+                                     '-fsanitize=undefined,address', '-fno-sanitize-recover=all',
+                                     '-I' + str(HERE), *defines, *config_flags, str(path / 'probe.c'),
+                                     '-o', str(binary)], capture_output=True, text=True)
+            if result.returncode:
+                raise RuntimeError(config + ':\n' + result.stdout + result.stderr)
+            cls.binaries.append((config, binary))
 
     def probe(self, mode):
-        result = subprocess.run([str(self.binary), mode], capture_output=True, text=True)
-        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for config, binary in self.binaries:
+            with self.subTest(config=config):
+                result = subprocess.run([str(binary), mode], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_sequential_operations_reuse_one_transform(self):
         self.probe('reuse')
