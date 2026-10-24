@@ -848,6 +848,7 @@ struct ctl_run {
 	__u64 published_seen;		/* frames taken off the RX ring */
 	int poll_ms;			/* longest sleep between two STATS */
 	bool defer_stats;		/* reliable finalizer prints the sole final snapshot */
+	bool source_error_drain;		/* retain live source error observations */
 };
 
 /* One final snapshot and one synchronous STOP, for success and failure alike.
@@ -931,6 +932,53 @@ static int ctl_wait(struct ctl_run *r, ctl_done_fn done, const void *arg,
 	}
 }
 
+/* Observe stopping; never issue STOP to supply a missing cancellation cause.
+ * The first terminal notification is one-shot and can precede native drain.
+ * Keep the original failure even if all accepted work subsequently settles. */
+static int ctl_source_error_drain(struct ctl_run *r, __u64 groups,
+				 struct xdev_ext_mech_stats *s, int outcome)
+{
+	__u64 deadline = ctl_now_ns() + 5000000000ULL;
+	unsigned int reads = 0;
+	const char *result = "timeout";
+	int query = 0;
+
+	for (;;) {
+		struct xdev_ext_mech_stats final;
+		bool finite;
+
+		query = ctl_stats(r->ring, r->session, &final);
+		if (query) {
+			result = "query-failed";
+			break;
+		}
+		reads++;
+		*s = final;
+		/* Subtract only after the bound check: do not overflow counters. */
+		finite = s->batches_done <= groups &&
+			s->batches_abort == groups - s->batches_done;
+		if (!s->inflight) {
+			if (s->state == XDEV_EXT_MECH_SESSION_ZOMBIE) {
+				result = "quarantine";
+				break;
+			}
+			if (s->state == XDEV_EXT_MECH_SESSION_STOPPED ||
+			    (s->state == XDEV_EXT_MECH_SESSION_ACTIVE && finite)) {
+				result = "settled";
+				break;
+			}
+		}
+		if (ctl_now_ns() >= deadline)
+			break;
+		usleep(10000);
+	}
+	if (reads)
+		ctl_print_stats(s);
+	printf("XDEV_EXT_MECH_SOURCE_DRAIN session=%llu result=%s wait_err=%d drain_err=%d stats_reads=%u\n",
+	       (unsigned long long)r->session, result, outcome, query, reads);
+	return outcome;
+}
+
 /*
  * The arm precedes admission/readiness, so the eventfd covers completions
  * that race entry into poll.  No intermediate STATS or RX-ring service is
@@ -987,8 +1035,12 @@ static int ctl_wait_coarse(struct ctl_run *r, __u64 groups,
 	    (ret || xdev_ext_mech_ctl_notify_result(s, groups)))
 		ctl_print_stats(s);
 	if (stats_ret || ret)
-		return stats_ret ? stats_ret : ret;
-	return xdev_ext_mech_ctl_notify_result(s, groups);
+		ret = stats_ret ? stats_ret : ret;
+	else
+		ret = xdev_ext_mech_ctl_notify_result(s, groups);
+	if (ret && r->source_error_drain && !r->defer_stats)
+		return ctl_source_error_drain(r, groups, s, ret);
+	return ret;
 }
 
 static bool ctl_stopped(const struct xdev_ext_mech_stats *s)
@@ -1499,6 +1551,7 @@ struct ctl_source {
 	__u32 nr_stages;
 	bool iou_umem;			/* pool: the ring's XDEV_EXT UMEM */
 	bool user_pattern;		/* chain d: user fills and compares */
+	bool started;			/* distinguishes runtime from setup failure */
 	__u32 nic_path;
 	struct xdev_ext_mech_transport_stats_v3 accounting;
 };
@@ -1516,7 +1569,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
  struct xdev_ext_afxdp_reliable_policy_config reliable_config;
 	struct xdev_ext_mech_layout l;
 	struct ctl_run r = { .ring = -1, .efd = -1, .poll_ms = CTL_POLL_MS,
-		.defer_stats = o->reliable };
+		.defer_stats = o->reliable, .source_error_drain = !o->expect_unbind };
 	struct ctl_xsk x = { .fd = -1 };
  struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
 	__u32 *user = NULL, frames, nr_user = 0, i, j;
@@ -1527,6 +1580,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	int ret, socket_fd = -1;
 	bool iou_umem = src->iou_umem;
 
+	src->started = false;
 	*frames_ok = true;
 	ret = ctl_layout(o, src->ifname, &l, &frames);
 	if (ret)
@@ -1635,6 +1689,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	ret = ctl_start(r.ring, r.session, o->groups, user, nr_user, o->reliable ? o->first_group : 1);
 	if (ret)
 		goto out;
+	src->started = true;
 	r.deadline_ns = ctl_now_ns() + o->timeout_ms * 1000000ULL;
 	ret = o->expect_unbind ?
 		ctl_wait(&r, ctl_done_stopped, &target, s) :
@@ -1715,7 +1770,7 @@ static int cmd_nvme_nic(struct ctl_opts *o)
 	close(src_ng);
 	if (ret) {
 		ctl_err("source session: %s\n", strerror(-ret));
-		return CTL_SETUP;
+		return src.started ? CTL_FAIL : CTL_SETUP;
 	}
 	if (o->expect_unbind)
 		verdict = ctl_report(xdev_ext_mech_ctl_report_unbind(
@@ -1763,7 +1818,7 @@ static int ctl_new_chain(struct ctl_opts *o,bool fanout)
  out:
  if(source>=0)close(source);
  if(dest>=0)close(dest);
- if(ret<0){ctl_err("chain: %s\n",strerror(-ret));return CTL_SETUP;}
+ if(ret<0){ctl_err("chain: %s\n",strerror(-ret));return src.started ? CTL_FAIL : CTL_SETUP;}
  return ret;
 }
 static int cmd_fanout(struct ctl_opts *o){return ctl_new_chain(o,true);}
@@ -1900,6 +1955,7 @@ static int cmd_ce_chain(struct ctl_opts *o)
 	ret = ctl_run_source(&src, &s, &frames_ok);
 	if (ret) {
 		ctl_err("chain %c: %s\n", o->chain, strerror(-ret));
+		verdict = src.started ? CTL_FAIL : CTL_SETUP;
 		goto out;
 	}
 	verdict = ctl_report(xdev_ext_mech_ctl_report_ce_chain(

@@ -83,3 +83,6 @@ for name, dest in [('cmd_nic_nvme','accounting'),('ctl_run_source','src->account
         prefix=tail[max(0,m.start()-180):m.start()]
         assert re.search(r'if\s*\([^{};]*!o->reliable[^{};]*\)\s*\{?\s*(?:ret\s*=\s*|if\s*\()?$',prefix,re.S),name+' late live query not non-reliable guarded'
 print('PASS source wiring: both reliable callers consume final snapshots; late queries non-reliable only')
+# This existing host gate also covers the ordinary source terminal-error path.
+subprocess.run([sys.executable, str(pathlib.Path(__file__).with_name('xdev_ext_mech_source_drain_test.py'))],
+               env=dict(os.environ, XDEV_EXT_TEST_SRC=str(k)), check=True)

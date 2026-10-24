@@ -12,6 +12,7 @@ TEST_FILES += xdev_ext_mech_rx_admission_fixture.c
 TEST_FILES += xdev_ext_mech_rx_private_fixture.c xdev_ext_mech_rx_result_fixture.c
 TEST_FILES += xdev_ext_mech_ce_window_test.c
 TEST_FILES += xdev_ext_mech_cuda_fake.c xdev_ext_mech_cuda_probe.c
+TEST_FILES += xdev_ext_mech_source_drain_test.py
 
 LOCAL_HDRS += $(abspath ../../../xdev_ext_mech/xdev_ext_mech_prog.h)
 LOCAL_HDRS += $(abspath ../../../xdev_ext_mech/xdev_ext_mech_ctl_core.h)

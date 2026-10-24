@@ -232,10 +232,11 @@ class CtlSourceTest(unittest.TestCase):
     def test_markers_come_from_the_core(self):
         # Core owns the common reports and transport counters. Socket RX uses
         # the same public markers with its START-loan ledger; NIC accounting
-        # is an informational CLI line, rather than a PASS/FAIL verdict.
+        # and source-drain observations are informational CLI lines, rather
+        # than PASS/FAIL verdicts.
         literals = set(re.findall(r'"(XDEV_EXT_MECH_[A-Z_0-9]+)[=" ]', self.ctl))
         self.assertEqual(literals, {
-            "XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE",
+            "XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE", "XDEV_EXT_MECH_SOURCE_DRAIN",
             "XDEV_EXT_MECH_READY", "XDEV_EXT_MECH_ATTACH",
             "XDEV_EXT_MECH_DETACH", "XDEV_EXT_MECH_RING_EXIT_CLOSE",
             "XDEV_EXT_MECH_NIC_ACCOUNTING", "XDEV_EXT_MECH_NIC_NVME_E2E",
