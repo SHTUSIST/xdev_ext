@@ -114,3 +114,12 @@ static void kthread_destroy_worker(struct kthread_worker *w) {(void)w;destroyed_
 static void timer_shutdown_sync(struct timer_list *t) {(void)t;}
 static void (*wait_hook)(void);
 #define wait_event_timeout(w,c,t) do {(void)(w);(void)(t);if(!(c)&&wait_hook)wait_hook();(void)(c);}while(0)
+
+/* These scheduler fixtures run with the optional tracepoint disabled. */
+static inline bool trace_native_event_enabled(void) { return false; }
+static inline void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch *b,
+ const char *phase, u64 ticket, int status)
+{ (void)b; (void)phase; (void)ticket; (void)status; }
+static inline void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
+ const char *phase, u32 pos, u64 ticket, int status)
+{ (void)b; (void)phase; (void)pos; (void)ticket; (void)status; }
