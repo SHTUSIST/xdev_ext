@@ -485,7 +485,7 @@ static void test_read_finish_rejects_stale_or_nonproducer_claims(void)
 {
 	struct xdev_ext_mech_life frame;
 	struct xdev_ext_mech_life_pool pool;
-	__u64 claim, consumer, next, word;
+	__u64 claim, consumer, next, word, wrong_owner;
 
 	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, 0, 4096, false), -ESTALE);
@@ -521,6 +521,25 @@ static void test_read_finish_rejects_stale_or_nonproducer_claims(void)
 	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, next, -EIO, false), 0);
 	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 2);
+
+	/* Owner 0 mirrors the UMEM read window above. A nonzero producer owner
+	 * must also work, while a different owner in the same generation fails. */
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &next), 0);
+	word = frame.ctrl;
+	wrong_owner = (next & ~XDEV_EXT_MECH_L_OWNER_MASK) |
+		(1ULL << XDEV_EXT_MECH_L_OWNER_SHIFT); /* owner 0, same generation/kind */
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, wrong_owner, 1024, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(frame.valid_len, 512);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, next, 1024, false), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_READY);
+	EXPECT_EQ(frame.valid_len, 1024);
+	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 1);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 2);
+	EXPECT_EQ(xdev_ext_mech_life_acquire(&frame, 0, 0, &consumer), 0);
+	EXPECT_EQ(xdev_ext_mech_life_put(&frame, consumer), XDEV_EXT_MECH_L_FREED);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 3);
 }
 
 static void test_write_compat_preserves_fd_durability_flags(void)
