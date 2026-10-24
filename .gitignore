@@ -1182,3 +1182,9 @@
 !/tests/eval/mechanism_variants/test_archive_relocation.py
 
 !/tests/eval/chains/test_bpf_headers.py
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/
+!/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/probe.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/kernel_popcount/run.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/shim/linux/bitops.h

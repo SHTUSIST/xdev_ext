@@ -5,12 +5,14 @@
 /* CPU ownership publication only; device DMA synchronization is separate. */
 #ifdef __KERNEL__
 #include <linux/atomic.h>
+#include <linux/bitops.h>
 #include <linux/compiler.h>
 #include <linux/errno.h>
 #include <linux/types.h>
 #define XDEV_EXT_L_LOAD(p) smp_load_acquire(p)
 #define XDEV_EXT_L_STORE(p, v) smp_store_release(p, v)
 #define XDEV_EXT_L_CAS(p, old, v) try_cmpxchg(p, old, v)
+#define XDEV_EXT_L_HWEIGHT32(v) hweight32(v)
 #else
 #include <errno.h>
 #include <stdbool.h>
@@ -19,6 +21,7 @@
 #define XDEV_EXT_L_STORE(p, v) __atomic_store_n(p, v, __ATOMIC_RELEASE)
 #define XDEV_EXT_L_CAS(p, old, v) \
 	__atomic_compare_exchange_n(p, old, v, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+#define XDEV_EXT_L_HWEIGHT32(v) __builtin_popcount(v)
 #endif
 
 #ifdef XDEV_EXT_MECH_LIFE_LEGACY
@@ -327,7 +330,7 @@ static inline int xdev_ext_mech_life_acquire(struct xdev_ext_mech_life *l,
 			return -EALREADY;
 		if (exclusive && refs > 1)
 			return -EBUSY;
-		if (refs <= (__u32)__builtin_popcount(busy))
+		if (refs <= (__u32)XDEV_EXT_L_HWEIGHT32(busy))
 			return -ENOENT;
 		if (old & XDEV_EXT_MECH_L_OWNER_MASK)
 			return -EBUSY;
@@ -352,7 +355,7 @@ static inline int xdev_ext_mech_life_drop(struct xdev_ext_mech_life *l,
 			return -ESTALE;
 		busy = ((old & XDEV_EXT_MECH_L_BUSY_MASK) >> XDEV_EXT_MECH_L_BUSY_SHIFT) &
 			~(1U << xdev_ext_mech_life_claim_owner(claim));
-		refs = failed ? (__u32)__builtin_popcount(busy) :
+		refs = failed ? (__u32)XDEV_EXT_L_HWEIGHT32(busy) :
 			((old & XDEV_EXT_MECH_L_REFS_MASK) >> XDEV_EXT_MECH_L_REFS_SHIFT) - 1;
 		next = xdev_ext_mech_life_word(xdev_ext_mech_life_claim_gen(old) + !refs,
 			!refs ? XDEV_EXT_MECH_L_FREE : busy ? XDEV_EXT_MECH_L_OUT_PENDING : XDEV_EXT_MECH_L_READY,

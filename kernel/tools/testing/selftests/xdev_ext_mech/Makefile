@@ -126,3 +126,11 @@ model-check:
 $(OUTPUT)/xdev_ext_mech_refs_test $(OUTPUT)/xdev_ext_mech_lifecycle_contract_test: CFLAGS += -pthread -I$(CURDIR)/model/shim
 $(OUTPUT)/xdev_ext_mech_refs_test $(OUTPUT)/xdev_ext_mech_lifecycle_contract_test: LDLIBS += -pthread
 $(OUTPUT)/xdev_ext_mech_cpu_xform_test $(OUTPUT)/xdev_ext_mech_ctl_chains_test: $(CURDIR)/xform_oracle.h
+
+# Real Kbuild linkage guard; requires an isolated prepared x86 output tree.
+.PHONY: kernel-popcount-check
+kernel-popcount-check:
+	@test -n "$(KERNEL_SOURCE)" -a -n "$(KERNEL_OUTPUT)" || \
+		{ echo 'Set KERNEL_SOURCE and KERNEL_OUTPUT to matching prepared kernel trees'; exit 2; }
+	python3 "$(CURDIR)/kernel_popcount/run.py" --kernel-source "$(KERNEL_SOURCE)" \
+		--kernel-output "$(KERNEL_OUTPUT)" --build-dir "$(OUTPUT)/.kernel-popcount" --cc "$(CC)"
