@@ -1262,11 +1262,11 @@ int mlx5e_peer_rx_open(struct net_device *dev, u32 queue, u64 owner)
   goto unlock;
  rq = &priv->channels.c[queue]->rq;
  if (rq->peer) { ret = -EBUSY; goto unlock; }
- ret = mlx5e_peer_channel_get(rq->channel);
- if (ret) goto unlock;
  if (rq->wq_type != MLX5_WQ_TYPE_CYCLIC || rq->xsk_pool ||
      rcu_access_pointer(rq->xdp_prog) || rq->wqe.wq.fbc.log_stride < 5 ||
      MLX5E_GET_PFLAG(&priv->channels.params, MLX5E_PFLAG_RX_CQE_COMPRESS)) goto unlock;
+ ret = mlx5e_peer_channel_get(rq->channel);
+ if (ret) goto unlock;
  ret = mlx5_core_query_mkey(priv->mdev, be32_to_cpu(rq->mkey_be), out, sizeof(out));
  if (ret) goto unlock;
  if (MLX5_GET(mkc, mkc, access_mode_4_2) ||
@@ -6573,6 +6573,13 @@ int mlx5e_netdev_change_profile(struct mlx5e_priv *priv,
 	void *orig_ppriv = priv->ppriv;
 	int err, rollback_err;
 
+#ifdef CONFIG_XDEV_EXT_MECH
+	/* A previous UNKNOWN must be rejected before detach destroys backing.
+	 * Keep the later guard too: detach can discover a new destroy failure.
+	 */
+	if (priv->peer_quarantined)
+		return -EIO;
+#endif
 	/* cleanup old profile */
 	mlx5e_detach_netdev(priv);
 #ifdef CONFIG_XDEV_EXT_MECH

@@ -23,6 +23,8 @@ netdev, device, and the actual devlink object containing `mlx5_core_dev` private
 storage. A device reference alone would not preserve that storage. The already
 publicly declared devlink reference functions are exported for this module use.
 Owner acquisition failure rejects submission before any WQE or doorbell.
+RX shape eligibility is rejected before owner acquisition; a zero pin result
+cannot turn an unsupported configuration into a successful unbound endpoint.
 
 Successful final channel close releases all references and frees the channel.
 Failed peer close propagates to the parent before related CQs or the embedding
@@ -32,7 +34,9 @@ in that retained channel too. This requires no closing-time allocation.
 Unknown channels cannot admit new peer work. NAPI is removed once, and repeated
 close does not destroy already closed queues again. Private cleanup, netdev
 free and profile replacement cannot discard or overwrite quarantined owner
-backing. The first quarantine emits a kernel diagnostic.
+backing. Profile replacement rejects a previously quarantined owner before
+detach or any cleanup. A second guard after detach covers newly discovered
+unknown outcomes. The first quarantine emits a kernel diagnostic.
 
 This repair does not invent a cancellation or firmware recovery guarantee.
 Unknown resources remain retained until a separately proven device-wide DMA

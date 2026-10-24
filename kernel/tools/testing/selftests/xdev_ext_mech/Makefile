@@ -46,8 +46,8 @@ TEST_FILES += reliable/slow_downstream_test.c
 TEST_PROGS += reliable/regressions/downstream_failure_terminal_test.py reliable/regressions/held_reply_provider_test.py
 TEST_PROGS += reliable/regressions/single_crc_pass_test.py reliable/regressions/backpressure_skip_payload_test.py
 TEST_PROGS += transport_pending/transport_counters_test.py
-TEST_PROGS += peer_graph/test_native_owner_teardown.py
-TEST_FILES += peer_graph/native_owner_fixture.h peer_graph/native_owner_cases.c peer_graph/NATIVE_TEARDOWN.md
+TEST_PROGS += peer_graph/test_native_owner_teardown.py peer_graph/test_native_admission_profile.py
+TEST_FILES += peer_graph/native_owner_fixture.h peer_graph/native_owner_cases.c peer_graph/NATIVE_TEARDOWN.md peer_graph/native_admission_fixture.py
 
 TEST_PROGS += socket_sink/adapter_test.py
 TEST_PROGS += socket_guest/key_contract_test.py
