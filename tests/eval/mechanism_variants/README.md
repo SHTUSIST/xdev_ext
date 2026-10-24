@@ -63,7 +63,10 @@ must retain that designation in its evidence.
 The separate `test_assertion_selfcheck.py` uses explicitly synthetic fixture
 artifacts to check that the assertions themselves run and reject changed
 setup/source/sink, guest timing, wrong accepted SLBA, early recycle and a
-negative that increases accepted count. Its PASS is assertion self-validation,
+negative that increases accepted count. They also accept pre-ticket validation
+and legal stage-local ticket/generation changes, while rejecting a changed
+ticket or frame generation within one accepted native operation, a different
+plan stage, or a foreign session. Their PASS is assertion self-validation,
 not BPF, verifier, guest or provider execution evidence.
 
 ## capture.json v1
@@ -87,14 +90,43 @@ or a hand-written `same_setup=true` field.
 
 Each real request has ordered events `class_validate`, `provider_accept`,
 `native_complete`, `downstream_complete`, `frame_recycle`. Each contains `seq`
-(globally increasing), `request_id`, `batch_id`, `ticket`, `ops_generation`
-(the actual pinned NVMe mechanism generation) and `frames` (actual frame
-indices, in the same order). The first two additionally record `slba`, `nlb`
-(decoded count, not zero-based encoding), `bytes`, `direction="read"`;
-class_validate records `result=0`. `ticket` is the NVMe native ticket retained
-for correlating this request; a downstream stage's own ticket is a separate
-field if recorded. Events must be captured at the named real boundaries;
-reconstructing them from expected SLBAs or final bytes is not evidence.
+(globally increasing), actual `session_id`, `batch_id`, `request_id`, `stage`,
+`ticket`, `frames` (actual frame indices, in the same order), and parallel
+`frame_generations` (the actual life token/generation for each index at that
+boundary). All events of a run must belong to its actual session. The BPF
+invocation assigns `request_id = batch_id`; a raw trace that records only
+`batch_id` can map it to `request_id` by this declared rule, without renumbering.
+
+The first two events additionally record `slba`, `nlb` (decoded count, not
+zero-based encoding), `bytes`, `direction="read"`. Link validation to native
+acceptance by their identical `(session_id,batch_id,request_id,stage,SLBA,NLB,
+bytes,direction)` plan and frame indices. `class_validate` records `result=0`
+and `ticket=0`, explicitly meaning that this native operation has no allocated
+ticket yet. In the core, BUILD/class validation precedes lifecycle acquire and
+`completion_begin`; validation's frame generation may legitimately be zero
+or differ from the subsequently acquired generation. Do not insert a future
+native ticket into an earlier raw validation event.
+
+`provider_accept` and `native_complete` additionally carry native request
+`cookie` and must match on `(session_id,batch_id,request_id,stage,ticket,cookie,
+frames,frame_generations)`. Their ticket, cookie and acquired frame generations
+are nonzero; NVMe is stage 0. `native_complete` must be captured at the matching
+native callback, before handoff releases or republishes its claims. This
+preserves the immutable identity of each actual accepted operation.
+
+Across stages, retain logical record identity `(session_id,batch_id,request_id)`
+and the actual stage-local ticket, frame indices and frame generations. Do
+not copy the earlier NVMe ticket/generation onto downstream/recycle events.
+The downstream and recycle stage is the configured terminal stage: 1 for
+NVMe→NIC and 3 for NVMe→CE→CE→NIC. The downstream stage's native ticket and
+lifecycle generation can legitimately differ, including a generation
+increment during consumer acquire or an L lifecycle publication/claim change.
+`ops_generation`, if a separate genuine mechanism-generation hook supplies it,
+is supplementary metadata; it is not the frame life token and is not invented
+from the native trace's `generation` field.
+
+Events must be captured at the named real boundaries; reconstructing them
+from expected SLBAs or final bytes is not evidence.
 Only NVMe provider accepts belong in `provider_accept` (downstream native
 accepts, if captured, use separately named events and a separate raw trace).
 The compact event array is derived from, and delivered with, the raw trace.
@@ -117,3 +149,33 @@ integrator must audit each producer hook and archive actual command, kernel
 SHA/config, verifier output and raw trace with the capture. BPF ELF compilation
 alone does not imply verifier acceptance; fixture/generated event rows do not
 satisfy the guest gate.
+
+## Existing guest runner integration
+
+Build the real UDP sink with `make -C tests/eval/mechanism_variants sink
+BUILD=<guestbin>` and the two real BPF objects with `make -C
+tests/eval/mechanism_variants/tests bpf BUILD_DIR=<guestbin> CLANG=clang-14
+VMLINUX_BTF=<final-target-vmlinux>`. `image.py seed` creates a new ordinary
+fragment file; it refuses device paths. Seed only the integrator's private
+QEMU image at LBA 2048, then run inside that private guest:
+
+```
+E2_PRIVATE_GUEST=yes guest_run.sh BIN_DIR SOURCE_NG TX_IF SINK_IP PEER_MAC NEW_CAPTURE_DIR TRACE_CTL
+```
+
+The runner uses the existing AF_XDP zero-copy path with depth 1, 4096-byte
+groups and 16 requests, with no silent copy fallback. It recreates the NVMe
+session/object for each variant, retains actual attach/program metadata,
+setup, raw traces and all 65536 NIC sink bytes. Its expected batch IDs 1..16
+must be confirmed from the trace. On the host, `image.py verify <sink>
+--variant reverse` (or `gray`) `--first-request-id 1` independently checks
+every LBA's bytes.
+
+`TRACE_CTL begin|end NAME OUT` owns collection. The provided `trace_ctl.sh`
+uses a private tracefs instance and writes `OUT/NAME.trace`, the real event
+format and per-CPU trace statistics; it rejects marker-only captures and
+nonzero trace overruns/drops. The runner also executes the existing
+`nvme_s0` modes 1/2 as actual out-of-window/reserved-plan negatives. A CLI
+failure is insufficient: the trace gate must verify the real class errno
+and no native acceptance. The separate old-ticket completion-entry negative
+and raw-to-compact capture assembly remain integrator responsibilities.

@@ -43,7 +43,13 @@ def fixture(directory):
             for name in ("class_validate", "provider_accept", "native_complete",
                          "downstream_complete", "frame_recycle"):
                 events.append({"seq": len(events), "event": name, "request_id": rid,
-                               "batch_id": rid, "ticket": 100 + rid, "ops_generation": 1,
+                               "session_id": 17, "batch_id": rid,
+                               "stage": 0 if name in ("class_validate", "provider_accept", "native_complete") else 1,
+                               "ticket": 0 if name == "class_validate" else
+                                   100 + rid + (1 if name in ("downstream_complete", "frame_recycle") else 0),
+                               "cookie": 4096 + rid,
+                               "frame_generations": [0, 0, 0] if name == "class_validate" else
+                                   ([1, 1, 1] if name in ("provider_accept", "native_complete") else [2, 2, 2]),
                                "frames": [0, 1, 2], "slba": slba, "nlb": 8, "bytes": 4096,
                                "direction": "read", "result": 0})
             payload.extend(b"".join(contract.signed_lba(lba) for lba in range(slba, slba + 8)))
@@ -77,12 +83,44 @@ class AssertionSelfcheck(unittest.TestCase):
         with patch.dict(os.environ, {"E2_CAPTURE_DIR": str(directory)}):
             contract.GuestCapture("test_actual_bpf_provider_and_successor_bytes").test_actual_bpf_provider_and_successor_bytes()
 
+    def test_validation_before_ticket_and_stage_local_generation(self):
+        with tempfile.TemporaryDirectory(prefix="e2-stage-identity-") as temporary:
+            directory = Path(temporary)
+            data = fixture(directory)
+            for run in data["runs"].values():
+                path = directory / run["events"]
+                events = json.loads(path.read_text())
+                for event in events:
+                    event["session_id"] = 17
+                    event["stage"] = 0 if event["event"] in (
+                        "class_validate", "provider_accept", "native_complete") else 1
+                    event["cookie"] = 4096 + event["request_id"]
+                    if event["event"] == "class_validate":
+                        event["ticket"] = 0  # native completion_begin has not run
+                        event["frame_generations"] = [0, 0, 0]
+                    elif event["stage"] == 0:
+                        event["frame_generations"] = [1, 1, 1]
+                    else:
+                        event["ticket"] += 1
+                        event["frame_generations"] = [2, 2, 2]
+                path.write_text(json.dumps(events))
+            self.check_capture(directory, data)
+            # A different stage may have another ticket; this same native
+            # request must still retain the ticket and frame claim it accepted.
+            path = directory / data["runs"]["gray"]["events"]
+            events = json.loads(path.read_text())
+            events[2]["ticket"] += 1
+            path.write_text(json.dumps(events))
+            with self.assertRaises(AssertionError):
+                self.check_capture(directory, data)
+
     def test_synthetic_fixture_and_required_rejections(self):
         with tempfile.TemporaryDirectory(prefix="e2-assertions-") as temporary:
             directory = Path(temporary)
             good = fixture(directory)
             self.check_capture(directory, good)
-            for mutation in ("setup", "source", "sink", "guest_timing", "accepted_slba", "early_recycle", "negative_accept"):
+            for mutation in ("setup", "source", "sink", "guest_timing", "accepted_slba", "early_recycle", "negative_accept",
+                             "native_ticket", "native_frame_generation", "plan_stage", "foreign_session"):
                 with self.subTest(mutation=mutation):
                     data = fixture(directory)
                     if mutation == "setup":
@@ -94,13 +132,22 @@ class AssertionSelfcheck(unittest.TestCase):
                         (directory / name).write_bytes(raw)
                     elif mutation == "guest_timing":
                         data["timing_claim"] = "performance"
-                    elif mutation in ("accepted_slba", "early_recycle"):
+                    elif mutation in ("accepted_slba", "early_recycle", "native_ticket",
+                                     "native_frame_generation", "plan_stage", "foreign_session"):
                         path = directory / data["runs"]["gray"]["events"]
                         events = json.loads(path.read_text())
                         if mutation == "accepted_slba":
                             events[1]["slba"] += 8
-                        else:
+                        elif mutation == "early_recycle":
                             events[2]["event"], events[4]["event"] = events[4]["event"], events[2]["event"]
+                        elif mutation == "native_ticket":
+                            events[2]["ticket"] += 1
+                        elif mutation == "native_frame_generation":
+                            events[2]["frame_generations"][0] += 1
+                        elif mutation == "plan_stage":
+                            events[0]["stage"] += 1
+                        else:
+                            events[2]["session_id"] += 1
                         path.write_text(json.dumps(events))
                     else:
                         data["negatives"]["outside_window"]["accepted_after"] = 1

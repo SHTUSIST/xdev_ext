@@ -83,6 +83,10 @@ class GuestCapture(unittest.TestCase):
                 self.assertTrue(self.artifact(run["raw_trace"]).strip())
                 events = json.loads(self.artifact(run["events"]))
                 self.assertEqual([e["seq"] for e in events], sorted(set(e["seq"] for e in events)))
+                session_id = events[0]["session_id"]
+                self.assertGreater(session_id, 0)
+                self.assertTrue(all(e["session_id"] == session_id for e in events),
+                                "events from another session cannot satisfy this run")
                 accepted = [e for e in events if e["event"] == "provider_accept"]
                 self.assertEqual([e["request_id"] for e in accepted], ids,
                                  "missing, duplicated, reordered or unaccounted accepted NVMe request")
@@ -95,15 +99,45 @@ class GuestCapture(unittest.TestCase):
                     names = [e["event"] for e in per_request]
                     self.assertEqual(names, ["class_validate", "provider_accept", "native_complete",
                                              "downstream_complete", "frame_recycle"])
-                    identity = (per_request[0]["batch_id"], per_request[0]["ticket"],
-                                per_request[0]["ops_generation"], per_request[0]["frames"])
+                    validation, accepted_event, completed, downstream, recycled = per_request
                     for event in per_request:
-                        self.assertEqual((event["batch_id"], event["ticket"],
-                                          event["ops_generation"], event["frames"]), identity)
-                    self.assertEqual(identity[0], rid, "callback request_id must be actual batch_id")
-                    self.assertTrue(identity[1] > 0 and identity[2] > 0)
-                    self.assertTrue(identity[3], "no actual frame correlation")
-                    self.assertEqual(per_request[0]["result"], 0)
+                        self.assertEqual(event["batch_id"], rid,
+                                         "callback request_id must be actual batch_id")
+                        self.assertTrue(event["frames"], "no actual frame correlation")
+                        self.assertEqual(len(event["frames"]), len(event["frame_generations"]))
+                        self.assertTrue(all(isinstance(index, int) and index >= 0
+                                            for index in event["frames"]))
+                        self.assertTrue(all(isinstance(gen, int) and gen >= 0
+                                            for gen in event["frame_generations"]))
+                    # BUILD validation precedes life acquire and completion_begin.
+                    # Link its authorized plan, not an as-yet-unallocated ticket.
+                    plan_keys = ("session_id", "batch_id", "request_id", "stage",
+                                 "slba", "nlb", "bytes", "direction")
+                    self.assertEqual(tuple(validation[key] for key in plan_keys),
+                                     tuple(accepted_event[key] for key in plan_keys),
+                                     "accepted native request differs from its validated plan")
+                    self.assertEqual(validation["ticket"], 0,
+                                     "validation must not borrow a future native ticket")
+                    self.assertEqual(validation["frames"], accepted_event["frames"])
+                    self.assertEqual(validation["result"], 0)
+                    self.assertEqual(accepted_event["stage"], 0)
+                    # Immutable native-operation identity holds only from the
+                    # accepted request to its matching native completion.
+                    native_keys = ("session_id", "batch_id", "request_id", "stage", "ticket",
+                                   "cookie", "frames", "frame_generations")
+                    self.assertEqual(tuple(accepted_event[key] for key in native_keys),
+                                     tuple(completed[key] for key in native_keys),
+                                     "native completion changed accepted ticket/cookie/frame claim")
+                    self.assertGreater(accepted_event["ticket"], 0)
+                    self.assertGreater(accepted_event["cookie"], 0)
+                    self.assertTrue(all(gen > 0 for gen in accepted_event["frame_generations"]))
+                    final_stage = 1 if data["chain"] == "nvme_nic" else 3
+                    self.assertEqual(downstream["stage"], final_stage)
+                    self.assertEqual(recycled["stage"], final_stage)
+                    # Downstream/recycle carry their actual stage-local ticket
+                    # and frame generations, not a copy of the NVMe snapshot.
+                    self.assertGreater(downstream["ticket"], 0)
+                    self.assertGreater(recycled["ticket"], 0)
                     for event in per_request[:2]:
                         self.assertEqual((event["slba"], event["nlb"], event["bytes"], event["direction"]),
                                          (slba, 8, 4096, "read"))
