@@ -5,6 +5,7 @@ TEST_GEN_PROGS := xdev_ext_mech_prog_test xdev_ext_mech_ctl_core_test \
 TEST_PROGS := xdev_ext_mech_timeout_test.py xdev_ext_mech_tools_source_test.py
 TEST_PROGS += xdev_ext_mech_rx_admission_test.py xdev_ext_mech_rx_private_test.py
 TEST_PROGS += xdev_ext_mech_cuda_lifecycle_test.py
+TEST_PROGS += xdev_ext_cpu_bpf_test.py
 TEST_FILES += xdev_ext_mech_rx_admission_fixture.c
 TEST_FILES += xdev_ext_mech_rx_private_fixture.c xdev_ext_mech_rx_result_fixture.c
 TEST_FILES += xdev_ext_mech_ce_window_test.c

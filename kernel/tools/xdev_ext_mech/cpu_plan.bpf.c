@@ -7,6 +7,7 @@
 #include <bpf/bpf_tracing.h>
 #include "xdev_ext_mech_prog.h"
 #include "xdev_ext_mech_kfunc.h"
+#include "xdev_ext_mech_cpu_abi.h"
 
 /* Zero uses the transform and parameter admitted at CREATE. */
 __u32 cpu_xform;
@@ -15,7 +16,7 @@ __u64 cpu_param;
 SEC("struct_ops/cpu_plan_build")
 __s32 BPF_PROG(cpu_plan_build, const struct xdev_ext_mech_ctx *mctx)
 {
-	struct xdev_ext_cpu_desc *desc;
+	struct xdev_ext_mp_cpu_desc *desc;
 
 	(void)ctx;
 	if (!cpu_xform)

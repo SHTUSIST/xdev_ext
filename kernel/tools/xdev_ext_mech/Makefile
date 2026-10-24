@@ -36,6 +36,9 @@ ctl: $(CTL)
 
 bpf: $(BPF_OBJECTS)
 
+check-cpu-bpf:
+	CC="$(CC)" CLANG="$(CLANG)" python3 ../testing/selftests/xdev_ext_mech_tools/xdev_ext_cpu_bpf_test.py
+
 $(BUILD_DIR):
 	mkdir -p $@
 
@@ -50,6 +53,8 @@ $(BUILD_DIR)/%.bpf.o: %.bpf.c xdev_ext_mech_prog.h xdev_ext_mech_kfunc.h ../../i
 		| $(BUILD_DIR)
 	$(CLANG) $(BPF_CFLAGS) -I$(BUILD_DIR) -c $< -o $@
 
+$(BUILD_DIR)/cpu_plan.bpf.o: xdev_ext_mech_cpu_abi.h
+
 $(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
 		../xdev_ext_gpu_identity.c ../include/xdev_ext_gpu_identity.h \
 		../xdev_ext_xsk_redirect.c ../include/xdev_ext_xsk_redirect.h \
@@ -60,7 +65,7 @@ $(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all bpf clean ctl
+.PHONY: all bpf check-cpu-bpf clean ctl
 
 $(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/xdev_ext_peer.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
