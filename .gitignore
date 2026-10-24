@@ -1198,3 +1198,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_reliable_accounting_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
 !/kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
+
+!/tests/eval/bam/test_native_contract.py
