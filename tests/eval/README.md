@@ -62,10 +62,25 @@ look up with `dlsym` must be exported by the SDK's driver stub
 (`lib64/stubs/libcuda.so`); prototypes are not compared.
 
 ```sh
-make -C tests/eval cuda-arms CUDA_HOME=/usr/local/cuda-12.8 CUDA_HOST_CXX=/usr/bin/g++-14
+make -C tests/eval cuda-arms CUDA_HOME=/usr/local/cuda-13.0 CUDA_HOST_CXX=/usr/bin/g++-14
 python3 tests/eval/build_cuda_arms.py --cuda-home /usr/local/cuda-13.0 \
     --out /abs/private/cuda-arms-13.0 --arch sm_80 --host-cxx /usr/bin/g++-14
 ```
+
+All eight arms have passed compile/link checks with CUDA 13.0.3, cuFile
+1.15.1.6 and GCC 14.3 on a glibc 2.43 host; workloads were not run.
+With CUDA 12.8.2 or 12.9.2 on that same host, only `bench_uring_cuda`,
+`chain_bench` and `bench_cuda_staging` built. The three `.cu` arms failed
+on conflicting `rsqrt`/`rsqrtf` exception specifications between CUDA and
+glibc headers. GCC 14 is within the older SDKs' compiler ranges, but glibc
+2.43 is outside their qualified host matrices; selecting that compiler alone
+does not make the host supported. See NVIDIA's [CUDA 12.8 host requirements](https://docs.nvidia.com/cuda/archive/12.8.1/cuda-installation-guide-linux/index.html#system-requirements)
+and [CUDA 12.9 host requirements](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-installation-guide-linux/index.html#system-requirements).
+The two cuFile arms require the statistics APIs introduced in [GDS 1.15](https://docs.nvidia.com/gpudirect-storage/release-notes/index.html#new-features-and-changes),
+including `cuFileGetStatsL3`; the tested 12.8/12.9 SDKs provide cuFile
+1.13.1/1.14.1 and lack them. Those statistics remain required for direct-path
+evidence. The CUDA 13 result is compile/link evidence for this configuration,
+not a claim of NVIDIA host qualification or runtime validation.
 
 The receipt `OUT/cuda-arms-receipt.json` holds the `nvcc --version` text, the
 SHA-256 of nvcc, every source and every output, the exact commands and each

@@ -142,8 +142,8 @@ records. Cells an arm cannot run (session with `rand`, `qd > 64` or
 reported as `not_run`. Without an
 NVIDIA control device the CUDA arms are `not_run`; nothing ran means exit 4.
 The CUDA arms compile with the host C++ compiler against the SDK's headers
-and `libcudart`/`libcufile`; they have not been compiled against an official
-SDK in this repository's checks. Before any campaign on the GPU host, run
+and `libcudart`/`libcufile`; see the [CUDA build compatibility notes](../README.md#cuda-arms-against-one-official-sdk)
+for official-SDK compile/link checks and older-SDK limits. Before any campaign on the GPU host, run
 `make -C tests/eval/nvme_gpu cuda-build` against the official SDK and one
 small cell of `gds-batch` and `gds-async`: whether cuFile's level-3
 statistics count batch and stream-async I/O as NVFS/P2P operations has not
