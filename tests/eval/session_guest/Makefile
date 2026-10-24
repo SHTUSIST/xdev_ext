@@ -46,6 +46,7 @@ check: | $(BUILD)
 	$(BUILD)/test_fd_check
 	$(PYTHON) test_oracle.py -v
 	$(PYTHON) test_cleanup.py -v
+	$(PYTHON) $(KERNEL)/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py -v
 	$(PYTHON) $(KERNEL)/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate_test.py -v
 
 clean:

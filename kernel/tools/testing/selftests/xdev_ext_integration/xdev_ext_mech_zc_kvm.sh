@@ -17,6 +17,7 @@ DEBUG_LOCKING=0
 COMPAT=0
 LIFECYCLE=0
 PEER=0
+EVAL_SESSION=0
 GROUP_COUNT=4
 DEPTH=''
 CE_SLOTS=''
@@ -39,6 +40,7 @@ while (($#)); do
 	--lifecycle) LIFECYCLE=1; shift ;;
 	--compat) COMPAT=1; CE_SIM=1; shift ;;
 	--peer) PEER=1; CE_SIM=1; shift ;;
+	--eval-session) EVAL_SESSION=1; CE_SIM=1; shift ;;
 	--groups) GROUP_COUNT=$2; shift 2 ;;
 	--depth) DEPTH=$2; shift 2 ;;
 	--ce-slots) CE_SLOTS=$2; shift 2 ;;
@@ -89,6 +91,11 @@ esac
 # private ext4 disk and CE module lifetime. Fault matrices stay independent.
 if (( COMPAT )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none ]]; fi
 if (( PEER )); then [[ "$PROVIDER_CASE" == normal && "$FAULT" == none && "$GROUP_COUNT" -ge 257 ]]; fi
+# Eval owns its plans and module lifetime before the normal suite starts.
+# It is opt-in; fault matrices do not automatically add its 16 cases.
+if (( EVAL_SESSION )); then
+    [[ "$PROVIDER_CASE" == normal && "$FAULT" == none && -z "$FAULT_CAMPAIGN" ]]
+fi
 if [[ -n "$FAULT_CAMPAIGN" ]]; then
     [[ "$FAULT" == none && "$PROVIDER_CASE" == normal && "$RELIABLE" == 0 && "$RX_CE" == 0 && "$COMPAT" == 0 && "$PEER" == 0 ]]
     (( GROUP_COUNT >= 2 && GROUP_COUNT <= 256 && DEPTH <= 8 && DEPTH <= GROUP_COUNT ))
@@ -151,6 +158,11 @@ PYSOURCEPATH
     SOURCE_COMMIT=$(git -C "$SOURCE_GIT_ROOT" rev-parse --verify 'HEAD^{commit}')
 }
 verify_source_checkout
+if (( ${EVAL_SESSION:-0} )); then
+    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/session_guest/Makefile" ]] || {
+        echo 'FAIL --eval-session requires the product overlay with tests/eval/session_guest' >&2; exit 1;
+    }
+fi
 # Use the same campaign geometry for native commands, image creation and
 # the strict full-image validator. The two destination spans never alias.
 read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" "${FAULT_CAMPAIGN:-}" <<'PYLAYOUT'
@@ -177,13 +189,15 @@ IAA_OUT=$TOOLS/iaa-transform
 SOCKET_OUT=$TOOLS/socket-guest
 PRELOAD_OUT=$TOOLS/preload
 PEER_OUT=$TOOLS/peer-guest
+EVAL_SESSION_OUT=$TOOLS/eval-session
+EVAL_SESSION_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py
 QEMU=/usr/local/bin/qemu-system-x86_64
 mkdir -p "$BUILD" "$EV" "$TOOLS"
 # Only current-run derived verdicts are invalidated. Historical campaign
 # directories and raw logs remain available even when this run fails early.
 clear_derived_results() {
     rm -f -- "$EV/result.txt" "$EV/data-result.txt" "$EV/validation.json" \
-        "$EV/data.sha256" "$EV/source-after.sha256" "$EV/debug-locking.json" "$EV/debug-locking-result.txt"
+        "$EV/eval-session-result.txt" "$EV/data.sha256" "$EV/source-after.sha256" "$EV/debug-locking.json" "$EV/debug-locking-result.txt"
 }
 clear_derived_results
 exec > >(tee -a "$EV/harness.log") 2>&1
@@ -232,6 +246,50 @@ verify_peer_identity() {
         }
     done
 }
+# These inputs live in the product overlay, outside a legacy kernel-only Git.
+record_eval_session_sources() {
+    (cd "$SOURCE_GIT_ROOT"
+        git ls-files -z -- tests/eval kernel/tools/xdev_ext_mech \
+            'kernel/tools/xdev_ext_gpu_identity.*' 'kernel/tools/xdev_ext_xsk_redirect.*' \
+            kernel/tools/include kernel/include/uapi 'kernel/include/linux/xdev_ext*' \
+            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_guest.sh \
+            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py \
+            | while IFS= read -r -d '' path; do sha256sum "$SOURCE_GIT_ROOT/$path"; done
+    ) >"$BUILD/xdev-ext-eval-session-source.sha256"
+    [[ -s "$BUILD/xdev-ext-eval-session-source.sha256" ]]
+}
+verify_eval_session_identity() {
+    local symbol artifact
+    for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY \
+        XDEV_EXT_MECH_CE XDEV_EXT_MECH_DMA XDEV_EXT_MECH_IAA CRYPTO_ACOMP2 CRYPTO_DEFLATE; do
+        grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || {
+            echo "FAIL eval session requires CONFIG_$symbol=y" >&2; return 1;
+        }
+    done
+    grep -Fxq 'eval_session=1' "$BUILD/xdev-ext-eval-session-mode.txt" || {
+        echo 'FAIL eval session build mode missing; rebuild with --eval-session' >&2; return 1;
+    }
+    for artifact in "$EVAL_SESSION_OUT/chain_bench" "$EVAL_SESSION_OUT/session_nvme_ce" \
+        "$EVAL_SESSION_OUT/session_gpu_nic" "$EVAL_SESSION_OUT/eval_session_oracle" \
+        "$EVAL_SESSION_OUT/chain_plan.bpf.o" "$EVAL_SESSION_OUT/xdev_ext_eval_session_guest.sh" \
+        "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
+        "$EVAL_SESSION_VALIDATOR"; do
+        [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
+            echo 'FAIL eval session artifact identity absent; rebuild exact source' >&2; return 1;
+        }
+    done
+    sha256sum -c "$BUILD/xdev-ext-artifacts.sha256" >/dev/null || {
+        echo 'FAIL eval session artifact hash mismatch' >&2; return 1;
+    }
+    sha256sum -c "$BUILD/xdev-ext-eval-session-source.sha256" >/dev/null || {
+        echo 'FAIL eval session source hash mismatch' >&2; return 1;
+    }
+}
+stage_eval_session_image() {
+    mkdir -p "$ROOT/opt/xdev_ext/eval"
+    cp "$EVAL_SESSION_OUT/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
+        "$ROOT/opt/xdev_ext/eval/"
+}
 if (( RUN_ONLY )); then
     [[ -r "$BUILD/xdev-ext-source.commit" ]] || {
         echo 'FAIL run-only build identity missing; rebuild exact source' >&2; exit 1;
@@ -245,6 +303,7 @@ if (( RUN_ONLY )); then
     sha256sum -c "$BUILD/xdev-ext-artifacts.sha256" >"$EV/reused-artifact-check.log" 2>&1 || {
         echo 'FAIL run-only artifact hash mismatch' >&2; exit 1;
     }
+    if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
 fi
@@ -259,6 +318,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
 printf 'lifecycle=%s\n' "$LIFECYCLE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
+printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\nimage_bytes=%s\n' \
@@ -368,6 +428,13 @@ if (( ! RUN_ONLY )); then
             peer_nvme_e2e >"$EV/peer-tools-build.log" 2>&1
         kmake M="$PEER_OUT" MODULE_PAHOLE_FLAGS= modules >"$EV/peer-module-build.log" 2>&1
     fi
+    if (( EVAL_SESSION )); then
+        lowprio make -C "$SOURCE_GIT_ROOT/tests/eval/session_guest" guest \
+            GUEST_OUT="$EVAL_SESSION_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 \
+            >"$EV/eval-session-build.log" 2>&1
+        record_eval_session_sources
+        printf 'eval_session=1\n' >"$BUILD/xdev-ext-eval-session-mode.txt"
+    fi
 fi
 lowprio make -C "$SRC/tools/testing/selftests/xdev_ext_integration/verifier" -j2 \
 	BUILD_DIR="$TOOLS/verifier" CLANG=/usr/bin/clang-21 HOSTCC=gcc-14 \
@@ -397,6 +464,11 @@ if (( ! RUN_ONLY )); then
     if (( PEER )); then
         sha256sum "$PEER_OUT/xdev_ext_peer_sw.ko" "$PEER_OUT/peer_nvme_e2e" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
+    if (( EVAL_SESSION )); then
+        sha256sum "$EVAL_SESSION_OUT/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
+            "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
+            "$EVAL_SESSION_VALIDATOR" >>"$BUILD/xdev-ext-artifacts.sha256"
+    fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
 fi
 sha256sum "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" >>"$EV/provenance.txt"
@@ -407,6 +479,10 @@ fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then verify_iaa_identity; fi
 if (( COMPAT )); then verify_compat_identity; fi
 if (( PEER )); then verify_peer_identity; fi
+if (( EVAL_SESSION )); then
+    verify_eval_session_identity
+    cat "$BUILD/xdev-ext-eval-session-source.sha256" >>"$EV/source-files.sha256"
+fi
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" && -x "$TOOLS/xdev_ext_mech_ctl" ]]
 mkdir -p "$ROOT"/{bin,sbin,dev,proc,sys,tmp,run,etc,usr/bin,opt/xdev_ext}
 [[ -e "$ROOT/dev/console" ]] || mknod -m 600 "$ROOT/dev/console" c 5 1
@@ -472,6 +548,7 @@ if (( PEER )); then
         "$SRC/tools/testing/selftests/xdev_ext_peer/guest/run-guest.sh" "$ROOT/opt/xdev_ext/peer_guest/"
     truncate -s 16M "$SCRATCH/peer.raw"
 fi
+if (( EVAL_SESSION )); then stage_eval_session_image; fi
 mkdir -p "$ROOT/opt/xdev_ext/verifier"
 cp "$TOOLS/verifier/"*.bpf.o \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run.sh" \
@@ -488,6 +565,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
@@ -504,6 +582,10 @@ if (( NIC_FALLBACK )); then
 fi
 # --- end track S section
 GUEST_PROGRAMS=("$TOOLS/xdev_ext_mech_ctl")
+if (( ${EVAL_SESSION:-0} )); then
+    GUEST_PROGRAMS+=("$EVAL_SESSION_OUT/chain_bench" "$EVAL_SESSION_OUT/session_nvme_ce"
+        "$EVAL_SESSION_OUT/session_gpu_nic" "$EVAL_SESSION_OUT/eval_session_oracle")
+fi
 if [[ -n "${FAULT_CAMPAIGN:-}" ]]; then GUEST_PROGRAMS+=("$TOOLS/fault_uid"); fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then GUEST_PROGRAMS+=("$IAA_OUT/iaa_runtime"); fi
 if (( ${COMPAT:-0} )); then
@@ -631,6 +713,10 @@ if [ -n "$fault_campaign" ]; then
     export source_block source_ng destination_block destination_ng nvme_source nvme_destination
     sh /opt/xdev_ext/xdev_ext_mech_zc_fault_guest.sh
     exit 0
+fi
+if [ "$eval_session" = 1 ]; then
+    sh /opt/xdev_ext/eval/xdev_ext_eval_session_guest.sh /opt/xdev_ext/eval /opt/xdev_ext \
+        "$source_block" "$source_ng" "$destination_block" "$destination_ng" "$cli_timeout_ms"
 fi
 trace=/sys/kernel/tracing
 echo 0 >"$trace/tracing_on"
@@ -1142,6 +1228,12 @@ fi
 if (( PEER )); then
     sha256sum "$PEER_OUT/xdev_ext_peer_sw.ko" "$PEER_OUT/peer_nvme_e2e" >>"$EV/artifacts.sha256"
 fi
+if (( EVAL_SESSION )); then
+    sha256sum "$EVAL_SESSION_OUT/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
+        "$ROOT/opt/xdev_ext/eval/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
+        "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
+        "$EVAL_SESSION_VALIDATOR" >>"$EV/artifacts.sha256"
+fi
 cat /proc/modules >"$EV/host-modules-before.txt"
 ip -details link show >"$EV/host-links-before.txt"
 set +e
@@ -1166,6 +1258,9 @@ ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
 [[ $rc == 0 ]]
+if (( EVAL_SESSION )); then
+    python3 "$EVAL_SESSION_VALIDATOR" "$EV/guest.log" | tee "$EV/eval-session-result.txt"
+fi
 if [[ -n "$FAULT_CAMPAIGN" ]]; then
     # The matrix owns the full-image/pin/session oracle and foreign-QEMU
     # snapshots. A clean boot alone is never reported as a campaign PASS.

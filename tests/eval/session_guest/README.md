@@ -28,36 +28,50 @@ contains `chain_bench`, `chain_plan.bpf.o`, `session_nvme_ce`,
 
 ## KVM harness integration
 
-The integrator owns `xdev_ext_mech_zc_kvm.sh`. For an explicitly enabled
-normal correctness run with CE simulation (not a fault campaign):
+The existing `xdev_ext_mech_zc_kvm.sh` harness accepts `--eval-session`.
+This explicitly opts into the 16 cases and implies `--ce-sim`; default
+runs and the existing 13-case network matrix keep their existing selection.
+Use it for a normal correctness run, for example (on the authorized build
+host, with a new private scratch directory and a clean product checkout):
 
-1. Before constructing its image, run the above make target. Copy its six
-   files into `$ROOT/opt/xdev_ext/eval/`. Add the four ELF executables to
-   `GUEST_PROGRAMS` before the existing per-program `ldd` loop, which copies
-   their dynamic libraries. Record their SHA-256 in the harness artifact
-   manifest, together with the driver, BPF object and host validator.
-2. In the generated guest script, after both NICs and namespaces are ready
-   and before attaching the ordinary suite's `nxp_nvme_ops`,
-   `nxp_afxdp_ops` and `ce_plan_ops`, invoke:
+```sh
+bash kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
+  --scratch /tmp/xdev-ext-e2e.RUN --source "$PWD/kernel" --eval-session
+```
 
-   ```sh
-   sh /opt/xdev_ext/eval/xdev_ext_eval_session_guest.sh \
-     /opt/xdev_ext/eval /opt/xdev_ext \
-     "$source_block" "$source_ng" "$destination_block" "$destination_ng" \
-     "$cli_timeout_ms"
-   ```
+Fault modes, fault campaigns and dedicated short/ambiguous provider cases
+are rejected with this option. `--compat`, `--peer`, `--reliable`,
+`--rx-ce` and `--debug-locking` may accompany a normal eval run, subject to
+their existing geometry rules. Strict debug, its independent root gate and
+normal execution retain their required ordering.
 
-   Use the harness's actual destination variable names. The module must
-   initially be unloaded; the driver loads it, attaches its own plans,
-   detaches those plans, verifies zero module references and unloads it.
-3. On the host, require exit 0 from:
+The harness builds `make -C tests/eval/session_guest guest` with private
+`GUEST_OUT`, explicit `CC=gcc-14` and `CLANG=/usr/bin/clang-21`. It copies
+all six files to `/opt/xdev_ext/eval`, stages the dynamic dependencies of
+all four ELF executables and records source, build and image hashes plus
+the host validator. `--run-only --eval-session` requires an eval-enabled
+build from the same source commit, matching source/artifact hashes, all
+six files and the required CE/IAA kernel configuration. Rebuild with
+`--eval-session` when an older build lacks this identity.
 
-   ```sh
-   python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py guest.log
-   ```
+After both NICs are up and NVMe roles are resolved by serial, and before
+ordinary suite plans attach or its CE module loads, the generated guest
+script calls the driver with exactly seven arguments:
 
-   The enclosing guest exit, dmesg checks and whole-disk comparison remain
-   required. Never manufacture a console from the synthetic fixtures.
+```sh
+sh /opt/xdev_ext/eval/xdev_ext_eval_session_guest.sh \
+  /opt/xdev_ext/eval /opt/xdev_ext \
+  "$source_block" "$source_ng" "$destination_block" "$destination_ng" \
+  "$cli_timeout_ms"
+```
+
+The driver owns loading, attaching, detaching and unloading for this phase.
+The host runs `xdev_ext_eval_session_validate.py` on the complete guest
+console and requires its successful exit along with the enclosing guest
+exit, dmesg checks and whole-disk comparisons. A driver or validator
+failure cannot produce a harness PASS. This wiring and its host tests do
+not establish that a guest has actually run; guest execution remains a
+separate acceptance step.
 
 ## Coverage and evidence
 

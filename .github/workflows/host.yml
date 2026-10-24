@@ -110,6 +110,8 @@ jobs:
           make -C tests/eval cuda-host-check
       - name: Reviewer-driven evaluation harness contracts
         run: make -C tests/eval reviewer-eval-check
+      - name: Eval session image and run-only wiring contracts
+        run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py -v
       - name: IAA syscall and lifetime contracts
         run: make -C tests/iaa all check
       - name: GPU host-page bookkeeping contracts

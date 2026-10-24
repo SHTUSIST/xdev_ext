@@ -1080,3 +1080,5 @@
 !/gpu/tests/nv_xdev_ext_gpu_export_test.py
 !/gpu/tests/nv_xdev_ext_ce_owner_api_test.py
 !/gpu/tests/nv_xdev_ext_registered_dma_test.py
+
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py
