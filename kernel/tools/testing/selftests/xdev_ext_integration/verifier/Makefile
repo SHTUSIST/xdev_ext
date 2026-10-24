@@ -16,6 +16,8 @@ PROGS := wrong_class_hold desc_complete sleepable_build forged_ctx frame_write \
 PROG_DIR := $(SOURCE_TREE)/tools/testing/selftests/bpf/progs
 OBJECTS := $(PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
 STATE_PROGS := state_ce state_build
+REL_PROGS := rel_view_write rel_view_complete
+REL_OBJECTS := $(REL_PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
 STATE_OBJECTS := $(STATE_PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
 BPF_CFLAGS ?= -O2 -g -Wall -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH)
 BPF_INCLUDES := -I$(LIBBPF_INCLUDE) \
@@ -25,7 +27,7 @@ BPF_INCLUDES += -idirafter /usr/include/$(MULTIARCH)
 endif
 
 .DEFAULT_GOAL := all
-all: $(OBJECTS) $(STATE_OBJECTS) $(BUILD_DIR)/ce_abi_good.bpf.o $(BUILD_DIR)/ce_abi_old.bpf.o
+all: $(OBJECTS) $(STATE_OBJECTS) $(REL_OBJECTS) $(BUILD_DIR)/ce_abi_good.bpf.o $(BUILD_DIR)/ce_abi_old.bpf.o
 
 state: $(STATE_OBJECTS)
 
@@ -44,7 +46,7 @@ $(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o: $(PROG_DIR)/xdev_ext_mech_fail_%.c \
 		$(SOURCE_TREE)/include/uapi/linux/xdev_ext_mech.h | $(BUILD_DIR)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -c $< -o $@
 
-$(STATE_OBJECTS): $(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o: \
+$(STATE_OBJECTS) $(REL_OBJECTS): $(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o: \
 		$(verifier_dir)/xdev_ext_mech_fail_%.c $(PROG_DIR)/xdev_ext_mech_common.h \
 		$(PROG_DIR)/bpf_misc.h $(PROG_DIR)/../xdev_ext_mech_test.h \
 		$(SOURCE_TREE)/include/uapi/linux/xdev_ext_mech.h | $(BUILD_DIR)

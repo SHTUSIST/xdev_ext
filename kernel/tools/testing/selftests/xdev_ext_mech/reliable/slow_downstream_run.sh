@@ -10,7 +10,7 @@ if [ -n "${RELIABLE_HEADER:-}" ]; then
 else
     set --
 fi
-${CC:-cc} -std=gnu11 -O1 -g -Wall -Wextra -Werror \
+${CC:-cc} -DXDEV_EXT_REL_C_GLUE -std=gnu11 -O1 -g -Wall -Wextra -Werror \
     -fsanitize=undefined -fno-sanitize-recover=all \
     -I "$kernel_dir" "$@" "$test_dir/slow_downstream_test.c" \
     -o "$build_dir/slow_downstream_test"

@@ -53,6 +53,7 @@
 #include "../include/xdev_ext_gpu_identity.h"
 #include "xdev_ext_mech_cuda.h"
 #include "xdev_ext_mech_ctl_core.h"
+#include "../../io_uring/xdev_ext_policy.h"
 
 #ifndef AF_XDP
 #define AF_XDP			44
@@ -88,6 +89,9 @@ struct ctl_opts {
 	bool have_local_port, have_peer_port;
 	bool ce_alloc, have_ce_va, reliable;
  __u64 wire_session, first_group, remote_window, max_attempts, retry_timeout_ms;
+ bool have_policy;
+ unsigned int policy_fields;
+ struct xdev_ext_rel_policy rel_policy;
 };
 
 /* --- struct_ops attach and detach ------------------------------------- */
@@ -646,15 +650,20 @@ static int ctl_layout(const struct ctl_opts *o, const char *ifname,
 }
 
 static void ctl_reliable_config(const struct ctl_opts *o,struct xdev_ext_mech_create *c,
-                                struct xdev_ext_afxdp_reliable_finite_config *cfg)
+                                struct xdev_ext_afxdp_reliable_policy_config *cfg)
 {
  unsigned int i;
  if (!o->reliable) return;
- *cfg=(struct xdev_ext_afxdp_reliable_finite_config){.base={.first_group=o->first_group,
+ cfg->finite=(struct xdev_ext_afxdp_reliable_finite_config){.base={.first_group=o->first_group,
   .timeout_ns=o->retry_timeout_ms*1000000ULL,.window=o->remote_window,
   .max_attempts=o->max_attempts},.nr_groups=o->groups};
  for(i=0;i<c->nr_stages;i++) if(c->st[i].class_id==XDEV_EXT_MECH_CLASS_AFXDP) {
   c->st[i].flags|=XDEV_EXT_AFXDP_F_RELIABLE|XDEV_EXT_AFXDP_F_FINITE;
+  if (o->have_policy) {
+   c->st[i].flags|=XDEV_EXT_AFXDP_F_POLICY;
+   cfg->finite.base.window=cfg->finite.base.timeout_ns=cfg->finite.base.max_attempts=0;
+   cfg->policy=o->rel_policy;
+  }
   c->st[i].arg0=o->wire_session;c->st[i].arg1=(uintptr_t)cfg;
  }
 }
@@ -994,7 +1003,7 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct xdev_ext_mech_cuda cuda = { 0 };
 	struct xdev_ext_mech_create c = { 0 };
- struct xdev_ext_afxdp_reliable_finite_config reliable_config;
+ struct xdev_ext_afxdp_reliable_policy_config reliable_config;
 	struct xdev_ext_mech_stats s;
 	struct xdev_ext_mech_layout l;
 	struct ctl_run r = { .ring = -1, .efd = -1, .poll_ms = CTL_POLL_MS,
@@ -1291,7 +1300,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 {
 	const struct ctl_opts *o = src->o;
 	struct xdev_ext_mech_create c = { 0 };
- struct xdev_ext_afxdp_reliable_finite_config reliable_config;
+ struct xdev_ext_afxdp_reliable_policy_config reliable_config;
 	struct xdev_ext_mech_layout l;
 	struct ctl_run r = { .ring = -1, .efd = -1, .poll_ms = CTL_POLL_MS,
 		.defer_stats = o->reliable };
@@ -1707,6 +1716,9 @@ enum {
  OPT_MAX_ATTEMPTS, OPT_RETRY_TIMEOUT,
  OPT_XFORM, OPT_XFORM_ARG, OPT_VERIFY_SRC, OPT_VERIFY_DST, OPT_VERIFY_SRC_OFF,
  OPT_VERIFY_DST_OFF, OPT_VERIFY_BYTES, OPT_VERIFY_SEG,
+ OPT_REL_WINDOW, OPT_REL_INITIAL_CREDIT, OPT_REL_RTO_US, OPT_REL_RTO_MAX_US,
+ OPT_REL_BACKOFF, OPT_REL_MAX_ATTEMPTS, OPT_REL_ACK_EVERY, OPT_REL_ACK_DELAY_US,
+ OPT_REL_ACK_RULE, OPT_REL_RESEND_ORDER,
 };
 
 static const struct option ctl_options[] = {
@@ -1718,6 +1730,17 @@ static const struct option ctl_options[] = {
  { "dst-off", required_argument, NULL, OPT_VERIFY_DST_OFF },
  { "bytes", required_argument, NULL, OPT_VERIFY_BYTES },
  { "seg-len", required_argument, NULL, OPT_VERIFY_SEG },
+ { "rel-window", required_argument, NULL, OPT_REL_WINDOW },
+ { "rel-initial-credit", required_argument, NULL, OPT_REL_INITIAL_CREDIT },
+ { "rel-rto-us", required_argument, NULL, OPT_REL_RTO_US },
+ { "rel-rto-max-us", required_argument, NULL, OPT_REL_RTO_MAX_US },
+ { "rel-backoff", required_argument, NULL, OPT_REL_BACKOFF },
+ { "rel-max-attempts", required_argument, NULL, OPT_REL_MAX_ATTEMPTS },
+ { "rel-ack-every", required_argument, NULL, OPT_REL_ACK_EVERY },
+ { "rel-ack-delay-us", required_argument, NULL, OPT_REL_ACK_DELAY_US },
+ { "rel-ack-rule", required_argument, NULL, OPT_REL_ACK_RULE },
+ { "rel-resend-order", required_argument, NULL, OPT_REL_RESEND_ORDER },
+
  { "reliable", no_argument, NULL, OPT_RELIABLE },
  { "wire-session", required_argument, NULL, OPT_WIRE_SESSION },
  { "first-group", required_argument, NULL, OPT_FIRST_GROUP },
@@ -1795,6 +1818,10 @@ static void usage(FILE *f)
 "        [--local-mac M] [--queue Q]\n"
 "RELIABLE: --reliable [--wire-session N] [--first-group N] [--remote-window N]\n"
 " [--max-attempts N] [--retry-timeout-ms N] (ACK means chain completion)\n"
+"POLICY: --rel-window N --rel-initial-credit N --rel-rto-us N --rel-rto-max-us N\n"
+" --rel-backoff fixed|exponential --rel-max-attempts N --rel-ack-every N\n"
+" --rel-ack-delay-us N --rel-ack-rule each|every-n|delayed\n"
+" --rel-resend-order slot|oldest|round-robin (requires --reliable)\n"
 "COMMON: [--groups N] [--depth N] [--group-bytes N] [--mtu N]\n"
 "        [--timeout-ms N] [--copy] (default: required AF_XDP driver ZC)\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
@@ -1832,13 +1859,80 @@ static int parse_port(const char *arg, __be16 *port, bool *have)
 	return 0;
 }
 
+/* CLI only: remember explicitly supplied fields, resolve dependent defaults once. */
+static int ctl_rel_policy_option(struct ctl_opts *o,int opt,const char *arg)
+{
+ struct xdev_ext_rel_policy *p=&o->rel_policy;
+ __u64 value=0;
+ unsigned bit;
+ if (opt<OPT_REL_WINDOW || opt>OPT_REL_RESEND_ORDER) return -ENOENT;
+ bit=opt-OPT_REL_WINDOW;
+ if (!o->have_policy) xdev_ext_rel_policy_defaults(p);
+ if (opt==OPT_REL_BACKOFF) {
+  if (!strcmp(arg,"fixed")) value=XDEV_EXT_REL_BACKOFF_FIXED;
+  else if (!strcmp(arg,"exponential")) value=XDEV_EXT_REL_BACKOFF_EXPONENTIAL;
+  else return -EINVAL;
+ } else if (opt==OPT_REL_ACK_RULE) {
+  if (!strcmp(arg,"each")) value=XDEV_EXT_REL_ACK_EACH;
+  else if (!strcmp(arg,"every-n")) value=XDEV_EXT_REL_ACK_EVERY_N;
+  else if (!strcmp(arg,"delayed")) value=XDEV_EXT_REL_ACK_DELAYED;
+  else return -EINVAL;
+ } else if (opt==OPT_REL_RESEND_ORDER) {
+  if (!strcmp(arg,"slot")) value=XDEV_EXT_REL_RESEND_SLOT;
+  else if (!strcmp(arg,"oldest")) value=XDEV_EXT_REL_RESEND_OLDEST;
+  else if (!strcmp(arg,"round-robin")) value=XDEV_EXT_REL_RESEND_ROUND_ROBIN;
+  else return -EINVAL;
+ } else if (parse_u64_opt(arg,&value,NULL)) return -EINVAL;
+ if (opt==OPT_REL_RTO_US || opt==OPT_REL_RTO_MAX_US || opt==OPT_REL_ACK_DELAY_US) {
+  if (value>UINT64_MAX/1000) return -EINVAL;
+  value*=1000;
+ } else if (value>UINT32_MAX) return -EINVAL;
+ switch(opt) {
+ case OPT_REL_WINDOW:p->window=value;break;
+ case OPT_REL_INITIAL_CREDIT:p->initial_credit=value;break;
+ case OPT_REL_RTO_US:p->rto_ns=value;break;
+ case OPT_REL_RTO_MAX_US:p->rto_max_ns=value;break;
+ case OPT_REL_BACKOFF:p->backoff=value;break;
+ case OPT_REL_MAX_ATTEMPTS:p->max_attempts=value;break;
+ case OPT_REL_ACK_EVERY:p->ack_every=value;break;
+ case OPT_REL_ACK_DELAY_US:p->ack_delay_ns=value;break;
+ case OPT_REL_ACK_RULE:p->ack_rule=value;break;
+ case OPT_REL_RESEND_ORDER:p->resend_order=value;break;
+ }
+ o->have_policy=true; o->policy_fields |= 1U<<bit;
+ return 0;
+}
+static int ctl_rel_policy_finish(struct ctl_opts *o)
+{
+ struct xdev_ext_rel_policy *p=&o->rel_policy;
+ __u32 field;
+ if (!o->have_policy) return 0;
+ if (o->remote_window>UINT32_MAX || o->max_attempts>UINT32_MAX ||
+     o->retry_timeout_ms>UINT64_MAX/1000000ULL) return -EINVAL;
+#define CTL_POLICY_GIVEN(opt) (o->policy_fields & (1U<<((opt)-OPT_REL_WINDOW)))
+ if (!CTL_POLICY_GIVEN(OPT_REL_WINDOW)) p->window=o->remote_window;
+ if (!CTL_POLICY_GIVEN(OPT_REL_INITIAL_CREDIT)) p->initial_credit=p->window;
+ if (!CTL_POLICY_GIVEN(OPT_REL_RTO_US)) p->rto_ns=o->retry_timeout_ms*1000000ULL;
+ if (!CTL_POLICY_GIVEN(OPT_REL_MAX_ATTEMPTS)) p->max_attempts=o->max_attempts;
+ if (!CTL_POLICY_GIVEN(OPT_REL_ACK_EVERY))
+  p->ack_every=p->ack_rule==XDEV_EXT_REL_ACK_DELAYED ? 0 : 1;
+#undef CTL_POLICY_GIVEN
+ if (xdev_ext_rel_policy_validate(p,&field)) {
+  ctl_err("invalid reliable policy field %u\n",field); return -EINVAL;
+ }
+ o->remote_window=p->window; o->max_attempts=p->max_attempts;
+ o->retry_timeout_ms=(p->rto_ns+999999ULL)/1000000ULL;
+ return 0;
+}
+
 static int parse_options(int argc, char **argv, struct ctl_opts *o)
 {
 	int opt, ret = 0;
 
 	o->groups = 64;
-	o->depth = 4;
- o->wire_session=270019;o->first_group=1;o->max_attempts=8;o->retry_timeout_ms=100;
+	o->depth = XDEV_EXT_POLICY_DEFAULT_DEPTH;
+ o->wire_session=270019;o->first_group=1;o->max_attempts=XDEV_EXT_REL_POLICY_DEFAULT_MAX_ATTEMPTS;
+ o->retry_timeout_ms=XDEV_EXT_REL_POLICY_DEFAULT_RTO_NS/1000000ULL;
 	o->group_bytes = 8192;
 	o->mtu = 1500;
 	o->timeout_ms = 60000;
@@ -1847,6 +1941,9 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 	optind = 1;
 	while (!ret && (opt = getopt_long(argc, argv, "h", ctl_options,
 					  NULL)) != -1) {
+  if (opt>=OPT_REL_WINDOW && opt<=OPT_REL_RESEND_ORDER) {
+   ret=ctl_rel_policy_option(o,opt,optarg); continue;
+  }
 		switch (opt) {
   case OPT_XFORM:o->xform_name=optarg;break;
   case OPT_XFORM_ARG:ret=parse_u64_opt(optarg,&o->xform_arg,NULL);break;
@@ -1962,13 +2059,15 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 		     o->mtu > 0xffffffffULL || !o->timeout_ms ||
 		     o->timeout_ms > 86400000ULL))
 		ret = -EINVAL;
+ if (o->have_policy && !o->reliable) ret=-EINVAL;
  if (o->reliable) {
   if (!o->remote_window) o->remote_window=o->depth;
+  if (!ret) ret=ctl_rel_policy_finish(o);
   if (!o->wire_session || !o->first_group || !o->remote_window ||
       o->remote_window>32 || o->remote_window>o->depth || o->copy_mode ||
       !o->max_attempts || o->max_attempts>0xffffffffULL ||
       !o->retry_timeout_ms || o->retry_timeout_ms>86400000ULL ||
-      o->max_attempts*o->retry_timeout_ms>o->timeout_ms ||
+      (!o->have_policy && o->max_attempts*o->retry_timeout_ms>o->timeout_ms) ||
       o->first_group>~0ULL-o->remote_window ||
       o->groups>~0ULL-o->first_group-o->remote_window) ret=-EINVAL;
  }

@@ -149,8 +149,8 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
              (u->flags & ~XDEV_EXT_IAA_F_SOFTWARE)) ||
             (u->flags && u->class_id != XDEV_EXT_MECH_CLASS_IAA &&
              (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
-		     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE)) ||
-		     ((u->flags & XDEV_EXT_AFXDP_F_FINITE) &&
+		     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) ||
+		     ((u->flags & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) &&
 		      !(u->flags & XDEV_EXT_AFXDP_F_RELIABLE)))) ||
 		    (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
 		     u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))

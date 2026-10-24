@@ -115,6 +115,7 @@ static void (*wait_hook)(void);
 struct xdev_ext_mech_session;
 struct xdev_ext_mech_batch;
 struct xdev_ext_mech_stage;
+struct xdev_ext_rel_policy;
 struct xdev_ext_mech_class_ops;
 struct xdev_ext_mech_pool;
 struct xdev_ext_dma_cookie;

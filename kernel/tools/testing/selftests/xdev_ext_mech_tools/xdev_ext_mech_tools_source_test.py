@@ -231,7 +231,7 @@ class CtlSourceTest(unittest.TestCase):
     def test_markers_come_from_the_core(self):
         # Every run marker is formatted and judged by xdev_ext_mech_ctl_core.h.
         literals = set(re.findall(r'"(XDEV_EXT_MECH_[A-Z_0-9]+)[=" ]', self.ctl))
-        self.assertEqual(literals, {"XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE", "XDEV_EXT_MECH_READY", "XDEV_EXT_MECH_ATTACH",
+        self.assertEqual(literals, {"XDEV_EXT_MECH_TRANSPORT_COUNTERS", "XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE", "XDEV_EXT_MECH_READY", "XDEV_EXT_MECH_ATTACH",
                                     "XDEV_EXT_MECH_DETACH",
                                     "XDEV_EXT_MECH_RING_EXIT_CLOSE"})
         for report in ("nic_nvme", "fq_dup", "window_reject", "native_copy",

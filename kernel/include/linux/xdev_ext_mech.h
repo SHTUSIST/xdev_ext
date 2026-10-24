@@ -270,6 +270,7 @@ struct xdev_ext_mech_stage {
 /* Read-only source plus an independent, bounded destination lease. */
 #define XDEV_EXT_MECH_CLASS_F_TRANSFORM (1U << 2)
 
+struct xdev_ext_rel_policy;
 struct xdev_ext_mech_class_ops {
 	u32 class_id;			/* enum xdev_ext_mech_class */
 	u32 flags;			/* XDEV_EXT_MECH_CLASS_F_* */
@@ -319,6 +320,7 @@ struct xdev_ext_mech_class_ops {
  /* Same snapshot rules; adds this stage's version 2 counters into @out. */
  void (*transport_counters)(struct xdev_ext_mech_stage *st,
                             struct xdev_ext_mech_transport_stats_v2 *out);
+ void (*transport_policy)(struct xdev_ext_mech_stage *st, struct xdev_ext_rel_policy *out);
 
 };
 
@@ -736,4 +738,18 @@ static inline void io_xdev_ext_mech_ring_exit(struct io_ring_ctx *ctx)
 #endif
 #endif /* __KERNEL__ */
 
+#ifdef CONFIG_XDEV_EXT_MECH
+extern int bpf_xdev_ext_rel_rx_view(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                  void *view, __u32 view__sz);
+extern int bpf_xdev_ext_rel_rx_data(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                  __u32 index, __u32 attempt, __u32 verdict);
+extern int bpf_xdev_ext_rel_rx_control(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                     __u32 attempt, __u64 credit, __u32 type);
+extern int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *ctx, void *policy,
+                                 __u32 policy__sz);
+
+extern __u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *ctx,
+                                    const size_t rdonly_buf_size);
+
+#endif
 #endif /* _LINUX_XDEV_EXT_MECH_H */

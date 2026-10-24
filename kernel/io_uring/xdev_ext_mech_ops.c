@@ -91,6 +91,9 @@ static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
 	if (!a || !a->base || a->nr_frames > XDEV_EXT_MECH_MAX_FRAMES ||
 	    (a->nr_frames && !a->frames) || (a->info_size && !a->info))
 		return false;
+ if (a->callsite==XDEV_EXT_MECH_SITE_WORKER_SELECT)
+  return a->member==XDEV_EXT_MECH_MEMBER_BUILD && !a->b && !a->frames && !a->nr_frames &&
+         !a->scratch && !a->desc_size && !a->desc_cap && !a->cqe && !a->cqe_size && !a->cqe_cap;
 	switch (a->member) {
 	case XDEV_EXT_MECH_MEMBER_PREPARE:
 		return a->callsite == XDEV_EXT_MECH_SITE_CREATE;

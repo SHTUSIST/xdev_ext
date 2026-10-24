@@ -22,7 +22,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Install host test dependencies
-        run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config
+        run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config clang llvm
       - name: Standalone production-rule checks
         run: python3 scripts/test_host.py
       - name: Reference-counted lifecycle and CPU transform contracts
@@ -119,6 +119,17 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/transport_counters_test.py 2>&1 | tee -a "$log"
           if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
             echo "Reliable regressions reported failed or skipped cases"
+            exit 1
+          fi
+      - name: Reliable BPF protocol and immutable policy contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          log="$RUNNER_TEMP/xdev-ext-reliable-policy.log"
+          XDEV_EXT_LIBBPF_INCLUDE=/usr/include make -C kernel/tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue check 2>&1 | tee "$log"
+          make -C kernel/tools/testing/selftests/xdev_ext_policy check 2>&1 | tee -a "$log"
+          if grep -Eiq '^(not ok[[:space:]]|ok[[:space:]].*#[[:space:]]*SKIP|OK[[:space:]]+\(skipped=)|\.\.\. skipped' "$log"; then
+            echo "Reliable protocol or policy checks reported failed or skipped cases"
             exit 1
           fi
       - name: Source layout and preparation regressions

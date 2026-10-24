@@ -187,7 +187,7 @@ class HeldReplyProvider(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix='xdev_ext-rel-held-') as tmp:
             path = Path(tmp)
             (path / 'probe.c').write_text(source)
-            build = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra',
+            build = subprocess.run([os.environ.get('CC', 'cc'), '-DXDEV_EXT_REL_C_GLUE', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra',
                                     '-Werror', '-Wno-unused-function', '-fsanitize=undefined',
                                     '-fno-sanitize-recover=undefined', '-I', str(ROOT),
                                     str(path / 'probe.c'), '-o', str(path / 'probe')],

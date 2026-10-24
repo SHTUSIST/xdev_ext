@@ -59,7 +59,7 @@ static void xdev_ext_mech_frame_recycle(struct xdev_ext_mech_session *s,struct x
 static int xsk_xdev_ext_mech_pool_resolve(struct xdev_ext_mech_pool *p,struct xdev_ext_mech_frame *f){if(f->index>=p->nr_frames)return -ERANGE;f->kaddr=(void *)(uintptr_t)(f->index+1);return 0;}
 static void xsk_xdev_ext_mech_frame(struct xdev_ext_mech_pool *p,struct xdp_buff_xsk *b,struct xdev_ext_mech_frame *f){(void)p;*f=(struct xdev_ext_mech_frame){.index=b->index,.data_off=b->data_off};}
 static int xsk_rel_rx(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_frame *f,struct xdev_ext_rel_msg *m){(void)st;(void)f;(void)m;abort();}
-static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,const struct xdev_ext_rel_msg *m,const struct xdev_ext_mech_hold_intent *h,const struct xdev_ext_mech_frame *f){(void)st;(void)m;(void)h;(void)f;abort();}
+static int xsk_rel_hold_commit(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_hold_intent *h,const struct xdev_ext_mech_frame *f){(void)st;(void)h;(void)f;abort();}
 static bool xsk_xdev_ext_mech_rx_runs(u32 site,bool active,bool zc){(void)site;(void)zc;return active;}
 static int xsk_xdev_ext_mech_rx_call(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_mech_stage *xst,const struct xdev_ext_mech_frame *f,u32 site,s32 *ret,struct xdev_ext_mech_hold_intent *h,const struct xdev_ext_afxdp_rx_hold_cqe *cqe){
  (void)st;(void)xst;

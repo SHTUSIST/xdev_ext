@@ -44,4 +44,16 @@ extern int bpf_xdev_ext_afxdp_hold(const struct xdev_ext_mech_ctx *ctx, __u64 ke
 			      __u32 pos, __u32 span_off,
 			      __u32 span_len) __ksym;
 
+extern int bpf_xdev_ext_rel_rx_view(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                  void *view, __u32 view__sz) __ksym;
+extern int bpf_xdev_ext_rel_rx_data(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                  __u32 index, __u32 attempt, __u32 verdict) __ksym;
+extern int bpf_xdev_ext_rel_rx_control(const struct xdev_ext_mech_ctx *ctx, __u64 group,
+                                     __u32 attempt, __u64 credit, __u32 type) __ksym;
+extern int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *ctx, void *policy,
+                                 __u32 policy__sz) __ksym;
+
+extern __u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *ctx,
+                                    const size_t rdonly_buf_size) __ksym;
+
 #endif /* XDEV_EXT_MECH_KFUNC_H */

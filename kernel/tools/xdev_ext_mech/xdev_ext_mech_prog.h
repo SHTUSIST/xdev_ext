@@ -48,6 +48,11 @@
 #define XDEV_EXT_MP_RECYCLE			6
 
 /* enum xdev_ext_mech_callsite, enum xdev_ext_mech_dir */
+#define XDEV_EXT_MP_BUILD_DEFAULT 0
+#define XDEV_EXT_MP_REL_ACK_EACH 0U
+#define XDEV_EXT_MP_REL_ACK_EVERY_N 1U
+#define XDEV_EXT_MP_REL_ACK_DELAYED 2U
+#define XDEV_EXT_MP_SITE_WORKER_SELECT 6U
 #define XDEV_EXT_MP_SITE_WORKER		0U
 #define XDEV_EXT_MP_SITE_RX_GENERIC		1U
 #define XDEV_EXT_MP_SITE_RX_NATIVE		2U

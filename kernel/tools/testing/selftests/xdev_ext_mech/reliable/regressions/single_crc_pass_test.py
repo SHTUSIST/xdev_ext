@@ -46,6 +46,8 @@ FIXTURE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include "vmlinux.h"
+#include "include/uapi/linux/xdev_ext_policy.h"
+#include "include/linux/xdev_ext_mech_reliable_core.h"
 typedef uint8_t u8; typedef uint32_t u32; typedef uint64_t u64;
 static unsigned crc_calls, hold_calls;
 static struct { __u64 key; __u32 pos, off, len; } hold;
@@ -73,10 +75,21 @@ __u8 *bpf_xdev_ext_afxdp_hdr(const struct xdev_ext_mech_ctx *c, __u32 pos, __u32
 { (void)c; return pos < 32 && M.frames[pos] && off + n <= M.frame_size ? M.frames[pos] + off : NULL; }
 int bpf_xdev_ext_afxdp_hold(const struct xdev_ext_mech_ctx *c, __u64 key, __u32 pos, __u32 off, __u32 len)
 { (void)c; hold_calls++; hold.key = key; hold.pos = pos; hold.off = off; hold.len = len; return 0; }
+int bpf_xdev_ext_rel_rx_view(const struct xdev_ext_mech_ctx *c,__u64 g,void *view,__u32 size)
+{ (void)c;(void)g;if(size!=sizeof(struct xdev_ext_rel_rx_view))return -EINVAL;
+  *(struct xdev_ext_rel_rx_view *)view=(struct xdev_ext_rel_rx_view){.base_group=1,.credit=3};return 0; }
+int bpf_xdev_ext_rel_rx_data(const struct xdev_ext_mech_ctx *c,__u64 g,__u32 i,__u32 a,__u32 v)
+{ (void)c;(void)g;(void)i;(void)a;(void)v;return 0; }
+int bpf_xdev_ext_rel_rx_control(const struct xdev_ext_mech_ctx *c,__u64 g,__u32 a,__u64 cr,__u32 t)
+{ (void)c;(void)g;(void)a;(void)cr;(void)t;return 0; }
+int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *c,void *p,__u32 n)
+{ (void)c;(void)p;(void)n;return -EINVAL; }
+__u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *c,const size_t n)
+{ (void)c;(void)n;return NULL; }
 /* PROGRAM */
 /* C TX boundary, with the envelope checker (tested elsewhere) admitted. */
 struct xdev_ext_mech_session { struct xdev_ext_mech_layout layout; struct xdev_ext_mech_peer peer; };
-struct xsk_mech_reliable { struct xdev_ext_rel_tx tx; };
+struct xsk_mech_reliable { struct xdev_ext_rel_rx rx; struct xdev_ext_rel_tx tx; };
 struct xsk_xdev_ext_mech_stage { struct xsk_mech_reliable *rel; u32 mtu; };
 struct xdev_ext_mech_stage { struct xsk_xdev_ext_mech_stage *priv; struct xdev_ext_mech_session *s; };
 struct xsk_xdev_ext_mech_tx_bounds { u32 hdr_room, mtu; struct xdev_ext_mech_peer peer; };

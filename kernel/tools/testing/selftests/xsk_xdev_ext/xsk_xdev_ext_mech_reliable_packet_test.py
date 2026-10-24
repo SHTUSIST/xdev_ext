@@ -28,7 +28,7 @@ struct xdev_ext_mech_frame_info { u64 umem_addr;u32 data_off,data_len; };
 struct xdev_ext_mech_peer { u32 unused; };
 struct xdev_ext_mech_layout { u32 hdr_room; };
 struct xsk_xdev_ext_mech_tx_bounds { u32 hdr_room,mtu;struct xdev_ext_mech_peer peer; };
-struct xsk_mech_reliable { struct xdev_ext_rel_tx tx; };
+struct xsk_mech_reliable { struct xdev_ext_rel_rx rx; struct xdev_ext_rel_tx tx; };
 struct xsk_xdev_ext_mech_stage { struct xsk_mech_reliable *rel;u32 mtu; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_layout layout;struct xdev_ext_mech_peer peer; };
 struct xdev_ext_mech_stage { struct xsk_xdev_ext_mech_stage *priv;struct xdev_ext_mech_session *s; };
