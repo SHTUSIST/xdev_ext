@@ -210,7 +210,18 @@ int main(void){
 }
 """
     # Preserve the original independent TX/refcount/late-completion assertions.
-    run('peer-endpoint-owner', shim + code + '\n#define main original_main\n' + endpoint.MAIN + '\n#undef main\n' + main)
+    # Read runtime pointers for weak-symbol probes: newer GCC diagnoses direct
+    # address checks when the extracted production body defines the function.
+    original_main = endpoint.MAIN
+    probes = ''
+    for symbol in ('test_initcall', 'xdev_ext_peer_net_send_stoppable',
+                   'xdev_ext_peer_net_bind_stage'):
+        check = 'if(!' + symbol + ')'
+        assert original_main.count(check) == 1, symbol
+        probe = symbol + '_probe'
+        probes += 'static __typeof__(&' + symbol + ') volatile ' + probe + '=' + symbol + ';\n'
+        original_main = original_main.replace(check, 'if(!' + probe + ')')
+    run('peer-endpoint-owner', shim + code + probes + '\n#define main original_main\n' + original_main + '\n#undef main\n' + main)
 
 
 if __name__ == '__main__':
