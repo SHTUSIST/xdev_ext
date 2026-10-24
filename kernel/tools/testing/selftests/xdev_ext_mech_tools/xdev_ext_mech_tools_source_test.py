@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0
 """Source contract of the mechanism programs in tools/xdev_ext_mech.
 
-The BPF objects are compiled and verified only in the KVM harness.  These
-checks hold the shape the harness and the verifier rely on: the struct_ops
+The KVM harness compiles and verifies the BPF objects; xdev_ext_cpu_bpf_test.py
+also checks CPU BPF target compilation. These checks hold the shape the harness
+and the verifier rely on: the struct_ops
 map names of the control-tool CLI, the globals it sets, constant view sizes,
 a NULL check on every view, and no UAPI constant that vmlinux.h lacks.
 """
@@ -229,16 +230,33 @@ class CtlSourceTest(unittest.TestCase):
         self.assertIn("case OPT_COPY: o->copy_mode = true; break;", self.ctl)
 
     def test_markers_come_from_the_core(self):
-        # Every run marker is formatted and judged by xdev_ext_mech_ctl_core.h.
+        # Core owns the common reports and transport counters. Socket RX uses
+        # the same public markers with its START-loan ledger; NIC accounting
+        # is an informational CLI line, rather than a PASS/FAIL verdict.
         literals = set(re.findall(r'"(XDEV_EXT_MECH_[A-Z_0-9]+)[=" ]', self.ctl))
-        self.assertEqual(literals, {"XDEV_EXT_MECH_TRANSPORT_COUNTERS", "XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE", "XDEV_EXT_MECH_READY", "XDEV_EXT_MECH_ATTACH",
-                                    "XDEV_EXT_MECH_DETACH",
-                                    "XDEV_EXT_MECH_RING_EXIT_CLOSE"})
+        self.assertEqual(literals, {
+            "XDEV_EXT_MECH_TRANSPORT", "XDEV_EXT_MECH_FINALIZE",
+            "XDEV_EXT_MECH_READY", "XDEV_EXT_MECH_ATTACH",
+            "XDEV_EXT_MECH_DETACH", "XDEV_EXT_MECH_RING_EXIT_CLOSE",
+            "XDEV_EXT_MECH_NIC_ACCOUNTING", "XDEV_EXT_MECH_NIC_NVME_E2E",
+            "XDEV_EXT_MECH_NIC_CE_NVME_E2E"})
         for report in ("nic_nvme", "fq_dup", "window_reject", "native_copy",
                        "group_timeout", "shared_umem", "prog_detach",
-                       "ring_exit", "unbind", "nvme_nic", "ce_chain"):
+                       "ring_exit", "unbind", "nvme_nic", "ce_chain", "nic_ce_nvme"):
             self.assertIn(f"xdev_ext_mech_ctl_report_{report}(", self.ctl)
         self.assertIn("xdev_ext_mech_ctl_stats_line(", self.ctl)
+        core = strip_comments((TOOLS / "xdev_ext_mech_ctl_core.h").read_text())
+        counters = c_function(core,
+            "static inline void xdev_ext_mech_ctl_print_transport_counters(")
+        self.assertIn('"XDEV_EXT_MECH_TRANSPORT_COUNTERS ', counters)
+        self.assertIn("xdev_ext_mech_ctl_print_transport_counters(session,&counters)",
+                      self.ctl)
+        socket = c_function(self.ctl, "static bool ctl_socket_rx_report(")
+        for marker in ("NIC_NVME_E2E", "NIC_CE_NVME_E2E"):
+            self.assertIn(f'"XDEV_EXT_MECH_{marker}=%s ', socket)
+        self.assertIn("xdev_ext_mech_ctl_line(", socket)
+        accounting = c_function(self.ctl, "static void ctl_print_nic_accounting(")
+        self.assertIn('"XDEV_EXT_MECH_NIC_ACCOUNTING ', accounting)
 
     def test_quiet_wait(self):
         # The quiet receiver blocks SIGUSR1 before anything can signal it,
