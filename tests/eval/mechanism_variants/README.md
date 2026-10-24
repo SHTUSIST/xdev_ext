@@ -1,5 +1,7 @@
 # Bounded NVMe mechanism substitution: test contract
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This is functional evidence of the implementation's mechanism space. Choosing
 another LBA is already an XRP capability. Different data selections are not an
 equivalent-workload performance comparison. Host callbacks and software guests

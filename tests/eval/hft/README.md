@@ -1,5 +1,7 @@
 # HFT-shaped replay microbenchmark
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This read-only microbenchmark coalesces small market-data records into bounded
 UDP replay bursts. It compares I/O, registration, submission, completion and
 buffer ownership. It contains no trading strategy or complete HFT business system.

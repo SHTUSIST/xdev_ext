@@ -1,5 +1,7 @@
 # GPU<->NIC comparison arms
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 Scenario microbenchmarks that move data between a NIC and GPU memory in one
 direction: ingest (NIC -> GPU, `--direction nic-gpu`) and egress
 (GPU -> NIC, `--direction gpu-nic`). They are shaped like GPU-facing network

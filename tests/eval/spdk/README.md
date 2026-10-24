@@ -1,5 +1,7 @@
 # SPDK NVMe -> TCP pipeline arm
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 A native SPDK comparison arm: queue depth 1 raw namespace read with the
 official SPDK user-space NVMe driver, an optional little-endian uint64 sum
 over the first `--calc-bytes` of each block, then a send of the block over a

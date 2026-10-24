@@ -1,5 +1,7 @@
 # BaM native correctness adapter
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This directory supplies a build-only entry and a qualified, GPU-initiated NVMe
 correctness adapter for [official BaM](https://github.com/ZaidQureshi/bam).
 `native.lock.json` selects BaM `315fadfc5c5c018a64596157bfac94ecbb7d87a2`,

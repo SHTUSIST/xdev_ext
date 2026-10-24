@@ -1,5 +1,7 @@
 # Evaluation workloads
 
+Follow the [evaluation policy](PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This directory ports selected workload ideas from the earlier
 `bench_nvme_pipeline_compare.c`, `bench_nvme_pipeline_cost.c`,
 `bench_llm_load.c`, and `bench_gpu_checkpoint.c` into bounded, independently

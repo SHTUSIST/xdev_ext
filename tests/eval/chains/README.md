@@ -1,5 +1,7 @@
 # Multi-stage chains: one session versus per-pair composition
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This directory runs pipelines of three or four device stages, the
 composability experiment the OSDI review asks for (E1), the mechanism
 ablations (E7) and the size/pool/depth/concurrency sweeps (E10). Nothing here

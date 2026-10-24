@@ -1,5 +1,7 @@
 # Native-view transition evidence
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This directory plans the existing shared-page `chains` workloads, associates
 native events with records and frames, and verifies retained raw evidence.
 No physical experiment has been run for this implementation. Python fixtures

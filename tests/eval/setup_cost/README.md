@@ -1,5 +1,7 @@
 # One-time setup costs
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 `setup_cost` times registration and release of the same host region through
 the session path and through the baseline registration interfaces. It also
 reports the BPF verifier cost of each mechanism plan.

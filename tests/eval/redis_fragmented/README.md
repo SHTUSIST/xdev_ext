@@ -1,5 +1,7 @@
 # Redis fragmented-response correctness
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This independently authored runner retains nine response shapes from the project's earlier Redis scenario specification: GET of 256 KiB, 512 KiB, 1 MiB and 2 MiB; MGET of 16×16 KiB, 32×16 KiB and 64×8 KiB; and LRANGE of 128×4 KiB and 256×4 KiB. Earlier runner source was not copied. Each element has distinct deterministic binary data; the oracle checks every byte, array count and order.
 
 Run the host contracts and real Redis cases with:

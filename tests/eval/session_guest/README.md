@@ -1,5 +1,7 @@
 # Eval session correctness in the existing KVM guest
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This driver runs the actual `chains`, `nvme_gpu` and `gpu_nic` session
 binaries against the project's existing NVMe/AF_XDP devices and CPU-memcpy
 CE stand-in. It adds no provider or virtual device. No result is GPU DMA

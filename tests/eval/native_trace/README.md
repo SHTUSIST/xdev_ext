@@ -1,5 +1,7 @@
 # Native trace collection
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 `collector.py` exposes `collect(manifest, argv, output_dir, *, tracefs_root,
 correctness_only=False)` and `decode_trace(manifest, raw_text, metadata)`.
 It uses the real `xdev_ext:native_event` tracepoint from the running kernel.

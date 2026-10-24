@@ -1,5 +1,7 @@
 # Production lifecycle and Linux dma_fence local experiment
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This compares one producer and one consumer with equal valid-length checks and
 successful-operation denominators. It measures local synchronization primitives,
 not dma-buf end-to-end throughput, DMA, or device performance. No performance

@@ -1,5 +1,7 @@
 # User-space shared-region baseline (reviewer E2)
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 The question this baseline answers: what does the kernel-owned lifecycle buy
 over one user process that registers the same memory with every subsystem and
 sequences the stages itself? `uo_bench` is that process. Nothing here has been

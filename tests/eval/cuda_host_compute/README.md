@@ -1,5 +1,7 @@
 # Registered-host GPU compute correctness
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This workload adapts the original `cumem_viability_test.cu`, preserving its uint64
 XOR kernel and three launch shapes. Original source SHA256:
 `903b082bc860b1d745964071df1df20563f14cd6b69a7ef9ef8920bf40762aaf`.

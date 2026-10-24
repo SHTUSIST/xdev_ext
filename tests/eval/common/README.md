@@ -1,5 +1,7 @@
 # Shared evaluation accounting
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 Tools that any evaluation arm can run around its harness command. `make check`
 runs their host tests against fixed perf, `/proc` and sysfs fixtures. These
 tests open no counters and time nothing.

@@ -1,5 +1,7 @@
 # NVMe↔NIC paired evaluation (reviewer E3)
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This harness compares four ways of moving NVMe data to the network
 (forward, NVMe→NIC) and network data to NVMe (reverse, NIC→NVMe) for unit
 sizes 4 KiB–4 MiB and queue depths 1–128. It contains source and commands

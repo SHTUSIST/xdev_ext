@@ -1,5 +1,7 @@
 # Application call shapes and transparent frontend boundaries
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 This directory makes the Redis/FIO/HFT integration audit reproducible without copying the old preload implementations. It tests ordinary libc calls and classifies actual custom requests separately from compatible fallback. These are deterministic call-shape workloads, not runs of Redis, FIO, or a trading application. There are no performance results here.
 
 | Application shape | Current frontend route | Executable verification |

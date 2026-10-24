@@ -1,5 +1,7 @@
 # Session path time breakdown
 
+Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+
 `run.py` generates a bpftrace program of fentry/fexit probes over the session
 core and the class functions of one batch step. It runs a workload under that
 program and reports the time per interval.
