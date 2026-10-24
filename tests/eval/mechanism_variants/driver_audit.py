@@ -31,6 +31,9 @@ def audit(raw,session_id,final_stage=1):
         else:
             terminal.setdefault(r['batch_id'],[]).append(r)
     if not binds:raise ValueError('no actual in-scope descriptor_bind pool observations')
+    unique_binding_claims={(b['session_id'],b['batch_id'],b['stage'],b['frame_id'],b['ticket'],b['cookie'],b['generation']) for b in binds}
+    if len(unique_binding_claims)!=len(binds):
+        raise ValueError('duplicate descriptor binding for one actual native frame claim')
     terminal_by_frame={}
     for cohort in terminal.values():
         for end in cohort:
