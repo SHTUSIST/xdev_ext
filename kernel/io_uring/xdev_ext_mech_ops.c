@@ -773,6 +773,7 @@ static void __init xdev_ext_mech_emit_btf_types(void)
  BTF_TYPE_EMIT(struct xdev_ext_iaa_mech_info);
  BTF_TYPE_EMIT(struct xdev_ext_iaa_desc);
  BTF_TYPE_EMIT(struct xdev_ext_socket_send_desc);
+ BTF_TYPE_EMIT(struct xdev_ext_socket_packet_desc);
  BTF_TYPE_EMIT(struct xdev_ext_socket_mech_info);
  BTF_TYPE_EMIT(struct xdev_ext_socket_mech_cqe);
  BTF_TYPE_EMIT(struct xdev_ext_net_send_desc);
