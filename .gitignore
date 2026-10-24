@@ -1107,3 +1107,9 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_README.md
+!/tests/eval/native_views/
+!/tests/eval/native_views/contract.py
+!/tests/eval/native_views/analyze.py
+!/tests/eval/native_views/run.py
+!/tests/eval/native_views/README.md
+!/tests/eval/native_views/test_import.py

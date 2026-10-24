@@ -1,0 +1,145 @@
+# Native-view transition evidence
+
+This directory plans the existing shared-page `chains` workloads, associates
+native events with records and frames, and verifies retained raw evidence.
+No physical experiment has been run for this implementation. Python fixtures
+exercise software contracts; they are never DMA or performance evidence.
+
+```
+python3 -m unittest discover -s tests/eval/native_views -p 'test_*.py' -v
+python3 tests/eval/native_views/run.py --manifest RUN.json --output OUT --dry-run
+python3 tests/eval/native_views/run.py --manifest RUN.json --output OUT --validate-only
+python3 tests/eval/native_views/run.py --manifest RUN.json --output OUT --execute
+python3 tests/eval/native_views/run.py --manifest RUN.json --output OUT \
+    --import-collection RECEIPT.json
+```
+
+Dry-run and validation do not execute a child or create an output directory.
+Execution requires the explicit option, a physical manifest, an existing
+chains recipe and the native trace collector. The existing chains hardware
+gate still checks the running host; manifest assertions cannot bypass it.
+Missing native probes or immutable identity mappings make the arm unavailable
+before its workload starts. There is no source preparation, device binding,
+module loading or implicit `--prepare-source` here. An explicitly executed
+paired chains workload uses the rig's declared destination NVMe window, as
+documented by `../chains/README.md`.
+
+A recipe names `chain` (`nvme-nic` or `nic-nvme`), `rig`, `records`, `pairs`,
+`arms` and a fixed `seed`. `warmup_records` defaults to the existing chains
+value 4. U-poll and U-event invoke `userspace-shared` with poll and eventfd;
+K-BPF invokes `session` with the real BPF plan. Eventfd TX completion can still
+poll. K-C is unavailable without a verified equivalent C implementation.
+`batch > 1` is unavailable because chains has no native batching option;
+record burst is not a substitute. `record_bytes`, `depth`, offered `load`,
+zero-copy AF_XDP mode and repetition counts are passed explicitly. At execution,
+each independent pair runs once per arm and alternate pairs reverse arm order.
+All arms retain the same fixed data seed. Missing or failed arms stay in the
+receipt. A nonzero child return code is a failure, not a successful observation.
+
+`contract.validate_run` separates parse/baseline admission from performance
+admission. The complete schema example is `fixtures/builders.py`; those
+identities describe synthetic fixtures, not a physical configuration. In a
+physical manifest, additionally declare observed `cpu_budget`, `numa`, `iommu`,
+`group_bytes`, `segments_per_group`, `inflight_bytes`, `native_batch` and
+`processing`. Depth is an in-flight group count; a record can contain several
+groups/frames. Workload configuration hashes should cover common work and
+exclude the intentionally different arm/wait strategy. These declarations
+alone do not verify any measurement.
+
+`analyze.summarize_events` requires explicit `stages[].after` dependencies and
+`records[]` frame identities. Association uses run, session, record, frame,
+generation and stage. Record-level admit/terminal events use frame -1 and stage
+`record`. Native submit means accepted request; native completion means the
+matched native software completion boundary. Rejected duplicate/stale events
+do not complete work. Accepted foreign identities, failed or duplicate native
+completions, missing frames and premature recycling invalidate the record.
+Fan-out validates every declared consumer and releases after the last one;
+it does not assert that a backend supports arbitrary dependency graphs.
+
+A record's latency is terminal minus admit. Inter-completion gaps remain a
+separate statistic. A dependency gap uses predecessor native-complete and
+successor accepted-submit from the same CLOCK_MONOTONIC host domain; user CQE
+observation cannot replace native completion. Unknown probes/clocks/lost traces
+produce `null` with reasons, never zero. Necessary CPU/CRC, admission, sync and
+queue work are included in an observed gap; no unmeasured decomposition is
+invented. Endpoint matching is exact: local TX is not remote receive, NVMe
+write completion is not durability, and host memory is not GPU residency.
+
+## Raw collection/import interface
+
+The separately implemented `../native_trace/collector.py` provides:
+
+```python
+collect(manifest, command, output_dir, *, tracefs_root=..., correctness_only=False)
+decode_trace(manifest, raw_text, metadata)  # deterministic normalized events
+```
+
+A collection receipt retains its real `returncode` and `status` (`ok`, `failed`
+or `unavailable`), reasons, and `artifacts`. Each artifact is `{path, sha256}`
+pointing to retained bytes. Required kinds are `raw_trace`, `events` (JSONL),
+`trace_metadata`, `system_cpu_before`, `system_cpu_after`, `workload_stdout`,
+`workload_stderr`, `oracle` and `zero_copy`. U arms additionally require the immutable cookie `journal`
+artifact; metadata.journal_artifact must link the same raw path/hash.
+Paths must remain accessible when
+importing; use absolute paths for movable receipts. Hashes establish file
+integrity, not that a physical experiment happened.
+
+`analyze.import_collection(manifest, receipt)` returns status, imported manifest,
+summary, errors and `performance_eligible`. It verifies hashes and identities,
+re-decodes raw trace using this checkout's collector, and requires exact equality
+with retained normalized events. It derives record latency, effective payload
+throughput and CPU per record rather than accepting the manifest's metrics.
+Positive-duration complete samples, zero dropped events and all admission gates
+are required for eligibility. A missing decoder, probe, mapping or artifact is
+unknown/unavailable. Corrupt artifacts, failed oracle/children and invalid causal
+events remain failures. Fixture/host/VM provenance never becomes eligible.
+
+`trace_metadata` has schema_version 1 and binds `run_id`, `exact_sha`,
+`config_hash`, `arm`, `clock`, `clock_domain`, `endpoint`, `physical`,
+`environment`, `evidence_kind`, `complete_boundary` and `submit_boundary` to the
+run. It records `trace_dropped`, actual `cpu_tick_hz` and the observed common
+configuration fields listed above. `probes.native_complete` and
+`probes.native_submit` each name the actual `source` and `layer=native_provider`.
+These must come from successful probe resolution/capture, not input assertions.
+The collector must preserve raw event formats, cookie/record mappings, clock
+selection and loss accounting needed for deterministic decoding.
+
+CPU input is real `/proc/stat` before/after with aggregate and every `cpuN`
+row. The importer rejects missing CPUs, hotplug during capture and regressed
+counters. It sums aggregate busy user/nice/system/IRQ/softirq ticks, excluding
+idle/iowait/steal and guest double counting. This is whole-host CPU, including
+unrelated work; it is not isolated workload cycles. Metadata must explicitly
+state `cpu_interval_scope=steady_state` only when actual sampling matches the
+measured interval. Whole-command snapshots include setup/drain/post-oracle
+and remain unavailable for steady-state CPU/record. Process getrusage is local
+supplementary data. Tick resolution and capture overhead remain limitations.
+
+`oracle` points to the actual existing `xdev-chain-campaign-v1` campaign.json,
+not a newly asserted pass boolean. Each receipt covers one arm/pair/size/load.
+The importer matches chain, size, seed, arm/wait; requires sender/receiver
+status and exits to pass; verifies the receiver's full file oracle byte count
+including warmup; and retains the chains hardware-gate evidence. The existing
+oracle executes outside the timed region. A zero exit alone is insufficient.
+
+`zero_copy` is a raw native-provider mapping observation with schema_version 1,
+`run_id`, `exact_sha`, `source=native_provider`, actual `afxdp_mode=zc`,
+`nvme_bounces=0` and `payload_copy_bytes=0`. `frames` associates session, record,
+frame and generation with an observed `backing_id`, `valid_bytes`, and
+`native_views`: each view contains `kind` (`nvme`/`afxdp`), its `backing_id`,
+`offset_bytes` and `length_bytes`. Both native classes must reference the same
+backing and legal ranges. Different DMA-domain addresses need not be equal.
+The collector must obtain those observations from the measured native path;
+ordinary interface success or caller-supplied zero-copy flags do not suffice.
+Missing mapping/no-bounce instrumentation makes eligibility unavailable.
+
+Pair comparisons check the common workload/endpoint/clock/configuration and
+preserve right-minus-left negatives and unknowns. Pair aggregation uses each
+run pair once, unweighted by record count, and retains exclusions. It does not
+claim statistical confidence from a small pair count or turn thousands of
+records into independent repetitions. Predeclare exclusions and main/boundary
+points; start with at least five independent pairs and report uncertainty.
+
+Physical native hooks, immutable U cookie mappings, steady-state whole-host
+CPU snapshots, verified backing/no-bounce observations, complete post-oracle
+capture and trace-on/off perturbation measurements are external prerequisites.
+The software test suite passing does not close these runtime requirements.
