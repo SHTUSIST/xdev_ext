@@ -3,6 +3,7 @@
 TEST_GEN_PROGS := nvme_xdev_ext_passthru_test nvme_xdev_ext_passthru_runtime \
 	nvme_sgl_gap_runtime
 TEST_PROGS := nvme_xdev_ext_passthru_source_test.py nvme_sgl_gap_source_test.py
+TEST_PROGS += nvme_sgl_profile_test.py
 
 LOCAL_HDRS += $(abspath ../../../../include/linux/nvme_xdev_ext_passthru.h)
 LOCAL_HDRS += $(abspath ../../../../include/uapi/linux/nvme_ioctl.h)
