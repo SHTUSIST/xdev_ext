@@ -323,3 +323,14 @@ prints `XDEV_EXT_E2_KVM=PASS scope=guest-correctness old_ticket=actual-core-host
 The harness stores that exact line in `evidence/result.txt`. The current
 implementation requires the actual final target run; parser/transport fixture
 PASS results are not target execution evidence.
+
+The native NIC audit separately handles the real driver's session-zero rows.
+`driver_audit.py` uses actual in-session `descriptor_bind` pool pointers and
+wire spans to associate each driver `native_submit` and `native_complete` with
+its record/frame. It requires a complete fresh-pool native sequence, matching
+accepted/completed spans, and driver completion before terminal record
+completion. A failed/unknown event or `trace_invalid` on a bound pool is fatal.
+Other pools remain explicit raw-line exclusions. It does not assign the core's
+session/ticket to raw driver events. The host validator archives this audit as
+`VARIANT-driver-audit.json` and references it from the compact decoder's scope
+receipt, retaining all original rows unchanged.

@@ -19,6 +19,7 @@ import unittest
 from artifacts import extract
 from decode_trace import audit_collection,decode,decode_negative
 from guard import verify as verify_guards
+from driver_audit import audit as audit_driver
 from inspect_create import inspect
 
 
@@ -86,7 +87,7 @@ def validate(source,scratch,evidence):
     require(negative['old_ticket']!=negative['current_ticket'] and before['state']==after['state'],'old ticket changed actual custody')
     write_derived(capture/'old-ticket.log',raw_old.encode())
     write_derived(capture/'old-ticket-source.json',ledger)
-    runs={};guards={};setup=[];policies=[]
+    runs={};guards={};drivers={};setup=[];policies=[]
     policy_initial=json.loads((capture/'net-policy.initial.json').read_text())
     require(bool(policy_initial),'no actual shared-plan initial map images')
     require('XDEV_EXT_MECH_ATTACH=PASS map=nxp_afxdp_ops ' in (capture/'net-attach.log').read_text(),'shared AF_XDP plan was not attached')
@@ -95,7 +96,11 @@ def validate(source,scratch,evidence):
         fmt=(capture/(variant+'-event-format.txt')).read_text();stats=(capture/(variant+'-trace-stats.txt')).read_text()
         audit_collection(fmt,stats)
         audit=dict(create_session=create['actual_session_id'],excluded=[])
-        events=decode((capture/(variant+'.trace')).read_text(),'nvme_nic',create['actual_session_id'],audit)
+        raw_trace=(capture/(variant+'.trace')).read_text()
+        events=decode(raw_trace,'nvme_nic',create['actual_session_id'],audit)
+        drivers[variant]=audit_driver(raw_trace,create['actual_session_id'])
+        audit['session_zero_driver_audit']=variant+'-driver-audit.json'
+        write_derived(capture/(variant+'-driver-audit.json'),drivers[variant])
         ids=[e['request_id'] for e in events if e['event']=='provider_accept']
         require(len(ids)==16 and ids==list(range(ids[0],ids[0]+16)) and ids[0] in (0,1),'actual callback sequence is not sixteen consecutive IDs')
         programs=json.loads((capture/(variant+'-programs.json')).read_text())
@@ -147,7 +152,7 @@ def validate(source,scratch,evidence):
     if not (evidence/'e2-frozen-gate.log').exists(): (evidence/'e2-frozen-gate.log').write_text(report.getvalue())
     require(result.wasSuccessful(),'independent frozen guest gate failed; see e2-frozen-gate.log')
     validation=dict(schema='xdev-ext-e2-validation-v1',status='pass',evidence_kind='guest-correctness',timing_claim='none',
-        source_disk='whole-image unchanged',destination_disk='whole-image unchanged',umem_guards=guards,
+        source_disk='whole-image unchanged',destination_disk='whole-image unchanged',umem_guards=guards,native_driver=drivers,
         old_ticket_scope='actual-core-host-fixture',kernel_git_sha=sha_source,capture_directory=str(capture),
         capture_sha256=sha(capture/'capture.json'))
     write_derived(evidence/'e2-validation.json',validation)

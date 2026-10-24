@@ -28,6 +28,7 @@ check: $(BUILD)/test_create_capture $(BUILD)/test_umem_guard
 	python3 -B test_kvm_wiring.py -v
 	python3 -B test_decode.py -v
 	python3 -B test_decode_regressions.py -v
+	python3 -B test_driver_audit.py -v
 	python3 -B test_guard.py -v
 	python3 -B test_inspect_create.py -v
 	@temporary=$$(mktemp -d); trap 'rm -rf "$$temporary"' EXIT; $(BUILD)/test_create_capture "$$temporary/create"
