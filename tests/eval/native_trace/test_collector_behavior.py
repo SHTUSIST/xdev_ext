@@ -37,7 +37,7 @@ def raw(phase, stamp, **changes):
     fields = dict(phase=phase, origin='K', session_id=7, batch_id=4, batch_key=6,
                   frame_id=1, generation=8, stage=0, ticket=19, class_id=3,
                   accepted=1, status=0, cookie=42, address=64, bytes=4096,
-                  aux=0, sequence=0)
+                  aux=0, sequence=0, origin_tgid=0, process_start_ticks=0, native_user_data=0, frame_ordinal=1, frame_offset=0, frame_length=4096)
     fields.update(changes)
     return 'worker-12 [001] .... %s: native_event: %s\n' % (
         stamp, ' '.join('%s=%s' % item for item in fields.items()))
@@ -234,6 +234,103 @@ class RawDecoder(unittest.TestCase):
             metadata['journal_artifact'] = self.c.artifact(path)
             with self.subTest(changes=changes), self.assertRaises(ValueError):
                 self.c.decode_trace(m, text, metadata)
+
+    def test_logical_frame_ordinal_is_declared_and_native_slot_is_preserved(self):
+        m = manifest()
+        m['record_bytes'] = 4096
+        m['trace']['layout'] = [dict(frame_id=0, offset_bytes=0, length_bytes=4096)]
+        m['records'][0]['frame_ids'] = [0]
+        text = raw('native_submit', '1.0', frame_id=99, frame_ordinal=0) + raw(
+            'native_complete', '1.1', frame_id=99, frame_ordinal=0)
+        rows = self.decode_accepted(m, text, self.metadata)
+        self.assertEqual([row['frame_id'] for row in rows], [0, 0])
+        self.assertEqual([row['native_frame_id'] for row in rows], [99, 99])
+        self.assertEqual(rows[0]['frame_offset'], 0)
+        self.assertEqual(rows[0]['frame_length'], 4096)
+        for changes in (dict(frame_ordinal=1), dict(frame_offset=1), dict(frame_length=1)):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                self.c.decode_trace(m, raw('native_submit', '1.0', **dict(dict(frame_id=99, frame_ordinal=0), **changes)) + raw('native_complete', '1.1',
+                    frame_id=99, frame_ordinal=0), self.metadata)
+
+    def test_runtime_k_binding_replaces_only_session_identity_from_actual_create(self):
+        m = manifest()
+        m['trace'].update(sessions=[dict(logical_id=7, role='sender'), dict(logical_id=8, role='receiver', measured=False)],
+                          batch_key_origin=1, generation_mapping='batch_key_relative')
+        m['trace']['burst'] = 1
+        m['records'][0].update(record_id=0, generation=0)
+        m['records'].append(dict(session_id=7, record_id=1, generation=1, frame_ids=[1]))
+        m['recipe'] = dict(records=1, warmup_records=1)
+        sideband = dict(kind='session_bind', native_session_id=99, session_id=99,
+                        logical_session_id=7, role='sender', pid=47,
+                        process_start_ticks=123, user_hz=os.sysconf('SC_CLK_TCK'),
+                        first_batch_key=1, groups=2, warmup=1, burst=1)
+        receiver = dict(sideband, native_session_id=100, session_id=100, logical_session_id=8, role='receiver', pid=48, process_start_ticks=124)
+        meta = self.journal_metadata([sideband, receiver])
+        text = (raw('session_bind', '0.05', session_id=100, origin_tgid=48, process_start_ticks=124) + raw('session_bind', '0.1', session_id=99, origin_tgid=47,
+                    process_start_ticks=123) +
+                raw('native_submit', '1.0', session_id=99, batch_key=1,
+                    origin_tgid=47, process_start_ticks=123, generation=1) +
+                raw('native_complete', '1.1', session_id=99, batch_key=1,
+                    origin_tgid=47, process_start_ticks=123, generation=1))
+        rows = self.decode_accepted(m, text, meta)
+        work = [row for row in rows if row['event'] == 'native_submit'][0]
+        self.assertEqual(work['session_id'], 7)
+        self.assertEqual(work['native_session_id'], 99)
+        self.assertEqual(work['origin_tgid'], 47)
+        self.assertEqual(work['process_start_ticks'], 123)
+        self.assertEqual(work['record_id'], 0)
+        self.assertEqual(work['generation'], 0)
+        self.assertEqual(len(m['records']), 2, 'missing observed work must not reduce expected records')
+        self.assertTrue(callable(getattr(self.c, 'derive_mapped_manifest', None)), 'runtime mapping artifact API missing')
+        mapped = self.c.derive_mapped_manifest(m, text, meta)
+        self.assertEqual(mapped['records'], m['records'])
+        self.assertEqual(mapped['recipe'], m['recipe'])
+        self.assertEqual(len(mapped['runtime_bindings']), 2)
+        self.assertEqual(mapped['runtime_bindings'][0]['native_session_id'], 99)
+        self.assertEqual(mapped['runtime_frames'][0]['native_frame_id'], 1)
+        with self.assertRaises(ValueError):
+            self.c.decode_trace(m, text.replace('process_start_ticks=123', 'process_start_ticks=124'), meta)
+
+    def test_runtime_u_owner_binding_does_not_mix_same_cookie_across_processes(self):
+        m = manifest()
+        m['arm'] = 'U-poll'
+        m['trace']['sessions'] = [dict(logical_id=7, role='sender', protocol_session_id=270019),
+                                  dict(logical_id=8, role='receiver', measured=False, protocol_session_id=270019)]
+        entry = dict(kind='nvme', cookie=42, session_id=270019, record_id=3, slot=0,
+                     generation=8, frame_id=1, stage=0, lba=64, bytes=4096)
+        metadata = self.journal_metadata([entry])
+        path = Path(metadata['journal_artifact']['path'])
+        rows = [json.loads(line) for line in path.read_text().splitlines()]
+        rows[0].update(pid=47, process_start_ticks=123, user_hz=os.sysconf('SC_CLK_TCK'),
+                       role='sender', session_id=270019)
+        receiver = dict(rows[0], pid=48, role='receiver', rx=True, process_start_ticks=124)
+        path.write_text(''.join(json.dumps(row) + '\n' for row in [*rows, receiver]))
+        metadata['journal_artifact'] = self.c.artifact(path)
+        text = (raw('pool_bind', '0.1', origin='U', class_id=2, cookie=222,
+                    origin_tgid=47, process_start_ticks=123) +
+                raw('pool_bind', '0.2', origin='U', class_id=2, cookie=333,
+                    origin_tgid=48, process_start_ticks=124) +
+                raw('native_submit', '1.0', origin='U', origin_tgid=47,
+                    process_start_ticks=123, native_user_data=42) +
+                raw('native_complete', '1.1', origin='U', origin_tgid=47,
+                    process_start_ticks=123, native_user_data=42) +
+                raw('native_submit', '1.2', origin='U', origin_tgid=48,
+                    process_start_ticks=124, native_user_data=42, sequence=777) +
+                raw('native_complete', '1.3', origin='U', origin_tgid=48,
+                    process_start_ticks=124, native_user_data=42, sequence=777))
+        decoded = self.decode_accepted(m, text, metadata)
+        work = [row for row in decoded if row['event'] in ('native_submit', 'native_complete') and row['accepted']]
+        self.assertEqual(len(work), 2)
+        self.assertTrue(all(row['origin_tgid'] == 47 for row in work))
+        self.assertEqual(work[0]['session_id'], 7)
+        self.assertEqual(work[0]['native_session_id'], 270019)
+
+    def test_runtime_binding_missing_create_or_sideband_is_unavailable(self):
+        m = manifest()
+        m['trace']['sessions'] = [dict(logical_id=7, role='sender')]
+        text = raw('native_submit', '1.0') + raw('native_complete', '1.1')
+        with self.assertRaises(ValueError):
+            self.c.decode_trace(m, text, self.metadata)
 
     def test_all_cpu_loss_parser_checks_each_cpu(self):
         self.assertEqual(self.c.trace_loss({'cpu0': 'overrun: 0\ndropped events: 0\ncommit overrun: 0\n',
