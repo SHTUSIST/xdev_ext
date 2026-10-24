@@ -443,24 +443,84 @@ static void test_fork_requires_lazy_context_rebuild(void)
 
 static void test_read_compat_recycles_but_pipeline_read_publishes(void)
 {
-	struct xdev_ext_frame frame;
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frame;
+	struct xdev_ext_mech_life_pool pool;
+	__u64 claim, consumer;
 
-	xdev_ext_pool_init(&pool, &frame, 1, false);
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, 0), 0);
-	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, 4096, false), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, 0), XDEV_EXT_FRAME_READY);
+	/* Original pipeline-read assertions: publish the completed byte count.
+	 * The new API carries the full producer claim, not just its generation. */
+	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, false), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frame.valid_len, 4096);
+	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 1);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 0);
+	EXPECT_EQ(xdev_ext_mech_life_acquire(&frame, 0, 0, &consumer), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_OUT_PENDING);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 0);
+	EXPECT_EQ(xdev_ext_mech_life_put(&frame, consumer), XDEV_EXT_MECH_L_FREED);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 0);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 1);
 
-	xdev_ext_pool_init(&pool, &frame, 1, false);
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, 0), 0);
-	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, 4096, true), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, 0), XDEV_EXT_FRAME_FREE);
+	/* Original compat-read assertions: successful I/O recycles immediately. */
+	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, true), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 0);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 1);
 
-	xdev_ext_pool_init(&pool, &frame, 1, false);
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, 0), 0);
-	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, -EIO, false), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, 0), XDEV_EXT_FRAME_FREE);
+	/* Original producer-error assertions: never publish a failed read. */
+	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, -EIO, false), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(xdev_ext_mech_life_refs(&frame), 0);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 1);
+}
+
+static void test_read_finish_rejects_stale_or_nonproducer_claims(void)
+{
+	struct xdev_ext_mech_life frame;
+	struct xdev_ext_mech_life_pool pool;
+	__u64 claim, consumer, next, word;
+
+	xdev_ext_mech_life_pool_init(&pool, &frame, 1);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, 0, 4096, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, 0);
+	EXPECT_EQ(frame.valid_len, 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &claim), 0);
+	word = frame.ctrl;
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0,
+		claim + (1ULL << XDEV_EXT_MECH_L_GEN_SHIFT), 4096, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(frame.valid_len, 0);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 512, false), 0);
+	word = frame.ctrl;
+	/* A duplicate producer completion cannot replace an already READY payload. */
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(frame.valid_len, 512);
+	EXPECT_EQ(xdev_ext_mech_life_acquire(&frame, 0, 0, &consumer), 0);
+	word = frame.ctrl;
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, consumer, 4096, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(frame.valid_len, 512);
+	EXPECT_EQ(xdev_ext_mech_life_put(&frame, consumer), XDEV_EXT_MECH_L_FREED);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&frame, XDEV_EXT_MECH_L_OWNER_START, &next), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim_gen(next), 1);
+	word = frame.ctrl;
+	/* Neither stale failure nor stale compat completion may free the next read. */
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, -EIO, false), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, claim, 4096, true), -ESTALE);
+	EXPECT_EQ(frame.ctrl, word);
+	EXPECT_EQ(frame.valid_len, 512);
+	EXPECT_EQ(xdev_ext_unified_read_finish(&pool, 0, next, -EIO, false), 0);
+	EXPECT_EQ(xdev_ext_mech_life_phase(&frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(xdev_ext_mech_life_gen(&frame), 2);
 }
 
 static void test_write_compat_preserves_fd_durability_flags(void)
@@ -663,6 +723,7 @@ int main(void)
 	test_thread_offsets_and_tokens_are_isolated();
 	test_fork_requires_lazy_context_rebuild();
 	test_read_compat_recycles_but_pipeline_read_publishes();
+	test_read_finish_rejects_stale_or_nonproducer_claims();
 	test_write_compat_preserves_fd_durability_flags();
 	test_cqe_short_io_and_errno();
 	test_vectored_eligibility_and_staging();
