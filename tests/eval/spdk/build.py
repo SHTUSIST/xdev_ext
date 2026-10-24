@@ -39,8 +39,9 @@ SPDK_URL = "https://github.com/spdk/spdk"
 SPDK_TAG = "v25.05.1"
 # Peeled commit of the tag (git ls-remote --tags, 2026-10-22).
 SPDK_COMMIT = "44b23be7c35469bc0aba4b942c08c935125e2315"
-# configure requires ISA-L on x86_64; DPDK is the environment layer.
-SPDK_SUBMODULES = ("dpdk", "isa-l")
+# configure requires ISA-L and ISA-L-crypto on x86_64 even with --without-crypto;
+# DPDK is the environment layer. Their gitlinks are pinned by SPDK_COMMIT.
+SPDK_SUBMODULES = ("dpdk", "isa-l", "isa-l-crypto")
 CONFIGURE_FLAGS = ("--disable-tests", "--disable-unit-tests", "--disable-examples",
                    "--disable-apps", "--without-shared", "--without-crypto",
                    "--without-vhost", "--without-virtio", "--without-vfio-user",
@@ -244,6 +245,9 @@ def main(argv):
     print(json.dumps(dict(status="built", kind="native-spdk", execution="not-run",
                           spdk_root=str(src), spdk_commit=head,
                           spdk_tag=SPDK_TAG if head == SPDK_COMMIT else None,
+                          spdk_submodules={name: git_head(src / name)
+                                           if (src / name / ".git").exists() else None
+                                           for name in SPDK_SUBMODULES},
                           command=command, source_sha256=sha256(SOURCE),
                           owner_sha256=sha256(HERE / "spdk_owner.h"),
                           binary=str(output), binary_sha256=sha256(output))))

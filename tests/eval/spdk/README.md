@@ -92,7 +92,8 @@ python3 tests/eval/spdk/run.py --mode native-correctness --traddr 0000:5e:00.0 -
 
 `--fetch-sdk` clones SPDK `v25.05.1` (commit
 `44b23be7c35469bc0aba4b942c08c935125e2315`, checked after the clone) with
-the `dpdk` and `isa-l` submodules into `DIR/spdk`, configures it without
+the `dpdk`, `isa-l` and `isa-l-crypto` submodules at their pinned gitlinks into
+`DIR/spdk` (SPDK requires ISA-L-crypto even with crypto modules disabled), configures it without
 tests, examples, apps, shared libraries, FUSE/NVMe-CUSE and optional modules, builds it, and
 links the arm the way SPDK's `doc/pkgconfig.md` links the static nvme
 library (`--whole-archive -Bstatic` around `pkg-config --libs spdk_nvme
@@ -109,7 +110,8 @@ fabricated sysfs tree. With `SPDK_INCLUDE_DIR` set to the `include/`
 directory of an official checkout at the pinned tag, it also compiles the
 native body with `-fsyntax-only` against those headers. None of this links
 SPDK or touches a device; linking and the first native run are done on the
-server.
+server. The native build receipt records the actual HEAD of each SDK submodule
+(`null` when its checkout is absent).
 
 ## Origin and changes
 

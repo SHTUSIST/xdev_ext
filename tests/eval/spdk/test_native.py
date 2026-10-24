@@ -143,7 +143,7 @@ class Build(unittest.TestCase):
         self.assertEqual(self.build.SPDK_URL, "https://github.com/spdk/spdk")
         self.assertEqual(self.build.SPDK_TAG, "v25.05.1")
         self.assertEqual(self.build.SPDK_COMMIT, "44b23be7c35469bc0aba4b942c08c935125e2315")
-        self.assertEqual(self.build.SPDK_SUBMODULES, ("dpdk", "isa-l"))
+        self.assertEqual(self.build.SPDK_SUBMODULES, ("dpdk", "isa-l", "isa-l-crypto"))
 
     def test_fetch_and_configure_commands(self):
         src = Path("/private/build/spdk")
@@ -154,7 +154,7 @@ class Build(unittest.TestCase):
         self.assertEqual(clone[-1], str(src))
         sub = self.build.submodule_command(src)
         self.assertEqual(sub[:4], ["git", "-C", str(src), "submodule"])
-        self.assertEqual(sub[-2:], ["dpdk", "isa-l"])
+        self.assertEqual(sub[-3:], ["dpdk", "isa-l", "isa-l-crypto"])
         configure = self.build.configure_command(src)
         self.assertEqual(configure[0], str(src / "configure"))
         for flag in ("--disable-tests", "--disable-unit-tests", "--disable-examples",
@@ -239,6 +239,86 @@ class Build(unittest.TestCase):
             self.assertEqual(plan["spdk_tag"], "v25.05.1")
             self.assertEqual(plan["spdk_commit"], "44b23be7c35469bc0aba4b942c08c935125e2315")
             self.assertFalse(target.exists())
+
+    def test_first_fetch_supplies_configure_dependencies_and_records_their_heads(self):
+        # Model only the external build tools. The real CLI must fetch every
+        # configure dependency even with --without-crypto, then read each HEAD
+        # for its receipt. No network, SDK build or device is involved.
+        pins = {"dpdk": "cf36799c473a686fa14fde9af97f917a2125d3d5",
+                "isa-l": "6f420b14a1e3e091bc9d15f508a54f82c007483c",
+                "isa-l-crypto": "9b7a2b842c9f4e54b8dc1c82899e5a5520c53301"}
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tools = root / "tools"
+            tools.mkdir()
+            log = root / "argv.jsonl"
+            tool = tools / "tool"
+            tool.write_text("#!" + sys.executable + "\n" + r'''
+import json
+import os
+from pathlib import Path
+import sys
+
+name, args = Path(sys.argv[0]).name, sys.argv[1:]
+pins = json.loads(os.environ["SDK_TEST_PINS"])
+with open(os.environ["SDK_TEST_LOG"], "a") as log:
+    log.write(json.dumps([name, *args]) + "\n")
+if name == "git":
+    if args[0] == "clone":
+        src = Path(args[-1])
+        (src / "include/spdk").mkdir(parents=True)
+        for header in ("env.h", "nvme.h", "stdinc.h"):
+            (src / "include/spdk" / header).touch()
+        (src / "configure").symlink_to(Path(__file__).resolve())
+    elif args[0] == "-C":
+        src = Path(args[1])
+        if args[2:] == ["rev-parse", "HEAD"]:
+            if not src.is_dir():
+                sys.exit(1)
+            print(pins.get(src.name, "44b23be7c35469bc0aba4b942c08c935125e2315"))
+        elif args[2:7] == ["submodule", "update", "--init", "--depth", "1"]:
+            for module in args[7:]:
+                (src / module).mkdir(exist_ok=True)
+                (src / module / ".git").touch()
+        else:
+            sys.exit(1)
+    else:
+        sys.exit(1)
+elif name == "configure":
+    for module in pins:
+        if not (Path.cwd() / module).is_dir():
+            sys.exit("configure requires " + module + " even with --without-crypto")
+    pc = Path.cwd() / "build/lib/pkgconfig/spdk_nvme.pc"
+    pc.parent.mkdir(parents=True)
+    pc.touch()
+elif name == "cc":
+    Path(args[args.index("-o") + 1]).write_bytes(b"native link contract")
+elif name not in ("make", "pkg-config"):
+    sys.exit(1)
+''')
+            tool.chmod(0o700)
+            for name in ("git", "make", "pkg-config", "cc"):
+                (tools / name).symlink_to(tool)
+            env = dict(os.environ, PATH=str(tools), CC="cc", SDK_TEST_LOG=str(log),
+                       SDK_TEST_PINS=json.dumps(pins))
+            target = root / "sdk"
+            p = self.run_build("--fetch-sdk", "--build-dir", str(target), env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            self.assertIn(["git", "-C", str(target / "spdk"), "submodule", "update",
+                           "--init", "--depth", "1", *pins], calls)
+            receipt = json.loads(p.stdout)
+            self.assertEqual(receipt.get("spdk_submodules"), pins)
+            for module in pins:
+                self.assertIn(["git", "-C", str(target / "spdk" / module),
+                               "rev-parse", "HEAD"], calls)
+            # An externally built tree may lack a module checkout. Git would
+            # then walk up to the parent SPDK repository: do not mislabel it.
+            (target / "spdk/isa-l/.git").unlink()
+            p = self.run_build("--spdk-root", str(target / "spdk"),
+                               "--output", str(root / "relinked"), env=env)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            self.assertEqual(json.loads(p.stdout)["spdk_submodules"], dict(pins, **{"isa-l": None}))
 
     def test_offline_fixture_still_builds(self):
         with tempfile.TemporaryDirectory() as tmp:
