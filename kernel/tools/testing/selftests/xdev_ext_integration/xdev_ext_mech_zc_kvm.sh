@@ -16,6 +16,8 @@ PREPARE_ONLY=0
 DEBUG_LOCKING=0
 COMPAT=0
 LIFECYCLE=0
+FENCE_CHECK=0
+FENCE_NONCE_PREFIX=''
 PEER=0
 EVAL_SESSION=0
 GROUP_COUNT=4
@@ -38,6 +40,7 @@ while (($#)); do
 	--prepare-only) PREPARE_ONLY=1; shift ;;
 	--debug-locking) DEBUG_LOCKING=1; shift ;;
 	--lifecycle) LIFECYCLE=1; shift ;;
+	--fence-check) FENCE_CHECK=1; shift ;;
 	--compat) COMPAT=1; CE_SIM=1; shift ;;
 	--peer) PEER=1; CE_SIM=1; shift ;;
 	--eval-session) EVAL_SESSION=1; CE_SIM=1; shift ;;
@@ -56,6 +59,14 @@ while (($#)); do
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+# Fence checks extend normal plans and run before CE/network setup. The
+# default matrix never selects them. Never combine them with fault campaigns.
+if (( FENCE_CHECK )) && [[ -n "$FAULT_CAMPAIGN" ]]; then
+    echo 'fence-check cannot accompany fault-campaign' >&2; exit 2
+fi
+if (( FENCE_CHECK )) && [[ "$FAULT" != none || "$PROVIDER_CASE" != normal ]]; then
+    echo 'fence-check requires a normal correctness plan' >&2; exit 2
+fi
 # Debug kernels are correctness runs; allow instrumentation overhead without
 # changing the default campaign budgets or matrix selection.
 TIMEOUT_FACTOR=$((DEBUG_LOCKING ? 4 : 1))
@@ -192,12 +203,25 @@ PEER_OUT=$TOOLS/peer-guest
 EVAL_SESSION_OUT=$TOOLS/eval-session
 EVAL_SESSION_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py
 QEMU=/usr/local/bin/qemu-system-x86_64
+FENCE_OUT=$SOURCE_GIT_ROOT/tests/eval/dmabuf_lifecycle
+FENCE_GUEST=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh
+FENCE_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py
+FENCE_RUNNER=$FENCE_OUT/run.py
+if (( FENCE_CHECK )); then
+    # Require the real experiment and its production-header relative path.
+    [[ "$SOURCE_LAYOUT" == overlay ]] || { echo 'FAIL fence-check requires the product overlay source' >&2; exit 2; }
+    git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- \
+        tests/eval/dmabuf_lifecycle/{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
+        kernel/io_uring/xdev_ext_mech_lifecycle.h \
+        kernel/tools/testing/selftests/xdev_ext_integration/{xdev_ext_fence_guest.sh,xdev_ext_fence_validate.py} >/dev/null
+fi
 mkdir -p "$BUILD" "$EV" "$TOOLS"
 # Only current-run derived verdicts are invalidated. Historical campaign
 # directories and raw logs remain available even when this run fails early.
 clear_derived_results() {
     rm -f -- "$EV/result.txt" "$EV/data-result.txt" "$EV/validation.json" \
-        "$EV/eval-session-result.txt" "$EV/data.sha256" "$EV/source-after.sha256" "$EV/debug-locking.json" "$EV/debug-locking-result.txt"
+        "$EV/eval-session-result.txt" "$EV/data.sha256" "$EV/source-after.sha256" "$EV/debug-locking.json" "$EV/debug-locking-result.txt" \
+        "$EV/fence-result.txt" "$EV/fence-request.json"
 }
 clear_derived_results
 exec > >(tee -a "$EV/harness.log") 2>&1
@@ -290,6 +314,27 @@ stage_eval_session_image() {
     cp "$EVAL_SESSION_OUT/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
         "$ROOT/opt/xdev_ext/eval/"
 }
+verify_fence_identity() {
+    local symbol artifact
+    for symbol in MODULES MODULE_UNLOAD DMA_SHARED_BUFFER DEBUG_FS; do
+        grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || {
+            echo "FAIL fence-check requires CONFIG_$symbol=y" >&2; return 1;
+        }
+    done
+    # This file must be produced by a full matching kernel build, never made
+    # up or replaced by a headers-only compile. Hash it together with vmlinux.
+    for artifact in "$BUILD/Module.symvers" "$BUILD/vmlinux" \
+        "$BUILD/include/config/kernel.release" "$FENCE_OUT/lifecycle_bench.ko" \
+        "$FENCE_OUT/Kbuild" "$FENCE_OUT/Makefile" "$FENCE_OUT/lifecycle_bench.c" \
+        "$FENCE_OUT/lifecycle_core.h" "$FENCE_RUNNER" \
+        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER"; do
+        [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
+            echo 'FAIL fence-check artifact/dependency identity absent; rebuild exact source' >&2; return 1;
+        }
+    done
+    [[ $(modinfo -F name "$FENCE_OUT/lifecycle_bench.ko") == lifecycle_bench ]]
+    [[ $(modinfo -F vermagic "$FENCE_OUT/lifecycle_bench.ko" | cut -d' ' -f1) == "$(cat "$BUILD/include/config/kernel.release")" ]]
+}
 if (( RUN_ONLY )); then
     [[ -r "$BUILD/xdev-ext-source.commit" ]] || {
         echo 'FAIL run-only build identity missing; rebuild exact source' >&2; exit 1;
@@ -316,7 +361,7 @@ printf 'groups=%s\ndepth=%s\nce_slots=%s\n' "$GROUP_COUNT" "$DEPTH" "$CE_SLOTS" 
 printf 'remote_window=%s\nrel_policy=%s\n' "$REMOTE_WINDOW" "$REL_POLICY" >>"$EV/provenance.txt"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
-printf 'lifecycle=%s\n' "$LIFECYCLE" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/provenance.txt"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
@@ -345,6 +390,11 @@ if (( CE_SIM )); then
 	(cd "$SRC"; sha256sum tools/testing/selftests/xdev_ext_mech/simulate/{Makefile,xdev_ext_ce_sim.c} \
 		tools/xdev_ext_mech/ce_plan.bpf.c) >>"$EV/source-files.sha256"
 fi
+if (( FENCE_CHECK )); then
+    sha256sum "$FENCE_OUT/"{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
+        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
+        >>"$EV/source-files.sha256"
+fi
 if (( ! RUN_ONLY )); then
 	kmake defconfig >"$EV/defconfig.log" 2>&1
 	cfg() { "$SRC/scripts/config" --file "$BUILD/.config" "$@"; }
@@ -366,6 +416,7 @@ if (( ! RUN_ONLY )); then
         cfg -e XDEV_EXT_MECH_IAA -e CRYPTO_DEFLATE
     fi
     if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE; fi
+    if (( FENCE_CHECK )); then cfg -e MODULES -e MODULE_UNLOAD -e DMA_SHARED_BUFFER; fi
     if (( COMPAT )); then cfg -e XDEV_EXT_MECH_SOCKET -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
     if (( DEBUG_LOCKING )); then
@@ -389,11 +440,19 @@ if (( ! RUN_ONLY )); then
     if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then
         for symbol in XDEV_EXT_MECH_IAA CRYPTO_ACOMP2 CRYPTO_DEFLATE; do grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"; done
     fi
+    if (( FENCE_CHECK )); then
+        for symbol in MODULES MODULE_UNLOAD DMA_SHARED_BUFFER DEBUG_FS; do grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"; done
+    fi
 	if (( PREPARE_ONLY )); then echo XDEV_EXT_ZC_CONFIG=PASS; exit 0; fi
+    if (( FENCE_CHECK )); then
+        # Full link + modules produces genuine Module.symvers for this vmlinux.
+        kmake bzImage vmlinux modules >"$EV/fence-kernel-build.log" 2>&1
+        [[ -s "$BUILD/Module.symvers" && -s "$BUILD/vmlinux" ]]
+    fi
 	if (( CE_SIM )); then
 		kmake bzImage vmlinux modules_prepare >"$EV/kernel-build.log" 2>&1
 		# All guest drivers are built in; only this external stand-in is loaded.
-		cp "$BUILD/vmlinux.symvers" "$BUILD/Module.symvers"
+		if (( ! FENCE_CHECK )); then cp "$BUILD/vmlinux.symvers" "$BUILD/Module.symvers"; fi
 		mkdir -p "$CE_SIM_OUT"
 		cp "$SRC/tools/testing/selftests/xdev_ext_mech/simulate/Makefile" \
 			"$SRC/tools/testing/selftests/xdev_ext_mech/simulate/xdev_ext_ce_sim.c" "$CE_SIM_OUT/"
@@ -410,6 +469,12 @@ if (( ! RUN_ONLY )); then
 	else
 		kmake bzImage >"$EV/kernel-build.log" 2>&1
 	fi
+    if (( FENCE_CHECK )); then
+        # Original tree location retains lifecycle_core.h's actual production
+        # dependency. No copied headers, fake exports, or MODPOST suppression.
+        kmake M="$FENCE_OUT" MODULE_PAHOLE_FLAGS= modules >"$EV/fence-module-build.log" 2>&1
+        [[ -s "$FENCE_OUT/lifecycle_bench.ko" ]]
+    fi
 	lowprio make -C "$SRC/tools/xdev_ext_mech" -j8 BUILD_DIR="$TOOLS" \
 		VMLINUX_BTF="$BUILD/vmlinux" CC=gcc-14 CLANG=/usr/bin/clang-21 \
 		all >"$EV/tools-build.log" 2>&1
@@ -469,6 +534,12 @@ if (( ! RUN_ONLY )); then
             "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
             "$EVAL_SESSION_VALIDATOR" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
+    if (( FENCE_CHECK )); then
+        sha256sum "$BUILD/Module.symvers" "$BUILD/include/config/kernel.release" \
+            "$FENCE_OUT/lifecycle_bench.ko" "$FENCE_OUT/"{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
+            "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
+            >>"$BUILD/xdev-ext-artifacts.sha256"
+    fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
 fi
 sha256sum "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" >>"$EV/provenance.txt"
@@ -483,6 +554,20 @@ if (( EVAL_SESSION )); then
     verify_eval_session_identity
     cat "$BUILD/xdev-ext-eval-session-source.sha256" >>"$EV/source-files.sha256"
 fi
+if (( FENCE_CHECK )); then
+    verify_fence_identity
+    FENCE_NONCE_PREFIX=$(python3 -c 'import secrets; print(secrets.token_hex(16)[:31])')
+    python3 - "$EV/fence-request.json" "$SOURCE_COMMIT" "$FENCE_NONCE_PREFIX" \
+        "$FENCE_OUT/lifecycle_bench.ko" "$SRC/io_uring/xdev_ext_mech_lifecycle.h" \
+        "$BUILD/include/config/kernel.release" <<'PYFENCEREQUEST'
+import hashlib, json, pathlib, sys
+out, sha, nonce, module, header, release = sys.argv[1:]
+hashfile = lambda path: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+pathlib.Path(out).write_text(json.dumps(dict(exact_sha=sha, nonce_prefix=nonce, iterations=8,
+    module_sha256=hashfile(module), lifecycle_header_sha256=hashfile(header),
+    kernel_release=pathlib.Path(release).read_text().strip())) + '\n')
+PYFENCEREQUEST
+fi
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" && -x "$TOOLS/xdev_ext_mech_ctl" ]]
 mkdir -p "$ROOT"/{bin,sbin,dev,proc,sys,tmp,run,etc,usr/bin,opt/xdev_ext}
 [[ -e "$ROOT/dev/console" ]] || mknod -m 600 "$ROOT/dev/console" c 5 1
@@ -491,6 +576,10 @@ cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount umount mkdir cat echo sleep poweroff ip grep dmesg sync readlink timeout date tail head sed rmdir mktemp env wc cmp id basename cut mknod; do
 	ln -sf /bin/busybox "$ROOT/bin/$app"
 done
+if (( FENCE_CHECK )); then
+    for app in insmod rmmod sha256sum uname; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+    cp "$FENCE_OUT/lifecycle_bench.ko" "$FENCE_GUEST" "$ROOT/opt/xdev_ext/"
+fi
 if (( CE_SIM )); then
 	for app in insmod rmmod; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
 	cp "$CE_SIM_OUT/xdev_ext_ce_sim.ko" "$TOOLS/ce_plan.bpf.o" "$ROOT/opt/xdev_ext/"
@@ -563,6 +652,7 @@ printf 'groups=%s\nwindow_nlb=%s\nce_sim=%s\nce_len=%s\nce_delay_us=%s\nfault=%s
 printf 'rel_policy=%s\n' "$REL_POLICY" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FENCE_CHECK" "$FENCE_NONCE_PREFIX" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -649,6 +739,10 @@ if [ "$provider_case" != normal ]; then
         /opt/xdev_ext/xdev_ext_ce_sim.ko "$provider_case"
     echo "XDEV_EXT_ZC_PROVIDER_CASE=PASS case=$provider_case backend=CPU-memcpy-standin"
     exit 0
+fi
+if [ "$fence_check" = 1 ]; then
+    mount -t debugfs debugfs /sys/kernel/debug
+    sh /opt/xdev_ext/xdev_ext_fence_guest.sh /opt/xdev_ext/lifecycle_bench.ko "$fence_nonce_prefix" 8
 fi
 ip link set lo up
 ip link set eth0 up
@@ -1234,6 +1328,11 @@ if (( EVAL_SESSION )); then
         "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
         "$EVAL_SESSION_VALIDATOR" >>"$EV/artifacts.sha256"
 fi
+if (( FENCE_CHECK )); then
+    sha256sum "$FENCE_OUT/lifecycle_bench.ko" "$ROOT/opt/xdev_ext/lifecycle_bench.ko" \
+        "$ROOT/opt/xdev_ext/xdev_ext_fence_guest.sh" "$EV/fence-request.json" \
+        >>"$EV/artifacts.sha256"
+fi
 cat /proc/modules >"$EV/host-modules-before.txt"
 ip -details link show >"$EV/host-links-before.txt"
 set +e
@@ -1257,6 +1356,10 @@ cat /proc/modules >"$EV/host-modules-after.txt"
 ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
+if (( FENCE_CHECK )); then
+    python3 "$FENCE_VALIDATOR" "$EV/guest.log" "$EV/qemu.exit" "$EV/fence-request.json" \
+        | tee "$EV/fence-result.txt"
+fi
 [[ $rc == 0 ]]
 if (( EVAL_SESSION )); then
     python3 "$EVAL_SESSION_VALIDATOR" "$EV/guest.log" | tee "$EV/eval-session-result.txt"

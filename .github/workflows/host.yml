@@ -168,6 +168,8 @@ jobs:
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: make -C kernel/tools/testing/selftests/xdev_ext_peer run_tests
+      - name: Fence guest evidence rejection controls
+        run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py -v
       - name: Integration harness and verdict checks
         if: matrix.cc == 'gcc'
         run: python3 -m unittest discover -s kernel/tools/testing/selftests/xdev_ext_integration -p '*_test.py' -v

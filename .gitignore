@@ -1101,3 +1101,9 @@
 /tests/eval/dmabuf_lifecycle/modules.order
 /tests/eval/dmabuf_lifecycle/__pycache__/
 !/tests/eval/dmabuf_lifecycle/test_runner_provenance.py
+
+# Real matching-kernel fence guest checks and host-only evidence controls.
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_README.md
