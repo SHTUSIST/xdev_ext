@@ -65,7 +65,7 @@ for variant in reverse gray; do
     # This same invocation creates a new session on each A/B iteration. The
     # previous process closes its ring before detach/recreate of the object.
     set +e
-    E2_CREATE_CAPTURE="$out/$variant-create" "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
+    E2_UMEM_CAPTURE="$out/$variant-guards" E2_CREATE_CAPTURE="$out/$variant-create" "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
         --peer-mac "$peer_mac" --local-ip 192.0.2.1 --peer-ip "$sink_ip" \
         --local-port 54321 --peer-port 12345 --groups 16 --depth 1 \
         --group-bytes 4096 --timeout-ms 60000 > "$out/$variant-run.log" 2>&1

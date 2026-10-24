@@ -240,3 +240,40 @@ from expected slot mappings or sink bytes and does not create the final
 manifest's verifier-acceptance or kernel-build claims. Trace format/stats
 checks do not independently authenticate a forged producer; the integrator's
 hook and artifact audit remains required.
+
+### UMEM guards and the separate old-ticket software observation
+
+Only the E2 frontend's explicit `E2_UMEM_CAPTURE` mode observes the actual
+`XDP_UMEM_REG` arguments and initializes that real registered mapping. It saves
+all registered bytes before use. Before the existing ctl closes the owning
+ring, the frontend issues a real synchronous STOP; only a successful return
+permits a complete after snapshot, guard scan and subsequent close/unmap.
+A failed STOP retains the resources until the private guest is terminated.
+Normal ctl behavior has no guard instrumentation without the explicit flag.
+
+The frontend records actual registration/STOP returns, geometry and session;
+it also checks every byte outside the header/payload region allowed by the
+actual CREATE layout. `guard.py` independently reads the complete before/after
+bytes and applies the tighter union of the actual traced frame addresses and
+lengths, checking every unused frame byte too. The before pattern is defined
+per absolute UMEM offset as `(0xa7 + offset*131 + floor(offset/chunk)*17) & 255`.
+The host uses its own byte oracle. Full snapshots may be gzip-compressed for
+bounded serial transport; decompression has an explicit size limit.
+
+```
+python3 guard.py CAPTURE/reverse-guards reverse-events.json CAPTURE/reverse-create
+```
+
+The old-ticket completion negative is separately produced on the host from
+the established actual-core fixture, retaining its provider/OS host boundary:
+
+```
+python3 export_old_ticket.py FINAL_KERNEL_DIRECTORY NEW_SOFTWARE_EVIDENCE_DIRECTORY
+```
+
+This invokes the real extracted `xdev_ext_mech_batch_complete` with the old
+ticket after the existing fixture's second acceptance. The output retains
+full before/after lifecycle, completion, custody, queue, acceptance and
+publication observations, actual source SHA/hashes, compilation command and
+raw output. It is `actual-core-host-fixture` evidence and is never inserted
+into the guest native trace. Re-run it against the final integrated checkout.

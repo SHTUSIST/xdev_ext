@@ -1161,3 +1161,8 @@
 !/tests/eval/mechanism_variants/inspect_create.py
 !/tests/eval/mechanism_variants/test_inspect_create.py
 !/tests/eval/mechanism_variants/test_decode_regressions.py
+!/tests/eval/mechanism_variants/mv_umem_guard.h
+!/tests/eval/mechanism_variants/test_umem_guard.c
+!/tests/eval/mechanism_variants/guard.py
+!/tests/eval/mechanism_variants/test_guard.py
+!/tests/eval/mechanism_variants/export_old_ticket.py

@@ -15,7 +15,7 @@
 #include "../../../kernel/include/uapi/linux/xdev_ext_mech.h"
 
 _Static_assert(sizeof(struct xdev_ext_mech_create)==200,"update audited raw CREATE layout");
-static int mv_blob(const char *prefix,const char *suffix,const void *data,size_t bytes)
+static inline int mv_blob(const char *prefix,const char *suffix,const void *data,size_t bytes)
 {
     char path[4096];
     int fd, saved;
@@ -33,7 +33,7 @@ static int mv_blob(const char *prefix,const char *suffix,const void *data,size_t
     }
     return close(fd);
 }
-static int mv_fd_json(FILE *f,const char *role,int fd,int comma)
+static inline int mv_fd_json(FILE *f,const char *role,int fd,int comma)
 {
     struct stat st;
     struct sockaddr_xdp sx={0};
@@ -52,7 +52,7 @@ static int mv_fd_json(FILE *f,const char *role,int fd,int comma)
     fputc('}',f);
     return ferror(f)?-1:0;
 }
-static int mv_capture_before(const char *prefix,const struct xdev_ext_mech_create *c)
+static inline int mv_capture_before(const char *prefix,const struct xdev_ext_mech_create *c)
 {
     char *json=NULL;
     size_t size=0;
