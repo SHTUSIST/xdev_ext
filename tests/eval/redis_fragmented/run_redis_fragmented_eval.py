@@ -207,7 +207,9 @@ class OwnedRedis:
         try:
             self.directory = tempfile.TemporaryDirectory(
                 prefix='redis-frag-', dir=self.scratch_root)
-            root = Path(self.directory.name)
+            # Python before 3.12 can return a relative temporary root. Redis
+            # changes cwd to --dir before resolving its Unix socket path.
+            root = Path(self.directory.name).resolve()
             root.chmod(0o700)
             self.socket_path = root / 'redis.sock'
             self.log = (root / 'server.log').open('wb')
