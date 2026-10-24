@@ -65,6 +65,16 @@ static void test_spec(void)
 	EXPECT_EQ(s.wait, UO_WAIT_EVENTFD);
 	EXPECT_EQ(s.nvme_io, UO_IO_PASSTHRU_VEC);
 	EXPECT_EQ(s.hugepage, 1);
+	EXPECT_EQ(s.seed, 1); /* Old specs retain the common default. */
+	EXPECT_EQ(spec("nvme-nic", "\"seed\":0", false, &s, &e), 0);
+	EXPECT_EQ(s.seed, 0);
+	EXPECT_EQ(spec("nvme-nic", "\"seed\":17", false, &s, &e), 0);
+	EXPECT_EQ(s.seed, 17);
+	EXPECT_EQ(spec("nvme-nic", "\"seed\":18446744073709551615", false, &s, &e), 0);
+	EXPECT_EQ(s.seed == UINT64_MAX, 1);
+	EXPECT_EQ(spec("nvme-nic", "\"seed\":true", false, &s, &e), -1);
+	EXPECT_PREFIX(e.msg, "invalid: seed must be an unsigned integer");
+	EXPECT_EQ(spec("nvme-nic", "\"seed\":18446744073709551616", false, &s, &e), -1);
 	EXPECT_EQ(spec("nic-nvme", "\"oracle\":{\"kind\":\"file\",\"path\":\"/dev/nvme1n1\","
 		       "\"reference\":\"/tmp/r\"}", false, &s, &e), 0);
 	EXPECT_EQ(s.rx, 1);

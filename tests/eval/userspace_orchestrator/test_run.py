@@ -106,6 +106,23 @@ class Specs(unittest.TestCase):
         _, out = uo_run.parse(['--rig', 'r.json', '--load', 'sustained'])
         self.assertEqual(out[-2:], ['--load', 'sustained'])
 
+    def test_seed_schema_accepts_real_producer_and_rejects_invalid_values(self):
+        for wait in ('poll', 'eventfd'):
+            for name, generated in self.uo_specs('nvme-nic', wait).items():
+                for seed in (0, 5, (1 << 64) - 1):
+                    with self.subTest(wait=wait, chain=name, seed=seed):
+                        self.assertEqual(self.validate(dict(generated, seed=seed))[0], 0)
+                legacy = dict(generated)
+                del legacy['seed']
+                self.assertEqual(self.validate(legacy)[0], 0)
+                for seed in (True, False, None, '5', 1.5, -1, 1 << 64):
+                    with self.subTest(wait=wait, chain=name, invalid_seed=seed):
+                        self.assertEqual(self.validate(dict(generated, seed=seed))[0], 2)
+                bad = dict(generated, seed_typo=17)
+                code, diagnostic = self.validate(bad)
+                self.assertEqual(code, 2)
+                self.assertIn('unknown member seed_typo', diagnostic)
+
     def test_receiver_has_the_oracle(self):
         s = self.uo_specs('nvme-nic')
         self.assertNotIn('oracle', s['nvme-nic'])

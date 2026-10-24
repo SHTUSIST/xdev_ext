@@ -40,7 +40,7 @@ struct uo_spec {
 	enum chain_xsk_mode xsk_mode;
 	enum chain_load load;
 	uint32_t group_bytes, depth, burst, lba_bytes;
-	uint64_t batches, warmup, timeout_ms;
+	uint64_t batches, warmup, timeout_ms, seed;
 	bool hugepage;
 	char ng[CHAIN_PATH_MAX], block[CHAIN_PATH_MAX];
 	uint64_t slba, nlb;
@@ -63,7 +63,7 @@ static inline int uo_parse(const char *text, size_t len, struct uo_spec *s,
 	static const char *const keys[] = { "schema", "chain", "mode", "wait",
 		"nvme_io", "afxdp_mode", "group_bytes", "batches", "warmup", "burst",
 		"depth", "timeout_ms", "hugepage", "nvme", "nic", "gpu", "peer",
-		"oracle", "out", "load", NULL };
+		"oracle", "out", "load", "seed", NULL };
 	static const char *const nvme_keys[] = { "ng", "block", "slba", "nlb",
 		"lba_bytes", NULL };
 	static const char *const nic_keys[] = { "ifname", "queue", NULL };
@@ -108,6 +108,7 @@ static inline int uo_parse(const char *text, size_t len, struct uo_spec *s,
 		      &s->group_bytes, e) ||
 	    chain_u64(&doc, root, "batches", 0, true, 1, CHAIN_MAX_BATCHES, &s->batches, e) ||
 	    chain_u64(&doc, root, "warmup", 0, false, 0, CHAIN_MAX_BATCHES, &s->warmup, e) ||
+	    chain_u64(&doc, root, "seed", 1, false, 0, UINT64_MAX, &s->seed, e) ||
 	    chain_u32(&doc, root, "burst", 1, false, 1, CHAIN_MAX_BATCHES, &s->burst, e) ||
 	    chain_u32(&doc, root, "depth", 0, true, 1, CHAIN_MAX_DEPTH, &s->depth, e) ||
 	    chain_u64(&doc, root, "timeout_ms", 30000, false, 1, 3600000, &s->timeout_ms, e) ||
