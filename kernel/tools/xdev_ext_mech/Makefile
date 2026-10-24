@@ -11,6 +11,7 @@
 CC ?= gcc
 CLANG ?= clang
 BPFTOOL ?= bpftool
+PAHOLE ?= pahole
 VMLINUX_BTF ?= /sys/kernel/btf/vmlinux
 BUILD_DIR ?= .xdev_ext-mech-build
 
@@ -39,6 +40,14 @@ bpf: $(BPF_OBJECTS)
 check-cpu-bpf:
 	CC="$(CC)" CLANG="$(CLANG)" python3 ../testing/selftests/xdev_ext_mech_tools/xdev_ext_cpu_bpf_test.py
 
+# Requires io_uring/xdev_ext_mech_ops.o and net/xdp/xsk.o from an actual
+# SOCKET-off Kbuild with DWARF. This is separate from the fast CPU ABI check.
+check-optional-btf:
+	@test -n "$(KBUILD_OUTPUT)" || { echo "set KBUILD_OUTPUT to the prepared O= directory"; exit 1; }
+	python3 ../testing/selftests/xdev_ext_mech_tools/xdev_ext_optional_btf_test.py \
+		--kbuild-output "$(KBUILD_OUTPUT)" --results "$(abspath $(BUILD_DIR))/optional-btf" \
+		--pahole "$(PAHOLE)" --bpftool "$(BPFTOOL)" --clang "$(CLANG)"
+
 $(BUILD_DIR):
 	mkdir -p $@
 
@@ -65,7 +74,7 @@ $(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all bpf check-cpu-bpf clean ctl
+.PHONY: all bpf check-cpu-bpf check-optional-btf clean ctl
 
 $(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/xdev_ext_peer.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)

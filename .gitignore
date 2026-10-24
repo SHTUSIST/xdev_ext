@@ -1200,3 +1200,5 @@
 !/kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
 
 !/tests/eval/bam/test_native_contract.py
+
+!/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_optional_btf_test.py
