@@ -30,6 +30,7 @@ jobs:
       - name: Tool accounting, buffer bounds and SGL profile contracts
         run: |
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_reliable_accounting_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_source_drain_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
           python3 kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
       - name: Reference-counted lifecycle and CPU transform contracts
@@ -173,7 +174,7 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_source_test.py 2>&1 | tee "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py 2>&1 | tee -a "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py 2>&1 | tee -a "$log"
-          for t in teardown stop_work_rearm start_keys frames_release transform_alias alias_table stage_get_cmd; do
+          for t in teardown stop_work_rearm start_keys frames_release transform_alias alias_table stage_get_cmd detach_generation; do
             python3 kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/${t}_test.py 2>&1 | tee -a "$log"
           done
           sh kernel/tools/testing/selftests/xdev_ext_mech/iaa_transform/run.sh 2>&1 | tee -a "$log"
