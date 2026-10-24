@@ -19,7 +19,7 @@ ifeq ($(UO_CUDA),1)
 CFLAGS += -DUO_CUDA
 endif
 
-HEADERS := uo_core.h ../chains/chain_json.h ../chains/chain_spec.h ../chains/chain_check.h \
+HEADERS := uo_core.h uo_native_trace.h ../common/native_process.h ../chains/chain_json.h ../chains/chain_spec.h ../chains/chain_check.h \
 	../chains/chain_crc.h ../chains/chain_timing.h \
 	../chains/chain_oracle.h ../chains/chain_nxp.h ../chains/chain_cuda.h \
 	../chains/uring_min.h $(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h

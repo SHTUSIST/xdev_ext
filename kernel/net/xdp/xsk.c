@@ -621,9 +621,97 @@ static void xsk_cq_cancel_locked(struct xsk_buff_pool *pool, u32 n)
 	spin_unlock_irqrestore(&pool->cq_lock, flags);
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <trace/events/xdev_ext.h>
+/* Lock gives descriptor events a per-pool total sequence, across all CPUs.
+ * Fresh pools must be created with tracing enabled: an unobserved prefix
+ * deliberately produces underflow and makes a capture unavailable.
+ */
+static void xsk_native_trace_event(struct xsk_buff_pool *pool, const char *phase,
+				   struct xdev_ext_trace_entry *e, u32 n, int status)
+{
+	xdev_ext_native_event_emit(phase, xsk_xdev_ext_mech_tx_active(pool) ? "K" : "U",
+		0, 0, 0, 0, 0, 0, 0, XDEV_EXT_MECH_CLASS_AFXDP,
+		!status, status, (u64)(unsigned long)pool, e ? e->address : 0,
+		e ? e->bytes : 0, n, e ? e->sequence : pool->native_trace.sequence, 0, 0, 0);
+}
+
+static void xsk_native_trace_submit(struct xsk_buff_pool *pool,
+				    const struct xdp_desc *descs, u32 n)
+{
+	struct xdev_ext_trace_entry e;
+	unsigned long flags;
+	u32 i;
+	int ret;
+
+	if (!trace_native_event_enabled() || !n)
+		return;
+	spin_lock_irqsave(&pool->native_trace_lock, flags);
+	for (i = 0; i < n; i++) {
+		ret = xdev_ext_trace_push(&pool->native_trace,
+				descs[i].addr, descs[i].len, &e);
+		if (ret) {
+			xsk_native_trace_event(pool, "trace_invalid", NULL, n, ret);
+			break;
+		}
+		xsk_native_trace_event(pool, "native_submit", &e, n, 0);
+	}
+	spin_unlock_irqrestore(&pool->native_trace_lock, flags);
+}
+
+/* n counts descriptors, including multiple frames of one logical record. */
+static void xsk_native_trace_complete(struct xsk_buff_pool *pool, u32 n)
+{
+	struct xdev_ext_trace_entry e;
+	unsigned long flags;
+	u32 i;
+
+	if (!trace_native_event_enabled() || !n)
+		return;
+	spin_lock_irqsave(&pool->native_trace_lock, flags);
+	if (n > pool->native_trace.count) {
+		xsk_native_trace_event(pool, "trace_invalid", NULL, n, -ENODATA);
+		goto out;
+	}
+	for (i = 0; i < n; i++) {
+		xdev_ext_trace_pop(&pool->native_trace, &e);
+		xsk_native_trace_event(pool, "native_complete", &e, n, e.status);
+	}
+out:
+	spin_unlock_irqrestore(&pool->native_trace_lock, flags);
+}
+
+static void xsk_native_trace_tail(struct xsk_buff_pool *pool, u32 n,
+				  int status, bool cancel)
+{
+	struct xdev_ext_trace_journal *j = &pool->native_trace;
+	unsigned long flags;
+	int ret;
+
+	if (!trace_native_event_enabled() || !n)
+		return;
+	spin_lock_irqsave(&pool->native_trace_lock, flags);
+	ret = xdev_ext_trace_tail(j, n, status ?: -ECANCELED);
+	/* Native tail cancellation is not a successful completion. */
+	xsk_native_trace_event(pool, "trace_invalid", NULL, n, ret ?: status ?: -ECANCELED);
+	if (!ret && cancel)
+		j->count -= n;
+	spin_unlock_irqrestore(&pool->native_trace_lock, flags);
+}
+#else
+static inline void xsk_native_trace_submit(struct xsk_buff_pool *pool,
+					 const struct xdp_desc *descs, u32 n) {}
+static inline void xsk_native_trace_complete(struct xsk_buff_pool *pool, u32 n) {}
+static inline void xsk_native_trace_tail(struct xsk_buff_pool *pool, u32 n,
+				       int status, bool cancel) {}
+#endif
+
 void xsk_tx_completed(struct xsk_buff_pool *pool, u32 nb_entries)
 {
-	int ret = xsk_xdev_ext_mech_tx_complete(pool, nb_entries, 0, false, false);
+	int ret;
+
+	xsk_native_trace_complete(pool, nb_entries);
+	ret = xsk_xdev_ext_mech_tx_complete(pool, nb_entries, 0, false, false);
 
 	if (ret != -EOPNOTSUPP)
 		return;
@@ -638,7 +726,10 @@ EXPORT_SYMBOL(xsk_tx_completed);
 void xsk_tx_cancel_tail(struct xsk_buff_pool *pool, u32 nb_entries,
 			int result)
 {
-	int ret = xsk_xdev_ext_mech_tx_complete(pool, nb_entries, result, true, false);
+	int ret;
+
+	xsk_native_trace_tail(pool, nb_entries, result, true);
+	ret = xsk_xdev_ext_mech_tx_complete(pool, nb_entries, result, true, false);
 
 	if (ret != -EOPNOTSUPP)
 		return;
@@ -652,6 +743,7 @@ EXPORT_SYMBOL(xsk_tx_cancel_tail);
 void xsk_tx_set_tail_result(struct xsk_buff_pool *pool, u32 nb_entries,
 			    int result)
 {
+	xsk_native_trace_tail(pool, nb_entries, result, false);
 	if (xsk_xdev_ext_mech_tx_complete(pool, nb_entries, result, true, true) == -EOPNOTSUPP)
 		(void)xsk_xdev_ext_zc_tx_set_tail_result(pool, nb_entries, result);
 }
@@ -678,11 +770,17 @@ bool xsk_tx_peek_desc(struct xsk_buff_pool *pool, struct xdp_desc *desc)
 	int ret;
 
 	ret = xsk_xdev_ext_mech_tx_peek(pool, desc);
-	if (ret != -EOPNOTSUPP)
+	if (ret != -EOPNOTSUPP) {
+		if (ret > 0)
+			xsk_native_trace_submit(pool, desc, 1);
 		return ret > 0;
+	}
 	ret = xsk_xdev_ext_zc_tx_peek_desc(pool, desc);
-	if (ret != -EOPNOTSUPP)
+	if (ret != -EOPNOTSUPP) {
+		if (ret > 0)
+			xsk_native_trace_submit(pool, desc, 1);
 		return ret > 0;
+	}
 
 	rcu_read_lock();
 again:
@@ -710,6 +808,7 @@ again:
 
 		xskq_cons_release(xs->tx);
 		rcu_read_unlock();
+		xsk_native_trace_submit(pool, desc, 1);
 		return true;
 	}
 
@@ -746,11 +845,17 @@ u32 xsk_tx_peek_release_desc_batch(struct xsk_buff_pool *pool, u32 nb_pkts)
 	int ret;
 
 	ret = xsk_xdev_ext_mech_tx_batch(pool, nb_pkts);
-	if (ret != -EOPNOTSUPP)
+	if (ret != -EOPNOTSUPP) {
+		if (ret > 0)
+			xsk_native_trace_submit(pool, pool->tx_descs, ret);
 		return ret < 0 ? 0 : ret;
+	}
 	ret = xsk_xdev_ext_zc_tx_peek_release_desc_batch(pool, nb_pkts);
-	if (ret != -EOPNOTSUPP)
+	if (ret != -EOPNOTSUPP) {
+		if (ret > 0)
+			xsk_native_trace_submit(pool, pool->tx_descs, ret);
 		return ret < 0 ? 0 : ret;
+	}
 
 	rcu_read_lock();
 	if (!list_is_singular(&pool->xsk_tx_list)) {
@@ -798,6 +903,7 @@ out_unlock_cq:
 	spin_unlock_irqrestore(&pool->cq_lock, flags);
 out:
 	rcu_read_unlock();
+	xsk_native_trace_submit(pool, pool->tx_descs, nb_pkts);
 	return nb_pkts;
 }
 EXPORT_SYMBOL(xsk_tx_peek_release_desc_batch);

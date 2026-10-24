@@ -1178,6 +1178,8 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 			.desc = *d, .batch = tb, .slot = i,
 			.state = XSK_MECH_ZC_PENDING,
 		};
+		xdev_ext_mech_trace_descriptor_bind(b, i, (u64)(unsigned long)p->xp,
+					     d->addr, d->len);
 		*xst->tx_tag[i] = xdev_ext_mech_batch_id(b);
 	}
 	spin_unlock_irqrestore(&p->tx_lock, flags);

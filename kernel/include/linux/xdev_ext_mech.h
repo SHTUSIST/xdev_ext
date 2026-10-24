@@ -548,6 +548,18 @@ u64 xdev_ext_mech_batch_ticket(const struct xdev_ext_mech_batch *b);
  * callbacks after native/session destruction remain invalid.
  */
 int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b, u64 ticket);
+/* Worker context: snapshot planned command and actual class validation result. */
+void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b, u64 lba,
+			    u32 bytes, u32 plan, int status);
+/* Worker context, provider TX lock held: immutable frame/descriptor binding. */
+void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch *b,
+		u32 pos, u64 pool, u64 address, u32 bytes);
+/* Worker context: immediately before native accepted-request handoff. */
+void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b, u64 cookie,
+				     u64 lba, u32 bytes, u32 opcode);
+/* Any context: winning native end_io claim, before completion publication. */
+void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
+				       u64 ticket, int status);
 /* Any context: matching claim winner only; publish metadata then enqueue. */
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket,
 				      int err, bool sequester);

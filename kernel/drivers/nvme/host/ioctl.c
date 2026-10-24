@@ -13,6 +13,7 @@
 #include "../../../io_uring/xdev_ext_mech_core.h"
 #include "nvme.h"
 #ifdef CONFIG_XDEV_EXT_MECH
+#include <trace/events/xdev_ext.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #endif
 
@@ -790,6 +791,7 @@ struct nvme_uring_cmd_pdu {
 	struct bio *bio;
 	u64 result;
 	int status;
+	u32 trace_bytes; /* existing alignment padding; assigned only when tracing */
 };
 
 static inline struct nvme_uring_cmd_pdu *nvme_uring_cmd_pdu(
@@ -914,6 +916,55 @@ static void nvme_uring_task_cb(struct io_uring_cmd *ioucmd,
 	}
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/* U user_data is only a cookie; immutable workload sideband supplies identity. */
+static void nvme_uring_native_trace(struct request *req,
+				   const char *phase, int status)
+{
+	struct io_uring_cmd *cmd = req->end_io_data;
+	struct nvme_command *c = nvme_req(req)->cmd;
+
+	if (trace_native_event_enabled()) {
+		struct task_struct *owner = io_uring_cmd_get_task(cmd)->group_leader;
+		struct nvme_uring_cmd_pdu *pdu = nvme_uring_cmd_pdu(cmd);
+		u64 cookie = cmd_to_io_kiocb(cmd)->cqe.user_data;
+		struct xdev_ext_native_event e = {
+			.phase = phase, .origin = "U", .class_id = XDEV_EXT_MECH_CLASS_NVME,
+			.accepted = 1, .status = status, .cookie = cookie,
+			.address = le64_to_cpu(c->rw.slba),
+			.bytes = !strcmp(phase, "native_submit") ? blk_rq_bytes(req) : pdu->trace_bytes,
+			.aux = (u32)c->rw.opcode | (u32)le16_to_cpu(c->rw.length) << 8,
+			.sequence = (u64)(unsigned long)req, .origin_tgid = task_tgid_nr(owner),
+			.process_start_ticks = nsec_to_clock_t(owner->start_boottime),
+			.native_user_data = cookie,
+		};
+
+		if (!strcmp(phase, "native_submit")) {
+			struct req_iterator iter;
+			struct bio_vec bvec;
+			struct xdev_ext_native_event span = e;
+			u64 offset = 0;
+
+			pdu->trace_bytes = blk_rq_bytes(req);
+			e.bytes = pdu->trace_bytes;
+			span.phase = "native_span";
+			rq_for_each_segment(bvec, req, iter) {
+				span.address = page_to_phys(bvec.bv_page) + bvec.bv_offset;
+				span.bytes = bvec.bv_len;
+				span.aux = offset;
+				trace_native_event(&span);
+				offset += bvec.bv_len;
+			}
+		}
+		trace_native_event(&e);
+	}
+}
+
+#else
+static inline void nvme_uring_native_trace(struct request *req,
+					const char *phase, int status) {}
+#endif
+
 static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 						blk_status_t err)
 {
@@ -927,6 +978,7 @@ static enum rq_end_io_ret nvme_uring_cmd_end_io(struct request *req,
 		if (!pdu->status)
 			pdu->status = blk_status_to_errno(err);
 	}
+	nvme_uring_native_trace(req, "native_complete", pdu->status);
 	pdu->result = le64_to_cpu(nvme_req(req)->result.u64);
 	if (io_uring_cmd_get_async_data(ioucmd)->op_data) {
 		struct nvme_xdev_ext_sidecar *sidecar =
@@ -1168,6 +1220,7 @@ static int nvme_uring_cmd_io(struct nvme_ctrl *ctrl, struct nvme_ns *ns,
 	pdu->req = req;
 	req->end_io_data = ioucmd;
 	req->end_io = nvme_uring_cmd_end_io;
+	nvme_uring_native_trace(req, "native_submit", 0);
 	blk_execute_rq_nowait(req, false);
 	return -EIOCBQUEUED;
 

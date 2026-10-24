@@ -1114,3 +1114,20 @@
 !/tests/eval/native_views/README.md
 !/tests/eval/native_views/test_import.py
 !/tests/eval/native_views/test_review_regressions.py
+# Native provider tracing overlay
+!/kernel/include/trace/
+!/kernel/include/trace/events/
+!/kernel/include/trace/events/xdev_ext.h
+!/kernel/include/linux/xdev_ext_trace_journal.h
+!/tests/eval/userspace_orchestrator/uo_native_trace.h
+!/kernel/drivers/net/ethernet/intel/
+!/kernel/drivers/net/ethernet/intel/ice/
+!/kernel/drivers/net/ethernet/intel/ice/ice_xsk.c
+!/tests/eval/native_trace/
+!/tests/eval/native_trace/test_native_journal.py
+!/tests/eval/native_trace/test_uo_cookie.py
+!/tests/eval/native_trace/test_provider_boundary.py
+!/tests/eval/native_trace/test_xsk_boundaries.py
+!/tests/eval/common/native_process.h
+!/tests/eval/native_trace/test_uo_journal.py
+!/tests/eval/native_trace/test_uring_completion.py

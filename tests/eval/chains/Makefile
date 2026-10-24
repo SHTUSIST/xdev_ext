@@ -21,7 +21,7 @@ BPF_ARCH ?= x86
 MULTIARCH ?= $(shell $(CC) -print-multiarch 2>/dev/null)
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH)
 
-HEADERS := chain_json.h chain_spec.h chain_check.h chain_crc.h chain_timing.h chain_oracle.h chain_bench.h chain_cuda.h chain_nxp.h \
+HEADERS := ../common/native_process.h chain_json.h chain_spec.h chain_check.h chain_crc.h chain_timing.h chain_oracle.h chain_bench.h chain_cuda.h chain_nxp.h \
 	uring_min.h $(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h
 SOURCES := chain_bench.c chain_session.c chain_staged.c \
 	$(KERNEL)/tools/xdev_ext_xsk_redirect.c $(KERNEL)/tools/xdev_ext_gpu_identity.c

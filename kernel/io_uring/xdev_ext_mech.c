@@ -40,6 +40,10 @@
 #include <linux/workqueue.h>
 #include <uapi/linux/if_xdp.h>
 
+#define CREATE_TRACE_POINTS
+#include <trace/events/xdev_ext.h>
+EXPORT_TRACEPOINT_SYMBOL_GPL(native_event);
+
 #include "xdev_ext_mech_core.h"
 #include "xdev_ext_mech_lifecycle.h"
 #include "xdev_ext_mech_internal.h"
@@ -75,6 +79,8 @@ struct xdev_ext_mech_batch {
 	u32 queued;
 	struct xdev_ext_mech_completion completion;
 	u64 ticket;
+	u64 trace_cookie, trace_lba;
+	u32 trace_bytes, trace_opcode;
 	struct list_head node;		/* s->free or s->open, under s->lock */
 	struct xdev_ext_mech_bstate bs;	/* s->lock while OPEN, else the worker */
 	struct xdev_ext_mech_group group;	/* RX holds, under s->lock */
@@ -186,6 +192,9 @@ struct xdev_ext_mech_session {
 	atomic64_t submitted[XDEV_EXT_MECH_MAX_STAGES];
 	atomic64_t completed[XDEV_EXT_MECH_MAX_STAGES];
 };
+
+static void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
+		const char *phase, u32 i, u64 ticket, int status);
 
 static atomic64_t xdev_ext_mech_next_id;
 static LIST_HEAD(xdev_ext_mech_all);
@@ -451,6 +460,8 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 		if (to == XDEV_EXT_MECH_F_USER) {
 			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PUBLISHED, 1);
 		} else {
+			if (trace_native_event_enabled())
+				xdev_ext_mech_trace_frame(b, "frame_recycle", pos, b->ticket, 0);
 			s->pool.ops->recycle(&s->pool, f);
 			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_RECYCLED, 1);
 		}
@@ -1248,6 +1259,89 @@ static int xdev_ext_mech_batch_handoff(struct xdev_ext_mech_batch *b,
  return err;
 }
 
+/* Native callback owns the immutable batch until completion publication. */
+static void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
+		const char *phase, u32 i, u64 ticket, int status)
+{
+	u32 stage = min(b->bs.stage, b->s->nr_stages - 1);
+	u32 j, offset = 0;
+	bool native = !strcmp(phase, "native_submit") ||
+		!strcmp(phase, "native_complete") || !strcmp(phase, "class_validate");
+	bool before = !strcmp(phase, "record_admit") || !strcmp(phase, "class_validate");
+
+	for (j = 0; j < i; j++)
+		offset += b->f[j].data_len;
+	xdev_ext_native_event_emit(phase, "K", xdev_ext_mech_session_id(b->s),
+		b->id, b->key, b->f[i].index,
+		before ? xdev_ext_mech_life_token(&b->s->life[b->f[i].index]) : b->life_token[i],
+		stage, ticket, b->s->st[stage].class_id,
+		!strcmp(phase, "class_validate") ? !status : 1, status,
+		native ? b->trace_cookie : 0,
+		native ? b->trace_lba : b->f[i].umem_addr + b->f[i].data_off,
+		native ? b->trace_bytes : b->f[i].data_len,
+		native ? b->trace_opcode : 0, 0, i, offset, b->f[i].data_len);
+}
+
+static void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch *b,
+				     const char *phase, u64 ticket, int status)
+{
+	u32 i;
+
+	if (!trace_native_event_enabled())
+		return;
+	for (i = 0; i < b->nr_frames; i++)
+		xdev_ext_mech_trace_frame(b, phase, i, ticket, status);
+}
+
+void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b, u64 lba,
+			    u32 bytes, u32 plan, int status)
+{
+	if (!trace_native_event_enabled())
+		return;
+	b->trace_cookie = 0;
+	b->trace_lba = lba;
+	b->trace_bytes = bytes;
+	b->trace_opcode = plan;
+	xdev_ext_mech_trace_batch(b, "class_validate", 0, status);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_plan);
+
+void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch *b,
+		u32 pos, u64 pool, u64 address, u32 bytes)
+{
+	u32 i, offset = 0;
+
+	if (!trace_native_event_enabled() || pos >= b->nr_frames)
+		return;
+	for (i = 0; i < pos; i++)
+		offset += b->f[i].data_len;
+	xdev_ext_native_event_emit("descriptor_bind", "K", b->s->id,
+		b->id, b->key, b->f[pos].index, b->life_token[pos],
+		b->bs.stage, b->ticket, XDEV_EXT_MECH_CLASS_AFXDP, 1, 0,
+		pool, address, bytes, 0, 0, pos, offset, b->f[pos].data_len);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_descriptor_bind);
+
+void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b, u64 cookie,
+				     u64 lba, u32 bytes, u32 opcode)
+{
+	if (!trace_native_event_enabled())
+		return;
+	b->trace_cookie = cookie;
+	b->trace_lba = lba;
+	b->trace_bytes = bytes;
+	b->trace_opcode = opcode;
+	xdev_ext_mech_trace_batch(b, "native_submit", b->ticket, 0);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_native_submit);
+
+void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
+				       u64 ticket, int status)
+{
+	xdev_ext_mech_trace_batch(b, "native_complete", ticket, status);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_native_complete);
+
 /* Only the matching claim winner may call this and write class metadata. */
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket,
 				      int err, bool sequester)
@@ -1440,6 +1534,8 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
 		b->bs.state = XDEV_EXT_MECH_B_SEQUESTERED;
 		xdev_ext_mech_session_stop(s, err);
 	}
+	xdev_ext_mech_trace_batch(b, "record_terminal", b->ticket,
+		how == XDEV_EXT_MECH_END_DONE ? 0 : (err ?: -EIO));
 	/* Frame release can itself discover uncertainty. Resource leases may
 	 * become reusable only after that final disposition is known.
 	 */
@@ -1972,6 +2068,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 	bool illegal;
 	int err;
 
+	xdev_ext_mech_trace_batch(b, "downstream_complete", b->ticket, b->status);
 	atomic64_inc(&s->completed[b->bs.stage]);
 	if (!b->parent)
 	WARN_ON_ONCE(xdev_ext_mech_frames_move(s, b, XDEV_EXT_MECH_F_INFLIGHT,
@@ -2197,8 +2294,10 @@ static void xdev_ext_mech_start_more(struct xdev_ext_mech_session *s)
 		xdev_ext_mech_batch_step(&b->bs, XDEV_EXT_MECH_EV_READY, 0);
 		if (ret)
 			xdev_ext_mech_abort(s, b, ret);
-		else
+		else {
+			xdev_ext_mech_trace_batch(b, "record_admit", 0, 0);
 			xdev_ext_mech_batch_run(s, b);
+		}
 	}
 }
 
@@ -3024,6 +3123,16 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 	mutex_lock(&xdev_ext_mech_live_lock);
 	list_add_tail(&s->live_node, &xdev_ext_mech_live);
 	mutex_unlock(&xdev_ext_mech_live_lock);
+	if (trace_native_event_enabled()) {
+		struct xdev_ext_native_event e = {
+			.phase = "session_bind", .origin = "K", .session_id = s->id,
+			.accepted = 1, .cookie = (u64)(unsigned long)ctx, .bytes = s->frames,
+			.origin_tgid = task_tgid_nr(current),
+			.process_start_ticks = nsec_to_clock_t(current->group_leader->start_boottime),
+		};
+
+		trace_native_event(&e);
+	}
 	/* A generation retracted before the session was listed. */
 	if (!xdev_ext_mech_session_admits(s))
 		xdev_ext_mech_session_stop(s, -ECANCELED);

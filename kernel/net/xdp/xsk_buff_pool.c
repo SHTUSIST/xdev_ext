@@ -5,6 +5,9 @@
 #include <net/xsk_buff_pool.h>
 #include <net/xdp_sock.h>
 #include <net/xdp_sock_drv.h>
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <trace/events/xdev_ext.h>
+#endif
 
 #include "xsk_queue.h"
 #include "xdp_umem.h"
@@ -43,6 +46,9 @@ void xp_destroy(struct xsk_buff_pool *pool)
 		return;
 
 	xsk_xdev_ext_pool_destroy(pool);
+#ifdef CONFIG_XDEV_EXT_MECH
+	kvfree(pool->native_trace.entries);
+#endif
 	kvfree(pool->tx_descs);
 	kvfree(pool->heads);
 	kvfree(pool);
@@ -57,6 +63,17 @@ int xp_alloc_tx_descs(struct xsk_buff_pool *pool, struct xdp_sock *xs)
 	pool->tx_descs = kvcalloc(capacity, sizeof(*pool->tx_descs), GFP_KERNEL);
 	if (!pool->tx_descs)
 		return -ENOMEM;
+#ifdef CONFIG_XDEV_EXT_MECH
+	pool->native_trace.entries = kvcalloc(capacity,
+			sizeof(*pool->native_trace.entries), GFP_KERNEL);
+	if (!pool->native_trace.entries) {
+		kvfree(pool->tx_descs);
+		pool->tx_descs = NULL;
+		return -ENOMEM;
+	}
+	pool->native_trace.capacity = capacity;
+	spin_lock_init(&pool->native_trace_lock);
+#endif
 	pool->tx_descs_capacity = capacity;
 
 	return 0;
@@ -125,6 +142,27 @@ struct xsk_buff_pool *xp_create_and_assign_umem(struct xdp_sock *xs,
 			xp_init_xskb_addr(xskb, pool, (u64)i * pool->chunk_size);
 	}
 
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (trace_native_event_enabled()) {
+		struct xdev_ext_native_event e = {
+			.phase = "pool_bind", .origin = "U", .class_id = 2, .accepted = 1,
+			.cookie = (u64)(unsigned long)pool, .bytes = pool->chunk_size,
+			.aux = umem->size, .sequence = task_tgid_nr(current),
+			.origin_tgid = task_tgid_nr(current),
+			.process_start_ticks = nsec_to_clock_t(current->group_leader->start_boottime),
+		};
+
+		trace_native_event(&e);
+		e.phase = "region_span";
+		e.bytes = PAGE_SIZE;
+		e.sequence = 0;
+		for (i = 0; i < umem->npgs; i++) {
+			e.address = page_to_phys(umem->pgs[i]);
+			e.aux = (u64)i << PAGE_SHIFT;
+			trace_native_event(&e);
+		}
+	}
+#endif
 	return pool;
 
 out:

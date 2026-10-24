@@ -48,6 +48,8 @@
 #include <unistd.h>
 
 #include "uo_core.h"
+#include "uo_native_trace.h"
+#include "../common/native_process.h"
 #include "../chains/chain_nxp.h"
 #include "../chains/chain_check.h"
 #include "../chains/chain_oracle.h"
@@ -91,6 +93,13 @@ struct uo_slot {
 	struct nvme_uring_cmd cmd;
 };
 
+struct uo_native_record {
+	const char *kind;
+	uint64_t ts_ns, cookie, generation, address, lba;
+	uint32_t slot, frame_id, bytes, descriptor_bytes, command_bytes, stage;
+	uint32_t frame_ordinal, frame_offset, frame_length;
+};
+
 struct uo {
 	struct uo_spec s;
 	struct uo_map m;
@@ -103,6 +112,11 @@ struct uo {
 	struct uo_xring fq, cq, rx, tx;
 	struct ur ur;
 	struct uo_slot *slot;
+	struct uo_native_record *native_records;
+	size_t native_capacity, native_count;
+	bool native_lost, native_from_env, native_unsupported;
+	const char *native_path;
+	char native_auto_path[4096];
 	struct xdev_ext_xsk_redirect redirect;
 #ifdef UO_CUDA
 	struct chain_cuda cuda;
@@ -143,6 +157,90 @@ static uint64_t uo_now(void)
 
 	clock_gettime(CLOCK_MONOTONIC_RAW, &ts);
 	return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* All entries are immutable snapshots; formatting/I/O happens after timing. */
+static void uo_native_note(struct uo *u, const char *kind, uint32_t k,
+			   uint64_t cookie, uint32_t stage)
+{
+	struct timespec now;
+	struct uo_slot *sl = &u->slot[k];
+	uint32_t j;
+
+	if (!u->native_records)
+		return;
+	clock_gettime(CLOCK_MONOTONIC, &now);
+	for (j = 0; j < u->m.segs; j++) {
+		struct uo_native_record *r;
+		uint64_t address = uo_chunk(&u->m, k, j);
+		uint32_t off, len;
+
+		if (u->native_count == u->native_capacity) {
+			u->native_lost = true;
+			return;
+		}
+		uo_span(&u->m, j, &off, &len);
+		r = &u->native_records[u->native_count++];
+		*r = (struct uo_native_record) {
+			.kind = kind, .ts_ns = (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec,
+			.cookie = cookie, .generation = sl->g, .slot = k,
+			.frame_id = address / UO_CHUNK, .address = address + off,
+			.lba = u->s.slba + sl->g * (u->s.group_bytes / u->s.lba_bytes),
+			.bytes = len, .descriptor_bytes = len,
+			.frame_ordinal = j, .frame_offset = j * u->m.l.seg_len, .frame_length = len,
+			.command_bytes = u->s.group_bytes, .stage = stage,
+		};
+		if (!strcmp(kind, "tx")) {
+			r->address -= XDEV_EXT_MP_PKT_HDR_LEN;
+			r->descriptor_bytes += XDEV_EXT_MP_PKT_HDR_LEN;
+		}
+	}
+}
+
+static int uo_native_flush(struct uo *u)
+{
+	FILE *f;
+	size_t i;
+	int fd, ret = 0;
+	uint64_t start_ticks;
+
+	if (!u->native_path)
+		return 0;
+	ret = native_process_start_ticks(&start_ticks);
+	if (ret)
+		return ret;
+	fd = open(u->native_path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	if (fd < 0)
+		return -errno;
+	f = fdopen(fd, "w");
+	if (!f) {
+		ret = -errno;
+		close(fd);
+		return ret;
+	}
+	fprintf(f, "{\"kind\":\"metadata\",\"abi\":\"xdev-native-v1\",\"clock\":\"CLOCK_MONOTONIC\",\"lost\":%s,\"fixed_io\":%s,\"rx\":%s,\"trace_unsupported\":%s,\"pid\":%ld,\"process_start_ticks\":%llu,\"user_hz\":%ld,\"role\":\"%s\"}\n",
+		u->native_lost ? "true" : "false",
+		u->s.nvme_io == UO_IO_PASSTHRU_VEC ? "false" : "true",
+		u->s.rx ? "true" : "false", u->native_unsupported ? "true" : "false", (long)getpid(),
+		(unsigned long long)start_ticks, sysconf(_SC_CLK_TCK), u->s.rx ? "receiver" : "sender");
+	for (i = 0; i < u->native_count; i++) {
+		const struct uo_native_record *r = &u->native_records[i];
+
+		fprintf(f, "{\"kind\":\"%s\",\"ts_ns\":%llu,\"cookie\":%llu,\"session_id\":%llu,\"batch_key\":%llu,\"record_id\":%llu,\"slot\":%u,\"generation\":%llu,\"frame_id\":%u,\"stage\":%u,\"frame_ordinal\":%u,\"frame_offset\":%u,\"frame_length\":%u,\"lba\":%llu,\"bytes\":%u,\"descriptor_bytes\":%u,\"command_bytes\":%u,\"address\":%llu}\n",
+			r->kind, (unsigned long long)r->ts_ns,
+			(unsigned long long)r->cookie, (unsigned long long)u->s.nxp_session,
+			(unsigned long long)r->generation,
+			(unsigned long long)(r->generation / u->s.burst), r->slot,
+			(unsigned long long)r->generation, r->frame_id, r->stage,
+			r->frame_ordinal, r->frame_offset, r->frame_length,
+			(unsigned long long)r->lba, r->bytes, r->descriptor_bytes, r->command_bytes,
+			(unsigned long long)r->address);
+	}
+	if (ferror(f))
+		ret = -EIO;
+	if (fclose(f) && !ret)
+		ret = -EIO;
+	return ret;
 }
 
 /* --- AF_XDP over the shared region ------------------------------------------ */
@@ -244,7 +342,10 @@ static int uo_nvme(struct uo *u, uint32_t k, bool write)
 		sqe->opcode = IORING_OP_URING_CMD;
 		sqe->fd = u->nvme;
 		sqe->cmd_op = NVME_URING_CMD_IO_VEC;
-		sqe->user_data = (uint64_t)k << 8 | 1;
+		sqe->user_data = uo_native_cookie(sl->g);
+		if (!sqe->user_data)
+			return -EOVERFLOW;
+		uo_native_note(u, "nvme", k, sqe->user_data, u->s.rx ? 1 : 0);
 		memcpy(sqe->cmd, &sl->cmd, sizeof(sl->cmd));
 		sl->nvme_left = 1;
 	} else {
@@ -265,6 +366,8 @@ static int uo_nvme(struct uo *u, uint32_t k, bool write)
 		}
 		sl->nvme_left = nr;
 	}
+	if (!u->s.rx)
+		uo_native_note(u, "record_admit", k, uo_native_cookie(sl->g), 0);
 	u->inflight += sl->nvme_left;
 	sl->state = SL_NVME;
 	return 0;
@@ -351,6 +454,7 @@ static int uo_tx(struct uo *u, uint32_t k)
 		u->cpu_read_bytes += len;
 		xdev_ext_mp_tx_desc(d, chunk, off, len);
 	}
+	uo_native_note(u, "tx", k, uo_native_cookie(sl->g), u->s.gpu ? 2 : 1);
 	__atomic_store_n(u->tx.producer, prod + u->m.segs, __ATOMIC_RELEASE);
 	sl->tx_left = u->m.segs;
 	sl->state = SL_TX;
@@ -371,6 +475,8 @@ static int uo_tx_reap(struct uo *u, uint64_t *done)
 		if (k >= u->s.depth || u->slot[k].state != SL_TX || !u->slot[k].tx_left)
 			return -EPROTO;
 		if (!--u->slot[k].tx_left) {
+			uo_native_note(u, "record_terminal", k,
+				uo_native_cookie(u->slot[k].g), u->s.gpu ? 2 : 1);
 			u->slot[k].state = SL_FREE;
 			(*done)++;
 		}
@@ -473,13 +579,20 @@ static int uo_reap_ring(struct uo *u, uint64_t *done)
 
 	while ((cqe = ur_peek(&u->ur))) {
 		uint32_t k = (uint32_t)(cqe->user_data >> 8);
+		uint64_t generation = 0;
 		int res = cqe->res;
+
+		if (u->s.nvme_io == UO_IO_PASSTHRU_VEC &&
+		    uo_native_cookie_decode(cqe->user_data, u->s.depth, &k, &generation))
+			return -EPROTO;
 		struct uo_slot *sl;
 
 		ur_seen(&u->ur);
 		if (k >= u->s.depth)
 			return -EPROTO;
 		sl = &u->slot[k];
+		if (u->s.nvme_io == UO_IO_PASSTHRU_VEC && sl->g != generation)
+			return -ESTALE;
 		u->inflight--;
 		if (res < 0)
 			return res;
@@ -756,6 +869,28 @@ static int uo_run(struct uo *u)
 	u->cfg = (struct xdev_ext_mp_rx_cfg){ .session_id = s->nxp_session, .mtu = u->mtu,
 		.frame_size = u->m.l.frame_size, .hdr_room = u->m.l.hdr_room,
 		.seg_len = u->m.l.seg_len, .group_bytes = s->group_bytes };
+	if (u->native_path && s->rx && u->native_from_env)
+		u->native_unsupported = true;
+	if (u->native_path && !u->native_unsupported) {
+		uint64_t groups = s->batches + s->warmup;
+
+		/* Four metadata snapshots per frame; refuse unsupported directions. */
+		if (s->rx || s->gpu || s->nvme_io != UO_IO_PASSTHRU_VEC ||
+		    groups > SIZE_MAX / u->m.segs / 4 / sizeof(*u->native_records))
+			return uo_fail(u, UO_NOT_RUN, "unsupported: native trace mapping");
+		u->native_capacity = groups * u->m.segs * 4;
+		u->native_records = calloc(u->native_capacity, sizeof(*u->native_records));
+		if (!u->native_records)
+			return uo_fail(u, UO_NOT_RUN, "native trace allocation failed");
+		/* Fault metadata pages in before the campaign. */
+		{
+			volatile unsigned char *pages = (void *)u->native_records;
+			size_t offset, size = u->native_capacity * sizeof(*u->native_records);
+
+			for (offset = 0; offset < size; offset += 4096)
+				pages[offset] = 0;
+		}
+	}
 	u->slot = calloc(s->depth, sizeof(*u->slot));
 	if (s->load == CH_LOAD_SUSTAINED)
 		u->rec_ns = malloc((warm + windows) * sizeof(*u->rec_ns));
@@ -894,11 +1029,26 @@ int main(int argc, char **argv)
 	size_t len = 0;
 	char *text;
 
-	if (argc != 3 || (strcmp(argv[1], "--spec") && strcmp(argv[1], "--check"))) {
-		fprintf(stderr, "usage: %s --spec|--check FILE.json\n", argv[0]);
+	if ((argc != 3 && argc != 5) || (strcmp(argv[1], "--spec") && strcmp(argv[1], "--check")) ||
+	    (argc == 5 && strcmp(argv[3], "--trace-journal"))) {
+		fprintf(stderr, "usage: %s --spec|--check FILE.json [--trace-journal FILE]\n", argv[0]);
 		return UO_INVALID;
 	}
 	check = !strcmp(argv[1], "--check");
+	if (argc == 5)
+		u.native_path = argv[4];
+	else if (getenv("XDEV_EXT_NATIVE_JOURNAL_DIR")) {
+		struct stat st;
+		const char *dir = getenv("XDEV_EXT_NATIVE_JOURNAL_DIR");
+
+		if (stat(dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+		    (st.st_mode & 077) || snprintf(u.native_auto_path,
+		    sizeof(u.native_auto_path), "%s/uo-%ld.jsonl", dir, (long)getpid()) >=
+		    (int)sizeof(u.native_auto_path))
+			return UO_NOT_RUN;
+		u.native_path = u.native_auto_path;
+		u.native_from_env = true;
+	}
 	text = slurp(argv[2], &len);
 	if (!text) {
 		fprintf(stderr, "uo_bench: cannot read %s\n", argv[2]);
@@ -944,6 +1094,8 @@ int main(int argc, char **argv)
 		close(u.efd);
 	if (!u.status && u.s.oracle == CH_ORACLE_FILE)
 		uo_oracle(&u);
+	if (uo_native_flush(&u) && !u.status)
+		uo_fail(&u, UO_FAIL, "native trace journal write failed");
 	uo_emit(stdout, &u, have_cuda);
 	if (u.s.out[0]) {
 		FILE *f = fopen(u.s.out, "wx");
@@ -960,5 +1112,6 @@ int main(int argc, char **argv)
 	free(u.samples);
 	free(u.rec_ns);
 	free(u.slot);
+	free(u.native_records);
 	return u.status;
 }

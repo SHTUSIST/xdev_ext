@@ -617,6 +617,11 @@ static int nvme_xdev_ext_class_validate(struct xdev_ext_mech_stage *st,
 	if (n != 1)
 		return -EPROTO;
 	ret = nvme_xdev_ext_mech_validate(scratch, &bounds, &decoded);
+	xdev_ext_mech_trace_plan(b,
+		(u64)nvme_xdev_ext_sqe_dw(scratch, 10) |
+		(u64)nvme_xdev_ext_sqe_dw(scratch, 11) << 32,
+		bounds.data_len, scratch[0] |
+		(nvme_xdev_ext_sqe_dw(scratch, 12) & 0xffff) << 8, ret);
 	if (ret)
 		return ret;
 	memcpy(bp->sqe, scratch, NVME_XDEV_EXT_SQE_SIZE);
@@ -783,6 +788,7 @@ static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 	done->uncertain = uncertain;
 	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
 			  &bp->cqe);
+	xdev_ext_mech_trace_native_complete(b, ticket, status);
 #ifdef NVME_XDEV_EXT_MECH_BOUNCE_AVAILABLE
  /* Native end_io owns the ticket and the transport has unmapped DMA. Copy
   * compatibility READ bytes before the core release-publishes READY. */
@@ -986,6 +992,7 @@ static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req,
 	done->uncertain = status != 0;
 	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
 			       &bp->cqe);
+	xdev_ext_mech_trace_native_complete(b, ticket, status);
 	xdev_ext_mech_batch_completion_publish(b, ticket, status, done->uncertain);
 	return RQ_END_IO_FREE;
 }
@@ -1065,6 +1072,9 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	req->end_io = nvme_xdev_ext_peer_end_io;
 	req->end_io_data = &slot->done;
 	/* As for host pages, end_io may run before this returns. */
+	xdev_ext_mech_trace_native_submit(b, (u64)(unsigned long)req,
+				 le64_to_cpu(cmd.rw.slba), xdev_ext_mech_batch_bytes(b),
+				 (u32)cmd.rw.opcode | (u32)le16_to_cpu(cmd.rw.length) << 8);
 	blk_execute_rq_nowait(req, false);
 	return 0;
 }
@@ -1130,6 +1140,9 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	 * The core marked the batch IN_FLIGHT before ->submit: end_io may
 	 * run before this returns, even from here when the queue is dead.
 	 */
+	xdev_ext_mech_trace_native_submit(b, (u64)(unsigned long)req,
+				 le64_to_cpu(cmd.rw.slba), xdev_ext_mech_batch_bytes(b),
+				 (u32)cmd.rw.opcode | (u32)le16_to_cpu(cmd.rw.length) << 8);
 	blk_execute_rq_nowait(req, false);
 	return 0;
 }

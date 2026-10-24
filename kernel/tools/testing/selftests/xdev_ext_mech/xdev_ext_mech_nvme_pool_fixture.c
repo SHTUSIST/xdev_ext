@@ -29,6 +29,7 @@ typedef int blk_status_t;
 #define WARN_ON_ONCE(x) (!!(x))
 #define cpu_to_le32(v) (v)
 #define le64_to_cpu(v) (v)
+#define le16_to_cpu(v) (v)
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
@@ -44,7 +45,7 @@ struct bio {
  struct bio *bi_next;
 };
 struct nvme_command {
- struct { u8 opcode; u32 nsid; } rw;
+ struct { u8 opcode; u32 nsid; u64 slba; u16 length; } rw;
  struct { u32 cdw10,cdw11,cdw12; } common;
 };
 struct xdev_ext_mech_batch;
@@ -156,6 +157,12 @@ static void blk_execute_rq_nowait(struct request *req,bool at_head)
   blk_complete_request(req);
  } else {req->bio=NULL;req->residual=!strcmp(mode,"short-native") ? 512 : 0;}
  req->end_io(req,0); }
+static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,
+ u64 cookie, u64 lba, u32 bytes, u32 plan)
+{ (void)b; (void)cookie; (void)lba; (void)bytes; (void)plan; }
+static void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
+ u64 ticket, int status)
+{ (void)b; (void)ticket; (void)status; }
 /* PRODUCTION_FUNCTIONS */
 int main(int argc,char **argv)
 {

@@ -7,6 +7,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef uint64_t u64;
+typedef uint32_t u32;
+#define le64_to_cpu(v) (v)
+#define le16_to_cpu(v) (v)
 #define BLK_MQ_REQ_NOWAIT (1U << 0)
 #define GFP_KERNEL 0
 #define NVME_REQ_USERCMD (1U << 0)
@@ -44,7 +48,7 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
                                     struct xdev_ext_mech_batch *b)
 { (void)st; (void)b; abort(); }
 struct nvme_command {
-	struct { unsigned char opcode; uint32_t nsid; } rw;
+	struct { unsigned char opcode; uint32_t nsid; uint64_t slba; uint16_t length; } rw;
 	struct { uint32_t cdw10, cdw11, cdw12; } common;
 };
 enum rq_end_io_ret { RQ_END_IO_FREE };
@@ -71,6 +75,11 @@ static struct request native_request;
 
 static struct nvme_xdev_ext_mech_batch *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b)
 { return &b->priv; }
+static unsigned int xdev_ext_mech_batch_bytes(struct xdev_ext_mech_batch *b)
+{ (void)b; return 4096; }
+static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,
+	uint64_t cookie, uint64_t lba, uint32_t bytes, uint32_t plan)
+{ (void)b; (void)cookie; (void)lba; (void)bytes; (void)plan; }
 static uint64_t xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b)
 { (void)b; return 7; }
 static uint64_t xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b)

@@ -64,6 +64,7 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA
 #define cpu_to_le64(v) (v)
 #define le32_to_cpu(v) (v)
 #define le64_to_cpu(v) (v)
+#define le16_to_cpu(v) (v)
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
@@ -163,6 +164,12 @@ static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b, u32 pos, str
 { if (pos >= b->nr) return -ERANGE; *f = b->f[pos]; return 0; }
 static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p) { assert(p->kind == 3); return 87; }
 static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p) { assert(p->kind == 3); return &authority; }
+static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,
+ u64 cookie, u64 lba, u32 bytes, u32 plan)
+{ (void)b; (void)cookie; (void)lba; (void)bytes; (void)plan; }
+static void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
+ u64 ticket, int status)
+{ (void)b; (void)ticket; (void)status; }
 static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b, u64 ticket)
 { if (ticket != b->ticket || b->claims) return -ESTALE; b->claims++; return 0; }
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket, int err, bool sequester)

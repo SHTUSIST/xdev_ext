@@ -9,6 +9,9 @@
 #include <linux/types.h>
 #include <linux/dma-mapping.h>
 #include <linux/bpf.h>
+#ifdef CONFIG_XDEV_EXT_MECH
+#include <linux/xdev_ext_trace_journal.h>
+#endif
 #include <net/xdp.h>
 
 struct xsk_buff_pool;
@@ -71,6 +74,8 @@ struct xsk_buff_pool {
 	spinlock_t xdev_ext_mech_alloc_lock;
 	bool xdev_ext_mech_fq_used;
 	struct xsk_xdev_ext_mech_provider __rcu *xdev_ext_mech_tx;
+	spinlock_t native_trace_lock;
+	struct xdev_ext_trace_journal native_trace;
 #endif
 	struct list_head xskb_list;
 	u32 heads_cnt;

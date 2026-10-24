@@ -29,6 +29,7 @@
 #include <sys/mman.h>
 #include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include <bpf/bpf.h>
@@ -42,6 +43,7 @@
 #include "../../../kernel/tools/include/xdev_ext_gpu_identity.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "chain_bench.h"
+#include "../common/native_process.h"
 #include "chain_cuda.h"
 #include "chain_oracle.h"
 
@@ -349,6 +351,49 @@ static int cs_mtu(const char *ifname, __u32 *mtu)
 }
 
 /* --- the session ---------------------------------------------------------- */
+
+/* CREATE is outside timing. Bind its unpredictable ID to this actual process. */
+static int cs_native_bind(const struct chain_spec *s, uint64_t session, bool rx)
+{
+	const char *dir = getenv("XDEV_EXT_NATIVE_JOURNAL_DIR");
+	char path[4096];
+	uint64_t start_ticks = 0;
+	struct stat st;
+	FILE *f;
+	int fd, ret = 0;
+
+	if (!dir)
+		return 0;
+	if (stat(dir, &st) || !S_ISDIR(st.st_mode) || st.st_uid != geteuid() ||
+	    (st.st_mode & 077))
+		return -EPERM;
+	ret = native_process_start_ticks(&start_ticks);
+	if (ret)
+		return ret;
+	if (snprintf(path, sizeof(path), "%s/session-%ld-%llu.jsonl", dir,
+		(long)getpid(), (unsigned long long)session) >= (int)sizeof(path))
+		return -ENAMETOOLONG;
+	fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0600);
+	if (fd < 0)
+		return -errno;
+	f = fdopen(fd, "w");
+	if (!f) {
+		ret = -errno;
+		close(fd);
+		return ret;
+	}
+	fprintf(f, "{\"kind\":\"session_bind\",\"abi\":\"xdev-native-v1\",\"session_id\":%llu,\"native_session_id\":%llu,\"logical_session_id\":%llu,\"pid\":%ld,\"process_start_ticks\":%llu,\"user_hz\":%ld,\"role\":\"%s\",\"first_batch_key\":1,\"groups\":%llu,\"warmup\":%llu,\"burst\":%u}\n",
+		(unsigned long long)session, (unsigned long long)session,
+		(unsigned long long)s->nxp_session,
+		(long)getpid(), (unsigned long long)start_ticks, sysconf(_SC_CLK_TCK), rx ? "receiver" : "sender",
+		(unsigned long long)(s->warmup + s->batches),
+		(unsigned long long)s->warmup, s->burst);
+	if (ferror(f))
+		ret = -EIO;
+	if (fclose(f) && !ret)
+		ret = -EIO;
+	return ret;
+}
 
 static int cs_mech(int ring, __u32 op, __u64 arg, uint64_t *syscalls)
 {
@@ -740,6 +785,11 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	ret = cs_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c, &r->syscalls);
 	if (ret) {
 		cb_fail(r, CB_NOT_RUN, "CREATE: %s", xdev_ext_mech_ctl_errname(ret));
+		goto out;
+	}
+	ret = cs_native_bind(s, c.session_id, rx);
+	if (ret) {
+		cb_fail(r, CB_NOT_RUN, "native session binding: %s", strerror(-ret));
 		goto out;
 	}
 	/* As ctl_run_source(): a copy-mode source socket gets the fill ring too. */
