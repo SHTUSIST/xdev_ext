@@ -2,17 +2,26 @@
 CC ?= cc
 CLANG ?= clang
 BUILD ?= .build
+LIBBPF_LIBS ?= -lbpf
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror
-.PHONY: all sink check bpf
-all: sink bpf
+.PHONY: all sink ctl check bpf
+all: sink ctl bpf
 sink: $(BUILD)/mv_sink
+ctl: $(BUILD)/mv_ctl
 $(BUILD):
 	mkdir -p $@
 $(BUILD)/mv_sink: mv_sink.c | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
+$(BUILD)/mv_ctl: mv_ctl.c mv_create_capture.h ../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) mv_ctl.c ../../../kernel/tools/xdev_ext_xsk_redirect.c ../../../kernel/tools/xdev_ext_gpu_identity.c -o $@ $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz -ldl
+$(BUILD)/test_create_capture: test_create_capture.c mv_create_capture.h | $(BUILD)
+	$(CC) $(CFLAGS) -D_GNU_SOURCE $< -o $@
 bpf:
 	$(MAKE) -C tests bpf CLANG=$(CLANG)
-check:
+check: $(BUILD)/test_create_capture
 	$(MAKE) -C tests check
 	python3 -B test_helpers.py -v
+	python3 -B test_decode.py -v
+	python3 -B test_inspect_create.py -v
+	@temporary=$$(mktemp -d); trap 'rm -rf "$$temporary"' EXIT; $(BUILD)/test_create_capture "$$temporary/create"

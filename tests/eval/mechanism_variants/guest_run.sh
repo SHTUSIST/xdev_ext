@@ -19,7 +19,7 @@ trace_ctl=$7
 [ -x "$trace_ctl" ]
 [ ! -e "$out" ] || { echo 'capture directory must be new' >&2; exit 2; }
 mkdir -m 700 "$out"
-ctl=$bin/xdev_ext_mech_ctl
+ctl=$bin/mv_ctl
 pin=/sys/fs/bpf/e2-nvme
 netpin=/sys/fs/bpf/e2-net
 [ ! -e "$pin" ] && [ ! -e "$netpin" ]
@@ -47,7 +47,7 @@ sha256sum "$bin/nvme_reverse.bpf.o" "$bin/nvme_gray.bpf.o" "$bin/nxp_mech.bpf.o"
     --set nxp_session=270019 --set key_base=1 --pin "$netpin" > "$out/net-attach.log" 2>&1
 net_attached=1
 for variant in reverse gray; do
-    "$ctl" attach --obj "$bin/nvme_$variant.bpf.o" --map mv_nvme_ops --pin "$pin" > "$out/$variant-attach.log" 2>&1
+    E2_VERIFIER_LOG="$out/$variant-verifier" "$ctl" attach --obj "$bin/nvme_$variant.bpf.o" --map mv_nvme_ops --pin "$pin" > "$out/$variant-attach.log" 2>&1
     nvme_attached=1
     # Archive actual loaded-program metadata; no hand-written acceptance bool.
     bpftool -j prog show > "$out/$variant-programs.json"
@@ -65,7 +65,7 @@ for variant in reverse gray; do
     # This same invocation creates a new session on each A/B iteration. The
     # previous process closes its ring before detach/recreate of the object.
     set +e
-    "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
+    E2_CREATE_CAPTURE="$out/$variant-create" "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
         --peer-mac "$peer_mac" --local-ip 192.0.2.1 --peer-ip "$sink_ip" \
         --local-port 54321 --peer-port 12345 --groups 16 --depth 1 \
         --group-bytes 4096 --timeout-ms 60000 > "$out/$variant-run.log" 2>&1
@@ -90,7 +90,7 @@ for negative in outside_window reserved_cdw2; do
     nvme_attached=1
     "$trace_ctl" begin "$negative" "$out"
     set +e
-    "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
+    E2_CREATE_CAPTURE="$out/$negative-create" "$ctl" nvme-nic --src-ng "$ng" --ifname "$iface" --slba 2048 --nlb 64 \
         --peer-mac "$peer_mac" --local-ip 192.0.2.1 --peer-ip "$sink_ip" \
         --local-port 54321 --peer-port 12345 --groups 1 --depth 1 \
         --group-bytes 4096 --timeout-ms 60000 > "$out/$negative-run.log" 2>&1

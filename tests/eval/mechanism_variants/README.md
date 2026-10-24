@@ -179,3 +179,64 @@ nonzero trace overruns/drops. The runner also executes the existing
 failure is insufficient: the trace gate must verify the real class errno
 and no native acceptance. The separate old-ticket completion-entry negative
 and raw-to-compact capture assembly remain integrator responsibilities.
+
+### Actual CREATE, verifier log and raw-event adapter
+
+The runner now invokes `mv_ctl`, an observational wrapper which includes the
+existing ctl implementation. It preserves both existing actual libc syscall
+sites. Before the real CREATE syscall it saves the entire 200-byte request
+and actual fd `fstat`/rdev/access flags plus AF_XDP `getsockname` resource
+specifications. After the call it saves actual output bytes, syscall return,
+errno and session ID. It records no self-declared CREATE-success boolean.
+The wrapper also requests real successful verifier logs from modern libbpf;
+`NAME-verifier.log` is the kernel's buffer, while attach logs and queried
+program/link metadata remain separate artifacts.
+
+Build with the same modern libbpf already used by the integrated guest tools:
+
+```
+make -C tests/eval/mechanism_variants sink ctl BUILD=<guestbin> \
+  CPPFLAGS=-I<existing-libbpf>/include LIBBPF_LIBS=<existing-libbpf>/libbpf.a
+```
+
+Copy `mv_ctl`, `mv_sink`, both variant objects, the existing `nxp_mech.bpf.o`
+and `nvme_s0.bpf.o`, `guest_run.sh`, and `trace_ctl.sh` into the private guest.
+Archive all resulting capture files on the host. No guest Python is needed.
+
+Audit A/B against the actual CREATE inputs and bound resources:
+
+```
+python3 inspect_create.py CAPTURE/reverse-create reverse-create.json
+python3 inspect_create.py CAPTURE/gray-create gray-create.json --compare CAPTURE/reverse-create
+```
+
+The normalized object retains every input byte other than process-local fd
+numbers. Actual fd numbers and ephemeral inodes remain in the raw resource
+artifact; comparison preserves fd-alias relationships, rdev, file type,
+access flags and actual AF_XDP binding. Session ID is validated against the
+real syscall result and retained separately. No pointed-to configuration is
+omitted for the E2 unreliable AF_XDP configuration (`flags/arg0/arg1=0`).
+Other pointer-based protocols require their own pointed-data capture and are
+outside this E2 runner.
+
+Decode actual hook lines with their target event format and loss statistics:
+
+```
+python3 decode_trace.py CAPTURE/reverse.trace reverse-events.json \
+  --format CAPTURE/reverse-event-format.txt --stats CAPTURE/reverse-trace-stats.txt \
+  --create-prefix CAPTURE/reverse-create
+python3 decode_trace.py CAPTURE/outside_window.trace outside.json --negative \
+  --format CAPTURE/outside_window-event-format.txt --stats CAPTURE/outside_window-trace-stats.txt \
+  --create-prefix CAPTURE/outside_window-create
+```
+
+Repeat for Gray and reserved-cdw2. The adapter groups actual per-frame rows,
+retains their raw line numbers/timestamps, requires the raw trace's session
+to equal the successful CREATE result, and refuses missing, duplicated,
+reordered or changed native claims. Only the genuine NVMe `native_submit`
+phase becomes `provider_accept`; terminal-stage downstream/recycle events
+remain their actual stage-local observations. It does not reconstruct events
+from expected slot mappings or sink bytes and does not create the final
+manifest's verifier-acceptance or kernel-build claims. Trace format/stats
+checks do not independently authenticate a forged producer; the integrator's
+hook and artifact audit remains required.

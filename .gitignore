@@ -1153,3 +1153,10 @@
 !/tests/eval/mechanism_variants/tests/test_guest_capture.py
 !/tests/eval/mechanism_variants/tests/test_assertion_selfcheck.py
 !/tests/eval/mechanism_variants/trace_ctl.sh
+!/tests/eval/mechanism_variants/decode_trace.py
+!/tests/eval/mechanism_variants/test_decode.py
+!/tests/eval/mechanism_variants/mv_ctl.c
+!/tests/eval/mechanism_variants/mv_create_capture.h
+!/tests/eval/mechanism_variants/test_create_capture.c
+!/tests/eval/mechanism_variants/inspect_create.py
+!/tests/eval/mechanism_variants/test_inspect_create.py
