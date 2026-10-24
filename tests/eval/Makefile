@@ -17,6 +17,7 @@ endif
 .PHONY: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check reviewer-eval-check
 .PHONY: spdk-check cuda-arms cuda-arms-check session-guest-check
 .PHONY: native-eval-check native-views-check native-trace-check dmabuf-lifecycle-check
+.PHONY: mechanism-variants-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -79,7 +80,10 @@ native-trace-check:
 dmabuf-lifecycle-check:
 	$(MAKE) -C dmabuf_lifecycle test
 
-native-eval-check: native-views-check native-trace-check dmabuf-lifecycle-check
+mechanism-variants-check:
+	$(MAKE) -C mechanism_variants check
+
+native-eval-check: native-views-check native-trace-check dmabuf-lifecycle-check mechanism-variants-check
 
 spdk-check:
 	$(MAKE) -C spdk check
