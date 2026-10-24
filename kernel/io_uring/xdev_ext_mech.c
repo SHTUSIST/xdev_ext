@@ -1273,7 +1273,8 @@ static void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
 		offset += b->f[j].data_len;
 	xdev_ext_native_event_emit(phase, "K", xdev_ext_mech_session_id(b->s),
 		b->id, b->key, b->f[i].index,
-		before ? xdev_ext_mech_life_token(&b->s->life[b->f[i].index]) : b->life_token[i],
+		before ? xdev_ext_mech_life_gen(&b->s->life[b->f[i].index]) :
+		xdev_ext_mech_life_claim_gen(b->life_token[i]),
 		stage, ticket, b->s->st[stage].class_id,
 		!strcmp(phase, "class_validate") ? !status : 1, status,
 		native ? b->trace_cookie : 0,
@@ -1316,7 +1317,8 @@ void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch *b,
 	for (i = 0; i < pos; i++)
 		offset += b->f[i].data_len;
 	xdev_ext_native_event_emit("descriptor_bind", "K", b->s->id,
-		b->id, b->key, b->f[pos].index, b->life_token[pos],
+		b->id, b->key, b->f[pos].index,
+		xdev_ext_mech_life_claim_gen(b->life_token[pos]),
 		b->bs.stage, b->ticket, XDEV_EXT_MECH_CLASS_AFXDP, 1, 0,
 		pool, address, bytes, 0, 0, pos, offset, b->f[pos].data_len);
 }

@@ -1131,3 +1131,4 @@
 !/tests/eval/common/native_process.h
 !/tests/eval/native_trace/test_uo_journal.py
 !/tests/eval/native_trace/test_uring_completion.py
+!/tests/eval/native_trace/test_lifecycle_generation.py
