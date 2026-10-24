@@ -99,6 +99,15 @@ class PayloadCoverage(unittest.TestCase):
                          for kind, span in zip(('nvme', 'afxdp'), spans)]
                 self.assertTrue(self.check(manifest, backing(manifest, views)))
 
+    def test_unscoped_same_class_overlap_is_not_unique_payload_coverage(self):
+        manifest = run_fixture()
+        for spans in (((0, 4096), (0, 4096)), ((0, 3072), (2048, 2048))):
+            with self.subTest(spans=spans):
+                views = [dict(kind='nvme', backing_id='pages', offset_bytes=start, length_bytes=length)
+                         for start, length in spans]
+                views.append(dict(kind='afxdp', backing_id='pages', offset_bytes=0, length_bytes=4096))
+                self.assertTrue(self.check(manifest, backing(manifest, views)))
+
     def test_multiple_frames_require_and_cover_explicit_record_payload_ranges(self):
         manifest = run_fixture()
         manifest['records'][0]['frame_ids'] = [0, 1]

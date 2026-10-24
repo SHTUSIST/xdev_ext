@@ -142,7 +142,12 @@ frame and generation with an observed `backing_id`, `valid_bytes`, and
 backing and cover the full same measured payload span. Native views here
 describe payload byte ranges, excluding unrelated protocol-header ranges.
 IOV/SG pieces can differ in segmentation and ordering; their interval unions
-must agree. A one-frame record defaults to payload span [0, record_bytes).
+must agree. Within one class's measured logical native view, pieces must not
+overlap or duplicate bytes; interval merging cannot excuse repeated payload.
+This minimal E1 proof has one view group per class. Aliasing by distinct
+consumers/operations needs explicit validated groups, not unscoped repeated
+ranges. The event analyzer's separately declared fan-out remains supported.
+A one-frame record defaults to payload span [0, record_bytes).
 For multiple frames, each observation must explicitly provide
 `record_offset_bytes`, `payload_offset_bytes` and `payload_bytes`; all frame
 payloads together must cover every record byte without holes or overlaps.

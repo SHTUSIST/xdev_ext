@@ -414,6 +414,9 @@ def _check_backing(run, proof):
                     ranges[kind].append((offset, offset + length))
             required_span = [(payload_offset, payload_offset + payload_bytes)]
             for kind, spans in ranges.items():
+                ordered_spans = sorted(spans)
+                if any(left[1] > right[0] for left, right in zip(ordered_spans, ordered_spans[1:])):
+                    errors.append('zero_copy.native_views.%s: overlapping/duplicate bytes in ungrouped native view' % kind)
                 if _merge_ranges(spans) != required_span:
                     errors.append('zero_copy.native_views.%s: full measured payload span must match backing/ranges' % kind)
         # Every measured record byte must occur in exactly one frame payload.
