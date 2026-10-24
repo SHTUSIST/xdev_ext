@@ -133,8 +133,12 @@ def decode_trace(manifest, raw_text, metadata):
         if runtime is not None:
             if expected_origin == 'K':
                 match = runtime['sessions'].get(actual_session)
-                if match is None or match['owner'] != owner:
+                if match is None or (owner != (0, 0) and match['owner'] != owner):
                     raise ValueError('native work lacks matching actual CREATE owner/session binding')
+                # K helpers inherit the immutable global native session's owner
+                # from its actual CREATE event. A worker's current task is not
+                # the creator; zero per-point owner is not a guessed PID.
+                owner = match['owner']
                 logical_session = match['logical_id']
             else:
                 match = runtime['owners'].get(owner)
@@ -167,6 +171,8 @@ def decode_trace(manifest, raw_text, metadata):
                    frame_generation=_integer(source['generation']), native_frame_id=native_frame,
                    frame_offset=_integer(source.get('frame_offset', 0)), frame_length=_integer(source.get('frame_length', 0)),
                    native_user_data=item['native_user_data'],
+                   native_event_origin_tgid=item['origin_tgid'],
+                   native_event_process_start_ticks=item['process_start_ticks'],
                    **{name: item[name] for name in ('batch_id', 'batch_key', 'ticket',
                        'class_id', 'cookie', 'address', 'bytes', 'aux', 'sequence')})
         if runtime is not None:
@@ -246,7 +252,7 @@ def decode_trace(manifest, raw_text, metadata):
         if runtime is not None:
             raw_owner = (item['origin_tgid'], item['process_start_ticks'])
             if expected_origin == 'K' and item['session_id'] in runtime['excluded_sessions']:
-                if runtime['excluded_sessions'][item['session_id']] != raw_owner:
+                if raw_owner != (0, 0) and runtime['excluded_sessions'][item['session_id']] != raw_owner:
                     raise ValueError('paired receiver raw owner/session mismatch')
                 observation(item, reason='paired_receiver')
                 continue

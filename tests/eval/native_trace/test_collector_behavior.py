@@ -268,10 +268,8 @@ class RawDecoder(unittest.TestCase):
         meta = self.journal_metadata([sideband, receiver])
         text = (raw('session_bind', '0.05', session_id=100, origin_tgid=48, process_start_ticks=124) + raw('session_bind', '0.1', session_id=99, origin_tgid=47,
                     process_start_ticks=123) +
-                raw('native_submit', '1.0', session_id=99, batch_key=1,
-                    origin_tgid=47, process_start_ticks=123, generation=1) +
-                raw('native_complete', '1.1', session_id=99, batch_key=1,
-                    origin_tgid=47, process_start_ticks=123, generation=1))
+                raw('native_submit', '1.0', session_id=99, batch_key=1, generation=1) +
+                raw('native_complete', '1.1', session_id=99, batch_key=1, generation=1))
         rows = self.decode_accepted(m, text, meta)
         work = [row for row in rows if row['event'] == 'native_submit'][0]
         self.assertEqual(work['session_id'], 7)
