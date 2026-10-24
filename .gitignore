@@ -1234,3 +1234,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_owner_teardown.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_rep_rx.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_teardown.py
+
+!/tests/eval/cuda_builder_inventory.py
