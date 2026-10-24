@@ -303,11 +303,16 @@ class OwnedRedis:
                 try:
                     self.process.wait(timeout=2)
                 except subprocess.TimeoutExpired:
+                    pass
+                finally:
+                    # A reaped leader is not proof that its process group is
+                    # empty: a child may ignore TERM and outlive that leader.
+                    # Escalate the same owned group even when wait succeeded.
                     try:
                         os.killpg(self.process.pid, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
-                    self.process.wait(timeout=2)
+                self.process.wait(timeout=2)
                 self.process = None
         finally:
             if self.log is not None:
