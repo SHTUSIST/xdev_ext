@@ -1132,3 +1132,8 @@
 !/tests/eval/native_trace/test_uo_journal.py
 !/tests/eval/native_trace/test_uring_completion.py
 !/tests/eval/native_trace/test_lifecycle_generation.py
+# Native trace loader and independently authored parser contracts.
+!/tests/eval/native_trace/
+!/tests/eval/native_trace/collector.py
+!/tests/eval/native_trace/test_collector_behavior.py
+!/tests/eval/native_trace/README.md
