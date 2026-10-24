@@ -422,6 +422,11 @@ struct mlx5e_skb_fifo {
 struct mlx5e_ptpsq;
 
 struct mlx5e_txqsq {
+#ifdef CONFIG_XDEV_EXT_MECH
+	bool peer_active;
+	bool peer_destroy_unknown;
+	struct list_head peer_quarantine_node;
+#endif
 	/* data path */
 
 	/* dirtied @completion */
@@ -681,6 +686,7 @@ struct mlx5e_peer_rq {
 struct mlx5e_rq {
 #ifdef CONFIG_XDEV_EXT_MECH
  struct mlx5e_peer_rq *peer;
+ bool peer_destroy_unknown;
 #endif
 	/* data path */
 	union {
@@ -772,6 +778,13 @@ enum mlx5e_channel_state {
 };
 
 struct mlx5e_channel {
+#ifdef CONFIG_XDEV_EXT_MECH
+	struct devlink *peer_devlink;
+	bool peer_quarantined;
+	bool peer_napi_deleted;
+	struct list_head peer_quarantine_node;
+	struct list_head peer_quarantine_sqs;
+#endif
 	/* data path */
 	struct mlx5e_rq            rq;
 	struct mlx5e_xdpsq         rq_xdpsq;
@@ -897,6 +910,9 @@ struct mlx5e_trap;
 struct mlx5e_htb;
 
 struct mlx5e_priv {
+#ifdef CONFIG_XDEV_EXT_MECH
+	bool peer_quarantined;
+#endif
 	/* priv data path fields - start */
 	struct mlx5e_selq selq;
 	struct mlx5e_txqsq **txq2sq;
@@ -1060,7 +1076,7 @@ int mlx5e_open_rq(struct mlx5e_params *params, struct mlx5e_rq_param *param,
 		  struct mlx5e_rq *rq);
 #define MLX5E_RQ_WQES_TIMEOUT 20000 /* msecs */
 int mlx5e_wait_for_min_rx_wqes(struct mlx5e_rq *rq, int wait_time);
-void mlx5e_close_rq(struct mlx5e_rq *rq);
+int mlx5e_close_rq(struct mlx5e_rq *rq);
 int mlx5e_create_rq(struct mlx5e_rq *rq, struct mlx5e_rq_param *param, u16 q_counter);
 void mlx5e_destroy_rq(struct mlx5e_rq *rq);
 
@@ -1150,7 +1166,11 @@ int mlx5e_create_sq_rdy(struct mlx5_core_dev *mdev,
 			u16 qos_queue_group_id,
 			u32 *sqn);
 void mlx5e_tx_err_cqe_work(struct work_struct *recover_work);
-void mlx5e_close_txqsq(struct mlx5e_txqsq *sq);
+int mlx5e_close_txqsq(struct mlx5e_txqsq *sq);
+#ifdef CONFIG_XDEV_EXT_MECH
+int mlx5e_peer_channel_get(struct mlx5e_channel *c);
+void mlx5e_peer_quarantine_txqsq(struct mlx5e_txqsq *sq);
+#endif
 
 bool mlx5e_reset_tx_moderation(struct dim_cq_moder *cq_moder, u8 cq_period_mode,
 			       bool dim_enabled);

@@ -809,6 +809,12 @@ int mlx5e_peer_xmit(struct net_device *dev, u32 queue, struct xdev_ext_peer_tx *
  if (!mlx5e_wqc_has_room_for(&sq->wq, sq->cc, sq->pc, sq->stop_room + need)) {
   ret = -EAGAIN; goto unlock;
  }
+ ret = mlx5e_peer_channel_get(sq->channel);
+ if (ret) goto unlock;
+ if (!sq->peer_active) {
+  INIT_LIST_HEAD(&sq->peer_quarantine_node);
+  sq->peer_active = true;
+ }
  mlx5e_tx_mpwqe_ensure_complete(sq);
  for (; tx; tx = tx->next) {
  inl = DIV_ROUND_UP(tx->header_len - INL_HDR_START_SZ, MLX5_SEND_WQE_DS);

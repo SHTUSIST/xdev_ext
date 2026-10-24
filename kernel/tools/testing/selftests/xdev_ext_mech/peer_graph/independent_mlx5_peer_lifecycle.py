@@ -59,7 +59,13 @@ struct mlx5e_tx_wqe { struct mlx5_wqe_ctrl_seg ctrl; struct mlx5_wqe_eth_seg eth
 struct mlx5_wq_cyc { u16 size; };
 struct netdev_queue { bool stopped; int locked; };
 struct mlx5e_sq_stats { u64 packets,bytes; };
-struct mlx5e_txqsq { struct mlx5_wq_cyc wq; u16 cc,pc,stop_room; u32 mkey_be,sqn,dma_fifo_cc; void *ptpsq; u8 min_inline_mode; unsigned long state; void *uar_map; struct mlx5e_sq_stats *stats; struct netdev_queue *txq; bool freed; struct { struct mlx5e_tx_wqe_info *wqe_info; } db; };
+struct mlx5e_channel;
+struct list_head { struct list_head *next,*prev; };
+#define INIT_LIST_HEAD(h) do { (h)->next=(h); (h)->prev=(h); } while (0)
+/* Owner acquisition is a boundary here; test_native_owner_teardown.py executes
+ * the actual owner/ref and parent close functions. Original MAIN is unchanged. */
+static int mlx5e_peer_channel_get(struct mlx5e_channel *c) { (void)c; return 0; }
+struct mlx5e_txqsq { struct mlx5e_channel *channel; bool peer_active,peer_destroy_unknown; struct list_head peer_quarantine_node; struct mlx5_wq_cyc wq; u16 cc,pc,stop_room; u32 mkey_be,sqn,dma_fifo_cc; void *ptpsq; u8 min_inline_mode; unsigned long state; void *uar_map; struct mlx5e_sq_stats *stats; struct netdev_queue *txq; bool freed; struct { struct mlx5e_tx_wqe_info *wqe_info; } db; };
 struct mdev { struct { struct { u32 mkey; } hw_objs; } mlx5e_res; struct pci_dev *pdev; };
 struct mlx5e_priv { struct mdev *mdev; struct mlx5e_txqsq **txq2sq; };
 struct net_device { u32 mtu,real_num_tx_queues; bool running; struct mlx5e_priv *priv; struct netdev_queue *txq; };

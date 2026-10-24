@@ -76,6 +76,89 @@
 #include "lib/devcom.h"
 #include "lib/sd.h"
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/* Embedded nodes avoid allocation after native ownership becomes UNKNOWN.
+ * The devlink ref pins mlx5_core_dev itself (it is devlink private storage),
+ * unlike a PCI device ref alone. Pins are acquired BEFORE peer submission.
+ */
+static DEFINE_SPINLOCK(mlx5e_peer_owner_lock);
+static LIST_HEAD(mlx5e_peer_quarantine);
+
+int mlx5e_peer_channel_get(struct mlx5e_channel *c)
+{
+	struct devlink *devlink;
+	unsigned long flags;
+	int err = 0;
+
+	if (!c)
+		return -EOPNOTSUPP;
+	spin_lock_irqsave(&mlx5e_peer_owner_lock, flags);
+	if (c->peer_quarantined || c->priv->peer_quarantined) {
+		err = -EIO;
+		goto out;
+	}
+	if (c->peer_devlink)
+		goto out;
+	if (!try_module_get(THIS_MODULE)) {
+		err = -ENODEV;
+		goto out;
+	}
+	devlink = devlink_try_get(priv_to_devlink(c->mdev));
+	if (!devlink) {
+		module_put(THIS_MODULE);
+		err = -ENODEV;
+		goto out;
+	}
+	dev_hold(c->netdev);
+	get_device(c->mdev->device);
+	INIT_LIST_HEAD(&c->peer_quarantine_node);
+	INIT_LIST_HEAD(&c->peer_quarantine_sqs);
+	c->peer_devlink = devlink;
+out:
+	spin_unlock_irqrestore(&mlx5e_peer_owner_lock, flags);
+	return err;
+}
+
+static void mlx5e_peer_channel_put(struct mlx5e_channel *c)
+{
+	struct devlink *devlink = c->peer_devlink;
+
+	if (!devlink)
+		return;
+	c->peer_devlink = NULL;
+	put_device(c->mdev->device);
+	dev_put(c->netdev);
+	devlink_put(devlink);
+	module_put(THIS_MODULE);
+}
+
+static void mlx5e_peer_quarantine_channel(struct mlx5e_channel *c)
+{
+	unsigned long flags;
+	bool first = false;
+
+	spin_lock_irqsave(&mlx5e_peer_owner_lock, flags);
+	if (!c->peer_quarantined) {
+		c->peer_quarantined = true;
+		c->priv->peer_quarantined = true;
+		list_add_tail(&c->peer_quarantine_node, &mlx5e_peer_quarantine);
+		first = true;
+	}
+	spin_unlock_irqrestore(&mlx5e_peer_owner_lock, flags);
+	if (first)
+		netdev_err(c->netdev, "native peer destroy failed: retaining channel, queues and owner refs\n");
+}
+
+void mlx5e_peer_quarantine_txqsq(struct mlx5e_txqsq *sq)
+{
+	struct mlx5e_channel *c = sq->channel;
+
+	/* QoS SQs are separately allocated; retain the detached allocation too. */
+	list_add_tail(&sq->peer_quarantine_node, &c->peer_quarantine_sqs);
+	mlx5e_peer_quarantine_channel(c);
+}
+#endif
+
 static bool mlx5e_hw_gro_supported(struct mlx5_core_dev *mdev)
 {
 	if (!MLX5_CAP_GEN(mdev, shampo))
@@ -1179,6 +1262,8 @@ int mlx5e_peer_rx_open(struct net_device *dev, u32 queue, u64 owner)
   goto unlock;
  rq = &priv->channels.c[queue]->rq;
  if (rq->peer) { ret = -EBUSY; goto unlock; }
+ ret = mlx5e_peer_channel_get(rq->channel);
+ if (ret) goto unlock;
  if (rq->wq_type != MLX5_WQ_TYPE_CYCLIC || rq->xsk_pool ||
      rcu_access_pointer(rq->xdp_prog) || rq->wqe.wq.fbc.log_stride < 5 ||
      MLX5E_GET_PFLAG(&priv->channels.params, MLX5E_PFLAG_RX_CQE_COMPRESS)) goto unlock;
@@ -1468,14 +1553,31 @@ void mlx5e_deactivate_rq(struct mlx5e_rq *rq)
 	synchronize_net(); /* Sync with NAPI to prevent mlx5e_post_rx_wqes. */
 }
 
-void mlx5e_close_rq(struct mlx5e_rq *rq)
+int mlx5e_close_rq(struct mlx5e_rq *rq)
 {
 	if (rq->dim)
 		cancel_work_sync(&rq->dim->work);
 	cancel_work_sync(&rq->recover_work);
-	mlx5e_destroy_rq(rq);
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (rq->peer) {
+		u32 in[MLX5_ST_SZ_DW(destroy_rq_in)] = {};
+		int err;
+
+		if (rq->peer_destroy_unknown)
+			return -EIO;
+		MLX5_SET(destroy_rq_in, in, opcode, MLX5_CMD_OP_DESTROY_RQ);
+		MLX5_SET(destroy_rq_in, in, rqn, rq->rqn);
+		err = mlx5_cmd_exec_in(rq->mdev, destroy_rq, in);
+		if (err) {
+			rq->peer_destroy_unknown = true;
+			return err;
+		}
+	} else
+#endif
+		mlx5e_destroy_rq(rq);
 	mlx5e_free_rx_descs(rq);
 	mlx5e_free_rq(rq);
+	return 0;
 }
 
 u32 mlx5e_profile_get_tisn(struct mlx5_core_dev *mdev,
@@ -1980,7 +2082,7 @@ void mlx5e_deactivate_txqsq(struct mlx5e_txqsq *sq)
 	}
 }
 
-void mlx5e_close_txqsq(struct mlx5e_txqsq *sq)
+int mlx5e_close_txqsq(struct mlx5e_txqsq *sq)
 {
 	struct mlx5_core_dev *mdev = sq->mdev;
 	struct mlx5_rate_limit rl = {0};
@@ -1988,13 +2090,30 @@ void mlx5e_close_txqsq(struct mlx5e_txqsq *sq)
 	if (sq->dim)
 		cancel_work_sync(&sq->dim->work);
 	cancel_work_sync(&sq->recover_work);
-	mlx5e_destroy_sq(mdev, sq->sqn);
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (sq->peer_active) {
+		u32 in[MLX5_ST_SZ_DW(destroy_sq_in)] = {};
+		int err;
+
+		if (sq->peer_destroy_unknown)
+			return -EIO;
+		MLX5_SET(destroy_sq_in, in, opcode, MLX5_CMD_OP_DESTROY_SQ);
+		MLX5_SET(destroy_sq_in, in, sqn, sq->sqn);
+		err = mlx5_cmd_exec_in(mdev, destroy_sq, in);
+		if (err) {
+			sq->peer_destroy_unknown = true;
+			return err;
+		}
+	} else
+#endif
+		mlx5e_destroy_sq(mdev, sq->sqn);
 	if (sq->rate_limit) {
 		rl.rate = sq->rate_limit;
 		mlx5_rl_remove_rate(mdev, &rl);
 	}
 	mlx5e_free_txqsq_descs(sq);
 	mlx5e_free_txqsq(sq);
+	return 0;
 }
 
 void mlx5e_tx_err_cqe_work(struct work_struct *recover_work)
@@ -2486,12 +2605,16 @@ err_close_sqs:
 	return err;
 }
 
-static void mlx5e_close_sqs(struct mlx5e_channel *c)
+static int mlx5e_close_sqs(struct mlx5e_channel *c)
 {
-	int tc;
+	int tc, err;
 
-	for (tc = 0; tc < c->num_tc; tc++)
-		mlx5e_close_txqsq(&c->sq[tc]);
+	for (tc = 0; tc < c->num_tc; tc++) {
+		err = mlx5e_close_txqsq(&c->sq[tc]);
+		if (err)
+			return err;
+	}
+	return 0;
 }
 
 static int mlx5e_set_sq_maxrate(struct net_device *dev,
@@ -2697,14 +2820,19 @@ err_close_async_icosq_cq:
 	return err;
 }
 
-static void mlx5e_close_queues(struct mlx5e_channel *c)
+static int mlx5e_close_queues(struct mlx5e_channel *c)
 {
+	int err;
 	if (c->xdp)
 		mlx5e_close_xdpsq(&c->rq_xdpsq);
 	/* The same ICOSQ is used for UMRs for both RQ and XSKRQ. */
 	cancel_work_sync(&c->icosq.recover_work);
-	mlx5e_close_rq(&c->rq);
-	mlx5e_close_sqs(c);
+	err = mlx5e_close_rq(&c->rq);
+	if (err)
+		return err;
+	err = mlx5e_close_sqs(c);
+	if (err)
+		return err;
 	mlx5e_close_icosq(&c->icosq);
 	mutex_destroy(&c->icosq_recovery_lock);
 	mlx5e_close_icosq(&c->async_icosq);
@@ -2716,6 +2844,7 @@ static void mlx5e_close_queues(struct mlx5e_channel *c)
 	mlx5e_close_tx_cqs(c);
 	mlx5e_close_cq(&c->icosq.cq);
 	mlx5e_close_cq(&c->async_icosq.cq);
+	return 0;
 }
 
 static u8 mlx5e_enumerate_lag_port(struct mlx5_core_dev *mdev, int ix)
@@ -2890,13 +3019,34 @@ static void mlx5e_deactivate_channel(struct mlx5e_channel *c)
 
 static void mlx5e_close_channel(struct mlx5e_channel *c)
 {
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (c->peer_quarantined)
+		goto quarantine;
+#endif
 	if (test_bit(MLX5E_CHANNEL_STATE_XSK, c->state))
 		mlx5e_close_xsk(c);
-	mlx5e_close_queues(c);
+	if (mlx5e_close_queues(c))
+		goto quarantine;
 	mlx5e_qos_close_queues(c);
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (c->peer_quarantined)
+		goto quarantine;
+	mlx5e_peer_channel_put(c);
+#endif
 	netif_napi_del_locked(&c->napi);
-
 	kvfree(c);
+	return;
+quarantine:
+#ifdef CONFIG_XDEV_EXT_MECH
+	mlx5e_peer_quarantine_channel(c);
+	if (c->peer_napi_deleted)
+		return;
+	c->peer_napi_deleted = true;
+#endif
+	/* NAPI is already disabled. Keep embedded queues, CQs and owner pins.
+	 * Do not replay a destroy, or infer PCI DMA stop from host deactivation.
+	 */
+	netif_napi_del_locked(&c->napi);
 }
 
 int mlx5e_open_channels(struct mlx5e_priv *priv,
@@ -6153,6 +6303,10 @@ err_free_cpumask:
 void mlx5e_priv_cleanup(struct mlx5e_priv *priv)
 {
 	int i;
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (priv->peer_quarantined)
+		return;
+#endif
 
 	/* bail if change profile failed and also rollback failed */
 	if (!priv->mdev)
@@ -6421,6 +6575,10 @@ int mlx5e_netdev_change_profile(struct mlx5e_priv *priv,
 
 	/* cleanup old profile */
 	mlx5e_detach_netdev(priv);
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (priv->peer_quarantined)
+		return -EIO;
+#endif
 	priv->profile->cleanup(priv);
 	mlx5e_priv_cleanup(priv);
 
@@ -6454,7 +6612,10 @@ void mlx5e_netdev_attach_nic_profile(struct mlx5e_priv *priv)
 void mlx5e_destroy_netdev(struct mlx5e_priv *priv)
 {
 	struct net_device *netdev = priv->netdev;
-
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (priv->peer_quarantined)
+		return;
+#endif
 	mlx5e_priv_cleanup(priv);
 	free_netdev(netdev);
 }
