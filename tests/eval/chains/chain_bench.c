@@ -27,6 +27,7 @@
 #include <unistd.h>
 
 #include "chain_bench.h"
+#include "../common/fd_check.h"
 #include "chain_oracle.h"
 
 int cb_fail(struct chain_result *r, int status, const char *fmt, ...)
@@ -352,6 +353,7 @@ static char *cb_slurp(const char *path, size_t *len)
 
 int main(int argc, char **argv)
 {
+	int fd_before = eval_fd_count();
 	static struct chain_spec spec;
 	struct chain_result r = { .nvme_bounces = -1, .xsk_zero_copy = -1,
 				  .iaa_completes = -1, .iaa_errors = -1 };
@@ -408,6 +410,8 @@ int main(int argc, char **argv)
 			cb_fail(&r, CB_FAIL, "timed session run shows an undeclared CPU "
 				"payload copy: %s", extra);
 	}
+	if (eval_fd_check(fd_before))
+		cb_fail(&r, CB_FAIL, "descriptor count changed after cleanup");
 	cb_emit(stdout, &spec, &r);
 	if (spec.out[0]) {
 		out = fopen(spec.out, "wx");

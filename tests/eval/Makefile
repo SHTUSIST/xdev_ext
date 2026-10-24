@@ -15,6 +15,7 @@ endif
 
 .PHONY: all check run clean FORCE gds-check hft hft-check cuda-host-check
 .PHONY: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check reviewer-eval-check
+.PHONY: spdk-check cuda-arms cuda-arms-check session-guest-check
 all: $(BUILD)/bench_file_pipeline $(BUILD)/bench_cuda_staging
 
 $(BUILD):
@@ -65,6 +66,20 @@ gpu-nic-check:
 bam-check:
 	$(MAKE) -C bam check
 
+session-guest-check:
+	$(MAKE) -C session_guest check
+
+spdk-check:
+	$(MAKE) -C spdk check
+
+# Every CUDA arm against one official SDK, e.g. CUDA_HOME=/usr/local/cuda-12.8;
+# writes $(BUILD)/cuda-arms/cuda-arms-receipt.json and runs nothing.
+cuda-arms:
+	python3 build_cuda_arms.py --cuda-home "$(CUDA_HOME)" --out $(abspath $(BUILD))/cuda-arms $(if $(CUDA_HOST_CXX),--host-cxx "$(CUDA_HOST_CXX)",)
+
+cuda-arms-check:
+	python3 test_build_cuda_arms.py -v
+
 eval-cost-check:
 	$(MAKE) -C common check
 	$(MAKE) -C setup_cost check BUILD=$(abspath $(BUILD))/setup_cost
@@ -72,7 +87,8 @@ eval-cost-check:
 	$(MAKE) -C providers check
 
 # Host-side contracts of the reviewer-driven harnesses; no timing.
-reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check
+reviewer-eval-check: chains-check uo-check nvme-nic-check nvme-gpu-check gpu-nic-check bam-check eval-cost-check \
+	spdk-check cuda-arms-check session-guest-check
 
 clean:
 	rm -rf $(BUILD) __pycache__

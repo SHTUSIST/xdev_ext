@@ -29,6 +29,7 @@
  * Exit: 0 verified, 1 failure, 2 usage, 4 unavailable capability.
  */
 #define _GNU_SOURCE
+#include "../common/fd_check.h"
 #include <getopt.h>
 #include <linux/if_link.h>
 #include <net/if.h>
@@ -182,6 +183,7 @@ static int sg_slots(struct es_ce *ce, const struct gn_plan *p, unsigned char *bu
 
 int main(int argc, char **argv)
 {
+	int fd_before = eval_fd_count();
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct es_run r = { .ring = -1, .efd = -1 };
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
@@ -357,5 +359,7 @@ out:
 		ret = XG_EXIT_FAIL;
 	free(slots);
 	free(seen);
+	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
 	return ret;
 }

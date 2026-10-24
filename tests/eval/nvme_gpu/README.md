@@ -151,3 +151,7 @@ been checked; if they do not, both arms exit 4 on every cell.
 
 Not here: the SPDK arm (`../spdk`), BaM (`../bam`), and LLM load/save
 macro workloads.
+
+The shared [session guest driver](../session_guest/README.md) builds this arm
+for the existing correctness-only KVM suite, with independent byte/guard
+oracles and strict counts, STOP and descriptor checks.
