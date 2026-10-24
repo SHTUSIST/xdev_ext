@@ -80,7 +80,10 @@ A receipt requesting any timeout/cancellation policy is rejected. Official
 queue polling has no proven bounded cancel/drain operation. After uncertain
 GPU submission/synchronization, unexpected completion identity, or uncertain
 admin completion, the process retains the controller, queues, PRPs and GPU
-memory indefinitely and prints an UNKNOWN diagnostic. It ignores SIGINT,
+memory indefinitely and prints an UNKNOWN diagnostic. SIGPIPE is ignored before
+the first main diagnostic and again at the quarantine entry, so a disconnected
+diagnostic pipe cannot terminate the UNKNOWN resource owner. A readable pipe
+still receives the diagnostic. It ignores SIGINT,
 SIGTERM and SIGHUP after physical setup begins. Do not wrap native execution
 in a process-killing timeout. SIGKILL, machine reset, driver removal and other
 external revocation remain physical hazards; process code cannot make them

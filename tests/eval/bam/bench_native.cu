@@ -62,6 +62,9 @@ __global__ void native_io(Pair* pair, const uint64_t* prps, uint64_t n,
 
 static bool uncertain=false;
 [[noreturn]] static void quarantine(const char* why) {
+    // An EPIPE diagnostic must never terminate the owner of UNKNOWN DMA.
+    // Also protect this entry if called independently of main's early policy.
+    if(std::signal(SIGPIPE,SIG_IGN)==SIG_ERR) { for(;;) pause(); }
     // Returning/exiting after an uncertain GPU submission can revoke DMA memory.
     // Keep process, controller, queues, PRPs and buffers alive. No timeout/replay.
     std::fprintf(stderr,"{\"backend\":\"bam-native\",\"state\":\"unknown\",\"reclaim\":false,\"resubmit\":false,\"reason\":\"%s\"}\n",why);
@@ -195,6 +198,9 @@ struct Session {
     }
 };
 int main(int argc,char** argv) {
+    // Install before any diagnostic, allocation or device operation. A closed
+    // diagnostic pipe must not turn an error report into resource revocation.
+    if(std::signal(SIGPIPE,SIG_IGN)==SIG_ERR) return 1;
     // Only run_native.py emits authorization after validating the receipt.
     if(argc!=15 || std::string(argv[1])!="--authorized-native-v1") {
         std::fprintf(stderr,"qualification runner required\n");return 4;
