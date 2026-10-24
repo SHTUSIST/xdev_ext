@@ -1190,3 +1190,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/model/shim/linux/bitops.h
 
 !/kernel/tools/testing/selftests/xdev_ext_mech/provider/unbind_api_test.py
+
+!/kernel/tools/xdev_ext_mech/xdev_ext_mech_cpu_abi.h
+
+!/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_cpu_bpf_test.py
