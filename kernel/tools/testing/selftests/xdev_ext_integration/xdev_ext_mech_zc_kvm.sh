@@ -274,7 +274,7 @@ verify_eval_session_identity() {
         "$EVAL_SESSION_OUT/chain_plan.bpf.o" "$EVAL_SESSION_OUT/xdev_ext_eval_session_guest.sh" \
         "$BUILD/xdev-ext-eval-session-mode.txt" "$BUILD/xdev-ext-eval-session-source.sha256" \
         "$EVAL_SESSION_VALIDATOR"; do
-        [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
+        [[ -s "$artifact" ]] && grep -Fxq -- "$(sha256sum -- "$artifact")" "$BUILD/xdev-ext-artifacts.sha256" || {
             echo 'FAIL eval session artifact identity absent; rebuild exact source' >&2; return 1;
         }
     done

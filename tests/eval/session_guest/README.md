@@ -7,7 +7,10 @@ or performance evidence: the console explicitly records
 `performance_claim=none` and prints no timing values.
 
 `make check` runs host tests of the independent byte oracle, descriptor
-leak detection, actual shell cleanup functions and console validator.
+leak detection, actual shell cleanup functions and console validator. It also
+compiles the real guest artifacts in a private source copy, changes only the
+mechanism ABI header and rebuilds the same output directory to check that
+both nested chains outputs contain current code; no arm is executed.
 `eval_session_fixtures/*.log` are explicitly synthetic validator inputs,
 not records of guest execution. Oracle host tests use ordinary files only
 to exercise its byte comparisons; they do not implement device behavior.
@@ -49,7 +52,9 @@ The harness builds `make -C tests/eval/session_guest guest` with private
 `GUEST_OUT`, explicit `CC=gcc-14` and `CLANG=/usr/bin/clang-21`. It copies
 all six files to `/opt/xdev_ext/eval`, stages the dynamic dependencies of
 all four ELF executables and records source, build and image hashes plus
-the host validator. `--run-only --eval-session` requires an eval-enabled
+the host validator. Each guest build forcibly rebuilds both nested chains
+outputs so header or compiler changes cannot bind stale code to a new
+source manifest. `--run-only --eval-session` requires an eval-enabled
 build from the same source commit, matching source/artifact hashes, all
 six files and the required CE/IAA kernel configuration. Rebuild with
 `--eval-session` when an older build lacks this identity.

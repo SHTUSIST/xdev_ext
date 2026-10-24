@@ -37,7 +37,8 @@ guest:
 	$(CC) $(CFLAGS) $(WARN) $(LIBBPF_CFLAGS) -msse4.2 ../gpu_nic/session_gpu_nic.c \
 		$(KERNEL)/tools/xdev_ext_xsk_redirect.c $(KERNEL)/tools/xdev_ext_gpu_identity.c \
 		-o $(OUT)/session_gpu_nic $(LIBBPF_LIBS) -lelf -lz -ldl
-	$(MAKE) -C ../chains BUILD=$(OUT)/chains CC="$(CC)" CLANG="$(CLANG)" bench bpf
+	# Nested targets omit some transitive headers; rebuild both for each guest image.
+	$(MAKE) -B -C ../chains BUILD=$(OUT)/chains CC="$(CC)" CLANG="$(CLANG)" bench bpf
 	cp $(OUT)/chains/chain_bench $(OUT)/chains/chain_plan.bpf.o $(OUT)/
 	cp $(GUEST_SH) $(OUT)/
 
@@ -46,6 +47,7 @@ check: | $(BUILD)
 	$(BUILD)/test_fd_check
 	$(PYTHON) test_oracle.py -v
 	$(PYTHON) test_cleanup.py -v
+	$(PYTHON) test_rebuild.py -v
 	$(PYTHON) $(KERNEL)/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py -v
 	$(PYTHON) $(KERNEL)/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate_test.py -v
 

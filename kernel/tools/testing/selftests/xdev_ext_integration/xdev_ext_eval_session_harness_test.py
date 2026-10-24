@@ -51,7 +51,7 @@ class EvalSessionHarness(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
 
     def identity(self, *, missing_file=None, missing_record=None, symbol=None,
-                 mode='eval_session=1\n', corrupt=None, source_changed=False):
+                 mode='eval_session=1\n', corrupt=None, source_changed=False, spaced_source=False):
         gate = function('verify_eval_session_identity')
         with tempfile.TemporaryDirectory(prefix='eval-identity-') as directory:
             base = Path(directory)
@@ -71,7 +71,9 @@ class EvalSessionHarness(unittest.TestCase):
             manifest(sources, [source])
             profile = build/'xdev-ext-eval-session-mode.txt'
             profile.write_text(mode)
-            validator = base/'validator.py'
+            validator_dir = base/'source with space' if spaced_source else base
+            validator_dir.mkdir(exist_ok=True)
+            validator = validator_dir/'validator.py'
             validator.write_text('validator identity')
             manifest(build/'xdev-ext-artifacts.sha256', artifacts+[sources, profile, validator])
             if missing_file:
@@ -85,6 +87,10 @@ class EvalSessionHarness(unittest.TestCase):
 
     def test_identity_accepts_exact_complete_build(self):
         result = self.identity()
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_identity_accepts_source_validator_path_with_spaces(self):
+        result = self.identity(spaced_source=True)
         self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_identity_rejects_every_missing_file_and_record(self):
