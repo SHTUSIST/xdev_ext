@@ -78,7 +78,7 @@ void process_a_read(void)
 	lseek(fd, 0, SEEK_SET);
 
 	/* Read through the transparently served read() - routed via io_uring */
-	ret = read(fd, buffer, sizeof(buffer));
+	ret = read(fd, buffer, sizeof(buffer) - 1);
 	if (ret < 0) {
 		perror("read");
 	} else {
