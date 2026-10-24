@@ -113,3 +113,18 @@ python3 -m py_compile tests/eval/native_trace/collector.py
 ```
 
 These are host software checks, not DMA or physical performance results.
+
+With `correctness_only=True`, the existing chains command must itself carry
+`--correctness-only`. This path observes actual host/VM identity and existing
+block/NVMe-generic/NIC nodes, permits real `virtio_net` as well as `ice`, and
+records `physical=false`, `evidence_kind=correctness-only`. It keeps the same
+native probe, immutable identity, FIFO, loss and oracle checks. It never
+produces performance eligibility. The generic `PrivateTrace` loader has no
+physical-device admission and can be reused by an independent correctness
+adapter; the adapter must retain formats and per-CPU loss counters itself.
+
+K per-point helpers can have zero owner fields when running on kernel workers.
+Their actual native session inherits owner identity only from the verified
+CREATE event and matching sideband. Nonzero conflicting owner fields are
+errors. `native_event_origin_tgid` and `native_event_process_start_ticks`
+preserve those raw per-point values alongside the bound origin identity.

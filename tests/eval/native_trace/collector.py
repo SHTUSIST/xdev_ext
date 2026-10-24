@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import time
 import uuid
@@ -658,7 +659,44 @@ def _module(path, name):
     return loaded
 
 
-def _native_preflight(manifest, root):
+def software_environment():
+    """Observe actual host/VM identity while making no physical-performance claim."""
+    cpuinfo = Path('/proc/cpuinfo').read_bytes()
+    dmi = {name: p.read_text().strip() for name in ('sys_vendor', 'product_name', 'board_vendor')
+           if (p := Path('/sys/class/dmi/id') / name).exists()}
+    hypervisor_path = Path('/sys/hypervisor/type')
+    hypervisor = hypervisor_path.read_text().strip() if hypervisor_path.exists() else ''
+    virtual = bool(hypervisor or re.search(rb'^flags\s*:.*\bhypervisor\b', cpuinfo, re.M) or
+                   re.search(r'qemu|kvm|virtual|vmware|xen|bochs', ' '.join(dmi.values()), re.I))
+    return dict(physical=False, environment='vm' if virtual else 'host-contract',
+                evidence_kind='correctness-only', observations=dict(dmi=dmi, hypervisor=hypervisor,
+                    cpuinfo_sha256=hashlib.sha256(cpuinfo).hexdigest(), kernel_release=os.uname().release))
+
+
+def _software_devices(rig):
+    """Resolve existing guest devices; this creates or substitutes no device."""
+    devices = []
+    for role in ('nvme_src', 'nvme_dst'):
+        side = rig[role]
+        block, ng = Path(side['block']), Path(side['ng'])
+        if not stat.S_ISBLK(block.stat().st_mode) or not stat.S_ISCHR(ng.stat().st_mode):
+            raise ValueError('correctness native path needs actual block and NVMe generic devices')
+        node = Path('/sys/class/block') / block.name
+        if not node.exists():
+            raise ValueError('correctness NVMe block device missing in running sysfs')
+        devices.append(dict(block=str(block), ng=str(ng), sysfs=str(node.resolve()), role=role))
+    for role in ('tx', 'rx'):
+        name = rig[role]['ifname']
+        node = Path('/sys/class/net') / name
+        driver = node / 'device/driver'
+        if not node.is_dir() or not driver.exists():
+            raise ValueError('correctness native NIC/driver missing in running sysfs')
+        devices.append(dict(ifname=name, driver=driver.resolve().name,
+                            sysfs=str(node.resolve()), role=role))
+    return dict(devices=devices, environment=software_environment())
+
+
+def _native_preflight(manifest, root, correctness_only=False):
     """Resolve actual kernel interfaces, driver, devices and running config."""
     trace = manifest.get('trace', {})
     fmt = (root / 'events/xdev_ext/native_event/format').read_text()
@@ -696,13 +734,19 @@ def _native_preflight(manifest, root):
         raise ValueError('collector source HEAD differs from declared exact_sha')
     gate = _module(Path(__file__).resolve().parent.parent / 'chains/hardware_gate.py', 'native_trace_hardware_gate')
     arm = 'session' if manifest['arm'].startswith('K') else 'userspace-shared'
-    try:
-        evidence = gate.admit(rig, [('nvme', 'from', 'src'), ('afxdp', 'to', 'tx'),
-                                  ('afxdp', 'from', 'rx'), ('nvme', 'to', 'dst')], [arm])
-    except gate.Refusal as error:
-        raise ValueError('physical native hardware gate: ' + str(error)) from error
+    if correctness_only:
+        evidence = _software_devices(rig)
+        scope = software_environment()
+    else:
+        try:
+            evidence = gate.admit(rig, [('nvme', 'from', 'src'), ('afxdp', 'to', 'tx'),
+                                      ('afxdp', 'from', 'rx'), ('nvme', 'to', 'dst')], [arm])
+        except gate.Refusal as error:
+            raise ValueError('physical native hardware gate: ' + str(error)) from error
+        scope = dict(physical=True, environment='physical', evidence_kind='physical')
     nics = [row for row in evidence['devices'] if 'ifname' in row]
-    if not nics or any(row.get('driver') != 'ice' for row in nics):
+    supported = ('ice', 'virtio_net') if correctness_only else ('ice',)
+    if not nics or any(row.get('driver') not in supported for row in nics):
         raise ValueError('native unsupported NIC driver: audited ice TX FIFO and teardown coverage required')
     symbols = Path('/proc/kallsyms').read_text()
     resolved = {}
@@ -734,7 +778,7 @@ def _native_preflight(manifest, root):
                 driver_modules=modules, kernel_release=os.uname().release,
                 kernel_notes=artifact('/sys/kernel/notes'), config_hash=config_hash,
                 collector_sha=source, timestamp_resolution_ns=(1 if 'ts_ns' in fmt else 1000),
-                physical=True, environment='physical', evidence_kind='physical')
+                **scope)
 
 
 def _cpu_snapshot():
@@ -780,7 +824,9 @@ def execute_command(command, stdout, stderr, environment, timeout):
 def _capture(manifest, command, output, root, correctness_only):
     artifacts, reasons = {}, []
     try:
-        observed = _native_preflight(manifest, root)
+        if correctness_only and '--correctness-only' not in command:
+            raise ValueError('correctness-only chains capture requires actual --correctness-only command')
+        observed = _native_preflight(manifest, root, correctness_only=correctness_only)
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         return dict(status='unavailable', performance_eligible=False, returncode=None,
                     reasons=['native preflight: ' + str(error)], artifacts={})

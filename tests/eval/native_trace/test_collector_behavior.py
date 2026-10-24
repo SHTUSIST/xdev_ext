@@ -354,6 +354,16 @@ class CaptureEvidence(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.c.validate_format(good.replace('u64 cookie;', 'u64 bogus;'))
 
+    def test_correctness_scope_reads_real_host_but_never_claims_physical_performance(self):
+        self.assertTrue(callable(getattr(self.c, 'software_environment', None)),
+                        'real software-only environment observation is missing')
+        result = self.c.software_environment()
+        self.assertIs(result['physical'], False)
+        self.assertIn(result['environment'], ('vm', 'host-contract'))
+        self.assertEqual(result['evidence_kind'], 'correctness-only')
+        self.assertIn('cpuinfo_sha256', result['observations'])
+        self.assertEqual(result['observations']['kernel_release'], os.uname().release)
+
     def test_timeout_stops_owned_process_group_and_preserves_real_output(self):
         self.assertTrue(callable(getattr(self.c, 'execute_command', None)),
                         'owned process group timeout handling is not implemented')
