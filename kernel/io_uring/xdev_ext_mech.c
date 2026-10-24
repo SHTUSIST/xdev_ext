@@ -1986,6 +1986,11 @@ static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,
 			/* No busy polling: capacity completion can expedite this timer. */
 			kthread_mod_delayed_work(s->worker, &s->retry_work, 1);
 		} else {
+			/* A capacity refusal never accepted this command. If STOP or
+			 * generation loss closed retry admission, record that cause.
+			 */
+			if (err == -EAGAIN || err == -ENOSPC)
+				err = xdev_ext_mech_stop_reason(s);
 			if (b->parent)
     xdev_ext_mech_fanout_landed(s, b, err, false);
    else

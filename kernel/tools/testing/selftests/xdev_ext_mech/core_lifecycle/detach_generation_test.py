@@ -46,6 +46,8 @@ def generate(kernel=ROOT):
         'xdev_ext_mech_session_stop', 'xdev_ext_mech_notify_locked',
         'xdev_ext_mech_generation_gone', 'xdev_ext_mech_batch_run')]
     bodies = [function(text, name) for text, name in names]
+    reliable = (kernel / 'net/xdp/xsk_xdev_ext_mech_reliable.inc').read_text()
+    source = source.replace('/* ACTUAL_RELIABLE_SUBMIT */', function(reliable, 'xsk_rel_submit'))
     source = source.replace('/* ACTUAL_PROTOTYPES */', '\n'.join(
         body[:body.index('{')].strip() + ';' for body in bodies))
     return source.replace('/* ACTUAL_FUNCTIONS */', '\n'.join(bodies))
