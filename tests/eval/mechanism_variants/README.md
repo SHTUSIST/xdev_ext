@@ -277,3 +277,49 @@ full before/after lifecycle, completion, custody, queue, acceptance and
 publication observations, actual source SHA/hashes, compilation command and
 raw output. It is `actual-core-host-fixture` evidence and is never inserted
 into the guest native trace. Re-run it against the final integrated checkout.
+
+### Dedicated KVM mode and authoritative host validator
+
+Use the existing private KVM harness with `--mechanism-variants`. It is an
+exclusive E2-only campaign: sixteen requests, depth one, NVMe READ and the
+source signature window at absolute LBA2048. It refuses CE, fault, reliable,
+compatibility, peer and other optional campaigns. An explicit
+`--mechanism-variants-timeout SECONDS` controls the outer timeout; the default
+budget is inherited, with no claim that an unrun campaign finishes within it.
+The same flag is required for `--run-only`, which verifies exact source,
+configuration, dedicated-mode identity, frontend/BPF/tool and source hashes.
+
+The mode builds its actual BPF objects against the final target vmlinux, using
+the prepared target's existing libbpf/bpftool sources without downloads. Both
+whole disk images must remain unchanged. Its private source-before image is
+created from the same seeded bytes as source.raw. Ordinary chain validation
+does not run in this mode.
+
+The guest uses the existing private NICs, exports the complete actual source
+window, sink bytes, BPF objects, raw trace/format/per-CPU statistics, verifier
+buffer, queried program/map/link metadata, CREATE request/results/resources,
+negative logs, and compressed complete UMEM snapshots. `export_artifacts.sh`
+frames each file with name/length/SHA256 and a final complete manifest. The
+host rejects unsafe paths, duplicate/truncated/unlisted files, hash/length
+mismatches and explicit size/count overruns. `CAPTURED` is never a PASS verdict.
+The shared AF_XDP object's actual initial map images are observed immediately
+before the existing libbpf load, after its configuration writes.
+
+```
+bash kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
+ --scratch /tmp/xdev-ext-e2e.PRIVATE --source PRODUCT/kernel \
+ --mechanism-variants --mechanism-variants-timeout 600
+python3 tests/eval/mechanism_variants/validate_e2.py \
+ --source-root PRODUCT --scratch /tmp/xdev-ext-e2e.PRIVATE \
+ --evidence /tmp/xdev-ext-e2e.PRIVATE/evidence
+```
+
+The validator always re-extracts and checks actual serial artifacts, actual
+CREATE/session/resource identity, native immutable claims, both complete sink
+payloads through the frozen independent guest gate, UMEM bytes, illegal-plan
+rejections, and separately labeled actual-core old-ticket software evidence.
+It writes `e2-capture/`, `e2-validation.json`, `e2-frozen-gate.log`, and only then
+prints `XDEV_EXT_E2_KVM=PASS scope=guest-correctness old_ticket=actual-core-host-fixture performance_claim=none`.
+The harness stores that exact line in `evidence/result.txt`. The current
+implementation requires the actual final target run; parser/transport fixture
+PASS results are not target execution evidence.

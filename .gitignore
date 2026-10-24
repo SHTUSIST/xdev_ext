@@ -1166,3 +1166,12 @@
 !/tests/eval/mechanism_variants/guard.py
 !/tests/eval/mechanism_variants/test_guard.py
 !/tests/eval/mechanism_variants/export_old_ticket.py
+!/tests/eval/mechanism_variants/artifacts.py
+!/tests/eval/mechanism_variants/export_artifacts.sh
+!/tests/eval/mechanism_variants/test_artifacts.py
+!/tests/eval/mechanism_variants/kvm_mode.sh
+!/tests/eval/mechanism_variants/kvm_guest.sh
+!/tests/eval/mechanism_variants/test_kvm_wiring.py
+!/tests/eval/mechanism_variants/validate_e2.py
+!/tests/eval/mechanism_variants/mv_policy_capture.h
+!/tests/eval/mechanism_variants/test_policy_capture.c

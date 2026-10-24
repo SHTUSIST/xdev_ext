@@ -32,11 +32,17 @@ REMOTE_WINDOW=''
 REL_POLICY=default
 PROVIDER_CASE=normal
 FAULT_CAMPAIGN=''
+MECHANISM_VARIANTS=0
+MECHANISM_VARIANTS_TIMEOUT=''
+GROUP_COUNT_SET=0
+DEPTH_SET=0
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
 	--source) SOURCE_OVERRIDE=$2; shift 2 ;;
 	--run-only) RUN_ONLY=1; shift ;;
+	--mechanism-variants) MECHANISM_VARIANTS=1; shift ;;
+	--mechanism-variants-timeout) MECHANISM_VARIANTS_TIMEOUT=$2; shift 2 ;;
 	--prepare-only) PREPARE_ONLY=1; shift ;;
 	--debug-locking) DEBUG_LOCKING=1; shift ;;
 	--lifecycle) LIFECYCLE=1; shift ;;
@@ -44,8 +50,8 @@ while (($#)); do
 	--compat) COMPAT=1; CE_SIM=1; shift ;;
 	--peer) PEER=1; CE_SIM=1; shift ;;
 	--eval-session) EVAL_SESSION=1; CE_SIM=1; shift ;;
-	--groups) GROUP_COUNT=$2; shift 2 ;;
-	--depth) DEPTH=$2; shift 2 ;;
+	--groups) GROUP_COUNT=$2; GROUP_COUNT_SET=1; shift 2 ;;
+	--depth) DEPTH=$2; DEPTH_SET=1; shift 2 ;;
 	--ce-slots) CE_SLOTS=$2; shift 2 ;;
 	--ce-sim) CE_SIM=1; shift ;;
 	--ce-delay-us) CE_DELAY_US=$2; shift 2 ;;
@@ -67,12 +73,28 @@ fi
 if (( FENCE_CHECK )) && [[ "$FAULT" != none || "$PROVIDER_CASE" != normal ]]; then
     echo 'fence-check requires a normal correctness plan' >&2; exit 2
 fi
+# E2 is a separate READ-only correctness campaign and data/oracle domain.
+if (( MECHANISM_VARIANTS )); then
+    if (( CE_SIM || COMPAT || PEER || RX_CE || RELIABLE || CE_DELAY_US || ${LIFECYCLE:-0} || ${FENCE_CHECK:-0} || ${EVAL_SESSION:-0} || ${NIC_FALLBACK:-0} )) || [[ "$FAULT" != none || "$PROVIDER_CASE" != normal || -n "${FAULT_CAMPAIGN:-}" ]]; then
+        echo 'mechanism-variants requires its exclusive correctness mode' >&2; exit 2
+    fi
+    if (( GROUP_COUNT_SET && GROUP_COUNT != 16 )) || (( DEPTH_SET && DEPTH != 1 )); then
+        echo 'mechanism-variants requires exactly groups=16 depth=1' >&2; exit 2
+    fi
+    GROUP_COUNT=16; DEPTH=1; CE_SLOTS=1; REMOTE_WINDOW=1
+elif [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then
+    echo 'mechanism-variants-timeout requires --mechanism-variants' >&2; exit 2
+fi
+if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" && ! "$MECHANISM_VARIANTS_TIMEOUT" =~ ^[1-9][0-9]{0,4}$ ]]; then
+    echo 'invalid mechanism-variants timeout' >&2; exit 2
+fi
 # Debug kernels are correctness runs; allow instrumentation overhead without
 # changing the default campaign budgets or matrix selection.
 TIMEOUT_FACTOR=$((DEBUG_LOCKING ? 4 : 1))
 CLI_TIMEOUT_MS=$((60000 * TIMEOUT_FACTOR))
 RX_TIMEOUT_MS=$((15000 * TIMEOUT_FACTOR))
 QEMU_TIMEOUT_SECONDS=$((150 * TIMEOUT_FACTOR))
+if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then QEMU_TIMEOUT_SECONDS=$MECHANISM_VARIANTS_TIMEOUT; fi
 # Campaign length is independent of the bounded in-flight pool/window.
 [[ "$GROUP_COUNT" =~ ^[1-9][0-9]{0,3}$ && "$GROUP_COUNT" -le 1024 ]]
 [[ -n "$DEPTH" ]] || DEPTH=$((RELIABLE ? 8 : (GROUP_COUNT < 64 ? GROUP_COUNT : 64)))
@@ -202,6 +224,12 @@ PRELOAD_OUT=$TOOLS/preload
 PEER_OUT=$TOOLS/peer-guest
 EVAL_SESSION_OUT=$TOOLS/eval-session
 EVAL_SESSION_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py
+if (( MECHANISM_VARIANTS )); then
+    [[ "$SOURCE_LAYOUT" == overlay ]] || { echo 'mechanism-variants requires prepared product overlay' >&2; exit 2; }
+    E2_SOURCE=$SOURCE_GIT_ROOT/tests/eval/mechanism_variants
+    source "$E2_SOURCE/kvm_mode.sh"
+    SOURCE_SLBA=2048
+fi
 QEMU=/usr/local/bin/qemu-system-x86_64
 FENCE_OUT=$SOURCE_GIT_ROOT/tests/eval/dmabuf_lifecycle
 FENCE_GUEST=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh
@@ -351,6 +379,7 @@ if (( RUN_ONLY )); then
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
+    if (( MECHANISM_VARIANTS )); then e2_verify_identity; fi
 fi
 lowprio() { nice -n 10 ionice -c 3 "$@"; }
 kmake() { lowprio make -C "$SRC" O="$BUILD" -j8 CC=gcc-14 HOSTCC=gcc-14 "$@"; }
@@ -501,6 +530,7 @@ if (( ! RUN_ONLY )); then
         printf 'eval_session=1\n' >"$BUILD/xdev-ext-eval-session-mode.txt"
     fi
 fi
+if (( MECHANISM_VARIANTS && ! RUN_ONLY )); then e2_build; fi
 lowprio make -C "$SRC/tools/testing/selftests/xdev_ext_integration/verifier" -j2 \
 	BUILD_DIR="$TOOLS/verifier" CLANG=/usr/bin/clang-21 HOSTCC=gcc-14 \
 	all >"$EV/verifier-build.log" 2>&1
@@ -540,6 +570,7 @@ if (( ! RUN_ONLY )); then
             "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
             >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
+    if (( MECHANISM_VARIANTS )); then e2_record_artifacts; fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
 fi
 sha256sum "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" >>"$EV/provenance.txt"
@@ -621,6 +652,7 @@ if (( LIFECYCLE )); then
     done
     cp "$TOOLS/cpu_plan.bpf.o" "$lifecycle_guest" "$ROOT/opt/xdev_ext/"
 fi
+if (( MECHANISM_VARIANTS )); then e2_stage; fi
 if (( COMPAT )); then
     mkdir -p "$ROOT/opt/xdev_ext/socket_guest" "$ROOT/opt/xdev_ext/preload"
     cp "$SOCKET_OUT/"{socket_runtime,ce_observe.bpf.o} \
@@ -656,6 +688,7 @@ printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FE
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
@@ -677,6 +710,7 @@ if (( ${EVAL_SESSION:-0} )); then
         "$EVAL_SESSION_OUT/session_gpu_nic" "$EVAL_SESSION_OUT/eval_session_oracle")
 fi
 if [[ -n "${FAULT_CAMPAIGN:-}" ]]; then GUEST_PROGRAMS+=("$TOOLS/fault_uid"); fi
+if (( MECHANISM_VARIANTS )); then GUEST_PROGRAMS+=("$TOOLS/e2/mv_ctl" "$TOOLS/e2/mv_sink" "$TOOLS/e2/bpftool"); fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then GUEST_PROGRAMS+=("$IAA_OUT/iaa_runtime"); fi
 if (( ${COMPAT:-0} )); then
     GUEST_PROGRAMS+=("$SOCKET_OUT/socket_runtime" "$PRELOAD_OUT/libio_uring_unified.so" \
@@ -803,6 +837,10 @@ resolve_nvme_roles() {
         "$source_block" "$source_ng" "$destination_block" "$destination_ng" "$peer_block" "$peer_ng"
 }
 resolve_nvme_roles /sys/class/nvme /dev "$peer"
+if [ "${mechanism_variants:-0}" = 1 ]; then
+    sh /opt/xdev_ext/e2/kvm_guest.sh "$source_block" "$source_ng"
+    exit 0
+fi
 if [ -n "$fault_campaign" ]; then
     export source_block source_ng destination_block destination_ng nvme_source nvme_destination
     sh /opt/xdev_ext/xdev_ext_mech_zc_fault_guest.sh
@@ -1200,6 +1238,9 @@ fi
 GUEST
 chmod 0700 "$ROOT/init"
 (cd "$ROOT" && find . -print0 | cpio --null -o -H newc 2>"$EV/cpio.log" | gzip -1) >"$SCRATCH/initramfs.cpio.gz"
+if (( MECHANISM_VARIANTS )); then
+    e2_images
+else
 python3 - "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$FAULT" "$SRC" "${FAULT_CAMPAIGN:-}" "${LIFECYCLE:-0}" <<'PY'
 import hashlib, pathlib, sys
 p = pathlib.Path(sys.argv[1])
@@ -1248,6 +1289,7 @@ if lifecycle:
 (p/'expected.raw').write_bytes(expected)
 (p/'evidence/source-before.sha256').write_text(hashlib.sha256(src).hexdigest()+'\n')
 PY
+fi
 # Reliable campaigns bound outstanding groups by depth; v2 retains its
 # finite fail-stop experiment. Extra virtual RX capacity is test plumbing.
 # This QEMU requires default TX=256.
@@ -1378,6 +1420,10 @@ if (( LIFECYCLE )); then
     cmp "$SCRATCH/expected.raw" "$SCRATCH/destination.raw"
     sha256sum "$SCRATCH/source.raw" "$SCRATCH/destination.raw" >"$EV/data.sha256"
     echo 'XDEV_EXT_LIFECYCLE_KVM=PASS source=unchanged destination=whole-image' | tee "$EV/result.txt"
+    exit 0
+fi
+if (( MECHANISM_VARIANTS )); then
+    python3 "$E2_SOURCE/validate_e2.py" --source-root "$SOURCE_GIT_ROOT" --scratch "$SCRATCH" --evidence "$EV" | tee "$EV/result.txt"
     exit 0
 fi
 if (( COMPAT )); then

@@ -43,7 +43,7 @@ cat /proc/cmdline > "$out/cmdline.txt"
 cat "/sys/class/net/$iface/mtu" > "$out/mtu.txt"
 cat "/sys/class/net/$iface/address" > "$out/local_mac.txt"
 sha256sum "$bin/nvme_reverse.bpf.o" "$bin/nvme_gray.bpf.o" "$bin/nxp_mech.bpf.o" > "$out/objects.sha256"
-"$ctl" attach --obj "$bin/nxp_mech.bpf.o" --map nxp_afxdp_ops \
+E2_POLICY_CAPTURE="$out/net-policy" "$ctl" attach --obj "$bin/nxp_mech.bpf.o" --map nxp_afxdp_ops \
     --set nxp_session=270019 --set key_base=1 --pin "$netpin" > "$out/net-attach.log" 2>&1
 net_attached=1
 for variant in reverse gray; do
@@ -52,6 +52,7 @@ for variant in reverse gray; do
     # Archive actual loaded-program metadata; no hand-written acceptance bool.
     bpftool -j prog show > "$out/$variant-programs.json"
     bpftool -j link show > "$out/$variant-links.json"
+    bpftool -j map show > "$out/$variant-maps.json"
     "$bin/mv_sink" "$sink_ip" 12345 "$out/$variant-sink.bin" > "$out/$variant-sink.log" 2>&1 &
     sink_pid=$!
     ready=0

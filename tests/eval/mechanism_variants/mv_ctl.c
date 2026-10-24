@@ -8,8 +8,10 @@
 #include <bpf/libbpf.h>
 #include "mv_create_capture.h"
 #include "mv_umem_guard.h"
+#include "mv_policy_capture.h"
 
 static long mv_syscall(long number,...);
+static int mv_object_load(struct bpf_object *object);
 static int mv_setsockopt(int fd,int level,int name,const void *value,socklen_t bytes);
 static int mv_close(int fd);
 static struct mv_umem_guard mv_guard;
@@ -18,6 +20,7 @@ static uint64_t mv_guard_session;
 static int mv_guard_ring=-1,mv_guard_failed,mv_guard_stopped;
 static struct bpf_object *mv_open_file(const char *path,const struct bpf_object_open_opts *opts);
 #define syscall mv_syscall
+#define bpf_object__load mv_object_load
 #define setsockopt mv_setsockopt
 #define close mv_close
 #define bpf_object__open_file mv_open_file
@@ -26,9 +29,16 @@ static struct bpf_object *mv_open_file(const char *path,const struct bpf_object_
 #undef main
 #undef bpf_object__open_file
 #undef syscall
+#undef bpf_object__load
 #undef setsockopt
 #undef close
 
+static int mv_object_load(struct bpf_object *object)
+{
+    const char *prefix=getenv("E2_POLICY_CAPTURE");
+    if (prefix && mv_policy_capture(object,prefix)) return -errno;
+    return bpf_object__load(object);
+}
 static char *mv_verifier_buffer;
 #define MV_LOG_BYTES (4U*1024U*1024U)
 static struct bpf_object *mv_open_file(const char *path,const struct bpf_object_open_opts *opts)

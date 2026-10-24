@@ -13,7 +13,7 @@ $(BUILD):
 	mkdir -p $@
 $(BUILD)/mv_sink: mv_sink.c | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
-$(BUILD)/mv_ctl: mv_ctl.c mv_create_capture.h mv_umem_guard.h ../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c | $(BUILD)
+$(BUILD)/mv_ctl: mv_ctl.c mv_create_capture.h mv_umem_guard.h mv_policy_capture.h ../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c | $(BUILD)
 	$(CC) $(CPPFLAGS) $(CFLAGS) mv_ctl.c ../../../kernel/tools/xdev_ext_xsk_redirect.c ../../../kernel/tools/xdev_ext_gpu_identity.c -o $@ $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz -ldl
 $(BUILD)/test_umem_guard: test_umem_guard.c mv_umem_guard.h mv_create_capture.h | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
@@ -24,6 +24,8 @@ bpf:
 check: $(BUILD)/test_create_capture $(BUILD)/test_umem_guard
 	$(MAKE) -C tests check
 	python3 -B test_helpers.py -v
+	python3 -B test_artifacts.py -v
+	python3 -B test_kvm_wiring.py -v
 	python3 -B test_decode.py -v
 	python3 -B test_decode_regressions.py -v
 	python3 -B test_guard.py -v
