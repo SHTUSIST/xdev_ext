@@ -9,6 +9,7 @@
 
 #include "include/uapi/linux/io_uring.h"
 #include "io_uring/iaa/xdev_ext_iaa_core.h"
+/* L8: direct IAA now uses the same packed owner/generation lifecycle as sessions. */
 
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 
@@ -93,8 +94,8 @@ static void test_exact_encoding_and_opcodes(void)
 
 static void test_optional_stats_never_alias_destination_offset(void)
 {
-	const xdev_ext_sm_u64 dst_off = UINT64_C(4096);
-	const xdev_ext_sm_u64 registered_stats = UINT64_C(0x12345000);
+	const __u64 dst_off = UINT64_C(4096);
+	const __u64 registered_stats = UINT64_C(0x12345000);
 	struct xdev_ext_iaa_sqe_fields fields = {
 		.src_off = 128,
 		.dst_off = dst_off,
@@ -127,7 +128,7 @@ static void test_registered_umem_stats_never_fall_back_to_sqe(void)
 }
 
 static void expect_decode_error(struct xdev_ext_iaa_sqe_fields fields,
-				xdev_ext_sm_u64 umem_size, xdev_ext_sm_u32 frame_size)
+				__u64 umem_size, __u32 frame_size)
 {
 	struct xdev_ext_iaa_window_plan plan;
 
@@ -256,7 +257,7 @@ static void test_physical_page_alias_detection(void)
 #define FAKE_PHYS_SEGMENTS 16
 
 struct fake_phys_env {
-	xdev_ext_sm_u64 page_ids[8];
+	__u64 page_ids[8];
 	struct xdev_ext_iaa_phys_segment source[FAKE_PHYS_SEGMENTS];
 	unsigned int source_count;
 };
@@ -343,18 +344,37 @@ static void test_physical_alias_production_walk(void)
 						&fake_phys_ops, &env), 0);
 }
 
-static void publish_source(struct xdev_ext_pool *pool, xdev_ext_sm_u32 idx,
-			   xdev_ext_sm_u32 len)
+/* Request-local test tokens for explicit competing producer operations. */
+static __u64 test_tokens[32];
+static int test_claim(struct xdev_ext_mech_life_pool *pool, __u32 index)
 {
-	EXPECT_EQ(xdev_ext_frame_claim(pool, idx), 0);
-	EXPECT_EQ(xdev_ext_frame_publish(pool, idx, len), 0);
+ return xdev_ext_mech_life_claim(&pool->frames[index], 3, &test_tokens[index]);
+}
+static int test_publish(struct xdev_ext_mech_life_pool *pool, __u32 index, __u32 len)
+{
+ return xdev_ext_mech_life_publish(&pool->frames[index], test_tokens[index], 1, len);
+}
+static int test_abort(struct xdev_ext_mech_life_pool *pool, __u32 index)
+{
+ return xdev_ext_mech_life_fail_produce(&pool->frames[index], test_tokens[index]);
+}
+static __u32 test_state(struct xdev_ext_mech_life_pool *pool, __u32 index)
+{
+ return xdev_ext_mech_life_phase(&pool->frames[index]);
 }
 
-static void init_pool(struct xdev_ext_pool *pool, struct xdev_ext_frame *frames,
+static void publish_source(struct xdev_ext_mech_life_pool *pool, __u32 idx,
+			   __u32 len)
+{
+	EXPECT_EQ(test_claim(pool, idx), 0);
+	EXPECT_EQ(test_publish(pool, idx, len), 0);
+}
+
+static void init_pool(struct xdev_ext_mech_life_pool *pool, struct xdev_ext_mech_life *frames,
 		      size_t nr)
 {
 	memset(frames, 0, nr * sizeof(*frames));
-	EXPECT_EQ(xdev_ext_pool_init(pool, frames, nr, false), 0);
+	xdev_ext_mech_life_pool_init(pool, frames, nr);
 }
 
 static void test_legacy_window_contract(void)
@@ -381,8 +401,8 @@ static void test_legacy_window_contract(void)
 static void test_legacy_ready_source_respects_offset(void)
 {
 	struct xdev_ext_lifecycle_window window = {};
-	struct xdev_ext_frame frames[2];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[2];
+	struct xdev_ext_mech_life_pool pool;
 	int mode;
 
 	EXPECT_EQ(xdev_ext_lifecycle_decode_window(128, 896, 8192, 4096, false,
@@ -392,12 +412,12 @@ static void test_legacy_ready_source_respects_offset(void)
 	mode = xdev_ext_lifecycle_consume_begin(&pool, &window);
 	EXPECT_EQ(mode, XDEV_EXT_LIFECYCLE_SOURCE_READY);
 	EXPECT_EQ(xdev_ext_lifecycle_consume_end(&pool, &window, mode), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, window.frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, window.frame), XDEV_EXT_MECH_L_FREE);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	publish_source(&pool, window.frame, 1023);
 	EXPECT_EQ(xdev_ext_lifecycle_consume_begin(&pool, &window), -EMSGSIZE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, window.frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, window.frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[window.frame].valid_len, 1023);
 }
 
@@ -406,8 +426,8 @@ static void test_legacy_and_iaa_ownership_conflicts(void)
 	struct xdev_ext_iaa_window_plan iaa = valid_plan();
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_lifecycle_window legacy = {};
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	int mode;
 
 	/* A legacy producer blocks IAA from reading the same frame. */
@@ -417,8 +437,8 @@ static void test_legacy_and_iaa_ownership_conflicts(void)
 	EXPECT_EQ(xdev_ext_lifecycle_producer_begin(&pool, &legacy), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &iaa,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), -EBUSY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, legacy.frame), XDEV_EXT_FRAME_IO_PENDING);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, iaa.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, legacy.frame), XDEV_EXT_MECH_L_IO_PENDING);
+	EXPECT_EQ(test_state(&pool, iaa.dst_frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_lifecycle_producer_abort(&pool, &legacy), 0);
 
 	/* IAA ownership blocks both legacy producers and consumers. */
@@ -443,14 +463,14 @@ static void test_legacy_and_iaa_ownership_conflicts(void)
 	EXPECT_EQ(mode, XDEV_EXT_LIFECYCLE_SOURCE_READY);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &iaa,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), -EBUSY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, iaa.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, iaa.dst_frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_lifecycle_consume_end(&pool, &legacy, mode), 0);
 }
 
 static void test_source_ready_success_and_failure(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
 
@@ -460,11 +480,11 @@ static void test_source_ready_success_and_failure(void)
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), 0);
 	EXPECT_EQ(claim.source_mode, XDEV_EXT_IAA_SOURCE_READY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_TX_PENDING);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_IO_PENDING);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_OUT_PENDING);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_IO_PENDING);
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, 0, 777), 777);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.dst_frame].valid_len, 777);
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, 0, 777), -EALREADY);
 
@@ -474,39 +494,39 @@ static void test_source_ready_success_and_failure(void)
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, -EIO, 0), -EIO);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_ready_source_respects_valid_prefix(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
-	xdev_ext_sm_u32 valid_end = plan.src_frame_offset + plan.src_len;
+	__u32 valid_end = plan.src_frame_offset + plan.src_len;
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	publish_source(&pool, plan.src_frame, valid_end);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len, valid_end);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	publish_source(&pool, plan.src_frame, valid_end - 1);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), -EMSGSIZE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len, valid_end - 1);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_source_free_success_and_provider_overrun(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
 
@@ -516,37 +536,37 @@ static void test_source_free_success_and_provider_overrun(void)
 	EXPECT_EQ(claim.source_mode, XDEV_EXT_IAA_SOURCE_FREE);
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, 0, plan.dst_cap),
 		  plan.dst_cap);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_READY);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, 0, plan.dst_cap + 1),
 		  -EOVERFLOW);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_terminal_state_corruption_fails_closed(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), 0);
-	frames[plan.dst_frame].state = XDEV_EXT_FRAME_FREE;
+	frames[plan.dst_frame].ctrl = 0; /* planted foreign retirement */
 	EXPECT_EQ(xdev_ext_iaa_frames_finish(&claim, -EBADMSG, 0), -EIO);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_both_claim_orders_roll_back_partial_ownership(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
 
@@ -554,30 +574,30 @@ static void test_both_claim_orders_roll_back_partial_ownership(void)
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	publish_source(&pool, plan.src_frame,
 		       plan.src_frame_offset + plan.src_len);
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, plan.dst_frame), 0);
+	EXPECT_EQ(test_claim(&pool, plan.dst_frame), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), -EBUSY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len,
 		  plan.src_frame_offset + plan.src_len);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_IO_PENDING);
-	EXPECT_EQ(xdev_ext_frame_abort(&pool, plan.dst_frame), 0);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_IO_PENDING);
+	EXPECT_EQ(test_abort(&pool, plan.dst_frame), 0);
 
 	/* Source first: destination contention releases a FREE source claim. */
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, plan.dst_frame), 0);
+	EXPECT_EQ(test_claim(&pool, plan.dst_frame), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), -EBUSY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_abort(&pool, plan.dst_frame), 0);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_abort(&pool, plan.dst_frame), 0);
 
 	/* Destination first: source contention releases the destination. */
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
-	EXPECT_EQ(xdev_ext_frame_claim(&pool, plan.src_frame), 0);
+	EXPECT_EQ(test_claim(&pool, plan.src_frame), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), -EBUSY);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_abort(&pool, plan.src_frame), 0);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_abort(&pool, plan.src_frame), 0);
 
 	/* A short READY source is restored unchanged while destination rolls back. */
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
@@ -585,16 +605,16 @@ static void test_both_claim_orders_roll_back_partial_ownership(void)
 		       plan.src_frame_offset + plan.src_len - 1);
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), -EMSGSIZE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len,
 		  plan.src_frame_offset + plan.src_len - 1);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_pre_submit_rollback_preserves_ready_source(void)
 {
-	struct xdev_ext_frame frames[4];
-	struct xdev_ext_pool pool;
+	struct xdev_ext_mech_life frames[4];
+	struct xdev_ext_mech_life_pool pool;
 	struct xdev_ext_iaa_frame_claim claim;
 	struct xdev_ext_iaa_window_plan plan = valid_plan();
 
@@ -604,18 +624,18 @@ static void test_pre_submit_rollback_preserves_ready_source(void)
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len,
 		  plan.src_frame_offset + plan.src_len + 17);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), -EALREADY);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	publish_source(&pool, plan.src_frame,
@@ -623,17 +643,17 @@ static void test_pre_submit_rollback_preserves_ready_source(void)
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_DEST_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_READY);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_READY);
 	EXPECT_EQ(frames[plan.src_frame].valid_len,
 		  plan.src_frame_offset + plan.src_len);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 
 	init_pool(&pool, frames, ARRAY_SIZE(frames));
 	EXPECT_EQ(xdev_ext_iaa_frames_claim(&claim, &pool, &plan,
 				       XDEV_EXT_IAA_CLAIM_SOURCE_FIRST), 0);
 	EXPECT_EQ(xdev_ext_iaa_frames_rollback(&claim), 0);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.src_frame), XDEV_EXT_FRAME_FREE);
-	EXPECT_EQ(xdev_ext_frame_state(&pool, plan.dst_frame), XDEV_EXT_FRAME_FREE);
+	EXPECT_EQ(test_state(&pool, plan.src_frame), XDEV_EXT_MECH_L_FREE);
+	EXPECT_EQ(test_state(&pool, plan.dst_frame), XDEV_EXT_MECH_L_FREE);
 }
 
 static void test_sync_submit_results(void)
@@ -705,10 +725,10 @@ static void test_callback_before_submit_return(void)
 
 struct fake_runtime_env {
 	struct xdev_ext_iaa_runtime *runtime;
-	xdev_ext_sm_u32 opcode;
+	__u32 opcode;
 	int submit_ret;
 	int callback_err[3];
-	xdev_ext_sm_u32 callback_out[3];
+	__u32 callback_out[3];
 	unsigned int callbacks;
 	bool callback_before_return;
 	bool provider_present;
@@ -810,7 +830,7 @@ static void fake_runtime_queue_task_work(void *opaque)
 }
 
 static int fake_runtime_submit(void *opaque, bool decompress,
-			       xdev_ext_sm_u32 *produced)
+			       __u32 *produced)
 {
 	struct fake_runtime_env *env = opaque;
 	unsigned int i;

@@ -673,4 +673,176 @@ static inline bool xdev_ext_mech_ctl_report_ce_chain(char *buf, size_t size,
 				 XDEV_EXT_MECH_CTL_VERDICT(pass), chain);
 }
 
+
+/* The control tool's oracle uses byte operations independently of kernel
+ * crypto callbacks. This runs only after correctness workloads, never timed. */
+#define XDEV_EXT_MECH_CTL_CHAINS_V2 1
+static inline int xdev_ext_mech_ctl_xform_parse(const char *name, __u32 *xform)
+{
+ static const char *const names[] = { "crc32c-append", "crc32c-strip", "crc32c-seal",
+  "crc32c-check", "parse-strip", "xxh64-append", "sha256-append", "deflate", "inflate" };
+ unsigned i;
+ if (!name || !xform) return -EINVAL;
+ for (i=0;i<sizeof(names)/sizeof(names[0]);i++)
+  if (!strcmp(name,names[i])) { *xform=i+1; return 0; }
+ return -EINVAL;
+}
+static inline int xdev_ext_mech_ctl_fanout_stages(struct xdev_ext_mech_stage_uapi *st,
+ int src_fd,__u64 slba,__u64 nlb,int dst_fd,__u64 dst_slba,__u64 dst_nlb,int xsk_fd)
+{
+ if (!st || src_fd<0 || dst_fd<0 || xsk_fd<0 || !nlb || !dst_nlb) return -EINVAL;
+ memset(st,0,sizeof(*st)*XDEV_EXT_MECH_MAX_STAGES);
+ st[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,
+  .direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.fd=src_fd,.arg0=slba,.arg1=nlb};
+ st[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,
+  .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=dst_fd,.arg0=dst_slba,.arg1=dst_nlb};
+ st[2]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,
+  .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=xsk_fd,.flags=XDEV_EXT_MECH_STAGE_F_FANOUT};
+ return 3;
+}
+static inline int xdev_ext_mech_ctl_cpu_stages(struct xdev_ext_mech_stage_uapi *st,
+ int src_fd,__u64 slba,__u64 nlb,__u32 xform,__u64 param,
+ __u32 sink_class,int sink_fd,__u64 sink_arg0,__u64 sink_arg1)
+{
+ if (!st || src_fd<0 || sink_fd<0 || !nlb || !xform || xform>=XDEV_EXT_CPU_XFORM_MAX ||
+     (sink_class!=XDEV_EXT_MECH_CLASS_NVME && sink_class!=XDEV_EXT_MECH_CLASS_AFXDP)) return -EINVAL;
+ memset(st,0,sizeof(*st)*XDEV_EXT_MECH_MAX_STAGES);
+ st[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,
+  .direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.fd=src_fd,.arg0=slba,.arg1=nlb};
+ st[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_CPU,
+  .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=-1,.arg0=xform,.arg1=param};
+ st[2]=(struct xdev_ext_mech_stage_uapi){.class_id=sink_class,
+  .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=sink_fd,.arg0=sink_arg0,.arg1=sink_arg1};
+ return 3;
+}
+static inline __u64 ctl_oracle_load(const __u8 *p,unsigned n,bool big)
+{
+ __u64 v=0; unsigned i;
+ for(i=0;i<n;i++) v|=(__u64)p[i]<<(8*(big?n-1-i:i));
+ return v;
+}
+static inline void ctl_oracle_store(__u8 *p,__u64 v,unsigned n,bool big)
+{
+ unsigned i; for(i=0;i<n;i++)p[i]=v>>(8*(big?n-1-i:i));
+}
+static inline __u32 ctl_oracle_crc(const __u8 *p,size_t n)
+{
+ __u32 c=~0U; size_t i; unsigned bit;
+ for(i=0;i<n;i++){c^=p[i];for(bit=0;bit<8;bit++)c=(c>>1)^((0U-(c&1))&0x82f63b78U);}
+ return ~c;
+}
+static inline __u64 ctl_oracle_rot(__u64 v,unsigned n){return (v<<n)|(v>>(64-n));}
+static inline __u64 ctl_oracle_xround(__u64 a,__u64 v)
+{
+ return ctl_oracle_rot(a+v*14029467366897019727ULL,31)*11400714785074694791ULL;
+}
+static inline __u64 ctl_oracle_xxh(const __u8 *p,size_t n,__u64 seed)
+{
+ const __u64 p1=11400714785074694791ULL,p2=14029467366897019727ULL;
+ const __u64 p3=1609587929392839161ULL,p4=9650029242287828579ULL,p5=2870177450012600261ULL;
+ size_t off=0;__u64 h;
+ if(n>=32){
+  __u64 lane[4]={seed+p1+p2,seed+p2,seed,seed-p1};unsigned j;
+  do {for(j=0;j<4;j++)lane[j]=ctl_oracle_xround(lane[j],ctl_oracle_load(p+off+8*j,8,false));off+=32;}while(n-off>=32);
+  h=ctl_oracle_rot(lane[0],1)+ctl_oracle_rot(lane[1],7)+ctl_oracle_rot(lane[2],12)+ctl_oracle_rot(lane[3],18);
+  for(j=0;j<4;j++)h=(h^ctl_oracle_xround(0,lane[j]))*p1+p4;
+ }else h=seed+p5;
+ h+=n;
+ while(n-off>=8){h=ctl_oracle_rot(h^ctl_oracle_xround(0,ctl_oracle_load(p+off,8,false)),27)*p1+p4;off+=8;}
+ if(n-off>=4){h=ctl_oracle_rot(h^(ctl_oracle_load(p+off,4,false)*p1),23)*p2+p3;off+=4;}
+ while(off<n)h=ctl_oracle_rot(h^((__u64)p[off++]*p5),11)*p1;
+ h^=h>>33;h*=p2;h^=h>>29;h*=p3;return h^(h>>32);
+}
+static inline __u32 ctl_oracle_ror32(__u32 x,unsigned n){return (x>>n)|(x<<(32-n));}
+static inline void ctl_oracle_sha256(const __u8 *p,size_t n,__u8 out[32])
+{
+ static const __u32 k[64]={
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2};
+ __u32 h[8]={0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19};
+ size_t blocks=n/64+1+(n%64>=56),b;unsigned i;
+ for(b=0;b<blocks;b++){
+  __u8 bytes[64]={0};__u32 w[64],v[8];size_t off=b*64;
+  for(i=0;i<64;i++)if(off+i<n)bytes[i]=p[off+i];else if(off+i==n)bytes[i]=0x80;
+  if(b+1==blocks)ctl_oracle_store(bytes+56,(__u64)n*8,8,true);
+  for(i=0;i<16;i++)w[i]=ctl_oracle_load(bytes+4*i,4,true);
+  for(i=16;i<64;i++){
+   __u32 a=w[i-15],z=w[i-2];
+   w[i]=w[i-16]+(ctl_oracle_ror32(a,7)^ctl_oracle_ror32(a,18)^(a>>3))+w[i-7]+(ctl_oracle_ror32(z,17)^ctl_oracle_ror32(z,19)^(z>>10));
+  }
+  memcpy(v,h,sizeof(v));
+  for(i=0;i<64;i++){
+   __u32 t=v[7]+(ctl_oracle_ror32(v[4],6)^ctl_oracle_ror32(v[4],11)^ctl_oracle_ror32(v[4],25))+((v[4]&v[5])^(~v[4]&v[6]))+k[i]+w[i];
+   __u32 u=(ctl_oracle_ror32(v[0],2)^ctl_oracle_ror32(v[0],13)^ctl_oracle_ror32(v[0],22))+((v[0]&v[1])^(v[0]&v[2])^(v[1]&v[2]));
+   memmove(v+1,v,7*sizeof(*v));v[4]+=t;v[0]=t+u;
+  }
+  for(i=0;i<8;i++)h[i]+=v[i];
+ }
+ for(i=0;i<8;i++)ctl_oracle_store(out+4*i,h[i],4,true);
+}
+static inline int xdev_ext_mech_ctl_xform_expect(__u32 x,__u64 param,__u32 seg,
+ const __u8 *src,__u32 len,__u8 *out,__u32 cap,__u32 *out_len)
+{
+ __u32 off,n,result=0;
+ if(!src || !out || !out_len || !seg || x<1 || x>XDEV_EXT_CPU_XFORM_SHA256_APPEND ||
+    (x!=XDEV_EXT_CPU_XFORM_PARSE_STRIP && x!=XDEV_EXT_CPU_XFORM_XXH64_APPEND && param) ||
+    (x==XDEV_EXT_CPU_XFORM_PARSE_STRIP && (param<4 || param>256))) return -EINVAL;
+ for(off=0;off<len;off+=n){
+  __u32 size;const __u8 *in=src+off;
+  n=len-off<seg?len-off:seg;size=n;
+  if(x==XDEV_EXT_CPU_XFORM_PARSE_STRIP){
+   if(n<param || ctl_oracle_load(in,4,false)!=n-param)return -EBADMSG;
+   size-=param;in+=param;
+  }else if(x==XDEV_EXT_CPU_XFORM_CRC32C_STRIP || x==XDEV_EXT_CPU_XFORM_CRC32C_CHECK){
+   if(n<4 || ctl_oracle_load(in+n-4,4,false)!=ctl_oracle_crc(in,n-4))return -EBADMSG;
+   if(x==XDEV_EXT_CPU_XFORM_CRC32C_STRIP)size-=4;
+  }else if(x==XDEV_EXT_CPU_XFORM_CRC32C_SEAL){if(n<4)return -EBADMSG;
+  }else{
+   __u32 extra=x==XDEV_EXT_CPU_XFORM_CRC32C_APPEND?4:x==XDEV_EXT_CPU_XFORM_XXH64_APPEND?8:32;
+   if(n>UINT32_MAX-extra)return -EMSGSIZE;
+   size+=extra;
+  }
+  if(result>cap || size>cap-result)return -EMSGSIZE;
+  memcpy(out+result,in,size<n?size:n);
+  if(x==XDEV_EXT_CPU_XFORM_CRC32C_APPEND)ctl_oracle_store(out+result+n,ctl_oracle_crc(in,n),4,false);
+  if(x==XDEV_EXT_CPU_XFORM_CRC32C_SEAL)ctl_oracle_store(out+result+n-4,ctl_oracle_crc(in,n-4),4,false);
+  if(x==XDEV_EXT_CPU_XFORM_XXH64_APPEND)ctl_oracle_store(out+result+n,ctl_oracle_xxh(in,n,param),8,true);
+  if(x==XDEV_EXT_CPU_XFORM_SHA256_APPEND)ctl_oracle_sha256(in,n,out+result+n);
+  result+=size;
+ }
+ *out_len=result;return 0;
+}
+
+
+static inline void xdev_ext_mech_ctl_report_chain(char *line,size_t cap,bool pass,
+ bool fanout,const char *xform,bool network)
+{
+ if(fanout)snprintf(line,cap,"XDEV_EXT_MECH_FANOUT=%s",pass?"PASS":"FAIL");
+ else snprintf(line,cap,"XDEV_EXT_MECH_CPU_CHAIN=%s xform=%s sink=%s",
+  pass?"PASS":"FAIL",xform,network?"afxdp":"nvme");
+}
+static inline void xdev_ext_mech_ctl_report_verify(char *line,size_t cap,bool pass,
+ const char *xform,__u32 bytes,__u64 mismatches)
+{
+ snprintf(line,cap,"XDEV_EXT_MECH_VERIFY_XFORM=%s xform=%s bytes=%u mismatches=%llu",
+  pass?"PASS":"FAIL",xform,bytes,(unsigned long long)mismatches);
+}
+
+
+/* Counter text follows the same marker ownership rule as the other reports. */
+static inline void xdev_ext_mech_ctl_print_transport_counters(__u64 session,
+ const struct xdev_ext_mech_transport_stats_v2 *counters)
+{
+ printf("XDEV_EXT_MECH_TRANSPORT_COUNTERS session=%llu retransmits=%llu dup_suppressed=%llu "
+        "held_acks=%llu held_unacked=%u\n",(unsigned long long)session,
+        (unsigned long long)counters->retransmits,(unsigned long long)counters->dup_suppressed,
+        (unsigned long long)counters->held_acks,counters->held_unacked);
+}
+
 #endif /* XDEV_EXT_MECH_CTL_CORE_H */

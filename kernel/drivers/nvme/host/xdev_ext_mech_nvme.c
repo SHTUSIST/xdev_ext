@@ -780,6 +780,14 @@ static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 	done->uncertain = uncertain;
 	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
 			  &bp->cqe);
+#ifdef NVME_XDEV_EXT_MECH_BOUNCE_AVAILABLE
+ /* Native end_io owns the ticket and the transport has unmapped DMA. Copy
+  * compatibility READ bytes before the core release-publishes READY. */
+ if (!status && !uncertain && bp->bounce &&
+     xdev_ext_mech_batch_stage(b)->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+     xdev_ext_mech_session_state(xdev_ext_mech_batch_stage(b)->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+  nvme_xdev_ext_class_bounce_copy(b, bp, false);
+#endif
 	xdev_ext_mech_batch_completion_publish(b, ticket, status, uncertain);
 	return RQ_END_IO_FREE;
 }
@@ -1112,12 +1120,9 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 static void nvme_xdev_ext_class_fill_cqe(struct xdev_ext_mech_stage *st,
 				    struct xdev_ext_mech_batch *b, void *cqe)
 {
-	const struct nvme_xdev_ext_mech_stage *p = st->priv;
 	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
 
-	nvme_xdev_ext_class_bounce_release(b, bp, !p->write && !bp->cqe.status &&
-					     !bp->cqe.err &&
-		xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE);
+	nvme_xdev_ext_class_bounce_release(b, bp, false);
 	if (xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
 		nvme_xdev_ext_class_slot_put(st, bp);
 	memcpy(cqe, &bp->cqe, sizeof(bp->cqe));

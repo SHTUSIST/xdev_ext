@@ -148,3 +148,15 @@ config XDEV_EXT_MECH_SOCKET
 	  Send a bounded batch as one connected IPv4/IPv6 UDP datagram through
 	  the ordinary kernel socket path. This path performs native socket
 	  payload copying and completes locally; it provides no remote ACK.
+
+config XDEV_EXT_MECH_CPU
+ bool "XDEV_EXT bounded in-frame CPU transforms"
+ default n
+ depends on XDEV_EXT_MECH && CRYPTO
+ select CRYPTO_ACOMP2
+ select CRYPTO_DEFLATE
+ select CRYPTO_LIB_SHA256
+ select XXHASH
+ help
+   Fixed CRC32C, parse and digest transforms use the registered frame CPU
+   mapping. Synchronous raw deflate/inflate use reserved same-pool output.

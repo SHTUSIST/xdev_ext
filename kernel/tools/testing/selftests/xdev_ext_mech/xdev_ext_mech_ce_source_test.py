@@ -91,17 +91,28 @@ class CeClassSourceTest(unittest.TestCase):
 
     def test_bind_order_and_unwind(self):
         bind = body(self.text, "xdev_ext_ce_bind")
-        # The window is resolved in the CREATE caller's context, before the
-        # pool pages are handed to the backend.
-        ordered(self, bind, "xdev_ext_ce_backend_get(", "->bind_region(",
-                "xdev_ext_ce_geom_init(", "->bind_host(", "st->priv = cs;")
-        unwind = bind[bind.index("st->priv = cs;"):]
-        ordered(self, unwind, "->unbind_region(", "module_put(", "kfree(cs)")
+        # L11: preserve partially created mappings in st->priv before bind;
+        # checked core rollback, not a local unconditional free, owns unwind.
+        ordered(self, bind, "xdev_ext_ce_backend_get(", "st->priv = cs;",
+                "->bind_region(", "xdev_ext_ce_geom_init(", "->bind_host(")
+        self.assertNotIn("->unbind_region(", bind)
+        self.assertNotIn("module_put(", bind)
+        core = (ROOT / "io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
+        bind_stages = body(core, "xdev_ext_mech_session_bind")
+        self.assertRegex(bind_stages,
+                         r"if \(st->cls->unbind_checked && st->priv\)\s+s->nr_bound\+\+;")
 
     def test_unbind_never_after_ambiguous(self):
+        # L11: checked unbind returns uncertainty without dropping live handles.
         unbind = body(self.text, "xdev_ext_ce_unbind")
-        ordered(self, unbind, "atomic_read(&cs->ambiguous)", "return;",
-                "->unbind_host(", "->unbind_region(", "module_put(")
+        ordered(self, unbind, "atomic_read(&cs->ambiguous)", "return -EBUSY;",
+                "->unbind_host(", "->unbind_region(", "st->priv = NULL;",
+                "kfree(cs)", "module_put(")
+        for name, cleared in (("unbind_host", "cs->host = NULL;"),
+                              ("unbind_region", "cs->region.priv = NULL;")):
+            part = unbind[unbind.index("err = ops->" + name):]
+            ordered(self, part, "if (err)", "return err;", cleared)
+        self.assertRegex(self.text, r"\.unbind_checked\s*=\s*xdev_ext_ce_unbind")
 
     def test_validate_stages_only_an_accepted_plan(self):
         validate = body(self.text, "xdev_ext_ce_validate")
@@ -155,7 +166,11 @@ class CeClassSourceTest(unittest.TestCase):
         self.assertIn("const struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);", fill)
         core = (ROOT / "io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
         buffers = body(core, "xdev_ext_mech_session_buffers")
-        self.assertIn("s->cookies = kvcalloc(s->depth, cookie, GFP_KERNEL);", buffers)
+        # L11: preallocated fan-out branches each retain their own stable cookie.
+        self.assertIn("s->cookies = kvcalloc(s->depth * (XDEV_EXT_MECH_MAX_STAGES + 1), cookie, GFP_KERNEL);", buffers)
+        self.assertIn("offset = s->depth + i * XDEV_EXT_MECH_MAX_STAGES + j;", buffers)
+        self.assertIn("child->cookie = cookie ? s->cookies + (size_t)offset * cookie : NULL;", buffers)
+        self.assertIn("xdev_ext_mech_completion_init(&child->completion)", buffers)
         self.assertIn("b->cookie = cookie ? s->cookies + (size_t)i * cookie : NULL;",
                       buffers)
         self.assertIn("memset(b->priv, 0, s->priv_size);", body(core, "xdev_ext_mech_build"))

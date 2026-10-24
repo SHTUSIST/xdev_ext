@@ -32,7 +32,34 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_DMA	= 6,
 	XDEV_EXT_MECH_CLASS_SOCKET = 7,
 	XDEV_EXT_MECH_CLASS_NET = 8,
-	XDEV_EXT_MECH_CLASS_MAX	= 9,
+	XDEV_EXT_MECH_CLASS_CPU = 9,
+	XDEV_EXT_MECH_CLASS_MAX	= 10,
+};
+
+/* FANOUT joins the previous consumer on the same READY publication; stage 0
+ * and producer/transform stages cannot carry it. Existing ABI layouts stay fixed.
+ * CPU: TO_DEVICE, fd -1, arg0 fixed transform, arg1 bounded parameter; variable
+ * transforms reserve same-pool destination capacity at CREATE. */
+#define XDEV_EXT_MECH_STAGE_F_FANOUT (1U << 31)
+#define XDEV_EXT_MECH_CPU_ABI_VERSION 1U
+enum xdev_ext_cpu_xform {
+ XDEV_EXT_CPU_XFORM_CRC32C_APPEND = 1,
+ XDEV_EXT_CPU_XFORM_CRC32C_STRIP = 2,
+ XDEV_EXT_CPU_XFORM_CRC32C_SEAL = 3,
+ XDEV_EXT_CPU_XFORM_CRC32C_CHECK = 4,
+ XDEV_EXT_CPU_XFORM_PARSE_STRIP = 5,
+ XDEV_EXT_CPU_XFORM_XXH64_APPEND = 6,
+ XDEV_EXT_CPU_XFORM_SHA256_APPEND = 7,
+ XDEV_EXT_CPU_XFORM_DEFLATE = 8,
+ XDEV_EXT_CPU_XFORM_INFLATE = 9,
+ XDEV_EXT_CPU_XFORM_MAX = 10,
+};
+#define XDEV_EXT_CPU_PARSE_HDR_MIN 4U
+#define XDEV_EXT_CPU_PARSE_HDR_MAX 256U
+struct xdev_ext_cpu_desc {
+ __u32 xform;
+ __u32 flags;
+ __aligned_u64 param;
 };
 
 /* Stage direction, relative to the stage's device. */

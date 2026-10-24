@@ -29,7 +29,7 @@ class AcquisitionContract(unittest.TestCase):
     def setUpClass(cls):
         text = Path(os.environ.get('XDEV_EXT_IAA_ACQUIRE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
         source = (HERE / 'acquire_fixture.c').read_text()
-        for name in ('xdev_ext_mech_life_undo', 'xdev_ext_mech_life_acquire'):
+        for name in ('xdev_ext_mech_life_undo', 'xdev_ext_mech_batch_acquire'):
             source = source.replace('/* ' + name + ' */', function(text, name))
         cls.tmp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-acquire-')
         cls.addClassCleanup(cls.tmp.cleanup)
@@ -62,7 +62,7 @@ class AcquisitionContract(unittest.TestCase):
     def test_busy_second_source_rolls_back_first_acquisition(self):
         self.run_case('busy_second')
 
-    def test_source_generation_exhaustion_is_rejected(self):
+    def test_consumer_last_generation_preserves_generation(self):
         self.run_case('saturated')
 
     def test_ordinary_from_device_producer_semantics_are_preserved(self):

@@ -10,8 +10,8 @@
 #include <linux/mm_types.h>
 #include <linux/refcount.h>
 
-#ifdef XDEV_EXT_LIFECYCLE_SM
-#include "../xdev_ext_frame_sm.h"
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
+#include "xdev_ext_mech_life_pool.h"
 #endif
 
 struct io_ring_ctx;
@@ -61,15 +61,15 @@ struct io_xdev_ext_umem {
 	 */
 	bool		legacy_used;
 #endif
-#ifdef XDEV_EXT_LIFECYCLE_SM
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
 	/*
 	 * Per-frame lifecycle SM, advanced from IRQ/softirq completion
 	 * context (CAS claim / release publish / atomic_dec retire — see
 	 * xdev_ext_frame_sm.h). use_stack=false: userspace names the frame via
 	 * the op's UMEM offset and the kernel CAS-claims that index.
 	 */
-	struct xdev_ext_pool		frame_pool;
-	struct xdev_ext_frame	*frames;
+	struct xdev_ext_mech_life_pool		frame_pool;
+	struct xdev_ext_mech_life	*frames;
 #endif
 };
 

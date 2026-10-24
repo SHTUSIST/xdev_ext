@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* L11: adapter result reaches native lifecycle handoff before worker custody transfer. */
 /* Boundary structs/helpers and actual core bodies are inserted unchanged. */
 /* LEASE_BOUNDARY */
 
@@ -242,10 +243,10 @@ int main(int argc,char **argv) {
   /* Legal request reuse happens after its one terminal result was consumed.
    * No previous-operation callback is emitted after this point. */
   u64 old_ticket=b.ticket;
-  assert(!xdev_ext_mech_life_release(&s.life[10],xdev_ext_mech_life_token(&s.life[10])));
+  assert(!xdev_ext_mech_life_release(&s.life[10],xdev_ext_mech_life_gen(&s.life[10])));
   b.f[0]=frame(1,700);b.nr_frames=1;b.present=1;b.bytes=700;
   s.pool.state[1]=XDEV_EXT_MECH_F_HELD;u64 token;
-  assert(!xdev_ext_mech_life_begin_produce(&s.life[1],false,&token));assert(!xdev_ext_mech_life_publish(&s.life[1],token,700));assert(!xdev_ext_mech_life_begin_consume(&s.life[1],&token));
+  assert(!xdev_ext_mech_life_claim(&s.life[1],0,&token));assert(!xdev_ext_mech_life_publish(&s.life[1],token,1,700));assert(!xdev_ext_mech_life_acquire(&s.life[1],0,0,&token));b.life_token[0]=token;b.life_active=1;
   xdev_ext_mech_bstate_init(&b.bs,1);assert(!xdev_ext_mech_batch_step(&b.bs,XDEV_EXT_MECH_EV_READY,0));
   api_dlen=251;
   CHECK(!xdev_ext_mech_submit(&s,&s.st[0],&b),"legal sequential request reuse refused");

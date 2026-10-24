@@ -959,3 +959,35 @@
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_integration/eval_session_fixtures/
 !/kernel/tools/testing/selftests/xdev_ext_integration/eval_session_fixtures/*.log
+# Reference-counted lifecycle and bounded CPU transform contracts.
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_refs_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_fanout_step_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_cpu_xform_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ctl_chains_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_lifecycle_contract_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xform_oracle.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_refs_source_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_explore.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_mutants.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/model/refs_run.sh
+
+!/kernel/io_uring/xdev_ext_mech_cpu_core.h
+!/kernel/io_uring/xdev_ext_mech_cpu.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/
+!/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
+!/kernel/io_uring/xdev_ext_mech_produced.h
+!/kernel/io_uring/xdev_ext_mech_life_pool.h
+
+# Fan-out scheduler execution and CPU/fan-out control workloads.
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/run.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/fixture.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/shim.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/produced_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/recycle_test.py
+!/kernel/tools/xdev_ext_mech/cpu_plan.bpf.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_lifecycle_guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/guest_harness_test.py

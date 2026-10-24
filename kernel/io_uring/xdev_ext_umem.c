@@ -156,7 +156,7 @@ static void io_xdev_ext_umem_free(struct io_xdev_ext_umem *umem)
 {
 	if (umem->vmap_addr)
 		vunmap(umem->vmap_addr);
-#ifdef XDEV_EXT_LIFECYCLE_SM
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
 	kvfree(umem->frames);
 #endif
 #ifdef CONFIG_XDEV_EXT_MECH
@@ -320,7 +320,7 @@ int io_xdev_ext_umem_register(struct io_ring_ctx *ctx, void __user *arg)
 	umem->nr_frames    = reg.size / reg.frame_size;
 	refcount_set(&umem->refcount, 1);
 
-#ifdef XDEV_EXT_LIFECYCLE_SM
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
 	umem->frames = kvcalloc(umem->nr_frames, sizeof(*umem->frames),
 				GFP_KERNEL);
 	if (!umem->frames) {
@@ -329,7 +329,7 @@ int io_xdev_ext_umem_register(struct io_ring_ctx *ctx, void __user *arg)
 		ret = -ENOMEM;
 		goto err_pages;
 	}
-	xdev_ext_pool_init(&umem->frame_pool, umem->frames, umem->nr_frames, false);
+	xdev_ext_mech_life_pool_init(&umem->frame_pool, umem->frames, umem->nr_frames);
 #endif
 
 	/*
@@ -546,6 +546,7 @@ int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool,
 		.ops = &io_xdev_ext_umem_mech_pool_ops,
 		.priv = m,
 		.state = state,
+  .life = umem->frames,
 		.pages = umem->pages,
 		.vaddr = umem->vmap_addr + umem->page_offset,
 		.size = umem->size,

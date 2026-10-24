@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0 */
+/* L11: native handoff publishes/retires lifecycle; worker keeps custody migration only. */
 /* Only OS/provider boundary shims and independent test schedules live here. */
 #include <assert.h>
 #include <errno.h>
@@ -10,6 +11,7 @@
 #include "io_uring/xdev_ext_mech_core.h"
 #include "io_uring/xdev_ext_mech_lifecycle.h"
 #include "io_uring/xdev_ext_mech_step.h"
+#include "io_uring/xdev_ext_mech_produced.h"
 typedef __u8 u8;
 typedef __u32 u32;
 typedef __u64 u64;
@@ -41,20 +43,24 @@ struct xdev_ext_mech_pool_ops {
  int (*resolve)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *);
  void (*recycle)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *);
  void (*sync_for_cpu)(struct xdev_ext_mech_pool *,const struct xdev_ext_mech_frame *);
+ void (*sync_for_cpu_batch)(struct xdev_ext_mech_pool *,const struct xdev_ext_mech_frame *,u32);
 };
 struct xdev_ext_mech_pool {u32 kind,nr_frames,frame_size,capabilities;u8 state[N];const struct xdev_ext_mech_pool_ops *ops;};
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_batch;
 struct xdev_ext_mech_class_ops {u32 flags;int (*submit)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *);};
 struct xdev_ext_mech_session;
-struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction;const struct xdev_ext_mech_class_ops *cls;};
+struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,class_id;const struct xdev_ext_mech_class_ops *cls;};
 struct xdev_ext_mech_session {
+ struct xdev_ext_mech_sess ss;u32 nr_stages;struct xdev_ext_mech_stage_uapi plan[2];
  struct xdev_ext_mech_pool pool;struct xdev_ext_mech_stage st[2];
  struct xdev_ext_mech_life life[N];u8 transform_owner[N];
  bool start_recycle;u64 start_left;u64 count[XDEV_EXT_MECH_CNT_NR];
  int lock,last_err;bool admits;u64 submitted[2];
 };
 struct xdev_ext_mech_batch {
+ struct xdev_ext_mech_batch *parent;u64 life_token[XDEV_EXT_MECH_MAX_FRAMES];
+ u32 life_active,produced,produced_used;bool producing,produced_set;
  struct xdev_ext_mech_session *s;struct xdev_ext_mech_bstate bs;bool fifo_accepted;
  struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];
  u32 nr_frames,present,bytes;bool to_user,sequester,locally_cancelled;
@@ -92,6 +98,9 @@ static bool xdev_ext_mech_transform_alias(struct xdev_ext_mech_pool *,const stru
 /* xdev_ext_mech_transform_alias */
 /* xdev_ext_mech_batch_transform_begin */
 /* xdev_ext_mech_batch_completion_claim */
+/* xdev_ext_mech_sync_for_cpu */
+/* xdev_ext_mech_trim_produced */
+/* xdev_ext_mech_batch_handoff */
 /* xdev_ext_mech_batch_completion_publish */
 /* xdev_ext_mech_batch_transform_complete */
 /* xdev_ext_mech_batch_transform_produced */
@@ -105,27 +114,30 @@ static int refusing_submit(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_b
  if(synchronous_refusal)xdev_ext_mech_batch_transform_complete(b,b->ticket,0,173,false);
  return -EAGAIN;
 }
-static const struct xdev_ext_mech_pool_ops poolops={resolve,recycle,sync_cpu};
+static const struct xdev_ext_mech_pool_ops poolops={.resolve=resolve,.recycle=recycle,.sync_for_cpu=sync_cpu};
 static const struct xdev_ext_mech_class_ops transformops={.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM};
 static void setup(struct xdev_ext_mech_session *s) {
  memset(s,0,sizeof(*s));memset(released,0,sizeof(released));memset(synced,0,sizeof(synced));queues=0;resolve_fail_index=N;fail_source_return_index=N;
  s->pool=(struct xdev_ext_mech_pool){.kind=XDEV_EXT_MECH_POOL_IOU_UMEM,.nr_frames=N,.frame_size=FS,.ops=&poolops};
  for(u32 i=0;i<N;i++){page_map[i]=i;pages[i].id=i;}
  for(u32 i=0;i<2;i++)s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&transformops};
- s->admits=true;
+ s->admits=true;xdev_ext_mech_sess_init(&s->ss);s->nr_stages=2;
+ s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_IAA,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};
+ s->plan[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_CE,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
 }
 static void source(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b,u32 index) {
  memset(b,0,sizeof(*b));b->s=s;b->f[0]=frame(index,700);b->nr_frames=1;b->present=1;b->bytes=700;
  s->pool.state[index]=XDEV_EXT_MECH_F_INFLIGHT;u64 t;
- assert(!xdev_ext_mech_life_begin_produce(&s->life[index],false,&t));
- assert(!xdev_ext_mech_life_publish(&s->life[index],t,700));
- assert(!xdev_ext_mech_life_begin_consume(&s->life[index],&t));
+ assert(!xdev_ext_mech_life_claim(&s->life[index],0,&t));
+ assert(!xdev_ext_mech_life_publish(&s->life[index],t,1,700));
+ assert(!xdev_ext_mech_life_acquire(&s->life[index],0,0,&t));
+ b->life_token[0]=t;b->life_active=1;
  assert(!xdev_ext_mech_completion_begin(&b->completion,&b->ticket));
 }
 static void source_landed(struct xdev_ext_mech_batch *b,bool seq) {
  u32 i=b->f[0].index;struct xdev_ext_mech_session *s=b->s;
  assert(!xdev_ext_mech_pool_frame_move(&s->pool,i,XDEV_EXT_MECH_F_INFLIGHT,seq?XDEV_EXT_MECH_F_SEQUESTERED:XDEV_EXT_MECH_F_HELD));
- if(!seq)assert(!xdev_ext_mech_life_complete_consume(&s->life[i],xdev_ext_mech_life_token(&s->life[i])));
+ if(!seq)assert(xdev_ext_mech_life_phase(&s->life[i])==XDEV_EXT_MECH_L_FREE);
 }
 static int failures;
 #define CHECK(c,msg) do {if(!(c)){fprintf(stderr,"FAIL: %s\n",msg);failures++;}}while(0)
@@ -165,9 +177,10 @@ int main(int argc,char **argv) {
  if(!strcmp(mode,"second_source_return_failure")) {
   b.f[1]=frame(1,700);b.nr_frames=2;b.present=3;b.bytes=1400;
   s.pool.state[1]=XDEV_EXT_MECH_F_INFLIGHT;u64 token;
-  assert(!xdev_ext_mech_life_begin_produce(&s.life[1],false,&token));
-  assert(!xdev_ext_mech_life_publish(&s.life[1],token,700));
-  assert(!xdev_ext_mech_life_begin_consume(&s.life[1],&token));
+  assert(!xdev_ext_mech_life_claim(&s.life[1],0,&token));
+  assert(!xdev_ext_mech_life_publish(&s.life[1],token,1,700));
+  assert(!xdev_ext_mech_life_acquire(&s.life[1],0,0,&token));
+  b.life_token[1]=token;b.life_active|=2;
  }
  if(!strcmp(mode,"preaccept") || !strcmp(mode,"sync_refuse")) {
   static const struct xdev_ext_mech_class_ops refusalops={.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM,.submit=refusing_submit};
@@ -192,10 +205,10 @@ int main(int argc,char **argv) {
  if(!strcmp(mode,"alias")){page_map[10]=page_map[0];invalid=true;}
  if(!strcmp(mode,"duplicate_dst")){dst[1]=dst[0];invalid=true;}
  if(!strcmp(mode,"wrong_stage")){s.transform_owner[11]=2;invalid=true;}
- if(!strcmp(mode,"busy_dst")){u64 t;assert(!xdev_ext_mech_life_begin_produce(&s.life[11],false,&t));invalid=true;}
+ if(!strcmp(mode,"busy_dst")){u64 t;assert(!xdev_ext_mech_life_claim(&s.life[11],0,&t));invalid=true;}
  if(!strcmp(mode,"resolve_fail")){resolve_fail_index=11;invalid=true;}
  if(!strcmp(mode,"short_source")){s.life[0].valid_len=699;invalid=true;}
- if(!strcmp(mode,"source_ready")){assert(!xdev_ext_mech_life_complete_consume(&s.life[0],xdev_ext_mech_life_token(&s.life[0])));invalid=true;}
+ if(!strcmp(mode,"source_ready")){assert(!xdev_ext_mech_life_rollback(&s.life[0],b.life_token[0]));b.life_active=0;invalid=true;}
  int ret=xdev_ext_mech_batch_transform_begin(&b,dst,nr);
  if(invalid) {
   CHECK(ret<0,"invalid transform lease was accepted");CHECK(!b.transform.active,"invalid transform marked lease active");
@@ -216,20 +229,20 @@ int main(int argc,char **argv) {
   xdev_ext_mech_batch_transform_complete(&b,b.ticket+1,0,999,false);
   CHECK(!b.transform.produced&&!queues,"stale completion changed result or queued work");
  }
+ if(!strcmp(mode,"destination_generation"))s.life[11].ctrl+=1ULL<<XDEV_EXT_MECH_L_GEN_SHIFT;
  xdev_ext_mech_batch_transform_complete(&b,b.ticket,unknown?-ETIMEDOUT:!strcmp(mode,"native_error")?-EIO:0,produced,unknown);
  if(!strcmp(mode,"duplicate"))xdev_ext_mech_batch_transform_complete(&b,b.ticket,-EIO,999,true);
  CHECK(queues==1,"callback was delivered more than once");
  CHECK(!xdev_ext_mech_completion_consume(&b.completion,b.ticket,&b.status),"winning completion not consumable");
- CHECK(b.sequester==unknown,"duplicate/stale callback changed quarantine metadata");
- source_landed(&b,unknown);
+ CHECK(b.sequester==(unknown||!strcmp(mode,"destination_generation")),"duplicate/stale callback changed quarantine metadata");
+ source_landed(&b,b.sequester);
  if(!strcmp(mode,"second_source_return_failure")) {
   assert(!xdev_ext_mech_pool_frame_move(&s.pool,1,XDEV_EXT_MECH_F_INFLIGHT,XDEV_EXT_MECH_F_HELD));
-  assert(!xdev_ext_mech_life_complete_consume(&s.life[1],xdev_ext_mech_life_token(&s.life[1])));
+  assert(xdev_ext_mech_life_phase(&s.life[1])==XDEV_EXT_MECH_L_FREE);
   fail_source_return_index=1;
  }
  if(!strcmp(mode,"release_failure"))fail_source_return_index=0;
- if(!strcmp(mode,"destination_generation"))s.life[11].ctrl+=8;
- bool seq=xdev_ext_mech_transform_landed(&s,&b,unknown);
+ bool seq=xdev_ext_mech_transform_landed(&s,&b,b.sequester);
  if(!strcmp(mode,"second_source_return_failure")) {
   CHECK(seq&&b.transform.active,"partial source return did not report retained transform lease");
   CHECK(s.pool.state[0]==XDEV_EXT_MECH_F_K_FREE&&released[0]==1&&xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_FREE,"safe completed first source was unnecessarily retained or returned twice");

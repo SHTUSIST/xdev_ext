@@ -50,8 +50,8 @@ def build_source(adapter, core):
                             'const struct xdev_ext_mech_class_ops *cls;void *priv;};')
     shared = shared.replace('struct xdev_ext_mech_session {\n',
                             'struct xdev_ext_mech_session {\n struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch *batches;u32 depth;\n')
-    shared = shared.replace('struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction;',
-                            'struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,flags;')
+    shared = shared.replace('struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,class_id;',
+                            'struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,class_id,flags;')
     if FRAME_PAGE not in shared:
         raise RuntimeError('lease fixture frame_page boundary changed')
     shared = shared.replace(FRAME_PAGE, SPLIT_FRAME_PAGE)

@@ -75,6 +75,8 @@ struct ctl_opts {
 	const char *sets[CTL_MAX_SETS];
 	unsigned int nr_sets;
 	const char *ifname, *src_ng, *dst_ng, *ce_dev;
+ const char *xform_name, *verify_src, *verify_dst;
+ __u64 xform_arg, verify_src_off, verify_dst_off, verify_bytes, verify_seg;
 	__u64 slba, nlb, dst_slba, dst_nlb, groups, timeout_ms, session;
 	__u64 ce_va, ce_len, queue, depth, group_bytes, mtu;
 	struct xdev_ext_mech_peer peer;
@@ -702,10 +704,7 @@ static int ctl_finish_reliable(struct ctl_run *r,
  if (ctl_transport_counters(r->ring,session,&counters))
   counters=(struct xdev_ext_mech_transport_stats_v2){.retransmits=UINT64_MAX,
    .dup_suppressed=UINT64_MAX,.held_acks=UINT64_MAX,.held_unacked=UINT32_MAX};
- printf("XDEV_EXT_MECH_TRANSPORT_COUNTERS session=%llu retransmits=%llu dup_suppressed=%llu "
-        "held_acks=%llu held_unacked=%u\n",(unsigned long long)session,
-        (unsigned long long)counters.retransmits,(unsigned long long)counters.dup_suppressed,
-        (unsigned long long)counters.held_acks,counters.held_unacked);
+ xdev_ext_mech_ctl_print_transport_counters(session,&counters);
  if (!outcome && !xdev_ext_mech_ctl_transport_ok(&transport)) outcome=-EBUSY;
  stopped=ctl_mech(r->ring,XDEV_EXT_MECH_OP_STOP,session);
  printf("XDEV_EXT_MECH_FINALIZE session=%llu stop_ret=%d\n",
@@ -1485,6 +1484,100 @@ static int cmd_nvme_nic(struct ctl_opts *o)
 	return verdict;
 }
 
+
+/* Both commands share the existing one-shot CREATE/START/wait path. */
+static int ctl_new_chain(struct ctl_opts *o,bool fanout)
+{
+ struct ctl_source src={.o=o,.ifname=o->ifname,.nr_stages=3,.iou_umem=!o->ifname};
+ struct xdev_ext_mech_stats stats={0};__u32 xform=0;bool frames_ok=false,ok;
+ int source=-1,dest=-1,ret;
+ char line[512];
+ if(!o->src_ng || !o->have_slba || !o->have_nlb || !o->nlb || !o->groups ||
+    (fanout && (!o->ifname || !o->dst_ng)) ||
+    (!fanout && ((!o->ifname)==(!o->dst_ng))) ||
+    (o->dst_ng && (!o->have_dst_slba || !o->have_dst_nlb || !o->dst_nlb)) ||
+    (o->ifname && ctl_peer(o)) ||
+    (!fanout && xdev_ext_mech_ctl_xform_parse(o->xform_name,&xform)))return -EINVAL;
+ source=open(o->src_ng,O_RDONLY|O_CLOEXEC);
+ if(source<0){ret=-errno;goto out;}
+ if(o->dst_ng){dest=open(o->dst_ng,O_RDWR|O_CLOEXEC);if(dest<0){ret=-errno;goto out;}}
+ if(fanout)
+  ret=xdev_ext_mech_ctl_fanout_stages(src.st,source,o->slba,o->nlb,dest,o->dst_slba,o->dst_nlb,0);
+ else
+  ret=xdev_ext_mech_ctl_cpu_stages(src.st,source,o->slba,o->nlb,xform,o->xform_arg,
+      o->ifname?XDEV_EXT_MECH_CLASS_AFXDP:XDEV_EXT_MECH_CLASS_NVME,
+      o->ifname?0:dest,o->ifname?0:o->dst_slba,o->ifname?0:o->dst_nlb);
+ if(ret<0)goto out;
+ ret=ctl_run_source(&src,&stats,&frames_ok);
+ ok=!ret && frames_ok && !xdev_ext_mech_ctl_notify_result(&stats,o->groups);
+ xdev_ext_mech_ctl_report_chain(line,sizeof(line),ok,fanout,o->xform_name,!!o->ifname);
+ puts(line);
+ ctl_print_stats(&stats);
+ if(!ret)ret=ok?CTL_PASS:CTL_FAIL;
+ out:
+ if(source>=0)close(source);
+ if(dest>=0)close(dest);
+ if(ret<0){ctl_err("chain: %s\n",strerror(-ret));return CTL_SETUP;}
+ return ret;
+}
+static int cmd_fanout(struct ctl_opts *o){return ctl_new_chain(o,true);}
+static int cmd_cpu_chain(struct ctl_opts *o){return ctl_new_chain(o,false);}
+
+/* O_DIRECT reads must retain their block alignment after short reads. A short
+ * result is a failed comparison, never an implicit buffered-I/O fallback. */
+static int ctl_verify_read(int fd,void *buf,size_t size,__u64 off)
+{
+ ssize_t got;
+ do {got=pread(fd,buf,size,(off_t)off);}while(got<0 && errno==EINTR);
+ return got<0?-errno:(size_t)got==size?0:-EIO;
+}
+static int cmd_verify_xform(struct ctl_opts *o)
+{
+ __u8 *source=NULL,*actual=NULL,*expected=NULL;__u32 xform=0,length=0;
+ __u64 cap,rounded,mismatches=0;int in=-1,out=-1,ret=CTL_SETUP,error;
+ char line[512];
+ bool identity=o->xform_name && !strcmp(o->xform_name,"none");
+ if(!o->verify_src || !o->verify_dst || !o->verify_bytes || !o->verify_seg ||
+    o->verify_seg>UINT32_MAX || o->verify_bytes>UINT32_MAX ||
+    ((o->verify_src_off|o->verify_dst_off|o->verify_bytes)&511) ||
+    o->verify_src_off>INT64_MAX-o->verify_bytes ||
+    (!identity && xdev_ext_mech_ctl_xform_parse(o->xform_name,&xform)))return -EINVAL;
+ cap=o->verify_bytes+((o->verify_bytes-1)/o->verify_seg+1+
+     (o->group_bytes?(o->verify_bytes-1)/o->group_bytes:0))*32;
+ if(cap>UINT32_MAX || o->verify_dst_off>INT64_MAX-cap-511)return -EINVAL;
+ rounded=(cap+511)&~511ULL;
+ if(posix_memalign((void**)&source,4096,o->verify_bytes) ||
+    posix_memalign((void**)&actual,4096,rounded) || !(expected=malloc(cap))){error=-ENOMEM;goto done;}
+ in=open(o->verify_src,O_RDONLY|O_CLOEXEC|O_DIRECT);
+ out=open(o->verify_dst,O_RDONLY|O_CLOEXEC|O_DIRECT);
+ if(in<0 || out<0){error=-errno;goto done;}
+ error=ctl_verify_read(in,source,o->verify_bytes,o->verify_src_off);if(error)goto done;
+ if(identity){memcpy(expected,source,o->verify_bytes);length=o->verify_bytes;}
+ else {
+  /* The final frame of each batch can be short: restart segmentation at
+   * every group boundary, exactly as the pool layout does. */
+  __u32 offset=0;
+  if(!o->group_bytes){error=-EINVAL;goto done;}
+  while(offset<o->verify_bytes){
+   __u32 n=o->verify_bytes-offset<o->group_bytes?o->verify_bytes-offset:o->group_bytes,produced=0;
+   error=xdev_ext_mech_ctl_xform_expect(xform,o->xform_arg,o->verify_seg,source+offset,n,expected+length,cap-length,&produced);
+   if(error)goto done;
+   offset+=n;length+=produced;
+  }
+ }
+ error=ctl_verify_read(out,actual,((__u64)length+511)&~511ULL,o->verify_dst_off);if(error)goto done;
+ for(__u32 i=0;i<length;i++)mismatches+=actual[i]!=expected[i];
+ ret=mismatches?CTL_FAIL:CTL_PASS;error=0;
+ done:
+ xdev_ext_mech_ctl_report_verify(line,sizeof(line),ret==CTL_PASS,
+  o->xform_name?o->xform_name:"invalid",length,mismatches);
+ puts(line);
+ if(error)ctl_err("verify: %s\n",strerror(-error));
+ if(in>=0)close(in);
+ if(out>=0)close(out);
+ free(source);free(actual);free(expected);return ret;
+}
+
 static int cmd_ce_chain(struct ctl_opts *o)
 {
 	struct xdev_ext_mech_cuda cuda = { 0 };
@@ -1612,9 +1705,19 @@ enum {
 	OPT_EXPECT_TIMEOUT, OPT_QUIET_WAIT, OPT_COPY, OPT_CE_ALLOC,
  OPT_RELIABLE, OPT_WIRE_SESSION, OPT_FIRST_GROUP, OPT_REMOTE_WINDOW,
  OPT_MAX_ATTEMPTS, OPT_RETRY_TIMEOUT,
+ OPT_XFORM, OPT_XFORM_ARG, OPT_VERIFY_SRC, OPT_VERIFY_DST, OPT_VERIFY_SRC_OFF,
+ OPT_VERIFY_DST_OFF, OPT_VERIFY_BYTES, OPT_VERIFY_SEG,
 };
 
 static const struct option ctl_options[] = {
+ { "xform", required_argument, NULL, OPT_XFORM },
+ { "xform-arg", required_argument, NULL, OPT_XFORM_ARG },
+ { "src", required_argument, NULL, OPT_VERIFY_SRC },
+ { "dst", required_argument, NULL, OPT_VERIFY_DST },
+ { "src-off", required_argument, NULL, OPT_VERIFY_SRC_OFF },
+ { "dst-off", required_argument, NULL, OPT_VERIFY_DST_OFF },
+ { "bytes", required_argument, NULL, OPT_VERIFY_BYTES },
+ { "seg-len", required_argument, NULL, OPT_VERIFY_SEG },
  { "reliable", no_argument, NULL, OPT_RELIABLE },
  { "wire-session", required_argument, NULL, OPT_WIRE_SESSION },
  { "first-group", required_argument, NULL, OPT_FIRST_GROUP },
@@ -1680,6 +1783,13 @@ static void usage(FILE *f)
 "                [--ce-va N | --ce-alloc] [--src-ng NG --slba N --nlb N]\n"
 "                [--dst-ng NG --dst-slba N --dst-nlb N] [--ifname IF PEER]\n"
 "                [COMMON]\n"
+"       xdev_ext_mech_ctl fanout --src-ng NG --slba N --nlb N\n"
+"                --dst-ng NG --dst-slba N --dst-nlb N --ifname IF PEER [COMMON]\n"
+"       xdev_ext_mech_ctl cpu-chain --xform NAME [--xform-arg N]\n"
+"                --src-ng NG --slba N --nlb N\n"
+"                (--dst-ng NG --dst-slba N --dst-nlb N | --ifname IF PEER) [COMMON]\n"
+"       xdev_ext_mech_ctl verify-xform --xform NAME|none [--xform-arg N]\n"
+"                --seg-len N --src DEV --src-off N --dst DEV --dst-off N --bytes N\n"
 "       xdev_ext_mech_ctl stats --session ID\n"
 "PEER:   --peer-mac M --local-ip A --peer-ip A --local-port P --peer-port P\n"
 "        [--local-mac M] [--queue Q]\n"
@@ -1738,6 +1848,14 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 	while (!ret && (opt = getopt_long(argc, argv, "h", ctl_options,
 					  NULL)) != -1) {
 		switch (opt) {
+  case OPT_XFORM:o->xform_name=optarg;break;
+  case OPT_XFORM_ARG:ret=parse_u64_opt(optarg,&o->xform_arg,NULL);break;
+  case OPT_VERIFY_SRC:o->verify_src=optarg;break;
+  case OPT_VERIFY_DST:o->verify_dst=optarg;break;
+  case OPT_VERIFY_SRC_OFF:ret=parse_u64_opt(optarg,&o->verify_src_off,NULL);break;
+  case OPT_VERIFY_DST_OFF:ret=parse_u64_opt(optarg,&o->verify_dst_off,NULL);break;
+  case OPT_VERIFY_BYTES:ret=parse_u64_opt(optarg,&o->verify_bytes,NULL);break;
+  case OPT_VERIFY_SEG:ret=parse_u64_opt(optarg,&o->verify_seg,NULL);break;
   case OPT_RELIABLE:o->reliable=true;break;
   case OPT_WIRE_SESSION:ret=parse_u64_opt(optarg,&o->wire_session,NULL);break;
   case OPT_FIRST_GROUP:ret=parse_u64_opt(optarg,&o->first_group,NULL);break;
@@ -1890,6 +2008,9 @@ static const struct {
 	{ "nic-nvme", cmd_nic_nvme },
 	{ "nvme-nic", cmd_nvme_nic },
 	{ "ce-chain", cmd_ce_chain },
+ { "fanout", cmd_fanout },
+ { "cpu-chain", cmd_cpu_chain },
+ { "verify-xform", cmd_verify_xform },
 	{ "stats", cmd_stats },
 };
 

@@ -26,8 +26,12 @@ def kconfig_block(text: str, symbol: str) -> str:
 def function_body(path: Path, signature: str) -> str:
     """Text of the function whose definition starts with @signature."""
     text = path.read_text(encoding="utf-8")
+    # L11: checked-unbind introduces forward declarations; inspect definitions.
     start = text.index(signature)
     opening = text.index("{", start)
+    while ";" in text[start:opening]:
+        start = text.index(signature, start + len(signature))
+        opening = text.index("{", start)
     depth = 0
     for offset, character in enumerate(text[opening:], opening):
         if character == "{":
@@ -544,9 +548,16 @@ class UbrMechSourceTest(unittest.TestCase):
         # frees the worker, and the stages are unbound after that.
         path = ROOT / "io_uring/xdev_ext_mech.c"
         release = function_body(path, "static int xdev_ext_mech_session_release(")
-        lock = release.index("spin_lock_irqsave(&s->lock, flags);")
+        # L11: checked unbind can quarantine under an earlier lock; the worker
+        # gate must be inside its own critical section before destruction.
         gone = release.index("s->worker_gone = true;")
-        unlock = release.index("spin_unlock_irqrestore(&s->lock, flags);")
+        lock = release.rindex("spin_lock_irqsave(&s->lock, flags);", 0, gone)
+        unlock = release.index("spin_unlock_irqrestore(&s->lock, flags);", gone)
+        checked = release.index("xdev_ext_mech_unbind_checked(s)")
+        quarantine = release.index("xdev_ext_mech_quarantine(s)")
+        self.assertLess(checked, quarantine)
+        self.assertLess(quarantine, release.index("return final_err;"))
+        self.assertLess(release.index("return final_err;"), gone)
         destroy = release.index("kthread_destroy_worker(s->worker);")
         unbind = release.index("s->st[i].cls->unbind(&s->st[i]);")
         self.assertEqual([lock, gone, unlock, destroy, unbind],
@@ -718,10 +729,12 @@ class UbrMechSourceTest(unittest.TestCase):
         path = ROOT / "io_uring/xdev_ext_mech.c"
         bufs = function_body(path, "static int xdev_ext_mech_session_buffers(")
         align = bufs.index("priv = ALIGN(priv, sizeof(u64));")
-        self.assertLess(align, bufs.index("kvcalloc(s->depth, priv,"))
+        self.assertLess(align, bufs.index("kvcalloc(s->depth * (XDEV_EXT_MECH_MAX_STAGES + 1), priv,"))
         self.assertLess(align, bufs.index("s->priv_size = priv;"))
         cookie_align = bufs.index("cookie = ALIGN(cookie, sizeof(u64));")
-        self.assertLess(cookie_align, bufs.index("kvcalloc(s->depth, cookie,"))
+        # L11: each parent plus four preallocated stage branches needs its own area.
+        self.assertLess(cookie_align, bufs.index("kvcalloc(s->depth * (XDEV_EXT_MECH_MAX_STAGES + 1), cookie,"))
+        self.assertIn("s->fan_batches", bufs)
 
     def test_stats_from_any_ring_while_the_session_exists(self):
         # xdev_ext_mech_ctl reads STATS through a fresh ring after the owning

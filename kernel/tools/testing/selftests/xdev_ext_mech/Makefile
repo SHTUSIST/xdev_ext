@@ -3,6 +3,10 @@
 TEST_GEN_PROGS := xdev_ext_mech_core_test xdev_ext_mech_ce_core_test
 TEST_GEN_PROGS += xdev_ext_mech_step_test
 TEST_GEN_PROGS += xdev_ext_mech_lifecycle_test
+# Four-state references replace the previous single-consumer lifecycle contract.
+TEST_GEN_PROGS += xdev_ext_mech_refs_test xdev_ext_mech_lifecycle_contract_test
+TEST_GEN_PROGS += xdev_ext_mech_fanout_step_test xdev_ext_mech_cpu_xform_test
+TEST_GEN_PROGS += xdev_ext_mech_ctl_chains_test
 TEST_GEN_PROGS += xdev_ext_mech_rx_stages_test
 TEST_GEN_PROGS += xdev_ext_mech_window_offset_test xdev_ext_mech_window_pipeline_test
 TEST_GEN_PROGS += xdev_ext_mech_ce_exact_completion_test
@@ -15,7 +19,8 @@ TEST_PROGS += xdev_ext_mech_zc_source_test.py xdev_ext_mech_dma_test.py
 TEST_PROGS += xdev_ext_mech_nvme_nowait_test.py
 TEST_PROGS += xdev_ext_mech_recycle_tail_test.py xdev_ext_mech_ce_positive_test.py
 TEST_PROGS += reliable/run.sh reliable/wire_fault_test.py
-TEST_PROGS += model/run.sh
+TEST_PROGS += model/run.sh model/refs_run.sh xdev_ext_mech_refs_source_test.py
+TEST_FILES += model/refs_explore.c model/refs_mutants.py xform_oracle.h refs_suite.py
 TEST_FILES += model/life_explore.c model/mutants.py model/Makefile
 TEST_FILES += $(wildcard model/shim/linux/*.h)
 TEST_PROGS += reliable/regressions/control_stop_admission_test.py
@@ -78,6 +83,16 @@ CFLAGS += -fsanitize=undefined -fno-sanitize-recover=undefined
 LDFLAGS += -fsanitize=undefined
 endif
 
+# Native lifecycle scheduler and teardown extraction, with independent failure schedules.
+TEST_PROGS += fanout_scheduler/run.py fanout_scheduler/produced_test.py
+TEST_PROGS += fanout_scheduler/recycle_test.py
+TEST_PROGS += lifecycle_runtime/guest_harness_test.py
+TEST_PROGS += lifecycle_runtime/recycle_input_test.py teardown_checked/test_ce_unbind.py
+TEST_FILES += fanout_scheduler/fixture.c fanout_scheduler/shim.h
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_cpu_core.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_life_pool.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_produced.h)
+
 include ../lib.mk
 
 $(OUTPUT)/xdev_ext_mech_lifecycle_test: CFLAGS += -pthread
@@ -98,3 +113,8 @@ run: run_tests
 model-check:
 	$(MAKE) -C model OUTPUT=$(OUTPUT)/model CC="$(CC)" \
 		XDEV_EXT_MECH_UBSAN=$(XDEV_EXT_MECH_UBSAN) model-check
+
+# Instrument the real kernel-form lifecycle header with the existing atomic shim.
+$(OUTPUT)/xdev_ext_mech_refs_test $(OUTPUT)/xdev_ext_mech_lifecycle_contract_test: CFLAGS += -pthread -I$(CURDIR)/model/shim
+$(OUTPUT)/xdev_ext_mech_refs_test $(OUTPUT)/xdev_ext_mech_lifecycle_contract_test: LDLIBS += -pthread
+$(OUTPUT)/xdev_ext_mech_cpu_xform_test $(OUTPUT)/xdev_ext_mech_ctl_chains_test: $(CURDIR)/xform_oracle.h

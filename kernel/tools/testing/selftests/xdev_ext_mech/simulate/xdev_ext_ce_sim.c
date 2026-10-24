@@ -143,8 +143,9 @@ static int xdev_ext_ce_sim_bind_region(struct file *f, u64 gpu_va, u64 len,
 }
 
 /* The window belongs to the module; binding took nothing. */
-static void xdev_ext_ce_sim_unbind_region(struct xdev_ext_ce_region *r)
+static int xdev_ext_ce_sim_unbind_region(struct xdev_ext_ce_region *r)
 {
+	return 0;
 }
 
 static int xdev_ext_ce_sim_bind_host(struct xdev_ext_ce_region *r, struct page **pages,
@@ -164,12 +165,13 @@ static int xdev_ext_ce_sim_bind_host(struct xdev_ext_ce_region *r, struct page *
 	return 0;
 }
 
-static void xdev_ext_ce_sim_unbind_host(void *host)
+static int xdev_ext_ce_sim_unbind_host(void *host)
 {
 	struct xdev_ext_ce_sim_host *h = host;
 
 	vunmap(h->vaddr);
 	kfree(h);
+	return 0;
 }
 
 static bool xdev_ext_ce_sim_in(u64 off, u32 len, u64 size)
