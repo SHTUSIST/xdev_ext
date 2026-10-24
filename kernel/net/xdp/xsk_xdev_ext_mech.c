@@ -757,11 +757,12 @@ static int xsk_xdev_ext_mech_bind(struct xdev_ext_mech_stage *st,
    err = xsk_rel_bind(st, u);
    if (err) { st->priv = NULL; goto bind_unlock; }
   }
+		/* Reliable TX receives control packets through the RX callback too. */
+		xsk_xdev_ext_mech_fill_info(st, NULL, &xst->rx_info);
+		xst->rx_info.base.nr_frames = 1;
 		if (tx) {
-			WRITE_ONCE(xs->xdev_ext_mech_tx, st);
+			smp_store_release(&xs->xdev_ext_mech_tx, st);
 		} else {
-			xsk_xdev_ext_mech_fill_info(st, NULL, &xst->rx_info);
-			xst->rx_info.base.nr_frames = 1;
 			/* RX dereferences st->priv after it sees the stage. */
 			smp_store_release(&xs->xdev_ext_mech_rx, st);
 		}
