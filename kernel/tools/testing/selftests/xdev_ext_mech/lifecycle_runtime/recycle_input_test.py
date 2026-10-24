@@ -13,7 +13,8 @@ int main(void) {
  struct xdev_ext_mech_session s={0};struct xdev_ext_mech_batch b={0};
  struct xdev_ext_mech_life life;u8 custody=XDEV_EXT_MECH_F_HELD;u64 input,oldticket;
  s.life=&life;s.nr_stages=1;s.depth=1;s.batches=&b;s.start_recycle=true;
- s.pool=(struct xdev_ext_mech_pool){.ops=&pool_ops,.state=&custody,.nr_frames=1};
+ /* Re-publication validates the preserved span against real pool geometry. */
+ s.pool=(struct xdev_ext_mech_pool){.ops=&pool_ops,.state=&custody,.nr_frames=1,.frame_size=128};
  s.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_SOCKET,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  s.st[0]=(struct xdev_ext_mech_stage){.s=&s,.cls=&cls,.class_id=XDEV_EXT_MECH_CLASS_SOCKET,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  xdev_ext_mech_sess_init(&s.ss);xdev_ext_mech_life_init(&life);

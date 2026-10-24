@@ -85,6 +85,7 @@ endif
 
 # Native lifecycle scheduler and teardown extraction, with independent failure schedules.
 TEST_PROGS += fanout_scheduler/run.py fanout_scheduler/produced_test.py
+TEST_PROGS += fanout_scheduler/recycle_test.py
 TEST_PROGS += lifecycle_runtime/guest_harness_test.py
 TEST_PROGS += lifecycle_runtime/recycle_input_test.py teardown_checked/test_ce_unbind.py
 TEST_FILES += fanout_scheduler/fixture.c fanout_scheduler/shim.h

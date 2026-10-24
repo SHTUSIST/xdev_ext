@@ -31,6 +31,7 @@ jobs:
         run: |
           python3 kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/run.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/produced_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/recycle_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/guest_harness_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py

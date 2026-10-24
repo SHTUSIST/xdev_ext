@@ -937,6 +937,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/shim.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/produced_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/recycle_test.py
 !/kernel/tools/xdev_ext_mech/cpu_plan.bpf.c
 !/kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_lifecycle_guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/

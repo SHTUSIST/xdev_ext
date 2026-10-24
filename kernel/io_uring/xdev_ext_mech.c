@@ -407,9 +407,6 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 {
 	bool recycle = b->to_user && s->start_recycle &&
 		READ_ONCE(s->start_left) && xdev_ext_mech_session_admits(s);
-	/* Recycled user source bytes remain the same READY payload. */
-	bool keep_ready = recycle && (s->st[0].direction == XDEV_EXT_MECH_DIR_TO_DEVICE ||
-  (s->st[0].cls->flags & XDEV_EXT_MECH_CLASS_F_TRANSFORM));
 	u32 to = b->to_user && !recycle ? XDEV_EXT_MECH_F_USER : XDEV_EXT_MECH_F_K_FREE;
 	u32 pos, done = 0, parked = 0;
 
@@ -440,8 +437,9 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
    continue; /* stage lease remains HELD until unbind */
   }
 		/* FREE includes a failed producer or a not-yet-started batch. */
-		if (!keep_ready &&
-		    xdev_ext_mech_life_phase(&s->life[f->index]) != XDEV_EXT_MECH_L_FREE &&
+		/* Even a terminal transform's READY output closes this publication.
+		 * A later RECYCLE loan installs new consumers over its valid span. */
+		if (xdev_ext_mech_life_phase(&s->life[f->index]) != XDEV_EXT_MECH_L_FREE &&
 		    WARN_ON_ONCE(xdev_ext_mech_life_release(&s->life[f->index],
 				xdev_ext_mech_life_gen(&s->life[f->index]))))
 			goto quarantine;
@@ -2133,7 +2131,7 @@ static void xdev_ext_mech_batch_drain(struct kthread_work *work)
 static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
                                          struct xdev_ext_mech_batch *b)
 {
- u32 i, refs;
+ u32 i, refs, bytes = 0;
 
  if (!s->start_recycle || xdev_ext_mech_stage_role(&s->plan[0]) == XDEV_EXT_MECH_ROLE_PRODUCER)
   return 0;
@@ -2143,8 +2141,16 @@ static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
   u64 claim;
   int err;
 
-  if (xdev_ext_mech_life_phase(life) == XDEV_EXT_MECH_L_READY)
+  if (xdev_ext_mech_life_phase(life) == XDEV_EXT_MECH_L_READY) {
+   bytes += b->f[i].data_len;
    continue; /* Initial user loan was already CPU-published by START. */
+  }
+  /* Reuse the preceding output, not the CREATE capacity reconstructed by
+   * start_more: an in-place stage may have changed the valid byte length. */
+  if (!life->valid_len || b->f[i].data_off > s->pool.frame_size ||
+      life->valid_len > s->pool.frame_size - b->f[i].data_off)
+   return -EINVAL;
+  b->f[i].data_len = life->valid_len;
   err = xdev_ext_mech_life_claim(life, XDEV_EXT_MECH_L_OWNER_START, &claim);
   if (err)
    return err;
@@ -2153,7 +2159,9 @@ static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
    xdev_ext_mech_life_rollback(life, claim);
    return err;
   }
+  bytes += b->f[i].data_len;
  }
+ b->bytes = bytes;
  return 0;
 }
 
