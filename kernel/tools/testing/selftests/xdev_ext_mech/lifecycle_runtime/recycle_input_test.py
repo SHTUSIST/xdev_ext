@@ -11,8 +11,9 @@ body=definition(core,helper) if re.search(r'static int '+helper+r'\(',core) else
 case=r'''
 int main(void) {
  struct xdev_ext_mech_session s={0};struct xdev_ext_mech_batch b={0};
- struct xdev_ext_mech_life life;u8 custody=XDEV_EXT_MECH_F_HELD;u64 input,oldticket;
- s.life=&life;s.nr_stages=1;s.depth=1;s.batches=&b;s.start_recycle=true;
+ struct xdev_ext_mech_life life;u8 custody=XDEV_EXT_MECH_F_HELD,owner=0;u64 input,oldticket;
+ s.life=&life;s.nr_stages=1;s.depth=1;s.batches=&b;s.start_recycle=true;s.transform_owner=&owner;
+ s.start_left=1; /* One more START batch remains after the first finishes. */
  /* Re-publication validates the preserved span against real pool geometry. */
  s.pool=(struct xdev_ext_mech_pool){.ops=&pool_ops,.state=&custody,.nr_frames=1,.frame_size=128};
  s.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_SOCKET,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
@@ -26,6 +27,13 @@ int main(void) {
  xdev_ext_mech_batch_run(&s,&b);REQUIRE(accepts[0]==1,"first native consumer accepted");oldticket=tickets[0];
  callback(0,0);xdev_ext_mech_batch_drain(&s.drain_work);
  REQUIRE(xdev_ext_mech_life_phase(&life)==XDEV_EXT_MECH_L_FREE,"first final reference recycles");
+ REQUIRE(custody==XDEV_EXT_MECH_F_K_FREE && recycle_calls==1 &&
+         s.cnt[XDEV_EXT_MECH_CNT_RECYCLED]==1,"first return goes through the provider allocator");
+ /* Model only the provider alloc boundary of start_more, not its lifecycle
+  * decision: production frame_release returned K_FREE, alloc loans HELD. */
+ REQUIRE(!xdev_ext_mech_pool_frame_move(&s.pool,0,XDEV_EXT_MECH_F_K_FREE,XDEV_EXT_MECH_F_HELD),
+         "provider loans recycled frame to the next START batch");
+ s.start_left=0; /* start_more consumes the final remaining batch. */
  xdev_ext_mech_bstate_init(&b.bs,1);xdev_ext_mech_batch_step(&b.bs,XDEV_EXT_MECH_EV_READY,0);
  START_PUBLICATION
  xdev_ext_mech_batch_run(&s,&b);REQUIRE(accepts[0]==2,"RECYCLE admits second CPU-input publication");
@@ -34,6 +42,9 @@ int main(void) {
  callback(0,0);xdev_ext_mech_batch_drain(&s.drain_work);
  CHECK(ends==2&&released==2,"two bounded batches retire exactly once each");
  CHECK(xdev_ext_mech_life_gen(&life)==2,"each publication advances generation only on final put");
+ CHECK(custody==XDEV_EXT_MECH_F_USER && recycle_calls==1 &&
+       s.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==1,"last bounded batch returns the user loan exactly once");
+ CHECK(!warnings,"production frame release sees valid custody on both returns");
  if(!failures)puts("PASS repeated CPU START, final-reference recycle, late-ticket rejection");
  return failures!=0;
 }

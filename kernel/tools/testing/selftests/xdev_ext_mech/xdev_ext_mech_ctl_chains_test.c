@@ -136,6 +136,73 @@ static bool test_fanout_stages(void)
 	return true;
 }
 
+static bool test_fanout_completion_verdict(void)
+{
+	struct xdev_ext_mech_stats good = {
+		.session_id = 17, .state = XDEV_EXT_MECH_SESSION_ACTIVE,
+		.batches_done = 4, .recycled = 24,
+		.submitted = {4, 4, 4, 0}, .completed = {4, 4, 4, 0},
+	};
+	struct xdev_ext_mech_stats s;
+	char line[2048];
+	unsigned int i;
+
+	CHECK(xdev_ext_mech_ctl_fanout_ok(&good, 4, 6));
+	CHECK(xdev_ext_mech_ctl_report_fanout_counts(line, sizeof(line), &good, 4, 6, 1, true));
+	CHECK(strstr(line, "\"pass\":true,\"session\":17,\"groups\":4"));
+	CHECK(strstr(line, "\"window_groups\":1,\"window_frames\":6"));
+	CHECK(strstr(line, "\"submitted\":[4,4,4,0],\"completed\":[4,4,4,0]"));
+	CHECK(!xdev_ext_mech_ctl_report_fanout_counts(line, sizeof(line), &good, 4, 6, 1, false));
+	CHECK(strstr(line, "\"pass\":false"));
+	CHECK(!xdev_ext_mech_ctl_report_fanout_counts(line, 20, &good, 4, 6, 1, true));
+	CHECK(!xdev_ext_mech_ctl_report_fanout_counts(line, sizeof(line), &good, 4, 6, 0, true));
+	CHECK(!xdev_ext_mech_ctl_report_fanout_counts(line, sizeof(line), &good, 4, 6, 5, true));
+	CHECK(!xdev_ext_mech_ctl_fanout_ok(&good, 0, 6));
+	CHECK(!xdev_ext_mech_ctl_fanout_ok(&good, 4, 0));
+	/* A settled IOU/socket loan is valid generic completion, not XSK proof. */
+	s = good;
+	s.published = 6;
+	s.recycled = 18;
+	CHECK(!xdev_ext_mech_ctl_notify_result(&s, 4));
+	CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6));
+	/* CREATE/terminal success cannot hide one missing, duplicate or extra stage. */
+	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
+		s = good;
+		s.completed[i]++;
+		CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6));
+		s = good;
+		s.submitted[i]++;
+		CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6));
+		if (i < 3) {
+			s = good;
+			s.completed[i]--;
+			CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6));
+			s = good;
+			s.submitted[i]--;
+			CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6));
+		}
+	}
+#define REJECT_FIELD(field, value) do { \
+	s = good; s.field = (value); \
+	CHECK(!xdev_ext_mech_ctl_fanout_ok(&s, 4, 6)); \
+} while (0)
+	REJECT_FIELD(batches_done, 5);
+	REJECT_FIELD(batches_done, 3);
+	REJECT_FIELD(recycled, 23);
+	REJECT_FIELD(recycled, 25);
+	REJECT_FIELD(published, 1);
+	REJECT_FIELD(inflight, 1);
+	REJECT_FIELD(sequestered, 1);
+	REJECT_FIELD(batches_abort, 1);
+	REJECT_FIELD(rejects, 1);
+	REJECT_FIELD(protocol_err, 1);
+	REJECT_FIELD(timeouts, 1);
+	REJECT_FIELD(last_err, -EIO);
+	REJECT_FIELD(state, XDEV_EXT_MECH_SESSION_STOPPED);
+#undef REJECT_FIELD
+	return true;
+}
+
 /* The BPF compute transform: named for cpu-chain, never judged by ctl. */
 static bool test_bpf_compute_chain(void)
 {
@@ -366,6 +433,7 @@ int main(void)
 	} tests[] = {
 		{ "L7 ctl transform names", FN(test_xform_names) },
 		{ "L3 ctl fan-out stages pass CREATE", FN(test_fanout_stages) },
+		{ "L3 ctl fan-out requires both completions and exact frame returns", FN(test_fanout_completion_verdict) },
 		{ "L7 ctl CPU chain stages pass CREATE", FN(test_cpu_stages) },
 		{ "L7 ctl BPF compute chain name and stages", FN(test_bpf_compute_chain) },
 		{ "L7 ctl oracle agrees with independent oracles", FN(test_oracle_agrees) },

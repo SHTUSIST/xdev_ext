@@ -191,6 +191,11 @@ PYSOURCEPATH
     SOURCE_COMMIT=$(git -C "$SOURCE_GIT_ROOT" rev-parse --verify 'HEAD^{commit}')
 }
 verify_source_checkout
+if (( LIFECYCLE )); then
+    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/native_trace/collector.py" ]] || {
+        echo 'FAIL --lifecycle native validation requires the product overlay with tests/eval/native_trace' >&2; exit 1;
+    }
+fi
 if (( ${EVAL_SESSION:-0} )); then
     [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/session_guest/Makefile" ]] || {
         echo 'FAIL --eval-session requires the product overlay with tests/eval/session_guest' >&2; exit 1;
@@ -249,7 +254,7 @@ mkdir -p "$BUILD" "$EV" "$TOOLS"
 clear_derived_results() {
     rm -f -- "$EV/result.txt" "$EV/data-result.txt" "$EV/validation.json" \
         "$EV/eval-session-result.txt" "$EV/data.sha256" "$EV/source-after.sha256" "$EV/debug-locking.json" "$EV/debug-locking-result.txt" \
-        "$EV/fence-result.txt" "$EV/fence-request.json"
+        "$EV/fence-result.txt" "$EV/fence-request.json" "$EV/fanout-result.json"
 }
 clear_derived_results
 exec > >(tee -a "$EV/harness.log") 2>&1
@@ -1420,6 +1425,12 @@ python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG
 if (( FENCE_CHECK )); then
     python3 "$FENCE_VALIDATOR" "$EV/guest.log" "$EV/qemu.exit" "$EV/fence-request.json" \
         | tee "$EV/fence-result.txt"
+fi
+# Preserve a machine-readable FAIL even when QEMU times out or exits nonzero.
+if (( LIFECYCLE )); then
+    python3 "$SRC/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate.py" \
+        --dir "$SCRATCH" --log "$EV/guest.log" --result "$EV/fanout-result.json" \
+        --groups "$GROUP_COUNT" --depth "$DEPTH" --qemu-exit "$rc"
 fi
 [[ $rc == 0 ]]
 if (( EVAL_SESSION )); then

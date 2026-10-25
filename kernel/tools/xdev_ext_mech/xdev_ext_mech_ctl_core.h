@@ -721,6 +721,56 @@ static inline int xdev_ext_mech_ctl_fanout_stages(struct xdev_ext_mech_stage_uap
   .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=xsk_fd,.flags=XDEV_EXT_MECH_STAGE_F_FANOUT};
  return 3;
 }
+/* A terminal notification alone cannot prove that both fan-out consumers ran.
+ * This fixed three-stage XSK chain returns every frame to its kernel pool;
+ * published counts user loans, not lifecycle READY transitions. */
+static inline bool xdev_ext_mech_ctl_fanout_ok(const struct xdev_ext_mech_stats *s,
+                                             __u64 groups, __u32 frames)
+{
+ unsigned int i;
+
+ if (!groups || !frames || xdev_ext_mech_ctl_notify_result(s, groups) ||
+     s->batches_done != groups || s->recycled != groups * frames ||
+     s->published || s->rejects || s->protocol_err || s->timeouts)
+  return false;
+ for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
+  __u64 expected = i < 3 ? groups : 0;
+
+  if (s->submitted[i] != expected || s->completed[i] != expected)
+   return false;
+ }
+ return true;
+}
+
+/* Machine-readable evidence from the same final snapshot as the verdict. */
+static inline bool xdev_ext_mech_ctl_report_fanout_counts(char *line, size_t cap,
+ const struct xdev_ext_mech_stats *s, __u64 groups, __u32 frames,
+ __u64 window_groups, bool run_ok)
+{
+ bool pass = run_ok && window_groups && window_groups <= groups &&
+  xdev_ext_mech_ctl_fanout_ok(s, groups, frames);
+
+ return xdev_ext_mech_ctl_line(line, cap, pass,
+  "XDEV_EXT_MECH_FANOUT_COUNTS={\"pass\":%s,\"session\":%llu,\"groups\":%llu,"
+  "\"frames_per_group\":%u,\"window_groups\":%llu,\"window_frames\":%llu,"
+  "\"submitted\":[%llu,%llu,%llu,%llu],\"completed\":[%llu,%llu,%llu,%llu],"
+  "\"recycled\":%llu,\"published\":%llu,\"inflight\":%llu,\"sequestered\":%llu,"
+  "\"batches_done\":%llu,\"batches_abort\":%llu,\"rejects\":%llu,"
+  "\"protocol_err\":%llu,\"timeouts\":%llu,\"last_err\":%d,\"state\":%u}",
+  pass ? "true" : "false", XDEV_EXT_MECH_CTL_U(s->session_id),
+  XDEV_EXT_MECH_CTL_U(groups), frames, XDEV_EXT_MECH_CTL_U(window_groups),
+  XDEV_EXT_MECH_CTL_U(window_groups * frames),
+  XDEV_EXT_MECH_CTL_U(s->submitted[0]), XDEV_EXT_MECH_CTL_U(s->submitted[1]),
+  XDEV_EXT_MECH_CTL_U(s->submitted[2]), XDEV_EXT_MECH_CTL_U(s->submitted[3]),
+  XDEV_EXT_MECH_CTL_U(s->completed[0]), XDEV_EXT_MECH_CTL_U(s->completed[1]),
+  XDEV_EXT_MECH_CTL_U(s->completed[2]), XDEV_EXT_MECH_CTL_U(s->completed[3]),
+  XDEV_EXT_MECH_CTL_U(s->recycled), XDEV_EXT_MECH_CTL_U(s->published),
+  XDEV_EXT_MECH_CTL_U(s->inflight), XDEV_EXT_MECH_CTL_U(s->sequestered),
+  XDEV_EXT_MECH_CTL_U(s->batches_done), XDEV_EXT_MECH_CTL_U(s->batches_abort),
+  XDEV_EXT_MECH_CTL_U(s->rejects), XDEV_EXT_MECH_CTL_U(s->protocol_err),
+  XDEV_EXT_MECH_CTL_U(s->timeouts), s->last_err, s->state);
+}
+
 static inline int xdev_ext_mech_ctl_cpu_stages(struct xdev_ext_mech_stage_uapi *st,
  int src_fd,__u64 slba,__u64 nlb,__u32 xform,__u64 param,
  __u32 sink_class,int sink_fd,__u64 sink_arg0,__u64 sink_arg1)

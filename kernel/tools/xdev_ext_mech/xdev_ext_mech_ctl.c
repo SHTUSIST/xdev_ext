@@ -1559,6 +1559,8 @@ struct ctl_source {
 	const char *ifname;		/* AF_XDP TX stage, or NULL */
 	struct xdev_ext_mech_stage_uapi st[XDEV_EXT_MECH_MAX_STAGES];
 	__u32 nr_stages;
+	__u32 frames_per_group;
+	__u64 window_groups;
 	bool iou_umem;			/* pool: the ring's XDEV_EXT UMEM */
 	bool user_pattern;		/* chain d: user fills and compares */
 	bool started;			/* distinguishes runtime from setup failure */
@@ -1595,6 +1597,8 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	ret = ctl_layout(o, src->ifname, &l, &frames);
 	if (ret)
 		return ret;
+	src->frames_per_group = frames;
+	src->window_groups = pool_groups;
 	if (pool_groups > CTL_NUM_FRAMES / frames)
 		return -E2BIG;
 	umem_size = (size_t)pool_groups * frames * XDEV_EXT_MECH_CTL_FRAME_SIZE;
@@ -1802,7 +1806,7 @@ static int ctl_new_chain(struct ctl_opts *o,bool fanout)
  struct ctl_source src={.o=o,.ifname=o->ifname,.nr_stages=3,.iou_umem=!o->ifname};
  struct xdev_ext_mech_stats stats={0};__u32 xform=0;bool frames_ok=false,ok;
  int source=-1,dest=-1,ret;
- char line[512];
+ char line[2048];
  if(!o->src_ng || !o->have_slba || !o->have_nlb || !o->nlb || !o->groups ||
     (fanout && (!o->ifname || !o->dst_ng)) ||
     (!fanout && ((!o->ifname)==(!o->dst_ng))) ||
@@ -1821,9 +1825,17 @@ static int ctl_new_chain(struct ctl_opts *o,bool fanout)
  if(ret<0)goto out;
  ret=ctl_run_source(&src,&stats,&frames_ok);
  ok=!ret && frames_ok && !xdev_ext_mech_ctl_notify_result(&stats,o->groups);
+ /* SOCKET fallback uses IOU user loans with a different final return ledger.
+  * Only AF_XDP campaigns may emit this XSK-pool proof marker. */
+ if(fanout && src.nic_path != XDEV_EXT_MECH_CTL_NIC_SOCKET) {
+  ok=xdev_ext_mech_ctl_report_fanout_counts(line,sizeof(line),&stats,
+      o->groups,src.frames_per_group,src.window_groups,ok);
+  puts(line);
+ }
  xdev_ext_mech_ctl_report_chain(line,sizeof(line),ok,fanout,o->xform_name,!!o->ifname);
  puts(line);
  ctl_print_stats(&stats);
+ if(src.nic_path)ctl_print_nic_accounting(src.nic_path,&src.accounting);
  if(!ret)ret=ok?CTL_PASS:CTL_FAIL;
  out:
  if(source>=0)close(source);

@@ -75,10 +75,21 @@ struct xdev_ext_mech_session {
 };
 struct xdev_ext_mech_batch {
  bool to_user; u32 nr_frames,present;
+ u64 ticket;
  struct {u32 state;} bs;
  struct xdev_ext_mech_frame f[8];
  struct list_head node;
 };
+/* Trace observation is disabled in this custody/notification fixture. */
+static bool trace_native_event_enabled(void) { return false; }
+static void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
+ const char *phase,u32 pos,u64 ticket,int status) {
+ (void)b;(void)phase;(void)pos;(void)ticket;(void)status;
+}
+static void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch *b,
+ const char *phase,u64 ticket,int status) {
+ (void)b;(void)phase;(void)ticket;(void)status;
+}
 enum {XDEV_EXT_MECH_END_DONE, XDEV_EXT_MECH_END_ABORT, XDEV_EXT_MECH_END_SEQUESTER};
 static struct xdev_ext_mech_session *event_session;
 /* The extracted terminal path must settle frame custody before allowing a

@@ -14,8 +14,7 @@ def main():
     code = generate().replace('int main(int argc,char**argv)',
                               'int baseline_main(int argc,char**argv)')
     code += '\n' + '\n'.join(definition(core, name) for name in (
-        'xdev_ext_mech_pool_frame_state', 'xdev_ext_mech_frames_release',
-        'xdev_ext_mech_start_publication'))
+        'xdev_ext_mech_start_publication',))
     code += r'''
 static void recycle_cb(struct xdev_ext_mech_pool *p, struct xdev_ext_mech_frame *f)
 { (void)p; (void)f; }

@@ -4,6 +4,8 @@
 Only OS work queues, descriptor construction and device submission are host
 boundaries. No scheduler, lifecycle or completion decision is restated here.
 """
+import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -33,7 +35,8 @@ def generate():
     structs = "\n".join(definition(abi, n, True) for n in names)
     structs += "\n" + "\n".join(definition(core, n, True) for n in
                                 ("xdev_ext_mech_batch", "xdev_ext_mech_session"))
-    names = ["xdev_ext_mech_frames_move", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
+    names = ["xdev_ext_mech_pool_frame_state", "xdev_ext_mech_frames_release",
+             "xdev_ext_mech_frames_move", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
              "xdev_ext_mech_batch_ticket", "xdev_ext_mech_batch_queue",
              "xdev_ext_mech_sync_for_cpu", "xdev_ext_mech_life_undo",
              "xdev_ext_mech_batch_acquire", "xdev_ext_mech_batch_completion_claim",
@@ -60,6 +63,11 @@ def generate():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--json-output", type=Path,
+                        help="write observed host-fixture counters and scope as JSON")
+    args = parser.parse_args()
+    results = []
     with tempfile.TemporaryDirectory(prefix="fanout-core-") as tmp:
         tmp = Path(tmp)
         source = tmp / "probe.c"
@@ -72,7 +80,9 @@ def main():
         subprocess.run(command, check=True)
         failed = 0
         cases = ("parallel", "reverse", "inline", "duplicate", "late", "eagain",
-                 "fail", "stop", "quarantine", "same-class", "dependent")
+                 "fail", "fail-reverse", "delay", "delay-reverse", "reuse",
+                 "late-error", "late-error-reverse",
+                 "stop", "quarantine", "same-class", "dependent")
         print("TAP version 13", flush=True)
         print("1.." + str(len(cases)), flush=True)
         for i, case in enumerate(cases, 1):
@@ -80,6 +90,19 @@ def main():
             print(("not ok" if run.returncode else "ok") + f" {i} - {case}", flush=True)
             print(run.stdout + run.stderr, end="", flush=True)
             failed += bool(run.returncode)
+            records = [json.loads(line.removeprefix("# ")) for line in run.stdout.splitlines()
+                       if line.startswith('# {')]
+            results.append({"case": case, "passed": run.returncode == 0,
+                            "returncode": run.returncode,
+                            "observed": records[-1] if records else None,
+                            "diagnostic": run.stderr})
+        if args.json_output:
+            args.json_output.write_text(json.dumps({
+                "schema": "xdev_ext.fanout_scheduler.v1",
+                "scope": "host-extracted-production-core-with-fake-device-callbacks",
+                "real_dma": False, "cases": results,
+                "passed": not failed,
+            }, indent=2) + "\n")
         return bool(failed)
 
 
