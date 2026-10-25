@@ -216,6 +216,30 @@ static void test_rings(void)
 	EXPECT_EQ(xdev_ext_user_ring_room(1, 0xffffffffU, 8), 6, "room across index wrap");
 }
 
+/* ->submit with a full ready ring: retry, bounded by one deadline. */
+static void test_full_wait(void)
+{
+	unsigned long since = 0;
+	bool full = false;
+
+	EXPECT_EQ(xdev_ext_user_full_wait(1, &full, &since, 1000, 50), 0, "room: hand out");
+	EXPECT_EQ(full, 0, "room: not waiting");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 1000, 50), -EAGAIN, "first refusal: retry");
+	EXPECT_EQ(full && since == 1000, 1, "first refusal starts the wait");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 1049, 50), -EAGAIN, "one jiffy before the deadline: retry");
+	EXPECT_EQ(since, 1000, "a later refusal keeps the start");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 1050, 50), -ETIMEDOUT, "full for one deadline: fail");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 1051, 50), -ETIMEDOUT, "still full: the next batch fails too");
+	EXPECT_EQ(xdev_ext_user_full_wait(2, &full, &since, 1052, 50), 0, "room again: hand out");
+	EXPECT_EQ(full, 0, "room ends the wait");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 1053, 50), -EAGAIN, "a new full period starts over");
+	EXPECT_EQ(since, 1053, "new start");
+	since = (unsigned long)-10;
+	full = true;
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 30, 50), -EAGAIN, "across jiffies wrap: 40 < 50");
+	EXPECT_EQ(xdev_ext_user_full_wait(0, &full, &since, 40, 50), -ETIMEDOUT, "across jiffies wrap: 50");
+}
+
 static void test_done_window(void)
 {
 	__u32 cons;
@@ -411,6 +435,7 @@ int main(void)
 	test_request();
 	test_layout();
 	test_rings();
+	test_full_wait();
 	test_done_window();
 	test_status_and_length();
 	test_stage();

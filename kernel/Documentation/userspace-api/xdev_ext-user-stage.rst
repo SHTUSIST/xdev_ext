@@ -150,12 +150,23 @@ Kernel, handing batch *b* to the user thread (in ``->submit``, on the
 session worker):
 
 1. If ``ready_prod - ready_cons`` (``ready_cons`` read once from user memory)
-   is not smaller than ``entries``, the ring is full and the submit is
-   refused with ``-ENOBUFS``; nothing was handed out and the batch aborts. A
-   user thread that consumes ready entries never sees this: at most ``depth``
-   batches are held at a time.
+   is not smaller than ``entries``, the ring is full and nothing is handed
+   out. At most ``depth`` batches are held at a time, so a full ring means the
+   user thread has not yet read the entries of batches that were cancelled
+   (for example at their deadline). The submit is refused with ``-EAGAIN``
+   and the batch waits on the core's retry path, which submits it again one
+   jiffy later; it is handed out as soon as the user thread has read an
+   entry. When the ring has stayed full for one deadline (``arg0``) since the
+   first refused submit, the submit is refused with ``-ETIMEDOUT`` instead,
+   STATS counts one ``timeouts`` and the batch aborts, as a held batch does
+   at its deadline; later batches fail the same way until the user thread
+   reads an entry. STOP and the release of the user stage fd end the wait as
+   for every retried batch: it aborts with the session's stop reason, or with
+   ``-ENODEV`` when it reaches ``->submit`` of the dead stage first.
 2. Write the slot table entry, then the ready entry, then
-   ``smp_store_release(&ready_prod, ready_prod + 1)``.
+   ``smp_store_release(&ready_prod, ready_prod + 1)``. The slot's ``ticket``
+   is set to 0 when the batch that held it before left the stage, and
+   ``smp_wmb()`` orders that store before the new frame descriptions.
 3. ``smp_mb()``; if ``user_flags & XDEV_EXT_USER_F_SLEEPING`` and an eventfd
    was given, signal it.
 
@@ -251,7 +262,8 @@ held batch, so the session worker runs it again then. A held batch is
 cancelled (``xdev_ext_mech_batch_complete_cancelled()``) when:
 
 * its deadline passed: error ``-ETIMEDOUT``, and STATS counts one
-  ``timeouts``;
+  ``timeouts`` (a batch that never got a place in a full ready ring fails the
+  same way, section "Ring protocol and memory order");
 * the session no longer admits (STOP, an error stop, a retracted program
   generation, a sequestered batch): error ``-ESHUTDOWN``;
 * the stage is dead: the user stage fd was released (below), error

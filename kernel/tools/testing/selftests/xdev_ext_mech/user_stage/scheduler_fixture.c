@@ -22,6 +22,7 @@ typedef __s64 s64;
 #define smp_store_release(p,v) __atomic_store_n(p,v,__ATOMIC_RELEASE)
 #define smp_load_acquire(p) __atomic_load_n(p,__ATOMIC_ACQUIRE)
 #define smp_mb() __sync_synchronize()
+#define smp_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
 #define time_after_eq(a,b) ((long)((a)-(b)) >= 0)
 #define list_empty(h) ((h)->next==(h))
 #define list_for_each_entry_safe(p,n,h,m) \
@@ -226,7 +227,7 @@ static int exercise(const char*mode){
  bool varlen=!strcmp(mode,"varlen");
  s64 delta=!strcmp(mode,"complete")||!strcmp(mode,"badlen")?4:0;
 
- setup(!strcmp(mode,"full")?1:2,!strcmp(mode,"full")?1:2,delta,varlen);
+ setup(!strncmp(mode,"full",4)?1:2,!strncmp(mode,"full",4)?1:2,delta,varlen);
  if(!strcmp(mode,"sleep"))us->hdr->user_flags=XDEV_EXT_USER_F_SLEEPING;
  b=start(0,4092);
  REQUIRE(b,"the producer stage ran");
@@ -324,18 +325,48 @@ static int exercise(const char*mode){
   r=take();
   post(1,r.ticket,7);progress();drain();
   CHECK(ends==2&&end_err==-EPROTO&&s->cnt[XDEV_EXT_MECH_CNT_PROTOCOL_ERR]==1,"a positive status is -EPROTO");
- }else if(!strcmp(mode,"full")){
-  /* The user thread never consumes ready entries; after the deadline the
-   * single-entry ring is still full. */
+ }else if(!strcmp(mode,"full")||!strcmp(mode,"full-timeout")||!strcmp(mode,"full-stop")){
+  /* The user thread has not consumed the ready entry of a batch cancelled
+   * at its deadline; with entries == depth the ring is still full.  The
+   * next batch waits on the core's retry path instead of aborting. */
   us->hdr->ready_cons=0;
   jiffies+=TIMEOUT;progress();drain();
   CHECK(ends==1&&end_err==-ETIMEDOUT,"first batch cancelled");
   accepts[0]=0;
   b=start(0,4092);
-  CHECK(!b||us->nr_held==0,"no second hand-out into a full ring");
-  CHECK(ends==2&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ENOBUFS,"a full ready ring refuses the submit with -ENOBUFS");
-  CHECK(us->hdr->ready_prod==1,"no ready entry overwritten");
-  CHECK(custody[0]==XDEV_EXT_MECH_F_K_FREE&&custody[1]==XDEV_EXT_MECH_F_K_FREE,"refused batch frames went back");
+  REQUIRE(b,"second batch reached the USER stage");
+  CHECK(ends==1,"a full ready ring does not abort the batch");
+  CHECK(us->nr_held==0&&us->hdr->ready_prod==1,"no second hand-out, no ready entry overwritten");
+  CHECK(retry_arms==1&&!list_empty(&s->retry),"the refused batch waits on the retry path");
+  CHECK(custody[0]==XDEV_EXT_MECH_F_HELD&&custody[1]==XDEV_EXT_MECH_F_HELD,"the waiting batch keeps its frames");
+  CHECK(xdev_ext_mech_life_phase(&life[0])==XDEV_EXT_MECH_L_READY,"its frames are READY again for the retry");
+  jiffies+=1;xdev_ext_mech_retry_work(&s->retry_work.work);
+  CHECK(ends==1&&us->nr_held==0&&retry_arms==2,"still full one jiffy later: retried again");
+  if(!strcmp(mode,"full")){
+   us->hdr->ready_cons=1;  /* the user thread reads the stale entry */
+   xdev_ext_mech_retry_work(&s->retry_work.work);
+   REQUIRE(us->nr_held==1&&us->held[0].b==b,"room in the ring: the retry hands the batch out");
+   CHECK(us->hdr->ready_prod==2&&list_empty(&s->retry),"one new ready entry, nothing left to retry");
+   r=take();
+   CHECK(r.ticket==xdev_ext_mech_batch_ticket(b)&&us->slots[0].ticket==r.ticket,"the new entry carries the new ticket");
+   post(0,r.ticket,0);progress();drain();
+   REQUIRE(accepts[2]==1&&accepted[2]==b,"the retried batch completes to the next stage");
+   callback(2,0);drain();
+   CHECK(ends==2&&end_how==XDEV_EXT_MECH_END_DONE,"batch done");
+  }else if(!strcmp(mode,"full-timeout")){
+   /* A user thread that never reads: the wait ends at one deadline. */
+   jiffies+=TIMEOUT-2;xdev_ext_mech_retry_work(&s->retry_work.work);
+   CHECK(ends==1,"one jiffy before the deadline the batch still waits");
+   jiffies+=1;xdev_ext_mech_retry_work(&s->retry_work.work);
+   CHECK(ends==2&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ETIMEDOUT,"a ring full for a whole deadline aborts the batch with -ETIMEDOUT");
+   CHECK(s->cnt[XDEV_EXT_MECH_CNT_TIMEOUTS]==2&&list_empty(&s->retry),"counted as a timeout, nothing left to retry");
+   CHECK(us->hdr->ready_prod==1,"no ready entry overwritten");
+  }else{
+   xdev_ext_mech_sess_stop(&s->ss);
+   xdev_ext_mech_retry_work(&s->retry_work.work);
+   CHECK(ends==2&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESHUTDOWN,"STOP ends the waiting batch with the stop reason");
+   CHECK(list_empty(&s->retry)&&us->hdr->ready_prod==1,"nothing left to retry, nothing handed out");
+  }
  }else if(!strcmp(mode,"multi")){
   struct xdev_ext_mech_batch*b2;
   struct xdev_ext_user_ready r2;

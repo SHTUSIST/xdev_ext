@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("KERNEL_SRC", next(p for p in HERE.parents
             if (p / "io_uring/xdev_ext_mech.c").is_file())))
 CASES = ("complete", "sleep", "varlen", "deadline", "stop", "dead", "stale",
-         "badlen", "status", "full", "multi", "kick-race")
+         "badlen", "status", "full", "full-timeout", "full-stop", "multi", "kick-race")
 
 
 def definition(text, name, structure=False):

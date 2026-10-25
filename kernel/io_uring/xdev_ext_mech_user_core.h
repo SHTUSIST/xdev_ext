@@ -86,6 +86,27 @@ static inline __u32 xdev_ext_user_ring_room(__u32 prod, __u32 cons, __u32 entrie
 }
 
 /*
+ * ->submit, @room places left in the ready ring: 0 to hand the batch out.
+ * A full ring is -EAGAIN, which the core retries, until the ring stayed full
+ * for @timeout jiffies since the first refusal (*@since, *@full); then
+ * -ETIMEDOUT fails the batch, as a held batch fails at its deadline.  Only
+ * the user thread frees places, so room ends the wait.
+ */
+static inline int xdev_ext_user_full_wait(__u32 room, bool *full, unsigned long *since,
+					  unsigned long now, unsigned long timeout)
+{
+	if (room) {
+		*full = false;
+		return 0;
+	}
+	if (!*full) {
+		*full = true;
+		*since = now;
+	}
+	return (long)(now - *since) >= (long)timeout ? -ETIMEDOUT : -EAGAIN;
+}
+
+/*
  * Kernel consumer of a ring user space produces: how many entries to read
  * at *@cons.  A producer more than @entries ahead overwrote entries: read the
  * newest @entries.  One behind the consumer is garbage: read none.  Both

@@ -75,10 +75,11 @@ struct xdev_ext_user_stage {
 	u64 staged_arg;
 	s64 delta;
 	unsigned long timeout;			/* jiffies from submit to deadline */
+	unsigned long full_since;		/* jiffies of the first full-ring refusal */
 	u32 entries, depth, nr_held;
 	u32 ready_prod, done_cons;		/* the kernel's own indices */
 	u32 kflags;				/* the kernel's own copy of kernel_flags */
-	bool varlen, dead, stopped;
+	bool varlen, dead, stopped, full;
 	struct xdev_ext_user_held held[];	/* depth */
 };
 
@@ -166,10 +167,25 @@ static int xdev_ext_user_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_
 	h = &us->held[slot];
 	if (h->b)
 		return -EBUSY;
-	/* A consuming user thread never fills it: at most depth batches are held. */
-	if (!xdev_ext_user_ring_room(us->ready_prod, READ_ONCE(us->hdr->ready_cons), us->entries))
-		return -ENOBUFS;
+	/*
+	 * Entries of batches cancelled before the user thread read them still
+	 * fill the ring.  -EAGAIN puts the batch on the core's retry path; a
+	 * ring full for a whole deadline fails it (-ETIMEDOUT), and STOP or a
+	 * dead stage ends the retry through the checks above.
+	 */
+	err = xdev_ext_user_full_wait(xdev_ext_user_ring_room(us->ready_prod,
+							      READ_ONCE(us->hdr->ready_cons),
+							      us->entries),
+				      &us->full, &us->full_since, jiffies, us->timeout);
+	if (err) {
+		if (err == -ETIMEDOUT)
+			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_TIMEOUTS, 1);
+		return err;
+	}
 	ss = &us->slots[slot];
+	/* An earlier holder's ticket 0 before these frames; pairs with the
+	 * user thread's second read of the ticket after copying them. */
+	smp_wmb();
 	for (i = 0; i < nr; i++) {
 		err = xdev_ext_mech_batch_frame(b, i, &f);
 		if (err)
