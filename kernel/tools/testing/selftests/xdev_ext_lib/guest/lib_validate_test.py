@@ -34,14 +34,14 @@ def passing_log():
                        f"duplicates=0 bad=0 foreign=0 expected={g * f}")
             out.append(f"XDEV_EXT_LIB_SCENARIO name={p['name']} tx_exit=0 rx_exit=0")
         else:
-            out.append(f"XDEV_EXT_LIB_RESULT api={p['api']} ret=-5 session=6 zero_copy={zc} "
-                       "wait_err=-5 nic_err=0 stop_err=0 retained=0")
-            out.append(f"XDEV_EXT_LIB_STATS api={p['api']} state=1 last_err=-22 batches_done=3 "
+            out.append(f"XDEV_EXT_LIB_RESULT api={p['api']} ret=-34 session=6 zero_copy={zc} "
+                       "wait_err=-34 nic_err=0 stop_err=-34 retained=0")
+            out.append(f"XDEV_EXT_LIB_STATS api={p['api']} state=1 last_err=-34 batches_done=0 "
                        "batches_abort=1 rejects=1 sequestered=0 timeouts=0 inflight=0 protocol_err=0 "
                        "submitted0=3 completed0=3 submitted1=3 completed1=3")
             out.append(f"XDEV_EXT_LIB_NIC api={p['api']} nic_copy_ops=0 nic_copy_bytes=0 "
                        "nic_zc_ops=18 nic_zc_bytes=24576")
-            out.append(f"XDEV_EXT_LIB_EXIT api={p['api']} ret=-5 (Input/output error)")
+            out.append(f"XDEV_EXT_LIB_EXIT api={p['api']} ret=-34 (Numerical result out of range)")
             out.append(f"XDEV_EXT_LIB_SCENARIO name={p['name']} tx_exit=1 rx_exit=none")
     out += ['XDEV_EXT_LIB_GUEST_EXIT=0', 'XDEV_EXT_LIB_DMESG_BEGIN', '[    0.0] ok',
             'XDEV_EXT_LIB_DMESG_END']
@@ -129,9 +129,12 @@ class OracleTest(unittest.TestCase):
     def test_negative_scenario(self):
         neg = [p for p in v.PLANS if p['expect'] == 'fail'][0]
         self.assertFails('negative', passing_log().replace(
-            f"XDEV_EXT_LIB_RESULT api={neg['api']} ret=-5", f"XDEV_EXT_LIB_RESULT api={neg['api']} ret=0"))
-        self.assertFails('negative', passing_log().replace('wait_err=-5 nic_err=0 stop_err=0 retained=0',
-                                                        'wait_err=-5 nic_err=0 stop_err=0 retained=1'))
+            f"XDEV_EXT_LIB_RESULT api={neg['api']} ret=-34", f"XDEV_EXT_LIB_RESULT api={neg['api']} ret=0"))
+        self.assertFails('negative', passing_log().replace('stop_err=-34 retained=0', 'stop_err=-34 retained=1'))
+        # STOP may return 0 or the session's own final error, nothing else.
+        self.verdict(passing_log().replace('stop_err=-34 retained=0', 'stop_err=0 retained=0'))
+        self.assertFails('negative', passing_log().replace('stop_err=-34 retained=0', 'stop_err=-5 retained=0'))
+        self.assertFails('negative', passing_log().replace('last_err=-34 batches_done=0', 'last_err=0 batches_done=0'))
 
     def test_missing_or_duplicate_scenario(self):
         log = passing_log()
@@ -140,6 +143,13 @@ class OracleTest(unittest.TestCase):
         line = f'XDEV_EXT_LIB_SCENARIO name={name} tx_exit=0 rx_exit=0'
         self.assertFails('scenario', log.replace(line, line + '\n' + line))
         self.assertFails('scenario', log.replace(line, line.replace('rx_exit=0', 'rx_exit=1')))
+
+    def test_every_scenario_reported(self):
+        log = passing_log().replace('inflight=0', 'inflight=1', 1)
+        report = v.scenario_report(log)
+        self.assertEqual(list(report), [p['name'] for p in v.PLANS])
+        self.assertIn('stats line', report[v.PLANS[0]['name']])
+        self.assertTrue(all(r == 'PASS' for r in list(report.values())[1:]))
 
     def test_guest_exit_and_debug(self):
         self.assertFails('guest exit', passing_log().replace('XDEV_EXT_LIB_GUEST_EXIT=0', 'XDEV_EXT_LIB_GUEST_EXIT=1'))

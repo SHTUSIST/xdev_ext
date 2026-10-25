@@ -675,6 +675,37 @@ static void test_stop_retained(void)
 	EXPECT_EQ(open_fds(), fds);
 }
 
+/* STOP's other errors: the kernel released the session with its final error
+ * (STATS -ENOENT), or kept it (any snapshot): only the probe tells which. */
+static void test_stop_other_error(void)
+{
+	int fds = open_fds();
+	struct xdev_ext_session *s = created(16);
+
+	queue_ret(XDEV_EXT_MECH_OP_STOP, -ERANGE);
+	queue_ret(XDEV_EXT_MECH_OP_STATS, -ENOENT);
+	EXPECT_EQ(xdev_ext_session_stop(s), -ERANGE);
+	EXPECT_EQ(xdev_ext_session_retained(s), 0);
+	EXPECT_EQ(count_ops(XDEV_EXT_MECH_OP_STATS), 1);
+	EXPECT_EQ(xdev_ext_session_stop(s), 0);	/* released: nothing more to stop */
+	EXPECT_EQ(xdev_ext_session_close(s), 0);
+	EXPECT_EQ(count_ops(XDEV_EXT_MECH_OP_STOP), 1);
+	EXPECT_EQ(open_fds(), fds);
+
+	reset();
+	s = created(16);
+	queue_ret(XDEV_EXT_MECH_OP_STOP, -EIO);
+	stats_reply.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
+	EXPECT_EQ(xdev_ext_session_stop(s), -EIO);
+	EXPECT_EQ(xdev_ext_session_retained(s), 1);
+	EXPECT_EQ(xdev_ext_session_close(s), -EBUSY);
+	EXPECT_EQ(count_ops(XDEV_EXT_MECH_OP_STOP), 1);
+	EXPECT_EQ(open_fds(), fds + 2);
+	queue_ret(XDEV_EXT_MECH_OP_STATS, -ENOENT);
+	EXPECT_EQ(xdev_ext_session_close(s), 0);
+	EXPECT_EQ(open_fds(), fds);
+}
+
 static void test_close_stops_live(void)
 {
 	struct xdev_ext_session *s = created(16);
@@ -705,7 +736,7 @@ static void test_close_stops_live(void)
 
 int main(void)
 {
-	printf("TAP version 13\n1..14\n");
+	printf("TAP version 13\n1..15\n");
 	RUN(test_open_validation);
 	RUN(test_open_setup_failure);
 	RUN(test_open_iou_umem);
@@ -719,6 +750,7 @@ int main(void)
 	RUN(test_stop_released);
 	RUN(test_stop_eagain);
 	RUN(test_stop_retained);
+	RUN(test_stop_other_error);
 	RUN(test_close_stops_live);
 	printf("# checks=%u failures=%u\n", checks, failures);
 	return failures ? 1 : 0;

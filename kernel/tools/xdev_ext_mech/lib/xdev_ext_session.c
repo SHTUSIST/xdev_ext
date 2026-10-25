@@ -595,10 +595,23 @@ int xdev_ext_session_stop(struct xdev_ext_session *s)
 		/* Returning to user space lets this task's completions run. */
 		sys_usleep(1000);
 	}
-	if (!ret)
+	if (!ret) {
 		s->released = true;
-	else if (ret == -EBUSY)
+	} else if (ret == -EBUSY) {
 		s->retained = true;
+	} else if (ret != -EAGAIN) {
+		struct xdev_ext_mech_stats snap;
+
+		/*
+		 * The kernel returns the session's final error after a full
+		 * release, and an unbind error after quarantine.  Only STATS
+		 * tells them apart: -ENOENT once released.
+		 */
+		if (raw_stats(s, &snap) == -ENOENT)
+			s->released = true;
+		else
+			s->retained = true;
+	}
 	return ret;
 }
 

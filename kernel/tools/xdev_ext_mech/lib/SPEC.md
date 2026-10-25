@@ -210,7 +210,12 @@ attached programs; the caller later calls `xdev_ext_session_close()` on it.
   1000 times 1 ms apart, then `-EAGAIN` is returned and the session stays
   live. STOP returning 0 means released. `-EBUSY` means the kernel kept
   the session (drain bound passed with accepted commands in flight, or
-  quarantine/ZOMBIE): the handle becomes retained.
+  quarantine/ZOMBIE): the handle becomes retained. Any other error is
+  returned unchanged, but it alone does not say whether the session is
+  gone: the kernel returns the session's final error (`last_err`) after a
+  full release, and an unbind error after quarantining it. stop then
+  queries STATS: `-ENOENT` marks the handle released, anything else marks
+  it retained.
 - close on a live session issues stop first. On a retained handle, close
   queries STATS (which also finds sessions no longer listed on the ring):
   `-ENOENT` means the kernel released it, and close then frees everything

@@ -30,6 +30,9 @@ PLANS = (
     dict(name='oneshot-zc', api='oneshot', mode='zc', slba=2048, nlb=1024, groups=64,
          depth=16, group_bytes=8192, wire=270101, src_port=54321, dst_port=12345,
          dst_offset=0, expect='pass'),
+    dict(name='steps-zc', api='steps', mode='zc', slba=12288, nlb=336, groups=21,
+         depth=4, group_bytes=8192, wire=270104, src_port=54324, dst_port=12348,
+         dst_offset=8 << 20, expect='pass'),
     dict(name='steps-copy', api='steps', mode='copy', slba=8192, nlb=592, groups=37,
          depth=8, group_bytes=8192, wire=270102, src_port=54322, dst_port=12346,
          dst_offset=4 << 20, expect='pass'),
@@ -113,45 +116,64 @@ def check_pass(lines, p):
 
 def check_fail(lines, p):
     r = fields(one(lines, f"XDEV_EXT_LIB_RESULT api={p['api']} ", f"{p['name']} negative result line"))
-    if int(r.get('ret', '0')) >= 0 or r.get('retained') != '0' or r.get('stop_err') != '0':
-        raise ValueError(f"{p['name']} negative result: {r}")
     s = fields(one(lines, f"XDEV_EXT_LIB_STATS api={p['api']} ", f"{p['name']} negative stats line"))
-    if s.get('inflight') != '0' or s.get('sequestered') != '0':
+    # The wait snapshot may precede the drain (inflight > 0); STOP then
+    # returns 0 or, after a full release, the session's final error.
+    if (int(r.get('ret', '0')) >= 0 or r.get('retained') != '0' or
+            r.get('stop_err') not in ('0', s.get('last_err'))):
+        raise ValueError(f"{p['name']} negative result: {r}")
+    if s.get('sequestered') != '0' or s.get('last_err') == '0':
         raise ValueError(f"{p['name']} negative stats: {s}")
 
 
 def check_log(text):
     # Each scenario's lines are the span after the previous scenario marker.
-    lines = text.splitlines()
-    names, start = [], 0
-    for p in PLANS:
-        mark = [i for i, line in enumerate(lines) if line.startswith(f"XDEV_EXT_LIB_SCENARIO name={p['name']} ")]
-        if len(mark) != 1 or mark[0] < start:
-            raise ValueError(f"{p['name']} scenario marker: {len(mark)}")
-        span, start = lines[start:mark[0]], mark[0] + 1
-        m = fields(lines[mark[0]])
-        if p['expect'] == 'pass':
-            if m.get('tx_exit') != '0' or m.get('rx_exit') != '0':
-                raise ValueError(f"{p['name']} scenario exits: {m}")
-            check_pass(span, p)
-            g, f = p['groups'], frames_per_group(p)
-            rx = fields(one(span, 'XDEV_EXT_LIB_RX result=', f"{p['name']} receiver line"))
-            want = dict(result='complete', groups=str(g), unique=str(g * f), duplicates='0',
-                        bad='0', expected=str(g * f))
-            if any(rx.get(k) != val for k, val in want.items()):
-                raise ValueError(f"{p['name']} receiver line: {rx}")
-        else:
-            if m.get('tx_exit') in (None, '0') or m.get('rx_exit') != 'none':
-                raise ValueError(f"{p['name']} negative scenario exits: {m}")
-            check_fail(span, p)
-        names.append(p['name'])
+    report = scenario_report(text)
+    errors = [e for e in report.values() if e != 'PASS']
+    if errors:
+        raise ValueError('; '.join(errors))
     exits = re.findall(r'^XDEV_EXT_LIB_GUEST_EXIT=(\d+)$', text, re.M)
     if exits != ['0']:
         raise ValueError(f'guest exit status {exits}')
     reports = debug_reports(text)
     if any(reports.values()):
         raise ValueError('kernel debug diagnostic: ' + json.dumps(reports, sort_keys=True))
-    return dict(scenarios=names, **{'debug_' + k: n for k, n in reports.items()})
+    return dict(scenarios=list(report), **{'debug_' + k: n for k, n in reports.items()})
+
+
+def scenario_report(text):
+    """Every scenario's verdict, so one failure does not hide the others."""
+    lines = text.splitlines()
+    report, start = {}, 0
+    for p in PLANS:
+        mark = [i for i, line in enumerate(lines) if line.startswith(f"XDEV_EXT_LIB_SCENARIO name={p['name']} ")]
+        if len(mark) != 1 or mark[0] < start:
+            report[p['name']] = f"{p['name']} scenario marker: {len(mark)}"
+            continue
+        span, start = lines[start:mark[0]], mark[0] + 1
+        try:
+            check_scenario(span, fields(lines[mark[0]]), p)
+            report[p['name']] = 'PASS'
+        except ValueError as error:
+            report[p['name']] = str(error)
+    return report
+
+
+def check_scenario(span, m, p):
+    if p['expect'] == 'pass':
+        if m.get('tx_exit') != '0' or m.get('rx_exit') != '0':
+            raise ValueError(f"{p['name']} scenario exits: {m}")
+        check_pass(span, p)
+        g, f = p['groups'], frames_per_group(p)
+        rx = fields(one(span, 'XDEV_EXT_LIB_RX result=', f"{p['name']} receiver line"))
+        want = dict(result='complete', groups=str(g), unique=str(g * f), duplicates='0',
+                    bad='0', expected=str(g * f))
+        if any(rx.get(k) != val for k, val in want.items()):
+            raise ValueError(f"{p['name']} receiver line: {rx}")
+    else:
+        if m.get('tx_exit') in (None, '0') or m.get('rx_exit') != 'none':
+            raise ValueError(f"{p['name']} negative scenario exits: {m}")
+        check_fail(span, p)
 
 
 def check_images(source_after, dest_after):
@@ -196,8 +218,10 @@ def main():
         sys.stdout.write(shell_plan())
         return 0
     result = dict(verdict='FAIL')
+    log_text = args.log.read_text(errors='replace')
+    result['scenario_results'] = scenario_report(log_text)
     try:
-        result.update(check(args.log.read_text(errors='replace'), args.source.read_bytes(),
+        result.update(check(log_text, args.source.read_bytes(),
                             args.dest.read_bytes()))
         result['verdict'] = 'PASS'
     except ValueError as error:
