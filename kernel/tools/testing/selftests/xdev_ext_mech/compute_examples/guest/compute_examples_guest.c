@@ -290,10 +290,16 @@ static int stats(struct session *s, struct xdev_ext_mech_stats *st)
 	return mech(s, XDEV_EXT_MECH_OP_STATS, (uintptr_t)st);
 }
 
-static void session_close(struct session *s)
+/*
+ * STOP, then release. STOP returns the session's first error after a full
+ * release; only STATS answering -ENOENT proves the session is gone. 0, or
+ * -EBUSY when the kernel still holds the session.
+ */
+static int session_close(struct session *s)
 {
+	struct xdev_ext_mech_stats st;
 	unsigned int tries;
-	int ret = 0;
+	int ret = 0, gone = 0;
 
 	if (s->id) {
 		for (tries = 0; tries < 1000; tries++) {
@@ -302,8 +308,10 @@ static void session_close(struct session *s)
 				break;
 			usleep(1000);
 		}
-		if (ret)
-			err_out("STOP: %s\n", strerror(-ret));
+		if (stats(s, &st) != -ENOENT) {
+			err_out("STOP: %s; the session was not released\n", strerror(-ret));
+			gone = -EBUSY;
+		}
 	}
 	if (s->ring >= 0)
 		close(s->ring);
@@ -313,6 +321,7 @@ static void session_close(struct session *s)
 		munmap(s->umem, (size_t)POOL_FRAMES * FRAME_SIZE);
 	memset(s, 0, sizeof(*s));
 	s->ring = s->efd = -1;
+	return gone;
 }
 
 static int session_open(struct session *s, const struct opts *o, const struct layout_arg *la)
@@ -551,7 +560,8 @@ out:
 	if (ret)
 		err_out("layout seg %u group %u hdr %u: %s\n", la->seg, la->group, la->hdr,
 			strerror(-ret));
-	session_close(&s);
+	if (session_close(&s) && !ret)
+		ret = -EBUSY;
 	return ret;
 }
 
