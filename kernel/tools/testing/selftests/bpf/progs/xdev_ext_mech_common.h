@@ -19,11 +19,14 @@ struct name {								\
 	__s32 (*prepare)(const struct xdev_ext_mech_ctx *ctx);		\
 	__s32 (*build)(const struct xdev_ext_mech_ctx *ctx);			\
 	__s32 (*complete)(const struct xdev_ext_mech_ctx *ctx);		\
+	/* only the CPU type accepts a program here */			\
+	__s32 (*compute)(const struct xdev_ext_mech_ctx *ctx);		\
 } __attribute__((preserve_access_index))
 
 XDEV_EXT_MECH_TEST_OPS(xdev_ext_nvme_mech_ops);
 XDEV_EXT_MECH_TEST_OPS(xdev_ext_afxdp_mech_ops);
 XDEV_EXT_MECH_TEST_OPS(xdev_ext_ce_mech_ops);
+XDEV_EXT_MECH_TEST_OPS(xdev_ext_cpu_mech_ops);
 
 /*
  * Views are valid for the running callback only.  rdonly_buf_size and
@@ -47,6 +50,12 @@ extern __u8 *bpf_xdev_ext_afxdp_state(const struct xdev_ext_mech_ctx *ctx,
                                  const __u64 rdwr_buf_size) __ksym;
 extern int bpf_xdev_ext_afxdp_hold(const struct xdev_ext_mech_ctx *ctx, __u64 key,
 			      __u32 pos, __u32 span_off, __u32 span_len) __ksym;
+/* CPU compute only (Documentation/userspace-api/xdev_ext-compute.rst). */
+extern __u32 bpf_xdev_ext_frame_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos) __ksym;
+extern __u8 *bpf_xdev_ext_frame_rw(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+			      __u32 off, const __u64 rdwr_buf_size) __ksym;
+extern int bpf_xdev_ext_frame_set_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+				 __u32 len) __ksym;
 
 /* The 64-byte NVMe read/write SQE (struct nvme_rw_command), little endian. */
 struct xdev_ext_mech_nvme_rw {

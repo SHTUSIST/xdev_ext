@@ -13,6 +13,13 @@
 #include "xdev_ext_mech_binding_loads.skel.h"
 #include "xdev_ext_mech_ce.skel.h"
 #include "xdev_ext_mech_fail_binding_calls_mech.skel.h"
+#include "xdev_ext_mech_fail_compute_desc.skel.h"
+#include "xdev_ext_mech_fail_compute_rw_build.skel.h"
+#include "xdev_ext_mech_fail_compute_set_len_complete.skel.h"
+#include "xdev_ext_mech_fail_compute_sleepable.skel.h"
+#include "xdev_ext_mech_fail_compute_view_past.skel.h"
+#include "xdev_ext_mech_fail_compute_view_size.skel.h"
+#include "xdev_ext_mech_fail_compute_wrong_class.skel.h"
 #include "xdev_ext_mech_fail_desc_complete.skel.h"
 #include "xdev_ext_mech_fail_dma_desc_complete.skel.h"
 #include "xdev_ext_mech_fail_dma_wrong_class_hold.skel.h"
@@ -998,5 +1005,12 @@ void serial_test_xdev_ext_mech(void)
 	RUN_TESTS(xdev_ext_mech_fail_wrong_class_hold);
 	RUN_TESTS(xdev_ext_mech_fail_forged_ctx);
 	RUN_TESTS(xdev_ext_mech_fail_frame_write);
+	RUN_TESTS(xdev_ext_mech_fail_compute_desc);
+	RUN_TESTS(xdev_ext_mech_fail_compute_rw_build);
+	RUN_TESTS(xdev_ext_mech_fail_compute_set_len_complete);
+	RUN_TESTS(xdev_ext_mech_fail_compute_sleepable);
+	RUN_TESTS(xdev_ext_mech_fail_compute_view_past);
+	RUN_TESTS(xdev_ext_mech_fail_compute_view_size);
+	RUN_TESTS(xdev_ext_mech_fail_compute_wrong_class);
 	RUN_TESTS(xdev_ext_mech_binding_loads);
 }

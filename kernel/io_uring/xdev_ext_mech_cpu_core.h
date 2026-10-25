@@ -29,6 +29,12 @@ static inline bool xdev_ext_mech_cpu_xform_variable(__u32 xform)
  return xform == XDEV_EXT_CPU_XFORM_DEFLATE || xform == XDEV_EXT_CPU_XFORM_INFLATE;
 }
 
+/* Run by the CPU program's compute member, never by the code below. */
+static inline bool xdev_ext_mech_cpu_xform_bpf(__u32 xform)
+{
+ return xform == XDEV_EXT_CPU_XFORM_BPF;
+}
+
 static inline int xdev_ext_mech_cpu_len_delta(__u32 xform, __u64 param, __s64 *delta)
 {
  __s64 d;
@@ -45,6 +51,13 @@ static inline int xdev_ext_mech_cpu_len_delta(__u32 xform, __u64 param, __s64 *d
   return 0;
  case XDEV_EXT_CPU_XFORM_XXH64_APPEND: *delta = 8; return 0;
  case XDEV_EXT_CPU_XFORM_SHA256_APPEND: d = 32; break;
+ case XDEV_EXT_CPU_XFORM_BPF:
+  /* param is the declared change itself, in two's complement. */
+  if ((__s64)param < -(__s64)XDEV_EXT_CPU_BPF_DELTA_MAX ||
+      (__s64)param > (__s64)XDEV_EXT_CPU_BPF_DELTA_MAX)
+   return -EINVAL;
+  *delta = (__s64)param;
+  return 0;
  default: return -EINVAL;
  }
  if (param)
@@ -67,6 +80,8 @@ static inline int xdev_ext_mech_cpu_out_len(__u32 xform, __u64 param,
      (xform == XDEV_EXT_CPU_XFORM_PARSE_STRIP && valid_len < param))
   return -EBADMSG;
  out = (__s64)valid_len + delta;
+ if (out < 0)
+  return -EBADMSG;
  if (out > cap)
   return -EMSGSIZE;
  *out_len = (__u32)out;
@@ -83,8 +98,11 @@ static inline int xdev_ext_mech_cpu_apply(const struct xdev_ext_mech_cpu_prims *
 {
  __u32 out, crc = 0, i;
  __u64 hash;
- int err = xdev_ext_mech_cpu_out_len(xform, param, valid_len, cap, &out);
+ int err;
 
+ if (!xdev_ext_mech_cpu_xform_fixed(xform))
+  return -EINVAL;
+ err = xdev_ext_mech_cpu_out_len(xform, param, valid_len, cap, &out);
  if (err)
   return err;
  if (!p || !span)
@@ -152,5 +170,30 @@ static inline int xdev_ext_mech_cpu_desc_check(const struct xdev_ext_cpu_desc *d
      xdev_ext_mech_cpu_len_delta(d->xform, d->param, &selected) || expected != selected)
   return -EINVAL;
  return 0;
+}
+
+/*
+ * BPF compute kfunc bounds (Documentation/userspace-api/xdev_ext-compute.rst).
+ * A writable view [off, off + size) counts from the frame's first valid byte
+ * and must lie inside the capacity, frame_size - data_off.
+ */
+static inline bool xdev_ext_mech_compute_view_ok(__u32 data_off, __u32 frame_size,
+ __u32 off, __u64 size)
+{
+ __u64 cap;
+
+ if (data_off >= frame_size || !size)
+  return false;
+ cap = (__u64)frame_size - data_off;
+ return off < cap && size <= cap - off;
+}
+
+/* The only output length compute may record: valid_len + delta, within cap. */
+static inline bool xdev_ext_mech_compute_len_ok(__u32 valid_len, __s64 delta,
+ __u32 cap, __u32 len)
+{
+ __s64 want = (__s64)valid_len + delta;
+
+ return valid_len <= cap && want >= 0 && want <= (__s64)cap && (__s64)len == want;
 }
 #endif

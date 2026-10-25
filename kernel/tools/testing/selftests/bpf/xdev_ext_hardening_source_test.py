@@ -24,14 +24,27 @@ MECH_NEGATIVES = {
         "calling kernel function bpf_xdev_ext_afxdp_hold is not allowed",
     "forged_ctx": "R1 must be referenced or trusted",
     "frame_write": "cannot write into rdonly_mem",
+    # CPU class BPF compute (Documentation/userspace-api/xdev_ext-compute.rst).
+    "compute_rw_build": "calling kernel function bpf_xdev_ext_frame_rw is not allowed",
+    "compute_set_len_complete":
+        "calling kernel function bpf_xdev_ext_frame_set_len is not allowed",
+    "compute_view_size": "R4 is not a const",
+    "compute_view_past": "invalid access to memory, mem_size=4 off=4 size=1",
+    "compute_wrong_class":
+        "attach to unsupported member compute of struct xdev_ext_nvme_mech_ops",
+    "compute_sleepable":
+        "attach to unsupported member compute of struct xdev_ext_cpu_mech_ops",
+    "compute_desc": "calling kernel function bpf_xdev_ext_desc is not allowed",
 }
 
 # Which mechanism kfuncs each member may call (plan section 2.3.4), plus the
-# two AF_XDP class kfuncs.  Positive programs must use exactly these.
+# AF_XDP class kfuncs and the three CPU compute kfuncs.  Positive programs
+# must use exactly these.
 MECH_KFUNCS = {
     "bpf_xdev_ext_info", "bpf_xdev_ext_desc", "bpf_xdev_ext_cqe", "bpf_xdev_ext_frame",
     "bpf_xdev_ext_frame_crc32c", "bpf_xdev_ext_crc32c", "bpf_xdev_ext_afxdp_hdr",
     "bpf_xdev_ext_afxdp_hold", "bpf_xdev_ext_afxdp_state",
+    "bpf_xdev_ext_frame_len", "bpf_xdev_ext_frame_rw", "bpf_xdev_ext_frame_set_len",
 }
 MECH_MEMBER_KFUNCS = {
     "prepare": {"bpf_xdev_ext_info", "bpf_xdev_ext_crc32c"},
@@ -39,10 +52,13 @@ MECH_MEMBER_KFUNCS = {
               "bpf_xdev_ext_frame_crc32c", "bpf_xdev_ext_crc32c"},
     "complete": {"bpf_xdev_ext_info", "bpf_xdev_ext_cqe", "bpf_xdev_ext_frame",
                  "bpf_xdev_ext_frame_crc32c", "bpf_xdev_ext_crc32c"},
+    "compute": {"bpf_xdev_ext_frame", "bpf_xdev_ext_frame_crc32c", "bpf_xdev_ext_crc32c"},
 }
 MECH_CLASS_KFUNCS = {
     ("afxdp", "build"): {"bpf_xdev_ext_afxdp_hdr"},
     ("afxdp", "complete"): {"bpf_xdev_ext_afxdp_hold", "bpf_xdev_ext_afxdp_state"},
+    ("cpu", "compute"): {"bpf_xdev_ext_frame_len", "bpf_xdev_ext_frame_rw",
+                         "bpf_xdev_ext_frame_set_len"},
 }
 
 

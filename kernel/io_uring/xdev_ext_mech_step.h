@@ -50,7 +50,8 @@ static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi
  if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
   if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
    return -EINVAL;
-  if (xdev_ext_mech_cpu_xform_fixed(u->arg0))
+  /* A BPF compute program changes the frame in place, like a fixed one. */
+  if (xdev_ext_mech_cpu_xform_fixed(u->arg0) || xdev_ext_mech_cpu_xform_bpf(u->arg0))
    return XDEV_EXT_MECH_ROLE_INPLACE;
   return xdev_ext_mech_cpu_xform_variable(u->arg0) ? XDEV_EXT_MECH_ROLE_TRANSFORM : -EINVAL;
  }

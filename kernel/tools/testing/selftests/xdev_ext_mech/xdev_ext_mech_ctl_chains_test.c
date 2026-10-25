@@ -136,6 +136,43 @@ static bool test_fanout_stages(void)
 	return true;
 }
 
+/* The BPF compute transform: named for cpu-chain, never judged by ctl. */
+static bool test_bpf_compute_chain(void)
+{
+#ifdef XDEV_EXT_CPU_BPF_DELTA_MAX
+	struct guarded g;
+	struct xdev_ext_mech_create c;
+	__u8 src[64], out[64];
+	__u32 x = 0, frames, len = 77;
+
+	CHECK(!xdev_ext_mech_ctl_xform_parse("bpf-compute", &x));
+	CHECK(x == XDEV_EXT_CPU_XFORM_BPF);
+	x = 77;
+	CHECK(xdev_ext_mech_ctl_xform_parse("bpf", &x) == -EINVAL && x == 77);
+	poison(&g);
+	CHECK(xdev_ext_mech_ctl_cpu_stages(g.st, 100001, 2048, 64, XDEV_EXT_CPU_XFORM_BPF, 0,
+					   XDEV_EXT_MECH_CLASS_NVME, 100002, 8192, 64) == 3);
+	CHECK(g.st[1].class_id == XDEV_EXT_MECH_CLASS_CPU && g.st[1].fd == -1 &&
+	      g.st[1].arg0 == XDEV_EXT_CPU_XFORM_BPF && !g.st[1].arg1 && !g.st[1].flags);
+	c = create_of(&g, 3, XDEV_EXT_MECH_POOL_IOU_UMEM);
+	CHECK(!xdev_ext_mech_create_check(&c, &frames));
+	/* A non-zero declared change cannot feed the fixed NVMe group. */
+	poison(&g);
+	CHECK(xdev_ext_mech_ctl_cpu_stages(g.st, 100001, 2048, 64, XDEV_EXT_CPU_XFORM_BPF, 4,
+					   XDEV_EXT_MECH_CLASS_NVME, 100002, 8192, 64) == 3);
+	c = create_of(&g, 3, XDEV_EXT_MECH_POOL_IOU_UMEM);
+	CHECK(xdev_ext_mech_create_check(&c, &frames) == -EOPNOTSUPP);
+	/* What a program computes is not known to ctl's byte oracle. */
+	memset(src, 1, sizeof(src));
+	CHECK(xdev_ext_mech_ctl_xform_expect(XDEV_EXT_CPU_XFORM_BPF, 0, 64, src, 64, out,
+					     sizeof(out), &len) == -EINVAL && len == 77);
+	return true;
+#else
+	fprintf(stderr, "missing API: XDEV_EXT_CPU_XFORM_BPF\n");
+	return false;
+#endif
+}
+
 static bool test_cpu_stages(void)
 {
 	struct guarded g;
@@ -330,6 +367,7 @@ int main(void)
 		{ "L7 ctl transform names", FN(test_xform_names) },
 		{ "L3 ctl fan-out stages pass CREATE", FN(test_fanout_stages) },
 		{ "L7 ctl CPU chain stages pass CREATE", FN(test_cpu_stages) },
+		{ "L7 ctl BPF compute chain name and stages", FN(test_bpf_compute_chain) },
 		{ "L7 ctl oracle agrees with independent oracles", FN(test_oracle_agrees) },
 		{ "L7 ctl oracle verification and parse", FN(test_oracle_verifies) },
 	};

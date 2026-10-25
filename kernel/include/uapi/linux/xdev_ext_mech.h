@@ -58,10 +58,15 @@ enum xdev_ext_cpu_xform {
  XDEV_EXT_CPU_XFORM_SHA256_APPEND = 7,
  XDEV_EXT_CPU_XFORM_DEFLATE = 8,
  XDEV_EXT_CPU_XFORM_INFLATE = 9,
- XDEV_EXT_CPU_XFORM_MAX = 10,
+ /* The CPU struct_ops program's compute member, once per batch; arg1 is the
+  * exact per-frame length change D (two's complement, |D| <= DELTA_MAX).
+  * See Documentation/userspace-api/xdev_ext-compute.rst. */
+ XDEV_EXT_CPU_XFORM_BPF = 10,
+ XDEV_EXT_CPU_XFORM_MAX = 11,
 };
 #define XDEV_EXT_CPU_PARSE_HDR_MIN 4U
 #define XDEV_EXT_CPU_PARSE_HDR_MAX 256U
+#define XDEV_EXT_CPU_BPF_DELTA_MAX 256U
 struct xdev_ext_cpu_desc {
  __u32 xform;
  __u32 flags;
@@ -80,6 +85,7 @@ enum xdev_ext_mech_member {
 	XDEV_EXT_MECH_MEMBER_PREPARE		= 1,	/* sleepable, optional */
 	XDEV_EXT_MECH_MEMBER_BUILD		= 2,
 	XDEV_EXT_MECH_MEMBER_COMPLETE	= 3,
+	XDEV_EXT_MECH_MEMBER_COMPUTE	= 4,	/* CPU class only, optional, never sleeps */
 };
 
 enum xdev_ext_mech_callsite {

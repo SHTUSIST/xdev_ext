@@ -802,6 +802,55 @@ static void test_return_values(void)
 	EXPECT_FALSE(illegal);
 }
 
+/*
+ * compute (CPU class only, worker, Documentation/userspace-api/xdev_ext-compute.rst):
+ * 0 accepts the batch, -1..-4095 is the batch error, anything else is a
+ * protocol error that fails the batch with -EPROTO.
+ */
+static void test_compute_return_values(void)
+{
+#ifdef XDEV_EXT_CPU_BPF_DELTA_MAX
+	static const __u32 classes[] = {
+		XDEV_EXT_MECH_CLASS_AFXDP, XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_CLASS_CE,
+		XDEV_EXT_MECH_CLASS_IAA, XDEV_EXT_MECH_CLASS_DMA, XDEV_EXT_MECH_CLASS_SOCKET,
+		XDEV_EXT_MECH_CLASS_NET, XDEV_EXT_MECH_CLASS_CPU,
+	};
+	static const __s32 rets[] = {
+		INT32_MIN, -4096, -4095, -EPROTO, -1, 0, 1, 2, 3, INT32_MAX,
+	};
+	__u32 c, site, r;
+	bool illegal;
+
+	EXPECT_EQ(XDEV_EXT_MECH_MEMBER_COMPUTE, 4);
+	for (c = 0; c < sizeof(classes) / sizeof(classes[0]); c++)
+		for (site = 0; site <= 6; site++)
+			for (r = 0; r < sizeof(rets) / sizeof(rets[0]); r++)
+				EXPECT_EQ(xdev_ext_mech_ret_legal(classes[c],
+					XDEV_EXT_MECH_MEMBER_COMPUTE, site, rets[r]),
+					  classes[c] == XDEV_EXT_MECH_CLASS_CPU &&
+					  site == XDEV_EXT_MECH_SITE_WORKER &&
+					  rets[r] <= 0 && rets[r] >= -4095);
+	EXPECT_EQ(xdev_ext_mech_ret_resolve(XDEV_EXT_MECH_CLASS_CPU, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				       XDEV_EXT_MECH_SITE_WORKER, 0, &illegal), 0);
+	EXPECT_FALSE(illegal);
+	EXPECT_EQ(xdev_ext_mech_ret_resolve(XDEV_EXT_MECH_CLASS_CPU, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				       XDEV_EXT_MECH_SITE_WORKER, -EBADMSG, &illegal), -EBADMSG);
+	EXPECT_FALSE(illegal);
+	EXPECT_EQ(xdev_ext_mech_ret_resolve(XDEV_EXT_MECH_CLASS_CPU, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				       XDEV_EXT_MECH_SITE_WORKER, 1, &illegal), -EPROTO);
+	EXPECT_TRUE(illegal);
+	EXPECT_EQ(xdev_ext_mech_ret_resolve(XDEV_EXT_MECH_CLASS_CPU, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				       XDEV_EXT_MECH_SITE_WORKER, -4096, &illegal), -EPROTO);
+	EXPECT_TRUE(illegal);
+	EXPECT_EQ(xdev_ext_mech_ret_resolve(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				       XDEV_EXT_MECH_SITE_WORKER, 0, &illegal), -EPROTO);
+	EXPECT_TRUE(illegal);
+#else
+	fprintf(stderr, "missing API: XDEV_EXT_MECH_MEMBER_COMPUTE (BPF compute callback)\n");
+	failures++;
+#endif
+}
+
 static void test_rx_resolve(void)
 {
 	bool proto, native;
@@ -1027,6 +1076,7 @@ int main(void)
 	test_session_rules();
 	test_quarantine();
 	test_return_values();
+	test_compute_return_values();
 	test_rx_resolve();
 	test_retry();
 	test_nxp_crc_convention();

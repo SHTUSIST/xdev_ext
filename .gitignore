@@ -1271,3 +1271,15 @@
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_nvme_nic.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_rx.c
+!/kernel/Documentation/userspace-api/xdev_ext-compute.rst
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/*.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/*.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/*.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/Makefile
+!/kernel/tools/testing/selftests/bpf/progs/xdev_ext_mech_fail_compute_*.c
+!/kernel/tools/testing/selftests/xdev_ext_integration/verifier/run_compute.sh

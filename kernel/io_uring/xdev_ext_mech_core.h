@@ -653,6 +653,7 @@ static inline void xdev_ext_mech_quarantine_add(struct xdev_ext_mech_quarantine 
  *            NVMe URING_CMD              DONE, ABORT
  *            AF_XDP RX_GENERIC/NATIVE    HOLD, PUBLISH, RECYCLE
  *            AF_XDP RX_HOLD_RESULT       HOLD, PUBLISH, RECYCLE (advisory)
+ *   compute  CPU WORKER                  0 or -errno (fails the batch)
  */
 static inline bool xdev_ext_mech_class_known(__u32 class_id)
 {
@@ -694,6 +695,10 @@ static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,
 		default:
 			return false;
 		}
+	case XDEV_EXT_MECH_MEMBER_COMPUTE:
+		return class_id == XDEV_EXT_MECH_CLASS_CPU &&
+		       callsite == XDEV_EXT_MECH_SITE_WORKER && ret <= 0 &&
+		       ret >= -XDEV_EXT_MECH_ERRNO_MAX;
 	default:
 		return false;
 	}
@@ -702,7 +707,7 @@ static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,
 /*
  * The return value C acts on: @ret when legal, otherwise the fail-closed
  * replacement (build/complete ABORT, RX PUBLISH, hold result RECYCLE,
- * prepare -EPROTO)
+ * prepare and compute -EPROTO)
  * with *@illegal set so the caller counts a protocol error.
  */
 static inline __s32 xdev_ext_mech_ret_resolve(__u32 class_id, __u32 member,
