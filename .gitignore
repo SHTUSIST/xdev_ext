@@ -1273,6 +1273,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/compute/*.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/*.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/*.h
