@@ -85,8 +85,27 @@ same_window() {
 	dd if="/dev/${dst}n1" of=/tmp/b bs=512 skip="$rx_slba" count="$nlb" 2>/dev/null
 	cmp /tmp/a /tmp/b
 }
+# A closed AF_XDP socket leaves its queue through deferred pool release, so a
+# bind right after the previous process exits can see -EBUSY: retry only that.
+refuse_create() {
+	reason=$1; shift
+	for try in $(seq 1 50); do
+		if $ctl nvme-nic "$@" --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
+			--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 --local-port 54321 \
+			--peer-port 12345 --groups "$groups" --depth "$depth" --group-bytes 8192 --timeout-ms 5000 \
+			>/tmp/refuse.log 2>&1; then
+			cat /tmp/refuse.log; echo "FAIL AF_XDP polling accepted: $reason"; return 1
+		fi
+		grep -q 'Device or resource busy' /tmp/refuse.log || break
+		sleep 0.2
+	done
+	grep -q 'Operation not supported' /tmp/refuse.log || { cat /tmp/refuse.log; echo "FAIL wrong refusal: $reason"; return 1; }
+	echo "XDEV_EXT_POLL_NIC_REFUSE=PASS reason=$reason create=-EOPNOTSUPP"
+	echo "# refusal $reason attempts=$try"
+}
 nic_pair() {
 	label=$1; shift
+	sleep 1	# let the previous sockets' deferred pool release finish
 	rx_ok=0
 	$ctl nic-nvme "$@" --ifname eth1 --dst-ng "/dev/ng${dst#nvme}n1" --slba "$rx_slba" --nlb "$nlb" \
 		--peer-mac 02:00:00:00:00:01 --local-ip 192.0.2.2 --peer-ip 192.0.2.1 \
@@ -116,21 +135,9 @@ nic_pair() {
 
 # Refusals: no NAPI interrupt deferral, or a copy-mode sender with nothing to poll.
 defer 0 0
-if $ctl nvme-nic --poll --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
-	--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 --local-port 54321 \
-	--peer-port 12345 --groups "$groups" --depth "$depth" --group-bytes 8192 --timeout-ms 5000 >/tmp/refuse.log 2>&1; then
-	cat /tmp/refuse.log; echo 'FAIL AF_XDP polling accepted without interrupt deferral'; exit 1
-fi
-grep -q 'Operation not supported' /tmp/refuse.log || { cat /tmp/refuse.log; echo 'FAIL wrong refusal'; exit 1; }
-echo 'XDEV_EXT_POLL_NIC_REFUSE=PASS reason=no-napi-deferral create=-EOPNOTSUPP'
+refuse_create no-napi-deferral --poll
 defer 2 200000
-if $ctl nvme-nic --poll --copy --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
-	--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 --local-port 54321 \
-	--peer-port 12345 --groups "$groups" --depth "$depth" --group-bytes 8192 --timeout-ms 5000 >/tmp/refuse.log 2>&1; then
-	cat /tmp/refuse.log; echo 'FAIL copy-mode AF_XDP transmit accepted for polling'; exit 1
-fi
-grep -q 'Operation not supported' /tmp/refuse.log || { cat /tmp/refuse.log; echo 'FAIL wrong copy refusal'; exit 1; }
-echo 'XDEV_EXT_POLL_NIC_REFUSE=PASS reason=copy-transmit create=-EOPNOTSUPP'
+refuse_create copy-transmit --poll --copy
 
 # Control without the bit: the busy-poll counter must not move.
 clear_window
