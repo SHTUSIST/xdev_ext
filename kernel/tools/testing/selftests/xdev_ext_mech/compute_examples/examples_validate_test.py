@@ -286,11 +286,43 @@ class Streams(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(ev.compare_runs('t', plan, fixed, bpf), [])
 
+    def test_refused_partial_writes(self):
+        """A refused fixed strip may keep earlier frames stripped; a check may not."""
+        plan = dict(self.plan, fixed=['parse-strip:4'], bpf=['parse-check:4'], input='parse:4',
+                    negatives=False, layouts=(('frames', 6, 12, 0, 1),), compare='strip:4')
+        good = (2).to_bytes(4, 'little') + b'pq'
+        bad = (3).to_bytes(4, 'little') + b'pq'
+        ins = [[good, bad]]
+        partial = [[good[4:] + good[2:], bad]]
+        args = dict(outcomes=[1], layout=(0, 0, 6, 12), input_kind='parse:4', negatives=0,
+                    last_errs=[-74])
+        errors, fixed = self.run_check('fixed', make_stream([(5, 4)], ins, partial, **args), plan)
+        self.assertEqual(errors, [])
+        errors, bpf = self.run_check('bpf', make_stream([(10, 0)], ins, ins, **args), plan)
+        self.assertEqual(errors, [])
+        self.assertEqual(ev.compare_runs('t', plan, fixed, bpf), [])
+        errors, _ = self.run_check('bpf', make_stream([(10, 0)], ins, partial, **args), plan)
+        self.assertTrue(any('changed' in e for e in errors), errors)
+
     def test_truncated_stream(self):
         ins, outs, args = self.sealed_pair()
         data = make_stream([(4, 0)], ins, outs, **args)
         with self.assertRaises(ValueError):
             ev.parse_stream(data[:-20])
+
+
+class Console(unittest.TestCase):
+    def test_kernel_reports(self):
+        self.assertEqual(ev.check_console('XDEV_EXT_EXAMPLES_GUEST=PASS\n'), [])
+        self.assertTrue(ev.check_console('[    1.0] BUG: KASAN: slab-out-of-bounds in x\n'))
+
+    def test_log_markers(self):
+        lines = ['XDEV_EXT_EXAMPLES_CASE=PASS name=' + c for c in ('verifier',) + tuple(ev.PLAN)]
+        lines += ['XDEV_EXT_EXAMPLE_VERIFIER_DONE objects=6 failed=0',
+                  'XDEV_EXT_EXAMPLES_GUEST=PASS', 'XDEV_EXT_EXAMPLES_GUEST_EXIT=0']
+        self.assertEqual(ev.check_log('\n'.join(lines)), [])
+        self.assertTrue(ev.check_log('\n'.join(lines[1:])))
+        self.assertTrue(ev.check_log('\n'.join(lines + ['XDEV_EXT_EXAMPLE_RUN out=x result=FAIL'])))
 
 
 class Verifier(unittest.TestCase):

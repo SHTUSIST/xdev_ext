@@ -83,7 +83,7 @@ struct rec_hdr {
 	__u32 corrupted;	/* the tool corrupted this input on purpose */
 	__u32 outcome;		/* 0 batch done, 1 batch aborted */
 	__s32 last_err;		/* session last_err after the batch */
-	__u32 stray;		/* chunk bytes changed outside the output span */
+	__u32 stray;		/* chunk bytes changed outside the frame's input and output */
 	__u32 in_len[MAX_FRAMES];
 	__u32 out_len[MAX_FRAMES];
 	/* in bytes of every frame, then out bytes of every frame */
@@ -470,7 +470,7 @@ static int one_batch(struct session *s, const struct opts *o, const struct layou
 	struct rec_hdr r = { .magic = REC_MAGIC, .spans = la->spans, .hdr_room = la->hdr,
 			     .seg_len = s->l.seg_len, .group_bytes = s->l.group_bytes,
 			     .nframes = n, .corrupted = corrupt };
-	__u32 idx[MAX_FRAMES], i, j;
+	__u32 idx[MAX_FRAMES], i, j, end;
 	int ret;
 
 	for (i = 0; i < n; i++) {
@@ -497,8 +497,13 @@ static int one_batch(struct session *s, const struct opts *o, const struct layou
 		if (out < 0 || out > FRAME_SIZE - la->hdr)
 			return -ERANGE;
 		r.out_len[i] = (__u32)out;
+		/*
+		 * Outside the bytes the frame held before or after: a shorter
+		 * output leaves its old tail, which is no longer frame data.
+		 */
+		end = la->hdr + (r.out_len[i] > lens[i] ? r.out_len[i] : lens[i]);
 		for (j = 0; j < FRAME_SIZE; j++)
-			if ((j < la->hdr || j >= la->hdr + r.out_len[i]) && chunk[j] != FILL)
+			if ((j < la->hdr || j >= end) && chunk[j] != FILL)
 				r.stray++;
 	}
 	ret = write_all(f, &r, sizeof(r));

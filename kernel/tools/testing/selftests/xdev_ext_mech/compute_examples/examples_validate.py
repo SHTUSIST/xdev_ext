@@ -177,6 +177,15 @@ def apply(semantic, frame):
     raise ValueError('unknown semantic ' + semantic)
 
 
+# Transforms that write no payload byte, not even on the way to a refusal.
+WRITE_FREE = ('crc32c-check', 'crc32c-strip', 'parse-check')
+
+
+def write_free(semantics):
+    """True when no stage of the run may write a payload byte."""
+    return all(s.partition(':')[0] in WRITE_FREE for s in semantics)
+
+
 def expect_batch(semantics, frames):
     """Every stage over every frame, stage by stage: outputs, or None (aborted)."""
     for semantic in semantics:
@@ -273,7 +282,9 @@ def check_stream(name, mode, semantics, plan, head, records, end):
         if r['corrupted'] and want is not None:
             errors.append(f'{where}: a corrupted input the oracle accepts')
         if want is None:
-            if r['outcome'] != 1 or r['outputs'] != r['inputs']:
+            # A refused batch may keep partial writes of a writing transform
+            # (a failed batch is never retried); a write-free run changes nothing.
+            if r['outcome'] != 1 or (write_free(semantics) and r['outputs'] != r['inputs']):
                 errors.append(f'{where}: the oracle refuses this batch; outcome {r["outcome"]}, '
                               f'frames {"unchanged" if r["outputs"] == r["inputs"] else "changed"}')
             if r['last_err'] != -EBADMSG:
@@ -298,7 +309,12 @@ def compare_runs(name, plan, fixed, bpf):
         elif f['outcome'] != b['outcome'] or f['last_err'] != b['last_err']:
             errors.append(f'{name} record {i}: fixed outcome {f["outcome"]}/{f["last_err"]}, '
                           f'BPF {b["outcome"]}/{b["last_err"]}')
-        elif not hdr or f['outcome']:
+        elif f['outcome']:
+            # Refused in both runs: bytes compare only where neither run writes.
+            if write_free(plan['fixed']) and write_free(plan['bpf']) and \
+                    f['outputs'] != b['outputs']:
+                errors.append(f'{name} record {i}: refused batch, frames differ')
+        elif not hdr:
             if f['outputs'] != b['outputs']:
                 errors.append(f'{name} record {i}: output bytes differ')
         elif f['outputs'] != [o[hdr:] for o in b['outputs']]:
@@ -349,7 +365,7 @@ def parse_verifier(text):
 
 
 def check_console(text):
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'xdev_ext_integration'))
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'xdev_ext_integration'))
     from xdev_ext_mech_zc_debug import debug_reports
     counts = debug_reports(text)
     return [] if not any(counts.values()) else ['kernel diagnostic: ' + json.dumps(counts, sort_keys=True)]
