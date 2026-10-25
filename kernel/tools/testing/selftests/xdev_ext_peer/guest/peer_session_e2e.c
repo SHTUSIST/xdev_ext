@@ -6,11 +6,18 @@
  * is never a VRAM, GPU or performance result.  No timing is measured.
  *
  * Cases, all on one guest boot, each its own session on the same pool kind:
- *   reject-map  provider refuses the DMA map: no completion, no DMA, errno kept
+ *   reject-map  provider refuses the DMA map: no completion, no DMA, errno kept;
+ *               every batch of the START aborts and the session stays ACTIVE
  *   cli         the product controller xdev_ext_peer_chain --allocation-fd,
  *               frame 64 KiB, depth 1 (its fixed geometry)
  *   depth4      4 KiB frames, 2 frames per batch, depth 4 (8 of 16 frames
  *               in flight); a second CREATE on the claimed allocation is EBUSY
+ *   stop-inflight  STOP right after START while NVMe commands on the
+ *               allocation are accepted: STOP releases (0 or -ECANCELED, never
+ *               -EBUSY), mappings stay cached, each group is source or guard
+ *   kill-inflight  a child process holding the session is SIGKILLed in
+ *               flight: ring exit releases it, the claim returns, mappings
+ *               stay cached, each group is source or guard
  *   fd-release  32 KiB frames, depth 2; ring and allocation fds are closed
  *               without STOP, and every provider pin/map must still drain
  * The plan below is duplicated, not shared, by the host validator.
@@ -30,6 +37,7 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
+#include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #include <bpf/libbpf.h>
@@ -42,18 +50,23 @@
 #define DEST_GUARD 0x6b
 #define WAIT_MS 120000
 
+/* copies: NONE nothing reaches the destination, ALL every group is copied,
+ * PART each group is the source group or untouched guard (teardown in flight). */
+enum { NONE, ALL, PART };
 struct plan {
 	const char *name;
 	uint32_t frame, seg, group, depth;
 	uint64_t groups, src_slba, dst_slba;
-	bool copies;
+	int copies;
 };
 /* Sector ranges never overlap on either disk; source != destination offset. */
-static const struct plan REJECT = {"reject-map", 4096, 4096, 4096, 1, 4, 2048, 16384, false};
-static const struct plan CLI = {"cli", 65536, 16384, 16384, 1, 64, 2048, 4096, true};
-static const struct plan DEEP = {"depth4", 4096, 4096, 8192, 4, 96, 8192, 10240, true};
-static const struct plan FDREL = {"fd-release", 32768, 32768, 32768, 2, 8, 12288, 14336, true};
-static const struct plan *const PLANS[] = {&REJECT, &CLI, &DEEP, &FDREL};
+static const struct plan REJECT = {"reject-map", 4096, 4096, 4096, 1, 4, 2048, 16384, NONE};
+static const struct plan CLI = {"cli", 65536, 16384, 16384, 1, 64, 2048, 4096, ALL};
+static const struct plan DEEP = {"depth4", 4096, 4096, 8192, 4, 96, 8192, 10240, ALL};
+static const struct plan STOPRUN = {"stop-inflight", 4096, 4096, 4096, 4, 1024, 16384, 18432, PART};
+static const struct plan KILLRUN = {"kill-inflight", 4096, 4096, 4096, 4, 512, 24576, 26624, PART};
+static const struct plan FDREL = {"fd-release", 32768, 32768, 32768, 2, 8, 12288, 14336, ALL};
+static const struct plan *const PLANS[] = {&REJECT, &CLI, &DEEP, &STOPRUN, &KILLRUN, &FDREL};
 
 static unsigned int checks;
 #define CHECK(c, msg) do { if (!(c)) { \
@@ -173,6 +186,38 @@ static struct xdev_ext_mech_stats start_and_wait(struct session *s, const struct
 	       (unsigned long long)st.completed[0], (unsigned long long)st.completed[1],
 	       st.last_err, st.state);
 	return st;
+}
+/* The terminal notification fires on the first error; read STATS until the
+ * START has ended (nothing in flight, every batch done or aborted). */
+static struct xdev_ext_mech_stats settled(struct session *s, const struct plan *p)
+{
+	struct xdev_ext_mech_stats st;
+	unsigned int tries;
+	for (tries = 0; tries < 6000; tries++) {
+		st = (struct xdev_ext_mech_stats){.session_id = s->c.session_id};
+		if (mech(s->ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&st)) break;
+		if (!st.inflight && st.batches_done + st.batches_abort == p->groups) {
+			CHECK(1, "START ended: nothing in flight, every batch done or aborted");
+			return st;
+		}
+		usleep(10000);
+	}
+	CHECK(0, "START ended: nothing in flight, every batch done or aborted");
+	return st;
+}
+static int session_stats(int ring, uint64_t id, struct xdev_ext_mech_stats *st)
+{
+	*st = (struct xdev_ext_mech_stats){.session_id = id};
+	return mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)st);
+}
+static void print_run(const char *name, const char *when, const struct xdev_ext_mech_stats *st)
+{
+	printf("# %s %s: done=%llu abort=%llu inflight=%llu sequestered=%llu submitted=%llu/%llu completed=%llu/%llu last_err=%d state=%u\n",
+	       name, when, (unsigned long long)st->batches_done, (unsigned long long)st->batches_abort,
+	       (unsigned long long)st->inflight, (unsigned long long)st->sequestered,
+	       (unsigned long long)st->submitted[0], (unsigned long long)st->submitted[1],
+	       (unsigned long long)st->completed[0], (unsigned long long)st->completed[1],
+	       st->last_err, st->state);
 }
 static void exact_success(const struct plan *p, const struct xdev_ext_mech_stats *st)
 {
@@ -309,6 +354,10 @@ int main(int argc, char **argv)
 	CHECK(!st.batches_done && !st.completed[0] && !st.completed[1] && !st.submitted[1],
 	      "reject-map: no native command completes and no write is issued");
 	CHECK(st.last_err == -EOPNOTSUPP, "reject-map: provider EOPNOTSUPP is reported, no fallback");
+	st = settled(&s, &REJECT);
+	CHECK(st.batches_abort == REJECT.groups && st.state == XDEV_EXT_MECH_SESSION_ACTIVE &&
+	      !st.batches_done && !st.sequestered && st.last_err == -EOPNOTSUPP,
+	      "reject-map: every batch of the START aborts, nothing sequestered, session stays ACTIVE");
 	finish(&s, true, -EOPNOTSUPP);
 	CHECK(!close(alloc2) && !close(provider2), "reject-map: close allocation and provider fds");
 	mid = drained(observer, 1);
@@ -337,6 +386,83 @@ int main(int argc, char **argv)
 	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
 	      "depth4: mappings stay cached per PCI function, never remapped per batch");
 
+	/* stop-inflight: STOP while accepted NVMe commands use the allocation. */
+	CHECK(!create(&s, &STOPRUN, alloc1, srcng, dstng), "stop-inflight: CREATE reclaims the allocation");
+	{
+		struct xdev_ext_mech_notify_arm arm = {.session_id = s.c.session_id, .batches_target = STOPRUN.groups};
+		struct xdev_ext_mech_start start = {.session_id = s.c.session_id, .nr_batches = STOPRUN.groups};
+		CHECK(!mech(s.ring, XDEV_EXT_MECH_OP_NOTIFY_ARM, (uintptr_t)&arm), "stop-inflight: NOTIFY_ARM");
+		CHECK(!mech(s.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start), "stop-inflight: one START");
+		CHECK(!session_stats(s.ring, s.c.session_id, &st), "stop-inflight: STATS before STOP");
+		print_run(STOPRUN.name, "before STOP", &st);
+		CHECK(st.batches_done < STOPRUN.groups && st.state == XDEV_EXT_MECH_SESSION_ACTIVE,
+		      "stop-inflight: STOP is issued before the START ended");
+		ret = mech(s.ring, XDEV_EXT_MECH_OP_STOP, s.c.session_id);
+		printf("# %s STOP returned %d\n", STOPRUN.name, ret);
+		CHECK(ret == 0 || ret == -ECANCELED, "stop-inflight: STOP releases (0 or -ECANCELED), never retains");
+		CHECK(session_stats(s.ring, s.c.session_id, &st) == -ENOENT, "stop-inflight: session gone after STOP");
+		finish(&s, false, 0);
+	}
+	mid = stats(observer);
+	print_stats("after stop-inflight", &mid);
+	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
+	      "stop-inflight: allocation pinned once, mappings cached, nothing remapped");
+
+	/* kill-inflight: the process holding the session dies in flight. */
+	{
+		struct xdev_ext_mech_stats seen;
+		int idpipe[2], status, probe;
+		uint64_t id = 0;
+		unsigned int tries;
+		pid_t child;
+		CHECK(!pipe2(idpipe, O_CLOEXEC), "kill-inflight: session id pipe");
+		child = fork();
+		if (child < 0) CHECK(0, "kill-inflight: fork session owner");
+		if (!child) {	/* never report TAP from the child */
+			struct xdev_ext_mech_notify_arm arm = {.batches_target = KILLRUN.groups};
+			struct xdev_ext_mech_start start = {.nr_batches = KILLRUN.groups};
+			struct io_uring_params params = {};
+			struct session c = {};
+			c.c = (struct xdev_ext_mech_create){
+				.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+				.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = alloc1,
+				.layout = {KILLRUN.frame, 0, KILLRUN.seg, KILLRUN.group}, .depth = KILLRUN.depth,
+			};
+			c.c.st[0] = (struct xdev_ext_mech_stage_uapi){.class_id = XDEV_EXT_MECH_CLASS_NVME,
+				.direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .fd = srcng,
+				.arg0 = KILLRUN.src_slba, .arg1 = nlb(&KILLRUN)};
+			c.c.st[1] = (struct xdev_ext_mech_stage_uapi){.class_id = XDEV_EXT_MECH_CLASS_NVME,
+				.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = dstng,
+				.arg0 = KILLRUN.dst_slba, .arg1 = nlb(&KILLRUN)};
+			c.c.eventfd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+			c.ring = syscall(__NR_io_uring_setup, 8, &params);
+			if (c.c.eventfd < 0 || c.ring < 0 || mech(c.ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c.c)) _exit(1);
+			arm.session_id = start.session_id = c.c.session_id;
+			if (mech(c.ring, XDEV_EXT_MECH_OP_NOTIFY_ARM, (uintptr_t)&arm) ||
+			    mech(c.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start)) _exit(2);
+			if (write(idpipe[1], &c.c.session_id, sizeof(c.c.session_id)) != sizeof(c.c.session_id)) _exit(3);
+			for (;;) pause();
+		}
+		close(idpipe[1]);
+		CHECK(read(idpipe[0], &id, sizeof(id)) == sizeof(id) && id, "kill-inflight: child started its session");
+		close(idpipe[0]);
+		probe = syscall(__NR_io_uring_setup, 8, &(struct io_uring_params){});
+		CHECK(probe >= 0, "kill-inflight: observer ring");
+		CHECK(!session_stats(probe, id, &seen), "kill-inflight: STATS of the child's session from another ring");
+		print_run(KILLRUN.name, "before SIGKILL", &seen);
+		CHECK(seen.batches_done < KILLRUN.groups && seen.state == XDEV_EXT_MECH_SESSION_ACTIVE,
+		      "kill-inflight: owner is killed before the START ended");
+		CHECK(!kill(child, SIGKILL) && waitpid(child, &status, 0) == child &&
+		      WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "kill-inflight: owner died of SIGKILL");
+		for (tries = 0; tries < 6000 && session_stats(probe, id, &seen) != -ENOENT; tries++) usleep(10000);
+		CHECK(session_stats(probe, id, &seen) == -ENOENT, "kill-inflight: ring exit released the session");
+		CHECK(!close(probe), "kill-inflight: close observer ring");
+	}
+	mid = stats(observer);
+	print_stats("after kill-inflight", &mid);
+	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
+	      "kill-inflight: allocation pinned once, mappings cached, nothing remapped");
+
 	/* fd-release: no STOP; closing every fd must still drain everything. */
 	CHECK(!create(&s, &FDREL, alloc1, srcng, dstng), "fd-release: CREATE reclaims the allocation after STOP");
 	st = start_and_wait(&s, &FDREL);
@@ -352,17 +478,32 @@ int main(int argc, char **argv)
 	CHECK(after.opens - before.opens == after.closes - before.closes, "provider file refs released");
 
 	/* Whole-disk data oracle, independent of session statistics. */
-	for (i = 0; i < sizeof(PLANS) / sizeof(PLANS[0]); i++)
-		if (PLANS[i]->copies)
-			memcpy(dest + PLANS[i]->dst_slba * LBA, source + PLANS[i]->src_slba * LBA, bytes(PLANS[i]));
 	CHECK(!ioctl(src, BLKFLSBUF) && !ioctl(dst, BLKFLSBUF), "invalidate block cache before readback");
 	read_all(src, source_after, source_bytes, 0); read_all(dst, dest_after, dest_bytes, 0);
+	for (i = 0; i < sizeof(PLANS) / sizeof(PLANS[0]); i++) {
+		const struct plan *p = PLANS[i];
+		const unsigned char *from = source + p->src_slba * LBA;
+		unsigned char *to = dest + p->dst_slba * LBA;
+		uint64_t g, copied = 0;
+		if (p->copies == ALL)
+			memcpy(to, from, bytes(p));
+		if (p->copies != PART)
+			continue;
+		/* A group the teardown cut stays guard; any other content fails below. */
+		for (g = 0; g < p->groups; g++)
+			if (!memcmp(dest_after + p->dst_slba * LBA + g * p->group, from + g * p->group, p->group)) {
+				memcpy(to + g * p->group, from + g * p->group, p->group);
+				copied++;
+			}
+		printf("# %s destination groups copied=%llu of %llu\n", p->name,
+		       (unsigned long long)copied, (unsigned long long)p->groups);
+	}
 	CHECK(!memcmp(source, source_after, source_bytes), "whole source disk unchanged");
 	CHECK(!memcmp(dest, dest_after, dest_bytes), "whole destination disk equals copies plus every guard byte");
 	close(observer); close(ctl); close(src); close(srcng); close(dst); close(dstng);
 	free(source); free(source_after); free(dest); free(dest_after);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_PEER_SESSION=PASS cases=reject-map,cli,depth4,fd-release batches=%llu pool=POOL_PEER stages=nvme-read,nvme-write memory=host-RAM-standin gpu=none net=none timing=none\n",
+	printf("XDEV_EXT_PEER_SESSION=PASS cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release batches=%llu pool=POOL_PEER stages=nvme-read,nvme-write memory=host-RAM-standin gpu=none net=none timing=none\n",
 	       (unsigned long long)(CLI.groups + DEEP.groups + FDREL.groups));
 	return 0;
 }

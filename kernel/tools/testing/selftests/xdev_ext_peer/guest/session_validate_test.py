@@ -15,7 +15,7 @@ def good_log():
     lines = ['TAP version 13']
     lines += [v.plan_line(p) for p in v.PLANS]
     lines += [f'ok {i} - check' for i in range(1, 41)]
-    lines += ['1..40', v.PASS_PREFIX + ' cases=reject-map,cli,depth4,fd-release',
+    lines += ['1..40', v.PASS_PREFIX + ' cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release',
               v.UNLOAD_MARKER, 'XDEV_EXT_SESSION_GUEST_EXIT=0',
               '[    1.0] kasan: KernelAddressSanitizer initialized']
     return '\n'.join(lines) + '\n'
@@ -34,7 +34,7 @@ class Images(unittest.TestCase):
 
     def test_every_copied_region_is_checked_first_and_last_byte(self):
         for p in v.PLANS:
-            if not p['copies']:
+            if p['copies'] != v.ALL:
                 continue
             start = p['dst_slba'] * v.LBA
             for offset in (start, start + v.plan_bytes(p) - 1):
@@ -79,6 +79,61 @@ class Images(unittest.TestCase):
     def test_size_mismatch_fails(self):
         with self.assertRaises(ValueError):
             v.check_images(self.source, bytes(self.dest[:-v.LBA]))
+
+
+class TeardownInFlight(unittest.TestCase):
+    """stop-inflight / kill-inflight: each group is the source group or guard."""
+
+    def setUp(self):
+        self.source = v.source_pattern(SIZE)
+        self.dest = bytearray(v.expected_destination(self.source))
+        self.parts = [p for p in v.PLANS if p['copies'] == v.PART]
+
+    def test_plan_has_both_teardown_cases(self):
+        self.assertEqual([p['name'] for p in self.parts], ['stop-inflight', 'kill-inflight'])
+        spans = sorted((p['dst_slba'], p['dst_slba'] + p['groups'] * p['group'] // v.LBA)
+                       for p in v.PLANS if p['copies'] != v.NONE)
+        self.assertTrue(all(a[1] <= b[0] for a, b in zip(spans, spans[1:])))
+        self.assertLessEqual(spans[-1][1] * v.LBA, SIZE)
+        for p in v.PLANS:
+            self.assertLessEqual((p['src_slba'] + p['groups'] * p['group'] // v.LBA) * v.LBA, SIZE)
+
+    def group(self, p, g, shift=0):
+        s = p['src_slba'] * v.LBA + g * p['group'] + shift
+        return p['dst_slba'] * v.LBA + g * p['group'], self.source[s:s + p['group']]
+
+    def test_untouched_and_copied_groups_pass(self):
+        for p in self.parts:
+            dest = bytearray(self.dest)
+            for g in (0, 1, p['groups'] - 1):
+                off, data = self.group(p, g)
+                dest[off:off + p['group']] = data
+            v.check_images(self.source, bytes(dest))
+        v.check_images(self.source, bytes(self.dest))
+
+    def test_torn_group_fails(self):
+        for p in self.parts:
+            with self.subTest(case=p['name']):
+                dest = bytearray(self.dest)
+                off, data = self.group(p, 3)
+                dest[off:off + v.LBA] = data[:v.LBA]
+                with self.assertRaisesRegex(ValueError, 'destination'):
+                    v.check_images(self.source, bytes(dest))
+
+    def test_group_from_wrong_source_fails(self):
+        for p in self.parts:
+            with self.subTest(case=p['name']):
+                dest = bytearray(self.dest)
+                off, data = self.group(p, 2, shift=p['group'])
+                dest[off:off + p['group']] = data
+                with self.assertRaisesRegex(ValueError, 'destination'):
+                    v.check_images(self.source, bytes(dest))
+
+    def test_plan_line_copies_value(self):
+        for p in self.parts:
+            self.assertTrue(v.plan_line(p).endswith(' copies=2'))
+        self.assertTrue(v.plan_line(v.PLANS[0]).endswith(' copies=0'))
+        self.assertTrue(v.plan_line(v.PLANS[1]).endswith(' copies=1'))
 
 
 class Log(unittest.TestCase):

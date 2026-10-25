@@ -20,10 +20,21 @@ Cases, in one guest boot:
 
 - `reject-map`: the provider refuses the DMA map. No command completes, no
   write is issued, `last_err` is `-EOPNOTSUPP`, no mapping is ever created.
+  Every batch of the START aborts, nothing is sequestered and the session
+  stays ACTIVE.
 - `cli`: the product controller `xdev_ext_peer_chain --allocation-fd`
   (64 KiB frame, depth 1, 64 batches of 16 KiB).
 - `depth4`: 4 KiB frames, two frames per batch, depth 4, 96 batches. A
   second CREATE on the claimed allocation must fail with `-EBUSY`.
+- `stop-inflight`: 4 KiB frames, depth 4, 1024 batches; STOP right after
+  START while NVMe commands on the allocation are accepted. STOP releases the
+  session (0 or `-ECANCELED`, never `-EBUSY`), the mappings stay cached, and
+  each destination group is the source group or untouched guard.
+- `kill-inflight`: 4 KiB frames, depth 4, 512 batches, owned by a child
+  process that is killed with SIGKILL before the START ends. Ring exit
+  releases the session (STATS from another ring returns `-ENOENT`), the
+  allocation can be claimed again, the mappings stay cached, and each
+  destination group is the source group or untouched guard.
 - `fd-release`: 32 KiB frames, depth 2, 8 batches; the ring and the last
   allocation fd are closed without STOP, and every provider pin and map must
   still be released.
@@ -48,4 +59,7 @@ single-byte, guard, offset, source, TAP, plan, unload and kernel-report
 mutations.
 
 Not covered: real device memory, GPU copy engines, NIC stages (the provider
-maps only for NVMe functions), IOMMU, unknown-DMA quarantine, or any timing.
+maps only for NVMe functions), IOMMU, unknown-DMA quarantine, ambiguous or
+stale-ticket completions (the fixture can only refuse a map, and QEMU NVMe
+completes every accepted command), a device reset during a run, or any
+timing.

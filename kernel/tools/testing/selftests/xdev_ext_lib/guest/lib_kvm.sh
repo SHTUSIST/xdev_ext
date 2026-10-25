@@ -4,7 +4,8 @@
 # It reuses an already built kernel and its BTF-matched mechanism BPF
 # objects, builds the library, its host unit tests and the guest programs
 # from the exact checkout, and boots a private QEMU guest with two NVMe
-# images and two virtio-net NICs on a private QEMU hub.  All writes stay in
+# images, two virtio-net NICs on a private QEMU hub, and the guest-only CE
+# stand-in module built against that kernel.  All writes stay in
 # --scratch.  No host module, NIC, route or disk is touched.
 #   bash lib_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR
 # GIT_ROOT is a clean product checkout whose HEAD differs from the build's
@@ -48,12 +49,16 @@ if [[ -n "$changed" ]] && grep -v -e "^$TEST_REL/" -e "^$LIB_REL/" -e '^\.gitign
 	-e '^kernel/tools/xdev_ext_mech/Makefile$' -e '^\.github/workflows/host\.yml$' <<<"$changed"; then
 	echo 'FAIL source differs from the prebuilt kernel/BPF objects outside the library and its test' >&2; exit 1
 fi
-for symbol in XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS IO_URING \
+for symbol in MODULES XDEV_EXT_MECH XDEV_EXT_MECH_CE XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS IO_URING \
 	BPF_SYSCALL DEBUG_INFO_BTF XDP_SOCKETS PACKET VIRTIO_NET PCI_MSI SERIAL_8250_CONSOLE; do
 	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
 done
 release=$(cat "$BUILD/include/config/kernel.release")
-for artifact in "$BUILD/arch/x86/boot/bzImage" "$TOOLS/nxp_mech.bpf.o"; do [[ -s "$artifact" ]]; done
+CE_SIM=$TOOLS/ce-sim/xdev_ext_ce_sim.ko
+for artifact in "$BUILD/arch/x86/boot/bzImage" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/ce_plan.bpf.o" "$CE_SIM"; do
+	[[ -s "$artifact" ]]
+done
+[[ $(modinfo -F vermagic "$CE_SIM" | cut -d' ' -f1) == "$release" ]]
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" ]]
 {
 	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; virtio-net and QEMU NVMe; no timing\n' \
@@ -73,21 +78,23 @@ printf 'host_unit_tests_exit=%s\n' "$host_status" >>"$EV/provenance.txt"
 nice -n 10 make -C "$SOURCE/kernel/tools/xdev_ext_mech" lib CC="$CC" BUILD_DIR="$OUT/mech" >"$EV/lib-build.log" 2>&1
 nice -n 10 make -C "$SOURCE/$TEST_REL/guest" CC="$CC" KSRC="$SOURCE/kernel" LIBXDEV_EXT="$OUT/mech/lib" \
 	OUTPUT="$OUT" >"$EV/guest-build.log" 2>&1
-sha256sum "$BUILD/arch/x86/boot/bzImage" "$TOOLS/nxp_mech.bpf.o" "$OUT/xdev_ext_lib_nvme_nic" \
-	"$OUT/xdev_ext_lib_rx" >"$EV/artifacts.sha256"
+sha256sum "$BUILD/arch/x86/boot/bzImage" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/ce_plan.bpf.o" "$CE_SIM" \
+	"$OUT/xdev_ext_lib_nvme_nic" "$OUT/xdev_ext_lib_iou" "$OUT/xdev_ext_lib_rx" >"$EV/artifacts.sha256"
 
 # Minimal initramfs: busybox, the guest programs, the BPF object, libraries.
 G=/opt/xdev_ext_lib
 rm -rf -- "$ROOT"
 mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp} "$ROOT$G"
 cp /bin/busybox "$ROOT/bin/busybox"
-for app in sh mount cat echo poweroff dmesg sed sleep rm ip sync; do ln -sf busybox "$ROOT/bin/$app"; done
-cp "$OUT/xdev_ext_lib_nvme_nic" "$OUT/xdev_ext_lib_rx" "$TOOLS/nxp_mech.bpf.o" \
-	"$SOURCE/$TEST_REL/guest/run-guest.sh" "$ROOT$G/"
+for app in sh mount cat echo poweroff dmesg sed sleep rm ip sync insmod; do ln -sf busybox "$ROOT/bin/$app"; done
+cp "$OUT/xdev_ext_lib_nvme_nic" "$OUT/xdev_ext_lib_iou" "$OUT/xdev_ext_lib_rx" "$TOOLS/nxp_mech.bpf.o" \
+	"$TOOLS/ce_plan.bpf.o" "$CE_SIM" "$SOURCE/$TEST_REL/guest/run-guest.sh" "$ROOT$G/"
 python3 -I "$SOURCE/$TEST_REL/guest/lib_validate.py" plan >"$ROOT$G/plan.txt"
 cp "$ROOT$G/plan.txt" "$EV/plan.txt"
+python3 -I "$SOURCE/$TEST_REL/guest/lib_validate.py" plan-iou >"$ROOT$G/plan-iou.txt"
+cp "$ROOT$G/plan-iou.txt" "$EV/plan-iou.txt"
 : >"$EV/guest-libraries.txt"
-for program in "$OUT/xdev_ext_lib_nvme_nic" "$OUT/xdev_ext_lib_rx"; do
+for program in "$OUT/xdev_ext_lib_nvme_nic" "$OUT/xdev_ext_lib_iou" "$OUT/xdev_ext_lib_rx"; do
 	ldd "$program" | awk '/=> \/|^[[:space:]]*\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' >>"$EV/guest-libraries.txt"
 done
 sort -u -o "$EV/guest-libraries.txt" "$EV/guest-libraries.txt"
@@ -114,7 +121,7 @@ for f in /sys/class/nvme/nvme*/serial; do
 	esac
 done
 if [ -n "$src" ] && [ -n "$dst" ]; then
-	sh /opt/xdev_ext_lib/run-guest.sh "/dev/ng${src#nvme}n1" "/dev/${dst}n1"
+	sh /opt/xdev_ext_lib/run-guest.sh "/dev/ng${src#nvme}n1" "/dev/${dst}n1" "/dev/ng${dst#nvme}n1"
 	code=$?
 else
 	echo 'FAIL NVMe serials XDEVLIBSRC1/XDEVLIBDST1 not found'

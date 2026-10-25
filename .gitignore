@@ -1289,6 +1289,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_nvme_nic.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_iou.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_rx.c
 !/kernel/Documentation/userspace-api/xdev_ext-compute.rst
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/

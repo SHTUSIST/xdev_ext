@@ -13,6 +13,55 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import lib_validate as v  # noqa: E402
 
 
+def iou_stats(p, idx, phase, session, **over):
+    g = p['groups']
+    f = dict(state=1, last_err=0, batches_done=g, batches_abort=0, rejects=0, sequestered=0,
+             timeouts=0, inflight=0, protocol_err=0, submitted=f'{g}/{g}/0/0',
+             completed=f'{g}/{g}/0/0')
+    f.update(over)
+    return (f"XDEV_EXT_LIB_IOU_STATS name={p['name']} idx={idx} phase={phase} tag={phase} "
+            f"session={session} " + ' '.join(f'{k}={val}' for k, val in f.items()))
+
+
+def iou_lines(p):
+    n, g = p['name'], p['groups']
+    out = []
+    if p['kind'] in ('single', 'threads', 'procs'):
+        for idx in range(len(p['src'])):
+            out.append(iou_stats(p, idx, 'wait', 40 + idx))
+            out.append(f"XDEV_EXT_LIB_IOU_RESULT name={n} idx={idx} session={40 + idx} ret=0 "
+                       "wait_err=0 stop_err=0 close_err=0 retained=0")
+            if p['kind'] == 'procs':
+                out.append(f"XDEV_EXT_LIB_IOU_CHILD name={n} idx={idx} exit=0")
+    elif p['kind'] == 'retain':
+        out.append(iou_stats(p, 0, 'before-stop', 50, batches_done=0, inflight=2,
+                             submitted=f'{g}/{g}/0/0', completed=f'{g}/0/0/0'))
+        out.append(f"XDEV_EXT_LIB_RETAIN name={n} phase=stop stop=-16 retained=1")
+        out.append(f"XDEV_EXT_LIB_RETAIN name={n} phase=stats-after-stop stats=0")
+        out.append(iou_stats(p, 0, 'after-stop', 50, state=3, batches_done=0, inflight=2,
+                             submitted=f'{g}/{g}/0/0', completed=f'{g}/0/0/0'))
+        out.append(f"XDEV_EXT_LIB_RETAIN name={n} phase=close-held close=-16")
+        out.append(f"XDEV_EXT_LIB_RETAIN name={n} phase=released close=0 tries=25")
+        out.append(f"XDEV_EXT_LIB_IOU_RESULT name={n} idx=0 session=50 ret=0 wait_err=0 "
+                   "stop_err=-16 close_err=0 retained=1")
+    else:
+        out.append(iou_stats(p, 0, 'wait', 60, state=2, last_err=-5, batches_done=0, sequestered=12,
+                             submitted=f'2/2/0/0', completed='2/2/0/0'))
+        out.append(iou_stats(p, 0, 'error', 60, state=2, last_err=-5, batches_done=0, sequestered=12,
+                             submitted=f'2/2/0/0', completed='2/2/0/0'))
+        out.append(f"XDEV_EXT_LIB_ZOMBIE name={n} phase=stop stop=-16 retained=1 stats=0")
+        out.append(iou_stats(p, 0, 'after-stop', 60, state=5, last_err=-5, batches_done=0,
+                             sequestered=12, submitted='2/2/0/0', completed='2/2/0/0'))
+        out.append(f"XDEV_EXT_LIB_ZOMBIE name={n} phase=close close1=-16 close2=-16 stats=0")
+        out.append(iou_stats(p, 0, 'after-close', 60, state=5, last_err=-5, batches_done=0,
+                             sequestered=12, submitted='2/2/0/0', completed='2/2/0/0'))
+        out.append(f"XDEV_EXT_LIB_IOU_RESULT name={n} idx=0 session=60 ret=0 wait_err=-5 "
+                   "stop_err=-16 close_err=-16 retained=1")
+    out.append(f"XDEV_EXT_LIB_IOU_EXIT name={n} ret=0 (Success)")
+    out.append(f"XDEV_EXT_LIB_SCENARIO name={n} tx_exit=0 rx_exit=none")
+    return out
+
+
 def passing_log():
     out = ['XDEV_EXT_LIB_GUEST_BEGIN']
     for p in v.PLANS:
@@ -43,6 +92,8 @@ def passing_log():
                        "nic_zc_ops=18 nic_zc_bytes=24576")
             out.append(f"XDEV_EXT_LIB_EXIT api={p['api']} ret=-34 (Numerical result out of range)")
             out.append(f"XDEV_EXT_LIB_SCENARIO name={p['name']} tx_exit=1 rx_exit=none")
+    for p in v.IOU_PLANS:
+        out += iou_lines(p)
     out += ['XDEV_EXT_LIB_GUEST_EXIT=0', 'XDEV_EXT_LIB_DMESG_BEGIN', '[    0.0] ok',
             'XDEV_EXT_LIB_DMESG_END']
     return '\n'.join(out) + '\n'
@@ -65,9 +116,10 @@ class OracleTest(unittest.TestCase):
 
     def test_pass(self):
         r = self.verdict(passing_log())
-        self.assertEqual(r['scenarios'], [p['name'] for p in v.PLANS])
+        self.assertEqual(r['scenarios'], [p['name'] for p in v.PLANS + v.IOU_PLANS])
         self.assertEqual(r['checked_bytes'],
-                         sum(p['groups'] * p['group_bytes'] for p in v.PLANS if p['expect'] == 'pass'))
+                         sum(p['groups'] * p['group_bytes'] for p in v.PLANS if p['expect'] == 'pass') +
+                         sum(p['groups'] * p['group_bytes'] * len(p['dst']) for p in v.IOU_PLANS))
 
     def test_plan_shape(self):
         names = [p['name'] for p in v.PLANS]
@@ -147,7 +199,7 @@ class OracleTest(unittest.TestCase):
     def test_every_scenario_reported(self):
         log = passing_log().replace('inflight=0', 'inflight=1', 1)
         report = v.scenario_report(log)
-        self.assertEqual(list(report), [p['name'] for p in v.PLANS])
+        self.assertEqual(list(report), [p['name'] for p in v.PLANS + v.IOU_PLANS])
         self.assertIn('stats line', report[v.PLANS[0]['name']])
         self.assertTrue(all(r == 'PASS' for r in list(report.values())[1:]))
 
@@ -155,6 +207,161 @@ class OracleTest(unittest.TestCase):
         self.assertFails('guest exit', passing_log().replace('XDEV_EXT_LIB_GUEST_EXIT=0', 'XDEV_EXT_LIB_GUEST_EXIT=1'))
         self.assertFails('kernel debug', passing_log().replace(
             '[    0.0] ok', '[    1.0] BUG: KASAN: slab-use-after-free in xdev_ext_mech_stop+0x1/0x2'))
+
+
+class IouOracleTest(unittest.TestCase):
+    """IOU_UMEM, concurrent-handle and retained/ZOMBIE scenarios."""
+
+    def verdict(self, log, dst=None):
+        s, d = images()
+        return v.check(log, s, d if dst is None else dst)
+
+    def assertFails(self, needle, log=None, dst=None):
+        with self.assertRaises(ValueError) as e:
+            self.verdict(passing_log() if log is None else log, dst)
+        self.assertIn(needle, str(e.exception))
+
+    def plan(self, kind):
+        return next(p for p in v.IOU_PLANS if p['kind'] == kind)
+
+    def test_iou_plan_shape(self):
+        self.assertEqual([p['kind'] for p in v.IOU_PLANS],
+                         ['single', 'threads', 'procs', 'retain', 'zombie'])
+        spans = sorted((d * v.LBA, d * v.LBA + p['groups'] * p['group_bytes'])
+                       for p in v.IOU_PLANS for d in p['dst'])
+        spans += [(p['dst_offset'], p['dst_offset'] + p['groups'] * p['group_bytes'])
+                  for p in v.PLANS if p['expect'] == 'pass']
+        spans.sort()
+        self.assertTrue(all(a[1] <= b[0] for a, b in zip(spans, spans[1:])))
+        self.assertLessEqual(spans[-1][1], v.DISK_BYTES)
+        for p in v.IOU_PLANS:
+            self.assertEqual(len(p['src']), len(p['dst']))
+            self.assertEqual(len(p['src']), 2 if p['kind'] in ('threads', 'procs') else 1)
+        # The late CE completion must outlast the kernel's 5 s drain bound.
+        self.assertGreater(self.plan('retain')['ce_delay_us'], 5_000_000)
+        self.assertEqual(self.plan('zombie')['ce_fail'], 'ambiguous')
+
+    def test_iou_shell_plan(self):
+        lines = v.shell_plan_iou().splitlines()
+        self.assertEqual(len(lines), len(v.IOU_PLANS))
+        p = self.plan('threads')
+        self.assertIn(f"{p['name']}:threads:{p['groups']}:{p['depth']}:{p['group_bytes']}:"
+                      f"{p['src'][0]}:{p['dst'][0]}:{p['src'][1]}:{p['dst'][1]}:", v.shell_plan_iou())
+        p = self.plan('single')
+        self.assertIn(f"{p['name']}:single:{p['groups']}:{p['depth']}:{p['group_bytes']}:"
+                      f"{p['src'][0]}:{p['dst'][0]}:-:-:", v.shell_plan_iou())
+
+    def test_exact_window_byte(self):
+        s, d = images()
+        for kind in ('single', 'threads', 'procs'):
+            p = self.plan(kind)
+            off = p['dst'][-1] * v.LBA + p['groups'] * p['group_bytes'] - 1
+            bad = bytearray(d)
+            bad[off] ^= 1
+            self.assertFails(f'destination image differs at byte {off}', dst=bytes(bad))
+
+    def test_retain_window_either_per_group(self):
+        s, d = images()
+        p = self.plan('retain')
+        base, gb = p['dst'][0] * v.LBA, p['group_bytes']
+        # Each group is the source group or untouched guard: both pass.
+        for g in range(p['groups']):
+            ok = bytearray(d)
+            ok[base + g * gb:base + (g + 1) * gb] = s[p['src'][0] * v.LBA + g * gb:
+                                                    p['src'][0] * v.LBA + (g + 1) * gb]
+            self.verdict(passing_log(), dst=bytes(ok))
+        torn = bytearray(d)
+        torn[base:base + 512] = s[p['src'][0] * v.LBA:p['src'][0] * v.LBA + 512]
+        self.assertFails(f"{p['name']} group 0", dst=bytes(torn))
+
+    def test_zombie_window_untouched(self):
+        s, d = images()
+        p = self.plan('zombie')
+        bad = bytearray(d)
+        off = p['dst'][0] * v.LBA
+        bad[off:off + p['group_bytes']] = s[p['src'][0] * v.LBA:p['src'][0] * v.LBA + p['group_bytes']]
+        self.assertFails(f'destination image differs at byte {off}', dst=bytes(bad))
+
+    def test_exact_result_and_stats(self):
+        n = self.plan('single')['name']
+        self.assertFails(f'{n} idx 0 result', passing_log().replace(
+            f'name={n} idx=0 session=40 ret=0 wait_err=0 stop_err=0 close_err=0 retained=0',
+            f'name={n} idx=0 session=40 ret=0 wait_err=0 stop_err=0 close_err=0 retained=1'))
+        g = self.plan('single')['groups']
+        self.assertFails(f'{n} idx 0 stats', passing_log().replace(
+            f'name={n} idx=0 phase=wait tag=wait session=40 state=1 last_err=0 batches_done={g}',
+            f'name={n} idx=0 phase=wait tag=wait session=40 state=1 last_err=0 batches_done={g - 1}'))
+        self.assertFails(f'{n} idx 0 stats', passing_log().replace(
+            f'completed={g}/{g}/0/0', f'completed={g}/{g - 1}/0/0', 1))
+
+    def test_pair_needs_both_and_distinct_sessions(self):
+        n = self.plan('threads')['name']
+        log = passing_log()
+        line = next(l for l in log.splitlines() if l.startswith(f'XDEV_EXT_LIB_IOU_RESULT name={n} idx=1 '))
+        self.assertFails(f'{n} idx 1 result', log.replace(line + '\n', ''))
+        same = log.replace(f'name={n} idx=1 session=41', f'name={n} idx=1 session=40')
+        same = same.replace(f'name={n} idx=1 phase=wait tag=wait session=41',
+                            f'name={n} idx=1 phase=wait tag=wait session=40')
+        self.assertFails(f'{n} sessions', same)
+
+    def test_procs_children(self):
+        n = self.plan('procs')['name']
+        self.assertFails(f'{n} child', passing_log().replace(
+            f'XDEV_EXT_LIB_IOU_CHILD name={n} idx=1 exit=0', f'XDEV_EXT_LIB_IOU_CHILD name={n} idx=1 exit=1'))
+
+    def test_retain_sequence(self):
+        n = self.plan('retain')['name']
+        log = passing_log()
+        self.assertFails(f'{n} stop', log.replace(f'name={n} phase=stop stop=-16 retained=1',
+                                                  f'name={n} phase=stop stop=0 retained=0'))
+        self.assertFails(f'{n} close-held', log.replace(f'name={n} phase=close-held close=-16',
+                                                        f'name={n} phase=close-held close=0'))
+        self.assertFails(f'{n} released', log.replace(f'name={n} phase=released close=0',
+                                                      f'name={n} phase=released close=-16'))
+        self.assertFails(f'{n} before-stop', log.replace(
+            f'name={n} idx=0 phase=before-stop tag=before-stop session=50 state=1 last_err=0 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=0 timeouts=0 inflight=2',
+            f'name={n} idx=0 phase=before-stop tag=before-stop session=50 state=1 last_err=0 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=0 timeouts=0 inflight=0'))
+        self.assertFails(f'{n} after-stop', log.replace(
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=50 state=3',
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=50 state=1'))
+        self.assertFails(f'{n} after-stop', log.replace(
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=50 state=3 last_err=0 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=0',
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=50 state=3 last_err=0 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=1'))
+
+    def test_zombie_sequence(self):
+        n = self.plan('zombie')['name']
+        log = passing_log()
+        self.assertFails(f'{n} stop', log.replace(f'name={n} phase=stop stop=-16 retained=1 stats=0',
+                                                  f'name={n} phase=stop stop=-5 retained=0 stats=-2'))
+        self.assertFails(f'{n} close', log.replace(f'name={n} phase=close close1=-16 close2=-16',
+                                                   f'name={n} phase=close close1=-16 close2=0'))
+        self.assertFails(f'{n} after-stop', log.replace(
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=60 state=5',
+            f'name={n} idx=0 phase=after-stop tag=after-stop session=60 state=4'))
+        self.assertFails(f'{n} after-close', log.replace(
+            f'name={n} idx=0 phase=after-close tag=after-close session=60 state=5 last_err=-5 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=12',
+            f'name={n} idx=0 phase=after-close tag=after-close session=60 state=5 last_err=-5 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=0'))
+        self.assertFails(f'{n} wait', log.replace(
+            f'name={n} idx=0 session=60 ret=0 wait_err=-5', f'name={n} idx=0 session=60 ret=0 wait_err=0'))
+        # An ambiguous batch never reaches the NVMe write stage.
+        self.assertFails(f'{n} error', log.replace(
+            f'name={n} idx=0 phase=error tag=error session=60 state=2 last_err=-5 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=12 timeouts=0 inflight=0 protocol_err=0 submitted=2/2/0/0',
+            f'name={n} idx=0 phase=error tag=error session=60 state=2 last_err=-5 batches_done=0 '
+            'batches_abort=0 rejects=0 sequestered=12 timeouts=0 inflight=0 protocol_err=0 submitted=2/2/0/1'))
+
+    def test_iou_exit_and_marker(self):
+        n = self.plan('zombie')['name']
+        self.assertFails(f'{n} exit', passing_log().replace(f'XDEV_EXT_LIB_IOU_EXIT name={n} ret=0',
+                                                            f'XDEV_EXT_LIB_IOU_EXIT name={n} ret=-71'))
+        self.assertFails(f'{n} scenario exits', passing_log().replace(
+            f'XDEV_EXT_LIB_SCENARIO name={n} tx_exit=0', f'XDEV_EXT_LIB_SCENARIO name={n} tx_exit=1'))
 
 
 if __name__ == '__main__':
