@@ -72,15 +72,18 @@ struct plan {
 	__s64 delta;
 	__u32 deadline_ms;
 	bool cpu_check;
+	/* A failed batch ends a RECYCLE START (xdev_ext_mech_end()): plans that
+	 * expect failures lend every batch its own frames instead. */
+	bool recycle;
 };
-static const struct plan SEAL = { "seal", 4096, 8192, 4, 64, 2048, 2048, 0, 5000, false };
-static const struct plan APPEND = { "append", 2048, 4096, 4, 32, 4096, 0, 4, 5000, true };
-static const struct plan APPEND_BAD = { "append-bad", 2048, 4096, 4, 16, 4096, 0, 4, 5000, true };
-static const struct plan DEADLINE = { "deadline", 4096, 4096, 2, 8, 8192, 8192, 0, 300, false };
-static const struct plan MALFORMED = { "malformed", 4096, 4096, 1, 6, 9216, 9216, 0, 5000, false };
-static const struct plan STOPHELD = { "stop-held", 4096, 4096, 4, 100, 10240, 10240, 0, 60000, false };
-static const struct plan KILL = { "kill", 4096, 4096, 4, 100, 12288, 12288, 0, 60000, false };
-static const struct plan KILL_OWNER = { "kill-owner", 4096, 4096, 4, 100, 14336, 14336, 0, 60000, false };
+static const struct plan SEAL = { "seal", 4096, 8192, 4, 64, 2048, 2048, 0, 5000, false, true };
+static const struct plan APPEND = { "append", 2048, 4096, 4, 32, 4096, 0, 4, 5000, true, true };
+static const struct plan APPEND_BAD = { "append-bad", 2048, 4096, 4, 16, 4096, 0, 4, 5000, true, false };
+static const struct plan DEADLINE = { "deadline", 4096, 4096, 2, 8, 8192, 8192, 0, 300, false, false };
+static const struct plan MALFORMED = { "malformed", 4096, 4096, 1, 6, 9216, 9216, 0, 5000, false, false };
+static const struct plan STOPHELD = { "stop-held", 4096, 4096, 4, 100, 10240, 10240, 0, 60000, false, true };
+static const struct plan KILL = { "kill", 4096, 4096, 4, 100, 12288, 12288, 0, 60000, false, true };
+static const struct plan KILL_OWNER = { "kill-owner", 4096, 4096, 4, 100, 14336, 14336, 0, 60000, false, true };
 #define DEADLINE_HELD_ID 3
 #define APPEND_BAD_ID 5
 
@@ -166,10 +169,14 @@ static void ring_up(struct session *s, const struct plan *p, __u32 entries)
 {
 	struct io_uring_params params = {};
 	struct io_uring_xdev_ext_umem_reg reg = { .frame_size = FRAME };
-	__u32 per = p->group / p->seg, i;
+	__u32 per = p->group / p->seg, i, frames;
 
 	memset(s, 0, sizeof(*s));
-	s->pool_bytes = (size_t)p->depth * per * FRAME * 2;
+	frames = p->depth * per * 2;
+	if (!p->recycle && frames < p->groups * per)
+		frames = p->groups * per;
+	CHECK(frames <= sizeof(s->frames) / sizeof(s->frames[0]), "plan fits the frame table");
+	s->pool_bytes = (size_t)frames * FRAME;
 	s->pool = mmap(NULL, s->pool_bytes, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	CHECK(s->pool != MAP_FAILED, "session pool memory");
 	memset(s->pool, 0x97, s->pool_bytes);
@@ -179,7 +186,7 @@ static void ring_up(struct session *s, const struct plan *p, __u32 entries)
 	reg.size = s->pool_bytes;
 	CHECK(!syscall(__NR_io_uring_register, s->ring, IORING_REGISTER_XDEV_EXT_UMEM, &reg, 1),
 	      "register the ring UMEM");
-	s->nr_loan = p->depth * per;
+	s->nr_loan = p->recycle ? p->depth * per : p->groups * per;
 	for (i = 0; i < s->nr_loan; i++)
 		s->frames[i] = i;
 	if (entries) {
@@ -221,7 +228,7 @@ static int create(struct session *s, const struct plan *p, int src_ng, int dst_n
 static void start(struct session *s, const struct plan *p)
 {
 	struct xdev_ext_mech_start st = { .session_id = s->c.session_id, .nr_batches = p->groups,
-		.flags = XDEV_EXT_MECH_START_F_USER_FRAMES | XDEV_EXT_MECH_START_F_RECYCLE,
+		.flags = XDEV_EXT_MECH_START_F_USER_FRAMES | (p->recycle ? XDEV_EXT_MECH_START_F_RECYCLE : 0),
 		.nr_user_frames = s->nr_loan, .user_frames = (uintptr_t)s->frames };
 
 	CHECK(!mech(s->ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&st), "exactly one START");
