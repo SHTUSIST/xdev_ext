@@ -95,12 +95,13 @@ EX_INLINE int ex_sha256_fill(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u8 b[
 		p = ex_frame_rw(c, pos, start, 64);
 		if (!p)
 			return -EX_EFAULT;
-		EX_UNROLL
+		/* Unrolled, 64 loads in flight exceed the BPF stack. */
+		EX_NOUNROLL
 		for (j = 0; j < 64; j++)
 			b[j] = p[j];
 		return 0;
 	}
-	EX_UNROLL
+	EX_NOUNROLL
 	for (j = 0; j < 64; j++) {
 		m = start + j;
 		if (m < len) {
