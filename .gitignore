@@ -705,6 +705,7 @@
 !/kernel/Documentation/
 !/kernel/Documentation/userspace-api/
 !/kernel/Documentation/userspace-api/xdev_ext-peer.rst
+!/kernel/Documentation/userspace-api/xdev_ext-user-stage.rst
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_peer_program_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/peer_chain_control_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/quality_cli_bpf_mapping.py
