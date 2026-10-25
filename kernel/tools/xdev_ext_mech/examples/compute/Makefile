@@ -21,7 +21,7 @@ CRC := crc32c.h crc32c_table.h
 
 OBJECTS := $(addprefix $(OUT)/,crc32c_check_bytewise.bpf.o crc32c_check_slice8.bpf.o \
 	crc32c_append_bytewise.bpf.o crc32c_append_slice8.bpf.o xxh64_append.bpf.o \
-	parse_check.bpf.o)
+	parse_check.bpf.o sha256_append.bpf.o)
 
 all: $(OBJECTS)
 
@@ -38,6 +38,9 @@ $(OUT)/xxh64_append.bpf.o: xxh64_append.bpf.c xxh64.h $(COMMON) | $(OUT)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -c $< -o $@
 
 $(OUT)/parse_check.bpf.o: parse_check.bpf.c parse.h $(COMMON) | $(OUT)
+	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -c $< -o $@
+
+$(OUT)/sha256_append.bpf.o: sha256_append.bpf.c sha256.h $(COMMON) | $(OUT)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -c $< -o $@
 
 # Regenerate the CRC32C tables (checked in; the host tests compare them).
