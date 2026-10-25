@@ -68,6 +68,18 @@ static void reject(const struct xdev_ext_dma_geom *g,
  EQ(memcmp(&p, &before, sizeof(p)), 0);
 }
 #define REJECT(g,d,n,e) reject(g,frames,indices,3,XDEV_EXT_MECH_DIR_TO_DEVICE,d,n,e)
+/* An accepted plan over the three frames: n entries, the given total. */
+static void accept(const struct xdev_ext_dma_geom *g, __u32 dir,
+                   const struct xdev_ext_dma_copy_desc *d, __u32 n, __u64 total)
+{
+ struct xdev_ext_dma_plan p;
+ __u32 i;
+ memset(&p, 0xa5, sizeof(p));
+ EQ(xdev_ext_dma_plan_check(g, frames, indices, 3, dir, d, n, &p), 0);
+ EQ(p.n, n); EQ(p.total, total);
+ for (i = 0; i < n; i++)
+  EQ(p.host_off[i], indices[d[i].frame_pos]*FRAME + d[i].frame_off);
+}
 
 static void test_geometry(void)
 {
@@ -107,7 +119,7 @@ static void test_accepted(void)
  struct xdev_ext_dma_copy_desc d[32];
  struct xdev_ext_dma_plan p;
  struct xdev_ext_mech_frame_info f[3];
- __u32 i;
+ __u32 i, k;
  good(d);
  for (i=XDEV_EXT_MECH_DIR_TO_DEVICE; i<=XDEV_EXT_MECH_DIR_FROM_DEVICE; i++) {
   EQ(xdev_ext_dma_plan_check(&g, frames, indices, 3, i, d, 3, &p), 0);
@@ -116,7 +128,7 @@ static void test_accepted(void)
   EQ(p.host_off[1], 5*FRAME+256);
   EQ(p.host_off[2], 7*FRAME+256);
  }
- /* Host order stays exact; device order is free within disjoint spans. */
+ /* Host order stays exact; device order is free. */
  d[0]=entry(0,256,8192,512); d[0].flags=XDEV_EXT_DMA_F_KNOWN_MASK;
  d[1]=entry(0,768,0,512);
  d[2]=entry(1,256,4096,1024);
@@ -140,6 +152,22 @@ static void test_accepted(void)
  for (i=0;i<32;i++) d[i]=entry(0,i*32,i*64,32);
  EQ(xdev_ext_dma_plan_check(&g,f,indices,1,XDEV_EXT_MECH_DIR_TO_DEVICE,d,32,&p),0);
  EQ(p.total,1024); EQ(p.n,32);
+ /* Device ranges of one batch may overlap in either direction (the
+  * caller's responsibility); total is the sum of entry lengths. */
+ for (i=XDEV_EXT_MECH_DIR_TO_DEVICE; i<=XDEV_EXT_MECH_DIR_FROM_DEVICE; i++) {
+  g=geometry(4096,0,1,BOTH);
+  good(d); d[2].device_off=2047; accept(&g,i,d,3,2560);
+  good(d); d[2].device_off=128; accept(&g,i,d,3,2560);
+  good(d); d[2].device_off=0; accept(&g,i,d,3,2560);
+  g=geometry(4096,0,64,BOTH);
+  good(d); d[0].device_off=d[1].device_off=d[2].device_off=1024;
+  accept(&g,i,d,3,2560);
+  g=geometry(4096,0,32,BOTH);
+  for (k=0;k<32;k++) d[k]=entry(0,k*32,0,32);
+  memcpy(f,frames,sizeof(f)); f[0].data_off=0; f[0].data_len=1024;
+  EQ(xdev_ext_dma_plan_check(&g,f,indices,1,i,d,32,&p),0);
+  EQ(p.n,32); EQ(p.total,1024); EQ(p.host_off[31],2*FRAME+31*32);
+ }
 }
 static void test_rejected(void)
 {
@@ -167,9 +195,13 @@ static void test_rejected(void)
  good(d); d[2].device_off=WINDOW-511; REJECT(&g,d,3,-ERANGE);
  good(d); d[2].device_off=UINT64_MAX-255; REJECT(&g,d,3,-ERANGE);
  good(d); d[2].device_off=4095; REJECT(&g,d,3,-EXDEV);
- good(d); d[2].device_off=2047; REJECT(&g,d,3,-EEXIST);
- good(d); d[2].device_off=128; REJECT(&g,d,3,-EEXIST);
- good(d); d[2].device_off=0; REJECT(&g,d,3,-EEXIST);
+ /* Overlap is the caller's: it no longer masks a later fault (each of
+  * these plans was -EEXIST while the kernel checked overlap first). */
+ good(d); d[2].device_off=0; d[1].device_off=WINDOW-1000;
+ REJECT(&g,d,3,-ERANGE);
+ memcpy(f,frames,sizeof(frames)); memcpy(idx,indices,sizeof(indices));
+ good(d); f[2].data_off=FRAME-256; d[2].frame_off=FRAME-256; d[2].device_off=0;
+ reject(&g,f,idx,3,XDEV_EXT_MECH_DIR_FROM_DEVICE,d,3,-ERANGE);
  memcpy(f,frames,sizeof(frames)); memcpy(idx,indices,sizeof(indices));
  good(d); f[2].data_off=FRAME-256; d[2].frame_off=FRAME-256;
  reject(&g,f,idx,3,XDEV_EXT_MECH_DIR_TO_DEVICE,d,3,-ERANGE);
@@ -192,6 +224,8 @@ static void test_rejected(void)
  good(d); f[2].data_off=257; d[2].frame_off=257;
  reject(&g,f,idx,3,XDEV_EXT_MECH_DIR_TO_DEVICE,d,3,-EINVAL);
  g.first_page_off=1; good(d); REJECT(&g,d,3,-EINVAL);
+ g=geometry(4096,0,64,BOTH);
+ good(d); d[2].device_off=1025; REJECT(&g,d,3,-EINVAL);
 }
 static void test_completions(void)
 {

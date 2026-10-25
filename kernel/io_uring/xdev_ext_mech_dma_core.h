@@ -100,9 +100,15 @@ struct xdev_ext_dma_plan {
  *   -ERANGE      past a frame's data span, an entry after full coverage,
  *                device side outside the window, host side outside the chunk
  *   -EXDEV       device side crosses a contiguous segment
- *   -EEXIST      device side overlaps another entry
  *   -ENODATA     the entries end before the batch spans are covered
  * Rejections leave every byte of @plan unchanged.
+ *
+ * Device ranges of one batch may overlap; keeping them apart is the caller's
+ * responsibility.  FROM_DEVICE reads of an overlapped byte are well defined;
+ * for TO_DEVICE its final content is unspecified.  plan->total is the sum of
+ * entry lengths.  Every entry stays inside the bound window; the window must
+ * behave like memory, and a provider that needs disjoint device ranges checks
+ * them in its own submit.
  */
 static inline int xdev_ext_dma_plan_check(const struct xdev_ext_dma_geom *g,
 				    const struct xdev_ext_mech_frame_info *f,
@@ -113,7 +119,7 @@ static inline int xdev_ext_dma_plan_check(const struct xdev_ext_dma_geom *g,
 	struct xdev_ext_mech_cover c;
 	struct xdev_ext_dma_plan tmp = { 0 };
 	__u64 total = 0;
-	__u32 i, j;
+	__u32 i;
 	int err;
 
 	if (!n || nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
@@ -141,10 +147,6 @@ static inline int xdev_ext_dma_plan_check(const struct xdev_ext_dma_geom *g,
 			return -ERANGE;
 		if (!xdev_ext_mech_span_one_segment(e->device_off, e->len, g->segment_size))
 			return -EXDEV;
-		for (j = 0; j < i; j++)
-			if (xdev_ext_mech_spans_overlap(d[j].device_off, d[j].len,
-						   e->device_off, e->len))
-				return -EEXIST;
 		err = xdev_ext_dma_host_off(g, index[e->frame_pos], e->frame_off,
 				      e->len, &tmp.host_off[i]);
 		if (err)

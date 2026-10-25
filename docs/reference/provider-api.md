@@ -8,7 +8,9 @@ See the [kernel mechanism interface](../../kernel/include/linux/xdev_ext_mech.h)
 
 A driver registers `xdev_ext_dma_provider_ops` using its device-file operations as the lookup key. A session binds an authorized device window and the shared host pool. Registration is dynamic; the interface does not depend on a fixed provider count.
 
-The driver validates the caller's access to the window and the consuming device's reachability of each mapping. The kernel validates direction, bounds, alignment, entries, overlap and coverage before native submission. Native queues and doorbells remain provider responsibilities.
+The driver validates the caller's access to the window and the consuming device's reachability of each mapping. The kernel validates direction, bounds, alignment, entries and coverage before native submission. Native queues and doorbells remain provider responsibilities.
+
+Device ranges of one batch may overlap; keeping them apart is the caller's responsibility. FROM_DEVICE reads are well defined. For TO_DEVICE, the final content of an overlapped byte is unspecified. The `bytes_done` of a complete transfer equals the sum of entry lengths. The kernel confines a batch to the caller's window (for CE, to the batch's window slot). The device window must behave like memory; a provider that needs non-overlapping ranges checks them in its own `submit` callback.
 
 `submit` accepts the plan by returning zero and completes it exactly once through `xdev_ext_dma_complete(cookie, ticket, status, hw_submitted, bytes)`. Completion may run inline. Retain the ticket by value so that later callbacks identify the submitted operation.
 

@@ -97,9 +97,15 @@ struct xdev_ext_ce_plan {
  *   -ERANGE      past a frame's data span, an entry after full coverage,
  *                device side outside the window, host side outside the chunk
  *   -EXDEV       device side crosses a contiguous segment
- *   -EEXIST      device side overlaps another entry
  *   -ENODATA     the entries end before the batch spans are covered
  * @plan is complete only on success.
+ *
+ * Device ranges of one batch may overlap; keeping them apart is the caller's
+ * responsibility.  FROM_DEVICE reads of an overlapped byte are well defined;
+ * for TO_DEVICE its final content is unspecified.  plan->total is the sum of
+ * entry lengths.  The class confines a batch to its window slot
+ * (xdev_ext_ce_validate()); the window must behave like memory, and a backend
+ * that needs disjoint device ranges checks them in its own submit.
  */
 static inline int xdev_ext_ce_plan_check(const struct xdev_ext_ce_geom *g,
 				    const struct xdev_ext_mech_frame_info *f,
@@ -109,7 +115,7 @@ static inline int xdev_ext_ce_plan_check(const struct xdev_ext_ce_geom *g,
 {
 	struct xdev_ext_mech_cover c;
 	__u64 total = 0;
-	__u32 i, j;
+	__u32 i;
 	int err;
 
 	if (!n || nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
@@ -134,10 +140,6 @@ static inline int xdev_ext_ce_plan_check(const struct xdev_ext_ce_geom *g,
 			return -ERANGE;
 		if (!xdev_ext_mech_span_one_segment(e->gpu_off, e->len, g->seg_size))
 			return -EXDEV;
-		for (j = 0; j < i; j++)
-			if (xdev_ext_mech_spans_overlap(d[j].gpu_off, d[j].len,
-						   e->gpu_off, e->len))
-				return -EEXIST;
 		err = xdev_ext_ce_host_off(g, index[e->frame_pos], e->frame_off,
 				      e->len, &plan->host_off[i]);
 		if (err)
