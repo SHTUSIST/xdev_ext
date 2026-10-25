@@ -31,7 +31,8 @@ struct xdev_ext_mech_hold_intent {u64 key;u32 pos,count,span_off,span_len;};
 struct xdev_ext_mech_frame {void *kaddr,*pool_priv;u64 umem_addr;u32 index,data_off,data_len;};
 /* PENDING_TYPES */
 /* PROTOCOL */
-struct xsk_xdev_ext_mech_stage {void *rel;bool dead; /* PENDING_MEMBER */ };
+struct xdp_sock;
+struct xsk_xdev_ext_mech_stage {struct xdp_sock *xs;void *rel;bool dead; /* PENDING_MEMBER */ };
 struct xdev_ext_mech_pool {u32 nr_frames;u8 state[4096];};
 struct list_head {int boundary;};
 struct xdev_ext_mech_batch {struct list_head node;int bs;u64 id,key,bytes;int abort_err,status;u32 present,nr_frames,life_active;bool sequester,to_user,fifo_accepted;};
@@ -55,6 +56,10 @@ static int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool *p,u32 i,u32 
 static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err){if(!last_err)last_err=err;st->s->admits=false;st->priv->dead=true;}
 static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st){(void)st;kicks++;}
 static void xdev_ext_mech_count(struct xdev_ext_mech_session *s,int counter,u64 n){(void)s;(void)counter;(void)n;}
+/* Real header maps the socket mode to separate NIC zero-copy/copy counters. */
+enum {NIC_COPY_OPS,NIC_COPY_BYTES,NIC_ZC_OPS,NIC_ZC_BYTES};
+static int xdev_ext_mech_nic_ops_counter(bool zc){return zc?NIC_ZC_OPS:NIC_COPY_OPS;}
+static int xdev_ext_mech_nic_bytes_counter(bool zc){return zc?NIC_ZC_BYTES:NIC_COPY_BYTES;}
 static void xdev_ext_mech_frame_recycle(struct xdev_ext_mech_session *s,struct xdev_ext_mech_frame *f){if(s->pool->state[f->index]!=XDEV_EXT_MECH_F_NIC_RX)abort();s->pool->state[f->index]=XDEV_EXT_MECH_F_K_FREE;recycled++;}
 static int xsk_xdev_ext_mech_pool_resolve(struct xdev_ext_mech_pool *p,struct xdev_ext_mech_frame *f){if(f->index>=p->nr_frames)return -ERANGE;f->kaddr=(void *)(uintptr_t)(f->index+1);return 0;}
 static void xsk_xdev_ext_mech_frame(struct xdev_ext_mech_pool *p,struct xdp_buff_xsk *b,struct xdev_ext_mech_frame *f){(void)p;*f=(struct xdev_ext_mech_frame){.index=b->index,.data_off=b->data_off};}
@@ -105,6 +110,7 @@ int main(int argc,char **argv){
  struct xdev_ext_mech_session session={.admits=true,.pool=&pool};
  struct xsk_xdev_ext_mech_stage xst={0};struct xdev_ext_mech_stage st={.priv=&xst,.s=&session};
  struct xdp_sock xs={.xdev_ext_mech_rx=&st,.pool=&pool,.zc=true};
+ xst.xs=&xs;
  u32 capacity=!strcmp(argv[1],"full")?6:2000;(void)capacity;
  /* INITIALIZE */
  if(!strcmp(argv[1],"flow")){

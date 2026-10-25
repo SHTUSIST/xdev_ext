@@ -276,9 +276,15 @@ class TxStageSourceTest(unittest.TestCase):
         step = function_body(self.mech, "static int xsk_xdev_ext_mech_tx_xmit(void *arg, u32 slot)")
         dead = step.index("if (READ_ONCE(xst->dead))")
         finish = step.index("xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[slot]);")
-        xmit = step.index("return xsk_kernel_xmit(xst->sock, d->addr, d->len, d->options);")
+        xmit = step.index("err = xsk_kernel_xmit(xst->sock, d->addr, d->len, d->options);")
         self.assertLess(dead, finish)
         self.assertLess(finish, xmit)
+        # xsk_kernel_xmit() returns the sent length on success: only a
+        # negative value is a failure, and the step itself reports 0.
+        refused = step.index("if (err < 0)\n\t\treturn err;", xmit)
+        self.assertLess(refused, step.index("xdev_ext_mech_count(st->s, xdev_ext_mech_nic_ops_counter(xst->xs->zc), 1);"))
+        self.assertTrue(step.rstrip().endswith("return 0;"))
+        self.assertNotIn("if (err)\n", step)
         # xsk_kernel_xmit() takes xs->mutex: worker context, no atomic section
         for text in (body, step):
             for forbidden in SLEEPLESS:
@@ -306,9 +312,14 @@ class TxStageSourceTest(unittest.TestCase):
         lock = body.index("mutex_lock(&xs->mutex);")
         check = body.index("xsk_xdev_ext_mech_stage_check(st->direction, st->index,")
         self.assertLess(lock, check)
-        self.assertLess(check, body.index("WRITE_ONCE(xs->xdev_ext_mech_tx, st);"))
-        self.assertLess(body.index("WRITE_ONCE(xs->xdev_ext_mech_tx, st);"),
-                        body.index("mutex_unlock(&xs->mutex);"))
+        # Publication is a release store: the stage is complete (priv, rx_info)
+        # before the data path can observe it.
+        publish = body.index("smp_store_release(&xs->xdev_ext_mech_tx, st);")
+        self.assertEqual(body.count("smp_store_release(&xs->xdev_ext_mech_tx, st);"), 1)
+        self.assertNotIn("WRITE_ONCE(xs->xdev_ext_mech_tx, st);", body)
+        self.assertLess(check, publish)
+        self.assertLess(body.index("st->priv = xst;"), publish)
+        self.assertLess(publish, body.index("mutex_unlock(&xs->mutex);"))
         self.assertIn("kvcalloc(pool->nr_frames, sizeof(*xst->tx_sent)", body)
         self.assertIn("if (p->xs != xs)", body)
         unbind = function_body(self.mech, "static void xsk_xdev_ext_mech_unbind(struct xdev_ext_mech_stage *st)")

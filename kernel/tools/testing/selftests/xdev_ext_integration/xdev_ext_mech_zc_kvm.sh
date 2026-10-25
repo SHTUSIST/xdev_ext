@@ -696,10 +696,13 @@ printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
 # --- Track S (appended): NIC-boundary fallback section switch and its tools.
 NIC_FALLBACK=${XDEV_EXT_ZC_NIC_FALLBACK:-1}
 [[ "$NIC_FALLBACK" == 0 || "$NIC_FALLBACK" == 1 ]]
-if [[ "$FAULT" != none || "$RELIABLE" != 0 || "$RX_CE" != 0 || "$PROVIDER_CASE" != normal ]]; then NIC_FALLBACK=0; fi
+# Fault injection and dedicated provider cases change the main outcome; the
+# strict reliable/rx-ce campaign keeps Track S (its sub-cases are plain).
+if [[ "$FAULT" != none || "$PROVIDER_CASE" != normal ]]; then NIC_FALLBACK=0; fi
 printf 'nic_fallback=%s\n' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"
 if (( NIC_FALLBACK )); then
     [[ -s "$TOOLS/socket_sink.bpf.o" ]]
+    /bin/busybox --list | grep -Fxq arp || { echo 'FAIL busybox lacks the arp applet (Track S static neighbour)' >&2; exit 1; }
     cp "$TOOLS/socket_sink.bpf.o" "$ROOT/opt/xdev_ext/"
     ln -sf /bin/busybox "$ROOT/bin/dd"
 fi
@@ -1077,14 +1080,24 @@ echo "XDEV_EXT_ZC_COPY_FALLBACK=PASS calls=$copy_calls"
 # Runs after the zero-copy trace check so its copy-mode calls cannot touch it.
 nic_fallback=0
 [ ! -f /opt/xdev_ext/nic_fallback.env ] || . /opt/xdev_ext/nic_fallback.env
-if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$rx_ce" = 0 ]; then
+if [ "$nic_fallback" = 1 ] && [ "$fault" = none ]; then
     nicfb_log() { /bin/busybox sed "s/^/XDEV_EXT_ZC_NICFB_LOG $1 /" "$2"; }
-    nicfb_frames=$(/bin/busybox sed -n 's/^XDEV_EXT_MECH_READY mode=nic-nvme .* frames=\([0-9]*\) .*/\1/p' /tmp/rx.log)
-    [ -n "$nicfb_frames" ]
+    nicfb_frames=
     nicfb_bytes=$((groups * 8192))
-    # Main AF_XDP zero-copy run: zero-copy counters only.
-    grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=zc nic_copy_ops=0 nic_copy_bytes=0 nic_zc_ops=$((groups * nicfb_frames)) nic_zc_bytes=$nicfb_bytes\$" /tmp/rx.log
-    grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=zc nic_copy_ops=0 nic_copy_bytes=0 nic_zc_ops=$((groups * nicfb_frames)) nic_zc_bytes=$nicfb_bytes\$" /tmp/tx.log
+    if [ "$reliable" = 0 ] && [ "$rx_ce" = 0 ]; then
+        nicfb_frames=$(/bin/busybox sed -n 's/^XDEV_EXT_MECH_READY mode=nic-nvme .* frames=\([0-9]*\) .*/\1/p' /tmp/rx.log)
+        [ -n "$nicfb_frames" ]
+        # Main AF_XDP zero-copy run: zero-copy counters only.
+        grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=zc nic_copy_ops=0 nic_copy_bytes=0 nic_zc_ops=$((groups * nicfb_frames)) nic_zc_bytes=$nicfb_bytes\$" /tmp/rx.log
+        grep -Eq "^XDEV_EXT_MECH_NIC_ACCOUNTING session=[0-9]+ path=zc nic_copy_ops=0 nic_copy_bytes=0 nic_zc_ops=$((groups * nicfb_frames)) nic_zc_bytes=$nicfb_bytes\$" /tmp/tx.log
+    fi
+    if [ "$reliable" = 1 ]; then
+        # One AF_XDP program per class: the main run published the reliable
+        # protocol; every Track S sub-case is plain and needs the plain one.
+        $ctl detach --pin /sys/fs/bpf/zc-afxdp
+        $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_afxdp_ops \
+            --pin /sys/fs/bpf/zc-afxdp --set nxp_session=270019
+    fi
     nicfb_clear() {
         dd if=/dev/zero of="$destination_block" bs=512 seek="$rx_slba" count="$window_nlb" conv=fsync 2>/dev/null
         sync; echo 3 >/proc/sys/vm/drop_caches
@@ -1128,6 +1141,11 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
     nicfb_log socket-tx /tmp/nicfb-socket-tx.log
     test "$nicfb_tx_exit" = 0
     test "$nicfb_rx_exit" = 0
+    # Frames per group of the plain layout, from this run's own receiver.
+    nicfb_run_frames=$(/bin/busybox sed -n 's/^XDEV_EXT_MECH_READY mode=nic-nvme .* frames=\([0-9]*\) .*/\1/p' /tmp/nicfb-socket-rx.log)
+    [ -n "$nicfb_run_frames" ]
+    [ -z "$nicfb_frames" ] || test "$nicfb_frames" = "$nicfb_run_frames"
+    nicfb_frames=$nicfb_run_frames
     grep -Eq '^XDEV_EXT_MECH_READY mode=source .* xsk=socket( |$)' /tmp/nicfb-socket-tx.log
     grep -Eq '^XDEV_EXT_MECH_NIC_NVME_E2E=PASS .* errors=0 sequestered=0 inflight=0$' /tmp/nicfb-socket-rx.log
     for log in /tmp/nicfb-socket-rx.log /tmp/nicfb-socket-tx.log; do
@@ -1175,7 +1193,8 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
             nicfb_tx_if=eth0; nicfb_tx_policy=off; nicfb_tx_path=zc
         else
             ip addr add 192.0.2.1/24 dev eth0
-            ip neigh replace 192.0.2.2 lladdr 02:00:00:00:00:02 nud permanent dev eth0
+            # busybox "ip neigh" only shows/flushes; arp -s adds a permanent entry.
+            /bin/busybox arp -i eth0 -s 192.0.2.2 02:00:00:00:00:02
             nicfb_rx_if=eth1; nicfb_rx_policy=off; nicfb_rx_path=zc
             nicfb_tx_if=lo; nicfb_tx_policy=auto; nicfb_tx_path=socket
         fi
@@ -1207,7 +1226,7 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
         if [ "$nicfb_mixed" = rx ]; then
             ip addr del 192.0.2.2/24 dev eth1
         else
-            ip neigh del 192.0.2.2 dev eth0
+            /bin/busybox arp -i eth0 -d 192.0.2.2
             ip addr del 192.0.2.1/24 dev eth0
         fi
         echo "XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS socket_side=$nicfb_mixed groups=$groups"
