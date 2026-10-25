@@ -587,6 +587,14 @@ static bool test_parse_check(void)
 			free(buf);
 			return false;
 		}
+		/* Shorter than the header, with the word a wrapped L - hdr would match. */
+		if (hdrs[i] - 1 >= 4) {
+			oracle_put_le32(buf, (hdrs[i] - 1) - hdrs[i]);
+			if (!compare_one(EX_PARSE_CHECK, hdrs[i], hdrs[i] - 1, 0, buf, -EBADMSG)) {
+				free(buf);
+				return false;
+			}
+		}
 	}
 	free(buf);
 	/* A header length outside what the fixed transform accepts. */
