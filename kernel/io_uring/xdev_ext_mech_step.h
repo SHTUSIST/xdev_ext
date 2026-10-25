@@ -12,6 +12,7 @@
 
 #include "xdev_ext_mech_core.h"
 #include "xdev_ext_mech_cpu_core.h"
+#include "xdev_ext_mech_user_core.h"
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
 #define XDEV_EXT_MECH_CLASS_SIZE_MAX		4096	/* info, scratch, copies, batch area */
@@ -47,6 +48,10 @@ static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi
   return -EINVAL;
  if (u->class_id == XDEV_EXT_MECH_CLASS_IAA)
   return XDEV_EXT_MECH_ROLE_TRANSFORM;
+ /* A user thread works in place on the batch's frames, like a fixed CPU
+  * transform: exclusive OUT_PENDING claim, republished READY afterwards. */
+ if (u->class_id == XDEV_EXT_MECH_CLASS_USER)
+  return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE ? XDEV_EXT_MECH_ROLE_INPLACE : -EINVAL;
  if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
   if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
    return -EINVAL;
@@ -104,7 +109,7 @@ static inline __u32 xdev_ext_mech_peer_dirs(__u32 class_id)
  case XDEV_EXT_MECH_CLASS_NET:
   return XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE;
  default:
-  return 0; /* AF_XDP, socket, IAA, DMA, CE: host-page classes */
+  return 0; /* AF_XDP, socket, IAA, DMA, CE, CPU, USER: host-page classes */
  }
 }
 /* 0, or -EOPNOTSUPP: frame_size not a power of two in [MIN, MAX], or hdr_room != 0. */
@@ -176,7 +181,7 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
             (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
              (u->flags & ~XDEV_EXT_SOCKET_F_NXP)) ||
             (u->flags && u->class_id != XDEV_EXT_MECH_CLASS_SOCKET &&
-             u->class_id != XDEV_EXT_MECH_CLASS_IAA &&
+             u->class_id != XDEV_EXT_MECH_CLASS_IAA && u->class_id != XDEV_EXT_MECH_CLASS_USER &&
              (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
 		     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) ||
 		     ((u->flags & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) &&
@@ -204,6 +209,25 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
          c->st[j].class_id == XDEV_EXT_MECH_CLASS_AFXDP)
       return -EOPNOTSUPP;
     }
+   }
+   continue;
+  }
+  /* USER: its own fd, flag, deadline and length rule; a length change may
+   * not reach a fixed-group NVMe or AF_XDP stage, as for the CPU class. */
+  if (u->class_id == XDEV_EXT_MECH_CLASS_USER) {
+   __s64 delta;
+   bool varlen;
+   __u32 j;
+   int err = xdev_ext_user_stage_check(u, c->layout.frame_size, &delta, &varlen);
+
+   if (err)
+    return err;
+   for (j = i + 1; (delta || varlen) && j < c->nr_stages; j++) {
+    if (xdev_ext_mech_stage_role(&c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
+     break;
+    if (c->st[j].class_id == XDEV_EXT_MECH_CLASS_NVME ||
+        c->st[j].class_id == XDEV_EXT_MECH_CLASS_AFXDP)
+     return -EOPNOTSUPP;
    }
    continue;
   }

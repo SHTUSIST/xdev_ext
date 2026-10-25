@@ -13,6 +13,7 @@
  * embeds its ctx as a read-only base.
  */
 
+#include <linux/ioctl.h>
 #include <linux/types.h>
 #include "xdev_ext_binding.h"
 
@@ -33,7 +34,8 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_SOCKET = 7,
 	XDEV_EXT_MECH_CLASS_NET = 8,
 	XDEV_EXT_MECH_CLASS_CPU = 9,
-	XDEV_EXT_MECH_CLASS_MAX	= 10,
+	XDEV_EXT_MECH_CLASS_USER = 10,	/* a user thread; see the USER stage below */
+	XDEV_EXT_MECH_CLASS_MAX	= 11,
 };
 
 /* FANOUT joins the previous consumer on the same READY publication; stage 0
@@ -372,6 +374,106 @@ struct xdev_ext_net_rx_mech_cqe {
  } rx[XDEV_EXT_NET_MAX_ENTRIES];
 };
 
+/*
+ * USER stage: each batch's frames are handed to an application thread and
+ * taken back through two rings in a region mapped from a user stage fd.
+ * Documentation/userspace-api/xdev_ext-user-stage.rst.  Stage description:
+ * TO_DEVICE, fd from XDEV_EXT_MECH_OP_USER_STAGE, flags 0 or VARLEN, arg0
+ * the per-batch deadline in ms (1..XDEV_EXT_USER_DEADLINE_MAX_MS), arg1 the
+ * exact per-frame length change as a two's complement __s64 (|change| <=
+ * layout.frame_size), 0 with VARLEN (any length 1..capacity).
+ */
+#define XDEV_EXT_USER_F_VARLEN		(1U << 0)
+#define XDEV_EXT_USER_DEADLINE_MAX_MS	600000U
+#define XDEV_EXT_USER_RING_MAX		256U
+#define XDEV_EXT_USER_DESC_VERSION	1U
+
+/* Build scratch of the USER class, one slot; arg goes to the ready entry. */
+struct xdev_ext_user_desc {
+	__u32 version;			/* XDEV_EXT_USER_DESC_VERSION */
+	__u32 flags;			/* 0 */
+	__aligned_u64 arg;
+};
+
+/* user_flags (user space writes): the user thread waits on its eventfd. */
+#define XDEV_EXT_USER_F_SLEEPING	(1U << 0)
+/* kernel_flags (kernel writes) */
+#define XDEV_EXT_USER_K_NEED_KICK	(1U << 0)	/* reaps again only after a kick */
+#define XDEV_EXT_USER_K_STOPPED		(1U << 1)	/* nothing more; held batches cancelled */
+
+/* Free-running indices, each in its own 64-byte line; entry i & (entries - 1). */
+struct xdev_ext_user_ring_hdr {
+	__u32 ready_prod;		/* kernel */
+	__u32 rsvd0[15];
+	__u32 ready_cons;		/* user */
+	__u32 rsvd1[15];
+	__u32 done_prod;		/* user */
+	__u32 rsvd2[15];
+	__u32 done_cons;		/* kernel */
+	__u32 rsvd3[15];
+	__u32 user_flags;		/* user: XDEV_EXT_USER_F_* */
+	__u32 rsvd4[15];
+	__u32 kernel_flags;		/* kernel: XDEV_EXT_USER_K_* */
+	__u32 rsvd5[15];
+};
+
+/* Kernel -> user: one batch handed to the user thread. */
+struct xdev_ext_user_ready {
+	__u32 slot;			/* batch slot, < CREATE depth */
+	__u32 nr_frames;
+	__aligned_u64 ticket;		/* copy into the completion entry */
+	__aligned_u64 batch_id;
+	__aligned_u64 key;		/* START sequence or RX hold key */
+	__aligned_u64 arg;		/* struct xdev_ext_user_desc.arg */
+};
+
+/* User -> kernel: the batch is finished; out_len of its frames is final. */
+struct xdev_ext_user_done {
+	__aligned_u64 ticket;
+	__u32 slot;
+	__s32 status;			/* 0, or a negative errno the batch fails with */
+};
+
+/* Payload at umem + umem_addr + data_off; writable up to capacity. */
+struct xdev_ext_user_frame {
+	__aligned_u64 umem_addr;	/* chunk base, offset in the pool UMEM */
+	__u32 data_off;
+	__u32 data_len;			/* valid input bytes */
+	__u32 capacity;			/* frame_size - data_off */
+	__u32 out_len;			/* user: valid output bytes; preset to data_len */
+};
+
+/* Slot table entry, indexed by batch slot; written by the kernel except out_len. */
+struct xdev_ext_user_slot {
+	__aligned_u64 ticket;		/* held batch's ticket, 0 when not held */
+	__u32 nr_frames;
+	__u32 rsvd;
+	struct xdev_ext_user_frame f[XDEV_EXT_MECH_MAX_FRAMES];
+};
+
+/* Byte offsets inside the mapping of a user stage fd. */
+struct xdev_ext_user_ring_offsets {
+	__aligned_u64 mmap_size;	/* map [0, mmap_size), MAP_SHARED */
+	__aligned_u64 hdr;		/* struct xdev_ext_user_ring_hdr */
+	__aligned_u64 ready;		/* entries struct xdev_ext_user_ready */
+	__aligned_u64 done;		/* entries struct xdev_ext_user_done */
+	__aligned_u64 slots;		/* entries struct xdev_ext_user_slot */
+};
+
+/* XDEV_EXT_MECH_OP_USER_STAGE; output fields must be zero on input. */
+struct xdev_ext_mech_user_stage {
+	__u32 size;			/* sizeof(struct xdev_ext_mech_user_stage) */
+	__u32 flags;			/* 0 */
+	__u32 entries;			/* power of two, 1..XDEV_EXT_USER_RING_MAX, >= depth */
+	__s32 eventfd;			/* kernel -> user wakeup, or -1 */
+	__s32 fd;			/* out: the user stage fd, O_CLOEXEC */
+	__u32 rsvd;			/* 0 */
+	struct xdev_ext_user_ring_offsets off;	/* out */
+};
+
+/* ioctl on a user stage fd: reap the completion ring now. */
+#define XDEV_EXT_USER_IOC_KICK		_IO('X', 0xe8)
+
 enum xdev_ext_mech_build_ret {
 	XDEV_EXT_MECH_BUILD_DEFAULT	= 0,	/* class default_build, if it has one */
 	XDEV_EXT_MECH_BUILD_SUBMIT	= 1,
@@ -401,6 +503,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_STATS	= 4,
 	XDEV_EXT_MECH_OP_NOTIFY_ARM	= 5,
 	XDEV_EXT_MECH_OP_TRANSPORT_STATS = 6,
+	XDEV_EXT_MECH_OP_USER_STAGE	= 7,	/* struct xdev_ext_mech_user_stage */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U
@@ -459,6 +562,7 @@ enum xdev_ext_mech_pool_kind {
  * AF_XDP: fd = bound AF_XDP socket.
  * CE: fd = backend device, arg0/arg1 = device VA/length of the window.
  * DMA: fd = provider device, arg0/arg1 = provider window offset/length.
+ * USER: fd = a user stage fd, arg0/arg1 = deadline ms/length change (above).
  * SOCKET: fd = UDP socket; TO_DEVICE: connected sink; FROM_DEVICE: bound
  * receiver, stage 0 of at least two stages, START-driven. Zero flags/args
  * select plain UDP. XDEV_EXT_SOCKET_F_NXP requires a connected socket in
@@ -470,6 +574,7 @@ struct xdev_ext_mech_stage_uapi {
 	__u32 direction;		/* enum xdev_ext_mech_dir */
 	__s32 fd;
 	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; SOCKET: XDEV_EXT_SOCKET_F_*;
+					 * USER: XDEV_EXT_USER_F_*;
 					 * generic: XDEV_EXT_MECH_STAGE_F_FANOUT, XDEV_EXT_MECH_STAGE_F_POLL */
 	__aligned_u64 arg0;
 	__aligned_u64 arg1;
