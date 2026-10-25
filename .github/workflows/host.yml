@@ -42,6 +42,8 @@ jobs:
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
       - name: CPU class BPF compute callback rules, kfuncs and wiring
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute/run.py
+      - name: BPF compute example algorithms and KVM verdict checks
+        run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/run.py
       - name: Native lifecycle scheduler and teardown contracts
         run: |
           python3 kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/run.py

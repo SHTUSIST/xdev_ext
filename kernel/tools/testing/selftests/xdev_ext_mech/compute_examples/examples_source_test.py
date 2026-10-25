@@ -59,12 +59,21 @@ class ExampleSources(unittest.TestCase):
             self.assertEqual(out.read_text(), (EXAMPLES / 'crc32c_table.h').read_text())
 
     def test_makefile_and_readme(self):
-        makefile = (EXAMPLES / 'Makefile').read_text()
+        makefile = (EXAMPLES / 'Makefile').read_text().replace('\\\n', ' ')
         readme = (EXAMPLES / 'README.md').read_text()
+        objects = re.search(r'^OBJECTS := \$\(addprefix \$\(OUT\)/,([^)]*)\)', makefile, re.M)
+        self.assertIsNotNone(objects)
+        objects = objects.group(1).split()
         for path in self.sources():
             stem = path.name[:-len('.bpf.c')]
-            self.assertRegex(makefile, r'\b' + stem + r'\b', path.name)
+            # A CRC32C source is built once per table variant, the others once.
+            built = [o for o in objects if o in (stem + '.bpf.o', stem + '_bytewise.bpf.o',
+                                                 stem + '_slice8.bpf.o')]
+            want = 2 if stem.startswith('crc32c_') else 1
+            self.assertEqual(len(built), want, path.name)
             self.assertIn(path.name, readme)
+            for obj in built:
+                self.assertIn(obj, readme)
 
 
 if __name__ == '__main__':
