@@ -57,6 +57,14 @@
 /* Hide @x's origin from the compiler (not from the verifier). */
 #define EX_OPAQUE(x)	__asm__ volatile("" : "+r"(x))
 
+/*
+ * @x & @mask as an array index the verifier can bound. Without the barrier
+ * clang drops a mask it proves redundant from the loop bounds, which the
+ * verifier may not know at that point (a loop counter reloaded from the
+ * stack), and the access becomes unbounded for the verifier.
+ */
+#define EX_INDEX(x, mask)	({ __u32 ___v = (__u32)(x); EX_OPAQUE(___v); ___v & (mask); })
+
 /* errno values; vmlinux.h carries none. */
 #define EX_EFAULT	14
 #define EX_EINVAL	22

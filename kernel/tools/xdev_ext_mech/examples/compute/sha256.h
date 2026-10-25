@@ -56,7 +56,7 @@ EX_INLINE __u32 ex_be32(const __u8 *p)
 #define EX_SHA256_ROUND(t, wt)							\
 	do {									\
 		t1 = hh + (ex_ror32(e, 6) ^ ex_ror32(e, 11) ^ ex_ror32(e, 25)) +	\
-		     ((e & f) ^ (~e & g)) + ex_sha256_k[(__u32)(t) & 63] + (wt);	\
+		     ((e & f) ^ (~e & g)) + ex_sha256_k[EX_INDEX(t, 63)] + (wt);	\
 		t2 = (ex_ror32(a, 2) ^ ex_ror32(a, 13) ^ ex_ror32(a, 22)) +	\
 		     ((a & bb) ^ (a & c) ^ (bb & c));				\
 		hh = g;								\
@@ -81,10 +81,10 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
 	int t;
 
 	ex_for(t, 0, 16)
-		EX_SHA256_ROUND(t, (__u32)w[(__u32)t & 15]);
+		EX_SHA256_ROUND(t, (__u32)w[EX_INDEX(t, 15)]);
 	ex_for(t, 16, 64) {
 		/* W[t] = s1(W[t-2]) + W[t-7] + s0(W[t-15]) + W[t-16] */
-		j = (__u32)t & 15;
+		j = EX_INDEX(t, 15);
 		x = (__u32)w[(j + 1) & 15];
 		s0 = ex_ror32(x, 7) ^ ex_ror32(x, 18) ^ (x >> 3);
 		x = (__u32)w[(j + 14) & 15];
@@ -133,7 +133,7 @@ EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, __u32 mask, __u32 anch
 			EX_OPAQUE(eq);
 			word |= ((data & (__u32)lt) | (0x80U & (__u32)eq)) << (24 - 8 * i);
 		}
-		w[(__u32)k & 15] = word;
+		w[EX_INDEX(k, 15)] = word;
 	}
 }
 
