@@ -752,6 +752,28 @@ static inline __s32 xdev_ext_mech_rx_resolve(__u32 callsite, __s32 ret,
 }
 
 /*
+ * Outcome of an accepted native operation, for the classes that report one
+ * (CE, DMA and NET): OK when it completed exactly as submitted, else
+ * AMBIGUOUS when the device may have seen it, PRE_SUBMIT_FAILED when it never
+ * did.  enum xdev_ext_ce_outcome, enum xdev_ext_dma_outcome and the NET
+ * completion's outcome field use these values.
+ */
+enum xdev_ext_mech_outcome {
+	XDEV_EXT_MECH_OUTCOME_OK		= 0,
+	XDEV_EXT_MECH_OUTCOME_PRE_SUBMIT_FAILED	= 1,
+	XDEV_EXT_MECH_OUTCOME_AMBIGUOUS	= 2,
+};
+
+/* @ok: completed exactly; @submitted: the device may have seen it. */
+static inline __u32 xdev_ext_mech_classify(bool ok, bool submitted)
+{
+	if (ok)
+		return XDEV_EXT_MECH_OUTCOME_OK;
+	return submitted ? XDEV_EXT_MECH_OUTCOME_AMBIGUOUS :
+			   XDEV_EXT_MECH_OUTCOME_PRE_SUBMIT_FAILED;
+}
+
+/*
  * RETRY is honoured only for a failure the device did not consume, and only
  * a bounded number of times per stage.  @status is the NVMe status
  * (nvme_req(req)->status), the AF_XDP TX errno, or the CE outcome.

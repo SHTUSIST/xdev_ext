@@ -39,6 +39,7 @@ CATALOG = {
                       IO + 'xdev_ext_mech_internal.h', IO + 'xdev_ext_mech_lifecycle.h',
                       IO + 'xdev_ext_mech_step.h', IO + 'xdev_ext_mech_window.h',
                       IO + 'xdev_ext_mech_notify.h', IO + 'xdev_ext_mech_native_cookie.h',
+                      IO + 'xdev_ext_mech_window_copy_core.h',
                       IO + 'xdev_ext_mech_ops.c', IO + 'xdev_ext_mech_peer_pool.c',
                       IO + 'xdev_ext_binding.c', IO + 'xdev_ext_ops_core.[ch]',
                       IO + 'xdev_ext_umem.[ch]', IO + 'xdev_ext_config.h',

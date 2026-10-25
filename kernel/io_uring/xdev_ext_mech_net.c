@@ -102,7 +102,8 @@ static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
   ret = -EPROTO;
  if (ret) {
   /* The sent prefix belongs to the old plan: never complete it differently. */
-  ns->resume.nr = 0; bp->cqe.status = ret; bp->cqe.outcome = 1;
+  ns->resume.nr = 0; bp->cqe.status = ret;
+  bp->cqe.outcome = XDEV_EXT_MECH_OUTCOME_PRE_SUBMIT_FAILED;
  }
  return ret;
 }
@@ -142,12 +143,12 @@ static int xdev_ext_net_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
       * gets no class CQE (the core reports just the session error), and a
       * retry that fails in the core before ->validate loses this area.
       */
-     bp->cqe.status = ret; bp->cqe.outcome = 1;
+     bp->cqe.status = ret; bp->cqe.outcome = XDEV_EXT_MECH_OUTCOME_PRE_SUBMIT_FAILED;
     }
     return ret;
    }
    ns->resume.nr = 0;
-   bp->cqe.status = ret; bp->cqe.outcome = accepted ? 2 : 1;
+   bp->cqe.status = ret; bp->cqe.outcome = xdev_ext_mech_classify(false, accepted);
    if (accepted) xdev_ext_mech_batch_sequester(b, xdev_ext_mech_batch_ticket(b), ret);
    else xdev_ext_mech_batch_complete(b, xdev_ext_mech_batch_ticket(b), ret);
    return 0;
@@ -341,7 +342,7 @@ static void xdev_ext_net_handoff(struct xdev_ext_net_slot *slot)
  if (xdev_ext_mech_batch_completion_claim(b, slot->ticket)) return;
  bp = xdev_ext_mech_batch_priv(b);
  bp->cqe.base.status = status;
- bp->cqe.base.outcome = sequester ? 2 : status ? 1 : 0;
+ bp->cqe.base.outcome = xdev_ext_mech_classify(!status && !sequester, sequester);
  /* Abandon can race callbacks: it must not read their mutable records. */
  if (!sequester) {
   for (i = 0; i < slot->nr; i++) {

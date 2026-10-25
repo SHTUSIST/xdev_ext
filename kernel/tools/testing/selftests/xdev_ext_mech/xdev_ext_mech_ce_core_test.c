@@ -209,6 +209,36 @@ static void test_plan_accepted(void)
 	EXPECT_EQ(xdev_ext_ce_plan_check(&g, f, index, 3, d, 2, &plan), 0);
 	EXPECT_EQ(plan.total, 2432);
 
+	/*
+	 * GPU side overlap within one batch is accepted (the caller's
+	 * responsibility): with the next entry, with an earlier entry, and all
+	 * entries on the same bytes.  Host offsets and the total are unchanged:
+	 * the total is the sum of entry lengths, not the GPU bytes touched.
+	 */
+	g = geom(SEG, 0);
+	good_plan(d);
+	d[1].gpu_off = 1431;
+	memset(&plan, 0xa5, sizeof(plan));
+	EXPECT_EQ(xdev_ext_ce_plan_check(&g, frames, pool_index, 3, d, 3, &plan), 0);
+	EXPECT_EQ(plan.n, 3);
+	EXPECT_EQ(plan.total, 1432 + 1432 + 1000);
+	EXPECT_EQ(plan.host_off[0], 2 * FRAME + 360);
+	EXPECT_EQ(plan.host_off[1], 5 * FRAME + 360);
+	EXPECT_EQ(plan.host_off[2], 7 * FRAME + 360);
+	good_plan(d);
+	d[2].gpu_off = 1000;
+	EXPECT_EQ(xdev_ext_ce_plan_check(&g, frames, pool_index, 3, d, 3, &plan), 0);
+	EXPECT_EQ(plan.total, 1432 + 1432 + 1000);
+	good_plan(d);
+	d[2].gpu_off = 0;
+	EXPECT_EQ(xdev_ext_ce_plan_check(&g, frames, pool_index, 3, d, 3, &plan), 0);
+	EXPECT_EQ(plan.total, 1432 + 1432 + 1000);
+	good_plan(d);
+	d[0].gpu_off = d[1].gpu_off = d[2].gpu_off = 4096;
+	EXPECT_EQ(xdev_ext_ce_plan_check(&g, frames, pool_index, 3, d, 3, &plan), 0);
+	EXPECT_EQ(plan.n, 3);
+	EXPECT_EQ(plan.total, 1432 + 1432 + 1000);
+
 	/* 32 entries of 32 bytes each cover one 1024-byte span. */
 	f[0] = (struct xdev_ext_mech_frame_info){ .data_off = 0, .data_len = 1024 };
 	for (i = 0; i < XDEV_EXT_CE_MAX_ENTRIES; i++)
@@ -308,16 +338,24 @@ static void test_plan_rejected(void)
 	EXPECT_EQ(check(&g, d, 3), -EXDEV);
 	g = geom(SEG, 0);
 
-	/* GPU side overlap, with the next and with an earlier entry. */
+	/*
+	 * GPU side overlap is the caller's responsibility, so it never masks a
+	 * fault found later: an overlapping entry whose host side is outside
+	 * its chunk is -ERANGE (this plan was -EEXIST while the kernel checked
+	 * overlap, because that check ran before host-side translation).
+	 */
+	memcpy(f, frames, sizeof(frames));
+	memcpy(index, pool_index, sizeof(pool_index));
+	f[2].data_off = FRAME - 500;
 	good_plan(d);
-	d[1].gpu_off = 1431;
-	EXPECT_EQ(check(&g, d, 3), -EEXIST);
-	good_plan(d);
-	d[2].gpu_off = 1000;
-	EXPECT_EQ(check(&g, d, 3), -EEXIST);
+	d[2].frame_off = FRAME - 500;
+	d[2].gpu_off = 0;
+	EXPECT_EQ(xdev_ext_ce_plan_check(&g, f, index, 3, d, 3, &plan), -ERANGE);
+	/* An overlapping entry is still confined to the window. */
 	good_plan(d);
 	d[2].gpu_off = 0;
-	EXPECT_EQ(check(&g, d, 3), -EEXIST);
+	d[1].gpu_off = 1024 * KIB - 1000;
+	EXPECT_EQ(check(&g, d, 3), -ERANGE);
 
 	/* Host side: a frame span outside its chunk or a chunk outside the pool. */
 	memcpy(f, frames, sizeof(frames));

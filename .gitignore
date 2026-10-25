@@ -206,6 +206,7 @@
 !/kernel/io_uring/xdev_ext_mech_socket.c
 !/kernel/io_uring/xdev_ext_mech_step.h
 !/kernel/io_uring/xdev_ext_mech_window.h
+!/kernel/io_uring/xdev_ext_mech_window_copy_core.h
 !/kernel/io_uring/xdev_ext_ops_core.c
 !/kernel/io_uring/xdev_ext_ops_core.h
 !/kernel/io_uring/xdev_ext_peer.c
@@ -458,6 +459,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_variable_length_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_window_offset_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_window_pipeline_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_window_copy_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_zc_source_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ce_window_test.c

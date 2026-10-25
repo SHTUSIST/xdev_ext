@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
 TEST_GEN_PROGS := xdev_ext_mech_core_test xdev_ext_mech_ce_core_test
+TEST_GEN_PROGS += xdev_ext_mech_window_copy_core_test
 TEST_GEN_PROGS += xdev_ext_mech_step_test
 TEST_GEN_PROGS += xdev_ext_mech_lifecycle_test
 # Four-state references replace the previous single-consumer lifecycle contract.
@@ -73,6 +74,7 @@ LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_core.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_step.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_lifecycle.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_ce_core.h)
+LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_window_copy_core.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_ce_lease.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_window.h)
 LOCAL_HDRS += $(abspath ../../../../io_uring/xdev_ext_mech_dma_core.h)
