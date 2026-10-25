@@ -38,13 +38,24 @@ static struct llist_node *llist_del_all(struct llist_head *h) {struct llist_node
 static struct llist_node *llist_reverse_order(struct llist_node *h) {
  struct llist_node *r=NULL;while(h){struct llist_node*n=h->next;h->next=r;r=h;h=n;}return r;
 }
+/* A model of the session's progress_work: pending or not, and its delay. */
 static void *progress_work_of_session;
 static unsigned progress_kicks, retry_arms;
-static void kthread_mod_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,int delay){
- (void)w;(void)delay;
- if((void*)d==progress_work_of_session)progress_kicks++;else retry_arms++;
+static bool pw_pending;
+static long pw_delay=-1;
+static bool kthread_mod_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,unsigned long delay){
+ (void)w;
+ if((void*)d!=progress_work_of_session){retry_arms++;return true;}
+ if(!delay)progress_kicks++;
+ pw_pending=true;pw_delay=(long)delay;return true;
 }
-static void kthread_queue_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,int delay){(void)w;(void)d;(void)delay;abort();}
+/* Stage polling is off in every case; only progress_work may be queued. */
+static bool kthread_queue_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,unsigned long delay){
+ (void)w;
+ if((void*)d!=progress_work_of_session)abort();
+ if(pw_pending)return false;
+ pw_pending=true;pw_delay=(long)delay;return true;
+}
 struct xdev_ext_mech_session;
 struct xdev_ext_mech_batch;
 struct xdev_ext_mech_stage;
@@ -110,6 +121,12 @@ static int native_submit(struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batc
  return 0;
 }
 static const struct xdev_ext_mech_class_ops native_cls={.submit=native_submit};
+/* A stage whose progress runs after USER's in the same pass and kicks USER:
+ * a user kick arriving while the pass runs. */
+static unsigned long kick_progress(struct xdev_ext_mech_stage*st){
+ xdev_ext_mech_stage_kick(&st->s->st[1]);return 0;
+}
+static const struct xdev_ext_mech_class_ops native_kick_cls={.submit=native_submit,.progress=kick_progress};
 static const struct xdev_ext_mech_class_ops user_cls={
  .class_id=XDEV_EXT_MECH_CLASS_USER,.desc_size=sizeof(struct xdev_ext_user_desc),.desc_cap=1,
  .default_build=xdev_ext_user_default_build,.validate=xdev_ext_user_validate,
@@ -189,6 +206,8 @@ static void post(u32 slot,u64 ticket,s32 status){
  us->hdr->done_prod++;
 }
 static unsigned long progress(void){return xdev_ext_user_progress(&session.st[1]);}
+/* The worker takes the pending progress_work and runs it. */
+static void run_progress_work(void){pw_pending=false;xdev_ext_mech_progress_work(&session.progress_work.work);}
 static void drain(void){xdev_ext_mech_batch_drain(&session.drain_work);}
 static bool held_out_pending(struct xdev_ext_mech_batch*b){
  for(u32 i=0;i<FRAMES;i++){
@@ -334,6 +353,17 @@ static int exercise(const char*mode){
   CHECK(accepts[2]==2&&accepted[2]==b,"then the first");
   callback(2,0);drain();
   CHECK(ends==2&&us->nr_held==0,"both done");
+ }else if(!strcmp(mode,"kick-race")){
+  run_progress_work();
+  CHECK(pw_pending&&pw_delay==TIMEOUT,"a pass with a held batch re-arms at the deadline");
+  s->st[2].cls=&native_kick_cls;
+  run_progress_work();
+  CHECK(pw_pending&&pw_delay==0,"a kick during the pass is not pushed back to the deadline");
+  s->st[2].cls=&native_cls;
+  post(0,r.ticket,0);
+  run_progress_work();
+  CHECK(us->nr_held==0,"the kicked pass reaps the completion");
+  CHECK(!pw_pending,"nothing held: no re-arm");
  }else return 2;
  CHECK(!warnings,"production warning count is zero");
  return failures!=0;

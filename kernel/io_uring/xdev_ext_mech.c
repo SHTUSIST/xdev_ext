@@ -2399,8 +2399,10 @@ static void xdev_ext_mech_progress_work(struct kthread_work *work)
   next = s->st[i].cls->progress(&s->st[i]);
   if (next && (!delay || next < delay)) delay = next;
  }
+ /* Queue, never modify: a stage kick that requeued this work while the pass
+  * ran (delay 0) must not be pushed back to the earliest stage delay. */
  if (delay && !READ_ONCE(s->worker_gone))
-  kthread_mod_delayed_work(s->worker, &s->progress_work, delay);
+  kthread_queue_delayed_work(s->worker, &s->progress_work, delay);
 }
 
 /*

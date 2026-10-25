@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get("KERNEL_SRC", next(p for p in HERE.parents
             if (p / "io_uring/xdev_ext_mech.c").is_file())))
 CASES = ("complete", "sleep", "varlen", "deadline", "stop", "dead", "stale",
-         "badlen", "status", "full", "multi")
+         "badlen", "status", "full", "multi", "kick-race")
 
 
 def definition(text, name, structure=False):
@@ -49,6 +49,7 @@ def generate():
                   "xdev_ext_mech_batch_key", "xdev_ext_mech_batch_slot", "xdev_ext_mech_batch_nr_frames",
                   "xdev_ext_mech_batch_frame", "xdev_ext_mech_batch_cpu_length",
                   "xdev_ext_mech_session_pool", "xdev_ext_mech_session_depth", "xdev_ext_mech_stage_kick",
+                  "xdev_ext_mech_progress_work",
                   "xdev_ext_mech_sync_for_cpu", "xdev_ext_mech_life_undo",
                   "xdev_ext_mech_batch_acquire", "xdev_ext_mech_batch_completion_claim",
                   "xdev_ext_mech_batch_handoff", "xdev_ext_mech_batch_completion_publish",
