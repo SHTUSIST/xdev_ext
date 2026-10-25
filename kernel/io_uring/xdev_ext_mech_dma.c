@@ -158,10 +158,21 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
 		err = -ENODEV;
 		goto free;
 	}
+	/* No interrupt fallback: a polled stage needs a polling provider. */
+	if (st->poll && !ops->poll) {
+		err = -EOPNOTSUPP;
+		goto put;
+	}
+	cs->region.polled = st->poll;
 	err = ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
 	if (err)
 		goto put;
 	cs->region.ops = ops;
+	/* A provider that dropped the mark would complete by its own means. */
+	if (cs->region.polled != st->poll) {
+		err = -EPROTO;
+		goto unbind_region;
+	}
 	err = xdev_ext_dma_geom_init(&cs->geom, u->arg1, cs->region.len,
 			       cs->region.segment_size, cs->region.max_entry_len,
 			       (u64)pool->nr_pages << PAGE_SHIFT,
@@ -368,6 +379,14 @@ static void xdev_ext_dma_mark_dead(struct xdev_ext_mech_stage *st)
 	WRITE_ONCE(cs->dead, true);
 }
 
+/* Session worker, polled stage: the provider's completion pass of the region. */
+static int xdev_ext_dma_poll(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_dma_stage *cs = st->priv;
+
+	return cs->region.ops->poll(&cs->region);
+}
+
 static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
 	.class_id	= XDEV_EXT_MECH_CLASS_DMA,
 	.desc_size	= sizeof(struct xdev_ext_dma_copy_desc),
@@ -385,6 +404,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
 	.submit		= xdev_ext_dma_submit,
 	.fill_cqe	= xdev_ext_dma_fill_cqe,
 	.mark_dead	= xdev_ext_dma_mark_dead,
+	.poll		= xdev_ext_dma_poll,
 };
 
 /* After every late_initcall, so the core's own initialisation has run. */
