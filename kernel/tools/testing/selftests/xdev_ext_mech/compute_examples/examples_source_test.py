@@ -19,7 +19,7 @@ HERE = Path(__file__).resolve().parent
 KERNEL = HERE.parents[4]
 EXAMPLES = KERNEL / 'tools/xdev_ext_mech/examples/compute'
 REQUIRED = ('crc32c_check.bpf.c', 'crc32c_append.bpf.c', 'xxh64_append.bpf.c',
-            'parse_check.bpf.c')
+            'parse_check.bpf.c', 'sha256_append.bpf.c')
 
 
 class ExampleSources(unittest.TestCase):

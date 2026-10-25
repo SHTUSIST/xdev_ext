@@ -10,13 +10,14 @@ validate --dir DIR --log LOG --result JSON
     record streams from the results disk (one tar archive): the fixed
     transform's run and the BPF example's run of identical inputs. Both runs
     must agree with each other and with an independent oracle written here
-    (Python CRC32C, XXH64 and the parse header rule), batch by batch and byte
+    (Python CRC32C, XXH64, hashlib SHA-256 and the parse header rule), batch by batch and byte
     by byte, and no chunk byte outside an output may change.
 The plan is duplicated, not shared, with guest/run-guest.sh and with
 guest/compute_examples_guest.c (the record layout): a guest that drifts from
 it fails here.
 """
 import argparse
+import hashlib
 import io
 import json
 from pathlib import Path
@@ -45,7 +46,7 @@ XXH_SEED = 0x9E3779B185EBCA87
 
 OBJECTS = ('crc32c_append_bytewise.bpf.o', 'crc32c_append_slice8.bpf.o',
            'crc32c_check_bytewise.bpf.o', 'crc32c_check_slice8.bpf.o',
-           'parse_check.bpf.o', 'xxh64_append.bpf.o')
+           'parse_check.bpf.o', 'sha256_append.bpf.o', 'xxh64_append.bpf.o')
 
 
 def case(fixed, bpf, input_kind, negatives, layouts, compare='identical'):
@@ -76,16 +77,19 @@ PLAN = {
                            (('spans', 4096, 0),) + FRAMES, compare='strip:4'),
     'parse_compose_h16': case(['parse-strip:16'], ['parse-check:16', 'parse-strip:16'],
                               'parse:16', True, (('spans', 4096, 0),) + FRAMES),
+    'sha256_append': case(['sha256-append'], ['sha256-append'], 'random', False,
+                          (('spans', 4064, 0), ('spans', 3704, 360)) + FRAMES),
 }
 # The stage words each run must carry: fixed transform id or BPF (10) with D.
 STAGES = {
     'crc32c-check': (4, 0), 'crc32c-strip': (2, 0), 'crc32c-append': (1, 0),
+    'sha256-append': (7, 0),
     'parse-strip:16': (5, 16), 'parse-strip:4': (5, 4), 'xxh64-append:0': (6, 0),
     f'xxh64-append:{XXH_SEED}': (6, XXH_SEED),
 }
 BPF_DELTA = {'crc32c-check': 0, 'crc32c-strip': -4, 'crc32c-append': 4, 'parse-check:16': 0,
              'parse-check:4': 0, 'xxh64-append:0': 8, f'xxh64-append:{XXH_SEED}': 8,
-             'parse-strip:16': -16}
+             'parse-strip:16': -16, 'sha256-append': 32}
 
 
 # --- independent oracles ----------------------------------------------------
@@ -169,6 +173,8 @@ def apply(semantic, frame):
         return frame + crc32c(frame).to_bytes(4, 'little')
     if name == 'xxh64-append':
         return frame + xxh64(frame, int(arg)).to_bytes(8, 'big')
+    if name == 'sha256-append':
+        return frame + hashlib.sha256(frame).digest()
     if name in ('parse-check', 'parse-strip'):
         hdr = int(arg)
         if len(frame) < hdr or int.from_bytes(frame[:4], 'little') != len(frame) - hdr:
@@ -334,7 +340,7 @@ def check_log(text):
     errors += ['failed case: ' + l for l in lines if l.startswith('XDEV_EXT_EXAMPLES_CASE=FAIL')]
     errors += ['missing case: ' + c for c in ('verifier',) + tuple(PLAN) if c not in passed]
     for marker in ('XDEV_EXT_EXAMPLES_GUEST=PASS', 'XDEV_EXT_EXAMPLES_GUEST_EXIT=0',
-                   'XDEV_EXT_EXAMPLE_VERIFIER_DONE objects=6 failed=0'):
+                   f'XDEV_EXT_EXAMPLE_VERIFIER_DONE objects={len(OBJECTS)} failed=0'):
         if marker not in lines:
             errors.append('missing marker: ' + marker)
     errors += ['run failed: ' + l for l in lines
@@ -415,7 +421,8 @@ def validate(directory, log, result):
                                  min_len=min(min(r['in_len']) for r in recs),
                                  max_len=max(max(r['in_len']) for r in recs))
     verdict = {'pass': not errors, 'errors': errors, 'cases': summary, 'verifier': verifier,
-               'oracle': 'python crc32c, xxh64 and parse rule; fixed vs BPF byte compare',
+               'oracle': 'python crc32c, xxh64, hashlib sha256 and parse rule; '
+                         'fixed vs BPF byte compare',
                'claim': 'correctness only; no timing'}
     Path(result).write_text(json.dumps(verdict, indent=1, sort_keys=True) + '\n')
     for e in errors:
