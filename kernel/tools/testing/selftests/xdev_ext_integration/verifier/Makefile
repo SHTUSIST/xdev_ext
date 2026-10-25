@@ -13,8 +13,12 @@ LIBBPF_INCLUDE ?= /usr/include
 
 PROGS := wrong_class_hold desc_complete sleepable_build forged_ctx frame_write \
 	dma_wrong_class_hold dma_desc_complete
+# BPF compute callback negatives, run by run_compute.sh.
+COMPUTE_PROGS := compute_rw_build compute_set_len_complete compute_view_size \
+	compute_view_past compute_wrong_class compute_sleepable compute_desc
 PROG_DIR := $(SOURCE_TREE)/tools/testing/selftests/bpf/progs
-OBJECTS := $(PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
+OBJECTS := $(PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o) \
+	$(COMPUTE_PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
 STATE_PROGS := state_ce state_build
 REL_PROGS := rel_view_write rel_view_complete
 REL_OBJECTS := $(REL_PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
@@ -30,6 +34,8 @@ endif
 all: $(OBJECTS) $(STATE_OBJECTS) $(REL_OBJECTS) $(BUILD_DIR)/ce_abi_good.bpf.o $(BUILD_DIR)/ce_abi_old.bpf.o
 
 state: $(STATE_OBJECTS)
+
+compute: $(COMPUTE_PROGS:%=$(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o)
 
 $(BUILD_DIR)/ce_abi_good.bpf.o: $(verifier_dir)/ce_abi_probe.bpf.c | $(BUILD_DIR)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -I$(PROG_DIR) -c $< -o $@
@@ -52,4 +58,4 @@ $(STATE_OBJECTS) $(REL_OBJECTS): $(BUILD_DIR)/xdev_ext_mech_fail_%.bpf.o: \
 		$(SOURCE_TREE)/include/uapi/linux/xdev_ext_mech.h | $(BUILD_DIR)
 	$(CLANG) $(BPF_CFLAGS) $(BPF_INCLUDES) -I$(PROG_DIR) -c $< -o $@
 
-.PHONY: all state
+.PHONY: all state compute

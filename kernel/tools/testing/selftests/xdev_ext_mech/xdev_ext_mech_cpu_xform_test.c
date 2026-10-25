@@ -404,9 +404,139 @@ static bool test_program_selection(void)
 	return true;
 }
 
+/*
+ * BPF compute transform (Documentation/userspace-api/xdev_ext-compute.rst):
+ * id 10, an exact declared length change D in arg1, never applied by the
+ * fixed-transform code, and the bounds the compute kfuncs enforce.
+ */
+#ifdef XDEV_EXT_CPU_BPF_DELTA_MAX
+static bool test_bpf_class(void)
+{
+	CHECK(XDEV_EXT_CPU_XFORM_BPF == 10 && XDEV_EXT_CPU_XFORM_MAX == 11);
+	CHECK(XDEV_EXT_CPU_BPF_DELTA_MAX == 256);
+	CHECK(xdev_ext_mech_cpu_xform_bpf(XDEV_EXT_CPU_XFORM_BPF));
+	CHECK(!xdev_ext_mech_cpu_xform_fixed(XDEV_EXT_CPU_XFORM_BPF));
+	CHECK(!xdev_ext_mech_cpu_xform_variable(XDEV_EXT_CPU_XFORM_BPF));
+	CHECK(!xdev_ext_mech_cpu_xform_bpf(0));
+	CHECK(!xdev_ext_mech_cpu_xform_bpf(XDEV_EXT_CPU_XFORM_INFLATE));
+	CHECK(!xdev_ext_mech_cpu_xform_bpf(XDEV_EXT_CPU_XFORM_MAX));
+	return true;
+}
+
+static bool test_bpf_delta(void)
+{
+	__s64 d = 7;
+
+	CHECK(delta_is(XDEV_EXT_CPU_XFORM_BPF, 0, 0));
+	CHECK(delta_is(XDEV_EXT_CPU_XFORM_BPF, 4, 4));
+	CHECK(delta_is(XDEV_EXT_CPU_XFORM_BPF, (__u64)-4LL, -4));
+	CHECK(delta_is(XDEV_EXT_CPU_XFORM_BPF, XDEV_EXT_CPU_BPF_DELTA_MAX,
+		       XDEV_EXT_CPU_BPF_DELTA_MAX));
+	CHECK(delta_is(XDEV_EXT_CPU_XFORM_BPF, (__u64)-(__s64)XDEV_EXT_CPU_BPF_DELTA_MAX,
+		       -(long long)XDEV_EXT_CPU_BPF_DELTA_MAX));
+	CHECK(xdev_ext_mech_cpu_len_delta(XDEV_EXT_CPU_XFORM_BPF,
+					  XDEV_EXT_CPU_BPF_DELTA_MAX + 1, &d) == -EINVAL);
+	CHECK(xdev_ext_mech_cpu_len_delta(XDEV_EXT_CPU_XFORM_BPF,
+		(__u64)-(__s64)(XDEV_EXT_CPU_BPF_DELTA_MAX + 1), &d) == -EINVAL);
+	CHECK(xdev_ext_mech_cpu_len_delta(XDEV_EXT_CPU_XFORM_BPF, 1ULL << 32, &d) == -EINVAL);
+	CHECK(xdev_ext_mech_cpu_len_delta(XDEV_EXT_CPU_XFORM_BPF, 1ULL << 63, &d) == -EINVAL);
+	CHECK(d == 7);
+	return true;
+}
+
+static bool test_bpf_out_len(void)
+{
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 0, 100, 4096, 0, 100));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 0, 0, 4096, 0, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 4, 4092, 4096, 0, 4096));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 4, 4093, 4096, -EMSGSIZE, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, (__u64)-4LL, 4, 64, 0, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, (__u64)-4LL, 3, 64, -EBADMSG, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 0, 4097, 4096, -EINVAL, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, 257, 100, 4096, -EINVAL, 0));
+	CHECK(out_len_is(XDEV_EXT_CPU_XFORM_BPF, XDEV_EXT_CPU_BPF_DELTA_MAX,
+			 UINT32_MAX - 8, UINT32_MAX, -EMSGSIZE, 0));
+	return true;
+}
+
+/* The fixed-transform code never runs a BPF transform: nothing is written. */
+static bool test_bpf_not_applied_by_kernel_code(void)
+{
+	__u8 in[64];
+
+	fill(in, sizeof(in), 11);
+	CHECK(apply_is(XDEV_EXT_CPU_XFORM_BPF, 0, in, 60, 64, -EINVAL, NULL, 0));
+	CHECK(apply_is(XDEV_EXT_CPU_XFORM_BPF, 4, in, 60, 64, -EINVAL, NULL, 0));
+	return true;
+}
+
+static bool test_bpf_selection(void)
+{
+	/* The same length change, either way between fixed and BPF. */
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_BPF, 0, 0, XDEV_EXT_CPU_XFORM_CRC32C_SEAL, 0));
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_CRC32C_SEAL, 0, 0, XDEV_EXT_CPU_XFORM_BPF, 0));
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_BPF, 0, 4, XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 0));
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_XXH64_APPEND, 0, 1, XDEV_EXT_CPU_XFORM_BPF, 8));
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_BPF, 0, (__u64)-16LL, XDEV_EXT_CPU_XFORM_PARSE_STRIP, 16));
+	CHECK(!desc(XDEV_EXT_CPU_XFORM_BPF, 0, 4, XDEV_EXT_CPU_XFORM_BPF, 4));
+	/* A different change, an out-of-range change or a flag is refused. */
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 0, 8, XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 0) == -EINVAL);
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 0, (__u64)-4LL, XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 0) ==
+	      -EINVAL);
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 0, 4, XDEV_EXT_CPU_XFORM_BPF, 0) == -EINVAL);
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 0, 257, XDEV_EXT_CPU_XFORM_BPF, 257) == -EINVAL);
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 1, 0, XDEV_EXT_CPU_XFORM_BPF, 0) == -EINVAL);
+	/* No switch between BPF and variable output. */
+	CHECK(desc(XDEV_EXT_CPU_XFORM_BPF, 0, 0, XDEV_EXT_CPU_XFORM_DEFLATE, 8192) == -EINVAL);
+	CHECK(desc(XDEV_EXT_CPU_XFORM_DEFLATE, 0, 8192, XDEV_EXT_CPU_XFORM_BPF, 0) == -EINVAL);
+	return true;
+}
+
+/* bpf_xdev_ext_frame_rw(): [off, off + size) inside [data_off, frame_size). */
+static bool test_compute_view_rule(void)
+{
+	CHECK(xdev_ext_mech_compute_view_ok(360, 4096, 0, 1));
+	CHECK(xdev_ext_mech_compute_view_ok(360, 4096, 3735, 1));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 3736, 1));
+	CHECK(xdev_ext_mech_compute_view_ok(360, 4096, 3732, 4));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 3733, 4));
+	CHECK(xdev_ext_mech_compute_view_ok(360, 4096, 0, 3736));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 0, 3737));
+	CHECK(xdev_ext_mech_compute_view_ok(0, 4096, 0, 4096));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 0, 0));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, UINT32_MAX, 1));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 8, UINT64_MAX));
+	CHECK(!xdev_ext_mech_compute_view_ok(360, 4096, 8, 1ULL << 32));
+	CHECK(!xdev_ext_mech_compute_view_ok(4096, 4096, 0, 1));
+	CHECK(!xdev_ext_mech_compute_view_ok(4097, 4096, 0, 1));
+	return true;
+}
+
+/* bpf_xdev_ext_frame_set_len(): exactly L + D, and within the capacity. */
+static bool test_compute_len_rule(void)
+{
+	CHECK(xdev_ext_mech_compute_len_ok(100, 0, 4096, 100));
+	CHECK(!xdev_ext_mech_compute_len_ok(100, 0, 4096, 101));
+	CHECK(!xdev_ext_mech_compute_len_ok(100, 0, 4096, 99));
+	CHECK(xdev_ext_mech_compute_len_ok(100, 4, 4096, 104));
+	CHECK(!xdev_ext_mech_compute_len_ok(100, 4, 4096, 100));
+	CHECK(xdev_ext_mech_compute_len_ok(100, -4, 4096, 96));
+	CHECK(xdev_ext_mech_compute_len_ok(4092, 4, 4096, 4096));
+	CHECK(!xdev_ext_mech_compute_len_ok(4093, 4, 4096, 4097));
+	CHECK(!xdev_ext_mech_compute_len_ok(2, -4, 64, (__u32)-2));
+	CHECK(!xdev_ext_mech_compute_len_ok(4097, 0, 4096, 4097));
+	CHECK(xdev_ext_mech_compute_len_ok(0, 0, 0, 0));
+	return true;
+}
+#define FB(f) f
+#else
+#define FB(f) NULL
+#endif
+
 #define FN(f) f
 #else
 #define FN(f) NULL
+#define FB(f) NULL
 #endif
 
 int main(void)
@@ -426,6 +556,13 @@ int main(void)
 		{ "L7 randomized spans against the oracles", FN(test_random_against_oracle) },
 		{ "L7 variable output larger than destination fails", FN(test_variable_result) },
 		{ "L7 bounded program selection of a fixed transform", FN(test_program_selection) },
+		{ "L7 BPF compute transform id and class", FB(test_bpf_class) },
+		{ "L7 BPF compute declared length change", FB(test_bpf_delta) },
+		{ "L7 BPF compute output length bounds", FB(test_bpf_out_len) },
+		{ "L7 BPF compute is never applied by kernel transform code", FB(test_bpf_not_applied_by_kernel_code) },
+		{ "L7 BPF compute selection keeps the declared length change", FB(test_bpf_selection) },
+		{ "L7 BPF compute writable view stays inside the frame capacity", FB(test_compute_view_rule) },
+		{ "L7 BPF compute output length is exactly L + D", FB(test_compute_len_rule) },
 	};
 	unsigned int i, failed = 0;
 
@@ -435,7 +572,7 @@ int main(void)
 
 		printf("%s %u - %s%s\n", ok ? "ok" : "not ok", i + 1, tests[i].name,
 		       tests[i].run ? "" :
-		       " # missing API: io_uring/xdev_ext_mech_cpu_core.h (in-frame CPU transform contract)");
+		       " # missing API: io_uring/xdev_ext_mech_cpu_core.h (in-frame CPU transform or BPF compute contract)");
 		failed += !ok;
 	}
 	return failed ? EXIT_FAILURE : EXIT_SUCCESS;

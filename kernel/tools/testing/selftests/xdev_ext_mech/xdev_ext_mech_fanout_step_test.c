@@ -96,7 +96,8 @@ static void test_uapi_values(void)
 	EXPECT_EQ(xdev_ext_mech_class_known(10), 0);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 1);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_INFLATE, 9);
-	EXPECT_EQ(XDEV_EXT_CPU_XFORM_MAX, 10);
+	/* Id 10 is the BPF compute transform (xdev_ext-compute.rst). */
+	EXPECT_EQ(XDEV_EXT_CPU_XFORM_MAX, 11);
 	EXPECT_EQ(sizeof(struct xdev_ext_cpu_desc), 16);
 	/* The frozen layouts do not move. */
 	EXPECT_EQ(sizeof(struct xdev_ext_mech_stage_uapi), 32);
@@ -266,6 +267,67 @@ static void test_cpu_length_rule(void)
 	EXPECT_EQ(check(&c), 0);
 }
 
+/* XDEV_EXT_CPU_XFORM_BPF: arg1 is the exact declared length change D. */
+static void test_bpf_compute_stage_rules(void)
+{
+#ifdef XDEV_EXT_CPU_BPF_DELTA_MAX
+	struct xdev_ext_mech_stage_uapi st[] = { NVME_R(6), CPU(XDEV_EXT_CPU_XFORM_BPF, 0),
+						 NVME_W(7, 0) };
+	struct xdev_ext_mech_stage_uapi to_socket[] = { NVME_R(6),
+		CPU(XDEV_EXT_CPU_XFORM_BPF, 4), SOCK() };
+	struct xdev_ext_mech_stage_uapi via_iaa[] = { NVME_R(6),
+		CPU(XDEV_EXT_CPU_XFORM_BPF, (__u64)-4LL), IAA_C(), NVME_W(7, 0) };
+	struct xdev_ext_mech_stage_uapi to_afxdp[] = { NVME_R(6),
+		CPU(XDEV_EXT_CPU_XFORM_BPF, 0), AF_TX(0) };
+	struct xdev_ext_mech_create c, base = chain(XDEV_EXT_MECH_POOL_IOU_UMEM, 3, st);
+	struct xdev_ext_mech_stage_uapi u;
+
+	EXPECT_EQ(XDEV_EXT_CPU_XFORM_BPF, 10);
+	EXPECT_EQ(XDEV_EXT_CPU_BPF_DELTA_MAX, 256);
+	u = CPU(XDEV_EXT_CPU_XFORM_BPF, 0);
+	EXPECT_EQ(xdev_ext_mech_stage_role(&u), XDEV_EXT_MECH_ROLE_INPLACE);
+	u = CPU(XDEV_EXT_CPU_XFORM_BPF, (__u64)-4LL);
+	EXPECT_EQ(xdev_ext_mech_stage_role(&u), XDEV_EXT_MECH_ROLE_INPLACE);
+	/* A length-preserving program between NVMe READ and NVMe WRITE. */
+	EXPECT_EQ(check(&base), 0);
+	c = base; c.st[1].arg1 = XDEV_EXT_CPU_BPF_DELTA_MAX;
+	EXPECT_EQ(check(&c), -EOPNOTSUPP);
+	c = base; c.st[1].arg1 = 4;
+	EXPECT_EQ(check(&c), -EOPNOTSUPP);
+	c = base; c.st[1].arg1 = XDEV_EXT_CPU_BPF_DELTA_MAX + 1;
+	EXPECT_EQ(check(&c), -EINVAL);
+	c = base; c.st[1].arg1 = (__u64)-(__s64)(XDEV_EXT_CPU_BPF_DELTA_MAX + 1);
+	EXPECT_EQ(check(&c), -EINVAL);
+	c = base; c.st[1].arg1 = 1ULL << 40;
+	EXPECT_EQ(check(&c), -EINVAL);
+	c = base; c.st[1].fd = 3;
+	EXPECT_EQ(check(&c), -EINVAL);
+	c = base; c.st[1].flags = XDEV_EXT_MECH_STAGE_F_FANOUT;
+	EXPECT_EQ(check(&c), -EINVAL);
+	/* A length change may feed a class without fixed groups ... */
+	c = chain(XDEV_EXT_MECH_POOL_IOU_UMEM, 3, to_socket);
+	EXPECT_EQ(check(&c), 0);
+	c.st[1].arg1 = XDEV_EXT_CPU_BPF_DELTA_MAX;
+	EXPECT_EQ(check(&c), 0);
+	c.st[1].arg1 = (__u64)-(__s64)XDEV_EXT_CPU_BPF_DELTA_MAX;
+	EXPECT_EQ(check(&c), 0);
+	/* ... or a transform stage that restores the group before NVMe. */
+	c = chain(XDEV_EXT_MECH_POOL_IOU_UMEM, 4, via_iaa);
+	EXPECT_EQ(check(&c), 0);
+	c = chain(XDEV_EXT_MECH_POOL_XSK, 3, to_afxdp);
+	EXPECT_EQ(check(&c), 0);
+	c.st[1].arg1 = 8;
+	EXPECT_EQ(check(&c), -EOPNOTSUPP);
+	/* No CPU mapping of a peer allocation. */
+	c = base; c.pool_kind = XDEV_EXT_MECH_POOL_PEER; c.pool_fd = 5;
+	c.layout.frame_size = 65536; c.layout.seg_len = 65536; c.layout.group_bytes = 65536;
+	EXPECT_EQ(check(&c), -EOPNOTSUPP);
+#else
+	fprintf(stderr, "missing API: XDEV_EXT_CPU_XFORM_BPF / XDEV_EXT_CPU_BPF_DELTA_MAX\n");
+	failures++;
+#endif
+}
+
 static void test_stage_roles(void)
 {
 	struct xdev_ext_mech_stage_uapi u;
@@ -377,6 +439,7 @@ static const struct {
 	{ "L3 CREATE rejects misplaced fan-out flags", test_fanout_rejected },
 	{ "L7 CREATE rules of the CPU stage", test_cpu_stage_rules },
 	{ "L7 length-changing transform before a fixed-group class", test_cpu_length_rule },
+	{ "L7 CREATE rules of the BPF compute transform", test_bpf_compute_stage_rules },
 	{ "L2 stage roles", test_stage_roles },
 	{ "L2 references installed per publication", test_chain_refs },
 	{ "L3 concurrent group boundaries", test_group_end },
@@ -390,6 +453,7 @@ static const char *const names[] = {
 	"L3 CREATE rejects misplaced fan-out flags",
 	"L7 CREATE rules of the CPU stage",
 	"L7 length-changing transform before a fixed-group class",
+	"L7 CREATE rules of the BPF compute transform",
 	"L2 stage roles",
 	"L2 references installed per publication",
 	"L3 concurrent group boundaries",

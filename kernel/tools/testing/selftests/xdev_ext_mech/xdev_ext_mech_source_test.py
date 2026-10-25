@@ -115,7 +115,8 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertIsNotNone(macro)
         members = re.findall(r"\(\*(\w+)\)\(const struct xdev_ext_mech_ctx \*ctx\)",
                              macro.group(1))
-        self.assertEqual(members, ["prepare", "build", "complete"])
+        # compute: CPU class only (Documentation/userspace-api/xdev_ext-compute.rst).
+        self.assertEqual(members, ["prepare", "build", "complete", "compute"])
         self.assertLess(macro.group(1).index("__u32 abi_version;"),
                         macro.group(1).index("__u32 flags;"))
         for name in ("xdev_ext_nvme_mech_ops", "xdev_ext_afxdp_mech_ops",
