@@ -195,13 +195,20 @@ out:
 	return err;
 }
 
-/* On a refused object: the verifier's own words, from a full log. */
+/*
+ * On a refused object: the verifier's own words, from a full log. The last
+ * 6000 bytes go to stdout; with $XDEV_EXT_EXAMPLES_LOG_DIR set, the last
+ * FAIL_LOG_SIZE bytes of the (rotating) log also go to DIR/OBJECT.verifier.log.
+ */
 static void verify_explain(const char *path)
 {
 	struct bpf_object *obj = bpf_object__open_file(path, NULL);
+	const char *dir = getenv("XDEV_EXT_EXAMPLES_LOG_DIR");
+	const char *base = strrchr(path, '/');
 	struct bpf_program *prog;
 	char *log = calloc(1, FAIL_LOG_SIZE);
 
+	base = base ? base + 1 : path;
 	if (!obj || !log)
 		goto out;
 	bpf_object__for_each_program(prog, obj) {
@@ -212,6 +219,17 @@ static void verify_explain(const char *path)
 		size_t len = strlen(log), from = len > 6000 ? len - 6000 : 0;
 
 		printf("XDEV_EXT_EXAMPLE_VERIFIER_LOG_TAIL object=%s\n%s\n", path, log + from);
+		if (dir) {
+			char name[512];
+			FILE *f;
+
+			snprintf(name, sizeof(name), "%s/%s.verifier.log", dir, base);
+			f = fopen(name, "w");
+			if (f) {
+				fwrite(log, 1, len, f);
+				fclose(f);
+			}
+		}
 	}
 out:
 	if (obj)

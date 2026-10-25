@@ -27,11 +27,21 @@ for f in /sys/class/nvme/nvme*/serial; do
 done
 [ -n "$res" ] || { echo 'XDEV_EXT_EXAMPLES_CASE=FAIL name=results-disk'; exit 1; }
 
-fail() { echo "XDEV_EXT_EXAMPLES_CASE=FAIL name=$1 ${2:-}"; for l in "$logs"/*.log; do echo "== $l"; cat "$l"; done; exit 1; }
+# A failure still leaves what was recorded (and verifier logs) on the results disk.
+save() {
+	(cd "$out" && tar -cf /tmp/examples-results.tar .) &&
+		dd if=/tmp/examples-results.tar of="$res" bs=1M conv=fsync 2>"$logs/dd.log" && sync
+}
+fail() {
+	echo "XDEV_EXT_EXAMPLES_CASE=FAIL name=$1 ${2:-}"
+	for l in "$logs"/*.log; do echo "== $l"; cat "$l"; done
+	save || echo 'XDEV_EXT_EXAMPLES_RESULTS=FAIL'
+	exit 1
+}
 pass() { echo "XDEV_EXT_EXAMPLES_CASE=PASS name=$1 ${2:-}"; }
 
 # 1. Every example object passes the verifier; record its processed insns.
-"$tool" verify "$obj"/*.bpf.o >"$out/verifier.txt" 2>"$logs/verify.log"
+XDEV_EXT_EXAMPLES_LOG_DIR=$out "$tool" verify "$obj"/*.bpf.o >"$out/verifier.txt" 2>"$logs/verify.log"
 rc=$?
 cat "$out/verifier.txt"
 [ "$rc" = 0 ] || fail verifier "rc=$rc"
@@ -90,8 +100,6 @@ case_run sha256_append sha256_append.bpf.o sha256_append_ops '' \
 "$ctl" detach --pin "$pin" >/dev/null 2>&1 || fail detach
 
 # The records leave through the results disk.
-(cd "$out" && tar -cf /tmp/examples-results.tar .) || fail results-tar
-dd if=/tmp/examples-results.tar of="$res" bs=1M conv=fsync 2>"$logs/dd.log" || fail results-write
-sync
+save || { echo 'XDEV_EXT_EXAMPLES_CASE=FAIL name=results-write'; exit 1; }
 echo "XDEV_EXT_EXAMPLES_RESULTS bytes=$(wc -c </tmp/examples-results.tar) files=$(ls "$out" | wc -l)"
 echo 'XDEV_EXT_EXAMPLES_GUEST=PASS'
