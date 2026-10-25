@@ -60,14 +60,14 @@ class ComputeWiring(unittest.TestCase):
         generic = re.search(r'#define XDEV_EXT_MECH_STRUCT_OPS\(cls, id, init_member_fn, validate_fn\)'
                             r'\s*\\\s*XDEV_EXT_MECH_STRUCT_OPS_X\(([^)]*)\)', ops)
         self.assertIsNotNone(generic)
-        self.assertEqual([a.strip() for a in generic.group(1).split(',')][-2:],
+        self.assertEqual([a.strip(' \t\n\\') for a in generic.group(1).split(',')][-2:],
                          ['xdev_ext_mech_ops_check_member', 'NULL'])
         cpu = re.search(r'XDEV_EXT_MECH_STRUCT_OPS_X\(cpu, XDEV_EXT_MECH_CLASS_CPU,([^;]*)\);', ops)
         self.assertIsNotNone(cpu)
-        args = [a.strip() for a in cpu.group(1).split(',')]
+        args = [a.strip(' \t\n\\') for a in cpu.group(1).split(',')]
         self.assertEqual(args, ['xdev_ext_mech_ops_init_member', 'xdev_ext_mech_ops_validate',
                                 'xdev_ext_cpu_mech_ops_check_member', 'xdev_ext_mech_ops__compute'])
-        self.assertEqual(len(re.findall(r'XDEV_EXT_MECH_STRUCT_OPS_X\(\w+,', ops)), 1)
+        self.assertEqual(re.findall(r'^XDEV_EXT_MECH_STRUCT_OPS_X\((\w+),', ops, re.M), ['cpu'])
         self.assertIn('XDEV_EXT_OPS_CFI_STUB(xdev_ext_mech_ops__compute, struct xdev_ext_mech_ctx)', ops)
         # The CPU member table lists compute as optional and never sleeping.
         table = re.search(r'xdev_ext_cpu_mech_ops_members\[\] = {\n(.*?)\n};', ops, re.S)

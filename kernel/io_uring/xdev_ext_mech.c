@@ -318,6 +318,13 @@ int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mec
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_call);
 
+/* The generation is pinned before ->bind and kept until session release. */
+bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st, u32 member)
+{
+	return st && st->s && xdev_ext_mech_ops_has_member(st->s->ops[st->class_id], member);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_has_member);
+
 /* Frame ownership words and session counters. */
 
 int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool *pool, u32 index, u32 from,
@@ -1710,6 +1717,65 @@ static int xdev_ext_mech_build(struct xdev_ext_mech_session *s, struct xdev_ext_
 		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_REJECTS, 1);
 	return err;
 }
+
+/*
+ * Worker, inside a CPU stage's ->submit: the frames are INFLIGHT and their
+ * lifecycle claims exclusive, exactly as for a fixed transform.  The program
+ * runs once over the whole batch; C checks every length before and after it
+ * and applies the lengths only when all of them are data_len + @delta.
+ */
+int xdev_ext_mech_batch_compute(struct xdev_ext_mech_batch *b, s32 delta)
+{
+	struct xdev_ext_mech_session *s = b->s;
+	struct xdev_ext_mech_stage *st = &s->st[b->bs.stage];
+	struct xdev_ext_binding_ctx_v2 base = xdev_ext_mech_base(st, b->bytes);
+	u32 out[XDEV_EXT_MECH_MAX_FRAMES], want, i;
+	struct xdev_ext_mech_call_args a;
+	s32 ret = -EPROTO;
+	bool illegal;
+	int err;
+
+	if (st->class_id != XDEV_EXT_MECH_CLASS_CPU || !b->nr_frames ||
+	    b->nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
+		return -EINVAL;
+	/* Every frame can take exactly L + D bytes before any byte changes. */
+	for (i = 0; i < b->nr_frames; i++) {
+		if (b->f[i].data_off > s->pool.frame_size)
+			return -EINVAL;
+		err = xdev_ext_mech_cpu_out_len(XDEV_EXT_CPU_XFORM_BPF, (u64)(s64)delta,
+					   b->f[i].data_len,
+					   s->pool.frame_size - b->f[i].data_off, &want);
+		if (err)
+			return err;
+		out[i] = b->f[i].data_len;
+	}
+	xdev_ext_mech_worker_args(s, st, b, XDEV_EXT_MECH_MEMBER_COMPUTE, &base, &a);
+	a.out_len = out;
+	a.len_delta = delta;
+	err = xdev_ext_mech_call(st, &a, &ret, NULL);
+	if (err) {
+		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+		return err == -ENOENT ? -EOPNOTSUPP : err;
+	}
+	ret = xdev_ext_mech_ret_resolve(st->class_id, XDEV_EXT_MECH_MEMBER_COMPUTE,
+				   XDEV_EXT_MECH_SITE_WORKER, ret, &illegal);
+	if (illegal)
+		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+	if (ret)
+		return ret;
+	for (i = 0; i < b->nr_frames; i++)
+		if ((s64)out[i] != (s64)b->f[i].data_len + delta) {
+			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+			return -EPROTO;
+		}
+	for (i = 0; i < b->nr_frames; i++) {
+		err = xdev_ext_mech_batch_cpu_length(b, i, out[i]);
+		if (err)
+			return err;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_compute);
 
 /* Acquire frame lifecycle only after provider custody made this batch HELD. */
 static void xdev_ext_mech_life_undo(struct xdev_ext_mech_session *s,

@@ -19,7 +19,7 @@ extern __u8 *bpf_xdev_ext_desc(const struct xdev_ext_mech_ctx *ctx, __u32 slot,
 /* Completion copy @slot; complete only. */
 extern __u8 *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *ctx, __u32 slot,
 			 const size_t rdonly_buf_size) __ksym;
-/* Chunk bytes [off, off + size) of batch frame @pos; build and complete. */
+/* Chunk bytes [off, off + size) of batch frame @pos; build, complete, compute. */
 extern __u8 *bpf_xdev_ext_frame(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
 			   __u32 off, const size_t rdonly_buf_size) __ksym;
 /* crc32c() without pre- or post-inversion over chunk bytes of frame @pos. */
@@ -28,6 +28,17 @@ extern __u32 bpf_xdev_ext_frame_crc32c(const struct xdev_ext_mech_ctx *ctx, __u3
 /* crc32c() without pre- or post-inversion over a stack buffer. */
 extern __u32 bpf_xdev_ext_crc32c(const void *buf, __u32 buf__sz,
 			    __u32 seed) __ksym;
+/*
+ * CPU compute only (Documentation/userspace-api/xdev_ext-compute.rst): the
+ * valid length of frame @pos on entry; a writable view counted from its first
+ * valid byte, inside the frame capacity; record its output length, which must
+ * be the entry length plus the length change declared at CREATE.
+ */
+extern __u32 bpf_xdev_ext_frame_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos) __ksym;
+extern __u8 *bpf_xdev_ext_frame_rw(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+			      __u32 off, const size_t rdwr_buf_size) __ksym;
+extern int bpf_xdev_ext_frame_set_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+				 __u32 len) __ksym;
 /* Private stage state; AF_XDP RX complete only, size in [1, 256]. */
 extern __u8 *bpf_xdev_ext_afxdp_state(const struct xdev_ext_mech_ctx *ctx,
 				 const size_t rdwr_buf_size) __ksym;

@@ -60,6 +60,9 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		    const struct xdev_ext_mech_call_args *a, s32 *ret,
 		    struct xdev_ext_mech_hold_intent *hold);
 
+/* Any context: @ops (a pinned generation or C table) has a callback for @member. */
+bool xdev_ext_mech_ops_has_member(const void *ops, u32 member);
+
 /*
  * Process context, from struct_ops ->unreg or when a C reference table is
  * cleared or replaced: @ops of @class_id is no longer what new sessions get;

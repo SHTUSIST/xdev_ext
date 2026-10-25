@@ -121,6 +121,8 @@ struct xdev_ext_ce_backend_ops;
  * program only for prepare; no member requests a private stack, so a
  * softirq RX complete may nest inside a worker build of the same program.
  * CE requires XDEV_EXT_CE_MECH_ABI_VERSION; the other types use XDEV_EXT_MECH_ABI_VERSION.
+ * Every type has the compute slot so the layouts stay identical; only the
+ * CPU type accepts a program for it (Documentation/userspace-api/xdev_ext-compute.rst).
  */
 #define XDEV_EXT_MECH_OPS_TYPE(name)						\
 struct name {								\
@@ -132,6 +134,8 @@ struct name {								\
 	__s32 (*build)(const struct xdev_ext_mech_ctx *ctx);			\
 	/* required, never sleeps */					\
 	__s32 (*complete)(const struct xdev_ext_mech_ctx *ctx);		\
+	/* optional, CPU class only, never sleeps, once per batch */	\
+	__s32 (*compute)(const struct xdev_ext_mech_ctx *ctx);		\
 }
 
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_nvme_mech_ops);
@@ -190,6 +194,8 @@ struct xdev_ext_mech_call {
 	const void *cqe;		/* complete only */
 	u32 cqe_size;
 	u32 cqe_cap;
+	u32 *out_len;			/* compute only: per-frame output lengths */
+	s32 len_delta;			/* compute only: declared change D */
 };
 
 /* Any context: the envelope of a trusted callback ctx, NULL if not sealed. */
@@ -209,7 +215,8 @@ xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *ctx)
  * else from batch_id; xdev_ext_mech_call_active() takes all four from these
  * fields.
  * The scratch area is caller-owned, at least desc_size * desc_cap bytes, and
- * zeroed by the caller.
+ * zeroed by the caller.  compute takes out_len, nr_frames entries preset to
+ * each frame's data_len, and the declared change len_delta.
  */
 struct xdev_ext_mech_call_args {
 	u32 member;			/* enum xdev_ext_mech_member */
@@ -230,6 +237,8 @@ struct xdev_ext_mech_call_args {
 	const void *cqe;
 	u32 cqe_size;
 	u32 cqe_cap;
+	u32 *out_len;
+	s32 len_delta;
 };
 
 /*
@@ -618,6 +627,17 @@ struct xdev_ext_ce_xfer {
 
 /* Worker context: record an exclusive CPU stage's bounded output length. */
 int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos, u32 len);
+/*
+ * Worker context, from a CPU stage's ->submit: run the compute program of the
+ * generation the session pinned over @b, then give every frame exactly
+ * data_len + @delta bytes.  0; -EBADMSG or -EMSGSIZE, before the program
+ * runs, when a frame cannot take that length; the program's own -errno;
+ * -EOPNOTSUPP without a compute program; -EPROTO for an illegal return, a
+ * kfunc misuse or a frame left at another length.  Never retry on failure.
+ */
+int xdev_ext_mech_batch_compute(struct xdev_ext_mech_batch *b, s32 delta);
+/* Process or worker context: the generation @st's session pinned has @member. */
+bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st, u32 member);
 /* Worker context: snapshot the current immutable per-frame claim. */
 int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch *b,
                                    u32 pos, u64 *owner, u64 *generation);
@@ -725,14 +745,24 @@ __u8 *bpf_xdev_ext_desc(const struct xdev_ext_mech_ctx *ctx, __u32 slot,
 /* Any context, during complete: completion copy @slot. */
 __u8 *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *ctx, __u32 slot,
 		  const size_t rdonly_buf_size);
-/* Any context, during build or complete: chunk bytes [off, off + size). */
+/* Any context, during build, complete or compute: chunk bytes [off, off + size). */
 __u8 *bpf_xdev_ext_frame(const struct xdev_ext_mech_ctx *ctx, __u32 pos, __u32 off,
 		    const size_t rdonly_buf_size);
-/* Any context, during build or complete: crc32c() over chunk bytes. */
+/* Any context, during build, complete or compute: crc32c() over chunk bytes. */
 __u32 bpf_xdev_ext_frame_crc32c(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
 			   __u32 off, __u32 len, __u32 seed);
 /* Any context: crc32c() over a program stack buffer. */
 __u32 bpf_xdev_ext_crc32c(const void *buf, __u32 buf__sz, __u32 seed);
+/* Worker context, during compute: valid length of frame @pos on entry. */
+__u32 bpf_xdev_ext_frame_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos);
+/*
+ * Worker context, during compute: writable bytes [off, off + size) counted
+ * from frame @pos's first valid byte, inside frame_size - data_off.
+ */
+__u8 *bpf_xdev_ext_frame_rw(const struct xdev_ext_mech_ctx *ctx, __u32 pos, __u32 off,
+		       const size_t rdwr_buf_size);
+/* Worker context, during compute: record frame @pos's output length, L + D. */
+int bpf_xdev_ext_frame_set_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos, __u32 len);
 /* AF_XDP RX complete, pool rx_lock held: writable stage protocol state. */
 __u8 *bpf_xdev_ext_afxdp_state(const struct xdev_ext_mech_ctx *ctx,
 			     const size_t rdwr_buf_size);

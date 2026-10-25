@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Fixed kernel transforms over the registered CPU mapping. Variable output
  * uses separate, CREATE-reserved frames of the same pool and its producer lease.
+ * XDEV_EXT_CPU_XFORM_BPF runs the verified compute member of the pinned CPU
+ * struct_ops generation instead (Documentation/userspace-api/xdev_ext-compute.rst).
  * No user function pointers, payload staging allocation, or per-request allocation.
  */
 #include <crypto/acompress.h>
@@ -86,7 +88,13 @@ static int xdev_ext_cpu_bind(struct xdev_ext_mech_stage *st,
  if (!cs)
   return -ENOMEM;
  cs->depth = xdev_ext_mech_session_depth(st->s);
- if (xdev_ext_mech_cpu_xform_fixed(u->arg0)) {
+ /* No silent C path: BPF compute needs a compute program at CREATE. */
+ if (xdev_ext_mech_cpu_xform_bpf(u->arg0) &&
+     !xdev_ext_mech_stage_has_member(st, XDEV_EXT_MECH_MEMBER_COMPUTE)) {
+  kfree(cs);
+  return -EOPNOTSUPP;
+ }
+ if (xdev_ext_mech_cpu_xform_fixed(u->arg0) || xdev_ext_mech_cpu_xform_bpf(u->arg0)) {
   st->priv = cs;
   return 0;
  }
@@ -177,6 +185,10 @@ static int xdev_ext_cpu_validate(struct xdev_ext_mech_stage *st,
  err = xdev_ext_mech_cpu_desc_check(d, st->arg0, st->arg1);
  if (err)
   return err;
+ /* A program may pick BPF compute only when its generation has one. */
+ if (xdev_ext_mech_cpu_xform_bpf(d->xform) &&
+     !xdev_ext_mech_stage_has_member(st, XDEV_EXT_MECH_MEMBER_COMPUTE))
+  return -EOPNOTSUPP;
  cs->selected = *d;
  cs->staged = b;
  return 0;
@@ -198,6 +210,16 @@ static int xdev_ext_cpu_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_m
  if (cs->staged != b)
   return -EPROTO;
  cs->staged = NULL;
+ if (xdev_ext_mech_cpu_xform_bpf(cs->selected.xform)) {
+  __s64 delta;
+
+  /* Once per batch; a failure is terminal, the payload may be half changed. */
+  err = xdev_ext_mech_cpu_len_delta(cs->selected.xform, cs->selected.param, &delta);
+  if (!err)
+   err = xdev_ext_mech_batch_compute(b, (s32)delta);
+  xdev_ext_mech_batch_complete(b, ticket, err);
+  return 0;
+ }
  for (i = 0; i < nr; i++) {
   err = xdev_ext_mech_batch_frame(b, i, &src[i]);
   if (err)

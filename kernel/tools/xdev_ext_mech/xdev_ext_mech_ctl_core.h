@@ -697,8 +697,11 @@ static inline bool xdev_ext_mech_ctl_report_ce_chain(char *buf, size_t size,
 #define XDEV_EXT_MECH_CTL_CHAINS_V2 1
 static inline int xdev_ext_mech_ctl_xform_parse(const char *name, __u32 *xform)
 {
+ /* bpf-compute runs the attached CPU program's compute member; --xform-arg is
+  * its declared length change. ctl's byte oracle cannot judge it. */
  static const char *const names[] = { "crc32c-append", "crc32c-strip", "crc32c-seal",
-  "crc32c-check", "parse-strip", "xxh64-append", "sha256-append", "deflate", "inflate" };
+  "crc32c-check", "parse-strip", "xxh64-append", "sha256-append", "deflate", "inflate",
+  "bpf-compute" };
  unsigned i;
  if (!name || !xform) return -EINVAL;
  for (i=0;i<sizeof(names)/sizeof(names[0]);i++)

@@ -40,13 +40,17 @@
 		      offsetof(struct type, build) ==			\
 		      offsetof(struct xdev_ext_nvme_mech_ops, build) &&	\
 		      offsetof(struct type, complete) ==		\
-		      offsetof(struct xdev_ext_nvme_mech_ops, complete))
+		      offsetof(struct xdev_ext_nvme_mech_ops, complete) &&	\
+		      offsetof(struct type, compute) ==			\
+		      offsetof(struct xdev_ext_nvme_mech_ops, compute))
 
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_afxdp_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_ce_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_dma_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_iaa_mech_ops);
+XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_cpu_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_socket_mech_ops);
+XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_net_mech_ops);
 #ifdef CONFIG_XDEV_EXT_MECH_C_REFERENCE
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_mech_c_ops);
 #endif
@@ -81,9 +85,16 @@ static xdev_ext_mech_cb_t xdev_ext_mech_member_fn(const void *ops, u32 member)
 		return o->build;
 	case XDEV_EXT_MECH_MEMBER_COMPLETE:
 		return o->complete;
+	case XDEV_EXT_MECH_MEMBER_COMPUTE:
+		return o->compute;
 	default:
 		return NULL;
 	}
+}
+
+bool xdev_ext_mech_ops_has_member(const void *ops, u32 member)
+{
+	return ops && xdev_ext_mech_member_fn(ops, member);
 }
 
 static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
@@ -103,6 +114,11 @@ static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
 	case XDEV_EXT_MECH_MEMBER_COMPLETE:
 		return a->callsite != XDEV_EXT_MECH_SITE_CREATE &&
 		       (a->cqe || (!a->cqe_size && !a->cqe_cap));
+	case XDEV_EXT_MECH_MEMBER_COMPUTE:
+		/* One batch on the worker; no scratch and no completion copy. */
+		return a->callsite == XDEV_EXT_MECH_SITE_WORKER && a->b && a->nr_frames &&
+		       a->out_len && !a->scratch && !a->desc_size && !a->desc_cap &&
+		       !a->cqe && !a->cqe_size && !a->cqe_cap;
 	default:
 		return false;
 	}
@@ -162,6 +178,9 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		call.cqe = a->cqe;
 		call.cqe_size = a->cqe_size;
 		call.cqe_cap = a->cqe_cap;
+	} else if (a->member == XDEV_EXT_MECH_MEMBER_COMPUTE) {
+		call.out_len = a->out_len;
+		call.len_delta = a->len_delta;
 	}
 
 	WRITE_ONCE(call.magic, XDEV_EXT_MECH_CALL_MAGIC);
@@ -173,14 +192,15 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 	return call.protocol_error ? -EPROTO : 0;
 }
 
-/* Bytes [off, off + len) of frame @pos's chunk during build or complete. */
+/* Bytes [off, off + len) of frame @pos's chunk during build, complete or compute. */
 static u8 *xdev_ext_mech_frame_bytes(struct xdev_ext_mech_call *c, u32 pos, u32 off,
 				u64 len)
 {
 	const struct xdev_ext_mech_frame *f;
 
 	if ((c->member != XDEV_EXT_MECH_MEMBER_BUILD &&
-	     c->member != XDEV_EXT_MECH_MEMBER_COMPLETE) ||
+	     c->member != XDEV_EXT_MECH_MEMBER_COMPLETE &&
+	     c->member != XDEV_EXT_MECH_MEMBER_COMPUTE) ||
 	    c->callsite == XDEV_EXT_MECH_SITE_RX_HOLD_RESULT || !c->frames ||
 	    pos >= c->nr_frames || !len)
 		return NULL;
@@ -188,6 +208,16 @@ static u8 *xdev_ext_mech_frame_bytes(struct xdev_ext_mech_call *c, u32 pos, u32 
 	if (!f->kaddr || !xdev_ext_mech_span_in(off, len, c->frame_size))
 		return NULL;
 	return (u8 *)f->kaddr + off;
+}
+
+/* Frame @pos of the batch a compute callback runs over, or NULL. */
+static const struct xdev_ext_mech_frame *xdev_ext_mech_compute_frame(struct xdev_ext_mech_call *c,
+								u32 pos)
+{
+	if (c->member != XDEV_EXT_MECH_MEMBER_COMPUTE || !c->frames || pos >= c->nr_frames ||
+	    !c->frames[pos].kaddr)
+		return NULL;
+	return &c->frames[pos];
 }
 
 __bpf_kfunc_start_defs();
@@ -264,6 +294,61 @@ __bpf_kfunc __u32 bpf_xdev_ext_crc32c(const void *buf, __u32 buf__sz, __u32 seed
 	return crc32c(seed, buf, buf__sz);
 }
 
+/* A position outside the batch latches a protocol error. */
+__bpf_kfunc __u32 bpf_xdev_ext_frame_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos)
+{
+	struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+	const struct xdev_ext_mech_frame *f;
+
+	if (!c)
+		return 0;
+	f = xdev_ext_mech_compute_frame(c, pos);
+	if (!f) {
+		c->protocol_error = 1;
+		return 0;
+	}
+	return f->data_len;
+}
+
+/*
+ * The frame is exclusively this CPU stage's (OUT_PENDING, INFLIGHT) while
+ * compute runs; @off counts from the first valid byte and the view may reach
+ * the end of the chunk, so a program can append.
+ */
+__bpf_kfunc __u8 *bpf_xdev_ext_frame_rw(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+				   __u32 off, const size_t rdwr_buf_size)
+{
+	struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+	const struct xdev_ext_mech_frame *f;
+
+	if (!c)
+		return NULL;
+	f = xdev_ext_mech_compute_frame(c, pos);
+	if (!f || !xdev_ext_mech_compute_view_ok(f->data_off, c->frame_size, off, rdwr_buf_size))
+		return NULL;
+	return (u8 *)f->kaddr + f->data_off + off;
+}
+
+/* C applies the recorded lengths only after compute returned 0. */
+__bpf_kfunc int bpf_xdev_ext_frame_set_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+				      __u32 len)
+{
+	struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+	const struct xdev_ext_mech_frame *f;
+
+	if (!c)
+		return -EINVAL;
+	f = xdev_ext_mech_compute_frame(c, pos);
+	if (!f || !c->out_len || f->data_off >= c->frame_size ||
+	    !xdev_ext_mech_compute_len_ok(f->data_len, c->len_delta,
+				     c->frame_size - f->data_off, len)) {
+		c->protocol_error = 1;
+		return -EINVAL;
+	}
+	c->out_len[pos] = len;
+	return 0;
+}
+
 __bpf_kfunc_end_defs();
 
 EXPORT_SYMBOL_GPL(bpf_xdev_ext_info);
@@ -272,6 +357,9 @@ EXPORT_SYMBOL_GPL(bpf_xdev_ext_cqe);
 EXPORT_SYMBOL_GPL(bpf_xdev_ext_frame);
 EXPORT_SYMBOL_GPL(bpf_xdev_ext_frame_crc32c);
 EXPORT_SYMBOL_GPL(bpf_xdev_ext_crc32c);
+EXPORT_SYMBOL_GPL(bpf_xdev_ext_frame_len);
+EXPORT_SYMBOL_GPL(bpf_xdev_ext_frame_rw);
+EXPORT_SYMBOL_GPL(bpf_xdev_ext_frame_set_len);
 
 BTF_KFUNCS_START(xdev_ext_mech_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_xdev_ext_info, KF_TRUSTED_ARGS | KF_RET_NULL)
@@ -302,6 +390,26 @@ BTF_ID(func, bpf_xdev_ext_frame)
 BTF_ID(func, bpf_xdev_ext_frame_crc32c)
 BTF_ID(func, bpf_xdev_ext_crc32c)
 BTF_SET_END(xdev_ext_mech_complete_kfuncs)
+
+/* The shared kfuncs a CPU compute program may also call. */
+BTF_SET_START(xdev_ext_mech_compute_kfuncs)
+BTF_ID(func, bpf_xdev_ext_frame)
+BTF_ID(func, bpf_xdev_ext_frame_crc32c)
+BTF_ID(func, bpf_xdev_ext_crc32c)
+BTF_SET_END(xdev_ext_mech_compute_kfuncs)
+
+/* compute only: a separate set, so no other member or type can see them. */
+BTF_KFUNCS_START(xdev_ext_mech_compute_kfunc_ids)
+BTF_ID_FLAGS(func, bpf_xdev_ext_frame_len, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_frame_rw, KF_TRUSTED_ARGS | KF_RET_NULL)
+BTF_ID_FLAGS(func, bpf_xdev_ext_frame_set_len, KF_TRUSTED_ARGS)
+BTF_KFUNCS_END(xdev_ext_mech_compute_kfunc_ids)
+
+BTF_SET_START(xdev_ext_mech_compute_only_kfuncs)
+BTF_ID(func, bpf_xdev_ext_frame_len)
+BTF_ID(func, bpf_xdev_ext_frame_rw)
+BTF_ID(func, bpf_xdev_ext_frame_set_len)
+BTF_SET_END(xdev_ext_mech_compute_only_kfuncs)
 
 /* struct_ops plumbing shared by the three types. */
 
@@ -344,6 +452,21 @@ static const struct xdev_ext_ops_desc xdev_ext_mech_ops_desc = {
 	.nr_members = ARRAY_SIZE(xdev_ext_mech_ops_members),
 };
 
+/* The CPU type alone takes a compute program; it never sleeps. */
+static const struct xdev_ext_ops_member xdev_ext_cpu_mech_ops_members[] = {
+	{ .off = offsetof(struct xdev_ext_cpu_mech_ops, prepare), .sleepable = true },
+	{ .off = offsetof(struct xdev_ext_cpu_mech_ops, build), .required = true },
+	{ .off = offsetof(struct xdev_ext_cpu_mech_ops, complete), .required = true },
+	{ .off = offsetof(struct xdev_ext_cpu_mech_ops, compute) },
+};
+
+static const struct xdev_ext_ops_desc xdev_ext_cpu_mech_ops_desc = {
+	.fields = xdev_ext_mech_ops_fields,
+	.nr_fields = ARRAY_SIZE(xdev_ext_mech_ops_fields),
+	.members = xdev_ext_cpu_mech_ops_members,
+	.nr_members = ARRAY_SIZE(xdev_ext_cpu_mech_ops_members),
+};
+
 static const struct xdev_ext_ops_desc xdev_ext_ce_mech_ops_desc = {
 	.fields = xdev_ext_ce_mech_ops_fields,
 	.nr_fields = ARRAY_SIZE(xdev_ext_ce_mech_ops_fields),
@@ -382,6 +505,13 @@ static int xdev_ext_mech_ops_validate(void *kdata)
 	return xdev_ext_ops_validate(&xdev_ext_mech_ops_desc, kdata);
 }
 
+static int xdev_ext_cpu_mech_ops_check_member(const struct btf_type *t,
+					 const struct btf_member *member,
+					 const struct bpf_prog *prog)
+{
+	return xdev_ext_ops_check_member(&xdev_ext_cpu_mech_ops_desc, t, member, prog);
+}
+
 static int xdev_ext_mech_reg(u32 class_id, void *kdata, struct bpf_link *link)
 {
 	return xdev_ext_ops_publish(&xdev_ext_mech_registry, class_id, kdata, link);
@@ -413,9 +543,14 @@ static const struct bpf_verifier_ops xdev_ext_mech_verifier_ops = {
 XDEV_EXT_OPS_CFI_STUB(xdev_ext_mech_ops__prepare, struct xdev_ext_mech_ctx)
 XDEV_EXT_OPS_CFI_STUB(xdev_ext_mech_ops__build, struct xdev_ext_mech_ctx)
 XDEV_EXT_OPS_CFI_STUB(xdev_ext_mech_ops__complete, struct xdev_ext_mech_ctx)
+XDEV_EXT_OPS_CFI_STUB(xdev_ext_mech_ops__compute, struct xdev_ext_mech_ctx)
 
-/* One struct_ops type per class; reg/unreg know their registry slot. */
-#define XDEV_EXT_MECH_STRUCT_OPS(cls, id, init_member_fn, validate_fn)				\
+/*
+ * One struct_ops type per class; reg/unreg know their registry slot.  A NULL
+ * @compute_stub makes bpf_struct_ops_supported() refuse a compute program for
+ * that type at load time.
+ */
+#define XDEV_EXT_MECH_STRUCT_OPS_X(cls, id, init_member_fn, validate_fn, check_member_fn, compute_stub) \
 static int xdev_ext_##cls##_mech_reg(void *kdata, struct bpf_link *link)	\
 {									\
 	return xdev_ext_mech_reg(id, kdata, link);				\
@@ -428,11 +563,12 @@ static struct xdev_ext_##cls##_mech_ops xdev_ext_##cls##_mech_cfi_stubs = {	\
 	.prepare = xdev_ext_mech_ops__prepare,				\
 	.build = xdev_ext_mech_ops__build,					\
 	.complete = xdev_ext_mech_ops__complete,				\
+	.compute = compute_stub,						\
 };									\
 static struct bpf_struct_ops bpf_xdev_ext_##cls##_mech_ops = {		\
 	.verifier_ops = &xdev_ext_mech_verifier_ops,				\
 	.init = xdev_ext_ops_init,						\
-	.check_member = xdev_ext_mech_ops_check_member,			\
+	.check_member = check_member_fn,					\
 	.init_member = init_member_fn,			\
 	.reg = xdev_ext_##cls##_mech_reg,					\
 	.unreg = xdev_ext_##cls##_mech_unreg,				\
@@ -441,6 +577,10 @@ static struct bpf_struct_ops bpf_xdev_ext_##cls##_mech_ops = {		\
 	.name = "xdev_ext_" #cls "_mech_ops",				\
 	.owner = THIS_MODULE,						\
 }
+
+#define XDEV_EXT_MECH_STRUCT_OPS(cls, id, init_member_fn, validate_fn)	\
+	XDEV_EXT_MECH_STRUCT_OPS_X(cls, id, init_member_fn, validate_fn,	\
+			      xdev_ext_mech_ops_check_member, NULL)
 
 XDEV_EXT_MECH_STRUCT_OPS(nvme, XDEV_EXT_MECH_CLASS_NVME,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
@@ -451,8 +591,9 @@ XDEV_EXT_MECH_STRUCT_OPS(ce, XDEV_EXT_MECH_CLASS_CE,
 XDEV_EXT_MECH_STRUCT_OPS(dma, XDEV_EXT_MECH_CLASS_DMA,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 
-XDEV_EXT_MECH_STRUCT_OPS(cpu, XDEV_EXT_MECH_CLASS_CPU,
-                    xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
+XDEV_EXT_MECH_STRUCT_OPS_X(cpu, XDEV_EXT_MECH_CLASS_CPU,
+                      xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate,
+                      xdev_ext_cpu_mech_ops_check_member, xdev_ext_mech_ops__compute);
 
 XDEV_EXT_MECH_STRUCT_OPS(iaa, XDEV_EXT_MECH_CLASS_IAA,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
@@ -510,6 +651,10 @@ static const struct xdev_ext_ops_kfunc_member xdev_ext_mech_kfunc_members[] = {
 		.off = offsetof(struct xdev_ext_nvme_mech_ops, complete),
 		.allowed = &xdev_ext_mech_complete_kfuncs,
 	},
+	{
+		.off = offsetof(struct xdev_ext_nvme_mech_ops, compute),
+		.allowed = &xdev_ext_mech_compute_kfuncs,
+	},
 };
 
 static const struct xdev_ext_ops_kfunc_rule xdev_ext_mech_kfunc_rule = {
@@ -529,6 +674,36 @@ static const struct btf_kfunc_id_set xdev_ext_mech_kfunc_set = {
 	.owner = THIS_MODULE,
 	.set = &xdev_ext_mech_kfunc_ids,
 	.filter = xdev_ext_mech_kfunc_filter,
+};
+
+static const struct bpf_struct_ops *const xdev_ext_mech_compute_st_ops[] = {
+	&bpf_xdev_ext_cpu_mech_ops,
+};
+
+static const struct xdev_ext_ops_kfunc_member xdev_ext_mech_compute_kfunc_members[] = {
+	{
+		.off = offsetof(struct xdev_ext_cpu_mech_ops, compute),
+		.allowed = &xdev_ext_mech_compute_only_kfuncs,
+	},
+};
+
+static const struct xdev_ext_ops_kfunc_rule xdev_ext_mech_compute_kfunc_rule = {
+	.ids = &xdev_ext_mech_compute_kfunc_ids,
+	.st_ops = xdev_ext_mech_compute_st_ops,
+	.nr_st_ops = ARRAY_SIZE(xdev_ext_mech_compute_st_ops),
+	.members = xdev_ext_mech_compute_kfunc_members,
+	.nr_members = ARRAY_SIZE(xdev_ext_mech_compute_kfunc_members),
+};
+
+static int xdev_ext_mech_compute_kfunc_filter(const struct bpf_prog *prog, u32 kfunc_id)
+{
+	return xdev_ext_ops_kfunc_filter(&xdev_ext_mech_compute_kfunc_rule, prog, kfunc_id);
+}
+
+static const struct btf_kfunc_id_set xdev_ext_mech_compute_kfunc_set = {
+	.owner = THIS_MODULE,
+	.set = &xdev_ext_mech_compute_kfunc_ids,
+	.filter = xdev_ext_mech_compute_kfunc_filter,
 };
 
 int xdev_ext_mech_class_kfunc_filter(u32 class_id, const struct bpf_prog *prog,
@@ -793,6 +968,9 @@ static int __init xdev_ext_mech_ops_init(void)
 	xdev_ext_mech_emit_btf_types();
 	ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
 					&xdev_ext_mech_kfunc_set);
+	if (!ret)
+		ret = register_btf_kfunc_id_set(BPF_PROG_TYPE_STRUCT_OPS,
+						&xdev_ext_mech_compute_kfunc_set);
 	if (!ret)
 		ret = register_bpf_struct_ops(&bpf_xdev_ext_nvme_mech_ops,
 					      xdev_ext_nvme_mech_ops);
