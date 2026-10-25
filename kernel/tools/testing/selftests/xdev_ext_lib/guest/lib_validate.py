@@ -41,6 +41,32 @@ PLANS = (
          dst_offset=0, expect='fail'),
 )
 
+# IOU_UMEM pool scenarios of xdev_ext_lib_iou (NVMe -> [CE -> CE ->] NVMe on
+# the ring's own UMEM).  src/dst are source and destination LBAs, one per
+# handle.  expect: exact (every byte), either (each group is the source
+# group or untouched guard: STOP while transfers were accepted), untouched.
+# ce_fail/ce_delay_us are written to the CE stand-in's parameters first.
+IOU_PLANS = (
+    dict(name='iou-single', kind='single', groups=32, depth=4, group_bytes=8192,
+         src=(16384,), dst=(20480,), ce_fail='none', ce_delay_us=0, timeout_ms=60000,
+         expect='exact'),
+    dict(name='iou-threads', kind='threads', groups=24, depth=4, group_bytes=8192,
+         src=(17408, 18432), dst=(22528, 23552), ce_fail='none', ce_delay_us=0,
+         timeout_ms=60000, expect='exact'),
+    dict(name='iou-procs', kind='procs', groups=24, depth=4, group_bytes=8192,
+         src=(19456, 20480), dst=(24576, 25600), ce_fail='none', ce_delay_us=0,
+         timeout_ms=60000, expect='exact'),
+    # 7 s per CE transfer: past the kernel's 5 s STOP drain bound.
+    dict(name='iou-retain', kind='retain', groups=2, depth=2, group_bytes=8192,
+         src=(21504,), dst=(26624,), ce_fail='none', ce_delay_us=7000000,
+         timeout_ms=60000, expect='either'),
+    dict(name='iou-zombie', kind='zombie', groups=4, depth=2, group_bytes=8192,
+         src=(22528,), dst=(28672,), ce_fail='ambiguous', ce_delay_us=0,
+         timeout_ms=20000, expect='untouched'),
+)
+EBUSY = '-16'
+STATE_ACTIVE, STATE_ERROR, STATE_ZOMBIE = '1', '2', '5'
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'xdev_ext_integration'))
 from xdev_ext_mech_zc_debug import debug_reports  # noqa: E402  (existing harness oracle)
 
@@ -53,6 +79,17 @@ def shell_plan():
     """One line per scenario: name:api:mode:slba:nlb:groups:depth:bytes:wire:sport:dport:off:expect."""
     return ''.join('{name}:{api}:{mode}:{slba}:{nlb}:{groups}:{depth}:{group_bytes}:{wire}:'
                    '{src_port}:{dst_port}:{dst_offset}:{expect}\n'.format(**p) for p in PLANS)
+
+
+def shell_plan_iou():
+    """name:kind:groups:depth:bytes:src1:dst1:src2:dst2:ce_fail:ce_delay_us:timeout_ms:expect."""
+    out = ''
+    for p in IOU_PLANS:
+        second = (p['src'][1], p['dst'][1]) if len(p['src']) > 1 else ('-', '-')
+        out += (f"{p['name']}:{p['kind']}:{p['groups']}:{p['depth']}:{p['group_bytes']}:"
+                f"{p['src'][0]}:{p['dst'][0]}:{second[0]}:{second[1]}:{p['ce_fail']}:"
+                f"{p['ce_delay_us']}:{p['timeout_ms']}:{p['expect']}\n")
+    return out
 
 
 @functools.lru_cache(maxsize=2)
@@ -71,6 +108,11 @@ def expected_destination(source, size=DISK_BYTES):
         if p['expect'] == 'pass':
             s, n = p['slba'] * LBA, p['groups'] * p['group_bytes']
             dest[p['dst_offset']:p['dst_offset'] + n] = source[s:s + n]
+    for p in IOU_PLANS:
+        if p['expect'] == 'exact':
+            n = p['groups'] * p['group_bytes']
+            for s, d in zip(p['src'], p['dst']):
+                dest[d * LBA:d * LBA + n] = source[s * LBA:s * LBA + n]
     return bytes(dest)
 
 
@@ -126,6 +168,105 @@ def check_fail(lines, p):
         raise ValueError(f"{p['name']} negative stats: {s}")
 
 
+def iou_stats(span, p, idx, phase):
+    s = fields(one(span, f"XDEV_EXT_LIB_IOU_STATS name={p['name']} idx={idx} phase={phase} ",
+                   f"{p['name']} idx {idx} {phase} stats line"))
+    s['submitted'] = [int(x) for x in s['submitted'].split('/')]
+    s['completed'] = [int(x) for x in s['completed'].split('/')]
+    return s
+
+
+def iou_result(span, p, idx):
+    return fields(one(span, f"XDEV_EXT_LIB_IOU_RESULT name={p['name']} idx={idx} ",
+                      f"{p['name']} idx {idx} result line"))
+
+
+def check_iou_exact(span, p):
+    g, sessions = p['groups'], set()
+    for idx in range(len(p['src'])):
+        r = iou_result(span, p, idx)
+        want = dict(ret='0', wait_err='0', stop_err='0', close_err='0', retained='0')
+        if any(r.get(k) != val for k, val in want.items()) or int(r.get('session', '0')) <= 0:
+            raise ValueError(f"{p['name']} idx {idx} result line: {r}")
+        sessions.add(r['session'])
+        s = iou_stats(span, p, idx, 'wait')
+        want = dict(state=STATE_ACTIVE, last_err='0', batches_done=str(g), batches_abort='0',
+                    rejects='0', sequestered='0', timeouts='0', inflight='0', protocol_err='0')
+        if (any(s.get(k) != val for k, val in want.items()) or s['session'] != r['session'] or
+                s['submitted'] != [g, g, 0, 0] or s['completed'] != [g, g, 0, 0]):
+            raise ValueError(f"{p['name']} idx {idx} stats line: {s}")
+        if p['kind'] == 'procs':
+            c = fields(one(span, f"XDEV_EXT_LIB_IOU_CHILD name={p['name']} idx={idx} ",
+                           f"{p['name']} child line"))
+            if c.get('exit') != '0':
+                raise ValueError(f"{p['name']} child {idx}: {c}")
+    if len(sessions) != len(p['src']):
+        raise ValueError(f"{p['name']} sessions not distinct: {sorted(sessions)}")
+
+
+def check_iou_retain(span, p):
+    """STOP while accepted CE transfers outlast the drain bound: kept, then released."""
+    g, n = p['groups'], p['name']
+    s = iou_stats(span, p, 0, 'before-stop')
+    if (s['state'] != STATE_ACTIVE or int(s['inflight']) == 0 or s['sequestered'] != '0' or
+            s['submitted'][1] <= s['completed'][1] or s['submitted'][3] or s['completed'][3]):
+        raise ValueError(f"{n} before-stop stats: {s}")
+    r = fields(one(span, f"XDEV_EXT_LIB_RETAIN name={n} phase=stop ", f"{n} stop line"))
+    if r != dict(name=n, phase='stop', stop=EBUSY, retained='1'):
+        raise ValueError(f"{n} stop: {r}")
+    r = fields(one(span, f"XDEV_EXT_LIB_RETAIN name={n} phase=stats-after-stop ", f"{n} stats-after-stop line"))
+    if r.get('stats') != '0':
+        raise ValueError(f"{n} stats-after-stop: {r}")
+    s = iou_stats(span, p, 0, 'after-stop')
+    if (s['state'] == STATE_ACTIVE or int(s['inflight']) == 0 or s['sequestered'] != '0' or
+            s['submitted'][3] > g):
+        raise ValueError(f"{n} after-stop stats: {s}")
+    r = fields(one(span, f"XDEV_EXT_LIB_RETAIN name={n} phase=close-held ", f"{n} close-held line"))
+    if r.get('close') != EBUSY:
+        raise ValueError(f"{n} close-held: {r}")
+    r = fields(one(span, f"XDEV_EXT_LIB_RETAIN name={n} phase=released ", f"{n} released line"))
+    if r.get('close') != '0':
+        raise ValueError(f"{n} released: {r}")
+    r = iou_result(span, p, 0)
+    if r.get('ret') != '0' or r.get('stop_err') != EBUSY or r.get('close_err') != '0' or r.get('retained') != '1':
+        raise ValueError(f"{n} idx 0 result line: {r}")
+
+
+def check_iou_zombie(span, p):
+    """Ambiguous CE outcomes: sequestered, quarantined, close refuses for good."""
+    n = p['name']
+    r = iou_result(span, p, 0)
+    if (r.get('ret') != '0' or r.get('wait_err') in (None, '0') or r.get('stop_err') != EBUSY or
+            r.get('close_err') != EBUSY or r.get('retained') != '1'):
+        raise ValueError(f"{n} wait/result line: {r}")
+    s = iou_stats(span, p, 0, 'error')
+    if (s['state'] == STATE_ACTIVE or int(s['sequestered']) == 0 or s['last_err'] == '0' or
+            s['batches_done'] != '0' or s['submitted'][3] or s['completed'][3]):
+        raise ValueError(f"{n} error stats: {s}")
+    z = fields(one(span, f"XDEV_EXT_LIB_ZOMBIE name={n} phase=stop ", f"{n} stop line"))
+    if z != dict(name=n, phase='stop', stop=EBUSY, retained='1', stats='0'):
+        raise ValueError(f"{n} stop: {z}")
+    for phase in ('after-stop', 'after-close'):
+        s = iou_stats(span, p, 0, phase)
+        if (s['state'] != STATE_ZOMBIE or int(s['sequestered']) == 0 or s['submitted'][3] or
+                s['completed'][3]):
+            raise ValueError(f"{n} {phase} stats: {s}")
+    z = fields(one(span, f"XDEV_EXT_LIB_ZOMBIE name={n} phase=close ", f"{n} close line"))
+    if z != dict(name=n, phase='close', close1=EBUSY, close2=EBUSY, stats='0'):
+        raise ValueError(f"{n} close: {z}")
+
+
+IOU_CHECKS = dict(single=check_iou_exact, threads=check_iou_exact, procs=check_iou_exact,
+                  retain=check_iou_retain, zombie=check_iou_zombie)
+
+
+def check_iou_scenario(span, m, p):
+    if m.get('tx_exit') != '0' or m.get('rx_exit') != 'none':
+        raise ValueError(f"{p['name']} scenario exits: {m}")
+    IOU_CHECKS[p['kind']](span, p)
+    one(span, f"XDEV_EXT_LIB_IOU_EXIT name={p['name']} ret=0 ", f"{p['name']} exit line")
+
+
 def check_log(text):
     # Each scenario's lines are the span after the previous scenario marker.
     report = scenario_report(text)
@@ -145,14 +286,14 @@ def scenario_report(text):
     """Every scenario's verdict, so one failure does not hide the others."""
     lines = text.splitlines()
     report, start = {}, 0
-    for p in PLANS:
+    for p in PLANS + IOU_PLANS:
         mark = [i for i, line in enumerate(lines) if line.startswith(f"XDEV_EXT_LIB_SCENARIO name={p['name']} ")]
         if len(mark) != 1 or mark[0] < start:
             report[p['name']] = f"{p['name']} scenario marker: {len(mark)}"
             continue
         span, start = lines[start:mark[0]], mark[0] + 1
         try:
-            check_scenario(span, fields(lines[mark[0]]), p)
+            (check_iou_scenario if 'kind' in p else check_scenario)(span, fields(lines[mark[0]]), p)
             report[p['name']] = 'PASS'
         except ValueError as error:
             report[p['name']] = str(error)
@@ -182,10 +323,24 @@ def check_images(source_after, dest_after):
     original = source_pattern()
     if source_after != original:
         raise ValueError(f'source image changed at byte {first_difference(source_after, original)}')
-    expected = expected_destination(original)
+    expected = bytearray(expected_destination(original))
+    # 'either' windows: accept each group as source or guard, then compare all.
+    for p in IOU_PLANS:
+        if p['expect'] != 'either':
+            continue
+        gb = p['group_bytes']
+        for s, d in zip(p['src'], p['dst']):
+            for g in range(p['groups']):
+                got = dest_after[d * LBA + g * gb:d * LBA + (g + 1) * gb]
+                src = original[s * LBA + g * gb:s * LBA + (g + 1) * gb]
+                if got == src:
+                    expected[d * LBA + g * gb:d * LBA + (g + 1) * gb] = src
+                elif got != bytes([DEST_GUARD]) * gb:
+                    raise ValueError(f"{p['name']} group {g} is neither the source group nor untouched")
     if dest_after != expected:
-        raise ValueError(f'destination image differs at byte {first_difference(dest_after, expected)}')
-    return dict(checked_bytes=sum(p['groups'] * p['group_bytes'] for p in PLANS if p['expect'] == 'pass'))
+        raise ValueError(f'destination image differs at byte {first_difference(dest_after, bytes(expected))}')
+    return dict(checked_bytes=sum(p['groups'] * p['group_bytes'] for p in PLANS if p['expect'] == 'pass') +
+                sum(p['groups'] * p['group_bytes'] * len(p['dst']) for p in IOU_PLANS))
 
 
 def check(log_text, source_after, dest_after):
@@ -202,6 +357,7 @@ def main():
     make_dst = sub.add_parser('make-dest')
     make_dst.add_argument('path', type=Path)
     sub.add_parser('plan')
+    sub.add_parser('plan-iou')
     val = sub.add_parser('validate')
     val.add_argument('--source', type=Path, required=True)
     val.add_argument('--dest', type=Path, required=True)
@@ -216,6 +372,9 @@ def main():
         return 0
     if args.action == 'plan':
         sys.stdout.write(shell_plan())
+        return 0
+    if args.action == 'plan-iou':
+        sys.stdout.write(shell_plan_iou())
         return 0
     result = dict(verdict='FAIL')
     log_text = args.log.read_text(errors='replace')
