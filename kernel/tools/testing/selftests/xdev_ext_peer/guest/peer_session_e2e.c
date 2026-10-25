@@ -199,8 +199,12 @@ static struct peer_sw_stats drained(int observer, uint64_t want_pins)
 	struct peer_sw_stats s;
 	unsigned int tries;
 	for (tries = 0; tries < 6000; tries++) {
-		s = stats(observer);
-		if (s.live_pins == want_pins && !s.live_maps) return s;
+		memset(&s, 0, sizeof(s));
+		if (ioctl(observer, PEER_SW_STATS, &s)) break;
+		if (s.live_pins == want_pins && !s.live_maps) {
+			CHECK(1, "provider pins and maps drained after session teardown");
+			return s;
+		}
 		usleep(10000);
 	}
 	print_stats("not drained", &s);
@@ -217,8 +221,8 @@ static void run_cli(const char *tool, const char *bpf_dir, int alloc,
 	pid_t child;
 	CHECK(!pipe2(pipefd, O_CLOEXEC), "controller output pipe");
 	child = fork();
-	CHECK(child >= 0, "fork product controller");
-	if (!child) {
+	if (child < 0) CHECK(0, "fork product controller");
+	if (!child) {	/* never report TAP from the child */
 		int fd = fcntl(alloc, F_DUPFD, 100);	/* inherited across exec */
 		if (fd < 0 || dup2(pipefd[1], 1) < 0) _exit(126);
 		snprintf(fdtext, sizeof(fdtext), "%d", fd);
