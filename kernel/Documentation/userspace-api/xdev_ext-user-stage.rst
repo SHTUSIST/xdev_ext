@@ -260,6 +260,9 @@ cancelled (``xdev_ext_mech_batch_complete_cancelled()``) when:
 A cancelled batch aborts. With no ordered stage after the USER stage the
 session stays ACTIVE and later batches continue; ``last_err`` records the
 first error (``-ETIMEDOUT`` for a deadline), and the final STOP returns it.
+The exception is a ``RECYCLE`` START, which ends at its first failed batch
+for every class (``xdev_ext_mech_end()``): it cannot lend that batch's frames
+again.
 If an ordered class (AF_XDP, SOCKET, NET) follows the USER stage, the abort
 stops the whole session (``xdev_ext_mech_abort()``): those classes have no way
 to skip a key on the wire. A USER batch stuck past its deadline before such a
