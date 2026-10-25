@@ -1242,3 +1242,23 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_teardown.py
 
 !/tests/eval/cuda_builder_inventory.py
+!/kernel/tools/xdev_ext_mech/lib/
+!/kernel/tools/xdev_ext_mech/lib/Makefile
+!/kernel/tools/xdev_ext_mech/lib/SPEC.md
+!/kernel/tools/xdev_ext_mech/lib/libxdev_ext.h
+!/kernel/tools/xdev_ext_mech/lib/libxdev_ext_internal.h
+!/kernel/tools/xdev_ext_mech/lib/xdev_ext_prog.c
+!/kernel/tools/xdev_ext_mech/lib/xdev_ext_run.c
+!/kernel/tools/xdev_ext_mech/lib/xdev_ext_session.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/
+!/kernel/tools/testing/selftests/xdev_ext_lib/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_run_test.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_session_test.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_kvm.sh
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/run-guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_nvme_nic.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_rx.c

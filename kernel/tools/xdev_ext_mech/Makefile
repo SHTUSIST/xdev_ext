@@ -71,10 +71,14 @@ $(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.
 	$(CC) $(CFLAGS) xdev_ext_mech_ctl.c ../xdev_ext_xsk_redirect.c ../xdev_ext_gpu_identity.c -o $@ \
 		$(LDFLAGS) $(LDLIBS)
 
+# The thin session library (lib/SPEC.md); not part of all.
+lib:
+	$(MAKE) -C lib BUILD_DIR=$(abspath $(BUILD_DIR))/lib CC="$(CC)"
+
 clean:
 	rm -rf $(BUILD_DIR)
 
-.PHONY: all bpf check-cpu-bpf check-optional-btf clean ctl
+.PHONY: all bpf check-cpu-bpf check-optional-btf clean ctl lib
 
 $(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/xdev_ext_peer.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)

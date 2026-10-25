@@ -1,0 +1,156 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#ifndef LIBXDEV_EXT_H
+#define LIBXDEV_EXT_H
+
+/*
+ * libxdev_ext: a thin user-space wrapper over the XDEV_EXT session control
+ * plane.  Semantics, ownership and error codes: SPEC.md in this directory.
+ * All functions return 0 or a negative errno and never print.
+ */
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <linux/types.h>
+
+#include "../../../include/uapi/linux/xdev_ext_mech.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#define LIBXDEV_EXT_VERSION		1U
+
+#define XDEV_EXT_FRAME_SIZE		4096U
+#define XDEV_EXT_DEFAULT_FRAMES		4096U
+#define XDEV_EXT_MAX_FRAMES		65536U
+#define XDEV_EXT_PROG_MAX_GLOBALS	16U
+#define XDEV_EXT_MAX_PROGS		4U
+#define XDEV_EXT_STOP_RETRIES		1000U
+
+/* xsk_mode of an XSK pool: the bound mode must equal the request. */
+enum xdev_ext_xsk_mode {
+	XDEV_EXT_XSK_ZEROCOPY	= 0,
+	XDEV_EXT_XSK_COPY	= 1,
+};
+
+/* Set sz to the caller's struct size; unnamed fields are zero. */
+#define XDEV_EXT_OPTS_INIT(type, ...) \
+	((struct type){ .sz = sizeof(struct type), __VA_ARGS__ })
+
+struct xdev_ext_prog;
+struct xdev_ext_session;
+
+/* --- class programs (struct_ops) --- */
+
+struct xdev_ext_prog_global {
+	const char *name;
+	__u64 value;
+};
+
+struct xdev_ext_prog_opts {
+	size_t sz;
+	const char *obj_path;
+	const char *map_name;
+	const char *pin_path;		/* optional */
+	const struct xdev_ext_prog_global *globals;
+	__u32 nr_globals;
+	__u32 flags;			/* must be 0 */
+};
+
+int xdev_ext_prog_attach(const struct xdev_ext_prog_opts *o,
+			 struct xdev_ext_prog **out);
+int xdev_ext_prog_detach(struct xdev_ext_prog *p);
+
+/* --- session steps --- */
+
+struct xdev_ext_pool_opts {
+	size_t sz;
+	__u32 pool_kind;		/* XDEV_EXT_MECH_POOL_XSK or _IOU_UMEM */
+	__u32 xsk_mode;			/* enum xdev_ext_xsk_mode */
+	const char *ifname;		/* XSK only, required */
+	__u32 queue;			/* XSK only */
+	__u32 nr_frames;		/* 0: XDEV_EXT_DEFAULT_FRAMES */
+	__u32 flags;			/* must be 0 */
+};
+
+struct xdev_ext_create_opts {
+	size_t sz;
+	__u32 group_bytes;
+	__u32 depth;
+	__u32 mtu;			/* 0: XSK ifname MTU, IOU_UMEM 1500 */
+	__u32 nr_stages;
+	struct xdev_ext_mech_layout layout;	/* all zero: computed */
+	struct xdev_ext_mech_peer peer;		/* zero local_mac: ifname MAC */
+	struct xdev_ext_mech_stage_uapi st[XDEV_EXT_MECH_MAX_STAGES];
+	__u32 flags;			/* must be 0 */
+};
+
+struct xdev_ext_start_opts {
+	size_t sz;
+	__u64 nr_batches;
+	__u64 first_seq;		/* 0: 1 */
+	__u32 flags;			/* must be 0 */
+};
+
+int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
+			  struct xdev_ext_session **out);
+int xdev_ext_session_create(struct xdev_ext_session *s,
+			    const struct xdev_ext_create_opts *o);
+int xdev_ext_session_arm(struct xdev_ext_session *s, __u64 batches_target,
+			 __u64 published_target);
+int xdev_ext_session_start(struct xdev_ext_session *s,
+			   const struct xdev_ext_start_opts *o);
+int xdev_ext_session_wait(struct xdev_ext_session *s, int timeout_ms,
+			  struct xdev_ext_mech_stats *out);
+int xdev_ext_session_stats(struct xdev_ext_session *s,
+			   struct xdev_ext_mech_stats *out);
+int xdev_ext_session_nic_accounting(struct xdev_ext_session *s,
+				    struct xdev_ext_mech_transport_stats_v3 *out);
+int xdev_ext_session_stop(struct xdev_ext_session *s);
+int xdev_ext_session_close(struct xdev_ext_session *s);
+
+int xdev_ext_session_eventfd(const struct xdev_ext_session *s);
+int xdev_ext_session_ring_fd(const struct xdev_ext_session *s);
+int xdev_ext_session_xsk_fd(const struct xdev_ext_session *s);
+__u64 xdev_ext_session_id(const struct xdev_ext_session *s);
+bool xdev_ext_session_zero_copy(const struct xdev_ext_session *s);
+bool xdev_ext_session_retained(const struct xdev_ext_session *s);
+
+/* --- one call: NVMe READ -> AF_XDP TX --- */
+
+struct xdev_ext_nvme_nic_opts {
+	size_t sz;
+	const char *nvme_path;		/* /dev/ngXnY */
+	__u64 slba, nlb;
+	const char *ifname;
+	__u32 queue;
+	__u32 xsk_mode;
+	struct xdev_ext_mech_peer peer;
+	__u32 group_bytes;
+	__u32 depth;
+	__u64 nr_batches;
+	int timeout_ms;			/* negative: no deadline */
+	__u32 nr_progs;
+	const struct xdev_ext_prog_opts *progs;	/* optional */
+	__u32 flags;			/* must be 0 */
+};
+
+struct xdev_ext_run_result {
+	size_t sz;
+	__u64 session_id;
+	bool zero_copy;
+	bool retained;
+	int wait_err, nic_err, stop_err;
+	struct xdev_ext_mech_stats stats;
+	struct xdev_ext_mech_transport_stats_v3 nic;
+	struct xdev_ext_session *session;	/* only when retained */
+};
+
+int xdev_ext_nvme_to_nic(const struct xdev_ext_nvme_nic_opts *o,
+			 struct xdev_ext_run_result *r);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif /* LIBXDEV_EXT_H */

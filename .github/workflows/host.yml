@@ -33,6 +33,11 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_source_drain_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
           python3 kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
+      - name: Thin session library contracts
+        run: |
+          make -C kernel/tools/testing/selftests/xdev_ext_lib CC="$CC" OUTPUT="$RUNNER_TEMP/xdev-ext-lib-tests" run
+          python3 kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate_test.py
+          make -C kernel/tools/xdev_ext_mech lib CC="$CC" BUILD_DIR="$RUNNER_TEMP/xdev-ext-lib"
       - name: Reference-counted lifecycle and CPU transform contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
       - name: Native lifecycle scheduler and teardown contracts
