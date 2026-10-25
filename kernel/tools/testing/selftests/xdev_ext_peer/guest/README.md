@@ -39,7 +39,9 @@ Cases, in one guest boot:
   destination group is the source group or untouched guard.
 - `fd-release`: 32 KiB frames, depth 2, 8 batches; the ring and the last
   allocation fd are closed without STOP, and every provider pin and map must
-  still be released.
+  still be released. Before this run, a bounded CREATE probe retries only
+  `-EBUSY` on the same ring/request until the previous owner's claim is released;
+  STATS `-ENOENT` alone does not establish that the claim is reusable.
 
 The two teardown cases retain the pre-action STATS snapshots in the console.
 The host rejects missing, zero-submission, completed, or inconsistent native

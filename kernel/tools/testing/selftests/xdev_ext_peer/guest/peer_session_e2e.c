@@ -166,6 +166,19 @@ static int create(struct session *s, const struct plan *p, int pool_fd, int src_
 	CHECK(s->ring >= 0, "io_uring ring");
 	return mech(s->ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&s->c);
 }
+/* ENOENT from STATS can precede the old owner's authority-fd release.  Probe
+ * only CREATE on the already prepared ring/request; never repeat native work.
+ */
+static int retry_create_busy(struct session *s, int ret)
+{
+	unsigned int tries;
+
+	for (tries = 0; ret == -EBUSY && tries < 6000; tries++) {
+		usleep(10000);
+		ret = mech(s->ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&s->c);
+	}
+	return ret;
+}
 static struct xdev_ext_mech_stats start_and_wait(struct session *s, const struct plan *p)
 {
 	struct xdev_ext_mech_notify_arm arm = {.session_id = s->c.session_id, .batches_target = p->groups};
@@ -497,7 +510,8 @@ int main(int argc, char **argv)
 	      "kill-inflight: allocation pinned once, mappings cached, nothing remapped");
 
 	/* fd-release: no STOP; closing every fd must still drain everything. */
-	CHECK(!create(&s, &FDREL, alloc1, srcng, dstng), "fd-release: CREATE reclaims the allocation after STOP");
+	ret = create(&s, &FDREL, alloc1, srcng, dstng);
+	CHECK(!retry_create_busy(&s, ret), "fd-release: bounded CREATE probe reclaims allocation after owner exit");
 	st = start_and_wait(&s, &FDREL);
 	exact_success(&FDREL, &st);
 	finish(&s, false, 0);

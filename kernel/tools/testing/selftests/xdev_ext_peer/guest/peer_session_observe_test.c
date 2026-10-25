@@ -11,8 +11,9 @@
 #undef syscall
 #include <stdarg.h>
 
-static unsigned int reads, sleeps;
+static unsigned int reads, sleeps, creates;
 static int scenario;
+static struct session reclaim = {.ring = 77};
 
 long observe_test_syscall(long number, ...)
 {
@@ -21,11 +22,22 @@ long observe_test_syscall(long number, ...)
 
 	va_list args;
 	va_start(args, number);
-	(void)va_arg(args, int);
+	int ring = va_arg(args, int);
 	(void)va_arg(args, int);
 	req = va_arg(args, struct io_uring_xdev_ext_mech *);
 	va_end(args);
-	if (number != __NR_io_uring_register || req->op != XDEV_EXT_MECH_OP_STATS)
+	if (number != __NR_io_uring_register)
+		abort();
+	if (req->op == XDEV_EXT_MECH_OP_CREATE && scenario >= 10) {
+		if (ring != reclaim.ring || req->arg != (uintptr_t)&reclaim.c)
+			abort();
+		creates++;
+		if (scenario == 10 && creates == 3)
+			return 0;
+		errno = scenario == 12 ? EINVAL : EBUSY;
+		return -1;
+	}
+	if (req->op != XDEV_EXT_MECH_OP_STATS)
 		abort();
 	st = (void *)(uintptr_t)req->arg;
 	st->state = XDEV_EXT_MECH_SESSION_ACTIVE;
@@ -83,5 +95,22 @@ int main(void)
 	if (!wait_native_inflight(7, 99, &STOPRUN, &st) || reads < 2 || reads > 6000 || sleeps > 6000)
 		return 5;
 	puts("PASS no native submission fails after bounded polling");
+	scenario = 10; creates = sleeps = 0;
+	if (retry_create_busy(&reclaim, -EBUSY) || creates != 3 || sleeps != 3)
+		return 6;
+	puts("PASS delayed claim release retries CREATE with the same ring and request");
+	scenario = 11; creates = sleeps = 0;
+	if (retry_create_busy(&reclaim, -EBUSY) != -EBUSY || creates != 6000 || sleeps != 6000)
+		return 7;
+	puts("PASS unreleased claim fails after bounded CREATE retries");
+	scenario = 12; creates = sleeps = 0;
+	if (retry_create_busy(&reclaim, -EBUSY) != -EINVAL || creates != 1 || sleeps != 1)
+		return 8;
+	puts("PASS a non-EBUSY CREATE error immediately ends retries");
+	creates = sleeps = 0;
+	if (retry_create_busy(&reclaim, 0) || creates || sleeps ||
+	    retry_create_busy(&reclaim, -EINVAL) != -EINVAL || creates || sleeps)
+		return 9;
+	puts("PASS first CREATE success or non-EBUSY error is never retried");
 	return 0;
 }
