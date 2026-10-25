@@ -270,6 +270,7 @@ static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_m
 		return to_dev ? xdev_ext_binding_make_afxdp_tx_ctx(bytes) :
 				xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, 0);
 	case XDEV_EXT_MECH_CLASS_CPU:
+	case XDEV_EXT_MECH_CLASS_USER:
 	case XDEV_EXT_MECH_CLASS_IAA:
 	case XDEV_EXT_MECH_CLASS_SOCKET:
 	case XDEV_EXT_MECH_CLASS_NET:
@@ -2866,7 +2867,10 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		return ret;
 	for (i = 0; i < s->nr_stages; i++) {
 		st = &s->st[i];
-		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU) {
+		/* USER binds the user stage object, not its file: the file's
+		 * release (process exit) must be able to stop the stage. */
+		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU &&
+		    st->class_id != XDEV_EXT_MECH_CLASS_USER) {
 			st->file = fget(c->st[i].fd);
 			if (!st->file)
 				return -EBADF;
@@ -3605,6 +3609,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return xdev_ext_mech_notify_arm_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_TRANSPORT_STATS:
 		return xdev_ext_mech_transport_stats(ctx, u64_to_user_ptr(req.arg));
+	case XDEV_EXT_MECH_OP_USER_STAGE:
+		return xdev_ext_mech_user_stage_create(u64_to_user_ptr(req.arg));
 	default:
 		return -EINVAL;
 	}

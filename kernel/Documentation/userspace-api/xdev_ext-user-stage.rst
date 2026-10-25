@@ -35,7 +35,8 @@ Stage description
   A user stage fd created by ``XDEV_EXT_MECH_OP_USER_STAGE`` (below). A
   negative fd is ``-EBADF``. A fd that is not a user stage fd is ``-EINVAL``.
   One user stage fd serves exactly one stage of one session, once: a second
-  CREATE with the same fd is ``-EBUSY``, also after the first session ended.
+  CREATE with the same fd is ``-EBUSY``, also after the first session ended
+  and also when the first CREATE failed after binding it.
 ``flags``
   0, or ``XDEV_EXT_USER_F_VARLEN``. Any other bit is ``-EINVAL``.
   ``XDEV_EXT_MECH_STAGE_F_POLL`` is ``-EOPNOTSUPP``: the class has no
@@ -182,8 +183,9 @@ or the kernel sees the entry. A ``done_prod`` more than ``entries`` ahead of
 ``done_cons`` is a user bug: the kernel counts one reject and reads only
 ``entries`` entries, each still validated.
 
-``XDEV_EXT_USER_IOC_KICK`` (``_IO('X', 0xe8)``) returns 0, or ``-ENOTCONN``
-when the fd is not bound to a live stage. A kick is never required for
+``XDEV_EXT_USER_IOC_KICK`` (``_IO('X', 0xe8)``, argument 0) returns 0, or
+``-ENOTCONN`` when the fd is not bound to a live stage; a nonzero argument is
+``-EINVAL``. A kick is never required for
 correctness: without one, completions are reaped at the latest when the
 oldest held batch reaches its deadline, and are then too late.
 

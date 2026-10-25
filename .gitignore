@@ -1027,6 +1027,8 @@
 
 !/kernel/io_uring/xdev_ext_mech_cpu_core.h
 !/kernel/io_uring/xdev_ext_mech_cpu.c
+!/kernel/io_uring/xdev_ext_mech_user_core.h
+!/kernel/io_uring/xdev_ext_mech_user.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/
 !/kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
 !/kernel/io_uring/xdev_ext_mech_produced.h
@@ -1213,6 +1215,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/provider/unbind_api_test.py
 
 !/kernel/tools/xdev_ext_mech/xdev_ext_mech_cpu_abi.h
+!/kernel/tools/xdev_ext_mech/user_plan.bpf.c
 
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_cpu_bpf_test.py
 
@@ -1265,6 +1268,7 @@
 !/kernel/tools/xdev_ext_mech/lib/xdev_ext_prog.c
 !/kernel/tools/xdev_ext_mech/lib/xdev_ext_run.c
 !/kernel/tools/xdev_ext_mech/lib/xdev_ext_session.c
+!/kernel/tools/xdev_ext_mech/lib/xdev_ext_user.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/
 !/kernel/tools/testing/selftests/xdev_ext_lib/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_run_test.c

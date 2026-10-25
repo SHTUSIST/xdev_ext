@@ -23,7 +23,7 @@ obj-$(CONFIG_IO_URING)		+= io_uring.o opdef.o kbuf.o rsrc.o notif.o \
 					xdev_ext_umem.o
 obj-$(CONFIG_IO_URING_ZCRX)	+= zcrx.o
 obj-$(CONFIG_IO_URING_XDEV_EXT_BPF_POLICY) += xdev_ext_ops_core.o xdev_ext_binding.o
-obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech.o xdev_ext_mech_ops.o xdev_ext_peer.o xdev_ext_peer_fd.o xdev_ext_peer_net.o xdev_ext_mech_peer_pool.o xdev_ext_mech_net.o
+obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech.o xdev_ext_mech_ops.o xdev_ext_peer.o xdev_ext_peer_fd.o xdev_ext_peer_net.o xdev_ext_mech_peer_pool.o xdev_ext_mech_net.o xdev_ext_mech_user.o
 obj-$(CONFIG_XDEV_EXT_MECH_CE) += xdev_ext_mech_ce.o
 obj-$(CONFIG_XDEV_EXT_MECH_DMA) += xdev_ext_mech_dma.o
 obj-$(CONFIG_IO_WQ)		+= io-wq.o
