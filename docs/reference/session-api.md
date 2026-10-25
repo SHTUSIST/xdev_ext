@@ -35,3 +35,5 @@ Counters are cumulative except fields explicitly documented otherwise. Per-stage
 `NOTIFY_ARM` selects cumulative batch or publication targets and changes eventfd notification behavior. An error or stop can also signal it. A wakeup is an observation event, not a guarantee that accepted DMA drained.
 
 ACTIVE, ERROR, STOPPING, STOPPED and ZOMBIE states distinguish normal execution, a sequestered batch, teardown and retained unresolved work. Accepted work is not replayed as a new native command. A resource whose completion or DMA quiescence is unknown stays retained under the provider's lifetime contract.
+
+A batch that aborts before any device accepted it (for example a provider that refuses the map, so nothing was submitted or sequestered) does not change the session state. The session stays ACTIVE, records the first error in `last_err`, and still attempts the remaining batches of the same START. Such an abort stops the session only when START used `RECYCLE` or a remaining stage belongs to an ordered class (NET, AF_XDP, socket). Callers detect the failure from `batches_abort` and `last_err`; STOP returns `last_err`.
