@@ -110,7 +110,7 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
  * (inside @q) and masked off. The word loop is an open-coded loop, so the
  * word index is a run-time value bounded to 0..15.
  */
-EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, __u32 mask, __u32 anchor,
+EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, const __u32 mask, __u32 anchor,
 			      __u32 start, __u32 len)
 {
 	__u32 i, m, word, data;
@@ -144,7 +144,7 @@ EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, __u32 mask, __u32 anch
  */
 EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 w[16])
 {
-	__u32 start = blk * 64, anchor, mask, k;
+	__u32 start = blk * 64, anchor, k;
 	__u64 bits = (__u64)len * 8;
 	const __u8 *p;
 
@@ -157,19 +157,22 @@ EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 
 			w[k] = ex_be32(p + 4 * k);
 		return 0;
 	}
+	/* The index mask must stay a constant at each call: a run-time mask
+	 * would reach the loop as a widened, unbounded value.
+	 */
 	if (len >= 32) {
 		/* The last 64 bytes, or the first 64 of a frame of 32..63 bytes. */
 		anchor = len >= 64 ? len - 64 : 0;
-		mask = 63;
 		p = ex_frame_rw(c, pos, anchor, 64);
+		if (!p)
+			return -EX_EFAULT;
+		ex_sha256_tail(w, p, 63, anchor, start, len);
 	} else {
-		anchor = 0;
-		mask = 31;
 		p = ex_frame_rw(c, pos, 0, 32);
+		if (!p)
+			return -EX_EFAULT;
+		ex_sha256_tail(w, p, 31, 0, start, len);
 	}
-	if (!p)
-		return -EX_EFAULT;
-	ex_sha256_tail(w, p, mask, anchor, start, len);
 	/* The length closes the last block: the one where it fits after 0x80. */
 	if ((len + 8) / 64 == blk) {
 		w[14] = (__u32)(bits >> 32);
