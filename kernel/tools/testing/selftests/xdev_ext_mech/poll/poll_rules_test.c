@@ -160,6 +160,16 @@ static void split(void)
 		  "split: no POLL needs no class poll");
 	EXPECT_EQ(poll, 0, "split: stage without POLL does not poll");
 	EXPECT_EQ(clean.flags, XDEV_EXT_AFXDP_F_RELIABLE, "split: flags unchanged without POLL");
+
+	/* FANOUT is the other generic stage bit; ->bind never sees it either. */
+	u.flags = XDEV_EXT_MECH_STAGE_F_FANOUT | POLL | XDEV_EXT_AFXDP_F_RELIABLE;
+	EXPECT_EQ(xdev_ext_mech_poll_split(&u, true, &clean, &poll), 0, "split: FANOUT and POLL");
+	EXPECT_EQ(poll, 1, "split: fanout member polls");
+	EXPECT_EQ(clean.flags, XDEV_EXT_AFXDP_F_RELIABLE, "split: class flags without FANOUT or POLL");
+	u.flags = XDEV_EXT_MECH_STAGE_F_FANOUT;
+	EXPECT_EQ(xdev_ext_mech_poll_split(&u, false, &clean, &poll), 0,
+		  "split: FANOUT alone needs no class poll");
+	EXPECT_EQ(clean.flags, 0, "split: FANOUT alone leaves no class flag");
 }
 
 static void rearm(void)

@@ -11,10 +11,13 @@
 #include "xdev_ext_mech_core.h"
 
 /*
- * CREATE, per bound stage: split the generic POLL request off the class
- * flags.  *@clean is @u without XDEV_EXT_MECH_STAGE_F_POLL; it is what the
- * class ->bind sees.  -EOPNOTSUPP when the stage asks for polling and its
- * class has no ->poll: there is no interrupt fallback.
+ * CREATE, per bound stage: split the generic stage bits off the class
+ * flags.  *@clean is @u without XDEV_EXT_MECH_STAGE_F_POLL and
+ * XDEV_EXT_MECH_STAGE_F_FANOUT; it is what the class ->bind sees.  FANOUT is
+ * a core scheduling bit kept in the session plan; a class that refuses
+ * unknown flags would otherwise fail every fanout member.  -EOPNOTSUPP when
+ * the stage asks for polling and its class has no ->poll: there is no
+ * interrupt fallback.
  */
 static inline int xdev_ext_mech_poll_split(const struct xdev_ext_mech_stage_uapi *u,
 					   bool class_polls,
@@ -22,7 +25,7 @@ static inline int xdev_ext_mech_poll_split(const struct xdev_ext_mech_stage_uapi
 					   bool *poll)
 {
 	*clean = *u;
-	clean->flags &= ~XDEV_EXT_MECH_STAGE_F_POLL;
+	clean->flags &= ~(XDEV_EXT_MECH_STAGE_F_POLL | XDEV_EXT_MECH_STAGE_F_FANOUT);
 	*poll = false;
 	if (!(u->flags & XDEV_EXT_MECH_STAGE_F_POLL))
 		return 0;
