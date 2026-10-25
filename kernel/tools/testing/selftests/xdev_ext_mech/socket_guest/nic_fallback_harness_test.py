@@ -47,6 +47,22 @@ class NicFallbackHarness(unittest.TestCase):
         self.assertIn('nicfb_tx_policy=auto', s)
         self.assertNotRegex(s, r'elapsed|latency|throughput|Gbps|MB/s')
 
+    def test_static_neighbour_uses_a_busybox_applet(self):
+        # The guest image only has busybox, whose "ip neigh" implements show
+        # and flush; replace/add/change/del exit 1 and stop the guest under
+        # set -e before the socket-TX AUTO case runs. busybox arp -s sets a
+        # permanent entry (SIOCSARP) and arp -d removes it.
+        s = self.section
+        self.assertNotRegex(s, r'\bip neigh (replace|add|change|del)\b')
+        self.assertEqual(s.count('/bin/busybox arp -i eth0 -s 192.0.2.2 02:00:00:00:00:02\n'), 1)
+        self.assertEqual(s.count('/bin/busybox arp -i eth0 -d 192.0.2.2\n'), 1)
+        self.assertLess(s.index('ip addr add 192.0.2.1/24 dev eth0'),
+                        s.index('/bin/busybox arp -i eth0 -s 192.0.2.2'))
+        self.assertLess(s.index('/bin/busybox arp -i eth0 -d 192.0.2.2'),
+                        s.index('ip addr del 192.0.2.1/24 dev eth0'))
+        # The host refuses to build an image whose busybox lacks the applet.
+        self.assertIn("/bin/busybox --list | grep -Fxq arp", self.text)
+
     def test_host_checks_marker(self):
         self.assertIn('grep -Fxq "XDEV_EXT_ZC_NIC_FALLBACK=PASS socket_groups=$GROUP_COUNT', self.text)
         self.assertIn('printf \'nic_fallback=%s\\n\' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"', self.text)

@@ -700,6 +700,7 @@ if [[ "$FAULT" != none || "$RELIABLE" != 0 || "$RX_CE" != 0 || "$PROVIDER_CASE" 
 printf 'nic_fallback=%s\n' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"
 if (( NIC_FALLBACK )); then
     [[ -s "$TOOLS/socket_sink.bpf.o" ]]
+    /bin/busybox --list | grep -Fxq arp || { echo 'FAIL busybox lacks the arp applet (Track S static neighbour)' >&2; exit 1; }
     cp "$TOOLS/socket_sink.bpf.o" "$ROOT/opt/xdev_ext/"
     ln -sf /bin/busybox "$ROOT/bin/dd"
 fi
@@ -1175,7 +1176,8 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
             nicfb_tx_if=eth0; nicfb_tx_policy=off; nicfb_tx_path=zc
         else
             ip addr add 192.0.2.1/24 dev eth0
-            ip neigh replace 192.0.2.2 lladdr 02:00:00:00:00:02 nud permanent dev eth0
+            # busybox "ip neigh" only shows/flushes; arp -s adds a permanent entry.
+            /bin/busybox arp -i eth0 -s 192.0.2.2 02:00:00:00:00:02
             nicfb_rx_if=eth1; nicfb_rx_policy=off; nicfb_rx_path=zc
             nicfb_tx_if=lo; nicfb_tx_policy=auto; nicfb_tx_path=socket
         fi
@@ -1207,7 +1209,7 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ] && [ "$reliable" = 0 ] && [ "$
         if [ "$nicfb_mixed" = rx ]; then
             ip addr del 192.0.2.2/24 dev eth1
         else
-            ip neigh del 192.0.2.2 dev eth0
+            /bin/busybox arp -i eth0 -d 192.0.2.2
             ip addr del 192.0.2.1/24 dev eth0
         fi
         echo "XDEV_EXT_ZC_NIC_AUTO_INTEROP=PASS socket_side=$nicfb_mixed groups=$groups"
