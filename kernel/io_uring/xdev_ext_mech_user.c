@@ -38,6 +38,7 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_internal.h"
+#include "xdev_ext_mech_step.h"
 #include "xdev_ext_mech_user_core.h"
 
 /* The object behind a user stage fd. */

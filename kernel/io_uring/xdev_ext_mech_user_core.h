@@ -6,7 +6,8 @@
  * Pure rules of the USER stage class (io_uring/xdev_ext_mech_user.c,
  * Documentation/userspace-api/xdev_ext-user-stage.rst): the register-op
  * request, the shared-region layout, ring index arithmetic, completion
- * status and length rules, and the stage description CREATE accepts.
+ * status and length rules.  The stage description CREATE accepts is in
+ * xdev_ext_mech_step.h.
  * The kernel and tools/testing/selftests/xdev_ext_mech/user_stage compile
  * the same code.  Nothing here reads user memory: callers pass values they
  * already copied.
@@ -125,27 +126,6 @@ static inline bool xdev_ext_user_len_ok(__u32 in_len, __u32 out_len, __u32 capac
 	if (!out_len || out_len > capacity)
 		return false;
 	return varlen || (__s64)out_len == (__s64)in_len + delta;
-}
-
-/* CREATE: a USER stage description of a session with @frame_size frames. */
-static inline int xdev_ext_user_stage_check(const struct xdev_ext_mech_stage_uapi *u,
-					    __u32 frame_size, __s64 *delta, bool *varlen)
-{
-	__s64 d = (__s64)u->arg1;
-
-	if (u->class_id != XDEV_EXT_MECH_CLASS_USER ||
-	    u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || (u->flags & ~XDEV_EXT_USER_F_VARLEN))
-		return -EINVAL;
-	if (u->fd < 0)
-		return -EBADF;
-	if (!u->arg0 || u->arg0 > XDEV_EXT_USER_DEADLINE_MAX_MS)
-		return -EINVAL;
-	if ((u->flags & XDEV_EXT_USER_F_VARLEN) ? d != 0 :
-	    (d < -(__s64)frame_size || d > (__s64)frame_size))
-		return -EINVAL;
-	*delta = d;
-	*varlen = u->flags & XDEV_EXT_USER_F_VARLEN;
-	return 0;
 }
 
 /* ->validate: exactly one descriptor, version 1, no flags. */

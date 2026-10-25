@@ -12,7 +12,6 @@
 
 #include "xdev_ext_mech_core.h"
 #include "xdev_ext_mech_cpu_core.h"
-#include "xdev_ext_mech_user_core.h"
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
 #define XDEV_EXT_MECH_CLASS_SIZE_MAX		4096	/* info, scratch, copies, batch area */
@@ -119,6 +118,28 @@ static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_lay
      l->frame_size > XDEV_EXT_MECH_PEER_FRAME_MAX || (l->frame_size & (l->frame_size - 1)))
   return -EOPNOTSUPP;
  return 0;
+}
+
+/* CREATE: a USER stage description (Documentation/userspace-api/xdev_ext-user-stage.rst)
+ * of a session with @frame_size frames. */
+static inline int xdev_ext_user_stage_check(const struct xdev_ext_mech_stage_uapi *u,
+					    __u32 frame_size, __s64 *delta, bool *varlen)
+{
+	__s64 d = (__s64)u->arg1;
+
+	if (u->class_id != XDEV_EXT_MECH_CLASS_USER ||
+	    u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || (u->flags & ~XDEV_EXT_USER_F_VARLEN))
+		return -EINVAL;
+	if (u->fd < 0)
+		return -EBADF;
+	if (!u->arg0 || u->arg0 > XDEV_EXT_USER_DEADLINE_MAX_MS)
+		return -EINVAL;
+	if ((u->flags & XDEV_EXT_USER_F_VARLEN) ? d != 0 :
+	    (d < -(__s64)frame_size || d > (__s64)frame_size))
+		return -EINVAL;
+	*delta = d;
+	*varlen = u->flags & XDEV_EXT_USER_F_VARLEN;
+	return 0;
 }
 
 /*
