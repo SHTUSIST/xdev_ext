@@ -1307,3 +1307,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute/guest/Makefile
 !/kernel/tools/testing/selftests/bpf/progs/xdev_ext_mech_fail_compute_*.c
 !/kernel/tools/testing/selftests/xdev_ext_integration/verifier/run_compute.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/call_identity_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/call_identity_fixture.c.in

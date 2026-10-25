@@ -1,0 +1,508 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Kernel environment only; production identity/invoke code is inserted below. */
+#define _GNU_SOURCE
+#include <errno.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include "io_uring/xdev_ext_mech_core.h"
+#include "io_uring/xdev_ext_mech_cpu_core.h"
+typedef uint8_t u8;
+typedef uint32_t u32;
+typedef uint64_t u64;
+typedef int32_t s32;
+typedef int64_t s64;
+#define __bpf_kfunc
+#define likely(condition) __builtin_expect(!!(condition), 1)
+#define unlikely(condition) __builtin_expect(!!(condition), 0)
+#define READ_ONCE(value) (value)
+#define WRITE_ONCE(value, next) ((value) = (next))
+#define container_of(pointer, type, member) ((type *)((char *)(pointer) - offsetof(type, member)))
+static _Thread_local unsigned int preempt_depth;
+static _Thread_local unsigned int cpu_id;
+static _Thread_local unsigned int spin_depth;
+static _Thread_local bool task_context = true;
+struct task_struct { unsigned int unused; };
+static _Thread_local struct task_struct host_task;
+#define current (&host_task)
+static bool in_task(void) { return task_context; }
+/* CPU and task identities are separate: two sleeping pthread tasks can share
+ * CPU 0, and a task can migrate between the two emulated CPU slots. */
+#define DEFINE_PER_CPU(type, name) type name[2]
+#define this_cpu_read(name) (name[cpu_id])
+#define this_cpu_write(name, value) do { \
+	if (!preempt_depth) { \
+		fprintf(stderr, "per-CPU publication without disabled preemption\n"); \
+		abort(); \
+	} \
+	(name[cpu_id]) = (value); \
+} while (0)
+#define raw_cpu_read(name) this_cpu_read(name)
+#define raw_cpu_write(name, value) this_cpu_write(name, value)
+#define DEFINE_SPINLOCK(name) pthread_mutex_t name = PTHREAD_MUTEX_INITIALIZER
+#define DEFINE_RAW_SPINLOCK(name) DEFINE_SPINLOCK(name)
+#define spin_lock_irqsave(lock, flags) do { \
+	(flags) = 0; \
+	if (pthread_mutex_lock(lock)) abort(); \
+	spin_depth++; \
+} while (0)
+#define spin_unlock_irqrestore(lock, flags) do { \
+	(void)(flags); \
+	if (!spin_depth) abort(); \
+	spin_depth--; \
+	if (pthread_mutex_unlock(lock)) abort(); \
+} while (0)
+#define raw_spin_lock_irqsave(lock, flags) spin_lock_irqsave(lock, flags)
+#define raw_spin_unlock_irqrestore(lock, flags) spin_unlock_irqrestore(lock, flags)
+struct hlist_node { struct hlist_node *next; struct hlist_node **pprev; };
+struct hlist_head { struct hlist_node *first; };
+/* One bucket deliberately forces collisions between distinct tasks. */
+#define DEFINE_HASHTABLE(name, bits) struct hlist_head name[1]
+static void host_hlist_add(struct hlist_node *node, struct hlist_head *head)
+{
+	node->next = head->first;
+	if (node->next)
+		node->next->pprev = &node->next;
+	head->first = node;
+	node->pprev = &head->first;
+}
+static void host_hlist_del(struct hlist_node *node)
+{
+	*node->pprev = node->next;
+	if (node->next)
+		node->next->pprev = node->pprev;
+}
+#define hash_add(table, node, key) do { \
+	(void)(key); \
+	host_hlist_add(node, &(table)[0]); \
+} while (0)
+#define hash_del(node) host_hlist_del(node)
+#define hash_for_each_possible(table, object, member, key) \
+	for (struct hlist_node *host_node = ((void)(key), (table)[0].first); \
+	     host_node && ((object) = container_of(host_node, __typeof__(*(object)), member), 1); \
+	     host_node = host_node->next)
+static void preempt_disable(void) { preempt_depth++; }
+static void preempt_enable(void)
+{
+	if (!preempt_depth) {
+		fprintf(stderr, "unbalanced preempt_enable\n");
+		abort();
+	}
+	preempt_depth--;
+}
+static _Thread_local unsigned int crc_calls;
+static u32 crc32c(u32 seed, const void *bytes, size_t length)
+{
+	(void)bytes;
+	crc_calls++;
+	return seed ^ (u32)length;
+}
+
+/* PRODUCTION */
+
+#define CHECK(condition) do { \
+	if (!(condition)) { \
+		fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #condition); \
+		return 1; \
+	} \
+} while (0)
+#define FRAME_SIZE 128U
+static _Thread_local u8 payload[FRAME_SIZE];
+static _Thread_local u8 scratch[32];
+static _Thread_local u8 information[16];
+static _Thread_local u8 completion[16];
+static _Thread_local u32 output_length;
+static _Thread_local struct xdev_ext_mech_frame frame;
+static _Thread_local struct xdev_ext_binding_ctx_v2 base;
+static _Thread_local struct xdev_ext_mech_call_args args;
+static _Thread_local struct xdev_ext_mech_target target;
+static _Thread_local struct xdev_ext_mech_call copied_call;
+static _Thread_local const char *helper;
+static _Thread_local int callback_failure;
+static _Thread_local const char *scenario;
+static _Thread_local const struct xdev_ext_mech_ctx *outer_ctx;
+static _Thread_local unsigned int outer_preempt;
+
+static void setup(u32 member)
+{
+	memset(payload, 0xa5, sizeof(payload));
+	memset(scratch, 0x5a, sizeof(scratch));
+	output_length = 16;
+	frame = (struct xdev_ext_mech_frame) {
+		.kaddr = payload, .data_off = 8, .data_len = 16,
+	};
+	target = (struct xdev_ext_mech_target) {
+		.class_id = XDEV_EXT_MECH_CLASS_CPU, .frame_size = FRAME_SIZE,
+		.session_id = 17, .batch_id = 23, .batch_frames = 1,
+	};
+	args = (struct xdev_ext_mech_call_args) {
+		.member = member, .callsite = XDEV_EXT_MECH_SITE_WORKER,
+		.base = &base, .frames = &frame, .nr_frames = 1,
+		.info = information, .info_size = sizeof(information),
+	};
+	if (member == XDEV_EXT_MECH_MEMBER_PREPARE)
+		args.callsite = XDEV_EXT_MECH_SITE_CREATE;
+	else if (member == XDEV_EXT_MECH_MEMBER_BUILD) {
+		args.scratch = scratch;
+		args.desc_size = 8;
+		args.desc_cap = 4;
+	} else if (member == XDEV_EXT_MECH_MEMBER_COMPLETE) {
+		args.cqe = completion;
+		args.cqe_size = 8;
+		args.cqe_cap = 2;
+	} else {
+		/* Opaque identity only: invoke/compute never dereference batch. */
+		args.b = (struct xdev_ext_mech_batch *)&base;
+		args.out_len = &output_length;
+		args.len_delta = 4;
+	}
+}
+
+static int invoke(xdev_ext_mech_cb_t callback, s32 *value)
+{
+	struct xdev_ext_nvme_mech_ops ops = {
+		.prepare = callback, .build = callback,
+		.complete = callback, .compute = callback,
+	};
+	return xdev_ext_mech_invoke(&ops, &target, &args, value, NULL);
+}
+
+/* The result for every helper is an independently specified denied result.
+ * No dereference of the supplied ctx is performed here. */
+static int helper_denied(const struct xdev_ext_mech_ctx *ctx)
+{
+	if (!strcmp(helper, "identity"))
+		return xdev_ext_mech_call_of(ctx) == NULL;
+	if (!strcmp(helper, "info"))
+		return bpf_xdev_ext_info(ctx, sizeof(information)) == NULL;
+	if (!strcmp(helper, "desc"))
+		return bpf_xdev_ext_desc(ctx, 1, 8) == NULL;
+	if (!strcmp(helper, "cqe"))
+		return bpf_xdev_ext_cqe(ctx, 1, 8) == NULL;
+	if (!strcmp(helper, "frame"))
+		return bpf_xdev_ext_frame(ctx, 0, 8, 16) == NULL;
+	if (!strcmp(helper, "frame_crc32c")) {
+		unsigned int before = crc_calls;
+		return bpf_xdev_ext_frame_crc32c(ctx, 0, 8, 16, 9) == 0 &&
+			crc_calls == before;
+	}
+	if (!strcmp(helper, "frame_len"))
+		return bpf_xdev_ext_frame_len(ctx, 0) == 0;
+	if (!strcmp(helper, "frame_rw"))
+		return bpf_xdev_ext_frame_rw(ctx, 0, 0, 16) == NULL;
+	if (!strcmp(helper, "frame_set_len"))
+		return bpf_xdev_ext_frame_set_len(ctx, 0, 20) == -EINVAL &&
+			output_length == 16;
+	return 0;
+}
+
+static s32 copy_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+
+	if (!real) {
+		callback_failure = 1;
+		return 0;
+	}
+	copied_call = *real;
+	if (!helper_denied(&copied_call.ctx) ||
+	    !real->protocol_error || copied_call.protocol_error)
+		callback_failure = 1;
+	/* Ignoring the helper's rejection must not hide the misuse from invoke. */
+	return 0;
+}
+
+static s32 legal_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+	unsigned int before = crc_calls;
+	u8 *writable;
+
+	CHECK(real && &real->ctx == ctx && !real->protocol_error);
+	CHECK(spin_depth == 0);
+	CHECK(ctx->session_id == 17 && ctx->batch_id == 23);
+	CHECK(bpf_xdev_ext_info(ctx, sizeof(information)) == information);
+	if (ctx->member == XDEV_EXT_MECH_MEMBER_PREPARE) {
+		CHECK(preempt_depth == 0);
+	} else if (ctx->member == XDEV_EXT_MECH_MEMBER_BUILD) {
+		CHECK(bpf_xdev_ext_desc(ctx, 1, 8) == scratch + 8);
+		CHECK(bpf_xdev_ext_frame(ctx, 0, 8, 16) == payload + 8);
+	} else if (ctx->member == XDEV_EXT_MECH_MEMBER_COMPLETE) {
+		CHECK(bpf_xdev_ext_cqe(ctx, 1, 8) == completion + 8);
+		CHECK(bpf_xdev_ext_frame(ctx, 0, 8, 16) == payload + 8);
+	} else if (ctx->member == XDEV_EXT_MECH_MEMBER_COMPUTE) {
+		CHECK(bpf_xdev_ext_frame_len(ctx, 0) == 16);
+		writable = bpf_xdev_ext_frame_rw(ctx, 0, 0, 20);
+		CHECK(writable == payload + 8);
+		writable[0] = 0x3c;
+		CHECK(payload[8] == 0x3c && payload[7] == 0xa5 && payload[28] == 0xa5);
+		CHECK(bpf_xdev_ext_frame_set_len(ctx, 0, 20) == 0 && output_length == 20);
+		CHECK(bpf_xdev_ext_frame(ctx, 0, 8, 16) == payload + 8);
+		CHECK(bpf_xdev_ext_frame_crc32c(ctx, 0, 8, 16, 9) == (9 ^ 16));
+		CHECK(crc_calls == before + 1);
+	}
+	CHECK(!real->protocol_error);
+	return 37;
+}
+
+static s32 bad_pointer_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+	const struct xdev_ext_mech_ctx *bad = NULL;
+	void *memory = MAP_FAILED;
+	long page_size = sysconf(_SC_PAGESIZE);
+	int denied;
+
+	CHECK(real);
+	if (!strcmp(scenario, "unsealed")) {
+		real->magic = 0;
+		bad = ctx;
+	} else if (!strcmp(scenario, "unreadable")) {
+		CHECK(page_size > 0);
+		memory = mmap(NULL, (size_t)page_size, PROT_NONE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		CHECK(memory != MAP_FAILED);
+		bad = memory;
+	} else if (!strcmp(scenario, "ctx-only")) {
+		/* Only ctx itself is accessible. The forbidden envelope read would
+		 * touch the following guard page, all inside this process's mmap. */
+		CHECK(page_size > (long)sizeof(*ctx));
+		memory = mmap(NULL, (size_t)page_size * 2, PROT_READ | PROT_WRITE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		CHECK(memory != MAP_FAILED);
+		CHECK(mprotect((u8 *)memory + page_size, (size_t)page_size, PROT_NONE) == 0);
+		bad = (void *)((u8 *)memory + page_size - sizeof(*ctx));
+		memcpy((void *)bad, ctx, sizeof(*ctx));
+	}
+	denied = xdev_ext_mech_call_of(bad) == NULL;
+	if (memory != MAP_FAILED)
+		CHECK(munmap(memory, (size_t)page_size *
+			     (!strcmp(scenario, "ctx-only") ? 2 : 1)) == 0);
+	CHECK(denied);
+	CHECK(real->protocol_error == 1);
+	return 0;
+}
+
+static s32 preempt_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	CHECK(preempt_depth > 0);
+	CHECK(xdev_ext_mech_call_of(ctx));
+	return 37;
+}
+
+static s32 error_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	CHECK(xdev_ext_mech_call_of(ctx));
+	return -EIO;
+}
+
+static s32 inner_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+
+	CHECK(real && ctx != outer_ctx);
+	CHECK(spin_depth == 0);
+	CHECK(preempt_depth == outer_preempt +
+	      (ctx->member == XDEV_EXT_MECH_MEMBER_PREPARE ? 0 : 1));
+	if (!strcmp(scenario, "nested-misuse")) {
+		CHECK(xdev_ext_mech_call_of(outer_ctx) == NULL);
+		CHECK(real->protocol_error == 1);
+		return 37;
+	}
+	CHECK(bpf_xdev_ext_info(ctx, sizeof(information)) == information);
+	return !strcmp(scenario, "nested-error") ? -EIO : 37;
+}
+
+static s32 nested_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+	s32 value = -99;
+	int result;
+
+	CHECK(real && spin_depth == 0);
+	CHECK(ctx->member == XDEV_EXT_MECH_MEMBER_PREPARE ?
+	      preempt_depth == 0 : preempt_depth > 0);
+	outer_ctx = ctx;
+	outer_preempt = preempt_depth;
+	if (!strcmp(scenario, "nested-validation")) {
+		struct xdev_ext_mech_call_args invalid = args;
+		struct xdev_ext_nvme_mech_ops ops = { .compute = inner_callback };
+
+		invalid.base = NULL;
+		CHECK(xdev_ext_mech_invoke(&ops, &target, &invalid, &value, NULL) == -EINVAL);
+		CHECK(value == -99);
+		ops.compute = NULL;
+		CHECK(xdev_ext_mech_invoke(&ops, &target, &args, &value, NULL) == -ENOENT);
+		CHECK(value == -99);
+	} else if (!strcmp(scenario, "prepare-nested")) {
+		struct xdev_ext_mech_call_args saved = args;
+
+		setup(!strcmp(helper, "prepare") ? XDEV_EXT_MECH_MEMBER_PREPARE :
+		      XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(inner_callback, &value) == 0 && value == 37);
+		args = saved;
+	} else {
+		result = invoke(inner_callback, &value);
+		CHECK(result == (!strcmp(scenario, "nested-misuse") ? -EPROTO : 0));
+		CHECK(value == (!strcmp(scenario, "nested-error") ? -EIO : 37));
+	}
+	CHECK(preempt_depth == outer_preempt);
+	CHECK(xdev_ext_mech_call_of(ctx) == real);
+	CHECK(!real->protocol_error);
+	CHECK(bpf_xdev_ext_info(ctx, sizeof(information)) == information);
+	return 37;
+}
+
+static s32 prepare_schedule_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+
+	CHECK(real && preempt_depth == 0 && spin_depth == 0);
+	if (!strcmp(scenario, "prepare-interrupt")) {
+		task_context = false;
+		CHECK(xdev_ext_mech_call_of(ctx) == NULL);
+		task_context = true;
+		CHECK(!real->protocol_error);
+	} else {
+		/* Moving the running task must not lose its sleepable call. */
+		cpu_id = 1;
+	}
+	CHECK(xdev_ext_mech_call_of(ctx) == real);
+	CHECK(bpf_xdev_ext_info(ctx, sizeof(information)) == information);
+	return 37;
+}
+
+static pthread_barrier_t both_entered;
+static pthread_barrier_t both_checked;
+static const struct xdev_ext_mech_ctx *cpu_context[2];
+static _Thread_local unsigned int task_slot;
+
+static s32 parallel_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *real = xdev_ext_mech_call_of(ctx);
+	int valid;
+
+	cpu_context[task_slot] = ctx;
+	pthread_barrier_wait(&both_entered);
+	valid = spin_depth == 0 &&
+		(ctx->member == XDEV_EXT_MECH_MEMBER_PREPARE ? preempt_depth == 0 :
+		 preempt_depth > 0) && real && xdev_ext_mech_call_of(ctx) == real;
+	if (valid) {
+		valid = xdev_ext_mech_call_of(cpu_context[1 - task_slot]) == NULL;
+		valid = valid && real->protocol_error == 1;
+	}
+	/* Both real call envelopes stay alive until the cross-CPU check ends. */
+	pthread_barrier_wait(&both_checked);
+	if (!valid)
+		callback_failure = 1;
+	return 0;
+}
+
+static void *parallel_worker(void *argument)
+{
+	s32 value = -99;
+	int result;
+
+	unsigned int number = (unsigned int)(uintptr_t)argument;
+	bool prepare = number >= 2;
+
+	cpu_id = prepare ? 0 : number;
+	scenario = prepare ? "prepare-parallel" : "parallel";
+	setup(prepare ? XDEV_EXT_MECH_MEMBER_PREPARE : XDEV_EXT_MECH_MEMBER_COMPUTE);
+	/* Barriers use task number even when both tasks execute on CPU 0. */
+	task_slot = prepare ? number - 2 : number;
+	result = invoke(parallel_callback, &value);
+	if (result != -EPROTO || value != 0 || preempt_depth || callback_failure)
+		return (void *)(uintptr_t)1;
+	return NULL;
+}
+
+int main(int argc, char **argv)
+{
+	s32 value = -99;
+	(void)current;
+	CHECK(argc >= 2);
+	scenario = argv[1];
+	if (!strcmp(argv[1], "inactive")) {
+		memset(&copied_call, 0, sizeof(copied_call));
+		copied_call.magic = XDEV_EXT_MECH_CALL_MAGIC;
+		CHECK(xdev_ext_mech_call_of(&copied_call.ctx) == NULL);
+		CHECK(!copied_call.protocol_error);
+	} else if (!strcmp(argv[1], "copy")) {
+		CHECK(argc == 3);
+		helper = argv[2];
+		setup(!strcmp(helper, "desc") ? XDEV_EXT_MECH_MEMBER_BUILD :
+		      !strcmp(helper, "cqe") ? XDEV_EXT_MECH_MEMBER_COMPLETE :
+		      XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(copy_callback, &value) == -EPROTO);
+		CHECK(value == 0);
+		CHECK(!callback_failure);
+	} else if (!strcmp(argv[1], "legal")) {
+		CHECK(argc == 3);
+		setup(!strcmp(argv[2], "prepare") ? XDEV_EXT_MECH_MEMBER_PREPARE :
+		      !strcmp(argv[2], "build") ? XDEV_EXT_MECH_MEMBER_BUILD :
+		      !strcmp(argv[2], "complete") ? XDEV_EXT_MECH_MEMBER_COMPLETE :
+		      XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(legal_callback, &value) == 0 && value == 37);
+	} else if (!strcmp(scenario, "ctx-only") || !strcmp(scenario, "unreadable") ||
+		   !strcmp(scenario, "null") || !strcmp(scenario, "unsealed")) {
+		setup(XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(bad_pointer_callback, &value) == -EPROTO && value == 0);
+	} else if (!strcmp(scenario, "inactive-null")) {
+		/* A volatile function pointer prevents folding the inline's NULL
+		 * result while discarding its forbidden envelope access. */
+		struct xdev_ext_mech_call *(*volatile lookup)(const struct xdev_ext_mech_ctx *) =
+			xdev_ext_mech_call_of;
+
+		CHECK(lookup(NULL) == NULL);
+	} else if (!strcmp(scenario, "preempt")) {
+		setup(XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(preempt_callback, &value) == 0 && value == 37);
+	} else if (!strncmp(scenario, "nested", 6) || !strcmp(scenario, "prepare-nested")) {
+		if (!strcmp(scenario, "prepare-nested")) {
+			CHECK(argc == 3);
+			helper = argv[2];
+		}
+		setup(!strcmp(scenario, "prepare-nested") ? XDEV_EXT_MECH_MEMBER_PREPARE :
+		      XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(nested_callback, &value) == 0 && value == 37);
+		CHECK(xdev_ext_mech_call_of(NULL) == NULL);
+	} else if (!strcmp(scenario, "prepare-migrate") || !strcmp(scenario, "prepare-interrupt")) {
+		setup(XDEV_EXT_MECH_MEMBER_PREPARE);
+		CHECK(invoke(prepare_schedule_callback, &value) == 0 && value == 37);
+		CHECK(xdev_ext_mech_call_of(NULL) == NULL);
+	} else if (!strcmp(scenario, "cleanup")) {
+		setup(XDEV_EXT_MECH_MEMBER_COMPUTE);
+		CHECK(invoke(error_callback, &value) == 0 && value == -EIO);
+		memset(&copied_call, 0, sizeof(copied_call));
+		copied_call.magic = XDEV_EXT_MECH_CALL_MAGIC;
+		CHECK(xdev_ext_mech_call_of(&copied_call.ctx) == NULL);
+		CHECK(invoke(legal_callback, &value) == 0 && value == 37);
+		CHECK(xdev_ext_mech_call_of(&copied_call.ctx) == NULL);
+	} else if (!strcmp(scenario, "parallel") || !strcmp(scenario, "prepare-parallel")) {
+		pthread_t threads[2];
+		void *result[2];
+		unsigned int first = !strcmp(scenario, "prepare-parallel") ? 2 : 0;
+
+		CHECK(pthread_barrier_init(&both_entered, NULL, 2) == 0);
+		CHECK(pthread_barrier_init(&both_checked, NULL, 2) == 0);
+		CHECK(pthread_create(&threads[0], NULL, parallel_worker, (void *)(uintptr_t)first) == 0);
+		CHECK(pthread_create(&threads[1], NULL, parallel_worker, (void *)(uintptr_t)(first + 1)) == 0);
+		CHECK(pthread_join(threads[0], &result[0]) == 0);
+		CHECK(pthread_join(threads[1], &result[1]) == 0);
+		CHECK(!result[0] && !result[1]);
+		CHECK(pthread_barrier_destroy(&both_entered) == 0);
+		CHECK(pthread_barrier_destroy(&both_checked) == 0);
+	} else {
+		fprintf(stderr, "unknown case %s\n", argv[1]);
+		return 2;
+	}
+	CHECK(preempt_depth == 0);
+	return 0;
+}

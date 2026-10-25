@@ -199,14 +199,11 @@ struct xdev_ext_mech_call {
 	s32 len_delta;			/* compute only: declared change D */
 };
 
-/* Any context: the envelope of a trusted callback ctx, NULL if not sealed. */
-static inline struct xdev_ext_mech_call *
-xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *ctx)
-{
-	struct xdev_ext_mech_call *c = container_of(ctx, struct xdev_ext_mech_call, ctx);
-
-	return READ_ONCE(c->magic) == XDEV_EXT_MECH_CALL_MAGIC ? c : NULL;
-}
+/* Any context, current callback only: check identity before reading the envelope.
+ * A different ctx latches misuse on the real call, even if BPF ignores it.
+ */
+struct xdev_ext_mech_call *
+xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *ctx);
 
 /*
  * One callback invocation.  base is the class's xdev_ext_binding_make_*_ctx()

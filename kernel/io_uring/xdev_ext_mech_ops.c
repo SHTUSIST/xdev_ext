@@ -13,11 +13,16 @@
 #include <linux/btf_ids.h>
 #include <linux/crc32.h>
 #include <linux/err.h>
+#include <linux/hashtable.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
+#include <linux/percpu.h>
+#include <linux/preempt.h>
 #include <linux/printk.h>
 #include <linux/rcupdate.h>
+#include <linux/sched.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/xdev_ext_binding.h>
 #include <linux/xdev_ext_mech.h>
@@ -57,6 +62,60 @@ XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_mech_c_ops);
 #endif
 
 typedef __s32 (*xdev_ext_mech_cb_t)(const struct xdev_ext_mech_ctx *ctx);
+
+/* Non-sleepable callbacks cannot migrate; interrupt nesting saves/restores it. */
+static DEFINE_PER_CPU(struct xdev_ext_mech_call *, xdev_ext_mech_active_call);
+
+/* PREPARE may sleep. Its stack entry belongs to the task, not to a CPU.
+ * Head insertion selects the innermost prepare of that task; deletion restores
+ * its outer call. The lock never covers BPF execution or a returned view.
+ */
+struct xdev_ext_mech_prepare_call {
+	struct hlist_node node;
+	struct task_struct *task;
+	struct xdev_ext_mech_call *call;
+};
+static DEFINE_HASHTABLE(xdev_ext_mech_prepare_calls, 6);
+static DEFINE_RAW_SPINLOCK(xdev_ext_mech_prepare_lock);
+
+static struct xdev_ext_mech_call *xdev_ext_mech_prepare_current(void)
+{
+	struct xdev_ext_mech_prepare_call *entry;
+	struct xdev_ext_mech_call *call = NULL;
+	unsigned long flags;
+
+	if (!in_task())
+		return NULL;
+	raw_spin_lock_irqsave(&xdev_ext_mech_prepare_lock, flags);
+	hash_for_each_possible(xdev_ext_mech_prepare_calls, entry, node,
+			       (unsigned long)current) {
+		if (entry->task == current) {
+			call = entry->call;
+			break;
+		}
+	}
+	raw_spin_unlock_irqrestore(&xdev_ext_mech_prepare_lock, flags);
+	return call;
+}
+
+struct xdev_ext_mech_call *
+xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *ctx)
+{
+	struct xdev_ext_mech_call *c = this_cpu_read(xdev_ext_mech_active_call);
+
+	if (!c)
+		c = xdev_ext_mech_prepare_current();
+	if (!c)
+		return NULL;
+	/* Never dereference the supplied pointer, including on a mismatch. */
+	if (unlikely(ctx != &c->ctx ||
+		     READ_ONCE(c->magic) != XDEV_EXT_MECH_CALL_MAGIC)) {
+		WRITE_ONCE(c->protocol_error, 1);
+		return NULL;
+	}
+	return c;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_call_of);
 
 /* One published struct_ops generation per class, indexed by class id. */
 DEFINE_XDEV_EXT_OPS_REGISTRY(xdev_ext_mech_registry, XDEV_EXT_MECH_CLASS_MAX, NULL);
@@ -130,6 +189,9 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		    struct xdev_ext_mech_hold_intent *hold)
 {
 	struct xdev_ext_mech_call call;
+	struct xdev_ext_mech_call *previous;
+	struct xdev_ext_mech_prepare_call prepare = { .task = current, .call = &call };
+	unsigned long flags;
 	xdev_ext_mech_cb_t fn;
 
 	if (!xdev_ext_mech_args_ok(a))
@@ -185,7 +247,22 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 	}
 
 	WRITE_ONCE(call.magic, XDEV_EXT_MECH_CALL_MAGIC);
-	*ret = fn(&call.ctx);
+	if (a->member == XDEV_EXT_MECH_MEMBER_PREPARE) {
+		raw_spin_lock_irqsave(&xdev_ext_mech_prepare_lock, flags);
+		hash_add(xdev_ext_mech_prepare_calls, &prepare.node, (unsigned long)current);
+		raw_spin_unlock_irqrestore(&xdev_ext_mech_prepare_lock, flags);
+		*ret = fn(&call.ctx);
+		raw_spin_lock_irqsave(&xdev_ext_mech_prepare_lock, flags);
+		hash_del(&prepare.node);
+		raw_spin_unlock_irqrestore(&xdev_ext_mech_prepare_lock, flags);
+	} else {
+		preempt_disable();
+		previous = this_cpu_read(xdev_ext_mech_active_call);
+		this_cpu_write(xdev_ext_mech_active_call, &call);
+		*ret = fn(&call.ctx);
+		this_cpu_write(xdev_ext_mech_active_call, previous);
+		preempt_enable();
+	}
 	WRITE_ONCE(call.magic, 0);
 
 	if (hold)

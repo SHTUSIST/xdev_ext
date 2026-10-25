@@ -16,10 +16,16 @@ import tempfile
 import unittest
 
 import compute_validate as cv
+from compute_extract import compile_and_run
 
 HERE = Path(__file__).resolve().parent
 KERNEL = HERE.parents[4]
 LAYOUT = 'frame_size=4096 hdr_room=360 seg_len=1432 group_bytes=8192 capacity=3736\n'
+LEGACY_CASES = ('attach-compute', 'compute-xor-seal', 'delta-before-nvme', 'compute-probe',
+                'bad-set-len', 'program-error', 'attach-old-layout', 'old-layout-seal',
+                'no-compute-program', 'verifier-run_compute', 'verifier-run', 'verifier-run_state')
+IDENTITY_CASES = ('copied-ctx-frame-len', 'copied-ctx-frame-rw', 'copied-ctx-set-len')
+IDENTITY_REGIONS = (256, 1536, 2560)
 
 SEAL_FIXTURE = r'''
 #include <stdio.h>
@@ -46,7 +52,13 @@ int main(void)
 
 
 def good_log():
-    lines = ['XDEV_EXT_COMPUTE_CASE=PASS name=' + c for c in cv.CASES]
+    # Literal case list: adding a case to the validator cannot manufacture its evidence.
+    lines = ['XDEV_EXT_COMPUTE_CASE=PASS name=' + c for c in LEGACY_CASES]
+    for name in IDENTITY_CASES:
+        lines += ['XDEV_EXT_COMPUTE_BEGIN name=' + name,
+                  'XDEV_EXT_MECH_STATS batches_done=0 last_err=-EPROTO protocol_err=16 ',
+                  'XDEV_EXT_COMPUTE_EXIT name=' + name + ' rc=1',
+                  'XDEV_EXT_COMPUTE_CASE=PASS name=' + name + ' rc=1']
     # The verifier suites print their log directory after the marker.
     markers = [m + (' logs=/tmp/x' if 'VERIFIER' in m else '') for m in cv.MARKERS]
     return '\n'.join(lines + markers) + '\n'
@@ -132,6 +144,48 @@ class Validator(unittest.TestCase):
                 self.poke(slba)
                 self.assertEqual(self.run_validate(), 1)
 
+    def test_copied_ctx_regions_are_separate_and_guarded(self):
+        intervals = sorted((slba, slba + 256) for slba in cv.REGIONS)
+        for slba in IDENTITY_REGIONS:
+            with self.subTest(slba=slba):
+                self.assertIn(slba, cv.REGIONS)
+                self.assertIsNone(cv.REGIONS[slba])
+                start, end = slba * 512, (slba + 256) * 512
+                source = (self.dir / 'source.raw').read_bytes()
+                self.assertEqual(bytes(cv.expected_destination(source, 1432)[start:end]),
+                                 bytes([0x6B]) * (256 * 512))
+                self.poke(slba, 256 * 512 - 1)
+                self.assertEqual(self.run_validate(), 1)
+                self.poke(slba, 256 * 512 - 1)
+        self.assertEqual(cv.NLB, 256)
+        self.assertTrue(all(end <= following for (_, end), (following, _)
+                            in zip(intervals, intervals[1:])))
+        self.assertLessEqual(intervals[-1][1] * 512, cv.DEST_BYTES)
+
+    def test_missing_copied_ctx_case_fails(self):
+        for name in IDENTITY_CASES:
+            with self.subTest(name=name):
+                self.log.write_text(good_log().replace(
+                    'XDEV_EXT_COMPUTE_CASE=PASS name=' + name + ' rc=1\n', ''))
+                self.assertEqual(self.run_validate(), 1)
+
+    def test_copied_ctx_requires_own_runtime_protocol_failure(self):
+        for name in IDENTITY_CASES:
+            block = ('XDEV_EXT_COMPUTE_BEGIN name=' + name + '\n'
+                     'XDEV_EXT_MECH_STATS batches_done=0 last_err=-EPROTO protocol_err=16 \n'
+                     'XDEV_EXT_COMPUTE_EXIT name=' + name + ' rc=1')
+            for before, after in (('rc=1', 'rc=0'), ('batches_done=0', 'batches_done=1'),
+                                  ('last_err=-EPROTO', 'last_err=-14'),
+                                  ('protocol_err=16', 'protocol_err=0')):
+                with self.subTest(name=name, wrong=after):
+                    self.log.write_text(good_log().replace(block, block.replace(before, after)))
+                    self.assertEqual(self.run_validate(), 1)
+            # Another case's valid stats cannot stand in for this one's missing stats.
+            with self.subTest(name=name, wrong='missing-stats'):
+                missing = '\n'.join((block.splitlines()[0], block.splitlines()[-1]))
+                self.log.write_text(good_log().replace(block, missing))
+                self.assertEqual(self.run_validate(), 1)
+
     def test_missing_case_or_marker_fails(self):
         for drop in ('name=bad-set-len', 'XDEV_EXT_MECH_VERIFIER_COMPUTES=PASS',
                      'XDEV_EXT_COMPUTE_GUEST_EXIT=0'):
@@ -166,6 +220,98 @@ class Validator(unittest.TestCase):
         self.assertEqual(self.run_validate(red=True), 1)
         self.log.write_text('XDEV_EXT_COMPUTE_CASE=FAIL name=compute-xor-seal rc=1\n')
         self.assertEqual(self.run_validate(red=True), 1)
+
+
+GUEST_PRELUDE = r'''
+#include <stddef.h>
+#include <stdio.h>
+#include <string.h>
+#include "include/uapi/linux/xdev_ext_mech.h"
+#define SEC(section)
+#define BPF_PROG(name, ...) name(__VA_ARGS__)
+#define bpf_for(i, first, last) for ((i) = (first); (i) < (int)(last); (i)++)
+struct xdev_ext_cpu_mech_ops {
+    __u32 abi_version;
+    __s32 (*build)(const struct xdev_ext_mech_ctx *);
+    __s32 (*complete)(const struct xdev_ext_mech_ctx *);
+    __s32 (*compute)(const struct xdev_ext_mech_ctx *);
+};
+static const struct xdev_ext_mech_ctx *real_ctx;
+static unsigned int calls[3], invalid;
+static void copied(const struct xdev_ext_mech_ctx *ctx, unsigned int which, __u32 pos)
+{
+    calls[which]++;
+    if (ctx == real_ctx || memcmp(ctx, real_ctx, sizeof(*ctx)) || pos != 0)
+        invalid++;
+}
+static __u32 bpf_xdev_ext_frame_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos)
+{
+    copied(ctx, 0, pos);
+    return 0;
+}
+static __u8 *bpf_xdev_ext_frame_rw(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+                                 __u32 off, __u64 size)
+{
+    copied(ctx, 1, pos);
+    if (off || size != 1)
+        invalid++;
+    return NULL;
+}
+static int bpf_xdev_ext_frame_set_len(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+                                    __u32 len)
+{
+    copied(ctx, 2, pos);
+    return -22;
+}
+static __u8 *bpf_xdev_ext_frame(const struct xdev_ext_mech_ctx *ctx, __u32 pos,
+                              __u32 off, __u64 size) { return NULL; }
+static __u32 bpf_xdev_ext_crc32c(const void *p, __u32 size, __u32 seed) { return seed; }
+'''
+
+GUEST_MAIN = r'''
+int main(void)
+{
+    struct xdev_ext_mech_ctx ctx;
+    unsigned int m, k;
+    int ret;
+
+    /* Every byte is initialized; the UAPI ctx contains scalar fields only. */
+    memset(&ctx, 0x35, sizeof(ctx));
+    ctx.nr_frames = 1;
+    real_ctx = &ctx;
+    for (m = 4; m <= 6; m++) {
+        memset(calls, 0, sizeof(calls));
+        invalid = 0;
+        mode = m;
+        ret = compute_test_compute(&ctx);
+        if (ret || invalid) {
+            fprintf(stderr, "mode %u must ignore copied-ctx refusal and return 0; ret=%d invalid=%u\n",
+                    m, ret, invalid);
+            return 1;
+        }
+        for (k = 0; k < 3; k++) {
+            if (calls[k] != (k == m - 4)) {
+                fprintf(stderr, "mode %u called kfunc %u %u times\n", m, k, calls[k]);
+                return 1;
+            }
+        }
+    }
+    puts("copied-ctx guest modes=3 ignored-refusal=PASS");
+    return 0;
+}
+'''
+
+
+class GuestModes(unittest.TestCase):
+    def test_each_copy_mode_ignores_kfunc_refusal_and_returns_zero(self):
+        # Keep the real guest decisions and scalar ctx layout; replace only the BPF
+        # invocation syntax/iterator and kfunc environment for host execution.
+        guest = (HERE / 'guest/compute_test.bpf.c').read_text()
+        guest = '\n'.join(line for line in guest.splitlines()
+                          if not line.startswith('#include'))
+        rc, output = compile_and_run(GUEST_PRELUDE + guest + GUEST_MAIN)
+        self.assertEqual(rc, 0, output)
+        self.assertIn('copied-ctx guest modes=3 ignored-refusal=PASS', output)
 
 
 if __name__ == '__main__':

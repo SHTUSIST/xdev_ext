@@ -11,6 +11,8 @@
  *   2  return -EBADMSG without touching the payload
  *   3  check the context and the view bounds at probe_cap (the frame
  *      capacity, --set probe_cap=N), then as mode 0
+ *   4/5/6  copy the scalar ctx, call frame_len/frame_rw/frame_set_len with
+ *      the copy, ignore the refusal and return 0 (the batch fails, -EPROTO)
  */
 #include <linux/bpf.h>		/* struct bpf_iter_num for bpf_for() */
 #include "xdev_ext_mech_common.h"
@@ -73,6 +75,19 @@ __s32 BPF_PROG(compute_test_compute, const struct xdev_ext_mech_ctx *mctx)
 {
 	int pos, err;
 
+	if (mode >= 4 && mode <= 6) {
+		struct xdev_ext_mech_ctx copy = *mctx;
+
+		/* The UAPI ctx contains scalars only; no envelope or pointer is forged. */
+		if (mode == 4)
+			bpf_xdev_ext_frame_len(&copy, 0);
+		else if (mode == 5)
+			bpf_xdev_ext_frame_rw(&copy, 0, 0, 1);
+		else
+			bpf_xdev_ext_frame_set_len(&copy, 0, 0);
+		/* Refusal must stay latched in the real call even when ignored here. */
+		return 0;
+	}
 	if (mode == 2)
 		return -TEST_EBADMSG;
 	if (mode == 1) {

@@ -135,15 +135,18 @@ class UbrMechSourceTest(unittest.TestCase):
                       "info_size", "*scratch", "desc_size", "desc_cap",
                       "*cqe", "cqe_size", "cqe_cap", "batch_frames"):
             self.assertIn(field, fields)
-        of = re.search(r"xdev_ext_mech_call_of\(const struct xdev_ext_mech_ctx \*ctx\)"
-                       r"\n{(.*?)\n}", text, re.S)
-        self.assertIsNotNone(of)
-        self.assertIn("container_of(ctx, struct xdev_ext_mech_call, ctx)",
-                      of.group(1))
-        self.assertIn("READ_ONCE(c->magic) == XDEV_EXT_MECH_CALL_MAGIC",
-                      of.group(1))
-        # The mechanism layer must not use the per-CPU envelope: a sleepable
-        # prepare can be preempted and overwritten on the same CPU.
+        self.assertIn("xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *ctx);", text)
+        ops = ROOT / "io_uring/xdev_ext_mech_ops.c"
+        of = function_body(ops, "xdev_ext_mech_call_of(")
+        self.assertIn("ctx != &c->ctx", of)
+        self.assertLess(of.index("ctx != &c->ctx"), of.index("READ_ONCE(c->magic)"))
+        self.assertIn("WRITE_ONCE(c->protocol_error, 1)", of)
+        self.assertNotIn("container_of(ctx", of)
+        # Sleepable prepare uses task identity; only non-sleepable callbacks
+        # publish a per-CPU envelope while preemption is disabled.
+        prepare = function_body(ops, "xdev_ext_mech_prepare_current(")
+        self.assertIn("entry->task == current", prepare)
+        self.assertIn("raw_spin_lock_irqsave", prepare)
         self.assertNotIn("DEFINE_PER_CPU", text)
 
     def test_hold_count_is_the_layout_frames_per_batch(self):
@@ -333,9 +336,9 @@ class UbrMechSourceTest(unittest.TestCase):
     def test_call_envelope_is_on_the_callers_stack(self):
         for path in mech_sources():
             text = path.read_text(encoding="utf-8")
-            self.assertNotIn("DEFINE_PER_CPU", text, path)
-            self.assertNotIn("this_cpu_", text, path)
-            self.assertNotIn("preempt_disable", text, path)
+            # Only a pointer may be per-CPU; the envelope itself stays on the
+            # invoking stack, and sleepable prepare is tracked by task.
+            self.assertNotRegex(text, r"DEFINE_PER_CPU\(struct xdev_ext_mech_call\s*,")
         invoke = function_body(ROOT / "io_uring/xdev_ext_mech_ops.c",
                                "int xdev_ext_mech_invoke(")
         self.assertIn("struct xdev_ext_mech_call call;", invoke)

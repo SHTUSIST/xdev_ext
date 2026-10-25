@@ -912,7 +912,8 @@ class UbrHardeningSourceTest(unittest.TestCase):
                                      header, re.M))
         used = set(re.findall(r"\b(xdev_ext_mech_\w+)\(", text))
         self.assertLessEqual(used & out_of_line,
-                             {"xdev_ext_mech_call_active", "xdev_ext_mech_set_c_ops"})
+                                 {"xdev_ext_mech_call_active", "xdev_ext_mech_set_c_ops",
+                                  "xdev_ext_mech_call_of"})
         self.assertIn('#include "../xdev_ext_mech_test.h"', text)
         self.assertIn('#include "../../../../../io_uring/xdev_ext_mech_core.h"',
                       text)

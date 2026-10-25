@@ -30,17 +30,21 @@ NLB = GROUPS * GROUP_BYTES // LBA
 XOR = 0x5A
 # destination slba -> what the stage wrote there (None: nothing).
 REGIONS = {
+    256: None,            # copied ctx passed to frame_len: runtime -EPROTO
     1024: 'seal',          # old-layout object, fixed CRC32C_SEAL
+    1536: None,           # copied ctx passed to frame_rw: runtime -EPROTO
     2048: 'xor-seal',      # compute mode 0
+    2560: None,           # copied ctx passed to frame_set_len: runtime -EPROTO
     3072: 'xor-seal',      # compute mode 3 (probe, then as 0)
     4096: None,            # wrong recorded length: every batch failed
     5120: None,            # the program's -EBADMSG
     6144: None,            # no compute program: CREATE refused
     7168: None,            # declared change before NVMe: CREATE refused
 }
+IDENTITY_CASES = ('copied-ctx-frame-len', 'copied-ctx-frame-rw', 'copied-ctx-set-len')
 CASES = ('attach-compute', 'compute-xor-seal', 'delta-before-nvme', 'compute-probe',
          'bad-set-len', 'program-error', 'attach-old-layout', 'old-layout-seal',
-         'no-compute-program', 'verifier-run_compute', 'verifier-run', 'verifier-run_state')
+         'no-compute-program', 'verifier-run_compute', 'verifier-run', 'verifier-run_state') + IDENTITY_CASES
 MARKERS = ('XDEV_EXT_MECH_VERIFIER_COMPUTES=PASS cases=7',
            'XDEV_EXT_MECH_VERIFIER_NEGATIVES=PASS cases=7',
            'XDEV_EXT_MECH_VERIFIER_STATES=PASS cases=2',
@@ -132,6 +136,29 @@ def parse_layout(text):
     return {k: int(v) for k, v in values.items()}
 
 
+def check_identity_runtime(lines):
+    """Each copied ctx must reach runtime and fail its own chain with -EPROTO."""
+    errors = []
+    for name in IDENTITY_CASES:
+        starts = [i for i, line in enumerate(lines)
+                  if line == 'XDEV_EXT_COMPUTE_BEGIN name=' + name]
+        if len(starts) != 1:
+            errors.append('missing or duplicate runtime begin: ' + name)
+            continue
+        start = starts[0]
+        end = next((i for i in range(start + 1, len(lines))
+                    if lines[i].startswith(('XDEV_EXT_COMPUTE_BEGIN ', 'XDEV_EXT_COMPUTE_EXIT '))),
+                   len(lines))
+        if end == len(lines) or lines[end] != 'XDEV_EXT_COMPUTE_EXIT name=' + name + ' rc=1':
+            errors.append('runtime exit is not rc=1: ' + name)
+        stats = [dict(re.findall(r'\b([a-z_]+)=(\S+)', line))
+                 for line in lines[start + 1:end] if line.startswith('XDEV_EXT_MECH_STATS ')]
+        if not any(s.get('batches_done') == '0' and s.get('last_err') == '-EPROTO' and
+                   re.fullmatch(r'[1-9][0-9]*', s.get('protocol_err', '')) for s in stats):
+            errors.append('missing runtime -EPROTO with no completed batch: ' + name)
+    return errors
+
+
 def check_log(text, red=False):
     """Problems in the guest console, as a list of strings."""
     errors = []
@@ -153,6 +180,7 @@ def check_log(text, red=False):
         return errors
     errors += ['failed case: ' + l for l in failed]
     errors += ['missing case: ' + c for c in CASES if c not in passed]
+    errors += check_identity_runtime(lines)
     # A marker may carry more words after it (the verifier suites add logs=).
     errors += ['missing marker: ' + m for m in MARKERS
                if not any(l == m or l.startswith(m + ' ') for l in lines)]

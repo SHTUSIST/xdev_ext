@@ -40,6 +40,7 @@ attach() { # name object map [--set ...]
 chain() { # name xform arg dst_slba: sets rc
 	name=$1
 	rc=0
+	echo "XDEV_EXT_COMPUTE_BEGIN name=$name"
 	"$ctl" cpu-chain --xform "$2" --xform-arg "$3" --src-ng "$src_ng" --slba "$src_slba" \
 		--nlb "$nlb" --dst-ng "$dst_ng" --dst-slba "$4" --dst-nlb "$nlb" \
 		--groups "$groups" --depth "$depth" --group-bytes "$group_bytes" \
@@ -88,7 +89,19 @@ expect_failed bad-set-len 'last_err=-EPROTO .*protocol_err=[1-9]'
 attach attach-prog-error compute_test.bpf.o compute_test_ops --set mode=2
 chain program-error bpf-compute 0 5120
 expect_failed program-error 'last_err=-74 '
-# 6. An object built without compute still loads and runs fixed transforms,
+# 6. These programs load, then copy only the scalar ctx. Each ignores one
+#    kfunc refusal and returns 0; the real call still fails with -EPROTO.
+#    All three destination ranges are disjoint from the original cases.
+attach attach-copy-len compute_test.bpf.o compute_test_ops --set mode=4
+chain copied-ctx-frame-len bpf-compute 0 256
+expect_failed copied-ctx-frame-len 'last_err=-EPROTO .*protocol_err=[1-9]'
+attach attach-copy-rw compute_test.bpf.o compute_test_ops --set mode=5
+chain copied-ctx-frame-rw bpf-compute 0 1536
+expect_failed copied-ctx-frame-rw 'last_err=-EPROTO .*protocol_err=[1-9]'
+attach attach-copy-set-len compute_test.bpf.o compute_test_ops --set mode=6
+chain copied-ctx-set-len bpf-compute 0 2560
+expect_failed copied-ctx-set-len 'last_err=-EPROTO .*protocol_err=[1-9]'
+# 7. An object built without compute still loads and runs fixed transforms,
 #    and the BPF transform is refused at CREATE without a compute program.
 attach attach-old-layout compute_old_layout.bpf.o old_layout_ops
 pass attach-old-layout
@@ -100,7 +113,7 @@ expect_refused no-compute-program
 "$ctl" detach --pin "$nvme_pin" >/dev/null 2>&1 || fail detach-nvme
 sync
 
-# 7. Verifier rejections; the shared negatives use the updated test header.
+# 8. Verifier rejections; the shared negatives use the updated test header.
 for suite in run_compute run run_state; do
 	LOG_DIR=$logs/verifier-$suite CTL=$ctl OBJECT_DIR=$dir/verifier sh "$dir/verifier/$suite.sh" ||
 		fail "verifier-$suite"
