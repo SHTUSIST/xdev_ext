@@ -106,6 +106,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/
 !/kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_spans/
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest/
 !/kernel/tools/testing/selftests/xdev_ext_mech_tools/
 !/kernel/tools/testing/selftests/xdev_ext_peer/
 !/kernel/tools/testing/selftests/xdev_ext_peer/guest/
@@ -437,6 +439,11 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/transport_pending/stop_finalize_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_spans/independent_start_boundaries.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_spans/test_user_spans.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/user_rules_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/scheduler_fixture.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/scheduler_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_call_active_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_exact_completion_test.c
@@ -1262,6 +1269,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_lib/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_run_test.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_session_test.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_user_test.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/Makefile
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_kvm.sh

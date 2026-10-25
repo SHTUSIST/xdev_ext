@@ -91,9 +91,12 @@ static void test_uapi_values(void)
 {
 	EXPECT_EQ(XDEV_EXT_MECH_STAGE_F_FANOUT, 1U << 31);
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_CPU, 9);
-	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 10);
+	/* The USER stage class (10) is appended after CPU. */
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_USER, 10);
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 11);
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_CPU), 1);
-	EXPECT_EQ(xdev_ext_mech_class_known(10), 0);
+	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_USER), 1);
+	EXPECT_EQ(xdev_ext_mech_class_known(11), 0);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 1);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_INFLATE, 9);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_MAX, 10);
