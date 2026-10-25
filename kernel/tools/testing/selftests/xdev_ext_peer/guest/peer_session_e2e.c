@@ -183,9 +183,12 @@ static void exact_success(const struct plan *p, const struct xdev_ext_mech_stats
 	      st->submitted[1] == p->groups && st->completed[1] == p->groups,
 	      "one native NVMe read and one native NVMe write per batch");
 }
-static void finish(struct session *s, bool stop)
+/* STOP releases the session and returns its recorded last error (see
+ * xdev_ext_mech_session_release()); 0 only for a run without error. */
+static void finish(struct session *s, bool stop, int expect)
 {
-	if (stop) CHECK(!mech(s->ring, XDEV_EXT_MECH_OP_STOP, s->c.session_id), "STOP with full session identity");
+	if (stop) CHECK(mech(s->ring, XDEV_EXT_MECH_OP_STOP, s->c.session_id) == expect,
+			"STOP with full session identity returns the session's last error");
 	CHECK(!close(s->ring), "close io_uring ring");
 	CHECK(!close(s->notify), "close session eventfd");
 }
@@ -302,7 +305,7 @@ int main(int argc, char **argv)
 	CHECK(!st.batches_done && !st.completed[0] && !st.completed[1] && !st.submitted[1],
 	      "reject-map: no native command completes and no write is issued");
 	CHECK(st.last_err == -EOPNOTSUPP, "reject-map: provider EOPNOTSUPP is reported, no fallback");
-	finish(&s, true);
+	finish(&s, true, -EOPNOTSUPP);
 	CHECK(!close(alloc2) && !close(provider2), "reject-map: close allocation and provider fds");
 	mid = drained(observer, 1);
 	print_stats("after reject-map", &mid);
@@ -324,7 +327,7 @@ int main(int argc, char **argv)
 	CHECK(!close(busy.ring) && !close(busy.notify), "depth4: discard refused session ring");
 	st = start_and_wait(&s, &DEEP);
 	exact_success(&DEEP, &st);
-	finish(&s, true);
+	finish(&s, true, 0);
 	mid = stats(observer);
 	print_stats("after depth4", &mid);
 	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
@@ -334,7 +337,7 @@ int main(int argc, char **argv)
 	CHECK(!create(&s, &FDREL, alloc1, srcng, dstng), "fd-release: CREATE reclaims the allocation after STOP");
 	st = start_and_wait(&s, &FDREL);
 	exact_success(&FDREL, &st);
-	finish(&s, false);
+	finish(&s, false, 0);
 	CHECK(!close(alloc1) && !close(provider1), "fd-release: close last allocation and provider fds");
 	detach_nvme_ops(&ops);
 	after = drained(observer, 0);

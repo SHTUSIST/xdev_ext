@@ -104,6 +104,9 @@ mount -t tmpfs tmpfs /tmp
 mount -t bpf bpf /sys/fs/bpf
 code=1
 src= dst=
+# Firmware leaves escape sequences on the console line; start a clean one.
+echo
+echo XDEV_EXT_SESSION_GUEST_BEGIN
 for f in /sys/class/nvme/nvme*/serial; do
 	c=${f%/serial}; c=${c##*/}
 	case "$(sed 's/[[:space:]]*$//' "$f")" in
