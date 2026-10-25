@@ -19,6 +19,7 @@
  * word lives in its own 64-bit stack slot, so storing a data word and storing
  * a padding zero leave the same kind of slot (a 4-byte store of a known zero
  * would mark the bytes as zero and keep every pattern of zero words apart).
+ * The 16 words of such a block are one open-coded loop too.
  * The 64 rounds are two open-coded loops, rounds 0..15 and 16..63 with the
  * message schedule in w[t % 16], which the verifier walks a few times
  * instead of 64 times per block.
@@ -106,20 +107,21 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
  * the message (@len bytes) or only padding. @q views frame bytes from
  * offset @anchor on, @mask + 1 of them (a power of two), and covers every
  * data byte of the block. No branch: a byte at or past @len is read anyway
- * (inside @q) and masked off.
+ * (inside @q) and masked off. The word loop is an open-coded loop, so the
+ * word index is a run-time value bounded to 0..15.
  */
-EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, const __u32 mask, __u32 anchor,
+EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, __u32 mask, __u32 anchor,
 			      __u32 start, __u32 len)
 {
-	__u32 k, i, m, word, data;
+	__u32 i, m, word, data;
 	__s64 dist, lt, eq;
+	int k;
 
-	EX_UNROLL
-	for (k = 0; k < 16; k++) {
+	ex_for(k, 0, 16) {
 		word = 0;
 		EX_UNROLL
 		for (i = 0; i < 4; i++) {
-			m = start + 4 * k + i;
+			m = start + 4 * (__u32)k + i;
 			data = q[(m - anchor) & mask];
 			dist = (__s64)m - (__s64)len;
 			/* -1 when m < len, else 0; -1 when m == len, else 0. */
@@ -131,7 +133,7 @@ EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, const __u32 mask, __u3
 			EX_OPAQUE(eq);
 			word |= ((data & (__u32)lt) | (0x80U & (__u32)eq)) << (24 - 8 * i);
 		}
-		w[k] = word;
+		w[(__u32)k & 15] = word;
 	}
 }
 
@@ -142,7 +144,7 @@ EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, const __u32 mask, __u3
  */
 EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 w[16])
 {
-	__u32 start = blk * 64, anchor, k;
+	__u32 start = blk * 64, anchor, mask, k;
 	__u64 bits = (__u64)len * 8;
 	const __u8 *p;
 
@@ -158,16 +160,16 @@ EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 
 	if (len >= 32) {
 		/* The last 64 bytes, or the first 64 of a frame of 32..63 bytes. */
 		anchor = len >= 64 ? len - 64 : 0;
+		mask = 63;
 		p = ex_frame_rw(c, pos, anchor, 64);
-		if (!p)
-			return -EX_EFAULT;
-		ex_sha256_tail(w, p, 63, anchor, start, len);
 	} else {
+		anchor = 0;
+		mask = 31;
 		p = ex_frame_rw(c, pos, 0, 32);
-		if (!p)
-			return -EX_EFAULT;
-		ex_sha256_tail(w, p, 31, 0, start, len);
 	}
+	if (!p)
+		return -EX_EFAULT;
+	ex_sha256_tail(w, p, mask, anchor, start, len);
 	/* The length closes the last block: the one where it fits after 0x80. */
 	if ((len + 8) / 64 == blk) {
 		w[14] = (__u32)(bits >> 32);
