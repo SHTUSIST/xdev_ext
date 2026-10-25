@@ -56,6 +56,7 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/guest_harness_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_trace_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_export_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/teardown_checked/test_ce_unbind.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/provider/unbind_api_test.py

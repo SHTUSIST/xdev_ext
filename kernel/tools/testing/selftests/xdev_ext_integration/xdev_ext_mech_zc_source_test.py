@@ -142,6 +142,19 @@ class SourceGate(unittest.TestCase):
         run=subprocess.run(['bash',str(HARNESS),'--scratch',str(scratch),'--source',str(source),'--run-only'],text=True,capture_output=True,timeout=20,env=env)
         return run,record
 
+    def test_lifecycle_refuses_missing_collector_before_guest_setup(self):
+        _, source = self.checkout(True)
+        scratch = Path('/tmp/xdev-ext-e2e.' + secrets.token_hex(8))
+        scratch.mkdir(mode=0o700)
+        self.addCleanup(shutil.rmtree, scratch)
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1')
+        run = subprocess.run(['bash', str(HARNESS), '--source', str(source),
+                              '--scratch', str(scratch), '--lifecycle'],
+                             text=True, capture_output=True, timeout=20, env=env)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn('native validation requires the product overlay', run.stderr)
+        self.assertFalse((scratch / 'build').exists())
+
     def test_run_only_never_creates_missing_source_stamp(self):
         run,record=self.run_only(None)
         self.assertNotEqual(run.returncode,0)

@@ -1059,6 +1059,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_bind_counterfactual.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_trace.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_trace_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_export_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/verify_fanout.py

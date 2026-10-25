@@ -37,6 +37,22 @@ def block(text, begin, end):
     return text[a:b]
 
 
+def merge_fanout_logs(console, native, output):
+    """Combine preserved raw channels without removing kernel diagnostics."""
+    console, native, output = map(Path, (console, native, output))
+    if output.resolve() in (console.resolve(), native.resolve()):
+        raise ValueError('combined log must not overwrite raw evidence')
+    serial = console.read_text(errors='replace').replace('\r', '')
+    trace = native.read_text().replace('\r', '')
+    if not trace.strip():
+        raise ValueError('empty native trace channel')
+    begin, end = 'XDEV_EXT_FANOUT_TRACE_BEGIN', 'XDEV_EXT_FANOUT_TRACE_END'
+    if begin in serial or end in serial:
+        raise ValueError('native trace also appeared on the serial console')
+    block(trace, begin, end)
+    output.write_text(serial.rstrip('\n') + '\n' + trace)
+
+
 def parse_trace(text):
     """Strictly type the existing ABI and require every retained CPU loss count."""
     if text.splitlines().count('XDEV_EXT_FANOUT_TRACE_CLOCK=mono') != 1:

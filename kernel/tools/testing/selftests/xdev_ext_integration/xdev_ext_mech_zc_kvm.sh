@@ -191,11 +191,6 @@ PYSOURCEPATH
     SOURCE_COMMIT=$(git -C "$SOURCE_GIT_ROOT" rev-parse --verify 'HEAD^{commit}')
 }
 verify_source_checkout
-if (( LIFECYCLE )); then
-    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/native_trace/collector.py" ]] || {
-        echo 'FAIL --lifecycle native validation requires the product overlay with tests/eval/native_trace' >&2; exit 1;
-    }
-fi
 if (( ${EVAL_SESSION:-0} )); then
     [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/session_guest/Makefile" ]] || {
         echo 'FAIL --eval-session requires the product overlay with tests/eval/session_guest' >&2; exit 1;
@@ -203,6 +198,11 @@ if (( ${EVAL_SESSION:-0} )); then
 fi
 # Use the same campaign geometry for native commands, image creation and
 # the strict full-image validator. The two destination spans never alias.
+if (( LIFECYCLE )); then
+    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/native_trace/collector.py" ]] || {
+        echo 'FAIL --lifecycle native validation requires the product overlay with tests/eval/native_trace' >&2; exit 1;
+    }
+fi
 read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" "${FAULT_CAMPAIGN:-}" <<'PYLAYOUT'
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1])/'tools/testing/selftests/xdev_ext_integration'))
@@ -449,7 +449,7 @@ if (( ! RUN_ONLY )); then
     if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then
         cfg -e XDEV_EXT_MECH_IAA -e CRYPTO_DEFLATE
     fi
-    if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE; fi
+    if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE -e VIRTIO_CONSOLE; fi
     if (( FENCE_CHECK )); then cfg -e MODULES -e MODULE_UNLOAD -e DMA_SHARED_BUFFER; fi
     if (( COMPAT )); then cfg -e XDEV_EXT_MECH_SOCKET -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
@@ -1357,6 +1357,12 @@ args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
 	-device nvme,drive=src,serial=UBRZCSRC01
 	-drive "$destination_drive"
 	-device nvme,drive=dst,serial=UBRZCDST01)
+if (( LIFECYCLE )); then
+    grep -Fxq 'CONFIG_VIRTIO_CONSOLE=y' "$BUILD/.config"
+    args+=(-device virtio-serial-pci
+        -chardev "file,id=fanout_native,path=$EV/fanout-native.raw.log"
+        -device virtserialport,chardev=fanout_native,name=xdev-fanout-native)
+fi
 if (( COMPAT )); then
     args+=(-drive "file=$SCRATCH/compat.raw,if=none,id=compat,format=raw,cache=none,aio=threads"
         -device virtio-blk-pci,drive=compat)
@@ -1407,6 +1413,18 @@ rc=$?
 set -e
 cleanup_proxy
 tr -d '\r' <"$EV/guest.raw.log" >"$EV/guest.log"
+printf '%s\n' "$rc" >"$EV/qemu.exit"
+if (( LIFECYCLE )); then
+    python3 - "$SOURCE_GIT_ROOT" "$EV" <<'PYFANOUTLOG'
+from pathlib import Path
+import sys
+root, evidence = map(Path, sys.argv[1:])
+sys.path.insert(0, str(root / 'kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime'))
+from fanout_trace import merge_fanout_logs
+merge_fanout_logs(evidence / 'guest.raw.log', evidence / 'fanout-native.raw.log',
+                  evidence / 'guest.log')
+PYFANOUTLOG
+fi
 if [[ "$FAULT" != none ]]; then
 	cat "$EV/wire.log" >>"$EV/guest.log"
 	python3 - "$EV/wire-stats.json" <<'PYWIRE'
@@ -1417,7 +1435,6 @@ PYWIRE
 elif [[ -z "$FAULT_CAMPAIGN" ]]; then
 	echo 'XDEV_EXT_ZC_FAULT_COUNTS mode=none matched=0 dropped=0 duplicated=0 session=270019 generation=2 index=2 count=6' >>"$EV/guest.log"
 fi
-printf '%s\n' "$rc" >"$EV/qemu.exit"
 cat /proc/modules >"$EV/host-modules-after.txt"
 ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \

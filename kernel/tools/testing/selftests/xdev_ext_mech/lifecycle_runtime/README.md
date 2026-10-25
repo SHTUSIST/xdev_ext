@@ -16,6 +16,14 @@ No second network receiver or independent scheduler is introduced.
 | `xdev_ext_mech_lifecycle_guest.sh` | Strict ZC fanout, peer RX->NVMe, both byte comparisons; two further CPU-transform outputs | Exact stage/recycle counts, isolated native trace, loss counters | Requires matching kernel/BPF/tools, KVM, QEMU NVMe and virtio-net |
 | `fanout_validate.py` | Reuses those sink images and native-event ABI/loss parser | Both consumer completions before recycle; same frame/generation/span; driver TX completion; whole-image guards; JSON | Synthetic validator tests are not guest execution; guest execution is not physical DMA proof |
 
+The lifecycle guest exports the full native snapshot through the named
+`xdev-fanout-native` virtio-serial port into `evidence/fanout-native.raw.log`.
+The serial console remains in `evidence/guest.raw.log`; the host combines
+both preserved originals into `guest.log` without removing kernel warnings.
+Missing or truncated native output fails validation. This avoids interleaving
+multi-megabyte trace data with printk on the emulated 8250 console; it does
+not relax the strict debug oracle or establish a cause for any prior stall.
+
 The trace joins session-less AF_XDP driver events through the actual
 `descriptor_bind` pool/address/sequence. A generic CQE or
 `downstream_complete` cannot replace a native completion. Loss, missing or

@@ -24,17 +24,34 @@ cpu_pin=/sys/fs/bpf/xdev-ext-lifecycle-cpu
 fanout_trace=
 dump_fanout_trace() {
  if [ -z "$fanout_trace" ]; then return; fi
- echo 0 >"$fanout_trace/tracing_on"
- echo XDEV_EXT_FANOUT_TRACE_CLOCK=mono
- for stats in "$fanout_trace"/per_cpu/cpu*/stats; do
-  cpu=${stats%/stats}; cpu=${cpu##*/}
-  echo "XDEV_EXT_FANOUT_TRACE_CPU_BEGIN $cpu"
-  cat "$stats"
-  echo "XDEV_EXT_FANOUT_TRACE_CPU_END $cpu"
+ # devtmpfs creates vport nodes; an initramfs need not run udev name rules.
+ port_root=${XDEV_FANOUT_PORT_SYSFS:-/sys/class/virtio-ports}
+ dev_root=${XDEV_FANOUT_DEV_ROOT:-/dev}
+ output=
+ for port in "$port_root"/vport*; do
+  [ -r "$port/name" ] || continue
+  [ "$(cat "$port/name")" = xdev-fanout-native ] || continue
+  output=$dev_root/${port##*/}
+  break
  done
- echo XDEV_EXT_FANOUT_TRACE_BEGIN
- cat "$fanout_trace/trace"
- echo XDEV_EXT_FANOUT_TRACE_END
+ if [ -z "$output" ] || [ ! -e "$output" ] || [ ! -w "$output" ]; then
+  echo 'FAIL named native trace port unavailable' >&2
+  return 1
+ fi
+ echo 0 >"$fanout_trace/tracing_on"
+ # Keep the complete snapshot away from ttyS0/printk. No console fallback.
+ {
+  echo XDEV_EXT_FANOUT_TRACE_CLOCK=mono
+  for stats in "$fanout_trace"/per_cpu/cpu*/stats; do
+   cpu=${stats%/stats}; cpu=${cpu##*/}
+   echo "XDEV_EXT_FANOUT_TRACE_CPU_BEGIN $cpu"
+   cat "$stats"
+   echo "XDEV_EXT_FANOUT_TRACE_CPU_END $cpu"
+  done
+  echo XDEV_EXT_FANOUT_TRACE_BEGIN
+  cat "$fanout_trace/trace"
+  echo XDEV_EXT_FANOUT_TRACE_END
+ } >"$output"
  echo 0 >"$fanout_trace/events/xdev_ext/native_event/enable"
  rmdir "$fanout_trace"
  fanout_trace=
