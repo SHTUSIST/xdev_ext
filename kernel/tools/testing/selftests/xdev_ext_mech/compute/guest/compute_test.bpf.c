@@ -76,7 +76,43 @@ __s32 BPF_PROG(compute_test_compute, const struct xdev_ext_mech_ctx *mctx)
 	int pos, err;
 
 	if (mode >= 4 && mode <= 6) {
-		struct xdev_ext_mech_ctx copy = *mctx;
+		struct xdev_ext_mech_ctx copy = {};
+
+		/* Preserve scalar values without compiler-wide reads crossing BTF fields. */
+#define COPY_FIELD(field) copy.field = ((const volatile struct xdev_ext_mech_ctx *)mctx)->field
+		COPY_FIELD(base.abi_version);
+		COPY_FIELD(base.ctx_size);
+		COPY_FIELD(base.event);
+		COPY_FIELD(base.backend);
+		COPY_FIELD(base.current_stage);
+		COPY_FIELD(base.direction);
+		COPY_FIELD(base.frame_state);
+		COPY_FIELD(base.capabilities);
+		COPY_FIELD(base.allowed_recipe_mask);
+		COPY_FIELD(base.allowed_next_mask);
+		COPY_FIELD(base.allowed_profile_mask);
+		COPY_FIELD(base.reserved0);
+		COPY_FIELD(base.request_id);
+		COPY_FIELD(base.chain_id);
+		COPY_FIELD(base.endpoint_id);
+		COPY_FIELD(base.src_buffer_id);
+		COPY_FIELD(base.dst_buffer_id);
+		COPY_FIELD(base.src_offset);
+		COPY_FIELD(base.dst_offset);
+		COPY_FIELD(base.logical_offset);
+		COPY_FIELD(base.length);
+		COPY_FIELD(base.bytes_done);
+		COPY_FIELD(base.result);
+		COPY_FIELD(base.reserved1);
+		COPY_FIELD(mech_abi_version);
+		COPY_FIELD(member);
+		COPY_FIELD(class_id);
+		COPY_FIELD(callsite);
+		COPY_FIELD(nr_frames);
+		COPY_FIELD(desc_cap);
+		COPY_FIELD(session_id);
+		COPY_FIELD(batch_id);
+#undef COPY_FIELD
 
 		/* The UAPI ctx contains scalars only; no envelope or pointer is forged. */
 		if (mode == 4)
