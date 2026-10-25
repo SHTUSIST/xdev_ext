@@ -23,18 +23,6 @@ sys.path.insert(0, str(HERE.parent))
 from xdev_ext_mech_recycle_tail_test import function  # noqa: E402
 
 BOUNDARY = (
-    ('bool to_user; u32 nr_frames,present;',
-     'bool to_user; u32 nr_frames,present; u64 ticket;'),
-    ('/* PRODUCTION_COUNT */',
-     '/* Optional trace observer is disabled at this OS boundary. */\n'
-     'static bool trace_native_event_enabled(void) {return false;}\n'
-     'static void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,'
-     'const char *phase,u32 pos,u64 ticket,int status) '
-     '{(void)b;(void)phase;(void)pos;(void)ticket;(void)status;}\n'
-     'static void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch *b,'
-     'const char *phase,u64 ticket,int status) '
-     '{(void)b;(void)phase;(void)ticket;(void)status;}\n'
-     '/* PRODUCTION_COUNT */'),
     ('static const struct xdev_ext_mech_class_ops class_callbacks = {.batch_release=verify_final_release};',
      'static unsigned long pending_progress(struct xdev_ext_mech_stage *st) {(void)st;return 1;}\n'
      'static const struct xdev_ext_mech_class_ops class_callbacks = '
