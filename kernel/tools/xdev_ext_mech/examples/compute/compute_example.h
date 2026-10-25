@@ -54,6 +54,9 @@
 
 #define EX_INLINE static inline __attribute__((always_inline))
 
+/* Hide @x's origin from the compiler (not from the verifier). */
+#define EX_OPAQUE(x)	__asm__ volatile("" : "+r"(x))
+
 /* errno values; vmlinux.h carries none. */
 #define EX_EFAULT	14
 #define EX_EINVAL	22

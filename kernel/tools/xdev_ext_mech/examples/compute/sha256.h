@@ -5,19 +5,26 @@
 /*
  * SHA-256 (FIPS 180-4) in plain BPF. Each 64-byte block of the padded
  * message is first turned into its 16 big-endian message words on the
- * stack: a whole block of the frame through one constant 64-byte view, the
- * last partial block word by word (a 4-byte view for a whole word, 1-byte
- * views around the end of the frame), followed by 0x80, zeros and the
- * message length in bits. One compression function therefore serves every
- * block. Each 32-bit message word is kept in its own 64-bit stack slot: an
- * aligned 8-byte store is a register spill for the verifier whether the
- * word is data or a padding zero, so the verifier can merge the paths that
- * stored them (a 4-byte store of a known zero instead marks the bytes as
- * zero and keeps every such pattern apart). The 64 rounds are one
- * open-coded loop over a 16-word message schedule, which the verifier walks
- * a few times instead of 64 times per block. The appended form is the one of
- * XDEV_EXT_CPU_XFORM_SHA256_APPEND (io_uring/xdev_ext_mech_cpu_core.h): the
- * 32-byte digest behind the frame.
+ * stack, so that one compression function serves every block. A whole block
+ * of the frame comes from one constant 64-byte view. The block that holds
+ * the end of the frame, and a block of padding only, are assembled byte by
+ * byte without a branch: every byte is read from one view that covers the
+ * end of the frame (at run-time indexes bounded by a mask), and masks
+ * computed from the byte's position keep a data byte, put 0x80 right after
+ * the data, or put 0. The bit length closes the last block.
+ *
+ * The shape is chosen for the verifier. Inside an open-coded loop that has
+ * not yet converged the verifier merges few paths, so every branch in the
+ * block code multiplies the work; the block code has a handful. Each message
+ * word lives in its own 64-bit stack slot, so storing a data word and storing
+ * a padding zero leave the same kind of slot (a 4-byte store of a known zero
+ * would mark the bytes as zero and keep every pattern of zero words apart).
+ * The 64 rounds are two open-coded loops, rounds 0..15 and 16..63 with the
+ * message schedule in w[t % 16], which the verifier walks a few times
+ * instead of 64 times per block.
+ *
+ * The appended form is the one of XDEV_EXT_CPU_XFORM_SHA256_APPEND
+ * (io_uring/xdev_ext_mech_cpu_core.h): the 32-byte digest behind the frame.
  */
 
 static const __u32 ex_sha256_k[64] = {
@@ -44,11 +51,27 @@ EX_INLINE __u32 ex_be32(const __u8 *p)
 	return (__u32)p[0] << 24 | (__u32)p[1] << 16 | (__u32)p[2] << 8 | p[3];
 }
 
+/* One round of the compression; W[t] is @wt. */
+#define EX_SHA256_ROUND(t, wt)							\
+	do {									\
+		t1 = hh + (ex_ror32(e, 6) ^ ex_ror32(e, 11) ^ ex_ror32(e, 25)) +	\
+		     ((e & f) ^ (~e & g)) + ex_sha256_k[(__u32)(t) & 63] + (wt);	\
+		t2 = (ex_ror32(a, 2) ^ ex_ror32(a, 13) ^ ex_ror32(a, 22)) +	\
+		     ((a & bb) ^ (a & c) ^ (bb & c));				\
+		hh = g;								\
+		g = f;								\
+		f = e;								\
+		e = d + t1;							\
+		d = c;								\
+		c = bb;								\
+		bb = a;								\
+		a = t1 + t2;							\
+	} while (0)
+
 /*
  * One compression of the block with message words @w into @h; @w is spent.
- * The 64 rounds are an open-coded loop: round t keeps the message schedule
- * word W[t] in w[t % 16], so the schedule index is a run-time value bounded
- * to 0..15.
+ * Rounds 16..63 keep the message schedule word W[t] in w[t % 16], a
+ * run-time stack index bounded to 0..15.
  */
 EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
 {
@@ -56,28 +79,17 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
 	__u32 g = h[6], hh = h[7], t1, t2, x, s0, s1, j;
 	int t;
 
-	ex_for(t, 0, 64) {
+	ex_for(t, 0, 16)
+		EX_SHA256_ROUND(t, (__u32)w[(__u32)t & 15]);
+	ex_for(t, 16, 64) {
+		/* W[t] = s1(W[t-2]) + W[t-7] + s0(W[t-15]) + W[t-16] */
 		j = (__u32)t & 15;
-		if (t >= 16) {
-			/* W[t] = s1(W[t-2]) + W[t-7] + s0(W[t-15]) + W[t-16] */
-			x = (__u32)w[(j + 1) & 15];
-			s0 = ex_ror32(x, 7) ^ ex_ror32(x, 18) ^ (x >> 3);
-			x = (__u32)w[(j + 14) & 15];
-			s1 = ex_ror32(x, 17) ^ ex_ror32(x, 19) ^ (x >> 10);
-			w[j] = (__u32)(w[j] + s0 + w[(j + 9) & 15] + s1);
-		}
-		t1 = hh + (ex_ror32(e, 6) ^ ex_ror32(e, 11) ^ ex_ror32(e, 25)) +
-		     ((e & f) ^ (~e & g)) + ex_sha256_k[(__u32)t & 63] + (__u32)w[j];
-		t2 = (ex_ror32(a, 2) ^ ex_ror32(a, 13) ^ ex_ror32(a, 22)) +
-		     ((a & bb) ^ (a & c) ^ (bb & c));
-		hh = g;
-		g = f;
-		f = e;
-		e = d + t1;
-		d = c;
-		c = bb;
-		bb = a;
-		a = t1 + t2;
+		x = (__u32)w[(j + 1) & 15];
+		s0 = ex_ror32(x, 7) ^ ex_ror32(x, 18) ^ (x >> 3);
+		x = (__u32)w[(j + 14) & 15];
+		s1 = ex_ror32(x, 17) ^ ex_ror32(x, 19) ^ (x >> 10);
+		w[j] = (__u32)(w[j] + s0 + w[(j + 9) & 15] + s1);
+		EX_SHA256_ROUND(t, (__u32)w[j]);
 	}
 	h[0] += a;
 	h[1] += bb;
@@ -89,32 +101,50 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
 	h[7] += hh;
 }
 
-/* Byte @m of the padded message of @len bytes, for @m below a whole word. */
-EX_INLINE int ex_sha256_byte(ex_ctx *c, __u32 pos, __u32 len, __u32 m, __u32 *byte)
+/*
+ * The 16 words of the block at message offset @start that holds the end of
+ * the message (@len bytes) or only padding. @q views frame bytes from
+ * offset @anchor on, @mask + 1 of them (a power of two), and covers every
+ * data byte of the block. No branch: a byte at or past @len is read anyway
+ * (inside @q) and masked off.
+ */
+EX_INLINE void ex_sha256_tail(__u64 w[16], const __u8 *q, const __u32 mask, __u32 anchor,
+			      __u32 start, __u32 len)
 {
-	const __u8 *p;
+	__u32 k, i, m, word, data;
+	__s64 dist, lt, eq;
 
-	if (m < len) {
-		p = ex_frame_rw(c, pos, m, 1);
-		if (!p)
-			return -EX_EFAULT;
-		*byte = p[0];
-	} else {
-		*byte = m == len ? 0x80 : 0;
+	EX_UNROLL
+	for (k = 0; k < 16; k++) {
+		word = 0;
+		EX_UNROLL
+		for (i = 0; i < 4; i++) {
+			m = start + 4 * k + i;
+			data = q[(m - anchor) & mask];
+			dist = (__s64)m - (__s64)len;
+			/* -1 when m < len, else 0; -1 when m == len, else 0. */
+			lt = dist >> 63;
+			eq = (((dist | -dist) >> 63) + 1) & 1;
+			eq = -eq;
+			/* Keep the compiler from turning the masks into branches. */
+			EX_OPAQUE(lt);
+			EX_OPAQUE(eq);
+			word |= ((data & (__u32)lt) | (0x80U & (__u32)eq)) << (24 - 8 * i);
+		}
+		w[k] = word;
 	}
-	return 0;
 }
 
 /*
  * The message words of block @blk of the padded message of the frame's
- * first @len bytes into @w.
+ * first @len bytes into @w. The frame capacity is at least @len + 32 (the
+ * stage declares +32), which every view below relies on.
  */
 EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 w[16])
 {
-	__u32 start = blk * 64, base, word, byte, k, i;
+	__u32 start = blk * 64, anchor, k;
 	__u64 bits = (__u64)len * 8;
 	const __u8 *p;
-	int err;
 
 	if (start + 64 <= len) {
 		p = ex_frame_rw(c, pos, start, 64);
@@ -125,25 +155,18 @@ EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 
 			w[k] = ex_be32(p + 4 * k);
 		return 0;
 	}
-	EX_UNROLL
-	for (k = 0; k < 16; k++) {
-		base = start + 4 * k;
-		if (base + 4 <= len) {
-			p = ex_frame_rw(c, pos, base, 4);
-			if (!p)
-				return -EX_EFAULT;
-			word = ex_be32(p);
-		} else {
-			word = 0;
-			EX_UNROLL
-			for (i = 0; i < 4; i++) {
-				err = ex_sha256_byte(c, pos, len, base + i, &byte);
-				if (err)
-					return err;
-				word |= byte << (24 - 8 * i);
-			}
-		}
-		w[k] = word;
+	if (len >= 32) {
+		/* The last 64 bytes, or the first 64 of a frame of 32..63 bytes. */
+		anchor = len >= 64 ? len - 64 : 0;
+		p = ex_frame_rw(c, pos, anchor, 64);
+		if (!p)
+			return -EX_EFAULT;
+		ex_sha256_tail(w, p, 63, anchor, start, len);
+	} else {
+		p = ex_frame_rw(c, pos, 0, 32);
+		if (!p)
+			return -EX_EFAULT;
+		ex_sha256_tail(w, p, 31, 0, start, len);
 	}
 	/* The length closes the last block: the one where it fits after 0x80. */
 	if ((len + 8) / 64 == blk) {
