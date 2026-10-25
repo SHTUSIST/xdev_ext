@@ -172,6 +172,8 @@ CLASS_BLOCK_CALLS = {
     "blk_execute_rq_nowait", "blk_lim_dma_alignment_and_pad",
     "blk_mq_alloc_request", "blk_mq_free_request", "blk_rq_append_bio",
     "blk_status_to_errno", "blk_rq_bytes",
+    # Stage polling (XDEV_EXT_MECH_STAGE_F_POLL): both exported by block/blk-mq.c.
+    "blk_rq_is_poll", "blk_mq_poll_hw_queue",
 }
 
 
@@ -282,6 +284,10 @@ def check_mech_class(source: str, root: Path) -> str:
     calls = set(re.findall(r"\b((?:__)?(?:blk|bio)_\w+)\s*\(", mech))
     require(calls <= CLASS_BLOCK_CALLS,
             f"unexported or bouncing block calls: {sorted(calls - CLASS_BLOCK_CALLS)}")
+    blk_mq = (root / "block/blk-mq.c").read_text()
+    for name in ("blk_rq_is_poll", "blk_mq_poll_hw_queue"):
+        require(f"EXPORT_SYMBOL_GPL({name});" in blk_mq,
+                f"nvme-core calls {name}, which block/blk-mq.c must export")
 
     bounce = mech.split("#ifdef CONFIG_XDEV_EXT_MECH_KVM_BOUNCE", 1)
     require(len(bounce) == 2 and "module_param_cb(xdev_ext_mech_bounces" in

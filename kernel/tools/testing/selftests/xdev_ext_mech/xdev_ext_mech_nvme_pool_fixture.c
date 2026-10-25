@@ -34,6 +34,11 @@ typedef int blk_status_t;
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
 #define nvme_req(r) (&(r)->nvme)
+/* Stage polling helpers run verbatim; these host-page sessions never poll. */
+typedef unsigned int blk_opf_t;
+#define REQ_POLLED (1U << 21)
+#define WRITE_ONCE(x, v) ((x) = (v))
+struct blk_mq_hw_ctx { unsigned int queue_num; };
 struct page { unsigned char data[PAGE_SIZE]; };
 struct nvme_ns_head;
 struct gendisk;
@@ -56,12 +61,13 @@ struct xdev_ext_mech_pool { struct page pages[2]; unsigned int kind; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; struct xdev_ext_mech_layout layout; unsigned int depth,state; };
 struct xdev_ext_mech_frame { void *kaddr; u64 umem_addr; u32 index,data_off,data_len; void *pool_priv; };
 struct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; u64 id,ticket; bool claimed,uncertain; int status; };
-struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; struct xdev_ext_mech_session *s; };
+struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; struct xdev_ext_mech_session *s; bool poll; };
 enum rq_end_io_ret { RQ_END_IO_FREE };
 struct request {
  struct { unsigned int flags; unsigned short status; struct { u64 u64; } result; } nvme;
  unsigned int cmd_flags,rq_flags;
  union {unsigned int residual;unsigned int __data_len;};
+ struct blk_mq_hw_ctx *mq_hctx;
  struct bio *bio;
  enum rq_end_io_ret (*end_io)(struct request *,blk_status_t);
  void *end_io_data;
@@ -123,6 +129,7 @@ static int nvme_req_op(struct nvme_command *cmd) { (void)cmd;return 0; }
 static struct request *blk_mq_alloc_request(void *q,int op,unsigned int flags)
 { (void)q;(void)op;if(flags!=BLK_MQ_REQ_NOWAIT)abort();if(!strcmp(mode,"tags"))return ERR_PTR(-EAGAIN);return &requests[next_request++]; }
 static void blk_mq_free_request(struct request *req) { (void)req; }
+static bool blk_rq_is_poll(struct request *req) { (void)req; abort(); }
 static void nvme_init_request(struct request *req,struct nvme_command *cmd) { (void)req;(void)cmd; }
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st) { (void)st;return 0; }
 static struct nvme_xdev_ext_queue_caps nvme_xdev_ext_class_caps(const struct nvme_xdev_ext_mech_stage *p)
