@@ -9,11 +9,13 @@
  * last partial block word by word (a 4-byte view for a whole word, 1-byte
  * views around the end of the frame), followed by 0x80, zeros and the
  * message length in bits. One compression function therefore serves every
- * block. Every store of a message word is a 32-bit word at a constant
- * index, whatever branch produced it, so the verifier can merge the
- * branches. The 64 rounds are one open-coded loop over a 16-word message
- * schedule, which the verifier walks a few times instead of 64 times per
- * block. The appended form is the one of
+ * block. Each 32-bit message word is kept in its own 64-bit stack slot: an
+ * aligned 8-byte store is a register spill for the verifier whether the
+ * word is data or a padding zero, so the verifier can merge the paths that
+ * stored them (a 4-byte store of a known zero instead marks the bytes as
+ * zero and keeps every such pattern apart). The 64 rounds are one
+ * open-coded loop over a 16-word message schedule, which the verifier walks
+ * a few times instead of 64 times per block. The appended form is the one of
  * XDEV_EXT_CPU_XFORM_SHA256_APPEND (io_uring/xdev_ext_mech_cpu_core.h): the
  * 32-byte digest behind the frame.
  */
@@ -48,7 +50,7 @@ EX_INLINE __u32 ex_be32(const __u8 *p)
  * word W[t] in w[t % 16], so the schedule index is a run-time value bounded
  * to 0..15.
  */
-EX_INLINE void ex_sha256_block(__u32 h[8], __u32 w[16])
+EX_INLINE void ex_sha256_block(__u32 h[8], __u64 w[16])
 {
 	__u32 a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5];
 	__u32 g = h[6], hh = h[7], t1, t2, x, s0, s1, j;
@@ -58,14 +60,14 @@ EX_INLINE void ex_sha256_block(__u32 h[8], __u32 w[16])
 		j = (__u32)t & 15;
 		if (t >= 16) {
 			/* W[t] = s1(W[t-2]) + W[t-7] + s0(W[t-15]) + W[t-16] */
-			x = w[(j + 1) & 15];
+			x = (__u32)w[(j + 1) & 15];
 			s0 = ex_ror32(x, 7) ^ ex_ror32(x, 18) ^ (x >> 3);
-			x = w[(j + 14) & 15];
+			x = (__u32)w[(j + 14) & 15];
 			s1 = ex_ror32(x, 17) ^ ex_ror32(x, 19) ^ (x >> 10);
-			w[j] += s0 + w[(j + 9) & 15] + s1;
+			w[j] = (__u32)(w[j] + s0 + w[(j + 9) & 15] + s1);
 		}
 		t1 = hh + (ex_ror32(e, 6) ^ ex_ror32(e, 11) ^ ex_ror32(e, 25)) +
-		     ((e & f) ^ (~e & g)) + ex_sha256_k[(__u32)t & 63] + w[j];
+		     ((e & f) ^ (~e & g)) + ex_sha256_k[(__u32)t & 63] + (__u32)w[j];
 		t2 = (ex_ror32(a, 2) ^ ex_ror32(a, 13) ^ ex_ror32(a, 22)) +
 		     ((a & bb) ^ (a & c) ^ (bb & c));
 		hh = g;
@@ -107,7 +109,7 @@ EX_INLINE int ex_sha256_byte(ex_ctx *c, __u32 pos, __u32 len, __u32 m, __u32 *by
  * The message words of block @blk of the padded message of the frame's
  * first @len bytes into @w.
  */
-EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u32 w[16])
+EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u64 w[16])
 {
 	__u32 start = blk * 64, base, word, byte, k, i;
 	__u64 bits = (__u64)len * 8;
@@ -154,7 +156,7 @@ EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u32 
 /* SHA-256 of the frame's first @len bytes into @out (32 bytes, big endian). */
 EX_INLINE int ex_sha256_frame(ex_ctx *c, __u32 pos, __u32 len, __u32 h[8])
 {
-	__u32 w[16];
+	__u64 w[16];
 	int blk, err;
 
 	h[0] = 0x6a09e667;
