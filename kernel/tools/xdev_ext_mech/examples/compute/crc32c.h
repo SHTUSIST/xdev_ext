@@ -46,7 +46,8 @@ EX_INLINE __u32 ex_crc32c_block(__u32 crc, const __u8 *p, const __u32 n)
 	__u32 k;
 
 #if EX_CRC32C_SLICE8
-	EX_UNROLL
+	/* Unrolled, the table loads of 32 words exceed the BPF stack. */
+	EX_NOUNROLL
 	for (k = 0; k < n / 8; k++)
 		crc = ex_crc32c_word8(crc, p + 8 * k);
 #endif

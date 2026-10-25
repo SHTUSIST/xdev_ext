@@ -33,11 +33,18 @@ typedef const struct xdev_ext_mech_ctx ex_ctx;
  * The bounds are int, as bpf_iter_num_new() takes them.
  */
 #define ex_for(i, start, end)		bpf_for(i, (int)(start), (int)(end))
-/* Constant-trip inner loops become straight-line code. */
+/* Constant-trip inner loops become straight-line code ... */
 #define EX_UNROLL			_Pragma("unroll")
+/*
+ * ... or stay a bounded loop that the verifier walks iteration by iteration,
+ * where unrolled code would keep more values live than the 512-byte stack
+ * holds.
+ */
+#define EX_NOUNROLL			_Pragma("clang loop unroll(disable)")
 #else
 #define ex_for(i, start, end)		for ((i) = (start); (i) < (int)(end); (i)++)
 #define EX_UNROLL
+#define EX_NOUNROLL
 #endif
 
 #define EX_INLINE static inline __attribute__((always_inline))
