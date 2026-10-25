@@ -28,8 +28,11 @@ typedef const struct xdev_ext_mech_ctx ex_ctx;
 #define ex_frame_len(c, pos)		bpf_xdev_ext_frame_len(c, pos)
 #define ex_frame_rw(c, pos, off, size)	bpf_xdev_ext_frame_rw(c, pos, off, size)
 #define ex_frame_set_len(c, pos, len)	bpf_xdev_ext_frame_set_len(c, pos, len)
-/* An open-coded iterator: bounded at run time, verified without unrolling. */
-#define ex_for(i, start, end)		bpf_for(i, start, end)
+/*
+ * An open-coded iterator: bounded at run time, verified without unrolling.
+ * The bounds are int, as bpf_iter_num_new() takes them.
+ */
+#define ex_for(i, start, end)		bpf_for(i, (int)(start), (int)(end))
 /* Constant-trip inner loops become straight-line code. */
 #define EX_UNROLL			_Pragma("unroll")
 #else
