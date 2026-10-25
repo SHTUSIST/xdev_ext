@@ -8,9 +8,13 @@
 # initramfs and evidence. No host module is loaded and no host NIC, route or
 # disk is touched; the guest has no network.
 #   bash user_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR
+# --red boots an older kernel (O_DIR of a commit before the USER stage) with the
+# same guest program and BPF objects of TOOLS_DIR and passes only if the first
+# USER step is refused (its program type does not exist): the guest test's RED
+# baseline. Identity checks of the build are recorded, not enforced, then.
 set -euo pipefail
 umask 077
-SCRATCH='' SOURCE='' BUILD='' TOOLS=''
+SCRATCH='' SOURCE='' BUILD='' TOOLS='' RED=0
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1800}
@@ -20,6 +24,7 @@ while (($#)); do
 	--source) SOURCE=$2; shift 2 ;;
 	--build) BUILD=$2; shift 2 ;;
 	--tools) TOOLS=$2; shift 2 ;;
+	--red) RED=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -39,18 +44,22 @@ git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]] || { echo 'FAIL untracked source files' >&2; exit 1; }
 HEAD_SHA=$(git -C "$SOURCE" rev-parse --verify 'HEAD^{commit}')
 BUILD_SHA=$(cat "$BUILD/xdev-ext-source.commit")
-git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
-git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
-changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
-# Only this test directory and its specification may differ: neither is part
-# of the prebuilt kernel or tools.
-if [[ -n "$changed" ]] && grep -v -e "^$REL/" -e '^kernel/Documentation/userspace-api/xdev_ext-user-stage.rst$' <<<"$changed"; then
-	echo 'FAIL source differs from the prebuilt kernel/tools outside the USER stage test files' >&2; exit 1
+if (( RED )); then
+	changed="red baseline kernel $BUILD_SHA, guest program and BPF objects of $HEAD_SHA"
+else
+	git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
+	git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
+	changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
+	# Only this test directory and its specification may differ: neither is
+	# part of the prebuilt kernel or tools.
+	if [[ -n "$changed" ]] && grep -v -e "^$REL/" -e '^kernel/Documentation/userspace-api/xdev_ext-user-stage.rst$' <<<"$changed"; then
+		echo 'FAIL source differs from the prebuilt kernel/tools outside the USER stage test files' >&2; exit 1
+	fi
+	for symbol in XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY XDEV_EXT_MECH_CPU BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS \
+		IO_URING BPF_SYSCALL DEBUG_INFO_BTF SERIAL_8250_CONSOLE PCI_MSI; do
+		grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
+	done
 fi
-for symbol in XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY XDEV_EXT_MECH_CPU BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS \
-	IO_URING BPF_SYSCALL DEBUG_INFO_BTF SERIAL_8250_CONSOLE PCI_MSI; do
-	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
-done
 release=$(cat "$BUILD/include/config/kernel.release")
 for artifact in "$BUILD/arch/x86/boot/bzImage" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/user_plan.bpf.o" "$TOOLS/cpu_plan.bpf.o"; do
 	[[ -s "$artifact" ]] || { echo "FAIL missing prebuilt artifact $artifact" >&2; exit 1; }
@@ -124,6 +133,17 @@ printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"; printf '\n' >>"$EV/qemu.c
 qemu_status=0
 timeout "$TIMEOUT_SECONDS" "$QEMU" "${args[@]}" </dev/null >"$EV/guest.log" 2>&1 || qemu_status=$?
 printf 'qemu_exit=%s\n' "$qemu_status" >>"$EV/provenance.txt"
+if (( RED )); then
+	# Expected: the kernel without the USER stage has no USER program type.
+	if (( qemu_status == 0 )) && tr -d '\r' <"$EV/guest.log" |
+		grep -Eq '^not ok [0-9]+ - load and attach user_plan struct_ops$' &&
+		! grep -q 'XDEV_EXT_USER_STAGE_E2E=PASS' "$EV/guest.log"; then
+		echo 'XDEV_EXT_USER_KVM=RED_CONFIRMED first_failure=user_plan-attach' | tee "$EV/verdict.txt"
+		exit 0
+	fi
+	echo "XDEV_EXT_USER_KVM=RED_UNEXPECTED qemu_exit=$qemu_status" | tee "$EV/verdict.txt"
+	exit 1
+fi
 validator_status=0
 python3 -I "$SOURCE/$REL/user_validate.py" validate --dir "$OUT" --log "$EV/guest.log" \
 	--result "$EV/result.json" || validator_status=$?
