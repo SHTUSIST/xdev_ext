@@ -33,9 +33,12 @@
 #include <linux/mutex.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
+#include <linux/rtnetlink.h>
 #include <linux/slab.h>
 #include <linux/xdev_ext_binding.h>
 #include <linux/xdev_ext_mech.h>
+#include <net/busy_poll.h>
+#include <net/netdev_rx_queue.h>
 #include <net/xdp_sock.h>
 #include <net/xsk_buff_pool.h>
 
@@ -103,6 +106,9 @@ struct xsk_xdev_ext_mech_stage {
 	u64 *tx_tag[XDEV_EXT_MECH_MAX_FRAMES];
 	struct xdev_ext_mech_frame_info tx_fi[XDEV_EXT_MECH_MAX_FRAMES];
 	u8 *tx_kaddr[XDEV_EXT_MECH_MAX_FRAMES];
+	/* Polled stage: NAPI ids the session worker busy-polls, fixed at bind. */
+	unsigned int poll_napi[2];
+	u32 nr_poll_napi;
 };
 
 /* xdev_ext_mech_batch_priv() of a TX batch: the last attempt, per frame. */
@@ -677,6 +683,75 @@ static void xsk_xdev_ext_mech_fill_info(struct xdev_ext_mech_stage *st,
 }
 
 /*
+ * CREATE, polled stage: NAPI can keep the device interrupt masked while the
+ * session worker keeps busy-polling, which needs napi_defer_hard_irqs and
+ * gro_flush_timeout on the instance (Documentation/networking/napi.rst,
+ * "Busy polling").  Without them interrupts would still deliver.
+ */
+static bool xsk_mech_poll_napi_ok(const struct napi_struct *napi)
+{
+	return napi && napi_id_valid(napi->napi_id) &&
+	       READ_ONCE(napi->defer_hard_irqs) && READ_ONCE(napi->gro_flush_timeout);
+}
+
+/*
+ * CREATE, polled stage, before xs->mutex (RTNL comes first, as in
+ * xsk_bind()): the NAPI instances of the socket's queue, receive first, then a
+ * distinct transmit instance if the driver registered one.  A copy-mode
+ * transmit stage without the reliable protocol completes inside ->submit,
+ * so it has nothing to poll.  -EOPNOTSUPP refuses; nothing is changed then.
+ */
+static int xsk_mech_poll_bind(struct xsk_xdev_ext_mech_stage *xst, struct xdp_sock *xs,
+			      bool tx, bool reliable)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	struct napi_struct *rx = NULL, *txn = NULL;
+	struct net_device *dev;
+	int err = -EOPNOTSUPP;
+	u32 qid;
+
+	if (tx && !xs->zc && !reliable)
+		return -EOPNOTSUPP;
+	rtnl_lock();
+	dev = READ_ONCE(xs->state) == XSK_BOUND ? xs->dev : NULL;
+	qid = xs->queue_id;
+	if (dev && qid < dev->real_num_rx_queues)
+		rx = __netif_get_rx_queue(dev, qid)->napi;
+	if (dev && tx && qid < dev->real_num_tx_queues)
+		txn = netdev_get_tx_queue(dev, qid)->napi;
+	if (xsk_mech_poll_napi_ok(rx) &&
+	    (!txn || txn == rx || xsk_mech_poll_napi_ok(txn))) {
+		xst->poll_napi[0] = rx->napi_id;
+		xst->nr_poll_napi = 1;
+		if (txn && txn != rx)
+			xst->poll_napi[xst->nr_poll_napi++] = txn->napi_id;
+		err = 0;
+	}
+	rtnl_unlock();
+	return err;
+#else
+	return -EOPNOTSUPP;
+#endif
+}
+
+/*
+ * Session worker, polled stage: one preferred busy-poll pass of each NAPI
+ * instance.  Received frames and transmit completions are processed here,
+ * through the same RX and completion paths an interrupt-driven NAPI runs.
+ */
+static int xsk_mech_poll(struct xdev_ext_mech_stage *st)
+{
+#ifdef CONFIG_NET_RX_BUSY_POLL
+	struct xsk_xdev_ext_mech_stage *xst = st->priv;
+	u32 i;
+
+	for (i = 0; i < xst->nr_poll_napi; i++)
+		napi_busy_loop(xst->poll_napi[i], NULL, NULL, true, BUSY_POLL_BUDGET);
+#endif
+	return 0;
+}
+
+/*
  * CREATE, process context.  Both directions sit on the very socket whose
  * UMEM backs the session's xsk pool: the RX stage is the session's source,
  * stage 0; a TX stage uses the kernel source for zero-copy and
@@ -742,6 +817,15 @@ static int xsk_xdev_ext_mech_bind(struct xdev_ext_mech_stage *st,
 		if (!xst->tx_sent) {
 			kfree(xst);
 			return -ENOMEM;
+		}
+	}
+	if (st->poll) {
+		err = xsk_mech_poll_bind(xst, xs, tx, u->flags & XDEV_EXT_AFXDP_F_RELIABLE);
+		if (err) {
+			kvfree(xst->pending.entries);
+			kvfree(xst->tx_sent);
+			kfree(xst);
+			return err;
 		}
 	}
 
@@ -1315,6 +1399,7 @@ static const struct xdev_ext_mech_class_ops xsk_xdev_ext_mech_class_ops = {
 	.mark_dead = xsk_xdev_ext_mech_mark_dead,
  .batch_end = xsk_rel_batch_end,
  .progress = xsk_mech_progress,
+	.poll = xsk_mech_poll,
 };
 
 __bpf_kfunc_start_defs();
