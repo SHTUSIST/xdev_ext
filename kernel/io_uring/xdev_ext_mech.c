@@ -49,6 +49,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(native_event);
 #include "xdev_ext_mech_internal.h"
 #include "xdev_ext_policy.h"
 #include "xdev_ext_mech_notify.h"
+#include "xdev_ext_mech_poll.h"
 #include "xdev_ext_mech_step.h"
 #include "xdev_ext_mech_produced.h"
 
@@ -170,6 +171,9 @@ struct xdev_ext_mech_session {
 	struct kthread_work stop_work;
 	struct kthread_work kick_work;
  struct kthread_delayed_work progress_work;
+	/* Stage polling passes; STOP leaves it queued until the drain ends. */
+	struct kthread_delayed_work poll_work;
+	bool poll_rx;			/* stage 0 is a polled receive source */
  atomic_t native_controls;
 	struct work_struct reap_work;
 	struct timer_list group_timer;
@@ -907,6 +911,7 @@ static void xdev_ext_mech_reap(struct work_struct *work)
 	}
 	kthread_cancel_delayed_work_sync(&s->retry_work);
 	kthread_cancel_delayed_work_sync(&s->progress_work);
+	kthread_cancel_delayed_work_sync(&s->poll_work);
 	synchronize_rcu();
 	kthread_destroy_worker(s->worker);
 }
@@ -1938,6 +1943,21 @@ static void xdev_ext_mech_fanout_landed(struct xdev_ext_mech_session *s,
  }
 }
 
+/*
+ * Worker or CREATE: start stage polling passes (xdev_ext_mech_poll_work());
+ * already queued passes stay as they are.  s->lock orders it against
+ * worker_gone, as for every other re-arm of a session work.
+ */
+static void xdev_ext_mech_poll_kick(struct xdev_ext_mech_session *s)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&s->lock, flags);
+	if (!s->worker_gone)
+		kthread_queue_delayed_work(s->worker, &s->poll_work, 0);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
 /* Worker: a READY batch at its current stage. */
 static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,
 			       struct xdev_ext_mech_batch *b)
@@ -1996,8 +2016,13 @@ static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,
    else
     xdev_ext_mech_abort(s, b, err);
 		}
-	} else if (st->cls->flags & XDEV_EXT_MECH_CLASS_F_ORDERED)
-		xdev_ext_mech_order_kick(s);
+	} else {
+		/* Accepted: its completion now waits for a poll pass. */
+		if (st->poll)
+			xdev_ext_mech_poll_kick(s);
+		if (st->cls->flags & XDEV_EXT_MECH_CLASS_F_ORDERED)
+			xdev_ext_mech_order_kick(s);
+	}
 }
 
 static void xdev_ext_mech_retry_kick(struct xdev_ext_mech_session *s)
@@ -2378,6 +2403,32 @@ static void xdev_ext_mech_progress_work(struct kthread_work *work)
   kthread_mod_delayed_work(s->worker, &s->progress_work, delay);
 }
 
+/*
+ * Session worker: one pass over every polled stage, then the re-arm rule of
+ * xdev_ext_mech_poll_next(), decided under s->lock against worker_gone.
+ * Completions a pass finds are claimed, published and queued to drain_work
+ * exactly as interrupt-time completions are.  The pass is queued again at
+ * the tail, so drain, START, retry and STOP work run between passes.
+ */
+static void xdev_ext_mech_poll_work(struct kthread_work *work)
+{
+	struct xdev_ext_mech_session *s = container_of(work, struct xdev_ext_mech_session,
+						  poll_work.work);
+	unsigned long flags;
+	long delay;
+	u32 i;
+
+	for (i = 0; i < s->nr_stages; i++)
+		if (s->st[i].poll)
+			s->st[i].cls->poll(&s->st[i]);
+	spin_lock_irqsave(&s->lock, flags);
+	delay = xdev_ext_mech_poll_next(s->ss.state, s->ss.inflight, s->poll_rx,
+				       s->worker_gone);
+	if (delay >= 0)
+		kthread_queue_delayed_work(s->worker, &s->poll_work, delay);
+	spin_unlock_irqrestore(&s->lock, flags);
+}
+
 static void xdev_ext_mech_kick_work(struct kthread_work *work)
 {
 	xdev_ext_mech_start_more(container_of(work, struct xdev_ext_mech_session,
@@ -2604,6 +2655,7 @@ static void xdev_ext_mech_session_init(struct xdev_ext_mech_session *s,
 	kthread_init_work(&s->stop_work, xdev_ext_mech_stop_work);
 	kthread_init_work(&s->kick_work, xdev_ext_mech_kick_work);
  kthread_init_delayed_work(&s->progress_work, xdev_ext_mech_progress_work);
+	kthread_init_delayed_work(&s->poll_work, xdev_ext_mech_poll_work);
 	INIT_WORK(&s->reap_work, xdev_ext_mech_reap);
 	timer_setup(&s->group_timer, xdev_ext_mech_group_timeout, 0);
 	init_waitqueue_head(&s->drain_wq);
@@ -2756,6 +2808,7 @@ static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s,
 static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 				 const struct xdev_ext_mech_create *c)
 {
+	struct xdev_ext_mech_stage_uapi clean[XDEV_EXT_MECH_MAX_STAGES];
 	struct xdev_ext_mech_stage *st;
 	u32 i;
 	int ret;
@@ -2774,6 +2827,12 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		st->cls = xdev_ext_mech_class_get(st->class_id);
 		if (!st->cls)
 			return -EOPNOTSUPP;
+		/* A class without ->poll cannot honour POLL: no interrupt fallback. */
+		ret = xdev_ext_mech_poll_split(&c->st[i], st->cls->poll, &clean[i],
+					       &st->poll);
+		if (ret)
+			return ret;
+		st->flags = clean[i].flags;
 		if (s->ops[st->class_id])
 			continue;
 		/* No program for the class: no silent C path either. */
@@ -2810,7 +2869,7 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 			if (!st->file)
 				return -EBADF;
 		}
-		ret = st->cls->bind(st, &c->st[i]);
+		ret = st->cls->bind(st, &clean[i]);
   if (ret) {
    /* Checked classes publish any residual mapping in priv on failure. */
    if (st->cls->unbind_checked && st->priv)
@@ -2824,6 +2883,8 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		if (ret)
 			return ret;
 	}
+	/* A receive source has no submit to start polling. */
+	s->poll_rx = xdev_ext_mech_rx_first(s) && s->st[0].poll;
 	return 0;
 }
 
@@ -2885,6 +2946,7 @@ static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
 	if (s->worker) {
 		kthread_cancel_delayed_work_sync(&s->retry_work);
  kthread_cancel_delayed_work_sync(&s->progress_work);
+		kthread_cancel_delayed_work_sync(&s->poll_work);
 		synchronize_rcu();
 		kthread_destroy_worker(s->worker);
 	}
@@ -3012,6 +3074,7 @@ static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 		if (last) {
 			kthread_cancel_delayed_work_sync(&s->retry_work);
 			kthread_cancel_delayed_work_sync(&s->progress_work);
+			kthread_cancel_delayed_work_sync(&s->poll_work);
 			synchronize_rcu();
 			kthread_destroy_worker(s->worker);
 		}
@@ -3046,6 +3109,7 @@ static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s)
 	xdev_ext_mech_quarantine(s);
 	kthread_cancel_delayed_work_sync(&s->retry_work);
 	kthread_cancel_delayed_work_sync(&s->progress_work);
+	kthread_cancel_delayed_work_sync(&s->poll_work);
 	synchronize_rcu();
 	kthread_destroy_worker(s->worker);
 }
@@ -3155,6 +3219,8 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 	/* A generation retracted before the session was listed. */
 	if (!xdev_ext_mech_session_admits(s))
 		xdev_ext_mech_session_stop(s, -ECANCELED);
+	else if (s->poll_rx)
+		xdev_ext_mech_poll_kick(s);
 	return 0;
 }
 

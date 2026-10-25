@@ -264,8 +264,10 @@ struct xdev_ext_mech_stage {
 	u64 arg1;
 	u32 class_id;			/* enum xdev_ext_mech_class */
 	u32 direction;			/* enum xdev_ext_mech_dir */
-	u32 flags;			/* xdev_ext_mech_stage_uapi.flags */
+	u32 flags;			/* xdev_ext_mech_stage_uapi.flags without F_POLL */
 	u32 index;			/* position in the chain */
+	/* XDEV_EXT_MECH_STAGE_F_POLL accepted: set by the core before ->bind */
+	bool poll;
 };
 
 /*
@@ -335,7 +337,16 @@ struct xdev_ext_mech_class_ops {
  void (*transport_counters)(struct xdev_ext_mech_stage *st,
                             struct xdev_ext_mech_transport_stats_v2 *out);
  void (*transport_policy)(struct xdev_ext_mech_stage *st, struct xdev_ext_rel_policy *out);
-
+	/*
+	 * Optional; only for a stage with st->poll, only from the session worker,
+	 * no session lock held.  One bounded pass reaping native completions the
+	 * device already produced; never sleeps, waits for the device or submits.
+	 * Completions go through the usual claim and publish, possibly before it
+	 * returns.  The number processed (>= 0, may include other users of a
+	 * shared native queue) or -errno; informational only.  A class with this
+	 * member refuses in ->bind (-EOPNOTSUPP) a device it cannot poll.
+	 */
+	int (*poll)(struct xdev_ext_mech_stage *st);
 };
 
 /* Initcall or module init, process context: -EBUSY if the class is taken. */
@@ -663,6 +674,11 @@ struct xdev_ext_dma_region {
 	void *priv;
 	u64 len;
 	u32 segment_size, max_entry_len, alignment, directions;
+	/* Set by the class before ->bind_region for a polled stage; the
+	 * provider must not clear it, and refuses (-EOPNOTSUPP) a device it
+	 * cannot poll.  Normal completions then come from ->poll (or inline in
+	 * ->submit), never from a device interrupt or a provider thread. */
+	bool polled;
 };
 struct xdev_ext_dma_xfer {
 	u64 host_byte_off, device_off;
@@ -684,6 +700,9 @@ struct xdev_ext_dma_provider_ops {
 	int (*submit)(struct xdev_ext_dma_region *r, void *host, u32 dir,
 		      const struct xdev_ext_dma_xfer *x, u32 n,
 		      struct xdev_ext_dma_cookie *cookie, u64 ticket);
+	/* Optional: a polled region's completion pass in the session worker;
+	 * never sleeps.  Transfers it completed (>= 0) or -errno. */
+	int (*poll)(struct xdev_ext_dma_region *r);
 };
 /* Module init, process context: duplicate fops fails with -EBUSY. */
 int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops);
