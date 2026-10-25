@@ -21,16 +21,23 @@ DEST_GUARD = 0x6b
 PASS_PREFIX = 'XDEV_EXT_PEER_SESSION=PASS'
 UNLOAD_MARKER = 'XDEV_EXT_PEER_SESSION_UNLOAD=PASS module=xdev_ext_peer_sw'
 EXIT_RE = re.compile(r'^XDEV_EXT_SESSION_GUEST_EXIT=(\d+)$', re.M)
+# copies: NONE nothing reaches the destination; ALL every group is copied;
+# PART (teardown in flight) each group is the source group or untouched guard.
+NONE, ALL, PART = 0, 1, 2
 # Kept in step with peer_session_e2e.c by the PLAN-line comparison below.
 PLANS = (
     dict(name='reject-map', frame=4096, seg=4096, group=4096, depth=1, groups=4,
-         src_slba=2048, dst_slba=16384, copies=False),
+         src_slba=2048, dst_slba=16384, copies=NONE),
     dict(name='cli', frame=65536, seg=16384, group=16384, depth=1, groups=64,
-         src_slba=2048, dst_slba=4096, copies=True),
+         src_slba=2048, dst_slba=4096, copies=ALL),
     dict(name='depth4', frame=4096, seg=4096, group=8192, depth=4, groups=96,
-         src_slba=8192, dst_slba=10240, copies=True),
+         src_slba=8192, dst_slba=10240, copies=ALL),
+    dict(name='stop-inflight', frame=4096, seg=4096, group=4096, depth=4, groups=1024,
+         src_slba=16384, dst_slba=18432, copies=PART),
+    dict(name='kill-inflight', frame=4096, seg=4096, group=4096, depth=4, groups=512,
+         src_slba=24576, dst_slba=26624, copies=PART),
     dict(name='fd-release', frame=32768, seg=32768, group=32768, depth=2, groups=8,
-         src_slba=12288, dst_slba=14336, copies=True),
+         src_slba=12288, dst_slba=14336, copies=ALL),
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'xdev_ext_integration'))
@@ -59,7 +66,7 @@ def source_pattern(size=DISK_BYTES):
 def expected_destination(source, size=DISK_BYTES):
     dest = bytearray([DEST_GUARD]) * size
     for p in PLANS:
-        if p['copies']:
+        if p['copies'] == ALL:
             s, d, n = p['src_slba'] * LBA, p['dst_slba'] * LBA, plan_bytes(p)
             dest[d:d + n] = source[s:s + n]
     return bytes(dest)
@@ -75,11 +82,23 @@ def check_images(source_after, dest_after):
     original = source_pattern()
     if source_after != original:
         raise ValueError(f'source image changed at byte {first_difference(source_after, original)}')
-    expected = expected_destination(original)
+    expected = bytearray(expected_destination(original))
+    partial = {}
+    for p in PLANS:
+        if p['copies'] != PART:
+            continue
+        copied = 0
+        for g in range(p['groups']):
+            s, d = p['src_slba'] * LBA + g * p['group'], p['dst_slba'] * LBA + g * p['group']
+            if dest_after[d:d + p['group']] == original[s:s + p['group']]:
+                expected[d:d + p['group']] = original[s:s + p['group']]
+                copied += 1
+        partial[p['name']] = copied
     if dest_after != expected:
-        raise ValueError(f'destination image differs at byte {first_difference(dest_after, expected)}')
+        raise ValueError(f'destination image differs at byte {first_difference(dest_after, bytes(expected))}')
     return dict(source_bytes=len(source_after), destination_bytes=len(dest_after),
-                copied_bytes=sum(plan_bytes(p) for p in PLANS if p['copies']))
+                copied_bytes=sum(plan_bytes(p) for p in PLANS if p['copies'] == ALL),
+                partial_groups_copied=partial)
 
 
 def check_log(text):
