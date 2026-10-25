@@ -11,7 +11,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[1]
 KERNEL_TESTS = (
     'xdev_ext_mech_core_test', 'xdev_ext_mech_ce_core_test',
-    'xdev_ext_mech_ce_lease_test',
+    'xdev_ext_mech_window_copy_core_test', 'xdev_ext_mech_ce_lease_test',
     'xdev_ext_mech_step_test', 'xdev_ext_mech_lifecycle_test',
     'xdev_ext_mech_refs_test', 'xdev_ext_mech_lifecycle_contract_test',
     'xdev_ext_mech_fanout_step_test', 'xdev_ext_mech_cpu_xform_test',

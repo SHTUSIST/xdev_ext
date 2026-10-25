@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-2.0
 
 TEST_GEN_PROGS := xdev_ext_mech_core_test xdev_ext_mech_ce_core_test
+TEST_GEN_PROGS += xdev_ext_mech_window_copy_core_test
 TEST_GEN_PROGS += xdev_ext_mech_step_test
 TEST_GEN_PROGS += xdev_ext_mech_lifecycle_test
 # Four-state references replace the previous single-consumer lifecycle contract.
