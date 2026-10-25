@@ -12,6 +12,7 @@
  *   3  check the context and the view bounds at probe_cap (the frame
  *      capacity, --set probe_cap=N), then as mode 0
  */
+#include <linux/bpf.h>		/* struct bpf_iter_num for bpf_for() */
 #include "xdev_ext_mech_common.h"
 #include <bpf/bpf_tracing.h>
 
