@@ -47,6 +47,8 @@ native queue, or a driver timeout handler that polls, may also reap a
 completion; that is still a polled completion. STATS is unchanged; a
 successful CREATE is the report that every flagged stage is polled. The bit is stripped from ``flags`` before the generic per-class flag
 rules run, and the class ``->bind`` receives the stage description without it.
+``XDEV_EXT_MECH_STAGE_F_FANOUT`` is stripped the same way; the core keeps it
+in the session plan.
 
 NVMe has one more case after CREATE: if the namespace loses its poll queues
 later (a controller reset with a different queue count), a submit whose block

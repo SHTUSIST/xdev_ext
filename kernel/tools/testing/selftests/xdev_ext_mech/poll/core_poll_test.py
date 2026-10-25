@@ -137,7 +137,15 @@ static int bind_case(const char *mode)
 	else if (!strcmp(mode, "unpollable"))
 		c = chain(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE, P,
 			  XDEV_EXT_MECH_CLASS_CE, XDEV_EXT_MECH_DIR_TO_DEVICE, P);
-	else
+	else if (!strcmp(mode, "fanout")) {
+		/* xdev_ext_mech_ctl fanout: NVMe READ -> {NVMe WRITE, AF_XDP TX}. */
+		c = chain(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE, 0,
+			  XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_TO_DEVICE, 0);
+		c.nr_stages = 3;
+		c.st[2] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_AFXDP,
+			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 3,
+			.flags = XDEV_EXT_MECH_STAGE_F_FANOUT | P };
+	} else
 		c = chain(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE, 0,
 			  XDEV_EXT_MECH_CLASS_CE, XDEV_EXT_MECH_DIR_TO_DEVICE, 0);
 	s.nr_stages = c.nr_stages;
@@ -147,6 +155,9 @@ static int bind_case(const char *mode)
 	       ret, s.st[0].poll, s.st[1].poll, s.st[0].flags, s.st[1].flags, bind_calls[0], bind_calls[1],
 	       bind_flags[0], bind_flags[1], bind_saw_poll[0], bind_saw_poll[1], s.poll_rx, s.nr_bound,
 	       c.st[0].flags, c.st[1].flags);
+	if (c.nr_stages == 3)	/* last line: the fields of the third stage */
+		printf("ret=%d nr_bound=%u poll2=%d flags2=%u bind2=%u bflags2=%u caller2=%u\n", ret,
+		       s.nr_bound, s.st[2].poll, s.st[2].flags, bind_calls[2], bind_flags[2], c.st[2].flags);
 	return 0;
 }
 
@@ -223,6 +234,17 @@ class CorePoll(unittest.TestCase):
         self.assertEqual((r['bpoll0'], r['bpoll1']), (1, 1), 'st->poll is visible to ->bind')
         self.assertEqual(r['poll_rx'], 1, 'polled AF_XDP stage 0 is a receive source')
         self.assertEqual(r['caller0'], (1 << 29) | rel, 'caller CREATE input not modified')
+
+    def test_bind_strips_fanout_before_class_bind(self):
+        # FANOUT is a generic stage bit like POLL (uapi xdev_ext_mech.h): the
+        # core keeps it in s->plan, and no class ->bind accepts it as a class
+        # flag (AF_XDP and NVMe refuse unknown flags with -EINVAL).
+        r = self.run_case('bind', 'fanout')
+        self.assertEqual((r['ret'], r['nr_bound'], r['bind2']), (0, 3, 1), r)
+        self.assertEqual(r['bflags2'], 0, '->bind of the fanout member sees no generic bit')
+        self.assertEqual(r['flags2'], 0, 'st->flags holds class flags only')
+        self.assertEqual(r['poll2'], 1, 'POLL on the fanout member is still honoured')
+        self.assertEqual(r['caller2'], (1 << 31) | (1 << 29), 'caller CREATE input not modified')
 
     def test_bind_only_flagged_stage_polls(self):
         r = self.run_case('bind', 'nvme-only')
