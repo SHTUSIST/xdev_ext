@@ -47,7 +47,9 @@ int main(void)
 
 def good_log():
     lines = ['XDEV_EXT_COMPUTE_CASE=PASS name=' + c for c in cv.CASES]
-    return '\n'.join(lines + list(cv.MARKERS)) + '\n'
+    # The verifier suites print their log directory after the marker.
+    markers = [m + (' logs=/tmp/x' if 'VERIFIER' in m else '') for m in cv.MARKERS]
+    return '\n'.join(lines + markers) + '\n'
 
 
 class Oracle(unittest.TestCase):
@@ -131,10 +133,16 @@ class Validator(unittest.TestCase):
                 self.assertEqual(self.run_validate(), 1)
 
     def test_missing_case_or_marker_fails(self):
-        for drop in ('name=bad-set-len', 'XDEV_EXT_MECH_VERIFIER_COMPUTES=PASS'):
+        for drop in ('name=bad-set-len', 'XDEV_EXT_MECH_VERIFIER_COMPUTES=PASS',
+                     'XDEV_EXT_COMPUTE_GUEST_EXIT=0'):
             with self.subTest(drop=drop):
                 self.log.write_text(''.join(l for l in good_log().splitlines(True) if drop not in l))
                 self.assertEqual(self.run_validate(), 1)
+
+    def test_marker_needs_its_exact_words(self):
+        self.log.write_text(good_log().replace('VERIFIER_COMPUTES=PASS cases=7',
+                                               'VERIFIER_COMPUTES=PASS cases=6'))
+        self.assertEqual(self.run_validate(), 1)
 
     def test_failed_case_or_kernel_report_fails(self):
         self.log.write_text(good_log() + 'XDEV_EXT_COMPUTE_CASE=FAIL name=x\n')

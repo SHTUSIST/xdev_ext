@@ -153,7 +153,9 @@ def check_log(text, red=False):
         return errors
     errors += ['failed case: ' + l for l in failed]
     errors += ['missing case: ' + c for c in CASES if c not in passed]
-    errors += ['missing marker: ' + m for m in MARKERS if m not in lines]
+    # A marker may carry more words after it (the verifier suites add logs=).
+    errors += ['missing marker: ' + m for m in MARKERS
+               if not any(l == m or l.startswith(m + ' ') for l in lines)]
     errors += ['TAP failure: ' + l for l in lines if re.match(r'^not ok\b', l)]
     return errors
 
