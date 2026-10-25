@@ -40,9 +40,12 @@ CREATE fails with ``-EOPNOTSUPP`` when any stage carries the bit and either
   queues).
 
 There is no case in which a stage requested polling, CREATE succeeded, and the
-stage's completions are delivered by its interrupt instead. STATS is
-unchanged; a successful CREATE is the report that every flagged stage is
-polled. The bit is stripped from ``flags`` before the generic per-class flag
+stage's completions are delivered by its interrupt instead, apart from one
+condition the AF_XDP section names as outside the guarantee (an administrator
+changing the NIC's NAPI settings after CREATE). Another poller of the same
+native queue, or a driver timeout handler that polls, may also reap a
+completion; that is still a polled completion. STATS is unchanged; a
+successful CREATE is the report that every flagged stage is polled. The bit is stripped from ``flags`` before the generic per-class flag
 rules run, and the class ``->bind`` receives the stage description without it.
 
 NVMe has one more case after CREATE: if the namespace loses its poll queues

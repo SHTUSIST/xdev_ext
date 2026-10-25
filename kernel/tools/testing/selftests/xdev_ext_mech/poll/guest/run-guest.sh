@@ -28,9 +28,12 @@ for t in /sys/kernel/debug/block/${src}n1/hctx*/type; do
 	[ -r "$t" ] && echo "XDEV_EXT_POLL_HCTX $(basename "$(dirname "$t")") type=$(cat "$t")"
 done
 
-# 1. NVMe: polled copy, interrupt control, STOP in flight, lost poll queues, refusal.
-XDEV_EXT_POLL_GUEST=1 "$dir/nvme_poll_e2e" "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
-	"/dev/${dst}n1" "/dev/ng${dst#nvme}n1" "/dev/${spare}n1" "/dev/ng${spare#nvme}n1" "$dir"
+nvme_e2e() {
+	XDEV_EXT_POLL_GUEST=1 "$dir/nvme_poll_e2e" "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
+		"/dev/${dst}n1" "/dev/ng${dst#nvme}n1" "/dev/${spare}n1" "/dev/ng${spare#nvme}n1" "$dir" "$1"
+}
+# 1. NVMe: polled copy, interrupt control, STOP with polled commands in flight.
+nvme_e2e main
 echo 'XDEV_EXT_POLL_NVME=PASS'
 
 # 2. DMA provider route: the same bit drives a provider ->poll.
@@ -164,4 +167,19 @@ if grep -E 'completion polled|drain bound passed|quarantined|WARNING:|BUG:|Oops'
 	echo 'FAIL kernel log shows a polling timeout, deferred drain, quarantine or warning'; exit 1
 fi
 echo 'XDEV_EXT_POLL_DMESG=PASS no_completion_polled_timeout=1 no_deferred_drain=1 no_warning=1'
+
+# 4. Last: reset the spare controller to zero poll queues under a polled session.
+lines=$(wc -l </tmp/dmesg.txt)
+nvme_e2e reset
+echo 'XDEV_EXT_POLL_NVME_RESET=PASS'
+dmesg | tail -n +"$((lines + 1))" >/tmp/dmesg-reset.txt
+if grep -E 'completion polled|drain bound passed|quarantined|BUG:|Oops' /tmp/dmesg-reset.txt; then
+	echo 'FAIL kernel log after the reset shows a polling timeout, deferred drain or quarantine'; exit 1
+fi
+# nvme-pci reset with fewer poll queues asks for more interrupt groups than
+# CPUs; upstream lib/group_cpus.c WARN_ON(nr_present + nr_others < numgrps).
+warnings=$(grep -c 'WARNING:' /tmp/dmesg-reset.txt || :)
+known=$(grep -c 'WARNING: .* at lib/group_cpus.c:[0-9]* group_cpus_evenly' /tmp/dmesg-reset.txt || :)
+[ "$warnings" = "$known" ] || { echo 'FAIL unexpected warning after the reset'; exit 1; }
+echo "XDEV_EXT_POLL_DMESG_RESET=PASS no_completion_polled_timeout=1 no_deferred_drain=1 upstream_group_cpus_warnings=$known other_warnings=0"
 echo 'XDEV_EXT_POLL_GUEST=PASS'

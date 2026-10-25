@@ -26,7 +26,9 @@ COPIES = ((4096, 2048, 256 * 4096), (8192, 2048, 256 * 4096), (32768, 32768, 16 
 STOP_WINDOW = (16384, 8192)        # destination slba, nlb: contents not specified
 MARKERS = (
     'XDEV_EXT_POLL_NVME=PASS',
-    'XDEV_EXT_NVME_POLL=PASS cases=polled-copy,plain-copy,polled-stop,lost-queues,refuse timing=none',
+    'XDEV_EXT_NVME_POLL=PASS cases=polled-copy,plain-copy,polled-stop timing=none',
+    'XDEV_EXT_NVME_POLL_RESET=PASS cases=lost-queues,refuse timing=none',
+    'XDEV_EXT_POLL_NVME_RESET=PASS',
     'XDEV_EXT_POLL_DMA=PASS cases=poll,plain,stop,refuse-provider,refuse-class backend=CPU-memcpy',
     'XDEV_EXT_POLL_NIC_REFUSE=PASS reason=no-napi-deferral create=-EOPNOTSUPP',
     'XDEV_EXT_POLL_NIC_REFUSE=PASS reason=copy-transmit create=-EOPNOTSUPP',
@@ -83,6 +85,9 @@ def check_log(text):
             errors.append('missing DMA case: ' + case)
     if len(re.findall(r'^XDEV_EXT_POLL_IO_POLL controller=nvme\d+ io_poll=1\s*$', text, re.M)) != 3:
         errors.append('not every controller started with poll queues')
+    if not re.search(r'^XDEV_EXT_POLL_DMESG_RESET=PASS no_completion_polled_timeout=1 no_deferred_drain=1 '
+                     r'upstream_group_cpus_warnings=\d+ other_warnings=0\s*$', text, re.M):
+        errors.append('missing marker: XDEV_EXT_POLL_DMESG_RESET=PASS')
     if re.search(r'^not ok\b', text, re.M):
         errors.append('a guest TAP check failed')
     if re.search(r'^FAIL\b', text, re.M):

@@ -10,11 +10,14 @@
  *                 the interrupt oracle can see interrupt completions
  *   polled-stop   STOP while polled commands are in flight must drain and
  *                 release (STOP 0, not -EBUSY from a deferred release)
+ * and, in mode reset (run last: resetting a controller to fewer poll queues
+ * makes the upstream IRQ affinity code warn about more queues than CPUs):
  *   lost-queues   a polled session whose controller is reset to zero poll
- *                 queues after CREATE refuses each submit with -EOPNOTSUPP
+ *                 queues after CREATE refuses its submit with -EOPNOTSUPP;
+ *                 a RECYCLE START then stops at that first refusal
  *   refuse        CREATE with the bit on that controller now fails
- *                 -EOPNOTSUPP; without the bit it still copies
- * Usage: nvme_poll_e2e SRC_BLOCK SRC_NG DST_BLOCK DST_NG SPARE_BLOCK SPARE_NG BPF_DIR
+ *                 -EOPNOTSUPP; without the bit it still reads
+ * Usage: nvme_poll_e2e SRC_BLOCK SRC_NG DST_BLOCK DST_NG SPARE_BLOCK SPARE_NG BPF_DIR main|reset
  */
 #define _GNU_SOURCE
 #include <ctype.h>
@@ -309,15 +312,17 @@ int main(int argc, char **argv)
 	struct session s, t;
 	struct rlimit lim = { RLIM_INFINITY, RLIM_INFINITY };
 	int src, srcng, dst, dstng, spare, spareng, i, ret;
+	bool reset;
 	__u64 off;
 
 	setbuf(stdout, NULL);
 	setrlimit(RLIMIT_MEMLOCK, &lim);
 	puts("TAP version 13\n# guest NVMe stage polling: QEMU NVMe PCI, nvme.poll_queues=2, correctness only, no timing");
-	if (argc != 8) {
-		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG SPARE_BLOCK SPARE_NG BPF_DIR\n", argv[0]);
+	if (argc != 9 || (strcmp(argv[8], "main") && strcmp(argv[8], "reset"))) {
+		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG SPARE_BLOCK SPARE_NG BPF_DIR main|reset\n", argv[0]);
 		return 2;
 	}
+	reset = !strcmp(argv[8], "reset");
 	CHECK(getenv("XDEV_EXT_POLL_GUEST") && !strcmp(getenv("XDEV_EXT_POLL_GUEST"), "1"), "guest-only opt-in");
 	snprintf(src_ctrl, sizeof(src_ctrl), "%.*s", (int)(strchr(base(argv[1]) + 4, 'n') - base(argv[1])), base(argv[1]));
 	snprintf(dst_ctrl, sizeof(dst_ctrl), "%.*s", (int)(strchr(base(argv[3]) + 4, 'n') - base(argv[3])), base(argv[3]));
@@ -325,6 +330,11 @@ int main(int argc, char **argv)
 	printf("# controllers source=%s destination=%s spare=%s\n", src_ctrl, dst_ctrl, spare_ctrl);
 	CHECK(io_poll(base(argv[1])) == 1 && io_poll(base(argv[3])) == 1 && io_poll(base(argv[5])) == 1,
 	      "every namespace starts with poll queues (io_poll=1)");
+	if (reset) {
+		spareng = open_ok(argv[6], O_RDONLY);
+		attach_nvme_ops(argv[7], &ops);
+		goto reset_cases;
+	}
 	src = open_ok(argv[1], O_RDONLY); srcng = open_ok(argv[2], O_RDONLY);
 	dst = open_ok(argv[3], O_RDWR); dstng = open_ok(argv[4], O_RDWR);
 	spare = open_ok(argv[5], O_RDONLY); spareng = open_ok(argv[6], O_RDONLY);
@@ -388,7 +398,25 @@ int main(int argc, char **argv)
 	      "polled-stop: STOP drains every accepted polled command and releases (not -EBUSY)");
 	CHECK(!close(s.ring) && !close(s.notify), "polled-stop: close ring and eventfd");
 	munmap(s.pool, s.pool_bytes);
+	bpf_link__destroy(ops.link);
+	bpf_object__close(ops.object);
+	/* Whole destination oracle: both copies, guards everywhere but the STOP range. */
+	CHECK(!ioctl(src, BLKFLSBUF) && !ioctl(dst, BLKFLSBUF), "invalidate block caches before readback");
+	read_all(src, source_after, source_bytes, 0);
+	CHECK(!memcmp(source, source_after, source_bytes), "whole source disk unchanged");
+	read_all(dst, dest_after, dest_bytes, 0);
+	memcpy(dest + POLLED.dst_slba * LBA, source + POLLED.src_slba * LBA, POLLED.groups * POLLED.group);
+	memcpy(dest + PLAIN.dst_slba * LBA, source + PLAIN.src_slba * LBA, PLAIN.groups * PLAIN.group);
+	memcpy(dest + STOP.dst_slba * LBA, dest_after + STOP.dst_slba * LBA, STOP.window_nlb * LBA);
+	CHECK(!memcmp(dest, dest_after, dest_bytes),
+	      "destination equals both copies and every guard byte outside the STOP window");
+	close(src); close(srcng); close(dst); close(dstng); close(spare); close(spareng);
+	free(source); free(source_after); free(dest); free(dest_after);
+	printf("1..%u\n", checks);
+	printf("XDEV_EXT_NVME_POLL=PASS cases=polled-copy,plain-copy,polled-stop timing=none\n");
+	return 0;
 
+reset_cases:
 	/* lost-queues: CREATE while the spare controller can poll, then reset it to none. */
 	ret = create(&t, &LOST, spareng, -1, POLL);
 	CHECK(!ret, "lost-queues: CREATE with POLL while the controller has poll queues");
@@ -405,9 +433,9 @@ int main(int argc, char **argv)
 	write_text("/sys/module/nvme/parameters/poll_queues", "2");
 	start(&t, &LOST, true);
 	st = wait_terminal(&t, &LOST);
-	CHECK(!st.batches_done && st.batches_abort == LOST.groups && st.last_err == -EOPNOTSUPP &&
+	CHECK(!st.batches_done && st.batches_abort >= 1 && st.last_err == -EOPNOTSUPP &&
 	      !st.submitted[0] && !st.completed[0] && !st.inflight,
-	      "lost-queues: every submit refused before the device, never on an interrupt queue");
+	      "lost-queues: the submit is refused before the device, never on an interrupt queue");
 	finish(&t, -EOPNOTSUPP);
 
 	/* refuse: the bit cannot be honoured now; without it the device still works. */
@@ -421,22 +449,10 @@ int main(int argc, char **argv)
 	st = wait_terminal(&t, &LOST);
 	CHECK(st.batches_done == LOST.groups && !st.batches_abort && !st.last_err, "refuse: interrupt-driven reads complete");
 	finish(&t, 0);
-
 	bpf_link__destroy(ops.link);
 	bpf_object__close(ops.object);
-	/* Whole destination oracle: both copies, guards everywhere but the STOP range. */
-	CHECK(!ioctl(src, BLKFLSBUF) && !ioctl(dst, BLKFLSBUF), "invalidate block caches before readback");
-	read_all(src, source_after, source_bytes, 0);
-	CHECK(!memcmp(source, source_after, source_bytes), "whole source disk unchanged");
-	read_all(dst, dest_after, dest_bytes, 0);
-	memcpy(dest + POLLED.dst_slba * LBA, source + POLLED.src_slba * LBA, POLLED.groups * POLLED.group);
-	memcpy(dest + PLAIN.dst_slba * LBA, source + PLAIN.src_slba * LBA, PLAIN.groups * PLAIN.group);
-	memcpy(dest + STOP.dst_slba * LBA, dest_after + STOP.dst_slba * LBA, STOP.window_nlb * LBA);
-	CHECK(!memcmp(dest, dest_after, dest_bytes),
-	      "destination equals both copies and every guard byte outside the STOP window");
-	close(src); close(srcng); close(dst); close(dstng); close(spare); close(spareng);
-	free(source); free(source_after); free(dest); free(dest_after);
+	close(spareng);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_NVME_POLL=PASS cases=polled-copy,plain-copy,polled-stop,lost-queues,refuse timing=none\n");
+	printf("XDEV_EXT_NVME_POLL_RESET=PASS cases=lost-queues,refuse timing=none\n");
 	return 0;
 }

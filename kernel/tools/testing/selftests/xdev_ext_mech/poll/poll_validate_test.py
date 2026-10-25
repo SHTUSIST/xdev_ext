@@ -14,6 +14,8 @@ import poll_validate as v  # noqa: E402
 GOOD_LOG = '\n'.join(
     ['XDEV_EXT_POLL_IO_POLL controller=nvme%d io_poll=1' % i for i in range(3)] +
     ['ok 1 - something'] + list(v.MARKERS) +
+    ['XDEV_EXT_POLL_DMESG_RESET=PASS no_completion_polled_timeout=1 no_deferred_drain=1 '
+     'upstream_group_cpus_warnings=1 other_warnings=0'] +
     ['PASS poll case=%s groups=1' % c for c in v.DMA_CASES]) + '\n'
 
 
@@ -47,6 +49,11 @@ class Validate(unittest.TestCase):
             with self.subTest(marker=marker):
                 code, out = self.verdict(GOOD_LOG.replace(marker + '\n', ''))
                 self.assertEqual(code, 1, out)
+
+    def test_reset_log_check_is_required(self):
+        code, out = self.verdict('\n'.join(l for l in GOOD_LOG.splitlines()
+                                           if not l.startswith('XDEV_EXT_POLL_DMESG_RESET')) + '\n')
+        self.assertEqual(code, 1, out)
 
     def test_failed_guest_check_fails(self):
         self.assertEqual(self.verdict(GOOD_LOG + 'not ok 9 - polled copy\n')[0], 1)

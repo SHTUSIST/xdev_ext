@@ -51,8 +51,10 @@ else
 	git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
 	git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
 	changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
-	if [[ -n "$changed" ]] && grep -v -e "^$REL/guest/" -e "^$REL/poll_kvm.sh$" -e "^$REL/poll_validate.py$" <<<"$changed"; then
-		echo 'FAIL source differs from the prebuilt kernel/tools outside the guest test files' >&2; exit 1
+	# Only this test directory and its specification may differ: neither is
+	# part of the prebuilt kernel, modules or tools.
+	if [[ -n "$changed" ]] && grep -v -e "^$REL/" -e '^kernel/Documentation/userspace-api/xdev_ext-poll.rst$' <<<"$changed"; then
+		echo 'FAIL source differs from the prebuilt kernel/tools outside the stage-polling test files' >&2; exit 1
 	fi
 fi
 for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY XDEV_EXT_MECH_DMA BLK_DEV_NVME \
