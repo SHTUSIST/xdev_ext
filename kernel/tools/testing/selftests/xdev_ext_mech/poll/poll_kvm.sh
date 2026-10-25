@@ -9,9 +9,13 @@
 # loaded and no host NIC, route or disk is touched; the guest's two virtio-net
 # devices meet on a QEMU hub.
 #   bash poll_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR
+# --red boots an older kernel (O_DIR of a commit before stage polling) with the
+# same guest programs and passes only if the first polled CREATE is refused:
+# the guest test's RED baseline.  Identity checks of the build are recorded,
+# not enforced, in that mode.
 set -euo pipefail
 umask 077
-SCRATCH='' SOURCE='' BUILD='' TOOLS=''
+SCRATCH='' SOURCE='' BUILD='' TOOLS='' RED=0
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1200}
@@ -21,6 +25,7 @@ while (($#)); do
 	--source) SOURCE=$2; shift 2 ;;
 	--build) BUILD=$2; shift 2 ;;
 	--tools) TOOLS=$2; shift 2 ;;
+	--red) RED=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -40,11 +45,15 @@ git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]] || { echo 'FAIL untracked source files' >&2; exit 1; }
 HEAD_SHA=$(git -C "$SOURCE" rev-parse --verify 'HEAD^{commit}')
 BUILD_SHA=$(cat "$BUILD/xdev-ext-source.commit")
-git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
-git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
-changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
-if [[ -n "$changed" ]] && grep -v -e "^$REL/guest/" -e "^$REL/poll_kvm.sh$" -e "^$REL/poll_validate.py$" <<<"$changed"; then
-	echo 'FAIL source differs from the prebuilt kernel/tools outside the guest test files' >&2; exit 1
+if (( RED )); then
+	changed="red baseline kernel $BUILD_SHA, guest programs of $HEAD_SHA"
+else
+	git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
+	git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
+	changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
+	if [[ -n "$changed" ]] && grep -v -e "^$REL/guest/" -e "^$REL/poll_kvm.sh$" -e "^$REL/poll_validate.py$" <<<"$changed"; then
+		echo 'FAIL source differs from the prebuilt kernel/tools outside the guest test files' >&2; exit 1
+	fi
 fi
 for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY XDEV_EXT_MECH_DMA BLK_DEV_NVME \
 	BLK_DEV_INITRD DEVTMPFS IO_URING BPF_SYSCALL DEBUG_INFO_BTF XDP_SOCKETS VIRTIO_NET NET_RX_BUSY_POLL \
@@ -58,7 +67,7 @@ for artifact in "$BUILD/arch/x86/boot/bzImage" "$TOOLS/xdev_ext_mech_ctl" "$TOOL
 	"$DMA/dma_provider_pair.bpf.o"; do
 	[[ -s "$artifact" ]] || { echo "FAIL missing prebuilt artifact $artifact" >&2; exit 1; }
 done
-[[ $(modinfo -F vermagic "$DMA/xdev_ext_dma_provider_sim.ko" | cut -d' ' -f1) == "$release" ]]
+[[ $(modinfo -F vermagic "$DMA/xdev_ext_dma_provider_sim.ko" | cut -d' ' -f1) == "$release" ]] || (( RED ))
 cmp "$SOURCE/kernel/tools/testing/selftests/xdev_ext_mech/provider/dma_poll_runtime.c" "$DMA/dma_poll_runtime.c"
 cmp "$SOURCE/kernel/tools/testing/selftests/xdev_ext_mech/provider/xdev_ext_dma_provider_sim.c" "$DMA/xdev_ext_dma_provider_sim.c"
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" ]]
@@ -139,6 +148,17 @@ printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"; printf '\n' >>"$EV/qemu.c
 qemu_status=0
 timeout "$TIMEOUT_SECONDS" "$QEMU" "${args[@]}" </dev/null >"$EV/guest.log" 2>&1 || qemu_status=$?
 printf 'qemu_exit=%s\n' "$qemu_status" >>"$EV/provenance.txt"
+if (( RED )); then
+	# Expected: the kernel without stage polling refuses the bit at CREATE.
+	if (( qemu_status == 0 )) && tr -d '\r' <"$EV/guest.log" |
+		grep -Eq '^not ok [0-9]+ - polled-copy: CREATE with POLL on NVMe READ and WRITE$' &&
+		! grep -q 'XDEV_EXT_POLL_NVME=PASS' "$EV/guest.log"; then
+		echo 'XDEV_EXT_POLL_KVM=RED_CONFIRMED first_failure=polled-copy-CREATE' | tee "$EV/verdict.txt"
+		exit 0
+	fi
+	echo "XDEV_EXT_POLL_KVM=RED_UNEXPECTED qemu_exit=$qemu_status" | tee "$EV/verdict.txt"
+	exit 1
+fi
 validator_status=0
 python3 -I "$SOURCE/$REL/poll_validate.py" validate --dir "$OUT" --log "$EV/guest.log" \
 	--result "$EV/result.json" || validator_status=$?
