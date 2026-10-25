@@ -70,4 +70,11 @@ bool xdev_ext_mech_ops_has_member(const void *ops, u32 member);
  */
 void xdev_ext_mech_generation_gone(u32 class_id, const void *ops);
 
+/*
+ * Process context, uring_lock held: XDEV_EXT_MECH_OP_USER_STAGE.  Creates a
+ * user stage fd (io_uring/xdev_ext_mech_user.c) from the struct
+ * xdev_ext_mech_user_stage at @uarg and writes its fd and offsets back.
+ */
+int xdev_ext_mech_user_stage_create(void __user *uarg);
+
 #endif /* IO_URING_XDEV_EXT_MECH_INTERNAL_H */

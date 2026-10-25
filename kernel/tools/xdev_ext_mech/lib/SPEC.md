@@ -240,7 +240,7 @@ installed; EINTR in poll is retried against the original deadline.
 ## 7. Test hook
 
 `libxdev_ext_internal.h` declares `struct xdev_ext_sys` (io_uring_setup,
-io_uring_register, usleep) and `xdev_ext__set_sys()`. Host unit tests use
+io_uring_register, usleep, ioctl) and `xdev_ext__set_sys()`. Host unit tests use
 it to observe the request structures the library builds and to inject
 kernel returns, including the individual successes needed to reach the
 step under test (for example a session id from CREATE or a STATS snapshot
@@ -248,3 +248,79 @@ to classify). The eventfd, poll and memory mappings stay real. The hook is
 not part of the public API, and no host test asserts a device run; a
 successful run is proven only by the guest test against the real kernel
 (`tools/testing/selftests/xdev_ext_lib/guest/lib_kvm.sh`).
+
+## 8. USER stage
+
+The user side of a USER stage
+(`Documentation/userspace-api/xdev_ext-user-stage.rst` in the kernel tree):
+a stage whose work on each batch is done by an application thread. The
+library adds no kernel interface; it wraps `XDEV_EXT_MECH_OP_USER_STAGE`,
+the mapping and the two rings.
+
+```c
+struct xdev_ext_user_stage_opts {
+	size_t sz;
+	int ring_fd;       /* io_uring fd for the register call */
+	void *umem;        /* pool UMEM base, for frame data pointers; NULL: none */
+	__u32 entries;     /* power of two <= 256, >= CREATE depth; 0: 64 */
+	__u32 flags;       /* 0 */
+};
+struct xdev_ext_user_batch {
+	__u32 slot, nr_frames;
+	__u64 ticket, batch_id, key, arg;
+	struct xdev_ext_user_frame f[XDEV_EXT_MECH_MAX_FRAMES];  /* copy of the slot's frames */
+	void *data[XDEV_EXT_MECH_MAX_FRAMES];
+};
+int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
+			     struct xdev_ext_user_stage **out);
+int xdev_ext_user_stage_fd(const struct xdev_ext_user_stage *u);
+int xdev_ext_user_stage_next(struct xdev_ext_user_stage *u, int timeout_ms,
+			     struct xdev_ext_user_batch *b);
+int xdev_ext_user_stage_complete(struct xdev_ext_user_stage *u,
+				 const struct xdev_ext_user_batch *b, int status);
+int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
+```
+
+- open creates a nonblocking wakeup eventfd owned by the handle, makes the
+  register call with it, and maps the region at the offsets the kernel
+  returned. Pass `xdev_ext_user_stage_fd()` as the USER stage's `fd` in
+  CREATE (`st[i]`, raw stage description, section 3). Kernel errors pass
+  through; a region whose returned offsets do not fit the mapping is
+  `-EPROTO`.
+- next takes the next ready entry: 0 with `*b` filled; `-EAGAIN` with
+  `timeout_ms` 0 and nothing ready; `-ETIMEDOUT` when a positive timeout
+  passed; a negative timeout waits without a bound. Before waiting it sets
+  the sleeping flag and checks the ring once more, so a batch the kernel
+  hands out meanwhile wakes it. Once the kernel marked the stage stopped
+  and no entry is left, next returns `-ESHUTDOWN` without waiting. An entry
+  with a slot or frame count out of range is consumed and reported as
+  `-EPROTO`. An entry whose slot no longer holds its ticket (the kernel
+  cancelled the batch before it was read, and may already have reused the
+  slot for a later batch with its own entry) is consumed and skipped.
+- `f` is the library's copy of the slot's frame descriptions, taken while
+  the slot held the entry's ticket; a later rewrite of the slot by the
+  kernel does not change it. While holding `*b` the thread may read
+  `f[i].data_len` bytes at `data[i]` and write up to `f[i].capacity` bytes
+  there, and sets `f[i].out_len` to each frame's output length (preset to
+  the input length). The kernel checks the lengths against the stage's
+  rule.
+- complete copies `f[i].out_len` into the slot only while the slot still
+  holds `b->ticket`, then posts the completion entry with `status` (0 or a
+  negative errno the batch fails with; positive, or `nr_frames` above
+  `XDEV_EXT_MECH_MAX_FRAMES`, is `-EINVAL`) and kicks the kernel only when it
+  asked for a kick. The entry of a batch the kernel already cancelled is
+  still posted; the kernel refuses it. A full completion ring is `-ENOSPC`
+  and posts nothing. A kick error (`-ENOTCONN`: the stage is no longer bound) is
+  returned after the entry was posted.
+- close unmaps and closes the fd and the eventfd. Closing the last
+  reference to the user stage fd while its session runs stops that session
+  with `-EPIPE` (kernel rule), so close only after STOP.
+- Threads: one thread at a time may call next, and one thread at a time
+  may call complete, on one handle (single consumer, single producer).
+  After a batch was cancelled by the kernel (deadline or stop), writing its
+  frames can corrupt a later batch's payload: the frames may already belong
+  to a later batch. The library cannot stop a transform that is already
+  running when the deadline fires, so the application must not write a
+  batch's payload after its deadline (CREATE `arg0`), and should stop
+  touching a batch when next has returned `-ESHUTDOWN` or the slot's ticket
+  changed.

@@ -660,7 +660,7 @@ static inline bool xdev_ext_mech_class_known(__u32 class_id)
 	return class_id == XDEV_EXT_MECH_CLASS_AFXDP ||
 	       class_id == XDEV_EXT_MECH_CLASS_NVME || class_id == XDEV_EXT_MECH_CLASS_CE ||
 	       class_id == XDEV_EXT_MECH_CLASS_DMA || class_id == XDEV_EXT_MECH_CLASS_IAA ||
-	       class_id == XDEV_EXT_MECH_CLASS_CPU ||
+	       class_id == XDEV_EXT_MECH_CLASS_CPU || class_id == XDEV_EXT_MECH_CLASS_USER ||
 	       class_id == XDEV_EXT_MECH_CLASS_SOCKET || class_id == XDEV_EXT_MECH_CLASS_NET;
 }
 

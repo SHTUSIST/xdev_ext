@@ -146,6 +146,7 @@ XDEV_EXT_MECH_OPS_TYPE(xdev_ext_iaa_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_cpu_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_socket_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_net_mech_ops);
+XDEV_EXT_MECH_OPS_TYPE(xdev_ext_user_mech_ops);
 
 /*
  * A frame resolved to kernel memory.  [kaddr, kaddr + frame_size) is one
@@ -625,7 +626,7 @@ struct xdev_ext_ce_xfer {
 	u32 flags;			/* XDEV_EXT_CE_F_* */
 };
 
-/* Worker context: record an exclusive CPU stage's bounded output length. */
+/* Worker context: record an exclusive in-place stage's (CPU, USER) bounded output length. */
 int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos, u32 len);
 /*
  * Worker context, from a CPU stage's ->submit: run the compute program of the
