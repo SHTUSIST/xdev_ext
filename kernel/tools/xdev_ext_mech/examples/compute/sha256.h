@@ -3,15 +3,18 @@
 #define XDEV_EXT_EXAMPLE_SHA256_H
 
 /*
- * SHA-256 (FIPS 180-4) in plain BPF. Every 64-byte block, including the one
- * or two padding blocks, is first copied into a 64-byte stack buffer: whole
- * blocks of the frame through one constant 64-byte view, the last partial
- * block byte by byte through 1-byte views, then 0x80, zeros and the message
- * length in bits, big endian. One compression function therefore serves
- * every block. The 64 rounds run as four groups of 16 unrolled rounds, so
- * every index into the 16-word message schedule is a constant. The appended
- * form is the one of XDEV_EXT_CPU_XFORM_SHA256_APPEND
- * (io_uring/xdev_ext_mech_cpu_core.h): the 32-byte digest behind the frame.
+ * SHA-256 (FIPS 180-4) in plain BPF. Each 64-byte block of the padded
+ * message is first turned into its 16 big-endian message words on the
+ * stack: a whole block of the frame through one constant 64-byte view, the
+ * last partial block word by word (a 4-byte view for a whole word, 1-byte
+ * views around the end of the frame), followed by 0x80, zeros and the
+ * message length in bits. One compression function therefore serves every
+ * block. Every stack store is a 32-bit word at a constant index, whatever
+ * branch produced it, so the verifier can merge the branches. The 64 rounds
+ * run as four groups of 16 unrolled rounds, so every index into the 16-word
+ * message schedule is a constant. The appended form is the one of
+ * XDEV_EXT_CPU_XFORM_SHA256_APPEND (io_uring/xdev_ext_mech_cpu_core.h): the
+ * 32-byte digest behind the frame.
  */
 
 static const __u32 ex_sha256_k[64] = {
@@ -38,16 +41,13 @@ EX_INLINE __u32 ex_be32(const __u8 *p)
 	return (__u32)p[0] << 24 | (__u32)p[1] << 16 | (__u32)p[2] << 8 | p[3];
 }
 
-/* One compression of the 64-byte block @b into @h. */
-EX_INLINE void ex_sha256_block(__u32 h[8], const __u8 *b)
+/* One compression of the block with message words @w into @h; @w is spent. */
+EX_INLINE void ex_sha256_block(__u32 h[8], __u32 w[16])
 {
-	__u32 w[16], a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5];
+	__u32 a = h[0], bb = h[1], c = h[2], d = h[3], e = h[4], f = h[5];
 	__u32 g = h[6], hh = h[7], t1, t2;
 	int grp, j;
 
-	EX_UNROLL
-	for (j = 0; j < 16; j++)
-		w[j] = ex_be32(b + 4 * j);
 	EX_NOUNROLL
 	for (grp = 0; grp < 4; grp++) {
 		EX_UNROLL
@@ -81,43 +81,66 @@ EX_INLINE void ex_sha256_block(__u32 h[8], const __u8 *b)
 	h[7] += hh;
 }
 
-/*
- * Block @blk of the padded message of the frame's first @len bytes into @b:
- * whole blocks come from one 64-byte view, the rest byte by byte.
- */
-EX_INLINE int ex_sha256_fill(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u8 b[64])
+/* Byte @m of the padded message of @len bytes, for @m below a whole word. */
+EX_INLINE int ex_sha256_byte(ex_ctx *c, __u32 pos, __u32 len, __u32 m, __u32 *byte)
 {
-	__u32 start = blk * 64, j, m;
+	const __u8 *p;
+
+	if (m < len) {
+		p = ex_frame_rw(c, pos, m, 1);
+		if (!p)
+			return -EX_EFAULT;
+		*byte = p[0];
+	} else {
+		*byte = m == len ? 0x80 : 0;
+	}
+	return 0;
+}
+
+/*
+ * The message words of block @blk of the padded message of the frame's
+ * first @len bytes into @w.
+ */
+EX_INLINE int ex_sha256_words(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u32 w[16])
+{
+	__u32 start = blk * 64, base, word, byte, k, i;
 	__u64 bits = (__u64)len * 8;
 	const __u8 *p;
+	int err;
 
 	if (start + 64 <= len) {
 		p = ex_frame_rw(c, pos, start, 64);
 		if (!p)
 			return -EX_EFAULT;
-		/* Unrolled, 64 loads in flight exceed the BPF stack. */
-		EX_NOUNROLL
-		for (j = 0; j < 64; j++)
-			b[j] = p[j];
+		EX_UNROLL
+		for (k = 0; k < 16; k++)
+			w[k] = ex_be32(p + 4 * k);
 		return 0;
 	}
-	EX_NOUNROLL
-	for (j = 0; j < 64; j++) {
-		m = start + j;
-		if (m < len) {
-			p = ex_frame_rw(c, pos, m, 1);
+	EX_UNROLL
+	for (k = 0; k < 16; k++) {
+		base = start + 4 * k;
+		if (base + 4 <= len) {
+			p = ex_frame_rw(c, pos, base, 4);
 			if (!p)
 				return -EX_EFAULT;
-			b[j] = p[0];
+			word = ex_be32(p);
 		} else {
-			b[j] = m == len ? 0x80 : 0;
+			word = 0;
+			EX_UNROLL
+			for (i = 0; i < 4; i++) {
+				err = ex_sha256_byte(c, pos, len, base + i, &byte);
+				if (err)
+					return err;
+				word |= byte << (24 - 8 * i);
+			}
 		}
+		w[k] = word;
 	}
 	/* The length closes the last block: the one where it fits after 0x80. */
 	if ((len + 8) / 64 == blk) {
-		EX_UNROLL
-		for (j = 0; j < 8; j++)
-			b[56 + j] = (__u8)(bits >> (56 - 8 * j));
+		w[14] = (__u32)(bits >> 32);
+		w[15] = (__u32)bits;
 	}
 	return 0;
 }
@@ -125,7 +148,7 @@ EX_INLINE int ex_sha256_fill(ex_ctx *c, __u32 pos, __u32 len, __u32 blk, __u8 b[
 /* SHA-256 of the frame's first @len bytes into @out (32 bytes, big endian). */
 EX_INLINE int ex_sha256_frame(ex_ctx *c, __u32 pos, __u32 len, __u32 h[8])
 {
-	__u8 b[64];
+	__u32 w[16];
 	int blk, err;
 
 	h[0] = 0x6a09e667;
@@ -138,10 +161,10 @@ EX_INLINE int ex_sha256_frame(ex_ctx *c, __u32 pos, __u32 len, __u32 h[8])
 	h[7] = 0x5be0cd19;
 	/* Padded length: len + 1 + 8 rounded up to whole blocks. */
 	ex_for(blk, 0, (len + 8) / 64 + 1) {
-		err = ex_sha256_fill(c, pos, len, (__u32)blk, b);
+		err = ex_sha256_words(c, pos, len, (__u32)blk, w);
 		if (err)
 			return err;
-		ex_sha256_block(h, b);
+		ex_sha256_block(h, w);
 	}
 	return 0;
 }
