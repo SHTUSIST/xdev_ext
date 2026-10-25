@@ -7,7 +7,7 @@
 # private raw images, initramfs, and evidence.  No host module is loaded.
 #   bash session_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR
 # GIT_ROOT is a clean product checkout whose HEAD differs from the build's
-# recorded commit only inside this guest test directory.
+# recorded commit only inside this guest test or the library selftests.
 set -euo pipefail
 umask 077
 SCRATCH='' SOURCE='' BUILD='' TOOLS=''
@@ -35,15 +35,18 @@ exec > >(tee -a "$EV/runner.log") 2>&1
 
 # Identity: exact clean source, and a prebuilt kernel/tools whose inputs equal it.
 SOURCE=$(git -C "$SOURCE" rev-parse --show-toplevel)
-git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet
+git -C "$SOURCE" diff --quiet
+git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]] || { echo 'FAIL untracked source files' >&2; exit 1; }
 HEAD_SHA=$(git -C "$SOURCE" rev-parse --verify 'HEAD^{commit}')
 BUILD_SHA=$(cat "$BUILD/xdev-ext-source.commit")
 git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
 git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
 changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" | grep -v '^\.gitignore$' || true)
-if [[ -n "$changed" ]] && grep -v "^$GUEST_REL/" <<<"$changed"; then
-	echo 'FAIL source differs from the prebuilt kernel/tools outside the guest test directory' >&2; exit 1
+if [[ -n "$changed" ]] && grep -v -e "^$GUEST_REL/" \
+	-e '^kernel/tools/testing/selftests/xdev_ext_lib/' \
+	-e '^\.github/workflows/host\.yml$' <<<"$changed"; then
+	echo 'FAIL source differs from the prebuilt kernel/tools outside the allowed tests' >&2; exit 1
 fi
 if grep -Fxq -e "$GUEST_REL/xdev_ext_peer_sw.c" -e "$GUEST_REL/sw_provider_uapi.h" <<<"$changed"; then
 	echo 'FAIL provider module source changed since the prebuilt module' >&2; exit 1

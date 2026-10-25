@@ -181,6 +181,34 @@ def iou_result(span, p, idx):
                       f"{p['name']} idx {idx} result line"))
 
 
+def check_procs_barrier(span, p):
+    n = p['name']
+    ready = [l for l in span if l.startswith(f'XDEV_EXT_LIB_IOU_READY name={n} ')]
+    starts = [l for l in span if l.startswith(f'XDEV_EXT_LIB_IOU_START name={n} ')]
+    go = one(span, f'XDEV_EXT_LIB_IOU_GO name={n} ', f'{n} barrier go')
+    if len(ready) != 2 or len(starts) != 2:
+        raise ValueError(f'{n} barrier needs two ready and start records')
+    go_pos, release = span.index(go), fields(go)
+    sessions = set()
+    for idx in range(2):
+        rline = one(ready, f'XDEV_EXT_LIB_IOU_READY name={n} idx={idx} ', f'{n} barrier ready')
+        sline = one(starts, f'XDEV_EXT_LIB_IOU_START name={n} idx={idx} ', f'{n} barrier start')
+        r, s = fields(rline), fields(sline)
+        result = iou_result(span, p, idx)
+        session = result['session']
+        sessions.add(session)
+        if (r.get('ret') != '0' or r.get('session') != session or s.get('session') != session or
+                release.get(f'session{idx}') != session or not span.index(rline) < go_pos < span.index(sline)):
+            raise ValueError(f'{n} barrier identity/setup/order mismatch for idx {idx}')
+        for line in span:
+            if (line.startswith(f'XDEV_EXT_LIB_IOU_STATS name={n} idx={idx} ') or
+                    line.startswith(f'XDEV_EXT_LIB_IOU_RESULT name={n} idx={idx} ')):
+                if span.index(line) <= span.index(sline):
+                    raise ValueError(f'{n} barrier result/stats precede start for idx {idx}')
+    if len(sessions) != 2:
+        raise ValueError(f'{n} barrier sessions not distinct')
+
+
 def check_iou_exact(span, p):
     g, sessions = p['groups'], set()
     for idx in range(len(p['src'])):
@@ -202,6 +230,8 @@ def check_iou_exact(span, p):
                 raise ValueError(f"{p['name']} child {idx}: {c}")
     if len(sessions) != len(p['src']):
         raise ValueError(f"{p['name']} sessions not distinct: {sorted(sessions)}")
+    if p['kind'] == 'procs':
+        check_procs_barrier(span, p)
 
 
 def check_iou_retain(span, p):

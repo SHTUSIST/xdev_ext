@@ -101,6 +101,38 @@ def check_images(source_after, dest_after):
                 partial_groups_copied=partial)
 
 
+def native_observations(lines):
+    observed = {}
+    for p, action in ((PLANS[3], 'STOP'), (PLANS[4], 'SIGKILL')):
+        prefix = f"# {p['name']} before {action}: "
+        samples = [(i, line) for i, line in enumerate(lines) if line.startswith(prefix)]
+        if len(samples) != 1:
+            raise ValueError(f"native inflight observation missing or duplicated for {p['name']}")
+        index, line = samples[0]
+        match = re.fullmatch(re.escape(prefix) +
+                             r'done=(\d+) abort=(\d+) inflight=(\d+) sequestered=(\d+) '
+                             r'submitted=(\d+)/(\d+) completed=(\d+)/(\d+) last_err=(-?\d+) state=(\d+)', line)
+        if not match:
+            raise ValueError(f"native inflight observation malformed for {p['name']}")
+        done, abort, inflight, sequestered, s0, s1, c0, c1, error, state = map(int, match.groups())
+        if not (state == 1 and not error and not sequestered and
+                done + abort < p['groups'] and 0 < inflight <= p['depth'] and
+                c0 <= s0 <= p['groups'] and c1 <= s1 <= p['groups'] and
+                (s0 > c0 or s1 > c1)):
+            raise ValueError(f"native inflight observation invalid for {p['name']}: {line}")
+        if action == 'STOP':
+            actions = [i for i, text in enumerate(lines)
+                       if re.fullmatch(r'# stop-inflight STOP returned (0|-125)', text)]
+        else:
+            actions = [i for i, text in enumerate(lines)
+                       if re.fullmatch(r'ok \d+ - kill-inflight: owner died of SIGKILL', text)]
+        if len(actions) != 1 or index >= actions[0]:
+            raise ValueError(f"native inflight observation must precede teardown for {p['name']}")
+        observed[p['name']] = dict(done=done, abort=abort, inflight=inflight,
+                                  submitted=[s0, s1], completed=[c0, c1], state=state)
+    return observed
+
+
 def check_log(text):
     lines = text.splitlines()
     if 'TAP version 13' not in lines:
@@ -127,7 +159,8 @@ def check_log(text):
     reports = debug_reports(text)
     if any(reports.values()):
         raise ValueError('kernel debug diagnostic: ' + json.dumps(reports, sort_keys=True))
-    return dict(ok=len(oks), not_ok=0, skip=0, **{'debug_' + k: n for k, n in reports.items()})
+    return dict(ok=len(oks), not_ok=0, skip=0, native_inflight_observations=native_observations(lines),
+                **{'debug_' + k: n for k, n in reports.items()})
 
 
 def main():

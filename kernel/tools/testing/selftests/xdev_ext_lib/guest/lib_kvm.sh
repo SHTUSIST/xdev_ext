@@ -38,7 +38,8 @@ exec > >(tee -a "$EV/runner.log") 2>&1
 
 # Identity: exact clean source; prebuilt kernel/BPF objects whose inputs equal it.
 SOURCE=$(git -C "$SOURCE" rev-parse --show-toplevel)
-git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet
+git -C "$SOURCE" diff --quiet
+git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]] || { echo 'FAIL untracked source files' >&2; exit 1; }
 HEAD_SHA=$(git -C "$SOURCE" rev-parse --verify 'HEAD^{commit}')
 BUILD_SHA=$(cat "$BUILD/xdev-ext-source.commit")
@@ -46,8 +47,9 @@ git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}"
 git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
 changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA")
 if [[ -n "$changed" ]] && grep -v -e "^$TEST_REL/" -e "^$LIB_REL/" -e '^\.gitignore$' \
+	-e '^kernel/tools/testing/selftests/xdev_ext_peer/guest/' \
 	-e '^kernel/tools/xdev_ext_mech/Makefile$' -e '^\.github/workflows/host\.yml$' <<<"$changed"; then
-	echo 'FAIL source differs from the prebuilt kernel/BPF objects outside the library and its test' >&2; exit 1
+	echo 'FAIL source differs from the prebuilt kernel/BPF objects outside the library and allowed tests' >&2; exit 1
 fi
 for symbol in MODULES XDEV_EXT_MECH XDEV_EXT_MECH_CE XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS IO_URING \
 	BPF_SYSCALL DEBUG_INFO_BTF XDP_SOCKETS PACKET VIRTIO_NET PCI_MSI SERIAL_8250_CONSOLE; do

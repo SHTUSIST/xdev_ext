@@ -12,8 +12,8 @@
  *               frame 64 KiB, depth 1 (its fixed geometry)
  *   depth4      4 KiB frames, 2 frames per batch, depth 4 (8 of 16 frames
  *               in flight); a second CREATE on the claimed allocation is EBUSY
- *   stop-inflight  STOP right after START while NVMe commands on the
- *               allocation are accepted: STOP releases (0 or -ECANCELED, never
+ *   stop-inflight  STATS observes native commands incomplete before STOP:
+ *               STOP releases (0 or -ECANCELED, never
  *               -EBUSY), mappings stay cached, each group is source or guard
  *   kill-inflight  a child process holding the session is SIGKILLed in
  *               flight: ring exit releases it, the claim returns, mappings
@@ -210,6 +210,34 @@ static int session_stats(int ring, uint64_t id, struct xdev_ext_mech_stats *st)
 	*st = (struct xdev_ext_mech_stats){.session_id = id};
 	return mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)st);
 }
+/* START only queues work.  Observe native work, not merely an ACTIVE session.
+ * STATS fields and the later teardown are not one atomic operation: completions
+ * may race both the sampling and the action.  Retry inconsistent samples, and
+ * fail if no qualifying observation is obtained within this bounded wait.
+ */
+static int wait_native_inflight(int ring, uint64_t id, const struct plan *p,
+			        struct xdev_ext_mech_stats *st)
+{
+	unsigned int tries;
+	int ret;
+
+	for (tries = 0; tries < 6000; tries++) {
+		ret = session_stats(ring, id, st);
+		if (ret)
+			return ret;
+		if (st->state != XDEV_EXT_MECH_SESSION_ACTIVE || st->last_err ||
+		    st->sequestered || st->batches_done >= p->groups ||
+		    st->batches_abort >= p->groups - st->batches_done)
+			return -ENODATA;
+		if (st->inflight && st->inflight <= p->depth &&
+		    st->submitted[0] <= p->groups && st->submitted[1] <= p->groups &&
+		    st->completed[0] <= st->submitted[0] && st->completed[1] <= st->submitted[1] &&
+		    (st->submitted[0] > st->completed[0] || st->submitted[1] > st->completed[1]))
+			return 0;
+		usleep(1000);
+	}
+	return -ETIMEDOUT;
+}
 static void print_run(const char *name, const char *when, const struct xdev_ext_mech_stats *st)
 {
 	printf("# %s %s: done=%llu abort=%llu inflight=%llu sequestered=%llu submitted=%llu/%llu completed=%llu/%llu last_err=%d state=%u\n",
@@ -386,17 +414,17 @@ int main(int argc, char **argv)
 	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
 	      "depth4: mappings stay cached per PCI function, never remapped per batch");
 
-	/* stop-inflight: STOP while accepted NVMe commands use the allocation. */
+	/* stop-inflight: native incomplete work observed before STOP. */
 	CHECK(!create(&s, &STOPRUN, alloc1, srcng, dstng), "stop-inflight: CREATE reclaims the allocation");
 	{
 		struct xdev_ext_mech_notify_arm arm = {.session_id = s.c.session_id, .batches_target = STOPRUN.groups};
 		struct xdev_ext_mech_start start = {.session_id = s.c.session_id, .nr_batches = STOPRUN.groups};
 		CHECK(!mech(s.ring, XDEV_EXT_MECH_OP_NOTIFY_ARM, (uintptr_t)&arm), "stop-inflight: NOTIFY_ARM");
 		CHECK(!mech(s.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start), "stop-inflight: one START");
-		CHECK(!session_stats(s.ring, s.c.session_id, &st), "stop-inflight: STATS before STOP");
+		ret = wait_native_inflight(s.ring, s.c.session_id, &STOPRUN, &st);
+		if (ret) print_run(STOPRUN.name, "native observation failed", &st);
+		CHECK(!ret, "stop-inflight: STATS observed native incomplete work and inflight batches before STOP");
 		print_run(STOPRUN.name, "before STOP", &st);
-		CHECK(st.batches_done < STOPRUN.groups && st.state == XDEV_EXT_MECH_SESSION_ACTIVE,
-		      "stop-inflight: STOP is issued before the START ended");
 		ret = mech(s.ring, XDEV_EXT_MECH_OP_STOP, s.c.session_id);
 		printf("# %s STOP returned %d\n", STOPRUN.name, ret);
 		CHECK(ret == 0 || ret == -ECANCELED, "stop-inflight: STOP releases (0 or -ECANCELED), never retains");
@@ -408,7 +436,7 @@ int main(int argc, char **argv)
 	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
 	      "stop-inflight: allocation pinned once, mappings cached, nothing remapped");
 
-	/* kill-inflight: the process holding the session dies in flight. */
+	/* kill-inflight: native incomplete work observed before owner SIGKILL. */
 	{
 		struct xdev_ext_mech_stats seen;
 		int idpipe[2], status, probe;
@@ -448,10 +476,15 @@ int main(int argc, char **argv)
 		close(idpipe[0]);
 		probe = syscall(__NR_io_uring_setup, 8, &(struct io_uring_params){});
 		CHECK(probe >= 0, "kill-inflight: observer ring");
-		CHECK(!session_stats(probe, id, &seen), "kill-inflight: STATS of the child's session from another ring");
+		ret = wait_native_inflight(probe, id, &KILLRUN, &seen);
+		if (ret) {
+			print_run(KILLRUN.name, "native observation failed", &seen);
+			/* Failed coverage still must not leave the owner paused forever. */
+			kill(child, SIGKILL);
+			waitpid(child, &status, 0);
+		}
+		CHECK(!ret, "kill-inflight: STATS observed native incomplete work and inflight batches before SIGKILL");
 		print_run(KILLRUN.name, "before SIGKILL", &seen);
-		CHECK(seen.batches_done < KILLRUN.groups && seen.state == XDEV_EXT_MECH_SESSION_ACTIVE,
-		      "kill-inflight: owner is killed before the START ended");
 		CHECK(!kill(child, SIGKILL) && waitpid(child, &status, 0) == child &&
 		      WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "kill-inflight: owner died of SIGKILL");
 		for (tries = 0; tries < 6000 && session_stats(probe, id, &seen) != -ENOENT; tries++) usleep(10000);

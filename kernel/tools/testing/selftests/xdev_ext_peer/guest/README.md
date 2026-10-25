@@ -26,18 +26,32 @@ Cases, in one guest boot:
   (64 KiB frame, depth 1, 64 batches of 16 KiB).
 - `depth4`: 4 KiB frames, two frames per batch, depth 4, 96 batches. A
   second CREATE on the claimed allocation must fail with `-EBUSY`.
-- `stop-inflight`: 4 KiB frames, depth 4, 1024 batches; STOP right after
-  START while NVMe commands on the allocation are accepted. STOP releases the
+- `stop-inflight`: 4 KiB frames, depth 4, 1024 batches; after START, bounded
+  STATS polling must observe `submitted > completed` for a native stage and
+  `inflight > 0` before STOP. STOP releases the
   session (0 or `-ECANCELED`, never `-EBUSY`), the mappings stay cached, and
   each destination group is the source group or untouched guard.
 - `kill-inflight`: 4 KiB frames, depth 4, 512 batches, owned by a child
-  process that is killed with SIGKILL before the START ends. Ring exit
+  process. The parent uses the same native-incomplete STATS observation before
+  sending SIGKILL. Ring exit
   releases the session (STATS from another ring returns `-ENOENT`), the
   allocation can be claimed again, the mappings stay cached, and each
   destination group is the source group or untouched guard.
 - `fd-release`: 32 KiB frames, depth 2, 8 batches; the ring and the last
   allocation fd are closed without STOP, and every provider pin and map must
   still be released.
+
+The two teardown cases retain the pre-action STATS snapshots in the console.
+The host rejects missing, zero-submission, completed, or inconsistent native
+observations. If no qualifying snapshot is observed, the case fails rather
+than claiming teardown-inflight coverage. STATS reads individual fields, and
+the snapshot and teardown are separate operations: completions can race either,
+so the observation does not prove a command remains incomplete at the exact
+STOP/SIGKILL instant. Only producer work may have been observed; therefore all
+destination groups may legitimately remain guard bytes.
+The submission counter increments before the class submit call and rolls back
+on a pre-acceptance failure; this observation is not a hardware acceptance
+certificate.
 
 The guest compares both whole disks and the provider counters; afterwards
 the host validator `session_validate.py` regenerates the source pattern and
@@ -49,14 +63,23 @@ the debug report families rejected by `xdev_ext_mech_zc_debug.py`.
 directory and the tools directory of the KVM harness run that built it
 (`xdev_ext_peer_chain`, `nvme_s0.bpf.o`, `peer-guest/xdev_ext_peer_sw.ko`) and
 refuses to run unless the source checkout differs from that build's recorded
-commit only inside this directory.
+commit only inside this guest directory, the library selftests, `.gitignore`,
+or the host workflow. Provider module source must still match the built copy.
 
     bash session_kvm.sh --scratch PRIVATE_0700_DIR --source CLEAN_CHECKOUT \
         --build KERNEL_O_DIR --tools HARNESS_TOOLS_DIR
 
 `python3 -I session_validate_test.py` checks that the host oracle rejects
 single-byte, guard, offset, source, TAP, plan, unload and kernel-report
-mutations.
+mutations, as well as missing or invalid native-inflight observations.
+`peer_session_observe_test.c` exercises bounded polling with controlled STATS
+responses at the syscall boundary; it creates no device and runs no guest:
+
+Set `HOST_TEST_OUT` to an existing private directory within the project.
+
+    gcc -O2 -std=gnu11 -Wall -Wextra -Werror -iquote ../../../../../include/uapi \
+        peer_session_observe_test.c -o "$HOST_TEST_OUT/peer_session_observe_test" -lbpf -lelf -lz
+    timeout 10s "$HOST_TEST_OUT/peer_session_observe_test"
 
 Not covered: real device memory, GPU copy engines, NIC stages (the provider
 maps only for NVMe functions), IOMMU, unknown-DMA quarantine, ambiguous or

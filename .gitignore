@@ -1287,6 +1287,10 @@
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_kvm.sh
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate.py
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/lib_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/build_reuse_test.py
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/iou_procs_test.c
+!/kernel/tools/testing/selftests/xdev_ext_lib/guest/iou_procs_test.py
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/peer_session_observe_test.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_nvme_nic.c
 !/kernel/tools/testing/selftests/xdev_ext_lib/guest/xdev_ext_lib_iou.c

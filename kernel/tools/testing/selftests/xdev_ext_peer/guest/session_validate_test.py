@@ -10,11 +10,18 @@ import session_validate as v  # noqa: E402
 
 SIZE = v.DISK_BYTES
 
+STOP_SNAPSHOT = ('# stop-inflight before STOP: done=0 abort=0 inflight=4 sequestered=0 '
+                 'submitted=4/0 completed=0/0 last_err=0 state=1')
+KILL_SNAPSHOT = ('# kill-inflight before SIGKILL: done=1 abort=0 inflight=4 sequestered=0 '
+                 'submitted=5/2 completed=5/1 last_err=0 state=1')
+
 
 def good_log():
     lines = ['TAP version 13']
     lines += [v.plan_line(p) for p in v.PLANS]
-    lines += [f'ok {i} - check' for i in range(1, 41)]
+    lines += [STOP_SNAPSHOT, '# stop-inflight STOP returned -125',
+              KILL_SNAPSHOT, 'ok 1 - kill-inflight: owner died of SIGKILL']
+    lines += [f'ok {i} - check' for i in range(2, 41)]
     lines += ['1..40', v.PASS_PREFIX + ' cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release',
               v.UNLOAD_MARKER, 'XDEV_EXT_SESSION_GUEST_EXIT=0',
               '[    1.0] kasan: KernelAddressSanitizer initialized']
@@ -175,6 +182,60 @@ class Log(unittest.TestCase):
             with self.subTest(report=report):
                 with self.assertRaisesRegex(ValueError, 'diagnostic'):
                     v.check_log(good_log() + report + '\n')
+
+
+class NativeObservation(unittest.TestCase):
+    """A teardown PASS needs a real native-incomplete STATS observation."""
+
+    def test_missing_observation_fails(self):
+        for snapshot in (STOP_SNAPSHOT, KILL_SNAPSHOT):
+            with self.subTest(snapshot=snapshot):
+                with self.assertRaisesRegex(ValueError, 'native.*observation'):
+                    v.check_log(good_log().replace(snapshot + '\n', ''))
+
+    def test_zero_submission_fails_even_with_active_unfinished_start(self):
+        for snapshot in (STOP_SNAPSHOT, KILL_SNAPSHOT):
+            zero = snapshot.split(':', 1)[0] + (': done=0 abort=0 inflight=0 sequestered=0 '
+                                               'submitted=0/0 completed=0/0 last_err=0 state=1')
+            with self.subTest(snapshot=snapshot):
+                with self.assertRaisesRegex(ValueError, 'native.*observation'):
+                    v.check_log(good_log().replace(snapshot, zero))
+
+    def test_inconsistent_or_no_longer_native_inflight_observation_fails(self):
+        for old, new in (('inflight=4', 'inflight=0'),
+                         ('submitted=4/0', 'submitted=0/0'),
+                         ('completed=0/0', 'completed=4/0'),
+                         ('completed=0/0', 'completed=5/0'),
+                         ('submitted=4/0', 'submitted=1025/0'),
+                         ('done=0', 'done=1024'),
+                         ('abort=0', 'abort=1024'),
+                         ('sequestered=0', 'sequestered=1'),
+                         ('last_err=0', 'last_err=-5'),
+                         ('state=1', 'state=2')):
+            with self.subTest(old=old, new=new):
+                changed = STOP_SNAPSHOT.replace(old, new)
+                with self.assertRaisesRegex(ValueError, 'native.*observation'):
+                    v.check_log(good_log().replace(STOP_SNAPSHOT, changed))
+
+    def test_duplicate_or_malformed_observation_fails(self):
+        for changed in (STOP_SNAPSHOT + '\n' + STOP_SNAPSHOT,
+                        STOP_SNAPSHOT.replace('submitted=4/0', 'submitted=-1/0'),
+                        STOP_SNAPSHOT.replace(' completed=0/0', '')):
+            with self.subTest(changed=changed):
+                with self.assertRaisesRegex(ValueError, 'native.*observation'):
+                    v.check_log(good_log().replace(STOP_SNAPSHOT, changed))
+
+    def test_producer_only_and_consumer_native_inflight_observations_pass(self):
+        result = v.check_log(good_log())
+        self.assertEqual(result['native_inflight_observations']['stop-inflight']['submitted'], [4, 0])
+        self.assertEqual(result['native_inflight_observations']['kill-inflight']['completed'], [5, 1])
+
+    def test_observation_after_teardown_fails(self):
+        text = good_log().replace(STOP_SNAPSHOT + '\n', '')
+        text = text.replace('# stop-inflight STOP returned -125',
+                            '# stop-inflight STOP returned -125\n' + STOP_SNAPSHOT)
+        with self.assertRaisesRegex(ValueError, 'native.*observation'):
+            v.check_log(text)
 
 
 if __name__ == '__main__':

@@ -27,7 +27,13 @@ def iou_lines(p):
     n, g = p['name'], p['groups']
     out = []
     if p['kind'] in ('single', 'threads', 'procs'):
+        if p['kind'] == 'procs':
+            out += [f"XDEV_EXT_LIB_IOU_READY name={n} idx=0 session=40 ret=0",
+                    f"XDEV_EXT_LIB_IOU_READY name={n} idx=1 session=41 ret=0",
+                    f"XDEV_EXT_LIB_IOU_GO name={n} session0=40 session1=41"]
         for idx in range(len(p['src'])):
+            if p['kind'] == 'procs':
+                out.append(f"XDEV_EXT_LIB_IOU_START name={n} idx={idx} session={40 + idx}")
             out.append(iou_stats(p, idx, 'wait', 40 + idx))
             out.append(f"XDEV_EXT_LIB_IOU_RESULT name={n} idx={idx} session={40 + idx} ret=0 "
                        "wait_err=0 stop_err=0 close_err=0 retained=0")
@@ -308,6 +314,50 @@ class IouOracleTest(unittest.TestCase):
         n = self.plan('procs')['name']
         self.assertFails(f'{n} child', passing_log().replace(
             f'XDEV_EXT_LIB_IOU_CHILD name={n} idx=1 exit=0', f'XDEV_EXT_LIB_IOU_CHILD name={n} idx=1 exit=1'))
+
+    def test_procs_require_ready_go_and_start(self):
+        n = self.plan('procs')['name']
+        for tag in ('READY', 'GO', 'START'):
+            with self.subTest(tag=tag):
+                lines = passing_log().splitlines()
+                line = next(l for l in lines if l.startswith(f'XDEV_EXT_LIB_IOU_{tag} name={n} '))
+                self.assertFails(f'{n} barrier', '\n'.join(l for l in lines if l != line) + '\n')
+
+    def test_procs_ready_identity_and_success(self):
+        n = self.plan('procs')['name']
+        for old, new in (('session=41 ret=0', 'session=40 ret=0'),
+                         ('session=41 ret=0', 'session=42 ret=0'),
+                         ('session=41 ret=0', 'session=41 ret=-5')):
+            with self.subTest(new=new):
+                self.assertFails(f'{n} barrier', passing_log().replace(
+                    f'XDEV_EXT_LIB_IOU_READY name={n} idx=1 {old}',
+                    f'XDEV_EXT_LIB_IOU_READY name={n} idx=1 {new}'))
+
+    def test_procs_barrier_order(self):
+        n = self.plan('procs')['name']
+        original = passing_log().splitlines()
+        go = next(l for l in original if l.startswith(f'XDEV_EXT_LIB_IOU_GO name={n} '))
+        ready = next(l for l in original if l.startswith(f'XDEV_EXT_LIB_IOU_READY name={n} idx=1 '))
+        start = next(l for l in original if l.startswith(f'XDEV_EXT_LIB_IOU_START name={n} idx=0 '))
+        result = next(l for l in original if l.startswith(f'XDEV_EXT_LIB_IOU_RESULT name={n} idx=0 '))
+        for line, before in ((go, ready), (start, go), (result, go)):
+            with self.subTest(line=line):
+                bad = original.copy()
+                bad.remove(line)
+                bad.insert(bad.index(before), line)
+                self.assertFails(f'{n} barrier', '\n'.join(bad) + '\n')
+
+    def test_procs_barrier_duplicate_and_mismatched_release(self):
+        n = self.plan('procs')['name']
+        log = passing_log()
+        for tag in ('READY', 'GO', 'START'):
+            with self.subTest(tag=tag):
+                line = next(l for l in log.splitlines() if l.startswith(f'XDEV_EXT_LIB_IOU_{tag} name={n} '))
+                self.assertFails(f'{n} barrier', log.replace(line, line + '\n' + line))
+        self.assertFails(f'{n} barrier', log.replace(f'name={n} session0=40 session1=41',
+                                                    f'name={n} session0=40 session1=42'))
+        self.assertFails(f'{n} barrier', log.replace(f'XDEV_EXT_LIB_IOU_START name={n} idx=1 session=41',
+                                                    f'XDEV_EXT_LIB_IOU_START name={n} idx=1 session=42'))
 
     def test_retain_sequence(self):
         n = self.plan('retain')['name']

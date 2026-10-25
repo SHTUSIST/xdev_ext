@@ -25,7 +25,9 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <getopt.h>
+#include <poll.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -52,10 +54,16 @@ struct run {
 	int idx, src, dst, ce[2];
 	pthread_barrier_t *barrier;	/* threads: start together */
 	int go_fd;			/* procs: read one byte, then START */
+	int ready_fd;			/* procs: report setup before waiting for go */
 	int ret, wait_err, stop_err, close_err;
 	bool retained;
 	__u64 session;
 	struct xdev_ext_mech_stats st;
+};
+
+struct ready_report {
+	int idx, ret;
+	__u64 session;
 };
 
 static void print_stats(const char *tag, const struct run *r, const char *phase)
@@ -189,8 +197,31 @@ static void *run_exact(void *arg)
 	r->ret = setup(r, &x);
 	if (r->barrier)
 		pthread_barrier_wait(r->barrier);	/* also on failure: never strand the peer */
-	if (r->go_fd >= 0 && read(r->go_fd, &go, 1) != 1 && !r->ret)
-		r->ret = -EPIPE;
+	if (r->go_fd >= 0) {
+		struct ready_report report = { .idx = r->idx, .ret = r->ret,
+			.session = r->session };
+		ssize_t n;
+
+		do {
+			n = write(r->ready_fd, &report, sizeof(report));
+		} while (n < 0 && errno == EINTR);
+		if (n != sizeof(report) && !r->ret)
+			r->ret = -EPIPE;
+		close(r->ready_fd);
+		if (!r->ret) {
+			do {
+				n = read(r->go_fd, &go, 1);
+			} while (n < 0 && errno == EINTR);
+			if (n != 1 || go != 'g')
+				r->ret = -EPIPE;
+		}
+		close(r->go_fd);
+		if (!r->ret) {
+			printf("XDEV_EXT_LIB_IOU_START name=%s idx=%d session=%llu\n",
+			       r->a->name, r->idx, (unsigned long long)r->session);
+			fflush(stdout);
+		}
+	}
 	if (!r->ret)
 		r->ret = start(r, x);
 	if (!r->ret) {
@@ -392,33 +423,100 @@ static int run_pair(const struct args *a)
 
 static int run_procs(const struct args *a)
 {
-	int go[2], i, status, ret = 0;
-	pid_t pid[2];
+	struct ready_report report;
+	__u64 sessions[2] = { 0, 0 }, deadline = now_ms() + (__u64)a->timeout_ms;
+	int go[2], ready[2], i, nr = 0, status, ret = 0;
+	pid_t pid[2], waited;
 
 	if (pipe2(go, O_CLOEXEC))
 		return -errno;
+	if (pipe2(ready, O_CLOEXEC)) {
+		ret = -errno;
+		close(go[0]);
+		close(go[1]);
+		return ret;
+	}
 	fflush(stdout);
 	for (i = 0; i < 2; i++) {
 		pid[i] = fork();
-		if (pid[i] < 0)
-			return -errno;
+		if (pid[i] < 0) {
+			ret = -errno;
+			break;
+		}
 		if (!pid[i]) {
-			struct run r = { .a = a, .idx = i, .go_fd = go[0] };
+			struct run r = { .a = a, .idx = i, .go_fd = go[0], .ready_fd = ready[1] };
 
 			close(go[1]);
+			close(ready[0]);
 			run_exact(&r);
 			fflush(stdout);
 			_exit(r.ret ? 1 : 0);
 		}
+		nr++;
 	}
+	close(ready[1]);
+	for (i = 0; !ret && i < 2; i++) {
+		struct pollfd pfd = { .fd = ready[0], .events = POLLIN };
+		__u64 now = now_ms();
+		ssize_t n;
+		int polled;
+
+		if (now >= deadline) {
+			ret = -ETIMEDOUT;
+			break;
+		}
+		polled = poll(&pfd, 1, (int)(deadline - now));
+		if (polled < 0 && errno == EINTR) {
+			i--;
+			continue;
+		}
+		if (polled <= 0) {
+			ret = polled ? -errno : -ETIMEDOUT;
+			break;
+		}
+		do {
+			n = read(ready[0], &report, sizeof(report));
+		} while (n < 0 && errno == EINTR);
+		if (n != sizeof(report)) {
+			ret = -EPIPE;
+			break;
+		}
+		printf("XDEV_EXT_LIB_IOU_READY name=%s idx=%d session=%llu ret=%d\n",
+		       a->name, report.idx, (unsigned long long)report.session, report.ret);
+		fflush(stdout);
+		if (report.ret || report.idx < 0 || report.idx > 1 || !report.session ||
+		    sessions[report.idx]) {
+			ret = report.ret ? report.ret : -EPROTO;
+			break;
+		}
+		sessions[report.idx] = report.session;
+	}
+	close(ready[0]);
+	if (!ret && sessions[0] == sessions[1])
+		ret = -EPROTO;
+	if (!ret) {
+		/* Flush before releasing either reader, including on redirected stdout. */
+		printf("XDEV_EXT_LIB_IOU_GO name=%s session0=%llu session1=%llu\n", a->name,
+		       (unsigned long long)sessions[0], (unsigned long long)sessions[1]);
+		fflush(stdout);
+		if (write(go[1], "gg", 2) != 2)
+			ret = -EPIPE;
+	}
+	/* Keep the parent's reader until after write: a dead child cannot SIGPIPE us. */
 	close(go[0]);
-	/* Both children CREATE first; each START waits for its byte. */
-	if (write(go[1], "gg", 2) != 2)
-		ret = -EPIPE;
 	close(go[1]);
-	for (i = 0; i < 2; i++) {
-		if (waitpid(pid[i], &status, 0) != pid[i])
-			return -errno;
+	if (ret)
+		for (i = 0; i < nr; i++)
+			kill(pid[i], SIGKILL);	/* includes a peer stuck inside setup */
+	for (i = 0; i < nr; i++) {
+		do {
+			waited = waitpid(pid[i], &status, 0);
+		} while (waited < 0 && errno == EINTR);
+		if (waited != pid[i]) {
+			if (!ret)
+				ret = -errno;
+			continue;
+		}
 		printf("XDEV_EXT_LIB_IOU_CHILD name=%s idx=%d exit=%d\n", a->name, i,
 		       WIFEXITED(status) ? WEXITSTATUS(status) : 128 + WTERMSIG(status));
 		if (!ret && !(WIFEXITED(status) && !WEXITSTATUS(status)))

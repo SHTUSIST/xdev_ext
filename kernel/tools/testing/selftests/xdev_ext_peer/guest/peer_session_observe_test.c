@@ -1,0 +1,87 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Host-only regression for the guest driver's bounded STATS observation.
+ * Only syscall/usleep boundaries are replaced; no device is opened or created.
+ */
+#define syscall observe_test_syscall
+#define usleep observe_test_usleep
+#define main peer_session_guest_main
+#include "peer_session_e2e.c"
+#undef main
+#undef usleep
+#undef syscall
+#include <stdarg.h>
+
+static unsigned int reads, sleeps;
+static int scenario;
+
+long observe_test_syscall(long number, ...)
+{
+	struct io_uring_xdev_ext_mech *req;
+	struct xdev_ext_mech_stats *st;
+
+	va_list args;
+	va_start(args, number);
+	(void)va_arg(args, int);
+	(void)va_arg(args, int);
+	req = va_arg(args, struct io_uring_xdev_ext_mech *);
+	va_end(args);
+	if (number != __NR_io_uring_register || req->op != XDEV_EXT_MECH_OP_STATS)
+		abort();
+	st = (void *)(uintptr_t)req->arg;
+	st->state = XDEV_EXT_MECH_SESSION_ACTIVE;
+	reads++;
+	if (scenario == 1 && reads >= 3) {
+		st->inflight = 4;
+		st->submitted[0] = 4;
+	} else if (scenario == 2) {
+		st->batches_done = STOPRUN.groups;
+		st->submitted[0] = st->completed[0] = STOPRUN.groups;
+		st->submitted[1] = st->completed[1] = STOPRUN.groups;
+	} else if (scenario == 3) {
+		st->inflight = 4;
+		st->submitted[0] = 4;
+		st->completed[0] = reads == 1 ? 5 : 3;
+	} else if (scenario == 4) {
+		st->inflight = 4;
+		st->submitted[0] = st->completed[0] = 4;
+		st->submitted[1] = 2;
+		st->completed[1] = 1;
+	}
+	return 0;
+}
+
+int observe_test_usleep(useconds_t usec)
+{
+	(void)usec;
+	sleeps++;
+	return 0;
+}
+
+int main(void)
+{
+	struct xdev_ext_mech_stats st;
+	int ret;
+
+	scenario = 1;
+	ret = wait_native_inflight(7, 99, &STOPRUN, &st);
+	if (ret || reads != 3 || sleeps != 2 || st.submitted[0] != 4 || !st.inflight)
+		return 1;
+	puts("PASS zero native submissions are polled past before observing producer work");
+	scenario = 2; reads = sleeps = 0;
+	if (!wait_native_inflight(7, 99, &STOPRUN, &st) || reads != 1 || sleeps)
+		return 2;
+	puts("PASS already completed START is not teardown-inflight coverage");
+	scenario = 3; reads = sleeps = 0;
+	if (wait_native_inflight(7, 99, &STOPRUN, &st) || reads != 2 || sleeps != 1)
+		return 3;
+	puts("PASS inconsistent native counter snapshot is retried");
+	scenario = 4; reads = sleeps = 0;
+	if (wait_native_inflight(7, 99, &STOPRUN, &st) || reads != 1 || sleeps)
+		return 4;
+	puts("PASS consumer-only native work is accepted");
+	scenario = 0; reads = sleeps = 0;
+	if (!wait_native_inflight(7, 99, &STOPRUN, &st) || reads < 2 || reads > 6000 || sleeps > 6000)
+		return 5;
+	puts("PASS no native submission fails after bounded polling");
+	return 0;
+}
