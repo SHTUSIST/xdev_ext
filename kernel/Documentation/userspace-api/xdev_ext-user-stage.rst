@@ -171,12 +171,21 @@ session worker):
    was given, signal it.
 
 User thread, taking work: ``smp_load_acquire(&ready_prod)``; read the ready
-entry and the slot; ``smp_store_release(&ready_cons, ready_cons + 1)``. To
+entry; ``smp_store_release(&ready_cons, ready_cons + 1)``; read the slot's
+``ticket`` (acquire), copy its frame descriptions, ``smp_rmb()`` and read
+``ticket`` again. Unless both reads equal the entry's ``ticket``, the batch
+was cancelled before the entry was read and the slot may already describe a
+later batch, which has its own ready entry: the user thread drops the entry
+and does not touch those frames. Taking such an entry would hand the later
+batch's payload to the user thread twice, once under a ticket the kernel
+refuses, and a transform that is not idempotent would reach the next stage
+applied twice. To
 sleep: set ``XDEV_EXT_USER_F_SLEEPING``, ``smp_mb()``, read ``ready_prod`` and
 ``kernel_flags`` again, and wait on the eventfd only if there is still no
 entry and ``XDEV_EXT_USER_K_STOPPED`` is clear; clear the flag after waking.
 
-User thread, finishing batch *b*: write ``out_len`` of its frames; write the
+User thread, finishing batch *b*: write ``out_len`` of its frames, only while
+the slot still holds *b*'s ticket; write the
 completion entry; ``smp_store_release(&done_prod, done_prod + 1)``;
 ``smp_mb()``; if ``kernel_flags & XDEV_EXT_USER_K_NEED_KICK``, call
 ``ioctl(fd, XDEV_EXT_USER_IOC_KICK)``. Only one thread at a time may produce
@@ -281,14 +290,18 @@ to skip a key on the wire. A USER batch stuck past its deadline before such a
 stage therefore ends the session at the deadline.
 
 After a cancellation the kernel has no way to stop a user thread that is
-still running on the batch. A late user thread may still write the frames
-after they returned to the pool and were reused by a later batch. This only
-affects the application's own pool memory: the frames are the application's
-UMEM pages, pinned by the pool, and no device and no kernel object depends on
-their content. It can corrupt the payload of a later batch. A user thread must
-therefore stop touching a batch once ``kernel_flags`` has
-``XDEV_EXT_USER_K_STOPPED`` set or its slot's ``ticket`` no longer matches;
-both are advisory, the kernel cannot enforce them.
+still running on the batch. The ticket checks above only cover the moment a
+batch is taken and the moment its lengths are written: a deadline that fires
+while the user thread is in the middle of transforming a batch still lets its
+later payload writes reach frames that returned to the pool and were reused
+by a later batch. This is safe for the kernel: a USER stage refuses ``PEER``
+pools, so the frames are always the application's own UMEM pages, pinned by
+the pool, and no device and no kernel object depends on their content. It
+can corrupt the payload of a later batch. The application must therefore not
+write a batch's payload after its deadline, and must stop touching a batch
+once ``kernel_flags`` has ``XDEV_EXT_USER_K_STOPPED`` set or its slot's
+``ticket`` no longer matches; all three are rules for the application, the
+kernel cannot enforce them.
 
 The user stage fd and process exit
 ----------------------------------

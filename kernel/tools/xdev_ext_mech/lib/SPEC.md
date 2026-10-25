@@ -268,7 +268,7 @@ struct xdev_ext_user_stage_opts {
 struct xdev_ext_user_batch {
 	__u32 slot, nr_frames;
 	__u64 ticket, batch_id, key, arg;
-	struct xdev_ext_user_frame *f;   /* the slot's frames in the shared map */
+	struct xdev_ext_user_frame f[XDEV_EXT_MECH_MAX_FRAMES];  /* copy of the slot's frames */
 	void *data[XDEV_EXT_MECH_MAX_FRAMES];
 };
 int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
@@ -294,15 +294,23 @@ int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
   hands out meanwhile wakes it. Once the kernel marked the stage stopped
   and no entry is left, next returns `-ESHUTDOWN` without waiting. An entry
   with a slot or frame count out of range is consumed and reported as
-  `-EPROTO`.
-- While holding `*b` the thread may read `f[i].data_len` bytes at
-  `data[i]` and write up to `f[i].capacity` bytes there, and sets
-  `f[i].out_len` to each frame's output length (preset to the input
-  length). The kernel checks the lengths against the stage's rule.
-- complete posts the completion entry with `status` (0 or a negative errno
-  the batch fails with; positive is `-EINVAL`) and kicks the kernel only
-  when it asked for a kick. A full completion ring is `-ENOSPC` and posts
-  nothing. A kick error (`-ENOTCONN`: the stage is no longer bound) is
+  `-EPROTO`. An entry whose slot no longer holds its ticket (the kernel
+  cancelled the batch before it was read, and may already have reused the
+  slot for a later batch with its own entry) is consumed and skipped.
+- `f` is the library's copy of the slot's frame descriptions, taken while
+  the slot held the entry's ticket; a later rewrite of the slot by the
+  kernel does not change it. While holding `*b` the thread may read
+  `f[i].data_len` bytes at `data[i]` and write up to `f[i].capacity` bytes
+  there, and sets `f[i].out_len` to each frame's output length (preset to
+  the input length). The kernel checks the lengths against the stage's
+  rule.
+- complete copies `f[i].out_len` into the slot only while the slot still
+  holds `b->ticket`, then posts the completion entry with `status` (0 or a
+  negative errno the batch fails with; positive, or `nr_frames` above
+  `XDEV_EXT_MECH_MAX_FRAMES`, is `-EINVAL`) and kicks the kernel only when it
+  asked for a kick. The entry of a batch the kernel already cancelled is
+  still posted; the kernel refuses it. A full completion ring is `-ENOSPC`
+  and posts nothing. A kick error (`-ENOTCONN`: the stage is no longer bound) is
   returned after the entry was posted.
 - close unmaps and closes the fd and the eventfd. Closing the last
   reference to the user stage fd while its session runs stops that session
@@ -310,5 +318,9 @@ int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
 - Threads: one thread at a time may call next, and one thread at a time
   may call complete, on one handle (single consumer, single producer).
   After a batch was cancelled by the kernel (deadline or stop), writing its
-  frames can corrupt a later batch's payload; stop touching a batch when
-  next has returned `-ESHUTDOWN` or the slot's ticket changed.
+  frames can corrupt a later batch's payload: the frames may already belong
+  to a later batch. The library cannot stop a transform that is already
+  running when the deadline fires, so the application must not write a
+  batch's payload after its deadline (CREATE `arg0`), and should stop
+  touching a batch when next has returned `-ESHUTDOWN` or the slot's ticket
+  changed.

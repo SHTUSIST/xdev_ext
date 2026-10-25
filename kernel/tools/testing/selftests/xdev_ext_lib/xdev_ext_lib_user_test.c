@@ -136,8 +136,8 @@ static struct xdev_ext_user_stage *opened(void)
 	return u;
 }
 
-/* The kernel hands out batch @slot with @nr frames. */
-static void produce(__u32 slot, __u32 nr, __u64 ticket)
+/* The kernel hands out batch @slot with @nr frames from chunk @chunk on. */
+static void produce_at(__u32 slot, __u32 nr, __u64 ticket, __u32 chunk)
 {
 	struct xdev_ext_user_ready *r = &ready()[hdr()->ready_prod & (ENTRIES - 1)];
 	struct xdev_ext_user_slot *s = &slots()[slot];
@@ -146,11 +146,22 @@ static void produce(__u32 slot, __u32 nr, __u64 ticket)
 	s->ticket = ticket;
 	s->nr_frames = nr;
 	for (i = 0; i < nr; i++)
-		s->f[i] = (struct xdev_ext_user_frame){ .umem_addr = (slot * 2 + i) * 4096ULL,
+		s->f[i] = (struct xdev_ext_user_frame){ .umem_addr = (chunk + i) * 4096ULL,
 			.data_off = 64, .data_len = 1000 + i, .capacity = 4096 - 64, .out_len = 1000 + i };
 	*r = (struct xdev_ext_user_ready){ .slot = slot, .nr_frames = nr, .ticket = ticket,
 		.batch_id = 40 + slot, .key = 9, .arg = 0xabc };
 	__atomic_store_n(&hdr()->ready_prod, hdr()->ready_prod + 1, __ATOMIC_RELEASE);
+}
+
+static void produce(__u32 slot, __u32 nr, __u64 ticket)
+{
+	produce_at(slot, nr, ticket, slot * 2);
+}
+
+/* The kernel cancels the batch held in @slot (deadline or stop). */
+static void cancel(__u32 slot)
+{
+	slots()[slot].ticket = 0;
 }
 
 static void test_open_request(void)
@@ -220,7 +231,7 @@ static void test_take(void)
 	EXPECT_EQ(b.batch_id, 41);
 	EXPECT_EQ(b.key, 9);
 	EXPECT_EQ(b.arg, 0xabc);
-	EXPECT_TRUE(b.f == slots()[1].f || (b.f && b.f[1].data_len == 1001));
+	EXPECT_TRUE((void *)b.f != (void *)slots()[1].f);	/* the library's copy */
 	EXPECT_EQ(b.f[1].data_len, 1001);
 	EXPECT_TRUE(b.data[0] == umem + 2 * 4096 + 64);
 	EXPECT_TRUE(b.data[1] == umem + 3 * 4096 + 64);
@@ -334,6 +345,72 @@ static void test_sleep_wakeup(void)
 	EXPECT_EQ(xdev_ext_user_stage_close(u), 0);
 }
 
+/*
+ * A batch cancelled at its deadline before the user thread read its ready
+ * entry; the kernel reused the slot for the next batch.  The stale entry
+ * must not hand out the new batch's frames under the old ticket: the
+ * application would transform the new payload twice (once under each
+ * ticket), and the second, accepted pass would reach the next stage.
+ */
+static void test_stale_entry_after_reuse(void)
+{
+	struct xdev_ext_user_stage *u = opened();
+	struct xdev_ext_user_batch b;
+	unsigned int handed_b = 0, handed_a = 0;
+	int ret;
+
+	if (!u)
+		return;
+	produce_at(0, 1, 100, 0);	/* batch A: chunk 0 */
+	cancel(0);			/* A passes its deadline, unread */
+	produce_at(0, 1, 101, 5);	/* batch B reuses slot 0: chunk 5 */
+	while ((ret = xdev_ext_user_stage_next(u, 0, &b)) == 0) {
+		if (b.data[0] == umem + 5 * 4096 + 64)
+			handed_b++;
+		if (b.ticket == 100)
+			handed_a++;
+	}
+	EXPECT_EQ(ret, -EAGAIN);
+	EXPECT_EQ(handed_b, 1);		/* B's payload is handed out exactly once */
+	EXPECT_EQ(handed_a, 0);		/* the cancelled A is never handed out */
+	EXPECT_EQ(hdr()->ready_cons, 2);	/* the stale entry was consumed */
+	EXPECT_EQ(xdev_ext_user_stage_close(u), 0);
+}
+
+/*
+ * The batch object is the library's copy: a later rewrite of the slot by
+ * the kernel (B cancelled, slot reused for C) changes neither B's frame
+ * table nor, through a late completion of B, C's output lengths.
+ */
+static void test_batch_is_a_copy(void)
+{
+	struct xdev_ext_user_stage *u = opened();
+	struct xdev_ext_user_batch b;
+
+	if (!u)
+		return;
+	produce_at(0, 1, 200, 3);
+	EXPECT_EQ(xdev_ext_user_stage_next(u, 0, &b), 0);
+	EXPECT_EQ(b.ticket, 200);
+	cancel(0);
+	produce_at(0, 1, 201, 6);	/* C in the same slot */
+	EXPECT_EQ(b.f[0].umem_addr, 3 * 4096);
+	EXPECT_EQ(b.f[0].out_len, 1000);	/* preset to the input length */
+	b.f[0].out_len = 1234;
+	hdr()->kernel_flags = 0;
+	EXPECT_EQ(xdev_ext_user_stage_complete(u, &b, 0), 0);	/* posted; the kernel refuses it */
+	EXPECT_EQ(hdr()->done_prod, 1);
+	EXPECT_EQ(done()[0].ticket, 200);
+	EXPECT_EQ(slots()[0].f[0].out_len, 1000);	/* C's preset is untouched */
+	EXPECT_EQ(xdev_ext_user_stage_next(u, 0, &b), 0);
+	EXPECT_EQ(b.ticket, 201);
+	EXPECT_EQ(b.f[0].umem_addr, 6 * 4096);
+	b.f[0].out_len = 999;
+	EXPECT_EQ(xdev_ext_user_stage_complete(u, &b, 0), 0);
+	EXPECT_EQ(slots()[0].f[0].out_len, 999);	/* the held batch's lengths reach its slot */
+	EXPECT_EQ(xdev_ext_user_stage_close(u), 0);
+}
+
 #define RUN(fn) do { \
 	reset(); \
 	xdev_ext__set_sys(&fake_sys); \
@@ -346,7 +423,7 @@ static void test_sleep_wakeup(void)
 
 int main(void)
 {
-	printf("TAP version 13\n1..7\n");
+	printf("TAP version 13\n1..9\n");
 	RUN(test_open_request);
 	RUN(test_open_validation);
 	RUN(test_take);
@@ -354,6 +431,8 @@ int main(void)
 	RUN(test_bad_entry);
 	RUN(test_stopped);
 	RUN(test_sleep_wakeup);
+	RUN(test_stale_entry_after_reuse);
+	RUN(test_batch_is_a_copy);
 	reset();
 	printf("# checks=%u failures=%u\n", checks, failures);
 	return failures ? 1 : 0;

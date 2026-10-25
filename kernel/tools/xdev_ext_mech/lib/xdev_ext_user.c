@@ -8,6 +8,7 @@
 #define _GNU_SOURCE
 #include <errno.h>
 #include <poll.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -125,18 +126,54 @@ static void store_release(__u32 *p, __u32 v)
 	__atomic_store_n(p, v, __ATOMIC_RELEASE);
 }
 
-/* 0 with *b filled, -EAGAIN when the ring is empty, -EPROTO for a bad entry. */
+/*
+ * Copy the frames of slot @s while it still holds @ticket.  The kernel sets
+ * a slot's ticket to 0 when its batch leaves the stage (deadline, stop,
+ * completion) and only then rewrites the frames for the next batch in that
+ * slot, so a ticket that matches both before and after the copy means the
+ * copy is the batch's own.  False: the batch is gone.
+ */
+static bool slot_copy(const struct xdev_ext_user_slot *s, __u64 ticket, __u32 nr,
+		      struct xdev_ext_user_frame *f)
+{
+	__u32 i;
+
+	if (!ticket || __atomic_load_n(&s->ticket, __ATOMIC_ACQUIRE) != ticket)
+		return false;
+	for (i = 0; i < nr; i++) {
+		f[i].umem_addr = __atomic_load_n(&s->f[i].umem_addr, __ATOMIC_RELAXED);
+		f[i].data_off = __atomic_load_n(&s->f[i].data_off, __ATOMIC_RELAXED);
+		f[i].data_len = __atomic_load_n(&s->f[i].data_len, __ATOMIC_RELAXED);
+		f[i].capacity = __atomic_load_n(&s->f[i].capacity, __ATOMIC_RELAXED);
+		f[i].out_len = f[i].data_len;	/* the kernel's preset */
+	}
+	__atomic_thread_fence(__ATOMIC_ACQUIRE);
+	return __atomic_load_n(&s->ticket, __ATOMIC_RELAXED) == ticket;
+}
+
+/*
+ * 0 with *b filled, -EAGAIN when the ring is empty, -EPROTO for a bad entry.
+ * An entry whose batch was cancelled before it was read (its slot no longer
+ * holds the entry's ticket) is consumed and skipped: its slot may already
+ * describe a later batch, which has its own entry.
+ */
 static int take(struct xdev_ext_user_stage *u, struct xdev_ext_user_batch *b)
 {
-	__u32 cons = u->hdr->ready_cons, i;
+	struct xdev_ext_user_frame f[XDEV_EXT_MECH_MAX_FRAMES];
 	struct xdev_ext_user_ready r;
+	__u32 cons, i;
 
-	if (load_acquire(&u->hdr->ready_prod) == cons)
-		return -EAGAIN;
-	r = u->ready[cons & (u->entries - 1)];
-	store_release(&u->hdr->ready_cons, cons + 1);
-	if (r.slot >= u->entries || !r.nr_frames || r.nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
-		return -EPROTO;
+	for (;;) {
+		cons = u->hdr->ready_cons;
+		if (load_acquire(&u->hdr->ready_prod) == cons)
+			return -EAGAIN;
+		r = u->ready[cons & (u->entries - 1)];
+		store_release(&u->hdr->ready_cons, cons + 1);
+		if (r.slot >= u->entries || !r.nr_frames || r.nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
+			return -EPROTO;
+		if (slot_copy(&u->slots[r.slot], r.ticket, r.nr_frames, f))
+			break;
+	}
 	memset(b, 0, sizeof(*b));
 	b->slot = r.slot;
 	b->nr_frames = r.nr_frames;
@@ -144,7 +181,7 @@ static int take(struct xdev_ext_user_stage *u, struct xdev_ext_user_batch *b)
 	b->batch_id = r.batch_id;
 	b->key = r.key;
 	b->arg = r.arg;
-	b->f = u->slots[r.slot].f;
+	memcpy(b->f, f, r.nr_frames * sizeof(f[0]));
 	if (u->umem)
 		for (i = 0; i < r.nr_frames; i++)
 			b->data[i] = (char *)u->umem + b->f[i].umem_addr + b->f[i].data_off;
@@ -211,14 +248,20 @@ int xdev_ext_user_stage_next(struct xdev_ext_user_stage *u, int timeout_ms,
 int xdev_ext_user_stage_complete(struct xdev_ext_user_stage *u,
 				 const struct xdev_ext_user_batch *b, int status)
 {
+	struct xdev_ext_user_slot *s;
 	struct xdev_ext_user_done *d;
-	__u32 prod;
+	__u32 prod, i;
 
-	if (!u || !b || status > 0 || b->slot >= u->entries)
+	if (!u || !b || status > 0 || b->slot >= u->entries || b->nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
 		return -EINVAL;
 	prod = u->hdr->done_prod;
 	if (prod - __atomic_load_n(&u->hdr->done_cons, __ATOMIC_ACQUIRE) >= u->entries)
 		return -ENOSPC;
+	/* Lengths only into a slot that still holds this batch, never a later one's. */
+	s = &u->slots[b->slot];
+	if (b->ticket && __atomic_load_n(&s->ticket, __ATOMIC_ACQUIRE) == b->ticket)
+		for (i = 0; i < b->nr_frames; i++)
+			__atomic_store_n(&s->f[i].out_len, b->f[i].out_len, __ATOMIC_RELAXED);
 	d = &u->done[prod & (u->entries - 1)];
 	d->ticket = b->ticket;
 	d->slot = b->slot;

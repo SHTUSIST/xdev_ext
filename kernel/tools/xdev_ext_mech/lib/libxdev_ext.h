@@ -136,7 +136,8 @@ struct xdev_ext_user_batch {
 	__u64 batch_id;
 	__u64 key;
 	__u64 arg;
-	struct xdev_ext_user_frame *f;	/* in the shared map; set f[i].out_len */
+	/* The library's copy of the slot's frames; set f[i].out_len. */
+	struct xdev_ext_user_frame f[XDEV_EXT_MECH_MAX_FRAMES];
 	void *data[XDEV_EXT_MECH_MAX_FRAMES];	/* umem + umem_addr + data_off */
 };
 
