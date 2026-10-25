@@ -142,8 +142,12 @@ def check_log(text, red=False):
     if red:
         if failed[:1] != ['XDEV_EXT_COMPUTE_CASE=FAIL name=attach-compute reason=attach-failed']:
             errors.append('red: first failure is not the compute attach: %r' % failed[:1])
-        elif not any('compute' in l and ('not found' in l or 'kernel' in l) for l in lines):
-            errors.append('red: libbpf did not refuse the compute member')
+        # libbpf resolves kfunc externs before struct_ops members: either
+        # missing piece of the compute interface is the expected refusal.
+        elif not any(re.search(r"member compute\b.*not found|"
+                               r"'bpf_xdev_ext_frame_(len|rw|set_len)': not found", l)
+                     for l in lines):
+            errors.append('red: libbpf did not refuse the compute interface')
         if passed:
             errors.append('red: cases passed on a kernel without compute: %s' % sorted(passed))
         return errors

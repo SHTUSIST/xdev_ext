@@ -147,6 +147,13 @@ class Validator(unittest.TestCase):
                'libbpf: struct_ops init_kern compute_test_ops: member compute not found in kernel BTF\n')
         self.log.write_text(red)
         self.assertEqual(self.run_validate(red=True), 0)
+        kfunc = ('XDEV_EXT_COMPUTE_CASE=FAIL name=attach-compute reason=attach-failed\n'
+                 "libbpf: extern (func ksym) 'bpf_xdev_ext_frame_len': not found in kernel or module BTFs\n")
+        self.log.write_text(kfunc)
+        self.assertEqual(self.run_validate(red=True), 0)
+        self.log.write_text('XDEV_EXT_COMPUTE_CASE=FAIL name=attach-compute reason=attach-failed\n'
+                            'xdev_ext_mech_ctl: load x: Permission denied\n')
+        self.assertEqual(self.run_validate(red=True), 1)
         self.log.write_text(good_log())
         self.assertEqual(self.run_validate(red=True), 1)
         self.log.write_text('XDEV_EXT_COMPUTE_CASE=FAIL name=compute-xor-seal rc=1\n')
