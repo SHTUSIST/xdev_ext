@@ -480,6 +480,12 @@
 !/kernel/tools/testing/selftests/xdev_ext_peer/guest/run-guest.sh
 !/kernel/tools/testing/selftests/xdev_ext_peer/guest/sw_provider_uapi.h
 !/kernel/tools/testing/selftests/xdev_ext_peer/guest/xdev_ext_peer_sw.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/README.md
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/peer_session_e2e.c
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/run-session-guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/session_kvm.sh
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/session_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_peer/guest/session_validate_test.py
 !/kernel/tools/testing/selftests/xdev_ext_peer/independent_gpu_peer.py
 !/kernel/tools/testing/selftests/xdev_ext_peer/independent_peer_ioctl.py
 !/kernel/tools/testing/selftests/xdev_ext_peer/independent_peer_lifetime.py
