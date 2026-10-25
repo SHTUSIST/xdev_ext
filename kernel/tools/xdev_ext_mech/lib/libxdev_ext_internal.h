@@ -18,6 +18,8 @@ struct xdev_ext_sys {
 	int (*io_uring_register)(int fd, unsigned int opcode, void *arg,
 				 unsigned int nr_args);
 	void (*usleep)(unsigned int usec);
+	/* Returns 0/positive or -errno. */
+	int (*ioctl)(int fd, unsigned long request, unsigned long arg);
 };
 
 /* Replace the system calls; NULL restores all of them. */
@@ -28,6 +30,9 @@ struct xdev_ext_prog;
 
 /* Shared between the library's units; not for applications. */
 int xdev_ext__opts_check(const void *o, size_t sz, size_t known);
+/* The replaceable system calls, for the library's other units. */
+int xdev_ext__uring_register(int fd, unsigned int opcode, void *arg);
+int xdev_ext__ioctl(int fd, unsigned long request, unsigned long arg);
 int xdev_ext__session_own_fd(struct xdev_ext_session *s, int fd);
 int xdev_ext__session_adopt_prog(struct xdev_ext_session *s, struct xdev_ext_prog *p,
 				 int (*detach)(struct xdev_ext_prog *p));

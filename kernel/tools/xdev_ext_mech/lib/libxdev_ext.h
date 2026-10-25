@@ -116,6 +116,39 @@ __u64 xdev_ext_session_id(const struct xdev_ext_session *s);
 bool xdev_ext_session_zero_copy(const struct xdev_ext_session *s);
 bool xdev_ext_session_retained(const struct xdev_ext_session *s);
 
+/* --- USER stage (SPEC.md section 8) --- */
+
+struct xdev_ext_user_stage;
+
+struct xdev_ext_user_stage_opts {
+	size_t sz;
+	int ring_fd;			/* io_uring fd for XDEV_EXT_MECH_OP_USER_STAGE */
+	void *umem;			/* pool UMEM base for frame pointers, or NULL */
+	__u32 entries;			/* power of two >= CREATE depth; 0: 64 */
+	__u32 flags;			/* must be 0 */
+};
+
+/* One batch the user thread holds until xdev_ext_user_stage_complete(). */
+struct xdev_ext_user_batch {
+	__u32 slot;
+	__u32 nr_frames;
+	__u64 ticket;
+	__u64 batch_id;
+	__u64 key;
+	__u64 arg;
+	struct xdev_ext_user_frame *f;	/* in the shared map; set f[i].out_len */
+	void *data[XDEV_EXT_MECH_MAX_FRAMES];	/* umem + umem_addr + data_off */
+};
+
+int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
+			     struct xdev_ext_user_stage **out);
+int xdev_ext_user_stage_fd(const struct xdev_ext_user_stage *u);
+int xdev_ext_user_stage_next(struct xdev_ext_user_stage *u, int timeout_ms,
+			     struct xdev_ext_user_batch *b);
+int xdev_ext_user_stage_complete(struct xdev_ext_user_stage *u,
+				 const struct xdev_ext_user_batch *b, int status);
+int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
+
 /* --- one call: NVMe READ -> AF_XDP TX --- */
 
 struct xdev_ext_nvme_nic_opts {

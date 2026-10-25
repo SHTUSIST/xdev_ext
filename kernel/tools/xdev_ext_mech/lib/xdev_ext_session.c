@@ -64,6 +64,21 @@ static int sys_uring_register(int fd, unsigned int opcode, void *arg)
 	return ret < 0 ? -errno : ret;
 }
 
+int xdev_ext__uring_register(int fd, unsigned int opcode, void *arg)
+{
+	return sys_uring_register(fd, opcode, arg);
+}
+
+int xdev_ext__ioctl(int fd, unsigned long request, unsigned long arg)
+{
+	int ret;
+
+	if (sys_hook && sys_hook->ioctl)
+		return sys_hook->ioctl(fd, request, arg);
+	ret = ioctl(fd, request, arg);
+	return ret < 0 ? -errno : ret;
+}
+
 static void sys_usleep(unsigned int usec)
 {
 	if (sys_hook && sys_hook->usleep)
