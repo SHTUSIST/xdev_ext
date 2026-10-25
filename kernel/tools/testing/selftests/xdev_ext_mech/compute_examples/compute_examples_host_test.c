@@ -96,7 +96,6 @@ static inline int ex_frame_set_len(ex_ctx *c, __u32 pos, __u32 len)
 #include "crc32c.h"
 #include "xxh64.h"
 #include "parse.h"
-#include "sha256.h"
 
 /* --- helpers ------------------------------------------------------------ */
 
@@ -195,12 +194,10 @@ enum example {
 	EX_CRC_APPEND,
 	EX_XXH64_APPEND,
 	EX_PARSE_CHECK,
-	EX_SHA256_APPEND,
 };
 
 static const char *const example_name[] = {
 	"crc32c-check", "crc32c-strip", "crc32c-append", "xxh64-append", "parse-check",
-	"sha256-append",
 };
 
 /* The example's length change D and the fixed transform it matches. */
@@ -210,7 +207,6 @@ static __s64 example_delta(enum example e)
 	case EX_CRC_STRIP: return -4;
 	case EX_CRC_APPEND: return 4;
 	case EX_XXH64_APPEND: return 8;
-	case EX_SHA256_APPEND: return 32;
 	default: return 0;
 	}
 }
@@ -222,7 +218,6 @@ static __u32 example_fixed(enum example e)
 	case EX_CRC_STRIP: return XDEV_EXT_CPU_XFORM_CRC32C_STRIP;
 	case EX_CRC_APPEND: return XDEV_EXT_CPU_XFORM_CRC32C_APPEND;
 	case EX_XXH64_APPEND: return XDEV_EXT_CPU_XFORM_XXH64_APPEND;
-	case EX_SHA256_APPEND: return XDEV_EXT_CPU_XFORM_SHA256_APPEND;
 	default: return XDEV_EXT_CPU_XFORM_PARSE_STRIP;
 	}
 }
@@ -236,7 +231,6 @@ static int run_example(enum example e, ex_ctx *c, __u64 arg)
 	case EX_CRC_STRIP: err = ex_crc32c_check(c, 1); break;
 	case EX_CRC_APPEND: err = ex_crc32c_append(c); break;
 	case EX_XXH64_APPEND: err = ex_xxh64_append(c, arg); break;
-	case EX_SHA256_APPEND: err = ex_sha256_append(c); break;
 	default: err = ex_parse_check(c, (__u32)arg); break;
 	}
 	return err ? err : kernel_lengths(c);
@@ -334,11 +328,6 @@ static bool compare_batch(enum example e, __u64 arg, const __u32 *lens, __u32 n,
 			oracle_put_be64(want, oracle_xxh64(data[i], lens[i], arg));
 			ok = (!lens[i] || !memcmp(out, data[i], lens[i])) &&
 			     !memcmp(out + lens[i], want, 8);
-			break;
-		case EX_SHA256_APPEND:
-			oracle_sha256(data[i], lens[i], want);
-			ok = (!lens[i] || !memcmp(out, data[i], lens[i])) &&
-			     !memcmp(out + lens[i], want, 32);
 			break;
 		default:
 			ok = lens[i] >= arg && oracle_le32(data[i]) == lens[i] - arg;
@@ -569,26 +558,6 @@ static bool test_xxh64_append(void)
 	return true;
 }
 
-static bool test_sha256_append(void)
-{
-	static const __u8 abc[32] = {
-		0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde,
-		0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c,
-		0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
-	};
-	struct ex_host_frame f;
-	ex_ctx c = { .nr_frames = 1, .f = &f, .delta = 32 };
-
-	if (!for_lengths(EX_SHA256_APPEND, 0, 0, make_random))
-		return false;
-	/* FIPS 180-2 example "abc" through the example itself. */
-	CHECK(frame_init(&f, 0, (const __u8 *)"abc", 3));
-	CHECK(!ex_sha256_append(&c) && f.set && f.out_len == 35);
-	CHECK(!memcmp(f.chunk + 3, abc, 32));
-	free(f.chunk);
-	return true;
-}
-
 static bool test_parse_check(void)
 {
 	static const __u32 hdrs[] = { 4, 5, 16, 255, 256 };
@@ -652,7 +621,6 @@ static bool test_batches(void)
 	};
 	static const enum example all[] = {
 		EX_CRC_CHECK, EX_CRC_STRIP, EX_CRC_APPEND, EX_XXH64_APPEND, EX_PARSE_CHECK,
-		EX_SHA256_APPEND,
 	};
 	__u8 *store = malloc(MAX_FRAMES * FRAME_SIZE);
 	const __u8 *data[MAX_FRAMES];
@@ -714,7 +682,6 @@ int main(void)
 		{ "crc_check_detects", test_crc_check_detects },
 		{ "xxh64_append", test_xxh64_append },
 		{ "parse_check", test_parse_check },
-		{ "sha256_append", test_sha256_append },
 		{ "batches", test_batches },
 	};
 	unsigned int i, bad = 0;

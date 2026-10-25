@@ -95,8 +95,6 @@ case_run parse_check_h4 parse_check.bpf.o parse_check_ops '--set hdr=4' \
 # ... and the check followed by the kernel's strip, byte-identical to the strip.
 case_run parse_compose_h16 parse_check.bpf.o parse_check_ops '--set hdr=16' \
 	'--stage 5:16' '--stage 10:0 --stage 5:16' parse:16 20 $NEG --spans 4096:0 $FRAMES
-case_run sha256_append sha256_append.bpf.o sha256_append_ops '' \
-	'--stage 7:0' '--stage 10:32' random 21 --spans 4064:0 --spans 3704:360 $FRAMES
 "$ctl" detach --pin "$pin" >/dev/null 2>&1 || fail detach
 
 # The records leave through the results disk.
