@@ -12,12 +12,14 @@ FIXTURE = r'''
 #define XDEV_EXT_MECH_MEMBER_PREPARE 0
 #define XDEV_EXT_MECH_MEMBER_BUILD 1
 #define XDEV_EXT_MECH_MEMBER_COMPLETE 2
+#define XDEV_EXT_MECH_MEMBER_COMPUTE 3
 #define XDEV_EXT_MECH_SITE_WORKER 0
 #define XDEV_EXT_MECH_SITE_CREATE 4
 #define XDEV_EXT_MECH_SITE_WORKER_SELECT 6
 struct xdev_ext_mech_call_args {
  unsigned member,callsite,nr_frames,info_size,desc_size,desc_cap,cqe_size,cqe_cap;
  void *base,*frames,*info,*scratch,*b,*cqe;
+ unsigned *out_len;
 };
 /* BODY */
 int main(void) {
@@ -35,8 +37,9 @@ int main(void) {
  }
  a.member=2; if(xdev_ext_mech_args_ok(&a)) fail++;
  a.member=0; if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=3; if(xdev_ext_mech_args_ok(&a)) fail++;
  a.member=1;a.callsite=0;if(xdev_ext_mech_args_ok(&a)) fail++;
- printf("SELECT envelope: 13 checks, %d failures\n",fail);return fail!=0;
+ printf("SELECT envelope: 14 checks, %d failures\n",fail);return fail!=0;
 }
 '''
 class SelectBoundary(unittest.TestCase):
