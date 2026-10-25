@@ -23,7 +23,12 @@
  */
 
 #if defined(__bpf__)
-typedef const struct xdev_ext_mech_ctx ex_ctx;
+/*
+ * A macro, not a typedef: vmlinux.h makes field accesses CO-RE relocations,
+ * and a relocation recorded against a local typedef name does not resolve
+ * against the kernel's BTF.
+ */
+#define ex_ctx const struct xdev_ext_mech_ctx
 #define ex_nr_frames(c)			((c)->nr_frames)
 #define ex_frame_len(c, pos)		bpf_xdev_ext_frame_len(c, pos)
 #define ex_frame_rw(c, pos, off, size)	bpf_xdev_ext_frame_rw(c, pos, off, size)
