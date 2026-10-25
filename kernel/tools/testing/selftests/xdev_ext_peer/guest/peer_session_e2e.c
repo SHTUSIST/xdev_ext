@@ -6,7 +6,8 @@
  * is never a VRAM, GPU or performance result.  No timing is measured.
  *
  * Cases, all on one guest boot, each its own session on the same pool kind:
- *   reject-map  provider refuses the DMA map: no completion, no DMA, errno kept
+ *   reject-map  provider refuses the DMA map: no completion, no DMA, errno kept;
+ *               every batch of the START aborts and the session stays ACTIVE
  *   cli         the product controller xdev_ext_peer_chain --allocation-fd,
  *               frame 64 KiB, depth 1 (its fixed geometry)
  *   depth4      4 KiB frames, 2 frames per batch, depth 4 (8 of 16 frames
@@ -174,6 +175,24 @@ static struct xdev_ext_mech_stats start_and_wait(struct session *s, const struct
 	       st.last_err, st.state);
 	return st;
 }
+/* The terminal notification fires on the first error; read STATS until the
+ * START has ended (nothing in flight, every batch done or aborted). */
+static struct xdev_ext_mech_stats settled(struct session *s, const struct plan *p)
+{
+	struct xdev_ext_mech_stats st;
+	unsigned int tries;
+	for (tries = 0; tries < 6000; tries++) {
+		st = (struct xdev_ext_mech_stats){.session_id = s->c.session_id};
+		if (mech(s->ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&st)) break;
+		if (!st.inflight && st.batches_done + st.batches_abort == p->groups) {
+			CHECK(1, "START ended: nothing in flight, every batch done or aborted");
+			return st;
+		}
+		usleep(10000);
+	}
+	CHECK(0, "START ended: nothing in flight, every batch done or aborted");
+	return st;
+}
 static void exact_success(const struct plan *p, const struct xdev_ext_mech_stats *st)
 {
 	CHECK(st->batches_done == p->groups && !st->batches_abort && !st->rejects &&
@@ -309,6 +328,10 @@ int main(int argc, char **argv)
 	CHECK(!st.batches_done && !st.completed[0] && !st.completed[1] && !st.submitted[1],
 	      "reject-map: no native command completes and no write is issued");
 	CHECK(st.last_err == -EOPNOTSUPP, "reject-map: provider EOPNOTSUPP is reported, no fallback");
+	st = settled(&s, &REJECT);
+	CHECK(st.batches_abort == REJECT.groups && st.state == XDEV_EXT_MECH_SESSION_ACTIVE &&
+	      !st.batches_done && !st.sequestered && st.last_err == -EOPNOTSUPP,
+	      "reject-map: every batch of the START aborts, nothing sequestered, session stays ACTIVE");
 	finish(&s, true, -EOPNOTSUPP);
 	CHECK(!close(alloc2) && !close(provider2), "reject-map: close allocation and provider fds");
 	mid = drained(observer, 1);
