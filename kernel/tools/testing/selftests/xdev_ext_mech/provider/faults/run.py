@@ -140,6 +140,7 @@ class ProviderFaults(unittest.TestCase):
                         "io_uring/xdev_ext_mech_core.h", "io_uring/xdev_ext_mech_lifecycle.h",
                         "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h", "io_uring/xdev_ext_mech_step.h",
                         "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
+                        "io_uring/xdev_ext_mech_window_copy_core.h",
                         "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h"):
                 p = cls.path / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
@@ -226,6 +227,7 @@ if __name__ == "__main__":
               "io_uring/xdev_ext_mech_lifecycle.h", "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h",
               "io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_dma_core.h",
               "io_uring/xdev_ext_mech_ce.c", "io_uring/xdev_ext_mech_ce_core.h",
+              "io_uring/xdev_ext_mech_window_copy_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")
     print(json.dumps({"source_root": str(ROOT), "ref": ref,
                       "working_tree": REF is None,

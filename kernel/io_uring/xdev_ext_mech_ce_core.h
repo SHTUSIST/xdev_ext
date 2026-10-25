@@ -5,12 +5,14 @@
 /*
  * Pure rules of the copy-engine class: window geometry, validation and
  * translation of a copy plan, the completion classifier and what C does with
- * each outcome, the cookie state word and the completion copy.  No locking
- * and no allocation; io_uring/xdev_ext_mech_ce.c and
- * tools/testing/selftests/xdev_ext_mech compile the same code.
+ * each outcome, the cookie state word and the completion copy.  The rules
+ * shared with the DMA provider class are in xdev_ext_mech_window_copy_core.h;
+ * this header keeps the class names.  No locking and no allocation;
+ * io_uring/xdev_ext_mech_ce.c and tools/testing/selftests/xdev_ext_mech
+ * compile the same code.
  */
 
-#include "xdev_ext_mech_core.h"
+#include "xdev_ext_mech_window_copy_core.h"
 #include "xdev_ext_mech_window.h"
 
 #define XDEV_EXT_CE_MAX_ENTRIES		32
@@ -31,12 +33,30 @@ struct xdev_ext_ce_geom {
 	__u32 nr_frames;
 };
 
+/*
+ * The shared window copy geometry of @g: no alignment, and either direction,
+ * since the class admits only TO_DEVICE and FROM_DEVICE stages at bind.
+ */
+static inline struct xdev_ext_window_copy_geom
+xdev_ext_ce_window_geom(const struct xdev_ext_ce_geom *g)
+{
+	return (struct xdev_ext_window_copy_geom){
+		.window_len	= g->window_len,
+		.host_bytes	= g->host_bytes,
+		.seg_size	= g->seg_size,
+		.max_entry_len	= g->max_entry_len,
+		.first_page_off	= g->first_page_off,
+		.frame_size	= g->frame_size,
+		.nr_frames	= g->nr_frames,
+		.alignment	= 1,
+		.directions	= XDEV_EXT_WINDOW_COPY_DIRS,
+	};
+}
+
 /* Largest entry: the backend's limit, else one segment, else any length. */
 static inline __u32 xdev_ext_ce_max_entry_len(__u32 seg_size, __u32 max_entry_len)
 {
-	if (max_entry_len)
-		return max_entry_len;
-	return seg_size ? seg_size : XDEV_EXT_MECH_U32_MAX;
+	return xdev_ext_window_copy_max_entry_len(seg_size, max_entry_len);
 }
 
 /*
@@ -49,9 +69,8 @@ static inline int xdev_ext_ce_geom_init(struct xdev_ext_ce_geom *g, __u64 want_l
 				   __u32 first_page_off, __u32 frame_size,
 				   __u32 nr_frames)
 {
-	if (!want_len || window_len != want_len || !frame_size || !nr_frames ||
-	    !xdev_ext_mech_span_in(first_page_off, (__u64)nr_frames * frame_size,
-			      host_bytes))
+	if (!xdev_ext_window_copy_geom_ok(want_len, window_len, host_bytes,
+					  first_page_off, frame_size, nr_frames))
 		return -EINVAL;
 	g->window_len = window_len;
 	g->host_bytes = host_bytes;
@@ -67,15 +86,9 @@ static inline int xdev_ext_ce_geom_init(struct xdev_ext_ce_geom *g, __u64 want_l
 static inline int xdev_ext_ce_host_off(const struct xdev_ext_ce_geom *g, __u32 index,
 				  __u32 off, __u32 len, __u64 *host_off)
 {
-	__u64 at;
+	const struct xdev_ext_window_copy_geom w = xdev_ext_ce_window_geom(g);
 
-	if (index >= g->nr_frames || !xdev_ext_mech_span_in(off, len, g->frame_size))
-		return -ERANGE;
-	at = g->first_page_off + (__u64)index * g->frame_size + off;
-	if (!xdev_ext_mech_span_in(at, len, g->host_bytes))
-		return -ERANGE;
-	*host_off = at;
-	return 0;
+	return xdev_ext_window_copy_host_off(&w, index, off, len, host_off);
 }
 
 /* A validated plan: host offsets of the entries, in entry order. */
@@ -87,25 +100,11 @@ struct xdev_ext_ce_plan {
 
 /*
  * Validate @n copy entries against the batch frames @f (data spans) with
- * pool chunk indices @index, and translate them into @plan.  Rejections:
- *   -EINVAL      no entry, more than XDEV_EXT_MECH_MAX_FRAMES frames, len 0, or a
- *                frame-side piece that is not the next one in frame order
- *                (gap, overlap, wrong frame)
- *   -E2BIG       more than XDEV_EXT_CE_MAX_ENTRIES entries
- *   -EOPNOTSUPP  a flag outside XDEV_EXT_CE_F_KNOWN_MASK
- *   -EMSGSIZE    longer than the largest entry
- *   -ERANGE      past a frame's data span, an entry after full coverage,
- *                device side outside the window, host side outside the chunk
- *   -EXDEV       device side crosses a contiguous segment
- *   -ENODATA     the entries end before the batch spans are covered
- * @plan is complete only on success.
- *
- * Device ranges of one batch may overlap; keeping them apart is the caller's
- * responsibility.  FROM_DEVICE reads of an overlapped byte are well defined;
- * for TO_DEVICE its final content is unspecified.  plan->total is the sum of
- * entry lengths.  The class confines a batch to its window slot
- * (xdev_ext_ce_validate()); the window must behave like memory, and a backend
- * that needs disjoint device ranges checks them in its own submit.
+ * pool chunk indices @index, and translate them into @plan, by
+ * xdev_ext_window_copy_plan_check() with no alignment and any direction: the
+ * rejections and their order, and the rule that device ranges of one batch
+ * may overlap, are there.  @plan is complete only on success.  The class
+ * also confines a batch to its window slot (xdev_ext_ce_validate()).
  */
 static inline int xdev_ext_ce_plan_check(const struct xdev_ext_ce_geom *g,
 				    const struct xdev_ext_mech_frame_info *f,
@@ -113,42 +112,16 @@ static inline int xdev_ext_ce_plan_check(const struct xdev_ext_ce_geom *g,
 				    const struct xdev_ext_ce_copy_desc *d, __u32 n,
 				    struct xdev_ext_ce_plan *plan)
 {
-	struct xdev_ext_mech_cover c;
-	__u64 total = 0;
-	__u32 i;
+	const struct xdev_ext_window_copy_geom w = xdev_ext_ce_window_geom(g);
 	int err;
 
-	if (!n || nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
-		return -EINVAL;
-	if (n > XDEV_EXT_CE_MAX_ENTRIES)
-		return -E2BIG;
-	xdev_ext_mech_cover_init(&c, f, nr_frames);
-	for (i = 0; i < n; i++) {
-		const struct xdev_ext_ce_copy_desc *e = &d[i];
-
-		if (!e->len)
-			return -EINVAL;
-		if (e->flags & ~XDEV_EXT_CE_F_KNOWN_MASK)
-			return -EOPNOTSUPP;
-		if (e->len > g->max_entry_len)
-			return -EMSGSIZE;
-		err = xdev_ext_mech_cover_take(&c, e->frame_pos, e->frame_off,
-					  e->len);
-		if (err)
-			return err;
-		if (!xdev_ext_mech_span_in(e->gpu_off, e->len, g->window_len))
-			return -ERANGE;
-		if (!xdev_ext_mech_span_one_segment(e->gpu_off, e->len, g->seg_size))
-			return -EXDEV;
-		err = xdev_ext_ce_host_off(g, index[e->frame_pos], e->frame_off,
-				      e->len, &plan->host_off[i]);
-		if (err)
-			return err;
-		total += e->len;
-	}
-	if (!xdev_ext_mech_cover_done(&c))
-		return -ENODATA;
-	plan->total = total;
+	err = xdev_ext_window_copy_plan_check(&w, f, index, nr_frames,
+					      XDEV_EXT_MECH_DIR_TO_DEVICE, d, n,
+					      XDEV_EXT_CE_MAX_ENTRIES,
+					      XDEV_EXT_CE_F_KNOWN_MASK,
+					      plan->host_off, &plan->total);
+	if (err)
+		return err;
 	plan->n = n;
 	return 0;
 }
@@ -169,81 +142,52 @@ static inline int xdev_ext_ce_completion_status(int status, bool hw_submitted,
  */
 static inline __u32 xdev_ext_ce_classify(int status, bool hw_submitted)
 {
-	if (!status)
-		return XDEV_EXT_CE_OK;
-	return hw_submitted ? XDEV_EXT_CE_AMBIGUOUS : XDEV_EXT_CE_PRE_SUBMIT_FAILED;
+	return xdev_ext_mech_classify(!status, hw_submitted);
 }
 
 /*
- * What C does with a classified completion.  true: sequester the batch
- * before any program runs (AMBIGUOUS), *err an errno for the session record.
- * false: complete it with *err = the outcome, which is the status
- * xdev_ext_mech_retry_ok() reads for the CE class, so only PRE_SUBMIT_FAILED can
- * be retried and only within XDEV_EXT_MECH_RETRY_MAX_CE.
+ * What C does with a classified completion: xdev_ext_window_copy_disposition().
+ * For the CE class only PRE_SUBMIT_FAILED can be retried, within
+ * XDEV_EXT_MECH_RETRY_MAX_CE.
  */
 static inline bool xdev_ext_ce_disposition(__u32 outcome, int status, int *err)
 {
-	if (outcome == XDEV_EXT_CE_AMBIGUOUS) {
-		*err = status < 0 && status >= -XDEV_EXT_MECH_ERRNO_MAX ? status :
-								      -EIO;
-		return true;
-	}
-	*err = (int)outcome;
-	return false;
+	return xdev_ext_window_copy_disposition(outcome, status, err);
 }
 
-/*
- * Cookie state word.  IDLE is zero so a zeroed batch area holds an idle
- * cookie.  The worker arms it before the backend sees it; exactly one
- * completion finishes it; a refused submit takes the arm back.
- */
+/* Cookie state word: the shared window copy cookie. */
 enum xdev_ext_ce_cookie_state {
-	XDEV_EXT_CE_CK_IDLE		= 0,
-	XDEV_EXT_CE_CK_ARMED		= 1,
-	XDEV_EXT_CE_CK_DONE		= 2,
+	XDEV_EXT_CE_CK_IDLE		= XDEV_EXT_WINDOW_COPY_CK_IDLE,
+	XDEV_EXT_CE_CK_ARMED		= XDEV_EXT_WINDOW_COPY_CK_ARMED,
+	XDEV_EXT_CE_CK_DONE		= XDEV_EXT_WINDOW_COPY_CK_DONE,
 };
 
 /* Worker: IDLE or DONE (a RETRY) -> ARMED; false while still armed. */
 static inline bool xdev_ext_ce_cookie_arm(__u8 *state)
 {
-	__u8 cur = XDEV_EXT_MECH_LOAD_U8(state);
-
-	if (cur != XDEV_EXT_CE_CK_IDLE && cur != XDEV_EXT_CE_CK_DONE)
-		return false;
-	return XDEV_EXT_MECH_CAS_U8(state, &cur, XDEV_EXT_CE_CK_ARMED);
+	return xdev_ext_window_copy_cookie_arm(state);
 }
 
 /* Any context: the one completion of an armed cookie. */
 static inline bool xdev_ext_ce_cookie_finish(__u8 *state)
 {
-	__u8 old = XDEV_EXT_CE_CK_ARMED;
-
-	return XDEV_EXT_MECH_CAS_U8(state, &old, XDEV_EXT_CE_CK_DONE);
+	return xdev_ext_window_copy_cookie_finish(state);
 }
 
 /* Worker, after a refused submit: false if the backend completed it anyway. */
 static inline bool xdev_ext_ce_cookie_disarm(__u8 *state)
 {
-	__u8 old = XDEV_EXT_CE_CK_ARMED;
-
-	return XDEV_EXT_MECH_CAS_U8(state, &old, XDEV_EXT_CE_CK_IDLE);
+	return xdev_ext_window_copy_cookie_disarm(state);
 }
 
-/*
- * Completion copy for the program.  Without a finished cookie nothing reached
- * the device: PRE_SUBMIT_FAILED with no bytes.  bytes_done never exceeds the
- * plan; entries_done counts entries known complete, all of them only on OK.
- */
+/* Completion copy for the program: xdev_ext_window_copy_cqe(). */
 static inline void xdev_ext_ce_cqe_fill(struct xdev_ext_ce_mech_cqe *c, __u8 state,
 				   __u32 outcome, int status, __u64 bytes_done,
 				   __u64 total, __u32 n)
 {
-	bool done = state == XDEV_EXT_CE_CK_DONE;
-
-	c->outcome = done ? outcome : XDEV_EXT_CE_PRE_SUBMIT_FAILED;
+	xdev_ext_window_copy_cqe(state, outcome, bytes_done, total, n,
+				 &c->outcome, &c->bytes_done, &c->entries_done);
 	c->backend_status = (__u32)status;
-	c->bytes_done = !done ? 0 : bytes_done < total ? bytes_done : total;
-	c->entries_done = done && outcome == XDEV_EXT_CE_OK ? n : 0;
 	c->rsvd = 0;
 }
 
@@ -254,9 +198,6 @@ static inline int xdev_ext_ce_info_fill(struct xdev_ext_ce_mech_info *info,
 				   const struct xdev_ext_mech_frame_info *f,
 				   __u32 nr)
 {
-	const struct xdev_ext_mech_frame_info none = { 0 };
-	__u32 i;
-
 	if (nr > XDEV_EXT_MECH_MAX_FRAMES)
 		return -E2BIG;
 	info->l = *l;
@@ -269,8 +210,7 @@ static inline int xdev_ext_ce_info_fill(struct xdev_ext_ce_mech_info *info,
 	info->window_slot = XDEV_EXT_MECH_U32_MAX;
 	info->window_depth = 0;
 	info->lease_generation = 0;
-	for (i = 0; i < XDEV_EXT_MECH_MAX_FRAMES; i++)
-		info->f[i] = i < nr ? f[i] : none;
+	xdev_ext_window_copy_frames(info->f, f, nr);
 	return 0;
 }
 
