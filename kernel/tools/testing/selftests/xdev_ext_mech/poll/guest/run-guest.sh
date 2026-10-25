@@ -66,6 +66,25 @@ irqs() {
 	awk -v pat="$1" '$NF ~ pat { for (i = 2; i <= NF; i++) if ($i ~ /^[0-9]+$/) s += $i; else break }
 		END { print s + 0 }' /proc/interrupts
 }
+# Which context ran each AF_XDP receive callback: the polling session worker
+# (task xdev_ext_mech/<id>) or interrupt-driven NAPI elsewhere.
+trace=/sys/kernel/tracing
+mount -t tracefs tracefs "$trace" 2>/dev/null || :
+rx_trace_begin() {
+	echo 0 >"$trace/tracing_on"
+	echo nop >"$trace/current_tracer"
+	echo xsk_xdev_ext_mech_rx >"$trace/set_ftrace_filter"
+	echo function >"$trace/current_tracer"
+	echo >"$trace/trace"
+	echo 1 >"$trace/tracing_on"
+}
+rx_trace_end() {
+	echo 0 >"$trace/tracing_on"
+	rx_total=$(grep -c ' xsk_xdev_ext_mech_rx <-' "$trace/trace" || :)
+	rx_worker=$(grep -E '^ *xdev_ext_mech/[0-9]*-[0-9]+ .* xsk_xdev_ext_mech_rx <-' "$trace/trace" | wc -l)
+	echo nop >"$trace/current_tracer"
+}
+virtio_of() { basename "$(readlink "/sys/class/net/$1/device")"; }
 defer() {
 	for d in eth0 eth1; do
 		echo "$1" >"/sys/class/net/$d/napi_defer_hard_irqs"
@@ -155,29 +174,37 @@ defer 2 200000
 refuse_create copy-transmit nvme-nic --poll --copy
 refuse_create transmit-only-napi nvme-nic --poll
 
-# Control without the bit: the busy-poll counter must not move.
+rx_dev=$(virtio_of eth1)
+grep -qx xsk_xdev_ext_mech_rx "$trace/available_filter_functions" || { echo 'FAIL receive callback not traceable'; exit 1; }
+
+# Control without the bit: no busy polling and no receive callback in a worker.
 clear_window
 before=$(busy_poll_packets)
+rx_irq_before=$(irqs "^${rx_dev}-input")
+rx_trace_begin
 nic_pair interrupt --
+rx_trace_end
 after=$(busy_poll_packets)
 same_window || { echo 'FAIL interrupt NIC chain data'; exit 1; }
-echo "XDEV_EXT_POLL_NIC_CONTROL busy_poll_rx_packets_delta=$((after - before))"
+echo "XDEV_EXT_POLL_NIC_CONTROL busy_poll_rx_packets_delta=$((after - before)) rx_callbacks=$rx_total rx_callbacks_in_session_worker=$rx_worker receiver_input_irq_delta=$(( $(irqs "^${rx_dev}-input") - rx_irq_before ))"
 [ "$((after - before))" = 0 ] || { echo 'FAIL busy polling without the bit'; exit 1; }
+[ "$rx_worker" = 0 ] && [ "$rx_total" -gt 0 ] || { echo 'FAIL control receive context'; exit 1; }
 
 # Polled receiver: AF_XDP RX and NVMe WRITE both carry the bit; the sender
 # cannot be polled on virtio-net (above), so it stays interrupt-driven.
 clear_window
 before=$(busy_poll_packets)
 nvme_dst_before=$(irqs "^${dst}q[1-9]")
-nic_in=$(irqs '^virtio[0-9]+-input')
-nic_out=$(irqs '^virtio[0-9]+-output')
+rx_irq_before=$(irqs "^${rx_dev}-input")
+rx_trace_begin
 nic_pair polled --poll --
+rx_trace_end
 after=$(busy_poll_packets)
 nvme_dst_after=$(irqs "^${dst}q[1-9]")
 same_window || { echo 'FAIL polled NIC chain data'; exit 1; }
 grep -q '^XDEV_EXT_MECH_POLL stages=2$' /tmp/rx.log && ! grep -q '^XDEV_EXT_MECH_POLL' /tmp/tx.log
-echo "XDEV_EXT_POLL_NIC_POLLED busy_poll_rx_packets_delta=$((after - before)) destination_nvme_io_irq_delta=$((nvme_dst_after - nvme_dst_before)) virtio_input_irq_delta=$(( $(irqs '^virtio[0-9]+-input') - nic_in )) virtio_output_irq_delta=$(( $(irqs '^virtio[0-9]+-output') - nic_out ))"
-[ "$((after - before))" -gt 0 ] || { echo 'FAIL no NAPI work done by the session workers'; exit 1; }
+echo "XDEV_EXT_POLL_NIC_POLLED busy_poll_rx_packets_delta=$((after - before)) rx_callbacks=$rx_total rx_callbacks_in_session_worker=$rx_worker receiver_input_irq_delta=$(( $(irqs "^${rx_dev}-input") - rx_irq_before )) destination_nvme_io_irq_delta=$((nvme_dst_after - nvme_dst_before))"
+[ "$((after - before))" -gt 0 ] && [ "$rx_worker" -gt 0 ] || { echo 'FAIL no receive work done by the session worker'; exit 1; }
 [ "$((nvme_dst_after - nvme_dst_before))" = 0 ] || { echo 'FAIL polled NVMe WRITE raised I/O-queue interrupts'; exit 1; }
 $ctl detach --pin /sys/fs/bpf/poll-nvme
 $ctl detach --pin /sys/fs/bpf/poll-afxdp

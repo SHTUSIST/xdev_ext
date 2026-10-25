@@ -92,7 +92,7 @@ rm -rf -- "$ROOT"
 mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,opt/poll}
 cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo poweroff dmesg sed cut basename dirname mknod insmod rmmod sync awk grep \
-	seq sleep kill cmp dd blockdev ip ls tr wc head tail; do
+	seq sleep kill cmp dd blockdev ip ls tr wc head tail readlink; do
 	ln -sf busybox "$ROOT/bin/$app"
 done
 cp "$OUT/build/nvme_poll_e2e" "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/nxp_mech.bpf.o" \
