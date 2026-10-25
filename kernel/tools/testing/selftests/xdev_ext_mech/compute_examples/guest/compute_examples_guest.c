@@ -17,7 +17,19 @@
  *	SEG-byte frames, the last one shorter). The tool waits for the batch to
  *	finish and the frames to return to user space, then reads them back.
  *	Every batch becomes one record of FILE: the input bytes, done or aborted,
- *	the output bytes and any byte of the chunk changed outside them.
+ *	the session's error code before and after the batch, the output bytes
+ *	and any byte of the chunk changed outside them.
+ *	The kernel keeps only a session's first error (last_err), so after any
+ *	batch that leaves an error the tool stops the session and creates a new
+ *	one on the same ring and UMEM: every batch starts with last_err 0, and
+ *	the code recorded after it is that batch's own.
+ *	No interface reports a user frame's output length, so the tool records
+ *	L + D for a completed batch (L input, D the stages' declared change) and
+ *	L for an aborted one. A BPF stage that records any other length fails
+ *	its batch with -EPROTO (the length rule of
+ *	Documentation/userspace-api/xdev_ext-compute.rst); a fixed transform
+ *	changes every length by its fixed D. The validator checks those bytes
+ *	against its oracle and the other run.
  *	KIND: random, sealed (each frame ends with its CRC32C), parse:H (a header
  *	of H bytes whose first word is the payload length). --negatives follows
  *	every sealed or parse batch with a corrupted copy.
@@ -65,7 +77,7 @@
 /* File layout, little endian: one stream header, records, one end record. */
 struct stream_hdr {
 	__u64 magic;
-	__u32 version;		/* 1 */
+	__u32 version;		/* 2 */
 	__u32 nr_stages;
 	__u32 xform[2];
 	__u64 arg[2];
@@ -82,7 +94,8 @@ struct rec_hdr {
 	__u32 nframes;
 	__u32 corrupted;	/* the tool corrupted this input on purpose */
 	__u32 outcome;		/* 0 batch done, 1 batch aborted */
-	__s32 last_err;		/* session last_err after the batch */
+	__s32 err_before;	/* session last_err before START */
+	__s32 last_err;		/* session last_err after the batch: its own error */
 	__u32 stray;		/* chunk bytes changed outside the frame's input and output */
 	__u32 in_len[MAX_FRAMES];
 	__u32 out_len[MAX_FRAMES];
@@ -97,7 +110,7 @@ struct end_rec {
 
 /* examples_validate.py unpacks these exact sizes. */
 _Static_assert(sizeof(struct stream_hdr) == 88, "stream header layout");
-_Static_assert(sizeof(struct rec_hdr) == 296, "record header layout");
+_Static_assert(sizeof(struct rec_hdr) == 300, "record header layout");
 _Static_assert(sizeof(struct end_rec) == 16, "end record layout");
 
 struct layout_arg {
@@ -313,24 +326,48 @@ static int stats(struct session *s, struct xdev_ext_mech_stats *st)
  * release; only STATS answering -ENOENT proves the session is gone. 0, or
  * -EBUSY when the kernel still holds the session.
  */
-static int session_close(struct session *s)
+static int session_stop(struct session *s)
 {
 	struct xdev_ext_mech_stats st;
 	unsigned int tries;
-	int ret = 0, gone = 0;
+	int ret = 0;
 
-	if (s->id) {
-		for (tries = 0; tries < 1000; tries++) {
-			ret = mech(s, XDEV_EXT_MECH_OP_STOP, s->id);
-			if (ret != -EAGAIN)
-				break;
-			usleep(1000);
-		}
-		if (stats(s, &st) != -ENOENT) {
-			err_out("STOP: %s; the session was not released\n", strerror(-ret));
-			gone = -EBUSY;
-		}
+	if (!s->id)
+		return 0;
+	for (tries = 0; tries < 1000; tries++) {
+		ret = mech(s, XDEV_EXT_MECH_OP_STOP, s->id);
+		if (ret != -EAGAIN)
+			break;
+		usleep(1000);
 	}
+	if (stats(s, &st) != -ENOENT) {
+		err_out("STOP: %s; the session was not released\n", strerror(-ret));
+		return -EBUSY;
+	}
+	s->id = 0;
+	return 0;
+}
+
+static int session_create(struct session *s, const struct opts *o);
+
+/* A new session on the same ring and UMEM, after STOP released the old one. */
+static int session_renew(struct session *s, const struct opts *o)
+{
+	int ret = session_stop(s);
+
+	if (ret)
+		return ret;
+	ret = session_create(s, o);
+	if (ret)
+		err_out("CREATE after STOP: %s\n", strerror(-ret));
+	return ret;
+}
+
+/* session_stop(), then the ring, the eventfd and the UMEM. */
+static int session_close(struct session *s)
+{
+	int gone = session_stop(s);
+
 	if (s->ring >= 0)
 		close(s->ring);
 	if (s->efd >= 0)
@@ -342,12 +379,38 @@ static int session_close(struct session *s)
 	return gone;
 }
 
+/* CREATE a session of @o's stages over the ring's UMEM with layout s->l. */
+static int session_create(struct session *s, const struct opts *o)
+{
+	struct xdev_ext_mech_create c = { 0 };
+	__u32 i;
+	int ret;
+
+	c.abi_version = XDEV_EXT_MECH_ABI_VERSION;
+	c.nr_stages = o->nr_stages;
+	c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM;
+	c.pool_fd = -1;
+	c.layout = s->l;
+	c.depth = 1;
+	c.eventfd = s->efd;
+	for (i = 0; i < o->nr_stages; i++)
+		c.st[i] = (struct xdev_ext_mech_stage_uapi) {
+			.class_id = XDEV_EXT_MECH_CLASS_CPU,
+			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = -1,
+			.arg0 = o->xform[i], .arg1 = o->arg[i],
+		};
+	ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
+	if (ret)
+		return ret;
+	s->id = c.session_id;
+	s->seq = 1;
+	return 0;
+}
+
 static int session_open(struct session *s, const struct opts *o, const struct layout_arg *la)
 {
 	struct io_uring_params p;
 	struct io_uring_xdev_ext_umem_reg reg = { 0 };
-	struct xdev_ext_mech_create c = { 0 };
-	__u32 i;
 	int ret;
 
 	memset(s, 0, sizeof(*s));
@@ -371,30 +434,15 @@ static int session_open(struct session *s, const struct opts *o, const struct la
 		.frame_size = FRAME_SIZE, .hdr_room = la->hdr,
 		.seg_len = la->seg, .group_bytes = la->spans ? la->seg : la->group,
 	};
-	c.abi_version = XDEV_EXT_MECH_ABI_VERSION;
-	c.nr_stages = o->nr_stages;
-	c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM;
-	c.pool_fd = -1;
-	c.layout = s->l;
-	c.depth = 1;
-	c.eventfd = s->efd;
-	for (i = 0; i < o->nr_stages; i++)
-		c.st[i] = (struct xdev_ext_mech_stage_uapi) {
-			.class_id = XDEV_EXT_MECH_CLASS_CPU,
-			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = -1,
-			.arg0 = o->xform[i], .arg1 = o->arg[i],
-		};
-	ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
-	if (ret)
-		return ret;
-	s->id = c.session_id;
-	s->seq = 1;
-	return 0;
+	return session_create(s, o);
 }
 
-/* START one batch over @idx; 0 with *@outcome 0 (done) or 1 (aborted). */
+/*
+ * START one batch over @idx; 0 with *@outcome 0 (done) or 1 (aborted), and the
+ * session's last_err before (*@err_before) and after (*@last_err) the batch.
+ */
 static int run_batch(struct session *s, const __u32 *idx, __u32 n, __u32 span_len,
-		     __u32 *outcome, __s32 *last_err)
+		     __u32 *outcome, __s32 *err_before, __s32 *last_err)
 {
 	struct xdev_ext_mech_user_span span = { .index = idx[0], .len = span_len };
 	struct xdev_ext_mech_stats before, after;
@@ -458,6 +506,7 @@ static int run_batch(struct session *s, const __u32 *idx, __u32 n, __u32 span_le
 		return -EPROTO;
 	}
 	*outcome = after.batches_done > before.batches_done ? 0 : 1;
+	*err_before = before.last_err;
 	*last_err = after.last_err;
 	return 0;
 }
@@ -466,7 +515,8 @@ static int run_batch(struct session *s, const __u32 *idx, __u32 n, __u32 span_le
 
 static const __u32 span_edges[] = {
 	301, 383, 384, 385, 511, 512, 513, 1023, 1024, 1025, 1431, 1432, 1433,
-	2047, 2048, 2049, 3000, 3735, 3736, 4087, 4088, 4091, 4092, 4095, 4096,
+	2047, 2048, 2049, 3000, 3728, 3732, 3735, 3736, 4087, 4088, 4091, 4092, 4095,
+	4096,
 };
 
 struct counts {
@@ -480,7 +530,10 @@ static int write_all(FILE *f, const void *p, size_t n)
 
 static __u8 saved[MAX_FRAMES][FRAME_SIZE];
 
-/* One batch of frames with lengths @lens; appends one record. */
+/*
+ * One batch of frames with lengths @lens; appends one record. A batch that
+ * leaves the session with an error replaces the session for the next one.
+ */
 static int one_batch(struct session *s, const struct opts *o, const struct layout_arg *la,
 		     FILE *f, const __u32 *lens, __u32 n, __u64 rng, bool corrupt,
 		     struct counts *cnt)
@@ -505,7 +558,8 @@ static int one_batch(struct session *s, const struct opts *o, const struct layou
 	/* Inputs are recorded before the kernel sees them. */
 	for (i = 0; i < n; i++)
 		memcpy(saved[i], s->umem + (size_t)idx[i] * FRAME_SIZE + la->hdr, lens[i]);
-	ret = run_batch(s, idx, n, la->spans ? lens[0] : 0, &r.outcome, &r.last_err);
+	ret = run_batch(s, idx, n, la->spans ? lens[0] : 0, &r.outcome, &r.err_before,
+			&r.last_err);
 	if (ret)
 		return ret;
 	for (i = 0; i < n; i++) {
@@ -534,6 +588,8 @@ static int one_batch(struct session *s, const struct opts *o, const struct layou
 		cnt->aborted++;
 	else
 		cnt->done++;
+	if (!ret && (r.err_before || r.last_err))
+		ret = session_renew(s, o);
 	return ret;
 }
 
@@ -639,7 +695,7 @@ static int cmd_run(int argc, char **argv)
 		{ "frames", required_argument, NULL, 'F' },
 		{ 0 }
 	};
-	struct stream_hdr h = { .magic = STREAM_MAGIC, .version = 1 };
+	struct stream_hdr h = { .magic = STREAM_MAGIC, .version = 2 };
 	struct counts cnt = { 0 };
 	struct end_rec e = { .magic = END_MAGIC };
 	struct opts o = { 0 };

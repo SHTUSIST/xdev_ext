@@ -31,14 +31,15 @@ MAX_FRAMES = 32
 EBADMSG = 74
 
 STREAM = struct.Struct('<QII2I2QQiI32s')     # struct stream_hdr
-RECORD = struct.Struct('<IIIIIIIIiI32I32I')  # struct rec_hdr
+RECORD = struct.Struct('<IIIIIIIIiiI32I32I')  # struct rec_hdr
 END = struct.Struct('<IIII')                 # struct end_rec
 STREAM_MAGIC = 0x4d525453584558
 REC_MAGIC = 0x52584558
 END_MAGIC = 0x45584558
 
 SPAN_EDGES = (301, 383, 384, 385, 511, 512, 513, 1023, 1024, 1025, 1431, 1432, 1433,
-              2047, 2048, 2049, 3000, 3735, 3736, 4087, 4088, 4091, 4092, 4095, 4096)
+              2047, 2048, 2049, 3000, 3728, 3732, 3735, 3736, 4087, 4088, 4091, 4092, 4095,
+              4096)
 FRAMES = (('frames', 1432, 8192, 360, 3), ('frames', 300, 8192, 360, 3),
           ('frames', 7, 200, 0, 3), ('frames', 16, 512, 0, 3), ('frames', 4064, 8192, 0, 3))
 XXH_SEED = 0x9E3779B185EBCA87
@@ -204,7 +205,7 @@ def parse_stream(data):
         raise ValueError('short stream')
     magic, version, nr_stages, x0, x1, a0, a1, seed, delta, negatives, inp = \
         STREAM.unpack_from(data, 0)
-    if magic != STREAM_MAGIC or version != 1 or not 1 <= nr_stages <= 2:
+    if magic != STREAM_MAGIC or version != 2 or not 1 <= nr_stages <= 2:
         raise ValueError('bad stream header')
     head = dict(stages=[(x0, a0), (x1, a1)][:nr_stages], seed=seed, delta=delta,
                 negatives=negatives, input=inp.rstrip(b'\0').decode())
@@ -224,9 +225,9 @@ def parse_stream(data):
         if f[0] != REC_MAGIC or not 1 <= f[5] <= MAX_FRAMES:
             raise ValueError('bad record header')
         n = f[5]
-        in_len, out_len = f[10:10 + n], f[42:42 + n]
+        in_len, out_len = f[11:11 + n], f[43:43 + n]
         rec = dict(spans=f[1], hdr_room=f[2], seg_len=f[3], group_bytes=f[4], nframes=n,
-                   corrupted=f[6], outcome=f[7], last_err=f[8], stray=f[9],
+                   corrupted=f[6], outcome=f[7], err_before=f[8], last_err=f[9], stray=f[10],
                    in_len=list(in_len), out_len=list(out_len))
         need = sum(in_len) + sum(out_len)
         if len(data) - off < need:
@@ -279,6 +280,11 @@ def check_stream(name, mode, semantics, plan, head, records, end):
         want = expect_batch(semantics, r['inputs'])
         if r['stray']:
             errors.append(f'{where}: {r["stray"]} chunk bytes changed outside the output')
+        # The kernel keeps a session's first error only: a code read after a
+        # batch is that batch's own only in a session that held none before.
+        if r['err_before']:
+            errors.append(f'{where}: the session held error {r["err_before"]} before the '
+                          'batch, so its own error code is not observed')
         if r['corrupted'] and want is not None:
             errors.append(f'{where}: a corrupted input the oracle accepts')
         if want is None:
@@ -291,6 +297,8 @@ def check_stream(name, mode, semantics, plan, head, records, end):
                 errors.append(f'{where}: last_err {r["last_err"]} after a refused batch')
         elif r['outcome'] != 0 or r['outputs'] != want:
             errors.append(f'{where}: outcome {r["outcome"]}, output differs from the oracle')
+        elif r['last_err']:
+            errors.append(f'{where}: last_err {r["last_err"]} after a completed batch')
         if len(errors) > 20:
             errors.append(f'{name}.{mode}: more problems not listed')
             break

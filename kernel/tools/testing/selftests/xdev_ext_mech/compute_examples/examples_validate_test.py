@@ -146,9 +146,9 @@ class Plan(unittest.TestCase):
     def test_record_layout(self):
         source = (HERE / 'guest/compute_examples_guest.c').read_text()
         self.assertEqual(ev.STREAM.size, 88)
-        self.assertEqual(ev.RECORD.size, 296)
+        self.assertEqual(ev.RECORD.size, 300)
         self.assertEqual(ev.END.size, 16)
-        for struct_name, size in (('stream_hdr', 88), ('rec_hdr', 296), ('end_rec', 16)):
+        for struct_name, size in (('stream_hdr', 88), ('rec_hdr', 300), ('end_rec', 16)):
             self.assertRegex(source, r'_Static_assert\(sizeof\(struct ' + struct_name +
                              r'\) == ' + str(size))
         self.assertEqual(list(ev.SPAN_EDGES), [int(v) for v in re.search(
@@ -157,11 +157,12 @@ class Plan(unittest.TestCase):
 
 
 def make_stream(head_stages, inputs_list, outputs_list, outcomes, layout, corrupted=None,
-                stray=None, input_kind='sealed', negatives=1, last_errs=None):
+                stray=None, input_kind='sealed', negatives=1, last_errs=None,
+                errs_before=None):
     """A stream as the guest tool writes it, all records of one layout."""
     xs = [s[0] for s in head_stages] + [0] * (2 - len(head_stages))
     args = [s[1] for s in head_stages] + [0] * (2 - len(head_stages))
-    data = ev.STREAM.pack(ev.STREAM_MAGIC, 1, len(head_stages), xs[0], xs[1], args[0], args[1],
+    data = ev.STREAM.pack(ev.STREAM_MAGIC, 2, len(head_stages), xs[0], xs[1], args[0], args[1],
                           5, 0, negatives, input_kind.encode())
     spans, hdr, seg, group = layout
     done = 0
@@ -170,8 +171,9 @@ def make_stream(head_stages, inputs_list, outputs_list, outcomes, layout, corrup
         in_len = [len(x) for x in ins] + [0] * (32 - n)
         out_len = [len(x) for x in outs] + [0] * (32 - n)
         err = (last_errs or [0] * len(inputs_list))[i]
+        before = (errs_before or [0] * len(inputs_list))[i]
         data += ev.RECORD.pack(ev.REC_MAGIC, spans, hdr, seg, group, n,
-                               (corrupted or [0] * len(inputs_list))[i], outcomes[i], err,
+                               (corrupted or [0] * len(inputs_list))[i], outcomes[i], before, err,
                                (stray or [0] * len(inputs_list))[i], *in_len, *out_len)
         data += b''.join(ins) + b''.join(outs)
         done += not outcomes[i]
@@ -261,7 +263,7 @@ class Streams(unittest.TestCase):
         outs = [list(x) for x in ins]
         outcomes = [1] * 8 + [0, 0]
         args = dict(outcomes=outcomes, layout=(1, 0, 5, 5), corrupted=[0, 1] * 5,
-                    last_errs=[-74] * 10)
+                    last_errs=[-74] * 8 + [0, 0])
         errors, _ = self.run_check('fixed', make_stream([(4, 0)], ins, outs, **args), plan)
         self.assertTrue(any('corrupted input the oracle accepts' in e for e in errors), errors)
 
@@ -277,7 +279,7 @@ class Streams(unittest.TestCase):
             fouts.append([frame[4:]] if ok else [frame])
             bouts.append([frame])
             outcomes.append(0 if ok else 1)
-        errs = [-74] * 6
+        errs = [0 if o == 0 else -74 for o in outcomes]
         args = dict(outcomes=outcomes, layout=(1, 0, 6, 6), input_kind='parse:4', negatives=0,
                     last_errs=errs)
         errors, fixed = self.run_check('fixed', make_stream([(5, 4)], ins, fouts, **args), plan)
@@ -303,6 +305,43 @@ class Streams(unittest.TestCase):
         self.assertEqual(ev.compare_runs('t', plan, fixed, bpf), [])
         errors, _ = self.run_check('bpf', make_stream([(10, 0)], ins, partial, **args), plan)
         self.assertTrue(any('changed' in e for e in errors), errors)
+
+    def test_later_refusal_errno_is_observed(self):
+        """A refused batch's own error code must be checked, not the session's first.
+
+        The kernel latches a session's last_err at its first error. Records of
+        one session over three refused batches whose own codes are -EBADMSG,
+        -EIO and -EBADMSG therefore all read -EBADMSG after the batch; the
+        validator must still see that the second batch's code was not checked.
+        """
+        ins = [[bytes([n] * n)] for n in (1, 2, 3)]
+        outs = [list(x) for x in ins]
+        own, latch, before, after = [-74, -5, -74], 0, [], []
+        for err in own:
+            before.append(latch)
+            latch = latch or err
+            after.append(latch)
+        plan = dict(self.plan, negatives=False)
+        args = dict(outcomes=[1] * 3, layout=(1, 0, 3, 3), negatives=0, last_errs=after,
+                    errs_before=before)
+        errors, _ = self.run_check('bpf', make_stream([(10, 0)], ins, outs, **args), plan)
+        self.assertTrue(any('is not observed' in e for e in errors), errors)
+
+    def test_refusal_errno_of_a_fresh_session(self):
+        """Each refusal in its own session: a code other than -EBADMSG fails."""
+        ins, outs, args = self.sealed_pair(last_errs=[-74, -74, -74, -5, -74, -74])
+        errors, _ = self.run_check('bpf', make_stream([(10, 0)], ins, outs, **args))
+        self.assertTrue(any('last_err -5 after a refused batch' in e for e in errors), errors)
+
+    def test_completed_batch_with_error_fails(self):
+        plan = dict(self.plan, fixed=['crc32c-append'], bpf=['crc32c-append'], input='random',
+                    negatives=False)
+        ins = [[b'a'], [b'bb'], [b'ccc']]
+        outs = [[x[0] + ev.crc32c(x[0]).to_bytes(4, 'little')] for x in ins]
+        args = dict(outcomes=[0] * 3, layout=(1, 0, 3, 3), input_kind='random', negatives=0,
+                    last_errs=[0, -74, 0])
+        errors, _ = self.run_check('bpf', make_stream([(10, 4)], ins, outs, **args), plan)
+        self.assertTrue(any('after a completed batch' in e for e in errors), errors)
 
     def test_truncated_stream(self):
         ins, outs, args = self.sealed_pair()
