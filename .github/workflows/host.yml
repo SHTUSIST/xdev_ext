@@ -46,6 +46,8 @@ jobs:
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute/run.py
       - name: Mechanism invocation context identity and sleepable prepare
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/call_identity_test.py
+      - name: BPF compute example algorithms and KVM verdict checks
+        run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/run.py
       - name: Native lifecycle scheduler and teardown contracts
         run: |
           python3 kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/run.py
