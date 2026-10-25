@@ -696,16 +696,21 @@ static bool xsk_mech_poll_napi_ok(const struct napi_struct *napi)
 
 /*
  * CREATE, polled stage, before xs->mutex (RTNL comes first, as in
- * xsk_bind()): the NAPI instances of the socket's queue, receive first, then a
- * distinct transmit instance if the driver registered one.  A copy-mode
- * transmit stage without the reliable protocol completes inside ->submit,
- * so it has nothing to poll.  -EOPNOTSUPP refuses; nothing is changed then.
+ * xsk_bind()): the NAPI instances of the socket's queue, receive first.  A
+ * zero-copy transmit stage completes in the NAPI the driver registered for
+ * its transmit queue: that instance must be known and either the receive one
+ * or busy-pollable itself.  A transmit-only instance (netif_napi_add_tx(),
+ * NAPI_STATE_NO_BUSY_POLL, e.g. virtio-net) has no NAPI id and is refused.
+ * A copy-mode transmit stage without the reliable protocol completes inside
+ * ->submit, so it has nothing to poll; a reliable one waits for ACKs that the
+ * receive NAPI delivers.  -EOPNOTSUPP refuses; nothing is changed then.
  */
 static int xsk_mech_poll_bind(struct xsk_xdev_ext_mech_stage *xst, struct xdp_sock *xs,
 			      bool tx, bool reliable)
 {
 #ifdef CONFIG_NET_RX_BUSY_POLL
 	struct napi_struct *rx = NULL, *txn = NULL;
+	bool zc_tx = tx && xs->zc;
 	struct net_device *dev;
 	int err = -EOPNOTSUPP;
 	u32 qid;
@@ -717,13 +722,13 @@ static int xsk_mech_poll_bind(struct xsk_xdev_ext_mech_stage *xst, struct xdp_so
 	qid = xs->queue_id;
 	if (dev && qid < dev->real_num_rx_queues)
 		rx = __netif_get_rx_queue(dev, qid)->napi;
-	if (dev && tx && qid < dev->real_num_tx_queues)
+	if (dev && zc_tx && qid < dev->real_num_tx_queues)
 		txn = netdev_get_tx_queue(dev, qid)->napi;
 	if (xsk_mech_poll_napi_ok(rx) &&
-	    (!txn || txn == rx || xsk_mech_poll_napi_ok(txn))) {
+	    (!zc_tx || txn == rx || xsk_mech_poll_napi_ok(txn))) {
 		xst->poll_napi[0] = rx->napi_id;
 		xst->nr_poll_napi = 1;
-		if (txn && txn != rx)
+		if (zc_tx && txn != rx)
 			xst->poll_napi[xst->nr_poll_napi++] = txn->napi_id;
 		err = 0;
 	}

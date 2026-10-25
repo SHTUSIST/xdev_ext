@@ -186,8 +186,8 @@ AF_XDP (``net/xdp/xsk_xdev_ext_mech.c``)
   Polling means NAPI preferred busy polling (``Documentation/networking/napi.rst``,
   section "Busy polling"): each pass calls ``napi_busy_loop()`` once, with
   ``prefer_busy_poll`` true and budget ``BUSY_POLL_BUDGET``, for the NAPI
-  instance of the socket's receive queue and, when the driver registered a
-  different NAPI instance for the transmit queue, for that one too. The NAPI
+  instance of the socket's receive queue and, for a zero-copy transmit stage
+  whose transmit queue has its own NAPI instance, for that one too. The NAPI
   poll then runs in the session worker and processes received frames and
   transmit completions there. ``->bind`` requires, under RTNL: a valid NAPI id,
   and nonzero ``defer_hard_irqs`` and ``gro_flush_timeout`` on each polled NAPI
@@ -198,13 +198,24 @@ AF_XDP (``net/xdp/xsk_xdev_ext_mech.c``)
   ``gro_flush_timeout`` passes without a poll; without them the interrupt path
   would still deliver completions, so CREATE refuses. The settings are checked
   at CREATE; changing them while a session runs is outside this guarantee.
-  Roles: the receive source (stage 0, FROM_DEVICE) polls while the session is
-  ACTIVE; a transmit stage polls only when its completions are asynchronous,
-  that is zero-copy sockets (driver transmit completion) or reliable mode
-  (acknowledgements arrive by receive). A plain copy-mode transmit stage
-  completes inside ``->submit`` (``xsk_kernel_xmit()`` returns after the skb
-  owns its bytes), so there is nothing to poll and CREATE refuses with
-  ``-EOPNOTSUPP``.
+
+  Roles:
+
+  * The receive source (stage 0, FROM_DEVICE) polls the receive NAPI while the
+    session is ACTIVE.
+  * A zero-copy transmit stage completes in the NAPI instance the driver
+    registered for its transmit queue (``netdev_queue.napi``). That instance
+    must be known, and must either be the receive instance (one NAPI per queue
+    pair) or be busy-pollable itself. A transmit-only instance added with
+    ``netif_napi_add_tx()`` carries ``NAPI_STATE_NO_BUSY_POLL``, is never
+    hashed and has no NAPI id, so no kernel interface can busy-poll it; CREATE
+    refuses. virtio-net registers its transmit queues this way, so a zero-copy
+    AF_XDP transmit stage on virtio-net cannot be polled.
+  * A copy-mode transmit stage in reliable mode polls the receive NAPI, which
+    delivers its acknowledgements.
+  * A plain copy-mode transmit stage completes inside ``->submit``
+    (``xsk_kernel_xmit()`` returns after the skb owns its bytes), so there is
+    nothing to poll and CREATE refuses with ``-EOPNOTSUPP``.
 
 Not pollable in this version (CREATE refuses the bit with ``-EOPNOTSUPP``)
   * CE (GPU copy engine): completions come from the backend driver. The NVIDIA
@@ -246,4 +257,7 @@ provider registry, and the AF_XDP capability checks. The KVM guest test
 kernel with ``nvme.poll_queues=2`` and checks real QEMU NVMe polled sessions,
 STOP with polled commands in flight, the DMA selftest provider's poll mode
 driven by the same bit, AF_XDP polling over two virtio-net devices, and every
-refusal above. KVM results are correctness evidence only.
+refusal above. On virtio-net the KVM test polls the AF_XDP receive session
+and shows the transmit refusal; a polled zero-copy transmit stage needs a
+driver whose transmit queue completes in a busy-pollable NAPI. KVM results
+are correctness evidence only.

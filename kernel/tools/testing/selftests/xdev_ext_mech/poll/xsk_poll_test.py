@@ -76,10 +76,14 @@ int main(int argc, char **argv)
 	if (!strcmp(m, "unbound")) xs.state = XSK_UNBOUND;
 	if (!strcmp(m, "bad-queue")) xs.queue_id = 3;
 	if (!strncmp(m, "tx-", 3)) is_tx = true;
-	if (!strcmp(m, "tx-copy-reliable")) reliable = true;
+	if (!strcmp(m, "tx-copy-reliable") || !strcmp(m, "tx-copy-reliable-tx-only")) reliable = true;
 	if (!strncmp(m, "tx-zc", 5)) xs.zc = true;
-	if (!strcmp(m, "tx-zc-split") || !strcmp(m, "tx-zc-split-no-defer")) dev.txq[1].napi = &tx;
+	if (!strcmp(m, "tx-zc-split") || !strcmp(m, "tx-zc-split-no-defer") || !strcmp(m, "tx-zc-tx-only"))
+		dev.txq[1].napi = &tx;
 	if (!strcmp(m, "tx-zc-split-no-defer")) tx.defer_hard_irqs = 0;
+	/* netif_napi_add_tx(): NAPI_STATE_NO_BUSY_POLL, never hashed, id 0 (virtio-net). */
+	if (!strcmp(m, "tx-zc-tx-only") || !strcmp(m, "tx-copy-reliable-tx-only")) tx.napi_id = 0;
+	if (!strcmp(m, "tx-copy-reliable-tx-only")) dev.txq[1].napi = &tx;
 	if (!strcmp(m, "tx-zc-shared")) dev.txq[1].napi = &rx;
 	ret = xsk_mech_poll_bind(&xst, &xs, is_tx, reliable);
 	if (!ret)
@@ -130,6 +134,10 @@ class XskPoll(unittest.TestCase):
         r = self.run_case('tx-copy-reliable')
         self.assertEqual((r['ret'], r['nr'], r['id0'], r['busy']), (0, 1, 100, 1), r)
 
+    def test_reliable_copy_ignores_a_transmit_only_napi(self):
+        r = self.run_case('tx-copy-reliable-tx-only')
+        self.assertEqual((r['ret'], r['nr'], r['id0'], r['busy']), (0, 1, 100, 1), r)
+
     def test_zero_copy_transmit_polls_its_own_napi_too(self):
         r = self.run_case('tx-zc-split')
         self.assertEqual((r['ret'], r['nr'], r['id0'], r['id1']), (0, 2, 100, 101), r)
@@ -138,6 +146,14 @@ class XskPoll(unittest.TestCase):
     def test_transmit_napi_needs_deferral_too(self):
         r = self.run_case('tx-zc-split-no-defer')
         self.assertEqual((r['ret'], r['nr']), (-95, 0), r)
+
+    def test_transmit_only_napi_cannot_be_busy_polled(self):
+        r = self.run_case('tx-zc-tx-only')
+        self.assertEqual((r['ret'], r['nr'], r['busy']), (-95, 0, 0), r)
+
+    def test_zero_copy_transmit_needs_a_known_transmit_napi(self):
+        r = self.run_case('tx-zc-unmapped')
+        self.assertEqual((r['ret'], r['nr'], r['busy']), (-95, 0, 0), 'unknown completion context')
 
     def test_shared_napi_polled_once(self):
         r = self.run_case('tx-zc-shared')

@@ -88,12 +88,19 @@ same_window() {
 # A closed AF_XDP socket leaves its queue through deferred pool release, so a
 # bind right after the previous process exits can see -EBUSY: retry only that.
 refuse_create() {
-	reason=$1; shift
+	reason=$1 command=$2; shift 2
+	if [ "$command" = nic-nvme ]; then
+		set -- "$@" --ifname eth1 --dst-ng "/dev/ng${dst#nvme}n1" --slba "$rx_slba" --nlb "$nlb" \
+			--peer-mac 02:00:00:00:00:01 --local-ip 192.0.2.2 --peer-ip 192.0.2.1 \
+			--local-port 12345 --peer-port 54321
+	else
+		set -- "$@" --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
+			--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 \
+			--local-port 54321 --peer-port 12345
+	fi
 	for try in $(seq 1 50); do
-		if $ctl nvme-nic "$@" --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
-			--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 --local-port 54321 \
-			--peer-port 12345 --groups "$groups" --depth "$depth" --group-bytes 8192 --timeout-ms 5000 \
-			>/tmp/refuse.log 2>&1; then
+		if $ctl "$command" "$@" --groups "$groups" --depth "$depth" --group-bytes 8192 \
+			--timeout-ms 5000 >/tmp/refuse.log 2>&1; then
 			cat /tmp/refuse.log; echo "FAIL AF_XDP polling accepted: $reason"; return 1
 		fi
 		grep -q 'Device or resource busy' /tmp/refuse.log || break
@@ -103,11 +110,17 @@ refuse_create() {
 	echo "XDEV_EXT_POLL_NIC_REFUSE=PASS reason=$reason create=-EOPNOTSUPP"
 	echo "# refusal $reason attempts=$try"
 }
+# nic_pair LABEL RX_ARGS -- TX_ARGS: receiver flags, then sender flags.
 nic_pair() {
 	label=$1; shift
+	rx_args= tx_args= side=rx
+	for a in "$@"; do
+		if [ "$a" = -- ]; then side=tx; continue; fi
+		if [ "$side" = rx ]; then rx_args="$rx_args $a"; else tx_args="$tx_args $a"; fi
+	done
 	sleep 1	# let the previous sockets' deferred pool release finish
 	rx_ok=0
-	$ctl nic-nvme "$@" --ifname eth1 --dst-ng "/dev/ng${dst#nvme}n1" --slba "$rx_slba" --nlb "$nlb" \
+	$ctl nic-nvme $rx_args --ifname eth1 --dst-ng "/dev/ng${dst#nvme}n1" --slba "$rx_slba" --nlb "$nlb" \
 		--peer-mac 02:00:00:00:00:01 --local-ip 192.0.2.2 --peer-ip 192.0.2.1 \
 		--local-port 12345 --peer-port 54321 --groups "$groups" --depth "$depth" \
 		--group-bytes 8192 --timeout-ms 60000 >/tmp/rx.log 2>&1 &
@@ -119,7 +132,7 @@ nic_pair() {
 	done
 	if [ "$rx_ok" != 1 ]; then cat /tmp/rx.log; echo "FAIL $label receiver not ready"; return 1; fi
 	set +e
-	$ctl nvme-nic "$@" --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
+	$ctl nvme-nic $tx_args --ifname eth0 --src-ng "/dev/ng${src#nvme}n1" --slba "$src_slba" --nlb "$nlb" \
 		--peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 \
 		--local-port 54321 --peer-port 12345 --groups "$groups" --depth "$depth" \
 		--group-bytes 8192 --timeout-ms 60000 >/tmp/tx.log 2>&1
@@ -133,41 +146,42 @@ nic_pair() {
 	grep -q 'XDEV_EXT_MECH_READY mode=source .* xsk=zc' /tmp/tx.log || { echo "FAIL $label sender not zero-copy"; return 1; }
 }
 
-# Refusals: no NAPI interrupt deferral, or a copy-mode sender with nothing to poll.
+# Refusals: a receiver without NAPI interrupt deferral; a copy-mode sender,
+# which has nothing to poll; a zero-copy sender whose transmit queue completes
+# in a transmit-only NAPI (virtio-net), which the kernel never busy-polls.
 defer 0 0
-refuse_create no-napi-deferral --poll
+refuse_create no-napi-deferral nic-nvme --poll
 defer 2 200000
-refuse_create copy-transmit --poll --copy
+refuse_create copy-transmit nvme-nic --poll --copy
+refuse_create transmit-only-napi nvme-nic --poll
 
 # Control without the bit: the busy-poll counter must not move.
 clear_window
 before=$(busy_poll_packets)
-nic_pair interrupt
+nic_pair interrupt --
 after=$(busy_poll_packets)
 same_window || { echo 'FAIL interrupt NIC chain data'; exit 1; }
 echo "XDEV_EXT_POLL_NIC_CONTROL busy_poll_rx_packets_delta=$((after - before))"
 [ "$((after - before))" = 0 ] || { echo 'FAIL busy polling without the bit'; exit 1; }
 
-# Polled: every stage of both sessions carries the bit.
+# Polled receiver: AF_XDP RX and NVMe WRITE both carry the bit; the sender
+# cannot be polled on virtio-net (above), so it stays interrupt-driven.
 clear_window
 before=$(busy_poll_packets)
-nvme_before=$(irqs "^${src}q[1-9]")
 nvme_dst_before=$(irqs "^${dst}q[1-9]")
 nic_in=$(irqs '^virtio[0-9]+-input')
 nic_out=$(irqs '^virtio[0-9]+-output')
-nic_pair polled --poll
+nic_pair polled --poll --
 after=$(busy_poll_packets)
-nvme_after=$(irqs "^${src}q[1-9]")
 nvme_dst_after=$(irqs "^${dst}q[1-9]")
 same_window || { echo 'FAIL polled NIC chain data'; exit 1; }
-grep -q '^XDEV_EXT_MECH_POLL stages=2$' /tmp/rx.log && grep -q '^XDEV_EXT_MECH_POLL stages=2$' /tmp/tx.log
-echo "XDEV_EXT_POLL_NIC_POLLED busy_poll_rx_packets_delta=$((after - before)) source_nvme_io_irq_delta=$((nvme_after - nvme_before)) destination_nvme_io_irq_delta=$((nvme_dst_after - nvme_dst_before)) virtio_input_irq_delta=$(( $(irqs '^virtio[0-9]+-input') - nic_in )) virtio_output_irq_delta=$(( $(irqs '^virtio[0-9]+-output') - nic_out ))"
+grep -q '^XDEV_EXT_MECH_POLL stages=2$' /tmp/rx.log && ! grep -q '^XDEV_EXT_MECH_POLL' /tmp/tx.log
+echo "XDEV_EXT_POLL_NIC_POLLED busy_poll_rx_packets_delta=$((after - before)) destination_nvme_io_irq_delta=$((nvme_dst_after - nvme_dst_before)) virtio_input_irq_delta=$(( $(irqs '^virtio[0-9]+-input') - nic_in )) virtio_output_irq_delta=$(( $(irqs '^virtio[0-9]+-output') - nic_out ))"
 [ "$((after - before))" -gt 0 ] || { echo 'FAIL no NAPI work done by the session workers'; exit 1; }
-[ "$((nvme_after - nvme_before))" = 0 ] || { echo 'FAIL polled NVMe READ raised I/O-queue interrupts'; exit 1; }
 [ "$((nvme_dst_after - nvme_dst_before))" = 0 ] || { echo 'FAIL polled NVMe WRITE raised I/O-queue interrupts'; exit 1; }
 $ctl detach --pin /sys/fs/bpf/poll-nvme
 $ctl detach --pin /sys/fs/bpf/poll-afxdp
-echo 'XDEV_EXT_POLL_NIC=PASS chain=nvme-read,afxdp-tx-zc,afxdp-rx,nvme-write data=identical'
+echo 'XDEV_EXT_POLL_NIC=PASS chain=nvme-read,afxdp-tx-zc,afxdp-rx-polled,nvme-write-polled data=identical'
 
 dmesg >/tmp/dmesg.txt
 if grep -E 'completion polled|drain bound passed|quarantined|WARNING:|BUG:|Oops' /tmp/dmesg.txt; then
