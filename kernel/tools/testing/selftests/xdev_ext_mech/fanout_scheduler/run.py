@@ -39,7 +39,7 @@ def generate():
              "xdev_ext_mech_batch_acquire", "xdev_ext_mech_batch_completion_claim",
              "xdev_ext_mech_batch_handoff", "xdev_ext_mech_batch_completion_publish",
              "xdev_ext_mech_batch_complete", "xdev_ext_mech_batch_complete_produced", "xdev_ext_mech_batch_sequester",
-             "xdev_ext_mech_submit", "xdev_ext_mech_batch_run",
+             "xdev_ext_mech_submit", "xdev_ext_mech_poll_kick", "xdev_ext_mech_batch_run",
              "xdev_ext_mech_batch_landed", "xdev_ext_mech_batch_drain",
              "xdev_ext_mech_retry_work", "xdev_ext_mech_trim_produced",
              "xdev_ext_mech_recycle_produced_tail"]

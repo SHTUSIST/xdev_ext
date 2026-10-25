@@ -714,13 +714,16 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertIn("if (fate != XDEV_EXT_MECH_REFS_RELEASE || !last) {",
                       destroy)
         # A quarantined session's worker goes only after its last batch,
-        # after its armed timers; a deferred STOP decides its fate there.
+        # after its armed timers (retry, progress and stage polling); a
+        # deferred STOP decides its fate there.
         reap = function_body(path, "static void xdev_ext_mech_reap(")
         self.assertEqual(re.findall(r"^\s*(\w+)\(", reap, re.M),
                          ["xdev_ext_mech_release_late",
                           "kthread_cancel_delayed_work_sync",
                           "kthread_cancel_delayed_work_sync",
+                          "kthread_cancel_delayed_work_sync",
                           "synchronize_rcu", "kthread_destroy_worker"])
+        self.assertIn("kthread_cancel_delayed_work_sync(&s->poll_work);", reap)
         self.assertIn("kthread_destroy_worker(s->worker);", reap)
 
     def test_batch_areas_are_u64_aligned(self):

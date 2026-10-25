@@ -31,7 +31,7 @@ struct list_head{int unused;};
 struct kthread_work{int unused;};
 struct xdev_ext_mech_session;
 struct xdev_ext_mech_class_ops{unsigned flags;};
-struct xdev_ext_mech_stage{u32 class_id;const struct xdev_ext_mech_class_ops*cls;struct xdev_ext_mech_session*s;void*priv;};
+struct xdev_ext_mech_stage{u32 class_id;const struct xdev_ext_mech_class_ops*cls;struct xdev_ext_mech_session*s;void*priv;bool poll;};
 struct xdev_ext_mech_batch{struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_batch*parent;int fan_error;u32 bytes;u64 key;struct list_head node;};
 struct xdev_ext_mech_session{
  struct xdev_ext_mech_sess ss;int lock,last_err,stop_err,native_controls;
@@ -71,6 +71,8 @@ static u32 xdev_ext_mech_stage_group_end(const void*plan,u32 nr,u32 stage){(void
 static void xdev_ext_mech_fanout_run(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;abort();}
 static int xdev_ext_mech_batch_acquire(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)b;if(late_close==1)xdev_ext_ops_retract(&xdev_ext_mech_registry,XDEV_EXT_MECH_CLASS_AFXDP,s->ops[XDEV_EXT_MECH_CLASS_AFXDP]);else if(late_close==2)xdev_ext_mech_session_stop(s,0);return 0;}
 static int xdev_ext_mech_build(struct xdev_ext_mech_session*s,struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){(void)s;(void)st;(void)b;return 0;}
+/* No stage of this fixture polls; polling has its own tests (../poll). */
+static void xdev_ext_mech_poll_kick(struct xdev_ext_mech_session*s){(void)s;abort();}
 static int xdev_ext_mech_submit(struct xdev_ext_mech_session*s,struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){(void)s;submit_calls++;return actual_provider?xsk_rel_submit(st,b):0;}
 static void xdev_ext_mech_life_undo(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;}
 static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session*s){(void)s;}

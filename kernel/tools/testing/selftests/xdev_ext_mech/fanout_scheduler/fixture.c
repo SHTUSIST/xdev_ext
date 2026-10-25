@@ -20,6 +20,8 @@ static struct llist_node *llist_reverse_order(struct llist_node *h) {
  struct llist_node *r=NULL;while(h){struct llist_node*n=h->next;h->next=r;r=h;h=n;}return r;
 }
 static void kthread_mod_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,int delay){(void)w;(void)d;(void)delay;}
+/* Stage polling is off in every scheduler case; only CREATE can turn it on. */
+static void kthread_queue_delayed_work(struct kthread_worker*w,struct kthread_delayed_work*d,int delay){(void)w;(void)d;(void)delay;abort();}
 struct xdev_ext_mech_session;
 struct xdev_ext_mech_batch;
 struct xdev_ext_mech_stage;

@@ -37,7 +37,7 @@ struct net_device {u32 mtu;};
 struct xdp_sock {int mutex,state; bool zc,tx,rx; struct net_device *dev; struct xdev_ext_mech_stage *xdev_ext_mech_tx,*xdev_ext_mech_rx;};
 struct xdev_ext_mech_pool {void *priv; const void *ops; u32 nr_frames;};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool *pool; struct xdev_ext_mech_layout l; struct xdev_ext_mech_peer peer; u64 id;};
-struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s; void *priv,*file; u32 direction,index;};
+struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s; void *priv,*file; u32 direction,index; bool poll;};
 struct xdev_ext_mech_frame {u64 umem_addr;u32 index,data_off,data_len;void *kaddr,*pool_priv;};
 struct xdev_ext_mech_batch {u64 key; struct xdev_ext_mech_stage *st;};
 struct xsk_rel_rx_intent {u64 group;u32 index,attempt;u8 calls,valid;};
@@ -63,6 +63,9 @@ static struct xdev_ext_mech_stage *xdev_ext_mech_batch_stage(struct xdev_ext_mec
 static bool xdev_ext_mech_session_admits(struct xdev_ext_mech_session *s){(void)s;return true;}
 static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err){(void)st;(void)err;dead_calls++;}
 static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st){(void)st;kicks++;}
+/* No stage here asks for polling; ../../poll tests the AF_XDP poll bind. */
+struct xsk_xdev_ext_mech_stage;
+static int xsk_mech_poll_bind(struct xsk_xdev_ext_mech_stage *xst,struct xdp_sock *xs,bool tx,bool reliable){(void)xst;(void)xs;(void)tx;(void)reliable;abort();}
 static u64 ktime_get_ns(void){return 1000;}
 static struct socket *sock_from_file(void *f){return f;}
 static struct xdp_sock *xdp_sk(struct sock *s){return s->owner;}

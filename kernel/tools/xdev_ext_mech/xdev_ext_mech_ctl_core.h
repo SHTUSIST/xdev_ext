@@ -72,6 +72,24 @@ xdev_ext_mech_ctl_notify_result(const struct xdev_ext_mech_stats *s, __u64 group
 	return 0;
 }
 
+/* --poll: ask every used stage for kernel-worker polling; CREATE refuses a
+ * stage that cannot be polled (no interrupt fallback). Other flags are kept. */
+static inline void xdev_ext_mech_ctl_poll_stages(struct xdev_ext_mech_create *c, bool poll)
+{
+	__u32 i;
+
+	for (i = 0; poll && i < c->nr_stages && i < XDEV_EXT_MECH_MAX_STAGES; i++)
+		c->st[i].flags |= XDEV_EXT_MECH_STAGE_F_POLL;
+}
+
+/* The marker of a --poll CREATE: how many stages asked for polling. */
+static inline bool xdev_ext_mech_ctl_poll_line(char *buf, size_t size, __u32 stages)
+{
+	int n = snprintf(buf, size, "XDEV_EXT_MECH_POLL stages=%u\n", stages);
+
+	return n > 0 && (size_t)n < size;
+}
+
 /* Force the requested mode: no implicit ZC-to-COPY downgrade. */
 static inline __u16 xdev_ext_mech_ctl_xsk_flags(bool copy_mode)
 {

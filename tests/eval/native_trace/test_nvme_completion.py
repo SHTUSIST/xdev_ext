@@ -37,9 +37,11 @@ typedef int blk_status_t;
 enum rq_end_io_ret { RQ_END_IO_FREE };
 #define NVME_REQ_CANCELLED 1
 #define le64_to_cpu(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
 struct xdev_ext_mech_batch { int claim; unsigned bytes; };
+/* poll_*: stage polling record, retired by every end_io. */
 struct nvme_xdev_ext_mech_completion {
-    struct xdev_ext_mech_batch *b; u64 ticket; bool uncertain;
+    struct xdev_ext_mech_batch *b; u64 ticket; bool uncertain; bool poll_live; unsigned poll_queue;
 };
 struct nvme_xdev_ext_mech_batch { void *bio; int cqe; };
 struct nvme_req_data { int flags, status; struct { u64 u64; } result; };

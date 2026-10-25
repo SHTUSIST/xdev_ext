@@ -21,6 +21,11 @@ typedef uint32_t u32;
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
 #define atomic_read(p) (*(p))
 #define nvme_req(r) (&(r)->nvme)
+/* Stage polling helpers run verbatim; this NOWAIT fixture never polls. */
+typedef unsigned int blk_opf_t;
+#define REQ_POLLED (1U << 21)
+#define WRITE_ONCE(x, v) ((x) = (v))
+struct blk_mq_hw_ctx { unsigned int queue_num; };
 
 struct nvme_xdev_ext_mech_slot;
 struct nvme_xdev_ext_mech_batch {
@@ -36,7 +41,7 @@ struct nvme_xdev_ext_mech_stage {
 	struct { uint32_t nsid; } identity;
 	struct nvme_ns *ns;
 };
-struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; void *s; };
+struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; void *s; bool poll; };
 #define XDEV_EXT_MECH_POOL_PEER 3
 struct xdev_ext_mech_pool { unsigned int kind; };
 static struct xdev_ext_mech_pool host_pool = { .kind = 2 };
@@ -54,10 +59,11 @@ struct nvme_command {
 enum rq_end_io_ret { RQ_END_IO_FREE };
 struct request {
 	struct { unsigned int flags; } nvme;
+	struct blk_mq_hw_ctx *mq_hctx;
 	enum rq_end_io_ret (*end_io)(struct request *, int);
 	void *end_io_data;
 };
-struct nvme_xdev_ext_mech_completion { struct xdev_ext_mech_batch *b; uint64_t ticket; };
+struct nvme_xdev_ext_mech_completion { struct xdev_ext_mech_batch *b; uint64_t ticket; bool poll_live; uint32_t poll_queue; };
 struct nvme_xdev_ext_mech_slot { struct nvme_xdev_ext_mech_completion done; };
 /* Pool mechanics have a separate production-behavior test; this fixture
  * supplies one ready metadata lease and tests native NOWAIT tag admission. */
@@ -113,6 +119,8 @@ static void nvme_init_request(struct request *req, struct nvme_command *cmd)
 { (void)req; (void)cmd; }
 static void blk_mq_free_request(struct request *req)
 { (void)req; }
+static bool blk_rq_is_poll(struct request *req)
+{ (void)req; abort(); }
 static int nvme_xdev_ext_class_map(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
 			    struct request *req, struct nvme_xdev_ext_mech_batch *bp)
 { (void)st; (void)b; (void)req; (void)bp; maps++; return 0; }

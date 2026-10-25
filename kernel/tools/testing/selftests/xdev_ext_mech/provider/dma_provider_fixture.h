@@ -13,6 +13,8 @@ struct dma_fixture_stats {
  __u64 region_binds, region_unbinds, host_binds, host_unbinds;
  __u64 accepted, completed, from_device, to_device, bytes;
  __u64 pending, peak_pending, stale_callbacks;
+ /* Polled regions: ->poll calls, and completions delivered from them. */
+ __u64 polls, polled_completed;
 };
 #define DMA_FIXTURE_STATS _IOR('D', 0x71, struct dma_fixture_stats)
 #endif

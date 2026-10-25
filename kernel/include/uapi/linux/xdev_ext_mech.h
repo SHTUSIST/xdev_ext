@@ -41,6 +41,12 @@ enum xdev_ext_mech_class {
  * CPU: TO_DEVICE, fd -1, arg0 fixed transform, arg1 bounded parameter; variable
  * transforms reserve same-pool destination capacity at CREATE. */
 #define XDEV_EXT_MECH_STAGE_F_FANOUT (1U << 31)
+/* POLL: the session's kernel worker reaps this stage's native completions by
+ * polling the device instead of waiting for its interrupt. Same meaning on
+ * every class; default off. CREATE fails with -EOPNOTSUPP when the class has no
+ * poll implementation or the bound device cannot be polled; there is no
+ * interrupt fallback. See Documentation/userspace-api/xdev_ext-poll.rst. */
+#define XDEV_EXT_MECH_STAGE_F_POLL (1U << 29)
 #define XDEV_EXT_MECH_CPU_ABI_VERSION 1U
 enum xdev_ext_cpu_xform {
  XDEV_EXT_CPU_XFORM_CRC32C_APPEND = 1,
@@ -463,7 +469,8 @@ struct xdev_ext_mech_stage_uapi {
 	__u32 class_id;			/* enum xdev_ext_mech_class */
 	__u32 direction;		/* enum xdev_ext_mech_dir */
 	__s32 fd;
-	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; SOCKET: XDEV_EXT_SOCKET_F_* */
+	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; SOCKET: XDEV_EXT_SOCKET_F_*;
+					 * generic: XDEV_EXT_MECH_STAGE_F_FANOUT, XDEV_EXT_MECH_STAGE_F_POLL */
 	__aligned_u64 arg0;
 	__aligned_u64 arg1;
 };

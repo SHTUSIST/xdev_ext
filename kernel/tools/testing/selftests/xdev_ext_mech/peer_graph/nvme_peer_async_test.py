@@ -77,6 +77,11 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA
 #define ALIGN(x, a) (((x) + (a) - 1) & ~((__typeof__(x))(a) - 1))
 #define nvme_req(r) (&(r)->nr)
 #define nvme_req_op(c) ((c)->rw.opcode & 1)
+/* Stage polling: these sessions never set the bit; the helpers are verbatim. */
+typedef u32 blk_opf_t;
+#define REQ_POLLED (1U << 21)
+#define WRITE_ONCE(x, v) ((x) = (v))
+struct blk_mq_hw_ctx { unsigned int queue_num; };
 struct device { int is_pci; };
 struct pci_dev { struct device dev; };
 #define to_pci_dev(d) ((struct pci_dev *)(d))
@@ -104,6 +109,7 @@ enum rq_end_io_ret { RQ_END_IO_NONE, RQ_END_IO_FREE };
 struct request {
  struct { struct nvme_command *cmd; u32 flags; u16 status; struct { u64 u64; } result; } nr;
  u32 cmd_flags;
+ struct blk_mq_hw_ctx *mq_hctx;
  enum rq_end_io_ret (*end_io)(struct request *, blk_status_t);
  void *end_io_data;
  struct nvme_command storage;
@@ -111,7 +117,7 @@ struct request {
 };
 struct xdev_ext_mech_pool { u32 kind, frame_size, nr_frames; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; struct xdev_ext_mech_layout l; u32 depth, state; };
-struct xdev_ext_mech_stage { void *priv; struct xdev_ext_mech_session *s; };
+struct xdev_ext_mech_stage { void *priv; struct xdev_ext_mech_session *s; bool poll; };
 struct xdev_ext_mech_frame { void *kaddr; u64 umem_addr; u32 index, data_off, data_len; void *pool_priv; };
 struct nvme_xdev_ext_mech_batch;
 #define MAX_TEST_FRAMES 4
@@ -179,6 +185,8 @@ static void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 tick
 static void xdev_ext_mech_batch_sequester(struct xdev_ext_mech_batch *b, u64 ticket, int err)
 { if (!xdev_ext_mech_batch_completion_claim(b, ticket)) xdev_ext_mech_batch_completion_publish(b, ticket, err, true); }
 static int nvme_ctrl_state(struct nvme_ctrl *c) { return c->state; }
+/* Never polled here: a polled stage would refuse an interrupt-queue request. */
+static bool blk_rq_is_poll(struct request *r) { (void)r; abort(); }
 static bool test_bit(unsigned bit, const unsigned long *p) { return (*p >> bit) & 1; }
 static bool get_disk_ro(struct gendisk *d) { return d->ro; }
 static u64 get_capacity(struct gendisk *d) { return d->sectors; }
@@ -250,7 +258,7 @@ static struct request_queue queue = { 4096 };
 static struct nvme_ns ns = { &ctrl, 1UL << NVME_NS_READY, &head, &disk, &queue };
 static struct xdev_ext_mech_session session;
 static struct nvme_xdev_ext_mech_stage priv;
-static struct xdev_ext_mech_stage st = { &priv, &session };
+static struct xdev_ext_mech_stage st = { &priv, &session, false };
 #define DEPTH 4
 static struct nvme_xdev_ext_mech_batch bps[8];
 static struct xdev_ext_mech_batch bs[8];
@@ -464,7 +472,8 @@ def extract(source):
         if m:
             types.append((m.start(), m[0]))
     fill = re.search(r"\.fill_cqe = (\w+),", source)[1]
-    wanted = r"(?:nvme_xdev_ext_peer_\w+|nvme_xdev_ext_class_fill_cqe|" + fill + r")"
+    wanted = (r"(?:nvme_xdev_ext_peer_\w+|nvme_xdev_ext_poll_(?:opf|check|arm)|"
+              r"nvme_xdev_ext_class_fill_cqe|" + fill + r")")
     functions = [(m.start(), m[0]) for m in re.finditer(
         r"^static [^;{}=]*\b" + wanted + r"\([^;{]*\)\s*\{.*?^\}", source, re.M | re.S)]
     submit = "nvme_xdev_ext_peer_submit"

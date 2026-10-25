@@ -23,11 +23,11 @@ typedef uint64_t u64; typedef uint32_t u32;
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define READ_ONCE(x) (x)
 #define min(a,b) ((a)<(b)?(a):(b))
-#define mutex_lock(x) ((void)(x))
-#define mutex_unlock(x) ((void)(x))
+#define spin_lock(x) ((void)(x))
+#define spin_unlock(x) ((void)(x))
 #define kfree(p) free(p)
 struct work_struct { int unused; };
-struct stats { u64 completed,bytes,from_device,to_device,pending,peak_pending,stale_callbacks; };
+struct stats { u64 completed,bytes,from_device,to_device,pending,peak_pending,stale_callbacks,polled_completed; };
 struct sim_device { void *window; int lock; struct stats stats; };
 struct sim_region { struct sim_device *dev; u64 base; };
 struct sim_host { void *addr; u64 bytes; struct sim_device *dev; };
@@ -58,11 +58,12 @@ int main(void) {
   for(unsigned i=0;i<replay;i++){CHECK(tickets[i]==40);CHECK(statuses[i]==-ESTALE);}
   CHECK(tickets[replay]==41);CHECK(statuses[replay]==(mode==3?-EIO:0));
   CHECK(counts[replay]==(mode==2?15:16));CHECK(d.stats.stale_callbacks==replay);
+  CHECK(d.stats.polled_completed==0); /* the worker thread is not a poll completion */
   CHECK(!memcmp(host+16,dev+8,16));for(unsigned i=0;i<64;i++)if(i<16||i>=32)CHECK(host[i]==0x97);
  }
  puts("PASS actual simulator worker delay, short, ambiguous, stale/replay-before-final, guards");return 0;
 }
-'''.replace('/* WORKER */',function(SOURCE.read_text(),'sim_work'))
+'''.replace('/* WORKER */',function(SOURCE.read_text(),'sim_finish')+'\n'+function(SOURCE.read_text(),'sim_work'))
         with tempfile.TemporaryDirectory(prefix='xdev-ext-sim-work-') as d:
             source=pathlib.Path(d)/'test.c';source.write_text(code);exe=pathlib.Path(d)/'test'
             p=subprocess.run(['cc','-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-fsanitize=undefined',str(source),'-o',str(exe)],capture_output=True,text=True)

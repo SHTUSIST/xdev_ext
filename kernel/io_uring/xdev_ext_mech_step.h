@@ -159,6 +159,8 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 				return -EINVAL;
 			continue;
 		}
+		/* Generic, for every class; its capability is checked at bind. */
+		clean.flags &= ~XDEV_EXT_MECH_STAGE_F_POLL;
   if (u->flags & XDEV_EXT_MECH_STAGE_F_FANOUT) {
    if (!i || xdev_ext_mech_stage_role(u) != XDEV_EXT_MECH_ROLE_CONSUMER ||
        xdev_ext_mech_stage_role(&c->st[i - 1]) != XDEV_EXT_MECH_ROLE_CONSUMER)

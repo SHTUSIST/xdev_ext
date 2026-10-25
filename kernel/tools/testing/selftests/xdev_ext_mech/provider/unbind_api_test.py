@@ -42,8 +42,8 @@ struct xdev_ext_dma_region; struct xdev_ext_dma_xfer; struct xdev_ext_dma_cookie
 /* OPS */
 static unsigned unlocked, unmapped, freed, host_unbinds;
 static void *expected_map;
-static void mutex_lock(unsigned *lock) { assert(!*lock); *lock = 1; }
-static void mutex_unlock(unsigned *lock) { assert(*lock); *lock = 0; unlocked++; }
+static void spin_lock(unsigned *lock) { assert(!*lock); *lock = 1; }
+static void spin_unlock(unsigned *lock) { assert(*lock); *lock = 0; unlocked++; }
 static void vunmap(void *addr) { assert(addr == expected_map); unmapped++; }
 static void kfree(void *ptr) { assert(unmapped == 1); freed++; free(ptr); }
 struct sim_device { unsigned lock; struct { unsigned host_unbinds; } stats; };

@@ -32,6 +32,8 @@ class NvmePool(unittest.TestCase):
         functions = ['nvme_xdev_ext_class_resources_free', 'nvme_xdev_ext_class_resources_init',
                      'nvme_xdev_ext_class_slot_get', 'nvme_xdev_ext_class_slot_put',
                      'nvme_xdev_ext_class_walk', 'nvme_xdev_ext_class_map',
+                     'nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
+                     'nvme_xdev_ext_poll_arm',
                      'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_class_submit',
                      'nvme_xdev_ext_class_fill_cqe']
         functions = '\n\n'.join(declaration(source, name) for name in functions)

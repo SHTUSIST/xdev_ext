@@ -5105,6 +5105,37 @@ int blk_rq_poll(struct request *rq, struct io_comp_batch *iob,
 }
 EXPORT_SYMBOL_GPL(blk_rq_poll);
 
+/**
+ * blk_mq_poll_hw_queue - poll one hardware queue once, by its number
+ * @q: the request queue
+ * @queue_num: blk_mq_hw_ctx::queue_num of a REQ_POLLED request the caller
+ *	issued and has not yet seen complete
+ * @iob: completion batch, or NULL to complete inline
+ *
+ * For passthrough requests whose bio has no block device, so bio_poll() does
+ * not apply, and whose request pointer the caller must not dereference after
+ * issue (another poller or the timeout handler may complete and free it).
+ * As in bio_poll(), the queue usage reference keeps the hardware context
+ * table stable; a number that no longer names a poll queue is ignored.
+ * Returns the driver's count of completions processed, or 0.
+ */
+int blk_mq_poll_hw_queue(struct request_queue *q, unsigned int queue_num,
+			 struct io_comp_batch *iob)
+{
+	struct blk_mq_hw_ctx *hctx;
+	int ret = 0;
+
+	if (!queue_is_mq(q) || !percpu_ref_tryget(&q->q_usage_counter))
+		return 0;
+	hctx = xa_load(&q->hctx_table, queue_num);
+	if (blk_mq_can_poll(q) && hctx && hctx->type == HCTX_TYPE_POLL &&
+	    q->mq_ops->poll)
+		ret = q->mq_ops->poll(hctx, iob);
+	blk_queue_exit(q);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(blk_mq_poll_hw_queue);
+
 unsigned int blk_mq_rq_cpu(struct request *rq)
 {
 	return rq->mq_ctx->cpu;

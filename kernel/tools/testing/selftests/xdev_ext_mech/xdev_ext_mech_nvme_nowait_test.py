@@ -44,8 +44,16 @@ class NvmeNowait(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         path = Path(cls.temp.name)
         fixture = (HERE / "xdev_ext_mech_nvme_nowait_fixture.c").read_text()
+        # The stage-polling helpers the submit calls, verbatim, before it.
+        helpers = [re.search(r"^static [^;{}]*\b" + name + r"\([^)]*\)\s*\{.*?^\}",
+                             source, re.MULTILINE | re.DOTALL)
+                   for name in ("nvme_xdev_ext_poll_opf", "nvme_xdev_ext_poll_check",
+                                "nvme_xdev_ext_poll_arm")]
+        if not all(helpers):
+            raise RuntimeError("production stage-polling helpers missing")
+        production = "\n".join(h[0] for h in helpers) + "\n" + function[0]
         generated = path / "submit.c"
-        generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", function[0]))
+        generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", production))
         cls.probe = path / "probe"
         build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                                 "-DCONFIG_XDEV_EXT_MECH_ZEROCOPY", str(generated),

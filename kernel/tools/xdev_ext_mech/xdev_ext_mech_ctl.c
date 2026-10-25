@@ -326,11 +326,21 @@ static int ctl_transport_counters(int ring, __u64 session,
 	return ctl_mech(ring, XDEV_EXT_MECH_OP_TRANSPORT_STATS, (uintptr_t)s);
 }
 
+/* --poll: every stage of every session this run creates. */
+static bool ctl_poll_all;
+
 static int ctl_create(int ring, struct xdev_ext_mech_create *c, __u64 *session)
 {
 	int ret;
 
 	c->abi_version = XDEV_EXT_MECH_ABI_VERSION;
+	xdev_ext_mech_ctl_poll_stages(c, ctl_poll_all);
+	if (ctl_poll_all) {
+		char line[64];
+
+		if (xdev_ext_mech_ctl_poll_line(line, sizeof(line), c->nr_stages))
+			fputs(line, stdout);
+	}
 	ret = ctl_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)c);
 	if (!ret)
 		*session = c->session_id;
@@ -2013,7 +2023,7 @@ enum {
  OPT_VERIFY_DST_OFF, OPT_VERIFY_BYTES, OPT_VERIFY_SEG,
  OPT_REL_WINDOW, OPT_REL_INITIAL_CREDIT, OPT_REL_RTO_US, OPT_REL_RTO_MAX_US,
  OPT_REL_BACKOFF, OPT_REL_MAX_ATTEMPTS, OPT_REL_ACK_EVERY, OPT_REL_ACK_DELAY_US,
- OPT_REL_ACK_RULE, OPT_REL_RESEND_ORDER,
+ OPT_REL_ACK_RULE, OPT_REL_RESEND_ORDER, OPT_POLL,
 };
 
 static const struct option ctl_options[] = {
@@ -2082,6 +2092,7 @@ static const struct option ctl_options[] = {
 	{ "expect-unbind", no_argument, NULL, OPT_EXPECT_UNBIND },
 	{ "expect-timeout", no_argument, NULL, OPT_EXPECT_TIMEOUT },
 	{ "quiet-wait", no_argument, NULL, OPT_QUIET_WAIT },
+	{ "poll", no_argument, NULL, OPT_POLL },
 	{ "help", no_argument, NULL, 'h' },
 	{ NULL, 0, NULL, 0 },
 };
@@ -2119,8 +2130,9 @@ static void usage(FILE *f)
 " --rel-ack-delay-us N --rel-ack-rule each|every-n|delayed\n"
 " --rel-resend-order slot|oldest|round-robin (requires --reliable)\n"
 "COMMON: [--groups N] [--depth N] [--group-bytes N] [--mtu N]\n"
-"        [--timeout-ms N] [--copy] [--nic-fallback auto|off|force]\n"
+"        [--timeout-ms N] [--copy] [--nic-fallback auto|off|force] [--poll]\n"
 "        auto: socket on ZC refusal; off: require ZC; force: socket (NXP2; reliable mode refused)\n"
+"        --poll: the session worker polls every stage; CREATE fails if one cannot be polled\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
 "        b NVMe READ -> CE H2D -> CE D2H -> AF_XDP TX (AF_XDP UMEM)\n"
@@ -2344,6 +2356,7 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 		case OPT_EXPECT_UNBIND: o->expect_unbind = true; break;
 		case OPT_EXPECT_TIMEOUT: o->expect_timeout = true; break;
 		case OPT_QUIET_WAIT: o->quiet_wait = true; break;
+		case OPT_POLL: ctl_poll_all = true; break;
 		case 'h':
 			usage(stdout);
 			exit(CTL_PASS);
