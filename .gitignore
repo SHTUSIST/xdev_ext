@@ -444,6 +444,12 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/scheduler_fixture.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/scheduler_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/user_kvm.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/user_validate.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/user_validate_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest/Makefile
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest/run-guest.sh
+!/kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest/user_stage_e2e.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_call_active_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_exact_completion_test.c
