@@ -173,6 +173,7 @@ def validate_trace(text, session_id, groups, frames_per_group=6):
         return e
 
     previous_use = {}
+    batch_ids = set()
     native_commands = [set(), set()]
     # Per frame: admit + 2 NVMe submit/complete pairs + TX bind + 3 landed
     # + recycle + terminal = 11. Keep exact cardinality to reject extras.
@@ -180,6 +181,10 @@ def validate_trace(text, session_id, groups, frames_per_group=6):
     if len(rows) != expected_rows:
         raise ValueError('unexpected/missing core event cardinality')
     for group in sorted(group_keys):
+        group_ids = {e['batch_id'] for e in admissions if e['batch_key'] == group}
+        if len(group_ids) != 1 or next(iter(group_ids)) <= 0 or group_ids & batch_ids:
+            raise ValueError('publication lacks one unique batch identity')
+        batch_ids.update(group_ids)
         frames = []
         for ordinal in range(frames_per_group):
             admit = get(group, ordinal, 'record_admit', 0)
@@ -227,6 +232,9 @@ def validate_trace(text, session_id, groups, frames_per_group=6):
             if not (nvme_done[0]['ts_ns'] <= bind['ts_ns'] <= tx_submit['ts_ns'] <=
                     tx_complete['ts_ns'] <= tx_landed['ts_ns'] <= recycle['ts_ns'] <= terminal['ts_ns']):
                 raise ValueError('TX completion/recycle ordering invalid')
+            if any(get(group, ordinal, 'downstream_complete', stage)['ts_ns'] > recycle['ts_ns']
+                   for stage in (0, 1)):
+                raise ValueError('frame recycled before NVMe worker landed')
             if nvme_done[1]['ts_ns'] > recycle['ts_ns']:
                 raise ValueError('frame recycled before NVMe consumer completed')
             if nvme_done[0]['ts_ns'] > get(group, ordinal, 'native_submit', 1)['ts_ns']:

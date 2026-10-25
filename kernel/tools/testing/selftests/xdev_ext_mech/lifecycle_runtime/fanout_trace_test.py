@@ -248,6 +248,42 @@ class FanoutTraceTest(unittest.TestCase):
                 e['ts_ns'] *= 100
         self.check_bad(rows)
 
+    def test_one_group_has_one_positive_batch_id_not_reused_by_another_group(self):
+        for defect in ('split_group', 'zero', 'negative', 'reused_by_next_group'):
+            with self.subTest(defect=defect):
+                rows = fixture()
+                for e in rows:
+                    if e['session_id'] != 17:
+                        continue
+                    if defect == 'split_group' and e['batch_key'] == 1 and e['frame_ordinal'] == 0:
+                        # Keep each frame internally consistent; all six spans
+                        # must still belong to the same immutable batch.
+                        e['batch_id'] += 123
+                    elif defect in ('zero', 'negative') and e['batch_key'] == 1:
+                        e['batch_id'] = 0 if defect == 'zero' else -1
+                    elif defect == 'reused_by_next_group' and e['batch_key'] == 2:
+                        e['batch_id'] = 1
+                self.check_bad(rows)
+
+    def test_nvme_worker_completion_cannot_follow_frame_return(self):
+        for stage in (0, 1):
+            with self.subTest(stage=stage):
+                rows = fixture()
+                for group in (1, 2):
+                    terminal = max(e['ts_ns'] for e in rows if e['batch_key'] == group)
+                    for e in rows:
+                        if (e['session_id'] == 17 and e['batch_key'] == group and
+                                e['stage'] == stage and e['phase'] == 'downstream_complete'):
+                            e['ts_ns'] = terminal + e['frame_ordinal'] + 1
+                self.check_bad(rows)
+
+    def test_batch_ids_may_skip_numbers_and_differ_from_batch_keys(self):
+        rows = fixture()
+        for e in rows:
+            if e['session_id'] == 17:
+                e['batch_id'] = {1: 17, 2: 900}[e['batch_key']]
+        self.assertEqual(validate_trace(encode(rows), 17, 2)['status'], 'PASS')
+
 
 if __name__ == '__main__':
     unittest.main()
