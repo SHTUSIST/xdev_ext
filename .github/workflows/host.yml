@@ -181,6 +181,8 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_source_test.py 2>&1 | tee "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py 2>&1 | tee -a "$log"
           python3 kernel/tools/testing/selftests/xdev_ext_mech/independent_ce_lease.py 2>&1 | tee -a "$log"
+          python3 kernel/tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_mech_source_test.py 2>&1 | tee -a "$log"
+          python3 kernel/tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_mech_backlog_test.py 2>&1 | tee -a "$log"
           for t in teardown stop_work_rearm start_keys frames_release transform_alias alias_table stage_get_cmd detach_generation; do
             python3 kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/${t}_test.py 2>&1 | tee -a "$log"
           done
