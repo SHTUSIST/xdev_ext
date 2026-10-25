@@ -418,6 +418,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/shim.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/bpf_both_directions_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nic_accounting_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/xsk_tx_copy_accounting_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/nic_fallback_choice_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/produced_trim_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/socket_sink/rx_adapter_test.py

@@ -51,7 +51,7 @@ jobs:
         run: |
           set -euo pipefail
           tests="kernel/tools/testing/selftests/xdev_ext_mech"
-          for t in adapter_test independent_credentials rx_adapter_test rx_create_check_test produced_trim_test produced_core_test bpf_both_directions_test nic_accounting_test nic_fallback_choice_test ctl_socket_test rx_core_fifo_test; do
+          for t in adapter_test independent_credentials rx_adapter_test rx_create_check_test produced_trim_test produced_core_test bpf_both_directions_test nic_accounting_test xsk_tx_copy_accounting_test nic_fallback_choice_test ctl_socket_test rx_core_fifo_test; do
             python3 "$tests/socket_sink/$t.py"
           done
           make -C "$tests/socket_guest" check

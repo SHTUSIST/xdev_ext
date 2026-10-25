@@ -868,13 +868,16 @@ static int xsk_xdev_ext_mech_tx_xmit(void *arg, u32 slot)
 	if (READ_ONCE(xst->dead))
 		return -ENXIO;
 	xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[slot]);
+	/* xsk_kernel_xmit() returns the frame length once the device has it. */
 	err = xsk_kernel_xmit(xst->sock, d->addr, d->len, d->options);
-	if (!err && st) {
+	if (err < 0)
+		return err;
+	if (st) {
 		xdev_ext_mech_count(st->s, xdev_ext_mech_nic_ops_counter(xst->xs->zc), 1);
 		xdev_ext_mech_count(st->s, xdev_ext_mech_nic_bytes_counter(xst->xs->zc),
 				    xst->tx_fi[slot].data_len);
 	}
-	return err;
+	return 0;
 }
 
 /* A completion owns the batch until it has left this local list. */
