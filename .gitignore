@@ -1333,3 +1333,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/guest/*.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/guest/*.sh
 !/kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/guest/Makefile
+!/kernel/include/linux/xdev_ext_family_core.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/family_table_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/class_register_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/family_wiring_source_test.py
