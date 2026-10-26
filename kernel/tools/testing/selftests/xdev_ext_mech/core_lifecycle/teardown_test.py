@@ -27,8 +27,6 @@ extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
 
 BOUNDARY = (
-    ('typedef __u64 u64;',
-     'typedef __u64 u64;\nstatic u64 ktime_get_boottime_ns(void) {return 0;}'),
     ('struct kthread_delayed_work { struct kthread_work work; };',
      'struct kthread_delayed_work { struct kthread_work work; int armed; };'),
     ('static void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *w) {(void)w;}',

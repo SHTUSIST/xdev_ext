@@ -67,4 +67,19 @@ struct xdev_ext_mech_transport_stats_v4 {        /* sizeof == 216 */
  struct xdev_ext_rel_policy rel_policy;           /* first reliable stage; all zero if none */
 };
 
+/* STOP with a final pre-release observation. All stats/transport bytes must
+ * be zero on input. The snapshot is taken after drain and worker/RCU/timer
+ * synchronization, while provider contexts still exist. Output is copied
+ * only after synchronous release succeeds; an error grants no cleanup
+ * permission, including when copying this result faults after release.
+ */
+#define XDEV_EXT_MECH_STOP_REPORT_VERSION 1U
+struct xdev_ext_mech_stop_report {
+	__u32 size;
+	__u32 version;
+	__aligned_u64 session_id;
+	struct xdev_ext_mech_stats stats;
+	struct xdev_ext_mech_transport_stats_v4 transport;
+};
+
 #endif

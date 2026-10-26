@@ -23,6 +23,7 @@
 typedef __u8 u8;
 typedef __u32 u32;
 typedef __u64 u64;
+static u64 ktime_get_boottime_ns(void) { return 0; }
 typedef int kuid_t;
 typedef int spinlock_t;
 typedef int wait_queue_head_t;
@@ -111,6 +112,8 @@ static void kthread_queue_work(struct kthread_worker *w,struct kthread_work *wor
 }
 static void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *w) {(void)w;}
 static void kthread_destroy_worker(struct kthread_worker *w) {(void)w;destroyed_workers++;}
+/* These legacy callers pass NULL; report capture must stay unreachable. */
+static void kthread_flush_worker(struct kthread_worker *w) {(void)w;assert(!"unexpected report capture on legacy STOP");}
 static void timer_shutdown_sync(struct timer_list *t) {(void)t;}
 static void (*wait_hook)(void);
 #define wait_event_timeout(w,c,t) do {(void)(w);(void)(t);if(!(c)&&wait_hook)wait_hook();(void)(c);}while(0)

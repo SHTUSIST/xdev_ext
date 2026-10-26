@@ -3025,13 +3025,42 @@ static int xdev_ext_mech_unbind_checked(struct xdev_ext_mech_session *s)
  return 0;
 }
 
+static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stats *out);
+static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_transport_stats_v4 *full,
+				u32 version);
+
 /* Process context, nothing in flight: give every reference back. */
-static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
+static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stop_report *report)
 {
 	struct xdev_ext_mech_stage *st;
 	unsigned long flags;
 	u32 i;
 	int final_err;
+
+	if (report) {
+		/* The destroy decision holds the final reference and has closed
+		 * admission. Flush queued completion work before observing live
+		 * provider counters. Keep the worker allocated until checked
+		 * unbind succeeds, as on the legacy quarantine path.
+		 */
+		spin_lock_irqsave(&s->lock, flags);
+		s->worker_gone = true;
+		spin_unlock_irqrestore(&s->lock, flags);
+		if (s->worker) {
+			kthread_cancel_delayed_work_sync(&s->retry_work);
+			kthread_cancel_delayed_work_sync(&s->progress_work);
+			kthread_cancel_delayed_work_sync(&s->poll_work);
+			synchronize_rcu();
+			kthread_flush_worker(s->worker);
+		}
+		timer_shutdown_sync(&s->group_timer);
+		xdev_ext_mech_stats_fill(s, &report->stats);
+		xdev_ext_mech_transport_stats_fill(s, &report->transport,
+				XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4);
+	}
 
  final_err = xdev_ext_mech_unbind_checked(s);
  if (final_err) {
@@ -3107,6 +3136,11 @@ static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
 	return final_err;
 }
 
+static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
+{
+	return xdev_ext_mech_session_release_report(s, NULL);
+}
+
 /*
  * Process context: a device may still use frames of @s (a sequestered batch,
  * or the drain timed out).  The session object, its pool and pool file, its
@@ -3143,7 +3177,8 @@ static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s)
  * the last reference makes the release decision (xdev_ext_mech_release_late).
  * Nothing is reissued; any ambiguous outcome still quarantines.
  */
-static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
+static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stop_report *report)
 {
 	unsigned long flags;
 	u32 inflight = 0;
@@ -3197,7 +3232,12 @@ static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 		}
 		return -EBUSY;
 	}
-	return xdev_ext_mech_session_release(s);
+	return xdev_ext_mech_session_release_report(s, report);
+}
+
+static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
+{
+	return xdev_ext_mech_session_destroy_report(s, NULL);
 }
 
 /*
@@ -3544,6 +3584,37 @@ static int xdev_ext_mech_stop_op(struct io_ring_ctx *ctx, u64 id)
 	return ret;
 }
 
+static int xdev_ext_mech_stop_report_op(struct io_ring_ctx *ctx,
+				      void __user *uarg)
+	__must_hold(&ctx->uring_lock)
+{
+	struct xdev_ext_mech_stop_report out;
+	struct xdev_ext_mech_session *s;
+	int ret;
+
+	if (copy_from_user(&out, uarg, sizeof(out)))
+		return -EFAULT;
+	if (out.size != sizeof(out) ||
+	    out.version != XDEV_EXT_MECH_STOP_REPORT_VERSION ||
+	    memchr_inv(&out.stats, 0, sizeof(out.stats)) ||
+	    memchr_inv(&out.transport, 0, sizeof(out.transport)))
+		return -EINVAL;
+	s = xdev_ext_mech_find(ctx, out.session_id);
+	if (!s)
+		return -ENOENT;
+	/* As for STOP, the task must return to run its own command completions. */
+	xdev_ext_mech_session_stop(s, 0);
+	if (READ_ONCE(s->cmd_refs))
+		return -EAGAIN;
+	list_del_rcu(&s->ring_node);
+	mutex_unlock(&ctx->uring_lock);
+	ret = xdev_ext_mech_session_destroy_report(s, &out);
+	mutex_lock(&ctx->uring_lock);
+	if (ret)
+		return ret;
+	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
 /*
  * xdev_ext_mech_live_lock held: a session of another ring, while it exists, if
  * the caller is its creator's user.
@@ -3742,6 +3813,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return xdev_ext_mech_start(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_STOP:
 		return xdev_ext_mech_stop_op(ctx, req.arg);
+	case XDEV_EXT_MECH_OP_STOP_REPORT:
+		return xdev_ext_mech_stop_report_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_STATS:
 		return xdev_ext_mech_stats(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_NOTIFY_ARM:

@@ -569,7 +569,8 @@ enum xdev_ext_mech_next {
 /*
  * Control plane: io_uring_register(fd, IORING_REGISTER_XDEV_EXT_MECH, &req, 1).
  * arg points to struct xdev_ext_mech_create, xdev_ext_mech_start, xdev_ext_mech_stats or
- * xdev_ext_mech_notify_arm; for STOP it is the session id itself.
+ * xdev_ext_mech_notify_arm or xdev_ext_mech_stop_report; for STOP it is the
+ * session id itself.
  */
 enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_CREATE	= 1,
@@ -580,6 +581,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_TRANSPORT_STATS = 6,
 	XDEV_EXT_MECH_OP_USER_STAGE	= 7,	/* struct xdev_ext_mech_user_stage */
 	XDEV_EXT_MECH_OP_STAGE_CAPS	= 8,	/* struct xdev_ext_mech_stage_caps */
+	XDEV_EXT_MECH_OP_STOP_REPORT	= 9,	/* struct xdev_ext_mech_stop_report */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U
