@@ -1415,3 +1415,12 @@
 !/tests/eval/xdomain/test_native_barrier.py
 !/tests/eval/xdomain/test_action_provider.py
 !/tests/eval/xdomain/test_case_dispatch.py
+
+!/tests/eval/xdomain/test_durable_failure.py
+!/tests/eval/xdomain/durable_failure_test_owner.cc
+!/tests/eval/xdomain/native_trace_owner.h
+!/tests/eval/xdomain/native_trace_owner.cc
+!/tests/eval/xdomain/native_trace_owner_test.cc
+!/tests/eval/xdomain/test_native_trace_owner.py
+!/tests/eval/xdomain/native_barrier.py
+!/tests/eval/xdomain/action_provider.py

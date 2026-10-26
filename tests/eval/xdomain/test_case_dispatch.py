@@ -25,7 +25,7 @@ IDLE = ("idle-suspend-resume", "idle-module-unload")
 FUNCTIONAL = ("functional-epochs", "bulk-static")
 
 AGENT = r'''
-import json, os, pathlib, struct, sys
+import json, os, pathlib, struct, sys, time
 role, root = sys.argv[1:3]
 root = pathlib.Path(root)
 phase = 'NEW'
@@ -52,6 +52,9 @@ while True:
                    kernel_identity=dict(sha=q['identity']['sha'], config='CONFIG_USB4=m\n'),
                    visibility='NATIVE_OWNER', raw_evidence=dict(service_listing=['xdevext'],
                    nhi_bdf='0000:04:00.0', platform_facts=platform,
+                   boot_id='contract-boot-' + role,
+                   clock_domain='contract-boot-' + role + ':CLOCK_MONOTONIC',
+                   observed_monotonic_ns=time.monotonic_ns(),
                    idle=dict(sessions=0, native_owners=0), evidence_scope='contract'))
     elif c == 'prepare' and case in ('functional-epochs','bulk-static','stop-inflight',
                                       'cable-loss','remove-on-resume','peer-reboot'):
