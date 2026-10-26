@@ -138,6 +138,13 @@ static bool allowed(const struct tb_guard *g, enum tb_operation op)
   return gpu && (p == TB_PHASE_GPU_READY || p == TB_PHASE_FAILED_SAFE ||
                  p == TB_PHASE_DRAINED_SAFE || p == TB_PHASE_VERIFIED) &&
          (permissions(g) & TB_CLEANUP_GPU_FREE);
+ case TB_OP_CONTROL:
+  return (gpu && p == TB_PHASE_GPU_READY && g->filled && g->gpu_safe) ||
+         (!gpu && p == TB_PHASE_EXTERNAL_READY &&
+          g->ready == TB_READY_EXISTING_PROVIDER_REGISTERED) ||
+         p == TB_PHASE_SESSION_CREATED ||
+         ((p == TB_PHASE_DRAINED_SAFE || p == TB_PHASE_VERIFIED) &&
+          g->pair && g->native_safe && g->gpu_safe);
  }
  return false;
 }
@@ -201,6 +208,9 @@ int tb_guard_end(struct tb_guard *g, uint64_t ticket, enum tb_phase next,
   valid = next == g->prior && native_safe && gpu_safe; break;
  case TB_OP_GPU_CLOSE:
   valid = next == TB_PHASE_CLOSED && native_safe && gpu_safe; break;
+ case TB_OP_CONTROL:
+  valid = next == g->prior && native_safe == g->prior_native_safe &&
+          gpu_safe == g->prior_gpu_safe; break;
  }
  if (!valid) goto out;
  g->phase = next; g->native_safe = native_safe;
