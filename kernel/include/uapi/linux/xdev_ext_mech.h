@@ -403,6 +403,13 @@ struct xdev_ext_socket_mech_cqe {
 /* Native NIC peer TX, separate CPU headers and device-memory payload.
  * The program writes offsets within the current frame, never DMA addresses.
  */
+/* Remote delivery state, independent of local DMA completion. */
+#define XDEV_EXT_NET_REMOTE_NONE		0U
+#define XDEV_EXT_NET_REMOTE_HELD		1U
+#define XDEV_EXT_NET_REMOTE_ACKED		2U
+#define XDEV_EXT_NET_REMOTE_FAILED	3U
+#define XDEV_EXT_NET_REMOTE_LOST		4U
+
 #define XDEV_EXT_NET_MAX_ENTRIES 16U
 #define XDEV_EXT_NET_HEADER_MAX 128U
 struct xdev_ext_net_send_desc {
