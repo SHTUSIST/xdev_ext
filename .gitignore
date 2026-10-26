@@ -1389,3 +1389,11 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_fixture.c
 !/kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_login_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_login_compat.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_login_boundaries.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_login_cases.c
+!/kernel/io_uring/xdomain/Makefile
+!/kernel/io_uring/xdomain/xdev_ext_xdomain.h
+!/kernel/io_uring/xdomain/xdev_ext_xdomain_main.c
+!/kernel/io_uring/xdomain/README.md
