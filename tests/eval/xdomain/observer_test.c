@@ -395,6 +395,54 @@ static void latch_errors(void)
  REQUIRE(observer_rec[0].error_bits & TB_XD_OBS_ERR_IDENTITY);
  observer_ok("latched record errors cannot be healed by later valid final CQE");
 }
+static void sticky_global_loss_records(void)
+{
+ struct sticky_result {
+  int invalid_build, valid_build, valid_cqe;
+  __u64 lost[3], global_bits[3], record_bits[2];
+ } actual[2]={0};
+ for(unsigned n=0;n<2;n++) {
+  struct xdev_ext_mech_ctx c=observer_reset(), invalid=c;
+  struct sticky_result *a=&actual[n];
+  /* The first error has no record. Later inputs address a previously untouched
+   * record, so an early return on the global latch must not hide their loss. */
+  observer_errors.observations_lost=n ? UINT64_MAX-1 : 0;
+  invalid.base.src_offset--;
+  a->invalid_build=build_call(&invalid);
+  a->lost[0]=observer_errors.observations_lost;
+  a->global_bits[0]=observer_errors.error_bits;
+  a->valid_build=build_call(&c);
+  a->lost[1]=observer_errors.observations_lost;
+  a->global_bits[1]=observer_errors.error_bits;
+  a->record_bits[0]=observer_rec[0].error_bits;
+  a->valid_cqe=complete_call(&c);
+  a->lost[2]=observer_errors.observations_lost;
+  a->global_bits[2]=observer_errors.error_bits;
+  a->record_bits[1]=observer_rec[0].error_bits;
+  printf("sticky diagnostic saturated=%u lost=%llu/%llu/%llu record_errors=%llu/%llu\n",
+   n,(unsigned long long)a->lost[0],(unsigned long long)a->lost[1],
+   (unsigned long long)a->lost[2],(unsigned long long)a->record_bits[0],
+   (unsigned long long)a->record_bits[1]);
+  REQUIRE(a->invalid_build==XDEV_EXT_MP_BUILD_ABORT);
+  REQUIRE(a->valid_build==XDEV_EXT_MP_BUILD_ABORT && a->valid_cqe==XDEV_EXT_MP_ABORT);
+  REQUIRE((a->global_bits[0] & TB_XD_OBS_ERR_KEY)!=0);
+  REQUIRE((a->global_bits[1] & a->global_bits[0])==a->global_bits[0]);
+  REQUIRE((a->global_bits[2] & a->global_bits[1])==a->global_bits[1]);
+  REQUIRE(!observer_rec[0].build_attempts && !observer_rec[0].cqe_seen);
+  REQUIRE(all_zero(&observer_rec[0].completion,sizeof(observer_rec[0].completion)));
+ }
+ /* Print both counter paths before failing, preserving evidence for the exact
+  * counts and the independent addressable-record latch requirement. */
+ fflush(stdout);
+ REQUIRE(actual[0].lost[0]==1 && actual[0].lost[1]==2 && actual[0].lost[2]==3);
+ REQUIRE(actual[0].record_bits[0]!=0 && actual[0].record_bits[1]!=0);
+ REQUIRE((actual[0].record_bits[1] & actual[0].record_bits[0])==actual[0].record_bits[0]);
+ observer_ok("sticky global error counts invalid BUILD then valid BUILD and CQE and latches record failure");
+ REQUIRE(actual[1].lost[0]==UINT64_MAX && actual[1].lost[1]==UINT64_MAX && actual[1].lost[2]==UINT64_MAX);
+ REQUIRE(actual[1].record_bits[0]!=0 && actual[1].record_bits[1]!=0);
+ REQUIRE((actual[1].record_bits[1] & actual[1].record_bits[0])==actual[1].record_bits[0]);
+ observer_ok("sticky global loss saturates while later addressable BUILD and CQE still latch failure");
+}
 int main(void)
 {
  observer_parity=1;
@@ -405,6 +453,7 @@ int main(void)
  puts("OBSERVER CASES BEGIN");
  positive_records(); retry_records(); config_errors(); identity_and_order_errors();
  key_and_map_errors(); overflow_errors(); bad_plan_errors(); failed_cqe_records(); latch_errors();
+ sticky_global_loss_records();
 #endif
  return 0;
 }
