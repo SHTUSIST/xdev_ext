@@ -12,6 +12,11 @@
 
 #include "xdev_ext_mech_core.h"
 #include "xdev_ext_mech_cpu_core.h"
+#ifdef __KERNEL__
+#include <linux/xdev_ext_family_core.h>
+#else
+#include "../include/linux/xdev_ext_family_core.h"
+#endif
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
 #define XDEV_EXT_MECH_CLASS_SIZE_MAX		4096	/* info, scratch, copies, batch area */
@@ -117,6 +122,30 @@ static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_lay
      l->frame_size > XDEV_EXT_MECH_PEER_FRAME_MAX || (l->frame_size & (l->frame_size - 1)))
   return -EOPNOTSUPP;
  return 0;
+}
+
+/* CREATE: what every stage records before its class adds facts. */
+static inline void xdev_ext_mech_stage_caps_default(const struct xdev_ext_mech_stage_uapi *u,
+						  __u32 pool_kind,
+						  struct xdev_ext_mech_stage_caps *c)
+{
+	bool peer = pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+		    (xdev_ext_mech_peer_dirs(u->class_id) & (1U << u->direction));
+	__u32 na = XDEV_EXT_CAP_NOT_APPLICABLE;
+
+	*c = (struct xdev_ext_mech_stage_caps){
+		.size = sizeof(*c),
+		.version = XDEV_EXT_MECH_STAGE_CAPS_VERSION,
+		.family = xdev_ext_mech_class_family(u->class_id),
+		.export_authority = peer ? XDEV_EXT_CAP_ESTABLISHED : na,
+		.reachability = peer ? XDEV_EXT_CAP_UNKNOWN : na,
+		.requester_mapping = peer ? XDEV_EXT_CAP_UNKNOWN : na,
+		.native_queue = XDEV_EXT_CAP_UNKNOWN,
+		.producer_visibility = peer ? XDEV_EXT_CAP_NOT_WIRED : na,
+		.last_use_quiescence = peer ? XDEV_EXT_CAP_NOT_WIRED : na,
+		.invalidation = peer ? XDEV_EXT_CAP_NOT_WIRED : na,
+		.p2p_distance = -1,
+	};
 }
 
 /* CREATE: a USER stage description (Documentation/userspace-api/xdev_ext-user-stage.rst)

@@ -110,6 +110,55 @@ int xdev_ext_peer_file_info(struct file *file, u64 *len, u64 *generation)
  return xdev_ext_peer_info(a->parent->region, len, generation, false);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_file_info);
+int xdev_ext_peer_file_describe(struct file *file, struct pci_dev *requester,
+                               struct xdev_ext_peer_backing *out)
+{
+ struct xdev_ext_peer_authority *a;
+
+ if (!file || file->f_op != &xdev_ext_peer_authority_fops)
+  return -EINVAL;
+ a = file->private_data;
+ return xdev_ext_peer_describe(a->parent->region, requester, out);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_file_describe);
+
+int xdev_ext_peer_file_premap(struct file *file, struct pci_dev *peer)
+{
+ struct xdev_ext_peer_authority *a;
+ struct xdev_ext_peer_fd_map *m;
+ struct xdev_ext_peer_fd *p;
+ int ret = 0;
+
+ if (!file || file->f_op != &xdev_ext_peer_authority_fops || !peer)
+  return -EINVAL;
+ a = file->private_data;
+ p = a->parent;
+ mutex_lock(&p->lock);
+ if (p->claimed != a) {
+  ret = -EBUSY;
+  goto unlock;
+ }
+ list_for_each_entry(m, &p->maps, node)
+  if (m->peer == peer)
+   goto unlock;
+ m = kzalloc(sizeof(*m), GFP_KERNEL);
+ if (!m) {
+  ret = -ENOMEM;
+  goto unlock;
+ }
+ ret = xdev_ext_peer_map(p->region, peer, DMA_BIDIRECTIONAL, &m->mapping);
+ if (ret) {
+  kfree(m);
+  goto unlock;
+ }
+ m->peer = peer;
+ list_add_tail(&m->node, &p->maps);
+unlock:
+ mutex_unlock(&p->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_file_premap);
+
 int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 generation,
                             u64 offset, u32 len, enum dma_data_direction dir,
                             struct xdev_ext_peer_fd_lease *handle)

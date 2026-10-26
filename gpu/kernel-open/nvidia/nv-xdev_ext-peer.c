@@ -7,14 +7,22 @@
 #define __NO_VERSION__
 #include "os-interface.h"
 #include "nv-linux.h"
+#include "nv-reg.h"
 #include "nv-lock.h"
 #include "nv-p2p.h"
 #include "nv-xdev_ext-peer.h"
+#include "nv-xdev_ext-peer-backing.h"
 #include <linux/xdev_ext_peer.h>
+#include <uapi/linux/xdev_ext_mech.h>
+
+extern NvU32 nv_dma_remap_peer_mmio;
+
 struct nv_xdev_ext_peer_allocation {
  struct nvidia_p2p_page_table *pages;
  u64 va;
  struct list_head quarantine;
+ struct pci_dev *gpu;
+ bool struct_page, coherent, external;
 };
 static LIST_HEAD(nv_xdev_ext_peer_quarantined);
 static DEFINE_MUTEX(nv_xdev_ext_peer_quarantine_lock);
@@ -66,6 +74,10 @@ static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
   }
   goto stack;
  }
+ a->gpu = nvl->pci_dev;
+ a->struct_page = NV_STATE_PTR(nvl)->mem_has_struct_page;
+ a->coherent = NV_STATE_PTR(nvl)->coherent;
+ a->external = NV_STATE_PTR(nvl)->is_external_gpu;
  *out = a;
 stack:
  nv_kmem_cache_free_stack(sp);
@@ -117,10 +129,49 @@ static int nv_xdev_ext_peer_unmap(void *private, struct pci_dev *peer,
  up_read(&nv_system_pm_lock);
  return rc;
 }
+
+/* The negation of nv_dma_use_map_resource() in nv-dma.c: a true result
+ * selects pci_bus_address(). The GPU source test pins both decisions. */
+static bool nv_xdev_ext_peer_raw_bus(struct device *dev)
+{
+ const struct dma_map_ops *ops = get_dma_ops(dev);
+
+ if (nv_dma_remap_peer_mmio == NV_DMA_REMAP_PEER_MMIO_DISABLE)
+  return true;
+ if (ops == NULL)
+#if defined(NV_DMA_IS_DIRECT_PRESENT)
+  return false;
+#else
+  return true;
+#endif
+#if defined(NV_DMA_MAP_OPS_HAS_MAP_PHYS)
+ return ops->map_phys == NULL;
+#else
+ return ops->map_resource == NULL;
+#endif
+}
+
+static int nv_xdev_ext_peer_describe(void *private, struct pci_dev *requester,
+                                    struct xdev_ext_peer_backing *out)
+{
+ struct nv_xdev_ext_peer_allocation *a = private;
+
+ out->owner = a->gpu;
+ out->flags = nv_xdev_ext_peer_backing_flags(a->struct_page, a->coherent, a->external,
+                                           nv_xdev_ext_peer_raw_bus(&requester->dev));
+ return 0;
+}
+static_assert(NV_XDEV_EXT_BACKING_MMIO_BAR == XDEV_EXT_PEER_BACKING_MMIO_BAR &&
+              NV_XDEV_EXT_BACKING_STRUCT_PAGE == XDEV_EXT_PEER_BACKING_STRUCT_PAGE &&
+              NV_XDEV_EXT_BACKING_COHERENT_C2C == XDEV_EXT_PEER_BACKING_COHERENT_C2C &&
+              NV_XDEV_EXT_BACKING_EXTERNAL == XDEV_EXT_PEER_BACKING_EXTERNAL &&
+              NV_XDEV_EXT_BACKING_RAW_BUS_ADDR == XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR);
+
 static struct xdev_ext_peer_provider_ops nv_xdev_ext_peer_ops = {
  .owner = THIS_MODULE,
  .pin = nv_xdev_ext_peer_pin, .unpin = nv_xdev_ext_peer_unpin,
  .map = nv_xdev_ext_peer_map, .unmap = nv_xdev_ext_peer_unmap,
+ .describe = nv_xdev_ext_peer_describe,
 };
 static bool nv_xdev_ext_peer_registered;
 void nv_xdev_ext_peer_init(const struct file_operations *fops)

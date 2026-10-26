@@ -121,6 +121,25 @@ int xdev_ext_peer_info(struct xdev_ext_peer_region *r, u64 *len, u64 *generation
  return ret;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_info);
+int xdev_ext_peer_describe(struct xdev_ext_peer_region *r, struct pci_dev *requester,
+                          struct xdev_ext_peer_backing *out)
+{
+ int ret;
+
+ if (!r || !requester || !out)
+  return -EINVAL;
+ *out = (struct xdev_ext_peer_backing){};
+ mutex_lock(&r->lock);
+ if (r->invalid || r->quarantined)
+  ret = -ESTALE;
+ else if (!r->provider->ops->describe)
+  ret = -EOPNOTSUPP;
+ else
+  ret = r->provider->ops->describe(r->allocation, requester, out);
+ mutex_unlock(&r->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_describe);
 static bool xdev_ext_peer_direction_valid(enum dma_data_direction dir)
 { return dir == DMA_BIDIRECTIONAL || dir == DMA_TO_DEVICE || dir == DMA_FROM_DEVICE; }
 int xdev_ext_peer_map(struct xdev_ext_peer_region *r, struct pci_dev *peer,

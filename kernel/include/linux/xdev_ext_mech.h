@@ -275,6 +275,7 @@ struct xdev_ext_mech_stage {
 	u32 index;			/* position in the chain */
 	/* XDEV_EXT_MECH_STAGE_F_POLL accepted: set by the core before ->bind */
 	bool poll;
+	struct xdev_ext_mech_stage_caps caps;	/* CREATE record, OP_STAGE_CAPS */
 };
 
 /*

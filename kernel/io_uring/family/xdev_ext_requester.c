@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Requester base below every device family: device-memory lease split. */
+/* Requester base below every device family: leases and bind-time admission. */
+#include <linux/capability.h>
+#include <linux/dma-map-ops.h>
 #include <linux/errno.h>
 #include <linux/export.h>
+#include <linux/iommu-dma.h>
+#include <linux/pci.h>
+#include <linux/pci-p2pdma.h>
+#include <linux/swiotlb.h>
+#include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_requester.h>
 
 int xdev_ext_peer_lease_split(struct file *authority, struct pci_dev *requester,
@@ -24,3 +31,50 @@ int xdev_ext_peer_lease_split(struct file *authority, struct pci_dev *requester,
 	}
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);
+
+int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+			  struct pci_dev *pdev, u32 admit_flags)
+{
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
+	struct xdev_ext_peer_backing back;
+	struct xdev_ext_admit_facts f = { .distance = -1 };
+	int ret;
+
+	if (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)
+		return -EINVAL;
+	rq->authority = xdev_ext_peer_mech_pool_file(pool);
+	rq->generation = xdev_ext_peer_mech_pool_generation(pool);
+	ret = xdev_ext_peer_file_describe(rq->authority, pdev, &back);
+	if (ret && ret != -EOPNOTSUPP)
+		return ret;
+	f.backing = ret ? 0 : back.flags;
+	f.owner_known = !ret && back.owner;
+	if (f.owner_known)
+		f.distance = pci_p2pdma_distance(back.owner, &pdev->dev, true);
+	f.untrusted = pdev->untrusted;
+	f.swiotlb_force = is_swiotlb_force_bounce(&pdev->dev);
+	f.dma_iommu = use_dma_iommu(&pdev->dev);
+	f.dma_ops = get_dma_ops(&pdev->dev) != NULL;
+	f.admin = capable(CAP_SYS_ADMIN);
+	ret = xdev_ext_admit_decide(&f, admit_flags, &rq->adm);
+	st->caps.reachability = rq->adm.reachability;
+	st->caps.p2p_distance = rq->adm.distance;
+	st->caps.backing = rq->adm.backing;
+	st->caps.refused = rq->adm.refused;
+	if (ret)
+		return ret;
+	ret = xdev_ext_peer_file_premap(rq->authority, pdev);
+	if (ret)
+		return ret;
+	st->caps.requester_mapping = XDEV_EXT_CAP_ESTABLISHED;
+	rq->pdev = pci_dev_get(pdev);
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_requester_bind);
+
+void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
+{
+	pci_dev_put(rq->pdev);
+	rq->pdev = NULL;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_requester_unbind);

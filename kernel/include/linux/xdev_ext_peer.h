@@ -11,6 +11,7 @@ struct module;
 struct pci_dev;
 struct xdev_ext_peer_region;
 struct xdev_ext_peer_mapping;
+struct xdev_ext_peer_backing;
 /* Provider-private addresses, never exposed to BPF or userspace. */
 struct xdev_ext_peer_dma {
  void *private;
@@ -26,6 +27,9 @@ struct xdev_ext_peer_provider_ops {
  int (*unpin)(void *allocation);
  int (*map)(void *allocation, struct pci_dev *, struct xdev_ext_peer_dma *);
  int (*unmap)(void *allocation, struct pci_dev *, struct xdev_ext_peer_dma *);
+ /* Optional, process context: backing as this requester would reach it. */
+ int (*describe)(void *allocation, struct pci_dev *requester,
+                 struct xdev_ext_peer_backing *out);
 };
 /* A lease is owned by one native request. Do not copy or reuse until release.
  * The peer device may use only dma_address..+len; no CPU struct page exists.
@@ -106,4 +110,16 @@ int xdev_ext_peer_release(struct xdev_ext_peer_lease *, u64 ticket, bool quiesce
 void xdev_ext_peer_invalidate(struct xdev_ext_peer_region *);
 int xdev_ext_peer_unmap(struct xdev_ext_peer_mapping *);
 int xdev_ext_peer_unpin(struct xdev_ext_peer_region *);
+
+struct xdev_ext_peer_backing {
+ struct pci_dev *owner; /* PCI function whose BAR backs the allocation; borrowed */
+ u32 flags; /* XDEV_EXT_PEER_BACKING_* in uapi/linux/xdev_ext_mech.h */
+};
+/* Process context: -EOPNOTSUPP when the provider has no describe(). */
+int xdev_ext_peer_describe(struct xdev_ext_peer_region *, struct pci_dev *requester,
+                          struct xdev_ext_peer_backing *);
+int xdev_ext_peer_file_describe(struct file *authority, struct pci_dev *requester,
+                               struct xdev_ext_peer_backing *);
+/* CREATE, process context: cache the requester mapping before its first lease. */
+int xdev_ext_peer_file_premap(struct file *authority, struct pci_dev *requester);
 #endif

@@ -46,6 +46,51 @@ enum xdev_ext_family {
 	XDEV_EXT_FAMILY_COMPUTE	= 3,	/* CE, DMA, IAA, CPU, USER */
 };
 
+/* Task F3: what the kernel established for one stage at CREATE.  None of
+ * these states is a hardware DMA proof. */
+enum xdev_ext_cap_state {
+	XDEV_EXT_CAP_UNKNOWN		= 0,	/* nothing recorded */
+	XDEV_EXT_CAP_ESTABLISHED	= 1,	/* kernel set the precondition up at CREATE */
+	XDEV_EXT_CAP_TOPOLOGY_PASSED	= 2,	/* upstream p2pdma topology judged pass, not proven */
+	XDEV_EXT_CAP_TOPOLOGY_FAILED	= 3,	/* upstream p2pdma topology judged no path */
+	XDEV_EXT_CAP_UNVERIFIED_FORCED	= 4,	/* admin override; never a zero-copy pass */
+	XDEV_EXT_CAP_NOT_WIRED		= 5,	/* the mechanism has no code for this part */
+	XDEV_EXT_CAP_NOT_APPLICABLE	= 6,	/* host-page class: no device-memory requester */
+};
+/* Provider backing of a device allocation (struct xdev_ext_peer_backing.flags). */
+#define XDEV_EXT_PEER_BACKING_MMIO_BAR		(1U << 0) /* discrete VRAM through a PCI BAR */
+#define XDEV_EXT_PEER_BACKING_STRUCT_PAGE	(1U << 1) /* struct-page memory, swiotlb possible */
+#define XDEV_EXT_PEER_BACKING_COHERENT_C2C	(1U << 2) /* non-PCI coherent aperture */
+#define XDEV_EXT_PEER_BACKING_EXTERNAL		(1U << 3) /* provider device is hot-removable */
+#define XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR	(1U << 4) /* provider maps without the IOMMU */
+/* Why an admission refused (struct xdev_ext_mech_stage_caps.refused). */
+#define XDEV_EXT_PEER_REFUSE_NO_P2P_PATH	(1U << 0)
+#define XDEV_EXT_PEER_REFUSE_SWIOTLB_FORCE	(1U << 1)
+#define XDEV_EXT_PEER_REFUSE_UNTRUSTED		(1U << 2)
+#define XDEV_EXT_PEER_REFUSE_IOMMU_RAW_ADDR	(1U << 3)
+#define XDEV_EXT_PEER_REFUSE_BACKING		(1U << 4)
+#define XDEV_EXT_PEER_REFUSE_EXTERNAL_OWNER	(1U << 5)
+
+#define XDEV_EXT_MECH_STAGE_CAPS_VERSION 1U
+/* XDEV_EXT_MECH_OP_STAGE_CAPS; out fields must be zero on input. */
+struct xdev_ext_mech_stage_caps {
+	__u32 size;			/* sizeof(struct xdev_ext_mech_stage_caps) == 64 */
+	__u32 version;			/* XDEV_EXT_MECH_STAGE_CAPS_VERSION */
+	__aligned_u64 session_id;	/* in */
+	__u32 stage;			/* in: < nr_stages */
+	__u32 family;			/* out: enum xdev_ext_family */
+	__u32 export_authority;		/* out: enum xdev_ext_cap_state, this and the next six */
+	__u32 reachability;
+	__u32 requester_mapping;
+	__u32 native_queue;
+	__u32 producer_visibility;
+	__u32 last_use_quiescence;
+	__u32 invalidation;
+	__s32 p2p_distance;		/* out: pci_p2pdma_distance(), -1 when not judged */
+	__u32 backing;			/* out: XDEV_EXT_PEER_BACKING_* */
+	__u32 refused;			/* out: XDEV_EXT_PEER_REFUSE_* seen at CREATE */
+};
+
 /* FANOUT joins the previous consumer on the same READY publication; stage 0
  * and producer/transform stages cannot carry it. Existing ABI layouts stay fixed.
  * CPU: TO_DEVICE, fd -1, arg0 fixed transform, arg1 bounded parameter; variable
@@ -518,6 +563,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_NOTIFY_ARM	= 5,
 	XDEV_EXT_MECH_OP_TRANSPORT_STATS = 6,
 	XDEV_EXT_MECH_OP_USER_STAGE	= 7,	/* struct xdev_ext_mech_user_stage */
+	XDEV_EXT_MECH_OP_STAGE_CAPS	= 8,	/* struct xdev_ext_mech_stage_caps */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U

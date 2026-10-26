@@ -2877,6 +2877,14 @@ static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s,
 				    XDEV_EXT_MECH_SITE_CREATE, ret, &illegal);
 }
 
+/* CREATE, process context: start the record before the class adds its facts. */
+static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
+				  const struct xdev_ext_mech_stage_uapi *u, __u32 pool_kind)
+{
+	xdev_ext_mech_stage_caps_default(u, pool_kind, &st->caps);
+	return st->cls->bind(st, u);
+}
+
 /*
  * CREATE, process context: classes and one callback generation per class,
  * buffers, eventfd, worker, pool, stage files and binds, then prepare.
@@ -2950,7 +2958,7 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 			if (!st->file)
 				return -EBADF;
 		}
-		ret = st->cls->bind(st, &clean[i]);
+		ret = xdev_ext_mech_class_bind(st, &clean[i], c->pool_kind);
   if (ret) {
    /* Checked classes publish any residual mapping in priv on failure. */
    if (st->cls->unbind_checked && st->priv)
@@ -3659,6 +3667,30 @@ static int xdev_ext_mech_transport_stats(struct io_ring_ctx *ctx, void __user *u
 	return copy_to_user(uarg, &out, size) ? -EFAULT : 0;
 }
 
+static int xdev_ext_mech_stage_caps_op(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct xdev_ext_mech_stage_caps in, out;
+	struct xdev_ext_mech_session *s;
+
+	if (copy_from_user(&in, uarg, sizeof(in)))
+		return -EFAULT;
+	if (in.size != sizeof(in) || in.version != XDEV_EXT_MECH_STAGE_CAPS_VERSION ||
+	    memchr_inv(&in.family, 0,
+		       sizeof(in) - offsetof(struct xdev_ext_mech_stage_caps, family)))
+		return -EINVAL;
+	/* Ring-local lookup under the register caller's uring_lock. CREATE is
+	 * the only writer of the capability record. */
+	s = xdev_ext_mech_find(ctx, in.session_id);
+	if (!s)
+		return -ENOENT;
+	if (in.stage >= s->nr_stages)
+		return -EINVAL;
+	out = s->st[in.stage].caps;
+	out.session_id = in.session_id;
+	out.stage = in.stage;
+	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
 int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 			 unsigned int nr_args)
 {
@@ -3686,6 +3718,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return xdev_ext_mech_transport_stats(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_USER_STAGE:
 		return xdev_ext_mech_user_stage_create(u64_to_user_ptr(req.arg));
+	case XDEV_EXT_MECH_OP_STAGE_CAPS:
+		return xdev_ext_mech_stage_caps_op(ctx, u64_to_user_ptr(req.arg));
 	default:
 		return -EINVAL;
 	}
