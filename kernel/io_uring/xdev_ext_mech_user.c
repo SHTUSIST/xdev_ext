@@ -35,6 +35,7 @@
 #include <linux/spinlock.h>
 #include <linux/uaccess.h>
 #include <linux/vmalloc.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_internal.h"
@@ -560,9 +561,16 @@ static void xdev_ext_user_unbind(struct xdev_ext_mech_stage *st)
 	kref_put(&obj->ref, xdev_ext_user_obj_free);
 }
 
+static const struct xdev_ext_comp_hooks xdev_ext_user_comp_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
+	.kinds = 1U << XDEV_EXT_COMP_INPLACE,
+	.producer_visibility = XDEV_EXT_CAP_NOT_WIRED,
+};
+
 /* No ->poll: F_POLL would requeue the poll work for the whole user compute. */
 static const struct xdev_ext_mech_class_ops xdev_ext_user_class = {
 	.class_id = XDEV_EXT_MECH_CLASS_USER,
+	.fam.comp = &xdev_ext_user_comp_hooks,
 	.desc_size = sizeof(struct xdev_ext_user_desc), .desc_cap = 1,
 	.owner = THIS_MODULE,
 	.bind = xdev_ext_user_bind, .unbind = xdev_ext_user_unbind,
