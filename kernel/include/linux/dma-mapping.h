@@ -107,6 +107,8 @@ static inline void debug_dma_map_single(struct device *dev, const void *addr,
 #ifdef CONFIG_HAS_DMA
 /* Mapped SG table: true only for a known backend without bounce buffers. */
 bool dma_sgtable_is_unbounced(struct device *dev, struct sg_table *sgt);
+bool dma_range_is_unbounced(struct device *dev, phys_addr_t expected,
+			    dma_addr_t addr, size_t size);
 bool dma_single_page_is_unbounced(struct device *dev, struct page *page,
 				dma_addr_t addr);
 static inline int dma_mapping_error(struct device *dev, dma_addr_t dma_addr)
@@ -190,6 +192,11 @@ static inline void dma_unmap_sg_attrs(struct device *dev,
 }
 static inline bool dma_sgtable_is_unbounced(struct device *dev,
 		struct sg_table *sgt)
+{
+	return false;
+}
+static inline bool dma_range_is_unbounced(struct device *dev,
+		phys_addr_t expected, dma_addr_t addr, size_t size)
 {
 	return false;
 }

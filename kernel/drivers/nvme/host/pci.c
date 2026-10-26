@@ -24,6 +24,7 @@
 #ifdef CONFIG_XDEV_EXT_MECH
 #include <linux/xdev_ext_peer.h>
 #include <uapi/linux/xdev_ext_peer.h>
+#include <trace/events/xdev_ext.h>
 #include "xdev_ext_peer_nvme_core.h"
 #endif
 #include <linux/suspend.h>
@@ -650,11 +651,142 @@ static void nvme_free_descriptors(struct nvme_queue *nvmeq, struct request *req)
 	}
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/* All fields describe observation only; they never decide request admission. */
+static bool nvme_native_dma_span(struct device *dev,
+		struct xdev_ext_native_event *e, phys_addr_t phys,
+		dma_addr_t dma, u32 bytes, bool eligible)
+{
+	bool certified = eligible &&
+		dma_range_is_unbounced(dev, phys, dma, bytes);
+
+	e->address = phys;
+	e->native_user_data = dma;
+	e->bytes = bytes;
+	e->accepted = certified;
+	e->status = certified ? 0 : -EOPNOTSUPP;
+	trace_native_event(e);
+	e->aux += bytes;
+	e->sequence++;
+	return certified;
+}
+
+/* DMA coalescing changes nents: walk both ordered byte lists independently. */
+static bool nvme_native_dma_sg(struct device *dev, struct sg_table *sgt,
+		struct xdev_ext_native_event *e)
+{
+	struct scatterlist *source = sgt->sgl, *mapped = sgt->sgl;
+	u32 si = 0, di = 0, source_off = 0, dma_off = 0;
+	bool eligible, complete = true;
+
+	if (!sgt->orig_nents || !sgt->nents)
+		return false;
+	eligible = dma_sgtable_is_unbounced(dev, sgt);
+	while (si < sgt->orig_nents && di < sgt->nents) {
+		phys_addr_t phys = sg_phys(source) + source_off;
+		u32 bytes;
+
+		if (!source->length || !sg_dma_len(mapped))
+			return false;
+		bytes = min_t(u32, source->length - source_off,
+				  sg_dma_len(mapped) - dma_off);
+		bytes = min_t(u32, bytes, PAGE_SIZE - offset_in_page(phys));
+		if (!nvme_native_dma_span(dev, e, phys,
+				sg_dma_address(mapped) + dma_off, bytes,
+				eligible && !is_pci_p2pdma_page(sg_page(source))))
+			complete = false;
+		source_off += bytes;
+		dma_off += bytes;
+		if (source_off == source->length) {
+			source = sg_next(source);
+			source_off = 0;
+			si++;
+		}
+		if (dma_off == sg_dma_len(mapped)) {
+			mapped = sg_next(mapped);
+			dma_off = 0;
+			di++;
+		}
+	}
+	return complete && si == sgt->orig_nents && di == sgt->nents &&
+		!source_off && !dma_off;
+}
+
+static bool nvme_native_dma_enabled(struct request *req)
+{
+	return trace_native_event_enabled() &&
+		(nvme_req(req)->flags & (NVME_REQ_XDEV_EXT_ZC | NVME_REQ_USERCMD)) &&
+		blk_rq_nr_phys_segments(req);
+}
+
+/*
+ * Called at the actual SQ copy after every prep step succeeded, including
+ * metadata mapping. A seal therefore also covers this hardware issue site.
+ * Repeated snapshots/retries are intentionally left visible to the importer.
+ */
+static void nvme_native_dma_trace(struct nvme_dev *dev, struct request *req)
+{
+	struct xdev_ext_native_event e = {
+		.phase = "dma_span", .class_id = 3,
+		.cookie = (u64)(unsigned long)req,
+	};
+	struct nvme_iod *iod;
+	bool certified;
+
+	if (!nvme_native_dma_enabled(req))
+		return;
+	/* Request flags, not the asynchronous submitter's current task. */
+	e.origin = nvme_req(req)->flags & NVME_REQ_XDEV_EXT_ZC ? "K" : "U";
+	iod = blk_mq_rq_to_pdu(req);
+	if (iod->dma_len) {
+		struct bio_vec bv = req_bvec(req);
+
+		certified = nvme_native_dma_span(dev->dev, &e,
+				page_to_phys(bv.bv_page) + bv.bv_offset,
+				iod->first_dma, iod->dma_len,
+				!is_pci_p2pdma_page(bv.bv_page) &&
+				iod->dma_len == bv.bv_len);
+	} else {
+		certified = nvme_native_dma_sg(dev->dev, &iod->sgt, &e);
+	}
+	certified = certified && e.aux == blk_rq_payload_bytes(req) &&
+		!blk_integrity_rq(req);
+	e.phase = "dma_seal";
+	e.accepted = certified;
+	e.status = certified ? 0 : -EOPNOTSUPP;
+	e.bytes = blk_rq_payload_bytes(req);
+	e.aux = e.sequence;
+	e.address = 0;
+	e.sequence = 0;
+	e.native_user_data = 0;
+	trace_native_event(&e);
+}
+
+static void nvme_native_dma_unmap(struct request *req)
+{
+	struct xdev_ext_native_event e = {
+		.phase = "dma_unmap", .class_id = 3, .accepted = 1,
+		.cookie = (u64)(unsigned long)req,
+	};
+
+	if (!nvme_native_dma_enabled(req))
+		return;
+	e.origin = nvme_req(req)->flags & NVME_REQ_XDEV_EXT_ZC ? "K" : "U";
+	e.bytes = blk_rq_payload_bytes(req);
+	trace_native_event(&e);
+}
+#else
+static inline void nvme_native_dma_trace(struct nvme_dev *dev,
+		struct request *req) { }
+static inline void nvme_native_dma_unmap(struct request *req) { }
+#endif
+
 static void nvme_unmap_data(struct nvme_dev *dev, struct nvme_queue *nvmeq,
 			    struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
 
+	nvme_native_dma_unmap(req);
 	if (iod->dma_len) {
 		dma_unmap_page(dev->dev, iod->first_dma, iod->dma_len,
 			       rq_dma_dir(req));
@@ -1065,6 +1197,7 @@ static blk_status_t nvme_queue_rq(struct blk_mq_hw_ctx *hctx,
 	if (unlikely(ret))
 		return ret;
 	spin_lock(&nvmeq->sq_lock);
+	nvme_native_dma_trace(dev, req);
 	nvme_sq_copy_cmd(nvmeq, &iod->cmd);
 	nvme_write_sq_db(nvmeq, bd->last);
 	spin_unlock(&nvmeq->sq_lock);
@@ -1082,6 +1215,7 @@ static void nvme_submit_cmds(struct nvme_queue *nvmeq, struct rq_list *rqlist)
 	while ((req = rq_list_pop(rqlist))) {
 		struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
 
+		nvme_native_dma_trace(nvmeq->dev, req);
 		nvme_sq_copy_cmd(nvmeq, &iod->cmd);
 	}
 	nvme_write_sq_db(nvmeq, true);

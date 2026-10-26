@@ -953,6 +953,31 @@ construct_skb:
 	return failure ? budget : (int)total_rx_packets;
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/* Observe the DMA address actually written, separately from pool mapping. */
+static void ice_native_dma_tx(struct xsk_buff_pool *pool,
+		struct xdp_desc *desc, struct ice_tx_desc *tx_desc)
+{
+	struct xdev_ext_native_event e;
+
+	if (!trace_native_event_enabled())
+		return;
+	e = (struct xdev_ext_native_event) {
+		.phase = "dma_tx", .origin = "U", .class_id = 2,
+		.cookie = (u64)(unsigned long)pool,
+		.address = desc->addr, .bytes = desc->len,
+		.native_user_data = le64_to_cpu(tx_desc->buf_addr),
+		/* Initial scope excludes multi-buffer and TX metadata options. */
+		.accepted = !desc->options,
+		.status = desc->options ? -EOPNOTSUPP : 0,
+	};
+	trace_native_event(&e);
+}
+#else
+static inline void ice_native_dma_tx(struct xsk_buff_pool *pool,
+		struct xdp_desc *desc, struct ice_tx_desc *tx_desc) { }
+#endif
+
 /**
  * ice_xmit_pkt - produce a single HW Tx descriptor out of AF_XDP descriptor
  * @xdp_ring: XDP ring to produce the HW Tx descriptor on
@@ -972,6 +997,7 @@ static void ice_xmit_pkt(struct ice_tx_ring *xdp_ring,
 
 	tx_desc = ICE_TX_DESC(xdp_ring, xdp_ring->next_to_use++);
 	tx_desc->buf_addr = cpu_to_le64(dma);
+	ice_native_dma_tx(xsk_pool, desc, tx_desc);
 	tx_desc->cmd_type_offset_bsz = ice_build_ctob(xsk_is_eop_desc(desc),
 						      0, desc->len, 0);
 
@@ -1003,6 +1029,7 @@ static void ice_xmit_pkt_batch(struct ice_tx_ring *xdp_ring,
 
 		tx_desc = ICE_TX_DESC(xdp_ring, ntu++);
 		tx_desc->buf_addr = cpu_to_le64(dma);
+		ice_native_dma_tx(xsk_pool, &descs[i], tx_desc);
 		tx_desc->cmd_type_offset_bsz = ice_build_ctob(xsk_is_eop_desc(&descs[i]),
 							      0, descs[i].len, 0);
 

@@ -439,6 +439,70 @@ static void __xp_dma_unmap(struct xsk_dma_map *dma_map, unsigned long attrs)
 	xp_destroy_dma_map(dma_map);
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+static void xp_native_dma_trace(struct xsk_buff_pool *pool)
+{
+	struct xdev_ext_native_event e = {
+		.phase = "dma_span", .origin = "U", .class_id = 2,
+		.cookie = (u64)(unsigned long)pool,
+	};
+	u64 total;
+	u32 i;
+	bool certified;
+
+	if (!trace_native_event_enabled())
+		return;
+	total = (u64)pool->dma_pages_cnt << PAGE_SHIFT;
+	certified = pool->dma_pages && pool->dev && total &&
+		pool->dma_pages_cnt == pool->umem->npgs && total <= U32_MAX &&
+		!pool->unaligned && !pool->tx_metadata_len;
+	if (certified) {
+		for (i = 0; i < pool->dma_pages_cnt; i++) {
+			dma_addr_t dma = pool->dma_pages[i] & ~XSK_NEXT_PG_CONTIG_MASK;
+			bool checked = dma_range_is_unbounced(pool->dev,
+					page_to_phys(pool->umem->pgs[i]), dma, PAGE_SIZE);
+
+			e.address = page_to_phys(pool->umem->pgs[i]);
+			e.bytes = PAGE_SIZE;
+			e.aux = (u64)i << PAGE_SHIFT;
+			e.sequence = i;
+			e.native_user_data = dma;
+			e.accepted = checked;
+			e.status = checked ? 0 : -EOPNOTSUPP;
+			trace_native_event(&e);
+			if (!checked)
+				certified = false;
+		}
+	} else {
+		i = 0;
+	}
+	e.phase = "dma_seal";
+	e.accepted = certified;
+	e.status = certified ? 0 : -EOPNOTSUPP;
+	e.address = 0;
+	e.bytes = total <= U32_MAX ? total : 0;
+	e.aux = i;
+	e.sequence = 0;
+	e.native_user_data = 0;
+	trace_native_event(&e);
+}
+
+static void xp_native_dma_unmap(struct xsk_buff_pool *pool)
+{
+	struct xdev_ext_native_event e = {
+		.phase = "dma_unmap", .origin = "U", .class_id = 2,
+		.cookie = (u64)(unsigned long)pool, .accepted = 1,
+	};
+
+	if (!trace_native_event_enabled())
+		return;
+	trace_native_event(&e);
+}
+#else
+static inline void xp_native_dma_trace(struct xsk_buff_pool *pool) { }
+static inline void xp_native_dma_unmap(struct xsk_buff_pool *pool) { }
+#endif
+
 void xp_dma_unmap(struct xsk_buff_pool *pool, unsigned long attrs)
 {
 	struct xsk_dma_map *dma_map;
@@ -447,6 +511,8 @@ void xp_dma_unmap(struct xsk_buff_pool *pool, unsigned long attrs)
 	if (!pool->dma_pages)
 		return;
 
+	/* Invalidate this pool attachment even when another pool retains the map. */
+	xp_native_dma_unmap(pool);
 	dma_map = xp_find_dma_map(pool);
 	if (!dma_map) {
 		WARN(1, "Could not find dma_map for device");
@@ -516,6 +582,7 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 			return err;
 
 		refcount_inc(&dma_map->users);
+		xp_native_dma_trace(pool);
 		return 0;
 	}
 
@@ -542,6 +609,7 @@ int xp_dma_map(struct xsk_buff_pool *pool, struct device *dev,
 		return err;
 	}
 
+	xp_native_dma_trace(pool);
 	return 0;
 }
 EXPORT_SYMBOL(xp_dma_map);

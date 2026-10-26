@@ -352,6 +352,62 @@ bool dma_single_page_is_unbounced(struct device *dev, struct page *page,
 }
 EXPORT_SYMBOL_GPL(dma_single_page_is_unbounced);
 
+/*
+ * Observe an already successful streaming map without changing its routing.
+ * Unlike the whole-page helper, this checks partial and multi-page mappings.
+ * False means uncertified, and must not be counted as an observed bounce.
+ */
+bool dma_range_is_unbounced(struct device *dev, phys_addr_t expected,
+			    dma_addr_t addr, size_t size)
+{
+	const struct dma_map_ops *ops = get_dma_ops(dev);
+	struct iommu_domain *domain = NULL;
+	size_t granule = PAGE_SIZE;
+	bool direct;
+
+	/* Include the one-past address used by arch_dma_unmap_page_direct(). */
+	if (!size || size > (dma_addr_t)~0 - addr ||
+	    size - 1 > (phys_addr_t)~0 - expected)
+		return false;
+	direct = dma_map_direct(dev, ops) ||
+		 arch_dma_unmap_page_direct(dev, addr + size);
+	if (!direct) {
+		if (!use_dma_iommu(dev))
+			return false;
+		domain = iommu_get_domain_for_dev(dev);
+		if (!domain || !domain->pgsize_bitmap)
+			return false;
+		granule = min_t(size_t, PAGE_SIZE,
+				1UL << __ffs(domain->pgsize_bitmap));
+	}
+
+	while (size) {
+		size_t step = min_t(size_t, size,
+				   granule - (addr & (granule - 1)));
+		phys_addr_t first, last;
+
+		if (direct) {
+			first = dma_to_phys(dev, addr);
+			last = dma_to_phys(dev, addr + step - 1);
+			if (swiotlb_find_pool(dev, first) ||
+			    swiotlb_find_pool(dev, last))
+				return false;
+		} else {
+			first = iommu_iova_to_phys(domain, addr);
+			last = iommu_iova_to_phys(domain, addr + step - 1);
+			if (!first || !last)
+				return false;
+		}
+		if (first != expected || last != expected + step - 1)
+			return false;
+		expected += step;
+		addr += step;
+		size -= step;
+	}
+	return true;
+}
+EXPORT_SYMBOL_GPL(dma_range_is_unbounced);
+
 void dma_unmap_sg_attrs(struct device *dev, struct scatterlist *sg,
 				      int nents, enum dma_data_direction dir,
 				      unsigned long attrs)
