@@ -1391,3 +1391,6 @@
 !/kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c
 !/tests/eval/xdomain/
 !/tests/eval/xdomain/observer_contract.h
+!/tests/eval/xdomain/test_observer.py
+!/tests/eval/xdomain/observer_test.c
+!/kernel/tools/xdev_ext_mech/xdomain_check.bpf.c
