@@ -55,7 +55,7 @@ struct xdev_ext_xd_stage {
 	int stage_error;
 	/* Worker-only current authority; callbacks change epoch, never this token. */
 	struct { u64 id, epoch, ticket; u32 event; struct xdev_ext_net_slot *slot;
-		struct xdev_ext_xd_reply *reply; bool rts, ctl; } current;
+		struct xdev_ext_xd_reply *reply; bool rts, ctl; } worker_event;
 };
 
 static struct xdev_ext_xd_ep *xdev_ext_xd_ep_of(struct xdev_ext_xd_stage *xs)
@@ -367,9 +367,9 @@ static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *
 				i->credit = m->group + XDEV_EXT_REL_MAX_WINDOW;
 		}
 	}
-	xs->current.id = i->event_id; xs->current.epoch = i->epoch; xs->current.event = event;
-	xs->current.slot = s; xs->current.reply = r; xs->current.rts = rts; xs->current.ctl = ctl;
-	xs->current.ticket = s ? s->ticket : 0;
+	xs->worker_event.id = i->event_id; xs->worker_event.epoch = i->epoch; xs->worker_event.event = event;
+	xs->worker_event.slot = s; xs->worker_event.reply = r; xs->worker_event.rts = rts; xs->worker_event.ctl = ctl;
+	xs->worker_event.ticket = s ? s->ticket : 0;
 }
 static int xdev_ext_xd_protocol_call(struct xdev_ext_xd_stage *xs,
 		const struct xdev_ext_xdomain_proto_info *info, struct xdev_ext_xdomain_proto_result *result)
@@ -387,10 +387,10 @@ static int xdev_ext_xd_protocol_call(struct xdev_ext_xd_stage *xs,
 }
 static void xd_drop_input(struct xdev_ext_xd_stage *xs)
 {
-	if (xs->current.ctl && xs->ctl_count) {
+	if (xs->worker_event.ctl && xs->ctl_count) {
 		xs->ctl_count--; memmove(xs->ctl, xs->ctl + 1, xs->ctl_count * sizeof(xs->ctl[0]));
 	}
-	if (xs->current.rts && xs->rts_count) {
+	if (xs->worker_event.rts && xs->rts_count) {
 		xs->rts_count--; memmove(xs->rts, xs->rts + 1, xs->rts_count * sizeof(xs->rts[0]));
 	}
 }
@@ -481,10 +481,10 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 	     act != XDEV_EXT_XDP_ACT_REJECT_RTS && act != XDEV_EXT_XDP_ACT_FAIL_LINK &&
 	     act != XDEV_EXT_XDP_ACT_CANCEL_ARMED && v->status)) return -EPROTO;
 	spin_lock_irqsave(&ns->lock, flags);
-	s = xs->current.slot; f = s ? xd_fact(xs, s) : NULL; r = xs->current.reply;
-	if (xs->event_id == ~0ULL || xs->current.id != i->event_id || xs->current.event != i->event) { ret = -EPROTO; goto out; }
-	if (xs->epoch != i->epoch || (s && (!s->busy || s->ticket != xs->current.ticket ||
-	    xdev_ext_mech_batch_ticket(s->batch) != xs->current.ticket)) ||
+	s = xs->worker_event.slot; f = s ? xd_fact(xs, s) : NULL; r = xs->worker_event.reply;
+	if (xs->event_id == ~0ULL || xs->worker_event.id != i->event_id || xs->worker_event.event != i->event) { ret = -EPROTO; goto out; }
+	if (xs->epoch != i->epoch || (s && (!s->busy || s->ticket != xs->worker_event.ticket ||
+	    xdev_ext_mech_batch_ticket(s->batch) != xs->worker_event.ticket)) ||
 	    i->pool_generation != xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(ns->st->s))) { ret = -ESTALE; goto out; }
 	/* STOP may win without a class callback. Recheck before every side effect. */
 	if (((i->facts & XDEV_EXT_XDP_F_ADMITS) && !xdev_ext_mech_session_admits(ns->st->s)) ||
@@ -549,7 +549,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		f->reply = r; s->state = XDEV_EXT_RDV_ARMED; f->arm_order = ++xs->order; f->event = 0;
 		break;
 	case XDEV_EXT_XDP_ACT_RX_POST:
-		if (!ns->rx || !s || !xs->current.rts || i->event != XDEV_EXT_XDP_EV_RTS ||
+		if (!ns->rx || !s || !xs->worker_event.rts || i->event != XDEV_EXT_XDP_EV_RTS ||
 		    s->state != XDEV_EXT_RDV_ARMED || xs->posted_groups || f->reserved || f->accepted ||
 		    i->local_status || xs->rts[0].canceled || !(i->facts & XDEV_EXT_XDP_F_ADMITS)) { ret = -EPROTO; break; }
 		if (!ns->rx_rel_ready) {
@@ -575,7 +575,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		spin_unlock_irqrestore(&ns->lock, flags);
 		return xd_post(xs, s, i);
 	case XDEV_EXT_XDP_ACT_TX_POST:
-		if (ns->rx || !s || i->event != XDEV_EXT_XDP_EV_CTS || !xs->current.ctl ||
+		if (ns->rx || !s || i->event != XDEV_EXT_XDP_EV_CTS || !xs->worker_event.ctl ||
 		    s->state != XDEV_EXT_RDV_ANNOUNCED || f->reserved || f->accepted || ns->dead ||
 		    s->local_known || s->remote != XDEV_EXT_NET_REMOTE_NONE ||
 		    i->stream != xs->stream || !(i->facts & XDEV_EXT_XDP_F_LINK_UP)) { ret = -EPROTO; break; }
@@ -589,7 +589,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 	case XDEV_EXT_XDP_ACT_ACCEPT_HELD:
 	case XDEV_EXT_XDP_ACT_ACCEPT_ACK:
 	case XDEV_EXT_XDP_ACT_ACCEPT_FAIL:
-		if (ns->rx || !s || f->published || xd_remote_final(s->remote) || !xs->current.ctl || i->stream != xs->stream || v->credit != i->msg_credit ||
+		if (ns->rx || !s || f->published || xd_remote_final(s->remote) || !xs->worker_event.ctl || i->stream != xs->stream || v->credit != i->msg_credit ||
 		    (act == XDEV_EXT_XDP_ACT_ACCEPT_HELD && i->event != XDEV_EXT_XDP_EV_HELD) ||
 		    (act == XDEV_EXT_XDP_ACT_ACCEPT_ACK && i->event != XDEV_EXT_XDP_EV_ACK) ||
 		    (act == XDEV_EXT_XDP_ACT_ACCEPT_FAIL && i->event != XDEV_EXT_XDP_EV_FAIL) ||
@@ -647,7 +647,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 			if (!r->closed && ns->rx_rel_ready) { xdev_ext_net_rx_close(&ns->rx_rel, r->group); r->closed = true; }
 			if (!r->sequestered) xd_reply_put(xs, r);
 		}
-		if (xs->current.ctl) xd_drop_input(xs);
+		if (xs->worker_event.ctl) xd_drop_input(xs);
 		if (f) { f->event = s->local_known && !f->published ? XDEV_EXT_XDP_EV_READY : 0; f->wake = 0; }
 		break;
 	case XDEV_EXT_XDP_ACT_WITHDRAW:
@@ -656,7 +656,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		s->withdrawn = true; s->withdraw_ms = now / NSEC_PER_MSEC; f->withdrawal = now; f->event = 0; f->wake = 0;
 		break;
 	case XDEV_EXT_XDP_ACT_REJECT_RTS:
-		if (!ns->rx || !xs->current.rts || !xs->rts_count || (s && f->accepted) ||
+		if (!ns->rx || !xs->worker_event.rts || !xs->rts_count || (s && f->accepted) ||
 		    v->status >= 0 || v->status != i->local_status) { ret = -EPROTO; break; }
 		{
 			struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
