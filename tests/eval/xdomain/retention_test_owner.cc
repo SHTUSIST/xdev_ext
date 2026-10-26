@@ -9,6 +9,7 @@
 #include <sys/eventfd.h>
 #include <unistd.h>
 #include <string>
+#include <stdexcept>
 #include <utility>
 
 static int ledger_fd = -1;
@@ -97,6 +98,94 @@ public:
  }
 };
 
+// Acquire inside execute, then throw without returning any result/phase. The
+// monitor is test-only and observes the shared production guard independently.
+class ThrowingOwner final : public tb::Owner {
+ tb_guard *guard_;
+ SurrogateResources *resources_ = nullptr;
+public:
+ explicit ThrowingOwner(tb_guard *guard) : guard_(guard) {}
+ ~ThrowingOwner() override
+ {
+  note("OWNER_DESTRUCTOR_ENTERED");
+  if (resources_) delete resources_;
+ }
+ tb::OwnerResult execute(const tb::Command &cmd) override
+ {
+  note("command=" + cmd.command);
+  if (cmd.command != "prepare") {
+   note("UNEXPECTED_OWNER_COMMAND=" + cmd.command);
+   return {cmd.request_id, -EPERM, TB_PHASE_NEW, false, "{}"};
+  }
+  resources_ = new SurrogateResources(guard_);
+  uint64_t ticket = 0;
+  if (tb_guard_begin(guard_, TB_OP_GPU_OPEN, &ticket) ||
+      tb_guard_end(guard_, ticket, TB_PHASE_GPU_READY, true, true) ||
+      tb_guard_begin(guard_, TB_OP_GPU_FILL, &ticket)) _exit(97);
+  note("exception_thrown");
+  throw std::runtime_error("test-only unknown acquired-resource failure");
+ }
+};
+
+class ReturnedErrorOwner final : public tb::Owner {
+ tb_guard *guard_;
+ bool acquire_;
+ SurrogateResources *resources_ = nullptr;
+public:
+ ReturnedErrorOwner(tb_guard *guard, bool acquire) : guard_(guard), acquire_(acquire) {}
+ ~ReturnedErrorOwner() override
+ {
+  note("OWNER_DESTRUCTOR_ENTERED");
+  if (resources_) delete resources_;
+ }
+ tb::OwnerResult execute(const tb::Command &cmd) override
+ {
+  note("command=" + cmd.command);
+  if (!acquire_) {
+   note("return_error_ready");
+   return {cmd.request_id, -ENODEV, TB_PHASE_NEW, false, "{}"};
+  }
+  resources_ = new SurrogateResources(guard_);
+  uint64_t ticket = 0;
+  if (tb_guard_begin(guard_, TB_OP_GPU_OPEN, &ticket) ||
+      tb_guard_end(guard_, ticket, TB_PHASE_GPU_READY, true, true)) _exit(101);
+  note("return_error_ready");
+  // A claimed safe result cannot replace the actual acquired-resource state.
+  return {cmd.request_id, -EIO, TB_PHASE_FAILED_SAFE, false, "{}"};
+ }
+};
+
+struct ExceptionProbe { tb_guard *guard; int release; bool authority_probes = true; };
+static void *probe_exception_guard(void *opaque)
+{
+ const auto *probe = static_cast<const ExceptionProbe *>(opaque);
+ char byte = 0;
+ ssize_t count;
+ do { count = read(probe->release, &byte, 1); } while (count < 0 && errno == EINTR);
+ if (count != 1) _exit(98);
+ struct tb_guard_snapshot snapshot{};
+ tb_guard_snapshot(probe->guard, &snapshot);
+ note("snapshot_held=" + std::to_string(snapshot.held));
+ note("snapshot_reasons=" + std::to_string(snapshot.hold_reasons));
+ note("snapshot_permissions=" + std::to_string(snapshot.cleanup_permissions));
+ if (!probe->authority_probes) {
+  note("snapshot_new=" + std::to_string(snapshot.phase == TB_PHASE_NEW));
+  note("return_error_probe_complete");
+  return nullptr;
+ }
+ for (const auto &op : {std::pair<tb_operation, const char *>{TB_OP_CREATE, "CREATE"},
+      {TB_OP_START, "START"}, {TB_OP_GPU_FILL, "REUSE"},
+      {TB_OP_GPU_CLOSE, "GPU_CLOSE"}, {TB_OP_EPOCH_CLOSE, "EPOCH_CLOSE"},
+      {TB_OP_CONTROL, "CONTROL"}}) {
+  uint64_t ticket = 0;
+  const int admitted = tb_guard_begin(probe->guard, op.first, &ticket);
+  note(std::string("probe_") + op.second + "=" + std::to_string(admitted));
+  if (!admitted) note(std::string("SIDE_EFFECT_") + op.second);
+ }
+ note("exception_probe_complete");
+ return nullptr;
+}
+
 int main(int argc, char **argv)
 {
  if (argc != 4) return 80;
@@ -118,6 +207,27 @@ int main(int argc, char **argv)
  note("durable=" + durable_path);
  tb_guard *guard = nullptr;
  if (tb_guard_new(TB_BACKING_GPU, &guard)) return 86;
+ if (const char *mode = std::getenv("TB_TEST_RETURN_ERROR_MODE")) {
+  const bool acquire = std::string(mode) != "new";
+  ReturnedErrorOwner owner(guard, acquire);
+  auto *probe = new ExceptionProbe{guard, std::atoi(argv[3]), acquire};
+  pthread_t monitor;
+  if (pthread_create(&monitor, nullptr, probe_exception_guard, probe)) return 102;
+  if (pthread_detach(monitor)) return 103;
+  const int result = tb::run_agent(STDIN_FILENO, STDOUT_FILENO, durable, id, guard, owner);
+  note("SUPERVISOR_RETURNED=" + std::to_string(result));
+  return 87;
+ }
+ if (std::getenv("TB_TEST_EXCEPTION_MODE")) {
+  ThrowingOwner owner(guard);
+  auto *probe = new ExceptionProbe{guard, std::atoi(argv[3])};
+  pthread_t monitor;
+  if (pthread_create(&monitor, nullptr, probe_exception_guard, probe)) return 99;
+  if (pthread_detach(monitor)) return 100;
+  const int result = tb::run_agent(STDIN_FILENO, STDOUT_FILENO, durable, id, guard, owner);
+  note("SUPERVISOR_RETURNED=" + std::to_string(result));
+  return 87;
+ }
  if (std::getenv("TB_TEST_VERIFY_MODE")) {
   // Only the resource boundary is a surrogate. Actual guard owns every proof.
   const std::pair<tb_operation, tb_phase> steps[] = {
@@ -126,8 +236,10 @@ int main(int argc, char **argv)
    {TB_OP_WAIT, TB_PHASE_TRANSPORT_DONE}, {TB_OP_STOP, TB_PHASE_DRAINED_SAFE}};
   for (const auto &step : steps) {
    uint64_t ticket = 0;
+   const bool native_safe = step.first == TB_OP_GPU_OPEN ||
+                            step.first == TB_OP_GPU_FILL || step.first == TB_OP_STOP;
    if (tb_guard_begin(guard, step.first, &ticket) ||
-       tb_guard_end(guard, ticket, step.second, true, true)) return 88;
+       tb_guard_end(guard, ticket, step.second, native_safe, true)) return 88;
   }
   if (tb_guard_pair_stopped(guard)) return 89;
   uint64_t ticket = 0;

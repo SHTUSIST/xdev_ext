@@ -217,11 +217,12 @@ def pipe_agent(role, scenario, directory):
         ledger.flush()
     prepare = None
     verify_cookie = None
+    unknown_owner_held = False
     success = scenario in ("success", "observe-gap", "observe-duplicate", "wrong-pair-stop", "bad-summary")
     while True:
         prefix = read_exact(sys.stdin.buffer, 4)
         if prefix is None:
-            if prepare is None:
+            if prepare is None and not unknown_owner_held:
                 return  # preflight-only endpoint never acquired a resource
             # Do not disappear on coordinator EOF after acquire/unknown work.
             while True:
@@ -264,6 +265,8 @@ def pipe_agent(role, scenario, directory):
                             payload=dict(session_id=0, registration_bytes=65536,
                                          producer_sync_proved=False, guard_sync_proved=False,
                                          create_error=0, stop_proved=False))
+                if scenario == "unknown-owner-prepare":
+                    response["evidence"] = {}
         elif name == "start" and success:
             response.update(phase="START_ACCEPTED", fate="ACTIVE", payload=dict(
                 start_accepted=True, arm_error=0, start_error=0))
@@ -304,7 +307,21 @@ def pipe_agent(role, scenario, directory):
         elif name == "close" and success:
             response.update(phase="CLOSED", fate="SAFE", payload=dict(closed=True, retained_resources=[]))
         elif name == "cancel":
+            owner_evidence = {}
+            if scenario == "unknown-owner-prepare":
+                unknown_owner_held = True
+            else:
+                owner_evidence = dict(owner_pid=os.getpid(), durable_path=str(path),
+                                      retained_resources=["test-only-eventfd"], recovery="manual")
+                # An actual same-process owner receipt, durably written before
+                # advertising its PID/path; not a coordinator-side hint.
+                with path.open("a") as durable:
+                    durable.write(json.dumps(dict(identity=cmd["identity"], phase="HELD",
+                                                   hold_reasons=1, **owner_evidence)) + "\n")
+                    durable.flush()
+                    os.fsync(durable.fileno())
             response.update(phase="HELD", fate="HELD", error=-1, held=True,
+                            evidence=owner_evidence,
                             payload=dict(hold_reasons=1, retained_resources=["test-only-eventfd"]))
         else:
             # Any further owner operation after HELD is recorded and rejected.
@@ -371,6 +388,27 @@ class CoordinatorProcesses(unittest.TestCase):
             self.assertTrue(worker["hold_reasons"])
             self.assertEqual(worker["phase"], "HELD")
 
+    def test_unknown_owner_receipt_keeps_owner_fields_null_and_transport_separate(self):
+        answer = self.run_case("unknown-owner-prepare")
+        self.assertIn(answer["status"], ("failed", "incomplete"))
+        self.assertTrue(answer["retained_workers"])
+        observed = {}
+        for role in ("tx", "rx"):
+            rows = [json.loads(line) for line in (self.directory / (role + ".jsonl")).read_text().splitlines()]
+            pid = rows[0]["pid"]
+            os.kill(pid, 0)
+            self.assertFalse(any("signal" in row for row in rows),
+                             "unknown owner evidence cannot authorize terminating the transport")
+            names = [row["command"]["command"] for row in rows if "command" in row]
+            self.assertFalse(set(names) & {"start", "wait", "stop", "observe", "verify", "close"})
+            observed[role] = pid
+        for worker in answer["retained_workers"]:
+            self.assertIsNone(worker["owner_pid"])
+            self.assertIsNone(worker["durable_path"])
+            self.assertTrue(worker["evidence_incomplete"])
+            self.assertEqual(worker["transport_pid"], observed[worker["identity"]["role"]])
+            self.assertTrue(pathlib.Path(worker["coordinator_log_path"]).is_file())
+
     def test_wrong_exact_sha_rejected_before_prepare(self):
         answer = self.run_case("wrong-sha")
         self.assertIn(answer["status"], ("failed", "incomplete"))
@@ -386,6 +424,31 @@ class CoordinatorProcesses(unittest.TestCase):
             path = self.directory / (role + ".jsonl")
             if path.exists():
                 self.assertNotIn('"command": "prepare"', path.read_text())
+
+    def unsupported_without_action_provider(self, case):
+        # The same peers can complete functional transport successfully. Case
+        # dispatch, rather than a failed functional fixture, must close this gate.
+        argv = lambda role: [sys.executable, "-I", str(__file__), "--pipe-agent", role,
+                             "success", str(self.directory)]
+        config = coordinator_config(self.directory)
+        config["identity"]["case"] = case
+        answer = self.coordinator.run(config, {"tx": argv("tx"), "rx": argv("rx")})
+        for role in ("tx", "rx"):
+            path = self.directory / (role + ".jsonl")
+            if path.exists():
+                rows = [json.loads(line) for line in path.read_text().splitlines()]
+                names = [row["command"]["command"] for row in rows if "command" in row]
+                self.assertNotIn("prepare", names,
+                                 case + " must fail closed before acquiring either owner")
+                self.assertFalse(set(names) & {"start", "wait", "stop", "observe", "verify", "close"})
+        self.assertEqual(answer["status"], "incomplete")
+        self.assertTrue(answer["reason"])
+
+    def test_fault_case_without_action_provider_is_incomplete_before_prepare(self):
+        self.unsupported_without_action_provider("stop-inflight")
+
+    def test_bringup_without_case_path_is_incomplete_before_prepare(self):
+        self.unsupported_without_action_provider("bringup")
 
     def test_rx_first_pair_stop_then_observe_verify_then_close_real_coordinator(self):
         answer = self.run_case("success")

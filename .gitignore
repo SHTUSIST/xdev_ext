@@ -1409,3 +1409,9 @@
 !/tests/eval/xdomain/epoch_control.c
 !/tests/eval/xdomain/control_guard_test.c
 !/tests/eval/xdomain/test_control_guard.py
+
+!/tests/eval/xdomain/platform_facts.py
+!/tests/eval/xdomain/test_platform_facts.py
+!/tests/eval/xdomain/test_native_barrier.py
+!/tests/eval/xdomain/test_action_provider.py
+!/tests/eval/xdomain/test_case_dispatch.py
