@@ -1401,3 +1401,4 @@
 !/tests/eval/xdomain/case_registry.py
 !/tests/eval/xdomain/admission.py
 !/tests/eval/xdomain/README.md
+!/tests/eval/xdomain/observer_contract.h
