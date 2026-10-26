@@ -593,6 +593,145 @@ static void stale_candidate_current_response_preserves_live_stage(void)
     CHECK(rings_running && ring_starts==starts_before && !ring_stops);
     CHECK(!xl->down_work.pending && !xl->connect_work.pending);
 }
+/* A confirmed peer restart must complete without another inbound LOGIN.
+ * Delayed packets may not erase either its incarnation or its advertised paths. */
+static void finish_confirmed_peer_recovery(u64 old_local)
+{
+    unsigned int turns=0;
+    while ((xl->connect_work.pending || xl->login_work.work.pending) && turns<120) {
+        if (xl->connect_work.pending) connect_run();
+        else login_run();
+        turns++;
+    }
+    CHECK(xl->up && xl->remote_inc==0x2222 && xl->local_inc==old_local);
+    CHECK(xl->accepted_inc==0x2222 && xl->response_inc==0x2222);
+    CHECK(endpoint.detached && dead_calls==1 && dead_error==-ENOLINK);
+    CHECK(!xl->chan[0].ep[0] && rings_running && ring_starts==2 && ring_stops==1);
+    CHECK(paths_peer.incarnation==0x2222 && paths_peer.ctl_tx_path==53);
+    CHECK(paths_peer.data_tx_path[0]==59);
+    CHECK(!xl->login_work.work.pending && !xl->connect_work.pending && !xl->down_work.pending);
+}
+static void confirmed_peer_survives_stale_login_before_connect(void)
+{
+    up_link(); bind_ep(false); u64 old_local=xl->local_inc;
+    struct xdev_ext_xd_login changed=peer_login(0x2222),stale=peer_login(0x1111);
+    changed.ctl_tx_path=53; changed.data_tx_path[0]=59;
+    CHECK(deliver(&changed)==1); connect_run();
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    reply_inc=0x2222; login_run();
+    CHECK(xl->connect_work.pending && !endpoint.detached && !dead_calls);
+    CHECK(deliver(&stale)==1);
+    finish_confirmed_peer_recovery(old_local);
+}
+static int request_interleavings;
+static void stale_login_during_fresh_request(void)
+{
+    CHECK(xl->ctl_mutex.held && !xl->lock.held && !active_spins);
+    CHECK(last_request.incarnation==xl->local_inc);
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls);
+    struct xdev_ext_xd_login stale=peer_login(0x1111);
+    CHECK(deliver(&stale)==1);
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    request_interleavings++;
+}
+static void confirmed_peer_survives_stale_login_during_request(void)
+{
+    up_link(); bind_ep(false); u64 old_local=xl->local_inc;
+    struct xdev_ext_xd_login changed=peer_login(0x2222);
+    changed.ctl_tx_path=53; changed.data_tx_path[0]=59;
+    CHECK(deliver(&changed)==1); connect_run();
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    during_request=stale_login_during_fresh_request;
+    reply_inc=0x2222; login_run();
+    CHECK(request_interleavings==1 && !during_request);
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    finish_confirmed_peer_recovery(old_local);
+}
+/* Discovery must survive an old duplicate even before any worker has
+ * sampled it. Both requests still receive their own protocol response. */
+static void changed_peer_survives_stale_login_before_first_work(void)
+{
+    up_link(); bind_ep(false); u64 old_local=xl->local_inc;
+    struct xdev_ext_xd_login changed=peer_login(0x2222),stale=peer_login(0x1111);
+    changed.ctl_tx_path=53; changed.data_tx_path[0]=59;
+    CHECK(deliver(&changed)==1 && !last_response.status);
+    CHECK(deliver(&stale)==1 && !last_response.status);
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    reply_inc=0x2222;
+    connect_run();
+    finish_confirmed_peer_recovery(old_local);
+}
+static void finish_retried_third_peer_recovery(u64 old_local)
+{
+    unsigned int turns=0;
+    while ((xl->connect_work.pending || xl->login_work.work.pending) && turns<120) {
+        if (xl->connect_work.pending) connect_run();
+        else login_run();
+        turns++;
+    }
+    CHECK(xl->up && xl->remote_inc==0x3333 && xl->local_inc==old_local);
+    CHECK(xl->accepted_inc==0x3333 && xl->response_inc==0x3333);
+    CHECK(endpoint.detached && dead_calls==1 && dead_error==-ENOLINK);
+    CHECK(!xl->chan[0].ep[0] && rings_running && ring_starts==2 && ring_stops==1);
+    CHECK(paths_peer.incarnation==0x3333 && paths_peer.ctl_tx_path==61);
+    CHECK(paths_peer.data_tx_path[0]==67);
+    CHECK(!xl->login_work.work.pending && !xl->connect_work.pending && !xl->down_work.pending);
+}
+/* A single occupied candidate slot must reject a third incarnation rather
+ * than positively acknowledging and losing its only discovery advertisement. */
+static void conflicting_candidate_retries_after_fresh_rejection(void)
+{
+    up_link(); bind_ep(false); u64 old_local=xl->local_inc;
+    struct xdev_ext_xd_login second=peer_login(0x2222),third=peer_login(0x3333);
+    second.ctl_tx_path=53; second.data_tx_path[0]=59;
+    third.ctl_tx_path=61; third.data_tx_path[0]=67;
+    CHECK(deliver(&second)==1 && !last_response.status); connect_run();
+    CHECK(deliver(&third)==1 && last_response.status==EAGAIN);
+    CHECK(last_response.incarnation==old_local);
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+    /* Fresh native evidence rejects second; this must not kill the old stage. */
+    reply_inc=0x3333; login_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+    if (xl->connect_work.pending) connect_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+    CHECK(deliver(&third)==1 && !last_response.status);
+    int requests_before_retry_confirmation=requests;
+    connect_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+    CHECK(xl->login_work.work.pending);
+    login_run();
+    CHECK(requests==requests_before_retry_confirmation+1);
+    CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+    finish_retried_third_peer_recovery(old_local);
+}
+/* Duplicates of one unresolved candidate cannot refresh its finite native
+ * request budget. Exhaustion frees admission for a newly retried candidate. */
+static void exhausted_candidate_releases_slot_and_third_gets_fresh_budget(void)
+{
+    up_link(); bind_ep(false); u64 old_local=xl->local_inc;
+    struct xdev_ext_xd_login second=peer_login(0x2222),third=peer_login(0x3333);
+    second.ctl_tx_path=53; second.data_tx_path[0]=59;
+    third.ctl_tx_path=61; third.data_tx_path[0]=67;
+    CHECK(deliver(&second)==1 && !last_response.status); connect_run();
+    int requests_before=requests;
+    request_result=-ETIMEDOUT;
+    unsigned int attempts=0;
+    while (xl->login_work.work.pending && attempts<61) {
+        login_run(); attempts++;
+        CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
+        if (xl->login_work.work.pending) {
+            CHECK(deliver(&second)==1 && !last_response.status);
+            if (xl->connect_work.pending) connect_run();
+        }
+    }
+    CHECK(attempts==60 && requests==requests_before+60);
+    CHECK(!xl->login_work.work.pending && !xl->connect_work.pending);
+    request_result=0; reply_inc=0x3333;
+    CHECK(deliver(&third)==1 && !last_response.status);
+    int requests_after_exhaustion=requests;
+    finish_retried_third_peer_recovery(old_local);
+    CHECK(requests>requests_after_exhaustion && requests<=requests_after_exhaustion+60);
+}
 struct test_case { const char *name; void (*run)(void); };
 static const struct test_case cases[]={
     {"outgoing LOGIN has exact route, UUIDs, local HopIDs and incarnation",login_bytes},
@@ -650,6 +789,11 @@ static const struct test_case cases[]={
     {"mismatched response retries autonomously until a later match brings UP",mismatched_response_recovers_without_more_peer_login},
     {"persistent successful response mismatch stops within finite retry budget",persistent_successful_mismatch_has_finite_retry_budget},
     {"stale candidate LOGIN with current peer response preserves live stage",stale_candidate_current_response_preserves_live_stage},
+    {"confirmed peer restart survives stale LOGIN before connect without new discovery",confirmed_peer_survives_stale_login_before_connect},
+    {"confirmed peer restart survives stale LOGIN during own request with original paths",confirmed_peer_survives_stale_login_during_request},
+    {"changed peer discovery survives old LOGIN before first worker",changed_peer_survives_stale_login_before_first_work},
+    {"conflicting peer gets EAGAIN then retries after fresh rejection",conflicting_candidate_retries_after_fresh_rejection},
+    {"duplicate candidate has finite budget and exhaustion admits fresh peer",exhausted_candidate_releases_slot_and_third_gets_fresh_budget},
 };
 int main(int argc,char **argv)
 {
