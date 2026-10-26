@@ -1382,3 +1382,9 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_identity_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_kfunc_test.py
 !/kernel/io_uring/xdev_ext_mech_xdomain_kfunc.c
+
+!/kernel/drivers/thunderbolt/
+!/kernel/drivers/thunderbolt/test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_fixture.c.in
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_cases.c.in
