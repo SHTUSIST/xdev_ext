@@ -54,8 +54,8 @@ That prerequisite must be integrated before X7 module load/unload
 acceptance; empty registry lookup alone is insufficient for module-text
 lifetime.
 
-This task declares the X4 ring and X5 class interfaces and Kbuild objects;
-it supplies no replacement ring or class implementations. X4 owns each
+The service declares the ring and class interfaces and Kbuild objects;
+the separate ring and class files supply their implementations. X4 owns each
 control allocation's accepted, normal-completed, unknown and callback
 barrier facts, its preallocated quarantine record and independent PCI
 reference. A healthy reconnect must use fresh backing for any allocation
@@ -66,3 +66,34 @@ backing. Software retirement is not physical DMA quiescence. These X4
 requirements and the module's actual GCC link are verified in their own
 tasks; X3's host recording fixtures establish no physical DMA or
 performance result.
+
+The class dispatches bounded protocol facts on the existing session worker.
+`ctl[XD_EVENTS]`, where `XD_EVENTS = 4 * XDEV_EXT_REL_MAX_WINDOW`, holds owned
+scalar CTS/HELD/ACK/FAIL records (`ctl_count` is the occupied prefix). The
+separate `rts[XDEV_EXT_REL_MAX_WINDOW]` prefix (`rts_count`) stores owned RTS
+messages and cancellation/sequence-consumption/control-admission facts.
+`replies[2 * XDEV_EXT_REL_MAX_WINDOW]` retains group replies independently of
+reusable native slots. A reply admission survives local CQE release and ends
+only after final control acceptance or definite link resolution. Native
+uncertainty retains its original leases and control pins.
+
+For a host-only full-queue precondition, initialize every occupied `ctl` entry
+as a distinct valid decoded control record for the stage's current incarnation
+pair and endpoint channel, and set `ctl_count` to `XD_EVENTS`. Preserve the
+entire occupied prefix. Deliver a further distinct record through the actual
+`xdev_ext_xd_class_ctl` ingress: it must set `overflow` and `down_latched`
+without writing beyond or overwriting that prefix. Do not replace the real
+enqueue or capacity decision. STOP remains authoritative in the core session
+admission state and is copied into `stop_latched` on the next worker pass.
+The class reads the core's locked first-STOP timestamp, so worker delay and
+repeated STOP cannot extend the one-second bound; timestamp zero is valid.
+LINK_DOWN and overflow are sticky independently of queue occupancy. This
+precondition is fixture setup, not a production API or evidence of NHI behavior.
+
+The version-1 announcement window is fixed at
+`XDEV_EXT_REL_MAX_WINDOW` (32), independently of payload batch depth. The
+bounded RTS queue backs this announcement capacity; the single posted or
+reserved RX group and its native leases remain separately enforced. A
+pre-CTS FAIL with zero credit never increases peer credit. Reliable entries
+count logical layout segments, while RTS and native posts count the actual
+4096-byte NHI elements (at most 64); these counts are deliberately distinct.

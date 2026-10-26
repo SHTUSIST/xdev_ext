@@ -195,10 +195,53 @@ void xdev_ext_net_elem_done(struct xdev_ext_net_elem *e, int status, u32 done_le
 	e->done_len = done_len;
 	e->hdr_len = hdr_len;
 	if (xdev_ext_peer_net_track_complete(&slot->track, status, quiesced) ==
-	    XDEV_EXT_PEER_NET_TRACK_HANDOFF)
-		xdev_ext_netfam_handoff(slot->ns, slot);
+	    XDEV_EXT_PEER_NET_TRACK_HANDOFF) {
+		if (slot->ns->m->dev->hdr_policy == XDEV_EXT_NET_HDR_CHANNEL) {
+			unsigned long flags;
+
+			spin_lock_irqsave(&slot->ns->lock, flags);
+			slot->local_status = xdev_ext_peer_net_track_result(&slot->track,
+								      &slot->sequestered);
+			slot->local_known = true;
+			slot->local_quiesced = !slot->sequestered;
+			slot->ns->m->local(slot->ns, slot);
+			spin_unlock_irqrestore(&slot->ns->lock, flags);
+		} else {
+			xdev_ext_netfam_handoff(slot->ns, slot);
+		}
+	}
 }
 EXPORT_SYMBOL_GPL(xdev_ext_net_elem_done);
+
+/* CHANNEL primitives: callers hold ns->lock; none selects protocol policy. */
+void xdev_ext_netfam_remote_locked(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_net_slot *slot, u32 remote)
+{
+	(void)ns;
+	slot->remote = remote;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_netfam_remote_locked);
+
+void xdev_ext_netfam_cancel_locked(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_net_slot *slot, int err)
+{
+	(void)ns;
+	slot->local_known = true;
+	slot->local_quiesced = true;
+	slot->local_status = err;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_netfam_cancel_locked);
+
+void xdev_ext_netfam_publish_locked(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_net_slot *slot, int status, bool sequester)
+{
+	if (xdev_ext_mech_batch_completion_claim(slot->batch, slot->ticket))
+		return;
+	slot->sequestered = sequester;
+	ns->m->result(ns, slot->batch, slot, status, sequester);
+	xdev_ext_mech_batch_completion_publish(slot->batch, slot->ticket, status, sequester);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_netfam_publish_locked);
 
 /* Worker, the class fill_cqe: release the batch's leases by its final custody. */
 void xdev_ext_netfam_fill_cqe(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot **slotp)
@@ -223,6 +266,8 @@ unsigned long xdev_ext_netfam_progress(struct xdev_ext_netfam_stage *ns)
 	bool stopping = READ_ONCE(ns->dead) || !xdev_ext_mech_session_admits(ns->st->s);
 	u32 i;
 
+	if (ns->m->dev->hdr_policy == XDEV_EXT_NET_HDR_CHANNEL)
+		return msecs_to_jiffies(20);
 	if (stopping && !ns->stop_ms)
 		ns->stop_ms = now ? now : 1;
 	if (ns->rx && !ns->flushed && ns->m->dev->rx_flush) {
