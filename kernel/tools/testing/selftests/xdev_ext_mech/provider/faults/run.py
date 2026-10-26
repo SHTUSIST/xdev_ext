@@ -71,6 +71,13 @@ def generate(mutation=None):
         "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_dma_region",
         "xdev_ext_dma_xfer", "xdev_ext_dma_provider_ops", "xdev_ext_ce_region",
         "xdev_ext_ce_xfer", "xdev_ext_ce_backend_ops")]
+    # The whole DMA adapter includes its family hook table in newer snapshots.
+    # Extract the actual types only when that selected adapter requires them;
+    # historical refs predate both the hook table and its contract header.
+    if "struct xdev_ext_comp_hooks" in dma:
+        structs.insert(0, structure(abi, "xdev_ext_family_hooks_hdr"))
+        structs.append(structure(source("include/linux/xdev_ext_compfam.h"),
+                                 "xdev_ext_comp_hooks"))
     structs += [structure(core, n) for n in ("xdev_ext_mech_batch", "xdev_ext_mech_session")]
     # Preserve the adapter's own structs, registry storage, every function and
     # class table, stopping before its kernel initcall only.
