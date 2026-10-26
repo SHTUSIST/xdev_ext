@@ -284,6 +284,14 @@ static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_m
 			.length = bytes,
 		};
 	default:
+		if (xdev_ext_mech_class_desc(st->class_id)->ctx_rule == XDEV_EXT_CTX_RULE_COMMON)
+			return (struct xdev_ext_binding_ctx_v2) {
+				.abi_version = XDEV_EXT_BINDING_ABI_VERSION,
+				.ctx_size = sizeof(struct xdev_ext_binding_ctx_v2),
+				.backend = XDEV_EXT_BINDING_BACKEND_UNSPEC,
+				.direction = st->direction,
+				.length = bytes,
+			};
 		return xdev_ext_binding_make_gpu_ctx(st->direction, 0, 0, bytes);
 	}
 }
@@ -2936,7 +2944,8 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		/* USER binds the user stage object, not its file: the file's
 		 * release (process exit) must be able to stop the stage. */
 		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU &&
-		    st->class_id != XDEV_EXT_MECH_CLASS_USER) {
+		    st->class_id != XDEV_EXT_MECH_CLASS_USER &&
+		    !xdev_ext_mech_class_desc(st->class_id)->no_file) {
 			st->file = fget(c->st[i].fd);
 			if (!st->file)
 				return -EBADF;

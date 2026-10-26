@@ -17,6 +17,7 @@
 #include <linux/limits.h>
 #include <linux/overflow.h>
 #include <linux/types.h>
+#include <linux/xdev_ext_family_core.h>
 #include <linux/xdev_ext_mech.h>
 
 #define XDEV_EXT_MECH_U32_MAX		U32_MAX
@@ -29,6 +30,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <linux/types.h>
+#include "../include/linux/xdev_ext_family_core.h"
 #include "../include/linux/xdev_ext_mech.h"
 
 #ifndef check_add_overflow
@@ -657,11 +659,7 @@ static inline void xdev_ext_mech_quarantine_add(struct xdev_ext_mech_quarantine 
  */
 static inline bool xdev_ext_mech_class_known(__u32 class_id)
 {
-	return class_id == XDEV_EXT_MECH_CLASS_AFXDP ||
-	       class_id == XDEV_EXT_MECH_CLASS_NVME || class_id == XDEV_EXT_MECH_CLASS_CE ||
-	       class_id == XDEV_EXT_MECH_CLASS_DMA || class_id == XDEV_EXT_MECH_CLASS_IAA ||
-	       class_id == XDEV_EXT_MECH_CLASS_CPU || class_id == XDEV_EXT_MECH_CLASS_USER ||
-	       class_id == XDEV_EXT_MECH_CLASS_SOCKET || class_id == XDEV_EXT_MECH_CLASS_NET;
+	return xdev_ext_mech_class_desc(class_id)->family != XDEV_EXT_FAMILY_NONE;
 }
 
 static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,

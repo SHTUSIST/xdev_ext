@@ -42,25 +42,29 @@ enum xdev_ext_mech_stage_role {
 
 static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi *u)
 {
+ const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(u->class_id);
+
  if (!xdev_ext_mech_class_known(u->class_id) ||
      (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE && u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
   return -EINVAL;
- if (u->class_id == XDEV_EXT_MECH_CLASS_IAA)
+ switch (d->role_rule) {
+ case XDEV_EXT_ROLE_RULE_TRANSFORM:
   return XDEV_EXT_MECH_ROLE_TRANSFORM;
  /* A user thread works in place on the batch's frames, like a fixed CPU
   * transform: exclusive OUT_PENDING claim, republished READY afterwards. */
- if (u->class_id == XDEV_EXT_MECH_CLASS_USER)
+ case XDEV_EXT_ROLE_RULE_INPLACE_TX:
   return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE ? XDEV_EXT_MECH_ROLE_INPLACE : -EINVAL;
- if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
+ case XDEV_EXT_ROLE_RULE_CPU_XFORM:
   if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
    return -EINVAL;
   /* A BPF compute program changes the frame in place, like a fixed one. */
   if (xdev_ext_mech_cpu_xform_fixed(u->arg0) || xdev_ext_mech_cpu_xform_bpf(u->arg0))
    return XDEV_EXT_MECH_ROLE_INPLACE;
   return xdev_ext_mech_cpu_xform_variable(u->arg0) ? XDEV_EXT_MECH_ROLE_TRANSFORM : -EINVAL;
+ default:
+  return u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
+   XDEV_EXT_MECH_ROLE_PRODUCER : XDEV_EXT_MECH_ROLE_CONSUMER;
  }
- return u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
-  XDEV_EXT_MECH_ROLE_PRODUCER : XDEV_EXT_MECH_ROLE_CONSUMER;
 }
 
 static inline __u32 xdev_ext_mech_chain_refs(const struct xdev_ext_mech_stage_uapi *st,
@@ -104,13 +108,7 @@ static inline __u32 xdev_ext_mech_stage_group_end(const struct xdev_ext_mech_sta
 /* XDEV_EXT_DMA_DIR_* bits each class implements over a PEER pool. */
 static inline __u32 xdev_ext_mech_peer_dirs(__u32 class_id)
 {
- switch (class_id) {
- case XDEV_EXT_MECH_CLASS_NVME:
- case XDEV_EXT_MECH_CLASS_NET:
-  return XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE;
- default:
-  return 0; /* AF_XDP, socket, IAA, DMA, CE, CPU, USER: host-page classes */
- }
+ return xdev_ext_mech_class_desc(class_id)->peer_dirs;
 }
 /* 0, or -EOPNOTSUPP: frame_size not a power of two in [MIN, MAX], or hdr_room != 0. */
 static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_layout *l)
@@ -194,23 +192,18 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
     return -EINVAL;
    clean.flags &= ~XDEV_EXT_MECH_STAGE_F_FANOUT;
   }
-  /* NET DMAs device memory only. */
-  if (u->class_id == XDEV_EXT_MECH_CLASS_NET && c->pool_kind != XDEV_EXT_MECH_POOL_PEER)
+  /* A class whose DMA reaches device memory only. */
+  if (xdev_ext_mech_class_desc(u->class_id)->peer_only && c->pool_kind != XDEV_EXT_MECH_POOL_PEER)
    return -EOPNOTSUPP;
-		if (!xdev_ext_mech_class_known(u->class_id) ||
-		    (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_IAA &&
-             (u->flags & ~XDEV_EXT_IAA_F_SOFTWARE)) ||
-            (u->flags && u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
-             (u->flags & ~XDEV_EXT_SOCKET_F_NXP)) ||
-            (u->flags && u->class_id != XDEV_EXT_MECH_CLASS_SOCKET &&
-             u->class_id != XDEV_EXT_MECH_CLASS_IAA && u->class_id != XDEV_EXT_MECH_CLASS_USER &&
-             (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
-		     (u->flags & ~(XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) ||
-		     ((u->flags & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) &&
-		      !(u->flags & XDEV_EXT_AFXDP_F_RELIABLE)))) ||
-		    (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
-		     u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
-			return -EINVAL;
+  {
+   const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(u->class_id);
+
+   if (!xdev_ext_mech_class_known(u->class_id) ||
+       (!d->flags_later && ((u->flags & ~d->known_flags) || (d->flags_ok && !d->flags_ok(u->flags)))) ||
+       (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
+        u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
+    return -EINVAL;
+  }
   if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
    __s64 delta;
    __u32 j;
