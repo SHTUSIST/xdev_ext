@@ -1,10 +1,10 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Only upstream/environment/family sinks. X4 ownership stays production. */
 static struct xdev_ext_xd_link *fixture_xl;
-static struct pci_dev fixture_pdev = {.dev={.id=71}};
+static struct pci_dev fixture_pdev = {.dev={.id=71,.name="0000:2d:00.0"}};
 static struct tb_nhi fixture_nhi = {.pdev=&fixture_pdev};
 static struct tb fixture_tb = {.nhi=&fixture_nhi};
-static struct tb_xdomain fixture_xd = {.tb=&fixture_tb};
+static struct tb_xdomain fixture_xd = {.tb=&fixture_tb,.dev={.name="7-1234ab"}};
 static struct tb_ring *all_rings[16];
 static unsigned ring_nr,acquire_step,fail_acquire_step,ring_frees,ring_dma_reads;
 static unsigned starts,fail_start_at,stops,stop_hop[32],stop_nr;
@@ -226,9 +226,14 @@ static int tb_xdomain_enable_paths(struct tb_xdomain *xd,int tp,int tr,int rp,in
 static int tb_xdomain_disable_paths(struct tb_xdomain *xd,int tp,int tr,int rp,int rr)
 {
     assert(!active_spins && fixture_xl->ctl_mutex.held && xd==&fixture_xd);
-    for(unsigned i=0;i<path_nr;i++) if(paths[i].tx_path==tp && paths[i].tx_ring==tr &&
-                                      paths[i].rx_path==rp && paths[i].rx_ring==rr) {
-        assert(!paths[i].disabled); paths[i].disabled=true; path_disables++; return 0;
+    /* A later retry may re-enable the same native tuple. Retire its newest
+     * ACTIVE acquisition; historical disabled records remain in the ledger. */
+    for(unsigned k=path_nr;k>0;k--) {
+        unsigned i=k-1;
+        if(!paths[i].disabled && paths[i].tx_path==tp && paths[i].tx_ring==tr &&
+           paths[i].rx_path==rp && paths[i].rx_ring==rr) {
+            paths[i].disabled=true; path_disables++; return 0;
+        }
     }
     assert(!"disable unacquired tunnel"); return -EINVAL;
 }
@@ -262,3 +267,17 @@ static void pci_dev_put(struct pci_dev *p) { if(p) { assert(p->refs>0); p->refs-
 
 static bool dma_is_freed(void *p)
 { for(unsigned i=0;i<dma_allocs;i++) if(dma_records[i].p==p) return dma_records[i].freed; assert(!"missing coherent allocation"); return false; }
+
+/* Preserve actual printk body, associated device and the real external path
+ * invocation count observed at that point. No BEGIN/END is generated here. */
+static struct { const struct device *dev;char text[512];unsigned calls; } path_logs[32];
+static unsigned path_log_nr;
+static void dev_info(const struct device *dev,const char *fmt,...)
+{
+    char text[512];va_list args;va_start(args,fmt);int n=vsnprintf(text,sizeof(text),fmt,args);va_end(args);
+    assert(n>=0 && (size_t)n<sizeof(text));
+    if(strncmp(text,"XDEV_EXT_XDOMAIN_PATH ",21))return;
+    assert(path_log_nr<ARRAY_SIZE(path_logs));
+    path_logs[path_log_nr].dev=dev;path_logs[path_log_nr].calls=path_attempts;
+    memcpy(path_logs[path_log_nr++].text,text,(size_t)n+1);
+}

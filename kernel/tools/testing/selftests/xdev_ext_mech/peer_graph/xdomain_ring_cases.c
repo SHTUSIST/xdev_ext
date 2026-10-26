@@ -104,6 +104,7 @@ static void stop_cancellation_unknown(void)
 static void going_away_has_no_completion(void)
 {
     fresh(); assert(!xdev_ext_xd_dev_ops.post_tx(&ep,elems,2)); fill_ctl();
+    void *old_rx=xl.ctl_rx_buf,*old_tx=xl.ctl_tx_buf;
     stop_nhi_gone=true; stop_link();
     assert(xl.nhi_gone && free_ctl()==0);
     /* Upstream stop generated no completion. The production glue may run its
@@ -111,7 +112,7 @@ static void going_away_has_no_completion(void)
      * accepted backing must stay UNKNOWN and every callback occurs once. */
     assert(done_nr==0 || done_nr==2);
     for(unsigned i=0;i<done_nr;i++)assert(done[i].status==-ECANCELED&&!done[i].quiesced);
-    assert(!dma_is_freed(xl.ctl_rx_buf)&&!dma_is_freed(xl.ctl_tx_buf));
+    assert(!dma_is_freed(old_rx)&&!dma_is_freed(old_tx));
     assert(data_native_calls==2 && !duplicate_native_calls);
     /* Family deadline quarantine is X5/F5, never fabricated by this ring shim. */
 }
@@ -375,7 +376,7 @@ static void unknown_native_retirement_precedes_context_free(void)
 {
     fresh();assert(!xdev_ext_xd_dev_ops.post_tx(&ep,elems,2));
     u8 raw[128]={0};assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
-    stop_nhi_gone=true;stop_link();void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;
+    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_nhi_gone=true;stop_link();
     mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
     assert(descriptor_quarantines==4&&!ring_frees&&done_nr==2);
     assert(!dma_is_freed(a)&&!dma_is_freed(b));
@@ -492,6 +493,64 @@ static void started_path_failure_retains_only_accepted_direction(void)
     assert(!dma_is_freed(a)&&dma_is_freed(b)&&path_disables==path_nr);
     for(unsigned i=0;i<hop_nr;i++)assert(hops[i].released);
 }
+
+struct scope_fields {unsigned long long scope,token,local,remote;unsigned channel;char phase[8],xd[80],role[16];int result;};
+static struct scope_fields scope_marker(unsigned index,const char *phase,const char *role,unsigned channel,int result,unsigned calls)
+{
+    assert(index<path_log_nr);const typeof(path_logs[0]) *entry=&path_logs[index];
+    assert(entry->dev==&fixture_pdev.dev && entry->calls==calls);
+    struct scope_fields f={0};int used=0;
+    int fields=sscanf(entry->text,"XDEV_EXT_XDOMAIN_PATH phase=%7s scope=%llu token=%llu local_inc=%llu remote_inc=%llu xdomain=%79s role=%15s channel=%u%n",
+        f.phase,&f.scope,&f.token,&f.local,&f.remote,f.xd,f.role,&f.channel,&used);
+    assert(fields==8 && f.scope>0 && !strcmp(f.phase,phase) && !strcmp(f.role,role) && f.channel==channel);
+    assert(f.token==xl.token && f.local==xl.local_inc && f.remote==xl.remote_inc);
+    assert(!strcmp(f.xd,dev_name(&fixture_xd.dev)));
+    char exact[512];int n=snprintf(exact,sizeof(exact),"XDEV_EXT_XDOMAIN_PATH phase=%s scope=%llu token=%llu local_inc=%llu remote_inc=%llu xdomain=%s role=%s channel=%u",
+        phase,f.scope,f.token,f.local,f.remote,f.xd,role,channel);
+    if(!strcmp(phase,"END"))n+=snprintf(exact+n,sizeof(exact)-(size_t)n," result=%d",result);
+    assert(n>0 && (size_t)n<sizeof(exact));
+    size_t actual=strlen(entry->text);if(actual && entry->text[actual-1]=='\n')actual--;
+    assert(actual==(size_t)n && !memcmp(entry->text,exact,(size_t)n));
+    return f;
+}
+static unsigned long long scope_pair(unsigned base,const char *role,unsigned channel,int result,unsigned before)
+{
+    struct scope_fields b=scope_marker(base,"BEGIN",role,channel,0,before);
+    struct scope_fields e=scope_marker(base+1,"END",role,channel,result,before+1);
+    assert(b.scope==e.scope);return b.scope;
+}
+static void path_scopes_identify_actual_ordered_calls(void)
+{
+    bare();xl.channels=2;assert(!xdev_ext_xd_rings_alloc(&xl));
+    struct xdev_ext_xd_login l={.channels=2,.ctl_tx_path=9,.data_tx_path={10,11}};
+    mutex_lock(&xl.ctl_mutex);assert(!xdev_ext_xd_paths_enable(&xl,&l));mutex_unlock(&xl.ctl_mutex);
+    assert(path_attempts==3 && path_log_nr==6);
+    unsigned long long a=scope_pair(0,"data",0,0,0),b=scope_pair(2,"data",1,0,1),c=scope_pair(4,"control",0,0,2);
+    assert(a<b && b<c);
+}
+static void failed_path_operation_has_exact_result_end(void)
+{
+    allocate();fail_path_at=2;struct xdev_ext_xd_login l=peer_login();
+    mutex_lock(&xl.ctl_mutex);assert(xdev_ext_xd_paths_enable(&xl,&l)==-EIO);mutex_unlock(&xl.ctl_mutex);
+    assert(path_attempts==2 && path_log_nr==4 && path_disables==1);
+    unsigned long long a=scope_pair(0,"data",0,0,0),b=scope_pair(2,"control",0,-EIO,1);assert(a<b);
+}
+static void retry_path_scopes_use_fresh_scope_and_identity(void)
+{
+    allocate();fail_path_at=1;struct xdev_ext_xd_login l=peer_login();
+    mutex_lock(&xl.ctl_mutex);assert(xdev_ext_xd_paths_enable(&xl,&l)==-EIO);mutex_unlock(&xl.ctl_mutex);
+    assert(path_attempts==1 && path_log_nr==2);unsigned long long old=scope_pair(0,"data",0,-EIO,0);
+    xl.local_inc++;xl.remote_inc++;xl.token++;fixture_xd.dev.name="7-abcdef";fail_path_at=0;
+    mutex_lock(&xl.ctl_mutex);assert(!xdev_ext_xd_paths_enable(&xl,&l));mutex_unlock(&xl.ctl_mutex);
+    assert(path_attempts==3 && path_log_nr==6);
+    unsigned long long a=scope_pair(2,"data",0,0,1),b=scope_pair(4,"control",0,0,2);assert(old<a && a<b);
+    mutex_lock(&xl.ctl_mutex);xdev_ext_xd_paths_disable(&xl);mutex_unlock(&xl.ctl_mutex);
+    xl.local_inc++;xl.remote_inc++;xl.token++;fixture_xd.dev.name="7-fedcba";fail_path_at=5;
+    mutex_lock(&xl.ctl_mutex);assert(xdev_ext_xd_paths_enable(&xl,&l)==-EIO);mutex_unlock(&xl.ctl_mutex);
+    assert(path_attempts==5 && path_log_nr==10);
+    unsigned long long late_data=scope_pair(6,"data",0,0,3),late_failure=scope_pair(8,"control",0,-EIO,4);
+    assert(b<late_data && late_data<late_failure);
+}
 static struct { const char *name; void (*run)(void); unsigned parameter; } cases[]={
     {"TX physical frame construction and native completion once",tx_frames_and_once,0},
     {"RX full buffers and CRC/overrun/length classification",rx_frame_classification,0},
@@ -557,6 +616,9 @@ static struct { const char *name; void (*run)(void); unsigned parameter; } cases
     {"started control path failure retains accepted RX only",started_path_failure_retains_only_accepted_direction,2},
     {"started mismatched data HopID rollback preserves control custody",started_path_failure_retains_only_accepted_direction,3},
     {"started mismatched control HopID rollback preserves control custody",started_path_failure_retains_only_accepted_direction,4},
+    {"path scopes identify actual ordered data and control calls",path_scopes_identify_actual_ordered_calls,0},
+    {"failed actual control operation emits matching END result",failed_path_operation_has_exact_result_end,0},
+    {"retry after failed data scope emits fresh scope and actual current identity",retry_path_scopes_use_fresh_scope_and_identity,0},
 };
 int main(int argc,char **argv)
 {

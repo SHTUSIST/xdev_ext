@@ -9,6 +9,7 @@ Production is required; missing artifacts are setup errors, never behavioral RED
 """
 import argparse
 from pathlib import Path
+HERE = Path(__file__).resolve().parent
 import subprocess
 import sys
 import tempfile
@@ -37,7 +38,7 @@ def declaration(text, key):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--kernel", type=Path, required=True)
+    parser.add_argument("--kernel", type=Path, default=HERE.parents[4])
     parser.add_argument("--ring-source", type=Path, help="explicit historical baseline source; never current-production evidence")
     parser.add_argument("--keep-build", type=Path)
     args = parser.parse_args()

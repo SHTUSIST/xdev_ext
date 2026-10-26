@@ -7,6 +7,7 @@ explicit historical unsafe baseline. It never supplies a retirement body.
 """
 import argparse
 from pathlib import Path
+HERE = Path(__file__).resolve().parent
 import subprocess
 import sys
 import tempfile
@@ -16,7 +17,7 @@ from xdomain_fixture import definition
 
 def main():
     p = argparse.ArgumentParser()
-    p.add_argument('--kernel', type=Path, required=True)
+    p.add_argument('--kernel', type=Path, default=HERE.parents[4])
     p.add_argument('--legacy-normal-free', action='store_true')
     p.add_argument('--keep-build', type=Path)
     a = p.parse_args()

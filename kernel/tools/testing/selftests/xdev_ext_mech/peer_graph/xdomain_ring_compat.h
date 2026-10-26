@@ -13,6 +13,7 @@
 #include <pthread.h>
 #include <stdatomic.h>
 #include <sched.h>
+#include <stdarg.h>
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef __u64 u64;
 typedef uintptr_t dma_addr_t;
 #define BIT(n) (1UL << (n))
@@ -56,11 +57,12 @@ typedef struct { int n; } atomic_t;
 typedef struct { u8 b[16]; } uuid_t;
 struct work_struct { void (*fn)(struct work_struct *); };
 struct delayed_work { struct work_struct work; };
-struct device { int id; };
+struct device { int id; const char *name; };
+static const char *dev_name(const struct device *d) { assert(d && d->name);return d->name; }
 struct pci_dev { struct device dev; int refs; };
 struct tb_nhi { struct pci_dev *pdev; bool going_away; };
 struct tb { struct tb_nhi *nhi; };
-struct tb_xdomain { struct tb *tb; };
+struct tb_xdomain { struct tb *tb;struct device dev; };
 struct tb_service { int unused; };
 struct file; struct module; struct xdev_ext_net_slot;
 struct xdev_ext_peer_mapping;
@@ -124,3 +126,9 @@ static void list_del_init(struct list_head *n) {n->prev->next=n->next;n->next->p
 #define spin_unlock spin_unlock_irq
 #define DECLARE_BITMAP(n,b) unsigned long n[BITS_TO_LONGS(b)]
 #define bitmap_zero(p,n) memset(p,0,BITS_TO_LONGS(n)*sizeof(long))
+
+/* C1 external scalar counter and printk boundary, never a marker generator. */
+typedef struct { _Atomic long long counter; } atomic64_t;
+#define ATOMIC64_INIT(v) { .counter=(v) }
+static long long atomic64_inc_return(atomic64_t *p) {return atomic_fetch_add(&p->counter,1)+1;}
+static void dev_info(const struct device *,const char *,...);
