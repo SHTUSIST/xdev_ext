@@ -1388,3 +1388,16 @@
 !/tests/eval/xdomain/gpu_adapter.h
 !/tests/eval/xdomain/agent_supervisor.h
 !/tests/eval/xdomain/Makefile
+!/tests/eval/xdomain/test_contract.py
+!/tests/eval/xdomain/test_retention.py
+!/tests/eval/xdomain/test_oracle.py
+!/tests/eval/xdomain/test_cases.py
+!/tests/eval/xdomain/retention_test_owner.cc
+!/tests/eval/xdomain/xdomain_agent.cc
+!/tests/eval/xdomain/agent_supervisor.cc
+!/tests/eval/xdomain/two_host_check.py
+!/tests/eval/xdomain/check_protocol.py
+!/tests/eval/xdomain/oracle.py
+!/tests/eval/xdomain/case_registry.py
+!/tests/eval/xdomain/admission.py
+!/tests/eval/xdomain/README.md
