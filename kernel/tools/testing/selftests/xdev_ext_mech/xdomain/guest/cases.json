@@ -1,0 +1,228 @@
+{
+  "schema_version": 1,
+  "scope": "software-module-and-verifier",
+  "api": "validate(log: str) -> {status: PASS, cases: sorted(required names), scope: software-module-and-verifier}; invalid logs raise ValueError",
+  "record_format": "XDEV_EXT_XDOMAIN_CASE=PASS|FAIL name=<name>",
+  "negative_boundary": "DENY is a verifier/helper-filter diagnostic for a syntactically valid compiled full struct_ops object on a prepared module/type/BTF kernel; compiler/ELF/BTF/module/setup failures never satisfy DENY",
+  "cases": [
+    {
+      "name": "module-load",
+      "expected": "PASS",
+      "requirement": "module and thunderbolt load and lsmod presence without controller"
+    },
+    {
+      "name": "reference-attach",
+      "expected": "PASS",
+      "requirement": "full reference build/complete program including both private kfuncs attaches"
+    },
+    {
+      "name": "link-1-enodev",
+      "expected": "PASS",
+      "requirement": "CREATE token 1 returns -ENODEV"
+    },
+    {
+      "name": "link-0-einval",
+      "expected": "PASS",
+      "requirement": "CREATE token 0 returns -EINVAL"
+    },
+    {
+      "name": "module-unload",
+      "expected": "PASS",
+      "requirement": "module unload succeeds after probes; no kernel diagnostics"
+    },
+    {
+      "name": "rel-tx-state-nvme-deny",
+      "expected": "DENY",
+      "requirement": "network-family kfunc refused in storage-family NVMe"
+    },
+    {
+      "name": "rel-tx-state-xdomain-allow",
+      "expected": "ALLOW",
+      "requirement": "network-family kfunc accepted in XDOMAIN"
+    },
+    {
+      "name": "private-info-xdomain-build-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-info-xdomain-prepare-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-info-xdomain-complete-allow",
+      "expected": "ALLOW",
+      "requirement": "bpf_xdev_ext_xdomain_info only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-info-nvme-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-info-net-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-info-af-xdp-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-info-socket-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_info refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-verdict-xdomain-build-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-verdict-xdomain-prepare-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-verdict-xdomain-complete-allow",
+      "expected": "ALLOW",
+      "requirement": "bpf_xdev_ext_xdomain_verdict only callable by XDOMAIN complete"
+    },
+    {
+      "name": "private-verdict-nvme-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-verdict-net-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-verdict-af-xdp-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "private-verdict-socket-complete-deny",
+      "expected": "DENY",
+      "requirement": "bpf_xdev_ext_xdomain_verdict refused outside XDOMAIN even in network family"
+    },
+    {
+      "name": "xdomain-complete-sleepable-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN complete sleepable struct_ops section refused"
+    },
+    {
+      "name": "xdomain-complete-nonsleepable-allow",
+      "expected": "ALLOW",
+      "requirement": "normal XDOMAIN complete accepted"
+    },
+    {
+      "name": "helper-map-lookup-allow",
+      "expected": "ALLOW",
+      "requirement": "XDOMAIN map_lookup_elem remains available"
+    },
+    {
+      "name": "helper-timer-init-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses timer-init"
+    },
+    {
+      "name": "helper-timer-start-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses timer-start"
+    },
+    {
+      "name": "helper-tail-call-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses tail-call"
+    },
+    {
+      "name": "helper-probe-read-kernel-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses probe-read-kernel"
+    },
+    {
+      "name": "helper-probe-read-user-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses probe-read-user"
+    },
+    {
+      "name": "helper-ringbuf-output-deny",
+      "expected": "DENY",
+      "requirement": "XDOMAIN helper resolver refuses ringbuf-output"
+    },
+    {
+      "name": "helper-existing-class-control-allow",
+      "expected": "ALLOW",
+      "requirement": "representative preexisting class helper remains available"
+    },
+    {
+      "name": "memory-ctx-write-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses ctx-write"
+    },
+    {
+      "name": "memory-oob-info-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses oob-info"
+    },
+    {
+      "name": "memory-oob-verdict-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses oob-verdict"
+    },
+    {
+      "name": "memory-uninit-info-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses uninit-info"
+    },
+    {
+      "name": "memory-uninit-verdict-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses uninit-verdict"
+    },
+    {
+      "name": "memory-readonly-map-info-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses readonly-map-info"
+    },
+    {
+      "name": "memory-readonly-map-verdict-deny",
+      "expected": "DENY",
+      "requirement": "verifier refuses readonly-map-verdict"
+    },
+    {
+      "name": "memory-initialized-local-info-allow",
+      "expected": "ALLOW",
+      "requirement": "initialized writable fixed-size local argument accepted"
+    },
+    {
+      "name": "memory-initialized-local-verdict-allow",
+      "expected": "ALLOW",
+      "requirement": "initialized writable fixed-size local argument accepted"
+    }
+  ],
+  "required_config": {
+    "MODULES": "y",
+    "MODULE_UNLOAD": "y",
+    "MEMORY_HOTPLUG": "y",
+    "MEMORY_HOTREMOVE": "y",
+    "MIGRATION": "y",
+    "SPARSEMEM_VMEMMAP": "y",
+    "ZONE_DEVICE": "y",
+    "PCI_P2PDMA": "y",
+    "DEBUG_INFO_BTF": "y",
+    "DEBUG_KERNEL": "y",
+    "PROVE_LOCKING": "y",
+    "DEBUG_ATOMIC_SLEEP": "y",
+    "KASAN": "y",
+    "KASAN_GENERIC": "y",
+    "DETECT_HUNG_TASK": "y",
+    "USB4": "m",
+    "XDEV_EXT_MECH_XDOMAIN": "m"
+  }
+}
