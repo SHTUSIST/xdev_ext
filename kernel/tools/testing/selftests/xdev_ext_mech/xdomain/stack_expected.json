@@ -1,0 +1,221 @@
+{
+  "version": 1,
+  "spec": "2026-10-26 thunderbolt software E2E closure \u00a78.2",
+  "source_units": [
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_main.c",
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c",
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_class.c",
+    "kernel/io_uring/family/xdev_ext_netfam.c",
+    "kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c"
+  ],
+  "wrappers": [
+    "stack_boundary.c",
+    "stack_x3.c",
+    "stack_x4.c",
+    "stack_x5.c",
+    "stack_family.c",
+    "stack_x6.c"
+  ],
+  "forbidden": [
+    "payload_copy",
+    "direct_x5_control",
+    "synthetic_cqe",
+    "policy_fallback",
+    "lock_held_bpf",
+    "lock_held_progress",
+    "unhandled_event",
+    "budget_exhaustion"
+  ],
+  "cases": [
+    {
+      "id": 1,
+      "name": "probe_login_identity",
+      "requirement": "probe/login/data-before-control path/HopIDs/rings/NHI requester identity and exactly-once release",
+      "event_budget": 4096,
+      "assertions": [
+        "two_probes",
+        "two_login",
+        "data_paths_before_control",
+        "requester_identity",
+        "hopid_balance",
+        "ring_balance"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "multiwindow_happy_path",
+      "requirement": "both ends >2 reliable windows; TX stage index0 and NVMe\u2192XDOMAIN index1; independent address/sequence oracle; ACK after RX release",
+      "event_budget": 30000,
+      "assertions": [
+        "groups_9",
+        "stage_0",
+        "stage_1",
+        "addresses",
+        "sequences",
+        "rx_release_before_ack",
+        "single_publication"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "ack_before_tx_callback",
+      "requirement": "ACK precedes final TX callback; no early publish/recycle/release; final callback completes once",
+      "event_budget": 8192,
+      "assertions": [
+        "ack_before_callback",
+        "no_early_publish",
+        "no_early_release",
+        "final_callback_once"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "wire_rts_cts_ack_faults",
+      "requirement": "RTS/CTS/ACK delay/drop/duplicate traverse actual X4 storage, X3 incarnation and real dispatch",
+      "event_budget": 18000,
+      "assertions": [
+        "rts_wire",
+        "cts_wire",
+        "ack_wire",
+        "delay",
+        "drop",
+        "duplicate",
+        "dispatch"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "preaccept_refusal_rollback",
+      "requirement": "ring/control storage refusal before acceptance; no partial/replay; exact rollback; no early accepted scalar",
+      "event_budget": 8192,
+      "assertions": [
+        "ring_refusal",
+        "control_refusal",
+        "rollback_exact",
+        "no_partial_post",
+        "no_replay",
+        "no_early_scalar"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "callback_lifetime",
+      "requirement": "duplicate and after-free callback rejected/prevented; no duplicate lease release/publication",
+      "event_budget": 8192,
+      "assertions": [
+        "duplicate_callback",
+        "after_free_callback",
+        "single_lease_release",
+        "single_publication"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "native_and_wire_errors",
+      "requirement": "CRC/partial/overrun/control CRC/incarnation/count errors reach actual X5 custody/failure",
+      "event_budget": 18000,
+      "assertions": [
+        "data_crc",
+        "partial",
+        "overrun",
+        "control_crc",
+        "incarnation",
+        "count",
+        "custody"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "stop_all_commitment_phases",
+      "requirement": "STOP ARMED/ANNOUNCED/CTS-committed/POSTED/local-done-ACK-owed; C commitment/withdrawal/control balance",
+      "event_budget": 22000,
+      "assertions": [
+        "armed",
+        "announced",
+        "cts_committed",
+        "posted",
+        "local_done_ack_owed",
+        "commitment_balance"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "loss_and_teardown",
+      "requirement": "remove/suspend/going-away/lost callback through actual X3\u2192X4 stop/free; unknown owner retained",
+      "event_budget": 18000,
+      "assertions": [
+        "remove",
+        "suspend",
+        "going_away",
+        "lost_callback",
+        "unknown_retained",
+        "no_false_free"
+      ]
+    },
+    {
+      "id": 10,
+      "name": "relogin_stale_identity",
+      "requirement": "re-login changes incarnation; stale handler/control/native callback/token cannot enter new session",
+      "event_budget": 15000,
+      "assertions": [
+        "new_incarnation",
+        "stale_handler",
+        "stale_control",
+        "stale_callback",
+        "stale_token"
+      ]
+    },
+    {
+      "id": 11,
+      "name": "sealed_bpf_boundary",
+      "requirement": "malicious/duplicate/stale/no-verdict/unsafe/wrong-event intents rejected by C, no policy fallback; replacement WAIT/resume works",
+      "event_budget": 22000,
+      "assertions": [
+        "malicious",
+        "duplicate",
+        "stale",
+        "no_verdict",
+        "unsafe",
+        "wrong_event",
+        "wait_resume",
+        "no_fallback"
+      ]
+    },
+    {
+      "id": 12,
+      "name": "geometry_and_offset_oracle",
+      "requirement": "depth4/64 reject; depth3/64 accept; zero/overflow/65 reject; shifted offset fails despite normal status/count",
+      "event_budget": 16000,
+      "assertions": [
+        "depth4_64_reject",
+        "depth3_64_accept",
+        "zero_reject",
+        "overflow_reject",
+        "65_reject",
+        "shift_offset_caught"
+      ]
+    }
+  ],
+  "mutations": [
+    {
+      "name": "disconnect_actual_vtable",
+      "must_fail": "multiwindow_happy_path"
+    },
+    {
+      "name": "bypass_x4_dispatch",
+      "must_fail": "wire_rts_cts_ack_faults"
+    },
+    {
+      "name": "replace_native_callback",
+      "must_fail": "callback_lifetime"
+    },
+    {
+      "name": "shift_mapping_offset",
+      "must_fail": "multiwindow_happy_path"
+    },
+    {
+      "name": "omit_batch_release",
+      "must_fail": "multiwindow_happy_path"
+    }
+  ]
+}
