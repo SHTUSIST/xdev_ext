@@ -1402,3 +1402,10 @@
 !/tests/eval/xdomain/admission.py
 !/tests/eval/xdomain/README.md
 !/tests/eval/xdomain/observer_contract.h
+!/tests/eval/xdomain/test_epoch_control.py
+!/tests/eval/xdomain/epoch_control_test.c
+!/tests/eval/xdomain/guard_test.c
+!/tests/eval/xdomain/check_contract.c
+!/tests/eval/xdomain/epoch_control.c
+!/tests/eval/xdomain/control_guard_test.c
+!/tests/eval/xdomain/test_control_guard.py

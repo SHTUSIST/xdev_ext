@@ -45,7 +45,7 @@ enum tb_hold_reason {
 enum tb_operation {
  TB_OP_GPU_OPEN, TB_OP_GPU_FILL, TB_OP_CREATE, TB_OP_START,
  TB_OP_WAIT, TB_OP_STOP, TB_OP_VISIBLE, TB_OP_GPU_VERIFY,
- TB_OP_EPOCH_CLOSE, TB_OP_GPU_CLOSE
+ TB_OP_EPOCH_CLOSE, TB_OP_GPU_CLOSE, TB_OP_CONTROL = 10
 };
 struct tb_guard;
 struct tb_guard_snapshot {
