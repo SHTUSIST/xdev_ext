@@ -551,6 +551,34 @@ static void retry_path_scopes_use_fresh_scope_and_identity(void)
     unsigned long long late_data=scope_pair(6,"data",0,0,3),late_failure=scope_pair(8,"control",0,-EIO,4);
     assert(b<late_data && late_data<late_failure);
 }
+
+static void established_paths_disable_after_native_stop(void)
+{
+    fresh();paths_on();assert(path_nr==2 && path_attempts==2);
+    int txp[2]={paths[0].tx_path,paths[1].tx_path};
+    int txr[2]={paths[0].tx_ring,paths[1].tx_ring};
+    int rxp[2]={paths[0].rx_path,paths[1].rx_path};
+    int rxr[2]={paths[0].rx_ring,paths[1].rx_ring};
+    if(parameter)fixture_nhi.going_away=true;
+    stop_link();
+    if(parameter) {
+        assert(descriptor_quarantines==4);
+        assert(!xl.ctl_rx&&!xl.ctl_tx&&!xl.chan[0].rx&&!xl.chan[0].tx);
+        for(unsigned i=0;i<ring_nr;i++){assert(all_rings[i]->freed);all_rings[i]->nhi=NULL;}
+    }
+    unsigned dma_reads=ring_dma_reads;
+    /* Actual X3 link_down_locked ordering: native stop already ran, so these
+     * operations must use retained scalar identities, not retired ring objects. */
+    mutex_lock(&xl.ctl_mutex);
+    xdev_ext_xd_paths_disable(&xl);xdev_ext_xd_paths_disable(&xl);
+    xdev_ext_xd_rings_free(&xl);
+    mutex_unlock(&xl.ctl_mutex);
+    assert(path_disables==2 && hop_releases==hop_nr && ring_dma_reads==dma_reads);
+    assert(!xl.ctl_paths&&!xl.chan[0].paths);
+    for(unsigned i=0;i<2;i++)assert(paths[i].disabled && paths[i].tx_path==txp[i] && paths[i].tx_ring==txr[i] &&
+        paths[i].rx_path==rxp[i] && paths[i].rx_ring==rxr[i]);
+    for(unsigned i=0;i<hop_nr;i++)assert(hops[i].released);
+}
 static struct { const char *name; void (*run)(void); unsigned parameter; } cases[]={
     {"TX physical frame construction and native completion once",tx_frames_and_once,0},
     {"RX full buffers and CRC/overrun/length classification",rx_frame_classification,0},
@@ -619,6 +647,8 @@ static struct { const char *name; void (*run)(void); unsigned parameter; } cases
     {"path scopes identify actual ordered data and control calls",path_scopes_identify_actual_ordered_calls,0},
     {"failed actual control operation emits matching END result",failed_path_operation_has_exact_result_end,0},
     {"retry after failed data scope emits fresh scope and actual current identity",retry_path_scopes_use_fresh_scope_and_identity,0},
+    {"normal established paths disable once after native stop",established_paths_disable_after_native_stop,0},
+    {"going-away established paths disable exact original hops after native retirement",established_paths_disable_after_native_stop,1},
 };
 int main(int argc,char **argv)
 {
