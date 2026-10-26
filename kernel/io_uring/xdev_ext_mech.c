@@ -35,6 +35,7 @@
 #include <linux/timer.h>
 #include <linux/uaccess.h>
 #include <linux/xdev_ext_binding.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
@@ -2881,8 +2882,18 @@ static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s,
 static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
 				  const struct xdev_ext_mech_stage_uapi *u, __u32 pool_kind)
 {
+	const struct xdev_ext_comp_hooks *comp =
+		xdev_ext_mech_class_family(st->class_id) == XDEV_EXT_FAMILY_COMPUTE ?
+		st->cls->fam.comp : NULL;
+	int ret;
+
 	xdev_ext_mech_stage_caps_default(u, pool_kind, &st->caps);
-	return st->cls->bind(st, u);
+	if (comp && !xdev_ext_comp_kind_ok(comp->kinds, xdev_ext_comp_kind_of(u)))
+		return -EINVAL;
+	ret = st->cls->bind(st, u);
+	if (!ret && comp)
+		st->caps.producer_visibility = comp->producer_visibility;
+	return ret;
 }
 
 /*
