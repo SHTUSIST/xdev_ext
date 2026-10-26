@@ -1,0 +1,81 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+#define _GNU_SOURCE
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <stddef.h>
+#include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <stdatomic.h>
+#include <assert.h>
+typedef uint32_t u32;
+typedef struct { unsigned char b[16]; } uuid_t;
+#define UUID_INIT(a,b,c,d0,d1,d2,d3,d4,d5,d6,d7) {{ (a)>>24,((a)>>16)&255,((a)>>8)&255,(a)&255,(b)>>8,(b)&255,(c)>>8,(c)&255,d0,d1,d2,d3,d4,d5,d6,d7 }}
+struct event { pthread_mutex_t lock; pthread_cond_t cond; bool set; };
+#define EVENT_INIT { PTHREAD_MUTEX_INITIALIZER, PTHREAD_COND_INITIALIZER, false }
+static void signal_event(struct event *e) { pthread_mutex_lock(&e->lock); e->set = true; pthread_cond_broadcast(&e->cond); pthread_mutex_unlock(&e->lock); }
+static bool wait_event(struct event *e, int ms) {
+ struct timespec t; clock_gettime(CLOCK_REALTIME, &t); t.tv_sec += ms/1000; t.tv_nsec += (ms%1000)*1000000L;
+ if (t.tv_nsec >= 1000000000L) { t.tv_sec++; t.tv_nsec -= 1000000000L; }
+ pthread_mutex_lock(&e->lock); int ret = 0;
+ while (!e->set && !ret) ret = pthread_cond_timedwait(&e->cond, &e->lock, &t);
+ bool set = e->set; pthread_mutex_unlock(&e->lock); return set;
+}
+static void must_wait(struct event *e) { if (!wait_event(e, 3000)) { fputs("fixture gate timeout\n", stderr); exit(3); } }
+static void join_thread(pthread_t thread) { struct timespec t; clock_gettime(CLOCK_REALTIME, &t); t.tv_sec += 3; if (pthread_timedjoin_np(thread, NULL, &t)) { fputs("bounded join failed\n", stderr); exit(3); } }
+static struct event selected = EVENT_INIT, release_selected = EVENT_INIT;
+static struct event unregister_progress = EVENT_INIT;
+static atomic_bool unregister_done, synchronize_entered;
+static _Thread_local bool dispatch_thread, removal_thread, selection_pending;
+static _Thread_local int registry_owned;
+static bool select_pause;
+static void pause_selected(void) { signal_event(&selected); must_wait(&release_selected); }
+static bool uuid_equal(const uuid_t *a, const uuid_t *b) {
+ bool equal = memcmp(a, b, sizeof(*a)) == 0;
+ if (equal && dispatch_thread && select_pause && a != b) {
+  if (registry_owned) selection_pending = true;
+  else pause_selected();
+ }
+ return equal;
+}
+#define DEFINE_MUTEX(n) pthread_mutex_t n = PTHREAD_MUTEX_INITIALIZER
+static void mutex_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); registry_owned++; }
+static void mutex_unlock(pthread_mutex_t *m) {
+ registry_owned--; pthread_mutex_unlock(m);
+ if (selection_pending) { selection_pending = false; pause_selected(); }
+}
+struct list_head { struct list_head *next, *prev; };
+#define LIST_HEAD(n) struct list_head n = { &n, &n }
+#define INIT_LIST_HEAD(h) do { (h)->next=(h); (h)->prev=(h); } while(0)
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define list_entry(p,t,m) container_of(p,t,m)
+#define list_for_each_entry_safe(p,n,h,m) for(p=list_entry((h)->next,typeof(*p),m), n=list_entry(p->m.next,typeof(*p),m); &p->m!=(h); p=n,n=list_entry(n->m.next,typeof(*n),m))
+#define list_for_each_entry_rcu(p,h,m,...) for(p=list_entry(__atomic_load_n(&(h)->next,__ATOMIC_ACQUIRE),typeof(*p),m); &p->m!=(h); p=list_entry(__atomic_load_n(&p->m.next,__ATOMIC_ACQUIRE),typeof(*p),m))
+static void list_add_tail(struct list_head *n, struct list_head *h) { n->next=h; n->prev=h->prev; h->prev->next=n; h->prev=n; }
+#define list_add_tail_rcu list_add_tail
+static void list_del_rcu(struct list_head *n) { n->next->prev=n->prev; __atomic_store_n(&n->prev->next,n->next,__ATOMIC_RELEASE); }
+static void list_del_init(struct list_head *n) { list_del_rcu(n); INIT_LIST_HEAD(n); }
+static bool list_empty(const struct list_head *n) { return n->next == n; }
+struct srcu_struct { pthread_mutex_t lock; pthread_cond_t cond; unsigned readers; };
+#define DEFINE_STATIC_SRCU(n) struct srcu_struct n = {PTHREAD_MUTEX_INITIALIZER,PTHREAD_COND_INITIALIZER,0}
+#define DEFINE_SRCU(n) DEFINE_STATIC_SRCU(n)
+static int srcu_read_lock(struct srcu_struct *s) { pthread_mutex_lock(&s->lock); s->readers++; pthread_mutex_unlock(&s->lock); return 0; }
+static void srcu_read_unlock(struct srcu_struct *s,int idx) { pthread_mutex_lock(&s->lock); s->readers--; pthread_cond_broadcast(&s->cond); pthread_mutex_unlock(&s->lock); }
+static bool srcu_read_lock_held(struct srcu_struct *s) { return true; }
+static void synchronize_srcu(struct srcu_struct *s) {
+ pthread_mutex_lock(&s->lock); atomic_store(&synchronize_entered,true); signal_event(&unregister_progress);
+ while(s->readers) pthread_cond_wait(&s->cond,&s->lock);
+ pthread_mutex_unlock(&s->lock);
+}
+struct tb {};
+enum tb_cfg_pkg_type { TB_CFG_PKG_XDOMAIN_REQ, TB_CFG_PKG_XDOMAIN_RESP };
+/* Full wire layout from pinned upstream tb_msgs.h, not a dispatcher. */
+struct tb_xdomain_header { u32 route_hi, route_lo, length_sn; };
+struct tb_xdp_header { struct tb_xdomain_header xd_hdr; uuid_t uuid; u32 type; };
+#define TB_XDOMAIN_LENGTH_MASK 63
+static bool tb_xdp_schedule_request(struct tb *tb,const void *h,size_t n) { fputs("unexpected discovery path\n",stderr); abort(); }
+/* PRODUCTION */
+/* CASES */

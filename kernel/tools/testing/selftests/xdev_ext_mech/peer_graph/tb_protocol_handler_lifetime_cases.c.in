@@ -1,0 +1,118 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+static const uuid_t test_uuid = UUID_INIT(0xfeedcafe,0x8a01,0x4e22,0xa1,0x11,0x11,0x22,0x33,0x44,0x55,0x66);
+static struct tb_xdp_header packet;
+struct callback_data {
+ struct event entered, release;
+ atomic_int calls, stale_reads;
+ atomic_bool retired;
+ bool pause;
+ int result;
+};
+#define DATA_INIT(r,p) { .entered=EVENT_INIT,.release=EVENT_INIT,.result=(r),.pause=(p) }
+static int callback(const void *buf,size_t size,void *opaque) {
+ struct callback_data *d=opaque;
+ assert(size==32 && ((const struct tb_xdp_header *)buf)->type==0);
+ atomic_fetch_add(&d->calls,1); signal_event(&d->entered);
+ if(d->pause) must_wait(&d->release);
+ if(atomic_load(&d->retired)) { atomic_fetch_add(&d->stale_reads,1); return 1; }
+ return d->result;
+}
+static void init_handler(struct tb_protocol_handler *h,struct callback_data *d) {
+ memset(h,0,sizeof(*h)); h->uuid=&test_uuid; h->callback=callback; h->data=d; INIT_LIST_HEAD(&h->list);
+ assert(tb_register_protocol_handler(h)==0);
+}
+static void *dispatch(void *unused) { dispatch_thread=true; bool handled=tb_xdomain_handle_request(NULL,TB_CFG_PKG_XDOMAIN_REQ,&packet,sizeof(packet)); return (void *)(uintptr_t)handled; }
+struct remove_arg { struct tb_protocol_handler *handler; struct callback_data *data; };
+static void *remove_handler(void *opaque) {
+ struct remove_arg *a=opaque; removal_thread=true;
+ tb_unregister_protocol_handler(a->handler);
+ if(a->data) atomic_store(&a->data->retired,true);
+ atomic_store(&unregister_done,true); signal_event(&unregister_progress); return NULL;
+}
+static bool check(bool condition,const char *message) { if(!condition) fprintf(stderr,"FAIL: %s\n",message); return condition; }
+static bool removal_waits(struct remove_arg *arg,pthread_t *thread) {
+ assert(pthread_create(thread,NULL,remove_handler,arg)==0);
+ must_wait(&unregister_progress);
+ return check(!atomic_load(&unregister_done),"unregister returned before the protected reader/callback ended");
+}
+static int active_case(bool selected_case,bool data_case,bool reregister) {
+ struct callback_data old=DATA_INIT(1,!selected_case), fresh=DATA_INIT(1,false);
+ struct tb_protocol_handler h; pthread_t reader,remover;
+ struct remove_arg arg={&h,data_case?&old:NULL};
+ init_handler(&h,&old); select_pause=selected_case;
+ assert(!pthread_create(&reader,NULL,dispatch,NULL));
+ must_wait(selected_case?&selected:&old.entered);
+ bool ok=removal_waits(&arg,&remover);
+ signal_event(selected_case?&release_selected:&old.release);
+ join_thread(reader); join_thread(remover);
+ ok &= check(atomic_load(&old.calls)==1,"selected callback was not executed exactly once");
+ ok &= check(atomic_load(&old.stale_reads)==0,"callback read data after synchronous unregister retired it");
+ select_pause=false;
+ dispatch(NULL);
+ ok &= check(atomic_load(&old.calls)==1,"new dispatch called an unregistered handler");
+ if(reregister) {
+  tb_unregister_protocol_handler(&h); /* sequential duplicate is a no-op */
+  h.data=&fresh; assert(!tb_register_protocol_handler(&h)); dispatch(NULL);
+  ok &= check(atomic_load(&fresh.calls)==1,"re-registered node did not execute exactly once with new data");
+  tb_unregister_protocol_handler(&h); tb_unregister_protocol_handler(&h);
+ }
+ return !ok;
+}
+static int next_case(void) {
+ struct callback_data a=DATA_INIT(0,true), b=DATA_INIT(0,false), c=DATA_INIT(1,false);
+ struct tb_protocol_handler ha,hb,hc; pthread_t reader,remover; struct remove_arg arg={&hb,&b};
+ init_handler(&ha,&a); init_handler(&hb,&b); init_handler(&hc,&c);
+ assert(!pthread_create(&reader,NULL,dispatch,NULL)); must_wait(&a.entered);
+ bool ok=removal_waits(&arg,&remover);
+ signal_event(&a.release); join_thread(reader); join_thread(remover);
+ ok &= check(!atomic_load(&b.stale_reads),"cached next handler was used after unregister retired its data");
+ ok &= check(atomic_load(&c.calls)==1,"return-zero traversal did not reach the remaining handler");
+ int calls=atomic_load(&b.calls); a.pause=false; dispatch(NULL);
+ ok &= check(atomic_load(&b.calls)==calls,"new dispatch reached removed next handler");
+ tb_unregister_protocol_handler(&ha); tb_unregister_protocol_handler(&hc);
+ return !ok;
+}
+static struct event registration_done=EVENT_INIT;
+struct registration_arg { struct tb_protocol_handler *handler; struct callback_data *data; };
+static void *register_handler(void *opaque) { struct registration_arg *a=opaque; init_handler(a->handler,a->data); signal_event(&registration_done); return NULL; }
+static int registration_case(void) {
+ struct callback_data a=DATA_INIT(1,true),b=DATA_INIT(1,false);
+ struct tb_protocol_handler ha,hb; pthread_t reader,writer; struct registration_arg arg={&hb,&b};
+ init_handler(&ha,&a); assert(!pthread_create(&reader,NULL,dispatch,NULL)); must_wait(&a.entered);
+ assert(!pthread_create(&writer,NULL,register_handler,&arg));
+ bool ok=check(wait_event(&registration_done,1000),"sleeping callback held registry mutex and blocked registration");
+ signal_event(&a.release); join_thread(reader); join_thread(writer);
+ tb_unregister_protocol_handler(&ha); tb_unregister_protocol_handler(&hb); return !ok;
+}
+static int semantics_case(void) {
+ struct callback_data a=DATA_INIT(0,false),b=DATA_INIT(1,false),c=DATA_INIT(1,false),wrong=DATA_INIT(1,false);
+ struct tb_protocol_handler ha,hb,hc,hw;
+ uuid_t other=test_uuid; other.b[0]^=1;
+ memset(&hw,0,sizeof(hw)); hw.uuid=&other; hw.callback=callback; hw.data=&wrong; INIT_LIST_HEAD(&hw.list); assert(tb_register_protocol_handler(&hw)==0);
+ init_handler(&ha,&a); init_handler(&hb,&b); init_handler(&hc,&c);
+ bool ok=check(tb_xdomain_handle_request(NULL,TB_CFG_PKG_XDOMAIN_REQ,&packet,32),"positive callback was not handled");
+ ok &= check(atomic_load(&wrong.calls)==0 && atomic_load(&a.calls)==1 && atomic_load(&b.calls)==1 && atomic_load(&c.calls)==0,"UUID/zero/positive callback order changed");
+ tb_unregister_protocol_handler(&ha); tb_unregister_protocol_handler(&hb); tb_unregister_protocol_handler(&hc); tb_unregister_protocol_handler(&hw);
+ a.result=-EINVAL; atomic_store(&a.calls,0); atomic_store(&b.calls,0); init_handler(&ha,&a); init_handler(&hb,&b);
+ ok &= check(!tb_xdomain_handle_request(NULL,TB_CFG_PKG_XDOMAIN_REQ,&packet,32),"negative callback incorrectly reported handled");
+ ok &= check(atomic_load(&a.calls)==1 && atomic_load(&b.calls)==0,"negative callback failed to stop traversal");
+ tb_unregister_protocol_handler(&ha); tb_unregister_protocol_handler(&hb);
+ ok &= check(!tb_xdomain_handle_request(NULL,TB_CFG_PKG_XDOMAIN_REQ,&packet,32),"empty registry incorrectly handled packet"); return !ok;
+}
+static int invalid_case(void) {
+ struct tb_protocol_handler h={0}; bool ok=check(tb_register_protocol_handler(&h)==-EINVAL,"null fields accepted");
+ h.uuid=&test_uuid; ok &= check(tb_register_protocol_handler(&h)==-EINVAL,"null callback accepted");
+ h.callback=callback; h.uuid=&tb_xdp_uuid; ok &= check(tb_register_protocol_handler(&h)==-EINVAL,"reserved discovery UUID accepted"); return !ok;
+}
+int main(int argc,char **argv) {
+ assert(argc==2); packet.uuid=test_uuid; packet.xd_hdr.length_sn=5; assert(sizeof(packet)==32);
+ if(!strcmp(argv[1],"callback_active_unregister_waits")) return active_case(false,false,false);
+ if(!strcmp(argv[1],"selected_before_callback_unregister_waits")) return active_case(true,false,false);
+ if(!strcmp(argv[1],"data_remove_without_module_unload")) return active_case(false,true,false);
+ if(!strcmp(argv[1],"re_register_after_grace")) return active_case(false,false,true);
+ if(!strcmp(argv[1],"return_zero_next_handler_removed")) return next_case();
+ if(!strcmp(argv[1],"sleepable_callback_no_registry_mutex")) return registration_case();
+ if(!strcmp(argv[1],"handled_and_unhandled_semantics")) return semantics_case();
+ if(!strcmp(argv[1],"invalid_registration")) return invalid_case();
+ return 3;
+}

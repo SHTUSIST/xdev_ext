@@ -1407,3 +1407,17 @@
 !/tests/eval/xdomain/test_observer.py
 !/tests/eval/xdomain/observer_test.c
 !/kernel/tools/xdev_ext_mech/xdomain_check.bpf.c
+
+!/kernel/drivers/thunderbolt/
+!/kernel/drivers/thunderbolt/test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_fixture.c.in
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_cases.c.in
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_fixture.c.in
+
+!/kernel/drivers/thunderbolt/xdomain.c
+!/kernel/include/linux/thunderbolt.h
+!/kernel/drivers/net/thunderbolt/
+!/kernel/drivers/net/thunderbolt/main.c
