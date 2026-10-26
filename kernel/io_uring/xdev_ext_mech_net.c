@@ -178,48 +178,111 @@ static int __init xdev_ext_net_init(void) { return xdev_ext_mech_class_register(
 late_initcall_sync(xdev_ext_net_init);
 
 #else
-/* Completion-driven NET: native contexts outlive uncertain callbacks. */
+/* Completion-driven NET: native contexts outlive uncertain callbacks.  Slots,
+ * element leases, tracker hand-off, release and deadlines are the network
+ * family runtime (io_uring/family/xdev_ext_netfam.c); NET keeps the Ethernet
+ * header rules, the netdev endpoint and the NET completion copy. */
 #include <linux/jiffies.h>
 #include <linux/ktime.h>
+#include <linux/xdev_ext_netfam.h>
 #include "xdev_ext_peer_net_track.h"
 #include "xdev_ext_peer_net_core.h"
-struct xdev_ext_net_slot;
-struct xdev_ext_net_element {
- struct xdev_ext_peer_tx tx;
- struct xdev_ext_peer_rx rx;
- struct xdev_ext_peer_fd_lease lease;
- struct xdev_ext_net_slot *slot;
- u32 bytes, header_len;
- u8 header[XDEV_EXT_NET_HEADER_MAX];
-};
-struct xdev_ext_net_slot {
- struct xdev_ext_peer_net_track track;
- struct xdev_ext_net_element element[XDEV_EXT_NET_MAX_ENTRIES];
- struct xdev_ext_mech_batch *batch;
- u64 ticket, posted_ms;
- u32 nr;
- bool busy;
-};
-struct xdev_ext_net_stage {
- struct xdev_ext_peer_net_endpoint *endpoint;
- struct xdev_ext_net_slot *slots;
- u32 depth, header_room;
- u64 stop_ms;
- bool rx, dead, flushed;
-};
 struct xdev_ext_net_batch {
  struct xdev_ext_net_send_desc desc[XDEV_EXT_NET_MAX_ENTRIES];
  struct xdev_ext_net_rx_mech_cqe cqe;
  struct xdev_ext_net_slot *slot;
  u32 nr;
 };
-static void xdev_ext_net_endpoint_dead(void *arg)
-{ xdev_ext_mech_stage_dead(arg, -ENXIO); }
+static_assert(sizeof(struct xdev_ext_peer_tx) <= XDEV_EXT_NET_DEV_AREA &&
+              sizeof(struct xdev_ext_peer_rx) <= XDEV_EXT_NET_DEV_AREA);
+static void xdev_ext_net_tx_done(struct xdev_ext_peer_tx *tx, int status, bool quiesced)
+{
+ struct xdev_ext_net_elem *e = container_of((void *)tx, struct xdev_ext_net_elem, dev);
+ xdev_ext_net_elem_done(e, status, status ? 0 : tx->len, 0, quiesced);
+}
+static void xdev_ext_net_rx_done(struct xdev_ext_peer_rx *rx, int status,
+                                 u32 header_len, u32 payload_len, bool quiesced)
+{
+ struct xdev_ext_net_elem *e = container_of((void *)rx, struct xdev_ext_net_elem, dev);
+ bool sequester;
+ u32 done, hdr;
+ status = xdev_ext_peer_net_rx_result(status, quiesced, rx->header_room, header_len,
+                                      payload_len, rx->len, &sequester);
+ done = status ? 0 : payload_len;
+ hdr = status ? 0 : header_len;
+ /* A fixed-layout consumer must never observe an unwritten frame tail.
+  * Keep the native lengths for completion BPF, but fail production. */
+ if (!status && payload_len != rx->len) status = -EMSGSIZE;
+ xdev_ext_net_elem_done(e, status, done, hdr, !sequester);
+}
+static void *xdev_ext_net_dev_bind(struct xdev_ext_mech_stage *st,
+                                   const struct xdev_ext_mech_stage_uapi *u,
+                                   void (*dead)(void *), void *arg)
+{
+ return xdev_ext_peer_net_bind_dir(u->arg0, (u32)u->arg1,
+                                   st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE, dead, arg);
+}
+static void xdev_ext_net_dev_unbind(void *lk) { xdev_ext_peer_net_unbind(lk); }
+static struct pci_dev *xdev_ext_net_dev_requester(void *lk) { return xdev_ext_peer_net_peer(lk); }
+static u32 xdev_ext_net_dev_max_payload(void *lk) { return xdev_ext_peer_net_mtu(lk); }
+static int xdev_ext_net_dev_post_tx(void *lk, struct xdev_ext_net_elem *e, u32 n)
+{
+ u32 i;
+ for (i = 0; i < n; i++)
+  *(struct xdev_ext_peer_tx *)e[i].dev.bytes = (struct xdev_ext_peer_tx){
+   .dma_address = e[i].lease.lease.dma_address, .len = e[i].len,
+   .header_len = e[i].hdr_len, .header = e[i].hdr, .complete = xdev_ext_net_tx_done,
+   .next = i + 1 < n ? (void *)e[i + 1].dev.bytes : NULL };
+ return xdev_ext_peer_net_post_tx(lk, (void *)e[0].dev.bytes);
+}
+static int xdev_ext_net_dev_post_rx(void *lk, struct xdev_ext_net_elem *e, u32 n)
+{
+ u32 i;
+ for (i = 0; i < n; i++)
+  *(struct xdev_ext_peer_rx *)e[i].dev.bytes = (struct xdev_ext_peer_rx){
+   .dma_address = e[i].lease.lease.dma_address, .len = e[i].len,
+   .header_room = e[i].hdr_len, .header = e[i].hdr, .complete = xdev_ext_net_rx_done,
+   .next = i + 1 < n ? (void *)e[i + 1].dev.bytes : NULL };
+ return xdev_ext_peer_net_post_rx(lk, (void *)e[0].dev.bytes);
+}
+static int xdev_ext_net_dev_rx_flush(void *lk) { return xdev_ext_peer_net_rx_flush(lk); }
+static const struct xdev_ext_net_dev_ops xdev_ext_net_dev_ops = {
+ .owner = THIS_MODULE, .hdr_policy = XDEV_EXT_NET_HDR_SPLIT,
+ .max_elems = XDEV_EXT_NET_MAX_ENTRIES,
+ .bind = xdev_ext_net_dev_bind, .unbind = xdev_ext_net_dev_unbind,
+ .requester = xdev_ext_net_dev_requester, .max_payload = xdev_ext_net_dev_max_payload,
+ .post_tx = xdev_ext_net_dev_post_tx, .post_rx = xdev_ext_net_dev_post_rx,
+ .rx_flush = xdev_ext_net_dev_rx_flush,
+};
+static void xdev_ext_net_result(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_batch *b,
+                                const struct xdev_ext_net_slot *slot, int status, bool sequester)
+{
+ struct xdev_ext_net_batch *bp = xdev_ext_mech_batch_priv(b);
+ u32 i;
+ (void)ns;
+ bp->cqe.base.status = status;
+ bp->cqe.base.outcome = xdev_ext_mech_classify(!status && !sequester, sequester);
+ /* Abandon can race callbacks: it must not read their mutable records. */
+ if (sequester) return;
+ for (i = 0; i < slot->nr; i++) {
+  bp->cqe.base.bytes_sent += slot->elem[i].done_len;
+  bp->cqe.base.entries_done++;
+  bp->cqe.rx[i].payload_len = slot->elem[i].done_len;
+  bp->cqe.rx[i].header_len = slot->elem[i].hdr_len;
+  memcpy(bp->cqe.rx[i].header, slot->elem[i].hdr, slot->elem[i].hdr_len);
+ }
+}
+static const struct xdev_ext_net_member xdev_ext_net_member = {
+ .dev = &xdev_ext_net_dev_ops, .admit = false, .result = xdev_ext_net_result,
+};
+static const struct xdev_ext_net_hooks xdev_ext_net_hooks = {
+ .hdr = { .family = XDEV_EXT_FAMILY_NETWORK }, .hdr_policy = XDEV_EXT_NET_HDR_SPLIT,
+};
 static int xdev_ext_net_bind(struct xdev_ext_mech_stage *st,
                              const struct xdev_ext_mech_stage_uapi *u)
 {
  const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
- struct xdev_ext_net_stage *ns;
+ struct xdev_ext_netfam_stage *ns;
  bool rx = st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE;
  u32 frames, span, header_room = u->arg1 >> 32;
  int ret;
@@ -233,47 +296,46 @@ static int xdev_ext_net_bind(struct xdev_ext_mech_stage *st,
  if (rx && frames > XDEV_EXT_NET_MAX_ENTRIES) return -EINVAL;
  ns = kzalloc(sizeof(*ns), GFP_KERNEL);
  if (!ns) return -ENOMEM;
- ns->depth = xdev_ext_mech_session_depth(st->s);
- ns->rx = rx; ns->header_room = header_room;
- ns->slots = kvcalloc(ns->depth, sizeof(*ns->slots), GFP_KERNEL);
- if (!ns->slots) { kfree(ns); return -ENOMEM; }
+ ret = xdev_ext_netfam_init(ns, st, &xdev_ext_net_member, rx, header_room);
+ if (ret) { kfree(ns); return ret; }
+ /* Published first: removal may report the stage dead before bind returns. */
  st->priv = ns;
- ns->endpoint = xdev_ext_peer_net_bind_dir(u->arg0, (u32)u->arg1, rx,
-                                         xdev_ext_net_endpoint_dead, st);
- if (IS_ERR(ns->endpoint)) { ret = PTR_ERR(ns->endpoint); goto fail; }
+ ret = xdev_ext_netfam_attach(ns, u, 0);
+ if (ret) goto fail;
  if (rx) {
   span = min(l->seg_len, l->group_bytes);
-  ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->endpoint), header_room, span, 0);
+  ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->lk), header_room, span, 0);
   if (!ret) {
    span = l->group_bytes - (frames - 1) * l->seg_len;
-   ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->endpoint), header_room, span, 0);
+   ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->lk), header_room, span, 0);
   }
-  if (ret) { xdev_ext_peer_net_unbind(ns->endpoint); goto fail; }
+  if (ret) goto fail;
  }
  return 0;
 fail:
- st->priv = NULL; kvfree(ns->slots); kfree(ns); return ret;
+ /* Unbind the endpoint before clearing priv, as main does: until then a
+  * dead callback can still reach this stage. */
+ xdev_ext_netfam_fini(ns); st->priv = NULL; kfree(ns); return ret;
 }
 static void xdev_ext_net_unbind(struct xdev_ext_mech_stage *st)
 {
- struct xdev_ext_net_stage *ns = st->priv;
+ struct xdev_ext_netfam_stage *ns = st->priv;
  u32 i;
  for (i = 0; i < ns->depth; i++)
   if (WARN_ON_ONCE(ns->slots[i].busy)) return;
- xdev_ext_peer_net_unbind(ns->endpoint);
- kvfree(ns->slots); kfree(ns); st->priv = NULL;
+ xdev_ext_netfam_fini(ns); kfree(ns); st->priv = NULL;
 }
 static void xdev_ext_net_fill_info(struct xdev_ext_mech_stage *st,
                                   struct xdev_ext_mech_batch *b, void *out)
 {
- struct xdev_ext_net_stage *ns = st->priv;
+ struct xdev_ext_netfam_stage *ns = st->priv;
  struct xdev_ext_net_mech_info *info = out;
  struct xdev_ext_mech_frame f;
  u32 i;
  *info = (struct xdev_ext_net_mech_info){
   .l = *xdev_ext_mech_session_layout(st->s),
   .generation = xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)),
-  .mtu = xdev_ext_peer_net_mtu(ns->endpoint), .peer = *xdev_ext_mech_session_peer(st->s),
+  .mtu = xdev_ext_peer_net_mtu(ns->lk), .peer = *xdev_ext_mech_session_peer(st->s),
   .direction = st->direction, .header_room = ns->header_room,
  };
  if (!b) return;
@@ -287,7 +349,7 @@ static void xdev_ext_net_fill_info(struct xdev_ext_mech_stage *st,
 static int xdev_ext_net_default_build(struct xdev_ext_mech_stage *st,
                                      struct xdev_ext_mech_batch *b, u8 *scratch)
 {
- struct xdev_ext_net_stage *ns = st->priv;
+ struct xdev_ext_netfam_stage *ns = st->priv;
  struct xdev_ext_net_send_desc *d = (void *)scratch;
  struct xdev_ext_mech_frame f;
  u32 i, nr = xdev_ext_mech_batch_nr_frames(b);
@@ -302,7 +364,7 @@ static int xdev_ext_net_default_build(struct xdev_ext_mech_stage *st,
 static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
                                  struct xdev_ext_mech_batch *b, const u8 *scratch, u32 nr)
 {
- struct xdev_ext_net_stage *ns = st->priv;
+ struct xdev_ext_netfam_stage *ns = st->priv;
  struct xdev_ext_net_batch *bp = xdev_ext_mech_batch_priv(b);
  struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
  const struct xdev_ext_net_send_desc *d = (const void *)scratch;
@@ -320,7 +382,7 @@ static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
   if (!ns->rx) continue;
   if (d[i].frame_pos != i || d[i].frame_off != f.data_off || d[i].len != f.data_len ||
       d[i].header_len != ns->header_room || d[i].flags || d[i].reserved) return -EINVAL;
-  ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->endpoint), ns->header_room, f.data_len, 0);
+  ret = xdev_ext_peer_net_rx_check(xdev_ext_peer_net_mtu(ns->lk), ns->header_room, f.data_len, 0);
   if (ret) return ret;
  }
  if (!ns->rx) {
@@ -331,148 +393,45 @@ static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
  memcpy(bp->desc, d, nr * sizeof(*d)); bp->nr = nr;
  return 0;
 }
-/* Only the tracker winner touches batch state, using its immutable ticket. */
-static void xdev_ext_net_handoff(struct xdev_ext_net_slot *slot)
-{
- struct xdev_ext_mech_batch *b = slot->batch;
- struct xdev_ext_net_batch *bp;
- bool sequester;
- int status = xdev_ext_peer_net_track_result(&slot->track, &sequester);
- u32 i;
- if (xdev_ext_mech_batch_completion_claim(b, slot->ticket)) return;
- bp = xdev_ext_mech_batch_priv(b);
- bp->cqe.base.status = status;
- bp->cqe.base.outcome = xdev_ext_mech_classify(!status && !sequester, sequester);
- /* Abandon can race callbacks: it must not read their mutable records. */
- if (!sequester) {
-  for (i = 0; i < slot->nr; i++) {
-   bp->cqe.base.bytes_sent += slot->element[i].bytes;
-   bp->cqe.base.entries_done++;
-   bp->cqe.rx[i].payload_len = slot->element[i].bytes;
-   bp->cqe.rx[i].header_len = slot->element[i].header_len;
-   memcpy(bp->cqe.rx[i].header, slot->element[i].header, slot->element[i].header_len);
-  }
- }
- xdev_ext_mech_batch_completion_publish(b, slot->ticket, status, sequester);
-}
-static void xdev_ext_net_tx_complete(struct xdev_ext_peer_tx *tx, int status, bool quiesced)
-{
- struct xdev_ext_net_element *e = container_of(tx, struct xdev_ext_net_element, tx);
- e->bytes = status ? 0 : tx->len;
- if (xdev_ext_peer_net_track_complete(&e->slot->track, status, quiesced) == XDEV_EXT_PEER_NET_TRACK_HANDOFF)
-  xdev_ext_net_handoff(e->slot);
-}
-static void xdev_ext_net_rx_complete(struct xdev_ext_peer_rx *rx, int status,
-                                     u32 header_len, u32 payload_len, bool quiesced)
-{
- struct xdev_ext_net_element *e = container_of(rx, struct xdev_ext_net_element, rx);
- bool sequester;
- status = xdev_ext_peer_net_rx_result(status, quiesced, rx->header_room, header_len,
-                                      payload_len, rx->len, &sequester);
- e->bytes = status ? 0 : payload_len;
- e->header_len = status ? 0 : header_len;
- /* A fixed-layout consumer must never observe an unwritten frame tail.
-  * Preserve the valid native lengths above for completion BPF/diagnostics,
-  * but fail production before the core publishes READY or builds a consumer.
-  */
- if (!status && payload_len != rx->len) status = -EMSGSIZE;
- if (xdev_ext_peer_net_track_complete(&e->slot->track, status, !sequester) == XDEV_EXT_PEER_NET_TRACK_HANDOFF)
-  xdev_ext_net_handoff(e->slot);
-}
-static void xdev_ext_net_release(struct xdev_ext_net_slot *slot, bool quiesced)
-{
- u32 i;
- for (i = 0; i < slot->nr; i++) xdev_ext_peer_fd_release(&slot->element[i].lease, quiesced);
- if (quiesced) slot->busy = false;
-}
 static int xdev_ext_net_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 {
- struct xdev_ext_net_stage *ns = st->priv;
+ struct xdev_ext_netfam_stage *ns = st->priv;
  struct xdev_ext_net_batch *bp = xdev_ext_mech_batch_priv(b);
- struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
- struct xdev_ext_net_slot *slot = NULL;
+ struct xdev_ext_net_slot *slot;
  struct xdev_ext_mech_frame f;
  u32 i;
  int ret;
  if (READ_ONCE(ns->dead) || !xdev_ext_mech_session_admits(st->s)) return -ESHUTDOWN;
  if (!bp->nr || bp->nr > XDEV_EXT_NET_MAX_ENTRIES) return -EPROTO;
- for (i = 0; i < ns->depth; i++) if (!ns->slots[i].busy) { slot = &ns->slots[i]; break; }
+ slot = xdev_ext_netfam_slot_get(ns, b);
  if (!slot) return -EAGAIN;
- memset(slot, 0, sizeof(*slot)); slot->busy = true;
- slot->nr = bp->nr; slot->batch = b; slot->ticket = xdev_ext_mech_batch_ticket(b);
- slot->posted_ms = ktime_get_boottime_ns() / NSEC_PER_MSEC;
  for (i = 0; i < bp->nr; i++) {
-  struct xdev_ext_net_element *e = &slot->element[i];
   const struct xdev_ext_net_send_desc *d = &bp->desc[i];
   ret = xdev_ext_mech_batch_frame(b, d->frame_pos, &f);
-  if (ret) goto refuse;
-  ret = xdev_ext_peer_file_acquire(xdev_ext_peer_mech_pool_file(pool),
-    xdev_ext_peer_net_peer(ns->endpoint), xdev_ext_peer_mech_pool_generation(pool),
-    f.umem_addr + d->frame_off, d->len, ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &e->lease);
-  if (ret) goto refuse;
-  e->slot = slot;
+  if (!ret) ret = xdev_ext_netfam_lease(ns, slot, i, f.umem_addr + d->frame_off, d->len, d->len);
+  if (ret) { xdev_ext_netfam_release(slot, true); return ret; }
   if (ns->rx) {
-   e->rx = (struct xdev_ext_peer_rx){ .dma_address = e->lease.lease.dma_address,
-    .len = d->len, .header_room = ns->header_room, .header = e->header,
-    .complete = xdev_ext_net_rx_complete, .next = i + 1 < bp->nr ? &slot->element[i + 1].rx : NULL };
+   slot->elem[i].hdr_len = ns->header_room;
   } else {
-   memcpy(e->header, d->header, d->header_len);
-   e->tx = (struct xdev_ext_peer_tx){ .dma_address = e->lease.lease.dma_address,
-    .len = d->len, .header_len = d->header_len, .header = e->header,
-    .complete = xdev_ext_net_tx_complete, .next = i + 1 < bp->nr ? &slot->element[i + 1].tx : NULL };
+   memcpy(slot->elem[i].hdr, d->header, d->header_len);
+   slot->elem[i].hdr_len = d->header_len;
   }
  }
- ret = xdev_ext_peer_net_track_init(&slot->track, bp->nr);
- if (ret) goto refuse;
  bp->slot = slot;
- ret = ns->rx ? xdev_ext_peer_net_post_rx(ns->endpoint, &slot->element[0].rx) :
-                xdev_ext_peer_net_post_tx(ns->endpoint, &slot->element[0].tx);
- if (!ret) return 0;
- bp->slot = NULL;
-refuse:
- xdev_ext_net_release(slot, true);
+ ret = xdev_ext_netfam_post(ns, slot);
+ if (ret) bp->slot = NULL;
  return ret;
 }
 static void xdev_ext_net_fill_cqe(struct xdev_ext_mech_stage *st,
                                  struct xdev_ext_mech_batch *b, void *out)
 {
  struct xdev_ext_net_batch *bp = xdev_ext_mech_batch_priv(b);
- bool sequester;
- (void)st;
- if (bp->slot) {
-  xdev_ext_peer_net_track_result(&bp->slot->track, &sequester);
-  xdev_ext_net_release(bp->slot, !sequester);
-  bp->slot = NULL;
- }
+ xdev_ext_netfam_fill_cqe(st->priv, &bp->slot);
  memcpy(out, &bp->cqe, sizeof(bp->cqe));
 }
-static void xdev_ext_net_dead(struct xdev_ext_mech_stage *st)
-{ WRITE_ONCE(((struct xdev_ext_net_stage *)st->priv)->dead, true); }
+static void xdev_ext_net_dead(struct xdev_ext_mech_stage *st) { xdev_ext_netfam_mark_dead(st->priv); }
 static unsigned long xdev_ext_net_progress(struct xdev_ext_mech_stage *st)
-{
- struct xdev_ext_net_stage *ns = st->priv;
- u64 now = ktime_get_boottime_ns() / NSEC_PER_MSEC;
- bool stopping = READ_ONCE(ns->dead) || !xdev_ext_mech_session_admits(st->s);
- u32 i;
- if (stopping && !ns->stop_ms) ns->stop_ms = now ? now : 1;
- if (ns->rx && !ns->flushed) {
-  bool flush = stopping;
-  for (i = 0; i < ns->depth && !flush; i++)
-   flush = ns->slots[i].busy && xdev_ext_peer_net_track_expired(now,
-             ns->slots[i].posted_ms, ns->stop_ms);
-  if (flush) {
-   xdev_ext_peer_net_rx_flush(ns->endpoint);
-   ns->flushed = true;
-  }
- }
- for (i = 0; i < ns->depth; i++) {
-  struct xdev_ext_net_slot *slot = &ns->slots[i];
-  if (!slot->busy || !xdev_ext_peer_net_track_expired(now, slot->posted_ms, ns->stop_ms)) continue;
-  if (xdev_ext_peer_net_track_abandon(&slot->track, stopping ? -ECANCELED : -ETIMEDOUT))
-   xdev_ext_net_handoff(slot);
- }
- return msecs_to_jiffies(20);
-}
+{ return xdev_ext_netfam_progress(st->priv); }
 static const struct xdev_ext_mech_class_ops xdev_ext_net_class = {
  .class_id = XDEV_EXT_MECH_CLASS_NET, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE,
  .desc_size = sizeof(struct xdev_ext_net_send_desc), .desc_cap = XDEV_EXT_NET_MAX_ENTRIES,
@@ -483,6 +442,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_net_class = {
  .default_build = xdev_ext_net_default_build, .validate = xdev_ext_net_validate,
  .submit = xdev_ext_net_submit, .fill_cqe = xdev_ext_net_fill_cqe,
  .mark_dead = xdev_ext_net_dead, .progress = xdev_ext_net_progress,
+ .fam.net = &xdev_ext_net_hooks,
 };
 static int __init xdev_ext_net_init(void) { return xdev_ext_mech_class_register(&xdev_ext_net_class); }
 late_initcall_sync(xdev_ext_net_init);
