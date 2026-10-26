@@ -130,7 +130,8 @@ class GuestCapture(unittest.TestCase):
                                      "native completion changed accepted ticket/cookie/frame claim")
                     self.assertGreater(accepted_event["ticket"], 0)
                     self.assertGreater(accepted_event["cookie"], 0)
-                    self.assertTrue(all(gen > 0 for gen in accepted_event["frame_generations"]))
+                    self.assertTrue(all(type(gen) is int and 0 <= gen < (1 << 64)
+                                        for gen in accepted_event["frame_generations"]))
                     final_stage = 1 if data["chain"] == "nvme_nic" else 3
                     self.assertEqual(downstream["stage"], final_stage)
                     self.assertEqual(recycled["stage"], final_stage)

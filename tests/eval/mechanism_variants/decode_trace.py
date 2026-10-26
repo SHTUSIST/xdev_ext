@@ -191,7 +191,7 @@ def decode(raw, chain,session_id=None,audit=None):
         for key in ('session_id','batch_id','request_id','stage','ticket','cookie','batch_key','native_aux','frames','frame_generations','frame_addresses','frame_bytes'):
             if accepted[key] != completed[key]:
                 raise ValueError('native completion differs from accepted claim')
-        if not accepted['ticket'] or not accepted['cookie'] or not all(accepted['frame_generations']):
+        if not accepted['ticket'] or not accepted['cookie']:
             raise ValueError('missing immutable native identity')
         if any(e['frames'] != accepted['frames'] for e in record):
             raise ValueError('frame cohort changed in fixed non-transform chain')

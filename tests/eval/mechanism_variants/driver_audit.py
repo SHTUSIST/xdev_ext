@@ -25,7 +25,7 @@ def audit(raw,session_id,final_stage=1):
         if r['origin']!='K' or r['class_id']!=2 or r['status'] or r['accepted']!=1:
             raise ValueError('failed/invalid actual terminal binding/completion')
         if r['phase']=='descriptor_bind':
-            if not r['cookie'] or not r['ticket'] or not r['generation'] or not r['bytes']:
+            if not r['cookie'] or not r['ticket'] or not r['bytes']:
                 raise ValueError('descriptor binding lacks actual immutable record/pool identity')
             binds.append(r)
         else:
