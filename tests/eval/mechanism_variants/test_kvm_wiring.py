@@ -47,6 +47,26 @@ class CaptureWiring(unittest.TestCase):
                     else:
                         self.assertIn('virtserialport,chardev=fanout_native,name=xdev-fanout-native',args)
 
+    def test_actual_qemu_e2_capture_path_resolves_evidence_aliases(self):
+        import tempfile
+        text=HARNESS.read_text()
+        start=text.index('destination_drive=')
+        stop=text.index("printf '%q '",start)
+        fragment=text[start:stop]
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td); (root/'.config').write_text('CONFIG_VIRTIO_CONSOLE=y\n')
+            evidence=root/'actual evidence'; evidence.mkdir()
+            for name in ('evidence-alias','evidence alias with spaces'):
+                with self.subTest(alias=name):
+                    alias=root/name; alias.symlink_to(evidence,target_is_directory=True)
+                    run=self.shell('wire_args=();\n'+fragment+'\nprintf "%s\\n" "${args[@]}"',root,
+                        SCRATCH=root,BUILD=root,EV=alias,DESTINATION_READONLY=0,
+                        MECHANISM_VARIANTS=1,LIFECYCLE=0,COMPAT=0,PEER=0)
+                    self.assertEqual(run.returncode,0,run.stderr)
+                    args=run.stdout.splitlines()
+                    self.assertEqual(args[args.index('-chardev')+1],
+                        'file,id=e2_artifacts,path='+str(evidence.resolve()/'e2-artifacts.raw.log'))
+
     def test_actual_build_config_calls_enable_e2_virtio_console(self):
         import tempfile
         text=HARNESS.read_text(); start=text.index('\tcfg()')
