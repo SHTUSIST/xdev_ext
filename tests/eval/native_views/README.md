@@ -159,7 +159,7 @@ status and exits to pass; verifies the receiver's full file oracle byte count
 including warmup; and retains the chains hardware-gate evidence. The independent retained post-command readback is outside the measured
 window; the receiver's own oracle can overlap sender work. A zero exit alone is insufficient.
 
-`zero_copy` is a raw native-provider mapping observation with schema_version 1,
+`zero_copy` is the collector-generated native-provider mapping export with schema_version 1,
 `run_id`, `exact_sha`, `source=native_provider`, actual `afxdp_mode=zc`,
 `nvme_bounces=0` and `payload_copy_bytes=0`. `frames` associates session, record,
 frame and generation with an observed `backing_id`, `valid_bytes`, and
@@ -179,9 +179,14 @@ For multiple frames, each observation must explicitly provide
 payloads together must cover every record byte without holes or overlaps.
 `valid_bytes` is a bound, not evidence that a tiny mapping covers a record.
 Different DMA-domain addresses need not be equal.
-The collector must obtain those observations from the measured native path;
-ordinary interface success or caller-supplied zero-copy flags do not suffice.
-Missing mapping/no-bounce instrumentation makes eligibility unavailable.
+The collector obtains these observations from the measured native path and
+automatically writes `native-backing.json`; a child-created file is not trusted.
+The importer re-derives the entire export, including physical byte ranges and
+the native-boundary copy scope, from retained raw trace/journal, then compares
+typed JSON. Ordinary interface success, fio results, an edited/rehashed proof
+or caller-supplied zero-copy flags do not suffice. Missing mapping/no-bounce
+observations make eligibility unavailable. The supported hooks and lifetime
+checks are documented in [the collector README](../native_trace/README.md#automatic-native-backing-export).
 
 Pair comparisons check the common workload/endpoint/clock/configuration and
 all visible recipe fields, including chain, rig, seed, records and warmup.
@@ -195,9 +200,10 @@ claim statistical confidence from a small pair count or turn thousands of
 records into independent repetitions. Predeclare exclusions and main/boundary
 points; start with at least five independent pairs and report uncertainty.
 
-Physical native hooks, immutable U cookie mappings, steady-state whole-host
-CPU samples, verified backing/no-bounce observations, complete post-oracle
-capture and trace-on/off perturbation measurements are external prerequisites.
+Physical device access, the matching instrumented kernel, immutable U cookie
+mappings, complete periodic whole-host CPU samples, actual verified
+backing/no-bounce observations, complete post-oracle capture and trace-on/off
+perturbation measurements remain runtime prerequisites.
 The software test suite passing does not close these runtime requirements.
 
 ## Predeclared logical workload and runtime ID binding

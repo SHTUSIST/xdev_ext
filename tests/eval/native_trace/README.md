@@ -53,7 +53,8 @@ sequence gaps, duplicate work, overflows, cancellation, loss, and unpaid
 completion/binding debt invalidate decoding.
 
 `class_validate`, `downstream_complete`, `frame_recycle`, `native_span`,
-`session_bind`, `pool_bind`, and `region_span` remain explicit observation-only records. Their
+`session_bind`, `pool_bind`, `region_span`, `dma_span`, `dma_seal`,
+`dma_unmap`, and `dma_tx` remain explicit observation-only records. Their
 raw acceptance flag is preserved as `probe_accepted`; they cannot satisfy a
 native submit/completion or record endpoint. Local TX completion cannot become
 a remote receive/ACK endpoint. Missing endpoints stay absent, so an analyzer
@@ -86,9 +87,51 @@ record identities are excluded from endpoint selection; pipelining can let the
 first measured admission precede the last warmup terminal, so this does not
 exclude all warmup CPU. Receiver validation can overlap the sender's measured
 window. Tracing/sampling perturbation still needs separate runtime evidence.
-Native backing/no-bounce proof is required independently; the collector never
-creates it from manifest flags or page-span similarity. Capture status `ok`
-remains distinct from physical performance eligibility.
+Native backing qualification is derived separately from the actual mapping and
+descriptor observations described below, never from manifest flags. Capture
+status `ok` remains distinct from physical performance eligibility.
+
+## Automatic native backing export
+
+After the actual workload and complete byte oracle, the collector invokes
+`derive_native_backing(plan, raw_trace, metadata)` and writes
+`native-backing.json` itself. A workload-created file or symlink is discarded;
+its contents cannot supply evidence. Missing or uncertified observations leave
+the proof unavailable, with the reason retained in trace metadata.
+
+The initial route is NVMe READ followed by audited ice AF_XDP zero-copy TX,
+for K-BPF, U-poll and U-event. NVMe records source physical spans and the
+actual mapped DMA ranges at submission-queue command insertion, in both
+single and batched paths. Each whole-command seal requires complete,
+positively checked direct/IOMMU translations. XSK records actual new/reused
+pool mappings and unmap; ice records the DMA address written into each
+single/batch transmit descriptor. Unknown DMA backends, mapping checks that
+cannot certify the original backing, unaligned pools, TX metadata and
+multi-buffer descriptors are not silently qualified.
+
+Reconstruction resolves actual request and pool lifetimes through verified
+owner, native command, record/generation and frame bindings. Sequential
+request-pointer reuse is legal when completed lifetimes are unambiguous;
+overlapping/duplicate attempts are refused. NVMe normally unmaps before its
+native completion callback, so its map must be valid at the command-insertion
+seal. The NIC map must remain valid through its matching native completion.
+
+Every payload byte is compared in order, using actual K admission or immutable
+U journal payload anchors and observed UMEM pages. Packet headers are excluded
+at recorded payload boundaries, not an assumed header size. Different SG
+segmentation and different device DMA addresses may still reference the same
+ordered physical bytes. A partial-page UMEM registration can use a rounded
+DMA mapping, but the descriptor and payload must stay within registered bytes.
+
+The v1 export retains the full physical ranges and an explicit
+`payload_copy_scope`. Its zero bounce/copy fields describe only the verified
+NVMe-to-native-AF_XDP payload boundary, not arbitrary process-wide CPU copies,
+remote receipt, GPU/NHI paths or cryptographic attestation. The importer
+reconstructs the full export from hashed raw trace/journal and compares typed
+JSON; editing the file and recomputing its hash cannot substitute for matching
+observations. No fio result, throughput number, interface success or
+caller-supplied zero counter supplies a missing mapping check. Actual physical
+execution and tracing-on/off perturbation still need runtime qualification.
 
 Runtime sessions are predeclared, for example:
 

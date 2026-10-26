@@ -325,6 +325,7 @@ def inspect_collection(run, receipt):
                     'cqe_observe' in probe['source'].lower()):
                 errors.append('trace_metadata.probes.' + event + ': same-layer native probe unavailable')
     mapped_manifest, verified_events = None, []
+    backing_replayed = False
     if 'events' in data and 'raw_trace' in data and metadata:
         collector = COLLECTOR_ENTRY
         try:
@@ -342,6 +343,17 @@ def inspect_collection(run, receipt):
                 errors.append('events: raw trace re-decoding does not match events.jsonl')
             else:
                 verified_events = decoded
+            if 'zero_copy' in data:
+                try:
+                    observer = getattr(module, 'derive_native_backing', None)
+                    if not callable(observer):
+                        raise ValueError('raw native backing exporter missing')
+                    reconstructed = observer(plan, data['raw_trace'], metadata)
+                    if not _same_json(reconstructed, data['zero_copy']):
+                        raise ValueError('retained proof differs from reconstructed raw mappings')
+                    backing_replayed = True
+                except (OSError, ValueError, TypeError, KeyError, AttributeError) as error:
+                    errors.append('zero_copy: raw replay refused: ' + str(error))
             if runtime:
                 mapper = getattr(module, 'derive_mapped_manifest', None)
                 if not callable(mapper):
@@ -364,6 +376,8 @@ def inspect_collection(run, receipt):
     if 'oracle' in data:
         errors.extend(_check_campaign(run, data['oracle']))
     if 'zero_copy' in data:
+        if not backing_replayed and not any(e.startswith('zero_copy: raw replay') for e in errors):
+            errors.append('zero_copy: raw replay unavailable')
         errors.extend(_check_backing(run, data['zero_copy']))
     if runtime and all(kind in data for kind in ('oracle_expected', 'oracle_readback', 'oracle_spec')):
         errors.extend(_check_postoracle(plan, artifacts, data['oracle_spec']))

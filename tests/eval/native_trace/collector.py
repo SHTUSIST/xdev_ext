@@ -27,7 +27,8 @@ _cpu_spec.loader.exec_module(CPU_SAMPLING)
 EVENT = 'xdev_ext:native_event'
 PHASES = {'record_admit', 'native_submit', 'native_complete', 'record_terminal'}
 OBSERVATIONS = {'class_validate', 'downstream_complete', 'frame_recycle',
-                'native_span', 'region_span', 'pool_bind', 'session_bind'}
+                'native_span', 'region_span', 'pool_bind', 'session_bind',
+                'dma_span', 'dma_seal', 'dma_unmap', 'dma_tx'}
 FIELDS = ('session_id', 'batch_id', 'batch_key', 'frame_id', 'generation',
           'stage', 'ticket', 'class_id', 'accepted', 'status', 'cookie',
           'address', 'bytes', 'aux', 'sequence', 'origin_tgid', 'process_start_ticks', 'native_user_data', 'frame_ordinal', 'frame_offset', 'frame_length')
@@ -74,7 +75,7 @@ def decode_trace(manifest, raw_text, metadata):
         raise ValueError('clock must be CLOCK_MONOTONIC')
     if metadata.get('clock_domain') != manifest.get('clock_domain'):
         raise ValueError('clock domain mismatch')
-    if metadata.get('trace_dropped') != 0:
+    if type(metadata.get('trace_dropped')) is not int or metadata['trace_dropped'] != 0:
         raise ValueError('trace loss or unknown loss invalidates correlation')
     maximum = _integer(trace.get('max_pending', 65536))
     if not 1 <= maximum <= 1048576:
@@ -275,7 +276,9 @@ def decode_trace(manifest, raw_text, metadata):
                 raise ValueError('current native ABI requires ts_ns on every row')
         except ValueError as error:
             raise ValueError('native ts_ns unavailable/invalid: ' + str(error)) from error
-        if item['origin'] != expected_origin:
+        if item['origin'] != expected_origin and not (
+                item['class_id'] == 2 and item['phase'] in
+                ('pool_bind', 'region_span', 'dma_span', 'dma_seal', 'dma_unmap', 'dma_tx')):
             continue
         item.update(cpu=int(cpu), ts_ns=native_ts)
         if item['ts_ns'] < 0 or item['accepted'] not in (0, 1):
@@ -393,6 +396,28 @@ def decode_trace(manifest, raw_text, metadata):
     # Stable order is defined by actual monotonic timestamps, never used to
     # reconstruct the kernel's FIFO (validated before this presentation sort).
     return sorted(output, key=lambda row: row['ts_ns'])
+
+
+def derive_native_backing(plan, raw_trace, metadata):
+    """Replay actual raw observations; no child-supplied proof is an input."""
+    spec = importlib.util.spec_from_file_location('native_backing_observer', Path(__file__).with_name('native_backing.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    events = decode_trace(plan, raw_trace, metadata)
+    return module.derive(plan, events, _runtime_binding(plan, raw_trace, metadata),
+                         _journal_rows(plan, metadata))
+
+
+def export_native_backing(plan, raw_trace, metadata, output):
+    """Create our own artifact, discarding any untrusted workload output."""
+    target = Path(output) / 'native-backing.json'
+    target.unlink(missing_ok=True)
+    proof = derive_native_backing(plan, raw_trace, metadata)
+    with target.open('x') as stream:
+        json.dump(proof, stream, indent=2, sort_keys=True, allow_nan=False)
+        stream.write('\n')
+    target.chmod(0o600)
+    return artifact(target)
 
 
 def derive_mapped_manifest(manifest, raw_text, metadata):
@@ -985,13 +1010,10 @@ def _capture(manifest, command, output, root, correctness_only):
         artifacts['oracle_spec'] = artifact(receiver_specs[0][0])
         artifacts['oracle_readback'] = metadata['postoracle_readback']['readback']
         artifacts['oracle_expected'] = metadata['postoracle_readback']['expected']
-        # Native backing proof has no generic fallback: absence is reported, not
-        # generated from manifest flags or a zero-valued counter declaration.
-        proof = output / 'native-backing.json'
-        if proof.is_file():
-            artifacts['zero_copy'] = artifact(proof)
-        else:
-            reasons.append('actual native backing/no-bounce proof unavailable')
+        try:
+            artifacts['zero_copy'] = export_native_backing(manifest, raw, metadata, output)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            reasons.append('actual native backing proof unavailable: ' + str(error))
         status = 'ok'
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         reasons.append(str(error))
