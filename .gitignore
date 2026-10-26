@@ -1492,3 +1492,16 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_pressure_adapter.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/session_stop_clock_test.py
 !/kernel/io_uring/xdomain/xdev_ext_xdomain_class.c
+
+# Full actual-source XDOMAIN composition and independent assertions.
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_kernel_compat.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_boundary.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_x3.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_x4.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_x5.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_family.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_x6.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_expected.json
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_mutations.py
