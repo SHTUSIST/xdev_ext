@@ -1377,3 +1377,5 @@
 !/tests/eval/mechanism_variants/test_capture_transport.py
 
 !/tests/eval/mechanism_variants/test_old_ticket_cache.py
+
+!/tests/eval/mechanism_variants/test_trace_config.py
