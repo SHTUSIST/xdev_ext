@@ -1382,3 +1382,7 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_identity_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_kfunc_test.py
 !/kernel/io_uring/xdev_ext_mech_xdomain_kfunc.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/xdomain_core_test.c
+!/kernel/io_uring/xdomain/
+!/kernel/io_uring/xdomain/xdev_ext_xdomain_core.h

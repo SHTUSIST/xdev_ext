@@ -28,6 +28,7 @@ KERNEL_TESTS = (
     'family/storfam_core_test',
     'family/compfam_core_test',
     'family/xdomain_create_test',
+    'xdomain/xdomain_core_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',
