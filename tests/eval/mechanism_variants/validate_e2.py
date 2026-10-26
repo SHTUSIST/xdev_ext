@@ -41,6 +41,40 @@ def write_derived(path,data):
     else: path.write_bytes(data)
 
 
+def validate_trace_configs(capture):
+    """Qualify actual readback, including the pinned x86 ring page rounding."""
+    normalized = None
+    for name in ('reverse', 'gray', 'outside_window', 'reserved_cdw2'):
+        path = Path(capture) / (name + '-trace-config.txt')
+        try:
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 65536,
+                    'missing/oversized trace config: ' + name)
+            lines = path.read_text(encoding='ascii').splitlines()
+        except (OSError, UnicodeError) as error:
+            raise ValueError('unreadable trace config: ' + name) from error
+        actual = {}
+        for line in lines:
+            require(line.count('=') == 1, 'malformed trace config: ' + name)
+            key, value = line.split('=', 1)
+            require(key not in actual, 'duplicate trace config field: ' + name)
+            actual[key] = value
+        require(set(actual) == {'buffer_size_kb', 'current_tracer', 'trace_clock'},
+                'trace config fields differ: ' + name)
+        size = actual['buffer_size_kb']
+        require(re.fullmatch(r'[0-9]+', size) is not None and 4096 <= int(size) < 4100,
+                'actual trace buffer capacity differs: ' + name)
+        clock = actual['trace_clock'].split()
+        require(actual['current_tracer'] == 'nop' and
+                (clock == ['mono'] or clock.count('[mono]') == 1 and
+                 sum(token.startswith('[') or token.endswith(']') for token in clock) == 1),
+                'actual trace tracer/clock differs: ' + name)
+        current = {'buffer_size_kb': int(size), 'current_tracer': 'nop', 'trace_clock': 'mono'}
+        require(normalized is None or current == normalized,
+                'trace capture configurations differ between cases: ' + name)
+        normalized = current
+    return normalized
+
+
 def validate(source,scratch,evidence):
     source=source.resolve();scratch=scratch.resolve();evidence=evidence.resolve()
     console=(evidence/'guest.log').read_text()
@@ -87,12 +121,7 @@ def validate(source,scratch,evidence):
                          ('-device','virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts')):
         require(sum(a==option and b==value for a,b in zip(qemu_args,qemu_args[1:]))==1,
                 'missing/ambiguous actual E2 virtio transport argument: '+value)
-    for name in ('reverse','gray','outside_window','reserved_cdw2'):
-        actual=dict(line.split('=',1) for line in (capture/(name+'-trace-config.txt')).read_text().splitlines())
-        clock=actual.get('trace_clock','').split()
-        require(actual.get('buffer_size_kb')=='4096' and actual.get('current_tracer')=='nop'
-                and ('[mono]' in clock or clock==['mono']),
-                'actual trace capture configuration differs: '+name)
+    validate_trace_configs(capture)
     window=(capture/'source-window.bin').read_bytes()
     require(len(window)==32768,'missing complete real source window')
     with (scratch/'source-before.raw').open('rb') as image:
