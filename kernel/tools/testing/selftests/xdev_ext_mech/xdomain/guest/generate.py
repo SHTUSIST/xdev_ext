@@ -55,7 +55,7 @@ struct { __uint(type, BPF_MAP_TYPE_RINGBUF); __uint(max_entries, 4096); } events
     callbacks = []
     for m in ('prepare', 'build', 'complete'):
         sec = section if m == member else ('struct_ops.s' if m == 'prepare' else 'struct_ops')
-        callbacks.append(f'SEC("{sec}/probe_{m}") int BPF_PROG(probe_{m}, const struct xdev_ext_mech_ctx *mctx) {{ (void)ctx; {body if m == member else "(void)mctx; return 0;"} }}')
+        callbacks.append(f'SEC("{sec}/probe_{m}") int BPF_PROG(probe_{m}, const struct xdev_ext_mech_ctx *mctx) {{ (void)ctx; (void)mctx; {body if m == member else "return 0;"} }}')
     return '''#define BPF_NO_KFUNC_PROTOTYPES
 #include "vmlinux.h"
 #include <bpf/bpf_helpers.h>
