@@ -1383,7 +1383,7 @@ fi
 if (( MECHANISM_VARIANTS )); then
     grep -Fxq 'CONFIG_VIRTIO_CONSOLE=y' "$BUILD/.config"
     args+=(-device virtio-serial-pci
-        -chardev "file,id=e2_artifacts,path=$EV/e2-artifacts.raw.log"
+        -chardev "file,id=e2_artifacts,path=$(realpath "$EV")/e2-artifacts.raw.log"
         -device virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts)
 fi
 if (( COMPAT )); then
