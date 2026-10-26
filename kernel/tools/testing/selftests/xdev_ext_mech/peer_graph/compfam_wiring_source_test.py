@@ -9,7 +9,9 @@ import re
 import sys
 
 KERNEL = Path(__file__).resolve().parents[5]
-JOINED = []  # (class name, kernel-relative file, hooks object)
+JOINED = [  # (class name, kernel-relative file, hooks object)
+    ("IAA", "io_uring/iaa/xdev_ext_mech_iaa.c", "xdev_ext_iaa_comp_hooks"),
+]
 
 
 def main():
