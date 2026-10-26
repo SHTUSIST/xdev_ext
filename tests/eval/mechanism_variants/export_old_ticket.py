@@ -53,9 +53,7 @@ def run(kernel,out,cc):
                       'xdev_ext_mech_batch_complete(&b,oldticket,0);\n'+
                       'e2_snapshot("after",&s,&b,&life,custody,oldticket);')
     source=module.generate().replace('int main(int argc,char**argv)','int baseline_main(int argc,char**argv)')
-    # An actual-core host fixture has no tracefs consumer. Disable diagnostic
-    # hook emission only; no lifecycle/scheduler/completion decision is replaced.
-    source='#define xdev_ext_mech_trace_batch(...) ((void)0)\n'+source+'\n'+body+SNAPSHOT+case
+    source=source+'\n'+body+SNAPSHOT+case
     out.mkdir(parents=True,mode=0o700)
     cfile=out/'old-ticket-fixture.c'; binary=out/'old-ticket-fixture'
     cfile.write_text(source)
