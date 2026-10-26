@@ -150,6 +150,14 @@ class ProviderFaults(unittest.TestCase):
             if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
                 rel = "include/linux/xdev_ext_family_core.h"
                 (cls.path / rel).write_text(source(rel))
+            # Follow CPU helper dependencies from the selected step snapshot.
+            if '"xdev_ext_mech_cpu_core.h"' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
+                rel = "io_uring/xdev_ext_mech_cpu_core.h"
+                (cls.path / rel).write_text(source(rel))
+            # F9a compute rules must come from that same fixed revision too.
+            if 'xdev_ext_compfam_core.h' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
+                rel = "include/linux/xdev_ext_compfam_core.h"
+                (cls.path / rel).write_text(source(rel))
         cls.binary = cls.compile("production", generate())
 
     @classmethod

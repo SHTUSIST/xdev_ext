@@ -31,6 +31,11 @@ with tempfile.TemporaryDirectory(prefix='independent-class7-') as temp:
         name = 'io_uring/xdev_ext_mech_cpu_core.h'
         data = subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
         (tree/name).write_bytes(data)
+    # F9a step rules use compute kinds; follow the selected snapshot only.
+    if 'xdev_ext_compfam_core.h' in (tree/'io_uring/xdev_ext_mech_step.h').read_text():
+        name = 'include/linux/xdev_ext_compfam_core.h'
+        data = subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes()
+        (tree/name).write_bytes(data)
     source=tree/'admission.c';binary=tree/'admission'
     source.write_text(r'''
 #include <stdio.h>

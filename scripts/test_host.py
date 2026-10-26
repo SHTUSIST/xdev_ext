@@ -23,6 +23,7 @@ KERNEL_TESTS = (
     'family/class_table_diff_test',
     'family/requester_core_test',
     'family/admit_core_test',
+    'family/compfam_core_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',
