@@ -23,7 +23,7 @@ BPF_ARCH ?= x86
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf \
 	-D__TARGET_ARCH_$(BPF_ARCH)
 
-BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan
+BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan xdomain_peer
 BPF_OBJECTS := $(BPF_NAMES:%=$(BUILD_DIR)/%.bpf.o)
 VMLINUX_H := $(BUILD_DIR)/vmlinux.h
 CTL := $(BUILD_DIR)/xdev_ext_mech_ctl
