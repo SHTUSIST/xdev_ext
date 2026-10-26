@@ -38,6 +38,14 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_MAX	= 11,
 };
 
+/* Device families: a family owns the code its classes share. */
+enum xdev_ext_family {
+	XDEV_EXT_FAMILY_NONE	= 0,
+	XDEV_EXT_FAMILY_NETWORK	= 1,	/* NET, AF_XDP, SOCKET */
+	XDEV_EXT_FAMILY_STORAGE	= 2,	/* NVMe */
+	XDEV_EXT_FAMILY_COMPUTE	= 3,	/* CE, DMA, IAA, CPU, USER */
+};
+
 /* FANOUT joins the previous consumer on the same READY publication; stage 0
  * and producer/transform stages cannot carry it. Existing ABI layouts stay fixed.
  * CPU: TO_DEVICE, fd -1, arg0 fixed transform, arg1 bounded parameter; variable

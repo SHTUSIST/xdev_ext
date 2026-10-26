@@ -25,6 +25,7 @@
 #include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/xdev_ext_binding.h>
+#include <linux/xdev_ext_family_core.h>
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_core.h"
@@ -827,6 +828,8 @@ int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops *ops)
 	    !ops->validate || !ops->submit ||
 	    (ops->info_size && !ops->fill_info) ||
 	    (ops->cqe_size && !ops->fill_cqe) ||
+	    !xdev_ext_family_hooks_ok(ops->class_id,
+				    ops->fam.hdr ? &ops->fam.hdr->family : NULL) ||
 	    !xdev_ext_mech_class_sizes_ok(ops->info_size, ops->desc_size,
 				     ops->desc_cap, ops->cqe_size,
 				     ops->cqe_cap, ops->batch_priv_size))

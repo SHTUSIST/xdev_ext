@@ -293,6 +293,14 @@ struct xdev_ext_mech_stage {
 /* Read-only source plus an independent, bounded destination lease. */
 #define XDEV_EXT_MECH_CLASS_F_TRANSFORM (1U << 2)
 
+/* First member of every family hooks structure. */
+struct xdev_ext_family_hooks_hdr {
+	u32 family;			/* enum xdev_ext_family */
+};
+struct xdev_ext_net_hooks;
+struct xdev_ext_stor_hooks;
+struct xdev_ext_comp_hooks;
+
 struct xdev_ext_rel_policy;
 struct xdev_ext_mech_class_ops {
 	u32 class_id;			/* enum xdev_ext_mech_class */
@@ -354,6 +362,13 @@ struct xdev_ext_mech_class_ops {
 	 * member refuses in ->bind (-EOPNOTSUPP) a device it cannot poll.
 	 */
 	int (*poll)(struct xdev_ext_mech_stage *st);
+	/* Optional family hooks; checked at class registration. */
+	union {
+		const struct xdev_ext_family_hooks_hdr *hdr;
+		const struct xdev_ext_net_hooks *net;
+		const struct xdev_ext_stor_hooks *stor;
+		const struct xdev_ext_comp_hooks *comp;
+	} fam;
 };
 
 /* Initcall or module init, process context: -EBUSY if the class is taken. */
