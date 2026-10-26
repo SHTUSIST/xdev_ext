@@ -32,6 +32,7 @@
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_peer.h>
 #include <linux/xdev_ext_requester.h>
+#include <linux/xdev_ext_storfam.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <linux/capability.h>
 #include "nvme.h"
@@ -240,6 +241,12 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
 #define NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT	12
 /* nvme-pci aligns its lists to 256 bytes, 512 under NVME_QUIRK_DMAPOOL_ALIGN_512. */
 #define NVME_XDEV_EXT_PEER_SGL_ALIGN	512U
+
+static const struct xdev_ext_stor_hooks nvme_xdev_ext_stor_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_STORAGE },
+	.extent_align_mask = 3,
+	.max_extents = NVME_XDEV_EXT_PEER_MAX_PIECES,
+};
 
 /*
  * GPU-memory command context, one per possible live batch, allocated at
@@ -979,7 +986,7 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 		return -EINVAL;
 	if (nvme_ctrl_sgl_supported(p->ns->ctrl)) {
 		ret = xdev_ext_peer_nvme_sgl_build(slot->spans, slot->nr_leases,
-				slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);
+				slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);
 		if (ret)
 			return ret;
 		for (pos = 0; pos < n; pos++)
@@ -1298,6 +1305,7 @@ static const struct xdev_ext_mech_class_ops nvme_xdev_ext_mech_class = {
 	.fill_cqe = nvme_xdev_ext_stage_fill_cqe,
 	.mark_dead = nvme_xdev_ext_class_mark_dead,
 	.poll = nvme_xdev_ext_class_poll,
+	.fam.stor = &nvme_xdev_ext_stor_hooks,
 };
 
 static bool nvme_xdev_ext_mech_registered;

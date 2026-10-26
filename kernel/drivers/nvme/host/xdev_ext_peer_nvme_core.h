@@ -4,9 +4,11 @@
 #ifdef __KERNEL__
 #include <linux/types.h>
 #include <linux/errno.h>
+#include <linux/xdev_ext_storfam_core.h>
 #else
 #include <stdint.h>
 #include <errno.h>
+#include "../../../include/linux/xdev_ext_storfam_core.h"
 typedef uint64_t u64;
 typedef uint32_t u32;
 typedef uint16_t u16;
@@ -32,28 +34,13 @@ static inline int xdev_ext_peer_nvme_plan(u8 lba_shift, u64 capacity_lbas,
 
 /* Provider DMA spans in payload order; outputs are CPU-endian. */
 #define XDEV_EXT_PEER_NVME_DPTR 1
-struct xdev_ext_peer_nvme_seg { u64 addr; u32 len; };
+/* The NVMe data-pointer extent is the storage family's extent. */
+#define xdev_ext_peer_nvme_seg xdev_ext_stor_extent
 static inline int xdev_ext_peer_nvme_sgl_build(
  const struct xdev_ext_peer_nvme_seg *seg, u32 nr,
  struct xdev_ext_peer_nvme_seg *out, u32 cap, u32 *n)
 {
- u32 i, used = 0;
- if (!n) return -EINVAL;
- *n = 0;
- if (!seg || !out || !nr) return -EINVAL;
- for (i = 0; i < nr; i++) {
-  if (!seg[i].len || ((seg[i].addr | seg[i].len) & 3)) return -EINVAL;
-  if (seg[i].addr + seg[i].len < seg[i].addr) return -EOVERFLOW;
-  if (used && out[used - 1].addr + out[used - 1].len == seg[i].addr &&
-      seg[i].len <= (u32)~0U - out[used - 1].len) {
-   out[used - 1].len += seg[i].len;
-  } else {
-   if (used == cap) return -EREMOTEIO;
-   out[used++] = seg[i];
-  }
- }
- *n = used;
- return 0;
+ return xdev_ext_stor_coalesce(seg, nr, out, cap, 3, n);
 }
 static inline int xdev_ext_peer_nvme_prp_build(
  const struct xdev_ext_peer_nvme_seg *seg, u32 nr, u32 page_shift,
