@@ -30,8 +30,13 @@ static void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch *b,
 { (void)b;(void)phase;(void)ticket;(void)status; }
 """.replace("/* CALL_ARGS */", extract.structure(
             (ROOT / "include/linux/xdev_ext_mech.h").read_text(), "xdev_ext_mech_call_args")) + extract.function(core, "xdev_ext_mech_recycle_produced_tail") + "\n" + accounting
-        helpers += "\n" + extract.function(core, "xdev_ext_mech_stats_fill")
-        code = extract.generate().replace("/* Native provider fixture:",
+        code = extract.generate()
+        stats = extract.function(core, "xdev_ext_mech_stats_fill")
+        # STOP_REPORT's release fixture already includes the actual filler.
+        # Older source snapshots still need the same verbatim dependency here.
+        if stats not in code:
+            helpers += "\n" + stats
+        code = code.replace("/* Native provider fixture:",
                                           helpers + "\n/* Native provider fixture:", 1)
         code = code.replace("int main(int argc,char **argv)", "int provider_main(int argc,char **argv)", 1)
         code += r"""
