@@ -145,6 +145,11 @@ class ProviderFaults(unittest.TestCase):
                 p = cls.path / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(source(rel))
+            # F1b core rules include the class table; keep fixed-ref copies
+            # self-contained without adding new inputs to older snapshots.
+            if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
+                rel = "include/linux/xdev_ext_family_core.h"
+                (cls.path / rel).write_text(source(rel))
         cls.binary = cls.compile("production", generate())
 
     @classmethod

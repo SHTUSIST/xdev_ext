@@ -1338,3 +1338,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/family/family_table_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/family/class_register_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/family_wiring_source_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/class_table_diff_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py

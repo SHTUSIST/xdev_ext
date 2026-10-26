@@ -98,6 +98,12 @@ class Admission(unittest.TestCase):
                 target = include_root / filename
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(subprocess.check_output(["git", "show", TEST_REVISION + ":./" + filename], cwd=KERNEL))
+            # F1b core rules include the class table; copy the same revision's
+            # dependency only when present, preserving historical RED inputs.
+            if 'xdev_ext_family_core.h' in (include_root / "io_uring/xdev_ext_mech_core.h").read_text():
+                filename = "include/linux/xdev_ext_family_core.h"
+                (include_root / filename).write_bytes(subprocess.check_output(
+                    ["git", "show", TEST_REVISION + ":./" + filename], cwd=KERNEL))
             # Follow that revision's dependencies without importing newer rules
             # into a historical RED checkout.
             if '#include "xdev_ext_mech_cpu_core.h"' in (include_root / "io_uring/xdev_ext_mech_step.h").read_text():

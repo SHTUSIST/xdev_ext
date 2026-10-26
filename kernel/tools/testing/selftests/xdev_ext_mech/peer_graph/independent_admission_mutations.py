@@ -11,6 +11,8 @@ HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / "independent_admission.py"))
 KERNEL = BASE["KERNEL"]
 FILES = ("io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_core.h", "include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h")
+# F1b: copied core rules now include the production class descriptor table.
+FILES += ("include/linux/xdev_ext_family_core.h",)
 
 
 def compile_and_run(directory, headers, cases):

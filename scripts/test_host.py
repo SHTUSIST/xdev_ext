@@ -20,6 +20,7 @@ KERNEL_TESTS = (
     'xdev_ext_mech_window_pipeline_test', 'xdev_ext_mech_ce_exact_completion_test',
     'provider/xdev_ext_mech_dma_core_test',
     'family/family_table_test',
+    'family/class_table_diff_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',
