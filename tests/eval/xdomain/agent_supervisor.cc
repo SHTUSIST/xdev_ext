@@ -770,7 +770,7 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
     std::deque<std::string> output;
     size_t output_offset = 0, queued = 0;
     bool input_open = true, output_open = true, busy = false,
-         held_written = false, closing = false;
+         held_attempted = false, closing = false, durable_failed = false;
     int terminal_error = 0;
     uint64_t last_request = 0, active_request = 0, deadline = 0;
     std::string active_command, inflight_command;
@@ -778,6 +778,12 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
     Json multipart;
     uint64_t next_part = 0, part_count = 0;
     size_t multipart_bytes = 0;
+    auto append_durable = [&](const Json &j) {
+      bool ok = append_record(durable_fd, j);
+      if (!ok)
+        durable_failed = true;
+      return ok;
+    };
     auto enqueue = [&](const Json &j) {
       std::string body = dump(j);
       if (body.size() > TB_MAX_JSON ||
@@ -830,6 +836,10 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       j.object["evidence"].object = {
           {"owner_pid", Json::num(getpid())},
           {"hold_reasons", Json::num(snap.hold_reasons)}};
+      if (durable_failed) {
+        j.object["evidence"].object["evidence_incomplete"] = Json::boolean(true);
+        j.object["evidence"].object["durable_write_failed"] = Json::boolean(true);
+      }
       if (snap.held && active_command == "cancel") {
         Json retained = inventory();
         Json opaque = Json::obj();
@@ -884,8 +894,8 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       j.object["retained_resources"].array.push_back(std::move(opaque));
       j.object["request_id"] = Json::num(active_request);
       j.object["retained_fds"] = inventory();
-      append_record(durable_fd, j);
-      held_written = true;
+      append_durable(j);
+      held_attempted = true;
       response(terminal_error, "{}");
     };
     auto dispatch = [&](Json r) {
@@ -898,7 +908,7 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       auto j = durable_base(identity, "intent", guard);
       j.object["command"] = Json::str(active_command);
       j.object["request_id"] = Json::num(active_request);
-      if (!append_record(durable_fd, j)) {
+      if (!append_durable(j)) {
         hold(TB_HOLD_PROTOCOL);
         return;
       }
@@ -914,7 +924,7 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
     for (;;) {
       struct tb_guard_snapshot snap{};
       tb_guard_snapshot(guard, &snap);
-      if (snap.held && !held_written)
+      if (snap.held && !held_attempted)
         hold(snap.hold_reasons ? snap.hold_reasons
                                : static_cast<uint32_t>(TB_HOLD_CUDA_UNKNOWN));
       if (deadline && !snap.held && now_ns() >= deadline)
@@ -932,7 +942,12 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
                                 guard);
           j.object["error"] = Json::signed_num(result.error);
           j.object["request_id"] = Json::num(result.request_id);
-          append_record(durable_fd, j);
+          if (!append_durable(j)) {
+            if (!terminal_error)
+              terminal_error = result.error ? result.error : -EIO;
+            hold(TB_HOLD_PROTOCOL);
+            tb_guard_snapshot(guard, &snap);
+          }
           if (!snap.held) {
             if (result.request_id != active_request) {
               hold(TB_HOLD_PROTOCOL);
@@ -1125,7 +1140,7 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
             auto failure = durable_base(identity, "protocol-error", guard);
             failure.object["reason"] = Json::str(error.what());
             failure.object["input_prefix"] = Json::str(body.substr(0, 512));
-            append_record(durable_fd, failure);
+            append_durable(failure);
             hold(TB_HOLD_PROTOCOL);
           }
         }
