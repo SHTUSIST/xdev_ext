@@ -1354,4 +1354,9 @@
 !/kernel/include/linux/xdev_ext_netfam_core.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/family/netfam_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/family/netfam_plan_diff_test.c
+!/kernel/include/linux/xdev_ext_netfam.h
+!/kernel/include/linux/xdev_ext_peer_net_track.h
+!/kernel/io_uring/family/xdev_ext_netfam.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/netfam_body_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_bind_order_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py

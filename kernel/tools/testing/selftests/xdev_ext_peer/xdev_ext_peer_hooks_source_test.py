@@ -191,9 +191,26 @@ def mech_net():
     check("P4", "xdev_ext_peer_net_send_stoppable(" not in default and "wait_for_completion" not in default,
           "default NET stage never waits synchronously for a native completion")
     check("P4", '#include "xdev_ext_peer_net_track.h"' in default, "default NET stage uses the in-flight tracker")
-    for name in ("xdev_ext_peer_net_track_init(", "xdev_ext_peer_net_track_complete(", "xdev_ext_peer_net_track_abandon(",
-                 "xdev_ext_peer_net_track_expired(", "xdev_ext_peer_net_post_tx("):
-        check("P4", name in default, "default NET stage calls " + name[:-1])
+    runtime = read(KERNEL / "io_uring/family/xdev_ext_netfam.c")
+    # Ignore comments and string literals: only executable calls satisfy custody.
+    runtime_code = re.sub(r'/\*.*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"', "", runtime, flags=re.S)
+    _, post = body(runtime_code, "xdev_ext_netfam_post")
+    check("P4", post is not None and re.search(
+        r"\bxdev_ext_peer_net_track_init_max\s*\(\s*&slot->track\s*,\s*slot->nr\s*,\s*ns->max_elems\s*\)", post),
+          "family post initializes its actual slot count with the subclass maximum")
+    for function, call in (("xdev_ext_net_elem_done", "xdev_ext_peer_net_track_complete"),
+                           ("xdev_ext_netfam_progress", "xdev_ext_peer_net_track_abandon"),
+                           ("xdev_ext_netfam_progress", "xdev_ext_peer_net_track_expired")):
+        _, code = body(runtime_code, function)
+        check("P4", code is not None and re.search(r"\b" + call + r"\s*\(", code),
+              function + " calls " + call + " in its production body")
+    check("P4", "#include <linux/xdev_ext_netfam.h>" in default,
+          "default NET stage includes the network family contract")
+    _, submit = body(default, "xdev_ext_net_submit")
+    check("P4", submit is not None and re.search(r"\bxdev_ext_netfam_post\s*\(", submit),
+          "default NET submit posts through the network family")
+    check("P4", "xdev_ext_peer_net_post_tx(" in default,
+          "default NET stage calls xdev_ext_peer_net_post_tx")
     for name in ("xdev_ext_peer_net_post_rx(", "xdev_ext_peer_net_rx_flush(", "xdev_ext_peer_net_bind_dir(",
                  "xdev_ext_peer_net_rx_result(", "xdev_ext_peer_net_rx_check("):
         check("P3", name in default, "NET FROM_DEVICE stage calls " + name[:-1])

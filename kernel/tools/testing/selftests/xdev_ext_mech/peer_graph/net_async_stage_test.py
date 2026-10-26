@@ -78,6 +78,28 @@ int xdev_ext_peer_net_post_tx(struct xdev_ext_peer_net_endpoint *e,struct xdev_e
 int xdev_ext_peer_net_post_rx(struct xdev_ext_peer_net_endpoint *e,struct xdev_ext_peer_rx *rx){assert(e==&endpoint&&e->rx);if(refusal)return refusal;rx_posted[posts++]=rx;return 0;}
 int xdev_ext_peer_net_rx_flush(struct xdev_ext_peer_net_endpoint *e){assert(e==&endpoint&&e->rx);for(int i=0;i<posts;i++){struct xdev_ext_peer_rx *rx=rx_posted[i];if(!rx)continue;rx_posted[i]=NULL;for(;rx;rx=rx->next)rx->complete(rx,-ECANCELED,0,0,true);}return 0;}
 '''
+FAMILY_SHIM = r'''
+/* Host-only context adapters; locking is not concurrency evidence. */
+#include "include/linux/xdev_ext_requester_core.h"
+#include "include/linux/xdev_ext_mech_reliable_core.h"
+typedef unsigned int spinlock_t;
+#define spin_lock_init(p) (*(p)=0)
+#define spin_lock_irqsave(p,f) do { (void)(p); (f)=0; } while (0)
+#define spin_unlock_irqrestore(p,f) do { (void)(p); (void)(f); } while (0)
+#define EXPORT_SYMBOL_GPL(name)
+#define THIS_MODULE NULL
+#define static_assert _Static_assert
+#define __bpf_kfunc
+struct xdev_ext_family_hooks_hdr {u32 family;};
+'''
+REQUESTER_STUBS = r'''
+/* NET must retain its current admission behavior throughout the refactor. */
+int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+                           struct pci_dev *pdev, u32 flags)
+{ (void)rq; (void)st; (void)pdev; (void)flags; assert(!"NET unexpectedly requested admission"); return -EINVAL; }
+void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
+{ (void)rq; assert(!"NET unexpectedly released admission"); }
+'''
 MAIN = r'''
 static struct xdev_ext_mech_session session;
 static struct xdev_ext_mech_stage stage;
@@ -135,16 +157,58 @@ int main(void)
 }
 '''
 
-def main():
+def without_includes(text):
+    return "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#include"))
+
+
+def require_family():
+    path = KERNEL / "io_uring/family/xdev_ext_netfam.c"
+    if not path.is_file():
+        print("not ok 1 - io_uring/family/xdev_ext_netfam.c missing")
+        raise SystemExit(1)
+    return path
+
+
+def family_declarations():
+    return (without_includes((KERNEL / "include/linux/xdev_ext_requester.h").read_text()) + "\n" +
+            without_includes((KERNEL / "include/linux/xdev_ext_netfam.h").read_text()))
+
+
+def family_runtime():
+    source = require_family().read_text()
+    begin = "/* xdev_ext_netfam runtime begin */"
+    end = "/* xdev_ext_netfam runtime end */"
+    return source[source.index(begin) + len(begin):source.index(end)]
+
+
+def net_completion_body():
     source = (KERNEL / "io_uring/xdev_ext_mech_net.c").read_text()
     code = source[source.index("/* Completion-driven NET:"):]
     code = code[:code.index("static const struct xdev_ext_mech_class_ops")]
-    code = "\n".join(line for line in code.splitlines() if not line.startswith("#include"))
-    # The real scheduler gates a later batch until the earlier native FIFO accepted it.
+    # The omitted class initializer consumes this constant in production.
+    # Keep that dependency visible without changing the behavioral fixture.
+    return without_includes(code) + "\n" + (
+        "const struct xdev_ext_net_hooks *const fixture_net_class_family = &xdev_ext_net_hooks;\n")
+
+
+def compile_and_run(code, main, prefix="net-family-"):
+    with tempfile.TemporaryDirectory(prefix=prefix) as tmp:
+        p = Path(tmp)
+        (p / "test.c").write_text(SHIM + FAMILY_SHIM + family_declarations() + REQUESTER_STUBS + code + main)
+        cmd = [os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+               "-Wno-unused-function", "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
+               "-I" + str(KERNEL), str(p / "test.c"), "-o", str(p / "test")]
+        subprocess.run(cmd, check=True)
+        subprocess.run([str(p / "test")], check=True)
+
+
+def main():
+    # Guard first: a missing family is the intended RED boundary, not an include/compile error.
+    require_family()
+    source = (KERNEL / "io_uring/xdev_ext_mech_net.c").read_text()
     assert ".flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE" in source
-    with tempfile.TemporaryDirectory(prefix="net-async-stage-") as tmp:
-        p=Path(tmp);(p/"test.c").write_text(SHIM+code+MAIN)
-        cmd=[os.environ.get("CC","cc"),"-std=gnu11","-Wall","-Wextra","-Werror","-Wno-unused-function","-fsanitize=undefined","-fno-sanitize-recover=undefined","-I"+str(KERNEL),str(p/"test.c"),"-o",str(p/"test")]
-        subprocess.run(cmd,check=True)
-        subprocess.run([str(p/"test")],check=True)
-if __name__=="__main__":main()
+    compile_and_run(family_runtime() + net_completion_body(), MAIN, "net-async-stage-")
+
+
+if __name__ == "__main__":
+    main()

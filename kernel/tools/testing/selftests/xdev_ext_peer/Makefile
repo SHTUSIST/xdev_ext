@@ -22,7 +22,7 @@ xdev_ext_peer_net_rx_test: xdev_ext_peer_net_rx_test.c ../../../../io_uring/xdev
 	$(CC) $(CFLAGS) $< -o $@
 xdev_ext_peer_rx_contract_test: xdev_ext_peer_rx_contract_test.c xdev_ext_peer_test_shim.h ../../../../include/linux/xdev_ext_peer.h
 	$(CC) $(CFLAGS) $< -o $@
-xdev_ext_peer_net_track_test: xdev_ext_peer_net_track_test.c $(wildcard ../../../../io_uring/xdev_ext_peer_net_track.h)
+xdev_ext_peer_net_track_test: xdev_ext_peer_net_track_test.c $(wildcard ../../../../io_uring/xdev_ext_peer_net_track.h ../../../../include/linux/xdev_ext_peer_net_track.h)
 	$(CC) $(CFLAGS) $< -o $@
 xdev_ext_peer_net_plan_frames_test: xdev_ext_peer_net_plan_frames_test.c ../../../../io_uring/xdev_ext_mech_net_core.h
 	$(CC) $(CFLAGS) $< -o $@
