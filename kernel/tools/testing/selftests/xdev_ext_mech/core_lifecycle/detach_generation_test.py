@@ -36,6 +36,9 @@ def generate(kernel=ROOT):
     registry = (kernel / 'io_uring/xdev_ext_ops_core.c').read_text()
     header = (kernel / 'io_uring/xdev_ext_ops_core.h').read_text()
     source = (HERE / 'detach_generation_fixture.c.in').read_text()
+    source = source.replace('struct xdev_ext_mech_session{',
+                            'static u64 ktime_get_boottime_ns(void){return 0;}\n'
+                            'struct xdev_ext_mech_session{\n u64 stop_started_ns;', 1)
     start = header.index('struct xdev_ext_ops_registry {')
     source = source.replace('@REGISTRY_STRUCT@', header[start:header.index('\n};', start) + 3])
     names = [(header, 'xdev_ext_ops_is_current'), (registry, 'xdev_ext_ops_retract'),

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Host metadata only. No protocol decisions or fabricated native quiescence. */
 #include <assert.h>
+#include <pthread.h>
 #include <errno.h>
 #include <inttypes.h>
 #include <stdarg.h>
@@ -102,12 +103,16 @@ struct xdev_ext_mech_hold_intent;
 #define XDEV_EXT_MECH_CLASS_F_TRANSFORM (1U<<2)
 /* Exact current production structs from header, not a parallel class ABI. */
 @DECLARATIONS@
+#define kthread_work work_struct
+struct kthread_delayed_work { struct work_struct work; };
+#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)
 struct xdev_ext_mech_session {
  struct xdev_ext_mech_pool pool;
  struct xdev_ext_mech_layout l;
  struct xdev_ext_mech_sess ss;
  struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
  unsigned nr_stages,depth,queued,gets,puts;
+ bool progress_ready;
  u64 id;
  spinlock_t lock;
  atomic_t native_controls;
@@ -115,8 +120,10 @@ struct xdev_ext_mech_session {
  unsigned start_left;
  atomic64_t done,aborted;
  int drain_wq,last_err,stop_err;
+ u64 stop_started_ns;
  void *worker;
- struct work_struct reap_work,kick_work;
+ struct work_struct reap_work,kick_work,stop_work;
+ struct kthread_delayed_work progress_work;
 };
 struct xdev_ext_mech_batch {
  void *priv,*cookie;
@@ -161,12 +168,14 @@ static bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st,
 static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_call_args *a,s32 *ret,struct xdev_ext_mech_hold_intent *hold);
 static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,u64 cookie,u64 lba,u32 bytes,u32 opcode);
 static void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,u64 ticket,int status);
+static void xdev_ext_mech_count(struct xdev_ext_mech_session *s,u32 counter,u64 add) { (void)s;(void)counter;(void)add; }
+static int bitmap_empty(const unsigned long *p,unsigned bits) { for(unsigned i=0;i<BITS_TO_LONGS(bits);i++)if(p[i])return 0;return 1; }
 static void capture_debug(struct device *dev,const char *format,...);
 #define dev_dbg(dev,...) capture_debug(dev,__VA_ARGS__)
 static const char *pci_name(const struct pci_dev *pdev) { (void)pdev;return "0000:06:00.0"; }
 /* Unrelated external core effects. The ordering/drain functions below are REAL. */
 #define wake_up(p) ((void)(p))
-static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s,int err) { s->ss.state=XDEV_EXT_MECH_SESSION_STOPPING;if(err)s->stop_err=err; }
+static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s,int err);
 static void xdev_ext_mech_retry_kick(struct xdev_ext_mech_session *s) { (void)s; }
 static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session *s) { (void)s; }
 static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b) { (void)s;b->disposed=true;b->disposition_order=++observation_order;return frame_release_fail?-EIO:0; }
@@ -177,6 +186,7 @@ static bool xdev_ext_mech_batch_put_locked(struct xdev_ext_mech_session *s,struc
 static void xdev_ext_mech_notify_locked(struct xdev_ext_mech_session *s,bool terminal) { (void)s;(void)terminal; }
 static int queue_work(void *queue,struct work_struct *work) { (void)queue;work->queued=1;return 1; }
 static int kthread_queue_work(void *queue,struct work_struct *work) { return queue_work(queue,work); }
+static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w,unsigned long delay) { (void)delay;return queue_work(queue,&w->work); }
 #define system_unbound_wq NULL
 @CORE@
 /* Full actual family runtime; no substituted CHANNEL policy. */

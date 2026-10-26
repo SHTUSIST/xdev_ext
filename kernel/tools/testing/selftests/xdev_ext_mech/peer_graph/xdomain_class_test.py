@@ -10,6 +10,7 @@ No generated policy, alternate transition implementation, or successful C fallba
 X4 is stubbed only at the external link/device boundary; no X4 source is required.
 """
 import argparse
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import re
@@ -55,7 +56,7 @@ def struct(source, name):
 
 def function(source, name):
     # Anchored line begins avoid calls/prototypes. Function body is retained byte-for-byte.
-    match = re.search(r"(?m)^(?:static\s+)?(?:inline\s+)?(?:void|bool|int|unsigned long)\s+" +
+    match = re.search(r"(?m)^(?:static\s+)?(?:inline\s+)?(?:void|bool|int|u64|unsigned long)\s+" +
                       re.escape(name) + r"\s*\([^;]*?\)\s*\{", source)
     if not match: raise ValueError(f"actual function missing: {name}")
     end = balanced(source, source.index("{", match.start()))
@@ -70,12 +71,14 @@ def region(source, begin, end):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--kernel", type=Path, required=True)
+    parser.add_argument("--kernel", type=Path, default=Path(__file__).resolve().parents[5])
     parser.add_argument("--cc", default="gcc")
-    parser.add_argument("--x1-test-directory", type=Path, required=True,
+    parser.add_argument("--x1-test-directory", type=Path, default=Path(__file__).resolve().parent,
                         help="activated independent X1 runners and supporting fixtures")
-    parser.add_argument("--pressure-adapter", type=Path,
+    parser.add_argument("--pressure-adapter", type=Path, default=Path(__file__).resolve().parent / "xdomain_pressure_adapter.c",
                         help="reviewed test-only actual X5 bounded-storage adapter; no replacement enqueue")
+    parser.add_argument("--artifact-directory", type=Path, help="retain compiled actual-source TU and binary")
+    parser.add_argument("--case", choices=tuple(f"P{i:02}" for i in range(5,27)) + ("U01", "U02", "B01", "B02", "B03", "U03", "U04"), help="run selected case; default original 45 plus U01/U02/B01/B02")
     args = parser.parse_args()
     kernel, here = args.kernel.resolve(), Path(__file__).resolve().parent
     files = {
@@ -118,8 +121,24 @@ def main():
     end_enum = re.search(r"enum xdev_ext_mech_end\s*\{[^}]+\};", texts["core"])
     if not end_enum: raise ValueError("actual core end disposition enum missing")
     core = end_enum.group(0) + "\n" + "\n".join(function(texts["core"], name) for name in (
-        "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked",
+        "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_progress_work", "xdev_ext_mech_session_stop", "xdev_ext_mech_session_stop_started_ns",
         "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_end"))
+    # Diagnostic selection copies the selected original case byte-for-byte;
+    # the default full-suite body and every oracle remain unchanged.
+    selected_policy = args.case and args.case.startswith("P") and args.case != "P19"
+    if selected_policy:
+        body = function(texts["xdomain_cases.c"], "policy_safety")
+        ends = list(re.finditer(r'\bok\("(P\d\d) [^"\n]*"\);', body))
+        match_index = next(i for i, match in enumerate(ends) if match.group(1) == args.case)
+        start = ends[match_index-1].end() if match_index else body.index("{")+1
+        chunk = body[start:ends[match_index].end()]
+        if args.case == "P20":
+            chunk = chunk.split("pressure_case();", 1)[1]
+        if args.case == "P17":
+            chunk = chunk.replace("pair(1,2,8192);", "pair(1,2,8192);unsigned window=family_of(&sides[0])->tx.cfg.window;", 1)
+        adapter = "static void diagnostic_policy_case(void) {\n" + chunk + "\n}\n"
+        texts["xdomain_cases.c"] = texts["xdomain_cases.c"].replace("int main(void)", adapter+"int main(void)")
+        texts["xdomain_cases.c"] = texts["xdomain_cases.c"].replace('if(!strcmp(selected,"P19"))pressure_case();', 'if(selected[0]==\'P\'&&strcmp(selected,"P19"))diagnostic_policy_case();else if(!strcmp(selected,"P19"))pressure_case();')
     # Complete actual class/BPF function bodies; only Linux/BPF includes removed.
     source = (texts["xdomain_host.h"].replace("@KERNEL@", str(kernel))
               .replace("@UAPI@", str(files["UAPI"]))
@@ -134,15 +153,23 @@ def main():
               .replace("@PRESSURE@", texts["pressure adapter"]))
     leftovers = re.findall(r"@[A-Z_]+@", source)
     if leftovers: raise ValueError(f"unexpanded adapter tokens: {leftovers}")
-    with tempfile.TemporaryDirectory(prefix="xdev-x5-event-apply-") as directory:
+    if args.artifact_directory:
+        args.artifact_directory.mkdir(parents=True, exist_ok=True)
+    context = nullcontext(str(args.artifact_directory.resolve())) if args.artifact_directory else tempfile.TemporaryDirectory(prefix="xdev-x5-event-apply-")
+    with context as directory:
         source_file, binary = Path(directory) / "test.c", Path(directory) / "test"
         source_file.write_text(source)
-        command = [args.cc, "-std=gnu11", "-O1", "-Wall", "-Wextra", "-Werror",
+        command = [args.cc, "-std=gnu11", "-O1", "-pthread", "-Wall", "-Wextra", "-Werror",
                    "-Wno-unused-function", "-fsanitize=undefined", "-fno-sanitize-recover=all",
                    "-I" + str(kernel), str(source_file), "-o", str(binary)]
         print("X5 actual-source GCC command:", " ".join(command), flush=True)
         subprocess.run(command, check=True)
-        subprocess.run([str(binary)], check=True, timeout=60)
+        print("X5 scope:", args.case or "original 45 plus U01/U02/B01/B02 (49)", flush=True)
+        runtime_env = dict(os.environ)
+        runtime_env.pop("X5_CASE", None)  # CLI owns scope; inherited debug state cannot narrow a full run.
+        if args.case:
+            runtime_env["X5_CASE"] = args.case
+        subprocess.run([str(binary)], check=True, timeout=60, env=runtime_env)
     return 0
 
 

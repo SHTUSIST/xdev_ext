@@ -4,8 +4,10 @@
 #define HOST_WIRE (16*XDEV_EXT_REL_MAX_WINDOW+64)
 struct posted_group {
  struct xdev_ext_net_elem *elements;
+ struct xdev_ext_mech_batch *batch;
+ u64 ticket;
  unsigned count,order;
- u64 done;
+ u64 done,quiesced;
  bool accepted;
 };
 struct native_record {
@@ -58,7 +60,7 @@ static struct side *side_of_batch(struct xdev_ext_mech_batch *b) {
  assert(!"foreign trace batch");return NULL;
 }
 static struct posted_group *accepted_for_batch(struct side *side,struct xdev_ext_mech_batch *b) {
- for(unsigned i=0;i<side->posts;i++)if(side->post[i].accepted&&side->post[i].elements[0].slot->batch==b)return &side->post[i];
+ for(unsigned i=0;i<side->posts;i++)if(side->post[i].accepted&&side->post[i].batch==b&&side->post[i].ticket==b->ticket)return &side->post[i];
  assert(!"native_submit before actual full-array post acceptance");return NULL;
 }
 static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,u64 cookie,u64 lba,u32 bytes,u32 opcode) {
@@ -99,7 +101,8 @@ u32 xdev_ext_xd_crc(u32 crc,const void *data,size_t count) {
  const u8 *p=data;while(count--){crc^=*p++;for(unsigned b=0;b<8;b++)crc=(crc>>1)^(0x82f63b78U&-(crc&1));}return crc;
 }
 struct xdev_ext_xd_link *xdev_ext_xd_link_get(u64 token) {
- for(unsigned i=0;i<2;i++)if(sides[i].link.token==token){sides[i].link.ref.refs++;return &sides[i].link;}return NULL;
+ for(unsigned i=0;i<2;i++) { if(sides[i].link.token==token){sides[i].link.ref.refs++;return &sides[i].link;} }
+ return NULL;
 }
 void xdev_ext_xd_link_put(struct xdev_ext_xd_link *link) { assert(link->ref.refs>0);link->ref.refs--; }
 void xdev_ext_xd_link_fail(struct xdev_ext_xd_link *link,const struct xdev_ext_xd_ep *ep,int error) {
@@ -135,11 +138,25 @@ int xdev_ext_xd_msg_send(struct xdev_ext_xd_link *link,const struct xdev_ext_xd_
  if(msg->type==XDEV_EXT_XD_RTS)link->chan[0].announced+=msg->count;
  return 0;
 }
+static bool early_bind_progress;
+static void *bind_progress_thread(void *arg) {
+ struct xdev_ext_mech_stage *st=arg;
+ xdev_ext_mech_progress_work(&st->s->progress_work.work);
+ return NULL;
+}
 static void *device_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_stage_uapi *u,void(*dead)(void *),void *arg) {
  struct side *side=side_of_stage(st);assert(dead&&arg==st&&st->priv);assert(u->arg0==side->link.token&&u->arg1==0);
  struct xdev_ext_xd_ep *ep=calloc(1,sizeof(*ep));assert(ep);
  ep->xl=&side->link;ep->st=st;ep->rx=st->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE;
- assert(!side->link.chan[0].ep[ep->rx]);side->link.chan[0].ep[ep->rx]=ep;side->endpoint_attaches++;return ep;
+ assert(!side->link.chan[0].ep[ep->rx]);side->link.chan[0].ep[ep->rx]=ep;side->endpoint_attaches++;
+ if(early_bind_progress) {
+  pthread_t thread;
+  xdev_ext_mech_session_stop(st->s,-ENOLINK);
+  xdev_ext_mech_stage_dead(st,-ENOLINK);
+  assert(!pthread_create(&thread,NULL,bind_progress_thread,st));
+  assert(!pthread_join(thread,NULL));
+ }
+ return ep;
 }
 static void device_unbind(void *opaque) {
  struct xdev_ext_xd_ep *ep=opaque;struct side *side=side_of_link(ep->xl);
@@ -152,7 +169,10 @@ static struct pci_dev *device_requester(void *opaque) { return &requester[side_o
 static u32 device_max_payload(void *opaque) { return ((struct xdev_ext_xd_ep *)opaque)->detached?0:4096; }
 static void finish_element(struct side *side,unsigned group,unsigned k,int error,unsigned length,bool quiesced) {
  struct posted_group *p=&side->post[group];assert(p->accepted&&k<p->count&&!(p->done&(1ULL<<k)));
- unsigned before=protocol_calls;p->done|=1ULL<<k;callback_depth++;
+ /* X4 reports both the native CRC bit and -EBADMSG before family completion. */
+ if(error==-EBADMSG&&stage_of(side)->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE)
+  p->elements[k].dev_flags|=XDEV_EXT_XD_DESC_CRC_ERROR;
+ unsigned before=protocol_calls;p->done|=1ULL<<k;if(quiesced)p->quiesced|=1ULL<<k;callback_depth++;
  xdev_ext_net_elem_done(&p->elements[k],error,length,0,quiesced);
  callback_depth--;assert(protocol_calls==before);
 }
@@ -162,7 +182,7 @@ static int device_post(void *opaque,struct xdev_ext_net_elem *elements,u32 count
  if(ep->detached||!ep->xl->up)return -ENOLINK;
  if(side->post_error)return side->post_error;
  assert(side->posts<HOST_GROUPS);unsigned index=side->posts++;
- side->post[index]=(struct posted_group){.elements=elements,.count=count,.order=++observation_order,.accepted=true};
+ side->post[index]=(struct posted_group){.elements=elements,.batch=elements[0].slot->batch,.ticket=elements[0].slot->ticket,.count=count,.order=++observation_order,.accepted=true};
  for(unsigned i=0;i<count;i++)assert(elements[i].lease.file&&elements[i].buf_len==(rx?4096:elements[i].len));
  /* Acceptance precedes callbacks; epoch changes here MUST merge with reservation. */
  if(side->complete_inline){
@@ -272,6 +292,19 @@ static int alternate_complete(const struct xdev_ext_mech_ctx *ctx) {
  }
  return bpf_xdev_ext_xdomain_verdict(ctx,&verdict,sizeof(verdict))?XDEV_EXT_MP_ABORT:0;
 }
+static void debug_stage_scalars(const char *label,struct side *side) {
+ if(!getenv("X5_DEBUG"))return;
+ fprintf(stderr,"XDDEBUG label=%s side=%td now=%llu posts=%u wires=%u fail=%u error=%d live=%u q0=%u q1=%u admissions=%d puts=%u\n",label,side-sides,(unsigned long long)host_ns,side->posts,side->wires,side->link_failures,side->last_link_error,side->live,side->released_q0,side->released_q1,side->session.native_controls,side->session.puts);
+ for(unsigned n=0;n<side->session.nr_stages;n++) {
+  struct xdev_ext_mech_stage *st=&side->session.st[n];if(st->cls!=registered||!st->priv)continue;
+  struct xdev_ext_xd_stage *xs=st->priv;
+  fprintf(stderr,"XDDEBUG stage=%u direction=%u dead=%u failed=%u epoch=%llu posted_groups=%u rts=%u ctl=%u base=%llu next=%llu credit=%llu\n",n,st->direction,xs->ns.dead,xs->failed,(unsigned long long)xs->epoch,xs->posted_groups,xs->rts_count,xs->ctl_count,(unsigned long long)xs->ns.tx.base_group,(unsigned long long)xs->ns.tx.next_group,(unsigned long long)xs->ns.tx.credit);
+  for(unsigned k=0;k<xs->ns.depth;k++) {
+   struct xdev_ext_net_slot *p=&xs->ns.slots[k];struct xdev_ext_xd_fact *f=&xs->facts[k];
+   fprintf(stderr,"XDDEBUG stage=%u slot=%u busy=%u state=%u group=%llu ticket=%llu local_known=%u quiesced=%u sequester=%u accepted=%u reserved=%u event=%u epoch=%llu wake=%llu\n",n,k,p->busy,p->state,(unsigned long long)p->group,(unsigned long long)p->ticket,p->local_known,p->local_quiesced,p->sequestered,f->accepted,f->reserved,f->event,(unsigned long long)f->epoch,(unsigned long long)f->wake);
+  }
+ }
+}
 static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_call_args *a,s32 *ret,struct xdev_ext_mech_hold_intent *hold) {
  (void)hold;assert(!held_spinlocks&&!held_mutexes&&!callback_depth&&worker_depth==1);
  assert(a->member==XDEV_EXT_MECH_MEMBER_COMPLETE&&a->callsite==XDEV_EXT_MECH_SITE_WORKER_PROTOCOL);
@@ -318,6 +351,9 @@ static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_e
   }
  }
  last_recorded=a->xdomain->verdict;
+ if(getenv("X5_DEBUG")) {
+  fprintf(stderr,"XDDEBUG candidate side=%td stage=%u direction=%u event=%u id=%llu epoch=%llu group=%llu state=%u facts=%u msg_type=%u now=%llu hard=%llu policy=%llu credit=%llu msg_credit=%llu action=%u out_id=%llu out_epoch=%llu out_credit=%llu status=%d wake=%llu injected=%u mode=%u\n",side_of_stage(st)-sides,st->index,st->direction,last_snapshot.event,(unsigned long long)last_snapshot.event_id,(unsigned long long)last_snapshot.epoch,(unsigned long long)last_snapshot.group,last_snapshot.state,last_snapshot.facts,last_snapshot.msg_type,(unsigned long long)last_snapshot.now_ns,(unsigned long long)last_snapshot.hard_deadline_ns,(unsigned long long)last_snapshot.policy_deadline_ns,(unsigned long long)last_snapshot.credit,(unsigned long long)last_snapshot.msg_credit,last_recorded.action,(unsigned long long)last_recorded.event_id,(unsigned long long)last_recorded.epoch,(unsigned long long)last_recorded.credit,last_recorded.status,(unsigned long long)last_recorded.wake_ns,malicious,inject);
+ }
  if(after_record){void(*hook)(struct xdev_ext_mech_stage*)=after_record;after_record=NULL;hook(st);}
  active_args=NULL;active_stage=NULL;return 0;
 }
@@ -326,7 +362,14 @@ static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_e
 static void run_worker_once(struct side *side) {
  assert(!held_spinlocks&&!held_mutexes&&!callback_depth&&!worker_depth);
  side->session.queued=0;worker_depth=1;unsigned before=protocol_calls;
- unsigned long delay=stage_of(side)->cls->progress(stage_of(side));
+ unsigned long delay=0;
+ /* Actual core worker visits every bound stage; each class owns its policy. */
+ for(unsigned i=0;i<side->session.nr_stages;i++) {
+  struct xdev_ext_mech_stage *st=&side->session.st[i];
+  if(st->priv&&st->cls&&st->cls->progress) {
+   unsigned long next=st->cls->progress(st);if(next)delay=next;
+  }
+ }
  worker_depth=0;assert(protocol_calls-before<=4*XDEV_EXT_REL_MAX_WINDOW);
  if(delay)side->session.queued=1;
 }
@@ -363,6 +406,10 @@ static void request_stop(struct side *side) { xdev_ext_mech_session_stop(&side->
 static void complete_group(struct side *side,unsigned group,int error,bool quiesced) {
  struct posted_group *p=&side->post[group];for(unsigned k=0;k<p->count;k++)if(!(p->done&(1ULL<<k)))finish_element(side,group,k,error,error?0:p->elements[k].len,quiesced);
 }
+static void complete_batch(struct side *side,unsigned batch,int error,bool quiesced) {
+ struct posted_group *p=accepted_for_batch(side,&side->batches[batch]);
+ complete_group(side,(unsigned)(p-side->post),error,quiesced);
+}
 static void down_run(bool callbacks) {
  assert(!callback_depth&&!held_spinlocks&&!held_mutexes);
  for(unsigned i=0;i<2;i++){
@@ -387,6 +434,7 @@ static void fresh(unsigned tx_index,unsigned rx_index,unsigned depth,unsigned fr
   for(unsigned j=0;j<index;j++)side->session.st[j]=(struct xdev_ext_mech_stage){.s=&side->session,.cls=&source_class,.index=j};
   side->session.st[index]=(struct xdev_ext_mech_stage){.s=&side->session,.cls=registered,.file=&authority,.class_id=XDEV_EXT_MECH_CLASS_XDOMAIN,.index=index,.direction=i?XDEV_EXT_MECH_DIR_FROM_DEVICE:XDEV_EXT_MECH_DIR_TO_DEVICE};
   side->link.token=1001+i;side->link.local_inc=11+i;side->link.remote_inc=12-i;side->link.up=true;side->link.channels=1;
+  memset(side->link.ctl_tx_free,0xff,sizeof(side->link.ctl_tx_free));
   side->link.nhi_pdev=&requester[i];
  }
 }
@@ -415,7 +463,9 @@ static int submit(struct side *side,unsigned index) {
  return result;
 }
 static void consume(struct side *side,unsigned index) {
- struct xdev_ext_mech_batch *b=&side->batches[index];assert(b->publishes==1);
+ struct xdev_ext_mech_batch *b=&side->batches[index];
+ if(b->publishes!=1)fprintf(stderr,"X5 consume unmet: side=%td batch=%u publishes=%u status=%d posts=%u native_submit=%u native_complete=%u wires=%u link_fail=%u err=%d protocol_calls=%u\n",side-sides,index,b->publishes,b->status,side->posts,side->native_submits,side->native_completes,side->wires,side->link_failures,side->last_link_error,protocol_calls);
+ assert(b->publishes==1);
  /* A complete CQE overwrites the caller buffer, including unused fields. */
  memset(&side->cqe[index],0xa5,sizeof(side->cqe[index]));
  registered->fill_cqe(stage_of(side),b,&side->cqe[index]);b->filled++;
@@ -431,16 +481,67 @@ static void end_batch(struct side *side,unsigned index,int error,bool sequester)
 }
 static void happy_group(unsigned index) {
  assert(!submit(&sides[1],index));assert(!submit(&sides[0],index));drain_worker(16);
- complete_group(&sides[1],index,0,true);complete_group(&sides[0],index,0,true);drain_worker(16);
+ complete_batch(&sides[1],index,0,true);complete_batch(&sides[0],index,0,true);drain_worker(16);
  consume(&sides[1],index);end_batch(&sides[1],index,0,false);drain_worker(16);
  consume(&sides[0],index);end_batch(&sides[0],index,0,false);drain_worker(4);
 }
-static void malicious(enum injection mode,unsigned event,unsigned limit) { inject=mode;inject_event=event;inject_limit=limit;inject_seen=0; }
+struct failure_batch_fact { unsigned publishes;int status;bool prepared;u64 ticket;unsigned accepted,quiesced; };
+static struct failure_batch_fact failure_before[2][HOST_GROUPS];
+static unsigned failure_success_before, failure_q1_before[2];
+static u64 failure_announced_before[2];
+static void capture_failure_before(void) {
+ failure_success_before=0;
+ for(unsigned i=0;i<2;i++) {
+  failure_q1_before[i]=sides[i].released_q1;failure_announced_before[i]=sides[i].link.chan[0].announced;
+  for(unsigned k=0;k<HOST_GROUPS;k++) {
+   struct xdev_ext_mech_batch *b=&sides[i].batches[k];
+   failure_before[i][k]=(struct failure_batch_fact){.publishes=b->publishes,.status=b->status,.prepared=b->priv!=NULL,.ticket=b->ticket};
+   for(unsigned n=0;n<sides[i].posts;n++) {
+    struct posted_group *p=&sides[i].post[n];if(p->batch!=b||p->ticket!=b->ticket)continue;
+    failure_before[i][k].accepted++;u64 mask=p->count==64?UINT64_MAX:(1ULL<<p->count)-1;
+    failure_before[i][k].quiesced+=p->done==mask&&p->quiesced==mask;
+   }
+   failure_success_before+=b->publishes&&b->status==0;
+  }
+ }
+}
+static void malicious(enum injection mode,unsigned event,unsigned limit) {
+ capture_failure_before();inject=mode;inject_event=event;inject_limit=limit;inject_seen=0;
+}
+/* Root SDD clarification: invalid intent has no selected effect; mandatory C
+ * failure may later publish truthful negative custody, never success. */
 static void assert_protocol_failure(unsigned posts_before,unsigned wire_before,unsigned publishes_before) {
  drain_worker(8);
+ debug_stage_scalars("protocol-failure",&sides[0]);debug_stage_scalars("protocol-failure",&sides[1]);
  assert(sides[0].link_failures+sides[1].link_failures>0);
  assert((sides[0].last_link_error==-EPROTO)||(sides[1].last_link_error==-EPROTO));
- assert(total_posts()==posts_before&&total_wire()==wire_before&&total_published()==publishes_before);
+ assert(total_posts()==posts_before&&total_wire()==wire_before);
+ unsigned success_after=0,new_publications=0;
+ for(unsigned i=0;i<2;i++) {
+  assert(sides[i].link.chan[0].announced==failure_announced_before[i]);
+  for(unsigned k=0;k<HOST_GROUPS;k++) {
+   struct xdev_ext_mech_batch *b=&sides[i].batches[k];struct failure_batch_fact *old=&failure_before[i][k];
+   success_after+=b->publishes&&b->status==0;
+   if(b->publishes==old->publishes)continue;
+   assert(b->publishes==old->publishes+1&&b->status<0);
+   if(old->prepared)assert(b->ticket==old->ticket);
+   struct xdev_ext_xd_batch *bp=b->priv;assert(bp&&bp->cqe.status==b->status);
+   unsigned accepted=0;bool all_quiesced=true;
+   for(unsigned n=0;n<sides[i].posts;n++) {
+    struct posted_group *p=&sides[i].post[n];
+    if(p->batch!=b||p->ticket!=b->ticket)continue;
+    accepted++;u64 mask=p->count==64?UINT64_MAX:(1ULL<<p->count)-1;
+    if(p->done!=mask||p->quiesced!=mask)all_quiesced=false;
+   }
+   fprintf(stderr,"Safety publication side=%u batch=%u before=%u/status%d after=%u/status%d ticket=%llu accepted_before=%u/quiesced_before=%u accepted_after=%u all_quiesced_after=%u sequester=%u remote=%u q1before=%u q1after=%u\n",i,k,old->publishes,old->status,b->publishes,b->status,(unsigned long long)b->ticket,old->accepted,old->quiesced,accepted,accepted&&all_quiesced,b->sequester,bp->cqe.remote,failure_q1_before[i],sides[i].released_q1);
+   if(stage_of(&sides[i])->direction==XDEV_EXT_MECH_DIR_TO_DEVICE)assert(bp->cqe.remote==XDEV_EXT_NET_REMOTE_LOST);
+   if(!accepted)assert(!b->sequester);
+   else if(!all_quiesced)assert(b->sequester&&sides[i].released_q1==failure_q1_before[i]);
+   new_publications++;
+  }
+ }
+ assert(success_after==failure_success_before);
+ assert(total_published()==publishes_before+new_publications);
 }
 
 /* Explicit activation dependency: the reviewable storage adapter is test-only.
@@ -450,7 +551,7 @@ struct pressure_observation {
  u8 queue[65536];
  size_t bytes;
  unsigned used;
- bool stop_pending,link_down_pending;
+ bool stop_pending,link_down_pending,stop_observed;
 };
 void pressure_seed_full(struct side *side,struct xdev_ext_xd_msg *one_more);
 void pressure_capture(struct side *side,struct pressure_observation *out);
