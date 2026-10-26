@@ -31,6 +31,7 @@ def execute(shim, production, main):
         subprocess.run(shlex.split(os.environ.get("CC", "gcc")) + [
             "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined",
             "-fno-sanitize-recover=undefined", "-I" + str(KERNEL),
+            "-idirafter", str(KERNEL / "include"),
             str(source), "-o", str(binary)], check=True, timeout=30)
         subprocess.run([str(binary)], check=True, timeout=10)
 
@@ -308,10 +309,17 @@ CAPS_SHIM = r'''
 #include <string.h>
 #include "io_uring/xdev_ext_mech_step.h"
 typedef uint32_t u32;
+/* The family header is kernel-only in mech.h; use the real compute contract
+ * with this plain-data host declaration, without replacing any kind rule. */
+struct xdev_ext_family_hooks_hdr { u32 family; };
+#include "include/linux/xdev_ext_compfam.h"
 #define __user
 struct xdev_ext_mech_stage;
-struct xdev_ext_mech_class_ops { int (*bind)(struct xdev_ext_mech_stage *, const struct xdev_ext_mech_stage_uapi *); };
-struct xdev_ext_mech_stage { const struct xdev_ext_mech_class_ops *cls; struct xdev_ext_mech_stage_caps caps; };
+struct xdev_ext_mech_class_ops {
+ int (*bind)(struct xdev_ext_mech_stage *, const struct xdev_ext_mech_stage_uapi *);
+ union { const struct xdev_ext_comp_hooks *comp; } fam;
+};
+struct xdev_ext_mech_stage { u32 class_id; const struct xdev_ext_mech_class_ops *cls; struct xdev_ext_mech_stage_caps caps; };
 struct xdev_ext_mech_session { u32 nr_stages; struct xdev_ext_mech_stage st[2]; };
 struct io_ring_ctx { int id; };
 static struct xdev_ext_mech_session session;
@@ -350,6 +358,7 @@ int main(void)
  struct xdev_ext_mech_stage_caps in, saved;
  unsigned byte;
  session.nr_stages = 2; session.st[1].cls = &ops;
+ session.st[1].class_id = u.class_id;
  memset(&session.st[1].caps, 0xa5, sizeof(session.st[1].caps));
  assert(!xdev_ext_mech_class_bind(&session.st[1], &u, XDEV_EXT_MECH_POOL_PEER) && bind_calls == 1);
  assert(session.st[1].caps.native_queue == XDEV_EXT_CAP_ESTABLISHED);

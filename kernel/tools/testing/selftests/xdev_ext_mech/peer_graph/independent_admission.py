@@ -110,6 +110,11 @@ class Admission(unittest.TestCase):
                 filename = "io_uring/xdev_ext_mech_cpu_core.h"
                 (include_root / filename).write_bytes(subprocess.check_output(
                     ["git", "show", TEST_REVISION + ":./" + filename], cwd=KERNEL))
+            # F9a: only this revision's step may require compute kind rules.
+            if 'xdev_ext_compfam_core.h' in (include_root / "io_uring/xdev_ext_mech_step.h").read_text():
+                filename = "include/linux/xdev_ext_compfam_core.h"
+                (include_root / filename).write_bytes(subprocess.check_output(
+                    ["git", "show", TEST_REVISION + ":./" + filename], cwd=KERNEL))
         source.write_text(C_SOURCE)
         subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(include_root), str(source), "-o", str(cls.binary)], check=True)
 

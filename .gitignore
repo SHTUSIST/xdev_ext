@@ -1367,4 +1367,9 @@
 !/kernel/include/linux/xdev_ext_storfam.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/family/storfam_core_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/storfam_wiring_source_test.py
+!/kernel/include/linux/xdev_ext_compfam_core.h
+!/kernel/include/linux/xdev_ext_compfam.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/compfam_core_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_bind_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/compfam_wiring_source_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py

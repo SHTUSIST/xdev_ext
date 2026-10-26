@@ -25,6 +25,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_dma_core.h"
@@ -387,6 +388,12 @@ static int xdev_ext_dma_poll(struct xdev_ext_mech_stage *st)
 	return cs->region.ops->poll(&cs->region);
 }
 
+static const struct xdev_ext_comp_hooks xdev_ext_dma_comp_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
+	.kinds = 1U << XDEV_EXT_COMP_COPY_WINDOW,
+	.producer_visibility = XDEV_EXT_CAP_NOT_WIRED,
+};
+
 static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
 	.class_id	= XDEV_EXT_MECH_CLASS_DMA,
 	.desc_size	= sizeof(struct xdev_ext_dma_copy_desc),
@@ -405,6 +412,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
 	.fill_cqe	= xdev_ext_dma_fill_cqe,
 	.mark_dead	= xdev_ext_dma_mark_dead,
 	.poll		= xdev_ext_dma_poll,
+	.fam.comp	= &xdev_ext_dma_comp_hooks,
 };
 
 /* After every late_initcall, so the core's own initialisation has run. */

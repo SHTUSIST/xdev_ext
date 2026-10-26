@@ -47,6 +47,10 @@ def main():
     if '#include "xdev_ext_mech_cpu_core.h"' in step:
         filename = "io_uring/xdev_ext_mech_cpu_core.h"
         headers[filename] = (KERNEL / filename).read_text()
+    # F9a: copy the pure compute dependency required by this step snapshot.
+    if 'xdev_ext_compfam_core.h' in step:
+        filename = "include/linux/xdev_ext_compfam_core.h"
+        headers[filename] = (KERNEL / filename).read_text()
     # Updated for P1: the 75b51c2 anchors (64 KiB frame, NVMe-read-first, NVMe/NET-only, TX-only NET)
     # are replaced by the capability table and the geometry rule; mutate those instead.
     mutations = [

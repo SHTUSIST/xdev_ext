@@ -15,6 +15,7 @@
 #include <linux/module.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 
 #define XDEV_EXT_IAA_SG_MAX 128
@@ -269,6 +270,11 @@ static void xdev_ext_iaa_mark_dead(struct xdev_ext_mech_stage *st)
  struct xdev_ext_iaa_stage *cs = st->priv;
  WRITE_ONCE(cs->dead, true);
 }
+static const struct xdev_ext_comp_hooks xdev_ext_iaa_comp_hooks = {
+ .hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
+ .kinds = 1U << XDEV_EXT_COMP_TRANSFORM,
+ .producer_visibility = XDEV_EXT_CAP_NOT_APPLICABLE,
+};
 static const struct xdev_ext_mech_class_ops xdev_ext_iaa_class = {
  .class_id = XDEV_EXT_MECH_CLASS_IAA, .flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM,
  .desc_size = sizeof(struct xdev_ext_iaa_desc), .desc_cap = 1,
@@ -278,6 +284,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_iaa_class = {
  .fill_info = xdev_ext_iaa_fill_info, .validate = xdev_ext_iaa_validate,
  .submit = xdev_ext_iaa_submit, .fill_cqe = xdev_ext_iaa_fill_cqe,
  .mark_dead = xdev_ext_iaa_mark_dead,
+ .fam.comp = &xdev_ext_iaa_comp_hooks,
 };
 static int __init xdev_ext_mech_iaa_init(void)
 {

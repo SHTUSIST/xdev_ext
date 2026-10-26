@@ -14,8 +14,10 @@
 #include "xdev_ext_mech_cpu_core.h"
 #ifdef __KERNEL__
 #include <linux/xdev_ext_family_core.h>
+#include <linux/xdev_ext_compfam_core.h>
 #else
 #include "../include/linux/xdev_ext_family_core.h"
+#include "../include/linux/xdev_ext_compfam_core.h"
 #endif
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
@@ -70,6 +72,18 @@ static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi
   return u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
    XDEV_EXT_MECH_ROLE_PRODUCER : XDEV_EXT_MECH_ROLE_CONSUMER;
  }
+}
+
+/* This header is also compiled by host tests without <assert.h>. */
+_Static_assert(XDEV_EXT_MECH_ROLE_PRODUCER == 1 &&
+	       XDEV_EXT_MECH_ROLE_CONSUMER == 2 &&
+	       XDEV_EXT_MECH_ROLE_INPLACE == 3 &&
+	       XDEV_EXT_MECH_ROLE_TRANSFORM == 4,
+	       "xdev_ext_comp_kind_of_role() numbers the roles");
+
+static inline int xdev_ext_comp_kind_of(const struct xdev_ext_mech_stage_uapi *u)
+{
+	return xdev_ext_comp_kind_of_role(u->class_id, xdev_ext_mech_stage_role(u));
 }
 
 static inline __u32 xdev_ext_mech_chain_refs(const struct xdev_ext_mech_stage_uapi *st,

@@ -12,6 +12,7 @@
 #include <linux/module.h>
 #include <linux/scatterlist.h>
 #include <linux/slab.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xxhash.h>
 #include "xdev_ext_mech_cpu_core.h"
@@ -271,12 +272,18 @@ static void xdev_ext_cpu_mark_dead(struct xdev_ext_mech_stage *st)
  struct xdev_ext_cpu_stage *cs = st->priv;
  WRITE_ONCE(cs->dead, true);
 }
+static const struct xdev_ext_comp_hooks xdev_ext_cpu_comp_hooks = {
+ .hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
+ .kinds = (1U << XDEV_EXT_COMP_INPLACE) | (1U << XDEV_EXT_COMP_TRANSFORM),
+ .producer_visibility = XDEV_EXT_CAP_NOT_APPLICABLE,
+};
 static const struct xdev_ext_mech_class_ops xdev_ext_cpu_class = {
  .class_id = XDEV_EXT_MECH_CLASS_CPU, .flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM,
  .desc_size = sizeof(struct xdev_ext_cpu_desc), .desc_cap = 1,
  .owner = THIS_MODULE, .bind = xdev_ext_cpu_bind, .unbind = xdev_ext_cpu_unbind,
  .default_build = xdev_ext_cpu_default_build, .validate = xdev_ext_cpu_validate,
  .submit = xdev_ext_cpu_submit, .mark_dead = xdev_ext_cpu_mark_dead,
+ .fam.comp = &xdev_ext_cpu_comp_hooks,
 };
 static int __init xdev_ext_mech_cpu_init(void)
 {
