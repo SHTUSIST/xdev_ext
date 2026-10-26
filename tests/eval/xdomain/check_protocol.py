@@ -178,6 +178,21 @@ def _request_payload(r):
         else:
             raise ValueError("verify kind")
         return
+    if c == "close" and (p or r["identity"]["case"] not in ("functional-epochs", "bulk-static")):
+        keys(p, {"stop_receipts"})
+        validate_stop_pair(p["stop_receipts"], r["identity"])
+        return
+    if c == "wait" and p:
+        if p.get("until") == "accepted-native-inflight":
+            keys(p, {"until", "max_age_ms"})
+            integer(p["max_age_ms"], minimum=1, maximum=120000)
+        elif p.get("until") == "native-action-evidence":
+            keys(p, {"until", "action"})
+            if type(p["action"]) is not dict:
+                raise ValueError("native action receipt")
+        else:
+            raise ValueError("WAIT discriminator")
+        return
     keys(p, required[c])
     if c in ("preflight", "prepare"):
         _geometry(p["geometry"])
@@ -355,7 +370,39 @@ def _response_payload(r):
         "close": {"closed", "retained_resources"},
         "cancel": {"hold_reasons", "retained_resources"},
     }
-    keys(p, names[c])
+    native_wait = c == "wait" and "native_trace" in p
+    if native_wait:
+        keys(p, {"native_trace"} | ({"terminal"} if "terminal" in p else set()))
+        keys(p["native_trace"], {"raw_trace", "receipt", "expected"})
+        trace = p["native_trace"]
+        if type(trace["raw_trace"]) is not str or type(trace["receipt"]) is not dict or type(trace["expected"]) is not dict:
+            raise ValueError("native trace evidence types")
+        if r["phase"] == "START_ACCEPTED":
+            if r["fate"] != "ACTIVE" or r["cleanup_permissions"]:
+                raise ValueError("pending native WAIT cannot release")
+        elif "terminal" not in p or r["phase"] != "DRAINED_SAFE" or r["fate"] != "SAFE":
+            raise ValueError("continued native WAIT must preserve actual guard phase")
+        if "terminal" in p:
+            keys(p["terminal"], {"stats_valid", "stats", "transport_valid", "transport"})
+            for k in ("stats_valid", "transport_valid"):
+                if type(p["terminal"][k]) is not bool:
+                    raise ValueError("native terminal validity")
+            if type(p["terminal"]["stats"]) is not dict or type(p["terminal"]["transport"]) is not dict:
+                raise ValueError("native terminal objects")
+            _stats_payload(p["terminal"])
+        return
+    if c == "prepare" and ("stage_caps" in p or "admission" in p):
+        keys(p, names[c] | {"stage_caps", "admission"})
+        if p["stage_caps"] is not None:
+            caps = p["stage_caps"]
+            keys(caps, set("size version session_id stage family export_authority reachability requester_mapping native_queue producer_visibility last_use_quiescence invalidation backing refused p2p_distance".split()))
+            for key, value in caps.items():
+                integer(value, minimum=-(1 << 31) if key == "p2p_distance" else 0,
+                        maximum=(1 << 31) - 1 if key == "p2p_distance" else ((1 << 64) - 1 if key == "session_id" else (1 << 32) - 1))
+        if type(p["admission"]) is not dict:
+            raise ValueError("admission evidence object")
+    else:
+        keys(p, names[c])
     if c == "preflight":
         if type(p["available"]) is not bool or type(p["reason"]) is not str:
             raise ValueError("preflight type")
@@ -467,7 +514,7 @@ def validate_record(r, expected=None):
                 "preflight": {"NEW"},
                 "prepare": {"SESSION_CREATED"},
                 "start": {"START_ACCEPTED"},
-                "wait": {"TRANSPORT_DONE"},
+                "wait": ({"START_ACCEPTED", "DRAINED_SAFE"} if "native_trace" in r["payload"] else {"TRANSPORT_DONE"}),
                 "stop": {"DRAINED_SAFE"},
                 "observe": {"DRAINED_SAFE"},
                 "verify": {"VERIFIED"},
@@ -477,6 +524,7 @@ def validate_record(r, expected=None):
                 raise ValueError("impossible success phase")
             if (
                 r["command"] in ("prepare", "start", "wait")
+                and r["phase"] != "DRAINED_SAFE"
                 and r["cleanup_permissions"]
             ):
                 raise ValueError("active cleanup")
@@ -493,7 +541,7 @@ def validate_record(r, expected=None):
             "preflight": {"NEW"},
             "prepare": {"NEW", "VERIFIED", "DRAINED_SAFE"},
             "start": {"SESSION_CREATED"},
-            "wait": {"START_ACCEPTED"},
+            "wait": ({"START_ACCEPTED", "DRAINED_SAFE"} if "native_trace" in r.get("payload", {}) else {"START_ACCEPTED"}),
             "stop": {"SESSION_CREATED", "START_ACCEPTED", "TRANSPORT_DONE"},
             "observe": {"DRAINED_SAFE"},
             "verify": {"DRAINED_SAFE"},
@@ -538,3 +586,46 @@ def encode_record(record):
     if not 1 <= len(body) <= MAX_JSON:
         raise ValueError("frame size")
     return struct.pack("!I", len(body)) + body
+
+
+def validate_terminal(terminal, session_id, *, fault=False, settled=False, stage=0):
+    """Validate actual terminal shapes even when their outer record is HELD."""
+    keys(terminal, {'stats_valid', 'stats', 'transport_valid', 'transport'})
+    if terminal['stats_valid'] is not True or terminal['transport_valid'] is not True:
+        raise ValueError('actual typed terminal stats and transport required')
+    if type(terminal['stats']) is not dict or type(terminal['transport']) is not dict:
+        raise ValueError('terminal objects')
+    _stats_payload(terminal)
+    integer(session_id, minimum=1)
+    integer(stage, maximum=3)
+    s = terminal['stats']; transport = terminal['transport']['v3']['v2']['v1']
+    if s['session_id'] != session_id or transport['session_id'] != session_id:
+        raise ValueError('terminal session identity mismatch')
+    if fault:
+        if s['last_err'] >= 0 or s['sequestered'] == 0 or s['submitted'][stage] == 0:
+            raise ValueError('fault lacks actual error, posted batch or quarantine')
+    if settled:
+        if any(s[k] for k in ('inflight', 'held', 'sequestered', 'last_err')) or any(transport[k] for k in ('native_controls', 'pending_acks', 'uncertain_controls')):
+            raise ValueError('terminal native/transport release unproved')
+    return terminal
+
+
+def validate_stop_pair(receipts, identity):
+    if type(receipts) is not list or len(receipts) != 2:
+        raise ValueError('two actual STOP receipts required')
+    roles = set()
+    for receipt in receipts:
+        validate_record(receipt)
+        i = receipt['identity']
+        if any(i[k] != identity[k] for k in ('version', 'run_id', 'sha', 'case', 'direction', 'epoch')):
+            raise ValueError('STOP pair run identity mismatch')
+        if i['role'] in roles or i['request_id'] >= identity['request_id']:
+            raise ValueError('STOP pair role or causal request mismatch')
+        roles.add(i['role'])
+        p = receipt['payload']
+        if receipt['command'] != 'stop' or receipt['phase'] != 'DRAINED_SAFE' or receipt['fate'] != 'SAFE' or receipt['error'] or receipt['held'] or p.get('stop_proved') is not True or p.get('stop_error') != 0 or p.get('first_error') != 0:
+            raise ValueError('unsafe STOP pair proof')
+        terminal = {k: p[k] for k in ('stats_valid', 'stats', 'transport_valid', 'transport')}
+        validate_terminal(terminal, p['stats']['session_id'], settled=True)
+    if roles != {'tx', 'rx'}:
+        raise ValueError('STOP pair requires both roles')

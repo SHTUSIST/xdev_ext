@@ -18,7 +18,10 @@ def required_sources(source_root: Path) -> list[Path]:
     names = ['check_contract.c', 'epoch_control.c', 'gpu_adapter.cc',
              'agent_supervisor.cc', 'xdomain_agent.cc', 'xdomain_gpu_pattern.cu',
              'xdomain_gpu_pattern.h', 'check_contract.h', 'epoch_control.h',
-             'gpu_adapter.h', 'agent_supervisor.h', 'observer_contract.h']
+             'gpu_adapter.h', 'agent_supervisor.h', 'observer_contract.h',
+             'native_trace_owner.cc', 'native_trace_owner.h',
+             'platform_facts.py', 'native_barrier.py', 'action_provider.py',
+             'check_protocol.py']
     abi_names = ['xdev_ext_mech.h', 'xdev_ext_policy.h',
                  'xdev_ext_binding.h', 'io_uring.h']
     uapi = source_root.parents[2] / 'kernel/include/uapi/linux'
@@ -153,9 +156,17 @@ def main():
     if not ptx.is_file() or not ptx.stat().st_size or not executable.is_file():
         return finish('failed', 1, 'Compiler did not produce required artifacts')
     produced['executable'] = executable
+    # Deploy the actual fixed-import modules used by the owner beside its binary.
+    # They are build prerequisites above, never manufactured placeholders.
+    for path in paths:
+        if path.suffix == '.py':
+            target = out / path.name
+            if path.resolve() != target.resolve():
+                shutil.copyfile(path, target)
+            produced[path.stem] = target
     receipt['source_sha256'] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
     receipt['artifact_sha256'] = {str(p): hashlib.sha256(p.read_bytes()).hexdigest()
-                                  for p in (ptx, executable)}
+                                  for p in produced.values()}
     return finish('built', 0)
 
 

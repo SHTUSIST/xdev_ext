@@ -65,7 +65,10 @@ An agent is launched with an argv array equivalent to:
 ```sh
 xdomain_agent --identity /PRIVATE/identity.json \
   --evidence-dir /PRIVATE/owner-evidence \
-  --kernel-receipt /PRIVATE/kernel-build.json --exclusive-creator
+  --kernel-receipt /PRIVATE/kernel-build.json --exclusive-creator \
+  --thunderbolt-log /PRIVATE/thunderbolt.jsonl \
+  --thunderbolt-receipt /PRIVATE/thunderbolt-receipt.json \
+  --helpers-dir /PRIVATE/xdomain-runtime
 ```
 
 The identity file contains version, run_id, exact sha, role (`tx` or `rx`), case,
@@ -89,9 +92,38 @@ production coordinator as a Python API; an explicit `{'tx': [...], 'rx': [...]}`
 argument overrides `config['agent_argv']`. Optional role-indexed
 `config['kernel_receipt']` values append the corresponding agent option.
 
-The current execution path supports `functional-epochs` and `bulk-static`.
-Every other case returns `incomplete` before launching either endpoint. Supplying
-an action provider does not enable a case without its action and evidence path.
+The coordinator dispatches all thirteen registered cases. Physical action cases
+require their bounded action provider before acquisition; absent prerequisites or
+raw action evidence remain incomplete. Strict CREATE refusal remains HELD with
+its actual errno, admission window and raw records; it grants no cleanup rights.
+
+The production owner imports the deployed `platform_facts.py` through a fixed
+`/usr/bin/python3 -I` metadata child and JSON pipes, checking the current local
+boot, build, NHI ancestry, token and channel. `--helpers-dir` defaults to the
+executable directory; it must contain the actual inventoried runtime helpers,
+including `native_barrier.py` and `check_protocol.py`. CLI evidence paths alone
+never prove the prerequisite.
+
+After GPU fill and before CREATE, each owner creates one exclusive tracefs
+instance for `xdev_ext:native_event`, with nop/mono and a 4096 KiB buffer. It
+records the actual event format, raw trace and per-CPU loss counters. Missing
+counters, loss, capacity overflow or unknown clocks cannot establish acceptance.
+`wait {until: accepted-native-inflight, max_age_ms: ...}` returns only an actual
+full pending native group qualified by `native_barrier.py`, retaining
+START_ACCEPTED and zero cleanup authority. `acceptance_seq` denotes a one-based
+raw ledger row, never a kernel acceptance counter. Continued action evidence
+seals only the owner's instance and retains the original pending request identity;
+a post-STOP read preserves the existing DRAINED_SAFE permissions. STOP timing
+uses the target's actual CLOCK_MONOTONIC invocation interval. Private owner
+metadata is removed from the payload and exposed as `evidence.stop_action` or
+`evidence.link_up` by the supervisor. Trace collection cannot prove quiescence.
+Destructor and failure paths retain active trace instances and resource FDs;
+only explicit safe close removes the owner's own instance.
+
+An actual CREATE_UNKNOWN response may wait for its same-command bounded
+admission capture. HELD is immediately durable; the original command deadline,
+cancel, signal, EOF, EPIPE and evidence-write failure still produce HELD without
+waiting for the owner. A late result never restores authority.
 
 The configuration supplies the identity base (without role/request_id), mode,
 groups, first_seq, seed, GPU BDFs and NVIDIA nodes by role, link tokens by role,

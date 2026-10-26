@@ -55,7 +55,8 @@ while True:
                    boot_id='contract-boot-' + role,
                    clock_domain='contract-boot-' + role + ':CLOCK_MONOTONIC',
                    observed_monotonic_ns=time.monotonic_ns(),
-                   idle=dict(sessions=0, native_owners=0), evidence_scope='contract'))
+                   idle=dict(scope='this-owner', prepared=False, session_id=0,
+                             native_payload_owners=0), evidence_scope='contract'))
     elif c == 'prepare' and case in ('functional-epochs','bulk-static','stop-inflight',
                                       'cable-loss','remove-on-resume','peer-reboot'):
         phase, fate = 'SESSION_CREATED', 'ACTIVE'

@@ -527,8 +527,25 @@ void request_validate(const Json &r, const Identity &id) {
   const auto &p = r.at("payload");
   if (c != "verify" && (count != 1 || r.at("part_index").u() != 0))
     throw std::runtime_error("multipart command");
-  if (c == "wait" || c == "stop" || c == "close")
-    exact(p, {});
+  if(c=="wait") {
+    if(p.object.empty())exact(p,{});
+    else if(p.at("until").s()=="accepted-native-inflight") {
+      exact(p,{"until","max_age_ms"});bounded(p.at("max_age_ms"),1,120000);
+    }else if(p.at("until").s()=="native-action-evidence") {
+      exact(p,{"until","action"});
+      const auto &a=p.at("action");
+      exact(a,{"version","action_id","identity","kind","target","barrier","attempted","completed","error","started_monotonic_ns","finished_monotonic_ns","evidence"});
+      a.at("started_monotonic_ns").u();a.at("finished_monotonic_ns").u();
+    }else throw std::runtime_error("WAIT discriminator");
+  } else if(c=="stop")exact(p,{});
+  else if(c=="close") {
+    if(p.object.empty())exact(p,{});
+    else {
+      exact(p,{"stop_receipts"});
+      if(p.at("stop_receipts").array.size()!=2)
+        throw std::runtime_error("paired STOP close receipts");
+    }
+  }
   else if (c == "start") {
     exact(p, {"groups", "first_seq"});
     auto groups = bounded(p.at("groups"), 1, 10000);
@@ -753,10 +770,16 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
         if (result.error) {
           struct tb_guard_snapshot actual{};
           tb_guard_snapshot(guard, &actual);
-          if (actual.phase != TB_PHASE_NEW &&
-              actual.phase != TB_PHASE_FAILED_SAFE &&
-              actual.phase != TB_PHASE_CLOSED)
+          if (actual.held && actual.hold_reasons == TB_HOLD_CREATE_UNKNOWN &&
+              c.command == "prepare") {
+            // A known CREATE refusal is already retained by its native reason.
+            std::lock_guard<std::mutex> lk(shared->lock);
+            if (!shared->owner_error) shared->owner_error = result.error;
+          } else if (actual.phase != TB_PHASE_NEW &&
+                     actual.phase != TB_PHASE_FAILED_SAFE &&
+                     actual.phase != TB_PHASE_CLOSED) {
             hold_owner_error(result.error);
+          }
         }
         {
           std::lock_guard<std::mutex> lk(shared->lock);
@@ -770,7 +793,7 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
     std::deque<std::string> output;
     size_t output_offset = 0, queued = 0;
     bool input_open = true, output_open = true, busy = false,
-         held_attempted = false, closing = false, durable_failed = false;
+         held_attempted = false, closing = false, durable_failed = false, create_receipt_deferred = false;
     int terminal_error = 0;
     uint64_t last_request = 0, active_request = 0, deadline = 0;
     std::string active_command, inflight_command;
@@ -836,6 +859,18 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       j.object["evidence"].object = {
           {"owner_pid", Json::num(getpid())},
           {"hold_reasons", Json::num(snap.hold_reasons)}};
+      auto owner_evidence=j.object["payload"].object.find("__owner_evidence");
+      if(owner_evidence!=j.object["payload"].object.end()) {
+        const auto &facts=owner_evidence->second;
+        if(active_command=="stop") {
+          exact(facts,{"stop_action"});
+          j.object["evidence"].object["stop_action"]=facts.at("stop_action");
+        }else if(active_command=="wait") {
+          exact(facts,{"link_up"});
+          j.object["evidence"].object["link_up"]=facts.at("link_up");
+        }else throw std::runtime_error("unexpected owner evidence");
+        j.object["payload"].object.erase(owner_evidence);
+      }
       if (durable_failed) {
         j.object["evidence"].object["evidence_incomplete"] = Json::boolean(true);
         j.object["evidence"].object["durable_write_failed"] = Json::boolean(true);
@@ -896,7 +931,10 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       j.object["retained_fds"] = inventory();
       append_durable(j);
       held_attempted = true;
-      response(terminal_error, "{}");
+      create_receipt_deferred = busy && active_command=="prepare" &&
+          reason == TB_HOLD_CREATE_UNKNOWN &&
+          !durable_failed && deadline && now_ns()<deadline;
+      if(!create_receipt_deferred)response(terminal_error, "{}");
     };
     auto dispatch = [&](Json r) {
       if (deadline && now_ns() >= deadline) {
@@ -927,6 +965,20 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
       if (snap.held && !held_attempted)
         hold(snap.hold_reasons ? snap.hold_reasons
                                : static_cast<uint32_t>(TB_HOLD_CUDA_UNKNOWN));
+      if (create_receipt_deferred &&
+          snap.hold_reasons != TB_HOLD_CREATE_UNKNOWN) {
+        // Replace the provisional CREATE notification error only with its
+        // returned owner error; external cancellation keeps its first cause.
+        if (!(snap.hold_reasons & ~(TB_HOLD_CREATE_UNKNOWN | TB_HOLD_PROTOCOL))) {
+          std::lock_guard<std::mutex> lk(shared->lock);
+          if (shared->owner_error) terminal_error = shared->owner_error;
+        }
+        create_receipt_deferred = false;
+        hold(snap.hold_reasons);
+      }
+      if(create_receipt_deferred && deadline && now_ns()>=deadline) {
+        create_receipt_deferred=false;hold(TB_HOLD_DEADLINE);
+      }
       if (deadline && !snap.held && now_ns() >= deadline)
         hold(TB_HOLD_DEADLINE);
       {
@@ -935,6 +987,8 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
           auto result = std::move(shared->result);
           shared->done = false;
           lk.unlock();
+          const bool deferred_completion = create_receipt_deferred;
+          create_receipt_deferred = false;
           busy = false;
           deadline = 0;
           tb_guard_snapshot(guard, &snap);
@@ -947,6 +1001,24 @@ int run_agent(int input_fd, int output_fd, int durable_fd,
               terminal_error = result.error ? result.error : -EIO;
             hold(TB_HOLD_PROTOCOL);
             tb_guard_snapshot(guard, &snap);
+          }
+          if (snap.held && deferred_completion) {
+            // Every deferred completion ends notification, including an empty
+            // result or an owner exception. It never changes HELD authority.
+            int error = result.error ? result.error : -EPROTO;
+            std::string payload = result.bounded_json.empty() ? "{}" : result.bounded_json;
+            try {
+              auto parsed = Parser(payload).parse();
+              if (result.request_id != active_request ||
+                  payload.size() > TB_MAX_JSON - 16384 ||
+                  parsed.type != Json::Object ||
+                  parsed.object.count("__owner_evidence"))
+                throw std::runtime_error("unexpected deferred owner result");
+            } catch (...) {
+              tb_guard_hold(guard, TB_HOLD_PROTOCOL);
+              payload = "{}";
+            }
+            response(error, payload);
           }
           if (!snap.held) {
             if (result.request_id != active_request) {

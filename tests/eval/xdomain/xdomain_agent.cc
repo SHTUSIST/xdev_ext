@@ -4,6 +4,7 @@
 #include "epoch_control.h"
 #include "gpu_adapter.h"
 #include "observer_contract.h"
+#include "native_trace_owner.h"
 #include <algorithm>
 #include <bpf/bpf.h>
 #include <bpf/libbpf.h>
@@ -21,6 +22,9 @@
 #include <linux/xdev_ext_peer.h>
 #include <map>
 #include <regex>
+#include <poll.h>
+#include <spawn.h>
+#include <sys/wait.h>
 #include <set>
 #include <sstream>
 #include <stdexcept>
@@ -28,8 +32,11 @@
 #include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <sys/utsname.h>
+#include <time.h>
 #include <unistd.h>
 #include <vector>
+
+extern char **environ;
 
 namespace tb {
 // The private wire parser is shared with supervisor; there is one parser body.
@@ -105,10 +112,9 @@ bool bool_at(const std::string &j, const std::string &p) {
   return s == "true";
 }
 uint64_t mono_ns() {
-  return static_cast<uint64_t>(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(
-          std::chrono::steady_clock::now().time_since_epoch())
-          .count());
+  struct timespec t{};
+  if(clock_gettime(CLOCK_MONOTONIC,&t))throw std::runtime_error("CLOCK_MONOTONIC unavailable");
+  return static_cast<uint64_t>(t.tv_sec)*1000000000ULL+static_cast<uint64_t>(t.tv_nsec);
 }
 std::string read_file(const std::string &path, size_t cap = 4 * 1024 * 1024) {
   int fd = open(path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW);
@@ -134,6 +140,19 @@ std::string read_file(const std::string &path, size_t cap = 4 * 1024 * 1024) {
   }
   close(fd);
   return result;
+}
+void persist_metadata(const std::string &path,const std::string &data) {
+  int fd=open(path.c_str(),O_WRONLY|O_CREAT|O_TRUNC|O_CLOEXEC|O_NOFOLLOW,0600);
+  if(fd<0)throw std::runtime_error("raw metadata evidence open");
+  size_t off=0;
+  while(off<data.size()) {
+    auto n=write(fd,data.data()+off,data.size()-off);
+    if(n<0&&errno==EINTR)continue;
+    if(n<=0){close(fd);throw std::runtime_error("raw metadata evidence write");}
+    off+=size_t(n);
+  }
+  int error=fsync(fd);close(fd);
+  if(error)throw std::runtime_error("raw metadata evidence fsync");
 }
 std::string trim(std::string v) {
   while (!v.empty() && std::isspace(static_cast<unsigned char>(v.back())))
@@ -188,6 +207,77 @@ std::string running_build_id() {
   if (id.empty())
     throw std::runtime_error("running kernel has no GNU build-id");
   return id;
+}
+// Fixed read-only local metadata helper; no shell, CUDA, or cleanup authority.
+std::string metadata_helper(const std::string &helpers, const std::string &input,
+                            uint64_t deadline) {
+  static const char code[] = R"PY(import json, sys, time
+sys.path.insert(0,sys.argv[1])
+q=json.load(sys.stdin)
+if q['op']=='platform':
+ from platform_facts import collect_platform_facts
+ r=collect_platform_facts(q['log'],q['receipt'],q['expected'])
+ if r['status']=='complete':
+  needed={c['begin_seq'] for c in r['credits']}
+  found=set()
+  binding=' token=%d local_inc=%d remote_inc=%d ' % (q['expected']['link_token'],q['local_inc'],q['remote_inc'])
+  with open(q['log'],'rb') as stream:
+   total=0
+   while True:
+    line=stream.readline(65537)
+    if not line: break
+    total+=len(line)
+    if len(line)>65536 or total>16*1024*1024: raise ValueError('C1 recheck capacity')
+    row=json.loads(line)
+    if row['seq'] in needed:
+     if binding not in row['message']: raise ValueError('C1 current incarnation mismatch')
+     found.add(row['seq'])
+  if found!=needed: raise ValueError('C1 selected PATH evidence missing')
+else:
+ from native_barrier import qualify_native_barrier
+ r=qualify_native_barrier(q['raw_trace'],q['receipt'],q['expected'],now_ns=time.monotonic_ns(),action=q.get('action'))
+print(json.dumps(r,separators=(',',':')),flush=True)
+)PY";
+  int in[2], out[2];
+  if(pipe2(in,O_CLOEXEC)) throw std::runtime_error("helper input pipe");
+  if(pipe2(out,O_CLOEXEC)) {close(in[0]);close(in[1]);throw std::runtime_error("helper output pipe");}
+  posix_spawn_file_actions_t actions;
+  posix_spawn_file_actions_init(&actions);
+  posix_spawn_file_actions_adddup2(&actions,in[0],STDIN_FILENO);
+  posix_spawn_file_actions_adddup2(&actions,out[1],STDOUT_FILENO);
+  char *argv[]={const_cast<char *>("/usr/bin/python3"),const_cast<char *>("-I"),
+                const_cast<char *>("-c"),const_cast<char *>(code),
+                const_cast<char *>(helpers.c_str()),nullptr};
+  pid_t pid=0;
+  int rc=posix_spawn(&pid,argv[0],&actions,nullptr,argv,environ);
+  posix_spawn_file_actions_destroy(&actions);
+  close(in[0]);close(out[1]);
+  if(rc) {close(in[1]);close(out[0]);throw std::runtime_error("metadata helper spawn");}
+  fcntl(in[1],F_SETFL,O_NONBLOCK);fcntl(out[0],F_SETFL,O_NONBLOCK);
+  size_t offset=0;std::string result;bool eof=false;int status=0;bool exited=false;
+  for(;;) {
+    if(mono_ns()>=deadline) // Keep unknown child and pipes retained; no kill/reap.
+      throw std::runtime_error("metadata helper deadline; retained pid="+std::to_string(pid));
+    pollfd fds[2]={{in[1],POLLOUT,0},{out[0],POLLIN,0}};
+    if(poll(fds,2,10)<0&&errno!=EINTR) throw std::runtime_error("metadata poll");
+    if(in[1]>=0&&(fds[0].revents&(POLLOUT|POLLERR|POLLHUP))) {
+      auto n=write(in[1],input.data()+offset,input.size()-offset);
+      if(n>0)offset+=size_t(n);
+      else if(n<0&&errno!=EAGAIN&&errno!=EINTR)throw std::runtime_error("metadata input");
+      if(offset==input.size()){close(in[1]);in[1]=-1;}
+    }
+    if(!eof&&(fds[1].revents&(POLLIN|POLLHUP|POLLERR))) {
+      char b[8192];auto n=read(out[0],b,sizeof(b));
+      if(n>0){if(result.size()+size_t(n)>TB_MAX_JSON)throw std::runtime_error("metadata capacity");result.append(b,size_t(n));}
+      else if(!n){eof=true;close(out[0]);out[0]=-1;}
+      else if(errno!=EAGAIN&&errno!=EINTR)throw std::runtime_error("metadata output");
+    }
+    if(!exited){auto w=waitpid(pid,&status,WNOHANG);if(w==pid)exited=true;else if(w<0&&errno!=EINTR)throw std::runtime_error("metadata child");}
+    if(exited&&eof)break;
+  }
+  if(in[1]>=0)close(in[1]);
+  if(!WIFEXITED(status)||WEXITSTATUS(status)||result.empty())throw std::runtime_error("metadata helper failed");
+  return trim(result);
 }
 struct LinkState {
   uint64_t token = 0, local_inc = 0, remote_inc = 0, channels = 0;
@@ -425,7 +515,12 @@ Fields terminal_fields(const tb_epoch_result &r) {
 class PhysicalOwner final : public tb::Owner {
   tb_guard *guard_;
   tb::Identity identity_;
-  std::string kernel_receipt_;
+  std::string kernel_receipt_, thunderbolt_log_, thunderbolt_receipt_, helpers_, evidence_dir_;
+  std::string boot_id_, build_id_, clock_domain_, native_name_, pending_identity_;
+  std::unique_ptr<tb::NativeTraceCapture> native_trace_;
+  uint64_t create_begin_ns_=0, create_end_ns_=0, native_max_age_ms_=1000;
+  int prepare_error_=0;
+  Fields response_evidence_;
   bool exclusive_;
   int durable_;
   std::string visibility_;
@@ -534,7 +629,9 @@ class PhysicalOwner final : public tb::Owner {
                          const Fields &payload) {
     struct tb_guard_snapshot s{};
     tb_guard_snapshot(guard_, &s);
-    return {c.request_id, error, s.phase, epoch_.stop_proved, obj(payload)};
+    auto wire=payload;
+    if(!response_evidence_.empty()) {wire["__owner_evidence"]=obj(response_evidence_);response_evidence_.clear();}
+    return {c.request_id, error, s.phase, epoch_.stop_proved, obj(wire)};
   }
   tb_geometry geometry(const std::string &p) {
     auto g = agent_json_get(p, "geometry");
@@ -552,7 +649,7 @@ class PhysicalOwner final : public tb::Owner {
       throw std::runtime_error("unsupported geometry");
     return out;
   }
-  Fields preflight(const std::string &p) {
+  Fields preflight(const tb::Command &c, const std::string &p) {
     geometry_ = geometry(p);
     std::string reason;
     Fields raw, device, link, kernel;
@@ -561,6 +658,9 @@ class PhysicalOwner final : public tb::Owner {
         throw std::runtime_error("exclusive-creator prerequisite not attested");
       auto receipt = read_file(kernel_receipt_);
       auto build_id = running_build_id();
+      build_id_=build_id;
+      boot_id_=trim(read_file("/proc/sys/kernel/random/boot_id",256));
+      clock_domain_=boot_id_+":CLOCK_MONOTONIC";
       struct utsname u{};
       if (uname(&u))
         throw std::runtime_error("uname");
@@ -588,6 +688,28 @@ class PhysicalOwner final : public tb::Owner {
               {"remote_inc", number(link_.remote_inc)}};
       if (uint_at(p, "channel") >= link_.channels)
         throw std::runtime_error("link channel");
+      char actual_service[4096];
+      if(!realpath(link_.service.c_str(),actual_service))throw std::runtime_error("service ancestry");
+      std::smatch domain_match;std::string service_path(actual_service);
+      if(!std::regex_search(service_path,domain_match,std::regex("/domain([0-9]+)(/|$)")))throw std::runtime_error("actual NHI domain absent");
+      auto platform_expected=obj({{"identity",agent_json_get(c.bounded_json,"identity")},
+          {"nhi_bdf",agent_json_quote(link_.nhi)},{"domain",domain_match[1].str()},
+          {"link_token",number(link_.token)},{"channel",number(uint_at(p,"channel"))},
+          {"max_log_age_ms","120000"}});
+      auto platform=metadata_helper(helpers_,obj({{"op",agent_json_quote("platform")},
+          {"log",agent_json_quote(thunderbolt_log_)},{"receipt",agent_json_quote(thunderbolt_receipt_)},
+          {"expected",platform_expected},{"local_inc",number(link_.local_inc)},
+          {"remote_inc",number(link_.remote_inc)}}),c.deadline_ns);
+      raw["platform_facts"]=platform;
+      raw["boot_id"]=agent_json_quote(boot_id_);raw["clock_domain"]=agent_json_quote(clock_domain_);
+      raw["observed_monotonic_ns"]=number(mono_ns());raw["nhi_bdf"]=agent_json_quote(link_.nhi);
+      if(string_at(platform,"status")!="complete" || string_at(platform,"identity.boot_id")!=boot_id_ ||
+         string_at(platform,"identity.kernel_build_id")!=build_id_ || string_at(platform,"identity.nhi_bdf")!=link_.nhi ||
+         uint_at(platform,"identity.link_token")!=link_.token || uint_at(platform,"identity.channel")!=uint_at(p,"channel"))
+        throw std::runtime_error("current C1 prerequisite collection incomplete");
+      if(identity_.case_id=="idle-suspend-resume"||identity_.case_id=="idle-module-unload")
+        raw["idle"]=obj({{"scope",agent_json_quote("this-owner")},{"prepared",boolean(prepared_)},
+                         {"session_id",number(epoch_.session_id)},{"native_payload_owners",number(epoch_.start_accepted?1:0)}});
       auto bdf = string_at(p, "gpu_bdf"), node = string_at(p, "nvidia_node");
       struct stat st{};
       if (stat(node.c_str(), &st) || !S_ISCHR(st.st_mode))
@@ -650,13 +772,18 @@ class PhysicalOwner final : public tb::Owner {
   Fields observe(uint64_t first, uint64_t limit);
   Fields prepare(const tb::Command &c, const std::string &p);
   Fields verify(const tb::Command &c, const std::string &p);
-  Fields close_resources();
+  void validate_stop_pair(const std::string &,bool require_complete);
+  Fields close_resources(const std::string &);
+  Fields native_wait(const tb::Command &, const std::string &);
 
 public:
   PhysicalOwner(tb_guard *g, const tb::Identity &id, const std::string &receipt,
-                bool exclusive, int durable)
+                bool exclusive, int durable, const std::string &log,
+                const std::string &tb_receipt, const std::string &helpers,
+                const std::string &evidence)
       : guard_(g), identity_(id), kernel_receipt_(receipt),
-        exclusive_(exclusive), durable_(durable) {
+        thunderbolt_log_(log), thunderbolt_receipt_(tb_receipt), helpers_(helpers),
+        evidence_dir_(evidence), exclusive_(exclusive), durable_(durable) {
     int r = tb_epoch_init(&epoch_, guard_, nullptr);
     if (r)
       throw std::runtime_error("epoch initialization");
@@ -668,11 +795,12 @@ public:
       check_guard();
       auto p = agent_json_get(c.bounded_json, "payload");
       if (c.command == "preflight") {
-        auto result = preflight(p);
+        auto result = preflight(c,p);
         return finish(c, preflight_ok_ ? 0 : -ENODEV, result);
       }
-      if (c.command == "prepare")
-        return finish(c, 0, prepare(c, p));
+      if (c.command == "prepare") {
+        auto result=prepare(c,p);return finish(c,prepare_error_,result);
+      }
       if (c.command == "start") {
         if (!prepared_ || uint_at(p, "groups") != groups_ ||
             uint_at(p, "first_seq") != first_seq_)
@@ -687,13 +815,19 @@ public:
              {"start_error",
               std::to_string(epoch_.start_attempted ? error : 0)}});
       }
+      if(c.command=="wait"&&p!="{}")return finish(c,0,native_wait(c,p));
       if (c.command == "wait" || c.command == "stop") {
         tb_epoch_result r{};
+        auto action_begin=mono_ns();
         int error = c.command == "wait"
                         ? tb_epoch_wait(&epoch_, c.deadline_ns, &r)
                         : tb_epoch_stop(&epoch_, c.deadline_ns, &r);
+        auto action_end=mono_ns();
         auto f = terminal_fields(r);
         if (c.command == "stop") {
+          response_evidence_["stop_action"]=obj({{"started_monotonic_ns",number(action_begin)},
+              {"finished_monotonic_ns",number(action_end)},{"boot_id",agent_json_quote(boot_id_)},
+              {"clock_domain",agent_json_quote(clock_domain_)}});
           f["stop_proved"] = boolean(r.stop_proved);
           f["first_error"] = std::to_string(r.first_error);
           f["stop_error"] = std::to_string(r.stop_error);
@@ -708,7 +842,7 @@ public:
       if (c.command == "verify")
         return finish(c, 0, verify(c, p));
       if (c.command == "close")
-        return finish(c, 0, close_resources());
+        return finish(c, 0, close_resources(p));
       throw std::runtime_error("owner command refused");
     } catch (const std::exception &e) {
       record("owner-error", {{"reason", agent_json_quote(e.what())},
@@ -748,7 +882,7 @@ struct KmsgWindow {
       std::vector<std::string> parts;
       while (std::getline(prefix, token, ','))
         parts.push_back(token);
-      if (parts.size() != 4)
+      if (parts.size() != 4 && parts.size() != 5)
         return false;
       size_t used = 0;
       auto seq = std::stoull(parts[1], &used);
@@ -761,10 +895,18 @@ struct KmsgWindow {
         captured_bytes += raw.size();
         if (captured_bytes > 8 * 1024 * 1024)
           return false;
+        std::string message=trim(raw.substr(semi+1));
+        auto marker=message.find("XDEV_EXT_XDOMAIN_ADMIT ");
+        if(marker!=std::string::npos) {
+          // Preserve raw printk bytes, expose only the canonical diagnostic body.
+          auto end=message.find('\n',marker);
+          message=message.substr(marker,end==std::string::npos?end:end-marker);
+        }
         records.push_back(
             obj({{"seq", number(seq)},
                  {"monotonic_ns", number(us * 1000)},
-                 {"message", agent_json_quote(trim(raw.substr(semi + 1)))}}));
+                 {"message", agent_json_quote(message)},
+                 {"raw",agent_json_quote(raw)}}));
       } else
         cursor = std::max<uint64_t>(cursor, seq);
     }
@@ -916,13 +1058,40 @@ Fields PhysicalOwner::prepare(const tb::Command &c, const std::string &p) {
     return 0;
   });
   check_guard();
+  control([&]() {
+    native_name_="xdomain-"+std::to_string(getpid())+"-"+std::to_string(mono_ns());
+    native_trace_.reset(new tb::NativeTraceCapture("/sys/kernel/tracing",evidence_dir_,native_name_));
+    int rc=native_trace_->start();
+    record("native-trace-instance",{{"instance_path",agent_json_quote(native_trace_->instance_path())},
+                                  {"start_error",std::to_string(rc)}});
+    if(rc)throw std::runtime_error("native trace start: "+std::to_string(rc));
+    return rc;
+  });
+  check_guard();
+  if(!native_trace_)throw std::runtime_error("native trace unavailable");
+  tb::NativeTraceSnapshot before_create{};
+  if(native_trace_->snapshot(&before_create))throw std::runtime_error("native trace pre-CREATE snapshot unavailable");
+  create_begin_ns_=mono_ns();
   int error = tb_epoch_open(&epoch_, &create);
+  create_end_ns_=mono_ns();
   auto diagnostic = window->capture();
   record("create-admission",
          {{"capture", diagnostic},
           {"create_error", std::to_string(error)},
           {"observed_session_id", number(epoch_.session_id)},
           {"requester", agent_json_quote(link_.nhi)}});
+  auto admission=obj({{"records",agent_json_get(diagnostic,"records")},
+      {"window",agent_json_get(diagnostic,"window")},
+      {"expected",obj({{"requester",agent_json_quote(link_.nhi)},{"stage","0"},{"errno",std::to_string(error)}})}});
+  if(error) {
+    struct tb_guard_snapshot actual{};tb_guard_snapshot(guard_,&actual);
+    if(epoch_.created || !(actual.hold_reasons & TB_HOLD_CREATE_UNKNOWN))
+      throw std::runtime_error("pre-CREATE setup or post-CREATE authority failed: "+std::to_string(error));
+    prepare_error_=error;
+    return {{"session_id","0"},{"registration_bytes",number(registration_.registered_bytes)},
+      {"producer_sync_proved",boolean(identity_.role=="tx")},{"guard_sync_proved",boolean(identity_.role=="rx")},
+      {"create_error",std::to_string(error)},{"stop_proved","false"},{"stage_caps","null"},{"admission",admission}};
+  }
   if (!window->complete || window->lost)
     throw std::runtime_error("incomplete CREATE diagnostic window");
   // These diagnostic-only fds are retained if CREATE became uncertain.
@@ -932,8 +1101,6 @@ Fields PhysicalOwner::prepare(const tb::Command &c, const std::string &p) {
       return 0;
     });
   check_guard();
-  if (error)
-    throw std::runtime_error("CREATE uncertain: " + std::to_string(error));
   xdev_ext_mech_stage_caps caps{};
   caps.size = sizeof(caps);
   caps.version = XDEV_EXT_MECH_STAGE_CAPS_VERSION;
@@ -982,16 +1149,91 @@ Fields PhysicalOwner::prepare(const tb::Command &c, const std::string &p) {
           {"producer_sync_proved", boolean(identity_.role == "tx")},
           {"guard_sync_proved", boolean(identity_.role == "rx")},
           {"create_error", "0"},
-          {"stop_proved", "false"}};
+          {"stop_proved", "false"},{"stage_caps",obj(facts)},{"admission",admission}};
 }
 
-Fields PhysicalOwner::verify(const tb::Command &c, const std::string &p) {
-  (void)c;
+Fields PhysicalOwner::native_wait(const tb::Command &c,const std::string &p) {
+  const auto until=string_at(p,"until");
+  const bool continued=until=="native-action-evidence";
+  if(!native_trace_||!prepared_||!epoch_.start_accepted)throw std::runtime_error("native wait requires actual START");
+  auto identity=agent_json_get(c.bounded_json,"identity");
+  std::string action="null";
+  if(continued) {
+    if(pending_identity_.empty())throw std::runtime_error("continued evidence has no owner pending sample");
+    action=agent_json_get(p,"action");
+    if(agent_json_get(action,"identity")!=pending_identity_)throw std::runtime_error("continued action differs from original pending identity");
+    identity=pending_identity_;
+  }else {
+    if(until!="accepted-native-inflight")throw std::runtime_error("native WAIT discriminator");
+    native_max_age_ms_=uint_at(p,"max_age_ms");
+    if(!native_max_age_ms_||native_max_age_ms_>120000)throw std::runtime_error("native sample age");
+  }
+  for(;;) {
+    check_guard();
+    if(mono_ns()>=c.deadline_ns) {tb_guard_hold(guard_,TB_HOLD_DEADLINE);throw std::runtime_error("native WAIT deadline");}
+    struct tb_guard_snapshot before{};tb_guard_snapshot(guard_,&before);
+    uint64_t ticket=0;
+    if(!continued&&tb_guard_begin(guard_,TB_OP_WAIT,&ticket))throw std::runtime_error("native WAIT admission");
+    tb::NativeTraceSnapshot sample{};
+    int error=native_trace_->snapshot(&sample,continued);
+    if(!continued&&tb_guard_end(guard_,ticket,before.phase,before.native_safe,before.gpu_safe))throw std::runtime_error("native WAIT returned after HELD");
+    if(error)throw std::runtime_error("native trace snapshot: "+std::to_string(error));
+    auto boot=trim(read_file("/proc/sys/kernel/random/boot_id",256));
+    if(boot!=boot_id_||running_build_id()!=build_id_)throw std::runtime_error("native capture boot/build changed");
+    if(!continued) {
+      std::vector<std::string> listing;auto current=find_link(link_.token,&listing);
+      if(current.local_inc!=link_.local_inc||current.remote_inc!=link_.remote_inc||current.nhi!=link_.nhi)throw std::runtime_error("native capture incarnation changed");
+    }
+    const auto raw_path=evidence_dir_+"/"+native_name_+"-request-"+number(c.request_id)+".trace";
+    persist_metadata(raw_path,sample.raw_trace);
+    auto receipt=obj({{"version","1"},{"identity",identity},{"boot_id",agent_json_quote(boot_id_)},
+        {"kernel_build_id",agent_json_quote(build_id_)},{"source_commit",agent_json_quote(identity_.sha)},
+        {"clock",agent_json_quote("CLOCK_MONOTONIC")},{"clock_domain",agent_json_quote(clock_domain_)},
+        {"nhi_bdf",agent_json_quote(link_.nhi)},{"link_token",number(link_.token)},
+        {"local_inc",number(link_.local_inc)},{"remote_inc",number(link_.remote_inc)},
+        {"create_begin_ns",number(create_begin_ns_)},{"create_end_ns",number(create_end_ns_)},
+        {"capture_begin_ns",number(sample.begin_ns)},{"capture_end_ns",number(sample.end_ns)},
+        {"captured_monotonic_ns",number(sample.captured_monotonic_ns)},{"trace_dropped",number(sample.lost_events)},
+        {"formats",obj({{"native_event",agent_json_quote(sample.event_format)}})},
+        {"raw_path",agent_json_quote(raw_path)}});
+    auto expected=obj({{"identity",identity},{"boot_id",agent_json_quote(boot_id_)},
+        {"kernel_build_id",agent_json_quote(build_id_)},{"source_commit",agent_json_quote(identity_.sha)},
+        {"clock_domain",agent_json_quote(clock_domain_)},{"nhi_bdf",agent_json_quote(link_.nhi)},
+        {"link_token",number(link_.token)},{"local_inc",number(link_.local_inc)},{"remote_inc",number(link_.remote_inc)},
+        {"session_id",number(epoch_.session_id)},{"stage","0"},{"batch_key",number(first_seq_)},
+        {"direction",number(identity_.role=="tx"?XDEV_EXT_MECH_DIR_TO_DEVICE:XDEV_EXT_MECH_DIR_FROM_DEVICE)},
+        {"group_bytes",number(geometry_.group_bytes)},{"max_age_ms",number(native_max_age_ms_)}});
+    Fields payload={{"native_trace",obj({{"raw_trace",agent_json_quote(sample.raw_trace)},
+                                        {"receipt",receipt},{"expected",expected}})}};
+    if(obj(payload).size()>TB_MAX_JSON-16384)throw std::runtime_error("native trace wire capacity");
+    auto qualification=metadata_helper(helpers_,obj({{"op",agent_json_quote("native")},
+       {"raw_trace",agent_json_quote(sample.raw_trace)},{"receipt",receipt},{"expected",expected},
+       {"action",action}}),c.deadline_ns);
+    check_guard();
+    record("native-trace-qualification",{{"request_id",number(c.request_id)},{"result",qualification},
+           {"receipt",receipt},{"expected",expected},
+           {"acceptance_seq_basis",agent_json_quote("one-based raw ledger row coordinate; not a kernel counter")}});
+    if(continued) {
+      tb_epoch_result terminal{};
+      (void)tb_epoch_snapshot(&epoch_,&terminal);
+      payload["terminal"]=obj(terminal_fields(terminal));
+      try {
+        std::vector<std::string> listing;auto current=find_link(link_.token,&listing);
+        response_evidence_["link_up"]=boolean(current.up&&current.local_inc==link_.local_inc&&current.remote_inc==link_.remote_inc);
+      }catch(const std::exception &) {response_evidence_["link_up"]="false";}
+      return payload; // Qualification remains independently checked by coordinator.
+    }
+    if(string_at(qualification,"status")=="ready") {pending_identity_=identity;return payload;}
+    poll(nullptr,0,5);
+  }
+}
+
+void PhysicalOwner::validate_stop_pair(const std::string &p,bool require_complete) {
   struct tb_guard_snapshot snap{};
   tb_guard_snapshot(guard_, &snap);
   if (snap.phase != TB_PHASE_DRAINED_SAFE || !epoch_.stop_proved ||
       !local_stop_request_)
-    throw std::runtime_error("verify requires local successful STOP");
+    throw std::runtime_error("paired cleanup requires local successful STOP");
   auto receipts = agent_json_array(agent_json_get(p, "stop_receipts"));
   if (receipts.size() != 2)
     throw std::runtime_error("two STOP receipts required");
@@ -1022,7 +1264,10 @@ Fields PhysicalOwner::verify(const tb::Command &c, const std::string &p) {
         (uint_at(i, "request_id") != local_stop_request_ ||
          uint_at(receipt, "payload.stats.session_id") != epoch_.session_id))
       throw std::runtime_error("STOP local request mismatch");
-    if (uint_at(receipt, "payload.stats.batches_done") != groups_)
+    // Safe release is also needed for no-START bringup and override. Only
+    // payload verification requires completion of every requested group.
+    const auto completed=uint_at(receipt, "payload.stats.batches_done");
+    if ((require_complete && completed != groups_) || completed > groups_)
       throw std::runtime_error("STOP group count");
     for (auto key : {"batches_abort", "rejects", "held", "sequestered",
                      "timeouts", "inflight", "protocol_err"})
@@ -1041,6 +1286,14 @@ Fields PhysicalOwner::verify(const tb::Command &c, const std::string &p) {
             uint_at(receipt, "payload.stats.session_id"))
       throw std::runtime_error("STOP transport identity");
   }
+  check_guard();
+  if (tb_guard_pair_stopped(guard_))
+    throw std::runtime_error("pair STOP proof rejected");
+}
+
+Fields PhysicalOwner::verify(const tb::Command &c, const std::string &p) {
+  (void)c;
+  validate_stop_pair(p,true);
   auto raw = agent_json_array(agent_json_get(p, "extents"));
   if (identity_.role == "tx" &&
       (raw.size() != 1 || uint_at(raw[0], "dst_off") != 0 ||
@@ -1112,8 +1365,10 @@ Fields PhysicalOwner::verify(const tb::Command &c, const std::string &p) {
           {"visibility_error", "0"}};
 }
 
-Fields PhysicalOwner::close_resources() {
+Fields PhysicalOwner::close_resources(const std::string &p) {
   check_guard();
+  if ((identity_.case_id != "functional-epochs" && identity_.case_id != "bulk-static") || p != "{}")
+    validate_stop_pair(p,false);
   uint32_t permissions = tb_guard_cleanup_permissions(guard_);
   uint32_t required = TB_CLEANUP_EPOCH_FDS | TB_CLEANUP_PEER_FD |
                       TB_CLEANUP_GPU_FREE | TB_CLEANUP_CONTEXT_DESTROY;
@@ -1141,6 +1396,8 @@ Fields PhysicalOwner::close_resources() {
     cleanup([&]() { return close(control_) ? -errno : 0; });
     control_ = -1;
   }
+  if (native_trace_)
+    cleanup([&]() { return native_trace_->close_safe(); });
   check_guard();
   int status = tb_gpu_close(gpu_);
   gpu_diagnostic("tb_gpu_close", status);
@@ -1308,7 +1565,9 @@ Fields PhysicalOwner::observe(uint64_t first, uint64_t limit) {
 } // namespace
 
 int main(int argc, char **argv) {
-  std::string identity_path, evidence_dir, kernel_receipt;
+  std::string identity_path, evidence_dir, kernel_receipt, thunderbolt_log, thunderbolt_receipt, helpers;
+  char executable[4096];auto executable_bytes=readlink("/proc/self/exe",executable,sizeof(executable)-1);
+  if(executable_bytes>0){executable[executable_bytes]=0;helpers=executable;helpers=helpers.substr(0,helpers.rfind('/'));}
   bool exclusive = false;
   for (int i = 1; i < argc; i++) {
     std::string arg = argv[i];
@@ -1326,6 +1585,9 @@ int main(int argc, char **argv) {
       evidence_dir = argv[++i];
     else if (arg == "--kernel-receipt")
       kernel_receipt = argv[++i];
+    else if(arg=="--thunderbolt-log")thunderbolt_log=argv[++i];
+    else if(arg=="--thunderbolt-receipt")thunderbolt_receipt=argv[++i];
+    else if(arg=="--helpers-dir")helpers=argv[++i];
     else {
       fprintf(stderr, "unknown agent option\n");
       return 2;
@@ -1355,7 +1617,8 @@ int main(int argc, char **argv) {
     if (tb_guard_new(TB_BACKING_GPU, &guard))
       throw std::runtime_error("guard allocation");
     auto *owner =
-        new PhysicalOwner(guard, identity, kernel_receipt, exclusive, durable);
+        new PhysicalOwner(guard, identity, kernel_receipt, exclusive, durable,
+                          thunderbolt_log,thunderbolt_receipt,helpers,evidence_dir);
     int result = tb::run_agent(STDIN_FILENO, STDOUT_FILENO, durable, identity,
                                guard, *owner);
     if (result)
