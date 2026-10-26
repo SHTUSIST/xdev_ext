@@ -14,6 +14,7 @@
 #include <linux/uio.h>
 #include <linux/udp.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_netfam.h>
 #include <net/sock.h>
 #include <net/tcp_states.h>
 
@@ -138,6 +139,21 @@ static void xdev_ext_socket_fill_info(struct xdev_ext_mech_stage *st,
 	}
 }
 
+struct xdev_ext_socket_cover {
+	const struct xdev_ext_socket_send_desc *d;
+};
+
+static void xdev_ext_socket_span(const void *ctx, u32 i,
+				 struct xdev_ext_net_span *s)
+{
+	const struct xdev_ext_socket_cover *c = ctx;
+	const struct xdev_ext_socket_send_desc *d = &c->d[i];
+
+	*s = (struct xdev_ext_net_span) {
+		d->frame_pos, d->frame_off, d->len, d->flags,
+	};
+}
+
 static int xdev_ext_socket_validate(struct xdev_ext_mech_stage *st,
 		struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
@@ -154,6 +170,22 @@ static int xdev_ext_socket_validate(struct xdev_ext_mech_stage *st,
 	if (slot >= ss->depth || !n || n > XDEV_EXT_MECH_MAX_FRAMES ||
 	    n != xdev_ext_mech_batch_nr_frames(b))
 		return -EINVAL;
+	{
+		struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
+		struct xdev_ext_socket_cover c = { .d = d };
+
+		for (i = 0; i < n; i++) {
+			if (xdev_ext_mech_batch_frame(b, i, &f))
+				return -EINVAL;
+			fi[i] = (struct xdev_ext_mech_frame_info) {
+				.umem_addr = f.umem_addr,
+				.data_off = f.data_off, .data_len = f.data_len,
+			};
+		}
+		if (xdev_ext_net_cover_check(fi, n, n, XDEV_EXT_MECH_MAX_FRAMES,
+					    xdev_ext_socket_span, NULL, &c))
+			return -EINVAL;
+	}
 	r = &ss->request[slot];
 	for (i = 0; i < n; i++) {
 		if (xdev_ext_mech_batch_frame(b, i, &f) || !f.kaddr ||
@@ -618,6 +650,12 @@ static void xdev_ext_socket_class_mark_dead(struct xdev_ext_mech_stage *st)
 	xdev_ext_mech_stage_kick(st);
 }
 
+static const struct xdev_ext_net_hooks xdev_ext_socket_net_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_NETWORK },
+	.hdr_policy = XDEV_EXT_NET_HDR_INBAND,
+	.rel = NULL,
+};
+
 static const struct xdev_ext_mech_class_ops xdev_ext_socket_class = {
 	.class_id = XDEV_EXT_MECH_CLASS_SOCKET,
 	.flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE,
@@ -631,6 +669,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_socket_class = {
 	.fill_info = xdev_ext_socket_fill_info, .validate = xdev_ext_socket_validate,
 	.submit = xdev_ext_socket_class_submit, .fill_cqe = xdev_ext_socket_class_fill_cqe,
 	.mark_dead = xdev_ext_socket_class_mark_dead,
+	.fam.net = &xdev_ext_socket_net_hooks,
 };
 
 static int __init xdev_ext_mech_socket_init(void)
