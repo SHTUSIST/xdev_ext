@@ -10,6 +10,13 @@
 #include "xdev_ext_mech_prog.h"
 #include "xdev_ext_mech_kfunc.h"
 
+#ifndef XDEV_EXT_XDOMAIN_OBSERVE_BUILD
+#define XDEV_EXT_XDOMAIN_OBSERVE_BUILD(ctx, info) 0
+#endif
+#ifndef XDEV_EXT_XDOMAIN_OBSERVE_CQE
+#define XDEV_EXT_XDOMAIN_OBSERVE_CQE(ctx, cqe) 0
+#endif
+
 /* These errno values are Linux ABI constants, not BTF enum values. */
 #define XD_ENOLINK 67
 #define XD_EPROTO 71
@@ -304,6 +311,8 @@ __s32 BPF_PROG(xdomain_peer_build, const struct xdev_ext_mech_ctx *mctx)
 		for (j = 0; j < 8; j++)
 			d->tag[j] = key >> (56 - j * 8);
 	}
+	if (XDEV_EXT_XDOMAIN_OBSERVE_BUILD(mctx, info))
+		return XDEV_EXT_MP_BUILD_ABORT;
 	return XDEV_EXT_MP_BUILD_SUBMIT;
 }
 
@@ -327,7 +336,11 @@ __s32 BPF_PROG(xdomain_peer_complete, const struct xdev_ext_mech_ctx *mctx)
 	if (mctx->callsite != XDEV_EXT_MP_SITE_WORKER)
 		return XDEV_EXT_MP_ABORT;
 	cqe = (const void *)bpf_xdev_ext_cqe(mctx, 0, sizeof(*cqe));
-	if (!cqe || cqe->status || cqe->outcome || cqe->bytes != mctx->base.length)
+	if (!cqe)
+		return XDEV_EXT_MP_ABORT;
+	if (XDEV_EXT_XDOMAIN_OBSERVE_CQE(mctx, cqe))
+		return XDEV_EXT_MP_ABORT;
+	if (cqe->status || cqe->outcome || cqe->bytes != mctx->base.length)
 		return XDEV_EXT_MP_ABORT;
 	if (mctx->base.direction == XDEV_EXT_MP_DIR_TO_DEVICE &&
 	    cqe->remote != XDEV_EXT_MP_NET_REMOTE_ACKED)
