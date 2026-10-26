@@ -23,6 +23,10 @@ sys.path.insert(0, str(HERE.parent))
 from xdev_ext_mech_recycle_tail_test import function  # noqa: E402
 
 BOUNDARY = (
+    ('typedef __u64 u64;',
+     'typedef __u64 u64;\nstatic u64 ktime_get_boottime_ns(void) {return 0;}'),
+    ('struct xdev_ext_mech_session {',
+     'struct xdev_ext_mech_session {\n u64 stop_started_ns;bool progress_ready;'),
     ('static const struct xdev_ext_mech_class_ops class_callbacks = {.batch_release=verify_final_release};',
      'static unsigned long pending_progress(struct xdev_ext_mech_stage *st) {(void)st;return 1;}\n'
      'static const struct xdev_ext_mech_class_ops class_callbacks = '
@@ -39,9 +43,12 @@ SCENARIO = r'''
 static int rearm(const char *mode) {
  struct xdev_ext_mech_session s;struct io_xdev_ext_umem_mech m;__u8 state[8];
  setup(&s,&m,state,0,1);s.start_return_pending=false;
+ s.progress_ready=strcmp(mode,"binding")!=0;
  xdev_ext_mech_session_stop(&s,0);
  if(!strcmp(mode,"gone"))s.worker_gone=true; /* the last reference left meanwhile */
  xdev_ext_mech_stop_work(&s.stop_work);
+ if(!strcmp(mode,"binding"))
+  return check(arms==0,"STOP called class progress before full bind publication");
  if(!strcmp(mode,"gone"))
   return check(arms_after_gone==0,"stop_work armed progress_work after worker_gone");
  return check(arms>0,"stop_work no longer re-arms progress for a live worker")|
@@ -71,7 +78,7 @@ class StopWorkRearm(unittest.TestCase):
             'TAKE': function(core, 'xdev_ext_mech_take_user_frames'),
             'START': function(core, 'xdev_ext_mech_start'),
         }
-        fixture = TAIL.read_text()
+        fixture = '#define smp_load_acquire(p) (*(p))\n' + TAIL.read_text()
         for old, new in BOUNDARY:
             if old not in fixture:
                 raise RuntimeError('recycle fixture boundary changed: ' + old)
@@ -97,6 +104,9 @@ class StopWorkRearm(unittest.TestCase):
     def probe(self, mode):
         run = subprocess.run([str(self.binary), 'rearm_' + mode], capture_output=True, text=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
+    def test_stop_work_before_full_bind_never_enters_class_progress(self):
+        self.probe('binding')
 
     def test_stop_work_after_worker_gone_arms_no_timer(self):
         self.probe('gone')
