@@ -1351,4 +1351,7 @@
 !/gpu/tests/nv_xdev_ext_peer_backing_test.c
 !/gpu/tests/nv_xdev_ext_peer_raw_bus_source_test.py
 !/gpu/kernel-open/nvidia/nv-xdev_ext-peer-backing.h
+!/kernel/include/linux/xdev_ext_netfam_core.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/netfam_core_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/netfam_plan_diff_test.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py
