@@ -1402,3 +1402,8 @@
 !/kernel/io_uring/xdomain/xdev_ext_xdomain.h
 !/kernel/io_uring/xdomain/xdev_ext_xdomain_main.c
 !/kernel/io_uring/xdomain/README.md
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_class_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_host.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_boundaries.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_cases.c
