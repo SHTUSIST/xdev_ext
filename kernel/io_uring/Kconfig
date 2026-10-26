@@ -96,6 +96,19 @@ config XDEV_EXT_MECH_DMA
 	  registered providers. Drivers own mappings and native completion;
 	  C validates plans and quarantines ambiguous submitted transfers.
 
+config XDEV_EXT_MECH_XDOMAIN
+	tristate "XDEV_EXT mechanism Thunderbolt/USB4 host-to-host class"
+	default n
+	depends on XDEV_EXT_MECH && USB4 && PCI_P2PDMA
+	help
+	  Enable the XDOMAIN service and class for device-memory payload
+	  transport between Thunderbolt/USB4 hosts. Uses the exported
+	  XDomain service API and opt-in NHI software retirement for rings
+	  whose native completion is unknown. Payload is not staged in host
+	  memory; CREATE refuses an allocation the requester cannot reach
+	  without a bounce. PCI_P2PDMA requires ZONE_DEVICE and memory hotplug.
+	  This option alone does not establish physical DMA or performance.
+
 config XDEV_EXT_MECH_C_REFERENCE
 	bool "XDEV_EXT mechanism C reference callbacks"
 	default n

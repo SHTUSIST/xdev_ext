@@ -1397,3 +1397,8 @@
 !/kernel/io_uring/xdomain/xdev_ext_xdomain.h
 !/kernel/io_uring/xdomain/xdev_ext_xdomain_main.c
 !/kernel/io_uring/xdomain/README.md
+
+!/kernel/io_uring/xdomain/Makefile
+!/kernel/io_uring/xdomain/xdev_ext_xdomain.h
+!/kernel/io_uring/xdomain/xdev_ext_xdomain_main.c
+!/kernel/io_uring/xdomain/README.md
