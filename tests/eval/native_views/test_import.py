@@ -67,6 +67,22 @@ class ImportEvidence(unittest.TestCase):
         self.assertIs(type(result['manifest']['total_cpu_ns']), int)
         self.assertFalse(result['performance_eligible'])
 
+    def test_cpu_paired_bounds_use_cross_endpoints_and_unknown_stays_unknown(self):
+        left, right = run_fixture(), run_fixture('K-BPF')
+        for run, lower, upper in ((left, 10, 40), (right, 20, 60)):
+            run['total_cpu_ns'] = None
+            run['total_cpu_ns_bounds'] = dict(lower=lower, upper=upper)
+            run['metrics']['cpu_ns_per_record'] = None
+            run['metrics']['cpu_ns_per_record_bounds'] = dict(lower=lower, upper=upper)
+        result = analyze.compare_runs(left, right)
+        self.assertTrue(result['eligible'], result['errors'])
+        self.assertIsNone(result['delta']['cpu_ns_per_record'])
+        self.assertEqual(result['delta']['cpu_ns_per_record_bounds'], dict(lower=-20, upper=50))
+        paired = analyze.compare_pairs([(left, right)])
+        self.assertEqual(paired['mean_delta']['cpu_ns_per_record_bounds'], dict(lower=-20, upper=50))
+        right['metrics']['cpu_ns_per_record_bounds'] = None
+        self.assertIsNone(analyze.compare_runs(left, right)['delta']['cpu_ns_per_record_bounds'])
+
     def test_failed_oracle_is_not_pass(self):
         self.artifact('oracle', json.dumps(dict(schema='xdev-chain-campaign-v1', correctness_only=False,
             rows=[dict(result=dict(status='fail'))])))

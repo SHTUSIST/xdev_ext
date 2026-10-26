@@ -91,7 +91,7 @@ decode_trace(manifest, raw_text, metadata)  # deterministic normalized events
 A collection receipt retains its real `returncode` and `status` (`ok`, `failed`
 or `unavailable`), reasons, and `artifacts`. Each artifact is `{path, sha256}`
 pointing to retained bytes. Required kinds are `raw_trace`, `events` (JSONL),
-`trace_metadata`, `system_cpu_before`, `system_cpu_after`, `workload_stdout`,
+`trace_metadata`, `cpu_samples`, `system_cpu_before`, `system_cpu_after`, `workload_stdout`,
 `workload_stderr`, `oracle` and `zero_copy`. U arms additionally require the immutable cookie `journal`
 artifact; metadata.journal_artifact must link the same raw path/hash.
 Paths must remain accessible when
@@ -118,22 +118,46 @@ These must come from successful probe resolution/capture, not input assertions.
 The collector must preserve raw event formats, cookie/record mappings, clock
 selection and loss accounting needed for deterministic decoding.
 
-CPU input is real `/proc/stat` before/after with aggregate and every `cpuN`
-row. The importer rejects missing CPUs, hotplug during capture and regressed
-counters. It sums aggregate busy user/nice/system/IRQ/softirq ticks, excluding
-idle/iowait/steal and guest double counting. This is whole-host CPU, including
-unrelated work; it is not isolated workload cycles. Metadata must explicitly
-state `cpu_interval_scope=steady_state` only when actual sampling matches the
-measured interval. Whole-command snapshots include setup/drain/post-oracle
-and remain unavailable for steady-state CPU/record. Process getrusage is local
-supplementary data. Tick resolution and capture overhead remain limitations.
+CPU input is the hashed `cpu_samples` JSONL stream containing actual aggregate
+and every `cpuN` row with monotonic read brackets. The collector's 10 ms default
+period, finite byte cap and failure metadata are described in
+[the collector README](../native_trace/README.md). The importer verifies its
+hash, replays the verified native endpoints and derives
+`total_cpu_ns_bounds: {lower, upper, ...coverage}`. The window starts at first
+measured `record_admit` and ends at last measured `record_terminal`; warmup
+identities never select its endpoints. Pipelining can overlap remaining warmup
+work with this window, so warmup CPU is not necessarily absent. The stream's
+outer reads enclose that window; entirely interior reads supply the lower
+counter-delta bound, or zero when no interior pair exists. Read widths, sample
+indices, maximum inter-read gap and endpoint slack accompany the bounds.
+The importer rejects missing coverage, failed/duplicate/missing endpoints,
+wrong clocks, hotplug and counter regression. An explicit sampler error
+refuses CPU qualification even if the incomplete stream happens to cover the
+window. A metadata label cannot turn whole-command snapshots into this proof.
+
+Busy user/nice/system/IRQ/softirq ticks are counted once via the aggregate;
+idle/iowait/steal and extra guest columns are excluded. These bounds retain
+counter quantization and cannot perfectly attribute workload CPU. Background,
+sampler, peer and receiver-oracle work can overlap the measured window. They
+do not establish that oracle CPU is excluded. Whole-command snapshots remain
+diagnostic. Legacy nonphysical fixtures retain their old integer counter
+parsing tests and can never pass physical performance admission.
+
+Bounds-only imports set `total_cpu_ns` and `metrics.cpu_ns_per_record` to null;
+`metrics.cpu_ns_per_record_bounds` divides each bound by verified measured
+completed records. Both raw total bounds and the per-record bounds are checked
+again during performance validation, so edited derived metrics cannot qualify.
+A paired right-minus-left interval is `[right.lower-left.upper,
+right.upper-left.lower]`; pair means average the respective interval endpoints.
+Unknown inputs stay null. Overlapping uncertainty bounds do not establish CPU
+savings, and CPU savings alone do not establish throughput improvement.
 
 `oracle` points to the actual existing `xdev-chain-campaign-v1` campaign.json,
 not a newly asserted pass boolean. Each receipt covers one arm/pair/size/load.
 The importer matches chain, size, seed, arm/wait; requires sender/receiver
 status and exits to pass; verifies the receiver's full file oracle byte count
-including warmup; and retains the chains hardware-gate evidence. The existing
-oracle executes outside the timed region. A zero exit alone is insufficient.
+including warmup; and retains the chains hardware-gate evidence. The independent retained post-command readback is outside the measured
+window; the receiver's own oracle can overlap sender work. A zero exit alone is insufficient.
 
 `zero_copy` is a raw native-provider mapping observation with schema_version 1,
 `run_id`, `exact_sha`, `source=native_provider`, actual `afxdp_mode=zc`,
@@ -172,7 +196,7 @@ records into independent repetitions. Predeclare exclusions and main/boundary
 points; start with at least five independent pairs and report uncertainty.
 
 Physical native hooks, immutable U cookie mappings, steady-state whole-host
-CPU snapshots, verified backing/no-bounce observations, complete post-oracle
+CPU samples, verified backing/no-bounce observations, complete post-oracle
 capture and trace-on/off perturbation measurements are external prerequisites.
 The software test suite passing does not close these runtime requirements.
 
@@ -233,7 +257,7 @@ real software child receipt remain marked nonphysical; no test starts a device
 workload or certifies DMA/performance.
 
 Self-contained CI requires both `tests/eval/native_views/` and
-`tests/eval/native_trace/{collector.py,test_collector_behavior.py}` in the same
+`tests/eval/native_trace/{collector.py,cpu_sampling.py,test_collector_behavior.py}` in the same
 checkout: the latter's `raw` helper supplies the frozen event ABI fixture.
 Run unittest discovery for each directory separately; no external device,
 privilege or tracing mount is needed for these software tests. An isolated

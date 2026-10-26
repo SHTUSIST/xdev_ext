@@ -59,13 +59,36 @@ native submit/completion or record endpoint. Local TX completion cannot become
 a remote receive/ACK endpoint. Missing endpoints stay absent, so an analyzer
 must report unavailable E2E intervals.
 
-CPU snapshots currently cover the whole command, including setup/drain/oracle:
-metadata says `cpu_interval_scope: "whole_command"`. They do not prove
-steady-state CPU/record. Native backing/no-bounce proof is also required
-separately; the collector never creates it from manifest booleans or page-span
-similarity. Consequently capture status `ok` is distinct from physical
-performance eligibility. The independent importer verifies all retained hashes,
-re-decodes raw events, and validates the actual campaign/byte denominators.
+Whole-command `/proc/stat` before/after snapshots remain diagnostics. One
+`CpuSampler` additionally retains actual aggregate and all `cpuN` rows in hashed
+`cpu_samples` JSONL, with `CLOCK_MONOTONIC` `before_ns`/`after_ns` read brackets.
+The default period is 10 ms; retained bytes are capped at 64 MiB, with a 1 MiB
+limit per CPU-row snapshot. Only CPU rows are retained in the periodic stream.
+The worker stops and joins after command exit, timeout or error; a read/size
+failure preserves its incomplete stream and makes CPU unavailable.
+`cpu_sample_period_seconds` and `cpu_sampler_error` are retained in metadata.
+
+`cpu_interval_scope: "native_interval_counter_bounds"` identifies this input,
+but cannot qualify it by itself. The importer replays the hashed raw sample
+stream against verified events for every declared measured record. Its window
+runs from first measured `record_admit` to last measured `record_terminal` in
+the same monotonic host domain. The nearest reads entirely outside the window
+bound the busy-counter delta from above; the widest pair of reads entirely
+inside it bounds the delta from below. Without an interior pair, the lower
+bound is zero. No interpolation or exact CPU total is produced. Replay retains
+selected sample indices, counter bounds, read widths, observed inter-read gap
+and endpoint slack. Missing covering reads, invalid endpoints, CPU-set changes,
+regression, or sampler failure refuse CPU qualification.
+
+These are quantized whole-host counter bounds. Tick granularity, sampler
+work, unrelated activity and peer/receiver oracle work remain included. Warmup
+record identities are excluded from endpoint selection; pipelining can let the
+first measured admission precede the last warmup terminal, so this does not
+exclude all warmup CPU. Receiver validation can overlap the sender's measured
+window. Tracing/sampling perturbation still needs separate runtime evidence.
+Native backing/no-bounce proof is required independently; the collector never
+creates it from manifest flags or page-span similarity. Capture status `ok`
+remains distinct from physical performance eligibility.
 
 Runtime sessions are predeclared, for example:
 
@@ -104,13 +127,13 @@ never reduces the expected record set.
 Only the Intel `ice` TX/CQE/teardown paths have the complete initial source
 coverage. `mlx5_core` remains unavailable until its teardown completion path
 is covered. No physical workload, enabled/disabled tracing perturbation run,
-steady-state CPU interval, or physical backing/no-bounce success is implied by
+qualified CPU bounds, or physical backing/no-bounce success is implied by
 the host software tests.
 
 Run parser/admission contracts with:
 
 ```sh
-python3 -m unittest discover -s tests/eval/native_trace -p 'test_collector*.py' -v
+python3 -m unittest discover -s tests/eval/native_trace -v
 python3 -m py_compile tests/eval/native_trace/collector.py
 ```
 

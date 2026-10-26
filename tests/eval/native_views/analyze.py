@@ -5,7 +5,7 @@ from collections import defaultdict
 import statistics
 import copy
 
-from contract import PAIR_FIELDS, canonical_recipe, inspect_collection, number, validate_run
+from contract import PAIR_FIELDS, canonical_recipe, cpu_interval, inspect_collection, number, validate_run
 
 
 IDENTITY = ('session_id', 'record_id', 'generation')
@@ -292,7 +292,11 @@ def compare_runs(left, right):
     delta = {}
     for metric in left['metrics'].keys() | right['metrics'].keys():
         a, b = left['metrics'].get(metric), right['metrics'].get(metric)
-        delta[metric] = b - a if number(a) and number(b) else None
+        if metric == 'cpu_ns_per_record_bounds':
+            delta[metric] = (dict(lower=b['lower'] - a['upper'], upper=b['upper'] - a['lower'])
+                             if cpu_interval(a) and cpu_interval(b) else None)
+        else:
+            delta[metric] = b - a if number(a) and number(b) else None
     return dict(eligible=True, errors=[], delta=delta,
                 performance_eligible=not validate_run(left, performance=True) and
                 not validate_run(right, performance=True))
@@ -316,7 +320,11 @@ def compare_pairs(pairs):
     means = {}
     for metric in metrics:
         values = [r['delta'].get(metric) for r in kept]
-        means[metric] = statistics.fmean(values) if values and all(v is not None for v in values) else None
+        if metric == 'cpu_ns_per_record_bounds':
+            means[metric] = ({bound: statistics.fmean(v[bound] for v in values) for bound in ('lower', 'upper')}
+                             if values and all(v is not None for v in values) else None)
+        else:
+            means[metric] = statistics.fmean(values) if values and all(v is not None for v in values) else None
     return dict(pairs=kept, excluded=excluded, mean_delta=means,
                 performance_eligible=bool(kept) and not excluded and all(r['performance_eligible'] for r in kept))
 
@@ -330,8 +338,8 @@ def import_collection(manifest, receipt):
     if observed.get('mapped_manifest') is not None:
         for field in ('runtime_mapping_version', 'runtime_bindings', 'runtime_frames'):
             imported[field] = copy.deepcopy(observed['mapped_manifest'][field])
-    if observed['total_cpu_ns'] is not None:
-        imported['total_cpu_ns'] = observed['total_cpu_ns']
+    imported['total_cpu_ns'] = observed['total_cpu_ns']
+    imported['total_cpu_ns_bounds'] = observed['total_cpu_ns_bounds']
     summary = summarize_events(imported, observed['events'], _admission=False)
     measured = [r for r in summary['records'] if r.get('measured', True)]
     latencies = [r['latency_ns'] for r in measured]
@@ -350,7 +358,10 @@ def import_collection(manifest, receipt):
         throughput_bytes_per_second=(len(latencies) * imported['record_bytes'] * 1e9 / elapsed
                                      if elapsed is not None and elapsed > 0 else None),
         cpu_ns_per_record=(observed['total_cpu_ns'] / len(latencies)
-                           if valid and observed['total_cpu_ns'] is not None else None))
+                           if valid and observed['total_cpu_ns'] is not None else None),
+        cpu_ns_per_record_bounds=({bound: observed['total_cpu_ns_bounds'][bound] / len(latencies)
+                                   for bound in ('lower', 'upper')}
+                                  if valid and observed['total_cpu_ns_bounds'] is not None else None))
     errors = list(dict.fromkeys([*observed['errors'], *summary['errors'],
                                 *validate_run(imported, performance=True)]))
     if not valid or elapsed is None or elapsed <= 0:

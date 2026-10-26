@@ -20,6 +20,10 @@ import subprocess
 import time
 import uuid
 
+_cpu_spec = importlib.util.spec_from_file_location('native_cpu_sampling', Path(__file__).with_name('cpu_sampling.py'))
+CPU_SAMPLING = importlib.util.module_from_spec(_cpu_spec)
+_cpu_spec.loader.exec_module(CPU_SAMPLING)
+
 EVENT = 'xdev_ext:native_event'
 PHASES = {'record_admit', 'native_submit', 'native_complete', 'record_terminal'}
 OBSERVATIONS = {'class_validate', 'downstream_complete', 'frame_recycle',
@@ -891,11 +895,12 @@ def _capture(manifest, command, output, root, correctness_only):
                 'cpu_budget', 'numa', 'iommu', 'group_bytes', 'segments_per_group',
                 'inflight_bytes', 'native_batch', 'processing')}
     metadata.update(observed, schema_version=1, command=list(command),
-                    cpu_interval_scope='whole_command', cpu_tick_hz=os.sysconf('SC_CLK_TCK'),
+                    cpu_interval_scope='native_interval_counter_bounds', cpu_tick_hz=os.sysconf('SC_CLK_TCK'),
                     trace_dropped=None, correctness_only=bool(correctness_only))
     metadata['probes'] = {phase: dict(layer='native_provider', source=EVENT + ':' + phase)
                           for phase in ('native_submit', 'native_complete')}
     status, returncode = 'unavailable', None
+    sampler = None
     def save(kind, name, data):
         target = output / name
         target.write_text(data)
@@ -913,12 +918,14 @@ def _capture(manifest, command, output, root, correctness_only):
             save('system_cpu_before', 'system-cpu-before.stat', cpu_before)
             started_ns = time.monotonic_ns()
             environment = dict(os.environ, XDEV_EXT_NATIVE_JOURNAL_DIR=str(journal_dir.resolve()))
-            with (output / 'workload.stdout').open('xb') as stdout, (output / 'workload.stderr').open('xb') as stderr:
-                child = execute_command(command, stdout, stderr, environment,
-                                        manifest['trace'].get('timeout_seconds', 3600))
-                returncode = child['returncode']
-                if child['timed_out']:
-                    reasons.append('actual workload timeout; owned process group terminated')
+            sampler = CPU_SAMPLING.CpuSampler(output / 'cpu-samples.jsonl')
+            with sampler:
+                with (output / 'workload.stdout').open('xb') as stdout, (output / 'workload.stderr').open('xb') as stderr:
+                    child = execute_command(command, stdout, stderr, environment,
+                                            manifest['trace'].get('timeout_seconds', 3600))
+                    returncode = child['returncode']
+                    if child['timed_out']:
+                        reasons.append('actual workload timeout; owned process group terminated')
             metadata['command_begin_ns'] = started_ns
             metadata['command_end_ns'] = time.monotonic_ns()
             cpu_after, metadata['cpu_sample_after'] = _cpu_snapshot()
@@ -985,12 +992,18 @@ def _capture(manifest, command, output, root, correctness_only):
             artifacts['zero_copy'] = artifact(proof)
         else:
             reasons.append('actual native backing/no-bounce proof unavailable')
-        reasons.append('steady-state all-CPU interval unavailable (whole command snapshots retained)')
         status = 'ok'
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         reasons.append(str(error))
         status = 'failed' if returncode is not None else 'unavailable'
     finally:
+        if sampler is not None:
+            metadata['cpu_sampler_error'] = sampler.error
+            metadata['cpu_sample_period_seconds'] = sampler.period_seconds
+            if sampler.path.is_file():
+                artifacts['cpu_samples'] = artifact(sampler.path)
+            if sampler.error:
+                reasons.append('system_cpu: ' + sampler.error)
         metadata.update(returncode=returncode, capture_status=status, reasons=reasons)
         save('trace_metadata', 'trace-metadata.json', json.dumps(metadata, indent=2, sort_keys=True) + '\n')
     return dict(status=status, returncode=returncode, reasons=reasons,

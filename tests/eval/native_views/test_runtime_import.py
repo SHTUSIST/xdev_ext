@@ -108,6 +108,82 @@ class RuntimeImport(unittest.TestCase):
         with patch.object(contract, 'COLLECTOR_ENTRY', self.collector_path):
             return analyze.import_collection(self.manifest, self.receipt)
 
+    def cpu_samples(self):
+        self.metadata.update(cpu_tick_hz=100, cpu_interval_scope='native_interval_counter_bounds')
+        self.artifact('trace_metadata', json.dumps(self.metadata))
+        samples = [dict(before_ns=a, after_ns=b,
+                        stat='cpu %d 0 0 100 0 0 0 0 0 0\ncpu0 %d 0 0 100 0 0 0 0 0 0\n' % (n, n))
+                   for a, b, n in [(500_000_000, 600_000_000, 1),
+                                    (2_000_000_000, 2_100_000_000, 4),
+                                    (3_000_000_000, 3_100_000_000, 7),
+                                    (4_500_000_000, 4_600_000_000, 11)]]
+        self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
+
+    def test_cpu_bounds_replay_raw_samples_and_keep_point_unknown(self):
+        self.cpu_samples()
+        result = self.import_run()
+        bounds = result['manifest'].get('total_cpu_ns_bounds')
+        self.assertIsNotNone(bounds, 'raw samples must produce counter bounds')
+        self.assertEqual((bounds['lower'], bounds['upper']), (30_000_000, 100_000_000))
+        self.assertIsNone(result['manifest']['total_cpu_ns'])
+        self.assertIsNone(result['manifest']['metrics']['cpu_ns_per_record'])
+        self.assertEqual(result['manifest']['metrics']['cpu_ns_per_record_bounds'],
+                         dict(lower=30_000_000, upper=100_000_000))
+        self.assertFalse(any('system_cpu:' in e for e in result['errors']))
+
+    def test_cpu_samples_missing_or_tampered_stay_unknown(self):
+        for variant in ('missing', 'tampered', 'forged_events', 'sampler_error'):
+            with self.subTest(variant=variant):
+                self.prepare()
+                self.cpu_samples()
+                if variant == 'missing':
+                    del self.receipt['artifacts']['cpu_samples']
+                elif variant == 'tampered':
+                    Path(self.receipt['artifacts']['cpu_samples']['path']).write_text('{}\n')
+                elif variant == 'forged_events':
+                    self.artifact('events', ''.join(json.dumps(e) + '\n' for e in self.events[:-1]))
+                else:
+                    self.metadata['cpu_sampler_error'] = 'CPU sample byte limit exceeded'
+                    self.artifact('trace_metadata', json.dumps(self.metadata))
+                result = self.import_run()
+                self.assertIsNone(result['manifest'].get('total_cpu_ns_bounds'))
+                self.assertIsNone(result['manifest']['metrics']['cpu_ns_per_record'])
+                self.assertFalse(result['performance_eligible'])
+                self.metadata.pop('cpu_sampler_error', None)
+
+    def test_cpu_bound_metrics_cannot_be_edited_after_import(self):
+        self.cpu_samples()
+        imported = self.import_run()['manifest']
+        original_errors = contract.validate_run(imported, performance=True)
+        self.assertFalse(any('cpu_ns_per_record' in e for e in original_errors), original_errors)
+        for field in ('cpu_ns_per_record', 'cpu_ns_per_record_bounds'):
+            edited = copy.deepcopy(imported)
+            edited['metrics'][field] = (123 if field == 'cpu_ns_per_record' else dict(lower=1, upper=2))
+            errors = contract.validate_run(edited, performance=True)
+            self.assertTrue(any('metrics.' + field in e for e in errors), errors)
+
+    def test_claimed_cpu_bounds_are_replaced_by_raw_replay_or_unknown(self):
+        self.manifest['total_cpu_ns_bounds'] = dict(lower=999, upper=999)
+        self.cpu_samples()
+        result = self.import_run()
+        self.assertEqual(result['manifest']['total_cpu_ns_bounds']['lower'], 30_000_000)
+        del self.receipt['artifacts']['cpu_samples']
+        result = self.import_run()
+        self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+        self.assertIsNone(result['manifest']['metrics']['cpu_ns_per_record'])
+
+    def test_real_whole_command_snapshots_cannot_promote_by_metadata(self):
+        self.manifest.update(physical=True, environment='physical', evidence_kind='physical')
+        self.metadata.update(physical=True, environment='physical', evidence_kind='physical',
+                             cpu_interval_scope='steady_state', cpu_tick_hz=100)
+        self.prepare()
+        self.artifact('system_cpu_before', 'cpu 1 0 0 100 0 0 0 0\ncpu0 1 0 0 100 0 0 0 0\n')
+        self.artifact('system_cpu_after', 'cpu 9 0 0 100 0 0 0 0\ncpu0 9 0 0 100 0 0 0 0\n')
+        result = self.import_run()
+        self.assertIsNone(result['manifest']['total_cpu_ns'])
+        self.assertIsNone(result['manifest']['metrics']['cpu_ns_per_record'])
+        self.assertTrue(any('system_cpu:' in e for e in result['errors']))
+
     def test_unknown_native_ids_bind_without_changing_expected_work(self):
         result = self.inspect()
         self.assertIn('mapped_manifest', result)

@@ -2,14 +2,19 @@
 # SPDX-License-Identifier: GPL-2.0
 """Admission for native-view evidence; schema validity is not physical proof."""
 import hashlib
+import importlib.util
 import math
 from pathlib import Path
 import re
 
 COLLECTOR_ENTRY = Path(__file__).resolve().parent.parent / 'native_trace' / 'collector.py'
+_cpu_spec = importlib.util.spec_from_file_location('native_cpu_bounds', COLLECTOR_ENTRY.with_name('cpu_sampling.py'))
+CPU_SAMPLING = importlib.util.module_from_spec(_cpu_spec)
+_cpu_spec.loader.exec_module(CPU_SAMPLING)
+
 RUNTIME_FIELDS = frozenset(('runtime_mapping_version', 'runtime_bindings', 'runtime_frames'))
 DERIVED_FIELDS = RUNTIME_FIELDS | frozenset(('collection_manifest', 'collection_receipt', 'metrics',
-    'completed_records', 'correctness_pass', 'status', 'total_cpu_ns'))
+    'completed_records', 'correctness_pass', 'status', 'total_cpu_ns', 'total_cpu_ns_bounds'))
 # These must match in a paired comparison. Arm names and waiting strategy may differ.
 PAIR_FIELDS = (
     'pair_id', 'exact_sha', 'config_hash', 'device_manifest', 'endpoint', 'load',
@@ -42,6 +47,11 @@ def canonical_recipe(run):
 
 def number(value, minimum=0):
     return (type(value) in (int, float) and math.isfinite(value) and value >= minimum)
+
+
+def cpu_interval(value):
+    return (isinstance(value, dict) and number(value.get('lower')) and
+            number(value.get('upper')) and value['lower'] <= value['upper'])
 
 
 def _same_json(left, right):
@@ -116,9 +126,13 @@ def validate_run(run, performance=False):
                  'registration_calls'):
         if type(run.get(name)) is not int or run[name] < 1:
             errors.append(name + ': expected positive integer')
-    for name in ('total_cpu_ns', 'payload_copy_bytes', 'completed_records', 'trace_dropped'):
+    for name in ('payload_copy_bytes', 'completed_records', 'trace_dropped'):
         if type(run.get(name)) is not int or run[name] < 0:
             errors.append(name + ': expected nonnegative integer')
+    if run.get('total_cpu_ns') is not None and (type(run['total_cpu_ns']) is not int or run['total_cpu_ns'] < 0):
+        errors.append('total_cpu_ns: expected nonnegative integer or null')
+    if run.get('total_cpu_ns_bounds') is not None and not cpu_interval(run['total_cpu_ns_bounds']):
+        errors.append('total_cpu_ns_bounds: invalid counter interval')
     for name in ('physical', 'correctness_pass', 'setup_in_timing', 'oracle_in_timing',
                  'registration_reused', 'shared_pages', 'afxdp_zero_copy', 'nvme_no_bounce'):
         if type(run.get(name)) is not bool:
@@ -141,7 +155,7 @@ def validate_run(run, performance=False):
         errors.append('metrics: expected object (unknown values use null)')
     else:
         for key, value in run['metrics'].items():
-            if value is not None and not number(value):
+            if value is not None and not (cpu_interval(value) if key == 'cpu_ns_per_record_bounds' else number(value)):
                 errors.append('metrics.' + key + ': expected finite nonnegative number or null')
     if isinstance(run.get('trace'), dict) and run['trace'].get('sessions'):
         errors.extend(validate_runtime_plan(run))
@@ -161,8 +175,6 @@ def validate_run(run, performance=False):
             errors.append('setup_in_timing: steady-state comparison excludes setup')
         if run.get('cpu_accounting') != 'system_total':
             errors.append('cpu_accounting: process-only accounting is insufficient')
-        if not number(run.get('total_cpu_ns'), 1):
-            errors.append('total_cpu_ns: positive whole-system CPU observation required')
         if not number(run.get('completed_records'), 1):
             errors.append('completed_records: positive success denominator required')
         if run.get('trace_dropped') != 0:
@@ -179,6 +191,14 @@ def validate_run(run, performance=False):
         # post-oracle/probe mappings must be produced by that collector, not here.
         observed = inspect_collection(run, run.get('collection_receipt'))
         errors.extend(observed['errors'])
+        bounds = observed['total_cpu_ns_bounds']
+        if bounds is None and observed['total_cpu_ns'] is None:
+            errors.append('system_cpu: verified whole-system counter observation required')
+        if bounds is not None:
+            if run.get('total_cpu_ns') is not None:
+                errors.append('total_cpu_ns: bounds-only capture has no exact point')
+            if not _same_json(run.get('total_cpu_ns_bounds'), bounds):
+                errors.append('total_cpu_ns_bounds: does not match raw counter replay')
         if observed['total_cpu_ns'] is not None and run.get('total_cpu_ns') != observed['total_cpu_ns']:
             errors.append('total_cpu_ns: does not match raw all-CPU counters')
         if observed['events']:
@@ -189,6 +209,14 @@ def validate_run(run, performance=False):
                         for row in checked['records'])
             if count != run.get('completed_records'):
                 errors.append('completed_records: differs from raw matched records')
+            if bounds is not None:
+                metrics = run.get('metrics', {})
+                metrics = metrics if isinstance(metrics, dict) else {}
+                if metrics.get('cpu_ns_per_record') is not None:
+                    errors.append('metrics.cpu_ns_per_record: bounds-only capture has no exact point')
+                expected = ({key: bounds[key] / count for key in ('lower', 'upper')} if count else None)
+                if not _same_json(metrics.get('cpu_ns_per_record_bounds'), expected):
+                    errors.append('metrics.cpu_ns_per_record_bounds: differs from raw CPU bounds/record count')
     return errors
 
 
@@ -225,6 +253,8 @@ def inspect_collection(run, receipt):
         artifacts = {}
     kinds = ['raw_trace', 'events', 'trace_metadata', 'system_cpu_before',
              'system_cpu_after', 'workload_stdout', 'workload_stderr', 'oracle', 'zero_copy']
+    if 'cpu_samples' in artifacts:
+        kinds.append('cpu_samples')
     if run.get('arm') in ('U-poll', 'U-event') or runtime:
         kinds.append('journal')
     if runtime:
@@ -234,6 +264,9 @@ def inspect_collection(run, receipt):
         errors.extend(problems)
         if not problems:
             try:
+                if kind == 'cpu_samples' and Path(artifacts[kind]['path']).stat().st_size > CPU_SAMPLING.MAX_BYTES:
+                    errors.append('system_cpu: CPU sample byte limit exceeded')
+                    continue
                 data[kind] = (Path(artifacts[kind]['path']) if kind in ('oracle_expected', 'oracle_readback')
                               else Path(artifacts[kind]['path']).read_text())
             except (OSError, UnicodeError) as error:
@@ -256,6 +289,10 @@ def inspect_collection(run, receipt):
             errors.append('events: invalid JSONL: ' + str(error))
             data.pop('events')
     metadata = data.get('trace_metadata', {})
+    # Legacy synthetic fixtures retain their old integer decoder tests only.
+    # Actual captures never qualify whole-command counters by a metadata label.
+    legacy_fixture_cpu = (run.get('physical') is False and run.get('environment') == 'fixture' and
+                          run.get('evidence_kind') == 'fixture' and 'cpu_samples' not in artifacts)
     if metadata:
         if run.get('arm') in ('U-poll', 'U-event') or runtime:
             if metadata.get('journal_artifact') != artifacts.get('journal') or 'journal' not in data:
@@ -267,8 +304,13 @@ def inspect_collection(run, receipt):
                       'complete_boundary', 'submit_boundary'):
             if field not in metadata or metadata[field] != run.get(field):
                 errors.append('trace_metadata.' + field + ': run identity/boundary mismatch')
-        if metadata.get('cpu_interval_scope') != 'steady_state':
-            errors.append('system_cpu: steady-state interval unavailable; whole-command includes setup/oracle')
+        if not legacy_fixture_cpu:
+            if metadata.get('cpu_interval_scope') != 'native_interval_counter_bounds':
+                errors.append('system_cpu: native interval sample scope unavailable; whole-command is diagnostic')
+            if 'cpu_samples' not in data:
+                errors.append('system_cpu: verified periodic raw samples unavailable')
+            if metadata.get('cpu_sampler_error') is not None:
+                errors.append('system_cpu: sampler failed: ' + str(metadata['cpu_sampler_error']))
         for field in ('cpu_budget', 'numa', 'iommu', 'group_bytes', 'segments_per_group',
                       'inflight_bytes', 'native_batch', 'processing'):
             if field not in metadata or metadata[field] != run.get(field):
@@ -325,16 +367,25 @@ def inspect_collection(run, receipt):
         errors.extend(_check_backing(run, data['zero_copy']))
     if runtime and all(kind in data for kind in ('oracle_expected', 'oracle_readback', 'oracle_spec')):
         errors.extend(_check_postoracle(plan, artifacts, data['oracle_spec']))
-    cpu_ns = None
-    if 'system_cpu_before' in data and 'system_cpu_after' in data:
+    cpu_ns, bounds = None, None
+    if legacy_fixture_cpu and 'system_cpu_before' in data and 'system_cpu_after' in data:
         try:
             cpu_ns = _system_cpu_ns(data['system_cpu_before'], data['system_cpu_after'],
                                     metadata.get('cpu_tick_hz'))
         except ValueError as error:
             errors.append('system_cpu: ' + str(error))
+    if ('cpu_samples' in data and metadata.get('cpu_sampler_error') is None and
+            metadata.get('cpu_interval_scope') == 'native_interval_counter_bounds'):
+        try:
+            if not verified_events:
+                raise ValueError('verified measured native endpoints unavailable')
+            samples = [json.loads(line) for line in data['cpu_samples'].splitlines()]
+            bounds = CPU_SAMPLING.cpu_bounds(plan, verified_events, samples, metadata.get('cpu_tick_hz'))
+        except (ValueError, TypeError, KeyError) as error:
+            errors.append('system_cpu: ' + str(error))
     return dict(errors=errors, events=verified_events, metadata=metadata,
                 mapped_manifest=mapped_manifest,
-                total_cpu_ns=cpu_ns)
+                total_cpu_ns=cpu_ns, total_cpu_ns_bounds=bounds)
 
 
 def _system_cpu_ns(before, after, tick_hz):
