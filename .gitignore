@@ -1386,3 +1386,6 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/xdomain_core_test.c
 !/kernel/io_uring/xdomain/
 !/kernel/io_uring/xdomain/xdev_ext_xdomain_core.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_fixture.c
+!/kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c
