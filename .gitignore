@@ -1375,3 +1375,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/compfam_wiring_source_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py
 !/tests/eval/mechanism_variants/test_capture_transport.py
+
+!/tests/eval/mechanism_variants/test_old_ticket_cache.py
