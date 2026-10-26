@@ -206,6 +206,9 @@ jobs:
             echo "Mechanism source checks reported failed or skipped cases"
             exit 1
           fi
+      - name: Prepare locked Linux sources for NHI host contracts
+        if: matrix.cc == 'gcc'
+        run: python3 scripts/prepare_sources.py --component linux
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: |
@@ -224,6 +227,62 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/test_native_rep_rx.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/mlx5_peer_rx_ring_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/independent_mlx5_peer_lifecycle.py
+      - name: Qualify pinned official CUDA headers for host contracts
+        if: matrix.cc == 'gcc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          header_root="$(mktemp -d "$RUNNER_TEMP/xdomain-official-headers.XXXXXXXX")"
+          export XDOMAIN_HEADER_ROOT="$header_root"
+          python3 -m pip download --no-deps --only-binary=:all: \
+            --index-url https://pypi.org/simple --dest "$header_root/wheels" \
+            nvidia-cuda-runtime==13.4.92
+          python3 - <<'PY'
+          import hashlib
+          import os
+          from pathlib import Path, PurePosixPath
+          import zipfile
+          root = Path(os.environ['XDOMAIN_HEADER_ROOT'])
+          wheels = list((root / 'wheels').glob('*.whl'))
+          if len(wheels) != 1:
+              raise SystemExit('FAIL: exactly one pinned NVIDIA runtime wheel required')
+          wheel = wheels[0]
+          expected = '9641f797da20ce1dd8e779b6e96d08cf9ba564cec8e8225458811ee26423f3a5'
+          if hashlib.sha256(wheel.read_bytes()).hexdigest() != expected:
+              raise SystemExit('FAIL: official NVIDIA runtime wheel SHA256 mismatch')
+          extracted = root / 'extracted'
+          extracted.mkdir(mode=0o700)
+          license_found = False
+          with zipfile.ZipFile(wheel) as archive:
+              for item in archive.infolist():
+                  path = PurePosixPath(item.filename)
+                  if (path.is_absolute() or '..' in path.parts or
+                          (item.external_attr >> 16) & 0o170000 == 0o120000):
+                      raise SystemExit('FAIL: unsafe wheel member: ' + item.filename)
+                  license_entry = item.filename.endswith('.dist-info/licenses/License.txt')
+                  if item.filename.startswith('nvidia/cu13/include/') or license_entry:
+                      archive.extract(item, extracted)
+                      license_found |= license_entry
+          cuda_home = extracted / 'nvidia/cu13'
+          if not license_found or not (cuda_home / 'include/cuda.h').is_file():
+              raise SystemExit('FAIL: official CUDA header or license missing')
+          with open(os.environ['GITHUB_ENV'], 'a') as environment:
+              environment.write('CUDA_HOME=' + str(cuda_home) + '\n')
+          print('Official NVIDIA headers and license verified; no SDK build or device execution')
+          PY
+      - name: Device-family and XDOMAIN software closure host checks
+        if: matrix.cc == 'gcc'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export CC=gcc CXX=g++
+          log="$RUNNER_TEMP/xdev-ext-xdomain-closure.log"
+          python3 scripts/check_xdomain_host.py \
+            --log-dir "$RUNNER_TEMP/xdev-ext-xdomain-closure" 2>&1 | tee "$log"
+          if grep -Eiq '(^not ok([[:space:]]|$)|^[[:space:]]*SKIP([:[:space:]]|$)|#[[:space:]]*SKIP([[:space:]]|$)|OK[[:space:]]+\(skipped=|\.\.\. skipped)' "$log"; then
+            echo "XDOMAIN closure checks reported failed or skipped cases"
+            exit 1
+          fi
       - name: Fence guest evidence rejection controls
         run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py -v
       - name: Integration harness and verdict checks

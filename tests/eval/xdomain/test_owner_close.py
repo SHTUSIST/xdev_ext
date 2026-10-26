@@ -30,7 +30,9 @@ class OwnerClose(unittest.TestCase):
     def setUpClass(cls):
         cls.build=tempfile.TemporaryDirectory(prefix="tb-owner-close-build-")
         cls.addClassCleanup(cls.build.cleanup);folder=Path(cls.build.name);objects=[]
-        cuda=Path("/root/xdev_ext/staging/queued-audits-20261022/P1g/deps/extracted/nvidia/cu13/include")
+        cuda=Path(os.environ.get("CUDA_HOME", "/usr/local/cuda"))/"include"
+        if not (cuda/"cuda.h").is_file():
+            raise AssertionError("UNAVAILABLE: official CUDA_HOME/include/cuda.h required: "+str(cuda/"cuda.h"))
         # Official declarations only. Every GPU/CUDA runtime entry in the test
         # process is a fail-stop trap, never a result or payload substitute.
         includes=["-I",str(HERE),"-I",str(HERE.parents[2]/"kernel/include/uapi"),"-I",str(cuda)]
