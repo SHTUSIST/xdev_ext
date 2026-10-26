@@ -8,11 +8,18 @@ from pathlib import Path
 
 REQUIRED = frozenset(['module-load', 'reference-attach', 'observer-attach', 'link-1-enodev', 'link-0-einval', 'module-unload', 'rel-tx-state-nvme-deny', 'rel-tx-state-xdomain-allow', 'private-info-xdomain-build-deny', 'private-info-xdomain-prepare-deny', 'private-info-xdomain-complete-allow', 'private-info-nvme-complete-deny', 'private-info-net-complete-deny', 'private-info-af-xdp-complete-deny', 'private-info-socket-complete-deny', 'private-verdict-xdomain-build-deny', 'private-verdict-xdomain-prepare-deny', 'private-verdict-xdomain-complete-allow', 'private-verdict-nvme-complete-deny', 'private-verdict-net-complete-deny', 'private-verdict-af-xdp-complete-deny', 'private-verdict-socket-complete-deny', 'xdomain-complete-sleepable-deny', 'xdomain-complete-nonsleepable-allow', 'helper-map-lookup-allow', 'helper-timer-init-deny', 'helper-timer-start-deny', 'helper-tail-call-deny', 'helper-probe-read-kernel-deny', 'helper-probe-read-user-deny', 'helper-ringbuf-output-deny', 'helper-existing-class-control-allow', 'memory-ctx-write-deny', 'memory-oob-info-deny', 'memory-oob-verdict-deny', 'memory-uninit-info-privileged-allow', 'memory-uninit-verdict-privileged-allow', 'memory-readonly-map-info-deny', 'memory-readonly-map-verdict-deny', 'memory-initialized-local-info-allow', 'memory-initialized-local-verdict-allow'])
 RECORD = re.compile(r"^XDEV_EXT_XDOMAIN_CASE=(PASS|FAIL) name=([a-z0-9-]+)$")
-BAD = re.compile(r"(?:\bnot ok\b|\bskip(?:ped)?\b|WARNING:|BUG:|KASAN:|lockdep:|lockdep (?:warning|failure)|possible circular locking|XDOMAIN_SETUP_FAIL|XDEV_EXT_XDOMAIN_SETUP=FAIL|SETUP_FAILURE|failed to find valid kernel BTF|failed to open ELF object|clang: error:|modprobe: FATAL:|XDEV_EXT_XDOMAIN_GUEST_EXIT=[1-9]|Kernel panic)", re.I)
+BAD = re.compile(r"(?:\bnot ok\b|(?:^|\n)[ \t]*SKIP\b|#\s*SKIP\b|\.\.\.[ \t]+skipped\b|\bOK[ \t]*\(skipped=[0-9]+\)|\b(?:skip|fail):[1-9][0-9]*\b|(?:=|:)[ \t]*SKIP\b|WARNING:|BUG:|KASAN:|lockdep:|lockdep (?:warning|failure)|possible circular locking|XDOMAIN_SETUP_FAIL|XDEV_EXT_XDOMAIN_SETUP=FAIL|SETUP_FAILURE|failed to find valid kernel BTF|failed to open ELF object|clang: error:|modprobe: FATAL:|XDEV_EXT_XDOMAIN_GUEST_EXIT=[1-9]|Kernel panic)", re.I)
+
+HEALTHY_KASAN = re.compile(r'^(?:\[[ \t]*[0-9]+\.[0-9]+\][ \t]+)?kasan: KernelAddressSanitizer initialized$')
 
 
 def validate(log: str) -> dict:
-    if not isinstance(log, str) or BAD.search(log):
+    if not isinstance(log, str):
+        raise ValueError("guest log must be text")
+    # This startup banner reports enabled instrumentation, not a KASAN fault.
+    diagnostics = "\n".join(line for line in log.splitlines()
+                            if not HEALTHY_KASAN.fullmatch(line))
+    if BAD.search(diagnostics):
         raise ValueError("failed, skipped, setup or kernel diagnostic in guest log")
     seen = set()
     for line in log.splitlines():

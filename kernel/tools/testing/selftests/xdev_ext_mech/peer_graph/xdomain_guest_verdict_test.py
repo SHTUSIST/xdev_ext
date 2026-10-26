@@ -107,6 +107,56 @@ class VerdictContract(unittest.TestCase):
         self.assertEqual(result['status'], 'PASS')
         self.reject(good_log() + 'WARNING: possible circular locking dependency detected\n')
 
+    def test_exact_healthy_kasan_startup_banner_with_timestamp_and_crlf_is_allowed(self):
+        healthy = 'kasan: KernelAddressSanitizer initialized'
+        for banner in (healthy + '\n', '[    0.141815] ' + healthy + '\n',
+                       healthy + '\r\n', '[    0.141815] ' + healthy + '\r\n'):
+            with self.subTest(banner=repr(banner)):
+                try:
+                    result = self.parser.validate(banner + good_log())
+                except ValueError as error:
+                    self.fail('exact healthy KASAN startup line rejected: ' + str(error))
+                self.assertEqual(result['status'], 'PASS')
+                self.assertEqual(result['cases'], list(NAMES))
+
+    def test_healthy_kasan_exception_never_hides_unknown_suffix_fault_bug_or_warning(self):
+        healthy = '[    0.141815] kasan: KernelAddressSanitizer initialized'
+        for diagnostic in (
+                'KASAN: use-after-free in xdomain',
+                '[    1.000001] kasan: unknown allocator state',
+                healthy + ' ERROR trailing fault',
+                'prefix kasan: KernelAddressSanitizer initialized',
+                '[not-a-time] kasan: KernelAddressSanitizer initialized',
+                healthy + '\nBUG: bad page state',
+                healthy + '\nWARNING: suspicious RCU usage'):
+            with self.subTest(diagnostic=diagnostic):
+                self.reject(good_log() + diagnostic + '\r\n')
+
+    def test_normal_delay_calibration_and_zero_skip_kunit_totals_are_allowed(self):
+        boot = ('[ 0.336026] Calibrating delay loop (skipped) preset value.. '
+                '4800.00 BogoMIPS (lpj=2400000)\n'
+                '[ 2.474835] # thunderbolt: pass:45 fail:0 skip:0 total:45\n'
+                '# Totals: pass:45 fail:0 skip:0 total:45\n')
+        try:
+            result = self.parser.validate(boot + good_log())
+        except ValueError as error:
+            self.fail('normal boot chatter and successful zero-skip KUnit summaries rejected: ' + str(error))
+        self.assertEqual(result, {'status': 'PASS', 'cases': list(NAMES), 'scope': SCOPE})
+
+    def test_actual_test_skip_forms_and_nonzero_kunit_skips_remain_rejected(self):
+        for diagnostic in (
+                'SKIP unavailable',
+                '    SKIP: no device',
+                'ok 1 - unavailable test # SKIP missing prerequisite',
+                'test_example ... skipped \'no device\'',
+                'OK (skipped=1)',
+                '[ 2.474835] # thunderbolt: pass:44 fail:0 skip:1 total:45',
+                '# Totals: pass:44 fail:0 skip:1 total:45',
+                '# Totals: pass:35 fail:0 skip:10 total:45',
+                '# Totals: pass:44 fail:1 skip:0 total:45'):
+            with self.subTest(diagnostic=diagnostic):
+                self.reject(good_log() + diagnostic + '\n')
+
 
 class FrozenInventory(unittest.TestCase):
     def test_matrix_has_all_forty_unique_rows(self):

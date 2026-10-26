@@ -87,5 +87,10 @@ rmmod xdev_ext_xdomain || fail module-unload
 if lsmod | grep -q '^xdev_ext_xdomain '; then fail module-unload; fi
 rmmod thunderbolt || setup thunderbolt-unload
 dmesg > /tmp/xdomain-final-dmesg
-if grep -Ei 'WARNING:|BUG:|KASAN:|lockdep:|lockdep (warning|failure)|possible circular locking|not ok|# SKIP' /tmp/xdomain-final-dmesg; then fail module-unload; fi
+# Preserve raw dmesg; only the exact healthy KASAN startup line is benign.
+if sed 's/\r$//' /tmp/xdomain-final-dmesg |
+   grep -Ev '^(\[[[:blank:]]*[[:digit:]]+\.[[:digit:]]+\][[:blank:]]+)?kasan: KernelAddressSanitizer initialized$' |
+   grep -Ei 'WARNING:|BUG:|KASAN:|lockdep:|lockdep (warning|failure)|possible circular locking|not ok|# SKIP'; then
+    fail module-unload
+fi
 pass module-unload

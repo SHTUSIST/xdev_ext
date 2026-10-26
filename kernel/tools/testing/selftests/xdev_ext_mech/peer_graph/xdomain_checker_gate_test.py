@@ -105,7 +105,7 @@ print('/* controlled BTF dump boundary */')
         self.assertIn('VMLINUX_BTF="$BUILD/vmlinux"', build.group())
 
     def run_guest(self, *, missing=False, reject=False, matrix_name=None,
-                  diagnostic='', loader_exit=1):
+                  diagnostic='', loader_exit=1, dmesg_extra=''):
         with tempfile.TemporaryDirectory(prefix='xd-check-guest-') as temp:
             root = Path(temp)
             bindir = root / 'bin'
@@ -125,6 +125,7 @@ elif name == 'rmmod' and sys.argv[1] == 'xdev_ext_xdomain':
 elif name == 'dmesg':
     for n in ('active_unregister','next_unregister','data_lifetime','callback_registration','reregister','return_semantics'):
         print('ok 1 tb_test_protocol_' + n)
+    sys.stdout.write(os.environ.get('GATE_DMESG_EXTRA', ''))
 '''
             for command in ('modprobe', 'lsmod', 'insmod', 'rmmod', 'dmesg', 'sleep'):
                 executable(bindir / command, boundary)
@@ -206,7 +207,7 @@ elif args[0] == 'xdomain-probe':
                        XDEV_EXT_XDOMAIN_GUEST='1', GATE_ROOT=str(root),
                        GATE_TRACE=str(trace), GATE_REJECT='1' if reject else '0',
                        GATE_MATRIX_NAME=matrix_name or '', GATE_DIAGNOSTIC=diagnostic,
-                       GATE_LOADER_EXIT=str(loader_exit))
+                       GATE_LOADER_EXIT=str(loader_exit), GATE_DMESG_EXTRA=dmesg_extra)
             result = subprocess.run(['sh', str(root / 'run.sh'), str(root)],
                                     env=env, capture_output=True, text=True, timeout=10)
             self.assertTrue(trace.exists(), 'guest did not reach loader boundary: ' + result.stdout + result.stderr)
@@ -365,6 +366,34 @@ elif args[0] == 'xdomain-probe':
                 result, _ = self.run_guest(matrix_name=name, diagnostic=diagnostic, loader_exit=code)
                 self.assertNotEqual(result.returncode, 0, 'invalid helper denial was accepted: ' + problem)
                 self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+
+    def test_actual_guest_accepts_only_exact_healthy_kasan_startup_banner(self):
+        healthy = 'kasan: KernelAddressSanitizer initialized'
+        for banner in (healthy + '\n', '[    0.141815] ' + healthy + '\n',
+                       healthy + '\r\n', '[    0.141815] ' + healthy + '\r\n'):
+            with self.subTest(banner=repr(banner)):
+                result, _ = self.run_guest(dmesg_extra=banner)
+                summary = '\n'.join(line for line in result.stdout.splitlines()
+                                    if not line.startswith('libbpf: DEBUG '))
+                self.assertEqual(result.returncode, 0, summary + result.stderr)
+                self.assertIn('XDEV_EXT_XDOMAIN_CASE=PASS name=module-unload', result.stdout)
+
+    def test_actual_guest_still_rejects_kasan_faults_unknown_messages_and_other_kernel_errors(self):
+        healthy = '[    0.141815] kasan: KernelAddressSanitizer initialized'
+        diagnostics = (
+            'KASAN: use-after-free in xdomain',
+            '[    1.000001] kasan: unknown allocator state',
+            healthy + ' ERROR trailing fault',
+            'prefix kasan: KernelAddressSanitizer initialized',
+            '[not-a-time] kasan: KernelAddressSanitizer initialized',
+            healthy + '\nBUG: bad page state',
+            healthy + '\nWARNING: suspicious RCU usage',
+        )
+        for diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic):
+                result, _ = self.run_guest(dmesg_extra=diagnostic + '\r\n')
+                self.assertNotEqual(result.returncode, 0, 'kernel diagnostic was ignored: ' + diagnostic)
+                self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=module-unload', result.stdout)
 
     def test_required_inventory_names_observer(self):
         cases = json.loads((GUEST / 'cases.json').read_text())['cases']
