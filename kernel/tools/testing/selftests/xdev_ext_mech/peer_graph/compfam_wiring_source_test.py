@@ -9,7 +9,9 @@ import re
 import sys
 
 KERNEL = Path(__file__).resolve().parents[5]
-JOINED = []  # (class name, kernel-relative file, hooks object)
+JOINED = [  # (class name, kernel-relative file, hooks object)
+    ("USER", "io_uring/xdev_ext_mech_user.c", "xdev_ext_user_comp_hooks"),
+]
 
 
 def main():
