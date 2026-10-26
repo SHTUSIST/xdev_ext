@@ -359,7 +359,7 @@ static int xdev_ext_net_default_build(struct xdev_ext_mech_stage *st,
   d[i] = (struct xdev_ext_net_send_desc){ .frame_pos = i, .frame_off = f.data_off,
    .len = f.data_len, .header_len = ns->header_room };
  }
- return nr;
+ return 0;
 }
 static int xdev_ext_net_validate(struct xdev_ext_mech_stage *st,
                                  struct xdev_ext_mech_batch *b, const u8 *scratch, u32 nr)
