@@ -222,6 +222,17 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 	    !reply.status && reply.incarnation) {
 		xl->logged_in = true;
 		xl->response_inc = reply.incarnation;
+		if (xl->remote_logged_in && xl->response_inc != xl->accepted_inc) {
+			u64 candidate;
+
+			spin_lock_irq(&xl->lock);
+			candidate = xl->remote_login.incarnation;
+			spin_unlock_irq(&xl->lock);
+			if (candidate == xl->response_inc) {
+				queue_work(system_long_wq, &xl->connect_work);
+				goto out;
+			}
+		}
 		xdev_ext_xd_maybe_up(xl);
 		if (!xl->remote_logged_in || xl->response_inc == xl->accepted_inc)
 			goto out;
@@ -234,7 +245,8 @@ out:
 }
 
 /* ctl_mutex held.  Ends the current link incarnation; see section 4.8. */
-static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err)
+static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err,
+                                         bool renew_local)
 {
 	u32 c, i;
 
@@ -244,6 +256,9 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err)
 	spin_lock_irq(&xl->lock);
 	xl->up = false;
 	xl->remote_inc = 0;
+	/* Faults queued for the detached peer epoch cannot end its successor. */
+	xl->down_err = 0;
+	xl->down_local_inc = 0;
 	spin_unlock_irq(&xl->lock);
 	mutex_lock(&xl->ep_mutex);
 	for (c = 0; c < xl->channels; c++)
@@ -270,7 +285,8 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err)
 	xl->response_inc = 0;
 	if (xl->going_away || xl->suspended || xl->nhi_gone)
 		return;
-	xdev_ext_xd_new_incarnation(xl);
+	if (renew_local)
+		xdev_ext_xd_new_incarnation(xl);
 	xl->login_retries = 0;
 	queue_delayed_work(system_long_wq, &xl->login_work, msecs_to_jiffies(XDEV_EXT_XD_RELOGIN_MS));
 }
@@ -278,7 +294,7 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err)
 void xdev_ext_xd_link_down(struct xdev_ext_xd_link *xl, int err)
 {
 	mutex_lock(&xl->ctl_mutex);
-	xdev_ext_xd_link_down_locked(xl, err);
+	xdev_ext_xd_link_down_locked(xl, err, true);
 	mutex_unlock(&xl->ctl_mutex);
 }
 
@@ -318,9 +334,21 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	/* The peer repeats LOGIN until it sees our response: same incarnation, nothing to do. */
 	if (xl->remote_logged_in && l.incarnation == xl->accepted_inc)
 		goto out;
-	/* A new peer incarnation ends every stage of the old one first. */
+	/* Confirm a changed unsolicited LOGIN with our own request before
+	 * disturbing an active connection. A delayed old LOGIN is not proof
+	 * that the peer has changed its incarnation. */
+	if (xl->remote_logged_in && xl->response_inc != l.incarnation) {
+		if (xl->logged_in) {
+			xl->logged_in = false;
+			xl->login_retries = 0;
+		}
+		mod_delayed_work(system_long_wq, &xl->login_work, 0);
+		goto out;
+	}
+	/* The peer changed; our own nonce and advertised outgoing HopID
+	 * leases did not. Renewing both peers here causes recovery ping-pong. */
 	if (xl->remote_logged_in)
-		xdev_ext_xd_link_down_locked(xl, -ENOLINK);
+		xdev_ext_xd_link_down_locked(xl, -ENOLINK, false);
 	/* stop may discover that the NHI is going away. */
 	if (xl->nhi_gone)
 		goto out;
@@ -339,7 +367,7 @@ fail:
 	/* The peer already got a positive response: restart our login so it
 	 * comes back (thunderbolt-net unwinds the same steps on failure,
 	 * drivers/net/thunderbolt/main.c:677-687). */
-	xdev_ext_xd_link_down_locked(xl, -EIO);
+	xdev_ext_xd_link_down_locked(xl, -EIO, true);
 out:
 	mutex_unlock(&xl->ctl_mutex);
 }
@@ -360,7 +388,7 @@ static void xdev_ext_xd_down_work(struct work_struct *work)
 	/* ctl_mutex keeps a new connection from changing incarnation between
 	 * the comparison and teardown. A queued old fault cannot end it. */
 	if (same_inc && !xl->going_away && !xl->suspended && !xl->gone && !xl->nhi_gone)
-		xdev_ext_xd_link_down_locked(xl, err);
+		xdev_ext_xd_link_down_locked(xl, err, true);
 	mutex_unlock(&xl->ctl_mutex);
 }
 
@@ -494,7 +522,7 @@ static void xdev_ext_xd_remove(struct tb_service *svc)
 	/* 3. Tell the peer, then end the link: stages die, rings stop, paths go. */
 	mutex_lock(&xl->ctl_mutex);
 	xdev_ext_xd_send_logout(xl);
-	xdev_ext_xd_link_down_locked(xl, -ENOLINK);
+	xdev_ext_xd_link_down_locked(xl, -ENOLINK, true);
 	/* 4. Rings and HopIDs belong to the NHI and the XDomain: free them now.
 	 *    A stage still bound keeps only the link memory (section 4.8). */
 	spin_lock_irq(&xl->lock);
