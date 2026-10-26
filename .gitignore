@@ -1391,3 +1391,8 @@
 
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_fixture.c.in
+
+!/kernel/drivers/thunderbolt/xdomain.c
+!/kernel/include/linux/thunderbolt.h
+!/kernel/drivers/net/thunderbolt/
+!/kernel/drivers/net/thunderbolt/main.c

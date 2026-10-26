@@ -145,3 +145,7 @@ kernel-popcount-check:
 
 TEST_PROGS += peer_graph/test_native_rep_rx.py peer_graph/test_native_teardown.py
 TEST_FILES += peer_graph/native_rep_fixture.py peer_graph/native_eswitch_fixture.h peer_graph/native_eswitch_cases.c peer_graph/native_suspend_fixture.py peer_graph/fixtures/native_destroy_wrappers.c
+
+# Sleepable Thunderbolt registry and real tbnet work teardown.
+TEST_PROGS += peer_graph/tb_protocol_handler_lifetime_test.py peer_graph/tbnet_handler_teardown_test.py
+TEST_FILES += peer_graph/tb_protocol_handler_lifetime_fixture.c.in peer_graph/tb_protocol_handler_lifetime_cases.c.in peer_graph/tbnet_handler_teardown_fixture.c.in
