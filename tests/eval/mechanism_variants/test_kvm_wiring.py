@@ -68,6 +68,7 @@ class CaptureWiring(unittest.TestCase):
 
     def identity_fixture(self, root):
         import hashlib
+        import tempfile
         tools=root/'tools'; out=tools/'e2'; out.mkdir(parents=True)
         build=root/'build'; build.mkdir(); ev=root/'evidence'; ev.mkdir()
         src=root/'kernel'; hook=src/'include/trace/events/xdev_ext.h'
@@ -82,6 +83,16 @@ class CaptureWiring(unittest.TestCase):
             p=out/name; p.write_text('host identity fixture '+name+'\n'); artifacts.append(p)
         (build/'xdev-ext-e2-sources.sha256').write_text(receipt(hook))
         artifacts += [build/'xdev-ext-e2-mode.txt',build/'xdev-ext-e2-sources.sha256']
+        # The run-only identity contract also requires a retained actual-core
+        # export. Require the real GCC exporter to succeed before indexing it.
+        parent=Path(tempfile.mkdtemp(prefix='software-old-ticket.',dir=out))
+        capture=parent/'capture'
+        subprocess.run(['python3','-B',str(HERE/'export_old_ticket.py'),
+                        str(HERE.parents[2]/'kernel'),str(capture),'--cc','gcc'],
+                       check=True,capture_output=True,text=True,timeout=60)
+        selected=build/'xdev-ext-e2-old-ticket.path'
+        selected.write_text(str(capture.resolve())+'\n')
+        artifacts += [selected,*sorted(capture.iterdir())]
         (build/'xdev-ext-artifacts.sha256').write_text(''.join(receipt(p) for p in artifacts))
         return dict(SRC=src,TOOLS=tools,BUILD=build,EV=ev,SOURCE_COMMIT='host-fixture')
 
