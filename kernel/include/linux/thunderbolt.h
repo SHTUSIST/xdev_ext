@@ -624,6 +624,10 @@ struct tb_ring *tb_ring_alloc_rx(struct tb_nhi *nhi, int hop, int size,
 void tb_ring_start(struct tb_ring *ring);
 void tb_ring_stop(struct tb_ring *ring);
 void tb_ring_free(struct tb_ring *ring);
+/* Process-context software retirement of a non-polling UNKNOWN ring.
+ * Consumes ring before NHI teardown; descriptor DMA backing is retained.
+ */
+void tb_ring_free_quarantined(struct tb_ring *ring);
 
 int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame);
 

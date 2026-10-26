@@ -16,6 +16,7 @@
 
 struct xdev_ext_xd_link;
 struct xdev_ext_xd_ctl_allocation;
+struct xdev_ext_xd_rings;
 /* One bound XDOMAIN stage on one channel and direction (the family "link"). */
 struct xdev_ext_xd_ep {
 	struct xdev_ext_xd_link *xl;
@@ -60,6 +61,7 @@ struct xdev_ext_xd_link {
 	struct tb_ring *ctl_tx, *ctl_rx;
 	int ctl_out_hopid, ctl_in_hopid;
 	bool ctl_paths;
+	struct xdev_ext_xd_rings *rings;
 	/* X4 owns per-allocation custody and preallocated quarantine records. */
 	struct xdev_ext_xd_ctl_allocation *ctl_rx_alloc, *ctl_tx_alloc;
 	u8 *ctl_rx_buf, *ctl_tx_buf;
