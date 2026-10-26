@@ -133,8 +133,12 @@ static NV_STATUS rm_p2p_dma_map_pages(nvidia_stack_t *sp, nv_dma_device_t *dev,
 #include "nv_xdev_ext_native_peer_p2p.inc"    /* nv-p2p.c actual bodies */
 
 /* ---------------------------------------------- owned provider environment */
-typedef struct { int unused; } nv_state_t;
-typedef struct { nv_state_t nv_state; } nv_linux_state_t;
+typedef struct {
+	NvBool mem_has_struct_page;
+	NvBool coherent;
+	NvBool is_external_gpu;
+} nv_state_t;
+typedef struct { nv_state_t nv_state; struct pci_dev *pci_dev; } nv_linux_state_t;
 typedef struct { int open_rc; nv_linux_state_t *nvptr; } nv_linux_file_private_t;
 #define NV_GET_LINUX_FILE_PRIVATE(f) ((nv_linux_file_private_t *)(f)->private_data)
 #define NV_FILE_INODE(f) ((f)->inode)
