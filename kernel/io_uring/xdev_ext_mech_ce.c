@@ -26,6 +26,7 @@
 #include <linux/printk.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_ce_core.h"
@@ -552,6 +553,12 @@ static void xdev_ext_ce_mark_dead(struct xdev_ext_mech_stage *st)
 	WRITE_ONCE(cs->dead, true);
 }
 
+static const struct xdev_ext_comp_hooks xdev_ext_ce_comp_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
+	.kinds = 1U << XDEV_EXT_COMP_COPY_WINDOW,
+	.producer_visibility = XDEV_EXT_CAP_NOT_WIRED,
+};
+
 static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.class_id	= XDEV_EXT_MECH_CLASS_CE,
 	.desc_size	= sizeof(struct xdev_ext_ce_copy_desc),
@@ -570,6 +577,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.fill_cqe	= xdev_ext_ce_fill_cqe,
 	.mark_dead	= xdev_ext_ce_mark_dead,
 	.batch_release	= xdev_ext_ce_batch_release,
+	.fam.comp	= &xdev_ext_ce_comp_hooks,
 };
 
 /* After every late_initcall, so the core's own initialisation has run. */
