@@ -1400,3 +1400,8 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_compat.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_boundaries.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_cases.c
+
+!/kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c
+!/kernel/drivers/thunderbolt/
+!/kernel/drivers/thunderbolt/nhi.c
+!/kernel/include/linux/thunderbolt.h

@@ -44,7 +44,7 @@ struct xdev_ext_net_dev_ops {
 	struct pci_dev *(*requester)(void *lk);
 	/* any context: largest element payload; 0 once the device is gone */
 	u32 (*max_payload)(void *lk);
-	/* worker: all or none of @n elements, one doorbell; negative: no DMA, no callback */
+	/* worker: all or none of @n elements; bounded native submit; negative: no DMA, no callback */
 	int (*post_tx)(void *lk, struct xdev_ext_net_elem *e, u32 n);
 	int (*post_rx)(void *lk, struct xdev_ext_net_elem *e, u32 n);
 	/* optional, may sleep: cancel posted RX elements; each completes exactly once */
