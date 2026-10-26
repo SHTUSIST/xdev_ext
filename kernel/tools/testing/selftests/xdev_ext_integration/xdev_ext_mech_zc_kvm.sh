@@ -16,6 +16,7 @@ PREPARE_ONLY=0
 DEBUG_LOCKING=0
 COMPAT=0
 LIFECYCLE=0
+XDOMAIN=0
 FENCE_CHECK=0
 FENCE_NONCE_PREFIX=''
 PEER=0
@@ -46,6 +47,7 @@ while (($#)); do
 	--prepare-only) PREPARE_ONLY=1; shift ;;
 	--debug-locking) DEBUG_LOCKING=1; shift ;;
 	--lifecycle) LIFECYCLE=1; shift ;;
+	--xdomain) XDOMAIN=1; DEBUG_LOCKING=1; shift ;;
 	--fence-check) FENCE_CHECK=1; shift ;;
 	--compat) COMPAT=1; CE_SIM=1; shift ;;
 	--peer) PEER=1; CE_SIM=1; shift ;;
@@ -65,6 +67,11 @@ while (($#)); do
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+if (( XDOMAIN )); then
+    if (( CE_SIM || COMPAT || PEER || RX_CE || RELIABLE || LIFECYCLE || FENCE_CHECK || EVAL_SESSION || MECHANISM_VARIANTS )) || [[ "$FAULT" != none || "$PROVIDER_CASE" != normal || -n "$FAULT_CAMPAIGN" ]]; then
+        echo 'xdomain requires its exclusive correctness mode' >&2; exit 2
+    fi
+fi
 # Fence checks extend normal plans and run before CE/network setup. The
 # default matrix never selects them. Never combine them with fault campaigns.
 if (( FENCE_CHECK )) && [[ -n "$FAULT_CAMPAIGN" ]]; then
@@ -386,6 +393,10 @@ verify_fence_identity() {
     [[ $(modinfo -F name "$FENCE_OUT/lifecycle_bench.ko") == lifecycle_bench ]]
     [[ $(modinfo -F vermagic "$FENCE_OUT/lifecycle_bench.ko" | cut -d' ' -f1) == "$(cat "$BUILD/include/config/kernel.release")" ]]
 }
+if (( XDOMAIN && RUN_ONLY )); then
+    exec bash "$SRC/tools/testing/selftests/xdev_ext_mech/xdomain/guest/xdomain_kvm.sh" \
+        --scratch "$SCRATCH" --source "$SOURCE_GIT_ROOT" --build "$BUILD" --tools "$TOOLS"
+fi
 if (( RUN_ONLY )); then
     [[ -r "$BUILD/xdev-ext-source.commit" ]] || {
         echo 'FAIL run-only build identity missing; rebuild exact source' >&2; exit 1;
@@ -470,6 +481,9 @@ if (( ! RUN_ONLY )); then
     fi
     if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE -e VIRTIO_CONSOLE; fi
     if (( FENCE_CHECK )); then cfg -e MODULES -e MODULE_UNLOAD -e DMA_SHARED_BUFFER; fi
+    if (( XDOMAIN )); then
+        cfg -e MODULES -e MODULE_UNLOAD -e MEMORY_HOTPLUG -e MEMORY_HOTREMOVE -e MIGRATION -e SPARSEMEM_VMEMMAP -e ZONE_DEVICE -e PCI_P2PDMA -e DEBUG_INFO_BTF -e DEBUG_INFO_BTF_MODULES -e XDEV_EXT_MECH_SOCKET -e KUNIT -e USB4_KUNIT_TEST -m USB4 -m XDEV_EXT_MECH_XDOMAIN
+    fi
     if (( SOCKET_REQUIRED )); then cfg -e XDEV_EXT_MECH_SOCKET; fi
     if (( COMPAT )); then cfg -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
@@ -484,6 +498,14 @@ if (( ! RUN_ONLY )); then
 	for symbol in IO_URING_XDEV_EXT_BPF_POLICY XDP_SOCKETS_XDEV_EXT_POLICY XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do cfg -e "$symbol"; done
 	kmake olddefconfig >>"$EV/olddefconfig.log" 2>&1
     verify_socket_config
+    if (( XDOMAIN )); then
+        for symbol in MODULES MODULE_UNLOAD MEMORY_HOTPLUG MEMORY_HOTREMOVE MIGRATION SPARSEMEM_VMEMMAP ZONE_DEVICE PCI_P2PDMA DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES KUNIT USB4_KUNIT_TEST DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do
+            grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "XDOMAIN_SETUP_FAIL CONFIG_$symbol=y required" >&2; exit 1; }
+        done
+        grep -Fxq CONFIG_PCI_P2PDMA=y "$BUILD/.config"
+        grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"
+        grep -Fxq CONFIG_USB4=m "$BUILD/.config"
+    fi
 	cp "$BUILD/.config" "$EV/kernel.config"
     python3 "$DEBUG_HELPER" config "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
 	for symbol in DEBUG_INFO_BTF VIRTIO_NET BLK_DEV_NVME XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do
@@ -504,6 +526,10 @@ if (( ! RUN_ONLY )); then
         kmake bzImage vmlinux modules >"$EV/fence-kernel-build.log" 2>&1
         [[ -s "$BUILD/Module.symvers" && -s "$BUILD/vmlinux" ]]
     fi
+    if (( XDOMAIN )); then
+        kmake bzImage vmlinux modules >"$EV/kernel-build.log" 2>&1
+        kmake INSTALL_MOD_PATH="$TOOLS/xdomain-modules" modules_install >"$EV/xdomain-modules-install.log" 2>&1
+    fi
 	if (( CE_SIM )); then
 		kmake bzImage vmlinux modules_prepare >"$EV/kernel-build.log" 2>&1
 		# All guest drivers are built in; only this external stand-in is loaded.
@@ -521,7 +547,7 @@ if (( ! RUN_ONLY )); then
             cp "$SRC/tools/testing/selftests/xdev_ext_mech/iaa_transform/"{Makefile,iaa_runtime.c,iaa_pair.bpf.c,campaign.h,observations.h,run-guest.sh} "$IAA_OUT/"
             lowprio make -C "$IAA_OUT" runtime KERNEL_SRC="$SRC" PROVIDER_HEADERS="$DMA_SIM_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 >"$EV/iaa-tools-build.log" 2>&1
         fi
-	else
+	elif (( ! XDOMAIN )); then
 		kmake bzImage >"$EV/kernel-build.log" 2>&1
 	fi
     if (( FENCE_CHECK )); then
@@ -533,6 +559,19 @@ if (( ! RUN_ONLY )); then
 	lowprio make -C "$SRC/tools/xdev_ext_mech" -j8 BUILD_DIR="$TOOLS" \
 		VMLINUX_BTF="$BUILD/vmlinux" CC=gcc-14 CLANG=/usr/bin/clang-21 \
 		all >"$EV/tools-build.log" 2>&1
+    if (( XDOMAIN )); then
+        mkdir -p "$PEER_OUT"
+        cp "$SRC/tools/testing/selftests/xdev_ext_peer/guest/"{Makefile,xdev_ext_peer_sw.c,sw_provider_uapi.h} "$PEER_OUT/"
+        kmake M="$PEER_OUT" modules >"$EV/xdomain-provider-build.log" 2>&1
+        printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
+        sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" \
+            "$BUILD/Module.symvers" "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nvme_s0.bpf.o" \
+            "$PEER_OUT/xdev_ext_peer_sw.ko" >"$BUILD/xdev-ext-xdomain-build.sha256"
+        find "$TOOLS/xdomain-modules" -type f -name '*.ko*' -print0 | sort -z | \
+            xargs -0 -r sha256sum >>"$BUILD/xdev-ext-xdomain-build.sha256"
+        exec bash "$SRC/tools/testing/selftests/xdev_ext_mech/xdomain/guest/xdomain_kvm.sh" \
+            --scratch "$SCRATCH" --source "$SOURCE_GIT_ROOT" --build "$BUILD" --tools "$TOOLS"
+    fi
     if (( COMPAT )); then
         mkdir -p "$SOCKET_OUT" "$PRELOAD_OUT"
         cp "$SRC/tools/testing/selftests/xdev_ext_mech/socket_guest/"{Makefile,socket_runtime.c,observations.h,ce_observe.bpf.c} "$SOCKET_OUT/"

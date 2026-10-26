@@ -97,6 +97,16 @@ class VerdictContract(unittest.TestCase):
     def test_unrelated_guest_boot_chatter_allowed(self):
         self.assertEqual(self.parser.validate('Linux version test\n' + good_log() + 'Power down\n')['status'], 'PASS')
 
+    def test_actual_debug_lockdep_enable_banner_is_not_a_locking_failure(self):
+        # Preserved healthy strict-debug boot line from base-lifecycle-guest.
+        banner = '[    2.523581] rcu: \tRCU lockdep checking is enabled.\n'
+        try:
+            result = self.parser.validate(banner + good_log())
+        except ValueError as error:
+            self.fail('healthy debug boot banner rejected: ' + str(error))
+        self.assertEqual(result['status'], 'PASS')
+        self.reject(good_log() + 'WARNING: possible circular locking dependency detected\n')
+
 
 class FrozenInventory(unittest.TestCase):
     def test_matrix_has_all_forty_unique_rows(self):
@@ -118,6 +128,48 @@ class ActualHarnessContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.harness = (HERE.parents[4] / 'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh').read_text()
+
+    def test_actual_guest_provider_startup_has_required_guest_opt_in(self):
+        """X7 must reach module-load using the existing guest-only provider.
+
+        Only external module commands are replaced: execute the real startup
+        shell. The provider's explicit opt-in protects the host from loading
+        the test module; the fixture must never load any host module.
+        """
+        guest = (GUEST / 'run-guest.sh').read_text()
+        boundary = guest.find('# Real registry KUnit rows')
+        self.assertGreater(boundary, 0, 'actual guest startup boundary missing')
+        external = '''modprobe() { :; }
+lsmod() { printf 'thunderbolt 1 0\\nxdev_ext_xdomain 1 0\\n'; }
+insmod() {
+    [ "$1" = ./xdev_ext_peer_sw.ko ] && [ "$#" -eq 2 ] && [ "$2" = guest_only=1 ]
+}
+export XDEV_EXT_XDOMAIN_GUEST=1
+'''
+        with tempfile.TemporaryDirectory(prefix='x7-provider-startup-') as tmp:
+            result = subprocess.run(['sh', '-c', external + guest[:boundary],
+                                     'fixture', tmp], text=True, capture_output=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('XDEV_EXT_XDOMAIN_CASE=PASS name=module-load', result.stdout)
+
+    def test_actual_guest_dmesg_gate_distinguishes_enable_banner_and_warning(self):
+        guest = (GUEST / 'run-guest.sh').read_text()
+        boundary = guest.find('dmesg > /tmp/xdomain-final-dmesg')
+        self.assertGreater(boundary, 0, 'actual final dmesg gate missing')
+        with tempfile.TemporaryDirectory(prefix='x7-final-dmesg-') as tmp:
+            block = guest[boundary:].replace('/tmp/xdomain-final-dmesg', tmp + '/dmesg')
+            commands = '''dmesg() { printf '%s\\n' "$X7_DMESG"; }
+pass() { echo "XDEV_EXT_XDOMAIN_CASE=PASS name=$1"; }
+fail() { echo "XDEV_EXT_XDOMAIN_CASE=FAIL name=$1"; exit 1; }
+'''
+            for message, want in (
+                ('rcu: RCU lockdep checking is enabled.', 0),
+                ('WARNING: possible circular locking dependency detected', 1),
+            ):
+                with self.subTest(message=message):
+                    result = subprocess.run(['sh', '-c', commands + 'X7_DMESG=$1\n' + block,
+                                             'fixture', message], text=True, capture_output=True)
+                    self.assertEqual(result.returncode, want, result.stdout + result.stderr)
 
     def test_actual_option_parser_selects_xdomain(self):
         end = self.harness.find('\n# Fence checks')
@@ -195,6 +247,79 @@ kmake() {
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertRegex(result.stdout, r'(?m)^CC=gcc(?:-[0-9]+)?$')
         self.assertRegex(result.stdout, r'(?m)^HOSTCC=gcc(?:-[0-9]+)?$')
+
+
+class ActualRunnerDependencies(unittest.TestCase):
+    """Exercise the runner's real dependency function with actual ELF files."""
+    @classmethod
+    def setUpClass(cls):
+        cls.runner = GUEST / 'xdomain_kvm.sh'
+        cls.runner_source = cls.runner.read_text()
+
+    def collect(self, binary, destination):
+        match = re.search(r'^collect_xdomain_libraries\(\)\s*\{.*?^\}',
+                          self.runner_source, re.M | re.S)
+        self.assertIsNotNone(match, 'actual collect_xdomain_libraries(binary, destination) missing')
+        return subprocess.run(['bash', '-c', 'set -euo pipefail\n' + match.group(0) +
+                               '\ncollect_xdomain_libraries "$1" "$2"\n',
+                               'fixture', str(binary), str(destination)],
+                              text=True, capture_output=True)
+
+    def test_actual_static_busybox_needs_no_libraries(self):
+        elf = subprocess.run(['readelf', '-l', '/bin/busybox'], text=True, capture_output=True)
+        self.assertEqual(elf.returncode, 0, elf.stderr)
+        self.assertNotIn('INTERP', elf.stdout, 'fixture requires actual static BusyBox')
+        with tempfile.TemporaryDirectory(prefix='x7-static-elf-') as tmp:
+            dest = Path(tmp) / 'libraries'
+            result = self.collect('/bin/busybox', dest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(dest.exists() and dest.read_text().strip())
+
+    def test_actual_dynamic_true_collects_existing_libraries(self):
+        with tempfile.TemporaryDirectory(prefix='x7-dynamic-elf-') as tmp:
+            dest = Path(tmp) / 'libraries'
+            result = self.collect('/bin/true', dest)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue(dest.is_file(), result.stdout + result.stderr)
+            libraries = dest.read_text().splitlines()
+            self.assertTrue(libraries)
+            for library in libraries:
+                self.assertTrue(Path(library).is_absolute() and Path(library).is_file(), library)
+
+    def test_actual_elf_with_missing_shared_library_is_setup_failure(self):
+        with tempfile.TemporaryDirectory(prefix='x7-missing-elf-') as tmp:
+            root = Path(tmp)
+            (root / 'dep.c').write_text('int x7_dependency(void) { return 0; }\n')
+            (root / 'main.c').write_text('extern int x7_dependency(void); int main(void) { return x7_dependency(); }\n')
+            for command in (
+                ['gcc', '-shared', '-fPIC', str(root / 'dep.c'), '-o', str(root / 'libx7_missing.so')],
+                ['gcc', str(root / 'main.c'), '-L' + tmp, '-Wl,-rpath,' + tmp,
+                 '-lx7_missing', '-o', str(root / 'dynamic')],
+            ):
+                built = subprocess.run(command, text=True, capture_output=True)
+                self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            (root / 'libx7_missing.so').unlink()
+            missing = subprocess.run(['ldd', str(root / 'dynamic')], text=True, capture_output=True)
+            self.assertIn('libx7_missing.so => not found', missing.stdout + missing.stderr)
+            result = self.collect(root / 'dynamic', root / 'libraries')
+            self.assertNotEqual(result.returncode, 0, 'missing real ELF dependency accepted')
+
+    def test_failed_actual_runner_cannot_retain_previous_pass(self):
+        source = subprocess.run(['git', '-C', str(GUEST), 'rev-parse', '--show-toplevel'],
+                                text=True, capture_output=True, check=True).stdout.strip()
+        with tempfile.TemporaryDirectory(prefix='x7-stale-verdict-') as tmp:
+            root = Path(tmp)
+            ev = root / 'xdomain-evidence'
+            ev.mkdir()
+            result_path = ev / 'result.json'
+            result_path.write_text('{"status":"PASS","sentinel":"previous-run"}\n')
+            result = subprocess.run(['bash', str(self.runner), '--scratch', tmp,
+                                     '--source', source, '--build', tmp + '/absent-build',
+                                     '--tools', tmp + '/absent-tools'], text=True, capture_output=True)
+            self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+            if result_path.exists():
+                self.assertNotEqual(json.loads(result_path.read_text()).get('status'), 'PASS',
+                                    'failed actual runner retained previous PASS')
 
 
 if __name__ == '__main__':
