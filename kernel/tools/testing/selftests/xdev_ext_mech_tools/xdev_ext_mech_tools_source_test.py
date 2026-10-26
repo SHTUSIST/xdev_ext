@@ -177,6 +177,21 @@ class ProgramSourceTest(unittest.TestCase):
 
         contract = protos(strip_comments(
             (ROOT / "include/linux/xdev_ext_mech.h").read_text()), "")
+        # XDOMAIN's module-private kfuncs are defined in their registration
+        # unit rather than declared by the common mechanism header. Include
+        # their actual signatures; keep exact symbol/parameter equality below.
+        private_source = strip_comments(
+            (ROOT / "io_uring/xdev_ext_mech_xdomain_kfunc.c").read_text())
+        private_contract = {
+            match.group(1): " ".join(match.group(2).split())
+            for match in re.finditer(
+                r"^__bpf_kfunc int (bpf_xdev_ext_xdomain_\w+)\(([^)]*)\)\s*\{",
+                private_source, re.M)
+        }
+        self.assertEqual(set(private_contract), {
+            "bpf_xdev_ext_xdomain_info", "bpf_xdev_ext_xdomain_verdict"})
+        self.assertFalse(set(contract) & set(private_contract))
+        contract.update(private_contract)
         ours = protos(strip_comments(
             (TOOLS / "xdev_ext_mech_kfunc.h").read_text()), "extern ")
         self.assertEqual(sorted(ours), sorted(contract))
