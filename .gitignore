@@ -1391,3 +1391,12 @@
 !/kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c
 
 !/kernel/io_uring/xdomain/xdev_ext_xdomain.h
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_compat.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_boundaries.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_compat.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_boundaries.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_nhi_cases.c
