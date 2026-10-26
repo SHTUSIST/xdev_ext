@@ -200,6 +200,52 @@ def decode(raw, chain,session_id=None,audit=None):
     return events
 
 
+def validate_negative_cleanup(rows,validates,result):
+    """A rejected plan may recycle its frames without accepting native I/O."""
+    cleanup=[r for r in rows if r['phase']=='frame_recycle']
+    if not cleanup:
+        return []
+    identity=('session_id','batch_id','batch_key','frame_id','generation',
+              'stage','ticket','class_id','cookie')
+    def key(row): return tuple(row[field] for field in identity)
+    rejected={key(row):row for row in validates}
+    def cohort(records):
+        mapped={key(row):row for row in records}
+        if len(mapped)!=len(records) or set(mapped)!=set(rejected):
+            raise ValueError('negative cleanup has an incomplete or duplicate frame cohort')
+        return mapped
+    recycled=cohort(cleanup)
+    def payload(row):
+        values=[row[field] for field in ('address','bytes','aux')]
+        for field in ('frame_ordinal','frame_offset','frame_length'):
+            value=row.get(field)
+            if value is not None:
+                try: value=int(value,10)
+                except (ValueError,TypeError) as exc:
+                    raise ValueError('invalid negative cleanup span metadata') from exc
+                if not 0<=value<(1<<32):
+                    raise ValueError('negative cleanup span metadata out of range')
+            values.append(value)
+        return tuple(values)
+    for ident,row in recycled.items():
+        if row['accepted']!=1 or row['status'] or row['ts_ns']<rejected[ident]['ts_ns']:
+            raise ValueError('failed or premature negative frame cleanup')
+        payload(row)
+    for phase in ('record_admit','record_terminal'):
+        records=[r for r in rows if r['phase']==phase]
+        if not records:
+            continue
+        for ident,row in cohort(records).items():
+            recycle=recycled[ident]
+            ordered=(row['ts_ns']<=rejected[ident]['ts_ns'] if phase=='record_admit'
+                     else recycle['ts_ns']<=row['ts_ns'])
+            status=0 if phase=='record_admit' else result
+            if (row['accepted']!=1 or row['status']!=status or not ordered or
+                    payload(row)!=payload(recycle)):
+                raise ValueError('negative cleanup differs from its admitted/terminal frame')
+    return [row['raw_line'] for row in cleanup]
+
+
 def decode_negative(raw,session_id=None,audit=None):
     session_id=infer_session(raw) if session_id is None else session_id
     rows=exclude_session_bind(parse(raw,session_id,audit),audit)
@@ -212,7 +258,7 @@ def decode_negative(raw,session_id=None,audit=None):
         raise ValueError('negative has native acceptance, no rejection, or ambiguous validation')
     if len({r['frame_id'] for r in validates})!=len(validates):
         raise ValueError('duplicate rejected validation frame')
-    if any(r['phase'] not in ('class_validate','record_admit','record_terminal') for r in rows):
+    if any(r['phase'] not in ('class_validate','record_admit','record_terminal','frame_recycle') for r in rows):
         raise ValueError('negative contains unexpected measured operation')
     stable=('batch_key','stage','ticket','cookie','address','bytes','aux','accepted','status')
     if any(any(row[key]!=validates[0][key] for key in stable) for row in validates):
@@ -222,9 +268,10 @@ def decode_negative(raw,session_id=None,audit=None):
         raise ValueError('negative diagnostic carries another measured failure')
     if result not in (-34,-1):
         raise ValueError('unexpected actual full-class rejection')
+    cleanup_lines=validate_negative_cleanup(rows,validates,result)
     return dict(entry='class_validate',result=result,accepted_during_capture=len(accepts),
                 session_id=validates[0]['session_id'],batch_id=validates[0]['batch_id'],
-                raw_lines=[r['raw_line'] for r in validates])
+                raw_lines=[r['raw_line'] for r in validates],cleanup_raw_lines=cleanup_lines)
 
 
 def audit_collection(format_text, stats):
