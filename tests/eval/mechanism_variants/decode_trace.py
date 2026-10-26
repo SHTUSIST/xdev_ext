@@ -69,6 +69,44 @@ KNOWN_PHASES={'class_validate','native_submit','native_complete','downstream_com
               'frame_recycle','record_admit','record_terminal','descriptor_bind'}
 
 
+def exclude_session_bind(rows,audit=None):
+    binds=[r for r in rows if r['phase']=='session_bind']
+    if not binds:
+        return rows
+    if len(binds)!=1:
+        raise ValueError('duplicate session bind diagnostic')
+    bind=binds[0]
+    zero=('batch_id','batch_key','frame_id','generation','stage','ticket',
+          'class_id','status','address','aux','sequence')
+    if (bind['origin']!='K' or bind['accepted']!=1 or
+            any(bind[f] for f in zero) or not bind['cookie'] or
+            not 1<=bind['bytes']<=32):
+        raise ValueError('invalid session bind diagnostic')
+    optional_widths={'origin_tgid':32,'process_start_ticks':64,
+                     'native_user_data':64,'frame_ordinal':32,
+                     'frame_offset':32,'frame_length':32}
+    for field,width in optional_widths.items():
+        if field not in bind:
+            continue
+        try: value=int(bind[field],10)
+        except ValueError as exc:
+            raise ValueError('invalid session bind optional field') from exc
+        if not 0<=value<(1<<width) or (field=='origin_tgid' and not value):
+            raise ValueError('out-of-range session bind optional field')
+        if field not in ('origin_tgid','process_start_ticks') and value:
+            raise ValueError('nonzero session bind optional field')
+    cohorts=defaultdict(set)
+    for r in rows:
+        if r['phase']=='class_validate' and r['stage']==0:
+            cohorts[r['batch_id']].add(r['frame_id'])
+    if any(len(frames)!=bind['bytes'] for frames in cohorts.values()):
+        raise ValueError('session bind frame count differs from validation cohort')
+    if audit is not None:
+        audit.setdefault('excluded',[]).append(dict(raw_line=bind['raw_line'],
+            phase='session_bind',reason='audited diagnostic/intermediate stage, retained in raw'))
+    return [r for r in rows if r['phase']!='session_bind']
+
+
 def validate_scoped(rows,final_stage,positive=True):
     expected_class={0:3,final_stage:2}
     for stage in range(1,final_stage): expected_class[stage]=5
@@ -133,7 +171,7 @@ def groups(rows, final_stage,audit=None):
 def decode(raw, chain,session_id=None,audit=None):
     final_stage={'nvme_nic':1,'nvme_ce_ce_nic':3}[chain]
     session_id=infer_session(raw) if session_id is None else session_id
-    rows=parse(raw,session_id,audit)
+    rows=exclude_session_bind(parse(raw,session_id,audit),audit)
     validate_scoped(rows,final_stage)
     events=groups(rows,final_stage,audit)
     if not events or len({e['session_id'] for e in events}) != 1:
@@ -164,7 +202,7 @@ def decode(raw, chain,session_id=None,audit=None):
 
 def decode_negative(raw,session_id=None,audit=None):
     session_id=infer_session(raw) if session_id is None else session_id
-    rows=parse(raw,session_id,audit)
+    rows=exclude_session_bind(parse(raw,session_id,audit),audit)
     validate_scoped(rows,1,positive=False)
     accepts={(r['session_id'],r['batch_id'],r['ticket'],r['cookie']) for r in rows
              if r['origin']=='K' and r['phase']=='native_submit' and r['class_id']==3}
