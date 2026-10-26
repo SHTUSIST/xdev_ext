@@ -150,8 +150,20 @@ static int xdev_ext_xd_handle_packet(const void *buf, size_t size, void *data)
 	status = xdev_ext_xd_login_check(l, size, xl->channels) ||
 		 l->channels != xl->channels ? EPROTO : 0;
 	if (!status) {
-		xl->remote_login = *l;
-		queue_work(system_long_wq, &xl->connect_work);
+		/* Positive acknowledgement owns one immutable advertisement slot.
+		 * A late current-peer repeat cannot erase a changed candidate. */
+		if (xl->up && l->incarnation == xl->remote_inc) {
+			/* Idempotent current-peer repeat: preserve any pending change. */
+		} else if (xl->candidate_pending) {
+			if (l->incarnation != xl->remote_login.incarnation)
+				status = EAGAIN;
+		} else {
+			xl->remote_login = *l;
+			xl->candidate_pending = true;
+			xl->candidate_probe_started = false;
+		}
+		if (!status)
+			queue_work(system_long_wq, &xl->connect_work);
 	}
 	r.incarnation = xl->local_inc;
 	spin_unlock_irq(&xl->lock);
@@ -190,6 +202,8 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 						   login_work);
 	struct xdev_ext_xd_login_response reply = {};
 	struct xdev_ext_xd_login req = {};
+	struct xdev_ext_xd_login candidate;
+	bool pending_candidate, rejected_candidate = false;
 	u32 c;
 	int ret;
 
@@ -212,6 +226,10 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 		req.data_tx_path[c] = xl->chan[c].out_hopid;
 	spin_lock_irq(&xl->lock);
 	req.incarnation = xl->local_inc;
+	/* The request confirms this complete advertisement, even if a late
+	 * unsolicited LOGIN arrives before its response. */
+	candidate = xl->remote_login;
+	pending_candidate = xl->candidate_pending;
 	spin_unlock_irq(&xl->lock);
 	req.caps = xl->e2e ? XDEV_EXT_XD_CAP_E2E : 0;
 	/* Every request consumes the budget, including successful mismatches. */
@@ -223,23 +241,42 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 		xl->logged_in = true;
 		xl->response_inc = reply.incarnation;
 		if (xl->remote_logged_in && xl->response_inc != xl->accepted_inc) {
-			u64 candidate;
-
-			spin_lock_irq(&xl->lock);
-			candidate = xl->remote_login.incarnation;
-			spin_unlock_irq(&xl->lock);
-			if (candidate == xl->response_inc) {
+			if (pending_candidate && candidate.incarnation == xl->response_inc) {
+				spin_lock_irq(&xl->lock);
+				xl->confirmed_login = candidate;
+				xl->confirmed_pending = true;
+				spin_unlock_irq(&xl->lock);
 				queue_work(system_long_wq, &xl->connect_work);
 				goto out;
 			}
 		}
+		if (pending_candidate && candidate.incarnation != reply.incarnation) {
+			spin_lock_irq(&xl->lock);
+			if (xl->candidate_pending &&
+			    xl->remote_login.incarnation == candidate.incarnation) {
+				xl->candidate_pending = false;
+				xl->candidate_probe_started = false;
+			}
+			spin_unlock_irq(&xl->lock);
+			rejected_candidate = true;
+		}
 		xdev_ext_xd_maybe_up(xl);
-		if (!xl->remote_logged_in || xl->response_inc == xl->accepted_inc)
+		if (rejected_candidate || !xl->remote_logged_in ||
+		    xl->response_inc == xl->accepted_inc)
 			goto out;
 	}
-	if (xl->login_retries < XDEV_EXT_XD_LOGIN_RETRIES)
+	if (xl->login_retries < XDEV_EXT_XD_LOGIN_RETRIES) {
 		queue_delayed_work(system_long_wq, &xl->login_work,
 				   msecs_to_jiffies(XDEV_EXT_XD_RELOGIN_MS));
+	} else if (pending_candidate) {
+		spin_lock_irq(&xl->lock);
+		if (xl->candidate_pending &&
+		    xl->remote_login.incarnation == candidate.incarnation) {
+			xl->candidate_pending = false;
+			xl->candidate_probe_started = false;
+		}
+		spin_unlock_irq(&xl->lock);
+	}
 out:
 	mutex_unlock(&xl->ctl_mutex);
 }
@@ -259,6 +296,11 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err,
 	/* Faults queued for the detached peer epoch cannot end its successor. */
 	xl->down_err = 0;
 	xl->down_local_inc = 0;
+	xl->confirmed_pending = false;
+	if (renew_local) {
+		xl->candidate_pending = false;
+		xl->candidate_probe_started = false;
+	}
 	spin_unlock_irq(&xl->lock);
 	mutex_lock(&xl->ep_mutex);
 	for (c = 0; c < xl->channels; c++)
@@ -321,24 +363,46 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 {
 	struct xdev_ext_xd_link *xl = container_of(work, struct xdev_ext_xd_link, connect_work);
 	struct xdev_ext_xd_login l;
+	bool confirmed, pending, start_probe = false;
 
 	mutex_lock(&xl->ctl_mutex);
 	if (xl->going_away || xl->suspended || xl->gone || xl->nhi_gone)
 		goto out;
 	spin_lock_irq(&xl->lock);
-	l = xl->remote_login;
+	confirmed = xl->confirmed_pending &&
+		    xl->confirmed_login.incarnation == xl->response_inc;
+	l = confirmed ? xl->confirmed_login : xl->remote_login;
+	pending = xl->candidate_pending;
+	xl->confirmed_pending = false;
 	spin_unlock_irq(&xl->lock);
+	if (xl->remote_logged_in && !confirmed && !pending)
+		goto out;
 	if (xdev_ext_xd_login_check(&l, sizeof(l), xl->channels) ||
 	    l.channels != xl->channels)
 		goto out;
 	/* The peer repeats LOGIN until it sees our response: same incarnation, nothing to do. */
-	if (xl->remote_logged_in && l.incarnation == xl->accepted_inc)
+	if (xl->remote_logged_in && l.incarnation == xl->accepted_inc) {
+		spin_lock_irq(&xl->lock);
+		if (xl->candidate_pending &&
+		    xl->remote_login.incarnation == l.incarnation) {
+			xl->candidate_pending = false;
+			xl->candidate_probe_started = false;
+		}
+		spin_unlock_irq(&xl->lock);
 		goto out;
+	}
 	/* Confirm a changed unsolicited LOGIN with our own request before
 	 * disturbing an active connection. A delayed old LOGIN is not proof
 	 * that the peer has changed its incarnation. */
-	if (xl->remote_logged_in && xl->response_inc != l.incarnation) {
-		if (xl->logged_in) {
+	if (xl->remote_logged_in && !confirmed) {
+		spin_lock_irq(&xl->lock);
+		if (xl->candidate_pending && !xl->candidate_probe_started &&
+		    xl->remote_login.incarnation == l.incarnation) {
+			xl->candidate_probe_started = true;
+			start_probe = true;
+		}
+		spin_unlock_irq(&xl->lock);
+		if (start_probe) {
 			xl->logged_in = false;
 			xl->login_retries = 0;
 		}
@@ -358,6 +422,12 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 		goto fail;			/* paths_enable disabled what it enabled */
 	xl->remote_logged_in = true;
 	xl->accepted_inc = l.incarnation;
+	spin_lock_irq(&xl->lock);
+	if (xl->candidate_pending && xl->remote_login.incarnation == l.incarnation) {
+		xl->candidate_pending = false;
+		xl->candidate_probe_started = false;
+	}
+	spin_unlock_irq(&xl->lock);
 	xl->logged_in = false;		/* our login is repeated against the new incarnation */
 	xl->login_retries = 0;
 	mod_delayed_work(system_long_wq, &xl->login_work, 0);

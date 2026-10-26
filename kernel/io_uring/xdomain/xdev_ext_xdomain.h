@@ -57,7 +57,10 @@ struct xdev_ext_xd_link {
 	u64 down_local_inc;			/* incarnation that queued down_work; lock */
 	u32 channels, login_retries;		/* login_retries counts sent requests; ctl_mutex */
 	atomic_t command_id;
-	struct xdev_ext_xd_login remote_login;	/* last valid LOGIN from the peer; lock */
+	struct xdev_ext_xd_login remote_login; /* admitted immutable candidate; lock */
+	struct xdev_ext_xd_login confirmed_login;
+	bool confirmed_pending; /* request-confirmed advertisement; lock */
+	bool candidate_pending, candidate_probe_started; /* bounded mailbox; lock */
 	struct tb_ring *ctl_tx, *ctl_rx;
 	int ctl_out_hopid, ctl_in_hopid;
 	bool ctl_paths;

@@ -12,6 +12,8 @@ static bool removed, link_freed, rings_running, ring_warn;
 static int ring_calls_after_remove, ring_starts, ring_stops, ring_frees;
 static int paths_result, start_result, alloc_result, request_result;
 static int requests, responses, logouts, dead_calls, dead_error, pci_gets, pci_puts;
+/* One scheduler event while the native request is active, before its reply. */
+static void (*during_request)(void);
 static int handler_regs, handler_live, driver_regs, class_live;
 static int fail_registration;
 static unsigned int property_fail_index, property_add_calls, property_entries;
@@ -74,6 +76,7 @@ static int tb_xdomain_request(struct tb_xdomain *xd,const void *request,size_t s
          resp_type==TB_CFG_PKG_XDOMAIN_RESP && timeout==1000);
   assert(live_link->ctl_mutex.held && !live_link->going_away && !live_link->suspended);
   memcpy(&last_request,request,size); requests++; event("request");
+  if (during_request) { void (*callback)(void)=during_request; during_request=NULL; callback(); }
   struct xdev_ext_xd_login_response response={.type=reply_type,.status=reply_status,.incarnation=reply_inc};
   memcpy(reply,&response,sizeof(response)); return request_result; }
 static int tb_xdomain_response(struct tb_xdomain *xd,const void *packet,size_t size,int type)
