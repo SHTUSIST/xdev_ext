@@ -1,0 +1,139 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Only OS/native-provider boundaries; decisions use production extracts. */
+static struct xdev_ext_mech_session *tracked_session;
+static struct xdev_ext_mech_class_ops report_class;
+static unsigned transport_reads;
+static int final_callback_error;
+static void final_callback(void) {
+ tracked_session->done=41;
+ tracked_session->cnt[XDEV_EXT_MECH_CNT_RECYCLED]=43;
+ if(final_callback_error)tracked_session->last_err=final_callback_error;
+}
+static void observed_transport(struct xdev_ext_mech_stage *st,u32 *p,u32 *u) {
+ assert(st->s==tracked_session);assert(owner.refs==1);
+ assert(region_unbinds==0);assert(flushed_workers==1);
+ transport_reads++;*p=0;*u=0;
+}
+static void observed_counters(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_transport_stats_v2 *out) {
+ assert(st->s==tracked_session);assert(region_unbinds==0);
+ out->retransmits+=47;out->dup_suppressed+=53;out->held_acks+=59;
+}
+static void observed_policy(struct xdev_ext_mech_stage *st,struct xdev_ext_rel_policy *out) {
+ assert(st->s==tracked_session);assert(region_unbinds==0);
+ *out=(struct xdev_ext_rel_policy){.version=1,.size=120,.window=8,.initial_credit=4,
+  .rto_ns=1000000,.max_attempts=3,.ack_every=1};
+}
+static int reject_unbind(struct xdev_ext_mech_stage *st) {(void)st;return -EIO;}
+static struct xdev_ext_mech_stop_report request_for(u64 id) {
+ return (struct xdev_ext_mech_stop_report){.size=400,.version=1,.session_id=id};
+}
+static int control(struct io_ring_ctx *ctx,struct xdev_ext_mech_stop_report *r) {
+ struct io_uring_xdev_ext_mech req={.op=9,.arg=(uintptr_t)r};
+ mutex_lock(&ctx->uring_lock);int err=io_xdev_ext_mech_register(ctx,&req,1);
+ mutex_unlock(&ctx->uring_lock);return err;
+}
+static int report_case(const char *mode) {
+ struct io_ring_ctx ctx={.uring_lock=PTHREAD_MUTEX_INITIALIZER};
+ INIT_LIST_HEAD(&ctx.xdev_ext_mech_sessions);
+ struct xdev_ext_mech_session *s=bound_session();tracked_session=s;
+ s->id=0x100000003ULL;INIT_LIST_HEAD(&s->ring_node);
+ list_add_tail(&s->ring_node,&ctx.xdev_ext_mech_sessions);
+ report_class=*s->st[0].cls;report_class.transport_stats=observed_transport;
+ report_class.transport_counters=observed_counters;report_class.transport_policy=observed_policy;
+ s->st[0].cls=&report_class;
+ s->done=7;s->aborted=11;s->cnt[XDEV_EXT_MECH_CNT_REJECTS]=13;
+ s->submitted[0]=17;s->completed[0]=19;s->cnt[XDEV_EXT_MECH_CNT_PROTOCOL_ERR]=23;
+ s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_OPS]=61;s->cnt[XDEV_EXT_MECH_CNT_NIC_COPY_BYTES]=67;
+ s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_OPS]=71;s->cnt[XDEV_EXT_MECH_CNT_NIC_ZC_BYTES]=73;
+ struct xdev_ext_mech_stop_report r=request_for(s->id);
+ if(!strcmp(mode,"size"))r.size--;
+ if(!strcmp(mode,"version"))r.version++;
+ if(!strcmp(mode,"stats_input")||!strcmp(mode,"transport_input")) {
+  unsigned char *begin=(unsigned char *)(!strcmp(mode,"stats_input")?(void *)&r.stats:(void *)&r.transport);
+  size_t n=!strcmp(mode,"stats_input")?168:216;
+  for(size_t i=0;i<n;i++) {
+   begin[i]=1;EQ(control(&ctx,&r),-EINVAL,"every output byte is zero-only input");begin[i]=0;
+   EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ACTIVE,"invalid output cannot close admission");
+  }
+  EQ(copy_writes+pool_releases+destroyed_workers+transport_reads,0,"rejection has no release/copy effects");return 0;
+ }
+ if(!strcmp(mode,"size")||!strcmp(mode,"version")) {
+  EQ(control(&ctx,&r),-EINVAL,"reject incompatible ABI before mutation");
+  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ACTIVE,"ABI reject preserves active session");
+  EQ(pool_releases+destroyed_workers+copy_writes+transport_reads,0,"ABI reject has no release/copy effects");return 0;
+ }
+ if(!strcmp(mode,"read_fault")) {
+  copy_read_fault=&r;EQ(control(&ctx,&r),-EFAULT,"bad report input returns original copy fault");
+  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ACTIVE,"copy failure cannot stop session");
+  EQ(pool_releases+destroyed_workers+copy_writes,0,"input copy failure has no release effects");return 0;
+ }
+ if(!strcmp(mode,"unknown")) {
+  r.session_id++;EQ(control(&ctx,&r),-ENOENT,"unknown session denied");
+  EQ(s->ss.state,XDEV_EXT_MECH_SESSION_ACTIVE,"unknown lookup cannot affect another session");
+  EQ(copy_writes+pool_releases+transport_reads,0,"unknown id cannot fabricate output");return 0;
+ }
+ if(!strcmp(mode,"cmd_refs")) {
+  s->cmd_refs=1;EQ(control(&ctx,&r),-EAGAIN,"task-work commands preserve EAGAIN retry");
+  EQ(xdev_ext_mech_find(&ctx,s->id),s,"EAGAIN keeps ring-local session for retry");
+  CHECK(s->ss.state!=XDEV_EXT_MECH_SESSION_ACTIVE,"EAGAIN closes admission");
+  EQ(pool_releases+destroyed_workers+copy_writes+transport_reads,0,"EAGAIN grants no terminal report");return 0;
+ }
+ if(!strcmp(mode,"quarantine")||!strcmp(mode,"deferred")) {
+  struct xdev_ext_mech_batch *b=batch_new(s);EQ(submit(b),0,"accepted real native command");
+  if(!strcmp(mode,"quarantine"))atomic_inc(&s->native_controls);
+  EQ(control(&ctx,&r),-EBUSY,"unresolved device custody fails closed");
+  EQ(pool_releases+region_unbinds+host_unbinds+copy_writes+transport_reads,0,"unresolved custody cannot release or report");
+  EQ(owner.refs,1,"unresolved custody retains provider pin");
+  EQ(s->pool.state[1],XDEV_EXT_MECH_F_INFLIGHT,"accepted frame stays device-owned");return 0;
+ }
+ if(!strcmp(mode,"unbind_error"))report_class.unbind_checked=reject_unbind;
+ if(!strcmp(mode,"late_error"))final_callback_error=-EPIPE;
+ if(!strcmp(mode,"write_fault"))copy_write_fault=true;
+ sync_hook=final_callback;
+ if(!strcmp(mode,"legacy")) {
+  struct io_uring_xdev_ext_mech req={.op=3,.arg=s->id};
+  mutex_lock(&ctx.uring_lock);int err=io_xdev_ext_mech_register(&ctx,&req,1);mutex_unlock(&ctx.uring_lock);
+  EQ(err,0,"old STOP still accepts scalar session ID");EQ(copy_writes,0,"legacy STOP has no report copy");
+  EQ(pool_releases,1,"old STOP still destroys session");return 0;
+ }
+ int err=control(&ctx,&r);
+ if(!strcmp(mode,"unbind_error")) {
+  EQ(err,-EIO,"checked unbind error remains authoritative");
+  EQ(pool_releases+copy_writes+region_unbinds,0,"unbind uncertainty retains resources/no report");return 0;
+ }
+ if(!strcmp(mode,"late_error")) {
+  EQ(err,-EPIPE,"synchronized callback error wins over snapshot");
+  EQ(copy_writes,0,"error grants no terminal report");EQ(pool_releases,1,"definite callback error still releases");return 0;
+ }
+ if(!strcmp(mode,"write_fault")) {
+  EQ(err,-EFAULT,"failed output copy is never successful authority");
+  EQ(r.stats.session_id,0,"copy fault cannot synthesize report");EQ(pool_releases,1,"copy failure occurs after actual release");return 0;
+ }
+ EQ(err,0,"STOP_REPORT completes safe release");
+ EQ(pool_releases,1,"successful report accompanies actual release");EQ(owner.refs,0,"successful report releases module pin");
+ EQ(copy_writes,1,"one complete output copied");EQ(transport_reads,1,"provider observed once before unbind");
+ EQ(r.stats.session_id,0x100000003ULL,"full-width actual session identity");
+ EQ(r.stats.batches_done,41,"snapshot includes synchronized worker callback");
+ EQ(r.stats.recycled,43,"snapshot includes synchronized counter update");
+ EQ(r.stats.batches_abort,11,"real abort counter");EQ(r.stats.rejects,13,"real rejects");
+ EQ(r.stats.submitted[0],17,"real submitted counter");EQ(r.stats.completed[0],19,"real completed counter");
+ EQ(r.stats.protocol_err,23,"real protocol count");EQ(r.stats.inflight,0,"real zero inflight");
+ EQ(r.stats.state,XDEV_EXT_MECH_SESSION_STOPPED,"actual terminal state");EQ(r.stats.last_err,0,"actual terminal error");
+ EQ(r.transport.v3.v2.v1.size,216,"nested v4 size");EQ(r.transport.v3.v2.v1.version,4,"nested v4 version");
+ EQ(r.transport.v3.v2.v1.session_id,0x100000003ULL,"nested full-width identity");
+ EQ(r.transport.v3.v2.retransmits,47,"provider retransmit observation");EQ(r.transport.v3.v2.dup_suppressed,53,"provider duplicate observation");
+ EQ(r.transport.v3.v2.held_acks,59,"provider held ACK observation");
+ EQ(r.transport.v3.nic_copy_ops,61,"actual v4 copy operations");
+ EQ(r.transport.v3.nic_copy_bytes,67,"actual v4 copy bytes");
+ EQ(r.transport.v3.nic_zc_ops,71,"actual v4 zero-copy operations");
+ EQ(r.transport.v3.nic_zc_bytes,73,"actual v4 zero-copy bytes");
+ EQ(r.transport.rel_policy.version,1,"actual reliable policy version");
+ EQ(r.transport.rel_policy.size,120,"actual reliable policy size");
+ EQ(r.transport.rel_policy.window,8,"actual reliable policy window");
+ EQ(r.transport.rel_policy.initial_credit,4,"actual reliable credit");
+ EQ(r.transport.rel_policy.rto_ns,1000000,"actual reliable timeout");
+ EQ(r.transport.rel_policy.max_attempts,3,"actual retry limit");
+ EQ(r.transport.rel_policy.ack_every,1,"actual ACK rule");
+ r=request_for(0x100000003ULL);EQ(control(&ctx,&r),-ENOENT,"repeated STOP cannot guess report after free");
+ EQ(copy_writes,1,"repeated STOP publishes no additional output");return 0;
+}

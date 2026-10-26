@@ -19,6 +19,7 @@
 #include <linux/io_uring_types.h>
 #include <linux/jiffies.h>
 #include <linux/kthread.h>
+#include <linux/ktime.h>
 #include <linux/list.h>
 #include <linux/llist.h>
 #include <linux/mm.h>
@@ -141,9 +142,11 @@ struct xdev_ext_mech_session {
 	u32 start_legacy_events;	/* prior batches finishing during the handoff */
 	bool start_return_pending;	/* queued loans must precede terminal wake */
 	bool worker_gone;
+	bool progress_ready;		/* release-published only after successful CREATE activation */
 	bool release_deferred;		/* drain bound passed; the last batch decides */
 	u32 cmd_refs;			/* uring_cmd stage references */
 	int stop_err;			/* first reason the session stopped */
+	u64 stop_started_ns;		/* first successful STOP, including timestamp zero */
 	int last_err;
 
 	struct xdev_ext_mech_layout layout;
@@ -819,6 +822,18 @@ u32 xdev_ext_mech_session_state(const struct xdev_ext_mech_session *s)
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_session_state);
 
+u64 xdev_ext_mech_session_stop_started_ns(struct xdev_ext_mech_session *s)
+{
+	unsigned long flags;
+	u64 started;
+
+	spin_lock_irqsave(&s->lock, flags);
+	started = s->stop_started_ns;
+	spin_unlock_irqrestore(&s->lock, flags);
+	return started;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_session_stop_started_ns);
+
 bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s)
 {
 	u32 i;
@@ -892,7 +907,8 @@ static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s, int err)
 	/* STOP(0) closes admission but cannot seal the native-error latch.
 	 * Keep the first nonzero reason, including a late callback during drain
 	 * or the provider's final synchronization in unbind. */
-	xdev_ext_mech_sess_stop(&s->ss);
+	if (!xdev_ext_mech_sess_stop(&s->ss))
+		s->stop_started_ns = ktime_get_boottime_ns();
 	if (err && !s->stop_err) {
 		err = s->last_err ?: err;
 		s->last_err = err;
@@ -2468,7 +2484,7 @@ static void xdev_ext_mech_progress_work(struct kthread_work *work)
                                          progress_work.work);
  unsigned long delay = 0;
  u32 i;
- if (READ_ONCE(s->worker_gone)) return;
+ if (!smp_load_acquire(&s->progress_ready) || READ_ONCE(s->worker_gone)) return;
  for (i = 0; i < s->nr_stages; i++) {
   unsigned long next;
   if (!s->st[i].cls->progress) continue;
@@ -2541,7 +2557,8 @@ static void xdev_ext_mech_stop_work(struct kthread_work *work)
 	xdev_ext_mech_order_kick(s);
  {
   u32 i;
-  for (i = 0; i < s->nr_stages; i++)
+  for (i = 0; smp_load_acquire(&s->progress_ready) &&
+              i < s->nr_stages; i++)
    if (s->st[i].cls->progress) {
     unsigned long delay = s->st[i].cls->progress(&s->st[i]);
     /* This may run in the flush of kthread_destroy_worker(); a timer
@@ -3008,13 +3025,42 @@ static int xdev_ext_mech_unbind_checked(struct xdev_ext_mech_session *s)
  return 0;
 }
 
+static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stats *out);
+static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_transport_stats_v4 *full,
+				u32 version);
+
 /* Process context, nothing in flight: give every reference back. */
-static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
+static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stop_report *report)
 {
 	struct xdev_ext_mech_stage *st;
 	unsigned long flags;
 	u32 i;
 	int final_err;
+
+	if (report) {
+		/* The destroy decision holds the final reference and has closed
+		 * admission. Flush queued completion work before observing live
+		 * provider counters. Keep the worker allocated until checked
+		 * unbind succeeds, as on the legacy quarantine path.
+		 */
+		spin_lock_irqsave(&s->lock, flags);
+		s->worker_gone = true;
+		spin_unlock_irqrestore(&s->lock, flags);
+		if (s->worker) {
+			kthread_cancel_delayed_work_sync(&s->retry_work);
+			kthread_cancel_delayed_work_sync(&s->progress_work);
+			kthread_cancel_delayed_work_sync(&s->poll_work);
+			synchronize_rcu();
+			kthread_flush_worker(s->worker);
+		}
+		timer_shutdown_sync(&s->group_timer);
+		xdev_ext_mech_stats_fill(s, &report->stats);
+		xdev_ext_mech_transport_stats_fill(s, &report->transport,
+				XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4);
+	}
 
  final_err = xdev_ext_mech_unbind_checked(s);
  if (final_err) {
@@ -3090,6 +3136,11 @@ static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
 	return final_err;
 }
 
+static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
+{
+	return xdev_ext_mech_session_release_report(s, NULL);
+}
+
 /*
  * Process context: a device may still use frames of @s (a sequestered batch,
  * or the drain timed out).  The session object, its pool and pool file, its
@@ -3126,7 +3177,8 @@ static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s)
  * the last reference makes the release decision (xdev_ext_mech_release_late).
  * Nothing is reissued; any ambiguous outcome still quarantines.
  */
-static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
+static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *s,
+				struct xdev_ext_mech_stop_report *report)
 {
 	unsigned long flags;
 	u32 inflight = 0;
@@ -3180,7 +3232,12 @@ static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
 		}
 		return -EBUSY;
 	}
-	return xdev_ext_mech_session_release(s);
+	return xdev_ext_mech_session_release_report(s, report);
+}
+
+static int xdev_ext_mech_session_destroy(struct xdev_ext_mech_session *s)
+{
+	return xdev_ext_mech_session_destroy_report(s, NULL);
 }
 
 /*
@@ -3299,6 +3356,10 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 		xdev_ext_mech_session_release(s);
 		return ret;
 	}
+	/* Bind and prepare are complete, and activation succeeded. An early
+	 * STOP kick may already have been consumed while CREATE was incomplete. */
+	smp_store_release(&s->progress_ready, true);
+	kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
 	list_add_tail_rcu(&s->ring_node, &ctx->xdev_ext_mech_sessions);
 	spin_lock(&xdev_ext_mech_all_lock);
 	list_add_tail(&s->all_node, &xdev_ext_mech_all);
@@ -3523,6 +3584,37 @@ static int xdev_ext_mech_stop_op(struct io_ring_ctx *ctx, u64 id)
 	return ret;
 }
 
+static int xdev_ext_mech_stop_report_op(struct io_ring_ctx *ctx,
+				      void __user *uarg)
+	__must_hold(&ctx->uring_lock)
+{
+	struct xdev_ext_mech_stop_report out;
+	struct xdev_ext_mech_session *s;
+	int ret;
+
+	if (copy_from_user(&out, uarg, sizeof(out)))
+		return -EFAULT;
+	if (out.size != sizeof(out) ||
+	    out.version != XDEV_EXT_MECH_STOP_REPORT_VERSION ||
+	    memchr_inv(&out.stats, 0, sizeof(out.stats)) ||
+	    memchr_inv(&out.transport, 0, sizeof(out.transport)))
+		return -EINVAL;
+	s = xdev_ext_mech_find(ctx, out.session_id);
+	if (!s)
+		return -ENOENT;
+	/* As for STOP, the task must return to run its own command completions. */
+	xdev_ext_mech_session_stop(s, 0);
+	if (READ_ONCE(s->cmd_refs))
+		return -EAGAIN;
+	list_del_rcu(&s->ring_node);
+	mutex_unlock(&ctx->uring_lock);
+	ret = xdev_ext_mech_session_destroy_report(s, &out);
+	mutex_lock(&ctx->uring_lock);
+	if (ret)
+		return ret;
+	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
 /*
  * xdev_ext_mech_live_lock held: a session of another ring, while it exists, if
  * the caller is its creator's user.
@@ -3721,6 +3813,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return xdev_ext_mech_start(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_STOP:
 		return xdev_ext_mech_stop_op(ctx, req.arg);
+	case XDEV_EXT_MECH_OP_STOP_REPORT:
+		return xdev_ext_mech_stop_report_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_STATS:
 		return xdev_ext_mech_stats(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_NOTIFY_ARM:

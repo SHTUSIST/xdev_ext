@@ -527,6 +527,9 @@ struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_sessi
 u32 xdev_ext_mech_session_depth(const struct xdev_ext_mech_session *s);
 /* Any context: enum xdev_ext_mech_session_state. */
 u32 xdev_ext_mech_session_state(const struct xdev_ext_mech_session *s);
+/* Any context: first successful STOP time, under the session lock; zero is valid.
+ * Read after observing admission closed. Repeated STOP never changes this clock. */
+u64 xdev_ext_mech_session_stop_started_ns(struct xdev_ext_mech_session *s);
 /* Any context: ACTIVE and every pinned generation still published. */
 bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s);
 /* Any context. */

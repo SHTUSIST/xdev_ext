@@ -49,6 +49,7 @@
 #include <linux/if_xdp.h>
 
 #include "../../include/uapi/linux/io_uring.h"
+#include "../../include/uapi/linux/xdev_ext_peer.h"
 #include "../include/xdev_ext_xsk_redirect.h"
 #include "../include/xdev_ext_gpu_identity.h"
 #include "xdev_ext_mech_cuda.h"
@@ -2113,6 +2114,7 @@ static void usage(FILE *f)
 {
 	fprintf(f,
 "usage: xdev_ext_mech_ctl attach --obj FILE --map NAME --pin PATH [--set G=V]...\n"
+"       xdev_ext_mech_ctl xdomain-probe --link TOKEN --dir to|from --pool-fd-from-sw-provider\n"
 "       xdev_ext_mech_ctl detach --pin PATH\n"
 "       xdev_ext_mech_ctl nic-nvme --ifname IF --dst-ng NG --slba N --nlb N PEER\n"
 "                [--expect-window-reject | --drv-mode | --fq-dup |\n"
@@ -2477,12 +2479,88 @@ static int ctl_libbpf_print(enum libbpf_print_level level, const char *fmt,
 	return len;
 }
 
+/* X7 admission probe: only the existing guest software provider grants the
+ * allocation fd. No START, DMA submission, hardware link or payload access. */
+static int cmd_xdomain_probe(int argc, char **argv)
+{
+    struct xdev_ext_peer_register registration = {
+        .gpu_va = 0x10000, .len = 65536,
+    };
+    struct io_uring_params params = {};
+    struct xdev_ext_mech_create create = {
+        .abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+        .pool_kind = XDEV_EXT_MECH_POOL_PEER,
+        .layout = {65536, 0, 4096, 4096}, .depth = 1, .eventfd = -1,
+    };
+    struct io_uring_xdev_ext_mech request = {
+        .op = XDEV_EXT_MECH_OP_CREATE, .arg = (uintptr_t)&create,
+    };
+    unsigned long long token = 0;
+    char *end;
+    bool have_token = false, have_direction = false, software = false;
+    int provider = -1, control = -1, allocation = -1, ng = -1, ring = -1;
+    int direction = 0, ret = CTL_SETUP, error;
+    for (int i = 2; i < argc; i++) {
+        if (!strcmp(argv[i], "--pool-fd-from-sw-provider")) software = true;
+        else if (!strcmp(argv[i], "--link") && ++i < argc) {
+            errno = 0; token = strtoull(argv[i], &end, 0);
+            if (errno || !*argv[i] || *argv[i] == '-' || *end) return CTL_USAGE;
+            have_token = true;
+        } else if (!strcmp(argv[i], "--dir") && ++i < argc) {
+            if (!strcmp(argv[i], "to")) direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+            else if (!strcmp(argv[i], "from")) direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+            else return CTL_USAGE;
+            have_direction = true;
+        } else return CTL_USAGE;
+    }
+    if (!have_token || !have_direction || !software ||
+        !getenv("XDEV_EXT_XDOMAIN_GUEST") ||
+        strcmp(getenv("XDEV_EXT_XDOMAIN_GUEST"), "1")) return CTL_USAGE;
+    provider = open("/dev/xdev_ext_peer_sw", O_RDWR | O_CLOEXEC);
+    control = open("/dev/xdev_ext_peer", O_RDWR | O_CLOEXEC);
+    ng = open("/dev/ng0n1", O_RDWR | O_CLOEXEC);
+    if (provider < 0 || control < 0 || ng < 0) goto out;
+    registration.gpu_fd = provider;
+    allocation = ioctl(control, XDEV_EXT_PEER_REGISTER, &registration);
+    if (allocation < 0 || !registration.generation) goto out;
+    create.pool_fd = allocation;
+    create.st[0] = (struct xdev_ext_mech_stage_uapi){
+        .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = direction,
+        .fd = control, .arg0 = token,
+    };
+    create.st[1] = (struct xdev_ext_mech_stage_uapi){
+        .class_id = XDEV_EXT_MECH_CLASS_NVME,
+        .direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = ng, .arg1 = 8,
+    };
+    ring = syscall(__NR_io_uring_setup, 8, &params);
+    if (ring < 0) goto out;
+    error = syscall(__NR_io_uring_register, ring,
+                    IORING_REGISTER_XDEV_EXT_MECH, &request, 1);
+    error = error < 0 ? -errno : error;
+    printf("XDEV_EXT_XDOMAIN_CREATE errno=%d\n", error);
+    ret = CTL_PASS;
+    if (!error) {
+        request.op = XDEV_EXT_MECH_OP_STOP; request.arg = create.session_id;
+        syscall(__NR_io_uring_register, ring, IORING_REGISTER_XDEV_EXT_MECH, &request, 1);
+    }
+out:
+    if (ret == CTL_SETUP) ctl_err("XDOMAIN_SETUP_FAIL provider/registration/ring: %s\n", strerror(errno));
+    if (ring >= 0) close(ring);
+    if (allocation >= 0) close(allocation);
+    if (ng >= 0) close(ng);
+    if (control >= 0) close(control);
+    if (provider >= 0) close(provider);
+    return ret;
+}
+
 int main(int argc, char **argv)
 {
 	struct ctl_opts o;
 	unsigned int i;
 	int ret;
 
+	if (argc > 1 && !strcmp(argv[1], "xdomain-probe"))
+		return cmd_xdomain_probe(argc, argv);
 	libbpf_set_print(ctl_libbpf_print);
 	memset(&o, 0, sizeof(o));
 	if (argc < 2) {

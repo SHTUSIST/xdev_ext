@@ -64,6 +64,31 @@
 #define XDEV_EXT_MP_DIR_TO_DEVICE		1U
 #define XDEV_EXT_MP_DIR_FROM_DEVICE		2U
 
+/* XDOMAIN UAPI macros (vmlinux.h carries event/action enums, not macros). */
+#define XDEV_EXT_MP_SITE_WORKER_PROTOCOL 7U
+#define XDEV_EXT_MP_XDOMAIN_PROTO_VERSION 1U
+#define XDEV_EXT_MP_XDOMAIN_MAX_FRAME 4096U
+#define XDEV_EXT_MP_NET_REMOTE_ACKED 2U
+#define XDEV_EXT_MP_NET_REMOTE_FAILED 3U
+#define XDEV_EXT_MP_NET_REMOTE_LOST 4U
+#define XDEV_EXT_MP_XDP_F_LINK_UP (1U << 0)
+#define XDEV_EXT_MP_XDP_F_ADMITS (1U << 1)
+#define XDEV_EXT_MP_XDP_F_STAGE_DEAD (1U << 2)
+#define XDEV_EXT_MP_XDP_F_STOPPING (1U << 3)
+#define XDEV_EXT_MP_XDP_F_LOCAL_KNOWN (1U << 4)
+#define XDEV_EXT_MP_XDP_F_LOCAL_QUIESCED (1U << 5)
+#define XDEV_EXT_MP_XDP_F_NATIVE_POSTED (1U << 6)
+#define XDEV_EXT_MP_XDP_F_WITHDRAWN (1U << 7)
+#define XDEV_EXT_MP_XDP_F_CHAIN_SEQUESTERED (1U << 9)
+#define XDEV_EXT_MP_XDP_F_RTS_CANCELED (1U << 10)
+#define XDEV_EXT_MP_XDP_F_NATIVE_PENDING (1U << 12)
+#define XDEV_EXT_MP_XDP_F_CTS_OWED (1U << 13)
+#define XDEV_EXT_MP_XDP_F_FINAL_OWED (1U << 14)
+/* enum xdev_ext_net_rdv in include/linux/xdev_ext_netfam_core.h. */
+#define XDEV_EXT_MP_RDV_ARMED 1U
+#define XDEV_EXT_MP_RDV_ANNOUNCED 2U
+
+
 /* enum xdev_ext_ce_outcome, XDEV_EXT_CE_F_* */
 #define XDEV_EXT_MP_CE_OK			0U
 #define XDEV_EXT_MP_CE_PRE_SUBMIT_FAILED	1U

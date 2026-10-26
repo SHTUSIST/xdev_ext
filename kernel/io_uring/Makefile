@@ -34,6 +34,7 @@ obj-$(CONFIG_NET) += net.o cmd_net.o
 obj-$(CONFIG_PROC_FS) += fdinfo.o
 
 obj-y += iaa/
+obj-y += xdomain/
 obj-y += family/
 obj-$(CONFIG_XDEV_EXT_MECH_SOCKET) += xdev_ext_mech_socket.o
 

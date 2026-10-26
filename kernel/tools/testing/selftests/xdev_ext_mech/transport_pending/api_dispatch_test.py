@@ -58,6 +58,10 @@ static int copy_to_user(void *dst,const void *src,size_t n) { if(!dst||fail_to)r
 static int xdev_ext_mech_create(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static int xdev_ext_mech_start(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static int xdev_ext_mech_stop_op(struct io_ring_ctx *ctx,u64 id) { (void)ctx;(void)id;return -ENOSYS; }
+/* Unselected dispatcher operations retain explicit unavailable boundaries. */
+static int xdev_ext_mech_stop_report_op(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
+static int xdev_ext_mech_user_stage_create(void *p) { (void)p;return -ENOSYS; }
+static int xdev_ext_mech_stage_caps_op(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static int xdev_ext_mech_stats(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *ctx,void *p) { (void)ctx;(void)p;return -ENOSYS; }
 static void provider_stats(struct xdev_ext_mech_stage *st,u32 *pending,u32 *uncertain) { *pending=st->pending;*uncertain=st->uncertain; }

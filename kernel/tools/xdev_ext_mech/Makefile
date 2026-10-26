@@ -23,7 +23,7 @@ BPF_ARCH ?= x86
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf \
 	-D__TARGET_ARCH_$(BPF_ARCH)
 
-BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan
+BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan xdomain_peer xdomain_check
 BPF_OBJECTS := $(BPF_NAMES:%=$(BUILD_DIR)/%.bpf.o)
 VMLINUX_H := $(BUILD_DIR)/vmlinux.h
 CTL := $(BUILD_DIR)/xdev_ext_mech_ctl
@@ -82,3 +82,6 @@ clean:
 
 $(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/xdev_ext_peer.h | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
+
+$(BUILD_DIR)/xdomain_check.bpf.o: BPF_CFLAGS += -mcpu=v3
+$(BUILD_DIR)/xdomain_check.bpf.o: xdomain_peer.bpf.c ../../../tests/eval/xdomain/observer_contract.h

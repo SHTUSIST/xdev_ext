@@ -96,6 +96,16 @@ def generate(mutation=None):
     after = ["xdev_ext_mech_transform_undo", "xdev_ext_mech_submit",
              "xdev_ext_mech_unbind_checked", "xdev_ext_mech_session_release", "xdev_ext_mech_quarantine",
              "xdev_ext_mech_session_destroy"]
+    # Legacy NULL-report wrappers still execute the actual shared release and
+    # destroy bodies. Extract their new dependencies rather than stub them.
+    if "static int xdev_ext_mech_session_release_report(" in core:
+        template = template.replace('#include "include/uapi/linux/xdev_ext_mech.h"',
+            '#include "include/uapi/linux/xdev_ext_mech.h"\n#include "include/uapi/linux/xdev_ext_policy.h"')
+        after.insert(after.index("xdev_ext_mech_session_release"),
+                     "xdev_ext_mech_session_release_report")
+        after.insert(after.index("xdev_ext_mech_session_destroy"),
+                     "xdev_ext_mech_session_destroy_report")
+        after[0:0] = ["xdev_ext_mech_stats_fill", "xdev_ext_mech_transport_stats_fill"]
     ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
     # These native-cookie/provider fault cases have one uncontended CE owner.
@@ -152,6 +162,11 @@ class ProviderFaults(unittest.TestCase):
                 p = cls.path / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(source(rel))
+            # Report-aware refs need the selected public policy/report ABI;
+            # pre-report refs do not borrow the current tree's new types.
+            if "static int xdev_ext_mech_session_release_report(" in source("io_uring/xdev_ext_mech.c"):
+                rel = "include/uapi/linux/xdev_ext_policy.h"
+                (cls.path / rel).write_text(source(rel))
             # F1b core rules include the class table; keep fixed-ref copies
             # self-contained without adding new inputs to older snapshots.
             if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
