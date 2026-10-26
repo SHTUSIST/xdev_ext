@@ -1389,3 +1389,5 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_fixture.c
 !/kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c
+!/tests/eval/xdomain/
+!/tests/eval/xdomain/observer_contract.h
