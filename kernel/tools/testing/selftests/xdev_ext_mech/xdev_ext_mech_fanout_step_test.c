@@ -93,10 +93,11 @@ static void test_uapi_values(void)
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_CPU, 9);
 	/* The USER stage class (10) is appended after CPU. */
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_USER, 10);
-	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 11);
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 12);
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_CPU), 1);
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_USER), 1);
-	EXPECT_EQ(xdev_ext_mech_class_known(11), 0);
+	EXPECT_EQ(xdev_ext_mech_class_known(11), 1);
+	EXPECT_EQ(xdev_ext_mech_class_known(12), 0);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 1);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_INFLATE, 9);
 	/* Id 10 is the BPF compute transform (xdev_ext-compute.rst). */
@@ -371,7 +372,12 @@ static void test_stage_roles(void)
 	EXPECT_EQ(xdev_ext_mech_stage_role(&u), XDEV_EXT_MECH_ROLE_TRANSFORM);
 	u = CPU(0, 0);
 	EXPECT_EQ(xdev_ext_mech_stage_role(&u), -EINVAL);
-	u = stage(11, TO, 3, 0, 0, 0);
+	u = stage(XDEV_EXT_MECH_CLASS_XDOMAIN, TO, 3, 0, 0, 0);
+	EXPECT_EQ(xdev_ext_mech_stage_role(&u), XDEV_EXT_MECH_ROLE_CONSUMER);
+	u.direction = FROM;
+	EXPECT_EQ(xdev_ext_mech_stage_role(&u), XDEV_EXT_MECH_ROLE_PRODUCER);
+	/* XDOMAIN now occupies 11; keep the unknown-class negative at MAX. */
+	u = stage(XDEV_EXT_MECH_CLASS_MAX, TO, 3, 0, 0, 0);
 	EXPECT_EQ(xdev_ext_mech_stage_role(&u), -EINVAL);
 	u = stage(XDEV_EXT_MECH_CLASS_NVME, 0, 3, 0, 0, 0);
 	EXPECT_EQ(xdev_ext_mech_stage_role(&u), -EINVAL);

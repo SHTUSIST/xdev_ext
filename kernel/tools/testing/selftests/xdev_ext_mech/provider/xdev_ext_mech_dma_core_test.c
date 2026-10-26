@@ -23,7 +23,7 @@ _Static_assert(XDEV_EXT_MECH_CLASS_DMA == 6, "DMA class ID is independent of pol
 /* L11: append CPU class 9 without renumbering DMA or the policy ABI. */
 _Static_assert(XDEV_EXT_MECH_CLASS_CPU == 9, "CPU class appended");
 _Static_assert(XDEV_EXT_MECH_CLASS_USER == 10, "USER class appended after CPU");
-_Static_assert(XDEV_EXT_MECH_CLASS_MAX == 11, "mechanism class maximum");
+_Static_assert(XDEV_EXT_MECH_CLASS_MAX == 12, "mechanism class maximum");
 _Static_assert(XDEV_EXT_BINDING_BACKEND_MAX == 6, "legacy policy ABI frozen");
 _Static_assert(sizeof(struct xdev_ext_dma_copy_desc) == 24, "DMA native plan ABI");
 _Static_assert(sizeof(struct xdev_ext_dma_mech_cqe) == 24, "DMA completion ABI");

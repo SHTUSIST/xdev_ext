@@ -1373,3 +1373,12 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_bind_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/compfam_wiring_source_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/family/xdomain_create_test.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_fixture.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_boundary.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_cases.c.in
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_declarations.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_fixture.c.in
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_identity_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_kfunc_test.py
+!/kernel/io_uring/xdev_ext_mech_xdomain_kfunc.c

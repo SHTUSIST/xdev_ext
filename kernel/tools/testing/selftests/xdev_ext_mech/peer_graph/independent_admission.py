@@ -47,7 +47,7 @@ int main(int argc,char **argv)
   ret=want("NVMe read -> GPU pool -> NET TX",xdev_ext_mech_create_check(&c,&frames),0);
  }else if(!strcmp(argv[1],"native_class")){
   ret=want("native NET class recognized",xdev_ext_mech_class_known(NET),1);
-  ret|=want("class table spans NET, CPU and USER",XDEV_EXT_MECH_CLASS_MAX,XDEV_EXT_MECH_CLASS_USER+1);
+  ret|=want("class table spans XDOMAIN",XDEV_EXT_MECH_CLASS_MAX,XDEV_EXT_MECH_CLASS_XDOMAIN+1);
  }else if(!strcmp(argv[1],"reject_host_stages")){
   const __u32 ids[]={XDEV_EXT_MECH_CLASS_CE,XDEV_EXT_MECH_CLASS_IAA,XDEV_EXT_MECH_CLASS_DMA,XDEV_EXT_MECH_CLASS_SOCKET,XDEV_EXT_MECH_CLASS_AFXDP};
   for(unsigned i=0;i<sizeof(ids)/sizeof(ids[0]);i++){c=graph();c.st[1].class_id=ids[i];ret|=want("GPU pool rejects a class without a peer capability",xdev_ext_mech_create_check(&c,&frames),ids[i]==XDEV_EXT_MECH_CLASS_CE&&(xdev_ext_mech_peer_dirs(ids[i])&XDEV_EXT_DMA_DIR_TO_DEVICE)?0:-EOPNOTSUPP);}

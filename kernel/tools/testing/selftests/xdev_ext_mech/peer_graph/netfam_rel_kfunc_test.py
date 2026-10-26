@@ -234,7 +234,7 @@ int main(void)
  init();
  for (u32 c=0;c<XDEV_EXT_MECH_CLASS_MAX;c++) {
   call.ctx.class_id=c;call.callsite=XDEV_EXT_MECH_SITE_WORKER;
-  if (c!=XDEV_EXT_MECH_CLASS_AFXDP && c!=XDEV_EXT_MECH_CLASS_SOCKET && c!=XDEV_EXT_MECH_CLASS_NET) {
+  if (c!=XDEV_EXT_MECH_CLASS_AFXDP && c!=XDEV_EXT_MECH_CLASS_SOCKET && c!=XDEV_EXT_MECH_CLASS_NET && c!=XDEV_EXT_MECH_CLASS_XDOMAIN) {
    errors(-EOPNOTSUPP); continue;
   }
   for (u8 member=XDEV_EXT_MECH_MEMBER_BUILD;member<=XDEV_EXT_MECH_MEMBER_COMPLETE;member++) {
@@ -339,7 +339,7 @@ int main(void)
   int result=xdev_ext_mech_family_kfunc_filter(XDEV_EXT_FAMILY_NETWORK,&prog,123,&ids,
                                              mask&1?&build:NULL,mask&2?&complete:NULL);
   assert(result==-EACCES && recorded_ids==&ids && recorded_prog==&prog && recorded_id==123);
-  assert(nr_ops==3 && has(XDEV_EXT_MECH_CLASS_AFXDP) && has(XDEV_EXT_MECH_CLASS_SOCKET) && has(XDEV_EXT_MECH_CLASS_NET));
+  assert(nr_ops==4 && has(XDEV_EXT_MECH_CLASS_AFXDP) && has(XDEV_EXT_MECH_CLASS_SOCKET) && has(XDEV_EXT_MECH_CLASS_NET) && has(XDEV_EXT_MECH_CLASS_XDOMAIN));
   assert(!has(XDEV_EXT_MECH_CLASS_NVME) && !has(XDEV_EXT_MECH_CLASS_CE) && !has(XDEV_EXT_MECH_CLASS_IAA));
   assert(nr_members==(u32)!!(mask&1)+(u32)!!(mask&2));
   u32 m=0;
@@ -348,10 +348,10 @@ int main(void)
  }
  omitted_ops=XDEV_EXT_MECH_CLASS_SOCKET;filter_result=0;
  assert(!xdev_ext_mech_family_kfunc_filter(XDEV_EXT_FAMILY_NETWORK,NULL,17,&ids,&build,&complete));
- assert(nr_ops==2 && has(XDEV_EXT_MECH_CLASS_AFXDP) && has(XDEV_EXT_MECH_CLASS_NET) && !has(XDEV_EXT_MECH_CLASS_SOCKET));
+ assert(nr_ops==3 && has(XDEV_EXT_MECH_CLASS_AFXDP) && has(XDEV_EXT_MECH_CLASS_NET) && has(XDEV_EXT_MECH_CLASS_XDOMAIN) && !has(XDEV_EXT_MECH_CLASS_SOCKET));
  omitted_ops=~0U;
  assert(!xdev_ext_mech_family_kfunc_filter(~0U,NULL,17,&ids,NULL,NULL));assert(!nr_ops && !nr_members);
- puts("ok 7 - family filter enumerates all three network types, preserves member offsets and propagates filter verdicts");
+ puts("ok 7 - family filter enumerates all four network types, preserves member offsets and propagates filter verdicts");
  return 0;
 }
 '''

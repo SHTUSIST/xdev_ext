@@ -324,6 +324,7 @@ int main(void)
   { XDEV_EXT_MECH_CLASS_NET, 1, 1, 4, 0, 1, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_CPU, 3, 4, 4, 0, 0, 0, 1, 0 },
   { XDEV_EXT_MECH_CLASS_USER, 3, 3, 4, 0, 0, 1, 1, 0 },
+  { XDEV_EXT_MECH_CLASS_XDOMAIN, 1, 1, 4, XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 1, 0, 0, 0 },
  };
  static const __u32 afxdp[] = {
   0, XDEV_EXT_AFXDP_F_RELIABLE, XDEV_EXT_AFXDP_F_FINITE, XDEV_EXT_AFXDP_F_POLICY,
@@ -357,7 +358,7 @@ int main(void)
  EQ(XDEV_EXT_MECH_CLASS_NET, 8);
  EQ(XDEV_EXT_MECH_CLASS_CPU, 9);
  EQ(XDEV_EXT_MECH_CLASS_USER, 10);
- EQ(XDEV_EXT_MECH_CLASS_MAX, 11);
+ EQ(XDEV_EXT_MECH_CLASS_MAX, 12);
  EQ(XDEV_EXT_ROLE_RULE_DIRECTION, 1);
  EQ(XDEV_EXT_ROLE_RULE_TRANSFORM, 2);
  EQ(XDEV_EXT_ROLE_RULE_INPLACE_TX, 3);
@@ -387,6 +388,34 @@ int main(void)
   EQ(d != NULL, true);
   if (!d)
    continue;
+  /* The only new oracle row. Do not alter old_* or let production
+   * compute its own expected answers. All ids other than 11 still take
+   * the original 713327e comparisons below. */
+  if (c == 11) {
+   EQ(xdev_ext_mech_class_known(c), true);
+   EQ(xdev_ext_mech_peer_dirs(c), 6);
+   EQ(d->peer_dirs, 6);
+   EQ(d->family, 1);
+   EQ(xdev_ext_mech_class_family(c), 1);
+   EQ(d->peer_only, 1);
+   EQ(d->known_flags, 1);
+   EQ(d->flags_later, 0);
+   EQ(d->role_rule, 1);
+   EQ(d->ctx_rule, 4);
+   EQ(d->no_file, 0);
+   EQ(d->flags_ok == NULL, true);
+   for (pool = 0; pool <= 4; pool++)
+    EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER,
+       pool != XDEV_EXT_MECH_POOL_PEER);
+   for (bit = 0; bit < 32; bit++)
+    EQ(new_flags_bad(d, 1U << bit), bit != 0);
+   for (dir = 0; dir < 4; dir++) {
+    struct xdev_ext_mech_stage_uapi u = { .class_id = 11, .direction = dir };
+    EQ(xdev_ext_mech_stage_role(&u), dir == 1 ? XDEV_EXT_MECH_ROLE_CONSUMER :
+       dir == 2 ? XDEV_EXT_MECH_ROLE_PRODUCER : -EINVAL);
+   }
+   continue;
+  }
   EQ(xdev_ext_mech_class_known(c), old_class_known(c));
   EQ(xdev_ext_mech_peer_dirs(c), old_peer_dirs(c));
   EQ(d->peer_dirs, old_peer_dirs(c));

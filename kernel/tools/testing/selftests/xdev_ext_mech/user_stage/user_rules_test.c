@@ -86,7 +86,7 @@ static int check(const struct xdev_ext_mech_create *c)
 static void test_uapi(void)
 {
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_USER, 10, "USER class id is 10");
-	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 11, "class maximum is 11");
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 12, "class maximum is 12");
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_CPU, 9, "CPU class id unchanged");
 	EXPECT_EQ(XDEV_EXT_MECH_OP_USER_STAGE, 7, "register sub-op 7");
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_USER), 1, "USER is a known class");
