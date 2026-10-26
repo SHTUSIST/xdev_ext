@@ -184,6 +184,7 @@ class HarnessWiring(unittest.TestCase):
         s = HARNESS.read_text()
         start = s.index('if (( RUN_ONLY )); then\n')
         block = s[start:s.index('\nlowprio()', start)]
+        socket_check = re.search(r'(verify_socket_config\(\) \{.*?^\})', s, re.S | re.M).group(1)
         debug = HERE/'xdev_ext_mech_zc_debug.py'
         with tempfile.TemporaryDirectory() as t:
             p = Path(t); (p/'evidence').mkdir()
@@ -193,7 +194,9 @@ class HarnessWiring(unittest.TestCase):
             manifest = subprocess.check_output(['sha256sum', str(dependency)], text=True)
             (p/'xdev-ext-artifacts.sha256').write_text(manifest)
             subprocess.run(['python3', str(debug), 'record', str(p/'.config'), str(p/'xdev-ext-debug-profile.json'), '0'], check=True)
-            cmd = f'RUN_ONLY=1; EVAL_SESSION=0; MECHANISM_VARIANTS=0; DEBUG_LOCKING=0; DEBUG_HELPER={debug}; BUILD={p}; EV={p}/evidence; SOURCE_COMMIT=' + 'b' * 40 + ';\n' + block
+            # This fixture tests artifact reuse hashes with no socket campaign.
+            # Keep the real run-only block's dependency, rather than a stub.
+            cmd = f'RUN_ONLY=1; SOCKET_REQUIRED=0; EVAL_SESSION=0; MECHANISM_VARIANTS=0; DEBUG_LOCKING=0; DEBUG_HELPER={debug}; BUILD={p}; EV={p}/evidence; SOURCE_COMMIT=' + 'b' * 40 + ';\n' + socket_check + '\n' + block
             r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             dependency.write_text(dependency.read_text() + '# changed dependency\n')
