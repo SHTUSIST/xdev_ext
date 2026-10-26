@@ -15,6 +15,8 @@
 enum call { C_RING = 100, C_EVENT, C_POLL, C_READ, C_CLOSE_RING, C_CLOSE_EVENT };
 struct ledger {
  struct tb_guard *guard;
+ /* Final release-side observation is independent of STATS query injections. */
+ struct xdev_ext_mech_stop_report final_report;
  unsigned int calls[MAX_CALLS], nr, count[128];
  uint64_t now, absolute_deadline, poll_deadlines[MAX_CALLS];
  unsigned int polls, reads, snapshots, closes, stop_calls;
@@ -53,6 +55,20 @@ static int event_open(void *opaque)
  record(l, C_EVENT);
  return 42;
 }
+/* These legacy scenarios inject malformed/error STATS observations, then
+ * separately configure successful or failed STOP. The final report is explicit;
+ * query-only injected counters are not a model of persistent native custody. */
+static void returned_stop_report(struct ledger *l,
+                                 struct xdev_ext_mech_stop_report *r)
+{
+ const struct xdev_ext_mech_stats empty_stats = {0};
+ const struct xdev_ext_mech_transport_stats_v4 empty_transport = {0};
+ CHECK(r->size == sizeof(*r));
+ CHECK(r->version == XDEV_EXT_MECH_STOP_REPORT_VERSION && r->session_id == 991);
+ CHECK(memcmp(&r->stats, &empty_stats, sizeof(r->stats)) == 0);
+ CHECK(memcmp(&r->transport, &empty_transport, sizeof(r->transport)) == 0);
+ *r = l->final_report;
+}
 static int mech(void *opaque, int fd, uint32_t op, void *arg)
 {
  struct ledger *l = opaque;
@@ -87,15 +103,17 @@ static int mech(void *opaque, int fd, uint32_t op, void *arg)
   CHECK(s->flags == 0 && s->nr_user_frames == 0 && s->user_frames == 0);
   return l->start_error;
  }
- case XDEV_EXT_MECH_OP_STOP:
-  CHECK((uintptr_t)arg == 991); /* Actual register ABI: id itself, not &id. */
+ case XDEV_EXT_MECH_OP_STOP_REPORT: {
   l->stop_calls++;
   if (l->stop_eagain) {
    l->stop_eagain--;
    l->now += 5 * NS_MS;
    return -EAGAIN;
   }
+  if (!l->stop_error)
+   returned_stop_report(l, arg);
   return l->stop_error;
+ }
  case XDEV_EXT_MECH_OP_STATS: {
   struct xdev_ext_mech_stats *s = arg;
   CHECK(s->session_id == 991);
@@ -192,6 +210,17 @@ static void fixture_init(struct fixture *f)
  CHECK(tb_guard_new(TB_BACKING_EXISTING_PROVIDER, &f->g) == 0);
  CHECK(tb_guard_external_ready(f->g, TB_READY_EXISTING_PROVIDER_REGISTERED) == 0);
  f->l.guard = f->g;
+ /* Existing STOP success was separately configured from read-side STATS
+  * counter/identity/failure injection. Make its actual report data explicit. */
+ f->l.final_report.size = sizeof(f->l.final_report);
+ f->l.final_report.version = XDEV_EXT_MECH_STOP_REPORT_VERSION;
+ f->l.final_report.session_id = 991;
+ f->l.final_report.stats.session_id = 991;
+ f->l.final_report.stats.batches_done = 3;
+ f->l.final_report.stats.state = XDEV_EXT_MECH_SESSION_STOPPED;
+ f->l.final_report.transport.v3.v2.v1.session_id = 991;
+ f->l.final_report.transport.v3.v2.v1.size = sizeof(f->l.final_report.transport);
+ f->l.final_report.transport.v3.v2.v1.version = XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4;
  f->l.now = 100 * NS_MS;
  f->l.absolute_deadline = 200 * NS_MS;
  f->request = (struct xdev_ext_mech_create){
@@ -649,8 +678,9 @@ static int admission_mech(void *opaque, int fd, uint32_t op, void *arg)
   c->session_id = 991;
   return 0;
  }
- CHECK(op == XDEV_EXT_MECH_OP_STOP && (uintptr_t)arg == 991);
+ CHECK(op == XDEV_EXT_MECH_OP_STOP_REPORT);
  a->f.l.stop_calls++;
+ returned_stop_report(&a->f.l, arg);
  return 0;
 }
 static uint64_t admission_now(void *opaque)

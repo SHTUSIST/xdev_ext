@@ -84,6 +84,13 @@ static void result_meta(const struct tb_epoch *e, struct tb_epoch_result *r)
  r->stop_error = e->stop_error; r->start_accepted = e->start_accepted;
  r->stop_proved = e->stop_proved;
 }
+static void terminal_copy(const struct tb_epoch *e, struct tb_epoch_result *r)
+{
+ memcpy(&r->stats, &e->stop_stats, sizeof(r->stats));
+ memcpy(&r->transport, &e->stop_transport, sizeof(r->transport));
+ r->stats_valid = r->transport_valid = e->stop_report_valid;
+ result_meta(e, r);
+}
 static bool held(struct tb_epoch *e)
 {
  struct tb_guard_snapshot s;
@@ -214,6 +221,11 @@ static int snapshot_at(struct tb_epoch *e, struct tb_epoch_result *r,
  int rc, rc2;
  if (!e || !r || !e->guard) return -EINVAL;
  memset(r, 0, sizeof(*r)); held(e); result_meta(e, r);
+ /* Successful STOP releases the kernel session. Never query it again. */
+ if (e->stop_proved) {
+  if (!e->stop_report_valid) return -EPROTO;
+  terminal_copy(e, r); return 0;
+ }
  if (!e->created) return -EPERM;
  r->stats.session_id = e->session_id;
  rc = e->io.mech(e->io.opaque, e->ring_fd, XDEV_EXT_MECH_OP_STATS, &r->stats);
@@ -310,21 +322,64 @@ int tb_epoch_wait(struct tb_epoch *e, uint64_t deadline, struct tb_epoch_result 
  result_meta(e, r);
  return rc;
 }
+static int validate_stop_report(const struct tb_epoch *e,
+                                const struct xdev_ext_mech_stop_report *report)
+{
+ const struct xdev_ext_mech_stats *s = &report->stats;
+ const struct xdev_ext_mech_transport_stats_v4 *t = &report->transport;
+ const struct xdev_ext_rel_policy *p = &t->rel_policy;
+ unsigned int i;
+ if (report->size != sizeof(*report) ||
+     report->version != XDEV_EXT_MECH_STOP_REPORT_VERSION ||
+     report->session_id != e->session_id || s->session_id != e->session_id ||
+     t->v3.v2.v1.size != sizeof(*t) ||
+     t->v3.v2.v1.version != XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 ||
+     t->v3.v2.v1.session_id != e->session_id ||
+     t->v3.v2.v1.rsvd || t->v3.v2.rsvd2)
+  return -EPROTO;
+ if (p->version) {
+  if (p->version != XDEV_EXT_REL_POLICY_VERSION || p->size != sizeof(*p) ||
+      p->flags || p->bad_field || p->rsvd0)
+   return -EPROTO;
+  for (i = 0; i < sizeof(p->rsvd) / sizeof(p->rsvd[0]); i++)
+   if (p->rsvd[i]) return -EPROTO;
+ } else {
+  const struct xdev_ext_rel_policy empty = {0};
+  if (memcmp(p, &empty, sizeof(*p))) return -EPROTO;
+ }
+ /* A contradictory custody snapshot cannot become a release permission. */
+ if (s->state != XDEV_EXT_MECH_SESSION_STOPPED ||
+     s->inflight || s->held || s->sequestered ||
+     t->v3.v2.v1.native_controls || t->v3.v2.v1.pending_acks ||
+     t->v3.v2.v1.uncertain_controls)
+  return -EPROTO;
+ return 0;
+}
 int tb_epoch_stop(struct tb_epoch *e, uint64_t deadline, struct tb_epoch_result *r)
 {
+ struct xdev_ext_mech_stop_report report;
  uint64_t ticket;
  int rc;
  if (!e || !e->guard || !r) return -EINVAL;
+ memset(r, 0, sizeof(*r));
  if (held(e)) { result_meta(e, r); return -EPERM; }
- if (e->stop_proved) { result_meta(e, r); return 0; }
+ if (e->stop_proved) {
+  if (!e->stop_report_valid) return hold(e, -EPROTO, TB_HOLD_STOP_UNKNOWN);
+  terminal_copy(e, r); return 0;
+ }
  if (!e->created || e->fate != TB_EPOCH_ACTIVE) { result_meta(e, r); return -EPERM; }
  rc = tb_guard_begin(e->guard, TB_OP_STOP, &ticket);
  if (rc) { result_meta(e, r); return rc; }
  for (;;) {
   if (held(e)) { rc = -EPERM; break; }
   if (e->io.now_ns(e->io.opaque) >= deadline) { rc = -ETIMEDOUT; break; }
-  rc = e->io.mech(e->io.opaque, e->ring_fd, XDEV_EXT_MECH_OP_STOP,
-                   (void *)(uintptr_t)e->session_id);
+  /* EAGAIN may return arbitrary output bytes. Every attempt starts clean. */
+  memset(&report, 0, sizeof(report));
+  report.size = sizeof(report);
+  report.version = XDEV_EXT_MECH_STOP_REPORT_VERSION;
+  report.session_id = e->session_id;
+  rc = e->io.mech(e->io.opaque, e->ring_fd,
+                   XDEV_EXT_MECH_OP_STOP_REPORT, &report);
   if (rc != -EAGAIN) break;
   if (held(e)) { rc = -EPERM; break; }
   if (e->io.now_ns(e->io.opaque) >= deadline) { rc = -ETIMEDOUT; break; }
@@ -338,10 +393,17 @@ int tb_epoch_stop(struct tb_epoch *e, uint64_t deadline, struct tb_epoch_result 
   }
  }
  if (!rc) {
-  rc = tb_guard_end(e->guard, ticket, TB_PHASE_DRAINED_SAFE, true, true);
+  if (held(e)) rc = -EPERM;
+  else if (e->io.now_ns(e->io.opaque) >= deadline) rc = -ETIMEDOUT;
+  else rc = validate_stop_report(e, &report);
+  if (!rc) rc = tb_guard_end(e->guard, ticket, TB_PHASE_DRAINED_SAFE, true, true);
   if (!rc) {
+   memcpy(&e->stop_stats, &report.stats, sizeof(e->stop_stats));
+   memcpy(&e->stop_transport, &report.transport, sizeof(e->stop_transport));
+   e->stop_report_valid = true;
    e->stop_proved = true;
    e->fate = e->first_error ? TB_EPOCH_FAILED_SAFE : TB_EPOCH_SAFE;
+   terminal_copy(e, r);
   }
  }
  if (rc) {
@@ -351,6 +413,7 @@ int tb_epoch_stop(struct tb_epoch *e, uint64_t deadline, struct tb_epoch_result 
  result_meta(e, r);
  return rc;
 }
+
 int tb_epoch_close(struct tb_epoch *e)
 {
  uint64_t ticket;

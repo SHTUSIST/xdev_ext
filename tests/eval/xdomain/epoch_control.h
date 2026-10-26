@@ -26,6 +26,10 @@ struct tb_epoch {
  enum tb_epoch_fate fate;
  int first_error, stop_error;
  bool created, arm_attempted, start_attempted, start_accepted, stop_proved;
+ /* Only a validated successful STOP_REPORT can populate this immutable cache. */
+ bool stop_report_valid;
+ struct xdev_ext_mech_stats stop_stats;
+ struct xdev_ext_mech_transport_stats_v4 stop_transport;
 };
 struct tb_epoch_result {
  enum tb_epoch_fate fate;
