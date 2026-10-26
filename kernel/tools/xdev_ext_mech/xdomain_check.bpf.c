@@ -179,13 +179,23 @@ xd_obs_build(const struct xdev_ext_mech_ctx *ctx,
 	for (i = 0; i < XDEV_EXT_MP_MAX_FRAMES; i++) {
 		if (i >= info->nr_frames)
 			break;
+		__u32 frame_pos;
+
 		desc = (void *)bpf_xdev_ext_desc(ctx, i, sizeof(*desc));
-		if (!desc || desc->frame_pos >= info->nr_frames ||
-		    desc->frame_pos >= XDEV_EXT_MP_MAX_FRAMES || !desc->len) {
+		if (!desc) {
 			bits = TB_XD_OBS_ERR_PLAN;
 			goto fail;
 		}
-		off = info->f[desc->frame_pos].umem_addr;
+		/* CO-RE field reads are separate loads. Bound the same snapshot
+		 * used for indexing so verifier range knowledge is preserved.
+		 */
+		frame_pos = desc->frame_pos;
+		if (frame_pos >= info->nr_frames ||
+		    frame_pos >= XDEV_EXT_MP_MAX_FRAMES || !desc->len) {
+			bits = TB_XD_OBS_ERR_PLAN;
+			goto fail;
+		}
+		off = info->f[frame_pos].umem_addr;
 		if (off > cfg->allocation_bytes) {
 			bits = TB_XD_OBS_ERR_PLAN;
 			goto fail;
