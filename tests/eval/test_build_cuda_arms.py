@@ -118,6 +118,53 @@ class Coverage(unittest.TestCase):
                         self.assertIn(missing, refused.stderr)
                         self.assertFalse(out.exists())
 
+    def test_xdomain_owner_inventory_matches_its_real_translation_units(self):
+        entry = next((e for e in self.dedicated() if e["name"] == "xdomain_owner"), None)
+        self.assertIsNotNone(entry, "missing dedicated real XDOMAIN owner builder")
+        self.assertEqual(entry["entrypoint"], "xdomain/build.py")
+        self.assertEqual(entry["required_args"], ("--cuda-home", "--out"))
+        self.assertEqual(entry["dependency_lock"], "../../sources.lock.json")
+        self.assertEqual(entry["kind"], "cuda-owner")
+        self.assertEqual(entry["needs"], ("cuda-sdk", "libbpf"))
+        spec = importlib.util.spec_from_file_location("xdomain_owner_builder",
+                                                   HERE / entry["entrypoint"])
+        builder = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(builder)
+        units = {str(p.relative_to(HERE))
+                 for p in builder.required_sources(HERE / "xdomain")
+                 if p.suffix in (".c", ".cc", ".cu")}
+        self.assertEqual(units, {
+            "xdomain/check_contract.c", "xdomain/epoch_control.c",
+            "xdomain/gpu_adapter.cc", "xdomain/agent_supervisor.cc",
+            "xdomain/xdomain_agent.cc", "xdomain/native_trace_owner.cc",
+            "xdomain/xdomain_gpu_pattern.cu"})
+        self.assertEqual(set(entry["sources"]), units)
+        # This is the project source pin, not an invented CUDA SDK pin.
+        lock = json.loads((HERE / entry["dependency_lock"]).read_text())
+        self.assertEqual(set(lock["components"]), {"linux", "nvidia"})
+
+    def test_xdomain_test_sources_have_their_actual_host_contract_entries(self):
+        owners = {
+            "gpu_contract_test.cc": ("test_gpu_contract.py", ("cuda-headers",)),
+            "native_trace_owner_test.cc": ("test_native_trace_owner.py", ()),
+            "durable_failure_test_owner.cc": ("test_durable_failure.py", ()),
+            "create_refusal_test_owner.cc": ("test_create_refusal.py", ()),
+            "retention_test_owner.cc": ("test_retention.py", ()),
+            "owner_close_test.cc": ("test_owner_close.py", ("cuda-headers", "libbpf")),
+        }
+        entries = self.dedicated()
+        for source, (script, needs) in owners.items():
+            with self.subTest(source=source):
+                matches = [e for e in entries if "xdomain/" + source in e["sources"]]
+                self.assertEqual(len(matches), 1, "source must have exactly one real owner")
+                entry = matches[0]
+                self.assertEqual(entry["sources"], ("xdomain/" + source,))
+                self.assertEqual(entry["entrypoint"], "xdomain/" + script)
+                self.assertEqual(entry["kind"], "host-contract")
+                self.assertEqual(entry["required_args"], ())
+                self.assertEqual(entry["needs"], needs)
+                self.assertEqual(entry["dependency_lock"], "../../sources.lock.json")
+
     def test_bam_entry_refuses_missing_sdk_without_artifact(self):
         entry = next(e for e in self.dedicated() if e["name"] == "bam_native")
         self.assertEqual(entry["sources"], ("bam/bench_native.cu",))
