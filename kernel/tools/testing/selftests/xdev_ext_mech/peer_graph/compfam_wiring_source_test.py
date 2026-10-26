@@ -11,6 +11,7 @@ import sys
 KERNEL = Path(__file__).resolve().parents[5]
 JOINED = [
     ('CE', 'io_uring/xdev_ext_mech_ce.c', 'xdev_ext_ce_comp_hooks'),
+    ('DMA', 'io_uring/xdev_ext_mech_dma.c', 'xdev_ext_dma_comp_hooks'),
 ]  # (class name, kernel-relative file, hooks object)
 
 
