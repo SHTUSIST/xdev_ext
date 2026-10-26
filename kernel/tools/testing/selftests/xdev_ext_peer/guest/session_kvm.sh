@@ -28,6 +28,10 @@ done
 	echo 'FAIL scratch must be an existing private 0700 directory' >&2; exit 1; }
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
 GUEST_REL=kernel/tools/testing/selftests/xdev_ext_peer/guest
+EPOCH_REL=tests/eval/xdomain
+# Only these SDK-free production helper inputs may differ from the kernel
+# build. Kernel/provider changes still require matching rebuilt artifacts.
+EPOCH_INPUTS=(epoch_control.c epoch_control.h check_contract.c check_contract.h)
 EV=$SCRATCH/evidence OUT=$SCRATCH/out ROOT=$SCRATCH/initroot
 mkdir -p "$EV" "$OUT"
 rm -f -- "$EV/result.json" "$EV/verdict.txt"
@@ -45,6 +49,10 @@ git -C "$SOURCE" merge-base --is-ancestor "$BUILD_SHA" "$HEAD_SHA"
 changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" | grep -v '^\.gitignore$' || true)
 if [[ -n "$changed" ]] && grep -v -e "^$GUEST_REL/" \
 	-e '^kernel/tools/testing/selftests/xdev_ext_lib/' \
+	-e '^tests/eval/xdomain/epoch_control\.c$' \
+	-e '^tests/eval/xdomain/epoch_control\.h$' \
+	-e '^tests/eval/xdomain/check_contract\.c$' \
+	-e '^tests/eval/xdomain/check_contract\.h$' \
 	-e '^\.github/workflows/host\.yml$' <<<"$changed"; then
 	echo 'FAIL source differs from the prebuilt kernel/tools outside the allowed tests' >&2; exit 1
 fi
@@ -73,9 +81,21 @@ for artifact in "$BUILD/arch/x86/boot/bzImage" "$TOOLS/xdev_ext_peer_chain" "$TO
 } >"$EV/provenance.txt"
 
 # Build only the session test program, from the exact checkout.
-mkdir -p "$OUT/build"
+mkdir -p "$OUT/build/xdomain"
 cp "$SOURCE/$GUEST_REL/"{Makefile,peer_session_e2e.c,sw_provider_uapi.h} "$OUT/build/"
-nice -n 10 make -C "$OUT/build" KERNEL_SRC="$SOURCE/kernel" CC="$CC" peer_session_e2e >"$EV/test-build.log" 2>&1
+for f in "${EPOCH_INPUTS[@]}"; do
+	cp "$SOURCE/$EPOCH_REL/$f" "$OUT/build/xdomain/$f"
+	cmp "$SOURCE/$EPOCH_REL/$f" "$OUT/build/xdomain/$f"
+done
+# The fixed source receipt identifies exactly the helper bytes compiled into
+# this guest binary, rather than whitelisting an entire eval directory.
+(
+	cd "$SOURCE"
+	printf 'source_commit=%s\nhelper_copy=%s\n' "$HEAD_SHA" "$OUT/build/xdomain"
+	for f in "${EPOCH_INPUTS[@]}"; do sha256sum "$EPOCH_REL/$f"; done
+) >"$EV/epoch-helper-sources.txt"
+nice -n 10 make -C "$OUT/build" KERNEL_SRC="$SOURCE/kernel" \
+	EPOCH_HELPER_DIR="$OUT/build/xdomain" CC="$CC" peer_session_e2e >"$EV/test-build.log" 2>&1
 # The artifacts the guest runs, recorded once for this fixed test version.
 sha256sum "$BUILD/arch/x86/boot/bzImage" "$TOOLS/xdev_ext_peer_chain" "$TOOLS/nvme_s0.bpf.o" \
 	"$TOOLS/peer-guest/xdev_ext_peer_sw.ko" "$OUT/build/peer_session_e2e" >"$EV/artifacts.sha256"

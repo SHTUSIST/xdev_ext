@@ -38,6 +38,14 @@ PLANS = (
          src_slba=24576, dst_slba=26624, copies=PART),
     dict(name='fd-release', frame=32768, seg=32768, group=32768, depth=2, groups=8,
          src_slba=12288, dst_slba=14336, copies=ALL),
+    dict(name='epoch-4k-0', frame=4096, seg=4096, group=4096, depth=1, groups=1,
+         src_slba=512, dst_slba=512, copies=ALL),
+    dict(name='epoch-4k-1', frame=4096, seg=4096, group=4096, depth=1, groups=1,
+         src_slba=528, dst_slba=528, copies=ALL),
+    dict(name='epoch-64k-0', frame=65536, seg=65536, group=65536, depth=1, groups=1,
+         src_slba=768, dst_slba=768, copies=ALL),
+    dict(name='epoch-64k-1', frame=65536, seg=65536, group=65536, depth=1, groups=1,
+         src_slba=1024, dst_slba=1024, copies=ALL),
 )
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'xdev_ext_integration'))
@@ -133,6 +141,59 @@ def native_observations(lines):
     return observed
 
 
+def epoch_observations(lines):
+    """Require every one-group epoch and its retained mapping/last-fd proof."""
+    cases = PLANS[6:]
+    samples = [line for line in lines if line.startswith(('# epoch ', '# epoch-provider '))]
+    if len(samples) != 2 * len(cases) + 1:
+        raise ValueError('epoch receipt missing, duplicated or unknown')
+
+    def fields(line, prefix):
+        if not line.startswith(prefix):
+            raise ValueError('epoch receipt missing or out of order: ' + prefix)
+        pairs = [part.split('=', 1) for part in line[len(prefix):].split()]
+        if any(len(pair) != 2 for pair in pairs) or len({p[0] for p in pairs}) != len(pairs):
+            raise ValueError('epoch receipt fields malformed or duplicated')
+        return dict(pairs)
+
+    fixed = dict(helper='shared', raw_uapi='1', ready='EXTERNAL_READY', gpu_applicable='0',
+                 groups='1', create='0', claim_busy='-16', start='0', stop='0', stop_proved='1',
+                 stats_valid='1', transport_valid='1', done='1', abort='0', rejects='0',
+                 timeouts='0', protocol_err='0', last_err='0', inflight='0', sequestered='0',
+                 native_controls='0', pending_acks='0', uncertain_controls='0', native_safe='1',
+                 held='0', epoch_closed='1')
+    counter_names = {'pins', 'unpins', 'maps', 'unmaps', 'live_pins', 'live_maps'}
+
+    def counters(line, prefix):
+        values = fields(line, prefix)
+        if set(values) != counter_names or any(not re.fullmatch(r'\d+', x) for x in values.values()):
+            raise ValueError('epoch provider counters malformed')
+        return {k: int(x) for k, x in values.items()}
+
+    cached = None
+    for i, p in enumerate(cases):
+        name = p['name']
+        values = fields(samples[2 * i], f'# epoch {name}: ')
+        if values != dict(fixed, first_seq=str(i)):
+            raise ValueError('epoch snapshot invalid for ' + name)
+        counts = counters(samples[2 * i + 1], f'# epoch {name} provider: ')
+        if (counts['live_pins'] != 1 or counts['live_maps'] != 2 or
+                counts['pins'] - counts['unpins'] != 1 or
+                counts['maps'] - counts['unmaps'] != 2):
+            raise ValueError('epoch cached pin/map accounting invalid for ' + name)
+        if cached is not None and counts != cached:
+            raise ValueError('epoch registration mapping cache changed for ' + name)
+        cached = counts
+    final = counters(samples[-1], '# epoch-provider last-close: ')
+    if (final['live_pins'] or final['live_maps'] or
+            final['pins'] != cached['pins'] or final['maps'] != cached['maps'] or
+            final['unpins'] != cached['unpins'] + 1 or
+            final['unmaps'] != cached['unmaps'] + 2 or
+            final['pins'] != final['unpins'] or final['maps'] != final['unmaps']):
+        raise ValueError('epoch last allocation fd close did not balance pin/map counts')
+    return dict(cases=[p['name'] for p in cases], cached=cached, last_close=final)
+
+
 def check_log(text):
     lines = text.splitlines()
     if 'TAP version 13' not in lines:
@@ -151,6 +212,10 @@ def check_log(text):
         raise ValueError('guest PLAN lines differ from host oracle plan')
     if sum(line.startswith(PASS_PREFIX + ' ') for line in lines) != 1:
         raise ValueError('session PASS marker missing')
+    marker = next(line for line in lines if line.startswith(PASS_PREFIX + ' '))
+    case_field = re.search(r'(?:^| )cases=([^ ]+)(?: |$)', marker)
+    if not case_field or case_field[1].split(',') != [p['name'] for p in PLANS]:
+        raise ValueError('session PASS case list missing, duplicated or different')
     if UNLOAD_MARKER not in lines:
         raise ValueError('provider unload marker missing')
     exits = EXIT_RE.findall(text)
@@ -159,7 +224,8 @@ def check_log(text):
     reports = debug_reports(text)
     if any(reports.values()):
         raise ValueError('kernel debug diagnostic: ' + json.dumps(reports, sort_keys=True))
-    return dict(ok=len(oks), not_ok=0, skip=0, native_inflight_observations=native_observations(lines),
+    return dict(ok=len(oks), not_ok=0, skip=0, epoch_observations=epoch_observations(lines),
+                native_inflight_observations=native_observations(lines),
                 **{'debug_' + k: n for k, n in reports.items()})
 
 
