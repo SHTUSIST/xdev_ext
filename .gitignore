@@ -1407,3 +1407,11 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_host.h
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_boundaries.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_cases.c
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_class_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_host.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_boundaries.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_pressure_adapter.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/session_stop_clock_test.py
+!/kernel/io_uring/xdomain/xdev_ext_xdomain_class.c
