@@ -124,7 +124,18 @@ static void foreign_target(void)
 static void new_peer_epoch_detaches_old_stage(void)
 {
     up_link(); bind_ep(false); struct xdev_ext_xd_login packet=peer_login(0x2222);
+    u64 old_local=xl->local_inc;
+    int requests_before=requests;
     CHECK(deliver(&packet)==1); clear_trace(); connect_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && xl->accepted_inc==0x1111);
+    CHECK(!endpoint.detached && !dead_calls && xl->chan[0].ep[0]==&endpoint);
+    CHECK(rings_running && !ring_stops && !events("paths_enable"));
+    CHECK(xl->login_work.work.pending);
+    reply_inc=0x2222; login_run();
+    CHECK(requests==requests_before+1 && xl->connect_work.pending);
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    connect_run();
+    CHECK(xl->local_inc==old_local);
     CHECK(dead_calls==1 && dead_error==-ENOLINK && dead_stage==&stage && endpoint.detached);
     CHECK(!xl->chan[0].ep[0] && xl->accepted_inc==0x2222 && !xl->up);
     CHECK(event_index("stage_dead")<event_index("rings_stop"));
@@ -496,8 +507,17 @@ static void queued_old_fault_cannot_down_new_peer_incarnation(void)
     struct xdev_ext_xd_login packet=peer_login(0x2222);
     CHECK(deliver(&packet)==1 && xl->connect_work.pending);
     connect_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && xl->accepted_inc==0x1111);
+    CHECK(!endpoint.detached && !dead_calls && xl->chan[0].ep[0]==&endpoint);
+    CHECK(rings_running && !ring_stops && xl->down_work.pending);
+    CHECK(xl->login_work.work.pending);
+    int requests_before=requests;
+    reply_inc=0x2222; login_run();
+    CHECK(requests==requests_before+1 && xl->connect_work.pending);
+    CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
+    connect_run();
     CHECK(endpoint.detached && dead_calls==1 && !xl->chan[0].ep[0]);
-    CHECK(xl->accepted_inc==0x2222 && xl->local_inc && xl->local_inc!=old_local);
+    CHECK(xl->accepted_inc==0x2222 && xl->local_inc && xl->local_inc==old_local);
     reply_inc=0x2222; login_run();
     CHECK(xl->up && xl->remote_inc==0x2222 && xl->down_work.pending && rings_running);
     u64 fresh_local=xl->local_inc;
@@ -550,6 +570,28 @@ static void persistent_successful_mismatch_has_finite_retry_budget(void)
     CHECK(attempts>1 && attempts<=60 && requests==(int)attempts);
     CHECK(!xl->login_work.work.pending && !xl->connect_work.pending);
     CHECK(rings_running && ring_starts==1 && !ring_stops && !ring_warn);
+}
+/* A stale unsolicited candidate cannot replace a live peer when the actual
+ * response to our fresh LOGIN still confirms the current incarnation. */
+static void stale_candidate_current_response_preserves_live_stage(void)
+{
+    up_link(); bind_ep(false);
+    u64 old_local=xl->local_inc;
+    int starts_before=ring_starts,requests_before=requests;
+    struct xdev_ext_xd_login packet=peer_login(0x2222);
+    CHECK(deliver(&packet)==1);
+    connect_run();
+    CHECK(xl->up && xl->remote_inc==0x1111 && xl->accepted_inc==0x1111);
+    CHECK(!endpoint.detached && !dead_calls && xl->chan[0].ep[0]==&endpoint);
+    CHECK(rings_running && !ring_stops && xl->login_work.work.pending);
+    reply_inc=0x1111; login_run();
+    CHECK(requests==requests_before+1);
+    if (xl->connect_work.pending) connect_run();
+    CHECK(xl->up && xl->local_inc==old_local && xl->remote_inc==0x1111);
+    CHECK(xl->accepted_inc==0x1111 && xl->response_inc==0x1111);
+    CHECK(!endpoint.detached && !dead_calls && xl->chan[0].ep[0]==&endpoint);
+    CHECK(rings_running && ring_starts==starts_before && !ring_stops);
+    CHECK(!xl->down_work.pending && !xl->connect_work.pending);
 }
 struct test_case { const char *name; void (*run)(void); };
 static const struct test_case cases[]={
@@ -607,6 +649,7 @@ static const struct test_case cases[]={
     {"queued current endpoint fault still enforces link down",queued_current_fault_still_enforces_link_down},
     {"mismatched response retries autonomously until a later match brings UP",mismatched_response_recovers_without_more_peer_login},
     {"persistent successful response mismatch stops within finite retry budget",persistent_successful_mismatch_has_finite_retry_budget},
+    {"stale candidate LOGIN with current peer response preserves live stage",stale_candidate_current_response_preserves_live_stage},
 };
 int main(int argc,char **argv)
 {
