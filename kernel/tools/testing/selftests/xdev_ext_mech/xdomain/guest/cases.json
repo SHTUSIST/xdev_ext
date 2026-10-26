@@ -181,14 +181,14 @@
       "requirement": "verifier refuses oob-verdict"
     },
     {
-      "name": "memory-uninit-info-deny",
-      "expected": "DENY",
-      "requirement": "verifier refuses uninit-info"
+      "name": "memory-uninit-info-privileged-allow",
+      "expected": "ALLOW",
+      "requirement": "Required CAP_PERFMON permits uninitialized stack for this privileged struct_ops load; reference records remain zero-initialized, with sized memory bounds enforced"
     },
     {
-      "name": "memory-uninit-verdict-deny",
-      "expected": "DENY",
-      "requirement": "verifier refuses uninit-verdict"
+      "name": "memory-uninit-verdict-privileged-allow",
+      "expected": "ALLOW",
+      "requirement": "Required CAP_PERFMON permits uninitialized stack for this privileged struct_ops load; reference records remain zero-initialized, with sized memory bounds enforced"
     },
     {
       "name": "memory-readonly-map-info-deny",

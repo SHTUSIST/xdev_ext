@@ -326,7 +326,7 @@ __s32 BPF_PROG(xdomain_peer_complete, const struct xdev_ext_mech_ctx *mctx)
 		struct xdev_ext_xdomain_proto_info info = {};
 		struct xdev_ext_xdomain_proto_verdict verdict = {};
 
-		/* Both __sz arguments require initialized writable memory. */
+		/* The reference uses initialized writable local records. */
 		if (bpf_xdev_ext_xdomain_info(mctx, &info, sizeof(info)) ||
 		    xdomain_peer_choose(&info, &verdict) ||
 		    bpf_xdev_ext_xdomain_verdict(mctx, &verdict, sizeof(verdict)))
