@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from adapter_test import socket_family_declarations, socket_family_reference
 
 HERE = Path(__file__).resolve().parent
 KERNEL = HERE.parents[4]
@@ -72,7 +73,8 @@ def main():
     with tempfile.TemporaryDirectory(prefix="independent-socket-creds-") as tmp:
         cfile = Path(tmp) / "actual.c"
         binary = Path(tmp) / "actual"
-        cfile.write_text(shim + CREDENTIALS + source + MAIN)
+        cfile.write_text(shim + CREDENTIALS + socket_family_declarations(KERNEL) +
+                        source + socket_family_reference() + MAIN)
         # -Wno-unused-function: this TX oracle does not call the receive-direction entry points.
         compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fsanitize=undefined", "-I" + str(KERNEL), str(cfile), "-o", str(binary)], capture_output=True, text=True)
         assert compiled.returncode == 0, compiled.stderr

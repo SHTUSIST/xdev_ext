@@ -8,6 +8,7 @@ production AF_XDP wire encoder/parser and independently computed CRC/payload.
 """
 from pathlib import Path
 import os, re, subprocess, tempfile, unittest
+from adapter_test import socket_family_declarations, socket_family_reference
 ROOT = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
 
@@ -54,7 +55,8 @@ class Interop(unittest.TestCase):
         bpf = re.sub(r'^SEC\([^\n]+\)\n','',bpf,flags=re.M)
         fixture = (HERE/'rx_fixture.c').read_text().split('int main(',1)[0].replace('#define HDR 16U','#define HDR 88U').replace('#define SEG 1000U','#define SEG 1432U').replace('b->ticket = ++r->next_ticket;', 'b->id = b->ticket = ++r->next_ticket;')
         shim = (HERE/'shim.h').read_text().replace('static int forced_send =', 'static int eagain_call;\nstatic int forced_send =').replace('if(forced_send!=999999)return forced_send;','if(eagain_call&&send_calls==eagain_call)return -EAGAIN;\n if(forced_send!=999999)return forced_send;')
-        code = shim+PRELUDE+bpf+CALL+adapter+fixture+(HERE/'nxp_interop_fixture.c').read_text()
+        code = (shim+PRELUDE+bpf+CALL+socket_family_declarations(ROOT)+adapter+
+                socket_family_reference()+fixture+(HERE/'nxp_interop_fixture.c').read_text())
         with tempfile.TemporaryDirectory(prefix='socket-nxp-') as tmp:
             c=Path(tmp)/'test.c';exe=Path(tmp)/'test';c.write_text(code)
             command=[os.environ.get('CC','cc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread','-I'+str(ROOT),str(c),'-o',str(exe)]

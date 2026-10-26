@@ -13,6 +13,27 @@ import unittest
 ROOT = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
 
+
+def socket_family_declarations(root):
+    """Pure coverage plus actual contract types, without kernel runtime headers."""
+    mech = (root / 'include/linux/xdev_ext_mech.h').read_text()
+    net = (root / 'include/linux/xdev_ext_netfam.h').read_text()
+    declarations = [
+        re.search(r'struct xdev_ext_family_hooks_hdr \{.*?\n\};', mech, re.S)[0],
+        re.search(r'enum xdev_ext_net_hdr_policy \{.*?\n\};', net, re.S)[0],
+        'struct xdev_ext_net_rel_view;',
+        re.search(r'struct xdev_ext_net_hooks \{.*?\n\};', net, re.S)[0],
+    ]
+    return '#include "include/linux/xdev_ext_netfam_core.h"\n' + '\n'.join(declarations) + '\n'
+
+
+def socket_family_reference():
+    # The host fixtures omit the class table, the production hook's sole user.
+    # Keep a typed reference rather than suppress unused-variable diagnostics.
+    return ('\nstatic const struct xdev_ext_net_hooks *const fixture_socket_hooks '
+            '__attribute__((used)) = &xdev_ext_socket_net_hooks;\n')
+
+
 class SocketAdapter(unittest.TestCase):
     def test_socket_class_is_admitted_by_production_registry(self):
         text = (ROOT / 'io_uring/xdev_ext_mech_core.h').read_text()
@@ -20,7 +41,8 @@ class SocketAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             source = Path(tmp) / 'class.c'
             exe = Path(tmp) / 'class'
-            source.write_text('#include <stdbool.h>\n#include "include/uapi/linux/xdev_ext_mech.h"\n' + function + '\nint main(void) {return !xdev_ext_mech_class_known(7);}\n')
+            source.write_text('#include <stdbool.h>\n#include "include/uapi/linux/xdev_ext_mech.h"\n'
+                              '#include "include/linux/xdev_ext_family_core.h"\n' + function + '\nint main(void) {return !xdev_ext_mech_class_known(7);}\n')
             subprocess.run(['cc', '-Wall', '-Werror', '-I'+str(ROOT), str(source), '-o', str(exe)], check=True)
             self.assertEqual(subprocess.run([str(exe)]).returncode, 0,
                              'ordinary socket class 7 must enter the common mechanism registry')
@@ -44,7 +66,8 @@ class SocketAdapter(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             cfile = Path(tmp) / 'adapter.c'
             exe = Path(tmp) / 'adapter'
-            cfile.write_text((HERE/'shim.h').read_text() + '\n' + text + '\n' + (HERE/'fixture.c').read_text())
+            cfile.write_text((HERE/'shim.h').read_text() + '\n' + socket_family_declarations(ROOT) +
+                             text + socket_family_reference() + '\n' + (HERE/'fixture.c').read_text())
             # -Wno-unused-function: this TX fixture does not call the receive-direction entry points.
             subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                             '-fsanitize=undefined', '-fno-sanitize-recover=undefined',

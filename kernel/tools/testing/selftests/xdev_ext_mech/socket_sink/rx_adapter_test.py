@@ -19,6 +19,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from adapter_test import socket_family_declarations, socket_family_reference
 
 ROOT = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
@@ -41,7 +42,8 @@ class SocketReceiveAdapter(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='socket-rx-')
         source = Path(cls.tmp.name) / 'rx.c'
         cls.binary = Path(cls.tmp.name) / 'rx'
-        source.write_text((HERE / 'shim.h').read_text() + '\n' + production_text() + '\n' +
+        source.write_text((HERE / 'shim.h').read_text() + '\n' + socket_family_declarations(ROOT) +
+                          production_text() + socket_family_reference() + '\n' +
                           (HERE / 'rx_fixture.c').read_text())
         cc = os.environ.get('CC', 'cc')
         cls.build = subprocess.run([cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',

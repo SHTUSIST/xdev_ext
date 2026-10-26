@@ -184,6 +184,8 @@ class IndependentAdapter(unittest.TestCase):
         cls.tmp=tempfile.TemporaryDirectory(prefix='independent-socket-')
         text=(ROOT/'io_uring/xdev_ext_mech_socket.c').read_text()
         structs=text[text.index('struct xdev_ext_socket_request {'):text.index('static int xdev_ext_socket_ready')]
+        cover=re.search(r'struct xdev_ext_socket_cover \{.*?\n\};',text,re.S)[0]
+        span=function(text,'xdev_ext_socket_span')
         names=('ready','bind','unbind','fill_info','validate','packet_call','packet_admit','packet_send','submit','fill_cqe','mark_dead')
         contract=(ROOT/'include/linux/xdev_ext_mech.h').read_text()
         callargs=re.search(r'struct xdev_ext_mech_call_args \{.*?\n\};',contract,re.S)[0]
@@ -192,7 +194,9 @@ class IndependentAdapter(unittest.TestCase):
 static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_call_args *a,s32 *r,struct xdev_ext_mech_hold_intent *h)
 {(void)st;(void)a;(void)r;(void)h;return -EOPNOTSUPP;}
 '''
-        code=PREAMBLE+callargs+boundary+structs+'\n'+'\n'.join(function(text,'xdev_ext_socket_'+n) for n in names)+TESTS
+        code=(PREAMBLE+'\n#include "include/linux/xdev_ext_netfam_core.h"\n'+
+              callargs+boundary+structs+cover+span+'\n'+
+              '\n'.join(function(text,'xdev_ext_socket_'+n) for n in names)+TESTS)
         cls.code=code
         source=Path(cls.tmp.name)/'adapter.c';source.write_text(code);cls.binary=Path(cls.tmp.name)/'adapter'
         r=subprocess.run([os.getenv('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-Wno-unused-function','-I',str(ROOT),str(source),'-o',str(cls.binary)],capture_output=True,text=True)
@@ -216,7 +220,15 @@ static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_e
                 self.assertEqual(self.code.count(old),1)
                 source=Path(self.tmp.name)/f'mutant-{number}.c'
                 binary=Path(self.tmp.name)/f'mutant-{number}'
-                source.write_text(self.code.replace(old,new))
+                mutant=self.code.replace(old,new)
+                if old == 'd[i].flags ||':
+                    # Coverage now rejects flags independently of the retained
+                    # per-frame gate. Model the same missing-flags fault across
+                    # both real checks; leave its malformed-input oracle intact.
+                    if mutant.count('d->flags,') != 1:
+                        raise AssertionError('missing unique real socket span flags bridge')
+                    mutant=mutant.replace('d->flags,','0,')
+                source.write_text(mutant)
                 compile_result=subprocess.run([os.getenv('CC','cc'),'-std=gnu11','-Wall','-Wextra','-Werror','-Wno-misleading-indentation','-Wno-unused-function','-I',str(ROOT),str(source),'-o',str(binary)],capture_output=True,text=True)
                 self.assertEqual(compile_result.returncode,0,compile_result.stdout+compile_result.stderr)
                 result=subprocess.run([str(binary),case],capture_output=True,text=True)
