@@ -1388,3 +1388,6 @@
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_fixture.c.in
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_cases.c.in
+
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/tbnet_handler_teardown_fixture.c.in
