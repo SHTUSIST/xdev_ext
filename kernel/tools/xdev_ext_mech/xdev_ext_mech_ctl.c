@@ -2492,9 +2492,7 @@ static int cmd_xdomain_probe(int argc, char **argv)
         .pool_kind = XDEV_EXT_MECH_POOL_PEER,
         .layout = {65536, 0, 4096, 4096}, .depth = 1, .eventfd = -1,
     };
-    struct io_uring_xdev_ext_mech request = {
-        .op = XDEV_EXT_MECH_OP_CREATE, .arg = (uintptr_t)&create,
-    };
+    __u64 session = 0;
     unsigned long long token = 0;
     char *end;
     bool have_token = false, have_direction = false, software = false;
@@ -2534,15 +2532,11 @@ static int cmd_xdomain_probe(int argc, char **argv)
     };
     ring = syscall(__NR_io_uring_setup, 8, &params);
     if (ring < 0) goto out;
-    error = syscall(__NR_io_uring_register, ring,
-                    IORING_REGISTER_XDEV_EXT_MECH, &request, 1);
-    error = error < 0 ? -errno : error;
+    error = ctl_create(ring, &create, &session);
     printf("XDEV_EXT_XDOMAIN_CREATE errno=%d\n", error);
     ret = CTL_PASS;
-    if (!error) {
-        request.op = XDEV_EXT_MECH_OP_STOP; request.arg = create.session_id;
-        syscall(__NR_io_uring_register, ring, IORING_REGISTER_XDEV_EXT_MECH, &request, 1);
-    }
+    if (!error)
+        ctl_mech(ring, XDEV_EXT_MECH_OP_STOP, session);
 out:
     if (ret == CTL_SETUP) ctl_err("XDOMAIN_SETUP_FAIL provider/registration/ring: %s\n", strerror(errno));
     if (ring >= 0) close(ring);
