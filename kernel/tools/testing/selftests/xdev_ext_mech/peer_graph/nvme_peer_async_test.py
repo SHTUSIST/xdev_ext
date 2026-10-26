@@ -43,6 +43,7 @@ typedef int atomic_t; typedef int blk_status_t; typedef u64 dma_addr_t; typedef 
 enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA_NONE };
 #define XDEV_EXT_PEER_HOST_TEST 1
 #include "include/linux/xdev_ext_peer.h"
+#include "include/linux/xdev_ext_requester_core.h"
 #include "include/uapi/linux/xdev_ext_peer.h"
 #include "drivers/nvme/host/xdev_ext_peer_nvme_core.h"
 #define GFP_KERNEL 0U
@@ -482,6 +483,13 @@ def extract(source):
               re.finditer(r"^#define NVME_XDEV_EXT_PEER_\w+\s.*$", source, re.M)]
     text = "\n".join(t for _, t in sorted(types))
     code = "\n\n".join(t for _, t in sorted(functions))
+    # NVMe's lease wrapper delegates to the requester base. Execute that real
+    # dependency too, so the page-splitting cases and mutation still exercise
+    # production code rather than substituting a successful lease stub.
+    requester = (KERNEL / "io_uring/family/xdev_ext_requester.c").read_text()
+    split = requester[requester.index("int xdev_ext_peer_lease_split("):
+                      requester.index("EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);")]
+    code = split + "\n\n" + code
     return text, code, fill, submit, have_res
 
 

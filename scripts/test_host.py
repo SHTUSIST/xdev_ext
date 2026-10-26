@@ -21,6 +21,7 @@ KERNEL_TESTS = (
     'provider/xdev_ext_mech_dma_core_test',
     'family/family_table_test',
     'family/class_table_diff_test',
+    'family/requester_core_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',
