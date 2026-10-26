@@ -30,6 +30,18 @@ int tb_gpu_verify(struct tb_gpu *, const struct tb_verify_extent *, size_t nr,
                   uint64_t launch_cookie, struct tb_verify_result *);
 int tb_gpu_close(struct tb_gpu *); /* checks permissions, no implicit destructor */
 
+/* Pure per-owner-thread diagnostic snapshot, never a CUDA query. */
+#define TB_GPU_DIAGNOSTIC_VERSION 1U
+#define TB_GPU_DIAG_CUDA (1U << 0)
+#define TB_GPU_DIAG_SYSTEM (1U << 1)
+#define TB_GPU_DIAG_GUARD (1U << 2)
+struct tb_gpu_diagnostic {
+ uint32_t size, version;
+ int32_t cuda_result, system_errno, guard_error;
+ uint32_t flags;
+ char operation[64];
+};
+int tb_gpu_last_diagnostic(struct tb_gpu_diagnostic *);
 #ifdef __cplusplus
 }
 #endif
