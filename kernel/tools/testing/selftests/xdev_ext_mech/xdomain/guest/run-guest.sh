@@ -56,11 +56,25 @@ while read -r name expected; do
     else
         [ "$rc" = 1 ] || setup "$name-loader-exit-$rc"
         if grep -Eiq 'not found in kernel BTF|failed to find|failed to open|invalid ELF|relocation.*failed|XDOMAIN_SETUP_FAIL' "/tmp/$name.log"; then setup "$name-prerequisite"; fi
+        helper=
+        case "$name" in
+            helper-timer-init-deny) helper=bpf_timer_init ;;
+            helper-timer-start-deny) helper=bpf_timer_start ;;
+            helper-tail-call-deny) helper=bpf_tail_call ;;
+            helper-probe-read-kernel-deny) helper=bpf_probe_read_kernel ;;
+            helper-probe-read-user-deny) helper=bpf_probe_read_user ;;
+            helper-ringbuf-output-deny) helper=bpf_ringbuf_output ;;
+        esac
         if [ "$name" = xdomain-complete-sleepable-deny ] &&
            grep -Fxq 'attach to unsupported member complete of struct xdev_ext_xdomain_mech_ops' "/tmp/$name.log" &&
            grep -Fq -- '-- BEGIN PROG LOAD LOG --' "/tmp/$name.log" &&
            grep -Fq -- '-- END PROG LOAD LOG --' "/tmp/$name.log"; then
             : # Exact verifier member rejection for this one sleepable probe.
+        elif [ -n "$helper" ] &&
+             grep -Eq "^program of this type cannot use helper $helper#[1-9][0-9]*$" "/tmp/$name.log" &&
+             grep -Fq -- '-- BEGIN PROG LOAD LOG --' "/tmp/$name.log" &&
+             grep -Fq -- '-- END PROG LOAD LOG --' "/tmp/$name.log"; then
+            : # Match only the helper belonging to this explicit DENY case.
         else
         grep -Eiq 'not allowed|invalid (mem|bpf_context|access|indirect)|unknown func|cannot call|uninitialized|unbounded memory|read-only|readonly|rdonly_mem|write into map forbidden|R[0-9]+.*(invalid|offset|outside)|sleepable.*(not|unsupported|cannot)|not sleepable|helper call is not allowed' "/tmp/$name.log" || setup "$name-no-verifier-diagnostic"
         fi

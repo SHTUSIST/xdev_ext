@@ -302,6 +302,70 @@ elif args[0] == 'xdomain-probe':
                                     'unrecognized denial/setup was accepted: ' + result.stdout)
                 self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
 
+    def test_helper_type_denials_match_each_of_the_six_explicit_cases(self):
+        pairs = (
+            ('helper-timer-init-deny', 'bpf_timer_init'),
+            ('helper-timer-start-deny', 'bpf_timer_start'),
+            ('helper-tail-call-deny', 'bpf_tail_call'),
+            ('helper-probe-read-kernel-deny', 'bpf_probe_read_kernel'),
+            ('helper-probe-read-user-deny', 'bpf_probe_read_user'),
+            ('helper-ringbuf-output-deny', 'bpf_ringbuf_output'),
+        )
+        for name, helper in pairs:
+            diagnostic = ('-- BEGIN PROG LOAD LOG --\n'
+                          'program of this type cannot use helper ' + helper + '#169\n'
+                          'processed 0 insns (limit 1000000)\n'
+                          '-- END PROG LOAD LOG --')
+            with self.subTest(case=name, helper=helper):
+                result, _ = self.run_guest(matrix_name=name, diagnostic=diagnostic)
+                # Keep preceding long DEBUG logs out of failure summaries while
+                # the separate full-object test still verifies every byte.
+                summary = '\n'.join(line for line in result.stdout.splitlines()
+                                    if not line.startswith('libbpf: DEBUG '))
+                self.assertEqual(result.returncode, 0, summary + result.stderr)
+                self.assertIn('XDOMAIN_OBJECT_END name=' + name + ' loader_exit=1', result.stdout)
+                self.assertIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+                self.assertIn(diagnostic, result.stdout)
+
+    def test_helper_type_denial_exception_requires_matching_case_complete_log_and_no_setup_failure(self):
+        pairs = (
+            ('helper-timer-init-deny', 'bpf_timer_init'),
+            ('helper-timer-start-deny', 'bpf_timer_start'),
+            ('helper-tail-call-deny', 'bpf_tail_call'),
+            ('helper-probe-read-kernel-deny', 'bpf_probe_read_kernel'),
+            ('helper-probe-read-user-deny', 'bpf_probe_read_user'),
+            ('helper-ringbuf-output-deny', 'bpf_ringbuf_output'),
+        )
+        def log(helper, number='169'):
+            return ('-- BEGIN PROG LOAD LOG --\n'
+                    'program of this type cannot use helper ' + helper + '#' + number + '\n'
+                    'processed 0 insns (limit 1000000)\n'
+                    '-- END PROG LOAD LOG --')
+        cases = []
+        for index, (name, helper) in enumerate(pairs):
+            wrong_helper = pairs[(index + 1) % len(pairs)][1]
+            cases.append(('wrong-helper-' + helper, name, log(wrong_helper), 1))
+        valid = log('bpf_timer_init')
+        cases.extend([
+            ('wrong-case', 'xdomain-complete-sleepable-deny', valid, 1),
+            ('missing-end', 'helper-timer-init-deny', valid.replace('-- END PROG LOAD LOG --', ''), 1),
+            ('missing-begin', 'helper-timer-init-deny', valid.replace('-- BEGIN PROG LOAD LOG --', ''), 1),
+            ('missing-diagnostic', 'helper-timer-init-deny', '-- BEGIN PROG LOAD LOG --\nprocessed 0 insns\n-- END PROG LOAD LOG --', 1),
+            ('zero-helper-id', 'helper-timer-init-deny', log('bpf_timer_init', '0'), 1),
+            ('negative-helper-id', 'helper-timer-init-deny', log('bpf_timer_init', '-1'), 1),
+            ('nonnumeric-helper-id', 'helper-timer-init-deny', log('bpf_timer_init', 'invalid'), 1),
+            ('suffix-helper-id', 'helper-timer-init-deny', log('bpf_timer_init', '169x'), 1),
+            ('setup-error', 'helper-timer-init-deny', valid + '\nXDOMAIN_SETUP_FAIL missing module', 1),
+            ('elf-error', 'helper-timer-init-deny', valid + '\nfailed to open ELF object', 1),
+            ('btf-error', 'helper-timer-init-deny', valid + '\nfailed to find valid kernel BTF', 1),
+            ('loader-setup-exit', 'helper-timer-init-deny', valid, 3),
+        ])
+        for problem, name, diagnostic, code in cases:
+            with self.subTest(problem=problem, case=name):
+                result, _ = self.run_guest(matrix_name=name, diagnostic=diagnostic, loader_exit=code)
+                self.assertNotEqual(result.returncode, 0, 'invalid helper denial was accepted: ' + problem)
+                self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+
     def test_required_inventory_names_observer(self):
         cases = json.loads((GUEST / 'cases.json').read_text())['cases']
         rows = [row for row in cases if row['name'] == OBSERVER]
