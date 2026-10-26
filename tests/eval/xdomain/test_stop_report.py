@@ -21,7 +21,7 @@ class StopReport(unittest.TestCase):
         uapi = Path(os.environ.get('TB_STOP_REPORT_UAPI', str(ROOT / 'kernel/include/uapi')))
         argv = ['gcc', '-std=c11', '-Wall', '-Wextra', '-Werror', '-O1', '-g',
                 '-fsanitize=undefined', '-fno-sanitize-recover=all', '-pthread',
-                '-I' + str(uapi), '-I' + str(HERE),
+                '-iquote' + str(uapi), '-I' + str(HERE),
                 str(HERE / 'epoch_stop_report_test.c'),
                 str(HERE / 'epoch_control.c'), str(HERE / 'check_contract.c'),
                 '-o', str(cls.binary)]

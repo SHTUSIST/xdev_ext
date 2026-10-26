@@ -235,6 +235,7 @@ class RequiredSourceReceiptTest(unittest.TestCase):
 PROJECT_ABI_INPUTS = ('kernel/include/uapi/linux/xdev_ext_mech.h',
                       'kernel/include/uapi/linux/xdev_ext_policy.h',
                       'kernel/include/uapi/linux/xdev_ext_binding.h',
+                      'kernel/include/uapi/linux/xdev_ext_peer.h',
                       'kernel/include/uapi/linux/io_uring.h')
 
 

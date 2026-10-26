@@ -37,7 +37,7 @@ ENTRYPOINTS = (
         "test_epoch_control.py", "test_gpu_contract.py", "test_native_barrier.py",
         "test_native_trace_owner.py", "test_observer.py", "test_oracle.py",
         "test_owner_close.py", "test_platform_facts.py", "test_retention.py",
-        "test_runtime_package.py", "test_stop_report.py",
+        "test_runtime_package.py", "test_stop_report.py", "test_uapi_search.py",
     )),
     STACK + "stack_test.py",
     STACK + "test_mutations.py",

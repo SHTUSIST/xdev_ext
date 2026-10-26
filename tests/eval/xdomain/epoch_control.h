@@ -2,8 +2,8 @@
 #ifndef XDEV_EXT_EPOCH_CONTROL_H
 #define XDEV_EXT_EPOCH_CONTROL_H
 #include "check_contract.h"
-#include <linux/xdev_ext_mech.h>
-#include <linux/xdev_ext_policy.h>
+#include "linux/xdev_ext_mech.h"
+#include "linux/xdev_ext_policy.h"
 #ifdef __cplusplus
 extern "C" {
 #endif

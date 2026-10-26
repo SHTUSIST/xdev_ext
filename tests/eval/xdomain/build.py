@@ -23,7 +23,7 @@ def required_sources(source_root: Path) -> list[Path]:
              'platform_facts.py', 'native_barrier.py', 'action_provider.py',
              'check_protocol.py']
     abi_names = ['xdev_ext_mech.h', 'xdev_ext_policy.h',
-                 'xdev_ext_binding.h', 'io_uring.h']
+                 'xdev_ext_binding.h', 'xdev_ext_peer.h', 'io_uring.h']
     uapi = source_root.parents[2] / 'kernel/include/uapi/linux'
     return ([source_root / name for name in names] +
             [uapi / name for name in abi_names])
@@ -119,8 +119,8 @@ def main():
             if match:
                 receipt['sdk']['cuda_version'] = int(match.group(1))
                 break
-    includes = ['-I' + str(header.parent), '-I' + str(source),
-                '-I' + str(repo / 'kernel/include/uapi')]
+    sdk_includes = ['-I' + str(header.parent), '-I' + str(source)]
+    includes = sdk_includes + ['-iquote' + str(repo / 'kernel/include/uapi')]
     bpf_flags = shlex.split(bpf['stdout'])
     ptx = out / 'xdomain_gpu_pattern.ptx'
     executable = out / 'xdomain_agent'
@@ -132,7 +132,7 @@ def main():
     compute = 'compute_' + args.arch.removeprefix('sm_')
     pattern = next(p for p in paths if p.name == 'xdomain_gpu_pattern.cu')
     if run([nvcc, '-std=c++17', '--ptx', '-arch=' + compute,
-            '-ccbin', args.host_cxx, *includes, pattern,
+            '-ccbin', args.host_cxx, *sdk_includes, pattern,
             '-o', ptx])['returncode']:
         return finish('failed', 1, 'PTX compilation failed')
     if ptx.is_file() and ptx.stat().st_size:

@@ -15,7 +15,7 @@ EPOCH_HELPER_DIR ?= $(abspath $(KERNEL_SRC)/../tests/eval/xdomain)
 EPOCH_HELPER_INPUTS := $(addprefix $(EPOCH_HELPER_DIR)/,epoch_control.c epoch_control.h check_contract.c check_contract.h)
 peer_session_e2e: peer_session_e2e.c sw_provider_uapi.h $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h \
 		$(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h $(KERNEL_SRC)/include/uapi/linux/io_uring.h $(EPOCH_HELPER_INPUTS)
-	$(CC) $(CFLAGS) -I$(KERNEL_SRC)/include/uapi -I$(EPOCH_HELPER_DIR) $< \
+	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi -I$(EPOCH_HELPER_DIR) $< \
 		$(EPOCH_HELPER_DIR)/epoch_control.c $(EPOCH_HELPER_DIR)/check_contract.c \
 		$(SESSION_LDFLAGS) -o $@ -pthread -lbpf -lelf -lz
 modules:

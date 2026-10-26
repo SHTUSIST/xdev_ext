@@ -33,7 +33,7 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "test_action_provider", "test_case_dispatch", "test_platform_facts",
     "test_native_barrier", "test_durable_failure", "test_native_trace_owner",
     "test_c2_terminals", "test_create_refusal", "test_owner_close",
-    "test_runtime_package", "test_stop_report", "test_observer",
+    "test_runtime_package", "test_stop_report", "test_observer", "test_uapi_search",
 )) + (
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_test.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_mutations.py",

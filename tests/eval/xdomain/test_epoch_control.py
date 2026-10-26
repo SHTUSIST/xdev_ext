@@ -11,7 +11,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[2]
 FLAGS = ["-std=c11", "-Wall", "-Wextra", "-Werror", "-O1", "-g",
          "-fsanitize=undefined", "-fno-sanitize-recover=all", "-pthread",
-         "-I" + str(HERE), "-I" + str(ROOT / "kernel/include/uapi")]
+         "-I" + str(HERE), "-iquote" + str(ROOT / "kernel/include/uapi")]
 
 
 def run(command, *, timeout=30):

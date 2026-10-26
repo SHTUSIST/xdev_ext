@@ -35,7 +35,7 @@ class OwnerClose(unittest.TestCase):
             raise AssertionError("UNAVAILABLE: official CUDA_HOME/include/cuda.h required: "+str(cuda/"cuda.h"))
         # Official declarations only. Every GPU/CUDA runtime entry in the test
         # process is a fail-stop trap, never a result or payload substitute.
-        includes=["-I",str(HERE),"-I",str(HERE.parents[2]/"kernel/include/uapi"),"-I",str(cuda)]
+        includes=["-I",str(HERE),"-iquote",str(HERE.parents[2]/"kernel/include/uapi"),"-I",str(cuda)]
         for name in ("check_contract.c","epoch_control.c","agent_supervisor.cc","native_trace_owner.cc","owner_close_test.cc"):
             compiler="gcc" if name.endswith(".c") else "g++";obj=folder/(name+".o")
             cmd=[compiler,"-std="+("c11" if compiler=="gcc" else "c++17"),"-Wall","-Wextra","-Werror","-pthread",*includes]
