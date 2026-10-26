@@ -22,6 +22,7 @@ KERNEL_TESTS = (
     'family/family_table_test',
     'family/class_table_diff_test',
     'family/requester_core_test',
+    'family/admit_core_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',
@@ -30,6 +31,7 @@ GPU_TESTS = (
     'nv_xdev_ext_dma_lifetime_test', 'nv_xdev_ext_gpu_identity_test',
     'nv_xdev_ext_ce_classify_test', 'nv_xdev_ext_vidmem_offset_test',
     'nv_xdev_ext_ce_plan_test', 'nv_xdev_ext_ce_async_test',
+    'nv_xdev_ext_peer_backing_test',
 )
 
 

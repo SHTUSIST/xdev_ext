@@ -21,7 +21,9 @@ SHIM = r'''
 #include <string.h>
 #include <errno.h>
 #include <stdio.h>
-typedef uint64_t u64; typedef uint8_t NvU8; typedef int nvidia_stack_t;
+#include "include/uapi/linux/xdev_ext_mech.h"
+#include "kernel-open/nvidia/nv-xdev_ext-peer-backing.h"
+typedef uint64_t u64; typedef uint8_t NvU8; typedef uint32_t NvU32; typedef int nvidia_stack_t;
 struct list_head { struct list_head *next, *prev; };
 #define LIST_HEAD(name) struct list_head name = { &(name), &(name) }
 #define DEFINE_MUTEX(name) int name
@@ -44,17 +46,26 @@ static void list_add_tail(struct list_head *entry, struct list_head *head)
 #define WARN_ON(x) assert(!(x))
 struct file_operations { int unused; };
 struct inode { bool control; };
-typedef struct { int unused; } nv_linux_state_t;
+struct pci_dev;
+/* F3's new description snapshots device facts while the persistent pin is
+ * live. The actual describe/raw-bus behavior is exercised in the F3 tests. */
+typedef struct { struct pci_dev *pci_dev; bool mem_has_struct_page, coherent, is_external_gpu; } nv_linux_state_t;
 typedef struct { nv_linux_state_t *nvptr; int open_rc; } nv_linux_file_private_t;
 struct file { struct inode inode; nv_linux_file_private_t *private_data; };
 #define NV_GET_LINUX_FILE_PRIVATE(f) ((f)->private_data)
 #define NV_FILE_INODE(f) (&(f)->inode)
 #define NV_STATE_PTR(x) (x)
-struct pci_dev { int id; };
+struct device { int unused; };
+struct pci_dev { int id; struct device dev; };
+struct dma_map_ops { void *map_resource; };
+static const struct dma_map_ops *get_dma_ops(struct device *dev) { (void)dev; return NULL; }
+#define NV_DMA_REMAP_PEER_MMIO_DISABLE 1
+static NvU32 nv_dma_remap_peer_mmio;
 struct nvidia_p2p_page_table { int version; NvU8 *gpu_uuid; };
 struct nvidia_p2p_dma_mapping { int version,page_size_type; uint32_t entries; u64 *dma_addresses; };
 struct xdev_ext_peer_dma { void *private;const u64 *addresses;uint32_t entries;uint8_t page_shift; };
-struct xdev_ext_peer_provider_ops { void *owner;const struct file_operations *fops;int (*pin)(struct file*,u64,u64,void**);int (*unpin)(void*);int (*map)(void*,struct pci_dev*,struct xdev_ext_peer_dma*);int (*unmap)(void*,struct pci_dev*,struct xdev_ext_peer_dma*); };
+struct xdev_ext_peer_backing { struct pci_dev *owner; uint32_t flags; };
+struct xdev_ext_peer_provider_ops { void *owner;const struct file_operations *fops;int (*pin)(struct file*,u64,u64,void**);int (*unpin)(void*);int (*map)(void*,struct pci_dev*,struct xdev_ext_peer_dma*);int (*unmap)(void*,struct pci_dev*,struct xdev_ext_peer_dma*);int (*describe)(void*,struct pci_dev*,struct xdev_ext_peer_backing*); };
 static int allocations,frees,pm_depth,nv_system_pm_lock,stacks,module_refs;
 static int wait_error,lock_error,stack_error,get_error,put_error,map_error,unmap_error;
 static int gets,put_calls,maps,unmaps,live_pages,live_mapping;
@@ -90,7 +101,7 @@ MAIN = r'''
 int main(void)
 {
  nv_linux_state_t nvl={};nv_linux_file_private_t private={&nvl,0};struct file f={{false},&private};
- const struct file_operations fops={};struct pci_dev peer={7};struct xdev_ext_peer_dma dma={};void *a=NULL;int before;
+ const struct file_operations fops={};struct pci_dev peer={.id=7};struct xdev_ext_peer_dma dma={};void *a=NULL;int before;
  nv_xdev_ext_peer_init(&fops);nv_xdev_ext_peer_exit();
  assert(nv_xdev_ext_peer_pin(&f,0x200001,131072,&a)==-EINVAL && !gets);
  f.inode.control=true;assert(nv_xdev_ext_peer_pin(&f,0x200000,131072,&a)==-EINVAL && !gets);f.inode.control=false;
@@ -139,7 +150,7 @@ def execute(code, directory, name):
     source = directory / (name + ".c")
     source.write_text(SHIM + code + MAIN)
     binary = directory / name
-    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", str(source), "-o", str(binary)], capture_output=True, text=True)
+    compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-fsanitize=undefined", "-I" + str(KERNEL), "-I" + str(GPU), str(source), "-o", str(binary)], capture_output=True, text=True)
     assert compiled.returncode == 0, compiled.stderr
     return subprocess.run([str(binary)], capture_output=True, text=True)
 

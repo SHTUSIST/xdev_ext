@@ -109,6 +109,15 @@ static struct file *fget(int fd) { return fd >= 0 && fd < 8 ? &files[fd] : NULL;
 static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s, struct xdev_ext_mech_stage *st)
 { (void)s; (void)st; return 0; }
 
+/* F3 initializes capability defaults in this wrapper. This fixture keeps
+ * testing POLL/FANOUT flag stripping; capability behavior has its own test. */
+static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
+                                    const struct xdev_ext_mech_stage_uapi *u, __u32 pool_kind)
+{
+ (void)pool_kind;
+ return st->cls->bind(st, u);
+}
+
 /* PRODUCTION */
 
 static struct xdev_ext_mech_create chain(u32 c0, u32 d0, u32 f0, u32 c1, u32 d1, u32 f1)
