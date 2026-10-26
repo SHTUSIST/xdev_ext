@@ -117,7 +117,7 @@ static void init(bool rx)
   batches[i]=(struct xdev_ext_mech_batch){.priv=&bp[i],.nr=1,.ticket=(u64)i+1};
   batches[i].f[0]=(struct xdev_ext_mech_frame){.umem_addr=(u64)i*4096,.index=(u32)i,.data_len=3000};
   struct xdev_ext_net_send_desc d[3]={0};int nr=3;
-  if(rx)nr=xdev_ext_net_default_build(&stage,&batches[i],(u8*)d);
+  if(rx){assert(!xdev_ext_net_default_build(&stage,&batches[i],(u8*)d));nr=xdev_ext_mech_slots_used((u8*)d,sizeof(d[0]),3);}
   else for(int j=0;j<3;j++)d[j]=(struct xdev_ext_net_send_desc){.frame_off=(u32)j*1000,.len=1000,.header_len=42};
   assert(nr>0&&!xdev_ext_net_validate(&stage,&batches[i],(u8*)d,(u32)nr));
  }
