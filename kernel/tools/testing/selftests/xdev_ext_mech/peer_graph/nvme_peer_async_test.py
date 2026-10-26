@@ -481,7 +481,20 @@ def extract(source):
     have_res = "nvme_xdev_ext_peer_resources_init(" in source
     types += [(m.start(), m[0]) for m in
               re.finditer(r"^#define NVME_XDEV_EXT_PEER_\w+\s.*$", source, re.M)]
-    text = "\n".join(t for _, t in sorted(types))
+    hooks = re.search(r"^static const struct xdev_ext_stor_hooks "
+                      r"nvme_xdev_ext_stor_hooks = \{.*?^\};", source, re.M | re.S)
+    if hooks:
+        types.append((hooks.start(), hooks[0]))
+    # These are real declarations from the production headers. Pull only the
+    # dependencies needed by the extracted object: the full mechanism header
+    # also declares stage/batch types supplied by this deterministic shim.
+    declarations = []
+    for header, name in (("xdev_ext_mech.h", "xdev_ext_family_hooks_hdr"),
+                         ("xdev_ext_storfam.h", "xdev_ext_stor_hooks")):
+        content = (KERNEL / "include/linux" / header).read_text()
+        declarations.append(re.search(r"^struct " + name + r" \{.*?^\};",
+                                      content, re.M | re.S)[0])
+    text = "\n".join(declarations + [t for _, t in sorted(types)])
     code = "\n\n".join(t for _, t in sorted(functions))
     # NVMe's lease wrapper delegates to the requester base. Execute that real
     # dependency too, so the page-splitting cases and mutation still exercise
@@ -527,8 +540,8 @@ def main():
         ("native write direction reversed",
          "p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE", "p->write ? DMA_FROM_DEVICE : DMA_TO_DEVICE"),
         # Merging moved into the pure builder; perturb its input adjacency instead.
-        ("DMA-contiguous pages not merged", "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);",
-         "slot->spans, NVME_XDEV_EXT_PEER_MAX_PIECES, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
+        ("DMA-contiguous pages not merged", "slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);",
+         "slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
         ("provider page refusal not split", "if (ret != -ERANGE)", "if (true)"),
     ]
     with tempfile.TemporaryDirectory(prefix="nvme-peer-async-") as tmp:

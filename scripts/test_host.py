@@ -25,6 +25,7 @@ KERNEL_TESTS = (
     'family/admit_core_test',
     'family/netfam_core_test',
     'family/netfam_plan_diff_test',
+    'family/storfam_core_test',
 )
 GPU_TESTS = (
     'nv_xdev_ext_gpu_policy_test', 'nv_xdev_ext_gpu_binding_test',

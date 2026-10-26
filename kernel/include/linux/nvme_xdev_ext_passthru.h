@@ -5,12 +5,14 @@
 #ifdef __KERNEL__
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/xdev_ext_storfam_core.h>
 #include <uapi/linux/nvme_ioctl.h>
 #include <uapi/linux/xdev_ext_binding.h>
 #include <uapi/linux/xdev_ext_mech.h>
 #else
 #include <errno.h>
 #include <linux/types.h>
+#include "xdev_ext_storfam_core.h"
 #include "../uapi/linux/nvme_ioctl.h"
 #include "../uapi/linux/xdev_ext_binding.h"
 #include "../uapi/linux/xdev_ext_mech.h"
@@ -340,7 +342,7 @@ nvme_xdev_ext_mech_validate(const __u8 *sqe,
 		       struct nvme_xdev_ext_decoded *decoded)
 {
 	struct nvme_xdev_ext_admission input;
-	__u64 slba, nlb, offset;
+	__u64 slba, nlb;
 	unsigned int dw;
 	int ret;
 
@@ -374,12 +376,10 @@ nvme_xdev_ext_mech_validate(const __u8 *sqe,
 	/* Window first: an SLBA outside it is -ERANGE, not decode's -EOVERFLOW. */
 	slba = ((__u64)input.cdw11 << 32) | input.cdw10;
 	nlb = (__u64)(input.cdw12 & 0xffffU) + 1;
-	if (slba < bounds->window_slba)
-		return -ERANGE;
-	offset = slba - bounds->window_slba;
-	if (offset >= bounds->window_nlb ||
-	    nlb > bounds->window_nlb - offset)
-		return -ERANGE;
+	ret = xdev_ext_stor_window_check(bounds->window_slba,
+					bounds->window_nlb, slba, nlb);
+	if (ret)
+		return ret;
 	return nvme_xdev_ext_decode_rw(&input, decoded);
 }
 
