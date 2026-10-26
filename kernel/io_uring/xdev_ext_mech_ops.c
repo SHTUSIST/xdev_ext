@@ -818,6 +818,40 @@ int xdev_ext_mech_class_kfunc_filter(u32 class_id, const struct bpf_prog *prog,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_class_kfunc_filter);
 
+/* Load-time family membership and callback-member filter for one kfunc set. */
+int xdev_ext_mech_family_kfunc_filter(u32 family, const struct bpf_prog *prog,
+				 u32 kfunc_id, const struct btf_id_set8 *ids,
+				 const struct btf_id_set *build,
+				 const struct btf_id_set *complete)
+{
+	const struct bpf_struct_ops *st_ops[XDEV_EXT_MECH_CLASS_MAX];
+	struct xdev_ext_ops_kfunc_member members[2];
+	struct xdev_ext_ops_kfunc_rule rule = {
+		.ids = ids,
+		.st_ops = st_ops,
+		.members = members,
+	};
+	const struct bpf_struct_ops *o;
+	u32 c;
+
+	for (c = 0; c < XDEV_EXT_MECH_CLASS_MAX; c++)
+		if (xdev_ext_mech_class_family(c) == family &&
+		    (o = xdev_ext_mech_st_ops_of(c)))
+			st_ops[rule.nr_st_ops++] = o;
+	if (build)
+		members[rule.nr_members++] = (struct xdev_ext_ops_kfunc_member) {
+			.off = offsetof(struct xdev_ext_nvme_mech_ops, build),
+			.allowed = build,
+		};
+	if (complete)
+		members[rule.nr_members++] = (struct xdev_ext_ops_kfunc_member) {
+			.off = offsetof(struct xdev_ext_nvme_mech_ops, complete),
+			.allowed = complete,
+		};
+	return xdev_ext_ops_kfunc_filter(&rule, prog, kfunc_id);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_family_kfunc_filter);
+
 /* Class registry. */
 
 int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops *ops)

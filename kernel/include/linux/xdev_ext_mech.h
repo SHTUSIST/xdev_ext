@@ -388,6 +388,15 @@ int xdev_ext_mech_class_kfunc_filter(u32 class_id, const struct bpf_prog *prog,
 				const struct btf_id_set *complete);
 
 /*
+ * Load time, from a family kfunc set's filter: allow @family's struct_ops
+ * types, with @build in build and @complete in complete; ignore other ids.
+ */
+int xdev_ext_mech_family_kfunc_filter(u32 family, const struct bpf_prog *prog,
+				 u32 kfunc_id, const struct btf_id_set8 *ids,
+				 const struct btf_id_set *build,
+				 const struct btf_id_set *complete);
+
+/*
  * Where batch frames live.  The provider fills it in its bind function and
  * keeps the UMEM, its pages and its state words alive until ->release.
  */

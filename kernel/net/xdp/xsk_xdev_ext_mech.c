@@ -37,6 +37,7 @@
 #include <linux/slab.h>
 #include <linux/xdev_ext_binding.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_netfam.h>
 #include <net/busy_poll.h>
 #include <net/netdev_rx_queue.h>
 #include <net/xdp_sock.h>
@@ -1376,6 +1377,31 @@ void xsk_xdev_ext_mech_unbind_dev(struct xdp_sock *xs)
 
 #include "xsk_xdev_ext_mech_reliable.inc"
 
+static bool xsk_xdev_ext_net_rel(struct xdev_ext_mech_stage *st,
+			       struct xdev_ext_net_rel_view *out)
+{
+	struct xsk_xdev_ext_mech_stage *xst = st->priv;
+	struct xsk_xdev_ext_mech_provider *p;
+
+	if (!xst || !xst->rel)
+		return false;
+	p = xdev_ext_mech_session_pool(st->s)->priv;
+	*out = (struct xdev_ext_net_rel_view) {
+		.tx = &xst->rel->tx,
+		.rx = &xst->rel->rx,
+		.ack_pending = xst->rel->ack_pending,
+		.policy = &xst->rel->policy,
+		.lock = &p->tx_lock,
+	};
+	return true;
+}
+
+static const struct xdev_ext_net_hooks xsk_xdev_ext_net_hooks = {
+	.hdr = { .family = XDEV_EXT_FAMILY_NETWORK },
+	.hdr_policy = XDEV_EXT_NET_HDR_INBAND,
+	.rel = xsk_xdev_ext_net_rel,
+};
+
 static unsigned long xsk_mech_progress(struct xdev_ext_mech_stage *st)
 {
 	unsigned long pending = xsk_rx_pending_drain(st, false);
@@ -1408,6 +1434,7 @@ static const struct xdev_ext_mech_class_ops xsk_xdev_ext_mech_class_ops = {
  .batch_end = xsk_rel_batch_end,
  .progress = xsk_mech_progress,
 	.poll = xsk_mech_poll,
+	.fam.net = &xsk_xdev_ext_net_hooks,
 };
 
 __bpf_kfunc_start_defs();

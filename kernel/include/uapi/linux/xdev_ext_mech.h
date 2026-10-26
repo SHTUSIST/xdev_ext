@@ -412,6 +412,13 @@ struct xdev_ext_socket_mech_cqe {
 
 #define XDEV_EXT_NET_MAX_ENTRIES 16U
 #define XDEV_EXT_NET_HEADER_MAX 128U
+/* Read-only reliable TX snapshot copied by the network family kfunc. */
+struct xdev_ext_net_rel_tx_state {
+	__aligned_u64 group, base_group, next_group, credit;
+	__u32 attempt, live, acked, native_pending;
+	__u32 terminal, rsvd;
+};
+
 struct xdev_ext_net_send_desc {
  __u32 frame_pos, frame_off, len, flags;
  __u32 header_len, reserved;
