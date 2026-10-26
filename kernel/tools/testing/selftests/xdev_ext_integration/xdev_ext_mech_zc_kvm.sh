@@ -140,6 +140,17 @@ fi
 (( ! RX_CE || CE_SIM ))
 (( ! CE_DELAY_US || CE_SIM ))
 [[ "$FAULT" == none || "$GROUP_COUNT" -ge 2 ]]
+# Resolve Track S before selecting or reusing a kernel configuration.
+NIC_FALLBACK=${XDEV_EXT_ZC_NIC_FALLBACK:-1}
+[[ "$NIC_FALLBACK" == 0 || "$NIC_FALLBACK" == 1 ]] || {
+    echo 'invalid XDEV_EXT_ZC_NIC_FALLBACK (expected 0 or 1)' >&2; exit 2;
+}
+# Fault injection and dedicated provider cases change the main outcome; the
+# strict reliable/rx-ce campaign keeps Track S (its sub-cases are plain).
+if [[ "$FAULT" != none || "$PROVIDER_CASE" != normal ]]; then NIC_FALLBACK=0; fi
+SOCKET_REQUIRED=$COMPAT
+# Lifecycle and fault campaigns leave the guest before Track S.
+if (( NIC_FALLBACK && ! LIFECYCLE )) && [[ -z "$FAULT_CAMPAIGN" ]]; then SOCKET_REQUIRED=1; fi
 [[ "$SCRATCH" =~ ^/tmp/xdev-ext-e2e\.[A-Za-z0-9]+$ ]]
 [[ $(stat -c %a "$SCRATCH") == 700 && ! -L "$SCRATCH" ]]
 SRC=${SOURCE_OVERRIDE:-$SCRATCH/src}
@@ -259,6 +270,13 @@ clear_derived_results() {
 clear_derived_results
 exec > >(tee -a "$EV/harness.log") 2>&1
 DEBUG_HELPER=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py
+verify_socket_config() {
+    if (( SOCKET_REQUIRED )); then
+        grep -Fxq 'CONFIG_XDEV_EXT_MECH_SOCKET=y' "$BUILD/.config" || {
+            echo 'FAIL socket campaign requires CONFIG_XDEV_EXT_MECH_SOCKET=y' >&2; return 1;
+        }
+    fi
+}
 # Reusing an older CE-only build cannot certify the new transform campaign.
 verify_iaa_identity() {
     local symbol artifact
@@ -381,6 +399,7 @@ if (( RUN_ONLY )); then
     sha256sum -c "$BUILD/xdev-ext-artifacts.sha256" >"$EV/reused-artifact-check.log" 2>&1 || {
         echo 'FAIL run-only artifact hash mismatch' >&2; exit 1;
     }
+    verify_socket_config
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
@@ -451,7 +470,8 @@ if (( ! RUN_ONLY )); then
     fi
     if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE -e VIRTIO_CONSOLE; fi
     if (( FENCE_CHECK )); then cfg -e MODULES -e MODULE_UNLOAD -e DMA_SHARED_BUFFER; fi
-    if (( COMPAT )); then cfg -e XDEV_EXT_MECH_SOCKET -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
+    if (( SOCKET_REQUIRED )); then cfg -e XDEV_EXT_MECH_SOCKET; fi
+    if (( COMPAT )); then cfg -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
     if (( DEBUG_LOCKING )); then
         for symbol in DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do cfg -e "$symbol"; done
@@ -463,6 +483,7 @@ if (( ! RUN_ONLY )); then
 	kmake olddefconfig >"$EV/olddefconfig.log" 2>&1
 	for symbol in IO_URING_XDEV_EXT_BPF_POLICY XDP_SOCKETS_XDEV_EXT_POLICY XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do cfg -e "$symbol"; done
 	kmake olddefconfig >>"$EV/olddefconfig.log" 2>&1
+    verify_socket_config
 	cp "$BUILD/.config" "$EV/kernel.config"
     python3 "$DEBUG_HELPER" config "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
 	for symbol in DEBUG_INFO_BTF VIRTIO_NET BLK_DEV_NVME XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do
@@ -699,11 +720,6 @@ printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
     "$SOURCE_SLBA" "$RX_SLBA" "$CE_SLBA" >>"$ROOT/opt/xdev_ext/zc.env"
 # --- Track S (appended): NIC-boundary fallback section switch and its tools.
-NIC_FALLBACK=${XDEV_EXT_ZC_NIC_FALLBACK:-1}
-[[ "$NIC_FALLBACK" == 0 || "$NIC_FALLBACK" == 1 ]]
-# Fault injection and dedicated provider cases change the main outcome; the
-# strict reliable/rx-ce campaign keeps Track S (its sub-cases are plain).
-if [[ "$FAULT" != none || "$PROVIDER_CASE" != normal ]]; then NIC_FALLBACK=0; fi
 printf 'nic_fallback=%s\n' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"
 if (( NIC_FALLBACK )); then
     [[ -s "$TOOLS/socket_sink.bpf.o" ]]
