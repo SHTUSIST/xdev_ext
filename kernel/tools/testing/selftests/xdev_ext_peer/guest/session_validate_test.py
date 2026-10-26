@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0
 """Oracle sensitivity of the host-side POOL_PEER session validator."""
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -22,7 +23,8 @@ def good_log():
     lines += [STOP_SNAPSHOT, '# stop-inflight STOP returned -125',
               KILL_SNAPSHOT, 'ok 1 - kill-inflight: owner died of SIGKILL']
     lines += [f'ok {i} - check' for i in range(2, 41)]
-    lines += ['1..40', v.PASS_PREFIX + ' cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release',
+    lines += epoch_receipts()
+    lines += ['1..40', v.PASS_PREFIX + ' cases=' + ','.join(p['name'] for p in v.PLANS),
               v.UNLOAD_MARKER, 'XDEV_EXT_SESSION_GUEST_EXIT=0',
               '[    1.0] kasan: KernelAddressSanitizer initialized']
     return '\n'.join(lines) + '\n'
@@ -76,6 +78,24 @@ class Images(unittest.TestCase):
         dest[d:d + n] = self.source[s:s + n]
         with self.assertRaisesRegex(ValueError, 'destination'):
             v.check_images(self.source, bytes(dest))
+
+    def test_repeated_epochs_reject_stale_payload_and_check_surrounding_guards(self):
+        # Reusing an allocation must not replay the previous epoch's bytes.
+        for p in EPOCH_CASES:
+            d = p['dst_slba'] * v.LBA
+            source = p['src_slba'] * v.LBA
+            n = p['group']
+            with self.subTest(case=p['name'], mutation='stale-payload'):
+                dest = bytearray(self.dest)
+                dest[d:d + n] = self.source[source + n:source + 2 * n]
+                with self.assertRaisesRegex(ValueError, 'destination'):
+                    v.check_images(self.source, bytes(dest))
+            for offset in (d - 1, d + n):
+                with self.subTest(case=p['name'], mutation='guard', offset=offset):
+                    dest = bytearray(self.dest)
+                    dest[offset] ^= 1
+                    with self.assertRaisesRegex(ValueError, 'destination'):
+                        v.check_images(self.source, bytes(dest))
 
     def test_source_change_fails(self):
         source = bytearray(self.source)
@@ -237,6 +257,118 @@ class NativeObservation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'native.*observation'):
             v.check_log(text)
 
+
+EPOCH_CASES = (
+    dict(name='epoch-4k-0', frame=4096, seg=4096, group=4096, depth=1, groups=1,
+         src_slba=512, dst_slba=512, copies=v.ALL),
+    dict(name='epoch-4k-1', frame=4096, seg=4096, group=4096, depth=1, groups=1,
+         src_slba=528, dst_slba=528, copies=v.ALL),
+    dict(name='epoch-64k-0', frame=65536, seg=65536, group=65536, depth=1, groups=1,
+         src_slba=768, dst_slba=768, copies=v.ALL),
+    dict(name='epoch-64k-1', frame=65536, seg=65536, group=65536, depth=1, groups=1,
+         src_slba=1024, dst_slba=1024, copies=v.ALL),
+)
+
+
+def epoch_receipts():
+    # Compose wire fixtures independently of the validator's parser/formatter.
+    lines = []
+    for index, p in enumerate(EPOCH_CASES):
+        lines.append(('# epoch {name}: helper=shared raw_uapi=1 ready=EXTERNAL_READY '
+                      'gpu_applicable=0 groups=1 first_seq={seq} create=0 claim_busy=-16 '
+                      'start=0 stop=0 stop_proved=1 stats_valid=1 transport_valid=1 '
+                      'done=1 abort=0 rejects=0 timeouts=0 protocol_err=0 last_err=0 '
+                      'inflight=0 sequestered=0 native_controls=0 pending_acks=0 '
+                      'uncertain_controls=0 native_safe=1 held=0 epoch_closed=1').format(
+                          name=p['name'], seq=index))
+        lines.append(('# epoch {name} provider: pins=2 unpins=1 maps=2 unmaps=0 '
+                      'live_pins=1 live_maps=2').format(name=p['name']))
+    lines.append('# epoch-provider last-close: pins=2 unpins=2 maps=2 unmaps=2 live_pins=0 live_maps=0')
+    return lines
+
+
+class SharedEpochContract(unittest.TestCase):
+    def test_required_case_inventory(self):
+        self.assertEqual(tuple(v.PLANS[-4:]), EPOCH_CASES,
+                         'missing repeated shared-helper 4KiB/64KiB epoch cases')
+
+    def test_guest_calls_shared_helper_for_required_cases(self):
+        source = Path(__file__).with_name('peer_session_e2e.c').read_text()
+        for p in EPOCH_CASES:
+            self.assertTrue('"' + p['name'] + '"' in source,
+                            'guest missing repeated shared-helper case ' + p['name'])
+        for api in ('tb_guard_new', 'tb_guard_external_ready', 'tb_epoch_init',
+                    'tb_epoch_open', 'tb_epoch_start', 'tb_epoch_wait',
+                    'tb_epoch_stop', 'tb_epoch_close', 'tb_guard_snapshot'):
+            self.assertIsNotNone(re.search(r'\b' + api + r'\s*\(', source),
+                                 'guest missing shared-helper API ' + api)
+
+    def test_missing_receipts_rejected(self):
+        with self.assertRaisesRegex(ValueError, 'epoch'):
+            v.check_log(good_log().replace('\n'.join(epoch_receipts()) + '\n', ''))
+
+    def test_bad_epoch_snapshot_rejected(self):
+        for old, new in (('raw_uapi=1', 'raw_uapi=0'), ('ready=EXTERNAL_READY', 'ready=GPU_READY'),
+                         ('gpu_applicable=0', 'gpu_applicable=1'), ('claim_busy=-16', 'claim_busy=0'),
+                         ('stop=0', 'stop=-16'), ('stop_proved=1', 'stop_proved=0'),
+                         ('stats_valid=1', 'stats_valid=0'), ('transport_valid=1', 'transport_valid=0'),
+                         ('done=1', 'done=0'), ('abort=0', 'abort=1'), ('rejects=0', 'rejects=1'),
+                         ('timeouts=0', 'timeouts=1'), ('protocol_err=0', 'protocol_err=1'),
+                         ('last_err=0', 'last_err=-5'), ('inflight=0', 'inflight=1'),
+                         ('sequestered=0', 'sequestered=1'), ('native_controls=0', 'native_controls=1'),
+                         ('pending_acks=0', 'pending_acks=1'), ('uncertain_controls=0', 'uncertain_controls=1'),
+                         ('native_safe=1', 'native_safe=0'), ('held=0', 'held=1'),
+                         ('epoch_closed=1', 'epoch_closed=0'), ('groups=1', 'groups=2'),
+                         ('first_seq=0', 'first_seq=1'), ('create=0', 'create=-16'), ('start=0', 'start=-11')):
+            with self.subTest(field=old):
+                text = good_log()
+                receipt = epoch_receipts()[0]
+                with self.assertRaisesRegex(ValueError, 'epoch'):
+                    v.check_log(text.replace(receipt, receipt.replace(old, new), 1))
+
+    def test_cached_mapping_cannot_remap_or_unpin_between_epochs(self):
+        text = good_log()
+        receipt = epoch_receipts()[3]
+        for old, new in (('maps=2', 'maps=3'), ('pins=2', 'pins=3'),
+                         ('unpins=1', 'unpins=2'), ('live_maps=2', 'live_maps=0')):
+            with self.subTest(field=old):
+                with self.assertRaisesRegex(ValueError, 'epoch'):
+                    v.check_log(text.replace(receipt, receipt.replace(old, new)))
+
+    def test_balanced_mapping_or_pin_churn_between_epochs_rejected(self):
+        # A remap/unmap pair balances accounting but still violates cache reuse.
+        receipt = epoch_receipts()[3]
+        for changed in (receipt.replace('maps=2 unmaps=0', 'maps=3 unmaps=1'),
+                        receipt.replace('pins=2 unpins=1', 'pins=3 unpins=2')):
+            with self.subTest(receipt=changed):
+                with self.assertRaisesRegex(ValueError, 'epoch.*cache'):
+                    v.check_log(good_log().replace(receipt, changed))
+
+    def test_last_fd_close_must_balance_pin_and_map(self):
+        text = good_log()
+        receipt = epoch_receipts()[-1]
+        for old, new in (('unpins=2', 'unpins=1'), ('unmaps=2', 'unmaps=1'),
+                         ('live_pins=0', 'live_pins=1'), ('live_maps=0', 'live_maps=1')):
+            with self.subTest(field=old):
+                with self.assertRaisesRegex(ValueError, 'epoch'):
+                    v.check_log(text.replace(receipt, receipt.replace(old, new)))
+
+    def test_duplicate_missing_or_unknown_cases_rejected(self):
+        text = good_log()
+        prefix = v.PASS_PREFIX + ' cases='
+        line = next(x for x in text.splitlines() if x.startswith(prefix))
+        names = [p['name'] for p in v.PLANS]
+        for changed in (names[:-1], names + names[-1:], names + ['unknown']):
+            with self.subTest(cases=changed):
+                with self.assertRaisesRegex(ValueError, 'case'):
+                    v.check_log(text.replace(line, prefix + ','.join(changed)))
+
+    def test_duplicate_or_reordered_receipt_rejected(self):
+        text = good_log()
+        for changed in (text + epoch_receipts()[0] + '\n',
+                        text.replace(epoch_receipts()[0], epoch_receipts()[2], 1)):
+            with self.assertRaisesRegex(ValueError, 'epoch'):
+                v.check_log(changed)
 
 if __name__ == '__main__':
     unittest.main()

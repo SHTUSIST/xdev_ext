@@ -20,6 +20,8 @@
  *               stay cached, each group is source or guard
  *   fd-release  32 KiB frames, depth 2; ring and allocation fds are closed
  *               without STOP, and every provider pin/map must still drain
+ *   epoch-*     two one-group epochs each at 4 KiB and 64 KiB, using the
+ *               shared production controller and its STOP_REPORT proof
  * The plan below is duplicated, not shared, by the host validator.
  */
 #define _GNU_SOURCE
@@ -39,12 +41,14 @@
 #include <sys/syscall.h>
 #include <signal.h>
 #include <sys/wait.h>
+#include <time.h>
 #include <unistd.h>
 #include <bpf/libbpf.h>
 #include "linux/io_uring.h"
 #include "linux/xdev_ext_peer.h"
 #include "linux/xdev_ext_mech.h"
 #include "sw_provider_uapi.h"
+#include "epoch_control.h"
 
 #define LBA 512U
 #define DEST_GUARD 0x6b
@@ -59,14 +63,21 @@ struct plan {
 	uint64_t groups, src_slba, dst_slba;
 	int copies;
 };
-/* Sector ranges never overlap on either disk; source != destination offset. */
+/* Legacy workload geometry. New epoch windows below are disjoint from it. */
 static const struct plan REJECT = {"reject-map", 4096, 4096, 4096, 1, 4, 2048, 16384, NONE};
 static const struct plan CLI = {"cli", 65536, 16384, 16384, 1, 64, 2048, 4096, ALL};
 static const struct plan DEEP = {"depth4", 4096, 4096, 8192, 4, 96, 8192, 10240, ALL};
 static const struct plan STOPRUN = {"stop-inflight", 4096, 4096, 4096, 4, 1024, 16384, 18432, PART};
 static const struct plan KILLRUN = {"kill-inflight", 4096, 4096, 4096, 4, 512, 24576, 26624, PART};
 static const struct plan FDREL = {"fd-release", 32768, 32768, 32768, 2, 8, 12288, 14336, ALL};
-static const struct plan *const PLANS[] = {&REJECT, &CLI, &DEEP, &STOPRUN, &KILLRUN, &FDREL};
+static const struct plan EPOCHS[] = {
+	{"epoch-4k-0", 4096, 4096, 4096, 1, 1, 512, 512, ALL},
+	{"epoch-4k-1", 4096, 4096, 4096, 1, 1, 528, 528, ALL},
+	{"epoch-64k-0", 65536, 65536, 65536, 1, 1, 768, 768, ALL},
+	{"epoch-64k-1", 65536, 65536, 65536, 1, 1, 1024, 1024, ALL},
+};
+static const struct plan *const PLANS[] = {&REJECT, &CLI, &DEEP, &STOPRUN, &KILLRUN, &FDREL,
+	&EPOCHS[0], &EPOCHS[1], &EPOCHS[2], &EPOCHS[3]};
 
 static unsigned int checks;
 #define CHECK(c, msg) do { if (!(c)) { \
@@ -331,6 +342,114 @@ static void run_cli(const char *tool, const char *bpf_dir, int alloc,
 	CHECK(!strcmp(out, expect), "product controller reports exact completion and nothing else");
 }
 
+static uint64_t epoch_deadline(void)
+{
+	struct timespec now;
+	CHECK(!clock_gettime(CLOCK_MONOTONIC, &now), "epoch: monotonic deadline");
+	return (uint64_t)now.tv_sec * 1000000000ULL + now.tv_nsec +
+		(uint64_t)WAIT_MS * 1000000ULL;
+}
+
+static void epoch_provider_receipt(const char *name, const struct peer_sw_stats *s)
+{
+	printf("# %s: pins=%llu unpins=%llu maps=%llu unmaps=%llu live_pins=%llu live_maps=%llu\n",
+	       name, (unsigned long long)s->pins, (unsigned long long)s->unpins,
+	       (unsigned long long)s->maps, (unsigned long long)s->unmaps,
+	       (unsigned long long)s->live_pins, (unsigned long long)s->live_maps);
+}
+
+/* Use the very same controller as the CUDA route, with the real syscall
+ * adapter and a registered existing provider. A fresh guard is required for
+ * every cleanly closed epoch; it never invents GPU readiness or retries CREATE.
+ */
+static void run_shared_epochs(int alloc, int srcng, int dstng, int observer)
+{
+	struct peer_sw_stats cached = stats(observer);
+	unsigned int i;
+
+	CHECK(cached.live_pins == 1 && cached.live_maps == 2,
+	      "epoch: registered allocation retains both cached NVMe mappings");
+	for (i = 0; i < sizeof(EPOCHS) / sizeof(EPOCHS[0]); i++) {
+		const struct plan *p = &EPOCHS[i];
+		struct xdev_ext_mech_create c = {
+			.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+			.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = alloc,
+			.layout = {p->frame, 0, p->seg, p->group}, .depth = p->depth,
+		};
+		struct tb_guard *guard = NULL;
+		struct tb_guard_snapshot proof;
+		struct tb_epoch epoch;
+		struct tb_epoch_result result;
+		struct peer_sw_stats current;
+		struct session busy;
+		char receipt[128];
+		int created, started, stopped, closed, claim_busy;
+
+		c.st[0] = (struct xdev_ext_mech_stage_uapi){.class_id = XDEV_EXT_MECH_CLASS_NVME,
+			.direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .fd = srcng,
+			.arg0 = p->src_slba, .arg1 = nlb(p)};
+		c.st[1] = (struct xdev_ext_mech_stage_uapi){.class_id = XDEV_EXT_MECH_CLASS_NVME,
+			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = dstng,
+			.arg0 = p->dst_slba, .arg1 = nlb(p)};
+		CHECK(!tb_guard_new(TB_BACKING_EXISTING_PROVIDER, &guard), "epoch: existing-provider guard");
+		CHECK(!tb_guard_external_ready(guard, TB_READY_EXISTING_PROVIDER_REGISTERED),
+		      "epoch: actual registered provider establishes EXTERNAL_READY");
+		tb_guard_snapshot(guard, &proof);
+		CHECK(proof.phase == TB_PHASE_EXTERNAL_READY && !proof.gpu_applicable &&
+		      proof.external_ready_proof == TB_READY_EXISTING_PROVIDER_REGISTERED,
+		      "epoch: no GPU readiness or GPU execution evidence");
+		CHECK(!tb_epoch_init(&epoch, guard, NULL), "epoch: production raw-UAPI adapter");
+		created = tb_epoch_open(&epoch, &c);
+		CHECK(!created, "epoch: CREATE claims or cleanly reclaims after preceding STOP");
+		/* The rejected claimant uses the established raw test path, never the
+		 * helper whose failed CREATE conservatively retains unknown ownership.
+		 */
+		claim_busy = create(&busy, p, alloc, srcng, dstng);
+		CHECK(claim_busy == -EBUSY, "epoch: active allocation rejects second claim");
+		CHECK(!close(busy.ring) && !close(busy.notify), "epoch: close refused raw claimant");
+		started = tb_epoch_start(&epoch, 1, i);
+		CHECK(!started, "epoch: one START for one group");
+		CHECK(!tb_epoch_wait(&epoch, epoch_deadline(), &result), "epoch: settled native completion");
+		exact_success(p, &result.stats);
+		stopped = tb_epoch_stop(&epoch, epoch_deadline(), &result);
+		CHECK(!stopped && result.stop_proved && result.stats_valid && result.transport_valid &&
+		      epoch.stop_report_valid, "epoch: successful current-kernel STOP_REPORT proves release");
+		exact_success(p, &result.stats);
+		closed = tb_epoch_close(&epoch);
+		CHECK(!closed && epoch.ring_fd == -1 && epoch.event_fd == -1,
+		      "epoch: close only helper-owned ring and eventfd after STOP");
+		tb_guard_snapshot(guard, &proof);
+		CHECK(!proof.held && proof.native_safe && !proof.gpu_applicable &&
+		      (proof.cleanup_permissions & TB_CLEANUP_PEER_FD) &&
+		      !(proof.cleanup_permissions & (TB_CLEANUP_GPU_FREE | TB_CLEANUP_CONTEXT_DESTROY)),
+		      "epoch: released provider caller authority without GPU permission");
+		printf("# epoch %s: helper=shared raw_uapi=1 ready=EXTERNAL_READY gpu_applicable=%u "
+		       "groups=1 first_seq=%u create=%d claim_busy=%d start=%d stop=%d stop_proved=%u "
+		       "stats_valid=%u transport_valid=%u done=%llu abort=%llu rejects=%llu timeouts=%llu "
+		       "protocol_err=%llu last_err=%d inflight=%llu sequestered=%llu native_controls=%llu "
+		       "pending_acks=%llu uncertain_controls=%llu native_safe=%u held=%u epoch_closed=%u\n",
+		       p->name, proof.gpu_applicable, i, created, claim_busy, started, stopped,
+		       result.stop_proved, result.stats_valid, result.transport_valid,
+		       (unsigned long long)result.stats.batches_done, (unsigned long long)result.stats.batches_abort,
+		       (unsigned long long)result.stats.rejects, (unsigned long long)result.stats.timeouts,
+		       (unsigned long long)result.stats.protocol_err, result.stats.last_err,
+		       (unsigned long long)result.stats.inflight, (unsigned long long)result.stats.sequestered,
+		       (unsigned long long)result.transport.v3.v2.v1.native_controls,
+		       (unsigned long long)result.transport.v3.v2.v1.pending_acks,
+		       (unsigned long long)result.transport.v3.v2.v1.uncertain_controls,
+		       proof.native_safe, proof.held, !closed);
+		current = stats(observer);
+		CHECK(current.pins == cached.pins && current.unpins == cached.unpins &&
+		      current.maps == cached.maps && current.unmaps == cached.unmaps &&
+		      current.live_pins == cached.live_pins && current.live_maps == cached.live_maps,
+		      "epoch: provider registration and mappings remain cached across STOP/reclaim");
+		CHECK(snprintf(receipt, sizeof(receipt), "epoch %s provider", p->name) < (int)sizeof(receipt),
+		      "epoch: provider receipt name");
+		epoch_provider_receipt(receipt, &current);
+		CHECK(!tb_guard_delete(guard), "epoch: delete cleanly closed guard");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	unsigned char *source, *source_after, *dest, *dest_after;
@@ -426,6 +545,7 @@ int main(int argc, char **argv)
 	print_stats("after depth4", &mid);
 	CHECK(mid.live_pins == 1 && mid.live_maps == 2 && mid.maps - before.maps == 2,
 	      "depth4: mappings stay cached per PCI function, never remapped per batch");
+	run_shared_epochs(alloc1, srcng, dstng, observer);
 
 	/* stop-inflight: native incomplete work observed before STOP. */
 	CHECK(!create(&s, &STOPRUN, alloc1, srcng, dstng), "stop-inflight: CREATE reclaims the allocation");
@@ -519,6 +639,7 @@ int main(int argc, char **argv)
 	detach_nvme_ops(&ops);
 	after = drained(observer, 0);
 	print_stats("after", &after);
+	epoch_provider_receipt("epoch-provider last-close", &after);
 	CHECK(after.maps - before.maps == after.unmaps - before.unmaps &&
 	      after.pins - before.pins == after.unpins - before.unpins && after.pins - before.pins == 2,
 	      "every successful pin and map released exactly once");
@@ -550,7 +671,7 @@ int main(int argc, char **argv)
 	close(observer); close(ctl); close(src); close(srcng); close(dst); close(dstng);
 	free(source); free(source_after); free(dest); free(dest_after);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_PEER_SESSION=PASS cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release batches=%llu pool=POOL_PEER stages=nvme-read,nvme-write memory=host-RAM-standin gpu=none net=none timing=none\n",
-	       (unsigned long long)(CLI.groups + DEEP.groups + FDREL.groups));
+	printf("XDEV_EXT_PEER_SESSION=PASS cases=reject-map,cli,depth4,stop-inflight,kill-inflight,fd-release,epoch-4k-0,epoch-4k-1,epoch-64k-0,epoch-64k-1 batches=%llu pool=POOL_PEER stages=nvme-read,nvme-write memory=host-RAM-standin gpu=none net=none timing=none\n",
+	       (unsigned long long)(CLI.groups + DEEP.groups + FDREL.groups + 4));
 	return 0;
 }
