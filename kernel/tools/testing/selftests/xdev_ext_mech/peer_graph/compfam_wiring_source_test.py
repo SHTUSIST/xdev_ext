@@ -13,6 +13,7 @@ JOINED = [
     ('CE', 'io_uring/xdev_ext_mech_ce.c', 'xdev_ext_ce_comp_hooks'),
     ('DMA', 'io_uring/xdev_ext_mech_dma.c', 'xdev_ext_dma_comp_hooks'),
     ('IAA', 'io_uring/iaa/xdev_ext_mech_iaa.c', 'xdev_ext_iaa_comp_hooks'),
+    ('CPU', 'io_uring/xdev_ext_mech_cpu.c', 'xdev_ext_cpu_comp_hooks'),
 ]  # (class name, kernel-relative file, hooks object)
 
 
