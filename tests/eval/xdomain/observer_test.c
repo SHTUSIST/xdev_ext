@@ -42,7 +42,25 @@ static int observer_noop_cqe(const struct xdev_ext_mech_ctx *c,
  return 0;
 }
 
+#if OBS_WRAPPER && !OBS_SYNTAX
+static int observer_interleave_armed;
+static void observer_interleaved_failure(void);
+/* Keep the real atomic operation and schedule a second actual observer after
+ * ownership release, before this callback makes its final return decision.
+ * This is a host scheduler seam, not a replacement observer implementation. */
+#define __sync_val_compare_and_swap(p, old, val) ({ \
+ __typeof__(*(p)) observer_previous=__sync_val_compare_and_swap((p),(old),(val)); \
+ if(observer_interleave_armed && (void *)(p)==(void *)&observer_rec[0].cqe_seen && \
+    (old)==0x80000000U && ((val)==0 || (val)==1)) { \
+  observer_interleave_armed=0; observer_interleaved_failure(); \
+ } observer_previous; })
+#endif
+
 /* @ACTUAL_SOURCE@ */
+
+#if OBS_WRAPPER && !OBS_SYNTAX
+#undef __sync_val_compare_and_swap
+#endif
 
 static void *bpf_map_lookup_elem(const void *map, const void *key)
 {
@@ -443,6 +461,54 @@ static void sticky_global_loss_records(void)
  REQUIRE((actual[1].record_bits[1] & actual[1].record_bits[0])==actual[1].record_bits[0]);
  observer_ok("sticky global loss saturates while later addressable BUILD and CQE still latch failure");
 }
+/* Independent requirement: each failed hook owns one lost observation and
+ * latches its own addressable record, even if a different callback caused
+ * the global error after the initial check. */
+#if OBS_WRAPPER && !OBS_SYNTAX
+static void observer_interleaved_failure(void)
+{
+ struct xdev_ext_mech_ctx foreign=observer_context();
+ foreign.session_id=observer_cfg.session_id+1;
+ foreign.base.src_offset=observer_cfg.first_seq+1;
+ REQUIRE(xd_obs_build(&foreign,&build_info)!=0);
+}
+static void final_interleaved_errors(void)
+{
+ struct interleaved_result {
+  int ret, armed;
+  __u64 lost, global_bits;
+  __u32 own_bits, foreign_bits;
+ } actual[2]={0};
+ for(unsigned final=0;final<2;final++) {
+  struct xdev_ext_mech_ctx c=observer_reset();
+  struct interleaved_result *a=&actual[final];
+  if(final) REQUIRE(build_call(&c)==XDEV_EXT_MP_BUILD_SUBMIT);
+  observer_interleave_armed=1;
+  a->ret=final ? complete_call(&c) : build_call(&c);
+  a->armed=observer_interleave_armed;
+  a->lost=observer_errors.observations_lost;
+  a->global_bits=observer_errors.error_bits;
+  a->own_bits=observer_rec[0].error_bits;
+  a->foreign_bits=observer_rec[1].error_bits;
+  printf("final interleave %s ret=%d lost=%llu own_error=%u foreign_error=%u global_error=%llu\n",
+   final?"CQE":"BUILD",a->ret,(unsigned long long)a->lost,
+   a->own_bits,a->foreign_bits,(unsigned long long)a->global_bits);
+ }
+ fflush(stdout);
+ for(unsigned final=0;final<2;final++) {
+  const struct interleaved_result *a=&actual[final];
+  REQUIRE(!a->armed);
+  REQUIRE(a->ret==(final ? XDEV_EXT_MP_ABORT : XDEV_EXT_MP_BUILD_ABORT));
+  REQUIRE((a->global_bits & TB_XD_OBS_ERR_CONFIG)!=0);
+  REQUIRE((a->foreign_bits & TB_XD_OBS_ERR_CONFIG)!=0);
+  REQUIRE(a->lost==2);
+  REQUIRE((a->own_bits & TB_XD_OBS_ERR_CONFIG)!=0);
+  observer_ok(final ?
+   "final CQE rejected by interleaved global error counts its own loss and record error" :
+   "BUILD rejected by interleaved global error counts its own loss and record error");
+ }
+}
+#endif
 int main(void)
 {
  observer_parity=1;
@@ -454,6 +520,7 @@ int main(void)
  positive_records(); retry_records(); config_errors(); identity_and_order_errors();
  key_and_map_errors(); overflow_errors(); bad_plan_errors(); failed_cqe_records(); latch_errors();
  sticky_global_loss_records();
+ final_interleaved_errors();
 #endif
  return 0;
 }
