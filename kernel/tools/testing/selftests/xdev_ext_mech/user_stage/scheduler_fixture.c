@@ -156,6 +156,8 @@ static void setup(u32 depth,u32 entries,s64 delta,bool varlen){
  s->layout=(struct xdev_ext_mech_layout){4096,0,4096,FRAMES*4096};
  s->pool=(struct xdev_ext_mech_pool){.ops=&pool_ops,.state=custody,.nr_frames=DEPTH_MAX*FRAMES,.frame_size=4096};
  INIT_LIST_HEAD(&s->retry);INIT_LIST_HEAD(&s->ordered);xdev_ext_mech_sess_init(&s->ss);
+ /* The fixture starts after successful CREATE activation. */
+ s->progress_ready=true;
  progress_work_of_session=&s->progress_work;
  for(u32 i=0;i<3;i++){
   u32 c=i==0?XDEV_EXT_MECH_CLASS_NVME:i==1?XDEV_EXT_MECH_CLASS_USER:XDEV_EXT_MECH_CLASS_DMA;

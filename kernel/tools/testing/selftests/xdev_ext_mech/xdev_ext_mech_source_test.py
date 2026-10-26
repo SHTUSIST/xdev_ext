@@ -494,7 +494,13 @@ class UbrMechSourceTest(unittest.TestCase):
 
     def test_teardown_order(self):
         path = ROOT / "io_uring/xdev_ext_mech.c"
-        destroy = function_body(path, "static int xdev_ext_mech_session_destroy(")
+        # Legacy STOP and ring exit forward to these shared implementations.
+        for operation in ("destroy", "release"):
+            wrapper = function_body(path,
+                f"static int xdev_ext_mech_session_{operation}(")
+            self.assertIn(f"return xdev_ext_mech_session_{operation}_report(s, NULL);",
+                          wrapper)
+        destroy = function_body(path, "static int xdev_ext_mech_session_destroy_report(")
         order = [destroy.index(step) for step in (
             "list_del_init(&s->all_node);",
             "xdev_ext_mech_session_stop(s, 0);",
@@ -503,12 +509,12 @@ class UbrMechSourceTest(unittest.TestCase):
             "xdev_ext_mech_sess_drain(&s->ss, true);",
             "fate = xdev_ext_mech_sess_ref_fate(&s->ss);",
             "xdev_ext_mech_quarantine(s);",
-            "xdev_ext_mech_session_release(s);")]
+            "xdev_ext_mech_session_release_report(s, report);")]
         self.assertEqual(order, sorted(order))
         park = destroy.index("xdev_ext_mech_quarantine(s);")
         self.assertLess(destroy.index("return -EBUSY;", park),
-                        destroy.index("xdev_ext_mech_session_release(s);"))
-        release = function_body(path, "static int xdev_ext_mech_session_release(")
+                        destroy.index("xdev_ext_mech_session_release_report(s, report);"))
+        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
         order = [release.index(step) for step in (
             "kthread_destroy_worker(s->worker);",
             "s->st[i].cls->unbind(&s->st[i]);",
@@ -551,10 +557,13 @@ class UbrMechSourceTest(unittest.TestCase):
         # unless worker_gone, so release sets it under s->lock before it
         # frees the worker, and the stages are unbound after that.
         path = ROOT / "io_uring/xdev_ext_mech.c"
-        release = function_body(path, "static int xdev_ext_mech_session_release(")
+        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
         # L11: checked unbind can quarantine under an earlier lock; the worker
         # gate must be inside its own critical section before destruction.
-        gone = release.index("s->worker_gone = true;")
+        # Select the shared post-unbind gate: the optional report snapshot
+        # has a separate earlier gate, absent on the legacy NULL-report path.
+        gone = release.index("s->worker_gone = true;",
+                             release.index("return final_err;"))
         lock = release.rindex("spin_lock_irqsave(&s->lock, flags);", 0, gone)
         unlock = release.index("spin_unlock_irqrestore(&s->lock, flags);", gone)
         checked = release.index("xdev_ext_mech_unbind_checked(s)")
@@ -663,7 +672,7 @@ class UbrMechSourceTest(unittest.TestCase):
         path = ROOT / "io_uring/xdev_ext_mech.c"
         bind = function_body(path, "static int xdev_ext_mech_session_bind(")
         self.assertIn("&s->c_owner[st->class_id]", bind)
-        release = function_body(path, "static int xdev_ext_mech_session_release(")
+        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
         self.assertIn("xdev_ext_mech_ops_put(s->ops[i], s->pinned[i], "
                       "s->c_owner[i]);", release)
         # Sessions on a C table are stopped too, not only pinned ones.
@@ -697,7 +706,7 @@ class UbrMechSourceTest(unittest.TestCase):
         # takes it, NONE included (include/linux/xdev_ext_mech.h: stage_dead
         # "records @err, stops admission").
         stop = function_body(path, "static void xdev_ext_mech_session_stop(")
-        taken = stop.index("xdev_ext_mech_sess_stop(&s->ss);")
+        taken = stop.index("xdev_ext_mech_sess_stop(&s->ss)")
         self.assertLess(taken, stop.index("WRITE_ONCE(s->stop_err, err);"))
         self.assertLess(stop.index("WRITE_ONCE(s->stop_err, err);"),
                         stop.index("xdev_ext_mech_settle_locked(s);"))
@@ -714,7 +723,7 @@ class UbrMechSourceTest(unittest.TestCase):
                       "&xdev_ext_mech_quarantined);", park)
         # Nothing ever takes a session off the quarantine list.
         self.assertEqual(text.count("quarantine_node"), 2)
-        destroy = function_body(path, "static int xdev_ext_mech_session_destroy(")
+        destroy = function_body(path, "static int xdev_ext_mech_session_destroy_report(")
         self.assertIn("if (fate != XDEV_EXT_MECH_REFS_RELEASE || !last) {",
                       destroy)
         # A quarantined session's worker goes only after its last batch,
@@ -765,7 +774,7 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertLess(create.index("ret = xdev_ext_mech_sess_activate(&s->ss);"),
                         create.index("list_add_tail(&s->live_node, "
                                      "&xdev_ext_mech_live);"))
-        release = function_body(path, "static int xdev_ext_mech_session_release(")
+        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
         gone = release.index("list_del_init(&s->live_node);")
         self.assertLess(gone, release.index("kthread_destroy_worker(s->worker);"))
         self.assertLess(gone, release.index("kfree(s);"))

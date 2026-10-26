@@ -8,23 +8,19 @@ FIXTURE = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#define XDEV_EXT_MECH_MAX_FRAMES 32
-#define XDEV_EXT_MECH_MEMBER_PREPARE 0
-#define XDEV_EXT_MECH_MEMBER_BUILD 1
-#define XDEV_EXT_MECH_MEMBER_COMPLETE 2
-#define XDEV_EXT_MECH_MEMBER_COMPUTE 3
-#define XDEV_EXT_MECH_SITE_WORKER 0
-#define XDEV_EXT_MECH_SITE_CREATE 4
-#define XDEV_EXT_MECH_SITE_WORKER_SELECT 6
+#include "include/uapi/linux/xdev_ext_mech.h"
 struct xdev_ext_mech_call_args {
  unsigned member,callsite,nr_frames,info_size,desc_size,desc_cap,cqe_size,cqe_cap;
  void *base,*frames,*info,*scratch,*b,*cqe;
  unsigned *out_len;
+ uint64_t batch_id;
+ int32_t len_delta;
+ struct xdev_ext_xdomain_proto_result *xdomain;
 };
 /* BODY */
 int main(void) {
  int obj,fail=0; unsigned i;
- struct xdev_ext_mech_call_args a={.member=1,.callsite=6,.base=&obj,.info=&obj,.info_size=528};
+ struct xdev_ext_mech_call_args a={.member=XDEV_EXT_MECH_MEMBER_BUILD,.callsite=XDEV_EXT_MECH_SITE_WORKER_SELECT,.base=&obj,.info=&obj,.info_size=528};
  if (!xdev_ext_mech_args_ok(&a)) fail++;
  for(i=0;i<9;i++) {
   struct xdev_ext_mech_call_args b=a;
@@ -35,10 +31,10 @@ int main(void) {
   }
   if(xdev_ext_mech_args_ok(&b)) fail++;
  }
- a.member=2; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=0; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=3; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=1;a.callsite=0;if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_COMPLETE; if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_PREPARE; if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_COMPUTE; if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_BUILD;a.callsite=XDEV_EXT_MECH_SITE_WORKER;if(xdev_ext_mech_args_ok(&a)) fail++;
  printf("SELECT envelope: 14 checks, %d failures\n",fail);return fail!=0;
 }
 '''
