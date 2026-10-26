@@ -18,6 +18,11 @@ typedef unsigned char uuid_t;
 #define TBIP_LOGIN 1
 #define TBIP_LOGOUT 2
 #define TBNET_LOGIN_RETRIES 60
+#define TBNET_LOGIN_DELAY 1000
+#define TBNET_LOGOUT_RETRIES 3
+#define TBNET_RING_SIZE 64
+#define netdev_err(...) ((void)0)
+#define netdev_info(...) ((void)0)
 #define msecs_to_jiffies(n) (n)
 #define netdev_dbg(...) ((void)0)
 #define netdev_warn(...) ((void)0)
@@ -25,11 +30,11 @@ typedef unsigned char uuid_t;
 struct work_struct { bool pending; };
 struct delayed_work { struct work_struct work; };
 struct device { void *data; };
-struct net_device { bool running, detached; void *data; };
+struct net_device { bool running, detached,carrier; void *data; };
 struct tb_protocol_handler { int unused; };
 struct tb_xdomain { const uuid_t *local_uuid,*remote_uuid; u64 route; };
 struct tb_service { struct device dev; void *data; };
-struct ring { int unused; };
+struct ring { int hop; };
 struct tbnet_ring { struct ring *ring; };
 struct tbnet {
  struct net_device *dev; struct tb_xdomain *xd;
@@ -47,7 +52,9 @@ static void *system_long_wq;
 static pthread_mutex_t gate_lock=PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t gate_cond=PTHREAD_COND_INITIALIZER;
 static bool entered,released,active,freed;
-static pthread_t reader;
+static pthread_t reader,worker;
+static struct work_struct *running_work;
+static int worker_gate;
 static struct tbnet *current;
 static int pending_at_free, late_access;
 static unsigned seq, netdev_unregistered, last_drain;
@@ -56,7 +63,13 @@ static void mutex_lock(pthread_mutex_t *m) { assert(!pthread_mutex_lock(m)); }
 static void mutex_unlock(pthread_mutex_t *m) { assert(!pthread_mutex_unlock(m)); }
 static void queue_work(void *q,struct work_struct *w) { if(freed) late_access++; w->pending=true; }
 static void queue_delayed_work(void *q,struct delayed_work *w,unsigned delay) { queue_work(q,&w->work); }
-static void cancel_work_sync(struct work_struct *w) { w->pending=false;last_drain=++seq; }
+static void cancel_work_sync(struct work_struct *w) {
+ if(running_work==w) {
+  pthread_mutex_lock(&gate_lock);released=true;pthread_cond_broadcast(&gate_cond);pthread_mutex_unlock(&gate_lock);
+  assert(!pthread_join(worker,NULL));running_work=NULL;
+ }
+ w->pending=false;last_drain=++seq;
+}
 static void cancel_delayed_work_sync(struct delayed_work *w) { cancel_work_sync(&w->work); }
 static bool netif_running(struct net_device *d) { return d->running; }
 static void netif_device_detach(struct net_device *d) { d->detached=true; }
@@ -77,7 +90,7 @@ static void tb_unregister_protocol_handler(struct tb_protocol_handler *h) {
  }
 }
 static void stop_login(struct tbnet *n);
-static void tbnet_tear_down(struct tbnet *n,bool logout) { stop_login(n); }
+static void tbnet_tear_down(struct tbnet *n,bool logout);
 static void napi_disable(int *n) { }
 static void tb_ring_free(struct ring *r) { }
 static void tb_xdomain_release_out_hopid(struct tb_xdomain *x,int h) { }
@@ -86,18 +99,57 @@ static void unregister_netdev(struct net_device *d) { if(d->running) { d->runnin
 static int register_netdev(struct net_device *d) { return -ENOMEM; }
 static unsigned pending(struct tbnet *n) { return n->login_work.work.pending+n->connected_work.pending+n->disconnect_work.pending; }
 static void free_netdev(struct net_device *d) { pending_at_free=pending(d->data);freed=true; }
+static void tb_register_protocol_handler(struct tb_protocol_handler *h) { }
+static void netif_device_attach(struct net_device *d) { d->detached=false; }
+static bool netif_carrier_ok(struct net_device *d) { return d->carrier; }
+static void netif_carrier_on(struct net_device *d) { d->carrier=true; }
+static void netif_carrier_off(struct net_device *d) { if(worker_gate==3)response();d->carrier=false; }
+static void netif_start_queue(struct net_device *d) { }
+static void netif_stop_queue(struct net_device *d) { }
+static int tbnet_login_request(struct tbnet *n,unsigned s) { if(worker_gate==1)response();return 0; }
+static int tbnet_logout_request(struct tbnet *n) { return 0; }
+static int tb_xdomain_alloc_in_hopid(struct tb_xdomain *xd,int preferred) { if(worker_gate==2)response();return preferred; }
+static void tb_xdomain_release_in_hopid(struct tb_xdomain *xd,int h) { }
+static void tb_ring_start(struct ring *r) { if(freed)late_access++; }
+static void tb_ring_stop(struct ring *r) { if(freed)late_access++; }
+static int tbnet_alloc_rx_buffers(struct tbnet *n,unsigned count) { return 0; }
+static int tbnet_alloc_tx_buffers(struct tbnet *n) { return 0; }
+static void tbnet_free_buffers(struct tbnet_ring *r) { if(freed)late_access++; }
+static int tb_xdomain_enable_paths(struct tb_xdomain *x,int a,int b,int c,int d) { if(freed)late_access++;return 0; }
+static int tb_xdomain_disable_paths(struct tb_xdomain *x,int a,int b,int c,int d) { if(freed)late_access++;return 0; }
 /* PRODUCTION */
 static struct thunderbolt_ip_login packet;
 static void *call_packet(void *unused) { int r=tbnet_handle_packet(&packet,sizeof(packet),current);assert(r==1);return NULL; }
+static void *call_worker(void *unused) {
+ if(worker_gate==1)tbnet_login_work(&current->login_work.work);
+ else if(worker_gate==2)tbnet_connected_work(&current->connected_work);
+ else tbnet_disconnect_work(&current->disconnect_work);
+ return NULL;
+}
 int main(int argc,char **argv) {
  assert(argc==2); uuid_t local=1,remote=2;
  struct tb_xdomain xd={&local,&remote,42};
  struct net_device dev={.running=true};
  struct tbnet net={.dev=&dev,.xd=&xd,.connection_lock=PTHREAD_MUTEX_INITIALIZER};
  struct tb_service svc={.data=&net};dev.data=&net;current=&net;
+ struct ring tx={.hop=1},rx={.hop=2};net.tx_ring.ring=&tx;net.rx_ring.ring=&rx;
  packet.hdr.initiator_uuid=remote;packet.hdr.target_uuid=local;packet.hdr.route_lo=42;
  packet.hdr.type=strstr(argv[1],"logout")?TBIP_LOGOUT:TBIP_LOGIN;
- if(!strcmp(argv[1],"normal-drain")) {
+ if(strstr(argv[1],"-running")) {
+  worker_gate=!strcmp(argv[1],"login-running")?1:!strcmp(argv[1],"connected-running")?2:3;
+  running_work=worker_gate==1?&net.login_work.work:worker_gate==2?&net.connected_work:&net.disconnect_work;
+  if(worker_gate==2)net.login_sent=net.login_received=true;
+  assert(!pthread_create(&worker,NULL,call_worker,NULL));
+  pthread_mutex_lock(&gate_lock);while(!entered)pthread_cond_wait(&gate_cond,&gate_lock);pthread_mutex_unlock(&gate_lock);
+  tbnet_remove(&svc);
+ } else if(!strncmp(argv[1],"idle-",5)) {
+  dev.running=false;net.login_work.work.pending=net.connected_work.pending=net.disconnect_work.pending=true;
+  if(!strcmp(argv[1],"idle-remove"))tbnet_remove(&svc);
+  else {
+   assert(tbnet_suspend(&svc.dev)==0);assert(!pending(&net));
+   if(!strcmp(argv[1],"idle-resume")) { assert(tbnet_resume(&svc.dev)==0);assert(!pending(&net));tbnet_remove(&svc); }
+  }
+ } else if(!strcmp(argv[1],"normal-drain")) {
   net.login_work.work.pending=net.connected_work.pending=net.disconnect_work.pending=true;
   tbnet_remove(&svc);
  } else {

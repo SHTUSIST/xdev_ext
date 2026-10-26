@@ -11,9 +11,10 @@ HERE = Path(__file__).resolve().parent
 KERNEL = HERE.parents[4]
 
 def main():
-    text = (KERNEL / 'drivers/net/thunderbolt/main.c').read_text()
-    names = ['stop_login', 'tbnet_handle_packet', 'tbnet_stop',
-             'tbnet_remove', 'tbnet_suspend', 'tbnet_disconnect_work']
+    text = Path(os.environ.get('TB_NET_SOURCE', KERNEL / 'drivers/net/thunderbolt/main.c')).read_text()
+    names = ['stop_login', 'start_login', 'tbnet_tear_down', 'tbnet_handle_packet',
+             'tbnet_connected_work', 'tbnet_login_work', 'tbnet_disconnect_work',
+             'tbnet_stop', 'tbnet_remove', 'tbnet_suspend', 'tbnet_resume']
     # Include the actual common teardown helper if the production fix adds one.
     if 'static void tbnet_unregister_protocol(' in text:
         names.insert(1, 'tbnet_unregister_protocol')
@@ -28,7 +29,8 @@ def main():
         built = subprocess.run([os.environ.get('CC','gcc'), '-std=gnu11', '-O1', '-g', '-pthread', '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-unused-function', str(c), '-o',str(exe)], capture_output=True,text=True)
         if built.returncode:
             print('SETUP_COMPILE_ERROR\n'+built.stderr);return 2
-        cases = ['remove-login','remove-logout','suspend-login','suspend-logout','probe-logout','normal-drain']
+        cases = ['remove-login','remove-logout','suspend-login','suspend-logout','probe-logout','normal-drain','idle-remove','idle-suspend','idle-resume',
+                 'login-running','connected-running','disconnect-running']
         for case in cases:
             try:
                 ran = subprocess.run([str(exe),case],capture_output=True,text=True,timeout=8)
