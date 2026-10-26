@@ -1359,4 +1359,6 @@
 !/kernel/io_uring/family/xdev_ext_netfam.c
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/netfam_body_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/net_bind_order_test.py
+!/kernel/io_uring/family/xdev_ext_netfam_rel.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/netfam_rel_kfunc_test.py
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/class_table_source_test.py
