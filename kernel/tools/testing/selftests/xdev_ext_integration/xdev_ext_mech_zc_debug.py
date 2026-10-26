@@ -50,7 +50,9 @@ def debug_reports(text):
                 r'\S+-safe -> \S+-unsafe lock order detected|'
                 r'turning off the locking correctness validator|lockdep is turned off',
         atomic_sleep=r'sleeping function called from invalid context|scheduling while atomic',
-        kasan=r'BUG: KASAN', hung=r'blocked for more than')
+        kasan=r'BUG: KASAN', hung=r'blocked for more than',
+        rcu_stall=r'rcu_[A-Za-z0-9_]+ (?:self-detected stall|detected (?:expedited )?stalls) on '
+                  r'(?:CPU|CPUs/tasks)|rcu_[A-Za-z0-9_]+ kthread starved for')
     counts = dict.fromkeys((*patterns, 'diagnostic'), 0)
     for line in text.splitlines():
         matched = False

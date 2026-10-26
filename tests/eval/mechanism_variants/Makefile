@@ -25,7 +25,11 @@ check: $(BUILD)/test_create_capture $(BUILD)/test_umem_guard
 	$(MAKE) -C tests check
 	python3 -B test_helpers.py -v
 	python3 -B test_artifacts.py -v
+	python3 -B test_capture_transport.py -v
+	python3 -B test_export_old_ticket.py -v
 	python3 -B test_kvm_wiring.py -v
+	python3 -B test_old_ticket_cache.py -v
+	python3 -B test_trace_config.py -v
 	python3 -B test_decode.py -v
 	python3 -B test_decode_regressions.py -v
 	python3 -B test_driver_audit.py -v

@@ -480,6 +480,7 @@ if (( ! RUN_ONLY )); then
         cfg -e XDEV_EXT_MECH_IAA -e CRYPTO_DEFLATE
     fi
     if (( LIFECYCLE )); then cfg -e XDEV_EXT_MECH_CPU -e CRYPTO_DEFLATE -e VIRTIO_CONSOLE; fi
+    if (( MECHANISM_VARIANTS )); then cfg -e VIRTIO_CONSOLE; fi
     if (( FENCE_CHECK )); then cfg -e MODULES -e MODULE_UNLOAD -e DMA_SHARED_BUFFER; fi
     if (( XDOMAIN )); then
         cfg -e MODULES -e MODULE_UNLOAD -e MEMORY_HOTPLUG -e MEMORY_HOTREMOVE -e MIGRATION -e SPARSEMEM_VMEMMAP -e ZONE_DEVICE -e PCI_P2PDMA -e DEBUG_INFO_BTF -e DEBUG_INFO_BTF_MODULES -e XDEV_EXT_MECH_SOCKET -e KUNIT -e USB4_KUNIT_TEST -m USB4 -m XDEV_EXT_MECH_XDOMAIN
@@ -1417,6 +1418,12 @@ if (( LIFECYCLE )); then
     args+=(-device virtio-serial-pci
         -chardev "file,id=fanout_native,path=$EV/fanout-native.raw.log"
         -device virtserialport,chardev=fanout_native,name=xdev-fanout-native)
+fi
+if (( MECHANISM_VARIANTS )); then
+    grep -Fxq 'CONFIG_VIRTIO_CONSOLE=y' "$BUILD/.config"
+    args+=(-device virtio-serial-pci
+        -chardev "file,id=e2_artifacts,path=$(realpath "$EV")/e2-artifacts.raw.log"
+        -device virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts)
 fi
 if (( COMPAT )); then
     args+=(-drive "file=$SCRATCH/compat.raw,if=none,id=compat,format=raw,cache=none,aio=threads"

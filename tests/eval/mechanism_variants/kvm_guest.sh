@@ -7,6 +7,7 @@ source_block=$1 source_ng=$2
 bin=/opt/xdev_ext/e2
 out=/tmp/e2-capture
 export E2_PRIVATE_GUEST=yes
+export E2_EXPORT_TRANSPORT=virtio
 finish_e2() {
     status=$?
     trap - EXIT

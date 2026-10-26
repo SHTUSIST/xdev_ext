@@ -16,6 +16,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+import shlex
 from artifacts import extract
 from decode_trace import audit_collection,decode,decode_negative
 from guard import verify as verify_guards
@@ -40,23 +41,68 @@ def write_derived(path,data):
     else: path.write_bytes(data)
 
 
+def validate_trace_configs(capture):
+    """Qualify actual readback, including the pinned x86 ring page rounding."""
+    normalized = None
+    for name in ('reverse', 'gray', 'outside_window', 'reserved_cdw2'):
+        path = Path(capture) / (name + '-trace-config.txt')
+        try:
+            require(path.is_file() and not path.is_symlink() and path.stat().st_size <= 65536,
+                    'missing/oversized trace config: ' + name)
+            lines = path.read_text(encoding='ascii').splitlines()
+        except (OSError, UnicodeError) as error:
+            raise ValueError('unreadable trace config: ' + name) from error
+        actual = {}
+        for line in lines:
+            require(line.count('=') == 1, 'malformed trace config: ' + name)
+            key, value = line.split('=', 1)
+            require(key not in actual, 'duplicate trace config field: ' + name)
+            actual[key] = value
+        require(set(actual) == {'buffer_size_kb', 'current_tracer', 'trace_clock'},
+                'trace config fields differ: ' + name)
+        size = actual['buffer_size_kb']
+        require(re.fullmatch(r'[0-9]+', size) is not None and 4096 <= int(size) < 4100,
+                'actual trace buffer capacity differs: ' + name)
+        clock = actual['trace_clock'].split()
+        require(actual['current_tracer'] == 'nop' and
+                (clock == ['mono'] or clock.count('[mono]') == 1 and
+                 sum(token.startswith('[') or token.endswith(']') for token in clock) == 1),
+                'actual trace tracer/clock differs: ' + name)
+        current = {'buffer_size_kb': int(size), 'current_tracer': 'nop', 'trace_clock': 'mono'}
+        require(normalized is None or current == normalized,
+                'trace capture configurations differ between cases: ' + name)
+        normalized = current
+    return normalized
+
+
 def validate(source,scratch,evidence):
     source=source.resolve();scratch=scratch.resolve();evidence=evidence.resolve()
     console=(evidence/'guest.log').read_text()
+    # Use the production shared detector on the entire console, including
+    # reports emitted before, during, or after artifact export.
+    debug_path=source/'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py'
+    debug_spec=importlib.util.spec_from_file_location('e2_debug',debug_path)
+    debug=importlib.util.module_from_spec(debug_spec);debug_spec.loader.exec_module(debug)
+    debug.check_console(console)
+    require('E2_ARTIFACT_' not in console,'artifact framing/payload found on UART console')
     require((evidence/'qemu.exit').read_text().strip()=='0','QEMU did not exit successfully')
     for marker in ('XDEV_EXT_ZC_GUEST_EXIT=0','E2_GUEST_CAPTURE_EXIT=0',
                    'E2_EXECUTION_COMPLETE=PASS scope=guest-correctness performance_claim=none'):
         require(console.splitlines().count(marker)==1,'missing/duplicate actual completion marker: '+marker)
-    require(not re.search(r'BUG:|WARNING:|Kernel panic|Oops:|E2 STOP failed',console),'guest kernel/STOP diagnostic failure')
+    require('E2 STOP failed' not in console,'guest STOP diagnostic failure')
     for stem in ('source','destination'):
         before=scratch/(stem+'-before.raw');after=scratch/(stem+'.raw')
         require(before.stat().st_size==after.stat().st_size and sha(before)==sha(after),'whole private '+stem+' image changed')
     capture=evidence/'e2-capture'
+    transport=evidence/'e2-artifacts.raw.log'
+    require(not transport.is_symlink(),'artifact transport source is a symlink')
+    require(transport.is_file() and transport.stat().st_size<=72*1024*1024,'missing/oversized artifact transport')
+    stream=transport.read_bytes().decode('ascii')
     with tempfile.TemporaryDirectory(prefix='.e2-reextract-',dir=evidence) as td:
         extracted=Path(td)/'capture'
-        files=extract(console,extracted)
+        files=extract(stream,extracted,strict=True)
         if capture.exists():
-            for name,data in files.items(): require((capture/name).read_bytes()==data,'archived guest artifact differs from serial bytes: '+name)
+            for name,data in files.items(): require((capture/name).read_bytes()==data,'archived guest artifact differs from transport bytes: '+name)
         else:
             capture.mkdir(mode=0o700)
             for name,data in files.items(): (capture/name).write_bytes(data)
@@ -65,6 +111,17 @@ def validate(source,scratch,evidence):
     require((scratch/'build/xdev-ext-e2-mode.txt').read_text().splitlines()==['mechanism_variants=1','source_commit='+sha_source],'dedicated build identity missing')
     subprocess.run(['sha256sum','-c',str(scratch/'build/xdev-ext-artifacts.sha256')],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     subprocess.run(['sha256sum','-c',str(scratch/'build/xdev-ext-e2-sources.sha256')],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
+    config_lines=(scratch/'build/.config').read_text().splitlines()
+    require('CONFIG_VIRTIO_CONSOLE=y' in config_lines,'E2 kernel lacks built-in virtio console')
+    # The archived command is shell-quoted by the harness; parse its actual
+    # arguments rather than searching a substring that might occur in a path.
+    qemu_args=shlex.split((evidence/'qemu.command').read_text())
+    for option,value in (('-device','virtio-serial-pci'),
+                         ('-chardev','file,id=e2_artifacts,path='+str(evidence/'e2-artifacts.raw.log')),
+                         ('-device','virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts')):
+        require(sum(a==option and b==value for a,b in zip(qemu_args,qemu_args[1:]))==1,
+                'missing/ambiguous actual E2 virtio transport argument: '+value)
+    validate_trace_configs(capture)
     window=(capture/'source-window.bin').read_bytes()
     require(len(window)==32768,'missing complete real source window')
     with (scratch/'source-before.raw').open('rb') as image:

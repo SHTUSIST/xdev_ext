@@ -83,6 +83,35 @@ class AssertionSelfcheck(unittest.TestCase):
         with patch.dict(os.environ, {"E2_CAPTURE_DIR": str(directory)}):
             contract.GuestCapture("test_actual_bpf_provider_and_successor_bytes").test_actual_bpf_provider_and_successor_bytes()
 
+    def test_fresh_zero_generation_keeps_native_claim_identity(self):
+        # Current lifecycle claims retain generation zero on a fresh frame.
+        # The claim token/ticket remains nonzero; the extracted generation need not.
+        with tempfile.TemporaryDirectory(prefix="e2-fresh-zero-") as temporary:
+            directory = Path(temporary)
+            data = fixture(directory)
+            self.check_capture(directory, data)
+            for run in data["runs"].values():
+                path = directory / run["events"]
+                events = json.loads(path.read_text())
+                for event in events:
+                    event["frame_generations"] = [0, 0, 0]
+                path.write_text(json.dumps(events))
+            self.check_capture(directory, data)
+            path = directory / data["runs"]["gray"]["events"]
+            zero_events = json.loads(path.read_text())
+            for mutation in ("completion_mismatch", "negative", "string"):
+                with self.subTest(mutation=mutation):
+                    events = copy.deepcopy(zero_events)
+                    if mutation == "completion_mismatch":
+                        events[2]["frame_generations"][0] = 1
+                    else:
+                        value = -1 if mutation == "negative" else "0"
+                        for event in events:
+                            event["frame_generations"] = [value, value, value]
+                    path.write_text(json.dumps(events))
+                    with self.assertRaises(AssertionError):
+                        self.check_capture(directory, data)
+
     def test_validation_before_ticket_and_stage_local_generation(self):
         with tempfile.TemporaryDirectory(prefix="e2-stage-identity-") as temporary:
             directory = Path(temporary)

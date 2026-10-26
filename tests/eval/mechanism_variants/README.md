@@ -111,8 +111,8 @@ native ticket into an earlier raw validation event.
 
 `provider_accept` and `native_complete` additionally carry native request
 `cookie` and must match on `(session_id,batch_id,request_id,stage,ticket,cookie,
-frames,frame_generations)`. Their ticket, cookie and acquired frame generations
-are nonzero; NVMe is stage 0. `native_complete` must be captured at the matching
+frames,frame_generations)`. Their ticket and cookie are nonzero; acquired frame generations are unsigned
+64-bit values and may be zero for a fresh frame. NVMe is stage 0. `native_complete` must be captured at the matching
 native callback, before handoff releases or republishes its claims. This
 preserves the immutable identity of each actual accepted operation.
 
