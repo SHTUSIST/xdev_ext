@@ -21,9 +21,17 @@ begin)
     # integrator can preserve diagnostics and remove this exact instance.
     printf '%s\n' "$instance" > "$state"
     echo 0 > "$instance/tracing_on"
-    echo 1024 > "$instance/buffer_size_kb"
+    # 8,806 records * 256 bytes fits even if all records land on one CPU.
+    # Keep all mapping/registration rows: this is a bounded 4 MiB per CPU.
+    echo 4096 > "$instance/buffer_size_kb"
+    echo nop > "$instance/current_tracer"
+    echo mono > "$instance/trace_clock"
     : > "$instance/trace"
     echo 1 > "$instance/events/xdev_ext/native_event/enable"
+    for control in buffer_size_kb current_tracer trace_clock; do
+        printf '%s=' "$control"
+        cat "$instance/$control"
+    done > "$out/$name-trace-config.txt"
     cat "$instance/events/xdev_ext/native_event/format" > "$out/$name-event-format.txt"
     echo 1 > "$instance/tracing_on"
     printf 'E2_BEGIN_%s\n' "$name" > "$instance/trace_marker"

@@ -18,11 +18,20 @@ END=re.compile(rf'E2_ARTIFACT_END name=({NAME})$')
 TOTAL=re.compile(r'E2_ARTIFACT_SET_END files=(\d+) bytes=(\d+) manifest_sha256=([a-f0-9]{64})$')
 
 
-def extract(console,out):
+def extract(console,out,*,strict=False):
     if len(console)>72*1024*1024:
         raise ValueError('oversized serial transcript')
-    files={}; current=None; chunks=[]; total=None; length=0
-    for line in console.splitlines():
+    if strict:
+        # Dedicated transport has only LF-terminated ASCII protocol lines.
+        # splitlines() would silently discard CR and other line separators.
+        if (not console or not console.isascii() or not console.endswith('\n')
+                or any(ord(c)<32 and c!='\n' for c in console) or '\x7f' in console):
+            raise ValueError('invalid strict artifact transport bytes')
+        lines=console.split('\n')[:-1]
+    else:
+        lines=console.splitlines()
+    files={}; current=None; chunks=[]; total=None; length=0; encoded_length=0
+    for line in lines:
         if line.startswith('E2_ARTIFACT_BEGIN'):
             match=BEGIN.fullmatch(line)
             if not match or current is not None or total is not None:
@@ -30,7 +39,7 @@ def extract(console,out):
             name,size,digest=match.groups(); size=int(size)
             if name in files or size>MAX_FILE or len(files)>=MAX_FILES:
                 raise ValueError('duplicate or oversized artifact')
-            current=(name,size,digest); chunks=[]
+            current=(name,size,digest); chunks=[]; encoded_length=0
         elif line.startswith('E2_ARTIFACT_DATA'):
             if current is None or total is not None or not line.startswith('E2_ARTIFACT_DATA '):
                 raise ValueError('data outside artifact frame')
@@ -38,7 +47,8 @@ def extract(console,out):
             if len(chunk)>76 or not re.fullmatch(r'[A-Za-z0-9+/]*={0,2}',chunk):
                 raise ValueError('invalid artifact base64 line')
             chunks.append(chunk)
-            if sum(map(len,chunks))>((current[1]+2)//3)*4:
+            encoded_length+=len(chunk)
+            if encoded_length>((current[1]+2)//3)*4:
                 raise ValueError('artifact exceeds declared size')
         elif line.startswith('E2_ARTIFACT_END'):
             match=END.fullmatch(line)
@@ -60,6 +70,8 @@ def extract(console,out):
             if not match or total is not None or current is not None:
                 raise ValueError('invalid/duplicate artifact set end')
             total=match.groups()
+        elif strict:
+            raise ValueError('nonprotocol bytes in strict artifact transport')
     if current is not None or total is None or 'export.manifest' not in files:
         raise ValueError('incomplete exported artifact set')
     count,size,digest=total

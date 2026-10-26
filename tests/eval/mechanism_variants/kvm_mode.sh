@@ -11,6 +11,8 @@ e2_record_sources() {
     (cd "$SOURCE_GIT_ROOT"
         git ls-files -z -- tests/eval/mechanism_variants kernel/include/trace/events/xdev_ext.h \
             kernel/io_uring kernel/drivers/nvme/host/xdev_ext_mech_nvme.c kernel/net/xdp/xsk.c \
+            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
+            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py \
             | while IFS= read -r -d '' path; do sha256sum "$SOURCE_GIT_ROOT/$path"; done
     ) > "$BUILD/xdev-ext-e2-sources.sha256"
     [[ -s "$BUILD/xdev-ext-e2-sources.sha256" ]]
@@ -45,7 +47,7 @@ e2_verify_identity() {
     e2_paths
     grep -Fxq mechanism_variants=1 "$BUILD/xdev-ext-e2-mode.txt"
     grep -Fxq "source_commit=$SOURCE_COMMIT" "$BUILD/xdev-ext-e2-mode.txt"
-    for symbol in TRACING FTRACE BPF_EVENTS XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do
+    for symbol in TRACING FTRACE BPF_EVENTS XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY VIRTIO_CONSOLE; do
         grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"
     done
     sha256sum -c "$BUILD/xdev-ext-e2-sources.sha256" > "$EV/e2-reused-source-check.log"
@@ -62,7 +64,7 @@ e2_stage() {
     cp "$E2_OUT/bpftool" "$ROOT/usr/bin/bpftool"
     mkdir -p "$EV/e2-software"
     cp "$E2_OUT/software-old-ticket/"* "$EV/e2-software/"
-    for app in cp rm seq dd sha256sum base64 gzip awk sort; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+    for app in cp rm seq dd sha256sum base64 gzip awk sort stat; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
 }
 e2_images() {
     python3 - "$SCRATCH" "$E2_SOURCE" "$IMAGE_BYTES" <<'PY'
