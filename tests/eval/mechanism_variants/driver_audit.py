@@ -49,15 +49,23 @@ def audit(raw,session_id,final_stage=1):
         if binding['address']+82!=end['address'] or binding['bytes']!=end['bytes']+82:
             raise ValueError('descriptor wire span does not match terminal payload plus the actual NXP2 header')
     pools={b['cookie'] for b in binds}
-    journal=[];excluded=[]
+    journal=[];excluded=[];backing_diagnostics=[]
     for number,line,f in tokens:
         if f.get('session_id')!='0' or f.get('class_id')!='2':continue
-        try: pool=int(f.get('cookie','-1'))
-        except ValueError as exc:raise ValueError('invalid driver pool identity') from exc
-        if pool not in pools:
-            excluded.append(dict(raw_line=number,pool=pool,phase=f.get('phase'),reason='no in-scope descriptor binding for this pool'))
-            continue
+        # Validate ABI and numeric widths before an out-of-scope exclusion.
+        # In particular an overflowing cookie is not a different valid pool.
         r=parse(line)[0];r['raw_line']=number
+        pool=r['cookie']
+        if pool not in pools:
+            excluded.append(dict(raw_line=number,pool=pool,phase=r['phase'],reason='no in-scope descriptor binding for this pool'))
+            continue
+        if r['origin']=='U' and r['phase'] in ('pool_bind','region_span','dma_span','dma_seal'):
+            if r['status'] or r['accepted']!=1:
+                raise ValueError('failed backing diagnostic on the bound pool')
+            backing_diagnostics.append(dict(raw_line=number,raw=line,origin=r['origin'],
+                phase=r['phase'],pool=pool,
+                reason='auxiliary backing diagnostic; not a native command or a DMA-map certification'))
+            continue
         if r['origin']!='K' or r['phase'] not in ('native_submit','native_complete') or r['status'] or r['accepted']!=1:
             raise ValueError('failed/unknown measured driver event on the bound pool')
         journal.append(r)
@@ -94,4 +102,4 @@ def audit(raw,session_id,final_stage=1):
         raise ValueError('incomplete actual driver accept/complete cohort')
     return dict(scope='actual descriptor_bind pools',session_id=session_id,pools=sorted(pools),
         native_submits=len(submitted),native_completes=len(completed),bindings=binding_report,
-        excluded_other_pool_rows=excluded)
+        excluded_other_pool_rows=excluded,excluded_backing_diagnostics=backing_diagnostics)

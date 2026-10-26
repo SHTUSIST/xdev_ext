@@ -34,6 +34,9 @@ check: $(BUILD)/test_create_capture $(BUILD)/test_umem_guard
 	python3 -B test_decode_regressions.py -v
 	python3 -B test_driver_audit.py -v
 	python3 -B test_driver_identity.py -v
+	python3 -B test_driver_backing_diagnostics.py -v
+	python3 -B test_decode_session_bind.py -v
+	python3 -B test_zero_generation.py -v
 	python3 -B test_archive_relocation.py -v
 	python3 -B test_guard.py -v
 	python3 -B test_inspect_create.py -v
