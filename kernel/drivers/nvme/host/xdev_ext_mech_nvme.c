@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_requester.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <linux/capability.h>
 #include "nvme.h"
@@ -913,21 +914,7 @@ static int nvme_xdev_ext_peer_lease(struct file *file, struct pci_dev *pdev,
 				    enum dma_data_direction dir,
 				    struct xdev_ext_peer_fd_lease *l)
 {
-	u32 shift = 31, len = left;
-	int ret;
-
-	for (;;) {
-		ret = xdev_ext_peer_file_acquire(file, pdev, generation, off, len,
-						 dir, l);
-		if (ret != -ERANGE)
-			return ret;
-		while (shift >= NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT &&
-		       ALIGN_DOWN(off, 1ULL << shift) + (1ULL << shift) - off >= len)
-			shift--;
-		if (shift < NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT)
-			return ret;
-		len = ALIGN_DOWN(off, 1ULL << shift) + (1ULL << shift) - off;
-	}
+	return xdev_ext_peer_lease_split(file, pdev, generation, off, left, dir, l);
 }
 
 /*
