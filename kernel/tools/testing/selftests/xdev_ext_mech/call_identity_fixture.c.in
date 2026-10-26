@@ -104,6 +104,21 @@ static u32 crc32c(u32 seed, const void *bytes, size_t length)
 	return seed ^ (u32)length;
 }
 
+/* The ordinary callback identity suite does not run WORKER_PROTOCOL.
+ * Supply its external stage/session boundary so the complete production
+ * invoke still compiles; accidentally reaching the new boundary is fatal.
+ * The separate XDOMAIN identity suite exercises the real protocol authority.
+ */
+struct xdev_ext_mech_stage {
+ struct xdev_ext_mech_session *s;
+ u32 class_id;
+};
+static u64 xdev_ext_mech_session_id(const struct xdev_ext_mech_session *s)
+{
+ (void)s;
+ abort();
+}
+
 /* PRODUCTION */
 
 #define CHECK(condition) do { \

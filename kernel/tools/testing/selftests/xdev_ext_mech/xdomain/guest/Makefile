@@ -8,7 +8,7 @@ CLANG ?= clang
 BPFTOOL ?= bpftool
 HOSTCC ?= gcc
 LDLIBS ?= -lbpf -lelf -lz
-BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86
+BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -mcpu=v3 -D__TARGET_ARCH_x86
 
 all:
 	mkdir -p $(OUT)
@@ -20,5 +20,8 @@ all:
 	done
 	$(CLANG) $(BPF_CFLAGS) -I$(OUT) -I$(KERNEL_SRC)/tools/xdev_ext_mech \
 		-c $(KERNEL_SRC)/tools/xdev_ext_mech/xdomain_peer.bpf.c -o $(OUT)/xdomain_peer.bpf.o
+
+	$(CLANG) $(BPF_CFLAGS) -I$(OUT) -I$(KERNEL_SRC)/tools/xdev_ext_mech \
+		-c $(KERNEL_SRC)/tools/xdev_ext_mech/xdomain_check.bpf.c -o $(OUT)/xdomain_check.bpf.o
 
 .PHONY: all

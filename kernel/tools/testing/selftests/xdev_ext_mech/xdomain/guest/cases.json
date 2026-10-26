@@ -16,6 +16,11 @@
       "requirement": "full reference build/complete program including both private kfuncs attaches"
     },
     {
+      "name": "observer-attach",
+      "expected": "PASS",
+      "requirement": "full checker object reaches the matching real verifier and attaches, with diagnostics retained and link detached"
+    },
+    {
       "name": "link-1-enodev",
       "expected": "PASS",
       "requirement": "CREATE token 1 returns -ENODEV"

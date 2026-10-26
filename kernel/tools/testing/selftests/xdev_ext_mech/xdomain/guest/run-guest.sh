@@ -19,10 +19,21 @@ dmesg > /tmp/xdomain-kunit.log
 for name in active_unregister next_unregister data_lifetime callback_registration reregister return_semantics; do
     grep -Eq "ok [0-9]+ .*tb_test_protocol_${name}([[:space:]]|$)" /tmp/xdomain-kunit.log || setup "KUnit-$name"
 done
+# Each full diagnostic loader releases its class slot before the next object.
+# The same class cannot register two struct_ops instances simultaneously.
+for role in reference observer; do
+    object=xdomain_peer.bpf.o
+    [ "$role" = reference ] || object=xdomain_check.bpf.o
+    echo "XDOMAIN_OBJECT_BEGIN name=$role-attach expected=ALLOW"
+    ./load "./$object" xdomain_peer_ops > "/tmp/$role.log" 2>&1 || { cat "/tmp/$role.log"; fail "$role-attach"; }
+    cat "/tmp/$role.log"
+    echo "XDOMAIN_OBJECT_END name=$role-attach loader_exit=0"
+    pass "$role-attach"
+done
+# Keep just the reference registered for the following CREATE probes.
 pin=/sys/fs/bpf/xdomain-reference
-./xdev_ext_mech_ctl attach --obj ./xdomain_peer.bpf.o --map xdomain_peer_ops --pin "$pin" > /tmp/reference.log 2>&1 || { cat /tmp/reference.log; fail reference-attach; }
-cat /tmp/reference.log
-pass reference-attach
+./xdev_ext_mech_ctl attach --obj ./xdomain_peer.bpf.o --map xdomain_peer_ops --pin "$pin" > /tmp/reference-probe.log 2>&1 || { cat /tmp/reference-probe.log; setup reference-probe-attach; }
+cat /tmp/reference-probe.log
 ./xdev_ext_mech_ctl attach --obj ./nvme_s0.bpf.o --map nvme_s0_ops --pin /sys/fs/bpf/xdomain-nvme > /tmp/nvme.log 2>&1 || { cat /tmp/nvme.log; setup nvme-attach; }
 for token in 1 0; do
     expect=-19 name=link-1-enodev

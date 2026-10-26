@@ -110,8 +110,8 @@ class VerdictContract(unittest.TestCase):
 
 class FrozenInventory(unittest.TestCase):
     def test_matrix_has_all_forty_unique_rows(self):
-        self.assertEqual(len(NAMES), 40)
-        self.assertEqual(len(set(NAMES)), 40)
+        self.assertEqual(len(NAMES), 41)
+        self.assertEqual(len(set(NAMES)), 41)
         self.assertEqual(MANIFEST['scope'], SCOPE)
         for symbol in ('info', 'verdict'):
             for member in ('build', 'prepare', 'complete'):
@@ -208,7 +208,7 @@ p.write_text(''.join(k+'='+v+'\\n' for k,v in values.items()))
             (root / 'debug.py').write_text('# Debug profile validation is a separate contract.\n')
             prefix = '''set -euo pipefail
 SRC=$1; BUILD=$SRC/build; EV=$SRC; DEBUG_HELPER=$SRC/debug.py
-XDOMAIN=1; RUN_ONLY=0; CE_SIM=0; LIFECYCLE=0; FENCE_CHECK=0
+XDOMAIN=1; MECHANISM_VARIANTS=0; RUN_ONLY=0; CE_SIM=0; LIFECYCLE=0; FENCE_CHECK=0
 SOCKET_REQUIRED=0; COMPAT=0; PEER=0; DEBUG_LOCKING=1; PREPARE_ONLY=1
 PROVIDER_CASE=normal
 verify_socket_config() { :; }
