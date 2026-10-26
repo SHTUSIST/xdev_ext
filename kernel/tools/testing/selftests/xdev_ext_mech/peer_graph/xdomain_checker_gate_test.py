@@ -104,7 +104,8 @@ print('/* controlled BTF dump boundary */')
         self.assertIsNotNone(build, 'guest BPF build invocation is missing')
         self.assertIn('VMLINUX_BTF="$BUILD/vmlinux"', build.group())
 
-    def run_guest(self, *, missing=False, reject=False):
+    def run_guest(self, *, missing=False, reject=False, matrix_name=None,
+                  diagnostic='', loader_exit=1):
         with tempfile.TemporaryDirectory(prefix='xd-check-guest-') as temp:
             root = Path(temp)
             bindir = root / 'bin'
@@ -145,6 +146,10 @@ def save(): state.write_text(json.dumps(slots))
 if command == 'load':
     if len(args) != 2: sys.exit(3)
     obj, mapname = pathlib.Path(args[0]), args[1]
+    if obj.name == os.environ.get('GATE_MATRIX_NAME', '') + '.bpf.o':
+        if not obj.is_file() or mapname != 'probe_ops': sys.exit(3)
+        print(os.environ['GATE_DIAGNOSTIC'], file=sys.stderr, flush=True)
+        sys.exit(int(os.environ['GATE_LOADER_EXIT']))
     print('VERIFIER_DIAGNOSTIC object=' + obj.name, flush=True)
     print('libbpf: DEBUG ' + 'V' * 24000 + ' DEBUG_END object=' + obj.name, file=sys.stderr, flush=True)
     if not obj.is_file(): sys.exit(3)
@@ -185,7 +190,9 @@ elif args[0] == 'xdomain-probe':
 '''
             executable(root / 'xdev_ext_mech_ctl', loader_boundary)
             executable(root / 'load', loader_boundary)
-            (root / 'matrix.txt').write_text('')
+            (root / 'matrix.txt').write_text(matrix_name + ' DENY\n' if matrix_name else '')
+            if matrix_name:
+                (root / (matrix_name + '.bpf.o')).write_bytes(b'negative-object-boundary')
             for name in (*OBJECTS, 'nvme_s0.bpf.o'):
                 if not (missing and name == 'xdomain_check.bpf.o'):
                     (root / name).write_bytes(b'object-boundary')
@@ -197,7 +204,9 @@ elif args[0] == 'xdomain-probe':
             (root / 'run.sh').write_text(script)
             env = dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'],
                        XDEV_EXT_XDOMAIN_GUEST='1', GATE_ROOT=str(root),
-                       GATE_TRACE=str(trace), GATE_REJECT='1' if reject else '0')
+                       GATE_TRACE=str(trace), GATE_REJECT='1' if reject else '0',
+                       GATE_MATRIX_NAME=matrix_name or '', GATE_DIAGNOSTIC=diagnostic,
+                       GATE_LOADER_EXIT=str(loader_exit))
             result = subprocess.run(['sh', str(root / 'run.sh'), str(root)],
                                     env=env, capture_output=True, text=True, timeout=10)
             self.assertTrue(trace.exists(), 'guest did not reach loader boundary: ' + result.stdout + result.stderr)
@@ -255,6 +264,43 @@ elif args[0] == 'xdomain-probe':
         self.assertNotEqual(result.returncode, 0, 'observer loader rejection silently passed')
         self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=observer-attach', result.stdout)
         self.assertIn('VERIFIER_DIAGNOSTIC object=xdomain_check.bpf.o', result.stdout)
+
+    def test_sleepable_exact_unsupported_member_is_real_verifier_deny(self):
+        name = 'xdomain-complete-sleepable-deny'
+        diagnostic = ('-- BEGIN PROG LOAD LOG --\n'
+                      'attach to unsupported member complete of struct xdev_ext_xdomain_mech_ops\n'
+                      'processed 0 insns (limit 1000000)\n'
+                      '-- END PROG LOAD LOG --')
+        result, calls = self.run_guest(matrix_name=name, diagnostic=diagnostic)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('XDOMAIN_OBJECT_END name=' + name + ' loader_exit=1', result.stdout)
+        self.assertIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+        self.assertIn(diagnostic, result.stdout, 'complete verifier log must remain visible')
+        self.assertIn(['load', './' + name + '.bpf.o', 'probe_ops'], calls)
+
+    def test_unsupported_member_exception_is_exact_and_never_hides_setup_failure(self):
+        exact = 'attach to unsupported member complete of struct xdev_ext_xdomain_mech_ops'
+        # Literal counterexamples freeze the exception's narrow scope. A real
+        # denial diagnostic cannot compensate for an ELF/BTF/setup failure.
+        cases = [
+            ('xdomain-complete-sleepable-deny', '', 1),
+            ('xdomain-complete-sleepable-deny',
+             'attach to unsupported member build of struct xdev_ext_xdomain_mech_ops', 1),
+            ('xdomain-complete-sleepable-deny',
+             'attach to unsupported member complete of struct xdev_ext_nvme_mech_ops', 1),
+            ('helper-timer-init-deny', exact, 1),
+            ('xdomain-complete-sleepable-deny', exact + '\nfailed to open ELF object', 1),
+            ('xdomain-complete-sleepable-deny', exact + '\nfailed to find valid kernel BTF', 1),
+            ('xdomain-complete-sleepable-deny', exact + '\nXDOMAIN_SETUP_FAIL missing module', 1),
+            ('xdomain-complete-sleepable-deny', exact, 3),
+        ]
+        for name, diagnostic, code in cases:
+            with self.subTest(name=name, diagnostic=diagnostic, loader_exit=code):
+                result, _ = self.run_guest(matrix_name=name, diagnostic=diagnostic,
+                                           loader_exit=code)
+                self.assertNotEqual(result.returncode, 0,
+                                    'unrecognized denial/setup was accepted: ' + result.stdout)
+                self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
 
     def test_required_inventory_names_observer(self):
         cases = json.loads((GUEST / 'cases.json').read_text())['cases']

@@ -56,7 +56,14 @@ while read -r name expected; do
     else
         [ "$rc" = 1 ] || setup "$name-loader-exit-$rc"
         if grep -Eiq 'not found in kernel BTF|failed to find|failed to open|invalid ELF|relocation.*failed|XDOMAIN_SETUP_FAIL' "/tmp/$name.log"; then setup "$name-prerequisite"; fi
+        if [ "$name" = xdomain-complete-sleepable-deny ] &&
+           grep -Fxq 'attach to unsupported member complete of struct xdev_ext_xdomain_mech_ops' "/tmp/$name.log" &&
+           grep -Fq -- '-- BEGIN PROG LOAD LOG --' "/tmp/$name.log" &&
+           grep -Fq -- '-- END PROG LOAD LOG --' "/tmp/$name.log"; then
+            : # Exact verifier member rejection for this one sleepable probe.
+        else
         grep -Eiq 'not allowed|invalid (mem|bpf_context|access|indirect)|unknown func|cannot call|uninitialized|unbounded memory|read-only|readonly|rdonly_mem|write into map forbidden|R[0-9]+.*(invalid|offset|outside)|sleepable.*(not|unsupported|cannot)|not sleepable|helper call is not allowed' "/tmp/$name.log" || setup "$name-no-verifier-diagnostic"
+        fi
     fi
     pass "$name"
 done < matrix.txt
