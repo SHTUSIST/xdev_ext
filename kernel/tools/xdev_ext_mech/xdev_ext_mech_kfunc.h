@@ -67,4 +67,12 @@ extern int bpf_xdev_ext_rel_policy(const struct xdev_ext_mech_ctx *ctx, void *po
 extern __u8 *bpf_xdev_ext_rel_tx_view(const struct xdev_ext_mech_ctx *ctx,
                                     const size_t rdonly_buf_size) __ksym;
 
+/* XDOMAIN COMPLETE/WORKER_PROTOCOL only. Both sized buffers must be
+ * initialized writable local records, including the const verdict input.
+ */
+extern int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *ctx,
+				   void *info, __u32 info__sz) __ksym;
+extern int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
+				      const void *verdict, __u32 verdict__sz) __ksym;
+
 #endif /* XDEV_EXT_MECH_KFUNC_H */

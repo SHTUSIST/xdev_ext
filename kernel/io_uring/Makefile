@@ -39,3 +39,5 @@ obj-$(CONFIG_XDEV_EXT_MECH_SOCKET) += xdev_ext_mech_socket.o
 
 obj-$(CONFIG_XDEV_EXT_MECH_CPU) += xdev_ext_mech_cpu.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_policy.o
+
+obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech_xdomain_kfunc.o

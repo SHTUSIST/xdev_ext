@@ -147,6 +147,7 @@ XDEV_EXT_MECH_OPS_TYPE(xdev_ext_cpu_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_socket_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_net_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_user_mech_ops);
+XDEV_EXT_MECH_OPS_TYPE(xdev_ext_xdomain_mech_ops);
 
 /*
  * A frame resolved to kernel memory.  [kaddr, kaddr + frame_size) is one
@@ -170,6 +171,12 @@ struct xdev_ext_mech_frame {
  * has returned, so nothing is checked and then changed.
  */
 #define XDEV_EXT_MECH_CALL_MAGIC	0x55424d43U	/* "UBMC" */
+
+/* Invocation-stack storage; the kfunc copies bytes and never retains BPF memory. */
+struct xdev_ext_xdomain_proto_result {
+	struct xdev_ext_xdomain_proto_verdict verdict;
+	__u32 calls;
+};
 
 struct xdev_ext_mech_call {
 	struct xdev_ext_mech_ctx ctx;
@@ -197,6 +204,7 @@ struct xdev_ext_mech_call {
 	u32 cqe_cap;
 	u32 *out_len;			/* compute only: per-frame output lengths */
 	s32 len_delta;			/* compute only: declared change D */
+	struct xdev_ext_xdomain_proto_result *xdomain;
 };
 
 /* Any context, current callback only: check identity before reading the envelope.
@@ -237,6 +245,7 @@ struct xdev_ext_mech_call_args {
 	u32 cqe_cap;
 	u32 *out_len;
 	s32 len_delta;
+	struct xdev_ext_xdomain_proto_result *xdomain;
 };
 
 /*
