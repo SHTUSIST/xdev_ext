@@ -124,6 +124,6 @@ for match in re.finditer(r'^XDOMAIN_OBJECT_BEGIN name=([a-z0-9-]+)[^\n]*\n(.*?)^
     (root/(match[1]+'.verifier.log')).write_text(match[0]+'\n')
 PY
 [[ "$qrc" == 0 ]]
-grep -Fxq 'XDEV_EXT_XDOMAIN_GUEST_EXIT=0' "$EV/guest.log"
+grep -Eq $'^XDEV_EXT_XDOMAIN_GUEST_EXIT=0\r?$' "$EV/guest.log"
 python3 -I "$SOURCE/$REL/verdict.py" "$EV/guest.log" >"$EV/result.json"
 echo XDEV_EXT_XDOMAIN_KVM=PASS

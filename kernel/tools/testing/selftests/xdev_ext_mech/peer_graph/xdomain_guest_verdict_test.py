@@ -315,6 +315,45 @@ class ActualRunnerDependencies(unittest.TestCase):
                                'fixture', str(binary), str(destination)],
                               text=True, capture_output=True)
 
+    def terminal_fragment(self, qemu_exit, raw):
+        start = self.runner_source.find('[[ "$qrc" == 0 ]]')
+        self.assertGreaterEqual(start, 0, 'actual host QEMU status gate missing')
+        end = self.runner_source.find('\npython3 -I "$SOURCE/$REL/verdict.py"', start)
+        self.assertGreater(end, start, 'actual host verdict invocation boundary missing')
+        fragment = self.runner_source[start:end]
+        with tempfile.TemporaryDirectory(prefix='x7-terminal-raw-') as temporary:
+            root = Path(temporary)
+            log = root / 'guest.log'
+            log.write_bytes(raw)
+            result = subprocess.run(['bash', '-c', 'set -euo pipefail\nqrc=$1\nEV=$2\n' + fragment,
+                                     'fixture', str(qemu_exit), str(root)],
+                                    text=True, capture_output=True)
+            self.assertEqual(log.read_bytes(), raw, 'terminal gate must preserve the original guest-log bytes')
+            return result
+
+    def test_actual_host_terminal_gate_accepts_exact_lf_and_single_crlf_exit_zero(self):
+        for raw in (b'boot chatter\nXDEV_EXT_XDOMAIN_GUEST_EXIT=0\n',
+                    b'boot chatter\r\nXDEV_EXT_XDOMAIN_GUEST_EXIT=0\r\n'):
+            with self.subTest(raw=raw):
+                result = self.terminal_fragment(0, raw)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_actual_host_terminal_gate_rejects_bad_qemu_status_missing_or_nonexact_exit(self):
+        cases = (
+            (1, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=0\n'),
+            (124, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=0\r\n'),
+            (0, b'boot chatter only\r\n'),
+            (0, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=1\r\n'),
+            (0, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=00\r\n'),
+            (0, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=0suffix\r\n'),
+            (0, b'prefix XDEV_EXT_XDOMAIN_GUEST_EXIT=0\r\n'),
+            (0, b'XDEV_EXT_XDOMAIN_GUEST_EXIT=0\r\r\n'),
+        )
+        for qemu_exit, raw in cases:
+            with self.subTest(qemu_exit=qemu_exit, raw=raw):
+                result = self.terminal_fragment(qemu_exit, raw)
+                self.assertNotEqual(result.returncode, 0, 'invalid terminal record accepted')
+
     def test_actual_static_busybox_needs_no_libraries(self):
         elf = subprocess.run(['readelf', '-l', '/bin/busybox'], text=True, capture_output=True)
         self.assertEqual(elf.returncode, 0, elf.stderr)
