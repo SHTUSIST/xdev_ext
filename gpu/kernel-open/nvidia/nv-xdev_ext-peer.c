@@ -75,9 +75,9 @@ static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
   goto stack;
  }
  a->gpu = nvl->pci_dev;
- a->struct_page = NV_STATE_PTR(nvl)->mem_has_struct_page;
- a->coherent = NV_STATE_PTR(nvl)->coherent;
- a->external = NV_STATE_PTR(nvl)->is_external_gpu;
+ a->struct_page = (NV_STATE_PTR(nvl))->mem_has_struct_page;
+ a->coherent = (NV_STATE_PTR(nvl))->coherent;
+ a->external = (NV_STATE_PTR(nvl))->is_external_gpu;
  *out = a;
 stack:
  nv_kmem_cache_free_stack(sp);

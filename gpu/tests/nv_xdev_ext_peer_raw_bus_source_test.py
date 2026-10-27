@@ -138,9 +138,13 @@ def main():
     desc = compact(describe)
     assert "nv_xdev_ext_peer_backing_flags(a->struct_page,a->coherent,a->external,nv_xdev_ext_peer_raw_bus(&requester->dev))" in desc, "provider description does not evaluate the actual requester"
     pin = compact(function(text, "nv_xdev_ext_peer_pin"))
-    for assignment in ("a->gpu=nvl->pci_dev;", "a->struct_page=NV_STATE_PTR(nvl)->mem_has_struct_page;",
-                       "a->coherent=NV_STATE_PTR(nvl)->coherent;", "a->external=NV_STATE_PTR(nvl)->is_external_gpu;"):
-        assert assignment in pin, f"provider pin does not retain required backing fact: {assignment}"
+    assert "a->gpu=nvl->pci_dev;" in pin, "provider pin does not retain the GPU requester"
+    for fact, native in (("struct_page", "mem_has_struct_page"),
+                         ("coherent", "coherent"), ("external", "is_external_gpu")):
+        assignments = (f"a->{fact}=NV_STATE_PTR(nvl)->{native};",
+                       f"a->{fact}=(NV_STATE_PTR(nvl))->{native};")
+        assert any(assignment in pin for assignment in assignments), \
+            f"provider pin does not retain required backing fact: {fact} from {native}"
     assert ".describe=nv_xdev_ext_peer_describe" in compact(text), "provider describe is not registered"
     with tempfile.TemporaryDirectory(prefix="peer-raw-bus-") as tmp:
         source, binary = Path(tmp) / "t.c", Path(tmp) / "t"

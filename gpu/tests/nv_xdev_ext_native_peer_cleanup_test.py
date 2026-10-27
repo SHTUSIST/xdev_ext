@@ -101,6 +101,17 @@ class NativePeerCleanup(unittest.TestCase):
     def tearDownClass(cls):
         cls.build.cleanup()
 
+    def test_fixture_state_macro_matches_prepared_vendor_header(self):
+        sdk = Path(os.environ.get("XDEV_EXT_NVIDIA_SDK", str(ex.GPU)))
+        header = sdk / "kernel-open/common/inc/nv-linux.h"
+        self.assertTrue(header.is_file(), "locked prepared NVIDIA nv-linux.h required; set XDEV_EXT_NVIDIA_SDK")
+        def macro(text):
+            definitions = re.findall(r"(?m)^#define[ \t]+NV_STATE_PTR\(nvl\)[^\n]*$", text)
+            self.assertEqual(len(definitions), 1, "expected one actual NV_STATE_PTR definition")
+            return definitions[0]
+        self.assertEqual(macro(FIXTURE.read_text()), macro(header.read_text()),
+                         "fixture must retain the actual vendor macro precedence; do not add shielding parentheses")
+
     def run_cases(self, cases):
         for cc in ex.compilers():
             with self.subTest(compiler=cc):

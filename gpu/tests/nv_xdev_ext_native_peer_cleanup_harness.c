@@ -142,7 +142,7 @@ typedef struct { nv_state_t nv_state; struct pci_dev *pci_dev; } nv_linux_state_
 typedef struct { int open_rc; nv_linux_state_t *nvptr; } nv_linux_file_private_t;
 #define NV_GET_LINUX_FILE_PRIVATE(f) ((nv_linux_file_private_t *)(f)->private_data)
 #define NV_FILE_INODE(f) ((f)->inode)
-#define NV_STATE_PTR(nvl) (&(nvl)->nv_state)
+#define NV_STATE_PTR(nvl)   &(((nv_linux_state_t *)(nvl))->nv_state)
 static int nv_is_control_device(struct inode *i) { return i->minor == 255; }
 static int nv_wait_open_complete_interruptible(nv_linux_file_private_t *p) { (void)p; return 0; }
 struct rw_semaphore { int readers; };
