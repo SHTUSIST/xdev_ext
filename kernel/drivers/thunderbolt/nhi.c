@@ -16,6 +16,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/interrupt.h>
 #include <linux/iommu.h>
+#include <linux/lockdep.h>
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/property.h>
@@ -702,6 +703,8 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	INIT_LIST_HEAD(&ring->queue);
 	INIT_LIST_HEAD(&ring->in_flight);
 	INIT_WORK(&ring->work, ring_work);
+	lockdep_register_key(&ring->lock_key);
+	lockdep_init_map(&ring->work.lockdep_map, "ring.work", &ring->lock_key, 0);
 
 	ring->nhi = nhi;
 	ring->hop = hop;
@@ -739,6 +742,7 @@ err_free_descs:
 			  ring->size * sizeof(*ring->descriptors),
 			  ring->descriptors, ring->descriptors_dma);
 err_free_ring:
+	lockdep_unregister_key(&ring->lock_key);
 	pci_dev_put(storage->pdev);
 	kfree(ring);
 
@@ -958,6 +962,7 @@ void tb_ring_free(struct tb_ring *ring)
 	 * to finish before freeing the ring.
 	 */
 	flush_work(&ring->work);
+	lockdep_unregister_key(&ring->lock_key);
 	pci_dev_put(container_of(ring, struct tb_ring_storage, ring)->pdev);
 	kfree(ring);
 }
@@ -1025,6 +1030,8 @@ void tb_ring_free_quarantined(struct tb_ring *ring)
 	ring_release_msix(ring);
 	schedule_work(&ring->work);
 	flush_work(&ring->work);
+	/* The memset below would corrupt a still-registered lockdep key. */
+	lockdep_unregister_key(&ring->lock_key);
 
 	/* No executable work, callback, NHI or link pointer survives the barrier.
 	 * Reuse the original storage: retirement cannot fail on allocation.
