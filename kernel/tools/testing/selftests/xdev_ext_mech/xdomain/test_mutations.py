@@ -10,6 +10,7 @@ import argparse
 import difflib
 import json
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -18,6 +19,43 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 RING = 'io_uring/xdomain/xdev_ext_xdomain_ring.c'
 CLASS = 'io_uring/xdomain/xdev_ext_xdomain_class.c'
+
+
+def copy_mutation_inputs(kernel, dest):
+    """Copy actual project inputs, independent of a prepared upstream tree."""
+    kernel = kernel.resolve()
+    here = kernel / HERE.relative_to(HERE.parents[4])
+    expected = json.loads((here / 'stack_expected.json').read_text())
+    pending = [kernel.parent / name for name in expected['source_units']]
+    pending += [here / name for name in expected['wrappers']]
+    pending += [here / name for name in ('stack_cases.c', 'stack_kernel_compat.h',
+                                        'stack_expected.json', 'stack_test.py', 'test_mutations.py')]
+    inputs = set()
+    include = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.M)
+    while pending:
+        source = pending.pop().resolve()
+        relative = source.relative_to(kernel)
+        if relative in inputs:
+            continue
+        if not source.is_file():
+            raise FileNotFoundError('missing actual stack input: ' + str(source))
+        inputs.add(relative)
+        if source.suffix not in ('.c', '.h'):
+            continue
+        for name in include.findall(source.read_text()):
+            if 'xdev_ext' not in Path(name).name:
+                continue  # Environmental headers are supplied by the facade/system UAPI.
+            candidates = (source.parent / name, kernel / name, kernel / 'include' / name,
+                          kernel / 'include/uapi' / name, kernel / 'tools/xdev_ext_mech' / name)
+            dependency = next((path for path in candidates if path.is_file()), None)
+            if dependency is None:
+                raise FileNotFoundError('missing project include: ' + name)
+            pending.append(dependency)
+    dest.mkdir(parents=True)
+    for relative in sorted(inputs):
+        target = dest / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(kernel / relative, target)
 
 
 def replace_once(path, old, new):
@@ -89,7 +127,7 @@ def execute(out):
         try:
             with tempfile.TemporaryDirectory(prefix='xdomain-stack-mutation-') as temp:
                 private_kernel = Path(temp) / 'kernel'
-                shutil.copytree(kernel, private_kernel, symlinks=True)
+                copy_mutation_inputs(kernel, private_kernel)
                 mutate(private_kernel, item['name'])
                 differences = []
                 for relative in (RING, CLASS):

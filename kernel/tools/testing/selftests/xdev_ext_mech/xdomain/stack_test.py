@@ -66,7 +66,7 @@ def execute(kernel, out, case=None, sanitize=False):
                '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                '-Wno-unused-function', '-Wno-unused-parameter', '-pthread',
                '-I', str(env), '-I', str(HERE), '-I', str(kernel),
-               '-I', str(kernel / 'include'), '-I', str(kernel / 'include/uapi'),
+               '-idirafter', str(kernel / 'include'), '-idirafter', str(kernel / 'include/uapi'),
                '-I', str(kernel / 'tools/xdev_ext_mech')]
     if sanitize:
         command += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer']
