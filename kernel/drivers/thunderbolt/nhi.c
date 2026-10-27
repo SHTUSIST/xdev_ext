@@ -254,6 +254,12 @@ static void ring_write_descriptors(struct tb_ring *ring)
 {
 	struct ring_frame *frame, *n;
 	struct ring_desc *descriptor;
+	u32 flags;
+
+	flags = RING_DESC_POSTED;
+	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
+		flags |= RING_DESC_INTERRUPT;
+
 	list_for_each_entry_safe(frame, n, &ring->queue, list) {
 		if (ring_full(ring))
 			break;
@@ -261,7 +267,7 @@ static void ring_write_descriptors(struct tb_ring *ring)
 		descriptor = &ring->descriptors[ring->head];
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
-		descriptor->flags = RING_DESC_POSTED | RING_DESC_INTERRUPT;
+		descriptor->flags = flags;
 		if (ring->is_tx) {
 			descriptor->length = frame->size;
 			descriptor->eof = frame->eof;
@@ -356,8 +362,9 @@ EXPORT_SYMBOL_GPL(__tb_ring_enqueue);
  * @ring: Ring to poll
  *
  * This function can be called when @start_poll callback of the @ring
- * has been called. It will read one completed frame from the ring and
- * return it to the caller. Returns %NULL if there is no more completed
+ * has been called or the ring is created with %RING_FLAG_NO_INTERRUPT.
+ * It will read one completed frame from the ring and return it to the
+ * caller. Returns %NULL if there is no more completed
  * frames.
  */
 struct ring_frame *tb_ring_poll(struct tb_ring *ring)
@@ -611,6 +618,12 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	dev_dbg(&nhi->pdev->dev, "allocating %s ring %d of size %d\n",
 		transmit ? "TX" : "RX", hop, size);
 
+	if ((flags & RING_FLAG_NO_INTERRUPT) && start_poll) {
+		dev_WARN(&nhi->pdev->dev,
+			 "start_poll() and NO_INTERRUPT cannot be used at the same time\n");
+		return NULL;
+	}
+
 	storage = kzalloc(sizeof(*storage), GFP_KERNEL);
 	if (!storage)
 		return NULL;
@@ -643,7 +656,8 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	if (!ring->descriptors)
 		goto err_free_ring;
 
-	if (ring_request_msix(ring, flags & RING_FLAG_NO_SUSPEND))
+	if (!(flags & RING_FLAG_NO_INTERRUPT) &&
+	    ring_request_msix(ring, flags & RING_FLAG_NO_SUSPEND))
 		goto err_free_descs;
 
 	if (nhi_alloc_hop(nhi, ring))
@@ -770,7 +784,8 @@ void tb_ring_start(struct tb_ring *ring)
 		ring_iowrite32options(ring, flags, 0);
 	}
 
-	ring_interrupt_active(ring, true);
+	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
+		ring_interrupt_active(ring, true);
 	ring->running = true;
 err:
 	spin_unlock(&ring->lock);
@@ -805,7 +820,8 @@ void tb_ring_stop(struct tb_ring *ring)
 			 RING_TYPE(ring), ring->hop);
 		goto err;
 	}
-	ring_interrupt_active(ring, false);
+	if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
+		ring_interrupt_active(ring, false);
 
 	ring_iowrite32options(ring, 0, 0);
 	ring_iowrite64desc(ring, 0, 0);
@@ -924,7 +940,8 @@ void tb_ring_free_quarantined(struct tb_ring *ring)
 	else
 		nhi->rx_rings[ring->hop] = NULL;
 	if (ring->running && !nhi->going_away) {
-		ring_interrupt_active(ring, false);
+		if (!(ring->flags & RING_FLAG_NO_INTERRUPT))
+			ring_interrupt_active(ring, false);
 		ring_iowrite32options(ring, 0, 0);
 		ring_iowrite64desc(ring, 0, 0);
 		ring_iowrite32desc(ring, 0, 8);
