@@ -1479,6 +1479,7 @@
 !/kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c
 !/kernel/drivers/thunderbolt/
 !/kernel/drivers/thunderbolt/nhi.c
+!/kernel/drivers/thunderbolt/dma_test.c
 !/kernel/include/linux/thunderbolt.h
 
 !/kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_class_test.py
