@@ -33,6 +33,13 @@ typedef uintptr_t dma_addr_t;
 static unsigned warnings;
 #define dev_WARN(...) (++warnings)
 #define lockdep_assert_held(p) assert((p)->held)
+/* Upstream ring backports: per-ring lockdep key, throttling, scoped lock. */
+#define DIV_ROUND_UP(n,d) (((n)+(d)-1)/(d))
+struct lock_class_key {bool registered;};
+static unsigned lockdep_registers,lockdep_unregisters;
+static void lockdep_register_key(struct lock_class_key *k) {assert(!k->registered);k->registered=true;lockdep_registers++;}
+static void lockdep_unregister_key(struct lock_class_key *k) {assert(k->registered);k->registered=false;lockdep_unregisters++;}
+#define lockdep_init_map(m,n,k,s) do {(void)(n);(void)(k);} while (0)
 typedef struct { bool held;pthread_mutex_t native; } spinlock_t;
 static _Thread_local unsigned held_locks;
 static spinlock_t *gate_nhi_lock;
@@ -49,6 +56,13 @@ static void spin_unlock(spinlock_t *p) {assert(p->held);p->held=false;held_locks
 #define spin_unlock_irq spin_unlock
 #define spin_lock_irqsave(p,f) do {(f)=0;spin_lock(p);}while(0)
 #define spin_unlock_irqrestore(p,f) do {(void)(f);spin_unlock(p);}while(0)
+static void __guard_spin_release(spinlock_t **p) {spin_unlock(*p);}
+static spinlock_t *__guard_spin_acquire(spinlock_t *p) {spin_lock(p);return p;}
+#define __guard_cat2(a,b) a##b
+#define __guard_cat(a,b) __guard_cat2(a,b)
+#define guard(t) __guard_##t
+#define __guard_spinlock_irqsave(l) \
+ spinlock_t *__guard_cat(__guard_,__COUNTER__) __attribute__((cleanup(__guard_spin_release)))=__guard_spin_acquire(l)
 struct list_head {struct list_head *next,*prev;};
 #define LIST_HEAD_INIT(n) {&(n),&(n)}
 #define LIST_HEAD(n) struct list_head n=LIST_HEAD_INIT(n)

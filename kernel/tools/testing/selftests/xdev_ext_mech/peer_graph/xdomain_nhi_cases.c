@@ -26,7 +26,7 @@ static struct tb_ring *allocated(bool msix,bool started)
  assert(r&&tx[r->hop]==r&&!r->start_poll);if(started)tb_ring_start(r);return r;
 }
 static void post(struct tb_ring *r,unsigned n)
-{for(unsigned i=0;i<n;i++)assert(!__tb_ring_enqueue(r,&frames[i]));}
+{for(unsigned i=0;i<n;i++)assert(!__tb_ring_enqueue(r,&frames[i],false));}
 static bool was_freed(void *p)
 {for(unsigned i=0;i<allocation_nr;i++)if(allocations[i].p==p)return allocations[i].freed;assert(!"allocation not recorded");return false;}
 static void retire(struct tb_ring *r)
@@ -76,7 +76,7 @@ static void shared_irq_unlink_preserves_other_ring(void)
 {
  struct tb_ring *r=allocated(false,true);
  struct tb_ring *other=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(other&&other->hop==2);
- tb_ring_start(other);post(r,1);assert(!__tb_ring_enqueue(other,&frames[1]));
+ tb_ring_start(other);post(r,1);assert(!__tb_ring_enqueue(other,&frames[1],false));
  /* Shared lookup's actual source holds NHI lock until schedule_work. */
  *(u32 *)(mmio+REG_RING_NOTIFY_BASE)=BIT(r->hop)|BIT(other->hop);
  nhi_interrupt_work(&nhi.interrupt_work);assert(r->work.pending&&other->work.pending);
@@ -164,7 +164,7 @@ static void shared_lookup_and_unlink_are_serialized(void)
 {
  struct tb_ring *r=allocated(false,true);post(r,1);
  struct tb_ring *other=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(other);
- tb_ring_start(other);assert(!__tb_ring_enqueue(other,&frames[1]));
+ tb_ring_start(other);assert(!__tb_ring_enqueue(other,&frames[1],false));
  lookup_retire_ring=r;shared_lookup_address=mmio+REG_RING_NOTIFY_BASE;shared_lookup_gate=true;
  *(u32 *)shared_lookup_address=BIT(r->hop)|BIT(other->hop);
  nhi_interrupt_work(&nhi.interrupt_work);
@@ -175,6 +175,64 @@ static void shared_lookup_and_unlink_are_serialized(void)
  nhi_interrupt_work(&nhi.interrupt_work);flush_work(&other->work);
  assert(r->work.schedules==before&&callbacks==2&&normal_callbacks==1);
  assert(!global_irq_disables&&!global_work_cancels&&!r->nhi&&!r->work.func);
+}
+/* Upstream ring backports (c51777370ac2, f5cb175ed728, 87045fbb8083,
+ * 4d84caebab18, de9d89b40861, 96ff396e6e0e) on the same real nhi.c. */
+static u32 *throttle_reg(struct tb_ring *r)
+{return (u32 *)(mmio+REG_INT_THROTTLING_RATE+r->vector*4);}
+static void unthrottled_ring_programs_zero_interval(void)
+{
+ setup(true);struct tb_ring *r=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(r&&r->irq>0);
+ *throttle_reg(r)=0xffffffff;tb_ring_start(r);
+ assert(r->interval_nsec==0&&*throttle_reg(r)==0);
+}
+static void service_throttle_is_programmed_per_ring(void)
+{
+ setup(true);struct tb_ring *r=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(r&&r->irq>0);
+ assert(!tb_ring_throttling(r,128000));*throttle_reg(r)=0;tb_ring_start(r);
+ assert(*throttle_reg(r)==DIV_ROUND_UP(128000,256));
+ struct tb_ring *other=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(other&&other->vector!=r->vector);
+ *throttle_reg(other)=0xffffffff;tb_ring_start(other);
+ assert(*throttle_reg(other)==0&&*throttle_reg(r)==DIV_ROUND_UP(128000,256));
+}
+static void no_interrupt_ring_is_polled_without_irq(void)
+{
+ setup(true);unsigned before=irq_nr;
+ struct tb_ring *r=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME|RING_FLAG_NO_INTERRUPT);
+ assert(r&&!r->irq&&irq_nr==before);tb_ring_start(r);post(r,1);
+ struct ring_desc *d=&r->descriptors[0];
+ assert((d->flags&RING_DESC_POSTED)&&!(d->flags&RING_DESC_INTERRUPT));
+ assert(!tb_ring_poll_pending(r));d->flags|=RING_DESC_COMPLETED;
+ assert(tb_ring_poll_pending(r)&&tb_ring_poll(r)==&frames[0]&&!tb_ring_poll_pending(r));
+}
+static void poll_pushes_queued_frame_into_freed_slot(void)
+{
+ setup(false);struct tb_ring *r=tb_ring_alloc_tx(&nhi,-1,2,RING_FLAG_FRAME|RING_FLAG_NO_INTERRUPT);
+ assert(r);tb_ring_start(r);post(r,2);assert(r->head==1&&!list_empty(&r->queue));
+ r->descriptors[0].flags|=RING_DESC_COMPLETED;assert(tb_ring_poll(r)==&frames[0]);
+ assert(list_empty(&r->queue)&&r->descriptors[1].phys==frames[1].buffer_phy&&(r->descriptors[1].flags&RING_DESC_POSTED));
+}
+static void no_interrupt_with_start_poll_is_refused(void)
+{
+ setup(true);unsigned w=warnings;
+ struct tb_ring *r=tb_ring_alloc_rx(&nhi,-1,8,RING_FLAG_FRAME|RING_FLAG_NO_INTERRUPT,0,0xffff,0xffff,
+				   (void (*)(void *))callback,NULL);
+ assert(!r&&warnings==w+1&&!pdev.refs&&!lockdep_registers);
+}
+static void batched_descriptors_ring_one_doorbell(void)
+{
+ struct tb_ring *r=allocated(false,true);unsigned wr=mmio_writes;
+ assert(!__tb_ring_enqueue(r,&frames[0],true)&&!__tb_ring_enqueue(r,&frames[1],true));
+ assert(mmio_writes==wr&&r->head==2);tb_ring_notify(r);assert(mmio_writes==wr+1);
+ tb_ring_notify(r);assert(mmio_writes==wr+1);
+}
+static void ring_lockdep_key_is_released_on_free_and_retirement(void)
+{
+ struct tb_ring *r=allocated(false,true);assert(lockdep_registers==1&&r->lock_key.registered);
+ struct tb_ring *q=tb_ring_alloc_tx(&nhi,-1,8,RING_FLAG_FRAME);assert(q&&lockdep_registers==2);
+ tb_ring_stop(r);tb_ring_free(r);assert(lockdep_unregisters==1);
+ tb_ring_start(q);post(q,1);nhi.going_away=true;retire(q);
+ assert(lockdep_unregisters==2&&!q->lock_key.registered);
 }
 static struct {const char *name;void (*run)(void);} cases[]={
  {"retirement keeps descriptor DMA and returns accepted frames UNKNOWN",descriptor_is_retained_but_callback_released},
@@ -190,6 +248,13 @@ static struct {const char *name;void (*run)(void);} cases[]={
  {"already stopped retirement avoids duplicate MMIO disable",already_stopped_retirement_does_not_disable_twice},
  {"in-progress normal callback drains before callback parent release",in_progress_normal_callback_is_drained_before_context_release},
  {"concurrent actual shared lookup and NHI unlink use same lock",shared_lookup_and_unlink_are_serialized},
+ {"ring without service throttle programs a zero interval",unthrottled_ring_programs_zero_interval},
+ {"service throttle is programmed for its own ring vector only",service_throttle_is_programmed_per_ring},
+ {"NO_INTERRUPT ring has no IRQ, posts without interrupt and is polled",no_interrupt_ring_is_polled_without_irq},
+ {"polling pushes a queued frame into the slot it just freed",poll_pushes_queued_frame_into_freed_slot},
+ {"NO_INTERRUPT with start_poll is refused without leaks",no_interrupt_with_start_poll_is_refused},
+ {"batched descriptors ring one doorbell on notify",batched_descriptors_ring_one_doorbell},
+ {"per-ring lockdep key released by free and by retirement before reuse",ring_lockdep_key_is_released_on_free_and_retirement},
 };
 int main(int argc,char **argv) {
  if(argc==2&&!strcmp(argv[1],"--count")){printf("%zu\n",ARRAY_SIZE(cases));return 0;}

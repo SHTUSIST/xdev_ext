@@ -43,7 +43,7 @@ def main():
             declaration(header, 'struct tb_ring') +
             'typedef void (*ring_cb)(struct tb_ring *, struct ring_frame *, bool);\n' +
             declaration(header, 'struct ring_frame') +
-            '#define RING_FLAG_FRAME BIT(1)\n#define RING_FLAG_E2E BIT(2)\n#define RING_FLAG_NO_SUSPEND BIT(0)\n' +
+            '#define RING_FLAG_FRAME BIT(1)\n#define RING_FLAG_E2E BIT(2)\n#define RING_FLAG_NO_SUSPEND BIT(0)\n#define RING_FLAG_NO_INTERRUPT BIT(3)\n' +
             (here/'xdomain_nhi_boundaries.c').read_text() + ring + '\n' +
             definition(source, 'nhi_interrupt_work') + '\n' +
             definition(source, 'nhi_msi') + '\n')
