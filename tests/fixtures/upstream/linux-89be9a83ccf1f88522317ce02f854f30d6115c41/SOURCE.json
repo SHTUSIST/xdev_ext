@@ -1,0 +1,8 @@
+{
+  "source_url": "https://raw.githubusercontent.com/torvalds/linux/89be9a83ccf1f88522317ce02f854f30d6115c41/drivers/thunderbolt/nhi_regs.h",
+  "commit": "89be9a83ccf1f88522317ce02f854f30d6115c41",
+  "upstream_path": "drivers/thunderbolt/nhi_regs.h",
+  "sha256": "5d2c5a71004f7b0cc2ecf2d95628cb8ea679b88d599f092d57983a0125ceb7d5",
+  "license": "GPL-2.0",
+  "qualification": "Unmodified upstream file retrieved over HTTPS from this exact public Linux commit; original bytes and license retained and verified with the recorded SHA256."
+}

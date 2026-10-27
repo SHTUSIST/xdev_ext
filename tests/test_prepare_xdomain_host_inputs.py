@@ -163,5 +163,65 @@ class PinnedHostInput(unittest.TestCase):
         self.assertIn('--root', run.stdout)
 
 
+    def test_valid_local_fixture_installs_identical_bytes_without_network(self):
+        fixture = self.root / 'tests/fixtures/upstream' / ('linux-' + COMMIT) / 'nhi_regs.h'
+        fixture.parent.mkdir(parents=True)
+        fixture.write_bytes(self.payload)
+        with mock.patch.object(self.m, 'urlopen', return_value=self.response()) as fetch:
+            result = self.m.prepare(self.root)
+        fetch.assert_not_called()
+        self.assertEqual(self.target.read_bytes(), self.payload)
+        self.assertEqual(result['status'], 'prepared')
+        self.assertEqual(fixture.read_bytes(), self.payload)
+
+    def test_corrupt_local_fixture_never_falls_back_to_network_or_creates_target(self):
+        fixture = self.root / 'tests/fixtures/upstream' / ('linux-' + COMMIT) / 'nhi_regs.h'
+        fixture.parent.mkdir(parents=True)
+        fixture.write_bytes(b'corrupt pinned fixture')
+        with mock.patch.object(self.m, 'urlopen', return_value=self.response()) as fetch:
+            with self.assertRaisesRegex(self.m.PreparationError, 'SHA256'):
+                self.m.prepare(self.root)
+        fetch.assert_not_called()
+        self.assertFalse(self.target.exists())
+        self.assertFalse((self.root / 'kernel').exists())
+
+    def test_oversized_local_fixture_never_falls_back_or_installs_partial_input(self):
+        fixture = self.root / 'tests/fixtures/upstream' / ('linux-' + COMMIT) / 'nhi_regs.h'
+        fixture.parent.mkdir(parents=True)
+        fixture.write_bytes(b'x' * 65537)
+        with mock.patch.object(self.m, 'urlopen', return_value=self.response()) as fetch:
+            with self.assertRaisesRegex(self.m.PreparationError, 'size|limit'):
+                self.m.prepare(self.root)
+        fetch.assert_not_called()
+        self.assertFalse(self.target.exists())
+
+
+class AuthenticRepositoryFixture(unittest.TestCase):
+    def test_pinned_official_fixture_matches_source_lock_hash_license_and_public_provenance(self):
+        root = SCRIPT.parents[1]
+        folder = root / 'tests/fixtures/upstream' / ('linux-' + COMMIT)
+        header = folder / 'nhi_regs.h'
+        self.assertTrue(header.is_file(), 'missing authentic pinned upstream NHI fixture')
+        data = header.read_bytes()
+        self.assertEqual(len(data), 4781)
+        expected_hash = '5d2c5a71004f7b0cc2ecf2d95628cb8ea679b88d599f092d57983a0125ceb7d5'
+        self.assertEqual(hashlib.sha256(data).hexdigest(), expected_hash)
+        self.assertTrue(data.startswith(b'/* SPDX-License-Identifier: GPL-2.0 */\n'))
+        self.assertIn(b'Copyright (c) 2014 Andreas Noever', data[:300])
+        self.assertIn(b'Copyright (C) 2018, Intel Corporation', data[:300])
+        lock = json.loads((root / 'sources.lock.json').read_text())
+        self.assertEqual(lock['components']['linux']['commit'], COMMIT)
+        metadata = json.loads((folder / 'SOURCE.json').read_text())
+        self.assertEqual(metadata['commit'], COMMIT)
+        self.assertEqual(metadata['upstream_path'], 'drivers/thunderbolt/nhi_regs.h')
+        self.assertEqual(metadata['sha256'], expected_hash)
+        self.assertEqual(metadata['license'], 'GPL-2.0')
+        self.assertEqual(metadata['source_url'],
+                         'https://raw.githubusercontent.com/torvalds/linux/' + COMMIT +
+                         '/drivers/thunderbolt/nhi_regs.h')
+        self.assertTrue(metadata['qualification'])
+        self.assertNotIn('/root/', json.dumps(metadata))
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

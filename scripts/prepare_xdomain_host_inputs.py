@@ -4,6 +4,7 @@
 
 Project production sources stay in the overlay. This does not assemble a kernel
 or rewrite existing files; authentic upstream bytes retain their license.
+A tracked official fixture is preferred; network fallback is only for its absence.
 """
 import argparse
 import hashlib
@@ -64,11 +65,20 @@ def prepare(root):
         with target.open('rb') as stream:
             verify(stream.read(MAX_BYTES + 1))
         return dict(receipt, status='verified-existing', bytes=target.stat().st_size)
-    try:
-        with urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
-            data = response.read(MAX_BYTES + 1)
-    except (OSError, URLError) as error:
-        raise PreparationError('NHI input download failed: ' + str(error)) from error
+    fixture = (root / 'tests/fixtures/upstream' / ('linux-' + LINUX_COMMIT) /
+               'nhi_regs.h')
+    if fixture.exists() or fixture.is_symlink():
+        if fixture.is_symlink() or not fixture.is_file():
+            raise PreparationError('Pinned NHI fixture must be a regular file')
+        with fixture.open('rb') as stream:
+            data = stream.read(MAX_BYTES + 1)
+        receipt['input'] = str(fixture.relative_to(root))
+    else:
+        try:
+            with urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response:
+                data = response.read(MAX_BYTES + 1)
+        except (OSError, URLError) as error:
+            raise PreparationError('NHI input download failed: ' + str(error)) from error
     verify(data)
     # Validate before creating any directories, and never follow an existing
     # symlink or open an existing author file for writing.
