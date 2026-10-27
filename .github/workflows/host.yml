@@ -206,9 +206,10 @@ jobs:
             echo "Mechanism source checks reported failed or skipped cases"
             exit 1
           fi
-      - name: Prepare locked Linux sources for NHI host contracts
+      - name: Prepare pinned NHI register header for host contracts
         if: matrix.cc == 'gcc'
-        run: python3 scripts/prepare_sources.py --component linux
+        timeout-minutes: 2
+        run: python3 scripts/prepare_xdomain_host_inputs.py
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: |

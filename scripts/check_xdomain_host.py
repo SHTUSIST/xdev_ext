@@ -39,6 +39,7 @@ ENTRYPOINTS = (
         "test_owner_close.py", "test_platform_facts.py", "test_retention.py",
         "test_runtime_package.py", "test_stop_report.py", "test_uapi_search.py",
     )),
+    STACK + "test_prepared_inputs.py",
     STACK + "stack_test.py",
     STACK + "test_mutations.py",
 )

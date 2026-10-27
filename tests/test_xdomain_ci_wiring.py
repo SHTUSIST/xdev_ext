@@ -35,6 +35,7 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "test_c2_terminals", "test_create_refusal", "test_owner_close",
     "test_runtime_package", "test_stop_report", "test_observer", "test_uapi_search",
 )) + (
+    "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_prepared_inputs.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_test.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_mutations.py",
 )
@@ -158,22 +159,22 @@ print("ok 1 - controlled external child", flush=True)
                 else:
                     self.assertNotEqual(run.returncode, 0, run.stdout + run.stderr)
 
-    def test_locked_linux_sources_prepared_before_first_peer_consumer_and_closure(self):
+    def test_locked_nhi_input_prepared_before_first_peer_consumer_and_closure(self):
         source = (ROOT / ".github/workflows/host.yml").read_text()
         steps = re.split(r"(?m)^      - ", source)[1:]
         prepare = [index for index, step in enumerate(steps) if re.search(
-            r"(?m)^\s+[^#\n]*python3\s+scripts/prepare_sources\.py\s+--component\s+linux\b", step)]
+            r"(?m)^\s+[^#\n]*python3\s+scripts/prepare_xdomain_host_inputs\.py\b", step)]
         peer = [index for index, step in enumerate(steps)
                 if step.startswith("name: Peer control and lifetime checks\n")]
         closure = [index for index, step in enumerate(steps) if re.search(
             r"(?m)^\s+[^#\n]*python3\s+scripts/check_xdomain_host\.py\b", step)]
-        self.assertTrue(prepare, "locked Linux source preparation step is missing")
+        self.assertTrue(prepare, "locked NHI input preparation step is missing")
         self.assertEqual(len(peer), 1, "existing Peer consumer step is missing or duplicated")
         self.assertEqual(len(closure), 1, "shared closure consumer step is missing or duplicated")
         self.assertLess(min(prepare), peer[0],
-                        "NHI fixture already runs through Peer Makefile wildcard; prepare Linux sources first")
+                        "NHI fixture already runs through Peer Makefile wildcard; prepare the locked NHI input first")
         self.assertLess(min(prepare), closure[0],
-                        "shared closure must consume prepared locked Linux sources")
+                        "shared closure must consume the prepared locked NHI input")
 
     def test_actual_owner_metadata_rejects_missing_configured_headers_without_private_fallback(self):
         # A missing configured official header must fail even if the author's
