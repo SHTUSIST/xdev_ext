@@ -7575,6 +7575,26 @@
       "source": "tests/integration/session/native/verifier/run_helpers.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/verifier/run_helpers.sh"
+    },
+    {
+      "source": "tests/core/provider_dma/Makefile",
+      "logical_path": "tests/core/provider_dma/Makefile"
+    },
+    {
+      "source": "tests/core/provider_dma/dma_reference_test.c",
+      "logical_path": "tests/core/provider_dma/dma_reference_test.c"
+    },
+    {
+      "source": "tests/core/provider_dma/host/bpf/bpf_helpers.h",
+      "logical_path": "tests/core/provider_dma/host/bpf/bpf_helpers.h"
+    },
+    {
+      "source": "tests/core/provider_dma/host/bpf/bpf_tracing.h",
+      "logical_path": "tests/core/provider_dma/host/bpf/bpf_tracing.h"
+    },
+    {
+      "source": "tests/core/provider_dma/host/vmlinux.h",
+      "logical_path": "tests/core/provider_dma/host/vmlinux.h"
     }
   ]
 }

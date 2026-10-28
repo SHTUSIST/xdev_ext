@@ -306,7 +306,7 @@ elif args[0] == 'xdomain-probe':
     def test_helper_type_denials_match_each_of_the_six_explicit_cases(self):
         pairs = (
             ('helper-timer-init-deny', 'bpf_timer_init', '169'),
-            ('helper-timer-start-deny', 'bpf_timer_start', '170'),
+            ('helper-timer-start-deny', 'bpf_timer_start', '171'),
             ('helper-tail-call-deny', 'bpf_tail_call', '12'),
             ('helper-probe-read-kernel-deny', 'bpf_probe_read_kernel', '113'),
             ('helper-probe-read-user-deny', 'bpf_probe_read_user', '112'),

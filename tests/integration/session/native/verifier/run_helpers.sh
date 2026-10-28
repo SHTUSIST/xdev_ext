@@ -55,7 +55,9 @@ run_case()
 		[ -e "$pin" ] || fail allow-link-not-pinned
 		"$CTL" detach --pin "$pin" >>"$log" 2>&1 || fail allow-detach-failed
 	else
-		[ "$status" -eq 1 ] || fail unexpected-loader-exit
+		# CLI cmd_attach reports verifier load failures as CTL_SETUP (3).
+		# Only the exact helper log below distinguishes the intended denial.
+		[ "$status" -eq 3 ] || fail unexpected-loader-exit
 		if grep -Eiq 'XDOMAIN_SETUP_FAIL|failed to open|failed to find|invalid ELF|not found in kernel BTF|relocation.*failed' "$log"; then
 			fail setup-error
 		fi

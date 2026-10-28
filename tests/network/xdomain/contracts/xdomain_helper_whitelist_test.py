@@ -9,6 +9,7 @@ tests; a synthetic loader boundary never certifies a real kernel rejection.
 import importlib.util
 import json
 import os
+import re
 from pathlib import Path
 import runpy
 import subprocess
@@ -143,6 +144,42 @@ class HelperWhitelistX7(unittest.TestCase):
         result = self.gate('helper-probe-read-kernel-deny', diagnostic())
         self.assertEqual(result.returncode, 0, result.stdout[-2200:] + result.stderr)
 
+    def test_timer_start_denial_uses_linux_uapi_id_and_rejects_callback_id(self):
+        """Catch a copied callback ID without repeating the runner's constants."""
+        with tempfile.TemporaryDirectory(prefix='helper-uapi-id-') as temp:
+            probe = Path(temp) / 'ids'
+            source = ('#include <linux/bpf.h>\n#include <stdio.h>\n'
+                      'int main(void) { printf("%u %u\\n", '
+                      '(unsigned)BPF_FUNC_timer_start, '
+                      '(unsigned)BPF_FUNC_timer_set_callback); return 0; }\n')
+            compiled = subprocess.run(['gcc', '-std=c11', '-Wall', '-Wextra',
+                                       '-Werror', '-x', 'c', '-', '-o', str(probe)],
+                                      input=source, capture_output=True, text=True,
+                                      timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            ids = subprocess.run([str(probe)], check=True, capture_output=True,
+                                 text=True, timeout=10).stdout.split()
+        self.assertEqual(len(ids), 2)
+        start_id, callback_id = ids
+        self.assertNotEqual(start_id, callback_id)
+        name = 'helper-timer-start-deny'
+        valid = diagnostic(helper='bpf_timer_start', number=start_id)
+        result = self.gate(name, valid)
+        self.assertEqual(result.returncode, 0, result.stdout[-2200:] + result.stderr)
+        self.assertIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+        invalid = {
+            'callback-id': diagnostic(helper='bpf_timer_start', number=callback_id),
+            'callback-helper': diagnostic(helper='bpf_timer_set_callback', number=start_id),
+            'missing-end': valid.replace('-- END PROG LOAD LOG --\n', ''),
+            'outside-region': valid.replace('-- BEGIN PROG LOAD LOG --\n', '') +
+                              '-- BEGIN PROG LOAD LOG --\n-- END PROG LOAD LOG --\n',
+        }
+        for label, log in invalid.items():
+            with self.subTest(vector=label):
+                result = self.gate(name, log)
+                self.assertNotEqual(result.returncode, 0, label)
+                self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=' + name, result.stdout)
+
     def test_wrong_or_unscoped_diagnostics_never_certify_helper_denial(self):
         for name in (NEW, 'helper-probe-read-kernel-deny'):
             for label, log in DENIAL_VECTORS.items():
@@ -168,7 +205,7 @@ PROBES = {'map_lookup_elem': 1, 'ktime_get_ns': 5, 'probe_read_kernel': 113,
 
 class DedicatedHelperRunner(unittest.TestCase):
     """Execute runner control flow, with only ctl/BTF/bpffs externalized."""
-    def execute(self, selection='probe_read_kernel', log=None, status=1,
+    def execute(self, selection='probe_read_kernel', log=None, status=3,
                 missing=False, detach_failure=False):
         with tempfile.TemporaryDirectory(prefix='helper-runner-contract-') as temp:
             root = Path(temp)
@@ -219,6 +256,79 @@ sys.exit(status)
             pins = list((root / 'bpffs').rglob('probe_read_kernel'))
             return result, traces, pins
 
+    def test_cli_attach_verifier_rejection_exit_is_accepted(self):
+        """Run the actual CLI attach/main bodies, not a copied exit constant."""
+        source = (ROOT / 'src/cli/xdev_ext_mech_ctl.c').read_text()
+        enum = re.search(r'enum \{ CTL_PASS[^;]+;', source).group()
+        begin = source.index('static int cmd_attach(')
+        attach = source[begin:source.index('/* Detach the struct_ops', begin)]
+        main = source[source.index('int main(int argc, char **argv)'):]
+        # Keep the production dispatch and attach return logic. Only libbpf
+        # load and unrelated command/parser boundaries are controlled here.
+        boundary = r"""
+#include <errno.h>
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+typedef uint64_t __u64;
+struct ctl_opts { const char *obj, *map, *pin, *sets[1]; unsigned nr_sets; bool quiet_wait; };
+struct bpf_object { int value; };
+struct bpf_map { int value; };
+struct bpf_link { int value; };
+static struct bpf_object object;
+static struct bpf_map map_value;
+static struct bpf_link link_value;
+#define ctl_err(...) fprintf(stderr, __VA_ARGS__)
+#define BPF_MAP_TYPE_STRUCT_OPS 1
+#define bpf_object__for_each_map(map, obj) for ((map) = NULL; (map); (map) = NULL)
+static struct bpf_object *bpf_object__open_file(const char *s, void *o) { return &object; }
+static long libbpf_get_error(const void *o) { return 0; }
+static int bpf_map__type(struct bpf_map *m) { return BPF_MAP_TYPE_STRUCT_OPS; }
+static const char *bpf_map__name(struct bpf_map *m) { return "helper_probe_ops"; }
+static void bpf_map__set_autocreate(struct bpf_map *m, bool v) {}
+static int xdev_ext_mech_ctl_parse_set(const char *s, char *n, size_t z, __u64 *v) { return 0; }
+static int ctl_set_global(struct bpf_object *o, const char *n, __u64 v) { return 0; }
+static int bpf_object__load(struct bpf_object *o) {
+ puts("-- BEGIN PROG LOAD LOG --");
+ puts("program of this type cannot use helper bpf_probe_read_kernel#113");
+ puts("-- END PROG LOAD LOG --"); return -EACCES;
+}
+static struct bpf_map *bpf_object__find_map_by_name(struct bpf_object *o, const char *s) { return &map_value; }
+static struct bpf_link *bpf_map__attach_struct_ops(struct bpf_map *m) { return &link_value; }
+static int bpf_link__pin(struct bpf_link *l, const char *s) { return 0; }
+static void bpf_link__disconnect(struct bpf_link *l) {}
+static void bpf_link__destroy(struct bpf_link *l) {}
+static void bpf_object__close(struct bpf_object *o) {}
+static int cmd_peer_discover(int a, char **v, bool p) { return 2; }
+static int cmd_peer_diag(int a, char **v) { return 2; }
+static int cmd_peer_caps(int a, char **v) { return 2; }
+static int cmd_xdomain_probe(int a, char **v) { return 2; }
+static int ctl_libbpf_print;
+static void libbpf_set_print(int p) {}
+static void usage(FILE *f) {}
+static int parse_options(int a, char **v, struct ctl_opts *o) {
+ o->obj="probe.bpf.o"; o->map="helper_probe_ops"; o->pin="unused"; return 0;
+}
+static int xdev_ext_mech_ctl_quiet_check(bool q, bool n, int v, bool p) { return 0; }
+"""
+        table = ('static const struct { const char *name; '
+                 'int (*run)(struct ctl_opts *); } ctl_commands[] = {{"attach", cmd_attach}};\n')
+        with tempfile.TemporaryDirectory(prefix='actual-ctl-attach-') as temp:
+            ctl = Path(temp) / 'ctl'
+            compiled = subprocess.run(['gcc', '-std=c11', '-Wall', '-Werror',
+                                       '-x', 'c', '-', '-o', str(ctl)],
+                                      input=boundary + enum + '\n' + attach + table + main,
+                                      capture_output=True, text=True, timeout=30)
+            self.assertEqual(compiled.returncode, 0, compiled.stderr)
+            denied = subprocess.run([str(ctl), 'attach'], capture_output=True,
+                                    text=True, timeout=10)
+        self.assertEqual(denied.returncode, 3, denied.stdout + denied.stderr)
+        self.assertIn(diagnostic().strip(), denied.stdout)
+        result, _, _ = self.execute(status=denied.returncode, log=denied.stdout)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_real_log_prefix_and_exact_helper_are_accepted(self):
         log = diagnostic().replace('-- BEGIN', "libbpf: prog 'helper_complete': -- BEGIN", 1)
         result, _, pins = self.execute(log=log)
@@ -250,8 +360,8 @@ sys.exit(status)
         result, _, _ = self.execute(selection='map_lookup_elem', detach_failure=True)
         self.assertNotEqual(result.returncode, 0)
 
-    def test_unexpected_success_or_setup_exit_fails(self):
-        for status in (0, 3):
+    def test_unexpected_success_or_other_cli_exit_fails(self):
+        for status in (0, 1, 2, 4, 255):
             with self.subTest(status=status):
                 result, _, pins = self.execute(status=status)
                 self.assertNotEqual(result.returncode, 0)

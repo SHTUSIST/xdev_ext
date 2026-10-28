@@ -86,6 +86,9 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech/provider/stats_frames_test.py
       - name: Stage polling rules, NVMe, DMA provider and AF_XDP contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/poll/run.py
+      - name: DMA reference plan byte coverage and provider limits
+        working-directory: .
+        run: make -C tests/core/provider_dma test BUILD_DIR="$RUNNER_TEMP/dma-reference"
       - name: USER stage rules, scheduler and wiring contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py
       - name: Socket NIC copy fallback and accounting contracts

@@ -59,7 +59,7 @@ while read -r name expected; do
         helper= helper_id=
         case "$name" in
             helper-timer-init-deny) helper=bpf_timer_init; helper_id=169 ;;
-            helper-timer-start-deny) helper=bpf_timer_start; helper_id=170 ;;
+            helper-timer-start-deny) helper=bpf_timer_start; helper_id=171 ;;
             helper-tail-call-deny) helper=bpf_tail_call; helper_id=12 ;;
             helper-probe-read-kernel-deny|helper-existing-class-control-deny)
                 helper=bpf_probe_read_kernel; helper_id=113 ;;
