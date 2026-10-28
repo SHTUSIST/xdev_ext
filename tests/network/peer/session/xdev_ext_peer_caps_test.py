@@ -3,7 +3,7 @@
 """PEER-pool CREATE admission follows generic validity, then class capabilities.
 
 Requirement P1: a device-memory pool admits any number of frames, a power-of-two
-frame size in [4 KiB, 2 MiB] with no CPU header room, and any order of stages
+frame size in [4 KiB, 2 MiB], valid payload headroom and segment bounds, and any order of stages
 whose class implements the peer contract in that stage's direction (NVMe read
 and write, NET TX and RX; CE only if its table entry says so). Every other
 class/direction in a valid topology fails CREATE with -EOPNOTSUPP.
@@ -65,6 +65,12 @@ int main(int argc, char **argv)
   c.st[i].fd = 8 + i;
   /* Plain SOCKET bind requires flags/arg0/arg1 zero. */
   c.st[i].arg1 = c.st[i].class_id == XDEV_EXT_MECH_CLASS_SOCKET ? 0 : 128;
+#ifdef XDEV_EXT_USER_F_STRICT_ASYNC
+  if (c.st[i].class_id == XDEV_EXT_MECH_CLASS_USER) {
+   c.st[i].flags = XDEV_EXT_USER_F_STRICT_ASYNC;
+   c.st[i].arg0 = 1000; c.st[i].arg1 = 0;
+  }
+#endif
  }
  if (fd_stage >= 0 && fd_stage < (int)c.nr_stages) c.st[fd_stage].fd = fd_value;
  ret = xdev_ext_mech_create_check(&c, &frames);
@@ -73,12 +79,12 @@ int main(int argc, char **argv)
 }
 '''
 
-AFXDP, NVME, IAA, CE, DMA, SOCKET, NET = 2, 3, 4, 5, 6, 7, 8
-NAMES = {AFXDP: "AF_XDP", NVME: "NVMe", IAA: "IAA", CE: "CE", DMA: "DMA", SOCKET: "SOCKET", NET: "NET"}
+AFXDP, NVME, IAA, CE, DMA, SOCKET, NET, USER = 2, 3, 4, 5, 6, 7, 8, 10
+NAMES = {AFXDP: "AF_XDP", NVME: "NVMe", IAA: "IAA", CE: "CE", DMA: "DMA", SOCKET: "SOCKET", NET: "NET", USER: "USER"}
 TO, FROM = 1, 2
 XSK, IOU, PEER = 1, 2, 3
 PINNED_DIRS = {NVME: (1 << TO) | (1 << FROM), NET: (1 << TO) | (1 << FROM),
-               AFXDP: 0, IAA: 0, DMA: 0, SOCKET: 0}
+               AFXDP: 0, IAA: 0, DMA: 0, SOCKET: 0, USER: (1 << TO)}
 EOPNOTSUPP, EINVAL, EBADF = -95, -22, -9
 
 # Exact non-PEER exceptions to the old pure-check golden: SOCKET RX alone,
@@ -170,7 +176,7 @@ def main():
             for cls, want in PINNED_DIRS.items():
                 if reported[cls] != want:
                     failures.append("capability table %s=%#x, want %#x" % (NAMES[cls], reported[cls], want))
-            for cls in (0, 1, 9, 10, 15):
+            for cls in (0, 1, 9, 15):
                 if reported[cls]:
                     failures.append("capability table names unknown class %d" % cls)
             ce_dirs = reported[CE]
@@ -215,7 +221,8 @@ def main():
             else:
                 passed += 1
 
-        # 3. Geometry: power-of-two frames in [4 KiB, 2 MiB], several frames per group, no header room.
+        # 3. Geometry: power-of-two frames in [4 KiB, 2 MiB], several frames
+        # per group, and payload headroom subject to the generic frame bounds.
         chain = [NVME, FROM, NVME, TO]
         geometry = [
             ((4096, 0, 4096, 4096), (0, 1)), ((8192, 0, 8192, 8192), (0, 1)),
@@ -224,12 +231,34 @@ def main():
             ((65536, 0, 65536, 32 * 65536), (0, 32)),
             ((2048, 0, 2048, 2048), (EOPNOTSUPP, 0)), ((12288, 0, 4096, 4096), (EOPNOTSUPP, 0)),
             ((65535, 0, 4096, 4096), (EOPNOTSUPP, 0)), ((4 << 20, 0, 4096, 4096), (EOPNOTSUPP, 0)),
-            ((65536, 16, 4096, 4096), (EOPNOTSUPP, 0)), ((65536, 0, 65536, 33 * 65536), (-7, 0)),
+            ((65536, 16, 4096, 4096), (0, 1)),
+            # Ordered-frame payload offset is intentional: two 3072-byte
+            # segments at offset 512 fit inside separate 4096-byte frames.
+            ((4096, 512, 3072, 6144), (0, 2)),
+            ((4096, 512, 3584, 7168), (0, 2)),
+            ((4096, 512, 3072, 4608), (0, 2)),
+            ((4096, 4096, 1, 1), (EINVAL, 0)),
+            ((4096, 8192, 1, 1), (EINVAL, 0)),
+            ((4096, 512, 3585, 7170), (EINVAL, 0)),
+            ((4096, 0xffffffff, 1, 1), (EINVAL, 0)),
+            ((65536, 0, 65536, 33 * 65536), (-7, 0)),
         ]
         for layout, want in geometry:
             got = run(new, [PEER, *layout, 2] + chain)
             if got != want:
                 failures.append("PEER layout frame=%d hdr=%d seg=%d group=%d: got %s, want %s" % (layout + (got, want)))
+            else:
+                passed += 1
+
+        # Exercise the actual ordered USER -> NVMe shape as well as the
+        # device-to-device chain. USER is fixed-length STRICT_ASYNC here.
+        for layout, want in (
+                ((4096, 512, 3072, 6144), (0, 2)),
+                ((4096, 4096, 1, 1), (EINVAL, 0)),
+                ((4096, 512, 3585, 7170), (EINVAL, 0))):
+            got = run(new, [PEER, *layout, 2, USER, TO, NVME, TO])
+            if got != want:
+                failures.append("PEER ordered USER -> NVMe layout %s: got %s, want %s" % (layout, got, want))
             else:
                 passed += 1
 

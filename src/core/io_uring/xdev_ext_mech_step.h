@@ -129,10 +129,10 @@ static inline __u32 xdev_ext_mech_peer_dirs(__u32 class_id)
 {
  return xdev_ext_mech_class_desc(class_id)->peer_dirs;
 }
-/* 0, or -EOPNOTSUPP: frame_size not a power of two in [MIN, MAX], or hdr_room != 0. */
+/* PEER frame capability; ordinary layout checks bound headroom and spans. */
 static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_layout *l)
 {
- if (!l || l->hdr_room || l->frame_size < XDEV_EXT_MECH_PEER_FRAME_MIN ||
+ if (!l || l->frame_size < XDEV_EXT_MECH_PEER_FRAME_MIN ||
      l->frame_size > XDEV_EXT_MECH_PEER_FRAME_MAX || (l->frame_size & (l->frame_size - 1)))
   return -EOPNOTSUPP;
  return 0;

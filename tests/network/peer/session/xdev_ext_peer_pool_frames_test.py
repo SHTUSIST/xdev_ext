@@ -50,7 +50,24 @@ int main(void)
  ret=bind(&p,12288,0,4096,4096,12*4096);CHECK(ret==-EOPNOTSUPP&&!claim_calls,"non-power-of-two frame refused before claiming the allocation");
  ret=bind(&p,2048,0,2048,2048,8*2048);CHECK(ret==-EOPNOTSUPP&&!claim_calls,"frame below 4 KiB refused");
  ret=bind(&p,4u<<20,0,4096,4096,8ull<<20);CHECK(ret==-EOPNOTSUPP&&!claim_calls,"frame above 2 MiB refused");
- ret=bind(&p,65536,16,4096,4096,8*65536ULL);CHECK(ret==-EOPNOTSUPP&&!claim_calls,"CPU header room refused");
+ ret=bind(&p,65536,16,4096,4096,8*65536ULL);
+ CHECK(!ret&&p.nr_frames==8&&claim_calls==1,"valid headroom binds without requiring CPU payload access");
+ if(!ret)p.ops->release(&p);
+ ret=bind(&p,4096,512,3072,6144,8*4096ULL);
+ CHECK(!ret&&p.frame_size==4096&&p.nr_frames==8&&claim_calls==1,"ordered-frame headroom 512 and two 3072-byte segments bind");
+ if(!ret){
+  int allocated=xdev_ext_peer_pool_alloc(&p,f,2);
+  CHECK(!allocated,"headroom layout allocates its two-frame group");
+  if(!allocated){
+   int a=xdev_ext_peer_pool_resolve(&p,&f[0]),b=xdev_ext_peer_pool_resolve(&p,&f[1]);
+   CHECK(!a&&!b&&f[0].umem_addr==0&&f[1].umem_addr==4096&&!f[0].kaddr&&!f[1].kaddr,"pool keeps frame-base offsets distinct from later payload headroom");
+  }
+  p.ops->release(&p);
+ }
+ ret=bind(&p,4096,4096,1,1,8*4096ULL);CHECK(ret==-EINVAL&&!claim_calls,"headroom equal to frame leaves no segment capacity and is rejected before claim");
+ ret=bind(&p,4096,8192,1,1,8*4096ULL);CHECK(ret==-EINVAL&&!claim_calls,"headroom beyond frame rejected before claim");
+ ret=bind(&p,4096,512,3585,7170,8*4096ULL);CHECK(ret==-EINVAL&&!claim_calls,"segment beyond remaining headroom capacity rejected before claim");
+ ret=bind(&p,4096,0xffffffffU,1,1,8*4096ULL);CHECK(ret==-EINVAL&&!claim_calls,"overflowing headroom plus segment rejected before claim");
  ret=bind(&p,4096,0,4096,4096,3*4096+1);CHECK(ret==-EINVAL&&put_calls==1,"allocation not a multiple of the frame size refused and released");
 
  /* Allocation rules are independent of geometry: fall back to a layout 75b51c2 binds. */

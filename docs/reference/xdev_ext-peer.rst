@@ -100,9 +100,11 @@ mechanism claimant. The caller must still lend the allocation exclusively:
 CUDA producers and alternative registrations must not race the session.
 Unknown DMA retains this claim and its original file permanently.
 
-The initial pool geometry uses 64-KiB frames, zero host-header room and one
-GPU span per batch (``group_bytes <= seg_len <= frame_size``). There are no
-CPU pages or CPU frame addresses. ``bpf_xdev_ext_frame`` and its CRC view
+The mechanism pool accepts power-of-two frame sizes from 4 KiB to 2 MiB
+and multiple payload spans per batch. Headroom and segment lengths follow
+the common bounded layout contract; payload addresses include the admitted
+frame offset. Each class can impose additional native alignment constraints.
+There are no CPU pages or CPU frame addresses. ``bpf_xdev_ext_frame`` and its CRC view
 cannot return a GPU payload pointer. Class information contains only bounded
 allocation offsets, lengths and generation; native addresses stay in C.
 
