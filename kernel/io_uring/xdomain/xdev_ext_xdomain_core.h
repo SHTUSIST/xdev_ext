@@ -64,13 +64,13 @@ struct xdev_ext_xd_login_response {
 	__u32 type, command_id;
 	__u32 status, rsvd0, rsvd1;
 	__u64 incarnation;
-	__u32 reserved[2];
+	__u64 requester_incarnation;
 }; /* 96 bytes */
 
 #define XDEV_EXT_XD_LOGIN			1U
 #define XDEV_EXT_XD_LOGIN_RESPONSE	2U
 #define XDEV_EXT_XD_LOGOUT		3U
-#define XDEV_EXT_XD_PROTO_VERSION		1U
+#define XDEV_EXT_XD_PROTO_VERSION		2U
 #define XDEV_EXT_XD_CAP_E2E		(1U << 0)
 #define XDEV_EXT_XD_PDF_START		1U
 #define XDEV_EXT_XD_PDF_END		2U

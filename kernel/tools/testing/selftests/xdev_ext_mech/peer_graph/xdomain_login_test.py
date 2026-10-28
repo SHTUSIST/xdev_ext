@@ -13,6 +13,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+from xdomain_retention_fixture import retention_unit
 
 
 def strip_includes(text):
@@ -47,8 +48,8 @@ def main():
     cases = (here / ("xdomain_login_cases.c" + suffix)).read_text()
     header = strip_includes(needed[1].read_text())
     source = strip_includes(needed[2].read_text())
-    unit = (compat + '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n'
-            + header + "\n" + boundaries + "\n" + source + "\n" + cases)
+    unit = (compat + "\nstatic unsigned long jiffies;\n#define time_before(a,b) ((long)((a)-(b))<0)\n#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))\n" + '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n'
+            + header + "\n" + boundaries + retention_unit(kernel) + "\n" + source + "\n" + cases)
     with tempfile.TemporaryDirectory(prefix="xdomain-login-") as directory:
         cfile, binary = Path(directory) / "login.c", Path(directory) / "login"
         cfile.write_text(unit)

@@ -626,6 +626,7 @@ struct ring_frame {
 /* Minimum size for ring_rx */
 #define TB_FRAME_SIZE		0x100
 
+size_t tb_ring_descriptor_bytes(unsigned int size);
 struct tb_ring *tb_ring_alloc_tx(struct tb_nhi *nhi, int hop, int size,
 				 unsigned int flags);
 struct tb_ring *tb_ring_alloc_rx(struct tb_nhi *nhi, int hop, int size,

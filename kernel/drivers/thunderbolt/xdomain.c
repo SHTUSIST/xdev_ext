@@ -2072,6 +2072,11 @@ static int unregister_service(struct device *dev, void *data)
  */
 void tb_xdomain_remove(struct tb_xdomain *xd)
 {
+	/* All CMs and ancestor-switch removal paths publish this irreversible
+	 * fact before synchronously draining any service worker.  Path users
+	 * recheck it while waiting for the domain lock and after acquiring it.
+	 */
+	WRITE_ONCE(xd->is_unplugged, true);
 	tb_xdomain_debugfs_remove(xd);
 
 	stop_handshake(xd);
