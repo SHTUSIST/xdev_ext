@@ -29,6 +29,8 @@ def generate(kernel, directory):
              no_includes(contents[names[1]]),
              declaration(header, 'struct tb_nhi'),
              declaration(header, 'struct tb_ring'),
+             declaration(header, 'struct tb_ring_snapshot'),
+             'void tb_ring_snapshot(struct tb_ring *, struct tb_ring_snapshot *);',
              'struct ring_frame;',
              'typedef void (*ring_cb)(struct tb_ring *, struct ring_frame *, bool);',
              declaration(header, 'struct ring_frame')]

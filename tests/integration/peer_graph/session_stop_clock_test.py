@@ -10,10 +10,13 @@ core=(kernel/'io_uring/xdev_ext_mech.c').read_text();header=(kernel/'include/lin
 if not re.search(r'\bu64\s+'+name+r'\s*\(',header) or not re.search(r'(?m)^u64\s+'+name+r'\s*\(',core):
  print('not ok 1 - kernel-only STOP-start accessor missing (API RED; no behavioral test executed)');sys.exit(1)
 private=m.struct(core,'xdev_ext_mech_session');fields=[]
-for n in ('lock','start_left','start_recycle','start_return_pending','worker_gone','stop_err','last_err','start_preparing','stop_started_ns'):
+for n in ('lock','start_left','start_ordered','start_recycle','start_return_pending','worker_gone','stop_err','last_err','start_preparing','stop_started_ns'):
  match=re.search(r'(?m)^\s*(spinlock_t|u64|u32|int|bool)\s+'+n+r'\s*;',private)
  if not match:raise RuntimeError('actual private scalar missing: '+n)
  fields.append(match.group(0))
+queue_field=re.search(r'(?m)^\s*struct xdev_ext_mech_start_queue\s*\*start_queue\s*;',private)
+if not queue_field:raise RuntimeError('actual START queue pointer missing')
+fields.append(queue_field.group(0))
 body='\n'.join(m.function(core,n) for n in ('xdev_ext_mech_settle_locked','xdev_ext_mech_session_stop',name))
 s='''#include <assert.h>
 #include <stdbool.h>

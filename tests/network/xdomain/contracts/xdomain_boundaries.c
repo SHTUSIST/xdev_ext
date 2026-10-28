@@ -151,6 +151,7 @@ static void *device_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_me
  struct side *side=side_of_stage(st);assert(dead&&arg==st&&st->priv);assert(u->arg0==side->link.token&&u->arg1==0);
  struct xdev_ext_xd_ep *ep=calloc(1,sizeof(*ep));assert(ep);
  ep->xl=&side->link;ep->st=st;ep->rx=st->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE;
+ ep->bound_local_inc=side->link.local_inc;ep->bound_remote_inc=side->link.remote_inc;
  assert(!side->link.chan[0].ep[ep->rx]);side->link.chan[0].ep[ep->rx]=ep;side->endpoint_attaches++;
  if(early_bind_progress) {
   pthread_t thread;
@@ -437,13 +438,21 @@ static void fresh(unsigned tx_index,unsigned rx_index,unsigned depth,unsigned fr
   for(unsigned j=0;j<index;j++)side->session.st[j]=(struct xdev_ext_mech_stage){.s=&side->session,.cls=&source_class,.index=j};
   side->session.st[index]=(struct xdev_ext_mech_stage){.s=&side->session,.cls=registered,.file=&authority,.class_id=XDEV_EXT_MECH_CLASS_XDOMAIN,.index=index,.direction=i?XDEV_EXT_MECH_DIR_FROM_DEVICE:XDEV_EXT_MECH_DIR_TO_DEVICE};
   side->link.token=1001+i;side->link.local_inc=11+i;side->link.remote_inc=12-i;side->link.up=true;side->link.channels=1;
+  /* Unit precondition: the external link/device boundary is preverified.
+   * These family cases never claim actual startup challenge execution. */
+  side->link.probe_phase=XD_PROBE_VERIFIED;side->link.data_verified_mask=1;
   memset(side->link.ctl_tx_free,0xff,sizeof(side->link.ctl_tx_free));
   side->link.nhi_pdev=&requester[i];
  }
 }
 static int bind_side(struct side *side) {
  struct xdev_ext_mech_stage_uapi u={.class_id=XDEV_EXT_MECH_CLASS_XDOMAIN,.direction=stage_of(side)->direction,.arg0=side->link.token};
- return registered->bind(stage_of(side),&u);
+ int result=registered->bind(stage_of(side),&u);
+ /* This unit stands in for completed CREATE publication only after its real
+  * bind returns. A worker reentered during bind must still see false. */
+ if(!result&&side->session.ss.state==XDEV_EXT_MECH_SESSION_ACTIVE)
+  side->session.progress_ready=true;
+ return result;
 }
 static void pair(unsigned tx_index,unsigned depth,unsigned bytes) { fresh(tx_index,0,depth,65536,bytes);assert(!bind_side(&sides[0])&&!bind_side(&sides[1])); }
 static struct xdev_ext_mech_batch *prepare_raw(struct side *side,unsigned index) {
@@ -559,3 +568,10 @@ struct pressure_observation {
 void pressure_seed_full(struct side *side,struct xdev_ext_xd_msg *one_more);
 void pressure_capture(struct side *side,struct pressure_observation *out);
 @PRESSURE@
+
+/* These class/family unit cases never query diagnostics. The link is an
+ * external recorder here; fail loudly if a new case attempts that query. */
+#ifndef DIAG_CLASS_HAS_HOOK
+int xdev_ext_xd_link_diag(struct xdev_ext_xd_ep *ep,struct xdev_ext_mech_stage_diag *out)
+{(void)ep;(void)out;abort();}
+#endif

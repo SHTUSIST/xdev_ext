@@ -66,11 +66,13 @@ struct file { int fd; };
 struct xdev_ext_peer_backing { struct pci_dev *owner; u32 flags; };
 struct xdev_ext_requester { struct pci_dev *pdev; struct file *authority; u64 generation; struct xdev_ext_admission adm; };
 struct xdev_ext_mech_stage;
+struct xdev_ext_mech_stage_diag;
 struct xdev_ext_comp_hooks { u32 kinds, producer_visibility; };
 struct xdev_ext_mech_class_ops {
  int (*bind)(struct xdev_ext_mech_stage *,const struct xdev_ext_mech_stage_uapi *);
  int (*unbind_checked)(struct xdev_ext_mech_stage *);
  void (*unbind)(struct xdev_ext_mech_stage *);
+ int (*stage_diag)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_stage_diag *);
  bool poll;
  union { const struct xdev_ext_comp_hooks *comp; } fam;
 };
@@ -251,6 +253,10 @@ static int xdev_ext_mech_stats(struct io_ring_ctx *c,void *p) { (void)c;(void)p;
 static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
 static int xdev_ext_mech_user_stage_create(void *p) { (void)p;abort(); }
+/* Task 2 snapshots have a separate suite. A call here is an out-of-scope
+ * boundary violation, never a fabricated successful diagnostic snapshot. */
+static int xdev_ext_mech_stage_diag_op(struct io_ring_ctx *c,void *p)
+{ (void)c;(void)p;abort(); }
 /* DISPATCH */
 
 static struct xdev_ext_mech_create request(void)

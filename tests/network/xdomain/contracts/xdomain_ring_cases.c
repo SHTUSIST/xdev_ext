@@ -25,7 +25,9 @@ static void fresh(void)
 {
     allocate(); mutex_lock(&xl.ctl_mutex);
     assert(xdev_ext_xd_rings_start(&xl)==0); mutex_unlock(&xl.ctl_mutex);
-    xl.up=true; /* X3 already established this device prerequisite. */
+    xl.up=true;
+    /* Explicit unit prerequisite; this runner does not certify startup. */
+    xl.probe_phase=XD_PROBE_VERIFIED;xl.data_verified_mask=1;
 }
 static void stop_link(void)
 {

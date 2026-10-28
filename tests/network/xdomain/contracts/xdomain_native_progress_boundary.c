@@ -128,7 +128,7 @@ int native_progress_more(struct tb_ring *ring, struct ring_frame *frame)
 {
 	assert(!world->cfg.nhi_batch && !ring_info(ring)->control);
 	world->cfg.nhi_batch = true;
-	int result = native_enqueue(ring, frame);
+	int result = native_enqueue(ring, frame, false);
 	world->cfg.nhi_batch = false;
 	native_interleave(ring);
 	return result;

@@ -43,6 +43,7 @@ class PreparedInputs(unittest.TestCase):
         # while the poison headers and unrelated sparse source stay excluded.
         pending += [KERNEL / name for name in (
             'io_uring/family/xdev_ext_requester_retention.c',
+            'io_uring/xdomain/xdev_ext_xdomain_probe.c',
             'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h',
             'include/linux/thunderbolt.h')]
         pending += [HERE.parent / 'peer_graph' / name for name in (

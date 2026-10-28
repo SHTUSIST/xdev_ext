@@ -47,7 +47,7 @@ def execute(kernel, out, case=None, sanitize=False):
 
     try:
         expected = json.loads((here / 'nhi_stack_expected.json').read_text())
-        expected['source_units'] = expected['source_units'] + [
+        expected['source_units'] = expected['source_units'] + ['kernel/io_uring/xdomain/xdev_ext_xdomain_probe.c',
             'kernel/io_uring/family/xdev_ext_requester_retention.c']
         selected = [item for item in expected['cases']
                     if case is None or item['name'] == case]
@@ -98,7 +98,7 @@ def execute(kernel, out, case=None, sanitize=False):
             manifest['checkout_head'] = head.stdout.strip() if head.returncode == 0 else None
         except (OSError, subprocess.TimeoutExpired):
             manifest['checkout_head'] = None
-        command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g',
+        command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g', '-DSTACK_STARTUP_EVENTS',
                    '-DSTACK_REAL_NHI', '-Wall', '-Wextra',
                    '-Werror=implicit-function-declaration', '-Wno-unused-function',
                    '-Wno-unused-parameter', '-pthread',
@@ -109,6 +109,11 @@ def execute(kernel, out, case=None, sanitize=False):
         if sanitize:
             command += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all',
                         '-fno-omit-frame-pointer']
+        probe_unit = out / 'startup-probe.c'
+        probe_unit.write_text('#define STACK_INTERNAL\n#include \"stack_kernel_compat.h\"\n' +
+            ('#include \"stack_nhi_api.h\"\n#define tb_ring_tx stack_ring_tx\n#define tb_ring_rx stack_ring_rx\n' if True else '') +
+            '#include \"' + str(kernel / 'io_uring/xdomain/xdev_ext_xdomain_probe.c') + '\"\n')
+        sources.append(probe_unit)
         binary = out / 'nhi-stack-cases'
         command += [str(source) for source in sources] + ['-o', str(binary)]
         manifest['compile_command'] = command

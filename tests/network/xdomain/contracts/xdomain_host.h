@@ -112,7 +112,7 @@ struct xdev_ext_mech_session {
  struct xdev_ext_mech_sess ss;
  struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
  unsigned nr_stages,depth,queued,gets,puts;
- bool progress_ready;
+ bool progress_ready,create_pending_publish;
  u64 id;
  spinlock_t lock;
  atomic_t native_controls;

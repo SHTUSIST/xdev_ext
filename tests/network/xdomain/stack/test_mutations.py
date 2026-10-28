@@ -30,6 +30,7 @@ def copy_mutation_inputs(kernel, dest):
     # Exact production dependencies of retention and descriptor-byte accounting.
     pending += [kernel / name for name in (
         'io_uring/family/xdev_ext_requester_retention.c',
+        'io_uring/xdomain/xdev_ext_xdomain_probe.c',
         'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h',
         'include/linux/thunderbolt.h')]
     pending += [here.parent / 'peer_graph' / name for name in (

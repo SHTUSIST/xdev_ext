@@ -29,6 +29,7 @@ def main():
     parser.add_argument("--kernel", type=Path, default=here.parents[4],
                         help="kernel tree (default: this test's kernel tree)")
     args = parser.parse_args()
+    print("# unit_scope=LOGIN/ring external_data_path=preverified actual_startup=false", flush=True)
     kernel = args.kernel.resolve()
     production = kernel / "io_uring/xdomain"
     needed = [production / name for name in

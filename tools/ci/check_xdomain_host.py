@@ -19,10 +19,17 @@ for _parent in Path(__file__).resolve().parents:
     if (_parent / 'tools/layout.py').is_file():
         sys.path.insert(0, str(_parent / 'tools'))
         break
-from layout import canonical_root, materialize_view
+from layout import canonical_root, materialize_view, load_layout, isolated_file, _atomic_copy
 
 CANONICAL_ROOT = canonical_root(Path(__file__))
 ROOT = materialize_view(CANONICAL_ROOT).root
+_LAYOUT = load_layout(CANONICAL_ROOT)
+_LOCK = json.loads((CANONICAL_ROOT / _LAYOUT.manifest['dependency_lock']).read_text())
+NHI_REGS_INPUT = CANONICAL_ROOT / ('tests/support/fixtures/upstream/linux-' +
+    _LOCK['components']['linux']['commit'] + '/nhi_regs.h')
+# Host NHI composition requires one pinned upstream-only declaration file.
+# Admit that exact fixture; a prepared full kernel header tree is unnecessary.
+_atomic_copy(NHI_REGS_INPUT, isolated_file(ROOT, 'kernel/drivers/thunderbolt/nhi_regs.h'))
 PEER = "kernel/tools/testing/selftests/xdev_ext_mech/peer_graph/"
 CONTROLLER = "tests/eval/xdomain/"
 STACK = "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/"
@@ -68,6 +75,19 @@ ENTRYPOINTS = (
     "kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py",
 )
 
+# Canonical entrypoints consume an explicit source root and their own isolated
+# outputs. Keep every regression visible; none is discovered through a glob.
+CANONICAL_ENTRYPOINTS = {
+    "tests/core/library/peer_wait/run.py": ("--out",),
+    "tests/network/xdomain/probe/probe_gate_test.py": ("--keep-build",),
+    "tests/network/xdomain/probe/probe_wire_test.py": ("--keep-build",),
+    "tests/network/xdomain/probe/probe_transport_test.py": ("--keep-build",),
+    "tests/core/admission_report/run.py": ("--output",),
+    "tests/core/library/create_report/run.py": ("--out",),
+    "tests/network/xdomain/diagnostics/run.py": ("--output",),
+    "tests/core/library/stage_diag/run.py": ("--output",),
+}
+
 REJECT_OUTPUT = re.compile(
     r"^\s*(?:not ok(?:\s|$)|(?:FAIL|FAILED|ERROR|UNAVAILABLE|SKIP)(?:[:(\s]|$))"
     r"|#\s*SKIP\b|\.\.\.\s+skipped\b|^OK\s*\(skipped=",
@@ -82,16 +102,26 @@ def main():
     log_dir = args.log_dir.resolve()
     log_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
     records = []
-    for index, source in enumerate(ENTRYPOINTS):
-        argv = ["python3", source]
-        header = f"SOURCE {source}\nCWD {ROOT}\nCOMMAND {shlex.join(argv)}\n"
+    layout = load_layout(CANONICAL_ROOT)
+    for index, entry in enumerate((*ENTRYPOINTS, *CANONICAL_ENTRYPOINTS)):
+        canonical = entry in CANONICAL_ENTRYPOINTS
+        source = entry if canonical else layout.by_logical[entry]
+        cwd = CANONICAL_ROOT if canonical else ROOT
+        argv = ["python3", entry]
+        if canonical:
+            output = log_dir / (f"{index:02d}-" + Path(entry).parent.name)
+            argv += ["--source-root", str(CANONICAL_ROOT),
+                     CANONICAL_ENTRYPOINTS[entry][0], str(output)]
+            if entry.endswith("diagnostics/run.py"):
+                argv += ["--nhi-regs", str(NHI_REGS_INPUT)]
+        header = f"SOURCE {source}\nCWD {cwd}\nCOMMAND {shlex.join(argv)}\n"
         print(header, end="", flush=True)
-        if not (ROOT / source).is_file():
+        if not (cwd / entry).is_file():
             output = f"MISSING FAIL: {source}\n"
             returncode, reason = 127, "missing required entrypoint"
         else:
             try:
-                result = subprocess.run(argv, cwd=ROOT, text=True,
+                result = subprocess.run(argv, cwd=cwd, text=True,
                                         stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                         timeout=600)
                 output, returncode = result.stdout, result.returncode
@@ -113,7 +143,7 @@ def main():
         path.write_text(header + output + footer)
         print(output, end="" if output.endswith("\n") else "\n", flush=True)
         print(footer, end="", flush=True)
-        records.append(dict(source=source, argv=argv, cwd=str(ROOT),
+        records.append(dict(source=source, argv=argv, cwd=str(cwd),
                             returncode=returncode, status="fail" if failed else "pass",
                             reason=reason, log=path.name))
     failed = any(row["status"] == "fail" for row in records)

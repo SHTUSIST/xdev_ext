@@ -41,6 +41,14 @@ void stack_nhi_observe(unsigned kind, struct tb_ring *ring, struct ring_frame *f
 
 	if (kind == STACK_NHI_DOORBELL) {
 		event.kind = STACK_EV_NHI_DOORBELL;
+        /* index is the actual new head. Classify a scratch-only notification
+         * from each real descriptor in its newly advertised interval. */
+        bool scratch = nr && !info->control;
+        for(unsigned i=0;i<nr&&scratch;i++){
+            struct ring_desc *d=&ring->descriptors[(index+ring->size-nr+i)%ring->size];
+            scratch=stack_scratch_dma(d->phys,d->length?d->length:4096);
+        }
+        if(scratch)event.control=2;
 		event.length = nr;
 	} else {
 		assert(kind == STACK_NHI_POST || kind == STACK_NHI_COMPLETE);
@@ -49,6 +57,7 @@ void stack_nhi_observe(unsigned kind, struct tb_ring *ring, struct ring_frame *f
 
 		assert(n); /* Every real descriptor belongs to accepted X4 storage. */
 		event.kind = kind == STACK_NHI_POST ? STACK_EV_NHI_POST : STACK_EV_NHI_COMPLETE;
+		event.control = !info->control && stack_scratch_dma(frame->buffer_phy, n->len) ? 2 : info->control;
 		event.address = desc->phys;
 		event.length = desc->length ? desc->length : 4096;
 		event.pdf = desc->sof | (desc->eof << 8);
@@ -77,7 +86,7 @@ static void native_callback(struct tb_ring *ring, struct ring_frame *frame, bool
 	frame->callback = n->callback;
 	struct stack_event event = {
 		.kind = STACK_EV_NHI_CALLBACK, .endpoint = info->endpoint,
-		.control = info->control, .direction = info->is_tx ? 1 : 2,
+		.control = !info->control && stack_scratch_dma(frame->buffer_phy,n->len) ? 2 : info->control, .direction = info->is_tx ? 1 : 2,
 		.channel = info->channel, .owner = (uintptr_t)frame,
 		.group = n->group, .seq = n->seq, .generation = n->generation,
 		.session_id = n->session_id, .address = frame->buffer_phy,
@@ -86,12 +95,12 @@ static void native_callback(struct tb_ring *ring, struct ring_frame *frame, bool
 	};
 	stack_record(event);
 	if (!info->control) {
-		event.kind = STACK_EV_DATA_CALLBACK;
+		event.kind = stack_scratch_dma(frame->buffer_phy,n->len) ? STACK_EV_STARTUP_CALLBACK : STACK_EV_DATA_CALLBACK;
 		event.flags = frame->flags;
 		event.pdf = frame->sof | (frame->eof << 8);
 		stack_record(event);
 	} else if (!info->is_tx && !canceled) {
-		event.kind = STACK_EV_CONTROL_RX;
+		event.kind = startup_event(n,STACK_EV_CONTROL_RX,STACK_EV_STARTUP_CONTROL_RX);
 		event.raw_len = n->raw_len;
 		event.length = frame->size;
 		event.control_type = n->raw[5];
@@ -104,7 +113,7 @@ static void native_callback(struct tb_ring *ring, struct ring_frame *frame, bool
 	world->in_callback = false;
 	/* Do not dereference frame here: the production callback owns its life. */
 	if (info->control && info->is_tx) {
-		event.kind = canceled ? STACK_EV_RETAIN : STACK_EV_CONTROL_DONE;
+		event.kind = canceled ? STACK_EV_RETAIN : startup_event(n,STACK_EV_CONTROL_DONE,STACK_EV_STARTUP_CONTROL_DONE);
 		event.flags = 0;
 		stack_record(event);
 	} else if (info->control && !canceled && link(info->endpoint)->ctl_dropped != dropped) {
@@ -335,7 +344,7 @@ static struct native *native_ready(void)
 
 		if (!native_live(n) || !stack_nhi_visible(n->r, n->f)) continue;
 		if (!info->is_tx) {
-			if (n->delivered && (info->control || !world->hold_callbacks[info->endpoint]))
+			if (n->delivered && (info->control || !native_callback_held(n)))
 				return n;
 			continue;
 		}
@@ -345,7 +354,7 @@ static struct native *native_ready(void)
 			continue;
 		if (!n->delivered) {
 			if (matching_rx(n)) return n;
-		} else if (info->control || world->drop_callback[e] || !world->hold_callbacks[e]) {
+		} else if (info->control || world->drop_callback[e] || !native_callback_held(n)) {
 			return n;
 		}
 	}
@@ -366,7 +375,7 @@ static bool one_native(void)
 	if (!n) return false;
 	struct stack_ring_info *info = ring_info(n->r);
 	if (!info->is_tx || n->delivered) {
-		if (!info->control && world->drop_callback[info->endpoint]) {
+		if (!info->control && !stack_scratch_dma(n->f->buffer_phy,n->len) && world->drop_callback[info->endpoint]) {
 			n->lost = true;
 			world->drop_callback[info->endpoint] = false;
 		} else {
@@ -384,9 +393,21 @@ static bool one_native(void)
 	if (info->control) {
 		/* Control storage is host memory. Data payload is never CPU accessed. */
 		memcpy((void *)(uintptr_t)rx->f->buffer_phy, n->raw, n->raw_len);
+		rx->startup=n->startup;
 		memcpy(rx->raw, n->raw, n->raw_len);
 		rx->raw_len = n->raw_len;
-	} else {
+	} else if(stack_scratch_dma(n->f->buffer_phy,n->len)){
+#ifdef STACK_STARTUP_EVENTS
+  assert(n->len<=4096&&stack_scratch_dma(rx->f->buffer_phy,4096));
+  memcpy((void *)(uintptr_t)rx->f->buffer_phy,(void *)(uintptr_t)n->f->buffer_phy,n->len);
+#else
+  /* Dedicated adversarial startup tests target the scratch path itself. */
+  unsigned endpoint=ring_info(rx->r)->endpoint;
+  if(world->rx_length_set[endpoint])rx->completion_len=world->rx_length[endpoint];
+  rx->completion_flags=world->rx_flags[endpoint];
+  world->rx_length_set[endpoint]=false;world->rx_flags[endpoint]=0;
+#endif
+ } else {
 		unsigned endpoint = ring_info(rx->r)->endpoint;
 		if (world->rx_length_set[endpoint]) rx->completion_len = world->rx_length[endpoint];
 		rx->completion_flags = world->rx_flags[endpoint];

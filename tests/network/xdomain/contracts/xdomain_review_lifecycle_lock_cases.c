@@ -42,7 +42,7 @@ int main(int argc,char **argv)
     /* Keep one independent reference across remove so postconditions can
      * inspect real gone/work state before dropping the final link reference. */
     kref_get(&review_xl->ref);
-    review_xl->remote_login=(struct xdev_ext_xd_login){.length_sn=27,.type=XDEV_EXT_XD_LOGIN,.proto_version=2,.channels=1,.ctl_tx_path=37,.data_tx_path={41},.incarnation=0x1111,.caps=1};
+    review_xl->remote_login=(struct xdev_ext_xd_login){.length_sn=27,.type=XDEV_EXT_XD_LOGIN,.proto_version=3,.channels=1,.ctl_tx_path=37,.data_tx_path={41},.incarnation=0x1111,.caps=3};
     if(review_case==2) {
         assert(!tb_approve_xdomain_paths(&review_tb,&review_domain,21,22,23,24));
         rings_running=true;review_xl->up=true;review_xl->remote_logged_in=true;

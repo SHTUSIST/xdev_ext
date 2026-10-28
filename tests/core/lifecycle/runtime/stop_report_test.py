@@ -65,6 +65,10 @@ static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *c,void *p){(void)c;(v
 static int xdev_ext_mech_transport_stats(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
 static int xdev_ext_mech_user_stage_create(void *p){(void)p;abort();}
 static int xdev_ext_mech_stage_caps_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
+/* STOP_REPORT tests never dispatch these new operations. Abort preserves that
+ * scope instead of manufacturing a successful CREATE_REPORT/diagnostic query. */
+static int xdev_ext_mech_create_report_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
+static int xdev_ext_mech_stage_diag_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
 static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *,struct xdev_ext_mech_stop_report *);
 static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *,struct xdev_ext_mech_stop_report *);
 static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *,struct xdev_ext_mech_stats *);

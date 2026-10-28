@@ -292,7 +292,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export CC=gcc CXX=g++
+          export CC=gcc CXX=g++ XDEV_EXT_LIBBPF_INCLUDE=/usr/include
           log="$RUNNER_TEMP/xdev-ext-xdomain-closure.log"
           python3 "$GITHUB_WORKSPACE/tools/ci/check_xdomain_host.py" \
             --log-dir "$RUNNER_TEMP/xdev-ext-xdomain-closure" 2>&1 | tee "$log"

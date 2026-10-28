@@ -271,7 +271,11 @@ static void relogin_stale_identity(void)
  uint64_t token=0;for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind==STACK_EV_PROBE&&e.endpoint==0)token=e.token;}
  CHECK(token&&stack_remove(w,0)==0&&stack_probe(w,0)==0,"actual remove/reprobe replaces X3 identity before token test");pump(w,10000000);
  struct stack_session_config stale={.direction=1,.stage_index=0,.groups=1,.token=token};size_t rejects=count(w,STACK_EV_REJECT,0,-1);
- CHECK(stack_session(w,0,&stale)<0&&count(w,STACK_EV_REJECT,0,-1)==rejects+1,"removed old token fails actual fresh X5 bind");stale.token=0;CHECK(stack_session(w,0,&stale)==0,"current token actually binds after old-token refusal");safety(w);stack_destroy(w);
+ CHECK(stack_session(w,0,&stale)<0&&count(w,STACK_EV_REJECT,0,-1)==rejects+1,"removed old token fails actual fresh X5 bind");
+ /* A single-end reprobe leaves the surviving peer's normal one-second LOGIN
+  * retry queued. Complete that actual retry and its native startup challenge
+  * before requiring the fresh token to admit business traffic. */
+ pump(w,1000000000);stale.token=0;CHECK(stack_session(w,0,&stale)==0,"current token actually binds after old-token refusal");safety(w);stack_destroy(w);
 }
 static void sealed_bpf_boundary(void)
 {for(unsigned mode=1;mode<=7;mode++){fprintf(stderr,"STACK_SUBCASE sealed mode=%u\n",mode);struct stack_config c=geometry();struct stack_world*w=create(&c);login(w);sessions(w,1,0);fault(w,STACK_FAULT_BPF_INTENT,0,0,0,mode,0);CHECK(stack_start(w,1,c.first_seq,0)==0,"receiver arm for sealed intent test");int submit=stack_start(w,0,c.first_seq,0);if(mode<7)CHECK(submit==0||submit==-71,"actual class may synchronously reject invalid BPF intent with EPROTO");else CHECK(submit==0,"compatible WAIT intent accepted by actual class");pump(w,1000000);CHECK(count(w,STACK_EV_PROTOCOL,0,-1)>0,"actual reference BPF invoked with actual protocol info");if(mode<7){CHECK(count(w,STACK_EV_REJECT,0,-1)+count(w,STACK_EV_FAILURE,0,-1)>0,"C sealed apply rejects invalid/duplicate/stale/unsafe intent");CHECK(count(w,STACK_EV_DATA_POST,0,-1)==0,"no C policy fallback to post after rejected/no verdict");}else{pump(w,10000000);CHECK(count(w,STACK_EV_DATA_POST,0,-1)>0,"compatible replacement WAIT resumes through actual progress");release_group(w,c.first_seq);CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1,"WAIT/resume completes normally");}safety(w);stack_destroy(w);}}

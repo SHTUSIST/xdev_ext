@@ -78,6 +78,8 @@ struct ring_frame {
     struct list_head list;
     u32 size:12,flags:12,eof:4,sof:4;
 };
+struct tb_ring_snapshot {u32 in_flight,software_pending;bool running,notify_pending;};
+static void tb_ring_snapshot(struct tb_ring *,struct tb_ring_snapshot *);
 struct tb_ring {
     struct tb_nhi *nhi;
     int size,hop;
@@ -139,3 +141,8 @@ static void dev_info(const struct device *,const char *,...);
 /* Kernel facilities required by the built-in retention core. */
 #define EXPORT_SYMBOL_GPL(n)
 static void list_del(struct list_head *n) { n->prev->next=n->next; n->next->prev=n->prev; }
+
+static unsigned bitmap_weight(const unsigned long *map,unsigned n){unsigned count=0;for(unsigned i=0;i<n;i++)count+=!!(map[i/(8*sizeof(long))]&(1UL<<(i%(8*sizeof(long)))));return count;}
+
+#include "include/linux/xdev_ext_mech_reliable_core.h"
+#include "io_uring/xdomain/xdev_ext_xdomain_probe_core.h"

@@ -50,7 +50,9 @@ enum stack_event_kind {
  STACK_EV_DEVICE_PUT, STACK_EV_CONTROL_DONE = 32, STACK_EV_SCHED_STEP = 33,
  STACK_EV_NHI_POST, STACK_EV_NHI_COMPLETE, STACK_EV_NHI_CALLBACK,
  STACK_EV_NHI_DOORBELL, STACK_EV_NHI_RETIRE,
- STACK_EV_NHI_IRQ_ALLOC, STACK_EV_NHI_IRQ_FREE
+ STACK_EV_NHI_IRQ_ALLOC, STACK_EV_NHI_IRQ_FREE,
+ STACK_EV_STARTUP_POST, STACK_EV_STARTUP_CALLBACK,
+ STACK_EV_STARTUP_CONTROL_TX, STACK_EV_STARTUP_CONTROL_RX, STACK_EV_STARTUP_CONTROL_DONE
 };
 /* event.id strictly increases; owner identifies the accepted ring_frame;
  * seq/group are actual native/batch identities, not test-case counters.
@@ -268,6 +270,8 @@ struct tb_protocol_handler{const uuid_t*uuid;int(*callback)(const void*,size_t,v
 #define TB_CFG_PKG_XDOMAIN_RESP 1
 #ifndef STACK_REAL_NHI
 struct tb_ring;struct ring_frame;
+struct tb_ring_snapshot {u32 in_flight,software_pending;bool running,notify_pending;};
+void tb_ring_snapshot(struct tb_ring *,struct tb_ring_snapshot *);
 typedef void(*ring_cb)(struct tb_ring*,struct ring_frame*,bool);
 struct ring_frame{dma_addr_t buffer_phy;ring_cb callback;struct list_head list;u32 size:12,flags:12,eof:4,sof:4;};
 struct tb_ring{struct tb_nhi*nhi;int size,hop;bool is_tx,running;unsigned flags,endpoint,control,channel;bool freed,unknown;};
@@ -304,6 +308,11 @@ int tb_register_service_driver(struct tb_service_driver*);void tb_unregister_ser
 void*kzalloc(size_t,int);void*kcalloc(size_t,size_t,int);void*kvcalloc(size_t,size_t,int);void kfree(void*);void kvfree(void*);
 void*dma_alloc_coherent(struct device*,size_t,dma_addr_t*,int);void dma_free_coherent(struct device*,size_t,void*,dma_addr_t);
 u32 crc32c(u32,const void*,size_t);
+static unsigned bitmap_weight(const unsigned long *map,unsigned n){unsigned count=0;for(unsigned i=0;i<n;i++)count+=!!(map[i/(8*sizeof(long))]&(1UL<<(i%(8*sizeof(long)))));return count;}
+void get_random_bytes(void *,size_t);
+bool cancel_delayed_work(struct delayed_work *);
+int sysfs_emit_at(char *,int,const char *,...);
+#define time_after_eq(a,b) ((long)((a)-(b))>=0)
 enum dma_data_direction{DMA_BIDIRECTIONAL,DMA_TO_DEVICE,DMA_FROM_DEVICE};
 #include "../../../../../include/linux/xdev_ext_mech.h"
 #include "../../../../../include/linux/xdev_ext_netfam.h"

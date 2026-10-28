@@ -42,6 +42,7 @@ def main():
     parser.add_argument("--ring-source", type=Path, help="explicit historical baseline source; never current-production evidence")
     parser.add_argument("--keep-build", type=Path)
     args = parser.parse_args()
+    print("# unit_scope=LOGIN/ring external_data_path=preverified actual_startup=false", flush=True)
     if __file__.endswith(".draft"):
         print("# INACTIVE_DRAFT: root activation after X3 acceptance is required")
         return 2
@@ -77,6 +78,7 @@ def main():
         unit = ((here / "xdomain_ring_compat.h").read_text() +
                 '\n#include "include/uapi/linux/xdev_ext_mech.h"\n' +
                 '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n' +
+                '\n#include "io_uring/xdomain/xdev_ext_xdomain_probe_core.h"\n' +
                 '\n#include "include/linux/xdev_ext_mech_reliable_core.h"\n' +
                 lease + family + no_includes((kernel / names[1]).read_text()) +
                 (here / "xdomain_ring_boundaries.c").read_text() + retention_unit(kernel) + descriptor_unit(kernel) + ring +

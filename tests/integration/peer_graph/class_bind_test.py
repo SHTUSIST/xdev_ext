@@ -59,6 +59,7 @@ BODY = r'''
  * family_hdr and class_ops above are sliced from the real mech contract. */
 #include "include/linux/xdev_ext_compfam.h"
 struct xdev_ext_mech_stage {
+ u32 create_valid;bool create_reporting;
  u32 class_id;
  const struct xdev_ext_mech_class_ops *cls;
  struct xdev_ext_mech_stage_caps caps;
@@ -97,6 +98,9 @@ static void reset(u32 class_id, u32 direction, u64 arg0)
   .class_id = class_id, .direction = direction, .arg0 = arg0,
  };
  memset(&st, 0xa5, sizeof(st));
+ /* Legacy CREATE does not request a report; retain poisoned caps so the
+  * original wrapper-capability initialization assertions remain effective. */
+ st.create_reporting=false;st.create_valid=0;
  st.class_id = class_id;
  st.cls = &ops;
  ops.class_id = class_id;

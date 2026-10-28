@@ -38,7 +38,8 @@ def assemble(out):
     pending += [f'{peer_rel}/{n}' for n in ('xdomain_retention_fixture.py',
                                          'xdomain_ring_test.py', 'xdomain_fixture.py')]
     pending += ['drivers/thunderbolt/nhi.c', 'include/linux/thunderbolt.h',
-                'io_uring/family/xdev_ext_requester_retention.c', 'io_uring/xdev_ext_mech.c']
+                'io_uring/family/xdev_ext_requester_retention.c', 'io_uring/xdev_ext_mech.c',
+                'io_uring/xdomain/xdev_ext_xdomain_probe.c']
     copied = {}
     include = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.M)
     while pending:
@@ -91,8 +92,9 @@ def prepare(kernel, stack, out):
     compat = compat_path.read_text()
     compat = compat.replace('struct xdev_ext_mech_stage st;u64 id',
                             'struct xdev_ext_mech_stage st[1];u64 id')
+    compat = '#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)\n' + compat
     compat = compat.replace('struct file authority;};', '''struct file authority;
- bool worker_gone; unsigned nr_bound,nr_stages;
+ bool worker_gone,create_pending_publish; unsigned nr_bound,nr_stages;
  void *worker; struct delayed_work retry_work,progress_work,poll_work;
  struct list_head live_node; int group_timer,last_err;
  void *pool_file,*evfd,*start_queue,*cookies,*transform_owner,*life,*privs;
@@ -121,7 +123,8 @@ int kthread_mod_delayed_work(void *,struct delayed_work *,unsigned long);
         'static void *b4_embedded_session;\nvoid kfree(void*p){\n if(p==b4_embedded_session)return;\n\tfree(p);')
     os_boundaries = (HERE / 'cases.c').read_text()
     release = '\n\n'.join(definition(core, n) for n in (
-        'xdev_ext_mech_unbind_checked', 'xdev_ext_mech_session_release_report'))
+        'xdev_ext_mech_unbind_checked', 'xdev_ext_mech_session_release_disposition',
+        'xdev_ext_mech_session_release_report'))
     boundary += '\n' + os_boundaries.replace('/* ACTUAL_CORE_RELEASE */', release)
     path.write_text(boundary)
     x5 = stack / 'stack_x5.c'
@@ -133,7 +136,13 @@ unsigned b4_raw_queued(struct xdev_ext_mech_stage *st) {
 ''')
     sources = [stack / n for n in ('stack_boundary.c', 'stack_x3.c', 'stack_x4.c',
                                    'stack_x5.c', 'stack_family.c', 'stack_x6.c', 'stack_nhi.c')]
-    command = ['gcc', '-std=gnu11', '-O0', '-g', '-DSTACK_REAL_NHI', '-Wall',
+    probe = out / 'startup-probe.c'
+    probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
+                     '#include "stack_nhi_api.h"\n#define tb_ring_tx stack_ring_tx\n'
+                     '#define tb_ring_rx stack_ring_rx\n#include "' +
+                     str(kernel / 'io_uring/xdomain/xdev_ext_xdomain_probe.c') + '"\n')
+    sources.append(probe)
+    command = ['gcc', '-std=gnu11', '-O0', '-g', '-DSTACK_REAL_NHI', '-DSTACK_STARTUP_EVENTS', '-Wall',
                '-Wextra', '-Werror=implicit-function-declaration', '-Wno-unused-function',
                '-Wno-unused-parameter', '-pthread', '-I', str(facade), '-I', str(stack),
                '-I', str(kernel), '-idirafter', str(kernel / 'include'),

@@ -293,3 +293,19 @@ static void dev_info(const struct device *dev,const char *fmt,...)
     path_logs[path_log_nr].dev=dev;path_logs[path_log_nr].calls=path_attempts;
     memcpy(path_logs[path_log_nr++].text,text,(size_t)n+1);
 }
+
+static void tb_ring_snapshot(struct tb_ring *r,struct tb_ring_snapshot *out){
+ *out=(struct tb_ring_snapshot){.in_flight=r->queued_nr,.running=r->running};
+}
+
+/* Unit OS precondition: this ring-only fixture begins after startup verified
+ * the data paths. No probe allocation/callback is supplied or certified here.
+ * Full startup is exercised by probe_transport_test and the NHI composition. */
+void xdev_ext_xd_probe_ctl_complete_locked(struct xdev_ext_xd_link *xl,bool canceled){(void)canceled;assert(!xl->probe);}
+void xdev_ext_xd_probe_ctl_error_locked(struct xdev_ext_xd_link *xl,int error){(void)error;assert(!xl->probe);}
+bool xdev_ext_xd_probe_ctl_rx(struct xdev_ext_xd_link *xl,const u8 *p,u32 n){
+ assert(!xl->probe);assert(n<4||xdev_ext_xd_get(p,4)!=XD_PROBE_CTL_MAGIC);return false;
+}
+void xdev_ext_xd_probe_close(struct xdev_ext_xd_link *xl){assert(!xl->probe);xl->data_verified_mask=0;}
+u64 xdev_ext_xd_probe_retire(struct xdev_ext_xd_link *xl,u32 rx,u32 tx,bool gone){(void)rx;(void)tx;(void)gone;assert(!xl->probe);return 0;}
+void xdev_ext_xd_probe_free(struct xdev_ext_xd_link *xl){assert(!xl->probe);}

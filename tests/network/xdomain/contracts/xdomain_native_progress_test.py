@@ -123,7 +123,14 @@ def execute(args, out):
         sources = [staged / name for name in expected['wrappers']
                    if name not in ('stack_boundary.c', 'stack_x4.c')]
         sources += [staged / name for name in own]
-        command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g', '-DSTACK_REAL_NHI',
+        probe = out / 'startup-probe.c'
+        probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
+                         '#include "stack_nhi_api.h"\n#define tb_ring_tx stack_ring_tx\n'
+                         '#define tb_ring_rx stack_ring_rx\n#include "' +
+                         str(kernel / 'io_uring/xdomain/xdev_ext_xdomain_probe.c') + '"\n')
+        sources.append(probe)
+        expected['source_units'].append('kernel/io_uring/xdomain/xdev_ext_xdomain_probe.c')
+        command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g', '-DSTACK_REAL_NHI', '-DSTACK_STARTUP_EVENTS',
                    '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                    '-Wno-unused-function', '-Wno-unused-parameter', '-pthread',
                    '-I', str(env), '-I', str(staged), '-I', str(kernel),

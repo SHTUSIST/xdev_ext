@@ -73,8 +73,8 @@ static void fresh_link(void)
 static struct xdev_ext_xd_login peer_login(u64 inc)
 {
     struct xdev_ext_xd_login l={.route_hi=0x12345678,.route_lo=0xa5,.length_sn=27,
-        .type=1,.command_id=0x76543210,.proto_version=2,.channels=1,
-        .ctl_tx_path=37,.data_tx_path={41},.incarnation=inc,.caps=1};
+        .type=1,.command_id=0x76543210,.proto_version=3,.channels=1,
+        .ctl_tx_path=37,.data_tx_path={41},.incarnation=inc,.caps=3};
     memcpy(l.uuid,&xdev_ext_xd_proto_uuid,16);
     memcpy(l.initiator_uuid,&remote_uuid,16); memcpy(l.target_uuid,&local_uuid,16);
     return l;
@@ -135,7 +135,7 @@ static void response_echo(bool error)
     CHECK(!memcmp(last_response.uuid,l.uuid,16));
     CHECK(!memcmp(last_response.initiator_uuid,l.target_uuid,16));
     CHECK(!memcmp(last_response.target_uuid,l.initiator_uuid,16));
-    CHECK(last_response.status==(error?EPROTO:0));
+    CHECK(last_response.status==(error?EPROTONOSUPPORT:0));
 }
 static void success_echo(void) { response_echo(false); }
 static void error_echo(void) { response_echo(true); }
@@ -193,7 +193,7 @@ static void responder_echoes_requester_incarnation(void)
     l.proto_version=1;
     CHECK(registered_handler->callback(&l,sizeof(l),NULL)==1);
     memcpy(&echoed,(unsigned char *)&last_response+88,8);
-    CHECK(last_response.status==EPROTO && echoed==l.incarnation);
+    CHECK(last_response.status==EPROTONOSUPPORT && echoed==l.incarnation);
 }
 static struct { const char *name; void (*run)(void); } cases[]={
     {"correct reply still establishes UP",correct_reply},

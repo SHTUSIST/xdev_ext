@@ -85,6 +85,10 @@ def execute(out, legacy=False, legacy_cancel=False):
     unit.write_text(boundary + '\n' + DRIVER)
     expected = json.loads((HERE / 'stack_expected.json').read_text())
     sources = [HERE / name for name in expected['wrappers'] if name != 'stack_boundary.c']
+    probe = out / 'startup-probe.c'
+    probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n#include "' +
+                     str(kernel / 'io_uring/xdomain/xdev_ext_xdomain_probe.c') + '"\n')
+    sources.append(probe)
     command = ['gcc','-std=gnu11','-O0','-g','-Werror=implicit-function-declaration',
                '-pthread','-I',str(facade),'-I',str(HERE),'-I',str(kernel),
                '-idirafter',str(kernel/'include'),'-idirafter',str(kernel/'include/uapi'),

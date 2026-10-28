@@ -43,6 +43,16 @@ def function_body(path: Path, signature: str) -> str:
     raise AssertionError(f"unterminated function {signature} in {path}")
 
 
+def release_body(path: Path) -> str:
+    """Follow the real release wrapper; keep safety assertions on its callee."""
+    wrapper = function_body(path, "static int xdev_ext_mech_session_release_report(")
+    if "xdev_ext_mech_session_release_disposition(" in wrapper:
+        if "return xdev_ext_mech_session_release_disposition(s, report, NULL);" not in wrapper:
+            raise AssertionError("release_report no longer forwards the actual disposition")
+        return function_body(path, "static int xdev_ext_mech_session_release_disposition(")
+    return wrapper
+
+
 def mech_sources():
     return sorted((ROOT / "io_uring").rglob("xdev_ext_mech*.c"))
 
@@ -514,7 +524,7 @@ class UbrMechSourceTest(unittest.TestCase):
         park = destroy.index("xdev_ext_mech_quarantine(s);")
         self.assertLess(destroy.index("return -EBUSY;", park),
                         destroy.index("xdev_ext_mech_session_release_report(s, report);"))
-        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
+        release = release_body(path)
         order = [release.index(step) for step in (
             "kthread_destroy_worker(s->worker);",
             "s->st[i].cls->unbind(&s->st[i]);",
@@ -557,7 +567,7 @@ class UbrMechSourceTest(unittest.TestCase):
         # unless worker_gone, so release sets it under s->lock before it
         # frees the worker, and the stages are unbound after that.
         path = ROOT / "io_uring/xdev_ext_mech.c"
-        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
+        release = release_body(path)
         # L11: checked unbind can quarantine under an earlier lock; the worker
         # gate must be inside its own critical section before destruction.
         # Select the shared post-unbind gate: the optional report snapshot
@@ -672,7 +682,7 @@ class UbrMechSourceTest(unittest.TestCase):
         path = ROOT / "io_uring/xdev_ext_mech.c"
         bind = function_body(path, "static int xdev_ext_mech_session_bind(")
         self.assertIn("&s->c_owner[st->class_id]", bind)
-        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
+        release = release_body(path)
         self.assertIn("xdev_ext_mech_ops_put(s->ops[i], s->pinned[i], "
                       "s->c_owner[i]);", release)
         # Sessions on a C table are stopped too, not only pinned ones.
@@ -681,15 +691,17 @@ class UbrMechSourceTest(unittest.TestCase):
 
     def test_create_admits_nothing_until_bound(self):
         path = ROOT / "io_uring/xdev_ext_mech.c"
-        create = function_body(path, "static int xdev_ext_mech_create(")
-        ready = create.index("if (!xdev_ext_mech_ready())\n\t\treturn -EOPNOTSUPP;")
-        self.assertLess(ready, create.index("kzalloc("))
+        create = function_body(path, "static int xdev_ext_mech_create_common(")
+        wrapper = function_body(path, "static int xdev_ext_mech_create(")
+        ready = wrapper.index("if (!xdev_ext_mech_ready())")
+        self.assertLess(ready, wrapper.index("return xdev_ext_mech_create_common("))
+        self.assertLess(create.index("xdev_ext_mech_create_check(c, &frames)"), create.index("kzalloc("))
         self.assertNotIn("s->ss.state = XDEV_EXT_MECH_SESSION_ACTIVE;", create)
         # A stage that died while CREATE was binding (state NONE) left its
         # stop recorded: activation fails, CREATE returns the stop reason
         # and releases, before the session is listed anywhere.
         order = [create.index(step) for step in (
-            "xdev_ext_mech_session_bind(s, &c);",
+            "xdev_ext_mech_session_bind(s, c);",
             "spin_lock_irqsave(&s->lock, flags);",
             "ret = xdev_ext_mech_sess_activate(&s->ss);",
             "spin_unlock_irqrestore(&s->lock, flags);",
@@ -698,8 +710,9 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertEqual(order, sorted(order))
         refused = create[create.index("ret = xdev_ext_mech_stop_reason(s);"):
                          create.index("list_add_tail_rcu(&s->ring_node,")]
-        self.assertIn("xdev_ext_mech_session_release(s);\n\t\treturn ret;",
-                      refused)
+        self.assertIn("xdev_ext_mech_session_release_disposition(s, NULL,", refused)
+        rollback = refused.index("xdev_ext_mech_session_release_disposition(s, NULL,")
+        self.assertLess(rollback, refused.index("goto no_session;", rollback))
         init = function_body(path, "static void xdev_ext_mech_session_init(")
         self.assertIn("s->ss.state = XDEV_EXT_MECH_SESSION_NONE;", init)
         # The reason of a stop is recorded whenever xdev_ext_mech_sess_stop()
@@ -770,11 +783,11 @@ class UbrMechSourceTest(unittest.TestCase):
         find = function_body(path, "static struct xdev_ext_mech_session "
                                    "*xdev_ext_mech_find_live(")
         self.assertIn("uid_eq(s->uid, current_euid())", find)
-        create = function_body(path, "static int xdev_ext_mech_create(")
+        create = function_body(path, "static int xdev_ext_mech_create_common(")
         self.assertLess(create.index("ret = xdev_ext_mech_sess_activate(&s->ss);"),
                         create.index("list_add_tail(&s->live_node, "
                                      "&xdev_ext_mech_live);"))
-        release = function_body(path, "static int xdev_ext_mech_session_release_report(")
+        release = release_body(path)
         gone = release.index("list_del_init(&s->live_node);")
         self.assertLess(gone, release.index("kthread_destroy_worker(s->worker);"))
         self.assertLess(gone, release.index("kfree(s);"))

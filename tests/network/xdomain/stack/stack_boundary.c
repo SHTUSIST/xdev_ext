@@ -29,7 +29,8 @@ struct native {
 	generation,
 	session_id, incarnation;
 	u32 len;
-	bool live,
+ u8 sof,eof;
+	bool startup, live,
 	held,
 	lost,
 	delivered,
@@ -40,6 +41,7 @@ struct native {
 ;
 /* The authority, stage, mutexes and callback storage of an old generation
  * never move. A new registration creates a distinct heap object. */
+static unsigned startup_event(const struct native *,unsigned,unsigned);
 struct epoch {
  struct xdev_ext_mech_session s;
  struct xdev_ext_mech_batch b[STACK_BATCHES];
@@ -340,10 +342,46 @@ void dev_dbg(const struct device*d,const char*f,...){
 	(void)d;
 	(void)f;
 }
+/* Coherent allocations are recorded independently of production pointers.
+ * Only matching allocations may be accessed by the host scratch link. */
+static struct {void *pointer;size_t bytes;bool freed;} startup_alloc[4096];
+static unsigned startup_alloc_nr;
+static bool stack_scratch_dma(dma_addr_t address,size_t length)
+{
+ for(unsigned i=0;i<startup_alloc_nr;i++){
+  uintptr_t base=(uintptr_t)startup_alloc[i].pointer;
+  if(!startup_alloc[i].freed&&address>=base&&address-base<=startup_alloc[i].bytes&&
+     length<=startup_alloc[i].bytes-(address-base))return true;
+ }
+ return false;
+}
+static bool native_callback_held(const struct native *n)
+{
+#ifdef STACK_STARTUP_EVENTS
+ if(!ring_info(n->r)->control&&stack_scratch_dma(n->f->buffer_phy,n->len))return false;
+#endif
+ return world->hold_callbacks[ring_info(n->r)->endpoint];
+}
+#ifndef dma_alloc_coherent
+/* The dedicated adversarial probe fixture supplies these same OS boundaries
+ * when it wraps this existing boundary with its own allocation observations. */
+void get_random_bytes(void *pointer,size_t length)
+{
+ unsigned char *p=pointer;
+ while(length){u64 value=get_random_u64();size_t n=length<sizeof(value)?length:sizeof(value);
+  memcpy(p,&value,n);p+=n;length-=n;}
+}
+bool cancel_delayed_work(struct delayed_work *work){return cancel_work_sync(&work->work);}
+int sysfs_emit_at(char *buffer,int offset,const char *format,...)
+{
+ va_list args;va_start(args,format);int n=vsnprintf(buffer+offset,4096-offset,format,args);va_end(args);return n;
+}
+#endif
 void*dma_alloc_coherent(struct device*d,size_t n,dma_addr_t*a,int g){
 	(void)d;
 	(void)g;
 	void*p=calloc(1,n);
+ if(p){assert(startup_alloc_nr<ARRAY_SIZE(startup_alloc));startup_alloc[startup_alloc_nr++]=(typeof(startup_alloc[0])){.pointer=p,.bytes=n};}
 	*a=(uintptr_t)p;
 	return p;
 }
@@ -351,6 +389,7 @@ void dma_free_coherent(struct device*d,size_t n,void*p,dma_addr_t a){
 	(void)d;
 	(void)n;
 	assert((uintptr_t)p==a);
+ for(unsigned i=0;i<startup_alloc_nr;i++)if(startup_alloc[i].pointer==p&&!startup_alloc[i].freed){assert(startup_alloc[i].bytes==n);startup_alloc[i].freed=true;break;}
 	free(p);
 }
 u32 crc32c(u32 c,const void*p,size_t n){
@@ -427,13 +466,13 @@ static void invoke(struct native*n,bool canceled){
 	unsigned e=n->r->endpoint;
 	world->in_callback=true;
 	if(!n->r->control)stack_record((struct stack_event){
-		.kind=STACK_EV_DATA_CALLBACK,.endpoint=e,.direction=n->r->is_tx?1:2,.owner=(uintptr_t)f,.group=n->group,.seq=n->seq,.generation=n->generation,.session_id=n->session_id,.address=f->buffer_phy,.length=canceled?0:n->len,.flags=f->flags,.pdf=f->sof|(f->eof<<8),.status=canceled?-ECANCELED:0
+		.kind=stack_scratch_dma(f->buffer_phy,n->len)?STACK_EV_STARTUP_CALLBACK:STACK_EV_DATA_CALLBACK,.endpoint=e,.direction=n->r->is_tx?1:2,.owner=(uintptr_t)f,.group=n->group,.seq=n->seq,.generation=n->generation,.session_id=n->session_id,.address=f->buffer_phy,.length=canceled?0:n->len,.flags=f->flags,.pdf=f->sof|(f->eof<<8),.status=canceled?-ECANCELED:0
 	}
 	);
 	f->callback(n->r,f,canceled);
 	world->in_callback=false;
 	if(n->r->control&&n->r->is_tx)stack_record((struct stack_event){
-		.kind=canceled?STACK_EV_RETAIN:STACK_EV_CONTROL_DONE,.endpoint=e,.control=1,.owner=(uintptr_t)f,.status=canceled?-ECANCELED:0
+		.kind=canceled?STACK_EV_RETAIN:startup_event(n,STACK_EV_CONTROL_DONE,STACK_EV_STARTUP_CONTROL_DONE),.endpoint=e,.control=1,.owner=(uintptr_t)f,.status=canceled?-ECANCELED:0
 	}
 	);
 	if(!n->r->control&&world->duplicate_callback[e]){
@@ -477,10 +516,22 @@ void tb_ring_free_quarantined(struct tb_ring*r){
 	}
 	);
 }
+void tb_ring_snapshot(struct tb_ring *r,struct tb_ring_snapshot *out){
+ unsigned pending=0;for(unsigned i=0;i<world->nn;i++)pending+=world->n[i].r==r&&world->n[i].live;
+ *out=(struct tb_ring_snapshot){.in_flight=pending,.running=r->running};
+}
 struct device*tb_ring_dma_device(struct tb_ring*r){
 	return &r->nhi->pdev->dev;
 }
 #endif /* !STACK_REAL_NHI: model ring implementation */
+static unsigned startup_event(const struct native *n,unsigned business,unsigned startup)
+{
+#ifdef STACK_STARTUP_EVENTS
+ return n->startup?startup:business;
+#else
+ (void)n;(void)startup;return business;
+#endif
+}
 static int native_post(struct tb_ring*r,struct ring_frame*f){
 	assert(r->running&&!ring_info(r)->freed&&world->nn<STACK_NATIVE);
 	struct native*n=&world->n[world->nn++];
@@ -488,6 +539,7 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 		.r=r,
 		.f=f,
 		.live=true,
+		.sof=f->sof,.eof=f->eof,
 		.len=f->size?f->size:4096
 	}
 	;
@@ -496,8 +548,10 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 			n->raw_len=n->len;
 			assert(n->raw_len<=STACK_CTL_BYTES);
 			memcpy(n->raw,(void*)(uintptr_t)f->buffer_phy,n->raw_len);
+   n->startup=stack_scratch_dma(f->buffer_phy,n->raw_len)&&n->raw_len>=4&&
+    n->raw[0]=='X'&&n->raw[1]=='S'&&n->raw[2]=='B'&&n->raw[3]=='1';
 			struct stack_event e={
-				.kind=STACK_EV_CONTROL_TX,
+				.kind=startup_event(n,STACK_EV_CONTROL_TX,STACK_EV_STARTUP_CONTROL_TX),
 				.endpoint=ring_info(r)->endpoint,
 				.direction=1,
 				.control=1,
@@ -505,7 +559,7 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 				.address=f->buffer_phy,
 				.length=n->len,
 				.raw_len=n->raw_len,
-				.control_type=n->raw[5]
+				.control_type=n->raw[5],.pdf=n->sof|(n->eof<<8)
 			}
 			;
 			memcpy(e.raw,n->raw,n->raw_len);
@@ -518,13 +572,20 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 			}
 		}
 	}
+ else if(stack_scratch_dma(f->buffer_phy,n->len)){
+  n->startup=true;
+  stack_record((struct stack_event){.kind=STACK_EV_STARTUP_POST,.control=2,
+   .endpoint=ring_info(r)->endpoint,.direction=r->is_tx?1:2,.channel=ring_info(r)->channel,
+   .owner=(uintptr_t)f,.address=f->buffer_phy,.length=n->len,.pdf=f->sof|(f->eof<<8)});
+  n->id=world->logs;
+ }
 	else{
 		struct xdev_ext_net_elem*el=container_of((void*)f,struct xdev_ext_net_elem,dev);
 		n->group=el->slot->group;
 		n->incarnation=link(ring_info(r)->endpoint)->local_inc;
 		n->generation=el->slot->ns->st->s->generation;
 		n->session_id=el->slot->ns->st->s->id;
-		for(unsigned i=0;i+1<world->nn;i++)if(world->n[i].r==r&&world->n[i].incarnation==n->incarnation)n->seq++;
+		for(unsigned i=0;i+1<world->nn;i++)if(world->n[i].r==r&&world->n[i].incarnation==n->incarnation&&world->n[i].session_id)n->seq++;
 		struct stack_event e={
 			.kind=STACK_EV_DATA_POST,
 			.endpoint=ring_info(r)->endpoint,
@@ -1132,7 +1193,7 @@ static bool one_native(void){
 	for(unsigned j=0;j<world->nn;j++){
 		struct native*r=&world->n[j];
 		unsigned e=r->r->endpoint;
-		if(r->live&&!r->r->is_tx&&!r->r->control&&r->delivered&&!r->lost&&!world->hold_callbacks[e]){
+		if(r->live&&!r->r->is_tx&&!r->r->control&&r->delivered&&!r->lost&&!native_callback_held(r)){
 			invoke(r,false);
 			return true;
 		}
@@ -1162,10 +1223,12 @@ static bool one_native(void){
 				}
 			}
 			memcpy((void*)(uintptr_t)r->f->buffer_phy,t->raw,t->raw_len);
+   r->startup=t->startup;
 			r->f->size=t->raw_len;
 			r->f->flags=0;
+   r->f->sof=t->sof;r->f->eof=t->eof;
 			struct stack_event ev={
-				.kind=STACK_EV_CONTROL_RX,
+				.kind=startup_event(t,STACK_EV_CONTROL_RX,STACK_EV_STARTUP_CONTROL_RX),
 				.endpoint=1-e,
 				.control=1,
 				.direction=2,
@@ -1205,6 +1268,13 @@ static bool one_native(void){
 			struct native*r=matching_rx(t);
 			if(!r)continue;
 			unsigned re=r->r->endpoint;
+   if(stack_scratch_dma(t->f->buffer_phy,t->len)){
+    assert(stack_scratch_dma(r->f->buffer_phy,4096));
+    memcpy((void *)(uintptr_t)r->f->buffer_phy,(void *)(uintptr_t)t->f->buffer_phy,t->len);
+    r->f->size=t->len;r->f->flags=0;r->f->sof=t->sof;r->f->eof=t->eof;
+    r->startup=true;
+    t->delivered=r->delivered=true;invoke(r,false);return true;
+   }
 			r->f->size=world->rx_length_set[re]?world->rx_length[re]:(r->len==4096?0:r->len);
 			r->f->flags=world->rx_flags[re];
 			world->rx_length_set[re]=false;
@@ -1215,7 +1285,7 @@ static bool one_native(void){
 				r->lost=true;
 				world->drop_callback[re]=false;
 			}
-			else if(!world->hold_callbacks[re])invoke(r,false);
+			else if(!native_callback_held(r))invoke(r,false);
 			return true;
 		}
 		if(world->drop_callback[e]){
@@ -1223,7 +1293,7 @@ static bool one_native(void){
 			world->drop_callback[e]=false;
 			return true;
 		}
-		if(world->hold_callbacks[e])continue;
+		if(native_callback_held(t))continue;
 		invoke(t,false);
 		return true;
 	}
@@ -1237,7 +1307,7 @@ static struct native *native_ready(void)
  for(unsigned i=0;i<world->nn;i++){
   struct native *r=&world->n[i];
   if(r->live&&!r->r->is_tx&&!r->r->control&&r->delivered&&!r->lost&&
-     !r->r->freed&&!world->hold_callbacks[r->r->endpoint])return r;
+     !r->r->freed&&!native_callback_held(r))return r;
  }
  for(unsigned i=0;i<world->nn;i++){
   struct native *t=&world->n[i];
@@ -1249,7 +1319,7 @@ static struct native *native_ready(void)
    if(t->delivered||matching_rx(t))return t;
   }else if(!t->delivered){
    if(matching_rx(t))return t;
-  }else if(world->drop_callback[endpoint]||!world->hold_callbacks[endpoint])return t;
+  }else if(world->drop_callback[endpoint]||!native_callback_held(t))return t;
  }
  return NULL;
 }
@@ -1286,7 +1356,7 @@ int stack_pump(struct stack_world *w,unsigned budget,uint64_t advance)
    for(unsigned endpoint=0;endpoint<2;endpoint++){
     if(!w->side[endpoint].probed||w->side[endpoint].removed)continue;
     struct xdev_ext_xd_link *xl=link(endpoint);
-    if(work==&xl->login_work.work||work==&xl->connect_work||work==&xl->down_work)
+    if(work==&xl->login_work.work||work==&xl->connect_work||work==&xl->down_work||work==&xl->probe_work.work)
      w->active=endpoint;
    }
    scheduler_step(w,budget,&used,STACK_STEP_WORK,w->active,0);
@@ -1512,7 +1582,7 @@ int stack_fault(struct stack_world*w,const struct stack_fault*f){
 				.r=link(1-e)->ctl_tx,
 				.live=true,
 				.replay=true,
-				.raw_len=old.raw_len
+				.raw_len=old.raw_len,.sof=old.pdf&15,.eof=(old.pdf>>8)&15
 			}
 			;
 			memcpy(r->raw,old.raw,old.raw_len);

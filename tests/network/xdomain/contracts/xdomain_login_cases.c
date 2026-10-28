@@ -29,8 +29,8 @@ static struct xdev_ext_xd_login peer_login(u64 incarnation)
     struct xdev_ext_xd_login packet={
         .route_hi=0x12345678,.route_lo=0x000000a5,.length_sn=27,
         .type=XDEV_EXT_XD_LOGIN,.command_id=0x76543210,
-        .proto_version=2,.channels=1,.ctl_tx_path=37,
-        .data_tx_path={41},.incarnation=incarnation,.caps=1,
+        .proto_version=3,.channels=1,.ctl_tx_path=37,
+        .data_tx_path={41},.incarnation=incarnation,.caps=3,
     };
     memcpy(packet.uuid,&xdev_ext_xd_proto_uuid,16);
     memcpy(packet.initiator_uuid,&remote_uuid,16);
@@ -67,11 +67,11 @@ static void check_no_pending(void)
 static void login_bytes(void)
 {
     fresh_link(); login_run();
-    CHECK(requests==1 && last_request.type==1 && last_request.proto_version==2);
+    CHECK(requests==1 && last_request.type==1 && last_request.proto_version==3);
     CHECK(last_request.route_hi==0x12345678 && last_request.route_lo==0xa5);
     CHECK(last_request.length_sn==27 && last_request.command_id==1);
     CHECK(last_request.channels==1 && last_request.ctl_tx_path==21 && last_request.data_tx_path[0]==23);
-    CHECK(last_request.incarnation==xl->local_inc && last_request.caps==1);
+    CHECK(last_request.incarnation==xl->local_inc && last_request.caps==3);
     CHECK(!memcmp(last_request.initiator_uuid,&local_uuid,16));
     CHECK(!memcmp(last_request.target_uuid,&remote_uuid,16));
     CHECK(!memcmp(last_request.uuid,&xdev_ext_xd_proto_uuid,16));
@@ -146,8 +146,8 @@ static void new_peer_epoch_detaches_old_stage(void)
 }
 static void bad_version_refused(void)
 {
-    fresh_link(); struct xdev_ext_xd_login packet=peer_login(0x1111); packet.proto_version=1;
-    CHECK(deliver(&packet)==1 && responses==1 && last_response.status==EPROTO);
+    fresh_link(); struct xdev_ext_xd_login packet=peer_login(0x1111); packet.proto_version=2;
+    CHECK(deliver(&packet)==1 && responses==1 && last_response.status==EPROTONOSUPPORT);
     CHECK(!xl->connect_work.pending && !xl->remote_logged_in && !ring_starts);
 }
 static void repeated_login_before_up(void)
@@ -190,7 +190,7 @@ static void stale_logout_cannot_down(void)
 static void remove_releases_native_before_last_ref(void)
 {
     up_link(); bind_ep(false); clear_trace(); remove_link();
-    CHECK(list_empty(&xdev_ext_xd_links) && logouts==1 && ring_frees==1 && events("cancel")==4);
+    CHECK(list_empty(&xdev_ext_xd_links) && logouts==1 && ring_frees==1 && events("cancel")==6);
     CHECK(endpoint.detached && dead_calls==1 && dead_error==-ENOLINK);
     CHECK(xl->gone && xl->going_away && !xl->xd && !xl->svc);
     CHECK(!link_freed && !pci_puts && pdev.refs==1); check_no_pending();
@@ -215,7 +215,7 @@ static void suspend_then_resume_login(void)
     CHECK(!xdev_ext_xd_suspend(&service.dev));
     CHECK(xl->suspended && !xl->up && dead_error==-ESHUTDOWN && endpoint.detached && !rings_running);
     CHECK(!ring_frees && !pci_puts && !link_freed); check_no_pending();
-    CHECK(events("cancel")==4 && event_index("cancel")<event_index("stage_dead"));
+    CHECK(events("cancel")==6 && event_index("cancel")<event_index("stage_dead"));
     CHECK(!xdev_ext_xd_resume(&service.dev));
     CHECK(!xl->suspended && xl->local_inc && xl->local_inc!=old && xl->login_work.work.pending);
     CHECK(xl->login_work.work.delay==0); reply_inc=0x2222; login_run();
@@ -257,7 +257,7 @@ static void late_packet_during_cancel_is_unfindable(struct work_struct *work)
 static void remove_barrier_hides_link_before_cancel(void)
 {
     up_link(); bind_ep(false); during_cancel=late_packet_during_cancel_is_unfindable;
-    remove_link(); CHECK(events("cancel")==4 && responses==1); put_ep();
+    remove_link(); CHECK(events("cancel")==6 && responses==1); put_ep();
 }
 static void suspended_packets_do_not_queue(void)
 {
@@ -749,7 +749,7 @@ static const struct test_case cases[]={
     {"foreign initiator UUID has no reply or connect work",foreign_initiator},
     {"foreign target UUID has no reply or connect work",foreign_target},
     {"peer reincarnation detaches old stage before restarting native path",new_peer_epoch_detaches_old_stage},
-    {"unsupported login version answers EPROTO without connect",bad_version_refused},
+    {"obsolete v2 LOGIN answers EPROTONOSUPPORT without connect",bad_version_refused},
     {"repeated LOGIN before up does not restart running rings",repeated_login_before_up},
     {"failed path enable stops rings and schedules re-login",paths_failure_unwinds_and_retries},
     {"failed ring start cannot enable paths",rings_failure_does_not_enable_paths},

@@ -58,7 +58,7 @@ def facade(kernel, directory):
 
 def execute(kernel, out, case=None, sanitize=False):
     expected = json.loads((HERE / 'stack_expected.json').read_text())
-    expected['source_units'] = expected['source_units'] + [RETENTION]
+    expected['source_units'] = expected['source_units'] + ['kernel/io_uring/xdomain/xdev_ext_xdomain_probe.c', RETENTION]
     provenance = expected['source_units'] + [
         'kernel/drivers/thunderbolt/nhi.c',
         'kernel/drivers/thunderbolt/nhi_regs.h',
@@ -77,8 +77,13 @@ def execute(kernel, out, case=None, sanitize=False):
         for name in provenance}, indent=2) + '\n')
     env = out / 'facade'
     facade(kernel, env)
+    probe_unit = out / 'startup-probe.c'
+    probe_unit.write_text('#define STACK_INTERNAL\n#include \"stack_kernel_compat.h\"\n' +
+        ('#include \"stack_nhi_api.h\"\n#define tb_ring_tx stack_ring_tx\n#define tb_ring_rx stack_ring_rx\n' if False else '') +
+        '#include \"' + str(kernel / 'io_uring/xdomain/xdev_ext_xdomain_probe.c') + '\"\n')
+    sources.append(probe_unit)
     binary = out / 'stack-cases'
-    command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g',
+    command = [os.environ.get('CC', 'gcc'), '-std=gnu11', '-O0', '-g', '-DSTACK_STARTUP_EVENTS',
                '-Wall', '-Wextra', '-Werror=implicit-function-declaration',
                '-Wno-unused-function', '-Wno-unused-parameter', '-pthread',
                '-I', str(env), '-I', str(HERE), '-I', str(kernel),

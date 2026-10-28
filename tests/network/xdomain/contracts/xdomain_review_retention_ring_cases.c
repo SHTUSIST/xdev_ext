@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Requirement: real ring lifecycle and real built-in core must agree on
- * descriptor+coherent bytes, preserve UNKNOWN across recreated link objects,
+ * descriptor+coherent bytes plus reserved startup scratch, preserve UNKNOWN across recreated link objects,
  * and refuse new DMA allocation at the requester/global limits. */
 static struct xdev_ext_requester_retention_stats joint_snapshot(void)
 {
@@ -20,11 +20,13 @@ static void joint_healthy(void)
     review_init();
     struct xdev_ext_requester_retention_stats s=joint_snapshot();
     /* 2*128*16 control descriptors + 2*256*16 data descriptors,
-     * plus 128*4096 RX and 128*128 TX coherent bytes. */
-    assert(s.generations==1 && s.reserved_bytes==552960);
+     * plus 128*4096 RX and 128*128 TX coherent bytes, and a reservation
+     * for four 4096-byte startup scratch slots. This unit never allocates
+     * scratch; UNKNOWN retains only the actual descriptor/control bytes. */
+    assert(s.generations==1 && s.reserved_bytes==569344);
     assert(!s.retained_generations && !s.retained_bytes);
     for(unsigned i=0;i<4;i++) {review_start();review_stop();s=joint_snapshot();
-        assert(s.reserved_bytes==552960 && !s.retained_bytes && dma_allocs==2);}
+        assert(s.reserved_bytes==569344 && !s.retained_bytes && dma_allocs==2);}
     review_free();s=joint_snapshot();
     assert(!s.generations && !s.reserved_bytes && !s.retained_bytes);
     assert(!s.global_reserved_bytes && !s.global_retained_bytes);
@@ -35,15 +37,15 @@ static void joint_unknown(void)
     review_init();void *rx=review_link.ctl_rx_buf,*tx=review_link.ctl_tx_buf;
     joint_full_unknown();struct xdev_ext_requester_retention_stats s=joint_snapshot();
     assert(s.generations==1 && s.retained_generations==1);
-    assert(s.reserved_bytes==552960 && s.retained_bytes==552960);
-    assert(s.global_reserved_bytes==552960 && s.global_retained_bytes==552960);
+    assert(s.reserved_bytes==569344 && s.retained_bytes==552960);
+    assert(s.global_reserved_bytes==569344 && s.global_retained_bytes==552960);
     assert(!dma_is_freed(rx) && !dma_is_freed(tx) && !dma_frees);
     assert(descriptor_quarantines==4 && fixture_pdev.refs==3);
     /* New subclass/link lifetime, same requester. Healthy allocation/free must
      * release only its own reservation, never erase prior retained charges. */
-    review_init();s=joint_snapshot();assert(s.generations==2 && s.reserved_bytes==1105920);
+    review_init();s=joint_snapshot();assert(s.generations==2 && s.reserved_bytes==1138688);
     review_free();s=joint_snapshot();
-    assert(s.generations==1 && s.reserved_bytes==552960 && s.retained_bytes==552960);
+    assert(s.generations==1 && s.reserved_bytes==569344 && s.retained_bytes==552960);
     assert(fixture_pdev.refs==3);
 }
 static void joint_partial_native(void)
@@ -58,13 +60,13 @@ static void joint_partial_native(void)
     /* Two started control descriptors (2048 each) and one data TX (4096),
      * while all never-submitted coherent control backing was truly freed. */
     assert(s.generations==1 && s.retained_generations==1);
-    assert(s.reserved_bytes==552960 && s.retained_bytes==8192);
+    assert(s.reserved_bytes==569344 && s.retained_bytes==8192);
     assert(dma_frees==2 && descriptor_quarantines==3 && fixture_pdev.refs==1);
 }
 static void joint_limits(bool global)
 {
     fixture_nhi.hop_count=global?1023:5;
-    unsigned expected=global?121:2;
+    unsigned expected=global?117:2;
     for(unsigned i=0;i<expected;i++) {review_init();joint_full_unknown();}
     unsigned before=dma_allocs;
     memset(&review_link,0,sizeof(review_link));fixture_xl=&review_link;
@@ -74,8 +76,8 @@ static void joint_limits(bool global)
     assert(dma_allocs==before && !review_link.rings && !dma_frees);
     struct xdev_ext_requester_retention_stats s=joint_snapshot();
     assert(s.generations==expected && s.retained_generations==expected);
-    assert(s.global_limit==67108864 && s.reserved_bytes==552960ULL*expected);
-    assert(s.retained_bytes==s.reserved_bytes && s.global_reserved_bytes==s.reserved_bytes);
+    assert(s.global_limit==67108864 && s.reserved_bytes==569344ULL*expected);
+    assert(s.retained_bytes==552960ULL*expected && s.global_reserved_bytes==s.reserved_bytes);
     fprintf(stderr,"# actual ring->built-in ledger %s generations=%u reserved=%llu retained=%llu limit=%llu\n",global?"global":"requester",s.generations,(unsigned long long)s.reserved_bytes,(unsigned long long)s.retained_bytes,(unsigned long long)s.global_limit);
 }
 int main(int argc,char **argv)

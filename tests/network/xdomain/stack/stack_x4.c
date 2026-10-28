@@ -14,8 +14,12 @@
 #define tb_ring_free_quarantined stack_ring_free_quarantined
 #define tb_ring_tx stack_ring_tx
 #define tb_ring_rx stack_ring_rx
+#ifndef tb_ring_tx_more
 #define tb_ring_tx_more stack_ring_tx_more
+#endif
+#ifndef tb_ring_rx_more
 #define tb_ring_rx_more stack_ring_rx_more
+#endif
 #else
 int tb_ring_tx_more(struct tb_ring *, struct ring_frame *);
 int tb_ring_rx_more(struct tb_ring *, struct ring_frame *);
@@ -23,6 +27,7 @@ void tb_ring_notify(struct tb_ring *);
 #endif
 #define xdev_ext_xd_class_ctl stack_record_dispatch
 #include "../../../../../io_uring/xdomain/xdev_ext_xdomain_ring.c"
+
 void stack_x4_control_pressure(struct xdev_ext_xd_link*x,bool full){
 	unsigned long f;
 	spin_lock_irqsave(&x->lock,f);

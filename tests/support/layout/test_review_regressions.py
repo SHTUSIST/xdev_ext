@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Disposable concrete reproductions of independent adapter findings A1-A7."""
 import ast
+import importlib.util
+from types import SimpleNamespace
+from unittest import mock
 import json
 import os
 from pathlib import Path
@@ -23,6 +26,26 @@ import prepare_host_component
 
 
 class ReviewRegressions(Adapter):
+    def test_checker_pinned_input_never_writes_through_view_links(self):
+        script = ROOT / 'tools/ci/check_xdomain_host.py'
+        for kind, linker in [('symlink', os.symlink), ('hardlink', os.link)]:
+            with self.subTest(kind=kind):
+                view = self.repo / ('checker-view-' + kind)
+                target = view / 'kernel/drivers/thunderbolt/nhi_regs.h'
+                target.parent.mkdir(parents=True)
+                victim = self.repo / ('outside-view-' + kind + '.c')
+                before = b'authored bytes must survive checker preparation\n'
+                victim.write_bytes(before)
+                linker(victim, target)
+                spec = importlib.util.spec_from_file_location('checker_copy_fixture', script)
+                module = importlib.util.module_from_spec(spec)
+                with mock.patch.object(layout, 'materialize_view', return_value=SimpleNamespace(root=view)):
+                    try:
+                        spec.loader.exec_module(module)
+                    except layout.LayoutError:
+                        pass
+                self.assertEqual(victim.read_bytes(), before)
+
     def test_a1_metadata_links_never_write_through(self):
         for kind in ('symlink', 'hardlink'):
             with self.subTest(kind=kind):

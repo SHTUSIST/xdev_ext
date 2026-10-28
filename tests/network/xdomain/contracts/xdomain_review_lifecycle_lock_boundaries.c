@@ -144,3 +144,13 @@ static int tb_register_service_driver(struct tb_service_driver *driver)
   assert(!driver_live); driver_live=true; registered_driver=driver; return 0; }
 static void tb_unregister_service_driver(struct tb_service_driver *driver)
 { assert(registered_driver==driver && driver_live); driver_live=false; event("driver_unregister"); }
+
+/* LOGIN unit scope: the external data-path OS boundary is preverified. These
+ * tests observe LOGIN, epochs and teardown, never startup challenge progress.
+ * No probe object exists and executing its worker is a scope violation. */
+int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *xl,const struct xdev_ext_xd_login *peer){(void)peer;assert(!xl->probe);return 0;}
+void xdev_ext_xd_probe_control_ready(struct xdev_ext_xd_link *xl){assert(!xl->probe);xl->data_verified_mask=(1U<<xl->channels)-1;xl->probe_phase=XD_PROBE_VERIFIED;}
+void xdev_ext_xd_probe_login_exhausted(struct xdev_ext_xd_link *xl){assert(!xl->probe);}
+void xdev_ext_xd_probe_close(struct xdev_ext_xd_link *xl){assert(!xl->probe);xl->data_verified_mask=0;}
+void xdev_ext_xd_probe_work(struct work_struct *work){(void)work;assert(!"LOGIN unit cannot execute startup challenge");abort();}
+ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *xl,char *out){(void)out;assert(!xl->probe);return 0;}

@@ -89,6 +89,8 @@ def generate(mutation=None):
         structs.insert(0, structure(abi, "xdev_ext_family_hooks_hdr"))
         structs.append(structure(source("include/linux/xdev_ext_compfam.h"),
                                  "xdev_ext_comp_hooks"))
+    if "static void xdev_ext_mech_start_queue_free(" in core:
+        structs.append(structure(source("io_uring/xdev_ext_mech_start_queue.h"), "xdev_ext_mech_start_queue"))
     structs += [structure(core, n) for n in ("xdev_ext_mech_batch", "xdev_ext_mech_session")]
     # Preserve the adapter's own structs, registry storage, every function and
     # class table, stopping before its kernel initcall only.
@@ -112,11 +114,16 @@ def generate(mutation=None):
     if "static int xdev_ext_mech_session_release_report(" in core:
         template = template.replace('#include "include/uapi/linux/xdev_ext_mech.h"',
             '#include "include/uapi/linux/xdev_ext_mech.h"\n#include "include/uapi/linux/xdev_ext_policy.h"')
+        if "static int xdev_ext_mech_session_release_disposition(" in core:
+            after.insert(after.index("xdev_ext_mech_session_release"),
+                         "xdev_ext_mech_session_release_disposition")
         after.insert(after.index("xdev_ext_mech_session_release"),
                      "xdev_ext_mech_session_release_report")
         after.insert(after.index("xdev_ext_mech_session_destroy"),
                      "xdev_ext_mech_session_destroy_report")
         after[0:0] = ["xdev_ext_mech_stats_fill", "xdev_ext_mech_transport_stats_fill"]
+    if "static void xdev_ext_mech_start_queue_free(" in core:
+        after.insert(0, "xdev_ext_mech_start_queue_free")
     ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
     # These native-cookie/provider fault cases have one uncontended CE owner.

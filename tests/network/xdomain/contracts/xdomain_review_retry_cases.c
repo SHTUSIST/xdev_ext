@@ -14,7 +14,7 @@ static void review_retry_fresh(void)
 }
 static struct xdev_ext_xd_login review_retry_peer(u64 nonce)
 {
-    struct xdev_ext_xd_login l={.route_lo=1,.length_sn=27,.type=XDEV_EXT_XD_LOGIN,.command_id=0x76543210,.proto_version=2,.channels=1,.ctl_tx_path=37,.data_tx_path={41},.incarnation=nonce,.caps=1};
+    struct xdev_ext_xd_login l={.route_lo=1,.length_sn=27,.type=XDEV_EXT_XD_LOGIN,.command_id=0x76543210,.proto_version=3,.channels=1,.ctl_tx_path=37,.data_tx_path={41},.incarnation=nonce,.caps=3};
     memcpy(l.uuid,&xdev_ext_xd_proto_uuid,16);memcpy(l.initiator_uuid,&review_retry_remote,16);memcpy(l.target_uuid,&review_retry_local,16);return l;
 }
 static unsigned long review_retry_delay(void)
