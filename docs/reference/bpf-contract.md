@@ -14,6 +14,14 @@ NVMe, AF_XDP, CE, DMA, CPU, IAA, SOCKET, NET and USER mechanism programs may use
 
 The kernel owns descriptor scratch capacity, frame identity, generation, direction, range, coverage and native submission. Drivers retain mapping, queue and completion responsibility. Programs cannot authorize an out-of-window transfer, invent DMA addresses, access MMIO, or reclaim a buffer still owned by an accepted device operation.
 
+Mechanism maps with flags 0 retain the class-global default attachment.
+`XDEV_EXT_MECH_OPS_F_PRIVATE` registers an independent link instance for
+explicit per-stage selection through [CREATE_PROGRAMS](session-api.md#per-stage-programs-operation-12).
+It does not change verifier, helper or sealed callback-context permissions.
+Keep the real struct_ops link alive while it should admit work; a session pins
+the selected program for safe completion, without keeping a detached link live.
+The reliable-policy interface does not accept this mechanism flag.
+
 ## Plans and results
 
 A plan must fit the bound layout and the class's descriptor limits. Source and destination offsets refer to admitted resources. Transform plans distinguish destination capacity from the actual produced length.

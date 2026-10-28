@@ -35,6 +35,7 @@ def generate(kernel=ROOT):
     ops = (kernel / 'io_uring/xdev_ext_mech_ops.c').read_text()
     registry = (kernel / 'io_uring/xdev_ext_ops_core.c').read_text()
     header = (kernel / 'io_uring/xdev_ext_ops_core.h').read_text()
+    mech_header = (kernel / 'include/linux/xdev_ext_mech.h').read_text()
     source = (HERE / 'detach_generation_fixture.c.in').read_text()
     source = source.replace('struct xdev_ext_mech_session{',
                             'static u64 ktime_get_boottime_ns(void){return 0;}\n'
@@ -42,10 +43,31 @@ def generate(kernel=ROOT):
                             ' bool create_pending_publish,start_ordered;\n'
                             ' struct xdev_ext_mech_start_queue *start_queue;', 1)
     source = '#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)\n' + source
+    # Compile the actual common ops layout: these default-generation tokens
+    # now pass through the PRIVATE discriminator before global retraction.
+    layout = re.search(r'^#define XDEV_EXT_MECH_OPS_TYPE\(name\).*?^}',
+                       mech_header, re.M | re.S)
+    if layout is None:
+        raise AssertionError('production struct_ops layout missing')
+    source = source.replace('/* ACTUAL_MECH_OPS_LAYOUT */',
+                            layout.group() + '\nXDEV_EXT_MECH_OPS_TYPE(xdev_ext_nvme_mech_ops);')
+    private_dependencies = 'xdev_ext_mech_instance_unregister' in function(ops, 'xdev_ext_mech_unreg')
+    if private_dependencies:
+        # This fixture exercises existing defaults only. Unexpected entry to
+        # a PRIVATE path is a failure, not a replacement registry model.
+        source = source.replace('/* PRIVATE_DEFAULT_ONLY_BOUNDARY */', r'''static bool xdev_ext_mech_instance_unregister(u32 class_id, const void *ops, struct bpf_link *link) {
+ (void)class_id;(void)ops;(void)link;abort();
+}
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance) {
+ (void)instance;abort();
+}
+''')
     start = header.index('struct xdev_ext_ops_registry {')
     source = source.replace('@REGISTRY_STRUCT@', header[start:header.index('\n};', start) + 3])
     names = [(header, 'xdev_ext_ops_is_current'), (registry, 'xdev_ext_ops_retract'),
              (ops, 'xdev_ext_mech_ops_current'), (ops, 'xdev_ext_mech_unreg')]
+    if re.search(r'\bxdev_ext_mech_programs_current\([^;{}]*\)\s*\{', core):
+        names.append((core, 'xdev_ext_mech_programs_current'))
     names += [(core, name) for name in (
         'xdev_ext_mech_session_admits', 'xdev_ext_mech_settle_locked',
         'xdev_ext_mech_set_err_locked', 'xdev_ext_mech_stop_reason',
@@ -56,7 +78,13 @@ def generate(kernel=ROOT):
     source = source.replace('/* ACTUAL_RELIABLE_SUBMIT */', function(reliable, 'xsk_rel_submit'))
     source = source.replace('/* ACTUAL_PROTOTYPES */', '\n'.join(
         body[:body.index('{')].strip() + ';' for body in bodies))
-    return source.replace('/* ACTUAL_FUNCTIONS */', '\n'.join(bodies))
+    functions = '\n'.join(bodies)
+    if private_dependencies:
+        # Adapt the historical two-argument caller to the link-aware native
+        # signature without changing any default withdrawal expectation.
+        functions += ('\n#define xdev_ext_mech_unreg(class_id,kdata) '
+                      'xdev_ext_mech_unreg(class_id,kdata,NULL)\n')
+    return source.replace('/* ACTUAL_FUNCTIONS */', functions)
 
 
 class DetachGeneration(unittest.TestCase):

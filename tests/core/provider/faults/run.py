@@ -25,8 +25,7 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = next((p for p in HERE.parents if (p / "io_uring/xdev_ext_mech_dma.c").is_file()),
-                    Path(str(next(p for p in Path(__file__).resolve().parents if (p/'io_uring/xdev_ext_mech.c').is_file()))))
+DEFAULT_ROOT = next((p for p in HERE.parents if (p / "io_uring/xdev_ext_mech.c").is_file()), HERE)
 ROOT = Path(os.environ.get("KERNEL_SRC", DEFAULT_ROOT)).resolve()
 REF = None
 
@@ -141,6 +140,16 @@ static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
 }
 """
     ce_adapter += "\n\n".join(function(ce,n) for n in ("xdev_ext_ce_stage_xfers", "xdev_ext_ce_submit", "xdev_ext_ce_complete"))
+    if "xdev_ext_mech_instance_put(" in core:
+        # Default-only fixtures have no selected instance handle. Keep the
+        # actual release call and fail closed if that precondition changes.
+        template = template.replace("/* PRODUCTION_OPS */", """struct xdev_ext_mech_instance;
+static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
+{
+    if (instance)
+        abort();
+}
+/* PRODUCTION_OPS */""")
     blocks = {"CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
               "OPS": "\n\n".join(function(ops, n) for n in
                                     ("xdev_ext_mech_class_put", "xdev_ext_mech_ops_put")),

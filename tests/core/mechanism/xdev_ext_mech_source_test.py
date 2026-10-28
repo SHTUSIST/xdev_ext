@@ -618,6 +618,15 @@ class UbrMechSourceTest(unittest.TestCase):
         sources = {p.name: p.read_text(encoding="utf-8")
                    for p in mech_sources()}
         for name, text in sources.items():
+            if name == "xdev_ext_mech_programs.c":
+                # Explicit PRIVATE selection pins one map per stage. Preserve
+                # the direct-pin prohibition everywhere outside its FD getter.
+                getter = function_body(ROOT / "io_uring" / name,
+                                       "int xdev_ext_mech_instance_get_from_fd(")
+                self.assertEqual(getter.count("bpf_struct_ops_get("), 1)
+                self.assertIn("xdev_ext_mech_instance_private(instance->ops)", getter)
+                self.assertIn("refcount_inc(&instance->refs);", getter)
+                text = text.replace(getter, "")
             self.assertNotIn("bpf_struct_ops_get", text, name)
         self.assertEqual(sources["xdev_ext_mech_ops.c"].count("xdev_ext_ops_pin("), 1)
         self.assertEqual(sources["xdev_ext_mech.c"].count("xdev_ext_mech_ops_get("), 1)
@@ -625,8 +634,12 @@ class UbrMechSourceTest(unittest.TestCase):
         bind = function_body(path, "static int xdev_ext_mech_session_bind(")
         self.assertIn("xdev_ext_mech_ops_get(st->class_id,", bind)
         call = function_body(path, "int xdev_ext_mech_call(")
-        self.assertIn("xdev_ext_mech_invoke(s->ops[st->class_id], &t, a, ret, "
-                      "hold);", call)
+        # Follow the stage selector to the same original per-class default.
+        self.assertIn("ops = xdev_ext_mech_stage_ops(st);", call)
+        selected = function_body(path, "static const void *xdev_ext_mech_stage_ops(")
+        self.assertIn("return instance ? xdev_ext_mech_instance_ops(instance) : "
+                      "st->s->ops[st->class_id];", selected)
+        self.assertIn("xdev_ext_mech_invoke(ops, &t, a, ret, hold);", call)
         unreg = function_body(ROOT / "io_uring/xdev_ext_mech_ops.c",
                               "static void xdev_ext_mech_unreg(")
         self.assertLess(unreg.index("xdev_ext_ops_retract("),
@@ -701,7 +714,7 @@ class UbrMechSourceTest(unittest.TestCase):
         # stop recorded: activation fails, CREATE returns the stop reason
         # and releases, before the session is listed anywhere.
         order = [create.index(step) for step in (
-            "xdev_ext_mech_session_bind(s, c);",
+            "xdev_ext_mech_session_bind(s, c, program_fds);",
             "spin_lock_irqsave(&s->lock, flags);",
             "ret = xdev_ext_mech_sess_activate(&s->ss);",
             "spin_unlock_irqrestore(&s->lock, flags);",

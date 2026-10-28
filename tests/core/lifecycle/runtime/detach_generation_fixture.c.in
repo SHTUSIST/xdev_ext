@@ -11,6 +11,11 @@
 #include "io_uring/xdev_ext_mech_notify.h"
 #include "include/linux/xdev_ext_mech_reliable_core.h"
 typedef uint32_t u32;typedef uint64_t u64;
+struct bpf_link;
+struct xdev_ext_mech_ctx;
+struct xdev_ext_mech_instance;
+/* ACTUAL_MECH_OPS_LAYOUT */
+/* PRIVATE_DEFAULT_ONLY_BOUNDARY */
 #define __rcu
 #define READ_ONCE(x) (x)
 #define WRITE_ONCE(x,v) ((x)=(v))
@@ -38,6 +43,7 @@ struct xdev_ext_mech_session{
  bool start_preparing,start_return_pending,start_recycle,worker_gone;
  u64 start_left,start_legacy_events,done,aborted,cnt[XDEV_EXT_MECH_CNT_NR];
  const void*ops[XDEV_EXT_MECH_CLASS_MAX];bool pinned[XDEV_EXT_MECH_CLASS_MAX];
+ struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
  struct xdev_ext_mech_stage st[2];struct xdev_ext_mech_layout layout;void*plan;u32 nr_stages;
  struct xdev_ext_mech_notify_state notify;int *evfd;int worker,drain_wq;
  struct kthread_work stop_work,retry_work;struct list_head retry;
@@ -56,7 +62,8 @@ static int xdev_ext_mech_all_lock;
 static unsigned submit_calls,queued_stop,retry_queued,provider_enqueues;
 static int late_close,provider_error,last_abort;static bool actual_provider;
 static int xsk_rel_submit(struct xdev_ext_mech_stage*,struct xdev_ext_mech_batch*);
-static int hook_mode,hook_error,hook_state,hook_inflight,replacement_token;
+static int hook_mode,hook_error,hook_state,hook_inflight;
+static struct xdev_ext_nvme_mech_ops replacement_token={.abi_version=XDEV_EXT_MECH_ABI_VERSION};
 static struct xdev_ext_mech_session *hook_session;
 static void wake_up(int*w){(void)w;}
 static void eventfd_signal(int*e){(*e)++;}
@@ -112,7 +119,8 @@ static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage*st){(void)st;}
 /* ACTUAL_RELIABLE_SUBMIT */
 static unsigned checks,failures;
 #define CHECK(label,cond) do{checks++;if(!(cond)){failures++;printf("FAIL %s\n",label);}else printf("PASS %s\n",label);}while(0)
-static int token,event;
+static struct xdev_ext_nvme_mech_ops token={.abi_version=XDEV_EXT_MECH_ABI_VERSION};
+static int event;
 static struct xdev_ext_mech_class_ops cls;
 static void setup(struct xdev_ext_mech_session*s){memset(s,0,sizeof(*s));memset(slots,0,sizeof(slots));event=0;submit_calls=queued_stop=retry_queued=provider_enqueues=0;late_close=provider_error=last_abort=0;actual_provider=false;
  s->ss=(struct xdev_ext_mech_sess){.state=XDEV_EXT_MECH_SESSION_ACTIVE,.refs=4,.inflight=3};s->layout.group_bytes=8192;s->ops[XDEV_EXT_MECH_CLASS_AFXDP]=&token;s->pinned[XDEV_EXT_MECH_CLASS_AFXDP]=true;s->st[0]=(struct xdev_ext_mech_stage){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,.cls=&cls};s->evfd=&event;s->start_left=5;s->done=51;s->aborted=5;
@@ -137,7 +145,7 @@ int main(void){struct xdev_ext_mech_session s;
  CHECK("prior_real_native_error_not_overwritten",s.last_err==-EIO&&s.stop_err==-EIO&&xdev_ext_mech_stop_reason(&s)==-EIO);finish_accepted(&s);
  setup(&s);hook_mode=0;xdev_ext_mech_session_stop(&s,0);s.native_controls=1;finish_accepted(&s);CHECK("native_control_ref_blocks_settle",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPING);s.native_controls=0;xdev_ext_mech_settle_locked(&s);CHECK("native_control_drain_then_settles",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED);
  setup(&s);hook_mode=0;xdev_ext_mech_session_stop(&s,0);CHECK("ordinary_STOP0_stays_ESHUTDOWN",xdev_ext_mech_stop_reason(&s)==-ESHUTDOWN);finish_accepted(&s);
- setup(&s);hook_mode=0;int unrelated_token;slots[XDEV_EXT_MECH_CLASS_NVME]=&unrelated_token;xdev_ext_mech_registry.nr_active++;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_NVME,&unrelated_token);CHECK("unrelated_class_detach_does_not_cancel",!slots[XDEV_EXT_MECH_CLASS_NVME]&&xdev_ext_mech_session_admits(&s)&&!s.last_err&&!s.stop_err);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
+ setup(&s);hook_mode=0;struct xdev_ext_nvme_mech_ops unrelated_token={.abi_version=XDEV_EXT_MECH_ABI_VERSION};slots[XDEV_EXT_MECH_CLASS_NVME]=&unrelated_token;xdev_ext_mech_registry.nr_active++;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_NVME,&unrelated_token);CHECK("unrelated_class_detach_does_not_cancel",!slots[XDEV_EXT_MECH_CLASS_NVME]&&xdev_ext_mech_session_admits(&s)&&!s.last_err&&!s.stop_err);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
  setup(&s);hook_mode=0;struct xdev_ext_mech_batch valid={.bytes=8192};xdev_ext_mech_batch_run(&s,&valid);CHECK("valid_generation_can_submit",submit_calls==1);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
  setup(&s);hook_mode=2;struct xdev_ext_mech_session replacement={0};replacement.ss.state=XDEV_EXT_MECH_SESSION_ACTIVE;replacement.ops[XDEV_EXT_MECH_CLASS_AFXDP]=&replacement_token;replacement.pinned[XDEV_EXT_MECH_CLASS_AFXDP]=true;s.next_test=&replacement;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);CHECK("replacement_generation_cancels_old_only",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED&&slots[XDEV_EXT_MECH_CLASS_AFXDP]==&replacement_token&&xdev_ext_mech_session_admits(&replacement)&&!replacement.stop_err);finish_accepted(&s);
  setup(&s);hook_mode=0;s.ss.sequestered=1;xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);CHECK("unknown_custody_stays_quarantined",s.ss.state==XDEV_EXT_MECH_SESSION_ZOMBIE&&xdev_ext_mech_sess_ref_fate(&s.ss)==XDEV_EXT_MECH_REFS_QUARANTINE);

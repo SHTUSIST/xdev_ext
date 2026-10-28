@@ -128,6 +128,45 @@ A failed CREATE captures an available diagnostic value before class teardown;
 its post-rollback retention is separately marked and sampled later. The report
 does not certify physical device execution or performance.
 
+## Per-stage programs (operation 12)
+
+`XDEV_EXT_MECH_OP_CREATE_PROGRAMS` accepts a version-1
+`struct xdev_ext_mech_create_programs`: size, version, four signed program fds,
+then the unchanged CREATE_REPORT envelope. Its embedded request starts at byte
+24; the wrapper is 520 bytes. Initialize the embedded envelope as above and
+zero all output fields. For each active stage, selector -1 retains the existing
+global default, including an installed C-reference table. A nonnegative fd
+explicitly selects a live PRIVATE struct_ops link of that stage's class. Set
+unused selectors to -1. STAGE_DIAG remains operation 11.
+
+Explicit selectors never fall back on failure. Programs set the common
+`XDEV_EXT_MECH_OPS_F_PRIVATE` flag in their struct_ops map; they coexist with
+the flags-0 global default and other PRIVATE instances of the same class.
+Different stages of one class can select different programs. Two links using
+one map have independent withdrawal identities. Detach stops sessions selecting
+that link; reattach creates a fresh instance and does not revive old sessions.
+
+The new operation retains CREATE_REPORT delivery, validation, rollback and
+retention semantics. A syscall return of zero still requires checking
+`request.report.result`. Explicit selection bypasses the C-reference default;
+selector -1 preserves its existing priority and module ownership. Program pins
+remain held through accepted native work and UNKNOWN retention, and are
+released only at the existing safe session-release boundary.
+
+The library provides `xdev_ext_create_programs_read()` and
+`xdev_ext_session_create_programs()`. The fd count must equal the stage count.
+The session helper validates delivery and remembers retention even if its
+optional report output is NULL. `xdev_ext_prog_link_fd()` returns a borrowed
+link fd valid while its program handle lives; it neither duplicates the fd nor
+transfers ownership. Keep the program handle until withdrawal is intended.
+The old creation functions and options layouts remain unchanged. See the
+[actual-kernel selection test](../../tests/core/program_instances/guest/README.md)
+for repeated-class selection and complete buffer guard checks.
+
+This interface does not grant nonadministrator loading, share an AF_XDP queue
+or XDOMAIN channel between sessions, or relax device/pool admission. Those
+capabilities require their own contracts.
+
 ## Pools and source spans
 
 | Pool kind | Bound resource |

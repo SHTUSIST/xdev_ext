@@ -9,7 +9,9 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-spec = importlib.util.spec_from_file_location('provider_extract', HERE.parent / 'provider/faults/run.py')
+provider = next((p / 'provider/faults/run.py' for p in HERE.parents
+                 if (p / 'provider/faults/run.py').is_file()))
+spec = importlib.util.spec_from_file_location('provider_extract', provider)
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
 
@@ -69,6 +71,7 @@ static int xdev_ext_mech_stage_caps_op(struct io_ring_ctx *c,void *p){(void)c;(v
  * scope instead of manufacturing a successful CREATE_REPORT/diagnostic query. */
 static int xdev_ext_mech_create_report_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
 static int xdev_ext_mech_stage_diag_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
+static int xdev_ext_mech_create_programs_op(struct io_ring_ctx *c,void *p){(void)c;(void)p;abort();}
 static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *,struct xdev_ext_mech_stop_report *);
 static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *,struct xdev_ext_mech_stop_report *);
 static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *,struct xdev_ext_mech_stats *);

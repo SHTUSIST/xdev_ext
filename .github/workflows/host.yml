@@ -72,6 +72,13 @@ jobs:
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute/run.py
       - name: Mechanism invocation context identity and sleepable prepare
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/call_identity_test.py
+      - name: Per-stage private mechanism instances and report compatibility
+        working-directory: .
+        run: |
+          python3 tests/core/program_instances/registry/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/program-registry"
+          python3 tests/core/program_instances/session/run.py --output "$RUNNER_TEMP/program-session"
+          python3 tests/core/program_instances/session/run.py --suite library --output "$RUNNER_TEMP/program-library"
+          python3 tests/core/program_instances/session/selection_run.py --output "$RUNNER_TEMP/program-selection"
       - name: BPF compute example algorithms and KVM verdict checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/run.py
       - name: Native lifecycle scheduler and teardown contracts
