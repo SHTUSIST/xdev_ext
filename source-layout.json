@@ -7557,6 +7557,24 @@
     {
       "source": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg",
       "logical_path": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg"
+    },
+    {
+      "source": "tests/core/mechanism/helper_whitelist_test.py",
+      "logical_path": "tests/core/mechanism/helper_whitelist_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_helper_whitelist_test.py",
+      "logical_path": "tests/network/xdomain/contracts/xdomain_helper_whitelist_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/verifier/helper_probe.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/verifier/helper_probe.bpf.c"
+    },
+    {
+      "source": "tests/integration/session/native/verifier/run_helpers.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/verifier/run_helpers.sh"
     }
   ]
 }

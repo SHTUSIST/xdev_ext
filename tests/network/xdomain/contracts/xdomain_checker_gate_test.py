@@ -305,16 +305,16 @@ elif args[0] == 'xdomain-probe':
 
     def test_helper_type_denials_match_each_of_the_six_explicit_cases(self):
         pairs = (
-            ('helper-timer-init-deny', 'bpf_timer_init'),
-            ('helper-timer-start-deny', 'bpf_timer_start'),
-            ('helper-tail-call-deny', 'bpf_tail_call'),
-            ('helper-probe-read-kernel-deny', 'bpf_probe_read_kernel'),
-            ('helper-probe-read-user-deny', 'bpf_probe_read_user'),
-            ('helper-ringbuf-output-deny', 'bpf_ringbuf_output'),
+            ('helper-timer-init-deny', 'bpf_timer_init', '169'),
+            ('helper-timer-start-deny', 'bpf_timer_start', '170'),
+            ('helper-tail-call-deny', 'bpf_tail_call', '12'),
+            ('helper-probe-read-kernel-deny', 'bpf_probe_read_kernel', '113'),
+            ('helper-probe-read-user-deny', 'bpf_probe_read_user', '112'),
+            ('helper-ringbuf-output-deny', 'bpf_ringbuf_output', '130'),
         )
-        for name, helper in pairs:
+        for name, helper, number in pairs:
             diagnostic = ('-- BEGIN PROG LOAD LOG --\n'
-                          'program of this type cannot use helper ' + helper + '#169\n'
+                          'program of this type cannot use helper ' + helper + '#' + number + '\n'
                           'processed 0 insns (limit 1000000)\n'
                           '-- END PROG LOAD LOG --')
             with self.subTest(case=name, helper=helper):

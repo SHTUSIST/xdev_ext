@@ -742,6 +742,7 @@ cp "$TOOLS/verifier/"*.bpf.o \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_state.sh" \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_abi.sh" \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_reliable.sh" \
+	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run_helpers.sh" \
 	"$ROOT/opt/xdev_ext/verifier/"
 printf 'groups=%s\nwindow_nlb=%s\nce_sim=%s\nce_len=%s\nce_delay_us=%s\nfault=%s\nrx_ce=%s\nreliable=%s\ndepth=%s\nce_slots=%s\nremote_window=%s\n' \
 	"$GROUP_COUNT" "$((GROUP_COUNT * 16))" "$CE_SIM" "$((CE_SLOTS * 8192))" \
@@ -1304,8 +1305,9 @@ LOG_DIR=/tmp/verifier-evidence sh /opt/xdev_ext/verifier/run.sh || verifier_stat
 LOG_DIR=/tmp/verifier-state-evidence sh /opt/xdev_ext/verifier/run_state.sh || verifier_status=$?
 LOG_DIR=/tmp/verifier-abi-evidence sh /opt/xdev_ext/verifier/run_abi.sh || verifier_status=$?
 LOG_DIR=/tmp/verifier-reliable-evidence sh /opt/xdev_ext/verifier/run_reliable.sh || verifier_status=$?
+LOG_DIR=/tmp/verifier-helper-evidence sh /opt/xdev_ext/verifier/run_helpers.sh || verifier_status=$?
 echo XDEV_EXT_ZC_VERIFIER_LOG_BEGIN
-cat /tmp/verifier-evidence/*.log /tmp/verifier-state-evidence/*.log /tmp/verifier-abi-evidence/*.log /tmp/verifier-reliable-evidence/*.log
+cat /tmp/verifier-evidence/*.log /tmp/verifier-state-evidence/*.log /tmp/verifier-abi-evidence/*.log /tmp/verifier-reliable-evidence/*.log /tmp/verifier-helper-evidence/*.log
 echo XDEV_EXT_ZC_VERIFIER_LOG_END
 test "$verifier_status" = 0
 if [ "$fault" = reliable-budget-unknown ]; then
