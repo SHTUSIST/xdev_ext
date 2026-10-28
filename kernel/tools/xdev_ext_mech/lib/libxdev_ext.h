@@ -92,6 +92,41 @@ struct xdev_ext_start_opts {
 	__u32 flags;			/* must be 0 */
 };
 
+/* Existing registered allocation authority; duplicated CLOEXEC by the library. */
+struct xdev_ext_peer_pool_opts {
+	size_t sz;
+	int allocation_fd;
+	__u32 flags;
+};
+struct xdev_ext_start_frames_opts {
+	size_t sz;
+	__u64 nr_batches, first_seq;
+	const __u32 *indices;
+	__u32 nr_indices, flags;
+};
+struct xdev_ext_peer_span {
+	__u64 offset, device_address;
+	__u32 frame_index, data_len, capacity;
+};
+struct xdev_ext_link_snapshot {
+	__u64 token, local_inc, remote_inc;
+	__u32 channels, up, closing, nhi_gone;
+	char service[256];
+};
+int xdev_ext_link_read(const char *sysfs_root, const char *service,
+	struct xdev_ext_link_snapshot *out);
+int xdev_ext_link_discover(const char *sysfs_root, __u64 wanted_token,
+	struct xdev_ext_link_snapshot *out);
+
+int xdev_ext_session_open_peer(const struct xdev_ext_peer_pool_opts *o,
+			       struct xdev_ext_session **out);
+int xdev_ext_session_start_frames(struct xdev_ext_session *s,
+				 const struct xdev_ext_start_frames_opts *o);
+int xdev_ext_session_stage_caps(struct xdev_ext_session *s, __u32 stage,
+			       struct xdev_ext_mech_stage_caps *out);
+int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,
+			  __u64 link_token, __u32 direction, __u32 flags);
+
 int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 			  struct xdev_ext_session **out);
 int xdev_ext_session_create(struct xdev_ext_session *s,
@@ -125,7 +160,7 @@ struct xdev_ext_user_stage_opts {
 	int ring_fd;			/* io_uring fd for XDEV_EXT_MECH_OP_USER_STAGE */
 	void *umem;			/* pool UMEM base for frame pointers, or NULL */
 	__u32 entries;			/* power of two >= CREATE depth; 0: 64 */
-	__u32 flags;			/* must be 0 */
+	__u32 flags;			/* 0 or XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL */
 };
 
 /* One batch the user thread holds until xdev_ext_user_stage_complete(). */
@@ -144,11 +179,19 @@ struct xdev_ext_user_batch {
 int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 			     struct xdev_ext_user_stage **out);
 int xdev_ext_user_stage_fd(const struct xdev_ext_user_stage *u);
+__u32 xdev_ext_user_stage_entries(const struct xdev_ext_user_stage *u);
 int xdev_ext_user_stage_next(struct xdev_ext_user_stage *u, int timeout_ms,
 			     struct xdev_ext_user_batch *b);
 int xdev_ext_user_stage_complete(struct xdev_ext_user_stage *u,
 				 const struct xdev_ext_user_batch *b, int status);
 int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
+int xdev_ext_user_batch_peer_span(const struct xdev_ext_user_batch *b, __u32 pos,
+	__u64 allocation_va, __u64 allocation_bytes, __u32 frame_size,
+	struct xdev_ext_peer_span *out);
+int xdev_ext_user_stage_control(struct xdev_ext_user_stage *u, void **base,
+	struct xdev_ext_user_ring_offsets *off);
+int xdev_ext_user_stage_ctl_attach(struct xdev_ext_user_stage *u);
+int xdev_ext_user_stage_ctl_detach(struct xdev_ext_user_stage *u);
 
 /* --- one call: NVMe READ -> AF_XDP TX --- */
 

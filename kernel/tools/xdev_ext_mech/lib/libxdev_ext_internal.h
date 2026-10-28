@@ -9,6 +9,11 @@
  */
 
 #include <stddef.h>
+#include <stdbool.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 struct io_uring_params;
 
@@ -27,6 +32,10 @@ void xdev_ext__set_sys(const struct xdev_ext_sys *sys);
 
 struct xdev_ext_session;
 struct xdev_ext_prog;
+struct xdev_ext_user_stage;
+bool xdev_ext__user_ctl_attached(const struct xdev_ext_user_stage *u);
+int xdev_ext__user_bind_stream(struct xdev_ext_user_stage *u,
+	unsigned long long context_id, unsigned long long stream_id);
 
 /* Shared between the library's units; not for applications. */
 int xdev_ext__opts_check(const void *o, size_t sz, size_t known);
@@ -36,5 +45,9 @@ int xdev_ext__ioctl(int fd, unsigned long request, unsigned long arg);
 int xdev_ext__session_own_fd(struct xdev_ext_session *s, int fd);
 int xdev_ext__session_adopt_prog(struct xdev_ext_session *s, struct xdev_ext_prog *p,
 				 int (*detach)(struct xdev_ext_prog *p));
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* LIBXDEV_EXT_INTERNAL_H */
