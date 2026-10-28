@@ -6,6 +6,9 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer;
+static void endpoint_timer_cleanup() { cpu_timer_destroy(&endpoint_timer); }
 #include <cuda_runtime_api.h>
 #include <cufile.h>
 #include <algorithm>
@@ -213,6 +216,7 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
             if (!cuda_ok(cudaDeviceSynchronize(), "I/O completion")) return 1;
             uint64_t end = now_ns();
             if (!start || end <= start) { std::fprintf(stderr, "clock failure\n"); return 1; }
+            cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, start, end);
             io_ns += end - start;
             if (!cuda_ok(cudaMemcpy(observed.data(), res.gpu, observed.size(), cudaMemcpyDeviceToHost), "complete oracle readback") ||
                 !cuda_ok(cudaDeviceSynchronize(), "oracle synchronize")) return 1;
@@ -226,6 +230,7 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
             if (fsync(res.direct)) { std::perror("checkpoint fsync"); return 1; }
             uint64_t end = now_ns();
             if (!start || end <= start) return 1;
+            cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, start, end);
             io_ns += end - start;
             struct stat saved{};
             if (fstat(res.ordinary, &saved) || saved.st_size != off_t(bytes)) return 1;
@@ -384,6 +389,7 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
             if (!cuda_ok(cudaDeviceSynchronize(), "I/O completion")) return 1;
             uint64_t end = now_ns();
             if (!start || end <= start) { std::fprintf(stderr, "clock failure\n"); return 1; }
+            cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, start, end);
             io_ns += end - start;
             ++operations;
             io_bytes += part;
@@ -393,6 +399,7 @@ static int execute(Resources &res, const char *workload, uint64_t bytes, size_t 
             if (fsync(res.direct)) { std::perror("checkpoint fsync"); return 1; }
             uint64_t end = now_ns();
             if (!start || end <= start) return 1;
+            cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, start, end);
             io_ns += end - start;
         }
     }
@@ -491,9 +498,20 @@ int main(int argc, char **argv)
         !number(argv[2], 1024ULL * 1024 * 1024, bytes) ||
         !number(argv[3], 16ULL * 1024 * 1024, chunk) || !number(argv[4], 1000, iterations) ||
         bytes % 4096 || chunk % 4096 || chunk > bytes) return 2;
+    uint64_t rows = ((bytes + chunk - 1) / chunk + (!std::strcmp(argv[1], "checkpoint") ? 1 : 0)) * iterations;
+    int cpu_error = rows > SIZE_MAX ? -EOVERFLOW : cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", size_t(rows));
+    if (cpu_error)
+        std::fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", cpu_error);
+    atexit(endpoint_timer_cleanup);
     Resources resources;
     int result = 1;
     try { result = execute(resources, argv[1], bytes, size_t(chunk), iterations, argv[5]); }
     catch (const std::bad_alloc &) { std::fprintf(stderr, "allocation failed\n"); }
-    return finish(resources, result);
+    result = finish(resources, result);
+    if (!result) {
+        cpu_error = cpu_timer_publish(&endpoint_timer);
+        if (cpu_error)
+            std::fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", cpu_error);
+    }
+    return result;
 }

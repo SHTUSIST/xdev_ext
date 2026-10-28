@@ -218,5 +218,23 @@ class SafeRunner(unittest.TestCase):
         self.assertEqual(len(plan['commands']) + len(plan['unavailable']), 2)
 
 
+
+class MalformedSelectedScopeAdmission(unittest.TestCase):
+    """Untrusted selected scope returns normal admission diagnostics, never crashes."""
+    def test_malformed_scope_with_count_reports_diagnostics_instead_of_raising(self):
+        api = target('contract')
+        for value in (None, [], 'bad', {'selected_cpus': None}):
+            with self.subTest(scope=value):
+                run = run_fixture()
+                run.update(cpu_scope=value, measurement_cpu_count=1)
+                try:
+                    errors = api.validate_run(run, performance=True)
+                except (AttributeError, TypeError) as error:
+                    self.fail('malformed selected scope crashed admission instead of HOLD: '+str(error))
+                self.assertIsInstance(errors, list)
+                self.assertTrue(errors)
+                self.assertTrue(all(isinstance(error, str) for error in errors))
+                self.assertIn('cpu_scope', ' '.join(errors))
+
 if __name__ == '__main__':
     unittest.main()

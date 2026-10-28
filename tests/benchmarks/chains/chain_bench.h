@@ -6,6 +6,7 @@
 #include <sys/resource.h>
 #include <time.h>
 
+#include "../common/cpu_timer.h"
 #include "chain_check.h"
 #include "chain_spec.h"
 #include "chain_timing.h"
@@ -14,6 +15,7 @@
 enum { CB_PASS = 0, CB_FAIL = 1, CB_INVALID = 2, CB_NOT_RUN = 4 };
 
 struct chain_result {
+	struct cpu_timer cpu_timer;
 	int status;			/* CB_* */
 	char failure[256];
 	/* closed load: one CLOCK_MONOTONIC_RAW interval per measured window */

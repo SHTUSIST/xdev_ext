@@ -706,8 +706,10 @@ int chain_run_staged(const struct chain_spec *s, struct chain_result *r)
 				strerror(-ret));
 			goto out;
 		}
-		if (w >= warm && r->samples)
+		if (w >= warm && r->samples) {
+			cpu_timer_store(&r->cpu_timer, "window_ns", r->nr_samples, t0, t1);
 			r->samples[r->nr_samples++] = t1 - t0;
+		}
 		first += nb;
 		r->windows_done++;
 		r->batches_done = first;

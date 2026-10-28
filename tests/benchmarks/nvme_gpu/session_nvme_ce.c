@@ -48,6 +48,9 @@
  * failure, 2 usage, 4 unavailable capability (stdout empty unless 0).
  */
 #define _GNU_SOURCE
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer;
+static void endpoint_timer_cleanup(void) { cpu_timer_destroy(&endpoint_timer); }
 #include "../common/fd_check.h"
 #include <getopt.h>
 #include <stdlib.h>
@@ -293,6 +296,7 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 		ret = XG_EXIT_FAIL;
 		goto out;
 	}
+	cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, t0, t1);
 	p->io_ns = t1 - t0;
 	ret = XG_EXIT_PASS;
 out:
@@ -397,6 +401,12 @@ int main(int argc, char **argv)
 		sn_usage(stderr);
 		return ret;
 	}
+	{
+		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", o.g.passes);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
+	}
+	atexit(endpoint_timer_cleanup);
 	if (o.g.pattern != XG_SEQ) {
 		fprintf(stderr, "SKIP: session NVMe plan is linear in the batch key; rand needs another plan program\n");
 		return XG_EXIT_UNAVAILABLE;
@@ -464,6 +474,11 @@ int main(int argc, char **argv)
 		fprintf(stderr, "CE window cleanup: %s\n", strerror(-closed));
 		ret = XG_EXIT_FAIL;
 		goto out;
+	}
+	{
+		int error = cpu_timer_publish(&endpoint_timer);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
 	}
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\","
 	       "\"route\":\"%s\",\"execution\":\"%s\",\"performance_claim\":\"%s\","

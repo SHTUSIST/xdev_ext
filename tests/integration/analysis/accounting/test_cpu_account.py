@@ -565,5 +565,129 @@ class Cli(unittest.TestCase):
         self.assertEqual(raised.exception.code, 2)
 
 
+
+class SelectedOwnerAccounting(unittest.TestCase):
+    """Inherited selected timer capture must not start the regex worker cadence."""
+    def test_dry_run_discloses_selected_owner_artifacts_without_creating_them(self):
+        from unittest.mock import patch
+        import os
+        with tempfile.TemporaryDirectory() as tmp:
+            root = fake_root(Path(tmp)/'root')
+            output = Path(tmp)/'planned-cpu-output'
+            online_text = Path('/sys/devices/system/cpu/online').read_text().strip()
+            env = {k: v for k, v in os.environ.items() if not k.startswith('XDEV_EXT_EVAL_CPU_')}
+            out, err = io.StringIO(), io.StringIO()
+            with patch.dict(os.environ, env, clear=True), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                try:
+                    code = ca.main(['--host-root', str(root), '--arm', 'plan', '--perf', '/bin/true',
+                                    '--payload-bytes', '1', '--cpu-set', online_text,
+                                    '--cpu-output', str(output), '--dry-run', '--', 'true'])
+                except SystemExit as error:
+                    self.fail('common accounting wrapper lacks selected CPU dry-run API: ' + str(error))
+            self.assertEqual(code, 0, err.getvalue())
+            planned = json.loads(out.getvalue())['cpu_measurement_plan']
+            self.assertEqual(planned['schema'], 1)
+            self.assertEqual(planned['status'], 'planned')
+            self.assertEqual(planned['selected_cpus'], ca.cpu_list(online_text))
+            self.assertEqual(planned['clock'], 'CLOCK_MONOTONIC')
+            self.assertEqual(planned['extra_clocks'], ['CLOCK_MONOTONIC_RAW'])
+            self.assertEqual(planned['owner_mode'], 'create')
+            self.assertTrue(planned['artifacts']['samples_path'])
+            self.assertTrue(planned['artifacts']['journal_dir'])
+            self.assertFalse(output.exists(), 'dry-run created CPU capture artifacts')
+
+    def test_accounting_owner_supports_nested_raw_timer_with_one_actual_stream(self):
+        import os
+        import sys
+        import threading
+        from unittest.mock import patch
+        timer_path = Path(ca.CPU_SAMPLING.__file__).parent/'timer_scope.py'
+        spec = importlib.util.spec_from_file_location('accounting_raw_nested_scope', timer_path)
+        timer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(timer)
+        env = {k: v for k, v in os.environ.items() if not k.startswith('XDEV_EXT_EVAL_CPU_')}
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, env, clear=True):
+            output = Path(tmp)/'account-owner'
+            args = ca.parse_args(['--arm', 'raw-chain', '--payload-bytes', '1',
+                                  '--cpu-output', str(output), '--', sys.executable, '-c',
+                                  "print('original-raw-result')"])
+            with ca._timer(args, Path(tmp)) as owner:
+                owner_env = owner.environment(dict(os.environ))
+                config = json.loads(Path(owner_env['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
+                threads = [t for t in threading.enumerate() if t.name == 'native-cpu-sampler']
+                self.assertEqual(len(threads), 1)
+                with patch.dict(os.environ, owner_env, clear=True):
+                    try:
+                        with timer.TimerCpuRun(None, clock='CLOCK_MONOTONIC_RAW') as nested:
+                            self.assertEqual(nested.environment({})['XDEV_EXT_EVAL_CPU_OWNER'],
+                                             owner_env['XDEV_EXT_EVAL_CPU_OWNER'])
+                            done = nested.run(args.cmd, capture_output=True, text=True, check=True)
+                            self.assertEqual(done.stdout, 'original-raw-result\n')
+                            self.assertEqual(done.returncode, 0)
+                            self.assertEqual([t for t in threading.enumerate()
+                                              if t.name == 'native-cpu-sampler'], threads)
+                    except ValueError as error:
+                        self.fail('accounting owner prevented existing RAW-timer workload: '+str(error))
+            self.assertFalse(threads[0].is_alive())
+            rows = [json.loads(line) for line in Path(config['samples_path']).read_text().splitlines()]
+            self.assertGreaterEqual(len(rows), 2)
+            self.assertTrue(all(row['clock'] == 'CLOCK_MONOTONIC' for row in rows))
+            self.assertTrue(all('CLOCK_MONOTONIC_RAW' in row['clock_brackets'] for row in rows))
+
+    def test_inherited_owner_disables_secondary_periodic_worker_sampler(self):
+        import os
+        import sys
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            root = fake_root(base / 'root')
+            perf = base / 'perf'
+            perf.write_text(FAKE_PERF % sys.executable)
+            perf.chmod(0o755)
+            (base / 'core.csv').write_text(CORE)
+            (base / 'system.csv').write_text(SYSTEM)
+            # This fixture describes an already active parent, not a second stream.
+            owner = base / 'owner'
+            owner.mkdir(mode=0o700)
+            (owner / 'samples.jsonl').write_text('')
+            (owner / 'journals').mkdir(mode=0o700)
+            (owner / 'receipts').mkdir(mode=0o700)
+            online = ca.CPU_SAMPLING.parse_cpu_set(None,
+                        possible=tuple(ca.cpu_list(Path('/sys/devices/system/cpu/possible').read_text().strip())),
+                        online=tuple(ca.cpu_list(Path('/sys/devices/system/cpu/online').read_text().strip())))
+            possible = ca.cpu_list(Path('/sys/devices/system/cpu/possible').read_text().strip())
+            cpu_scope = dict(schema=1, selected_cpus=list(online), online_cpus=list(online),
+                             possible_cpus=possible,
+                             boot_id=Path('/proc/sys/kernel/random/boot_id').read_text().strip(),
+                             clock='CLOCK_MONOTONIC', clock_domain='account-fixture',
+                             selection='all-online', status='qualified', hold_reasons=[])
+            config = dict(schema=1, token='fixture-owner-token', run_id='fixture-command',
+                          cpu_scope=cpu_scope, measurement_cpu_count=len(online),
+                          tick_hz=os.sysconf('SC_CLK_TCK'),
+                          primary_clock='CLOCK_MONOTONIC', extra_clocks=[],
+                          samples_path=str(owner/'samples.jsonl'), journal_dir=str(owner/'journals'),
+                          receipts_dir=str(owner/'receipts'))
+            config_path = owner/'owner.json'
+            config_path.write_text(json.dumps(config))
+            config_path.chmod(0o600)
+            env = dict(FAKE_CORE=str(base/'core.csv'), FAKE_SYSTEM=str(base/'system.csv'),
+                       XDEV_EXT_EVAL_CPU_OWNER=str(config_path),
+                       XDEV_EXT_EVAL_CPU_JOURNAL_DIR=str(owner/'journals'),
+                       XDEV_EXT_EVAL_CPU_TOKEN=config['token'],
+                       XDEV_EXT_EVAL_CPU_RUN_ID=config['run_id'],
+                       XDEV_EXT_EVAL_CPU_CLOCK_DOMAIN='account-fixture')
+            args = ca.parse_args(['--host-root', str(root), '--arm', 'selected',
+                                  '--perf', str(perf), '--payload-bytes', '1',
+                                  '--min-wall-s', '0', '--', sys.executable, '-c',
+                                  'print(1)'])
+            p = ca.plan(args, root, base)
+            def forbidden(*args, **kwargs):
+                self.fail('selected owner started a second periodic regex-worker sampler')
+            with patch.dict(os.environ, env), patch.object(ca, 'Sampler', side_effect=forbidden):
+                receipt, code = ca.execute(args, root, p)
+            self.assertEqual(code, 0)
+            self.assertIn('separate-periodic-worker-sampler-disabled', json.dumps(receipt))
+            self.assertEqual(config_path.read_text(), json.dumps(config))
+
 if __name__ == '__main__':
     unittest.main()

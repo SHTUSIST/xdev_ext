@@ -335,16 +335,18 @@ class RuntimeImport(unittest.TestCase):
 
 
     # Scope replay uses the real importer/decoder, with synthetic provenance only.
-    def selected_samples(self, subset=False, status='qualified'):
+    def selected_samples(self, subset=False, status='qualified', selected=(0,)):
         self.cpu_samples()
-        online = [0, 1] if subset else [0]
-        scope = dict(schema=1, selected_cpus=[0], online_cpus=online,
+        online = [0, 1] if subset else list(selected)
+        scope = dict(schema=1, selected_cpus=list(selected), online_cpus=online,
                      possible_cpus=[0, 1], boot_id='01234567-89ab-4cde-8f01-23456789abcd',
                      clock=self.manifest['clock'], clock_domain=self.manifest['clock_domain'],
                      selection='subset' if subset else 'all-online', status=status,
                      hold_reasons=['worker/IRQ containment unavailable'] if status == 'hold' else [])
-        self.manifest.update(cpu_accounting='cpu_set_total', cpu_budget=1, cpu_scope=copy.deepcopy(scope))
-        self.metadata.update(cpu_accounting='cpu_set_total', cpu_budget=1, cpu_scope=copy.deepcopy(scope))
+        self.manifest.update(cpu_accounting='cpu_set_total', cpu_budget=1,
+                             measurement_cpu_count=len(selected), cpu_scope=copy.deepcopy(scope))
+        self.metadata.update(cpu_accounting='cpu_set_total', cpu_budget=1,
+                             measurement_cpu_count=len(selected), cpu_scope=copy.deepcopy(scope))
         path = Path(self.receipt['artifacts']['cpu_samples']['path'])
         samples = [json.loads(line) for line in path.read_text().splitlines()]
         for sample in samples:
@@ -352,6 +354,11 @@ class RuntimeImport(unittest.TestCase):
                           clock=scope['clock'], clock_domain=scope['clock_domain'])
             if subset:
                 sample['stat'] += 'cpu1 0 0 0 100 0 0 0 0 0 0\n'
+            elif selected == (0, 1):
+                n = int(sample['stat'].splitlines()[1].split()[1])
+                sample['stat'] = ('cpu %d 0 0 200 0 0 0 0 0 0\n'
+                                  'cpu0 %d 0 0 100 0 0 0 0 0 0\n'
+                                  'cpu1 %d 0 0 100 0 0 0 0 0 0\n') % (2 * n, n, n)
         self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
         self.artifact('trace_metadata', json.dumps(self.metadata))
 
@@ -414,7 +421,7 @@ class RuntimeImport(unittest.TestCase):
         self.selected_samples()
         left, right = run_fixture(), run_fixture('K-BPF')
         for run in (left, right):
-            run.update(cpu_accounting='cpu_set_total', cpu_budget=1,
+            run.update(cpu_accounting='cpu_set_total', cpu_budget=1, measurement_cpu_count=1,
                        cpu_scope=copy.deepcopy(self.manifest['cpu_scope']))
         right['cpu_scope']['selected_cpus'] = [1]
         right['cpu_scope']['online_cpus'] = [1]
@@ -462,12 +469,86 @@ class RuntimeImport(unittest.TestCase):
         self.assertEqual(legacy['delta']['cpu_ns_per_record_bounds'], dict(lower=0, upper=20))
         self.assertFalse(legacy['performance_eligible'])
         for run in (left, right):
-            run.update(cpu_scope=copy.deepcopy(scope), cpu_budget=1)
+            run.update(cpu_scope=copy.deepcopy(scope), cpu_budget=1, measurement_cpu_count=1)
         held = analyze.compare_runs(left, right)
         self.assertFalse(held['eligible'], 'same selected CPUs bypassed HOLD qualification')
         self.assertIsNone(held['delta'])
         self.assertTrue(any('cpu' in error.lower() for error in held['errors']), held['errors'])
         self.assertFalse(held['performance_eligible'])
+
+    def test_measurement_count_two_with_legacy_budget_one_preserves_both_meanings(self):
+        recipe = copy.deepcopy(self.manifest['recipe'])
+        self.selected_samples(selected=(0, 1))
+        result = self.import_run()
+        bounds = result['manifest']['total_cpu_ns_bounds']
+        self.assertIsNotNone(bounds, result['errors'])
+        self.assertEqual((bounds['lower'], bounds['upper']), (60_000_000, 200_000_000))
+        self.assertEqual(result['manifest']['cpu_budget'], 1)
+        self.assertEqual(result['manifest']['measurement_cpu_count'], 2)
+        self.assertEqual(result['manifest']['cpu_scope']['selected_cpus'], [0, 1])
+        self.assertEqual(result['manifest']['recipe'], recipe)
+        self.assertEqual(self.metadata['cpu_budget'], 1)
+        self.assertEqual(self.metadata['measurement_cpu_count'], 2)
+        self.assertFalse(any(error.startswith('system_cpu:') for error in result['errors']), result['errors'])
+        self.assertFalse(result['performance_eligible'])
+
+    def test_selected_count_missing_bool_or_wrong_value_never_falls_back_to_budget(self):
+        for count in ('missing', True, 1, 0, -1, 2.0):
+            with self.subTest(count=count):
+                self.selected_samples(selected=(0, 1))
+                # Legacy budget happens to equal selected cardinality here.
+                # It must not rescue a missing or malformed measurement count.
+                self.manifest['cpu_budget'] = self.metadata['cpu_budget'] = 2
+                for record in (self.manifest, self.metadata):
+                    if count == 'missing':
+                        record.pop('measurement_cpu_count')
+                    else:
+                        record['measurement_cpu_count'] = count
+                self.artifact('trace_metadata', json.dumps(self.metadata))
+                result = self.import_run()
+                self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+                self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record_bounds'))
+                self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+                self.assertFalse(result['performance_eligible'])
+
+    def test_selected_count_must_match_manifest_and_trace_metadata_independently(self):
+        for changed in ('manifest', 'metadata'):
+            for count in ('missing', True, 1):
+                with self.subTest(changed=changed, count=count):
+                    self.selected_samples(selected=(0, 1))
+                    self.manifest['cpu_budget'] = self.metadata['cpu_budget'] = 2
+                    record = self.manifest if changed == 'manifest' else self.metadata
+                    if count == 'missing':
+                        record.pop('measurement_cpu_count')
+                    else:
+                        record['measurement_cpu_count'] = count
+                    self.artifact('trace_metadata', json.dumps(self.metadata))
+                    result = self.import_run()
+                    self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+                    self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+
+    def test_selected_pair_requires_measurement_count_and_keeps_legacy_budget_matching(self):
+        self.selected_samples()
+        left, right = run_fixture(), run_fixture('K-BPF')
+        for run in (left, right):
+            run.update(cpu_accounting='cpu_set_total', cpu_budget=1, measurement_cpu_count=1,
+                       cpu_scope=copy.deepcopy(self.manifest['cpu_scope']))
+        matched = analyze.compare_runs(left, right)
+        self.assertTrue(matched['eligible'], matched['errors'])
+        self.assertFalse(matched['performance_eligible'])
+        for changed, value in (('measurement_cpu_count', 'missing'),
+                               ('measurement_cpu_count', True),
+                               ('measurement_cpu_count', 2), ('cpu_budget', 2)):
+            with self.subTest(changed=changed, value=value):
+                different = copy.deepcopy(right)
+                if value == 'missing':
+                    different.pop(changed)
+                else:
+                    different[changed] = value
+                report = analyze.compare_runs(left, different)
+                self.assertFalse(report['eligible'])
+                self.assertIsNone(report['delta'])
+                self.assertTrue(any('cpu' in error.lower() for error in report['errors']), report['errors'])
 
 
 if __name__ == '__main__':

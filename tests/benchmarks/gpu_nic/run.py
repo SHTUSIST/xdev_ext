@@ -33,6 +33,12 @@ import time
 
 sys.dont_write_bytecode = True  # the sibling runner is loaded as a module
 HERE = Path(__file__).resolve().parent
+_CPU_MODULES = HERE.parent / "native_trace"
+if not _CPU_MODULES.is_dir():
+    _CPU_MODULES = HERE.parents[1] / "support/evidence/native_trace"
+sys.path.insert(0, str(_CPU_MODULES))
+from timer_scope import TimerCpuRun, OptionalTimerCpuRun
+
 REPO = HERE.parents[2]
 KERNEL = REPO / "kernel"
 _SPEC = importlib.util.spec_from_file_location("nvme_gpu_run", HERE.parent / "nvme_gpu" / "run.py")
@@ -54,6 +60,18 @@ MAX_DEPTH = 64
 WAITS = ("block", "poll")
 
 
+def cpu_owner(args, clock="CLOCK_MONOTONIC", *, optional=False):
+    import uuid
+    output = args.cpu_output
+    if output is None and not os.environ.get("XDEV_EXT_EVAL_CPU_OWNER"):
+        parent = getattr(args, "build_dir", HERE / "build")
+        output = Path(parent) / "cpu-measurements" / str(uuid.uuid4())
+    elif output is not None:
+        output = Path(output) / str(uuid.uuid4())
+    capture = OptionalTimerCpuRun if optional else TimerCpuRun
+    return capture(output, cpu_set=args.cpu_set, clock=clock)
+
+
 def size_list(text):
     if ".." in text:
         low, high = (NG.decimal(part) for part in text.split("..", 1))
@@ -73,6 +91,9 @@ def size_list(text):
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--cpu-set")
+    parser.add_argument("--cpu-output", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--arms", type=NG.choice_list(ARMS), required=True)
     parser.add_argument("--direction", choices=("nic-gpu", "gpu-nic"), required=True)
     group = parser.add_mutually_exclusive_group(required=True)
@@ -108,9 +129,9 @@ def arguments(argv=None):
         parser.error("depth 1..64, pairs 1..100, messages 1..2^24, streams 1..16")
     if not 1 <= args.local_port <= 65535 or not 1 <= args.peer_port <= 65535:
         parser.error("ports are 1..65535")
-    if not args.build_only and not (args.ifname and args.local_ip and args.peer_ip and args.peer_mac):
+    if not args.build_only and not args.dry_run and not (args.ifname and args.local_ip and args.peer_ip and args.peer_mac):
         parser.error("a campaign needs --ifname, --local-ip, --peer-ip and --peer-mac")
-    if "session" in args.arms and not args.build_only and not args.ce_dev:
+    if "session" in args.arms and not args.build_only and not args.dry_run and not args.ce_dev:
         parser.error("the session arm needs --ce-dev")
     return args
 
@@ -244,7 +265,7 @@ class NotReady(RuntimeError):
         self.lines = lines
 
 
-def wait_ready(process, deadline):
+def wait_ready(process, deadline, *, cpu=None):
     """Read stderr lines until XDEV_EVAL_READY; returns the lines read."""
     lines = []
     while time.monotonic() < deadline:
@@ -254,6 +275,8 @@ def wait_ready(process, deadline):
             if not line:
                 break
             lines.append(line)
+            if cpu is not None and line.startswith("XDEV_EXT_CPU_TIMER_REFUSED "):
+                cpu.refuse_child(process.pid, "CPU timer child refused journaling")
             if line.startswith("XDEV_EVAL_READY"):
                 return lines
         elif process.poll() is not None:
@@ -261,7 +284,7 @@ def wait_ready(process, deadline):
     raise NotReady(lines)
 
 
-def run_cell(args, arm, binary, peer, size, pair):
+def _run_cell(args, arm, binary, peer, size, pair, cpu):
     ingest = args.direction == "nic-gpu"
     direction = "ingest" if ingest else "egress"
     timeout = args.timeout_ms / 1000 + 120
@@ -287,11 +310,14 @@ def run_cell(args, arm, binary, peer, size, pair):
                           "--seed", 1]
     first, second = (arm_cmd, peer_cmd) if ingest else (peer_cmd, arm_cmd)
     deadline = time.monotonic() + timeout
+    peer_env = {k: v for k, v in os.environ.items() if not k.startswith("XDEV_EXT_EVAL_CPU_")}
     listener = subprocess.Popen([str(c) for c in first], text=True, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE)
+                                stderr=subprocess.PIPE, env=cpu.environment(os.environ) if ingest else peer_env)
+    if ingest:
+        cpu.watch_child(listener, [str(c) for c in first])
     try:
         try:
-            early = wait_ready(listener, deadline)
+            early = wait_ready(listener, deadline, cpu=cpu if ingest else None)
         except NotReady as error:
             # An ingest arm that refuses (exit 4, SKIP) before READY is a not_run cell.
             try:
@@ -302,13 +328,18 @@ def run_cell(args, arm, binary, peer, size, pair):
                 sys.stderr.write("".join(error.lines) + rest)
                 return None
             raise
-        talker = subprocess.run([str(c) for c in second], text=True, capture_output=True,
-                                timeout=timeout)
+        if ingest:
+            talker = subprocess.run([str(c) for c in second], text=True, capture_output=True,
+                                    timeout=timeout, env=peer_env)
+        else:
+            talker = cpu.run([str(c) for c in second], text=True, capture_output=True, timeout=timeout)
         out, err = listener.communicate(timeout=max(1, deadline - time.monotonic()))
     finally:
         if listener.poll() is None:
             listener.kill()
             listener.communicate()
+    if ingest and any(line.startswith("XDEV_EXT_CPU_TIMER_REFUSED ") for line in err.splitlines()):
+        cpu.refuse_child(listener.pid, "CPU timer child refused journaling")
     sys.stderr.write("".join(early) + err + talker.stderr)
     arm_rc, arm_out = (listener.returncode, out) if ingest else (talker.returncode, talker.stdout)
     peer_rc, peer_out = (talker.returncode, talker.stdout) if ingest else (listener.returncode, out)
@@ -325,8 +356,27 @@ def run_cell(args, arm, binary, peer, size, pair):
     return record
 
 
+def run_cell(args, arm, binary, peer, size, pair):
+    with cpu_owner(args, optional=True) as cpu:
+        record = _run_cell(args, arm, binary, peer, size, pair, cpu)
+    if record is not None:
+        semantics = ("terminal-wake-before-settle" if arm == "session" else
+                     "copy-completion" if args.direction == "nic-gpu" else
+                     "tx-completion" if arm == "afxdp-cuda" else "local-socket-custody")
+        measurement = cpu.measurement([dict(arm=arm, identity={"pair": pair, "direction": args.direction},
+            metric="io_ns", keys=[0], expected_duration_ns=record["io_ns"],
+            endpoint_semantics=semantics, clock="CLOCK_MONOTONIC")])
+        if measurement is not None:
+            record["cpu_measurement"] = measurement
+    return record
+
+
 def main(argv=None):
     args = arguments(argv)
+    if args.dry_run:
+        print(json.dumps({"status": "planned", "arms": args.arms, "direction": args.direction,
+                          "cpu_measurement_plan": cpu_owner(args).plan()}, sort_keys=True))
+        return 0
     binaries = {}
     for arm in args.arms:
         binary, reason = build("session_gpu_nic" if arm == "session" else arm, args)

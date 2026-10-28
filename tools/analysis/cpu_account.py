@@ -66,6 +66,10 @@ _cpu_spec = importlib.util.spec_from_file_location('shared_cpu_account_sampling'
 CPU_SAMPLING = importlib.util.module_from_spec(_cpu_spec)
 _cpu_spec.loader.exec_module(CPU_SAMPLING)
 
+_timer_spec = importlib.util.spec_from_file_location('shared_cpu_account_timer', _CPU_SOURCE.with_name('timer_scope.py'))
+TIMER_SCOPE = importlib.util.module_from_spec(_timer_spec)
+_timer_spec.loader.exec_module(TIMER_SCOPE)
+
 SCHEMA = 'xdev-eval-cpu-account-v2'
 SEP = ';'
 CORE_EVENTS = ['cycles', 'cycles:u', 'cycles:k', 'instructions', 'task-clock']
@@ -562,13 +566,32 @@ def plan(args, root, work):
              '--', '/bin/sh', '-c', JOIN_SCRIPT, 'xdev-eval-join', str(cgdir)] + harness
     argv = [perf, 'stat', '-a', '-A', '-x', SEP, '-o', system_out,
             '-e', ','.join(SYSTEM_EVENTS + args.uncore_events), '--'] + inner
-    return dict(schema=SCHEMA, arm=args.arm, cgroup=cgroup, cgroup_dir=str(cgdir),
+    result = dict(schema=SCHEMA, arm=args.arm, cgroup=cgroup, cgroup_dir=str(cgdir),
                 argv=argv, harness=harness, core_output=core_out, system_output=system_out,
                 core_events=CORE_EVENTS, system_events=SYSTEM_EVENTS,
                 uncore_events=args.uncore_events, imc_events=args.imc,
                 poller_cpus=args.pollers, kthread_comm=args.kthread_comm,
                 kthread_interval_s=args.kthread_interval, target_rate=args.target_rate,
                 rate_env=args.rate_env, min_wall_s=args.min_wall_s)
+    if _selected(args):
+        timer = _timer(args, work)
+        result['cpu_measurement_plan'] = timer.plan()
+    return result
+
+
+def _selected(args):
+    return bool(os.environ.get('XDEV_EXT_EVAL_CPU_OWNER') or
+                getattr(args, 'cpu_output', None) is not None or getattr(args, 'cpu_set', None) is not None)
+
+
+def _timer(args, work, *, optional=False):
+    inherited = bool(os.environ.get('XDEV_EXT_EVAL_CPU_OWNER'))
+    output = getattr(args, 'cpu_output', None)
+    if output is None and not inherited:
+        output = Path(work) / 'cpu-measurements' / str(TIMER_SCOPE.uuid.uuid4())
+    timer_type = TIMER_SCOPE.OptionalTimerCpuRun if optional else TIMER_SCOPE.TimerCpuRun
+    return timer_type(output, cpu_set=getattr(args, 'cpu_set', None),
+                                   extra_clocks=('CLOCK_MONOTONIC_RAW',))
 
 
 def execute(args, root, p):
@@ -581,16 +604,24 @@ def execute(args, root, p):
     hz = os.sysconf('SC_CLK_TCK')
     scan = (root, args.kthread_comm, p['cgroup'], hz)
     try:
-        tracker = KthreadTracker(scan_threads(*scan), args.kthread_interval)
-        sampler = Sampler(*scan, tracker)
+        selected = _selected(args)
+        tracker = None if selected else KthreadTracker(scan_threads(*scan), args.kthread_interval)
+        sampler = None if selected else Sampler(*scan, tracker)
+        timer = _timer(args, cgdir.parent, optional=True) if selected else None
         before = parse_proc_stat((root / 'proc/stat').read_text())
         start = time.monotonic()
-        sampler.start()
+        if sampler is not None:
+            sampler.start()
         try:
-            done = subprocess.run(p['argv'], stdout=subprocess.PIPE, env=env, text=True)
+            if timer is not None:
+                with timer:
+                    done = timer.run(p['argv'], stdout=subprocess.PIPE, env=env, text=True)
+            else:
+                done = subprocess.run(p['argv'], stdout=subprocess.PIPE, env=env, text=True)
         finally:
             wall = time.monotonic() - start
-            sampler.stop()
+            if sampler is not None:
+                sampler.stop()
         after = parse_proc_stat((root / 'proc/stat').read_text())
     finally:
         try:
@@ -619,8 +650,14 @@ def execute(args, root, p):
     receipt['walls'] = w
     receipt['account'] = account(core, uncore, proc_stat_seconds(before, after, hz),
                                  wall, payload, args.pollers, system=system,
-                                 kthreads=tracker.summary(args.pollers), imc=args.imc,
+                                 kthreads=tracker.summary(args.pollers) if tracker else None, imc=args.imc,
                                  imc_count_bytes=args.imc_count_bytes)
+    if selected:
+        receipt['worker_diagnostic'] = dict(status='unavailable',
+            reason='separate-periodic-worker-sampler-disabled')
+        # The wrapper has no arm-specific timer parser: the attached runner owns
+        # original result validation and views, never the perf command wall.
+        receipt['cpu_measurement'] = timer.measurement([])
     receipt['rate'] = rate_check(payload, w['rate_wall_s'], args.target_rate,
                                  args.rate_tolerance)
     if receipt['rate']:
@@ -668,6 +705,8 @@ def parse_args(argv):
     parser.add_argument('--out')
     parser.add_argument('--harness-stdout')
     parser.add_argument('--dry-run', action='store_true')
+    parser.add_argument('--cpu-set')
+    parser.add_argument('--cpu-output', type=Path)
     args = parser.parse_args(argv[:split])
     args.cmd = argv[split + 1:]
     if not args.cmd:

@@ -27,6 +27,8 @@
  * Exit: 0 pass, 1 run failed, 2 invalid spec, 4 not run.
  */
 #define _GNU_SOURCE
+#include "../common/cpu_timer.h"
+static struct cpu_timer uo_cpu_timer;
 #include <errno.h>
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -1004,8 +1006,10 @@ static int uo_run(struct uo *u)
 			return uo_fail(u, UO_FAIL, "window %llu: %s", (unsigned long long)w,
 				       strerror(-ret));
 		}
-		if (w >= warm && u->samples)
+		if (w >= warm && u->samples) {
+			cpu_timer_store(&uo_cpu_timer, "window_ns", u->nr_samples, t0, t1);
 			u->samples[u->nr_samples++] = t1 - t0;
+		}
 		first += s->burst;
 		u->windows_done++;
 		u->batches_done = first;
@@ -1072,6 +1076,11 @@ int main(int argc, char **argv)
 		       have_cuda ? "true" : "false");
 		return UO_PASS;
 	}
+	if (u.s.mode == CH_TIMING && u.s.load == CH_LOAD_CLOSED) {
+		int error = cpu_timer_init(&uo_cpu_timer, "CLOCK_MONOTONIC_RAW", u.s.batches / u.s.burst);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
+	}
 	/* hardware_gate.py admits timed runs; this catches a direct start. */
 	if (u.s.mode == CH_TIMING && chain_env_virtual("", why, sizeof(why)))
 		uo_fail(&u, UO_NOT_RUN, "unsupported: timing refused: %s", why);
@@ -1096,6 +1105,12 @@ int main(int argc, char **argv)
 		uo_oracle(&u);
 	if (uo_native_flush(&u) && !u.status)
 		uo_fail(&u, UO_FAIL, "native trace journal write failed");
+	if (!u.status && u.s.mode == CH_TIMING && u.s.load == CH_LOAD_CLOSED) {
+		int error = cpu_timer_publish(&uo_cpu_timer);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
+	}
+	cpu_timer_destroy(&uo_cpu_timer);
 	uo_emit(stdout, &u, have_cuda);
 	if (u.s.out[0]) {
 		FILE *f = fopen(u.s.out, "wx");

@@ -390,6 +390,11 @@ int main(int argc, char **argv)
 		cb_plan(&spec);
 		return CB_PASS;
 	}
+	if (spec.mode == CH_TIMING && spec.load == CH_LOAD_CLOSED) {
+		int error = cpu_timer_init(&r.cpu_timer, "CLOCK_MONOTONIC_RAW", chain_windows(&spec));
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
+	}
 	/* hardware_gate.py admits timed runs; this catches a direct start. */
 	if (spec.mode == CH_TIMING && chain_env_virtual("", why, sizeof(why)))
 		cb_fail(&r, CB_NOT_RUN, "unsupported: timing refused: %s", why);
@@ -412,6 +417,12 @@ int main(int argc, char **argv)
 	}
 	if (eval_fd_check(fd_before))
 		cb_fail(&r, CB_FAIL, "descriptor count changed after cleanup");
+	if (!r.status && spec.mode == CH_TIMING && spec.load == CH_LOAD_CLOSED) {
+		int error = cpu_timer_publish(&r.cpu_timer);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
+	}
+	cpu_timer_destroy(&r.cpu_timer);
 	cb_emit(stdout, &spec, &r);
 	if (spec.out[0]) {
 		out = fopen(spec.out, "wx");

@@ -908,8 +908,10 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 				xdev_ext_mech_ctl_errname(ret));
 			goto stop;
 		}
-		if (w >= warm && r->samples)
+		if (w >= warm && r->samples) {
+			cpu_timer_store(&r->cpu_timer, "window_ns", r->nr_samples, t0, t1);
 			r->samples[r->nr_samples++] = t1 - t0;
+		}
 		/*
 		 * Outside the window: did every batch of it end well?  A timed run
 		 * leaves this to the final STATS, so its system calls are the

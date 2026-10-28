@@ -7,7 +7,7 @@ ENABLE_SESSION ?= 0
 BUILD_DIR ?= .build
 KERNEL = ../../../kernel
 PRODUCER_SOURCES = nnb_producer.c nnb_uring.c nnb_session.c
-HEADERS = nnb.h nnb_wire.h
+HEADERS = ../common/cpu_timer.h ../common/native_process.h nnb.h nnb_wire.h
 ifeq ($(ENABLE_URING),1)
 CPPFLAGS += -DNNB_HAVE_URING
 LDLIBS += -luring
