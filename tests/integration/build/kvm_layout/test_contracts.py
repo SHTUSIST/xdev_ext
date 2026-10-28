@@ -80,6 +80,68 @@ class Roots(unittest.TestCase):
             contracts.check_roots(self.root, self.sha, self.build)
 
 
+
+    def test_xdomain_requires_every_staged_module_in_prebuild_receipt(self):
+        # Only Git/depmod/modprobe/make are command-boundary doubles. The
+        # runner's receipts, checksum verification and stop decision are real.
+        project = Path(__file__).resolve().parents[4]
+        runner = project / 'tests/network/xdomain/stack/guest/xdomain_kvm.sh'
+        bindir = self.root / 'bin'
+        bindir.mkdir()
+        (bindir / 'git').write_text('#!/bin/sh\ncase "$3:$4" in\nrev-parse:--show-toplevel) echo "$UNIT_SOURCE";;\nrev-parse:HEAD) echo "$UNIT_SHA";;\ndiff:*|ls-files:*) exit 0;;\n*) exit 17;;\nesac\n')
+        (bindir / 'depmod').write_text('#!/bin/sh\nexit 0\n')
+        (bindir / 'modprobe').write_text('#!/bin/sh\ncat "$UNIT_DEPENDENCIES"\n')
+        (bindir / 'make').write_text('#!/bin/sh\ntouch "$UNIT_SENTINEL"\nexit 43\n')
+        for command in bindir.iterdir():
+            command.chmod(0o755)
+        helper = 'tests/integration/build/kvm_layout/contracts.py'
+        self.write(helper, (project / helper).read_text())
+        self.write('src/network/drivers/thunderbolt/test.c',
+                   'static struct kunit_case tb_test_cases[] = {\n' +
+                   ''.join(f'KUNIT_CASE(tb_test_case_{i}),\n' for i in range(45)) + '};\n')
+        symbols = 'MODULES MODULE_UNLOAD MEMORY_HOTPLUG MEMORY_HOTREMOVE MIGRATION SPARSEMEM_VMEMMAP ZONE_DEVICE PCI_P2PDMA DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK KUNIT USB4_KUNIT_TEST'
+        self.write('output/.config', ''.join('CONFIG_' + key + '=y\n' for key in symbols.split()) +
+                   'CONFIG_USB4=m\nCONFIG_XDEV_EXT_MECH_XDOMAIN=m\n')
+        self.write('output/xdev-ext-source.commit', self.sha + '\n')
+        self.write('output/include/config/kernel.release', 'unit-only\n')
+        module_root = 'tools/xdomain-modules/lib/modules/unit-only/'
+        modules = [module_root + 'kernel/io_uring/xdomain/xdev_ext_xdomain.ko',
+                   module_root + 'kernel/drivers/thunderbolt/thunderbolt.ko',
+                   module_root + 'kernel/lib/crc32c.ko.zst']
+        artifacts = ['output/.config', 'output/arch/x86/boot/bzImage', 'output/vmlinux',
+                     'output/Module.symvers', 'tools/xdev_ext_mech_ctl', 'tools/nvme_s0.bpf.o',
+                     'tools/peer-guest/xdev_ext_peer_sw.ko'] + modules
+        for artifact in artifacts[1:]:
+            self.write(artifact, 'unit boundary input')
+        self.write(module_root + 'modules.dep', 'unit depmod boundary\n')
+        dependencies = self.root / 'dependencies.txt'
+        dependencies.write_text(''.join('insmod ' + str(self.root / path) + '\n' for path in modules))
+        sentinel = self.root / 'make-reached'
+        env = dict(os.environ, PATH=str(bindir) + ':' + os.environ['PATH'],
+                   UNIT_SOURCE=str(self.root), UNIT_SHA=self.sha,
+                   UNIT_DEPENDENCIES=str(dependencies), UNIT_SENTINEL=str(sentinel),
+                   QEMU='/nonexistent/no-qemu')
+        for index, omitted in enumerate(modules + [None]):
+            with self.subTest(omitted=omitted):
+                sentinel.unlink(missing_ok=True)
+                records = [path for path in artifacts if path != omitted]
+                self.write('output/xdev-ext-xdomain-build.sha256', ''.join(
+                    hashlib.sha256((self.root / path).read_bytes()).hexdigest() + '  ' +
+                    str(self.root / path) + '\n' for path in records))
+                scratch = self.root / f'xdomain-{index}'
+                scratch.mkdir(mode=0o700)
+                result = subprocess.run(['bash', str(runner), '--source', str(self.root),
+                                         '--scratch', str(scratch), '--build', str(self.build),
+                                         '--tools', str(self.root / 'tools')], env=env,
+                                        capture_output=True, text=True)
+                if omitted is None:
+                    self.assertTrue(sentinel.is_file(), result.stdout + result.stderr)
+                    self.assertEqual(result.returncode, 43)
+                else:
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(sentinel.exists(), 'unbound staged module reached make: ' + omitted)
+
+
     def test_ordered_packaging_preserves_relative_peer_header_and_baseline(self):
         # make and Git are external command-boundary doubles only. The runner,
         # receipts, source copies, ELF dependency inspection, image creation
