@@ -1,0 +1,2823 @@
+{
+  "schema": 1,
+  "case_count": 75,
+  "cases": [
+    {
+      "name": "sum_f16_exact_and_special",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "f16",
+        "local_bits": [
+          "3c00",
+          "c000",
+          "3400",
+          "7bff",
+          "7c00",
+          "7c00",
+          "7e55"
+        ],
+        "peer_bits": [
+          "4000",
+          "3800",
+          "3800",
+          "7bff",
+          "3c00",
+          "fc00",
+          "3c00"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          "4200",
+          "be00",
+          "3a00",
+          "7c00",
+          "7c00",
+          {
+            "nan": true
+          },
+          {
+            "nan": true
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong dtype decode, integer arithmetic, missing peer addition, NaN/Inf sanitization or output conversion"
+    },
+    {
+      "name": "sum_bf16_exact_and_special",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "bf16",
+        "local_bits": [
+          "3f80",
+          "c000",
+          "3e80",
+          "7f7f",
+          "7f80",
+          "7f80",
+          "7fc5"
+        ],
+        "peer_bits": [
+          "4000",
+          "3f00",
+          "3f00",
+          "7f7f",
+          "3f80",
+          "ff80",
+          "3f80"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          "4040",
+          "bfc0",
+          "3f40",
+          "7f80",
+          "7f80",
+          {
+            "nan": true
+          },
+          {
+            "nan": true
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong dtype decode, integer arithmetic, missing peer addition, NaN/Inf sanitization or output conversion"
+    },
+    {
+      "name": "sum_f32_exact_and_special",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "f32",
+        "local_bits": [
+          "3f800000",
+          "c0000000",
+          "3e800000",
+          "7f7fffff",
+          "7f800000",
+          "7f800000",
+          "7fc12345"
+        ],
+        "peer_bits": [
+          "40000000",
+          "3f000000",
+          "3f000000",
+          "7f7fffff",
+          "3f800000",
+          "ff800000",
+          "3f800000"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          "40400000",
+          "bfc00000",
+          "3f400000",
+          "7f800000",
+          "7f800000",
+          {
+            "nan": true
+          },
+          {
+            "nan": true
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong dtype decode, integer arithmetic, missing peer addition, NaN/Inf sanitization or output conversion"
+    },
+    {
+      "name": "sum_f16_finite_tolerance",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "f16",
+        "local_bits": [
+          "3555",
+          "3a66"
+        ],
+        "peer_bits": [
+          "2e66",
+          "2e66"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          {
+            "value": 0.4332275390625,
+            "atol": 0.0005
+          },
+          {
+            "value": 0.9000244140625,
+            "atol": 0.001
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong finite arithmetic; permits dtype rounding without arbitrary NCCL bit-identity"
+    },
+    {
+      "name": "sum_bf16_finite_tolerance",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "bf16",
+        "local_bits": [
+          "3eab",
+          "3f4d"
+        ],
+        "peer_bits": [
+          "3dcd",
+          "3dcd"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          {
+            "value": 0.43359375,
+            "atol": 0.004
+          },
+          {
+            "value": 0.900390625,
+            "atol": 0.008
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong finite arithmetic; permits dtype rounding without arbitrary NCCL bit-identity"
+    },
+    {
+      "name": "sum_f32_finite_tolerance",
+      "family": "algorithm",
+      "request": {
+        "action": "sum",
+        "dtype": "f32",
+        "local_bits": [
+          "3eaaaaab",
+          "3f4ccccd"
+        ],
+        "peer_bits": [
+          "3dcccccd",
+          "3dcccccd"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          {
+            "value": 0.4333333373069763,
+            "atol": 1e-07
+          },
+          {
+            "value": 0.9000000357627869,
+            "atol": 2e-07
+          }
+        ],
+        "status": 0
+      },
+      "catches": "wrong finite arithmetic; permits dtype rounding without arbitrary NCCL bit-identity"
+    },
+    {
+      "name": "gather_rowwise_rank0",
+      "family": "algorithm",
+      "request": {
+        "action": "gather",
+        "dtype": "f32",
+        "rank": 0,
+        "rows": 2,
+        "local_width": 2,
+        "rank0_bits": [
+          "3f800000",
+          "40000000",
+          "40400000",
+          "40800000"
+        ],
+        "rank1_bits": [
+          "40a00000",
+          "40c00000",
+          "40e00000",
+          "41000000"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          "3f800000",
+          "40000000",
+          "40a00000",
+          "40c00000",
+          "40400000",
+          "40800000",
+          "40e00000",
+          "41000000"
+        ],
+        "status": 0
+      },
+      "catches": "flatten concatenation, reversed ranks or rank-dependent layout"
+    },
+    {
+      "name": "gather_rowwise_rank1",
+      "family": "algorithm",
+      "request": {
+        "action": "gather",
+        "dtype": "f32",
+        "rank": 1,
+        "rows": 2,
+        "local_width": 2,
+        "rank0_bits": [
+          "3f800000",
+          "40000000",
+          "40400000",
+          "40800000"
+        ],
+        "rank1_bits": [
+          "40a00000",
+          "40c00000",
+          "40e00000",
+          "41000000"
+        ]
+      },
+      "expected": {
+        "output_bits": [
+          "3f800000",
+          "40000000",
+          "40a00000",
+          "40c00000",
+          "40400000",
+          "40800000",
+          "40e00000",
+          "41000000"
+        ],
+        "status": 0
+      },
+      "catches": "flatten concatenation, reversed ranks or rank-dependent layout"
+    },
+    {
+      "name": "bridge_gather_nondst_none",
+      "family": "bridge",
+      "request": {
+        "action": "gather",
+        "rank": 1,
+        "dst_rank": 0,
+        "all_gather": false,
+        "shape": [
+          2,
+          2
+        ],
+        "dtype": "f32"
+      },
+      "expected": {
+        "return_kind": "None",
+        "output_allocation_count": 0
+      },
+      "catches": "non-destination returns tensor or allocates output"
+    },
+    {
+      "name": "bridge_gather_leading_dimensions",
+      "family": "bridge",
+      "request": {
+        "action": "gather",
+        "rank": 0,
+        "dst_rank": 0,
+        "all_gather": false,
+        "shape": [
+          2,
+          1,
+          2
+        ],
+        "dtype": "f32"
+      },
+      "expected": {
+        "return_kind": "Tensor",
+        "output_shape": [
+          2,
+          1,
+          4
+        ]
+      },
+      "catches": "bridge flattens away original leading dimensions"
+    },
+    {
+      "name": "pack_real_header_noncontiguous_spans_and_padding",
+      "family": "algorithm",
+      "request": {
+        "action": "pack",
+        "header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "payload_hex": "0000803f000000400000404000008040",
+        "allocation_bytes": 640,
+        "initial_byte": 165,
+        "spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "wire_bytes": 96
+      },
+      "expected": {
+        "status": 0,
+        "allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "logical_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "payload_bytes": 16,
+        "header_bytes": 64,
+        "padding_bytes": 16,
+        "wire_bytes": 96
+      },
+      "catches": "contiguous-VA assumption, missing real 64B header, uninitialized padding or neighbor overwrite"
+    },
+    {
+      "name": "result_reads_noncontiguous_rx_spans",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "local_bits": [
+          "3f800000",
+          "40000000",
+          "40400000",
+          "40800000"
+        ],
+        "dtype": "f32",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd"
+      },
+      "expected": {
+        "status": 0,
+        "output_bits": [
+          "40000000",
+          "40800000",
+          "40c00000",
+          "41000000"
+        ]
+      },
+      "catches": "RX payload assumed contiguous or frame index order sorted instead of message order"
+    },
+    {
+      "name": "reject_wire_magic",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "000000000000000008070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000000000000000008070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header magic ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_communicator_id",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503163000000000000000900000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503163000000000000000900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header communicator_id ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_epoch",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010a00000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010a00000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header epoch ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_sequence",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000160000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5160000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header sequence ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_rows",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000002000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000002000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header rows ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_local_width",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000500000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000500000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header local_width ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_payload_bytes",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "5858444556545031080706050403020109000000000000001700000000000000010000000000000004000000000000000c0000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a51700000000000000010000000000000004000000000000000c0000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header payload_bytes ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_version",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000200400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000200400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header version ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_header_bytes",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "5858444556545031080706050403020109000000000000001700000000000000010000000000000004000000000000001000000001003f0001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a51700000000000000010000000000000004000000000000001000000001003f0001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header header_bytes ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_operation",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400002030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400002030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header operation ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_dtype",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001010102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001010102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header dtype ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_rank",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030002000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030002000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header rank ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_world_size",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030103000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030103000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header world_size ignored or output changed before validation"
+    },
+    {
+      "name": "reject_wire_reserved",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030102010000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102010000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "peer header reserved ignored or output changed before validation"
+    },
+    {
+      "name": "reject_stale_rx_key",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "actual_rx_key": 22,
+        "actual_tx_sequence": 23,
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "fresh ready key and actual TX invocation not jointly matched"
+    },
+    {
+      "name": "reject_wrong_tx_sequence",
+      "family": "algorithm",
+      "request": {
+        "action": "receive_sum",
+        "expected_rx_key": 23,
+        "output_initial_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "actual_rx_key": 23,
+        "actual_tx_sequence": 24,
+        "expected_header": {
+          "magic": 3553432835501348952,
+          "communicator_id": 72623859790382856,
+          "epoch": 9,
+          "sequence": 23,
+          "rows": 1,
+          "local_width": 4,
+          "payload_bytes": 16,
+          "version": 1,
+          "header_bytes": 64,
+          "operation": 1,
+          "dtype": 3,
+          "rank": 1,
+          "world_size": 2,
+          "reserved": 0
+        },
+        "rx_wire_hex": "585844455654503108070605040302010900000000000000170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040000040400000804000000000000000000000000000000000",
+        "rx_spans": [
+          {
+            "frame_index": 6,
+            "allocation_offset": 392,
+            "length": 24
+          },
+          {
+            "frame_index": 1,
+            "allocation_offset": 68,
+            "length": 48
+          },
+          {
+            "frame_index": 8,
+            "allocation_offset": 528,
+            "length": 24
+          }
+        ],
+        "rx_allocation_hex": "a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5170000000000000001000000000000000400000000000000100000000100400001030102000000000000803f00000040a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5585844455654503108070605040302010900000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5000040400000804000000000000000000000000000000000a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5"
+      },
+      "expected": {
+        "status_negative": true,
+        "output_hex": "cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd",
+        "payload_read_count": 0,
+        "communicator_poisoned": true
+      },
+      "catches": "fresh ready key and actual TX invocation not jointly matched"
+    },
+    {
+      "name": "preflight_inplace",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 4096,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: inplace"
+    },
+    {
+      "name": "preflight_partial_alias",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 4100,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: partial_alias"
+    },
+    {
+      "name": "preflight_input_range_wrap",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 18446744073709551608,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: input_range_wrap"
+    },
+    {
+      "name": "preflight_numel_bytes_overflow",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 9223372036854775808,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: numel_bytes_overflow"
+    },
+    {
+      "name": "preflight_payload_uint32_overflow",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 1073741824,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: payload_uint32_overflow"
+    },
+    {
+      "name": "preflight_header_slot_overflow",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 79,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: header_slot_overflow"
+    },
+    {
+      "name": "preflight_unsupported_dtype",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "i32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: unsupported_dtype"
+    },
+    {
+      "name": "preflight_unsupported_world",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 3,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: unsupported_world"
+    },
+    {
+      "name": "preflight_wrong_stream_context",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 2,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: wrong_stream_context"
+    },
+    {
+      "name": "preflight_managed_memory",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": true,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: managed_memory"
+    },
+    {
+      "name": "preflight_noncontiguous",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": false,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: noncontiguous"
+    },
+    {
+      "name": "preflight_d1_capture",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": true,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: d1_capture"
+    },
+    {
+      "name": "preflight_d1_unsupported_depth",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 2
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: d1_unsupported_depth"
+    },
+    {
+      "name": "preflight_gather_rows_width_overflow",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "gather",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "rows": 9223372036854775808,
+        "local_width": 4
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: gather_rows_width_overflow"
+    },
+    {
+      "name": "preflight_gather_output_width_overflow",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "gather",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "rows": 1,
+        "local_width": 9223372036854775808
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: gather_output_width_overflow"
+    },
+    {
+      "name": "preflight_gather_dst_invalid",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "gather",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "rows": 2,
+        "local_width": 2,
+        "dst_rank": 2
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "validation after external side effect: gather_dst_invalid"
+    },
+    {
+      "name": "empty_sum_exchanges_control_and_sequence",
+      "family": "lifecycle",
+      "request": {
+        "action": "submit_and_complete",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 0,
+        "sequence": 23,
+        "next_sequence": 24
+      },
+      "expected": {
+        "wire_header_bytes": 64,
+        "payload_bytes": 0,
+        "submitted": 1,
+        "completed": 1,
+        "first_sequence": 23,
+        "last_sequence": 23,
+        "next_sequence": 24
+      },
+      "catches": "empty tensor silently skips matching control and native runtime counters"
+    },
+    {
+      "name": "timeout_and_destroy_preserve_accepted_custody",
+      "family": "lifecycle",
+      "request": {
+        "action": "script",
+        "events": [
+          "accept:23",
+          "query",
+          "wait:1",
+          "destroy_work",
+          "destroy_comm:1",
+          "query"
+        ]
+      },
+      "expected": {
+        "query_results": [
+          1,
+          1
+        ],
+        "wait_timeout": true,
+        "destroy_work_negative": true,
+        "destroy_comm_negative": true,
+        "retained": true,
+        "tx_storage_freed": false,
+        "rx_storage_freed": false,
+        "borrowed_endpoints_closed": 0,
+        "tx_done0_count": 0,
+        "rx_done0_count": 0
+      },
+      "catches": "query/wait/destroy frees unknown accepted custody or converts timeout to done"
+    },
+    {
+      "name": "rx_last_use_before_late_tx_terminal",
+      "family": "lifecycle",
+      "request": {
+        "action": "script",
+        "events": [
+          "accept:23",
+          "producer_event_success:23",
+          "rx_ready:23",
+          "result_event_success:23",
+          "query",
+          "tx_terminal_ready:23",
+          "query"
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "after": "result_event_success:23",
+            "rx_done0_count": 1,
+            "tx_terminal_done0_count": 0,
+            "released": false,
+            "tx_storage_freed": false
+          },
+          {
+            "after": "tx_terminal_ready:23",
+            "rx_done0_count": 1,
+            "tx_terminal_done0_count": 1,
+            "released": true
+          }
+        ],
+        "query_results": [
+          1,
+          0
+        ]
+      },
+      "catches": "TX accepted mistaken for terminal, or TX terminal waited before RX last-use release"
+    },
+    {
+      "name": "late_rx_last_use_not_released_by_tx",
+      "family": "lifecycle",
+      "request": {
+        "action": "script",
+        "events": [
+          "accept:23",
+          "producer_event_success:23",
+          "rx_ready:23",
+          "tx_terminal_ready:23",
+          "query",
+          "result_event_success:23",
+          "query"
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "after": "tx_terminal_ready:23",
+            "rx_done0_count": 0,
+            "released": false,
+            "rx_storage_freed": false
+          },
+          {
+            "after": "result_event_success:23",
+            "rx_done0_count": 1,
+            "released": true
+          }
+        ],
+        "query_results": [
+          1,
+          0
+        ]
+      },
+      "catches": "TX terminal alone frees RX storage before actual GPU last use"
+    },
+    {
+      "name": "gpu_failure_stable_poison_retains",
+      "family": "lifecycle",
+      "request": {
+        "action": "script",
+        "events": [
+          "accept:23",
+          "producer_event_failure:23:-5",
+          "query",
+          "wait:1",
+          "submit:24",
+          "destroy_comm:1"
+        ]
+      },
+      "expected": {
+        "query_results": [
+          -5
+        ],
+        "wait_result": -5,
+        "second_submit_result": -5,
+        "retained": true,
+        "tx_done0_count": 0,
+        "rx_done0_count": 0,
+        "accepted_count": 1,
+        "storage_freed": false
+      },
+      "catches": "CUDA failure rewritten as done0, retry after accepted failure, or unstable terminal error"
+    },
+    {
+      "name": "d2_capture_pending_and_fresh_replay_keys",
+      "family": "replay",
+      "request": {
+        "action": "capture_and_replay",
+        "first_sequence": 23,
+        "capture_sequence": 23,
+        "query_before_replay": true,
+        "ready_keys": [
+          23,
+          24,
+          25
+        ],
+        "inputs_per_replay": [
+          [
+            "3f800000"
+          ],
+          [
+            "40000000"
+          ],
+          [
+            "40400000"
+          ]
+        ],
+        "peer_per_replay": [
+          [
+            "40800000"
+          ],
+          [
+            "40a00000"
+          ],
+          [
+            "40c00000"
+          ]
+        ]
+      },
+      "expected": {
+        "query_before_replay": 1,
+        "producer_keys": [
+          23,
+          24,
+          25
+        ],
+        "rx_keys": [
+          23,
+          24,
+          25
+        ],
+        "terminal_keys": [
+          23,
+          24,
+          25
+        ],
+        "wire_sequences": [
+          23,
+          24,
+          25
+        ],
+        "output_bits_per_replay": [
+          [
+            "40a00000"
+          ],
+          [
+            "40e00000"
+          ],
+          [
+            "41100000"
+          ]
+        ],
+        "gpu_invocations": 3,
+        "completed": 3,
+        "api_attempts": 1,
+        "storage_alive_until_graph_destroy": true
+      },
+      "catches": "capture-time CPU key/output/counter reused on replay or unrecorded event reported complete"
+    },
+    {
+      "name": "d2_cross_stream_rejected_before_enqueue",
+      "family": "qualification",
+      "request": {
+        "action": "d2_cross_stream",
+        "controller_stream": 1,
+        "caller_stream": 2
+      },
+      "expected": {
+        "status_negative": true,
+        "enqueued_nodes": 0,
+        "ready_consumed_count": 0
+      },
+      "catches": "one CUDA control used on two streams"
+    },
+    {
+      "name": "e6_local_clock_interval",
+      "family": "accounting",
+      "request": {
+        "action": "e6",
+        "start": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 100
+        },
+        "end": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 180
+        },
+        "remote_timestamp": 9000000,
+        "barrier_start": 1,
+        "barrier_end": 90
+      },
+      "expected": {
+        "valid": true,
+        "elapsed_ns": 80,
+        "metric": "rank_local_end_to_end"
+      },
+      "catches": "cross-host clock subtraction or barrier/GPU-only timing substituted for d1 end-to-end"
+    },
+    {
+      "name": "e6_reject_rank",
+      "family": "accounting",
+      "request": {
+        "action": "e6",
+        "start": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 100
+        },
+        "end": {
+          "rank": 1,
+          "clock": "host_monotonic",
+          "value": 180
+        }
+      },
+      "expected": {
+        "valid": false
+      },
+      "catches": "invalid rank/clock/time pair admitted"
+    },
+    {
+      "name": "e6_reject_clock",
+      "family": "accounting",
+      "request": {
+        "action": "e6",
+        "start": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 100
+        },
+        "end": {
+          "rank": 0,
+          "clock": "gpu_globaltimer",
+          "value": 180
+        }
+      },
+      "expected": {
+        "valid": false
+      },
+      "catches": "invalid rank/clock/time pair admitted"
+    },
+    {
+      "name": "e6_reject_backwards",
+      "family": "accounting",
+      "request": {
+        "action": "e6",
+        "start": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 100
+        },
+        "end": {
+          "rank": 0,
+          "clock": "host_monotonic",
+          "value": 90
+        }
+      },
+      "expected": {
+        "valid": false
+      },
+      "catches": "invalid rank/clock/time pair admitted"
+    },
+    {
+      "name": "e7_actual_lifetime_and_unique_validated_payload",
+      "family": "accounting",
+      "request": {
+        "action": "e7",
+        "clock": "host_monotonic",
+        "configured_depth": 16,
+        "events": [
+          {
+            "t": 10,
+            "kind": "acquire",
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "payload": 16,
+            "wire": 96
+          },
+          {
+            "t": 20,
+            "kind": "acquire",
+            "seq": 24,
+            "rank": 0,
+            "direction": "tx",
+            "payload": 16,
+            "wire": 96
+          },
+          {
+            "t": 30,
+            "kind": "tx_done",
+            "seq": 23
+          },
+          {
+            "t": 40,
+            "kind": "gpu_validated",
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "payload": 16
+          },
+          {
+            "t": 41,
+            "kind": "gpu_validated",
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "payload": 16
+          },
+          {
+            "t": 50,
+            "kind": "release",
+            "seq": 23
+          },
+          {
+            "t": 60,
+            "kind": "failed_retained",
+            "seq": 24
+          }
+        ],
+        "communicator_id": 7,
+        "epoch": 9,
+        "trace_dropped": 0
+      },
+      "expected": {
+        "valid": true,
+        "observed_high_water": 2,
+        "final_inflight": 1,
+        "unique_validated_payload_bytes": 16,
+        "failed_payload_bytes": 16,
+        "depth_series": [
+          [
+            10,
+            1
+          ],
+          [
+            20,
+            2
+          ],
+          [
+            30,
+            2
+          ],
+          [
+            40,
+            2
+          ],
+          [
+            41,
+            2
+          ],
+          [
+            50,
+            1
+          ],
+          [
+            60,
+            1
+          ]
+        ],
+        "completed_lifetimes": [
+          {
+            "seq": 23,
+            "start": 10,
+            "end": 50
+          }
+        ]
+      },
+      "catches": "configured depth copied as observed, TXdone ends custody, duplicate/header/padding/failed bytes counted"
+    },
+    {
+      "name": "e7_dropped_trace_invalidates_depth",
+      "family": "accounting",
+      "request": {
+        "action": "e7",
+        "clock": "host_monotonic",
+        "configured_depth": 16,
+        "events": [],
+        "trace_dropped": 1
+      },
+      "expected": {
+        "valid": false,
+        "depth_evidence_valid": false
+      },
+      "catches": "lost records converted to inferred depth"
+    },
+    {
+      "name": "e7_each_direction_unique_key",
+      "family": "accounting",
+      "request": {
+        "action": "e7_unique",
+        "records": [
+          {
+            "comm": 7,
+            "epoch": 9,
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "bytes": 16,
+            "validated": true
+          },
+          {
+            "comm": 7,
+            "epoch": 9,
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "bytes": 16,
+            "validated": true
+          },
+          {
+            "comm": 7,
+            "epoch": 9,
+            "seq": 23,
+            "rank": 1,
+            "direction": "rx",
+            "bytes": 16,
+            "validated": true
+          },
+          {
+            "comm": 7,
+            "epoch": 10,
+            "seq": 23,
+            "rank": 0,
+            "direction": "tx",
+            "bytes": 16,
+            "validated": true
+          },
+          {
+            "comm": 7,
+            "epoch": 10,
+            "seq": 24,
+            "rank": 0,
+            "direction": "tx",
+            "bytes": 64,
+            "validated": false
+          }
+        ]
+      },
+      "expected": {
+        "unique_validated_payload_bytes": 48,
+        "tx_bytes": 32,
+        "rx_bytes": 16
+      },
+      "catches": "dedup key omits epoch/rank/direction or unvalidated bytes admitted"
+    },
+    {
+      "name": "preflight_input_range_too_short",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 12,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "invalid range/context/output accepted before side effect: input_range_too_short"
+    },
+    {
+      "name": "preflight_output_range_too_short",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 12,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "invalid range/context/output accepted before side effect: output_range_too_short"
+    },
+    {
+      "name": "preflight_wrong_input_context",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "memory_context": 2
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "invalid range/context/output accepted before side effect: wrong_input_context"
+    },
+    {
+      "name": "preflight_host_memory",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "sum",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 8192,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "memory_type": "host"
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "invalid range/context/output accepted before side effect: host_memory"
+    },
+    {
+      "name": "preflight_dst_gather_null_output",
+      "family": "qualification",
+      "request": {
+        "action": "submit",
+        "op": "gather",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 0,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 0,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "rows": 2,
+        "local_width": 2,
+        "dst_rank": 0
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "accepted_count": 0,
+        "output_write_count": 0,
+        "endpoint_mutation_count": 0
+      },
+      "catches": "invalid range/context/output accepted before side effect: dst_gather_null_output"
+    },
+    {
+      "name": "gather_nondst_null_output_admitted",
+      "family": "lifecycle",
+      "request": {
+        "action": "submit_and_complete",
+        "op": "gather",
+        "dtype": "f32",
+        "numel": 4,
+        "input": 4096,
+        "output": 0,
+        "input_bytes": 16,
+        "output_bytes": 16,
+        "context": 1,
+        "stream_context": 1,
+        "managed": false,
+        "contiguous": true,
+        "rank": 1,
+        "world_size": 2,
+        "slot_capacity": 4096,
+        "capturing": false,
+        "logical_depth": 1,
+        "dst_rank": 0,
+        "all_gather": false,
+        "rows": 2,
+        "local_width": 2,
+        "sequence": 23
+      },
+      "expected": {
+        "status": 0,
+        "submitted": 1,
+        "completed": 1,
+        "output_write_count": 0,
+        "last_sequence": 23
+      },
+      "catches": "non-dst output0 rejected or written"
+    },
+    {
+      "name": "empty_gather_matching_shape_control",
+      "family": "lifecycle",
+      "request": {
+        "action": "submit_and_complete",
+        "op": "gather",
+        "dtype": "f32",
+        "rows": 2,
+        "local_width": 0,
+        "sequence": 23,
+        "next_sequence": 24
+      },
+      "expected": {
+        "wire_header_bytes": 64,
+        "payload_bytes": 0,
+        "wire_rows": 2,
+        "wire_local_width": 0,
+        "submitted": 1,
+        "completed": 1,
+        "next_sequence": 24
+      },
+      "catches": "zero-width gather loses row shape or skips sequence"
+    },
+    {
+      "name": "bridge_preflight_nonlast_dimension",
+      "family": "bridge",
+      "request": {
+        "action": "gather",
+        "rank": 0,
+        "dst_rank": 0,
+        "shape": [
+          2,
+          2
+        ],
+        "dim": 0,
+        "dtype": "f32"
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "native_runtime_attempts": 0
+      },
+      "catches": "unsupported gather dimension reaches transport"
+    },
+    {
+      "name": "bridge_fake_meta_no_runtime",
+      "family": "bridge",
+      "request": {
+        "action": "fake_meta_gather",
+        "rank": 0,
+        "dst_rank": 0,
+        "shape": [
+          2,
+          1,
+          2
+        ],
+        "dtype": "f32"
+      },
+      "expected": {
+        "output_shape": [
+          2,
+          1,
+          4
+        ],
+        "native_runtime_attempts": 0,
+        "native_submitted": 0
+      },
+      "catches": "fake/meta shape propagation transmits or increments runtime counters"
+    },
+    {
+      "name": "bridge_tensor_drop_preserves_custody",
+      "family": "bridge",
+      "request": {
+        "action": "storage_lifetime",
+        "events": [
+          "submit",
+          "drop_input_tensor",
+          "drop_output_tensor",
+          "drop_python_work",
+          "rx_result_complete",
+          "tx_terminal_complete"
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "after": "drop_python_work",
+            "input_storage_retained": true,
+            "output_storage_retained": true,
+            "native_slot_returned": false
+          },
+          {
+            "after": "rx_result_complete",
+            "input_storage_retained": true,
+            "output_storage_retained": true,
+            "native_slot_returned": false
+          },
+          {
+            "after": "tx_terminal_complete",
+            "native_slot_returned": true
+          }
+        ]
+      },
+      "catches": "Python/Tensor destructors free native in-flight storage"
+    },
+    {
+      "name": "d2_graph_storage_until_destroy_and_last_use",
+      "family": "replay",
+      "request": {
+        "action": "captured_storage_lifetime",
+        "events": [
+          "capture",
+          "replay_complete",
+          "drop_python_work",
+          "query",
+          "graph_destroy",
+          "final_last_use_complete"
+        ]
+      },
+      "expected": {
+        "snapshots": [
+          {
+            "after": "drop_python_work",
+            "storage_retained": true
+          },
+          {
+            "after": "graph_destroy",
+            "storage_retained": true
+          },
+          {
+            "after": "final_last_use_complete",
+            "storage_releasable": true
+          }
+        ]
+      },
+      "catches": "completed prior replay allows freeing storage referenced by future graph or final use"
+    },
+    {
+      "name": "create_zero_comm_id",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 0,
+        "epoch": 9,
+        "first_sequence": 23,
+        "rank": 0,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 8192,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: zero_comm_id"
+    },
+    {
+      "name": "create_zero_epoch",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 7,
+        "epoch": 0,
+        "first_sequence": 23,
+        "rank": 0,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 8192,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: zero_epoch"
+    },
+    {
+      "name": "create_zero_first_sequence",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 7,
+        "epoch": 9,
+        "first_sequence": 0,
+        "rank": 0,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 8192,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: zero_first_sequence"
+    },
+    {
+      "name": "create_rank_out_of_range",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 7,
+        "epoch": 9,
+        "first_sequence": 23,
+        "rank": 2,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 8192,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: rank_out_of_range"
+    },
+    {
+      "name": "create_tx_rx_alias",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 7,
+        "epoch": 9,
+        "first_sequence": 23,
+        "rank": 0,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 4100,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: tx_rx_alias"
+    },
+    {
+      "name": "create_unknown_flags",
+      "family": "qualification",
+      "request": {
+        "action": "create",
+        "communicator_id": 7,
+        "epoch": 9,
+        "first_sequence": 23,
+        "rank": 0,
+        "world_size": 2,
+        "tx_va": 4096,
+        "rx_va": 8192,
+        "tx_bytes": 4096,
+        "rx_bytes": 4096,
+        "flags": 1
+      },
+      "expected": {
+        "status_negative": true,
+        "submit_count": 0,
+        "ready_consumed_count": 0,
+        "borrowed_endpoints_closed": 0
+      },
+      "catches": "invalid communicator allocation/config admitted: unknown_flags"
+    }
+  ]
+}
