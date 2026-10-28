@@ -3252,6 +3252,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/ordered_frames_guest.c"
     },
     {
+      "source": "tests/compute/user_stage/guest/ordered_frames_nvme.bpf.c",
+      "logical_path": "tests/compute/user_stage/guest/ordered_frames_nvme.bpf.c"
+    },
+    {
       "source": "tests/compute/user_stage/guest/run-guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/run-guest.sh"

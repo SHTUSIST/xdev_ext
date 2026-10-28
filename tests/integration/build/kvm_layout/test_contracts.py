@@ -151,9 +151,10 @@ class Roots(unittest.TestCase):
         bindir = self.root / 'bin'
         bindir.mkdir()
         (bindir / 'git').write_text('#!/bin/sh\ncase "$3:$4" in\nrev-parse:--show-toplevel) echo "$UNIT_SOURCE";;\nrev-parse:HEAD|rev-parse:--verify) echo "$UNIT_SHA";;\ndiff:*|ls-files:*) exit 0;;\n*) exit 17;;\nesac\n')
-        (bindir / 'make').write_text('#!/usr/bin/env python3\nimport os, pathlib, shutil, sys\na=sys.argv[1:]\nassert a[-1] == "ordered_frames_guest", a\nw=pathlib.Path(a[a.index("-C")+1])\nassert (w/"../../../xdev_ext_peer/guest/sw_provider_uapi.h").resolve().is_file()\nassert "KERNEL_SRC="+os.environ["UNIT_NATIVE"] in a\nshutil.copyfile("/bin/true", w/"ordered_frames_guest")\n(w/"ordered_frames_guest").chmod(0o755)\n')
+        (bindir / 'make').write_text('#!/usr/bin/env python3\nimport os, pathlib, shutil, sys\na=sys.argv[1:]\nassert a[-2:] == ["ordered_frames_guest", "ordered_frames_nvme.bpf.o"], a\nw=pathlib.Path(a[a.index("-C")+1])\nassert (w/"../../../xdev_ext_peer/guest/sw_provider_uapi.h").resolve().is_file()\nassert "KERNEL_SRC="+os.environ["UNIT_NATIVE"] in a\nassert (w/"ordered_frames_nvme.bpf.c").read_text() == "/* canonical test-only policy */"\nassert any(arg.startswith("VMLINUX_BTF=") for arg in a)\nshutil.copyfile("/bin/true", w/"ordered_frames_guest")\n(w/"ordered_frames_guest").chmod(0o755)\n(w/"ordered_frames_nvme.bpf.o").write_bytes(b"unit-only BPF object boundary")\n')
         for command in bindir.iterdir():
             command.chmod(0o755)
+        self.write('tests/compute/user_stage/guest/ordered_frames_nvme.bpf.c', '/* canonical test-only policy */')
         guest = 'tools/testing/selftests/xdev_ext_mech/user_stage/guest'
         peer = 'tools/testing/selftests/xdev_ext_peer/guest/sw_provider_uapi.h'
         for relative, text in [(guest + '/Makefile', 'ordered_frames_guest:'),
@@ -187,6 +188,8 @@ class Roots(unittest.TestCase):
         self.assertNotEqual(before.stat().st_ino, after.stat().st_ino)
         self.assertEqual(before.read_bytes(), after.read_bytes())
         self.assertTrue((scratch / 'initroot/opt/user/ordered_frames_guest').is_file())
+        self.assertTrue((scratch / 'initroot/opt/user/ordered_frames_nvme.bpf.o').is_file())
+        self.assertFalse((scratch / 'initroot/opt/user/nvme_s0.bpf.o').exists())
         self.assertFalse((scratch / 'initroot/opt/user/user_stage_e2e').exists())
         self.assertGreater(len((scratch / 'evidence/guest-libraries.txt').read_text().splitlines()), 0)
         self.assertFalse((scratch / 'evidence/result.json').exists())

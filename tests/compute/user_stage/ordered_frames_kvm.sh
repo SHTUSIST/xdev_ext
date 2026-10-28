@@ -7,6 +7,8 @@ umask 077
 SCRATCH= SOURCE= BUILD= TOOLS=
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
+CLANG=${CLANG:-/usr/bin/clang-21}
+BPFTOOL=${BPFTOOL:-bpftool}
 while (($#)); do
     case "$1" in
     --scratch) SCRATCH=$2; shift 2;;
@@ -40,7 +42,7 @@ python3 -I "$CONTRACT" roots "$SOURCE" "$SHA" "$BUILD" "$EV/roots.json"
 [[ $(cat "$BUILD/xdev-ext-source.commit") == "$SHA" ]]
 python3 -I "$CONTRACT" artifacts "$BUILD/xdev-ext-xdomain-build.sha256" "$EV/bound-artifacts.json" \
     "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$BUILD/Module.symvers" \
-    "$TOOLS/nvme_s0.bpf.o" "$TOOLS/user_plan.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko"
+    "$TOOLS/user_plan.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko"
 sha256sum -c "$BUILD/xdev-ext-xdomain-build.sha256" >"$EV/build-identity-check.log" 2>&1
 for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD RD_GZIP \
     DEVTMPFS DEVTMPFS_MOUNT TMPFS PROC_FS SYSFS BLOCK PCI PCI_MSI ACPI SERIAL_8250 SERIAL_8250_CONSOLE \
@@ -51,7 +53,7 @@ DEBUG=$SOURCE/tests/integration/session/native/xdev_ext_mech_zc_debug.py
 python3 -I "$DEBUG" config "$BUILD/.config" "$EV/debug-profile.json" 1
 release=$(cat "$BUILD/include/config/kernel.release")
 for artifact in "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$BUILD/Module.symvers" \
-    "$TOOLS/nvme_s0.bpf.o" "$TOOLS/user_plan.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko"; do
+    "$TOOLS/user_plan.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko"; do
     [[ -s "$artifact" ]] || { echo "FAIL missing artifact $artifact"; exit 1; }
 done
 printf 'source=%s\nsource_commit=%s\nbuild=%s\nbuild_commit=%s\nnative_source=%s\nassembled_source=%s\ntools=%s\nkernel_release=%s\nscope=ordered-frames-software-correctness\ntiming=none\n' \
@@ -65,14 +67,17 @@ GUEST=$SELF/xdev_ext_mech/user_stage/guest
 mkdir -p "$SELF/xdev_ext_mech/user_stage" "$SELF/xdev_ext_peer/guest"
 cp -a "$NATIVE/tools/testing/selftests/xdev_ext_mech/user_stage/guest/." "$GUEST/"
 cp "$NATIVE/tools/testing/selftests/xdev_ext_peer/guest/sw_provider_uapi.h" "$SELF/xdev_ext_peer/guest/"
-nice -n 10 make -C "$GUEST" KERNEL_SRC="$NATIVE" CC="$CC" ordered_frames_guest >"$EV/test-build.log" 2>&1
+# This test policy is logical-only: copy its canonical source explicitly.
+cp "$SOURCE/tests/compute/user_stage/guest/ordered_frames_nvme.bpf.c" "$GUEST/"
+nice -n 10 make -C "$GUEST" KERNEL_SRC="$NATIVE" CC="$CC" VMLINUX_BTF="$BUILD/vmlinux" \
+    CLANG="$CLANG" BPFTOOL="$BPFTOOL" ordered_frames_guest ordered_frames_nvme.bpf.o >"$EV/test-build.log" 2>&1
 rm -rf -- "$ROOT"
 mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,opt/user}
 cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo printf poweroff dmesg sed grep sync sleep insmod rmmod; do
     ln -s busybox "$ROOT/bin/$app"
 done
-cp "$GUEST/ordered_frames_guest" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/user_plan.bpf.o" \
+cp "$GUEST/ordered_frames_guest" "$GUEST/ordered_frames_nvme.bpf.o" "$TOOLS/user_plan.bpf.o" \
     "$TOOLS/peer-guest/xdev_ext_peer_sw.ko" "$ROOT/opt/user/"
 : >"$EV/guest-libraries.txt"
 collect_libraries() {
@@ -148,7 +153,7 @@ for name in ('destination-before.raw', 'destination.raw'):
             stream.write(chunk)
 PY
 sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$BUILD/Module.symvers" \
-    "$GUEST/ordered_frames_guest" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/user_plan.bpf.o" \
+    "$GUEST/ordered_frames_guest" "$GUEST/ordered_frames_nvme.bpf.o" "$TOOLS/user_plan.bpf.o" \
     "$TOOLS/peer-guest/xdev_ext_peer_sw.ko" "$OUT/destination-before.raw" >"$EV/artifacts.sha256"
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" ]] || { echo 'FAIL KVM/QEMU unavailable'; exit 1; }
 args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot

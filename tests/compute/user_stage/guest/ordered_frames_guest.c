@@ -198,7 +198,7 @@ int main(int argc,char **argv)
  CHECK(pwrite(provider,seed,sizeof(seed),0)==sizeof(seed),"seed existing software allocation with distinct full frames");
  struct xdev_ext_peer_register reg={.gpu_fd=provider,.gpu_va=PEER_SW_VA,.len=PEER_SW_BYTES};
  int allocation=ioctl(ctl,XDEV_EXT_PEER_REGISTER,&reg);CHECK(allocation>=0&&reg.generation,"register existing provider allocation");
- struct ops nvme={0},user={0};attach(&nvme,argv[3],"nvme_s0");attach(&user,argv[3],"user_plan");
+ struct ops nvme={0},user={0};attach(&nvme,argv[3],"ordered_frames_nvme");attach(&user,argv[3],"user_plan");
  struct session s;create(&s,allocation,ng,slba);
  struct xdev_ext_user_ready held=take(&s,0),other=take(&s,1);complete(&s,other);wait_done(&s,1);
  __u32 prod=__atomic_load_n(&s.h->ready_prod,__ATOMIC_ACQUIRE);
