@@ -240,5 +240,32 @@ busy includes background work and sampler overhead; it does not prove idle or
 dedicated hardware. Held results expose no primary CPU cost/bounds, and paired
 selected sets must match exact IDs. Historical synthetic fixture arithmetic is
 retained solely for decoder compatibility and proves no physical eligibility.
-Collector option propagation, all-arm readiness/timer adapters, span-union
-replay and subset placement evidence remain separate integration requirements.
+
+The chains, NVMe/GPU, GPU/NIC, NVMe/NIC, GDS and userspace-orchestrator
+runners accept `--cpu-set` and `--cpu-output`. The output path is a private
+capture directory. The default selection covers all online CPUs; selecting a
+subset without placement evidence produces HOLD. These options do not pin
+tasks, change queue depth, tune a baseline or move an existing timer endpoint.
+See the [performance policy](../../../benchmarks/PERFORMANCE_POLICY.md).
+
+One outer owner samples counters across delegated runners. It brackets the
+same counter read with actual MONOTONIC and, when required, MONOTONIC_RAW
+clock reads; timestamps are never converted between clocks. C adapters retain
+the original start/end values after the original end read and publish their
+journal only after the original correctness oracle. Union replay coalesces
+overlapping sample ranges before adding ticks. `measurement_cpu_count` is
+the observed selected-set cardinality, separate from a declared CPU budget.
+
+Primary replay also requires an observed process identity and successful
+completion. Nested wrappers use the existing captured stderr channel to bind
+their closed receipt to owner-retained evidence. Missing observation or a
+missing completion channel produces HOLD. This is measurement provenance,
+not authentication against a malicious same-user workload. A collector
+attached to an outer owner stays pending until that owner closes its counter
+stream; finalization seals and imports the native artifacts automatically.
+
+Capture setup, journal or receipt errors hold the CPU result while preserving
+the original workload, raw result and exit status. C journal failures emit
+`XDEV_EXT_CPU_TIMER_REFUSED` on stderr. Physical-device qualification and
+subset placement evidence remain separate requirements; host tests cannot
+establish either.
