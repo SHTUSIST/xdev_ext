@@ -195,6 +195,8 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 	u32 i;
 	int ret = 0;
 
+	if (!n || n > XDEV_EXT_XDOMAIN_MAX_ELEMS)
+		return -EINVAL;
 	for (i = 0; i < n; i++)
 		if (!e[i].len || e[i].len > XDEV_EXT_XDOMAIN_MAX_FRAME ||
 		    (rx && e[i].buf_len != XDEV_EXT_XDOMAIN_MAX_FRAME))
@@ -217,9 +219,14 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 			.sof = XDEV_EXT_XD_PDF_START,
 			.eof = XDEV_EXT_XD_PDF_END,
 		};
-		/* Cannot fail: the ring runs while up is set under this lock. */
-		WARN_ON_ONCE(rx ? tb_ring_rx(ring, f) : tb_ring_tx(ring, f));
+		/* The native API only rejects a stopped ring. Stop clears up
+		 * under xl->lock before touching any ring, so this whole group
+		 * shares one running window. Hardware fullness queues the same
+		 * preallocated frame; it is not a submission failure.
+		 */
+		WARN_ON_ONCE(rx ? tb_ring_rx_more(ring, f) : tb_ring_tx_more(ring, f));
 	}
+	tb_ring_notify(ring);
 out:
 	spin_unlock_irqrestore(&xl->lock, flags);
 	return ret;

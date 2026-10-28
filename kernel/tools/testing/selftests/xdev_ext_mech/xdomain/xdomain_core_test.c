@@ -2,7 +2,7 @@
 /* Independent X2 requirements tests; host safety rules only, hardware=none.
  * A missing X1 dependency is NOT X2 RED.
  * Mutations caught: swapped offsets/endian/CRC seed, unchecked per-type fields,
- * stale incarnation acceptance, ring overcommit/underflow and short-RX success.
+ * stale incarnation acceptance, software-pending overcommit/underflow and short-RX success.
  * These helpers do not post work, consume channel sequence or release leases;
  * X4/X5 must prove accepted requests are never resubmitted and UNKNOWN quarantines.
  */
@@ -24,6 +24,9 @@ int main(void) { puts("not ok 1 - no XDOMAIN rules"); return 1; }
 #define X2_NO_RULES
 #else
 #include "io_uring/xdomain/xdev_ext_xdomain_core.h"
+#include "io_uring/xdev_ext_mech_step.h"
+_Static_assert(XDEV_EXT_XD_MAX_DEPTH == XDEV_EXT_MECH_MAX_DEPTH,
+               "XDOMAIN pending depth must match mechanism session depth");
 #endif
 #ifndef X2_NO_RULES
 static unsigned int checks, failures;
@@ -316,12 +319,14 @@ static void rx_tests(void)
 static void budget_layout_tests(void)
 {
  static const struct { __u32 depth, elems, ring; bool result; } v[] = {
-  {3,64,256,true}, {4,64,256,false}, {0,1,256,false}, {1,65,256,false},
+  {3,64,256,true}, {4,64,256,true}, {16,16,256,true}, {64,64,256,true},
+  {64,64,2,true}, {65,1,256,false}, {64,65,256,false},
+  {0,1,256,false}, {1,65,256,false},
   {1,0,256,false}, {1,1,0,false}, {1,1,1,false}, {1,1,2,true},
-  {1,64,64,false}, {1,64,65,true}, {3,64,192,false}, {3,64,193,true},
-  {255,1,256,true}, {256,1,256,false},
+  {1,64,64,true}, {1,64,65,true}, {3,64,192,true}, {3,64,193,true},
+  {255,1,256,false}, {256,1,256,false},
   {UINT32_MAX,64,UINT32_MAX,false}, {UINT32_MAX,1,UINT32_MAX,false},
-  {UINT32_MAX-1,1,UINT32_MAX,true}, {UINT32_C(0x40000000),4,256,false},
+  {UINT32_MAX-1,1,UINT32_MAX,false}, {UINT32_C(0x40000000),4,256,false},
  };
  static const struct { struct xdev_ext_mech_layout l; __u32 result; } l[] = {
   {{65536,0,65536,131072},32}, {{4096,0,4096,8192},2},
@@ -336,7 +341,7 @@ static void budget_layout_tests(void)
  };
  unsigned int i;
  for (i = 0; i < sizeof(v)/sizeof(v[0]); i++)
-  EQ("one slot empty and wide product", xdev_ext_xd_budget_ok(v[i].depth, v[i].elems, v[i].ring), v[i].result);
+  EQ("bounded software pending: depth<=64 elems<=64 ring>1", xdev_ext_xd_budget_ok(v[i].depth, v[i].elems, v[i].ring), v[i].result);
  for (i = 0; i < sizeof(l)/sizeof(l[0]); i++)
   EQ("layout bounds segment count", xdev_ext_xd_layout_elems(&l[i].l), l[i].result);
 }
