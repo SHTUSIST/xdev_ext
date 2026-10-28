@@ -225,7 +225,9 @@ static int actual_driver_echo(tp_eval_owner &owner,const tp_eval_options &o){bar
 #undef printf
 int main(int argc,char **argv){
  assert(argc==3);scenario=argv[1];rank_=unsigned(std::stoul(argv[2]));
- tp_eval_options o;o.rank=rank_;o.mode=2;o.operation=4;o.depth=1;o.iterations=2;o.first_sequence=23;o.group_bytes=3091;o.allocation_bytes=16384;o.timeout_ns=1000000;
+ // This host fixture uses the production monotonic clock. A successful case
+ // must tolerate CI scheduling; end_timeout below separately checks expiry.
+ tp_eval_options o;o.rank=rank_;o.mode=2;o.operation=4;o.depth=1;o.iterations=2;o.first_sequence=23;o.group_bytes=3091;o.allocation_bytes=16384;o.timeout_ns=1000000000;
  if(fault("end_timeout"))o.timeout_ns=1;
  tp_eval_owner owner;bool threw=false;
  if(fault("destroy_failure")||fault("graph_destroy_failure")){
