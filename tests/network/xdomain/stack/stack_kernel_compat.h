@@ -145,6 +145,7 @@ typedef int32_t s32; typedef int64_t s64; typedef uintptr_t dma_addr_t;
 #define module_init(x)
 #define module_exit(x)
 #define module_param_named(...)
+#define module_param(...)
 #define SEC(x)
 #define BPF_PROG(name,...) name(void *ctx __attribute__((unused)), __VA_ARGS__)
 #define BIT(n) (1UL<<(n))
@@ -277,12 +278,15 @@ struct ring_frame{dma_addr_t buffer_phy;ring_cb callback;struct list_head list;u
 struct tb_ring{struct tb_nhi*nhi;int size,hop;bool is_tx,running;unsigned flags,endpoint,control,channel;bool freed,unknown;};
 #define RING_FLAG_FRAME BIT(1)
 #define RING_FLAG_E2E BIT(2)
+#define RING_FLAG_NO_INTERRUPT BIT(3)
 #define RING_DESC_CRC_ERROR 1U
 #define RING_DESC_BUFFER_OVERRUN 4U
 struct tb_ring *tb_ring_alloc_tx(struct tb_nhi*,int,int,unsigned);
 struct tb_ring *tb_ring_alloc_rx(struct tb_nhi*,int,int,unsigned,int,u16,u16,void(*)(void*),void*);
 void tb_ring_start(struct tb_ring*);void tb_ring_stop(struct tb_ring*);void tb_ring_free(struct tb_ring*);void tb_ring_free_quarantined(struct tb_ring*);
 int tb_ring_tx(struct tb_ring*,struct ring_frame*);int tb_ring_rx(struct tb_ring*,struct ring_frame*);
+struct ring_frame *tb_ring_poll(struct tb_ring *);
+bool tb_ring_poll_pending(struct tb_ring *);
 struct device*tb_ring_dma_device(struct tb_ring*);
 #endif
 size_t tb_ring_descriptor_bytes(unsigned int);

@@ -401,6 +401,20 @@ u32 crc32c(u32 c,const void*p,size_t n){
 	return c;
 }
 #ifndef STACK_REAL_NHI
+/* The original stack model uses IRQ callbacks. Polling requires the separate
+ * actual-NHI composition; never synthesize successful native completion here. */
+struct ring_frame *tb_ring_poll(struct tb_ring *ring)
+{
+	(void)ring;
+	assert(!"unexpected native poll in IRQ stack fixture");
+	abort();
+}
+bool tb_ring_poll_pending(struct tb_ring *ring)
+{
+	(void)ring;
+	assert(!"unexpected native poll query in IRQ stack fixture");
+	abort();
+}
 static struct tb_ring*ring_alloc(struct tb_nhi*n,int size,unsigned flags,bool tx){
 	unsigned e=endpoint_pci(n->pdev);
 	if(world->ring_refuse[e]){
