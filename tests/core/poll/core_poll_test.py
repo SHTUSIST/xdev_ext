@@ -27,7 +27,7 @@ FIXTURE = r'''
 #include <string.h>
 #include "io_uring/xdev_ext_mech_poll.h"
 
-typedef uint32_t u32; typedef uint64_t u64;
+typedef uint32_t u32; typedef uint64_t u64; typedef int32_t s32;
 #define U32_MAX UINT32_MAX
 #define READ_ONCE(v) (v)
 #define smp_load_acquire(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
@@ -46,6 +46,7 @@ struct file { int fd; };
 struct eventfd_ctx { int unused; };
 struct module;
 struct xdev_ext_mech_session;
+struct xdev_ext_mech_instance;
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops {
 	u32 class_id;
@@ -71,6 +72,7 @@ struct xdev_ext_mech_session {
 	u64 id;
 	u32 nr_stages, nr_bound, create_phase, create_failed_stage;
 	struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
+	struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
 	const void *ops[XDEV_EXT_MECH_CLASS_MAX];
 	bool pinned[XDEV_EXT_MECH_CLASS_MAX];
 	struct module *c_owner[XDEV_EXT_MECH_CLASS_MAX];
@@ -127,6 +129,12 @@ static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
  return st->cls->bind(st, u);
 }
 
+/* Default-only polling cases must never select a private instance. */
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance)
+{ (void)instance; abort(); }
+static int xdev_ext_mech_instance_get_from_fd(u32 class_id, int fd,
+                                            struct xdev_ext_mech_instance **out)
+{ (void)class_id; (void)fd; (void)out; abort(); }
 /* PRODUCTION */
 
 static struct xdev_ext_mech_create chain(u32 c0, u32 d0, u32 f0, u32 c1, u32 d1, u32 f1)
@@ -167,7 +175,7 @@ static int bind_case(const char *mode)
 		c = chain(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE, 0,
 			  XDEV_EXT_MECH_CLASS_CE, XDEV_EXT_MECH_DIR_TO_DEVICE, 0);
 	s.nr_stages = c.nr_stages;
-	ret = xdev_ext_mech_session_bind(&s, &c);
+	ret = xdev_ext_mech_session_bind(&s, &c, NULL);
 	printf("ret=%d poll0=%d poll1=%d flags0=%u flags1=%u bind0=%u bind1=%u bflags0=%u bflags1=%u "
 	       "bpoll0=%d bpoll1=%d poll_rx=%d nr_bound=%u caller0=%u caller1=%u\n",
 	       ret, s.st[0].poll, s.st[1].poll, s.st[0].flags, s.st[1].flags, bind_calls[0], bind_calls[1],
@@ -251,7 +259,7 @@ int main(int argc, char **argv)
 def build_fixture():
     text = source(CORE)
     production = '\n'.join(function(text, n) for n in (
-        'xdev_ext_mech_session_admits', 'xdev_ext_mech_rx_first', 'xdev_ext_mech_session_bind',
+        'xdev_ext_mech_programs_current', 'xdev_ext_mech_session_admits', 'xdev_ext_mech_rx_first', 'xdev_ext_mech_session_bind',
         'xdev_ext_mech_poll_kick', 'xdev_ext_mech_poll_work'))
     return FIXTURE.replace('/* PRODUCTION */', production)
 
@@ -377,14 +385,14 @@ class CorePollStructure(unittest.TestCase):
 
     def test_create_starts_receive_source_after_activation(self):
         legacy = body(self.text, 'xdev_ext_mech_create')
-        self.assertIn('return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL);', legacy)
+        self.assertIn('return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL, NULL);', legacy)
         create = body(self.text, 'xdev_ext_mech_create_common')
         # Preserve the original activation-before-receive-poll contract on the
         # actual shared implementation reached by both CREATE entrypoints.
         self.assertRegex(create, r'if \(s->poll_rx\)\s*xdev_ext_mech_poll_kick\(s\);')
         self.assertLess(create.index('xdev_ext_mech_sess_activate'), create.index('xdev_ext_mech_poll_kick'))
         self.assertLess(create.index('s->create_pending_publish = !!r;'),
-                        create.index('xdev_ext_mech_session_bind(s, c);'))
+                        create.index('xdev_ext_mech_session_bind(s, c, program_fds);'))
         publish = create.index('smp_store_release(&s->create_pending_publish, false);')
         self.assertLess(create.index('copy_to_user(uarg, envelope, sizeof(*envelope))'), publish)
         self.assertLess(create.index('list_add_tail(&s->live_node, &xdev_ext_mech_live);'), publish)

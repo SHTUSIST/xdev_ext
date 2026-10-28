@@ -69,7 +69,7 @@ def generate():
                    "xdev_ext_mech_session_stop", "xdev_ext_mech_notify_locked",
                    "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked",
                    "xdev_ext_mech_count", "xdev_ext_mech_stop_reason",
-                   "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
+                   "xdev_ext_mech_programs_current", "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
     user_names += ["xdev_ext_user_drain", "xdev_ext_user_external_end",
                    "xdev_ext_user_strict_progress"]
     functions = [definition(core, n) for n in core_names]
@@ -83,7 +83,17 @@ def generate():
     for name in ("xdev_ext_mech_session_admits", "xdev_ext_mech_stop_reason", "xdev_ext_mech_count"):
         code = re.sub(r'^static [^\n]*\b' + name + r'\([^\n]*\n', '', code, flags=re.M)
     code = code.replace("/* STRUCTURES */", structs)
-    code = code.replace("/* PROTOTYPES */", prototypes)
+    # These existing USER scheduler scenarios use no PRIVATE stage handles.
+    # Compile the real shared admission helper; unexpected private liveness
+    # must fail rather than receive fabricated success from this boundary.
+    private_boundary = """struct xdev_ext_mech_instance;
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance)
+{
+    (void)instance;
+    abort();
+}
+"""
+    code = code.replace("/* PROTOTYPES */", private_boundary + prototypes)
     code = code.replace("/* PRODUCTION */", "\n".join(functions))
     return code
 
