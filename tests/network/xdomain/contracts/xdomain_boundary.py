@@ -105,7 +105,8 @@ def object_shims():
 def runtime_boundary():
     ops = (KERNEL / "io_uring/xdev_ext_mech_ops.c").read_text()
     private = PRIVATE.read_text()
-    ids = {"bpf_xdev_ext_xdomain_info": 1001, "bpf_xdev_ext_xdomain_verdict": 1002}
+    ids = {"bpf_xdev_ext_xdomain_info": 1001, "bpf_xdev_ext_xdomain_verdict": 1002,
+           "bpf_xdev_ext_xdomain_info_v2": 1003, "bpf_xdev_ext_xdomain_verdict_v2": 1004}
     sets = []
     observed = set()
     for kind, name, body in re.findall(

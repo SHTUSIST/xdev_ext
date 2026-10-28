@@ -59,6 +59,8 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_environment_test.py",
 )
 CANONICAL_REQUIRED = (
+    "tests/network/xdomain/early/run.py",
+    "tests/network/xdomain/early/kfunc_test.py",
     "tests/core/library/peer_wait/run.py",
     "tests/network/xdomain/probe/probe_gate_test.py",
     "tests/network/xdomain/probe/probe_wire_test.py",

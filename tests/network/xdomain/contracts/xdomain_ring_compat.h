@@ -74,7 +74,10 @@ struct tb_xdomain { struct tb *tb;struct device dev; };
 struct tb_service { int unused; };
 struct file; struct module; struct xdev_ext_net_slot;
 struct xdev_ext_peer_mapping;
-struct xdev_ext_mech_stage { u32 direction; int id; };
+struct xdev_ext_mech_session;
+struct xdev_ext_mech_stage { u32 direction; int id; struct xdev_ext_mech_session *s; };
+static bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *session)
+{ (void)session;assert(!"v2 session admission outside original v1 ring fixture");abort(); }
 
 /* Exact public frame field layout from locked upstream thunderbolt.h. */
 struct tb_ring;
@@ -159,3 +162,5 @@ static unsigned bitmap_weight(const unsigned long *map,unsigned n){unsigned coun
 
 #include "include/linux/xdev_ext_mech_reliable_core.h"
 #include "io_uring/xdomain/xdev_ext_xdomain_probe_core.h"
+
+#include "io_uring/xdomain/xdev_ext_xdomain_early.h"

@@ -157,3 +157,5 @@ static void tb_unregister_service_driver(struct tb_service_driver *);
 #define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-MAX_ERRNO)
 #define WARN_ON_ONCE(x) ({ bool _warn=!!(x); assert(!_warn); _warn; })
 #define DEFINE_SPINLOCK(n) spinlock_t n={0}
+
+#include "io_uring/xdomain/xdev_ext_xdomain_early.h"

@@ -22,6 +22,9 @@ def mirror_assertions(program: str, prog_header: str, netfam_header: str) -> str
         "XDEV_EXT_MP_NET_REMOTE_ACKED": "XDEV_EXT_NET_REMOTE_ACKED",
         "XDEV_EXT_MP_SITE_WORKER_PROTOCOL": "XDEV_EXT_MECH_SITE_WORKER_PROTOCOL",
         "XDEV_EXT_MP_XDOMAIN_PROTO_VERSION": "XDEV_EXT_XDOMAIN_PROTO_VERSION",
+        "XDEV_EXT_MP_XDOMAIN_PROTO_V2_VERSION": "XDEV_EXT_XDOMAIN_PROTO_V2_VERSION",
+        "XDEV_EXT_MP_XDP_MODE_EARLY": "XDEV_EXT_XDP_MODE_EARLY",
+        "XDEV_EXT_MP_XDP_PAIR_BOUND": "XDEV_EXT_XDP_PAIR_BOUND",
         "XDEV_EXT_MP_PROTO_VERSION": "XDEV_EXT_XDOMAIN_PROTO_VERSION",
         "XDEV_EXT_MP_MAX_FRAMES": "XDEV_EXT_MECH_MAX_FRAMES",
         "XDEV_EXT_MP_SITE_WORKER": "XDEV_EXT_MECH_SITE_WORKER",
@@ -50,6 +53,8 @@ def mirror_assertions(program: str, prog_header: str, netfam_header: str) -> str
         uapi = direct.get(name)
         if uapi is None and name.startswith("XDEV_EXT_MP_XDP_F_"):
             uapi = name.replace("XDEV_EXT_MP_XDP_F_", "XDEV_EXT_XDP_F_", 1)
+        if uapi is None and name.startswith("XDEV_EXT_MP_XDP_EARLY_F_"):
+            uapi = name.replace("XDEV_EXT_MP_XDP_EARLY_F_", "XDEV_EXT_XDP_EARLY_F_", 1)
         if uapi is None and name.startswith("XDEV_EXT_MP_NET_REMOTE_"):
             uapi = name.replace("XDEV_EXT_MP_NET_REMOTE_", "XDEV_EXT_NET_REMOTE_", 1)
         if uapi is None and name.startswith("XDEV_EXT_MP_RDV_"):

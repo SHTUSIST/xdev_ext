@@ -19,6 +19,7 @@
 #include "@KERNEL@/include/linux/xdev_ext_netfam_core.h"
 #include "@KERNEL@/include/linux/xdev_ext_requester_core.h"
 #include "@KERNEL@/io_uring/xdomain/xdev_ext_xdomain_core.h"
+#include "@KERNEL@/io_uring/xdomain/xdev_ext_xdomain_early.h"
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
 typedef int32_t s32; typedef int64_t s64; typedef u64 dma_addr_t;
 enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE };
@@ -145,7 +146,7 @@ struct xdev_ext_mech_batch {
  struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];
  struct { unsigned state,stage; } bs;
  u32 nr;
- u64 ticket;
+ u64 ticket,key;
  bool ordered_loan;
  unsigned claims,publishes,filled,ended,disposition_order;
  int status;
@@ -169,6 +170,7 @@ static void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b) { return b-
 static void *xdev_ext_mech_batch_cookie(struct xdev_ext_mech_batch *b) { return b->cookie; }
 static u32 xdev_ext_mech_batch_nr_frames(struct xdev_ext_mech_batch *b) { return b->nr; }
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b) { return b->ticket; }
+static u64 xdev_ext_mech_batch_key(const struct xdev_ext_mech_batch *b) { return b->key; }
 static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b,u32 i,struct xdev_ext_mech_frame *out) { if(i>=b->nr)return -EINVAL; *out=b->f[i]; return 0; }
 static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b,u64 ticket) { if(ticket!=b->ticket||b->claims)return -ESTALE; b->claims++; return 0; }
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b,u64 ticket,int status,bool q) { assert(ticket==b->ticket&&b->claims==1&&!b->publishes); b->publishes++;b->status=status;b->sequester=q; }
@@ -220,6 +222,8 @@ static void *bpf_xdev_ext_desc(const struct xdev_ext_mech_ctx *ctx,__u32 slot,__
 static void *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *ctx,__u32 slot,__u32 size);
 static int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *ctx,void *out,__u32 size);
 static int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,const void *in,__u32 size);
+static int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *,void *,__u32);
+static int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *,const void *,__u32);
 struct xdev_ext_xdomain_mech_ops {
  __u32 abi_version,flags;
  __s32 (*prepare)(const struct xdev_ext_mech_ctx *);

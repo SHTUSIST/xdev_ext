@@ -167,3 +167,5 @@ static void tb_unregister_service_driver(struct tb_service_driver *);
 static unsigned long jiffies;
 #define time_before(a,b) ((long)((a)-(b))<0)
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
+
+#include "io_uring/xdomain/xdev_ext_xdomain_early.h"

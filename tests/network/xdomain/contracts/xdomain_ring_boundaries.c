@@ -309,3 +309,6 @@ bool xdev_ext_xd_probe_ctl_rx(struct xdev_ext_xd_link *xl,const u8 *p,u32 n){
 void xdev_ext_xd_probe_close(struct xdev_ext_xd_link *xl){assert(!xl->probe);xl->data_verified_mask=0;}
 u64 xdev_ext_xd_probe_retire(struct xdev_ext_xd_link *xl,u32 rx,u32 tx,bool gone){(void)rx;(void)tx;(void)gone;assert(!xl->probe);return 0;}
 void xdev_ext_xd_probe_free(struct xdev_ext_xd_link *xl){assert(!xl->probe);}
+
+void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *stage,const struct xdev_ext_xd_msg_v2 *msg)
+{ (void)stage;(void)msg;assert(!"v2 dispatch outside original v1 ring fixture");abort(); }

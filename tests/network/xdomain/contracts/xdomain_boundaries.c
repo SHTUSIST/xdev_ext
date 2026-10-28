@@ -279,6 +279,33 @@ static int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,cons
  /* Record-only boundary. Duplicate/error validation belongs to actual dispatcher/X1. */
  active_args->xdomain->calls++;memcpy(&active_args->xdomain->verdict,in,64);return 0;
 }
+
+/* Ordinary v1 invocation storage exposed to the versioned reference policy.
+ * Actual private kfunc identity/validation is tested independently. */
+static int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *ctx,void *out,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_info base={0};
+ struct xdev_ext_xdomain_proto_info_v2 *info=out;
+ int ret;
+ if(!out||size!=sizeof(*info))return -EINVAL;
+ ret=bpf_xdev_ext_xdomain_info(ctx,&base,sizeof(base));
+ if(ret)return ret;
+ if(base.size!=sizeof(base)||base.version!=XDEV_EXT_XDOMAIN_PROTO_VERSION)return -EINVAL;
+ memset(out,0,size);info->base=base;
+ info->base.size=sizeof(*info);info->base.version=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
+ return 0;
+}
+static int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,const void *in,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_verdict verdict;
+ if(!in||size!=sizeof(verdict))return -EINVAL;
+ memcpy(&verdict,in,size);
+ if(verdict.size!=size||verdict.version!=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION||
+    verdict.action>XDEV_EXT_XDP_ACT_CANCEL_ARMED)return -EINVAL;
+ verdict.version=XDEV_EXT_XDOMAIN_PROTO_VERSION;
+ return bpf_xdev_ext_xdomain_verdict(ctx,&verdict,size);
+}
+
 static void *bpf_xdev_ext_info(const struct xdev_ext_mech_ctx *ctx,__u32 size) { (void)ctx;(void)size;assert(!"protocol generic info access");return NULL; }
 static void *bpf_xdev_ext_desc(const struct xdev_ext_mech_ctx *ctx,__u32 slot,__u32 size) { (void)ctx;(void)slot;(void)size;assert(!"protocol descriptor access");return NULL; }
 static void *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *ctx,__u32 slot,__u32 size) { (void)ctx;(void)slot;(void)size;assert(!"protocol final CQE access");return NULL; }
@@ -575,3 +602,7 @@ void pressure_capture(struct side *side,struct pressure_observation *out);
 int xdev_ext_xd_link_diag(struct xdev_ext_xd_ep *ep,struct xdev_ext_mech_stage_diag *out)
 {(void)ep;(void)out;abort();}
 #endif
+
+/* The original class fixture opts into v1 only. Reject unexpected v2 wire I/O. */
+int xdev_ext_xd_msg_send_v2(struct xdev_ext_xd_link *link,const struct xdev_ext_xd_ep *ep,struct xdev_ext_xd_msg_v2 *msg)
+{ (void)link;(void)ep;(void)msg;assert(!"v2 wire outside original v1 class fixture");abort(); }

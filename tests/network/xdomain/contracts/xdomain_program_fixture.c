@@ -96,6 +96,33 @@ static int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
  return 0;
 }
 
+
+/* Ordinary v1 invocation storage exposed to the versioned reference policy.
+ * Actual private kfunc identity/validation is tested independently. */
+static int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *ctx,void *out,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_info base={0};
+ struct xdev_ext_xdomain_proto_info_v2 *info=out;
+ int ret;
+ if(!out||size!=sizeof(*info))return -EINVAL;
+ ret=bpf_xdev_ext_xdomain_info(ctx,&base,sizeof(base));
+ if(ret)return ret;
+ if(base.size!=sizeof(base)||base.version!=XDEV_EXT_XDOMAIN_PROTO_VERSION)return -EINVAL;
+ memset(out,0,size);info->base=base;
+ info->base.size=sizeof(*info);info->base.version=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
+ return 0;
+}
+static int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,const void *in,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_verdict verdict;
+ if(!in||size!=sizeof(verdict))return -EINVAL;
+ memcpy(&verdict,in,size);
+ if(verdict.size!=size||verdict.version!=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION||
+    verdict.action>XDEV_EXT_XDP_ACT_CANCEL_ARMED)return -EINVAL;
+ verdict.version=XDEV_EXT_XDOMAIN_PROTO_VERSION;
+ return bpf_xdev_ext_xdomain_verdict(ctx,&verdict,size);
+}
+
 @BPF_SOURCE@
 
 #define UP (XDEV_EXT_XDP_F_LINK_UP | XDEV_EXT_XDP_F_ADMITS)
