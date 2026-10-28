@@ -86,7 +86,8 @@ _Static_assert(XDEV_EXT_MECH_POOL_XSK == 1 && XDEV_EXT_MECH_POOL_IOU_UMEM == 2,
 _Static_assert(XDEV_EXT_MECH_START_F_USER_FRAMES == 1 &&
 	       XDEV_EXT_MECH_START_F_RECYCLE == 2 &&
 	       XDEV_EXT_MECH_START_F_USER_SPANS == 4 &&
-	       XDEV_EXT_MECH_START_KNOWN_FLAGS == 7, "START flags");
+	       XDEV_EXT_MECH_START_F_ORDERED_FRAMES == 8 &&
+	       XDEV_EXT_MECH_START_KNOWN_FLAGS == 15, "START flags");
 _Static_assert(sizeof(struct xdev_ext_mech_start) == 40, "START v1 size unchanged");
 _Static_assert(sizeof(struct xdev_ext_mech_user_span) == 8, "explicit source span size");
 _Static_assert(XDEV_EXT_MECH_SESSION_NONE == 0 && XDEV_EXT_MECH_SESSION_ACTIVE == 1 &&

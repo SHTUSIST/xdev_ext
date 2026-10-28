@@ -74,7 +74,10 @@ static void capability_defaults(void)
  for (dir = XDEV_EXT_MECH_DIR_TO_DEVICE; dir <= XDEV_EXT_MECH_DIR_FROM_DEVICE; dir++) {
   struct xdev_ext_mech_stage_uapi u = { .class_id = cases[i].id, .direction = dir };
   struct xdev_ext_mech_stage_caps c;
-  bool peer = pool && cases[i].peer;
+  /* Keep frozen F3 rows; strict USER adds only PEER TO_DEVICE. FROM_DEVICE
+   * and every other class retain the original capability expectations. */
+  bool peer = pool && (cases[i].peer ||
+   (cases[i].id == XDEV_EXT_MECH_CLASS_USER && dir == XDEV_EXT_MECH_DIR_TO_DEVICE));
   unsigned na = XDEV_EXT_CAP_NOT_APPLICABLE;
   memset(&c, 0xa5, sizeof(c));
   xdev_ext_mech_stage_caps_default(&u, pool ? XDEV_EXT_MECH_POOL_PEER : XDEV_EXT_MECH_POOL_IOU_UMEM, &c);

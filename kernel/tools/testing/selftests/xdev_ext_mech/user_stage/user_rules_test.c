@@ -140,7 +140,7 @@ static void test_request(void)
 	r.size = sizeof(r) + 8;
 	EXPECT_EQ(xdev_ext_user_request_check(&r), -EINVAL, "request: long size");
 	r.size = sizeof(r);
-	r.flags = 1;
+	r.flags = 1U << 31;
 	EXPECT_EQ(xdev_ext_user_request_check(&r), -EINVAL, "request: unknown flag");
 	r.flags = 0;
 	r.rsvd = 1;
@@ -318,7 +318,7 @@ static void test_stage(void)
 	EXPECT_EQ(xdev_ext_user_stage_check(&u, FRAME, &delta, &varlen), -EINVAL, "stage: delta above a frame");
 	u = user_stage(0, 100, -(__s64)FRAME - 1);
 	EXPECT_EQ(xdev_ext_user_stage_check(&u, FRAME, &delta, &varlen), -EINVAL, "stage: delta below a frame");
-	u = user_stage(2, 100, 0);
+	u = user_stage(1U << 31, 100, 0);
 	EXPECT_EQ(xdev_ext_user_stage_check(&u, FRAME, &delta, &varlen), -EINVAL, "stage: unknown flag");
 	u = user_stage(0, 100, 0);
 	u.direction = FROM;
@@ -353,7 +353,7 @@ static void test_create(void)
 	c.st[1].flags = VARLEN;
 	EXPECT_EQ(check(&c), -EOPNOTSUPP, "USER(varlen) before NVMe WRITE");
 	c = nvme_user_nvme();
-	c.st[1].flags = 2;
+	c.st[1].flags = 1U << 31;
 	EXPECT_EQ(check(&c), -EINVAL, "USER unknown flag");
 	c = nvme_user_nvme();
 	c.st[2] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_AFXDP,
@@ -407,7 +407,7 @@ static void test_role(void)
 	EXPECT_EQ(xdev_ext_mech_chain_refs(c.st, 3, 1), 1, "the NVMe READ publication has one reference: USER");
 	EXPECT_EQ(xdev_ext_mech_chain_refs(c.st, 3, 2), 1, "the USER republication has one reference: NVMe WRITE");
 	EXPECT_EQ(xdev_ext_mech_chain_refs(c.st, 2, 2), 0, "a last USER stage republishes with none");
-	EXPECT_EQ(xdev_ext_mech_peer_dirs(XDEV_EXT_MECH_CLASS_USER), 0, "USER has no peer capability");
+	EXPECT_EQ(xdev_ext_mech_peer_dirs(XDEV_EXT_MECH_CLASS_USER), 1U << TO, "USER peer capability is TO_DEVICE only");
 	EXPECT_EQ(xdev_ext_mech_ret_legal(XDEV_EXT_MECH_CLASS_USER, XDEV_EXT_MECH_MEMBER_BUILD,
 					  XDEV_EXT_MECH_SITE_WORKER, XDEV_EXT_MECH_BUILD_DEFAULT), 1,
 		  "USER build may return DEFAULT");

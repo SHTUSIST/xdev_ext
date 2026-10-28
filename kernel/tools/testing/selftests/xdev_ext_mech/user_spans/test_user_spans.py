@@ -15,6 +15,7 @@ PRELUDE = r'''
 #include <stdio.h>
 #include "io_uring/xdev_ext_mech_core.h"
 #include "io_uring/xdev_ext_mech_lifecycle.h"
+#include "io_uring/xdev_ext_mech_step.h"
 #define XDEV_EXT_MECH_CLASS_F_TRANSFORM 2
 #define XDEV_EXT_MECH_F_USER 0
 #define XDEV_EXT_MECH_F_K_FREE 1
@@ -28,7 +29,8 @@ struct cls {unsigned flags;};
 struct stage {unsigned direction; struct cls *cls;};
 struct xdev_ext_mech_session {
  struct pool pool; struct stage st[1]; struct xdev_ext_mech_layout layout;
- struct xdev_ext_mech_life life[2]; u32 frames, start_user_len;
+ struct xdev_ext_mech_life life[2]; u32 frames, start_user_len,nr_stages;
+ struct xdev_ext_mech_stage_uapi plan[1];
 };
 static unsigned states[2], recycled;
 static void cond_resched(void) {}

@@ -5,7 +5,7 @@
 The host has no kernel build, so this reads the production sources: the
 build rule, the struct_ops type and its registration, the core's stage
 binding (no file reference for USER), the register sub-op dispatch, the
-class table (no ->poll, no ordering flag), the user stage fd operations,
+class table (strict USER poll, no ordering flag), the user stage fd operations,
 the trivial BPF program and the CI step.  Prints TAP.
 """
 import os
@@ -66,7 +66,7 @@ def main():
          re.search(r'case XDEV_EXT_MECH_OP_USER_STAGE:\s*return xdev_ext_mech_user_stage_create\(', register)),
         ('register sub-op declared for the core', 'int xdev_ext_mech_user_stage_create(' in internal),
         ('class table: id 10', '.class_id = XDEV_EXT_MECH_CLASS_USER' in table),
-        ('class table: no poll member, so F_POLL fails CREATE', table and '.poll' not in table),
+        ('class table: strict USER poll entry', '.poll = xdev_ext_user_poll' in table),
         ('class table: not an ordered class', table and 'F_ORDERED' not in table),
         ('class table: progress reaps and cancels', '.progress = xdev_ext_user_progress' in table),
         ('class table: dead marking', '.mark_dead = xdev_ext_user_mark_dead' in table),

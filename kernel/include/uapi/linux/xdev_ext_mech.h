@@ -459,6 +459,11 @@ struct xdev_ext_net_rx_mech_cqe {
  * layout.frame_size), 0 with VARLEN (any length 1..capacity).
  */
 #define XDEV_EXT_USER_F_VARLEN		(1U << 0)
+#define XDEV_EXT_USER_F_STRICT_ASYNC	(1U << 1)
+#define XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL (1U << 0)
+#define XDEV_EXT_USER_STRICT_GRACE_MS	1000U
+#define XDEV_EXT_USER_IOC_CTL_ATTACH	_IO('X', 0xe9)
+#define XDEV_EXT_USER_IOC_CTL_DETACH	_IO('X', 0xea)
 #define XDEV_EXT_USER_DEADLINE_MAX_MS	600000U
 #define XDEV_EXT_USER_RING_MAX		256U
 #define XDEV_EXT_USER_DESC_VERSION	1U
@@ -474,7 +479,8 @@ struct xdev_ext_user_desc {
 #define XDEV_EXT_USER_F_SLEEPING	(1U << 0)
 /* kernel_flags (kernel writes) */
 #define XDEV_EXT_USER_K_NEED_KICK	(1U << 0)	/* reaps again only after a kick */
-#define XDEV_EXT_USER_K_STOPPED		(1U << 1)	/* nothing more; held batches cancelled */
+#define XDEV_EXT_USER_K_DRAINING		(1U << 2)
+#define XDEV_EXT_USER_K_STOPPED		(1U << 1)	/* no new ready; strict held leases drain */
 
 /* Free-running indices, each in its own 64-byte line; entry i & (entries - 1). */
 struct xdev_ext_user_ring_hdr {
@@ -685,7 +691,8 @@ struct xdev_ext_mech_create {
  * Not combinable with RECYCLE. START requires no preceding in-flight batch.
  */
 #define XDEV_EXT_MECH_START_F_USER_SPANS	(1U << 2)
-#define XDEV_EXT_MECH_START_KNOWN_FLAGS	0x00000007U
+#define XDEV_EXT_MECH_START_F_ORDERED_FRAMES (1U << 3)
+#define XDEV_EXT_MECH_START_KNOWN_FLAGS	0x0000000fU
 
 struct xdev_ext_mech_user_span {
 	__u32 index;

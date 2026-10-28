@@ -23,6 +23,7 @@ typedef __s64 s64;
 #define smp_load_acquire(p) __atomic_load_n(p,__ATOMIC_ACQUIRE)
 #define smp_mb() __sync_synchronize()
 #define smp_wmb() __atomic_thread_fence(__ATOMIC_RELEASE)
+#define msecs_to_jiffies(n) (n)
 #define time_after_eq(a,b) ((long)((a)-(b)) >= 0)
 #define list_empty(h) ((h)->next==(h))
 #define list_for_each_entry_safe(p,n,h,m) \
@@ -31,6 +32,11 @@ typedef __s64 s64;
 #define llist_entry(p,t,m) container_of(p,t,m)
 #define llist_for_each_safe(p,n,h) for((p)=(h); (p)&&((n)=(p)->next,1); (p)=(n))
 static unsigned long jiffies = 1000;
+static u64 ktime_get_boottime_ns(void) { return (u64)jiffies * 1000000; }
+/* BPF program registration is fixed for a host scenario. */
+static bool xdev_ext_mech_ops_current(u32 c, const void *ops, bool pin) {
+ (void)c;(void)ops;(void)pin;return true;
+}
 static void list_splice_init(struct list_head *a,struct list_head *b) {
  if(list_empty(a))return;
  b->next=a->next;b->prev=a->prev;b->next->prev=b;b->prev->next=b;INIT_LIST_HEAD(a);
