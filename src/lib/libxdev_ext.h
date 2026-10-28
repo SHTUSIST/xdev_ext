@@ -124,6 +124,12 @@ int xdev_ext_session_start_frames(struct xdev_ext_session *s,
 				 const struct xdev_ext_start_frames_opts *o);
 int xdev_ext_session_stage_caps(struct xdev_ext_session *s, __u32 stage,
 			       struct xdev_ext_mech_stage_caps *out);
+/* Diagnostic query also accepts a stopped session still held by its ring.
+ * On failure out is zero. Counts are observations at separate instants. */
+int xdev_ext_session_stage_diag(struct xdev_ext_session *s, __u32 stage,
+			       struct xdev_ext_mech_stage_diag *out);
+int xdev_ext_stage_diag_read(int owning_ring_fd, __u64 session_id, __u32 stage,
+			   struct xdev_ext_mech_stage_diag *out);
 int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,
 			  __u64 link_token, __u32 direction, __u32 flags);
 

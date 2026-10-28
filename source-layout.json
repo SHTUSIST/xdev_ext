@@ -3761,6 +3761,26 @@
       "logical_path": "tests/core/library/peer_wait/wait_hooks.h"
     },
     {
+      "source": "tests/core/library/stage_diag/README.md",
+      "logical_path": "tests/core/library/stage_diag/README.md"
+    },
+    {
+      "source": "tests/core/library/stage_diag/ctl_hooks.c",
+      "logical_path": "tests/core/library/stage_diag/ctl_hooks.c"
+    },
+    {
+      "source": "tests/core/library/stage_diag/deadline.c",
+      "logical_path": "tests/core/library/stage_diag/deadline.c"
+    },
+    {
+      "source": "tests/core/library/stage_diag/run.py",
+      "logical_path": "tests/core/library/stage_diag/run.py"
+    },
+    {
+      "source": "tests/core/library/stage_diag/test.c",
+      "logical_path": "tests/core/library/stage_diag/test.c"
+    },
+    {
       "source": "tests/core/library/xdev_ext_lib_run_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_run_test.c"
@@ -6593,6 +6613,30 @@
       "source": "tests/network/xdomain/contracts/xdomain_ring_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/README.md",
+      "logical_path": "tests/network/xdomain/diagnostics/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/class.c",
+      "logical_path": "tests/network/xdomain/diagnostics/class.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/class_boundary.c",
+      "logical_path": "tests/network/xdomain/diagnostics/class_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/core.c.in",
+      "logical_path": "tests/network/xdomain/diagnostics/core.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/native.c",
+      "logical_path": "tests/network/xdomain/diagnostics/native.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/run.py",
+      "logical_path": "tests/network/xdomain/diagnostics/run.py"
     },
     {
       "source": "tests/network/xdomain/late_rts/README.md",

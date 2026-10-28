@@ -883,10 +883,37 @@ struct ctl_run {
 	struct ctl_xsk *xsk;		/* RX ring to service, or NULL */
 	__u64 deadline_ns;
 	__u64 published_seen;		/* frames taken off the RX ring */
+	__u32 diag_stage_mask;		/* XDOMAIN stages from this CREATE */
 	int poll_ms;			/* longest sleep between two STATS */
 	bool defer_stats;		/* reliable finalizer prints the sole final snapshot */
 	bool source_error_drain;		/* retain live source error observations */
 };
+
+static void peer_print_diag(const struct xdev_ext_mech_stage_diag *d);
+
+static void ctl_diag_stages(struct ctl_run *r, const struct xdev_ext_mech_create *c)
+{
+	for (__u32 i = 0; i < c->nr_stages; i++)
+		if (c->st[i].class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)
+			r->diag_stage_mask |= 1U << i;
+}
+
+/* Before the caller's STOP, with no change to its deadline or primary error. */
+static void ctl_timeout_diag(const struct ctl_run *r)
+{
+	for (__u32 i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++) {
+		struct xdev_ext_mech_stage_diag d;
+		int ret;
+
+		if (!(r->diag_stage_mask & (1U << i)))
+			continue;
+		ret = xdev_ext_stage_diag_read(r->ring, r->session, i, &d);
+		if (ret)
+			fprintf(stderr, "XDEV_EXT_STAGE_DIAG_UNKNOWN stage=%u errno=%d\n", i, ret);
+		else
+			peer_print_diag(&d);
+	}
+}
 
 /* One final snapshot and one synchronous STOP, for success and failure alike.
  * No PASS marker precedes this boundary. A failed query remains visibly unknown. */
@@ -956,8 +983,10 @@ static int ctl_wait(struct ctl_run *r, ctl_done_fn done, const void *arg,
 		if (done(s, r, arg))
 			return 0;
 		now = ctl_now_ns();
-		if (now >= r->deadline_ns)
+		if (now >= r->deadline_ns) {
+			ctl_timeout_diag(r);
 			return -ETIMEDOUT;
+		}
 		left_ms = (r->deadline_ns - now) / 1000000 + 1;
 		if (poll(pfd, r->xsk && !more ? 2 : 1,
 			 left_ms < (__u64)r->poll_ms ? (int)left_ms : r->poll_ms) < 0 &&
@@ -1035,6 +1064,7 @@ static int ctl_wait_coarse(struct ctl_run *r, __u64 groups,
 		int ready;
 
 		if (now >= r->deadline_ns) {
+			ctl_timeout_diag(r);
 			ret = -ETIMEDOUT;
 			break;
 		}
@@ -1370,6 +1400,7 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 			goto out;
 	}
  ret = ctl_create(r.ring, &c, &r.session);
+ ctl_diag_stages(&r, &c);
 	if (ret) {
 		ctl_err("CREATE: %s\n", strerror(-ret));
 		goto out;
@@ -1709,6 +1740,7 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 			goto out;
 	}
  ret = ctl_create(r.ring, &c, &r.session);
+ ctl_diag_stages(&r, &c);
 	if (ret)
 		goto out;
 	if (!o->expect_unbind) {
@@ -2643,6 +2675,55 @@ static int cmd_peer_discover(int argc, char **argv, bool preflight)
 	return status;
 }
 
+static void peer_print_diag(const struct xdev_ext_mech_stage_diag *d)
+{
+	printf("XDEV_EXT_STAGE_DIAG session=%llu stage=%u class=%u valid=%u readiness=%u "
+	       "token=%llu local_inc=%llu remote_inc=%llu pool_generation=%llu "
+	       "capture_begin_ns=%llu capture_end_ns=%llu native_inflight=%u software_pending=%u "
+	       "rx_native_posted=%u ctl_tx_free=%u cts_owed=%u ack_owed=%u fail_owed=%u "
+	       "final_waiting_chain=%u downstream_release_pending=%u generations=%u "
+	       "retained_generations=%u reserved_bytes=%llu retained_bytes=%llu "
+	       "global_reserved_bytes=%llu global_retained_bytes=%llu global_limit=%llu\n",
+	       (unsigned long long)d->session_id, d->stage, d->class_id, d->valid, d->readiness,
+	       (unsigned long long)d->token, (unsigned long long)d->local_inc,
+	       (unsigned long long)d->remote_inc, (unsigned long long)d->pool_generation,
+	       (unsigned long long)d->capture_begin_ns, (unsigned long long)d->capture_end_ns,
+	       d->native_inflight, d->software_pending, d->rx_native_posted, d->ctl_tx_free,
+	       d->cts_owed, d->ack_owed, d->fail_owed, d->final_waiting_chain,
+	       d->downstream_release_pending, d->retention.generations,
+	       d->retention.retained_generations, (unsigned long long)d->retention.reserved_bytes,
+	       (unsigned long long)d->retention.retained_bytes,
+	       (unsigned long long)d->retention.global_reserved_bytes,
+	       (unsigned long long)d->retention.global_retained_bytes,
+	       (unsigned long long)d->retention.global_limit);
+}
+
+/* The caller passes the inherited owning io_uring fd. */
+static int cmd_peer_diag(int argc, char **argv)
+{
+	__u64 ring = UINT64_MAX, session = 0, stage = UINT64_MAX;
+	struct xdev_ext_mech_stage_diag diag;
+	int ret;
+
+	for (int i = 2; i < argc; i++) {
+		__u64 *value;
+		if (!strcmp(argv[i], "--ring-fd")) value = &ring;
+		else if (!strcmp(argv[i], "--session")) value = &session;
+		else if (!strcmp(argv[i], "--stage")) value = &stage;
+		else return CTL_USAGE;
+		if (++i == argc || peer_number(argv[i], value)) return CTL_USAGE;
+	}
+	if (ring > INT_MAX || !session || stage >= XDEV_EXT_MECH_MAX_STAGES)
+		return CTL_USAGE;
+	ret = xdev_ext_stage_diag_read((int)ring, session, stage, &diag);
+	if (ret) {
+		fprintf(stderr, "XDEV_EXT_STAGE_DIAG_UNKNOWN errno=%d\n", ret);
+		return CTL_SETUP;
+	}
+	peer_print_diag(&diag);
+	return CTL_PASS;
+}
+
 /* The caller must retain and pass the owning io_uring fd across exec. */
 static int cmd_peer_caps(int argc, char **argv)
 {
@@ -2689,6 +2770,8 @@ int main(int argc, char **argv)
 		return cmd_peer_discover(argc, argv, false);
 	if (argc > 1 && !strcmp(argv[1], "peer-preflight"))
 		return cmd_peer_discover(argc, argv, true);
+	if (argc > 1 && !strcmp(argv[1], "peer-diag"))
+		return cmd_peer_diag(argc, argv);
 	if (argc > 1 && !strcmp(argv[1], "peer-caps"))
 		return cmd_peer_caps(argc, argv);
 
@@ -2705,7 +2788,8 @@ int main(int argc, char **argv)
 		usage(stdout);
 		puts("       xdev_ext_mech_ctl peer-discover [--sysfs-root PATH] [--link TOKEN]\n"
 		     "       xdev_ext_mech_ctl peer-preflight --link TOKEN [--sysfs-root PATH]\n"
-		     "       xdev_ext_mech_ctl peer-caps --ring-fd FD --session ID --stage N");
+		     "       xdev_ext_mech_ctl peer-caps --ring-fd FD --session ID --stage N\n"
+		     "       xdev_ext_mech_ctl peer-diag --ring-fd FD --session ID --stage N");
 		return CTL_PASS;
 	}
 	for (i = 0; i < sizeof(ctl_commands) / sizeof(ctl_commands[0]); i++) {

@@ -527,6 +527,8 @@ struct tb_nhi {
  * @descriptors: Allocated descriptors for this ring
  * @queue: Queue holding frames to be transferred over this ring
  * @in_flight: Queue holding frames that are currently in flight
+ * @queued_frames: Number of frames on @queue, under @lock
+ * @inflight_frames: Number of frames on @in_flight, under @lock
  * @work: Interrupt work structure
  * @is_tx: Is the ring Tx or Rx
  * @running: Is the ring running
@@ -557,6 +559,7 @@ struct tb_ring {
 	dma_addr_t descriptors_dma;
 	struct list_head queue;
 	struct list_head in_flight;
+	u32 queued_frames, inflight_frames;
 	struct work_struct work;
 	bool is_tx:1;
 	bool running:1;
@@ -572,6 +575,14 @@ struct tb_ring {
 	unsigned int interval_nsec;
 	struct lock_class_key lock_key;
 };
+
+/* Actual queue membership, read under the native ring lock. */
+struct tb_ring_snapshot {
+	u32 in_flight, software_pending;
+	bool running, notify_pending;
+};
+void tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *out);
+
 
 /* Leave ring interrupt enabled on suspend */
 #define RING_FLAG_NO_SUSPEND	BIT(0)

@@ -290,6 +290,8 @@ static void ring_write_descriptors(struct tb_ring *ring, bool notify)
 		if (ring_full(ring))
 			break;
 		list_move_tail(&frame->list, &ring->in_flight);
+		ring->queued_frames--;
+		ring->inflight_frames++;
 		descriptor = &ring->descriptors[ring->head];
 		descriptor->phys = frame->buffer_phy;
 		descriptor->time = 0;
@@ -330,6 +332,7 @@ static void ring_work(struct work_struct *work)
 		/*  Move all frames to done and mark them as canceled. */
 		list_splice_tail_init(&ring->in_flight, &done);
 		list_splice_tail_init(&ring->queue, &done);
+		ring->queued_frames = ring->inflight_frames = 0;
 		canceled = true;
 		goto invoke_callback;
 	}
@@ -341,6 +344,7 @@ static void ring_work(struct work_struct *work)
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_move_tail(&frame->list, &done);
+		ring->inflight_frames--;
 		if (!ring->is_tx) {
 			frame->size = ring->descriptors[ring->tail].length;
 			frame->eof = ring->descriptors[ring->tail].eof;
@@ -366,6 +370,21 @@ invoke_callback:
 	}
 }
 
+void tb_ring_snapshot(struct tb_ring *ring, struct tb_ring_snapshot *out)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&ring->lock, flags);
+	*out = (struct tb_ring_snapshot) {
+		.in_flight = ring->inflight_frames,
+		.software_pending = ring->queued_frames,
+		.running = ring->running,
+		.notify_pending = ring->notify_pending,
+	};
+	spin_unlock_irqrestore(&ring->lock, flags);
+}
+EXPORT_SYMBOL_GPL(tb_ring_snapshot);
+
 int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame, bool more)
 {
 	unsigned long flags;
@@ -374,6 +393,7 @@ int __tb_ring_enqueue(struct tb_ring *ring, struct ring_frame *frame, bool more)
 	spin_lock_irqsave(&ring->lock, flags);
 	if (ring->running) {
 		list_add_tail(&frame->list, &ring->queue);
+		ring->queued_frames++;
 		ring_write_descriptors(ring, !more);
 	} else {
 		ret = -ESHUTDOWN;
@@ -424,6 +444,7 @@ struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 		frame = list_first_entry(&ring->in_flight, typeof(*frame),
 					 list);
 		list_del_init(&frame->list);
+		ring->inflight_frames--;
 
 		if (!ring->is_tx) {
 			frame->size = ring->descriptors[ring->tail].length;
@@ -709,6 +730,7 @@ static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 	spin_lock_init(&ring->lock);
 	INIT_LIST_HEAD(&ring->queue);
 	INIT_LIST_HEAD(&ring->in_flight);
+	ring->queued_frames = ring->inflight_frames = 0;
 	INIT_WORK(&ring->work, ring_work);
 	lockdep_register_key(&ring->lock_key);
 	lockdep_init_map(&ring->work.lockdep_map, "ring.work", &ring->lock_key, 0);
@@ -1046,6 +1068,7 @@ void tb_ring_free_quarantined(struct tb_ring *ring)
 	memset(ring, 0, sizeof(*ring));
 	INIT_LIST_HEAD(&ring->queue);
 	INIT_LIST_HEAD(&ring->in_flight);
+	ring->queued_frames = ring->inflight_frames = 0;
 	ring->descriptors = descriptors;
 	ring->descriptors_dma = dma;
 	ring->size = size;

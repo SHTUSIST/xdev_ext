@@ -226,11 +226,14 @@ that can authorize later reclamation.
 
 A saved report remains readable after ordinary released handles are closed.
 It is the observation from that CREATE and cleanup, rather than a live status
-record. Currently `OBSERVED` and `observed.valid` remain clear. If
+record. A failed XDOMAIN bind captures `OBSERVED` before releasing its endpoint
+when that endpoint still belongs to the bound incarnation. A later stage failure
+also captures its diagnostic hook before rollback. Failure before an endpoint
+exists, or a stale incarnation, leaves `OBSERVED` clear. If
 `POST_ROLLBACK_RETENTION` is valid, `observed.retention` contains the requester
-ledger sampled after rollback; its totals can include other links sharing
-that requester. Those totals do not certify DMA quiescence. Dynamic stage
-queries and timeout diagnostic snapshots remain unimplemented. Admission,
+ledger sampled after rollback; this replaces the earlier retention sample and
+clears its diagnostic RETENTION valid bit. Its totals can include other links
+sharing that requester. Those totals do not certify DMA quiescence. Admission,
 topology and mapping observations require separate physical device validation.
 
 Normal `xdev_ext_mech_ctl` accepts `--diagnostics` on its CREATE paths. It calls
@@ -240,8 +243,7 @@ refusal mask. An unavailable report prints `diagnostics=unavailable` and the
 command remains failed. RETAINED output identifies kernel quarantine and
 states that fd close does not release DMA; the command skips explicit CUDA
 allocation destruction on that report path. Without the flag the command
-uses legacy CREATE. This flag does not enable a dynamic stage query or change
-wait deadlines.
+uses legacy CREATE. This flag does not change wait deadlines.
 
 ## 4. One call: NVMe -> NIC
 
@@ -468,6 +470,43 @@ an error. These read-only APIs do not register memory, submit I/O or establish
 GPU/NHI capabilities. Normal ctl exposes `peer-discover`, `peer-preflight
 --link TOKEN` and `peer-caps --ring-fd FD --session ID --stage N`; the last
 requires the inherited owning ring fd rather than querying a different ring.
+
+`xdev_ext_stage_diag_read(owning_ring_fd, session_id, stage, out)` queries
+STAGE_DIAG (operation 11, version 1). `xdev_ext_session_stage_diag` uses the
+session's own ring. The ring must still own the session; stopped objects may
+be queried until released. A missing session returns ENOENT, an invalid stage
+returns EINVAL, a class without the hook or an unknown version returns
+EOPNOTSUPP, and an incarnation mismatch returns ESTALE. The library checks the
+returned identity, version, validity masks, reserved fields and timestamp order.
+The version-1 library decoder currently supports XDOMAIN only and requires the
+IDENTITY valid bit; other classes or a missing identity return EPROTO, as does
+malformed output. Future classes need explicit client schema support. Every
+failure leaves `out` zero.
+
+The valid mask identifies IDENTITY (bit 0), NATIVE (1), RX_POSTED (2),
+CONTROL (3), PROTOCOL (4), and RETENTION (5). Readiness identifies control UP
+(bit 0), receive ready (1), closing (2), NHI gone (3), matching stage incarnation
+(4), and the existing startup data challenge verified for this channel (5).
+These observations do not establish GPU backing visibility or last use.
+Native counts describe only the selected channel and direction's real native
+in-flight list and software queue. RX_POSTED excludes frames still queued in
+software. Missing retired native rings clear NATIVE and RX_POSTED validity;
+zero counters alone do not establish safe release. Control free slots belong
+to the shared link. Protocol counters report outstanding CTS, ACK, FAIL, final
+chain waits, and completed local RX payload awaiting downstream release. They
+do not report CUDA kernel progress. Retention is the requester's existing
+aggregate ledger, including other links and services.
+
+The capture timestamps enclose separate lock-protected observations, rather
+than one atomic snapshot across protocol, native rings and retention. Query
+performs no allocation registration, mapping, provider admission, posting or
+policy invocation. Normal ctl exposes `peer-diag --ring-fd FD --session ID
+--stage N` through the same library API. Its wait helpers collect diagnostics
+for XDOMAIN stages recorded from a CREATE plan before returning a timeout to
+the original STOP and cleanup; diagnostic errors do not replace the timeout
+or reset its deadline. This wait-helper boundary is connected, but the CLI
+currently has no configurable XDOMAIN START/wait campaign. The `xdomain-probe`
+command remains an admission probe followed by STOP.
 
 The optional CUDA Driver library is built separately from the base C archive.
 Set XDEV_EXT_CUDA_PTX to the matching real PTX artifact before opening a GPU

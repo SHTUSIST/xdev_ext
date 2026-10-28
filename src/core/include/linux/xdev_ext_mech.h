@@ -361,6 +361,9 @@ struct xdev_ext_mech_class_ops {
                        struct xdev_ext_mech_batch *b, bool sequestered);
  /* Same session worker, bounded transport progress; returns next poll delay. */
  unsigned long (*progress)(struct xdev_ext_mech_stage *st);
+ /* Process-context, read-only query; owning ring keeps st alive. */
+ int (*stage_diag)(struct xdev_ext_mech_stage *st,
+                   struct xdev_ext_mech_stage_diag *out);
  /* Observational snapshot, provider lock only; both outputs start at zero. */
  void (*transport_stats)(struct xdev_ext_mech_stage *st, u32 *pending_acks,
                          u32 *uncertain_controls);
@@ -552,14 +555,16 @@ struct xdev_ext_mech_stage *xdev_ext_mech_stage_get_cmd(struct io_uring_cmd *iou
 					      u32 class_id);
 /* Any context; a final put frees the session from a worker. */
 void xdev_ext_mech_stage_put(struct xdev_ext_mech_stage *st);
+/* Non-NMI atomic or process context; never blocks. Close admission and queue
+ * drain, without declaring external users quiescent. */
+void xdev_ext_mech_stage_stop(struct xdev_ext_mech_stage *st, int err);
+/* Any context except NMI; read the existing stop reason without blocking. */
+int xdev_ext_mech_stage_stop_error(struct xdev_ext_mech_stage *st);
 /*
  * Any context, never blocks, even with xs->mutex held: the stage's device
  * went away.  Records @err, stops admission, calls ->mark_dead and queues
  * the teardown.
  */
-/* Close admission and drain, without declaring external users quiescent. */
-void xdev_ext_mech_stage_stop(struct xdev_ext_mech_stage *st, int err);
-int xdev_ext_mech_stage_stop_error(struct xdev_ext_mech_stage *st);
 void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st, int err);
 
 /* Any context. */
@@ -638,15 +643,16 @@ void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
                                          u64 ticket, int err, u32 produced);
 /* Any context after native publication: valid bytes reported by this stage. */
 u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b);
-/* Any context: publish one terminal native result using the immutable ticket. */
 enum xdev_ext_mech_external_outcome {
  XDEV_EXT_MECH_EXTERNAL_QUIESCED = 0,
  XDEV_EXT_MECH_EXTERNAL_UNKNOWN = 1,
 };
+/* Any context: publish one terminal native result using the immutable ticket. */
 int xdev_ext_mech_batch_external_complete(
  struct xdev_ext_mech_batch *b, u64 ticket, int err,
  enum xdev_ext_mech_external_outcome outcome);
 
+/* Any context: claim and publish one native completion for the immutable ticket. */
 void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int err);
 /* Any context: explicit local cancellation after proving no native owner remains. This
  * cannot report a hardware error; native failures use batch_complete(). */

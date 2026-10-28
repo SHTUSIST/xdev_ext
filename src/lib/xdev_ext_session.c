@@ -427,7 +427,7 @@ int xdev_ext_create_report_read(int owning_ring_fd,
      r->result > 0 || r->rollback_errno > 0 || (r->valid & ~valid) ||
      r->requester.rsvd || r->cleanup > XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED ||
      r->observed.rsvd || (r->observed.valid & ~0x3fU) ||
-     (r->observed.readiness & ~0x1fU) ||
+     (r->observed.readiness & ~0x3fU) ||
      r->observed.capture_begin_ns > r->observed.capture_end_ns)
   return -EPROTO;
  if (!(r->valid & XDEV_EXT_MECH_CREATE_VALID_REQUESTER)) {
@@ -756,6 +756,50 @@ int xdev_ext_session_stage_caps(struct xdev_ext_session *s, __u32 stage,
 	if (!ret)
 		*out = caps;
 	return ret;
+}
+
+int xdev_ext_stage_diag_read(int owning_ring_fd, __u64 session_id, __u32 stage,
+			   struct xdev_ext_mech_stage_diag *out)
+{
+	struct xdev_ext_mech_stage_diag d = {
+		.size = sizeof(d), .version = XDEV_EXT_MECH_STAGE_DIAG_VERSION,
+		.session_id = session_id, .stage = stage,
+	};
+	struct io_uring_xdev_ext_mech req = {
+		.op = XDEV_EXT_MECH_OP_STAGE_DIAG, .arg = (uintptr_t)&d,
+	};
+	int ret;
+
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (owning_ring_fd < 0 || !session_id || stage >= XDEV_EXT_MECH_MAX_STAGES)
+		return -EINVAL;
+	ret = xdev_ext__uring_register(owning_ring_fd, IORING_REGISTER_XDEV_EXT_MECH, &req);
+	if (ret)
+		return ret;
+	if (d.size != sizeof(d) || d.version != XDEV_EXT_MECH_STAGE_DIAG_VERSION ||
+	    d.session_id != session_id || d.stage != stage ||
+	    d.class_id != XDEV_EXT_MECH_CLASS_XDOMAIN ||
+	    !(d.valid & XDEV_EXT_MECH_DIAG_IDENTITY) ||
+	    d.valid & ~0x3fU || d.readiness & ~0x3fU || d.rsvd ||
+	    d.capture_begin_ns > d.capture_end_ns)
+		return -EPROTO;
+	*out = d;
+	return 0;
+}
+
+int xdev_ext_session_stage_diag(struct xdev_ext_session *s, __u32 stage,
+			       struct xdev_ext_mech_stage_diag *out)
+{
+	if (!out)
+		return -EINVAL;
+	memset(out, 0, sizeof(*out));
+	if (!s)
+		return -EINVAL;
+	if (!s->created || !s->id || s->released)
+		return -ENOTCONN;
+	return xdev_ext_stage_diag_read(s->ring, s->id, stage, out);
 }
 
 int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,

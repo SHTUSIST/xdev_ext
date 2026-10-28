@@ -868,6 +868,76 @@ void xdev_ext_xd_paths_disable(struct xdev_ext_xd_link *xl)
 	}
 }
 
+/* ctl_mutex pins allocation/retirement; each native sample has its own instant. */
+int xdev_ext_xd_link_diag(struct xdev_ext_xd_ep *ep,
+                         struct xdev_ext_mech_stage_diag *out)
+{
+	struct xdev_ext_xd_link *xl = ep->xl;
+	struct xdev_ext_mech_stage_diag d = *out;
+	struct xdev_ext_requester_retention_stats retention;
+	struct tb_ring_snapshot native;
+	struct tb_ring *ring;
+	unsigned long flags;
+	int ret = 0;
+
+	lockdep_assert_held(&xl->ctl_mutex);
+	spin_lock_irqsave(&xl->lock, flags);
+	if (ep->detached || ep->bound_local_inc != xl->local_inc ||
+	    ep->bound_remote_inc != xl->remote_inc) {
+		ret = -ESTALE;
+		goto unlock;
+	}
+	d.token = xl->token;
+	d.local_inc = xl->local_inc;
+	d.remote_inc = xl->remote_inc;
+	d.valid |= XDEV_EXT_MECH_DIAG_IDENTITY | XDEV_EXT_MECH_DIAG_CONTROL;
+	d.readiness = XDEV_EXT_MECH_DIAG_STAGE_INC_MATCH |
+		(xl->up ? XDEV_EXT_MECH_DIAG_CONTROL_UP : 0) |
+		(xl->receive_ready ? XDEV_EXT_MECH_DIAG_RECEIVE_READY : 0) |
+		(xdev_ext_xd_closing(xl) ? XDEV_EXT_MECH_DIAG_CLOSING : 0) |
+		(xl->nhi_gone ? XDEV_EXT_MECH_DIAG_NHI_GONE : 0) |
+		((xl->data_verified_mask & BIT(ep->chan)) ? XDEV_EXT_MECH_DIAG_DATA_VERIFIED : 0);
+	d.ctl_tx_free = xl->ctl_tx_alloc && !xl->ctl_tx_alloc->unknown ?
+		bitmap_weight(xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING) : 0;
+	d.valid &= ~(XDEV_EXT_MECH_DIAG_NATIVE | XDEV_EXT_MECH_DIAG_RX_POSTED);
+	d.native_inflight = d.software_pending = d.rx_native_posted = 0;
+	ring = ep->rx ? xl->chan[ep->chan].rx : xl->chan[ep->chan].tx;
+	if (ring) {
+		tb_ring_snapshot(ring, &native);
+		d.native_inflight = native.in_flight;
+		d.software_pending = native.software_pending;
+		d.valid |= XDEV_EXT_MECH_DIAG_NATIVE;
+		if (ep->rx) {
+			d.rx_native_posted = native.in_flight;
+			d.valid |= XDEV_EXT_MECH_DIAG_RX_POSTED;
+		}
+	}
+unlock:
+	spin_unlock_irqrestore(&xl->lock, flags);
+	if (ret)
+		return ret;
+	/* The requester ledger may include other links and services. */
+	xdev_ext_requester_retention_snapshot(xl->nhi_pdev, &retention);
+	d.retention = (struct xdev_ext_mech_retention_diag) {
+		.generations = retention.generations,
+		.retained_generations = retention.retained_generations,
+		.reserved_bytes = retention.reserved_bytes,
+		.retained_bytes = retention.retained_bytes,
+		.global_reserved_bytes = retention.global_reserved_bytes,
+		.global_retained_bytes = retention.global_retained_bytes,
+		.global_limit = retention.global_limit,
+	};
+	d.valid |= XDEV_EXT_MECH_DIAG_RETENTION;
+	spin_lock_irqsave(&xl->lock, flags);
+	if (ep->detached || ep->bound_local_inc != xl->local_inc ||
+	    ep->bound_remote_inc != xl->remote_inc)
+		ret = -ESTALE;
+	spin_unlock_irqrestore(&xl->lock, flags);
+	if (!ret)
+		*out = d;
+	return ret;
+}
+
 static void *xdev_ext_xd_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_stage_uapi *u,
 			      void (*dead)(void *), void *arg)
 {
@@ -899,8 +969,11 @@ static void *xdev_ext_xd_bind(struct xdev_ext_mech_stage *st, const struct xdev_
 		ret = -EAGAIN;
 	else if (xl->chan[ep->chan].ep[rx])
 		ret = -EBUSY;
-	else
+	else {
+		ep->bound_local_inc = xl->local_inc;
+		ep->bound_remote_inc = xl->remote_inc;
 		xl->chan[ep->chan].ep[rx] = ep;
+	}
 	spin_unlock_irq(&xl->lock);
 	mutex_unlock(&xl->ep_mutex);
 	if (ret) {

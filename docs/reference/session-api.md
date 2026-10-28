@@ -97,9 +97,30 @@ requester, reachability and refusal mask. Unsupported or invalid report
 delivery prints `diagnostics=unavailable`; the command still fails. RETAINED
 output identifies kernel quarantine; fd close does not demonstrate DMA
 release, and that report path skips explicit CUDA allocation destruction.
-Dynamic STAGE_DIAG queries, `peer-diag` and diagnostic snapshots before timeout
-STOP remain unimplemented in this revision. The report does not certify
-physical device execution or performance.
+STAGE_DIAG (operation 11) accepts a zero-initialized version-1
+`xdev_ext_mech_stage_diag` with only size, version, session ID and stage set.
+The owning ring performs the lookup, including for stopped sessions it still
+holds. XDOMAIN returns bounded protocol counts, the selected channel and
+direction's native queue membership, shared control free slots, readiness and
+requester retention. An absent native ring clears its validity bits. A detached
+endpoint or changed incarnation returns ESTALE. Other classes without a
+hook and unsupported versions return EOPNOTSUPP; malformed size or nonzero
+output fields return EINVAL. Query performs no mapping, posting or policy work.
+
+Use `xdev_ext_stage_diag_read` or `xdev_ext_session_stage_diag` to validate and
+copy a diagnostic value. The version-1 library decoder currently supports
+XDOMAIN only and requires IDENTITY validity; another class or missing identity
+returns EPROTO. Future class hooks require explicit client schema support.
+`peer-diag --ring-fd FD --session ID --stage N` uses the normal library and
+inherited owning ring. Wait helpers collect diagnostics for XDOMAIN stages
+recorded from the CREATE plan before their existing STOP and cleanup, retaining
+the original timeout even if diagnostic collection fails. This is a wait-helper
+boundary; the CLI currently provides no configurable XDOMAIN START/wait
+campaign. Capture timestamps bound separate observations; requester retention
+can include other links.
+A failed CREATE captures an available diagnostic value before class teardown;
+its post-rollback retention is separately marked and sampled later. The report
+does not certify physical device execution or performance.
 
 ## Pools and source spans
 

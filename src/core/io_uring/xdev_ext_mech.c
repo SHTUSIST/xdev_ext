@@ -3713,6 +3713,15 @@ static int xdev_ext_mech_create_common(struct io_ring_ctx *ctx,
  }
  /* Transfer report-only references before any class or session is freed. */
  if (r) {
+  if (ret && s->create_failed_stage < s->nr_stages) {
+   struct xdev_ext_mech_stage *st = &s->st[s->create_failed_stage];
+
+   if (st->priv && st->cls && st->cls->stage_diag &&
+       !st->cls->stage_diag(st, &st->create_observed)) {
+    st->create_observed.session_id = 0;
+    st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_OBSERVED;
+   }
+  }
   for (i = 0; i < s->nr_stages; i++) {
    refs[i] = s->st[i].create_requester;
    s->st[i].create_requester = NULL;
@@ -4368,6 +4377,41 @@ static int xdev_ext_mech_stage_caps_op(struct io_ring_ctx *ctx, void __user *uar
 	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
 }
 
+static int xdev_ext_mech_stage_diag_op(struct io_ring_ctx *ctx, void __user *uarg)
+{
+	struct xdev_ext_mech_stage_diag in, out = {};
+	struct xdev_ext_mech_session *s;
+	struct xdev_ext_mech_stage *st;
+	int ret;
+
+	if (copy_from_user(&in, uarg, sizeof(in)))
+		return -EFAULT;
+	if (in.version != XDEV_EXT_MECH_STAGE_DIAG_VERSION)
+		return -EOPNOTSUPP;
+	if (in.size != sizeof(in) ||
+	    memchr_inv(&in.class_id, 0, sizeof(in) -
+		       offsetof(struct xdev_ext_mech_stage_diag, class_id)))
+		return -EINVAL;
+	/* register holds this ring's uring_lock, including while stopped. */
+	s = xdev_ext_mech_find(ctx, in.session_id);
+	if (!s)
+		return -ENOENT;
+	if (in.stage >= s->nr_stages)
+		return -EINVAL;
+	st = &s->st[in.stage];
+	if (!st->cls->stage_diag)
+		return -EOPNOTSUPP;
+	ret = st->cls->stage_diag(st, &out);
+	if (ret)
+		return ret;
+	out.size = sizeof(out);
+	out.version = XDEV_EXT_MECH_STAGE_DIAG_VERSION;
+	out.session_id = in.session_id;
+	out.stage = in.stage;
+	out.class_id = st->class_id;
+	return copy_to_user(uarg, &out, sizeof(out)) ? -EFAULT : 0;
+}
+
 int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 			 unsigned int nr_args)
 {
@@ -4399,6 +4443,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return xdev_ext_mech_transport_stats(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_USER_STAGE:
 		return xdev_ext_mech_user_stage_create(u64_to_user_ptr(req.arg));
+	case XDEV_EXT_MECH_OP_STAGE_DIAG:
+		return xdev_ext_mech_stage_diag_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_STAGE_CAPS:
 		return xdev_ext_mech_stage_caps_op(ctx, u64_to_user_ptr(req.arg));
 	default:

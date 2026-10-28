@@ -29,6 +29,7 @@ struct xdev_ext_xd_ep {
 	struct xdev_ext_xd_link *xl;
 	struct xdev_ext_mech_stage *st;
 	u32 chan;
+	u64 bound_local_inc, bound_remote_inc;
 	bool rx;
 	bool detached;		/* a link down took it off chan[]; set under ep_mutex and lock */
 };
@@ -100,6 +101,8 @@ struct xdev_ext_xd_link *xdev_ext_xd_link_get(u64 token);
 void xdev_ext_xd_link_put(struct xdev_ext_xd_link *xl);
 void xdev_ext_xd_link_down(struct xdev_ext_xd_link *xl, int err);
 void xdev_ext_xd_link_fail(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_ep *ep, int err);
+/* Caller holds ctl_mutex and no spinlock. */
+int xdev_ext_xd_link_diag(struct xdev_ext_xd_ep *ep, struct xdev_ext_mech_stage_diag *out);
 /* xdev_ext_xdomain_ring.c */
 int  xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl);
 int  xdev_ext_xd_rings_start(struct xdev_ext_xd_link *xl);

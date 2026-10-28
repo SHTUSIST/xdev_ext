@@ -140,6 +140,12 @@ static struct xdev_ext_xd_reply *xd_reply_group(struct xdev_ext_xd_stage *xs, u6
 		if (xs->replies[i].used && xs->replies[i].group == group) return &xs->replies[i];
 	return NULL;
 }
+/* Same final status used by SEND_ACK/FAIL and observational diagnostics. */
+static int xd_reply_status(const struct xdev_ext_xd_reply *r)
+{
+	return r->local_status ? r->local_status :
+		(r->chain_status ? r->chain_status : r->sequestered ? -ENOLINK : 0);
+}
 static void xd_reply_put(struct xdev_ext_xd_stage *xs, struct xdev_ext_xd_reply *r)
 {
 	if (r && r->admission) {
@@ -727,7 +733,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 			if (!r->cts || (s && !f->accepted)) { ret = -EPROTO; break; }
 			m.type = XDEV_EXT_XD_CTS;
 		} else {
-			status = r->local_status ? r->local_status : (r->chain_status ? r->chain_status : r->sequestered ? -ENOLINK : 0);
+			status = xd_reply_status(r);
 			if (!r->final || (act == XDEV_EXT_XDP_ACT_SEND_ACK && (!r->chain_done || status || r->sequestered)) ||
 			    (act == XDEV_EXT_XDP_ACT_SEND_FAIL && (!status || status != v->status))) { ret = -EPROTO; break; }
 			m.type = act == XDEV_EXT_XDP_ACT_SEND_ACK ? XDEV_EXT_XD_ACK : XDEV_EXT_XD_FAIL;
@@ -1212,6 +1218,70 @@ static void xdev_ext_xd_class_transport_stats(struct xdev_ext_mech_stage *st, u3
 	}
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
 }
+static int xdev_ext_xd_class_stage_diag(struct xdev_ext_mech_stage *st,
+                                       struct xdev_ext_mech_stage_diag *out)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	struct xdev_ext_xd_ep *ep;
+	struct xdev_ext_mech_stage_diag d = {
+		.size = sizeof(d), .version = XDEV_EXT_MECH_STAGE_DIAG_VERSION,
+		.session_id = xdev_ext_mech_session_id(st->s),
+		.stage = st->index, .class_id = st->class_id,
+	};
+	unsigned long flags;
+	u32 k;
+	int ret;
+
+	if (!xs || !xs->ns.lk)
+		return -EOPNOTSUPP;
+	ep = xdev_ext_xd_ep_of(xs);
+	d.capture_begin_ns = ktime_get_boottime_ns();
+	mutex_lock(&ep->xl->ctl_mutex);
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	/* A failed attach has bound identity but no initialized protocol pair. */
+	if (xs->local_inc != ep->bound_local_inc ||
+	    xs->remote_inc != ep->bound_remote_inc) {
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+		ret = -ESTALE;
+		goto unlock;
+	}
+	for (k = 0; k < XD_REPLIES; k++) {
+		struct xdev_ext_xd_reply *r = &xs->replies[k];
+		struct xdev_ext_net_slot *slot;
+
+		if (!r->used)
+			continue;
+		if (r->cts)
+			d.cts_owed++;
+		if (r->final) {
+			if (xd_reply_status(r))
+				d.fail_owed++;
+			else if (r->chain_done && !r->sequestered)
+				d.ack_owed++;
+			else
+				d.final_waiting_chain++;
+		}
+		if (!xs->ns.rx || !r->native_posted || r->chain_done || r->sequestered)
+			continue;
+		slot = xd_group(xs, r->group);
+		if (slot && slot->local_known && slot->local_quiesced)
+			d.downstream_release_pending++;
+	}
+	for (k = 0; k < xs->rts_count; k++)
+		if (xs->rts[k].admission)
+			d.fail_owed++;
+	d.valid |= XDEV_EXT_MECH_DIAG_PROTOCOL;
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+	d.pool_generation = xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s));
+	ret = xdev_ext_xd_link_diag(ep, &d);
+	if (!ret) {
+		d.capture_end_ns = ktime_get_boottime_ns();
+		*out = d;
+	}
+unlock:
+	mutex_unlock(&ep->xl->ctl_mutex);
+	return ret;
+}
 static bool xd_rel(struct xdev_ext_mech_stage *st, struct xdev_ext_net_rel_view *out)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
@@ -1251,13 +1321,14 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 			(unsigned long long)xdev_ext_mech_session_id(st->s), st->index, pci_name(pdev), ret,
 			xs->ns.rq.adm.reachability, xs->ns.rq.adm.distance, xs->ns.rq.adm.backing, xs->ns.rq.adm.refused, xs->ns.admitted);
 	}
+	if (xs->ns.lk) {
+		ep = xdev_ext_xd_ep_of(xs);
+		spin_lock_irqsave(&xs->ns.lock, flags);
+		xs->local_inc = ep->bound_local_inc;
+		xs->remote_inc = ep->bound_remote_inc;
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+	}
 	if (ret) goto fini;
-	ep = xdev_ext_xd_ep_of(xs);
-	spin_lock_irqsave(&xs->ns.lock, flags);
-	spin_lock(&ep->xl->lock);
-	xs->local_inc = ep->xl->local_inc; xs->remote_inc = ep->xl->remote_inc;
-	spin_unlock(&ep->xl->lock);
-	spin_unlock_irqrestore(&xs->ns.lock, flags);
 	cfg = (struct xdev_ext_rel_cfg){ .session = xs->stream ? xs->stream : 1, .first_group = 1,
 		.window = XDEV_EXT_REL_MAX_WINDOW, .max_attempts = 1, .timeout_ns = XD_PHASE_NS,
 		.group_bytes = l->group_bytes, .seg_len = l->seg_len };
@@ -1265,6 +1336,11 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	if (ret) goto fini;
 	return 0;
  fini:
+	if (st->create_reporting && xs->ns.lk &&
+	    !xdev_ext_xd_class_stage_diag(st, &st->create_observed)) {
+		st->create_observed.session_id = 0;
+		st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_OBSERVED;
+	}
 	xdev_ext_netfam_fini(&xs->ns); st->priv = NULL;
  free:
 	kvfree(xs->facts); kfree(xs); return ret;
@@ -1275,6 +1351,7 @@ static void xdev_ext_xd_class_unbind(struct xdev_ext_mech_stage *st)
 	xdev_ext_netfam_fini(&xs->ns); st->priv = NULL; kvfree(xs->facts); kfree(xs);
 }
 static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
+	.stage_diag = xdev_ext_xd_class_stage_diag,
 	.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED,
 	.desc_size = sizeof(struct xdev_ext_xdomain_desc), .desc_cap = XDEV_EXT_MECH_MAX_FRAMES,
 	.info_size = sizeof(struct xdev_ext_xdomain_mech_info), .cqe_size = sizeof(struct xdev_ext_xdomain_mech_cqe), .cqe_cap = 1,

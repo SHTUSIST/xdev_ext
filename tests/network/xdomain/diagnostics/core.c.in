@@ -1,0 +1,116 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Real register dispatch and lookup; class hook is an explicit core boundary. */
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <linux/xdev_ext_mech.h>
+typedef __u32 u32;
+typedef __u64 u64;
+#define __user
+#define u64_to_user_ptr(n) ((void *)(uintptr_t)(n))
+#define READ_ONCE(x) (x)
+#define lockdep_assert_held(p) assert(*(p))
+#define ARRAY_SIZE(x) (sizeof(x)/sizeof((x)[0]))
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+struct list_head { struct list_head *next,*prev; };
+static void INIT_LIST_HEAD(struct list_head *h) { h->next=h->prev=h; }
+static void list_add_tail(struct list_head *n,struct list_head *h)
+{ n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n; }
+#define list_for_each_entry(p,h,m) \
+ for(p=container_of((h)->next,typeof(*p),m);&(p)->m!=(h);p=container_of((p)->m.next,typeof(*p),m))
+struct io_ring_ctx { int uring_lock; struct list_head xdev_ext_mech_sessions; };
+struct xdev_ext_mech_stage;
+struct xdev_ext_mech_class_ops {
+ int (*stage_diag)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_stage_diag *);
+};
+struct xdev_ext_mech_stage {
+ struct xdev_ext_mech_session *s;
+ const struct xdev_ext_mech_class_ops *cls;
+ u32 index,class_id;
+};
+struct xdev_ext_mech_session {
+ struct list_head ring_node;
+ u64 id; u32 nr_stages;
+ struct xdev_ext_mech_stage st[2];
+ struct { u32 state; } ss;
+};
+static unsigned copyouts,hook_calls,other_ops;
+static bool read_fault,write_fault;
+static int hook_error;
+static int copy_from_user(void *out,const void *in,size_t n)
+{ if(read_fault)return 1;memcpy(out,in,n);return 0; }
+static int copy_to_user(void *out,const void *in,size_t n)
+{ copyouts++;if(write_fault)return 1;memcpy(out,in,n);return 0; }
+static const void *memchr_inv(const void *p,int value,size_t n)
+{ const unsigned char *s=p;for(size_t i=0;i<n;i++)if(s[i]!=(unsigned char)value)return s+i;return NULL; }
+/* Other opcodes must never be selected by a diagnostic request. */
+#define OTHER(name,type) static int name(struct io_ring_ctx *ctx,type arg) { (void)ctx;(void)arg;other_ops++;return -ENOSYS; }
+OTHER(xdev_ext_mech_create,void *)
+OTHER(xdev_ext_mech_create_report_op,void *)
+OTHER(xdev_ext_mech_start,void *)
+OTHER(xdev_ext_mech_stop_op,u64)
+OTHER(xdev_ext_mech_stop_report_op,void *)
+OTHER(xdev_ext_mech_stats,void *)
+OTHER(xdev_ext_mech_notify_arm_op,void *)
+OTHER(xdev_ext_mech_transport_stats,void *)
+OTHER(xdev_ext_mech_stage_caps_op,void *)
+static int xdev_ext_mech_user_stage_create(void *arg) { (void)arg;other_ops++;return -ENOSYS; }
+/* PRODUCTION */
+static int observed(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_stage_diag *d)
+{
+ assert(st->s->id==73 && st->index==1);hook_calls++;
+ if(hook_error)return hook_error;
+ d->class_id=st->class_id;d->valid=1U|2U|8U|16U|32U;
+ d->readiness=1U|16U;d->token=211;d->local_inc=31;d->remote_inc=37;
+ d->pool_generation=41;d->capture_begin_ns=1000;d->capture_end_ns=1002;
+ d->native_inflight=2;d->software_pending=3;d->ctl_tx_free=5;
+ d->cts_owed=7;d->ack_owed=11;d->fail_owed=13;d->final_waiting_chain=17;
+ d->downstream_release_pending=19;d->retention.retained_generations=2;
+ d->retention.retained_bytes=8192;return 0;
+}
+static const struct xdev_ext_mech_class_ops supported={.stage_diag=observed},unsupported={0};
+static int check(bool ok,const char *why)
+{ if(!ok)fprintf(stderr,"DIAG_CORE_ASSERT: %s\n",why);return !ok; }
+int main(int argc,char **argv)
+{
+ assert(argc==2);const char *name=argv[1];
+ struct io_ring_ctx owner={.uring_lock=1},stranger={.uring_lock=1};
+ INIT_LIST_HEAD(&owner.xdev_ext_mech_sessions);INIT_LIST_HEAD(&stranger.xdev_ext_mech_sessions);
+ struct xdev_ext_mech_session s={.id=73,.nr_stages=2};
+ for(u32 i=0;i<2;i++)s.st[i]=(struct xdev_ext_mech_stage){.s=&s,.cls=&supported,.index=i,.class_id=10};
+ list_add_tail(&s.ring_node,&owner.xdev_ext_mech_sessions);
+ struct xdev_ext_mech_stage_diag d={.size=168,.version=1,.session_id=73,.stage=1},before;
+ struct io_uring_xdev_ext_mech req={.op=11,.arg=(uintptr_t)&d};
+ struct io_ring_ctx *ctx=&owner;int want=0;bool want_hook=true;
+ if(!strcmp(name,"owner")){ctx=&stranger;want=-ENOENT;want_hook=false;}
+ else if(!strcmp(name,"unknown-session")){d.session_id=74;want=-ENOENT;want_hook=false;}
+ else if(!strcmp(name,"stage-bounds")){d.stage=2;want=-EINVAL;want_hook=false;}
+ else if(!strcmp(name,"unsupported-class")){s.st[1].cls=&unsupported;want=-EOPNOTSUPP;want_hook=false;}
+ else if(!strcmp(name,"stopped")){s.ss.state=3;}
+ else if(!strcmp(name,"stale")){hook_error=-ESTALE;want=-ESTALE;}
+ else if(!strcmp(name,"size")){d.size--;want=-EINVAL;want_hook=false;}
+ else if(!strcmp(name,"version")){d.version=2;want=-EOPNOTSUPP;want_hook=false;}
+ else if(!strcmp(name,"dirty-output")){d.native_inflight=1;want=-EINVAL;want_hook=false;}
+ else if(!strcmp(name,"dirty-reserved")){d.rsvd=1;want=-EINVAL;want_hook=false;}
+ else if(!strcmp(name,"read-fault")){read_fault=true;want=-EFAULT;want_hook=false;}
+ else if(!strcmp(name,"write-fault")){write_fault=true;want=-EFAULT;}
+ else assert(!strcmp(name,"query"));
+ before=d;struct xdev_ext_mech_session saved=s;
+ int got=io_xdev_ext_mech_register(ctx,&req,1);int bad=0;
+ bad+=check(got==want,"op11 result must follow query/validation contract");
+ bad+=check(hook_calls==(unsigned)want_hook,"only valid owning-stage queries invoke class once");
+ bad+=check(!other_ops,"query never dispatches lifecycle or other operations");
+ bad+=check(!memcmp(&s,&saved,sizeof(s)),"core query preserves session and stage state");
+ if(want)bad+=check(!memcmp(&d,&before,sizeof(d)),"errors preserve caller snapshot");
+ else {
+  bad+=check(d.size==168 && d.version==1 && d.session_id==73 && d.stage==1,"core preserves query identity");
+  bad+=check(d.token==211 && d.local_inc==31 && d.remote_inc==37 && d.native_inflight==2 && d.software_pending==3 && d.cts_owed==7 && d.fail_owed==13 && d.downstream_release_pending==19 && d.retention.retained_bytes==8192,"complete class value is delivered");
+ }
+ printf("DIAG_CORE %s got=%d expected=%d hooks=%u failures=%d\n",name,got,want,hook_calls,bad);
+ return !!bad;
+}

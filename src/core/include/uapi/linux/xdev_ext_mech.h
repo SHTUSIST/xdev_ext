@@ -589,6 +589,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_STAGE_CAPS	= 8,	/* struct xdev_ext_mech_stage_caps */
 	XDEV_EXT_MECH_OP_STOP_REPORT	= 9,	/* struct xdev_ext_mech_stop_report */
 	XDEV_EXT_MECH_OP_CREATE_REPORT = 10, /* struct xdev_ext_mech_create_with_report */
+	XDEV_EXT_MECH_OP_STAGE_DIAG = 11, /* struct xdev_ext_mech_stage_diag */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U
@@ -708,6 +709,18 @@ struct xdev_ext_mech_retention_diag {
  __aligned_u64 reserved_bytes, retained_bytes;
  __aligned_u64 global_reserved_bytes, global_retained_bytes, global_limit;
 };
+#define XDEV_EXT_MECH_DIAG_IDENTITY (1U << 0)
+#define XDEV_EXT_MECH_DIAG_NATIVE (1U << 1)
+#define XDEV_EXT_MECH_DIAG_RX_POSTED (1U << 2)
+#define XDEV_EXT_MECH_DIAG_CONTROL (1U << 3)
+#define XDEV_EXT_MECH_DIAG_PROTOCOL (1U << 4)
+#define XDEV_EXT_MECH_DIAG_RETENTION (1U << 5)
+#define XDEV_EXT_MECH_DIAG_CONTROL_UP (1U << 0)
+#define XDEV_EXT_MECH_DIAG_RECEIVE_READY (1U << 1)
+#define XDEV_EXT_MECH_DIAG_CLOSING (1U << 2)
+#define XDEV_EXT_MECH_DIAG_NHI_GONE (1U << 3)
+#define XDEV_EXT_MECH_DIAG_STAGE_INC_MATCH (1U << 4)
+#define XDEV_EXT_MECH_DIAG_DATA_VERIFIED (1U << 5)
 struct xdev_ext_mech_stage_diag {
  __u32 size, version;
  __aligned_u64 session_id;
