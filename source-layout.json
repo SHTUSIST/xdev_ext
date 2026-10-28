@@ -3263,8 +3263,7 @@
     },
     {
       "source": "tests/compute/user_stage/ordered_frames_kvm.sh",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/ordered_frames_kvm.sh"
+      "logical_path": "tests/compute/user_stage/ordered_frames_kvm.sh"
     },
     {
       "source": "tests/compute/user_stage/ordered_frames_validate.py",
