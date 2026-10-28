@@ -30,8 +30,13 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "xdomain_review_stats_ring_test",
     "requester_retention_test",
     "xdomain_review_retention_ring_test",
+    "xdomain_login_reply_test", "xdomain_review_tbnet_test",
+    "xdomain_review_stop_epoch_test",
 )) + (
     "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/stop_report_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/ordered_frames_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/ordered_frames_worker_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py",
     "gpu/tests/nv_xdev_ext_peer_raw_bus_source_test.py",
 ) + tuple(EVAL + name + ".py" for name in (
     "test_epoch_control", "test_control_guard", "test_gpu_contract", "test_build",
@@ -44,6 +49,9 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_prepared_inputs.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_test.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_mutations.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/nhi_stack_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_nhi_stack_mutations.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_environment_test.py",
 )
 
 

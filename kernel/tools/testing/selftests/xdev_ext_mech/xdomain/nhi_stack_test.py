@@ -47,6 +47,8 @@ def execute(kernel, out, case=None, sanitize=False):
 
     try:
         expected = json.loads((here / 'nhi_stack_expected.json').read_text())
+        expected['source_units'] = expected['source_units'] + [
+            'kernel/io_uring/family/xdev_ext_requester_retention.c']
         selected = [item for item in expected['cases']
                     if case is None or item['name'] == case]
         if not selected:
@@ -60,7 +62,12 @@ def execute(kernel, out, case=None, sanitize=False):
         required += list(here.glob('stack_nhi*.h'))
         required += [kernel.parent / name for name in expected['source_units']]
         required += [kernel / 'drivers/thunderbolt/nhi_regs.h',
-                     kernel / 'include/linux/thunderbolt.h']
+                     kernel / 'include/linux/thunderbolt.h',
+                     kernel / 'include/linux/xdev_ext_requester_retention.h']
+        support = [here.parent / 'peer_graph' / name for name in (
+            'xdomain_retention_fixture.py', 'xdomain_ring_test.py',
+            'xdomain_fixture.py')]
+        required += support
         absent = [str(path) for path in required if not path.is_file()]
         if absent:
             raise FileNotFoundError('missing actual composition input: ' + ', '.join(absent))
@@ -75,6 +82,8 @@ def execute(kernel, out, case=None, sanitize=False):
                           for name in expected['source_units']},
             fixture_inputs={str(path.relative_to(kernel)): sha256(path)
                             for path in sorted(set(required)) if path.is_relative_to(here)},
+            support_inputs={str(path.relative_to(kernel)): sha256(path)
+                            for path in support + [kernel / 'include/linux/xdev_ext_requester_retention.h']},
             nhi_prefix=dict(path=str(NHI), end_before='int nhi_mailbox_cmd(',
                             sha256=hashlib.sha256(prefix[0]).hexdigest(),
                             bytes=len(prefix[0])),

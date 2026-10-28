@@ -2,6 +2,13 @@
 /* External kernel/NHI/provider recorder. Payload is never CPU accessible. */
 #define STACK_INTERNAL
 #include "stack_kernel_compat.h"
+/* Actual built-in requester budget, with only kernel OS facilities facaded. */
+#include "../../../../../io_uring/family/xdev_ext_requester_retention.c"
+#ifndef STACK_REAL_NHI
+/* Actual NHI declaration and sizing body; never a copied byte formula. */
+#include "stack_descriptor_source.inc"
+#endif
+unsigned long jiffies;
 #define STACK_RECORDS 200000
 #define STACK_NATIVE 40000
 #define STACK_BATCHES 512
@@ -216,7 +223,9 @@ bool cancel_work_sync(struct work_struct*w){
 	bool was=w->pending;
 	w->pending=false;
 	for(unsigned i=0;i<world->nwork;i++)if(world->work[i]==w){
-		world->work[i]=world->work[--world->nwork];
+		world->nwork--;
+		memmove(&world->work[i],&world->work[i+1],
+		        (world->nwork-i)*sizeof(world->work[0]));
 		break;
 	}
 	return was;
@@ -238,7 +247,7 @@ void pci_dev_put(struct pci_dev*p){
 void stack_x3_pci_put(struct pci_dev*p){
 	pci_dev_put(p);
 	stack_record((struct stack_event){
-		.kind=STACK_EV_DEVICE_PUT,.endpoint=endpoint_pci(p),.address=(uintptr_t)p
+		.kind=STACK_EV_DEVICE_PUT,.endpoint=endpoint_pci(p),.address=(uintptr_t)p,.length=p->refs
 	}
 	);
 }
@@ -703,6 +712,15 @@ bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session*s){
 u64 xdev_ext_mech_session_stop_started_ns(struct xdev_ext_mech_session*s){
 	return s->stop_started_ns;
 }
+void xdev_ext_mech_stage_stop(struct xdev_ext_mech_stage *st,int err){
+ /* Core session storage is an explicit host boundary. Preserve its real
+  * STOP transition and first timestamp; this is not the actual-core gate. */
+ (void)err;
+ if(!xdev_ext_mech_sess_stop(&st->s->ss)){
+  st->s->stop_started_ns=world->now;
+  st->s->kicked=true;
+ }
+}
 void*xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch*b){
 	return b->priv;
 }
@@ -831,6 +849,9 @@ int stack_new(const struct stack_config*c,struct stack_world**out){
 		;
 		s->pci.refs=1;
 		s->nhi.pdev=&s->pci;
+#ifndef STACK_REAL_NHI
+  s->nhi.hop_count=32;
+#endif
 #ifdef STACK_REAL_NHI
   stack_nhi_init(&s->nhi, &s->pci);
 #endif
@@ -1247,6 +1268,7 @@ int stack_pump(struct stack_world *w,unsigned budget,uint64_t advance)
  if(w!=world)return -EINVAL;
  worker_safe();
  if(__builtin_add_overflow(w->now,advance,&w->now))return -EOVERFLOW;
+ jiffies=nsecs_to_jiffies(w->now);
  w->pump_serial++;
  unsigned used=0;
  for(;;){
@@ -1264,7 +1286,11 @@ int stack_pump(struct stack_world *w,unsigned budget,uint64_t advance)
    }
    scheduler_step(w,budget,&used,STACK_STEP_WORK,w->active,0);
    work->pending=false;
-   w->work[work_index]=w->work[--w->nwork];
+   /* Keep the deterministic workqueue FIFO. Swapping the newest entry here
+    * can run a later LOGIN before already queued receive-path setup. */
+   w->nwork--;
+   memmove(&w->work[work_index],&w->work[work_index+1],
+           (w->nwork-work_index)*sizeof(w->work[0]));
    work->fn(work);
    continue;
   }

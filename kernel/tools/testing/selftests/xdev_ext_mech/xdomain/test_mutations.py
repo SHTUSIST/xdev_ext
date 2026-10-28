@@ -27,6 +27,14 @@ def copy_mutation_inputs(kernel, dest):
     here = kernel / HERE.relative_to(HERE.parents[4])
     expected = json.loads((here / 'stack_expected.json').read_text())
     pending = [kernel.parent / name for name in expected['source_units']]
+    # Exact production dependencies of retention and descriptor-byte accounting.
+    pending += [kernel / name for name in (
+        'io_uring/family/xdev_ext_requester_retention.c',
+        'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h',
+        'include/linux/thunderbolt.h')]
+    pending += [here.parent / 'peer_graph' / name for name in (
+        'xdomain_retention_fixture.py', 'xdomain_ring_test.py',
+        'xdomain_fixture.py')]
     pending += [here / name for name in expected['wrappers']]
     pending += [here / name for name in ('stack_cases.c', 'stack_kernel_compat.h',
                                         'stack_expected.json', 'stack_test.py', 'test_mutations.py')]

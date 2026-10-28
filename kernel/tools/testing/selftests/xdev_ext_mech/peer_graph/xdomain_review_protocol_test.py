@@ -34,7 +34,8 @@ def source(kernel, here):
     core = enum.group() + "\n" + "\n".join(fixture.function(core_text, name) for name in (
         "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_progress_work",
         "xdev_ext_mech_session_stop", "xdev_ext_mech_session_stop_started_ns",
-        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_stage_kick", "xdev_ext_mech_end"))
+        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_stage_kick", "xdev_ext_mech_end") +
+        (("xdev_ext_mech_stage_stop",) if "\nvoid xdev_ext_mech_stage_stop(" in core_text else ()))
     family = fixture.region(read("io_uring/family/xdev_ext_netfam.c"),
         "/* xdev_ext_netfam runtime begin */", "/* xdev_ext_netfam runtime end */")
     # The original case source is included verbatim with a renamed entry point;
@@ -79,6 +80,10 @@ static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w
 
 def ring_source(kernel, here):
     read = lambda relative: (kernel / relative).read_text()
+    support = ""
+    if (kernel / "include/linux/xdev_ext_requester_retention.h").is_file():
+        from xdomain_retention_fixture import retention_unit, descriptor_unit
+        support = retention_unit(kernel) + descriptor_unit(kernel)
     declaration = ring_fixture.declaration
     lease = "\n".join(declaration(read("include/linux/xdev_ext_peer.h"), "struct " + name)
                        for name in ("xdev_ext_peer_lease", "xdev_ext_peer_fd_lease"))
@@ -90,7 +95,7 @@ def ring_source(kernel, here):
     return ((here / "xdomain_ring_compat.h").read_text() +
             '\n#include "include/uapi/linux/xdev_ext_mech.h"\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n\n#include "include/linux/xdev_ext_mech_reliable_core.h"\n' +
             lease + family + fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain.h")) +
-            (here / "xdomain_ring_boundaries.c").read_text() +
+            (here / "xdomain_ring_boundaries.c").read_text() + support +
             fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain_ring.c")) +
             "\n#define main review_unused_ring_original_main\n" + (here / "xdomain_ring_cases.c").read_text() +
             "\n#undef main\n" + (here / "xdomain_review_protocol_ring_cases.c").read_text())
@@ -100,10 +105,16 @@ def ring_source(kernel, here):
 def down_source(kernel, here):
     # Complete main.c and unchanged login boundary/case bytes. The appended
     # independent case runs actual link_fail/down_work, not their recorder.
-    return ((here / "xdomain_login_compat.h").read_text() +
+    support = ""
+    clock = ""
+    if (kernel / "include/linux/xdev_ext_requester_retention.h").is_file():
+        from xdomain_retention_fixture import retention_unit
+        support = retention_unit(kernel)
+        clock = "\nstatic unsigned long jiffies;\n#define time_before(a,b) ((long)((a)-(b))<0)\n#define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))\n"
+    return ((here / "xdomain_login_compat.h").read_text() + clock +
             '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n' +
             fixture.no_includes((kernel / "io_uring/xdomain/xdev_ext_xdomain.h").read_text()) +
-            (here / "xdomain_login_boundaries.c").read_text() +
+            (here / "xdomain_login_boundaries.c").read_text() + support +
             fixture.no_includes((kernel / "io_uring/xdomain/xdev_ext_xdomain_main.c").read_text()) +
             "\n#define main review_unused_login_original_main\n" + (here / "xdomain_login_cases.c").read_text() +
             "\n#undef main\n" + (here / "xdomain_review_protocol_down_cases.c").read_text())

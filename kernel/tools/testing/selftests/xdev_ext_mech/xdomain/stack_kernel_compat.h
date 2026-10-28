@@ -171,6 +171,7 @@ typedef int32_t s32; typedef int64_t s64; typedef uintptr_t dma_addr_t;
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((long)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-4095)
+#define MAX_ERRNO 4095
 #define WARN_ON_ONCE(x) ({bool bad=!!(x); assert(!bad); bad;})
 struct list_head {struct list_head *next,*prev;};
 #define LIST_HEAD_INIT(n) {&(n),&(n)}
@@ -207,6 +208,7 @@ typedef struct{int n;} atomic_t;
 typedef struct{long long n;} atomic64_t;
 #define ATOMIC64_INIT(v) {.n=(v)}
 static inline int atomic_read(const atomic_t *a){return a->n;}
+static inline void atomic_set(atomic_t *a,int n){a->n=n;}
 static inline int atomic_read_acquire(const atomic_t *a){return a->n;}
 static inline void atomic_set_release(atomic_t *a,int n){a->n=n;}
 static inline int atomic_cmpxchg(atomic_t*a,int o,int n){int old=a->n;if(old==o)a->n=n;return old;}
@@ -234,6 +236,8 @@ bool cancel_work_sync(struct work_struct*);
 bool cancel_delayed_work_sync(struct delayed_work*);
 static inline unsigned long msecs_to_jiffies(unsigned long n){return n;}
 static inline unsigned long nsecs_to_jiffies(u64 n){return (n+NSEC_PER_MSEC-1)/NSEC_PER_MSEC;}
+extern unsigned long jiffies;
+#define time_before(a,b) ((long)((a)-(b))<0)
 u64 ktime_get_boottime_ns(void);
 typedef struct{u8 b[16];} uuid_t;
 #define UUID_INIT(a,b,c,d,e,f,g,h,i,j,k) {{(a)>>24,((a)>>16)&255,((a)>>8)&255,(a)&255,(b)>>8,(b)&255,(c)>>8,(c)&255,d,e,f,g,h,i,j,k}}
@@ -244,7 +248,7 @@ struct pci_dev{struct device dev;unsigned refs;bool msix_enabled;};
 #ifdef STACK_REAL_NHI
 #include "stack_nhi_compat.h"
 #else
-struct tb_nhi{struct pci_dev *pdev;bool going_away;};
+struct tb_nhi{struct pci_dev *pdev;bool going_away;u32 hop_count;};
 #endif
 struct tb{struct tb_nhi*nhi;};
 struct tb_xdomain{u64 route;const uuid_t*local_uuid,*remote_uuid;struct tb*tb;struct device dev;};
@@ -277,6 +281,7 @@ void tb_ring_start(struct tb_ring*);void tb_ring_stop(struct tb_ring*);void tb_r
 int tb_ring_tx(struct tb_ring*,struct ring_frame*);int tb_ring_rx(struct tb_ring*,struct ring_frame*);
 struct device*tb_ring_dma_device(struct tb_ring*);
 #endif
+size_t tb_ring_descriptor_bytes(unsigned int);
 int tb_xdomain_alloc_in_hopid(struct tb_xdomain*,int);int tb_xdomain_alloc_out_hopid(struct tb_xdomain*,int);
 void tb_xdomain_release_in_hopid(struct tb_xdomain*,int);void tb_xdomain_release_out_hopid(struct tb_xdomain*,int);
 int tb_xdomain_enable_paths(struct tb_xdomain*,int,int,int,int);int tb_xdomain_disable_paths(struct tb_xdomain*,int,int,int,int);

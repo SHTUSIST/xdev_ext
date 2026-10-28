@@ -30,7 +30,7 @@
     {
       "id": 1,
       "name": "probe_login_identity",
-      "requirement": "probe/login/data-before-control path/HopIDs/rings/NHI requester identity and exactly-once release",
+      "requirement": "probe/login/data-before-control path/HopIDs/rings/NHI requester identity, healthy control release and PCI reference balance",
       "event_budget": 4096,
       "assertions": [
         "two_probes",
@@ -38,7 +38,9 @@
         "data_paths_before_control",
         "requester_identity",
         "hopid_balance",
-        "ring_balance"
+        "ring_balance",
+        "healthy_control_release",
+        "pci_reference_balance"
       ]
     },
     {

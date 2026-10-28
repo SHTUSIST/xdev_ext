@@ -122,7 +122,8 @@ def main():
     if not end_enum: raise ValueError("actual core end disposition enum missing")
     core = end_enum.group(0) + "\n" + "\n".join(function(texts["core"], name) for name in (
         "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_progress_work", "xdev_ext_mech_session_stop", "xdev_ext_mech_session_stop_started_ns",
-        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_end"))
+        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_end") +
+        (("xdev_ext_mech_stage_stop",) if "\nvoid xdev_ext_mech_stage_stop(" in texts["core"] else ()))
     # Diagnostic selection copies the selected original case byte-for-byte;
     # the default full-suite body and every oracle remain unchanged.
     selected_policy = args.case and args.case.startswith("P") and args.case != "P19"

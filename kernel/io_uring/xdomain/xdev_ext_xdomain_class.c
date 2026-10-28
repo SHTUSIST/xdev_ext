@@ -896,8 +896,15 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 	struct xdev_ext_xd_reply *r;
 	u64 now = ktime_get_boottime_ns();
 	u32 k, ev;
-	if (!xdev_ext_mech_session_admits(xs->ns.st->s)) {
-		if (!xs->stop_latched) { xs->stop_ns = xdev_ext_mech_session_stop_started_ns(xs->ns.st->s); xs->stop_latched = true; xs->epoch++; }
+	if (!xs->stop_latched && !xdev_ext_mech_session_admits(xs->ns.st->s)) {
+		/* Registry retraction closes admission before generation_gone
+		 * publishes STOP. Establish the core timestamp before latching it;
+		 * zero is also a valid timestamp for an actual STOP at boot.
+		 */
+		xdev_ext_mech_stage_stop(xs->ns.st, 0);
+		xs->stop_ns = xdev_ext_mech_session_stop_started_ns(xs->ns.st->s);
+		xs->stop_latched = true;
+		xs->epoch++;
 	}
 	if (xs->overflow) { xd_fail_locked(xs, -EPROTO); xd_terminal_locked(xs, -ENOLINK); return false; }
 	if (xs->failed || xs->ns.dead || xs->down_latched) {

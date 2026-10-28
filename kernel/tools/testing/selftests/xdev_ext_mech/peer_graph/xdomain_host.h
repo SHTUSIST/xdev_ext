@@ -121,6 +121,8 @@ struct xdev_ext_mech_session {
  atomic64_t done,aborted;
  int drain_wq,last_err,stop_err;
  u64 stop_started_ns;
+ struct xdev_ext_mech_start_queue *start_queue;
+ bool start_ordered;
  void *worker;
  struct work_struct reap_work,kick_work,stop_work;
  struct kthread_delayed_work progress_work;
@@ -131,6 +133,7 @@ struct xdev_ext_mech_batch {
  struct { unsigned state,stage; } bs;
  u32 nr;
  u64 ticket;
+ bool ordered_loan;
  unsigned claims,publishes,filled,ended,disposition_order;
  int status;
  bool sequester,disposed;
@@ -188,6 +191,13 @@ static int queue_work(void *queue,struct work_struct *work) { (void)queue;work->
 static int kthread_queue_work(void *queue,struct work_struct *work) { return queue_work(queue,work); }
 static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w,unsigned long delay) { (void)delay;return queue_work(queue,&w->work); }
 #define system_unbound_wq NULL
+/* Existing XDOMAIN cases do not enter ordered START queue release. Refuse
+ * that external boundary rather than inventing a successful lifecycle. */
+static int xdev_ext_mech_start_queue_release(struct xdev_ext_mech_session *s,
+ struct xdev_ext_mech_batch *b, bool reusable) {
+ (void)s;(void)b;(void)reusable;
+ assert(!"ordered START queue outside XDOMAIN class fixture scope");return -EOPNOTSUPP;
+}
 @CORE@
 /* Full actual family runtime; no substituted CHANNEL policy. */
 @FAMILY@

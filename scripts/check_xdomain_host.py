@@ -34,6 +34,8 @@ ENTRYPOINTS = (
         "xdomain_review_stats_ring_test.py",
         "requester_retention_test.py",
         "xdomain_review_retention_ring_test.py",
+        "xdomain_login_reply_test.py", "xdomain_review_tbnet_test.py",
+        "xdomain_review_stop_epoch_test.py",
     )),
     "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/stop_report_test.py",
     "gpu/tests/nv_xdev_ext_peer_raw_bus_source_test.py",
@@ -51,6 +53,10 @@ ENTRYPOINTS = (
     STACK + "test_mutations.py",
     STACK + "nhi_stack_test.py",
     STACK + "test_nhi_stack_mutations.py",
+    STACK + "stack_environment_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/ordered_frames_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/ordered_frames_worker_test.py",
+    "kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py",
 )
 
 REJECT_OUTPUT = re.compile(

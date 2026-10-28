@@ -6,6 +6,7 @@ The independent expected set is frozen in stack_expected.json. Missing wrappers
 are an initial missing-composition RED, never a semantic mutation result.
 """
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+RETENTION = 'kernel/io_uring/family/xdev_ext_requester_retention.c'
 
 
 def facade(kernel, directory):
@@ -47,18 +49,32 @@ def facade(kernel, directory):
         dest = directory / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text('/* kernel environment facade, no production bodies */\n')
+    # The old ring model also needs the new actual NHI descriptor accounting
+    # helper. Reuse the qualified extraction instead of inventing a quota.
+    sys.path.insert(0, str(kernel / 'tools/testing/selftests/xdev_ext_mech/peer_graph'))
+    from xdomain_retention_fixture import descriptor_unit
+    (directory / 'stack_descriptor_source.inc').write_text(descriptor_unit(kernel))
 
 
 def execute(kernel, out, case=None, sanitize=False):
     expected = json.loads((HERE / 'stack_expected.json').read_text())
+    expected['source_units'] = expected['source_units'] + [RETENTION]
+    provenance = expected['source_units'] + [
+        'kernel/drivers/thunderbolt/nhi.c',
+        'kernel/drivers/thunderbolt/nhi_regs.h',
+        'kernel/include/linux/thunderbolt.h',
+        'kernel/include/linux/xdev_ext_requester_retention.h']
     sources = [HERE / name for name in expected['wrappers']] + [HERE / 'stack_cases.c']
     absent = [str(p) for p in sources + [HERE / 'stack_kernel_compat.h'] if not p.is_file()]
-    absent += [str(kernel.parent / p) for p in expected['source_units'] if not (kernel.parent / p).is_file()]
+    absent += [str(kernel.parent / p) for p in provenance if not (kernel.parent / p).is_file()]
     if absent:
         print('STACK_MISSING_COMPOSITION_RED: actual stack has not executed', flush=True)
         for p in absent:
             print('missing: ' + p, flush=True)
         return 2
+    (out / 'source-units.json').write_text(json.dumps({
+        name: hashlib.sha256((kernel.parent / name).read_bytes()).hexdigest()
+        for name in provenance}, indent=2) + '\n')
     env = out / 'facade'
     facade(kernel, env)
     binary = out / 'stack-cases'

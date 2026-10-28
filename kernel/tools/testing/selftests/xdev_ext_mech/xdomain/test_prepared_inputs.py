@@ -38,6 +38,16 @@ class PreparedInputs(unittest.TestCase):
         # Resolve only project-owned C definitions. Kernel/libc environmental
         # headers belong to stack_test's real facade or installed exported UAPI.
         pending = list(seeds)
+        # The real retention ledger and descriptor-byte extractor are now
+        # executed by the stack. Keep their exact native input closure,
+        # while the poison headers and unrelated sparse source stay excluded.
+        pending += [KERNEL / name for name in (
+            'io_uring/family/xdev_ext_requester_retention.c',
+            'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h',
+            'include/linux/thunderbolt.h')]
+        pending += [HERE.parent / 'peer_graph' / name for name in (
+            'xdomain_retention_fixture.py', 'xdomain_ring_test.py',
+            'xdomain_fixture.py')]
         inputs = {}
         include = re.compile(r'^\s*#\s*include\s*[<"]([^>"\n]+)[>"]', re.M)
         while pending:
