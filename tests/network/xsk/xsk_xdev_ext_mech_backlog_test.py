@@ -38,6 +38,9 @@ class Backlog(unittest.TestCase):
         protocol += '\n' + extract(prog.replace('XDEV_EXT_MP_INLINE ', 'static inline '),
                                     'xdev_ext_mp_rx_order')
         code = (HERE / 'xsk_xdev_ext_mech_backlog_fixture.c').read_text()
+        # The real core batch reset now clears ordered START custody metadata.
+        code = code.replace('struct xdev_ext_mech_batch {',
+                            'struct xdev_ext_mech_batch {bool ordered_loan;')
         has_pending = bool(types.strip())
         code = code.replace('/* PENDING_TYPES */', types)
         code = code.replace('/* PROTOCOL */', protocol)

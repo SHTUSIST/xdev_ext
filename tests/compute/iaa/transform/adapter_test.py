@@ -12,7 +12,7 @@ import subprocess
 import tempfile
 import unittest
 from acquire_red_test import function
-from lease_test import FUNCTIONS
+from lease_test import FUNCTIONS, start_queue_closure
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
@@ -45,7 +45,7 @@ static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,const 
 def build_source(adapter, core):
     # Reuse only the existing fixture's kernel boundary types and helpers.
     # Its production placeholders are still replaced by the current real code.
-    shared = (HERE / 'lease_fixture.c').read_text().split('int main(', 1)[0]
+    shared = start_queue_closure((HERE / 'lease_fixture.c').read_text().split('int main(', 1)[0], core)
     shared = shared.replace('const struct xdev_ext_mech_class_ops *cls;};',
                             'const struct xdev_ext_mech_class_ops *cls;void *priv;};')
     shared = shared.replace('struct xdev_ext_mech_session {\n',

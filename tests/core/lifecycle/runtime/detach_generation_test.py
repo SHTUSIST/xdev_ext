@@ -18,8 +18,8 @@ ROOT = Path(os.environ.get('KERNEL_SRC', str(HERE.parents[4]))).resolve()
 
 
 def function(text, name):
-    match = re.search(r'^([^\n;#{}]*\b' + re.escape(name) +
-                      r'\s*\([^;]*?\))\s*\{', text, re.M)
+    match = re.search(r'^[A-Za-z_][^;{}=()]*?\b' + re.escape(name) +
+                      r'\s*\([^;{}]*\)\s*\{', text, re.M)
     if not match:
         raise AssertionError('missing production definition: ' + name)
     start, depth = match.start(), 0
@@ -38,7 +38,10 @@ def generate(kernel=ROOT):
     source = (HERE / 'detach_generation_fixture.c.in').read_text()
     source = source.replace('struct xdev_ext_mech_session{',
                             'static u64 ktime_get_boottime_ns(void){return 0;}\n'
-                            'struct xdev_ext_mech_session{\n u64 stop_started_ns;', 1)
+                            'struct xdev_ext_mech_session{\n u64 stop_started_ns;\n'
+                            ' bool create_pending_publish,start_ordered;\n'
+                            ' struct xdev_ext_mech_start_queue *start_queue;', 1)
+    source = '#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)\n' + source
     start = header.index('struct xdev_ext_ops_registry {')
     source = source.replace('@REGISTRY_STRUCT@', header[start:header.index('\n};', start) + 3])
     names = [(header, 'xdev_ext_ops_is_current'), (registry, 'xdev_ext_ops_retract'),

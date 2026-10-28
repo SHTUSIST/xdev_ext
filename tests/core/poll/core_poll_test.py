@@ -28,6 +28,9 @@ FIXTURE = r'''
 #include "io_uring/xdev_ext_mech_poll.h"
 
 typedef uint32_t u32; typedef uint64_t u64;
+#define U32_MAX UINT32_MAX
+#define READ_ONCE(v) (v)
+#define smp_load_acquire(p) __atomic_load_n((p), __ATOMIC_ACQUIRE)
 #define container_of(p, t, m) ((t *)((char *)(p) - offsetof(t, m)))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
 #define PTR_ERR(p) ((long)(intptr_t)(p))
@@ -57,15 +60,16 @@ struct xdev_ext_mech_stage {
 	void *priv;
 	u64 arg0, arg1;
 	u32 class_id, direction, flags, index;
-	bool poll;
+	bool poll, create_reporting;
+ u32 create_phase;
 };
 struct sess { u32 state, inflight; };
 struct xdev_ext_mech_session {
 	spinlock_t lock;
 	struct sess ss;
-	bool worker_gone, poll_rx;
+	bool worker_gone, poll_rx, create_reporting, create_pending_publish;
 	u64 id;
-	u32 nr_stages, nr_bound;
+	u32 nr_stages, nr_bound, create_phase, create_failed_stage;
 	struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
 	const void *ops[XDEV_EXT_MECH_CLASS_MAX];
 	bool pinned[XDEV_EXT_MECH_CLASS_MAX];
@@ -96,8 +100,13 @@ static const struct xdev_ext_mech_class_ops *xdev_ext_mech_class_get(u32 id)
 { return id == XDEV_EXT_MECH_CLASS_NVME ? &polling_nvme : id == XDEV_EXT_MECH_CLASS_AFXDP ?
 	&polling_afxdp : id == XDEV_EXT_MECH_CLASS_CE ? &plain_ce : NULL; }
 static int ops_token;
+static const void *current_ops[XDEV_EXT_MECH_CLASS_MAX];
 static const void *xdev_ext_mech_ops_get(u32 id, bool *pinned, struct module **owner)
-{ (void)id; *pinned = false; *owner = NULL; return &ops_token; }
+{ *pinned = false; *owner = NULL; current_ops[id] = &ops_token; return &ops_token; }
+/* Registry boundary records the currently published class table. Admission
+ * itself remains the complete production function, including report delivery. */
+static bool xdev_ext_mech_ops_current(u32 id, const void *ops, bool pinned)
+{ (void)pinned; return id < XDEV_EXT_MECH_CLASS_MAX && current_ops[id] == ops; }
 static int xdev_ext_mech_session_buffers(struct xdev_ext_mech_session *s) { (void)s; return 0; }
 static struct eventfd_ctx *eventfd_ctx_fdget(int fd) { (void)fd; return NULL; }
 static struct kthread_worker worker_object;
@@ -206,11 +215,35 @@ static int pass_case(const char *mode)
 	return 0;
 }
 
+static int admission_case(void)
+{
+ struct xdev_ext_mech_session s = {0};
+ int active, pending, published, stale, stopped;
+ s.ss.state = XDEV_EXT_MECH_SESSION_ACTIVE;
+ s.ops[XDEV_EXT_MECH_CLASS_NVME] = &ops_token;
+ current_ops[XDEV_EXT_MECH_CLASS_NVME] = &ops_token;
+ active = xdev_ext_mech_session_admits(&s);
+ s.create_pending_publish = true;
+ pending = xdev_ext_mech_session_admits(&s);
+ s.create_pending_publish = false;
+ published = xdev_ext_mech_session_admits(&s);
+ current_ops[XDEV_EXT_MECH_CLASS_NVME] = NULL;
+ stale = xdev_ext_mech_session_admits(&s);
+ current_ops[XDEV_EXT_MECH_CLASS_NVME] = &ops_token;
+ s.ss.state = XDEV_EXT_MECH_SESSION_STOPPING;
+ stopped = xdev_ext_mech_session_admits(&s);
+ printf("active=%d pending=%d published=%d stale=%d stopped=%d\n",
+        active, pending, published, stale, stopped);
+ return 0;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc != 3)
 		return 2;
-	return !strcmp(argv[1], "bind") ? bind_case(argv[2]) : pass_case(argv[2]);
+	if (!strcmp(argv[1], "admission"))
+  return admission_case();
+ return !strcmp(argv[1], "bind") ? bind_case(argv[2]) : pass_case(argv[2]);
 }
 '''
 
@@ -218,7 +251,7 @@ int main(int argc, char **argv)
 def build_fixture():
     text = source(CORE)
     production = '\n'.join(function(text, n) for n in (
-        'xdev_ext_mech_rx_first', 'xdev_ext_mech_session_bind',
+        'xdev_ext_mech_session_admits', 'xdev_ext_mech_rx_first', 'xdev_ext_mech_session_bind',
         'xdev_ext_mech_poll_kick', 'xdev_ext_mech_poll_work'))
     return FIXTURE.replace('/* PRODUCTION */', production)
 
@@ -232,6 +265,11 @@ class CorePoll(unittest.TestCase):
         code, out = compile_and_run(self.fixture, args)
         self.assertEqual(code, 0, out)
         return fields(out)
+
+    def test_pending_publication_cannot_admit_receive_polling(self):
+        r = self.run_case('admission', 'publication')
+        self.assertEqual((r['active'], r['pending'], r['published'], r['stale'], r['stopped']),
+                         (1, 0, 1, 0, 0), r)
 
     def test_bind_strips_poll_before_class_bind(self):
         r = self.run_case('bind', 'nic-nvme')
@@ -338,9 +376,25 @@ class CorePollStructure(unittest.TestCase):
                          'a refused submit must not start polling')
 
     def test_create_starts_receive_source_after_activation(self):
-        create = body(self.text, 'xdev_ext_mech_create')
+        legacy = body(self.text, 'xdev_ext_mech_create')
+        self.assertIn('return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL);', legacy)
+        create = body(self.text, 'xdev_ext_mech_create_common')
+        # Preserve the original activation-before-receive-poll contract on the
+        # actual shared implementation reached by both CREATE entrypoints.
         self.assertRegex(create, r'if \(s->poll_rx\)\s*xdev_ext_mech_poll_kick\(s\);')
         self.assertLess(create.index('xdev_ext_mech_sess_activate'), create.index('xdev_ext_mech_poll_kick'))
+        self.assertLess(create.index('s->create_pending_publish = !!r;'),
+                        create.index('xdev_ext_mech_session_bind(s, c);'))
+        publish = create.index('smp_store_release(&s->create_pending_publish, false);')
+        self.assertLess(create.index('copy_to_user(uarg, envelope, sizeof(*envelope))'), publish)
+        self.assertLess(create.index('list_add_tail(&s->live_node, &xdev_ext_mech_live);'), publish)
+        guard = create.index('if (!xdev_ext_mech_session_admits(s))')
+        self.assertLess(publish, guard)
+        self.assertLess(guard, create.index('xdev_ext_mech_poll_kick'))
+        self.assertRegex(create,
+                         r'if \(!xdev_ext_mech_session_admits\(s\)\)\s*'
+                         r'xdev_ext_mech_session_stop\(s, -ECANCELED\);\s*'
+                         r'else if \(s->poll_rx\)\s*xdev_ext_mech_poll_kick\(s\);')
 
 
 if __name__ == '__main__':

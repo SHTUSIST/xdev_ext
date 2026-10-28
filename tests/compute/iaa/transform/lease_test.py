@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0
 """Run independent schedules through unchanged production transform functions."""
 import os
+import re
 from pathlib import Path
 import subprocess
 import tempfile
@@ -23,11 +24,28 @@ FUNCTIONS = (
 )
 
 
+def start_queue_closure(fixture, production):
+    """Real ordered-release callee; older source selections need none of it."""
+    if not re.search(r'^static int xdev_ext_mech_start_queue_release\(', production, re.M):
+        return fixture
+    fixture = fixture.replace('#include "io_uring/xdev_ext_mech_step.h"',
+        '#include "io_uring/xdev_ext_mech_step.h"\n#include "io_uring/xdev_ext_mech_start_queue.h"')
+    fixture = fixture.replace('struct xdev_ext_mech_session {',
+        'struct xdev_ext_mech_session {\n struct xdev_ext_mech_start_queue *start_queue;')
+    fixture = fixture.replace('struct xdev_ext_mech_batch {',
+        'struct xdev_ext_mech_batch {\n bool ordered_loan;u32 start_template;u64 start_ordinal;')
+    anchor = '/* xdev_ext_mech_frames_move */'
+    if fixture.count(anchor) != 1:
+        raise RuntimeError('transform fixture lost real frame-move insertion point')
+    return fixture.replace(anchor, anchor + '\n' +
+                           function(production, 'xdev_ext_mech_start_queue_release'))
+
+
 class TransformLease(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         production = Path(os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
-        fixture = (HERE / 'lease_fixture.c').read_text()
+        fixture = start_queue_closure((HERE / 'lease_fixture.c').read_text(), production)
         for name in FUNCTIONS:
             fixture = fixture.replace('/* ' + name + ' */', function(production, name))
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-lease-')
