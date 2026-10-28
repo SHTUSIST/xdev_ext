@@ -15,7 +15,7 @@ static inline int tp_eval_geometry(tp_eval_options &o) {
  if (o.rank>1 || (o.mode!=1 && o.mode!=2) || !o.depth || o.depth>256 ||
      (o.mode==1 && o.depth!=1) || !o.iterations || !o.first_sequence ||
      !o.communicator || !o.epoch || o.dtype<1 || o.dtype>3 ||
-     o.operation<1 || o.operation>4 || (o.operation==4 && o.mode!=1) || !o.timeout_ns || o.device>INT_MAX)
+     o.operation<1 || o.operation>4 || (o.operation==4 && o.depth!=1) || !o.timeout_ns || o.device>INT_MAX)
   return -EINVAL;
  if (o.operation==1 && o.rows!=1) return -EINVAL;
  uint64_t item=o.dtype==3 ? 4:2;

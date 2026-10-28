@@ -2,7 +2,7 @@
 
 This executable uses the actual native collective library and two separately
 admitted GPU allocations per rank. It implements E6 complete allreduce or
-rowwise all-gather latency and E7 payload/lifetime accounting, plus a real d1 opaque-message echo RTT. It supplies no
+rowwise all-gather latency and E7 payload/lifetime accounting, plus real d1/d2 depth1 opaque-message echo RTT. It supplies no
 fake backend, host-payload staging or hardware performance result. Follow
 [the performance policy](../../../docs/reference/performance-policy.md).
 
@@ -52,6 +52,9 @@ driver retains its process/context/resources on unknown native/GPU custody and
 prints `TP_EVAL_RETAINED`; explicit recovery must establish quiescence before
 those resources are reclaimed. Do not treat killing that process as proof of
 successful drain.
+The normal runner writes a summary only after the driver exits successfully;
+a late close failure or timeout cannot qualify a run. Offline `--analyze-only`
+checks saved observations and does not certify owner teardown.
 
 D1 is explicitly host-synchronous and admits depth 1. D2 captures a real
 `xdev_tp_submit_batch` template. For depth above 1 that API enqueues all TX
@@ -83,7 +86,8 @@ E6 starts a local host monotonic interval immediately before the native call
 or graph launch and ends after real result/required custody completion. It
 includes d1 host control, packing, visibility and reduction/unpack. D2 native
 occupancy traces use one GPU globaltimer domain, retained separately from host
-latency intervals. Use `--operation echo --mode d1 --depth 1` for the real opaque-message exchange.
+latency intervals. Use `--operation echo --mode d1 --depth 1` or
+`--operation echo --mode d2 --depth 1` for the real opaque-message exchange.
 Rank 0 creates and checks the payload on the GPU; rank 1 independently checks
 its received message and copies it directly into its separately admitted TX
 allocation on the GPU. Both ranks release RX only after actual CUDA last use
@@ -96,7 +100,17 @@ the measured iteration. Rank 0 reports
 full RTT on its own host clock; rank 1 reports local reply completion. No
 cross-host timestamp subtraction or measured one-way latency is implemented.
 Half an RTT is only a symmetric estimate and is not emitted as a measurement.
-The echo branch does not claim d2 echo or a/b/c attribution arms.
+D2 echo captures one graph outside the measured interval. Each replay obtains
+fresh native tickets and keys; the GPU replay counter selects a new byte pattern.
+Its three message controls reside in one retained device state. Graph completion,
+independent host observation and both current END prefixes precede interval end.
+The graph executable and graph are destroyed before final stream synchronization
+and device state release. Any failed or unknown use retains the resources.
+This benchmark-local echo uses the existing native GPU USER API; it adds no
+collective operation. Every final record identifies `native_mode` (1 or 2) and
+`handoff_mode` (`cpu` or `gpu` respectively); the summary rejects missing or
+inconsistent pairs. These fields identify native handoff primitives. It does not implement the full E6 configuration d2, NHI
+completion polling, early CTS or a/b/c attribution arms.
 
 For a matched baseline use the normal official NCCL executable. Select
 `NCCL_NET=Socket` and exact `NCCL_SOCKET_IFNAME='=thunderbolt0'`, retain NCCL

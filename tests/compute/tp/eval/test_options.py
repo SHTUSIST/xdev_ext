@@ -19,7 +19,10 @@ int main() {
  o.iterations=2; o.rank=2; assert(tp_eval_geometry(o)<0);
  o.rank=1; assert(tp_eval_geometry(o)==0);
  o.operation=4; o.mode=1; assert(tp_eval_geometry(o)==0);
- o.mode=2; assert(tp_eval_geometry(o)<0);
+ o.mode=2; assert(tp_eval_geometry(o)==0);
+ o.depth=2; assert(tp_eval_geometry(o)==-EINVAL);
+ o.operation=1; assert(tp_eval_geometry(o)==0);
+ o.operation=3; assert(tp_eval_geometry(o)==0);
 }'''
         with tempfile.TemporaryDirectory() as d:
             source=Path(d)/'probe.cc'; source.write_text(code)

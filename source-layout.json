@@ -7557,6 +7557,30 @@
     {
       "source": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg",
       "logical_path": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg"
+    },
+    {
+      "source": "tests/benchmarks/tp/echo_device.h",
+      "logical_path": "tests/benchmarks/tp/echo_device.h"
+    },
+    {
+      "source": "tests/benchmarks/tp/echo_gpu.h",
+      "logical_path": "tests/benchmarks/tp/echo_gpu.h"
+    },
+    {
+      "source": "tests/compute/tp/echo_gpu_boundary.cc",
+      "logical_path": "tests/compute/tp/echo_gpu_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/echo_gpu_boundary_test.py",
+      "logical_path": "tests/compute/tp/echo_gpu_boundary_test.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_handoff_metadata.py",
+      "logical_path": "tests/compute/tp/eval/test_handoff_metadata.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_driver_process.py",
+      "logical_path": "tests/compute/tp/eval/test_driver_process.py"
     }
   ]
 }

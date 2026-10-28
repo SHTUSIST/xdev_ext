@@ -27,7 +27,7 @@ def main(argv=None):
     receipt=dict(status='failed',execution='not-run',runtime_stub_execution=False,
                  sdk=str(sdk),arch=args.arch,commands=[],artifacts={},sources=[])
     inputs=[Path(__file__).resolve(),args.native_receipt.resolve()]
-    inputs += [source/n for n in ['driver.cc','owner.h','echo.h','options.h','verify.cu','run.py','accounting.py']]
+    inputs += [source/n for n in ['driver.cc','owner.h','echo.h','echo_gpu.h','echo_device.h','options.h','verify.cu','run.py','accounting.py']]
     inputs += list((root/'src/compute/collectives').glob('*.h'))
     inputs += [root/'src/compute/cuda/peer_endpoint_owner.h',
                root/'src/compute/cuda/peer_endpoint_owner.cc',root/'src/lib/libxdev_ext.h',root/'src/lib/libxdev_ext_peer_message.h',
@@ -79,6 +79,7 @@ def main(argv=None):
         for extension,flag in [('ptx','--ptx'),('cubin','--cubin')]:
             target=out/('tp_eval_verify.'+extension)
             run([sdk/'bin/nvcc',flag,'-arch='+args.arch,'-std=c++17','-ccbin',args.host_cxx,
+                 '-I'+str(base_headers),'-I'+str(root/'src/core/include/uapi'),
                  source/'verify.cu','-o',target])
             receipt['artifacts'][extension]=str(target)
         target=out/'tp_eval'
