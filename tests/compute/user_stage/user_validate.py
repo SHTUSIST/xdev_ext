@@ -16,6 +16,7 @@ is bitwise.
 """
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import re
@@ -101,9 +102,17 @@ def check_images(directory):
 
 
 def debug_counts(text):
-    sys.path.insert(0, str(HERE.parents[1] / 'xdev_ext_integration'))
-    from xdev_ext_mech_zc_debug import debug_reports
-    return debug_reports(text)
+    # Canonical tests/compute/user_stage and the materialized native selftests
+    # tree share the same real helper, at their respective stable locations.
+    for directory in (HERE.parents[1] / 'integration/session/native',
+                      HERE.parents[1] / 'xdev_ext_integration'):
+        helper = directory / 'xdev_ext_mech_zc_debug.py'
+        if helper.is_file():
+            spec = importlib.util.spec_from_file_location('_xdev_ext_user_stage_debug', helper)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module.debug_reports(text)
+    raise ModuleNotFoundError('USER validator requires the real xdev_ext_mech_zc_debug.py helper')
 
 
 def check_log(text):
