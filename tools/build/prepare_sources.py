@@ -35,9 +35,10 @@ REQUIRED = {
 }
 
 
-def run_git(directory, *args):
+def run_git(directory, *args, offline=False):
     result = subprocess.run(['git', '-C', str(directory), *args],
-                            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                            env={**os.environ, 'GIT_NO_LAZY_FETCH': '1'} if offline else None)
     if result.returncode:
         raise PreparationError(result.stderr.decode(errors='replace').strip())
     return result.stdout
@@ -198,12 +199,13 @@ def process_archive(archive, destination, overlay, replace, write):
     return required_bytes
 
 
-def archive_pass(cache, commit, destination, overlay, replace, write):
+def archive_pass(cache, commit, destination, overlay, replace, write, offline=False):
     # stderr goes to a small temporary stream so a Git failure cannot deadlock
     # against a full pipe while the archive reader waits for EOF.
     with tempfile.TemporaryFile() as errors:
         process = subprocess.Popen(['git', '-C', str(cache), 'archive', '--format=tar', commit],
-                                   stdout=subprocess.PIPE, stderr=errors)
+                                   stdout=subprocess.PIPE, stderr=errors,
+                                   env={**os.environ, 'GIT_NO_LAZY_FETCH': '1'} if offline else None)
         try:
             with tarfile.open(fileobj=process.stdout, mode='r|') as archive:
                 required_bytes = process_archive(archive, destination, overlay, replace, write)
@@ -219,7 +221,7 @@ def archive_pass(cache, commit, destination, overlay, replace, write):
         return required_bytes
 
 
-def prepare(root, component, cache, check=False, replace=False, output=None):
+def prepare(root, component, cache, check=False, replace=False, output=None, offline=False):
     root = Path(root).resolve()
     layout = load_layout(root)
     layout.validate_sources()
@@ -275,31 +277,46 @@ def prepare(root, component, cache, check=False, replace=False, output=None):
             target = safe_file(destination, native)
             if hashlib.sha256(target.read_bytes()).hexdigest() != previous:
                 raise PreparationError('Locally modified assembled overlay: ' + native)
-    cache.mkdir(parents=True, exist_ok=True)
     repository = cache / f'{component}.git'
     if repository.is_symlink():
         raise PreparationError('Cache repository must not be a symlink')
-    if not repository.exists():
-        repository.mkdir()
-        run_git(repository, 'init', '--bare', '-q')
-    run_git(repository, 'fetch', '--no-tags', '--depth=1', url, ref)
-    actual = run_git(repository, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}').decode().strip()
-    if actual != commit:
-        raise PreparationError(f'Pinned commit mismatch: expected {commit}, ref resolves to {actual}')
+    if offline:
+        if not repository.is_dir():
+            raise PreparationError(f'Offline mode requires an existing bare cache: {repository}')
+        if run_git(repository, 'rev-parse', '--is-bare-repository', offline=True).strip() != b'true':
+            raise PreparationError('Offline mode requires a bare cache repository')
+        try:
+            actual = run_git(repository, 'rev-parse', '--verify', commit + '^{commit}',
+                             offline=True).decode().strip()
+        except PreparationError as error:
+            raise PreparationError(f'Locked cached commit unavailable: {commit}: {error}') from error
+        if actual != commit:
+            raise PreparationError(f'Cached commit mismatch: expected {commit}, got {actual}')
+        receipt['source_transport'] = 'local-cache-no-live-ref-check'
+    else:
+        cache.mkdir(parents=True, exist_ok=True)
+        if not repository.exists():
+            repository.mkdir()
+            run_git(repository, 'init', '--bare', '-q')
+        run_git(repository, 'fetch', '--no-tags', '--depth=1', url, ref)
+        actual = run_git(repository, 'rev-parse', '--verify', 'FETCH_HEAD^{commit}').decode().strip()
+        if actual != commit:
+            raise PreparationError(f'Pinned commit mismatch: expected {commit}, ref resolves to {actual}')
     destination.mkdir(parents=True, exist_ok=True)
-    required_bytes = archive_pass(repository, commit, destination, overlay, replace, False)
+    required_bytes = archive_pass(repository, commit, destination, overlay, replace, False, offline=offline)
     required_bytes += sum(safe_file(root, source).stat().st_size + 4096
                           for source in receipt['source_origins'].values())
     free_bytes = shutil.disk_usage(destination).free
     if required_bytes > free_bytes:
         raise PreparationError(f'Insufficient space: need at least {required_bytes} bytes, have {free_bytes}')
-    archive_pass(repository, commit, destination, overlay, replace, True)
+    archive_pass(repository, commit, destination, overlay, replace, True, offline=offline)
     receipt['overlay_sha256'] = assemble_overlay(layout, component, destination,
                                                  old.get('overlay_sha256') if old else None)
     for name in REQUIRED[component]:
         safe_file(destination, name)
     atomic_json(marker, receipt)
-    print(f'{component}: prepared {destination} at {commit}; copied {len(overlay)} overlays')
+    transport = '; local cache, no live ref check' if offline else ''
+    print(f'{component}: prepared {destination} at {commit}; copied {len(overlay)} overlays{transport}')
 
 
 def main():
@@ -307,13 +324,15 @@ def main():
     parser.add_argument('--component', required=True, choices=sorted(REQUIRED))
     parser.add_argument('--cache', type=Path, help='Git-object cache (default: build/upstream)')
     parser.add_argument('--output', type=Path, help='assembly destination (default: build/assembled/<component>)')
+    parser.add_argument('--offline', action='store_true',
+                        help='Use only the locked commit in an existing bare cache; no live ref check')
     parser.add_argument('--check', action='store_true', help='Check local marker and required files without fetching')
     parser.add_argument('--replace-base', action='store_true', help='Replace conflicting untracked upstream files')
     options = parser.parse_args()
     root = canonical_root(Path(__file__))
     try:
         prepare(root, options.component, options.cache or root / 'build' / 'upstream',
-                options.check, options.replace_base, options.output)
+                options.check, options.replace_base, options.output, options.offline)
     except (PreparationError, LayoutError, OSError, ValueError, KeyError, tarfile.TarError) as error:
         print(f'prepare_sources: {error}', file=sys.stderr)
         return 1
