@@ -27,7 +27,7 @@ class DelegateBuild(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="gds-build-boundary-")
         self.addCleanup(temporary.cleanup)
         self.directory = Path(temporary.name)
-        self.args = argparse.Namespace(arms=["gds-direct"], build_only=True,
+        self.args = argparse.Namespace(arms=["gds-direct"], build_only=True, dry_run=False,
             build_dir=self.directory / "build", directory=self.directory,
             cuda_root=self.directory / "official-sdk-boundary")
         self.calls = []
