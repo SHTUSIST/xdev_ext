@@ -5,7 +5,8 @@ from collections import defaultdict
 import statistics
 import copy
 
-from contract import PAIR_FIELDS, canonical_recipe, cpu_interval, inspect_collection, number, validate_run
+from contract import (PAIR_FIELDS, _cpu_scope_selection, canonical_recipe, cpu_interval,
+                      inspect_collection, number, validate_run)
 
 
 IDENTITY = ('session_id', 'record_id', 'generation')
@@ -279,6 +280,14 @@ def compare_runs(left, right):
     for field in PAIR_FIELDS:
         if left.get(field) != right.get(field):
             errors.append(field + ': paired workload mismatch')
+    if 'cpu_scope' in left or 'cpu_scope' in right:
+        try:
+            left_cpus = _cpu_scope_selection(left, left.get('cpu_scope'))
+            right_cpus = _cpu_scope_selection(right, right.get('cpu_scope'))
+            if left_cpus != right_cpus:
+                errors.append('cpu_scope.selected_cpus: paired CPU set mismatch')
+        except ValueError as error:
+            errors.append('cpu_scope: ' + str(error))
     try:
         left_recipe, right_recipe = canonical_recipe(left), canonical_recipe(right)
         for field in left_recipe.keys() | right_recipe.keys():

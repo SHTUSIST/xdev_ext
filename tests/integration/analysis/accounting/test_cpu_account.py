@@ -101,6 +101,23 @@ def proc_task(root, pid, comm, runtime_ns, start=100, cpus='0-3', cgroup='0::/',
 
 
 class Parse(unittest.TestCase):
+    def test_steal_is_not_host_busy_time(self):
+        before = ca.parse_proc_stat('cpu 0 0 0 0 0 0 0 0 0 0\ncpu0 0 0 0 0 0 0 0 0 0 0\n')
+        after = ca.parse_proc_stat('cpu 0 0 0 0 0 0 0 90 0 0\ncpu0 0 0 0 0 0 0 0 90 0 0\n')
+        self.assertEqual(ca.proc_stat_seconds(before, after, 100)['busy']['total'], 0.0)
+
+    def test_missing_cpu_is_not_silently_intersected(self):
+        before = ca.parse_proc_stat(STAT_BEFORE)
+        after = ca.parse_proc_stat(STAT_AFTER.replace('cpu3 25 0 50 2600 0 5 100 0 0 0\n', ''))
+        with self.assertRaises(ValueError):
+            ca.proc_stat_seconds(before, after, 100)
+
+    def test_duplicate_cpu_and_unsigned_overflow_do_not_parse(self):
+        for text in (STAT_BEFORE + 'cpu0 25 0 50 2500 0 10 100 0 0 0\n',
+                     STAT_BEFORE.replace('cpu0 25 ', 'cpu0 18446744073709551616 ')):
+            with self.subTest(text=text), self.assertRaises(ValueError):
+                ca.parse_proc_stat(text)
+
     def test_cpu_list(self):
         self.assertEqual(ca.cpu_list('0-2,5'), [0, 1, 2, 5])
         self.assertEqual(ca.cpu_list(''), [])
