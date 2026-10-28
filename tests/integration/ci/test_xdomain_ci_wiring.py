@@ -36,6 +36,7 @@ REQUIRED = tuple(PEER + name + ".py" for name in (
     "xdomain_review_retention_ring_test",
     "xdomain_login_reply_test", "xdomain_review_tbnet_test",
     "xdomain_review_stop_epoch_test",
+    "xdomain_production_poll_test",
 )) + (
     "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/stop_report_test.py",
     "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/ordered_frames_test.py",
