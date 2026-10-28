@@ -80,7 +80,7 @@ class LegacyCancel(unittest.TestCase):
   batch='struct xdev_ext_mech_batch {u64 group;'
   source=source.replace(batch,frame+'\n'+batch)
   source=source.replace('u32 queued;};',
-   'u32 queued,life_active,nr_frames,produced,produced_used,bytes;bool producing,produced_set;'
+   'u32 queued,life_active,nr_frames,produced,produced_used,bytes;bool producing,produced_set,ordered_loan;'
    'u64 life_token[XDEV_EXT_MECH_MAX_FRAMES];struct xdev_ext_mech_bstate bs;'
    'struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];'
    'struct {struct xdev_ext_mech_frame dst[XDEV_EXT_MECH_MAX_FRAMES];u64 token[XDEV_EXT_MECH_MAX_FRAMES];u32 nr,produced;bool active;} transform;};')

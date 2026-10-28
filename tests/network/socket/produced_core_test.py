@@ -35,7 +35,7 @@ struct xdev_ext_mech_pool;
 struct ops {void (*recycle)(struct xdev_ext_mech_pool *, struct xdev_ext_mech_frame *);};
 struct xdev_ext_mech_pool {const struct ops *ops; u32 state[32], returned;};
 struct xdev_ext_mech_session {bool start_recycle;u32 transform_owner[32];struct xdev_ext_mech_pool pool; struct xdev_ext_mech_life life[32];u32 recycled;};
-struct xdev_ext_mech_batch {u32 nr_frames,bytes,present,produced,produced_used,life_active;bool produced_set,producing,to_user;struct xdev_ext_mech_frame f[32];u64 life_token[32];struct xdev_ext_mech_completion completion;int status,publishes;};
+struct xdev_ext_mech_batch {u32 nr_frames,bytes,present,produced,produced_used,life_active;bool produced_set,producing,to_user,ordered_loan;struct xdev_ext_mech_frame f[32];u64 life_token[32];struct xdev_ext_mech_completion completion;int status,publishes;};
 static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b,u64 t)
 {return xdev_ext_mech_completion_claim(&b->completion,t);}
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b,u64 t,int e,bool seq)

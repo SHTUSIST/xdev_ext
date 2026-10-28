@@ -244,6 +244,15 @@ class Ordered(unittest.TestCase):
         self.assertTrue(callable(getattr(contracts, 'check_ordered', None)), 'ordered terminal gate is missing')
         self.assertEqual(contracts.check_ordered(self.log())['status'], 'PASS')
 
+    def test_boot_delay_calibration_is_not_a_skipped_test(self):
+        boot = '[    0.373024] Calibrating delay loop (skipped) preset value.. 4800.00 BogoMIPS (lpj=2400000)\n'
+        self.assertEqual(contracts.check_ordered(boot + self.log())['status'], 'PASS')
+        for marker in ('SKIP unavailable', 'SKIPPED unavailable',
+                       'ok 1 - payload # SKIP unavailable',
+                       'test_payload ... skipped unavailable', 'OK (skipped=1)'):
+            with self.subTest(marker=marker), self.assertRaises(ValueError):
+                contracts.check_ordered(boot + self.log() + marker + '\n')
+
     def test_missing_duplicate_failed_and_diagnostic_logs(self):
         self.assertTrue(callable(getattr(contracts, 'check_ordered', None)), 'ordered terminal gate is missing')
         for row in self.log().splitlines():

@@ -110,7 +110,8 @@ def check_ordered(text):
                 'conflicting ordered record: ' + prefix)
         positions.append(lines.index(record))
     require(positions == sorted(positions), 'ordered terminal records out of sequence')
-    require(not re.search(r'(?im)\bnot ok\b|\bFAIL\b|\bSKIP(?:PED)?\b|quarantin|'
+    require(not re.search(r'(?im)\bnot ok\b|\bFAIL\b|#\s*SKIP\b|^\s*SKIP(?:PED)?\b|'
+                          r'\.{3}\s+skipped\b|^OK\s*\(skipped=|quarantin|'
                           r'drain bound passed|deferred[ _-]*drain|WARNING:|BUG:|Oops:|Kernel panic', text),
             'ordered failure, skip, quarantine, deferred drain or kernel diagnostic')
     return dict(status='PASS', messages=6, selected=[7, 3, 9, 1], timing='none')
