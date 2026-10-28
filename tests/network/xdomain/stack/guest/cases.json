@@ -161,9 +161,9 @@
       "requirement": "XDOMAIN helper resolver refuses ringbuf-output"
     },
     {
-      "name": "helper-existing-class-control-allow",
-      "expected": "ALLOW",
-      "requirement": "representative preexisting class helper remains available"
+      "name": "helper-existing-class-control-deny",
+      "expected": "DENY",
+      "requirement": "shared-class helper resolver refuses probe-read-kernel"
     },
     {
       "name": "memory-ctx-write-deny",

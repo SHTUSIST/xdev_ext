@@ -15,7 +15,8 @@ __s32 BPF_PROG(dma_plan_build, const struct xdev_ext_mech_ctx *mctx)
 	const struct xdev_ext_dma_mech_info *info;
 	struct xdev_ext_dma_copy_desc *d;
 	__u64 device_off, key = mctx->base.src_offset;
-	__u32 pos = 0, used = 0, slot, nr;
+	__u32 pos = 0, used = 0, nr;
+	int slot;
 
 	(void)ctx;
 	info = (const void *)bpf_xdev_ext_info(mctx, sizeof(struct xdev_ext_dma_mech_info));
@@ -29,8 +30,12 @@ __s32 BPF_PROG(dma_plan_build, const struct xdev_ext_mech_ctx *mctx)
 	    xdev_ext_mp_ce_base(key - key_base, info->l.group_bytes,
 			   info->window_len, &device_off))
 		return XDEV_EXT_MP_BUILD_ABORT;
-	/* Split on provider segment and entry limits, bounded by scratch capacity. */
-	for (slot = 0; slot < 32; slot++) {
+	/*
+	 * Split on provider segment and entry limits, bounded by scratch capacity.
+	 * The iterator lets verifier states converge instead of expanding the
+	 * combinations of frame and segment progress through a counted loop.
+	 */
+	bpf_for(slot, 0, 32) {
 		const struct xdev_ext_mech_frame_info *f;
 		__u32 len, off, segment_left;
 

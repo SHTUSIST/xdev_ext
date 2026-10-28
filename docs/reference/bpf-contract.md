@@ -10,6 +10,8 @@ The policy interface has phase-specific dispatch and completion collections. Pol
 
 Mechanism programs attach through class-specific struct_ops. Their build callbacks construct bounded descriptors; completion callbacks interpret the supplied native result and select permitted next actions. Class contracts define the available information, limits, and actions. An action legal for AF_XDP receive is not automatically legal for a different class or phase.
 
+NVMe, AF_XDP, CE, DMA, CPU, IAA, SOCKET, NET and USER mechanism programs may use only the classic helpers `bpf_map_lookup_elem` and `bpf_ktime_get_ns`. XDOMAIN mechanism programs may use only `bpf_map_lookup_elem`. Other classic helpers are rejected during program verification. The allowed helpers retain the target kernel's own checks. These helper limits are separate from class, callback, context and kfunc permissions, which still apply; they do not grant access to another class's operations. The policy interface has its own verifier contract.
+
 The kernel owns descriptor scratch capacity, frame identity, generation, direction, range, coverage and native submission. Drivers retain mapping, queue and completion responsibility. Programs cannot authorize an out-of-window transfer, invent DMA addresses, access MMIO, or reclaim a buffer still owned by an accepted device operation.
 
 ## Plans and results

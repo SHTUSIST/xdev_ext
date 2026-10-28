@@ -639,8 +639,20 @@ static int xdev_ext_mech_btf_struct_access(struct bpf_verifier_log *log,
 	return xdev_ext_ops_deny_btf_write(log, reg, off, size, "xdev_ext_mech_ctx");
 }
 
+static const struct bpf_func_proto *
+xdev_ext_mech_func_proto(enum bpf_func_id func_id, const struct bpf_prog *prog)
+{
+	switch (func_id) {
+	case BPF_FUNC_map_lookup_elem:
+	case BPF_FUNC_ktime_get_ns:
+		return bpf_base_func_proto(func_id, prog);
+	default:
+		return NULL;
+	}
+}
+
 static const struct bpf_verifier_ops xdev_ext_mech_verifier_ops = {
-	.get_func_proto = bpf_base_func_proto,
+	.get_func_proto = xdev_ext_mech_func_proto,
 	.is_valid_access = xdev_ext_ops_is_valid_access,
 	.btf_struct_access = xdev_ext_mech_btf_struct_access,
 };

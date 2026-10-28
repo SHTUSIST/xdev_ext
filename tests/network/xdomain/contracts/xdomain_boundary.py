@@ -131,13 +131,21 @@ def runtime_boundary():
     filters = re.findall(r"\.filter\s*=\s*(\w+)", private)
     if len(set(filters)) != 1:
         raise AssertionError("expected one private registered filter; inspect new registration shape")
-    # Select the distinct non-generic verifier table, without assuming a
-    # private C identifier chosen by the future implementation author.
+    # Follow the actual XDOMAIN registration. Other classes may also install
+    # private helper resolvers; uniqueness among non-base tables is no ABI.
+    registration = re.search(
+        r'static\s+struct\s+bpf_struct_ops\s+bpf_xdev_ext_xdomain_mech_ops\s*='
+        r'\s*\{([^}]+)\}', ops, re.S)
+    if not registration:
+        raise AssertionError("missing actual XDOMAIN struct_ops registration")
+    selected = re.search(r'\.verifier_ops\s*=\s*&(\w+)', registration.group(1))
+    if not selected:
+        raise AssertionError("XDOMAIN registration has no verifier table")
     tables = re.findall(r"static\s+const\s+struct\s+bpf_verifier_ops\s+(\w+)\s*=\s*\{([^}]+)\}", ops, re.S)
     tables = [(name, body) for name, body in tables
-              if re.search(r"\.get_func_proto\s*=\s*(?!bpf_base_func_proto\b)\w+", body)]
+              if name == selected.group(1)]
     if len(tables) != 1:
-        raise AssertionError("missing unique XDOMAIN-specific verifier table")
+        raise AssertionError("missing selected XDOMAIN verifier table")
     table_name, table = tables[0]
     for required in ("xdev_ext_ops_is_valid_access", "xdev_ext_mech_btf_struct_access"):
         if required not in table:
