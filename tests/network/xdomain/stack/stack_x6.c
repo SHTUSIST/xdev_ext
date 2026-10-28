@@ -31,13 +31,14 @@ __u8 *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *ctx, __u32 slot, size_t s
 
 int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *ctx, void *out, __u32 size)
 {
-	if (!active || ctx != active_ctx || !active->xdomain || size != active->info_size)
+	if (!active || ctx != active_ctx || !active->xdomain || !out ||
+	    size != sizeof(struct xdev_ext_xdomain_proto_info) || size != active->info_size)
 		return -EINVAL;
 	memcpy(out, active->info, size);
 	return 0;
 }
 
-int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
+static int stack_x6_record_verdict(const struct xdev_ext_mech_ctx *ctx,
 			       const void *in, __u32 size)
 {
 	struct xdev_ext_xdomain_proto_verdict verdict;
@@ -78,6 +79,60 @@ int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
 		return -EALREADY;
 	}
 	return 0;
+}
+
+/* Versioned host invocation storage only. Private kfunc identity and verifier
+ * gates remain covered by their separate actual-source suite. */
+static bool stack_x6_protocol_view(void)
+{
+ const struct xdev_ext_xdomain_proto_info *info;
+ if(!active||!active->xdomain||!active->info)return false;
+ info=active->info;
+ return info->size==active->info_size&&
+  ((active->info_size==sizeof(*info)&&info->version==XDEV_EXT_XDOMAIN_PROTO_VERSION)||
+   (active->info_size==sizeof(struct xdev_ext_xdomain_proto_info_v2)&&
+    info->version==XDEV_EXT_XDOMAIN_PROTO_V2_VERSION));
+}
+
+int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
+                               const void *in,__u32 size)
+{
+ if(!active||active->info_size!=sizeof(struct xdev_ext_xdomain_proto_info))return -EINVAL;
+ return stack_x6_record_verdict(ctx,in,size);
+}
+
+int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *ctx,void *out,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_info_v2 *info=out;
+ if(!active||ctx!=active_ctx||!stack_x6_protocol_view()||!out||size!=sizeof(*info))return -EINVAL;
+ memset(out,0,sizeof(*info));memcpy(out,active->info,active->info_size);
+ info->base.size=sizeof(*info);info->base.version=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
+ return 0;
+}
+
+static int stack_x6_v2_verdict_decode(const struct xdev_ext_mech_ctx *ctx,
+                                    const void *in,__u32 size,
+                                    struct xdev_ext_xdomain_proto_verdict *verdict)
+{
+ const struct xdev_ext_xdomain_proto_info *info;
+ if(!active||ctx!=active_ctx||!stack_x6_protocol_view()||!in||size!=sizeof(*verdict))return -EINVAL;
+ memcpy(verdict,in,sizeof(*verdict));info=active->info;
+ if(verdict->size!=sizeof(*verdict)||verdict->version!=XDEV_EXT_XDOMAIN_PROTO_V2_VERSION||
+    verdict->action<=XDEV_EXT_XDP_ACT_INVALID||
+    verdict->action>(info->version==XDEV_EXT_XDOMAIN_PROTO_VERSION?
+       XDEV_EXT_XDP_ACT_CANCEL_ARMED:XDEV_EXT_XDP_ACT_TX_POST_EARLY)||
+    verdict->flags||verdict->reserved0||verdict->reserved1||
+    verdict->event_id!=info->event_id||verdict->epoch!=info->epoch)return -EINVAL;
+ if(info->version==XDEV_EXT_XDOMAIN_PROTO_VERSION)verdict->version=XDEV_EXT_XDOMAIN_PROTO_VERSION;
+ return 0;
+}
+
+int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,const void *in,__u32 size)
+{
+ struct xdev_ext_xdomain_proto_verdict verdict;
+ int ret=stack_x6_v2_verdict_decode(ctx,in,size,&verdict);
+ if(ret)return ret;
+ return stack_x6_record_verdict(ctx,&verdict,sizeof(verdict));
 }
 
 int stack_x6_call(struct xdev_ext_mech_stage *stage,

@@ -79,6 +79,8 @@ ENTRYPOINTS = (
 # Canonical entrypoints consume an explicit source root and their own isolated
 # outputs. Keep every regression visible; none is discovered through a glob.
 CANONICAL_ENTRYPOINTS = {
+    "tests/network/xdomain/early/run.py": ("--output",),
+    "tests/network/xdomain/early/kfunc_test.py": ("--output",),
     "tests/core/library/peer_wait/run.py": ("--out",),
     "tests/network/xdomain/probe/probe_gate_test.py": ("--keep-build",),
     "tests/network/xdomain/probe/probe_wire_test.py": ("--keep-build",),

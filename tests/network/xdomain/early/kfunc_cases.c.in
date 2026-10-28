@@ -1,0 +1,372 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* API §6 expectations. Removing validation/normalization/accounting must fail. */
+_Static_assert(sizeof(struct xdev_ext_xdomain_proto_info) == 256, "v1 facts frozen");
+_Static_assert(sizeof(struct xdev_ext_xdomain_proto_info_v2) == 320, "v2 facts fixed");
+_Static_assert(sizeof(struct xdev_ext_xdomain_proto_verdict) == 64, "verdict frozen");
+_Static_assert(offsetof(struct xdev_ext_xdomain_proto_info_v2, tx_bind) == 256, "v1 prefix frozen");
+_Static_assert(__builtin_types_compatible_p(__typeof__(&bpf_xdev_ext_xdomain_info_v2),
+ int (*)(const struct xdev_ext_mech_ctx *, void *, u32)), "sized info ABI");
+_Static_assert(__builtin_types_compatible_p(__typeof__(&bpf_xdev_ext_xdomain_verdict_v2),
+ int (*)(const struct xdev_ext_mech_ctx *, const void *, u32)), "sized verdict ABI");
+static struct xdev_ext_xdomain_proto_info_v2 facts2;
+static unsigned test_mode, test_variant;
+static const struct xdev_ext_mech_ctx *stale_ctx;
+
+static void setup2(xdev_ext_mech_cb_t callback, bool early)
+{
+ setup(callback);
+ memset(&facts2, 0, sizeof(facts2));
+ facts2.base = snapshot;
+ facts2.base.size = 320; facts2.base.version = 2;
+ facts2.base.event = XDEV_EXT_XDP_EV_PAIR_DUE;
+ facts2.base.direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+ facts2.tx_bind = 61; facts2.rx_bind = 67; facts2.key = 999;
+ facts2.pair_deadline_ns = 30000000000ULL;
+ facts2.shape_total = 8192; facts2.shape_seg = 4096; facts2.shape_count = 2;
+ facts2.mode = XDEV_EXT_XDP_MODE_EARLY;
+ facts2.pair_state = XDEV_EXT_XDP_PAIR_IDLE;
+ facts2.early_facts = XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE;
+ if (early) {
+  args.info = &facts2; args.info_size = 320;
+  stage.direction = facts2.base.direction; base.direction = stage.direction;
+ }
+ test_mode = early;
+}
+static struct xdev_ext_xdomain_proto_verdict intent2(void)
+{
+ struct xdev_ext_xdomain_proto_verdict v = intent();
+ v.version = 2;
+ return v;
+}
+static s32 normalization_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct { u64 before; struct xdev_ext_xdomain_proto_info_v2 info; u64 after; } out;
+ struct xdev_ext_xdomain_proto_info_v2 expected = {};
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ memset(&out, 0xa7, sizeof(out));
+ expected.base = snapshot; expected.base.size = 320; expected.base.version = 2;
+ if (test_mode) expected = facts2;
+ ASSERT(!bpf_xdev_ext_xdomain_info_v2(ctx, &out.info, 320));
+ ASSERT(out.before == 0xa7a7a7a7a7a7a7a7ULL && out.after == out.before);
+ ASSERT(!memcmp(&out.info, &expected, 320));
+ ASSERT(!bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64));
+ ASSERT(result.calls == 1 && result.verdict.version == (test_mode ? 2U : 1U));
+ v.version = test_mode ? 2 : 1;
+ ASSERT(!memcmp(&result.verdict, &v, 64) && !c->protocol_error);
+ memset(&out.info, 0, 320); memset(&v, 0, 64);
+ ASSERT(result.verdict.event_id == snapshot.event_id && result.verdict.action == 1);
+ no_effects(); return 0;
+}
+static s32 new_action_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ v.action = test_variant; v.wake_ns = 0;
+ ASSERT(!bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64));
+ ASSERT(result.calls == 1 && !memcmp(&result.verdict, &v, 64) && !c->protocol_error);
+ return 0;
+}
+static s32 bad_identity_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx), copied = *c;
+ struct xdev_ext_mech_ctx lone = *ctx;
+ const struct xdev_ext_mech_ctx *bad = test_variant == 0 ? NULL :
+  test_variant == 1 ? &copied.ctx : test_variant == 2 ? &lone : guard;
+ struct xdev_ext_xdomain_proto_info_v2 out = {}, before = out;
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ ASSERT(bpf_xdev_ext_xdomain_info_v2(bad, &out, 320) == -EINVAL);
+ ASSERT(!memcmp(&out, &before, 320));
+ ASSERT(bpf_xdev_ext_xdomain_verdict_v2(bad, &v, 64) == -EINVAL);
+ ASSERT(c->protocol_error && !copied.protocol_error && !result.calls);
+ return 0;
+}
+static s32 old_early_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_info out = {}, before = out;
+ struct xdev_ext_xdomain_proto_verdict v = intent();
+ if (!test_variant) {
+  ASSERT(bpf_xdev_ext_xdomain_info(ctx, &out, 256) < 0);
+  ASSERT(!memcmp(&out, &before, 256));
+ } else ASSERT(bpf_xdev_ext_xdomain_verdict(ctx, &v, 64) < 0);
+ ASSERT(c->protocol_error);
+ /* A valid v2 recording cannot clear the error raised by the old API. */
+ v = intent2(); (void)bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64);
+ ASSERT(c->protocol_error);
+ return 0;
+}
+static s32 shared_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_verdict v = intent(), saved;
+ int first, second;
+ if (test_variant & 1) { v.version = 2; first = bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64); }
+ else first = bpf_xdev_ext_xdomain_verdict(ctx, &v, 64);
+ ASSERT(first == 0 && result.calls == 1);
+ saved = result.verdict;
+ if (test_variant & 2) { v.version = 2; second = bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64); }
+ else { v.version = 1; second = bpf_xdev_ext_xdomain_verdict(ctx, &v, 64); }
+ ASSERT(test_mode && !(test_variant & 2) ? second < 0 : second == -EALREADY);
+ ASSERT(c->protocol_error && result.calls == 1 && !memcmp(&saved, &result.verdict, 64));
+ return 0;
+}
+static s32 malformed2_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ switch (test_variant) {
+ case 0: v.size = 63; break; case 1: v.size = 65; break;
+ case 2: v.version = 0; break; case 3: v.version = 1; break;
+ case 4: v.flags = 1; break; case 5: v.reserved0 = 1; break;
+ case 6: v.reserved1 = 1; break; case 7: v.event_id++; break;
+ case 8: v.epoch++; break; case 9: v.action = 0; break;
+ case 10: v.action = 25; break;
+ /* New actions must not pass through the normal-mode normalization path. */
+ default: ASSERT(test_variant <= 17); v.action = test_variant + 7; v.wake_ns = 0; break;
+ }
+ ASSERT(bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64) < 0);
+ ASSERT(c->protocol_error && result.calls == 1 && !result.verdict.action);
+ return 0;
+}
+static s32 sizes2_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_info_v2 out = {}, before = out;
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ if (!test_variant) {
+  ASSERT(bpf_xdev_ext_xdomain_info_v2(ctx, &out, size_arg) < 0);
+  ASSERT(!memcmp(&out, &before, 320));
+ } else {
+  ASSERT(bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, size_arg) < 0);
+  ASSERT(result.calls == 1 && !result.verdict.action);
+ }
+ ASSERT(c->protocol_error); return 0;
+}
+static s32 no_backing2_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_info_v2 out = {};
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ ASSERT(ctx->class_id == 11 && ctx->member == 3 && ctx->callsite == 7);
+ ASSERT(!ctx->nr_frames && !ctx->desc_cap && !ctx->batch_id);
+ ASSERT(!c->b && !c->frames && !c->scratch && !c->cqe && !c->out_len);
+ ASSERT(!bpf_xdev_ext_info(ctx, 320) && !bpf_xdev_ext_desc(ctx, 0, 64));
+ ASSERT(!bpf_xdev_ext_cqe(ctx, 0, 64) && !bpf_xdev_ext_frame(ctx, 0, 0, 1));
+ ASSERT(!bpf_xdev_ext_xdomain_info_v2(ctx, &out, 320));
+ ASSERT(!bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64) && !c->protocol_error);
+ stale_ctx = ctx; return 0;
+}
+static s32 denied2_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_xdomain_proto_info_v2 out = {}, before = out;
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ ASSERT(bpf_xdev_ext_xdomain_info_v2(ctx, &out, 320) < 0);
+ ASSERT(!memcmp(&out, &before, 320));
+ ASSERT(bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64) < 0);
+ ASSERT(c->protocol_error && !result.calls); return 0;
+}
+static pthread_barrier_t identity_barrier;
+static const struct xdev_ext_mech_ctx *cpu_contexts[2];
+static _Thread_local unsigned expected_cpu;
+static s32 parallel2_callback(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+ struct xdev_ext_xdomain_proto_info_v2 out = {}, before;
+ struct xdev_ext_xdomain_proto_verdict v = {
+  .size = 64, .version = 2, .action = 1, .wake_ns = 600,
+  .event_id = 80 + expected_cpu, .epoch = 81,
+ };
+ ASSERT(c && &c->ctx == ctx && c->s->id == 50 + expected_cpu);
+ cpu_contexts[expected_cpu] = ctx;
+ pthread_barrier_wait(&identity_barrier);
+ ASSERT(!bpf_xdev_ext_xdomain_info_v2(ctx, &out, 320));
+ ASSERT(out.base.event_id == 80 + expected_cpu && out.tx_bind == 91 + expected_cpu);
+ ASSERT(!bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64));
+ before = out;
+ pthread_barrier_wait(&identity_barrier);
+ if (expected_cpu == 0) {
+  ASSERT(bpf_xdev_ext_xdomain_info_v2(cpu_contexts[1], &out, 320) == -EINVAL);
+  ASSERT(c->protocol_error);
+ }
+ pthread_barrier_wait(&identity_barrier);
+ if (expected_cpu == 1) {
+  ASSERT(!c->protocol_error); /* CPU0 misuse must not poison this invocation. */
+  ASSERT(bpf_xdev_ext_xdomain_info_v2(cpu_contexts[0], &out, 320) == -EINVAL);
+  ASSERT(c->protocol_error);
+ }
+ ASSERT(!memcmp(&out, &before, 320));
+ ASSERT(c->xdomain->calls == 1 && c->xdomain->verdict.event_id == 80 + expected_cpu);
+ pthread_barrier_wait(&identity_barrier);
+ return 0;
+}
+static void *parallel2_thread(void *opaque)
+{
+ expected_cpu = (unsigned)(uintptr_t)opaque; cpu_id = expected_cpu;
+ struct xdev_ext_mech_session own_session = { .id = 50 + expected_cpu };
+ struct xdev_ext_mech_stage own_stage = { .s = &own_session, .class_id = 11, .direction = 1 };
+ struct xdev_ext_nvme_mech_ops own_ops = { .complete = parallel2_callback };
+ struct xdev_ext_xdomain_proto_info_v2 own_info = facts2;
+ struct xdev_ext_xdomain_proto_result own_result = {};
+ struct xdev_ext_binding_ctx_v2 own_base = base;
+ struct xdev_ext_mech_call_args own_args = args;
+ own_info.base.event_id = 80 + expected_cpu; own_info.base.epoch = 81;
+ own_info.tx_bind = 91 + expected_cpu;
+ own_session.ops[11] = &own_ops;
+ own_args.base = &own_base; own_args.info = &own_info; own_args.xdomain = &own_result;
+ s32 raw = -999;
+ ASSERT(xdev_ext_mech_call(&own_stage, &own_args, &raw, NULL) == -EPROTO);
+ ASSERT(raw == 0 && own_result.calls == 1 && !preempt_depth);
+ ASSERT(!xdev_ext_mech_call_of(NULL));
+ return NULL;
+}
+static s32 nested2_inner(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+ struct xdev_ext_xdomain_proto_info_v2 out = {}, before = out;
+ struct xdev_ext_xdomain_proto_result saved = result;
+ ASSERT(c && c->st == &inner_stage && ctx != outer_ctx && !c->xdomain);
+ /* A nested real callback must prevent borrowing the outer CPU identity. */
+ ASSERT(bpf_xdev_ext_xdomain_info_v2(outer_ctx, &out, 320) == -EINVAL);
+ ASSERT(!memcmp(&out, &before, 320) && c->protocol_error);
+ ASSERT(!memcmp(&result, &saved, sizeof(result)));
+ return 0;
+}
+static s32 nested2_outer(const struct xdev_ext_mech_ctx *ctx)
+{
+ struct xdev_ext_mech_call *c = real_call(ctx);
+ struct xdev_ext_mech_call_args nested = { .member = XDEV_EXT_MECH_MEMBER_COMPLETE,
+  .callsite = XDEV_EXT_MECH_SITE_WORKER, .base = &base };
+ struct xdev_ext_xdomain_proto_info_v2 out = {};
+ struct xdev_ext_xdomain_proto_verdict v = intent2();
+ s32 raw = -999;
+ outer_ctx = ctx;
+ memset(&inner_session, 0, sizeof(inner_session));
+ inner_ops = (struct xdev_ext_nvme_mech_ops){ .complete = nested2_inner };
+ inner_session.id = 71; inner_session.ops[2] = &inner_ops;
+ inner_stage = (struct xdev_ext_mech_stage){ .s = &inner_session, .class_id = 2 };
+ ASSERT(xdev_ext_mech_call(&inner_stage, &nested, &raw, NULL) == -EPROTO && raw == 0);
+ ASSERT(xdev_ext_mech_call_of(ctx) == c && !c->protocol_error && !result.calls);
+ ASSERT(!bpf_xdev_ext_xdomain_info_v2(ctx, &out, 320));
+ ASSERT(out.tx_bind == 61 && !bpf_xdev_ext_xdomain_verdict_v2(ctx, &v, 64));
+ return 0;
+}
+static void envelope2(void)
+{
+ for (unsigned mode = 0; mode < 2; mode++) {
+  for (unsigned which = 0; which < 31; which++) {
+   setup2(never_callback, mode);
+   s32 raw = -999;
+   switch (which) {
+   case 0: args.info_size = 0; break; case 1: args.info_size = 255; break;
+   case 2: args.info_size = 257; break; case 3: args.info_size = 319; break;
+   case 4: args.info_size = 321; break;
+   case 5: if (mode) facts2.base.size = 256; else snapshot.size = 320; break;
+   case 6: if (mode) facts2.base.version = 1; else snapshot.version = 2; break;
+   case 7: args.b = &batch; break; case 8: args.frames = &frame; break;
+   case 9: args.nr_frames = 1; break; case 10: args.scratch = backing; break;
+   case 11: args.desc_size = 1; break; case 12: args.desc_cap = 1; break;
+   case 13: args.cqe = backing; break; case 14: args.cqe_size = 1; break;
+   case 15: args.cqe_cap = 1; break; case 16: args.out_len = &out_length; break;
+   case 17: args.len_delta = 1; break; case 18: args.xdomain = NULL; break;
+   case 19: args.info = NULL; break; case 20: args.batch_id = 1; break;
+   case 21: args.callsite = XDEV_EXT_MECH_SITE_WORKER; break;
+   case 22: args.member = XDEV_EXT_MECH_MEMBER_BUILD; break;
+   case 23: args.member = XDEV_EXT_MECH_MEMBER_PREPARE; break;
+   case 24: base.length = 1; break; case 25: base.src_offset = 1; break;
+   case 26: stage.class_id = 2; session.ops[2] = &ops; break;
+   case 27: stage.s = NULL; break;
+   case 28: if (mode) facts2.base.version = 0; else snapshot.version = 0; break;
+   case 29: args.info_size = mode ? 256 : 320; break;
+   case 30: if (mode) facts2.base.size = 319; else snapshot.size = 255; break;
+   }
+   ASSERT(invoke(&raw) == -EINVAL);
+   ASSERT(!callbacks && raw == -999 && !result.calls && !preempt_depth);
+  }
+ }
+ /* Existing direct-target guard must also protect the new-sized path. */
+ for (unsigned which = 0; which < 5; which++) {
+  setup2(never_callback, true);
+  struct xdev_ext_mech_target t = { .s = &session, .st = &stage,
+   .class_id = 11, .session_id = 17, .frame_size = 65536,
+   .hdr_room = 64, .batch_frames = 2 };
+  s32 raw = -999;
+  switch (which) { case 0: t.class_id = 2; break; case 1: t.session_id++; break;
+  case 2: t.batch = true; break; case 3: t.batch_id = 1; break; case 4: t.st = NULL; break; }
+  ASSERT(xdev_ext_mech_invoke(&ops, &t, &args, &raw, NULL) == -EINVAL);
+  ASSERT(!callbacks && !result.calls && raw == -999);
+ }
+}
+int main(int argc, char **argv)
+{
+ ASSERT(argc == 2);
+ if (!strcmp(argv[1], "abi-normalize") || !strcmp(argv[1], "early-copy")) {
+  setup2(normalization_callback, !strcmp(argv[1], "early-copy")); expect_call(0);
+  if (!strcmp(argv[1], "abi-normalize")) { setup(copy_callback); expect_call(0); }
+ } else if (!strcmp(argv[1], "envelope")) envelope2();
+ else if (!strcmp(argv[1], "identity")) {
+  guard_len = (size_t)sysconf(_SC_PAGESIZE);
+  guard = mmap(NULL, guard_len, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  ASSERT(guard != MAP_FAILED);
+  for (unsigned mode = 0; mode < 2; mode++) for (unsigned i = 0; i < 4; i++) {
+   setup2(bad_identity_callback, mode); test_variant = i; expect_call(-EPROTO);
+  }
+  ASSERT(!munmap(guard, guard_len));
+ } else if (!strcmp(argv[1], "cross-class-member")) {
+  const unsigned classes[] = {2, 3, 4, 6, 7, 8, 9, 10, 11};
+  for (unsigned i = 0; i < sizeof(classes)/sizeof(classes[0]); i++) {
+   setup2(denied2_callback, false); stage.class_id = classes[i];
+   session.ops[classes[i]] = &ops; args.xdomain = NULL; args.callsite = XDEV_EXT_MECH_SITE_WORKER;
+   expect_call(-EPROTO);
+  }
+  for (unsigned member = 1; member <= 2; member++) {
+   setup2(denied2_callback, false); args.xdomain = NULL; args.member = member;
+   args.callsite = member == 1 ? XDEV_EXT_MECH_SITE_CREATE : XDEV_EXT_MECH_SITE_WORKER;
+   if (member == 2) { args.scratch = backing; args.desc_size = 64; args.desc_cap = 1; }
+   expect_call(-EPROTO);
+  }
+ } else if (!strcmp(argv[1], "parallel-identity")) {
+  setup2(never_callback, true);
+  pthread_t threads[2]; ASSERT(!pthread_barrier_init(&identity_barrier, NULL, 2));
+  for (unsigned i = 0; i < 2; i++) ASSERT(!pthread_create(&threads[i], NULL, parallel2_thread, (void *)(uintptr_t)i));
+  for (unsigned i = 0; i < 2; i++) ASSERT(!pthread_join(threads[i], NULL));
+  ASSERT(!pthread_barrier_destroy(&identity_barrier));
+ } else if (!strcmp(argv[1], "nested-identity")) {
+  setup2(nested2_outer, true); expect_call(0);
+ } else if (!strcmp(argv[1], "v1-early")) {
+  for (unsigned i = 0; i < 2; i++) { setup2(old_early_callback, true); test_variant = i; expect_call(-EPROTO); }
+ } else if (!strcmp(argv[1], "shared-verdict")) {
+  for (unsigned i = 0; i < 4; i++) { setup2(shared_callback, false); test_variant = i; expect_call(-EPROTO); }
+  for (unsigned i = 1; i <= 3; i += 2) { setup2(shared_callback, true); test_variant = i; expect_call(-EPROTO); }
+ } else if (!strcmp(argv[1], "new-actions")) {
+  const unsigned events[] = {18, 19, 20, 21, 22, 23, 1};
+  const unsigned directions[] = {1, 2, 1, 2, 1, 2, 1};
+  for (unsigned i = 0; i < 7; i++) {
+   setup2(new_action_callback, true); test_variant = i + 18;
+   facts2.base.event = events[i]; facts2.base.direction = directions[i];
+   stage.direction = directions[i]; base.direction = directions[i];
+   expect_call(0);
+  }
+ } else if (!strcmp(argv[1], "malformed")) {
+  for (unsigned mode = 0; mode < 2; mode++) for (unsigned i = 0; i < (mode ? 11U : 18U); i++) {
+   setup2(malformed2_callback, mode); test_variant = i; expect_call(-EPROTO);
+  }
+ } else if (!strcmp(argv[1], "sizes")) {
+  const unsigned sizes[] = {0, 255, 256, 319, 321, 63, 65};
+  for (unsigned mode = 0; mode < 2; mode++) for (unsigned i = 0; i < 7; i++) {
+   setup2(sizes2_callback, mode); test_variant = i >= 5; size_arg = sizes[i]; expect_call(-EPROTO);
+  }
+ } else if (!strcmp(argv[1], "no-backing")) {
+  for (unsigned mode = 0; mode < 2; mode++) { setup2(no_backing2_callback, mode); expect_call(0); }
+ } else if (!strcmp(argv[1], "inactive")) {
+  setup2(no_backing2_callback, true); expect_call(0);
+  struct xdev_ext_xdomain_proto_info_v2 out = {}, before = out;
+  struct xdev_ext_xdomain_proto_verdict v = intent2();
+  ASSERT(bpf_xdev_ext_xdomain_info_v2(stale_ctx, &out, 320) == -EINVAL);
+  ASSERT(bpf_xdev_ext_xdomain_verdict_v2(stale_ctx, &v, 64) == -EINVAL);
+  ASSERT(!memcmp(&out, &before, 320) && result.calls == 1);
+ } else return 2;
+ printf("ok - %s real private kfunc/envelope host semantics\n", argv[1]);
+ return 0;
+}

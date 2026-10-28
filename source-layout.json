@@ -7697,6 +7697,30 @@
       "source": "src/network/io_uring/xdomain/xdev_ext_xdomain_early.h",
       "component": "linux",
       "native_path": "io_uring/xdomain/xdev_ext_xdomain_early.h"
+    },
+    {
+      "source": "tests/network/xdomain/early/README.md",
+      "logical_path": "tests/network/xdomain/early/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/early/cases.c",
+      "logical_path": "tests/network/xdomain/early/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/early/run.py",
+      "logical_path": "tests/network/xdomain/early/run.py"
+    },
+    {
+      "source": "tests/network/xdomain/early/wire_cases.c",
+      "logical_path": "tests/network/xdomain/early/wire_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/early/kfunc_test.py",
+      "logical_path": "tests/network/xdomain/early/kfunc_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/early/kfunc_cases.c.in",
+      "logical_path": "tests/network/xdomain/early/kfunc_cases.c.in"
     }
   ]
 }

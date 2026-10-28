@@ -810,6 +810,9 @@ void*xdev_ext_mech_batch_cookie(struct xdev_ext_mech_batch*b){
 u32 xdev_ext_mech_batch_nr_frames(const struct xdev_ext_mech_batch*b){
 	return b->nr;
 }
+u64 xdev_ext_mech_batch_key(const struct xdev_ext_mech_batch *b){
+	return b->key;
+}
 u64 xdev_ext_mech_batch_ticket(const struct xdev_ext_mech_batch*b){
 	return b->ticket;
 }
