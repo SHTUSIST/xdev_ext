@@ -1,0 +1,75 @@
+{
+  "version": 1,
+  "scope": "Host software composition: real NHI ring with real X3/X4/X5/family/X6; MMIO, DMA, IRQ and core/provider boundaries are simulated",
+  "production_mode": "Unmodified XDOMAIN uses interrupt-driven, unbatched tb_ring_tx/tb_ring_rx",
+  "experimental_modes": "NO_INTERRUPT, batching and tiny data rings are selected by the host adapter only; no production support or hardware claim",
+  "source_units": [
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_main.c",
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c",
+    "kernel/io_uring/xdomain/xdev_ext_xdomain_class.c",
+    "kernel/io_uring/family/xdev_ext_netfam.c",
+    "kernel/tools/xdev_ext_mech/xdomain_peer.bpf.c",
+    "kernel/drivers/thunderbolt/nhi.c"
+  ],
+  "wrappers": [
+    "stack_boundary.c",
+    "stack_x3.c",
+    "stack_x4.c",
+    "stack_x5.c",
+    "stack_family.c",
+    "stack_x6.c",
+    "stack_nhi.c"
+  ],
+  "cases": [
+    {
+      "name": "production_happy_path",
+      "mode": "production API",
+      "event_budget": 30000,
+      "assertions": ["existing_multiwindow_oracle", "tx_stage_0_and_1", "real_descriptor_callbacks", "wire_rts_cts_ack"]
+    },
+    {
+      "name": "production_ack_orders",
+      "mode": "production API",
+      "event_budget": 18000,
+      "assertions": ["existing_ack_before_tx_callback", "tx_completion_before_ack", "no_early_publish", "no_early_lease_release", "exactly_once_publication"]
+    },
+    {
+      "name": "production_stop_phases",
+      "mode": "production API",
+      "event_budget": 30000,
+      "assertions": ["existing_five_commitment_phases", "actual_nhi_stop_callbacks", "control_admission_balance", "lease_custody_balance"]
+    },
+    {
+      "name": "production_loss_teardown",
+      "mode": "production API with simulated controller unavailability",
+      "event_budget": 30000,
+      "assertions": ["existing_remove_suspend_going_away", "lost_completion", "unknown_retained", "no_false_release"]
+    },
+    {
+      "name": "no_interrupt_poll_refill",
+      "mode": "host adapter NO_INTERRUPT, size-3 data ring",
+      "event_budget": 30000,
+      "assertions": ["no_interrupt_descriptor_bit", "callbacks_returned_by_real_poll", "four_frames_through_two_slots", "nine_groups_wrap", "independent_descriptor_address_oracle"]
+    },
+    {
+      "name": "batched_doorbells_wrap",
+      "mode": "host adapter batching, size-3 data ring",
+      "event_budget": 30000,
+      "assertions": ["multi_descriptor_doorbell", "descriptors_invisible_until_doorbell", "real_refill_after_wrap", "independent_descriptor_address_oracle", "same_wire_and_cqe_oracle"]
+    },
+    {
+      "name": "poll_batch_retirement",
+      "mode": "host adapter NO_INTERRUPT and batching, serialized poller exclusion before teardown",
+      "event_budget": 30000,
+      "assertions": ["queued_and_posted_frames", "actual_canceled_nhi_callbacks", "unknown_descriptor_backing_retained", "lockdep_key_unregistered", "no_callback_after_retirement", "no_false_payload_release"]
+    }
+  ],
+  "mutations": [
+    {"name": "omit_batch_notify", "must_fail": "batched_doorbells_wrap"},
+    {"name": "omit_poll_refill", "must_fail": "no_interrupt_poll_refill"},
+    {"name": "request_irq_for_no_interrupt", "must_fail": "no_interrupt_poll_refill"},
+    {"name": "omit_quarantine_key_unregister", "must_fail": "poll_batch_retirement"},
+    {"name": "ack_implies_local_completion", "must_fail": "production_ack_orders"},
+    {"name": "shift_nhi_descriptor_address", "must_fail": "batched_doorbells_wrap"}
+  ]
+}

@@ -8,6 +8,12 @@
 #define STACK_WORK 256
 #define STACK_FAULTS 128
 struct native {
+#ifdef STACK_REAL_NHI
+	ring_cb callback;
+	bool completed;
+	u32 completion_len, completion_flags;
+	u8 completion_sof, completion_eof;
+#endif
 	struct tb_ring*r;
 	struct ring_frame*f;
 	u64 id,
@@ -46,6 +52,15 @@ struct side {
  u64 rand;
  bool probed, removed;
 };
+#ifdef STACK_REAL_NHI
+/* Test metadata is separate from the unmodified production ring layout. */
+struct stack_ring_info {
+ struct tb_ring *ring;
+ struct tb_nhi *nhi;
+ unsigned endpoint, control, channel, size;
+ bool is_tx, freed, unknown, retiring;
+};
+#endif
 struct stack_world {
 	struct stack_config cfg;
 	struct side side[2];
@@ -54,6 +69,9 @@ struct stack_world {
 	struct native*n;
 	unsigned nn;
 	struct tb_ring*rings[64];
+#ifdef STACK_REAL_NHI
+ struct stack_ring_info ring_info[64];
+#endif
 	unsigned nrings;
 	struct work_struct*work[STACK_WORK];
 	unsigned nwork;
@@ -85,6 +103,19 @@ struct stack_world {
 static struct stack_world*world;
 struct stack_world*stack_retained_worlds[128];
 static unsigned stack_retained_count;
+#ifdef STACK_REAL_NHI
+static struct stack_ring_info *ring_info(const struct tb_ring *r)
+{
+ /* A normal free may recycle its address. The newest allocation owns it. */
+ for (unsigned i = world->nrings; i; i--)
+  if (world->ring_info[i - 1].ring == r)
+   return &world->ring_info[i - 1];
+ assert(!"unrecorded NHI ring");
+ return NULL;
+}
+#else
+#define ring_info(r) (r)
+#endif
 unsigned stack_spins,stack_mutexes;
 static unsigned endpoint_pci(const struct pci_dev*p){
 	assert(world);
@@ -321,6 +352,7 @@ u32 crc32c(u32 c,const void*p,size_t n){
 	}
 	return c;
 }
+#ifndef STACK_REAL_NHI
 static struct tb_ring*ring_alloc(struct tb_nhi*n,int size,unsigned flags,bool tx){
 	unsigned e=endpoint_pci(n->pdev);
 	if(world->ring_refuse[e]){
@@ -439,8 +471,9 @@ void tb_ring_free_quarantined(struct tb_ring*r){
 struct device*tb_ring_dma_device(struct tb_ring*r){
 	return &r->nhi->pdev->dev;
 }
+#endif /* !STACK_REAL_NHI: model ring implementation */
 static int native_post(struct tb_ring*r,struct ring_frame*f){
-	assert(r->running&&!r->freed&&world->nn<STACK_NATIVE);
+	assert(r->running&&!ring_info(r)->freed&&world->nn<STACK_NATIVE);
 	struct native*n=&world->n[world->nn++];
 	*n=(struct native){
 		.r=r,
@@ -449,14 +482,14 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 		.len=f->size?f->size:4096
 	}
 	;
-	if(r->control){
+	if(ring_info(r)->control){
 		if(r->is_tx){
 			n->raw_len=n->len;
 			assert(n->raw_len<=STACK_CTL_BYTES);
 			memcpy(n->raw,(void*)(uintptr_t)f->buffer_phy,n->raw_len);
 			struct stack_event e={
 				.kind=STACK_EV_CONTROL_TX,
-				.endpoint=r->endpoint,
+				.endpoint=ring_info(r)->endpoint,
 				.direction=1,
 				.control=1,
 				.owner=(uintptr_t)f,
@@ -469,25 +502,25 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 			memcpy(e.raw,n->raw,n->raw_len);
 			stack_record(e);
 			n->id=world->logs;
-			n->held=world->hold_controls[r->endpoint]&&(!world->hold_control_type[r->endpoint]||world->hold_control_type[r->endpoint]==n->raw[5]);
-			if(world->drop_control[r->endpoint]&&(!world->drop_control_type[r->endpoint]||world->drop_control_type[r->endpoint]==n->raw[5])){
+			n->held=world->hold_controls[ring_info(r)->endpoint]&&(!world->hold_control_type[ring_info(r)->endpoint]||world->hold_control_type[ring_info(r)->endpoint]==n->raw[5]);
+			if(world->drop_control[ring_info(r)->endpoint]&&(!world->drop_control_type[ring_info(r)->endpoint]||world->drop_control_type[ring_info(r)->endpoint]==n->raw[5])){
 				n->delivered=true;
-				world->drop_control[r->endpoint]=false;
+				world->drop_control[ring_info(r)->endpoint]=false;
 			}
 		}
 	}
 	else{
 		struct xdev_ext_net_elem*el=container_of((void*)f,struct xdev_ext_net_elem,dev);
 		n->group=el->slot->group;
-		n->incarnation=link(r->endpoint)->local_inc;
+		n->incarnation=link(ring_info(r)->endpoint)->local_inc;
 		n->generation=el->slot->ns->st->s->generation;
 		n->session_id=el->slot->ns->st->s->id;
 		for(unsigned i=0;i+1<world->nn;i++)if(world->n[i].r==r&&world->n[i].incarnation==n->incarnation)n->seq++;
 		struct stack_event e={
 			.kind=STACK_EV_DATA_POST,
-			.endpoint=r->endpoint,
+			.endpoint=ring_info(r)->endpoint,
 			.direction=r->is_tx?1:2,
-			.channel=r->channel,
+			.channel=ring_info(r)->channel,
 			.stage_index=el->slot->ns->st->index,
 			.owner=(uintptr_t)f,
 			.address=f->buffer_phy,
@@ -504,6 +537,7 @@ static int native_post(struct tb_ring*r,struct ring_frame*f){
 	}
 	return 0;
 }
+#ifndef STACK_REAL_NHI
 int tb_ring_tx(struct tb_ring*r,struct ring_frame*f){
 	assert(r->is_tx);
 	return native_post(r,f);
@@ -512,6 +546,9 @@ int tb_ring_rx(struct tb_ring*r,struct ring_frame*f){
 	assert(!r->is_tx);
 	return native_post(r,f);
 }
+#else
+#include "stack_nhi_boundary.h"
+#endif
 static int hop_alloc(struct tb_xdomain*x,int id,bool in){
 	unsigned e=endpoint_xd(x);
 	int v=id>=0?id:100+(int)world->logs;
@@ -547,9 +584,9 @@ int tb_xdomain_enable_paths(struct tb_xdomain*x,int tx,int out,int rx,int in){
 	unsigned channel=0;
 	for(unsigned i=0;i<world->nrings;i++){
 		struct tb_ring*r=world->rings[i];
-		if(r->endpoint==e&&(r->hop==out||r->hop==in)){
-			control=r->control;
-			channel=r->channel;
+		if(!ring_info(r)->freed&&ring_info(r)->endpoint==e&&(r->hop==out||r->hop==in)){
+			control=ring_info(r)->control;
+			channel=ring_info(r)->channel;
 			break;
 		}
 	}
@@ -794,6 +831,9 @@ int stack_new(const struct stack_config*c,struct stack_world**out){
 		;
 		s->pci.refs=1;
 		s->nhi.pdev=&s->pci;
+#ifdef STACK_REAL_NHI
+  stack_nhi_init(&s->nhi, &s->pci);
+#endif
 		s->tb.nhi=&s->nhi;
 		memset(s->uuid.b,e+1,sizeof(s->uuid));
 		s->rand=c->local_inc[e]?c->local_inc[e]-1:100+100*e;
@@ -1054,6 +1094,7 @@ static bool finalize(unsigned e,struct epoch *s){
 	}
 	return false;
 }
+#ifndef STACK_REAL_NHI
 static struct native*matching_rx(struct native*t){
 	for(unsigned i=0;i<world->nn;i++){
 		struct native*r=&world->n[i];
@@ -1186,6 +1227,7 @@ static struct native *native_ready(void)
  }
  return NULL;
 }
+#endif /* !STACK_REAL_NHI: model native delivery */
 static bool finalize_ready(const struct epoch *epoch)
 {
  for(unsigned i=0;i<epoch->nb;i++)
@@ -1254,10 +1296,28 @@ int stack_pump(struct stack_world *w,unsigned budget,uint64_t advance)
    assert(finalize(selected_endpoint,selected));
    continue;
   }
+#ifdef STACK_REAL_NHI
+  struct tb_ring *notify = native_notify_ready();
+  if (notify) {
+   if (used == budget) return -ELOOP;
+   scheduler_step(w, budget, &used, STACK_STEP_NHI_NOTIFY,
+                  ring_info(notify)->endpoint, 0);
+   tb_ring_notify(notify);
+   continue;
+  }
+  struct tb_ring *poll = native_poll_ready();
+  if (poll) {
+   if (used == budget) return -ELOOP;
+   scheduler_step(w, budget, &used, STACK_STEP_NHI_POLL,
+                  ring_info(poll)->endpoint, 0);
+   assert(stack_nhi_poll_one(poll));
+   continue;
+  }
+#endif
   struct native *native=native_ready();
   if(native){
    if(used==budget)return -ELOOP;
-   scheduler_step(w,budget,&used,STACK_STEP_NATIVE,native->r->endpoint,native->session_id);
+   scheduler_step(w,budget,&used,STACK_STEP_NATIVE,ring_info(native->r)->endpoint,native->session_id);
    assert(one_native());
    continue;
   }
@@ -1343,6 +1403,14 @@ static struct native*native_id(u64 id){
 }
 int stack_fault(struct stack_world*w,const struct stack_fault*f){
 	if(w!=world||!f||f->endpoint>1)return -EINVAL;
+#ifdef STACK_REAL_NHI
+	/* These old model injections bypass descriptor ownership. Refuse them
+	 * explicitly rather than accepting an event the NHI backend cannot run. */
+	if (f->kind == STACK_FAULT_CORRUPT_CONTROL ||
+	    f->kind == STACK_FAULT_DUP_CONTROL ||
+	    f->kind == STACK_FAULT_REPLAY_CONTROL)
+		return -EOPNOTSUPP;
+#endif
 	unsigned e=f->endpoint;
 	struct native*n=f->ordinal?native_id(f->ordinal):NULL;
 	switch(f->kind){
@@ -1351,7 +1419,7 @@ int stack_fault(struct stack_world*w,const struct stack_fault*f){
 		case STACK_FAULT_DROP_CALLBACK:w->drop_callback[e]=true;
 		break;
 		case STACK_FAULT_RELEASE_CALLBACKS:w->hold_callbacks[e]=false;
-		for(unsigned i=0;i<w->nn;i++)if(w->n[i].r->endpoint==e)w->n[i].held=false;
+		for(unsigned i=0;i<w->nn;i++)if(ring_info(w->n[i].r)->endpoint==e)w->n[i].held=false;
 		break;
 		case STACK_FAULT_HOLD_CONTROL:w->hold_controls[e]=true;
 		w->hold_control_type[e]=f->control_type;
@@ -1362,7 +1430,7 @@ int stack_fault(struct stack_world*w,const struct stack_fault*f){
 		case STACK_FAULT_RELEASE_CONTROLS:w->hold_controls[e]=false;
 		w->control_refuse[e]=false;
 		if(w->side[e].probed&&!w->side[e].removed)stack_x4_control_pressure(link(e),false);
-		for(unsigned i=0;i<w->nn;i++)if(w->n[i].r->endpoint==e&&w->n[i].r->control)w->n[i].held=false;
+		for(unsigned i=0;i<w->nn;i++)if(ring_info(w->n[i].r)->endpoint==e&&ring_info(w->n[i].r)->control)w->n[i].held=false;
 		break;
 		case STACK_FAULT_RING_REFUSE:w->ring_refuse[e]=true;
 		break;
@@ -1383,13 +1451,19 @@ int stack_fault(struct stack_world*w,const struct stack_fault*f){
 		break;
 		case STACK_FAULT_SHIFT_OFFSET:if(w->cfg.nr_frames)w->cfg.span[0].data_off+=f->arg0?f->arg0:4096;
 		break;
-		case STACK_FAULT_DUP_CALLBACK:case STACK_FAULT_REPLAY_CALLBACK:if(n){
+		case STACK_FAULT_DUP_CALLBACK:case STACK_FAULT_REPLAY_CALLBACK:
+#ifdef STACK_REAL_NHI
+   (void)n;
+   return -EOPNOTSUPP;
+#else
+   if(n){
 			invoke(n,false);
 			if(f->kind==STACK_FAULT_DUP_CALLBACK)invoke(n,false);
 		}
 		else if(!f->ordinal)w->duplicate_callback[e]++;
 		else return -ENOENT;
 		break;
+#endif
 		case STACK_FAULT_REPLAY_HANDLER:if(!f->ordinal||f->ordinal>w->logs)return -ENOENT;
 		{
 			struct stack_event old=w->log[f->ordinal-1];
@@ -1442,7 +1516,12 @@ void stack_destroy(struct stack_world *w)
   }
  }
  stack_x3_exit();
+#ifdef STACK_REAL_NHI
+ for (unsigned endpoint = 0; endpoint < 2; endpoint++)
+  stack_nhi_destroy(&w->side[endpoint].nhi);
+#else
  for(unsigned i=0;i<w->nrings;i++)if(!w->rings[i]->unknown)free(w->rings[i]);
+#endif
  for(unsigned endpoint=0;endpoint<2;endpoint++)retain_world|=w->side[endpoint].pci.refs>1;
  if(retain_world){
   assert(stack_retained_count<ARRAY_SIZE(stack_retained_worlds));
