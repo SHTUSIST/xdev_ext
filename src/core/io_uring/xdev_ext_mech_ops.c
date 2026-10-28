@@ -32,6 +32,7 @@
 #include "xdev_ext_mech_internal.h"
 #include "xdev_ext_mech_step.h"
 #include "xdev_ext_ops_core.h"
+#include "xdev_ext_mech_programs.h"
 
 /* The four types share one layout; xdev_ext_nvme_mech_ops stands for all. */
 #define XDEV_EXT_MECH_SAME_LAYOUT(type)					\
@@ -622,15 +623,26 @@ static int xdev_ext_cpu_mech_ops_check_member(const struct btf_type *t,
 
 static int xdev_ext_mech_reg(u32 class_id, void *kdata, struct bpf_link *link)
 {
+	const struct xdev_ext_nvme_mech_ops *ops = kdata;
+
+	if (ops->flags & XDEV_EXT_MECH_OPS_F_PRIVATE)
+		return xdev_ext_mech_instance_register(class_id, kdata, link);
 	return xdev_ext_ops_publish(&xdev_ext_mech_registry, class_id, kdata, link);
 }
 
 /*
- * Retract and wait for RCU readers.  Sessions keep their pinned generation
- * for batches already in flight and stop admitting new ones.
+ * Global retraction waits for RCU readers; PRIVATE records instead retain
+ * their referenced lifetime. Sessions keep pinned generations for accepted
+ * batches and stop admitting new ones when their selected generation leaves.
  */
-static void xdev_ext_mech_unreg(u32 class_id, void *kdata)
+static void xdev_ext_mech_unreg(u32 class_id, void *kdata, struct bpf_link *link)
 {
+	const struct xdev_ext_nvme_mech_ops *ops = kdata;
+
+	if (ops->flags & XDEV_EXT_MECH_OPS_F_PRIVATE) {
+		xdev_ext_mech_instance_unregister(class_id, kdata, link);
+		return;
+	}
 	if (xdev_ext_ops_retract(&xdev_ext_mech_registry, class_id, kdata))
 		xdev_ext_mech_generation_gone(class_id, kdata);
 }
@@ -692,7 +704,7 @@ static int xdev_ext_##cls##_mech_reg(void *kdata, struct bpf_link *link)	\
 }									\
 static void xdev_ext_##cls##_mech_unreg(void *kdata, struct bpf_link *link)	\
 {									\
-	xdev_ext_mech_unreg(id, kdata);					\
+	xdev_ext_mech_unreg(id, kdata, link);					\
 }									\
 static struct xdev_ext_##cls##_mech_ops xdev_ext_##cls##_mech_cfi_stubs = {	\
 	.prepare = xdev_ext_mech_ops__prepare,				\
@@ -748,7 +760,7 @@ static int xdev_ext_xdomain_mech_reg(void *kdata, struct bpf_link *link)
 
 static void xdev_ext_xdomain_mech_unreg(void *kdata, struct bpf_link *link)
 {
-	xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_XDOMAIN, kdata);
+	xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_XDOMAIN, kdata, link);
 }
 
 static struct xdev_ext_xdomain_mech_ops xdev_ext_xdomain_mech_cfi_stubs = {

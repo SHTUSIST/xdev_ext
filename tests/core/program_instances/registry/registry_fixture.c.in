@@ -1,0 +1,59 @@
+// SPDX-License-Identifier: GPL-2.0
+// Actual registration and validation functions. Mutex/RCU/BPF ref operations are
+// explicit host dependency shims, not kernel synchronization or DMA evidence.
+#include "registry_shim.h"
+@REGISTRY_STRUCT@
+static const void *slots[XDEV_EXT_MECH_CLASS_MAX];
+static struct xdev_ext_ops_registry xdev_ext_mech_registry={.slots=slots,.nr_slots=XDEV_EXT_MECH_CLASS_MAX};
+static void xdev_ext_mech_generation_gone(u32 cls,const void *ops){(void)cls;(void)ops;check(!held_mutexes,"default notifier outside registry lock");default_gone++;}
+@FLAGS_CONSTANT@
+@PRIVATE_COMPONENT@
+@ACTUAL_FUNCTIONS@
+static int observed_register(u32 cls,struct xdev_ext_nvme_mech_ops *ops,struct bpf_link *link){
+ if(!xdev_ext_mech_flags_known(ops->flags))return -EINVAL;
+ return xdev_ext_mech_reg(cls,ops,link);
+}
+@LIFETIME_FUNCTIONS@
+int main(int argc,char **argv){
+ if(argc!=2)return 2;
+ struct xdev_ext_nvme_mech_ops ordinary={.abi_version=1,.flags=0},a={.abi_version=1,.flags=1},b={.abi_version=1,.flags=1};
+ struct bpf_link default_link=make_link(10,XDEV_EXT_MECH_CLASS_NVME,&ordinary);
+ struct bpf_link left=make_link(11,XDEV_EXT_MECH_CLASS_NVME,&a),right=make_link(12,XDEV_EXT_MECH_CLASS_NVME,&b);
+ if(!strncmp(argv[1],"life-",5))return lifetime_case(argv[1]+5);
+ if(argv[1][0]=='f'){
+  check(xdev_ext_mech_flags_known(0),"ordinary mechanism flags remain legal");
+  check(xdev_ext_mech_flags_known(1),"exact PRIVATE bit admitted by actual mechanism flags");
+  check(!xdev_ext_mech_flags_known(2)&&!xdev_ext_mech_flags_known(0x80000000U),"unknown mechanism flags remain rejected");
+ }else if(argv[1][0]=='c'){
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&ordinary,&default_link),"default registration remains available");
+  int ar=observed_register(XDEV_EXT_MECH_CLASS_NVME,&a,&left),br=observed_register(XDEV_EXT_MECH_CLASS_NVME,&b,&right);
+  printf("COEXIST default=0 private_a=%d private_b=%d\n",ar,br);
+  check(ar==0&&br==0,"actual registration retains default plus two same-class PRIVATE links");
+  check(slots[XDEV_EXT_MECH_CLASS_NVME]==&ordinary,"PRIVATE registration never replaces default slot");
+  if(!ar)owned_link_unregister(&left);
+  if(!br)owned_link_unregister(&right);
+  check(records_allocated==records_freed,"coexistence teardown releases registry ownership exactly once");
+ }else if(argv[1][0]=='n'){
+  check(observed_register(XDEV_EXT_MECH_CLASS_NVME,&ordinary,NULL)==-EOPNOTSUPP,"legacy default keeps required BPF link gate");
+  check(observed_register(XDEV_EXT_MECH_CLASS_NVME,&a,NULL)==-EOPNOTSUPP,"PRIVATE registration rejects NULL link without publishing NULL key");
+ }else if(argv[1][0]=='g'){
+  a.flags=b.flags=0;a.oracle=17;b.oracle=29;
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&a,&left),"first ordinary registration accepted");
+  check(observed_register(XDEV_EXT_MECH_CLASS_NVME,&b,&right)==-EBUSY,"second ordinary registration retains global -EBUSY");
+  check(slots[XDEV_EXT_MECH_CLASS_NVME]==&a,"failed ordinary publication preserves original default");
+  const void *pinned=xdev_ext_ops_pin(&xdev_ext_mech_registry,XDEV_EXT_MECH_CLASS_NVME);
+  check(pinned==&a&&a.pins==1,"global registry pins exact current program");
+  owned_link_unregister(&left);
+  check(!slots[XDEV_EXT_MECH_CLASS_NVME]&&default_gone==1&&a.pins==1,"global withdrawal removes lookup before notification while cached pin survives");
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&b,&right),"new ordinary generation attaches after old withdrawal");
+  check(!xdev_ext_ops_is_current(&xdev_ext_mech_registry,XDEV_EXT_MECH_CLASS_NVME,pinned)&&xdev_ext_ops_is_current(&xdev_ext_mech_registry,XDEV_EXT_MECH_CLASS_NVME,&b),"global current check does not resurrect retired default");
+  check(((const struct xdev_ext_nvme_mech_ops *)pinned)->oracle==17&&b.oracle==29,"retired/default program payload identities remain independently observable");
+  xdev_ext_ops_unpin(pinned);owned_link_unregister(&right);
+  check(!ops_pins&&default_gone==2,"global pin and withdrawal references remain balanced");
+ }else{
+  check(xdev_ext_binding_ops_flags_valid(XDEV_EXT_BINDING_BACKEND_NVME,0),"ordinary NVMe policy flags stay legal");
+  check(!xdev_ext_binding_ops_flags_valid(XDEV_EXT_BINDING_BACKEND_NVME,1),"mechanism PRIVATE bit does not become a policy capability");
+  check(!xdev_ext_binding_ops_flags_valid(XDEV_EXT_BINDING_BACKEND_AFXDP,2),"unknown policy flags stay rejected");
+ }
+ printf("REGISTRY case=%s failures=%u\n",argv[1],failures);return failures?1:0;
+}

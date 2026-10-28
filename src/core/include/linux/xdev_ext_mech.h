@@ -112,7 +112,7 @@ struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops;
 struct xdev_ext_ce_backend_ops;
 
-#define XDEV_EXT_MECH_OPS_KNOWN_FLAGS	0x00000000U
+#define XDEV_EXT_MECH_OPS_KNOWN_FLAGS	XDEV_EXT_MECH_OPS_F_PRIVATE
 
 /*
  * One struct_ops type per class, registered by built-in code so neither

@@ -161,6 +161,13 @@ fail:
 	return ret < 0 ? ret : -EINVAL;
 }
 
+int xdev_ext_prog_link_fd(const struct xdev_ext_prog *p)
+{
+ if (!p || !p->link)
+  return -EINVAL;
+ return bpf_link__fd(p->link);
+}
+
 int xdev_ext_prog_detach(struct xdev_ext_prog *p)
 {
 	int ret = 0;

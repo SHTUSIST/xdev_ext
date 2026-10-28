@@ -22,6 +22,8 @@
 #define XDEV_EXT_CE_MECH_ABI_VERSION		2U
 #define XDEV_EXT_MECH_MAX_FRAMES		32
 #define XDEV_EXT_MECH_MAX_STAGES		4
+/* Explicit per-link mechanism programs; flags0 keeps the class default. */
+#define XDEV_EXT_MECH_OPS_F_PRIVATE	(1U << 0)
 #define XDEV_EXT_AFXDP_MECH_STATE_SIZE	256U
 
 /* Existing ids reuse policy numbers; new mechanisms have their own range. */
@@ -590,6 +592,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_STOP_REPORT	= 9,	/* struct xdev_ext_mech_stop_report */
 	XDEV_EXT_MECH_OP_CREATE_REPORT = 10, /* struct xdev_ext_mech_create_with_report */
 	XDEV_EXT_MECH_OP_STAGE_DIAG = 11, /* struct xdev_ext_mech_stage_diag */
+	XDEV_EXT_MECH_OP_CREATE_PROGRAMS = 12, /* struct xdev_ext_mech_create_programs */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U
@@ -745,6 +748,17 @@ struct xdev_ext_mech_create_with_report {
  __u32 size, version;
  struct xdev_ext_mech_create create;
  struct xdev_ext_mech_create_report report;
+};
+
+#define XDEV_EXT_MECH_CREATE_PROGRAMS_VERSION 1U
+/* One selector per active stage: -1 uses the existing default, a link fd
+ * explicitly selects a PRIVATE program. Unused selectors must be -1.
+ * Only request is copied out, with the existing CREATE_REPORT semantics.
+ */
+struct xdev_ext_mech_create_programs {
+ __u32 size, version;
+ __s32 program_fds[XDEV_EXT_MECH_MAX_STAGES];
+ struct xdev_ext_mech_create_with_report request;
 };
 
 /* IOU_UMEM only: the listed frames move USER -> kernel before the batches. */

@@ -58,6 +58,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(native_event);
 #include "xdev_ext_mech_step.h"
 #include "xdev_ext_mech_start_queue.h"
 #include "xdev_ext_mech_produced.h"
+#include "xdev_ext_mech_programs.h"
 
 /* What the contract headers mirror from kernel definitions. */
 static_assert(XDEV_EXT_MECH_NVME_STATUS_DNR == NVME_STATUS_DNR);
@@ -65,6 +66,8 @@ static_assert(XDEV_EXT_MECH_NVME_SCT_SC_MASK == NVME_SCT_SC_MASK);
 static_assert(sizeof(struct xdp_desc) == 16);
 static_assert(sizeof(struct nvme_command) == XDEV_EXT_NVME_MECH_DESC_SIZE);
 static_assert(offsetof(struct xdev_ext_mech_call, ctx) == 0);
+static_assert(XDEV_EXT_MECH_MAX_STAGES == 4);
+static_assert(offsetof(struct xdev_ext_mech_create_programs, request) == 24);
 static_assert(__builtin_types_compatible_p(typeof(&crc32c), xdev_ext_mech_crc32c_fn));
 
 #define XDEV_EXT_MECH_GROUP_TIMEOUT	xdev_ext_policy_rx_group_timeout()
@@ -169,6 +172,7 @@ struct xdev_ext_mech_session {
  u32 create_phase, create_failed_stage;
 	struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
  struct xdev_ext_mech_stage_uapi plan[XDEV_EXT_MECH_MAX_STAGES];
+	struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
 	const void *ops[XDEV_EXT_MECH_CLASS_MAX];	/* per class, for life */
 	bool pinned[XDEV_EXT_MECH_CLASS_MAX];
 	struct module *c_owner[XDEV_EXT_MECH_CLASS_MAX];	/* C reference ops */
@@ -312,16 +316,26 @@ static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_m
 	}
 }
 
+/* Program choice is stage-local; defaults keep their per-class pin. */
+static const void *xdev_ext_mech_stage_ops(const struct xdev_ext_mech_stage *st)
+{
+ struct xdev_ext_mech_instance *instance = st->s->instances[st->index];
+
+ return instance ? xdev_ext_mech_instance_ops(instance) : st->s->ops[st->class_id];
+}
+
 int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_call_args *a,
 		  s32 *ret, struct xdev_ext_mech_hold_intent *hold)
 {
 	struct xdev_ext_mech_session *s;
 	struct xdev_ext_mech_target t;
+	const void *ops;
 
 	if (!st || !st->s || !a)
 		return -EINVAL;
 	s = st->s;
-	if (!s->ops[st->class_id])
+	ops = xdev_ext_mech_stage_ops(st);
+	if (!ops)
 		return -ENOENT;
 	t = (struct xdev_ext_mech_target) {
 		.s = s,
@@ -339,14 +353,14 @@ int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mec
 		t.key = a->b->key;
 		t.bytes = a->b->bytes;
 	}
-	return xdev_ext_mech_invoke(s->ops[st->class_id], &t, a, ret, hold);
+	return xdev_ext_mech_invoke(ops, &t, a, ret, hold);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_call);
 
 /* The generation is pinned before ->bind and kept until session release. */
 bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st, u32 member)
 {
-	return st && st->s && xdev_ext_mech_ops_has_member(st->s->ops[st->class_id], member);
+	return st && st->s && xdev_ext_mech_ops_has_member(xdev_ext_mech_stage_ops(st), member);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_has_member);
 
@@ -889,19 +903,27 @@ u64 xdev_ext_mech_session_stop_started_ns(struct xdev_ext_mech_session *s)
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_session_stop_started_ns);
 
+/* Cached handles are immutable and ref-held through native/worker teardown. */
+static bool xdev_ext_mech_programs_current(const struct xdev_ext_mech_session *s)
+{
+ u32 i;
+
+ for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
+  if (s->ops[i] && !xdev_ext_mech_ops_current(i, s->ops[i], s->pinned[i]))
+   return false;
+ for (i = 0; i < s->nr_stages; i++)
+  if (s->instances[i] && !xdev_ext_mech_instance_current(s->instances[i]))
+   return false;
+ return true;
+}
+
 bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s)
 {
-	u32 i;
-
 	/* Class bind may expose an ingress callback before CREATE returns. */
 	if (smp_load_acquire(&s->create_pending_publish) ||
 	    READ_ONCE(s->ss.state) != XDEV_EXT_MECH_SESSION_ACTIVE)
 		return false;
-	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
-		if (s->ops[i] &&
-		    !xdev_ext_mech_ops_current(i, s->ops[i], s->pinned[i]))
-			return false;
-	return true;
+	return xdev_ext_mech_programs_current(s);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_session_admits);
 
@@ -936,7 +958,6 @@ static void xdev_ext_mech_set_err_locked(struct xdev_ext_mech_session *s, int er
 static int xdev_ext_mech_stop_reason(struct xdev_ext_mech_session *s)
 {
 	int err = READ_ONCE(s->stop_err);
-	u32 i;
 
 	if (err)
 		return err;
@@ -945,10 +966,8 @@ static int xdev_ext_mech_stop_reason(struct xdev_ext_mech_session *s)
 	 * new transport failure that may win the first-error latch. The pinned
 	 * generation remains alive; only compare its registry identity here.
 	 */
-	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
-		if (s->ops[i] &&
-		    !xdev_ext_mech_ops_current(i, s->ops[i], s->pinned[i]))
-			return -ECANCELED;
+	if (!xdev_ext_mech_programs_current(s))
+		return -ECANCELED;
 	return -ESHUTDOWN;
 }
 
@@ -3248,7 +3267,8 @@ static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
  * On error the caller releases whatever was taken.
  */
 static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
-				 const struct xdev_ext_mech_create *c)
+				 const struct xdev_ext_mech_create *c,
+                                 const s32 *program_fds)
 {
 	struct xdev_ext_mech_stage_uapi clean[XDEV_EXT_MECH_MAX_STAGES];
 	struct xdev_ext_mech_stage *st;
@@ -3278,6 +3298,15 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		if (ret)
 			return ret;
 		st->flags = clean[i].flags;
+  if (program_fds && program_fds[i] >= 0) {
+   s->create_phase = XDEV_EXT_MECH_CREATE_OPS_LOOKUP;
+   s->create_failed_stage = i;
+   ret = xdev_ext_mech_instance_get_from_fd(st->class_id, program_fds[i],
+                                          &s->instances[i]);
+   if (ret)
+    return ret;
+   continue;
+  }
 		if (s->ops[st->class_id])
 			continue;
 		/* No program for the class: no silent C path either. */
@@ -3470,6 +3499,9 @@ static int xdev_ext_mech_session_release_disposition(struct xdev_ext_mech_sessio
 	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
 		if (s->ops[i])
 			xdev_ext_mech_ops_put(s->ops[i], s->pinned[i], s->c_owner[i]);
+ for (i = 0; i < s->nr_stages; i++)
+  if (s->instances[i])
+   xdev_ext_mech_instance_put(s->instances[i]);
 	xdev_ext_mech_start_queue_free(s->start_queue);
 	kvfree(s->cookies);
 	kvfree(s->transform_owner);
@@ -3639,6 +3671,24 @@ void xdev_ext_mech_generation_gone(u32 class_id, const void *ops)
 	spin_unlock(&xdev_ext_mech_all_lock);
 }
 
+/* A link withdrawal names its record, not shared map/kdata identity. */
+void xdev_ext_mech_instance_gone(struct xdev_ext_mech_instance *instance)
+{
+ struct xdev_ext_mech_session *s;
+ u32 i;
+
+ spin_lock(&xdev_ext_mech_all_lock);
+ list_for_each_entry(s, &xdev_ext_mech_all, all_node) {
+  for (i = 0; i < s->nr_stages; i++) {
+   if (s->instances[i] != instance)
+    continue;
+   xdev_ext_mech_session_stop(s, -ECANCELED);
+   break;
+  }
+ }
+ spin_unlock(&xdev_ext_mech_all_lock);
+}
+
 /* Control plane, uring_lock held. */
 
 static struct xdev_ext_mech_session *xdev_ext_mech_find(struct io_ring_ctx *ctx, u64 id)
@@ -3679,7 +3729,8 @@ static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *ctx, void __user *uar
 static int xdev_ext_mech_create_common(struct io_ring_ctx *ctx,
     const struct xdev_ext_mech_create *c,
     struct xdev_ext_mech_create __user *legacy,
-    struct xdev_ext_mech_create_with_report *envelope, void __user *uarg)
+    struct xdev_ext_mech_create_with_report *envelope, void __user *uarg,
+    const s32 *program_fds)
 {
  struct xdev_ext_mech_create_report *r = envelope ? &envelope->report : NULL;
  struct pci_dev *refs[XDEV_EXT_MECH_MAX_STAGES] = {};
@@ -3705,7 +3756,7 @@ static int xdev_ext_mech_create_common(struct io_ring_ctx *ctx,
  xdev_ext_mech_session_init(s, ctx, c, frames);
  s->create_reporting = !!r;
  s->create_pending_publish = !!r;
- ret = xdev_ext_mech_session_bind(s, c);
+ ret = xdev_ext_mech_session_bind(s, c, program_fds);
  /* Preserve the legacy ID copyout and its precedence over activation. */
  if (!ret && legacy && put_user(s->id, &legacy->session_id))
   ret = -EFAULT;
@@ -3844,7 +3895,7 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
   return -EOPNOTSUPP;
  if (copy_from_user(&c, uarg, sizeof(c)))
   return -EFAULT;
- return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL);
+ return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL, NULL);
 }
 
 static int xdev_ext_mech_create_report_op(struct io_ring_ctx *ctx, void __user *uarg)
@@ -3861,7 +3912,32 @@ static int xdev_ext_mech_create_report_op(struct io_ring_ctx *ctx, void __user *
   return -EINVAL;
  if (!xdev_ext_mech_ready())
   return -EOPNOTSUPP;
- return xdev_ext_mech_create_common(ctx, &in.create, NULL, &in, uarg);
+ return xdev_ext_mech_create_common(ctx, &in.create, NULL, &in, uarg, NULL);
+}
+
+static int xdev_ext_mech_create_programs_op(struct io_ring_ctx *ctx, void __user *uarg)
+{
+ struct xdev_ext_mech_create_programs in;
+ struct xdev_ext_mech_create_with_report *request = &in.request;
+ u32 i;
+
+ if (copy_from_user(&in, uarg, sizeof(in)))
+  return -EFAULT;
+ if (in.size != sizeof(in) || request->size != sizeof(*request))
+  return -EINVAL;
+ if (in.version != XDEV_EXT_MECH_CREATE_PROGRAMS_VERSION ||
+     request->version != XDEV_EXT_MECH_CREATE_REPORT_VERSION)
+  return -EOPNOTSUPP;
+ if (request->create.session_id || memchr_inv(&request->report, 0, sizeof(request->report)))
+  return -EINVAL;
+ for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+  if (i < request->create.nr_stages ? in.program_fds[i] < -1 : in.program_fds[i] != -1)
+   return -EINVAL;
+ if (!xdev_ext_mech_ready())
+  return -EOPNOTSUPP;
+ return xdev_ext_mech_create_common(ctx, &request->create, NULL, request,
+        (char __user *)uarg + offsetof(struct xdev_ext_mech_create_programs, request),
+        in.program_fds);
 }
 
 /* Only preparation owns these uncommitted claims. Restore precisely them. */
@@ -4432,6 +4508,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return -EINVAL;
 
 	switch (req.op) {
+ case XDEV_EXT_MECH_OP_CREATE_PROGRAMS:
+  return xdev_ext_mech_create_programs_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_CREATE_REPORT:
   return xdev_ext_mech_create_report_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_CREATE:

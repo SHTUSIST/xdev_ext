@@ -7741,6 +7741,101 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "src/core/io_uring/programs/instances.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_mech_programs.c"
+    },
+    {
+      "source": "src/core/io_uring/programs/instances.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_mech_programs.h"
+    },
+    {
+      "source": "tests/core/program_instances/guest/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/guest/README.md"
+    },
+    {
+      "source": "tests/core/program_instances/guest/programs.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/guest/programs.bpf.c"
+    },
+    {
+      "source": "tests/core/program_instances/guest/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/guest/run.py"
+    },
+    {
+      "source": "tests/core/program_instances/guest/session_programs.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/guest/session_programs.c"
+    },
+    {
+      "source": "tests/core/program_instances/registry/lifetime_fixture.c.in",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/registry/lifetime_fixture.c.in"
+    },
+    {
+      "source": "tests/core/program_instances/registry/registry_fixture.c.in",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/registry/registry_fixture.c.in"
+    },
+    {
+      "source": "tests/core/program_instances/registry/registry_shim.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/registry/registry_shim.h"
+    },
+    {
+      "source": "tests/core/program_instances/registry/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/registry/run.py"
+    },
+    {
+      "source": "tests/core/program_instances/session/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/README.md"
+    },
+    {
+      "source": "tests/core/program_instances/session/core_cases.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/core_cases.c"
+    },
+    {
+      "source": "tests/core/program_instances/session/default_boundary.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/default_boundary.h"
+    },
+    {
+      "source": "tests/core/program_instances/session/library.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/library.c"
+    },
+    {
+      "source": "tests/core/program_instances/session/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/run.py"
+    },
+    {
+      "source": "tests/core/program_instances/session/selection_boundary.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/selection_boundary.h"
+    },
+    {
+      "source": "tests/core/program_instances/session/selection_cases.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/selection_cases.c"
+    },
+    {
+      "source": "tests/core/program_instances/session/selection_run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/selection_run.py"
+    },
+    {
+      "source": "tests/core/program_instances/session/wire.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/wire.h"
     }
   ]
 }

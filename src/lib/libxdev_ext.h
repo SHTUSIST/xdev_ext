@@ -60,6 +60,9 @@ struct xdev_ext_prog_opts {
 int xdev_ext_prog_attach(const struct xdev_ext_prog_opts *o,
 			 struct xdev_ext_prog **out);
 int xdev_ext_prog_detach(struct xdev_ext_prog *p);
+/* Borrowed struct_ops link fd, valid only while p remains alive. No dup or
+ * ownership transfer; the caller must not close this fd independently. */
+int xdev_ext_prog_link_fd(const struct xdev_ext_prog *p);
 
 /* --- session steps --- */
 
@@ -146,6 +149,16 @@ int xdev_ext_session_create_report(struct xdev_ext_session *s,
     const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out);
 int xdev_ext_create_report_read(int owning_ring_fd,
     const struct xdev_ext_mech_create *create, struct xdev_ext_mech_create_report *out);
+/* One selector per stage: -1 preserves its existing default; nonnegative fds
+ * explicitly select PRIVATE mechanism links. No failed selection falls back.
+ * Raw read requires out; the session helper permits NULL but always validates
+ * the delivered report and remembers retained cleanup before returning. */
+int xdev_ext_create_programs_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create, const int *program_fds,
+    __u32 nr_programs, struct xdev_ext_mech_create_report *out);
+int xdev_ext_session_create_programs(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o, const int *program_fds,
+    __u32 nr_programs, struct xdev_ext_mech_create_report *out);
 int xdev_ext_session_arm(struct xdev_ext_session *s, __u64 batches_target,
 			 __u64 published_target);
 int xdev_ext_session_start(struct xdev_ext_session *s,

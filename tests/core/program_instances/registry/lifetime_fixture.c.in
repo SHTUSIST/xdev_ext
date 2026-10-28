@@ -1,0 +1,120 @@
+// SPDX-License-Identifier: GPL-2.0
+// Assertions derived from the frozen FD/reference/instance contract, not from
+// the new registry implementation. All registry/pin/liveness bodies are real.
+#if INSTANCE_API_PRESENT
+static unsigned gone_count;
+static int notify_probe_fd=-1;
+static struct xdev_ext_mech_instance *gone_instances[32];
+#endif
+static void owned_link_unregister(struct bpf_link *link){
+ link->detached=true;
+ @ACTUAL_UNREGISTER_CALL@
+}
+void xdev_ext_mech_instance_gone(struct xdev_ext_mech_instance *instance){
+#if INSTANCE_API_PRESENT
+ check(!held_mutexes,"instance notifier called after registry lock release");
+ check(allocation_live(instance),"registry keeps retired record owned throughout notifier");
+ check(!xdev_ext_mech_instance_current(instance),"notifier observes already-closed instance liveness");
+ if(notify_probe_fd>=0){
+  struct xdev_ext_mech_instance *missing=(void *)(uintptr_t)1;
+  check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,notify_probe_fd,&missing)==-ENOENT&&!missing,
+        "notifier cannot resolve retired record even while user fd remains open");
+ }
+ gone_instances[gone_count++]=instance;
+#else
+ (void)instance;
+#endif
+}
+static struct bpf_link make_link(unsigned fd,u32 cls,const void *ops){
+ (void)fd;return (struct bpf_link){.type=BPF_LINK_TYPE_STRUCT_OPS,.id=0,.refs=1,.class_id=cls,.ops=ops};
+}
+static int lifetime_case(const char *name){
+#if INSTANCE_API_PRESENT
+ struct xdev_ext_nvme_mech_ops ordinary={.abi_version=1,.flags=0,.oracle=11};
+ struct xdev_ext_nvme_mech_ops left={.abi_version=1,.flags=1,.oracle=23},right={.abi_version=1,.flags=1,.oracle=47};
+ struct bpf_link dl=make_link(10,XDEV_EXT_MECH_CLASS_NVME,&ordinary);
+ struct bpf_link a=make_link(11,XDEV_EXT_MECH_CLASS_NVME,&left),b=make_link(12,XDEV_EXT_MECH_CLASS_NVME,&right);
+ struct xdev_ext_mech_instance *ha=NULL,*hb=NULL;
+ check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&ordinary,&dl),"legacy default remains independently registered");
+ fd_links[10]=&dl;fd_links[11]=&a;fd_links[12]=&b;
+ if(!strcmp(name,"fd-errors")){
+  struct bpf_link other=make_link(6,XDEV_EXT_MECH_CLASS_NVME,&left);other.type=92;fd_links[6]=&other;
+  struct bpf_link unregistered=make_link(7,XDEV_EXT_MECH_CLASS_NVME,&left);fd_links[7]=&unregistered;nonlink_fd[5]=true;
+  const int fds[]={-1,123,5,6,7,10};const int errors[]={-EBADF,-EBADF,-EINVAL,-EINVAL,-ENOENT,-ENOENT};
+  for(unsigned i=0;i<ARRAY_SIZE(fds);i++){ha=(void *)(uintptr_t)1;unsigned pins=ops_pins;
+   check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,fds[i],&ha)==errors[i],"fd resolution preserves exact errno without default fallback");
+   check(ha==NULL&&ops_pins==pins,"fd failure clears output and balances partial ops refs");
+  }
+  check(other.refs==1&&unregistered.refs==1&&dl.refs==1,"all temporary failure link references released");
+ }else if(!strcmp(name,"same-map")){
+  b.ops=&left;
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&left,&a)&&!observed_register(XDEV_EXT_MECH_CLASS_NVME,&left,&b),"same READY map accepts two distinct links even with id0");
+  check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha)&&!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,12,&hb),"same-map links both resolve");
+  check(ha&&hb&&ha!=hb,"same ops pointer does not collapse instance identity");
+  check(xdev_ext_mech_instance_ops(ha)==&left&&xdev_ext_mech_instance_ops(hb)==&left,"same-map record pins original ops pointer");
+  check(a.refs==1&&b.refs==1&&left.pins==2,"two selected handles own ops pins but no link references");
+  close_fd(11);
+  check(gone_count==1&&gone_instances[0]==ha,"withdrawal notifies exact cached instance identity");
+  check(!xdev_ext_mech_instance_current(ha)&&xdev_ext_mech_instance_current(hb),"detach one same-map link leaves the other live");
+  check(xdev_ext_mech_instance_ops(ha)==&left&&left.pins==2,"retired cached ops remain pinned until safe release");
+  struct bpf_link again=make_link(13,XDEV_EXT_MECH_CLASS_NVME,&left);fd_links[13]=&again;
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&left,&again),"same map reattaches while retired record is still pinned");
+  struct xdev_ext_mech_instance *fresh=NULL;check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,13,&fresh),"reattached map resolves fresh handle");
+  check(fresh!=ha&&fresh!=hb&&xdev_ext_mech_instance_current(fresh)&&!xdev_ext_mech_instance_current(ha),"fresh attach never resurrects retired record");
+  xdev_ext_mech_instance_put(ha);ha=NULL;check(left.pins==2,"safe release drops only retired selected pin");
+  close_fd(12);close_fd(13);xdev_ext_mech_instance_put(hb);hb=NULL;xdev_ext_mech_instance_put(fresh);
+ }else{
+  check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&left,&a),"first private instance registers");
+  if(!strcmp(name,"reentrant-put")){
+   close_fd_on_put=true;
+   check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha),"get linearizes before final-fd-close boundary");
+   check(ha&&!xdev_ext_mech_instance_current(ha)&&a.refs==0&&gone_count==1,"temporary put triggers real reentrant unregister without deadlock or resurrection");
+   check(left.pins==1&&xdev_ext_mech_instance_ops(ha)==&left,"lookup retirement retains selected ops pin");
+   xdev_ext_mech_instance_put(ha);ha=NULL;
+  }else if(!strcmp(name,"detached-live-fd")){
+   check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha),"live-fd detach first pins selected instance");
+   notify_probe_fd=11;owned_link_unregister(&a);notify_probe_fd=-1;
+   check(a.refs==1&&!xdev_ext_mech_instance_current(ha)&&gone_count==1,"explicit detach closes instance while user fd stays open");
+   struct xdev_ext_mech_instance *missing=(void *)(uintptr_t)1;
+   check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&missing)==-ENOENT&&!missing,"detached but open fd returns ENOENT without fallback");
+   check(left.pins==1&&a.refs==1,"detached lookup balances temporary refs without releasing accepted selected ops");
+   close_fd(11);xdev_ext_mech_instance_put(ha);ha=NULL;
+  }else if(!strcmp(name,"wrong-withdraw")){
+   check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha),"wrong-withdraw case first selects live record");
+   check(!xdev_ext_mech_instance_unregister(XDEV_EXT_MECH_CLASS_CPU,&left,&a),"wrong-class withdrawal does not retire record");
+   check(!xdev_ext_mech_instance_unregister(XDEV_EXT_MECH_CLASS_NVME,&right,&a),"wrong-ops withdrawal does not retire record");
+   check(!xdev_ext_mech_instance_unregister(XDEV_EXT_MECH_CLASS_NVME,&left,&b),"wrong-link withdrawal does not retire record");
+   check(!gone_count&&xdev_ext_mech_instance_current(ha),"wrong identity withdrawals preserve selected liveness and emit no notifier");
+   unsigned before=hash_queries;for(unsigned i=0;i<1000;i++)check(xdev_ext_mech_instance_current(ha),"cached instance stays current");
+   check(hash_queries==before,"hot cached current check never scans private hash");
+   close_fd(11);xdev_ext_mech_instance_put(ha);ha=NULL;
+  }else if(!strcmp(name,"pin-failure")){
+   left.pin_failure=true;ha=(void *)(uintptr_t)1;
+   check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha)<0,"failed real struct_ops pin refuses selection");
+   check(!ha&&a.refs==1&&!ops_pins,"failed pin clears output and balances temporary refs");close_fd(11);
+  }else if(!strcmp(name,"wrong-class")){
+   ha=(void *)(uintptr_t)1;check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_CPU,11,&ha)==-EINVAL,"wrong-class selection returns EINVAL");
+   check(!ha&&a.refs==1&&!ops_pins,"wrong-class failure has no selected handle or ref leak");close_fd(11);
+  }else{
+   check(!observed_register(XDEV_EXT_MECH_CLASS_NVME,&right,&b),"second independent same-class program registers");
+   check(!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&ha)&&!xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,12,&hb),"two explicit selectors resolve separately");
+   check(((const struct xdev_ext_nvme_mech_ops *)xdev_ext_mech_instance_ops(ha))->oracle==23&&((const struct xdev_ext_nvme_mech_ops *)xdev_ext_mech_instance_ops(hb))->oracle==47,"selected accessors preserve independent program payload oracle");
+   check(a.refs==1&&b.refs==1&&left.pins==1&&right.pins==1,"selected handles never permanently pin BPF links");
+   close_fd(11);a.type=0;a.ops=NULL;a.id=~0U;
+   check(!xdev_ext_mech_instance_current(ha)&&xdev_ext_mech_instance_current(hb),"cached liveness remains valid after link identity is gone");
+   check(slots[XDEV_EXT_MECH_CLASS_NVME]==&ordinary&&!default_gone,"private withdrawal does not remove or notify default");
+   check(xdev_ext_mech_instance_ops(ha)==&left&&left.pins==1,"retired accepted work still owns exact program");
+   struct xdev_ext_mech_instance *missing=(void *)(uintptr_t)1;
+   check(xdev_ext_mech_instance_get_from_fd(XDEV_EXT_MECH_CLASS_NVME,11,&missing)==-EBADF&&!missing,"closed user fd never resolves by global fallback");
+   xdev_ext_mech_instance_put(ha);ha=NULL;close_fd(12);xdev_ext_mech_instance_put(hb);hb=NULL;
+  }
+ }
+ check(!held_mutexes,"all operations return outside owned mutexes");
+ check(ops_pins==0&&left.pins==0&&right.pins==0,"all selected ops refs balanced after explicit safe releases");
+ check(records_allocated==records_freed,"all private records released after unregister and selected puts");
+ printf("LIFETIME case=%s failures=%u get=%u put=%u records=%u/%u\n",name,failures,temp_gets,temp_puts,records_allocated,records_freed);
+#else
+ (void)name;check(false,"private API absent: unavailable fixture scope, not a standalone behavior RED");
+#endif
+ return failures?1:0;
+}

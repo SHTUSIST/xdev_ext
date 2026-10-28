@@ -392,18 +392,12 @@ peer_fail:
 	return ret;
 }
 
-/* The caller selects this operation explicitly; never retry legacy CREATE. */
-int xdev_ext_create_report_read(int owning_ring_fd,
-    const struct xdev_ext_mech_create *create,
+/* Delivery validation is shared by both explicit CREATE report transports. */
+static int create_report_validate(const struct xdev_ext_mech_create *create,
+    const struct xdev_ext_mech_create_with_report *e,
     struct xdev_ext_mech_create_report *out)
 {
- struct xdev_ext_mech_create_with_report e = {
-  .size = sizeof(e), .version = XDEV_EXT_MECH_CREATE_REPORT_VERSION,
- };
- struct io_uring_xdev_ext_mech req = {
-  .op = XDEV_EXT_MECH_OP_CREATE_REPORT, .arg = (uintptr_t)&e,
- };
- const struct xdev_ext_mech_create_report *r = &e.report;
+ const struct xdev_ext_mech_create_report *r = &e->report;
  unsigned int valid = XDEV_EXT_MECH_CREATE_VALID_REQUESTER |
   XDEV_EXT_MECH_CREATE_VALID_DESCRIBED | XDEV_EXT_MECH_CREATE_VALID_DECIDED |
   XDEV_EXT_MECH_CREATE_VALID_CAPS | XDEV_EXT_MECH_CREATE_VALID_OBSERVED |
@@ -411,18 +405,8 @@ int xdev_ext_create_report_read(int owning_ring_fd,
  static const struct xdev_ext_mech_requester_id empty_requester;
  static const struct xdev_ext_mech_stage_diag empty_diag;
  static const struct xdev_ext_mech_stage_caps empty_caps;
- int ret;
 
- if (!out)
-  return -EINVAL;
- memset(out, 0, sizeof(*out));
- if (!create || owning_ring_fd < 0 || create->session_id)
-  return -EINVAL;
- e.create = *create;
- ret = xdev_ext__uring_register(owning_ring_fd, IORING_REGISTER_XDEV_EXT_MECH, &req);
- if (ret)
-  return ret;
- if (e.size != sizeof(e) || e.version != XDEV_EXT_MECH_CREATE_REPORT_VERSION ||
+ if (e->size != sizeof(*e) || e->version != XDEV_EXT_MECH_CREATE_REPORT_VERSION ||
      r->size != sizeof(*r) || r->version != XDEV_EXT_MECH_CREATE_REPORT_VERSION ||
      r->result > 0 || r->rollback_errno > 0 || (r->valid & ~valid) ||
      r->requester.rsvd || r->cleanup > XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED ||
@@ -446,10 +430,10 @@ int xdev_ext_create_report_read(int owning_ring_fd,
      (r->observed.valid & (1U << 5)))
   return -EPROTO;
  if (!r->result) {
-  if (!r->session_id || e.create.session_id != r->session_id || r->phase ||
+  if (!r->session_id || e->create.session_id != r->session_id || r->phase ||
       r->failed_stage != UINT32_MAX || r->cleanup || r->rollback_errno)
    return -EPROTO;
- } else if (r->session_id || e.create.session_id || r->caps.session_id ||
+ } else if (r->session_id || e->create.session_id || r->caps.session_id ||
             r->observed.session_id || !r->phase ||
             r->phase > XDEV_EXT_MECH_CREATE_ACTIVATE ||
             (r->failed_stage != UINT32_MAX && r->failed_stage >= create->nr_stages)) {
@@ -479,8 +463,77 @@ int xdev_ext_create_report_read(int owning_ring_fd,
  return r->result;
 }
 
+/* The caller selects this operation explicitly; never retry legacy CREATE. */
+int xdev_ext_create_report_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create,
+    struct xdev_ext_mech_create_report *out)
+{
+ struct xdev_ext_mech_create_with_report e = {
+  .size = sizeof(e), .version = XDEV_EXT_MECH_CREATE_REPORT_VERSION,
+ };
+ struct io_uring_xdev_ext_mech req = {
+  .op = XDEV_EXT_MECH_OP_CREATE_REPORT, .arg = (uintptr_t)&e,
+ };
+ int ret;
+
+ if (!out)
+  return -EINVAL;
+ memset(out, 0, sizeof(*out));
+ if (!create || owning_ring_fd < 0 || create->session_id)
+  return -EINVAL;
+ e.create = *create;
+ ret = xdev_ext__uring_register(owning_ring_fd, IORING_REGISTER_XDEV_EXT_MECH, &req);
+ return ret ? ret : create_report_validate(create, &e, out);
+}
+
+static int program_fds_check(const int *program_fds, __u32 nr_programs,
+                            __u32 nr_stages)
+{
+ __u32 i;
+
+ if (!program_fds || !nr_stages || nr_stages > XDEV_EXT_MECH_MAX_STAGES ||
+     nr_programs != nr_stages)
+  return -EINVAL;
+ for (i = 0; i < nr_programs; i++)
+  if (program_fds[i] < -1)
+   return -EINVAL;
+ return 0;
+}
+
+int xdev_ext_create_programs_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create, const int *program_fds,
+    __u32 nr_programs, struct xdev_ext_mech_create_report *out)
+{
+ struct xdev_ext_mech_create_programs e = {
+  .size = sizeof(e), .version = XDEV_EXT_MECH_CREATE_PROGRAMS_VERSION,
+  .request = {
+   .size = sizeof(e.request), .version = XDEV_EXT_MECH_CREATE_REPORT_VERSION,
+  },
+ };
+ struct io_uring_xdev_ext_mech req = {
+  .op = XDEV_EXT_MECH_OP_CREATE_PROGRAMS, .arg = (uintptr_t)&e,
+ };
+ __u32 i;
+ int ret;
+
+ if (!out)
+  return -EINVAL;
+ memset(out, 0, sizeof(*out));
+ if (!create || owning_ring_fd < 0 || create->session_id)
+  return -EINVAL;
+ ret = program_fds_check(program_fds, nr_programs, create->nr_stages);
+ if (ret)
+  return ret;
+ for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+  e.program_fds[i] = i < nr_programs ? program_fds[i] : -1;
+ e.request.create = *create;
+ ret = xdev_ext__uring_register(owning_ring_fd, IORING_REGISTER_XDEV_EXT_MECH, &req);
+ return ret ? ret : create_report_validate(create, &e.request, out);
+}
+
 static int session_create(struct xdev_ext_session *s,
-    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out)
+    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out,
+    const int *program_fds, __u32 nr_programs)
 {
 	static const struct xdev_ext_mech_layout zero_layout;
 	static const __u8 zero_mac[6];
@@ -499,6 +552,11 @@ static int session_create(struct xdev_ext_session *s,
 	if (!o->group_bytes || !o->depth || !o->nr_stages ||
 	    o->nr_stages > XDEV_EXT_MECH_MAX_STAGES)
 		return -EINVAL;
+ if (program_fds) {
+  ret = program_fds_check(program_fds, nr_programs, o->nr_stages);
+  if (ret)
+   return ret;
+ }
 	if (s->retained)
   return -EBUSY;
 	if (s->created)
@@ -542,12 +600,15 @@ static int session_create(struct xdev_ext_session *s,
 		if (s->pool_kind == XDEV_EXT_MECH_POOL_XSK &&
 		    c.st[i].class_id == XDEV_EXT_MECH_CLASS_AFXDP && c.st[i].fd < 0)
 			c.st[i].fd = s->xsk;
- if (out) {
+ if (out || program_fds) {
   struct xdev_ext_mech_create_report report = {};
 
-  ret = xdev_ext_create_report_read(s->ring, &c, &report);
+  ret = program_fds ? xdev_ext_create_programs_read(s->ring, &c, program_fds,
+                      nr_programs, &report) :
+                     xdev_ext_create_report_read(s->ring, &c, &report);
   if (report.size == sizeof(report)) {
-   *out = report;
+   if (out)
+    *out = report;
    if (report.cleanup == XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED)
     s->retained = true;
   }
@@ -568,7 +629,7 @@ static int session_create(struct xdev_ext_session *s,
 int xdev_ext_session_create(struct xdev_ext_session *s,
     const struct xdev_ext_create_opts *o)
 {
- return session_create(s, o, NULL);
+ return session_create(s, o, NULL, NULL, 0);
 }
 
 int xdev_ext_session_create_report(struct xdev_ext_session *s,
@@ -577,7 +638,18 @@ int xdev_ext_session_create_report(struct xdev_ext_session *s,
  if (!out)
   return -EINVAL;
  memset(out, 0, sizeof(*out));
- return session_create(s, o, out);
+ return session_create(s, o, out, NULL, 0);
+}
+
+int xdev_ext_session_create_programs(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o, const int *program_fds,
+    __u32 nr_programs, struct xdev_ext_mech_create_report *out)
+{
+ if (out)
+  memset(out, 0, sizeof(*out));
+ if (!program_fds)
+  return -EINVAL;
+ return session_create(s, o, out, program_fds, nr_programs);
 }
 
 static bool live(const struct xdev_ext_session *s)
