@@ -76,6 +76,7 @@ def main():
         unit = ((here / "xdomain_ring_compat.h").read_text() +
                 '\n#include "include/uapi/linux/xdev_ext_mech.h"\n' +
                 '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n' +
+                '\n#include "include/linux/xdev_ext_mech_reliable_core.h"\n' +
                 lease + family + no_includes((kernel / names[1]).read_text()) +
                 (here / "xdomain_ring_boundaries.c").read_text() + ring +
                 (here / "xdomain_ring_cases.c").read_text())
