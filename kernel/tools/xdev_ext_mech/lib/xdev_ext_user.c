@@ -9,6 +9,8 @@
 #include <errno.h>
 #include <poll.h>
 #include <stdbool.h>
+#include <stdatomic.h>
+#include <sched.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -29,6 +31,12 @@ struct xdev_ext_user_stage {
 	size_t map_len;
 	void *umem;
 	__u32 entries;
+	__u32 flags;
+	bool attached;
+	struct xdev_ext_user_ring_offsets off;
+	atomic_flag owner_lock;
+	bool owner_bound;
+	unsigned long long owner_context_id, owner_stream_id;
 	struct xdev_ext_user_ring_hdr *hdr;
 	struct xdev_ext_user_ready *ready;
 	struct xdev_ext_user_done *done;
@@ -60,7 +68,7 @@ int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
 	if (ret)
 		return ret;
-	if (o->flags)
+	if (o->flags & ~XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL)
 		return -EOPNOTSUPP;
 	entries = o->entries ? o->entries : USER_DEFAULT_ENTRIES;
 	if (o->ring_fd < 0 || (entries & (entries - 1)) || entries > XDEV_EXT_USER_RING_MAX)
@@ -69,8 +77,10 @@ int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 	if (!u)
 		return -ENOMEM;
 	u->fd = -1;
+	atomic_flag_clear(&u->owner_lock);
 	u->umem = o->umem;
 	u->entries = entries;
+	u->flags = o->flags;
 	u->efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 	if (u->efd < 0) {
 		ret = -errno;
@@ -79,6 +89,7 @@ int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 	}
 	memset(&r, 0, sizeof(r));
 	r.size = sizeof(r);
+	r.flags = o->flags;
 	r.entries = entries;
 	r.eventfd = u->efd;
 	req = (struct io_uring_xdev_ext_mech){ .op = XDEV_EXT_MECH_OP_USER_STAGE,
@@ -96,6 +107,7 @@ int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 		return -EPROTO;
 	}
 	u->map_len = r.off.mmap_size;
+	u->off = r.off;
 	u->map = mmap(NULL, u->map_len, PROT_READ | PROT_WRITE, MAP_SHARED, u->fd, 0);
 	if (u->map == MAP_FAILED) {
 		ret = -errno;
@@ -114,6 +126,35 @@ int xdev_ext_user_stage_open(const struct xdev_ext_user_stage_opts *o,
 int xdev_ext_user_stage_fd(const struct xdev_ext_user_stage *u)
 {
 	return u ? u->fd : -EINVAL;
+}
+
+__u32 xdev_ext_user_stage_entries(const struct xdev_ext_user_stage *u)
+{
+	return u ? u->entries : 0;
+}
+
+bool xdev_ext__user_ctl_attached(const struct xdev_ext_user_stage *u)
+{
+	return u && u->attached;
+}
+
+int xdev_ext__user_bind_stream(struct xdev_ext_user_stage *u,
+	unsigned long long context_id, unsigned long long stream_id)
+{
+	int ret = 0;
+	if (!u) return -EINVAL;
+	while (atomic_flag_test_and_set_explicit(&u->owner_lock, memory_order_acquire))
+		sched_yield();
+	if (u->owner_bound) {
+		if (u->owner_context_id != context_id || u->owner_stream_id != stream_id)
+			ret = -EINVAL;
+	} else {
+		u->owner_context_id = context_id;
+		u->owner_stream_id = stream_id;
+		u->owner_bound = true;
+	}
+	atomic_flag_clear_explicit(&u->owner_lock, memory_order_release);
+	return ret;
 }
 
 static __u32 load_acquire(const __u32 *p)
@@ -279,7 +320,80 @@ int xdev_ext_user_stage_complete(struct xdev_ext_user_stage *u,
 
 int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u)
 {
+	if (u && u->attached)
+		return -EBUSY;
 	if (u)
 		user_free(u);
+	return 0;
+}
+
+int xdev_ext_user_stage_control(struct xdev_ext_user_stage *u, void **base,
+	struct xdev_ext_user_ring_offsets *off)
+{
+	if (!u || !base || !off)
+		return -EINVAL;
+	if (!(u->flags & XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL))
+		return -EOPNOTSUPP;
+	*base = u->map;
+	*off = u->off;
+	return 0;
+}
+
+int xdev_ext_user_stage_ctl_attach(struct xdev_ext_user_stage *u)
+{
+	int ret;
+	if (!u)
+		return -EINVAL;
+	if (!(u->flags & XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL))
+		return -EOPNOTSUPP;
+	if (u->attached)
+		return -EALREADY;
+	ret = xdev_ext__ioctl(u->fd, XDEV_EXT_USER_IOC_CTL_ATTACH, 0);
+	if (!ret)
+		u->attached = true;
+	return ret;
+}
+
+int xdev_ext_user_stage_ctl_detach(struct xdev_ext_user_stage *u)
+{
+	int ret;
+	if (!u)
+		return -EINVAL;
+	if (!(u->flags & XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL))
+		return -EOPNOTSUPP;
+	if (!u->attached)
+		return -ENOENT;
+	ret = xdev_ext__ioctl(u->fd, XDEV_EXT_USER_IOC_CTL_DETACH, 0);
+	if (!ret)
+		u->attached = false;
+	return ret;
+}
+
+int xdev_ext_user_batch_peer_span(const struct xdev_ext_user_batch *b, __u32 pos,
+	__u64 allocation_va, __u64 allocation_bytes, __u32 frame_size,
+	struct xdev_ext_peer_span *out)
+{
+	const struct xdev_ext_user_frame *f;
+	struct xdev_ext_peer_span span;
+	__u64 offset;
+	if (!b || !out || !frame_size || !b->nr_frames ||
+	    b->nr_frames > XDEV_EXT_MECH_MAX_FRAMES || pos >= b->nr_frames)
+		return -EINVAL;
+	f = &b->f[pos];
+	if (f->umem_addr % frame_size || f->umem_addr / frame_size > UINT32_MAX ||
+	    f->data_off > frame_size || f->capacity > frame_size - f->data_off ||
+	    f->data_len > f->capacity || f->umem_addr > allocation_bytes ||
+	    frame_size > allocation_bytes - f->umem_addr)
+		return -ERANGE;
+	offset = f->umem_addr + f->data_off;
+	if (allocation_va > UINT64_MAX - offset ||
+	    f->capacity > UINT64_MAX - (allocation_va + offset))
+		return -EOVERFLOW;
+	span = (struct xdev_ext_peer_span) {
+		.offset = offset, .device_address = allocation_va + offset,
+		.frame_index = f->umem_addr / frame_size,
+		.data_len = f->data_len, .capacity = f->capacity,
+	};
+	*out = span;
 	return 0;
 }

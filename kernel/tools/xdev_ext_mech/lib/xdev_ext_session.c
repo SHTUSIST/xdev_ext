@@ -6,6 +6,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <fcntl.h>
 #include <net/if.h>
 #include <poll.h>
 #include <stdint.h>
@@ -98,6 +99,7 @@ struct xring {
 
 struct xdev_ext_session {
 	int ring, efd, xsk;
+	int allocation_fd;
 	__u32 pool_kind, xsk_mode, nr_frames, depth, frames_per_batch;
 	bool zero_copy, created, started, released, retained;
 	void *umem;			/* XSK UMEM or IOU UMEM */
@@ -257,6 +259,8 @@ static void session_free(struct xdev_ext_session *s)
 	xring_unmap(&s->tx);
 	if (s->xsk >= 0)
 		close(s->xsk);
+	if (s->allocation_fd >= 0)
+		close(s->allocation_fd);
 	if (s->umem)
 		munmap(s->umem, s->umem_size);
 	for (i = 0; i < s->nr_owned_fds; i++)
@@ -303,7 +307,7 @@ int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 	s = calloc(1, sizeof(*s));
 	if (!s)
 		return -ENOMEM;
-	s->ring = s->efd = s->xsk = -1;
+	s->ring = s->efd = s->xsk = s->allocation_fd = -1;
 	s->pool_kind = o->pool_kind;
 	s->xsk_mode = o->xsk_mode;
 	s->nr_frames = o->nr_frames ? o->nr_frames : XDEV_EXT_DEFAULT_FRAMES;
@@ -343,6 +347,47 @@ int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 	*out = s;
 	return 0;
 fail:
+	session_free(s);
+	return ret;
+}
+
+int xdev_ext_session_open_peer(const struct xdev_ext_peer_pool_opts *o,
+			       struct xdev_ext_session **out)
+{
+	struct io_uring_params p = { 0 };
+	struct xdev_ext_session *s;
+	int ret;
+
+	if (!o || !out || o->allocation_fd < 0)
+		return -EINVAL;
+	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
+	if (ret)
+		return ret;
+	if (o->flags)
+		return -EOPNOTSUPP;
+	s = calloc(1, sizeof(*s));
+	if (!s)
+		return -ENOMEM;
+	s->ring = s->efd = s->xsk = s->allocation_fd = -1;
+	s->pool_kind = XDEV_EXT_MECH_POOL_PEER;
+	s->allocation_fd = fcntl(o->allocation_fd, F_DUPFD_CLOEXEC, 0);
+	if (s->allocation_fd < 0) {
+		ret = -errno;
+		goto peer_fail;
+	}
+	s->ring = sys_uring_setup(8, &p);
+	if (s->ring < 0) {
+		ret = s->ring;
+		goto peer_fail;
+	}
+	s->efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+	if (s->efd < 0) {
+		ret = -errno;
+		goto peer_fail;
+	}
+	*out = s;
+	return 0;
+peer_fail:
 	session_free(s);
 	return ret;
 }
@@ -399,7 +444,8 @@ int xdev_ext_session_create(struct xdev_ext_session *s,
 	c.abi_version = XDEV_EXT_MECH_ABI_VERSION;
 	c.nr_stages = o->nr_stages;
 	c.pool_kind = s->pool_kind;
-	c.pool_fd = s->pool_kind == XDEV_EXT_MECH_POOL_XSK ? s->xsk : -1;
+	c.pool_fd = s->pool_kind == XDEV_EXT_MECH_POOL_XSK ? s->xsk :
+		s->pool_kind == XDEV_EXT_MECH_POOL_PEER ? s->allocation_fd : -1;
 	c.depth = o->depth;
 	c.eventfd = s->efd;
 	memcpy(c.st, o->st, sizeof(c.st));
@@ -510,6 +556,104 @@ static int raw_stats(struct xdev_ext_session *s, struct xdev_ext_mech_stats *out
 	memset(out, 0, sizeof(*out));
 	out->session_id = s->id;
 	return mech(s, XDEV_EXT_MECH_OP_STATS, (uintptr_t)out);
+}
+
+int xdev_ext_session_start_frames(struct xdev_ext_session *s,
+				 const struct xdev_ext_start_frames_opts *o)
+{
+	struct xdev_ext_mech_start st = { 0 };
+	struct xdev_ext_mech_stats snap;
+	__u32 *indices;
+	__u64 target;
+	int ret;
+
+	if (!s || !o)
+		return -EINVAL;
+	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
+	if (ret)
+		return ret;
+	if (o->flags & ~XDEV_EXT_MECH_START_F_RECYCLE)
+		return -EOPNOTSUPP;
+	if (!o->nr_batches || !o->nr_indices || !o->indices ||
+	    o->nr_indices > XDEV_EXT_MAX_FRAMES ||
+	    o->nr_batches - 1 > UINT64_MAX - (o->first_seq ? o->first_seq : 1))
+		return -EINVAL;
+	if (!live(s))
+		return -ENOTCONN;
+	if (s->pool_kind != XDEV_EXT_MECH_POOL_PEER &&
+	    s->pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM)
+		return -EOPNOTSUPP;
+	if (s->started) {
+		ret = raw_stats(s, &snap);
+		if (ret)
+			return ret;
+		if (snap.last_err || snap.sequestered || snap.batches_abort ||
+		    snap.state != XDEV_EXT_MECH_SESSION_ACTIVE)
+			return snap.last_err < 0 ? snap.last_err : -EIO;
+		if (snap.inflight || snap.batches_done < s->nr_batches)
+			return -EBUSY;
+	}
+	if (o->nr_batches > UINT64_MAX - s->nr_batches)
+		return -EOVERFLOW;
+	target = s->nr_batches + o->nr_batches;
+	indices = malloc((size_t)o->nr_indices * sizeof(*indices));
+	if (!indices)
+		return -ENOMEM;
+	memcpy(indices, o->indices, (size_t)o->nr_indices * sizeof(*indices));
+	st.session_id = s->id;
+	st.nr_batches = o->nr_batches;
+	st.first_seq = o->first_seq ? o->first_seq : 1;
+	st.flags = o->flags | XDEV_EXT_MECH_START_F_USER_FRAMES |
+		XDEV_EXT_MECH_START_F_ORDERED_FRAMES;
+	st.nr_user_frames = o->nr_indices;
+	st.user_frames = (uintptr_t)indices;
+	ret = xdev_ext_session_arm(s, target, 0);
+	if (ret) {
+		free(indices);
+		return ret;
+	}
+	ret = mech(s, XDEV_EXT_MECH_OP_START, (uintptr_t)&st);
+	free(indices);
+	if (!ret) {
+		s->started = true;
+		s->nr_batches = target;
+	}
+	return ret;
+}
+
+int xdev_ext_session_stage_caps(struct xdev_ext_session *s, __u32 stage,
+			       struct xdev_ext_mech_stage_caps *out)
+{
+	struct xdev_ext_mech_stage_caps caps = {
+		.size = sizeof(caps), .version = XDEV_EXT_MECH_STAGE_CAPS_VERSION,
+		.stage = stage,
+	};
+	int ret;
+	if (!s || !out)
+		return -EINVAL;
+	if (!live(s))
+		return -ENOTCONN;
+	caps.session_id = s->id;
+	ret = mech(s, XDEV_EXT_MECH_OP_STAGE_CAPS, (uintptr_t)&caps);
+	if (!ret)
+		*out = caps;
+	return ret;
+}
+
+int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,
+			  __u64 link_token, __u32 direction, __u32 flags)
+{
+	if (!out || control_fd < 0 || !link_token ||
+	    (direction != XDEV_EXT_MECH_DIR_TO_DEVICE && direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
+		return -EINVAL;
+	/* A public helper never silently enables the administrator override. */
+	if (flags & ~(XDEV_EXT_MECH_STAGE_F_POLL))
+		return -EOPNOTSUPP;
+	*out = (struct xdev_ext_mech_stage_uapi) {
+		.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = direction,
+		.fd = control_fd, .flags = flags, .arg0 = link_token,
+	};
+	return 0;
 }
 
 int xdev_ext_session_wait(struct xdev_ext_session *s, int timeout_ms,

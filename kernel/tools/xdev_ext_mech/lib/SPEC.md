@@ -22,13 +22,15 @@ the session part needs only libc.
   A smaller `sz` than the version 1 layout is `-EINVAL`. A larger `sz` is
   accepted only when every byte past the known layout is zero; otherwise
   `-EOPNOTSUPP` (the caller asked for a feature this library lacks).
-- `flags` fields: an unknown bit is `-EOPNOTSUPP`. Version 1 knows no bit.
+- `flags` fields: an unknown bit is `-EOPNOTSUPP`. The USER control and
+  explicit-frame interfaces have the flags described in section 9.
 - Library-reserved extension points (not implemented, reserved names only):
   appending batches to a running session, and NVMe completion polling. They
   will arrive as new `flags` bits or appended fields; a version 1 library
   rejects both with `-EOPNOTSUPP`, so a caller never silently runs without
   the requested behaviour. A second START on one session is `-EOPNOTSUPP`
-  in version 1 for the same reason.
+  through the original start function for the same reason. The separate
+  explicit-frame interface in section 9 permits a proven drained restart.
 
 Error codes chosen by the library itself:
 
@@ -324,3 +326,117 @@ int xdev_ext_user_stage_close(struct xdev_ext_user_stage *u);
   batch's payload after its deadline (CREATE `arg0`), and should stop
   touching a batch when next has returned `-ESHUTDOWN` or the slot's ticket
   changed.
+
+## 9. PEER and external-control extension
+
+`xdev_ext_session_open_peer` accepts a previously registered allocation fd,
+duplicates it using F_DUPFD_CLOEXEC, and creates only an io_uring and eventfd.
+It does not register UMEM, map payload on the CPU or assume the authority's
+range from a user VA. CREATE passes the duplicate as POOL_PEER pool_fd;
+the kernel validates the allocation and stage geometry. Caller ownership of
+the original fd is unchanged. Failed setup releases acquired resources.
+STOP/close UNKNOWN and retained results keep the library handle and its
+duplicate authority alive, using the same retained rules as other pools.
+
+`xdev_ext_session_start_frames` accepts explicit frame indices in caller order.
+It copies them until the synchronous syscall returns and sets
+USER_FRAMES|ORDERED_FRAMES. It adds RECYCLE only when explicitly requested.
+It never substitutes allocator-selected or lowest-numbered frames.
+After an accepted START, another START requires STATS to prove the prior
+cumulative goal is done, with no inflight, abort, sequestered or session error.
+Before each START it installs a cumulative batch NOTIFY_ARM target, replacing
+any previously installed batch or published target. A failed START does not
+advance local started/count state; a retry installs the same new target.
+The original start/arm API keeps its existing behavior.
+
+`xdev_ext_user_batch_peer_span` converts one copied frame into an allocation
+offset and GPU address. It checks frame alignment, index width, data offset,
+capacity, valid length, whole-frame allocation bounds and VA arithmetic.
+Every error leaves the output unchanged. The returned address does not itself
+prove allocation authority, DMA qualification, visibility or last use.
+PEER USER objects are opened with umem=NULL and batch.data[] stays NULL.
+
+USER open accepts XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL. `stage_control` exposes
+only the control mapping plus exact negotiated offsets; it rejects legacy
+objects. `ctl_attach`/`ctl_detach` forward the explicit lifetime ioctls. A
+duplicate attach returns -EALREADY; detach without attachment returns -ENOENT.
+An ioctl failure preserves local attachment state, and close of an attached
+object returns -EBUSY. In particular a bound detach failure does not unmap or
+close the region. GPU controllers must attach before CREATE and detach after
+native STOP/unbind and proven GPU completion.
+
+`xdev_ext_stage_xdomain` constructs a channel0 strict XDOMAIN stage from a
+control fd, never-reused link token and direction. The only accepted flag is
+generic POLL; the helper does not enable ALLOW_UNVERIFIED.
+`xdev_ext_session_stage_caps` returns the kernel's actual post-CREATE
+STAGE_CAPS record without interpreting topology as executed DMA evidence.
+
+`xdev_ext_link_read` reads bounded version1 sysfs records and returns their
+structural state, including down state for discovery output. `link_discover`
+requires a unique matching token with nonzero local/remote incarnation,
+channel count, up=1 and closing=nhi_gone=0. A missing or malformed state is
+an error. These read-only APIs do not register memory, submit I/O or establish
+GPU/NHI capabilities. Normal ctl exposes `peer-discover`, `peer-preflight
+--link TOKEN` and `peer-caps --ring-fd FD --session ID --stage N`; the last
+requires the inherited owning ring fd rather than querying a different ring.
+
+The optional CUDA Driver library is built separately from the base C archive.
+Set XDEV_EXT_CUDA_PTX to the matching real PTX artifact before opening a GPU
+controller. Its control region is registered as mapped host metadata only;
+payload remains device memory. A handle owns exactly one stream and requires
+strict USER|POLL. System-scope acquire/release kernels consume fresh ready
+key/ticket metadata at each replay. Native owner write ordering or supported
+remote-write flush is required before device payload reads. During capture,
+the flush is an actual batch-memop graph node linked to the stream's capture
+dependencies. This is a capability-gated implementation, not hardware proof.
+
+CUDA close requires the caller to have destroyed graph executables referencing
+the handle, succeeds only after stream synchronization, unregisters metadata
+and then detaches. Any CUDA or detach error retains the handle; a detach retry
+does not unregister twice. d1 event_complete records and synchronizes a real
+event after caller stream work before publishing done0; a CUDA failure posts
+negative UNKNOWN status. d1 capture is unsupported. Physical correctness and
+performance require separate device execution; link stubs are never runtime
+execution libraries.
+
+The ordinary PEER endpoint wrapper prepares a session and USER objects at open;
+explicit `endpoint_create` binds them after optional GPU control attachment.
+TX uses strict USER producer → XDOMAIN → strict USER terminal. RX uses
+XDOMAIN → strict USER consumer. USER stages select POLL. Each endpoint owns
+duplicates of both allocation and control fds; caller fds may be closed after
+open. Duplex endpoints need distinct allocation authorities because the
+kernel claims each registered allocation exclusively.
+
+Endpoint next returns a dedicated message wrapper carrying the unchanged
+legacy USER batch, its role and a non-reused endpoint origin cookie. Complete
+checks origin, role, outstanding ticket/key/batch/arg and immutable frame
+metadata, allowing only out_len to change. This cookie catches accidental
+cross-endpoint misuse; it is not security authority for a malicious caller.
+Accepted negative completion poisons the endpoint and preserves UNKNOWN.
+
+Endpoint close checks every external-control attachment before changing any
+session or fd. If any USER is still attached it returns -EBUSY and preserves
+the entire endpoint, even after payload STOP succeeded. The owner must call
+endpoint_stop, successfully synchronize/unregister/detach its CUDA controller,
+then endpoint_close. There is no automatic detach or assumption that native
+payload completion proves the metadata controller has stopped.
+
+CUDA operations bind each USER object's lifetime to its first qualified actual
+CUDA context ID and stream ID. Queries use cuCtxGetId, cuStreamGetCtx and
+cuStreamGetId, so a CU_STREAM_PER_THREAD numeric handle in another thread does
+not bypass the single-stream contract. The private pair is installed and
+checked under a tiny atomic flag; driver API calls happen outside that lock.
+The CUDA controller and d1 event_complete share the same USER binding.
+Current-context, actual stream context/ID and capture qualification errors
+return before d1 event completion publishes any done entry. An actual event
+record/synchronization error after qualification still reports negative
+UNKNOWN. There is no new kernel UAPI or change to the public USER batch ABI.
+
+Metadata atomicity uses NVIDIA's independent guarantee for naturally aligned
+32/64-bit load/store on mapped host memory. The library still checks successful
+mapped-host registration, alias/field alignment, complete region extents and
+all CUDA query results. HOST_NATIVE_ATOMIC_SUPPORTED=0 alone does not reject
+this load/store-only protocol. Adding atomic RMW would require separate
+qualification. This qualification does not relax remote VRAM write visibility;
+the same native-ordering or supported-flush requirement and physical GPU/NHI
+acceptance remain necessary.

@@ -197,7 +197,7 @@ static void test_open_validation(void)
 	o.entries = 512;
 	EXPECT_EQ(xdev_ext_user_stage_open(&o, &u), -EINVAL);
 	o.entries = 0;
-	o.flags = 1;
+	o.flags = 1U << 30; /* bit 0 is the explicit EXTERNAL_CTL opt-in */
 	EXPECT_EQ(xdev_ext_user_stage_open(&o, &u), -EOPNOTSUPP);
 	o.flags = 0;
 	o.ring_fd = -1;

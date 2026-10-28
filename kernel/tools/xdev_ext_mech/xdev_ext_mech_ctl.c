@@ -23,6 +23,7 @@
 #define _GNU_SOURCE
 #include <arpa/inet.h>
 #include <errno.h>
+#include <dirent.h>
 #include <fcntl.h>
 #include <getopt.h>
 #include <limits.h>
@@ -56,6 +57,7 @@
 #include "xdev_ext_mech_ctl_core.h"
 #include "../../io_uring/xdev_ext_policy.h"
 #include "xdev_ext_mech_ctl_fallback.h"
+#include "lib/libxdev_ext.h"
 
 #ifndef AF_XDP
 #define AF_XDP			44
@@ -2547,11 +2549,113 @@ out:
     return ret;
 }
 
+static int peer_number(const char *text, __u64 *out)
+{
+	char *end;
+	unsigned long long value;
+	if (!text || !*text || *text == '-' || *text == '+') return -EINVAL;
+	errno = 0;
+	value = strtoull(text, &end, 0);
+	if (errno || *end) return -EINVAL;
+	*out = value;
+	return 0;
+}
+
+static void peer_print_link(const struct xdev_ext_link_snapshot *s)
+{
+	printf("XDEV_EXT_LINK service=%s token=%llu local_inc=%llu remote_inc=%llu "
+	       "up=%u closing=%u nhi_gone=%u channels=%u\n", s->service,
+	       (unsigned long long)s->token, (unsigned long long)s->local_inc,
+	       (unsigned long long)s->remote_inc, s->up, s->closing, s->nhi_gone,
+	       s->channels);
+}
+
+/* Read-only: this does not register VRAM, create a session or certify DMA. */
+static int cmd_peer_discover(int argc, char **argv, bool preflight)
+{
+	const char *root = "/sys/bus/thunderbolt/devices";
+	struct xdev_ext_link_snapshot s;
+	struct dirent *entry;
+	__u64 token = 0;
+	DIR *dir;
+	int ret, status = CTL_PASS;
+	unsigned int found = 0;
+	for (int i = 2; i < argc; i++) {
+		if (!strcmp(argv[i], "--sysfs-root") && i + 1 < argc) root = argv[++i];
+		else if (!strcmp(argv[i], "--link") && i + 1 < argc) {
+			if (peer_number(argv[++i], &token) || !token) return CTL_USAGE;
+		} else return CTL_USAGE;
+	}
+	if (preflight || token) {
+		if (!token) return CTL_USAGE;
+		ret = xdev_ext_link_discover(root, token, &s);
+		if (ret) { fprintf(stderr, "XDEV_EXT_LINK_UNAVAILABLE errno=%d\n", ret); return CTL_SETUP; }
+		peer_print_link(&s);
+		if (preflight) puts("XDEV_EXT_LINK_PREFLIGHT state=ready dma_qualification=not-queried");
+		return CTL_PASS;
+	}
+	dir = opendir(root);
+	if (!dir) { fprintf(stderr, "XDEV_EXT_LINK_UNAVAILABLE errno=%d\n", -errno); return CTL_SETUP; }
+	while ((entry = readdir(dir))) {
+		if (entry->d_name[0] == '.') continue;
+		ret = xdev_ext_link_read(root, entry->d_name, &s);
+		if (ret == -ENOENT || ret == -ENOTDIR) continue;
+		if (ret) { fprintf(stderr, "XDEV_EXT_LINK_INVALID service=%s errno=%d\n", entry->d_name, ret); status = CTL_SETUP; continue; }
+		peer_print_link(&s); found++;
+	}
+	closedir(dir);
+	if (!found) { puts("XDEV_EXT_LINK_NONE"); return CTL_SETUP; }
+	return status;
+}
+
+/* The caller must retain and pass the owning io_uring fd across exec. */
+static int cmd_peer_caps(int argc, char **argv)
+{
+	__u64 ring = UINT64_MAX, session = 0, stage = UINT64_MAX;
+	struct xdev_ext_mech_stage_caps caps;
+	struct io_uring_xdev_ext_mech req;
+	for (int i = 2; i < argc; i++) {
+		__u64 *value;
+		if (!strcmp(argv[i], "--ring-fd")) value = &ring;
+		else if (!strcmp(argv[i], "--session")) value = &session;
+		else if (!strcmp(argv[i], "--stage")) value = &stage;
+		else return CTL_USAGE;
+		if (++i == argc || peer_number(argv[i], value)) return CTL_USAGE;
+	}
+	if (ring > INT_MAX || !session || stage >= XDEV_EXT_MECH_MAX_STAGES) return CTL_USAGE;
+	caps = (struct xdev_ext_mech_stage_caps) {
+		.size = sizeof(caps), .version = XDEV_EXT_MECH_STAGE_CAPS_VERSION,
+		.session_id = session, .stage = stage,
+	};
+	req = (struct io_uring_xdev_ext_mech) {
+		.op = XDEV_EXT_MECH_OP_STAGE_CAPS, .arg = (uintptr_t)&caps,
+	};
+	if (syscall(__NR_io_uring_register, (int)ring,
+		IORING_REGISTER_XDEV_EXT_MECH, &req, 1) < 0) {
+		fprintf(stderr, "XDEV_EXT_STAGE_CAPS_UNKNOWN errno=%d\n", -errno);
+		return CTL_SETUP;
+	}
+	printf("XDEV_EXT_STAGE_CAPS session=%llu stage=%u family=%u export=%u reachability=%u "
+	       "mapping=%u native_queue=%u producer_visibility=%u last_use=%u invalidation=%u "
+	       "p2p_distance=%d backing=%u refused=%u\n", (unsigned long long)caps.session_id,
+	       caps.stage, caps.family, caps.export_authority, caps.reachability,
+	       caps.requester_mapping, caps.native_queue, caps.producer_visibility,
+	       caps.last_use_quiescence, caps.invalidation, caps.p2p_distance,
+	       caps.backing, caps.refused);
+	return CTL_PASS;
+}
+
 int main(int argc, char **argv)
 {
 	struct ctl_opts o;
 	unsigned int i;
 	int ret;
+	if (argc > 1 && !strcmp(argv[1], "peer-discover"))
+		return cmd_peer_discover(argc, argv, false);
+	if (argc > 1 && !strcmp(argv[1], "peer-preflight"))
+		return cmd_peer_discover(argc, argv, true);
+	if (argc > 1 && !strcmp(argv[1], "peer-caps"))
+		return cmd_peer_caps(argc, argv);
 
 	if (argc > 1 && !strcmp(argv[1], "xdomain-probe"))
 		return cmd_xdomain_probe(argc, argv);
@@ -2564,6 +2668,9 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	if (!strcmp(argv[1], "-h") || !strcmp(argv[1], "--help")) {
 		usage(stdout);
+		puts("       xdev_ext_mech_ctl peer-discover [--sysfs-root PATH] [--link TOKEN]\n"
+		     "       xdev_ext_mech_ctl peer-preflight --link TOKEN [--sysfs-root PATH]\n"
+		     "       xdev_ext_mech_ctl peer-caps --ring-fd FD --session ID --stage N");
 		return CTL_PASS;
 	}
 	for (i = 0; i < sizeof(ctl_commands) / sizeof(ctl_commands[0]); i++) {

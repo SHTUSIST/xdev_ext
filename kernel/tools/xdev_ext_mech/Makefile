@@ -64,11 +64,11 @@ $(BUILD_DIR)/%.bpf.o: %.bpf.c xdev_ext_mech_prog.h xdev_ext_mech_kfunc.h ../../i
 
 $(BUILD_DIR)/cpu_plan.bpf.o: xdev_ext_mech_cpu_abi.h
 
-$(CTL): xdev_ext_mech_ctl.c xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
+$(CTL): xdev_ext_mech_ctl.c lib/xdev_ext_link.c lib/libxdev_ext.h xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
 		../xdev_ext_gpu_identity.c ../include/xdev_ext_gpu_identity.h \
 		../xdev_ext_xsk_redirect.c ../include/xdev_ext_xsk_redirect.h \
 		../include/xdev_ext_xsk_redirect_prog.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) xdev_ext_mech_ctl.c ../xdev_ext_xsk_redirect.c ../xdev_ext_gpu_identity.c -o $@ \
+	$(CC) $(CFLAGS) xdev_ext_mech_ctl.c lib/xdev_ext_link.c ../xdev_ext_xsk_redirect.c ../xdev_ext_gpu_identity.c -o $@ \
 		$(LDFLAGS) $(LDLIBS)
 
 # The thin session library (lib/SPEC.md); not part of all.
