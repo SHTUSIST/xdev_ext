@@ -21,7 +21,7 @@ PAIR_FIELDS = (
     'pool_bytes', 'record_bytes', 'frame_bytes', 'depth', 'batch', 'mtu',
     'protocol', 'crc', 'setup_in_timing', 'oracle_in_timing',
     'complete_boundary', 'submit_boundary', 'clock', 'clock_domain',
-    'cpu_accounting', 'cpu_budget', 'cpu_set', 'completed_records', 'numa', 'iommu', 'group_bytes',
+    'cpu_accounting', 'cpu_budget', 'measurement_cpu_count', 'cpu_set', 'completed_records', 'numa', 'iommu', 'group_bytes',
     'segments_per_group', 'inflight_bytes', 'native_batch', 'processing', 'stages',
     'records', 'workload',
 )
@@ -187,6 +187,11 @@ def validate_run(run, performance=False):
                      'native_batch', 'numa', 'iommu', 'processing'):
             if name not in run or run[name] is None:
                 errors.append(name + ': missing matched measurement configuration')
+        if 'cpu_scope' in run:
+            try:
+                _cpu_scope_selection(run, run['cpu_scope'])
+            except (ValueError, TypeError, KeyError) as error:
+                errors.append('cpu_scope: ' + str(error))
         # Physical collection/import is a separate step. Raw files and verified
         # post-oracle/probe mappings must be produced by that collector, not here.
         observed = inspect_collection(run, run.get('collection_receipt'))
@@ -429,8 +434,8 @@ def _cpu_scope_selection(plan, scope):
         raise ValueError('CPU scope CPUs offline/unknown')
     if 'cpu_set' in plan and not _same_json(plan['cpu_set'], list(selected)):
         raise ValueError('CPU scope selected CPU set mismatch')
-    if type(plan.get('cpu_budget')) is not int or plan['cpu_budget'] != len(selected):
-        raise ValueError('CPU scope budget differs from actual selected CPU count')
+    if type(plan.get('measurement_cpu_count')) is not int or plan['measurement_cpu_count'] != len(selected):
+        raise ValueError('CPU scope measurement_cpu_count differs from actual selected CPU count')
     if (scope.get('clock') != plan.get('clock') or
             scope.get('clock_domain') != plan.get('clock_domain')):
         raise ValueError('CPU scope/native endpoint clock mismatch')
@@ -456,6 +461,9 @@ def _qualified_cpu_scope(plan, metadata, samples):
     if not isinstance(scope, dict) or not _same_json(scope, plan.get('cpu_scope')):
         raise ValueError('CPU scope metadata/manifest mismatch or unavailable')
     selected = _cpu_scope_selection(plan, scope)
+    if (type(metadata.get('measurement_cpu_count')) is not int or
+            metadata['measurement_cpu_count'] != plan.get('measurement_cpu_count')):
+        raise ValueError('CPU measurement_cpu_count metadata/manifest mismatch')
     online = tuple(scope['online_cpus'])
     possible = tuple(scope['possible_cpus'])
     expected = (scope.get('boot_id'), online, possible, scope.get('clock'), scope.get('clock_domain'))

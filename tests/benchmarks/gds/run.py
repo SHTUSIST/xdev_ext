@@ -11,6 +11,24 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+_CPU_MODULES = HERE.parent / "native_trace"
+if not _CPU_MODULES.is_dir():
+    _CPU_MODULES = HERE.parents[1] / "support/evidence/native_trace"
+sys.path.insert(0, str(_CPU_MODULES))
+from timer_scope import TimerCpuRun, OptionalTimerCpuRun
+
+
+
+def cpu_owner(args, clock="CLOCK_MONOTONIC", *, optional=False):
+    import uuid
+    output = args.cpu_output
+    if output is None and not os.environ.get("XDEV_EXT_EVAL_CPU_OWNER"):
+        parent = getattr(args, "build_dir", HERE / "build")
+        output = Path(parent) / "cpu-measurements" / str(uuid.uuid4())
+    elif output is not None:
+        output = Path(output) / str(uuid.uuid4())
+    capture = OptionalTimerCpuRun if optional else TimerCpuRun
+    return capture(output, cpu_set=args.cpu_set, clock=clock)
 
 
 def decimal(value):
@@ -24,6 +42,9 @@ def decimal(value):
 
 def arguments():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--cpu-set")
+    parser.add_argument("--cpu-output", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--mode", required=True, choices=["cufile-direct"])
     parser.add_argument("--workload", required=True, choices=["llm-load", "checkpoint"])
     parser.add_argument("--bytes", required=True, type=decimal)
@@ -256,6 +277,10 @@ def checked_manifest(output, record):
 
 def main():
     args = arguments()
+    if args.dry_run:
+        print(json.dumps({"status": "planned", "mode": args.mode, "workload": args.workload,
+                          "cpu_measurement_plan": cpu_owner(args).plan()}, sort_keys=True))
+        return 0
     try:
         binary, reason = build(args.cuda_root)
         if reason:
@@ -270,12 +295,28 @@ def main():
         with tempfile.TemporaryDirectory(prefix="xdev-gds-", dir=args.directory.resolve()) as temporary:
             command = [str(binary), args.workload, str(args.bytes), str(args.chunk),
                        str(args.iterations), temporary]
-            result = subprocess.run(command, text=True, capture_output=True, timeout=300)
+            with cpu_owner(args, optional=True) as cpu:
+                result = cpu.run(command, text=True, capture_output=True, timeout=300)
             print(result.stderr, file=sys.stderr, end="")
             if result.returncode:
                 return result.returncode if result.returncode in (1, 2, 4) else 1
             record = checked_result(result.stdout, args)
             checked_manifest(result.stderr, record)
+        rows = args.iterations * ((args.bytes + args.chunk - 1) // args.chunk + (args.workload == "checkpoint"))
+        measurement = cpu.measurement([dict(arm="gds-direct", identity={"workload": args.workload},
+            metric="io_ns", keys=list(range(rows)), expected_duration_ns=record["io_ns"],
+            endpoint_semantics="chunk-completion-and-checkpoint-fsync", clock="CLOCK_MONOTONIC")])
+        # Strict delegates receive precisely their existing record. Owner CPU output is retained separately.
+        if measurement is not None:
+            try:
+                samples_path = measurement.get("artifacts", {}).get("samples_path")
+                if samples_path:
+                    Path(samples_path).with_name("cpu-measurement.json").write_text(
+                        json.dumps(measurement, sort_keys=True) + "\n")
+                else:
+                    print("CPU measurement unavailable: " + measurement.get("reason", "capture setup refused"), file=sys.stderr)
+            except (OSError, ValueError) as error:
+                print("CPU measurement summary unavailable: " + str(error), file=sys.stderr)
         print(json.dumps(record, separators=(",", ":")))
         return 0
     except (OSError, ValueError, subprocess.TimeoutExpired) as error:

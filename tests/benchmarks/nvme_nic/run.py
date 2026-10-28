@@ -24,8 +24,26 @@ import gate
 import results
 
 HERE = Path(__file__).resolve().parent
+_CPU_MODULES = HERE.parent / "native_trace"
+if not _CPU_MODULES.is_dir():
+    _CPU_MODULES = HERE.parents[1] / "support/evidence/native_trace"
+sys.path.insert(0, str(_CPU_MODULES))
+from timer_scope import TimerCpuRun, OptionalTimerCpuRun
+
 ARMS = ('posix', 'uring', 'splice', 'session')
 MIN_SIZE, MAX_SIZE = 4096, 4 << 20
+
+
+def cpu_owner(args, clock="CLOCK_MONOTONIC", *, optional=False):
+    import uuid
+    output = args.cpu_output
+    if output is None and not os.environ.get("XDEV_EXT_EVAL_CPU_OWNER"):
+        parent = getattr(args, "build_dir", HERE / "build")
+        output = Path(parent) / "cpu-measurements" / str(uuid.uuid4())
+    elif output is not None:
+        output = Path(output) / str(uuid.uuid4())
+    capture = OptionalTimerCpuRun if optional else TimerCpuRun
+    return capture(output, cpu_set=args.cpu_set, clock=clock)
 
 
 def decimal(text):
@@ -87,6 +105,9 @@ def mac(text):
 
 def parse(argv):
     p = argparse.ArgumentParser(description=__doc__, allow_abbrev=False)
+    p.add_argument("--cpu-set")
+    p.add_argument("--cpu-output", type=Path)
+    p.add_argument("--dry-run", action="store_true")
     p.add_argument('--direction', choices=('fwd', 'rev'), default='fwd')
     p.add_argument('--sizes', type=lambda t: power_list(t, MIN_SIZE, MAX_SIZE, 'size'))
     p.add_argument('--qd', type=lambda t: power_list(t, 1, 128, 'qd'))
@@ -142,7 +163,7 @@ def parse(argv):
         p.error('port/rate range')
     if not args.window_mib or args.window_mib % 4 or args.window_mib > 1024:
         p.error('--window-mib: multiple of 4, at most 1024')
-    if not args.loopback and (args.direction == 'rev' or args.prepare_window) and not args.allow_window_write:
+    if not args.dry_run and not args.loopback and (args.direction == 'rev' or args.prepare_window) and not args.allow_window_write:
         p.error('reverse runs and --prepare-window write the NVMe window: pass --allow-window-write')
     return args
 
@@ -231,7 +252,12 @@ def campaign(args, mtu, receipt):
         for qd in args.qd:
             args.run_id = secrets.randbelow(2 ** 63) + 1
             args.session_base = secrets.randbelow(2 ** 63) + 1
-            out = subprocess.run(command(args, size, qd, mtu), text=True, capture_output=True, timeout=7200)
+            cpu = None
+            if measured:
+                with cpu_owner(args, "CLOCK_MONOTONIC_RAW", optional=True) as cpu:
+                    out = cpu.run(command(args, size, qd, mtu), text=True, capture_output=True, timeout=7200)
+            else:
+                out = subprocess.run(command(args, size, qd, mtu), text=True, capture_output=True, timeout=7200)
             if out.returncode == 4:
                 # Refused before this configuration's first trial; earlier ones stand.
                 raise gate.Refused('not_run_capability', f'size {size} qd {qd}: ' + out.stderr.strip(),
@@ -253,6 +279,17 @@ def campaign(args, mtu, receipt):
             if measured:
                 config['summary'] = results.summarize(trials, args.direction)
                 config['records'] = trials
+                views = []
+                for arm in args.arms:
+                    arm_trials = [r for r in trials if r['arm'] == arm and r['record'] == 'trial']
+                    for metric in (('local_release_ns', 'receipt_ns') if args.direction == 'fwd' else ('durable_ns',)):
+                        views.append(dict(arm=arm, identity={"direction": args.direction, "size": size, "qd": qd},
+                            metric=metric, keys=[r['trial'] for r in arm_trials],
+                            expected_duration_ns=sum(r[metric] for r in arm_trials),
+                            endpoint_semantics=metric.removesuffix('_ns'), clock="CLOCK_MONOTONIC_RAW"))
+                measurement = cpu.measurement(views)
+                if measurement is not None:
+                    config['cpu_measurement'] = measurement
             print(json.dumps(config, sort_keys=True))
             sys.stdout.flush()
             configs.append(config)
@@ -261,6 +298,10 @@ def campaign(args, mtu, receipt):
 
 
 def run(args):
+    if args.dry_run:
+        print(json.dumps(dict(status="planned", arms=args.arms, direction=args.direction,
+            cpu_measurement_plan=cpu_owner(args, "CLOCK_MONOTONIC_RAW").plan()), sort_keys=True))
+        return 0
     args.prepare_only = False
     args.buffered = False
     if not producer(args).is_file() or not (args.build_dir / 'nnb_peer').is_file():

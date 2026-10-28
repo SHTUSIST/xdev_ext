@@ -29,6 +29,9 @@
  * Exit: 0 verified, 1 failure, 2 usage, 4 unavailable capability.
  */
 #define _GNU_SOURCE
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer;
+static void endpoint_timer_cleanup(void) { cpu_timer_destroy(&endpoint_timer); }
 #include "../common/fd_check.h"
 #include <getopt.h>
 #include <linux/if_link.h>
@@ -204,6 +207,12 @@ int main(int argc, char **argv)
 			sg_usage(stderr);
 		return ret;
 	}
+	{
+		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", 1);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
+	}
+	atexit(endpoint_timer_cleanup);
 	err = sg_if_query(o.ifname, SIOCGIFMTU, &ifr);
 	if (err) {
 		fprintf(stderr, "SKIP: %s: %s\n", o.ifname, strerror(-err));
@@ -304,6 +313,7 @@ int main(int argc, char **argv)
 	if (!err)
 		err = es_wait_terminal(&r, deadline);
 	t1 = es_now_ns();
+	cpu_timer_store(&endpoint_timer, "io_ns", 0, t0, t1);
 	cpu = es_cpu_us() - cpu0;
 	busy = xg_host_busy_us() - busy0;
 	if (!err)
@@ -333,6 +343,11 @@ int main(int argc, char **argv)
 			ret = XG_EXIT_FAIL;
 			goto out;
 		}
+	}
+	{
+		int error = cpu_timer_publish(&endpoint_timer);
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
 	}
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\",\"route\":\"%s\","
 	       "\"execution\":\"%s\",\"performance_claim\":\"%s\",\"size\":%llu,\"messages\":%llu,"

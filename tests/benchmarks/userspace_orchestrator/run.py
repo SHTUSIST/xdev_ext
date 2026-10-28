@@ -53,6 +53,8 @@ def code_lines(path):
 
 def parse(argv):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0], allow_abbrev=False)
+    p.add_argument('--cpu-set')
+    p.add_argument('--cpu-output')
     p.add_argument('--rig')
     p.add_argument('--chain', default='nvme-nic')
     p.add_argument('--wait', default='poll,eventfd')
@@ -71,6 +73,10 @@ def parse(argv):
     arms = 'userspace-shared' + (',session' if a.with_session else '')
     out = ['--rig', a.rig, '--chain', a.chain, '--wait', a.wait, '--sizes', a.sizes,
            '--arms', arms, '--depth', str(depths[0]), *rest]
+    if a.cpu_set is not None:
+        out += ['--cpu-set', a.cpu_set]
+    if a.cpu_output is not None:
+        out += ['--cpu-output', a.cpu_output]
     if len(depths) > 1:
         out += ['--sweep', 'qd=' + ','.join(str(d) for d in depths[1:])]
     return a, out

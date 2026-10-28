@@ -489,5 +489,156 @@ class SelectedCounterBounds(unittest.TestCase):
         self.assertEqual((actual['lower'], actual['upper']), (expected['lower'], expected['upper']))
 
 
+
+class TimerUnionBounds(unittest.TestCase):
+    """Catch duplicate counter coverage, gap denominators and per-span rounding."""
+    def rows(self, stamps, ticks=None, clock='CLOCK_MONOTONIC'):
+        return [dict(before_ns=t, after_ns=t, stat=stat(n), boot_id=BOOT_ID,
+                     online_cpus=[0], possible_cpus=[0], clock=clock,
+                     clock_domain='host')
+                for t, n in zip(stamps, stamps if ticks is None else ticks)]
+
+    def bounds(self, spans, rows, hz=1_000_000_000, mode='union'):
+        try:
+            return load().interval_bounds(spans, rows, hz, cpu_set=(0,), interval_mode=mode)
+        except TypeError as error:
+            self.fail('shared replay lacks explicit timer span mode: ' + str(error))
+
+    def test_two_spans_sharing_one_outer_pair_count_it_once(self):
+        result = self.bounds([(12, 18), (22, 28)], self.rows([0, 10, 30, 40]))
+        self.assertEqual((result['lower'], result['upper']), (0, 20))
+        self.assertEqual(result['intervals_ns'], [[12, 18], [22, 28]])
+        self.assertEqual(result['measured_ns'], 12)
+        self.assertEqual(result['interval_ns'], [12, 28])
+        self.assertEqual(result['outer_sample_ranges'], [[1, 2]])
+        self.assertEqual(result['inner_sample_ranges'], [])
+        self.assertEqual(result['outer_samples'], [1, 2])
+        self.assertIsNone(result['inner_samples'])
+        self.assertEqual(result['interval_slack_ns'],
+                         [dict(before=2, after=12), dict(before=12, after=2)])
+        envelope = self.bounds([(12, 18), (22, 28)], self.rows([0, 10, 30, 40]), mode='envelope')
+        self.assertEqual(envelope['measured_ns'], 16)
+
+    def test_overlapping_requested_spans_are_normalized_before_duration(self):
+        result = self.bounds([(20, 40), (10, 30), (10, 30)], self.rows([0, 10, 20, 30, 40, 50]))
+        self.assertEqual(result['intervals_ns'], [[10, 40]])
+        self.assertEqual(result['measured_ns'], 30)
+        self.assertEqual((result['lower'], result['upper']), (30, 30))
+
+    def test_touching_counter_ranges_merge_and_oracle_gap_is_not_measured(self):
+        result = self.bounds([(2, 8), (22, 28)], self.rows([0, 10, 20, 30]))
+        self.assertEqual(result['outer_sample_ranges'], [[0, 1], [2, 3]])
+        self.assertEqual(result['measured_ns'], 12)
+        self.assertEqual(result['upper'], 20)
+        self.assertIsNone(result['outer_samples'])
+        touching = self.bounds([(2, 8), (12, 18)], self.rows([0, 10, 20, 30]))
+        self.assertEqual(touching['outer_sample_ranges'], [[0, 2]])
+        self.assertEqual(touching['upper'], 20)
+
+    def test_integer_ticks_are_summed_before_single_outward_rounding(self):
+        result = self.bounds([(10, 30), (50, 70)],
+                             self.rows([0, 10, 20, 30, 40, 50, 60, 70, 80], range(9)), hz=3)
+        # Two disjoint two-tick ranges: floor(4e9/3), ceil(4e9/3).
+        self.assertEqual((result['lower'], result['upper']), (1333333333, 1333333334))
+        self.assertEqual(result['inner_sample_ranges'], [[1, 3], [5, 7]])
+        self.assertEqual(result['outer_sample_ranges'], [[1, 3], [5, 7]])
+        self.assertEqual(result['measured_ns'], 40)
+
+    def test_raw_clock_is_valid_for_pure_timer_arithmetic(self):
+        result = self.bounds([(10, 30)], self.rows([0, 10, 20, 30, 40], clock='CLOCK_MONOTONIC_RAW'))
+        self.assertEqual((result['lower'], result['upper']), (20, 20))
+
+    def test_native_disjoint_records_keep_original_monotonic_envelope(self):
+        manifest, events, samples = selected_inputs()
+        manifest['records'].append(dict(session_id=1, record_id=2, generation=1, measured=True))
+        events[-1]['ts_ns'] = 40
+        for phase, stamp in [('record_admit', 60), ('record_terminal', 80)]:
+            event = dict(events[-1], record_id=2, event=phase, ts_ns=stamp)
+            events.append(event)
+        result = load().cpu_bounds(manifest, events, samples, 7, cpu_set=(1, 3))
+        self.assertEqual((result['lower'], result['upper']), (1285714285, 4285714286))
+        self.assertEqual(result['interval_ns'], [20, 80])
+        for row in samples:
+            row['clock'] = 'CLOCK_MONOTONIC_RAW'
+        with self.assertRaises(ValueError):
+            load().cpu_bounds(manifest, events, samples, 7, cpu_set=(1, 3))
+
+    def test_unknown_span_mode_cannot_silently_become_envelope(self):
+        with self.assertRaises(ValueError):
+            self.bounds([(10, 30)], self.rows([0, 10, 20, 30, 40]), mode='guess')
+
+
+class TimerSamplerClocks(unittest.TestCase):
+    """One real proc read must be enclosed by both actual clock brackets."""
+    os_fixture = ActualSamplerIdentity.os_fixture
+    redirected_path = ActualSamplerIdentity.redirected_path
+
+    def test_extra_clock_brackets_the_same_proc_read_in_order(self):
+        module = load()
+        with tempfile.TemporaryDirectory() as tmp:
+            files = self.os_fixture(tmp)
+            path = Path(tmp) / 'samples.jsonl'
+            try:
+                sampler = module.CpuSampler(path, period_seconds=60, clock_domain='host',
+                                            extra_clocks=('CLOCK_MONOTONIC_RAW',))
+            except TypeError as error:
+                self.fail('sampler lacks same-read extra clock capture: ' + str(error))
+            sequence = []
+            real_open = Path.open
+            counts = {'mono': 100, 'raw': 1000}
+            def clock_read(clock):
+                name = 'raw' if clock == time.CLOCK_MONOTONIC_RAW else 'mono'
+                sequence.append(name)
+                counts[name] += 1
+                return counts[name]
+            def open_record(target, *args, **kwargs):
+                if target == files['stat']:
+                    sequence.append('stat')
+                return real_open(target, *args, **kwargs)
+            with patch.object(module, 'Path', side_effect=self.redirected_path(tmp)), patch.object(
+                    Path, 'open', autospec=True, side_effect=open_record), patch.object(
+                    module.time, 'clock_gettime_ns', side_effect=clock_read), patch.object(
+                    module.time, 'monotonic_ns', side_effect=lambda: clock_read(time.CLOCK_MONOTONIC)):
+                with sampler:
+                    pass
+            self.assertIsNone(sampler.error)
+            self.assertEqual(sequence, ['raw', 'mono', 'stat', 'mono', 'raw'] * 2)
+            rows = [json.loads(line) for line in path.read_text().splitlines()]
+            self.assertEqual(len(rows), 2)
+            for row in rows:
+                self.assertEqual(row['clock'], 'CLOCK_MONOTONIC')
+                self.assertEqual(row['stat'], stat(1))
+                bracket = row['clock_brackets']['CLOCK_MONOTONIC_RAW']
+                self.assertLess(bracket['before_ns'], bracket['after_ns'])
+                self.assertGreater(bracket['before_ns'], row['after_ns'])  # independent origins
+
+    def test_raw_primary_retains_raw_identity(self):
+        module = load()
+        with tempfile.TemporaryDirectory() as tmp:
+            self.os_fixture(tmp)
+            path = Path(tmp) / 'samples.jsonl'
+            try:
+                sampler = module.CpuSampler(path, period_seconds=60, clock_domain='host',
+                                            clock='CLOCK_MONOTONIC_RAW')
+            except TypeError as error:
+                self.fail('sampler cannot capture an actual RAW primary clock: ' + str(error))
+            with patch.object(module, 'Path', side_effect=self.redirected_path(tmp)):
+                with sampler:
+                    pass
+            self.assertIsNone(sampler.error)
+            self.assertTrue(all(row['clock'] == 'CLOCK_MONOTONIC_RAW'
+                                for row in map(json.loads, path.read_text().splitlines())))
+
+    def test_unknown_duplicate_or_primary_extra_clock_is_refused(self):
+        for clock, extra in [('CLOCK_REALTIME', ()), ('CLOCK_MONOTONIC', ('CLOCK_MONOTONIC',)),
+                             ('CLOCK_MONOTONIC', ('CLOCK_MONOTONIC_RAW', 'CLOCK_MONOTONIC_RAW')),
+                             ('CLOCK_MONOTONIC', ('CLOCK_REALTIME',))]:
+            with self.subTest(clock=clock, extra=extra), tempfile.TemporaryDirectory() as tmp:
+                try:
+                    with self.assertRaises(ValueError):
+                        load().CpuSampler(Path(tmp) / 's', clock=clock, extra_clocks=extra)
+                except TypeError as error:
+                    self.fail('clock validation is missing: ' + str(error))
+
 if __name__ == '__main__':
     unittest.main()

@@ -24,6 +24,9 @@
  * refused before the first trial.
  */
 #define _GNU_SOURCE
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer;
+static void endpoint_timer_cleanup(void) { cpu_timer_destroy(&endpoint_timer); }
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -808,6 +811,12 @@ static int run_trial(struct nnb_arm *a, uint64_t trial, uint64_t units, const ch
 		       m.f[8], (int64_t)m.f[7]);
 	else
 		printf(",\"readback_compare\":%d", t.integrity ? 1 : 0);
+	if (!c->correctness && !strcmp(kind, "trial")) {
+		cpu_timer_store(&endpoint_timer, c->reverse ? "durable_ns" : "local_release_ns",
+				trial, t.t_start, t.t_release);
+		if (!c->reverse)
+			cpu_timer_store(&endpoint_timer, "receipt_ns", trial, t.t_start, t_receipt);
+	}
 	/* Integrity trials and correctness runs carry no timing. */
 	if (!c->correctness && !t.integrity) {
 		printf(",\"%s_ns\":%" PRIu64 ",\"cpu_user_us\":%.0f,\"cpu_sys_us\":%.0f",
@@ -1120,7 +1129,22 @@ int main(int argc, char **argv)
 	/* Reverse bursts are whole: units round up to a multiple of qd. */
 	if (c.reverse)
 		c.units = (c.units + c.qd - 1) / c.qd * c.qd;
-	return campaign(&c, &g);
+	if (!c.correctness) {
+		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC_RAW",
+			(size_t)c.nr_arms * c.pairs * (c.reverse ? 1 : 2));
+		if (error)
+			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
+	}
+	atexit(endpoint_timer_cleanup);
+	{
+		int result = campaign(&c, &g);
+		if (!result && !c.correctness) {
+			int error = cpu_timer_publish(&endpoint_timer);
+			if (error)
+				fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
+		}
+		return result;
+	}
 bad:
 	usage(stderr);
 	return NNB_USAGE;

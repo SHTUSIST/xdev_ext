@@ -7648,6 +7648,50 @@
       "source": "tests/network/xdomain/contracts/xdomain_production_poll_x3.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_x3.c"
+    },
+    {
+      "source": "tests/benchmarks/chains/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/chains/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/gds/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/gds/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/gpu_nic/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/gpu_nic/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/nvme_gpu/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_nic/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/nvme_nic/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/userspace_orchestrator/test_cpu_timer_contract.py",
+      "logical_path": "tests/eval/userspace_orchestrator/test_cpu_timer_contract.py"
+    },
+    {
+      "source": "tests/support/benchmarks/cpu_timer.h",
+      "logical_path": "tests/eval/common/cpu_timer.h"
+    },
+    {
+      "source": "tests/support/benchmarks/test_cpu_endpoints.py",
+      "logical_path": "tests/eval/common/test_cpu_endpoints.py"
+    },
+    {
+      "source": "tests/support/benchmarks/test_cpu_timer.py",
+      "logical_path": "tests/eval/common/test_cpu_timer.py"
+    },
+    {
+      "source": "tests/support/evidence/native_trace/test_timer_scope.py",
+      "logical_path": "tests/eval/native_trace/test_timer_scope.py"
+    },
+    {
+      "source": "tests/support/evidence/native_trace/timer_scope.py",
+      "logical_path": "tests/eval/native_trace/timer_scope.py"
     }
   ]
 }

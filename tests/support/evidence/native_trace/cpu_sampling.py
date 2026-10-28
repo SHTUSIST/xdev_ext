@@ -131,7 +131,7 @@ def _sample_identity(row, cpus):
     boot = row.get('boot_id')
     if (not isinstance(boot, str) or
             not re.fullmatch(r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', boot) or
-            row.get('clock') != 'CLOCK_MONOTONIC' or
+            row.get('clock') not in ('CLOCK_MONOTONIC', 'CLOCK_MONOTONIC_RAW') or
             not isinstance(row.get('clock_domain'), str) or not row['clock_domain']):
         raise ValueError('sample boot/clock/domain identity invalid')
     return (boot, online, possible, row['clock'], row['clock_domain'])
@@ -168,7 +168,8 @@ def _os_identity():
 
 class CpuSampler:
     """Own one finite JSONL stream and worker; stop and join on every exit."""
-    def __init__(self, path, period_seconds=0.01, max_bytes=MAX_BYTES, clock_domain=None):
+    def __init__(self, path, period_seconds=0.01, max_bytes=MAX_BYTES, clock_domain=None, *,
+                 clock="CLOCK_MONOTONIC", extra_clocks=(), sample_callback=None):
         if (type(period_seconds) not in (int, float) or not math.isfinite(period_seconds) or
                 not 0 < period_seconds <= 60):
             raise ValueError('CPU sampling period must be 0..60 seconds')
@@ -176,6 +177,12 @@ class CpuSampler:
             raise ValueError('CPU sampling byte limit invalid')
         if clock_domain is not None and (not isinstance(clock_domain, str) or not clock_domain):
             raise ValueError('CPU clock domain invalid')
+        clocks = ('CLOCK_MONOTONIC', 'CLOCK_MONOTONIC_RAW')
+        if (clock not in clocks or not isinstance(extra_clocks, (list, tuple)) or
+                len(extra_clocks) > 1 or any(c not in clocks or c == clock for c in extra_clocks)):
+            raise ValueError('CPU sample clock/extra clocks invalid')
+        self.sample_callback = sample_callback
+        self.clock, self.extra_clocks = clock, tuple(extra_clocks)
         self.clock_domain = clock_domain
         self._identity = None
         self.path = Path(path)
@@ -190,7 +197,11 @@ class CpuSampler:
             return
         try:
             identity = _os_identity()
-            before = time.monotonic_ns()
+            def now(clock):
+                return (time.monotonic_ns() if clock == 'CLOCK_MONOTONIC' else
+                        time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW))
+            extra_before = {clock: now(clock) for clock in self.extra_clocks}
+            before = now(self.clock)
             rows, retained = [], 0
             with Path('/proc/stat').open('r') as source:
                 while True:
@@ -204,7 +215,11 @@ class CpuSampler:
                         raise ValueError('CPU stat byte limit exceeded')
                     rows.append(line)
             text = ''.join(rows)
-            after = time.monotonic_ns()
+            after = now(self.clock)
+            brackets = {clock: dict(before_ns=extra_before[clock], after_ns=now(clock))
+                        for clock in self.extra_clocks}
+            if after < before or any(b['after_ns'] < b['before_ns'] for b in brackets.values()):
+                raise ValueError('CPU sample clock bracket regressed')
             cpus = parse_stat(text)
             if identity != _os_identity() or (self._identity is not None and identity != self._identity):
                 raise ValueError('CPU boot/online/possible identity changed')
@@ -212,13 +227,16 @@ class CpuSampler:
                 raise ValueError('CPU rows differ from online identity')
             self._identity = identity
             row = json.dumps(dict(before_ns=before, after_ns=after, stat=text,
-                                  **identity, clock='CLOCK_MONOTONIC', clock_domain=self.clock_domain),
+                                  **identity, clock=self.clock, clock_domain=self.clock_domain,
+                                  **({'clock_brackets': brackets} if brackets else {})),
                              sort_keys=True).encode() + b'\n'
             if self._bytes + len(row) > self.max_bytes:
                 raise ValueError('CPU sample byte limit exceeded')
             self._stream.write(row)
             self._stream.flush()
             self._bytes += len(row)
+            if self.sample_callback is not None:
+                self.sample_callback()
         except (OSError, ValueError) as error:
             self.error = str(error)
             self._stop.set()
@@ -298,6 +316,8 @@ def cpu_bounds(manifest, events, samples, tick_hz, cpu_set=None):
         if end <= start:
             raise ValueError('nonpositive CPU interval')
         spans.append((start, end))
+    if any(isinstance(row, dict) and 'clock' in row and row['clock'] != 'CLOCK_MONOTONIC' for row in samples):
+        raise ValueError('native CPU samples require CLOCK_MONOTONIC')
     result = interval_bounds(spans, samples, tick_hz, cpu_set)
     if cpu_set is not None:
         if any(row.get('clock') != manifest['clock'] or
@@ -306,7 +326,7 @@ def cpu_bounds(manifest, events, samples, tick_hz, cpu_set=None):
     return result
 
 
-def interval_bounds(spans, samples, tick_hz, cpu_set=None):
+def interval_bounds(spans, samples, tick_hz, cpu_set=None, *, interval_mode="envelope"):
     """Bound the existing measured envelope without interpolating counters."""
     if type(tick_hz) is not int or tick_hz <= 0:
         raise ValueError('CPU tick frequency invalid')
@@ -320,7 +340,16 @@ def interval_bounds(spans, samples, tick_hz, cpu_set=None):
         if type(cpu_set) is not tuple:
             raise ValueError('selected CPU set must be an explicit tuple')
         cpu_set = _cpu_ids(cpu_set)
+    if interval_mode not in ('envelope', 'union'):
+        raise ValueError('CPU interval mode invalid')
     t0, t1 = min(a for a, _ in spans), max(b for _, b in spans)
+    normalized = []
+    for a, b in sorted(spans):
+        if normalized and a <= normalized[-1][1]:
+            normalized[-1][1] = max(normalized[-1][1], b)
+        else:
+            normalized.append([a, b])
+    intervals = [[t0, t1]] if interval_mode == 'envelope' else normalized
     parsed, identity = [], None
     iowait_unreliable = False
     for row in samples:
@@ -339,21 +368,43 @@ def interval_bounds(spans, samples, tick_hz, cpu_set=None):
         if parsed:
             iowait_unreliable |= _validate_delta(parsed[-1][1], cpus)
         parsed.append((row, cpus))
-    before = [i for i, (r, _) in enumerate(parsed) if r['after_ns'] <= t0]
-    after = [i for i, (r, _) in enumerate(parsed) if r['before_ns'] >= t1]
-    if not before or not after:
-        raise ValueError('CPU samples do not cover measured interval')
-    outer = [before[-1], after[0]]
-    inside = [i for i, (r, _) in enumerate(parsed)
-              if r['before_ns'] >= t0 and r['after_ns'] <= t1]
-    inner = [inside[0], inside[-1]] if len(inside) >= 2 else None
+    outer_ranges, inner_ranges, slack = [], [], []
+    resolution_sufficient = True
+    for start, end in intervals:
+        before = [i for i, (r, _) in enumerate(parsed) if r['after_ns'] <= start]
+        after = [i for i, (r, _) in enumerate(parsed) if r['before_ns'] >= end]
+        if not before or not after:
+            raise ValueError('CPU samples do not cover measured interval')
+        outer = [before[-1], after[0]]
+        inside = [i for i, (r, _) in enumerate(parsed)
+                  if r['before_ns'] >= start and r['after_ns'] <= end]
+        outer_ranges.append(outer)
+        if len(inside) >= 2:
+            inner_ranges.append([inside[0], inside[-1]])
+        else:
+            resolution_sufficient = False
+        slack.append(dict(before=start - parsed[outer[0]][0]['after_ns'],
+                          after=parsed[outer[1]][0]['before_ns'] - end))
 
+    def coalesce(ranges):
+        merged = []
+        for a, b in sorted(ranges):
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        return merged
+
+    outer_ranges, inner_ranges = coalesce(outer_ranges), coalesce(inner_ranges)
+    outer = outer_ranges[0] if len(outer_ranges) == 1 else None
+    inner = inner_ranges[0] if len(inner_ranges) == 1 else None
     def ticks(pair):
         a, b = (parsed[i][1] for i in pair)
         if cpu_set is not None:
             return busy_ticks(a, b, cpu_set)
         return sum(b['cpu'][i] - a['cpu'][i] for i in BUSY_FIELDS)
-    lower_ticks, upper_ticks = ticks(inner) if inner else 0, ticks(outer)
+    lower_ticks = sum(ticks(pair) for pair in inner_ranges)
+    upper_ticks = sum(ticks(pair) for pair in outer_ranges)
     result = dict(lower=lower_ticks * 1_000_000_000 // tick_hz,
                   upper=(upper_ticks * 1_000_000_000 + tick_hz - 1) // tick_hz,
                   interval_ns=[t0, t1], outer_samples=outer, inner_samples=inner,
@@ -362,8 +413,11 @@ def interval_bounds(spans, samples, tick_hz, cpu_set=None):
                                      max=max(r['after_ns'] - r['before_ns'] for r, _ in parsed)),
                   max_between_reads_ns=max((b[0]['before_ns'] - a[0]['after_ns']
                                             for a, b in zip(parsed, parsed[1:])), default=0),
-                  endpoint_slack_ns=dict(before=t0 - parsed[outer[0]][0]['after_ns'],
-                                         after=parsed[outer[1]][0]['before_ns'] - t1))
+                  endpoint_slack_ns=dict(before=slack[0]['before'], after=slack[-1]['after']))
+    result.update(interval_mode=interval_mode, intervals_ns=intervals,
+                  measured_ns=sum(b - a for a, b in intervals),
+                  outer_sample_ranges=outer_ranges, inner_sample_ranges=inner_ranges,
+                  interval_slack_ns=slack, insufficient_resolution=not resolution_sufficient)
     if iowait_unreliable:
         result['iowait_unreliable'] = True
     if cpu_set is not None:

@@ -18,6 +18,20 @@ from analyze import import_collection
 HERE = Path(__file__).resolve().parent
 CHAINS = HERE.parent / 'chains' / 'run.py'
 COLLECTOR = HERE.parent / 'native_trace' / 'collector.py'
+_timer_spec = importlib.util.spec_from_file_location('native_views_timer_scope', COLLECTOR.with_name('timer_scope.py'))
+TIMER_SCOPE = importlib.util.module_from_spec(_timer_spec)
+_timer_spec.loader.exec_module(TIMER_SCOPE)
+
+
+def _measurement_scope(manifest, cpu_set=None):
+    if cpu_set is None and 'cpu_set' in manifest:
+        cpu_set = ','.join(map(str, manifest['cpu_set']))
+    scope = TIMER_SCOPE._scope(manifest['clock'], manifest['clock_domain'], cpu_set)
+    manifest.setdefault('cpu_scope', scope)
+    manifest.setdefault('cpu_set', scope['selected_cpus'])
+    manifest.setdefault('measurement_cpu_count', len(scope['selected_cpus']))
+    return scope
+
 
 
 def execute_command(argv, output_dir):
@@ -118,7 +132,7 @@ def _load_collector():
     return module
 
 
-def _execute(manifest, plan, output):
+def _execute(manifest, plan, output, cpu_output=None):
     # Caller assertions never bypass the existing chains hardware gate. This
     # preliminary gate only refuses known nonphysical inputs before a subprocess.
     errors = []
@@ -160,8 +174,10 @@ def _execute(manifest, plan, output):
             argv += ['--out-dir', str(directory / 'chains')]
             attempt = dict(manifest, arm=row['arm'], pair_id='%s-%03d' % (manifest['pair_id'], pair),
                            run_id='%s-%03d-%s' % (manifest['run_id'], pair, row['arm']))
+            _measurement_scope(attempt, ','.join(map(str, manifest['cpu_set'])) if 'cpu_set' in manifest else None)
             try:
-                receipt = collector.collect(attempt, argv, directory, correctness_only=False)
+                cpu_kwargs = {} if cpu_output is None else {'cpu_output': cpu_output / ('pair-%03d' % pair) / row['arm']}
+                receipt = collector.collect(attempt, argv, directory, correctness_only=False, **cpu_kwargs)
             except (OSError, ValueError, RuntimeError) as error:
                 receipt = dict(status='failed', reasons=['collector: ' + str(error)])
             receipt = dict(receipt, arm=row['arm'], pair_id=attempt['pair_id'],
@@ -172,6 +188,9 @@ def _execute(manifest, plan, output):
                 return dict(status='failed' if failed else 'unavailable', receipts=receipts,
                             reasons=receipt.get('reasons', []) + ['collector/workload did not complete successfully'],
                             trace_collection=receipt, performance_eligible=False), 1 if failed else 4
+            if receipt.get('cpu_owner_pending') is True:
+                receipt['evidence_import'] = dict(status='pending-owner-finalization', errors=[], performance_eligible=False)
+                continue
             evidence = import_collection(attempt, receipt)
             receipt['evidence_import'] = {key: evidence[key] for key in ('status', 'summary', 'errors', 'performance_eligible')}
             receipt['performance_eligible'] = evidence['performance_eligible']
@@ -197,6 +216,8 @@ def main(argv=None):
     mode.add_argument('--execute', action='store_true')
     mode.add_argument('--import-collection', type=Path, metavar='RECEIPT',
                       help='verify retained artifacts offline; starts no workload')
+    parser.add_argument('--cpu-set')
+    parser.add_argument('--cpu-output', type=Path)
     args = parser.parse_args(argv)
     try:
         manifest = json.loads(Path(args.manifest).read_text())
@@ -210,11 +231,16 @@ def main(argv=None):
             return 0 if evidence['performance_eligible'] else (1 if evidence['status'] == 'failed' else 4)
         plan = build_commands(manifest)
         if args.dry_run:
+            cpu = TIMER_SCOPE.TimerCpuRun(args.cpu_output or args.output / 'cpu-measurements' / 'planned',
+                                         cpu_set=args.cpu_set, clock_domain=manifest['clock_domain'],
+                                         extra_clocks=('CLOCK_MONOTONIC_RAW',))
+            plan['cpu_measurement_plan'] = cpu.plan()
             report, code = dict(status='dry-run', **plan, performance_eligible=False), 0
         elif args.validate_only:
             report, code = dict(status='validated', **plan, performance_eligible=False), 0
         else:
-            report, code = _execute(manifest, plan, args.output)
+            _measurement_scope(manifest, args.cpu_set)
+            report, code = _execute(manifest, plan, args.output, cpu_output=args.cpu_output)
             report['unavailable'] = plan['unavailable']
             report.setdefault('trace_collection', dict(status='unavailable',
                 reasons=['native_trace_probe_unavailable: capture not admitted'] + report.get('reasons', []),

@@ -31,6 +31,9 @@
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer;
+static void endpoint_timer_cleanup() { cpu_timer_destroy(&endpoint_timer); }
 #include <cuda_runtime_api.h>
 
 #include <cerrno>
@@ -323,6 +326,7 @@ int ingest(Run &r, uint64_t &io_ns)
         }
     }
     if (!t1 || t1 <= t0) return -EIO;
+    cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, t0, t1);
     io_ns = t1 - t0;
     return 0;
 }
@@ -387,6 +391,7 @@ int egress(Run &r, uint64_t &io_ns)
     }
     uint64_t t1 = now_ns();
     if (!t0 || t1 <= t0) return -EIO;
+    cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, t0, t1);
     io_ns = t1 - t0;
     return 0;
 }
@@ -498,6 +503,10 @@ int main(int argc, char **argv)
         usage(stderr);
         return ret;
     }
+    int cpu_error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", 1);
+    if (cpu_error)
+        std::fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", cpu_error);
+    atexit(endpoint_timer_cleanup);
     try {
         ret = execute(r);
     } catch (const std::bad_alloc &) {
@@ -505,5 +514,10 @@ int main(int argc, char **argv)
         ret = XG_EXIT_FAIL;
     }
     if (!r.close() && ret == XG_EXIT_PASS) ret = XG_EXIT_FAIL;
+    if (ret == XG_EXIT_PASS) {
+        cpu_error = cpu_timer_publish(&endpoint_timer);
+        if (cpu_error)
+            std::fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", cpu_error);
+    }
     return ret;
 }

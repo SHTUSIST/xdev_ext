@@ -24,6 +24,10 @@ _cpu_spec = importlib.util.spec_from_file_location('native_cpu_sampling', Path(_
 CPU_SAMPLING = importlib.util.module_from_spec(_cpu_spec)
 _cpu_spec.loader.exec_module(CPU_SAMPLING)
 
+_timer_spec = importlib.util.spec_from_file_location('native_timer_scope', Path(__file__).with_name('timer_scope.py'))
+TIMER_SCOPE = importlib.util.module_from_spec(_timer_spec)
+_timer_spec.loader.exec_module(TIMER_SCOPE)
+
 EVENT = 'xdev_ext:native_event'
 PHASES = {'record_admit', 'native_submit', 'native_complete', 'record_terminal'}
 OBSERVATIONS = {'class_validate', 'downstream_complete', 'frame_recycle',
@@ -586,7 +590,7 @@ def _journal_rows(manifest, metadata):
 
 
 def collect(manifest, command, output_dir, *, tracefs_root=Path('/sys/kernel/tracing'),
-            correctness_only=False):
+            correctness_only=False, cpu_output=None):
     """Capture a real command only after trace interfaces pass admission."""
     # The capture implementation follows below; admission has precedence over
     # touching output or starting a child.
@@ -605,7 +609,7 @@ def collect(manifest, command, output_dir, *, tracefs_root=Path('/sys/kernel/tra
     if reasons:
         return dict(status='unavailable', performance_eligible=False, reasons=reasons,
                     returncode=None, artifacts={})
-    return _capture(manifest, command, Path(output_dir), root, correctness_only)
+    return _capture(manifest, command, Path(output_dir), root, correctness_only, cpu_output=cpu_output)
 
 
 def artifact(path):
@@ -868,7 +872,7 @@ def _cpu_snapshot():
 
 
 
-def execute_command(command, stdout, stderr, environment, timeout):
+def execute_command(command, stdout, stderr, environment, timeout, cpu_owner=None):
     """Run one owned process group; a timeout cannot leave device workers alive."""
     if not isinstance(timeout, (int, float)) or not 0 < timeout <= 86400:
         raise ValueError('bounded command timeout must be 0..86400 seconds')
@@ -876,6 +880,8 @@ def execute_command(command, stdout, stderr, environment, timeout):
                              start_new_session=True)
     timed_out = False
     try:
+        if cpu_owner is not None:
+            cpu_owner.watch_child(child, command)
         child.wait(timeout=timeout)
     except subprocess.TimeoutExpired:
         timed_out = True
@@ -894,10 +900,10 @@ def execute_command(command, stdout, stderr, environment, timeout):
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
-    return dict(returncode=child.returncode, timed_out=timed_out)
+    return dict(returncode=child.returncode, timed_out=timed_out, pid=child.pid)
 
 
-def _capture(manifest, command, output, root, correctness_only):
+def _capture(manifest, command, output, root, correctness_only, cpu_output=None):
     artifacts, reasons = {}, []
     try:
         if correctness_only and '--correctness-only' not in command:
@@ -917,7 +923,7 @@ def _capture(manifest, command, output, root, correctness_only):
     journal_dir.mkdir(mode=0o700)
     metadata = {k: manifest.get(k) for k in ('run_id', 'exact_sha', 'arm', 'clock',
                 'clock_domain', 'endpoint', 'complete_boundary', 'submit_boundary',
-                'cpu_budget', 'numa', 'iommu', 'group_bytes', 'segments_per_group',
+                'cpu_budget', 'measurement_cpu_count', 'cpu_scope', 'numa', 'iommu', 'group_bytes', 'segments_per_group',
                 'inflight_bytes', 'native_batch', 'processing')}
     metadata.update(observed, schema_version=1, command=list(command),
                     cpu_interval_scope='native_interval_counter_bounds', cpu_tick_hz=os.sysconf('SC_CLK_TCK'),
@@ -926,6 +932,7 @@ def _capture(manifest, command, output, root, correctness_only):
                           for phase in ('native_submit', 'native_complete')}
     status, returncode = 'unavailable', None
     sampler = None
+    cpu_owner = None
     def save(kind, name, data):
         target = output / name
         target.write_text(data)
@@ -943,12 +950,35 @@ def _capture(manifest, command, output, root, correctness_only):
             save('system_cpu_before', 'system-cpu-before.stat', cpu_before)
             started_ns = time.monotonic_ns()
             environment = dict(os.environ, XDEV_EXT_NATIVE_JOURNAL_DIR=str(journal_dir.resolve()))
-            sampler = CPU_SAMPLING.CpuSampler(output / 'cpu-samples.jsonl')
-            with sampler:
+            inherited_cpu = bool(os.environ.get('XDEV_EXT_EVAL_CPU_OWNER'))
+            cpu_owner = TIMER_SCOPE.OptionalTimerCpuRun(cpu_output if inherited_cpu else (cpu_output or output / 'cpu-capture'), clock_domain=manifest['clock_domain'],
+                                               extra_clocks=('CLOCK_MONOTONIC_RAW',),
+                                               cpu_set=','.join(map(str, manifest['cpu_set'])) if not inherited_cpu and 'cpu_set' in manifest else None)
+            with cpu_owner:
+                sampler = cpu_owner.sampler
+                config = cpu_owner.config
+                if cpu_owner.error is not None:
+                    metadata['cpu_sampler_error'] = 'CPU measurement setup unavailable: ' + cpu_owner.error
+                else:
+                    if ('cpu_scope' in manifest and (manifest.get('cpu_scope') != config['cpu_scope'] or
+                            manifest.get('measurement_cpu_count') != config['measurement_cpu_count'])):
+                        reasons.append('CPU observed owner scope/count differs from manifest; primary CPU unavailable')
+                    metadata.update(cpu_scope=config['cpu_scope'], measurement_cpu_count=config['measurement_cpu_count'])
+                    if inherited_cpu:
+                        metadata['cpu_sampler_error'] = 'outer owner capture pending; native replay requires finalized owner artifacts'
+                        metadata['cpu_owner_artifacts'] = {k: config[k] for k in ('samples_path', 'journal_dir', 'receipts_dir')}
+                environment = cpu_owner.environment(environment)
                 with (output / 'workload.stdout').open('xb') as stdout, (output / 'workload.stderr').open('xb') as stderr:
                     child = execute_command(command, stdout, stderr, environment,
-                                            manifest['trace'].get('timeout_seconds', 3600))
+                                            manifest['trace'].get('timeout_seconds', 3600), cpu_owner=cpu_owner)
                     returncode = child['returncode']
+                    if cpu_owner is not None:
+                        try:
+                            stderr.flush()
+                            cpu_owner.capture_stderr(child['pid'], TIMER_SCOPE._regular_bytes(output / 'workload.stderr', 1024 * 1024))
+                        except (OSError, ValueError) as error:
+                            if cpu_owner.inner is not None:
+                                cpu_owner.inner._artifact_error(error)
                     if child['timed_out']:
                         reasons.append('actual workload timeout; owned process group terminated')
             metadata['command_begin_ns'] = started_ns
@@ -1014,6 +1044,9 @@ def _capture(manifest, command, output, root, correctness_only):
             artifacts['zero_copy'] = export_native_backing(manifest, raw, metadata, output)
         except (OSError, ValueError, KeyError, TypeError) as error:
             reasons.append('actual native backing proof unavailable: ' + str(error))
+        if cpu_owner is not None:
+            timer_measurement = cpu_owner.measurement([])
+            save('cpu_measurement', 'cpu-measurement.json', json.dumps(timer_measurement, indent=2, sort_keys=True) + '\n')
         status = 'ok'
     except (OSError, ValueError, KeyError, RuntimeError) as error:
         reasons.append(str(error))
@@ -1021,6 +1054,8 @@ def _capture(manifest, command, output, root, correctness_only):
     finally:
         if sampler is not None:
             metadata['cpu_sampler_error'] = sampler.error
+            if cpu_owner is not None:
+                metadata['cpu_owner_artifacts'] = {k: cpu_owner.config[k] for k in ('samples_path', 'journal_dir', 'receipts_dir')}
             metadata['cpu_sample_period_seconds'] = sampler.period_seconds
             if sampler.path.is_file():
                 artifacts['cpu_samples'] = artifact(sampler.path)
@@ -1028,5 +1063,9 @@ def _capture(manifest, command, output, root, correctness_only):
                 reasons.append('system_cpu: ' + sampler.error)
         metadata.update(returncode=returncode, capture_status=status, reasons=reasons)
         save('trace_metadata', 'trace-metadata.json', json.dumps(metadata, indent=2, sort_keys=True) + '\n')
-    return dict(status=status, returncode=returncode, reasons=reasons,
-                performance_eligible=False, artifacts=artifacts)
+    receipt = dict(status=status, returncode=returncode, reasons=reasons,
+                   performance_eligible=False, artifacts=artifacts)
+    if cpu_owner is not None and cpu_owner.error is None and cpu_owner.owner_mode == 'attach' and status == 'ok':
+        receipt['cpu_owner_pending'] = True
+        cpu_owner.defer_native(manifest, receipt, output)
+    return receipt

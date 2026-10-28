@@ -38,6 +38,12 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+_CPU_MODULES = HERE.parent / "native_trace"
+if not _CPU_MODULES.is_dir():
+    _CPU_MODULES = HERE.parents[1] / "support/evidence/native_trace"
+sys.path.insert(0, str(_CPU_MODULES))
+from timer_scope import TimerCpuRun, OptionalTimerCpuRun
+
 REPO = HERE.parents[2]
 KERNEL = REPO / "kernel"
 ARMS = ("session", "uring-cuda", "gds-batch", "gds-async", "gds-direct")
@@ -59,6 +65,18 @@ FIEMAP_FLAG_SYNC = 1
 FIEMAP_EXTENT_LAST, FIEMAP_EXTENT_UNKNOWN, FIEMAP_EXTENT_ENCODED = 0x1, 0x2, 0x8
 FIEMAP_EXTENT_UNWRITTEN, FIEMAP_EXTENT_NOT_ALIGNED = 0x800, 0x100
 FIEMAP_EXTENT_DATA_INLINE, FIEMAP_EXTENT_SHARED = 0x200, 0x2000
+
+
+def cpu_owner(args, clock="CLOCK_MONOTONIC", *, optional=False):
+    import uuid
+    output = args.cpu_output
+    if output is None and not os.environ.get("XDEV_EXT_EVAL_CPU_OWNER"):
+        parent = getattr(args, "build_dir", HERE / "build")
+        output = Path(parent) / "cpu-measurements" / str(uuid.uuid4())
+    elif output is not None:
+        output = Path(output) / str(uuid.uuid4())
+    capture = OptionalTimerCpuRun if optional else TimerCpuRun
+    return capture(output, cpu_set=args.cpu_set, clock=clock)
 
 
 def decimal(text):
@@ -106,6 +124,9 @@ def choice_list(allowed):
 def arguments(argv=None):
     parser = argparse.ArgumentParser(description=__doc__, allow_abbrev=False,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--cpu-set")
+    parser.add_argument("--cpu-output", type=Path)
+    parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--arms", type=choice_list(ARMS), required=True)
     parser.add_argument("--directions", type=choice_list(("load", "save")), default=["load", "save"])
     parser.add_argument("--sizes", type=size_list, required=True)
@@ -132,9 +153,9 @@ def arguments(argv=None):
         parser.error("--window-bytes is a positive multiple of 4 MiB up to 64 GiB")
     if args.window_bytes // max(args.sizes) < max(args.qd):
         parser.error("--window-bytes must hold max(qd) blocks of the largest size")
-    if not args.build_only and (args.directory is None or not args.directory.is_dir()):
+    if not args.build_only and not args.dry_run and (args.directory is None or not args.directory.is_dir()):
         parser.error("--directory must name an existing directory")
-    if "session" in args.arms and not args.build_only and not (args.ng and args.ce_dev):
+    if "session" in args.arms and not args.build_only and not args.dry_run and not (args.ng and args.ce_dev):
         parser.error("the session arm needs --ng and --ce-dev")
     return args
 
@@ -428,6 +449,10 @@ def cell_supported(arm, qd, pattern, destination):
 
 def main(argv=None):
     args = arguments(argv)
+    if args.dry_run:
+        print(json.dumps({"status": "planned", "arms": args.arms, "directions": args.directions,
+                          "cpu_measurement_plan": cpu_owner(args).plan()}, sort_keys=True))
+        return 0
     binaries, ran = {}, 0
     for arm in args.arms:
         try:
@@ -486,8 +511,9 @@ def main(argv=None):
                                     command = arm_command(arm, binaries[arm], args, direction,
                                                           size, qd, pattern, path,
                                                           args.window_bytes, lba)
-                                    result = subprocess.run(command, text=True, capture_output=True,
-                                                            timeout=args.timeout_ms / 1000 * (args.passes + 2) + 600)
+                                    with cpu_owner(args, optional=True) as cpu:
+                                        result = cpu.run(command, text=True, capture_output=True,
+                                                         timeout=args.timeout_ms / 1000 * (args.passes + 2) + 600)
                                     sys.stderr.write(result.stderr)
                                     if result.returncode == 4:
                                         skip("%s %s: capability refused" % (arm, direction))
@@ -502,6 +528,16 @@ def main(argv=None):
                                     validate(record, arm, direction, size, qd, pattern,
                                              args.window_bytes, args.passes, args.destination,
                                              args.completion_wait)
+                                    raw = record["delegate_record"] if arm == "gds-direct" else record
+                                    rows = args.passes if arm != "gds-direct" else args.passes * (
+                                        (args.window_bytes + size - 1) // size + (direction == "save"))
+                                    measurement = cpu.measurement([dict(arm=arm, identity={"pair": pair, "direction": direction},
+                                        metric="io_ns", keys=list(range(rows)), expected_duration_ns=raw["io_ns"],
+                                        endpoint_semantics=("settled-session" if arm == "session" else
+                                            "chunk-completion-and-checkpoint-fsync" if arm == "gds-direct" else "retired-pass"),
+                                        clock="CLOCK_MONOTONIC")])
+                                    if measurement is not None:
+                                        record["cpu_measurement"] = measurement
                                     record["pair"] = pair
                                     print(json.dumps(record, sort_keys=True))
                                     ran += 1

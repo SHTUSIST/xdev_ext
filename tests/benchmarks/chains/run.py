@@ -39,6 +39,12 @@ import time
 import zlib
 
 HERE = Path(__file__).resolve().parent
+_CPU_MODULES = HERE.parent / "native_trace"
+if not _CPU_MODULES.is_dir():
+    _CPU_MODULES = HERE.parents[1] / "support/evidence/native_trace"
+sys.path.insert(0, str(_CPU_MODULES))
+from timer_scope import TimerCpuRun, OptionalTimerCpuRun
+
 ROOT = HERE.parents[2]
 M64 = (1 << 64) - 1
 CHAINS = ('nvme-gpu-nic', 'nic-gpu-nvme', 'nvme-iaa-gpu', 'nic-iaa-gpu', 'nvme-crc-nic',
@@ -156,8 +162,22 @@ def sweep(text):
     return axes
 
 
+def cpu_owner(args, clock="CLOCK_MONOTONIC", *, optional=False):
+    import uuid
+    output = args.cpu_output
+    if output is None and not os.environ.get("XDEV_EXT_EVAL_CPU_OWNER"):
+        parent = Path(args.out_dir)
+        output = Path(parent) / "cpu-measurements" / str(uuid.uuid4())
+    elif output is not None:
+        output = Path(output) / str(uuid.uuid4())
+    capture = OptionalTimerCpuRun if optional else TimerCpuRun
+    return capture(output, cpu_set=args.cpu_set, clock=clock)
+
+
 def parse(argv):
     p = argparse.ArgumentParser(description=__doc__.split('\n')[0], allow_abbrev=False)
+    p.add_argument("--cpu-set")
+    p.add_argument("--cpu-output", type=Path)
     p.add_argument('--rig', required=True, help='host devices (see README.md)')
     p.add_argument('--chain', required=True)
     p.add_argument('--sizes', default='4096')
@@ -484,13 +504,18 @@ def write_reference(path, chain, shape, seed, total):
             f.write(group_bytes(seed, g, group, text=chain == 'nvme-iaa-gpu'))
 
 
-def start(argv, spec_path, netns=None):
+def start(argv, spec_path, netns=None, *, cpu=None, observations=None):
     prefix = ['ip', 'netns', 'exec', netns] if netns else []
-    return subprocess.Popen([*prefix, *argv, '--spec', str(spec_path)], stdout=subprocess.PIPE,
-                            stderr=subprocess.PIPE, text=True)
+    command = [*prefix, *argv, '--spec', str(spec_path)]
+    process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                               **({'env': cpu.environment(os.environ)} if cpu is not None else {}))
+    if cpu is not None:
+        receipt = cpu.watch_child(process, command)
+        observations.append((Path(spec_path).stem.replace('.spec', ''), receipt))
+    return process
 
 
-def wait_ready(proc, timeout):
+def wait_ready(proc, timeout, *, cpu=None):
     """Read the receiver's stderr until CHAIN_READY; the rest is kept."""
     deadline = time.monotonic() + timeout
     lines = []
@@ -499,18 +524,22 @@ def wait_ready(proc, timeout):
         if not line:
             break
         lines.append(line)
+        if cpu is not None and line.startswith('XDEV_EXT_CPU_TIMER_REFUSED '):
+            cpu.refuse_child(proc.pid, 'CPU timer child refused journaling')
         if line.startswith('CHAIN_READY'):
             return True, lines
     return False, lines
 
 
-def finish(proc, timeout):
+def finish(proc, timeout, *, cpu=None):
     try:
         out, err = proc.communicate(timeout=timeout)
     except subprocess.TimeoutExpired:
         proc.kill()
         out, err = proc.communicate()
         return dict(status='fail', failure='timed out'), err
+    if cpu is not None and any(line.startswith('XDEV_EXT_CPU_TIMER_REFUSED ') for line in err.splitlines()):
+        cpu.refuse_child(proc.pid, 'CPU timer child refused journaling')
     try:
         result = json.loads(out.strip().splitlines()[-1]) if out.strip() else {}
     except ValueError:
@@ -525,7 +554,7 @@ def binary(case, a):
     return [a.uo_bench] if case['arm'] == 'userspace-shared' else [a.chain_bench]
 
 
-def run_case(case, rig, a, out_dir, seed):
+def _run_case(case, rig, a, out_dir, seed, cpu=None, observations=None):
     chain, var = case['chain'], case['var']
     shape = record_shape(chain, case['size'], rig)
     total = (a.records + a.warmup_records) * shape[1]
@@ -545,7 +574,8 @@ def run_case(case, rig, a, out_dir, seed):
     for name, spec in specs.items():
         (out_dir / (name.replace('#', '-') + '.spec.json')).write_text(json.dumps(spec, indent=1))
     if a.dry_run:
-        return dict(status='planned', specs=sorted(specs))
+        return dict(status='planned', specs=sorted(specs),
+                    cpu_measurement_plan=cpu_owner(a, 'CLOCK_MONOTONIC_RAW').plan())
     if a.prepare_source:
         write_source(rig, chain, shape, seed, total, var['sessions'])
     for index in range(var['sessions'] if not peer_chain else 1):
@@ -554,35 +584,86 @@ def run_case(case, rig, a, out_dir, seed):
     if peer_chain and a.role != 'both':
         name = sender if a.role == 'sender' else receiver
         proc = start(binary(case, a), out_dir / (name + '.spec.json'),
-                     rig.get('rx_netns') if a.role == 'receiver' else None)
-        result, err = finish(proc, timeout)
+                     rig.get('rx_netns') if a.role == 'receiver' else None, cpu=cpu, observations=observations)
+        result, err = finish(proc, timeout, cpu=cpu)
         ok = result.get('status') == 'pass' and (a.role == 'sender' or
                                                   result.get('oracle', {}).get('verdict') == 'pass')
         return dict(measured=measured, status='pass' if ok else 'fail', role=a.role,
                     **{a.role: result}, stderr=err[-2000:])
     if peer_chain:
-        rx = start(binary(case, a), out_dir / (receiver + '.spec.json'), rig.get('rx_netns'))
-        ready, early = wait_ready(rx, 60)
+        rx = start(binary(case, a), out_dir / (receiver + '.spec.json'), rig.get('rx_netns'), cpu=cpu, observations=observations)
+        ready, early = wait_ready(rx, 60, cpu=cpu)
         if not ready:
             rx.kill()
-            result, err = finish(rx, 10)
+            result, err = finish(rx, 10, cpu=cpu)
             return dict(status='fail', failure='receiver not ready: ' + ''.join(early) + err)
-        tx = start(binary(case, a), out_dir / (sender + '.spec.json'))
-        tx_result, tx_err = finish(tx, timeout)
-        rx_result, rx_err = finish(rx, timeout)
+        tx = start(binary(case, a), out_dir / (sender + '.spec.json'), cpu=cpu, observations=observations)
+        tx_result, tx_err = finish(tx, timeout, cpu=cpu)
+        rx_result, rx_err = finish(rx, timeout, cpu=cpu)
         result = dict(measured=measured, sender=tx_result, receiver=rx_result,
                       stderr=dict(sender=tx_err[-2000:], receiver=(''.join(early) + rx_err)[-2000:]))
         ok = tx_result.get('status') == 'pass' and rx_result.get('status') == 'pass' and \
             rx_result.get('oracle', {}).get('verdict') == 'pass'
         result['status'] = 'pass' if ok else 'fail'
         return result
-    procs = [start(binary(case, a), out_dir / (name.replace('#', '-') + '.spec.json'))
+    procs = [start(binary(case, a), out_dir / (name.replace('#', '-') + '.spec.json'),
+                   cpu=cpu, observations=observations)
              for name in specs]
-    results = [finish(p, timeout) for p in procs]
+    results = [finish(p, timeout, cpu=cpu) for p in procs]
     ok = all(r.get('status') == 'pass' and r.get('oracle', {}).get('verdict') == 'pass'
              for r, _ in results)
     return dict(measured=measured, status='pass' if ok else 'fail',
                 sessions=[r for r, _ in results], stderr=[e[-2000:] for _, e in results])
+
+
+def run_case(case, rig, a, out_dir, seed):
+    if a.dry_run or a.correctness_only:
+        return _run_case(case, rig, a, out_dir, seed)
+    observations = []
+    with cpu_owner(a, "CLOCK_MONOTONIC_RAW", optional=True) as cpu:
+        result = _run_case(case, rig, a, out_dir, seed, cpu, observations)
+    views, actors = [], []
+    if result.get('status') == 'pass':
+        records = result.get('sessions')
+        if records is None:
+            records = [result[k] for k in ('sender', 'receiver') if k in result]
+        remaining = list(observations)
+        for index, record in enumerate(records):
+            matches = [(i, receipt) for i, (name, receipt) in enumerate(remaining)
+                       if name.startswith(record['chain'])]
+            if not matches or not isinstance(matches[0][1], dict):
+                views = []
+                break
+            found, receipt = matches[0]
+            remaining.pop(found)
+            timing = record.get('timing')
+            if not timing:
+                views = []
+                break
+            view = dict(arm=case['arm'], identity={"chain": record['chain'], "actor": index},
+                        metric='window_ns', endpoint_semantics='original-closed-window',
+                        clock='CLOCK_MONOTONIC_RAW', pid=receipt['pid'],
+                        process_start_ticks=receipt['process_start_ticks'])
+            if timing['load'] == 'sustained':
+                start = timing['t0_ns']
+                end = start + timing['completions'][-1]
+                view.update(metric='sustained_ns', spans=[[start, end]], expected_duration_ns=end-start,
+                            interval_mode='envelope', endpoint_semantics='post-warmup-last-completion')
+                actors.append((start, end, receipt))
+            else:
+                view.update(keys=list(range(len(timing['samples']))),
+                            expected_duration_ns=sum(timing['samples']), interval_mode='union')
+            views.append(view)
+        if len(actors) > 1 and 'sessions' in result:
+            start, end = min(x[0] for x in actors), max(x[1] for x in actors)
+            views.append(dict(arm="concurrent", identity={"actors": len(actors)}, metric='sustained_ns',
+                endpoint_semantics='concurrent-original-throughput-envelope', clock='CLOCK_MONOTONIC_RAW',
+                spans=[[start, end]], expected_duration_ns=end-start, interval_mode='envelope',
+                bindings=[{k: r[k] for k in ('pid', 'process_start_ticks')} for _, _, r in actors]))
+    measurement = cpu.measurement(views)
+    if measurement is not None:
+        result['cpu_measurement'] = measurement
+    return result
 
 
 # --- summary -------------------------------------------------------------------------
@@ -707,7 +788,9 @@ def main(argv):
         print(json.dumps(dict(index=i, chain=case['chain'], size=case['size'], arm=case['arm'],
                               load=case['load'], variant=case['var']['label'], wait=case['wait'],
                               status=row['result']['status'],
-                              failure=row['result'].get('failure', ''))), flush=True)
+                              failure=row['result'].get('failure', ''),
+                              **({'cpu_measurement_plan': row['result']['cpu_measurement_plan']}
+                                 if a.dry_run and 'cpu_measurement_plan' in row['result'] else {}))), flush=True)
     summary = dict(schema='xdev-chain-campaign-v1', correctness_only=a.correctness_only,
                    evidence=evidence, rows=rows,
                    summary=[] if a.correctness_only else summarize(rows))
