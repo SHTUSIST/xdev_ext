@@ -1,6 +1,6 @@
 # xdev_ext
 
-Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_POLICY.md).
+Performance comparisons follow the [evaluation policy](docs/reference/performance-policy.md).
 
 **Coordinate DMA devices over shared, pinned host pages with Linux kernel extensions, bounded eBPF programs, and device providers.**
 
@@ -8,7 +8,7 @@ Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_PO
 
 xdev_ext is a research system for coordinating storage, networking, and GPU DMA over the same shared, pinned host pages. Its common basis is registered host pages, native descriptors, DMA completion, and ownership handoff. NVMe, NIC, and GPU stages each use their own native descriptors to access these pages. The kernel manages the page pool, descriptor admission, generations, backpressure, and ownership; eBPF programs construct bounded transfer and protocol plans; device providers supply device-specific mappings, native submissions, synchronization, and completion callbacks.
 
-[Get started](docs/getting-started.md) · [Architecture](docs/architecture.md) · [Supported paths](docs/supported-paths.md) · [Documentation](docs/README.md)
+[Get started](docs/guides/getting-started.md) · [Architecture](docs/architecture/overview.md) · [Supported paths](docs/reference/supported-paths.md) · [Documentation](docs/README.md)
 
 ## Why xdev_ext?
 
@@ -32,7 +32,7 @@ On Linux, install Python 3 and a C compiler with C11, pthread, and UndefinedBeha
 ```bash
 git clone https://github.com/shtusist/xdev_ext.git
 cd xdev_ext
-python3 scripts/test_host.py
+python3 tools/ci/test_host.py
 ```
 
 These host checks use the project sources without preparing or booting a complete kernel. They exercise software behavior and do not establish physical DMA execution or hardware performance.
@@ -40,11 +40,11 @@ These host checks use the project sources without preparing or booting a complet
 To build the kernel or optional NVIDIA components, prepare their pinned public upstream sources:
 
 ```bash
-python3 scripts/prepare_sources.py --component linux
-python3 scripts/prepare_sources.py --component nvidia
+make prepare-linux
+make prepare-nvidia
 ```
 
-The preparation step fills missing upstream files in `kernel/` and `gpu/`, retaining the checked-in project changes. See the [build guide](docs/build.md) for dependencies, configuration, BTF, and build commands.
+The preparation step assembles the pinned upstream and canonical project sources into `build/assembled/linux` and `build/assembled/nvidia`. Edit the maintained sources under `src/`; assembled trees are generated build inputs. See the [build guide](docs/guides/build.md) for dependencies, configuration, BTF, and build commands.
 
 ## How it works
 
@@ -57,26 +57,36 @@ The preparation step fills missing upstream files in `kernel/` and `gpu/`, retai
 
 Across stages, DMA completion and ownership handoff govern when the next device may use the same host pages. GPU copy-engine transfers still move data between host memory and VRAM; avoiding CPU payload copies depends on the supported path. An ordinary socket sink performs native socket copying. Optional peer-memory paths use a separate device-memory allocation and mapping contract.
 
-The [architecture guide](docs/architecture.md) explains stage composition. [Supported paths](docs/supported-paths.md) describes memory routes, device prerequisites, and compatibility limits.
+The [architecture guide](docs/architecture/overview.md) explains stage composition. [Supported paths](docs/reference/supported-paths.md) describes memory routes, device prerequisites, and compatibility limits.
 
 ## Repository guide
 
-| Path | Contents |
-|---|---|
-| `kernel/` | Linux changes, UAPI, BPF programs, userspace tools, and selftests |
-| [`kernel/io_uring/iaa/`](kernel/io_uring/iaa/) | IAA io_uring operations, admission/lifetime core, and mechanism transform adapter |
-| [`tests/iaa/`](tests/iaa/) | IAA syscall contract gate and standalone host checks |
-| `gpu/` | NVIDIA open kernel module changes and host tests |
-| `scripts/` | Host-test and pinned-source preparation entry points |
-| `tests/eval/` | Reproducible comparison workloads and transparent frontend call-shape checks |
-| `docs/` | Build instructions, architecture, supported paths, testing, and API references |
-| `sources.lock.json` | Pinned public upstream sources used to assemble the complete trees |
+```text
+src/
+  core/                 shared kernel contracts and lifecycle
+  compute/              CPU, CE, IAA, CUDA and NVIDIA integration
+  storage/              NVMe and block integration
+  network/              NIC, socket, XDP and Thunderbolt/XDOMAIN
+  lib/ cli/ frontend/ bpf/
+examples/               runnable demonstrations
+tests/                 component, integration and benchmark tests
+docs/                  public guides, architecture and references
+tools/                 build, CI, packaging and analysis entrypoints
+third_party/           pinned dependencies and provenance
+build/                 generated source views and build outputs
+```
 
-The checked-in trees contain project source overlays. Source preparation supplies the unchanged upstream files needed for full builds.
+The [source layout and naming policy](docs/project-layout.md) defines permanent
+ownership and directory names. GPU integration lives under `src/compute/nvidia`;
+compute, storage and network remain sibling families. The canonical mapping is
+`source-layout.json`; dependency pins are in `third_party/sources.lock.json`.
+Linux/NVIDIA native paths are projected only into generated assembled trees or
+`build/source-view`. The source view is an isolated copy workspace, not a Git
+checkout; source provenance comes from the canonical repository and manifest.
 
 ## Documentation and contributing
 
-Start with the [documentation index](docs/README.md). The [testing guide](docs/testing.md) explains host, guest, and physical-device evidence. For configuration and runtime errors, see [troubleshooting](docs/troubleshooting.md).
+Start with the [documentation index](docs/README.md). The [testing guide](docs/guides/testing.md) explains host, guest, and physical-device evidence. For configuration and runtime errors, see [troubleshooting](docs/guides/troubleshooting.md).
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution and issue-report expectations.
 

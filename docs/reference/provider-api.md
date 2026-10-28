@@ -2,7 +2,7 @@
 
 A device provider connects an admitted resource and bounded plan to the real device. Its responsibilities include authority checks, DMA mapping and reachability, synchronization, native submission, completion and invalidation.
 
-See the [kernel mechanism interface](../../kernel/include/linux/xdev_ext_mech.h) and [peer-memory interface](../../kernel/include/linux/xdev_ext_peer.h) for exact declarations. Providers for different classes have distinct entry points; the registered DMA contract below illustrates the acceptance and lifetime rules.
+See the [kernel mechanism interface](../../src/core/include/linux/xdev_ext_mech.h) and [peer-memory interface](../../src/core/include/linux/xdev_ext_peer.h) for exact declarations. Providers for different classes have distinct entry points; the registered DMA contract below illustrates the acceptance and lifetime rules.
 
 ## Registered DMA providers
 

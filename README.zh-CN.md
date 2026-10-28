@@ -1,6 +1,6 @@
 # xdev_ext
 
-Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_POLICY.md).
+Performance comparisons follow the [evaluation policy](docs/reference/performance-policy.md).
 
 **通过 Linux 内核扩展、有界 eBPF 程序和设备 provider，协调多种 DMA 设备使用共享、钉住的主机页。**
 
@@ -8,7 +8,7 @@ Performance comparisons follow the [evaluation policy](tests/eval/PERFORMANCE_PO
 
 xdev_ext 是一个研究存储、网络与 GPU 如何在同一组共享、钉住的主机页上进行 DMA 协同的系统。它抓住几类设备的共同基础：注册主机页面、原生描述符、DMA 完成和所有权交接。NVMe、NIC、GPU 各自使用自身原生描述符访问这些页面。内核管理页池、描述符准入、generation、背压与所有权；eBPF 程序构造有界的传输与协议计划；设备 provider 提供各设备的映射、原生提交、同步和完成回调。
 
-[开始使用](docs/getting-started.md) · [系统架构](docs/architecture.md) · [支持路径](docs/supported-paths.md) · [文档索引](docs/README.md)
+[开始使用](docs/guides/getting-started.md) · [系统架构](docs/architecture/overview.md) · [支持路径](docs/reference/supported-paths.md) · [文档索引](docs/README.md)
 
 ## 为什么需要 xdev_ext？
 
@@ -32,7 +32,7 @@ xdev_ext 是一个研究存储、网络与 GPU 如何在同一组共享、钉住
 ```bash
 git clone https://github.com/shtusist/xdev_ext.git
 cd xdev_ext
-python3 scripts/test_host.py
+python3 tools/ci/test_host.py
 ```
 
 主机检查直接使用项目源码，无需准备或启动完整内核。它们验证软件行为，不能证明物理 DMA 执行或硬件性能。
@@ -40,11 +40,11 @@ python3 scripts/test_host.py
 构建内核或可选 NVIDIA 组件前，准备固定版本的公共上游源码：
 
 ```bash
-python3 scripts/prepare_sources.py --component linux
-python3 scripts/prepare_sources.py --component nvidia
+make prepare-linux
+make prepare-nvidia
 ```
 
-该步骤向 `kernel/` 和 `gpu/` 补齐缺失的上游文件，保留仓库中的项目改动。依赖、配置、BTF 与构建命令见[构建指南](docs/build.md)。
+源码准备步骤将固定上游版本与 canonical 项目源码装配到 `build/assembled/linux` 和 `build/assembled/nvidia`。维护源码位于 `src/`；装配目录仅用于构建。依赖、配置、BTF 与构建命令见[构建指南](docs/guides/build.md)。
 
 ## 工作方式
 
@@ -57,26 +57,30 @@ python3 scripts/prepare_sources.py --component nvidia
 
 各 stage 通过 DMA 完成与所有权交接决定下一设备何时可使用同一组主机页。GPU copy engine 仍在主机内存与 VRAM 之间传输数据；能否避免 CPU payload 复制取决于受支持的路径。普通 socket sink 会执行原生 socket 复制。可选 peer-memory 路径采用独立的设备内存分配与映射契约。
 
-[系统架构](docs/architecture.md)说明 stage 组合方式；[支持路径](docs/supported-paths.md)列出内存路线、设备条件与兼容范围。
+[系统架构](docs/architecture/overview.md)说明 stage 组合方式；[支持路径](docs/reference/supported-paths.md)列出内存路线、设备条件与兼容范围。
 
 ## 目录导航
 
-| 路径 | 内容 |
-|---|---|
-| `kernel/` | Linux 改动、UAPI、BPF 程序、用户态工具与 selftests |
-| [`kernel/io_uring/iaa/`](kernel/io_uring/iaa/) | IAA io_uring 操作、准入与生命周期核心、机制变换适配器 |
-| [`tests/iaa/`](tests/iaa/) | IAA 系统调用合同门禁与独立主机检查 |
-| `gpu/` | NVIDIA 开放内核模块改动与主机测试 |
-| `scripts/` | 主机测试与固定上游源码准备入口 |
-| `tests/eval/` | 可复现对照负载与透明前端调用形状核对 |
-| `docs/` | 构建、架构、支持路径、测试及接口参考 |
-| `sources.lock.json` | 完整源码树所需的公共上游版本 |
+```text
+src/
+  core/                 公共内核契约与生命周期
+  compute/              CPU、CE、IAA、CUDA 与 NVIDIA 实现
+  storage/              NVMe 与 block 集成
+  network/              NIC、socket、XDP 与 Thunderbolt/XDOMAIN
+  lib/ cli/ frontend/ bpf/
+examples/               可运行示例
+tests/                  组件、集成与 benchmark 测试
+docs/                   公开指南、架构与接口参考
+tools/                  构建、CI、打包与分析入口
+third_party/            固定依赖与来源信息
+build/                  生成的源码视图与构建输出
+```
 
-仓库跟踪项目源码覆盖层；源码准备步骤提供完整构建需要的未修改上游文件。每条路径的内存路线与设备条件见[支持路径](docs/supported-paths.md)。
+[源码布局与命名规范](docs/project-layout.md)规定长期使用的目录归属与命名。GPU 实现位于 `src/compute/nvidia`；compute、storage 与 network 同级。`source-layout.json` 记录 canonical 源码映射；`third_party/sources.lock.json` 固定依赖版本。Linux/NVIDIA 原生路径只在生成的装配目录或 `build/source-view` 中投影。source view 使用独立副本，不是 Git checkout；源码来源以 canonical 仓库与 manifest 为准。
 
 ## 文档与参与
 
-[文档索引](docs/README.md)提供使用任务导航。[测试指南](docs/testing.md)区分主机、虚拟机软件设备和物理设备的证据范围；[故障排查](docs/troubleshooting.md)说明配置与运行问题；[贡献指南](CONTRIBUTING.md)列出提交与问题报告要求。
+[文档索引](docs/README.md)提供使用任务导航。[测试指南](docs/guides/testing.md)区分主机、虚拟机软件设备和物理设备的证据范围；[故障排查](docs/guides/troubleshooting.md)说明配置与运行问题；[贡献指南](CONTRIBUTING.md)列出提交与问题报告要求。
 
 ## 许可与来源
 

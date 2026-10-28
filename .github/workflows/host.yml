@@ -17,14 +17,23 @@ jobs:
         cc: [gcc]
     env:
       CC: ${{ matrix.cc }}
+    defaults:
+      run:
+        working-directory: build/source-view
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install host test dependencies
         run: sudo apt-get update && sudo apt-get install -y libbpf-dev libelf-dev zlib1g-dev pkg-config clang llvm redis-server
+      - name: Materialize isolated logical source inputs
+        working-directory: .
+        run: |
+          python3 tools/layout.py view
+          echo "XDEV_EXT_CANONICAL_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+          echo "XDEV_EXT_SOURCE_VIEW=$GITHUB_WORKSPACE/build/source-view" >> "$GITHUB_ENV"
       - name: Standalone production-rule checks
-        run: python3 scripts/test_host.py
+        run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
       - name: CPU mechanism BPF target and scratch ABI contracts
         run: make -C kernel/tools/xdev_ext_mech check-cpu-bpf
       - name: Tool accounting, buffer bounds and SGL profile contracts
@@ -153,7 +162,8 @@ jobs:
         run: make -C gpu/tests run-host-bookkeeping
       - name: GPU callback, DMA mapping and frame ownership contracts
         run: |
-          python3 scripts/prepare_sources.py --component nvidia
+          python3 "$GITHUB_WORKSPACE/tools/build/prepare_sources.py" --component nvidia
+          python3 "$GITHUB_WORKSPACE/tools/build/prepare_host_component.py" --component nvidia
           make -C gpu/tests run-lifecycle-contract
       - name: Reliable control admission and map teardown regressions
         shell: bash
@@ -184,7 +194,11 @@ jobs:
           fi
       - name: Source layout and preparation regressions
         if: matrix.cc == 'gcc'
-        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+        working-directory: .
+        run: |
+          python3 tests/support/layout/test_adapter.py
+          python3 tests/support/layout/test_review_regressions.py
+          python3 tools/run.py python3 -m unittest discover -s tests -p 'test_*.py' -v
       - name: Mechanism source contracts
         if: matrix.cc == 'gcc'
         shell: bash
@@ -209,7 +223,7 @@ jobs:
       - name: Prepare pinned NHI register header for host contracts
         if: matrix.cc == 'gcc'
         timeout-minutes: 2
-        run: python3 scripts/prepare_xdomain_host_inputs.py
+        run: python3 "$GITHUB_WORKSPACE/tools/build/prepare_xdomain_host_inputs.py"
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: |
@@ -280,7 +294,7 @@ jobs:
           set -euo pipefail
           export CC=gcc CXX=g++
           log="$RUNNER_TEMP/xdev-ext-xdomain-closure.log"
-          python3 scripts/check_xdomain_host.py \
+          python3 "$GITHUB_WORKSPACE/tools/ci/check_xdomain_host.py" \
             --log-dir "$RUNNER_TEMP/xdev-ext-xdomain-closure" 2>&1 | tee "$log"
           if grep -Eiq '(^not ok([[:space:]]|$)|^[[:space:]]*SKIP([:[:space:]]|$)|#[[:space:]]*SKIP([[:space:]]|$)|OK[[:space:]]+\(skipped=|\.\.\. skipped)' "$log"; then
             echo "XDOMAIN closure checks reported failed or skipped cases"

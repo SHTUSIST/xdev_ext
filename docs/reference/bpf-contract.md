@@ -2,7 +2,7 @@
 
 xdev_ext separates programmable plans from resource admission and native device ownership. Programs operate on the bounded information supplied at a defined callback phase. The kernel validates their output before using it.
 
-The principal declarations are the [mechanism kernel interface](../../kernel/include/linux/xdev_ext_mech.h), [mechanism UAPI](../../kernel/include/uapi/linux/xdev_ext_mech.h), and [policy interface](../../kernel/include/linux/xdev_ext_binding.h). Example class programs live in [tools/xdev_ext_mech](../../kernel/tools/xdev_ext_mech).
+The principal declarations are the [mechanism kernel interface](../../src/core/include/linux/xdev_ext_mech.h), [mechanism UAPI](../../src/core/include/uapi/linux/xdev_ext_mech.h), and [policy interface](../../src/core/include/linux/xdev_ext_binding.h). Example class programs live under [examples](../../examples/); shared BPF glue lives in [src/bpf](../../src/bpf/).
 
 ## Policy and mechanism callbacks
 
@@ -20,6 +20,6 @@ A refusal before native acceptance may permit bounded retry or backpressure. Onc
 
 ## Build against the target
 
-Build programs using the BTF of the intended configured kernel, as shown in the [build guide](../build.md). The verifier must accept the exact loaded object against that kernel. Host fixtures that compile program logic do not substitute for kernel verifier acceptance or execution.
+Build programs using the BTF of the intended configured kernel, as shown in the [build guide](../guides/build.md). The verifier must accept the exact loaded object against that kernel. Host fixtures that compile program logic do not substitute for kernel verifier acceptance or execution.
 
 When adding a program, test legal plans, boundary values, rejected descriptors and the corresponding completion actions. Include stale/duplicate results and uncertain accepted completion where applicable.
