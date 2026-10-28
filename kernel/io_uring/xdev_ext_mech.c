@@ -10,6 +10,7 @@
 
 #include <linux/align.h>
 #include <linux/bitops.h>
+#include <linux/bitmap.h>
 #include <linux/cred.h>
 #include <linux/crc32.h>
 #include <linux/err.h>
@@ -53,6 +54,7 @@ EXPORT_TRACEPOINT_SYMBOL_GPL(native_event);
 #include "xdev_ext_mech_notify.h"
 #include "xdev_ext_mech_poll.h"
 #include "xdev_ext_mech_step.h"
+#include "xdev_ext_mech_start_queue.h"
 #include "xdev_ext_mech_produced.h"
 
 /* What the contract headers mirror from kernel definitions. */
@@ -105,6 +107,9 @@ struct xdev_ext_mech_batch {
 	bool sequester;			/* the completion was a sequester */
 	bool locally_cancelled;		/* explicit non-native cancellation origin */
 	bool to_user;			/* frames go back to user space at the end */
+	bool ordered_loan;
+	u32 start_template;
+	u64 start_ordinal;
 	void *priv;			/* class area of s->priv_size bytes */
 	void *cookie;			/* stable native callback identity */
  struct {
@@ -133,9 +138,11 @@ struct xdev_ext_mech_session {
 	struct list_head ordered;	/* READY, waiting for their turn; worker */
 	struct list_head retry;		/* preaccept backpressure; worker */
 	u64 next_batch_id;
+	struct xdev_ext_mech_start_queue *start_queue;
 	u64 start_left;			/* START batches not yet taken */
 	u64 start_seq;
 	bool start_to_user;
+	bool start_ordered;		/* last committed START owns only its loan set */
 	bool start_recycle;		/* explicit bounded USER_FRAMES START */
 	u32 start_user_len;		/* USER_SPANS actual bytes; zero: legacy capacity */
 	bool start_preparing;		/* CPU START copy/custody handoff in progress */
@@ -435,6 +442,44 @@ static int xdev_ext_mech_frames_move(struct xdev_ext_mech_session *s,
 	return ret;
 }
 
+/* Worker only: a template is reusable only after the entire batch ends. */
+static int xdev_ext_mech_start_queue_release(struct xdev_ext_mech_session *s,
+ struct xdev_ext_mech_batch *b, bool reusable)
+{
+ struct xdev_ext_mech_start_queue *q = s->start_queue;
+ struct xdev_ext_mech_start_template *t;
+ u32 i;
+
+ if (!q || b->start_template >= q->nr_templates)
+  return -EIO;
+ t = &q->templates[b->start_template];
+ if (!t->active || t->returned || t->sequestered ||
+     b->nr_frames != q->frames || b->start_ordinal >= q->total ||
+     b->start_template != b->start_ordinal % q->nr_templates)
+  return -EIO;
+ if (b->bs.state == XDEV_EXT_MECH_B_SEQUESTERED || b->sequester) {
+  t->sequestered = true;
+  t->active = false;
+  return 0;
+ }
+ for (i = 0; i < q->frames; i++)
+  if (b->f[i].index != q->loans[t->first + i].index)
+   return -EIO;
+ if (reusable && xdev_ext_mech_session_admits(s) &&
+     xdev_ext_mech_start_template_again(q, b->start_ordinal)) {
+  t->active = false;
+  xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_RECYCLED, q->frames);
+  return 0;
+ }
+ if (xdev_ext_mech_frames_move(s, b, XDEV_EXT_MECH_F_HELD,
+                             XDEV_EXT_MECH_F_USER))
+  return -EIO;
+ t->active = false;
+ t->returned = true;
+ xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PUBLISHED, q->frames);
+ return 0;
+}
+
 /* A finished batch's HELD frames go back to user space or to the pool. */
 static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 				    struct xdev_ext_mech_batch *b)
@@ -477,6 +522,8 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 		    WARN_ON_ONCE(xdev_ext_mech_life_release(&s->life[f->index],
 				xdev_ext_mech_life_gen(&s->life[f->index]))))
 			goto quarantine;
+		if (b->ordered_loan)
+			continue; /* the queue returns or retains the whole template */
 		if (WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, f->index,
 							  XDEV_EXT_MECH_F_HELD, to)))
 			goto quarantine;
@@ -490,6 +537,9 @@ static int xdev_ext_mech_frames_release(struct xdev_ext_mech_session *s,
 			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_RECYCLED, 1);
 		}
 	}
+	if (b->ordered_loan && xdev_ext_mech_start_queue_release(s, b,
+					b->bs.state == XDEV_EXT_MECH_B_DONE && !b->status))
+		goto quarantine;
 	return 0;
 quarantine:
 	/* Never return an active/unknown lifecycle to the allocator.  Frames
@@ -915,7 +965,7 @@ static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s, int err)
 		WRITE_ONCE(s->stop_err, err);
 	}
 	s->start_left = 0;
-	if (s->start_recycle)
+	if (s->start_queue || (!s->start_ordered && s->start_recycle))
 		s->start_return_pending = true;
 	xdev_ext_mech_settle_locked(s);
 	xdev_ext_mech_notify_locked(s, false);
@@ -1018,6 +1068,18 @@ void xdev_ext_mech_stage_put(struct xdev_ext_mech_stage *st)
 		queue_work(system_unbound_wq, &s->reap_work);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_put);
+
+void xdev_ext_mech_stage_stop(struct xdev_ext_mech_stage *st, int err)
+{
+ xdev_ext_mech_session_stop(st->s, err);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_stop);
+
+int xdev_ext_mech_stage_stop_error(struct xdev_ext_mech_stage *st)
+{
+ return xdev_ext_mech_stop_reason(st->s);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_stop_error);
 
 void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st, int err)
 {
@@ -1226,6 +1288,8 @@ static int xdev_ext_mech_trim_produced(struct xdev_ext_mech_session *s,
 
  if (!b->producing)
   return -EINVAL;
+ if (b->ordered_loan && b->produced != b->bytes)
+  return -EPROTO;
  for (i = 0; i < b->nr_frames; i++)
   len[i] = b->f[i].data_len;
  used = xdev_ext_mech_produced_trim(len, b->nr_frames, b->produced);
@@ -1425,6 +1489,41 @@ void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_complete);
 
+int xdev_ext_mech_batch_external_complete(struct xdev_ext_mech_batch *b,
+ u64 ticket, int err, enum xdev_ext_mech_external_outcome outcome)
+{
+ struct xdev_ext_mech_session *s = b->s;
+ struct xdev_ext_mech_stage *st;
+ bool unknown;
+
+ if (ticket != READ_ONCE(b->ticket))
+  return -ESTALE;
+ st = &s->st[b->bs.stage];
+ if (st->class_id != XDEV_EXT_MECH_CLASS_USER ||
+     !(st->flags & XDEV_EXT_USER_F_STRICT_ASYNC)) {
+  xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+  return -EINVAL;
+ }
+ /* No batch metadata may change before this unique ticket claim. */
+ if (xdev_ext_mech_batch_completion_claim(b, ticket))
+  return -ESTALE;
+ if (outcome != XDEV_EXT_MECH_EXTERNAL_QUIESCED &&
+     outcome != XDEV_EXT_MECH_EXTERNAL_UNKNOWN) {
+  outcome = XDEV_EXT_MECH_EXTERNAL_UNKNOWN;
+  err = -EPROTO;
+ }
+ unknown = outcome == XDEV_EXT_MECH_EXTERNAL_UNKNOWN;
+ if (unknown) {
+  err = err ?: -EIO;
+  xdev_ext_mech_session_stop(s, err);
+ } else if (!xdev_ext_mech_session_admits(s)) {
+  err = xdev_ext_mech_stop_reason(s);
+ }
+ xdev_ext_mech_batch_completion_publish(b, ticket, err, unknown);
+ return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_external_complete);
+
 void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
                                          u64 ticket, int err, u32 produced)
 {
@@ -1487,6 +1586,7 @@ xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *s)
 	b->bytes = 0;
 	b->sequester = false;
 	b->to_user = false;
+	b->ordered_loan = false;
 	b->fifo_accepted = false;
 	b->life_active = 0;
 	return b;
@@ -1508,6 +1608,89 @@ static bool xdev_ext_mech_batch_put_locked(struct xdev_ext_mech_session *s,
 
 static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session *s);
 static void xdev_ext_mech_retry_kick(struct xdev_ext_mech_session *s);
+
+static void xdev_ext_mech_start_queue_free(struct xdev_ext_mech_start_queue *q)
+{
+ if (!q)
+  return;
+ kvfree(q->templates);
+ kvfree(q->loans);
+ kfree(q);
+}
+
+/* Worker only; never inspect or allocate a frame outside this loan set. */
+static int xdev_ext_mech_start_queue_drain(struct xdev_ext_mech_session *s)
+{
+ struct xdev_ext_mech_start_queue *q = s->start_queue;
+ unsigned long flags;
+ bool active = false, sequestered = false;
+ u32 i, j;
+ int err = 0;
+
+ if (!q)
+  return 0;
+ for (i = 0; i < q->nr_templates; i++) {
+  struct xdev_ext_mech_start_template *t = &q->templates[i];
+
+  if (t->sequestered) {
+   sequestered = true;
+   continue;
+  }
+  if (t->returned)
+   continue;
+  if (t->active) {
+   active = true;
+   continue;
+  }
+  /* Validate the entire template before returning its first frame. */
+  for (j = 0; j < q->frames; j++) {
+   u32 index = q->loans[t->first + j].index;
+
+   if (xdev_ext_mech_life_phase(&s->life[index]) != XDEV_EXT_MECH_L_FREE ||
+       xdev_ext_mech_pool_frame_state(&s->pool, index) != XDEV_EXT_MECH_F_HELD)
+    break;
+  }
+  if (j == q->frames) {
+   for (j = 0; j < q->frames; j++) {
+    u32 index = q->loans[t->first + j].index;
+
+    if (xdev_ext_mech_pool_frame_move(&s->pool, index,
+                         XDEV_EXT_MECH_F_HELD, XDEV_EXT_MECH_F_USER))
+     break;
+    xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PUBLISHED, 1);
+   }
+   if (j == q->frames) {
+    t->returned = true;
+    continue;
+   }
+  }
+  /* A custody invariant failure cannot authorize allocator fallback. */
+  for (j = 0; j < q->frames; j++)
+   if (!xdev_ext_mech_pool_frame_move(&s->pool,
+       q->loans[t->first + j].index, XDEV_EXT_MECH_F_HELD,
+       XDEV_EXT_MECH_F_SEQUESTERED))
+    xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, 1);
+  t->sequestered = true;
+  sequestered = true;
+  err = -EIO;
+  spin_lock_irqsave(&s->lock, flags);
+  s->ss.sequestered++;
+  spin_unlock_irqrestore(&s->lock, flags);
+ }
+ if (err)
+  xdev_ext_mech_session_stop(s, err);
+ spin_lock_irqsave(&s->lock, flags);
+ s->start_return_pending = active;
+ if (!active && !sequestered && !s->start_left)
+  s->start_queue = NULL;
+ else
+  q = NULL;
+ xdev_ext_mech_settle_locked(s);
+ xdev_ext_mech_notify_locked(s, false);
+ spin_unlock_irqrestore(&s->lock, flags);
+ xdev_ext_mech_start_queue_free(q);
+ return err;
+}
 
 /*
  * Worker only: give back queued RECYCLE loans as soon as no future batch can
@@ -1534,6 +1717,10 @@ static void xdev_ext_mech_return_idle(struct xdev_ext_mech_session *s, bool stop
 		return;
 	}
 	spin_unlock_irqrestore(&s->lock, flags);
+	if (s->start_queue) {
+		xdev_ext_mech_start_queue_drain(s);
+		return;
+	}
 	while (!(err = s->pool.ops->alloc(&s->pool, &f, 1))) {
 		phase = xdev_ext_mech_life_phase(&s->life[f.index]);
 		if ((phase != XDEV_EXT_MECH_L_FREE && phase != XDEV_EXT_MECH_L_READY) ||
@@ -1577,6 +1764,8 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
  if (s->st[0].cls->batch_end)
   s->st[0].cls->batch_end(&s->st[0], b,
                         how == XDEV_EXT_MECH_END_DONE ? 0 : (err ?: -EIO));
+	if (b->ordered_loan && how != XDEV_EXT_MECH_END_DONE)
+		xdev_ext_mech_session_stop(s, err ?: -EIO);
 	xdev_ext_mech_retry_kick(s);
 	/* @b no longer holds back a later key at an ordered stage. */
 	xdev_ext_mech_order_kick(s);
@@ -1586,6 +1775,8 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
 		b->bs.state = XDEV_EXT_MECH_B_SEQUESTERED;
 		xdev_ext_mech_session_stop(s, err);
 	}
+	if (how == XDEV_EXT_MECH_END_SEQUESTER && b->ordered_loan)
+		xdev_ext_mech_start_queue_release(s, b, false);
 	xdev_ext_mech_trace_batch(b, "record_terminal", b->ticket,
 		how == XDEV_EXT_MECH_END_DONE ? 0 : (err ?: -EIO));
 	/* Frame release can itself discover uncertainty. Resource leases may
@@ -2168,6 +2359,8 @@ static int xdev_ext_mech_recycle_produced_tail(struct xdev_ext_mech_session *s,
 
  if (!b->produced_set || b->status || !b->produced_used)
   return 0;
+ if (b->ordered_loan)
+  return b->produced_used == b->nr_frames ? 0 : -EPROTO;
  for (i = b->produced_used; i < b->nr_frames; i++) {
   struct xdev_ext_mech_frame *f = &b->f[i];
   u32 to = b->to_user && !s->start_recycle ? XDEV_EXT_MECH_F_USER : XDEV_EXT_MECH_F_K_FREE;
@@ -2334,6 +2527,37 @@ static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
 {
  u32 i, refs, bytes = 0;
 
+ if (b->ordered_loan) {
+  u64 claims[XDEV_EXT_MECH_MAX_FRAMES];
+  u32 claimed = 0, published = 0;
+  int err;
+
+  if (xdev_ext_mech_stage_role(&s->plan[0]) == XDEV_EXT_MECH_ROLE_PRODUCER)
+   return 0;
+  refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0);
+  for (i = 0; i < b->nr_frames; i++) {
+   err = xdev_ext_mech_life_claim(&s->life[b->f[i].index],
+                         XDEV_EXT_MECH_L_OWNER_START, &claims[i]);
+   if (err)
+    goto ordered_undo;
+   claimed++;
+  }
+  for (i = 0; i < b->nr_frames; i++) {
+   err = xdev_ext_mech_life_publish(&s->life[b->f[i].index], claims[i],
+                                  refs, b->f[i].data_len);
+   if (err)
+    goto ordered_undo;
+   published++;
+  }
+  return 0;
+ordered_undo:
+  for (i = 0; i < published; i++)
+   WARN_ON_ONCE(xdev_ext_mech_life_release(&s->life[b->f[i].index],
+                    xdev_ext_mech_life_gen(&s->life[b->f[i].index])));
+  for (; i < claimed; i++)
+   WARN_ON_ONCE(xdev_ext_mech_life_rollback(&s->life[b->f[i].index], claims[i]));
+  return err;
+ }
  if (!s->start_recycle || xdev_ext_mech_stage_role(&s->plan[0]) == XDEV_EXT_MECH_ROLE_PRODUCER)
   return 0;
  refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0);
@@ -2366,6 +2590,68 @@ static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
  return 0;
 }
 
+static int xdev_ext_mech_start_queue_bind(struct xdev_ext_mech_session *s,
+ struct xdev_ext_mech_batch *b)
+{
+ struct xdev_ext_mech_start_queue *q = s->start_queue;
+ struct xdev_ext_mech_start_template *t;
+ unsigned long flags;
+ u32 i, template;
+ int err = -EIO;
+
+ if (!q || q->next_ordinal >= q->total)
+  return -EIO;
+ template = q->next_ordinal % q->nr_templates;
+ t = &q->templates[template];
+ if (t->active || t->returned || t->sequestered)
+  return -EBUSY;
+ b->nr_frames = q->frames;
+ b->present = (u32)GENMASK_ULL(q->frames - 1, 0);
+ b->bytes = s->layout.group_bytes;
+ b->ordered_loan = true;
+ b->to_user = true;
+ b->start_template = template;
+ b->start_ordinal = q->next_ordinal;
+ for (i = 0; i < q->frames; i++) {
+  b->f[i] = (struct xdev_ext_mech_frame) {
+   .index = q->loans[t->first + i].index,
+  };
+  if (xdev_ext_mech_pool_frame_state(&s->pool, b->f[i].index) != XDEV_EXT_MECH_F_HELD ||
+      xdev_ext_mech_life_phase(&s->life[b->f[i].index]) != XDEV_EXT_MECH_L_FREE)
+   goto fail;
+  err = s->pool.ops->resolve(&s->pool, &b->f[i]);
+  if (!err)
+   err = xdev_ext_mech_layout_span(&s->layout, i,
+                                  &b->f[i].data_off, &b->f[i].data_len);
+  if (err)
+   goto fail;
+ }
+ err = xdev_ext_mech_start_publication(s, b);
+ if (err)
+  goto fail;
+ /* STOP may close admission while resolve/publication run without s->lock. */
+ spin_lock_irqsave(&s->lock, flags);
+ if (xdev_ext_mech_session_admits(s)) {
+  t->active = true;
+  q->next_ordinal++;
+  b->key = s->start_seq++;
+  s->start_left--;
+  spin_unlock_irqrestore(&s->lock, flags);
+  return 0;
+ }
+ spin_unlock_irqrestore(&s->lock, flags);
+ for (i = 0; i < q->frames; i++)
+  if (xdev_ext_mech_life_phase(&s->life[b->f[i].index]) == XDEV_EXT_MECH_L_READY)
+   WARN_ON_ONCE(xdev_ext_mech_life_release(&s->life[b->f[i].index],
+                    xdev_ext_mech_life_gen(&s->life[b->f[i].index])));
+ err = -ESHUTDOWN;
+fail:
+ b->ordered_loan = false;
+ b->nr_frames = 0;
+ b->present = 0;
+ return err;
+}
+
 /* Worker: START batches while depth and frames allow. */
 static void xdev_ext_mech_start_more(struct xdev_ext_mech_session *s)
 {
@@ -2377,6 +2663,33 @@ static void xdev_ext_mech_start_more(struct xdev_ext_mech_session *s)
 
 	for (;;) {
 		spin_lock_irqsave(&s->lock, flags);
+		if (!s->start_preparing && s->start_left && s->start_queue) {
+			struct xdev_ext_mech_start_queue *q = s->start_queue;
+			u32 template = q->next_ordinal % q->nr_templates;
+
+			if (q->next_ordinal >= q->total || q->templates[template].active) {
+				spin_unlock_irqrestore(&s->lock, flags);
+				return; /* never skip a busy template or consume its key */
+			}
+			b = xdev_ext_mech_batch_get_locked(s);
+			spin_unlock_irqrestore(&s->lock, flags);
+			if (IS_ERR(b))
+				return;
+			ret = xdev_ext_mech_start_queue_bind(s, b);
+			if (ret) {
+				xdev_ext_mech_session_stop(s, ret);
+				spin_lock_irqsave(&s->lock, flags);
+				last = xdev_ext_mech_batch_put_locked(s, b, false);
+				spin_unlock_irqrestore(&s->lock, flags);
+				xdev_ext_mech_return_idle(s, true);
+				WARN_ON_ONCE(last);
+				return;
+			}
+			xdev_ext_mech_batch_step(&b->bs, XDEV_EXT_MECH_EV_READY, 0);
+			xdev_ext_mech_trace_batch(b, "record_admit", 0, 0);
+			xdev_ext_mech_batch_run(s, b);
+			continue;
+		}
 		b = !s->start_preparing && s->start_left ?
 			xdev_ext_mech_batch_get_locked(s) : NULL;
 		if (IS_ERR_OR_NULL(b)) {
@@ -3122,6 +3435,7 @@ static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
 	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
 		if (s->ops[i])
 			xdev_ext_mech_ops_put(s->ops[i], s->pinned[i], s->c_owner[i]);
+	xdev_ext_mech_start_queue_free(s->start_queue);
 	kvfree(s->cookies);
 	kvfree(s->transform_owner);
 	if (s->owns_life)
@@ -3385,6 +3699,90 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 	return 0;
 }
 
+/* Only preparation owns these uncommitted claims. Restore precisely them. */
+static void xdev_ext_mech_start_queue_rollback(struct xdev_ext_mech_session *s,
+ struct xdev_ext_mech_start_queue *q)
+{
+ u32 i = q->nr_loans;
+
+ while (i--) {
+  struct xdev_ext_mech_start_loan *l = &q->loans[i];
+
+  WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, l->index,
+                         XDEV_EXT_MECH_F_HELD, l->original_state));
+  cond_resched();
+ }
+ xdev_ext_mech_start_queue_free(q);
+}
+
+static int xdev_ext_mech_start_queue_prepare(struct xdev_ext_mech_session *s,
+ const u32 *idx, u32 nr, u64 nr_batches, bool recycle,
+ struct xdev_ext_mech_start_queue **out)
+{
+ struct xdev_ext_mech_start_queue *q;
+ unsigned long *seen;
+ u32 i, state;
+ int err = -ENOMEM;
+
+ *out = NULL;
+ q = kzalloc(sizeof(*q), GFP_KERNEL);
+ if (!q)
+  return -ENOMEM;
+ q->frames = s->frames;
+ q->nr_templates = nr / s->frames;
+ q->total = nr_batches;
+ q->recycle = recycle;
+ q->loans = kvcalloc(nr, sizeof(*q->loans), GFP_KERNEL);
+ q->templates = kvcalloc(q->nr_templates, sizeof(*q->templates), GFP_KERNEL);
+ seen = bitmap_zalloc(s->pool.nr_frames, GFP_KERNEL);
+ if (!q->loans || !q->templates || !seen)
+  goto fail;
+ /* Validate the whole copied list before changing any custody word. */
+ for (i = 0; i < nr; i++) {
+  if (idx[i] >= s->pool.nr_frames || test_and_set_bit(idx[i], seen)) {
+   err = -EINVAL;
+   goto fail;
+  }
+  cond_resched();
+ }
+ for (i = 0; i < q->nr_templates; i++)
+  q->templates[i].first = i * q->frames;
+ for (i = 0; i < nr; i++) {
+  if (!xdev_ext_mech_session_admits(s)) {
+   err = -ESHUTDOWN;
+   goto fail;
+  }
+  state = xdev_ext_mech_pool_frame_state(&s->pool, idx[i]);
+  if ((state != XDEV_EXT_MECH_F_USER &&
+       !(s->pool.kind == XDEV_EXT_MECH_POOL_PEER && state == XDEV_EXT_MECH_F_K_FREE)) ||
+      s->transform_owner[idx[i]]) {
+   err = -EBUSY;
+   goto fail;
+  }
+  err = xdev_ext_mech_pool_frame_move(&s->pool, idx[i], state,
+                                   XDEV_EXT_MECH_F_HELD);
+  if (err) {
+   err = -EBUSY;
+   goto fail;
+  }
+  q->loans[q->nr_loans++] = (struct xdev_ext_mech_start_loan) {
+   .index = idx[i], .original_state = state,
+  };
+  if (xdev_ext_mech_life_phase(&s->life[idx[i]]) != XDEV_EXT_MECH_L_FREE) {
+   err = -EBUSY;
+   goto fail;
+  }
+  cond_resched();
+ }
+ bitmap_free(seen);
+ *out = q;
+ return 0;
+fail:
+ bitmap_free(seen);
+ xdev_ext_mech_start_queue_rollback(s, q);
+ return err;
+}
+
 /* Process context, START preparing: lend USER frames, then queue them.
  * uring_lock pins the session; preparing excludes the worker from this queue.
  * No pool-sized loop may hold s->lock or keep interrupts disabled.
@@ -3463,6 +3861,8 @@ static int xdev_ext_mech_start(struct io_ring_ctx *ctx, void __user *uarg)
 	struct xdev_ext_mech_session *s;
 	struct xdev_ext_mech_start req;
 	struct xdev_ext_mech_user_span span;
+	struct xdev_ext_mech_start_queue *q = NULL;
+	bool ordered, publish;
 	unsigned long flags;
 	u32 *idx = NULL;
 	u32 user_len = 0;
@@ -3477,6 +3877,12 @@ static int xdev_ext_mech_start(struct io_ring_ctx *ctx, void __user *uarg)
 				   s->frames, s->pool.nr_frames);
 	if (ret)
 		return ret;
+	ordered = req.flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES;
+	if (ordered) {
+		ret = xdev_ext_mech_start_queue_plan_check(s->plan, s->nr_stages);
+		if (ret)
+			return ret;
+	}
 	if (req.flags & XDEV_EXT_MECH_START_F_USER_SPANS) {
 		u32 off, capacity;
 
@@ -3501,6 +3907,7 @@ static int xdev_ext_mech_start(struct io_ring_ctx *ctx, void __user *uarg)
 	if (!xdev_ext_mech_session_admits(s))
 		ret = -ESHUTDOWN;
 	else if (s->start_preparing || s->start_return_pending || s->start_left ||
+		 s->start_queue || (ordered && s->ss.inflight) ||
 		 ((s->start_user_len || user_len) && s->ss.inflight) ||
 		 ((s->start_recycle || (req.flags & XDEV_EXT_MECH_START_F_RECYCLE)) &&
 		  s->ss.inflight))
@@ -3527,23 +3934,41 @@ static int xdev_ext_mech_start(struct io_ring_ctx *ctx, void __user *uarg)
 		/* Avoid lending at all if STOP won during a faulting user copy. */
 		if (!xdev_ext_mech_session_admits(s))
 			ret = -ESHUTDOWN;
+		else if (ordered)
+			ret = xdev_ext_mech_start_queue_prepare(s, idx, req.nr_user_frames,
+				req.nr_batches, req.flags & XDEV_EXT_MECH_START_F_RECYCLE, &q);
 		else
 			ret = xdev_ext_mech_take_user_frames(s, idx, req.nr_user_frames);
 	}
 finish:
 	spin_lock_irqsave(&s->lock, flags);
-	if (!ret && xdev_ext_mech_session_admits(s)) {
+	publish = !ret && xdev_ext_mech_session_admits(s);
+	if (q && !publish) {
+		/* Still preparing: STOP's worker cannot drain uncommitted loans.
+		 * Restore original USER/K_FREE states before releasing that gate. */
+		spin_unlock_irqrestore(&s->lock, flags);
+		xdev_ext_mech_start_queue_rollback(s, q);
+		q = NULL;
+		ret = ret ?: -ESHUTDOWN;
+		spin_lock_irqsave(&s->lock, flags);
+	}
+	if (publish) {
+		/* One admission decision: retraction after it owns a committed
+		 * queue, which stop_work can drain, rather than a lost local q. */
+		s->start_queue = q;
+		q = NULL;
 		s->start_left = req.nr_batches;
 		s->start_seq = req.first_seq;
 		s->start_to_user = req.flags & XDEV_EXT_MECH_START_F_USER_FRAMES;
+		s->start_ordered = ordered;
 		s->start_recycle = req.flags & XDEV_EXT_MECH_START_F_RECYCLE;
-		s->start_return_pending = s->start_recycle;
+		s->start_return_pending = ordered || s->start_recycle;
 	} else if (!ret) {
 		/* STOP can run even while take_user_frames is publishing its queue.
 		 * The worker could already have tried to drain it; requeue below
 		 * after the complete loan set is visible, including legacy USER.
 		 */
-		s->start_return_pending = idx != NULL;
+		s->start_return_pending = !ordered && idx != NULL;
 		ret = -ESHUTDOWN;
 	}
 	s->start_preparing = false;

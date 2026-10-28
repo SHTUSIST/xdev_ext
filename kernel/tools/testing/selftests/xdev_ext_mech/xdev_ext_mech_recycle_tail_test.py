@@ -25,40 +25,16 @@ def function(text, name, optional=False):
 class RecycleTail(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        core = Path(os.environ.get('XDEV_EXT_RECYCLE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
-        umem = (ROOT / 'io_uring/xdev_ext_umem.c').read_text()
-        parts = {
-            'POOL': '\n'.join(function(umem, n) for n in
-                              ('io_xdev_ext_umem_mech_alloc', 'io_xdev_ext_umem_mech_recycle')),
-            'NOTIFY': function(core, 'xdev_ext_mech_notify_locked'),
-            'COUNT': function(core, 'xdev_ext_mech_count'),
-            'MOVE': function(core, 'xdev_ext_mech_frames_move'),
-            'RELEASE': function(core, 'xdev_ext_mech_frames_release'),
-            'STOP': function(core, 'xdev_ext_mech_session_stop'),
-            'SETTLED': function(core, 'xdev_ext_mech_settled'),
-            'SETTLE': function(core, 'xdev_ext_mech_settle_locked'),
-            'RETURN_IDLE': function(core, 'xdev_ext_mech_return_idle', optional=True),
-            'END': function(core, 'xdev_ext_mech_end'),
-            'STOP_WORK': function(core, 'xdev_ext_mech_stop_work'),
-            'TAKE': function(core, 'xdev_ext_mech_take_user_frames'),
-            'START': function(core, 'xdev_ext_mech_start'),
-        }
-        fixture = (HERE / 'xdev_ext_mech_recycle_tail_fixture.c').read_text()
-        for marker, body in parts.items():
-            fixture = fixture.replace('/* PRODUCTION_' + marker + ' */', body)
+        import sys
+        sys.path.insert(0,str(HERE / 'core_lifecycle'))
+        from ordered_frames_test import build
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-recycle-tail-')
         cls.addClassCleanup(cls.temp.cleanup)
-        path = Path(cls.temp.name)
-        source = path / 'tail.c'
-        source.write_text(fixture)
-        cls.binary = path / 'probe'
-        build = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11',
-                                '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
-                                '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
-                                '-I' + str(ROOT), str(source), '-o', str(cls.binary)],
-                               text=True, capture_output=True)
-        if build.returncode:
-            raise RuntimeError(build.stdout + build.stderr)
+        # Share only extraction/OS adaptation, retaining this fixture's
+        # original scenarios and every behavior assertion.
+        def original_scenarios(fixture, core):
+            return fixture.replace(' return ordered_scenario(argv[1]);\n', '')
+        cls.binary = build(cls.temp.name,original_scenarios)
 
     def probe(self, mode):
         run = subprocess.run([str(self.binary), mode], capture_output=True, text=True)

@@ -40,8 +40,9 @@ static inline int xdev_ext_user_entries_check(__u32 entries)
 /* XDEV_EXT_MECH_OP_USER_STAGE request, as copied from user space. */
 static inline int xdev_ext_user_request_check(const struct xdev_ext_mech_user_stage *r)
 {
-	if (r->size != sizeof(*r) || r->flags || r->rsvd || r->fd || r->off.mmap_size ||
-	    r->off.hdr || r->off.ready || r->off.done || r->off.slots)
+	if (r->size != sizeof(*r) || (r->flags & ~XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL) ||
+	    r->rsvd || r->fd || r->off.mmap_size || r->off.hdr || r->off.ready ||
+	    r->off.done || r->off.slots)
 		return -EINVAL;
 	if (r->eventfd < -1)
 		return -EBADF;

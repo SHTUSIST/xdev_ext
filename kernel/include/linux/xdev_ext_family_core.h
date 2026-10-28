@@ -79,7 +79,8 @@ xdev_ext_mech_class_desc(__u32 class_id)
 		[XDEV_EXT_MECH_CLASS_CPU] = { .family = XDEV_EXT_FAMILY_COMPUTE, .no_file = 1,
 			.role_rule = XDEV_EXT_ROLE_RULE_CPU_XFORM, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
 		[XDEV_EXT_MECH_CLASS_USER] = { .family = XDEV_EXT_FAMILY_COMPUTE, .no_file = 1,
-			.flags_later = 1, /* xdev_ext_user_stage_check() checks VARLEN */
+			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE,
+			.flags_later = 1, /* xdev_ext_user_stage_check() checks USER flags */
 			.role_rule = XDEV_EXT_ROLE_RULE_INPLACE_TX, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
 	};
 

@@ -40,7 +40,8 @@ typedef __u64 u64;
 #define __user
 #define GFP_KERNEL 0
 #define BIT(n) (1U << (n))
-#define GENMASK_ULL(h,l) (((1ULL << ((h)+1))-1) & ~((1ULL << (l))-1))
+#define GENMASK_ULL(h,l) (((~0ULL) << (l)) & ((~0ULL) >> (63-(h))))
+#include "io_uring/xdev_ext_mech_start_queue.h"
 #define min_t(t,a,b) ((t)(a)<(t)(b)?(t)(a):(t)(b))
 #define IS_ERR(p) ((uintptr_t)(p) > (uintptr_t)-4096)
 #define IS_ERR_OR_NULL(p) (!(p) || IS_ERR(p))
@@ -59,10 +60,12 @@ struct pool_ops {
  int (*resolve)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *);
  void (*recycle)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *);
 };
-struct xdev_ext_mech_pool {u32 kind, nr_frames; const struct pool_ops *ops; __u8 custody[4]; u32 queue[4], count;};
+struct xdev_ext_mech_pool {u32 kind, nr_frames,frame_size; const struct pool_ops *ops; __u8 custody[4]; u32 queue[4], count;};
 struct fake_cls {u32 flags;};
-struct xdev_ext_mech_batch {u64 key; bool to_user; u32 nr_frames,present,bytes; struct xdev_ext_mech_frame f[4]; struct xdev_ext_mech_bstate bs;};
+struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;u64 key; bool ordered_loan,to_user; u32 nr_frames,present,bytes; struct xdev_ext_mech_frame f[4]; struct xdev_ext_mech_bstate bs;};
 struct xdev_ext_mech_session {
+ struct xdev_ext_mech_start_queue *start_queue;bool start_ordered;
+ struct xdev_ext_mech_stage_uapi plan[1];u32 nr_stages;
  int lock; bool start_preparing,start_return_pending,start_recycle,start_to_user,worker_gone,admit;
  u32 frames,depth,start_user_len; u64 start_left,start_seq;
  struct {u32 inflight;} ss;
@@ -74,6 +77,9 @@ struct xdev_ext_mech_session {
  struct xdev_ext_mech_batch batch;
 };
 struct io_ring_ctx {struct xdev_ext_mech_session *s;};
+/* Legacy span scenarios must never enter ordered-queue branches. */
+static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session*s,int e){(void)s;(void)e;abort();}
+static void xdev_ext_mech_trace_batch(struct xdev_ext_mech_batch*b,const char*tag,int e,int v){(void)b;(void)tag;(void)e;(void)v;}
 static int inject_alloc_fail, inject_copy_fail, kicks, stops, runs, observed_len, observed_bytes;
 static struct xdev_ext_mech_session *xdev_ext_mech_find(struct io_ring_ctx *c,u64 id){return id==7 ? c->s : NULL;}
 static bool xdev_ext_mech_rx_first(struct xdev_ext_mech_session *s){(void)s;return false;}
@@ -106,8 +112,8 @@ TESTS = r'''
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);return 1;}}while(0)
 static struct fake_cls cls;
 static void init(struct xdev_ext_mech_session *s){
- memset(s,0,sizeof(*s));s->admit=true;s->frames=s->depth=1;s->pool.kind=XDEV_EXT_MECH_POOL_IOU_UMEM;
- s->pool.nr_frames=4;s->pool.ops=&ops;s->layout=(struct xdev_ext_mech_layout){4096,32,1024,1024};
+ memset(s,0,sizeof(*s));s->admit=true;s->frames=s->depth=s->nr_stages=1;s->pool.kind=XDEV_EXT_MECH_POOL_IOU_UMEM;
+ s->pool.nr_frames=4;s->pool.frame_size=4096;s->pool.ops=&ops;s->layout=(struct xdev_ext_mech_layout){4096,32,1024,1024};
  s->st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;s->st[0].cls=&cls;
  inject_alloc_fail=inject_copy_fail=kicks=stops=runs=0;
 }
@@ -117,7 +123,8 @@ static int admission(void){
  CHECK(sizeof(struct xdev_ext_mech_start)==40);CHECK(sizeof(struct xdev_ext_mech_user_span)==8);CHECK(XDEV_EXT_MECH_START_F_USER_SPANS==(1U<<2));
  struct xdev_ext_mech_user_span span={0,17};struct xdev_ext_mech_start r=request(&span), b;
  CHECK(check_arg(&r,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==0);
- for(unsigned bit=3;bit<32;bit++){b=r;b.flags|=1U<<bit;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EINVAL);}
+ b=r;b.flags|=XDEV_EXT_MECH_START_F_ORDERED_FRAMES;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EOPNOTSUPP);
+ for(unsigned bit=4;bit<32;bit++){b=r;b.flags|=1U<<bit;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EINVAL);}
  b=r;b.flags&=~XDEV_EXT_MECH_START_F_USER_FRAMES;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EINVAL);
  b=r;b.flags|=XDEV_EXT_MECH_START_F_RECYCLE;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EINVAL);
  b=r;b.nr_batches=0;CHECK(check_arg(&b,XDEV_EXT_MECH_POOL_IOU_UMEM,false,1,4)==-EINVAL);
@@ -164,7 +171,7 @@ static int lengths_and_repeat(void){
  span.len=lengths[i];CHECK(xdev_ext_mech_start(&ctx,&r)==0);CHECK(s.start_left==1&&!s.start_preparing);CHECK(s.life[0].valid_len==span.len&&xdev_ext_mech_life_phase(&s.life[0])==XDEV_EXT_MECH_L_READY);
  xdev_ext_mech_start_more(&s);CHECK(runs==(int)i+1);CHECK(observed_len==(int)span.len&&observed_bytes==(int)span.len);CHECK(s.batch.f[0].data_off==32&&s.start_left==0&&s.ss.inflight==1);CHECK(xdev_ext_mech_start(&ctx,&r)==-EBUSY);
  /* explicit completion fixture: terminal lifecycle and custody returned */
- CHECK(xdev_ext_mech_life_release(&s.life[0],xdev_ext_mech_life_token(&s.life[0]))==0);
+ CHECK(xdev_ext_mech_life_release(&s.life[0],xdev_ext_mech_life_gen(&s.life[0]))==0);
  CHECK(xdev_ext_mech_pool_frame_move(&s.pool,0,XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_USER)==0);s.ss.inflight=0;
  }
  u32 idx=0;r.flags=XDEV_EXT_MECH_START_F_USER_FRAMES;r.user_frames=(uintptr_t)&idx;CHECK(xdev_ext_mech_start(&ctx,&r)==0);CHECK(s.start_user_len==0);CHECK(s.life[0].valid_len==1024);xdev_ext_mech_start_more(&s);CHECK(observed_len==1024&&observed_bytes==1024);
@@ -178,12 +185,17 @@ class IndependentStart(unittest.TestCase):
     def setUpClass(cls):
         cls.tmp = tempfile.TemporaryDirectory(prefix='independent-start-')
         text = (ROOT / 'io_uring/xdev_ext_mech.c').read_text()
-        code = PREAMBLE + '\n' + '\n'.join(extract(text, n) for n in (
-            'xdev_ext_mech_take_user_frames', 'xdev_ext_mech_start', 'xdev_ext_mech_start_more')) + '\n' + TESTS
+        # Queue entrypoints are unreachable in this legacy USER_SPANS suite;
+        # fail on entry, while compiling real legacy START/publication bodies.
+        queue_names = ('xdev_ext_mech_start_queue_prepare',
+                       'xdev_ext_mech_start_queue_rollback', 'xdev_ext_mech_start_queue_bind')
+        queue_guards = '\n'.join(extract(text,n).split('{',1)[0] + '{ abort(); }' for n in queue_names)
+        code = PREAMBLE + '\n' + queue_guards + '\n' + '\n'.join(extract(text, n) for n in (
+            'xdev_ext_mech_take_user_frames', 'xdev_ext_mech_start', 'xdev_ext_mech_start_publication', 'xdev_ext_mech_start_more')) + '\n' + TESTS
         source = Path(cls.tmp.name) / 'fixture.c'
         cls.binary = Path(cls.tmp.name) / 'fixture'
         source.write_text(code)
-        result = subprocess.run([os.getenv('CC','cc'), '-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-value','-I',str(ROOT),str(source),'-o',str(cls.binary)],capture_output=True,text=True)
+        result = subprocess.run([os.getenv('CC','cc'), '-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-value','-Wno-unused-parameter','-I',str(ROOT),str(source),'-o',str(cls.binary)],capture_output=True,text=True)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
     @classmethod
