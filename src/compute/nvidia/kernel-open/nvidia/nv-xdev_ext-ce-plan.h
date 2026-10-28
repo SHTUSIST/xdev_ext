@@ -57,16 +57,5 @@ static inline int nv_xdev_ext_ce_entry_ok(nv_xdev_ext_gpu_u64 host_off,
 	       gpu_off <= window_len && len <= window_len - gpu_off;
 }
 
-/*
- * status of xdev_ext_ce_complete(): 0 for NV_OK, else the errno RM's status maps
- * to.  Classification is status-first, so hw_submitted only matters on a
- * failure.
- */
-static inline nv_xdev_ext_gpu_s32
-nv_xdev_ext_ce_complete_status(nv_xdev_ext_gpu_u32 rm_status,
-			  nv_xdev_ext_gpu_s32 mapped_error)
-{
-	return nv_xdev_ext_gpu_normalize_status(rm_status, mapped_error);
-}
 
 #endif /* _NV_XDEV_EXT_CE_PLAN_H_ */

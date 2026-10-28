@@ -76,11 +76,11 @@ int main(void)
 	 * Status handed to xdev_ext_ce_complete(): 0 for NV_OK whatever the mapped
 	 * errno, else the mapped negative errno, else -EIO.
 	 */
-	EXPECT_EQ(0, nv_xdev_ext_ce_complete_status(0, -EIO));
-	EXPECT_EQ(-EBUSY, nv_xdev_ext_ce_complete_status(0x55, -EBUSY));
-	EXPECT_EQ(-EIO, nv_xdev_ext_ce_complete_status(0x55, 0));
-	EXPECT_EQ(-EIO, nv_xdev_ext_ce_complete_status(0x55, 5));
-	EXPECT_EQ(-EIO, nv_xdev_ext_ce_complete_status(0x55, -5000));
+	EXPECT_EQ(0, nv_xdev_ext_gpu_normalize_status(0, -EIO));
+	EXPECT_EQ(-EBUSY, nv_xdev_ext_gpu_normalize_status(0x55, -EBUSY));
+	EXPECT_EQ(-EIO, nv_xdev_ext_gpu_normalize_status(0x55, 0));
+	EXPECT_EQ(-EIO, nv_xdev_ext_gpu_normalize_status(0x55, 5));
+	EXPECT_EQ(-EIO, nv_xdev_ext_gpu_normalize_status(0x55, -5000));
 
 	printf("nv_xdev_ext_ce_plan_test: %u checks, %u failures\n", checks,
 	       failures);
