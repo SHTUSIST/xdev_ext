@@ -5,6 +5,7 @@
 #include <linux/crc32.h>
 #include <linux/dma-mapping.h>
 #include <linux/pci.h>
+#include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
 
 static_assert(sizeof(struct ring_frame) <= XDEV_EXT_NET_DEV_AREA);
@@ -36,7 +37,9 @@ struct xdev_ext_xd_rings {
 	struct xdev_ext_xd_native native[2 + 2 * XDEV_EXT_XD_MAX_CHANNELS];
 	u32 count;
 	u64 generation;
-	bool starting;
+	struct xdev_ext_requester_retention *retention;
+	u64 retained_bytes;
+	bool starting, retention_sealed;
 };
 /* Each direction is one coherent allocation. A canceled accepted slot taints
  * the whole allocation. The record is prepared before any DMA acceptance.
@@ -129,6 +132,7 @@ static void xdev_ext_xd_ctl_release(struct xdev_ext_xd_link *xl, bool rx)
 	if (a->accepted != a->retired)
 		a->unknown = true;
 	if (a->unknown) {
+		xl->rings->retained_bytes += a->bytes;
 		spin_lock_irqsave(&xdev_ext_xd_ctl_quarantine_lock, flags);
 		list_add_tail(&a->node, &xdev_ext_xd_ctl_quarantine);
 		spin_unlock_irqrestore(&xdev_ext_xd_ctl_quarantine_lock, flags);
@@ -385,6 +389,11 @@ static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf,
 	spin_lock_irqsave(&xl->lock, flags);
 	local = xl->local_inc;
 	remote = xl->remote_inc;
+	if (len >= XDEV_EXT_XD_MSG_LEN &&
+	    (u32)xdev_ext_xd_get(buf + 124, 4) != (u32)~xdev_ext_xd_crc(~0U, buf, 124))
+		xl->crc_errors++;
+	if (len >= 5 && buf[4] != XDEV_EXT_XD_MSG_VERSION)
+		xl->version_errors++;
 	spin_unlock_irqrestore(&xl->lock, flags);
 	if (xdev_ext_xd_msg_decode(buf, len, xdev_ext_xd_crc, &m) ||
 	    xdev_ext_xd_msg_for_us(&m, local, remote, xl->channels)) {
@@ -422,6 +431,8 @@ static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *ring, struct ring_frame *f, bo
 
 	spin_lock_irqsave(&xl->lock, flags);
 	a = xl->ctl_rx_alloc;
+	if (!canceled && (f->flags & RING_DESC_CRC_ERROR))
+		xl->crc_errors++;
 	if (a && a->pending[cf->index]) {
 		a->pending[cf->index] = false;
 		a->retired++;
@@ -537,6 +548,7 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		tb_ring_stop(r);
 		if (r->running) {
 			n->disposition = XDEV_EXT_XD_NATIVE_UNKNOWN;
+			rs->retained_bytes += tb_ring_descriptor_bytes(r->size);
 			xdev_ext_xd_mark_nhi_gone(xl);
 			tb_ring_free_quarantined(r);
 			*n->slot = NULL;
@@ -545,17 +557,38 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		}
 		n->started = false;
 	}
-	if (xl->ctl_rx_alloc) {
-		xl->ctl_rx_alloc->callbacks_drained = true;
-		if (xl->ctl_rx_alloc->unknown)
-			xdev_ext_xd_ctl_release(xl, true);
-	}
-	if (xl->ctl_tx_alloc) {
-		xl->ctl_tx_alloc->callbacks_drained = true;
-		if (xl->ctl_tx_alloc->unknown)
-			xdev_ext_xd_ctl_release(xl, false);
-		else
+	for (i = 0; i < 2; i++) {
+		bool rx = !i;
+		struct xdev_ext_xd_ctl_allocation *a = rx ? xl->ctl_rx_alloc : xl->ctl_tx_alloc;
+		struct xdev_ext_xd_native *n = &rs->native[rs->count - 2 + i];
+
+		if (!a)
+			continue;
+		a->callbacks_drained = true;
+		if (a->accepted != a->retired)
+			a->unknown = true;
+		/* Cancellation alone proves nothing about DMA.  A healthy native
+		 * STOPPED barrier, however, disables the host ring and drains its
+		 * callbacks.  This backing contains control messages only; payload
+		 * device-memory custody remains UNKNOWN in the data callbacks.
+		 */
+		if (n->disposition == XDEV_EXT_XD_NATIVE_STOPPED &&
+		    !xl->nhi_gone && *n->slot && !(*n->slot)->nhi->going_away &&
+		    a->accepted == a->retired)
+			a->unknown = false;
+		if (a->unknown)
+			xdev_ext_xd_ctl_release(xl, rx);
+		else if (!rx)
 			bitmap_fill(xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
+	}
+	if (rs->retained_bytes && !rs->retention_sealed) {
+		/* UNKNOWN data descriptors count even if startup failed before
+		 * any control buffer was posted. The built-in ledger survives
+		 * this module's exit without retaining a callback into it.
+		 */
+		xdev_ext_xd_mark_nhi_gone(xl);
+		xdev_ext_requester_retention_retain(rs->retention, rs->retained_bytes);
+		rs->retention_sealed = true;
 	}
 }
 
@@ -565,7 +598,9 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 	unsigned int flags = RING_FLAG_FRAME | (xl->e2e ? RING_FLAG_E2E : 0);
 	u16 sof = BIT(XDEV_EXT_XD_PDF_START), eof = BIT(XDEV_EXT_XD_PDF_END);
 	struct xdev_ext_xd_rings *rs;
-	u32 c;
+	u32 c, generations;
+	u64 bytes;
+	int ret = -ENOMEM;
 
 	xl->ctl_in_hopid = xl->ctl_out_hopid = -1;
 	for (c = 0; c < xl->channels; c++)
@@ -573,6 +608,25 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 	rs = kzalloc(sizeof(*rs), GFP_KERNEL);
 	if (!rs)
 		return -ENOMEM;
+	/* Reserve every possible descriptor and control byte before its first
+	 * allocation. Each generation needs channels+1 hops in each direction;
+	 * configuration hop zero is unavailable to services.
+	 */
+	generations = nhi->hop_count > 1 ?
+		(nhi->hop_count - 1) / (xl->channels + 1) : 0;
+	if (!generations) {
+		kfree(rs);
+		return -ENOSPC;
+	}
+	bytes = 2ULL * tb_ring_descriptor_bytes(XDEV_EXT_XD_CTL_RING) +
+		2ULL * xl->channels * tb_ring_descriptor_bytes(XDEV_EXT_XD_DATA_RING) +
+		(u64)XDEV_EXT_XD_CTL_RING * (XDEV_EXT_XD_CTL_BUF + XDEV_EXT_XD_CTL_TX_BUF);
+	rs->retention = xdev_ext_requester_retention_reserve(xl->nhi_pdev, generations, bytes);
+	if (IS_ERR(rs->retention)) {
+		ret = PTR_ERR(rs->retention);
+		kfree(rs);
+		return ret;
+	}
 	xl->rings = rs;
 	/* Explicit records exist even for partial allocation failure. */
 	for (c = 0; c < xl->channels; c++)
@@ -605,13 +659,18 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 			goto fail;
 	}
 	xl->ctl_out_hopid = tb_xdomain_alloc_out_hopid(xl->xd, -1);
-	if (xl->ctl_out_hopid < 0 || xdev_ext_xd_ctl_alloc(xl, true) ||
-	    xdev_ext_xd_ctl_alloc(xl, false))
+	if (xl->ctl_out_hopid < 0)
+		goto fail;
+	ret = xdev_ext_xd_ctl_alloc(xl, true);
+	if (ret)
+		goto fail;
+	ret = xdev_ext_xd_ctl_alloc(xl, false);
+	if (ret)
 		goto fail;
 	return 0;
 fail:
 	xdev_ext_xd_rings_free(xl);
-	return -ENOMEM;
+	return ret;
 }
 
 void xdev_ext_xd_rings_free(struct xdev_ext_xd_link *xl)
@@ -640,6 +699,11 @@ void xdev_ext_xd_rings_free(struct xdev_ext_xd_link *xl)
 			tb_xdomain_release_out_hopid(xl->xd, xl->chan[c].out_hopid);
 		xl->chan[c].out_hopid = -1;
 	}
+	/* Healthy stop can reuse backing. Account for it until the actual
+	 * free; release is deliberately inert for a retained generation.
+	 */
+	if (rs)
+		xdev_ext_requester_retention_release(rs->retention);
 	kfree(rs);
 	xl->rings = NULL;
 }
@@ -683,29 +747,36 @@ static int xdev_ext_xd_path_enable(struct xdev_ext_xd_link *xl,
 int xdev_ext_xd_paths_enable(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_login *l)
 {
 	u32 c;
+	int ret;
 
 	for (c = 0; c < xl->channels; c++) {
 		struct xdev_ext_xd_chan *ch = &xl->chan[c];
 
 		ch->in_hopid = tb_xdomain_alloc_in_hopid(xl->xd, l->data_tx_path[c]);
-		if (ch->in_hopid != (int)l->data_tx_path[c])
+		if (ch->in_hopid != (int)l->data_tx_path[c]) {
+			ret = ch->in_hopid < 0 ? ch->in_hopid : -EPROTO;
 			goto fail;
-		if (xdev_ext_xd_path_enable(xl, "data", c, ch->out_hopid, ch->tx->hop,
-					    ch->in_hopid, ch->rx->hop))
+		}
+		ret = xdev_ext_xd_path_enable(xl, "data", c, ch->out_hopid, ch->tx->hop,
+					    ch->in_hopid, ch->rx->hop);
+		if (ret)
 			goto fail;
 		ch->paths = true;
 	}
 	xl->ctl_in_hopid = tb_xdomain_alloc_in_hopid(xl->xd, l->ctl_tx_path);
-	if (xl->ctl_in_hopid != (int)l->ctl_tx_path)
+	if (xl->ctl_in_hopid != (int)l->ctl_tx_path) {
+		ret = xl->ctl_in_hopid < 0 ? xl->ctl_in_hopid : -EPROTO;
 		goto fail;
-	if (xdev_ext_xd_path_enable(xl, "control", 0, xl->ctl_out_hopid, xl->ctl_tx->hop,
-				    xl->ctl_in_hopid, xl->ctl_rx->hop))
+	}
+	ret = xdev_ext_xd_path_enable(xl, "control", 0, xl->ctl_out_hopid, xl->ctl_tx->hop,
+				    xl->ctl_in_hopid, xl->ctl_rx->hop);
+	if (ret)
 		goto fail;
 	xl->ctl_paths = true;
 	return 0;
 fail:
 	xdev_ext_xd_paths_disable(xl);
-	return -EIO;
+	return ret;
 }
 
 /* ctl_mutex held: every enabled pair, then every allocated in-HopID.  The

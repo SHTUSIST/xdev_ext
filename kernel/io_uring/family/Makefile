@@ -3,3 +3,4 @@
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_requester.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_netfam.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_netfam_rel.o
+obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_requester_retention.o

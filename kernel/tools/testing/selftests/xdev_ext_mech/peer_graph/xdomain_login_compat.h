@@ -73,6 +73,8 @@ static void kref_put(struct kref *r, void (*release)(struct kref *))
 { assert(r->n>0); if (!--r->n) release(r); }
 typedef struct { int n; } atomic_t;
 static int atomic_inc_return(atomic_t *n) { return ++n->n; }
+static void atomic_set(atomic_t *n,int value) { n->n=value; }
+static int atomic_read(const atomic_t *n) { return n->n; }
 
 struct work_struct { void (*fn)(struct work_struct *); bool pending; unsigned long delay; };
 struct delayed_work { struct work_struct work; };
@@ -145,3 +147,12 @@ static int tb_register_property_dir(const char *,struct tb_property_dir *);
 static void tb_unregister_property_dir(const char *,struct tb_property_dir *);
 static int tb_register_service_driver(struct tb_service_driver *);
 static void tb_unregister_service_driver(struct tb_service_driver *);
+
+/* Kernel facilities required by the built-in retention core. */
+#define EXPORT_SYMBOL_GPL(n)
+#define MAX_ERRNO 4095
+#define ERR_PTR(e) ((void *)(intptr_t)(e))
+#define PTR_ERR(p) ((long)(intptr_t)(p))
+#define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-MAX_ERRNO)
+#define WARN_ON_ONCE(x) ({ bool _warn=!!(x); assert(!_warn); _warn; })
+#define DEFINE_SPINLOCK(n) spinlock_t n={0}

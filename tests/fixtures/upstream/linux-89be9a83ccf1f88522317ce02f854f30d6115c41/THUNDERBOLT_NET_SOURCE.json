@@ -1,0 +1,8 @@
+{
+  "linux_commit": "89be9a83ccf1f88522317ce02f854f30d6115c41",
+  "upstream_path": "drivers/net/thunderbolt/main.c",
+  "git_blob": "0a53ec293d0408b591467baca93e1e1ff0999191",
+  "sha256": "e4aab01bcddda126816070a17ad7a5311bd57c10112cf1f372876b091aa79650",
+  "bytes": 38799,
+  "source": "existing official upstream git blob; active full file differs, extracted two function bodies verified identical"
+}

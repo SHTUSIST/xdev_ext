@@ -2,7 +2,7 @@
 /* Only upstream/environment/family sinks. X4 ownership stays production. */
 static struct xdev_ext_xd_link *fixture_xl;
 static struct pci_dev fixture_pdev = {.dev={.id=71,.name="0000:2d:00.0"}};
-static struct tb_nhi fixture_nhi = {.pdev=&fixture_pdev};
+static struct tb_nhi fixture_nhi = {.pdev=&fixture_pdev,.hop_count=256};
 static struct tb fixture_tb = {.nhi=&fixture_nhi};
 static struct tb_xdomain fixture_xd = {.tb=&fixture_tb,.dev={.name="7-1234ab"}};
 static struct tb_ring *all_rings[16];

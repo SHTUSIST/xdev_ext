@@ -32,6 +32,19 @@ static void stop_link(void)
     spin_lock_irq(&xl.lock); xl.up=false; spin_unlock_irq(&xl.lock);
     mutex_lock(&xl.ctl_mutex); xdev_ext_xd_rings_stop(&xl); mutex_unlock(&xl.ctl_mutex);
 }
+/* TEST: known STOPPED controls can be reused; data cancel stays UNKNOWN. */
+static void known_stopped_controls(void)
+{
+    assert(!xl.nhi_gone && xl.ctl_rx_alloc && xl.ctl_tx_alloc);
+    for(unsigned i=0;i<xl.rings->count;i++)
+        assert(xl.rings->native[i].disposition==XDEV_EXT_XD_NATIVE_STOPPED);
+    assert(!xl.ctl_rx_alloc->unknown&&!xl.ctl_tx_alloc->unknown);
+    assert(xl.ctl_rx_alloc->callbacks_drained&&xl.ctl_tx_alloc->callbacks_drained);
+    assert(xl.ctl_rx_alloc->accepted==xl.ctl_rx_alloc->retired);
+    assert(xl.ctl_tx_alloc->accepted==xl.ctl_tx_alloc->retired);
+    for(unsigned i=0;i<XDEV_EXT_XD_CTL_RING;i++)
+        assert(!xl.ctl_rx_alloc->pending[i]&&!xl.ctl_tx_alloc->pending[i]);
+}
 static unsigned free_ctl(void)
 { unsigned n=0; for(unsigned i=0;i<128;i++) n+=test_bit(i,xl.ctl_tx_free); return n; }
 static unsigned running(void)
@@ -95,7 +108,7 @@ static void stop_cancellation_unknown(void)
 {
     fresh(); assert(!xdev_ext_xd_dev_ops.post_rx(&ep,elems,4)); fill_ctl();
     assert(free_ctl()==0); int rxhop=xl.chan[0].rx->hop,txhop=xl.chan[0].tx->hop;
-    stop_link(); assert(done_nr==4 && free_ctl()==0 && !running());
+    stop_link(); known_stopped_controls(); assert(done_nr==4 && free_ctl()==128 && !running());
     for(unsigned i=0;i<4;i++) assert(done[i].status==-ECANCELED && !done[i].len && !done[i].quiesced);
     assert(stop_nr==4 && stop_hop[0]==(unsigned)rxhop && stop_hop[1]==(unsigned)txhop);
     assert(stop_hop[2]==(unsigned)xl.ctl_rx->hop && stop_hop[3]==(unsigned)xl.ctl_tx->hop);
@@ -291,7 +304,7 @@ static void in_hop_error_unwinds(void)
 {
     allocate(); if(parameter<=2) in_negative_at=parameter; else in_mismatch_at=parameter-2;
     struct xdev_ext_xd_login p=peer_login();
-    mutex_lock(&xl.ctl_mutex); assert(xdev_ext_xd_paths_enable(&xl,&p)==-EIO); mutex_unlock(&xl.ctl_mutex);
+    mutex_lock(&xl.ctl_mutex); assert(xdev_ext_xd_paths_enable(&xl,&p)==(parameter<=2 ? -ENOMEM : -EPROTO)); mutex_unlock(&xl.ctl_mutex);
     unsigned acquired_in=0; for(unsigned i=0;i<hop_nr;i++) if(hops[i].in) { acquired_in++; assert(hops[i].released); }
     assert(hop_releases==acquired_in && path_disables==path_nr);
     assert(xl.ctl_in_hopid==-1 && xl.chan[0].in_hopid==-1);
@@ -353,24 +366,23 @@ static void normal_completions_allow_control_free(void)
     assert(dma_is_freed(a)&&dma_is_freed(b)&&!descriptor_quarantines&&ring_frees==4);
     assert(!callback_reads_buffer&&!fixture_pdev.refs);
 }
-static void unknown_accepted_control_retained(void)
+static void healthy_canceled_accepted_controls_freed(void)
 {
     fresh();u8 raw[128]={0};
     assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
     assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
     complete_frame(xl.ctl_tx,0,0,0);
     void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;
-    stop_link();
+    stop_link();known_stopped_controls();
     mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(!dma_is_freed(a)&&!dma_is_freed(b)&&dma_frees==0);
-    assert(!descriptor_quarantines&&ring_frees==4); /* normal STOPPED descriptors */
-    assert(fixture_pdev.refs>=2); /* unknown direction allocations own refs */
+    assert(dma_is_freed(a)&&dma_is_freed(b)&&dma_frees==2);
+    assert(!descriptor_quarantines&&ring_frees==4&&!fixture_pdev.refs);
 }
-static void unknown_rx_does_not_leak_unposted_tx(void)
+static void healthy_canceled_rx_and_unposted_tx_freed(void)
 {
     fresh();void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;
-    stop_link();mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(!dma_is_freed(a)&&dma_is_freed(b)&&dma_frees==1&&fixture_pdev.refs>=1);
+    stop_link();known_stopped_controls();mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
+    assert(dma_is_freed(a)&&dma_is_freed(b)&&dma_frees==2&&!fixture_pdev.refs);
 }
 static void unknown_native_retirement_precedes_context_free(void)
 {
@@ -386,39 +398,42 @@ static void unknown_native_retirement_precedes_context_free(void)
     fixture_tb.nhi=NULL;xl.xd=NULL;
     assert(xdev_ext_xd_dev_ops.requester(&ep)==&fixture_pdev);
 }
-static void healthy_relogin_replaces_unknown_rx_tx(void)
+static void healthy_relogin_reuses_stopped_rx_tx(void)
 {
     fresh();u8 raw[128]={0};
     if(parameter&2)assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
     void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;dma_addr_t ad=xl.ctl_rx_dma,bd=xl.ctl_tx_dma;
     if(!(parameter&1))stop_rx_normal=true;
-    stop_link();assert(!xl.nhi_gone);
+    stop_link();known_stopped_controls();assert(!xl.nhi_gone);
     mutex_lock(&xl.ctl_mutex);int ret=xdev_ext_xd_rings_start(&xl);mutex_unlock(&xl.ctl_mutex);
     assert(!ret&&!xl.nhi_gone&&running()==4);
-    if(parameter&1)assert(xl.ctl_rx_buf!=a&&xl.ctl_rx_dma!=ad&&!dma_is_freed(a));
-    if(parameter&2)assert(xl.ctl_tx_buf!=b&&xl.ctl_tx_dma!=bd&&!dma_is_freed(b));
+    assert(xl.ctl_rx_buf==a&&xl.ctl_rx_dma==ad&&!dma_is_freed(a));
+    assert(xl.ctl_tx_buf==b&&xl.ctl_tx_dma==bd&&!dma_is_freed(b));
     assert(xl.ctl_rx->queued_nr==127&&free_ctl()==128);
     xl.up=true;
     assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
     assert((void *)(uintptr_t)xl.ctl_tx->queued[0]->buffer_phy>= (void *)xl.ctl_tx_buf);
 }
-static void fresh_control_allocation_failure_stays_down(void)
+static void healthy_restart_needs_no_fresh_control_allocation(void)
 {
     fresh();u8 raw[128]={0};assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
-    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_link();fault_countdown=parameter;
+    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_link();known_stopped_controls();
+    unsigned allocations=dma_allocs,records=heap_allocs;fault_countdown=parameter;
     mutex_lock(&xl.ctl_mutex);int ret=xdev_ext_xd_rings_start(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(ret<0&&!xl.up&&!running()&&!path_nr&&!dma_is_freed(a)&&!dma_is_freed(b));
-    fault_countdown=0;
-    mutex_lock(&xl.ctl_mutex);ret=xdev_ext_xd_rings_start(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(!ret&&running()==4&&xl.ctl_rx_buf!=a&&xl.ctl_tx_buf!=b);
+    assert(!ret&&!xl.up&&running()==4&&!path_nr);
+    assert(dma_allocs==allocations&&heap_allocs==records&&fault_countdown==parameter);
+    assert(xl.ctl_rx_buf==a&&xl.ctl_tx_buf==b&&!dma_is_freed(a)&&!dma_is_freed(b));
+    fault_countdown=0;stop_link();known_stopped_controls();
+    mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
+    assert(dma_frees==dma_allocs&&!fixture_pdev.refs);
 }
-static void idle_suspend_resume_refreshes_controls(void)
+static void idle_suspend_resume_reuses_stopped_controls(void)
 {
     fresh();assert(!xl.chan[0].ep[0]&&!xl.chan[0].ep[1]);
-    void *old=xl.ctl_rx_buf;xl.suspended=true;stop_link();
+    void *old=xl.ctl_rx_buf;xl.suspended=true;stop_link();known_stopped_controls();
     assert(!dma_is_freed(old));xl.suspended=false;
     mutex_lock(&xl.ctl_mutex);int ret=xdev_ext_xd_rings_start(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(!ret&&xl.ctl_rx_buf!=old&&xl.ctl_rx->queued_nr==127&&!xl.nhi_gone);
+    assert(!ret&&xl.ctl_rx_buf==old&&xl.ctl_rx->queued_nr==127&&!xl.nhi_gone);
 }
 static void going_away_never_restarts_native_ring(void)
 {
@@ -476,21 +491,21 @@ static void rx_repost_close_serialized(void)
     stop_complete_normal=true;unsigned posts=r->enqueue_calls;stop_link();
     assert(r->enqueue_calls==posts&&!r->queued_nr);
 }
-static void unknown_tx_does_not_leak_normal_rx(void)
+static void healthy_canceled_tx_and_normal_rx_freed(void)
 {
     fresh();u8 raw[128]={0};assert(!xdev_ext_xd_dev_ops.ctl_send(&ep,raw,128));
-    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_rx_normal=true;stop_link();
+    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_rx_normal=true;stop_link();known_stopped_controls();
     mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(dma_is_freed(a)&&!dma_is_freed(b)&&dma_frees==1);
+    assert(dma_is_freed(a)&&dma_is_freed(b)&&dma_frees==2&&!fixture_pdev.refs);
 }
-static void started_path_failure_retains_only_accepted_direction(void)
+static void started_path_failure_frees_stopped_controls(void)
 {
     fresh();struct xdev_ext_xd_login p=peer_login();
     if(parameter<=2)fail_path_at=parameter;else in_mismatch_at=parameter-2;
     mutex_lock(&xl.ctl_mutex);assert(xdev_ext_xd_paths_enable(&xl,&p)<0);mutex_unlock(&xl.ctl_mutex);
-    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_link();
+    void *a=xl.ctl_rx_buf,*b=xl.ctl_tx_buf;stop_link();known_stopped_controls();
     mutex_lock(&xl.ctl_mutex);xdev_ext_xd_rings_free(&xl);mutex_unlock(&xl.ctl_mutex);
-    assert(!dma_is_freed(a)&&dma_is_freed(b)&&path_disables==path_nr);
+    assert(dma_is_freed(a)&&dma_is_freed(b)&&path_disables==path_nr&&!fixture_pdev.refs);
     for(unsigned i=0;i<hop_nr;i++)assert(hops[i].released);
 }
 
@@ -620,16 +635,16 @@ static struct { const char *name; void (*run)(void); unsigned parameter; } cases
     {"going_away_late_normal_completion 0",going_away_late_normal_completion,0},
     {"unposted_allocations_are_freed 0",unposted_allocations_are_freed,0},
     {"normal_completions_allow_control_free 0",normal_completions_allow_control_free,0},
-    {"unknown_accepted_control_retained 0",unknown_accepted_control_retained,0},
-    {"unknown_rx_does_not_leak_unposted_tx 0",unknown_rx_does_not_leak_unposted_tx,0},
+    {"healthy_canceled_accepted_controls_freed 0",healthy_canceled_accepted_controls_freed,0},
+    {"healthy_canceled_rx_and_unposted_tx_freed 0",healthy_canceled_rx_and_unposted_tx_freed,0},
     {"unknown_native_retirement_precedes_context_free 0",unknown_native_retirement_precedes_context_free,0},
-    {"healthy_relogin_replaces_unknown_rx_tx 1",healthy_relogin_replaces_unknown_rx_tx,1},
-    {"healthy_relogin_replaces_unknown_rx_tx 3",healthy_relogin_replaces_unknown_rx_tx,3},
-    {"fresh_control_allocation_failure_stays_down 1",fresh_control_allocation_failure_stays_down,1},
-    {"fresh_control_allocation_failure_stays_down 2",fresh_control_allocation_failure_stays_down,2},
-    {"fresh_control_allocation_failure_stays_down 3",fresh_control_allocation_failure_stays_down,3},
-    {"fresh_control_allocation_failure_stays_down 4",fresh_control_allocation_failure_stays_down,4},
-    {"idle_suspend_resume_refreshes_controls 0",idle_suspend_resume_refreshes_controls,0},
+    {"healthy_relogin_reuses_stopped_rx_tx 1",healthy_relogin_reuses_stopped_rx_tx,1},
+    {"healthy_relogin_reuses_stopped_rx_tx 3",healthy_relogin_reuses_stopped_rx_tx,3},
+    {"healthy_restart_needs_no_fresh_control_allocation 1",healthy_restart_needs_no_fresh_control_allocation,1},
+    {"healthy_restart_needs_no_fresh_control_allocation 2",healthy_restart_needs_no_fresh_control_allocation,2},
+    {"healthy_restart_needs_no_fresh_control_allocation 3",healthy_restart_needs_no_fresh_control_allocation,3},
+    {"healthy_restart_needs_no_fresh_control_allocation 4",healthy_restart_needs_no_fresh_control_allocation,4},
+    {"idle_suspend_resume_reuses_stopped_controls 0",idle_suspend_resume_reuses_stopped_controls,0},
     {"going_away_never_restarts_native_ring 0",going_away_never_restarts_native_ring,0},
     {"starting_control_rx_reposts_before_up 0",starting_control_rx_reposts_before_up,0},
     {"closed_control_rx_does_not_repost 0",closed_control_rx_does_not_repost,0},
@@ -638,12 +653,12 @@ static struct { const char *name; void (*run)(void); unsigned parameter; } cases
     {"actual pthread post/close serialization accepts whole batch or zero",actual_post_close_lock_boundary,0},
     {"other CPU callback before post return retires control slot once",other_cpu_early_control_callback_returns_slot_once,0},
     {"RX close decision and actual repost share link lock",rx_repost_close_serialized,0},
-    {"normal RX allocation freed independently of unknown TX",unknown_tx_does_not_leak_normal_rx,0},
-    {"healthy relogin refreshes TX-only unknown allocation",healthy_relogin_replaces_unknown_rx_tx,2},
-    {"started data path failure retains accepted RX only",started_path_failure_retains_only_accepted_direction,1},
-    {"started control path failure retains accepted RX only",started_path_failure_retains_only_accepted_direction,2},
-    {"started mismatched data HopID rollback preserves control custody",started_path_failure_retains_only_accepted_direction,3},
-    {"started mismatched control HopID rollback preserves control custody",started_path_failure_retains_only_accepted_direction,4},
+    {"healthy canceled TX and normal RX free after STOPPED",healthy_canceled_tx_and_normal_rx_freed,0},
+    {"healthy relogin reuses stopped TX allocation",healthy_relogin_reuses_stopped_rx_tx,2},
+    {"started data path failure frees STOPPED controls",started_path_failure_frees_stopped_controls,1},
+    {"started control path failure frees STOPPED controls",started_path_failure_frees_stopped_controls,2},
+    {"started mismatched data HopID rollback preserves control custody",started_path_failure_frees_stopped_controls,3},
+    {"started mismatched control HopID rollback preserves control custody",started_path_failure_frees_stopped_controls,4},
     {"path scopes identify actual ordered data and control calls",path_scopes_identify_actual_ordered_calls,0},
     {"failed actual control operation emits matching END result",failed_path_operation_has_exact_result_end,0},
     {"retry after failed data scope emits fresh scope and actual current identity",retry_path_scopes_use_fresh_scope_and_identity,0},

@@ -343,7 +343,7 @@ static void budget_layout_tests(void)
 static struct xdev_ext_xd_login valid_login(void)
 {
  struct xdev_ext_xd_login l = {
-  .length_sn = 27, .type = XDEV_EXT_XD_LOGIN, .proto_version = 1,
+  .length_sn = 27, .type = XDEV_EXT_XD_LOGIN, .proto_version = 2,
   .channels = 1, .ctl_tx_path = 8, .data_tx_path = {8,9,10,11},
   .incarnation = UINT64_C(0x1020304050607080), .caps = XDEV_EXT_XD_CAP_E2E,
  };
@@ -356,7 +356,7 @@ static void login_tests(void)
  EQ("LOGIN packet size", sizeof(l), 120);
  EQ("LOGIN response size", sizeof(struct xdev_ext_xd_login_response), 96);
  l = valid_login();
- EQ("valid v1 one-channel LOGIN", xdev_ext_xd_login_check(&l, 120, 1), 0);
+ EQ("valid v2 one-channel LOGIN", xdev_ext_xd_login_check(&l, 120, 1), 0);
  EQ("short LOGIN", xdev_ext_xd_login_check(&l, 119, 1), -EPROTO);
  EQ("long LOGIN", xdev_ext_xd_login_check(&l, 121, 1), -EPROTO);
 #define BAD_LOGIN(label, statement) do { l = valid_login(); statement; \
@@ -365,7 +365,7 @@ static void login_tests(void)
  BAD_LOGIN("type zero", l.type = 0);
  BAD_LOGIN("LOGOUT is not LOGIN", l.type = XDEV_EXT_XD_LOGOUT);
  BAD_LOGIN("response is not LOGIN", l.type = XDEV_EXT_XD_LOGIN_RESPONSE);
- BAD_LOGIN("version two", l.proto_version = 2);
+ BAD_LOGIN("legacy v1 cannot echo requester incarnation", l.proto_version = 1);
  BAD_LOGIN("zero channels", l.channels = 0);
  BAD_LOGIN("exceeds caller one-channel limit", l.channels = 2);
  BAD_LOGIN("zero incarnation", l.incarnation = 0);

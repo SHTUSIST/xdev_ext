@@ -29,7 +29,7 @@ static struct xdev_ext_xd_login peer_login(u64 incarnation)
     struct xdev_ext_xd_login packet={
         .route_hi=0x12345678,.route_lo=0x000000a5,.length_sn=27,
         .type=XDEV_EXT_XD_LOGIN,.command_id=0x76543210,
-        .proto_version=1,.channels=1,.ctl_tx_path=37,
+        .proto_version=2,.channels=1,.ctl_tx_path=37,
         .data_tx_path={41},.incarnation=incarnation,.caps=1,
     };
     memcpy(packet.uuid,&xdev_ext_xd_proto_uuid,16);
@@ -67,7 +67,7 @@ static void check_no_pending(void)
 static void login_bytes(void)
 {
     fresh_link(); login_run();
-    CHECK(requests==1 && last_request.type==1 && last_request.proto_version==1);
+    CHECK(requests==1 && last_request.type==1 && last_request.proto_version==2);
     CHECK(last_request.route_hi==0x12345678 && last_request.route_lo==0xa5);
     CHECK(last_request.length_sn==27 && last_request.command_id==1);
     CHECK(last_request.channels==1 && last_request.ctl_tx_path==21 && last_request.data_tx_path[0]==23);
@@ -97,14 +97,17 @@ static void control_command_sequence(void)
 {
     fresh_link(); login_run(); CHECK(last_request.command_id==1);
     struct xdev_ext_xd_login packet=peer_login(0x1111);
-    CHECK(deliver(&packet)==1); CHECK(last_response.command_id==2);
+    CHECK(deliver(&packet)==1 && last_response.status==EAGAIN);
+    connect_run();
+    CHECK(deliver(&packet)==1); CHECK(last_response.command_id==packet.command_id);
+    CHECK(last_request.command_id==1 && atomic_read(&xl->command_id)==1);
     CHECK(last_response.length_sn==21 && last_response.type==2 && !last_response.status);
     CHECK(last_response.incarnation==xl->local_inc);
     CHECK(!memcmp(last_response.initiator_uuid,&local_uuid,16) &&
           !memcmp(last_response.target_uuid,&remote_uuid,16));
     CHECK(!last_response.rsvd0 && !last_response.rsvd1 &&
-          !last_response.reserved[0] && !last_response.reserved[1]);
-    connect_run(); login_run(); CHECK(last_request.command_id==3);
+          last_response.requester_incarnation==packet.incarnation);
+    connect_run(); login_run(); CHECK(last_request.command_id==2);
 }
 static void foreign_route(void)
 {
@@ -143,7 +146,7 @@ static void new_peer_epoch_detaches_old_stage(void)
 }
 static void bad_version_refused(void)
 {
-    fresh_link(); struct xdev_ext_xd_login packet=peer_login(0x1111); packet.proto_version=2;
+    fresh_link(); struct xdev_ext_xd_login packet=peer_login(0x1111); packet.proto_version=1;
     CHECK(deliver(&packet)==1 && responses==1 && last_response.status==EPROTO);
     CHECK(!xl->connect_work.pending && !xl->remote_logged_in && !ring_starts);
 }
@@ -160,7 +163,7 @@ static void paths_failure_unwinds_and_retries(void)
     CHECK(deliver(&packet)==1); connect_run();
     CHECK(ring_starts==1 && ring_stops==1 && !rings_running && !xl->remote_logged_in && !xl->up);
     CHECK(xl->login_work.work.pending && xl->login_work.work.delay==1000);
-    paths_result=0; CHECK(deliver(&packet)==1); connect_run();
+    paths_result=0; jiffies+=xl->login_work.work.delay; CHECK(deliver(&packet)==1); connect_run();
     CHECK(ring_starts==2 && !ring_warn && rings_running);
 }
 static void rings_failure_does_not_enable_paths(void)
@@ -187,7 +190,7 @@ static void stale_logout_cannot_down(void)
 static void remove_releases_native_before_last_ref(void)
 {
     up_link(); bind_ep(false); clear_trace(); remove_link();
-    CHECK(list_empty(&xdev_ext_xd_links) && logouts==1 && ring_frees==1 && events("cancel")==3);
+    CHECK(list_empty(&xdev_ext_xd_links) && logouts==1 && ring_frees==1 && events("cancel")==4);
     CHECK(endpoint.detached && dead_calls==1 && dead_error==-ENOLINK);
     CHECK(xl->gone && xl->going_away && !xl->xd && !xl->svc);
     CHECK(!link_freed && !pci_puts && pdev.refs==1); check_no_pending();
@@ -212,7 +215,7 @@ static void suspend_then_resume_login(void)
     CHECK(!xdev_ext_xd_suspend(&service.dev));
     CHECK(xl->suspended && !xl->up && dead_error==-ESHUTDOWN && endpoint.detached && !rings_running);
     CHECK(!ring_frees && !pci_puts && !link_freed); check_no_pending();
-    CHECK(events("cancel")==3 && event_index("cancel")<event_index("stage_dead"));
+    CHECK(events("cancel")==4 && event_index("cancel")<event_index("stage_dead"));
     CHECK(!xdev_ext_xd_resume(&service.dev));
     CHECK(!xl->suspended && xl->local_inc && xl->local_inc!=old && xl->login_work.work.pending);
     CHECK(xl->login_work.work.delay==0); reply_inc=0x2222; login_run();
@@ -254,7 +257,7 @@ static void late_packet_during_cancel_is_unfindable(struct work_struct *work)
 static void remove_barrier_hides_link_before_cancel(void)
 {
     up_link(); bind_ep(false); during_cancel=late_packet_during_cancel_is_unfindable;
-    remove_link(); CHECK(events("cancel")==3 && responses==1); put_ep();
+    remove_link(); CHECK(events("cancel")==4 && responses==1); put_ep();
 }
 static void suspended_packets_do_not_queue(void)
 {
@@ -654,12 +657,13 @@ static void changed_peer_survives_stale_login_before_first_work(void)
     up_link(); bind_ep(false); u64 old_local=xl->local_inc;
     struct xdev_ext_xd_login changed=peer_login(0x2222),stale=peer_login(0x1111);
     changed.ctl_tx_path=53; changed.data_tx_path[0]=59;
-    CHECK(deliver(&changed)==1 && !last_response.status);
+    CHECK(deliver(&changed)==1 && last_response.status==EAGAIN);
     CHECK(deliver(&stale)==1 && !last_response.status);
     CHECK(xl->up && !endpoint.detached && !dead_calls && !ring_stops);
     reply_inc=0x2222;
     connect_run();
     finish_confirmed_peer_recovery(old_local);
+    CHECK(deliver(&changed)==1 && !last_response.status);
 }
 static void finish_retried_third_peer_recovery(u64 old_local)
 {
@@ -685,7 +689,7 @@ static void conflicting_candidate_retries_after_fresh_rejection(void)
     struct xdev_ext_xd_login second=peer_login(0x2222),third=peer_login(0x3333);
     second.ctl_tx_path=53; second.data_tx_path[0]=59;
     third.ctl_tx_path=61; third.data_tx_path[0]=67;
-    CHECK(deliver(&second)==1 && !last_response.status); connect_run();
+    CHECK(deliver(&second)==1 && last_response.status==EAGAIN); connect_run();
     CHECK(deliver(&third)==1 && last_response.status==EAGAIN);
     CHECK(last_response.incarnation==old_local);
     CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
@@ -694,7 +698,7 @@ static void conflicting_candidate_retries_after_fresh_rejection(void)
     CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
     if (xl->connect_work.pending) connect_run();
     CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
-    CHECK(deliver(&third)==1 && !last_response.status);
+    CHECK(deliver(&third)==1 && last_response.status==EAGAIN);
     int requests_before_retry_confirmation=requests;
     connect_run();
     CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
@@ -703,6 +707,7 @@ static void conflicting_candidate_retries_after_fresh_rejection(void)
     CHECK(requests==requests_before_retry_confirmation+1);
     CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
     finish_retried_third_peer_recovery(old_local);
+    CHECK(deliver(&third)==1 && !last_response.status);
 }
 /* Duplicates of one unresolved candidate cannot refresh its finite native
  * request budget. Exhaustion frees admission for a newly retried candidate. */
@@ -712,7 +717,7 @@ static void exhausted_candidate_releases_slot_and_third_gets_fresh_budget(void)
     struct xdev_ext_xd_login second=peer_login(0x2222),third=peer_login(0x3333);
     second.ctl_tx_path=53; second.data_tx_path[0]=59;
     third.ctl_tx_path=61; third.data_tx_path[0]=67;
-    CHECK(deliver(&second)==1 && !last_response.status); connect_run();
+    CHECK(deliver(&second)==1 && last_response.status==EAGAIN); connect_run();
     int requests_before=requests;
     request_result=-ETIMEDOUT;
     unsigned int attempts=0;
@@ -720,17 +725,18 @@ static void exhausted_candidate_releases_slot_and_third_gets_fresh_budget(void)
         login_run(); attempts++;
         CHECK(xl->up && xl->remote_inc==0x1111 && !endpoint.detached && !dead_calls && !ring_stops);
         if (xl->login_work.work.pending) {
-            CHECK(deliver(&second)==1 && !last_response.status);
+            CHECK(deliver(&second)==1 && last_response.status==EAGAIN);
             if (xl->connect_work.pending) connect_run();
         }
     }
     CHECK(attempts==60 && requests==requests_before+60);
     CHECK(!xl->login_work.work.pending && !xl->connect_work.pending);
     request_result=0; reply_inc=0x3333;
-    CHECK(deliver(&third)==1 && !last_response.status);
+    CHECK(deliver(&third)==1 && last_response.status==EAGAIN);
     int requests_after_exhaustion=requests;
     finish_retried_third_peer_recovery(old_local);
     CHECK(requests>requests_after_exhaustion && requests<=requests_after_exhaustion+60);
+    CHECK(deliver(&third)==1 && !last_response.status);
 }
 struct test_case { const char *name; void (*run)(void); };
 static const struct test_case cases[]={
