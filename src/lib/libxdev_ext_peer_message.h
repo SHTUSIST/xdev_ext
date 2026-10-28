@@ -25,6 +25,7 @@ struct xdev_ext_peer_endpoint_opts {
 	__u32 flags;
 };
 #define XDEV_EXT_PEER_ENDPOINT_F_EXTERNAL_CTL 1U
+#define XDEV_EXT_PEER_ENDPOINT_F_EARLY (1U << 1)
 /* open prepares the USER objects. Attach GPU control before create/bind. */
 int xdev_ext_peer_endpoint_open(const struct xdev_ext_peer_endpoint_opts *,
 	struct xdev_ext_peer_endpoint **);

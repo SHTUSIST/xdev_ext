@@ -13,6 +13,7 @@
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_netfam.h>
 #include "xdev_ext_xdomain_core.h"
+#include "xdev_ext_xdomain_early.h"
 
 struct xdev_ext_xd_link;
 struct xdev_ext_xd_ctl_allocation;
@@ -30,6 +31,8 @@ struct xdev_ext_xd_ep {
 	struct xdev_ext_mech_stage *st;
 	u32 chan;
 	u64 bound_local_inc, bound_remote_inc;
+	u64 bind_id;
+	bool early;
 	bool rx;
 	bool detached;		/* a link down took it off chan[]; set under ep_mutex and lock */
 };
@@ -52,6 +55,7 @@ struct xdev_ext_xd_link {
 	struct tb_service *svc;			/* valid until remove returns */
 	struct tb_xdomain *xd;			/* valid until remove; NULL afterwards */
 	struct pci_dev *nhi_pdev;		/* pci_dev_get() at probe, put with the last reference */
+	u64 early_bind_next; /* link lifetime; zero means exhausted, never reset */
 	u64 route, token;			/* token never reused */
 	uuid_t local_uuid, remote_uuid;		/* copies taken at probe */
 	spinlock_t lock;			/* up, closing flags, local/remote_inc, chan counters,
@@ -125,6 +129,8 @@ int  xdev_ext_xd_paths_enable(struct xdev_ext_xd_link *xl, const struct xdev_ext
 void xdev_ext_xd_paths_disable(struct xdev_ext_xd_link *xl);
 int  xdev_ext_xd_msg_send(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_ep *ep, u32 chan,
 			  struct xdev_ext_xd_msg *m);
+int xdev_ext_xd_msg_send_v2(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_ep *ep,
+			     struct xdev_ext_xd_msg_v2 *m);
 int  xdev_ext_xd_seq_consume(struct xdev_ext_xd_link *xl, u32 chan, u64 data_seq, u32 count);
 void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_msg *rts);
 u32  xdev_ext_xd_crc(u32 crc, const void *p, size_t len);
@@ -145,6 +151,7 @@ void xdev_ext_xd_probe_ctl_error_locked(struct xdev_ext_xd_link *, int);
 ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *, char *);
 /* xdev_ext_xdomain_class.c */
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m);
+void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m);
 void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st);
 int  xdev_ext_xd_class_register(void);
 void xdev_ext_xd_class_unregister(void);

@@ -7692,6 +7692,11 @@
     {
       "source": "tests/support/evidence/native_trace/timer_scope.py",
       "logical_path": "tests/eval/native_trace/timer_scope.py"
+    },
+    {
+      "source": "src/network/io_uring/xdomain/xdev_ext_xdomain_early.h",
+      "component": "linux",
+      "native_path": "io_uring/xdomain/xdev_ext_xdomain_early.h"
     }
   ]
 }

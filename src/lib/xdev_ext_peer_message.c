@@ -60,7 +60,7 @@ int xdev_ext_peer_endpoint_open(const struct xdev_ext_peer_endpoint_opts *o,
 	if (!o || !out) return -EINVAL;
 	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
 	if (ret) return ret;
-	if (o->flags & ~XDEV_EXT_PEER_ENDPOINT_F_EXTERNAL_CTL) return -EOPNOTSUPP;
+	if (o->flags & ~(XDEV_EXT_PEER_ENDPOINT_F_EXTERNAL_CTL | XDEV_EXT_PEER_ENDPOINT_F_EARLY)) return -EOPNOTSUPP;
 	if (o->allocation_fd < 0 || o->control_fd < 0 || !o->link_token ||
 	    !o->depth || o->depth > XDEV_EXT_USER_RING_MAX || !o->group_bytes ||
 	    !o->deadline_ms || o->deadline_ms > XDEV_EXT_USER_DEADLINE_MAX_MS ||
@@ -93,7 +93,7 @@ int xdev_ext_peer_endpoint_open(const struct xdev_ext_peer_endpoint_opts *o,
 	create.nr_stages = e->producer ? 3 : 2;
 	__u32 native = e->producer ? 1 : 0;
 	ret = xdev_ext_stage_xdomain(&create.st[native], control, o->link_token,
-		o->direction, 0);
+		o->direction, o->flags & XDEV_EXT_PEER_ENDPOINT_F_EARLY ? XDEV_EXT_XDOMAIN_F_EARLY : 0);
 	if (ret) goto fail;
 	struct xdev_ext_mech_stage_uapi strict = {
 		.class_id = XDEV_EXT_MECH_CLASS_USER,

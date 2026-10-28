@@ -170,7 +170,8 @@ static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
 		       !a->scratch && !a->desc_size && !a->desc_cap &&
 		       !a->cqe && !a->cqe_size && !a->cqe_cap &&
 		       !a->out_len && !a->len_delta &&
-		       a->info_size == sizeof(struct xdev_ext_xdomain_proto_info);
+		       (a->info_size == sizeof(struct xdev_ext_xdomain_proto_info) ||
+			a->info_size == sizeof(struct xdev_ext_xdomain_proto_info_v2));
 	if (a->xdomain)
 		return false;
  if (a->callsite==XDEV_EXT_MECH_SITE_WORKER_SELECT)
@@ -218,8 +219,10 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		    t->batch || t->batch_id || a->base->length ||
 		    a->base->bytes_done || a->base->src_offset ||
 		    a->base->dst_offset || a->base->logical_offset ||
-		    info->size != sizeof(*info) ||
-		    info->version != XDEV_EXT_XDOMAIN_PROTO_VERSION)
+		    info->size != a->info_size ||
+		    !((a->info_size == sizeof(*info) && info->version == XDEV_EXT_XDOMAIN_PROTO_VERSION) ||
+		      (a->info_size == sizeof(struct xdev_ext_xdomain_proto_info_v2) &&
+		       info->version == XDEV_EXT_XDOMAIN_PROTO_V2_VERSION)))
 			return -EINVAL;
 	}
 	fn = xdev_ext_mech_member_fn(ops, a->member);

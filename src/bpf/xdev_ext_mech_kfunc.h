@@ -75,4 +75,9 @@ extern int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *ctx,
 extern int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx,
 				      const void *verdict, __u32 verdict__sz) __ksym;
 
+extern int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *ctx,
+	void *info, __u32 info__sz) __ksym;
+extern int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,
+	const void *verdict, __u32 verdict__sz) __ksym;
+
 #endif /* XDEV_EXT_MECH_KFUNC_H */

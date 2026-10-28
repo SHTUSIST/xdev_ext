@@ -26,11 +26,14 @@ static bool xdev_ext_xdomain_call_ok(const struct xdev_ext_mech_call *c)
 	    c->desc_size || c->desc_cap || c->cqe || c->cqe_size || c->cqe_cap ||
 	    c->out_len || c->len_delta || c->ctx.batch_id || c->ctx.nr_frames ||
 	    c->ctx.desc_cap || c->ctx.base.length || c->ctx.base.bytes_done ||
-	    !c->info || c->info_size != sizeof(*info))
+	    !c->info || (c->info_size != sizeof(*info) &&
+	    c->info_size != sizeof(struct xdev_ext_xdomain_proto_info_v2)))
 		return false;
 	info = c->info;
-	return info->size == sizeof(*info) &&
-	       info->version == XDEV_EXT_XDOMAIN_PROTO_VERSION;
+	return info->size == c->info_size &&
+	       ((c->info_size == sizeof(*info) && info->version == XDEV_EXT_XDOMAIN_PROTO_VERSION) ||
+		(c->info_size == sizeof(struct xdev_ext_xdomain_proto_info_v2) &&
+		 info->version == XDEV_EXT_XDOMAIN_PROTO_V2_VERSION));
 }
 
 static bool xdev_ext_xdomain_verdict_ok(const struct xdev_ext_xdomain_proto_verdict *v,
@@ -38,9 +41,10 @@ static bool xdev_ext_xdomain_verdict_ok(const struct xdev_ext_xdomain_proto_verd
 {
 	bool credit = false, status = false;
 
-	if (v->size != sizeof(*v) || v->version != XDEV_EXT_XDOMAIN_PROTO_VERSION ||
+	if (v->size != sizeof(*v) || v->version != info->version ||
 	    v->action <= XDEV_EXT_XDP_ACT_INVALID ||
-	    v->action > XDEV_EXT_XDP_ACT_CANCEL_ARMED || v->flags ||
+	    v->action > (info->version == XDEV_EXT_XDOMAIN_PROTO_V2_VERSION ?
+		XDEV_EXT_XDP_ACT_TX_POST_EARLY : XDEV_EXT_XDP_ACT_CANCEL_ARMED) || v->flags ||
 	    v->reserved0 || v->reserved1 || v->event_id != info->event_id ||
 	    v->epoch != info->epoch)
 		return false;
@@ -86,7 +90,8 @@ __bpf_kfunc int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *ctx,
 
 	if (!c)
 		return -EINVAL;
-	if (!xdev_ext_xdomain_call_ok(c) || !info ||
+	if (!xdev_ext_xdomain_call_ok(c) ||
+	    c->info_size != sizeof(struct xdev_ext_xdomain_proto_info) || !info ||
 	    info__sz != sizeof(struct xdev_ext_xdomain_proto_info)) {
 		c->protocol_error = 1;
 		return -EINVAL;
@@ -103,7 +108,8 @@ __bpf_kfunc int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx
 
 	if (!c)
 		return -EINVAL;
-	if (!xdev_ext_xdomain_call_ok(c)) {
+	if (!xdev_ext_xdomain_call_ok(c) ||
+	    c->info_size != sizeof(struct xdev_ext_xdomain_proto_info)) {
 		c->protocol_error = 1;
 		return -EINVAL;
 	}
@@ -126,16 +132,70 @@ __bpf_kfunc int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *ctx
 	return 0;
 }
 
+__bpf_kfunc int bpf_xdev_ext_xdomain_info_v2(const struct xdev_ext_mech_ctx *ctx,
+					  void *info, __u32 info__sz)
+{
+	struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+	struct xdev_ext_xdomain_proto_info_v2 *out = info;
+
+	if (!c) return -EINVAL;
+	if (!xdev_ext_xdomain_call_ok(c) || !out || info__sz != sizeof(*out)) {
+		c->protocol_error = 1;
+		return -EINVAL;
+	}
+	memset(out, 0, sizeof(*out));
+	memcpy(out, c->info, c->info_size);
+	out->base.size = sizeof(*out);
+	out->base.version = XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
+	return 0;
+}
+
+__bpf_kfunc int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,
+					     const void *verdict, __u32 verdict__sz)
+{
+	struct xdev_ext_mech_call *c = xdev_ext_mech_call_of(ctx);
+	struct xdev_ext_xdomain_proto_verdict v;
+	struct xdev_ext_xdomain_proto_info info;
+
+	if (!c) return -EINVAL;
+	if (!xdev_ext_xdomain_call_ok(c)) {
+		c->protocol_error = 1;
+		return -EINVAL;
+	}
+	if (c->xdomain->calls) {
+		c->protocol_error = 1;
+		return -EALREADY;
+	}
+	c->xdomain->calls = 1;
+	if (!verdict || verdict__sz != sizeof(v)) goto invalid;
+	memcpy(&v, verdict, sizeof(v));
+	if (v.version != XDEV_EXT_XDOMAIN_PROTO_V2_VERSION) goto invalid;
+	memcpy(&info, c->info, sizeof(info));
+	/* A new policy can serve ordinary sessions without changing v1 calls. */
+	if (info.version == XDEV_EXT_XDOMAIN_PROTO_VERSION)
+		v.version = XDEV_EXT_XDOMAIN_PROTO_VERSION;
+	if (!xdev_ext_xdomain_verdict_ok(&v, &info)) goto invalid;
+	c->xdomain->verdict = v;
+	return 0;
+ invalid:
+	c->protocol_error = 1;
+	return -EINVAL;
+}
+
 __bpf_kfunc_end_defs();
 
 BTF_KFUNCS_START(xdev_ext_xdomain_kfunc_ids)
 BTF_ID_FLAGS(func, bpf_xdev_ext_xdomain_info, KF_TRUSTED_ARGS)
 BTF_ID_FLAGS(func, bpf_xdev_ext_xdomain_verdict, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_xdomain_info_v2, KF_TRUSTED_ARGS)
+BTF_ID_FLAGS(func, bpf_xdev_ext_xdomain_verdict_v2, KF_TRUSTED_ARGS)
 BTF_KFUNCS_END(xdev_ext_xdomain_kfunc_ids)
 
 BTF_SET_START(xdev_ext_xdomain_complete_kfuncs)
 BTF_ID(func, bpf_xdev_ext_xdomain_info)
 BTF_ID(func, bpf_xdev_ext_xdomain_verdict)
+BTF_ID(func, bpf_xdev_ext_xdomain_info_v2)
+BTF_ID(func, bpf_xdev_ext_xdomain_verdict_v2)
 BTF_SET_END(xdev_ext_xdomain_complete_kfuncs)
 
 static int xdev_ext_xdomain_kfunc_filter(const struct bpf_prog *prog, u32 kfunc_id)
@@ -154,6 +214,7 @@ static const struct btf_kfunc_id_set xdev_ext_xdomain_kfunc_set = {
 static int __init xdev_ext_xdomain_kfunc_init(void)
 {
 	BTF_TYPE_EMIT(struct xdev_ext_xdomain_proto_info);
+	BTF_TYPE_EMIT(struct xdev_ext_xdomain_proto_info_v2);
 	BTF_TYPE_EMIT(struct xdev_ext_xdomain_proto_verdict);
 	BTF_TYPE_EMIT(enum xdev_ext_xdomain_proto_event);
 	BTF_TYPE_EMIT(enum xdev_ext_xdomain_proto_action);

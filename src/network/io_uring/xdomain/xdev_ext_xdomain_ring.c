@@ -469,6 +469,32 @@ out:
 	return ret;
 }
 
+int xdev_ext_xd_msg_send_v2(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_ep *ep,
+                           struct xdev_ext_xd_msg_v2 *m)
+{
+	u8 buf[128];
+	unsigned long flags;
+	int ret;
+
+	if (!ep || !ep->early || ep->xl != xl || ep->chan >= xl->channels)
+		return -EINVAL;
+	spin_lock_irqsave(&xl->lock, flags);
+	if (!xl->up || xdev_ext_xd_closing(xl) || ep->detached ||
+	    ep->bound_local_inc != xl->local_inc || ep->bound_remote_inc != xl->remote_inc) {
+		ret = -ENOLINK;
+		goto out;
+	}
+	m->src_inc = xl->local_inc;
+	m->dst_inc = xl->remote_inc;
+	m->channel = ep->chan;
+	ret = xdev_ext_xd_msg_v2_encode(buf, m, xdev_ext_xd_crc);
+	if (!ret)
+		ret = xdev_ext_xd_ctl_tx_locked(xl, buf, sizeof(buf));
+ out:
+	spin_unlock_irqrestore(&xl->lock, flags);
+	return ret;
+}
+
 int xdev_ext_xd_seq_consume(struct xdev_ext_xd_link *xl, u32 chan, u64 data_seq, u32 count)
 {
 	unsigned long flags;
@@ -525,6 +551,37 @@ void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_x
 
 /* Control RX callback, ring work (process context): decode, check the link
  * incarnation, hand to the bound stage under ep_mutex, repost the buffer. */
+static void xdev_ext_xd_ctl_dispatch_v2(struct xdev_ext_xd_link *xl, const u8 *buf, u32 len)
+{
+	struct xdev_ext_xd_msg_v2 m;
+	struct xdev_ext_xd_ep *ep;
+	unsigned long flags;
+	bool valid, to_rx;
+
+	if (xdev_ext_xd_msg_v2_decode(buf, len, xdev_ext_xd_crc, &m))
+		goto drop;
+	to_rx = m.type == XDEV_EXT_XD_HELLO || m.type == XDEV_EXT_XD_CONFIRM ||
+		m.type == XDEV_EXT_XD_CANCEL;
+	mutex_lock(&xl->ep_mutex);
+	spin_lock_irqsave(&xl->lock, flags);
+	valid = xl->up && !xdev_ext_xd_closing(xl) &&
+		!xdev_ext_xd_msg_v2_for_us(&m, xl->local_inc, xl->remote_inc, xl->channels);
+	spin_unlock_irqrestore(&xl->lock, flags);
+	if (valid) {
+		ep = xl->chan[m.channel].ep[to_rx];
+		if (ep && ep->early && !ep->detached &&
+		    ep->bound_local_inc == m.dst_inc && ep->bound_remote_inc == m.src_inc &&
+		    xdev_ext_mech_session_admits(ep->st->s)) {
+			xdev_ext_xd_class_ctl_v2(ep->st, &m);
+			mutex_unlock(&xl->ep_mutex);
+			return;
+		}
+	}
+	mutex_unlock(&xl->ep_mutex);
+ drop:
+	WRITE_ONCE(xl->ctl_dropped, xl->ctl_dropped + 1);
+}
+
 static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf, u32 len)
 {
 	struct xdev_ext_xd_msg m;
@@ -533,6 +590,10 @@ static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf,
 	unsigned long flags;
 	bool to_rx;
 
+	if (len >= 5 && (buf[4] == 2 || xdev_ext_xd_get(buf, 4) == XDEV_EXT_XD_MSG_V2_MAGIC)) {
+		xdev_ext_xd_ctl_dispatch_v2(xl, buf, len);
+		return;
+	}
 	spin_lock_irqsave(&xl->lock, flags);
 	local = xl->local_inc;
 	remote = xl->remote_inc;
@@ -559,9 +620,9 @@ static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf,
 	}
 	spin_unlock_irqrestore(&xl->lock, flags);
 	ep = xl->chan[m.channel].ep[to_rx];
-	if (ep)
+	if (ep && !ep->early)
 		xdev_ext_xd_class_ctl(ep->st, &m);
-	else if (m.type == XDEV_EXT_XD_RTS)
+	else if (!ep && m.type == XDEV_EXT_XD_RTS)
 		xdev_ext_xd_refuse_rts(xl, &m);
 	else
 		WRITE_ONCE(xl->ctl_dropped, xl->ctl_dropped + 1);
@@ -1094,7 +1155,8 @@ static void *xdev_ext_xd_bind(struct xdev_ext_mech_stage *st, const struct xdev_
 		xdev_ext_xd_link_put(xl);
 		return ERR_PTR(-ENOMEM);
 	}
-	*ep = (struct xdev_ext_xd_ep){ .xl = xl, .st = st, .chan = (u32)u->arg1, .rx = rx };
+	*ep = (struct xdev_ext_xd_ep){ .xl = xl, .st = st, .chan = (u32)u->arg1, .rx = rx,
+		.early = !!(u->flags & XDEV_EXT_XDOMAIN_F_EARLY) };
 	mutex_lock(&xl->ep_mutex);
 	spin_lock_irq(&xl->lock);
 	if (!xl->up || xdev_ext_xd_closing(xl))
@@ -1103,7 +1165,13 @@ static void *xdev_ext_xd_bind(struct xdev_ext_mech_stage *st, const struct xdev_
 		ret = -EAGAIN;
 	else if (xl->chan[ep->chan].ep[rx])
 		ret = -EBUSY;
+	else if (ep->early && !xl->early_bind_next)
+		ret = -EOVERFLOW;
 	else {
+		if (ep->early) {
+			ep->bind_id = xl->early_bind_next;
+			xl->early_bind_next = ep->bind_id == ~0ULL ? 0 : ep->bind_id + 1;
+		}
 		ep->bound_local_inc = xl->local_inc;
 		ep->bound_remote_inc = xl->remote_inc;
 		xl->chan[ep->chan].ep[rx] = ep;

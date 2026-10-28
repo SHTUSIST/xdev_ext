@@ -775,6 +775,7 @@ static int xdev_ext_xd_probe(struct tb_service *svc, const struct tb_service_id 
 	(void)id;
 	if (!xl)
 		return -ENOMEM;
+	xl->early_bind_next = 1;
 	kref_init(&xl->ref);
 	spin_lock_init(&xl->lock);
 	mutex_init(&xl->ctl_mutex);

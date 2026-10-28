@@ -20,6 +20,10 @@
 
 struct xdev_ext_xd_reply {
 	u64 group, stream, advertised, deadline;
+	/* Immutable early transaction, independent of the reusable slot. */
+	u64 tx_bind, rx_bind, key, data_seq, ticket, pool_generation;
+	struct xdev_ext_mech_batch *batch;
+	u32 total_len, seg_len, count;
 	u64 wake, wait_epoch;
 	int chain_status, local_status;
 	bool used, admission, chain_done, sequestered, cts, final, closed, native_posted;
@@ -29,7 +33,7 @@ struct xdev_ext_xd_reply {
 };
 struct xdev_ext_xd_fact {
 	u64 epoch, wake, born, posted, local_done, withdrawal, arm_order;
-	u64 wait_epoch;
+	u64 wait_epoch, pool_generation, data_seq;
 	u32 event;
 	bool reserved, accepted, traced, complete_traced, published, retired, cts_received;
 	struct xdev_ext_xd_reply *reply;
@@ -65,10 +69,16 @@ struct xdev_ext_xd_stage {
 	u64 wait_generation;
 	struct xdev_ext_xd_wait_facts wait_facts;
 	bool stop_latched, down_latched, overflow, failed;
+	bool early;
+	u32 shape_count, pair_state, grant_state;
+	u64 tx_bind, rx_bind, pair_deadline, pair_next_retry, pair_wake;
+	u64 rx_next_group, grant_deadline, pending_grant_group, pending_grant_deadline;
+	struct xdev_ext_xd_msg_v2 early_ctl[XD_EVENTS], grant;
+	u32 early_ctl_count;
 	int stage_error;
 	/* Worker-only current authority; callbacks change epoch, never this token. */
 	struct { u64 id, epoch, ticket; u32 event; struct xdev_ext_net_slot *slot;
-		struct xdev_ext_xd_reply *reply; bool rts, ctl; } worker_event;
+		struct xdev_ext_xd_reply *reply; bool rts, ctl, early_ctl; } worker_event;
 };
 
 static struct xdev_ext_xd_ep *xdev_ext_xd_ep_of(struct xdev_ext_xd_stage *xs)
@@ -158,6 +168,19 @@ static void xd_reply_put(struct xdev_ext_xd_stage *xs, struct xdev_ext_xd_reply 
 static int xd_send(struct xdev_ext_xd_stage *xs, struct xdev_ext_xd_msg *m)
 {
 	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	if (xs->early) {
+		struct xdev_ext_xd_msg_v2 v = { .type = m->type, .tx_bind = xs->tx_bind,
+			.rx_bind = xs->rx_bind, .group = m->group, .credit = m->credit, .status = m->status };
+		if (m->type == XDEV_EXT_XD_CTS) {
+			struct xdev_ext_xd_reply *r = xd_reply_group(xs, m->group);
+			if (!r || !r->native_posted || r->tx_bind != xs->tx_bind || r->rx_bind != xs->rx_bind)
+				return -EPROTO;
+			v.key = r->key; v.data_seq = r->data_seq; v.total_len = r->total_len;
+			v.seg_len = r->seg_len; v.count = r->count;
+			memcpy(v.tag, r->tag, sizeof(v.tag));
+		}
+		return xdev_ext_xd_msg_send_v2(ep->xl, ep, &v);
+	}
 	return xdev_ext_xd_msg_send(ep->xl, ep, ep->chan, m);
 }
 static void xd_fail_locked(struct xdev_ext_xd_stage *xs, int err)
@@ -167,6 +190,7 @@ static void xd_fail_locked(struct xdev_ext_xd_stage *xs, int err)
 
 	if (!xs->failed) {
 		xs->failed = true;
+		if (xs->early) { xs->pair_state = XDEV_EXT_XDP_PAIR_FAILED; xs->grant_state = XDEV_EXT_XDP_GRANT_EMPTY; }
 		xdev_ext_xd_link_fail(ep->xl, ep, err);
 	}
 	xs->down_latched = true;
@@ -272,6 +296,8 @@ static int xdev_ext_xd_class_default_build(struct xdev_ext_mech_stage *st, struc
 	if (!info.nr_frames) return -EPROTO;
 	for (i = 0; i < info.nr_frames; i++) d[i] = (struct xdev_ext_xdomain_desc){ .frame_pos = i, .frame_off = info.f[i].data_off, .len = info.f[i].data_len };
 	d[0].group = info.next_group;
+	if (((struct xdev_ext_xd_stage *)st->priv)->early && st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE)
+		xdev_ext_xd_key_tag(d[0].tag, xdev_ext_mech_batch_key(b));
 	return 0;
 }
 struct xdev_ext_xd_cover { const struct xdev_ext_xdomain_desc *d; };
@@ -282,6 +308,27 @@ static void xdev_ext_xd_span(const void *ctx, u32 i, struct xdev_ext_net_span *s
 	for (k = 0; k < sizeof(d->rsvd); k++) bad |= d->rsvd[k];
 	if (i) { bad |= d->group != 0; for (k = 0; k < XDEV_EXT_XDOMAIN_TAG_LEN; k++) bad |= d->tag[k]; }
 	*s = (struct xdev_ext_net_span){ d->frame_pos, d->frame_off, d->len, bad };
+}
+static int xd_early_canonical(struct xdev_ext_xd_stage *xs, struct xdev_ext_mech_batch *b,
+		const struct xdev_ext_xdomain_desc *d, u32 nr)
+{
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
+	struct xdev_ext_mech_frame frame;
+	u8 tag[XDEV_EXT_XDOMAIN_TAG_LEN];
+	u32 j, k, frames = ((u64)l->group_bytes + l->seg_len - 1) / l->seg_len;
+	if (nr != frames || xdev_ext_mech_batch_nr_frames(b) != frames) return -EPROTO;
+	xdev_ext_xd_key_tag(tag, xdev_ext_mech_batch_key(b));
+	for (j = 0; j < frames; j++) {
+		u32 len = l->group_bytes - (u64)j * l->seg_len;
+		if (len > l->seg_len) len = l->seg_len;
+		if (xdev_ext_mech_batch_frame(b, j, &frame) || frame.data_len != len ||
+		    d[j].frame_pos != j || d[j].frame_off != frame.data_off || d[j].len != len)
+			return -EPROTO;
+		if (j && d[j].group) return -EPROTO;
+		for (k = 0; k < sizeof(tag); k++)
+			if (d[j].tag[k] != (!j && !xs->ns.rx ? tag[k] : 0)) return -EPROTO;
+	}
+	return 0;
 }
 static int xdev_ext_xd_class_validate(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
@@ -310,6 +357,7 @@ static int xdev_ext_xd_class_validate(struct xdev_ext_mech_stage *st, struct xde
 		elems += segs;
 	}
 	if (elems > XDEV_EXT_XDOMAIN_MAX_ELEMS) return -E2BIG;
+	if (xs->early && (elems != xs->shape_count || xd_early_canonical(xs, b, d, n))) return -EPROTO;
 	memcpy(bp->desc, d, n * sizeof(*d)); bp->nr = n; bp->elems = elems;
 	return 0;
 }
@@ -450,6 +498,7 @@ static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *
 	xs->worker_event.id = i->event_id; xs->worker_event.epoch = i->epoch; xs->worker_event.event = event;
 	xs->worker_event.slot = s; xs->worker_event.reply = r; xs->worker_event.rts = rts; xs->worker_event.ctl = ctl;
 	xs->worker_event.ticket = s ? s->ticket : 0;
+	xs->worker_event.early_ctl = false;
 }
 static int xdev_ext_xd_protocol_call(struct xdev_ext_xd_stage *xs,
 		const struct xdev_ext_xdomain_proto_info *info, struct xdev_ext_xdomain_proto_result *result)
@@ -458,7 +507,7 @@ static int xdev_ext_xd_protocol_call(struct xdev_ext_xd_stage *xs,
 		.ctx_size = sizeof(base), .backend = XDEV_EXT_BINDING_BACKEND_UNSPEC, .direction = xs->ns.st->direction };
 	struct xdev_ext_mech_call_args a = { .member = XDEV_EXT_MECH_MEMBER_COMPLETE,
 		.callsite = XDEV_EXT_MECH_SITE_WORKER_PROTOCOL, .base = &base,
-		.info = info, .info_size = sizeof(*info), .xdomain = result };
+		.info = info, .info_size = info->size, .xdomain = result };
 	s32 ret = -1;
 	int err;
 	memset(result, 0, sizeof(*result));
@@ -467,6 +516,12 @@ static int xdev_ext_xd_protocol_call(struct xdev_ext_xd_stage *xs,
 }
 static void xd_drop_input(struct xdev_ext_xd_stage *xs)
 {
+	if (xs->worker_event.early_ctl && xs->early_ctl_count) {
+		xs->early_ctl_count--;
+		memmove(xs->early_ctl, xs->early_ctl + 1, xs->early_ctl_count * sizeof(xs->early_ctl[0]));
+		xs->worker_event.early_ctl = false;
+		return;
+	}
 	if (xs->worker_event.ctl && xs->ctl_count) {
 		xs->ctl_count--; memmove(xs->ctl, xs->ctl + 1, xs->ctl_count * sizeof(xs->ctl[0]));
 		memmove(xs->ctl_wake, xs->ctl_wake + 1, xs->ctl_count * sizeof(xs->ctl_wake[0]));
@@ -498,12 +553,19 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 	u32 k, bytes = 0;
 	bool family_called = false;
 	int ret;
-	ret = xdev_ext_xd_lease_all(xs, s, bp);
+	ret = xs->early ? xd_early_canonical(xs, s->batch, bp->desc, bp->nr) : 0;
+	if (!ret && xs->early && xs->ns.rx && (!f->reply || f->reply->batch != s->batch ||
+	    f->reply->ticket != ticket || f->reply->pool_generation != i->pool_generation ||
+	    f->reply->tx_bind != xs->tx_bind || f->reply->rx_bind != xs->rx_bind)) ret = -ESTALE;
+	if (!ret) ret = xdev_ext_xd_lease_all(xs, s, bp);
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	if (!ret && (xs->ns.dead || xs->failed ||
-	    (xs->ns.rx && !xdev_ext_mech_session_admits(xs->ns.st->s)) || s->ticket != ticket ||
+	    ((xs->ns.rx || xs->early) && !xdev_ext_mech_session_admits(xs->ns.st->s)) || s->ticket != ticket ||
 	    xdev_ext_mech_batch_ticket(s->batch) != ticket || f->epoch != epoch ||
 	    i->pool_generation != xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)))) ret = -ESTALE;
+	/* A lease-acquisition boundary can cross the immutable grant deadline. */
+	if (!ret && xs->early && i->hard_deadline_ns &&
+	    ktime_get_boottime_ns() >= i->hard_deadline_ns) ret = -ETIMEDOUT;
 	spin_lock(&ep->xl->lock);
 	if (!ret && (!ep->xl->up || ep->detached || ep->xl->local_inc != i->local_inc || ep->xl->remote_inc != i->remote_inc)) ret = -ESTALE;
 	spin_unlock(&ep->xl->lock);
@@ -524,6 +586,7 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 			f->reply->local_status = ret;
 			f->reply->final = true;
 		} else xd_fail_locked(xs, ret);
+		if (xs->early) { xd_fail_locked(xs, ret); xs->stage_error = ret; }
 	} else {
 		f->accepted = true; f->withdrawal = 0;
 		s->state = XDEV_EXT_RDV_POSTED;
@@ -738,7 +801,8 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 			m.type = XDEV_EXT_XD_CTS;
 		} else {
 			status = xd_reply_status(r);
-			if (!r->final || (act == XDEV_EXT_XDP_ACT_SEND_ACK && (!r->chain_done || status || r->sequestered)) ||
+			if (!r->final || (act == XDEV_EXT_XDP_ACT_SEND_ACK && (!r->chain_done || status || r->sequestered ||
+			    (xs->early && (!r->native_posted || !r->local_known || !r->local_quiesced)))) ||
 			    (act == XDEV_EXT_XDP_ACT_SEND_FAIL && (!status || status != v->status))) { ret = -EPROTO; break; }
 			m.type = act == XDEV_EXT_XDP_ACT_SEND_ACK ? XDEV_EXT_XD_ACK : XDEV_EXT_XD_FAIL;
 			m.status = status < 0 ? -status : 0;
@@ -890,7 +954,7 @@ void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext
 	struct xdev_ext_xd_stage *xs = st->priv;
 	unsigned long flags;
 	u32 k;
-	if (!xs) return;
+	if (!xs || xs->early) return;
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	/* dev.bind may have published the endpoint just before ns.lk is set.
 	 * X4 already authenticated this wire record; retain its scalar facts,
@@ -1066,11 +1130,483 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 	}
 	return false;
 }
+/* ns.lock held; source fields come only from the actual immutable CREATE. */
+static bool xd_early_shape_match(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd_msg_v2 *m)
+{
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
+	return m->total_len == l->group_bytes && m->seg_len == l->seg_len && m->count == xs->shape_count;
+}
+static bool xd_early_msg_equal(const struct xdev_ext_xd_msg_v2 *a, const struct xdev_ext_xd_msg_v2 *b)
+{
+	return a->src_inc == b->src_inc && a->dst_inc == b->dst_inc && a->tx_bind == b->tx_bind &&
+		a->rx_bind == b->rx_bind && a->group == b->group && a->credit == b->credit &&
+		a->data_seq == b->data_seq && a->key == b->key && a->total_len == b->total_len &&
+		a->seg_len == b->seg_len && a->count == b->count && a->status == b->status &&
+		a->type == b->type && a->channel == b->channel && !memcmp(a->tag, b->tag, sizeof(a->tag));
+}
+static bool xd_early_pair_match(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd_msg_v2 *m)
+{
+	return xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND && m->tx_bind == xs->tx_bind && m->rx_bind == xs->rx_bind;
+}
+/* Endpoint lifetime is excluded by ep_mutex. Ingress records no data authority. */
+void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	struct xdev_ext_rel_tx proved;
+	unsigned long flags;
+	u32 k;
+	if (!xs || !xs->early || !xdev_ext_mech_session_admits(st->s) || xdev_ext_xd_msg_v2_layout(m)) return;
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	if (xs->failed || xs->stop_latched || xs->ns.dead || m->channel != xs->channel ||
+	    m->src_inc != xs->remote_inc || m->dst_inc != xs->local_inc) goto out;
+	if (xs->ns.rx && m->type == XDEV_EXT_XD_HELLO) {
+		if (!xd_early_shape_match(xs, m) || (xs->tx_bind && xs->tx_bind != m->tx_bind)) goto out;
+		/* Keep one candidate even before its first enqueue succeeds. */
+		for (k = 0; k < xs->early_ctl_count; k++)
+			if (xs->early_ctl[k].type == XDEV_EXT_XD_HELLO && xs->early_ctl[k].tx_bind != m->tx_bind) goto out;
+	} else if (!xs->ns.rx && m->type == XDEV_EXT_XD_CHALLENGE) {
+		if ((xs->pair_state != XDEV_EXT_XDP_PAIR_HELLO_SENT && xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND) ||
+		    !xd_early_shape_match(xs, m) || m->tx_bind != xs->tx_bind ||
+		    (xs->rx_bind && xs->rx_bind != m->rx_bind)) goto out;
+		for (k = 0; k < xs->early_ctl_count; k++)
+			if (xs->early_ctl[k].type == XDEV_EXT_XD_CHALLENGE && xs->early_ctl[k].rx_bind != m->rx_bind) goto out;
+	} else if (xs->ns.rx && m->type == XDEV_EXT_XD_CONFIRM) {
+		if ((xs->pair_state != XDEV_EXT_XDP_PAIR_CHALLENGE_SENT && xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND) ||
+		    !xd_early_shape_match(xs, m) || m->tx_bind != xs->tx_bind || m->rx_bind != xs->rx_bind) goto out;
+	} else {
+		if (!xd_early_pair_match(xs, m)) goto out;
+		if (!xs->ns.rx && m->type == XDEV_EXT_XD_CTS) {
+			struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+			bool valid;
+			if (!xd_early_shape_match(xs, m)) goto out;
+			if (xs->grant_state != XDEV_EXT_XDP_GRANT_EMPTY && m->group == xs->grant.group) {
+				if (!xd_early_msg_equal(m, &xs->grant)) goto out;
+			} else {
+				if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE || m->group != xs->ns.tx.next_group) goto out;
+				spin_lock(&ep->xl->lock);
+				valid = m->data_seq == ep->xl->chan[ep->chan].announced &&
+					m->count <= ~0ULL - m->data_seq;
+				spin_unlock(&ep->xl->lock);
+				if (!valid) goto out;
+				proved = xs->ns.tx;
+				if (xdev_ext_net_credit_update(&proved, m->credit)) goto out;
+			}
+		} else if (!xs->ns.rx && m->type >= XDEV_EXT_XD_ACK && m->type <= XDEV_EXT_XD_FAIL) {
+			struct xdev_ext_net_slot *slot = xd_group(xs, m->group);
+			if (slot && !xd_fact(xs, slot)->accepted && !xd_fact(xs, slot)->reserved) goto out;
+			proved = xs->ns.tx;
+			if (m->credit && xdev_ext_net_credit_update(&proved, m->credit)) goto out;
+		} else if (!xs->ns.rx || m->type != XDEV_EXT_XD_CANCEL || !xd_reply_group(xs, m->group)) goto out;
+	}
+	for (k = 0; k < xs->early_ctl_count; k++)
+		if (xd_early_msg_equal(m, &xs->early_ctl[k])) goto out;
+	if (xs->early_ctl_count == XD_EVENTS) { xs->overflow = true; goto changed; }
+	xs->early_ctl[xs->early_ctl_count++] = *m;
+	if (m->type == XDEV_EXT_XD_CTS &&
+	    !(xs->grant_state != XDEV_EXT_XDP_GRANT_EMPTY && m->group == xs->grant.group) &&
+	    !xs->pending_grant_deadline) {
+		xs->pending_grant_group = m->group;
+		xs->pending_grant_deadline = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_PHASE_NS);
+	}
+ changed:
+	xs->pair_wake = 0;
+	xd_changed(xs);
+ out:
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+}
+static void xd_early_fail_locked(struct xdev_ext_xd_stage *xs, int err)
+{
+	bool committed = xs->posted_groups || xs->pending_grant_deadline ||
+		xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;
+	u32 k;
+	if (xs->failed && xs->ns.dead) { xd_terminal_locked(xs, err); return; }
+	for (k = 0; k < xs->ns.depth; k++)
+		if (xs->ns.slots[k].busy && (xd_fact(xs, &xs->ns.slots[k])->accepted ||
+		    xd_fact(xs, &xs->ns.slots[k])->reserved)) committed = true;
+	for (k = 0; k < XD_REPLIES; k++)
+		if (xs->replies[k].used && xs->replies[k].admission && xs->replies[k].native_posted) committed = true;
+	if (committed) xd_fail_locked(xs, err);
+	else { xs->failed = true; xs->pair_state = XDEV_EXT_XDP_PAIR_FAILED; xs->grant_state = XDEV_EXT_XDP_GRANT_EMPTY; }
+	xs->ns.dead = true; xs->stage_error = err;
+	xd_terminal_locked(xs, err);
+}
+/* Mandatory checks run before policy, including when there are no batch slots. */
+static bool xd_early_safety_locked(struct xdev_ext_xd_stage *xs, u64 now)
+{
+	u32 k;
+	if (!xs->stop_latched && !xdev_ext_mech_session_admits(xs->ns.st->s)) {
+		xdev_ext_mech_stage_stop(xs->ns.st, 0);
+		xs->stop_ns = xdev_ext_mech_session_stop_started_ns(xs->ns.st->s);
+		xs->stop_latched = true;
+		xs->epoch++;
+	}
+	if (xs->failed || xs->ns.dead || xs->down_latched || xs->overflow) {
+		xd_early_fail_locked(xs, xs->overflow ? -EPROTO : -ENOLINK); return false;
+	}
+	if (!xs->pair_deadline && !xs->stop_latched)
+		xs->pair_deadline = xdev_ext_rel_deadline(now, XD_PHASE_NS);
+	if (xs->stop_latched || (xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND && now >= xs->pair_deadline) ||
+	    (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE && now >= xs->grant_deadline) ||
+	    (xs->pending_grant_deadline && now >= xs->pending_grant_deadline)) {
+		xd_early_fail_locked(xs, xs->stop_latched ? -ECANCELED : -ETIMEDOUT); return false;
+	}
+	for (k = 0; k < xs->ns.depth; k++) {
+		struct xdev_ext_net_slot *slot = &xs->ns.slots[k];
+		if (slot->busy && slot->state != XDEV_EXT_RDV_FINAL && now >= xd_hard(xs, slot)) {
+			xd_early_fail_locked(xs, -ETIMEDOUT); return false;
+		}
+	}
+	for (k = 0; k < XD_REPLIES; k++) {
+		struct xdev_ext_xd_reply *reply = &xs->replies[k];
+		if (reply->used && reply->admission && reply->deadline && now >= reply->deadline) {
+			xd_early_fail_locked(xs, -ETIMEDOUT); return false;
+		}
+	}
+	return true;
+}
+/* Exact private transaction facts are never accepted from BPF or wire. */
+static bool xd_early_batch_current(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s)
+{
+	struct xdev_ext_xd_batch *bp = xdev_ext_mech_batch_priv(s->batch);
+	return s->busy && s->ticket == xdev_ext_mech_batch_ticket(s->batch) &&
+		xd_fact(xs, s)->pool_generation == xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)) &&
+		bp->slot == s && bp->elems == xs->shape_count && !xd_early_canonical(xs, s->batch, bp->desc, bp->nr);
+}
+static bool xd_early_rx_postable(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s)
+{
+	struct xdev_ext_rel_rx *rx = &xs->ns.rx_rel;
+	return xs->ns.rx && s && s->state == XDEV_EXT_RDV_ARMED &&
+		xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND && !xs->posted_groups &&
+		!xd_fact(xs, s)->reserved && !xd_fact(xs, s)->accepted && xd_fact(xs, s)->reply &&
+		xs->ns.rx_rel_ready && xs->rx_next_group >= rx->base_group && xs->rx_next_group < rx->credit &&
+		xs->rx_next_group <= ~0ULL - rx->cfg.window &&
+		(!rx->entry[xs->rx_next_group % rx->cfg.window].state ||
+		 rx->entry[xs->rx_next_group % rx->cfg.window].group < rx->base_group) && xd_early_batch_current(xs, s);
+}
+static bool xd_early_tx_postable(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s)
+{
+	struct xdev_ext_xd_batch *bp;
+	if (xs->ns.rx || !s || xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND ||
+	    xs->grant_state != XDEV_EXT_XDP_GRANT_AVAILABLE || s->state != XDEV_EXT_RDV_IDLE ||
+	    xd_fact(xs, s)->reserved || xd_fact(xs, s)->accepted || !xd_early_batch_current(xs, s)) return false;
+	bp = xdev_ext_mech_batch_priv(s->batch);
+	return xs->grant.key == xdev_ext_mech_batch_key(s->batch) &&
+		bp->desc[0].group == xs->grant.group && xs->grant.group == xs->ns.tx.next_group;
+}
+static u64 xd_early_stage_hard(struct xdev_ext_xd_stage *xs)
+{
+	u64 hard = xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND ? ~0ULL : xs->pair_deadline;
+	u32 k;
+	if (xs->stop_latched && xdev_ext_rel_deadline(xs->stop_ns, XD_STOP_NS) < hard)
+		hard = xdev_ext_rel_deadline(xs->stop_ns, XD_STOP_NS);
+	if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE && xs->grant_deadline < hard) hard = xs->grant_deadline;
+	if (xs->pending_grant_deadline && xs->pending_grant_deadline < hard) hard = xs->pending_grant_deadline;
+	for (k = 0; k < xs->ns.depth; k++)
+		if (xs->ns.slots[k].busy && xs->ns.slots[k].state != XDEV_EXT_RDV_FINAL &&
+		    xd_hard(xs, &xs->ns.slots[k]) < hard) hard = xd_hard(xs, &xs->ns.slots[k]);
+	for (k = 0; k < XD_REPLIES; k++)
+		if (xs->replies[k].used && xs->replies[k].admission && xs->replies[k].deadline < hard)
+			hard = xs->replies[k].deadline;
+	return hard;
+}
+static void xd_early_snapshot_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
+		struct xdev_ext_xd_reply *r, u32 event, struct xdev_ext_xdomain_proto_info_v2 *i)
+{
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
+	struct xdev_ext_xd_msg_v2 *m = NULL;
+	bool input = xs->early_ctl_count && (event == XDEV_EXT_XDP_EV_HELLO || event == XDEV_EXT_XDP_EV_CHALLENGE ||
+		event == XDEV_EXT_XDP_EV_CONFIRM || event == XDEV_EXT_XDP_EV_GRANT ||
+		event == XDEV_EXT_XDP_EV_DUPLICATE || event == XDEV_EXT_XDP_EV_ACK ||
+		event == XDEV_EXT_XDP_EV_HELD || event == XDEV_EXT_XDP_EV_FAIL || event == XDEV_EXT_XDP_EV_CANCEL);
+	memset(i, 0, sizeof(*i));
+	xd_snapshot(xs, s, r, event, false, false, &i->base);
+	if (s) r = xd_fact(xs, s)->reply;
+	i->base.size = sizeof(*i); i->base.version = XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
+	i->mode = XDEV_EXT_XDP_MODE_EARLY; i->tx_bind = xs->tx_bind; i->rx_bind = xs->rx_bind;
+	i->pair_deadline_ns = xs->pair_deadline; i->pair_state = xs->pair_state;
+	i->shape_total = l->group_bytes; i->shape_seg = l->seg_len; i->shape_count = xs->shape_count;
+	i->grant_state = xs->grant_state;
+	i->base.stream = xs->tx_bind; i->base.want_count = xs->shape_count;
+	if (!s && !r) i->base.hard_deadline_ns = xd_early_stage_hard(xs);
+	if (xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND && xs->pair_deadline < i->base.hard_deadline_ns)
+		i->base.hard_deadline_ns = xs->pair_deadline;
+	spin_lock(&ep->xl->lock);
+	i->base.expected_seq = xs->ns.rx ? ep->xl->chan[ep->chan].consumed : ep->xl->chan[ep->chan].announced;
+	spin_unlock(&ep->xl->lock);
+	if (xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND) i->early_facts |= XDEV_EXT_XDP_EARLY_F_PAIR_BOUND;
+	if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE) i->early_facts |= XDEV_EXT_XDP_EARLY_F_GRANT_AVAILABLE;
+	if (s) {
+		i->key = xdev_ext_mech_batch_key(s->batch);
+		i->early_facts |= XDEV_EXT_XDP_EARLY_F_HAS_BATCH;
+		if (xd_early_batch_current(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_CANONICAL;
+		i->base.total_len = l->group_bytes; i->base.count = xs->shape_count;
+		i->base.data_seq = xd_fact(xs, s)->data_seq;
+		if (!xs->ns.rx) {
+			struct xdev_ext_xd_batch *bp = xdev_ext_mech_batch_priv(s->batch);
+			if (!s->group) i->base.group = bp->desc[0].group;
+			memcpy(i->base.tag, bp->desc[0].tag, sizeof(i->base.tag));
+			if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE &&
+			    xs->grant_deadline < i->base.hard_deadline_ns)
+				i->base.hard_deadline_ns = xs->grant_deadline;
+		}
+		if (xd_early_rx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_RX_POSTABLE;
+		if (xd_early_tx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_TX_POSTABLE;
+	}
+	if (r && r->group) {
+		i->key = r->key; i->tx_bind = r->tx_bind; i->rx_bind = r->rx_bind;
+		i->base.data_seq = r->data_seq; i->base.total_len = r->total_len; i->base.count = r->count;
+		if (r->local_known) i->base.facts |= XDEV_EXT_XDP_F_LOCAL_KNOWN;
+		if (r->local_quiesced) i->base.facts |= XDEV_EXT_XDP_F_LOCAL_QUIESCED;
+		i->early_facts |= XDEV_EXT_XDP_EARLY_F_CANONICAL;
+	}
+	if (input) {
+		m = &xs->early_ctl[0]; xs->worker_event.early_ctl = true; xs->worker_event.ctl = true;
+	} else if (!s && !r && !xs->ns.rx && xs->grant_state != XDEV_EXT_XDP_GRANT_EMPTY) m = &xs->grant;
+	if (m) {
+		i->tx_bind = m->tx_bind; if (m->rx_bind) i->rx_bind = m->rx_bind;
+		if (!s || m->type == XDEV_EXT_XD_CTS) i->key = m->key;
+		i->base.group = m->group; i->base.stream = m->tx_bind;
+		i->base.data_seq = m->data_seq; i->base.total_len = m->total_len; i->base.count = m->count;
+		i->base.msg_type = m->type; i->base.msg_credit = m->type == XDEV_EXT_XD_HELD ? xs->ns.tx.credit : m->credit;
+		memcpy(i->base.tag, m->tag, sizeof(i->base.tag));
+		if (m->type == XDEV_EXT_XD_CTS || m->type >= XDEV_EXT_XD_HELLO)
+			i->early_facts |= XDEV_EXT_XDP_EARLY_F_CANONICAL;
+	}
+	if (event == XDEV_EXT_XDP_EV_PAIR_DUE || event == XDEV_EXT_XDP_EV_HELLO || event == XDEV_EXT_XDP_EV_CHALLENGE) {
+		/* A later phase's first send is eligible immediately. */
+		u64 retry = event == XDEV_EXT_XDP_EV_CHALLENGE && xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND ? 0 : xs->pair_next_retry;
+		if (retry > i->base.now_ns) i->base.policy_deadline_ns = retry;
+		else { i->base.policy_deadline_ns = 0; i->early_facts |= XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE; }
+	}
+}
+static bool xd_early_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain_proto_info_v2 *i)
+{
+	struct xdev_ext_net_slot *s;
+	struct xdev_ext_xd_reply *r;
+	u64 now = ktime_get_boottime_ns();
+	u32 ev;
+	if (!xd_early_safety_locked(xs, now)) return false;
+	if (xs->early_ctl_count && xs->pair_wake <= now) {
+		struct xdev_ext_xd_msg_v2 *m = &xs->early_ctl[0];
+		s = m->group ? xd_group(xs, m->group) : NULL;
+		r = m->group ? xd_reply_group(xs, m->group) : NULL;
+		switch (m->type) {
+		case XDEV_EXT_XD_HELLO: ev = xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_HELLO; break;
+		case XDEV_EXT_XD_CHALLENGE: ev = XDEV_EXT_XDP_EV_CHALLENGE; break;
+		case XDEV_EXT_XD_CONFIRM: ev = xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_CONFIRM; break;
+		case XDEV_EXT_XD_CTS: ev = xs->grant_state != XDEV_EXT_XDP_GRANT_EMPTY && m->group == xs->grant.group ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_GRANT; break;
+		case XDEV_EXT_XD_ACK: ev = s && !xd_remote_final(s->remote) ? XDEV_EXT_XDP_EV_ACK : XDEV_EXT_XDP_EV_DUPLICATE; break;
+		case XDEV_EXT_XD_HELD: ev = s && !xd_remote_final(s->remote) ? XDEV_EXT_XDP_EV_HELD : XDEV_EXT_XDP_EV_DUPLICATE; break;
+		case XDEV_EXT_XD_FAIL: ev = s && !xd_remote_final(s->remote) ? XDEV_EXT_XDP_EV_FAIL : XDEV_EXT_XDP_EV_DUPLICATE; break;
+		default: ev = XDEV_EXT_XDP_EV_DUPLICATE; break;
+		}
+		xd_early_snapshot_locked(xs, s, r, ev, i); return true;
+	}
+	if (xs->pair_wake <= now && xs->pair_next_retry <= now &&
+	    ((!xs->ns.rx && (xs->pair_state == XDEV_EXT_XDP_PAIR_IDLE || xs->pair_state == XDEV_EXT_XDP_PAIR_HELLO_SENT)) ||
+	     (xs->ns.rx && xs->pair_state == XDEV_EXT_XDP_PAIR_CHALLENGE_SENT))) {
+		xd_early_snapshot_locked(xs, NULL, NULL, XDEV_EXT_XDP_EV_PAIR_DUE, i); return true;
+	}
+	s = xd_armed(xs);
+	if (s && xd_early_rx_postable(xs, s) && !xd_waiting(xs, xd_fact(xs, s)->wake, xd_fact(xs, s)->wait_epoch, now)) {
+		xd_early_snapshot_locked(xs, s, xd_fact(xs, s)->reply, XDEV_EXT_XDP_EV_EARLY_RX_READY, i); return true;
+	}
+	/* Existing slot/reply completion and reliable disposition semantics. */
+	if (!xd_next_locked(xs, &i->base)) return false;
+	s = xs->worker_event.slot; r = xs->worker_event.reply; ev = i->base.event;
+	xd_early_snapshot_locked(xs, s, r, ev, i);
+	return true;
+}
+/* ns.lock -> xl.lock: reserve the exact whole RX group once, before native work. */
+static int xd_early_rx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
+		const struct xdev_ext_xdomain_proto_info_v2 *i)
+{
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	struct xdev_ext_xd_reply *r = xd_fact(xs, s)->reply;
+	struct xdev_ext_xd_fact *f = xd_fact(xs, s);
+	u64 seq;
+	if (!xd_early_rx_postable(xs, s) || i->key != xdev_ext_mech_batch_key(s->batch)) return -EPROTO;
+	spin_lock(&ep->xl->lock);
+	seq = ep->xl->chan[ep->chan].consumed;
+	if (!ep->xl->up || ep->detached || ep->xl->local_inc != i->base.local_inc ||
+	    ep->xl->remote_inc != i->base.remote_inc || seq != i->base.expected_seq || xs->shape_count > ~0ULL - seq) {
+		spin_unlock(&ep->xl->lock); return -ESTALE;
+	}
+	ep->xl->chan[ep->chan].consumed = seq + xs->shape_count;
+	spin_unlock(&ep->xl->lock);
+	s->group = xs->rx_next_group++;
+	xdev_ext_net_rts_accept(&xs->ns.rx_rel, s->group);
+	r->group = s->group; r->stream = xs->tx_bind; r->tx_bind = xs->tx_bind; r->rx_bind = xs->rx_bind;
+	r->key = i->key; r->data_seq = seq; r->total_len = i->shape_total; r->seg_len = i->shape_seg; r->count = i->shape_count;
+	r->batch = s->batch; r->ticket = s->ticket; r->pool_generation = i->base.pool_generation;
+	xdev_ext_xd_key_tag(r->tag, r->key);
+	((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[xs->ns.st->index] =
+		(struct xdev_ext_xd_cookie_entry){ .group = s->group };
+	xs->posted_groups++; f->reserved = true;
+	return 0;
+}
+static int xd_early_tx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
+		const struct xdev_ext_xdomain_proto_info_v2 *i)
+{
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	u32 frames = (i->shape_total - 1) / i->shape_seg + 1;
+	int ret;
+	if (!xd_early_tx_postable(xs, s)) return -EPROTO;
+	if (ktime_get_boottime_ns() >= xs->grant_deadline) return -ETIMEDOUT;
+	ret = xdev_ext_rel_tx_can_open(&xs->ns.tx, xs->grant.group, i->shape_total, frames);
+	if (ret != XDEV_EXT_REL_SEND) return ret == XDEV_EXT_REL_BACKPRESSURE ? -EAGAIN : -EPROTO;
+	spin_lock(&ep->xl->lock);
+	if (!ep->xl->up || ep->detached || ep->xl->local_inc != i->base.local_inc ||
+	    ep->xl->remote_inc != i->base.remote_inc || xs->grant.data_seq != ep->xl->chan[ep->chan].announced ||
+	    xs->grant.count > ~0ULL - xs->grant.data_seq) {
+		spin_unlock(&ep->xl->lock); return -ESTALE;
+	}
+	ep->xl->chan[ep->chan].announced += xs->grant.count;
+	xs->grant_state = XDEV_EXT_XDP_GRANT_CONSUMED;
+	spin_unlock(&ep->xl->lock);
+	s->group = xs->grant.group;
+	((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[xs->ns.st->index] =
+		(struct xdev_ext_xd_cookie_entry){ .group = s->group };
+	ret = xdev_ext_rel_tx_open(&xs->ns.tx, s->group, i->shape_total, frames);
+	if (ret == XDEV_EXT_REL_SEND) ret = xdev_ext_rel_tx_native_begin(&xs->ns.tx, s->group, i->base.now_ns);
+	if (ret != XDEV_EXT_REL_SEND) { xd_early_fail_locked(xs, -EPROTO); return -EPROTO; }
+	xd_fact(xs, s)->data_seq = xs->grant.data_seq;
+	xd_fact(xs, s)->reserved = true; xd_fact(xs, s)->cts_received = true;
+	return 0;
+}
+static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xdomain_proto_info_v2 *i,
+		const struct xdev_ext_xdomain_proto_verdict *v)
+{
+	struct xdev_ext_net_slot *s;
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	struct xdev_ext_xd_msg_v2 m = {}, *in;
+	struct xdev_ext_xdomain_proto_verdict normal;
+	unsigned long flags;
+	u64 now = ktime_get_boottime_ns();
+	bool post = false, same;
+	int ret = 0;
+	u32 act = v->action;
+	if (v->size != sizeof(*v) || v->version != 2 || v->flags || v->reserved0 || v->reserved1 ||
+	    v->event_id != i->base.event_id || v->epoch != i->base.epoch ||
+	    act < XDEV_EXT_XDP_ACT_WAIT || act > XDEV_EXT_XDP_ACT_TX_POST_EARLY) return -EPROTO;
+	if (act < XDEV_EXT_XDP_ACT_SEND_HELLO) {
+		/* No v1 data/announce/refusal action is authority for early mode. */
+		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST ||
+		    act == XDEV_EXT_XDP_ACT_TX_POST || act == XDEV_EXT_XDP_ACT_REJECT_RTS ||
+		    act == XDEV_EXT_XDP_ACT_WITHDRAW) return -EPROTO;
+		if (i->base.event >= XDEV_EXT_XDP_EV_PAIR_DUE && act != XDEV_EXT_XDP_ACT_WAIT &&
+		    act != XDEV_EXT_XDP_ACT_FAIL_LINK) return -EPROTO;
+		if (act == XDEV_EXT_XDP_ACT_WAIT && !xs->stop_latched) {
+			/* Shared validator owns wake bounds. This stage wake also applies to no-slot events. */
+			normal = *v; normal.version = 1;
+			ret = xdev_ext_xd_apply(xs, &i->base, &normal);
+			if (!ret) { spin_lock_irqsave(&xs->ns.lock, flags); xs->pair_wake = v->wake_ns; spin_unlock_irqrestore(&xs->ns.lock, flags); }
+			return ret;
+		}
+		normal = *v; normal.version = 1;
+		return xdev_ext_xd_apply(xs, &i->base, &normal);
+	}
+	if (v->wake_ns || v->credit || v->status) return -EPROTO;
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	s = xs->worker_event.slot;
+	in = xs->worker_event.early_ctl && xs->early_ctl_count ? &xs->early_ctl[0] : NULL;
+	if (xs->worker_event.id != i->base.event_id || xs->worker_event.event != i->base.event) { ret = -EPROTO; goto out; }
+	if (xs->epoch != i->base.epoch || xs->stop_latched || xs->failed || xs->ns.dead ||
+	    !xdev_ext_mech_session_admits(xs->ns.st->s) ||
+	    i->base.pool_generation != xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)) ||
+	    (s && (!s->busy || s->ticket != xs->worker_event.ticket || !xd_early_batch_current(xs, s)))) { ret = -ESTALE; goto out; }
+	spin_lock(&ep->xl->lock);
+	same = ep->xl->up && !ep->detached && ep->xl->local_inc == i->base.local_inc && ep->xl->remote_inc == i->base.remote_inc;
+	spin_unlock(&ep->xl->lock);
+	if (!same) { ret = -ESTALE; goto out; }
+	if (i->base.hard_deadline_ns && now >= i->base.hard_deadline_ns) {
+		ret = act == XDEV_EXT_XDP_ACT_TX_POST_EARLY ? -ETIMEDOUT : -ESTALE;
+		goto out;
+	}
+	m.tx_bind = xs->tx_bind; m.rx_bind = xs->rx_bind;
+	m.total_len = i->shape_total; m.seg_len = i->shape_seg; m.count = i->shape_count;
+	switch (act) {
+	case XDEV_EXT_XDP_ACT_SEND_HELLO:
+		if (xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_PAIR_DUE ||
+		    (xs->pair_state != XDEV_EXT_XDP_PAIR_IDLE && xs->pair_state != XDEV_EXT_XDP_PAIR_HELLO_SENT) ||
+		    !(i->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE) || now < xs->pair_next_retry) { ret = -EPROTO; break; }
+		m.type = XDEV_EXT_XD_HELLO; m.rx_bind = 0;
+		ret = xdev_ext_xd_msg_send_v2(ep->xl, ep, &m);
+		if (!ret) { xs->pair_state = XDEV_EXT_XDP_PAIR_HELLO_SENT; xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); }
+		break;
+	case XDEV_EXT_XDP_ACT_SEND_CHALLENGE:
+		if (!xs->ns.rx || !(i->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE) ||
+		    ((i->base.event != XDEV_EXT_XDP_EV_HELLO || !in || in->type != XDEV_EXT_XD_HELLO) &&
+		     (i->base.event != XDEV_EXT_XDP_EV_PAIR_DUE || xs->pair_state != XDEV_EXT_XDP_PAIR_CHALLENGE_SENT)) ||
+		    (xs->pair_state != XDEV_EXT_XDP_PAIR_IDLE && xs->pair_state != XDEV_EXT_XDP_PAIR_CHALLENGE_SENT) ||
+		    now < xs->pair_next_retry) { ret = -EPROTO; break; }
+		if (in && xs->tx_bind && xs->tx_bind != in->tx_bind) { ret = -EPROTO; break; }
+		m.tx_bind = xs->tx_bind ? xs->tx_bind : in->tx_bind; m.type = XDEV_EXT_XD_CHALLENGE;
+		ret = xdev_ext_xd_msg_send_v2(ep->xl, ep, &m);
+		if (!ret) { xs->tx_bind = xs->stream = m.tx_bind; xs->pair_state = XDEV_EXT_XDP_PAIR_CHALLENGE_SENT;
+			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); }
+		break;
+	case XDEV_EXT_XDP_ACT_SEND_CONFIRM:
+		if (xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_CHALLENGE || !in ||
+		    (xs->pair_state != XDEV_EXT_XDP_PAIR_HELLO_SENT && xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND) ||
+		    in->tx_bind != xs->tx_bind || (xs->rx_bind && xs->rx_bind != in->rx_bind) ||
+		    !(i->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE) ||
+		    (xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND && now < xs->pair_next_retry)) { ret = -EPROTO; break; }
+		m.type = XDEV_EXT_XD_CONFIRM; m.rx_bind = in->rx_bind;
+		ret = xdev_ext_xd_msg_send_v2(ep->xl, ep, &m);
+		if (!ret) { xs->rx_bind = m.rx_bind; xs->pair_state = XDEV_EXT_XDP_PAIR_BOUND;
+			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); }
+		break;
+	case XDEV_EXT_XDP_ACT_BIND_PAIR:
+		if (!xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_CONFIRM || !in ||
+		    xs->pair_state != XDEV_EXT_XDP_PAIR_CHALLENGE_SENT || in->tx_bind != xs->tx_bind || in->rx_bind != xs->rx_bind) { ret = -EPROTO; break; }
+		{
+			const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
+			struct xdev_ext_rel_cfg cfg = { .session = xs->tx_bind, .first_group = 1,
+				.window = XDEV_EXT_REL_MAX_WINDOW, .max_attempts = 1, .timeout_ns = XD_PHASE_NS,
+				.group_bytes = l->group_bytes, .seg_len = l->seg_len };
+			ret = xdev_ext_rel_rx_init(&xs->ns.rx_rel, &cfg);
+			if (!ret) { xs->ns.rx_rel_ready = true; xs->pair_state = XDEV_EXT_XDP_PAIR_BOUND;
+				xs->wait_generation++; xd_drop_input(xs); }
+		}
+		break;
+	case XDEV_EXT_XDP_ACT_ACCEPT_GRANT:
+		if (xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_GRANT || !in || in->type != XDEV_EXT_XD_CTS ||
+		    !xd_early_pair_match(xs, in) || !xd_early_shape_match(xs, in) ||
+		    xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE || in->group != xs->ns.tx.next_group ||
+		    in->group != xs->pending_grant_group || !xs->pending_grant_deadline) { ret = -EPROTO; break; }
+		spin_lock(&ep->xl->lock);
+		same = in->data_seq == ep->xl->chan[ep->chan].announced && in->count <= ~0ULL - in->data_seq;
+		spin_unlock(&ep->xl->lock);
+		if (!same || xdev_ext_net_credit_update(&xs->ns.tx, in->credit)) { ret = -EPROTO; break; }
+		xs->grant = *in; xs->grant_state = XDEV_EXT_XDP_GRANT_AVAILABLE;
+		xs->grant_deadline = xs->pending_grant_deadline;
+		xs->pending_grant_deadline = xs->pending_grant_group = 0; xd_drop_input(xs);
+		break;
+	case XDEV_EXT_XDP_ACT_RX_POST_EARLY:
+		if (!s || i->base.event != XDEV_EXT_XDP_EV_EARLY_RX_READY || !xs->ns.rx) { ret = -EPROTO; break; }
+		ret = xd_early_rx_reserve_locked(xs, s, i); post = !ret;
+		break;
+	case XDEV_EXT_XDP_ACT_TX_POST_EARLY:
+		if (!s || i->base.event != XDEV_EXT_XDP_EV_TX_SUBMIT || xs->ns.rx) { ret = -EPROTO; break; }
+		ret = xd_early_tx_reserve_locked(xs, s, i); post = !ret;
+		break;
+	default: ret = -EPROTO;
+	}
+	if (!ret) { xs->pair_wake = 0; xd_changed(xs); }
+ out:
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+	if (post) return xd_post(xs, s, &i->base);
+	return ret;
+}
+
 static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
 	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
-	struct xdev_ext_xdomain_proto_info info;
+	struct xdev_ext_xdomain_proto_info_v2 info_v2;
+	struct xdev_ext_xdomain_proto_info *info = &info_v2.base;
 	struct xdev_ext_xdomain_proto_result result;
 	unsigned long flags;
 	u32 budget = XD_EVENTS;
@@ -1083,10 +1619,10 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 	poll_pending = xdev_ext_xd_poll(ep->xl);
 	while (budget--) {
 		spin_lock_irqsave(&xs->ns.lock, flags);
-		if (!xd_next_locked(xs, &info)) { spin_unlock_irqrestore(&xs->ns.lock, flags); break; }
+		if (!(xs->early ? xd_early_next_locked(xs, &info_v2) : xd_next_locked(xs, info))) { spin_unlock_irqrestore(&xs->ns.lock, flags); break; }
 		spin_unlock_irqrestore(&xs->ns.lock, flags);
-		ret = xdev_ext_xd_protocol_call(xs, &info, &result);
-		if (!ret) ret = xdev_ext_xd_apply(xs, &info, &result.verdict);
+		ret = xdev_ext_xd_protocol_call(xs, info, &result);
+		if (!ret) ret = xs->early ? xd_early_apply(xs, &info_v2, &result.verdict) : xdev_ext_xd_apply(xs, info, &result.verdict);
 		if (xs->stage_error) {
 			int err;
 			spin_lock_irqsave(&xs->ns.lock, flags);
@@ -1098,7 +1634,9 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 		if (ret == -EAGAIN) {
 			u64 wake = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_TICK_NS);
 			spin_lock_irqsave(&xs->ns.lock, flags);
-			if (xs->worker_event.rts && xs->rts_count) {
+			if (xs->early && (xs->worker_event.early_ctl || !xs->worker_event.slot)) {
+				xs->pair_wake = wake;
+			} else if (xs->worker_event.rts && xs->rts_count) {
 				xs->rts[0].wake = wake; xs->rts[0].wait_epoch = xs->wait_generation;
 			} else if (xs->worker_event.ctl && xs->ctl_count) {
 				xs->ctl_wake[0] = wake; xs->ctl_wait_epoch[0] = xs->wait_generation;
@@ -1112,6 +1650,13 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 			continue;
 		}
 		if (ret) { xd_policy_error(xs); break; }
+	}
+	if (xs->stage_error) {
+		int err;
+		spin_lock_irqsave(&xs->ns.lock, flags);
+		err = xs->stage_error; xs->stage_error = 0;
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+		xdev_ext_mech_stage_dead(st, err);
 	}
 	{
 		u64 now = ktime_get_boottime_ns(), due = xdev_ext_rel_deadline(now, XD_TICK_NS);
@@ -1159,25 +1704,56 @@ static int xdev_ext_xd_class_submit(struct xdev_ext_mech_stage *st, struct xdev_
 	struct xdev_ext_xd_batch *bp = xdev_ext_mech_batch_priv(b);
 	struct xdev_ext_net_slot *s;
 	struct xdev_ext_xd_fact *f;
-	struct xdev_ext_xdomain_proto_info info;
+	struct xdev_ext_xdomain_proto_info_v2 info_v2;
+	struct xdev_ext_xdomain_proto_info *info = &info_v2.base;
 	struct xdev_ext_xdomain_proto_result result;
 	unsigned long flags;
 	int ret;
 	if (xs->ns.dead || !xdev_ext_mech_session_admits(st->s)) return -ESHUTDOWN;
+	/* No temporary unaccepted slot exists while mandatory safety retires
+	 * prior commitments. Pair time still starts only in admitted progress. */
+	if (xs->early && xs->pair_deadline) {
+		spin_lock_irqsave(&xs->ns.lock, flags);
+		if (!xd_early_safety_locked(xs, ktime_get_boottime_ns())) {
+			ret = xs->stage_error ? xs->stage_error : -ENOLINK;
+			xs->stage_error = 0;
+			spin_unlock_irqrestore(&xs->ns.lock, flags);
+			xdev_ext_mech_stage_dead(st, ret);
+			return ret;
+		}
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+	}
 	s = xdev_ext_netfam_slot_get(&xs->ns, b); if (!s) return -EAGAIN;
 	bp->slot = s;
 	spin_lock_irqsave(&xs->ns.lock, flags);
-	f = xd_fact(xs, s); *f = (struct xdev_ext_xd_fact){ .born = ktime_get_boottime_ns() };
+	f = xd_fact(xs, s); *f = (struct xdev_ext_xd_fact){ .born = ktime_get_boottime_ns(),
+		.pool_generation = xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)) };
 	xd_changed(xs);
-	xd_snapshot(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT, false, false, &info);
+	if (xs->early && !xs->ns.rx && xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE &&
+	    xs->grant.key != xdev_ext_mech_batch_key(b)) {
+		/* This attempt has not been accepted and owns no native lease.
+		 * Core owns its synchronous rejection; terminalize only prior work. */
+		s->busy = false; bp->slot = NULL;
+		xd_early_fail_locked(xs, -EPROTO);
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+		xdev_ext_mech_stage_dead(st, -EPROTO);
+		return -EPROTO;
+	}
+	if (xs->early)
+		xd_early_snapshot_locked(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT, &info_v2);
+	else
+		xd_snapshot(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT, false, false, info);
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
-	ret = xdev_ext_xd_protocol_call(xs, &info, &result);
-	if (!ret) ret = xdev_ext_xd_apply(xs, &info, &result.verdict);
+	ret = xdev_ext_xd_protocol_call(xs, info, &result);
+	if (!ret) ret = xs->early ? xd_early_apply(xs, &info_v2, &result.verdict) : xdev_ext_xd_apply(xs, info, &result.verdict);
 	if (ret) {
 		spin_lock_irqsave(&xs->ns.lock, flags);
 		if (!s->group && !f->accepted && !f->reserved) { xd_reply_put(xs, f->reply); if (f->reply) f->reply->used = false; s->busy = false; bp->slot = NULL; }
+		if (xs->early && ret == -ETIMEDOUT) xd_early_fail_locked(xs, ret);
 		spin_unlock_irqrestore(&xs->ns.lock, flags);
-		if (ret != -EAGAIN && ret != -ESTALE) xd_policy_error(xs);
+		if (xs->early && ret == -ETIMEDOUT) {
+			xdev_ext_mech_stage_dead(st, ret);
+		} else if (ret != -EAGAIN && ret != -ESTALE) xd_policy_error(xs);
 		return ret == -ESTALE ? -EAGAIN : ret;
 	}
 	xdev_ext_mech_stage_kick(st);
@@ -1338,15 +1914,28 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	struct xdev_ext_xd_ep *ep;
 	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
 	struct xdev_ext_rel_cfg cfg;
-	u32 depth = xdev_ext_mech_session_depth(st->s), elems = xdev_ext_xd_layout_elems(l);
+	u32 depth = xdev_ext_mech_session_depth(st->s), elems = xdev_ext_xd_layout_elems(l), exact = 0;
 	unsigned long flags;
 	int ret;
 	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER ||
 	    (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE && st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)) return -EOPNOTSUPP;
 	if (st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE && st->index) return -EOPNOTSUPP;
+	if (u->flags & XDEV_EXT_XDOMAIN_F_EARLY) {
+		ret = xdev_ext_xd_early_shape(l->group_bytes, l->seg_len, &exact);
+		if (ret) return ret;
+		elems = exact;
+	}
 	if (!xdev_ext_peer_control_file(st->file) || !u->arg0 || u->arg1 >= XDEV_EXT_XD_CHANNELS_V1 ||
 	    (u->flags & ~XDEV_EXT_XDOMAIN_KNOWN_FLAGS) || !xdev_ext_xd_budget_ok(depth, elems, XDEV_EXT_XD_DATA_RING)) return -EINVAL;
+	if (u->flags & XDEV_EXT_XDOMAIN_F_EARLY) {
+		ret = xdev_ext_xd_early_shape(l->group_bytes, l->seg_len, &exact);
+		if (ret) return ret;
+		elems = exact;
+		if (!xdev_ext_xd_budget_ok(depth, elems, XDEV_EXT_XD_DATA_RING)) return -EINVAL;
+	}
 	xs = kzalloc(sizeof(*xs), GFP_KERNEL); if (!xs) return -ENOMEM;
+	xs->early = !!(u->flags & XDEV_EXT_XDOMAIN_F_EARLY);
+	xs->shape_count = exact; xs->rx_next_group = 1;
 	xs->channel = u->arg1;
 	xs->stream = st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ? 0 : xdev_ext_mech_session_id(st->s);
 	xs->facts = kvcalloc(depth, sizeof(*xs->facts), GFP_KERNEL);
@@ -1366,6 +1955,10 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 		spin_lock_irqsave(&xs->ns.lock, flags);
 		xs->local_inc = ep->bound_local_inc;
 		xs->remote_inc = ep->bound_remote_inc;
+		if (xs->early) {
+			if (xs->ns.rx) xs->rx_bind = ep->bind_id;
+			else xs->tx_bind = xs->stream = ep->bind_id;
+		}
 		spin_unlock_irqrestore(&xs->ns.lock, flags);
 	}
 	if (ret) goto fini;

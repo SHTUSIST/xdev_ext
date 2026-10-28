@@ -838,7 +838,8 @@ struct xdev_ext_mech_stats {
  * receiver's chain finished the group.
  */
 #define XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED (1U << 0)	/* CAP_SYS_ADMIN: bind without a judged P2P path */
-#define XDEV_EXT_XDOMAIN_KNOWN_FLAGS	0x00000001U
+#define XDEV_EXT_XDOMAIN_F_EARLY (1U << 1)
+#define XDEV_EXT_XDOMAIN_KNOWN_FLAGS	0x00000003U
 #define XDEV_EXT_XDOMAIN_MAX_FRAME	4096U	/* bytes of one NHI ring frame */
 #define XDEV_EXT_XDOMAIN_MAX_ELEMS	64U	/* NHI frames per batch */
 #define XDEV_EXT_XDOMAIN_TAG_LEN	24U
@@ -879,6 +880,24 @@ struct xdev_ext_xdomain_mech_cqe {
 };
 
 #define XDEV_EXT_XDOMAIN_PROTO_VERSION 1U
+#define XDEV_EXT_XDOMAIN_PROTO_V2_VERSION 2U
+#define XDEV_EXT_XDP_MODE_NORMAL 0U
+#define XDEV_EXT_XDP_MODE_EARLY 1U
+#define XDEV_EXT_XDP_PAIR_IDLE 0U
+#define XDEV_EXT_XDP_PAIR_HELLO_SENT 1U
+#define XDEV_EXT_XDP_PAIR_CHALLENGE_SENT 2U
+#define XDEV_EXT_XDP_PAIR_BOUND 3U
+#define XDEV_EXT_XDP_PAIR_FAILED 4U
+#define XDEV_EXT_XDP_GRANT_EMPTY 0U
+#define XDEV_EXT_XDP_GRANT_AVAILABLE 1U
+#define XDEV_EXT_XDP_GRANT_CONSUMED 2U
+#define XDEV_EXT_XDP_EARLY_F_PAIR_BOUND (1U << 0)
+#define XDEV_EXT_XDP_EARLY_F_GRANT_AVAILABLE (1U << 1)
+#define XDEV_EXT_XDP_EARLY_F_CANONICAL (1U << 2)
+#define XDEV_EXT_XDP_EARLY_F_HAS_BATCH (1U << 3)
+#define XDEV_EXT_XDP_EARLY_F_RX_POSTABLE (1U << 4)
+#define XDEV_EXT_XDP_EARLY_F_TX_POSTABLE (1U << 5)
+#define XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE (1U << 6)
 
 enum xdev_ext_xdomain_proto_event {
 	XDEV_EXT_XDP_EV_TX_SUBMIT = 1,
@@ -898,6 +917,12 @@ enum xdev_ext_xdomain_proto_event {
 	XDEV_EXT_XDP_EV_REPLY_DUE = 15,
 	XDEV_EXT_XDP_EV_READY = 16,
 	XDEV_EXT_XDP_EV_DUPLICATE = 17,
+	XDEV_EXT_XDP_EV_PAIR_DUE = 18,
+	XDEV_EXT_XDP_EV_HELLO = 19,
+	XDEV_EXT_XDP_EV_CHALLENGE = 20,
+	XDEV_EXT_XDP_EV_CONFIRM = 21,
+	XDEV_EXT_XDP_EV_GRANT = 22,
+	XDEV_EXT_XDP_EV_EARLY_RX_READY = 23,
 };
 enum xdev_ext_xdomain_proto_action {
 	XDEV_EXT_XDP_ACT_INVALID = 0,
@@ -918,6 +943,13 @@ enum xdev_ext_xdomain_proto_action {
 	XDEV_EXT_XDP_ACT_REJECT_RTS = 15,
 	XDEV_EXT_XDP_ACT_FAIL_LINK = 16,
 	XDEV_EXT_XDP_ACT_CANCEL_ARMED = 17,
+	XDEV_EXT_XDP_ACT_SEND_HELLO = 18,
+	XDEV_EXT_XDP_ACT_SEND_CHALLENGE = 19,
+	XDEV_EXT_XDP_ACT_SEND_CONFIRM = 20,
+	XDEV_EXT_XDP_ACT_BIND_PAIR = 21,
+	XDEV_EXT_XDP_ACT_ACCEPT_GRANT = 22,
+	XDEV_EXT_XDP_ACT_RX_POST_EARLY = 23,
+	XDEV_EXT_XDP_ACT_TX_POST_EARLY = 24,
 };
 
 #define XDEV_EXT_XDP_F_LINK_UP          (1U << 0)
@@ -948,6 +980,13 @@ struct xdev_ext_xdomain_proto_info {
 	__u8 tag[XDEV_EXT_XDOMAIN_TAG_LEN];
 	__aligned_u64 reserved[4];
 }; /* 256 bytes */
+
+struct xdev_ext_xdomain_proto_info_v2 {
+	struct xdev_ext_xdomain_proto_info base;
+	__aligned_u64 tx_bind, rx_bind, key, pair_deadline_ns;
+	__u32 shape_total, shape_seg, shape_count, pair_state;
+	__u32 mode, early_facts, grant_state, reserved0;
+}; /* 320 bytes */
 
 struct xdev_ext_xdomain_proto_verdict {
 	__u32 size, version, action, flags; /* flags must be zero */

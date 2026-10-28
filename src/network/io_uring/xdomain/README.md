@@ -142,3 +142,17 @@ holding `ep_mutex` or a spinlock. Only afterwards may native stop/free or
 UNKNOWN retirement consume rings and allocations. Posts and callback
 reposts schedule fallback under the same gate lock. Completed native
 ownership and UNKNOWN backing follow the existing custody ledger.
+
+Early CTS is an explicit opt-in: pass `XDEV_EXT_XDOMAIN_F_EARLY` to
+`xdev_ext_stage_xdomain()`, or `XDEV_EXT_PEER_ENDPOINT_F_EARLY` in existing
+endpoint options, on both endpoints. The updated reference BPF policy supports
+ordinary and early sessions. Ordinary sessions keep the v1 RTS protocol.
+
+Early endpoints bind fresh endpoint identities before batches, then grant one
+actual posted RX batch to its exact future TX key. The ordered layout must use
+one full-span descriptor per logical frame and the TX tag is the key as eight
+big-endian bytes followed by sixteen zero bytes. Early and ordinary modes do
+not negotiate an in-place fallback; close an uncommitted early session and
+explicitly create an ordinary session when required. Pairing has a fixed
+30-second deadline and bounded identical control retries. CRC and pair freshness
+checks do not provide cryptographic authentication.

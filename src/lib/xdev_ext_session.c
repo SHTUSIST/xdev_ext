@@ -809,7 +809,7 @@ int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,
 	    (direction != XDEV_EXT_MECH_DIR_TO_DEVICE && direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 		return -EINVAL;
 	/* A public helper never silently enables the administrator override. */
-	if (flags & ~(XDEV_EXT_MECH_STAGE_F_POLL))
+	if (flags & ~(XDEV_EXT_MECH_STAGE_F_POLL | XDEV_EXT_XDOMAIN_F_EARLY))
 		return -EOPNOTSUPP;
 	*out = (struct xdev_ext_mech_stage_uapi) {
 		.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = direction,

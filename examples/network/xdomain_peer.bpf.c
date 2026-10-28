@@ -282,6 +282,77 @@ xdomain_peer_choose(const struct xdev_ext_xdomain_proto_info *info,
 	return 0;
 }
 
+/* One policy serves both envelopes. Normalize the normal base in place so
+ * BPF never needs a second 256-byte facts record on its bounded stack. */
+static __always_inline int
+xdomain_peer_choose_v2(struct xdev_ext_xdomain_proto_info_v2 *info,
+		      struct xdev_ext_xdomain_proto_verdict *verdict)
+{
+	__u64 wake;
+	__u32 action = 0;
+	int ret;
+
+	if (info->base.size != sizeof(*info) || info->base.version != 2 || info->mode > 1)
+		return -EINVAL;
+	if (!info->mode) {
+		info->base.size = sizeof(info->base); info->base.version = 1;
+		ret = xdomain_peer_choose(&info->base, verdict);
+		info->base.size = sizeof(*info); info->base.version = 2;
+		verdict->version = 2;
+		return ret;
+	}
+	if (info->base.event == XDEV_EXT_XDP_EV_TX_SUBMIT || info->base.event >= XDEV_EXT_XDP_EV_PAIR_DUE) {
+		*verdict = (struct xdev_ext_xdomain_proto_verdict){ .size = sizeof(*verdict), .version = 2,
+			.event_id = info->base.event_id, .epoch = info->base.epoch };
+		if (!(info->base.facts & XDEV_EXT_MP_XDP_F_LINK_UP) ||
+		    !(info->base.facts & XDEV_EXT_MP_XDP_F_ADMITS) ||
+		    (info->base.facts & (XDEV_EXT_MP_XDP_F_STAGE_DEAD | XDEV_EXT_MP_XDP_F_STOPPING))) {
+			verdict->action = XDEV_EXT_XDP_ACT_FAIL_LINK; verdict->status = -XD_ENOLINK;
+			return 0;
+		}
+		if (info->base.hard_deadline_ns && info->base.now_ns >= info->base.hard_deadline_ns) {
+			verdict->action = XDEV_EXT_XDP_ACT_FAIL_LINK; verdict->status = -XD_ETIMEDOUT;
+			return 0;
+		}
+		switch (info->base.event) {
+		case XDEV_EXT_XDP_EV_PAIR_DUE:
+			if (info->base.ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
+				action = info->base.direction == XDEV_EXT_MP_DIR_TO_DEVICE ?
+					XDEV_EXT_XDP_ACT_SEND_HELLO : XDEV_EXT_XDP_ACT_SEND_CHALLENGE;
+			break;
+		case XDEV_EXT_XDP_EV_HELLO:
+			if (info->base.ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
+				action = XDEV_EXT_XDP_ACT_SEND_CHALLENGE;
+			break;
+		case XDEV_EXT_XDP_EV_CHALLENGE:
+			if (info->base.ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
+				action = XDEV_EXT_XDP_ACT_SEND_CONFIRM;
+			break;
+		case XDEV_EXT_XDP_EV_CONFIRM: action = XDEV_EXT_XDP_ACT_BIND_PAIR; break;
+		case XDEV_EXT_XDP_EV_GRANT: action = XDEV_EXT_XDP_ACT_ACCEPT_GRANT; break;
+		case XDEV_EXT_XDP_EV_EARLY_RX_READY:
+			if (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_RX_POSTABLE) action = XDEV_EXT_XDP_ACT_RX_POST_EARLY;
+			break;
+		case XDEV_EXT_XDP_EV_TX_SUBMIT:
+			if (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_TX_POSTABLE) action = XDEV_EXT_XDP_ACT_TX_POST_EARLY;
+			break;
+		default: return -XD_EPROTO;
+		}
+		if (action) { verdict->action = action; return 0; }
+		wake = info->base.now_ns > ~(__u64)0 - 20000000ULL ? ~(__u64)0 : info->base.now_ns + 20000000ULL;
+		if (info->base.hard_deadline_ns && info->base.hard_deadline_ns < wake) wake = info->base.hard_deadline_ns;
+		if (info->base.policy_deadline_ns && info->base.policy_deadline_ns < wake) wake = info->base.policy_deadline_ns;
+		if (wake <= info->base.now_ns) return -XD_ETIMEDOUT;
+		verdict->action = XDEV_EXT_XDP_ACT_WAIT; verdict->wake_ns = wake;
+		return 0;
+	}
+	info->base.size = sizeof(info->base); info->base.version = 1;
+	ret = xdomain_peer_choose(&info->base, verdict);
+	info->base.size = sizeof(*info); info->base.version = 2;
+	verdict->version = 2;
+	return ret;
+}
+
 SEC("struct_ops.s/xdomain_peer_prepare")
 __s32 BPF_PROG(xdomain_peer_prepare, const struct xdev_ext_mech_ctx *mctx)
 {
@@ -333,13 +404,13 @@ __s32 BPF_PROG(xdomain_peer_complete, const struct xdev_ext_mech_ctx *mctx)
 
 	(void)ctx;
 	if (mctx->callsite == XDEV_EXT_MP_SITE_WORKER_PROTOCOL) {
-		struct xdev_ext_xdomain_proto_info info = {};
+		struct xdev_ext_xdomain_proto_info_v2 info = {};
 		struct xdev_ext_xdomain_proto_verdict verdict = {};
 
 		/* The reference uses initialized writable local records. */
-		if (bpf_xdev_ext_xdomain_info(mctx, &info, sizeof(info)) ||
-		    xdomain_peer_choose(&info, &verdict) ||
-		    bpf_xdev_ext_xdomain_verdict(mctx, &verdict, sizeof(verdict)))
+		if (bpf_xdev_ext_xdomain_info_v2(mctx, &info, sizeof(info)) ||
+		    xdomain_peer_choose_v2(&info, &verdict) ||
+		    bpf_xdev_ext_xdomain_verdict_v2(mctx, &verdict, sizeof(verdict)))
 			return XDEV_EXT_MP_ABORT;
 		return 0;
 	}
