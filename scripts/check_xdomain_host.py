@@ -21,12 +21,18 @@ STACK = "kernel/tools/testing/selftests/xdev_ext_mech/xdomain/"
 # disappearing from a glob while its implementation is still being integrated.
 ENTRYPOINTS = (
     *(PEER + name for name in (
-        "xdomain_class_test.py", "xdomain_login_test.py", "xdomain_ring_test.py",
+        "xdomain_class_test.py", "xdomain_review_geometry_test.py", "xdomain_review_protocol_test.py", "xdomain_login_test.py", "xdomain_ring_test.py",
         "xdomain_kfunc_test.py", "xdomain_identity_test.py", "xdomain_program_test.py",
         "xdomain_guest_verdict_test.py", "xdomain_nhi_test.py",
         "netfam_rel_kfunc_test.py", "class_table_source_test.py", "class_bind_test.py",
         "tb_protocol_handler_lifetime_test.py", "tbnet_handler_teardown_test.py",
         "session_stop_clock_test.py",
+        "xdomain_review_lifecycle_test.py",
+        "xdomain_review_retry_test.py",
+        "xdomain_review_readiness_test.py",
+        "xdomain_review_stats_ring_test.py",
+        "requester_retention_test.py",
+        "xdomain_review_retention_ring_test.py",
     )),
     "kernel/tools/testing/selftests/xdev_ext_mech/core_lifecycle/stop_report_test.py",
     "gpu/tests/nv_xdev_ext_peer_raw_bus_source_test.py",

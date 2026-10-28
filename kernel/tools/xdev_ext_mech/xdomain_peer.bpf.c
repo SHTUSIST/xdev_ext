@@ -200,6 +200,16 @@ xdomain_peer_choose(const struct xdev_ext_xdomain_proto_info *info,
 		break;
 	case XDEV_EXT_XDP_EV_POST_RESULT:
 		if (info->local_status) {
+			/* All-or-none RX rejection has no native commitment. Finish
+			 * this group through FAIL; other sessions keep the link. */
+			if (!tx && !(facts & XDEV_EXT_MP_XDP_F_NATIVE_POSTED) &&
+			    (facts & XDEV_EXT_MP_XDP_F_FINAL_OWED)) {
+				if (!info->ctl_room) break;
+				verdict->action = XDEV_EXT_XDP_ACT_SEND_FAIL;
+				verdict->status = info->local_status;
+				verdict->credit = info->credit;
+				return 0;
+			}
 			verdict->action = XDEV_EXT_XDP_ACT_FAIL_LINK;
 			verdict->status = info->local_status;
 			return 0;

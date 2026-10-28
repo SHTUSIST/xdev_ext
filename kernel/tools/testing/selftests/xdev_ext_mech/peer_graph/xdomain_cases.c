@@ -216,7 +216,14 @@ static void policy_safety(void) {
  ok("P04 WAIT cannot move immutable announce/withdraw/post/STOP hard boundaries or trigger implicit CANCEL/ACK");
 
  const enum injection wakes[]={WAIT_ZERO,WAIT_PAST,WAIT_LATE,WAIT_HARD};
- for(unsigned i=0;i<ARRAY_SIZE(wakes);i++){announced();unsigned w=total_wire();malicious(wakes[i],XDEV_EXT_XDP_EV_TIMER,1);advance_ms(1);assert_protocol_failure(0,w,0);}
+ for(unsigned i=0;i<ARRAY_SIZE(wakes);i++){
+  announced();unsigned w=total_wire();
+  /* announced() already recorded WAIT. Observe its actual wake so this test
+   * reaches the malicious verdict rather than merely re-kicking a paused slot. */
+  u64 wake=((struct xdev_ext_xd_stage*)stage_of(&sides[0])->priv)->facts[0].wake;
+  assert(wake>host_ns);malicious(wakes[i],XDEV_EXT_XDP_EV_TIMER,1);
+  advance_ms((wake-host_ns+NSEC_PER_MSEC-1)/NSEC_PER_MSEC);assert_protocol_failure(0,w,0);
+ }
  pair(0,2,8192);host_ns=UINT64_MAX-100;malicious(WAIT_LATE,XDEV_EXT_XDP_EV_TX_SUBMIT,1);assert(submit(&sides[0],0)<0);assert_protocol_failure(0,0,0);
  ok("P05 invalid zero/past/late/hard-crossing/wrapped WAIT is refused");
 
@@ -228,7 +235,11 @@ static void policy_safety(void) {
  pair(0,2,8192);assert(!submit(&sides[1],0)&&!submit(&sides[1],1));lease_schedule=nested_rx_reservation;assert(!submit(&sides[0],0));drain_worker(12);
  fprintf(stderr,"P07 lease_blocked=%u lease_calls=%u posts=%u\n",sides[1].lease_blocked,sides[1].lease_calls,sides[1].posts);debug_stage_scalars("P07-after-lease-race",&sides[1]);
  assert(sides[1].lease_blocked==1&&sides[1].posts==1);
- malicious(RX_POST_FORBIDDEN,XDEV_EXT_XDP_EV_RTS,1);sides[1].session.queued=1;drain_worker(4);assert(sides[1].posts==1&&sides[1].link_failures);
+ /* The retained second RTS is paused by a previous WAIT. Installing a new
+  * malicious program is not a protocol fact; reach the actual retry first. */
+ worker_depth=1;unsigned long rts_retry_ms=registered->progress(stage_of(&sides[1]));worker_depth=0;
+ assert(rts_retry_ms>0&&rts_retry_ms*NSEC_PER_MSEC<=XD_TICK_NS);
+ malicious(RX_POST_FORBIDDEN,XDEV_EXT_XDP_EV_RTS,1);advance_ms(rts_retry_ms);sides[1].session.queued=1;drain_worker(4);assert(sides[1].posts==1&&sides[1].link_failures);
  ok("P07 second RX candidate cannot post during first lease reservation or native owner");
 
  pair(0,2,8192);sides[0].complete_inline=sides[1].complete_inline=1;assert(!submit(&sides[1],0)&&!submit(&sides[0],0));drain_worker(12);
@@ -243,6 +254,10 @@ static void policy_safety(void) {
   if(i==2)complete_group(&sides[1],0,-EBADMSG,true);
   if(i==3){finish_element(&sides[1],0,0,0,1,true);finish_element(&sides[1],0,1,0,4096,true);}
   if(i==4)complete_group(&sides[1],0,-EOVERFLOW,true);
+  /* announced() has already produced WAIT without any completion fact.
+   * Let its actual scheduled retry arrive before attacking the verdict. */
+  if(i==0){worker_depth=1;unsigned long retry_ms=registered->progress(stage_of(&sides[0]));worker_depth=0;
+   assert(retry_ms>0&&retry_ms*NSEC_PER_MSEC<=XD_TICK_NS);advance_ms(retry_ms);}
   malicious(PUBLISH_SUCCESS,0,1);sides[i>=2?1:0].session.queued=1;drain_worker(8);
   assert(sides[0].link_failures+sides[1].link_failures);
   for(unsigned s=0;s<2;s++)assert(!sides[s].batches[0].publishes||sides[s].batches[0].status!=0);
@@ -250,7 +265,13 @@ static void policy_safety(void) {
  ok("P09 false success without ACK/local proof or after unknown/CRC/short/overrun is refused");
 
  pair(0,2,8192);assert(!submit(&sides[1],0));malicious(IGNORE_OBLIGATION,XDEV_EXT_XDP_EV_RTS,1);assert(!submit(&sides[0],0));drain_worker(8);assert(sides[1].link_failures&&!total_posts());
- posted();malicious(REJECT_POSTED,XDEV_EXT_XDP_EV_CANCEL,1);inject_message(&sides[1],XDEV_EXT_XD_CANCEL,1,0,0);drain_worker(6);assert(sides[1].link_failures&&sides[1].posts==1);
+ posted();malicious(REJECT_POSTED,XDEV_EXT_XDP_EV_CANCEL,1);
+ /* This attacks rejection of the accepted current stream. A stale stream is
+  * correctly dropped before it can reach the injected BPF verdict. */
+ struct xdev_ext_xd_msg accepted_cancel={.type=XDEV_EXT_XD_CANCEL,
+  .stream=((struct xdev_ext_xd_stage*)stage_of(&sides[1])->priv)->stream,.group=1};
+ assert(!xdev_ext_xd_msg_send(&sides[0].link,NULL,0,&accepted_cancel));deliver_wire_once(&sides[0]);
+ drain_worker(6);assert(sides[1].link_failures&&sides[1].posts==1);
  for(unsigned event=XDEV_EXT_XDP_EV_CTS;event<=XDEV_EXT_XDP_EV_CHAIN_END;event++){
   if(event!=XDEV_EXT_XDP_EV_CTS&&event!=XDEV_EXT_XDP_EV_CHAIN_END)continue;
   if(event==XDEV_EXT_XDP_EV_CTS){announced();malicious(IGNORE_OBLIGATION,event,1);inject_message(&sides[0],XDEV_EXT_XD_CTS,1,4,0);}

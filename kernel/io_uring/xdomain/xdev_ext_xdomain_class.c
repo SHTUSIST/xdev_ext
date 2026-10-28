@@ -20,18 +20,21 @@
 
 struct xdev_ext_xd_reply {
 	u64 group, stream, advertised, deadline;
+	u64 wake, wait_epoch;
 	int chain_status, local_status;
 	bool used, admission, chain_done, sequestered, cts, final, closed, native_posted;
 	u8 tag[XDEV_EXT_XDOMAIN_TAG_LEN];
 };
 struct xdev_ext_xd_fact {
 	u64 epoch, wake, born, posted, local_done, withdrawal, arm_order;
+	u64 wait_epoch;
 	u32 event;
 	bool reserved, accepted, traced, complete_traced, published, retired, cts_received;
 	struct xdev_ext_xd_reply *reply;
 };
 struct xdev_ext_xd_rts {
 	struct xdev_ext_xd_msg msg;
+	u64 wake, wait_epoch;
 	bool canceled, consumed, admission;
 	int status;
 };
@@ -43,6 +46,11 @@ struct xdev_ext_xd_batch {
 	struct xdev_ext_net_slot *slot;
 	u32 nr, elems;
 };
+/* Shared policy facts, independent of the authority epoch. Unrelated group
+ * publications change authority but do not make a waiting candidate runnable. */
+struct xdev_ext_xd_wait_facts {
+	u64 credit, base, next, posted, consumed, room, local, remote, pool, admits, stop;
+};
 struct xdev_ext_xd_stage {
 	struct xdev_ext_netfam_stage ns;
 	struct xdev_ext_xd_fact *facts;
@@ -51,6 +59,9 @@ struct xdev_ext_xd_stage {
 	struct xdev_ext_xd_reply replies[XD_REPLIES];
 	u32 rts_count, ctl_count, posted_groups, channel, cursor;
 	u64 stream, epoch, event_id, order, local_inc, remote_inc, stop_ns, next_wake;
+	u64 ctl_wake[XD_EVENTS], ctl_wait_epoch[XD_EVENTS];
+	u64 wait_generation;
+	struct xdev_ext_xd_wait_facts wait_facts;
 	bool stop_latched, down_latched, overflow, failed;
 	int stage_error;
 	/* Worker-only current authority; callbacks change epoch, never this token. */
@@ -64,6 +75,40 @@ static struct xdev_ext_xd_fact *xd_fact(struct xdev_ext_xd_stage *xs, struct xde
 { return &xs->facts[slot - xs->ns.slots]; }
 static void xd_changed(struct xdev_ext_xd_stage *xs)
 { xs->epoch++; xdev_ext_mech_stage_kick(xs->ns.st); }
+static bool xd_waiting(struct xdev_ext_xd_stage *xs, u64 wake, u64 epoch, u64 now)
+{ return wake > now && epoch == xs->wait_generation; }
+/* ns lock held, with the same ns -> xl nesting as a protocol snapshot. */
+static void xd_refresh_waits(struct xdev_ext_xd_stage *xs)
+{
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	struct xdev_ext_xd_wait_facts current = {
+		.credit = xs->ns.rx ? (xs->ns.rx_rel_ready ? xs->ns.rx_rel.credit : 0) : xs->ns.tx.credit,
+		.base = xs->ns.rx ? xs->ns.rx_rel.base_group : xs->ns.tx.base_group,
+		.next = xs->ns.rx ? 0 : xs->ns.tx.next_group,
+		.posted = xs->posted_groups,
+		.pool = xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)),
+		.admits = xdev_ext_mech_session_admits(xs->ns.st->s),
+		.stop = xs->stop_latched,
+	};
+	spin_lock(&ep->xl->lock);
+	current.consumed = ep->xl->chan[ep->chan].consumed;
+	current.room = !bitmap_empty(ep->xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
+	current.local = ep->xl->local_inc; current.remote = ep->xl->remote_inc;
+	spin_unlock(&ep->xl->lock);
+	if (memcmp(&current, &xs->wait_facts, sizeof(current))) {
+		xs->wait_facts = current;
+		xs->wait_generation++;
+	}
+}
+static void xd_group_wake(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s)
+{
+	struct xdev_ext_xd_fact *f = xd_fact(xs, s);
+	u32 k;
+	f->wake = 0;
+	if (f->reply) f->reply->wake = 0;
+	for (k = 0; k < xs->ctl_count; k++)
+		if (xs->ctl[k].group == s->group) xs->ctl_wake[k] = 0;
+}
 static bool xd_remote_final(u32 remote)
 {
 	return remote == XDEV_EXT_NET_REMOTE_ACKED || remote == XDEV_EXT_NET_REMOTE_FAILED ||
@@ -140,12 +185,13 @@ static void xd_local(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot 
 	if (f->reply) {
 		f->reply->local_status = slot->local_status;
 		f->reply->sequestered |= !slot->local_quiesced;
+		if (slot->local_status) f->reply->final = true;
 	}
 	if (ns->rx && f->accepted && slot->local_quiesced && xs->posted_groups) xs->posted_groups--;
 	if (!slot->local_quiesced) xd_fail_locked(xs, -ENOLINK);
 	f->local_done = ktime_get_boottime_ns();
 	f->event = XDEV_EXT_XDP_EV_LOCAL;
-	f->wake = 0;
+	xd_group_wake(xs, slot);
 	f->epoch++;
 	xd_changed(xs);
 }
@@ -287,6 +333,29 @@ static u64 xd_hard(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s)
 		d = xdev_ext_rel_deadline(xs->stop_ns, XD_STOP_NS);
 	return d;
 }
+/* Project a refusal without changing the live window. Only a fresh group in
+ * this stream can return capacity; an accepted group keeps its commitment. */
+static int xd_refusal_window(struct xdev_ext_xd_stage *xs,
+		const struct xdev_ext_xd_msg *m, struct xdev_ext_rel_rx *proved)
+{
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
+	int ret;
+
+	if (xs->ns.rx_rel_ready) {
+		*proved = xs->ns.rx_rel;
+	} else {
+		struct xdev_ext_rel_cfg cfg = { .session = m->stream, .first_group = m->group,
+			.window = XDEV_EXT_REL_MAX_WINDOW, .max_attempts = 1, .timeout_ns = XD_PHASE_NS,
+			.group_bytes = l->group_bytes, .seg_len = l->seg_len };
+		ret = xdev_ext_rel_rx_init(proved, &cfg);
+		if (ret) return ret;
+	}
+	ret = xdev_ext_net_rts_check(proved, m->stream, m->group,
+		l->group_bytes, xdev_ext_xd_layout_count(l), l->group_bytes, xdev_ext_xd_layout_count(l));
+	if (ret) return ret;
+	xdev_ext_net_rts_accept(proved, m->group);
+	return xdev_ext_net_rx_close(proved, m->group);
+}
 /* ns lock held. Link lock is nested only in the documented ns -> xl order. */
 static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 		struct xdev_ext_xd_reply *r, u32 event, bool rts, bool ctl,
@@ -302,7 +371,7 @@ static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *
 		.event = event, .direction = xs->ns.st->direction, .event_id = xs->event_id == ~0ULL ? ~0ULL : ++xs->event_id,
 		.epoch = xs->epoch, .pool_generation = xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)),
 		.stream = xs->stream, .now_ns = ktime_get_boottime_ns(), .want_len = l->group_bytes,
-		.want_count = xdev_ext_xd_layout_elems(l), .posted_groups = xs->posted_groups, .channel = ep->chan,
+		.want_count = xdev_ext_xd_layout_count(l), .posted_groups = xs->posted_groups, .channel = ep->chan,
 		.credit = xs->ns.rx ? (xs->ns.rx_rel_ready ? xs->ns.rx_rel.credit : 0) : xs->ns.tx.credit,
 		.base_group = xs->ns.rx ? xs->ns.rx_rel.base_group : xs->ns.tx.base_group,
 		.next_group = xs->ns.rx ? 0 : xs->ns.tx.next_group };
@@ -343,7 +412,8 @@ static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *
 		/* Final disposition proves capacity independently of whether BPF
 		 * advertises it. Project the checked close without mutating the
 		 * live window or promising credit before the selected reply. */
-		if (xs->ns.rx && r->chain_done && !r->closed && !r->sequestered && xs->ns.rx_rel_ready) {
+		if (xs->ns.rx && (r->chain_done || (!r->native_posted && r->local_status)) &&
+		    !r->closed && !r->sequestered && xs->ns.rx_rel_ready) {
 			struct xdev_ext_rel_rx proved = xs->ns.rx_rel;
 
 			if (!xdev_ext_net_rx_close(&proved, r->group)) i->credit = proved.credit;
@@ -359,12 +429,12 @@ static void xd_snapshot(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *
 			i->msg_credit = m->type == XDEV_EXT_XD_HELD ? xs->ns.tx.credit : (m->credit < cap ? m->credit : cap);
 		}
 		if (rts) {
+			struct xdev_ext_rel_rx proved;
 			if (xs->rts[0].canceled) i->facts |= XDEV_EXT_XDP_F_RTS_CANCELED;
 			if (!admits) i->local_status = -ESHUTDOWN;
 			else if (xs->rts[0].canceled) i->local_status = -ECANCELED;
 			else if (m->total_len != i->want_len || m->count != i->want_count || (xs->stream && m->stream != xs->stream)) i->local_status = -EPROTO;
-			if (!xs->ns.rx_rel_ready && m->group <= ~0ULL - XDEV_EXT_REL_MAX_WINDOW)
-				i->credit = m->group + XDEV_EXT_REL_MAX_WINDOW;
+			if (!xd_refusal_window(xs, m, &proved)) i->credit = proved.credit;
 		}
 	}
 	xs->worker_event.id = i->event_id; xs->worker_event.epoch = i->epoch; xs->worker_event.event = event;
@@ -389,6 +459,8 @@ static void xd_drop_input(struct xdev_ext_xd_stage *xs)
 {
 	if (xs->worker_event.ctl && xs->ctl_count) {
 		xs->ctl_count--; memmove(xs->ctl, xs->ctl + 1, xs->ctl_count * sizeof(xs->ctl[0]));
+		memmove(xs->ctl_wake, xs->ctl_wake + 1, xs->ctl_count * sizeof(xs->ctl_wake[0]));
+		memmove(xs->ctl_wait_epoch, xs->ctl_wait_epoch + 1, xs->ctl_count * sizeof(xs->ctl_wait_epoch[0]));
 	}
 	if (xs->worker_event.rts && xs->rts_count) {
 		xs->rts_count--; memmove(xs->rts, xs->rts + 1, xs->rts_count * sizeof(xs->rts[0]));
@@ -429,6 +501,7 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 	if (!ret) { family_called = true; ret = xdev_ext_netfam_post(&xs->ns, s); }
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	f->reserved = false;
+	xd_group_wake(xs, s);
 	if (ret) {
 		/* Vtable refuses all elements on error. No native owner exists. */
 		if (!family_called) xdev_ext_netfam_release(s, true);
@@ -437,7 +510,10 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 		s->local_known = s->local_quiesced = true; s->local_status = ret;
 		if (!xs->ns.rx) xdev_ext_rel_tx_native_done(&xs->ns.tx, s->group, 1, ret, false, i->now_ns);
 		f->event = XDEV_EXT_XDP_EV_POST_RESULT;
-		xd_fail_locked(xs, ret);
+		if (xs->ns.rx && f->reply) {
+			f->reply->local_status = ret;
+			f->reply->final = true;
+		} else xd_fail_locked(xs, ret);
 	} else {
 		f->accepted = true; f->withdrawal = 0;
 		s->state = XDEV_EXT_RDV_POSTED;
@@ -499,18 +575,35 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		if (!same) { ret = -ESTALE; goto out; }
 	}
 	if (i->hard_deadline_ns && now >= i->hard_deadline_ns &&
+	    act != XDEV_EXT_XDP_ACT_WAIT &&
 	    act != XDEV_EXT_XDP_ACT_FAIL_LINK && act != XDEV_EXT_XDP_ACT_CANCEL_ARMED &&
 	    act != XDEV_EXT_XDP_ACT_PUBLISH && act != XDEV_EXT_XDP_ACT_WITHDRAW) { ret = -EPROTO; goto out; }
 	m.stream = i->stream; m.group = i->group;
 	switch (act) {
 	case XDEV_EXT_XDP_ACT_WAIT:
-		if (!v->wake_ns || v->wake_ns <= now || v->wake_ns > xdev_ext_rel_deadline(now, XD_TICK_NS) ||
+		/* A verdict is legal against its snapshot. Scheduling delay is
+		 * stale work, not a protocol violation by the BPF program.
+		 */
+		if (!v->wake_ns || v->wake_ns <= i->now_ns ||
+		    v->wake_ns > xdev_ext_rel_deadline(i->now_ns, XD_TICK_NS) ||
 		    (i->hard_deadline_ns && v->wake_ns > i->hard_deadline_ns) ||
+		    (i->policy_deadline_ns && v->wake_ns > i->policy_deadline_ns) ||
+		    (i->hard_deadline_ns && i->now_ns >= i->hard_deadline_ns) ||
+		    (i->policy_deadline_ns && i->now_ns >= i->policy_deadline_ns)) { ret = -EPROTO; break; }
+		if (v->wake_ns <= now ||
 		    (i->hard_deadline_ns && now >= i->hard_deadline_ns) ||
-		    (i->policy_deadline_ns && now >= i->policy_deadline_ns)) { ret = -EPROTO; break; }
+		    (i->policy_deadline_ns && now >= i->policy_deadline_ns)) { ret = -ESTALE; break; }
 		if (i->event == XDEV_EXT_XDP_EV_TX_SUBMIT || i->event == XDEV_EXT_XDP_EV_RX_SUBMIT) { ret = -EAGAIN; break; }
-		if (f) f->wake = v->wake_ns;
-		xs->next_wake = v->wake_ns;
+		if (xs->worker_event.rts) {
+			xs->rts[0].wake = v->wake_ns; xs->rts[0].wait_epoch = xs->wait_generation;
+		} else if (xs->worker_event.ctl) {
+			xs->ctl_wake[0] = v->wake_ns; xs->ctl_wait_epoch[0] = xs->wait_generation;
+		} else if (f) {
+			f->wake = v->wake_ns; f->wait_epoch = xs->wait_generation;
+		} else if (r) {
+			r->wake = v->wake_ns; r->wait_epoch = xs->wait_generation;
+		}
+		if (!xs->next_wake || v->wake_ns < xs->next_wake) xs->next_wake = v->wake_ns;
 		break;
 	case XDEV_EXT_XDP_ACT_IGNORE:
 		if (i->event != XDEV_EXT_XDP_EV_DUPLICATE || (r && (r->cts || r->final))) { ret = -EPROTO; break; }
@@ -547,6 +640,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		if (ret) { if (ret == -ESHUTDOWN) ret = -ESTALE; break; }
 		r = &xs->replies[k]; *r = (struct xdev_ext_xd_reply){ .used = true, .admission = true, .deadline = xd_hard(xs, s) };
 		f->reply = r; s->state = XDEV_EXT_RDV_ARMED; f->arm_order = ++xs->order; f->event = 0;
+		for (k = 0; k < xs->rts_count; k++) xs->rts[k].wake = 0;
 		break;
 	case XDEV_EXT_XDP_ACT_RX_POST:
 		if (!ns->rx || !s || !xs->worker_event.rts || i->event != XDEV_EXT_XDP_EV_RTS ||
@@ -641,13 +735,14 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		}
 		m.credit = v->credit; ret = xd_send(xs, &m); if (ret) break;
 		r->advertised = v->credit;
+		r->wake = 0;
 		if (act == XDEV_EXT_XDP_ACT_SEND_CTS) r->cts = false;
 		else {
 			r->final = false;
 			if (!r->closed && ns->rx_rel_ready) { xdev_ext_net_rx_close(&ns->rx_rel, r->group); r->closed = true; }
 			if (!r->sequestered) xd_reply_put(xs, r);
 		}
-		if (xs->worker_event.ctl) xd_drop_input(xs);
+		if (xs->worker_event.ctl || xs->worker_event.rts) xd_drop_input(xs);
 		if (f) { f->event = s->local_known && !f->published ? XDEV_EXT_XDP_EV_READY : 0; f->wake = 0; }
 		break;
 	case XDEV_EXT_XDP_ACT_WITHDRAW:
@@ -660,23 +755,32 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		    v->status >= 0 || v->status != i->local_status) { ret = -EPROTO; break; }
 		{
 			struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+			struct xdev_ext_rel_rx proved;
+			bool close = !xd_refusal_window(xs, &xs->rts[0].msg, &proved);
+			/* A refusal is transactional with control admission. Duplicates,
+			 * old streams and groups already posted cannot close capacity. */
+			if (i->data_seq != i->expected_seq ||
+			    (close && i->count > ~0ULL - i->expected_seq)) { ret = -EPROTO; break; }
 			if ((!r || !r->admission) && !xs->rts[0].admission) {
 				ret = xdev_ext_mech_stage_native_get(ns->st);
 				if (ret) { xd_fail_locked(xs, -ENOLINK); ret = 0; break; }
 				xs->rts[0].admission = true;
 			}
-			if (!xs->rts[0].consumed) {
-				ret = xdev_ext_xd_seq_consume(ep->xl, ep->chan, i->data_seq, i->count); if (ret) break;
-				xs->rts[0].consumed = true;
-			}
-			m.type = XDEV_EXT_XD_FAIL; m.status = -v->status; m.credit = 0;
+			m.type = XDEV_EXT_XD_FAIL; m.status = -v->status;
+			m.credit = close ? proved.credit : i->credit;
 			ret = xd_send(xs, &m); if (ret) break;
+			if (close) {
+				ret = xdev_ext_xd_seq_consume(ep->xl, ep->chan, i->data_seq, i->count); if (ret) break;
+				ns->rx_rel = proved; ns->rx_rel_ready = true; xs->stream = i->stream;
+			}
 			if (xs->rts[0].admission) {
 				xs->rts[0].admission = false;
 				xdev_ext_mech_stage_native_put(ns->st);
 			}
 			xd_drop_input(xs);
-			if (v->status == -EPROTO) { xd_fail_locked(xs, -EPROTO); ns->dead = true; xs->stage_error = -EPROTO; }
+			if (v->status == -EPROTO) {
+				xd_fail_locked(xs, -EPROTO); ns->dead = true; xs->stage_error = -EPROTO;
+			}
 		}
 		break;
 	case XDEV_EXT_XDP_ACT_FAIL_LINK:
@@ -694,7 +798,10 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		break;
 	default: ret = -EPROTO;
 	}
-	if (!ret && act != XDEV_EXT_XDP_ACT_WAIT) xd_changed(xs);
+	if (!ret && act != XDEV_EXT_XDP_ACT_WAIT) {
+		if (s) xd_group_wake(xs, s);
+		xd_changed(xs);
+	}
  out:
 	spin_unlock_irqrestore(&ns->lock, flags);
 	return ret;
@@ -760,19 +867,25 @@ void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext
 	} else if (xs->ns.rx && m->type == XDEV_EXT_XD_CANCEL) {
 		for (k = 0; k < xs->rts_count; k++)
 			if (xs->rts[k].msg.group == m->group && xs->rts[k].msg.stream == m->stream) {
-				xs->rts[k].canceled = true; goto changed;
+				xs->rts[k].canceled = true; xs->rts[k].wake = 0; goto changed;
 			}
-		if (!xd_reply_group(xs, m->group)) goto out;
+		if (!xd_reply_group(xs, m->group) || xd_reply_group(xs, m->group)->stream != m->stream) goto out;
 		if (xs->ctl_count == XD_EVENTS) { xs->overflow = true; xs->down_latched = true; goto changed; }
+		xs->ctl_wake[xs->ctl_count] = xs->ctl_wait_epoch[xs->ctl_count] = 0;
 		xs->ctl[xs->ctl_count++] = *m;
 	} else if (!xs->ns.rx && m->type >= XDEV_EXT_XD_CTS && m->type <= XDEV_EXT_XD_FAIL) {
 		for (k = 0; k < xs->ctl_count; k++)
 			if (xs->ctl[k].type == m->type && xs->ctl[k].group == m->group &&
 			    xs->ctl[k].credit == m->credit && xs->ctl[k].status == m->status) goto out;
 		if (xs->ctl_count == XD_EVENTS) { xs->overflow = true; xs->down_latched = true; goto changed; }
+		xs->ctl_wake[xs->ctl_count] = xs->ctl_wait_epoch[xs->ctl_count] = 0;
 		xs->ctl[xs->ctl_count++] = *m;
 	} else goto out;
  changed:
+	{
+		struct xdev_ext_net_slot *slot = xd_group(xs, m->group);
+		if (slot) xd_group_wake(xs, slot);
+	}
 	xd_changed(xs);
  out:
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
@@ -790,11 +903,35 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 	if (xs->failed || xs->ns.dead || xs->down_latched) {
 		xd_fail_locked(xs, -ENOLINK); xd_terminal_locked(xs, -ENOLINK); return false;
 	}
+	xd_refresh_waits(xs);
 	/* A hard native/withdrawal deadline cannot depend on a cooperative policy. */
 	for (k = 0; k < xs->ns.depth; k++) {
 		s = &xs->ns.slots[k];
 		if (s->busy && s->state != XDEV_EXT_RDV_FINAL && now >= xd_hard(xs, s) &&
 		    (xd_fact(xs, s)->accepted || s->withdrawn)) {
+			xd_fail_locked(xs, -ETIMEDOUT); xd_terminal_locked(xs, -ETIMEDOUT); return false;
+		}
+	}
+	/* Deadline events precede persistent POST_RESULT/LOCAL facts. A policy
+	 * WAIT on those facts must not hide withdrawal or an armed hard bound. */
+	for (k = 0; k < xs->ns.depth; k++) {
+		struct xdev_ext_xd_fact *f;
+		s = &xs->ns.slots[(xs->cursor + k) % xs->ns.depth]; f = xd_fact(xs, s);
+		if (!s->busy || f->published || f->reserved || s->local_known || s->state == XDEV_EXT_RDV_FINAL) continue;
+		/* A queued refusal may borrow this ARMED slot's control admission
+		 * after STOP. Do not return it before the RTS can be answered. */
+		if (xs->ns.rx && xs->rts_count && now < xd_hard(xs, s)) continue;
+		if (now >= xd_hard(xs, s) || xs->stop_latched ||
+		    (!xs->ns.rx && s->state == XDEV_EXT_RDV_ANNOUNCED && !s->withdrawn &&
+		     now >= xdev_ext_rel_deadline(f->born, XD_WITHDRAW_NS))) {
+			if (now < xd_hard(xs, s) && xd_waiting(xs, f->wake, f->wait_epoch, now)) continue;
+			xd_snapshot(xs, s, f->reply, xs->stop_latched ? XDEV_EXT_XDP_EV_STOP : XDEV_EXT_XDP_EV_TIMER,
+				false, false, i); return true;
+		}
+	}
+	for (k = 0; k < XD_REPLIES; k++) {
+		r = &xs->replies[k];
+		if (r->used && (r->cts || r->final) && r->deadline && now >= r->deadline) {
 			xd_fail_locked(xs, -ETIMEDOUT); xd_terminal_locked(xs, -ETIMEDOUT); return false;
 		}
 	}
@@ -804,7 +941,26 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 	while (xs->rts_count && (xs->rts[0].msg.src_inc != xs->remote_inc || xs->rts[0].msg.dst_inc != xs->local_inc)) {
 		xs->rts_count--; memmove(xs->rts, xs->rts + 1, xs->rts_count * sizeof(xs->rts[0])); xs->epoch++;
 	}
-	if (xs->ctl_count) {
+	/* Independent groups can pass a waiting control candidate. Keep the
+	 * order of records for each group, and preserve the selected head token. */
+	for (k = 0; k < xs->ctl_count; k++) {
+		u32 n;
+		bool blocked = false;
+		if (xd_waiting(xs, xs->ctl_wake[k], xs->ctl_wait_epoch[k], now)) continue;
+		for (n = 0; n < k; n++)
+			if (xs->ctl[n].group == xs->ctl[k].group) { blocked = true; break; }
+		if (blocked) continue;
+		if (k) {
+			struct xdev_ext_xd_msg selected = xs->ctl[k];
+			u64 wake = xs->ctl_wake[k], epoch = xs->ctl_wait_epoch[k];
+			memmove(xs->ctl + 1, xs->ctl, k * sizeof(xs->ctl[0]));
+			memmove(xs->ctl_wake + 1, xs->ctl_wake, k * sizeof(xs->ctl_wake[0]));
+			memmove(xs->ctl_wait_epoch + 1, xs->ctl_wait_epoch, k * sizeof(xs->ctl_wait_epoch[0]));
+			xs->ctl[0] = selected; xs->ctl_wake[0] = wake; xs->ctl_wait_epoch[0] = epoch;
+		}
+		break;
+	}
+	if (k < xs->ctl_count) {
 		struct xdev_ext_xd_msg *m = &xs->ctl[0];
 		s = xd_group(xs, m->group); r = xd_reply_group(xs, m->group);
 		switch (m->type) {
@@ -812,7 +968,10 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 		case XDEV_EXT_XD_ACK: ev = s && s->remote == XDEV_EXT_NET_REMOTE_ACKED ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_ACK; break;
 		case XDEV_EXT_XD_HELD: ev = s && xd_fact(xs, s)->published ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_HELD; break;
 		case XDEV_EXT_XD_FAIL: ev = s && (xd_fact(xs, s)->published || s->remote == XDEV_EXT_NET_REMOTE_FAILED) ? XDEV_EXT_XDP_EV_DUPLICATE : XDEV_EXT_XDP_EV_FAIL; break;
-		case XDEV_EXT_XD_CANCEL: ev = XDEV_EXT_XDP_EV_CANCEL; if (r) r->cts = true; break;
+		case XDEV_EXT_XD_CANCEL:
+			ev = r && r->native_posted ? XDEV_EXT_XDP_EV_CANCEL : XDEV_EXT_XDP_EV_DUPLICATE;
+			if (r && r->native_posted) r->cts = true;
+			break;
 		default: ev = XDEV_EXT_XDP_EV_DUPLICATE;
 		}
 		/* A final remote disposition is immutable. Later CTS/HELD/ACK/FAIL
@@ -824,29 +983,39 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 	for (k = 0; k < xs->ns.depth; k++) {
 		struct xdev_ext_xd_fact *f;
 		s = &xs->ns.slots[(xs->cursor + k) % xs->ns.depth]; f = xd_fact(xs, s);
-		if (!s->busy || f->published || f->reserved) continue;
+		if (!s->busy || f->published || f->reserved || xd_waiting(xs, f->wake, f->wait_epoch, now)) continue;
 		if (f->event) {
-			if (s->local_known && f->reply) {
-				f->reply->local_status = s->local_status; f->reply->sequestered |= !s->local_quiesced;
-				if (s->local_status) f->reply->final = true;
-			}
 			xd_snapshot(xs, s, f->reply, f->event, false, false, i); return true;
 		}
 	}
 	for (k = 0; k < XD_REPLIES; k++) {
 		r = &xs->replies[k];
-		if (r->used && (r->cts || r->final)) {
+		if (r->used && (r->cts || r->final) && !xd_waiting(xs, r->wake, r->wait_epoch, now)) {
 			if (r->deadline && now >= r->deadline) { xd_fail_locked(xs, -ETIMEDOUT); xd_terminal_locked(xs, -ETIMEDOUT); return false; }
 			xd_snapshot(xs, NULL, r, r->chain_done ? XDEV_EXT_XDP_EV_CHAIN_END : XDEV_EXT_XDP_EV_REPLY_DUE, false, false, i); return true;
 		}
 	}
-	if (xs->rts_count) {
+	if (xs->rts_count && !xd_waiting(xs, xs->rts[0].wake, xs->rts[0].wait_epoch, now)) {
+		struct xdev_ext_xd_msg *m = &xs->rts[0].msg;
+		r = xd_reply_group(xs, m->group);
+		if (r && r->stream != m->stream) r = NULL;
+		/* Retransmitted RTS is informational after acceptance or refusal;
+		 * never pair it with a different ARMED slot. */
+		if (r || (xs->ns.rx_rel_ready && m->stream == xs->stream &&
+		    (m->group < xs->ns.rx_rel.base_group ||
+		     (xs->ns.rx_rel.entry[m->group % xs->ns.rx_rel.cfg.window].group == m->group &&
+		      xs->ns.rx_rel.entry[m->group % xs->ns.rx_rel.cfg.window].state)))) {
+			if (r && r->native_posted && xs->rts[0].canceled) r->cts = true;
+			s = r ? xd_group(xs, m->group) : NULL;
+			xd_snapshot(xs, s, r, XDEV_EXT_XDP_EV_DUPLICATE, true, false, i); return true;
+		}
 		s = xd_armed(xs);
 		xd_snapshot(xs, s, NULL, xs->rts[0].canceled ? XDEV_EXT_XDP_EV_CANCEL : XDEV_EXT_XDP_EV_RTS, true, false, i); return true;
 	}
 	for (k = 0; k < xs->ns.depth; k++) {
 		s = &xs->ns.slots[(xs->cursor + k) % xs->ns.depth];
-		if (!s->busy || s->state == XDEV_EXT_RDV_FINAL || xd_fact(xs, s)->reserved) continue;
+		if (!s->busy || s->state == XDEV_EXT_RDV_FINAL || xd_fact(xs, s)->reserved ||
+		    xd_waiting(xs, xd_fact(xs, s)->wake, xd_fact(xs, s)->wait_epoch, now)) continue;
 		xd_snapshot(xs, s, NULL, xs->stop_latched ? XDEV_EXT_XDP_EV_STOP : XDEV_EXT_XDP_EV_TIMER, false, false, i); return true;
 	}
 	return false;
@@ -873,9 +1042,23 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 			xdev_ext_mech_stage_dead(st, err);
 		}
 		if (ret == -ESTALE) continue;
-		if (ret == -EAGAIN) break;
+		if (ret == -EAGAIN) {
+			u64 wake = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_TICK_NS);
+			spin_lock_irqsave(&xs->ns.lock, flags);
+			if (xs->worker_event.rts && xs->rts_count) {
+				xs->rts[0].wake = wake; xs->rts[0].wait_epoch = xs->wait_generation;
+			} else if (xs->worker_event.ctl && xs->ctl_count) {
+				xs->ctl_wake[0] = wake; xs->ctl_wait_epoch[0] = xs->wait_generation;
+			} else if (xs->worker_event.slot) {
+				struct xdev_ext_xd_fact *f = xd_fact(xs, xs->worker_event.slot);
+				f->wake = wake; f->wait_epoch = xs->wait_generation;
+			} else if (xs->worker_event.reply) {
+				xs->worker_event.reply->wake = wake; xs->worker_event.reply->wait_epoch = xs->wait_generation;
+			}
+			spin_unlock_irqrestore(&xs->ns.lock, flags);
+			continue;
+		}
 		if (ret) { xd_policy_error(xs); break; }
-		if (result.verdict.action == XDEV_EXT_XDP_ACT_WAIT) break;
 	}
 	{
 		u64 now = ktime_get_boottime_ns(), due = xdev_ext_rel_deadline(now, XD_TICK_NS);
@@ -964,6 +1147,7 @@ static void xdev_ext_xd_class_batch_release(struct xdev_ext_mech_stage *st, stru
 		ce->released = true; r->chain_done = true; r->sequestered |= sequestered;
 		r->chain_status = ce->status ? ce->status : sequestered ? -ENOLINK : 0;
 		r->final = r->admission || !r->closed; r->deadline = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_PHASE_NS);
+		r->wake = 0;
 		xd_changed(xs);
 	}
 	spin_unlock_irqrestore(&xs->ns.lock, flags);

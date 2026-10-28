@@ -220,6 +220,23 @@ xdev_ext_xd_layout_elems(const struct xdev_ext_mech_layout *l)
 	return total <= (__u32)~0U ? (__u32)total : 0;
 }
 
+/* Exact wire count: the final source frame may be shorter than seg_len. */
+static inline __u32
+xdev_ext_xd_layout_count(const struct xdev_ext_mech_layout *l)
+{
+	__u64 full, tail, per_frame, total;
+
+	if (!l->group_bytes || !l->seg_len)
+		return 0;
+	full = l->group_bytes / l->seg_len;
+	tail = l->group_bytes % l->seg_len;
+	per_frame = ((__u64)l->seg_len + XDEV_EXT_XDOMAIN_MAX_FRAME - 1) /
+		    XDEV_EXT_XDOMAIN_MAX_FRAME;
+	total = full * per_frame +
+		(tail + XDEV_EXT_XDOMAIN_MAX_FRAME - 1) / XDEV_EXT_XDOMAIN_MAX_FRAME;
+	return total <= (__u32)~0U ? (__u32)total : 0;
+}
+
 /* All batches fit at once; the ring must retain one empty slot. */
 static inline bool
 xdev_ext_xd_budget_ok(__u32 depth, __u32 elems_per_batch, __u32 ring_size)

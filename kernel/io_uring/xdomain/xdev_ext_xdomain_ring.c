@@ -349,10 +349,27 @@ static void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xde
 {
 	struct xdev_ext_xd_msg f = { .type = XDEV_EXT_XD_FAIL, .stream = rts->stream,
 				     .group = rts->group, .status = ENODEV };
+	unsigned long flags;
+	u64 consumed;
+	int ret;
 
-	xdev_ext_xd_msg_send(xl, NULL, rts->channel, &f);	/* best effort */
-	if (xdev_ext_xd_seq_consume(xl, rts->channel, rts->data_seq, rts->count) == -EPROTO)
-		xdev_ext_xd_link_fail(xl, NULL, -EPROTO);
+	spin_lock_irqsave(&xl->lock, flags);
+	consumed = xl->chan[rts->channel].consumed;
+	spin_unlock_irqrestore(&xl->lock, flags);
+	/* Already refused records are informational. No second sequence debit. */
+	if (rts->data_seq < consumed) return;
+	if (rts->data_seq != consumed || rts->count > ~0ULL - consumed ||
+	    rts->group > ~0ULL - XDEV_EXT_REL_MAX_WINDOW) {
+		xdev_ext_xd_link_fail(xl, NULL, -EPROTO); return;
+	}
+	/* A new binding initializes its own stream/window. This finite credit
+	 * closes only this sender's refused group; it is not a future promise. */
+	f.credit = rts->group + XDEV_EXT_REL_MAX_WINDOW;
+	ret = xdev_ext_xd_msg_send(xl, NULL, rts->channel, &f);
+	if (!ret) ret = xdev_ext_xd_seq_consume(xl, rts->channel, rts->data_seq, rts->count);
+	/* There is no bound stage to retain a reply obligation. Failure must be
+	 * terminal and observable rather than silently dropping the RTS. */
+	if (ret) xdev_ext_xd_link_fail(xl, NULL, ret);
 }
 
 /* Control RX callback, ring work (process context): decode, check the link
