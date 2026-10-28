@@ -54,8 +54,9 @@ int main(void)
 	EQ(XDEV_EXT_MECH_CLASS_XDOMAIN, 11);
 	EQ(XDEV_EXT_MECH_CLASS_MAX, 12);
 	EQ(XDEV_EXT_XDOMAIN_PROTO_VERSION, 1);
-	EQ(XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 1);
+	EQ(XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 3);
 	EQ(XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED, 1);
+	EQ(XDEV_EXT_XDOMAIN_F_EARLY, 2);
 	EQ(XDEV_EXT_XDOMAIN_MAX_FRAME, 4096);
 	EQ(XDEV_EXT_XDOMAIN_MAX_ELEMS, 64);
 	EQ(XDEV_EXT_XDOMAIN_TAG_LEN, 24);
@@ -63,7 +64,11 @@ int main(void)
 	EQ(frames, 2);
 	c.st[1].flags = XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED;
 	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
-	for (__u32 bit = 1; bit < 29; bit++) {
+	c.st[1].flags = XDEV_EXT_XDOMAIN_F_EARLY;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	c.st[1].flags |= XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	for (__u32 bit = 2; bit < 29; bit++) {
 		c.st[1].flags = 1U << bit;
 		EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	}
@@ -80,7 +85,7 @@ int main(void)
 	EQ(xdev_ext_mech_peer_dirs(11), 6);
 	EQ(xdev_ext_mech_class_family(11), XDEV_EXT_FAMILY_NETWORK);
 	EQ(d->family, 1); EQ(d->peer_dirs, 6); EQ(d->peer_only, 1);
-	EQ(d->known_flags, 1); EQ(d->flags_later, 0);
+	EQ(d->known_flags, 3); EQ(d->flags_later, 0);
 	EQ(d->role_rule, 1); EQ(d->ctx_rule, 4); EQ(d->no_file, 0);
 	EQ(d->flags_ok == NULL, 1);
 	c.st[0].direction = 0;
