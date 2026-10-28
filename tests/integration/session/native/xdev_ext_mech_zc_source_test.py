@@ -37,7 +37,8 @@ class SourceGate(unittest.TestCase):
         tracked = ['.gitignore']
         ignored = ['Makefile','Kconfig','scripts/Makefile.build','include/linux/types.h']
         prefix = 'kernel/' if overlay else ''
-        (root/'.gitignore').write_text('build/\n'+''.join('/'+prefix+p+'\n' for p in ignored))
+        (root/'.gitignore').write_text('/build/\n'+''.join('/'+prefix+p+'\n' for p in ignored)+
+                                      ('/kernel/.xdev-ext-source.json\n' if overlay else ''))
         for relative in ANCHORS:
             path=source/relative;path.parent.mkdir(parents=True,exist_ok=True)
             original=HERE/Path(relative).name
@@ -48,13 +49,54 @@ class SourceGate(unittest.TestCase):
         for relative in ignored:
             path=source/relative;path.parent.mkdir(parents=True,exist_ok=True);path.write_text('upstream fixture\n')
         if overlay:
-            spec={'url':'https://example.invalid/linux.git','ref':'refs/tags/fixture',
-                  'commit':'1'*40,'path':'kernel'}
-            (root/'sources.lock.json').write_text(json.dumps({'schema':1,'components':{'linux':spec}}))
-            path=root/'scripts/prepare_sources.py';path.parent.mkdir();path.write_bytes((PROJECT/'scripts/prepare_sources.py').read_bytes())
-            marker=root/'build/source-state/linux.json';marker.parent.mkdir(parents=True)
-            marker.write_text(json.dumps({'schema':1,'component':'linux',**spec}))
-            tracked+=['sources.lock.json','scripts/prepare_sources.py']
+            # Exercise the real canonical preparer offline. Only the legacy
+            # harness's tracked anchor projection stays at kernel/; canonical
+            # author inputs and their assembled copies are separate files.
+            upstream=self.folder/'upstream';upstream.mkdir()
+            self.git(upstream,'init','-q')
+            for relative in ignored:
+                path=upstream/relative;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text('upstream fixture\n')
+            self.git(upstream,'add','--',*ignored)
+            self.git(upstream,'-c','user.name=Selftest','-c','user.email=selftest@invalid',
+                     'commit','-qm','local upstream fixture')
+            self.git(upstream,'tag','fixture')
+            spec={'url':upstream.as_uri(),'ref':'refs/tags/fixture',
+                  'commit':self.git(upstream,'rev-parse','HEAD'),'path':'kernel'}
+            (root/'sources.lock.json').write_text(json.dumps({'schema':2,'components':{'linux':spec}}))
+            product=json.loads((PROJECT/'source-layout.json').read_text())
+            native={entry['native_path']:entry for entry in product['files']
+                    if entry.get('component')=='linux'}
+            files=[]
+            for relative in (*ANCHORS,'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py'):
+                entry=native[relative]
+                target=root/entry['source'];target.parent.mkdir(parents=True,exist_ok=True)
+                target.write_bytes((source/relative).read_bytes())
+                files.append(entry);tracked.append(entry['source'])
+            for origin,name in (('scripts/prepare_sources.py','tools/build/prepare_sources.py'),
+                                ('tools/layout.py','tools/layout.py')):
+                path=root/name;path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_bytes((PROJECT/origin).read_bytes())
+                files.append({'source':name,'logical_path':name});tracked.append(name)
+            (root/'source-layout.json').write_text(json.dumps({
+                'schema':1,'dependency_lock':'sources.lock.json','files':files}))
+            # Argument adaptation only: the real implementation checks this
+            # exact assembly, rather than its default build/assembled/linux.
+            path=root/'scripts/prepare_sources.py';path.parent.mkdir()
+            path.write_text('import os,sys\nfrom pathlib import Path\n'
+                            'root=Path(__file__).resolve().parents[1]\n'
+                            'os.execv(sys.executable,[sys.executable,str(root/"tools/build/prepare_sources.py"),'
+                            '*sys.argv[1:],"--output",str(root/"kernel")])\n')
+            tracked+=['sources.lock.json','source-layout.json','scripts/prepare_sources.py']
+            # Assemble into a fresh destination; do not manufacture a receipt
+            # for the initial anchor scaffold or bypass conflict validation.
+            shutil.rmtree(source)
+            prepared=subprocess.run(['python3',str(root/'tools/build/prepare_sources.py'),
+                                     '--component','linux','--output',str(source),
+                                     '--cache',str(self.folder/'cache')],
+                                    env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'),
+                                    capture_output=True,text=True)
+            self.assertEqual(prepared.returncode,0,prepared.stdout+prepared.stderr)
         self.git(root,'add','--',*tracked)
         self.git(root,'-c','user.name=Selftest','-c','user.email=selftest@invalid','commit','-qm','source fixture')
         return root,source
@@ -64,7 +106,9 @@ class SourceGate(unittest.TestCase):
         block=script[script.index('SRC=${SOURCE_OVERRIDE:'):script.index('# Use the same campaign geometry')]
         body='set -euo pipefail\nSOURCE_OVERRIDE=$1\nSCRATCH=$2\n'+block
         body+='printf "GATE_ROOT=%s\\nGATE_SHA=%s\\nGATE_LAYOUT=%s\\n" "${SOURCE_GIT_ROOT:-unset}" "${SOURCE_COMMIT:-unset}" "${SOURCE_LAYOUT:-unset}"\n'
-        return subprocess.run(['bash','-c',body,'source-gate',str(source),str(self.folder)],text=True,capture_output=True,timeout=20)
+        return subprocess.run(['bash','-c',body,'source-gate',str(source),str(self.folder)],
+                              env=dict(os.environ,PYTHONDONTWRITEBYTECODE='1'),
+                              text=True,capture_output=True,timeout=20)
 
     def test_standalone_kernel_checkout(self):
         _,source=self.checkout()
@@ -77,6 +121,13 @@ class SourceGate(unittest.TestCase):
         self.assertIn('GATE_ROOT='+str(root),run.stdout)
         self.assertIn('GATE_SHA='+self.git(root,'rev-parse','HEAD'),run.stdout)
         self.assertIn('GATE_LAYOUT=overlay',run.stdout)
+        receipt=json.loads((source/'.xdev-ext-source.json').read_text())
+        self.assertEqual(receipt['kind'],'full-assembly')
+        self.assertEqual(receipt['canonical_root'],str(root))
+        self.assertEqual(receipt['output'],str(source))
+        for native,canonical in receipt['source_origins'].items():
+            self.assertEqual((source/native).read_bytes(),(root/canonical).read_bytes())
+            self.assertNotEqual((source/native).stat().st_ino,(root/canonical).stat().st_ino)
 
     def test_standalone_git_worktree(self):
         root,_=self.checkout()
@@ -96,10 +147,11 @@ class SourceGate(unittest.TestCase):
 
     def test_overlay_rejects_missing_or_mismatched_preparation(self):
         root,source=self.checkout(True)
-        marker=root/'build/source-state/linux.json'
+        marker=source/'.xdev-ext-source.json'
         original=marker.read_text();marker.unlink()
         self.assertNotEqual(self.gate(source).returncode,0)
-        marker.write_text(original.replace('1'*40,'2'*40))
+        receipt=json.loads(original);receipt['commit']='0'*40
+        marker.write_text(json.dumps(receipt))
         self.assertNotEqual(self.gate(source).returncode,0)
 
     def test_dirty_and_untracked_files_outside_kernel_are_rejected(self):
@@ -115,8 +167,8 @@ class SourceGate(unittest.TestCase):
         root,source=self.checkout(True)
         path=root/'sources.lock.json';lock=json.loads(path.read_text())
         lock['components']['linux']['path']='other';path.write_text(json.dumps(lock))
-        marker=root/'build/source-state/linux.json';receipt=json.loads(marker.read_text())
-        receipt['path']='other';marker.write_text(json.dumps(receipt))
+        marker=source/'.xdev-ext-source.json';receipt=json.loads(marker.read_text())
+        receipt['output']=str(root/'other');marker.write_text(json.dumps(receipt))
         for relative in ('Makefile','Kconfig','scripts/Makefile.build','include/linux/types.h'):
             path=root/'other'/relative;path.parent.mkdir(parents=True,exist_ok=True)
             path.write_text('another prepared directory\n')
