@@ -172,6 +172,7 @@ static void stop_late(struct session *s)
  CHECK(flags&XDEV_EXT_USER_K_DRAINING,"strict STOP publishes DRAINING before grace expires");
  CHECK(s->slots[a.slot].ticket==a.ticket&&s->slots[b.slot].ticket==b.ticket,"STOP retains both original tickets pending late completion");
  complete(s,a);complete(s,b);CHECK(!pthread_join(t,NULL),"join STOP after late status-zero done");
+ printf("XDEV_EXT_ORDERED_STOP_RESULT=%d\n",v.ret);
  CHECK(v.ret==0,"late done permits STOP drain/release");
  CHECK(!s->slots[a.slot].ticket&&!s->slots[b.slot].ticket,"drain clears matched external leases");
  st=(struct xdev_ext_mech_stats){.session_id=s->c.session_id};
