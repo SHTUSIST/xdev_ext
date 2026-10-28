@@ -18,9 +18,11 @@ done
 [[ -n "$SCRATCH" && -n "$SOURCE" && -n "$BUILD" && -n "$TOOLS" ]]
 [[ -d "$SCRATCH" && ! -L "$SCRATCH" && $(stat -c %a "$SCRATCH") == 700 && $(stat -c %u "$SCRATCH") == $(id -u) ]]
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
-SOURCE=$(git -C "$SOURCE" rev-parse --show-toplevel)
-REL=kernel/tools/testing/selftests/xdev_ext_mech/xdomain/guest
-SRC=$SOURCE/kernel
+SOURCE=$(cd "$SOURCE" && pwd -P)
+[[ $(git -C "$SOURCE" rev-parse --show-toplevel) == "$SOURCE" ]] || { echo 'FAIL --source must be canonical Git root' >&2; exit 1; }
+REL=tools/testing/selftests/xdev_ext_mech/xdomain/guest
+SRC=$SOURCE/build/source-view/kernel
+CONTRACT=$SOURCE/tests/integration/build/kvm_layout/contracts.py
 EV=$SCRATCH/xdomain-evidence OUT=$SCRATCH/xdomain-out ROOT=$SCRATCH/xdomain-initroot
 mkdir -p "$EV" "$OUT"
 # A failed retry must never retain the previous terminal verdict.
@@ -31,7 +33,12 @@ git -C "$SOURCE" diff --quiet
 git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]]
 SHA=$(git -C "$SOURCE" rev-parse HEAD)
+python3 -I "$CONTRACT" roots "$SOURCE" "$SHA" "$BUILD" "$EV/roots.json"
+python3 -I "$CONTRACT" freeze-kunit "$SOURCE/src/network/drivers/thunderbolt/test.c" "$EV/kunit-expected.json"
 [[ $(cat "$BUILD/xdev-ext-source.commit") == "$SHA" ]]
+python3 -I "$CONTRACT" artifacts "$BUILD/xdev-ext-xdomain-build.sha256" "$EV/bound-artifacts.json" \
+    "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$BUILD/Module.symvers" \
+    "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko"
 sha256sum -c "$BUILD/xdev-ext-xdomain-build.sha256" >"$EV/build-identity-check.log" 2>&1
 for symbol in MODULES MODULE_UNLOAD MEMORY_HOTPLUG MEMORY_HOTREMOVE MIGRATION SPARSEMEM_VMEMMAP ZONE_DEVICE PCI_P2PDMA DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK KUNIT USB4_KUNIT_TEST; do
     grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"
@@ -47,9 +54,9 @@ modprobe --show-depends --dirname "$TOOLS/xdomain-modules" --set-version "$relea
 grep -q 'xdev_ext_xdomain.ko' "$EV/module-dependencies.txt"
 grep -q 'thunderbolt.ko' "$EV/module-dependencies.txt"
 for a in "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$TOOLS/xdev_ext_mech_ctl"; do [[ -s "$a" ]]; done
-printf 'source_commit=%s\nbuild_commit=%s\nrelease=%s\nscope=software-module-and-verifier\n' "$SHA" "$SHA" "$release" >"$EV/provenance.txt"
+printf 'source_commit=%s\nbuild_commit=%s\nrelease=%s\nnative_source=%s\nassembled_source=%s\nscope=software-module-and-verifier\n' "$SHA" "$SHA" "$release" "$SRC" "$SOURCE/build/assembled/linux" >"$EV/provenance.txt"
 cp "$BUILD/.config" "$EV/kernel.config"
-make -C "$SOURCE/$REL" OUT="$OUT/build" KERNEL_SRC="$SRC" VMLINUX_BTF="$BUILD/vmlinux" \
+make -C "$SRC/$REL" OUT="$OUT/build" KERNEL_SRC="$SRC" VMLINUX_BTF="$BUILD/vmlinux" \
     CLANG="$CLANG" BPFTOOL="$BPFTOOL" HOSTCC="$CC" >"$EV/bpf-build.log" 2>&1
 # All modules are staged from modules_install so weak deps and KUnit remain
 # genuine. The guest's modprobe reads the same depmod graph as the host check.
@@ -61,7 +68,7 @@ rm -f "$ROOT/lib/modules/$release/build" "$ROOT/lib/modules/$release/source"
 cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo printf poweroff dmesg grep sed mkdir sync sleep lsmod modprobe insmod rmmod uname ls; do ln -s busybox "$ROOT/bin/$app"; done
 cp "$OUT/build/"*.bpf.o "$OUT/build/load" "$OUT/build/matrix.txt" \
-    "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko" "$SOURCE/$REL/run-guest.sh" "$ROOT/opt/xdomain/"
+    "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/peer-guest/xdev_ext_peer_sw.ko" "$SRC/$REL/run-guest.sh" "$ROOT/opt/xdomain/"
 : >"$EV/libraries.txt"
 collect_xdomain_libraries() {
     local binary=$1 destination=$2 elf dependencies
@@ -125,5 +132,6 @@ for match in re.finditer(r'^XDOMAIN_OBJECT_BEGIN name=([a-z0-9-]+)[^\n]*\n(.*?)^
 PY
 [[ "$qrc" == 0 ]]
 grep -Eq $'^XDEV_EXT_XDOMAIN_GUEST_EXIT=0\r?$' "$EV/guest.log"
-python3 -I "$SOURCE/$REL/verdict.py" "$EV/guest.log" >"$EV/result.json"
+python3 -I "$CONTRACT" kunit "$EV/kunit-expected.json" "$EV/guest.log" "$EV/kunit-result.json"
+python3 -I "$SRC/$REL/verdict.py" "$EV/guest.log" >"$EV/result.json"
 echo XDEV_EXT_XDOMAIN_KVM=PASS

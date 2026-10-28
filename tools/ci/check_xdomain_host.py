@@ -85,6 +85,7 @@ CANONICAL_ENTRYPOINTS = {
     "tests/core/admission_report/run.py": ("--output",),
     "tests/core/library/create_report/run.py": ("--out",),
     "tests/network/xdomain/diagnostics/run.py": ("--output",),
+    "tests/network/xdomain/diagnostics/stack_run.py": ("--output",),
     "tests/core/library/stage_diag/run.py": ("--output",),
 }
 
@@ -112,7 +113,8 @@ def main():
             output = log_dir / (f"{index:02d}-" + Path(entry).parent.name)
             argv += ["--source-root", str(CANONICAL_ROOT),
                      CANONICAL_ENTRYPOINTS[entry][0], str(output)]
-            if entry.endswith("diagnostics/run.py"):
+            if entry in ("tests/network/xdomain/diagnostics/run.py",
+                         "tests/network/xdomain/diagnostics/stack_run.py"):
                 argv += ["--nhi-regs", str(NHI_REGS_INPUT)]
         header = f"SOURCE {source}\nCWD {cwd}\nCOMMAND {shlex.join(argv)}\n"
         print(header, end="", flush=True)

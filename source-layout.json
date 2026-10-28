@@ -3262,6 +3262,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/user_stage_e2e.c"
     },
     {
+      "source": "tests/compute/user_stage/ordered_frames_kvm.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/ordered_frames_kvm.sh"
+    },
+    {
       "source": "tests/compute/user_stage/ordered_frames_validate.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/ordered_frames_validate.py"
@@ -4463,6 +4468,14 @@
     {
       "source": "tests/integration/analysis/providers/test_loc_report.py",
       "logical_path": "tests/eval/providers/test_loc_report.py"
+    },
+    {
+      "source": "tests/integration/build/kvm_layout/contracts.py",
+      "logical_path": "tests/integration/build/kvm_layout/contracts.py"
+    },
+    {
+      "source": "tests/integration/build/kvm_layout/test_contracts.py",
+      "logical_path": "tests/integration/build/kvm_layout/test_contracts.py"
     },
     {
       "source": "tests/integration/build/test_cuda_arms.py",
@@ -6637,6 +6650,22 @@
     {
       "source": "tests/network/xdomain/diagnostics/run.py",
       "logical_path": "tests/network/xdomain/diagnostics/run.py"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/stack_boundary.c",
+      "logical_path": "tests/network/xdomain/diagnostics/stack_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/stack_cases.c",
+      "logical_path": "tests/network/xdomain/diagnostics/stack_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/stack_class.c",
+      "logical_path": "tests/network/xdomain/diagnostics/stack_class.c"
+    },
+    {
+      "source": "tests/network/xdomain/diagnostics/stack_run.py",
+      "logical_path": "tests/network/xdomain/diagnostics/stack_run.py"
     },
     {
       "source": "tests/network/xdomain/late_rts/README.md",

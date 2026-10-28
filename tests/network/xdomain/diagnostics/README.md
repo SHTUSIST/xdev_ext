@@ -39,7 +39,13 @@ The new link sampler is an explicit external boundary here; native membership,
 link pair validation and requester retention require independent tests. Class
 cases distinguish CTS, ACK, local/chain/sequester FAIL, admitted RTS rejection,
 unadmitted RTS, final-chain wait and the local-quiescence conditions for downstream
-release. Whole class, fact and slot comparisons reject mutation of epoch,
+release. Downstream preconditions seed the persistent reply facts left by a
+successful native callback. The `downstream` case also checks seven controls:
+success after slot release, callback error, nonquiescence, unknown completion,
+chain release, sequestration, and a seemingly successful live slot without any
+reply callback fact. A successful pending release counts as both downstream
+pending and waiting for the chain; query must leave the protocol's final flag
+unchanged. Whole class, fact and slot comparisons reject mutation of epoch,
 cursor, worker-event authority or waits during query. Allocation, admission,
 lease, policy, data post and control post boundaries are observed.
 

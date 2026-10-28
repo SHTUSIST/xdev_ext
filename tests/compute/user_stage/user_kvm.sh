@@ -8,13 +8,15 @@
 # initramfs and evidence. No host module is loaded and no host NIC, route or
 # disk is touched; the guest has no network.
 #   bash user_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR
+# Add --ordered-frames for the exclusive raw USER ordered-frame correctness
+# run (no CPU stage); this mode requires an exact matching strict-debug build.
 # --red boots an older kernel (O_DIR of a commit before the USER stage) with the
 # same guest program and BPF objects of TOOLS_DIR and passes only if the first
 # USER step is refused (its program type does not exist): the guest test's RED
 # baseline. Identity checks of the build are recorded, not enforced, then.
 set -euo pipefail
 umask 077
-SCRATCH='' SOURCE='' BUILD='' TOOLS='' RED=0
+SCRATCH='' SOURCE='' BUILD='' TOOLS='' RED=0 ORDERED=0
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1800}
@@ -25,21 +27,32 @@ while (($#)); do
 	--build) BUILD=$2; shift 2 ;;
 	--tools) TOOLS=$2; shift 2 ;;
 	--red) RED=1; shift ;;
+	--ordered-frames) ORDERED=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+if (( ORDERED && RED )); then echo 'FAIL incompatible --ordered-frames and --red' >&2; exit 2; fi
+if (( ORDERED )); then
+	exec bash "$(dirname "$(realpath "$0")")/ordered_frames_kvm.sh" --scratch "$SCRATCH" --source "$SOURCE" --build "$BUILD" --tools "$TOOLS"
+fi
 [[ -n "$SCRATCH" && -n "$SOURCE" && -n "$BUILD" && -n "$TOOLS" ]] || { echo 'missing option' >&2; exit 2; }
 [[ -d "$SCRATCH" && ! -L "$SCRATCH" && $(stat -c %a "$SCRATCH") == 700 && $(stat -c %u "$SCRATCH") == $(id -u) ]] || {
 	echo 'FAIL scratch must be an existing private 0700 directory' >&2; exit 1; }
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
-REL=kernel/tools/testing/selftests/xdev_ext_mech/user_stage
+REL=tests/compute/user_stage
+NATIVE=$SOURCE/build/source-view/kernel
 EV=$SCRATCH/evidence OUT=$SCRATCH/out ROOT=$SCRATCH/initroot
 mkdir -p "$EV" "$OUT"
 rm -f -- "$EV/result.json" "$EV/verdict.txt"
 exec > >(tee -a "$EV/runner.log") 2>&1
 
 # Identity: an exact clean checkout, and a prebuilt kernel/tools of that commit.
-SOURCE=$(git -C "$SOURCE" rev-parse --show-toplevel)
+SOURCE=$(cd "$SOURCE" && pwd -P)
+[[ $(git -C "$SOURCE" rev-parse --show-toplevel) == "$SOURCE" ]] || { echo 'FAIL --source must be canonical Git root' >&2; exit 1; }
+NATIVE=$SOURCE/build/source-view/kernel
+ROOT_ACTION=roots
+(( ! RED )) || ROOT_ACTION=red-roots
+python3 -I "$SOURCE/tests/integration/build/kvm_layout/contracts.py" "$ROOT_ACTION" "$SOURCE" "$(git -C "$SOURCE" rev-parse HEAD)" "$BUILD" "$EV/roots.json"
 git -C "$SOURCE" diff --quiet && git -C "$SOURCE" diff --cached --quiet
 [[ -z $(git -C "$SOURCE" ls-files --others --exclude-standard) ]] || { echo 'FAIL untracked source files' >&2; exit 1; }
 HEAD_SHA=$(git -C "$SOURCE" rev-parse --verify 'HEAD^{commit}')
@@ -52,7 +65,7 @@ else
 	changed=$(git -C "$SOURCE" diff --name-only "$BUILD_SHA" "$HEAD_SHA" || true)
 	# Only this test directory and its specification may differ: neither is
 	# part of the prebuilt kernel or tools.
-	if [[ -n "$changed" ]] && grep -v -e "^$REL/" -e '^kernel/Documentation/userspace-api/xdev_ext-user-stage.rst$' <<<"$changed"; then
+	if [[ -n "$changed" ]] && grep -v -e "^$REL/" -e '^docs/reference/xdev_ext-user-stage.rst$' <<<"$changed"; then
 		echo 'FAIL source differs from the prebuilt kernel/tools outside the USER stage test files' >&2; exit 1
 	fi
 	for symbol in XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY XDEV_EXT_MECH_CPU BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS \
@@ -78,7 +91,7 @@ done
 # Build only the guest test program, from the exact checkout.
 mkdir -p "$OUT/build"
 cp "$SOURCE/$REL/guest/"{Makefile,user_stage_e2e.c} "$OUT/build/"
-nice -n 10 make -C "$OUT/build" KERNEL_SRC="$SOURCE/kernel" CC="$CC" user_stage_e2e >"$EV/test-build.log" 2>&1
+nice -n 10 make -C "$OUT/build" KERNEL_SRC="$NATIVE" CC="$CC" user_stage_e2e >"$EV/test-build.log" 2>&1
 
 # Minimal initramfs: busybox, the guest program and its libraries, the programs.
 rm -rf -- "$ROOT"

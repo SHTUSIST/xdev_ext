@@ -493,9 +493,17 @@ in-flight list and software queue. RX_POSTED excludes frames still queued in
 software. Missing retired native rings clear NATIVE and RX_POSTED validity;
 zero counters alone do not establish safe release. Control free slots belong
 to the shared link. Protocol counters report outstanding CTS, ACK, FAIL, final
-chain waits, and completed local RX payload awaiting downstream release. They
-do not report CUDA kernel progress. Retention is the requester's existing
-aggregate ledger, including other links and services.
+chain waits, and completed local RX payload awaiting downstream release. The
+RX reply preserves local completion facts from the native callback after CQE
+fill releases its reusable network slot. Successful, proven quiescent RX
+completion awaiting chain release contributes to both final_waiting_chain and
+downstream_release_pending, even before the protocol marks the final reply
+sendable. Actual chain release removes that wait and permits the existing
+ACK/FAIL policy; diagnostics do not advance that policy or send replies.
+Reply reallocation clears the saved facts for the next group. Errors and
+UNKNOWN do not qualify as successful local quiescence. These counters do not
+report CUDA kernel progress. Retention is the requester's existing aggregate
+ledger, including other links and services.
 
 The capture timestamps enclose separate lock-protected observations, rather
 than one atomic snapshot across protocol, native rings and retention. Query

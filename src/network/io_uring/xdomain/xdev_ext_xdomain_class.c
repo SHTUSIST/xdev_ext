@@ -23,6 +23,8 @@ struct xdev_ext_xd_reply {
 	u64 wake, wait_epoch;
 	int chain_status, local_status;
 	bool used, admission, chain_done, sequestered, cts, final, closed, native_posted;
+	/* Native callback facts outlive the CQE-released, reusable network slot. */
+	bool local_known, local_quiesced;
 	u8 tag[XDEV_EXT_XDOMAIN_TAG_LEN];
 };
 struct xdev_ext_xd_fact {
@@ -81,7 +83,7 @@ static bool xd_waiting(struct xdev_ext_xd_stage *xs, u64 wake, u64 epoch, u64 no
 static void xd_refresh_waits(struct xdev_ext_xd_stage *xs)
 {
 	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
-	struct xdev_ext_xd_wait_facts current = {
+	struct xdev_ext_xd_wait_facts facts_now = {
 		.credit = xs->ns.rx ? (xs->ns.rx_rel_ready ? xs->ns.rx_rel.credit : 0) : xs->ns.tx.credit,
 		.base = xs->ns.rx ? xs->ns.rx_rel.base_group : xs->ns.tx.base_group,
 		.next = xs->ns.rx ? 0 : xs->ns.tx.next_group,
@@ -91,12 +93,12 @@ static void xd_refresh_waits(struct xdev_ext_xd_stage *xs)
 		.stop = xs->stop_latched,
 	};
 	spin_lock(&ep->xl->lock);
-	current.consumed = ep->xl->chan[ep->chan].consumed;
-	current.room = !bitmap_empty(ep->xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
-	current.local = ep->xl->local_inc; current.remote = ep->xl->remote_inc;
+	facts_now.consumed = ep->xl->chan[ep->chan].consumed;
+	facts_now.room = !bitmap_empty(ep->xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
+	facts_now.local = ep->xl->local_inc; facts_now.remote = ep->xl->remote_inc;
 	spin_unlock(&ep->xl->lock);
-	if (memcmp(&current, &xs->wait_facts, sizeof(current))) {
-		xs->wait_facts = current;
+	if (memcmp(&facts_now, &xs->wait_facts, sizeof(facts_now))) {
+		xs->wait_facts = facts_now;
 		xs->wait_generation++;
 	}
 }
@@ -190,6 +192,8 @@ static void xd_local(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot 
 			slot->local_status = -EMSGSIZE;
 	if (f->reply) {
 		f->reply->local_status = slot->local_status;
+		f->reply->local_known = slot->local_known;
+		f->reply->local_quiesced = slot->local_quiesced;
 		f->reply->sequestered |= !slot->local_quiesced;
 		if (slot->local_status) f->reply->final = true;
 	}
@@ -1247,13 +1251,18 @@ static int xdev_ext_xd_class_stage_diag(struct xdev_ext_mech_stage *st,
 	}
 	for (k = 0; k < XD_REPLIES; k++) {
 		struct xdev_ext_xd_reply *r = &xs->replies[k];
-		struct xdev_ext_net_slot *slot;
+		bool local_wait;
 
 		if (!r->used)
 			continue;
+		local_wait = xs->ns.rx && r->native_posted && r->local_known &&
+			r->local_quiesced && !r->chain_done && !r->sequestered &&
+			!xd_reply_status(r);
 		if (r->cts)
 			d.cts_owed++;
-		if (r->final) {
+		/* A successful local payload already owes a final chain result,
+		 * even before release makes the protocol's r->final sendable. */
+		if (r->final || local_wait) {
 			if (xd_reply_status(r))
 				d.fail_owed++;
 			else if (r->chain_done && !r->sequestered)
@@ -1261,10 +1270,7 @@ static int xdev_ext_xd_class_stage_diag(struct xdev_ext_mech_stage *st,
 			else
 				d.final_waiting_chain++;
 		}
-		if (!xs->ns.rx || !r->native_posted || r->chain_done || r->sequestered)
-			continue;
-		slot = xd_group(xs, r->group);
-		if (slot && slot->local_known && slot->local_quiesced)
+		if (local_wait)
 			d.downstream_release_pending++;
 	}
 	for (k = 0; k < xs->rts_count; k++)

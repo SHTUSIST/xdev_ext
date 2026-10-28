@@ -102,8 +102,14 @@ STAGE_DIAG (operation 11) accepts a zero-initialized version-1
 The owning ring performs the lookup, including for stopped sessions it still
 holds. XDOMAIN returns bounded protocol counts, the selected channel and
 direction's native queue membership, shared control free slots, readiness and
-requester retention. An absent native ring clears its validity bits. A detached
-endpoint or changed incarnation returns ESTALE. Other classes without a
+requester retention. An RX reply retains callback-proven local completion
+after CQE fill releases its network slot. Successful quiescent completion
+awaiting real chain release contributes to final_waiting_chain and
+downstream_release_pending without changing the protocol's final flag or ACK
+timing. Real release removes the wait; actual ACK transmission clears ACK owed.
+New reply allocation clears old local facts, and errors or UNKNOWN never count
+as successful local quiescence. An absent native ring clears its validity bits.
+A detached endpoint or changed incarnation returns ESTALE. Other classes without a
 hook and unsupported versions return EOPNOTSUPP; malformed size or nonzero
 output fields return EINVAL. Query performs no mapping, posting or policy work.
 
