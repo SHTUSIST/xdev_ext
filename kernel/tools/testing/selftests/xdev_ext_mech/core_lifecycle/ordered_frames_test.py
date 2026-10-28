@@ -136,7 +136,7 @@ def build(directory, transform=None):
         queue_bodies=[function(core,n) for n in queue_names]
         prototypes='\n'.join(b[:b.index('\n{')]+';' for b in queue_bodies)
         publication=function(core,'xdev_ext_mech_start_publication')
-        prototypes+='\n'+publication[:publication.index('\n{')]+';' 
+        prototypes+='\n'+publication[:publication.index('\n{')]+';'
         fixture=fixture.replace('/* PRODUCTION_RELEASE */',prototypes+'\n/* PRODUCTION_RELEASE */')
         fixture=fixture.replace('/* PRODUCTION_START */',publication+'\n'+'\n'.join(queue_bodies)+'\n/* PRODUCTION_START */')
         fixture=fixture.replace('#define kfree(x) free(x)', '#define kfree(x) free(x)\n#define kvcalloc(n,s,gfp) calloc(n,s)\n#define bitmap_free(p) free(p)\nstatic unsigned long *bitmap_zalloc(unsigned n,int g){(void)g;return calloc((n+63)/64,sizeof(unsigned long));}\nstatic bool test_and_set_bit(unsigned n,unsigned long *p){unsigned long mask=1UL<<(n%64);bool old=!!(p[n/64]&mask);p[n/64]|=mask;return old;}\n#define kzalloc(n,gfp) calloc(1,n)\n#define kcalloc(n,s,gfp) calloc(n,s)\n#define kvmalloc_array(n,s,gfp) calloc(n,s)\n#define kvfree(p) free(p)')
