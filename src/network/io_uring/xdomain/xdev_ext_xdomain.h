@@ -17,6 +17,13 @@
 struct xdev_ext_xd_link;
 struct xdev_ext_xd_ctl_allocation;
 struct xdev_ext_xd_rings;
+struct xdev_ext_xd_probe;
+#define XDEV_EXT_XD_LOGIN_RETRIES 60U
+#define XDEV_EXT_XD_RELOGIN_MS 1000U
+enum xdev_ext_xd_probe_phase {
+	XD_PROBE_IDLE, XD_PROBE_PREPOSTED, XD_PROBE_RUNNING,
+	XD_PROBE_LOCAL_DONE, XD_PROBE_VERIFIED, XD_PROBE_FAILED, XD_PROBE_CLOSED,
+};
 /* One bound XDOMAIN stage on one channel and direction (the family "link"). */
 struct xdev_ext_xd_ep {
 	struct xdev_ext_xd_link *xl;
@@ -59,7 +66,7 @@ struct xdev_ext_xd_link {
 	u32 channels, login_retries;		/* login_retries counts sent requests; ctl_mutex */
 	u32 retry_failures, retry_delay_ms;
 	unsigned long retry_after;
-	bool retry_pending;			/* setup failure budget; reset only on UP */
+	bool retry_pending;			/* setup failure budget; reset only after data verification */
 	u64 login_attempts, login_errors, version_errors, crc_errors;
 	u64 connect_errors, retries_exhausted, link_ups;
 	int last_error;				/* diagnostics, under lock */
@@ -81,6 +88,11 @@ struct xdev_ext_xd_link {
 	unsigned long ctl_tx_free[BITS_TO_LONGS(XDEV_EXT_XD_CTL_RING)];
 	u64 ctl_dropped;			/* messages refused by xdev_ext_xd_msg_for_us() or decode */
 	struct xdev_ext_xd_chan chan[XDEV_EXT_XD_MAX_CHANNELS];
+	struct xdev_ext_xd_probe *probe;
+	u32 data_verified_mask, probe_phase;
+	int probe_error;
+	u64 probe_successes, probe_failures, probe_stale;
+	struct delayed_work probe_work;
 	struct delayed_work login_work;
 	struct work_struct connect_work, down_work;
 };
@@ -101,6 +113,20 @@ int  xdev_ext_xd_seq_consume(struct xdev_ext_xd_link *xl, u32 chan, u64 data_seq
 void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_msg *rts);
 u32  xdev_ext_xd_crc(u32 crc, const void *p, size_t len);
 extern const struct xdev_ext_net_dev_ops xdev_ext_xd_dev_ops;
+/* transport-owned startup challenge; lifecycle functions require ctl_mutex. */
+int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *, const struct xdev_ext_xd_login *);
+void xdev_ext_xd_probe_control_ready(struct xdev_ext_xd_link *);
+void xdev_ext_xd_probe_login_exhausted(struct xdev_ext_xd_link *);
+bool xdev_ext_xd_probe_ctl_rx(struct xdev_ext_xd_link *, const u8 *, u32);
+void xdev_ext_xd_probe_work(struct work_struct *);
+void xdev_ext_xd_probe_close(struct xdev_ext_xd_link *);
+u64 xdev_ext_xd_probe_retire(struct xdev_ext_xd_link *, u32, u32, bool);
+void xdev_ext_xd_probe_free(struct xdev_ext_xd_link *);
+int xdev_ext_xd_probe_ctl_tx_locked(struct xdev_ext_xd_link *, const u8 buf[128]);
+void xdev_ext_xd_probe_wake_locked(struct xdev_ext_xd_link *);
+void xdev_ext_xd_probe_ctl_complete_locked(struct xdev_ext_xd_link *, bool);
+void xdev_ext_xd_probe_ctl_error_locked(struct xdev_ext_xd_link *, int);
+ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *, char *);
 /* xdev_ext_xdomain_class.c */
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m);
 void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st);

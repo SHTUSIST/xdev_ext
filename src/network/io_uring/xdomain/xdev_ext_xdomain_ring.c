@@ -7,6 +7,7 @@
 #include <linux/pci.h>
 #include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
+#include "xdev_ext_xdomain_probe_core.h"
 
 static_assert(sizeof(struct ring_frame) <= XDEV_EXT_NET_DEV_AREA);
 static_assert(XDEV_EXT_XD_DESC_CRC_ERROR == RING_DESC_CRC_ERROR &&
@@ -208,6 +209,10 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 		ret = -ENOLINK;
 		goto out;
 	}
+	if (!(xl->data_verified_mask & BIT(ep->chan))) {
+		ret = -EAGAIN;
+		goto out;
+	}
 	ring = rx ? xl->chan[ep->chan].rx : xl->chan[ep->chan].tx;
 	for (i = 0; i < n; i++) {
 		struct ring_frame *f = xdev_ext_xd_frame(&e[i]);
@@ -258,6 +263,7 @@ static void xdev_ext_xd_ctl_tx_cb(struct tb_ring *ring, struct ring_frame *f, bo
 		else if (!xdev_ext_xd_closing(xl) && xl->up && !a->unknown)
 			__set_bit(cf->index, xl->ctl_tx_free);
 	}
+	xdev_ext_xd_probe_ctl_complete_locked(xl, canceled);
 	spin_unlock_irqrestore(&xl->lock, flags);
 }
 
@@ -292,6 +298,18 @@ static int xdev_ext_xd_ctl_tx_locked(struct xdev_ext_xd_link *xl, const u8 *msg,
 	a->accepted++;
 	a->callbacks_drained = false;
 	return 0;
+}
+
+int xdev_ext_xd_probe_ctl_tx_locked(struct xdev_ext_xd_link *xl, const u8 buf[128])
+{
+	lockdep_assert_held(&xl->lock);
+	if (!xl->probe || !xl->up || xdev_ext_xd_closing(xl))
+		return -ENOLINK;
+	if (xdev_ext_xd_get(buf, 4) != XD_PROBE_CTL_MAGIC ||
+	    xdev_ext_xd_get(buf + 8, 8) != xl->local_inc ||
+	    xdev_ext_xd_get(buf + 16, 8) != xl->remote_inc || buf[6] >= xl->channels)
+		return -ESTALE;
+	return xdev_ext_xd_ctl_tx_locked(xl, buf, 128);
 }
 
 /* Raw family primitive (CHANNEL): send one already encoded message. */
@@ -451,20 +469,33 @@ static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *ring, struct ring_frame *f, bo
 	if (a && a->pending[cf->index]) {
 		a->pending[cf->index] = false;
 		a->retired++;
-		if (canceled)
+		if (canceled) {
 			a->unknown = true;
-		else
-			dispatch = xl->up && !xdev_ext_xd_closing(xl);
+			xdev_ext_xd_probe_ctl_error_locked(xl, -ECANCELED);
+		} else {
+			u32 actual_len = f->size ? f->size : XDEV_EXT_XD_CTL_BUF;
+			int error = f->flags & RING_DESC_CRC_ERROR ? -EBADMSG :
+				f->flags & RING_DESC_BUFFER_OVERRUN ? -EOVERFLOW :
+				actual_len != XDEV_EXT_XD_MSG_LEN ? -EMSGSIZE :
+				f->sof != XDEV_EXT_XD_PDF_START || f->eof != XDEV_EXT_XD_PDF_END ? -EPROTO : 0;
+
+			xdev_ext_xd_probe_ctl_error_locked(xl, error);
+			dispatch = (xl->up || xl->receive_ready) && !xdev_ext_xd_closing(xl);
+		}
 	}
 	spin_unlock_irqrestore(&xl->lock, flags);
-	if (dispatch && !(f->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN)))
-		xdev_ext_xd_ctl_dispatch(xl, cf->buf, f->size ? f->size : XDEV_EXT_XD_CTL_BUF);
+	if (dispatch && !(f->flags & (RING_DESC_CRC_ERROR | RING_DESC_BUFFER_OVERRUN))) {
+		u32 len = f->size ? f->size : XDEV_EXT_XD_CTL_BUF;
+
+		if (!xdev_ext_xd_probe_ctl_rx(xl, cf->buf, len) && READ_ONCE(xl->up))
+			xdev_ext_xd_ctl_dispatch(xl, cf->buf, len);
+	}
 	/* Stop first clears starting/up under this lock; context is not rebound
 	 * until stop/free has drained this whole callback, including dispatch.
 	 */
 	spin_lock_irqsave(&xl->lock, flags);
 	if (a && a == xl->ctl_rx_alloc && !canceled && !a->unknown &&
-	    !xdev_ext_xd_closing(xl) && (xl->up || xl->rings->starting)) {
+	    !xdev_ext_xd_closing(xl) && (xl->up || xl->receive_ready || xl->rings->starting)) {
 		a->pending[cf->index] = true;
 		if (!tb_ring_rx(ring, f)) {
 			a->accepted++;
@@ -544,8 +575,10 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 {
 	struct xdev_ext_xd_rings *rs = xl->rings;
 	unsigned long flags;
-	u32 i;
+	u32 i, stopped_rx = 0, stopped_tx = 0;
+	bool requester_gone = xl->nhi_gone;
 
+	xdev_ext_xd_probe_close(xl);
 	spin_lock_irqsave(&xl->lock, flags);
 	xl->up = false;
 	if (rs)
@@ -572,6 +605,16 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		}
 		n->started = false;
 	}
+	for (i = 0; i < xl->channels; i++) {
+		struct tb_ring *rx = xl->chan[i].rx, *tx = xl->chan[i].tx;
+
+		if (rs->native[i].disposition == XDEV_EXT_XD_NATIVE_STOPPED && rx && !rx->nhi->going_away)
+			stopped_rx |= BIT(i);
+		if (rs->native[xl->channels + i].disposition == XDEV_EXT_XD_NATIVE_STOPPED && tx && !tx->nhi->going_away)
+			stopped_tx |= BIT(i);
+	}
+	requester_gone |= xl->nhi_gone;
+	rs->retained_bytes += xdev_ext_xd_probe_retire(xl, stopped_rx, stopped_tx, requester_gone);
 	for (i = 0; i < 2; i++) {
 		bool rx = !i;
 		struct xdev_ext_xd_ctl_allocation *a = rx ? xl->ctl_rx_alloc : xl->ctl_tx_alloc;
@@ -635,7 +678,8 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 	}
 	bytes = 2ULL * tb_ring_descriptor_bytes(XDEV_EXT_XD_CTL_RING) +
 		2ULL * xl->channels * tb_ring_descriptor_bytes(XDEV_EXT_XD_DATA_RING) +
-		(u64)XDEV_EXT_XD_CTL_RING * (XDEV_EXT_XD_CTL_BUF + XDEV_EXT_XD_CTL_TX_BUF);
+		(u64)XDEV_EXT_XD_CTL_RING * (XDEV_EXT_XD_CTL_BUF + XDEV_EXT_XD_CTL_TX_BUF) +
+		xdev_ext_xd_probe_worst_bytes(xl->channels);
 	rs->retention = xdev_ext_requester_retention_reserve(xl->nhi_pdev, generations, bytes);
 	if (IS_ERR(rs->retention)) {
 		ret = PTR_ERR(rs->retention);
@@ -704,6 +748,7 @@ void xdev_ext_xd_rings_free(struct xdev_ext_xd_link *xl)
 		}
 	}
 	/* All normal free and unknown retirement callbacks have now finished. */
+	xdev_ext_xd_probe_free(xl);
 	xdev_ext_xd_ctl_release(xl, true);
 	xdev_ext_xd_ctl_release(xl, false);
 	if (xl->ctl_out_hopid >= 0)
@@ -847,12 +892,16 @@ static void *xdev_ext_xd_bind(struct xdev_ext_mech_stage *st, const struct xdev_
 	}
 	*ep = (struct xdev_ext_xd_ep){ .xl = xl, .st = st, .chan = (u32)u->arg1, .rx = rx };
 	mutex_lock(&xl->ep_mutex);
-	if (!READ_ONCE(xl->up) || READ_ONCE(xl->gone))
+	spin_lock_irq(&xl->lock);
+	if (!xl->up || xdev_ext_xd_closing(xl))
 		ret = -ENOLINK;
+	else if (!(xl->data_verified_mask & BIT(ep->chan)))
+		ret = -EAGAIN;
 	else if (xl->chan[ep->chan].ep[rx])
 		ret = -EBUSY;
 	else
 		xl->chan[ep->chan].ep[rx] = ep;
+	spin_unlock_irq(&xl->lock);
 	mutex_unlock(&xl->ep_mutex);
 	if (ret) {
 		kfree(ep);

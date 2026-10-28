@@ -75,8 +75,9 @@ struct xdev_ext_xd_login_response {
 #define XDEV_EXT_XD_LOGIN			1U
 #define XDEV_EXT_XD_LOGIN_RESPONSE	2U
 #define XDEV_EXT_XD_LOGOUT		3U
-#define XDEV_EXT_XD_PROTO_VERSION		2U
+#define XDEV_EXT_XD_PROTO_VERSION		3U
 #define XDEV_EXT_XD_CAP_E2E		(1U << 0)
+#define XDEV_EXT_XD_CAP_DATA_CHALLENGE	(1U << 1)
 #define XDEV_EXT_XD_PDF_START		1U
 #define XDEV_EXT_XD_PDF_END		2U
 
@@ -260,6 +261,14 @@ xdev_ext_xd_login_check(const struct xdev_ext_xd_login *l, __u32 size,
 {
 	__u32 i;
 
+	if (size != sizeof(*l))
+		return -EPROTO;
+	if (l->proto_version != XDEV_EXT_XD_PROTO_VERSION ||
+	    !(l->caps & XDEV_EXT_XD_CAP_DATA_CHALLENGE) ||
+	    (l->caps & ~(XDEV_EXT_XD_CAP_E2E | XDEV_EXT_XD_CAP_DATA_CHALLENGE)))
+		return -EPROTONOSUPPORT;
+	if (l->reserved[0] || l->reserved[1] || l->reserved[2])
+		return -EPROTO;
 	if (size != sizeof(*l) ||
 	    (l->length_sn & 0x3f) != (sizeof(*l) - 12) / 4 ||
 	    l->type != XDEV_EXT_XD_LOGIN ||

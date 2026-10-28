@@ -1493,6 +1493,16 @@
       "native_path": "io_uring/xdomain/xdev_ext_xdomain_main.c"
     },
     {
+      "source": "src/network/io_uring/xdomain/xdev_ext_xdomain_probe.c",
+      "component": "linux",
+      "native_path": "io_uring/xdomain/xdev_ext_xdomain_probe.c"
+    },
+    {
+      "source": "src/network/io_uring/xdomain/xdev_ext_xdomain_probe_core.h",
+      "component": "linux",
+      "native_path": "io_uring/xdomain/xdev_ext_xdomain_probe_core.h"
+    },
+    {
       "source": "src/network/io_uring/xdomain/xdev_ext_xdomain_ring.c",
       "component": "linux",
       "native_path": "io_uring/xdomain/xdev_ext_xdomain_ring.c"
@@ -6595,6 +6605,74 @@
     {
       "source": "tests/network/xdomain/late_rts/run.py",
       "logical_path": "tests/network/xdomain/late_rts/run.py"
+    },
+    {
+      "source": "tests/network/xdomain/probe/README.md",
+      "logical_path": "tests/network/xdomain/probe/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_boundary.c",
+      "logical_path": "tests/network/xdomain/probe/probe_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_extra_compat.h",
+      "logical_path": "tests/network/xdomain/probe/probe_extra_compat.h"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_gate_cases.c",
+      "logical_path": "tests/network/xdomain/probe/probe_gate_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_gate_test.py",
+      "logical_path": "tests/network/xdomain/probe/probe_gate_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_native_boundary.h",
+      "logical_path": "tests/network/xdomain/probe/probe_native_boundary.h"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_observation.h",
+      "logical_path": "tests/network/xdomain/probe/probe_observation.h"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_transport_boundary.c",
+      "logical_path": "tests/network/xdomain/probe/probe_transport_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_transport_cases.c",
+      "logical_path": "tests/network/xdomain/probe/probe_transport_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_transport_test.py",
+      "logical_path": "tests/network/xdomain/probe/probe_transport_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_transport_unit.c",
+      "logical_path": "tests/network/xdomain/probe/probe_transport_unit.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_wire_cases.c",
+      "logical_path": "tests/network/xdomain/probe/probe_wire_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/probe/probe_wire_test.py",
+      "logical_path": "tests/network/xdomain/probe/probe_wire_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/probe/vectors/done.bin",
+      "logical_path": "tests/network/xdomain/probe/vectors/done.bin"
+    },
+    {
+      "source": "tests/network/xdomain/probe/vectors/ping.bin",
+      "logical_path": "tests/network/xdomain/probe/vectors/ping.bin"
+    },
+    {
+      "source": "tests/network/xdomain/probe/vectors/pong.bin",
+      "logical_path": "tests/network/xdomain/probe/vectors/pong.bin"
+    },
+    {
+      "source": "tests/network/xdomain/probe/vectors/ready.bin",
+      "logical_path": "tests/network/xdomain/probe/vectors/ready.bin"
     },
     {
       "source": "tests/network/xdomain/stack/NHI_STACK.md",

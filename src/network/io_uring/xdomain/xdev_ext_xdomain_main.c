@@ -22,8 +22,6 @@ static const uuid_t xdev_ext_xd_proto_uuid =
 	UUID_INIT(0x90b54f9d, 0xabd0, 0x4881, 0xba, 0x1f, 0x31, 0x89, 0x89, 0x17, 0xb2, 0x7e);
 #define XDEV_EXT_XD_KEY			"xdevext"
 #define XDEV_EXT_XD_LOGIN_TIMEOUT_MS	1000
-#define XDEV_EXT_XD_LOGIN_RETRIES	60
-#define XDEV_EXT_XD_RELOGIN_MS		1000
 
 static bool xdev_ext_xd_e2e = true;
 module_param_named(e2e, xdev_ext_xd_e2e, bool, 0444);
@@ -189,8 +187,9 @@ static int xdev_ext_xd_handle_packet(const void *buf, size_t size, void *data)
 		ret = 0;
 		goto out;
 	}
-	status = !l->command_id || xdev_ext_xd_login_check(l, size, xl->channels) ||
-		 l->channels != xl->channels ? EPROTO : 0;
+	ret = xdev_ext_xd_login_check(l, size, xl->channels);
+	status = ret ? -ret : (!l->command_id || l->channels != xl->channels ? EPROTO : 0);
+	ret = 1;
 	if (size >= offsetof(struct xdev_ext_xd_login, proto_version) + sizeof(l->proto_version) &&
 	    l->proto_version != XDEV_EXT_XD_PROTO_VERSION)
 		xl->version_errors++;
@@ -251,11 +250,9 @@ static void xdev_ext_xd_maybe_up(struct xdev_ext_xd_link *xl)
 		xl->up = true;
 		xl->link_ups++;
 		xl->last_error = 0;
-		xl->retry_failures = 0;
-		xl->retry_delay_ms = 0;
-		xl->retry_pending = false;
 	}
 	spin_unlock_irq(&xl->lock);
+	xdev_ext_xd_probe_control_ready(xl);
 }
 
 static void xdev_ext_xd_login_work(struct work_struct *work)
@@ -326,7 +323,7 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 	candidate = xl->remote_login;
 	pending_candidate = xl->candidate_pending;
 	spin_unlock_irq(&xl->lock);
-	req.caps = xl->e2e ? XDEV_EXT_XD_CAP_E2E : 0;
+	req.caps = XDEV_EXT_XD_CAP_DATA_CHALLENGE | (xl->e2e ? XDEV_EXT_XD_CAP_E2E : 0);
 	/* Every request consumes the budget, including successful mismatches. */
 	xl->login_retries++;
 	spin_lock_irq(&xl->lock);
@@ -386,6 +383,7 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 		spin_lock_irq(&xl->lock);
 		xl->retries_exhausted++;
 		spin_unlock_irq(&xl->lock);
+		xdev_ext_xd_probe_login_exhausted(xl);
 	}
 out:
 	mutex_unlock(&xl->ctl_mutex);
@@ -400,6 +398,7 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err,
 	lockdep_assert_held(&xl->ctl_mutex);
 	if (xl->gone)
 		return;
+	xdev_ext_xd_probe_close(xl);
 	spin_lock_irq(&xl->lock);
 	xl->up = false;
 	xl->last_error = err;
@@ -544,6 +543,9 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	ret = xdev_ext_xd_rings_start(xl);
 	if (ret)
 		goto fail;			/* rings_start stopped what it started */
+	ret = xdev_ext_xd_probe_prepare(xl, &l);
+	if (ret)
+		goto fail;
 	ret = xdev_ext_xd_paths_enable(xl, &l);
 	if (ret)
 		goto fail;			/* paths_enable disabled what it enabled */
@@ -651,6 +653,7 @@ static void xdev_ext_xd_quiesce_work(struct xdev_ext_xd_link *xl, bool *flag)
 	spin_lock_irq(&xl->lock);
 	WRITE_ONCE(*flag, true);
 	spin_unlock_irq(&xl->lock);
+	cancel_delayed_work_sync(&xl->probe_work);
 	cancel_delayed_work_sync(&xl->login_work);
 	cancel_work_sync(&xl->connect_work);
 	cancel_work_sync(&xl->down_work);
@@ -659,6 +662,7 @@ static void xdev_ext_xd_quiesce_work(struct xdev_ext_xd_link *xl, bool *flag)
 	 * Both producers are now stopped. Drain that retry before the link
 	 * is removed; login_work observes the published cancellation flag.
 	 */
+	cancel_delayed_work_sync(&xl->probe_work);
 	cancel_delayed_work_sync(&xl->login_work);
 }
 /* xdomain login end */
@@ -736,10 +740,24 @@ static ssize_t xdev_ext_link_stats_show(struct device *dev,
 		retained.global_reserved_bytes, retained.global_retained_bytes, retained.global_limit);
 }
 static DEVICE_ATTR_RO(xdev_ext_link_stats);
+static ssize_t xdev_ext_data_state_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct xdev_ext_xd_link *xl = tb_service_get_drvdata(tb_to_service(dev));
+	ssize_t len;
+
+	(void)attr;
+	mutex_lock(&xl->ctl_mutex);
+	len = xdev_ext_xd_probe_show(xl, buf);
+	mutex_unlock(&xl->ctl_mutex);
+	return len;
+}
+static DEVICE_ATTR_RO(xdev_ext_data_state);
 static struct attribute *xdev_ext_xd_attrs[] = {
 	&dev_attr_xdev_ext_link.attr,
 	&dev_attr_xdev_ext_link_state.attr,
 	&dev_attr_xdev_ext_link_stats.attr,
+	&dev_attr_xdev_ext_data_state.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(xdev_ext_xd);
@@ -766,6 +784,7 @@ static int xdev_ext_xd_probe(struct tb_service *svc, const struct tb_service_id 
 	xl->channels = XDEV_EXT_XD_CHANNELS_V1;
 	xl->e2e = xdev_ext_xd_e2e && (svc->prtcstns & XDEV_EXT_XD_CAP_E2E);
 	xdev_ext_xd_new_incarnation(xl);
+	INIT_DELAYED_WORK(&xl->probe_work, xdev_ext_xd_probe_work);
 	INIT_DELAYED_WORK(&xl->login_work, xdev_ext_xd_login_work);
 	INIT_WORK(&xl->connect_work, xdev_ext_xd_connect_work);
 	INIT_WORK(&xl->down_work, xdev_ext_xd_down_work);
@@ -887,7 +906,8 @@ static int __init xdev_ext_xd_init(void)
 	if (ret)
 		goto dir;
 	ret = tb_property_add_immediate(xdev_ext_xd_dir, "prtcstns",
-					xdev_ext_xd_e2e ? XDEV_EXT_XD_CAP_E2E : 0);
+					XDEV_EXT_XD_CAP_DATA_CHALLENGE |
+					(xdev_ext_xd_e2e ? XDEV_EXT_XD_CAP_E2E : 0));
 	if (ret)
 		goto dir;
 	ret = xdev_ext_xd_class_register();

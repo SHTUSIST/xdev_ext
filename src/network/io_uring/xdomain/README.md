@@ -97,3 +97,23 @@ reserved RX group and its native leases remain separately enforced. A
 pre-CTS FAIL with zero credit never increases peer credit. Reliable entries
 count logical layout segments, while RTS and native posts count the actual
 4096-byte NHI elements (at most 64); these counts are deliberately distinct.
+
+Startup data verification requires LOGIN protocol version 3 and the mandatory
+DATA_CHALLENGE capability. Version 2 peers are refused. The existing link `up`
+state reports control login readiness; it does not report data verification.
+Each channel preposts two private host scratch receive buffers, exchanges READY,
+and transfers exactly one 128-byte PING and one 4096-byte PONG in each direction.
+Actual receive length, descriptor errors, the deterministic payload, identity
+and nonces are checked. Both local transmit completions and the peer's DONE are
+required before a business endpoint can bind. A control-ready channel still
+verifying returns `-EAGAIN`; callers may retry binding. The deadline is ten
+seconds after control readiness and shares the bounded setup failure budget.
+
+The read-only `xdev_ext_data_state` attribute reports control readiness,
+per-channel data gates, startup results, actual RX lengths and flags, submitted
+TX lengths and TX completions. Startup uses internal coherent host memory;
+`backing_qualified=not_queried` remains explicit. This does not prove VRAM DMA,
+GPU visibility or GPU last use. Business PEER admission is unchanged.
+Successful startup hands over the same native rings and HopIDs without a reset.
+Failed startup closes admission and stops through the existing native barriers;
+unknown scratch DMA retains the entire allocation in the requester quota.
