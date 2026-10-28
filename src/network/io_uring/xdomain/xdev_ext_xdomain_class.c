@@ -846,6 +846,35 @@ static void xd_terminal_locked(struct xdev_ext_xd_stage *xs, int err)
 		}
 	}
 }
+/* Device unbind holds ep_mutex after removing the endpoint. The worker is
+ * stopped, so no ingress or progress can add/remove these records. Keep the
+ * class storage and endpoint alive until X4 has settled each raw obligation;
+ * native admissions, replies and slot custody remain the core drain's job. */
+void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
+	struct xdev_ext_xd_msg m;
+	unsigned long flags;
+	u32 k = 0;
+	bool overflow;
+
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	overflow = xs->overflow;
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+	/* An overflow may have omitted an RTS from the bounded queue. */
+	if (overflow) xdev_ext_xd_link_fail(ep->xl, ep, -EPROTO);
+	for (;;) {
+		spin_lock_irqsave(&xs->ns.lock, flags);
+		if (k == xs->rts_count) {
+			spin_unlock_irqrestore(&xs->ns.lock, flags);
+			break;
+		}
+		m = xs->rts[k++].msg;
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+		xdev_ext_xd_refuse_rts(ep->xl, &m);
+	}
+}
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;

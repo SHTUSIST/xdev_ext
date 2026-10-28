@@ -6553,6 +6553,18 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_ring_test.py"
     },
     {
+      "source": "tests/network/xdomain/late_rts/README.md",
+      "logical_path": "tests/network/xdomain/late_rts/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/late_rts/cases.c",
+      "logical_path": "tests/network/xdomain/late_rts/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/late_rts/run.py",
+      "logical_path": "tests/network/xdomain/late_rts/run.py"
+    },
+    {
       "source": "tests/network/xdomain/stack/NHI_STACK.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdomain/NHI_STACK.md"

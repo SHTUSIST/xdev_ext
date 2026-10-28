@@ -355,8 +355,8 @@ int xdev_ext_xd_seq_consume(struct xdev_ext_xd_link *xl, u32 chan, u64 data_seq,
 	return ret;
 }
 
-/* ep_mutex held: an RTS for a channel with no bound receiving stage. */
-static void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_msg *rts)
+/* ep_mutex held: no receiving worker can retain this RTS obligation. */
+void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_msg *rts)
 {
 	struct xdev_ext_xd_msg f = { .type = XDEV_EXT_XD_FAIL, .stream = rts->stream,
 				     .group = rts->group, .status = ENODEV };
@@ -365,6 +365,14 @@ static void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xde
 	int ret;
 
 	spin_lock_irqsave(&xl->lock, flags);
+	/* Teardown can retain records from an incarnation already ended by
+	 * link down. They cannot debit, or fail, its successor. ep_mutex keeps
+	 * the successor from starting until this refusal has finished. */
+	if (!xl->up || xdev_ext_xd_closing(xl) ||
+	    rts->src_inc != xl->remote_inc || rts->dst_inc != xl->local_inc) {
+		spin_unlock_irqrestore(&xl->lock, flags);
+		return;
+	}
 	consumed = xl->chan[rts->channel].consumed;
 	spin_unlock_irqrestore(&xl->lock, flags);
 	/* Already refused records are informational. No second sequence debit. */
@@ -862,6 +870,11 @@ static void xdev_ext_xd_unbind(void *lk)
 	/* A link down may have detached us, and a later stage may own the slot. */
 	if (xl->chan[ep->chan].ep[ep->rx] == ep)
 		xl->chan[ep->chan].ep[ep->rx] = NULL;
+	/* The core destroys the worker before unbind. Wait out every ingress
+	 * under ep_mutex, then settle RTS queued after its last progress pass.
+	 * A link-down-detached endpoint belongs to an already ended epoch. */
+	if (ep->rx && !ep->detached)
+		xdev_ext_xd_class_detach(ep->st);
 	mutex_unlock(&xl->ep_mutex);	/* no dispatch or dead notification reaches the stage after this */
 	kfree(ep);
 	xdev_ext_xd_link_put(xl);	/* may free the link memory after remove */

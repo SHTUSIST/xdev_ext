@@ -263,6 +263,9 @@ static struct xdev_ext_xd_msg class_msg;
 static int fail_error;
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st,const struct xdev_ext_xd_msg *msg)
 { assert(!class_context_dead && fixture_xl->ep_mutex.held); class_calls++; class_stage=st; class_msg=*msg; }
+/* X5 is not linked into this ring-only recording boundary. */
+void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st)
+{ (void)st; assert(fixture_xl->ep_mutex.held); }
 void xdev_ext_xd_link_fail(struct xdev_ext_xd_link *xl,const struct xdev_ext_xd_ep *ep,int err)
 { assert(xl==fixture_xl); fail_calls++; fail_error=err; }
 static unsigned link_gets,link_puts;

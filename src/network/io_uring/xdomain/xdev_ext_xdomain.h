@@ -98,10 +98,12 @@ void xdev_ext_xd_paths_disable(struct xdev_ext_xd_link *xl);
 int  xdev_ext_xd_msg_send(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_ep *ep, u32 chan,
 			  struct xdev_ext_xd_msg *m);
 int  xdev_ext_xd_seq_consume(struct xdev_ext_xd_link *xl, u32 chan, u64 data_seq, u32 count);
+void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_msg *rts);
 u32  xdev_ext_xd_crc(u32 crc, const void *p, size_t len);
 extern const struct xdev_ext_net_dev_ops xdev_ext_xd_dev_ops;
 /* xdev_ext_xdomain_class.c */
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m);
+void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st);
 int  xdev_ext_xd_class_register(void);
 void xdev_ext_xd_class_unregister(void);
 #endif

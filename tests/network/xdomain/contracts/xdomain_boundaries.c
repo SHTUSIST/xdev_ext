@@ -138,6 +138,9 @@ int xdev_ext_xd_msg_send(struct xdev_ext_xd_link *link,const struct xdev_ext_xd_
  if(msg->type==XDEV_EXT_XD_RTS)link->chan[0].announced+=msg->count;
  return 0;
 }
+/* This X5-only fixture never dispatches the X4 device-unbind hook. */
+void xdev_ext_xd_refuse_rts(struct xdev_ext_xd_link *link,const struct xdev_ext_xd_msg *msg)
+{ (void)link; (void)msg; assert(!"X4 teardown refusal requires the composed ring boundary"); abort(); }
 static bool early_bind_progress;
 static void *bind_progress_thread(void *arg) {
  struct xdev_ext_mech_stage *st=arg;
