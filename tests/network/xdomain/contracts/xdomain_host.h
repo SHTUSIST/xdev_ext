@@ -78,7 +78,20 @@ static void mutex_lock(struct mutex *m) { assert(!m->held); m->held=1; held_mute
 static void mutex_unlock(struct mutex *m) { assert(m->held && held_mutexes); m->held=0; held_mutexes--; }
 struct kref { int refs; }; struct list_head { void *next,*prev; };
 struct work_struct { unsigned queued; }; struct delayed_work { struct work_struct work; };
-struct ring_frame { u64 buffer_phy; unsigned size,flags; void *complete; };
+struct tb_ring;
+struct ring_frame {
+ dma_addr_t buffer_phy;
+ void (*callback)(struct tb_ring *,struct ring_frame *,bool);
+ struct list_head list;
+ u32 size:12,flags:12,eof:4,sof:4;
+};
+static struct ring_frame *tb_ring_poll(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected native poll in IRQ class fixture");abort(); }
+static bool tb_ring_poll_pending(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected native poll query in IRQ class fixture");abort(); }
+static bool mod_delayed_work(void *queue,struct delayed_work *work,unsigned long delay)
+{ (void)queue;(void)work;(void)delay;assert(!"unexpected native poll work in IRQ class fixture");abort(); }
+#define system_long_wq NULL
 struct tb_ring; struct tb_service; struct tb_xdomain;
 typedef struct { u8 bytes[16]; } uuid_t;
 typedef int atomic_t; typedef long atomic64_t;
@@ -216,6 +229,7 @@ struct xdev_ext_xdomain_mech_ops {
 };
 @BPF@
 /* Complete actual class, not a test model. */
+@POLL@
 @CLASS@
 @BOUNDARIES@
 @CASES@

@@ -117,3 +117,28 @@ GPU visibility or GPU last use. Business PEER admission is unchanged.
 Successful startup hands over the same native rings and HopIDs without a reset.
 Failed startup closes admission and stops through the existing native barriers;
 unknown scratch DMA retains the entire allocation in the requester quota.
+
+The read-only module parameter `poll_completions` defaults to false. Probe
+snapshots it before allocating rings. When enabled, every control and data
+TX/RX ring uses native `NO_INTERRUPT`; default links retain the IRQ/work
+completion path. Existing process-context class progress collects at most
+64 completions per pass, rotating after at most eight from one ring. It
+runs the original callbacks after native ring locks are released. Native
+poll also refills software-pending descriptors. The generic atomic `.poll`
+interface is not used because control callbacks can sleep and repost.
+
+A shared link work item runs the same bounded pass at a one-jiffy cadence
+while polling is live, including startup verification before any session
+exists and control traffic after a session unbinds. It keeps no stage
+pointer and does not take `ctl_mutex`. A session with pending completions
+or native/protocol commitments queues a further worker turn; idle sessions
+retain their existing deadline schedule. The cadence is a scheduling
+choice and gives no latency guarantee.
+
+The polling mutex covers native poll return through the entire callback.
+Stop closes UP, receive readiness, starting and the poll gate under
+`xl->lock`, then cancels fallback and waits for the polling mutex without
+holding `ep_mutex` or a spinlock. Only afterwards may native stop/free or
+UNKNOWN retirement consume rings and allocations. Posts and callback
+reposts schedule fallback under the same gate lock. Completed native
+ownership and UNKNOWN backing follow the existing custody ledger.

@@ -69,6 +69,21 @@ def region(source, begin, end):
     return source.split(begin, 1)[1].split(end, 1)[0]
 
 
+def poll_unit(kernel, ring_source=None):
+    """Retain real poll/custody bodies; IRQ-default cases exit before OS calls."""
+    ring = (ring_source or (kernel / "io_uring/xdomain/xdev_ext_xdomain_ring.c")).read_text()
+    enum = re.search(r"enum xdev_ext_xd_native_disposition\s*\{[^}]+\};", ring)
+    if not enum:
+        raise ValueError("actual native disposition enum missing")
+    declarations = enum.group(0) + "\n"
+    declarations += "".join(struct(ring, name) for name in (
+        "xdev_ext_xd_native", "xdev_ext_xd_rings", "xdev_ext_xd_ctl_allocation"))
+    limits = "\n".join(line for line in ring.splitlines()
+                       if line.startswith("#define XDEV_EXT_XD_POLL_"))
+    return declarations + limits + "\n" + "\n".join(function(ring, name) for name in (
+        "xdev_ext_xd_closing", "xdev_ext_xd_poll", "xdev_ext_xd_ctl_tx_pending_locked"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--kernel", type=Path, default=Path(__file__).resolve().parents[5])
@@ -148,6 +163,7 @@ def main():
               .replace("@CORE@", core)
               .replace("@FAMILY@", family)
               .replace("@BPF@", no_includes(texts["X6 policy"]))
+              .replace("@POLL@", poll_unit(kernel))
               .replace("@CLASS@", no_includes(texts["class"]))
               .replace("@BOUNDARIES@", texts["xdomain_boundaries.c"])
               .replace("@CASES@", texts["xdomain_cases.c"])

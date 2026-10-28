@@ -4,6 +4,7 @@
 #include <linux/bitmap.h>
 #include <linux/crc32.h>
 #include <linux/dma-mapping.h>
+#include <linux/jiffies.h>
 #include <linux/pci.h>
 #include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
@@ -36,7 +37,7 @@ struct xdev_ext_xd_rings {
 	int data_tx_hop[XDEV_EXT_XD_MAX_CHANNELS];
 	int data_rx_hop[XDEV_EXT_XD_MAX_CHANNELS];
 	struct xdev_ext_xd_native native[2 + 2 * XDEV_EXT_XD_MAX_CHANNELS];
-	u32 count;
+	u32 count, poll_cursor;
 	u64 generation;
 	struct xdev_ext_requester_retention *retention;
 	u64 retained_bytes;
@@ -63,9 +64,120 @@ static DEFINE_SPINLOCK(xdev_ext_xd_ctl_quarantine_lock);
 static void xdev_ext_xd_ctl_tx_cb(struct tb_ring *, struct ring_frame *, bool);
 static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *, struct ring_frame *, bool);
 
+bool xdev_ext_xd_ctl_tx_pending_locked(struct xdev_ext_xd_link *xl)
+{
+	struct xdev_ext_xd_ctl_allocation *a = xl->ctl_tx_alloc;
+
+	lockdep_assert_held(&xl->lock);
+	/* This existing custody ledger changes under xl->lock on native
+	 * acceptance and callback retirement, independently of reusable slots.
+	 */
+	return a && a->accepted != a->retired;
+}
+
 static bool xdev_ext_xd_closing(struct xdev_ext_xd_link *xl)
 {
 	return xl->going_away || xl->suspended || xl->gone || xl->nhi_gone;
+}
+
+#define XDEV_EXT_XD_POLL_BUDGET 64U
+#define XDEV_EXT_XD_POLL_QUANTUM 8U
+
+/* Serializing the enqueue with gate closure means cancel_sync cannot lose
+ * a late producer. A delayed fallback is also necessary for hardware which
+ * completes after the last explicit post, including startup without a stage.
+ */
+static void xdev_ext_xd_poll_wake_locked(struct xdev_ext_xd_link *xl)
+{
+	if (xl->poll_completions && xl->poll_live && !xdev_ext_xd_closing(xl)) {
+		xl->poll_wake++;
+		mod_delayed_work(system_long_wq, &xl->poll_work, 1);
+	}
+}
+
+/* No ctl_mutex: stop may hold it while waiting for this work/callback.
+ * Only poll_mutex protects the ring pointers here. Stop first closes the
+ * live gate, then waits for this mutex before touching native storage.
+ */
+bool xdev_ext_xd_poll(struct xdev_ext_xd_link *xl)
+{
+	struct xdev_ext_xd_rings *rs;
+	unsigned long flags;
+	u64 generation, wake;
+	u32 done = 0, empty = 0, i;
+	bool pending = false;
+
+	if (!xl->poll_completions)
+		return false;
+	mutex_lock(&xl->poll_mutex);
+	spin_lock_irqsave(&xl->lock, flags);
+	if (!xl->poll_live || xdev_ext_xd_closing(xl)) {
+		spin_unlock_irqrestore(&xl->lock, flags);
+		goto out;
+	}
+	rs = xl->rings;
+	generation = xl->poll_generation;
+	wake = xl->poll_wake;
+	spin_unlock_irqrestore(&xl->lock, flags);
+	while (done < XDEV_EXT_XD_POLL_BUDGET && empty < rs->count) {
+		struct tb_ring *ring = *rs->native[rs->poll_cursor].slot;
+		u32 quantum = 0;
+
+		rs->poll_cursor = (rs->poll_cursor + 1) % rs->count;
+		while (ring && quantum < XDEV_EXT_XD_POLL_QUANTUM &&
+		       done < XDEV_EXT_XD_POLL_BUDGET) {
+			struct ring_frame *frame;
+			bool live;
+
+			spin_lock_irqsave(&xl->lock, flags);
+			live = xl->poll_live && generation == xl->poll_generation &&
+			       !xdev_ext_xd_closing(xl);
+			spin_unlock_irqrestore(&xl->lock, flags);
+			if (!live)
+				goto out;
+			frame = tb_ring_poll(ring);
+			if (!frame)
+				break;
+			/* Even if stop closed the gate after poll returned, this
+			 * callback owns the frame and must finish before retirement.
+			 * Native poll has dropped its ring lock; dispatch may sleep.
+			 */
+			frame->callback(ring, frame, false);
+			done++;
+			quantum++;
+		}
+		empty = quantum ? 0 : empty + 1;
+	}
+	/* A NULL only describes that instant. Observe every native tail and
+	 * the post generation before deciding whether the worker needs a turn.
+	 */
+	for (i = 0; i < rs->count; i++) {
+		struct tb_ring *ring = *rs->native[i].slot;
+
+		if (ring && tb_ring_poll_pending(ring))
+			pending = true;
+	}
+	spin_lock_irqsave(&xl->lock, flags);
+	if (xl->poll_live && generation == xl->poll_generation &&
+	    !xdev_ext_xd_closing(xl)) {
+		pending |= wake != xl->poll_wake;
+		/* One bounded pass per delayed invocation, never an idle spin. */
+		mod_delayed_work(system_long_wq, &xl->poll_work, 1);
+	} else {
+		pending = false;
+	}
+	spin_unlock_irqrestore(&xl->lock, flags);
+out:
+	mutex_unlock(&xl->poll_mutex);
+	return pending;
+}
+
+void xdev_ext_xd_poll_work(struct work_struct *work)
+{
+	struct xdev_ext_xd_link *xl = container_of(to_delayed_work(work),
+						struct xdev_ext_xd_link, poll_work);
+
+	xdev_ext_xd_poll(xl);
 }
 
 /* Also read by post/callback paths under xl->lock. */
@@ -232,6 +344,7 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 		WARN_ON_ONCE(rx ? tb_ring_rx_more(ring, f) : tb_ring_tx_more(ring, f));
 	}
 	tb_ring_notify(ring);
+	xdev_ext_xd_poll_wake_locked(xl);
 out:
 	spin_unlock_irqrestore(&xl->lock, flags);
 	return ret;
@@ -297,6 +410,7 @@ static int xdev_ext_xd_ctl_tx_locked(struct xdev_ext_xd_link *xl, const u8 *msg,
 	}
 	a->accepted++;
 	a->callbacks_drained = false;
+	xdev_ext_xd_poll_wake_locked(xl);
 	return 0;
 }
 
@@ -500,6 +614,7 @@ static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *ring, struct ring_frame *f, bo
 		if (!tb_ring_rx(ring, f)) {
 			a->accepted++;
 			a->callbacks_drained = false;
+			xdev_ext_xd_poll_wake_locked(xl);
 		} else {
 			a->pending[cf->index] = false;
 		}
@@ -564,6 +679,14 @@ int xdev_ext_xd_rings_start(struct xdev_ext_xd_link *xl)
 		xdev_ext_xd_rings_stop(xl);
 		return -EIO;
 	}
+	spin_lock_irqsave(&xl->lock, flags);
+	if (xl->poll_completions && !xdev_ext_xd_closing(xl)) {
+		rs->poll_cursor = 0;
+		xl->poll_generation++;
+		xl->poll_live = true;
+		xdev_ext_xd_poll_wake_locked(xl);
+	}
+	spin_unlock_irqrestore(&xl->lock, flags);
 	return 0;
 }
 
@@ -581,9 +704,18 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 	xdev_ext_xd_probe_close(xl);
 	spin_lock_irqsave(&xl->lock, flags);
 	xl->up = false;
+	xl->receive_ready = false;
+	xl->poll_live = false;
+	xl->poll_generation++;
 	if (rs)
 		rs->starting = false;
 	spin_unlock_irqrestore(&xl->lock, flags);
+	if (xl->poll_completions) {
+		cancel_delayed_work_sync(&xl->poll_work);
+		/* No ep/xl lock: a returned control frame may be in dispatch. */
+		mutex_lock(&xl->poll_mutex);
+		mutex_unlock(&xl->poll_mutex);
+	}
 	if (!rs)
 		return;
 	/* Native array is ordered data RX, data TX, control RX, control TX. */
@@ -653,7 +785,9 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 {
 	struct tb_nhi *nhi = xl->xd->tb->nhi;
-	unsigned int flags = RING_FLAG_FRAME | (xl->e2e ? RING_FLAG_E2E : 0);
+	unsigned int tx_flags = RING_FLAG_FRAME |
+		(xl->poll_completions ? RING_FLAG_NO_INTERRUPT : 0);
+	unsigned int flags = tx_flags | (xl->e2e ? RING_FLAG_E2E : 0);
 	u16 sof = BIT(XDEV_EXT_XD_PDF_START), eof = BIT(XDEV_EXT_XD_PDF_END);
 	struct xdev_ext_xd_rings *rs;
 	u32 c, generations;
@@ -694,7 +828,7 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 		rs->native[rs->count++].slot = &xl->chan[c].tx;
 	rs->native[rs->count++].slot = &xl->ctl_rx;
 	rs->native[rs->count++].slot = &xl->ctl_tx;
-	xl->ctl_tx = tb_ring_alloc_tx(nhi, -1, XDEV_EXT_XD_CTL_RING, RING_FLAG_FRAME);
+	xl->ctl_tx = tb_ring_alloc_tx(nhi, -1, XDEV_EXT_XD_CTL_RING, tx_flags);
 	if (!xl->ctl_tx)
 		goto fail;
 	xl->ctl_rx = tb_ring_alloc_rx(nhi, -1, XDEV_EXT_XD_CTL_RING, flags,
@@ -704,7 +838,7 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 	rs->ctl_tx_hop = xl->ctl_tx->hop;
 	rs->ctl_rx_hop = xl->ctl_rx->hop;
 	for (c = 0; c < xl->channels; c++) {
-		xl->chan[c].tx = tb_ring_alloc_tx(nhi, -1, XDEV_EXT_XD_DATA_RING, RING_FLAG_FRAME);
+		xl->chan[c].tx = tb_ring_alloc_tx(nhi, -1, XDEV_EXT_XD_DATA_RING, tx_flags);
 		if (!xl->chan[c].tx)
 			goto fail;
 		xl->chan[c].rx = tb_ring_alloc_rx(nhi, -1, XDEV_EXT_XD_DATA_RING, flags,

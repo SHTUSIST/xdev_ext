@@ -129,6 +129,7 @@ def class_unit(root,out):
     generated=generated.replace('@CORE@',corebody)
     generated=generated.replace('@FAMILY@',mod.region(family,'/* xdev_ext_netfam runtime begin */','/* xdev_ext_netfam runtime end */'))
     generated=generated.replace('@BPF@',mod.no_includes((root/bpf).read_text()))
+    generated=generated.replace('@POLL@',mod.poll_unit(k,root/'src/network/io_uring/xdomain/xdev_ext_xdomain_ring.c'))
     generated=generated.replace('@CLASS@',boundary+'\n'+mod.no_includes(clstext))
     generated=generated.replace('@BOUNDARIES@',(contracts/'xdomain_boundaries.c').read_text())
     generated=generated.replace('@CASES@',(HERE/'class.c').read_text())

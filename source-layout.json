@@ -7623,6 +7623,31 @@
     {
       "source": "tests/core/provider_dma/host/vmlinux.h",
       "logical_path": "tests/core/provider_dma/host/vmlinux.h"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_boundary.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_cases.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_nhi.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_nhi.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_x3.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_x3.c"
     }
   ]
 }

@@ -1019,7 +1019,7 @@ EXPORT_SYMBOL_GPL(tb_ring_throttling);
 
 /**
  * tb_ring_free_quarantined() - retire a callback ring with unknown DMA state
- * @ring: non-polling ring, with all external producers already excluded
+ * @ring: ring with all external producers and poll-returned callbacks excluded
  *
  * Process context only, before NHI devres teardown. Consumes the ring and
  * synchronizes its software callbacks, but never certifies DMA quiescence.
@@ -1034,7 +1034,7 @@ void tb_ring_free_quarantined(struct tb_ring *ring)
 	int size = ring->size;
 	unsigned long flags;
 
-	/* Non-polling and exclusive lifecycle ownership are caller preconditions. */
+	/* Caller owns lifecycle and has waited for external poll callbacks. */
 	spin_lock_irqsave(&nhi->lock, flags);
 	spin_lock(&ring->lock);
 	if (ring->is_tx)

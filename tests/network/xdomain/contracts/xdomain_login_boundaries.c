@@ -154,3 +154,8 @@ void xdev_ext_xd_probe_login_exhausted(struct xdev_ext_xd_link *xl){assert(!xl->
 void xdev_ext_xd_probe_close(struct xdev_ext_xd_link *xl){assert(!xl->probe);xl->data_verified_mask=0;}
 void xdev_ext_xd_probe_work(struct work_struct *work){(void)work;assert(!"LOGIN unit cannot execute startup challenge");abort();}
 ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *xl,char *out){(void)out;assert(!xl->probe);return 0;}
+
+/* The pure LOGIN fixture uses default IRQ completions and preverified rings.
+ * Keep the new native-poll worker outside that scope, visibly fail closed. */
+void xdev_ext_xd_poll_work(struct work_struct *work)
+{ (void)work;assert(!"LOGIN unit cannot execute native polling");abort(); }
