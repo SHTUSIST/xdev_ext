@@ -14,7 +14,8 @@ text = Path(os.environ.get('XDEV_EXT_TEST_CTL_SOURCE',
 
 
 def function(name, optional=False):
-    match = re.search(r'^static\s+int\s+' + name + r'\s*\(', text, re.M)
+    match = re.search(r'^static\s+(?:int|void)\s+' + re.escape(name) +
+                      r'\s*\([^;{}]*\)\s*\{', text, re.M)
     if not match:
         if optional:
             return ''
@@ -33,13 +34,17 @@ prefix = r'''
 #include <unistd.h>
 #include <fcntl.h>
 #include "tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h"
+#include "tools/xdev_ext_mech/lib/libxdev_ext.h"
 enum { CTL_PASS=0, CTL_FAIL=1, CTL_SETUP=3 };
 struct ctl_opts { const char *ifname,*src_ng; bool have_slba,have_nlb,reliable,expect_unbind;
  __u64 groups,slba,nlb; };
 struct ctl_source { struct ctl_opts *o;const char *ifname;unsigned nr_stages,nic_path;
  struct xdev_ext_mech_stage_uapi st[4];struct xdev_ext_mech_transport_stats_v3 accounting;
  bool started; };
-struct ctl_run { int ring,efd;__u64 session,deadline_ns;bool defer_stats,source_error_drain; };
+/* These NVMe/NIC source cases have no XDOMAIN stage; the real timeout helper
+ * must observe an empty diagnostic mask while retaining the original wait. */
+struct ctl_run { int ring,efd;__u64 session,deadline_ns;__u32 diag_stage_mask;
+ bool defer_stats,source_error_drain; };
 static unsigned reads,queries,printed,failures,checks,first_inflight,final_inflight;
 static int mode,final_error,command_error,command_started;
 static __u64 now;
@@ -126,12 +131,15 @@ int main(void){
 with tempfile.TemporaryDirectory(prefix='source-drain-', dir=os.environ.get(
         'XDEV_EXT_TEST_TMPDIR', str(Path(__file__).parent))) as tmp:
     source, binary = Path(tmp)/'probe.c', Path(tmp)/'probe'
-    source.write_text(prefix + function('ctl_source_error_drain', optional=True) + '\n' +
+    source.write_text(prefix + function('peer_print_diag') + '\n' +
+                      function('ctl_timeout_diag') + '\n' +
+                      function('ctl_source_error_drain', optional=True) + '\n' +
                       function('ctl_wait_coarse') + '\n' + function('cmd_nvme_nic') + suffix)
     command = shlex.split(os.environ.get('CC', 'gcc')) + [
         '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
         '-fsanitize=undefined', '-fno-sanitize-recover=undefined', '-I'+str(ROOT),
-        str(source), '-o', str(binary)]
+        str(source), str(ROOT/'tools/xdev_ext_mech/lib/xdev_ext_session.c'),
+        '-o', str(binary)]
     subprocess.run(command, check=True)
     result = subprocess.run([str(binary)], check=False)
     if result.returncode:
