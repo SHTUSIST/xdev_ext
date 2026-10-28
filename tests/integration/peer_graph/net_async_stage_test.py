@@ -41,7 +41,7 @@ enum dma_data_direction {DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE};
 struct file {int unused;}; struct pci_dev {int unused;};
 struct xdev_ext_mech_pool {u32 kind, frame_size, nr_frames;};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;struct xdev_ext_mech_peer peer;u32 depth;bool admits;};
-struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction;};
+struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction;bool create_reporting;u32 create_phase;};
 struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_len;};
 struct xdev_ext_mech_batch {void *priv;struct xdev_ext_mech_frame f[16];u32 nr;u64 ticket;int claims,publishes,status;bool sequester;};
 struct xdev_ext_peer_net_endpoint {bool rx;};

@@ -318,7 +318,8 @@ class ActualRunnerDependencies(unittest.TestCase):
     def terminal_fragment(self, qemu_exit, raw):
         start = self.runner_source.find('[[ "$qrc" == 0 ]]')
         self.assertGreaterEqual(start, 0, 'actual host QEMU status gate missing')
-        end = self.runner_source.find('\npython3 -I "$SOURCE/$REL/verdict.py"', start)
+        # This unit stops before the independent KUnit/artifact verifier.
+        end = self.runner_source.find('\npython3 -I "$CONTRACT" kunit ', start)
         self.assertGreater(end, start, 'actual host verdict invocation boundary missing')
         fragment = self.runner_source[start:end]
         with tempfile.TemporaryDirectory(prefix='x7-terminal-raw-') as temporary:

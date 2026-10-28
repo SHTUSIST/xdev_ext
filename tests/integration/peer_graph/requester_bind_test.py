@@ -71,11 +71,15 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE };
 /* The real header catches a missing forward declaration before ->describe. */
 #include "include/linux/xdev_ext_peer.h"
 struct device { int id; };
-struct pci_dev { struct device dev; bool untrusted; };
+struct pci_bus { int domain; unsigned char number; };
+struct pci_dev { struct device dev; bool untrusted; struct pci_bus *bus; unsigned int devfn; };
+static int pci_domain_nr(struct pci_bus *bus) { assert(bus); return bus->domain; }
 struct file { int id; };
 struct xdev_ext_mech_pool { u32 kind; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; };
-struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct xdev_ext_mech_stage_caps caps; };
+struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct xdev_ext_mech_stage_caps caps;
+ bool create_reporting; u32 create_phase, create_valid;
+ struct xdev_ext_mech_requester_id create_requester_id; struct pci_dev *create_requester; };
 struct xdev_ext_requester {
  struct pci_dev *pdev; struct file *authority; u64 generation; struct xdev_ext_admission adm;
 };
@@ -319,7 +323,8 @@ struct xdev_ext_mech_class_ops {
  int (*bind)(struct xdev_ext_mech_stage *, const struct xdev_ext_mech_stage_uapi *);
  union { const struct xdev_ext_comp_hooks *comp; } fam;
 };
-struct xdev_ext_mech_stage { u32 class_id; const struct xdev_ext_mech_class_ops *cls; struct xdev_ext_mech_stage_caps caps; };
+struct xdev_ext_mech_stage { u32 class_id; const struct xdev_ext_mech_class_ops *cls; struct xdev_ext_mech_stage_caps caps;
+ bool create_reporting; u32 create_phase, create_valid; };
 struct xdev_ext_mech_session { u32 nr_stages; struct xdev_ext_mech_stage st[2]; };
 struct io_ring_ctx { int id; };
 static struct xdev_ext_mech_session session;

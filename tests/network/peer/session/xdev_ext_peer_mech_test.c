@@ -14,7 +14,7 @@ int main(void)
    .st = {{.class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .fd = 5},
           {.class_id = 8, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 6}} };
  struct xdev_ext_mech_start start = {.nr_batches = 17};
- __u32 frames = 0;
+ __u32 frames = 0, off, len;
  assert(xdev_ext_mech_create_check(&c, &frames) == 0 && frames == 1);
  assert(xdev_ext_mech_start_check(&start, c.pool_kind, false, 1, 2) == 0);
  c.st[1].class_id = XDEV_EXT_MECH_CLASS_NVME;
@@ -36,7 +36,33 @@ int main(void)
  assert(xdev_ext_mech_create_check(&c, &frames) == 0); /* GPU -> NVMe write, GPU -> NIC TX */
  c.st[0].class_id = XDEV_EXT_MECH_CLASS_NVME; c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
  c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE; c.layout.hdr_room = 14;
- assert(xdev_ext_mech_create_check(&c, &frames) == -EOPNOTSUPP);
+ /* Generic CREATE bounds headroom; device alignment is checked by each
+  * native class. This offset alone is not an NVMe DMA qualification. */
+ assert(xdev_ext_mech_create_check(&c, &frames) == 0 && frames == 1);
+ assert(xdev_ext_mech_layout_span(&c.layout, 0, &off, &len) == 0 &&
+        off == 14 && len == 8192);
+ /* Two sector-aligned payload spans retain their frame-local headroom. */
+ c.layout = (struct xdev_ext_mech_layout){4096, 512, 3072, 6144};
+ assert(xdev_ext_mech_create_check(&c, &frames) == 0 && frames == 2);
+ assert(xdev_ext_mech_layout_span(&c.layout, 0, &off, &len) == 0 &&
+        off == 512 && len == 3072);
+ assert(xdev_ext_mech_layout_span(&c.layout, 1, &off, &len) == 0 &&
+        off == 512 && len == 3072 && c.layout.frame_size + off == 4608);
+ assert(xdev_ext_mech_layout_span(&c.layout, 2, &off, &len) == -ERANGE);
+ c.layout.group_bytes = 4608;
+ assert(xdev_ext_mech_create_check(&c, &frames) == 0 && frames == 2);
+ assert(xdev_ext_mech_layout_span(&c.layout, 1, &off, &len) == 0 &&
+        off == 512 && len == 1536);
+ c.layout.hdr_room = 1024;
+ assert(xdev_ext_mech_create_check(&c, &frames) == 0 && frames == 2);
+ assert(xdev_ext_mech_layout_span(&c.layout, 0, &off, &len) == 0 &&
+        off == 1024 && len == 3072 && off + len == 4096);
+ c.layout.hdr_room = 1025;
+ assert(xdev_ext_mech_create_check(&c, &frames) == -EINVAL);
+ assert(xdev_ext_mech_layout_span(&c.layout, 0, &off, &len) == -EINVAL);
+ c.layout.hdr_room = UINT32_MAX;
+ assert(xdev_ext_mech_create_check(&c, &frames) == -EINVAL);
+ assert(xdev_ext_mech_layout_span(&c.layout, 0, &off, &len) == -EINVAL);
  puts("ok 1 - one START composes authoritative GPU spans across native NVMe and NET in both directions; host-only stages reject");
  return 0;
 }

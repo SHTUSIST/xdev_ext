@@ -39,6 +39,7 @@ SHIM = r'''
 #include "io_uring/xdev_ext_mech_core.h"
 #include "io_uring/xdev_ext_mech_step.h" /* P1: shared PEER geometry rule */
 #include "io_uring/xdev_ext_mech_lifecycle.h"
+#include "io_uring/xdev_ext_mech_start_queue.h"
 typedef __u64 u64;typedef __u32 u32;typedef __u8 u8;
 #define GFP_KERNEL 0
 #define U32_MAX UINT32_MAX
@@ -74,10 +75,30 @@ SCHEDULER = r'''
 #define spin_unlock_irqrestore(l,f) ((void)(l),(void)(f))
 #define GENMASK_ULL(h,l) (((~0ULL)<<(l))&((~0ULL)>>(63-(h))))
 #define WARN_ON_ONCE(x) assert(!(x))
-struct xdev_ext_mech_batch {u64 key;bool to_user,busy;u32 nr_frames,present,bytes;struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_frame f[1];};
-struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user,start_recycle;u64 start_left,start_seq;u32 start_user_len,frames,nr_stages;struct {u32 inflight;}ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];struct xdev_ext_mech_stage_uapi plan[2];struct xdev_ext_mech_life life[2];};
+struct xdev_ext_mech_batch {u64 key,start_ordinal;u32 start_template;bool ordered_loan,to_user,busy;u32 nr_frames,present,bytes;struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_frame f[1];};
+typedef int atomic_t,wait_queue_head_t;
+struct kthread_worker;struct kthread_work {int unused;};
+struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user,start_recycle;
+ struct xdev_ext_mech_start_queue *start_queue;bool start_ordered,start_return_pending,create_pending_publish,worker_gone;
+ u64 stop_started_ns;int stop_err,last_err;atomic_t native_controls;wait_queue_head_t drain_wq;
+ struct kthread_worker *worker;struct kthread_work stop_work;
+ const void *ops[XDEV_EXT_MECH_CLASS_MAX];bool pinned[XDEV_EXT_MECH_CLASS_MAX];
+ u64 start_left,start_seq;u32 start_user_len,frames,nr_stages;struct xdev_ext_mech_sess ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];struct xdev_ext_mech_stage_uapi plan[2];struct xdev_ext_mech_life life[2];};
 /* Optional observer disabled; publication below executes the production helper. */
 #define xdev_ext_mech_trace_batch(b,event,status,flags) ((void)0)
+/* Original cases exercise legacy START with no ordered queue. The queue
+ * binder and STOP bodies stay real; unexpected external OS/registry work
+ * aborts instead of manufacturing ordered START or teardown evidence. */
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define smp_load_acquire(p) (*(p))
+#define atomic_read(p) (*(p))
+static u64 ktime_get_boottime_ns(void){abort();}
+static void wake_up(wait_queue_head_t *q){(void)q;abort();}
+static bool kthread_queue_work(struct kthread_worker *w,struct kthread_work *k)
+{(void)w;(void)k;abort();}
+static bool xdev_ext_mech_ops_current(u32 id,const void *ops,bool pinned)
+{(void)id;(void)ops;(void)pinned;abort();}
 static int submitted,admission_error;
 static struct xdev_ext_mech_batch *xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *s)
 {for(unsigned i=0;i<2;i++)if(!s->batches[i].busy){struct xdev_ext_mech_batch *b=&s->batches[i];b->busy=true;s->ss.inflight++;xdev_ext_mech_bstate_init(&b->bs,2);return b;}return NULL;}
@@ -99,7 +120,26 @@ int main(void)
  struct xdev_ext_mech_layout l={.frame_size=65536,.seg_len=4096,.group_bytes=4096};
  struct xdev_ext_mech_pool p={};struct file original={1};struct xdev_ext_mech_frame frames[8]={};
  struct xdev_ext_mech_call call={.member=XDEV_EXT_MECH_MEMBER_BUILD,.callsite=XDEV_EXT_MECH_SITE_WORKER,.nr_frames=1,.frame_size=65536,.frames=frames};
- reset();l.hdr_room=16;assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-EOPNOTSUPP&&!claim_calls);l.hdr_room=0;
+ reset();
+ /* Headroom describes payload offsets, never CPU backing. */
+ l=(struct xdev_ext_mech_layout){4096,512,3072,6144};
+ assert(!xdev_ext_peer_mech_pool_bind(&p,&original,&l)&&claim_calls==1);
+ assert(p.frame_size==4096&&p.nr_frames==128&&!p.pages&&!p.vaddr&&!p.nr_pages);
+ assert(!xdev_ext_peer_pool_alloc(&p,frames,2));
+ for(u32 i=0;i<2;i++){
+  assert(frames[i].index==i&&!xdev_ext_peer_pool_resolve(&p,&frames[i]));
+  assert(!xdev_ext_mech_layout_span(&l,i,&frames[i].data_off,&frames[i].data_len));
+  assert(frames[i].data_off==512&&frames[i].data_len==3072&&!frames[i].kaddr&&!frames[i].pool_priv);
+  assert(frames[i].umem_addr+frames[i].data_off==(i?4608:512));
+  assert(!xdev_ext_mech_pool_frame_move(&p,i,XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_K_FREE));
+ }
+ p.ops->release(&p);assert(authority.refs==1&&put_calls==1);
+ reset();memset(&p,0,sizeof(p));memset(frames,0,sizeof(frames));
+ l=(struct xdev_ext_mech_layout){65536,65536,4096,4096};
+ assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-EINVAL&&!claim_calls);
+ l.hdr_room=UINT32_MAX;
+ assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-EINVAL&&!claim_calls);
+ l.hdr_room=0;
  fail_alloc=1;assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-ENOMEM&&!claim_calls);reset();
  claim_error=-EPERM;assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-EPERM&&claim_calls==1&&!put_calls);reset();
  fail_alloc=2;assert(xdev_ext_peer_mech_pool_bind(&p,&original,&l)==-ENOMEM&&claim_calls==1&&put_calls==1);reset();
@@ -177,7 +217,14 @@ def main():
     pool = (KERNEL / "io_uring/xdev_ext_mech_peer_pool.c").read_text()
     pool = pool[pool.index("struct xdev_ext_peer_mech_pool {"):]
     support = "".join(struct(contract, name) for name in ("xdev_ext_mech_frame", "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool")) + GLUE + function(contract, "static inline struct page *xdev_ext_mech_frame_page(") + function(ops, "static u8 *xdev_ext_mech_frame_bytes(")
-    start = function(core, "static int xdev_ext_mech_start_publication(") + function(core, "static void xdev_ext_mech_start_more(")
+    start = "".join(function(core, signature) for signature in (
+        "u32 xdev_ext_mech_pool_frame_state(",
+        "bool xdev_ext_mech_session_admits(",
+        "static void xdev_ext_mech_settle_locked(",
+        "static void xdev_ext_mech_session_stop(",
+        "static int xdev_ext_mech_start_publication(",
+        "static int xdev_ext_mech_start_queue_bind(",
+        "static void xdev_ext_mech_start_more("))
     mutations = [
         ("GPU offset shifted", pool.replace("(u64)f->index * pool->frame_size", "(u64)(f->index + 1) * pool->frame_size"), start),
         ("fake CPU address exposed", pool.replace("f->kaddr = NULL", "f->kaddr = (void *)1"), start),

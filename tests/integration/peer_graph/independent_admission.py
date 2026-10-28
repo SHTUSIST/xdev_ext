@@ -3,7 +3,7 @@
 """Independent graph admission oracle, executing the production pure rules.
 
 POOL_PEER=3 is allocation-fd backed GPU memory: power-of-two frames of 4 KiB to
-2 MiB, no host header room, any frames per group, and any order of NVMe
+2 MiB, bounded payload headroom, any frames per group, and any order of NVMe
 read/write and native NET TX/RX stages (the per-class capability table).
 Updated for P1: 75b51c2 pinned 64 KiB, one frame and NVMe-read-first here.
 Ordinary START must drive an arbitrarily longer bounded-window campaign.
@@ -46,7 +46,7 @@ static struct xdev_ext_mech_create graph(void)
 }
 int main(int argc,char **argv)
 {
- struct xdev_ext_mech_create c=graph();__u32 frames=0;int ret=0;
+ struct xdev_ext_mech_create c=graph();__u32 frames=0,off=0,len=0;int ret=0;
  if(argc!=2)return 2;
  if(!strcmp(argv[1],"peer_nvme")){
   ret=want("NVMe read -> GPU pool -> NVMe write",xdev_ext_mech_create_check(&c,&frames),0);
@@ -73,7 +73,18 @@ int main(int argc,char **argv)
   c.layout.frame_size=12288;ret|=want("GPU frame is a power of two",xdev_ext_mech_create_check(&c,&frames),-EOPNOTSUPP);
   c=graph();c.layout.frame_size=2048;c.layout.seg_len=2048;c.layout.group_bytes=2048;ret|=want("GPU frame at least 4 KiB",xdev_ext_mech_create_check(&c,&frames),-EOPNOTSUPP);
   c=graph();c.layout.frame_size=4u<<20;ret|=want("GPU frame at most 2 MiB",xdev_ext_mech_create_check(&c,&frames),-EOPNOTSUPP);
-  c=graph();c.layout.hdr_room=16;ret|=want("GPU payload has no CPU header room",xdev_ext_mech_create_check(&c,&frames),-EOPNOTSUPP);
+  c=graph();c.layout.hdr_room=16;ret|=want("generic GPU layout retains bounded payload headroom",xdev_ext_mech_create_check(&c,&frames),0);
+  ret|=want("headroom keeps one payload frame",frames,1);
+  ret|=want("headroom span decodes",xdev_ext_mech_layout_span(&c.layout,0,&off,&len),0);
+  ret|=want("payload offset retained",off,16);ret|=want("payload length retained",len,4096);
+  c.layout=(struct xdev_ext_mech_layout){4096,512,3072,6144};
+  ret|=want("sector-aligned headroom admits two frames",xdev_ext_mech_create_check(&c,&frames),0);
+  ret|=want("two offset payload frames",frames,2);
+  ret|=want("second offset frame decodes",xdev_ext_mech_layout_span(&c.layout,1,&off,&len),0);
+  ret|=want("second frame retains local offset",off,512);ret|=want("second frame retains payload length",len,3072);
+  ret|=want("third offset frame refused",xdev_ext_mech_layout_span(&c.layout,2,&off,&len),-ERANGE);
+  c.layout.hdr_room=1025;ret|=want("headroom plus payload cannot exceed frame",xdev_ext_mech_create_check(&c,&frames),-EINVAL);
+  c.layout.hdr_room=UINT32_MAX;ret|=want("headroom addition cannot wrap",xdev_ext_mech_create_check(&c,&frames),-EINVAL);
   c=graph();c.layout.seg_len=2048;ret|=want("GPU group of two frames",xdev_ext_mech_create_check(&c,&frames),0);
   if(!ret)ret|=want("two GPU frames per group",frames,2);
   c=graph();c.layout.frame_size=4096;ret|=want("4 KiB GPU frame",xdev_ext_mech_create_check(&c,&frames),0);
@@ -82,7 +93,7 @@ int main(int argc,char **argv)
   struct xdev_ext_mech_start start={.session_id=10,.nr_batches=257};
   ret=want("one START longer than depth has no user continuation",xdev_ext_mech_start_check(&start,PEER,false,1,2),0);
   start.flags=XDEV_EXT_MECH_START_F_USER_FRAMES;start.nr_batches=1;start.nr_user_frames=1;start.user_frames=42;
-  ret|=want("GPU frame cannot masquerade as registered host USER frame",xdev_ext_mech_start_check(&start,PEER,false,1,2),-EINVAL);
+  ret|=want("legacy USER frames require ordered PEER custody",xdev_ext_mech_start_check(&start,PEER,false,1,2),-EOPNOTSUPP);
  }else if(!strcmp(argv[1],"legacy_unchanged")){
   c.pool_kind=XDEV_EXT_MECH_POOL_IOU_UMEM;c.pool_fd=-1;c.layout.frame_size=4096;
   ret=want("legacy UMEM NVMe graph still admitted",xdev_ext_mech_create_check(&c,&frames),0);
@@ -100,7 +111,10 @@ class Admission(unittest.TestCase):
         cls.addClassCleanup(cls.tmp.cleanup)
         source = Path(cls.tmp.name) / "actual.c"
         cls.binary = Path(cls.tmp.name) / "actual"
-        include_root = (_LAYOUT.materialize_view(_LAYOUT.canonical_root(Path(__file__))).kernel if globals().get("_LAYOUT") else KERNEL)
+        include_root = KERNEL
+        if not (include_root / "io_uring/xdev_ext_mech_step.h").is_file() and globals().get("_LAYOUT"):
+            include_root = _LAYOUT.materialize_view(
+                _LAYOUT.canonical_root(Path(__file__)), Path(cls.tmp.name) / "source-view").kernel
         if TEST_REVISION:
             include_root = Path(cls.tmp.name) / "production"
             for filename in ("io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_core.h", "include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h"):

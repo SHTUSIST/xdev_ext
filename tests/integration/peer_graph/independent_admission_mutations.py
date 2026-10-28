@@ -77,10 +77,19 @@ def main():
         old, new = "pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !frames", "(pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM && pool_kind != XDEV_EXT_MECH_POOL_PEER) || !frames"
         assert step.count(old) == 1, ("host USER frame on GPU pool", step.count(old))
         changed = dict(headers)
-        changed[FILES[0]] = step.replace(old, new)
+        # The ordered ABI added an earlier independent refusal for legacy
+        # PEER USER frames. Bypass both real guards to test invalid acceptance,
+        # rather than claiming the later pool predicate alone removes custody.
+        early = """	if (pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+	    (st->flags & XDEV_EXT_MECH_START_F_USER_FRAMES) &&
+	    !(st->flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES))
+		return -EOPNOTSUPP;
+"""
+        assert step.count(early) == 1, "ordered ABI legacy PEER refusal guard missing"
+        changed[FILES[0]] = step.replace(early, "").replace(old, new)
         result = compile_and_run(directory, changed, ("bounded_start",))[0]
-        assert result.returncode != 0 and "expected=" in result.stderr, ("host USER frame on GPU pool", result.stdout, result.stderr)
-        print("ok mutation - host USER frame on GPU pool rejected by unchanged admission oracle")
+        assert result.returncode != 0 and "expected=" in result.stderr, ("legacy PEER USER two-guard bypass", result.stdout, result.stderr)
+        print("ok mutation - legacy PEER USER two-guard bypass rejected by admission oracle")
 
 
 if __name__ == "__main__":
