@@ -25,6 +25,14 @@ from datetime import datetime, timezone
 
 CONFIG = "/boot/grub/grub.cfg"
 ENVIRONMENT = "/boot/grub/grubenv"
+CUSTOM = "/boot/grub/custom.cfg"
+_CUSTOM_BLOCK = [
+    'if [ -f ${config_directory}/custom.cfg ]; then',
+    'source ${config_directory}/custom.cfg',
+    'elif [ -z "${config_directory}" -a -f $prefix/custom.cfg ]; then',
+    'source $prefix/custom.cfg',
+    'fi',
+]
 NORMAL_LOADED = "/sys/kernel/kexec_loaded"
 CRASH_LOADED = "/sys/kernel/kexec_crash_loaded"
 LOCK = "/run/lock/xdev-kernel-switch.lock"
@@ -113,6 +121,17 @@ def _parse_entry(entry, lines):
         if not words:
             continue
         command = words[0]
+        # Only the generated Xen decompressor branch has an inline command list.
+        # Quoted punctuation in echo text is harmless; unquoted lists are not.
+        lexer = shlex.shlex(line, posix=True, punctuation_chars=";&|<>")
+        lexer.whitespace_split = True
+        compound = any(token and all(char in ";&|<>" for char in token) for token in lexer)
+        xen_branch = words == ['if', '[', 'x$grub_platform', '=', 'xxen', '];', 'then',
+                               'insmod', 'xzio;', 'insmod', 'lzopio;', 'fi']
+        if command in ("if", "elif") and not xen_branch:
+            unsafe.append("entry contains unsupported conditional execution")
+        if compound and not xen_branch:
+            unsafe.append("entry contains an unsupported compound command")
         if command != "savedefault" and _fallback_effect(line):
             unsafe.append("entry contains an inline fallback mutation")
         if command == "linux":
@@ -183,8 +202,8 @@ def _header_condition(words):
 
 
 def _fallback_effect(line):
-    return re.search(r"(?:^|[;\s])(?:set\s+)?(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|prefix|env_block|initrdfail|chosen)\s*=|"
-                     r"(?:^|[;\s])(?:load_env|eval|configfile|savedefault)(?:\s|;|$)|"
+    return re.search(r"(?:^|[;\s])(?:set\s+)?(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|prefix|config_directory|env_block|initrdfail|chosen)\s*=|"
+                     r"(?:^|[;\s])(?:load_env|eval|configfile|source|savedefault)(?:\s|;|$)|"
                      r"(?:^|[;\s])save_env\s+(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|chosen)(?:\s|;|$)", line)
 
 
@@ -216,6 +235,8 @@ def parse_grub(config_text, environment_text):
         if not separator or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key) or key in environment:
             _reject("Malformed or duplicate GRUB environment assignment")
         environment[key] = value
+    if environment.get("prefix") or environment.get("config_directory"):
+        _reject("Imported GRUB prefix/config_directory could redirect configuration sources")
     if environment.get("env_block"):
         _reject("An alternate GRUB environment block is unsupported")
     if environment.get("initrdfail", "") not in ("", "0"):
@@ -223,6 +244,7 @@ def parse_grub(config_text, environment_text):
     if environment.get("chosen"):
         _reject("An imported chosen prefix could change the full saved fallback ID")
     entries = {}
+    declared_ids = set()
     stack = []
     depth = 0
     active = None
@@ -273,6 +295,9 @@ def parse_grub(config_text, environment_text):
                 _reject("Unsupported GRUB entry declaration")
             entry_id = _entry_id(words)
             full_id = ">".join([item["id"] for item in stack] + [entry_id])
+            if full_id in declared_ids:
+                _reject("Duplicate full GRUB menu/submenu ID")
+            declared_ids.add(full_id)
             conditional = bool(conditions) or any(item["conditional"] for item in stack)
             if words[0] == "submenu":
                 stack.append({"id": entry_id, "depth": depth + 1, "conditional": conditional})
@@ -342,7 +367,7 @@ def parse_grub(config_text, environment_text):
             elif words:
                 assignment = words[1] if words[0] == "set" and len(words) == 2 else words[0]
                 name, separator, value = assignment.partition("=")
-                if separator and name in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "env_block", "initrdfail", "chosen"):
+                if separator and name in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "config_directory", "env_block", "initrdfail", "chosen"):
                     restored = (name == "saved_entry" and value == "${prev_saved_entry}"
                                 and conditions == ["prev_saved_entry"])
                     cleared = (not value and name in ("next_entry", "prev_entry", "prev_saved_entry")
@@ -653,6 +678,89 @@ def _mapped_path(path, root_uuid, mounts, host):
     return mapped
 
 
+
+def _literal_custom_menus(text):
+    """Qualify menu declarations only; never execute or interpret custom globals."""
+    if len(text) > 2 * 1024 * 1024:
+        _reject("custom.cfg exceeds the supported size")
+    inside = False
+    for line in text.splitlines():
+        words = _words(line)
+        if not words:
+            continue
+        delta = _brace_delta(line)
+        if not inside:
+            if (len(words) < 5 or words[0] != "menuentry" or words[-1] != "{" or delta != 1
+                    or any(char in line for char in ("$", "`", ";"))):
+                _reject("custom.cfg may contain only literal menuentry declarations")
+            _entry_id(words)
+            # Only literal --id and repeated --class options are supported.
+            options = words[2:-1]
+            index = 0
+            while index < len(options):
+                if options[index].startswith("--id="):
+                    index += 1
+                elif options[index] in ("--id", "--class") and index + 1 < len(options):
+                    index += 2
+                else:
+                    _reject("Unsupported custom menu declaration option")
+            inside = True
+        elif delta == -1 and words == ["}"]:
+            inside = False
+        elif delta != 0 or words[0] in ("menuentry", "submenu", "function"):
+            _reject("Nested or malformed custom menu structure is unsupported")
+    if inside:
+        _reject("Unterminated custom menuentry")
+
+
+def _expand_custom(config, host):
+    """Expand one exact unconditional standard 41_custom block, in place."""
+    lines = config.splitlines(keepends=True)
+    normalized = [" ".join(line.split()) for line in lines]
+    matches = []
+    depth = 0
+    conditions = 0
+    index = 0
+    while index < len(lines):
+        words = _words(lines[index])
+        if normalized[index:index + len(_CUSTOM_BLOCK)] == _CUSTOM_BLOCK:
+            if depth or conditions or matches:
+                _reject("41_custom must be one unconditional top-level source block")
+            matches.append(index)
+            index += len(_CUSTOM_BLOCK)
+            continue
+        if depth == 0 and words:
+            if (words[0] == "source" or re.search(r"(?:^|[;\s])source(?:\s|;|$)", lines[index])):
+                _reject("Only the exact standard 41_custom source block is supported")
+            if words[0] == "if":
+                conditions += 1
+            elif words[0] == "fi":
+                conditions -= 1
+        # A source hidden in a submenu header is not a supported source boundary.
+        elif words and words[0] == "source":
+            _reject("Nested GRUB sources are unsupported")
+        depth += _brace_delta(lines[index])
+        index += 1
+    if not matches:
+        return config, None
+    path = CUSTOM
+    try:
+        before = host.stat(path)
+    except FileNotFoundError:
+        text, identity = "", {"path": path, "text": None, "stat": None}
+    else:
+        if not before["regular"] or before["size"] > 2 * 1024 * 1024:
+            _reject("custom.cfg must be a bounded regular file")
+        if hasattr(host, "realpath") and host.realpath(path) != path:
+            _reject("Redirected custom.cfg path is unsupported")
+        text = host.read_text(path)
+        if host.stat(path) != before:
+            _reject("custom.cfg changed while collecting boot facts")
+        _literal_custom_menus(text)
+        identity = {"path": path, "text": text, "stat": before}
+    start = matches[0]
+    return "".join(lines[:start]) + text + "\n" + "".join(lines[start + len(_CUSTOM_BLOCK):]), identity
+
 def collect_snapshot(host, target_entry=None, good_entry=None):
     try:
         config = host.read_text(CONFIG)
@@ -660,19 +768,10 @@ def collect_snapshot(host, target_entry=None, good_entry=None):
         if not grub_tool:
             _reject("grub-editenv is required; systemd-boot is not supported")
         environment = _checked_run(host, [grub_tool, ENVIRONMENT, "list"])
-        grub = parse_grub(config, environment)
-        # Standard 41_custom is harmless only when its optional payload is absent.
-        source_lines = [line.strip() for line in config.splitlines() if line.strip().startswith("source ")]
-        for line in source_lines:
-            words = _words(line)
-            if len(words) != 2 or words[1] not in ("${config_directory}/custom.cfg", "$prefix/custom.cfg", "${prefix}/custom.cfg"):
-                _reject("Custom top-level GRUB source is unsupported")
-            try:
-                custom = host.stat("/boot/grub/custom.cfg")
-            except FileNotFoundError:
-                continue
-            if custom["size"]:
-                _reject("A nonempty custom.cfg can change the persistent fallback")
+        # Validate the original header before resolving its sole supported source.
+        parse_grub(config, environment)
+        expanded, custom = _expand_custom(config, host)
+        grub = parse_grub(expanded, environment)
         findmnt = host.which("findmnt")
         if not findmnt:
             _reject("findmnt is required for root/boot path mapping")
@@ -693,7 +792,8 @@ def collect_snapshot(host, target_entry=None, good_entry=None):
             "normal_loaded": _flag(host, NORMAL_LOADED), "crash_loaded": _flag(host, CRASH_LOADED),
             "tools": tools, "mounts": mounts, "artifacts": {},
             "loader": _loader_evidence(host, mounts),
-            "config_identity": {"config": config, "environment": environment, "mounts": mounts},
+            "config_identity": {"config": config, "environment": environment, "mounts": mounts,
+                                "expanded_config": expanded, "custom": custom},
         }
         for entry_id in dict.fromkeys(item for item in (target_entry, good_entry) if item):
             if entry_id not in grub["entries"]:

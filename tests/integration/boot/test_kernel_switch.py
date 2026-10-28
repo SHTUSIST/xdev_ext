@@ -327,6 +327,157 @@ class PlanFixture(Subject):
         return switch.validate_plan(self.snapshot(), TRIAL, GOOD, 17)
 
 
+CUSTOM_BLOCK = ('if [ -f  ${config_directory}/custom.cfg ]; then\n'
+                '  source ${config_directory}/custom.cfg\n'
+                'elif [ -z "${config_directory}" -a -f  $prefix/custom.cfg ]; then\n'
+                '  source $prefix/custom.cfg\nfi\n')
+
+
+def literal_custom_entry(entry_id, body=''):
+    return ("menuentry 'Synthetic custom Linux' --id " + entry_id + " {\n" + body +
+            '  search --no-floppy --fs-uuid --set=root AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE\n'
+            '  linux /boot/vmlinuz-6.16.0-trial root=UUID=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE ro\n'
+            '  initrd /boot/initrd.img-6.16.0-trial\n}\n')
+
+
+class CustomMenus(PlanFixture):
+    def configure(self, payload=None):
+        # Independently authored 20+13 shape, without any private host text.
+        self.host.text['/boot/grub/grub.cfg'] = GRUB + ''.join(
+            literal_custom_entry('synthetic-main-' + str(i)) for i in range(17)) + CUSTOM_BLOCK
+        self.host.text['/boot/grub/custom.cfg'] = payload if payload is not None else ''.join(
+            literal_custom_entry('synthetic-custom-' + str(i), '  cutmem 0x100000 0x200000\n' if i >= 5 else '')
+            for i in range(13))
+
+    def accepted_snapshot(self, target=TRIAL):
+        try:
+            return switch.collect_snapshot(self.host, target, GOOD)
+        except switch.SwitchError as error:
+            self.fail('append-only literal custom menus were refused: ' + str(error))
+
+    def test_exact_custom_block_expands_once_and_preserves_permanent_good(self):
+        self.configure()
+        snapshot = self.accepted_snapshot()
+        self.assertEqual(len(snapshot['grub']['entries']), 33)
+        self.assertEqual(snapshot['grub']['default'], GOOD)
+        self.assertEqual(switch.validate_plan(snapshot, TRIAL, GOOD, 17)['state'], 'planned')
+        for i in range(13):
+            entry = snapshot['grub']['entries']['synthetic-custom-' + str(i)]
+            self.assertEqual(bool(entry['unsafe']), i >= 5)
+        safe = self.accepted_snapshot('synthetic-custom-0')
+        self.assertEqual(switch.validate_plan(safe, 'synthetic-custom-0', GOOD, 17)['state'], 'planned')
+        self.refuse(lambda: switch.collect_snapshot(self.host, 'synthetic-custom-5', GOOD))
+        identity = snapshot['config_identity']
+        self.assertEqual(identity['custom']['path'], '/boot/grub/custom.cfg')
+        self.assertEqual(identity['custom']['text'], self.host.text['/boot/grub/custom.cfg'])
+        self.assertEqual(identity['custom']['stat'], self.host.stat('/boot/grub/custom.cfg'))
+        expanded = identity['expanded_config']
+        self.assertNotIn('source ', expanded)
+        self.assertEqual(expanded.count('--id synthetic-custom-0 {'), 1)
+
+    def test_custom_global_statements_missing_ids_and_collisions_refuse(self):
+        good = literal_custom_entry('custom-safe')
+        for payload in ('set saved_entry=foreign\n' + good, good + 'set default=foreign\n',
+                        'function local_helper {\n echo hi\n}\n' + good,
+                        'source /other/file\n' + good, 'submenu other --id sub {\n' + good + '}\n',
+                        good.replace('--id custom-safe', ''), good + good,
+                        literal_custom_entry('simple-test-root'), literal_custom_entry('advanced-test-root'),
+                        good.replace('}\n', '} set saved_entry=foreign\n')):
+            self.host = FixtureHost()
+            self.configure(payload)
+            with self.subTest(payload=payload[:80]):
+                self.refuse(lambda: switch.collect_snapshot(self.host))
+
+    def test_custom_source_block_is_exact_unconditional_and_unique(self):
+        for block in (CUSTOM_BLOCK.replace('$prefix/custom.cfg', '$prefix/foreign.cfg'),
+                      CUSTOM_BLOCK.replace('  source ${config_directory}/custom.cfg', '  source /other/custom.cfg'),
+                      CUSTOM_BLOCK + CUSTOM_BLOCK,
+                      'if [ "${unknown}" = yes ]; then\n' + CUSTOM_BLOCK + 'fi\n',
+                      'submenu outer --id outer {\n' + CUSTOM_BLOCK + '}\n',
+                      'source ${config_directory}/custom.cfg\n',
+                      'if [ x = y ]; then source /other/custom.cfg; fi\n',
+                      'echo ready; source /other/custom.cfg\n'):
+            self.host = FixtureHost()
+            self.configure()
+            self.host.text['/boot/grub/grub.cfg'] = GRUB + block
+            with self.subTest(block=block[:90]):
+                self.refuse(lambda: switch.collect_snapshot(self.host))
+
+    def test_custom_path_overrides_and_nonregular_source_refuse(self):
+        for mutation in ('env-prefix', 'env-config-directory', 'set-config-directory',
+                         'bare-config-directory', 'nonregular'):
+            self.host = FixtureHost()
+            self.configure()
+            if mutation.startswith('env-'):
+                key = 'prefix' if mutation == 'env-prefix' else 'config_directory'
+                self.host.text['/boot/grub/grubenv'] += key + '=/other/grub\n'
+            elif mutation == 'nonregular':
+                original = self.host.stat
+                def changed(path):
+                    result = original(path)
+                    if path == '/boot/grub/custom.cfg':
+                        result['regular'] = False
+                    return result
+                self.host.stat = changed
+            else:
+                assignment = ('set ' if mutation == 'set-config-directory' else '') + 'config_directory=/other/grub\n'
+                self.host.text['/boot/grub/grub.cfg'] = assignment + self.host.text['/boot/grub/grub.cfg']
+            with self.subTest(mutation=mutation):
+                self.refuse(lambda: switch.collect_snapshot(self.host))
+
+    def test_custom_selected_unknown_or_inline_effects_are_unsafe(self):
+        for body in ('  cutmem 0x100000 0x200000\n', '  unknown_device_effect\n',
+                     '  if [ x = x ]; then cutmem 0x100000 0x200000; fi\n',
+                     "  echo ready; cutmem 0x100000 0x200000\n",
+                     '  if [ x = x ]; then cutmem 0x100000 0x200000; then\n',
+                     '  if [ x = y ]; then\n  echo conditional\n  fi\n'):
+            self.host = FixtureHost()
+            self.configure(literal_custom_entry('custom-unsafe', body))
+            with self.subTest(body=body):
+                snapshot = self.accepted_snapshot()
+                self.assertTrue(snapshot['grub']['entries']['custom-unsafe']['unsafe'])
+                self.refuse(lambda: switch.collect_snapshot(self.host, 'custom-unsafe', GOOD))
+
+    def test_custom_expansion_preserves_source_position_and_absence_identity(self):
+        self.configure(literal_custom_entry('custom-middle'))
+        self.host.text['/boot/grub/grub.cfg'] = GRUB + CUSTOM_BLOCK + literal_custom_entry('after-custom')
+        snapshot = self.accepted_snapshot()
+        ids = list(snapshot['grub']['entries'])
+        self.assertLess(ids.index('custom-middle'), ids.index('after-custom'))
+        del self.host.text['/boot/grub/custom.cfg']
+        snapshot = self.accepted_snapshot()
+        self.assertEqual(snapshot['config_identity']['custom'],
+                         {'path': '/boot/grub/custom.cfg', 'text': None, 'stat': None})
+        plan = switch.validate_plan(snapshot, TRIAL, GOOD, 17)
+        self.host.text['/boot/grub/custom.cfg'] = '# now exists\n'
+        calls = []
+        self.refuse(lambda: switch.execute_switch(plan, execute=True,
+            runner=lambda argv: calls.append(argv),
+            recheck=lambda: switch.validate_plan(self.snapshot(), TRIAL, GOOD, 17),
+            read_loaded=lambda: False, receipt=lambda event: None))
+        self.assertEqual(calls, [])
+
+    def test_custom_text_stat_or_absence_change_prevents_execute(self):
+        for mutation in ('text', 'stat', 'absent'):
+            self.host = FixtureHost()
+            self.configure()
+            snapshot = self.accepted_snapshot()
+            plan = switch.validate_plan(snapshot, TRIAL, GOOD, 17)
+            if mutation == 'text':
+                self.host.text['/boot/grub/custom.cfg'] += '# changed after planning\n'
+            elif mutation == 'stat':
+                self.host.stat_overrides['/boot/grub/custom.cfg'] = 4567
+            else:
+                del self.host.text['/boot/grub/custom.cfg']
+            commands = []
+            with self.subTest(mutation=mutation):
+                self.refuse(lambda: switch.execute_switch(plan, execute=True,
+                    runner=lambda argv: commands.append(argv),
+                    recheck=lambda: switch.validate_plan(self.snapshot(), TRIAL, GOOD, 17),
+                    read_loaded=lambda: False, receipt=lambda event: None))
+                self.assertEqual(commands, [])
+
+
 class Planning(PlanFixture):
     def test_selected_verified_standard_savedefault_can_plan_without_changing_good_default(self):
         config = UBUNTU_HEADER.replace('    linux /boot/', '    savedefault\n    linux /boot/')

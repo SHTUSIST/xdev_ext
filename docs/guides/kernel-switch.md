@@ -45,6 +45,18 @@ defined. Conditional menus remain visible during inspection, marked unsafe;
 the tool does not assume that an unknown GRUB condition will make a chosen
 trial or fallback entry available.
 
+The exact top-level Ubuntu `41_custom` block can load
+`/boot/grub/custom.cfg`. The tool expands that one block once, at its original
+position. The optional regular file may contain comments and literal
+`menuentry` declarations with explicit IDs. Global statements, functions,
+submenus, other sources, duplicate menu/submenu IDs, and redirected source
+paths are refused. Imported `prefix` or `config_directory`, and assignments
+that override those paths, are also refused. Inspection lists unsupported
+custom bodies as unsafe; selected entries containing `cutmem`, unknown effects,
+or unsupported conditional/compound commands are rejected. Kexec does not
+reproduce GRUB memory-map edits. Custom menus cannot change the required
+permanent good default.
+
 The image's embedded release, its installed filename, the initrd's modules
 release, and `/lib/modules/RELEASE` must agree. An initrd with no identifiable
 modules release or with multiple releases is unsupported. Root/boot paths must
@@ -105,7 +117,8 @@ python3 tools/boot/kernel_switch.py switch \
 ```
 
 Immediately before loading, the tool takes an execution lock and repeats the
-read-only checks. Changed boot facts or image/initrd metadata stop execution.
+read-only checks. Changed boot facts, image/initrd metadata, or custom menu
+contents/file identity stop execution.
 Do not update boot files or run another kernel-switch program concurrently;
 the lock coordinates this tool's invocations, not every privileged program.
 
