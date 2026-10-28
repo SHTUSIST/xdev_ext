@@ -46,6 +46,7 @@ used as performance evidence.  --dry-run prints the exact commands without
 running.
 """
 import argparse
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -56,6 +57,14 @@ import sys
 import tempfile
 import threading
 import time
+
+# Canonical source and assembled logical source use the same shared implementation.
+_CPU_SOURCE = Path(__file__).resolve().parents[2] / 'tests/support/evidence/native_trace/cpu_sampling.py'
+if not _CPU_SOURCE.is_file():
+    _CPU_SOURCE = Path(__file__).resolve().parent.parent / 'native_trace/cpu_sampling.py'
+_cpu_spec = importlib.util.spec_from_file_location('shared_cpu_account_sampling', _CPU_SOURCE)
+CPU_SAMPLING = importlib.util.module_from_spec(_cpu_spec)
+_cpu_spec.loader.exec_module(CPU_SAMPLING)
 
 SCHEMA = 'xdev-eval-cpu-account-v2'
 SEP = ';'
@@ -74,7 +83,7 @@ NOT_COUNTED = ('<not counted>', '<not supported>')
 # /proc/stat per-CPU fields (fs/proc/stat.c):
 # user nice system idle iowait irq softirq steal guest guest_nice
 IRQ_FIELD, SOFTIRQ_FIELD = 5, 6
-BUSY_FIELDS = (0, 1, 2, 5, 6, 7)	# guest time is already inside user
+BUSY_FIELDS = CPU_SAMPLING.BUSY_FIELDS	# guest time is already inside user
 ATTRIBUTION = dict(
     cycles='cgroup only: cycles, user/kernel cycles and instructions count arm tasks '
            '(including io_uring io-wq/SQPOLL threads, which stay in the cgroup); '
@@ -206,19 +215,24 @@ def event_bytes(entry, count_bytes=None):
 
 
 def parse_proc_stat(text):
-    cpus = {}
-    for line in text.splitlines():
-        m = re.match(r'cpu(\d+)\s+(.*)', line)
-        if m:
-            cpus[int(m.group(1))] = [int(x) for x in m.group(2).split()]
-    if not cpus:
-        raise ParseError('no per-CPU lines in /proc/stat')
-    return cpus
+    try:
+        parsed = CPU_SAMPLING.parse_stat(text)
+    except ValueError as error:
+        raise ParseError(str(error)) from error
+    return {int(name[3:]): counters for name, counters in parsed.items() if name != 'cpu'}
 
 
 def _stat_delta(before, after, hz, fields):
+    if type(hz) is not int or hz <= 0:
+        raise ParseError('CPU tick frequency invalid')
+    try:
+        if not before or any(type(cpu) is not int or cpu < 0 for cpu in (*before, *after)):
+            raise ValueError('invalid CPU IDs')
+        CPU_SAMPLING._validate_delta(before, after)
+    except ValueError as error:
+        raise ParseError(str(error)) from error
     per_cpu = {cpu: sum(after[cpu][f] - before[cpu][f] for f in fields) / hz
-               for cpu in sorted(set(before) & set(after))}
+               for cpu in sorted(before)}
     return dict(total=sum(per_cpu.values()), per_cpu=per_cpu)
 
 

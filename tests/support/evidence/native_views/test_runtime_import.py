@@ -334,5 +334,141 @@ class RuntimeImport(unittest.TestCase):
         self.assertFalse(result['performance_eligible'])
 
 
+    # Scope replay uses the real importer/decoder, with synthetic provenance only.
+    def selected_samples(self, subset=False, status='qualified'):
+        self.cpu_samples()
+        online = [0, 1] if subset else [0]
+        scope = dict(schema=1, selected_cpus=[0], online_cpus=online,
+                     possible_cpus=[0, 1], boot_id='01234567-89ab-4cde-8f01-23456789abcd',
+                     clock=self.manifest['clock'], clock_domain=self.manifest['clock_domain'],
+                     selection='subset' if subset else 'all-online', status=status,
+                     hold_reasons=['worker/IRQ containment unavailable'] if status == 'hold' else [])
+        self.manifest.update(cpu_accounting='cpu_set_total', cpu_budget=1, cpu_scope=copy.deepcopy(scope))
+        self.metadata.update(cpu_accounting='cpu_set_total', cpu_budget=1, cpu_scope=copy.deepcopy(scope))
+        path = Path(self.receipt['artifacts']['cpu_samples']['path'])
+        samples = [json.loads(line) for line in path.read_text().splitlines()]
+        for sample in samples:
+            sample.update(boot_id=scope['boot_id'], online_cpus=online, possible_cpus=[0, 1],
+                          clock=scope['clock'], clock_domain=scope['clock_domain'])
+            if subset:
+                sample['stat'] += 'cpu1 0 0 0 100 0 0 0 0 0 0\n'
+        self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
+        self.artifact('trace_metadata', json.dumps(self.metadata))
+
+    def test_all_online_raw_bounds_remain_fixture_arithmetic_not_physical_evidence(self):
+        self.selected_samples()
+        result = self.import_run()
+        bounds = result['manifest']['total_cpu_ns_bounds']
+        self.assertIsNotNone(bounds)
+        self.assertEqual((bounds['lower'], bounds['upper']), (30_000_000, 100_000_000))
+        self.assertFalse(result['performance_eligible'])
+
+    def test_held_subset_exposes_no_primary_cpu_cost_or_bounds(self):
+        self.selected_samples(subset=True, status='hold')
+        result = self.import_run()
+        self.assertIsNone(result['manifest']['total_cpu_ns'])
+        self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+        self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record'))
+        self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record_bounds'))
+        self.assertFalse(result['performance_eligible'])
+        self.assertIn('cpu_samples', self.receipt['artifacts'])
+
+    def test_subset_qualified_label_without_observed_containment_cannot_promote(self):
+        self.selected_samples(subset=True)
+        result = self.import_run()
+        self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+        self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record_bounds'))
+        self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+
+    def test_selected_result_cannot_relabel_legacy_identityless_samples(self):
+        self.selected_samples()
+        path = Path(self.receipt['artifacts']['cpu_samples']['path'])
+        samples = [json.loads(line) for line in path.read_text().splitlines()]
+        for sample in samples:
+            for key in ('boot_id', 'online_cpus', 'possible_cpus', 'clock', 'clock_domain'):
+                sample.pop(key)
+        self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
+        result = self.import_run()
+        self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+        self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+
+    def test_scope_metadata_and_raw_boot_identity_are_independently_replayed(self):
+        for mutation in ('metadata_set', 'metadata_boot', 'raw_boot'):
+            with self.subTest(mutation=mutation):
+                self.selected_samples()
+                if mutation.startswith('metadata'):
+                    scope = self.metadata['cpu_scope']
+                    scope['selected_cpus' if mutation == 'metadata_set' else 'boot_id'] = (
+                        [1] if mutation == 'metadata_set' else 'fedcba98-7654-4321-8abc-0123456789ab')
+                    self.artifact('trace_metadata', json.dumps(self.metadata))
+                else:
+                    path = Path(self.receipt['artifacts']['cpu_samples']['path'])
+                    samples = [json.loads(line) for line in path.read_text().splitlines()]
+                    samples[1]['boot_id'] = 'fedcba98-7654-4321-8abc-0123456789ab'
+                    self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
+                result = self.import_run()
+                self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+                self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+
+    def test_equal_cpu_budget_does_not_pair_different_selected_cpu_ids(self):
+        self.selected_samples()
+        left, right = run_fixture(), run_fixture('K-BPF')
+        for run in (left, right):
+            run.update(cpu_accounting='cpu_set_total', cpu_budget=1,
+                       cpu_scope=copy.deepcopy(self.manifest['cpu_scope']))
+        right['cpu_scope']['selected_cpus'] = [1]
+        right['cpu_scope']['online_cpus'] = [1]
+        result = analyze.compare_runs(left, right)
+        self.assertFalse(result['eligible'])
+        self.assertIsNone(result['delta'])
+        self.assertTrue(any('cpu' in error.lower() for error in result['errors']), result['errors'])
+
+    def test_nonobject_selected_cpu_jsonl_returns_unavailable_without_exception(self):
+        for malformed in ([], None):
+            with self.subTest(malformed=malformed):
+                self.selected_samples()
+                path = Path(self.receipt['artifacts']['cpu_samples']['path'])
+                samples = [json.loads(line) for line in path.read_text().splitlines()]
+                samples[1] = malformed
+                self.artifact('cpu_samples', ''.join(json.dumps(row) + '\n' for row in samples))
+                try:
+                    observed = self.inspect()
+                    result = self.import_run()
+                except Exception as error:
+                    self.fail('malformed CPU evidence escaped admission as %s: %s' %
+                              (type(error).__name__, error))
+                self.assertIsNone(observed['total_cpu_ns'])
+                self.assertIsNone(observed['total_cpu_ns_bounds'])
+                self.assertTrue(any('cpu' in error.lower() for error in observed['errors']),
+                                observed['errors'])
+                self.assertIsNone(result['manifest']['total_cpu_ns'])
+                self.assertIsNone(result['manifest']['total_cpu_ns_bounds'])
+                self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record'))
+                self.assertIsNone(result['manifest']['metrics'].get('cpu_ns_per_record_bounds'))
+                self.assertFalse(result['performance_eligible'])
+
+    def test_same_cpu_ids_cannot_pair_held_primary_bounds_but_legacy_diagnostics_survive(self):
+        self.selected_samples(status='hold')
+        scope = copy.deepcopy(self.manifest['cpu_scope'])
+        scope['hold_reasons'] = ['unqualified']
+        left, right = run_fixture(), run_fixture('K-BPF')
+        for run, lower, upper in ((left, 10, 20), (right, 20, 30)):
+            run['total_cpu_ns'] = None
+            run['total_cpu_ns_bounds'] = dict(lower=lower, upper=upper)
+            run['metrics']['cpu_ns_per_record'] = None
+            run['metrics']['cpu_ns_per_record_bounds'] = dict(lower=lower, upper=upper)
+        legacy = analyze.compare_runs(left, right)
+        self.assertTrue(legacy['eligible'], legacy['errors'])
+        self.assertEqual(legacy['delta']['cpu_ns_per_record_bounds'], dict(lower=0, upper=20))
+        self.assertFalse(legacy['performance_eligible'])
+        for run in (left, right):
+            run.update(cpu_scope=copy.deepcopy(scope), cpu_budget=1)
+        held = analyze.compare_runs(left, right)
+        self.assertFalse(held['eligible'], 'same selected CPUs bypassed HOLD qualification')
+        self.assertIsNone(held['delta'])
+        self.assertTrue(any('cpu' in error.lower() for error in held['errors']), held['errors'])
+        self.assertFalse(held['performance_eligible'])
+
+
 if __name__ == '__main__':
     unittest.main()

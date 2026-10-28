@@ -21,7 +21,7 @@ PAIR_FIELDS = (
     'pool_bytes', 'record_bytes', 'frame_bytes', 'depth', 'batch', 'mtu',
     'protocol', 'crc', 'setup_in_timing', 'oracle_in_timing',
     'complete_boundary', 'submit_boundary', 'clock', 'clock_domain',
-    'cpu_accounting', 'cpu_budget', 'completed_records', 'numa', 'iommu', 'group_bytes',
+    'cpu_accounting', 'cpu_budget', 'cpu_set', 'completed_records', 'numa', 'iommu', 'group_bytes',
     'segments_per_group', 'inflight_bytes', 'native_batch', 'processing', 'stages',
     'records', 'workload',
 )
@@ -292,7 +292,9 @@ def inspect_collection(run, receipt):
     # Legacy synthetic fixtures retain their old integer decoder tests only.
     # Actual captures never qualify whole-command counters by a metadata label.
     legacy_fixture_cpu = (run.get('physical') is False and run.get('environment') == 'fixture' and
-                          run.get('evidence_kind') == 'fixture' and 'cpu_samples' not in artifacts)
+                          run.get('evidence_kind') == 'fixture' and 'cpu_samples' not in artifacts and
+                          'cpu_scope' not in plan and 'cpu_scope' not in metadata and
+                          'cpu_set' not in plan)
     if metadata:
         if run.get('arm') in ('U-poll', 'U-event') or runtime:
             if metadata.get('journal_artifact') != artifacts.get('journal') or 'journal' not in data:
@@ -394,7 +396,19 @@ def inspect_collection(run, receipt):
             if not verified_events:
                 raise ValueError('verified measured native endpoints unavailable')
             samples = [json.loads(line) for line in data['cpu_samples'].splitlines()]
-            bounds = CPU_SAMPLING.cpu_bounds(plan, verified_events, samples, metadata.get('cpu_tick_hz'))
+            selected = 'cpu_scope' in metadata or 'cpu_scope' in plan or 'cpu_set' in plan
+            if selected:
+                cpu_set = _qualified_cpu_scope(plan, metadata, samples)
+                bounds = CPU_SAMPLING.cpu_bounds(plan, verified_events, samples,
+                                                metadata.get('cpu_tick_hz'), cpu_set=cpu_set)
+            elif (run.get('physical') is False and run.get('environment') == 'fixture' and
+                  run.get('evidence_kind') == 'fixture'):
+                # Preserve historical synthetic decoder arithmetic only. These
+                # old fixtures do not acquire selected-set/physical eligibility.
+                bounds = CPU_SAMPLING.cpu_bounds(plan, verified_events, samples,
+                                                metadata.get('cpu_tick_hz'))
+            else:
+                raise ValueError('CPU scope unavailable; identityless whole-host samples are diagnostic only')
         except (ValueError, TypeError, KeyError) as error:
             errors.append('system_cpu: ' + str(error))
     return dict(errors=errors, events=verified_events, metadata=metadata,
@@ -402,38 +416,68 @@ def inspect_collection(run, receipt):
                 total_cpu_ns=cpu_ns, total_cpu_ns_bounds=bounds)
 
 
+def _cpu_scope_selection(plan, scope):
+    """Validate primary scope eligibility shared by replay and direct pairing."""
+    if not isinstance(scope, dict):
+        raise ValueError('CPU scope unavailable or malformed')
+    if type(scope.get('schema')) is not int or scope['schema'] != 1:
+        raise ValueError('CPU scope schema invalid')
+    selected = CPU_SAMPLING._cpu_ids(scope.get('selected_cpus'))
+    online = CPU_SAMPLING._cpu_ids(scope.get('online_cpus'))
+    possible = CPU_SAMPLING._cpu_ids(scope.get('possible_cpus'))
+    if not set(online) <= set(possible) or not set(selected) <= set(online):
+        raise ValueError('CPU scope CPUs offline/unknown')
+    if 'cpu_set' in plan and not _same_json(plan['cpu_set'], list(selected)):
+        raise ValueError('CPU scope selected CPU set mismatch')
+    if type(plan.get('cpu_budget')) is not int or plan['cpu_budget'] != len(selected):
+        raise ValueError('CPU scope budget differs from actual selected CPU count')
+    if (scope.get('clock') != plan.get('clock') or
+            scope.get('clock_domain') != plan.get('clock_domain')):
+        raise ValueError('CPU scope/native endpoint clock mismatch')
+    if (not isinstance(scope.get('hold_reasons'), list) or
+            any(not isinstance(v, str) or not v for v in scope['hold_reasons'])):
+        raise ValueError('CPU scope HOLD reasons invalid')
+    if scope.get('status') != 'qualified' or scope['hold_reasons']:
+        raise ValueError('CPU scope HOLD; primary CPU bounds unavailable')
+    if scope.get('selection') != 'all-online' or selected != online:
+        # No actual placement proof adapter is present in this first slice.
+        # Neither affinity nor an imported qualified label proves containment.
+        raise ValueError('CPU subset scope HOLD without actual worker/IRQ/background containment proof')
+    if (not isinstance(scope.get('boot_id'), str) or not re.fullmatch(
+            r'[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}', scope['boot_id']) or
+            scope.get('clock') != 'CLOCK_MONOTONIC' or
+            not isinstance(scope.get('clock_domain'), str) or not scope['clock_domain']):
+        raise ValueError('CPU scope boot/clock/domain identity invalid')
+    return selected
+
+
+def _qualified_cpu_scope(plan, metadata, samples):
+    scope = metadata.get('cpu_scope')
+    if not isinstance(scope, dict) or not _same_json(scope, plan.get('cpu_scope')):
+        raise ValueError('CPU scope metadata/manifest mismatch or unavailable')
+    selected = _cpu_scope_selection(plan, scope)
+    online = tuple(scope['online_cpus'])
+    possible = tuple(scope['possible_cpus'])
+    expected = (scope.get('boot_id'), online, possible, scope.get('clock'), scope.get('clock_domain'))
+    if not samples:
+        raise ValueError('CPU scope raw identity unavailable')
+    for sample in samples:
+        if not isinstance(sample, dict):
+            raise ValueError('CPU raw sample must be an object')
+        identity = CPU_SAMPLING._sample_identity(sample, CPU_SAMPLING.parse_stat(sample.get('stat')))
+        if identity != expected:
+            raise ValueError('CPU scope and raw boot/online/possible/clock identity mismatch')
+    return selected
+
+
 def _system_cpu_ns(before, after, tick_hz):
-    """Whole-host busy CPU, excluding idle, iowait, steal and guest double count."""
+    """Historical whole-host fixture arithmetic, using the shared strict parser."""
     if type(tick_hz) is not int or tick_hz <= 0:
         raise ValueError('cpu_tick_hz missing/invalid')
-
-    def parse(text):
-        cpus = {}
-        for line in text.splitlines():
-            parts = line.split()
-            if parts and re.fullmatch(r'cpu(?:[0-9]+)?', parts[0]):
-                if parts[0] in cpus or len(parts) < 9:
-                    raise ValueError('duplicate/truncated CPU counter row')
-                try:
-                    counters = [int(v) for v in parts[1:]]
-                except ValueError:
-                    raise ValueError('noninteger CPU counter') from None
-                if any(v < 0 for v in counters):
-                    raise ValueError('negative CPU counter')
-                cpus[parts[0]] = counters
-        if 'cpu' not in cpus or len(cpus) < 2:
-            raise ValueError('aggregate and all cpuN counters required')
-        return cpus
-    a, b = parse(before), parse(after)
-    if set(a) != set(b):
-        raise ValueError('CPU set changed/incomplete all-CPU capture')
-    for cpu in a:
-        if len(a[cpu]) != len(b[cpu]) or any(y < x for x, y in zip(a[cpu], b[cpu])):
-            raise ValueError('CPU counter regressed/reset')
-    # /proc/stat aggregate includes every CPU; per-CPU rows prove the captured
-    # set, while summing both would double count. Tick resolution is preserved.
-    busy_ticks = sum(b['cpu'][i] - a['cpu'][i] for i in (0, 1, 2, 5, 6))
-    return busy_ticks * 1_000_000_000 // tick_hz
+    a, b = CPU_SAMPLING.parse_stat(before), CPU_SAMPLING.parse_stat(after)
+    CPU_SAMPLING._validate_delta(a, b)
+    ticks = sum(b['cpu'][i] - a['cpu'][i] for i in CPU_SAMPLING.BUSY_FIELDS)
+    return ticks * 1_000_000_000 // tick_hz
 
 
 def _check_campaign(run, campaign):

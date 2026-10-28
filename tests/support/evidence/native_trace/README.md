@@ -216,3 +216,29 @@ opcode/length value. `trace.native_directions` may map stage IDs to `read` or
 `write`; the supported `nvme-nic` recipe also declares a measured NVMe read.
 XSK `aux` is the native batch count and can differ between submit and complete
 without changing the identity or byte span of the individual descriptor.
+
+
+Selected CPU counter replay uses `cpu_sampling.parse_cpu_set`, `busy_ticks`
+and `interval_bounds`. Explicit selected IDs are summed once from `cpuN`
+rows. Busy includes user, nice, system, irq and softirq; steal and extra guest
+fields are excluded. Raw tokens must fit unsigned 64-bit; totals use Python
+integers. Decreasing iowait is reported as unreliable without becoming busy.
+Native record replay retains the existing first-admit to last-terminal envelope,
+with outward-rounded interior/enclosing bounds, read widths and endpoint slack.
+
+The existing sampler now records actual Linux boot ID, online/possible CPU IDs,
+`CLOCK_MONOTONIC` and its optional caller-provided clock domain around each
+bounded proc read. Changing identity invalidates the stream. A missing clock
+domain remains diagnostic and cannot qualify a selected result. This does not
+add a sampler, alter benchmark timers or establish workload placement.
+
+A selected import requires matching manifest/collection `cpu_scope`, raw sample
+identity and native clock domain. Only an unchanged explicit all-online set can
+qualify containment in this implementation; subset scopes remain HOLD until
+actual worker, IRQ and background-work placement proof is available. All-online
+busy includes background work and sampler overhead; it does not prove idle or
+dedicated hardware. Held results expose no primary CPU cost/bounds, and paired
+selected sets must match exact IDs. Historical synthetic fixture arithmetic is
+retained solely for decoder compatibility and proves no physical eligibility.
+Collector option propagation, all-arm readiness/timer adapters, span-union
+replay and subset placement evidence remain separate integration requirements.
