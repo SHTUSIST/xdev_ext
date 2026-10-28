@@ -397,7 +397,10 @@ int main(void)
    EQ(d->family, 1);
    EQ(xdev_ext_mech_class_family(c), 1);
    EQ(d->peer_only, 1);
-   EQ(d->known_flags, 1);
+   /* The opt-in EARLY contract adds only bit1 to this new XDOMAIN row;
+    * all frozen pre-XDOMAIN old_* oracles remain unchanged. */
+   EQ(XDEV_EXT_XDOMAIN_F_EARLY, 2);
+   EQ(d->known_flags, 3);
    EQ(d->flags_later, 0);
    EQ(d->role_rule, 1);
    EQ(d->ctx_rule, 4);
@@ -407,7 +410,9 @@ int main(void)
     EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER,
        pool != XDEV_EXT_MECH_POOL_PEER);
    for (bit = 0; bit < 32; bit++)
-    EQ(new_flags_bad(d, 1U << bit), bit != 0);
+    EQ(new_flags_bad(d, 1U << bit), bit > 1);
+   for (bit = 0; bit < 8; bit++)
+    EQ(new_flags_bad(d, bit), !!(bit & ~3U));
    for (dir = 0; dir < 4; dir++) {
     struct xdev_ext_mech_stage_uapi u = { .class_id = 11, .direction = dir };
     EQ(xdev_ext_mech_stage_role(&u), dir == 1 ? XDEV_EXT_MECH_ROLE_CONSUMER :
