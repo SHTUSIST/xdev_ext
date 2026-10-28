@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import shlex
 import subprocess
 import tempfile
 import unittest
@@ -68,11 +69,53 @@ else: raise AssertionError(directory)
 root.mkdir(parents=True,exist_ok=True)
 for name in names: (root/name).write_bytes(b'host make/BPF boundary fixture, never executed\\n')
 ''')
-        self.env = dict(os.environ, SRC=str(PRODUCT/'kernel'), TOOLS=str(self.tools),
+        git_env = dict(os.environ)
+        receipt = PRODUCT/'view.json'
+        if receipt.is_file():
+            view = json.loads(receipt.read_text())
+            self.assertEqual(view['kind'], 'host-source-view')
+            canonical = view['canonical_root']
+            # The view contains native copies but has no native Git index.
+            # Select the actual harness's source paths, then index their current
+            # bytes in private objects. Canonical Git metadata stays read-only.
+            command = MODE.read_text().split('git ls-files -z --', 1)[1].split('| while', 1)[0]
+            source_paths = shlex.split(command.replace('\\\n', ''))
+            tracked = subprocess.check_output(
+                ['git', '-C', canonical, 'ls-files', '--stage', '-z'])
+            entries = {}
+            for row in filter(None, tracked.split(b'\0')):
+                metadata, path = row.split(b'\t', 1)
+                mode, _blob, stage = metadata.split()
+                self.assertEqual(stage, b'0', 'source fixture requires resolved inputs')
+                entries[os.fsdecode(path)] = mode
+            selected = sorted(logical for logical in view['source_origins']
+                              if any(logical == path or logical.startswith(path+'/')
+                                     for path in source_paths))
+            self.assertTrue(selected, 'actual source-record selection is empty')
+            git_env.update(GIT_DIR=subprocess.check_output(
+                ['git', '-C', canonical, 'rev-parse', '--absolute-git-dir'],
+                text=True).strip(), GIT_WORK_TREE=str(PRODUCT),
+                GIT_INDEX_FILE=str(self.root/'native-source.index'),
+                GIT_OBJECT_DIRECTORY=str(self.root/'native-objects'),
+                GIT_ALTERNATE_OBJECT_DIRECTORIES=subprocess.check_output(
+                    ['git', '-C', canonical, 'rev-parse', '--path-format=absolute',
+                     '--git-path', 'objects'], text=True).strip())
+            Path(git_env['GIT_OBJECT_DIRECTORY']).mkdir()
+            blobs = subprocess.check_output(
+                ['git', 'hash-object', '-w', '--no-filters', '--stdin-paths'],
+                input=''.join(str(PRODUCT/name)+'\n' for name in selected).encode(),
+                env=git_env).splitlines()
+            self.assertEqual(len(blobs), len(selected))
+            native = b''.join(entries[view['source_origins'][logical]]+b' '+blob+
+                              b'\t'+os.fsencode(logical)+b'\0'
+                              for logical, blob in zip(selected, blobs))
+            subprocess.run(['git', 'update-index', '-z', '--index-info'],
+                           input=native, env=git_env, check=True)
+        self.env = dict(git_env, SRC=str(PRODUCT/'kernel'), TOOLS=str(self.tools),
             BUILD=str(self.build), EV=str(self.evidence), ROOT=str(self.guest),
             E2_SOURCE=str(HERE), SOURCE_GIT_ROOT=str(PRODUCT), E2_MODE=str(MODE),
             SOURCE_COMMIT=subprocess.check_output(['git', '-C', str(PRODUCT),
-                                                  'rev-parse', 'HEAD'], text=True).strip(),
+                                                  'rev-parse', 'HEAD'], text=True, env=git_env).strip(),
             BUILD_STUB=str(self.stub), E2_TEST_MAKE_CALLS=str(self.root/'make-calls.jsonl'),
             PYTHONDONTWRITEBYTECODE='1', PATH=str(self.wrappers)+':'+os.environ['PATH'])
 
