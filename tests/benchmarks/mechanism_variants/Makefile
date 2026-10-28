@@ -5,6 +5,12 @@ BUILD ?= .build
 LIBBPF_LIBS ?= -lbpf
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror
+CTL_LIB := ../../../kernel/tools/xdev_ext_mech/lib
+CTL_LIB_SOURCES := $(CTL_LIB)/xdev_ext_session.c $(CTL_LIB)/xdev_ext_link.c
+CTL_LIB_HEADERS := $(CTL_LIB)/libxdev_ext.h $(CTL_LIB)/libxdev_ext_internal.h \
+	$(CTL_LIB)/../xdev_ext_mech_ctl_core.h \
+	../../../kernel/include/uapi/linux/xdev_ext_mech.h \
+	../../../kernel/include/uapi/linux/io_uring.h
 .PHONY: all sink ctl check bpf
 all: sink ctl bpf
 sink: $(BUILD)/mv_sink
@@ -13,8 +19,8 @@ $(BUILD):
 	mkdir -p $@
 $(BUILD)/mv_sink: mv_sink.c | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
-$(BUILD)/mv_ctl: mv_ctl.c mv_create_capture.h mv_umem_guard.h mv_policy_capture.h ../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c | $(BUILD)
-	$(CC) $(CPPFLAGS) $(CFLAGS) mv_ctl.c ../../../kernel/tools/xdev_ext_xsk_redirect.c ../../../kernel/tools/xdev_ext_gpu_identity.c -o $@ $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz -ldl
+$(BUILD)/mv_ctl: mv_ctl.c mv_create_capture.h mv_umem_guard.h mv_policy_capture.h ../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c $(CTL_LIB_SOURCES) $(CTL_LIB_HEADERS) | $(BUILD)
+	$(CC) $(CPPFLAGS) $(CFLAGS) mv_ctl.c $(CTL_LIB_SOURCES) ../../../kernel/tools/xdev_ext_xsk_redirect.c ../../../kernel/tools/xdev_ext_gpu_identity.c -o $@ $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz -ldl
 $(BUILD)/test_umem_guard: test_umem_guard.c mv_umem_guard.h mv_create_capture.h | $(BUILD)
 	$(CC) $(CFLAGS) $< -o $@
 $(BUILD)/test_create_capture: test_create_capture.c mv_create_capture.h | $(BUILD)
