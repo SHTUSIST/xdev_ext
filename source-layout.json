@@ -3315,6 +3315,14 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/user_rules_test.c"
     },
     {
+      "source": "tests/compute/user_stage/user_stop_origin_fixture.c",
+      "logical_path": "tests/compute/user_stage/user_stop_origin_fixture.c"
+    },
+    {
+      "source": "tests/compute/user_stage/user_stop_origin_test.py",
+      "logical_path": "tests/compute/user_stage/user_stop_origin_test.py"
+    },
+    {
       "source": "tests/compute/user_stage/user_validate.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/user_validate.py"

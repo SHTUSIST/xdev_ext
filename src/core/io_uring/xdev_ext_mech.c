@@ -1475,7 +1475,8 @@ void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 t
 		return;
 	/* Publish native errors under the same lock as STOP, regardless of state:
 	 * the worker may not land this completion until after a clean STOP wins.
-	 * Local never-issued cancellations use their separate entry point. */
+	 * Local cancellation status, including quiesced external success after
+	 * STOP, carries explicit origin instead of sealing this native latch. */
 	if (err && !b->locally_cancelled) {
 		spin_lock_irqsave(&b->s->lock, flags);
 		if (!b->s->last_err)
@@ -1523,8 +1524,13 @@ int xdev_ext_mech_batch_external_complete(struct xdev_ext_mech_batch *b,
  if (unknown) {
   err = err ?: -EIO;
   xdev_ext_mech_session_stop(s, err);
- } else if (!xdev_ext_mech_session_admits(s)) {
+ } else if (!err && !xdev_ext_mech_session_admits(s)) {
+  /* The external operation succeeded and quiesced. Only its continuation
+   * was cancelled locally; preserve real nonzero completion errors above.
+   * The unique ticket claim already owns this metadata publication.
+   */
   err = xdev_ext_mech_stop_reason(s);
+  b->locally_cancelled = true;
  }
  xdev_ext_mech_batch_completion_publish(b, ticket, err, unknown);
  return 0;

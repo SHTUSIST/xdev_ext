@@ -320,7 +320,7 @@ static void xdev_ext_user_reap_one(struct xdev_ext_mech_stage *st, const struct 
 		if (err) {
 			if (bad)
 				xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
-			xdev_ext_user_external_end(st, e->slot, h->stop_err ?: err,
+			xdev_ext_user_external_end(st, e->slot, err,
 						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
 			return;
 		}
@@ -348,7 +348,8 @@ static void xdev_ext_user_reap_one(struct xdev_ext_mech_stage *st, const struct 
 						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
 			return;
 		}
-		xdev_ext_user_external_end(st, e->slot, h->stop_err ?: err,
+		/* Preserve the validated result; the core classifies STOP itself. */
+		xdev_ext_user_external_end(st, e->slot, err,
 					   XDEV_EXT_MECH_EXTERNAL_QUIESCED);
 		return;
 	}
