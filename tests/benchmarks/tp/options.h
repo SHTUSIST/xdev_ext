@@ -5,14 +5,14 @@
 #include <cstdint>
 #include <climits>
 struct tp_eval_options {
- unsigned rank=0, mode=1, depth=1, dtype=3, operation=1, device=0;
+ unsigned rank=0, mode=1, depth=1, dtype=3, operation=1, device=0, early_cts=0;
  uint64_t elements=1024, rows=1, iterations=10, first_sequence=1;
  uint64_t communicator=1, epoch=1, link=0, timeout_ns=600000000000ULL;
  unsigned group_bytes=0, frame_count=0, trace_capacity=0;
  uint64_t payload_bytes=0, allocation_bytes=0;
 };
 static inline int tp_eval_geometry(tp_eval_options &o) {
- if (o.rank>1 || (o.mode!=1 && o.mode!=2) || !o.depth || o.depth>256 ||
+ if (o.early_cts>1 || o.rank>1 || (o.mode!=1 && o.mode!=2) || !o.depth || o.depth>256 ||
      (o.mode==1 && o.depth!=1) || !o.iterations || !o.first_sequence ||
      !o.communicator || !o.epoch || o.dtype<1 || o.dtype>3 ||
      o.operation<1 || o.operation>4 || (o.operation==4 && o.depth!=1) || !o.timeout_ns || o.device>INT_MAX)

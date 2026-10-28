@@ -7725,6 +7725,22 @@
     {
       "source": "tests/network/xdomain/early/kfunc_cases.c.in",
       "logical_path": "tests/network/xdomain/early/kfunc_cases.c.in"
+    },
+    {
+      "source": "tests/compute/cuda/early_selection/test_selection.py",
+      "logical_path": "tests/compute/cuda/early_selection/test_selection.py"
+    },
+    {
+      "source": "tests/compute/cuda/early_selection/owner_selection.cc",
+      "logical_path": "tests/compute/cuda/early_selection/owner_selection.cc"
+    },
+    {
+      "source": "tests/compute/cuda/early_selection/test_driver.py",
+      "logical_path": "tests/compute/cuda/early_selection/test_driver.py"
+    },
+    {
+      "source": "tests/compute/cuda/early_selection/driver_selection.cc",
+      "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
     }
   ]
 }

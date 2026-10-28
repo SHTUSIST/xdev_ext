@@ -11,6 +11,7 @@
 #include <unistd.h>
 struct xdev_ext_cuda_peer_owner {
  xdev_ext_cuda_peer_owner_opts config{};
+ uint32_t endpoint_flags=0;
  CUcontext context=nullptr;
  CUstream stream=nullptr;
  CUevent last_use=nullptr;
@@ -73,7 +74,7 @@ static int prepare(xdev_ext_cuda_peer_owner *o) {
   xdev_ext_peer_endpoint_opts e{};e.sz=sizeof(e);e.allocation_fd=o->allocation[i];e.control_fd=o->control;
   e.link_token=c.link_token;e.direction=i?XDEV_EXT_MECH_DIR_FROM_DEVICE:XDEV_EXT_MECH_DIR_TO_DEVICE;
   e.depth=c.depth;e.group_bytes=c.group_bytes;e.deadline_ms=unsigned(c.timeout_ns/1000000);
-  e.layout={4096,0,4096,c.group_bytes};e.flags=c.mode==2?XDEV_EXT_PEER_ENDPOINT_F_EXTERNAL_CTL:0;
+  e.layout={4096,0,4096,c.group_bytes};e.flags=o->endpoint_flags|(c.mode==2?XDEV_EXT_PEER_ENDPOINT_F_EXTERNAL_CTL:0);
   if((rc=xdev_ext_peer_endpoint_open(&e,&o->endpoint[i])))return rc;
  }
  if(c.mode==2) {
@@ -88,8 +89,11 @@ static int prepare(xdev_ext_cuda_peer_owner *o) {
  return 0;
 }
 extern "C" int xdev_ext_cuda_peer_owner_open(const xdev_ext_cuda_peer_owner_opts *c,xdev_ext_cuda_peer_owner **out) {
+ return xdev_ext_cuda_peer_owner_open_flags(c,0,out);
+}
+extern "C" int xdev_ext_cuda_peer_owner_open_flags(const xdev_ext_cuda_peer_owner_opts *c,uint32_t endpoint_flags,xdev_ext_cuda_peer_owner **out) {
  if(out)*out=nullptr;
- if(!out || !c || c->size!=sizeof(*c) || c->version!=1 || (c->mode!=1 && c->mode!=2) ||
+ if((endpoint_flags&~XDEV_EXT_PEER_ENDPOINT_F_EARLY) || !out || !c || c->size!=sizeof(*c) || c->version!=1 || (c->mode!=1 && c->mode!=2) ||
     !c->nvidia_node || !*c->nvidia_node || !c->bpf_object || !*c->bpf_object ||
     !c->user_bpf_object || !*c->user_bpf_object || !c->link_token ||
     !c->allocation_bytes || c->allocation_bytes%65536 || c->allocation_bytes>UINT64_MAX-65536 ||
@@ -106,7 +110,7 @@ extern "C" int xdev_ext_cuda_peer_owner_open(const xdev_ext_cuda_peer_owner_opts
  }
  auto *o=new(std::nothrow) xdev_ext_cuda_peer_owner;
  if(!o)return -ENOMEM;
- o->config=*c;
+ o->config=*c;o->endpoint_flags=endpoint_flags;
  // Always expose partial ownership; no hidden destructor may reclaim UNKNOWN.
  *out=o;
  return prepare(o);

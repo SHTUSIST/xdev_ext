@@ -46,6 +46,16 @@ python3 tests/benchmarks/tp/run.py \
   --oracle-ptx "$EVAL_BUILD/tp_eval_verify.ptx"
 ```
 
+To request EARLY endpoint admission, pass `--early-cts 1` among the driver
+arguments after `--` on both ranks. The default is `--early-cts 0`; values above
+1 are rejected before endpoint ownership or GPU work. Both ranks must request
+the same value: the existing fixed-width control handshake rejects a mismatch
+before either rank opens its owner. The rank-local runner passes these driver
+arguments through unchanged. Final metadata records boolean
+`early_cts_requested`, which describes the request and does not establish
+observed transport, DMA or performance. Framework/vLLM EARLY selection is a
+separate integration requirement.
+
 Use a distinct raw filename for rank 1 and for every subsequent run. Raw output
 is created exclusively so an original failed run cannot be overwritten. The
 driver retains its process/context/resources on unknown native/GPU custody and
@@ -110,7 +120,7 @@ This benchmark-local echo uses the existing native GPU USER API; it adds no
 collective operation. Every final record identifies `native_mode` (1 or 2) and
 `handoff_mode` (`cpu` or `gpu` respectively); the summary rejects missing or
 inconsistent pairs. These fields identify native handoff primitives. It does not implement the full E6 configuration d2, NHI
-completion polling, early CTS or a/b/c attribution arms.
+completion polling or a/b/c attribution arms.
 
 For a matched baseline use the normal official NCCL executable. Select
 `NCCL_NET=Socket` and exact `NCCL_SOCKET_IFNAME='=thunderbolt0'`, retain NCCL

@@ -36,7 +36,7 @@ struct tp_eval_owner {
   options.allocation_bytes=o.allocation_bytes;options.nr_batches=o.iterations*o.depth;
   options.first_sequence=o.first_sequence;options.timeout_ns=o.timeout_ns;
   options.group_bytes=o.group_bytes;options.depth=o.depth;
-  int rc=xdev_ext_cuda_peer_owner_open(&options,&bootstrap);
+  int rc=xdev_ext_cuda_peer_owner_open_flags(&options,o.early_cts?XDEV_EXT_PEER_ENDPOINT_F_EARLY:0,&bootstrap);
   started=bootstrap!=nullptr; // Retain partial owner as well as accepted work.
   NATIVE(rc);
   xdev_ext_cuda_peer_owner_view view{};view.size=sizeof(view);

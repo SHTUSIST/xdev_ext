@@ -69,7 +69,7 @@ static std::string handshake(const tp_eval_options &o) {
  char text[512];snprintf(text,sizeof(text),"%016llx:%016llx:%016llx:%016llx:%016llx:%08x:%08x:%08x:%08x:%08x:%016llx",
   (unsigned long long)o.communicator,(unsigned long long)o.epoch,(unsigned long long)o.first_sequence,
   (unsigned long long)o.iterations,(unsigned long long)o.elements,o.rows>UINT_MAX?UINT_MAX:unsigned(o.rows),
-  o.mode,o.depth,o.dtype,o.operation,(unsigned long long)o.rows);
+  o.mode|(o.early_cts?0x80000000U:0),o.depth,o.dtype,o.operation,(unsigned long long)o.rows);
  return text;
 }
 int main(int argc,char **argv) {
@@ -82,6 +82,7 @@ int main(int argc,char **argv) {
    std::string key=argv[i];if(i+1>=argc)throw std::runtime_error("argument needs value");const char *v=argv[++i];
    if(key=="--rank"){o.rank=small(v);have_rank=true;}
    else if(key=="--mode") {if(!strcmp(v,"d1"))o.mode=1;else if(!strcmp(v,"d2"))o.mode=2;else throw std::runtime_error("mode must be d1/d2");}
+   else if(key=="--early-cts")o.early_cts=small(v);
    else if(key=="--depth")o.depth=small(v);
    else if(key=="--dtype") {if(!strcmp(v,"f16"))o.dtype=1;else if(!strcmp(v,"bf16"))o.dtype=2;else if(!strcmp(v,"f32"))o.dtype=3;else throw std::runtime_error("dtype");}
    else if(key=="--operation") {if(!strcmp(v,"sum"))o.operation=1;else if(!strcmp(v,"all-gather"))o.operation=3;else if(!strcmp(v,"echo"))o.operation=4;else throw std::runtime_error("operation must be sum/all-gather/echo");}
@@ -122,8 +123,8 @@ int main(int argc,char **argv) {
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
-     o.mode,o.mode==1?"cpu":"gpu",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
+   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
+     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
    if(echo_gpu)echo_gpu->close();else echo->close();
    owner.close(o.timeout_ns);::close(control.fd);return 0;
   }
@@ -173,8 +174,8 @@ int main(int argc,char **argv) {
      stats.rx_delivered!=stats.completed)throw std::runtime_error("native final accounting incomplete");
   std::vector<xdev_tp_trace_record> traces(o.trace_capacity);size_t written=0;
   NATIVE(xdev_tp_trace_read(owner.comm,traces.data(),traces.size(),&written));
-  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu}\n",
-   o.mode,o.mode==1?"cpu":"gpu",(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
+  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu}\n",
+   o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
    (unsigned long long)stats.trace_dropped,o.depth,(unsigned long long)stats.logical_inflight_high_water,
    o.group_bytes,o.frame_count,(unsigned long long)stats.completed,(unsigned long long)stats.gpu_invocations,
    (unsigned long long)stats.host_control_calls);

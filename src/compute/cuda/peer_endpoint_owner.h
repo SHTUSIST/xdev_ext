@@ -39,6 +39,12 @@ struct xdev_ext_cuda_peer_owner_view {
  * be retained until close succeeds. D2 uses existing XDEV_EXT_CUDA_PTX config. */
 int xdev_ext_cuda_peer_owner_open(const struct xdev_ext_cuda_peer_owner_opts *,
  struct xdev_ext_cuda_peer_owner **);
+/* The legacy open selects ordinary endpoints. open_flags additionally accepts
+ * XDEV_EXT_PEER_ENDPOINT_F_EARLY only; EXTERNAL_CTL is derived from mode.
+ * Invalid flags initialize a supplied output to NULL before any acquisition.
+ * Partial ownership and close requirements are identical to open. */
+int xdev_ext_cuda_peer_owner_open_flags(const struct xdev_ext_cuda_peer_owner_opts *,
+ uint32_t endpoint_flags, struct xdev_ext_cuda_peer_owner **);
 int xdev_ext_cuda_peer_owner_get_view(struct xdev_ext_cuda_peer_owner *,
  struct xdev_ext_cuda_peer_owner_view *);
 int xdev_ext_cuda_peer_owner_start(struct xdev_ext_cuda_peer_owner *);
