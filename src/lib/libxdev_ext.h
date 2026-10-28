@@ -131,6 +131,15 @@ int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 			  struct xdev_ext_session **out);
 int xdev_ext_session_create(struct xdev_ext_session *s,
 			    const struct xdev_ext_create_opts *o);
+/* Explicit diagnostics: syscall delivery and report.result are distinct.
+ * Each call clears out first. Only a delivered, validated report has nonzero
+ * size/version; a transport or schema error leaves out zero. Copy historical
+ * reports elsewhere before reusing out. Retained failed CREATE has no session
+ * ID; close preserves its owner handles. */
+int xdev_ext_session_create_report(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out);
+int xdev_ext_create_report_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create, struct xdev_ext_mech_create_report *out);
 int xdev_ext_session_arm(struct xdev_ext_session *s, __u64 batches_target,
 			 __u64 published_target);
 int xdev_ext_session_start(struct xdev_ext_session *s,

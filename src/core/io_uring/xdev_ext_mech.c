@@ -27,6 +27,8 @@
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/nvme.h>
+#include <linux/pci.h>
+#include <linux/xdev_ext_requester_retention.h>
 #include <linux/printk.h>
 #include <linux/rculist.h>
 #include <linux/rcupdate.h>
@@ -161,7 +163,10 @@ struct xdev_ext_mech_session {
 	u32 depth;
 	u32 frames;			/* frames per batch */
 	u32 nr_stages;
-	u32 nr_bound;			/* stages whose ->bind succeeded */
+	u32 nr_bound; /* stages whose ->bind succeeded */
+ bool create_reporting;
+ bool create_pending_publish; /* report delivery and list publication precede admission */
+ u32 create_phase, create_failed_stage;
 	struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
  struct xdev_ext_mech_stage_uapi plan[XDEV_EXT_MECH_MAX_STAGES];
 	const void *ops[XDEV_EXT_MECH_CLASS_MAX];	/* per class, for life */
@@ -888,7 +893,9 @@ bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s)
 {
 	u32 i;
 
-	if (READ_ONCE(s->ss.state) != XDEV_EXT_MECH_SESSION_ACTIVE)
+	/* Class bind may expose an ingress callback before CREATE returns. */
+	if (smp_load_acquire(&s->create_pending_publish) ||
+	    READ_ONCE(s->ss.state) != XDEV_EXT_MECH_SESSION_ACTIVE)
 		return false;
 	for (i = 0; i < XDEV_EXT_MECH_CLASS_MAX; i++)
 		if (s->ops[i] &&
@@ -3218,6 +3225,8 @@ static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
 	int ret;
 
 	xdev_ext_mech_stage_caps_default(u, pool_kind, &st->caps);
+ if (st->create_reporting)
+  st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_CAPS;
 	if (comp && !xdev_ext_comp_kind_ok(comp->kinds, xdev_ext_comp_kind_of(u)))
 		return -EINVAL;
 	ret = st->cls->bind(st, u);
@@ -3249,7 +3258,10 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 			.direction = c->st[i].direction,
 			.flags = c->st[i].flags,
 			.index = i,
+   .create_reporting = s->create_reporting,
 		};
+		s->create_phase = XDEV_EXT_MECH_CREATE_CLASS_LOOKUP;
+  s->create_failed_stage = i;
 		st->cls = xdev_ext_mech_class_get(st->class_id);
 		if (!st->cls)
 			return -EOPNOTSUPP;
@@ -3262,15 +3274,20 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		if (s->ops[st->class_id])
 			continue;
 		/* No program for the class: no silent C path either. */
+		s->create_phase = XDEV_EXT_MECH_CREATE_OPS_LOOKUP;
+  s->create_failed_stage = U32_MAX;
 		s->ops[st->class_id] = xdev_ext_mech_ops_get(st->class_id,
 							&s->pinned[st->class_id],
 							&s->c_owner[st->class_id]);
 		if (!s->ops[st->class_id])
 			return -EOPNOTSUPP;
 	}
+	s->create_failed_stage = U32_MAX;
+ s->create_phase = XDEV_EXT_MECH_CREATE_BUFFERS;
 	ret = xdev_ext_mech_session_buffers(s);
 	if (ret)
 		return ret;
+	s->create_phase = XDEV_EXT_MECH_CREATE_EVENTFD;
 	if (c->eventfd >= 0) {
 		s->evfd = eventfd_ctx_fdget(c->eventfd);
 		if (IS_ERR(s->evfd)) {
@@ -3279,17 +3296,21 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 			return ret;
 		}
 	}
+	s->create_phase = XDEV_EXT_MECH_CREATE_WORKER;
 	s->worker = kthread_run_worker(0, "xdev_ext_mech/%llu", s->id);
 	if (IS_ERR(s->worker)) {
 		ret = PTR_ERR(s->worker);
 		s->worker = NULL;
 		return ret;
 	}
+	s->create_phase = XDEV_EXT_MECH_CREATE_POOL;
 	ret = xdev_ext_mech_pool_bind(s, c);
 	if (ret)
 		return ret;
 	for (i = 0; i < s->nr_stages; i++) {
 		st = &s->st[i];
+		s->create_failed_stage = i;
+  s->create_phase = XDEV_EXT_MECH_CREATE_STAGE_FILE;
 		/* USER binds the user stage object, not its file: the file's
 		 * release (process exit) must be able to stop the stage. */
 		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU &&
@@ -3299,8 +3320,11 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 			if (!st->file)
 				return -EBADF;
 		}
+		s->create_phase = XDEV_EXT_MECH_CREATE_CLASS_BIND;
 		ret = xdev_ext_mech_class_bind(st, &clean[i], c->pool_kind);
   if (ret) {
+   if (st->create_phase)
+    s->create_phase = st->create_phase;
    /* Checked classes publish any residual mapping in priv on failure. */
    if (st->cls->unbind_checked && st->priv)
     s->nr_bound++;
@@ -3309,6 +3333,8 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
 		s->nr_bound++;
 	}
 	for (i = 0; i < s->nr_stages; i++) {
+		s->create_failed_stage = i;
+  s->create_phase = XDEV_EXT_MECH_CREATE_PREPARE;
 		ret = xdev_ext_mech_prepare(s, &s->st[i]);
 		if (ret)
 			return ret;
@@ -3345,8 +3371,8 @@ static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,
 				u32 version);
 
 /* Process context, nothing in flight: give every reference back. */
-static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
-				struct xdev_ext_mech_stop_report *report)
+static int xdev_ext_mech_session_release_disposition(struct xdev_ext_mech_session *s,
+    struct xdev_ext_mech_stop_report *report, u32 *cleanup)
 {
 	struct xdev_ext_mech_stage *st;
 	unsigned long flags;
@@ -3387,6 +3413,8 @@ static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
   spin_unlock_irqrestore(&s->lock, flags);
   atomic64_add(s->pool.nr_frames, &s->cnt[XDEV_EXT_MECH_CNT_SEQUESTERED]);
   xdev_ext_mech_quarantine(s);
+  if (cleanup)
+   *cleanup = XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED;
   return final_err;
  }
 
@@ -3447,7 +3475,15 @@ static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
 	kfree(s->scratch);
 	kfree(s->info);
 	kfree(s);
+ if (cleanup)
+  *cleanup = XDEV_EXT_MECH_CREATE_CLEANUP_RELEASED;
 	return final_err;
+}
+
+static int xdev_ext_mech_session_release_report(struct xdev_ext_mech_session *s,
+    struct xdev_ext_mech_stop_report *report)
+{
+ return xdev_ext_mech_session_release_disposition(s, report, NULL);
 }
 
 static int xdev_ext_mech_session_release(struct xdev_ext_mech_session *s)
@@ -3632,48 +3668,115 @@ static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *ctx, void __user *uar
 	return ret;
 }
 
-static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
+/* CREATE and CREATE_REPORT share binding, activation and rollback. */
+static int xdev_ext_mech_create_common(struct io_ring_ctx *ctx,
+    const struct xdev_ext_mech_create *c,
+    struct xdev_ext_mech_create __user *legacy,
+    struct xdev_ext_mech_create_with_report *envelope, void __user *uarg)
 {
-	struct xdev_ext_mech_create __user *ucreate = uarg;
-	struct xdev_ext_mech_session *s;
-	struct xdev_ext_mech_create c;
-	unsigned long flags;
-	u32 frames;
-	int ret;
+ struct xdev_ext_mech_create_report *r = envelope ? &envelope->report : NULL;
+ struct pci_dev *refs[XDEV_EXT_MECH_MAX_STAGES] = {};
+ struct xdev_ext_mech_session *s;
+ unsigned long flags;
+ u32 frames, i;
+ int ret;
 
-	if (!xdev_ext_mech_ready())
-		return -EOPNOTSUPP;
-	if (copy_from_user(&c, ucreate, sizeof(c)))
-		return -EFAULT;
-	ret = xdev_ext_mech_create_check(&c, &frames);
-	if (ret)
-		return ret;
+ if (r) {
+  r->size = sizeof(*r);
+  r->version = XDEV_EXT_MECH_CREATE_REPORT_VERSION;
+  r->phase = XDEV_EXT_MECH_CREATE_CHECK;
+  r->failed_stage = U32_MAX;
+ }
+ ret = xdev_ext_mech_create_check(c, &frames);
+ if (ret)
+  goto no_session;
+ s = kzalloc(sizeof(*s), GFP_KERNEL);
+ if (!s) {
+  ret = -ENOMEM;
+  goto no_session;
+ }
+ xdev_ext_mech_session_init(s, ctx, c, frames);
+ s->create_reporting = !!r;
+ s->create_pending_publish = !!r;
+ ret = xdev_ext_mech_session_bind(s, c);
+ /* Preserve the legacy ID copyout and its precedence over activation. */
+ if (!ret && legacy && put_user(s->id, &legacy->session_id))
+  ret = -EFAULT;
+ if (!ret) {
+  s->create_phase = XDEV_EXT_MECH_CREATE_ACTIVATE;
+  s->create_failed_stage = U32_MAX;
+  spin_lock_irqsave(&s->lock, flags);
+  ret = xdev_ext_mech_sess_activate(&s->ss);
+  spin_unlock_irqrestore(&s->lock, flags);
+  if (ret)
+   ret = xdev_ext_mech_stop_reason(s);
+ }
+ /* Transfer report-only references before any class or session is freed. */
+ if (r) {
+  for (i = 0; i < s->nr_stages; i++) {
+   refs[i] = s->st[i].create_requester;
+   s->st[i].create_requester = NULL;
+   s->st[i].create_reporting = false;
+  }
+  r->result = ret;
+  if (ret) {
+   r->phase = s->create_phase;
+   r->failed_stage = s->create_failed_stage;
+   if (r->failed_stage < s->nr_stages) {
+    struct xdev_ext_mech_stage *st = &s->st[r->failed_stage];
 
-	s = kzalloc(sizeof(*s), GFP_KERNEL);
-	if (!s)
-		return -ENOMEM;
-	xdev_ext_mech_session_init(s, ctx, &c, frames);
-	ret = xdev_ext_mech_session_bind(s, &c);
-	if (!ret && put_user(s->id, &ucreate->session_id))
-		ret = -EFAULT;
-	if (ret) {
-		xdev_ext_mech_session_release(s);
-		return ret;
-	}
+    r->valid = st->create_valid;
+    r->requester = st->create_requester_id;
+    if (r->valid & XDEV_EXT_MECH_CREATE_VALID_CAPS) {
+     r->caps = st->caps;
+     r->caps.session_id = 0;
+     r->caps.stage = r->failed_stage;
+    }
+    r->observed = st->create_observed;
+    r->observed.session_id = 0;
+   }
+  } else {
+   r->phase = 0;
+   r->session_id = s->id;
+   envelope->create.session_id = s->id;
+  }
+ }
+ if (ret) {
+  int rollback = xdev_ext_mech_session_release_disposition(s, NULL,
+                  r ? &r->cleanup : NULL);
 
-	spin_lock_irqsave(&s->lock, flags);
-	ret = xdev_ext_mech_sess_activate(&s->ss);
-	spin_unlock_irqrestore(&s->lock, flags);
-	if (ret) {
-		/* A stage's device went away while CREATE was binding. */
-		ret = xdev_ext_mech_stop_reason(s);
-		xdev_ext_mech_session_release(s);
-		return ret;
-	}
+  if (r) {
+   r->rollback_errno = rollback;
+   if (r->failed_stage < XDEV_EXT_MECH_MAX_STAGES && refs[r->failed_stage]) {
+    struct xdev_ext_requester_retention_stats t;
+
+    xdev_ext_requester_retention_snapshot(refs[r->failed_stage], &t);
+    r->observed.retention = (struct xdev_ext_mech_retention_diag) {
+     .generations = t.generations, .retained_generations = t.retained_generations,
+     .reserved_bytes = t.reserved_bytes, .retained_bytes = t.retained_bytes,
+     .global_reserved_bytes = t.global_reserved_bytes,
+     .global_retained_bytes = t.global_retained_bytes, .global_limit = t.global_limit,
+    };
+    r->observed.valid &= ~(1U << 5);
+    r->valid |= XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION;
+   }
+  }
+ } else if (r && copy_to_user(uarg, envelope, sizeof(*envelope))) {
+  /* No lists or progress publication until the complete value is delivered. */
+  xdev_ext_mech_session_release(s);
+  ret = -EFAULT;
+ }
+ for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+  pci_dev_put(refs[i]);
+ if (ret)
+  goto no_session;
+ s->create_reporting = false;
 	/* Bind and prepare are complete, and activation succeeded. An early
 	 * STOP kick may already have been consumed while CREATE was incomplete. */
-	smp_store_release(&s->progress_ready, true);
-	kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+ if (!r) {
+  smp_store_release(&s->progress_ready, true);
+  kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+ }
 	list_add_tail_rcu(&s->ring_node, &ctx->xdev_ext_mech_sessions);
 	spin_lock(&xdev_ext_mech_all_lock);
 	list_add_tail(&s->all_node, &xdev_ext_mech_all);
@@ -3681,6 +3784,13 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 	mutex_lock(&xdev_ext_mech_live_lock);
 	list_add_tail(&s->live_node, &xdev_ext_mech_live);
 	mutex_unlock(&xdev_ext_mech_live_lock);
+ if (r) {
+  /* No ingress, commands or native control accepted until delivery and
+   * publication are complete. All admission paths share session_admits. */
+  smp_store_release(&s->create_pending_publish, false);
+  smp_store_release(&s->progress_ready, true);
+  kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+ }
 	if (trace_native_event_enabled()) {
 		struct xdev_ext_native_event e = {
 			.phase = "session_bind", .origin = "K", .session_id = s->id,
@@ -3697,6 +3807,45 @@ static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
 	else if (s->poll_rx)
 		xdev_ext_mech_poll_kick(s);
 	return 0;
+
+no_session:
+ if (!r)
+  return ret;
+ /* Successful reports were already delivered before session publication. */
+ if (!ret)
+  return 0;
+ if (ret == -EFAULT && r->session_id)
+  return ret;
+ r->result = ret;
+ return copy_to_user(uarg, envelope, sizeof(*envelope)) ? -EFAULT : 0;
+}
+
+static int xdev_ext_mech_create(struct io_ring_ctx *ctx, void __user *uarg)
+{
+ struct xdev_ext_mech_create c;
+
+ if (!xdev_ext_mech_ready())
+  return -EOPNOTSUPP;
+ if (copy_from_user(&c, uarg, sizeof(c)))
+  return -EFAULT;
+ return xdev_ext_mech_create_common(ctx, &c, uarg, NULL, NULL);
+}
+
+static int xdev_ext_mech_create_report_op(struct io_ring_ctx *ctx, void __user *uarg)
+{
+ struct xdev_ext_mech_create_with_report in;
+
+ if (copy_from_user(&in, uarg, sizeof(in)))
+  return -EFAULT;
+ if (in.size != sizeof(in))
+  return -EINVAL;
+ if (in.version != XDEV_EXT_MECH_CREATE_REPORT_VERSION)
+  return -EOPNOTSUPP;
+ if (in.create.session_id || memchr_inv(&in.report, 0, sizeof(in.report)))
+  return -EINVAL;
+ if (!xdev_ext_mech_ready())
+  return -EOPNOTSUPP;
+ return xdev_ext_mech_create_common(ctx, &in.create, NULL, &in, uarg);
 }
 
 /* Only preparation owns these uncommitted claims. Restore precisely them. */
@@ -4232,6 +4381,8 @@ int io_xdev_ext_mech_register(struct io_ring_ctx *ctx, void __user *arg,
 		return -EINVAL;
 
 	switch (req.op) {
+	case XDEV_EXT_MECH_OP_CREATE_REPORT:
+  return xdev_ext_mech_create_report_op(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_CREATE:
 		return xdev_ext_mech_create(ctx, u64_to_user_ptr(req.arg));
 	case XDEV_EXT_MECH_OP_START:

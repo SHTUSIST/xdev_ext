@@ -392,8 +392,95 @@ peer_fail:
 	return ret;
 }
 
-int xdev_ext_session_create(struct xdev_ext_session *s,
-			    const struct xdev_ext_create_opts *o)
+/* The caller selects this operation explicitly; never retry legacy CREATE. */
+int xdev_ext_create_report_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create,
+    struct xdev_ext_mech_create_report *out)
+{
+ struct xdev_ext_mech_create_with_report e = {
+  .size = sizeof(e), .version = XDEV_EXT_MECH_CREATE_REPORT_VERSION,
+ };
+ struct io_uring_xdev_ext_mech req = {
+  .op = XDEV_EXT_MECH_OP_CREATE_REPORT, .arg = (uintptr_t)&e,
+ };
+ const struct xdev_ext_mech_create_report *r = &e.report;
+ unsigned int valid = XDEV_EXT_MECH_CREATE_VALID_REQUESTER |
+  XDEV_EXT_MECH_CREATE_VALID_DESCRIBED | XDEV_EXT_MECH_CREATE_VALID_DECIDED |
+  XDEV_EXT_MECH_CREATE_VALID_CAPS | XDEV_EXT_MECH_CREATE_VALID_OBSERVED |
+  XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION;
+ static const struct xdev_ext_mech_requester_id empty_requester;
+ static const struct xdev_ext_mech_stage_diag empty_diag;
+ static const struct xdev_ext_mech_stage_caps empty_caps;
+ int ret;
+
+ if (!out)
+  return -EINVAL;
+ memset(out, 0, sizeof(*out));
+ if (!create || owning_ring_fd < 0 || create->session_id)
+  return -EINVAL;
+ e.create = *create;
+ ret = xdev_ext__uring_register(owning_ring_fd, IORING_REGISTER_XDEV_EXT_MECH, &req);
+ if (ret)
+  return ret;
+ if (e.size != sizeof(e) || e.version != XDEV_EXT_MECH_CREATE_REPORT_VERSION ||
+     r->size != sizeof(*r) || r->version != XDEV_EXT_MECH_CREATE_REPORT_VERSION ||
+     r->result > 0 || r->rollback_errno > 0 || (r->valid & ~valid) ||
+     r->requester.rsvd || r->cleanup > XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED ||
+     r->observed.rsvd || (r->observed.valid & ~0x3fU) ||
+     (r->observed.readiness & ~0x1fU) ||
+     r->observed.capture_begin_ns > r->observed.capture_end_ns)
+  return -EPROTO;
+ if (!(r->valid & XDEV_EXT_MECH_CREATE_VALID_REQUESTER)) {
+  if (memcmp(&r->requester, &empty_requester, sizeof(empty_requester)) ||
+      (r->valid & (XDEV_EXT_MECH_CREATE_VALID_DESCRIBED |
+       XDEV_EXT_MECH_CREATE_VALID_DECIDED |
+       XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION)))
+   return -EPROTO;
+ } else if (r->requester.bus > 255 || r->requester.devfn > 255) {
+  return -EPROTO;
+ }
+ if ((r->valid & XDEV_EXT_MECH_CREATE_VALID_DECIDED) &&
+     !(r->valid & XDEV_EXT_MECH_CREATE_VALID_CAPS))
+  return -EPROTO;
+ if ((r->valid & XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION) &&
+     (r->observed.valid & (1U << 5)))
+  return -EPROTO;
+ if (!r->result) {
+  if (!r->session_id || e.create.session_id != r->session_id || r->phase ||
+      r->failed_stage != UINT32_MAX || r->cleanup || r->rollback_errno)
+   return -EPROTO;
+ } else if (r->session_id || e.create.session_id || r->caps.session_id ||
+            r->observed.session_id || !r->phase ||
+            r->phase > XDEV_EXT_MECH_CREATE_ACTIVATE ||
+            (r->failed_stage != UINT32_MAX && r->failed_stage >= create->nr_stages)) {
+  return -EPROTO;
+ }
+ if (!(r->valid & XDEV_EXT_MECH_CREATE_VALID_CAPS)) {
+  if (memcmp(&r->caps, &empty_caps, sizeof(empty_caps)))
+   return -EPROTO;
+ } else if (r->caps.size != sizeof(r->caps) ||
+            r->caps.version != XDEV_EXT_MECH_STAGE_CAPS_VERSION ||
+            r->caps.stage != r->failed_stage) {
+  return -EPROTO;
+ }
+ if (!(r->valid & XDEV_EXT_MECH_CREATE_VALID_OBSERVED)) {
+  struct xdev_ext_mech_stage_diag d = r->observed;
+
+  if (r->valid & XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION)
+   memset(&d.retention, 0, sizeof(d.retention));
+  if (memcmp(&d, &empty_diag, sizeof(d)))
+   return -EPROTO;
+ } else if (r->observed.size != sizeof(r->observed) ||
+            r->observed.version != XDEV_EXT_MECH_STAGE_DIAG_VERSION ||
+            r->observed.stage != r->failed_stage) {
+  return -EPROTO;
+ }
+ *out = *r;
+ return r->result;
+}
+
+static int session_create(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out)
 {
 	static const struct xdev_ext_mech_layout zero_layout;
 	static const __u8 zero_mac[6];
@@ -412,6 +499,8 @@ int xdev_ext_session_create(struct xdev_ext_session *s,
 	if (!o->group_bytes || !o->depth || !o->nr_stages ||
 	    o->nr_stages > XDEV_EXT_MECH_MAX_STAGES)
 		return -EINVAL;
+	if (s->retained)
+  return -EBUSY;
 	if (s->created)
 		return -EALREADY;
 	c.layout = o->layout;
@@ -453,13 +542,42 @@ int xdev_ext_session_create(struct xdev_ext_session *s,
 		if (s->pool_kind == XDEV_EXT_MECH_POOL_XSK &&
 		    c.st[i].class_id == XDEV_EXT_MECH_CLASS_AFXDP && c.st[i].fd < 0)
 			c.st[i].fd = s->xsk;
-	ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
+ if (out) {
+  struct xdev_ext_mech_create_report report = {};
+
+  ret = xdev_ext_create_report_read(s->ring, &c, &report);
+  if (report.size == sizeof(report)) {
+   *out = report;
+   if (report.cleanup == XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED)
+    s->retained = true;
+  }
+  if (ret)
+   return ret;
+  c.session_id = report.session_id;
+ } else {
+  ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
+ }
 	if (ret)
 		return ret;
 	s->id = c.session_id;
 	s->depth = o->depth;
 	s->created = true;
 	return 0;
+}
+
+int xdev_ext_session_create(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o)
+{
+ return session_create(s, o, NULL);
+}
+
+int xdev_ext_session_create_report(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out)
+{
+ if (!out)
+  return -EINVAL;
+ memset(out, 0, sizeof(*out));
+ return session_create(s, o, out);
 }
 
 static bool live(const struct xdev_ext_session *s)
@@ -741,12 +859,12 @@ int xdev_ext_session_stop(struct xdev_ext_session *s)
 
 	if (!s)
 		return -EINVAL;
+	if (s->retained)
+		return -EBUSY;
 	if (!s->created)
 		return -ENOTCONN;
 	if (s->released)
 		return 0;
-	if (s->retained)
-		return -EBUSY;
 	for (tries = 0;; tries++) {
 		ret = mech(s, XDEV_EXT_MECH_OP_STOP, s->id);
 		if (ret != -EAGAIN || tries == XDEV_EXT_STOP_RETRIES)
@@ -781,6 +899,8 @@ int xdev_ext_session_close(struct xdev_ext_session *s)
 
 	if (!s)
 		return -EINVAL;
+ if (s->retained && !s->created)
+  return -EBUSY;
 	if (s->created && !s->released) {
 		if (!s->retained) {
 			ret = xdev_ext_session_stop(s);

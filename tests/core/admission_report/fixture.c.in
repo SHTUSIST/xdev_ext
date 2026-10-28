@@ -1,0 +1,542 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Production CREATE/requester/release control flow; OS and BPF boundaries only. */
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "io_uring/xdev_ext_mech_step.h"
+#include "io_uring/xdev_ext_mech_poll.h"
+static unsigned decisions;
+#define xdev_ext_admit_decide r3_admit_rule
+#include "include/linux/xdev_ext_requester_core.h"
+#undef xdev_ext_admit_decide
+static int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *facts,__u32 flags,struct xdev_ext_admission *out)
+{ decisions++;return r3_admit_rule(facts,flags,out); }
+#include "include/uapi/linux/xdev_ext_policy.h"
+#include "wire.h"
+typedef uint32_t u32; typedef uint64_t u64;
+#define __user
+#define GFP_KERNEL 0
+#define U32_MAX UINT32_MAX
+static const void *memchr_inv(const void *,int,size_t);
+#define IS_ERR(x) ((uintptr_t)(x)>=(uintptr_t)-4095)
+#define PTR_ERR(x) ((long)(intptr_t)(x))
+#define ERR_PTR(e) ((void *)(intptr_t)(e))
+#define READ_ONCE(x) (x)
+#define smp_load_acquire(p) (*(p))
+#define spin_lock_irqsave(l,f) do { (void)(l); (f)=0; } while(0)
+#define spin_unlock_irqrestore(l,f) do { (void)(l); (void)(f); } while(0)
+#define spin_lock(x) ((void)(x))
+#define spin_unlock(x) ((void)(x))
+#define mutex_lock(x) ((void)(x))
+#define mutex_unlock(x) ((void)(x))
+#define smp_store_release(p,v) (*(p)=(v))
+#define atomic64_add(n,p) (*(p)+=(n))
+#define CAP_SYS_ADMIN 21
+#define kzalloc(n,g) calloc(1,n)
+#define kvfree free
+struct list_head { struct list_head *next, *prev; };
+static void INIT_LIST_HEAD(struct list_head *h) { h->next=h->prev=h; }
+static void publish_step_probe(struct list_head *,struct list_head *);
+static void list_add_tail(struct list_head *n,struct list_head *h)
+{ n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n;publish_step_probe(n,h); }
+#define list_first_entry_or_null(h,t,m) ((h)->next==(h)?NULL:(t *)((char *)(h)->next - offsetof(t,m)))
+#define list_add_tail_rcu list_add_tail
+static void list_del_init(struct list_head *n)
+{ n->prev->next=n->next;n->next->prev=n->prev;INIT_LIST_HEAD(n); }
+struct io_ring_ctx { struct list_head xdev_ext_mech_sessions; };
+struct device { int id; };
+struct pci_bus { unsigned number,domain; };
+struct pci_dev { struct device dev; bool untrusted; struct pci_bus *bus; unsigned devfn; };
+static struct pci_bus requester_bus={.number=0x52,.domain=7};
+static struct pci_dev requester;
+struct xdev_ext_requester_retention_stats {
+ u32 generations,retained_generations;
+ u64 reserved_bytes,retained_bytes,global_reserved_bytes,global_retained_bytes,global_limit;
+};
+static unsigned retention_samples;
+static void xdev_ext_requester_retention_snapshot(struct pci_dev *p,struct xdev_ext_requester_retention_stats *out)
+{ assert(p==&requester);retention_samples++;memset(out,0,sizeof(*out));out->global_limit=16777216; }
+static int pci_domain_nr(struct pci_bus *bus) { assert(bus==&requester_bus);return bus->domain; }
+struct file { int fd; };
+struct xdev_ext_peer_backing { struct pci_dev *owner; u32 flags; };
+struct xdev_ext_requester { struct pci_dev *pdev; struct file *authority; u64 generation; struct xdev_ext_admission adm; };
+struct xdev_ext_mech_stage;
+struct xdev_ext_comp_hooks { u32 kinds, producer_visibility; };
+struct xdev_ext_mech_class_ops {
+ int (*bind)(struct xdev_ext_mech_stage *,const struct xdev_ext_mech_stage_uapi *);
+ int (*unbind_checked)(struct xdev_ext_mech_stage *);
+ void (*unbind)(struct xdev_ext_mech_stage *);
+ bool poll;
+ union { const struct xdev_ext_comp_hooks *comp; } fam;
+};
+struct xdev_ext_mech_stage {
+ struct xdev_ext_mech_session *s; const struct xdev_ext_mech_class_ops *cls;
+ struct file *file; void *priv; u64 arg0,arg1; u32 class_id,direction,flags,index;
+ bool poll; struct xdev_ext_mech_stage_caps caps; struct xdev_ext_requester rq;
+ bool create_reporting;u32 create_phase,create_valid;
+ #ifdef XDEV_EXT_MECH_CREATE_REPORT_VERSION
+ struct xdev_ext_mech_requester_id create_requester_id;
+#else
+ struct r3_requester_id create_requester_id;
+#endif
+ struct pci_dev *create_requester;
+#ifdef XDEV_EXT_MECH_CREATE_REPORT_VERSION
+ struct xdev_ext_mech_stage_diag create_observed;
+#else
+ struct r3_stage_diag create_observed;
+#endif
+};
+struct xdev_ext_mech_pool;
+struct pool_ops { void (*release)(struct xdev_ext_mech_pool *); };
+struct xdev_ext_mech_pool { u32 kind,nr_frames; const struct pool_ops *ops; };
+struct xdev_ext_mech_batch {
+ struct list_head node;struct xdev_ext_mech_bstate bs;
+ u64 id,key;int abort_err,status;u32 present,nr_frames,bytes,life_active;
+ bool sequester,to_user,ordered_loan,fifo_accepted;
+};
+struct xdev_ext_mech_session {
+ struct io_ring_ctx *ctx; struct xdev_ext_mech_sess ss;
+ struct xdev_ext_mech_pool pool; struct file *pool_file;
+ struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
+ const void *ops[XDEV_EXT_MECH_CLASS_MAX]; bool pinned[XDEV_EXT_MECH_CLASS_MAX];
+ void *c_owner[XDEV_EXT_MECH_CLASS_MAX];
+ u64 id; u32 frames,nr_stages,nr_bound; int lock,last_err;
+ bool create_reporting,create_pending_publish;u32 create_phase,create_failed_stage;
+ struct list_head ring_node,all_node,live_node,free;u64 next_batch_id;
+ bool progress_ready,worker_gone,poll_rx,owns_life;
+ void *evfd,*worker,*start_queue,*cookies,*transform_owner,*life,*privs,*fan_batches,*batches,*cqe,*scratch,*info;
+ int retry_work,progress_work,poll_work,group_timer;
+ u64 cnt[XDEV_EXT_MECH_CNT_NR];
+};
+static int xdev_ext_mech_all_lock,xdev_ext_mech_live_lock;
+static struct list_head xdev_ext_mech_all,xdev_ext_mech_live;
+static struct io_ring_ctx ring;
+static struct pci_dev owner,requester;
+static struct file authority,stage_file;
+static struct xdev_ext_mech_session *allocated,*retained;
+static unsigned describes,premaps,refs,pci_puts,pool_frees,session_frees,quarantines,prepares,queues,copyouts;
+static bool bad_report_publication,freed_with_custody;
+static bool publication_probe,stop_during_copyout;
+static unsigned admission_attempts,admission_accepted,publication_steps,refs_at_free,inflight_at_free;
+static bool bad_partial_admission;
+static long copyout_admission_ret;
+bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *);
+static struct xdev_ext_mech_batch *xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *);
+static int distance,describe_err,premap_err,prepare_stage,checked_err,late_err,refuse_stage;
+static bool owner_known,bounce,iommu,ops_present,admin,write_fault;
+static const void *read_fault;
+static u32 backing;
+static struct xdev_ext_mech_stage_caps observed_caps;
+static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s) { return &s->pool; }
+static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p) { (void)p;return &authority; }
+static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p) { (void)p;return 29; }
+static int xdev_ext_peer_file_describe(struct file *f,struct pci_dev *p,struct xdev_ext_peer_backing *b)
+{ assert(f==&authority && p==&requester);describes++;if(describe_err)return describe_err;
+ *b=(struct xdev_ext_peer_backing){ .owner=owner_known?&owner:NULL,.flags=backing };return 0; }
+static int pci_p2pdma_distance(struct pci_dev *p,struct device *d,bool verbose)
+{ assert(p==&owner && d==&requester.dev && verbose);return distance; }
+static bool is_swiotlb_force_bounce(struct device *d) { assert(d==&requester.dev);return bounce; }
+static bool use_dma_iommu(struct device *d) { assert(d==&requester.dev);return iommu; }
+static const void *get_dma_ops(struct device *d) { assert(d==&requester.dev);return ops_present?&authority:NULL; }
+static bool capable(int cap) { assert(cap==CAP_SYS_ADMIN);return admin; }
+static int xdev_ext_peer_file_premap(struct file *f,struct pci_dev *p)
+{ assert(f==&authority && p==&requester);premaps++;return premap_err; }
+static struct pci_dev *pci_dev_get(struct pci_dev *p) { assert(p==&requester);refs++;return p; }
+static void pci_dev_put(struct pci_dev *p) { if(p){assert(p==&requester && refs);refs--;pci_puts++;} }
+/* REQUESTER */
+static int class_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_stage_uapi *u)
+{ int saved=distance; if((int)st->index==refuse_stage)distance=-1;
+ int ret=xdev_ext_requester_bind(&st->rq,st,&requester,u->flags);distance=saved;
+ st->priv=&st->rq; observed_caps=st->caps;return ret; }
+static int class_unbind_checked(struct xdev_ext_mech_stage *st) { (void)st;return checked_err; }
+static void class_unbind(struct xdev_ext_mech_stage *st) { xdev_ext_requester_unbind(&st->rq);if(late_err)st->s->last_err=late_err; }
+static const struct xdev_ext_mech_class_ops net_class={ .bind=class_bind,.unbind_checked=class_unbind_checked,.unbind=class_unbind };
+static const struct xdev_ext_mech_class_ops *xdev_ext_mech_class_get(u32 id)
+{ return id==XDEV_EXT_MECH_CLASS_NET?&net_class:NULL; }
+static int token;
+static const void *xdev_ext_mech_ops_get(u32 id,bool *p,void **m) { (void)id;*p=false;*m=NULL;return &token; }
+static int xdev_ext_mech_session_buffers(struct xdev_ext_mech_session *s)
+{ s->batches=calloc(1,sizeof(struct xdev_ext_mech_batch));if(!s->batches)return -ENOMEM;
+ list_add_tail(&((struct xdev_ext_mech_batch *)s->batches)->node,&s->free);return 0; }
+static bool xdev_ext_mech_ops_current(u32 id,const void *ops,bool pinned)
+{ assert(id<XDEV_EXT_MECH_CLASS_MAX && ops==&token && !pinned);return true; }
+static void *eventfd_ctx_fdget(int fd) { (void)fd;return &token; }
+#define kthread_run_worker(...) (&token)
+static void pool_release(struct xdev_ext_mech_pool *p) { (void)p;pool_frees++; }
+static const struct pool_ops pool_operations={ .release=pool_release };
+static int xdev_ext_mech_pool_bind(struct xdev_ext_mech_session *s,const struct xdev_ext_mech_create *c)
+{ s->pool=(struct xdev_ext_mech_pool){.kind=c->pool_kind,.nr_frames=4,.ops=&pool_operations};return 0; }
+static struct file *fget(int fd) { return fd>=0?&stage_file:NULL; }
+/* BPF PREPARE invocation boundary, not a second implementation of PREPARE. */
+static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s,struct xdev_ext_mech_stage *st)
+{ assert(st->s==s);prepares++;return (int)st->index==prepare_stage?-EACCES:0; }
+static bool xdev_ext_mech_rx_first(struct xdev_ext_mech_session *s) { return s->st[0].direction==XDEV_EXT_MECH_DIR_FROM_DEVICE; }
+/* BIND */
+static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s)
+{ assert(!retained);retained=s;quarantines++; }
+static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,struct xdev_ext_mech_stats *o) { (void)s;(void)o;abort(); }
+static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,struct xdev_ext_mech_transport_stats_v4 *o,u32 v) { (void)s;(void)o;(void)v;abort(); }
+static void kthread_cancel_delayed_work_sync(void *w) { (void)w; }
+static void synchronize_rcu(void) {}
+static void kthread_flush_worker(void *w) { (void)w;abort(); }
+static void kthread_destroy_worker(void *w) { (void)w; }
+static void timer_shutdown_sync(void *t) { (void)t; }
+static void fput(struct file *f) { (void)f; }
+static void xdev_ext_mech_class_put(const struct xdev_ext_mech_class_ops *c) { (void)c; }
+static void eventfd_ctx_put(void *e) { (void)e; }
+static void xdev_ext_mech_ops_put(const void *o,bool p,void *m) { (void)o;(void)p;(void)m; }
+static void xdev_ext_mech_start_queue_free(void *q) { assert(!q); }
+static void record_free(void *p) { if(p==allocated){session_frees++;refs_at_free=((struct xdev_ext_mech_session *)p)->ss.refs;inflight_at_free=((struct xdev_ext_mech_session *)p)->ss.inflight;freed_with_custody=((struct xdev_ext_mech_session *)p)->ss.inflight!=0 || ((struct xdev_ext_mech_session *)p)->ss.refs!=1;allocated=NULL;memset(p,0xa5,sizeof(struct xdev_ext_mech_session));}free(p); }
+#define kfree record_free
+/* RELEASE */
+static bool xdev_ext_mech_ready(void) { return true; }
+static int copy_from_user(void *d,const void *s,size_t n) { if(s==read_fault)return 1;memcpy(d,s,n);return 0; }
+static int copy_to_user(void *d,const void *s,size_t n) {
+ copyouts++;
+ if(n==496 && allocated) {
+  struct xdev_ext_mech_batch *b=xdev_ext_mech_batch_get_locked(allocated);
+  admission_attempts++;
+  if(IS_ERR(b))copyout_admission_ret=PTR_ERR(b);
+  else {copyout_admission_ret=0;admission_accepted++;}
+  if(stop_during_copyout){xdev_ext_mech_sess_stop(&allocated->ss);allocated->last_err=-ENOLINK;}
+ }
+ if(n==496 && allocated && (allocated->progress_ready || ring.xdev_ext_mech_sessions.next!=&ring.xdev_ext_mech_sessions))bad_report_publication=true;
+ if(write_fault)return 1;
+ memcpy(d,s,n);return 0;
+}
+#define put_user(v,p) (write_fault ? 1 : (*(p)=(v),0))
+static void xdev_ext_mech_session_init(struct xdev_ext_mech_session *s,struct io_ring_ctx *ctx,const struct xdev_ext_mech_create *c,u32 f)
+{ allocated=s;s->ctx=ctx;s->nr_stages=c->nr_stages;s->frames=f;s->id=117;
+ INIT_LIST_HEAD(&s->ring_node);INIT_LIST_HEAD(&s->all_node);INIT_LIST_HEAD(&s->live_node);INIT_LIST_HEAD(&s->free);
+ xdev_ext_mech_sess_init(&s->ss);s->ss.state=XDEV_EXT_MECH_SESSION_NONE; }
+static int xdev_ext_mech_stop_reason(struct xdev_ext_mech_session *s) { return s->last_err?s->last_err:-ECANCELED; }
+static void kthread_queue_delayed_work(void *w,void *d,int delay) { (void)w;(void)d;(void)delay;queues++; }
+static bool trace_native_event_enabled(void) { return false; }
+struct xdev_ext_native_event { const char *phase,*origin;u64 session_id,cookie,bytes,origin_tgid,process_start_ticks;int accepted; };
+struct task { struct task *group_leader;u64 start_boottime; };
+static struct task task_object,*current=&task_object;
+static int task_tgid_nr(struct task *t) { (void)t;return 1; }
+static u64 nsec_to_clock_t(u64 n) { return n; }
+static void trace_native_event(struct xdev_ext_native_event *e) { (void)e;abort(); }
+/* ADMITS */
+/* BATCH_GET */
+static void publish_step_probe(struct list_head *node,struct list_head *head)
+{
+ (void)head;
+ if(!publication_probe || !allocated ||
+    (node!=&allocated->ring_node && node!=&allocated->all_node && node!=&allocated->live_node))return;
+ publication_steps++;
+ struct xdev_ext_mech_batch *b=xdev_ext_mech_batch_get_locked(allocated);
+ if(!IS_ERR(b) || PTR_ERR(b)!=-ESHUTDOWN)bad_partial_admission=true;
+}
+static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s,int e) { xdev_ext_mech_sess_stop(&s->ss);if(!s->last_err)s->last_err=e; }
+static void xdev_ext_mech_poll_kick(struct xdev_ext_mech_session *s) { (void)s; }
+/* CREATE */
+static const void *memchr_inv(const void *p,int c,size_t n)
+{ const unsigned char *b=p;for(size_t i=0;i<n;i++)if(b[i]!=(unsigned char)c)return b+i;return NULL; }
+static struct xdev_ext_mech_session *xdev_ext_mech_find(struct io_ring_ctx *ctx,u64 id)
+{ assert(ctx==&ring);if(ring.xdev_ext_mech_sessions.next==&ring.xdev_ext_mech_sessions)return NULL;
+ return allocated && id==allocated->id?allocated:NULL; }
+/* CAPS */
+#define u64_to_user_ptr(x) ((void *)(uintptr_t)(x))
+static int xdev_ext_mech_start(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
+static int xdev_ext_mech_stop_op(struct io_ring_ctx *c,u64 id) { (void)c;(void)id;abort(); }
+static int xdev_ext_mech_stop_report_op(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
+static int xdev_ext_mech_stats(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
+static int xdev_ext_mech_notify_arm_op(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
+static int xdev_ext_mech_transport_stats(struct io_ring_ctx *c,void *p) { (void)c;(void)p;abort(); }
+static int xdev_ext_mech_user_stage_create(void *p) { (void)p;abort(); }
+/* DISPATCH */
+
+static struct xdev_ext_mech_create request(void)
+{
+ return (struct xdev_ext_mech_create){ .abi_version=XDEV_EXT_MECH_ABI_VERSION,
+ .nr_stages=1,.pool_kind=XDEV_EXT_MECH_POOL_PEER,.pool_fd=3,
+ .layout={.frame_size=65536,.seg_len=65536,.group_bytes=65536},.depth=1,.eventfd=-1,
+ .st={{.class_id=XDEV_EXT_MECH_CLASS_NET,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=4}} };
+}
+static void reset(void)
+{
+ assert(!allocated && !retained && !refs);
+ INIT_LIST_HEAD(&ring.xdev_ext_mech_sessions);INIT_LIST_HEAD(&xdev_ext_mech_all);INIT_LIST_HEAD(&xdev_ext_mech_live);
+ retention_samples=decisions=describes=premaps=pci_puts=pool_frees=session_frees=quarantines=prepares=queues=copyouts=0;bad_report_publication=freed_with_custody=publication_probe=stop_during_copyout=bad_partial_admission=false;admission_attempts=admission_accepted=publication_steps=refs_at_free=inflight_at_free=0;copyout_admission_ret=0;
+ distance=3;describe_err=premap_err=checked_err=late_err=0;prepare_stage=refuse_stage=-1;
+ owner_known=true;bounce=iommu=ops_present=admin=write_fault=false;read_fault=NULL;
+ backing=XDEV_EXT_PEER_BACKING_MMIO_BAR;requester.untrusted=false;requester.bus=&requester_bus;requester.devfn=0x19;
+ memset(&observed_caps,0,sizeof(observed_caps));
+}
+static bool published(void)
+{ return ring.xdev_ext_mech_sessions.next!=&ring.xdev_ext_mech_sessions; }
+#define CHECK(c) do { if(!(c)){fprintf(stderr,"not ok line %d: %s\n",__LINE__,#c);return 1;} } while(0)
+static int controls(void)
+{
+ struct xdev_ext_mech_create c;
+ /* Independent literals: one refusal reason changes at a time. */
+ static const struct { const char *name; u32 refusal; } v[]={
+ {"no_topology",1U},{"swiotlb",1U<<1},{"untrusted",1U<<2},
+ {"raw_iommu",1U<<3},{"raw_dma_ops",1U<<3},{"owner_missing",(1U<<4)|1U},
+ {"non_bar",1U<<4},{"unknown_backing",1U<<4},{"external",1U<<5}};
+ for(unsigned i=0;i<sizeof(v)/sizeof(v[0]);i++) {
+  reset();c=request();
+  switch(i){case 0:distance=-1;break;case 1:bounce=true;break;case 2:requester.untrusted=true;break;
+   case 3:backing|=XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR;iommu=true;break;
+   case 4:backing|=XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR;ops_present=true;break;
+   case 5:owner_known=false;break;case 6:backing=0;break;
+   case 7:backing|=0x80000000U;break;case 8:backing|=XDEV_EXT_PEER_BACKING_EXTERNAL;break;}
+  int ret=xdev_ext_mech_create(&ring,&c);
+  if(ret!=-EXDEV || observed_caps.refused!=v[i].refusal) {
+   fprintf(stderr,"refusal %s actual result=%d refused=%u expected=-18/%u\n",v[i].name,ret,observed_caps.refused,v[i].refusal);return 1;
+  }
+  CHECK(describes==1 && decisions==1 && !premaps && !prepares && !refs && pool_frees==1 && session_frees==1 && !published() && !queues);
+  printf("PASS refusal_%s result=%d refused=%u describes=%u premaps=%u freed=%u\n",v[i].name,ret,observed_caps.refused,describes,premaps,session_frees);
+ }
+ for(int stage=0;stage<2;stage++) {
+  reset();c=request();if(stage){c.nr_stages=2;c.st[1]=c.st[0];}
+  refuse_stage=stage;
+  CHECK(xdev_ext_mech_create(&ring,&c)==-EXDEV && observed_caps.refused==1);
+  CHECK(describes==(unsigned)stage+1 && premaps==(unsigned)stage && pci_puts==(unsigned)stage && !refs);
+  CHECK(session_frees==1 && pool_frees==1 && !published() && !queues);
+  printf("PASS bind_stage_%d requester refusal released exactly once\n",stage);
+ }
+ reset();c=request();describe_err=-EIO;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EIO && describes==1 && !decisions && !premaps && !observed_caps.refused && session_frees==1);
+ puts("PASS describe_error original errno retained without mapping");
+ reset();c=request();describe_err=-EOPNOTSUPP;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EXDEV && describes==1 && decisions==1 && !premaps && observed_caps.backing==0 && observed_caps.refused==17);
+ puts("PASS describe_unsupported real decision refuses unknown backing");
+ reset();c=request();premap_err=-EIO;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EIO && describes==1 && decisions==1 && premaps==1 && !refs);
+ CHECK(observed_caps.reachability==XDEV_EXT_CAP_TOPOLOGY_PASSED && !observed_caps.refused && observed_caps.requester_mapping==XDEV_EXT_CAP_UNKNOWN);
+ puts("PASS premap_error decision facts remain but mapping unknown");
+ for(int stage=0;stage<2;stage++) {
+  reset();c=request();if(stage){c.nr_stages=2;c.st[1]=c.st[0];}
+  prepare_stage=stage;
+  CHECK(xdev_ext_mech_create(&ring,&c)==-EACCES && prepares==(unsigned)stage+1);
+  CHECK(describes==c.nr_stages && premaps==c.nr_stages && pci_puts==c.nr_stages && !refs && session_frees==1 && !published());
+  printf("PASS prepare_stage_%d actual bind/prepare/release executed\n",stage);
+ }
+ reset();c=request();
+ CHECK(!xdev_ext_mech_create(&ring,&c) && published() && allocated && queues==1);
+ list_del_init(&allocated->ring_node);list_del_init(&allocated->all_node);late_err=-EIO;
+ CHECK(xdev_ext_mech_session_release(allocated)==-EIO && !allocated && session_frees==1 && pool_frees==1 && !refs && !quarantines);
+ puts("PASS actual_release_returns_EIO_while_freed disposition cannot derive from errno");
+ reset();c=request();prepare_stage=0;late_err=-EIO;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EACCES && session_frees==1 && pool_frees==1 && !quarantines && !refs);
+ puts("PASS release_error_with_free primary CREATE errno unchanged");
+ reset();c=request();prepare_stage=0;checked_err=-EIO;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EACCES && retained && !session_frees && !pool_frees && quarantines==1 && refs==1 && !published());
+ CHECK(retained->ss.state==XDEV_EXT_MECH_SESSION_ZOMBIE && !retained->progress_ready);
+ puts("PASS unknown_checked_unbind retains session pool and requester ref with zero delivered ID");
+ /* Fixture cleanup only after explicitly resolving the injected unknown. */
+ {struct xdev_ext_mech_session *s=retained;retained=NULL;checked_err=0;CHECK(xdev_ext_mech_session_release(s)==-EIO);}
+ CHECK(session_frees==1 && pool_frees==1 && !refs);
+ reset();c=request();write_fault=true;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EFAULT && !published() && !queues && session_frees==1 && pool_frees==1 && !refs);
+ puts("PASS legacy_copyout_fault rolls back once without publication or progress");
+ reset();c=request();c.abi_version=0;
+ CHECK(xdev_ext_mech_create(&ring,&c)==-EINVAL && !describes && !premaps && !session_frees);
+ puts("PASS create_check rejects before device operations");
+ return 0;
+}
+static int legacy_value_gap(void)
+{
+ struct xdev_ext_mech_create c=request();
+ struct xdev_ext_mech_stage_caps caps={.size=64,.version=1};
+ reset();distance=-1;
+ int ret=xdev_ext_mech_create(&ring,&c);
+ caps.session_id=c.session_id;
+ int queried=xdev_ext_mech_stage_caps_op(&ring,&caps);
+ CHECK(ret==-EXDEV && observed_caps.refused==1 && !premaps && session_frees==1 && c.session_id==0 && queried==-ENOENT);
+ printf("PASS legacy_value_gap CREATE=%d actual_refused=%u delivered_id=%llu session_frees=%u STAGE_CAPS=%d caller_refused=%u\n",
+ ret,observed_caps.refused,(unsigned long long)c.session_id,session_frees,queried,caps.refused);
+ return 0;
+}
+static int report_case(const char *name)
+{
+ struct r3_create_with_report envelope={.size=496,.version=1,.create=request()};
+ struct io_uring_xdev_ext_mech reg={.op=10,.arg=(uintptr_t)&envelope};
+ int want_result=-EXDEV,want_rollback=0;u32 want_stage=0,want_phase=12,want_cleanup=1,want_refused=1;
+ unsigned want_describes=1,want_premaps=0,want_puts=1;
+ reset();distance=-1;
+ if(!strcmp(name,"swiotlb")){distance=3;bounce=true;want_refused=2;}
+ else if(!strcmp(name,"untrusted")){distance=3;requester.untrusted=true;want_refused=4;}
+ else if(!strcmp(name,"raw_iommu")){distance=3;backing|=XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR;iommu=true;want_refused=8;}
+ else if(!strcmp(name,"raw_dma_ops")){distance=3;backing|=XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR;ops_present=true;want_refused=8;}
+ else if(!strcmp(name,"owner_missing")){owner_known=false;want_refused=17;}
+ else if(!strcmp(name,"non_bar")){distance=3;backing=0;want_refused=16;}
+ else if(!strcmp(name,"unknown_backing")){distance=3;backing|=0x80000000U;want_refused=16;}
+ else if(!strcmp(name,"external")){distance=3;backing|=XDEV_EXT_PEER_BACKING_EXTERNAL;want_refused=32;}
+ else if(!strcmp(name,"describe_unsupported")){describe_err=-EOPNOTSUPP;want_refused=17;}
+ else if(!strcmp(name,"success")){distance=3;want_result=0;want_phase=0;want_stage=UINT32_MAX;want_cleanup=0;want_refused=0;want_premaps=1;want_puts=1;}
+ else if(!strcmp(name,"bind1")) { envelope.create.nr_stages=2;envelope.create.st[1]=envelope.create.st[0];distance=3;refuse_stage=1;want_stage=1;want_describes=2;want_premaps=1;want_puts=3; }
+ else if(!strcmp(name,"prepare0") || !strcmp(name,"prepare1") || !strcmp(name,"unknown") || !strcmp(name,"released_error")) {
+  distance=3;prepare_stage=!strcmp(name,"prepare1")?1:0;
+  if(prepare_stage){envelope.create.nr_stages=2;envelope.create.st[1]=envelope.create.st[0];}
+  want_result=-EACCES;want_refused=0;want_phase=14;want_stage=prepare_stage;want_premaps=want_describes=envelope.create.nr_stages;want_puts=prepare_stage?4:2;
+  if(!strcmp(name,"unknown")){checked_err=-EIO;want_rollback=-EIO;want_cleanup=2;want_puts=1;}
+  if(!strcmp(name,"released_error")){late_err=-EIO;want_rollback=-EIO;}
+ } else if(!strcmp(name,"describe")){describe_err=-EIO;want_result=-EIO;want_refused=0;want_phase=11;}
+ else if(!strcmp(name,"premap")){distance=3;premap_err=-EIO;want_result=-EIO;want_refused=0;want_phase=13;want_premaps=1;}
+ else if(!strcmp(name,"copyout_success")){distance=3;write_fault=true;want_premaps=1;want_puts=2;}
+ else if(!strcmp(name,"copyout_failure")){write_fault=true;}
+ else if(!strcmp(name,"check")){envelope.create.abi_version=0;want_result=-EINVAL;want_phase=1;want_stage=UINT32_MAX;want_cleanup=0;want_refused=0;want_describes=0;want_puts=0;}
+ else if(strcmp(name,"bind0"))return 2;
+ int ret=io_xdev_ext_mech_register(&ring,&reg,1);
+ if(!strncmp(name,"copyout_",8)) {
+  if(ret!=-EFAULT){fprintf(stderr,"not ok - actual report %s returned %d expected EFAULT\n",name,ret);return 1;}
+  CHECK(session_frees==1 && pool_frees==1 && !published() && !queues && !refs && !freed_with_custody);
+  if(want_premaps)CHECK(admission_attempts==1 && !admission_accepted && copyout_admission_ret==-ESHUTDOWN);
+  CHECK(describes==1 && premaps==want_premaps && pci_puts==want_puts && copyouts==1 && !bad_report_publication);
+  printf("PASS report_%s rollback exactly once and no publication\n",name);return 0;
+ }
+ if(ret) {
+  fprintf(stderr,"not ok - actual CREATE_REPORT %s dispatch returned %d; expected delivered report result=%d phase=%u stage=%u cleanup=%u refused=%u\n",name,ret,want_result,want_phase,want_stage,want_cleanup,want_refused);
+  return 1;
+ }
+ if(!strcmp(name,"success")) {
+  CHECK(envelope.report.size==288 && envelope.report.version==1 && !envelope.report.result && !envelope.report.phase && envelope.report.session_id==117);
+  CHECK(published() && allocated && allocated->progress_ready && queues==1 && !bad_report_publication);
+  CHECK(describes==1 && decisions==1 && premaps==1 && refs==1 && pci_puts==1 && !session_frees && !pool_frees && copyouts==1);
+  CHECK(admission_attempts==1 && !admission_accepted && copyout_admission_ret==-ESHUTDOWN);
+  struct xdev_ext_mech_batch *b=xdev_ext_mech_batch_get_locked(allocated);
+  CHECK(!IS_ERR(b) && allocated->ss.refs==2 && allocated->ss.inflight==1);
+  CHECK(!xdev_ext_mech_sess_batch_end(&allocated->ss,false));
+  list_add_tail(&b->node,&allocated->free);
+  struct r3_create_report saved=envelope.report;
+  list_del_init(&allocated->ring_node);list_del_init(&allocated->all_node);
+  CHECK(!xdev_ext_mech_session_release(allocated) && session_frees==1 && pool_frees==1 && !refs && pci_puts==2);
+  memset(&ring,0xa5,sizeof(ring));
+  CHECK(!memcmp(&saved,&envelope.report,sizeof(saved)));
+  puts("PASS report_success copyout precedes publication and report survives release/ring destruction");return 0;
+ }
+ CHECK(envelope.report.size==288 && envelope.report.version==1);
+ CHECK(envelope.report.result==want_result && envelope.report.rollback_errno==want_rollback && envelope.report.session_id==0);
+ CHECK(envelope.report.failed_stage==want_stage && envelope.report.phase==want_phase);
+ CHECK(envelope.report.caps.refused==want_refused && envelope.report.cleanup==want_cleanup);
+ CHECK(envelope.report.caps.session_id==0 && envelope.report.observed.session_id==0);
+ CHECK(describes==want_describes && decisions==(want_phase==11?0:want_describes) && premaps==want_premaps && pci_puts==want_puts && !published() && !queues && !bad_report_publication);
+ if(want_describes) {
+  CHECK((envelope.report.valid&1)==1);
+  CHECK(envelope.report.requester.domain==7 && envelope.report.requester.bus==0x52 && envelope.report.requester.devfn==0x19 && envelope.report.requester.rsvd==0);
+ }
+ struct r3_create_report saved=envelope.report;
+ if(want_phase==12 || want_phase==13)CHECK((envelope.report.valid&12)==12);
+ if(want_phase==11)CHECK(!(envelope.report.valid&4));
+ if(want_phase==13)CHECK(envelope.report.caps.requester_mapping==XDEV_EXT_CAP_UNKNOWN);
+ if(want_cleanup==1)CHECK(session_frees==1 && pool_frees==1 && !refs && !retained);
+ if(want_cleanup==2){
+  CHECK(retained && session_frees==0 && pool_frees==0 && refs==1);
+  struct xdev_ext_mech_session *held=retained;retained=NULL;checked_err=0;
+  CHECK(xdev_ext_mech_session_release(held)==-EIO);
+ }
+ memset(&observed_caps,0xa5,sizeof(observed_caps));
+ INIT_LIST_HEAD(&ring.xdev_ext_mech_sessions);
+ CHECK(!memcmp(&saved,&envelope.report,sizeof(saved)));
+ printf("PASS report_%s result=%d phase=%u stage=%u cleanup=%u\n",name,want_result,want_phase,want_stage,want_cleanup);
+ return 0;
+}
+static int publication_case(const char *name)
+{
+ struct r3_create_with_report e={.size=496,.version=1,.create=request()};
+ struct io_uring_xdev_ext_mech reg={.op=10,.arg=(uintptr_t)&e};
+ reset();publication_probe=true;
+ bool copyfault=!strcmp(name,"copyfault"),stopped=!strcmp(name,"stop");
+ write_fault=copyfault;stop_during_copyout=stopped;
+ int ret=io_xdev_ext_mech_register(&ring,&reg,1);
+ printf("OBSERVED publication_%s syscall=%d copyout_admission=%ld accepted=%u list_steps=%u refs_at_free=%u inflight_at_free=%u\n",name,ret,copyout_admission_ret,admission_accepted,publication_steps,refs_at_free,inflight_at_free);
+ if(copyfault) {
+  CHECK(ret==-EFAULT && admission_attempts==1 && !admission_accepted && copyout_admission_ret==-ESHUTDOWN);
+  CHECK(!publication_steps && !bad_partial_admission && !bad_report_publication && !published());
+  CHECK(!freed_with_custody && !allocated && !retained && !refs && pci_puts==2 && pool_frees==1 && session_frees==1);
+  puts("PASS publication_copyfault real batch admission refused before rollback without custody/free leak");return 0;
+ }
+ CHECK(!ret && e.report.size==288 && !e.report.result && e.report.session_id==117);
+ CHECK(admission_attempts==1 && !admission_accepted && copyout_admission_ret==-ESHUTDOWN);
+ CHECK(publication_steps==3 && !bad_partial_admission && !bad_report_publication && published());
+ CHECK(allocated && !allocated->create_pending_publish && allocated->progress_ready);
+ CHECK(allocated->ring_node.next!=&allocated->ring_node && allocated->all_node.next!=&allocated->all_node && allocated->live_node.next!=&allocated->live_node);
+ CHECK(allocated->ss.refs==1 && !allocated->ss.inflight && refs==1 && pci_puts==1);
+ struct xdev_ext_mech_batch *b=xdev_ext_mech_batch_get_locked(allocated);
+ if(stopped) {
+  CHECK(allocated->ss.state==XDEV_EXT_MECH_SESSION_STOPPING);
+  CHECK(IS_ERR(b) && PTR_ERR(b)==-ESHUTDOWN && allocated->ss.refs==1 && !allocated->ss.inflight);
+ } else {
+  CHECK(!IS_ERR(b) && allocated->ss.refs==2 && allocated->ss.inflight==1);
+  CHECK(!xdev_ext_mech_sess_batch_end(&allocated->ss,false));
+  list_add_tail(&b->node,&allocated->free);
+ }
+ struct r3_create_report saved=e.report;
+ list_del_init(&allocated->ring_node);list_del_init(&allocated->all_node);
+ int released=xdev_ext_mech_session_release(allocated);
+ CHECK(released==(stopped?-ENOLINK:0));
+ CHECK(!allocated && !retained && !refs && pci_puts==2 && pool_frees==1 && session_frees==1 && !freed_with_custody);
+ CHECK(!memcmp(&saved,&e.report,sizeof(saved)));
+ printf("PASS publication_%s all three lists precede admission; delivered ID survives concurrent STOP\n",name);
+ return 0;
+}
+static int legacy_publication(void)
+{
+ struct xdev_ext_mech_create c=request();
+ reset();
+ CHECK(!xdev_ext_mech_create(&ring,&c) && c.session_id==117 && published());
+ CHECK(!allocated->create_pending_publish && allocated->progress_ready && !admission_attempts && !copyouts);
+ struct xdev_ext_mech_batch *b=xdev_ext_mech_batch_get_locked(allocated);
+ CHECK(!IS_ERR(b) && allocated->ss.refs==2 && allocated->ss.inflight==1);
+ CHECK(!xdev_ext_mech_sess_batch_end(&allocated->ss,false));
+ list_add_tail(&b->node,&allocated->free);
+ list_del_init(&allocated->ring_node);list_del_init(&allocated->all_node);
+ CHECK(!xdev_ext_mech_session_release(allocated) && !allocated && !refs && !freed_with_custody);
+ puts("PASS legacy_publication old CREATE delivers ID and admits batches without report gate");
+ return 0;
+}
+static int report_schema(void)
+{
+ int gate=report_case("bind0");if(gate)return gate;
+ for(unsigned i=0;i<sizeof(struct r3_create_report)+4;i++) {
+  struct r3_create_with_report e={.size=496,.version=1,.create=request()};
+  struct io_uring_xdev_ext_mech reg={.op=10,.arg=(uintptr_t)&e};
+  int want=-EINVAL;
+  reset();
+  if(i<sizeof(e.report))((unsigned char *)&e.report)[i]=1;
+  else switch(i-sizeof(e.report)) {
+   case 0:e.size--;break;
+   case 1:e.version=2;want=-EOPNOTSUPP;break;
+   case 2:e.create.session_id=117;break;
+   case 3:read_fault=&e;want=-EFAULT;break;
+  }
+  CHECK(io_xdev_ext_mech_register(&ring,&reg,1)==want);
+  CHECK(!describes && !decisions && !premaps && !session_frees && !refs && !copyouts);
+ }
+ puts("PASS report_schema all output bytes/size/version/id/read fault reject before allocation/device/BPF");
+ return 0;
+}
+static int abi_compatibility(void)
+{
+ CHECK(XDEV_EXT_MECH_OP_CREATE==1 && XDEV_EXT_MECH_OP_STAGE_CAPS==8 && XDEV_EXT_MECH_OP_STOP_REPORT==9);
+ CHECK(sizeof(struct xdev_ext_mech_create)==200 && offsetof(struct xdev_ext_mech_create,session_id)==192);
+ CHECK(sizeof(struct xdev_ext_mech_stage_caps)==64 && offsetof(struct xdev_ext_mech_stage_caps,refused)==60);
+ CHECK(sizeof(struct r3_retention_diag)==48 && sizeof(struct r3_stage_diag)==168);
+ CHECK(sizeof(struct r3_create_report)==288 && offsetof(struct r3_create_report,session_id)==32);
+ CHECK(offsetof(struct r3_create_report,requester)==40 && offsetof(struct r3_create_report,caps)==56);
+ CHECK(offsetof(struct r3_create_report,observed)==120);
+ CHECK(sizeof(struct r3_create_with_report)==496 && offsetof(struct r3_create_with_report,report)==208);
+ puts("PASS ABI old CREATE/caps and independent v1 envelope sizes/offsets");
+ return 0;
+}
+int main(int argc,char **argv)
+{
+ if(argc!=2)return 2;
+ if(!strcmp(argv[1],"controls"))return controls();
+ if(!strcmp(argv[1],"legacy_value_gap"))return legacy_value_gap();
+ if(!strcmp(argv[1],"legacy_publication"))return legacy_publication();
+ if(!strncmp(argv[1],"publication_",12))return publication_case(argv[1]+12);
+ if(!strcmp(argv[1],"report_schema"))return report_schema();
+ if(!strncmp(argv[1],"report_",7))return report_case(argv[1]+7);
+ if(!strcmp(argv[1],"abi"))return abi_compatibility();
+ return 2;
+}

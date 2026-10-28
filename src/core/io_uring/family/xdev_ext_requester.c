@@ -42,11 +42,25 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 
 	if (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)
 		return -EINVAL;
+ if (st->create_reporting) {
+  st->create_requester = pci_dev_get(pdev);
+  st->create_requester_id = (struct xdev_ext_mech_requester_id) {
+   .domain = pci_domain_nr(pdev->bus), .bus = pdev->bus->number,
+   .devfn = pdev->devfn,
+  };
+  st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_REQUESTER;
+  st->create_phase = XDEV_EXT_MECH_CREATE_REQUESTER_DESCRIBE;
+ }
 	rq->authority = xdev_ext_peer_mech_pool_file(pool);
 	rq->generation = xdev_ext_peer_mech_pool_generation(pool);
 	ret = xdev_ext_peer_file_describe(rq->authority, pdev, &back);
 	if (ret && ret != -EOPNOTSUPP)
 		return ret;
+ if (st->create_reporting) {
+  if (!ret)
+   st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_DESCRIBED;
+  st->create_phase = XDEV_EXT_MECH_CREATE_REQUESTER_DECIDE;
+ }
 	f.backing = ret ? 0 : back.flags;
 	f.owner_known = !ret && back.owner;
 	if (f.owner_known)
@@ -57,12 +71,16 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 	f.dma_ops = get_dma_ops(&pdev->dev) != NULL;
 	f.admin = capable(CAP_SYS_ADMIN);
 	ret = xdev_ext_admit_decide(&f, admit_flags, &rq->adm);
+ if (st->create_reporting)
+  st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_DECIDED;
 	st->caps.reachability = rq->adm.reachability;
 	st->caps.p2p_distance = rq->adm.distance;
 	st->caps.backing = rq->adm.backing;
 	st->caps.refused = rq->adm.refused;
 	if (ret)
 		return ret;
+ if (st->create_reporting)
+  st->create_phase = XDEV_EXT_MECH_CREATE_REQUESTER_PREMAP;
 	ret = xdev_ext_peer_file_premap(rq->authority, pdev);
 	if (ret)
 		return ret;

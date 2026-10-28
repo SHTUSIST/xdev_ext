@@ -331,6 +331,8 @@ static int ctl_transport_counters(int ring, __u64 session,
 
 /* --poll: every stage of every session this run creates. */
 static bool ctl_poll_all;
+static bool ctl_diagnostics;
+static bool ctl_create_retained;
 
 static int ctl_create(int ring, struct xdev_ext_mech_create *c, __u64 *session)
 {
@@ -344,7 +346,29 @@ static int ctl_create(int ring, struct xdev_ext_mech_create *c, __u64 *session)
 		if (xdev_ext_mech_ctl_poll_line(line, sizeof(line), c->nr_stages))
 			fputs(line, stdout);
 	}
-	ret = ctl_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)c);
+ if (ctl_diagnostics) {
+  struct xdev_ext_mech_create_report report = {};
+
+  ret = xdev_ext_create_report_read(ring, c, &report);
+  if (ret) {
+   if (!report.size)
+    fprintf(stderr, "diagnostics=unavailable error=%d\n", ret);
+   else
+    fprintf(stderr, "diagnostics result=%d rollback_errno=%d phase=%u stage=%u cleanup=%u valid=%u requester=%04x:%02x:%02x.%u reachability=%u refused=%u\n",
+     report.result, report.rollback_errno, report.phase, report.failed_stage,
+     report.cleanup, report.valid, report.requester.domain, report.requester.bus,
+     report.requester.devfn >> 3, report.requester.devfn & 7,
+     report.caps.reachability, report.caps.refused);
+   if (report.size && report.cleanup == XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED) {
+    ctl_create_retained = true;
+    fputs("diagnostics retained=kernel-quarantine fd-close-does-not-release-dma\n", stderr);
+   }
+  } else {
+   c->session_id = report.session_id;
+  }
+ } else {
+  ret = ctl_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)c);
+ }
 	if (!ret)
 		*session = c->session_id;
 	return ret;
@@ -1216,7 +1240,14 @@ static int ctl_cuda_open(struct xdev_ext_mech_cuda *cuda, struct ctl_opts *o, in
 static int ctl_cuda_close(struct xdev_ext_mech_cuda *cuda, const struct ctl_opts *o,
 			  int verdict)
 {
-	int ret = xdev_ext_mech_cuda_close(cuda);
+ int ret;
+
+ if (ctl_create_retained) {
+  if (o->ce_alloc)
+   fputs("CUDA allocation=native released=no retained=kernel-quarantine\n", stderr);
+  return verdict;
+ }
+ ret = xdev_ext_mech_cuda_close(cuda);
 
 	if (o->ce_alloc)
 		printf("CUDA allocation=native released=%s\n",
@@ -2038,7 +2069,7 @@ enum {
  OPT_VERIFY_DST_OFF, OPT_VERIFY_BYTES, OPT_VERIFY_SEG,
  OPT_REL_WINDOW, OPT_REL_INITIAL_CREDIT, OPT_REL_RTO_US, OPT_REL_RTO_MAX_US,
  OPT_REL_BACKOFF, OPT_REL_MAX_ATTEMPTS, OPT_REL_ACK_EVERY, OPT_REL_ACK_DELAY_US,
- OPT_REL_ACK_RULE, OPT_REL_RESEND_ORDER, OPT_POLL,
+ OPT_REL_ACK_RULE, OPT_REL_RESEND_ORDER, OPT_POLL, OPT_DIAGNOSTICS,
 };
 
 static const struct option ctl_options[] = {
@@ -2108,6 +2139,7 @@ static const struct option ctl_options[] = {
 	{ "expect-timeout", no_argument, NULL, OPT_EXPECT_TIMEOUT },
 	{ "quiet-wait", no_argument, NULL, OPT_QUIET_WAIT },
 	{ "poll", no_argument, NULL, OPT_POLL },
+ { "diagnostics", no_argument, NULL, OPT_DIAGNOSTICS },
 	{ "help", no_argument, NULL, 'h' },
 	{ NULL, 0, NULL, 0 },
 };
@@ -2148,6 +2180,7 @@ static void usage(FILE *f)
 "COMMON: [--groups N] [--depth N] [--group-bytes N] [--mtu N]\n"
 "        [--timeout-ms N] [--copy] [--nic-fallback auto|off|force] [--poll]\n"
 "        auto: socket on ZC refusal; off: require ZC; force: socket (NXP2; reliable mode refused)\n"
+"        --diagnostics: request an explicit CREATE admission value report\n"
 "        --poll: the session worker polls every stage; CREATE fails if one cannot be polled\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
@@ -2373,6 +2406,7 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 		case OPT_EXPECT_TIMEOUT: o->expect_timeout = true; break;
 		case OPT_QUIET_WAIT: o->quiet_wait = true; break;
 		case OPT_POLL: ctl_poll_all = true; break;
+  case OPT_DIAGNOSTICS: ctl_diagnostics = true; break;
 		case 'h':
 			usage(stdout);
 			exit(CTL_PASS);
@@ -2502,6 +2536,7 @@ static int cmd_xdomain_probe(int argc, char **argv)
     int direction = 0, ret = CTL_SETUP, error;
     for (int i = 2; i < argc; i++) {
         if (!strcmp(argv[i], "--pool-fd-from-sw-provider")) software = true;
+        else if (!strcmp(argv[i], "--diagnostics")) ctl_diagnostics = true;
         else if (!strcmp(argv[i], "--link") && ++i < argc) {
             errno = 0; token = strtoull(argv[i], &end, 0);
             if (errno || !*argv[i] || *argv[i] == '-' || *end) return CTL_USAGE;

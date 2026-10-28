@@ -3312,6 +3312,22 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py"
     },
     {
+      "source": "tests/core/admission_report/CONTRACT.md",
+      "logical_path": "tests/core/admission_report/CONTRACT.md"
+    },
+    {
+      "source": "tests/core/admission_report/fixture.c.in",
+      "logical_path": "tests/core/admission_report/fixture.c.in"
+    },
+    {
+      "source": "tests/core/admission_report/run.py",
+      "logical_path": "tests/core/admission_report/run.py"
+    },
+    {
+      "source": "tests/core/admission_report/wire.h",
+      "logical_path": "tests/core/admission_report/wire.h"
+    },
+    {
       "source": "tests/core/binding/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_binding/Makefile"
@@ -3630,6 +3646,22 @@
       "source": "tests/core/library/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_lib/Makefile"
+    },
+    {
+      "source": "tests/core/library/create_report/README.md",
+      "logical_path": "tests/core/library/create_report/README.md"
+    },
+    {
+      "source": "tests/core/library/create_report/ctl_hooks.c",
+      "logical_path": "tests/core/library/create_report/ctl_hooks.c"
+    },
+    {
+      "source": "tests/core/library/create_report/run.py",
+      "logical_path": "tests/core/library/create_report/run.py"
+    },
+    {
+      "source": "tests/core/library/create_report/test.c",
+      "logical_path": "tests/core/library/create_report/test.c"
     },
     {
       "source": "tests/core/library/guest/Makefile",

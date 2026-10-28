@@ -56,8 +56,12 @@ EXPORT_SYMBOL_GPL(xdev_ext_netfam_init);
 int xdev_ext_netfam_attach(struct xdev_ext_netfam_stage *ns,
 			   const struct xdev_ext_mech_stage_uapi *u, u32 admit_flags)
 {
-	void *lk = ns->m->dev->bind(ns->st, u, xdev_ext_netfam_link_dead, ns->st);
-	int ret;
+	void *lk;
+ int ret;
+
+ if (ns->st->create_reporting)
+  ns->st->create_phase = XDEV_EXT_MECH_CREATE_TRANSPORT_BIND;
+ lk = ns->m->dev->bind(ns->st, u, xdev_ext_netfam_link_dead, ns->st);
 
 	if (IS_ERR(lk))
 		return PTR_ERR(lk);

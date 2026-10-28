@@ -38,12 +38,13 @@ Error codes chosen by the library itself:
 |---|---|
 | `-EINVAL` | NULL pointer, out-of-range value, missing required field |
 | `-EOPNOTSUPP` | unknown flag, nonzero unknown opts tail, reserved feature |
-| `-ENOTCONN` | operation needs a created session (arm/start/wait/stats/stop before CREATE) |
+| `-ENOTCONN` | operation needs a created session; retained failed CREATE uses `-EBUSY` for stop |
 | `-EALREADY` | the step already happened (second CREATE) |
 | `-E2BIG` | the frame pool cannot hold what START would lend |
 | `-ETIMEDOUT` | wait deadline passed without a notification |
-| `-EBUSY` | STOP/close could not release: the kernel retains the session |
+| `-EBUSY` | a retained handle cannot create, stop or close without preserving its resources |
 | `-EAGAIN` | STOP still refused after its bounded retry (own uring_cmds pending) |
+| `-EPROTO` | a returned report has an invalid schema |
 
 ## 2. Class programs
 
@@ -157,6 +158,91 @@ must still STOP (section 5).
 nic_accounting: TRANSPORT_STATS version 3 (NIC copy/zero-copy op and byte
 counters). It must be read before STOP, because STOP releases the session.
 
+### 3.1. Explicit CREATE reports
+
+```c
+int xdev_ext_session_create_report(struct xdev_ext_session *s,
+    const struct xdev_ext_create_opts *o,
+    struct xdev_ext_mech_create_report *out);
+int xdev_ext_create_report_read(int owning_ring_fd,
+    const struct xdev_ext_mech_create *create,
+    struct xdev_ext_mech_create_report *out);
+```
+
+`xdev_ext_session_create_report()` uses the same option packing as
+`xdev_ext_session_create()` and explicitly selects `CREATE_REPORT` (operation
+10). The raw form, `xdev_ext_create_report_read()`, submits a raw CREATE
+request on the supplied owning ring; `create->session_id` must be zero. It
+borrows the ring and request resources and does not create a library handle
+or take over their cleanup. The original `xdev_ext_session_create()` continues
+to select operation 1.
+
+The kernel's syscall return and the CREATE result are separate. A syscall
+return of 0 means the complete report was copied out; `report.result` carries
+the actual CREATE result, either 0 or the original negative errno. Both
+library functions validate that report, copy it to `out`, and return
+`report.result`. Thus a library return of `-EXDEV` can accompany a valid
+admission refusal report. On success the session function records the returned
+nonzero ID and marks its handle created. A failed CREATE leaves its ID zero
+and its handle uncreated.
+
+Every call with non-NULL `out` first clears it. Only a fully delivered and
+validated report has a nonzero `size` and version
+`XDEV_EXT_MECH_CREATE_REPORT_VERSION` (1). Invalid arguments, syscall errors
+and schema errors leave `out->size == 0`; callers must not consume other
+report fields in that case. Schema errors return `-EPROTO`. A caller saving
+an earlier report must copy it elsewhere before reusing the output object.
+An older kernel can reject the new operation with `-EINVAL` or
+`-EOPNOTSUPP`; the library returns the error and never retries legacy CREATE.
+
+The report is a caller-owned value. Its `result` preserves the primary CREATE
+error, while `rollback_errno` records cleanup's separate result. `phase`
+identifies the failed execution step; `failed_stage` is the stage index or
+`UINT32_MAX` when there is no stage. A successful report has `phase == 0` and
+`failed_stage == UINT32_MAX`. The `valid` mask controls whether requester
+identity, description, admission decision, caps and observations are available.
+Requester identity is the PCI `domain`, `bus` and `devfn`, with bus and devfn
+in the 8-bit PCI range. `caps` contains the recorded CREATE preconditions and
+refusal mask. A failed report's `session_id`, `caps.session_id` and
+`observed.session_id` are all zero. No field supplies an object query token.
+
+`cleanup` describes the actual disposition:
+
+- `XDEV_EXT_MECH_CREATE_CLEANUP_NONE` (0): no rollback was needed on success,
+  or the failure formed no session to release.
+- `XDEV_EXT_MECH_CREATE_CLEANUP_RELEASED` (1): rollback released the session.
+  `rollback_errno` may still contain a final session error.
+- `XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED` (2): rollback quarantined unresolved
+  resources. The primary CREATE error stays in `result`.
+
+For RETAINED, the session function sets `xdev_ext_session_retained(s)` true
+while keeping the handle uncreated with ID 0. Further CREATE, STOP and close
+calls return `-EBUSY`. Close preserves the ring, allocation authority,
+eventfd and other owned resources; it issues no STATS or STOP for ID 0 and
+cannot use `STATS == -ENOENT` as release evidence. Keep this handle and its
+owner resources alive. The raw API leaves the equivalent owner-resource
+retention obligation with its caller. There is no failed-session query token
+that can authorize later reclamation.
+
+A saved report remains readable after ordinary released handles are closed.
+It is the observation from that CREATE and cleanup, rather than a live status
+record. Currently `OBSERVED` and `observed.valid` remain clear. If
+`POST_ROLLBACK_RETENTION` is valid, `observed.retention` contains the requester
+ledger sampled after rollback; its totals can include other links sharing
+that requester. Those totals do not certify DMA quiescence. Dynamic stage
+queries and timeout diagnostic snapshots remain unimplemented. Admission,
+topology and mapping observations require separate physical device validation.
+
+Normal `xdev_ext_mech_ctl` accepts `--diagnostics` on its CREATE paths. It calls
+the same raw library API and prints failure `result`, `rollback_errno`,
+`phase`, stage, cleanup, valid bits, requester identity, reachability and
+refusal mask. An unavailable report prints `diagnostics=unavailable` and the
+command remains failed. RETAINED output identifies kernel quarantine and
+states that fd close does not release DMA; the command skips explicit CUDA
+allocation destruction on that report path. Without the flag the command
+uses legacy CREATE. This flag does not enable a dynamic stage query or change
+wait deadlines.
+
 ## 4. One call: NVMe -> NIC
 
 ```c
@@ -218,7 +304,8 @@ attached programs; the caller later calls `xdev_ext_session_close()` on it.
   full release, and an unbind error after quarantining it. stop then
   queries STATS: `-ENOENT` marks the handle released, anything else marks
   it retained.
-- close on a live session issues stop first. On a retained handle, close
+- close on a live session issues stop first. On a retained handle with a
+  successfully delivered nonzero session ID, close
   queries STATS (which also finds sessions no longer listed on the ring):
   `-ENOENT` means the kernel released it, and close then frees everything
   and returns 0; any snapshot means it is still held, and close returns
@@ -226,7 +313,9 @@ attached programs; the caller later calls `xdev_ext_session_close()` on it.
   program detach. Resources whose accepted DMA outcome is unknown are never
   released early. The caller may call close again later; a retained handle
   that is never closed is a deliberate leak.
-- close on a handle that never reached CREATE frees immediately.
+- close on a handle that never reached CREATE frees immediately, except a
+  retained failed CREATE_REPORT handle: section 3.1 preserves that handle and
+  its authority without querying ID 0.
 - After close returns 0 the handle pointer is invalid.
 
 ## 6. Threads and signals

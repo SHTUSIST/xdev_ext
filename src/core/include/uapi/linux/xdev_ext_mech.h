@@ -588,6 +588,7 @@ enum xdev_ext_mech_op {
 	XDEV_EXT_MECH_OP_USER_STAGE	= 7,	/* struct xdev_ext_mech_user_stage */
 	XDEV_EXT_MECH_OP_STAGE_CAPS	= 8,	/* struct xdev_ext_mech_stage_caps */
 	XDEV_EXT_MECH_OP_STOP_REPORT	= 9,	/* struct xdev_ext_mech_stop_report */
+	XDEV_EXT_MECH_OP_CREATE_REPORT = 10, /* struct xdev_ext_mech_create_with_report */
 };
 
 #define XDEV_EXT_MECH_TRANSPORT_STATS_VERSION 1U
@@ -675,6 +676,62 @@ struct xdev_ext_mech_create {
 	struct xdev_ext_mech_peer peer;
 	struct xdev_ext_mech_stage_uapi st[XDEV_EXT_MECH_MAX_STAGES];
 	__aligned_u64 session_id;	/* out */
+};
+
+/* Explicit value report; an operation return of zero means delivery, while
+ * report.result carries the CREATE result. No failed-session query token. */
+#define XDEV_EXT_MECH_CREATE_REPORT_VERSION 1U
+#define XDEV_EXT_MECH_STAGE_DIAG_VERSION 1U
+#define XDEV_EXT_MECH_CREATE_VALID_REQUESTER (1U << 0)
+#define XDEV_EXT_MECH_CREATE_VALID_DESCRIBED (1U << 1)
+#define XDEV_EXT_MECH_CREATE_VALID_DECIDED (1U << 2)
+#define XDEV_EXT_MECH_CREATE_VALID_CAPS (1U << 3)
+#define XDEV_EXT_MECH_CREATE_VALID_OBSERVED (1U << 4)
+#define XDEV_EXT_MECH_CREATE_VALID_POST_ROLLBACK_RETENTION (1U << 5)
+#define XDEV_EXT_MECH_CREATE_CLEANUP_NONE 0U
+#define XDEV_EXT_MECH_CREATE_CLEANUP_RELEASED 1U
+#define XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED 2U
+
+enum xdev_ext_mech_create_phase {
+ XDEV_EXT_MECH_CREATE_CHECK = 1, XDEV_EXT_MECH_CREATE_CLASS_LOOKUP,
+ XDEV_EXT_MECH_CREATE_OPS_LOOKUP, XDEV_EXT_MECH_CREATE_BUFFERS,
+ XDEV_EXT_MECH_CREATE_EVENTFD, XDEV_EXT_MECH_CREATE_WORKER,
+ XDEV_EXT_MECH_CREATE_POOL, XDEV_EXT_MECH_CREATE_STAGE_FILE,
+ XDEV_EXT_MECH_CREATE_CLASS_BIND, XDEV_EXT_MECH_CREATE_TRANSPORT_BIND,
+ XDEV_EXT_MECH_CREATE_REQUESTER_DESCRIBE, XDEV_EXT_MECH_CREATE_REQUESTER_DECIDE,
+ XDEV_EXT_MECH_CREATE_REQUESTER_PREMAP, XDEV_EXT_MECH_CREATE_PREPARE,
+ XDEV_EXT_MECH_CREATE_ACTIVATE,
+};
+struct xdev_ext_mech_requester_id { __u32 domain, bus, devfn, rsvd; };
+struct xdev_ext_mech_retention_diag {
+ __u32 generations, retained_generations;
+ __aligned_u64 reserved_bytes, retained_bytes;
+ __aligned_u64 global_reserved_bytes, global_retained_bytes, global_limit;
+};
+struct xdev_ext_mech_stage_diag {
+ __u32 size, version;
+ __aligned_u64 session_id;
+ __u32 stage, class_id, valid, readiness;
+ __aligned_u64 token, local_inc, remote_inc, pool_generation;
+ __aligned_u64 capture_begin_ns, capture_end_ns;
+ __u32 native_inflight, software_pending, rx_native_posted, ctl_tx_free;
+ __u32 cts_owed, ack_owed, fail_owed, final_waiting_chain;
+ __u32 downstream_release_pending, rsvd;
+ struct xdev_ext_mech_retention_diag retention;
+};
+struct xdev_ext_mech_create_report {
+ __u32 size, version;
+ __s32 result, rollback_errno;
+ __u32 phase, failed_stage, valid, cleanup;
+ __aligned_u64 session_id;
+ struct xdev_ext_mech_requester_id requester;
+ struct xdev_ext_mech_stage_caps caps;
+ struct xdev_ext_mech_stage_diag observed;
+};
+struct xdev_ext_mech_create_with_report {
+ __u32 size, version;
+ struct xdev_ext_mech_create create;
+ struct xdev_ext_mech_create_report report;
 };
 
 /* IOU_UMEM only: the listed frames move USER -> kernel before the batches. */

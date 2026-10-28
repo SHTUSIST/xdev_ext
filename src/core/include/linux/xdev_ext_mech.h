@@ -284,7 +284,13 @@ struct xdev_ext_mech_stage {
 	u32 index;			/* position in the chain */
 	/* XDEV_EXT_MECH_STAGE_F_POLL accepted: set by the core before ->bind */
 	bool poll;
-	struct xdev_ext_mech_stage_caps caps;	/* CREATE record, OP_STAGE_CAPS */
+	struct xdev_ext_mech_stage_caps caps; /* CREATE record, OP_STAGE_CAPS */
+ /* Synchronous CREATE_REPORT observations; never an object query handle. */
+ bool create_reporting;
+ u32 create_phase, create_valid;
+ struct xdev_ext_mech_requester_id create_requester_id;
+ struct pci_dev *create_requester;
+ struct xdev_ext_mech_stage_diag create_observed;
 };
 
 /*
@@ -530,7 +536,8 @@ u32 xdev_ext_mech_session_state(const struct xdev_ext_mech_session *s);
 /* Any context: first successful STOP time, under the session lock; zero is valid.
  * Read after observing admission closed. Repeated STOP never changes this clock. */
 u64 xdev_ext_mech_session_stop_started_ns(struct xdev_ext_mech_session *s);
-/* Any context: ACTIVE and every pinned generation still published. */
+/* Any context: CREATE report delivered/published, ACTIVE and every pinned
+ * generation still published. */
 bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s);
 /* Any context. */
 void xdev_ext_mech_count(struct xdev_ext_mech_session *s, enum xdev_ext_mech_counter c,
