@@ -1,10 +1,11 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #define STACK_INTERNAL
 #include "stack_kernel_compat.h"
+
 #ifdef STACK_REAL_NHI
+#include "stack_nhi_api.h"
 /* Observe the real API calls and supply explicitly selected host adapters.
  * The production source and its callbacks are included without body edits. */
-#include "stack_nhi_api.h"
 #define tb_ring_alloc_tx stack_ring_alloc_tx
 #define tb_ring_alloc_rx stack_ring_alloc_rx
 #define tb_ring_start stack_ring_start
@@ -13,6 +14,12 @@
 #define tb_ring_free_quarantined stack_ring_free_quarantined
 #define tb_ring_tx stack_ring_tx
 #define tb_ring_rx stack_ring_rx
+#define tb_ring_tx_more stack_ring_tx_more
+#define tb_ring_rx_more stack_ring_rx_more
+#else
+int tb_ring_tx_more(struct tb_ring *, struct ring_frame *);
+int tb_ring_rx_more(struct tb_ring *, struct ring_frame *);
+void tb_ring_notify(struct tb_ring *);
 #endif
 #define xdev_ext_xd_class_ctl stack_record_dispatch
 #include "../../../../../io_uring/xdomain/xdev_ext_xdomain_ring.c"

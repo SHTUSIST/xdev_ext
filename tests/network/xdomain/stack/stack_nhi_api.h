@@ -11,4 +11,6 @@ void stack_ring_free(struct tb_ring *);
 void stack_ring_free_quarantined(struct tb_ring *);
 int stack_ring_tx(struct tb_ring *, struct ring_frame *);
 int stack_ring_rx(struct tb_ring *, struct ring_frame *);
+int stack_ring_tx_more(struct tb_ring *, struct ring_frame *);
+int stack_ring_rx_more(struct tb_ring *, struct ring_frame *);
 #endif

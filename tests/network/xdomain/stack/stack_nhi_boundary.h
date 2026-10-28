@@ -257,7 +257,7 @@ void stack_ring_free_quarantined(struct tb_ring *ring)
 		       after.dma_frees - before.dma_frees);
 }
 
-static int native_enqueue(struct tb_ring *ring, struct ring_frame *frame)
+static int native_enqueue(struct tb_ring *ring, struct ring_frame *frame, bool more)
 {
 	if (!ring->running) return -ESHUTDOWN;
 	/* Acceptance is observed before the synchronous real descriptor write. */
@@ -269,7 +269,7 @@ static int native_enqueue(struct tb_ring *ring, struct ring_frame *frame)
 	n->completion_sof = frame->sof;
 	n->completion_eof = frame->eof;
 	frame->callback = native_callback;
-	bool batch = world->cfg.nhi_batch && !ring_info(ring)->control;
+	bool batch = more || (world->cfg.nhi_batch && !ring_info(ring)->control);
 	int ret = ring->is_tx ? (batch ? tb_ring_tx_more(ring, frame) : tb_ring_tx(ring, frame)) :
 		(batch ? tb_ring_rx_more(ring, frame) : tb_ring_rx(ring, frame));
 
@@ -280,13 +280,25 @@ static int native_enqueue(struct tb_ring *ring, struct ring_frame *frame)
 int stack_ring_tx(struct tb_ring *ring, struct ring_frame *frame)
 {
 	assert(ring->is_tx);
-	return native_enqueue(ring, frame);
+	return native_enqueue(ring, frame, false);
 }
 
 int stack_ring_rx(struct tb_ring *ring, struct ring_frame *frame)
 {
 	assert(!ring->is_tx);
-	return native_enqueue(ring, frame);
+	return native_enqueue(ring, frame, false);
+}
+
+int stack_ring_tx_more(struct tb_ring *ring, struct ring_frame *frame)
+{
+	assert(ring->is_tx);
+	return native_enqueue(ring, frame, true);
+}
+
+int stack_ring_rx_more(struct tb_ring *ring, struct ring_frame *frame)
+{
+	assert(!ring->is_tx);
+	return native_enqueue(ring, frame, true);
 }
 
 static bool native_live(const struct native *n)

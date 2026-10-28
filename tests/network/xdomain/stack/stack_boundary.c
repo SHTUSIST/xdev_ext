@@ -555,6 +555,11 @@ int tb_ring_rx(struct tb_ring*r,struct ring_frame*f){
 	assert(!r->is_tx);
 	return native_post(r,f);
 }
+/* This legacy recorder has no descriptor visibility model. Preserve its
+ * acceptance/completion scheduler; real NHI visibility is tested separately. */
+int tb_ring_tx_more(struct tb_ring*r,struct ring_frame*f){return tb_ring_tx(r,f);}
+int tb_ring_rx_more(struct tb_ring*r,struct ring_frame*f){return tb_ring_rx(r,f);}
+void tb_ring_notify(struct tb_ring*r){assert(r->running);}
 #else
 #include "stack_nhi_boundary.h"
 #endif

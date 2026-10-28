@@ -277,7 +277,7 @@ static void sealed_bpf_boundary(void)
 {for(unsigned mode=1;mode<=7;mode++){fprintf(stderr,"STACK_SUBCASE sealed mode=%u\n",mode);struct stack_config c=geometry();struct stack_world*w=create(&c);login(w);sessions(w,1,0);fault(w,STACK_FAULT_BPF_INTENT,0,0,0,mode,0);CHECK(stack_start(w,1,c.first_seq,0)==0,"receiver arm for sealed intent test");int submit=stack_start(w,0,c.first_seq,0);if(mode<7)CHECK(submit==0||submit==-71,"actual class may synchronously reject invalid BPF intent with EPROTO");else CHECK(submit==0,"compatible WAIT intent accepted by actual class");pump(w,1000000);CHECK(count(w,STACK_EV_PROTOCOL,0,-1)>0,"actual reference BPF invoked with actual protocol info");if(mode<7){CHECK(count(w,STACK_EV_REJECT,0,-1)+count(w,STACK_EV_FAILURE,0,-1)>0,"C sealed apply rejects invalid/duplicate/stale/unsafe intent");CHECK(count(w,STACK_EV_DATA_POST,0,-1)==0,"no C policy fallback to post after rejected/no verdict");}else{pump(w,10000000);CHECK(count(w,STACK_EV_DATA_POST,0,-1)>0,"compatible replacement WAIT resumes through actual progress");release_group(w,c.first_seq);CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1,"WAIT/resume completes normally");}safety(w);stack_destroy(w);}}
 static void geometry_and_offset_oracle(void)
 {
- for(unsigned mode=0;mode<6;mode++) {
+ for(unsigned mode=0;mode<7;mode++) {
   struct stack_config c=geometry();
   c.nr_frames=1;c.frame_size=524288;
   c.span[0]=(struct stack_span){524288,0,262144};
@@ -286,26 +286,32 @@ static void geometry_and_offset_oracle(void)
   if(mode==3)c.span[0].allocation_off=UINT64_MAX-4095;
   if(mode==4){c.native_elems=65;c.span[0].len=65U*4096U;}
   if(mode==5){c=geometry();c.span[0].data_off=128;}
+  if(mode==6)c.depth=65;
   struct stack_world*w=create(&c);login(w);
   struct stack_session_config rx={.direction=2,.stage_index=0,.groups=1};
   struct stack_session_config tx={.direction=1,.stage_index=0,.groups=1};
   int rrx=stack_session(w,1,&rx),rtx=stack_session(w,0,&tx);
+  if(mode==6) {
+   CHECK(rrx==-22&&rtx==-22,"depth65 with legal64-element payload fails actual class EINVAL admission");
+   CHECK(count(w,STACK_EV_BUILD,-1,-1)==0&&count(w,STACK_EV_LEASE_ACQUIRE,-1,-1)==0,
+         "depth65 rejected before BUILD, payload array access or native leases");
+  }
   int started=0,failed=rrx<0||rtx<0;
   if(!failed) {
    int a=stack_start(w,1,c.first_seq,0),b=stack_start(w,0,c.first_seq,0);
    started=1;failed=a<0||b<0;pump(w,1000000);
   }
-  if(mode==1) {
-   CHECK(!failed,"depth3/64 actual class geometry accepted");
+  if(mode==0||mode==1) {
+   CHECK(!failed,"depth3-or4/64 actual class geometry accepted");
    CHECK(count(w,STACK_EV_DATA_POST,0,-1)==64&&count(w,STACK_EV_DATA_POST,1,-1)==64,
-         "depth3/64 actual X4 accepts exactly64 native frames per endpoint");
+         "depth3-or4/64 actual X4 accepts exactly64 native frames per endpoint");
    release_group(w,c.first_seq);
-   for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind!=STACK_EV_DATA_POST)continue;CHECK(e.seq<64&&e.group==1,"depth3/64 independent native sequence0..63 and wire group1");CHECK(e.address==c.mapping_base[e.endpoint]+524288+4096*e.seq&&e.length==4096,"depth3/64 literal independent address/length oracle");CHECK(e.pdf==0x201,"depth3/64 actual SOF1/EOF2");}
-   CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1&&count(w,STACK_EV_PUBLISH,1,-1)==1,"depth3/64 both endpoints actually complete");
-   for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind!=STACK_EV_PUBLISH)continue;CHECK(e.status==0&&e.bytes==262144&&e.elems_done==64,"depth3/64 actual CQE success bytes262144 elems_done64");CHECK(e.stage_index==0,"depth3/64 actual ownstage index0");}
+   for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind!=STACK_EV_DATA_POST)continue;CHECK(e.seq<64&&e.group==1,"depth3-or4/64 independent native sequence0..63 and wire group1");CHECK(e.address==c.mapping_base[e.endpoint]+524288+4096*e.seq&&e.length==4096,"depth3-or4/64 literal independent address/length oracle");CHECK(e.pdf==0x201,"depth3-or4/64 actual SOF1/EOF2");}
+   CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1&&count(w,STACK_EV_PUBLISH,1,-1)==1,"depth3-or4/64 both endpoints actually complete");
+   for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind!=STACK_EV_PUBLISH)continue;CHECK(e.status==0&&e.bytes==262144&&e.elems_done==64,"depth3-or4/64 actual CQE success bytes262144 elems_done64");CHECK(e.stage_index==0,"depth3-or4/64 actual ownstage index0");}
   } else {
    CHECK(failed||count(w,STACK_EV_REJECT,-1,-1)+count(w,STACK_EV_FAILURE,-1,-1)>0,
-         "depth4/64 zero overflow and65 rejected by actual class/BUILD admission");
+         "zero length, address overflow, element65 and depth65 rejected by actual class/BUILD admission");
    CHECK(count(w,STACK_EV_DATA_POST,-1,-1)==0,"invalid geometry never partially posts");
    if(started)CHECK(count(w,STACK_EV_BUILD,-1,-1)+count(w,STACK_EV_REJECT,-1,-1)+count(w,STACK_EV_FAILURE,-1,-1)>0,
                     "invalid span reaches actual production admission, not environment-only filtering");

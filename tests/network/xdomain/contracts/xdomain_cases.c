@@ -38,6 +38,30 @@ static void debug_p04(unsigned phase,const char *point) {
   }
  }
 }
+/* N1 bounds the software pending set separately from 255 hardware slots. */
+static void pending_geometry(void) {
+ for(unsigned pass=0;pass<2;pass++) {
+  fresh(0,0,pass?64:4,262144,262144);
+  for(unsigned side=0;side<2;side++) {
+   assert(!bind_side(&sides[side]));
+   assert(family_of(&sides[side])->depth==(pass?64U:4U));
+   assert(sides[side].endpoint_attaches==1&&sides[side].admission_calls==1);
+   assert(!sides[side].posts&&!sides[side].live&&!sides[side].session.native_controls);
+   registered->unbind(stage_of(&sides[side]));
+   assert(sides[side].endpoint_detaches==1&&!stage_of(&sides[side])->priv);
+  }
+ }
+ /* Isolate depth65 with a legal64-element payload, then element65 at depth1. */
+ for(unsigned pass=0;pass<2;pass++) {
+  fresh(0,0,pass?1:65,524288,pass?266240:262144);
+  for(unsigned side=0;side<2;side++) {
+   assert(bind_side(&sides[side])==-EINVAL);
+   assert(!sides[side].endpoint_attaches&&!sides[side].admission_calls);
+   assert(!stage_of(&sides[side])->priv&&!sides[side].posts&&!sides[side].live&&!sides[side].session.native_controls);
+  }
+ }
+ ok("T15 software pending admits depth4 and depth64 by64, rejects depth65 and element65 before attachment");
+}
 static void original_traces(void) {
  /* T01 catches publishing/ACK on local RX rather than final chain disposition. */
  pair(0,2,8192);
@@ -122,7 +146,7 @@ static void original_traces(void) {
  assert(sides[0].admission_order<sides[0].debug_order&&!sides[0].unbind_order);
  ok("T14 refused admission diagnostic precedes unbind and private stage cleanup");
 
- fresh(0,0,4,262144,262144);assert(bind_side(&sides[0])==-EINVAL);ok("T15 four batches of sixty-four elements exceed ring budget");
+ pending_geometry();
 
  pair(0,2,8192);struct xdev_ext_mech_batch *b=prepare(&sides[0],0);struct xdev_ext_xdomain_desc descriptor={.frame_pos=0,.frame_off=2048,.len=8192,.group=1};
  assert(registered->validate(stage_of(&sides[0]),b,(u8*)&descriptor,1)==-EINVAL);
@@ -489,7 +513,8 @@ int main(void) {
  setvbuf(stdout,NULL,_IONBF,0);puts("TAP version 13");
  const char *selected=getenv("X5_CASE");
  if(selected){
-  if(!strcmp(selected,"P19"))pressure_case();
+  if(!strcmp(selected,"T15"))pending_geometry();
+  else if(!strcmp(selected,"P19"))pressure_case();
   else if(!strcmp(selected,"U01"))uncertain_rx_reservation();
   else if(!strcmp(selected,"U02"))uncertain_rx_reply_pin();
   else if(!strcmp(selected,"B01"))bind_depth33();
