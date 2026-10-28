@@ -8,6 +8,8 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/mman.h>
+#include "../common/cpu_timer.h"
+static struct cpu_timer endpoint_timer; /* No owner: real journal remains disabled. */
 #include "nvme_gpu_core.h"
 #include "kernel/include/uapi/linux/io_uring.h"
 #include "kernel/io_uring/xdev_ext_mech_core.h"

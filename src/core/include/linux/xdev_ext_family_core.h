@@ -45,45 +45,56 @@ static inline bool xdev_ext_afxdp_flags_ok(__u32 flags)
 		 !(flags & XDEV_EXT_AFXDP_F_RELIABLE));
 }
 
+/* Positional slots avoid array designators unsupported by C++ consumers. */
+typedef char xdev_ext_mech_class_table_ids[
+	(XDEV_EXT_MECH_CLASS_AFXDP == 2 && XDEV_EXT_MECH_CLASS_NVME == 3 &&
+	 XDEV_EXT_MECH_CLASS_IAA == 4 && XDEV_EXT_MECH_CLASS_CE == 5 &&
+	 XDEV_EXT_MECH_CLASS_DMA == 6 && XDEV_EXT_MECH_CLASS_SOCKET == 7 &&
+	 XDEV_EXT_MECH_CLASS_NET == 8 && XDEV_EXT_MECH_CLASS_CPU == 9 &&
+	 XDEV_EXT_MECH_CLASS_USER == 10 && XDEV_EXT_MECH_CLASS_XDOMAIN == 11 &&
+	 XDEV_EXT_MECH_CLASS_MAX == 12) ? 1 : -1];
+
 /* One row per class; unknown ids share the all-zero NONE descriptor. */
 static inline const struct xdev_ext_mech_class_desc *
 xdev_ext_mech_class_desc(__u32 class_id)
 {
 	static const struct xdev_ext_mech_class_desc none = {};
 	static const struct xdev_ext_mech_class_desc tab[XDEV_EXT_MECH_CLASS_MAX] = {
-		[XDEV_EXT_MECH_CLASS_AFXDP] = { .family = XDEV_EXT_FAMILY_NETWORK,
+		{}, /* 0: no class */
+		{}, /* 1: unused */
+		{ .family = XDEV_EXT_FAMILY_NETWORK, /* XDEV_EXT_MECH_CLASS_AFXDP */
 			.known_flags = XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY,
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_AFXDP,
 			.flags_ok = xdev_ext_afxdp_flags_ok },
-		[XDEV_EXT_MECH_CLASS_NVME] = { .family = XDEV_EXT_FAMILY_STORAGE,
+		{ .family = XDEV_EXT_FAMILY_STORAGE, /* XDEV_EXT_MECH_CLASS_NVME */
 			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE,
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_NVME },
-		[XDEV_EXT_MECH_CLASS_IAA] = { .family = XDEV_EXT_FAMILY_COMPUTE,
+		{ .family = XDEV_EXT_FAMILY_COMPUTE, /* XDEV_EXT_MECH_CLASS_IAA */
 			.known_flags = XDEV_EXT_IAA_F_SOFTWARE,
 			.role_rule = XDEV_EXT_ROLE_RULE_TRANSFORM, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
-		[XDEV_EXT_MECH_CLASS_CE] = { .family = XDEV_EXT_FAMILY_COMPUTE,
+		{ .family = XDEV_EXT_FAMILY_COMPUTE, /* XDEV_EXT_MECH_CLASS_CE */
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_GPU },
-		[XDEV_EXT_MECH_CLASS_DMA] = { .family = XDEV_EXT_FAMILY_COMPUTE,
+		{ .family = XDEV_EXT_FAMILY_COMPUTE, /* XDEV_EXT_MECH_CLASS_DMA */
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
-		[XDEV_EXT_MECH_CLASS_SOCKET] = { .family = XDEV_EXT_FAMILY_NETWORK,
+		{ .family = XDEV_EXT_FAMILY_NETWORK, /* XDEV_EXT_MECH_CLASS_SOCKET */
 			.known_flags = XDEV_EXT_SOCKET_F_NXP,
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
-		[XDEV_EXT_MECH_CLASS_NET] = { .family = XDEV_EXT_FAMILY_NETWORK,
+		{ .family = XDEV_EXT_FAMILY_NETWORK, /* XDEV_EXT_MECH_CLASS_NET */
 			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE,
 			.peer_only = 1,
 			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
-		[XDEV_EXT_MECH_CLASS_XDOMAIN] = { .family = XDEV_EXT_FAMILY_NETWORK,
-			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE,
-			.known_flags = XDEV_EXT_XDOMAIN_KNOWN_FLAGS, .peer_only = 1,
-			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
-		[XDEV_EXT_MECH_CLASS_CPU] = { .family = XDEV_EXT_FAMILY_COMPUTE,
+		{ .family = XDEV_EXT_FAMILY_COMPUTE, /* XDEV_EXT_MECH_CLASS_CPU */
 			.role_rule = XDEV_EXT_ROLE_RULE_CPU_XFORM, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON,
 			.no_file = 1 },
-		[XDEV_EXT_MECH_CLASS_USER] = { .family = XDEV_EXT_FAMILY_COMPUTE,
+		{ .family = XDEV_EXT_FAMILY_COMPUTE, /* XDEV_EXT_MECH_CLASS_USER */
 			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE,
 			.flags_later = 1, /* xdev_ext_user_stage_check() checks USER flags */
 			.role_rule = XDEV_EXT_ROLE_RULE_INPLACE_TX, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON,
 			.no_file = 1 },
+		{ .family = XDEV_EXT_FAMILY_NETWORK, /* XDEV_EXT_MECH_CLASS_XDOMAIN */
+			.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE,
+			.known_flags = XDEV_EXT_XDOMAIN_KNOWN_FLAGS, .peer_only = 1,
+			.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION, .ctx_rule = XDEV_EXT_CTX_RULE_COMMON },
 	};
 
 	if (class_id >= XDEV_EXT_MECH_CLASS_MAX || !tab[class_id].family)
