@@ -33,6 +33,11 @@ default. `/etc/default/grub` can be stale and is not used to infer that default.
 Saved defaults require the standard generated header to load `grubenv`.
 Custom default/environment assignments, helper functions, or fallback-changing
 control flow are refused rather than interpreted as a general GRUB program.
+The standard alternate-environment prefix branch is accepted only while the
+stored `env_block` is empty, so that branch is inactive. Nonempty `env_block`
+and active or unknown `initrdfail` recovery state are refused. Standard display
+and EFI-menu availability probes can be inspected; their presence does not
+make an unsafe selected entry executable.
 Both selected entries must have one literal Linux image, one initrd, and a
 filesystem UUID that maps to the installed root/boot filesystem.
 Both selected entries and every parent submenu must also be unconditionally
@@ -76,7 +81,7 @@ Replace the example IDs with complete IDs from inspection. `plan`, and
 write a receipt, or alter boot settings.
 
 The trial command line comes from the selected trial entry. Existing `panic=`
-arguments are replaced with exactly one positive timeout. Other supported
+arguments are replaced with exactly one positive timeout. The timeout must fit a positive signed 32-bit integer. Other supported
 arguments keep their values and order. The tool does not silently copy the
 running kernel's command line or add watchdog/kdump options.
 The final UTF-8 command line must fit both the image's advertised boot-protocol
@@ -114,11 +119,22 @@ paths after reconnecting.
 ## Recovery and failure states
 
 The permanent good default is kept in place. Nonempty GRUB `next_entry`,
-`prev_entry`, or `prev_saved_entry` prevents execution. So do a selected entry's
-`savedefault` or unsupported default-changing commands. EFI `BootNext` and a
+`prev_entry`, or `prev_saved_entry` prevents execution. So do unsupported
+default-changing commands or a selected entry's unverified `savedefault` call.
+EFI `BootNext` and a
 boot order that does not start with the qualified GRUB entry are refused.
 Kexec bypasses GRUB and would not consume a pending trial oneshot; leaving one
 set could select the failed trial again on the next firmware reboot.
+
+The exact generated Ubuntu `savedefault` helper is supported: when `boot_once`
+is empty, it saves `chosen` to the standard environment. Its alternate-file
+branch must be inactive because `env_block` is empty. Every selected entry and
+parent submenu has an explicit ID, and an imported or overridden `chosen`
+prefix is refused. Kexec does not execute the trial's GRUB body; a later
+firmware fallback selects the existing good full ID, so this verified helper
+saves the same good ID. Modified, conditionally defined, or redefined helpers
+remain unsupported. The tool itself never calls the helper or writes GRUB's
+environment.
 
 A positive panic timeout can cause a panicking trial kernel to reboot through
 firmware to the existing good default. This interrupts all processes and

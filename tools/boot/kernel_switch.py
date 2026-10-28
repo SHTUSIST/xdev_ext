@@ -105,6 +105,7 @@ def _parse_entry(entry, lines):
     roots = set()
     unsafe = list(entry.get("unsafe", []))
     args = []
+    uses_savedefault = False
     allowed = {"recordfail", "load_video", "gfxmode", "insmod", "echo", "if",
                "then", "else", "fi", "[", "}", "{"}
     for line in lines:
@@ -112,6 +113,8 @@ def _parse_entry(entry, lines):
         if not words:
             continue
         command = words[0]
+        if command != "savedefault" and _fallback_effect(line):
+            unsafe.append("entry contains an inline fallback mutation")
         if command == "linux":
             if len(words) < 2:
                 unsafe.append("linux command has no image")
@@ -134,6 +137,16 @@ def _parse_entry(entry, lines):
                     unsafe.append("root reassigned after filesystem search")
             elif not assignment.startswith("gfxpayload="):
                 unsafe.append("entry changes unsupported GRUB state")
+        elif command == "savedefault":
+            if words == ["savedefault"]:
+                uses_savedefault = True
+            else:
+                unsafe.append("savedefault arguments are unsupported")
+        elif command == "if":
+            try:
+                _header_condition(words)
+            except SwitchError:
+                unsafe.append("entry condition has unknown side effects")
         elif command not in allowed:
             unsafe.append(f"unsupported entry command: {command}")
     if len(linux) != 1 or len(initrds) != 1:
@@ -146,28 +159,50 @@ def _parse_entry(entry, lines):
     entry.update(linux=linux[0] if len(linux) == 1 else "",
                  initrd=initrds[0] if len(initrds) == 1 else "", args=args,
                  root_uuid=next(iter(roots)) if len(roots) == 1 else "",
-                 unsafe=sorted(set(unsafe)))
+                 unsafe=sorted(set(unsafe)), uses_savedefault=uses_savedefault)
     return entry
 
 
 def _header_condition(words):
     # Header conditions may inspect facts, not invoke a custom state-changing
     # function or regexp --set. Standard display/capability probes are read-only.
+    condition = " ".join(words[1:]).replace("] ;", "];")
+    if condition in ("hwmatch ${prefix}/gfxblacklist.txt 3; then", "hwmatch $prefix/gfxblacklist.txt 3; then"):
+        return "other"  # Generated display selection; never a fallback assignment.
     if len(words) < 2 or words[1] not in ("[", "test", "loadfont", "keystatus", "cpuid"):
         _reject("Custom GRUB condition commands have unknown fallback effects")
-    condition = " ".join(words[1:]).replace("] ;", "];")
     if condition in ("[ -s $prefix/grubenv ]; then", "[ -s ${prefix}/grubenv ]; then"):
         return "grubenv"
     for name in ("next_entry", "prev_entry", "prev_saved_entry", "env_block"):
         if condition in (f"[ ${{{name}}} ]; then", f"[ ${name} ]; then"):
             return name
+    for value in ("1", "2"):
+        if condition in (f"[ ${{initrdfail}} = {value} ]; then", f"[ $initrdfail = {value} ]; then"):
+            return "initrdfail:" + value
     return "other"
 
 
 def _fallback_effect(line):
-    return re.search(r"(?:^|[;\s])(?:set\s+)?(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|prefix|env_block)\s*=|"
+    return re.search(r"(?:^|[;\s])(?:set\s+)?(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|prefix|env_block|initrdfail|chosen)\s*=|"
                      r"(?:^|[;\s])(?:load_env|eval|configfile|savedefault)(?:\s|;|$)|"
-                     r"(?:^|[;\s])save_env\s+(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry)(?:\s|;|$)", line)
+                     r"(?:^|[;\s])save_env\s+(?:default|saved_entry|next_entry|prev_entry|prev_saved_entry|chosen)(?:\s|;|$)", line)
+
+
+def _standard_savedefault(lines):
+    # This is the complete generated Ubuntu helper, not a permissive evaluator.
+    # Preserve quoting: '${chosen}' would save a literal, not the selected ID.
+    actual = [" ".join(line.split()).replace("] ;", "];") for line in lines
+              if line.strip() and not line.lstrip().startswith("#")]
+    return actual == [
+        'if [ -z "${boot_once}" ]; then',
+        'saved_entry="${chosen}"',
+        'if [ "${env_block}" ]; then',
+        'save_env -f "${env_block}" saved_entry',
+        'else',
+        'save_env saved_entry',
+        'fi',
+        'fi',
+    ]
 
 
 def parse_grub(config_text, environment_text):
@@ -183,6 +218,10 @@ def parse_grub(config_text, environment_text):
         environment[key] = value
     if environment.get("env_block"):
         _reject("An alternate GRUB environment block is unsupported")
+    if environment.get("initrdfail", "") not in ("", "0"):
+        _reject("Active or unknown GRUB initrdfail recovery state prevents a known-good fallback")
+    if environment.get("chosen"):
+        _reject("An imported chosen prefix could change the full saved fallback ID")
     entries = {}
     stack = []
     depth = 0
@@ -193,6 +232,10 @@ def parse_grub(config_text, environment_text):
     environment_loaded = False
     saved_default = False
     function_name = None
+    function_lines = []
+    function_unconditional = False
+    savedefault_count = 0
+    savedefault_verified = False
     for line in config_text.splitlines():
         stripped = line.strip()
         delta = _brace_delta(line)
@@ -207,16 +250,23 @@ def parse_grub(config_text, environment_text):
             else:
                 bodies.append(line)
         elif function_name is not None:
-            if function_name != "savedefault" and _fallback_effect(stripped):
+            # These generated definitions may mutate boot state if called.
+            # Their calls remain forbidden in selected entries/header code.
+            opaque = function_name in ("savedefault", "initrdfail")
+            if not opaque and _fallback_effect(stripped):
                 _reject("A custom GRUB helper can change fallback state")
             helper_words = _words(line)
-            if function_name != "savedefault" and helper_words:
+            if not opaque and helper_words:
                 if helper_words[0] not in ("if", "elif", "else", "fi", "insmod", "set", "save_env", "}"):
                     _reject("Custom commands inside a GRUB helper are unsupported")
                 if helper_words[0] in ("if", "elif"):
                     _header_condition(helper_words)
             if depth + delta == 0:
+                if function_name == "savedefault":
+                    savedefault_verified = function_unconditional and _standard_savedefault(function_lines)
                 function_name = None
+            else:
+                function_lines.append(line)
         elif stripped.startswith(("menuentry ", "submenu ")):
             words = _words(line)
             if len(words) < 4 or words[-1] != "{" or delta != 1:
@@ -256,6 +306,12 @@ def parse_grub(config_text, environment_text):
                 if words[1] not in ("savedefault", "recordfail", "load_video", "gfxmode", "initrdfail"):
                     _reject("Custom GRUB helpers are unsupported; their fallback effects are unknown")
                 function_name = words[1]
+                function_lines = []
+                function_unconditional = not conditions
+                if function_name == "savedefault":
+                    savedefault_count += 1
+                    if savedefault_count != 1:
+                        _reject("A duplicate or overridden savedefault helper is unsupported")
             if len(words) >= 2 and words[0] == "set" and words[1].startswith("default="):
                 value = words[1][8:]
                 if value in ("${next_entry}", "$next_entry"):
@@ -281,17 +337,24 @@ def parse_grub(config_text, environment_text):
                     _reject("Saved default requires the standard grubenv load, not custom control flow")
             elif words and words[0] in ("savedefault", "configfile", "eval", "unset"):
                 _reject("Top-level GRUB control flow can change the fallback")
+            elif words == ["fwsetup", "--is-supported"]:
+                pass  # Standard read-only EFI-menu availability probe.
             elif words:
                 assignment = words[1] if words[0] == "set" and len(words) == 2 else words[0]
                 name, separator, value = assignment.partition("=")
-                if separator and name in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "env_block"):
+                if separator and name in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "env_block", "initrdfail", "chosen"):
                     restored = (name == "saved_entry" and value == "${prev_saved_entry}"
                                 and conditions == ["prev_saved_entry"])
                     cleared = (not value and name in ("next_entry", "prev_entry", "prev_saved_entry")
-                               and conditions == [name])
+                               and (conditions == [name] or (name == "prev_entry" and conditions == ["initrdfail:1"])))
                     previous = (name == "next_entry" and value == "${prev_entry}"
-                                and conditions == ["prev_entry"])
-                    if not (restored or cleared or previous):
+                                and conditions in (["prev_entry"], ["initrdfail:1"]))
+                    inactive_env = (name == "env_block" and value == "(${root})${env_block}"
+                                    and conditions == ["env_block"] and not environment.get("env_block"))
+                    inactive_recovery = (name == "initrdfail"
+                                         and ((not value and conditions == ["initrdfail:2"])
+                                              or (value == "2" and conditions == ["initrdfail:1", "next_entry"])))
+                    if not (restored or cleared or previous or inactive_env or inactive_recovery):
                         _reject(f"Custom top-level {name} mutation can change the fallback")
                 elif words[0] == "save_env":
                     arguments = words[1:]
@@ -303,9 +366,10 @@ def parse_grub(config_text, environment_text):
                     if len(arguments) != 1 or arguments[0].startswith("-"):
                         _reject("Only a standard single-variable save_env is supported")
                     key = arguments[0]
-                    if key in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "env_block"):
+                    if key in ("default", "saved_entry", "next_entry", "prev_entry", "prev_saved_entry", "prefix", "env_block", "chosen"):
                         permitted = "prev_saved_entry" if key == "saved_entry" else key
-                        if (conditions[:1] != [permitted]
+                        if ((conditions[:1] != [permitted]
+                             and not (key == "prev_entry" and conditions[:1] == ["initrdfail:1"]))
                                 or conditions[1:] not in ([], ["env_block"], ["else:env_block"])):
                             _reject("Custom save_env control flow can change the fallback")
                 elif not separator and words[0] not in {
@@ -330,10 +394,13 @@ def parse_grub(config_text, environment_text):
     default = next(iter(defaults))
     if default not in entries:
         _reject("Persistent default must be a full, installed entry ID (not an index/title)")
+    for entry in entries.values():
+        if entry["uses_savedefault"] and not savedefault_verified:
+            entry["unsafe"] = sorted(set(entry["unsafe"] + ["savedefault helper is not the verified standard definition"]))
     pending = {key: environment[key] for key in ("next_entry", "prev_entry", "prev_saved_entry")
                if environment.get(key)}
     return {"entries": entries, "default": default, "pending": pending,
-            "environment": environment}
+            "environment": environment, "savedefault_verified": savedefault_verified}
 
 
 def read_bzimage_release(image_prefix):
@@ -387,8 +454,9 @@ def parse_initrd_releases(listing):
 
 
 def normalise_cmdline(args, panic_seconds):
-    if isinstance(panic_seconds, bool) or not isinstance(panic_seconds, int) or panic_seconds <= 0:
-        _reject("panic-seconds must be a positive integer", exit_code=2)
+    if (isinstance(panic_seconds, bool) or not isinstance(panic_seconds, int)
+            or not 1 <= panic_seconds <= 2147483647):
+        _reject("panic-seconds must fit a positive signed 32-bit integer", exit_code=2)
     result = []
     for arg in args:
         if not isinstance(arg, str) or any(char in arg for char in ("\x00", "\n", "\r", "$", "`", '"', "\\")):

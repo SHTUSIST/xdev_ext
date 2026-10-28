@@ -7553,6 +7553,10 @@
     {
       "source": "tests/compute/tp/framework/test_worker_shutdown.py",
       "logical_path": "tests/compute/tp/framework/test_worker_shutdown.py"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg",
+      "logical_path": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg"
     }
   ]
 }

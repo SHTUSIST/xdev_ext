@@ -26,6 +26,7 @@ else:
     switch = None
 FIXTURES = Path(__file__).with_name('fixtures')
 GRUB = (FIXTURES / 'grub_saved.cfg').read_text()
+UBUNTU_HEADER = (FIXTURES / 'grub_ubuntu_generated_header.cfg').read_text()
 ENV = (FIXTURES / 'grub_saved.env').read_text()
 EFI_MANAGER = (FIXTURES / 'efi_boot_manager.txt').read_text()
 EFI_FORWARDER = (FIXTURES / 'efi_grub_forwarder.cfg').read_text()
@@ -64,6 +65,23 @@ class Subject(unittest.TestCase):
 
 
 class Parser(Subject):
+    def test_standard_empty_env_block_prefix_branch_is_inactive_and_supported(self):
+        branch = ('if [ "${env_block}" ] ; then\n'
+                  '  set env_block="(${root})${env_block}"\n'
+                  '  export env_block\n'
+                  '  load_env -f "${env_block}"\nfi\n')
+        config = GRUB.replace('if [ "${next_entry}" ] ; then', branch + 'if [ "${next_entry}" ] ; then')
+        try:
+            parsed = switch.parse_grub(config, ENV)
+        except switch.SwitchError as error:
+            self.fail('inactive standard env_block prefix branch was refused: ' + str(error))
+        self.assertEqual(parsed['default'], GOOD)
+        for changed, environment in ((config, ENV + 'env_block=/other/grubenv\n'),
+                                     (config.replace('(${root})${env_block}', '/other/grubenv'), ENV),
+                                     (config.replace('load_env -f "${env_block}"', 'load_env -f /other/grubenv'), ENV)):
+            with self.subTest(config=changed[:90], environment=environment[-40:]):
+                self.refuse(lambda: switch.parse_grub(changed, environment))
+
     def test_saved_default_requires_standard_environment_load(self):
         for config in (GRUB.replace('  load_env\n', ''),
                        GRUB.replace('  load_env\n', '  load_env -f /other/grubenv\n'),
@@ -162,7 +180,7 @@ class Parser(Subject):
         args = ['root=UUID=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', 'ro', 'console=ttyS0', 'iommu=pt', 'panic=0', 'panic=99']
         line = switch.normalise_cmdline(args, 17)
         self.assertEqual(line.split(), ['root=UUID=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', 'ro', 'console=ttyS0', 'iommu=pt', 'panic=17'])
-        for bad in (0, -1):
+        for bad in (0, -1, 1 << 31, 1 << 64):
             with self.subTest(panic=bad):
                 self.refuse(lambda: switch.normalise_cmdline(args, bad))
 
@@ -310,6 +328,57 @@ class PlanFixture(Subject):
 
 
 class Planning(PlanFixture):
+    def test_selected_verified_standard_savedefault_can_plan_without_changing_good_default(self):
+        config = UBUNTU_HEADER.replace('    linux /boot/', '    savedefault\n    linux /boot/')
+        self.host.text['/boot/grub/grub.cfg'] = config
+        try:
+            snapshot = self.snapshot()
+            plan = switch.validate_plan(snapshot, TRIAL, GOOD, 17)
+        except switch.SwitchError as error:
+            self.fail('verified standard savedefault was refused: ' + str(error))
+        self.assertTrue(snapshot['grub']['savedefault_verified'])
+        self.assertEqual(snapshot['grub']['default'], GOOD)
+        self.assertEqual(plan['good_entry'], GOOD)
+        self.assertEqual(plan['commands'][0][1], '--load')
+        self.assertEqual(plan['commands'][1], ['/usr/sbin/systemctl', 'kexec'])
+        self.assertEqual(len(plan['commands']), 2)  # No GRUB entry body is executed.
+
+    def test_custom_or_overridden_savedefault_and_chosen_prefix_are_not_trusted(self):
+        standard = UBUNTU_HEADER.replace('    linux /boot/', '    savedefault\n    linux /boot/')
+        start = standard.index('function savedefault {')
+        end = standard.index('function initrdfail {', start)
+        helper = standard[start:end]
+        variants = [
+            (standard.replace('saved_entry="${chosen}"', 'saved_entry="simple-test-root"'), ENV),
+            (standard.replace('if [ -z "${boot_once}" ]; then', 'if [ -n "${boot_once}" ]; then'), ENV),
+            (standard.replace('save_env saved_entry', 'save_env -f /other/grubenv saved_entry'), ENV),
+            (standard + '\n' + helper, ENV),
+            (standard[:start] + 'if [ "${unknown_define}" = yes ]; then\n' + helper + 'fi\n' + standard[end:], ENV),
+            (standard, ENV + 'chosen=foreign-menu-prefix\n'),
+            (standard.replace('  load_env\n', '  load_env\n  set chosen=foreign-menu-prefix\n'), ENV),
+            (standard.replace('saved_entry="${chosen}"', 'saved_entry="simple-test-root"').replace(
+                '    savedefault\n', '    if [ "${call_flag}" = yes ]; then savedefault; fi\n'), ENV),
+        ]
+        for config, environment in variants:
+            self.host = FixtureHost()
+            self.host.text['/boot/grub/grub.cfg'] = config
+            self.host.text['/boot/grub/grubenv'] = environment
+            with self.subTest(config=config[start:start + 100], environment=environment[-40:]):
+                self.refuse(self.plan)
+
+    def test_sanitized_actual_ubuntu_header_is_inspectable_with_empty_recovery_state(self):
+        self.host.text['/boot/grub/grub.cfg'] = UBUNTU_HEADER
+        try:
+            snapshot = switch.collect_snapshot(self.host)
+        except switch.SwitchError as error:
+            self.fail('standard generated Ubuntu header was refused during inspection: ' + str(error))
+        self.assertEqual(snapshot['grub']['default'], GOOD)
+        self.assertIn('uefi-firmware', snapshot['grub']['entries'])
+        for active in ('1', '2', 'unknown'):
+            self.host.text['/boot/grub/grubenv'] = ENV + 'initrdfail=' + active + '\n'
+            with self.subTest(recovery=active):
+                self.refuse(lambda: switch.collect_snapshot(self.host))
+
     def test_selected_conditional_good_entry_or_parent_submenu_is_refused(self):
         start = GRUB.index("  menuentry 'Known good Linux'")
         end = GRUB.index('\n  }', start) + len('\n  }')
@@ -471,7 +540,7 @@ class Planning(PlanFixture):
             with self.subTest(fault=fault):
                 self.refuse(self.plan)
 
-    def test_selected_entry_savedefault_and_variable_image_are_unsafe(self):
+    def test_selected_entry_unverified_savedefault_or_variable_image_is_unsafe(self):
         for command in ('savedefault', 'linux ${unresolved_image} root=UUID=AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'):
             self.host = FixtureHost()
             if command == 'savedefault':
