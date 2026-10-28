@@ -87,7 +87,12 @@ latency intervals. Use `--operation echo --mode d1 --depth 1` for the real opaqu
 Rank 0 creates and checks the payload on the GPU; rank 1 independently checks
 its received message and copies it directly into its separately admitted TX
 allocation on the GPU. Both ranks release RX only after actual CUDA last use
-and complete TX terminal custody before the interval ends. Rank 0 reports
+and complete TX terminal custody before the interval ends. After terminal
+done publication, both local sessions must report cumulative kernel END
+completion through that iteration. One monotonic timeout bounds the two-session
+statistics poll; abort, held/sequestered custody and native errors reject the
+interval. Future iteration in-flight work does not substitute for completion of
+the measured iteration. Rank 0 reports
 full RTT on its own host clock; rank 1 reports local reply completion. No
 cross-host timestamp subtraction or measured one-way latency is implemented.
 Half an RTT is only a symmetric estimate and is not emitted as a measurement.

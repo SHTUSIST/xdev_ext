@@ -118,11 +118,6 @@ int main(int argc,char **argv) {
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   for(bool tx:{true,false}) {
-    xdev_ext_mech_stats statistics{};
-    NATIVE(xdev_ext_session_wait(xdev_ext_peer_endpoint_session(tx?echo.view.tx_endpoint:echo.view.rx_endpoint),int(o.timeout_ns/1000000),&statistics));
-    if(statistics.batches_done!=o.iterations)throw std::runtime_error("echo native completion count mismatch");
-   }
    printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
      o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
    echo.close();owner.close(o.timeout_ns);::close(control.fd);return 0;

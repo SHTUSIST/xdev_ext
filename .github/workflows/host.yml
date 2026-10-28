@@ -44,6 +44,7 @@ jobs:
         run: |
           python3 -m unittest discover -s tests/compute/tp/framework -p 'test_*.py' -v
           python3 -m unittest discover -s tests/compute/tp/eval -p 'test_*.py' -v
+          python3 tests/compute/tp/echo_boundary_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-echo-contracts"
       - name: Standalone production-rule checks
         run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
       - name: CPU mechanism BPF target and scratch ABI contracts

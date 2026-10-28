@@ -7525,6 +7525,34 @@
     {
       "source": "LICENSES/Apache-2.0.txt",
       "logical_path": "LICENSES/Apache-2.0.txt"
+    },
+    {
+      "source": "tests/compute/tp/echo_boundary.cc",
+      "logical_path": "tests/compute/tp/echo_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/echo_boundary_test.py",
+      "logical_path": "tests/compute/tp/echo_boundary_test.py"
+    },
+    {
+      "source": "tests/compute/tp/work_never_replayed_boundary.cc",
+      "logical_path": "tests/compute/tp/work_never_replayed_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/work_never_replayed_test.py",
+      "logical_path": "tests/compute/tp/work_never_replayed_test.py"
+    },
+    {
+      "source": "src/compute/vllm/xdev_tp_vllm/shutdown.py",
+      "logical_path": "src/compute/vllm/xdev_tp_vllm/shutdown.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/fixtures/vllm_worker.py",
+      "logical_path": "tests/compute/tp/framework/fixtures/vllm_worker.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_worker_shutdown.py",
+      "logical_path": "tests/compute/tp/framework/test_worker_shutdown.py"
     }
   ]
 }

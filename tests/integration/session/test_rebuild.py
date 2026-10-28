@@ -6,6 +6,7 @@ No guest, device or arm execution. The private source copy changes only the
 mechanism ABI define; the BPF struct_ops data must expose the new value.
 """
 import hashlib
+import json
 import os
 from pathlib import Path
 import re
@@ -38,10 +39,20 @@ class GuestRebuild(unittest.TestCase):
             source.mkdir(); identity.mkdir()
             # Copy tracked code only: prepared upstream sources, build outputs
             # and the caller's evidence are not inputs to this regression.
-            tracked = subprocess.check_output(['git', '-C', str(REPO), 'ls-files', '-z',
-                                                '--', 'kernel', 'tests/eval']).split(b'\0')
-            for raw in filter(None, tracked):
-                relative = os.fsdecode(raw)
+            receipt = REPO/'view.json'
+            if receipt.is_file():
+                view = json.loads(receipt.read_text())
+                self.assertEqual(view['kind'], 'host-source-view')
+                # A generated view has native paths but no Git index. Its
+                # recorded mapping selects authored inputs, excluding any
+                # prepared upstream tree or untracked build/evidence files.
+                tracked = sorted(name for name in view['source_origins']
+                                 if name.startswith(('kernel/', 'tests/eval/')))
+            else:
+                tracked = [os.fsdecode(raw) for raw in subprocess.check_output(
+                    ['git', '-C', str(REPO), 'ls-files', '-z',
+                     '--', 'kernel', 'tests/eval']).split(b'\0') if raw]
+            for relative in tracked:
                 destination = source/relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(REPO/relative, destination)

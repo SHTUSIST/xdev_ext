@@ -10,6 +10,7 @@
 #include <limits>
 #include <memory>
 #include <string>
+#include <thread>
 #include <vector>
 
 namespace py = pybind11;
@@ -157,12 +158,26 @@ py::dict statistics(State &s) {
   }
   return d;
 }
-int close_native(State &s) {
+int close_native(State &s, bool drain = false) {
   if (s.comm) {
     outside_capture(s);
-    reap(s);
-    // Destroying TP with registry work could free native handles behind us.
-    if (!s.works.empty()) return -EBUSY;
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+      reap(s);
+      if (s.works.empty()) break;
+      for (const auto &work : s.works) {
+        const int rc = xdev_tp_work_query(work.handle);
+        if (rc < 0) return rc;
+      }
+      if (!drain || !s.cfg.timeout_ns) return -EBUSY;
+      const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - start).count();
+      if (uint64_t(elapsed) >= s.cfg.timeout_ns) return -ETIMEDOUT;
+      // A graph user-object callback may release its last reference after
+      // graph destruction returns. Only actual work_destroy success releases
+      // Tensor storage; timeout/external references preserve the whole registry.
+      std::this_thread::yield();
+    }
     s.final_stats = statistics(s);
     int rc = xdev_tp_destroy(s.comm, s.cfg.timeout_ns);
     if (rc) return rc;
@@ -357,23 +372,28 @@ public:
     auto &s = *s_; TORCH_CHECK(s.comm, "xdev TP communicator is closed");
     outside_capture(s);
     const auto start = std::chrono::steady_clock::now();
-    for (const auto &work : s.works) {
-      uint64_t remaining = timeout;
-      if (timeout) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        TORCH_CHECK(uint64_t(elapsed) < timeout, "native completion wait timed out; work retained");
-        remaining -= uint64_t(elapsed);
+    for (;;) {
+      // In particular, do not wait forever on a captured template that never
+      // ran: actual graph-release and no-entry proof can make destroy safe.
+      reap(s);
+      bool pending = false;
+      for (const auto &work : s.works) {
+        const int rc = xdev_tp_work_query(work.handle);
+        TORCH_CHECK(rc >= 0, "native completion wait failed; work retained: ", rc);
+        pending = pending || rc == 1;
       }
-      const int rc = xdev_tp_work_wait(work.handle, remaining);
-      TORCH_CHECK(!rc, "native completion wait failed; work retained: ", rc);
+      if (!pending) return; // close separately requires graph future-use release
+      const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - start).count();
+      TORCH_CHECK(!timeout || uint64_t(elapsed) < timeout,
+                  "native completion wait timed out; work retained");
+      std::this_thread::yield();
     }
-    reap(s); // graph ownership may still prevent release even after completion
   }
   py::dict stats() { return statistics(*s_); }
   size_t retained_work_count() const { return s_->works.size(); }
   void close() {
-    const int rc = close_native(*s_);
+    const int rc = close_native(*s_, true);
     TORCH_CHECK(!rc, "xdev TP close retained live work/resources: ", rc);
   }
 };

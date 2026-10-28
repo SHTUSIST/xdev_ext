@@ -56,6 +56,14 @@ plugin loading and source checks do not establish GPU/model execution.
 
 The fixed upstream GroupCoordinator destroy hook waits and checks native work
 before the original code destroys either ProcessGroup. Unknown native/graph
-users preserve the ProcessGroups and communicator resources. Reset/destroy
-model graph objects before final communicator teardown. Original NCCL/CA
-resources are released only after successful native close.
+users preserve the ProcessGroups and communicator resources.
+
+The fixed V1 worker shutdown hook gates new execute/replay calls, waits existing
+CPU dispatch, invokes the original KV shutdown and synchronizes actual GPU use.
+It clears only the caches of CUDAGraphWrapper instances actually dispatched with
+this backend. It does not reset graph objects held by another caller or search
+objects with gc. Caller-held graph/entry references and unknown graph owner
+types still block native teardown; release those references explicitly. This
+is source and boundary-tested integration of the fixed V1 path, not a GPU/model
+runtime certificate. Original NCCL/CA resources are released only after native
+close succeeds.

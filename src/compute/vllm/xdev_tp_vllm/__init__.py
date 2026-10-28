@@ -246,3 +246,8 @@ def install():
     from vllm.distributed.parallel_state import GroupCoordinator, GraphCaptureContext
     _install_on_class(CudaCommunicator, version=vllm.__version__, factory=checked_factory)
     _install_coordinator(GroupCoordinator, GraphCaptureContext)
+    from vllm.v1.worker.gpu_worker import Worker
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.distributed.parallel_state import get_tp_group
+    from .shutdown import install_worker_shutdown
+    install_worker_shutdown(Worker, CUDAGraphWrapper, get_tp_group)

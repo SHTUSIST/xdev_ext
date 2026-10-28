@@ -2,6 +2,8 @@
 #ifndef TP_EVAL_ECHO_H
 #define TP_EVAL_ECHO_H
 #include "owner.h"
+#include <sched.h>
+#include <time.h>
 struct tp_eval_echo {
  tp_eval_owner &owner;
  const tp_eval_options &options;
@@ -62,6 +64,34 @@ struct tp_eval_echo {
   CU(cuEventRecord(complete_event,owner.stream));CU(cuEventSynchronize(complete_event));
   unsigned bad=0;CU(cuMemcpyDtoH(&bad,owner.bad[0],sizeof(bad)));return bad==0;
  }
+ static uint64_t monotonic_ns() {
+  timespec t{};
+  if(clock_gettime(CLOCK_MONOTONIC,&t))throw std::runtime_error("echo monotonic clock failed");
+  return uint64_t(t.tv_sec)*1000000000ULL+uint64_t(t.tv_nsec);
+ }
+ void wait_native_complete(uint64_t target) {
+  // USER done publication is not kernel END. Only END's cumulative done
+  // counter follows frame/class release. Future iterations can already own
+  // other loans, so whole-session inflight==0 is not a prefix completion rule.
+  const uint64_t begin=monotonic_ns();
+  bool completed[2]={false,false};
+  while(!completed[0] || !completed[1]) {
+   for(unsigned i=0;i<2;++i) {
+    if(completed[i])continue;
+    if(monotonic_ns()-begin>=options.timeout_ns)NATIVE(-ETIMEDOUT);
+    xdev_ext_mech_stats statistics{};
+    auto *session=xdev_ext_peer_endpoint_session(i?view.rx_endpoint:view.tx_endpoint);
+    NATIVE(xdev_ext_session_stats(session,&statistics));
+    if(statistics.last_err)NATIVE(statistics.last_err);
+    if(statistics.batches_abort || statistics.held || statistics.sequestered ||
+       statistics.timeouts || statistics.protocol_err || statistics.rejects)
+     throw std::runtime_error("echo native completion has aborted or retained custody");
+    if(monotonic_ns()-begin>=options.timeout_ns)NATIVE(-ETIMEDOUT);
+    completed[i]=statistics.batches_done>=target;
+   }
+   if(!completed[0] || !completed[1])sched_yield();
+  }
+ }
  bool exchange(uint64_t iteration) {
   uint64_t sequence=options.first_sequence+iteration;
   if(options.rank==0) {
@@ -78,6 +108,7 @@ struct tp_eval_echo {
    copy(rx,tx);done(false,rx);done(true,tx);
   }
   auto terminal=next(true,XDEV_EXT_PEER_TX_TERMINAL,sequence);done(true,terminal);
+  wait_native_complete(iteration+1);
   return true;
  }
  void close() {CU(cuEventDestroy(complete_event));complete_event=nullptr;}

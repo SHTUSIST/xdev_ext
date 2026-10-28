@@ -63,7 +63,8 @@ statistics. Call statistics and synchronization outside stream capture.
 Call `close()` before releasing the endpoint owner. Actual `at::Tensor`
 references keep input/output storage alive until `xdev_tp_work_destroy` succeeds.
 A completed captured template still holds references while CUDA graph/exec
-objects can replay it. Destroy/reset those graph objects before closing the
-communicator. A failed close retains resources. If Python drops a communicator
-whose native work cannot be released, the bridge deliberately preserves its
+objects can replay it. Release caller-owned graph/exec references before
+closing the communicator. Explicit close waits for actual native graph-release callbacks
+up to its configured timeout; it preserves storage and owners on failure.
+If Python drops a communicator whose native work cannot be released, the bridge deliberately preserves its
 state and owner for the process lifetime rather than freeing unknown users.

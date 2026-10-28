@@ -35,6 +35,7 @@ struct xdev_tp_comm {
  std::mutex mutex;
  std::vector<xdev_tp_work *> works;
  bool occupied[template_capacity]{};
+ uint64_t retired_cookie[template_capacity]{};
  std::deque<xdev_tp_trace_record> trace;
 };
 struct xdev_tp_work {
@@ -571,14 +572,42 @@ extern "C" int xdev_tp_trace_read(xdev_tp_comm *c,xdev_tp_trace_record *out,size
  }
  while(*written<capacity && !c->trace.empty()){out[(*written)++]=c->trace.front();c->trace.pop_front();}return 0;
 }
+static int unused_template(xdev_tp_work *w) {
+ auto *c=w->comm;
+ if(c->cfg.mode!=XDEV_TP_D2_GPU || !w->graph || !w->accepted ||
+    !w->graph->released.load(std::memory_order_acquire) ||
+    w->image.core.error || c->stable_error || c->runtime.error)return 1;
+ /* The userobject callback proves all graph/exec references and queued
+  * launches ended, including launches on streams other than capture's. */
+ int rc=context_check(c->cfg.context);if(rc)return rc;
+ CUstreamCaptureStatus capture=CU_STREAM_CAPTURE_STATUS_NONE;
+ rc=drv(cuStreamIsCapturing(w->stream,&capture));if(rc)return rc;
+ if(capture!=CU_STREAM_CAPTURE_STATUS_NONE)return 1;
+ CUresult ready=cuStreamQuery(w->stream);
+ if(ready==CUDA_ERROR_NOT_READY)return 1;
+ if(ready!=CUDA_SUCCESS)return retain(w,drv(ready));
+ DeviceWork observed{};
+ rc=drv(cuMemcpyDtoH(&observed,w->device,sizeof(observed)));
+ if(rc)return retain(w,rc);
+ /* A fresh slot is zero. A reused slot must still contain exactly the
+  * successful prior owner's cookie; none of its counters belong to w. */
+ return observed.owner_cookie==c->retired_cookie[w->slot] &&
+        observed.owner_cookie<w->owner_cookie?0:1;
+}
 extern "C" int xdev_tp_work_destroy(xdev_tp_work *w) {
  if(!w)return -EINVAL;
  auto *c=w->comm;
  std::lock_guard<std::mutex> lock(c->mutex);
- int rc=refresh(w);if(rc)return rc==1?-EBUSY:rc;
+ int rc=refresh(w);
+ bool unused=false;
+ if(rc==1){rc=unused_template(w);unused=!rc;}
+ if(rc)return rc==1?-EBUSY:rc;
  if(w->graph && !w->graph->released.load(std::memory_order_acquire))return -EBUSY;
  rc=drv(cuEventDestroy(w->event));if(rc)return rc;
- if(c->cfg.mode==XDEV_TP_D2_GPU)add_runtime_totals(&c->stats,w->image);
+ if(c->cfg.mode==XDEV_TP_D2_GPU && !unused) {
+  add_runtime_totals(&c->stats,w->image);
+  c->retired_cookie[w->slot]=w->owner_cookie;
+ }
  c->occupied[w->slot]=false;c->works.erase(std::find(c->works.begin(),c->works.end(),w));delete w->graph;delete w;return 0;
 }
 extern "C" int xdev_tp_destroy(xdev_tp_comm *c,uint64_t timeout) {
