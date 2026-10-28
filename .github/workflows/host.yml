@@ -79,6 +79,7 @@ jobs:
           python3 tests/core/program_instances/session/run.py --output "$RUNNER_TEMP/program-session"
           python3 tests/core/program_instances/session/run.py --suite library --output "$RUNNER_TEMP/program-library"
           python3 tests/core/program_instances/session/selection_run.py --output "$RUNNER_TEMP/program-selection"
+          python3 tests/core/program_instances/lifecycle/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/program-native-lifetime"
       - name: BPF compute example algorithms and KVM verdict checks
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/compute_examples/run.py
       - name: Native lifecycle scheduler and teardown contracts

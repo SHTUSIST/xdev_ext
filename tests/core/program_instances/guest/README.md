@@ -5,6 +5,8 @@ callbacks. There is no replacement registry, selected-ops resolver, admission
 predicate or callback invocation in this suite. It requires a kernel built from
 the tested production checkout and BPF objects compiled from its genuine BTF.
 A successful build alone does not certify runtime behavior.
+Enable `CONFIG_XDEV_EXT_MECH_CPU=y` in the target kernel; an XDOMAIN-only
+profile correctly refuses CPU stage creation and cannot run these cases.
 
 Build in a private output directory:
 

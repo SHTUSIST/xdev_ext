@@ -7836,6 +7836,21 @@
       "source": "tests/core/program_instances/session/wire.h",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/wire.h"
+    },
+    {
+      "source": "tests/core/program_instances/lifecycle/cases.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/lifecycle/cases.c"
+    },
+    {
+      "source": "tests/core/program_instances/lifecycle/program_boundary.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/lifecycle/program_boundary.h"
+    },
+    {
+      "source": "tests/core/program_instances/lifecycle/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/lifecycle/run.py"
     }
   ]
 }
