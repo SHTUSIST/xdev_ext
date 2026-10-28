@@ -52,10 +52,17 @@ struct xdev_ext_xd_link {
 	struct mutex ep_mutex;			/* chan[].ep, control dispatch, dead notifications */
 	bool up, going_away, suspended, gone, nhi_gone;
 	bool logged_in, remote_logged_in, e2e;
+	bool receive_ready;			/* native rings + receive paths; lock */
 	u64 local_inc, remote_inc, response_inc, accepted_inc;
 	int down_err;				/* first error for down_local_inc; lock */
 	u64 down_local_inc;			/* incarnation that queued down_work; lock */
 	u32 channels, login_retries;		/* login_retries counts sent requests; ctl_mutex */
+	u32 retry_failures, retry_delay_ms;
+	unsigned long retry_after;
+	bool retry_pending;			/* setup failure budget; reset only on UP */
+	u64 login_attempts, login_errors, version_errors, crc_errors;
+	u64 connect_errors, retries_exhausted, link_ups;
+	int last_error;				/* diagnostics, under lock */
 	atomic_t command_id;
 	struct xdev_ext_xd_login remote_login; /* admitted immutable candidate; lock */
 	struct xdev_ext_xd_login confirmed_login;

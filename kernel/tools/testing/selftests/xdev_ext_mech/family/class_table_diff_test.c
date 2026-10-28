@@ -388,9 +388,8 @@ int main(void)
   EQ(d != NULL, true);
   if (!d)
    continue;
-  /* The only new oracle row. Do not alter old_* or let production
-   * compute its own expected answers. All ids other than 11 still take
-   * the original 713327e comparisons below. */
+  /* XDOMAIN is a new oracle row. Frozen old_* functions remain verbatim;
+   * USER peer_dirs has one explicitly approved extension below. */
   if (c == 11) {
    EQ(xdev_ext_mech_class_known(c), true);
    EQ(xdev_ext_mech_peer_dirs(c), 6);
@@ -417,8 +416,17 @@ int main(void)
    continue;
   }
   EQ(xdev_ext_mech_class_known(c), old_class_known(c));
-  EQ(xdev_ext_mech_peer_dirs(c), old_peer_dirs(c));
-  EQ(d->peer_dirs, old_peer_dirs(c));
+  if (c == XDEV_EXT_MECH_CLASS_USER) {
+   /* Strict USER now consumes a PEER lease in place. The legacy oracle
+    * remains frozen at no PEER support; all other USER properties below
+    * still run through the original parity checks. */
+   EQ(old_peer_dirs(c), 0);
+   EQ(xdev_ext_mech_peer_dirs(c), 2); /* TO_DEVICE only, never FROM_DEVICE */
+   EQ(d->peer_dirs, 2);
+  } else {
+   EQ(xdev_ext_mech_peer_dirs(c), old_peer_dirs(c));
+   EQ(d->peer_dirs, old_peer_dirs(c));
+  }
   EQ(d->family != XDEV_EXT_FAMILY_NONE, old_class_known(c));
   EQ(xdev_ext_mech_class_family(c), d->family);
   if (old_class_known(c)) {

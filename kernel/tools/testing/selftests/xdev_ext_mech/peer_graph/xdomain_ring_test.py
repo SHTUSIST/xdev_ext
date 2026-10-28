@@ -57,6 +57,7 @@ def main():
         for name in absent:
             print("# missing: " + str(kernel / name))
         return 2
+    from xdomain_retention_fixture import retention_unit, descriptor_unit
     here = Path(__file__).resolve().parent
     try:
         source = (args.ring_source or (kernel / names[2])).read_text()
@@ -76,8 +77,9 @@ def main():
         unit = ((here / "xdomain_ring_compat.h").read_text() +
                 '\n#include "include/uapi/linux/xdev_ext_mech.h"\n' +
                 '\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n' +
+                '\n#include "include/linux/xdev_ext_mech_reliable_core.h"\n' +
                 lease + family + no_includes((kernel / names[1]).read_text()) +
-                (here / "xdomain_ring_boundaries.c").read_text() + ring +
+                (here / "xdomain_ring_boundaries.c").read_text() + retention_unit(kernel) + descriptor_unit(kernel) + ring +
                 (here / "xdomain_ring_cases.c").read_text())
     except (OSError, ValueError) as error:
         print("# SETUP_EXTRACTION: " + str(error), file=sys.stderr)

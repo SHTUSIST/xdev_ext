@@ -550,6 +550,9 @@ void xdev_ext_mech_stage_put(struct xdev_ext_mech_stage *st);
  * went away.  Records @err, stops admission, calls ->mark_dead and queues
  * the teardown.
  */
+/* Close admission and drain, without declaring external users quiescent. */
+void xdev_ext_mech_stage_stop(struct xdev_ext_mech_stage *st, int err);
+int xdev_ext_mech_stage_stop_error(struct xdev_ext_mech_stage *st);
 void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st, int err);
 
 /* Any context. */
@@ -629,6 +632,14 @@ void xdev_ext_mech_batch_complete_produced(struct xdev_ext_mech_batch *b,
 /* Any context after native publication: valid bytes reported by this stage. */
 u32 xdev_ext_mech_batch_produced(const struct xdev_ext_mech_batch *b);
 /* Any context: publish one terminal native result using the immutable ticket. */
+enum xdev_ext_mech_external_outcome {
+ XDEV_EXT_MECH_EXTERNAL_QUIESCED = 0,
+ XDEV_EXT_MECH_EXTERNAL_UNKNOWN = 1,
+};
+int xdev_ext_mech_batch_external_complete(
+ struct xdev_ext_mech_batch *b, u64 ticket, int err,
+ enum xdev_ext_mech_external_outcome outcome);
+
 void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b, u64 ticket, int err);
 /* Any context: explicit local cancellation after proving no native owner remains. This
  * cannot report a hardware error; native failures use batch_complete(). */

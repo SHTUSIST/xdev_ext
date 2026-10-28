@@ -77,7 +77,13 @@ static int tb_xdomain_request(struct tb_xdomain *xd,const void *request,size_t s
   assert(live_link->ctl_mutex.held && !live_link->going_away && !live_link->suspended);
   memcpy(&last_request,request,size); requests++; event("request");
   if (during_request) { void (*callback)(void)=during_request; during_request=NULL; callback(); }
-  struct xdev_ext_xd_login_response response={.type=reply_type,.status=reply_status,.incarnation=reply_inc};
+  const struct xdev_ext_xd_login *sent=request;
+  struct xdev_ext_xd_login_response response={.type=reply_type,.status=reply_status,.incarnation=reply_inc,
+      .route_hi=sent->route_hi,.route_lo=sent->route_lo,.length_sn=21,.command_id=sent->command_id,
+      .requester_incarnation=sent->incarnation};
+  memcpy(response.uuid,sent->uuid,16);
+  memcpy(response.initiator_uuid,sent->target_uuid,16);
+  memcpy(response.target_uuid,sent->initiator_uuid,16);
   memcpy(reply,&response,sizeof(response)); return request_result; }
 static int tb_xdomain_response(struct tb_xdomain *xd,const void *packet,size_t size,int type)
 { assert(xd && type==TB_CFG_PKG_XDOMAIN_RESP); const struct xdev_ext_xd_login *h=packet;

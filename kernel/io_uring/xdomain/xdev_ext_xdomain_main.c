@@ -3,12 +3,15 @@
  * registry and the link lifetime. Uses exported Thunderbolt symbols;
  * X3a supplies the synchronous protocol-handler unregister barrier. */
 #include <linux/module.h>
+#include <linux/err.h>
+#include <linux/jiffies.h>
 #include <linux/pci.h>
 #include <linux/pm.h>
 #include <linux/random.h>
 #include <linux/slab.h>
 #include <linux/sysfs.h>
 #include <linux/uuid.h>
+#include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
 
 /* Property directory: aff120c8-4435-4bfd-a46b-30cb3c52f92d (generated for
@@ -68,11 +71,25 @@ static void xdev_ext_xd_new_incarnation(struct xdev_ext_xd_link *xl)
 	while (!inc || inc == xl->local_inc);
 	spin_lock_irq(&xl->lock);
 	xl->local_inc = inc;
+	atomic_set(&xl->command_id, 0);
 	spin_unlock_irq(&xl->lock);
 }
 
+/* ctl_mutex serializes locally originated commands with incarnation changes. */
+static int xdev_ext_xd_next_command_id(struct xdev_ext_xd_link *xl, u32 *id)
+{
+	lockdep_assert_held(&xl->ctl_mutex);
+	/* Leave an exhausted counter saturated until a fresh incarnation is published.
+	 * Neither a retry nor a peer change permits same-incarnation reuse.
+	 */
+	if ((u32)atomic_read(&xl->command_id) == ~0U)
+		return -EOVERFLOW;
+	*id = (u32)atomic_inc_return(&xl->command_id);
+	return 0;
+}
+
 static void xdev_ext_xd_fill_hdr(struct xdev_ext_xd_link *xl, void *pkt, size_t size, u32 type,
-				 const uuid_t *initiator, const uuid_t *target)
+				 const uuid_t *initiator, const uuid_t *target, u32 command_id)
 {
 	struct xdev_ext_xd_login *h = pkt;	/* every packet starts with the same header */
 
@@ -83,7 +100,32 @@ static void xdev_ext_xd_fill_hdr(struct xdev_ext_xd_link *xl, void *pkt, size_t 
 	memcpy(h->initiator_uuid, initiator, 16);
 	memcpy(h->target_uuid, target, 16);
 	h->type = type;
-	h->command_id = atomic_inc_return(&xl->command_id);
+	h->command_id = command_id;
+}
+
+static int xdev_ext_xd_login_reply_check(const struct xdev_ext_xd_login *req,
+				       const struct xdev_ext_xd_login_response *reply)
+{
+	/* The common matcher validates transport size, route and protocol, but
+	 * does not associate our command or endpoint UUIDs. Check the complete
+	 * identity before interpreting status or changing confirmation state.
+	 */
+	if (!req->command_id || !reply->command_id ||
+	    reply->command_id != req->command_id ||
+	    !req->incarnation || reply->requester_incarnation != req->incarnation ||
+	    (reply->length_sn & 0x3f) != (sizeof(*reply) - 12) / 4 ||
+	    (reply->route_hi & ~BIT(31)) != req->route_hi ||
+	    reply->route_lo != req->route_lo ||
+	    !uuid_equal((const uuid_t *)reply->uuid, &xdev_ext_xd_proto_uuid) ||
+	    !uuid_equal((const uuid_t *)reply->uuid, (const uuid_t *)req->uuid) ||
+	    !uuid_equal((const uuid_t *)reply->initiator_uuid,
+			(const uuid_t *)req->target_uuid) ||
+	    !uuid_equal((const uuid_t *)reply->target_uuid,
+			(const uuid_t *)req->initiator_uuid) ||
+	    reply->type != XDEV_EXT_XD_LOGIN_RESPONSE || !reply->incarnation ||
+	    reply->status > MAX_ERRNO)
+		return -EPROTO;
+	return reply->status ? -(int)reply->status : 0;
 }
 
 /* Under xdev_ext_xd_links_lock: the link of this XDomain, or NULL.  Same
@@ -132,7 +174,7 @@ static int xdev_ext_xd_handle_packet(const void *buf, size_t size, void *data)
 	if (l->type == XDEV_EXT_XD_LOGOUT) {
 		if (size == sizeof(*l) &&
 		    (l->length_sn & 0x3f) == (sizeof(*l) - 12) / 4 &&
-		    xl->up && l->incarnation == xl->remote_inc) {
+		    l->command_id && xl->up && l->incarnation == xl->remote_inc) {
 			if (!xl->down_err || xl->down_local_inc != xl->local_inc) {
 				xl->down_err = -ENOLINK;
 				xl->down_local_inc = xl->local_inc;
@@ -147,8 +189,11 @@ static int xdev_ext_xd_handle_packet(const void *buf, size_t size, void *data)
 		ret = 0;
 		goto out;
 	}
-	status = xdev_ext_xd_login_check(l, size, xl->channels) ||
+	status = !l->command_id || xdev_ext_xd_login_check(l, size, xl->channels) ||
 		 l->channels != xl->channels ? EPROTO : 0;
+	if (size >= offsetof(struct xdev_ext_xd_login, proto_version) + sizeof(l->proto_version) &&
+	    l->proto_version != XDEV_EXT_XD_PROTO_VERSION)
+		xl->version_errors++;
 	if (!status) {
 		/* Positive acknowledgement owns one immutable advertisement slot.
 		 * A late current-peer repeat cannot erase a changed candidate. */
@@ -162,13 +207,25 @@ static int xdev_ext_xd_handle_packet(const void *buf, size_t size, void *data)
 			xl->candidate_pending = true;
 			xl->candidate_probe_started = false;
 		}
-		if (!status)
+		if (!status) {
 			queue_work(system_long_wq, &xl->connect_work);
+			/* Accept the advertisement before its paths exist, but only
+			 * acknowledge readiness once this exact peer can reach our
+			 * receive rings. Do not require UP: both peers must be able
+			 * to build paths before either gets its positive response.
+			 */
+			if (!xl->receive_ready || !xl->remote_logged_in ||
+			    xl->accepted_inc != l->incarnation)
+				status = EAGAIN;
+		}
 	}
 	r.incarnation = xl->local_inc;
 	spin_unlock_irq(&xl->lock);
 	xdev_ext_xd_fill_hdr(xl, &r, sizeof(r), XDEV_EXT_XD_LOGIN_RESPONSE,
-			     &xl->local_uuid, &xl->remote_uuid);
+			     (const uuid_t *)l->target_uuid,
+			     (const uuid_t *)l->initiator_uuid, l->command_id);
+	if (size >= offsetof(struct xdev_ext_xd_login, incarnation) + sizeof(l->incarnation))
+		r.requester_incarnation = l->incarnation;
 	r.status = status;
 	tb_xdomain_response(xl->xd, &r, sizeof(r), TB_CFG_PKG_XDOMAIN_RESP);
 out:
@@ -192,6 +249,11 @@ static void xdev_ext_xd_maybe_up(struct xdev_ext_xd_link *xl)
 			xl->chan[c].announced = xl->chan[c].consumed = 0;
 		xl->remote_inc = xl->accepted_inc;
 		xl->up = true;
+		xl->link_ups++;
+		xl->last_error = 0;
+		xl->retry_failures = 0;
+		xl->retry_delay_ms = 0;
+		xl->retry_pending = false;
 	}
 	spin_unlock_irq(&xl->lock);
 }
@@ -204,12 +266,37 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 	struct xdev_ext_xd_login req = {};
 	struct xdev_ext_xd_login candidate;
 	bool pending_candidate, rejected_candidate = false;
-	u32 c;
+	unsigned long now;
+	u32 c, command_id;
 	int ret;
 
 	mutex_lock(&xl->ctl_mutex);
-	if (xl->going_away || xl->suspended || xl->gone || xl->nhi_gone ||
-	    xl->login_retries >= XDEV_EXT_XD_LOGIN_RETRIES ||
+	if (READ_ONCE(xl->going_away) || READ_ONCE(xl->suspended) ||
+	    READ_ONCE(xl->gone) || READ_ONCE(xl->nhi_gone))
+		goto out;
+	/* Setup failures consume one link-wide budget. A changed nonce or a
+	 * new advertisement cannot accelerate the pending retry or reset it.
+	 */
+	if (xl->retry_pending) {
+		if (xl->retry_failures >= XDEV_EXT_XD_LOGIN_RETRIES)
+			goto out;
+		now = jiffies;
+		if (time_before(now, xl->retry_after)) {
+			mod_delayed_work(system_long_wq, &xl->login_work,
+					 xl->retry_after - now);
+			goto out;
+		}
+		if (!xl->remote_logged_in) {
+			spin_lock_irq(&xl->lock);
+			pending_candidate = xl->candidate_pending || xl->confirmed_pending;
+			spin_unlock_irq(&xl->lock);
+			if (pending_candidate) {
+				queue_work(system_long_wq, &xl->connect_work);
+				goto out;
+			}
+		}
+	}
+	if (xl->login_retries >= XDEV_EXT_XD_LOGIN_RETRIES ||
 	    !xl->channels || xl->channels > XDEV_EXT_XD_MAX_CHANNELS)
 		goto out;
 	/* A response before the peer's LOGIN waits for connect_work. Once
@@ -217,8 +304,16 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 	if (xl->logged_in && (!xl->remote_logged_in ||
 	    xl->response_inc == xl->accepted_inc))
 		goto out;
+	ret = xdev_ext_xd_next_command_id(xl, &command_id);
+	if (ret) {
+		spin_lock_irq(&xl->lock);
+		xl->login_errors++;
+		xl->last_error = ret;
+		spin_unlock_irq(&xl->lock);
+		goto out;
+	}
 	xdev_ext_xd_fill_hdr(xl, &req, sizeof(req), XDEV_EXT_XD_LOGIN, &xl->local_uuid,
-			     &xl->remote_uuid);
+			     &xl->remote_uuid, command_id);
 	req.proto_version = XDEV_EXT_XD_PROTO_VERSION;
 	req.channels = xl->channels;
 	req.ctl_tx_path = xl->ctl_out_hopid;
@@ -234,10 +329,20 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 	req.caps = xl->e2e ? XDEV_EXT_XD_CAP_E2E : 0;
 	/* Every request consumes the budget, including successful mismatches. */
 	xl->login_retries++;
+	spin_lock_irq(&xl->lock);
+	xl->login_attempts++;
+	spin_unlock_irq(&xl->lock);
 	ret = tb_xdomain_request(xl->xd, &req, sizeof(req), TB_CFG_PKG_XDOMAIN_RESP, &reply,
 				 sizeof(reply), TB_CFG_PKG_XDOMAIN_RESP, XDEV_EXT_XD_LOGIN_TIMEOUT_MS);
-	if (!ret && reply.type == XDEV_EXT_XD_LOGIN_RESPONSE &&
-	    !reply.status && reply.incarnation) {
+	if (!ret)
+		ret = xdev_ext_xd_login_reply_check(&req, &reply);
+	if (ret || (xl->remote_logged_in && reply.incarnation != xl->accepted_inc)) {
+		spin_lock_irq(&xl->lock);
+		xl->login_errors++;
+		xl->last_error = ret ? ret : -EPROTO;
+		spin_unlock_irq(&xl->lock);
+	}
+	if (!ret) {
 		xl->logged_in = true;
 		xl->response_inc = reply.incarnation;
 		if (xl->remote_logged_in && xl->response_inc != xl->accepted_inc) {
@@ -277,6 +382,11 @@ static void xdev_ext_xd_login_work(struct work_struct *work)
 		}
 		spin_unlock_irq(&xl->lock);
 	}
+	if (xl->login_retries == XDEV_EXT_XD_LOGIN_RETRIES) {
+		spin_lock_irq(&xl->lock);
+		xl->retries_exhausted++;
+		spin_unlock_irq(&xl->lock);
+	}
 out:
 	mutex_unlock(&xl->ctl_mutex);
 }
@@ -292,6 +402,8 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err,
 		return;
 	spin_lock_irq(&xl->lock);
 	xl->up = false;
+	xl->last_error = err;
+	xl->receive_ready = false;
 	xl->remote_inc = 0;
 	/* Faults queued for the detached peer epoch cannot end its successor. */
 	xl->down_err = 0;
@@ -321,11 +433,14 @@ static void xdev_ext_xd_link_down_locked(struct xdev_ext_xd_link *xl, int err,
 	 * and the control callback takes ep_mutex. */
 	xdev_ext_xd_rings_stop(xl);
 	xdev_ext_xd_paths_disable(xl);
+	spin_lock_irq(&xl->lock);
 	xl->remote_logged_in = false;
-	xl->logged_in = false;
 	xl->accepted_inc = 0;
+	spin_unlock_irq(&xl->lock);
+	xl->logged_in = false;
 	xl->response_inc = 0;
-	if (xl->going_away || xl->suspended || xl->nhi_gone)
+	if (READ_ONCE(xl->going_away) || READ_ONCE(xl->suspended) ||
+	    READ_ONCE(xl->nhi_gone))
 		return;
 	if (renew_local)
 		xdev_ext_xd_new_incarnation(xl);
@@ -364,10 +479,20 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	struct xdev_ext_xd_link *xl = container_of(work, struct xdev_ext_xd_link, connect_work);
 	struct xdev_ext_xd_login l;
 	bool confirmed, pending, start_probe = false;
+	unsigned long now;
+	int ret;
 
 	mutex_lock(&xl->ctl_mutex);
-	if (xl->going_away || xl->suspended || xl->gone || xl->nhi_gone)
+	if (READ_ONCE(xl->going_away) || READ_ONCE(xl->suspended) ||
+	    READ_ONCE(xl->gone) || READ_ONCE(xl->nhi_gone))
 		goto out;
+	if (xl->retry_failures >= XDEV_EXT_XD_LOGIN_RETRIES)
+		goto out;
+	now = jiffies;
+	if (xl->retry_pending && time_before(now, xl->retry_after)) {
+		mod_delayed_work(system_long_wq, &xl->login_work, xl->retry_after - now);
+		goto out;
+	}
 	spin_lock_irq(&xl->lock);
 	confirmed = xl->confirmed_pending &&
 		    xl->confirmed_login.incarnation == xl->response_inc;
@@ -416,13 +541,16 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	/* stop may discover that the NHI is going away. */
 	if (xl->nhi_gone)
 		goto out;
-	if (xdev_ext_xd_rings_start(xl))
+	ret = xdev_ext_xd_rings_start(xl);
+	if (ret)
 		goto fail;			/* rings_start stopped what it started */
-	if (xdev_ext_xd_paths_enable(xl, &l))
+	ret = xdev_ext_xd_paths_enable(xl, &l);
+	if (ret)
 		goto fail;			/* paths_enable disabled what it enabled */
+	spin_lock_irq(&xl->lock);
 	xl->remote_logged_in = true;
 	xl->accepted_inc = l.incarnation;
-	spin_lock_irq(&xl->lock);
+	xl->receive_ready = true;
 	if (xl->candidate_pending && xl->remote_login.incarnation == l.incarnation) {
 		xl->candidate_pending = false;
 		xl->candidate_probe_started = false;
@@ -434,10 +562,37 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	xdev_ext_xd_maybe_up(xl);
 	goto out;
 fail:
-	/* The peer already got a positive response: restart our login so it
-	 * comes back (thunderbolt-net unwinds the same steps on failure,
-	 * drivers/net/thunderbolt/main.c:677-687). */
-	xdev_ext_xd_link_down_locked(xl, -EIO, true);
+	/* Keep the admitted advertisement and local incarnation.  Requiring
+	 * another unsolicited LOGIN here loses recovery when the peer has
+	 * already received a response. The budget spans all advertisements.
+	 */
+	spin_lock_irq(&xl->lock);
+	xl->receive_ready = false;
+	xl->remote_logged_in = false;
+	xl->accepted_inc = 0;
+	spin_unlock_irq(&xl->lock);
+	xdev_ext_xd_rings_stop(xl);
+	xdev_ext_xd_paths_disable(xl);
+	spin_lock_irq(&xl->lock);
+	if (confirmed && !xl->candidate_pending) {
+		xl->confirmed_login = l;
+		xl->confirmed_pending = true;
+	}
+	xl->connect_errors++;
+	xl->last_error = ret;
+	xl->retry_failures++;
+	xl->retry_delay_ms = xl->retry_delay_ms ?
+		min_t(u32, xl->retry_delay_ms * 2,
+		      XDEV_EXT_XD_RELOGIN_MS * XDEV_EXT_XD_LOGIN_RETRIES) :
+		XDEV_EXT_XD_RELOGIN_MS;
+	xl->retry_pending = true;
+	xl->retry_after = jiffies + msecs_to_jiffies(xl->retry_delay_ms);
+	if (xl->retry_failures == XDEV_EXT_XD_LOGIN_RETRIES)
+		xl->retries_exhausted++;
+	spin_unlock_irq(&xl->lock);
+	if (xl->retry_failures < XDEV_EXT_XD_LOGIN_RETRIES && !xl->nhi_gone)
+		mod_delayed_work(system_long_wq, &xl->login_work,
+				 msecs_to_jiffies(xl->retry_delay_ms));
 out:
 	mutex_unlock(&xl->ctl_mutex);
 }
@@ -457,7 +612,8 @@ static void xdev_ext_xd_down_work(struct work_struct *work)
 	spin_unlock_irq(&xl->lock);
 	/* ctl_mutex keeps a new connection from changing incarnation between
 	 * the comparison and teardown. A queued old fault cannot end it. */
-	if (same_inc && !xl->going_away && !xl->suspended && !xl->gone && !xl->nhi_gone)
+	if (same_inc && !READ_ONCE(xl->going_away) && !READ_ONCE(xl->suspended) &&
+	    !READ_ONCE(xl->gone) && !READ_ONCE(xl->nhi_gone))
 		xdev_ext_xd_link_down_locked(xl, err, true);
 	mutex_unlock(&xl->ctl_mutex);
 }
@@ -466,11 +622,20 @@ static void xdev_ext_xd_down_work(struct work_struct *work)
 static void xdev_ext_xd_send_logout(struct xdev_ext_xd_link *xl)
 {
 	struct xdev_ext_xd_login req = {};
+	u32 command_id;
+	int ret;
 
 	if (!xl->up || xl->gone || xl->nhi_gone)
 		return;
+	ret = xdev_ext_xd_next_command_id(xl, &command_id);
+	if (ret) {
+		spin_lock_irq(&xl->lock);
+		xl->last_error = ret;
+		spin_unlock_irq(&xl->lock);
+		return;
+	}
 	xdev_ext_xd_fill_hdr(xl, &req, sizeof(req), XDEV_EXT_XD_LOGOUT, &xl->local_uuid,
-			     &xl->remote_uuid);
+			     &xl->remote_uuid, command_id);
 	spin_lock_irq(&xl->lock);
 	req.incarnation = xl->local_inc;
 	spin_unlock_irq(&xl->lock);
@@ -480,14 +645,21 @@ static void xdev_ext_xd_send_logout(struct xdev_ext_xd_link *xl)
 /* Set @flag (going_away or suspended) and stop every work item. */
 static void xdev_ext_xd_quiesce_work(struct xdev_ext_xd_link *xl, bool *flag)
 {
-	mutex_lock(&xl->ctl_mutex);
+	/* Publish cancellation before waiting for ctl_mutex or a worker.
+	 * The CM may already hold tb->lock while it unbinds this service.
+	 */
 	spin_lock_irq(&xl->lock);
-	*flag = true;
+	WRITE_ONCE(*flag, true);
 	spin_unlock_irq(&xl->lock);
-	mutex_unlock(&xl->ctl_mutex);
 	cancel_delayed_work_sync(&xl->login_work);
 	cancel_work_sync(&xl->connect_work);
 	cancel_work_sync(&xl->down_work);
+	/* A connect/down worker already running when cancellation was
+	 * published can have queued a final retry after the first cancel.
+	 * Both producers are now stopped. Drain that retry before the link
+	 * is removed; login_work observes the published cancellation flag.
+	 */
+	cancel_delayed_work_sync(&xl->login_work);
 }
 /* xdomain login end */
 
@@ -523,9 +695,51 @@ static ssize_t xdev_ext_link_state_show(struct device *dev,
 		token, local_inc, remote_inc, up, closing, nhi_gone, channels);
 }
 static DEVICE_ATTR_RO(xdev_ext_link_state);
+static ssize_t xdev_ext_link_stats_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct xdev_ext_xd_link *xl = tb_service_get_drvdata(tb_to_service(dev));
+	struct xdev_ext_requester_retention_stats retained;
+	u64 token, login_attempts, login_errors, version_errors, crc_errors;
+	u64 connect_errors, retries_exhausted, link_ups;
+	u32 retry_delay_ms, e2e_rx;
+	int last_error;
+
+	(void)attr;
+	mutex_lock(&xl->ctl_mutex);
+	xdev_ext_requester_retention_snapshot(xl->nhi_pdev, &retained);
+	spin_lock_irq(&xl->lock);
+	token = xl->token;
+	login_attempts = xl->login_attempts;
+	login_errors = xl->login_errors;
+	version_errors = xl->version_errors;
+	crc_errors = xl->crc_errors;
+	connect_errors = xl->connect_errors;
+	retries_exhausted = xl->retries_exhausted;
+	link_ups = xl->link_ups;
+	last_error = xl->last_error;
+	retry_delay_ms = xl->retry_delay_ms;
+	e2e_rx = xl->e2e;
+	spin_unlock_irq(&xl->lock);
+	mutex_unlock(&xl->ctl_mutex);
+	return sysfs_emit(buf,
+		"version=1 token=%llu login_attempts=%llu login_errors=%llu "
+		"version_errors=%llu crc_errors=%llu connect_errors=%llu "
+		"retries_exhausted=%llu link_ups=%llu last_error=%d retry_delay_ms=%u "
+		"e2e_rx=%u e2e_tx=0 generations=%u retained_generations=%u "
+		"reserved_bytes=%llu retained_bytes=%llu global_reserved_bytes=%llu "
+		"global_retained_bytes=%llu global_limit=%llu\n",
+		token, login_attempts, login_errors, version_errors, crc_errors,
+		connect_errors, retries_exhausted, link_ups, last_error, retry_delay_ms,
+		e2e_rx, retained.generations, retained.retained_generations,
+		retained.reserved_bytes, retained.retained_bytes,
+		retained.global_reserved_bytes, retained.global_retained_bytes, retained.global_limit);
+}
+static DEVICE_ATTR_RO(xdev_ext_link_stats);
 static struct attribute *xdev_ext_xd_attrs[] = {
 	&dev_attr_xdev_ext_link.attr,
 	&dev_attr_xdev_ext_link_state.attr,
+	&dev_attr_xdev_ext_link_stats.attr,
 	NULL,
 };
 ATTRIBUTE_GROUPS(xdev_ext_xd);

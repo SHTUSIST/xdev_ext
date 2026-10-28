@@ -10,16 +10,18 @@
  * kernel) and a slot table describing each held batch's frames.  ->submit
  * hands a batch out through the ready ring and parks it in this class's
  * held table; ->progress, on the session worker, reaps the completion ring,
- * applies the reported lengths through the same claim-checked call as the
- * CPU class and completes the batch, or cancels held batches at their
- * deadline, on STOP and when the stage is dead.  Frames keep the INPLACE
+ * applies CPU completion lengths through the claim-checked CPU call.
+ * Legacy CPU work is cancelled on deadline/STOP/death. Strict external work
+ * retains custody until matching status-zero completion or UNKNOWN isolation;
+ * STOP/deadline allow a bounded grace for late completion. Frames keep the INPLACE
  * lifecycle of a fixed CPU transform: OUT_PENDING/INFLIGHT while held,
  * republished READY with the new length on completion.
  *
  * The session holds no reference to the user stage file, only to its
  * object, so the file's release (the last descriptor and mapping gone, for
- * example at process exit) marks the stage dead.  The kernel reads each
- * user-written value once and validates its own copy.
+ * example at process exit) marks the stage dead. An external attach owns an
+ * independent object reference until explicit detach, including after file
+ * release. The kernel reads each user-written value once and validates its copy.
  */
 #include <linux/anon_inodes.h>
 #include <linux/eventfd.h>
@@ -48,6 +50,7 @@ struct xdev_ext_user_obj {
 	spinlock_t lock;		/* st, bound */
 	struct xdev_ext_mech_stage *st;	/* the live bound stage, NULL otherwise */
 	bool bound;			/* bound once: one stage of one session */
+	bool external_ctl, attached;	/* independent external control-region pin */
 	void *region;			/* vmalloc_user(), mapped by user space */
 	struct xdev_ext_user_ring_offsets off;
 	u32 entries;
@@ -59,6 +62,9 @@ struct xdev_ext_user_held {
 	struct xdev_ext_mech_batch *b;	/* NULL: slot not held */
 	u64 ticket;
 	unsigned long deadline;		/* jiffies */
+	unsigned long grace_deadline;
+	int stop_err;
+	bool strict, draining;
 	u32 nr;
 	u32 in_len[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 cap[XDEV_EXT_MECH_MAX_FRAMES];
@@ -81,6 +87,8 @@ struct xdev_ext_user_stage {
 	u32 ready_prod, done_cons;		/* the kernel's own indices */
 	u32 kflags;				/* the kernel's own copy of kernel_flags */
 	bool varlen, dead, stopped, full;
+	bool strict, draining, ring_bad;
+	int stop_err;
 	struct xdev_ext_user_held held[];	/* depth */
 };
 
@@ -139,6 +147,50 @@ static void xdev_ext_user_end(struct xdev_ext_mech_stage *st, u32 slot, int err,
 		xdev_ext_mech_batch_complete(b, ticket, err);
 }
 
+/* Worker only: close publication and retain every published external lease. */
+static void xdev_ext_user_drain(struct xdev_ext_mech_stage *st, int err,
+				  unsigned long now)
+{
+	struct xdev_ext_user_stage *us = st->priv;
+	u32 i;
+
+	if (!us->draining) {
+		us->draining = true;
+		us->stop_err = err;
+		us->kflags |= XDEV_EXT_USER_K_DRAINING;
+		xdev_ext_user_stopped(us);
+	}
+	for (i = 0; i < us->depth; i++) {
+		struct xdev_ext_user_held *h = &us->held[i];
+
+		if (!h->b || h->draining)
+			continue;
+		h->draining = true;
+		h->stop_err = us->stop_err;
+		h->grace_deadline = now +
+			(msecs_to_jiffies(XDEV_EXT_USER_STRICT_GRACE_MS) ?: 1);
+	}
+}
+
+/* Only the winning external completion may retire the notification slot.
+ * UNKNOWN still retains batch storage and payload/provider pins in the core.
+ */
+static void xdev_ext_user_external_end(struct xdev_ext_mech_stage *st,
+					 u32 slot, int err,
+					 enum xdev_ext_mech_external_outcome outcome)
+{
+	struct xdev_ext_user_stage *us = st->priv;
+	struct xdev_ext_user_held *h = &us->held[slot];
+
+	if (xdev_ext_mech_batch_external_complete(h->b, h->ticket, err, outcome)) {
+		xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_REJECTS, 1);
+		return;
+	}
+	h->b = NULL;
+	us->nr_held--;
+	WRITE_ONCE(us->slots[slot].ticket, 0);
+}
+
 /*
  * Worker, the batch already IN_FLIGHT: describe it in the slot table, hand
  * it out through the ready ring and hold it until its completion entry,
@@ -158,6 +210,8 @@ static int xdev_ext_user_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_
 
 	if (READ_ONCE(us->dead))
 		return -ENODEV;
+	if (us->strict && us->draining)
+		return us->stop_err;
 	if (!xdev_ext_mech_session_admits(st->s))
 		return -ESHUTDOWN;
 	if (us->staged != b)
@@ -211,13 +265,19 @@ static int xdev_ext_user_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_
 	WRITE_ONCE(r->batch_id, xdev_ext_mech_batch_id(b));
 	WRITE_ONCE(r->key, xdev_ext_mech_batch_key(b));
 	WRITE_ONCE(r->arg, us->staged_arg);
-	us->ready_prod++;
-	smp_store_release(&us->hdr->ready_prod, us->ready_prod);
+	/* Install custody before ready_prod makes the lease visible externally. */
 	h->ticket = ticket;
 	h->deadline = jiffies + us->timeout;
+	h->strict = us->strict;
+	h->draining = false;
+	h->stop_err = 0;
+	h->grace_deadline = 0;
 	h->b = b;
-	/* Deadlines grow with submit order: only a first held batch arms ->progress. */
-	if (!us->nr_held++)
+	us->nr_held++;
+	us->ready_prod++;
+	smp_store_release(&us->hdr->ready_prod, us->ready_prod);
+	/* Only a first held batch arms ->progress. */
+	if (us->nr_held == 1)
 		xdev_ext_mech_stage_kick(st);
 	smp_mb();	/* ready_prod before user_flags; pairs with the user's barrier */
 	if (us->evfd && (READ_ONCE(us->hdr->user_flags) & XDEV_EXT_USER_F_SLEEPING))
@@ -240,6 +300,58 @@ static void xdev_ext_user_reap_one(struct xdev_ext_mech_stage *st, const struct 
 		return;
 	}
 	h = &us->held[e->slot];
+	if (us->strict) {
+		unsigned long now = jiffies;
+
+		/* A zero done cannot override owner death, STOP, or an elapsed lease. */
+		if (READ_ONCE(us->dead)) {
+			xdev_ext_user_external_end(st, e->slot, -EPIPE,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			return;
+		}
+		if (!xdev_ext_mech_session_admits(st->s))
+			xdev_ext_user_drain(st, xdev_ext_mech_stage_stop_error(st), now);
+		if (h->draining && time_after_eq(now, h->grace_deadline)) {
+			xdev_ext_user_external_end(st, e->slot, -ETIMEDOUT,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			return;
+		}
+		err = xdev_ext_user_status_err(e->status, &bad);
+		if (err) {
+			if (bad)
+				xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+			xdev_ext_user_external_end(st, e->slot, h->stop_err ?: err,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			return;
+		}
+		/* Copy and validate the complete fixed-length report. Do not write
+		 * batch lengths before the external completion has won its claim.
+		 * Strict arg1=0/no VARLEN means the validated lengths never change.
+		 */
+		for (i = 0; i < h->nr; i++)
+			out[i] = READ_ONCE(us->slots[e->slot].f[i].out_len);
+		for (i = 0; i < h->nr; i++)
+			if (!xdev_ext_user_len_ok(h->in_len[i], out[i], h->cap[i], 0, false))
+				err = -EPROTO;
+		if (err)
+			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+		/* STOP may have arrived while copying user-controlled lengths. */
+		if (READ_ONCE(us->dead)) {
+			xdev_ext_user_external_end(st, e->slot, -EPIPE,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			return;
+		}
+		if (!xdev_ext_mech_session_admits(st->s))
+			xdev_ext_user_drain(st, xdev_ext_mech_stage_stop_error(st), jiffies);
+		if (h->draining && time_after_eq(jiffies, h->grace_deadline)) {
+			xdev_ext_user_external_end(st, e->slot, -ETIMEDOUT,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			return;
+		}
+		xdev_ext_user_external_end(st, e->slot, h->stop_err ?: err,
+					   XDEV_EXT_MECH_EXTERNAL_QUIESCED);
+		return;
+	}
 	err = xdev_ext_user_status_err(e->status, &bad);
 	/* Every length is checked before the first one is applied. */
 	for (i = 0; !err && i < h->nr; i++) {
@@ -275,8 +387,25 @@ static bool xdev_ext_user_reap(struct xdev_ext_mech_stage *st)
 	WRITE_ONCE(us->hdr->kernel_flags, us->kflags);
 	smp_mb();
 	for (;;) {
-		n = xdev_ext_user_done_window(smp_load_acquire(&us->hdr->done_prod),
-					      &us->done_cons, us->entries, &bad);
+		if (us->strict) {
+			u32 prod = smp_load_acquire(&us->hdr->done_prod);
+
+			if (us->ring_bad)
+				return false;
+			if (xdev_ext_user_ring_count(prod, us->done_cons, us->entries) < 0) {
+				us->ring_bad = true;
+				xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+				xdev_ext_mech_stage_stop(st, -EPROTO);
+				xdev_ext_user_drain(st, -EPROTO, jiffies);
+				return false;
+			}
+			/* Validate and consume the same producer snapshot. */
+			n = prod - us->done_cons;
+			bad = false;
+		} else {
+			n = xdev_ext_user_done_window(smp_load_acquire(&us->hdr->done_prod),
+						      &us->done_cons, us->entries, &bad);
+		}
 		if (bad)
 			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_REJECTS, 1);
 		if (!n) {
@@ -310,6 +439,55 @@ static bool xdev_ext_user_reap(struct xdev_ext_mech_stage *st)
 	}
 }
 
+/* Same worker as ->poll; one bounded ring pass, then lease deadlines. */
+static unsigned long xdev_ext_user_strict_progress(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_user_stage *us = st->priv;
+	unsigned long now = jiffies, next = 0;
+	u32 i;
+
+	if (!xdev_ext_mech_session_admits(st->s))
+		xdev_ext_user_drain(st, xdev_ext_mech_stage_stop_error(st), now);
+	for (i = 0; i < us->depth && !us->draining; i++) {
+		if (us->held[i].b && time_after_eq(now, us->held[i].deadline)) {
+			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_TIMEOUTS, 1);
+			xdev_ext_mech_stage_stop(st, -ETIMEDOUT);
+			xdev_ext_user_drain(st, -ETIMEDOUT, now);
+		}
+	}
+	if (xdev_ext_user_reap(st))
+		xdev_ext_mech_stage_kick(st);
+	now = jiffies;
+	for (i = 0; i < us->depth && us->nr_held; i++) {
+		struct xdev_ext_user_held *h = &us->held[i];
+		unsigned long due;
+
+		if (!h->b)
+			continue;
+		if (READ_ONCE(us->dead)) {
+			xdev_ext_user_external_end(st, i, -EPIPE, XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			continue;
+		}
+		/* Recheck admission after reaping: an UNKNOWN can close it. */
+		if (!xdev_ext_mech_session_admits(st->s))
+			xdev_ext_user_drain(st, xdev_ext_mech_stage_stop_error(st), now);
+		due = h->draining ? h->grace_deadline : h->deadline;
+		if (h->draining && time_after_eq(now, due)) {
+			xdev_ext_user_external_end(st, i, -ETIMEDOUT,
+						   XDEV_EXT_MECH_EXTERNAL_UNKNOWN);
+			continue;
+		}
+		/* STOP need not leave generic POLL armed. Keep accepting late done
+		 * until grace expires even when the GPU sends no CPU kick.
+		 */
+		if (h->draining)
+			next = 1;
+		else if (!next || due - now < next)
+			next = time_after_eq(now, due) ? 1 : due - now;
+	}
+	return next;
+}
+
 /*
  * Worker (progress work, the kick ioctl, the deadline timer and STOP):
  * reap, then cancel what passed its deadline, or everything when the stage
@@ -324,6 +502,8 @@ static unsigned long xdev_ext_user_progress(struct xdev_ext_mech_stage *st)
 	unsigned long now, next = 0;
 	u32 i;
 
+	if (us->strict)
+		return xdev_ext_user_strict_progress(st);
 	if (xdev_ext_user_reap(st))
 		xdev_ext_mech_stage_kick(st);
 	now = jiffies;
@@ -350,7 +530,19 @@ static unsigned long xdev_ext_user_progress(struct xdev_ext_mech_stage *st)
 	return next;
 }
 
-/* Any context, never blocks: the user side went away; ->progress cancels. */
+/* Generic session POLL: bounded and serialized with progress/STOP work. */
+static int xdev_ext_user_poll(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_user_stage *us = st->priv;
+	u32 before = us->done_cons;
+	unsigned long next = xdev_ext_user_strict_progress(st);
+
+	if (next && us->nr_held)
+		xdev_ext_mech_stage_kick(st);
+	return us->done_cons - before;
+}
+
+/* Any context, never blocks: progress cancels CPU work or isolates strict work. */
 static void xdev_ext_user_mark_dead(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_user_stage *us = st->priv;
@@ -396,18 +588,47 @@ static int xdev_ext_user_mmap(struct file *file, struct vm_area_struct *vma)
 static long xdev_ext_user_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
 	struct xdev_ext_user_obj *obj = file->private_data;
+	bool put = false;
 	long ret = -ENOTCONN;
 
-	if (cmd != XDEV_EXT_USER_IOC_KICK)
+	if (cmd != XDEV_EXT_USER_IOC_KICK && cmd != XDEV_EXT_USER_IOC_CTL_ATTACH &&
+	    cmd != XDEV_EXT_USER_IOC_CTL_DETACH)
 		return -ENOTTY;
 	if (arg)
 		return -EINVAL;
 	spin_lock(&obj->lock);
-	if (obj->st) {
-		xdev_ext_mech_stage_kick(obj->st);
+	if (cmd == XDEV_EXT_USER_IOC_KICK) {
+		if (obj->st) {
+			xdev_ext_mech_stage_kick(obj->st);
+			ret = 0;
+		}
+	} else if (!obj->external_ctl) {
+		ret = -EOPNOTSUPP;
+	} else if (cmd == XDEV_EXT_USER_IOC_CTL_ATTACH) {
+		if (obj->bound)
+			ret = -EBUSY;
+		else if (obj->attached)
+			ret = -EALREADY;
+		else {
+			kref_get(&obj->ref);
+			obj->attached = true;
+			ret = 0;
+		}
+	} else if (!obj->attached) {
+		ret = -ENOENT;
+	} else if (obj->st) {
+		ret = -EBUSY;
+	} else {
+		/* Owner protocol: CUDA synchronization and unregister precede this
+		 * release. The kernel cannot verify a dishonest owner's GPU claim.
+		 */
+		obj->attached = false;
+		put = true;
 		ret = 0;
 	}
 	spin_unlock(&obj->lock);
+	if (put)
+		kref_put(&obj->ref, xdev_ext_user_obj_free);
 	return ret;
 }
 
@@ -438,6 +659,7 @@ int xdev_ext_mech_user_stage_create(void __user *uarg)
 	kref_init(&obj->ref);
 	spin_lock_init(&obj->lock);
 	obj->entries = r.entries;
+	obj->external_ctl = r.flags & XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL;
 	err = xdev_ext_user_layout(r.entries, PAGE_SIZE, &obj->off);
 	if (err)
 		goto free;
@@ -490,12 +712,18 @@ static int xdev_ext_user_bind(struct xdev_ext_mech_stage *st,
 	struct xdev_ext_user_stage *us;
 	struct xdev_ext_user_obj *obj;
 	struct file *f;
-	bool varlen;
+	bool varlen, strict = u->flags & XDEV_EXT_USER_F_STRICT_ASYNC;
 	s64 delta;
 	int err;
 
-	/* The user thread addresses frames through the pool's CPU mapping. */
-	if (!pool->vaddr)
+	/* PEER payload is described by allocation offsets, never a CPU pointer. */
+	if (pool->kind == XDEV_EXT_MECH_POOL_PEER) {
+		if (!strict || u->arg1 || (u->flags & XDEV_EXT_USER_F_VARLEN))
+			return -EOPNOTSUPP;
+	} else if (!pool->vaddr) {
+		return -EOPNOTSUPP;
+	}
+	if (st->poll && !strict)
 		return -EOPNOTSUPP;
 	err = xdev_ext_user_stage_check(u, pool->frame_size, &delta, &varlen);
 	if (err)
@@ -521,6 +749,7 @@ static int xdev_ext_user_bind(struct xdev_ext_mech_stage *st,
 	us->evfd = obj->evfd;
 	us->delta = delta;
 	us->varlen = varlen;
+	us->strict = strict;
 	us->timeout = msecs_to_jiffies(u->arg0) ?: 1;
 	us->entries = obj->entries;
 	us->depth = depth;
@@ -529,6 +758,8 @@ static int xdev_ext_user_bind(struct xdev_ext_mech_stage *st,
 	spin_lock(&obj->lock);
 	if (obj->bound)
 		err = -EBUSY;
+	else if (obj->attached && !strict)
+		err = -EOPNOTSUPP;
 	else if (obj->entries < depth)
 		err = -EINVAL;
 	if (!err) {
@@ -543,6 +774,14 @@ static int xdev_ext_user_bind(struct xdev_ext_mech_stage *st,
 	if (err)
 		kfree(us);
 	return err;
+}
+
+/* A rejected external completion must never become permission to unbind. */
+static int xdev_ext_user_unbind_checked(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_user_stage *us = st->priv;
+
+	return us->strict && us->nr_held ? -EBUSY : 0;
 }
 
 /* After drain (nothing held), process context. */
@@ -567,16 +806,17 @@ static const struct xdev_ext_comp_hooks xdev_ext_user_comp_hooks = {
 	.producer_visibility = XDEV_EXT_CAP_NOT_WIRED,
 };
 
-/* No ->poll: F_POLL would requeue the poll work for the whole user compute. */
+/* Strict USER can consume GPU completion sequences through generic POLL. */
 static const struct xdev_ext_mech_class_ops xdev_ext_user_class = {
 	.class_id = XDEV_EXT_MECH_CLASS_USER,
 	.fam.comp = &xdev_ext_user_comp_hooks,
 	.desc_size = sizeof(struct xdev_ext_user_desc), .desc_cap = 1,
 	.owner = THIS_MODULE,
 	.bind = xdev_ext_user_bind, .unbind = xdev_ext_user_unbind,
+	.unbind_checked = xdev_ext_user_unbind_checked,
 	.default_build = xdev_ext_user_default_build, .validate = xdev_ext_user_validate,
 	.submit = xdev_ext_user_submit, .progress = xdev_ext_user_progress,
-	.mark_dead = xdev_ext_user_mark_dead,
+	.mark_dead = xdev_ext_user_mark_dead, .poll = xdev_ext_user_poll,
 };
 
 static int __init xdev_ext_mech_user_init(void)

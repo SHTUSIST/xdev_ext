@@ -1512,3 +1512,15 @@
 !/tests/eval/mechanism_variants/test_old_ticket_cache.py
 
 !/tests/eval/mechanism_variants/test_trace_config.py
+
+# Real NHI ring and XDOMAIN host composition.
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/nhi_stack_test.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/nhi_stack_expected.json
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi_source.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi_compat.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi_api.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi_boundary.h
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/stack_nhi_cases.c
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/test_nhi_stack_mutations.py
+!/kernel/tools/testing/selftests/xdev_ext_mech/xdomain/NHI_STACK.md

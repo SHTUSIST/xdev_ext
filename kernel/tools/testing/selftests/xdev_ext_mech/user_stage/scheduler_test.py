@@ -64,10 +64,24 @@ def generate():
     user_names = ["xdev_ext_user_default_build", "xdev_ext_user_validate", "xdev_ext_user_stopped",
                   "xdev_ext_user_end", "xdev_ext_user_submit", "xdev_ext_user_reap_one",
                   "xdev_ext_user_reap", "xdev_ext_user_progress", "xdev_ext_user_mark_dead"]
+    # Newly reachable custody/stop helpers remain real production functions.
+    core_names += ["xdev_ext_mech_stage_stop", "xdev_ext_mech_stage_stop_error",
+                   "xdev_ext_mech_session_stop", "xdev_ext_mech_notify_locked",
+                   "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked",
+                   "xdev_ext_mech_count", "xdev_ext_mech_stop_reason",
+                   "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
+    user_names += ["xdev_ext_user_drain", "xdev_ext_user_external_end",
+                   "xdev_ext_user_strict_progress"]
     functions = [definition(core, n) for n in core_names]
     functions += [definition(user, n) for n in user_names]
     prototypes = "\n".join(f[:f.index("\n{")] + ";" for f in functions)
     code = (HERE / "scheduler_fixture.c").read_text()
+    outcome = re.search(r'^enum xdev_ext_mech_external_outcome \{\n.*?^\};', abi, re.M | re.S)
+    if outcome:
+        structs += "\n" + outcome[0]
+    # Remove obsolete one-line fixture helpers now extracted from production.
+    for name in ("xdev_ext_mech_session_admits", "xdev_ext_mech_stop_reason", "xdev_ext_mech_count"):
+        code = re.sub(r'^static [^\n]*\b' + name + r'\([^\n]*\n', '', code, flags=re.M)
     code = code.replace("/* STRUCTURES */", structs)
     code = code.replace("/* PROTOTYPES */", prototypes)
     code = code.replace("/* PRODUCTION */", "\n".join(functions))

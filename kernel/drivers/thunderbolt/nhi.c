@@ -674,6 +674,13 @@ struct tb_ring_storage {
 static LIST_HEAD(tb_ring_quarantine);
 static DEFINE_SPINLOCK(tb_ring_quarantine_lock);
 
+/* Public accounting uses the actual native descriptor layout. */
+size_t tb_ring_descriptor_bytes(unsigned int size)
+{
+	return (size_t)size * sizeof(struct ring_desc);
+}
+EXPORT_SYMBOL_GPL(tb_ring_descriptor_bytes);
+
 static struct tb_ring *tb_ring_alloc(struct tb_nhi *nhi, u32 hop, int size,
 				     bool transmit, unsigned int flags,
 				     int e2e_tx_hop, u16 sof_mask, u16 eof_mask,

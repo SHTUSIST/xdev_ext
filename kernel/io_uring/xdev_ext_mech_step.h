@@ -170,8 +170,11 @@ static inline int xdev_ext_user_stage_check(const struct xdev_ext_mech_stage_uap
 	__s64 d = (__s64)u->arg1;
 
 	if (u->class_id != XDEV_EXT_MECH_CLASS_USER ||
-	    u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || (u->flags & ~XDEV_EXT_USER_F_VARLEN))
+	    u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || (u->flags & ~(XDEV_EXT_USER_F_VARLEN | XDEV_EXT_USER_F_STRICT_ASYNC)))
 		return -EINVAL;
+	if ((u->flags & XDEV_EXT_USER_F_STRICT_ASYNC) &&
+	    ((u->flags & XDEV_EXT_USER_F_VARLEN) || d))
+		return -EOPNOTSUPP;
 	if (u->fd < 0)
 		return -EBADF;
 	if (!u->arg0 || u->arg0 > XDEV_EXT_USER_DEADLINE_MAX_MS)
@@ -280,6 +283,9 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 
    if (err)
     return err;
+   if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+       !(u->flags & XDEV_EXT_USER_F_STRICT_ASYNC))
+    return -EOPNOTSUPP;
    for (j = i + 1; (delta || varlen) && j < c->nr_stages; j++) {
     if (xdev_ext_mech_stage_role(&c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
      break;
@@ -338,6 +344,17 @@ static inline int xdev_ext_mech_start_check(const struct xdev_ext_mech_start *st
 	if ((st->flags & ~XDEV_EXT_MECH_START_KNOWN_FLAGS) || rx_first ||
 	    !st->nr_batches || st->nr_batches > XDEV_EXT_MECH_U64_MAX - st->first_seq)
 		return -EINVAL;
+	if (st->flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES) {
+		if (!(st->flags & XDEV_EXT_MECH_START_F_USER_FRAMES))
+			return -EINVAL;
+		if (pool_kind == XDEV_EXT_MECH_POOL_XSK ||
+		    (st->flags & XDEV_EXT_MECH_START_F_USER_SPANS))
+			return -EOPNOTSUPP;
+	}
+	if (pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+	    (st->flags & XDEV_EXT_MECH_START_F_USER_FRAMES) &&
+	    !(st->flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES))
+		return -EOPNOTSUPP;
 	if ((st->flags & XDEV_EXT_MECH_START_F_USER_SPANS) &&
 	    (!(st->flags & XDEV_EXT_MECH_START_F_USER_FRAMES) ||
 	     (st->flags & XDEV_EXT_MECH_START_F_RECYCLE) ||
@@ -347,6 +364,26 @@ static inline int xdev_ext_mech_start_check(const struct xdev_ext_mech_start *st
 		return st->nr_user_frames || st->user_frames ||
 		       (st->flags & XDEV_EXT_MECH_START_F_RECYCLE) ? -EINVAL : 0;
 
+	if (st->flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES) {
+		if (!frames || (pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM &&
+				pool_kind != XDEV_EXT_MECH_POOL_PEER))
+			return -EINVAL;
+		if (st->flags & XDEV_EXT_MECH_START_F_RECYCLE) {
+			if (!st->nr_user_frames || st->nr_user_frames % frames ||
+			    st->nr_user_frames / frames > st->nr_batches)
+				return -EINVAL;
+			need = st->nr_user_frames;
+		} else {
+			if (st->nr_batches > XDEV_EXT_MECH_U32_MAX / frames)
+				return -EINVAL;
+			need = st->nr_batches * frames;
+			if (st->nr_user_frames != need)
+				return -EINVAL;
+		}
+		if (need > pool_frames)
+			return -ENOSPC;
+		return st->user_frames ? 0 : -EFAULT;
+	}
 	if (pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !frames ||
 	    st->nr_batches > XDEV_EXT_MECH_U32_MAX / frames)
 		return -EINVAL;

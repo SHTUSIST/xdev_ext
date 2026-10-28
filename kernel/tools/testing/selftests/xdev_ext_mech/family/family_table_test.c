@@ -59,7 +59,12 @@ int main(void)
 		EXPECT_EQ(actual, expected);
 		EXPECT_EQ(actual != 0, xdev_ext_mech_class_known(c));
 		known += xdev_ext_mech_class_known(c);
-		if (xdev_ext_mech_peer_dirs(c))
+		if (c == XDEV_EXT_MECH_CLASS_USER) {
+			/* Approved strict USER extension: compute family remains 3,
+			 * while only TO_DEVICE can consume the external PEER lease. */
+			EXPECT_EQ(actual, 3);
+			EXPECT_EQ(xdev_ext_mech_peer_dirs(c), 2);
+		} else if (xdev_ext_mech_peer_dirs(c))
 			EXPECT_EQ(actual == 1 || actual == 2, true);
 		/* NULL hooks impose no new requirement; class validity remains the
 		 * registry's separate responsibility. All known classes must work. */

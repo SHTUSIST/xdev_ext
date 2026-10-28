@@ -60,7 +60,7 @@ struct delayed_work { struct work_struct work; };
 struct device { int id; const char *name; };
 static const char *dev_name(const struct device *d) { assert(d && d->name);return d->name; }
 struct pci_dev { struct device dev; int refs; };
-struct tb_nhi { struct pci_dev *pdev; bool going_away; };
+struct tb_nhi { struct pci_dev *pdev; bool going_away; unsigned int hop_count; };
 struct tb { struct tb_nhi *nhi; };
 struct tb_xdomain { struct tb *tb;struct device dev; };
 struct tb_service { int unused; };
@@ -132,3 +132,7 @@ typedef struct { _Atomic long long counter; } atomic64_t;
 #define ATOMIC64_INIT(v) { .counter=(v) }
 static long long atomic64_inc_return(atomic64_t *p) {return atomic_fetch_add(&p->counter,1)+1;}
 static void dev_info(const struct device *,const char *,...);
+
+/* Kernel facilities required by the built-in retention core. */
+#define EXPORT_SYMBOL_GPL(n)
+static void list_del(struct list_head *n) { n->prev->next=n->next; n->next->prev=n->prev; }

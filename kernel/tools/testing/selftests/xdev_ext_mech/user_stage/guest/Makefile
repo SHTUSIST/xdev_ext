@@ -7,10 +7,15 @@ CC ?= cc
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -pthread
 .PHONY: all clean
-all: user_stage_e2e
+all: user_stage_e2e ordered_frames_guest
 user_stage_e2e: user_stage_e2e.c $(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(LIBDIR)/libxdev_ext.h \
 		$(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h $(KERNEL_SRC)/include/uapi/linux/io_uring.h
 	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi -I$(LIBDIR) user_stage_e2e.c \
 		$(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(LDFLAGS) -o $@ -lbpf -lelf -lz -pthread
+ordered_frames_guest: ordered_frames_guest.c $(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h \
+                $(KERNEL_SRC)/include/uapi/linux/io_uring.h \
+                $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h \
+                ../../../xdev_ext_peer/guest/sw_provider_uapi.h
+	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi $< $(LDFLAGS) -o $@ -lbpf -lelf -lz -pthread
 clean:
-	$(RM) user_stage_e2e
+	$(RM) user_stage_e2e ordered_frames_guest

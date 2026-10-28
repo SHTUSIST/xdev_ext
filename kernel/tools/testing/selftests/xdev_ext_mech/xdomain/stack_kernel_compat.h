@@ -27,6 +27,9 @@ struct stack_config {
  uint64_t mapping_base[2], local_inc[2], generation[2], first_seq;
  uint32_t depth, nr_frames, frame_size, native_elems, channels;
  struct stack_span span[STACK_MAX_FRAMES];
+ /* Explicit host adapter stress options, not production XDOMAIN settings. */
+ bool nhi_poll, nhi_batch;
+ uint32_t nhi_ring_size; /* 0 preserves production geometry; data rings only */
 };
 struct stack_session_config {
  uint32_t direction, stage_index, groups;
@@ -44,7 +47,10 @@ enum stack_event_kind {
  STACK_EV_RETAIN, STACK_EV_REJECT, STACK_EV_LOCK_VIOLATION,
  STACK_EV_FORBIDDEN, STACK_EV_UNHANDLED, STACK_EV_QUIESCED,
  STACK_EV_START_RESULT, STACK_EV_STOP_RESULT, STACK_EV_HANDLER,
- STACK_EV_DEVICE_PUT, STACK_EV_CONTROL_DONE = 32, STACK_EV_SCHED_STEP = 33
+ STACK_EV_DEVICE_PUT, STACK_EV_CONTROL_DONE = 32, STACK_EV_SCHED_STEP = 33,
+ STACK_EV_NHI_POST, STACK_EV_NHI_COMPLETE, STACK_EV_NHI_CALLBACK,
+ STACK_EV_NHI_DOORBELL, STACK_EV_NHI_RETIRE,
+ STACK_EV_NHI_IRQ_ALLOC, STACK_EV_NHI_IRQ_FREE
 };
 /* event.id strictly increases; owner identifies the accepted ring_frame;
  * seq/group are actual native/batch identities, not test-case counters.
@@ -76,7 +82,8 @@ struct stack_stage_facts {
  uint32_t reply_admissions, rts_admissions;
 };
 enum stack_scheduler_step { STACK_STEP_WORK=1, STACK_STEP_PROGRESS,
- STACK_STEP_FINALIZE, STACK_STEP_NATIVE };
+ STACK_STEP_FINALIZE, STACK_STEP_NATIVE, STACK_STEP_NHI_NOTIFY,
+ STACK_STEP_NHI_POLL };
 /* SCHED_STEP: seq=actual pump invocation serial, bytes=step ordinal1..N,
  * length=passed budget, flags=the actual step kind. Emitted only for execution;
  * exhausted budgets do not execute or emit a step. */
@@ -233,8 +240,12 @@ typedef struct{u8 b[16];} uuid_t;
 static inline bool uuid_equal(const uuid_t*a,const uuid_t*b){return !memcmp(a,b,16);}
 static inline void uuid_copy(uuid_t*a,const uuid_t*b){memcpy(a,b,16);}
 struct device{void *owner;const char *name;unsigned endpoint;};
-struct pci_dev{struct device dev;unsigned refs;};
+struct pci_dev{struct device dev;unsigned refs;bool msix_enabled;};
+#ifdef STACK_REAL_NHI
+#include "stack_nhi_compat.h"
+#else
 struct tb_nhi{struct pci_dev *pdev;bool going_away;};
+#endif
 struct tb{struct tb_nhi*nhi;};
 struct tb_xdomain{u64 route;const uuid_t*local_uuid,*remote_uuid;struct tb*tb;struct device dev;};
 struct tb_service{struct device dev;void*drvdata;struct tb_xdomain*parent;u32 prtcstns;};
@@ -251,6 +262,7 @@ struct attribute_group{struct attribute**attrs;};
 struct tb_service_driver{struct{void*owner;const char*name;const struct attribute_group**dev_groups;void*pm;}driver;int(*probe)(struct tb_service*,const struct tb_service_id*);void(*remove)(struct tb_service*);const struct tb_service_id*id_table;};
 struct tb_protocol_handler{const uuid_t*uuid;int(*callback)(const void*,size_t,void*);void*data;struct list_head list;};
 #define TB_CFG_PKG_XDOMAIN_RESP 1
+#ifndef STACK_REAL_NHI
 struct tb_ring;struct ring_frame;
 typedef void(*ring_cb)(struct tb_ring*,struct ring_frame*,bool);
 struct ring_frame{dma_addr_t buffer_phy;ring_cb callback;struct list_head list;u32 size:12,flags:12,eof:4,sof:4;};
@@ -264,6 +276,7 @@ struct tb_ring *tb_ring_alloc_rx(struct tb_nhi*,int,int,unsigned,int,u16,u16,voi
 void tb_ring_start(struct tb_ring*);void tb_ring_stop(struct tb_ring*);void tb_ring_free(struct tb_ring*);void tb_ring_free_quarantined(struct tb_ring*);
 int tb_ring_tx(struct tb_ring*,struct ring_frame*);int tb_ring_rx(struct tb_ring*,struct ring_frame*);
 struct device*tb_ring_dma_device(struct tb_ring*);
+#endif
 int tb_xdomain_alloc_in_hopid(struct tb_xdomain*,int);int tb_xdomain_alloc_out_hopid(struct tb_xdomain*,int);
 void tb_xdomain_release_in_hopid(struct tb_xdomain*,int);void tb_xdomain_release_out_hopid(struct tb_xdomain*,int);
 int tb_xdomain_enable_paths(struct tb_xdomain*,int,int,int,int);int tb_xdomain_disable_paths(struct tb_xdomain*,int,int,int,int);

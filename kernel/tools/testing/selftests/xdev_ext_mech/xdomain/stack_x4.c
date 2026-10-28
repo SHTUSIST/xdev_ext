@@ -1,6 +1,19 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #define STACK_INTERNAL
 #include "stack_kernel_compat.h"
+#ifdef STACK_REAL_NHI
+/* Observe the real API calls and supply explicitly selected host adapters.
+ * The production source and its callbacks are included without body edits. */
+#include "stack_nhi_api.h"
+#define tb_ring_alloc_tx stack_ring_alloc_tx
+#define tb_ring_alloc_rx stack_ring_alloc_rx
+#define tb_ring_start stack_ring_start
+#define tb_ring_stop stack_ring_stop
+#define tb_ring_free stack_ring_free
+#define tb_ring_free_quarantined stack_ring_free_quarantined
+#define tb_ring_tx stack_ring_tx
+#define tb_ring_rx stack_ring_rx
+#endif
 #define xdev_ext_xd_class_ctl stack_record_dispatch
 #include "../../../../../io_uring/xdomain/xdev_ext_xdomain_ring.c"
 void stack_x4_control_pressure(struct xdev_ext_xd_link*x,bool full){

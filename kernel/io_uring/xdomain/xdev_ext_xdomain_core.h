@@ -64,13 +64,13 @@ struct xdev_ext_xd_login_response {
 	__u32 type, command_id;
 	__u32 status, rsvd0, rsvd1;
 	__u64 incarnation;
-	__u32 reserved[2];
+	__u64 requester_incarnation;
 }; /* 96 bytes */
 
 #define XDEV_EXT_XD_LOGIN			1U
 #define XDEV_EXT_XD_LOGIN_RESPONSE	2U
 #define XDEV_EXT_XD_LOGOUT		3U
-#define XDEV_EXT_XD_PROTO_VERSION		1U
+#define XDEV_EXT_XD_PROTO_VERSION		2U
 #define XDEV_EXT_XD_CAP_E2E		(1U << 0)
 #define XDEV_EXT_XD_PDF_START		1U
 #define XDEV_EXT_XD_PDF_END		2U
@@ -217,6 +217,23 @@ xdev_ext_xd_layout_elems(const struct xdev_ext_mech_layout *l)
 	per_frame = ((__u64)l->seg_len + XDEV_EXT_XDOMAIN_MAX_FRAME - 1) /
 		    XDEV_EXT_XDOMAIN_MAX_FRAME;
 	total = frames * per_frame;
+	return total <= (__u32)~0U ? (__u32)total : 0;
+}
+
+/* Exact wire count: the final source frame may be shorter than seg_len. */
+static inline __u32
+xdev_ext_xd_layout_count(const struct xdev_ext_mech_layout *l)
+{
+	__u64 full, tail, per_frame, total;
+
+	if (!l->group_bytes || !l->seg_len)
+		return 0;
+	full = l->group_bytes / l->seg_len;
+	tail = l->group_bytes % l->seg_len;
+	per_frame = ((__u64)l->seg_len + XDEV_EXT_XDOMAIN_MAX_FRAME - 1) /
+		    XDEV_EXT_XDOMAIN_MAX_FRAME;
+	total = full * per_frame +
+		(tail + XDEV_EXT_XDOMAIN_MAX_FRAME - 1) / XDEV_EXT_XDOMAIN_MAX_FRAME;
 	return total <= (__u32)~0U ? (__u32)total : 0;
 }
 

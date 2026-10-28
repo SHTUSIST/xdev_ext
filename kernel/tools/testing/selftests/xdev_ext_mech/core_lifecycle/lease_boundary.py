@@ -53,6 +53,11 @@ def build(scenario, directory, nr_frames=None, name='probe', patches=()):
         if old not in fixture:
             raise RuntimeError('lease fixture boundary changed: ' + old)
         fixture = fixture.replace(old, new, 1)
+    # These legacy scenarios never create an ordered START. Fail loudly if a
+    # queue path is reached instead of silently modeling ordered custody.
+    fixture = fixture.replace('struct xdev_ext_mech_batch {',
+                              'struct xdev_ext_mech_batch { bool ordered_loan;')
+    fixture = fixture.replace(marker, 'static int xdev_ext_mech_start_queue_release(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b,bool seq){(void)s;(void)b;(void)seq;abort();}\n' + marker)
     for fn in FUNCTIONS:
         body = function(production, fn)
         if fn == 'xdev_ext_mech_transform_reserve' and 'xdev_ext_mech_transform_alias_free' not in FUNCTIONS:
