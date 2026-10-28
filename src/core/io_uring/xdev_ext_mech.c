@@ -1777,7 +1777,8 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
  if (s->st[0].cls->batch_end)
   s->st[0].cls->batch_end(&s->st[0], b,
                         how == XDEV_EXT_MECH_END_DONE ? 0 : (err ?: -EIO));
-	if (b->ordered_loan && how != XDEV_EXT_MECH_END_DONE)
+	if (b->ordered_loan && how != XDEV_EXT_MECH_END_DONE &&
+	    xdev_ext_mech_session_admits(s))
 		xdev_ext_mech_session_stop(s, err ?: -EIO);
 	xdev_ext_mech_retry_kick(s);
 	/* @b no longer holds back a later key at an ordered stage. */

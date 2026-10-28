@@ -63,6 +63,17 @@ static void finish_message(struct xdev_ext_mech_session*s,struct xdev_ext_mech_b
  b->bs.state=XDEV_EXT_MECH_B_DONE;
  xdev_ext_mech_end(s,b,XDEV_EXT_MECH_END_DONE,0);
 }
+/* The existing native boundary certifies quiescence before actual END. No
+ * publisher or native-error latch is reimplemented by this terminal test. */
+static void finish_failed_message(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,int err){
+ unsigned slot=(unsigned)(b-worker_batches);assert(slot<2);
+ for(unsigned i=0;i<2;i++){
+  assert(!xdev_ext_mech_life_republish(&s->life[b->f[i].index],lease[slot][i],0,b->f[i].data_len));
+  assert(!xdev_ext_mech_pool_frame_move(&s->pool,b->f[i].index,XDEV_EXT_MECH_F_INFLIGHT,XDEV_EXT_MECH_F_HELD));
+ }
+ b->bs.state=XDEV_EXT_MECH_B_ABORT;
+ xdev_ext_mech_end(s,b,XDEV_EXT_MECH_END_ABORT,err);
+}
 static int worker_scenario(const char*mode){
  struct xdev_ext_mech_session s;struct io_xdev_ext_umem_mech m;__u8 state[12];
  u32 selected[]={7,3,9,1};int bad=0;
@@ -99,7 +110,35 @@ static int worker_scenario(const char*mode){
  for(unsigned i=0;i<2;i++)for(unsigned j=0;j<2;j++)
   bad|=check(observed_index[i][j]==expected[i][j],"worker bound a different frame/order");
  bad|=check(observed_key[0]==101&&observed_key[1]==102,"worker changed initial message keys");
- if(!strcmp(mode,"unknown")){
+ if(!strcmp(mode,"clean_stop_cancel")||!strcmp(mode,"active_error")||!strcmp(mode,"stop_error")){
+  bool active_error=!strcmp(mode,"active_error"),real_error=active_error||!strcmp(mode,"stop_error");
+  int expected=real_error?-EIO:0;
+  if(!active_error){
+   xdev_ext_mech_session_stop(&s,0);
+   bad|=check(!s.last_err&&!s.stop_err,"clean STOP invented an error before END");
+   /* Model the documented already-latched native error precondition through
+    * the real fatal-stop latch. Prior origin tests cover real publication. */
+   if(real_error)xdev_ext_mech_session_stop(&s,-EIO);
+  }
+  finish_failed_message(&s,observed[0],real_error?-EIO:-ESHUTDOWN);
+  bad|=check(s.last_err==expected&&s.stop_err==expected,"ordered END replaced clean STOP or the first real error");
+  bad|=check(!xdev_ext_mech_session_admits(&s),"failed ordered work allowed a later ordinal");
+  finish_message(&s,observed[1]);xdev_ext_mech_stop_work(&s.stop_work);xdev_ext_mech_start_more(&s);
+  bad|=check(s.last_err==expected&&s.stop_err==expected,"loan return or later DONE changed terminal error origin");
+  for(unsigned i=0;i<12;i++)bad|=check(state[i]==XDEV_EXT_MECH_F_USER,"quiesced terminal path lost or reclaimed an ordered loan");
+  bad|=check(s.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==4,"terminal cancellation did not return each selected loan exactly once");
+  bad|=check(!allocator_calls&&admitted==2&&!s.ss.inflight&&!s.start_left,"terminal cancellation allocated or restarted work");
+  printf("ORDERED_END_ORIGIN %s last_err=%d stop_err=%d published=%llu admitted=%u failures=%d\n",
+         mode,s.last_err,s.stop_err,(unsigned long long)s.cnt[XDEV_EXT_MECH_CNT_PUBLISHED],admitted,bad);
+  return bad;
+ }
+ if(!strcmp(mode,"unknown")||!strcmp(mode,"stop_unknown")){
+  if(!strcmp(mode,"stop_unknown")){
+   xdev_ext_mech_session_stop(&s,0);
+   /* Real UNKNOWN completion has already recorded its fatal status before
+    * terminal custody is landed. This fixture begins at that END boundary. */
+   xdev_ext_mech_session_stop(&s,-ETIMEDOUT);
+  }
   struct xdev_ext_mech_batch *uncertain=observed[0];
   u64 word[2]={s.life[7].ctrl,s.life[3].ctrl};
   for(unsigned i=0;i<2;i++)assert(!xdev_ext_mech_pool_frame_move(&s.pool,uncertain->f[i].index,XDEV_EXT_MECH_F_INFLIGHT,XDEV_EXT_MECH_F_SEQUESTERED));
@@ -113,6 +152,7 @@ static int worker_scenario(const char*mode){
   bad|=check(state[7]==XDEV_EXT_MECH_F_SEQUESTERED&&s.life[7].ctrl==word[0]&&s.life[3].ctrl==word[1],"subsequent drain revived UNKNOWN template");
   bad|=check(worker_used[uncertain-worker_batches],"UNKNOWN discarded retained batch storage");
   bad|=check(s.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==2&&!allocator_calls,"UNKNOWN return count includes retained frames or allocator used");
+  bad|=check(s.last_err==-ETIMEDOUT&&s.stop_err==-ETIMEDOUT,"UNKNOWN terminal path lost its recorded error");
   return bad;
  }
  if(recycle){
@@ -146,6 +186,11 @@ static int worker_scenario(const char*mode){
 
 def adapt(fixture, core):
     fixture=fixture.replace('#define WARN_ON_ONCE(x) (!!(x))', 'static bool test_warn(bool x){return x;}\n#define WARN_ON_ONCE(x) test_warn(!!(x))')
+    # END must use the actual state-sensitive core latch. The legacy recycle
+    # boundary's simplified latch otherwise creates a second false error.
+    old='static void xdev_ext_mech_set_err_locked(struct xdev_ext_mech_session *s,int err) {if(err&&!s->stop_err)s->last_err=err;}'
+    if fixture.count(old)!=1:raise RuntimeError('ordered worker error-latch boundary changed')
+    fixture=fixture.replace(old,function(core,'xdev_ext_mech_set_err_locked'),1)
     # The boundary allocates batch storage only, never frame indices.
     marker='static bool xdev_ext_mech_batch_put_locked('
     at=fixture.index(marker)
@@ -174,6 +219,10 @@ class OrderedWorker(unittest.TestCase):
     def test_unknown_template_retains_custody_refs_and_generation(self):self.probe('unknown')
     def test_exact_nonlowest_frames_one_pass(self):self.probe('one_pass')
     def test_busy_template_cannot_be_skipped_or_reused_before_last_use(self):self.probe('recycle')
+    def test_clean_stop_quiesced_cancel_returns_loans_without_latching_error(self):self.probe('clean_stop_cancel')
+    def test_first_active_ordered_failure_still_closes_admission(self):self.probe('active_error')
+    def test_real_error_already_latched_after_stop_survives_end(self):self.probe('stop_error')
+    def test_unknown_after_stop_retains_custody_and_error(self):self.probe('stop_unknown')
     def probe(self,mode):
         run=subprocess.run([str(self.binary),mode],capture_output=True,text=True,timeout=10)
         self.assertEqual(run.returncode,0,run.stdout+run.stderr)
