@@ -7221,6 +7221,10 @@
       "logical_path": "tests/eval/short_io_shim.c"
     },
     {
+      "source": "tests/support/layout/test_prepare_sources_offline.py",
+      "logical_path": "tests/support/layout/test_prepare_sources_offline.py"
+    },
+    {
       "source": "tests/support/layout/test_adapter.py",
       "logical_path": "tests/support/layout/test_adapter.py"
     },
