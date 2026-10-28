@@ -9,10 +9,12 @@ int main()
     xdev_tp_stats stats{};
     xdev_tp_work_stats work_stats{};
     xdev_tp_trace_record record{};
+    xdev_tp_request request{};
     size_t written = 0;
     int rc = xdev_tp_create(&config, &comm);
     rc += xdev_tp_allreduce_sum(comm, 0, 0, 0, XDEV_TP_F32, nullptr, 1, &work);
     rc += xdev_tp_logits_gather(comm, 0, 0, 0, 0, XDEV_TP_F32, 0, 0, nullptr, 1, &work);
+    rc += xdev_tp_submit_batch(comm, &request, 1, nullptr, 1, &work);
     rc += xdev_tp_work_query(work);
     rc += xdev_tp_work_wait(work, 1);
     rc += xdev_tp_work_get_stats(work, &work_stats);

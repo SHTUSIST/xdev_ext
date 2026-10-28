@@ -26,10 +26,18 @@ struct Qualification {
  uint32_t mode, depth, capturing;
  MemoryFacts input, output;
 };
+struct TraceRecord {
+ uint64_t sequence, timestamp, payload_bytes, wire_bytes, logical_inflight;
+ uint32_t rank, kind, clock, operation;
+ int32_t error;
+ uint32_t reserved;
+};
 struct Runtime {
  uint64_t next_sequence, invocations, completed, failed, first_sequence, last_sequence;
  uint64_t inflight, high_water, last_rx_ticket;
  int32_t error;
+ uint64_t trace_address, trace_count, trace_dropped;
+ uint32_t trace_capacity;
 };
 struct WorkCore { uint32_t state; int32_t error; uint64_t sequence; };
 TP_HD inline uint32_t item_size(uint32_t dtype) { return dtype == 3 ? 4 : dtype == 1 || dtype == 2 ? 2 : 0; }
@@ -104,12 +112,67 @@ TP_HD inline unsigned char *span_address(const Span *spans, uint32_t count, uint
  for(uint32_t i=0;i<count;++i) { if(offset<spans[i].bytes) return reinterpret_cast<unsigned char *>(spans[i].address+offset); offset-=spans[i].bytes; }
  return nullptr;
 }
-TP_HD inline int pack(const Shape &s, const unsigned char *input, const Span *spans, uint32_t count) {
- uint64_t total; int rc=span_capacity(spans,count,&total);
- if(rc) return rc; if(total<s.wire_bytes || (s.payload_bytes && !input)) return -EMSGSIZE;
- unsigned char h[64]; encode_header(s,h);
- for(uint64_t i=0;i<total;++i) *span_address(spans,count,i)=i<64?h[i]:i<s.wire_bytes?input[i-64]:0;
+/* Prefix bounds are prepared once per real message. Payload lanes use at most
+ * log2(32)+1 comparisons per span lookup rather than rescanning all frames. */
+constexpr uint32_t max_spans = 32;
+struct SpanIndex {
+ uint64_t end[max_spans], bytes;
+ uint32_t count;
+};
+TP_HD inline int index_spans(const Span *spans, uint32_t count, SpanIndex *index) {
+ if (!index || count > max_spans) return -E2BIG;
+ uint64_t bytes;
+ int rc = span_capacity(spans, count, &bytes);
+ if (rc) return rc;
+ index->bytes = bytes;
+ index->count = count;
+ uint64_t end = 0;
+ for (uint32_t i = 0; i < count; ++i) {
+  end += spans[i].bytes;
+  index->end[i] = end;
+ }
  return 0;
+}
+TP_HD inline unsigned char *indexed_address(const Span *spans,
+ const SpanIndex &index, uint64_t offset) {
+ uint32_t low = 0, high = index.count;
+ while (low < high) {
+  uint32_t mid = low + (high - low) / 2;
+  if (offset < index.end[mid]) high = mid;
+  else low = mid + 1;
+ }
+ if (low == index.count) return nullptr;
+ uint64_t start = low ? index.end[low - 1] : 0;
+ return reinterpret_cast<unsigned char *>(spans[low].address + offset - start);
+}
+TP_HD inline int prepare_pack(const Shape &s, const unsigned char *input,
+ const Span *spans, uint32_t count, SpanIndex *index) {
+ int rc = index_spans(spans, count, index);
+ if (rc) return rc;
+ if (index->bytes < s.wire_bytes || (s.payload_bytes && !input)) return -EMSGSIZE;
+ unsigned char header[64];
+ encode_header(s, header);
+ for (unsigned i = 0; i < 64; ++i)
+  *indexed_address(spans, *index, i) = header[i];
+ return 0;
+}
+TP_HD inline void pack_partition(const Shape &s, const unsigned char *input,
+ const Span *spans, const SpanIndex &index, uint64_t lane, uint64_t lanes) {
+ if (!lanes || lane >= lanes || lane > UINT64_MAX - 64) return;
+ uint64_t offset = 64 + lane;
+ while (offset < index.bytes) {
+  *indexed_address(spans, index, offset) =
+   offset < s.wire_bytes ? input[offset - 64] : 0;
+  if (index.bytes - offset <= lanes) break;
+  offset += lanes;
+ }
+}
+TP_HD inline int pack(const Shape &s, const unsigned char *input,
+ const Span *spans, uint32_t count) {
+ SpanIndex index{};
+ int rc = prepare_pack(s, input, spans, count, &index);
+ if (!rc) pack_partition(s, input, spans, index, 0, 1);
+ return rc;
 }
 union FloatBits { float f; uint32_t u; };
 TP_HD inline float decode(uint32_t dtype, uint32_t bits) {
@@ -136,43 +199,72 @@ TP_HD inline uint32_t encode(uint32_t dtype, float f) {
  uint32_t truncated=mant>>shift, mask=(uint32_t(1)<<shift)-1, rem=mant&mask, half=uint32_t(1)<<(shift-1);
  if(rem>half || (rem==half && (truncated&1))) ++truncated;
  if(exp < -14) return sign|truncated;
- return sign|uint32_t(exp+14)*1024+truncated;
+ return sign | (uint32_t(exp + 14) * 1024 + truncated);
 }
 TP_HD inline uint32_t sum_element(uint32_t dtype, uint32_t a, uint32_t b) { return encode(dtype,decode(dtype,a)+decode(dtype,b)); }
 TP_HD inline uint64_t gather_index(uint64_t row, uint64_t column, uint64_t width, uint32_t rank) { return row*(2*width)+rank*width+column; }
-/* Whole header is read and validated before ANY payload access or output store.
- * Each actual CUDA result invocation calls this same function. */
-TP_HD inline int result(const Shape &s, const unsigned char *input, unsigned char *output,
- const Span *remote, uint32_t count, uint64_t rx_key) {
- uint64_t total; int rc=span_capacity(remote,count,&total);
- if(rc) return rc; if(total<s.wire_bytes || rx_key!=s.sequence) return -EPROTO;
- unsigned char h[64]; for(unsigned i=0;i<64;++i)h[i]=*span_address(remote,count,i);
- if((rc=validate_header(s,h))) return rc;
- if(s.operation==2 && s.rank!=s.dst_rank) return 0;
- if(s.output_bytes && (!output || !input)) return -EINVAL;
- unsigned size=item_size(s.dtype);
- for(uint64_t i=0;i<s.elements;++i) {
-  uint32_t a=0,b=0;
-  for(unsigned j=0;j<size;++j) { a|=uint32_t(input[i*size+j])<<(8*j); b|=uint32_t(*span_address(remote,count,64+i*size+j))<<(8*j); }
-  if(s.operation==1) { uint32_t sum=sum_element(s.dtype,a,b); put_le(output+i*size,sum,size); }
-  else {
-   uint64_t row=i/s.width, column=i%s.width;
-   put_le(output+gather_index(row,column,s.width,s.rank)*size,a,size);
-   put_le(output+gather_index(row,column,s.width,s.rank^1)*size,b,size);
-  }
- }
+/* Preparation is a separate CUDA stream phase. A rejected complete header
+ * prevents every later payload lane from reading peer data or writing output. */
+TP_HD inline int prepare_result(const Shape &s, const unsigned char *input,
+ unsigned char *output, const Span *remote, uint32_t count, uint64_t rx_key,
+ SpanIndex *index) {
+ int rc = index_spans(remote, count, index);
+ if (rc) return rc;
+ if (index->bytes < s.wire_bytes || rx_key != s.sequence) return -EPROTO;
+ unsigned char header[64];
+ for (unsigned i = 0; i < 64; ++i)
+  header[i] = *indexed_address(remote, *index, i);
+ if ((rc = validate_header(s, header))) return rc;
+ if (s.operation == 2 && s.rank != s.dst_rank) return 0;
+ if (s.output_bytes && (!output || !input)) return -EINVAL;
  return 0;
 }
+TP_HD inline void result_partition(const Shape &s, const unsigned char *input,
+ unsigned char *output, const Span *remote, const SpanIndex &index,
+ uint64_t lane, uint64_t lanes) {
+ if (!lanes || lane >= lanes || (s.operation == 2 && s.rank != s.dst_rank)) return;
+ unsigned size = item_size(s.dtype);
+ uint64_t i = lane;
+ while (i < s.elements) {
+  uint32_t a = 0, b = 0;
+  for (unsigned j = 0; j < size; ++j) {
+   a |= uint32_t(input[i * size + j]) << (8 * j);
+   b |= uint32_t(*indexed_address(remote, index, 64 + i * size + j)) << (8 * j);
+  }
+  if (s.operation == 1) put_le(output + i * size, sum_element(s.dtype, a, b), size);
+  else {
+   uint64_t row = i / s.width, column = i % s.width;
+   put_le(output + gather_index(row, column, s.width, s.rank) * size, a, size);
+   put_le(output + gather_index(row, column, s.width, s.rank ^ 1) * size, b, size);
+  }
+  if (s.elements - i <= lanes) break;
+  i += lanes;
+ }
+}
+TP_HD inline int result(const Shape &s, const unsigned char *input,
+ unsigned char *output, const Span *remote, uint32_t count, uint64_t rx_key) {
+ SpanIndex index{};
+ int rc = prepare_result(s, input, output, remote, count, rx_key, &index);
+ if (!rc) result_partition(s, input, output, remote, index, 0, 1);
+ return rc;
+}
 TP_HD inline int fail(Runtime *r, WorkCore *w, int error) {
- if(error>=0)error=-EIO; if(!r->error)r->error=error;
- if(w->state!=6)++r->failed; w->error=r->error; w->state=6; return r->error;
+ if(error>=0)error=-EIO;
+ if(!r->error)r->error=error;
+ if(w->state!=6)++r->failed;
+ w->error=r->error;
+ w->state=6;
+ return r->error;
 }
 TP_HD inline int begin_invocation(Runtime *r, WorkCore *w, uint64_t key) {
  if(r->error)return r->error;
  if(!key || key!=r->next_sequence || key==UINT64_MAX) return fail(r,w,-EPROTO);
  w->state=1; w->sequence=key; w->error=0; ++r->invocations; ++r->inflight;
  if(r->inflight>r->high_water)r->high_water=r->inflight;
- if(!r->first_sequence)r->first_sequence=key; r->last_sequence=key; ++r->next_sequence; return 0;
+ if(!r->first_sequence)r->first_sequence=key;
+ r->last_sequence=key;
+ ++r->next_sequence;
+ return 0;
 }
 TP_HD inline int advance(Runtime *r, WorkCore *w, uint32_t state, int status) {
  if(r->error)return r->error;

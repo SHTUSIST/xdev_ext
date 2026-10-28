@@ -11,6 +11,34 @@ identity is recorded by the real owner build receipt.
 
 DEDICATED_BUILDERS = (
     {
+        "name": "peer_cuda_library_consumer",
+        "sources": ("tp/cuda_library_link_test.cc",),
+        "entrypoint": "tp/build.py",
+        "required_args": ("--cuda-home", "--out"),
+        "dependency_lock": "../../sources.lock.json",
+        "kind": "cuda-owner",
+        "needs": ("cuda-sdk", "libbpf"),
+    },
+    {
+        "name": "tp_collectives",
+        "sources": ("tp/xdev_tp.cc", "tp/xdev_tp.cu",
+                    "tp/tests/public_api_link.cc", "tp/tp_library_link_test.cc"),
+        "entrypoint": "tp/build_collectives.py",
+        "required_args": ("--source-root", "--cuda-home", "--base-build", "--out"),
+        "dependency_lock": "../../sources.lock.json",
+        "kind": "cuda-owner",
+        "needs": ("cuda-sdk", "built-peer-cuda-library", "libbpf"),
+    },
+    {
+        "name": "tp_algorithm_contract",
+        "sources": ("tp/tests/native_algorithm_probe.cc",),
+        "entrypoint": "tp/tests/algorithm_resume_test.py",
+        "required_args": ("--source-root", "--output"),
+        "dependency_lock": "../../sources.lock.json",
+        "kind": "host-contract",
+        "needs": (),
+    },
+    {
         "name": "bam_native",
         "sources": ("bam/bench_native.cu",),
         "entrypoint": "bam/build_native.py",

@@ -4,8 +4,8 @@
 #include <cuda.h>
 #include <stddef.h>
 #include <stdint.h>
-#include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext_peer_message.h"
-#include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext_cuda.h"
+#include "libxdev_ext_peer_message.h"
+#include "libxdev_ext_cuda.h"
 #include "xdev_tp_wire.h"
 #ifdef __cplusplus
 extern "C" {
@@ -79,6 +79,18 @@ struct xdev_tp_trace_record {
 	int32_t error;
 	uint32_t reserved;
 };
+/* Optional real d2 pipeline. All items are validated before any ready take.
+ * A negative accepted result can leave non-NULL retained handles in out. */
+struct xdev_tp_request {
+ CUdeviceptr input, output;
+ uint64_t rows, local_width;
+ uint32_t operation, dtype;
+ int32_t dst_rank;
+ uint32_t flags;
+};
+int xdev_tp_submit_batch(xdev_tp_comm *, const struct xdev_tp_request *,
+ size_t count, CUstream caller_stream, uint64_t first_sequence,
+ xdev_tp_work **out);
 int xdev_tp_create(const struct xdev_tp_config *, xdev_tp_comm **);
 int xdev_tp_allreduce_sum(xdev_tp_comm *, CUdeviceptr input, CUdeviceptr output,
 	uint64_t numel, enum xdev_tp_dtype, CUstream caller_stream,

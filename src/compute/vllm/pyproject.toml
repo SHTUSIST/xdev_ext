@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xdev-tp-vllm"
+version = "0.1.0"
+description = "Strict two-rank xdev TP plugin for vLLM 0.10.2"
+requires-python = ">=3.10"
+dependencies = ["xdev-tp-torch==0.1.0", "vllm==0.10.2"]
+
+[project.entry-points."vllm.general_plugins"]
+xdev_tp = "xdev_tp_vllm:install"
+
+[tool.setuptools]
+packages = ["xdev_tp_vllm"]

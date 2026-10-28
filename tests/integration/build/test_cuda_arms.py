@@ -82,7 +82,7 @@ class Coverage(unittest.TestCase):
 
     def test_every_cuda_source_is_an_arm(self):
         sources = {str(p.relative_to(HERE)) for p in HERE.rglob("*")
-                   if p.suffix in (".cu", ".cc") and ".build" not in p.parts and "build" not in p.parts}
+                   if p.suffix in (".cu", ".cc") and not {".build", "build"}.intersection(p.relative_to(HERE).parts)}
         covered = {src for arm in self.m.ARMS for src in arm.sources}
         dedicated = [src for entry in self.dedicated() for src in entry["sources"]]
         self.assertEqual(len(dedicated), len(set(dedicated)), "duplicate dedicated source")

@@ -33,6 +33,17 @@ jobs:
           python3 tools/layout.py view
           echo "XDEV_EXT_CANONICAL_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "XDEV_EXT_SOURCE_VIEW=$GITHUB_WORKSPACE/build/source-view" >> "$GITHUB_ENV"
+      - name: Kernel switch planning and recovery boundaries
+        working-directory: .
+        run: python3 -m unittest discover -s tests/integration/boot -p 'test_kernel_switch.py' -v
+      - name: TP host algorithms and native custody contracts
+        working-directory: .
+        run: python3 tests/compute/tp/native_suite.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-native-contracts"
+      - name: TP framework and measurement software contracts
+        working-directory: .
+        run: |
+          python3 -m unittest discover -s tests/compute/tp/framework -p 'test_*.py' -v
+          python3 -m unittest discover -s tests/compute/tp/eval -p 'test_*.py' -v
       - name: Standalone production-rule checks
         run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
       - name: CPU mechanism BPF target and scratch ABI contracts
