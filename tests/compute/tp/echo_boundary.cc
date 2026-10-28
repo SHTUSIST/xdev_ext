@@ -9,6 +9,8 @@
 #include <cstring>
 #include <deque>
 #include <iostream>
+#include <memory>
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -107,6 +109,15 @@ static int boundary_printf(const char *fmt,...) {
  return 0;
 }
 #define printf boundary_printf
+// The actual driver branch now names a d2 type. Its implementation and real
+// kernels are exercised by echo_gpu_boundary.cc. Any accidental d2 invocation
+// in these unchanged d1-only cases aborts instead of supplying fake behavior.
+struct tp_eval_echo_gpu {
+ tp_eval_echo_gpu(tp_eval_owner &,const tp_eval_options &) {std::abort();}
+ void capture() {std::abort();}
+ bool exchange(uint64_t) {std::abort();}
+ void close() {std::abort();}
+};
 static int actual_driver_echo(tp_eval_owner &owner,const tp_eval_options &o) {
  barrier control;
 #include TP_ECHO_DRIVER

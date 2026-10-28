@@ -2,6 +2,7 @@
 // Real bilateral E6/E7 native TP driver. No fake device/backend or host payload copy.
 #include "owner.h"
 #include "echo.h"
+#include "echo_gpu.h"
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -109,18 +110,22 @@ int main(int argc,char **argv) {
   control.open(o.rank,address,port,o.timeout_ns);control.exchange(handshake(o));
   owner.open(o,node,bpf,user_bpf,oracle,tp_ptx);works.resize(o.depth,nullptr);
   if(o.operation==4) {
-   tp_eval_echo echo(owner,o);
+   std::unique_ptr<tp_eval_echo> echo;
+   std::unique_ptr<tp_eval_echo_gpu> echo_gpu;
+   if(o.mode==2){echo_gpu.reset(new tp_eval_echo_gpu(owner,o));echo_gpu->capture();}
+   else echo.reset(new tp_eval_echo(owner,o));
    for(uint64_t iteration=0;iteration<o.iterations;++iteration) {
     control.exchange(std::string("echo-barrier:")+std::to_string(iteration));
-    uint64_t start=now_ns();bool valid=echo.exchange(iteration);uint64_t end=now_ns();
+    uint64_t start=now_ns();bool valid=echo_gpu?echo_gpu->exchange(iteration):echo->exchange(iteration);uint64_t end=now_ns();
     printf("{\"record\":\"interval\",\"start\":%llu,\"end\":%llu,\"rank\":%u,\"clock\":1,\"kind\":\"%s\",\"completed\":true,\"custody_released\":true}\n",
       (unsigned long long)start,(unsigned long long)end,o.rank,o.rank==0?"rtt":"echo_reply");
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
-     o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
-   echo.close();owner.close(o.timeout_ns);::close(control.fd);return 0;
+   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
+     o.mode,o.mode==1?"cpu":"gpu",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
+   if(echo_gpu)echo_gpu->close();else echo->close();
+   owner.close(o.timeout_ns);::close(control.fd);return 0;
   }
   if(o.mode==2) {
    std::vector<xdev_tp_request> requests(o.depth);
@@ -168,8 +173,8 @@ int main(int argc,char **argv) {
      stats.rx_delivered!=stats.completed)throw std::runtime_error("native final accounting incomplete");
   std::vector<xdev_tp_trace_record> traces(o.trace_capacity);size_t written=0;
   NATIVE(xdev_tp_trace_read(owner.comm,traces.data(),traces.size(),&written));
-  printf("{\"record\":\"metadata\",\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu}\n",
-   (unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
+  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu}\n",
+   o.mode,o.mode==1?"cpu":"gpu",(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
    (unsigned long long)stats.trace_dropped,o.depth,(unsigned long long)stats.logical_inflight_high_water,
    o.group_bytes,o.frame_count,(unsigned long long)stats.completed,(unsigned long long)stats.gpu_invocations,
    (unsigned long long)stats.host_control_calls);

@@ -54,6 +54,11 @@ def analyze_file(path):
     if len(groups['metadata'])!=1:
         raise ValueError('one complete native final statistics record required')
     metadata=groups['metadata'][0]
+    # This identifies the native handoff primitive, not an E6 experiment arm.
+    native_mode=metadata.get('native_mode')
+    if (type(native_mode) is not int or native_mode not in (1,2) or
+            metadata.get('handoff_mode') != {1:'cpu',2:'gpu'}[native_mode]):
+        raise ValueError('native_mode and matching cpu/gpu handoff_mode required')
     if metadata.get('execution_kind')=='echo':
         durations=accounting.local_durations(groups['interval'])
         expected_kind='rtt' if metadata['rank']==0 else 'echo_reply'
