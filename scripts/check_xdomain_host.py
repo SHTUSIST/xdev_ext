@@ -2,8 +2,9 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Run the required XDOMAIN software closure checks, with durable command logs.
 
-This checks host contracts and actual source composition. Official CUDA headers
-qualify declarations only; this runner makes no device or SDK-build claim.
+This checks host contracts and actual source composition, including the real
+NHI ring joined to XDOMAIN. MMIO/IRQ/link simulation remains a host boundary.
+Official CUDA headers qualify declarations only; no device or SDK-build claim.
 """
 import argparse
 import json
@@ -42,6 +43,8 @@ ENTRYPOINTS = (
     STACK + "test_prepared_inputs.py",
     STACK + "stack_test.py",
     STACK + "test_mutations.py",
+    STACK + "nhi_stack_test.py",
+    STACK + "test_nhi_stack_mutations.py",
 )
 
 REJECT_OUTPUT = re.compile(
