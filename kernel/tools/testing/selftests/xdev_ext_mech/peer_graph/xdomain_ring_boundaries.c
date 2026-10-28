@@ -169,6 +169,15 @@ static int enqueue(struct tb_ring *r,struct ring_frame *f,bool tx)
 }
 static int tb_ring_tx(struct tb_ring *r,struct ring_frame *f) { return enqueue(r,f,true); }
 static int tb_ring_rx(struct tb_ring *r,struct ring_frame *f) { return enqueue(r,f,false); }
+/* Ring-glue recorder only. Real *_more descriptor publication and notify are
+ * verified by xdomain_native_progress_test.py with actual nhi.c, not here. */
+static int tb_ring_tx_more(struct tb_ring *r,struct ring_frame *f) { return enqueue(r,f,true); }
+static int tb_ring_rx_more(struct tb_ring *r,struct ring_frame *f) { return enqueue(r,f,false); }
+static void tb_ring_notify(struct tb_ring *r)
+{
+    assert(r && !r->freed && r->running && fixture_xl->lock.held);
+    r->notify_calls++;
+}
 static struct device *tb_ring_dma_device(struct tb_ring *r)
 { ring_dma_reads++; assert(r && !r->freed && r->nhi); return &r->nhi->pdev->dev; }
 static void *dma_alloc_coherent(struct device *dev,size_t n,dma_addr_t *dma,int flags)

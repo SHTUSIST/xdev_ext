@@ -85,7 +85,7 @@ struct tb_ring {
     unsigned flags;
     /* Recorder-only upstream queue state; production never accesses these. */
     struct ring_frame *queued[512];
-    unsigned queued_nr,enqueue_calls;
+    unsigned queued_nr,enqueue_calls,notify_calls;
     bool freed;
 };
 #define RING_FLAG_FRAME BIT(1)
@@ -100,6 +100,9 @@ static void tb_ring_free(struct tb_ring *);
 static void tb_ring_free_quarantined(struct tb_ring *);
 static int tb_ring_tx(struct tb_ring *,struct ring_frame *);
 static int tb_ring_rx(struct tb_ring *,struct ring_frame *);
+static int tb_ring_tx_more(struct tb_ring *,struct ring_frame *);
+static int tb_ring_rx_more(struct tb_ring *,struct ring_frame *);
+static void tb_ring_notify(struct tb_ring *);
 static struct device *tb_ring_dma_device(struct tb_ring *);
 static int tb_xdomain_alloc_in_hopid(struct tb_xdomain *,int);
 static int tb_xdomain_alloc_out_hopid(struct tb_xdomain *,int);

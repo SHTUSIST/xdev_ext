@@ -594,6 +594,49 @@ static void established_paths_disable_after_native_stop(void)
         paths[i].rx_path==rxp[i] && paths[i].rx_ring==rxr[i]);
     for(unsigned i=0;i<hop_nr;i++)assert(hops[i].released);
 }
+/* N1 count guards must precede both element access and native publication.
+ * All65 elements are valid, so an oversize rejection cannot accidentally come
+ * from a malformed late element. Existing69 cases stay unchanged. */
+static void rejected_count_has_no_native_effects(void)
+{
+    fresh();
+    struct xdev_ext_net_elem many[65];
+    memset(many,0,sizeof(many));
+    for(unsigned i=0;i<ARRAY_SIZE(many);i++) {
+        many[i].len=many[i].buf_len=4096;
+        many[i].lease.lease.dma_address=0xA0000000ULL+0x10000*i;
+        many[i].lease.lease.len=4096;
+    }
+    for(unsigned rx=0;rx<2;rx++) {
+        struct tb_ring *r=rx?xl.chan[0].rx:xl.chan[0].tx;
+        int result=rx?xdev_ext_xd_dev_ops.post_rx(&ep,many,parameter):
+                      xdev_ext_xd_dev_ops.post_tx(&ep,many,parameter);
+        fprintf(stderr,"NATIVE_COUNT_REJECT n=%u rx=%u result=%d enqueue=%u notify=%u\n",
+                parameter,rx,result,r->enqueue_calls,r->notify_calls);
+        assert(result==-EINVAL);
+        assert(!r->enqueue_calls&&!r->queued_nr&&!r->notify_calls);
+        assert(!data_native_calls&&!done_nr);
+    }
+}
+
+static void late_invalid_has_no_notify(void)
+{
+    fresh();
+    for(unsigned rx=0;rx<2;rx++)for(unsigned invalid=0;invalid<2;invalid++) {
+        elems[2].len=invalid?4097:0;
+        struct tb_ring *r=rx?xl.chan[0].rx:xl.chan[0].tx;
+        int result=rx?xdev_ext_xd_dev_ops.post_rx(&ep,elems,3):
+                      xdev_ext_xd_dev_ops.post_tx(&ep,elems,3);
+        assert(result==-EINVAL);
+        assert(!r->enqueue_calls&&!r->queued_nr&&!r->notify_calls);
+        assert(!data_native_calls&&!done_nr);
+    }
+    elems[2].len=4096;elems[2].buf_len=1000;
+    assert(xdev_ext_xd_dev_ops.post_rx(&ep,elems,3)==-EINVAL);
+    assert(!xl.chan[0].rx->enqueue_calls&&!xl.chan[0].rx->queued_nr&&!xl.chan[0].rx->notify_calls);
+    assert(!data_native_calls&&!done_nr);
+}
+
 static struct { const char *name; void (*run)(void); unsigned parameter; } cases[]={
     {"TX physical frame construction and native completion once",tx_frames_and_once,0},
     {"RX full buffers and CRC/overrun/length classification",rx_frame_classification,0},
@@ -664,6 +707,9 @@ static struct { const char *name; void (*run)(void); unsigned parameter; } cases
     {"retry after failed data scope emits fresh scope and actual current identity",retry_path_scopes_use_fresh_scope_and_identity,0},
     {"normal established paths disable once after native stop",established_paths_disable_after_native_stop,0},
     {"going-away established paths disable exact original hops after native retirement",established_paths_disable_after_native_stop,1},
+    {"zero-element TX and RX reject before native enqueue or notify",rejected_count_has_no_native_effects,0},
+    {"65-element TX and RX reject before native enqueue or notify",rejected_count_has_no_native_effects,65},
+    {"late invalid TX and RX element reject without enqueue or notify",late_invalid_has_no_notify,0},
 };
 int main(int argc,char **argv)
 {

@@ -31,6 +31,11 @@
 #define XDEV_EXT_XD_DESC_CRC_ERROR	0x1U /* RING_DESC_CRC_ERROR */
 #define XDEV_EXT_XD_DESC_BUFFER_OVERRUN	0x4U /* RING_DESC_BUFFER_OVERRUN */
 #define XDEV_EXT_XD_DATA_RING	256U
+/* Match the mechanism's bounded live-batch limit. Native frames use the
+ * family's depth * max_elems preallocation, including NHI software pending.
+ */
+#define XDEV_EXT_XD_MAX_DEPTH	64U
+#define XDEV_EXT_XD_MAX_PENDING	(XDEV_EXT_XD_MAX_DEPTH * XDEV_EXT_XDOMAIN_MAX_ELEMS)
 /* Control RX buffers are 4096 bytes; control TX buffers are 128 bytes. */
 #define XDEV_EXT_XD_CTL_RING	128U
 #define XDEV_EXT_XD_MAX_CHANNELS	4U /* wire format limit */
@@ -237,13 +242,16 @@ xdev_ext_xd_layout_count(const struct xdev_ext_mech_layout *l)
 	return total <= (__u32)~0U ? (__u32)total : 0;
 }
 
-/* All batches fit at once; the ring must retain one empty slot. */
+/* The hardware ring keeps one empty slot; NHI queues the remaining frames
+ * using the family's preallocated elements until completion makes room.
+ */
 static inline bool
 xdev_ext_xd_budget_ok(__u32 depth, __u32 elems_per_batch, __u32 ring_size)
 {
-	return ring_size > 1 && depth && elems_per_batch &&
+	return ring_size > 1 && depth && depth <= XDEV_EXT_XD_MAX_DEPTH &&
+	       elems_per_batch &&
 	       elems_per_batch <= XDEV_EXT_XDOMAIN_MAX_ELEMS &&
-	       (__u64)depth * elems_per_batch <= ring_size - 1;
+	       (__u64)depth * elems_per_batch <= XDEV_EXT_XD_MAX_PENDING;
 }
 
 static inline int
