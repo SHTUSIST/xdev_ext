@@ -67,6 +67,7 @@ static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w
         "@PROG@": str(kernel / "tools/xdev_ext_mech/xdev_ext_mech_prog.h"),
         "@DECLARATIONS@": declarations, "@CORE@": core, "@FAMILY@": family,
         "@BPF@": fixture.no_includes(read("tools/xdev_ext_mech/xdomain_peer.bpf.c")),
+        "@POLL@": fixture.poll_unit(kernel),
         "@CLASS@": fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain_class.c")),
         "@BOUNDARIES@": (here / "xdomain_boundaries.c").read_text(), "@CASES@": cases,
     }.items():

@@ -58,6 +58,14 @@ struct xdev_ext_xd_link {
 						 * control TX buffers, posting, down_err/down_local_inc */
 	struct mutex ctl_mutex;			/* login state, accepted/response_inc, rings, paths */
 	struct mutex ep_mutex;			/* chan[].ep, control dispatch, dead notifications */
+	/* Immutable mode; live/generation/wake under lock. poll_mutex spans
+	 * native poll return through callback. Poll callers hold neither ctl nor ep;
+	 * stop may hold ctl while waiting for this barrier, but never ep.
+	 */
+	bool poll_completions, poll_live;
+	u64 poll_generation, poll_wake;
+	struct mutex poll_mutex;
+	struct delayed_work poll_work;
 	bool up, going_away, suspended, gone, nhi_gone;
 	bool logged_in, remote_logged_in, e2e;
 	bool receive_ready;			/* native rings + receive paths; lock */
@@ -104,6 +112,11 @@ void xdev_ext_xd_link_fail(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd
 /* Caller holds ctl_mutex and no spinlock. */
 int xdev_ext_xd_link_diag(struct xdev_ext_xd_ep *ep, struct xdev_ext_mech_stage_diag *out);
 /* xdev_ext_xdomain_ring.c */
+/* Process context, no ep/ns/xl lock: returns a bounded pass's tail work. */
+bool xdev_ext_xd_poll(struct xdev_ext_xd_link *xl);
+/* xl->lock held: actual accepted control TX awaiting its native callback. */
+bool xdev_ext_xd_ctl_tx_pending_locked(struct xdev_ext_xd_link *xl);
+void xdev_ext_xd_poll_work(struct work_struct *work);
 int  xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl);
 int  xdev_ext_xd_rings_start(struct xdev_ext_xd_link *xl);
 void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl);

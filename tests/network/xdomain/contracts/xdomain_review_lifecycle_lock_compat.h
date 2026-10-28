@@ -27,6 +27,7 @@ typedef uintptr_t dma_addr_t;
 #define __exit
 #define THIS_MODULE NULL
 #define module_param_named(...)
+#define module_param(...)
 #define MODULE_PARM_DESC(...)
 #define MODULE_DEVICE_TABLE(...)
 #define module_init(...)

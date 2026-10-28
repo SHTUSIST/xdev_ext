@@ -32,6 +32,10 @@
       "logical_path": "LICENSE.md"
     },
     {
+      "source": "LICENSES/Apache-2.0.txt",
+      "logical_path": "LICENSES/Apache-2.0.txt"
+    },
+    {
       "source": "LICENSES/BSD-2-Clause.txt",
       "logical_path": "LICENSES/BSD-2-Clause.txt"
     },
@@ -87,6 +91,10 @@
     {
       "source": "docs/guides/getting-started.md",
       "logical_path": "docs/getting-started.md"
+    },
+    {
+      "source": "docs/guides/kernel-switch.md",
+      "logical_path": "docs/guides/kernel-switch.md"
     },
     {
       "source": "docs/guides/testing.md",
@@ -478,6 +486,14 @@
       "native_path": "tools/xdev_ext_mech/lib/libxdev_ext_cuda_kernels.cu"
     },
     {
+      "source": "src/compute/cuda/peer_endpoint_owner.cc",
+      "logical_path": "src/compute/cuda/peer_endpoint_owner.cc"
+    },
+    {
+      "source": "src/compute/cuda/peer_endpoint_owner.h",
+      "logical_path": "src/compute/cuda/peer_endpoint_owner.h"
+    },
+    {
       "source": "src/compute/drivers/gpu/nvidia-p2p/README.md",
       "component": "linux",
       "native_path": "drivers/gpu/nvidia-p2p/README.md"
@@ -751,6 +767,50 @@
       "source": "src/compute/nvidia/src/nvidia/srcs.mk",
       "component": "nvidia",
       "native_path": "src/nvidia/srcs.mk"
+    },
+    {
+      "source": "src/compute/torch/README.md",
+      "logical_path": "src/compute/torch/README.md"
+    },
+    {
+      "source": "src/compute/torch/bridge.cc",
+      "logical_path": "src/compute/torch/bridge.cc"
+    },
+    {
+      "source": "src/compute/torch/pyproject.toml",
+      "logical_path": "src/compute/torch/pyproject.toml"
+    },
+    {
+      "source": "src/compute/torch/xdev_tp_torch/__init__.py",
+      "logical_path": "src/compute/torch/xdev_tp_torch/__init__.py"
+    },
+    {
+      "source": "src/compute/torch/xdev_tp_torch/config.py",
+      "logical_path": "src/compute/torch/xdev_tp_torch/config.py"
+    },
+    {
+      "source": "src/compute/torch/xdev_tp_torch/policy.py",
+      "logical_path": "src/compute/torch/xdev_tp_torch/policy.py"
+    },
+    {
+      "source": "src/compute/vllm/README.md",
+      "logical_path": "src/compute/vllm/README.md"
+    },
+    {
+      "source": "src/compute/vllm/pyproject.toml",
+      "logical_path": "src/compute/vllm/pyproject.toml"
+    },
+    {
+      "source": "src/compute/vllm/xdev_tp_vllm/__init__.py",
+      "logical_path": "src/compute/vllm/xdev_tp_vllm/__init__.py"
+    },
+    {
+      "source": "src/compute/vllm/xdev_tp_vllm/bootstrap.py",
+      "logical_path": "src/compute/vllm/xdev_tp_vllm/bootstrap.py"
+    },
+    {
+      "source": "src/compute/vllm/xdev_tp_vllm/shutdown.py",
+      "logical_path": "src/compute/vllm/xdev_tp_vllm/shutdown.py"
     },
     {
       "source": "src/core/arch/x86/entry/syscalls/syscall_64.tbl",
@@ -2586,6 +2646,38 @@
       "logical_path": "tests/eval/spdk/test_owner.c"
     },
     {
+      "source": "tests/benchmarks/tp/README.md",
+      "logical_path": "tests/benchmarks/tp/README.md"
+    },
+    {
+      "source": "tests/benchmarks/tp/accounting.py",
+      "logical_path": "tests/benchmarks/tp/accounting.py"
+    },
+    {
+      "source": "tests/benchmarks/tp/driver.cc",
+      "logical_path": "tests/benchmarks/tp/driver.cc"
+    },
+    {
+      "source": "tests/benchmarks/tp/echo.h",
+      "logical_path": "tests/benchmarks/tp/echo.h"
+    },
+    {
+      "source": "tests/benchmarks/tp/options.h",
+      "logical_path": "tests/benchmarks/tp/options.h"
+    },
+    {
+      "source": "tests/benchmarks/tp/owner.h",
+      "logical_path": "tests/benchmarks/tp/owner.h"
+    },
+    {
+      "source": "tests/benchmarks/tp/run.py",
+      "logical_path": "tests/benchmarks/tp/run.py"
+    },
+    {
+      "source": "tests/benchmarks/tp/verify.cu",
+      "logical_path": "tests/benchmarks/tp/verify.cu"
+    },
+    {
       "source": "tests/benchmarks/userspace_orchestrator/Makefile",
       "logical_path": "tests/eval/userspace_orchestrator/Makefile"
     },
@@ -3210,6 +3302,18 @@
       "logical_path": "tests/test_gpu_fence_revision.py"
     },
     {
+      "source": "tests/compute/tp/algorithm_resume_test.py",
+      "logical_path": "tests/eval/tp/tests/algorithm_resume_test.py"
+    },
+    {
+      "source": "tests/compute/tp/batch_capability_test.py",
+      "logical_path": "tests/compute/tp/batch_capability_test.py"
+    },
+    {
+      "source": "tests/compute/tp/batch_pipeline_test.py",
+      "logical_path": "tests/compute/tp/batch_pipeline_test.py"
+    },
+    {
       "source": "tests/compute/tp/collective_behavior.py",
       "logical_path": "tests/eval/tp/tests/collective_behavior.py"
     },
@@ -3230,6 +3334,78 @@
       "logical_path": "tests/eval/tp/tp_library_link_test.cc"
     },
     {
+      "source": "tests/compute/tp/driver_boundary.h",
+      "logical_path": "tests/compute/tp/driver_boundary.h"
+    },
+    {
+      "source": "tests/compute/tp/echo_boundary.cc",
+      "logical_path": "tests/compute/tp/echo_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/echo_boundary_test.py",
+      "logical_path": "tests/compute/tp/echo_boundary_test.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_accounting.py",
+      "logical_path": "tests/compute/tp/eval/test_accounting.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_options.py",
+      "logical_path": "tests/compute/tp/eval/test_options.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_run.py",
+      "logical_path": "tests/compute/tp/eval/test_run.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/fixtures/vllm_group.py",
+      "logical_path": "tests/compute/tp/framework/fixtures/vllm_group.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/fixtures/vllm_worker.py",
+      "logical_path": "tests/compute/tp/framework/fixtures/vllm_worker.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_bootstrap.py",
+      "logical_path": "tests/compute/tp/framework/test_bootstrap.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_builder.py",
+      "logical_path": "tests/compute/tp/framework/test_builder.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_framework.py",
+      "logical_path": "tests/compute/tp/framework/test_framework.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_vllm_lifecycle.py",
+      "logical_path": "tests/compute/tp/framework/test_vllm_lifecycle.py"
+    },
+    {
+      "source": "tests/compute/tp/framework/test_worker_shutdown.py",
+      "logical_path": "tests/compute/tp/framework/test_worker_shutdown.py"
+    },
+    {
+      "source": "tests/compute/tp/gpu_trace_capability_test.py",
+      "logical_path": "tests/compute/tp/gpu_trace_capability_test.py"
+    },
+    {
+      "source": "tests/compute/tp/gpu_trace_runtime_test.py",
+      "logical_path": "tests/compute/tp/gpu_trace_runtime_test.py"
+    },
+    {
+      "source": "tests/compute/tp/kernel_partition_probe.cc",
+      "logical_path": "tests/compute/tp/kernel_partition_probe.cc"
+    },
+    {
+      "source": "tests/compute/tp/kernel_partition_test.py",
+      "logical_path": "tests/compute/tp/kernel_partition_test.py"
+    },
+    {
+      "source": "tests/compute/tp/library_boundary_regressions.py",
+      "logical_path": "tests/compute/tp/library_boundary_regressions.py"
+    },
+    {
       "source": "tests/compute/tp/native_algorithm_probe.cc",
       "logical_path": "tests/eval/tp/tests/native_algorithm_probe.cc"
     },
@@ -3238,8 +3414,48 @@
       "logical_path": "tests/eval/tp/tests/native_algorithm_probe.py"
     },
     {
+      "source": "tests/compute/tp/native_library_boundary.cc",
+      "logical_path": "tests/compute/tp/native_library_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/native_library_probe.py",
+      "logical_path": "tests/compute/tp/native_library_probe.py"
+    },
+    {
+      "source": "tests/compute/tp/native_suite.py",
+      "logical_path": "tests/compute/tp/native_suite.py"
+    },
+    {
+      "source": "tests/compute/tp/owner_lifetime_boundary.cc",
+      "logical_path": "tests/compute/tp/owner_lifetime_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/owner_lifetime_test.py",
+      "logical_path": "tests/compute/tp/owner_lifetime_test.py"
+    },
+    {
+      "source": "tests/compute/tp/production_observers.py",
+      "logical_path": "tests/compute/tp/production_observers.py"
+    },
+    {
       "source": "tests/compute/tp/public_api_link.cc",
       "logical_path": "tests/eval/tp/tests/public_api_link.cc"
+    },
+    {
+      "source": "tests/compute/tp/resume_behavior.py",
+      "logical_path": "tests/compute/tp/resume_behavior.py"
+    },
+    {
+      "source": "tests/compute/tp/work_never_replayed_boundary.cc",
+      "logical_path": "tests/compute/tp/work_never_replayed_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/work_never_replayed_test.py",
+      "logical_path": "tests/compute/tp/work_never_replayed_test.py"
+    },
+    {
+      "source": "tests/compute/tp/work_stats_retirement_test.py",
+      "logical_path": "tests/compute/tp/work_stats_retirement_test.py"
     },
     {
       "source": "tests/compute/user_stage/guest/Makefile",
@@ -4479,6 +4695,30 @@
     {
       "source": "tests/integration/analysis/providers/test_loc_report.py",
       "logical_path": "tests/eval/providers/test_loc_report.py"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/efi_boot_manager.txt",
+      "logical_path": "tests/integration/boot/fixtures/efi_boot_manager.txt"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/efi_grub_forwarder.cfg",
+      "logical_path": "tests/integration/boot/fixtures/efi_grub_forwarder.cfg"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/grub_saved.cfg",
+      "logical_path": "tests/integration/boot/fixtures/grub_saved.cfg"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/grub_saved.env",
+      "logical_path": "tests/integration/boot/fixtures/grub_saved.env"
+    },
+    {
+      "source": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg",
+      "logical_path": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg"
+    },
+    {
+      "source": "tests/integration/boot/test_kernel_switch.py",
+      "logical_path": "tests/integration/boot/test_kernel_switch.py"
     },
     {
       "source": "tests/integration/build/kvm_layout/contracts.py",
@@ -6479,6 +6719,31 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_privileged_memory_test.py"
     },
     {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_boundary.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_cases.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_nhi.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_nhi.c"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_test.py"
+    },
+    {
+      "source": "tests/network/xdomain/contracts/xdomain_production_poll_x3.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_production_poll_x3.c"
+    },
+    {
       "source": "tests/network/xdomain/contracts/xdomain_program_fixture.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/xdomain_program_fixture.c"
@@ -7249,6 +7514,14 @@
       "logical_path": "tests/eval/providers/loc_report.py"
     },
     {
+      "source": "tools/boot/kernel_switch.py",
+      "logical_path": "tools/boot/kernel_switch.py"
+    },
+    {
+      "source": "tools/build/collectives.py",
+      "logical_path": "tests/eval/tp/build_collectives.py"
+    },
+    {
       "source": "tools/build/cuda/build_arms.py",
       "logical_path": "tests/eval/build_cuda_arms.py"
     },
@@ -7271,6 +7544,14 @@
     {
       "source": "tools/build/tp.py",
       "logical_path": "tests/eval/tp/build.py"
+    },
+    {
+      "source": "tools/build/tp_eval.py",
+      "logical_path": "tools/build/tp_eval.py"
+    },
+    {
+      "source": "tools/build/tp_framework.py",
+      "logical_path": "tools/build/tp_framework.py"
     },
     {
       "source": "tools/ci/check_xdomain_host.py",
@@ -7301,262 +7582,6 @@
     {
       "source": "tools/test.py",
       "logical_path": "tools/test.py"
-    },
-    {
-      "source": "tools/build/collectives.py",
-      "logical_path": "tests/eval/tp/build_collectives.py"
-    },
-    {
-      "source": "tests/compute/tp/algorithm_resume_test.py",
-      "logical_path": "tests/eval/tp/tests/algorithm_resume_test.py"
-    },
-    {
-      "source": "docs/guides/kernel-switch.md",
-      "logical_path": "docs/guides/kernel-switch.md"
-    },
-    {
-      "source": "src/compute/cuda/peer_endpoint_owner.cc",
-      "logical_path": "src/compute/cuda/peer_endpoint_owner.cc"
-    },
-    {
-      "source": "src/compute/cuda/peer_endpoint_owner.h",
-      "logical_path": "src/compute/cuda/peer_endpoint_owner.h"
-    },
-    {
-      "source": "src/compute/torch/README.md",
-      "logical_path": "src/compute/torch/README.md"
-    },
-    {
-      "source": "src/compute/torch/bridge.cc",
-      "logical_path": "src/compute/torch/bridge.cc"
-    },
-    {
-      "source": "src/compute/torch/pyproject.toml",
-      "logical_path": "src/compute/torch/pyproject.toml"
-    },
-    {
-      "source": "src/compute/torch/xdev_tp_torch/__init__.py",
-      "logical_path": "src/compute/torch/xdev_tp_torch/__init__.py"
-    },
-    {
-      "source": "src/compute/torch/xdev_tp_torch/config.py",
-      "logical_path": "src/compute/torch/xdev_tp_torch/config.py"
-    },
-    {
-      "source": "src/compute/torch/xdev_tp_torch/policy.py",
-      "logical_path": "src/compute/torch/xdev_tp_torch/policy.py"
-    },
-    {
-      "source": "src/compute/vllm/README.md",
-      "logical_path": "src/compute/vllm/README.md"
-    },
-    {
-      "source": "src/compute/vllm/pyproject.toml",
-      "logical_path": "src/compute/vllm/pyproject.toml"
-    },
-    {
-      "source": "src/compute/vllm/xdev_tp_vllm/__init__.py",
-      "logical_path": "src/compute/vllm/xdev_tp_vllm/__init__.py"
-    },
-    {
-      "source": "src/compute/vllm/xdev_tp_vllm/bootstrap.py",
-      "logical_path": "src/compute/vllm/xdev_tp_vllm/bootstrap.py"
-    },
-    {
-      "source": "tests/benchmarks/tp/README.md",
-      "logical_path": "tests/benchmarks/tp/README.md"
-    },
-    {
-      "source": "tests/benchmarks/tp/accounting.py",
-      "logical_path": "tests/benchmarks/tp/accounting.py"
-    },
-    {
-      "source": "tests/benchmarks/tp/driver.cc",
-      "logical_path": "tests/benchmarks/tp/driver.cc"
-    },
-    {
-      "source": "tests/benchmarks/tp/echo.h",
-      "logical_path": "tests/benchmarks/tp/echo.h"
-    },
-    {
-      "source": "tests/benchmarks/tp/options.h",
-      "logical_path": "tests/benchmarks/tp/options.h"
-    },
-    {
-      "source": "tests/benchmarks/tp/owner.h",
-      "logical_path": "tests/benchmarks/tp/owner.h"
-    },
-    {
-      "source": "tests/benchmarks/tp/run.py",
-      "logical_path": "tests/benchmarks/tp/run.py"
-    },
-    {
-      "source": "tests/benchmarks/tp/verify.cu",
-      "logical_path": "tests/benchmarks/tp/verify.cu"
-    },
-    {
-      "source": "tests/compute/tp/batch_capability_test.py",
-      "logical_path": "tests/compute/tp/batch_capability_test.py"
-    },
-    {
-      "source": "tests/compute/tp/batch_pipeline_test.py",
-      "logical_path": "tests/compute/tp/batch_pipeline_test.py"
-    },
-    {
-      "source": "tests/compute/tp/driver_boundary.h",
-      "logical_path": "tests/compute/tp/driver_boundary.h"
-    },
-    {
-      "source": "tests/compute/tp/eval/test_accounting.py",
-      "logical_path": "tests/compute/tp/eval/test_accounting.py"
-    },
-    {
-      "source": "tests/compute/tp/eval/test_options.py",
-      "logical_path": "tests/compute/tp/eval/test_options.py"
-    },
-    {
-      "source": "tests/compute/tp/eval/test_run.py",
-      "logical_path": "tests/compute/tp/eval/test_run.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/fixtures/vllm_group.py",
-      "logical_path": "tests/compute/tp/framework/fixtures/vllm_group.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/test_bootstrap.py",
-      "logical_path": "tests/compute/tp/framework/test_bootstrap.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/test_builder.py",
-      "logical_path": "tests/compute/tp/framework/test_builder.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/test_framework.py",
-      "logical_path": "tests/compute/tp/framework/test_framework.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/test_vllm_lifecycle.py",
-      "logical_path": "tests/compute/tp/framework/test_vllm_lifecycle.py"
-    },
-    {
-      "source": "tests/compute/tp/gpu_trace_capability_test.py",
-      "logical_path": "tests/compute/tp/gpu_trace_capability_test.py"
-    },
-    {
-      "source": "tests/compute/tp/gpu_trace_runtime_test.py",
-      "logical_path": "tests/compute/tp/gpu_trace_runtime_test.py"
-    },
-    {
-      "source": "tests/compute/tp/kernel_partition_probe.cc",
-      "logical_path": "tests/compute/tp/kernel_partition_probe.cc"
-    },
-    {
-      "source": "tests/compute/tp/kernel_partition_test.py",
-      "logical_path": "tests/compute/tp/kernel_partition_test.py"
-    },
-    {
-      "source": "tests/compute/tp/library_boundary_regressions.py",
-      "logical_path": "tests/compute/tp/library_boundary_regressions.py"
-    },
-    {
-      "source": "tests/compute/tp/native_library_boundary.cc",
-      "logical_path": "tests/compute/tp/native_library_boundary.cc"
-    },
-    {
-      "source": "tests/compute/tp/native_library_probe.py",
-      "logical_path": "tests/compute/tp/native_library_probe.py"
-    },
-    {
-      "source": "tests/compute/tp/native_suite.py",
-      "logical_path": "tests/compute/tp/native_suite.py"
-    },
-    {
-      "source": "tests/compute/tp/owner_lifetime_boundary.cc",
-      "logical_path": "tests/compute/tp/owner_lifetime_boundary.cc"
-    },
-    {
-      "source": "tests/compute/tp/owner_lifetime_test.py",
-      "logical_path": "tests/compute/tp/owner_lifetime_test.py"
-    },
-    {
-      "source": "tests/compute/tp/production_observers.py",
-      "logical_path": "tests/compute/tp/production_observers.py"
-    },
-    {
-      "source": "tests/compute/tp/resume_behavior.py",
-      "logical_path": "tests/compute/tp/resume_behavior.py"
-    },
-    {
-      "source": "tests/compute/tp/work_stats_retirement_test.py",
-      "logical_path": "tests/compute/tp/work_stats_retirement_test.py"
-    },
-    {
-      "source": "tests/integration/boot/fixtures/efi_boot_manager.txt",
-      "logical_path": "tests/integration/boot/fixtures/efi_boot_manager.txt"
-    },
-    {
-      "source": "tests/integration/boot/fixtures/efi_grub_forwarder.cfg",
-      "logical_path": "tests/integration/boot/fixtures/efi_grub_forwarder.cfg"
-    },
-    {
-      "source": "tests/integration/boot/fixtures/grub_saved.cfg",
-      "logical_path": "tests/integration/boot/fixtures/grub_saved.cfg"
-    },
-    {
-      "source": "tests/integration/boot/fixtures/grub_saved.env",
-      "logical_path": "tests/integration/boot/fixtures/grub_saved.env"
-    },
-    {
-      "source": "tests/integration/boot/test_kernel_switch.py",
-      "logical_path": "tests/integration/boot/test_kernel_switch.py"
-    },
-    {
-      "source": "tools/boot/kernel_switch.py",
-      "logical_path": "tools/boot/kernel_switch.py"
-    },
-    {
-      "source": "tools/build/tp_eval.py",
-      "logical_path": "tools/build/tp_eval.py"
-    },
-    {
-      "source": "tools/build/tp_framework.py",
-      "logical_path": "tools/build/tp_framework.py"
-    },
-    {
-      "source": "LICENSES/Apache-2.0.txt",
-      "logical_path": "LICENSES/Apache-2.0.txt"
-    },
-    {
-      "source": "tests/compute/tp/echo_boundary.cc",
-      "logical_path": "tests/compute/tp/echo_boundary.cc"
-    },
-    {
-      "source": "tests/compute/tp/echo_boundary_test.py",
-      "logical_path": "tests/compute/tp/echo_boundary_test.py"
-    },
-    {
-      "source": "tests/compute/tp/work_never_replayed_boundary.cc",
-      "logical_path": "tests/compute/tp/work_never_replayed_boundary.cc"
-    },
-    {
-      "source": "tests/compute/tp/work_never_replayed_test.py",
-      "logical_path": "tests/compute/tp/work_never_replayed_test.py"
-    },
-    {
-      "source": "src/compute/vllm/xdev_tp_vllm/shutdown.py",
-      "logical_path": "src/compute/vllm/xdev_tp_vllm/shutdown.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/fixtures/vllm_worker.py",
-      "logical_path": "tests/compute/tp/framework/fixtures/vllm_worker.py"
-    },
-    {
-      "source": "tests/compute/tp/framework/test_worker_shutdown.py",
-      "logical_path": "tests/compute/tp/framework/test_worker_shutdown.py"
-    },
-    {
-      "source": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg",
-      "logical_path": "tests/integration/boot/fixtures/grub_ubuntu_generated_header.cfg"
     }
   ]
 }

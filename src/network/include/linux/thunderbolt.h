@@ -647,7 +647,8 @@ struct tb_ring *tb_ring_alloc_rx(struct tb_nhi *nhi, int hop, int size,
 void tb_ring_start(struct tb_ring *ring);
 void tb_ring_stop(struct tb_ring *ring);
 void tb_ring_free(struct tb_ring *ring);
-/* Process-context software retirement of a non-polling UNKNOWN ring.
+/* Process-context software retirement of an UNKNOWN ring. Caller excludes
+ * all external producers and waits for every poll-returned frame callback.
  * Consumes ring before NHI teardown; descriptor DMA backing is retained.
  */
 void tb_ring_free_quarantined(struct tb_ring *ring);

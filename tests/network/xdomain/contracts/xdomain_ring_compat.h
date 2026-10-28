@@ -57,6 +57,14 @@ typedef struct { int n; } atomic_t;
 typedef struct { u8 b[16]; } uuid_t;
 struct work_struct { void (*fn)(struct work_struct *); };
 struct delayed_work { struct work_struct work; };
+#define to_delayed_work(w) container_of(w,struct delayed_work,work)
+static void *system_long_wq;
+/* These original suites use IRQ completion. Native polling/work scheduling
+ * belongs to the separate actual-NHI composition and must never be hidden. */
+static bool mod_delayed_work(void *queue,struct delayed_work *work,unsigned long delay)
+{ (void)queue;(void)work;(void)delay;assert(!"unexpected native poll work in IRQ ring fixture");abort(); }
+static bool cancel_delayed_work_sync(struct delayed_work *work)
+{ (void)work;assert(!"unexpected native poll cancellation in IRQ ring fixture");abort(); }
 struct device { int id; const char *name; };
 static const char *dev_name(const struct device *d) { assert(d && d->name);return d->name; }
 struct pci_dev { struct device dev; int refs; };
@@ -92,6 +100,7 @@ struct tb_ring {
 };
 #define RING_FLAG_FRAME BIT(1)
 #define RING_FLAG_E2E BIT(2)
+#define RING_FLAG_NO_INTERRUPT BIT(3)
 #define RING_DESC_CRC_ERROR 1U
 #define RING_DESC_BUFFER_OVERRUN 4U
 static struct tb_ring *tb_ring_alloc_tx(struct tb_nhi *,int,int,unsigned);
@@ -105,6 +114,10 @@ static int tb_ring_rx(struct tb_ring *,struct ring_frame *);
 static int tb_ring_tx_more(struct tb_ring *,struct ring_frame *);
 static int tb_ring_rx_more(struct tb_ring *,struct ring_frame *);
 static void tb_ring_notify(struct tb_ring *);
+static struct ring_frame *tb_ring_poll(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected native poll in IRQ ring fixture");abort(); }
+static bool tb_ring_poll_pending(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected native poll query in IRQ ring fixture");abort(); }
 static struct device *tb_ring_dma_device(struct tb_ring *);
 static int tb_xdomain_alloc_in_hopid(struct tb_xdomain *,int);
 static int tb_xdomain_alloc_out_hopid(struct tb_xdomain *,int);

@@ -1069,11 +1069,18 @@ static bool xd_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_xdomain
 static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
+	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
 	struct xdev_ext_xdomain_proto_info info;
 	struct xdev_ext_xdomain_proto_result result;
 	unsigned long flags;
 	u32 budget = XD_EVENTS;
+	bool poll_pending;
 	int ret;
+
+	/* Completion callbacks may take ep_mutex and ns.lock or repost: this
+	 * is process-context progress, before any family lock, not .poll.
+	 */
+	poll_pending = xdev_ext_xd_poll(ep->xl);
 	while (budget--) {
 		spin_lock_irqsave(&xs->ns.lock, flags);
 		if (!xd_next_locked(xs, &info)) { spin_unlock_irqrestore(&xs->ns.lock, flags); break; }
@@ -1108,14 +1115,41 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 	}
 	{
 		u64 now = ktime_get_boottime_ns(), due = xdev_ext_rel_deadline(now, XD_TICK_NS);
+		bool commitment = false, poll_live;
 		u32 k;
 		spin_lock_irqsave(&xs->ns.lock, flags);
 		if (xs->next_wake && xs->next_wake <= now) xs->next_wake = 0;
 		if (xs->next_wake && xs->next_wake < due) due = xs->next_wake;
-		for (k = 0; k < xs->ns.depth; k++)
-			if (xs->ns.slots[k].busy && xs->ns.slots[k].state != XDEV_EXT_RDV_FINAL &&
-			    xd_hard(xs, &xs->ns.slots[k]) < due) due = xd_hard(xs, &xs->ns.slots[k]);
+		for (k = 0; k < xs->ns.depth; k++) {
+			struct xdev_ext_net_slot *s = &xs->ns.slots[k];
+
+			if (!s->busy || s->state == XDEV_EXT_RDV_FINAL)
+				continue;
+			if (xd_hard(xs, s) < due)
+				due = xd_hard(xs, s);
+			/* ARMED RX alone has made no native/peer commitment. */
+			if (xd_fact(xs, s)->accepted || s->state == XDEV_EXT_RDV_ANNOUNCED)
+				commitment = true;
+		}
+		for (k = 0; k < XD_REPLIES; k++)
+			if (xs->replies[k].used &&
+			    (xs->replies[k].cts || xs->replies[k].final))
+				commitment = true;
 		spin_unlock_irqrestore(&xs->ns.lock, flags);
+		spin_lock_irqsave(&ep->xl->lock, flags);
+		poll_live = ep->xl->poll_completions && ep->xl->poll_live && !ep->detached;
+		/* Final ACK may outlive both its slot and terminal reply work.
+		 * Retain immediate turns until its actual native TX retires;
+		 * permanent preposted control RX is deliberately not counted.
+		 */
+		if (poll_live && xdev_ext_xd_ctl_tx_pending_locked(ep->xl))
+			commitment = true;
+		spin_unlock_irqrestore(&ep->xl->lock, flags);
+		/* Queue another finite worker turn; never spin within this pass.
+		 * Only this current worker owns st. The fallback retains only xl.
+		 */
+		if (poll_live && (poll_pending || commitment))
+			xdev_ext_mech_stage_kick(st);
 		return msecs_to_jiffies(due <= now ? 1 : (due - now + NSEC_PER_MSEC - 1) / NSEC_PER_MSEC);
 	}
 }
