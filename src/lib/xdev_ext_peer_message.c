@@ -35,12 +35,6 @@ static __u64 allocate_origin(void)
 	}
 	return 0;
 }
-static __u64 mono_ms(void)
-{
-	struct timespec now;
-	clock_gettime(CLOCK_MONOTONIC, &now);
-	return (__u64)now.tv_sec * 1000 + now.tv_nsec / 1000000;
-}
 struct xdev_ext_session *xdev_ext_peer_endpoint_session(struct xdev_ext_peer_endpoint *e)
 { return e ? e->session : NULL; }
 struct xdev_ext_user_stage *xdev_ext_peer_endpoint_user(struct xdev_ext_peer_endpoint *e,
@@ -147,13 +141,31 @@ static int remember(struct xdev_ext_peer_endpoint *e, const struct xdev_ext_user
 int xdev_ext_peer_endpoint_next(struct xdev_ext_peer_endpoint *e, int timeout_ms,
 	struct xdev_ext_peer_message *message)
 {
-	__u64 deadline = timeout_ms > 0 ? mono_ms() + timeout_ms : 0;
+	struct timespec deadline, *until = NULL;
+	struct xdev_ext_user_stage *users[2];
+	size_t nr;
 	struct xdev_ext_user_batch *batch;
 	int ret;
 	if (!e || !message) return -EINVAL;
 	batch = &message->batch;
 	if (e->error) return e->error;
+	users[0] = e->terminal;
+	users[1] = e->producer;
+	nr = e->producer ? 2 : 1;
+	if (timeout_ms > 0) {
+		if (clock_gettime(CLOCK_MONOTONIC, &deadline)) return -errno;
+		deadline.tv_sec += timeout_ms / 1000;
+		deadline.tv_nsec += (timeout_ms % 1000) * 1000000L;
+		if (deadline.tv_nsec >= 1000000000L) {
+			deadline.tv_sec++;
+			deadline.tv_nsec -= 1000000000L;
+		}
+		until = &deadline;
+	}
 	for (;;) {
+		/* Reject the whole CPU round before taking any ring's custody. */
+		for (size_t i = 0; i < nr; i++)
+			if (xdev_ext__user_ctl_attached(users[i])) return -EBUSY;
 		/* Drain terminal custody before lending more producer work. */
 		ret = xdev_ext_user_stage_next(e->terminal, 0, batch);
 		if (!ret) {
@@ -172,11 +184,8 @@ int xdev_ext_peer_endpoint_next(struct xdev_ext_peer_endpoint *e, int timeout_ms
 			if (ret != -EAGAIN) return ret;
 		}
 		if (!timeout_ms) return -EAGAIN;
-		if (timeout_ms > 0 && mono_ms() >= deadline) return -ETIMEDOUT;
-		/* USER kernel polling is bounded; this CPU eager progress delay is
-		 * part of its real control cost rather than a hidden busy loop. */
-		struct timespec pause = { .tv_nsec = 1000000 };
-		nanosleep(&pause, NULL);
+		ret = xdev_ext__user_wait_any(users, nr, until);
+		if (ret) return ret;
 	}
 }
 int xdev_ext_peer_endpoint_complete(struct xdev_ext_peer_endpoint *e,

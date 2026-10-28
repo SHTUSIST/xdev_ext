@@ -7,6 +7,7 @@
  */
 #define _GNU_SOURCE
 #include <errno.h>
+#include <limits.h>
 #include <poll.h>
 #include <stdbool.h>
 #include <stdatomic.h>
@@ -235,6 +236,150 @@ static long long now_ms(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &ts);
 	return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+/* A wake is only a request to rescan, never custody of a ready entry. */
+static bool user_wait_rescan(struct xdev_ext_user_stage *const *users, size_t nr)
+{
+	bool rescan = false;
+	size_t i;
+
+	for (i = 0; i < nr; i++) {
+		struct xdev_ext_user_stage *u = users[i];
+
+		if (load_acquire(&u->hdr->ready_prod) != u->hdr->ready_cons ||
+		    (load_acquire(&u->hdr->kernel_flags) & XDEV_EXT_USER_K_STOPPED))
+			rescan = true;
+	}
+	return rescan;
+}
+
+/* Ceil the remaining duration so sub-millisecond time never expires early. */
+static int user_wait_timeout(const struct timespec *deadline, int *wait)
+{
+	struct timespec now;
+	time_t sec;
+	long nsec;
+
+	*wait = -1;
+	if (!deadline)
+		return 0;
+	if (clock_gettime(CLOCK_MONOTONIC, &now))
+		return -errno;
+	if (now.tv_sec > deadline->tv_sec ||
+	    (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) {
+		*wait = 0;
+		return 0;
+	}
+	sec = deadline->tv_sec - now.tv_sec;
+	nsec = deadline->tv_nsec - now.tv_nsec;
+	if (nsec < 0) {
+		sec--;
+		nsec += 1000000000L;
+	}
+	if (sec > INT_MAX / 1000 ||
+	    (sec == INT_MAX / 1000 &&
+	     (nsec + 999999L) / 1000000L > INT_MAX % 1000))
+		*wait = INT_MAX;
+	else
+		*wait = (int)sec * 1000 + (nsec + 999999L) / 1000000L;
+	return 0;
+}
+
+int xdev_ext__user_wait_any(struct xdev_ext_user_stage *const *users,
+			  size_t nr, const struct timespec *deadline)
+{
+	struct pollfd p[2];
+	size_t i;
+	int ret, wait;
+
+	if (!users || !nr || nr > 2 || !users[0] ||
+	    (nr == 2 && (!users[1] || users[0] == users[1])) ||
+	    (deadline && (deadline->tv_sec < 0 || deadline->tv_nsec < 0 ||
+			  deadline->tv_nsec >= 1000000000L)))
+		return -EINVAL;
+	/* The endpoint has the same check before taking from either candidate.
+	 * Owner changes/concurrent close remain outside the single-consumer contract. */
+	for (i = 0; i < nr; i++)
+		if (xdev_ext__user_ctl_attached(users[i]))
+			return -EBUSY;
+	if (user_wait_rescan(users, nr))
+		return 0;
+	ret = user_wait_timeout(deadline, &wait);
+	if (ret)
+		return ret;
+	if (!wait)
+		return user_wait_rescan(users, nr) ? 0 : -ETIMEDOUT;
+	for (i = 0; i < nr; i++) {
+		p[i] = (struct pollfd){ .fd = users[i]->efd, .events = POLLIN };
+		__atomic_or_fetch(&users[i]->hdr->user_flags, XDEV_EXT_USER_F_SLEEPING,
+				  __ATOMIC_SEQ_CST);
+	}
+	/* Paired with the kernel's publish/fence/SLEEPING observation. */
+	__atomic_thread_fence(__ATOMIC_SEQ_CST);
+	if (user_wait_rescan(users, nr)) {
+		ret = 0;
+		goto clear;
+	}
+	ret = user_wait_timeout(deadline, &wait);
+	if (ret)
+		goto clear;
+	if (!wait) {
+		ret = user_wait_rescan(users, nr) ? 0 : -ETIMEDOUT;
+		goto clear;
+	}
+	ret = poll(p, nr, wait);
+	if (ret < 0) {
+		ret = errno == EINTR ? 0 : -errno;
+		goto clear;
+	}
+	for (i = 0; i < nr; i++) {
+		if (p[i].revents & POLLNVAL) {
+			ret = -EBADF;
+			goto clear;
+		}
+		if (p[i].revents & (POLLERR | POLLHUP)) {
+			ret = -EIO;
+			goto clear;
+		}
+	}
+	for (i = 0; i < nr; i++) {
+		__u64 count;
+		ssize_t len;
+
+		if (!(p[i].revents & POLLIN))
+			continue;
+		/* An eventfd read drains aggregated hints in one operation. Never
+		 * turn the count into a number of ready entries to consume. */
+		for (;;) {
+			len = read(users[i]->efd, &count, sizeof(count));
+			if (len >= 0 || errno != EINTR)
+				break;
+			ret = user_wait_timeout(deadline, &wait);
+			if (ret || !wait) {
+				if (!ret)
+					ret = user_wait_rescan(users, nr) ? 0 : -ETIMEDOUT;
+				goto clear;
+			}
+		}
+		if (len < 0 && errno != EAGAIN) {
+			ret = -errno;
+			goto clear;
+		}
+		if (len >= 0 && len != sizeof(count)) {
+			ret = -EIO;
+			goto clear;
+		}
+	}
+	/* Even timeout must yield to work/STOP published at the deadline. */
+	ret = user_wait_timeout(deadline, &wait);
+	if (!ret && !wait && !user_wait_rescan(users, nr))
+		ret = -ETIMEDOUT;
+clear:
+	for (i = 0; i < nr; i++)
+		__atomic_and_fetch(&users[i]->hdr->user_flags, ~XDEV_EXT_USER_F_SLEEPING,
+				   __ATOMIC_SEQ_CST);
+	return ret;
 }
 
 int xdev_ext_user_stage_next(struct xdev_ext_user_stage *u, int timeout_ms,

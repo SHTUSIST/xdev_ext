@@ -33,7 +33,11 @@ void xdev_ext__set_sys(const struct xdev_ext_sys *sys);
 struct xdev_ext_session;
 struct xdev_ext_prog;
 struct xdev_ext_user_stage;
+struct timespec;
 bool xdev_ext__user_ctl_attached(const struct xdev_ext_user_stage *u);
+/* Non-consuming CPU wait; NULL deadline means no timeout. */
+int xdev_ext__user_wait_any(struct xdev_ext_user_stage *const *users,
+			  size_t nr, const struct timespec *deadline);
 int xdev_ext__user_bind_stream(struct xdev_ext_user_stage *u,
 	unsigned long long context_id, unsigned long long stream_id);
 

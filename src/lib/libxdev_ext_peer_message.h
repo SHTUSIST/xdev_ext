@@ -31,6 +31,8 @@ int xdev_ext_peer_endpoint_open(const struct xdev_ext_peer_endpoint_opts *,
 int xdev_ext_peer_endpoint_create(struct xdev_ext_peer_endpoint *);
 int xdev_ext_peer_endpoint_start(struct xdev_ext_peer_endpoint *,
 	const struct xdev_ext_start_frames_opts *);
+/* CPU eager wait: terminal first, USER eventfds, one monotonic deadline.
+ * Attached external control on either USER returns -EBUSY before taking work. */
 int xdev_ext_peer_endpoint_next(struct xdev_ext_peer_endpoint *, int timeout_ms,
 	struct xdev_ext_peer_message *);
 /* status0 is an owner assertion of completed producer/consumer work, never

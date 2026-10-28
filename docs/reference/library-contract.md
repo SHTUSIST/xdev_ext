@@ -414,6 +414,11 @@ metadata, allowing only out_len to change. This cookie catches accidental
 cross-endpoint misuse; it is not security authority for a malicious caller.
 Accepted negative completion poisons the endpoint and preserves UNKNOWN.
 
+CPU endpoint next waits on the producer and terminal USER eventfds, with
+terminal priority and one monotonic deadline across interrupts and wake hints.
+An attached external controller on either USER returns -EBUSY before CPU
+consumption; the GPU owner continues to use its metadata protocol.
+
 Endpoint close checks every external-control attachment before changing any
 session or fd. If any USER is still attached it returns -EBUSY and preserves
 the entire endpoint, even after payload STOP succeeded. The owner must call

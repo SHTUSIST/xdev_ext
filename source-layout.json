@@ -3707,6 +3707,18 @@
       "native_path": "tools/testing/selftests/xdev_ext_lib/peer_message_test.py"
     },
     {
+      "source": "tests/core/library/peer_wait/peer_wait_test.c",
+      "logical_path": "tests/core/library/peer_wait/peer_wait_test.c"
+    },
+    {
+      "source": "tests/core/library/peer_wait/run.py",
+      "logical_path": "tests/core/library/peer_wait/run.py"
+    },
+    {
+      "source": "tests/core/library/peer_wait/wait_hooks.h",
+      "logical_path": "tests/core/library/peer_wait/wait_hooks.h"
+    },
+    {
       "source": "tests/core/library/xdev_ext_lib_run_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_lib/xdev_ext_lib_run_test.c"
