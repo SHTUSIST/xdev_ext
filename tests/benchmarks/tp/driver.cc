@@ -110,6 +110,12 @@ int main(int argc,char **argv) {
   // This socket only coordinates barriers. Payload never enters it.
   control.open(o.rank,address,port,o.timeout_ns);control.exchange(handshake(o));
   owner.open(o,node,bpf,user_bpf,oracle,tp_ptx);works.resize(o.depth,nullptr);
+  xdev_ext_cuda_peer_owner_view identity{};identity.size=sizeof(identity);
+  NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&identity));
+  o.tx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.tx_endpoint));
+  o.rx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.rx_endpoint));
+  if(!o.tx_session_id || !o.rx_session_id || o.tx_session_id==o.rx_session_id)
+   throw std::runtime_error("native session identity missing or aliased");
   if(o.operation==4) {
    std::unique_ptr<tp_eval_echo> echo;
    std::unique_ptr<tp_eval_echo_gpu> echo_gpu;
@@ -123,8 +129,11 @@ int main(int argc,char **argv) {
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u}\n",
-     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes);fflush(stdout);
+   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u,\"requested_depth\":%u,\"frame_count\":%u,\"frame_size\":4096,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
+     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes,o.depth,o.frame_count,
+     o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,(unsigned long long)o.iterations,
+     (unsigned long long)o.first_sequence,(unsigned long long)o.payload_bytes,(unsigned long long)o.timeout_ns,
+     (unsigned long long)o.tx_session_id,(unsigned long long)o.rx_session_id);fflush(stdout);
    if(echo_gpu)echo_gpu->close();else echo->close();
    owner.close(o.timeout_ns);::close(control.fd);return 0;
   }
@@ -152,6 +161,9 @@ int main(int argc,char **argv) {
    } else CU(cuGraphLaunch(exec,owner.stream));
    CU(cuStreamSynchronize(owner.stream));
    for(auto w:works)NATIVE(xdev_tp_work_wait(w,o.timeout_ns));
+   xdev_ext_cuda_peer_owner_view completed_view{};completed_view.size=sizeof(completed_view);
+   NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&completed_view));
+   tp_eval_echo::wait_native_complete(completed_view,(iteration+1)*o.depth,o.timeout_ns);
    uint64_t end=now_ns();
    printf("{\"record\":\"interval\",\"start\":%llu,\"end\":%llu,\"rank\":%u,\"clock\":1,\"kind\":\"%s\",\"completed\":true,\"custody_released\":true}\n",
     (unsigned long long)start,(unsigned long long)end,o.rank,o.depth>1?"batch":(o.operation==1?"allreduce":"all_gather"));
@@ -174,11 +186,13 @@ int main(int argc,char **argv) {
      stats.rx_delivered!=stats.completed)throw std::runtime_error("native final accounting incomplete");
   std::vector<xdev_tp_trace_record> traces(o.trace_capacity);size_t written=0;
   NATIVE(xdev_tp_trace_read(owner.comm,traces.data(),traces.size(),&written));
-  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu}\n",
+  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
    o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
    (unsigned long long)stats.trace_dropped,o.depth,(unsigned long long)stats.logical_inflight_high_water,
    o.group_bytes,o.frame_count,(unsigned long long)stats.completed,(unsigned long long)stats.gpu_invocations,
-   (unsigned long long)stats.host_control_calls);
+   (unsigned long long)stats.host_control_calls,o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,
+   (unsigned long long)o.iterations,(unsigned long long)o.first_sequence,(unsigned long long)o.payload_bytes,(unsigned long long)o.timeout_ns,
+     (unsigned long long)o.tx_session_id,(unsigned long long)o.rx_session_id);
   for(size_t i=0;i<written;++i) {const auto &t=traces[i];
    printf("{\"record\":\"event\",\"sequence\":%llu,\"timestamp\":%llu,\"kind\":%u,\"clock\":%u,\"rank\":%u,\"payload_bytes\":%llu,\"wire_bytes\":%llu,\"logical_inflight\":%llu,\"operation\":%u,\"error\":%d}\n",
     (unsigned long long)t.sequence,(unsigned long long)t.timestamp,t.kind,t.clock,t.rank,

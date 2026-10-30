@@ -95,6 +95,8 @@ def class_unit(root,out):
     declarations='\n'.join(mod.struct(mech,name) for name in (
         'xdev_ext_mech_frame','xdev_ext_family_hooks_hdr','xdev_ext_mech_stage',
         'xdev_ext_mech_class_ops','xdev_ext_xdomain_proto_result','xdev_ext_mech_call_args'))
+    if 'struct xdev_ext_xdomain_trace' in mech:
+        declarations+=mod.struct(mech,'xdev_ext_xdomain_trace')
     for name in ('xdev_ext_requester.h','xdev_ext_netfam.h'):
         declarations+=mod.no_includes((k/'include/linux'/name).read_text())+'\n'
     declarations+=mod.no_includes(link)

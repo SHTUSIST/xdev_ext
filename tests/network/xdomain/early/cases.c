@@ -312,6 +312,9 @@ static void early_ack_before_post_return(void)
  fault(world,STACK_FAULT_RELEASE_CALLBACKS,0,0,0,0,0);pump(world,1000000);
  CHECK(count(world,STACK_EV_PUBLISH,0,-1)==1,"ACK arriving before post return survives acceptance merge and retires after local completion");
  CHECK(count(world,STACK_EV_CONTROL_TX,1,3)==1,"early ACK receipt does not require duplicate remote disposition");
+ for(size_t i=0;i<world->logs;i++)
+  if(world->log[i].kind==STACK_EV_PUBLISH&&world->log[i].endpoint==0)
+   CHECK(world->log[i].status==0,"ACK before post return must finish successfully, not merely publish an error");
 }
 static void early_local_before_post_return(void)
 {

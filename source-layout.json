@@ -7741,6 +7741,30 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "tests/benchmarks/tp/early_trace.py",
+      "logical_path": "tests/benchmarks/tp/early_trace.py"
+    },
+    {
+      "source": "tests/benchmarks/tp/pair.py",
+      "logical_path": "tests/benchmarks/tp/pair.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_early_trace.py",
+      "logical_path": "tests/compute/tp/eval/test_early_trace.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_native_completion.py",
+      "logical_path": "tests/compute/tp/eval/test_native_completion.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_pair.py",
+      "logical_path": "tests/compute/tp/eval/test_pair.py"
+    },
+    {
+      "source": "tests/network/xdomain/early/trace_observer.c",
+      "logical_path": "tests/network/xdomain/early/trace_observer.c"
     }
   ]
 }

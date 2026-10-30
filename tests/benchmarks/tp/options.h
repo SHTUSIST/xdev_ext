@@ -10,6 +10,7 @@ struct tp_eval_options {
  uint64_t communicator=1, epoch=1, link=0, timeout_ns=600000000000ULL;
  unsigned group_bytes=0, frame_count=0, trace_capacity=0;
  uint64_t payload_bytes=0, allocation_bytes=0;
+ uint64_t tx_session_id=0, rx_session_id=0; // Observed after native CREATE.
 };
 static inline int tp_eval_geometry(tp_eval_options &o) {
  if (o.early_cts>1 || o.rank>1 || (o.mode!=1 && o.mode!=2) || !o.depth || o.depth>256 ||

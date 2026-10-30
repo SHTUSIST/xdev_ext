@@ -1465,6 +1465,21 @@ void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_native_complete);
 
+bool xdev_ext_mech_trace_xdomain_enabled(void)
+{
+	return trace_xdomain_event_enabled();
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_xdomain_enabled);
+
+void xdev_ext_mech_trace_xdomain(struct xdev_ext_mech_stage *st,
+			       const struct xdev_ext_xdomain_trace *event)
+{
+	if (trace_xdomain_event_enabled())
+		trace_xdomain_event(xdev_ext_mech_session_id(st->s), st->index,
+				   st->direction, event);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_xdomain);
+
 /* Only the matching claim winner may call this and write class metadata. */
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket,
 				      int err, bool sequester)

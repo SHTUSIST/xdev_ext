@@ -85,6 +85,38 @@ static struct xdev_ext_xd_ep *xdev_ext_xd_ep_of(struct xdev_ext_xd_stage *xs)
 { return xs->ns.lk; }
 static struct xdev_ext_xd_fact *xd_fact(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *slot)
 { return &xs->facts[slot - xs->ns.slots]; }
+/* ns.lock held, or exclusive bind context. Never follow a reply's saved
+ * batch pointer: core may already have reused that batch for another key. */
+static void xd_trace(struct xdev_ext_xd_stage *xs, const char *phase,
+		u64 group, u64 key, u64 ticket, u64 pool_generation,
+		int status, bool quiesced)
+{
+	struct xdev_ext_xdomain_trace event;
+
+	if (!xdev_ext_mech_trace_xdomain_enabled())
+		return;
+	event = (struct xdev_ext_xdomain_trace){
+		.phase = phase, .local_inc = xs->local_inc,
+		.remote_inc = xs->remote_inc, .tx_bind = xs->tx_bind,
+		.rx_bind = xs->rx_bind, .group = group, .key = key,
+		.ticket = ticket, .pool_generation = pool_generation,
+		.early = xs->early, .status = status, .quiesced = quiesced,
+	};
+
+	xdev_ext_mech_trace_xdomain(xs->ns.st, &event);
+}
+static void xd_trace_slot(struct xdev_ext_xd_stage *xs, const char *phase,
+			  struct xdev_ext_net_slot *s, int status, bool quiesced)
+{
+	xd_trace(xs, phase, s->group, xdev_ext_mech_batch_key(s->batch),
+		s->ticket, xd_fact(xs, s)->pool_generation, status, quiesced);
+}
+static void xd_trace_reply(struct xdev_ext_xd_stage *xs, const char *phase,
+			   const struct xdev_ext_xd_reply *r, int status, bool quiesced)
+{
+	xd_trace(xs, phase, r->group, r->key, r->ticket,
+		r->pool_generation, status, quiesced);
+}
 static void xd_changed(struct xdev_ext_xd_stage *xs)
 { xs->epoch++; xdev_ext_mech_stage_kick(xs->ns.st); }
 static bool xd_waiting(struct xdev_ext_xd_stage *xs, u64 wake, u64 epoch, u64 now)
@@ -221,6 +253,7 @@ static void xd_local(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot 
 		f->reply->sequestered |= !slot->local_quiesced;
 		if (slot->local_status) f->reply->final = true;
 	}
+	xd_trace_slot(xs, "native_complete", slot, slot->local_status, slot->local_quiesced);
 	if (ns->rx && f->accepted && slot->local_quiesced && xs->posted_groups) xs->posted_groups--;
 	if (!slot->local_quiesced) xd_fail_locked(xs, -ENOLINK);
 	f->local_done = ktime_get_boottime_ns();
@@ -580,6 +613,7 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 		s->busy = true;
 		if (xs->ns.rx && xs->posted_groups) xs->posted_groups--;
 		s->local_known = s->local_quiesced = true; s->local_status = ret;
+		xd_trace_slot(xs, "native_rejected", s, ret, true);
 		if (!xs->ns.rx) xdev_ext_rel_tx_native_done(&xs->ns.tx, s->group, 1, ret, false, i->now_ns);
 		f->event = XDEV_EXT_XDP_EV_POST_RESULT;
 		if (xs->ns.rx && f->reply) {
@@ -592,6 +626,8 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 		s->state = XDEV_EXT_RDV_POSTED;
 		f->posted = i->now_ns;
 		for (k = 0; k < s->nr; k++) bytes += s->elem[k].len;
+		/* The device may queue descriptors or complete before post returns. */
+		xd_trace_slot(xs, "native_accepted", s, 0, s->local_quiesced);
 		xdev_ext_mech_trace_native_submit(s->batch, s->group, 0, bytes, xs->ns.st->direction);
 		f->traced = true;
 		/* Callback may have won on another CPU while post was returning. */
@@ -711,7 +747,9 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		/* Worker native_get uses the core's existing ACTIVE/STOP admission. */
 		ret = xdev_ext_mech_stage_native_get(ns->st);
 		if (ret) { if (ret == -ESHUTDOWN) ret = -ESTALE; break; }
-		r = &xs->replies[k]; *r = (struct xdev_ext_xd_reply){ .used = true, .admission = true, .deadline = xd_hard(xs, s) };
+		r = &xs->replies[k]; *r = (struct xdev_ext_xd_reply){ .used = true, .admission = true, .deadline = xd_hard(xs, s),
+			.key = xdev_ext_mech_batch_key(s->batch), .ticket = s->ticket,
+			.pool_generation = f->pool_generation };
 		f->reply = r; s->state = XDEV_EXT_RDV_ARMED; f->arm_order = ++xs->order; f->event = 0;
 		for (k = 0; k < xs->rts_count; k++) xs->rts[k].wake = 0;
 		break;
@@ -738,6 +776,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[ns->st->index] =
 			(struct xdev_ext_xd_cookie_entry){ .group = i->group };
 		xd_drop_input(xs); xs->posted_groups++; f->reserved = true;
+		xd_trace_reply(xs, "rx_reserved", r, 0, false);
 		xd_changed(xs);
 		spin_unlock_irqrestore(&ns->lock, flags);
 		return xd_post(xs, s, i);
@@ -751,6 +790,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		ret = xdev_ext_rel_tx_native_begin(&ns->tx, s->group, now);
 		if (ret != XDEV_EXT_REL_SEND) { ret = -EPROTO; break; }
 		f->cts_received = true; f->reserved = true; xd_drop_input(xs); xd_changed(xs);
+		xd_trace_slot(xs, "grant_accepted", s, 0, false);
 		spin_unlock_irqrestore(&ns->lock, flags);
 		return xd_post(xs, s, i);
 	case XDEV_EXT_XDP_ACT_ACCEPT_HELD:
@@ -808,6 +848,10 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 			m.status = status < 0 ? -status : 0;
 		}
 		m.credit = v->credit; ret = xd_send(xs, &m); if (ret) break;
+		xd_trace_reply(xs, act == XDEV_EXT_XDP_ACT_SEND_CTS ? "cts_sent" :
+			act == XDEV_EXT_XDP_ACT_SEND_ACK ? "ack_sent" : "fail_sent", r,
+			act == XDEV_EXT_XDP_ACT_SEND_CTS ? 0 : xd_reply_status(r),
+			act != XDEV_EXT_XDP_ACT_SEND_CTS && r->local_quiesced && !r->sequestered);
 		r->advertised = v->credit;
 		r->wake = 0;
 		if (act == XDEV_EXT_XDP_ACT_SEND_CTS) r->cts = false;
@@ -977,6 +1021,14 @@ void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext
 		xs->ctl_wake[xs->ctl_count] = xs->ctl_wait_epoch[xs->ctl_count] = 0;
 		xs->ctl[xs->ctl_count++] = *m;
 	} else if (!xs->ns.rx && m->type >= XDEV_EXT_XD_CTS && m->type <= XDEV_EXT_XD_FAIL) {
+		if (m->type == XDEV_EXT_XD_CTS) {
+			struct xdev_ext_net_slot *slot = xd_group(xs, m->group);
+
+			xd_trace(xs, "cts_received", m->group,
+				slot ? xdev_ext_mech_batch_key(slot->batch) : 0,
+				slot ? slot->ticket : 0,
+				xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)), 0, false);
+		}
 		for (k = 0; k < xs->ctl_count; k++)
 			if (xs->ctl[k].type == m->type && xs->ctl[k].group == m->group &&
 			    xs->ctl[k].credit == m->credit && xs->ctl[k].status == m->status) goto out;
@@ -1198,6 +1250,9 @@ void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_
 			if (m->credit && xdev_ext_net_credit_update(&proved, m->credit)) goto out;
 		} else if (!xs->ns.rx || m->type != XDEV_EXT_XD_CANCEL || !xd_reply_group(xs, m->group)) goto out;
 	}
+	if (m->type == XDEV_EXT_XD_CTS)
+		xd_trace(xs, "cts_received", m->group, m->key, 0,
+			xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)), 0, false);
 	for (k = 0; k < xs->early_ctl_count; k++)
 		if (xd_early_msg_equal(m, &xs->early_ctl[k])) goto out;
 	if (xs->early_ctl_count == XD_EVENTS) { xs->overflow = true; goto changed; }
@@ -1444,6 +1499,7 @@ static int xd_early_rx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_
 	((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[xs->ns.st->index] =
 		(struct xdev_ext_xd_cookie_entry){ .group = s->group };
 	xs->posted_groups++; f->reserved = true;
+	xd_trace_reply(xs, "rx_reserved", r, 0, false);
 	return 0;
 }
 static int xd_early_tx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
@@ -1581,6 +1637,7 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		spin_unlock(&ep->xl->lock);
 		if (!same || xdev_ext_net_credit_update(&xs->ns.tx, in->credit)) { ret = -EPROTO; break; }
 		xs->grant = *in; xs->grant_state = XDEV_EXT_XDP_GRANT_AVAILABLE;
+		xd_trace(xs, "grant_accepted", in->group, in->key, 0, i->base.pool_generation, 0, false);
 		xs->grant_deadline = xs->pending_grant_deadline;
 		xs->pending_grant_deadline = xs->pending_grant_group = 0; xd_drop_input(xs);
 		break;
@@ -1709,6 +1766,14 @@ static int xdev_ext_xd_class_submit(struct xdev_ext_mech_stage *st, struct xdev_
 	struct xdev_ext_xdomain_proto_result result;
 	unsigned long flags;
 	int ret;
+	if (!xs->ns.rx && xdev_ext_mech_trace_xdomain_enabled()) {
+		/* Preserve the first attempt even when no slot/grant exists yet. */
+		spin_lock_irqsave(&xs->ns.lock, flags);
+		xd_trace(xs, "tx_attempt", bp->nr ? bp->desc[0].group : 0,
+			xdev_ext_mech_batch_key(b), xdev_ext_mech_batch_ticket(b),
+			xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)), 0, false);
+		spin_unlock_irqrestore(&xs->ns.lock, flags);
+	}
 	if (xs->ns.dead || !xdev_ext_mech_session_admits(st->s)) return -ESHUTDOWN;
 	/* No temporary unaccepted slot exists while mandatory safety retires
 	 * prior commitments. Pair time still starts only in admitted progress. */
@@ -1802,6 +1867,7 @@ static void xdev_ext_xd_class_batch_release(struct xdev_ext_mech_stage *st, stru
 	if (ce->group && !ce->released && (r = xd_reply_group(xs, ce->group))) {
 		ce->released = true; r->chain_done = true; r->sequestered |= sequestered;
 		r->chain_status = ce->status ? ce->status : sequestered ? -ENOLINK : 0;
+		xd_trace_reply(xs, "consumer_release", r, xd_reply_status(r), !r->sequestered);
 		r->final = r->admission || !r->closed; r->deadline = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_PHASE_NS);
 		r->wake = 0;
 		xd_changed(xs);
@@ -1967,6 +2033,8 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 		.group_bytes = l->group_bytes, .seg_len = l->seg_len };
 	ret = xdev_ext_rel_tx_init(&xs->ns.tx, &cfg);
 	if (ret) goto fini;
+	xd_trace(xs, "stage_bound", 0, 0, 0,
+		xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)), 0, false);
 	return 0;
  fini:
 	if (st->create_reporting && xs->ns.lk &&

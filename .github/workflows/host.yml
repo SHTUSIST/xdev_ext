@@ -250,6 +250,10 @@ jobs:
         if: matrix.cc == 'gcc'
         timeout-minutes: 2
         run: python3 "$GITHUB_WORKSPACE/tools/build/prepare_xdomain_host_inputs.py"
+      - name: EARLY execution observation contracts
+        if: matrix.cc == 'gcc'
+        working-directory: .
+        run: python3 tests/network/xdomain/early/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/xdomain-early-observation" --observe
       - name: Peer control and lifetime checks
         if: matrix.cc == 'gcc'
         run: |

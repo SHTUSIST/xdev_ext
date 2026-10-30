@@ -25,6 +25,8 @@ def source(kernel, here):
     declarations = "\n".join(fixture.struct(mech, name) for name in (
         "xdev_ext_mech_frame", "xdev_ext_family_hooks_hdr", "xdev_ext_mech_stage",
         "xdev_ext_mech_class_ops", "xdev_ext_xdomain_proto_result", "xdev_ext_mech_call_args"))
+    if "struct xdev_ext_xdomain_trace" in mech:
+        declarations += fixture.struct(mech, "xdev_ext_xdomain_trace")
     for name in ("include/linux/xdev_ext_requester.h", "include/linux/xdev_ext_netfam.h", "io_uring/xdomain/xdev_ext_xdomain.h"):
         declarations += fixture.no_includes(read(name)) + "\n"
     core_text = read("io_uring/xdev_ext_mech.c")
