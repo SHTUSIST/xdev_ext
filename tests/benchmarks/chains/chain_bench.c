@@ -275,7 +275,9 @@ static void cb_emit(FILE *f, const struct chain_spec *s, const struct chain_resu
 		s->oracle == CH_ORACLE_CE ? "ce-window" : "none",
 		r->oracle_verdict ? r->oracle_verdict : "not-checked",
 		(unsigned long long)r->oracle_bytes, r->oracle_detail);
-	fprintf(f, "\"cost\":{\"syscalls\":%llu,\"observer_syscalls\":%llu,"
+	/* RUSAGE_SELF diagnostics; cross-arm CPU accounting is cpu_measurement. */
+	fprintf(f, "\"cost\":{\"cpu_scope\":\"producer-process\",\"syscalls\":%llu,"
+		"\"observer_syscalls\":%llu,"
 		"\"voluntary_ctxsw\":%ld,"
 		"\"involuntary_ctxsw\":%ld,\"user_us\":%llu,\"sys_us\":%llu},",
 		(unsigned long long)r->syscalls,

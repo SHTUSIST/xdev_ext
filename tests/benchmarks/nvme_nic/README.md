@@ -89,9 +89,14 @@ producer.
 - Reverse `durable_ns` runs from the first `GO` to the completion of every
   unit's NVMe write. Units arrive in bursts of `qd` units. The peer's per-burst
   `SENT` receipt is read after the burst completes locally.
-- `cpu_user_us` and `cpu_sys_us` cover the producer process only. Work in
-  softirq context and in kernel workers is not attributed to the process, so
-  these fields are not cycles per byte.
+- Raw `cpu_user_us` and `cpu_sys_us` cover the producer process only. Their
+  per-trial sum appears in `summary.arms[arm].producer_process_cpu_us`; the
+  former unqualified summary key `cpu_us` is no longer emitted. Raw record
+  keys remain unchanged. These are process diagnostics: work in softirq
+  context and in kernel workers is not attributed to the process, so equal
+  values can hide different system CPU work. They must not be used for
+  whole-system CPU comparisons between arms. Use the existing
+  `cpu_measurement` accounting and its declared scope for CPU comparisons.
 - Latency distribution: posix, splice and uring stamp every unit twice into
   arrays preallocated before the trial, which costs two clock reads per unit
   and no per-byte work. Forward, a unit's latency runs from its read being
