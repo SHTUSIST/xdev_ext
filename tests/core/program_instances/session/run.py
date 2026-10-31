@@ -43,8 +43,17 @@ def main():
    nonlocal text
    if text.count(old)!=1:raise RuntimeError('environment boundary anchor changed: '+old)
    text=text.replace(old,new)
-  replace_once('typedef uint32_t u32;', 'typedef int32_t s32; typedef uint32_t u32;')
-  replace_once('struct xdev_ext_mech_session {', 'struct xdev_ext_mech_instance;\nstruct xdev_ext_mech_session {\n struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];')
+  if not re.search(r'\btypedef\s+int32_t\s+s32\s*;',text):
+   replace_once('typedef uint32_t u32;', 'typedef int32_t s32; typedef uint32_t u32;')
+  if 'struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];' not in text:
+   replace_once('struct xdev_ext_mech_session {', 'struct xdev_ext_mech_instance;\nstruct xdev_ext_mech_session {\n struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];')
+  # The qualified admission fixture also needs a default-only environment for
+  # these dependencies. Replace only those boundary definitions here; this
+  # suite supplies its own fail-closed PRIVATE boundary and actual opcode12.
+  for n in ('xdev_ext_mech_instance_get_from_fd','xdev_ext_mech_instance_current',
+            'xdev_ext_mech_instance_put','xdev_ext_mech_create_programs_op'):
+   if re.search(r'^\w[^;{}]*\b'+n+r'\([^;{}]*\)\s*\{',text,re.M):
+    text=text.replace(extract.function(text,n),'',1)
   replace_once('static int xdev_ext_mech_all_lock', '#include "default_boundary.h"\nstatic int xdev_ext_mech_all_lock')
   (out/'default_boundary.h').write_bytes((HERE/'default_boundary.h').read_bytes())
   for token,(source,names) in groups.items():

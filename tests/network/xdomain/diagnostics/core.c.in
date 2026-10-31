@@ -52,6 +52,7 @@ static const void *memchr_inv(const void *p,int value,size_t n)
 #define OTHER(name,type) static int name(struct io_ring_ctx *ctx,type arg) { (void)ctx;(void)arg;other_ops++;return -ENOSYS; }
 OTHER(xdev_ext_mech_create,void *)
 OTHER(xdev_ext_mech_create_report_op,void *)
+OTHER(xdev_ext_mech_create_programs_op,void *)
 OTHER(xdev_ext_mech_start,void *)
 OTHER(xdev_ext_mech_stop_op,u64)
 OTHER(xdev_ext_mech_stop_report_op,void *)

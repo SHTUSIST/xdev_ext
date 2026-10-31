@@ -38,7 +38,7 @@ def source(kernel):
     private=extract.struct(core,'xdev_ext_mech_session')
     import re
     fields=[]
-    for pattern in (r'const void \*ops\[XDEV_EXT_MECH_CLASS_MAX\];',r'bool pinned\[XDEV_EXT_MECH_CLASS_MAX\];',r'struct list_head all_node;'):
+    for pattern in (r'const void \*ops\[XDEV_EXT_MECH_CLASS_MAX\];',r'bool pinned\[XDEV_EXT_MECH_CLASS_MAX\];',r'struct xdev_ext_mech_instance \*instances\[XDEV_EXT_MECH_MAX_STAGES\];',r'struct list_head all_node;'):
         match=re.search(pattern,private)
         if not match:raise ValueError('actual session field absent: '+pattern)
         fields.append(match.group())
@@ -59,6 +59,16 @@ static void synchronize_rcu(void) {
  if(stop_epoch_rcu_hook)stop_epoch_rcu_hook();
 }
 '''
+    # The old fixture reused the class table as an opaque registry token.
+    # Unregister now reads common ops flags; provide the actual flags0 layout.
+    header=(kernel/'include/linux/xdev_ext_mech.h').read_text()
+    layout=re.search(r'^#define XDEV_EXT_MECH_OPS_TYPE\(name\).*?^}',header,re.M|re.S)
+    if not layout:raise ValueError('actual common ops layout absent')
+    environment += ('\nstruct bpf_link;\nstruct xdev_ext_mech_ctx;\nstruct xdev_ext_mech_instance;\n'+
+        layout.group()+'\nXDEV_EXT_MECH_OPS_TYPE(xdev_ext_nvme_mech_ops);\n'+
+        'static const struct xdev_ext_nvme_mech_ops stop_epoch_ops={.abi_version=XDEV_EXT_MECH_ABI_VERSION};\n'+
+        'static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *p){(void)p;abort();}\n'+
+        'static bool xdev_ext_mech_instance_unregister(u32 c,const void *o,struct bpf_link *l){(void)c;(void)o;(void)l;abort();}\n')
     bodies=(extract.struct(registry_header,'xdev_ext_ops_registry')+
         '\nstatic const void *stop_epoch_registry_slots[XDEV_EXT_MECH_CLASS_MAX];\n'+
         'static struct xdev_ext_ops_registry xdev_ext_mech_registry={.slots=stop_epoch_registry_slots,.nr_slots=XDEV_EXT_MECH_CLASS_MAX};\n'+
@@ -67,15 +77,20 @@ static void synchronize_rcu(void) {
         extract.function(registry_header,'xdev_ext_ops_is_current')+
         extract.function(registry,'xdev_ext_ops_retract')+
         extract.function(ops,'xdev_ext_mech_ops_current')+
+        extract.function(core,'xdev_ext_mech_programs_current')+
         extract.function(core,'xdev_ext_mech_session_admits')+
         extract.function(ops,'xdev_ext_mech_unreg'))
     if s.count(old)!=1:raise ValueError('admission boundary changed')
-    s=s.replace(old,environment+bodies)
+    s=s.replace(old,environment+bodies+'\n#define xdev_ext_mech_unreg(c,o) xdev_ext_mech_unreg(c,o,NULL)\n')
     before,token,after=s.rpartition('int main(int argc,char **argv)')
     if not token:raise ValueError('terminal main absent')
+    cases=(HERE/'xdomain_review_stop_epoch_cases.c').read_text()
+    # Only registry token inputs change; class callbacks and assertions stay.
+    cases=cases.replace(']=registered;',']=&stop_epoch_ops;')
+    cases=cases.replace('(void *)registered','(void *)&stop_epoch_ops')
     return (before+'int stop_epoch_unused_terminal_main(int argc,char **argv)'+after+'\n'+
         extract.function(core,'xdev_ext_mech_generation_gone')+'\n'+
-        (HERE/'xdomain_review_stop_epoch_cases.c').read_text())
+        cases)
 
 def main():
     p=argparse.ArgumentParser(description=__doc__);p.add_argument('--kernel',type=Path,default=HERE.parents[4]);p.add_argument('--artifact-directory',type=Path);p.add_argument('--case',choices=CASES,action='append');a=p.parse_args()

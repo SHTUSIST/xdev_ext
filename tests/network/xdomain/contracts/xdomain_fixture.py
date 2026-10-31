@@ -99,14 +99,23 @@ def declarations(syntax):
     # Device/session environment for the real call wrapper and target checker.
     # No identity, filter or protocol success function is supplied here.
     parts.append(r'''
+struct xdev_ext_mech_instance;
 struct xdev_ext_mech_batch { u64 id, key, bytes; };
 struct xdev_ext_mech_session {
  u64 id; struct xdev_ext_mech_layout layout; u32 frames;
+ struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
  const void *ops[XDEV_EXT_MECH_CLASS_MAX + 1];
 };
 struct xdev_ext_mech_stage {
  struct xdev_ext_mech_session *s; u32 class_id, index, direction; void *priv;
 };
+/* Existing X1 cases select default tables only. No PRIVATE lookup model. */
+static const void *xdev_ext_mech_instance_ops(const struct xdev_ext_mech_instance *instance)
+{
+ if (instance)
+  abort();
+ return NULL;
+}
 int bpf_xdev_ext_xdomain_info(const struct xdev_ext_mech_ctx *, void *, u32);
 int bpf_xdev_ext_xdomain_verdict(const struct xdev_ext_mech_ctx *, const void *, u32);
 struct xdev_ext_mech_call *xdev_ext_mech_call_of(const struct xdev_ext_mech_ctx *);
@@ -148,6 +157,7 @@ def production():
         "xdev_ext_mech_invoke", "bpf_xdev_ext_info", "bpf_xdev_ext_desc", "bpf_xdev_ext_cqe",
         "bpf_xdev_ext_frame")))
     parts.append(closure(private, ("bpf_xdev_ext_xdomain_info", "bpf_xdev_ext_xdomain_verdict")))
+    parts.append(definition(core, "xdev_ext_mech_stage_ops"))
     parts.append(definition(core, "xdev_ext_mech_call"))
     return "\n\n".join(parts)
 

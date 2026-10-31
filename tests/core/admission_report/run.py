@@ -77,7 +77,7 @@ def main():
             core = (root / "src/core/io_uring/xdev_ext_mech.c").read_text()
             requester = (root / "src/core/io_uring/family/xdev_ext_requester.c").read_text()
         groups = {
-            "ADMITS": (core, ("xdev_ext_mech_session_admits",)),
+            "ADMITS": (core, ("xdev_ext_mech_programs_current", "xdev_ext_mech_session_admits")),
             "BATCH_GET": (core, ("xdev_ext_mech_batch_get_locked",)),
             "REQUESTER": (requester, ("xdev_ext_requester_bind", "xdev_ext_requester_unbind")),
             "BIND": (core, ("xdev_ext_mech_class_bind", "xdev_ext_mech_session_bind")),

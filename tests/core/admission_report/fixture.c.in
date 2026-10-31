@@ -18,7 +18,7 @@ static int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *facts,__u32 
 { decisions++;return r3_admit_rule(facts,flags,out); }
 #include "include/uapi/linux/xdev_ext_policy.h"
 #include "wire.h"
-typedef uint32_t u32; typedef uint64_t u64;
+typedef uint32_t u32; typedef uint64_t u64; typedef int32_t s32;
 #define __user
 #define GFP_KERNEL 0
 #define U32_MAX UINT32_MAX
@@ -101,10 +101,12 @@ struct xdev_ext_mech_batch {
  u64 id,key;int abort_err,status;u32 present,nr_frames,bytes,life_active;
  bool sequester,to_user,ordered_loan,fifo_accepted;
 };
+struct xdev_ext_mech_instance;
 struct xdev_ext_mech_session {
  struct io_ring_ctx *ctx; struct xdev_ext_mech_sess ss;
  struct xdev_ext_mech_pool pool; struct file *pool_file;
  struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
+ struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
  const void *ops[XDEV_EXT_MECH_CLASS_MAX]; bool pinned[XDEV_EXT_MECH_CLASS_MAX];
  void *c_owner[XDEV_EXT_MECH_CLASS_MAX];
  u64 id; u32 frames,nr_stages,nr_bound; int lock,last_err;
@@ -160,6 +162,15 @@ static void class_unbind(struct xdev_ext_mech_stage *st) { xdev_ext_requester_un
 static const struct xdev_ext_mech_class_ops net_class={ .bind=class_bind,.unbind_checked=class_unbind_checked,.unbind=class_unbind };
 static const struct xdev_ext_mech_class_ops *xdev_ext_mech_class_get(u32 id)
 { return id==XDEV_EXT_MECH_CLASS_NET?&net_class:NULL; }
+/* Default-only CREATE report scenarios never select PRIVATE handles. */
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *p)
+{ (void)p;abort(); }
+static int xdev_ext_mech_instance_get_from_fd(u32 c,int fd,struct xdev_ext_mech_instance **out)
+{ (void)c;(void)fd;(void)out;abort(); }
+static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *p)
+{ if(p)abort(); }
+static int xdev_ext_mech_create_programs_op(struct io_ring_ctx *c,void *p)
+{ (void)c;(void)p;abort(); }
 static int token;
 static const void *xdev_ext_mech_ops_get(u32 id,bool *p,void **m) { (void)id;*p=false;*m=NULL;return &token; }
 static int xdev_ext_mech_session_buffers(struct xdev_ext_mech_session *s)
