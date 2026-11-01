@@ -40,6 +40,17 @@ static std::map<CUdeviceptr,size_t> live_allocations;
 static std::map<int,bool> live_fds;
 static struct xdev_ext_peer_endpoint endpoints[2]={{0},{1}};
 static struct xdev_ext_cuda_user controls[3]={{0},{1},{2}};
+static void check(bool,const char *);
+/* These cases use the legacy owner_open API. The complete owner TU also
+ * contains additive PRIVATE entry points, which must stay unreachable here.
+ * Resolve their transport symbols without pretending PRIVATE validation ran. */
+extern "C" int bpf_obj_get(const char *){
+ check(false,"legacy owner must not acquire a PRIVATE program pin");errno=EOPNOTSUPP;return -1;
+}
+extern "C" int xdev_ext_peer_endpoint_create_programs(xdev_ext_peer_endpoint *,
+ const int *,__u32,xdev_ext_mech_create_report *){
+ check(false,"legacy owner must not CREATE with PRIVATE program selectors");return -EOPNOTSUPP;
+}
 static int owner_os_open(const char *,int,...){int fd=10+int(live_fds.size());live_fds[fd]=true;return fd;}
 static int owner_os_close(int fd){assert(live_fds[fd]);live_fds[fd]=false;closes++;if(fault=="authority_close"&&fd==100){errno=EIO;return -1;}return 0;}
 static int owner_os_ioctl(int fd,unsigned long op,...){
