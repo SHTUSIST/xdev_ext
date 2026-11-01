@@ -98,6 +98,144 @@ class EarlyTraceTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     self.a.analyze(es, STATS)
 
+    def test_tx_local_bind_must_match_stage_admission(self):
+        es = [tx_trace()[0]] + [dict(e, tx_bind=999) for e in tx_trace()[1:]]
+        with self.assertRaisesRegex(ValueError, "local bind"):
+            self.a.analyze(es, STATS)
+
+    def test_rx_local_bind_must_match_stage_admission(self):
+        es = [rx_bound()] + [dict(e, rx_bind=999) for e in rx_trace()]
+        with self.assertRaisesRegex(ValueError, "local bind"):
+            self.a.analyze(es, STATS)
+
+    def test_early_stage_requires_a_nonzero_local_bind(self):
+        for es, field in ((tx_trace(), "tx_bind"),
+                          ([rx_bound()]+rx_trace(), "rx_bind")):
+            with self.subTest(field=field):
+                with self.assertRaisesRegex(ValueError, "local bind"):
+                    self.a.analyze([dict(e, **{field: 0}) for e in es], STATS)
+
+    def test_ordinary_stages_keep_both_binds_zero(self):
+        for es in (tx_trace(), [rx_bound()]+rx_trace()):
+            ordinary = [dict(e, early=0, tx_bind=0, rx_bind=0) for e in es]
+            self.assertTrue(self.a.analyze(ordinary, STATS)["protocol_complete"])
+            for field in ("tx_bind", "rx_bind"):
+                with self.subTest(direction=es[0]["direction"], field=field):
+                    with self.assertRaisesRegex(ValueError, "ordinary.*bind"):
+                        self.a.analyze([dict(e, **{field: 999}) for e in ordinary], STATS)
+
+    def test_local_bind_is_scoped_by_session_and_stage(self):
+        # Independent admitted TX stages may use distinct local binds.
+        first = tx_trace()
+        for identity in (dict(session_id=43), dict(stage=2)):
+            other = [dict(e, tx_bind=8, **identity) for e in first]
+            with self.subTest(identity=identity):
+                self.assertTrue(self.a.analyze(first+other, STATS)["protocol_complete"])
+
+    def test_early_peer_bind_cannot_change_between_groups(self):
+        for es, peer in ((tx_trace(), "rx_bind"),
+                         ([rx_bound()]+rx_trace(), "tx_bind")):
+            later = [dict(e, ts_ns=e["ts_ns"]+100, key=38,
+                          group=2 if e["group"] else 0, **{peer: 999})
+                     for e in es if e["phase"] != "stage_bound"]
+            with self.subTest(peer=peer):
+                with self.assertRaisesRegex(ValueError, "peer bind changed"):
+                    self.a.analyze(es+later, STATS)
+
+    def test_early_successful_group_requires_peer_bind(self):
+        for es, peer in ((tx_trace(), "rx_bind"),
+                         ([rx_bound()]+rx_trace(), "tx_bind")):
+            with self.subTest(peer=peer):
+                with self.assertRaisesRegex(ValueError, "group.*peer bind"):
+                    self.a.analyze([dict(e, **{peer: 0}) for e in es], STATS)
+
+    def test_peer_bind_can_be_learned_after_zero_bound_and_eagain_attempt(self):
+        es = tx_trace()+[rx_bound()]+rx_trace()
+        es.append(event("tx_attempt", 5, group=0, rx_bind=0, ticket=10))
+        result = self.a.analyze(es, STATS)
+        self.assertTrue(result["protocol_complete"])
+        self.assertEqual(result["grant_lead_ns"], [-15])
+        self.assertEqual(result["grants_before_first_tx_attempt"], 0)
+
+    def test_peer_bind_cannot_return_to_zero_on_later_tx_attempt(self):
+        es = [dict(e, rx_bind=0) if e["phase"] == "tx_attempt" else e
+              for e in tx_trace()]
+        with self.assertRaisesRegex(ValueError, "peer bind returned to zero"):
+            self.a.analyze(es, STATS)
+
+    def test_zero_peer_at_same_timestamp_as_pair_observation_is_allowed(self):
+        es = [dict(e, ts_ns=10, rx_bind=0) if e["phase"] == "tx_attempt" else e
+              for e in tx_trace()]
+        # Equal timestamps cannot establish ordering, including input-row order.
+        self.assertTrue(self.a.analyze(es, STATS)["protocol_complete"])
+        self.assertTrue(self.a.analyze(list(reversed(es)), STATS)["protocol_complete"])
+
+    def test_paired_rx_success_observations_cannot_return_to_zero(self):
+        # RX has no tx_attempt exception: reservation and native ownership need
+        # the established pair. Later RX observations must preserve that peer.
+        for phase in ("native_accepted", "cts_sent", "native_complete",
+                      "consumer_release", "ack_sent"):
+            es = [rx_bound()] + [dict(e, tx_bind=0) if e["phase"] == phase else e
+                                 for e in rx_trace()]
+            with self.subTest(phase=phase):
+                with self.assertRaises(ValueError):
+                    self.a.analyze(es, STATS)
+
+    def test_peer_bind_is_scoped_by_session_and_stage(self):
+        es = tx_trace()
+        for identity in (dict(session_id=43), dict(stage=2)):
+            other = [dict(e, rx_bind=0 if e["phase"] == "stage_bound" else 99,
+                          **identity) for e in es]
+            with self.subTest(identity=identity):
+                self.assertTrue(self.a.analyze(es+other, STATS)["protocol_complete"])
+
+    def test_tx_attempt_cannot_follow_native_acceptance(self):
+        es = [dict(e, ts_ns=41) if e["phase"] == "tx_attempt" else e
+              for e in tx_trace()]
+        with self.assertRaisesRegex(ValueError, "native accepted before first TX attempt"):
+            self.a.analyze(es, STATS)
+
+    def test_tx_attempt_cannot_follow_native_completion(self):
+        # Callback before API return is legal, but cannot precede submission.
+        es = [dict(e, ts_ns=29) if e["phase"] == "native_complete" else e
+              for e in tx_trace()]
+        with self.assertRaisesRegex(ValueError, "native complete before first TX attempt"):
+            self.a.analyze(es, STATS)
+
+    def test_grant_cannot_follow_native_completion(self):
+        es = [dict(e, ts_ns=19) if e["phase"] == "native_complete" else e
+              for e in tx_trace()]
+        # An earlier EAGAIN attempt excludes first-attempt causality as the cause.
+        es.append(event("tx_attempt", 5, group=0, rx_bind=0, ticket=10))
+        with self.assertRaisesRegex(ValueError, "native complete before grant"):
+            self.a.analyze(es, STATS)
+
+    def test_rx_reservation_cannot_follow_native_completion(self):
+        es = [rx_bound()] + [dict(e, ts_ns=9) if e["phase"] == "native_complete" else e
+                             for e in rx_trace()]
+        with self.assertRaisesRegex(ValueError, "native complete before RX reservation"):
+            self.a.analyze(es, STATS)
+
+    def test_tx_prerequisites_may_equal_native_boundaries(self):
+        for accepted, completed in ((30, 50), (40, 30)):
+            es = [dict(e, ts_ns=accepted) if e["phase"] == "native_accepted" else
+                  dict(e, ts_ns=completed) if e["phase"] == "native_complete" else e
+                  for e in tx_trace()]
+            with self.subTest(accepted=accepted, completed=completed):
+                self.assertTrue(self.a.analyze(es, STATS)["protocol_complete"])
+        # The EAGAIN attempt precedes a grant simultaneous with the callback.
+        es = [dict(e, ts_ns=20) if e["phase"] == "native_complete" else e
+              for e in tx_trace()]
+        es.append(event("tx_attempt", 5, group=0, rx_bind=0, ticket=10))
+        self.assertTrue(self.a.analyze(es, STATS)["protocol_complete"])
+
+    def test_rx_reservation_may_equal_callback_before_post_returns(self):
+        es = [rx_bound()] + [dict(e, ts_ns=10) if e["phase"] == "native_complete" else e
+                             for e in rx_trace()]
+        result = self.a.analyze(es, STATS)
+        self.assertTrue(result["protocol_complete"])
+        self.assertEqual(result["completion_before_post_return_groups"], 1)
+
     def test_receive_requires_preposted_descriptors_and_release_before_ack(self):
         good = [rx_bound()]+rx_trace()
         self.assertTrue(self.a.analyze(good, STATS)["protocol_complete"])
