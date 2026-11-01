@@ -35,6 +35,12 @@ with tempfile.TemporaryDirectory(prefix='independent-class7-') as temp:
         name = 'include/linux/xdev_ext_family_core.h'
         data = _LAYOUT.read_native(Path(__file__).resolve().parent, 'linux', name, a.revision) if globals().get("_LAYOUT") else (subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes())
         (tree/name).write_bytes(data)
+        # Follow the selected declaration header's real constructor dependency;
+        # older source overrides that do not include it need no extra input.
+        if '"xdev_ext_binding_ctx.h"' in data.decode():
+            name = 'include/linux/xdev_ext_binding_ctx.h'
+            data = _LAYOUT.read_native(Path(__file__).resolve().parent, 'linux', name, a.revision) if globals().get("_LAYOUT") else (subprocess.check_output(['git','show',a.revision+':./'+name],cwd=ROOT) if a.revision else (ROOT/name).read_bytes())
+            (tree/name).write_bytes(data)
     # Newer admission code uses the CPU contract; older revisions did not.
     if '"xdev_ext_mech_cpu_core.h"' in (tree/'io_uring/xdev_ext_mech_step.h').read_text():
         name = 'io_uring/xdev_ext_mech_cpu_core.h'

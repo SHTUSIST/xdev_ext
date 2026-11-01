@@ -23,6 +23,7 @@ int main(void)
   b.bs.state=XDEV_EXT_MECH_B_READY;b.bs.nr_stages=2;
   s.pool.state[0]=XDEV_EXT_MECH_F_HELD;
   s.st[0].cls=&ops;s.st[0].class_id=mode==2||mode==3?XDEV_EXT_MECH_CLASS_AFXDP:XDEV_EXT_MECH_CLASS_SOCKET;
+  ops.class_id=s.st[0].class_id;ops.decl=xdev_ext_mech_class_desc(ops.class_id);
   s.st[0].direction=mode==0||mode==4?XDEV_EXT_MECH_DIR_FROM_DEVICE:XDEV_EXT_MECH_DIR_TO_DEVICE;
   s.pool.capabilities=mode==3?XDEV_EXT_BINDING_CAP_ZERO_COPY:0;
   ops.flags=mode==4?0:XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE;

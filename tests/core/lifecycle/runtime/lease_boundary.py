@@ -18,7 +18,7 @@ ROOT = HERE.parents[4]
 LEASE = HERE.parent / 'iaa_transform'
 sys.path.insert(0, str(LEASE))
 from lease_test import FUNCTIONS  # noqa: E402
-from acquire_red_test import function  # noqa: E402
+from acquire_red_test import function, session_helpers  # noqa: E402
 
 SHIMS = r'''
 #ifndef GFP_KERNEL
@@ -58,6 +58,7 @@ def build(scenario, directory, nr_frames=None, name='probe', patches=()):
     fixture = fixture.replace('struct xdev_ext_mech_batch {',
                               'struct xdev_ext_mech_batch { bool ordered_loan;')
     fixture = fixture.replace(marker, 'static int xdev_ext_mech_start_queue_release(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b,bool seq){(void)s;(void)b;(void)seq;abort();}\n' + marker)
+    bodies = {}
     for fn in FUNCTIONS:
         body = function(production, fn)
         if fn == 'xdev_ext_mech_transform_reserve' and 'xdev_ext_mech_transform_alias_free' not in FUNCTIONS:
@@ -66,7 +67,23 @@ def build(scenario, directory, nr_frames=None, name='probe', patches=()):
                 body = function(production, 'xdev_ext_mech_transform_alias_free') + '\n' + body
             except RuntimeError:
                 pass
-        fixture = fixture.replace('/* ' + fn + ' */', body)
+        bodies[fn] = body
+    # Match the real compiled closure, including historical source overrides.
+    # The shared extractor rejects a called helper absent from that source.
+    helpers = session_helpers(production, bodies.values())
+    for helper in helpers:
+        token = '/* ' + helper + ' */'
+        if token not in fixture:
+            fixture = fixture.replace(marker, token + '\n' + marker, 1)
+        bodies[helper] = function(production, helper)
+    if 'xdev_ext_mech_session_start_queue_check' in helpers:
+        fixture = fixture.replace('#include "io_uring/xdev_ext_mech_step.h"',
+            '#include "io_uring/xdev_ext_mech_step.h"\n#include "io_uring/xdev_ext_mech_start_queue.h"')
+    for fn in helpers + list(FUNCTIONS):
+        token = '/* ' + fn + ' */'
+        if fixture.count(token) != 1:
+            raise RuntimeError('lease fixture production marker changed: ' + fn)
+        fixture = fixture.replace(token, bodies[fn], 1)
     source = Path(directory) / (name + '.c')
     source.write_text(fixture + scenario)
     binary = Path(directory) / name
