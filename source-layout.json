@@ -7756,6 +7756,50 @@
       "source": "src/core/drivers/dma-buf/heaps/system_heap.c",
       "component": "linux",
       "native_path": "drivers/dma-buf/heaps/system_heap.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/contract.h",
+      "logical_path": "tests/core/peer_dmabuf/contract.h"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/fd_boundary.c.in",
+      "logical_path": "tests/core/peer_dmabuf/fd_boundary.c.in"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/fd_boundary.h",
+      "logical_path": "tests/core/peer_dmabuf/fd_boundary.h"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/host_admission_test.c",
+      "logical_path": "tests/core/peer_dmabuf/host_admission_test.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/importer_cases.c",
+      "logical_path": "tests/core/peer_dmabuf/importer_cases.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/importer_run.py",
+      "logical_path": "tests/core/peer_dmabuf/importer_run.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/kernel-api-boundary.md",
+      "logical_path": "tests/core/peer_dmabuf/kernel-api-boundary.md"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/kernel_shim.c",
+      "logical_path": "tests/core/peer_dmabuf/kernel_shim.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/kernel_shim.h",
+      "logical_path": "tests/core/peer_dmabuf/kernel_shim.h"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/provenance.py",
+      "logical_path": "tests/core/peer_dmabuf/provenance.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/run.py",
+      "logical_path": "tests/core/peer_dmabuf/run.py"
     }
   ]
 }
