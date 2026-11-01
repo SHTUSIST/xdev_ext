@@ -23,7 +23,8 @@ def main():
     args = p.parse_args()
     source = Path(__file__).resolve().parent
     repo = source.parents[2]
-    lib = repo / 'kernel/tools/xdev_ext_mech/lib'
+    tools = repo / 'kernel/tools'
+    lib = tools / 'xdev_ext_mech/lib'
     examples = lib.parent / 'examples'
     uapi = repo / 'kernel/include/uapi/linux'
     out = args.out.resolve()
@@ -36,11 +37,16 @@ def main():
                  if q.is_file()), None)
     c_sources = [lib / f'xdev_ext_{n}.c' for n in
                  ['session', 'user', 'prog', 'run', 'link', 'peer_message']]
+    # Session receive configuration owns the shared RX/steering lifecycle.
+    c_sources += [tools/'xdev_ext_xsk_shared.c', tools/'xdev_ext_xsk_steer.c']
     cuda_sources = [lib/'libxdev_ext_cuda.cc', lib/'libxdev_ext_cuda_kernels.cu',
                     examples/'peer_message.cc', examples/'peer_message_owner.cu']
     headers = [lib/n for n in ['libxdev_ext.h', 'libxdev_ext_internal.h',
                                'libxdev_ext_peer_message.h', 'libxdev_ext_cuda.h',
                                'libxdev_ext_cuda_device.h']]
+    headers += [tools/'include'/n for n in ['xdev_ext_xsk_shared.h',
+                  'xdev_ext_xsk_shared_prog.h', 'xdev_ext_xsk_steer.h',
+                  'xdev_ext_xsk_redirect.h', 'xdev_ext_xsk_redirect_prog.h']]
     headers += [uapi/n for n in ['io_uring.h', 'xdev_ext_mech.h',
                                  'xdev_ext_peer.h', 'xdev_ext_binding.h']]
     headers += [lib.parent/n for n in ['xdev_ext_mech_ctl_core.h',
@@ -142,7 +148,7 @@ def main():
     shared = out/'libxdev_ext_cuda.so'
     core_objects = [q for q in objects if q.stem not in ['xdev_ext_prog', 'xdev_ext_run']]
     if run([args.host_cxx, '-shared', '-Wl,--no-undefined', cuda_obj,
-            *core_objects, '-L'+str(stub.parent), '-lcuda', '-o', shared])['returncode']:
+            *core_objects, *link, '-o', shared])['returncode']:
         return finish('failed', 1, 'Driver library link failed')
     executable = out/'peer_message'
     if run([args.host_cxx, '-std=c++17', *common, '-I'+str(include),
