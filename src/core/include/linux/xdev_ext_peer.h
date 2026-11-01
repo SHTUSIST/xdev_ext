@@ -12,6 +12,18 @@ struct pci_dev;
 struct xdev_ext_peer_region;
 struct xdev_ext_peer_mapping;
 struct xdev_ext_peer_backing;
+/*
+ * Memory-provider boundary below the storage, network and compute families.
+ * Memory supplies addressable frames; it has no device request/completion and
+ * is not a fourth family.  One device may supply memory and also implement a
+ * family operation, such as GPU memory and a GPU copy engine.
+ *
+ * Core owns pin/map/unmap/unpin and calls the registered provider operations.
+ * Family stages consume the core's pools and bounded leases, not vendor pin/map
+ * APIs or vendor-private headers.  A provider describes actual backing and
+ * requester mappings; registration alone does not establish reachability or
+ * producer visibility.  See docs/architecture/overview.md for the layer split.
+ */
 /* Provider-private addresses, never exposed to BPF or userspace. */
 struct xdev_ext_peer_dma {
  void *private;

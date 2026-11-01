@@ -415,8 +415,11 @@ int xdev_ext_mech_family_kfunc_filter(u32 family, const struct bpf_prog *prog,
 				 const struct btf_id_set *complete);
 
 /*
- * Where batch frames live.  The provider fills it in its bind function and
- * keeps the UMEM, its pages and its state words alive until ->release.
+ * Memory-provider layer shared by all three device families.  A pool describes
+ * where batch frames live, not a device request or an additional family.
+ * The provider fills it in its bind function and keeps the backing and state
+ * words alive until ->release.  Stages use this pool or core-issued peer leases;
+ * provider-specific pinning and mapping stay behind the core peer interface.
  */
 struct xdev_ext_mech_pool;
 
