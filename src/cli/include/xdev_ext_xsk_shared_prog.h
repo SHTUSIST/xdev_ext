@@ -73,6 +73,11 @@ static inline int xdev_ext_shared_program(int xsks, int flows,
 	J(BPF_JMP32 | BPF_JSET | BPF_K, 3, 0, 0x3fff);
 	LOAD(3, 7, 16, BPF_H);
 	BE(3, 16);
+	/*
+	 * BPF_END loses scalar bounds; JMP32 cannot bound the upper half.
+	 * Expose the 16-bit length before adding it to a packet pointer.
+	 */
+	E(BPF_ALU64 | BPF_AND | BPF_K, 3, 0, 0, 0xffff);
 	J(BPF_JMP32 | BPF_JLT | BPF_K, 3, 0, 32);
 	MOV(4, 3);
 	E(BPF_ALU64 | BPF_ADD | BPF_K, 4, 0, 0, 14);
