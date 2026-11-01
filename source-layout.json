@@ -4842,6 +4842,31 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/session/wire.h"
     },
     {
+      "source": "tests/core/program_instances/token/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/token/Makefile"
+    },
+    {
+      "source": "tests/core/program_instances/token/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/token/README.md"
+    },
+    {
+      "source": "tests/core/program_instances/token/private_cpu.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/token/private_cpu.bpf.c"
+    },
+    {
+      "source": "tests/core/program_instances/token/protocol_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/token/protocol_test.py"
+    },
+    {
+      "source": "tests/core/program_instances/token/token_guest.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/token/token_guest.c"
+    },
+    {
       "source": "tests/core/provider/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/Makefile"
@@ -7753,6 +7778,16 @@
       "source": "tests/storage/nvme/passthru/nvme_xdev_ext_passthru_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext_passthru/nvme_xdev_ext_passthru_test.c"
+    },
+    {
+      "source": "tests/storage/nvme/peer_bind_authorization_fixture.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_fixture.c"
+    },
+    {
+      "source": "tests/storage/nvme/peer_bind_authorization_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_test.py"
     },
     {
       "source": "tests/storage/nvme/xdev_ext_mech_nvme_nowait_fixture.c",

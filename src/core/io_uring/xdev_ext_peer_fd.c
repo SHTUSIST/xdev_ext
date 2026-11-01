@@ -83,7 +83,9 @@ struct file *xdev_ext_peer_file_claim(struct file *file, u64 *len, u64 *generati
  struct xdev_ext_peer_authority *a;
  struct file *authority;
  int ret;
- if (!capable(CAP_SYS_RAWIO)) return ERR_PTR(-EPERM);
+ /* REGISTER already authorized and sealed this region. Passing its allocation
+  * fd delegates only that bounded region; GPU/control/authority fds cannot claim.
+  */
  if (!file || file->f_op != &xdev_ext_peer_allocation_fops || !len || !generation)
   return ERR_PTR(-EINVAL);
  a = kzalloc(sizeof(*a), GFP_KERNEL);

@@ -11,7 +11,8 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-KERNEL = HERE.parents[3]
+ROOT = HERE.parents[3]
+KERNEL = ROOT / "src/core" if (ROOT / "source-layout.json").is_file() else ROOT
 
 
 def actual_fd_code():
@@ -40,7 +41,7 @@ SHIM += r'''
 #define IS_ERR(p) ((uintptr_t)(p) > (uintptr_t)-4096)
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 static bool rawio=true;
-static bool capable(int cap) { (void)cap; return rawio; }
+static __attribute__((unused)) bool capable(int cap) { (void)cap; return rawio; }
 static struct file *anon_inode_getfile(const char *name, const struct file_operations *ops, void *private, int flags)
 { (void)name; (void)flags; struct file *f=calloc(1,sizeof(*f)); assert(f); f->f_op=ops; f->refs=1; f->private_data=private; return f; }
 static struct file *fd_table[16];

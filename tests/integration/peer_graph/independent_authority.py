@@ -10,8 +10,10 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-KERNEL = Path(__file__).resolve().parents[5]
-RAW_SHIM = KERNEL / "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h"
+ROOT = next((p for p in Path(__file__).resolve().parents if (p / "source-layout.json").is_file()), None)
+KERNEL = ROOT / "src/core" if ROOT else Path(__file__).resolve().parents[5]
+RAW_SHIM = (ROOT / "tests/network/peer/session/xdev_ext_peer_test_shim.h" if ROOT else
+            KERNEL / "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h")
 SHIM = RAW_SHIM.read_text()
 SHIM = "#include <assert.h>\n#include <stdio.h>\n#include <string.h>\n" + SHIM
 SHIM = SHIM.replace("struct file_operations { int unused; };", "struct inode { int unused; }; struct file; struct file_operations { void *owner; int (*release)(struct inode *,struct file *); };")
@@ -29,7 +31,7 @@ typedef uint16_t u16;
 #define list_for_each_entry_safe(p,n,h,m) for(p=container_of((h)->next,__typeof__(*p),m),n=container_of(p->m.next,__typeof__(*p),m);&p->m!=(h);p=n,n=container_of(n->m.next,__typeof__(*n),m))
 static bool rawio=true;
 static int anon_error;
-static bool capable(int cap){assert(cap==CAP_SYS_RAWIO);return rawio;}
+static __attribute__((unused)) bool capable(int cap){assert(cap==CAP_SYS_RAWIO);return rawio;}
 static struct file *anon_inode_getfile(const char *name,const struct file_operations *ops,void *private,int flags)
 {struct file *f;(void)name;assert(flags==O_RDWR);if(anon_error)return ERR_PTR(anon_error);f=calloc(1,sizeof(*f));assert(f);*f=(struct file){ops,1,private};return f;}
 static struct file *slots[16];
@@ -57,11 +59,16 @@ int main(void)
  struct file *f,*a,*again,wrong={.f_op=&wrong_ops,.refs=1};struct pci_dev pci={};
  struct xdev_ext_peer_fd_lease h={};u64 len=0,gen=0,query_gen=0;int before;
  assert(!xdev_ext_peer_provider_register(&provider));f=allocation();
- rawio=false;a=xdev_ext_peer_file_claim(f,&len,&gen);assert(IS_ERR(a)&&PTR_ERR(a)==-EPERM&&f->refs==1);rawio=true;
+ rawio=false;a=xdev_ext_peer_file_claim(f,&len,&gen);
+ assert(!IS_ERR(a)&&len==262144&&gen&&f->refs==2);
+ fput(a);assert(f->refs==1&&!((struct xdev_ext_peer_fd*)f->private_data)->claimed);
+ /* Even a coherent private-data shape cannot substitute for the sealed fd type. */
+ wrong.private_data=f->private_data;
  a=xdev_ext_peer_file_claim(&wrong,&len,&gen);assert(IS_ERR(a)&&PTR_ERR(a)==-EINVAL&&wrong.refs==1);
+ a=xdev_ext_peer_file_claim(&gpu,&len,&gen);assert(IS_ERR(a)&&PTR_ERR(a)==-EINVAL);
  a=xdev_ext_peer_file_claim(f,NULL,&gen);assert(IS_ERR(a)&&PTR_ERR(a)==-EINVAL);
  anon_error=-ENFILE;a=xdev_ext_peer_file_claim(f,&len,&gen);assert(IS_ERR(a)&&PTR_ERR(a)==-ENFILE&&f->refs==1&&!((struct xdev_ext_peer_fd*)f->private_data)->claimed);anon_error=0;
- puts("ok 1 - actual authority checks capability/type/output pointers and rolls back failed anonymous-file creation");
+ puts("ok 1 - actual allocation fd delegates claim without RAWIO; type/output and anonymous-file rollback remain enforced");
  gen=xdev_ext_peer_generation(((struct xdev_ext_peer_fd*)f->private_data)->region);
  assert(!xdev_ext_peer_file_acquire(f,&pci,gen,0,512,DMA_FROM_DEVICE,&h));
  a=xdev_ext_peer_file_claim(f,&len,&query_gen);assert(IS_ERR(a)&&PTR_ERR(a)==-EBUSY);
@@ -123,7 +130,7 @@ def main():
     mutations = [
         ("ordinary ioctl bypasses claim", core, fd.replace("if (p->claimed != a)", "if (p->claimed != a && false)")),
         ("claim ignores active native owner", core.replace("if (m->active)", "if (m->active && false)"), fd),
-        ("claim ignores capability", core, fd.replace("if (!capable(CAP_SYS_RAWIO))", "if (!capable(CAP_SYS_RAWIO) && false)")),
+        ("claim accepts non-allocation file", core, fd.replace("file->f_op != &xdev_ext_peer_allocation_fops", "false")),
         ("unknown claim released", core, fd.replace("if (xdev_ext_peer_drainable(p->region))", "if (xdev_ext_peer_drainable(p->region) && false)")),
         ("claim loses original file reference", core, fd.replace("p->claimed = a; get_file(file);", "p->claimed = a;")),
     ]
