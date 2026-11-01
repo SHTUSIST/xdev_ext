@@ -41,7 +41,13 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_MAX	= 12,
 };
 
-/* Device families: a family owns the code its classes share. */
+/*
+ * Families follow the other end of a request, besides its local frame:
+ * STORAGE addresses persistent device storage through requests (e.g. LBA);
+ * NETWORK delivers bytes to another party; COMPUTE changes or moves bytes
+ * locally.  Addressable memory supplies frames below these three families;
+ * it is neither a family nor storage merely because it retains bytes.
+ */
 enum xdev_ext_family {
 	XDEV_EXT_FAMILY_NONE	= 0,
 	XDEV_EXT_FAMILY_NETWORK	= 1,	/* NET, AF_XDP, SOCKET, XDOMAIN */
