@@ -6964,6 +6964,26 @@
       "native_path": "tools/testing/selftests/xdev_ext_shared_receive/socket_identity.c"
     },
     {
+      "source": "tests/network/shared_receive_native/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive_native/README.md"
+    },
+    {
+      "source": "tests/network/shared_receive_native/build.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive_native/build.py"
+    },
+    {
+      "source": "tests/network/shared_receive_native/native.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive_native/native.c"
+    },
+    {
+      "source": "tests/network/shared_receive_native/packets.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive_native/packets.h"
+    },
+    {
       "source": "tests/network/socket/adapter_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/socket_sink/adapter_test.py"
