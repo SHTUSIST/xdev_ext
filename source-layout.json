@@ -7741,6 +7741,21 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "src/core/include/linux/xdev_ext_peer_dmabuf.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_peer_dmabuf.h"
+    },
+    {
+      "source": "src/core/io_uring/xdev_ext_peer_dmabuf.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_peer_dmabuf.c"
+    },
+    {
+      "source": "src/core/drivers/dma-buf/heaps/system_heap.c",
+      "component": "linux",
+      "native_path": "drivers/dma-buf/heaps/system_heap.c"
     }
   ]
 }

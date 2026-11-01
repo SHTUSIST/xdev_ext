@@ -30,6 +30,8 @@ struct xdev_ext_peer_provider_ops {
  /* Optional, process context: backing as this requester would reach it. */
  int (*describe)(void *allocation, struct pci_dev *requester,
                  struct xdev_ext_peer_backing *out);
+ /* Optional atomic, nonblocking notification state; true forbids new use. */
+ bool (*is_stale)(void *allocation);
 };
 /* A lease is owned by one native request. Do not copy or reuse until release.
  * The peer device may use only dma_address..+len; no CPU struct page exists.
@@ -94,9 +96,17 @@ long xdev_ext_peer_net_ioctl(unsigned long arg);
 struct file *xdev_ext_peer_file_claim(struct file *, u64 *len, u64 *generation);
 int xdev_ext_peer_file_info(struct file *, u64 *len, u64 *generation);
 bool xdev_ext_peer_control_file(struct file *);
+/* Teardown only: zero active native leases and no permanent quarantine.
+ * Does not admit a new claim or lease on an invalid/stale region. */
+int xdev_ext_peer_drainable(struct xdev_ext_peer_region *);
 int xdev_ext_peer_info(struct xdev_ext_peer_region *, u64 *len, u64 *generation, bool idle);
 int xdev_ext_peer_provider_register(const struct xdev_ext_peer_provider_ops *);
 int xdev_ext_peer_provider_unregister(const struct xdev_ext_peer_provider_ops *);
+/* Internal constructor: success owns allocation and its own file/module refs.
+ * Failure leaves allocation and caller references untouched. */
+int xdev_ext_peer_region_create(const struct xdev_ext_peer_provider_ops *,
+                               struct file *, void *, u64,
+                               struct xdev_ext_peer_region **);
 int xdev_ext_peer_pin(struct file *, u64 gpu_va, u64 len, struct xdev_ext_peer_region **);
 u64 xdev_ext_peer_generation(struct xdev_ext_peer_region *);
 int xdev_ext_peer_map(struct xdev_ext_peer_region *, struct pci_dev *, enum dma_data_direction,

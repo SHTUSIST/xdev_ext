@@ -28,6 +28,7 @@ struct xdev_ext_peer_region {
  struct mutex lock;
  struct list_head maps;
  struct xdev_ext_peer_provider *provider;
+ const struct xdev_ext_peer_provider_ops *ops;
  struct file *file;
  void *allocation;
  u64 len, generation;
@@ -77,6 +78,41 @@ int xdev_ext_peer_provider_unregister(const struct xdev_ext_peer_provider_ops *o
  return ret;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_provider_unregister);
+static void xdev_ext_peer_region_init(struct xdev_ext_peer_region *r,
+                                     const struct xdev_ext_peer_provider_ops *ops,
+                                     struct file *file, u64 len)
+{
+ mutex_init(&r->lock); INIT_LIST_HEAD(&r->maps);
+ r->ops = ops;
+ get_file(file); r->file = file; r->len = len;
+ r->generation = atomic64_inc_return(&xdev_ext_peer_serial);
+ if (!r->generation) r->generation = atomic64_inc_return(&xdev_ext_peer_serial);
+}
+int xdev_ext_peer_region_create(const struct xdev_ext_peer_provider_ops *ops,
+                               struct file *file, void *allocation, u64 len,
+                               struct xdev_ext_peer_region **out)
+{
+ struct xdev_ext_peer_region *r;
+ if (!out) return -EINVAL;
+ *out = NULL;
+ if (!ops || !ops->map || !ops->unmap || !ops->unpin ||
+     !file || !allocation || !len) return -EINVAL;
+ r = kzalloc(sizeof(*r), GFP_KERNEL);
+ if (!r) return -ENOMEM;
+ if (!try_module_get(ops->owner)) { kfree(r); return -ENODEV; }
+ xdev_ext_peer_region_init(r, ops, file, len);
+ r->allocation = allocation;
+ *out = r;
+ return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_region_create);
+/* Caller holds r->lock. Stale never permits another borrower; draining an
+ * existing lease is deliberately independent of this check. */
+static bool xdev_ext_peer_stale(struct xdev_ext_peer_region *r)
+{
+ return r->invalid || r->quarantined ||
+        (r->ops->is_stale && r->ops->is_stale(r->allocation));
+}
 int xdev_ext_peer_pin(struct file *file, u64 va, u64 len, struct xdev_ext_peer_region **out)
 {
  struct xdev_ext_peer_region *r;
@@ -86,19 +122,25 @@ int xdev_ext_peer_pin(struct file *file, u64 va, u64 len, struct xdev_ext_peer_r
  *out = NULL;
  r = kzalloc(sizeof(*r), GFP_KERNEL);
  if (!r) return -ENOMEM;
- mutex_init(&r->lock); INIT_LIST_HEAD(&r->maps);
  mutex_lock(&xdev_ext_peer_registry_lock);
  list_for_each_entry(p, &xdev_ext_peer_providers, node)
-  if (p->ops->fops == file->f_op && try_module_get(p->ops->owner)) {
-   ret = p->ops->pin(file, va, len, &r->allocation);
-   if (ret) { module_put(p->ops->owner); break; }
-   p->allocations++; r->provider = p; break;
+  if (p->ops->fops == file->f_op) {
+   if (!try_module_get(p->ops->owner)) { ret = -ENODEV; break; }
+   if (p->allocations == U32_MAX) {
+    module_put(p->ops->owner); ret = -EOVERFLOW; break;
+   }
+   p->allocations++; r->provider = p; r->ops = p->ops; ret = 0; break;
   }
  mutex_unlock(&xdev_ext_peer_registry_lock);
  if (ret) { kfree(r); return ret; }
- get_file(file); r->file = file; r->len = len;
- r->generation = atomic64_inc_return(&xdev_ext_peer_serial);
- if (!r->generation) r->generation = atomic64_inc_return(&xdev_ext_peer_serial);
+ p = r->provider;
+ ret = p->ops->pin(file, va, len, &r->allocation);
+ if (ret) {
+  mutex_lock(&xdev_ext_peer_registry_lock); p->allocations--;
+  mutex_unlock(&xdev_ext_peer_registry_lock);
+  module_put(r->ops->owner); kfree(r); return ret;
+ }
+ xdev_ext_peer_region_init(r, p->ops, file, len);
  *out = r;
  return 0;
 }
@@ -106,13 +148,27 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_pin);
 u64 xdev_ext_peer_generation(struct xdev_ext_peer_region *r)
 { return r ? r->generation : 0; }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_generation);
+int xdev_ext_peer_drainable(struct xdev_ext_peer_region *r)
+{
+ struct xdev_ext_peer_mapping *m;
+ int ret = 0;
+ if (!r) return -EINVAL;
+ mutex_lock(&r->lock);
+ if (r->quarantined) ret = -EIO;
+ if (!ret)
+  list_for_each_entry(m, &r->maps, node)
+   if (m->active) { ret = -EBUSY; break; }
+ mutex_unlock(&r->lock);
+ return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_drainable);
 int xdev_ext_peer_info(struct xdev_ext_peer_region *r, u64 *len, u64 *generation, bool idle)
 {
  struct xdev_ext_peer_mapping *m;
  int ret = 0;
  if (!r || !len || !generation) return -EINVAL;
  mutex_lock(&r->lock);
- if (r->invalid || r->quarantined) ret = -ESTALE;
+ if (xdev_ext_peer_stale(r)) ret = -ESTALE;
  if (!ret && idle)
   list_for_each_entry(m, &r->maps, node)
    if (m->active) { ret = -EBUSY; break; }
@@ -130,12 +186,12 @@ int xdev_ext_peer_describe(struct xdev_ext_peer_region *r, struct pci_dev *reque
   return -EINVAL;
  *out = (struct xdev_ext_peer_backing){};
  mutex_lock(&r->lock);
- if (r->invalid || r->quarantined)
+ if (xdev_ext_peer_stale(r))
   ret = -ESTALE;
- else if (!r->provider->ops->describe)
+ else if (!r->ops->describe)
   ret = -EOPNOTSUPP;
  else
-  ret = r->provider->ops->describe(r->allocation, requester, out);
+  ret = r->ops->describe(r->allocation, requester, out);
  mutex_unlock(&r->lock);
  return ret;
 }
@@ -150,7 +206,7 @@ int xdev_ext_peer_map(struct xdev_ext_peer_region *r, struct pci_dev *peer,
  if (!r || !peer || !out || !xdev_ext_peer_direction_valid(dir)) return -EINVAL;
  *out = NULL;
  mutex_lock(&r->lock);
- if (r->invalid || r->quarantined) { ret = -ESTALE; goto done; }
+ if (xdev_ext_peer_stale(r)) { ret = -ESTALE; goto done; }
  list_for_each_entry(m, &r->maps, node)
   if (m->peer == peer) {
    if (m->direction != dir && m->direction != DMA_BIDIRECTIONAL) { ret = -EACCES; goto done; }
@@ -160,13 +216,15 @@ int xdev_ext_peer_map(struct xdev_ext_peer_region *r, struct pci_dev *peer,
  m = kzalloc(sizeof(*m), GFP_KERNEL);
  if (!m) { ret = -ENOMEM; goto done; }
  m->region = r; m->peer = pci_dev_get(peer); m->direction = dir;
- ret = r->provider->ops->map(r->allocation, peer, &m->dma);
+ ret = r->ops->map(r->allocation, peer, &m->dma);
  if (ret) goto free;
+ if (xdev_ext_peer_stale(r)) { ret = -ESTALE; goto rollback; }
  if (!m->dma.addresses || !m->dma.entries || m->dma.page_shift < 12 ||
      m->dma.page_shift > 31 || (u64)m->dma.entries << m->dma.page_shift < r->len) {
   ret = -EPROTO;
+rollback:
   /* Even malformed provider geometry cannot bypass native cleanup failure. */
-  if (r->provider->ops->unmap(r->allocation, peer, &m->dma)) {
+  if (r->ops->unmap(r->allocation, peer, &m->dma)) {
    r->invalid = r->quarantined = true; m->users = 1;
    list_add_tail(&m->node, &r->maps); goto done;
   }
@@ -191,7 +249,7 @@ int xdev_ext_peer_acquire(struct xdev_ext_peer_mapping *m, u64 generation,
   return -EINVAL;
  r = m->region; mutex_lock(&r->lock);
  if (lease->mapping) { ret = -EBUSY; goto done; }
- if (r->invalid || r->quarantined || generation != r->generation) { ret = -ESTALE; goto done; }
+ if (xdev_ext_peer_stale(r) || generation != r->generation) { ret = -ESTALE; goto done; }
  if (m->direction != DMA_BIDIRECTIONAL && m->direction != dir) { ret = -EACCES; goto done; }
  page_size = 1ULL << m->dma.page_shift;
  if (!len || offset >= r->len || len > r->len - offset ||
@@ -239,7 +297,7 @@ int xdev_ext_peer_unmap(struct xdev_ext_peer_mapping *m)
  if (r->quarantined) { ret = -EIO; goto done; }
  if (m->active) { ret = -EBUSY; goto done; }
  if (m->users > 1) { m->users--; goto done; }
- ret = r->provider->ops->unmap(r->allocation, m->peer, &m->dma);
+ ret = r->ops->unmap(r->allocation, m->peer, &m->dma);
  if (ret) { r->invalid = r->quarantined = true; goto done; }
  list_del(&m->node); pci_dev_put(m->peer); kfree(m);
 done:
@@ -255,12 +313,14 @@ int xdev_ext_peer_unpin(struct xdev_ext_peer_region *r)
  mutex_lock(&r->lock);
  if (r->quarantined) { ret = -EIO; goto done; }
  if (!list_empty(&r->maps)) { ret = -EBUSY; goto done; }
- r->invalid = true; p = r->provider; owner = p->ops->owner;
- ret = p->ops->unpin(r->allocation);
+ r->invalid = true; p = r->provider; owner = r->ops->owner;
+ ret = r->ops->unpin(r->allocation);
  if (ret) { r->quarantined = true; goto done; }
  mutex_unlock(&r->lock);
- mutex_lock(&xdev_ext_peer_registry_lock); p->allocations--;
- mutex_unlock(&xdev_ext_peer_registry_lock);
+ if (p) {
+  mutex_lock(&xdev_ext_peer_registry_lock); p->allocations--;
+  mutex_unlock(&xdev_ext_peer_registry_lock);
+ }
  fput(r->file); module_put(owner); kfree(r); return 0;
 done:
  mutex_unlock(&r->lock); return ret;

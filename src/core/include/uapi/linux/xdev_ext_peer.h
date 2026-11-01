@@ -7,6 +7,8 @@
  * Caller must synchronize CUDA producers before a peer reads VRAM, and wait
  * for a successful peer completion before launching CUDA consumers.
  */
+#define XDEV_EXT_PEER_REGISTER_F_DMABUF (1U << 0)
+/* DMABUF: gpu_fd is the source fd, gpu_va=0, len is the whole export. */
 struct xdev_ext_peer_register {
  __s32 gpu_fd;
  __u32 flags;

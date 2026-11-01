@@ -57,6 +57,7 @@ enum xdev_ext_cap_state {
 	XDEV_EXT_CAP_UNVERIFIED_FORCED	= 4,	/* admin override; never a zero-copy pass */
 	XDEV_EXT_CAP_NOT_WIRED		= 5,	/* the mechanism has no code for this part */
 	XDEV_EXT_CAP_NOT_APPLICABLE	= 6,	/* host-page class: no device-memory requester */
+	XDEV_EXT_CAP_HOST_DMA_MAPPED	= 7,	/* coherent host DMA-API mapping established */
 };
 /* Provider backing of a device allocation (struct xdev_ext_peer_backing.flags). */
 #define XDEV_EXT_PEER_BACKING_MMIO_BAR		(1U << 0) /* discrete VRAM through a PCI BAR */
@@ -64,6 +65,7 @@ enum xdev_ext_cap_state {
 #define XDEV_EXT_PEER_BACKING_COHERENT_C2C	(1U << 2) /* non-PCI coherent aperture */
 #define XDEV_EXT_PEER_BACKING_EXTERNAL		(1U << 3) /* provider device is hot-removable */
 #define XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR	(1U << 4) /* provider maps without the IOMMU */
+#define XDEV_EXT_PEER_BACKING_HOST_SYSTEM	(1U << 5) /* trusted ordinary host RAM */
 /* Why an admission refused (struct xdev_ext_mech_stage_caps.refused). */
 #define XDEV_EXT_PEER_REFUSE_NO_P2P_PATH	(1U << 0)
 #define XDEV_EXT_PEER_REFUSE_SWIOTLB_FORCE	(1U << 1)
