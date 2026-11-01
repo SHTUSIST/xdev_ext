@@ -10,11 +10,30 @@ are joined through the sender's immutable descriptor_bind pool/address.
 import importlib.util
 from pathlib import Path
 import re
+import sys
 
-ROOT = next(p for p in Path(__file__).resolve().parents
-            if (p / 'tests/eval/native_trace/collector.py').is_file())
+# Canonical files and copied native trees use the same declared mapping.
+# A full assembly can be outside the checkout, so follow its explicit receipt.
+def collector_path():
+    import json
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / '.xdev-ext-source.json'
+        if marker.is_file():
+            parent = Path(json.loads(marker.read_text())['canonical_root'])
+        if (parent / 'source-layout.json').is_file():
+            sys.path.insert(0, str(parent / 'tools'))
+            from layout import load_layout, safe_file
+            layout = load_layout(parent)
+            source = layout.by_logical['tests/eval/native_trace/collector.py']
+            return safe_file(layout.repo, source)
+        legacy = parent / 'tests/eval/native_trace/collector.py'
+        if legacy.is_file():
+            return legacy
+    raise ImportError('native collector source layout is unavailable')
+
+
 spec = importlib.util.spec_from_file_location(
-    'fanout_native_collector', ROOT / 'tests/eval/native_trace/collector.py')
+    'fanout_native_collector', collector_path())
 collector = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(collector)
 ABI = 'xdev-native-v1-nvme-xsk-batch'
