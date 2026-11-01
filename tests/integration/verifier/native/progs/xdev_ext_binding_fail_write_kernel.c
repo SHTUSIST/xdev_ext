@@ -9,7 +9,8 @@ struct task_struct___local {
 } __attribute__((preserve_access_index));
 
 SEC("struct_ops/dispatch")
-__failure __msg("XDEV_EXT callback kernel BTF objects are read-only at off")
+/* The helper whitelist now refuses acquisition before the attempted write. */
+__failure __msg("program of this type cannot use helper bpf_get_current_task_btf#158")
 __s32 BPF_PROG(dispatch_write_kernel_btf,
 	       const struct xdev_ext_binding_ctx_v2 *binding_ctx)
 {
