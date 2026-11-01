@@ -278,9 +278,12 @@ def analyze(events, stats, native=()):
             offset += e["frame_length"]
             final = terminal.get(frame_batches[scope, (e["frame_id"], e["generation"])])
             if final is not None:
-                _, accepted, done = wanted[scope]
+                base, accepted, done = wanted[scope]
                 _before(accepted, final, "terminal before native post acceptance")
                 _before(done, final, "terminal before native completion")
+                if base["direction"] == 2:
+                    release = _one(groups[scope], "consumer_release")
+                    _before(final, release, "terminal after consumer release")
         if not offset or offset != rows[0]["bytes"]:
             raise ValueError("incomplete native group byte coverage")
     frame_checked = bool(native_groups) and all(frames[s] for s, _, _ in native_groups)

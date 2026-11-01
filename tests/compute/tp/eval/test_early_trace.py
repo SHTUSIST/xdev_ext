@@ -217,6 +217,49 @@ class EarlyTraceTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.a.analyze(es, STATS, [f, dict(f, phase="record_terminal", ts_ns=39)])
 
+    def test_rx_frame_terminals_may_precede_or_equal_release_with_other_stage_tickets(self):
+        es = [rx_bound()]+rx_trace()
+        first = dict(frame(37, 1, 2, 20), bytes=8192)
+        second = dict(first, frame_id=3, frame_ordinal=1, frame_offset=4096)
+        terminals = [dict(first, phase="record_terminal", ts_ns=79,
+                          stage=1, class_id=10, ticket=99),
+                     dict(second, phase="record_terminal", ts_ns=80,
+                          stage=1, class_id=10, ticket=100)]
+        self.assertTrue(self.a.analyze(es, STATS, [first, second]+terminals)["complete"])
+
+    def test_each_rx_frame_terminal_must_not_follow_its_consumer_release(self):
+        es = [rx_bound()]+rx_trace()
+        first = dict(frame(37, 1, 2, 20), bytes=8192)
+        second = dict(first, frame_id=3, frame_ordinal=1, frame_offset=4096)
+        for late_frame in (2, 3):
+            for when in (81, 100):
+                terminals = [dict(f, phase="record_terminal", stage=1,
+                                  class_id=10, ticket=99,
+                                  ts_ns=when if f["frame_id"] == late_frame else 79)
+                             for f in (first, second)]
+                with self.subTest(frame_id=late_frame, terminal_ns=when):
+                    with self.assertRaisesRegex(ValueError, "terminal after consumer release"):
+                        self.a.analyze(es, STATS, [first, second]+terminals)
+
+    def test_full_tp_trace_cannot_qualify_rx_terminal_after_release_and_ack(self):
+        es = tx_trace()+[rx_bound()]+rx_trace()
+        rx = frame(37, 1, 2, 20)
+        tx = dict(rx, session_id=41, stage=1, ts_ns=40)
+        native = [rx, tx, dict(rx, phase="record_terminal", ts_ns=79,
+                              stage=1, class_id=10, ticket=99),
+                  dict(tx, phase="record_terminal", ts_ns=100)]
+        metadata = dict(early_cts_requested=True, tx_session_id=41, rx_session_id=42,
+                        iterations=1, requested_depth=1, completed=1, first_sequence=37,
+                        group_bytes=4096, frame_size=4096, frame_count=1,
+                        completion_boundary="kernel-end-prefix")
+        result = self.a.analyze(es, STATS, native)
+        self.a.qualify_tp(result, es, native, metadata)
+        self.assertTrue(result["complete"])
+        native[2] = dict(native[2], ts_ns=100)
+        with self.assertRaisesRegex(ValueError, "terminal after consumer release"):
+            result = self.a.analyze(es, STATS, native)
+            self.a.qualify_tp(result, es, native, metadata)
+
     def test_partial_or_noncontiguous_native_frames_are_refused(self):
         es = [rx_bound()]+rx_trace()
         f = frame(37, 1, 2, 20)
