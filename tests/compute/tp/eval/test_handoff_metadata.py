@@ -102,6 +102,8 @@ class HandoffMetadataTest(unittest.TestCase):
                 'int main(int argc,char **argv) { if(argc!=4)return 2; '
                 'tp_eval_options o;o.mode=std::strtoul(argv[1],nullptr,10);'
                 'o.rank=std::strtoul(argv[2],nullptr,10);o.iterations=7;'
+                'o.operation=argv[3][0]==\'e\'?4:3;o.dtype=2;o.rows=2;'
+                'o.elements=512;o.first_sequence=23;if(tp_eval_geometry(o))return 3;'
                 "Stats stats; if(argv[3][0]=='e'){" + statements[0] + '}'
                 'else{' + statements[1] + '}return 0;}')
         with tempfile.TemporaryDirectory() as directory:
@@ -124,6 +126,15 @@ class HandoffMetadataTest(unittest.TestCase):
                             self.assertEqual(metadata['handoff_mode'], handoff)
                             self.assertEqual(metadata['rank'], rank)
                             self.assertEqual(metadata['completed'], 7)
+                            self.assertEqual(metadata.get('completion_boundary'), 'kernel-end-prefix')
+                            expected = dict(operation=4 if operation == 'echo' else 3,
+                                            dtype=2, rows=2, elements=512, iterations=7,
+                                            first_sequence=23, requested_depth=1,
+                                            timeout_ns=600000000000, payload_bytes=2048,
+                                            group_bytes=2112, frame_count=1, frame_size=4096,
+                                            tx_session_id=0, rx_session_id=0)
+                            for field, value in expected.items():
+                                self.assertEqual(metadata.get(field), value, field)
 
     def test_missing_native_mode_or_handoff_rejected_before_either_operation(self):
         for kind in ('echo', 'collective'):

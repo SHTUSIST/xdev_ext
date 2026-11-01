@@ -65,23 +65,7 @@ struct tp_eval_echo_gpu {
   captured=true;safe=true;
  }
  void wait_native_complete(uint64_t target) {
-  const uint64_t start=tp_eval_echo::monotonic_ns();
-  bool done[2]={false,false};
-  while(!done[0] || !done[1]) {
-   for(unsigned i=0;i<2;++i) {
-    if(done[i])continue;
-    if(tp_eval_echo::monotonic_ns()-start>=options.timeout_ns)NATIVE(-ETIMEDOUT);
-    xdev_ext_mech_stats stats{};
-    auto *session=xdev_ext_peer_endpoint_session(i?view.rx_endpoint:view.tx_endpoint);
-    NATIVE(xdev_ext_session_stats(session,&stats));
-    if(stats.last_err)NATIVE(stats.last_err);
-    if(stats.batches_abort || stats.held || stats.sequestered || stats.timeouts || stats.protocol_err || stats.rejects)
-     throw std::runtime_error("GPU echo native END failed or retained custody");
-    if(tp_eval_echo::monotonic_ns()-start>=options.timeout_ns)NATIVE(-ETIMEDOUT);
-    done[i]=stats.batches_done>=target;
-   }
-   if(!done[0] || !done[1])sched_yield();
-  }
+  tp_eval_echo::wait_native_complete(view,target,options.timeout_ns);
  }
  bool exchange(uint64_t iteration) {
   if(!captured || !exec || !safe || iteration!=completed || iteration==UINT64_MAX)NATIVE(-EINVAL);

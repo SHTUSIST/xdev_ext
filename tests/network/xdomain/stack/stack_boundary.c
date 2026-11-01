@@ -864,6 +864,16 @@ int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops*o){
 void xdev_ext_mech_class_unregister(const struct xdev_ext_mech_class_ops*o){
 	assert(o==stack_x5_ops());
 }
+/* Observation-only core boundary; EARLY trace tests provide a recorder. */
+#ifndef STACK_XDOMAIN_TRACE_CAPTURE
+struct xdev_ext_xdomain_trace;
+bool xdev_ext_mech_trace_xdomain_enabled(void) { return false; }
+void xdev_ext_mech_trace_xdomain(struct xdev_ext_mech_stage *st,
+                               const struct xdev_ext_xdomain_trace *event)
+{
+ (void)st; (void)event;
+}
+#endif
 void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch*b,u64 cookie,u64 lba,u32 bytes,u32 opcode){
 	(void)b;
 	(void)cookie;

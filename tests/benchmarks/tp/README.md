@@ -122,6 +122,160 @@ collective operation. Every final record identifies `native_mode` (1 or 2) and
 inconsistent pairs. These fields identify native handoff primitives. It does not implement the full E6 configuration d2, NHI
 completion polling or a/b/c attribution arms.
 
+## EARLY execution evidence
+
+The request flag is not an execution verdict. Enable both
+`xdev_ext:xdomain_event` and the existing `xdev_ext:native_event` before owner
+open/START. The dedicated `abi=xdev-xdomain-v1` record carries local monotonic
+time, session/stage/direction, admitted EARLY mode, both incarnations and bind
+IDs, group/key/ticket/pool generation, status and quiescence. Key zero is valid.
+
+The relevant boundaries are:
+
+| Phase | Evidence |
+| --- | --- |
+| `stage_bound` | Class bind and reliable state initialization succeeded; whole CREATE may still fail later. |
+| `tx_attempt` | Actual TX submit attempt, including an earlier attempt that returns EAGAIN. |
+| `rx_reserved` | An admitted RX group/batch is reserved; native leases and post follow. |
+| `cts_sent` / `cts_received` | Control enqueue accepted CTS / ingress validated CTS; receipt may repeat. |
+| `grant_accepted` | The protocol accepted the grant, independently of mere receipt. |
+| `native_accepted` / `native_rejected` | Payload post API accepted ownership / refused before acceptance. |
+| `native_complete` | Final native callback, with status and quiescence. |
+| `consumer_release` | Core completed the final frame disposition and invoked RX batch release. |
+| `ack_sent` / `fail_sent` | Final disposition was accepted by the control enqueue API. |
+
+EARLY reserves and posts a legal free RX group before the matching TX attempt;
+ordinary mode waits for the per-group RTS. Neither path authorizes overwriting
+a consumer-held frame. A later disjoint frame may be posted while the previous
+consumer still holds its frame. RX `posted_groups == 0` excludes an earlier
+unquiesced native RX post; it does not imply that every downstream consumer has
+released. ACK requires the final successful, quiescent release.
+
+`native_accepted` is the API-return boundary, not DMA first byte. A final
+callback can precede that return. The analyzer accepts this causal order and
+does not invent a positive native interval for it. `tx_attempt` is transport
+readiness, not the GPU producer's exact timestamp.
+
+On each qualified physical host, use a new private trace instance and output
+directory for each run. Set `RUN_ID` to a unique simple name. The following
+commands only configure that instance; they assume the events already exist
+in the booted, matching kernel:
+
+```sh
+RUN_DIR="$RESULTS/$RUN_ID"
+INSTANCE="/sys/kernel/tracing/instances/$RUN_ID"
+mkdir -m 700 "$RUN_DIR"
+sudo mkdir "$INSTANCE"
+printf 'mono\n' | sudo tee "$INSTANCE/trace_clock" >/dev/null
+printf '8192\n' | sudo tee "$INSTANCE/buffer_size_kb" >/dev/null
+printf '1\n' | sudo tee "$INSTANCE/events/xdev_ext/xdomain_event/enable" >/dev/null
+printf '1\n' | sudo tee "$INSTANCE/events/xdev_ext/native_event/enable" >/dev/null
+sudo cat "$INSTANCE/events/xdev_ext/xdomain_event/format" > "$RUN_DIR/xdomain-format.txt"
+sudo cat "$INSTANCE/events/xdev_ext/native_event/format" > "$RUN_DIR/native-format.txt"
+printf '1\n' | sudo tee "$INSTANCE/tracing_on" >/dev/null
+```
+
+Run the rank-local driver command above with `--early-cts "$EARLY"`, writing
+`--raw "$RUN_DIR/rank.jsonl" --summary "$RUN_DIR/summary.json"`. Start rank 0
+first, then rank 1 with the same shared configuration and its own local device,
+link and files. Capture from before owner open through successful driver exit,
+including close. Then save the stopped buffers and every CPU's loss counters:
+
+```sh
+printf '0\n' | sudo tee "$INSTANCE/tracing_on" >/dev/null
+sudo cat "$INSTANCE/trace" > "$RUN_DIR/trace.txt"
+for cpu in "$INSTANCE"/per_cpu/cpu*; do
+  printf '%s:\n' "${cpu##*/}"
+  sudo cat "$cpu/stats"
+done > "$RUN_DIR/trace-stats.txt"
+python3 tests/benchmarks/tp/early_trace.py \
+  --trace "$RUN_DIR/trace.txt" --stats "$RUN_DIR/trace-stats.txt" \
+  --tp-summary "$RUN_DIR/summary.json" --output "$RUN_DIR/early-evidence.json"
+```
+
+The summary selects the actual local TX/RX session IDs. The analyzer requires
+admission, immutable identity, the earliest TX attempt, quiescent completion,
+RX release/ACK, complete native frame coverage and matching core
+`record_terminal` records. It also checks all `iterations * depth` ordered TP
+keys on both sessions against the finite START count and group geometry.
+A completed prefix cannot qualify a truncated run. Missing/overwritten events,
+nonzero overrun/commit-overrun/dropped counters, wrong identity and premature
+frame reuse cannot produce success. Late ordinary CTS duplicates without a live
+slot lack a reliable key correlation and are conservatively rejected. The frame
+reuse check uses RX reservation time, so a late post return cannot hide a
+reservation made before the previous consumer release.
+
+Exit 0 means these local trace checks completed, exit 1 means incomplete
+evidence, and exit 2 means rejected input. `--session-id TX RX` is available
+without a TP summary, but its completeness is limited to observed groups.
+Neither mode establishes hardware provenance, independent GPU payload
+correctness or successful process teardown. Preserve those separately.
+
+`grants_before_first_tx_attempt` counts actual accepted grants strictly earlier
+than the first attempt for that key. `grant_lead_ns` is first attempt minus grant
+acceptance; receipt alone cannot increase this count. Equal timestamps do not
+prove a positive lead. The RX overlap measure intersects a later group's
+accepted-post-to-callback interval with an older group's
+callback-to-consumer-release interval, and requires disjoint native frame IDs
+in the same session/stage. It is driver in-flight versus consumer custody,
+not physical engine busy time or GPU compute overlap. Frame IDs do not rule out
+aliasing across independently exported sessions; keep the owner's separate
+admitted allocations and mapping/lifetime evidence. Do not subtract timestamps
+between hosts, GPU globaltimer and kernel monotonic clocks.
+
+## Matched EARLY off/on experiments
+
+Use the same rebuilt driver/libraries, kernel/modules/BPF objects, GPUs, links,
+dtype/shape, depth, iteration count, timeout and payload oracle in both arms.
+Record hashes, build receipts, boot/kernel identity, topology and mapping
+admission. Use fresh endpoint/link authority and epoch as required by the
+existing lifecycle procedure, and preserve failed runs. Both ranks must agree
+on EARLY for each run.
+
+Run repeated paired blocks in ABBA order: off, on, on, off. Start with
+`--mode d1 --depth 1`, then use `--mode d2 --depth 2` for the disjoint-frame
+overlap question. Repeat each fixed shape separately, including the short-tail
+case in the example. A native geometry/ring-budget rejection is an experimental
+outcome, not permission to silently change a workload. Use at least 100 measured
+iterations plus a declared warmup for performance cohorts; short traced
+cohorts are useful for mechanism checks. Measure trace overhead with matched
+tracing settings and preserve a separate untraced performance cohort.
+
+Collective E6 intervals now end after CUDA/TP completion and the cumulative
+kernel END prefix on both local sessions. USER done alone cannot close an
+interval. Metadata records `completion_boundary="kernel-end-prefix"`,
+configuration geometry and native session IDs. START, input fill and the rank
+barrier precede E6; EARLY may have pregranted outside the interval. E6 therefore
+measures operation-to-END service latency, not startup wall time. Report startup
+and steady-state observations separately. At depth above one, E6 is a complete
+batch/replay latency, not a per-message latency.
+
+Compare each rank separately with:
+
+```sh
+python3 tests/benchmarks/tp/pair.py \
+  --off "$OFF_DIR/summary.json" --on "$ON_DIR/summary.json" \
+  --warmup 10 --output "$PAIR_DIR/rank0-pair.json"
+```
+
+The helper checks matching geometry/completion semantics and reports E6
+p50/p95/p99/mean plus validated local RX bytes divided by the sum of selected E6
+intervals. E7 retains its original whole-trace denominator, including
+inter-replay gaps and warmup, and reports logical lifetime occupancy. It is not
+DMA overlap. Echo comparisons report local RTT/reply latency without inventing
+tensor payload totals. Report sample counts and the distribution of paired
+run-level differences; do not infer benefit from one ratio, requested EARLY,
+or greater logical occupancy.
+
+For errors, first reuse `tests/network/xdomain/early/run.py --observe` and the
+full default suite: held/disjoint frames, attempted reuse, duplicate CTS,
+control pressure, callback ordering, downstream failure, sequester and UNKNOWN
+STOP. Hardware fault injection needs a separately qualified recovery procedure.
+A retained owner, failed oracle, nonquiescent native callback, trace loss or
+incomplete terminal chain invalidates a performance arm. Save its diagnostics
+and keep uncertain resources retained.
+
+
 For a matched baseline use the normal official NCCL executable. Select
 `NCCL_NET=Socket` and exact `NCCL_SOCKET_IFNAME='=thunderbolt0'`, retain NCCL
 algorithm/protocol/channel/buffer/concurrency defaults, and save actual INIT/NET

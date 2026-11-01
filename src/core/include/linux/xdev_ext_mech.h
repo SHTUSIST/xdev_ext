@@ -633,6 +633,19 @@ void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b, u64 cookie
 /* Any context: winning native end_io claim, before completion publication. */
 void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
 				       u64 ticket, int status);
+/* Observation only. No batch pointer: a grant may precede TX, and an RX
+ * reply can outlive its reusable network slot. Caller copies stable facts. */
+struct xdev_ext_xdomain_trace {
+	const char *phase;
+	u64 local_inc, remote_inc, tx_bind, rx_bind;
+	u64 group, key, ticket, pool_generation;
+	u32 early;
+	int status;
+	bool quiesced;
+};
+bool xdev_ext_mech_trace_xdomain_enabled(void);
+void xdev_ext_mech_trace_xdomain(struct xdev_ext_mech_stage *st,
+			       const struct xdev_ext_xdomain_trace *event);
 /* Any context: matching claim winner only; publish metadata then enqueue. */
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 ticket,
 				      int err, bool sequester);

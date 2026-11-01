@@ -6,6 +6,7 @@
 #include <linux/tracepoint.h>
 #include <linux/ktime.h>
 #include <linux/jiffies.h>
+#include <linux/xdev_ext_mech.h>
 /* ABI marker declares source hook coverage, not physical path verification. */
 #ifndef _XDEV_EXT_NATIVE_EVENT_DATA
 #define _XDEV_EXT_NATIVE_EVENT_DATA
@@ -76,6 +77,48 @@ TRACE_EVENT(native_event,
 		__entry->aux, __entry->sequence, __entry->ts_ns,
 		__entry->origin_tgid, __entry->process_start_ticks, __entry->native_user_data,
 		__entry->frame_ordinal, __entry->frame_offset, __entry->frame_length)
+);
+/* Local monotonic observations, not hardware first-byte timestamps. */
+TRACE_EVENT(xdomain_event,
+	TP_PROTO(u64 session_id, u32 stage, u32 direction,
+		 const struct xdev_ext_xdomain_trace *e),
+	TP_ARGS(session_id, stage, direction, e),
+	TP_STRUCT__entry(
+		__string(phase, e->phase)
+		__field(u64, session_id) __field(u32, stage)
+		__field(u32, direction) __field(u32, early)
+		__field(u64, local_inc) __field(u64, remote_inc)
+		__field(u64, tx_bind) __field(u64, rx_bind)
+		__field(u64, group) __field(u64, key)
+		__field(u64, ticket) __field(u64, pool_generation)
+		__field(int, status) __field(bool, quiesced)
+		__field(u64, ts_ns)
+	),
+	TP_fast_assign(
+		__entry->ts_ns = ktime_get_ns();
+		__assign_str(phase);
+		__entry->session_id = session_id;
+		__entry->stage = stage;
+		__entry->direction = direction;
+		__entry->early = e->early;
+		__entry->local_inc = e->local_inc;
+		__entry->remote_inc = e->remote_inc;
+		__entry->tx_bind = e->tx_bind;
+		__entry->rx_bind = e->rx_bind;
+		__entry->group = e->group;
+		__entry->key = e->key;
+		__entry->ticket = e->ticket;
+		__entry->pool_generation = e->pool_generation;
+		__entry->status = e->status;
+		__entry->quiesced = e->quiesced;
+	),
+	TP_printk("abi=xdev-xdomain-v1 phase=%s session_id=%llu stage=%u direction=%u early=%u local_inc=%llu remote_inc=%llu tx_bind=%llu rx_bind=%llu group=%llu key=%llu ticket=%llu pool_generation=%llu status=%d quiesced=%u ts_ns=%llu",
+		__get_str(phase), __entry->session_id, __entry->stage,
+		__entry->direction, __entry->early, __entry->local_inc,
+		__entry->remote_inc, __entry->tx_bind, __entry->rx_bind,
+		__entry->group, __entry->key, __entry->ticket,
+		__entry->pool_generation, __entry->status,
+		__entry->quiesced, __entry->ts_ns)
 );
 #endif
 #include <trace/define_trace.h>

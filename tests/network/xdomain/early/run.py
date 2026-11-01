@@ -13,6 +13,11 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 ROOT = next(p for p in HERE.parents if (p / 'source-layout.json').is_file())
+OBSERVATION_CASES = ('opt_in', 'default_v1', 'early_happy', 'short_tail',
+                     'tx_before_grant', 'zero_key', 'duplicate_cts', 'batch_end_only',
+                     'consumer_error', 'consumer_sequester', 'unknown_stop',
+                     'control_full', 'ack_before_local', 'ack_before_post_return',
+                     'local_before_post_return', 'single_posted')
 
 
 def module(name, path):
@@ -109,7 +114,7 @@ def mutate(kernel,out,name):
     (out/'mutation.json').write_text(json.dumps(dict(name=name,source='io_uring/xdomain/xdev_ext_xdomain_class.c',edits=edits),indent=2)+'\n')
 
 
-def prepare(kernel, stack, out, sanitize=False):
+def prepare(kernel, stack, out, sanitize=False, observe=False):
     shared = module('early_shared_stack', stack / 'stack_test.py')
     facade = out / 'facade'
     shared.facade(kernel, facade)
@@ -121,7 +126,16 @@ def prepare(kernel, stack, out, sanitize=False):
     boundary = stack / 'stack_boundary.c'
     text = boundary.read_text()
     text = text.replace('.arg1=0};', '.arg1=0,.flags=early_flags};')
-    text = '#include <pthread.h>\nstatic unsigned early_flags;\nstatic int early_wait_grant,early_race_mode;\nstatic unsigned early_grant_waits,early_race_hits,early_ack_during_post,early_callbacks_during_post;\nstatic int early_lease_fail_after,early_lease_fail_endpoint,early_lease_attempts;\nstatic pthread_barrier_t early_race_barrier;\n' + text
+    # The production core uses one kthread worker per session. Recursive device
+    # delivery in the post-return race must not re-enter that session's worker;
+    # native callbacks and peer worker progress remain eligible.
+    for old in ('epoch->bound&&(epoch->s.kicked||epoch->next_progress<=w->now)',
+                'epoch->bound&&finalize_ready(epoch)'):
+        if text.count(old) != 1:
+            raise ValueError('qualified session scheduler boundary changed')
+        text = text.replace(old, 'epoch->s.id!=early_posting_session&&' + old, 1)
+
+    text = '#include <pthread.h>\nstatic unsigned early_flags;\nstatic unsigned long long early_posting_session;\nstatic int early_wait_grant,early_race_mode;\nstatic unsigned early_grant_waits,early_race_hits,early_ack_during_post,early_callbacks_during_post;\nstatic int early_lease_fail_after,early_lease_fail_endpoint,early_lease_attempts;\nstatic pthread_barrier_t early_race_barrier;\n' + text
     if 'u64 xdev_ext_mech_batch_key(' not in text:
         text += '\nu64 xdev_ext_mech_batch_key(const struct xdev_ext_mech_batch *b){return b->key;}\n'
     text=text.replace('unsigned e=f->endpoint;','unsigned e=f->endpoint;\n if(early_lease_fail_after&&e==(unsigned)early_lease_fail_endpoint&&++early_lease_attempts>early_lease_fail_after)return -ENOMEM;',1)
@@ -144,6 +158,7 @@ int early_netfam_post(struct xdev_ext_netfam_stage *ns,struct xdev_ext_net_slot 
  if(!ret&&!ns->rx&&(early_race_mode==2||early_race_mode==3)){
   assert(!stack_spins&&!stack_mutexes);early_race_hits++;int mode=early_race_mode;early_race_mode=0;
   struct epoch *tx=world->side[0].current;u64 saved=tx->next_progress;
+  early_posting_session=tx->s.id;
   tx->next_progress=UINT64_MAX;tx->s.kicked=false;
   assert(stack_pump(world,12000,1000000)==0);
   if(mode==2){assert(stack_release(world,1,37)==0);
@@ -153,12 +168,22 @@ int early_netfam_post(struct xdev_ext_netfam_stage *ns,struct xdev_ext_net_slot 
    if(world->log[i].kind==STACK_EV_CONTROL_RX&&world->log[i].endpoint==0&&world->log[i].control_type==3)early_ack_during_post++;
   for(size_t i=0;i<world->logs;i++)
    if(world->log[i].kind==STACK_EV_DATA_CALLBACK&&world->log[i].endpoint==0)early_callbacks_during_post++;
+  early_posting_session=0;
   tx->next_progress=saved;tx->s.kicked=true;
  }
  return ret;
 }
 '''
-    text += '\n' + (HERE / 'cases.c').read_text()
+    cases = (HERE / 'cases.c').read_text()
+    if observe:
+        marker = ' printf("EARLY_ASSERTIONS %s %u\\n",case_name,assertions);return 0;'
+        if cases.count(marker) != 1:
+            raise ValueError('independent assertion completion anchor changed')
+        cases = cases.replace(marker, ' early_trace_validate(case_name);\n' + marker)
+        text += '\nstatic void early_trace_validate(const char *);\n'
+    text += '\n' + cases
+    if observe:
+        text += '\n' + (HERE / 'trace_observer.c').read_text()
     boundary.write_text(text)
     # Host invocation storage bridges the real reference BPF into the actual
     # class. This is explicitly not a private-kfunc/verifier certification.
@@ -237,6 +262,10 @@ int bpf_xdev_ext_xdomain_verdict_v2(const struct xdev_ext_mech_ctx *ctx,const vo
         '-Wno-unused-function', '-Wno-unused-parameter', '-pthread', '-I', str(facade),
         '-I', str(stack), '-I', str(kernel), '-idirafter', str(kernel / 'include'),
         '-idirafter', str(kernel / 'include/uapi'), '-I', str(kernel / 'tools/xdev_ext_mech')]
+    if observe:
+        command += ['-DSTACK_XDOMAIN_TRACE_CAPTURE']
+        if 'struct xdev_ext_xdomain_trace {' in (kernel / 'include/linux/xdev_ext_mech.h').read_text():
+            command += ['-DSTACK_HAS_XDOMAIN_TRACE']
     if sanitize:
         command += ['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer']
     command += [str(s) for s in sources] + ['-o', str(out / 'early-cts')]
@@ -256,15 +285,22 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case')
     parser.add_argument('--sanitize',action='store_true')
+    parser.add_argument('--observe', action='store_true',
+                        help='assert actual production trace calls in existing cases')
     parser.add_argument('--mutation',choices=['pair','shape','key','single_posted','ack_chain_guard','ack_chain_boundary'])
     args = parser.parse_args()
+    if args.observe and args.case and args.case not in OBSERVATION_CASES + ('wire',):
+        parser.error('--observe case must be one of: ' + ', '.join(OBSERVATION_CASES))
     ROOT = args.source_root.resolve()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=False)
     kernel, stack = assemble(out)
+    if args.observe:
+        (out / 'trace-observer.sha256').write_text(
+            hashlib.sha256((HERE / 'trace_observer.c').read_bytes()).hexdigest() + '\n')
     if args.mutation:
         mutate(kernel,out,args.mutation)
-    if args.case != 'wire' and not prepare(kernel, stack, out, args.sanitize):
+    if args.case != 'wire' and not prepare(kernel, stack, out, args.sanitize, args.observe):
         (out/'result.json').write_text(json.dumps(dict(status='setup-error',
             scope='host actual NHI/XDOMAIN composition', hardware=False,
             kernel_execution=False, compile_exit=1, cases=[]),indent=2)+'\n')
@@ -277,6 +313,8 @@ def main():
         'zero_key','mixed_v1_tx','mixed_v1_rx','available_deadline','single_posted',
         'batch_end_only','consumer_error','consumer_sequester','unknown_stop',
         'control_full','bind_exhaustion','seq_overflow','window_reuse66','receipt_deadline','stop_after_lease','ack_before_post_return','local_before_post_return','partial_tx_lease','facts_selected_slot','facts_ack_key','pending_deadline','stop_pending_grant','first_cts_pair','first_cts_shape','expired_submit','expired_after_lease']
+    if args.observe:
+        cases = list(OBSERVATION_CASES)
     if args.case:
         cases = [] if args.case == 'wire' else [args.case]
     records=[]
@@ -308,7 +346,7 @@ def main():
     setup_error=any(r.get('setup_error') or r.get('failure_kind')=='runtime-error' for r in records)
     (out/'result.json').write_text(json.dumps(dict(status='setup-or-runtime-error' if setup_error else 'behavioral-red' if failed else 'pass',
         scope='host actual NHI/XDOMAIN composition', hardware=False, kernel_execution=False,
-        compile_exit=0, sanitize=args.sanitize, cases=records), indent=2)+'\n')
+        compile_exit=0, sanitize=args.sanitize, observe=args.observe, cases=records), indent=2)+'\n')
     return int(failed)
 
 if __name__ == '__main__':

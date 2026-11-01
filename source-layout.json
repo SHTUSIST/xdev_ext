@@ -2718,6 +2718,10 @@
       "logical_path": "tests/benchmarks/tp/driver.cc"
     },
     {
+      "source": "tests/benchmarks/tp/early_trace.py",
+      "logical_path": "tests/benchmarks/tp/early_trace.py"
+    },
+    {
       "source": "tests/benchmarks/tp/echo.h",
       "logical_path": "tests/benchmarks/tp/echo.h"
     },
@@ -2736,6 +2740,10 @@
     {
       "source": "tests/benchmarks/tp/owner.h",
       "logical_path": "tests/benchmarks/tp/owner.h"
+    },
+    {
+      "source": "tests/benchmarks/tp/pair.py",
+      "logical_path": "tests/benchmarks/tp/pair.py"
     },
     {
       "source": "tests/benchmarks/tp/run.py",
@@ -3454,12 +3462,24 @@
       "logical_path": "tests/compute/tp/eval/test_driver_process.py"
     },
     {
+      "source": "tests/compute/tp/eval/test_early_trace.py",
+      "logical_path": "tests/compute/tp/eval/test_early_trace.py"
+    },
+    {
       "source": "tests/compute/tp/eval/test_handoff_metadata.py",
       "logical_path": "tests/compute/tp/eval/test_handoff_metadata.py"
     },
     {
+      "source": "tests/compute/tp/eval/test_native_completion.py",
+      "logical_path": "tests/compute/tp/eval/test_native_completion.py"
+    },
+    {
       "source": "tests/compute/tp/eval/test_options.py",
       "logical_path": "tests/compute/tp/eval/test_options.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_pair.py",
+      "logical_path": "tests/compute/tp/eval/test_pair.py"
     },
     {
       "source": "tests/compute/tp/eval/test_run.py",
@@ -7227,6 +7247,10 @@
     {
       "source": "tests/network/xdomain/early/run.py",
       "logical_path": "tests/network/xdomain/early/run.py"
+    },
+    {
+      "source": "tests/network/xdomain/early/trace_observer.c",
+      "logical_path": "tests/network/xdomain/early/trace_observer.c"
     },
     {
       "source": "tests/network/xdomain/early/wire_cases.c",

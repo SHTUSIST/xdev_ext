@@ -184,6 +184,12 @@ static int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops *op
 static void xdev_ext_mech_class_unregister(const struct xdev_ext_mech_class_ops *ops) { assert(registered==ops);registered=NULL; }
 static bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st,u32 member);
 static int xdev_ext_mech_call(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_call_args *a,s32 *ret,struct xdev_ext_mech_hold_intent *hold);
+/* The core trace sink is external to this class-only executable. */
+struct xdev_ext_xdomain_trace;
+static bool xdev_ext_mech_trace_xdomain_enabled(void) { return false; }
+static void xdev_ext_mech_trace_xdomain(struct xdev_ext_mech_stage *st,
+                                     const struct xdev_ext_xdomain_trace *event)
+{ (void)st; (void)event; }
 static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,u64 cookie,u64 lba,u32 bytes,u32 opcode);
 static void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,u64 ticket,int status);
 static void xdev_ext_mech_count(struct xdev_ext_mech_session *s,u32 counter,u64 add) { (void)s;(void)counter;(void)add; }

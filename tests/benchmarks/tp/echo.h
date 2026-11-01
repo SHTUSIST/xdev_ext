@@ -69,7 +69,8 @@ struct tp_eval_echo {
   if(clock_gettime(CLOCK_MONOTONIC,&t))throw std::runtime_error("echo monotonic clock failed");
   return uint64_t(t.tv_sec)*1000000000ULL+uint64_t(t.tv_nsec);
  }
- void wait_native_complete(uint64_t target) {
+ static void wait_native_complete(const xdev_ext_cuda_peer_owner_view &view,
+                                  uint64_t target,uint64_t timeout_ns) {
   // USER done publication is not kernel END. Only END's cumulative done
   // counter follows frame/class release. Future iterations can already own
   // other loans, so whole-session inflight==0 is not a prefix completion rule.
@@ -78,7 +79,7 @@ struct tp_eval_echo {
   while(!completed[0] || !completed[1]) {
    for(unsigned i=0;i<2;++i) {
     if(completed[i])continue;
-    if(monotonic_ns()-begin>=options.timeout_ns)NATIVE(-ETIMEDOUT);
+    if(monotonic_ns()-begin>=timeout_ns)NATIVE(-ETIMEDOUT);
     xdev_ext_mech_stats statistics{};
     auto *session=xdev_ext_peer_endpoint_session(i?view.rx_endpoint:view.tx_endpoint);
     NATIVE(xdev_ext_session_stats(session,&statistics));
@@ -86,11 +87,14 @@ struct tp_eval_echo {
     if(statistics.batches_abort || statistics.held || statistics.sequestered ||
        statistics.timeouts || statistics.protocol_err || statistics.rejects)
      throw std::runtime_error("echo native completion has aborted or retained custody");
-    if(monotonic_ns()-begin>=options.timeout_ns)NATIVE(-ETIMEDOUT);
+    if(monotonic_ns()-begin>=timeout_ns)NATIVE(-ETIMEDOUT);
     completed[i]=statistics.batches_done>=target;
    }
    if(!completed[0] || !completed[1])sched_yield();
   }
+ }
+ void wait_native_complete(uint64_t target) {
+  wait_native_complete(view,target,options.timeout_ns);
  }
  bool exchange(uint64_t iteration) {
   uint64_t sequence=options.first_sequence+iteration;
