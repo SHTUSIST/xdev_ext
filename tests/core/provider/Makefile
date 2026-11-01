@@ -28,6 +28,12 @@ BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARC
 runtime: dma_provider_runtime dma_poll_runtime dma_provider_pair.bpf.o
 dma_provider_runtime: dma_provider_runtime.c dma_provider_fixture.h dma_campaign.h dma_wave.h
 	$(CC) $(CFLAGS) -I$(KERNEL_SRC) $< -o $@ -lbpf -lelf -lz -pthread
+# Explicit native scope acceptance tool; existing runtime/provider/BPF unchanged.
+SCOPE_LIBBPF_LIBS ?= -lbpf -lelf -lz
+.PHONY: scope-runtime
+scope-runtime: dma_scope_runtime
+dma_scope_runtime: dma_scope_runtime.c dma_provider_fixture.h dma_campaign.h
+	$(CC) $(CFLAGS) -I$(KERNEL_SRC) -I$(LIBBPF_INCLUDE) $< -o $@ $(SCOPE_LIBBPF_LIBS)
 # Stage polling (XDEV_EXT_MECH_STAGE_F_POLL) over the same provider and pair.
 dma_poll_runtime: dma_poll_runtime.c dma_provider_fixture.h dma_campaign.h dma_wave.h
 	$(CC) $(CFLAGS) -I$(KERNEL_SRC) $< -o $@ -lbpf -lelf -lz
