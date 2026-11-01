@@ -2014,8 +2014,24 @@
       "logical_path": "tests/eval/chains/test_run.py"
     },
     {
+      "source": "tests/benchmarks/chains/test_user_continuation_independent.py",
+      "logical_path": "tests/benchmarks/chains/test_user_continuation_independent.py"
+    },
+    {
       "source": "tests/benchmarks/chains/uring_min.h",
       "logical_path": "tests/eval/chains/uring_min.h"
+    },
+    {
+      "source": "tests/benchmarks/chains/user_continuation_kernel_fixture.c",
+      "logical_path": "tests/benchmarks/chains/user_continuation_kernel_fixture.c"
+    },
+    {
+      "source": "tests/benchmarks/chains/user_continuation_result_fixture.c",
+      "logical_path": "tests/benchmarks/chains/user_continuation_result_fixture.c"
+    },
+    {
+      "source": "tests/benchmarks/chains/user_continuation_staged_fixture.c",
+      "logical_path": "tests/benchmarks/chains/user_continuation_staged_fixture.c"
     },
     {
       "source": "tests/benchmarks/cuda_host_compute/Makefile",
