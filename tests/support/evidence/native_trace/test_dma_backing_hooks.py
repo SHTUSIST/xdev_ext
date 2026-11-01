@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[3]
+ROOT = Path(__file__).resolve().parents[4]
 
 
 def function(source, name):
@@ -169,11 +169,13 @@ int main(void)
 
 
 NVME_PREFIX = r"""
+#define NVME_REQ_XDEV_EXT_PEER 32
+struct nvme_xdev_ext_peer_trace;
 #define NVME_REQ_XDEV_EXT_ZC 16
 #define NVME_REQ_USERCMD 2
 struct bio_vec { struct page *bv_page; u32 bv_offset,bv_len; };
 struct nvme_iod { u32 dma_len; dma_addr_t first_dma; struct sg_table sgt; };
-struct nvme_request { u32 flags; };
+struct nvme_request { u32 flags; struct nvme_xdev_ext_peer_trace *peer_trace; };
 struct request { struct nvme_request native; struct nvme_iod iod; struct bio_vec bv; u32 payload,nr_segments; bool integrity; };
 struct nvme_dev { struct device *dev; };
 static struct nvme_request *nvme_req(struct request *r) { return &r->native; }
@@ -183,11 +185,12 @@ static u32 blk_rq_payload_bytes(struct request *r) { return r->payload; }
 static u32 blk_rq_nr_phys_segments(struct request *r) { return r->nr_segments; }
 static bool blk_integrity_rq(struct request *r) { return r->integrity; }
 """
+NVME_PREFIX += "\nstatic void nvme_native_peer_dma_trace(struct request *r) { (void)r; assert(0); }\n"
 NVME_MAIN = r"""
 int main(void)
 {
  struct device d={2}; struct nvme_dev dev={&d}; struct page page={4096,false};
- struct request r={.native={NVME_REQ_USERCMD},.iod={5000,0x101080,{0}},.bv={&page,128,5000},.payload=5000,.nr_segments=1};
+ struct request r={.native={.flags=NVME_REQ_USERCMD},.iod={5000,0x101080,{0}},.bv={&page,128,5000},.payload=5000,.nr_segments=1};
  nvme_native_dma_trace(&dev,&r);
  assert(emitted==2 && !strcmp(events[0].phase,"dma_span") && !strcmp(events[0].origin,"U"));
  assert(events[0].address==4224 && events[0].bytes==5000 && events[0].native_user_data==0x101080 && !events[0].sequence && !events[0].aux);
@@ -303,14 +306,14 @@ class DMABackingHooks(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_actual_range_observer(self):
-        source = (ROOT / 'kernel/kernel/dma/mapping.c').read_text()
+        source = (ROOT / 'src/core/kernel/dma/mapping.c').read_text()
         self.assertTrue('bool dma_range_is_unbounced(' in source,
                         'range-aware actual-map observer is missing')
         self.compile_run(PREFIX + function(source, 'dma_range_is_unbounced') + RANGE_MAIN)
 
     def test_actual_sg_zipper_splits_original_and_mapped_lists(self):
-        mapping = (ROOT / 'kernel/kernel/dma/mapping.c').read_text()
-        pci = (ROOT / 'kernel/drivers/nvme/host/pci.c').read_text()
+        mapping = (ROOT / 'src/core/kernel/dma/mapping.c').read_text()
+        pci = (ROOT / 'src/storage/drivers/nvme/host/pci.c').read_text()
         self.assertTrue('static bool nvme_native_dma_sg(' in pci,
                         'mapped SG/source byte zipper is missing')
         functions = '\n'.join((function(mapping, 'dma_range_is_unbounced'),
@@ -319,8 +322,8 @@ class DMABackingHooks(unittest.TestCase):
         self.compile_run(PREFIX + TRACE_PREFIX + functions + SG_MAIN)
 
     def test_actual_nvme_simple_seal_identity_failures_and_trace_disabled_cost(self):
-        mapping = (ROOT / 'kernel/kernel/dma/mapping.c').read_text()
-        pci = (ROOT / 'kernel/drivers/nvme/host/pci.c').read_text()
+        mapping = (ROOT / 'src/core/kernel/dma/mapping.c').read_text()
+        pci = (ROOT / 'src/storage/drivers/nvme/host/pci.c').read_text()
         functions = function(mapping, 'dma_range_is_unbounced') + '\n'
         functions += '\n'.join(function(pci, name) for name in
                                  ('nvme_native_dma_span', 'nvme_native_dma_sg',
@@ -329,15 +332,15 @@ class DMABackingHooks(unittest.TestCase):
         self.compile_run(PREFIX + TRACE_PREFIX + NVME_PREFIX + functions + NVME_MAIN)
 
     def test_actual_xsk_snapshot_fields_failures_and_trace_disabled_cost(self):
-        mapping = (ROOT / 'kernel/kernel/dma/mapping.c').read_text()
-        pool = (ROOT / 'kernel/net/xdp/xsk_buff_pool.c').read_text()
+        mapping = (ROOT / 'src/core/kernel/dma/mapping.c').read_text()
+        pool = (ROOT / 'src/network/net/xdp/xsk_buff_pool.c').read_text()
         functions = '\n'.join((function(mapping, 'dma_range_is_unbounced'),
                                  function(pool, 'xp_native_dma_trace'),
                                  function(pool, 'xp_native_dma_unmap')))
         self.compile_run(PREFIX + TRACE_PREFIX + POOL_PREFIX + functions + POOL_MAIN)
 
     def test_actual_ice_single_batch_dma_descriptor_observation(self):
-        ice = (ROOT / 'kernel/drivers/net/ethernet/intel/ice/ice_xsk.c').read_text()
+        ice = (ROOT / 'src/network/drivers/net/ethernet/intel/ice/ice_xsk.c').read_text()
         self.assertTrue('static void ice_native_dma_tx(' in ice,
                         'actual ice DMA descriptor observation missing')
         functions = '\n'.join(function(ice, name) for name in
@@ -345,7 +348,7 @@ class DMABackingHooks(unittest.TestCase):
         self.compile_run(PREFIX + TRACE_PREFIX + ICE_PREFIX + functions + ICE_MAIN)
 
     def test_snapshot_at_both_actual_nvme_submission_boundaries(self):
-        source = (ROOT / 'kernel/drivers/nvme/host/pci.c').read_text()
+        source = (ROOT / 'src/storage/drivers/nvme/host/pci.c').read_text()
         for name in ('nvme_queue_rq', 'nvme_submit_cmds'):
             actual = function(source, name)
             self.assertIn('nvme_native_dma_trace(', actual,
@@ -358,7 +361,7 @@ class DMABackingHooks(unittest.TestCase):
                         actual.index('dma_unmap_page('))
 
     def test_xsk_reused_mapping_and_detach_are_observed(self):
-        source = (ROOT / 'kernel/net/xdp/xsk_buff_pool.c').read_text()
+        source = (ROOT / 'src/network/net/xdp/xsk_buff_pool.c').read_text()
         actual = function(source, 'xp_dma_map')
         self.assertEqual(actual.count('xp_native_dma_trace(pool)'), 2,
                          'new and shared-map attachment both need complete snapshots')

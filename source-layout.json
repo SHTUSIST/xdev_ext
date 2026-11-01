@@ -7741,6 +7741,15 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "src/storage/drivers/nvme/host/xdev_ext_native_peer_trace.h",
+      "component": "linux",
+      "native_path": "drivers/nvme/host/xdev_ext_native_peer_trace.h"
+    },
+    {
+      "source": "tests/support/evidence/native_trace/test_nvme_peer_dma.py",
+      "logical_path": "tests/eval/native_trace/test_nvme_peer_dma.py"
     }
   ]
 }

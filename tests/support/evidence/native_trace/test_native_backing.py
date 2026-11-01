@@ -118,6 +118,21 @@ class NativeBacking(unittest.TestCase):
         self.assertTrue(callable(function), 'automatic raw native backing exporter missing')
         return function(self.plan, text(self.rows), self.meta)
 
+    def test_peer_dma_never_certifies_host_backing_even_with_stale_host_rows(self):
+        # Matching numerical addresses or a stale host certificate cannot turn
+        # a device DMA lease into a CPU physical-page qualification.
+        span = next(r for r in self.rows if r['phase'] == 'dma_span' and r['class_id'] == 3)
+        peer_span = dict(span, phase='peer_dma_span', address=0, native_user_data=span['address'])
+        seal = next(r for r in self.rows if r['phase'] == 'dma_seal' and r['class_id'] == 3)
+        peer_seal = dict(seal, phase='peer_dma_seal')
+        for retain_host in (True, False):
+            with self.subTest(stale_host_certificate=retain_host):
+                base = self.rows if retain_host else [r for r in self.rows
+                    if not (r['class_id'] == 3 and r['phase'] in ('dma_span', 'dma_seal', 'dma_unmap'))]
+                self.rows = base + [peer_span, peer_seal]
+                with self.assertRaisesRegex(ValueError, 'device-memory'):
+                    self.derive()
+
     def test_actual_maps_and_payload_anchors_export_two_exact_frames(self):
         proof = self.derive()
         self.assertEqual(proof['source'], 'native_provider')

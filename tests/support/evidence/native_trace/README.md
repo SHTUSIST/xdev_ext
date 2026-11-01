@@ -60,6 +60,25 @@ native submit/completion or record endpoint. Local TX completion cannot become
 a remote receive/ACK endpoint. Missing endpoints stay absent, so an analyzer
 must report unavailable E2E intervals.
 
+`peer_dma_span`, `peer_dma_seal`, and `peer_dma_release` are device-memory
+lease observations. They retain `address_kind: "device_dma"` and
+`resource_scope: "peer_lease"`; `address` is zero, while a span's
+`native_user_data` is the requester's leased DMA address, `ticket` is the
+lease ticket, `aux` is the payload byte offset, and `sequence` is its ordinal.
+A seal covers the complete ordered lease extent snapshot at an actual NVMe
+SQ copy, identified by the request pointer in `cookie`. Each actual copy
+remains visible, including a retry. The origin comes from the command owner:
+`K` for the mechanism stage and `U` for the synchronous peer ioctl.
+
+A release observation follows lease retirement: `probe_accepted: 1` means the
+handles retired after a quiesced completion; `-EINPROGRESS` preserves uncertain
+retirement and the underlying quarantined allocation, and `-ESTALE` means a
+handle did not retire. This is not a DMA-unmap observation. These phases
+cannot satisfy native work or establish host PFNs, BAR provenance, physical
+DMA execution, or performance. The host-backing importer explicitly refuses a
+request with device-memory observations, even if stale host mapping rows are
+also present. Physical backing qualification remains unavailable.
+
 Whole-command `/proc/stat` before/after snapshots remain diagnostics. One
 `CpuSampler` additionally retains actual aggregate and all `cpuN` rows in hashed
 `cpu_samples` JSONL, with `CLOCK_MONOTONIC` `before_ns`/`after_ns` read brackets.
