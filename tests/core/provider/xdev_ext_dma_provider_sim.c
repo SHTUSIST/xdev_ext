@@ -120,11 +120,12 @@ static int sim_bind_region(struct file *file,u64 off,u64 len,struct xdev_ext_dma
  spin_lock(&d->lock); d->stats.region_binds++; spin_unlock(&d->lock);
  return 0;
 }
-static void sim_unbind_region(struct xdev_ext_dma_region *region)
+static int sim_unbind_region(struct xdev_ext_dma_region *region)
 {
  struct sim_region *r=region->priv;
  spin_lock(&r->dev->lock); r->dev->stats.region_unbinds++; spin_unlock(&r->dev->lock);
  kfree(r);
+ return 0;
 }
 static int sim_bind_host(struct xdev_ext_dma_region *region,struct page **pages,u32 nr,void **host)
 {
@@ -151,7 +152,10 @@ static void sim_finish(struct sim_request *r,bool polled)
  u64 bytes=0;
  u32 i, replays=min(READ_ONCE(stale_replays),2U);
  unsigned int mode=READ_ONCE(fail_mode);
- for (i=0;i<r->n;i++) {
+ /* Validate the immutable saved claims before touching payload. C repeats
+  * this check in completion, so a stale owner cannot publish success. */
+ bool valid=xdev_ext_dma_owners_valid(r->cookie,r->ticket,r->x,r->n);
+ for (i=0;valid && i<r->n;i++) {
   void *device=d->window+r->region->base+r->x[i].device_off;
   void *host=r->host->addr+r->x[i].host_byte_off;
   if (r->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE) memcpy(host,device,r->x[i].len);
@@ -170,7 +174,7 @@ static void sim_finish(struct sim_request *r,bool polled)
   spin_lock(&d->lock); d->stats.stale_callbacks++; spin_unlock(&d->lock);
   xdev_ext_dma_complete(r->cookie,r->old_ticket,-ESTALE,true,0);
  }
- xdev_ext_dma_complete(r->cookie,r->ticket,mode==3 ? -EIO : 0,true,
+ xdev_ext_dma_complete(r->cookie,r->ticket,!valid ? -ESTALE : mode==3 ? -EIO : 0,true,
                       mode==2 && bytes ? bytes-1 : bytes);
  kfree(r);
 }

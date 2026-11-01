@@ -29,10 +29,12 @@
 #include "include/uapi/linux/xdev_ext_mech.h"
 #include "dma_provider_fixture.h"
 #include "dma_campaign.h"
+#include "dma_wave.h"
+static unsigned char poll_pattern(unsigned g,unsigned b) { return campaign_pattern(g,b); }
 
 #define FRAME 4096U
 #define POOL_BYTES (32U * FRAME)
-#define STRIDE FRAME
+#define STRIDE PAYLOAD
 #define MAX_DEPTH 8U
 #define HEAD 256U
 #define SEG 1024U
@@ -109,7 +111,8 @@ int main(int argc, char **argv)
 	struct xdev_ext_mech_create c = { .abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
 		.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1, .eventfd = -1,
 		.layout = { .frame_size = FRAME, .hdr_room = HEAD, .seg_len = SEG, .group_bytes = PAYLOAD } };
-	__u32 frame_index[2 * MAX_DEPTH];
+	__u32 frame_index[2 * MAX_DEPTH],zero=0;
+ struct dma_fixture_observation obs={0};
 	struct xdev_ext_mech_start start = { .flags = XDEV_EXT_MECH_START_F_USER_FRAMES |
 		XDEV_EXT_MECH_START_F_RECYCLE, .user_frames = (uintptr_t)frame_index };
 	struct xdev_ext_mech_stats stats = { 0 };
@@ -117,7 +120,7 @@ int main(int argc, char **argv)
 	unsigned char *window = MAP_FAILED, *pool = MAP_FAILED, *before = NULL;
 	struct rlimit lim = { RLIM_INFINITY, RLIM_INFINITY };
 	int dma = -1, ring = -1, refs = -1, created = 0, stopped = 0, ret;
-	unsigned int i, g;
+	unsigned int i, g,waves=0;
 	__u64 deadline;
 
 	if ((!polled && strcmp(mode, "plain") && strcmp(mode, "refuse-class")) || !groups || !depth ||
@@ -140,7 +143,7 @@ int main(int argc, char **argv)
 	window = mmap(NULL, DMA_FIXTURE_MAP_BYTES, PROT_READ | PROT_WRITE, MAP_SHARED, dma, 0);
 	REQUIRE(window != MAP_FAILED);
 	memset(window, 0xa6, DMA_FIXTURE_MAP_BYTES);
-	for (g = 0; g < groups; g++)
+	for (g = 0; g < depth; g++)
 		for (i = 0; i < PAYLOAD; i++)
 			window[DMA_FIXTURE_INPUT_OFF + g * STRIDE + i] = campaign_pattern(g, i);
 	before = malloc(DMA_FIXTURE_MAP_BYTES);
@@ -186,19 +189,37 @@ int main(int argc, char **argv)
 	REQUIRE(ret == 0);
 	created = 1;
 	REQUIRE(module_refs() >= refs + 2);
-	start.session_id = c.session_id;
-	REQUIRE(!mech(ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start));
-	deadline = now_ms() + 20000;
-	do {
-		memset(&stats, 0, sizeof(stats));
-		stats.session_id = c.session_id;
-		REQUIRE(!mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&stats));
-		REQUIRE(!ioctl(dma, DMA_FIXTURE_STATS, &device));
-		if (stopping ? device.pending > 0 :
-		    stats.batches_done == groups || stats.batches_abort || stats.sequestered)
-			break;
-		usleep(1000);
-	} while (now_ms() < deadline);
+ start.session_id=c.session_id;
+ for(unsigned base=0;;) {
+  unsigned count=stopping?groups:(groups-base<depth?groups-base:depth);
+  if(!stopping) {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
+   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
+   REQUIRE(!dma_wave_seed(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_INPUT_OFF,
+     depth,PAYLOAD,base,poll_pattern,&stats,&device,2));
+   start.first_seq=base;start.nr_batches=count;start.nr_user_frames=2*count;
+  }
+  deadline=now_ms()+20000;
+  do {ret=mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start);if(ret==-EBUSY)usleep(1000);}
+  while(ret==-EBUSY&&now_ms()<deadline);
+  REQUIRE(!ret);waves++;
+  do {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
+   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
+   if(stopping?device.pending>0:stats.batches_abort||stats.sequestered||
+      (stats.batches_done==base+count&&!stats.inflight&&!device.pending))break;
+   usleep(1000);
+  }while(now_ms()<deadline);
+  if(stopping)break;
+  map=bpf_object__find_map_by_name(object,"observations");REQUIRE(map);
+  REQUIRE(!bpf_map_lookup_elem(bpf_map__fd(map),&zero,&obs));
+  REQUIRE(!dma_wave_check(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,
+    depth,PAYLOAD,base,count,obs.source_slot+base,obs.sink_slot+base,
+    poll_pattern,&stats,&device,2));
+  base+=count;if(base==groups)break;
+ }
 	if (stopping) {
 		/* Polled requests are accepted and outstanding: nothing but a poll
 		 * pass completes them, so STOP returns 0 only if the worker kept
@@ -224,7 +245,7 @@ int main(int argc, char **argv)
 		!stats.sequestered && !stats.protocol_err && !stats.inflight && !stats.last_err);
 	for (i = 0; i < 2; i++)
 		REQUIRE(stats.submitted[i] == groups && stats.completed[i] == groups);
-	REQUIRE(!campaign_verify(window, before, DMA_FIXTURE_MAP_BYTES, DMA_FIXTURE_OUTPUT_OFF, groups, STRIDE, PAYLOAD));
+	REQUIRE(!memcmp(window,before,DMA_FIXTURE_MAP_BYTES));
 	REQUIRE(!ioctl(dma, DMA_FIXTURE_STATS, &device));
 	REQUIRE(device.accepted == 2ULL * groups && device.completed == 2ULL * groups && !device.pending &&
 		device.from_device == groups && device.to_device == groups &&
@@ -237,6 +258,7 @@ int main(int argc, char **argv)
 	stopped = 1;
 	REQUIRE(!ioctl(dma, DMA_FIXTURE_STATS, &device));
 	REQUIRE(device.region_unbinds == 2 && device.host_unbinds == 2 && module_refs() == refs);
+	printf("# poll waves=%u distinct_sequence_patterns=%u\n",waves,groups);
 	printf("PASS poll case=%s groups=%u depth=%u full_output=1 accepted=%llu completed=%llu polled_completed=%llu polls_nonzero=%d owner_refs_released=1 CPU_simulation=1\n",
 	       mode, groups, depth, (unsigned long long)device.accepted, (unsigned long long)device.completed,
 	       (unsigned long long)device.polled_completed, device.polls > 0);

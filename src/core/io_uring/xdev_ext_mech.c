@@ -1184,53 +1184,73 @@ int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch *b,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_frame_claim);
 
-/* Read-only admission: never steal the native callback's completion claim.
- * The cookie's batch pointer is immutable. Check its ticket before reading any
- * reusable batch metadata, and again after the bounded snapshot validation.
- */
-bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
-                                       u64 ticket, const struct xdev_ext_ce_xfer *x, u32 n)
+/* One immutable copy claim, shared by the typed CE and DMA adapters. */
+static bool xdev_ext_mech_batch_copy_owner_valid(const struct xdev_ext_mech_batch *b,
+ u64 owner, u64 generation, u64 host_byte_off, u32 len)
 {
- const struct xdev_ext_mech_session *s;
+ const struct xdev_ext_mech_session *s = b->s;
+ u32 j;
+
+ for (j = 0; j < b->nr_frames; j++) {
+  const struct xdev_ext_mech_frame *f = &b->f[j];
+  struct xdev_ext_mech_frame_rec rec;
+  u64 start = s->pool.first_page_off + (u64)f->index * s->pool.frame_size + f->data_off;
+  u64 claim = b->life_token[j], word;
+
+  if (host_byte_off < start || host_byte_off - start > f->data_len ||
+      !len || len > f->data_len - (host_byte_off - start))
+   continue;
+  if (!(b->life_active & BIT(j)) || owner != xdev_ext_mech_life_claim_owner(claim) ||
+      generation != xdev_ext_mech_life_claim_gen(claim))
+   return false;
+  xdev_ext_mech_frame_rec_fill(&rec, &s->life[f->index], f->index, s->pool.frame_size,
+    s->pool.first_page_off, PAGE_SHIFT, s->pool.capabilities,
+    s->pool.ops->sync_for_cpu != NULL, READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ZOMBIE);
+  word = smp_load_acquire(&s->life[f->index].ctrl);
+  if (rec.gen != generation || rec.closing || !xdev_ext_mech_life_matches(word, claim))
+   return false;
+  if ((claim & XDEV_EXT_MECH_L_STATE_MASK) != XDEV_EXT_MECH_L_CLAIM_PRODUCE && !rec.refs)
+   return false;
+  return true;
+ }
+ return false;
+}
+
+/* Ticket admission precedes reusable transfer/frame reads. Keep CE's original
+ * SUBMITTED-only contract; a DMA completion checks after claiming its ticket. */
+bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
+ u64 ticket, const struct xdev_ext_ce_xfer *x, u32 n)
+{
  u64 expected = (ticket << 3) | XDEV_EXT_MECH_C_SUBMITTED;
- u32 i, j;
+ u32 i;
 
  if (!ticket || !n || n > XDEV_EXT_MECH_MAX_FRAMES ||
      smp_load_acquire(&b->completion.ctrl) != expected)
   return false;
- s = b->s;
- for (i = 0; i < n; i++) {
-  bool found = false;
-
-  for (j = 0; j < b->nr_frames; j++) {
-   const struct xdev_ext_mech_frame *f = &b->f[j];
-   struct xdev_ext_mech_frame_rec rec;
-   u64 start = s->pool.first_page_off + (u64)f->index * s->pool.frame_size + f->data_off;
-   u64 claim = b->life_token[j], word;
-
-   if (x[i].host_byte_off < start || x[i].host_byte_off - start > f->data_len ||
-       !x[i].len || x[i].len > f->data_len - (x[i].host_byte_off - start))
-    continue;
-   if (!(b->life_active & BIT(j)) || x[i].owner != xdev_ext_mech_life_claim_owner(claim) ||
-       x[i].generation != xdev_ext_mech_life_claim_gen(claim))
-    return false;
-   xdev_ext_mech_frame_rec_fill(&rec, &s->life[f->index], f->index, s->pool.frame_size,
-     s->pool.first_page_off, PAGE_SHIFT, s->pool.capabilities,
-     s->pool.ops->sync_for_cpu != NULL, READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ZOMBIE);
-   word = smp_load_acquire(&s->life[f->index].ctrl);
-   if (rec.gen != x[i].generation || rec.closing || !xdev_ext_mech_life_matches(word, claim))
-    return false;
-   if ((claim & XDEV_EXT_MECH_L_STATE_MASK) != XDEV_EXT_MECH_L_CLAIM_PRODUCE && !rec.refs)
-    return false;
-   found = true;
-   break;
-  }
-  if (!found)
+ for (i = 0; i < n; i++)
+  if (!xdev_ext_mech_batch_copy_owner_valid(b, x[i].owner, x[i].generation,
+       x[i].host_byte_off, x[i].len))
    return false;
- }
  return smp_load_acquire(&b->completion.ctrl) == expected;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_ce_owners_valid);
+
+bool xdev_ext_mech_batch_dma_owners_valid(const struct xdev_ext_mech_batch *b,
+ u64 ticket, const struct xdev_ext_dma_xfer *x, u32 n)
+{
+ u64 expected = smp_load_acquire(&b->completion.ctrl);
+ u32 phase = expected & 7, i;
+
+ if (!ticket || expected >> 3 != ticket || !n || n > XDEV_EXT_DMA_MAX_ENTRIES ||
+     (phase != XDEV_EXT_MECH_C_SUBMITTED && phase != XDEV_EXT_MECH_C_COMPLETING))
+  return false;
+ for (i = 0; i < n; i++)
+  if (!xdev_ext_mech_batch_copy_owner_valid(b, x[i].owner, x[i].generation,
+       x[i].host_byte_off, x[i].len))
+   return false;
+ return smp_load_acquire(&b->completion.ctrl) == expected;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_dma_owners_valid);
 
 void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b)
 {

@@ -41,11 +41,12 @@ def source(path):
 
 
 def function(text, name):
-    match = re.search(r"^\w[^;{}]*\b" + name + r"\([^;{}]*\)\n\{\n.*?^\}",
+    match = re.search(r"^\w[^;{}]*\b" + re.escape(name) + r"\([^;{}]*\)\n\{\n.*?^\}",
                       text, re.M | re.S)
     if not match:
         raise RuntimeError("missing production function: " + name)
     return match[0]
+
 
 
 def structure(text, name):
@@ -69,14 +70,27 @@ def generate(mutation=None):
                          "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);", dma)
         assert n == 1
     elif mutation == "ambiguous_unbind":
-        dma, n = re.subn(r"if \(atomic_read\(&cs->ambiguous\)\)\n\t\treturn;", "if (false) return;", dma)
+        dma, n = re.subn(r"if \(atomic_read\(&cs->ambiguous\)\)\n\s+return -EBUSY;", "if (false) return -EBUSY;", dma)
         assert n == 1
+        # The new window lease is a second independent quarantine barrier.
+        dma = dma.replace("if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)", 1)
+        dma = dma.replace("if (!xdev_ext_dma_lease_unbind(cs))", "if (false)", 1)
+    elif mutation == "lease_get":
+        dma = dma.replace("err = xdev_ext_dma_lease_get(cs, b);", "err = 0;", 1)
+    elif mutation == "owner_guard":
+        dma = dma.replace("if (!xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, cb->x, cb->n))", "if (false)", 1)
     elif mutation == "duplicate_registry":
         dma, n = re.subn(r"if \(p->ops->fops == ops->fops\)", "if (false)", dma)
         assert n == 1
     template = (HERE / "provider_fault_fixture.c").read_text()
     template = template.replace("/* PRODUCTION_CLASS_FLAGS */",
                                 re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0])
+    # Historical void callbacks are adapted only at the fixture boundary so the
+    # old implementation executes and fails ownership assertions, not compilation.
+    if 'void (*unbind_region)(struct xdev_ext_dma_region *r)' in abi:
+        template = template.replace('static int native_unbind_region(', 'static void native_unbind_region(')
+        template = template.replace('if(region_unmap_error)return region_unmap_error;free(r->priv);r->priv=NULL;return 0;',
+                                    'if(region_unmap_error)return;free(r->priv);r->priv=NULL;')
     structs = [structure(abi, n) for n in (
         "xdev_ext_mech_frame", "xdev_ext_mech_stage", "xdev_ext_mech_class_ops",
         "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_dma_region",
@@ -100,7 +114,9 @@ def generate(mutation=None):
               "xdev_ext_mech_session_pool", "xdev_ext_mech_session_layout",
               "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_session_stop",
               "xdev_ext_mech_leave_locked", "xdev_ext_mech_batch_nr_frames",
-              "xdev_ext_mech_batch_frame", "xdev_ext_mech_batch_frame_claim", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
+              "xdev_ext_mech_batch_frame", "xdev_ext_mech_batch_frame_claim",
+              "xdev_ext_mech_session_depth", "xdev_ext_mech_batch_id", "xdev_ext_mech_batch_slot",
+              "xdev_ext_mech_batch_copy_owner_valid", "xdev_ext_mech_batch_dma_owners_valid", "xdev_ext_mech_batch_ce_owners_valid", "xdev_ext_mech_batch_priv", "xdev_ext_mech_batch_cookie",
               "xdev_ext_mech_batch_queue", "xdev_ext_mech_batch_ticket",
               "xdev_ext_mech_batch_completion_claim", "xdev_ext_mech_sync_for_cpu",
               "xdev_ext_mech_trim_produced", "xdev_ext_mech_batch_handoff",
@@ -155,6 +171,7 @@ static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
 
 
 CASES = [
+    "overlapping_sessions", "stale_owner", "stale_generation", "saved_claims", "unmap_retry", "unmap_exclusion", "lease_depth", "lease_shifted", "partial_region_bind", "partial_host_bind", "region_reset", "cleanup_active_group", "host_unmap_retention", "region_unmap_retention",
     "registry", "bind_rollback", "directions_and_bounds", "preaccept_eagain",
     "inline", "duplicate", "stale_reuse", "stale_stage_reuse", "dma_to_ce_stale", "ce_to_dma_stale", "short", "excess", "ambiguous",
     "unsubmitted_zero", "accepted_pre_submit_error", "dead_before_submit",
@@ -176,7 +193,7 @@ class ProviderFaults(unittest.TestCase):
                         "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h", "io_uring/xdev_ext_mech_step.h",
                         "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
                         "io_uring/xdev_ext_mech_window_copy_core.h",
-                        "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h"):
+                        "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h", "io_uring/xdev_ext_mech_ce_lease.h"):
                 p = cls.path / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(source(rel))
@@ -215,11 +232,81 @@ class ProviderFaults(unittest.TestCase):
             raise RuntimeError(" ".join(command) + "\n" + built.stdout + built.stderr)
         return exe
 
+
+    def test_dma_struct_ops_abi(self):
+        ops = source("io_uring/xdev_ext_mech_ops.c")
+        if os.environ.get("DMA_ABI_BASELINE"):
+            repo = _LAYOUT.canonical_root(HERE)
+            ops = subprocess.check_output(["git", "show", "HEAD:src/core/io_uring/xdev_ext_mech_ops.c"], cwd=repo, text=True)
+        dma = "static bool xdev_ext_dma_mech_abi_valid(" in ops
+        prefix = "xdev_ext_dma_mech" if dma else "xdev_ext_mech"
+        def declaration(signature):
+            start = ops.index(signature)
+            return ops[start:ops.index("\n};", start)+3]
+        code = r"""
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include "include/uapi/linux/xdev_ext_mech.h"
+typedef __u32 u32;
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+struct xdev_ext_dma_mech_ops { u32 abi_version,flags;void *prepare,*build,*complete; };
+struct xdev_ext_nvme_mech_ops { u32 abi_version,flags;void *prepare,*build,*complete; };
+"""
+        code += re.search(r"^#define XDEV_EXT_MECH_OPS_KNOWN_FLAGS\s+.*", source("include/linux/xdev_ext_mech.h"), re.M)[0]+"\n"
+        contract = source("io_uring/xdev_ext_ops_core.h")
+        code += "\n".join(structure(contract, n) for n in (
+            "xdev_ext_ops_u32_field", "xdev_ext_ops_member", "xdev_ext_ops_desc"))
+        code += function(source("io_uring/xdev_ext_ops_core.c"), "xdev_ext_ops_validate")
+        code += function(ops, "xdev_ext_mech_flags_known")
+        name = prefix+"_abi_valid"
+        code += function(ops[ops.index("static bool "+name+"("):], name)
+        code += declaration("static const struct xdev_ext_ops_u32_field "+prefix+"_ops_fields[]")
+        code += declaration("static const struct xdev_ext_ops_member xdev_ext_mech_ops_members[]")
+        code += declaration("static const struct xdev_ext_ops_desc "+prefix+"_ops_desc")
+        name = prefix+"_ops_validate"
+        code += function(ops[ops.index("static int "+name+"("):], name)
+        code += r"""
+int main(void) {
+ struct xdev_ext_dma_mech_ops ops={.abi_version=1,.build=(void *)1,.complete=(void *)1};
+ if (VALIDATE(&ops) != -EINVAL) { fputs("FAIL old DMA ABI silently accepted\n",stderr);return 1; }
+ ops.abi_version=2;assert(!VALIDATE(&ops));
+ ops.abi_version=3;assert(VALIDATE(&ops)==-EINVAL);
+ ops.abi_version=2;ops.flags=~0U;assert(VALIDATE(&ops)==-EINVAL);
+ ops.flags=0;ops.complete=NULL;assert(VALIDATE(&ops)==-EINVAL);
+ puts("PASS DMA struct_ops ABI: v2 accepted; v1/v3, unknown flags and missing completion refused");
+ return 0;
+}
+""".replace("VALIDATE",prefix+"_ops_validate")
+        code = code.replace("#include <stdint.h>", "#include <stdint.h>\n#include <stdio.h>")
+        exe = self.compile("abi", code)
+        run = subprocess.run([str(exe)],capture_output=True,text=True)
+        self.assertEqual(run.returncode,0,run.stdout+run.stderr)
+        self.assertIn("PASS DMA struct_ops ABI",run.stdout)
+        if dma:
+            registration = re.search(r"XDEV_EXT_MECH_STRUCT_OPS\(dma,.*?;",ops,re.S)[0]
+            self.assertIn("xdev_ext_dma_mech_ops_init_member",registration)
+            self.assertIn("xdev_ext_dma_mech_ops_validate",registration)
+
     def run_case(self, mode, binary=None):
         run = subprocess.run([str(binary or self.binary), mode], capture_output=True,
                              text=True, timeout=10)
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         self.assertIn("PASS " + mode, run.stdout)
+
+    def test_mutation_window_admission_is_detected(self):
+        exe = self.compile("mutant_lease_get", generate("lease_get"))
+        run = subprocess.run([str(exe), "overlapping_sessions"], capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("second overlapping active window", run.stderr)
+
+    def test_mutation_completion_owner_guard_is_detected(self):
+        exe = self.compile("mutant_owner_guard", generate("owner_guard"))
+        run = subprocess.run([str(exe), "stale_owner"], capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("expired ownership cannot become success", run.stderr)
 
     def test_mutation_cookie_prefix_is_detected(self):
         text=generate().replace("struct xdev_ext_dma_cookie {", "struct xdev_ext_dma_cookie {\n u64 invalid_prefix;",1)

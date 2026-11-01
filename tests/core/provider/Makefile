@@ -14,8 +14,8 @@ check: xdev_ext_mech_dma_core_test dma_campaign_test
 	python3 stats_frames_test.py
 	python3 mmap_test.py
 	python3 unbind_api_test.py
-dma_campaign_test: dma_campaign_test.c dma_campaign.h
-	$(CC) $(CFLAGS) $< -o $@
+dma_campaign_test: dma_campaign_test.c dma_campaign.h dma_wave.h dma_provider_fixture.h
+	$(CC) $(CFLAGS) -I$(KERNEL_SRC) $< -o $@
 clean:
 	rm -f xdev_ext_mech_dma_core_test dma_provider_runtime dma_poll_runtime dma_provider_pair.bpf.o dma_campaign_test
 
@@ -26,12 +26,12 @@ LIBBPF_INCLUDE ?= /usr/include
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH)
 .PHONY: runtime provider
 runtime: dma_provider_runtime dma_poll_runtime dma_provider_pair.bpf.o
-dma_provider_runtime: dma_provider_runtime.c dma_provider_fixture.h dma_campaign.h
+dma_provider_runtime: dma_provider_runtime.c dma_provider_fixture.h dma_campaign.h dma_wave.h
 	$(CC) $(CFLAGS) -I$(KERNEL_SRC) $< -o $@ -lbpf -lelf -lz -pthread
 # Stage polling (XDEV_EXT_MECH_STAGE_F_POLL) over the same provider and pair.
-dma_poll_runtime: dma_poll_runtime.c dma_provider_fixture.h dma_campaign.h
+dma_poll_runtime: dma_poll_runtime.c dma_provider_fixture.h dma_campaign.h dma_wave.h
 	$(CC) $(CFLAGS) -I$(KERNEL_SRC) $< -o $@ -lbpf -lelf -lz
-dma_provider_pair.bpf.o: dma_provider_pair.bpf.c
+dma_provider_pair.bpf.o: dma_provider_pair.bpf.c dma_provider_fixture.h
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL_SRC) -I$(LIBBPF_INCLUDE) -idirafter /usr/include/$(MULTIARCH) -c $< -o $@
 # KERNEL_BUILD is the configured output directory for the exact guest kernel.
 KERNEL_BUILD ?= $(KERNEL_SRC)

@@ -22,7 +22,8 @@ __s32 BPF_PROG(dma_build,const struct xdev_ext_mech_ctx *m)
  __u32 i,nr;
  (void)ctx;
  if (o) __sync_fetch_and_add(&o->dma_build,1);
- if (m->class_id!=XDEV_EXT_MECH_CLASS_DMA || m->base.backend!=XDEV_EXT_BINDING_BACKEND_UNSPEC) {
+ if (m->mech_abi_version!=XDEV_EXT_DMA_MECH_ABI_VERSION ||
+     m->class_id!=XDEV_EXT_MECH_CLASS_DMA || m->base.backend!=XDEV_EXT_BINDING_BACKEND_UNSPEC) {
   if (o) __sync_fetch_and_add(&o->errors,1);
   return XDEV_EXT_MECH_BUILD_ABORT;
  }
@@ -31,15 +32,18 @@ __s32 BPF_PROG(dma_build,const struct xdev_ext_mech_ctx *m)
  nr=info->nr_frames;
  if (m->base.src_offset>=IAA_OBSERVATION_GROUPS) return XDEV_EXT_MECH_BUILD_ABORT;
  if (o) {
-  if (m->base.direction==XDEV_EXT_MECH_DIR_TO_DEVICE) o->sink_frame[m->base.src_offset]=info->f[0].umem_addr/8192;
-  else o->source_frame[m->base.src_offset]=info->f[0].umem_addr/8192;
+  if (m->base.direction==XDEV_EXT_MECH_DIR_TO_DEVICE) {o->sink_frame[m->base.src_offset]=info->f[0].umem_addr/8192;
+  o->sink_slot[m->base.src_offset]=info->window_slot;}
+  else {o->source_frame[m->base.src_offset]=info->f[0].umem_addr/8192;
+        o->source_slot[m->base.src_offset]=info->window_slot;}
  }
- /* START sequence addresses a distinct campaign group; CE retains its slots. */
- if (!nr || nr>XDEV_EXT_MECH_MAX_FRAMES || info->l.group_bytes!=4096 ||
-     info->l.group_bytes>info->window_len ||
-     m->base.src_offset>(info->window_len-info->l.group_bytes)/4096)
+ /* Native addresses come only from the kernel-issued window lease. */
+ if (!nr || nr>XDEV_EXT_MECH_MAX_FRAMES || !info->lease_generation ||
+     !info->window_depth || info->window_slot>=info->window_depth ||
+     !info->l.group_bytes ||
+     info->window_depth>info->window_len/info->l.group_bytes)
   return XDEV_EXT_MECH_BUILD_ABORT;
- device_off=m->base.src_offset*4096;
+ device_off=(__u64)info->window_slot*info->l.group_bytes;
  for (i=0;i<XDEV_EXT_MECH_MAX_FRAMES;i++) {
   struct xdev_ext_dma_copy_desc *d;
   const struct xdev_ext_mech_frame_info *f;
@@ -106,6 +110,6 @@ __s32 BPF_PROG(iaa_complete,const struct xdev_ext_mech_ctx *m)
  else {if(c->produced!=4096){__sync_fetch_and_add(&o->errors,1);return XDEV_EXT_MECH_ABORT;}o->decompressed[g]=c->produced;}
  return XDEV_EXT_MECH_NEXT;
 }
-SEC(".struct_ops.link") struct xdev_ext_dma_mech_ops dma_pair={.abi_version=XDEV_EXT_MECH_ABI_VERSION,.build=(void *)dma_build,.complete=(void *)dma_complete};
+SEC(".struct_ops.link") struct xdev_ext_dma_mech_ops dma_pair={.abi_version=XDEV_EXT_DMA_MECH_ABI_VERSION,.build=(void *)dma_build,.complete=(void *)dma_complete};
 SEC(".struct_ops.link") struct xdev_ext_iaa_mech_ops iaa_pair={.abi_version=XDEV_EXT_MECH_ABI_VERSION,.build=(void *)iaa_build,.complete=(void *)iaa_complete};
 char LICENSE[] SEC("license")="GPL";

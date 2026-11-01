@@ -200,6 +200,9 @@ static inline int xdev_ext_dma_info_fill(struct xdev_ext_dma_mech_info *info,
 	info->directions = g->directions;
 	info->nr_frames = nr;
 	info->rsvd = 0;
+ info->window_slot = ~(__u32)0;
+ info->window_depth = 0;
+ info->lease_generation = 0;
 	xdev_ext_window_copy_frames(info->f, f, nr);
 	return 0;
 }

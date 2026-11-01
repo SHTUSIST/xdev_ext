@@ -15,7 +15,7 @@ __s32 BPF_PROG(dma_complete_holds, const struct xdev_ext_mech_ctx *mctx)
 
 SEC(".struct_ops.link")
 struct xdev_ext_dma_mech_ops dma_wrong_class_hold_ops = {
-	.abi_version = XDEV_EXT_MECH_ABI_VERSION,
+	.abi_version = XDEV_EXT_DMA_MECH_ABI_VERSION,
 	.complete = (void *)dma_complete_holds,
 };
 char _license[] SEC("license") = "GPL";

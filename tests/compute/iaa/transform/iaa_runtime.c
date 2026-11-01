@@ -21,6 +21,7 @@
 #include "dma_provider_fixture.h"
 #include "campaign.h"
 #include "observations.h"
+#include "dma_wave.h"
 static int bad;
 #define REQUIRE(c) do {if(!(c)){fprintf(stderr,"FAIL IAA line=%d expr=%s errno=%d\n",__LINE__,#c,errno);bad=1;goto out;}}while(0)
 static int mech(int ring,__u32 op,__u64 arg) {
@@ -44,6 +45,7 @@ int main(int argc,char **argv) {
  if(strcmp(mode,"normal")&&strcmp(mode,"delay")&&!stopping&&!replay){fprintf(stderr,"FAIL invalid IAA case\n");return 1;}
  struct bpf_object *object=NULL;struct bpf_link *dma_link=NULL,*iaa_link=NULL;struct bpf_map *map;
  struct iaa_observation *obs=NULL;
+ obs=calloc(1,sizeof(*obs));if(!obs)return 1;
  struct io_uring_params p={0};int ring=-1,dma=-1,created=0,stopped=0,refs=-1;
  unsigned char *window=MAP_FAILED,*pool=MAP_FAILED,*before=NULL;
  struct io_uring_xdev_ext_umem_reg reg={.size=IAA_POOL_BYTES,.frame_size=IAA_FRAME};
@@ -55,14 +57,14 @@ int main(int argc,char **argv) {
   .flags=XDEV_EXT_MECH_START_F_USER_FRAMES|XDEV_EXT_MECH_START_F_RECYCLE,
   .nr_user_frames=IAA_DEPTH,.user_frames=(uintptr_t)indices};
  struct xdev_ext_mech_stats stats={0};struct dma_fixture_stats device={0};
- unsigned highwater[IAA_POOL_FRAMES]={0},last_source[IAA_DEPTH]={0};unsigned min_comp=UINT32_MAX,max_comp=0;
+ unsigned highwater[IAA_POOL_FRAMES]={0},last_source[IAA_DEPTH]={0};unsigned min_comp=UINT32_MAX,max_comp=0,waves=0;
  struct rlimit limit={RLIM_INFINITY,RLIM_INFINITY};setrlimit(RLIMIT_MEMLOCK,&limit);
  REQUIRE(!set_param("fail_mode",0));REQUIRE(!set_param("delay_us",stopping?500000:!strcmp(mode,"delay")?2000:0));
  REQUIRE(!set_param("stale_replays",!strcmp(mode,"duplicate")?2:replay?1:0));
  dma=open("/dev/xdev_ext_dma_provider_sim",O_RDWR|O_CLOEXEC);REQUIRE(dma>=0);
  window=mmap(NULL,DMA_FIXTURE_MAP_BYTES,PROT_READ|PROT_WRITE,MAP_SHARED,dma,0);REQUIRE(window!=MAP_FAILED);
  memset(window,0xa6,DMA_FIXTURE_MAP_BYTES);
- for(unsigned g=0;g<IAA_GROUPS;g++)for(unsigned i=0;i<IAA_PAYLOAD;i++)window[DMA_FIXTURE_INPUT_OFF+g*IAA_PAYLOAD+i]=iaa_pattern(g,i);
+ for(unsigned g=0;g<IAA_DEPTH;g++)for(unsigned i=0;i<IAA_PAYLOAD;i++)window[DMA_FIXTURE_INPUT_OFF+g*IAA_PAYLOAD+i]=iaa_pattern(g,i);
  before=malloc(DMA_FIXTURE_MAP_BYTES);REQUIRE(before);memcpy(before,window,DMA_FIXTURE_MAP_BYTES);
  refs=owner_refs();REQUIRE(refs>=1);
  object=bpf_object__open_file(object_path,NULL);REQUIRE(object&&!libbpf_get_error(object));REQUIRE(!bpf_object__load(object));
@@ -77,14 +79,37 @@ int main(int argc,char **argv) {
  c.st[3]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_DMA,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=dma,.arg0=DMA_FIXTURE_OUTPUT_OFF,.arg1=DMA_FIXTURE_WINDOW_BYTES};
  REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&c));created=1;REQUIRE(owner_refs()>=refs+2);
  for(unsigned i=0;i<IAA_DEPTH;i++)indices[i]=i;
- start.session_id=c.session_id;REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start));
- uint64_t deadline=now_ms()+30000;
- do {
-  stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
-  if(stopping){REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));if(device.pending)break;}
-  else if(stats.batches_done==IAA_GROUPS||stats.batches_abort||stats.sequestered)break;
-  usleep(1000);
- }while(now_ms()<deadline);
+ start.session_id=c.session_id;
+ for(unsigned base=0;;) {
+  unsigned count=stopping?IAA_GROUPS:(IAA_GROUPS-base<IAA_DEPTH?IAA_GROUPS-base:IAA_DEPTH);
+  if(!stopping) {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
+   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
+   REQUIRE(!dma_wave_seed(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_INPUT_OFF,
+     IAA_DEPTH,IAA_PAYLOAD,base,iaa_pattern,&stats,&device,4));
+   start.first_seq=base;start.nr_batches=count;start.nr_user_frames=count;
+  }
+  uint64_t deadline=now_ms()+30000;int start_ret;
+  do {start_ret=mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start);if(start_ret==-EBUSY)usleep(1000);}
+  while(start_ret==-EBUSY&&now_ms()<deadline);
+  REQUIRE(!start_ret);waves++;
+  do {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
+   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
+   if(stopping?device.pending>0:stats.batches_abort||stats.sequestered||
+      (stats.batches_done==base+count&&!stats.inflight&&!device.pending))break;
+   usleep(1000);
+  }while(now_ms()<deadline);
+  if(stopping)break;
+  map=bpf_object__find_map_by_name(object,"observations");REQUIRE(map);
+  REQUIRE(!bpf_map_lookup_elem(bpf_map__fd(map),&zero,obs));
+  REQUIRE(!dma_wave_check(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,
+    IAA_DEPTH,IAA_PAYLOAD,base,count,obs->source_slot+base,obs->sink_slot+base,
+    iaa_pattern,&stats,&device,4));
+  base+=count;if(base==IAA_GROUPS)break;
+ }
  if(stopping) {
   REQUIRE(device.pending&&!device.host_unbinds&&!device.region_unbinds&&owner_refs()>=refs+2);
   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STOP,c.session_id));stopped=1;
@@ -95,14 +120,14 @@ int main(int argc,char **argv) {
  }
  REQUIRE(stats.batches_done==IAA_GROUPS&&!stats.batches_abort&&!stats.rejects&&!stats.sequestered&&!stats.protocol_err&&!stats.inflight&&!stats.last_err);
  for(unsigned i=0;i<4;i++)REQUIRE(stats.submitted[i]==IAA_GROUPS&&stats.completed[i]==IAA_GROUPS);
- REQUIRE(!iaa_verify_window(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,IAA_GROUPS,IAA_PAYLOAD));
- obs=calloc(1,sizeof(*obs));REQUIRE(obs);map=bpf_object__find_map_by_name(object,"observations");REQUIRE(map);
+ REQUIRE(!memcmp(window,before,DMA_FIXTURE_MAP_BYTES));
+ map=bpf_object__find_map_by_name(object,"observations");REQUIRE(map);
  REQUIRE(!bpf_map_lookup_elem(bpf_map__fd(map),&zero,obs));
  REQUIRE(obs->dma_build==2*IAA_GROUPS&&obs->dma_complete==2*IAA_GROUPS&&obs->iaa_build==2*IAA_GROUPS&&obs->iaa_complete==2*IAA_GROUPS&&!obs->errors);
  for(unsigned i=0;i<IAA_DEPTH;i++)highwater[i]=IAA_PAYLOAD;
  for(unsigned g=0;g<IAA_GROUPS;g++) {
   unsigned n=obs->compressed[g],f=obs->comp_frame[g],d=obs->sink_frame[g],src=obs->source_frame[g];
-  REQUIRE(src<IAA_DEPTH);last_source[src]=g;
+  REQUIRE(src<IAA_DEPTH && obs->source_slot[g]<IAA_DEPTH);last_source[src]=(g/IAA_DEPTH)*IAA_DEPTH+obs->source_slot[g];
   REQUIRE(n&&n<=2*IAA_PAYLOAD&&n==obs->decomp_input[g]&&obs->decompressed[g]==IAA_PAYLOAD);
   REQUIRE(f>=IAA_COMP_FIRST&&f<IAA_COMP_FIRST+2*IAA_DEPTH&&(f-IAA_COMP_FIRST)%2==0);
   REQUIRE(d>=IAA_DECOMP_FIRST&&d<IAA_DECOMP_FIRST+IAA_DEPTH);
@@ -119,11 +144,11 @@ int main(int argc,char **argv) {
  REQUIRE(!iaa_verify_pool_guards(pool,highwater));
  /* Mutation checks exercise the very validator that judged the real bytes. */
  window[DMA_FIXTURE_OUTPUT_OFF+IAA_PAYLOAD+77]^=1;
- REQUIRE(iaa_verify_window(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,IAA_GROUPS,IAA_PAYLOAD));window[DMA_FIXTURE_OUTPUT_OFF+IAA_PAYLOAD+77]^=1;
+ REQUIRE(memcmp(window,before,DMA_FIXTURE_MAP_BYTES));window[DMA_FIXTURE_OUTPUT_OFF+IAA_PAYLOAD+77]^=1;
  window[DMA_FIXTURE_INPUT_OFF+17]^=1;
- REQUIRE(iaa_verify_window(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,IAA_GROUPS,IAA_PAYLOAD));window[DMA_FIXTURE_INPUT_OFF+17]^=1;
+ REQUIRE(memcmp(window,before,DMA_FIXTURE_MAP_BYTES));window[DMA_FIXTURE_INPUT_OFF+17]^=1;
  window[DMA_FIXTURE_OUTPUT_OFF-1]^=1;
- REQUIRE(iaa_verify_window(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,IAA_GROUPS,IAA_PAYLOAD));window[DMA_FIXTURE_OUTPUT_OFF-1]^=1;
+ REQUIRE(memcmp(window,before,DMA_FIXTURE_MAP_BYTES));window[DMA_FIXTURE_OUTPUT_OFF-1]^=1;
  pool[IAA_COMP_FIRST*IAA_FRAME+IAA_HEAD-1]^=1;REQUIRE(iaa_verify_pool_guards(pool,highwater));pool[IAA_COMP_FIRST*IAA_FRAME+IAA_HEAD-1]^=1;
  REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
  REQUIRE(device.accepted==2*IAA_GROUPS&&device.completed==2*IAA_GROUPS&&!device.pending&&device.from_device==IAA_GROUPS&&device.to_device==IAA_GROUPS&&device.bytes==2ULL*IAA_GROUPS*IAA_PAYLOAD);
@@ -131,6 +156,7 @@ int main(int argc,char **argv) {
  if(replay)REQUIRE(device.stale_callbacks>0);else REQUIRE(!device.stale_callbacks);
  REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STOP,c.session_id));stopped=1;
  REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));REQUIRE(device.region_unbinds==2&&device.host_unbinds==2&&owner_refs()==refs);
+ printf("# IAA waves=%u distinct_sequence_patterns=%u\n",waves,IAA_GROUPS);
  printf("PASS IAA case=%s groups=257 depth=8 software=deflate-generic compressed_min=%u compressed_max=%u actual_lengths=257 restored_bytes=%u full_source=1 all_window_guards=1 all_pool_guards=1 mutation_rejects=4 stage_counts=257,257,257,257 native_accepted=514 native_completed=514 pending=0 owners_released=1 dma_cpu_simulation=1\n",mode,min_comp,max_comp,IAA_GROUPS*IAA_PAYLOAD);
 out:
  if(created&&!stopped&&ring>=0)mech(ring,XDEV_EXT_MECH_OP_STOP,c.session_id);

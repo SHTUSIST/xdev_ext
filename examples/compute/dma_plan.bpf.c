@@ -7,29 +7,33 @@
 #include "xdev_ext_mech_prog.h"
 #include "xdev_ext_mech_kfunc.h"
 
-__u64 key_base = 1;
-
 SEC("struct_ops/dma_plan_build")
 __s32 BPF_PROG(dma_plan_build, const struct xdev_ext_mech_ctx *mctx)
 {
 	const struct xdev_ext_dma_mech_info *info;
 	struct xdev_ext_dma_copy_desc *d;
-	__u64 device_off, key = mctx->base.src_offset;
+	__u64 device_off, slot_end;
 	__u32 pos = 0, used = 0, nr;
 	int slot;
 
 	(void)ctx;
+ if (mctx->mech_abi_version != XDEV_EXT_MP_DMA_ABI_VERSION)
+  return XDEV_EXT_MP_BUILD_ABORT;
 	info = (const void *)bpf_xdev_ext_info(mctx, sizeof(struct xdev_ext_dma_mech_info));
 	if (!info)
 		return XDEV_EXT_MP_BUILD_ABORT;
 	nr = info->nr_frames;
-	if (!nr || nr > XDEV_EXT_MP_MAX_FRAMES || key < key_base ||
+	if (!nr || nr > XDEV_EXT_MP_MAX_FRAMES || !info->lease_generation ||
+     !info->window_depth || info->window_slot >= info->window_depth ||
+     !info->l.group_bytes ||
+     info->window_depth > info->window_len / info->l.group_bytes ||
 	    (mctx->base.direction != XDEV_EXT_MP_DIR_TO_DEVICE &&
 	     mctx->base.direction != XDEV_EXT_MP_DIR_FROM_DEVICE) ||
 	    !(info->directions & (1U << mctx->base.direction)) ||
-	    xdev_ext_mp_ce_base(key - key_base, info->l.group_bytes,
+	    xdev_ext_mp_ce_base(info->window_slot, info->l.group_bytes,
 			   info->window_len, &device_off))
 		return XDEV_EXT_MP_BUILD_ABORT;
+	slot_end = device_off + info->l.group_bytes;
 	/*
 	 * Split on provider segment and entry limits, bounded by scratch capacity.
 	 * The iterator lets verifier states converge instead of expanding the
@@ -55,8 +59,8 @@ __s32 BPF_PROG(dma_plan_build, const struct xdev_ext_mech_ctx *mctx)
 		}
 		if (!len || !info->alignment ||
 		    ((off | device_off | len) & (info->alignment - 1)) ||
-		    device_off > info->window_len ||
-		    len > info->window_len - device_off)
+		    device_off > slot_end ||
+		    len > slot_end - device_off)
 			return XDEV_EXT_MP_BUILD_ABORT;
 		d = (void *)bpf_xdev_ext_desc(mctx, slot, sizeof(struct xdev_ext_dma_copy_desc));
 		if (!d)
@@ -91,7 +95,7 @@ __s32 BPF_PROG(dma_plan_complete, const struct xdev_ext_mech_ctx *mctx)
 
 SEC(".struct_ops.link")
 struct xdev_ext_dma_mech_ops dma_plan_ops = {
-	.abi_version = XDEV_EXT_MP_ABI_VERSION,
+	.abi_version = XDEV_EXT_MP_DMA_ABI_VERSION,
 	.build = (void *)dma_plan_build,
 	.complete = (void *)dma_plan_complete,
 };

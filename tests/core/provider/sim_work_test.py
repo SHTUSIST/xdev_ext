@@ -36,6 +36,8 @@ struct xdev_ext_dma_xfer { u64 host_byte_off,device_off; u32 len,flags; };
 struct sim_request { struct work_struct work; struct xdev_ext_dma_cookie *cookie; u64 ticket,old_ticket;
  struct sim_region *region; struct sim_host *host; u32 direction,n; struct xdev_ext_dma_xfer x[]; };
 static unsigned fail_mode,delay_us,stale_replays,delayed,calls;
+static bool xdev_ext_dma_owners_valid(struct xdev_ext_dma_cookie *c,u64 t,const struct xdev_ext_dma_xfer *x,u32 n)
+{ (void)c;(void)t;(void)x;return n && fail_mode!=4; }
 static u64 tickets[8],counts[8]; static int statuses[8];
 static void usleep_range(unsigned a,unsigned b) { (void)b; delayed+=a; }
 static void xdev_ext_dma_complete(struct xdev_ext_dma_cookie *c,u64 ticket,int status,bool submitted,u64 bytes) {
@@ -44,7 +46,7 @@ static void xdev_ext_dma_complete(struct xdev_ext_dma_cookie *c,u64 ticket,int s
 /* WORKER */
 #define CHECK(x) do { if(!(x)) { fprintf(stderr,"FAIL line %d: %s\n",__LINE__,#x);return 1; } } while(0)
 int main(void) {
- for(unsigned mode=0;mode<4;mode++) for(unsigned replay=0;replay<=2;replay++) {
+ for(unsigned mode=0;mode<5;mode++) for(unsigned replay=0;replay<=2;replay++) {
   unsigned char dev[64],host[64];memset(dev,0xa6,sizeof(dev));memset(host,0x97,sizeof(host));
   for(unsigned i=0;i<16;i++)dev[8+i]=(unsigned char)(i*17+3);
   struct sim_device d={.window=dev,.stats={.pending=1}};
@@ -56,10 +58,12 @@ int main(void) {
   sim_work(&r->work);
   CHECK(delayed==123);CHECK(calls==replay+1);CHECK(d.stats.pending==0);CHECK(d.stats.completed==1);
   for(unsigned i=0;i<replay;i++){CHECK(tickets[i]==40);CHECK(statuses[i]==-ESTALE);}
-  CHECK(tickets[replay]==41);CHECK(statuses[replay]==(mode==3?-EIO:0));
-  CHECK(counts[replay]==(mode==2?15:16));CHECK(d.stats.stale_callbacks==replay);
+  CHECK(tickets[replay]==41);CHECK(statuses[replay]==(mode==4?-ESTALE:mode==3?-EIO:0));
+  CHECK(counts[replay]==(mode==4?0:mode==2?15:16));CHECK(d.stats.stale_callbacks==replay);
   CHECK(d.stats.polled_completed==0); /* the worker thread is not a poll completion */
-  CHECK(!memcmp(host+16,dev+8,16));for(unsigned i=0;i<64;i++)if(i<16||i>=32)CHECK(host[i]==0x97);
+  if(mode==4){for(unsigned i=0;i<64;i++)CHECK(host[i]==0x97);}
+  else { CHECK(!memcmp(host+16,dev+8,16)); }
+  for(unsigned i=0;i<64;i++)if(i<16||i>=32)CHECK(host[i]==0x97);
  }
  puts("PASS actual simulator worker delay, short, ambiguous, stale/replay-before-final, guards");return 0;
 }

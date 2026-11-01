@@ -9,6 +9,11 @@
 #define DMA_FIXTURE_INPUT_OFF DMA_FIXTURE_UNIT
 #define DMA_FIXTURE_OUTPUT_OFF (3U * DMA_FIXTURE_UNIT)
 #define DMA_FIXTURE_WINDOW_BYTES DMA_FIXTURE_UNIT
+#define DMA_FIXTURE_MAX_GROUPS 1024U
+struct dma_fixture_observation {
+ __u64 dma_build,dma_complete,ce_build,ce_complete,wrong_base,slot_mask;
+ __u32 source_slot[DMA_FIXTURE_MAX_GROUPS],sink_slot[DMA_FIXTURE_MAX_GROUPS];
+};
 struct dma_fixture_stats {
  __u64 region_binds, region_unbinds, host_binds, host_unbinds;
  __u64 accepted, completed, from_device, to_device, bytes;
