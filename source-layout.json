@@ -7741,6 +7741,49 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "examples/storage/nvme_blocktable.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.h"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/host/bpf/bpf_helpers.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/host/bpf/bpf_helpers.h"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/Makefile"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/test.c"
+    },
+    {
+      "source": "examples/storage/nvme_blocktable.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.bpf.c"
+    },
+    {
+      "source": "examples/storage/Makefile",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/Makefile"
+    },
+    {
+      "source": "examples/storage/README.md",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/README.md"
+    },
+    {
+      "source": "tools/analysis/responsibility.py",
+      "logical_path": "tools/analysis/responsibility.py"
+    },
+    {
+      "source": "tests/tools/test_responsibility.py",
+      "logical_path": "tests/tools/test_responsibility.py"
     }
   ]
 }
