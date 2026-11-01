@@ -16,6 +16,7 @@
  */
 #include <linux/atomic.h>
 #include <linux/bug.h>
+#include <linux/err.h>
 #include <linux/export.h>
 #include <linux/fs.h>
 #include <linux/init.h>
@@ -24,6 +25,7 @@
 #include <linux/limits.h>
 #include <linux/mutex.h>
 #include <linux/printk.h>
+#include <linux/refcount.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/xdev_ext_compfam.h>
@@ -34,19 +36,86 @@
 #include "xdev_ext_mech_ce_lease.h"
 #include "xdev_ext_mech_window.h"
 
+/* The creator ref is owned by the real backing space, without a module self-pin.
+ * Every external ref separately pins this object's release-code owner. */
+struct xdev_ext_dma_scope {
+	refcount_t refs;
+	struct module *owner;
+	void *private_data;
+	void (*release)(void *private_data);
+};
+
+struct xdev_ext_dma_scope *xdev_ext_dma_scope_create(struct module *owner,
+		void *private_data, void (*release)(void *private_data))
+{
+	struct xdev_ext_dma_scope *scope;
+
+	if (!release)
+		return ERR_PTR(-EINVAL);
+	scope = kmalloc(sizeof(*scope), GFP_KERNEL);
+	if (!scope)
+		return ERR_PTR(-ENOMEM);
+	refcount_set(&scope->refs, 1);
+	scope->owner = owner;
+	scope->private_data = private_data;
+	scope->release = release;
+	return scope;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_dma_scope_create);
+
+static void xdev_ext_dma_scope_ref_put(struct xdev_ext_dma_scope *scope)
+{
+	if (refcount_dec_and_test(&scope->refs)) {
+		scope->release(scope->private_data);
+		kfree(scope);
+	}
+}
+
+void xdev_ext_dma_scope_owner_put(struct xdev_ext_dma_scope *scope)
+{
+	xdev_ext_dma_scope_ref_put(scope);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_dma_scope_owner_put);
+
+int xdev_ext_dma_scope_get(struct xdev_ext_dma_scope *scope)
+{
+	struct module *owner;
+
+	if (!scope)
+		return -EINVAL;
+	owner = scope->owner;
+	if (!try_module_get(owner))
+		return -ENODEV;
+	if (!refcount_inc_not_zero(&scope->refs)) {
+		module_put(owner);
+		return -ESTALE;
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_dma_scope_get);
+
+void xdev_ext_dma_scope_put(struct xdev_ext_dma_scope *scope)
+{
+	struct module *owner = scope->owner;
+
+	xdev_ext_dma_scope_ref_put(scope);
+	module_put(owner);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_dma_scope_put);
+
 /* Registry has no fixed provider count; sessions pin ops->owner under lock. */
 struct xdev_ext_dma_provider {
 	struct list_head node;
 	const struct xdev_ext_dma_provider_ops *ops;
+	const struct xdev_ext_dma_scope_ops *scope_ops;
 };
 
 /* A session atomically owns ALL its bound DMA windows while any batch can
  * use them. Reentrant batches keep per-slot depth parallelism for matching
  * bases or disjoint windows; shifted overlapping bases serialize batches.
- * Numeric windows are compared across every device of the same provider,
- * conservatively merging device-node aliases and independent device address spaces.
- * Distinct VAs aliasing the same physical bytes require provider canonical
- * identity; this contract covers overlapping configured address windows.
+ * Legacy providers compare numeric windows. Scoped providers supply immutable
+ * canonical coordinates and a pinned backing identity; unknown or mixed
+ * identities conservatively exclude the whole provider namespace.
  */
 struct xdev_ext_dma_lease_group {
 	struct list_head node;
@@ -66,7 +135,8 @@ struct xdev_ext_dma_stage {
  const struct xdev_ext_dma_provider_ops *ops; /* C-owned identity and pin */
 	struct list_head lease_node;
 	struct xdev_ext_dma_lease_group *lease_group;
-	u64 window_start, window_len;
+	struct xdev_ext_dma_scope_key key;
+	struct xdev_ext_dma_scope *scope; /* one owned external ref; key borrows it */
  bool cleanup_held;
 	struct xdev_ext_dma_region region;
 	void *host;			/* bind_host() handle of the pool pages */
@@ -103,7 +173,9 @@ struct xdev_ext_dma_batch {
 static DEFINE_MUTEX(xdev_ext_dma_provider_lock);
 static LIST_HEAD(xdev_ext_dma_providers);
 
-int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops)
+static int xdev_ext_dma_provider_register_common(
+ const struct xdev_ext_dma_provider_ops *ops,
+ const struct xdev_ext_dma_scope_ops *scope_ops, bool scoped)
 {
 	struct xdev_ext_dma_provider *p, *new;
 	int err = 0;
@@ -111,10 +183,19 @@ int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops)
 	if (!ops || !ops->fops || !ops->bind_region || !ops->unbind_region ||
 	    !ops->bind_host || !ops->unbind_host || !ops->submit)
 		return -EINVAL;
+	if (scoped) {
+		if (!scope_ops || scope_ops->size != sizeof(*scope_ops))
+			return -EINVAL;
+		if (scope_ops->version != XDEV_EXT_DMA_SCOPE_OPS_VERSION)
+			return -EOPNOTSUPP;
+		if (scope_ops->flags || scope_ops->reserved || !scope_ops->acquire)
+			return -EINVAL;
+	}
 	new = kmalloc(sizeof(*new), GFP_KERNEL);
 	if (!new)
 		return -ENOMEM;
 	new->ops = ops;
+	new->scope_ops = scope_ops;
 	mutex_lock(&xdev_ext_dma_provider_lock);
 	list_for_each_entry(p, &xdev_ext_dma_providers, node) {
 		if (p->ops->fops == ops->fops) {
@@ -129,7 +210,18 @@ int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops)
 		kfree(new);
 	return err;
 }
+int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops)
+{
+ return xdev_ext_dma_provider_register_common(ops, NULL, false);
+}
 EXPORT_SYMBOL_GPL(xdev_ext_dma_provider_register);
+
+int xdev_ext_dma_provider_register_scoped(const struct xdev_ext_dma_provider_ops *ops,
+ const struct xdev_ext_dma_scope_ops *scope_ops)
+{
+ return xdev_ext_dma_provider_register_common(ops, scope_ops, true);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_dma_provider_register_scoped);
 
 void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *ops)
 {
@@ -150,15 +242,18 @@ void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *op
 EXPORT_SYMBOL_GPL(xdev_ext_dma_provider_unregister);
 
 /* CREATE: select by file operations and pin before releasing registry lock. */
-static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *file)
+static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(
+ struct file *file, const struct xdev_ext_dma_scope_ops **scope_ops)
 {
 	const struct xdev_ext_dma_provider_ops *ops = NULL;
 	struct xdev_ext_dma_provider *p;
 
+	*scope_ops = NULL;
 	mutex_lock(&xdev_ext_dma_provider_lock);
 	list_for_each_entry(p, &xdev_ext_dma_providers, node) {
 		if (p->ops->fops == file->f_op && try_module_get(p->ops->owner)) {
 			ops = p->ops;
+			*scope_ops = p->scope_ops;
 			break;
 		}
 	}
@@ -166,9 +261,38 @@ static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct 
 	return ops;
 }
 
+/* No native effects here. A non-NULL output always transfers one get-ref,
+ * even on provider error; checked CREATE rollback will return it exactly once. */
+static int xdev_ext_dma_stage_scope(struct xdev_ext_dma_stage *cs,
+ const struct xdev_ext_dma_scope_ops *scope_ops, struct file *file, u64 start, u64 len)
+{
+ struct xdev_ext_dma_scope_info info = { .kind = XDEV_EXT_DMA_SCOPE_UNKNOWN };
+ int err;
+
+ cs->key = (struct xdev_ext_dma_scope_key) {
+  .provider = cs->ops, .kind = XDEV_EXT_DMA_SCOPE_LEGACY,
+  .start = start, .len = len,
+ };
+ if (!scope_ops)
+  return 0;
+ err = scope_ops->acquire(file, start, len, &info);
+ cs->scope = info.scope;
+ if (err)
+  return err < 0 ? err : -EPROTO;
+ if (info.reserved ||
+     (info.kind != XDEV_EXT_DMA_SCOPE_UNKNOWN && info.kind != XDEV_EXT_DMA_SCOPE_KNOWN) ||
+     (info.kind == XDEV_EXT_DMA_SCOPE_KNOWN && info.canonical_len != len))
+  return -EPROTO;
+ cs->key = (struct xdev_ext_dma_scope_key) {
+  .provider = cs->ops, .kind = info.kind, .scope = info.scope,
+  .start = info.canonical_start, .len = info.canonical_len,
+ };
+ return xdev_ext_dma_scope_key_valid(&cs->key) ? 0 : -EPROTO;
+}
+
 /* CREATE cannot activate a session until every bound region is registered. */
 static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *st,
-		struct xdev_ext_dma_stage *cs, u64 start, u64 len)
+		struct xdev_ext_dma_stage *cs)
 {
 	struct xdev_ext_dma_lease_group *group, *found = NULL;
 	struct xdev_ext_dma_stage *other;
@@ -196,14 +320,9 @@ static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *st,
 	 * before ACTIVE, so this conservative group policy is then immutable.
 	 */
 	list_for_each_entry(other, &found->regions, lease_node)
-		if (other->window_start != start &&
-		    xdev_ext_ce_lease_overlap(other->ops,
-			other->window_start, other->window_len,
-			cs->ops, start, len))
+		if (xdev_ext_dma_scope_serial(&other->key, &cs->key))
 			found->state.serial_batches = true;
 	cs->lease_group = found;
-	cs->window_start = start;
- cs->window_len = len;
 	list_add_tail(&cs->lease_node, &found->regions);
 	mutex_unlock(&xdev_ext_dma_lease_lock);
 	return 0;
@@ -230,10 +349,7 @@ static int xdev_ext_dma_lease_get(struct xdev_ext_dma_stage *cs,
     continue;
 			list_for_each_entry(a, &group->regions, lease_node)
 				list_for_each_entry(held, &other->regions, lease_node)
-					if (xdev_ext_ce_lease_overlap(a->ops,
-						a->window_start, a->window_len,
-						held->ops, held->window_start,
-						held->window_len)) {
+					if (xdev_ext_dma_scope_overlap(&a->key, &held->key)) {
 						conflict = true;
       cleanup_conflict = other->cleanup_holds;
 						goto checked;
@@ -326,6 +442,7 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
 {
  struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
  const struct xdev_ext_dma_provider_ops *ops;
+ const struct xdev_ext_dma_scope_ops *scope_ops;
  struct xdev_ext_dma_stage *cs;
  u64 offset;
  int err;
@@ -338,7 +455,7 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
  cs = kzalloc(sizeof(*cs), GFP_KERNEL);
  if (!cs)
   return -ENOMEM;
- ops = xdev_ext_dma_provider_get(st->file);
+ ops = xdev_ext_dma_provider_get(st->file, &scope_ops);
  if (!ops) {
   kfree(cs);
   return -ENODEV;
@@ -354,10 +471,12 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
  cs->region.ops = ops;
  cs->region.polled = st->poll;
  st->priv = cs;
- /* Reserve the requested numeric interval before any provider mapping can
-  * become residual. Provider error paths must not erase this C-owned range.
-  * An allocation refusal here precedes all native bind hooks. */
- err = xdev_ext_dma_lease_bind(st, cs, u->arg0, u->arg1);
+ /* Pin and publish trusted identity before a mapping can become residual.
+  * Provider region initialization cannot erase this separate C-owned key. */
+ err = xdev_ext_dma_stage_scope(cs, scope_ops, st->file, u->arg0, u->arg1);
+ if (err)
+  return err;
+ err = xdev_ext_dma_lease_bind(st, cs);
  if (err)
   return err;
  err = ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
@@ -416,6 +535,10 @@ static int xdev_ext_dma_unbind(struct xdev_ext_mech_stage *st)
   if (!xdev_ext_dma_lease_unbind(cs))
    return -EBUSY;
   cs->lease_group = NULL;
+ }
+ if (cs->scope) {
+  xdev_ext_dma_scope_put(cs->scope);
+  cs->scope = NULL;
  }
  st->priv = NULL;
  kfree(cs);

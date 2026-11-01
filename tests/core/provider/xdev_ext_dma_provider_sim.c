@@ -7,6 +7,7 @@
  * a device queue.
  */
 #include <linux/fs.h>
+#include <linux/err.h>
 #include <linux/delay.h>
 #include <linux/ktime.h>
 #include <linux/list.h>
@@ -36,6 +37,7 @@ MODULE_PARM_DESC(stale_replays, "0..2 old accepted-ticket replays before the cur
 
 struct sim_device {
  void *window;
+ struct xdev_ext_dma_scope *scope;
  /* Never held across a sleep: ->poll runs it from the session worker. */
  spinlock_t lock;
  struct list_head polled;	/* accepted polled requests, submit order */
@@ -62,23 +64,38 @@ static bool span(u64 off, u64 len, u64 capacity)
  u64 end;
  return !check_add_overflow(off,len,&end) && end<=capacity;
 }
+static void sim_scope_release(void *private_data)
+{
+ struct sim_device *d=private_data;
+
+ WARN_ON(!list_empty(&d->polled));
+ vfree(d->window);
+ kfree(d);
+}
 static int sim_open(struct inode *inode, struct file *file)
 {
  struct sim_device *d=kzalloc(sizeof(*d),GFP_KERNEL);
+ int err;
  if (!d) return -ENOMEM;
  d->window=vmalloc_user(DMA_FIXTURE_MAP_BYTES);
  if (!d->window) { kfree(d); return -ENOMEM; }
  spin_lock_init(&d->lock);
  INIT_LIST_HEAD(&d->polled);
+ d->scope=xdev_ext_dma_scope_create(THIS_MODULE,d,sim_scope_release);
+ if (IS_ERR(d->scope)) {
+  err=PTR_ERR(d->scope);
+  vfree(d->window); kfree(d);
+  return err;
+ }
  file->private_data=d;
  return 0;
 }
 static int sim_release(struct inode *inode, struct file *file)
 {
  struct sim_device *d=file->private_data;
- /* Stages retain file and module refs until all accepted work completes. */
- WARN_ON(!list_empty(&d->polled));
- vfree(d->window); kfree(d); return 0;
+ /* One creator belongs to this real allocation, shared by every dup alias. */
+ xdev_ext_dma_scope_owner_put(d->scope);
+ return 0;
 }
 static int sim_mmap(struct file *file, struct vm_area_struct *vma)
 {
@@ -102,6 +119,22 @@ static const struct file_operations sim_fops={
 static struct miscdevice sim_misc={
  .minor=MISC_DYNAMIC_MINOR,.name="xdev_ext_dma_provider_sim",.fops=&sim_fops,.mode=0600,
 };
+static int sim_scope_acquire(struct file *file,u64 off,u64 len,
+                             struct xdev_ext_dma_scope_info *out)
+{
+ struct sim_device *d=file->private_data;
+ int err;
+
+ if (len!=DMA_FIXTURE_WINDOW_BYTES ||
+     (off!=DMA_FIXTURE_INPUT_OFF && off!=DMA_FIXTURE_OUTPUT_OFF)) return -EINVAL;
+ err=xdev_ext_dma_scope_get(d->scope);
+ if (err) return err;
+ *out=(struct xdev_ext_dma_scope_info){
+  .kind=XDEV_EXT_DMA_SCOPE_KNOWN,.scope=d->scope,
+  .canonical_start=off,.canonical_len=len,
+ };
+ return 0;
+}
 static int sim_bind_region(struct file *file,u64 off,u64 len,struct xdev_ext_dma_region *out)
 {
  struct sim_device *d=file->private_data;
@@ -248,13 +281,17 @@ static const struct xdev_ext_dma_provider_ops sim_ops={
  .unbind_region=sim_unbind_region,.bind_host=sim_bind_host,
  .unbind_host=sim_unbind_host,.submit=sim_submit,.poll=sim_poll,
 };
+static const struct xdev_ext_dma_scope_ops sim_scope_ops={
+ .size=sizeof(struct xdev_ext_dma_scope_ops),
+ .version=XDEV_EXT_DMA_SCOPE_OPS_VERSION,.acquire=sim_scope_acquire,
+};
 static int __init sim_init(void)
 {
  int err;
  sim_wq=alloc_workqueue("xdev_ext_dma_provider_sim",WQ_UNBOUND,0);
  if (!sim_wq) return -ENOMEM;
  err=misc_register(&sim_misc); if (err) goto free_queue;
- err=xdev_ext_dma_provider_register(&sim_ops); if (!err) return 0;
+ err=xdev_ext_dma_provider_register_scoped(&sim_ops,&sim_scope_ops); if (!err) return 0;
  misc_deregister(&sim_misc);
 free_queue: destroy_workqueue(sim_wq); return err;
 }
