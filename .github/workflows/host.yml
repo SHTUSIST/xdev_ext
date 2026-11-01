@@ -66,6 +66,11 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_lib/guest/iou_procs_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_lib/guest/build_reuse_test.py
           make -C kernel/tools/xdev_ext_mech lib CC="$CC" BUILD_DIR="$RUNNER_TEMP/xdev-ext-lib"
+      - name: DMA-BUF peer admission and lifecycle contracts
+        working-directory: .
+        run: |
+          python3 -I tests/core/peer_dmabuf/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-admission"
+          python3 -I tests/core/peer_dmabuf/importer_run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-importer"
       - name: Reference-counted lifecycle and CPU transform contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
       - name: CPU class BPF compute callback rules, kfuncs and wiring

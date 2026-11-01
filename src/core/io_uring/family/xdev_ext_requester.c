@@ -84,6 +84,10 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 	ret = xdev_ext_peer_file_premap(rq->authority, pdev);
 	if (ret)
 		return ret;
+	if (rq->adm.backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+		rq->adm.reachability = XDEV_EXT_CAP_HOST_DMA_MAPPED;
+		st->caps.reachability = XDEV_EXT_CAP_HOST_DMA_MAPPED;
+	}
 	st->caps.requester_mapping = XDEV_EXT_CAP_ESTABLISHED;
 	rq->pdev = pci_dev_get(pdev);
 	return 0;

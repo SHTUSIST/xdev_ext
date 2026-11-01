@@ -54,7 +54,7 @@ struct xdev_ext_admission {
 };
 
 /*
- * Admit only discrete BAR-backed VRAM with a trusted, unbounced requester.
+ * Admit trusted host RAM or discrete BAR-backed VRAM with an unbounced requester.
  * A raw bus address cannot cross a translating DMA layer. An explicit admin
  * override admits only a missing topology path, recorded UNVERIFIED_FORCED.
  */
@@ -65,7 +65,7 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 
 	out->distance = f->distance;
 	out->backing = f->backing;
-	if (f->distance < 0)
+	if (!(f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) && f->distance < 0)
 		r |= XDEV_EXT_PEER_REFUSE_NO_P2P_PATH;
 	if (f->swiotlb_force)
 		r |= XDEV_EXT_PEER_REFUSE_SWIOTLB_FORCE;
@@ -74,7 +74,11 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 	if ((f->dma_iommu || f->dma_ops) &&
 	    (f->backing & XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR))
 		r |= XDEV_EXT_PEER_REFUSE_IOMMU_RAW_ADDR;
-	if (!f->owner_known || !(f->backing & XDEV_EXT_PEER_BACKING_MMIO_BAR) ||
+	if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+		if (f->backing != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
+				   XDEV_EXT_PEER_BACKING_STRUCT_PAGE))
+			r |= XDEV_EXT_PEER_REFUSE_BACKING;
+	} else if (!f->owner_known || !(f->backing & XDEV_EXT_PEER_BACKING_MMIO_BAR) ||
 	    (f->backing & (XDEV_EXT_PEER_BACKING_STRUCT_PAGE |
 			   XDEV_EXT_PEER_BACKING_COHERENT_C2C)) ||
 	    (f->backing & ~(XDEV_EXT_PEER_BACKING_MMIO_BAR |
@@ -86,6 +90,10 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 	if (f->backing & XDEV_EXT_PEER_BACKING_EXTERNAL)
 		r |= XDEV_EXT_PEER_REFUSE_EXTERNAL_OWNER;
 	out->refused = r;
+	if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+		out->reachability = XDEV_EXT_CAP_UNKNOWN;
+		return r ? -EXDEV : 0;
+	}
 	if (!(r & XDEV_EXT_PEER_REFUSE_NO_P2P_PATH))
 		out->reachability = XDEV_EXT_CAP_TOPOLOGY_PASSED;
 	else if ((flags & XDEV_EXT_ADMIT_F_ALLOW_UNVERIFIED) && f->admin)

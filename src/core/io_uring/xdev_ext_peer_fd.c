@@ -4,6 +4,9 @@
  */
 #include <linux/anon_inodes.h>
 #include <linux/compat.h>
+#if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
+#include <linux/dma-buf.h>
+#endif
 #include <linux/capability.h>
 #include <linux/list.h>
 #include <linux/file.h>
@@ -15,6 +18,7 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_peer_dmabuf.h>
 #include <uapi/linux/xdev_ext_peer.h>
 struct xdev_ext_peer_authority;
 struct xdev_ext_peer_fd {
@@ -57,13 +61,12 @@ static int xdev_ext_peer_authority_close(struct inode *inode, struct file *file)
 {
  struct xdev_ext_peer_authority *a = file->private_data;
  struct xdev_ext_peer_fd *p = a->parent;
- u64 len, generation;
  (void)inode;
  mutex_lock(&p->lock);
  /* Unknown DMA keeps its owner and original file, even after the last
   * visible authority reference closes. No new claimant can reuse it.
   */
- if (xdev_ext_peer_info(p->region, &len, &generation, true)) {
+ if (xdev_ext_peer_drainable(p->region)) {
   mutex_unlock(&p->lock); return 0;
  }
  p->claimed = NULL;
@@ -127,6 +130,7 @@ int xdev_ext_peer_file_premap(struct file *file, struct pci_dev *peer)
  struct xdev_ext_peer_authority *a;
  struct xdev_ext_peer_fd_map *m;
  struct xdev_ext_peer_fd *p;
+ u64 len, generation;
  int ret = 0;
 
  if (!file || file->f_op != &xdev_ext_peer_authority_fops || !peer)
@@ -138,6 +142,8 @@ int xdev_ext_peer_file_premap(struct file *file, struct pci_dev *peer)
   ret = -EBUSY;
   goto unlock;
  }
+ ret = xdev_ext_peer_info(p->region, &len, &generation, false);
+ if (ret) goto unlock;
  list_for_each_entry(m, &p->maps, node)
   if (m->peer == peer)
    goto unlock;
@@ -220,19 +226,34 @@ static long xdev_ext_peer_ctl_ioctl(struct file *file, unsigned int cmd, unsigne
  struct xdev_ext_peer_register u;
  struct xdev_ext_peer_fd *p;
  struct file *gpu, *allocation;
- int fd, ret;
+ int fd, ret = -EOPNOTSUPP;
  (void)file;
  if (cmd == XDEV_EXT_PEER_NET_TX) return xdev_ext_peer_net_ioctl(arg);
  if (cmd != XDEV_EXT_PEER_REGISTER) return -ENOTTY;
  if (!capable(CAP_SYS_RAWIO)) return -EPERM;
  if (copy_from_user(&u, (void __user *)arg, sizeof(u))) return -EFAULT;
- if (u.flags || u.generation) return -EINVAL;
- gpu = fget(u.gpu_fd);
- if (!gpu) return -EBADF;
+ if ((u.flags & ~XDEV_EXT_PEER_REGISTER_F_DMABUF) || u.generation)
+  return -EINVAL;
+ if ((u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF) &&
+     (u.gpu_va || !u.len || (u.len & 4095))) return -EINVAL;
+#if !IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
+ if (u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF) return -EOPNOTSUPP;
+#endif
  p = kzalloc(sizeof(*p), GFP_KERNEL);
- if (!p) { fput(gpu); return -ENOMEM; }
- ret = xdev_ext_peer_pin(gpu, u.gpu_va, u.len, &p->region);
- fput(gpu);
+ if (!p) return -ENOMEM;
+ if (u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF) {
+#if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
+  struct dma_buf *buf = dma_buf_get(u.gpu_fd);
+  if (IS_ERR(buf)) { kfree(p); return PTR_ERR(buf); }
+  ret = xdev_ext_peer_dmabuf_import(buf, u.len, &p->region);
+  if (ret) dma_buf_put(buf);
+#endif
+ } else {
+  gpu = fget(u.gpu_fd);
+  if (!gpu) { kfree(p); return -EBADF; }
+  ret = xdev_ext_peer_pin(gpu, u.gpu_va, u.len, &p->region);
+  fput(gpu);
+ }
  if (ret) { kfree(p); return ret; }
  mutex_init(&p->lock); INIT_LIST_HEAD(&p->maps);
  allocation = anon_inode_getfile("xdev_ext_peer", &xdev_ext_peer_allocation_fops, p, O_RDWR);
@@ -261,3 +282,7 @@ static struct miscdevice xdev_ext_peer_ctl = {
 };
 static int __init xdev_ext_peer_fd_init(void) { return misc_register(&xdev_ext_peer_ctl); }
 late_initcall(xdev_ext_peer_fd_init);
+
+#if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
+MODULE_IMPORT_NS("DMA_BUF");
+#endif

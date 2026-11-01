@@ -1,0 +1,51 @@
+// SPDX-License-Identifier: GPL-2.0
+#include "kernel_shim.h"
+#ifdef SHIM_CONTRACT_ONLY
+#include "contract.h"
+#else
+#include <linux/xdev_ext_peer.h>
+#endif
+#include "fd_boundary.h"
+
+/* ACTUAL_CLOSE_FUNCTIONS is inserted verbatim by importer_run.py from the
+ * requested production peer_fd.c. Its behavior is never replaced by a mock. */
+ACTUAL_CLOSE_FUNCTIONS
+
+struct test_authority_handle {
+	struct file original, authority;
+};
+static const struct file_operations allocation_fops = {.release = xdev_ext_peer_fd_close};
+
+struct test_authority_handle *test_authority_setup(struct xdev_ext_peer_region *r,
+		struct xdev_ext_peer_mapping *mapping, struct pci_dev *peer)
+{
+	struct test_authority_handle *h = kzalloc(sizeof(*h), GFP_KERNEL);
+	struct xdev_ext_peer_fd *p = kzalloc(sizeof(*p), GFP_KERNEL);
+	struct xdev_ext_peer_authority *a = kzalloc(sizeof(*a), GFP_KERNEL);
+	struct xdev_ext_peer_fd_map *m = kzalloc(sizeof(*m), GFP_KERNEL);
+	assert(h && p && a && m);
+	mutex_init(&p->lock);
+	INIT_LIST_HEAD(&p->maps);
+	p->region = r;
+	p->claimed = a;
+	m->peer = peer;
+	m->mapping = mapping;
+	list_add_tail(&m->node, &p->maps);
+	h->original = (struct file){.refs = 1, .f_op = &allocation_fops, .private_data = p};
+	h->authority = (struct file){.refs = 1, .private_data = a};
+	a->parent = p;
+	a->original = &h->original;
+	return h;
+}
+
+bool test_authority_close(struct test_authority_handle *h)
+{
+	assert(xdev_ext_peer_authority_close(NULL, &h->authority) == 0);
+	return h->original.refs == 0;
+}
+
+void test_authority_destroy_closed(struct test_authority_handle *h)
+{
+	assert(h->original.refs == 0);
+	kfree(h);
+}

@@ -78,6 +78,17 @@ config XDEV_EXT_MECH
 	  doorbells, frame ownership and teardown; a session fails closed when
 	  a program is missing or misbehaves.
 
+config XDEV_EXT_PEER_DMABUF
+	bool "XDEV_EXT persistent DMA-BUF peer import"
+	default n
+	depends on XDEV_EXT_MECH && DMA_SHARED_BUFFER
+	help
+	  Import a complete DMA-BUF export as a bounded persistent peer authority.
+	  Exporters must register an exact-ops backing descriptor. Whole-export
+	  MEMLOCK accounting and native lease quarantine retain source references
+	  until safe teardown. Host RAM requires coherent, no-sync DMA-API mappings.
+	  Applications retain producer/consumer synchronization responsibility.
+
 config XDEV_EXT_MECH_CE
 	bool "XDEV_EXT mechanism copy-engine class"
 	default n
