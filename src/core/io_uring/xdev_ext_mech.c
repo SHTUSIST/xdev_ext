@@ -2975,13 +2975,29 @@ int xdev_ext_mech_hold_commit(struct xdev_ext_mech_stage *st,
 	 */
 	{
 		u64 token;
+		bool claimed = false;
 
 		ret = xdev_ext_mech_life_claim(&s->life[f->index], 0, &token);
-		if (!ret)
+		if (!ret) {
+			claimed = true;
 			ret = xdev_ext_mech_life_publish(&s->life[f->index], token,
        xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 1), hold->span_len);
+		}
 		if (ret) {
-			xdev_ext_mech_pool_frame_move(&s->pool, f->index, XDEV_EXT_MECH_F_HELD, from);
+			bool idle = claimed ?
+				!xdev_ext_mech_life_rollback(&s->life[f->index], token) :
+				xdev_ext_mech_life_phase(&s->life[f->index]) == XDEV_EXT_MECH_L_FREE;
+			u32 restore = idle ? (from == XDEV_EXT_MECH_F_NIC_RX ?
+				XDEV_EXT_MECH_F_K_FREE : from) : XDEV_EXT_MECH_F_SEQUESTERED;
+
+			/* NIC_RX has no reverse edge from HELD. A failed publication
+			 * must also release our lifecycle claim before caller recycle.
+			 * Another lifecycle owner is retained and never put on a free list.
+			 */
+			if (!WARN_ON_ONCE(xdev_ext_mech_pool_frame_move(&s->pool, f->index,
+					 XDEV_EXT_MECH_F_HELD, restore)) &&
+			    restore == XDEV_EXT_MECH_F_SEQUESTERED)
+				xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_SEQUESTERED, 1);
 			b->group.present &= ~BIT(pos);
 			if (fresh)
 				WARN_ON_ONCE(xdev_ext_mech_batch_put_locked(s, b, false));

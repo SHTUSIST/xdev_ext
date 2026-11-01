@@ -1,0 +1,282 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Host OS/ring/storage boundaries only. Actual admission bodies are inserted. */
+#include <assert.h>
+#include <errno.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "@CORE_INCLUDE@/xdev_ext_mech_core.h"
+#include "@CORE_INCLUDE@/xdev_ext_mech_lifecycle.h"
+#include "@CORE_INCLUDE@/xdev_ext_mech_step.h"
+typedef __u8 u8;
+typedef __u32 u32;
+typedef __u64 u64;
+#define READ_ONCE(x) (x)
+#define BIT(x) (1U << (x))
+#define EXPORT_SYMBOL_GPL(x)
+#define container_of(p,t,m) ((t *)((char *)(p) - offsetof(t,m)))
+#define likely(x) (x)
+#define unlikely(x) (x)
+#define XDP_PACKET_HEADROOM 256
+#define XSK_UNALIGNED_BUF_OFFSET_SHIFT 48
+#define XDEV_EXT_MECH_CLASS_F_TRANSFORM (1U << 2)
+#define XDEV_EXT_MECH_GROUP_TIMEOUT 10
+static unsigned warnings;
+static bool warn_once(bool value) { warnings += value; return value; }
+#define WARN_ON_ONCE(x) warn_once(!!(x))
+static unsigned lock_depth;
+static void scheduler_unlock(void);
+#define spin_lock_irqsave(p,f) do { (void)(p); (f)=0; lock_depth++; } while (0)
+#define spin_unlock_irqrestore(p,f) do { (void)(p); (void)(f); assert(lock_depth); lock_depth--; } while (0)
+#define spin_lock_bh(p) do { (void)(p); lock_depth++; } while (0)
+#define spin_unlock_bh(p) do { (void)(p); assert(lock_depth); lock_depth--; scheduler_unlock(); } while (0)
+#define cond_resched() ((void)0)
+struct list_head { struct list_head *next, *prev; };
+static void INIT_LIST_HEAD(struct list_head *head) { head->next=head->prev=head; }
+static bool list_empty(const struct list_head *head) { return head->next==head; }
+static void list_add(struct list_head *node,struct list_head *head) {
+ node->next=head->next;node->prev=head;head->next->prev=node;head->next=node;
+}
+static void list_add_tail(struct list_head *node,struct list_head *head) { list_add(node,head->prev); }
+static void list_del_init(struct list_head *node) {
+ node->prev->next=node->next;node->next->prev=node->prev;INIT_LIST_HEAD(node);
+}
+#define list_first_entry(h,t,m) container_of((h)->next,t,m)
+#define list_for_each_entry(p,h,m) for(p=list_first_entry(h,__typeof__(*p),m); &(p)->m!=(h); p=container_of((p)->m.next,__typeof__(*p),m))
+struct llist_node { struct llist_node *next; };
+struct llist_head { struct llist_node *first; };
+static bool llist_empty(const struct llist_head *head) { return !head->first; }
+static struct llist_node *llist_del_all(struct llist_head *head) { struct llist_node *n=head->first;head->first=NULL;return n; }
+static void llist_add(struct llist_node *node,struct llist_head *head) { node->next=head->first;head->first=node; }
+#define llist_for_each_entry_safe(p,t,n,m) for(struct llist_node *it=(n),*next; it && ((next=it->next),(p)=container_of(it,__typeof__(*p),m),(t)=next?container_of(next,__typeof__(*t),m):NULL,1);it=next)
+struct xsk_buff_pool;
+struct xdp_buff { void *data,*data_meta,*data_hard_start; u32 flags; };
+struct xdp_buff_xsk {
+ struct xdp_buff xdp;
+ struct xsk_buff_pool *pool;
+ struct list_head list_node;
+ struct llist_node xdev_ext_mech_node;
+ u64 dma;
+};
+struct umem_boundary { u8 *xdev_ext_mech_state; bool zc; };
+struct xsk_queue { u64 addresses[8]; u32 head,nr,invalid_descs,queue_empty_descs; };
+struct xsk_buff_pool {
+ struct umem_boundary *umem;
+ struct xdp_buff_xsk *heads,**free_heads;
+ u32 heads_cnt,free_heads_cnt,free_list_cnt,chunk_shift,headroom,frame_len;
+ u64 chunk_mask,addrs_cnt;
+ void *addrs,*dma_pages,*dev;
+ bool unaligned,xdev_ext_mech_fq_used;
+ struct xsk_queue *fq;
+ struct list_head free_list;
+ struct llist_head xdev_ext_mech_recycle;
+ int xdev_ext_mech_alloc_lock;
+};
+struct xdev_ext_mech_frame { u32 index,data_off,data_len; u64 umem_addr; void *kaddr,*pool_priv; };
+struct xdev_ext_mech_pool;
+struct xdev_ext_mech_pool_ops { void (*recycle)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *); };
+struct xdev_ext_mech_pool { u32 nr_frames,frame_size;u8 *state;void *priv,*vaddr;const struct xdev_ext_mech_pool_ops *ops; };
+struct xsk_xdev_ext_mech_provider {struct xsk_buff_pool *xp;bool zc,has_rx;u32 source_next,source_first;};
+struct xdev_ext_mech_session;
+struct xdev_ext_mech_class_ops { u32 flags; };
+struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s;u32 index,direction,flags;const struct xdev_ext_mech_class_ops *cls; };
+struct xdev_ext_mech_batch {
+ u64 key,bytes;u32 nr_frames,present;unsigned long opened;
+ struct xdev_ext_mech_bstate bs;
+ struct xdev_ext_mech_group group;
+ struct xdev_ext_mech_frame f[4];
+ struct list_head node;
+};
+struct xdev_ext_mech_session {
+ int lock,group_timer;struct xdev_ext_mech_pool pool;
+ struct xdev_ext_mech_layout layout;struct xdev_ext_mech_life *life;
+ struct xdev_ext_mech_stage_uapi plan[4];struct xdev_ext_mech_stage st[4];
+ u32 nr_stages,frames,start_user_len;bool admits;
+ struct list_head open;u64 completed[4],cnt[XDEV_EXT_MECH_CNT_NR];
+};
+static unsigned long jiffies;
+static bool timer_pending(int *timer) { return *timer; }
+static void mod_timer(int *timer,unsigned long due) { (void)due;*timer=1; }
+#define atomic64_inc(p) (++*(p))
+static bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s) {return s->admits;}
+static bool xdev_ext_mech_rx_first(const struct xdev_ext_mech_session *s) {return s->plan[0].class_id==XDEV_EXT_MECH_CLASS_AFXDP&&s->plan[0].direction==XDEV_EXT_MECH_DIR_FROM_DEVICE;}
+static void xdev_ext_mech_count(struct xdev_ext_mech_session*s,enum xdev_ext_mech_counter c,u64 n){s->cnt[c]+=n;}
+static struct xdev_ext_mech_batch batch_storage;
+static bool batch_busy;
+static unsigned queued;
+static struct xdev_ext_mech_batch*xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session*s) {
+ assert(!batch_busy);batch_busy=true;memset(&batch_storage,0,sizeof(batch_storage));
+ INIT_LIST_HEAD(&batch_storage.node);xdev_ext_mech_bstate_init(&batch_storage.bs,s->nr_stages);return &batch_storage;
+}
+static bool xdev_ext_mech_batch_put_locked(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,bool parked) {
+ (void)s;(void)b;(void)parked;batch_busy=false;return false;
+}
+#define IS_ERR(p) ((uintptr_t)(p)>(uintptr_t)-4096)
+#define PTR_ERR(p) ((int)(intptr_t)(p))
+static void xdev_ext_mech_batch_queue(struct xdev_ext_mech_batch*b) { (void)b;queued++; }
+/* PRODUCTION_CORE */
+/* PRODUCTION_POOL_RECYCLE */
+/* Ring I/O and unaligned/device operations are external boundaries. All tests
+ * use aligned, copy-mode buffers with no device/DMA mapping. */
+static bool xskq_cons_peek_addr_unchecked(struct xsk_queue*q,u64*a) { if(q->head==q->nr)return false;*a=q->addresses[q->head];return true; }
+static void xskq_cons_release(struct xsk_queue*q) { assert(q->head<q->nr);q->head++; }
+static void __xskq_cons_release(struct xsk_queue*q) { (void)q; }
+static bool xp_check_unaligned(struct xsk_buff_pool*p,u64*a) { (void)p;(void)a;abort(); }
+static void xp_init_xskb_addr(struct xdp_buff_xsk*b,struct xsk_buff_pool*p,u64 a) {b->xdp.data_hard_start=p->addrs+a+p->headroom;}
+static void xp_init_xskb_dma(struct xdp_buff_xsk*b,struct xsk_buff_pool*p,void*d,u64 a) {(void)b;(void)p;(void)d;(void)a;abort();}
+static void xp_dma_sync_for_device(struct xsk_buff_pool*p,u64 d,u32 n) {(void)p;(void)d;(void)n;abort();}
+/* PRODUCTION_XSK_PURE */
+/* PRODUCTION_XSK_HEADERS */
+/* PRODUCTION_BUFF_HEADERS */
+/* PRODUCTION_XP_ALLOC */
+static void xp_free(struct xdp_buff_xsk*b) {
+ xp_xdev_ext_mech_alloc_lock(b->pool);
+ if(xp_xdev_ext_mech_return(b)&&list_empty(&b->list_node)){b->pool->free_list_cnt++;list_add(&b->list_node,&b->pool->free_list);}
+ xp_xdev_ext_mech_alloc_unlock(b->pool);
+}
+/* PRODUCTION_ALLOC */
+/* PRODUCTION_TAKE */
+/* PRODUCTION_OPEN_FIND */
+static bool reject_publish;
+static unsigned rejected_publish_calls;
+static int publish_boundary(struct xdev_ext_mech_life*l,u64 claim,u32 refs,u32 valid) {
+ if(reject_publish){
+  rejected_publish_calls++;
+  /* Deliberately stale token makes the actual lifecycle publish reject,
+   * without modifying its producer claim. This is an injected failure,
+   * not a claimed normal-path interleaving or any device access. */
+  return xdev_ext_mech_life_publish(l,claim^(1ULL<<XDEV_EXT_MECH_L_GEN_SHIFT),refs,valid);
+ }
+ return xdev_ext_mech_life_publish(l,claim,refs,valid);
+}
+#define xdev_ext_mech_life_publish publish_boundary
+/* PRODUCTION_HOLD */
+#undef xdev_ext_mech_life_publish
+static struct xdev_ext_mech_session session;
+static struct xsk_buff_pool xp;
+static struct xsk_xdev_ext_mech_provider provider;
+static struct umem_boundary umem;
+static struct xsk_queue fq;
+static struct xdp_buff_xsk heads[4];
+static struct xdev_ext_mech_life life[4];
+static u8 state[4],bytes[4*4096];
+static const struct xdev_ext_mech_pool_ops ops={.recycle=xsk_xdev_ext_mech_pool_recycle};
+static const struct xdev_ext_mech_class_ops cls={0};
+static bool schedule_start;
+static int handoff_result;
+static void scheduler_unlock(void) {
+ if(!schedule_start)return;
+ schedule_start=false;
+ u32 index=0;
+ handoff_result=xdev_ext_mech_take_user_frames(&session,&index,1);
+}
+static void reset(void) {
+ memset(&session,0,sizeof(session));memset(&xp,0,sizeof(xp));memset(&provider,0,sizeof(provider));
+ memset(&fq,0,sizeof(fq));memset(heads,0,sizeof(heads));memset(state,0,sizeof(state));memset(life,0,sizeof(life));
+ batch_busy=false;queued=warnings=lock_depth=rejected_publish_calls=0;reject_publish=schedule_start=false;
+ umem=(struct umem_boundary){.xdev_ext_mech_state=state};
+ xp=(struct xsk_buff_pool){.umem=&umem,.heads=heads,.heads_cnt=4,.free_heads_cnt=4,
+  .chunk_shift=12,.chunk_mask=~4095ULL,.addrs_cnt=sizeof(bytes),.addrs=bytes,.fq=&fq,.frame_len=4096};
+ INIT_LIST_HEAD(&xp.free_list);
+ for(unsigned i=0;i<4;i++){heads[i].pool=&xp;INIT_LIST_HEAD(&heads[i].list_node);xp_init_xskb_addr(&heads[i],&xp,i*4096);}
+ provider=(struct xsk_xdev_ext_mech_provider){.xp=&xp,.source_first=4};
+ session.pool=(struct xdev_ext_mech_pool){.nr_frames=4,.frame_size=4096,.state=state,.priv=&provider,.vaddr=bytes,.ops=&ops};
+ session.layout=(struct xdev_ext_mech_layout){.frame_size=4096,.seg_len=64,.group_bytes=128};
+ session.life=life;session.admits=true;session.nr_stages=2;session.frames=1;INIT_LIST_HEAD(&session.open);
+ session.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};
+ session.plan[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
+ session.st[0]=(struct xdev_ext_mech_stage){.s=&session,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&cls};
+}
+static int violations;
+#define REQUIRE(condition,message) do{if(!(condition)){fprintf(stderr,"VIOLATION %s\n",message);violations++;}}while(0)
+static unsigned recycled(unsigned index) {
+ unsigned count=0,seen=0;
+ for(struct llist_node*n=xp.xdev_ext_mech_recycle.first;n;n=n->next){
+  assert(seen++<8);if(n==&heads[index].xdev_ext_mech_node)count++;
+ }
+ return count+(!list_empty(&heads[index].list_node));
+}
+static void seed_returned(unsigned index) {
+ xp.free_list_cnt++;list_add_tail(&heads[index].list_node,&xp.free_list);
+}
+static void test_alloc(const char*name) {
+ const char*keys[]={"alloc_user","alloc_free","alloc_held","alloc_inflight","alloc_sequestered","alloc_nic_rx"};
+ const u8 initial[]={0,1,2,3,4,5};unsigned at=0;
+ while(at<6&&strcmp(name,keys[at]))at++;
+ assert(at<6);state[0]=initial[at];life[0].ctrl=23ULL<<XDEV_EXT_MECH_L_GEN_SHIFT;
+ /* Boundary characterization: even if a returned-list entry is stale,
+  * mechanism admission must not acquire another owner's frame. */
+ seed_returned(0);u64 old_life=life[0].ctrl;
+ struct xdev_ext_mech_frame f={0};int ret=xsk_xdev_ext_mech_pool_alloc(&session.pool,&f,1);
+ if(at<2){REQUIRE(ret==0,"idle frame allocation refused");REQUIRE(state[0]==2,"idle frame not acquired HELD");}
+ else{REQUIRE(ret==-EBUSY,"unavailable frame not refused with EBUSY");REQUIRE(state[0]==initial[at],"allocation stole unavailable custody");}
+ REQUIRE(life[0].ctrl==old_life,"allocation changed another lifecycle");
+ printf("OBSERVE %s ret=%d custody=%u life=%llu warnings=%u\n",name,ret,state[0],(unsigned long long)life[0].ctrl,warnings);
+}
+static void test_partial(void) {
+ state[0]=1;state[1]=3;seed_returned(0);seed_returned(1);u64 claim;
+ assert(!xdev_ext_mech_life_claim(&life[1],0,&claim));u64 old=life[1].ctrl;
+ struct xdev_ext_mech_frame f[2]={{0}};int ret=xsk_xdev_ext_mech_pool_alloc(&session.pool,f,2);
+ REQUIRE(ret==-EBUSY,"partial allocation accepted active second frame");
+ REQUIRE(state[0]==1&&recycled(0)==1,"partial failure lost or duplicated its idle first frame");
+ REQUIRE(state[1]==3&&life[1].ctrl==old,"partial failure changed active second ownership");
+ printf("OBSERVE alloc_partial ret=%d custody=%u,%u recycled0=%u\n",ret,state[0],state[1],recycled(0));
+}
+static void test_start_interleaving(void) {
+ fq.addresses[0]=0;fq.nr=1;schedule_start=true;
+ struct xdev_ext_mech_frame first={0},second={0};
+ int one=xsk_xdev_ext_mech_pool_alloc(&session.pool,&first,1);
+ REQUIRE(handoff_result==0,"scheduled actual USER_FRAMES handoff failed");
+ if(!one){
+  u64 claim;assert(!xdev_ext_mech_life_claim(&life[0],0,&claim));
+  assert(!xdev_ext_mech_frame_move(&state[0],2,3));
+  u64 old=life[0].ctrl;
+  int two=xsk_xdev_ext_mech_pool_alloc(&session.pool,&second,1);
+  REQUIRE(two!=0,"concurrent USER_FRAMES loan allocated the same active frame twice");
+  REQUIRE(state[0]==3&&life[0].ctrl==old,"second allocation stole the first software command's ownership");
+  printf("OBSERVE start_allocator_interleaving first=%d second=%d custody=%u life=%llu\n",one,two,state[0],(unsigned long long)life[0].ctrl);
+ }else{
+  REQUIRE(one==-EBUSY||one==-ENOSPC,"unexpected refusal during handoff race");
+  REQUIRE(state[0]!=2&&state[0]!=3,"refused allocation left ownerless custody");
+ }
+}
+static void test_hold(const char*name) {
+ session.plan[0].class_id=XDEV_EXT_MECH_CLASS_AFXDP;provider.zc=true;umem.zc=true;state[0]=5;
+ struct xdev_ext_mech_hold_intent intent={.key=7,.pos=0,.count=2,.span_len=64};
+ struct xdev_ext_mech_frame f={.index=0,.data_len=64};u64 old=0,claim;
+ if(!strcmp(name,"hold_claim_overflow"))life[0].ctrl=XDEV_EXT_MECH_L_GEN_MAX<<XDEV_EXT_MECH_L_GEN_SHIFT;
+ if(!strcmp(name,"hold_claim_busy")){assert(!xdev_ext_mech_life_claim(&life[0],1,&claim));old=life[0].ctrl;}
+ reject_publish=!strcmp(name,"hold_publish_failure");
+ int ret=xdev_ext_mech_hold_commit(&session.st[0],&intent,&f);
+ if(!strcmp(name,"hold_success")){
+  REQUIRE(ret==0&&state[0]==2,"normal received hold not admitted");
+  REQUIRE(xdev_ext_mech_life_phase(&life[0])==2,"normal received hold did not publish READY");
+  REQUIRE(batch_busy&&batch_storage.present==1&&batch_storage.group.present==1,"normal hold lost batch ownership");
+ }else{
+  REQUIRE(ret<0,"injected hold error was accepted");
+  REQUIRE(!batch_busy&&batch_storage.present==0&&batch_storage.group.present==0,"failed hold retained group ownership");
+  if(reject_publish)REQUIRE(rejected_publish_calls==1,"publish failure seam was not reached");
+  /* This is the actual caller disposition after failed hold. */
+  xdev_ext_mech_frame_recycle(&session,&f);
+  bool safe_free=state[0]==1&&xdev_ext_mech_life_phase(&life[0])==0&&recycled(0)==1;
+  bool quarantined=state[0]==4&&recycled(0)==0;
+  REQUIRE(safe_free||quarantined,"failed RX hold neither safely recycled nor explicitly quarantined");
+  if(old)REQUIRE(life[0].ctrl==old,"failed claim modified another lifecycle owner");
+  REQUIRE(!queued,"failed hold queued batch work");
+ }
+ printf("OBSERVE %s ret=%d custody=%u life=%llu phase=%u recycled=%u warnings=%u\n",name,ret,state[0],(unsigned long long)life[0].ctrl,xdev_ext_mech_life_phase(&life[0]),recycled(0),warnings);
+}
+int main(int argc,char**argv) {
+ if(argc!=2)return 2;
+ reset();
+ if(!strcmp(argv[1],"alloc_partial"))test_partial();
+ else if(!strncmp(argv[1],"alloc_",6))test_alloc(argv[1]);
+ else if(!strcmp(argv[1],"start_allocator_interleaving"))test_start_interleaving();
+ else if(!strncmp(argv[1],"hold_",5))test_hold(argv[1]);
+ else return 2;
+ printf("CASE %s %s violations=%d\n",argv[1],violations?"FAIL":"PASS",violations);
+ return violations?1:0;
+}

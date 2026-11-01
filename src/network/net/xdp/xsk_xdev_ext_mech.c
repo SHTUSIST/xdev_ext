@@ -359,6 +359,7 @@ static int xsk_xdev_ext_mech_pool_alloc(struct xdev_ext_mech_pool *pool,
 	for (i = 0; i < nr; i++) {
 		struct xdp_buff *xdp = xp_alloc(xp);
 		u8 *word;
+		u32 from;
 
 		if (!xdp) {
 			err = -ENOSPC;
@@ -369,8 +370,9 @@ static int xsk_xdev_ext_mech_pool_alloc(struct xdev_ext_mech_pool *pool,
 		f[i].data_off = 0;
 		/* free_list frames are K_FREE, fill-ring frames USER */
 		word = &pool->state[f[i].index];
-		err = xdev_ext_mech_frame_move(word, xdev_ext_mech_frame_state(word),
-					  XDEV_EXT_MECH_F_HELD);
+		from = xdev_ext_mech_frame_state(word);
+		err = from == XDEV_EXT_MECH_F_USER || from == XDEV_EXT_MECH_F_K_FREE ?
+			xdev_ext_mech_frame_move(word, from, XDEV_EXT_MECH_F_HELD) : -EBUSY;
 		if (WARN_ON_ONCE(err))
 			break;	/* someone owns frame i: leave it alone */
 	}

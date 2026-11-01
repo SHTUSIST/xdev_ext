@@ -7741,6 +7741,16 @@
     {
       "source": "tests/compute/cuda/early_selection/driver_selection.cc",
       "logical_path": "tests/compute/cuda/early_selection/driver_selection.cc"
+    },
+    {
+      "source": "tests/core/lifecycle/runtime/frame_admission_failure_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/frame_admission_failure_test.py"
+    },
+    {
+      "source": "tests/core/lifecycle/runtime/frame_admission_failure_fixture.c.in",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/frame_admission_failure_fixture.c.in"
     }
   ]
 }
