@@ -32,10 +32,17 @@ typedef int wait_queue_head_t;
 typedef unsigned long atomic64_t;
 typedef int atomic_t;
 /* Kernel primitive boundary; production scope ownership stays extracted. */
+#ifndef XDEV_EXT_TEST_REFCOUNT_BASE_DEFINED
+#define XDEV_EXT_TEST_REFCOUNT_BASE_DEFINED
 typedef struct { unsigned refs; } refcount_t;
 static void refcount_set(refcount_t *r,unsigned value) {
  __atomic_store_n(&r->refs,value,__ATOMIC_RELAXED);
 }
+static bool refcount_dec_and_test(refcount_t *r) {
+ unsigned old=__atomic_fetch_sub(&r->refs,1,__ATOMIC_ACQ_REL);
+ assert(old>0);return old==1;
+}
+#endif
 static bool refcount_inc_not_zero(refcount_t *r) {
  unsigned old=__atomic_load_n(&r->refs,__ATOMIC_RELAXED);
  while(old) {
@@ -45,11 +52,9 @@ static bool refcount_inc_not_zero(refcount_t *r) {
  }
  return false;
 }
-static bool refcount_dec_and_test(refcount_t *r) {
- unsigned old=__atomic_fetch_sub(&r->refs,1,__ATOMIC_ACQ_REL);
- assert(old>0);return old==1;
-}
+#ifndef ERR_PTR
 #define ERR_PTR(error) ((void *)(intptr_t)(error))
+#endif
 struct module { int refs; bool going; };
 struct file_operations { int tag; };
 struct file { const struct file_operations *f_op; };

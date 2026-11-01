@@ -18,10 +18,13 @@ static void hash_del_host(struct hlist_node *n){assert(n->pprev);*n->pprev=n->ne
 #define hash_del(n) hash_del_host(n)
 #define hash_for_each_possible(t,o,m,k) for(struct hlist_node *hn=((void)(k),(t)[0].first);hn&&((o)=container_of(hn,__typeof__(*(o)),m),true);hn=hn->next)
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#ifndef XDEV_EXT_TEST_REFCOUNT_BASE_DEFINED
+#define XDEV_EXT_TEST_REFCOUNT_BASE_DEFINED
 typedef struct{unsigned refs;} refcount_t;
 static void refcount_set(refcount_t *r,unsigned n){r->refs=n;}
-static void refcount_inc(refcount_t *r){assert(r->refs);r->refs++;}
 static bool refcount_dec_and_test(refcount_t *r){assert(r->refs);return !--r->refs;}
+#endif
+static void refcount_inc(refcount_t *r){assert(r->refs);r->refs++;}
 struct xdev_ext_mech_ctx;
 /* ACTUAL_OPS_TYPES */
 struct host_selected_program {struct xdev_ext_nvme_mech_ops ops;unsigned pins;};
@@ -32,7 +35,9 @@ static void bpf_struct_ops_put(const void *p){struct host_selected_program *h=co
 struct bpf_link {unsigned type,refs;u32 class_id;const void *ops;bool detached;};
 static struct bpf_link *program_fds[128];
 #define IS_ERR(p) ((uintptr_t)(p)>=(uintptr_t)-4095)
+#ifndef ERR_PTR
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
+#endif
 #define PTR_ERR(p) ((long)(intptr_t)(p))
 static struct bpf_link *bpf_link_get_from_fd(u32 fd){if(fd>=ARRAY_SIZE(program_fds)||!program_fds[fd])return ERR_PTR(-EBADF);link_gets++;program_fds[fd]->refs++;return program_fds[fd];}
 static void bpf_link_put(struct bpf_link *l){assert(l->refs>1);l->refs--;link_puts++;}
