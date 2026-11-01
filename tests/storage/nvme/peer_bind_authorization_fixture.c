@@ -7,7 +7,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
+#include "include/linux/nvme_xdev_ext_passthru.h"
 typedef uint32_t u32;
+typedef uint64_t u64;
 #define GFP_KERNEL 0
 #define kzalloc(n,f) calloc(1,n)
 #define kfree free
@@ -46,11 +48,9 @@ struct nvme_ops { const char *name; bool peer_rw; };
 struct nvme_ctrl { struct nvme_ops *ops; };
 struct nvme_ns_head { unsigned ns_id; };
 struct nvme_ns { struct nvme_ctrl *ctrl; struct nvme_ns_head *head; void *queue; };
-struct xdev_ext_mech_layout { unsigned group_bytes; };
 struct xdev_ext_mech_pool { unsigned kind; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_layout layout; struct xdev_ext_mech_pool pool; };
-struct xdev_ext_mech_stage_uapi { unsigned flags; };
-struct nvme_xdev_ext_mech_stage { struct nvme_ns *ns; bool write; int identity; void *head, *disk, *queue; };
+struct nvme_xdev_ext_mech_stage { struct nvme_ns *ns; bool write; struct nvme_xdev_ext_identity identity; struct xdev_ext_stor_window window; void *head, *disk, *queue; };
 struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct file *file; unsigned direction; bool poll; unsigned arg0,arg1; void *priv; };
 static struct nvme_ops ops={"pcie",true};
 static struct nvme_ctrl ctrl={&ops};
@@ -66,10 +66,17 @@ static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xd
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s) { return &s->pool; }
 static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *f) { return f->native_ns ? &ns : NULL; }
 static bool nvme_xdev_ext_poll_capable(void *q) { (void)q; return true; }
-static int nvme_xdev_ext_capture_identity(struct nvme_ns *n,int *i,void **h,void **d,void **q)
-{ assert(n==&ns); *i=1; *h=&head; *d=&ns; *q=&ctrl; return 0; }
-static int nvme_xdev_ext_mech_bind_check(int *i,bool write,unsigned start,unsigned len,unsigned bytes)
-{ assert(*i==1); (void)write; assert(bytes==4096); return start<32 && len && len<=32-start ? 0 : -ERANGE; }
+static int nvme_xdev_ext_capture_identity(struct nvme_ns *n,struct nvme_xdev_ext_identity *i,void **h,void **d,void **q)
+{ assert(n==&ns); *i=(struct nvme_xdev_ext_identity){.nsid=1,.namespace_ready=1,.lba_shift=9,.capacity_lbas=32}; *h=&head; *d=&ns; *q=&ctrl; return 0; }
+/* Preserve the old fixture's argument observations while executing the
+ * actual portable admission and typed-window construction. */
+static int fixture_bind_window(const struct nvme_xdev_ext_identity *i,int write,
+ u64 start,u64 len,u32 bytes,struct xdev_ext_stor_window *window)
+{
+ assert(i->nsid==1);assert(bytes==4096);
+ return nvme_xdev_ext_mech_bind_window(i,write,start,len,bytes,window);
+}
+#define nvme_xdev_ext_mech_bind_window fixture_bind_window
 static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st) { assert(st->priv); resources++; return 0; }
 static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st) { assert(st->priv); return 0; }
 /* PRODUCTION */
@@ -77,7 +84,7 @@ static int bind_case(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_stage_u
 { int rc=nvme_xdev_ext_class_bind(st,u); if (!rc) { free(st->priv); st->priv=NULL; } return rc; }
 int main(void)
 {
- struct xdev_ext_mech_session s={.layout={4096},.pool={XDEV_EXT_MECH_POOL_PEER}};
+ struct xdev_ext_mech_session s={.layout={.group_bytes=4096},.pool={XDEV_EXT_MECH_POOL_PEER}};
  struct file f={FMODE_READ,true};
  struct xdev_ext_mech_stage st={.s=&s,.file=&f,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.arg0=4,.arg1=8};
  struct xdev_ext_mech_stage_uapi u={0};

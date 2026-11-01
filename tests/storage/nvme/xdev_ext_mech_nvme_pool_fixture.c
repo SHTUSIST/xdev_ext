@@ -32,6 +32,7 @@ typedef int blk_status_t;
 #define atomic_read(p) (*(p))
 #define WARN_ON_ONCE(x) (!!(x))
 #define cpu_to_le32(v) (v)
+#define cpu_to_le64(v) (v)
 #define le64_to_cpu(v) (v)
 #define le16_to_cpu(v) (v)
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
@@ -175,15 +176,20 @@ static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,
 static void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,
  u64 ticket, int status)
 { (void)b; (void)ticket; (void)status; }
+static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,
+ u64 lba,u32 bytes,u32 plan,int ret)
+{ (void)b;(void)lba;(void)bytes;(void)plan;(void)ret; }
 /* PRODUCTION_FUNCTIONS */
 int main(int argc,char **argv)
 {
  struct nvme_ns ns={};
- struct nvme_xdev_ext_mech_stage p={.ns=&ns};
+ struct nvme_xdev_ext_mech_stage p={.ns=&ns,
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}};
  struct xdev_ext_mech_session session={.layout={.frame_size=4096,.hdr_room=384,.seg_len=512,.group_bytes=1024},.depth=2};
  struct xdev_ext_mech_stage st={.priv=&p,.s=&session};
  struct xdev_ext_mech_batch batches[3]={},*b=&batches[0];
  struct xdev_ext_nvme_mech_cqe cqe;
+ const u8 sqe[NVME_XDEV_EXT_SQE_SIZE]={[0]=NVME_XDEV_EXT_NVM_READ,[48]=1};
  unsigned int i,rounds,denied=0,retained=0,uncertain=0;
  int rc;
  mode=argc>1 ? argv[1] : "flow";
@@ -192,7 +198,7 @@ int main(int argc,char **argv)
  hot=1;
  if(!strcmp(mode,"capacity")) {
   for(i=0;i<3;i++) {
-   b=&batches[i];b->id=b->ticket=i+1;b->priv.validated=true;b->priv.batch_id=b->id;
+   b=&batches[i];b->id=b->ticket=i+1;if(nvme_xdev_ext_class_validate(&st,b,sqe,1))abort();
    rc=nvme_xdev_ext_class_submit(&st,b);
    if(i<2 && rc)abort();
    if(i==2 && rc==-EAGAIN)denied++;
@@ -208,7 +214,7 @@ int main(int argc,char **argv)
  } else {
   rounds=!strcmp(mode,"flow") ? 256 : !strcmp(mode,"stale") ? 2 : 1;
   for(i=0;i<rounds;i++) {
-   memset(b,0,sizeof(*b));b->id=b->ticket=i+1;b->priv.validated=true;b->priv.batch_id=b->id;
+   memset(b,0,sizeof(*b));b->id=b->ticket=i+1;if(nvme_xdev_ext_class_validate(&st,b,sqe,1))abort();
    rc=nvme_xdev_ext_class_submit(&st,b);
    if(rc)break;
    nvme_xdev_ext_class_fill_cqe(&st,b,&cqe);

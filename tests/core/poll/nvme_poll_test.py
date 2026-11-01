@@ -38,6 +38,7 @@ FIXTURE = r'''
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define ERR_CAST(p) ((void *)(p))
 #include "include/uapi/linux/xdev_ext_mech.h"
+#include "include/linux/nvme_xdev_ext_passthru.h"
 
 typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_t u8;
 typedef unsigned int blk_opf_t; typedef int blk_status_t; typedef u64 dma_addr_t;
@@ -62,7 +63,6 @@ typedef unsigned int blk_opf_t; typedef int blk_status_t; typedef u64 dma_addr_t
 #define NVME_REQ_XDEV_EXT_PEER (1U << 5)
 #define NVME_CMD_SGL_METABUF (1U << 6)
 #define GFP_KERNEL 0
-#define NVME_XDEV_EXT_SQE_SIZE 64
 #define NVME_XDEV_EXT_PEER_MAX_SPANS 4
 #define XDEV_EXT_MECH_POOL_PEER 3
 enum rq_end_io_ret { RQ_END_IO_NONE, RQ_END_IO_FREE };
@@ -113,13 +113,15 @@ struct nvme_ns { struct request_queue *queue; };
 struct nvme_xdev_ext_mech_stage {
 	struct nvme_ns *ns;
 	int dead;
-	struct { u32 nsid; } identity;
+	struct nvme_xdev_ext_identity identity;
+ struct xdev_ext_stor_window window;
 	struct nvme_xdev_ext_mech_slot *slots, *free;
 	u32 nr_slots;
 	struct nvme_xdev_ext_peer_res *peer;
 };
 struct nvme_xdev_ext_mech_batch {
 	u8 sqe[NVME_XDEV_EXT_SQE_SIZE];
+ struct xdev_ext_stor_rw rw;
 	u64 batch_id;
 	bool validated;
 	struct bio *bio;
@@ -173,7 +175,6 @@ static int blk_mq_poll_hw_queue(struct request_queue *q, unsigned int queue_num,
 static int blk_status_to_errno(blk_status_t s) { return s ? -5 : 0; }
 static unsigned int blk_rq_bytes(struct request *rq) { return rq->bytes; }
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st) { (void)st; return 0; }
-static u32 nvme_xdev_ext_sqe_dw(const u8 *sqe, unsigned int dw) { (void)sqe; (void)dw; return 0; }
 static blk_opf_t nvme_req_op(struct nvme_command *cmd) { (void)cmd; return 1; }
 static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 { (void)st; (void)b; abort(); }
@@ -198,9 +199,10 @@ static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b, u
 { if (ticket != b->ticket) { claims_failed++; return -1; } return 0; }
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b, u64 t, int e, bool q)
 { (void)b; (void)t; (void)e; (void)q; publishes++; }
-static void nvme_xdev_ext_mech_cqe(int status, u64 result, struct xdev_ext_nvme_mech_cqe *cqe)
-{ cqe->err = status; cqe->result = result; }
 static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req, blk_status_t err);
+
+static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,u64 lba,u32 bytes,u32 plan,int ret)
+{ (void)b;(void)lba;(void)bytes;(void)plan;(void)ret; }
 
 /* PRODUCTION */
 
@@ -215,13 +217,15 @@ static void report(int rc)
 static int submit_case(bool poll)
 {
 	struct nvme_ns ns = { 0 };
-	struct nvme_xdev_ext_mech_stage p = { .ns = &ns };
+	struct nvme_xdev_ext_mech_stage p = { .ns = &ns,
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
 	struct xdev_ext_mech_session s = { .pool_kind = 2 };
 	struct xdev_ext_mech_stage st = { .s = &s, .priv = &p, .poll = poll };
 	static struct xdev_ext_mech_batch b;
 
-	b.priv.validated = true;
-	b.priv.batch_id = 7;
+	const u8 sqe[NVME_XDEV_EXT_SQE_SIZE] = { [0]=NVME_XDEV_EXT_NVM_READ,[48]=7 };
+ if (nvme_xdev_ext_class_validate(&st,&b,sqe,1))
+  abort();
 	b.ticket = 11;
 	report(nvme_xdev_ext_class_submit(&st, &b));
 	return 0;
@@ -255,7 +259,8 @@ static int pass_case(bool peer)
 	struct nvme_xdev_ext_mech_slot host[4] = { 0 };
 	struct nvme_xdev_ext_peer_slot peers[3];
 	struct nvme_xdev_ext_peer_res res = { 0 };
-	struct nvme_xdev_ext_mech_stage p = { .ns = &ns };
+	struct nvme_xdev_ext_mech_stage p = { .ns = &ns,
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
 	struct xdev_ext_mech_stage st = { .priv = &p, .poll = true };
 	u32 qs[4] = { 2, 3, 2, 9 };
 	unsigned i;
@@ -318,7 +323,7 @@ int main(int argc, char **argv)
 PRODUCTION = ('nvme_xdev_ext_poll_capable', 'nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
               'nvme_xdev_ext_poll_arm', 'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_ready',
               'nvme_xdev_ext_peer_complete', 'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_peer_end_io',
-              'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_class_poll')
+              'nvme_xdev_ext_class_validate', 'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_class_poll')
 
 
 def storage_runtime(root):

@@ -5,6 +5,7 @@
 #ifdef __KERNEL__
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/xdev_ext_desc_schema.h>
 #include <linux/xdev_ext_storfam_core.h>
 #include <uapi/linux/nvme_ioctl.h>
 #include <uapi/linux/xdev_ext_binding.h>
@@ -12,6 +13,7 @@
 #else
 #include <errno.h>
 #include <linux/types.h>
+#include "xdev_ext_desc_schema.h"
 #include "xdev_ext_storfam_core.h"
 #include "../uapi/linux/nvme_ioctl.h"
 #include "../uapi/linux/xdev_ext_binding.h"
@@ -341,9 +343,10 @@ nvme_xdev_ext_mech_validate(const __u8 *sqe,
 		       const struct nvme_xdev_ext_mech_bounds *bounds,
 		       struct nvme_xdev_ext_decoded *decoded)
 {
-	struct nvme_xdev_ext_admission input;
+	struct xdev_ext_desc_schema16 schema;
+	struct xdev_ext_stor_window window;
+	struct xdev_ext_stor_rw rw;
 	__u64 slba, nlb;
-	unsigned int dw;
 	int ret;
 
 	if (!sqe || !bounds || !decoded)
@@ -353,34 +356,34 @@ nvme_xdev_ext_mech_validate(const __u8 *sqe,
 	ret = nvme_xdev_ext_lba_shift_check(bounds->lba_shift);
 	if (ret)
 		return ret;
-	if (sqe[0] != (bounds->write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ))
-		return -EOPNOTSUPP;
-	if (nvme_xdev_ext_sqe_dw(sqe, 0) >> 8)
-		return -EPERM;
-	for (dw = 1; dw < NVME_XDEV_EXT_SQE_SIZE / 4; dw++)
-		if ((dw < 10 || dw > 12) && nvme_xdev_ext_sqe_dw(sqe, dw))
-			return -EPERM;
-
-	input = (struct nvme_xdev_ext_admission) {
-		.opcode = sqe[0],
-		.lba_shift = bounds->lba_shift,
-		.data_len = bounds->data_len,
-		.cdw10 = nvme_xdev_ext_sqe_dw(sqe, 10),
-		.cdw11 = nvme_xdev_ext_sqe_dw(sqe, 11),
-		.cdw12 = nvme_xdev_ext_sqe_dw(sqe, 12),
-		.capacity_lbas = bounds->capacity_lbas,
+	schema = (struct xdev_ext_desc_schema16) {
+		.writable = {
+			[0] = 0xffU, [10] = ~(__u32)0, [11] = ~(__u32)0,
+			[12] = 0xffffU | (__u32)bounds->control_allow << 16,
+		},
 	};
-	if ((input.cdw12 >> 16) & ~(__u32)bounds->control_allow)
-		return -EPERM;
-
-	/* Window first: an SLBA outside it is -ERANGE, not decode's -EOVERFLOW. */
-	slba = ((__u64)input.cdw11 << 32) | input.cdw10;
-	nlb = (__u64)(input.cdw12 & 0xffffU) + 1;
-	ret = xdev_ext_stor_window_check(bounds->window_slba,
-					bounds->window_nlb, slba, nlb);
+	ret = xdev_ext_desc_schema16_check(sqe, &schema,
+		bounds->write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ);
 	if (ret)
 		return ret;
-	return nvme_xdev_ext_decode_rw(&input, decoded);
+
+	/* Window first: an SLBA outside it is -ERANGE, not decode's -EOVERFLOW. */
+	slba = ((__u64)nvme_xdev_ext_sqe_dw(sqe, 11) << 32) |
+		nvme_xdev_ext_sqe_dw(sqe, 10);
+	nlb = (__u64)(nvme_xdev_ext_sqe_dw(sqe, 12) & 0xffffU) + 1;
+	window = (struct xdev_ext_stor_window) {
+		.slba = bounds->window_slba, .nlb = bounds->window_nlb,
+		.capacity_lbas = bounds->capacity_lbas,
+		.lba_shift = bounds->lba_shift, .write = !!bounds->write,
+	};
+	ret = xdev_ext_stor_window_admit(&window, slba, nlb, bounds->data_len, &rw);
+	if (ret)
+		return ret;
+	*decoded = (struct nvme_xdev_ext_decoded) {
+		.slba = rw.slba, .nlb = rw.nlb, .byte_offset = rw.byte_offset,
+		.byte_length = rw.byte_length, .write = rw.write,
+	};
+	return 0;
 }
 
 /*
@@ -470,14 +473,14 @@ static inline void nvme_xdev_ext_mech_cqe(int status, __u64 result,
  * command can carry and the window can hold.
  */
 static inline int
-nvme_xdev_ext_mech_bind_check(const struct nvme_xdev_ext_identity *id, int write,
+nvme_xdev_ext_mech_bind_window(const struct nvme_xdev_ext_identity *id, int write,
 			 __u64 window_slba, __u64 window_nlb,
-			 __u32 group_bytes)
+			 __u32 group_bytes, struct xdev_ext_stor_window *window)
 {
 	struct nvme_xdev_ext_admission input;
 	int ret;
 
-	if (!id)
+	if (!id || !window)
 		return -EINVAL;
 	input = (struct nvme_xdev_ext_admission) {
 		.opcode = write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ,
@@ -496,13 +499,19 @@ nvme_xdev_ext_mech_bind_check(const struct nvme_xdev_ext_identity *id, int write
 	ret = nvme_xdev_ext_admit_identity(&input);
 	if (ret)
 		return ret;
-	if (!window_nlb)
-		return -EINVAL;
-	if (window_slba > id->capacity_lbas ||
-	    window_nlb > id->capacity_lbas - window_slba ||
-	    (group_bytes >> id->lba_shift) > window_nlb)
-		return -ERANGE;
-	return 0;
+	return xdev_ext_stor_window_bind(window, id->capacity_lbas,
+		id->lba_shift, !!write, window_slba, window_nlb, group_bytes);
+}
+
+static inline int
+nvme_xdev_ext_mech_bind_check(const struct nvme_xdev_ext_identity *id, int write,
+			 __u64 window_slba, __u64 window_nlb,
+			 __u32 group_bytes)
+{
+	struct xdev_ext_stor_window window;
+
+	return nvme_xdev_ext_mech_bind_window(id, write, window_slba, window_nlb,
+					  group_bytes, &window);
 }
 
 /* Queue limits a batch payload must meet to reach the device as it is. */
