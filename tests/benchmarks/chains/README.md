@@ -1,6 +1,6 @@
-# Multi-stage chains: one session versus per-pair composition
+# Multi-stage chains and same-binding USER continuation
 
-Follow the [evaluation policy](../PERFORMANCE_POLICY.md) for baseline changes, comparison eligibility and performance claims.
+Follow the [evaluation policy](../../../docs/reference/performance-policy.md) for baseline changes, comparison eligibility and performance claims.
 
 This directory runs pipelines of three or four device stages, the
 composability experiment the OSDI review asks for (E1), the mechanism
@@ -15,6 +15,14 @@ tested on a host. The guest correctness run is still to be done.
   `IORING_REGISTER_XDEV_EXT_MECH` CREATE, gets one terminal `NOTIFY_ARM` and
   one `START` per window, and the process blocks once on the eventfd.
   Implemented in `chain_session.c`.
+- `user-continuation`: the same mechanism device bindings, frame pool and
+  logical depth as `session`, with a fixed-length USER point after NVMe READ.
+  One helper thread calls libxdev_ext ready/completion operations and inherits
+  the process CPU affinity. The main thread keeps the session arm's final
+  device-completion observer and byte oracle. The supported chains are
+  `nvme-nic` (NVMe, USER, AF_XDP TX) and `nvme-gpu` (NVMe, USER, CE H2D).
+  A paired NIC receiver stays an ordinary `session`. The four-stage
+  `nvme-gpu-nic` cannot accommodate another stage and is explicitly refused.
 - `staged`: the strongest per-pair Linux composition built here. Every buffer
   is allocated and registered once. NVMe uses io_uring `READ_FIXED`/`WRITE_FIXED`
   on the `O_DIRECT` block device. The GPU uses CUDA `cuMemHostRegister` with
@@ -35,6 +43,7 @@ receiver.
 
 | chain | stages | status |
 |---|---|---|
+| `nvme-gpu` | NVMe READ, CE H2D | session, USER continuation, staged; final GPU readback |
 | `nvme-gpu-nic` | NVMe READ, CE H2D, CE D2H, AF_XDP TX | runs; paired with `nic-gpu-nvme` |
 | `nic-gpu-nvme` | AF_XDP RX, CE H2D, CE D2H, NVMe WRITE | runs; the receiver compares its NVMe window |
 | `nvme-iaa-gpu` | NVMe READ, IAA decompress, CE H2D | runs (session); staged is CPU zlib, correctness only |
@@ -78,6 +87,49 @@ hit.
    run for `nvme-iaa-gpu`. One struct_ops plan per class is live at a time, so
    concurrent sessions need every plan they use, `chain_iaa_ops` included,
    attached once system-wide (rig `attached`); run.py refuses otherwise.
+
+## Three-arm comparison contract
+
+Build `bench bpf` with GCC and the BPF compiler, and add the resulting
+`chain_plan.bpf.o` as rig `plans.user`, or attach its `chain_user_ops` once
+and list that map under rig `attached`. Existing NVMe/AF_XDP plans shared
+by a paired run still need to be attached once. A single NVMe/GPU session
+can load its NVMe, CE and USER plans from the rig.
+
+```sh
+python3 run.py --rig rig.json --chain nvme-nic,nvme-gpu \
+  --arms staged,user-continuation,session --cpu-set 2,3 \
+  --seed 17 --correctness-only --dry-run --out-dir planned
+```
+
+Each planned stdout row carries `comparison_contract`: the common seed,
+record bytes/counts, logical depth, group/burst/frame/pool geometry, CPU
+set, endpoint bindings and terminal completion semantics. `execution_site`
+distinguishes existing interfaces, userspace continuation and kernel
+continuation; `same_binding` is true for the latter two. The legacy
+`userspace-shared` arm still uses uo_bench and has no `nvme-gpu` composition.
+Its original scheduling and registration choices are retained. The geometry
+fields describe logical controls; they do not make legacy queue algorithms
+identical. A campaign without an explicit seed chooses one seed for all arms.
+
+For `nvme-gpu`, the new staged composition ends after H2D and GPU completion,
+without a D2H return. The USER and session variants use one io_uring UMEM
+pool and one session each; no cross-session pool permission is assumed.
+All variants retain the final GPU-window oracle. The USER arm additionally
+requires `ready_batches == completed_batches == warmup + batches`, with
+zero USER failure. Missing acknowledgements at terminal completion report a
+negative USER failure without extending the timer or retrying during cleanup.
+The USER deadline is 1..600000 ms; the original arms keep their prior timeout
+domain. A USER acknowledgement alone is not terminal completion.
+
+Comparable session and USER results label raw `cost.syscalls` as
+`syscalls_scope: main-thread-explicit`. The library's USER helper syscalls
+are not included, and a whole-arm syscall count is not provided. This count
+cannot support a claim of whole-arm syscall savings. CPU accounting continues
+to cover the complete selected CPU set, including the helper and kernel work.
+No timer boundary is moved. Correctness-only results omit timing, and timed
+runs of either same-binding arm require hardware-gate admission. Physical
+performance remains pending until that gate and device correctness checks pass.
 
 ## Measurement
 

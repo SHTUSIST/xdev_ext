@@ -99,4 +99,41 @@ struct xdev_ext_iaa_mech_ops chain_iaa_ops = {
 	.complete = (void *)chain_iaa_complete,
 };
 
+/* An explicit fixed-length USER descriptor: user space only acknowledges
+ * the original frames; NEXT still waits for that acknowledgement. */
+struct xdev_ext_user_mech_ops {
+	__u32 abi_version, flags;
+	__s32 (*prepare)(const struct xdev_ext_mech_ctx *);
+	__s32 (*build)(const struct xdev_ext_mech_ctx *);
+	__s32 (*complete)(const struct xdev_ext_mech_ctx *);
+} __attribute__((preserve_access_index));
+
+SEC("struct_ops/chain_user_build")
+__s32 BPF_PROG(chain_user_build, const struct xdev_ext_mech_ctx *m)
+{
+	struct xdev_ext_user_desc *d;
+
+	(void)ctx;
+	d = (void *)bpf_xdev_ext_desc(m, 0, sizeof(*d));
+	if (!d)
+		return XDEV_EXT_MECH_BUILD_ABORT;
+	*d = (struct xdev_ext_user_desc){ .version = XDEV_EXT_USER_DESC_VERSION };
+	return XDEV_EXT_MECH_BUILD_SUBMIT;
+}
+
+SEC("struct_ops/chain_user_complete")
+__s32 BPF_PROG(chain_user_complete, const struct xdev_ext_mech_ctx *m)
+{
+	(void)ctx;
+	(void)m;
+	return XDEV_EXT_MECH_NEXT;
+}
+
+SEC(".struct_ops.link")
+struct xdev_ext_user_mech_ops chain_user_ops = {
+	.abi_version = XDEV_EXT_MECH_ABI_VERSION,
+	.build = (void *)chain_user_build,
+	.complete = (void *)chain_user_complete,
+};
+
 char LICENSE[] SEC("license") = "GPL";

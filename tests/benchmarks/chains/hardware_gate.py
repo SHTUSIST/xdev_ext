@@ -171,7 +171,7 @@ def admit(rig, chain_stages, arms, root=Path('/')):
     """
     root = Path(root)
     evidence = {'environment': environment(root)}
-    if 'session' in arms:
+    if set(arms) & {'session', 'user-continuation'}:
         evidence['kernel'] = kernel_config(root)
     devices = []
     for cls, _direction, role in chain_stages:

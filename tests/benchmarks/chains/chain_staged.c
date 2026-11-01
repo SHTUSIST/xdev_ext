@@ -103,7 +103,7 @@ static int sg_gpu_start(struct sg *x, unsigned int k)
 
 	if (x->s->gpu == CH_GPU_CUDA) {
 		ret = chain_cuda_h2d(&x->cuda, k, dev, src, len);
-		if (!ret && !x->iaa)
+		if (!ret && !x->iaa && strcmp(x->s->chain, "nvme-gpu"))
 			ret = chain_cuda_d2h(&x->cuda, k, x->b + (size_t)k * x->stride,
 					     dev, len);
 		if (!ret)
@@ -115,7 +115,7 @@ static int sg_gpu_start(struct sg *x, unsigned int k)
 		return -EIO;
 	x->r->cpu_copies++;
 	x->r->cpu_copy_bytes += len;
-	if (!x->iaa) {
+	if (!x->iaa && strcmp(x->s->chain, "nvme-gpu")) {
 		if (pread(x->ce, x->b + (size_t)k * x->stride, len,
 			  (off_t)(x->s->ce_va + dev)) != (ssize_t)len)
 			return -EIO;
@@ -407,7 +407,7 @@ static int sg_window(struct sg *x, uint64_t first, uint64_t nb, struct chain_sus
 
 			if (x->rx) {
 				ret = sg_nvme(x, k, next_out, true);
-			} else if (x->iaa) {
+			} else if (x->iaa || !strcmp(x->s->chain, "nvme-gpu")) {
 				x->slot[k].state = SL_FREE;
 				done++;
 				ret = 0;
@@ -528,6 +528,8 @@ int chain_run_staged(const struct chain_spec *s, struct chain_result *r)
 	int ret;
 
 	x.rx = chain_rx_first(s);
+	if (!strcmp(s->chain, "nvme-gpu"))
+		x.iaa_out = s->group_bytes;
 	x.gpu = chain_has(s, CH_CE);
 	x.iaa = chain_has(s, CH_IAA);
 	r->ce_backend = !x.gpu ? "none" : s->gpu == CH_GPU_CUDA ? "staged-cuda" :

@@ -20,6 +20,8 @@
 #include <glob.h>
 #include <net/if.h>
 #include <poll.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -43,6 +45,7 @@
 #include "../../../kernel/tools/include/xdev_ext_gpu_identity.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "chain_bench.h"
+#include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext.h"
 #include "../common/native_process.h"
 #include "chain_cuda.h"
 #include "chain_oracle.h"
@@ -595,6 +598,73 @@ static int cs_sustained(const struct chain_spec *s, struct chain_result *r, int 
 	return 0;
 }
 
+/* One bounded USER continuation thread; payload stays in the existing pool.
+ * The normal main thread observes terminal device completion, as in session.
+ * These counters describe library operations, never whole-process syscalls. */
+struct cs_user {
+	struct xdev_ext_user_stage *stage;
+	pthread_t thread;
+	atomic_bool stop;
+	bool running;
+	uint32_t group_bytes;
+	uint64_t ready, completed;
+	int failure;
+};
+
+static void *cs_user_worker(void *arg)
+{
+	struct cs_user *u = arg;
+
+	while (!atomic_load_explicit(&u->stop, memory_order_acquire)) {
+		struct xdev_ext_user_batch batch;
+		uint64_t bytes = 0;
+		unsigned int i;
+		int status = 0, ret = xdev_ext_user_stage_next(u->stage, 100, &batch);
+
+		if (ret == -ETIMEDOUT || ret == -EAGAIN)
+			continue;
+		if (ret) {
+			if (!atomic_load_explicit(&u->stop, memory_order_acquire))
+				u->failure = ret;
+			break;
+		}
+		u->ready++;
+		if (!batch.nr_frames || batch.nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
+			status = -EPROTO;
+		for (i = 0; !status && i < batch.nr_frames; i++) {
+			if (!batch.f[i].data_len || batch.f[i].data_len > batch.f[i].capacity) {
+				status = -EPROTO;
+				break;
+			}
+			bytes += batch.f[i].data_len;
+			batch.f[i].out_len = batch.f[i].data_len;
+		}
+		if (bytes != u->group_bytes)
+			status = -EPROTO;
+		ret = xdev_ext_user_stage_complete(u->stage, &batch, status);
+		if (ret || status) {
+			u->failure = ret ? ret : status;
+			break;
+		}
+		u->completed++;
+	}
+	return NULL;
+}
+
+static void cs_user_join(struct cs_user *u, struct chain_result *r)
+{
+	if (u->running) {
+		atomic_store_explicit(&u->stop, true, memory_order_release);
+		pthread_join(u->thread, NULL);
+		u->running = false;
+	}
+	r->user_ready_batches = u->ready;
+	r->user_completed_batches = u->completed;
+	r->user_failure = u->failure;
+	if (u->failure)
+		cb_fail(r, CB_FAIL, "USER continuation: %s", strerror(-u->failure));
+}
+
 int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 {
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
@@ -605,6 +675,7 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	struct chain_err e = { { 0 } };
 	struct cs_plans plans = { .iaa_counts_fd = -1 };
 	struct cs_xsk x = { .fd = -1 };
+	struct cs_user continuation = { 0 };
 	struct cs_ce ce = { .fd = { -1, -1, -1, -1 } };
 	int fds[XDEV_EXT_MECH_MAX_STAGES] = { -1, -1, -1, -1 };
 	__u32 *user = NULL, frames = 0, headroom = 0, mtu = 0, i;
@@ -622,6 +693,7 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	bool sustained = s->load == CH_LOAD_SUSTAINED;
 	int64_t bounces0 = cs_bounces();
 
+	atomic_init(&continuation.stop, false);
 	r->ce_backend = !chain_has(s, CH_CE) ? "none" :
 			strstr(s->ce_dev, "xdev_ext_ce_sim") ? "ce-sim-cpu-standin" :
 			s->ce_native ? "gpu-native-allocation" : "gpu-given-window";
@@ -725,7 +797,19 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 				      O_CLOEXEC);
 		else if (sg->cls == CH_CE)
 			fds[i] = ce.fd[i] = open(s->ce_dev, O_RDWR | O_CLOEXEC);
-		else if (sg->cls == CH_IAA)
+		else if (sg->cls == CH_USER) {
+			struct xdev_ext_user_stage_opts opts = { .sz = sizeof(opts),
+				.ring_fd = ring, .entries = 1 };
+
+			while (opts.entries < s->depth)
+				opts.entries <<= 1;
+			ret = xdev_ext_user_stage_open(&opts, &continuation.stage);
+			if (ret) {
+				cb_fail(r, CB_NOT_RUN, "USER stage: %s", strerror(-ret));
+				goto out;
+			}
+			fds[i] = xdev_ext_user_stage_fd(continuation.stage);
+		} else if (sg->cls == CH_IAA)
 			fds[i] = open(sg->dev, O_RDONLY | O_CLOEXEC);
 		if (sg->cls != CH_AFXDP && fds[i] < 0) {
 			cb_fail(r, CB_NOT_RUN, "stage %u device: %s", i, strerror(errno));
@@ -790,7 +874,18 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	ret = cs_native_bind(s, c.session_id, rx);
 	if (ret) {
 		cb_fail(r, CB_NOT_RUN, "native session binding: %s", strerror(-ret));
+		if (continuation.stage)
+			goto stop;
 		goto out;
+	}
+	if (continuation.stage) {
+		continuation.group_bytes = s->group_bytes;
+		ret = pthread_create(&continuation.thread, NULL, cs_user_worker, &continuation);
+		if (ret) {
+			cb_fail(r, CB_NOT_RUN, "USER thread: %s", strerror(ret));
+			goto stop;
+		}
+		continuation.running = true;
 	}
 	/* As ctl_run_source(): a copy-mode source socket gets the fill ring too. */
 	if (!rx && ax >= 0 && !x.zero_copy)
@@ -987,6 +1082,7 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 				strerror(-ret), r->oracle_detail);
 	}
 stop:
+	atomic_store_explicit(&continuation.stop, true, memory_order_release);
 	if (c.session_id) {
 		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STOP, c.session_id, &r->syscalls);
 		fprintf(stderr, "EVAL_STOP=%s result=%d\n", ret ? "FAIL" : "PASS", ret);
@@ -996,6 +1092,18 @@ stop:
 			cb_fail(r, CB_FAIL, "STOP: %s; native resources retained",
 				xdev_ext_mech_ctl_errname(ret));
 		}
+	}
+	cs_user_join(&continuation, r);
+	if (continuation.stage && started &&
+	    (continuation.ready != s->warmup + s->batches ||
+	     continuation.completed != s->warmup + s->batches)) {
+		/* A terminal wake never proves the USER acknowledgement happened.
+		 * Record missing progress without extending the measured interval. */
+		if (!continuation.failure)
+			continuation.failure = continuation.completed < s->warmup + s->batches ?
+				-ETIMEDOUT : -EPROTO;
+		r->user_failure = continuation.failure;
+		cb_fail(r, CB_FAIL, "USER continuation count mismatch");
 	}
 	/*
 	 * chain_counts of this process's plan, or of the system-wide one
@@ -1023,6 +1131,7 @@ stop:
 		plans.iaa_counts_fd = -1;
 	}
 out:
+	cs_user_join(&continuation, r);
 	if (campaign_syscalls)
 		r->syscalls = campaign_syscalls;
 	if (bounces0 >= 0) {
@@ -1046,12 +1155,14 @@ out:
 	}
 	if (xdev_ext_xsk_redirect_is_active(&redirect))
 		xdev_ext_xsk_redirect_detach(&redirect);
+	if (continuation.stage)
+		xdev_ext_user_stage_close(continuation.stage);
 	if (ring >= 0)
 		close(ring);
 	if (efd >= 0)
 		close(efd);
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
-		if (fds[i] >= 0)
+		if (fds[i] >= 0 && (i >= s->nr_stages || s->st[i].cls != CH_USER))
 			close(fds[i]);
 	if (s->ce_native && xdev_ext_mech_cuda_close(&ce.cuda) && !r->status)
 		cb_fail(r, CB_FAIL, "CUDA allocation cleanup failed");

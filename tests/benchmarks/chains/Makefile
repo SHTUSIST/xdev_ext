@@ -16,7 +16,7 @@ CFLAGS += -std=gnu11 -Wall -Wextra -Werror -D_FILE_OFFSET_BITS=64
 # when the system's is older, e.g. one built from kernel/tools/lib/bpf.
 LIBBPF_CFLAGS ?=
 LIBBPF_LIBS ?= -lbpf
-LDLIBS += $(LIBBPF_LIBS) -lelf -lz -ldl
+LDLIBS += -pthread $(LIBBPF_LIBS) -lelf -lz -ldl
 BPF_ARCH ?= x86
 # BPF has no native arch include search. Ask the selected native compiler
 # (including its target/sysroot flags), rather than guessing a directory from
@@ -27,6 +27,10 @@ BPF_SYS_INCLUDES ?= $(shell $(CC) $(CPPFLAGS) $(CFLAGS) -E -Wp,-v -x c /dev/null
 		if test -f "$$path/asm/types.h"; then printf '%s ' "-idirafter $$path"; fi; \
 	done)
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH)
+
+LIBDIR := $(KERNEL)/tools/xdev_ext_mech/lib
+LIBBUILD := $(abspath $(BUILD))/lib
+LIBXDEV := $(LIBBUILD)/libxdev_ext.a
 
 HEADERS := ../common/cpu_timer.h ../common/native_process.h chain_json.h chain_spec.h chain_check.h chain_crc.h chain_timing.h chain_oracle.h chain_bench.h chain_cuda.h chain_nxp.h \
 	uring_min.h $(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h
@@ -43,8 +47,11 @@ test: $(BUILD)/test_chain_spec
 $(BUILD):
 	mkdir -p $@
 
-$(BUILD)/chain_bench: $(SOURCES) $(HEADERS) | $(BUILD)
-	$(CC) $(CFLAGS) $(LIBBPF_CFLAGS) $(SOURCES) -o $@ $(LDFLAGS) $(LDLIBS)
+$(LIBXDEV): $(wildcard $(LIBDIR)/*.[ch]) $(LIBDIR)/Makefile
+	$(MAKE) -C $(LIBDIR) BUILD_DIR=$(LIBBUILD) CC="$(CC)" CFLAGS="$(CFLAGS) $(LIBBPF_CFLAGS)"
+
+$(BUILD)/chain_bench: $(SOURCES) $(HEADERS) $(LIBXDEV) | $(BUILD)
+	$(CC) $(CFLAGS) $(LIBBPF_CFLAGS) $(SOURCES) $(LIBXDEV) -o $@ $(LDFLAGS) $(LDLIBS)
 
 $(BUILD)/chain_plan.bpf.o: chain_plan.bpf.c | $(BUILD)
 	$(CLANG) $(BPF_CFLAGS) -I$(KERNEL) $(BPF_SYS_INCLUDES) -c $< -o $@

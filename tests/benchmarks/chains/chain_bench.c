@@ -172,7 +172,8 @@ static void cb_emit(FILE *f, const struct chain_spec *s, const struct chain_resu
 		"\"batches\":%llu,\"warmup\":%llu,\"burst\":%u,\"depth\":%u,"
 		"\"start_per\":\"%s\",\"plan\":\"%s\",\"afxdp_mode\":\"%s\","
 		"\"stages\":%u,\"ce_backend\":\"%s\",\"load\":\"%s\",",
-		s->arm == CH_SESSION ? "session" : "staged",
+		s->arm == CH_SESSION ? "session" :
+		s->arm == CH_USER_CONTINUATION ? "user-continuation" : "staged",
 		s->mode == CH_TIMING ? "timing" : "correctness", s->group_bytes,
 		(unsigned long long)s->batches, (unsigned long long)s->warmup,
 		s->burst, s->depth, s->start_per == CH_START_RUN ? "run" : "batch",
@@ -213,6 +214,15 @@ static void cb_emit(FILE *f, const struct chain_spec *s, const struct chain_resu
 			fprintf(f, "%s%llu", k ? "," : "", (unsigned long long)r->samples[k]);
 		fputs("]},", f);
 	}
+	fprintf(f, "\"execution_site\":\"%s\",\"same_binding\":%s,",
+		s->arm == CH_STAGED ? "existing-interfaces" :
+		s->arm == CH_USER_CONTINUATION ? "userspace-continuation" : "kernel-continuation",
+		s->arm == CH_STAGED ? "false" : "true");
+	if (s->arm == CH_USER_CONTINUATION)
+		fprintf(f, "\"user_continuation\":{\"ready_batches\":%llu,"
+			"\"completed_batches\":%llu,\"failure\":%d},",
+			(unsigned long long)r->user_ready_batches,
+			(unsigned long long)r->user_completed_batches, r->user_failure);
 	if (r->have_stats) {
 		const struct xdev_ext_mech_stats *t = &r->stats;
 
@@ -246,7 +256,7 @@ static void cb_emit(FILE *f, const struct chain_spec *s, const struct chain_resu
 			fputc(',', f);
 		cb_json_str(f, r->copy_sources[i]);
 	}
-	if (s->arm == CH_SESSION) {
+	if (s->arm != CH_STAGED) {
 		const char *declared[CHAIN_MAX_COPY_SOURCES];
 		unsigned int nd = chain_declared_copies(s, declared);
 
@@ -276,7 +286,7 @@ static void cb_emit(FILE *f, const struct chain_spec *s, const struct chain_resu
 		r->oracle_verdict ? r->oracle_verdict : "not-checked",
 		(unsigned long long)r->oracle_bytes, r->oracle_detail);
 	/* RUSAGE_SELF diagnostics; cross-arm CPU accounting is cpu_measurement. */
-	fprintf(f, "\"cost\":{\"cpu_scope\":\"producer-process\",\"syscalls\":%llu,"
+	fprintf(f, "\"cost\":{\"cpu_scope\":\"producer-process\",\"syscalls_scope\":\"main-thread-explicit\",\"syscalls\":%llu,"
 		"\"observer_syscalls\":%llu,"
 		"\"voluntary_ctxsw\":%ld,"
 		"\"involuntary_ctxsw\":%ld,\"user_us\":%llu,\"sys_us\":%llu},",
@@ -400,7 +410,7 @@ int main(int argc, char **argv)
 	/* hardware_gate.py admits timed runs; this catches a direct start. */
 	if (spec.mode == CH_TIMING && chain_env_virtual("", why, sizeof(why)))
 		cb_fail(&r, CB_NOT_RUN, "unsupported: timing refused: %s", why);
-	else if (spec.arm == CH_SESSION)
+	else if (spec.arm != CH_STAGED)
 		chain_run_session(&spec, &r);
 	else
 		chain_run_staged(&spec, &r);
@@ -409,7 +419,7 @@ int main(int argc, char **argv)
 	 * declares (the copy-mode ablation's AF_XDP copy).  The staged arm
 	 * only counts its copies.
 	 */
-	if (spec.arm == CH_SESSION && spec.mode == CH_TIMING && !r.status) {
+	if (spec.arm != CH_STAGED && spec.mode == CH_TIMING && !r.status) {
 		const char *extra = chain_undeclared_copy(&spec, r.copy_sources,
 							  r.nr_copy_sources);
 
