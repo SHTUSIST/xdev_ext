@@ -70,6 +70,8 @@ struct xdev_ext_ce_stage {
 	/* session worker only: the plan validate accepted, until submit */
 	struct xdev_ext_mech_batch *staged;
 	struct xdev_ext_comp_copy_plan plan;
+	/* Worker-only scratch; native callbacks retain the typed batch copy. */
+	struct xdev_ext_comp_copy_transfer transfer[XDEV_EXT_CE_MAX_ENTRIES];
 	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
 };
@@ -446,7 +448,7 @@ static int xdev_ext_ce_stage_xfers(struct xdev_ext_ce_stage *cs, struct xdev_ext
 			      struct xdev_ext_ce_batch *cb)
 {
 	struct xdev_ext_mech_batch *staged = cs->staged;
-	struct xdev_ext_comp_copy_transfer x[XDEV_EXT_CE_MAX_ENTRIES];
+	struct xdev_ext_comp_copy_transfer *x = cs->transfer;
 	u32 i;
 	int err;
 
