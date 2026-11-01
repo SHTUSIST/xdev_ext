@@ -706,5 +706,52 @@ print(json.dumps(dict(exited=True,result=result,evidence_errors=final.get('evide
             self.assertTrue(report['evidence_errors'], 'nonregular request was silently ignored')
             self.assertTrue(all(view.get('bounds') is None for view in report['result'].get('views', [])))
 
+class UserContinuationTimerAdapter(unittest.TestCase):
+    """The new chain arm keeps its identity with both original timer endpoints."""
+    clean_environment = TimerOwner.clean_environment
+
+    def replay_user_arm(self, sustained):
+        module = load()
+        child_source = """import json,os,time
+from pathlib import Path
+config=json.loads(Path(os.environ['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
+start_ticks=int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
+t0=time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+time.sleep(.025)
+t1=time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW)
+metadata=dict(kind='cpu-timer-metadata',schema=1,token=config['token'],run_id=config['run_id'],
+              pid=os.getpid(),process_start_ticks=start_ticks,clock='CLOCK_MONOTONIC_RAW',
+              clock_domain=config['cpu_scope']['clock_domain'],rows=1,complete=True)
+row=dict(kind='cpu-timer-span',metric='window_ns',key=0,start_ns=t0,end_ns=t1)
+(Path(config['journal_dir'])/'user-child.jsonl').write_text(json.dumps(metadata)+'\\n'+json.dumps(row)+'\\n')
+print(json.dumps(dict(start=t0,end=t1,pid=os.getpid(),start_ticks=start_ticks)))
+"""
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.clean_environment(), clear=True):
+            with module.TimerCpuRun(Path(tmp)/'owner', clock='CLOCK_MONOTONIC_RAW') as owner:
+                done = owner.run([sys.executable, '-c', child_source],
+                                 capture_output=True, text=True, check=True, timeout=3)
+                actual = json.loads(done.stdout)
+            identity = {'chain': 'nvme-nic', 'actor': 0}
+            view = dict(arm='user-continuation', identity=identity, clock='CLOCK_MONOTONIC_RAW',
+                        pid=actual['pid'], process_start_ticks=actual['start_ticks'],
+                        expected_duration_ns=actual['end']-actual['start'])
+            if sustained:
+                view.update(metric='sustained_ns', endpoint_semantics='post-warmup-last-completion',
+                            spans=[[actual['start'], actual['end']]])
+            else:
+                view.update(metric='window_ns', endpoint_semantics='original-closed-window', keys=[0])
+            result = owner.measurement([view])
+            self.assertEqual(result['status'], 'qualified', result)
+            self.assertEqual(result['views'][0]['arm'], 'user-continuation')
+            self.assertEqual(result['views'][0]['identity'], identity)
+            self.assertEqual(result['views'][0]['measured_ns'], actual['end']-actual['start'])
+
+    def test_closed_observed_child_qualifies_with_user_identity(self):
+        self.replay_user_arm(False)
+
+    def test_sustained_observed_child_qualifies_with_user_identity(self):
+        self.replay_user_arm(True)
+
+
 if __name__ == '__main__':
     unittest.main()

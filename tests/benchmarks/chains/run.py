@@ -47,11 +47,12 @@ from timer_scope import TimerCpuRun, OptionalTimerCpuRun
 
 ROOT = HERE.parents[2]
 M64 = (1 << 64) - 1
-CHAINS = ('nvme-gpu-nic', 'nic-gpu-nvme', 'nvme-iaa-gpu', 'nic-iaa-gpu', 'nvme-crc-nic',
+CHAINS = ('nvme-gpu', 'nvme-gpu-nic', 'nic-gpu-nvme', 'nvme-iaa-gpu', 'nic-iaa-gpu', 'nvme-crc-nic',
           'nvme-nic', 'nic-nvme')
-ARMS = ('staged', 'userspace-shared', 'session')
+ARMS = ('staged', 'userspace-shared', 'user-continuation', 'session')
 # Stage lists: (class, direction, role); role names the rig entry it uses.
 STAGES = {
+    'nvme-gpu': [('nvme', 'from', 'src'), ('ce', 'to', 'src')],
     'nvme-nic': [('nvme', 'from', 'src'), ('afxdp', 'to', 'tx')],
     'nic-nvme': [('afxdp', 'from', 'rx'), ('nvme', 'to', 'dst')],
     'nvme-gpu-nic': [('nvme', 'from', 'src'), ('ce', 'to', 'tx'), ('ce', 'from', 'tx'),
@@ -70,6 +71,7 @@ REFUSED = {
                    'AF_XDP stages need the socket UMEM pool and IAA destination leases need '
                    'the io_uring UMEM pool',
 }
+USER_DEADLINE_MAX_MS = 600000  # XDEV_EXT_USER_DEADLINE_MAX_MS
 MAX_DEPTH = 64          # XDEV_EXT_MECH_MAX_DEPTH
 MAX_FRAMES = 32         # XDEV_EXT_MECH_MAX_FRAMES
 IAA_MAX = 131072        # CRYPTO_ACOMP_DST_MAX: deflate source and destination per batch
@@ -251,6 +253,9 @@ def record_shape(chain, size_bytes, rig):
         # source one contiguous span (deflate-iaa needs a single-entry list).
         group = min(size_bytes, IAA_MAX)
         return group, size_bytes // group, group
+    if chain == 'nvme-gpu':
+        group = min(size_bytes, MAX_FRAMES * XSK_FRAME)
+        return group, size_bytes // group, XSK_FRAME
     mtus = [rig[side]['mtu'] for side in ('tx', 'rx') if side in rig]
     limit = MAX_FRAMES * seg_len(min(mtus) if mtus else 1500)
     group = 1 << (min(size_bytes, limit).bit_length() - 1)
@@ -280,14 +285,21 @@ def refusal(chain, arm, var, rig, corr, size_bytes=4096, load='closed', role='bo
     """A reason this case cannot run, or None.  Mirrors chain_validate()."""
     if chain in REFUSED:
         return REFUSED[chain]
+    if arm == 'user-continuation' and (type(rig.get('timeout_ms', 60000)) is not int or
+                                       not 1 <= rig.get('timeout_ms', 60000) <= USER_DEADLINE_MAX_MS):
+        return 'invalid: user-continuation timeout_ms must be in [1, %d]' % USER_DEADLINE_MAX_MS
+    if arm == 'user-continuation' and chain not in ('nvme-nic', 'nvme-gpu'):
+        return 'unsupported: user-continuation supports nvme-nic and nvme-gpu'
+    if arm == 'userspace-shared' and chain == 'nvme-gpu':
+        return 'unsupported: the user-space orchestrator has no nvme-gpu composition'
     xsk = 'afxdp' in [c for c, _, _ in STAGES[chain]]
     if load == 'sustained' and var['start_per'] == 'run':
         return ('invalid: start_per run is a closed-load option; the sustained load already '
                 'issues one START for the campaign (compare --load closed with sustained)')
-    if arm == 'session' and var['plan'] == 'default':
+    if arm in ('session', 'user-continuation') and var['plan'] == 'default':
         return ('unsupported: no mechanism class registers default_build, so a build '
                 'returning XDEV_EXT_MECH_BUILD_DEFAULT aborts with -EOPNOTSUPP')
-    if arm != 'session' and (var['plan'] != 'bpf' or var['start_per'] != 'batch'):
+    if arm not in ('session', 'user-continuation') and (var['plan'] != 'bpf' or var['start_per'] != 'batch'):
         return 'unsupported: plan and START-granularity ablations exist only for the session arm'
     if arm == 'userspace-shared' and chain == 'nvme-iaa-gpu':
         return 'unsupported: the user-space orchestrator has no IAA stage'
@@ -310,7 +322,7 @@ def refusal(chain, arm, var, rig, corr, size_bytes=4096, load='closed', role='bo
     ce = rig.get('ce', {})
     # Both ends on this host share one CE device; the staged CUDA leg and the
     # user-space arm allocate their own GPU memory instead.
-    windows = arm == 'session' or (arm == 'staged' and 'xdev_ext_ce_sim' in ce.get('dev', ''))
+    windows = arm in ('session', 'user-continuation') or (arm == 'staged' and 'xdev_ext_ce_sim' in ce.get('dev', ''))
     if chain in COMPLEMENT and role == 'both' and windows and \
             'ce' in [c for c, _, _ in STAGES[chain]]:
         tx, rx, length = ce.get('tx_va', 0), ce.get('rx_va', 0), ce.get('len', 0)
@@ -324,17 +336,17 @@ def refusal(chain, arm, var, rig, corr, size_bytes=4096, load='closed', role='bo
         return ('invalid: the GPU window (rig ce.len %d per end, over %d sessions) is below '
                 'depth x group_bytes = %d' % (rig.get('ce', {}).get('len', 0), var['sessions'],
                                              var['depth'] * group))
-    if arm == 'session':
-        missing = [m for m, _, _ in needed_plans(chain, rig, var)
+    if arm in ('session', 'user-continuation'):
+        missing = [m for m, _, _ in needed_plans(chain, rig, var, arm)
                    if m not in rig.get('attached', [])]
-        if chain in COMPLEMENT and missing:
+        if chain in COMPLEMENT and [m for m in missing if m != 'chain_user_ops']:
             return ('invalid: paired chains share one struct_ops plan per class; attach %s '
                     'once (rig "attached") before the campaign' % ', '.join(missing))
         if var['sessions'] > 1 and missing:
             return ('invalid: %d concurrent sessions share one struct_ops plan per class; '
                     'attach %s once (rig "attached") before the campaign'
                     % (var['sessions'], ', '.join(missing)))
-        unknown = [key for m, key, _ in needed_plans(chain, rig, var)
+        unknown = [key for m, key, _ in needed_plans(chain, rig, var, arm)
                    if m in missing and key not in rig.get('plans', {})]
         if unknown:
             return 'invalid: rig "plans" lacks the %s object' % ', '.join(sorted(set(unknown)))
@@ -366,7 +378,7 @@ def peer(rig, role):
                 session=rig.get('nxp_session', 270019))
 
 
-def needed_plans(chain, rig, var):
+def needed_plans(chain, rig, var, arm='session'):
     """(struct_ops map, rig "plans" object key, globals) of every stage class."""
     classes = {c for c, _, _ in STAGES.get(chain, [])}
     out = []
@@ -378,15 +390,17 @@ def needed_plans(chain, rig, var):
         out.append(('ce_plan_ops', 'ce', {}))
     if 'iaa' in classes:
         out.append(('chain_iaa_ops', 'iaa', dict(expect_out=var.get('group', 0))))
+    if arm == 'user-continuation':
+        out.append(('chain_user_ops', 'user', {}))
     return out
 
 
-def plans(rig, chain, var):
+def plans(rig, chain, var, arm='session'):
     """The plans chain_bench loads itself: those not attached system-wide.
     One struct_ops per class is live at a time, so an attached class is reused."""
     attached = rig.get('attached', [])
     return [dict(obj=rig['plans'][key], map=name, **(dict(set=sets) if sets else {}))
-            for name, key, sets in needed_plans(chain, rig, var) if name not in attached]
+            for name, key, sets in needed_plans(chain, rig, var, arm) if name not in attached]
 
 
 def chain_spec(case, chain, rig, a, shape, seed, out_dir, index=0):
@@ -394,6 +408,8 @@ def chain_spec(case, chain, rig, a, shape, seed, out_dir, index=0):
     var = case['var']
     group, burst, frame = shape
     arm = case['arm']
+    if arm == 'user-continuation' and chain.startswith('nic-'):
+        arm = 'session'  # The complementary sink is unchanged.
     corr = a.correctness_only
     stages, role_tx = [], None
     nvme_role = None
@@ -412,6 +428,8 @@ def chain_spec(case, chain, rig, a, shape, seed, out_dir, index=0):
         elif cls == 'iaa':
             st.update(software=rig.get('iaa_software', True), capacity=group, expect=group)
         stages.append(st)
+        if arm == 'user-continuation' and cls == 'nvme':
+            stages.append({'class': 'user', 'dir': 'to'})
     records = a.records
     spec = dict(schema='xdev-chain-spec-v1', chain=chain, arm=arm,
                 mode='correctness' if corr else 'timing', group_bytes=group,
@@ -433,7 +451,7 @@ def chain_spec(case, chain, rig, a, shape, seed, out_dir, index=0):
             spec['ce']['bdf'] = ce['bdf']
         if arm == 'staged':
             spec['staged_gpu'] = 'ce-sim' if 'xdev_ext_ce_sim' in ce['dev'] else 'cuda'
-    if chain == 'nvme-iaa-gpu':
+    if chain in ('nvme-iaa-gpu', 'nvme-gpu'):
         spec['pool'] = dict(frame_size=var['frame'] or frame)
         if var['pool']:
             spec['pool']['frames'] = var['pool'] // spec['pool']['frame_size']
@@ -447,7 +465,7 @@ def chain_spec(case, chain, rig, a, shape, seed, out_dir, index=0):
                               offset=(side['slba'] + index * (side['nlb'] // var['sessions'])) *
                               side['lba_bytes'],
                               reference=str(out_dir / ('reference-%d.bin' % index)))
-    spec['plans'] = plans(rig, chain, dict(var, group=group))
+    spec['plans'] = plans(rig, chain, dict(var, group=group), arm)
     if not spec['plans']:
         del spec['plans']
     return spec
@@ -475,6 +493,33 @@ def uo_spec(case, chain, rig, a, shape, seed, out_dir):
         spec['oracle'] = dict(kind='file', path=side['block'], offset=side['slba'] * side['lba_bytes'],
                               reference=str(out_dir / 'reference-0.bin'))
     return spec
+
+
+def comparison_contract(case, rig, a, shape, seed):
+    group, burst, frame = shape
+    xsk = any(cls == 'afxdp' for cls, _, _ in STAGES[case['chain']])
+    if xsk:
+        frames, room = XSK_POOL // XSK_FRAME, NXP_HDR_ROOM
+    else:
+        frame = case['var']['frame'] or frame
+        room = 0
+        frames = (case['var']['pool'] // frame if case['var']['pool'] else
+                  case['var']['depth'] * ((group + frame - 1) // frame))
+        if case['chain'] == 'nvme-iaa-gpu' and not case['var']['pool']:
+            frames *= 2  # source plus the same-sized IAA destination lease
+    arm = case['arm']
+    return dict(schema='xdev-chain-comparison-v1',
+                execution_site=('kernel-continuation' if arm == 'session' else
+                                'userspace-continuation' if arm == 'user-continuation' else
+                                'existing-interfaces'),
+                same_binding=arm in ('session', 'user-continuation'),
+                input=dict(seed=seed, record_bytes=case['size'], records=a.records,
+                           warmup_records=a.warmup_records),
+                geometry=dict(group_bytes=group, burst=burst, logical_depth=case['var']['depth'],
+                              frame_size=frame, pool_frames=frames, hdr_room=room),
+                cpu_set=a.cpu_set, completion='terminal-device-completion-and-output-oracle',
+                bindings={name: rig[name] for name in ('nvme_src', 'nvme_dst', 'tx', 'rx', 'ce')
+                          if name in rig})
 
 
 # --- execution ---------------------------------------------------------------------
@@ -575,6 +620,7 @@ def _run_case(case, rig, a, out_dir, seed, cpu=None, observations=None):
         (out_dir / (name.replace('#', '-') + '.spec.json')).write_text(json.dumps(spec, indent=1))
     if a.dry_run:
         return dict(status='planned', specs=sorted(specs),
+                    comparison_contract=comparison_contract(case, rig, a, shape, seed),
                     cpu_measurement_plan=cpu_owner(a, 'CLOCK_MONOTONIC_RAW').plan())
     if a.prepare_source:
         write_source(rig, chain, shape, seed, total, var['sessions'])
@@ -770,17 +816,20 @@ def main(argv):
     stamp = time.strftime('%Y%m%dT%H%M%S')
     root = Path(a.out_dir) / ('%s-%s' % ('correctness' if a.correctness_only else 'timing', stamp))
     rows = []
+    campaign_seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(6), 'little')
     for i, case in enumerate(plan):
         row = dict(case, index=i)
         if case['refused']:
             row['result'] = dict(status='not_run', failure=case['refused'])
         else:
-            seed = a.seed if a.seed is not None else int.from_bytes(os.urandom(6), 'little')
+            seed = campaign_seed
             out_dir = root / ('%03d-%s-%d-%s-%s-%s%s' % (i, case['chain'], case['size'], case['arm'],
                                                        case['load'], case['var']['label'],
                                                        '-' + case['wait'] if case['wait'] else ''))
             try:
                 row['result'] = run_case(case, rig, a, out_dir, seed)
+                row['result']['comparison_contract'] = comparison_contract(
+                    case, rig, a, record_shape(case['chain'], case['size'], rig), seed)
             except (Usage, OSError, KeyError) as error:
                 row['result'] = dict(status='fail', failure=str(error))
             row['seed'] = seed
@@ -789,6 +838,8 @@ def main(argv):
                               load=case['load'], variant=case['var']['label'], wait=case['wait'],
                               status=row['result']['status'],
                               failure=row['result'].get('failure', ''),
+                              **({'comparison_contract': row['result']['comparison_contract']}
+                                 if 'comparison_contract' in row['result'] else {}),
                               **({'cpu_measurement_plan': row['result']['cpu_measurement_plan']}
                                  if a.dry_run and 'cpu_measurement_plan' in row['result'] else {}))), flush=True)
     summary = dict(schema='xdev-chain-campaign-v1', correctness_only=a.correctness_only,

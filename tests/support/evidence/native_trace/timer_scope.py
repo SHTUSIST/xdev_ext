@@ -24,9 +24,11 @@ MAX_JSON = 64 * 1024 * 1024
 # Fixed arm endpoint adapters, never descriptions supplied by a journal.
 _ENDPOINTS = {
     'window_ns': {'staged': {'original-closed-window'}, 'session': {'original-closed-window'},
-                  'userspace-shared': {'original-closed-window'}},
+                  'userspace-shared': {'original-closed-window'},
+                  'user-continuation': {'original-closed-window'}},
     'sustained_ns': {'staged': {'post-warmup-last-completion'}, 'session': {'post-warmup-last-completion'},
                      'userspace-shared': {'post-warmup-last-completion'},
+                     'user-continuation': {'post-warmup-last-completion'},
                      'concurrent': {'concurrent-original-throughput-envelope'}},
     'io_ns': {'session': {'settled-session', 'terminal-wake-before-settle'},
               'uring-cuda': {'retired-pass'}, 'gds-batch': {'retired-pass'}, 'gds-async': {'retired-pass'},

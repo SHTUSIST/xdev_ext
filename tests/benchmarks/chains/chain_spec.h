@@ -35,9 +35,9 @@
 #define CHAIN_XSK_FRAMES	4096U	/* AF_XDP pool chunks, as xdev_ext_mech_ctl */
 #define CHAIN_IAA_MAX		131072U	/* CRYPTO_ACOMP_DST_MAX */
 
-enum chain_class { CH_NVME = 1, CH_CE, CH_AFXDP, CH_IAA };
+enum chain_class { CH_NVME = 1, CH_CE, CH_AFXDP, CH_IAA, CH_USER };
 enum chain_dir { CH_TO = 1, CH_FROM };
-enum chain_arm { CH_SESSION = 1, CH_STAGED };
+enum chain_arm { CH_SESSION = 1, CH_STAGED, CH_USER_CONTINUATION };
 enum chain_mode { CH_CORRECTNESS = 1, CH_TIMING };
 enum chain_start { CH_START_BATCH = 1, CH_START_RUN };
 enum chain_load { CH_LOAD_CLOSED = 1, CH_LOAD_SUSTAINED };
@@ -124,6 +124,8 @@ struct chain_catalog {
 	"returning XDEV_EXT_MECH_BUILD_DEFAULT aborts with -EOPNOTSUPP"
 
 static const struct chain_catalog chain_catalog[] = {
+	{ "nvme-gpu", 2, { CH_NVME, CH_CE }, { CH_FROM, CH_TO },
+	  NULL, true, true },
 	{ "nvme-nic", 2, { CH_NVME, CH_AFXDP }, { CH_FROM, CH_TO },
 	  NULL, true, true },
 	{ "nic-nvme", 2, { CH_AFXDP, CH_NVME }, { CH_FROM, CH_TO },
@@ -239,7 +241,7 @@ static inline int chain_enum(const struct cj_doc *d, int obj, const char *key,
 
 #define CHAIN_ENUM(d, obj, key, dflt, out, e, ...) ({			\
 	static const char *const n_[] = { __VA_ARGS__, NULL };		\
-	static const int v_[] = { 1, 2, 3, 4 };				\
+	static const int v_[] = { 1, 2, 3, 4, 5 };				\
 	int x_ = 0, r_ = chain_enum(d, obj, key, n_, v_, dflt, &x_, e);	\
 	if (!r_)							\
 		*(out) = x_;						\
@@ -394,7 +396,7 @@ static inline int chain_parse_stage(const struct cj_doc *d, int o,
 
 	if (bad)
 		return chain_bad(e, "invalid: unknown stage member %s", bad);
-	if (CHAIN_ENUM(d, o, "class", -1, &cls, e, "nvme", "ce", "afxdp", "iaa") ||
+	if (CHAIN_ENUM(d, o, "class", -1, &cls, e, "nvme", "ce", "afxdp", "iaa", "user") ||
 	    CHAIN_ENUM(d, o, "dir", -1, &dir, e, "to", "from"))
 		return -1;
 	st->cls = (enum chain_class)cls;
@@ -427,6 +429,7 @@ static inline int chain_parse_stage(const struct cj_doc *d, int o,
 			snprintf(st->dev, sizeof(st->dev), "/dev/null");
 		break;
 	case CH_CE:
+	case CH_USER:
 		break;
 	}
 	return 0;
@@ -490,7 +493,7 @@ static inline int chain_parse(const char *text, size_t len, struct chain_spec *s
 	    strcmp(schema, CHAIN_SCHEMA))
 		return chain_bad(e, "invalid: schema must be %s", CHAIN_SCHEMA);
 	if (chain_path(&doc, root, "chain", true, s->chain, sizeof(s->chain), e) ||
-	    CHAIN_ENUM(&doc, root, "arm", -1, &x, e, "session", "staged"))
+	    CHAIN_ENUM(&doc, root, "arm", -1, &x, e, "session", "staged", "user-continuation"))
 		return -1;
 	s->arm = (enum chain_arm)x;
 	if (CHAIN_ENUM(&doc, root, "mode", -1, &x, e, "correctness", "timing"))
@@ -608,6 +611,7 @@ static inline int chain_validate(const struct chain_spec *s, struct chain_err *e
 					chain_find(s->chain) : NULL;
 	unsigned int i, ce = 0;
 	bool xsk = chain_has(s, CH_AFXDP), iaa = chain_has(s, CH_IAA);
+	bool continuation = s->arm == CH_USER_CONTINUATION;
 
 	if (strcmp(s->chain, "custom") && !c)
 		return chain_bad(e, "invalid: unknown chain %s", s->chain);
@@ -615,14 +619,25 @@ static inline int chain_validate(const struct chain_spec *s, struct chain_err *e
 		return chain_bad(e, "%s", c->refusal);
 	if (s->plan == CH_PLAN_DEFAULT)
 		return chain_bad(e, "%s", CHAIN_REFUSE_DEFAULT_PLAN);
+	if (continuation && s->timeout_ms > XDEV_EXT_USER_DEADLINE_MAX_MS)
+		return chain_bad(e, "invalid: user-continuation timeout_ms exceeds %u",
+				 XDEV_EXT_USER_DEADLINE_MAX_MS);
+	if (continuation && strcmp(s->chain, "nvme-nic") && strcmp(s->chain, "nvme-gpu"))
+		return chain_bad(e, "unsupported: user-continuation supports nvme-nic and nvme-gpu");
 	if (c) {
-		if (s->nr_stages != c->nr)
+		unsigned int extra = continuation ? 1 : 0;
+
+		if (s->nr_stages != c->nr + extra)
 			return chain_bad(e, "invalid: chain %s has %u stages, spec lists %u",
-					 c->name, c->nr, s->nr_stages);
-		for (i = 0; i < c->nr; i++)
-			if (s->st[i].cls != c->cls[i] || s->st[i].dir != c->dir[i])
-				return chain_bad(e, "invalid: stage %u does not match chain %s",
-						 i, c->name);
+					 c->name, c->nr + extra, s->nr_stages);
+		for (i = 0; i < s->nr_stages; i++) {
+			unsigned int pos = i - (continuation && i > 1);
+			enum chain_class cls = continuation && i == 1 ? CH_USER : c->cls[pos];
+			enum chain_dir dir = continuation && i == 1 ? CH_TO : c->dir[pos];
+
+			if (s->st[i].cls != cls || s->st[i].dir != dir)
+				return chain_bad(e, "invalid: stage %u does not match chain %s", i, c->name);
+		}
 	}
 	if (s->arm == CH_STAGED && (!c || !c->staged))
 		return chain_bad(e, "unsupported: the staged arm has no %s composition",
@@ -639,13 +654,15 @@ static inline int chain_validate(const struct chain_spec *s, struct chain_err *e
 	for (i = 0; i < s->nr_stages; i++) {
 		const struct chain_stage *st = &s->st[i];
 
+		if (st->cls == CH_USER && (!continuation || i != 1 || st->dir != CH_TO))
+			return chain_bad(e, "invalid: USER is the continuation point after NVMe");
 		if (i && st->cls == CH_AFXDP && st->dir == CH_FROM)
 			return chain_bad(e, "invalid: AF_XDP RX must be stage 0");
 		if (i && st->cls == CH_NVME && st->dir == CH_FROM)
 			return chain_bad(e, "invalid: an NVMe READ must be stage 0");
 		if (i + 1 < s->nr_stages && st->cls == CH_AFXDP && st->dir == CH_TO)
 			return chain_bad(e, "invalid: AF_XDP TX must be the last stage");
-		if (st->cls == CH_NVME && s->arm == CH_SESSION && !st->dev[0])
+		if (st->cls == CH_NVME && s->arm != CH_STAGED && !st->dev[0])
 			return chain_bad(e, "invalid: session NVMe stage %u needs dev (ngXnY)", i);
 		if (st->cls == CH_NVME && s->arm == CH_STAGED && !st->block[0])
 			return chain_bad(e, "invalid: staged NVMe stage %u needs block", i);
@@ -672,9 +689,9 @@ static inline int chain_validate(const struct chain_spec *s, struct chain_err *e
 	}
 	if (s->nr_stages < 2 && chain_rx_first(s))
 		return chain_bad(e, "invalid: AF_XDP RX feeds at least one more stage");
-	if (ce && s->arm == CH_SESSION && !s->ce_dev[0])
+	if (ce && s->arm != CH_STAGED && !s->ce_dev[0])
 		return chain_bad(e, "invalid: CE stages need ce.dev");
-	if (ce && s->arm == CH_SESSION &&
+	if (ce && s->arm != CH_STAGED &&
 	    !xdev_ext_mech_ctl_ce_window_ok(s->depth, s->group_bytes, s->ce_len))
 		return chain_bad(e, "invalid: ce.len must hold depth x group_bytes window slots");
 	if (ce && s->arm == CH_STAGED && s->gpu == CH_GPU_NONE)
@@ -824,6 +841,10 @@ static inline void chain_stage_uapi(const struct chain_spec *s, const int *fds,
 		case CH_AFXDP:
 			u->class_id = XDEV_EXT_MECH_CLASS_AFXDP;
 			u->fd = xsk_fd;
+			break;
+		case CH_USER:
+			u->class_id = XDEV_EXT_MECH_CLASS_USER;
+			u->arg0 = s->timeout_ms;
 			break;
 		case CH_IAA:
 			u->class_id = XDEV_EXT_MECH_CLASS_IAA;

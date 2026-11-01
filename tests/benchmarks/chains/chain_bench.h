@@ -34,6 +34,8 @@ struct chain_result {
 	const char *copy_sources[CHAIN_MAX_COPY_SOURCES];
 	int64_t nvme_bounces;		/* -1: no bounce counter in this kernel */
 	int xsk_zero_copy;		/* -1: no AF_XDP stage */
+	uint64_t user_ready_batches, user_completed_batches;
+	int user_failure;
 	/* staged arm accounting */
 	uint64_t cpu_copies, cpu_copy_bytes, cpu_read_bytes, socket_bytes;
 	/* IAA plan counters (chain_plan.bpf.c), when loaded */
