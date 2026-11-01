@@ -78,11 +78,13 @@ SCHEDULER = r'''
 struct xdev_ext_mech_batch {u64 key,start_ordinal;u32 start_template;bool ordered_loan,to_user,busy;u32 nr_frames,present,bytes;struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_frame f[1];};
 typedef int atomic_t,wait_queue_head_t;
 struct kthread_worker;struct kthread_work {int unused;};
+struct xdev_ext_mech_instance;
 struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user,start_recycle;
  struct xdev_ext_mech_start_queue *start_queue;bool start_ordered,start_return_pending,create_pending_publish,worker_gone;
  u64 stop_started_ns;int stop_err,last_err;atomic_t native_controls;wait_queue_head_t drain_wq;
  struct kthread_worker *worker;struct kthread_work stop_work;
  const void *ops[XDEV_EXT_MECH_CLASS_MAX];bool pinned[XDEV_EXT_MECH_CLASS_MAX];
+ struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
  u64 start_left,start_seq;u32 start_user_len,frames,nr_stages;struct xdev_ext_mech_sess ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];struct xdev_ext_mech_stage_uapi plan[2];struct xdev_ext_mech_life life[2];};
 /* Optional observer disabled; publication below executes the production helper. */
 #define xdev_ext_mech_trace_batch(b,event,status,flags) ((void)0)
@@ -99,6 +101,9 @@ static bool kthread_queue_work(struct kthread_worker *w,struct kthread_work *k)
 {(void)w;(void)k;abort();}
 static bool xdev_ext_mech_ops_current(u32 id,const void *ops,bool pinned)
 {(void)id;(void)ops;(void)pinned;abort();}
+/* Legacy START cases select no PRIVATE instance. Unexpected lookup is fatal. */
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance)
+{(void)instance;abort();}
 static int submitted,admission_error;
 static struct xdev_ext_mech_batch *xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *s)
 {for(unsigned i=0;i<2;i++)if(!s->batches[i].busy){struct xdev_ext_mech_batch *b=&s->batches[i];b->busy=true;s->ss.inflight++;xdev_ext_mech_bstate_init(&b->bs,2);return b;}return NULL;}
@@ -219,6 +224,7 @@ def main():
     support = "".join(struct(contract, name) for name in ("xdev_ext_mech_frame", "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool")) + GLUE + function(contract, "static inline struct page *xdev_ext_mech_frame_page(") + function(ops, "static u8 *xdev_ext_mech_frame_bytes(")
     start = "".join(function(core, signature) for signature in (
         "u32 xdev_ext_mech_pool_frame_state(",
+        "static bool xdev_ext_mech_programs_current(",
         "bool xdev_ext_mech_session_admits(",
         "static void xdev_ext_mech_settle_locked(",
         "static void xdev_ext_mech_session_stop(",

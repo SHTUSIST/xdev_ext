@@ -92,7 +92,8 @@ def prepare(kernel, stack, out):
     compat = compat_path.read_text()
     compat = compat.replace('struct xdev_ext_mech_stage st;u64 id',
                             'struct xdev_ext_mech_stage st[1];u64 id')
-    compat = '#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)\n' + compat
+    compat = ('#define smp_load_acquire(p) __atomic_load_n((p),__ATOMIC_ACQUIRE)\n'
+              'struct xdev_ext_mech_instance;\n' + compat)
     compat = compat.replace('struct file authority;};', '''struct file authority;
  bool worker_gone,create_pending_publish; unsigned nr_bound,nr_stages;
  void *worker; struct delayed_work retry_work,progress_work,poll_work;
@@ -102,6 +103,7 @@ def prepare(kernel, stack, out):
  bool owns_life; atomic64_t cnt[XDEV_EXT_MECH_CNT_NR];
  void *ops[XDEV_EXT_MECH_CLASS_MAX];
  bool pinned[XDEV_EXT_MECH_CLASS_MAX]; void *c_owner[XDEV_EXT_MECH_CLASS_MAX];
+ struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
 };
 int kthread_mod_delayed_work(void *,struct delayed_work *,unsigned long);
 ''')
@@ -111,11 +113,20 @@ int kthread_mod_delayed_work(void *,struct delayed_work *,unsigned long);
     boundary = re.sub(r'(\.st|\b(?:session|s)->st)\b', r'\1[0]', boundary)
     boundary = boundary.replace(definition(boundary, 'xdev_ext_mech_stage_kick'),
                                 definition(core, 'xdev_ext_mech_stage_kick'))
+    # Existing scenarios select no cached default or PRIVATE program. Preserve
+    # real admission/release bodies; any unexpected registry work is fatal.
+    admission = '\n'.join(definition(core, name) for name in (
+        'xdev_ext_mech_programs_current', 'xdev_ext_mech_session_admits'))
+    default_boundary = '''
+static bool xdev_ext_mech_ops_current(u32 i,const void *o,bool p)
+{ (void)i;(void)o;(void)p;abort(); }
+static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance)
+{ (void)instance;abort(); }
+static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
+{ (void)instance;abort(); }
+'''
     boundary = boundary.replace(definition(boundary, 'xdev_ext_mech_session_admits'),
-                                definition(core, 'xdev_ext_mech_session_admits'))
-    # OS core callback dependencies declared before the two verbatim functions.
-    boundary = boundary.replace('bool xdev_ext_mech_session_admits(',
-        'static bool xdev_ext_mech_ops_current(u32 i,void *o,bool p) { (void)i;(void)o;(void)p;abort(); }\nbool xdev_ext_mech_session_admits(', 1)
+                                default_boundary + admission)
     boundary = boundary.replace('if(epoch->bound&&(epoch->s.kicked||',
                                 'if(epoch->bound&&!epoch->s.worker_gone&&(epoch->s.kicked||')
     # Real release frees the session; here it is embedded in the recorder epoch.
