@@ -32,7 +32,8 @@ EVENT = 'xdev_ext:native_event'
 PHASES = {'record_admit', 'native_submit', 'native_complete', 'record_terminal'}
 OBSERVATIONS = {'class_validate', 'downstream_complete', 'frame_recycle',
                 'native_span', 'region_span', 'pool_bind', 'session_bind',
-                'dma_span', 'dma_seal', 'dma_unmap', 'dma_tx'}
+                'dma_span', 'dma_seal', 'dma_unmap', 'dma_tx',
+                'peer_dma_span', 'peer_dma_seal', 'peer_dma_release'}
 FIELDS = ('session_id', 'batch_id', 'batch_key', 'frame_id', 'generation',
           'stage', 'ticket', 'class_id', 'accepted', 'status', 'cookie',
           'address', 'bytes', 'aux', 'sequence', 'origin_tgid', 'process_start_ticks', 'native_user_data', 'frame_ordinal', 'frame_offset', 'frame_length')
@@ -121,6 +122,8 @@ def decode_trace(manifest, raw_text, metadata):
                    probe_accepted=item['accepted'], native_stage=item['stage'],
                    **{key: value for key, value in item.items() if key not in ('phase', 'accepted', 'stage')},
                    accepted=False)
+        if item['phase'].startswith('peer_dma_'):
+            row.update(address_kind='device_dma', resource_scope='peer_lease')
         if reason:
             row['scope_excluded'] = reason
         output.append(row)

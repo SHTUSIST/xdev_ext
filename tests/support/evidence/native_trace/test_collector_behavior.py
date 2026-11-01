@@ -51,6 +51,23 @@ class RawDecoder(unittest.TestCase):
                              trace_dropped=0, abi='xdev-native-fixture-text-v0',
                              evidence_kind='fixture', physical=False, performance_eligible=False)
 
+    def test_peer_dma_is_typed_observation_not_accepted_work(self):
+        text = (raw('peer_dma_span', '1.01', address=0, native_user_data=0xa0000080,
+                    ticket=91, bytes=1024, sequence=0, aux=0) +
+                raw('peer_dma_seal', '1.02', address=0, native_user_data=0,
+                    ticket=0, bytes=1024, sequence=0, aux=1) +
+                raw('peer_dma_release', '1.04', address=0, native_user_data=0,
+                    ticket=0, bytes=1024, sequence=0, aux=1, accepted=0, status=-115))
+        rows = self.c.decode_trace(manifest(), text, self.metadata)
+        self.assertEqual(len(rows), 3)
+        self.assertTrue(all(r['observation_only'] and not r['accepted'] for r in rows))
+        self.assertTrue(all(r['address_kind'] == 'device_dma' for r in rows))
+        self.assertEqual(rows[0]['native_user_data'], 0xa0000080)
+        self.assertEqual(rows[0]['ticket'], 91)
+        self.assertEqual(rows[-1]['probe_accepted'], 0)
+        self.assertEqual(rows[-1]['status'], -115)
+        self.assertEqual(rows[-1]['resource_scope'], 'peer_lease')
+
     def test_decodes_actual_text_precision_and_immutable_mapping(self):
         rows = self.c.decode_trace(manifest(), raw('native_submit', '12.000000001') +
                                   raw('native_complete', '12.000000019'), self.metadata)

@@ -1738,6 +1738,11 @@
       "native_path": "drivers/nvme/host/xdev_ext_mech_nvme.c"
     },
     {
+      "source": "src/storage/drivers/nvme/host/xdev_ext_native_peer_trace.h",
+      "component": "linux",
+      "native_path": "drivers/nvme/host/xdev_ext_native_peer_trace.h"
+    },
+    {
       "source": "src/storage/drivers/nvme/host/xdev_ext_peer_nvme_core.h",
       "component": "linux",
       "native_path": "drivers/nvme/host/xdev_ext_peer_nvme_core.h"
@@ -7664,6 +7669,10 @@
     {
       "source": "tests/support/evidence/native_trace/test_nvme_completion.py",
       "logical_path": "tests/eval/native_trace/test_nvme_completion.py"
+    },
+    {
+      "source": "tests/support/evidence/native_trace/test_nvme_peer_dma.py",
+      "logical_path": "tests/eval/native_trace/test_nvme_peer_dma.py"
     },
     {
       "source": "tests/support/evidence/native_trace/test_provider_boundary.py",

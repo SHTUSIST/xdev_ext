@@ -138,6 +138,10 @@ def derive(plan, events, runtime, journal):
         if key not in mapping_cache:
             group = observations[observation_key]
             if class_id == 3:
+                _require(not any(start <= row['ts_ns'] <= end
+                                 for phase in ('peer_dma_span', 'peer_dma_seal')
+                                 for row in group[phase]),
+                         'device-memory DMA observations cannot certify host backing')
                 selected = {}
                 for phase in ('dma_span', 'dma_seal', 'dma_unmap'):
                     times = observation_times.get(observation_key, {}).get(phase, [])

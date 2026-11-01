@@ -102,6 +102,9 @@ jobs:
       - name: DMA reference plan byte coverage and provider limits
         working-directory: .
         run: make -C tests/core/provider_dma test BUILD_DIR="$RUNNER_TEMP/dma-reference"
+      - name: Native peer DMA observation contracts
+        working-directory: .
+        run: python3 -I tests/support/evidence/native_trace/test_nvme_peer_dma.py
       - name: USER stage rules, scheduler and wiring contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py
       - name: Socket NIC copy fallback and accounting contracts

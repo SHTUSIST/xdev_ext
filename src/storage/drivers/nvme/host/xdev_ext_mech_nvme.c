@@ -37,6 +37,7 @@
 #include <linux/capability.h>
 #include "nvme.h"
 #include "xdev_ext_peer_nvme_core.h"
+#include "xdev_ext_native_peer_trace.h"
 
 struct nvme_xdev_ext_mech_slot;
 struct nvme_xdev_ext_peer_slot;
@@ -256,6 +257,7 @@ static const struct xdev_ext_stor_hooks nvme_xdev_ext_stor_hooks = {
 struct nvme_xdev_ext_peer_slot {
 	struct xdev_ext_peer_nvme_seg spans[NVME_XDEV_EXT_PEER_MAX_SPANS];
 	struct nvme_xdev_ext_mech_completion done;
+	struct nvme_xdev_ext_peer_trace trace;
 	struct nvme_xdev_ext_peer_slot *next;
 	struct xdev_ext_peer_fd_lease *leases;	/* max_pieces, in payload order */
 	struct nvme_sgl_desc *sgl;		/* max_pieces, controller-readable */
@@ -877,6 +879,7 @@ nvme_xdev_ext_peer_slot_get(struct nvme_xdev_ext_peer_res *res,
 	slot->next = NULL;
 	slot->busy = true;
 	slot->nr_leases = 0;
+	slot->trace.cookie = 0;
 	slot->done.uncertain = false;
 	bp->peer_slot = slot;
 	return slot;
@@ -901,6 +904,8 @@ static void nvme_xdev_ext_peer_slot_put(struct nvme_xdev_ext_peer_res *res,
 	quiesced = !slot->done.uncertain;
 	for (i = 0; i < slot->nr_leases; i++)
 		xdev_ext_peer_fd_release(&slot->leases[i], quiesced);
+	nvme_xdev_ext_peer_trace_release(&slot->trace, quiesced);
+	slot->trace.cookie = 0;
 	slot->nr_leases = 0;
 	bp->peer_slot = NULL;
 	if (!quiesced)
@@ -1029,6 +1034,8 @@ static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req,
 	u64 ticket = done->ticket;
 	int status;
 
+	nvme_req(req)->flags &= ~NVME_REQ_XDEV_EXT_PEER;
+	nvme_req(req)->peer_trace = NULL;
 	WRITE_ONCE(done->poll_live, false);
 	if (xdev_ext_mech_batch_completion_claim(b, ticket))
 		return RQ_END_IO_FREE;
@@ -1119,7 +1126,13 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	if (nvme_ctrl_sgl_supported(ns->ctrl))
 		nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
 	req->cmd_flags |= REQ_FAILFAST_MASK;
-	nvme_req(req)->flags |= NVME_REQ_USERCMD;
+	slot->trace = (struct nvme_xdev_ext_peer_trace) {
+		.leases = slot->leases, .nr_leases = slot->nr_leases,
+		.bytes = plan.bytes, .origin = "K",
+		.cookie = (u64)(unsigned long)req,
+	};
+	nvme_req(req)->peer_trace = &slot->trace;
+	nvme_req(req)->flags |= NVME_REQ_USERCMD | NVME_REQ_XDEV_EXT_PEER;
 	slot->done.b = b;
 	slot->done.ticket = xdev_ext_mech_batch_ticket(b);
 	req->end_io = nvme_xdev_ext_peer_end_io;

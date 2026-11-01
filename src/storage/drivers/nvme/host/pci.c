@@ -26,6 +26,7 @@
 #include <uapi/linux/xdev_ext_peer.h>
 #include <trace/events/xdev_ext.h>
 #include "xdev_ext_peer_nvme_core.h"
+#include "xdev_ext_native_peer_trace.h"
 #endif
 #include <linux/suspend.h>
 #include <linux/t10-pi.h>
@@ -712,6 +713,50 @@ static bool nvme_native_dma_sg(struct device *dev, struct sg_table *sgt,
 		!source_off && !dma_off;
 }
 
+/*
+ * A provider lease has a requester DMA address, not a CPU physical address.
+ * These typed observations certify the SQ's ordered lease extent snapshot
+ * only. They cannot qualify host backing, BAR provenance, or physical DMA.
+ */
+static void nvme_native_peer_dma_trace(struct request *req)
+{
+	const struct nvme_xdev_ext_peer_trace *ctx = nvme_req(req)->peer_trace;
+	struct xdev_ext_native_event e = {
+		.phase = "peer_dma_span", .class_id = 3,
+		.cookie = (u64)(unsigned long)req,
+	};
+	bool complete = true;
+	u32 i;
+
+	if (!ctx || ctx->cookie != e.cookie)
+		return;
+	e.origin = ctx->origin;
+	for (i = 0; i < ctx->nr_leases; i++) {
+		const struct xdev_ext_peer_lease *lease = &ctx->leases[i].lease;
+		bool valid = lease->mapping && lease->ticket && lease->len &&
+			lease->dma_address <= U64_MAX - (lease->len - 1) &&
+			e.aux <= ctx->bytes && lease->len <= ctx->bytes - e.aux;
+
+		e.native_user_data = lease->dma_address;
+		e.ticket = lease->ticket;
+		e.bytes = lease->len;
+		e.accepted = valid;
+		e.status = valid ? 0 : -EOPNOTSUPP;
+		trace_native_event(&e);
+		complete &= valid;
+		e.aux += lease->len;
+		e.sequence++;
+	}
+	complete &= ctx->nr_leases && e.aux == ctx->bytes;
+	e.phase = "peer_dma_seal";
+	e.accepted = complete;
+	e.status = complete ? 0 : -EOPNOTSUPP;
+	e.bytes = ctx->bytes;
+	e.aux = e.sequence;
+	e.sequence = e.ticket = e.native_user_data = 0;
+	trace_native_event(&e);
+}
+
 static bool nvme_native_dma_enabled(struct request *req)
 {
 	return trace_native_event_enabled() &&
@@ -733,6 +778,12 @@ static void nvme_native_dma_trace(struct nvme_dev *dev, struct request *req)
 	struct nvme_iod *iod;
 	bool certified;
 
+	if (!trace_native_event_enabled())
+		return;
+	if (nvme_req(req)->flags & NVME_REQ_XDEV_EXT_PEER) {
+		nvme_native_peer_dma_trace(req);
+		return;
+	}
 	if (!nvme_native_dma_enabled(req))
 		return;
 	/* Request flags, not the asynchronous submitter's current task. */
@@ -3284,6 +3335,7 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  struct nvme_dev *dev = to_nvme_dev(ns->ctrl);
  struct xdev_ext_peer_nvme_plan plan;
  struct xdev_ext_peer_fd_lease handle = {};
+ struct nvme_xdev_ext_peer_trace trace = { .leases = &handle, .nr_leases = 1, .origin = "U" };
  struct nvme_command cmd = {};
  struct request *req;
  bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE;
@@ -3320,14 +3372,20 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
   */
  nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
  req->cmd_flags |= REQ_FAILFAST_MASK;
- nvme_req(req)->flags |= NVME_REQ_USERCMD;
+ trace.bytes = plan.bytes;
+ trace.cookie = (u64)(unsigned long)req;
+ nvme_req(req)->peer_trace = &trace;
+ nvme_req(req)->flags |= NVME_REQ_USERCMD | NVME_REQ_XDEV_EXT_PEER;
  if (accepted) *accepted = true;
  ret = nvme_execute_rq(req, false);
+ nvme_req(req)->flags &= ~NVME_REQ_XDEV_EXT_PEER;
+ nvme_req(req)->peer_trace = NULL;
  blk_mq_free_request(req);
  /* Errors/cancellation do not prove that no peer DMA can still arrive.
   * Retain mapping/allocation on all accepted failures; never retry here.
   */
  xdev_ext_peer_fd_release(&handle, ret == 0);
+ nvme_xdev_ext_peer_trace_release(&trace, ret == 0);
  return ret;
 release:
  xdev_ext_peer_fd_release(&handle, true);
