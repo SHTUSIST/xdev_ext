@@ -11,7 +11,7 @@ model does not reproduce nvme-pci queues, DMA or timing.
 import re
 import unittest
 
-from poll_extract import body, compile_and_run, fields, function, source
+from poll_extract import KERNEL, body, compile_and_run, fields, function, source
 
 NVME = 'drivers/nvme/host/xdev_ext_mech_nvme.c'
 BLK = 'block/blk-mq.c'
@@ -33,6 +33,10 @@ FIXTURE = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include "include/linux/xdev_ext_storfam_runtime.h"
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define ERR_CAST(p) ((void *)(p))
 #include "include/uapi/linux/xdev_ext_mech.h"
 
 typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_t u8;
@@ -148,11 +152,12 @@ static void blk_mq_free_request(struct request *req) { (void)req; frees++; }
 static void nvme_init_request(struct request *req, struct nvme_command *cmd) { (void)req; (void)cmd; }
 static void blk_execute_rq_nowait(struct request *req, bool at_head)
 {
-	struct nvme_xdev_ext_mech_completion *done = req->end_io_data;
+	struct xdev_ext_stor_completion *done = req->end_io_data;
 	(void)at_head;
 	executes++;
 	live_at_execute = done->poll_live;
 	queue_at_execute = done->poll_queue;
+	if (!strcmp(mode,"early")) req->end_io(req,0);
 }
 static int blk_mq_poll_hw_queue(struct request_queue *q, unsigned int queue_num, struct io_comp_batch *iob)
 {
@@ -200,8 +205,9 @@ static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req, blk_sta
 static void report(int rc)
 {
 	printf("rc=%d polled_opf=%d allocs=%d frees=%d maps=%d executes=%d slot_gets=%d slot_puts=%d "
-	       "live=%d queue=%u publishes=%d\n", rc, !!(alloc_opf & REQ_POLLED), allocs, frees, maps,
-	       executes, slot_gets, slot_puts, live_at_execute, queue_at_execute, publishes);
+	       "live=%d queue=%u publishes=%d live_after=%d\n", rc, !!(alloc_opf & REQ_POLLED), allocs, frees, maps,
+	       executes, slot_gets, slot_puts, live_at_execute, queue_at_execute, publishes,
+	       native_request.end_io_data ? ((struct xdev_ext_stor_completion *)native_request.end_io_data)->poll_live : -1);
 }
 
 static int submit_case(bool poll)
@@ -222,10 +228,10 @@ static int submit_case(bool poll)
 static int end_io_case(bool peer)
 {
 	static struct xdev_ext_mech_batch b;
-	struct nvme_xdev_ext_mech_completion done = { .b = &b, .ticket = 11, .poll_live = true, .poll_queue = 5 };
+	struct xdev_ext_stor_completion done = { .b = &b, .ticket = 11, .poll_live = true, .poll_queue = 5 };
 	struct request req = { .end_io_data = &done };
 
-	b.ticket = 11;
+	b.ticket = !strcmp(mode,"stale") ? 12 : 11;
 	if (peer)
 		nvme_xdev_ext_peer_end_io(&req, 0);
 	else
@@ -291,8 +297,8 @@ int main(int argc, char **argv)
 		return 2;
 	mode = argv[1];
 	if (!strcmp(mode, "plain")) return submit_case(false);
-	if (!strcmp(mode, "poll") || !strcmp(mode, "lost")) return submit_case(true);
-	if (!strcmp(mode, "end_io")) return end_io_case(false);
+	if (!strcmp(mode, "poll") || !strcmp(mode, "lost") || !strcmp(mode,"early")) return submit_case(true);
+	if (!strcmp(mode, "end_io") || !strcmp(mode,"stale")) return end_io_case(false);
 	if (!strcmp(mode, "peer_end_io")) return end_io_case(true);
 	if (!strcmp(mode, "pass")) return pass_case(false);
 	if (!strcmp(mode, "peer_pass")) return pass_case(true);
@@ -302,17 +308,31 @@ int main(int argc, char **argv)
 '''
 
 PRODUCTION = ('nvme_xdev_ext_poll_capable', 'nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
-              'nvme_xdev_ext_poll_arm', 'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_peer_end_io',
+              'nvme_xdev_ext_poll_arm', 'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_ready',
+              'nvme_xdev_ext_peer_complete', 'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_peer_end_io',
               'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_class_poll')
+
+
+def storage_runtime(root):
+    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    found = []
+    for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
+                 'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
+        match = re.search(r'^[A-Za-z_][^;{}]*\b' + name +
+                          r'\([^;{}]*\)\s*\{.*?^\}', content, re.M | re.S)
+        if not match:
+            raise AssertionError('production storage runtime symbol missing: ' + name)
+        found.append(match[0])
+    return '\n\n'.join(found)
 
 
 def build_fixture():
     text = source(NVME)
     structs = '\n'.join(structure(text, n) for n in (
-        'nvme_xdev_ext_mech_completion', 'nvme_xdev_ext_mech_slot',
+        'nvme_xdev_ext_mech_slot',
         'nvme_xdev_ext_peer_slot', 'nvme_xdev_ext_peer_res'))
     structs = structs.replace('struct device *dma_dev;', 'void *dma_dev;')
-    production = '\n'.join(function(text, n) for n in PRODUCTION)
+    production = storage_runtime(KERNEL) + '\n' + '\n'.join(function(text, n) for n in PRODUCTION)
     return FIXTURE.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
 
 
@@ -345,6 +365,15 @@ class NvmePoll(unittest.TestCase):
     def test_end_io_retires_the_poll_record(self):
         r = self.run_case('end_io')
         self.assertEqual((r['live'], r['publishes']), (0, 1), r)
+
+    def test_immediate_completion_clears_poll_record_before_submit_returns(self):
+        r = self.run_case('early')
+        self.assertEqual((r['rc'], r['executes'], r['live'], r['live_after'], r['publishes']),
+                         (0, 1, 1, 0, 1), r)
+
+    def test_stale_completion_retires_record_without_publishing(self):
+        r = self.run_case('stale')
+        self.assertEqual((r['live'], r['publishes']), (0, 0), r)
 
     def test_peer_end_io_retires_the_poll_record(self):
         r = self.run_case('peer_end_io')

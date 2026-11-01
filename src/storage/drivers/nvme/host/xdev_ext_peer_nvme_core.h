@@ -38,9 +38,9 @@ static inline int xdev_ext_peer_nvme_plan(u8 lba_shift, u64 capacity_lbas,
 #define xdev_ext_peer_nvme_seg xdev_ext_stor_extent
 static inline int xdev_ext_peer_nvme_sgl_build(
  const struct xdev_ext_peer_nvme_seg *seg, u32 nr,
- struct xdev_ext_peer_nvme_seg *out, u32 cap, u32 *n)
+ struct xdev_ext_peer_nvme_seg *out, u32 cap, u32 align_mask, u32 *n)
 {
- return xdev_ext_stor_coalesce(seg, nr, out, cap, 3, n);
+ return xdev_ext_stor_coalesce(seg, nr, out, cap, align_mask, n);
 }
 static inline int xdev_ext_peer_nvme_prp_build(
  const struct xdev_ext_peer_nvme_seg *seg, u32 nr, u32 page_shift,

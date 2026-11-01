@@ -28,31 +28,37 @@ static void sgl_cases(void)
  u32 n = 99, i;
  /* 16 x 64 KiB frames, provider maps them contiguously: one 1 MiB data block. */
  for (i = 0; i < 16; i++) seg[i] = (struct xdev_ext_peer_nvme_seg){ 0x40000000ULL + i * 64 * KIB, 64 * KIB };
- CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 16, out, 256, &n) && n == 1 &&
+ CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 16, out, 256, 3, &n) && n == 1 &&
        out[0].addr == 0x40000000ULL && out[0].len == MIB, "contiguous 1 MiB over 16 frames is one inline SGL data block");
  /* Frame 5 lives elsewhere: three runs [0,5) [5] [6,16). */
  seg[5].addr = 0x90000000ULL;
- CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 16, out, 256, &n) && n == 3 &&
+ CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 16, out, 256, 3, &n) && n == 3 &&
        out[0].addr == 0x40000000ULL && out[0].len == 5 * 64 * KIB &&
        out[1].addr == 0x90000000ULL && out[1].len == 64 * KIB &&
        out[2].addr == 0x40000000ULL + 6 * 64 * KIB && out[2].len == 10 * 64 * KIB,
        "a remote frame splits the list into three data blocks in payload order");
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 16, out, 2, &n) == -EREMOTEIO && n == 0, "more blocks than list room: -EREMOTEIO");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 16, out, 2, 3, &n) == -EREMOTEIO && n == 0, "more blocks than list room: -EREMOTEIO");
  seg[5].addr = 0x40000000ULL + 5 * 64 * KIB;
  /* Merged length must fit the 32-bit SGL length field. */
  seg[0] = (struct xdev_ext_peer_nvme_seg){ 0x100000000ULL, 0xfffff000U };
  seg[1] = (struct xdev_ext_peer_nvme_seg){ 0x100000000ULL + 0xfffff000ULL, 0x2000 };
- CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 2, out, 4, &n) && n == 2 && out[0].len == 0xfffff000U &&
+ CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 2, out, 4, 3, &n) && n == 2 && out[0].len == 0xfffff000U &&
        out[1].len == 0x2000, "a run that would overflow the 32-bit length starts a new block");
  seg[0] = (struct xdev_ext_peer_nvme_seg){ 0x40000002ULL, 4096 };
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, &n) == -EINVAL && n == 0, "non-dword address refused");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 3, &n) == -EINVAL && n == 0, "non-dword address refused");
  seg[0] = (struct xdev_ext_peer_nvme_seg){ 0x40000000ULL, 4094 };
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, &n) == -EINVAL, "non-dword length refused");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 3, &n) == -EINVAL, "non-dword length refused");
  seg[0] = (struct xdev_ext_peer_nvme_seg){ 0x40000000ULL, 0 };
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, &n) == -EINVAL, "empty segment refused");
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 0, out, 4, &n) == -EINVAL, "no segment refused");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 3, &n) == -EINVAL, "empty segment refused");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 0, out, 4, 3, &n) == -EINVAL, "no segment refused");
  seg[0] = (struct xdev_ext_peer_nvme_seg){ UINT64_MAX - 4095, 8192 };
- CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, &n) == -EOVERFLOW, "wrapping segment refused");
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 3, &n) == -EOVERFLOW, "wrapping segment refused");
+ seg[0] = (struct xdev_ext_peer_nvme_seg){3, 5};
+ CHECK(!xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 0, &n) && n == 1,
+       "zero declared alignment permits byte extents");
+ seg[0] = (struct xdev_ext_peer_nvme_seg){4, 8};
+ CHECK(xdev_ext_peer_nvme_sgl_build(seg, 1, out, 4, 7, &n) == -EINVAL,
+       "eight-byte declared alignment rejects a merely dword-aligned span");
  if (!failures) puts("ok 1 - SGL data blocks merge DMA-contiguous peer pages across frames, bounded by list room");
 }
 

@@ -52,7 +52,8 @@ struct nvme_xdev_ext_mech_stage {
 	atomic_t dead;
 	/* Only this session's worker mutates the free list. End_io records a
   * terminal outcome; fill_cqe returns a definitively drained slot. */
-	struct nvme_xdev_ext_mech_slot *slots, *free;
+	struct nvme_xdev_ext_mech_slot *slots;
+	struct xdev_ext_stor_pool pool;
 	u32 nr_slots;
 	u16 nr_vecs;
 	struct nvme_xdev_ext_peer_res *peer;	/* GPU-memory pool only */
@@ -71,31 +72,17 @@ struct nvme_xdev_ext_mech_batch {
 	struct nvme_xdev_ext_peer_slot *peer_slot;
 };
 
-/* Owned by one native request until end_io; never re-read a reused batch ticket. */
-struct nvme_xdev_ext_mech_completion {
-	struct xdev_ext_mech_batch *b;
-	u64 ticket;
-	bool uncertain;
-	/*
-	 * Polled stage: the hardware queue of the request, live from just before
-	 * execute until its end_io.  Only the session worker's poll pass reads
-	 * it; a stale "live" costs one extra poll of a queue, never a request.
-	 */
-	bool poll_live;
-	u32 poll_queue;
-};
-
 /*
  * One bounded lease per possible live batch, allocated at CREATE. A native
  * request retains this context and bio until end_io and worker consumption.
  */
 struct nvme_xdev_ext_mech_slot {
-	struct nvme_xdev_ext_mech_completion done;
-	struct nvme_xdev_ext_mech_slot *next;
+	struct xdev_ext_stor_completion done;
+	struct xdev_ext_stor_slot runtime;
 	struct bio *bio;
 	struct page **bounce;
 	u32 nr_bounce;
-	bool busy, bio_live;
+	bool bio_live;
 };
 
 /* Process context: only after drain, or unwinding a failed CREATE. */
@@ -106,7 +93,7 @@ static bool nvme_xdev_ext_class_resources_free(struct nvme_xdev_ext_mech_stage *
 	if (!p->slots)
 		return true;
 	for (i = 0; i < p->nr_slots; i++)
-		if (WARN_ON_ONCE(p->slots[i].busy))
+		if (WARN_ON_ONCE(p->slots[i].runtime.busy))
 			return false; /* Accepted or quarantined leases remain pinned. */
 	for (i = 0; i < p->nr_slots; i++) {
 		struct nvme_xdev_ext_mech_slot *slot = &p->slots[i];
@@ -126,7 +113,8 @@ static bool nvme_xdev_ext_class_resources_free(struct nvme_xdev_ext_mech_stage *
 		kfree(slot->bio);
 	}
 	kfree(p->slots);
-	p->slots = p->free = NULL;
+	p->slots = NULL;
+	p->pool.free = NULL;
 	p->nr_slots = 0;
 	return true;
 }
@@ -180,8 +168,7 @@ static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st)
 			}
 		}
 #endif
-		slot->next = p->free;
-		p->free = slot;
+		xdev_ext_stor_slot_add(&p->pool, &slot->runtime);
 	}
 	return 0;
 fail:
@@ -196,15 +183,12 @@ nvme_xdev_ext_class_slot_get(struct xdev_ext_mech_stage *st,
 {
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
 	struct nvme_xdev_ext_mech_slot *slot;
+	struct xdev_ext_stor_slot *node;
 
-	if (bp->slot)
-		return ERR_PTR(-EBUSY);
-	slot = p->free;
-	if (!slot)
-		return ERR_PTR(-EAGAIN);
-	p->free = slot->next;
-	slot->next = NULL;
-	slot->busy = true;
+	node = xdev_ext_stor_slot_get(&p->pool, bp->slot != NULL);
+	if (IS_ERR(node))
+		return ERR_CAST(node);
+	slot = container_of(node, struct nvme_xdev_ext_mech_slot, runtime);
 	slot->done.uncertain = false;
 	bp->slot = slot;
 	return slot;
@@ -227,9 +211,7 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *st,
 	bp->bounce = NULL;
 	bp->nr_bounce = 0;
 	bp->slot = NULL;
-	slot->busy = false;
-	slot->next = p->free;
-	p->free = slot;
+	xdev_ext_stor_slot_put(&p->pool, &slot->runtime, false);
 }
 
 /* At most one 4 KiB descriptor list per command, the size of an nvme-pci
@@ -255,18 +237,18 @@ static const struct xdev_ext_stor_hooks nvme_xdev_ext_stor_hooks = {
  */
 struct nvme_xdev_ext_peer_slot {
 	struct xdev_ext_peer_nvme_seg spans[NVME_XDEV_EXT_PEER_MAX_SPANS];
-	struct nvme_xdev_ext_mech_completion done;
-	struct nvme_xdev_ext_peer_slot *next;
+	struct xdev_ext_stor_completion done;
+	struct xdev_ext_stor_slot runtime;
 	struct xdev_ext_peer_fd_lease *leases;	/* max_pieces, in payload order */
 	struct nvme_sgl_desc *sgl;		/* max_pieces, controller-readable */
 	dma_addr_t sgl_dma;
 	u32 nr_leases;
-	bool busy;
 };
 
 struct nvme_xdev_ext_peer_res {
 	struct device *dma_dev;			/* the controller's PCI function */
-	struct nvme_xdev_ext_peer_slot *slots, *free;	/* free: worker only */
+	struct nvme_xdev_ext_peer_slot *slots;
+	struct xdev_ext_stor_pool pool;	/* worker only */
 	struct xdev_ext_peer_fd_lease *leases;
 	struct nvme_sgl_desc *sgl;
 	dma_addr_t sgl_dma;
@@ -283,7 +265,7 @@ static bool nvme_xdev_ext_peer_resources_free(struct nvme_xdev_ext_mech_stage *p
 	if (!res)
 		return true;
 	for (i = 0; i < res->nr_slots; i++)
-		if (WARN_ON_ONCE(res->slots[i].busy))
+		if (WARN_ON_ONCE(res->slots[i].runtime.busy))
 			return false; /* The controller may still read the list. */
 	if (res->sgl)
 		dma_free_coherent(res->dma_dev, res->sgl_bytes, res->sgl,
@@ -345,8 +327,7 @@ static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
 		slot->sgl = &res->sgl[(size_t)i * stride];
 		slot->sgl_dma = res->sgl_dma +
 			(dma_addr_t)i * stride * sizeof(*slot->sgl);
-		slot->next = res->free;
-		res->free = slot;
+		xdev_ext_stor_slot_add(&res->pool, &slot->runtime);
 	}
 	return 0;
 }
@@ -529,7 +510,7 @@ static int nvme_xdev_ext_poll_check(const struct xdev_ext_mech_stage *st,
 /* Worker, immediately before execute: let the poll pass find the request. */
 static void nvme_xdev_ext_poll_arm(const struct xdev_ext_mech_stage *st,
 				   struct request *req,
-				   struct nvme_xdev_ext_mech_completion *done)
+				   struct xdev_ext_stor_completion *done)
 {
 	if (!st->poll) {
 		WRITE_ONCE(done->poll_live, false);
@@ -816,25 +797,21 @@ static int nvme_xdev_ext_class_map(struct xdev_ext_mech_stage *st,
 	return nvme_xdev_ext_class_bounce(st, b, req, bp);
 }
 
-/* Any context: the native completion, kept for the worker's fill_cqe. */
-static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
-						 blk_status_t err)
+/* Member mapping runs only after the family has claimed the captured ticket. */
+static int nvme_xdev_ext_class_complete(struct xdev_ext_mech_batch *b,
+				       void *native, int transport_status,
+				       bool *is_uncertain)
 {
-	struct nvme_xdev_ext_mech_completion *done = req->end_io_data;
-	struct xdev_ext_mech_batch *b = done->b;
+	struct request *req = native;
 	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
-	u64 ticket = done->ticket;
 	bool uncertain, full_batch;
 	int status;
 
-	WRITE_ONCE(done->poll_live, false);
-	if (xdev_ext_mech_batch_completion_claim(b, ticket))
-		return RQ_END_IO_FREE;
 	/* The uring_cmd convention: NVMe status > 0, -errno without one. */
 	if (nvme_req(req)->flags & NVME_REQ_CANCELLED)
 		status = -EINTR;
 	else
-		status = nvme_req(req)->status ?: blk_status_to_errno(err);
+		status = nvme_req(req)->status ?: transport_status;
 	/* The block batch completion loop already ends every bio in the optimized NVMe
 	 * completion batch, but deliberately preserves bio/__data_len for a
 	 * passthrough request's end_io. That exact owned bio and original length
@@ -846,19 +823,35 @@ static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 	uncertain = blk_rq_bytes(req) != 0 && !full_batch;
 	if (uncertain && !status)
 		status = -EIO;
-	done->uncertain = uncertain;
+	*is_uncertain = uncertain;
 	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
 			  &bp->cqe);
-	xdev_ext_mech_trace_native_complete(b, ticket, status);
+	return status;
+}
+
+static void nvme_xdev_ext_class_ready(struct xdev_ext_mech_batch *b,
+				     int status, bool uncertain)
+{
 #ifdef NVME_XDEV_EXT_MECH_BOUNCE_AVAILABLE
- /* Native end_io owns the ticket and the transport has unmapped DMA. Copy
-  * compatibility READ bytes before the core release-publishes READY. */
- if (!status && !uncertain && bp->bounce &&
-     xdev_ext_mech_batch_stage(b)->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
-     xdev_ext_mech_session_state(xdev_ext_mech_batch_stage(b)->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
-  nvme_xdev_ext_class_bounce_copy(b, bp, false);
+	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+
+	/* Transport has unmapped DMA; copy before release-publishing READY. */
+	if (!status && !uncertain && bp->bounce &&
+	    xdev_ext_mech_batch_stage(b)->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+	    xdev_ext_mech_session_state(xdev_ext_mech_batch_stage(b)->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+		nvme_xdev_ext_class_bounce_copy(b, bp, false);
+#else
+	(void)b;
+	(void)status;
+	(void)uncertain;
 #endif
-	xdev_ext_mech_batch_completion_publish(b, ticket, status, uncertain);
+}
+
+static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
+						 blk_status_t err)
+{
+	xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req,
+			   nvme_xdev_ext_class_complete, nvme_xdev_ext_class_ready);
 	return RQ_END_IO_FREE;
 }
 
@@ -867,15 +860,13 @@ static struct nvme_xdev_ext_peer_slot *
 nvme_xdev_ext_peer_slot_get(struct nvme_xdev_ext_peer_res *res,
 			    struct nvme_xdev_ext_mech_batch *bp)
 {
-	struct nvme_xdev_ext_peer_slot *slot = res->free;
+	struct nvme_xdev_ext_peer_slot *slot;
+	struct xdev_ext_stor_slot *node;
 
-	if (bp->peer_slot)
-		return ERR_PTR(-EBUSY);
-	if (!slot)
-		return ERR_PTR(-EAGAIN);
-	res->free = slot->next;
-	slot->next = NULL;
-	slot->busy = true;
+	node = xdev_ext_stor_slot_get(&res->pool, bp->peer_slot != NULL);
+	if (IS_ERR(node))
+		return ERR_CAST(node);
+	slot = container_of(node, struct nvme_xdev_ext_peer_slot, runtime);
 	slot->nr_leases = 0;
 	slot->done.uncertain = false;
 	bp->peer_slot = slot;
@@ -905,9 +896,7 @@ static void nvme_xdev_ext_peer_slot_put(struct nvme_xdev_ext_peer_res *res,
 	bp->peer_slot = NULL;
 	if (!quiesced)
 		return;
-	slot->busy = false;
-	slot->next = res->free;
-	res->free = slot;
+	xdev_ext_stor_slot_put(&res->pool, &slot->runtime, false);
 }
 
 /*
@@ -986,7 +975,8 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 		return -EINVAL;
 	if (nvme_ctrl_sgl_supported(p->ns->ctrl)) {
 		ret = xdev_ext_peer_nvme_sgl_build(slot->spans, slot->nr_leases,
-				slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);
+				slot->spans, nvme_xdev_ext_stor_hooks.max_extents,
+				nvme_xdev_ext_stor_hooks.extent_align_mask, &n);
 		if (ret)
 			return ret;
 		for (pos = 0; pos < n; pos++)
@@ -1019,29 +1009,30 @@ static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *st,
 	return 0;
 }
 
-/* Any context: the native completion, kept for the worker's fill_cqe. */
-static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req,
-						    blk_status_t err)
+static int nvme_xdev_ext_peer_complete(struct xdev_ext_mech_batch *b,
+				      void *native, int transport_status,
+				      bool *uncertain)
 {
-	struct nvme_xdev_ext_mech_completion *done = req->end_io_data;
-	struct xdev_ext_mech_batch *b = done->b;
+	struct request *req = native;
 	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
-	u64 ticket = done->ticket;
 	int status;
 
-	WRITE_ONCE(done->poll_live, false);
-	if (xdev_ext_mech_batch_completion_claim(b, ticket))
-		return RQ_END_IO_FREE;
 	if (nvme_req(req)->flags & NVME_REQ_CANCELLED)
 		status = -EINTR;
 	else
-		status = nvme_req(req)->status ?: blk_status_to_errno(err);
+		status = nvme_req(req)->status ?: transport_status;
 	/* An error or a cancellation does not prove that peer DMA stopped. */
-	done->uncertain = status != 0;
+	*uncertain = status != 0;
 	nvme_xdev_ext_mech_cqe(status, le64_to_cpu(nvme_req(req)->result.u64),
 			       &bp->cqe);
-	xdev_ext_mech_trace_native_complete(b, ticket, status);
-	xdev_ext_mech_batch_completion_publish(b, ticket, status, done->uncertain);
+	return status;
+}
+
+static enum rq_end_io_ret nvme_xdev_ext_peer_end_io(struct request *req,
+						    blk_status_t err)
+{
+	xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req,
+			   nvme_xdev_ext_peer_complete, NULL);
 	return RQ_END_IO_FREE;
 }
 
@@ -1140,7 +1131,7 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
 	struct nvme_command cmd = {};
 	struct request *req;
-	struct nvme_xdev_ext_mech_completion *done;
+	struct xdev_ext_stor_completion *done;
 	struct nvme_xdev_ext_mech_slot *slot;
 	int ret;
 
@@ -1222,7 +1213,7 @@ static int nvme_xdev_ext_class_poll(struct xdev_ext_mech_stage *st)
 	for (i = 0; i < 2; i++) {
 		n = i ? (p->peer ? p->peer->nr_slots : 0) : p->nr_slots;
 		for (j = 0; j < n; j++) {
-			struct nvme_xdev_ext_mech_completion *done =
+			struct xdev_ext_stor_completion *done =
 				i ? &p->peer->slots[j].done : &p->slots[j].done;
 			u32 queue;
 			int ret;

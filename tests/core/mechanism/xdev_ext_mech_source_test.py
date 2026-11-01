@@ -195,13 +195,17 @@ class UbrMechSourceTest(unittest.TestCase):
         nvme = function_body(ROOT / "drivers/nvme/host/xdev_ext_mech_nvme.c",
                              "static enum rq_end_io_ret "
                              "nvme_xdev_ext_class_end_io(")
-        self.assertIn("nvme_req(req)->status ?: blk_status_to_errno(err)",
-                      nvme)
-        self.assertLess(nvme.index("xdev_ext_mech_batch_completion_claim(b, ticket)"),
-                        nvme.index("nvme_xdev_ext_mech_cqe("))
-        self.assertIn("xdev_ext_mech_batch_completion_publish(b, ticket, status, uncertain);", nvme)
-        self.assertIn("uncertain = blk_rq_bytes(req) != 0", nvme)
-        self.assertNotIn("kfree(done)", nvme)
+        self.assertIn("xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req,", nvme)
+        complete = function_body(ROOT / "drivers/nvme/host/xdev_ext_mech_nvme.c",
+                                 "static int nvme_xdev_ext_class_complete(")
+        handoff = function_body(ROOT / "io_uring/family/xdev_ext_storfam.c",
+                                "void xdev_ext_stor_done(")
+        self.assertIn("nvme_req(req)->status ?: transport_status", complete)
+        self.assertLess(handoff.index("xdev_ext_mech_batch_completion_claim(b, done->ticket)"),
+                        handoff.index("status = complete("))
+        self.assertIn("xdev_ext_mech_batch_completion_publish(b, done->ticket, status, done->uncertain);", handoff)
+        self.assertIn("uncertain = blk_rq_bytes(req) != 0", complete)
+        self.assertNotIn("kfree(done)", nvme + handoff)
         ce = function_body(ROOT / "io_uring/xdev_ext_mech_ce.c",
                            "void xdev_ext_ce_complete(")
         self.assertIn("xdev_ext_mech_batch_completion_publish(ck->b, ticket, "

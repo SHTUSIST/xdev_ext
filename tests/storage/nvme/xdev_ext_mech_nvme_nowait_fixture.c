@@ -63,8 +63,8 @@ struct request {
 	enum rq_end_io_ret (*end_io)(struct request *, int);
 	void *end_io_data;
 };
-struct nvme_xdev_ext_mech_completion { struct xdev_ext_mech_batch *b; uint64_t ticket; bool poll_live; uint32_t poll_queue; };
-struct nvme_xdev_ext_mech_slot { struct nvme_xdev_ext_mech_completion done; };
+struct xdev_ext_stor_completion { struct xdev_ext_mech_batch *b; uint64_t ticket; bool poll_live; uint32_t poll_queue; };
+struct nvme_xdev_ext_mech_slot { struct xdev_ext_stor_completion done; };
 /* Pool mechanics have a separate production-behavior test; this fixture
  * supplies one ready metadata lease and tests native NOWAIT tag admission. */
 static struct nvme_xdev_ext_mech_slot ready_slot;

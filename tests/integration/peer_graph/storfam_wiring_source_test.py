@@ -32,8 +32,8 @@ def main():
     builder = body(core, r"\bxdev_ext_peer_nvme_sgl_build\s*\([^;]+?\)\s*(?=\{)")
     hooks = body(nvme, r"\bstruct\s+xdev_ext_stor_hooks\s+nvme_xdev_ext_stor_hooks\s*=\s*(?=\{)")
     checks = [
-        ("NVMe SGL wrapper delegates to family rules",
-         bool(re.search(r"return\s+xdev_ext_stor_coalesce\s*\(\s*seg\s*,\s*nr\s*,\s*out\s*,\s*cap\s*,\s*3\s*,\s*n\s*\)", builder))),
+        ("NVMe SGL wrapper delegates declared alignment to family rules",
+         bool(re.search(r"return\s+xdev_ext_stor_coalesce\s*\(\s*seg\s*,\s*nr\s*,\s*out\s*,\s*cap\s*,\s*align_mask\s*,\s*n\s*\)", builder))),
         ("NVMe class registers STORAGE hooks",
          bool(re.search(r"\.fam\.stor\s*=\s*&nvme_xdev_ext_stor_hooks\b", nvme))),
         ("NVMe hooks identify STORAGE, dword alignment and native extent capacity",
@@ -41,6 +41,8 @@ def main():
              r"\.family\s*=\s*XDEV_EXT_FAMILY_STORAGE\b",
              r"\.extent_align_mask\s*=\s*3\b",
              r"\.max_extents\s*=\s*NVME_XDEV_EXT_PEER_MAX_PIECES\b"))),
+        ("NVMe SGL alignment comes from STORAGE hooks",
+         bool(re.search(r"\bxdev_ext_peer_nvme_sgl_build\s*\([^;]*?nvme_xdev_ext_stor_hooks\s*\.\s*extent_align_mask\s*,", nvme, re.S))),
         ("NVMe SGL capacity comes from STORAGE hooks",
          bool(re.search(r"\bxdev_ext_peer_nvme_sgl_build\s*\([^;]*?nvme_xdev_ext_stor_hooks\s*\.\s*max_extents\s*,", nvme, re.S))),
         ("NVMe command validation delegates its LBA window to family rules",
