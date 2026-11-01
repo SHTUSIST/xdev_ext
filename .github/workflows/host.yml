@@ -72,6 +72,7 @@ jobs:
             python3 tests/network/shared_receive/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/shared-receive-$scope" --case "$scope" --scenario all
           done
           python3 tests/network/shared_receive/run_library_integration.py --native-root "$GITHUB_WORKSPACE/build/source-view/kernel" --boundary-root "$GITHUB_WORKSPACE/tests/network/shared_receive" --output "$RUNNER_TEMP/shared-receive-library" --case all
+          python3 tests/network/shared_receive_native/build.py --candidate-root "$GITHUB_WORKSPACE" --libbpf-build /usr --libbpf-archive "$(pkg-config --variable=libdir libbpf)/libbpf.a" --output "$RUNNER_TEMP/shared-receive-native-build"
       - name: Thin session library contracts
         run: |
           make -C kernel/tools/testing/selftests/xdev_ext_lib CC="$CC" OUTPUT="$RUNNER_TEMP/xdev-ext-lib-tests" run
