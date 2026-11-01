@@ -139,7 +139,8 @@ class NVMePeerDMA(unittest.TestCase):
         for entry in manifest['files']:
             native = entry.get('native_path', '')
             if entry.get('component') == 'linux' and (native.startswith('include/') or
-                    native == 'io_uring/family/xdev_ext_requester.c'):
+                    native in ('io_uring/family/xdev_ext_requester.c',
+                               'drivers/nvme/host/xdev_ext_native_peer_trace.h')):
                 target = peer.KERNEL / native
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((ROOT / entry['source']).read_bytes())
@@ -148,14 +149,13 @@ class NVMePeerDMA(unittest.TestCase):
         text, code, fill, submit, have_res = peer.extract(production)
         shim = peer.SHIM.replace('#include "drivers/nvme/host/xdev_ext_peer_nvme_core.h"',
                                  '#include "' + str(path / 'xdev_ext_peer_nvme_core.h') + '"')
-        header = (path / 'xdev_ext_native_peer_trace.h').read_text()
-        context = re.search(r'struct nvme_xdev_ext_peer_trace \{.*?\n\};', header, re.S)[0] + '\n'
+        # This suite supplies the actual trace helper below instead of the
+        # ownership-only suite's observation stub.
+        shim = shim.replace('/* PEER_TRACE_RELEASE */', '')
         event_prefix = hooks.TRACE_PREFIX[hooks.TRACE_PREFIX.index('struct xdev_ext_native_event {'):]
         event_prefix = event_prefix.replace('u64 cookie,address;', 'u64 cookie,address,ticket;')
         event_prefix = event_prefix.replace('events[64]', 'events[65536]').replace('emitted<64', 'emitted<65536')
-        shim = shim.replace('struct request {', '#define NVME_REQ_XDEV_EXT_PEER 32\n#define U64_MAX UINT64_MAX\n' + context + event_prefix + 'struct request {', 1)
-        shim = shim.replace('struct nvme_command *cmd; u32 flags;',
-                            'struct nvme_command *cmd; u32 flags; struct nvme_xdev_ext_peer_trace *peer_trace;', 1)
+        shim = shim.replace('struct request {', '#define U64_MAX UINT64_MAX\n' + event_prefix + 'struct request {', 1)
         shim = shim.replace('h->lease.dma_address = provider_dma(offset);',
                             'h->lease.ticket = acquire_calls; h->lease.dma_address = provider_dma(offset);', 1)
         shim = shim.replace('static void blk_execute_rq_nowait(', 'static void issue_trace(struct request *);\nstatic void blk_execute_rq_nowait(', 1)

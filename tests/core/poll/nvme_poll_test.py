@@ -55,6 +55,7 @@ typedef unsigned int blk_opf_t; typedef int blk_status_t; typedef u64 dma_addr_t
 #define BLK_FEAT_POLL (1U << 3)
 #define NVME_REQ_CANCELLED (1U << 0)
 #define NVME_REQ_USERCMD (1U << 1)
+#define NVME_REQ_XDEV_EXT_PEER (1U << 5)
 #define NVME_CMD_SGL_METABUF (1U << 6)
 #define GFP_KERNEL 0
 #define NVME_XDEV_EXT_SQE_SIZE 64
@@ -77,7 +78,8 @@ struct nvme_command {
 	struct { u8 opcode; u32 nsid; u64 slba; u16 length; } rw;
 	struct { u32 cdw10, cdw11, cdw12; u8 flags; } common;
 };
-struct nvme_request { unsigned int flags; u16 status; union { u64 u64; } result; struct nvme_command *cmd; };
+struct nvme_request { unsigned int flags; u16 status; union { u64 u64; } result; struct nvme_command *cmd;
+	struct nvme_xdev_ext_peer_trace *peer_trace; };
 struct request {
 	blk_opf_t cmd_flags;
 	struct blk_mq_hw_ctx *mq_hctx;
@@ -222,15 +224,21 @@ static int submit_case(bool poll)
 static int end_io_case(bool peer)
 {
 	static struct xdev_ext_mech_batch b;
+	struct nvme_xdev_ext_peer_trace trace = { 0 };
 	struct nvme_xdev_ext_mech_completion done = { .b = &b, .ticket = 11, .poll_live = true, .poll_queue = 5 };
 	struct request req = { .end_io_data = &done };
 
 	b.ticket = 11;
+	if (peer) {
+		req.nvme.flags |= NVME_REQ_XDEV_EXT_PEER;
+		req.nvme.peer_trace = &trace;
+	}
 	if (peer)
 		nvme_xdev_ext_peer_end_io(&req, 0);
 	else
 		nvme_xdev_ext_class_end_io(&req, 0);
-	printf("live=%d publishes=%d\n", done.poll_live, publishes);
+	printf("live=%d publishes=%d trace_flag=%d trace_ptr=%d\n", done.poll_live, publishes,
+	       !!(req.nvme.flags & NVME_REQ_XDEV_EXT_PEER), !!req.nvme.peer_trace);
 	return 0;
 }
 
@@ -308,7 +316,9 @@ PRODUCTION = ('nvme_xdev_ext_poll_capable', 'nvme_xdev_ext_poll_opf', 'nvme_xdev
 
 def build_fixture():
     text = source(NVME)
-    structs = '\n'.join(structure(text, n) for n in (
+    trace = structure(source('drivers/nvme/host/xdev_ext_native_peer_trace.h'),
+                      'nvme_xdev_ext_peer_trace')
+    structs = trace + '\n' + '\n'.join(structure(text, n) for n in (
         'nvme_xdev_ext_mech_completion', 'nvme_xdev_ext_mech_slot',
         'nvme_xdev_ext_peer_slot', 'nvme_xdev_ext_peer_res'))
     structs = structs.replace('struct device *dma_dev;', 'void *dma_dev;')
@@ -349,6 +359,7 @@ class NvmePoll(unittest.TestCase):
     def test_peer_end_io_retires_the_poll_record(self):
         r = self.run_case('peer_end_io')
         self.assertEqual((r['live'], r['publishes']), (0, 1), r)
+        self.assertEqual((r['trace_flag'], r['trace_ptr']), (0, 0), r)
 
     def test_pass_polls_each_live_queue_once(self):
         r = self.run_case('pass')

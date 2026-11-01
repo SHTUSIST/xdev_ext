@@ -52,6 +52,7 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA
 #define BLK_MQ_REQ_NOWAIT 1U
 #define NVME_REQ_CANCELLED 1U
 #define NVME_REQ_USERCMD 2U
+#define NVME_REQ_XDEV_EXT_PEER (1U << 5)
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_CMD_SGL_ALL 0xc0
 #define NVME_SGL_FMT_DATA_DESC 0x00
@@ -108,7 +109,8 @@ struct nvme_ns { struct nvme_ctrl *ctrl; unsigned long flags; struct nvme_ns_hea
                  struct gendisk *disk; struct request_queue *queue; };
 enum rq_end_io_ret { RQ_END_IO_NONE, RQ_END_IO_FREE };
 struct request {
- struct { struct nvme_command *cmd; u32 flags; u16 status; struct { u64 u64; } result; } nr;
+ struct { struct nvme_command *cmd; u32 flags; struct nvme_xdev_ext_peer_trace *peer_trace;
+          u16 status; struct { u64 u64; } result; } nr;
  u32 cmd_flags;
  struct blk_mq_hw_ctx *mq_hctx;
  enum rq_end_io_ret (*end_io)(struct request *, blk_status_t);
@@ -125,6 +127,7 @@ struct nvme_xdev_ext_mech_batch;
 struct xdev_ext_mech_batch { void *priv; struct xdev_ext_mech_frame f[MAX_TEST_FRAMES]; u32 nr, bytes;
  u64 ticket, id; int claims, publishes, status; bool sequester; };
 /* PRODUCTION_TYPES */
+/* PEER_TRACE_RELEASE */
 static struct file authority;
 static struct device pci_device = { 1 };
 static int in_irq, blocked_worker, host_slot_puts, host_bounce_releases, executes, frees, allocs, tag_full;
@@ -489,6 +492,9 @@ def extract(source):
     # dependencies needed by the extracted object: the full mechanism header
     # also declares stage/batch types supplied by this deterministic shim.
     declarations = []
+    trace = (KERNEL / "drivers/nvme/host/xdev_ext_native_peer_trace.h").read_text()
+    declarations.append(re.search(r"^struct nvme_xdev_ext_peer_trace \{.*?^\};",
+                                  trace, re.M | re.S)[0])
     for header, name in (("xdev_ext_mech.h", "xdev_ext_family_hooks_hdr"),
                          ("xdev_ext_storfam.h", "xdev_ext_stor_hooks")):
         content = (KERNEL / "include/linux" / header).read_text()
@@ -514,6 +520,13 @@ def build(text, code, fill, submit, have_res, directory, name):
     else:
         defines += ["#define INIT_RESOURCES rc = 0"]
     shim = SHIM.replace("/* PRODUCTION_TYPES */", text)
+    # This ownership suite does not inspect observation events. The native
+    # trace suite consumes SHIM directly and supplies the real trace helper.
+    shim = shim.replace("/* PEER_TRACE_RELEASE */", """
+static void nvme_xdev_ext_peer_trace_release(
+ const struct nvme_xdev_ext_peer_trace *ctx, bool quiesced)
+{ (void)ctx; (void)quiesced; }
+""")
     shim = shim.replace("/* PRODUCTION_FUNCTIONS */", code)
     source = directory / (name + ".c")
     binary = directory / name
