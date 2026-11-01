@@ -278,6 +278,7 @@ static const struct xdev_ext_comp_hooks xdev_ext_cpu_comp_hooks = {
  .producer_visibility = XDEV_EXT_CAP_NOT_APPLICABLE,
 };
 static const struct xdev_ext_mech_class_ops xdev_ext_cpu_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CPU],
  .class_id = XDEV_EXT_MECH_CLASS_CPU, .flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM,
  .desc_size = sizeof(struct xdev_ext_cpu_desc), .desc_cap = 1,
  .owner = THIS_MODULE, .bind = xdev_ext_cpu_bind, .unbind = xdev_ext_cpu_unbind,

@@ -24,12 +24,27 @@ def function(text, name):
     return m[0]
 
 
+def session_helpers(text, bodies, extractor=function):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 class AcquisitionContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         text = Path(os.environ.get('XDEV_EXT_IAA_ACQUIRE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
         source = (HERE / 'acquire_fixture.c').read_text()
-        for name in ('xdev_ext_mech_life_undo', 'xdev_ext_mech_batch_acquire'):
+        names = ('xdev_ext_mech_life_undo', 'xdev_ext_mech_batch_acquire')
+        names = session_helpers(text, [function(text, name) for name in names]) + list(names)
+        for name in names:
             source = source.replace('/* ' + name + ' */', function(text, name))
         cls.tmp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-acquire-')
         cls.addClassCleanup(cls.tmp.cleanup)

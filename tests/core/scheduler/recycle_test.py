@@ -24,7 +24,9 @@ int main(void)
  struct xdev_ext_mech_batch b = {0};
  struct xdev_ext_mech_life life;
  u8 state = XDEV_EXT_MECH_F_HELD, owner = 0;
- struct xdev_ext_mech_class_ops cpu = {.flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM};
+ struct xdev_ext_mech_class_ops cpu = {.class_id = XDEV_EXT_MECH_CLASS_CPU,
+  .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CPU],
+  .flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM};
  struct xdev_ext_mech_pool_ops ops = {.recycle = recycle_cb};
  u8 payload[64] = {32, 0, 0, 0};
  u32 len = 0;

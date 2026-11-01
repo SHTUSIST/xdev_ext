@@ -69,6 +69,10 @@ static int ordered_scenario(const char *mode) {
  else if(!strcmp(mode,"recycle")){req.nr_batches=6;req.flags|=XDEV_EXT_MECH_START_F_RECYCLE;}
  else if(!strcmp(mode,"recycle_count")){req.nr_batches=6;req.flags|=XDEV_EXT_MECH_START_F_RECYCLE;req.nr_user_frames=2;want=-EINVAL;}
  else if(!strcmp(mode,"stop_copy")){stop_during_copy=true;want=-ESHUTDOWN;}
+ struct xdev_ext_mech_class_ops selected_class=class_callbacks;
+ selected_class.class_id=s.plan[0].class_id;
+ selected_class.decl=xdev_ext_mech_class_desc(s.plan[0].class_id);
+ s.st[0].cls=&selected_class;
  memcpy(before,states,sizeof(states));memcpy(life_before,s.life,sizeof(life_before));
  int ret=xdev_ext_mech_start(&ctx,&req);
  if(ret!=want){fprintf(stderr,"FAIL %s: START returned %d, expected %d\n",mode,ret,want);return 1;}
@@ -98,6 +102,19 @@ static int ordered_scenario(const char *mode) {
 '''
 
 
+def session_helpers(text, bodies, extractor):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 def build(directory, transform=None):
     core = Path(os.environ.get('XDEV_EXT_RECYCLE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
     umem = (ROOT / 'io_uring/xdev_ext_umem.c').read_text()
@@ -115,7 +132,9 @@ def build(directory, transform=None):
              'STOP_WORK': function(core, 'xdev_ext_mech_stop_work'),
              'TAKE': function(core, 'xdev_ext_mech_take_user_frames'),
              'START': function(core, 'xdev_ext_mech_start')}
+    dependencies = list(names.values())
     fixture = (HERE.parent / 'xdev_ext_mech_recycle_tail_fixture.c').read_text()
+    fixture = fixture.replace('struct xdev_ext_mech_class_ops {', 'struct xdev_ext_mech_class_ops { u32 class_id; const struct xdev_ext_mech_class_desc *decl;')
     fixture = '#define smp_load_acquire(p) (*(p))\n#define GENMASK_ULL(h,l) (((~0ULL) << (l)) & ((~0ULL) >> (63-(h))))\n' + fixture
     fixture=fixture.replace('#define WARN_ON_ONCE(x) (!!(x))','static bool test_warn(bool x){return x;}\n#define WARN_ON_ONCE(x) test_warn(!!(x))')
     fixture = fixture.replace('typedef __u64 u64;', 'typedef __u64 u64;\nstatic u64 ktime_get_boottime_ns(void){return 0;}')
@@ -136,10 +155,13 @@ def build(directory, transform=None):
         queue_bodies=[function(core,n) for n in queue_names]
         prototypes='\n'.join(b[:b.index('\n{')]+';' for b in queue_bodies)
         publication=function(core,'xdev_ext_mech_start_publication')
+        dependencies += queue_bodies + [publication]
         prototypes+='\n'+publication[:publication.index('\n{')]+';'
         fixture=fixture.replace('/* PRODUCTION_RELEASE */',prototypes+'\n/* PRODUCTION_RELEASE */')
         fixture=fixture.replace('/* PRODUCTION_START */',publication+'\n'+'\n'.join(queue_bodies)+'\n/* PRODUCTION_START */')
         fixture=fixture.replace('#define kfree(x) free(x)', '#define kfree(x) free(x)\n#define kvcalloc(n,s,gfp) calloc(n,s)\n#define bitmap_free(p) free(p)\nstatic unsigned long *bitmap_zalloc(unsigned n,int g){(void)g;return calloc((n+63)/64,sizeof(unsigned long));}\nstatic bool test_and_set_bit(unsigned n,unsigned long *p){unsigned long mask=1UL<<(n%64);bool old=!!(p[n/64]&mask);p[n/64]|=mask;return old;}\n#define kzalloc(n,gfp) calloc(1,n)\n#define kcalloc(n,s,gfp) calloc(n,s)\n#define kvmalloc_array(n,s,gfp) calloc(n,s)\n#define kvfree(p) free(p)')
+    helpers = session_helpers(core, dependencies, function)
+    names['TAKE'] = '\n'.join(function(core, name) for name in helpers) + '\n' + names['TAKE']
     for marker, body in names.items():
         fixture = fixture.replace('/* PRODUCTION_' + marker + ' */', body)
     fixture = fixture.replace('int main(int argc,char **argv) {', SCENARIO+'\nint main(int argc,char **argv) {',1)

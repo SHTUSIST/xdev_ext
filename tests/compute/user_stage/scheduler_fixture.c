@@ -127,15 +127,19 @@ static int native_submit(struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batc
  accepts[k]++;accepted[k]=b;tickets[k]=xdev_ext_mech_batch_ticket(b);
  return 0;
 }
-static const struct xdev_ext_mech_class_ops native_cls={.submit=native_submit};
+static const struct xdev_ext_mech_class_ops native_cls={.class_id=XDEV_EXT_MECH_CLASS_DMA,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_DMA],.submit=native_submit};
+static const struct xdev_ext_mech_class_ops native_nvme_cls={.class_id=XDEV_EXT_MECH_CLASS_NVME,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME],.submit=native_submit};
 /* A stage whose progress runs after USER's in the same pass and kicks USER:
  * a user kick arriving while the pass runs. */
 static unsigned long kick_progress(struct xdev_ext_mech_stage*st){
  xdev_ext_mech_stage_kick(&st->s->st[1]);return 0;
 }
-static const struct xdev_ext_mech_class_ops native_kick_cls={.submit=native_submit,.progress=kick_progress};
+static const struct xdev_ext_mech_class_ops native_kick_cls={.class_id=XDEV_EXT_MECH_CLASS_DMA,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_DMA],.submit=native_submit,.progress=kick_progress};
 static const struct xdev_ext_mech_class_ops user_cls={
- .class_id=XDEV_EXT_MECH_CLASS_USER,.desc_size=sizeof(struct xdev_ext_user_desc),.desc_cap=1,
+ .class_id=XDEV_EXT_MECH_CLASS_USER,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_USER],.desc_size=sizeof(struct xdev_ext_user_desc),.desc_cap=1,
  .default_build=xdev_ext_user_default_build,.validate=xdev_ext_user_validate,
  .submit=xdev_ext_user_submit,.progress=xdev_ext_user_progress,.mark_dead=xdev_ext_user_mark_dead,
 };
@@ -168,7 +172,7 @@ static void setup(u32 depth,u32 entries,s64 delta,bool varlen){
  for(u32 i=0;i<3;i++){
   u32 c=i==0?XDEV_EXT_MECH_CLASS_NVME:i==1?XDEV_EXT_MECH_CLASS_USER:XDEV_EXT_MECH_CLASS_DMA;
   u32 d=i?XDEV_EXT_MECH_DIR_TO_DEVICE:XDEV_EXT_MECH_DIR_FROM_DEVICE;
-  s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.cls=i==1?&user_cls:&native_cls,.class_id=c,.direction=d};
+  s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.cls=i==1?&user_cls:i==0?&native_nvme_cls:&native_cls,.class_id=c,.direction=d};
   s->plan[i]=(struct xdev_ext_mech_stage_uapi){.class_id=c,.direction=d,.fd=i==1?7:5,
    .flags=i==1&&varlen?XDEV_EXT_USER_F_VARLEN:0,.arg0=i==1?100:0,.arg1=i==1?(u64)delta:64};
  }

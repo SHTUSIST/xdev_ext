@@ -33,6 +33,19 @@ def definition(text, name, structure=False):
     return match[0]
 
 
+def session_helpers(text, bodies, extractor):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 def generate():
     core = (ROOT / "io_uring/xdev_ext_mech.c").read_text()
     user = (ROOT / "io_uring/xdev_ext_mech_user.c").read_text()
@@ -72,10 +85,13 @@ def generate():
                    "xdev_ext_mech_programs_current", "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
     user_names += ["xdev_ext_user_drain", "xdev_ext_user_external_end",
                    "xdev_ext_user_strict_progress"]
+    core_names = session_helpers(core, [definition(core, n) for n in core_names], definition) + core_names
     functions = [definition(core, n) for n in core_names]
     functions += [definition(user, n) for n in user_names]
     prototypes = "\n".join(f[:f.index("\n{")] + ";" for f in functions)
     code = (HERE / "scheduler_fixture.c").read_text()
+    if not re.search(r'\bdecl\s*;', definition(abi, "xdev_ext_mech_class_ops", True)):
+        code = re.sub(r'\.decl=&xdev_ext_mech_class_decls\[XDEV_EXT_MECH_CLASS_(?:DMA|NVME|USER)\],', '', code)
     outcome = re.search(r'^enum xdev_ext_mech_external_outcome \{\n.*?^\};', abi, re.M | re.S)
     if outcome:
         structs += "\n" + outcome[0]

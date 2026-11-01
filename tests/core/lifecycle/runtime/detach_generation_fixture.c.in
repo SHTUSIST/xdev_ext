@@ -35,7 +35,7 @@ static void static_branch_disable(struct static_key_false*k){(void)k;}
 struct list_head{int unused;};
 struct kthread_work{int unused;};
 struct xdev_ext_mech_session;
-struct xdev_ext_mech_class_ops{unsigned flags;};
+struct xdev_ext_mech_class_ops{u32 class_id;unsigned flags;const struct xdev_ext_mech_class_desc *decl;};
 struct xdev_ext_mech_stage{u32 class_id;const struct xdev_ext_mech_class_ops*cls;struct xdev_ext_mech_session*s;void*priv;bool poll;};
 struct xdev_ext_mech_batch{struct xdev_ext_mech_bstate bs;struct xdev_ext_mech_batch*parent;int fan_error;u32 bytes;u64 key;struct list_head node;};
 struct xdev_ext_mech_session{
@@ -121,7 +121,8 @@ static unsigned checks,failures;
 #define CHECK(label,cond) do{checks++;if(!(cond)){failures++;printf("FAIL %s\n",label);}else printf("PASS %s\n",label);}while(0)
 static struct xdev_ext_nvme_mech_ops token={.abi_version=XDEV_EXT_MECH_ABI_VERSION};
 static int event;
-static struct xdev_ext_mech_class_ops cls;
+static struct xdev_ext_mech_class_ops cls={.class_id=XDEV_EXT_MECH_CLASS_AFXDP,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_AFXDP]};
 static void setup(struct xdev_ext_mech_session*s){memset(s,0,sizeof(*s));memset(slots,0,sizeof(slots));event=0;submit_calls=queued_stop=retry_queued=provider_enqueues=0;late_close=provider_error=last_abort=0;actual_provider=false;
  s->ss=(struct xdev_ext_mech_sess){.state=XDEV_EXT_MECH_SESSION_ACTIVE,.refs=4,.inflight=3};s->layout.group_bytes=8192;s->ops[XDEV_EXT_MECH_CLASS_AFXDP]=&token;s->pinned[XDEV_EXT_MECH_CLASS_AFXDP]=true;s->st[0]=(struct xdev_ext_mech_stage){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,.cls=&cls};s->evfd=&event;s->start_left=5;s->done=51;s->aborted=5;
  s->notify=(struct xdev_ext_mech_notify_state){.coarse=true,.armed=true,.target={.session_id=2,.batches_target=64}};slots[XDEV_EXT_MECH_CLASS_AFXDP]=&token;xdev_ext_mech_registry.nr_active=1;xdev_ext_mech_all.first=s;hook_session=s;

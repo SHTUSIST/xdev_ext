@@ -49,6 +49,11 @@ static bool retire(struct xdev_ext_mech_batch *b) {
  assert(!xdev_ext_mech_frames_move(s,b,XDEV_EXT_MECH_F_INFLIGHT,
   b->sequester?XDEV_EXT_MECH_F_SEQUESTERED:XDEV_EXT_MECH_F_HELD));
  b->queued=0;s->inbox.first=NULL;
+ /* The real END path notifies every provider of the final frame fate before
+  * dropping the batch reference. Keep native window leases in that boundary. */
+ for(u32 i=0;i<s->nr_stages;i++)
+  if(s->st[i].cls->batch_release)
+   s->st[i].cls->batch_release(&s->st[i],b,b->sequester);
  return xdev_ext_mech_leave_locked(s,b->sequester);
 }
 static int lifecycle(const char *mode) {

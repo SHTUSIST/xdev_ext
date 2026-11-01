@@ -474,7 +474,7 @@ class UbrMechSourceTest(unittest.TestCase):
             "xdev_ext_mech_fill_info(s, st, b);",
             "memset(s->scratch, 0, len);",
             "xdev_ext_mech_call(st, &a, &ret, NULL);",
-            "xdev_ext_mech_ret_resolve(st->class_id, XDEV_EXT_MECH_MEMBER_BUILD,",
+            "xdev_ext_mech_ret_resolve_desc(st->cls->decl, XDEV_EXT_MECH_MEMBER_BUILD,",
             "xdev_ext_mech_build_step(ret, st->cls->default_build, &err)",
             "xdev_ext_mech_slots_used(s->scratch,",
             "st->cls->validate(st, b, s->scratch, n);")]
@@ -484,7 +484,7 @@ class UbrMechSourceTest(unittest.TestCase):
             "XDEV_EXT_MECH_F_INFLIGHT,",
             "cls->fill_cqe(st, b, s->cqe);",
             "xdev_ext_mech_call(st, &a, &ret, NULL)",
-            "xdev_ext_mech_complete_step(st->class_id, ret, b->status,")]
+            "xdev_ext_mech_complete_step_desc(st->cls->decl, ret, b->status,")]
         self.assertEqual(order, sorted(order))
         end = function_body(path, "static void xdev_ext_mech_end(")
         # Keep legacy finished-batch signals, but let the serialized notifier

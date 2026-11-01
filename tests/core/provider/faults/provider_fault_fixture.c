@@ -501,7 +501,8 @@ static int ce_native_submit(struct xdev_ext_ce_region *r,void *host,u32 dir,
  ce_pending_cookie=cookie;ce_pending_ticket=ticket;return 0;
 }
 static const struct xdev_ext_ce_backend_ops ce_native_ops={.submit=ce_native_submit};
-static const struct xdev_ext_mech_class_ops ce_test_class={.class_id=XDEV_EXT_MECH_CLASS_CE,.submit=xdev_ext_ce_submit};
+static const struct xdev_ext_mech_class_ops ce_test_class={.class_id=XDEV_EXT_MECH_CLASS_CE,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],.submit=xdev_ext_ce_submit};
 static int ce_submit_admitted(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b) {
  struct xdev_ext_ce_stage *cs=s->st[1].priv;
  cs->staged=b;cs->plan.n=1;cs->plan.total=128;cs->plan.host_off[0]=4160;

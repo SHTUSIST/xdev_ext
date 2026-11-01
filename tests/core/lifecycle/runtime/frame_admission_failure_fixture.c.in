@@ -81,8 +81,8 @@ struct xdev_ext_mech_pool_ops { void (*recycle)(struct xdev_ext_mech_pool *,stru
 struct xdev_ext_mech_pool { u32 nr_frames,frame_size;u8 *state;void *priv,*vaddr;const struct xdev_ext_mech_pool_ops *ops; };
 struct xsk_xdev_ext_mech_provider {struct xsk_buff_pool *xp;bool zc,has_rx;u32 source_next,source_first;};
 struct xdev_ext_mech_session;
-struct xdev_ext_mech_class_ops { u32 flags; };
-struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s;u32 index,direction,flags;const struct xdev_ext_mech_class_ops *cls; };
+struct xdev_ext_mech_class_ops { u32 class_id,flags; const struct xdev_ext_mech_class_desc *decl; };
+struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s;u32 class_id,index,direction,flags;const struct xdev_ext_mech_class_ops *cls; };
 struct xdev_ext_mech_batch {
  u64 key,bytes;u32 nr_frames,present;unsigned long opened;
  struct xdev_ext_mech_bstate bs;
@@ -164,7 +164,10 @@ static struct xdp_buff_xsk heads[4];
 static struct xdev_ext_mech_life life[4];
 static u8 state[4],bytes[4*4096];
 static const struct xdev_ext_mech_pool_ops ops={.recycle=xsk_xdev_ext_mech_pool_recycle};
-static const struct xdev_ext_mech_class_ops cls={0};
+static const struct xdev_ext_mech_class_ops afxdp_cls={.class_id=XDEV_EXT_MECH_CLASS_AFXDP,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_AFXDP]};
+static const struct xdev_ext_mech_class_ops cls={.class_id=XDEV_EXT_MECH_CLASS_NVME,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME]};
 static bool schedule_start;
 static int handoff_result;
 static void scheduler_unlock(void) {
@@ -188,7 +191,8 @@ static void reset(void) {
  session.life=life;session.admits=true;session.nr_stages=2;session.frames=1;INIT_LIST_HEAD(&session.open);
  session.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};
  session.plan[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
- session.st[0]=(struct xdev_ext_mech_stage){.s=&session,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&cls};
+ session.st[0]=(struct xdev_ext_mech_stage){.s=&session,.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&cls};
+ session.st[1]=(struct xdev_ext_mech_stage){.s=&session,.class_id=XDEV_EXT_MECH_CLASS_NVME,.index=1,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.cls=&cls};
 }
 static int violations;
 #define REQUIRE(condition,message) do{if(!(condition)){fprintf(stderr,"VIOLATION %s\n",message);violations++;}}while(0)
@@ -244,7 +248,7 @@ static void test_start_interleaving(void) {
  }
 }
 static void test_hold(const char*name) {
- session.plan[0].class_id=XDEV_EXT_MECH_CLASS_AFXDP;provider.zc=true;umem.zc=true;state[0]=5;
+ session.plan[0].class_id=XDEV_EXT_MECH_CLASS_AFXDP;session.st[0].class_id=XDEV_EXT_MECH_CLASS_AFXDP;session.st[0].cls=&afxdp_cls;provider.zc=true;umem.zc=true;state[0]=5;
  struct xdev_ext_mech_hold_intent intent={.key=7,.pos=0,.count=2,.span_len=64};
  struct xdev_ext_mech_frame f={.index=0,.data_len=64};u64 old=0,claim;
  if(!strcmp(name,"hold_claim_overflow"))life[0].ctrl=XDEV_EXT_MECH_L_GEN_MAX<<XDEV_EXT_MECH_L_GEN_SHIFT;

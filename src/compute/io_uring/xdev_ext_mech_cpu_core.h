@@ -11,60 +11,13 @@
 #include <stddef.h>
 #include <string.h>
 #endif
-#include "../include/uapi/linux/xdev_ext_mech.h"
+#include "../include/linux/xdev_ext_family_core.h"
 
 struct xdev_ext_mech_cpu_prims {
  __u32 (*crc32c)(__u32 crc, const void *p, size_t len);
  __u64 (*xxh64)(const void *p, size_t len, __u64 seed);
  void (*sha256)(const void *p, size_t len, __u8 out[32]);
 };
-
-static inline bool xdev_ext_mech_cpu_xform_fixed(__u32 xform)
-{
- return xform >= XDEV_EXT_CPU_XFORM_CRC32C_APPEND && xform <= XDEV_EXT_CPU_XFORM_SHA256_APPEND;
-}
-
-static inline bool xdev_ext_mech_cpu_xform_variable(__u32 xform)
-{
- return xform == XDEV_EXT_CPU_XFORM_DEFLATE || xform == XDEV_EXT_CPU_XFORM_INFLATE;
-}
-
-/* Run by the CPU program's compute member, never by the code below. */
-static inline bool xdev_ext_mech_cpu_xform_bpf(__u32 xform)
-{
- return xform == XDEV_EXT_CPU_XFORM_BPF;
-}
-
-static inline int xdev_ext_mech_cpu_len_delta(__u32 xform, __u64 param, __s64 *delta)
-{
- __s64 d;
-
- switch (xform) {
- case XDEV_EXT_CPU_XFORM_CRC32C_APPEND: d = 4; break;
- case XDEV_EXT_CPU_XFORM_CRC32C_STRIP: d = -4; break;
- case XDEV_EXT_CPU_XFORM_CRC32C_SEAL:
- case XDEV_EXT_CPU_XFORM_CRC32C_CHECK: d = 0; break;
- case XDEV_EXT_CPU_XFORM_PARSE_STRIP:
-  if (param < XDEV_EXT_CPU_PARSE_HDR_MIN || param > XDEV_EXT_CPU_PARSE_HDR_MAX)
-   return -EINVAL;
-  *delta = -(__s64)param;
-  return 0;
- case XDEV_EXT_CPU_XFORM_XXH64_APPEND: *delta = 8; return 0;
- case XDEV_EXT_CPU_XFORM_SHA256_APPEND: d = 32; break;
- case XDEV_EXT_CPU_XFORM_BPF:
-  /* param is the declared change itself, in two's complement. */
-  if ((__s64)param < -(__s64)XDEV_EXT_CPU_BPF_DELTA_MAX ||
-      (__s64)param > (__s64)XDEV_EXT_CPU_BPF_DELTA_MAX)
-   return -EINVAL;
-  *delta = (__s64)param;
-  return 0;
- default: return -EINVAL;
- }
- if (param)
-  return -EINVAL;
- *delta = d;
- return 0;
-}
 
 static inline int xdev_ext_mech_cpu_out_len(__u32 xform, __u64 param,
  __u32 valid_len, __u32 cap, __u32 *out_len)

@@ -165,6 +165,7 @@ static void xdev_ext_net_fill_cqe(struct xdev_ext_mech_stage *st,
 static void xdev_ext_net_dead(struct xdev_ext_mech_stage *st)
 { WRITE_ONCE(((struct xdev_ext_net_stage *)st->priv)->dead, true); }
 static const struct xdev_ext_mech_class_ops xdev_ext_net_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NET],
  .class_id = XDEV_EXT_MECH_CLASS_NET, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED,
  .desc_size = sizeof(struct xdev_ext_net_send_desc), .desc_cap = XDEV_EXT_NET_MAX_ENTRIES,
  .info_size = sizeof(struct xdev_ext_net_mech_info),
@@ -433,6 +434,7 @@ static void xdev_ext_net_dead(struct xdev_ext_mech_stage *st) { xdev_ext_netfam_
 static unsigned long xdev_ext_net_progress(struct xdev_ext_mech_stage *st)
 { return xdev_ext_netfam_progress(st->priv); }
 static const struct xdev_ext_mech_class_ops xdev_ext_net_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NET],
  .class_id = XDEV_EXT_MECH_CLASS_NET, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE,
  .desc_size = sizeof(struct xdev_ext_net_send_desc), .desc_cap = XDEV_EXT_NET_MAX_ENTRIES,
  .info_size = sizeof(struct xdev_ext_net_mech_info),

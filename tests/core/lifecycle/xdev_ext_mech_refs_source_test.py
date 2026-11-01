@@ -113,9 +113,11 @@ class IntegrationContracts(unittest.TestCase):
 
     def test_L2_L9_core_uses_plan_and_frame_record(self):
         core = source("io_uring/xdev_ext_mech.c")
-        for name in ("xdev_ext_mech_chain_refs", "xdev_ext_mech_stage_group_end",
+        for name in ("xdev_ext_mech_session_chain_refs", "xdev_ext_mech_stage_group_end",
                      "xdev_ext_mech_frame_rec_fill"):
             self.assertRegex(core, r"\b" + name + r"\s*\(")
+        self.assertIn("xdev_ext_mech_chain_refs_desc(s->plan, rows, s->nr_stages, from)", core)
+        self.assertIn("rows[i] = s->st[i].cls->decl", core)
         self.assertIn("XDEV_EXT_MECH_L_ACQ_FANOUT", core)
         self.assertIn("XDEV_EXT_MECH_L_ACQ_EXCLUSIVE", core)
 

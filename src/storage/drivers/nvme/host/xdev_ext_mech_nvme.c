@@ -1295,6 +1295,7 @@ static void nvme_xdev_ext_class_mark_dead(struct xdev_ext_mech_stage *st)
 }
 
 static const struct xdev_ext_mech_class_ops nvme_xdev_ext_mech_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME],
 	.class_id = XDEV_EXT_MECH_CLASS_NVME,
 	.desc_size = NVME_XDEV_EXT_SQE_SIZE,
 	.desc_cap = 1,

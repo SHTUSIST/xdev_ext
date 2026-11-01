@@ -89,7 +89,12 @@ static int native_submit(struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batc
  if(inline_done[k])delivered(b,tickets[k],0);
  return refusal[k];
 }
-static const struct xdev_ext_mech_class_ops cls={.submit=native_submit};
+static const struct xdev_ext_mech_class_ops cls={
+ .class_id=XDEV_EXT_MECH_CLASS_SOCKET,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_SOCKET],
+ .submit=native_submit,
+};
+static struct xdev_ext_mech_class_ops stage_classes[4];
 static void recycle(struct xdev_ext_mech_pool*p,struct xdev_ext_mech_frame*f){
  CHECK(p->state[f->index]==XDEV_EXT_MECH_F_K_FREE,"provider recycle sees K_FREE custody");
  recycle_calls++;
@@ -129,7 +134,9 @@ static int exercise(const char*mode){
  for(u32 i=0;i<s->nr_stages;i++){
   u32 c=i==2 && strcmp(mode,"same-class")?XDEV_EXT_MECH_CLASS_AFXDP:XDEV_EXT_MECH_CLASS_NVME;
   u32 d=i?XDEV_EXT_MECH_DIR_TO_DEVICE:XDEV_EXT_MECH_DIR_FROM_DEVICE;
-  s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.cls=&cls,.class_id=c,.direction=d};
+  stage_classes[i]=(struct xdev_ext_mech_class_ops){
+   .class_id=c,.decl=xdev_ext_mech_class_desc(c),.submit=native_submit};
+  s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.cls=&stage_classes[i],.class_id=c,.direction=d};
   s->plan[i]=(struct xdev_ext_mech_stage_uapi){.class_id=c,.direction=d,.flags=i==2?XDEV_EXT_MECH_STAGE_F_FANOUT:0};
  }
  root.s=s;root.nr_frames=1;root.present=1;root.bytes=128;root.priv=priv[0];root.cookie=cookies[0];root.id=1;

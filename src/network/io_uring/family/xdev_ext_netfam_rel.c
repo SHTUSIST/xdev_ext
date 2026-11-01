@@ -29,7 +29,7 @@ static int xdev_ext_net_call_rel(const struct xdev_ext_mech_ctx *ctx,
 	     c->callsite != XDEV_EXT_MECH_SITE_WORKER_SELECT))
 		return -EOPNOTSUPP;
 	cls = c->st->cls;
-	if (xdev_ext_mech_class_family(c->ctx.class_id) != XDEV_EXT_FAMILY_NETWORK ||
+	if (cls->decl->family != XDEV_EXT_FAMILY_NETWORK ||
 	    !cls->fam.net || !cls->fam.net->rel ||
 	    !cls->fam.net->rel(c->st, v) || !v->lock)
 		return -EOPNOTSUPP;

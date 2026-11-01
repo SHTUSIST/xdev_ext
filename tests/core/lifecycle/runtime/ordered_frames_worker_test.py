@@ -31,7 +31,8 @@ static int resolve_frame(struct xdev_ext_mech_pool*p,struct xdev_ext_mech_frame*
  f->umem_addr=(u64)f->index*p->frame_size;return 0;
 }
 static const struct xdev_ext_mech_pool_ops worker_ops={counted_alloc,hook_recycle,resolve_frame};
-static const struct xdev_ext_mech_class_ops quiet_cls={0};
+static const struct xdev_ext_mech_class_ops quiet_cls={.class_id=XDEV_EXT_MECH_CLASS_USER,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_USER]};
 static struct xdev_ext_mech_batch*xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session*s){
  if(!xdev_ext_mech_session_admits(s))return ERR_PTR(-ESHUTDOWN);
  for(unsigned j=0;j<2;j++)if(!worker_used[j]){

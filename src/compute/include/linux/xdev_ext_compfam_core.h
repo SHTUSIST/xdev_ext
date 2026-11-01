@@ -23,9 +23,10 @@ enum xdev_ext_comp_kind {
 };
 
 /* @role is xdev_ext_mech_stage_role(u) (io_uring/xdev_ext_mech_step.h). */
-static inline int xdev_ext_comp_kind_of_role(__u32 class_id, int role)
+static inline int xdev_ext_comp_kind_of_role_desc(
+ const struct xdev_ext_mech_class_desc *d, int role)
 {
-	if (xdev_ext_mech_class_family(class_id) != XDEV_EXT_FAMILY_COMPUTE)
+	if (!d || d->family != XDEV_EXT_FAMILY_COMPUTE)
 		return -EINVAL;
 	if (role == 3 /* XDEV_EXT_MECH_ROLE_INPLACE */)
 		return XDEV_EXT_COMP_INPLACE;
@@ -35,6 +36,12 @@ static inline int xdev_ext_comp_kind_of_role(__u32 class_id, int role)
 	    role == 2 /* XDEV_EXT_MECH_ROLE_CONSUMER */)
 		return XDEV_EXT_COMP_COPY_WINDOW;
 	return -EINVAL;
+}
+
+/* Compatibility lookup; pinned stages pass their declaration directly. */
+static inline int xdev_ext_comp_kind_of_role(__u32 class_id, int role)
+{
+ return xdev_ext_comp_kind_of_role_desc(xdev_ext_mech_class_desc(class_id), role);
 }
 
 static inline bool xdev_ext_comp_kind_ok(__u32 kinds, int kind)

@@ -7,7 +7,7 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from acquire_red_test import function
+from acquire_red_test import function, session_helpers
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[4]
@@ -46,7 +46,8 @@ class TransformLease(unittest.TestCase):
     def setUpClass(cls):
         production = Path(os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
         fixture = start_queue_closure((HERE / 'lease_fixture.c').read_text(), production)
-        for name in FUNCTIONS:
+        names = session_helpers(production, [function(production, name) for name in FUNCTIONS]) + list(FUNCTIONS)
+        for name in names:
             fixture = fixture.replace('/* ' + name + ' */', function(production, name))
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-lease-')
         cls.addClassCleanup(cls.temp.cleanup)

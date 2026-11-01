@@ -160,7 +160,8 @@ bool xdev_ext_mech_ops_has_member(const void *ops, u32 member)
 	return ops && xdev_ext_mech_member_fn(ops, member);
 }
 
-static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
+static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_class_desc *d,
+ const struct xdev_ext_mech_call_args *a)
 {
 	if (!a || !a->base || a->nr_frames > XDEV_EXT_MECH_MAX_FRAMES ||
 	    (a->nr_frames && !a->frames) || (a->info_size && !a->info))
@@ -171,8 +172,7 @@ static bool xdev_ext_mech_args_ok(const struct xdev_ext_mech_call_args *a)
 		       !a->scratch && !a->desc_size && !a->desc_cap &&
 		       !a->cqe && !a->cqe_size && !a->cqe_cap &&
 		       !a->out_len && !a->len_delta &&
-		       (a->info_size == sizeof(struct xdev_ext_xdomain_proto_info) ||
-			a->info_size == sizeof(struct xdev_ext_xdomain_proto_info_v2));
+		       d && d->protocol_info_ok && d->protocol_info_ok(a->info, a->info_size);
 	if (a->xdomain)
 		return false;
  if (a->callsite==XDEV_EXT_MECH_SITE_WORKER_SELECT)
@@ -206,24 +206,21 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 	struct xdev_ext_mech_prepare_call prepare = { .task = current, .call = &call };
 	unsigned long flags;
 	xdev_ext_mech_cb_t fn;
+ const struct xdev_ext_mech_class_desc *d = t && t->st && t->st->cls ?
+  t->st->cls->decl : t ? xdev_ext_mech_class_desc(t->class_id) : NULL;
 
-	if (!xdev_ext_mech_args_ok(a))
+	if (!xdev_ext_mech_args_ok(d, a))
 		return -EINVAL;
 	if (a->callsite == XDEV_EXT_MECH_SITE_WORKER_PROTOCOL) {
-		const struct xdev_ext_xdomain_proto_info *info = a->info;
-
 		/* Authority comes from the real target, never from the BPF base. */
 		if (!t || !t->s || !t->st || t->st->s != t->s ||
-		    t->class_id != XDEV_EXT_MECH_CLASS_XDOMAIN ||
-		    t->st->class_id != XDEV_EXT_MECH_CLASS_XDOMAIN ||
+		    !d || !d->protocol_info_ok || !t->st->cls ||
+      t->class_id != t->st->class_id || t->class_id != t->st->cls->class_id ||
 		    t->session_id != xdev_ext_mech_session_id(t->s) ||
 		    t->batch || t->batch_id || a->base->length ||
 		    a->base->bytes_done || a->base->src_offset ||
 		    a->base->dst_offset || a->base->logical_offset ||
-		    info->size != a->info_size ||
-		    !((a->info_size == sizeof(*info) && info->version == XDEV_EXT_XDOMAIN_PROTO_VERSION) ||
-		      (a->info_size == sizeof(struct xdev_ext_xdomain_proto_info_v2) &&
-		       info->version == XDEV_EXT_XDOMAIN_PROTO_V2_VERSION)))
+      !d->protocol_info_ok(a->info, a->info_size))
 			return -EINVAL;
 	}
 	fn = xdev_ext_mech_member_fn(ops, a->member);
@@ -241,9 +238,8 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		call.ctx.base.src_offset = t->key;
 		call.ctx.base.length = t->bytes;
 	}
-	call.ctx.mech_abi_version = t->class_id == XDEV_EXT_MECH_CLASS_CE ?
-		XDEV_EXT_CE_MECH_ABI_VERSION : t->class_id == XDEV_EXT_MECH_CLASS_DMA ?
-  XDEV_EXT_DMA_MECH_ABI_VERSION : XDEV_EXT_MECH_ABI_VERSION;
+	call.ctx.mech_abi_version = d->mech_abi_version;
+ call.decl = d;
 	call.ctx.member = a->member;
 	call.ctx.class_id = t->class_id;
 	call.ctx.callsite = a->callsite;
@@ -341,10 +337,8 @@ __bpf_kfunc __u8 *bpf_xdev_ext_info(const struct xdev_ext_mech_ctx *ctx,
   return NULL;
  /* Keep the fixed v1 AF_XDP view readable when C allocates the v3
   * extension. No other prefix length or class is granted a view. */
- if (rdonly_buf_size != c->info_size &&
-     !(c->ctx.class_id == XDEV_EXT_MECH_CLASS_AFXDP &&
-       c->info_size == sizeof(struct xdev_ext_afxdp_reliable_info) &&
-       rdonly_buf_size == sizeof(struct xdev_ext_afxdp_mech_info)))
+ if (rdonly_buf_size != (__u32)rdonly_buf_size ||
+     !xdev_ext_mech_info_view_ok_desc(c->decl, c->info_size, rdonly_buf_size))
   return NULL;
 	return (__u8 *)c->info;
 }
@@ -540,7 +534,7 @@ static const struct xdev_ext_ops_u32_field xdev_ext_mech_ops_fields[] = {
 
 static bool xdev_ext_ce_mech_abi_valid(u32 value)
 {
-	return value == XDEV_EXT_CE_MECH_ABI_VERSION;
+	return value == xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE].mech_abi_version;
 }
 
 static const struct xdev_ext_ops_u32_field xdev_ext_ce_mech_ops_fields[] = {
@@ -550,7 +544,7 @@ static const struct xdev_ext_ops_u32_field xdev_ext_ce_mech_ops_fields[] = {
 
 static bool xdev_ext_dma_mech_abi_valid(u32 value)
 {
-	return value == XDEV_EXT_DMA_MECH_ABI_VERSION;
+	return value == xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_DMA].mech_abi_version;
 }
 
 static const struct xdev_ext_ops_u32_field xdev_ext_dma_mech_ops_fields[] = {
@@ -594,16 +588,18 @@ static const struct xdev_ext_ops_desc xdev_ext_ce_mech_ops_desc = {
 	.nr_members = ARRAY_SIZE(xdev_ext_mech_ops_members),
 };
 
+static const struct xdev_ext_ops_desc *xdev_ext_mech_type_schema(u32 class_id);
+
 static int xdev_ext_ce_mech_ops_init_member(const struct btf_type *t,
 				       const struct btf_member *member,
 				       void *kdata, const void *udata)
 {
-	return xdev_ext_ops_init_member(&xdev_ext_ce_mech_ops_desc, t, member, kdata, udata);
+	return xdev_ext_ops_init_member(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_CE), t, member, kdata, udata);
 }
 
 static int xdev_ext_ce_mech_ops_validate(void *kdata)
 {
-	return xdev_ext_ops_validate(&xdev_ext_ce_mech_ops_desc, kdata);
+	return xdev_ext_ops_validate(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_CE), kdata);
 }
 
 static const struct xdev_ext_ops_desc xdev_ext_dma_mech_ops_desc = {
@@ -617,12 +613,12 @@ static int xdev_ext_dma_mech_ops_init_member(const struct btf_type *t,
 				       const struct btf_member *member,
 				       void *kdata, const void *udata)
 {
-	return xdev_ext_ops_init_member(&xdev_ext_dma_mech_ops_desc, t, member, kdata, udata);
+	return xdev_ext_ops_init_member(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_DMA), t, member, kdata, udata);
 }
 
 static int xdev_ext_dma_mech_ops_validate(void *kdata)
 {
-	return xdev_ext_ops_validate(&xdev_ext_dma_mech_ops_desc, kdata);
+	return xdev_ext_ops_validate(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_DMA), kdata);
 }
 
 static int xdev_ext_mech_ops_init_member(const struct btf_type *t,
@@ -648,7 +644,7 @@ static int xdev_ext_cpu_mech_ops_check_member(const struct btf_type *t,
 					 const struct btf_member *member,
 					 const struct bpf_prog *prog)
 {
-	return xdev_ext_ops_check_member(&xdev_ext_cpu_mech_ops_desc, t, member, prog);
+	return xdev_ext_ops_check_member(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_CPU), t, member, prog);
 }
 
 static int xdev_ext_mech_reg(u32 class_id, void *kdata, struct bpf_link *link)
@@ -825,32 +821,46 @@ static const struct bpf_struct_ops *const xdev_ext_mech_st_ops[] = {
 	&bpf_xdev_ext_xdomain_mech_ops,
 };
 
+/* Type identity and schema are class metadata, never inferred from a family. */
+struct xdev_ext_mech_type_decl {
+ u32 class_id;
+ const struct bpf_struct_ops *st_ops;
+ const struct xdev_ext_ops_desc *schema;
+};
+#define XDEV_EXT_MECH_TYPE_ROW(name, id, schema_name) \
+ { (id), &bpf_xdev_ext_##name##_mech_ops, &(schema_name) }
+static const struct xdev_ext_mech_type_decl xdev_ext_mech_types[] = {
+ XDEV_EXT_MECH_TYPE_ROW(nvme, XDEV_EXT_MECH_CLASS_NVME, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(afxdp, XDEV_EXT_MECH_CLASS_AFXDP, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(ce, XDEV_EXT_MECH_CLASS_CE, xdev_ext_ce_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(dma, XDEV_EXT_MECH_CLASS_DMA, xdev_ext_dma_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(cpu, XDEV_EXT_MECH_CLASS_CPU, xdev_ext_cpu_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(iaa, XDEV_EXT_MECH_CLASS_IAA, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(socket, XDEV_EXT_MECH_CLASS_SOCKET, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(net, XDEV_EXT_MECH_CLASS_NET, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(user, XDEV_EXT_MECH_CLASS_USER, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(xdomain, XDEV_EXT_MECH_CLASS_XDOMAIN, xdev_ext_mech_ops_desc),
+};
+#undef XDEV_EXT_MECH_TYPE_ROW
+
+static const struct xdev_ext_ops_desc *xdev_ext_mech_type_schema(u32 class_id)
+{
+ u32 i;
+
+ for (i = 0; i < ARRAY_SIZE(xdev_ext_mech_types); i++)
+  if (xdev_ext_mech_types[i].class_id == class_id)
+   return xdev_ext_mech_types[i].schema;
+ return NULL;
+}
+
 static const struct bpf_struct_ops *xdev_ext_mech_st_ops_of(u32 class_id)
 {
-	switch (class_id) {
-	case XDEV_EXT_MECH_CLASS_NVME:
-		return &bpf_xdev_ext_nvme_mech_ops;
-	case XDEV_EXT_MECH_CLASS_AFXDP:
-		return &bpf_xdev_ext_afxdp_mech_ops;
-	case XDEV_EXT_MECH_CLASS_CE:
-		return &bpf_xdev_ext_ce_mech_ops;
-	case XDEV_EXT_MECH_CLASS_DMA:
-		return &bpf_xdev_ext_dma_mech_ops;
-	case XDEV_EXT_MECH_CLASS_CPU:
-		return &bpf_xdev_ext_cpu_mech_ops;
-	case XDEV_EXT_MECH_CLASS_IAA:
-		return &bpf_xdev_ext_iaa_mech_ops;
-	case XDEV_EXT_MECH_CLASS_SOCKET:
-		return &bpf_xdev_ext_socket_mech_ops;
-	case XDEV_EXT_MECH_CLASS_NET:
-		return &bpf_xdev_ext_net_mech_ops;
-	case XDEV_EXT_MECH_CLASS_USER:
-		return &bpf_xdev_ext_user_mech_ops;
-	case XDEV_EXT_MECH_CLASS_XDOMAIN:
-		return &bpf_xdev_ext_xdomain_mech_ops;
-	default:
-		return NULL;
-	}
+ u32 i;
+
+ for (i = 0; i < ARRAY_SIZE(xdev_ext_mech_types); i++)
+  if (xdev_ext_mech_types[i].class_id == class_id)
+   return xdev_ext_mech_types[i].st_ops;
+ return NULL;
 }
 
 static const struct xdev_ext_ops_kfunc_member xdev_ext_mech_kfunc_members[] = {
@@ -989,12 +999,13 @@ int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops *ops)
 {
 	int ret = 0;
 
-	if (!ops || !xdev_ext_mech_class_known(ops->class_id) || !ops->bind ||
+	if (!ops || !xdev_ext_mech_class_known(ops->class_id) ||
+     !ops->decl || !ops->decl->family || !ops->decl->role ||
+     !ops->decl->check_stage || !ops->decl->base || !ops->bind ||
 	    !ops->validate || !ops->submit ||
 	    (ops->info_size && !ops->fill_info) ||
 	    (ops->cqe_size && !ops->fill_cqe) ||
-	    !xdev_ext_family_hooks_ok(ops->class_id,
-				    ops->fam.hdr ? &ops->fam.hdr->family : NULL) ||
+	    (ops->fam.hdr && ops->fam.hdr->family != ops->decl->family) ||
 	    !xdev_ext_mech_class_sizes_ok(ops->info_size, ops->desc_size,
 				     ops->desc_cap, ops->cqe_size,
 				     ops->cqe_cap, ops->batch_priv_size))

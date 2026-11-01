@@ -1413,6 +1413,7 @@ static unsigned long xsk_mech_progress(struct xdev_ext_mech_stage *st)
 }
 
 static const struct xdev_ext_mech_class_ops xsk_xdev_ext_mech_class_ops = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_AFXDP],
 	.class_id = XDEV_EXT_MECH_CLASS_AFXDP,
 	/* The NXP receiver takes generations only in order. */
 	.flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE,

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parents[5]
 
 def extract(text, name):
     import re
-    match = re.search(r'^static (?:int|void) ' + name + r'\(', text, re.M)
+    match = re.search(r'^static (?:int|void|u32) ' + name + r'\(', text, re.M)
     if not match:
         raise AssertionError(f'production function missing: {name}')
     end = text.index('{', match.start())
@@ -61,7 +61,7 @@ struct pool_ops {
  void (*recycle)(struct xdev_ext_mech_pool *,struct xdev_ext_mech_frame *);
 };
 struct xdev_ext_mech_pool {u32 kind, nr_frames,frame_size; const struct pool_ops *ops; __u8 custody[4]; u32 queue[4], count;};
-struct fake_cls {u32 flags;};
+struct fake_cls {u32 class_id, flags; const struct xdev_ext_mech_class_desc *decl;};
 struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;u64 key; bool ordered_loan,to_user; u32 nr_frames,present,bytes; struct xdev_ext_mech_frame f[4]; struct xdev_ext_mech_bstate bs;};
 struct xdev_ext_mech_session {
  struct xdev_ext_mech_start_queue *start_queue;bool start_ordered;
@@ -110,11 +110,13 @@ static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,struct xdev_
 '''
 TESTS = r'''
 #define CHECK(x) do {if(!(x)){fprintf(stderr,"line %d: %s\n",__LINE__,#x);return 1;}}while(0)
-static struct fake_cls cls;
+static struct fake_cls cls={.class_id=XDEV_EXT_MECH_CLASS_SOCKET,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_SOCKET]};
 static void init(struct xdev_ext_mech_session *s){
  memset(s,0,sizeof(*s));s->admit=true;s->frames=s->depth=s->nr_stages=1;s->pool.kind=XDEV_EXT_MECH_POOL_IOU_UMEM;
  s->pool.nr_frames=4;s->pool.frame_size=4096;s->pool.ops=&ops;s->layout=(struct xdev_ext_mech_layout){4096,32,1024,1024};
  s->st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;s->st[0].cls=&cls;
+ s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_SOCKET,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  inject_alloc_fail=inject_copy_fail=kicks=stops=runs=0;
 }
 static struct xdev_ext_mech_start request(struct xdev_ext_mech_user_span *span){return (struct xdev_ext_mech_start){.session_id=7,.nr_batches=1,.first_seq=91,.flags=XDEV_EXT_MECH_START_F_USER_FRAMES|XDEV_EXT_MECH_START_F_USER_SPANS,.nr_user_frames=1,.user_frames=(uintptr_t)span};}
@@ -191,6 +193,8 @@ class IndependentStart(unittest.TestCase):
                        'xdev_ext_mech_start_queue_rollback', 'xdev_ext_mech_start_queue_bind')
         queue_guards = '\n'.join(extract(text,n).split('{',1)[0] + '{ abort(); }' for n in queue_names)
         code = PREAMBLE + '\n' + queue_guards + '\n' + '\n'.join(extract(text, n) for n in (
+            'xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+            'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check',
             'xdev_ext_mech_take_user_frames', 'xdev_ext_mech_start', 'xdev_ext_mech_start_publication', 'xdev_ext_mech_start_more')) + '\n' + TESTS
         source = Path(cls.tmp.name) / 'fixture.c'
         cls.binary = Path(cls.tmp.name) / 'fixture'

@@ -69,6 +69,7 @@ struct xdev_ext_mech_stage;
 struct xdev_ext_mech_stage_diag;
 struct xdev_ext_comp_hooks { u32 kinds, producer_visibility; };
 struct xdev_ext_mech_class_ops {
+ u32 class_id; const struct xdev_ext_mech_class_desc *decl;
  int (*bind)(struct xdev_ext_mech_stage *,const struct xdev_ext_mech_stage_uapi *);
  int (*unbind_checked)(struct xdev_ext_mech_stage *);
  void (*unbind)(struct xdev_ext_mech_stage *);
@@ -159,7 +160,8 @@ static int class_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_
  st->priv=&st->rq; observed_caps=st->caps;return ret; }
 static int class_unbind_checked(struct xdev_ext_mech_stage *st) { (void)st;return checked_err; }
 static void class_unbind(struct xdev_ext_mech_stage *st) { xdev_ext_requester_unbind(&st->rq);if(late_err)st->s->last_err=late_err; }
-static const struct xdev_ext_mech_class_ops net_class={ .bind=class_bind,.unbind_checked=class_unbind_checked,.unbind=class_unbind };
+static const struct xdev_ext_mech_class_ops net_class={ .class_id=XDEV_EXT_MECH_CLASS_NET,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NET],
+ .bind=class_bind,.unbind_checked=class_unbind_checked,.unbind=class_unbind };
 static const struct xdev_ext_mech_class_ops *xdev_ext_mech_class_get(u32 id)
 { return id==XDEV_EXT_MECH_CLASS_NET?&net_class:NULL; }
 /* Default-only CREATE report scenarios never select PRIVATE handles. */

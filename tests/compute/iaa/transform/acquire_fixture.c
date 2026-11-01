@@ -15,7 +15,7 @@ typedef __u64 u64;
 static bool warn_once(bool condition) { return condition; }
 #define WARN_ON_ONCE(x) warn_once(!!(x))
 #define XDEV_EXT_MECH_CLASS_F_TRANSFORM (1U << 2)
-struct xdev_ext_mech_class_ops { u32 flags; };
+struct xdev_ext_mech_class_ops { u32 class_id,flags; const struct xdev_ext_mech_class_desc *decl; };
 struct xdev_ext_mech_stage { u32 class_id, direction, index; const struct xdev_ext_mech_class_ops *cls; };
 struct xdev_ext_mech_session { u32 nr_stages;struct xdev_ext_mech_stage_uapi plan[1];struct xdev_ext_mech_stage st[1]; struct xdev_ext_mech_life *life; };
 struct xdev_ext_mech_frame { u32 index, data_len; };
@@ -27,6 +27,7 @@ struct xdev_ext_mech_batch {
  bool producing, fifo_accepted;
  struct xdev_ext_mech_frame f[2];
 };
+/* xdev_ext_mech_session_stage_role */
 /* xdev_ext_mech_life_undo */
 /* xdev_ext_mech_batch_acquire */
 static int check(bool ok, const char *message) {
@@ -42,7 +43,9 @@ int main(int argc, char **argv) {
  bool saturated=!strcmp(argv[1],"saturated");
  bool ordinary=!strcmp(argv[1],"ordinary_producer");
  struct xdev_ext_mech_life life[2] = {0};
- const struct xdev_ext_mech_class_ops ops={.flags=ordinary?0:XDEV_EXT_MECH_CLASS_F_TRANSFORM};
+ const struct xdev_ext_mech_class_ops ops={.class_id=ordinary?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_IAA,
+  .decl=xdev_ext_mech_class_desc(ordinary?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_IAA),
+  .flags=ordinary?0:XDEV_EXT_MECH_CLASS_F_TRANSFORM};
  struct xdev_ext_mech_session s = {.st={{.class_id=ordinary?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_IAA,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&ops}},.life=life};
  struct xdev_ext_mech_batch b = {.nr_frames=1,.f={{.index=0,.data_len=1024},{.index=1,.data_len=1024}}};
  s.nr_stages=1;s.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=ordinary?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_IAA,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};
@@ -51,7 +54,7 @@ int main(int argc, char **argv) {
  assert(!xdev_ext_mech_life_claim(&life[0],0,&token));
  assert(!xdev_ext_mech_life_publish(&life[0],token,1,short_source?1000:1024));
  }
- if (!strcmp(argv[1],"to_device"))s.st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;
+ if (!strcmp(argv[1],"to_device"))s.plan[0].direction=s.st[0].direction=XDEV_EXT_MECH_DIR_TO_DEVICE;
  if (short_second || busy_second) {
   b.nr_frames=2;
   if(short_second) {
