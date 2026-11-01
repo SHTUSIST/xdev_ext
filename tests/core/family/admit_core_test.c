@@ -20,7 +20,7 @@ static void admission_matrix(void)
 {
  static const int distances[] = { -99, -1, 0, 3, INT32_MAX };
  unsigned backing, bits, owner, d;
- for (backing = 0; backing < 32; backing++)
+ for (backing = 0; backing < 64; backing++)
  for (owner = 0; owner < 2; owner++)
  for (d = 0; d < sizeof(distances) / sizeof(distances[0]); d++)
  for (bits = 0; bits < 64; bits++) {
@@ -30,12 +30,17 @@ static void admission_matrix(void)
    .dma_iommu = !!(bits & 4), .dma_ops = !!(bits & 8), .admin = !!(bits & 16),
   };
   struct xdev_ext_admission a;
-  bool override = !!(bits & 32), no_path = distances[d] < 0;
-  bool wrong_memory = !owner || !(backing & 1) || (backing & 6);
+  bool host = !!(backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM);
+  bool override = !!(bits & 32), no_path = !host && distances[d] < 0;
+  /* A host certificate admits exactly ordinary struct-page RAM. Mixed BAR,
+   * coherent aperture, external ownership and raw-address claims stay hard
+   * refusals; the original 0..31 BAR cases retain their original oracle. */
+  bool wrong_memory = host ? backing != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
+   XDEV_EXT_PEER_BACKING_STRUCT_PAGE) : !owner || !(backing & 1) || (backing & 6);
   bool raw_translated = (backing & 16) && (bits & 12);
   bool hard = wrong_memory || (bits & 3) || (backing & 8) || raw_translated;
   bool permitted = !hard && (!no_path || (override && f.admin));
-  int reach = !no_path ? XDEV_EXT_CAP_TOPOLOGY_PASSED :
+  int reach = host ? XDEV_EXT_CAP_UNKNOWN : !no_path ? XDEV_EXT_CAP_TOPOLOGY_PASSED :
    override && f.admin ? XDEV_EXT_CAP_UNVERIFIED_FORCED : XDEV_EXT_CAP_TOPOLOGY_FAILED;
   memset(&a, 0xa5, sizeof(a));
   EQ(xdev_ext_admit_decide(&f, override ? XDEV_EXT_ADMIT_F_ALLOW_UNVERIFIED : 0, &a), permitted ? 0 : -EXDEV);
@@ -98,6 +103,10 @@ static void unknown_backing_bits(void)
 {
  unsigned bit;
  for (bit = 5; bit < 32; bit++) {
+  /* HOST_SYSTEM is now defined; its mixed-BAR refusal is checked in the
+   * exhaustive admission matrix rather than classified as an unknown bit. */
+  if ((1U << bit) == XDEV_EXT_PEER_BACKING_HOST_SYSTEM)
+   continue;
   struct xdev_ext_admit_facts f = { .distance = 3, .owner_known = true,
    .backing = XDEV_EXT_PEER_BACKING_MMIO_BAR | (1U << bit), .admin = true };
   struct xdev_ext_admission a;
