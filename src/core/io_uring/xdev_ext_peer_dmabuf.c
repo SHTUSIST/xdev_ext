@@ -224,8 +224,21 @@ static int xdev_ext_dmabuf_describe(void *allocation, struct pci_dev *peer,
                                    struct xdev_ext_peer_backing *out)
 {
  struct xdev_ext_dmabuf_allocation *a = allocation;
+ struct xdev_ext_peer_backing backing = {};
+ int ret;
+
+ *out = (struct xdev_ext_peer_backing){};
  if (a->buf->size != a->len || xdev_ext_dmabuf_stale(a)) return -ESTALE;
- return a->descriptor->ops->describe(a->buf, peer, out);
+ ret = a->descriptor->ops->describe(a->buf, peer, &backing);
+ if (ret) return ret;
+ if (backing.flags & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+  if (backing.flags != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
+                        XDEV_EXT_PEER_BACKING_STRUCT_PAGE)) return -EOPNOTSUPP;
+  if (peer->untrusted || is_swiotlb_force_bounce(&peer->dev)) return -EXDEV;
+  if (!dev_is_dma_coherent(&peer->dev)) return -EOPNOTSUPP;
+ }
+ *out = backing;
+ return 0;
 }
 static int xdev_ext_dmabuf_map(void *allocation, struct pci_dev *peer,
                               struct xdev_ext_peer_dma *out)
@@ -243,12 +256,6 @@ static int xdev_ext_dmabuf_map(void *allocation, struct pci_dev *peer,
  if (a->requesters == XDEV_EXT_DMABUF_MAX_REQUESTERS) return -ENOSPC;
  ret = xdev_ext_dmabuf_describe(a, peer, &backing);
  if (ret) return ret;
- if (backing.flags & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
-  if (backing.flags != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
-                        XDEV_EXT_PEER_BACKING_STRUCT_PAGE)) return -EOPNOTSUPP;
-  if (peer->untrusted || is_swiotlb_force_bounce(&peer->dev)) return -EXDEV;
-  if (!dev_is_dma_coherent(&peer->dev)) return -EOPNOTSUPP;
- }
  m = kzalloc(sizeof(*m), GFP_KERNEL);
  if (!m) return -ENOMEM;
  m->attachment = dma_buf_dynamic_attach(a->buf, &peer->dev,
