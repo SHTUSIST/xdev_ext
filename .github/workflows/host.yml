@@ -208,6 +208,11 @@ jobs:
             *) exit 1 ;;
           esac
           make -C tests/eval cuda-host-check
+      - name: Mooncake command plans and no-execution boundary
+        working-directory: .
+        run: |
+          python3 tests/benchmarks/mooncake/test_contract.py
+          python3 tests/benchmarks/mooncake/fixtures/test_cli_assertions.py
       - name: Reviewer-driven evaluation harness contracts
         run: make -C tests/eval reviewer-eval-check
       - name: Native-view evidence, trace and dma-fence contracts
