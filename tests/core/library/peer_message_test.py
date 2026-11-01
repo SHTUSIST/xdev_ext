@@ -2,6 +2,7 @@
 """Compile the independent public-contract test against real library units."""
 import argparse
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -25,6 +26,7 @@ def main():
     lib = kernel / "tools/xdev_ext_mech/lib"
     compiler = os.environ.get("CC", "gcc")
     flags = ["-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror"]
+    flags += shlex.split(os.environ.get("CPPFLAGS", ""))
     if not args.no_sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
     objects = []
@@ -35,10 +37,18 @@ def main():
         print("+", " ".join(command), flush=True)
         subprocess.run(command, check=True)
         objects.append(str(obj))
+    for unit in ("xdev_ext_xsk_shared", "xdev_ext_xsk_steer"):
+        obj = out / (unit + ".o")
+        command = [compiler, *flags, "-I", str(kernel), "-c",
+                   str(kernel / "tools" / (unit + ".c")), "-o", str(obj)]
+        print("+", " ".join(command), flush=True)
+        subprocess.run(command, check=True)
+        objects.append(str(obj))
     binary = out / "peer_message_test"
     command = [compiler, *flags, "-I", str(contract_kernel),
                "-DXDEV_EXT_TEST_CONTRACT=\"" + str(contract_kernel / "tools/xdev_ext_mech/lib/libxdev_ext.h") + "\"",
-               str(test), *objects, "-o", str(binary)]
+               str(test), *objects, *shlex.split(os.environ.get("LDFLAGS", "")),
+               *shlex.split(os.environ.get("LIBBPF_LIBS", "-lbpf")), "-lelf", "-lz", "-o", str(binary)]
     print("+", " ".join(command), flush=True)
     subprocess.run(command, check=True)
     print("+", binary, flush=True)

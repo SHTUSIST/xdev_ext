@@ -138,7 +138,11 @@ with tempfile.TemporaryDirectory(prefix='source-drain-', dir=os.environ.get(
     command = shlex.split(os.environ.get('CC', 'gcc')) + [
         '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
         '-fsanitize=undefined', '-fno-sanitize-recover=undefined', '-I'+str(ROOT),
+        *shlex.split(os.environ.get('CPPFLAGS', '')),
         str(source), str(ROOT/'tools/xdev_ext_mech/lib/xdev_ext_session.c'),
+        str(ROOT/'tools/xdev_ext_xsk_shared.c'), str(ROOT/'tools/xdev_ext_xsk_steer.c'),
+        *shlex.split(os.environ.get('LDFLAGS', '')),
+        *shlex.split(os.environ.get('LIBBPF_LIBS', '-lbpf')), '-lelf', '-lz',
         '-o', str(binary)]
     subprocess.run(command, check=True)
     result = subprocess.run([str(binary)], check=False)

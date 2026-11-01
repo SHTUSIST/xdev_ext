@@ -6,7 +6,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -21,21 +20,23 @@ def main():
     out=a.out.resolve();out.mkdir(parents=True,exist_ok=True)
     spec=importlib.util.spec_from_file_location('r3_layout',root/'tools/layout.py')
     module=importlib.util.module_from_spec(spec);sys.modules[spec.name]=module;spec.loader.exec_module(module)
-    layout=module.load_layout(root);view=out/'view';inputs=[]
-    # Isolated build view; no changes to canonical source or layout manifest.
+    layout=module.load_layout(root);view=module.materialize_view(root).root;inputs=[]
+    # Reuse the canonical tool-owned build view for every old consumer.
     for source,logical in layout.by_source.items():
         if logical.startswith('kernel/') and (source.endswith('.h') or source in (
                 'src/lib/xdev_ext_session.c','src/lib/xdev_ext_link.c',
-                'src/cli/xdev_ext_mech_ctl.c','src/cli/xdev_ext_xsk_redirect.c','src/cli/xdev_ext_gpu_identity.c')):
-            dst=view/logical;dst.parent.mkdir(parents=True,exist_ok=True)
-            shutil.copyfile(root/source,dst);inputs.append(source)
+                'src/cli/xdev_ext_mech_ctl.c','src/cli/xdev_ext_xsk_redirect.c','src/cli/xdev_ext_gpu_identity.c',
+                'src/cli/xdev_ext_xsk_shared.c','src/cli/xdev_ext_xsk_steer.c')):
+            inputs.append(source)
     (out/'inputs.json').write_text(json.dumps({'canonical_root':str(root),'inputs':inputs},indent=2)+'\n')
     kernel=view/'kernel';lib=kernel/'tools/xdev_ext_mech/lib'
     bpf=Path(a.libbpf_build) if a.libbpf_build else None
     cc=os.environ.get('CC','gcc');flags=['-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-I',str(kernel),'-I',str(lib)]
     if bpf:flags+=['-I',str(bpf/'include')]
-    commands=[ [cc,*flags,str(test/'test.c'),str(lib/'xdev_ext_session.c'),'-o',str(out/'test')],
-        [cc,*flags,str(kernel/'tools/xdev_ext_mech/xdev_ext_mech_ctl.c'),str(lib/'xdev_ext_link.c'),str(lib/'xdev_ext_session.c'),str(kernel/'tools/xdev_ext_xsk_redirect.c'),str(kernel/'tools/xdev_ext_gpu_identity.c'),str(test/'ctl_hooks.c'),'-Wl,--wrap=syscall','-Wl,--wrap=ioctl','-Wl,--wrap=open',str(bpf/'libbpf.a') if bpf else '-lbpf','-lelf','-lz','-ldl','-o',str(out/'ctl')] ]
+    shared=[str(kernel/'tools/xdev_ext_xsk_shared.c'),str(kernel/'tools/xdev_ext_xsk_steer.c')]
+    bpf_link=str(bpf/'libbpf.a') if bpf else '-lbpf'
+    commands=[ [cc,*flags,str(test/'test.c'),str(lib/'xdev_ext_session.c'),*shared,bpf_link,'-lelf','-lz','-o',str(out/'test')],
+        [cc,*flags,str(kernel/'tools/xdev_ext_mech/xdev_ext_mech_ctl.c'),str(lib/'xdev_ext_link.c'),str(lib/'xdev_ext_session.c'),*shared,str(kernel/'tools/xdev_ext_xsk_redirect.c'),str(kernel/'tools/xdev_ext_gpu_identity.c'),str(test/'ctl_hooks.c'),'-Wl,--wrap=syscall','-Wl,--wrap=ioctl','-Wl,--wrap=open',str(bpf/'libbpf.a') if bpf else '-lbpf','-lelf','-lz','-ldl','-o',str(out/'ctl')] ]
     verdict={'classification':'postimplementation-independent-conformance','scope':'normal lib/ctl CREATE_REPORT op10; injected external syscall replies; no kernel admission, stage_diag, hardware, performance','build_exit':0,'test_exit':None,'ctl':[]}
     with (out/'build.log').open('w') as log:
         for command in commands:

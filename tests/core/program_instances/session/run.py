@@ -6,7 +6,7 @@ OS/device/PREPARE invocation boundaries reuse the independently qualified
 admission fixture. This mode certifies wire/control-flow only, not private
 instance lookup or sealed invocation. Those require core-call/actual guest.
 """
-import argparse,hashlib,importlib.util,json,os,re,subprocess,sys
+import argparse,hashlib,importlib.util,json,os,re,shlex,subprocess,sys
 from pathlib import Path
 HERE=Path(__file__).resolve().parent
 ROOT=next(p for p in HERE.parents if (p/'source-layout.json').is_file())
@@ -19,20 +19,21 @@ def main():
  root=a.source_root.resolve();out=a.output.resolve();out.mkdir(parents=True,exist_ok=True)
  result={'scope':'actual core CREATE/bind/release wire control flow; host environmental device/BPF boundaries','hardware':False,'kernel_execution':False,'commands':[],'cases':[]}
  try:
-  mapping=module('sp_layout',root/'tools/layout.py').load_layout(root);native=out/'headers'
-  for (component,name),source in mapping.by_native.items():
-   if component=='linux' and name.endswith('.h'):
-    dst=native/name;dst.parent.mkdir(parents=True,exist_ok=True);dst.write_bytes((root/source).read_bytes())
+  layout_module=module('sp_layout',root/'tools/layout.py');mapping=layout_module.load_layout(root);native=out/'headers'
   if a.suite=='library':
-   source_name=mapping.by_native[('linux','tools/xdev_ext_mech/lib/xdev_ext_session.c')]
-   target=native/'tools/xdev_ext_mech/lib/xdev_ext_session.c';target.parent.mkdir(parents=True,exist_ok=True);target.write_bytes((root/source_name).read_bytes())
+   native=layout_module.materialize_view(root).root/'kernel'
+   target=native/'tools/xdev_ext_mech/lib/xdev_ext_session.c'
    (out/'session_wire.h').write_bytes((HERE/'wire.h').read_bytes());exe=out/'library'
-   cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-fsanitize=undefined','-fno-sanitize-recover=all','-I'+str(native),'-I'+str(out),str(HERE/'library.c'),str(target),'-o',str(exe)]
+   shared=[str(native/'tools/xdev_ext_xsk_shared.c'),str(native/'tools/xdev_ext_xsk_steer.c')]
+   cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-fsanitize=undefined','-fno-sanitize-recover=all',*shlex.split(os.environ.get('CPPFLAGS','')),'-I'+str(native),'-I'+str(out),str(HERE/'library.c'),str(target),*shared,*shlex.split(os.environ.get('LDFLAGS','')),*shlex.split(os.environ.get('LIBBPF_LIBS','-lbpf')),'-lelf','-lz','-o',str(exe)]
    r=subprocess.run(cmd,text=True,capture_output=True,timeout=60);(out/'compile.log').write_text(r.stdout+r.stderr);result.update(compile_command=cmd,compile_exit=r.returncode)
    if r.returncode:raise RuntimeError('library compile failed; setup only')
    r=subprocess.run([str(exe)],text=True,capture_output=True,timeout=15);(out/'library.log').write_text(r.stdout+r.stderr)
    result.update(exit=r.returncode,state='SETUP_ERROR' if r.returncode==2 else 'BEHAVIOR_RED' if r.returncode else 'SCOPED_PASS');print(r.stdout+r.stderr,end='')
    (out/'result.json').write_text(json.dumps(result,indent=2)+'\n');return r.returncode
+  for (component,name),source in mapping.by_native.items():
+   if component=='linux' and name.endswith('.h'):
+    dst=native/name;dst.parent.mkdir(parents=True,exist_ok=True);dst.write_bytes((root/source).read_bytes())
   admission=root/'tests/core/admission_report';extract=module('sp_admission_extract',admission/'run.py')
   core=(root/'src/core/io_uring/xdev_ext_mech.c').read_text();rq=(root/'src/core/io_uring/family/xdev_ext_requester.c').read_text()
   groups={'REQUESTER':(rq,('xdev_ext_requester_bind','xdev_ext_requester_unbind')),'ADMITS':(core,tuple(n for n in ('xdev_ext_mech_programs_current','xdev_ext_mech_session_admits') if n+'(' in core)),'BATCH_GET':(core,('xdev_ext_mech_batch_get_locked',)),'BIND':(core,('xdev_ext_mech_class_bind','xdev_ext_mech_session_bind')),'RELEASE':(core,('xdev_ext_mech_unbind_checked','xdev_ext_mech_session_release_disposition','xdev_ext_mech_session_release_report','xdev_ext_mech_session_release')),'CREATE':(core,('xdev_ext_mech_create_common','xdev_ext_mech_create','xdev_ext_mech_create_report_op')+tuple(n for n in ('xdev_ext_mech_create_programs_op',) if n+'(' in core)),'CAPS':(core,('xdev_ext_mech_stage_caps_op',)),'DISPATCH':(core,('io_xdev_ext_mech_register',))}

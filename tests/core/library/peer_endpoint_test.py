@@ -2,6 +2,7 @@
 """Real-linked endpoint behavior tests, with no endpoint-source parsing."""
 import argparse
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import tempfile
@@ -28,6 +29,7 @@ def main():
     kernel, contract_kernel = source / "kernel", contract / "kernel"
     lib = kernel / "tools/xdev_ext_mech/lib"
     flags = ["-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror"]
+    flags += shlex.split(os.environ.get("CPPFLAGS", ""))
     if not args.no_sanitize:
         flags += ["-fsanitize=address,undefined", "-fno-sanitize-recover=undefined"]
     compiler, objects = os.environ.get("CC", "gcc"), []
@@ -40,10 +42,18 @@ def main():
         print("+", " ".join(command), flush=True)
         subprocess.run(command, check=True)
         objects.append(str(obj))
+    for unit in ("xdev_ext_xsk_shared", "xdev_ext_xsk_steer"):
+        obj = out / (unit + ".o")
+        command = [compiler, *flags, "-I", str(kernel), "-c",
+                   str(kernel / "tools" / (unit + ".c")), "-o", str(obj)]
+        print("+", " ".join(command), flush=True)
+        subprocess.run(command, check=True)
+        objects.append(str(obj))
     binary = out / "peer_endpoint_test"
     header = contract_kernel / "tools/xdev_ext_mech/lib/libxdev_ext_peer_message.h"
     command = [compiler, *flags, "-I", str(contract_kernel),
-               '-DXDEV_EXT_ENDPOINT_CONTRACT="' + str(header) + '"', str(test), *objects, "-o", str(binary)]
+               '-DXDEV_EXT_ENDPOINT_CONTRACT="' + str(header) + '"', str(test), *objects, *shlex.split(os.environ.get("LDFLAGS", "")),
+               *shlex.split(os.environ.get("LIBBPF_LIBS", "-lbpf")), "-lelf", "-lz", "-o", str(binary)]
     print("+", " ".join(command), flush=True)
     subprocess.run(command, check=True)
     print("+", binary, flush=True)

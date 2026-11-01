@@ -6,7 +6,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
+import shlex
 import subprocess
 import sys
 
@@ -26,15 +26,13 @@ def main():
     sys.modules[spec.name] = layout_module
     spec.loader.exec_module(layout_module)
     layout = layout_module.load_layout(root)
-    view = out / 'view'
+    view = layout_module.materialize_view(root).root
     inputs = []
     for source, logical in layout.by_source.items():
         if logical.startswith('kernel/') and (source.endswith('.h') or source in (
                 'src/lib/xdev_ext_session.c', 'src/lib/xdev_ext_user.c',
-                'src/lib/xdev_ext_link.c', 'src/lib/xdev_ext_peer_message.c')):
-            destination = view / logical
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(root / source, destination)
+                'src/lib/xdev_ext_link.c', 'src/lib/xdev_ext_peer_message.c',
+                'src/cli/xdev_ext_xsk_shared.c', 'src/cli/xdev_ext_xsk_steer.c')):
             inputs.append(source)
     (out / 'inputs.json').write_text(json.dumps({'canonical_root': str(root),
                                                'inputs': inputs}, indent=2) + '\n')
@@ -42,22 +40,28 @@ def main():
     lib = kernel / 'tools/xdev_ext_mech/lib'
     flags = ['-std=gnu11', '-O0', '-g', '-Wall', '-Wextra', '-Werror',
              '-I', str(kernel), '-I', str(lib)]
+    flags += shlex.split(os.environ.get('CPPFLAGS', ''))
     compiler = os.environ.get('CC', 'gcc')
     objects = []
     with (out / 'build.log').open('w') as log:
-        for unit in ('xdev_ext_session', 'xdev_ext_user', 'xdev_ext_link', 'xdev_ext_peer_message'):
+        for unit in ('xdev_ext_session', 'xdev_ext_user', 'xdev_ext_link', 'xdev_ext_peer_message',
+                     'xdev_ext_xsk_shared', 'xdev_ext_xsk_steer'):
             obj = out / (unit + '.o')
             command = [compiler, *flags]
             if unit == 'xdev_ext_user':
                 command += ['-include', str(test_dir / 'wait_hooks.h')]
-            command += ['-c', str(lib / (unit + '.c')), '-o', str(obj)]
+            directory = kernel / 'tools' if unit.startswith('xdev_ext_xsk_') else lib
+            command += ['-c', str(directory / (unit + '.c')), '-o', str(obj)]
             print('+', ' '.join(command), flush=True)
             subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
             objects.append(str(obj))
         binary = out / 'peer_wait_test'
         command = [compiler, *flags, str(test_dir / 'peer_wait_test.c'), *objects,
                    '-Wl,--wrap=poll', '-Wl,--wrap=clock_gettime', '-Wl,--wrap=nanosleep',
-                   '-Wl,--wrap=read', '-Wl,--wrap=mmap', '-o', str(binary)]
+                   '-Wl,--wrap=read', '-Wl,--wrap=mmap',
+                   *shlex.split(os.environ.get('LDFLAGS', '')),
+                   *shlex.split(os.environ.get('LIBBPF_LIBS', '-lbpf')), '-lelf', '-lz',
+                   '-o', str(binary)]
         print('+', ' '.join(command), flush=True)
         subprocess.run(command, stdout=log, stderr=subprocess.STDOUT, check=True)
     result = subprocess.run([str(binary)], text=True, stdout=subprocess.PIPE,

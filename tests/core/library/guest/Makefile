@@ -9,18 +9,19 @@ LIBXDEV_EXT ?= $(KSRC)/tools/xdev_ext_mech/lib/.xdev_ext-lib-build
 OUTPUT ?= $(CURDIR)
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror
+LIBBPF_LIBS ?= -lbpf
 
 all: $(OUTPUT)/xdev_ext_lib_nvme_nic $(OUTPUT)/xdev_ext_lib_iou $(OUTPUT)/xdev_ext_lib_rx
 
 $(OUTPUT)/xdev_ext_lib_nvme_nic: xdev_ext_lib_nvme_nic.c $(LIBXDEV_EXT)/libxdev_ext.a \
 		$(KSRC)/tools/xdev_ext_mech/lib/libxdev_ext.h
-	$(CC) $(CFLAGS) -I$(KSRC)/tools/xdev_ext_mech/lib $< -o $@ \
-		$(LIBXDEV_EXT)/libxdev_ext.a -lbpf -lelf -lz
+	$(CC) $(CPPFLAGS) $(CFLAGS) -I$(KSRC)/tools/xdev_ext_mech/lib $< -o $@ \
+		$(LIBXDEV_EXT)/libxdev_ext.a $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz
 
 $(OUTPUT)/xdev_ext_lib_iou: xdev_ext_lib_iou.c $(LIBXDEV_EXT)/libxdev_ext.a \
 		$(KSRC)/tools/xdev_ext_mech/lib/libxdev_ext.h
-	$(CC) $(CFLAGS) -pthread -I$(KSRC)/tools/xdev_ext_mech/lib $< -o $@ \
-		$(LIBXDEV_EXT)/libxdev_ext.a -lbpf -lelf -lz
+	$(CC) $(CPPFLAGS) $(CFLAGS) -pthread -I$(KSRC)/tools/xdev_ext_mech/lib $< -o $@ \
+		$(LIBXDEV_EXT)/libxdev_ext.a $(LDFLAGS) $(LIBBPF_LIBS) -lelf -lz
 
 # Independent of the product: no product header.
 $(OUTPUT)/xdev_ext_lib_rx: xdev_ext_lib_rx.c

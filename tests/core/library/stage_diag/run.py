@@ -6,7 +6,6 @@ import importlib.util
 import json
 import os
 from pathlib import Path
-import shutil
 import subprocess
 import sys
 
@@ -26,16 +25,14 @@ def main():
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
     layout = module.load_layout(root)
-    view = out / 'view'
+    view = module.materialize_view(root).root
     inputs = []
     for source, logical in layout.by_source.items():
         if logical.startswith('kernel/') and (source.endswith('.h') or source in (
                 'src/lib/xdev_ext_session.c', 'src/lib/xdev_ext_link.c',
                 'src/cli/xdev_ext_mech_ctl.c', 'src/cli/xdev_ext_xsk_redirect.c',
-                'src/cli/xdev_ext_gpu_identity.c')):
-            dst = view / logical
-            dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(root / source, dst)
+                'src/cli/xdev_ext_gpu_identity.c',
+                'src/cli/xdev_ext_xsk_shared.c', 'src/cli/xdev_ext_xsk_steer.c')):
             inputs.append(source)
     (out / 'inputs.json').write_text(json.dumps({'canonical_root': str(root), 'inputs': inputs}, indent=2) + '\n')
     kernel = view / 'kernel'
@@ -46,15 +43,17 @@ def main():
         flags += ['-I', str(a.libbpf_build / 'include')]
     bpf_link = str(a.libbpf_build / 'libbpf.a') if a.libbpf_build else '-lbpf'
     cc = os.environ.get('CC', 'gcc')
+    shared = [str(kernel / 'tools/xdev_ext_xsk_shared.c'), str(kernel / 'tools/xdev_ext_xsk_steer.c')]
     commands = [
-        [cc, *flags, str(test / 'test.c'), str(lib / 'xdev_ext_session.c'), '-o', str(out / 'test')],
+        [cc, *flags, str(test / 'test.c'), str(lib / 'xdev_ext_session.c'), *shared, bpf_link,
+         '-lelf', '-lz', '-o', str(out / 'test')],
         [cc, *flags, str(kernel / 'tools/xdev_ext_mech/xdev_ext_mech_ctl.c'),
-         str(lib / 'xdev_ext_link.c'), str(lib / 'xdev_ext_session.c'),
+         str(lib / 'xdev_ext_link.c'), str(lib / 'xdev_ext_session.c'), *shared,
          str(kernel / 'tools/xdev_ext_xsk_redirect.c'), str(kernel / 'tools/xdev_ext_gpu_identity.c'),
          str(test / 'ctl_hooks.c'), '-Wl,--wrap=syscall', bpf_link,
          '-lelf', '-lz', '-ldl', '-o', str(out / 'ctl')],
         [cc, *flags, str(test / 'deadline.c'), str(lib / 'xdev_ext_link.c'),
-         str(lib / 'xdev_ext_session.c'), str(kernel / 'tools/xdev_ext_xsk_redirect.c'),
+         str(lib / 'xdev_ext_session.c'), *shared, str(kernel / 'tools/xdev_ext_xsk_redirect.c'),
          str(kernel / 'tools/xdev_ext_gpu_identity.c'), '-Wl,--wrap=syscall',
          '-Wl,--wrap=clock_gettime', '-Wl,--wrap=poll', bpf_link,
          '-lelf', '-lz', '-ldl', '-o', str(out / 'deadline')]]

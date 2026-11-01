@@ -14,7 +14,9 @@ CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC
 
 SRCS := xdev_ext_session.c xdev_ext_prog.c xdev_ext_run.c xdev_ext_user.c xdev_ext_link.c xdev_ext_peer_message.c
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
-HDRS := libxdev_ext.h libxdev_ext_internal.h libxdev_ext_peer_message.h ../xdev_ext_mech_ctl_core.h \
+SHARED := xdev_ext_xsk_shared xdev_ext_xsk_steer
+OBJS += $(SHARED:%=$(BUILD_DIR)/%.o)
+HDRS := ../../include/xdev_ext_xsk_shared.h ../../include/xdev_ext_xsk_shared_prog.h ../../include/xdev_ext_xsk_steer.h libxdev_ext.h libxdev_ext_internal.h libxdev_ext_peer_message.h ../xdev_ext_mech_ctl_core.h \
 	../xdev_ext_mech_prog.h ../../../include/uapi/linux/xdev_ext_mech.h \
 	../../../include/uapi/linux/io_uring.h
 
@@ -26,6 +28,9 @@ $(BUILD_DIR):
 	mkdir -p $@
 
 $(BUILD_DIR)/%.o: %.c $(HDRS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(SHARED:%=$(BUILD_DIR)/%.o): $(BUILD_DIR)/%.o: ../../%.c $(HDRS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 $(BUILD_DIR)/libxdev_ext.a: $(OBJS)
