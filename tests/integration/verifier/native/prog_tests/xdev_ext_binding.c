@@ -43,6 +43,7 @@
 #include "xdev_ext_binding_fail_sleepable.skel.h"
 #include "xdev_ext_binding_fail_write.skel.h"
 #include "xdev_ext_binding_fail_write_kernel.skel.h"
+#include "xdev_ext_binding_helpers.skel.h"
 #include "xdev_ext_binding_invalid_decision.skel.h"
 #include "xdev_ext_binding_legacy.skel.h"
 #include "xdev_ext_binding_missing_select.skel.h"
@@ -4207,5 +4208,6 @@ void serial_test_xdev_ext_binding(void)
 	RUN_TESTS(xdev_ext_binding_fail_foreign_ops);
 	RUN_TESTS(xdev_ext_binding_fail_write);
 	RUN_TESTS(xdev_ext_binding_fail_write_kernel);
+	RUN_TESTS(xdev_ext_binding_helpers);
 	RUN_TESTS(xdev_ext_binding_fail_sleepable);
 }

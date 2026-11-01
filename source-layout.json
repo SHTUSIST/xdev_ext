@@ -3359,6 +3359,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_binding/Makefile"
     },
     {
+      "source": "tests/core/binding/helper_whitelist_test.py",
+      "logical_path": "tests/core/binding/helper_whitelist_test.py"
+    },
+    {
       "source": "tests/core/binding/xdev_ext_binding_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_binding/xdev_ext_binding_test.c"
@@ -5424,6 +5428,11 @@
       "source": "tests/integration/verifier/native/progs/xdev_ext_binding_fail_write_kernel.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/bpf/progs/xdev_ext_binding_fail_write_kernel.c"
+    },
+    {
+      "source": "tests/integration/verifier/native/progs/xdev_ext_binding_helpers.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/bpf/progs/xdev_ext_binding_helpers.c"
     },
     {
       "source": "tests/integration/verifier/native/progs/xdev_ext_binding_invalid_decision.c",
