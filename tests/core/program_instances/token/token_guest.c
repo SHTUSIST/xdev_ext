@@ -67,6 +67,47 @@ static int enter_userns(void)
  return 0;
 }
 struct loaded { struct bpf_object *obj; struct bpf_link *link; int selected; };
+/* This fixed test object has one ordinary helper CALL and no BPF subprograms. */
+#define FORBIDDEN_MAX_INSNS 4096
+static bool forbidden_call_shape(const struct bpf_insn *insn)
+{
+ return insn->code==(BPF_JMP|BPF_CALL) && !insn->src_reg &&
+        !insn->dst_reg && !insn->off;
+}
+static int forbidden_helper_original(struct bpf_object *obj,size_t *index)
+{
+ struct bpf_program *prog=bpf_object__find_program_by_name(obj,"token_prepare");
+ const struct bpf_insn *insns; size_t count,found=0;
+ if (!prog) return -EINVAL;
+ count=bpf_program__insn_cnt(prog); insns=bpf_program__insns(prog);
+ if (!count || count>FORBIDDEN_MAX_INSNS || !insns) return -EINVAL;
+ for (size_t i=0;i<count;i++) {
+  if (insns[i].imm!=BPF_FUNC_probe_read_kernel) continue;
+  if (!forbidden_call_shape(&insns[i]) || ++found!=1) return -EINVAL;
+  *index=i;
+ }
+ return found==1 ? 0 : -EINVAL;
+}
+static int forbidden_helper_restore(struct bpf_object *obj,size_t index)
+{
+ struct bpf_program *prog=bpf_object__find_program_by_name(obj,"token_prepare");
+ const struct bpf_insn *insns; struct bpf_insn *copy;
+ size_t count; int before,ret;
+ if (!prog) return -EINVAL;
+ count=bpf_program__insn_cnt(prog); insns=bpf_program__insns(prog);
+ if (!count || count>FORBIDDEN_MAX_INSNS || index>=count || !insns) return -EINVAL;
+ before=insns[index].imm;
+ if (!forbidden_call_shape(&insns[index]) ||
+     (before!=BPF_FUNC_probe_read_kernel && before!=BPF_FUNC_probe_read)) return -EINVAL;
+ /* set_insns may realloc its storage: never pass a borrowed insns alias. */
+ copy=malloc(count*sizeof(*copy)); if (!copy) return -ENOMEM;
+ memcpy(copy,insns,count*sizeof(*copy));
+ copy[index].imm=BPF_FUNC_probe_read_kernel;
+ ret=bpf_program__set_insns(prog,copy,count); free(copy);
+ if (!ret) fprintf(stderr,"helper index=%zu prepared=%d restored=%d insns=%zu\n",
+                   index,before,BPF_FUNC_probe_read_kernel,count);
+ return ret;
+}
 static int object_load(const char *name,const char *token_path,struct loaded *out,char *log,size_t size)
 {
  LIBBPF_OPTS(bpf_object_open_opts,opts,.bpf_token_path=token_path,.kernel_log_buf=log,.kernel_log_size=size,.kernel_log_level=1);
@@ -74,6 +115,15 @@ static int object_load(const char *name,const char *token_path,struct loaded *ou
  snprintf(path,sizeof(path),"%s/%s",objects,name);
  out->obj=bpf_object__open_file(path,&opts);
  ret=libbpf_get_error(out->obj); if (ret) { out->obj=NULL; return ret; }
+ if (!strcmp(name,"bad_helper.bpf.o")) {
+  size_t index=0;
+  ret=forbidden_helper_original(out->obj,&index); if (ret) return ret;
+  fprintf(stderr,"helper index=%zu original=%d\n",index,BPF_FUNC_probe_read_kernel);
+  ret=bpf_object__prepare(out->obj); if (ret) return ret;
+  /* libbpf's TRACEPOINT feature probe is outside this token's authority.
+   * Undo only its known 113->4 fallback after all prepare relocations. */
+  ret=forbidden_helper_restore(out->obj,index); if (ret) return ret;
+ }
  ret=bpf_object__load(out->obj); if (ret) return ret;
  map=bpf_object__find_map_by_name(out->obj,"private_cpu_ops"); if (!map) return -ENOENT;
  out->link=bpf_map__attach_struct_ops(map);
@@ -157,13 +207,14 @@ static int child(int sock,const char *test)
 static int delegate(int fs,const char *test)
 {
  /* struct_ops expected_attach_type is the BTF member index: prepare=2,
-  * build=3, complete=4 in the fixed CPU ops type (not an attach enum). */
- __u64 masks[]={BIT(BPF_MAP_CREATE)|BIT(BPF_BTF_LOAD)|BIT(BPF_PROG_LOAD),BIT(BPF_MAP_TYPE_ARRAY)|BIT(BPF_MAP_TYPE_STRUCT_OPS),BIT(BPF_PROG_TYPE_STRUCT_OPS),BIT(2)|BIT(3)|BIT(4)};
+  * build=3, complete=4 in the fixed CPU ops type (not an attach enum).
+  * libbpf 1.6 first probes SOCKET_FILTER with expected_attach_type=0. */
+ __u64 masks[]={BIT(BPF_MAP_CREATE)|BIT(BPF_BTF_LOAD)|BIT(BPF_PROG_LOAD),BIT(BPF_MAP_TYPE_ARRAY)|BIT(BPF_MAP_TYPE_STRUCT_OPS),BIT(BPF_PROG_TYPE_SOCKET_FILTER)|BIT(BPF_PROG_TYPE_STRUCT_OPS),BIT(0)|BIT(2)|BIT(3)|BIT(4)};
  const char *keys[]={"delegate_cmds","delegate_maps","delegate_progs","delegate_attachs"}; char value[40]; int fd;
  if (!strcmp(test,"no-command")) masks[0]&=~BIT(BPF_PROG_LOAD);
  if (!strcmp(test,"no-map")) masks[1]&=~BIT(BPF_MAP_TYPE_STRUCT_OPS);
- if (!strcmp(test,"no-prog")) masks[2]=0;
- if (!strcmp(test,"no-attach")) masks[3]=0;
+ if (!strcmp(test,"no-prog")) masks[2]&=~BIT(BPF_PROG_TYPE_STRUCT_OPS);
+ if (!strcmp(test,"no-attach")) masks[3]&=~(BIT(2)|BIT(3)|BIT(4));
  for (unsigned i=0;i<4;i++) {
   snprintf(value,sizeof(value),"0x%llx",(unsigned long long)masks[i]);
   if (syscall(__NR_fsconfig,fs,FSCONFIG_SET_STRING,keys[i],value,0)) return -1;

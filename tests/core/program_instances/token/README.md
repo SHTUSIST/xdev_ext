@@ -32,8 +32,12 @@ Copy the executable and three `.bpf.o` files into the guest, then run:
 
 Success requires all five cases. The positive case first proves that the same
 loader cannot load struct_ops without a token. Administrator delegation allows
-only MAP_CREATE/BTF_LOAD/PROG_LOAD, ARRAY/STRUCT_OPS maps, STRUCT_OPS programs,
-and callback member indices 2/3/4 (prepare/build/complete). In struct_ops the
+only MAP_CREATE/BTF_LOAD/PROG_LOAD, ARRAY/STRUCT_OPS maps, SOCKET_FILTER/STRUCT_OPS
+programs, and attach values 0/2/3/4. libbpf 1.6 first loads a trivial
+SOCKET_FILTER with expected_attach_type=0 before loading the object. The extra
+SOCKET_FILTER/0 permission admits that prerequisite; callback member indices
+2/3/4 are prepare/build/complete. TRACEPOINT and blanket `any` are not delegated.
+In struct_ops the
 `expected_attach_type` is the BTF member index, not a generic attach enum.
 The child cannot set delegation itself. The parent only configures detached
 bpffs mounts created by each child's namespace; it never mounts over a host path.
@@ -42,10 +46,20 @@ Two separately loaded PRIVATE link fds are explicitly selected by
 `CREATE_PROGRAMS.program_fds[0]`. CPU `stage.fd=-1` requires no device fd.
 Independent PREPARE maps must progress from `(0,0)` to `(1,0)` then `(1,2)`.
 A BPF program invoking `probe_read_kernel` must fail with its exact whitelist
-diagnostic. Four additional children independently omit the program-load
+diagnostic. Only `bad_helper.bpf.o` receives special instruction handling: its
+original `token_prepare` must contain one correctly encoded helper113 call in a
+bounded instruction array. After libbpf prepare, the same call must still be
+helper113 or its known legacy helper4 fallback; an independent instruction copy
+restores only that immediate to113, preserving all prepared relocations. The
+loader logs the verified call index and helper IDs. Preparation, missing or
+malformed helper and restoration errors remain failures; they cannot satisfy
+the exact verifier diagnostic. No TRACEPOINT permission is added. Four additional children independently omit the program-load
 command, STRUCT_OPS map type, program type or callback attach mask; each must
 create a real token and receive a permission failure while loading the same
-previously qualified object.
+previously qualified object. The no-prog and no-attach cases retain the
+SOCKET_FILTER/0 prerequisite, so they must reach the object permission being
+tested. The no-command case removes token authority for every program load;
+the final STRUCT_OPS load still requires the missing delegated command.
 
 Exit 0 is a native assertion pass, 1 is an assertion failure, and 2 is setup
 failure. Missing matching BTF/type, namespace support, user mappings, mount
@@ -63,7 +77,17 @@ bind independently requires the namespace fd's mode, native command-effects
 permission, supported transport and admitted LBA window. NET's ifindex/queue
 API has no delegated queue fd and retains its management gate.
 
-The host-only `protocol_test.py` compiles the actual parent send/wait tail and
+The host-only `protocol_test.py` executes the actual delegation function with
+only fsconfig/fsmount intercepted. It checks that the emitted masks admit the
+libbpf prerequisite and isolate each intended permission denial without granting
+other commands, maps, program types or attach values. This checks mask generation,
+not kernel enforcement. It also opens the actual bad-helper ELF with libbpf,
+without kernel loading, and checks the real helper validation/restoration
+functions against original, sanitized, missing, duplicate, malformed and bounded
+instruction inputs. Prepared bytes outside the helper immediate must survive.
+Set `TOKEN_OBJECT_DIR` to an existing build directory containing
+`bad_helper.bpf.o`, or provide `CLANG` and `LIBBPF_HELPER_INCLUDE` to compile it
+in the temporary test directory. It also compiles the actual parent send/wait tail and
 uses real socketpairs and children, without namespaces or BPF operations. It
 requires failed SCM_RIGHTS sends to return SETUP (2), preserve their original
 errno and reap the child; successful sends must also reap the child. Configure
