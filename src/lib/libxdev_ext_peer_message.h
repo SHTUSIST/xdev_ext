@@ -30,6 +30,11 @@ struct xdev_ext_peer_endpoint_opts {
 int xdev_ext_peer_endpoint_open(const struct xdev_ext_peer_endpoint_opts *,
 	struct xdev_ext_peer_endpoint **);
 int xdev_ext_peer_endpoint_create(struct xdev_ext_peer_endpoint *);
+/* Exact active-stage selectors, -1 for a global default. Report may be NULL;
+ * all report validation and retained-cleanup handling stays in the session. */
+int xdev_ext_peer_endpoint_create_programs(struct xdev_ext_peer_endpoint *,
+ const int *program_fds, __u32 nr_programs,
+ struct xdev_ext_mech_create_report *report);
 int xdev_ext_peer_endpoint_start(struct xdev_ext_peer_endpoint *,
 	const struct xdev_ext_start_frames_opts *);
 /* CPU eager wait: terminal first, USER eventfds, one monotonic deadline.

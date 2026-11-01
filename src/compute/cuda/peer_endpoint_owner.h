@@ -23,6 +23,19 @@ struct xdev_ext_cuda_peer_owner_opts {
  uint32_t group_bytes, depth;
  const char *user_bpf_object;
 };
+#define XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION 1U
+/* Optional PRIVATE link pins, in the owner's fixed stage order. NULL keeps
+ * that stage's global default. Paths are consumed only during open. */
+struct xdev_ext_cuda_peer_programs_opts {
+ size_t size;
+ uint32_t version, flags; /* flags must be zero */
+ const char *tx_stage_pins[3]; /* USER producer, XDOMAIN TX, USER terminal */
+ const char *rx_stage_pins[2]; /* XDOMAIN RX, USER consumer */
+};
+#define XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT \
+ { sizeof(struct xdev_ext_cuda_peer_programs_opts), \
+   XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION, 0U, \
+   { NULL, NULL, NULL }, { NULL, NULL } }
 struct xdev_ext_cuda_peer_owner_view {
  size_t size;
  CUcontext context;
@@ -45,6 +58,13 @@ int xdev_ext_cuda_peer_owner_open(const struct xdev_ext_cuda_peer_owner_opts *,
  * Partial ownership and close requirements are identical to open. */
 int xdev_ext_cuda_peer_owner_open_flags(const struct xdev_ext_cuda_peer_owner_opts *,
  uint32_t endpoint_flags, struct xdev_ext_cuda_peer_owner **);
+/* Additive selection API; old owner options and open APIs keep their ABI.
+ * Explicit pins must name attached PRIVATE links. Only classes still used by
+ * a default stage require their old object path. Acquired refs stay with a
+ * partial/retained owner; close never unpins or detaches external links. */
+int xdev_ext_cuda_peer_owner_open_programs(const struct xdev_ext_cuda_peer_owner_opts *,
+ uint32_t endpoint_flags, const struct xdev_ext_cuda_peer_programs_opts *,
+ struct xdev_ext_cuda_peer_owner **);
 int xdev_ext_cuda_peer_owner_get_view(struct xdev_ext_cuda_peer_owner *,
  struct xdev_ext_cuda_peer_owner_view *);
 int xdev_ext_cuda_peer_owner_start(struct xdev_ext_cuda_peer_owner *);

@@ -3107,6 +3107,26 @@
       "logical_path": "tests/compute/cuda/early_selection/test_selection.py"
     },
     {
+      "source": "tests/compute/cuda/private_programs/control.cc",
+      "logical_path": "tests/compute/cuda/private_programs/control.cc"
+    },
+    {
+      "source": "tests/compute/cuda/private_programs/declarations.c",
+      "logical_path": "tests/compute/cuda/private_programs/declarations.c"
+    },
+    {
+      "source": "tests/compute/cuda/private_programs/declarations.cc",
+      "logical_path": "tests/compute/cuda/private_programs/declarations.cc"
+    },
+    {
+      "source": "tests/compute/cuda/private_programs/run.py",
+      "logical_path": "tests/compute/cuda/private_programs/run.py"
+    },
+    {
+      "source": "tests/compute/cuda/private_programs/test_config.py",
+      "logical_path": "tests/compute/cuda/private_programs/test_config.py"
+    },
+    {
       "source": "tests/compute/examples/compute_examples_host_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/compute_examples/compute_examples_host_test.c"

@@ -21,12 +21,12 @@ can also contain `{group}`. The shipped factory reads this rank-local JSON,
 checks actual group rank/device and both ranks' namespace/geometry agreement
 over the existing CPU ProcessGroup, then opens the production native owner.
 Configuration contains admission inputs, never serialized native pointers.
-The owner opens two separate allocations/authority fds, attaches the registered
-USER and XDOMAIN BPF mechanisms, creates controls/endpoints, and starts them
+The owner opens two separate allocations/authority fds, selects PRIVATE links
+or attaches required global USER/XDOMAIN defaults, creates controls/endpoints, and starts them
 after native TP creation. It borrows the actual PyTorch CUDA context.
 
 Required JSON keys are `version` (1), `rank`, `world_size` (2), `device_index`,
-`mode` (1 eager or 2 GPU), `nvidia_node`, `bpf_object`, `user_bpf_object`,
+`mode` (1 eager or 2 GPU), `nvidia_node`,
 `ptx_path`, `link_token`, `allocation_bytes`, `group_bytes`, `depth`,
 `nr_batches`, `first_sequence`, `timeout_ns`, `communicator_id`, `epoch` and
 `max_payload_bytes`. `trace_capacity` is optional. d1 requires depth 1. d2 also
@@ -34,6 +34,18 @@ requires `control_ptx_path` to identify the same existing file as the process's
 `XDEV_EXT_CUDA_PTX`. BPF and PTX paths name actual compiled inputs. Link tokens
 are the corresponding local native link admission values; communicator/epoch
 and operation geometry agree across ranks. Native validation remains final.
+
+Optional `tx_program_pins` (three entries: USER producer, XDOMAIN TX, USER
+terminal) and `rx_program_pins` (two: XDOMAIN RX, USER consumer) contain
+absolute PRIVATE link-pin paths or null per stage. Absence means all null.
+Each null XDOMAIN stage requires the existing `bpf_object`; each null USER
+stage requires `user_bpf_object`. A class with all PRIVATE stages needs no
+global attach and its object field may be absent or null. ELF paths retain
+their existing relative-path semantics. The pin arrays are rank-local and
+excluded from agreement. The existing Torch factory passes every slot to the
+native owner; failed selection never substitutes a default. Link FD references
+remain with a partial/retained owner until safe close, without external unpin
+or detach. See the Torch package's bootstrap documentation for an example.
 
 The default factory owns a persistent nondefault CUDA stream. Eager calls
 scope execution to that stream with caller-to-communicator and return event

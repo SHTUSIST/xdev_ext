@@ -6,6 +6,16 @@ static unsigned observed_flags[2],observed_direction[2],observed_endpoints;
 extern "C" int owner_registry_attach(unsigned,const void *) { return 0; }
 extern "C" int owner_registry_detach(unsigned,const void *) { return 0; }
 extern "C" bool owner_registry_has(unsigned) { return true; }
+// Default-only EARLY scope: these additive native references are linked so
+// the actual owner TU builds, but no PRIVATE selection is permitted here.
+extern "C" int bpf_obj_get(const char *) {
+ std::cerr<<"FORBIDDEN PRIVATE BPF_OBJ_GET in default EARLY fixture\n";std::abort();
+}
+extern "C" int xdev_ext_peer_endpoint_create_programs(
+ xdev_ext_peer_endpoint *,const int *,__u32,xdev_ext_mech_create_report *) {
+ std::cerr<<"FORBIDDEN PRIVATE endpoint CREATE in default EARLY fixture\n";std::abort();
+}
+
 
 // Frozen transition adapter: legacy executes actual old open and cannot select
 // EARLY; after the declared new interface exists, call it directly, no fallback.

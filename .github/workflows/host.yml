@@ -361,6 +361,13 @@ jobs:
               environment.write('CUDA_HOME=' + str(cuda_home) + '\n')
           print('Official NVIDIA headers and license verified; no SDK build or device execution')
           PY
+      - name: CUDA per-stage PRIVATE owner control and configuration
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 tests/compute/cuda/private_programs/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cuda-private-new" "$CUDA_HOME/include" --new
+          python3 tests/compute/cuda/private_programs/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/cuda-private-legacy" "$CUDA_HOME/include"
+          python3 tests/compute/cuda/private_programs/test_config.py "$GITHUB_WORKSPACE"
       - name: Device-family and XDOMAIN software closure host checks
         if: matrix.cc == 'gcc'
         shell: bash

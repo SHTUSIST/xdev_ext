@@ -8,8 +8,10 @@ _NUMBERS = {'version', 'rank', 'world_size', 'device_index', 'mode', 'link_token
             'allocation_bytes', 'group_bytes', 'depth', 'nr_batches',
             'first_sequence', 'timeout_ns', 'communicator_id', 'epoch',
             'max_payload_bytes'}
-_PATHS = {'nvidia_node', 'bpf_object', 'user_bpf_object', 'ptx_path'}
-_ALLOWED = _NUMBERS | _PATHS | {'control_ptx_path', 'trace_capacity'}
+_PATHS = {'nvidia_node', 'ptx_path'}
+_OBJECT_PATHS = {'bpf_object', 'user_bpf_object'}
+_PIN_COUNTS = {'tx_program_pins': 3, 'rx_program_pins': 2}
+_ALLOWED = _NUMBERS | _PATHS | _OBJECT_PATHS | set(_PIN_COUNTS) | {'control_ptx_path', 'trace_capacity'}
 _AGREEMENT = ('version', 'world_size', 'mode', 'allocation_bytes', 'group_bytes',
               'depth', 'nr_batches', 'first_sequence', 'timeout_ns',
               'communicator_id', 'epoch', 'max_payload_bytes')
@@ -21,6 +23,29 @@ def validate_options(options, *, rank, device_index, environ=None):
     if (_NUMBERS | _PATHS) - set(options):
         raise ValueError('rank-local admission options are incomplete')
     data = dict(options)
+    for key, count in _PIN_COUNTS.items():
+        pins = data.get(key, [None] * count)
+        if not isinstance(pins, list) or len(pins) != count:
+            raise ValueError(f'invalid stage pin array: {key}')
+        for pin in pins:
+            if pin is not None and (not isinstance(pin, str) or not pin or
+                    '\x00' in pin or not Path(pin).is_absolute()):
+                raise ValueError(f'invalid PRIVATE link pin: {key}')
+        if key in data:
+            data[key] = list(pins)
+    tx = data.get('tx_program_pins', [None] * 3)
+    rx = data.get('rx_program_pins', [None] * 2)
+    needed_objects = set()
+    if tx[1] is None or rx[0] is None:
+        needed_objects.add('bpf_object')
+    if tx[0] is None or tx[2] is None or rx[1] is None:
+        needed_objects.add('user_bpf_object')
+    for key in _OBJECT_PATHS:
+        value = data.get(key)
+        if value is None and key not in needed_objects:
+            data[key] = None
+        elif not isinstance(value, str) or not value or '\x00' in value:
+            raise ValueError(f'invalid admission path: {key}')
     for key in _NUMBERS | ({'trace_capacity'} & set(data)):
         value = data[key]
         if type(value) is not int or value < 0 or value > (1 << 64) - 1:
@@ -47,7 +72,7 @@ def validate_options(options, *, rank, device_index, environ=None):
     for key in _PATHS | ({'control_ptx_path'} & set(data)):
         if not isinstance(data[key], str) or not data[key] or '\x00' in data[key]:
             raise ValueError(f'invalid admission path: {key}')
-    for key in ('bpf_object', 'user_bpf_object', 'ptx_path'):
+    for key in needed_objects | {'ptx_path'}:
         if not Path(data[key]).is_file():
             raise ValueError(f'admission source file missing: {key}')
     if data['mode'] == 2:

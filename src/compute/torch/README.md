@@ -30,6 +30,32 @@ to the actual caller stream. It restores the caller's stream on return. The
 native owner stays alive through partial failures and closes only after TP,
 work and graph users are gone.
 
+Optional `tx_program_pins` and `rx_program_pins` arrays select existing PRIVATE
+struct_ops link pins per stage. TX has three entries: USER producer, XDOMAIN
+TX, USER terminal. RX has two: XDOMAIN RX, USER consumer. A null entry keeps
+that stage's global default; an absent array is all null. For example:
+
+```json
+{"tx_program_pins": ["/sys/fs/bpf/tx-producer", "/sys/fs/bpf/tx-link", null],
+ "rx_program_pins": ["/sys/fs/bpf/rx-link", "/sys/fs/bpf/rx-consumer"]}
+```
+
+Only PRIVATE pin paths must be absolute. `bpf_object` is required when either
+XDOMAIN entry is null; `user_bpf_object` is required when any USER entry is
+null. When all entries of a class are PRIVATE its object may be absent or
+null, and no global object of that class is attached. Existing relative ELF
+paths stay valid. Pin paths are rank-local and are not cross-rank agreement
+fields. An explicit selection error never falls back to a global program.
+The owner holds one link FD reference per explicit entry through partial or
+retained close; it never unpins or detaches another owner's supplied link.
+
+Native C/C++ callers use the additive `xdev_ext_cuda_peer_owner_open_programs`
+API with `XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT`; old owner option layouts and
+open APIs retain their behavior. The standalone TP driver accepts the five
+corresponding flags `--tx-producer-program-pin`, `--tx-xdomain-program-pin`,
+`--tx-terminal-program-pin`, `--rx-xdomain-program-pin` and
+`--rx-consumer-program-pin`, independently of `--early-cts`.
+
 The advanced `TorchCommunicator(config, owner)` borrows already admitted endpoints, context
 and CUDA controls from the `owner`. The config keys match `xdev_tp_config`:
 `rank`, `world_size`, `mode`, `context`, `tx_endpoint`, `rx_endpoint`, `tx_va`,
