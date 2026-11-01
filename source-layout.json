@@ -4877,11 +4877,6 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign.h"
     },
     {
-      "source": "tests/core/provider/dma_wave.h",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
-    },
-    {
       "source": "tests/core/provider/dma_campaign_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign_test.c"
@@ -4905,6 +4900,11 @@
       "source": "tests/core/provider/dma_provider_runtime.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_provider_runtime.c"
+    },
+    {
+      "source": "tests/core/provider/dma_wave.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
     },
     {
       "source": "tests/core/provider/faults/provider_fault_fixture.c",
@@ -7728,6 +7728,31 @@
       "source": "tests/storage/nvme/blocktable/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/Makefile"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/build.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/build.py"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/driver.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/driver.c"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/oracle.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/oracle.h"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/oracle_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/oracle_test.c"
     },
     {
       "source": "tests/storage/nvme/blocktable/host/bpf/bpf_helpers.h",
