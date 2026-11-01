@@ -8,6 +8,7 @@ test_chain_spec binary this test builds with `make test`.
 """
 import json
 import os
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -277,6 +278,50 @@ class Specs(unittest.TestCase):
         code, text = self.validate(spec)
         self.assertEqual((code, text.split(',')[0]), (4, 'unsupported: no mechanism class '
                                                          'registers default_build'))
+
+
+class CostJson(unittest.TestCase):
+    def test_actual_serializer_labels_process_cpu_and_keeps_legacy_values(self):
+        # Execute only the production JSON emitter with fixed rusage values;
+        # the linked-away benchmark main never opens a device or reads a clock.
+        fixture = r'''#define main chain_bench_main
+#include "chain_bench.c"
+#undef main
+int main(void)
+{
+    struct chain_spec s = { .arm = CH_STAGED, .mode = CH_CORRECTNESS };
+    struct chain_result r = { 0 };
+    strcpy(s.chain, "nvme-nic");
+    r.ru_before.ru_utime = (struct timeval){ 1, 20 };
+    r.ru_after.ru_utime = (struct timeval){ 2, 30 };
+    r.ru_before.ru_stime = (struct timeval){ 3, 40 };
+    r.ru_after.ru_stime = (struct timeval){ 3, 90 };
+    r.ru_before.ru_nvcsw = 2;
+    r.ru_after.ru_nvcsw = 5;
+    r.ru_before.ru_nivcsw = 7;
+    r.ru_after.ru_nivcsw = 9;
+    r.syscalls = 11;
+    r.observer_syscalls = 4;
+    cb_emit(stdout, &s, &r);
+    return 0;
+}
+'''
+        with tempfile.TemporaryDirectory(prefix='.chains-cost-', dir=HERE) as temp:
+            source = Path(temp) / 'cost.c'
+            exe = Path(temp) / 'cost'
+            source.write_text(fixture)
+            command = shlex.split(os.environ.get('CC', 'gcc')) + [
+                '-std=gnu11', '-Wall', '-Wextra', '-Werror', '-ffunction-sections',
+                '-fdata-sections', '-I' + str(HERE), str(source),
+                '-Wl,--gc-sections', '-o', str(exe)]
+            subprocess.run(command, check=True, capture_output=True, text=True)
+            record = json.loads(subprocess.run([str(exe)], check=True,
+                                              capture_output=True, text=True).stdout)
+        cost = record['cost']
+        self.assertEqual(cost.get('cpu_scope'), 'producer-process')
+        self.assertEqual((cost['user_us'], cost['sys_us']), (1000010, 50))
+        self.assertEqual((cost['syscalls'], cost['observer_syscalls']), (11, 4))
+        self.assertEqual((cost['voluntary_ctxsw'], cost['involuntary_ctxsw']), (3, 2))
 
 
 class Summary(unittest.TestCase):

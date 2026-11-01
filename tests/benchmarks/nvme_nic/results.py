@@ -191,7 +191,10 @@ def validate(lines, expect, measured):
 
 
 def summarize(trials, direction, reference='posix'):
-    """Raw samples, throughput and paired ratios; slower and no-benefit results stay."""
+    """Raw samples, throughput and paired ratios; slower and no-benefit results stay.
+
+    CPU samples cover only the producer process.
+    """
     key = 'local_release_ns' if direction == 'fwd' else 'durable_ns'
     arms = sorted({r['arm'] for r in trials})
     out = dict(metric=key, arms={})
@@ -201,7 +204,7 @@ def summarize(trials, direction, reference='posix'):
             samples_ns=[r[key] for r in mine],
             gbytes_per_s=[r['payload_bytes'] / r[key] for r in mine],
             receipt_ns=[r['receipt_ns'] for r in mine] if direction == 'fwd' else None,
-            cpu_us=[r['cpu_user_us'] + r['cpu_sys_us'] for r in mine],
+            producer_process_cpu_us=[r['cpu_user_us'] + r['cpu_sys_us'] for r in mine],
             zc_copied_fraction=[(r['zc_copied'] / r['notifs']) if r['notifs'] else None for r in mine],
             unit_latency_ns=None if arm == 'session' else {
                 name: [r['lat_%s_ns' % name] for r in mine] for name in ('min', 'p50', 'p90', 'p99', 'p999', 'max')},

@@ -316,6 +316,21 @@ class Validator(unittest.TestCase):
         with self.assertRaises(results.Invalid):
             results.validate(self.lines(records), expect, True)
 
+    def test_summary_cpu_is_producer_only_despite_different_worker_irq_work(self):
+        # Fixed synthetic accounting: equal process CPU does not imply equal
+        # system CPU when one arm moves work to workers or IRQ context.
+        for direction in ('fwd', 'rev'):
+            records, expect = fixture_records(direction)
+            trials, _ = results.validate(self.lines(records), expect, True)
+            worker_irq_us = {'posix': 5, 'uring': 500}
+            process_us = {arm: [3, 3] for arm in expect['arms']}
+            self.assertNotEqual(process_us['posix'][0] + worker_irq_us['posix'],
+                                process_us['uring'][0] + worker_irq_us['uring'])
+            summary = json.loads(json.dumps(results.summarize(trials, direction)))
+            for arm, row in summary['arms'].items():
+                self.assertNotIn('cpu_us', row)
+                self.assertEqual(row['producer_process_cpu_us'], process_us[arm])
+
     def test_summary_keeps_every_sample(self):
         records, expect = fixture_records()
         trials, _ = results.validate(self.lines(records), expect, True)
