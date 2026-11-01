@@ -6979,6 +6979,22 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h"
     },
     {
+      "source": "tests/network/plan_cover/README.md",
+      "logical_path": "tests/network/plan_cover/README.md"
+    },
+    {
+      "source": "tests/network/plan_cover/contract.c",
+      "logical_path": "tests/network/plan_cover/contract.c"
+    },
+    {
+      "source": "tests/network/plan_cover/mutations.py",
+      "logical_path": "tests/network/plan_cover/mutations.py"
+    },
+    {
+      "source": "tests/network/plan_cover/run.py",
+      "logical_path": "tests/network/plan_cover/run.py"
+    },
+    {
       "source": "tests/network/reliable/bpf_glue/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/Makefile"
