@@ -2,6 +2,7 @@
 // Actual complete owner TU, shared CUDA/OS/endpoint boundary dependencies.
 // The generator adds flag observations only to the existing endpoint dependency.
 static unsigned observed_flags[2],observed_direction[2],observed_endpoints;
+#define XDEV_EXT_TEST_OWNER_PRIVATE_BOUNDARY_DEFINED
 #include EARLY_OWNER_BOUNDARY
 extern "C" int owner_registry_attach(unsigned,const void *) { return 0; }
 extern "C" int owner_registry_detach(unsigned,const void *) { return 0; }

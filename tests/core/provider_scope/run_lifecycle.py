@@ -44,6 +44,7 @@ def main():
     command=['gcc','-O1','-g','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter',
              '-D__KERNEL__','-DXDEV_PUBLIC_HEADER="'+str(public)+'"','-DXDEV_DMA_SOURCE="'+str(source)+'"',
              '-I'+str(fixtures/'shim'),'-I'+str(root/'src/core/include'),
+             '-I'+str(root/'src/core/io_uring'),'-I'+str(root/'src/compute/include'),
              '-I'+str(root/'src/compute/io_uring'),'-I'+str(fixtures)]
     if args.mode=='candidate':command+=['-DXDEV_SCOPE_HEADER="'+str(scope)+'"']
     else:command+=['-DDMA_SCOPE_LEGACY_CONTROL']

@@ -116,7 +116,7 @@ class CeClassSourceTest(unittest.TestCase):
 
     def test_validate_stages_only_an_accepted_plan(self):
         validate = body(self.text, "xdev_ext_ce_validate")
-        ordered(self, validate, "cs->staged = NULL;", "xdev_ext_ce_plan_check(",
+        ordered(self, validate, "cs->staged = NULL;", "xdev_ext_comp_copy_validate(",
                 "if (err)", "cs->staged = b;")
 
     def test_submit_arms_before_the_backend_and_takes_back_a_refusal(self):

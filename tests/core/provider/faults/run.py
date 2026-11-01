@@ -61,6 +61,12 @@ def dma_scope_dependencies(text):
             if re.search(r"^struct xdev_ext_dma_scope \{", text, re.M) else ())
 
 
+def copy_window_dependencies(text):
+    """Use the typed header only when this actual adapter includes it."""
+    return (("io_uring/xdev_ext_compfam_copy_core.h",)
+            if '#include "xdev_ext_compfam_copy_core.h"' in text else ())
+
+
 def session_helpers(text, bodies, extractor):
     """Follow actual session-helper calls; a called missing definition is fatal."""
     helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
@@ -127,6 +133,12 @@ def generate(mutation=None):
     if "static void xdev_ext_mech_start_queue_free(" in core:
         structs.append(structure(source("io_uring/xdev_ext_mech_start_queue.h"), "xdev_ext_mech_start_queue"))
     structs += [structure(core, n) for n in ("xdev_ext_mech_batch", "xdev_ext_mech_session")]
+    copy_dependencies = tuple(dict.fromkeys(copy_window_dependencies(dma) +
+                                            copy_window_dependencies(ce)))
+    if copy_dependencies:
+        template = template.replace('#include "io_uring/xdev_ext_mech_window.h"',
+            '#include "io_uring/xdev_ext_mech_window.h"\n' +
+            '\n'.join('#include "' + rel + '"' for rel in copy_dependencies))
     scope_dependencies = dma_scope_dependencies(dma)
     if scope_dependencies:
         # Public declarations and the pure comparator are production inputs,
@@ -193,6 +205,10 @@ static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
     return 0; /* Fixture precondition: uncontended registered CE window. */
 }
 """
+    # Keep the selected adapter's actual frame-claim callback, not a test
+    # replacement. Older adapters have no typed transfer callback.
+    if re.search(r"\bxdev_ext_ce_copy_claim\b", function(ce, "xdev_ext_ce_stage_xfers")):
+        ce_adapter += "\n" + function(ce, "xdev_ext_ce_copy_claim") + "\n"
     ce_adapter += "\n\n".join(function(ce,n) for n in ("xdev_ext_ce_stage_xfers", "xdev_ext_ce_submit", "xdev_ext_ce_complete"))
     if "xdev_ext_mech_instance_put(" in core:
         # Default-only fixtures have no selected instance handle. Keep the
@@ -233,43 +249,46 @@ class ProviderFaults(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix="xdev_ext-provider-faults-")
         cls.addClassCleanup(cls.tmp.cleanup)
         cls.path = Path(cls.tmp.name)
-        # Fixed-ref runs compile the exact portable headers too.
-        if REF:
-            for rel in ("include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h",
-                        "io_uring/xdev_ext_mech_core.h", "io_uring/xdev_ext_mech_lifecycle.h",
-                        "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h", "io_uring/xdev_ext_mech_step.h",
-                        "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
-                        "io_uring/xdev_ext_mech_window_copy_core.h",
-                        "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h", "io_uring/xdev_ext_mech_ce_lease.h"):
-                p = cls.path / rel
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(source(rel))
-            for rel in dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c")):
-                p = cls.path / rel
-                p.parent.mkdir(parents=True, exist_ok=True)
-                p.write_text(source(rel))
-            # Report-aware refs need the selected public policy/report ABI;
-            # pre-report refs do not borrow the current tree's new types.
-            if "static int xdev_ext_mech_session_release_report(" in source("io_uring/xdev_ext_mech.c"):
-                rel = "include/uapi/linux/xdev_ext_policy.h"
-                (cls.path / rel).write_text(source(rel))
-            # F1b core rules include the class table; keep fixed-ref copies
-            # self-contained without adding new inputs to older snapshots.
-            if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
-                rel = "include/linux/xdev_ext_family_core.h"
-                (cls.path / rel).write_text(source(rel))
-            family_header = cls.path / "include/linux/xdev_ext_family_core.h"
-            if family_header.is_file() and 'xdev_ext_binding_ctx.h' in family_header.read_text():
-                rel = "include/linux/xdev_ext_binding_ctx.h"
-                (cls.path / rel).write_text(source(rel))
-            # Follow CPU helper dependencies from the selected step snapshot.
-            if '"xdev_ext_mech_cpu_core.h"' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
-                rel = "io_uring/xdev_ext_mech_cpu_core.h"
-                (cls.path / rel).write_text(source(rel))
-            # F9a compute rules must come from that same fixed revision too.
-            if 'xdev_ext_compfam_core.h' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
-                rel = "include/linux/xdev_ext_compfam_core.h"
-                (cls.path / rel).write_text(source(rel))
+        # Compile the exact selected portable headers in both fixed-ref and
+        # canonical worktree runs; neither requires a materialized native view.
+        for rel in ("include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h",
+                    "io_uring/xdev_ext_mech_core.h", "io_uring/xdev_ext_mech_lifecycle.h",
+                    "io_uring/xdev_ext_mech_notify.h", "io_uring/xdev_ext_mech_produced.h", "io_uring/xdev_ext_mech_step.h",
+                    "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
+                    "io_uring/xdev_ext_mech_window_copy_core.h",
+                    "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h", "io_uring/xdev_ext_mech_ce_lease.h"):
+            p = cls.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(source(rel))
+        for rel in tuple(dict.fromkeys(
+                dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
+                copy_window_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
+                copy_window_dependencies(source("io_uring/xdev_ext_mech_ce.c")))):
+            p = cls.path / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(source(rel))
+        # Report-aware refs need the selected public policy/report ABI;
+        # pre-report refs do not borrow the current tree's new types.
+        if "static int xdev_ext_mech_session_release_report(" in source("io_uring/xdev_ext_mech.c"):
+            rel = "include/uapi/linux/xdev_ext_policy.h"
+            (cls.path / rel).write_text(source(rel))
+        # F1b core rules include the class table; keep fixed-ref copies
+        # self-contained without adding new inputs to older snapshots.
+        if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
+            rel = "include/linux/xdev_ext_family_core.h"
+            (cls.path / rel).write_text(source(rel))
+        family_header = cls.path / "include/linux/xdev_ext_family_core.h"
+        if family_header.is_file() and 'xdev_ext_binding_ctx.h' in family_header.read_text():
+            rel = "include/linux/xdev_ext_binding_ctx.h"
+            (cls.path / rel).write_text(source(rel))
+        # Follow CPU helper dependencies from the selected step snapshot.
+        if '"xdev_ext_mech_cpu_core.h"' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
+            rel = "io_uring/xdev_ext_mech_cpu_core.h"
+            (cls.path / rel).write_text(source(rel))
+        # F9a compute rules must come from that same fixed revision too.
+        if 'xdev_ext_compfam_core.h' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
+            rel = "include/linux/xdev_ext_compfam_core.h"
+            (cls.path / rel).write_text(source(rel))
         cls.binary = cls.compile("production", generate())
 
     @classmethod
@@ -442,6 +461,8 @@ if __name__ == "__main__":
               "io_uring/xdev_ext_mech_window_copy_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")
     inputs += dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c"))
+    inputs += tuple(dict.fromkeys(copy_window_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
+                                 copy_window_dependencies(source("io_uring/xdev_ext_mech_ce.c"))))
     print(json.dumps({"source_root": str(ROOT), "ref": ref,
                       "working_tree": REF is None,
                       "source_sha256": {p: hashlib.sha256(source(p).encode()).hexdigest() for p in inputs}}), flush=True)

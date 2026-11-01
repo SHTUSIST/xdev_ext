@@ -172,7 +172,7 @@ void xdev_ext_dma_complete(struct xdev_ext_dma_cookie *,u64,int,bool,u64);
 
 struct xdev_ext_family_hooks_hdr {u32 family;};
 struct xdev_ext_comp_hooks {struct xdev_ext_family_hooks_hdr hdr;u32 kinds,producer_visibility;};
-#define XDEV_EXT_COMP_COPY_WINDOW 1U
+#include <linux/xdev_ext_compfam_core.h>
 struct xdev_ext_mech_class_ops {
  const struct xdev_ext_mech_class_desc *decl;u32 class_id,flags,desc_size,desc_cap,info_size,cqe_size,cqe_cap,batch_priv_size,batch_cookie_size;
  struct module *owner;int (*bind)(struct xdev_ext_mech_stage *,const struct xdev_ext_mech_stage_uapi *);

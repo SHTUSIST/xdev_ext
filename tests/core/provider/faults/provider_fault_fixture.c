@@ -363,8 +363,15 @@ static int test_directions_and_bounds(void) {
  d.device_off=0;d.frame_off=63;
  EQ(xdev_ext_dma_validate(&s->st[0],b,(const u8 *)&d,1),-EINVAL,"bad host coverage");
  d.frame_off=64;s->st[0].direction=0;
+#ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_CORE_H
+ /* Typed adapters consume the bind-admitted direction, not mutable st. */
+ ((struct xdev_ext_dma_stage *)s->st[0].priv)->window.direction=0;
+#endif
  EQ(xdev_ext_dma_validate(&s->st[0],b,(const u8 *)&d,1),-EOPNOTSUPP,"invalid direction before native");
  EQ(native_calls,0,"direction cannot reach native");s->st[0].direction=XDEV_EXT_MECH_DIR_FROM_DEVICE;
+#ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_CORE_H
+ ((struct xdev_ext_dma_stage *)s->st[0].priv)->window.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE;
+#endif
  EQ(submit(b),0,"valid translated plan");EQ(saved_n,1,"native entries");
  EQ(saved_x[0].host_byte_off,4160,"translated nonzero frame host offset");
  EQ(saved_x[0].device_off,0,"device offset retained");EQ(saved_x[0].len,128,"native len");return 0;
@@ -529,8 +536,17 @@ static const struct xdev_ext_mech_class_ops ce_test_class={.class_id=XDEV_EXT_ME
  .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],.submit=xdev_ext_ce_submit};
 static int ce_submit_admitted(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b) {
  struct xdev_ext_ce_stage *cs=s->st[1].priv;
- cs->staged=b;cs->plan.n=1;cs->plan.total=128;cs->plan.host_off[0]=4160;
+ cs->staged=b;cs->plan.n=1;cs->plan.total=128;
+#ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_CORE_H
+ /* The same one-span admitted boundary, in the selected typed layout. */
+ cs->plan.batch_id=xdev_ext_mech_batch_id(b);
+ cs->plan.slot=xdev_ext_mech_batch_slot(b);
+ cs->plan.entry[0]=(struct xdev_ext_comp_copy_entry){
+  .host_byte_off=4160,.device_off=0,.frame_pos=0,.len=128,.flags=0};
+#else
+ cs->plan.host_off[0]=4160;
  cs->d[0]=(struct xdev_ext_ce_copy_desc){.len=128};
+#endif
  /* CE-first cases start with an independently produced input payload. */
  struct xdev_ext_mech_life *life=&s->life[b->f[0].index];
  if(xdev_ext_mech_life_phase(life)==XDEV_EXT_MECH_L_FREE) {
