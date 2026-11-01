@@ -124,7 +124,7 @@ def main():
         ("ordinary ioctl bypasses claim", core, fd.replace("if (p->claimed != a)", "if (p->claimed != a && false)")),
         ("claim ignores active native owner", core.replace("if (m->active)", "if (m->active && false)"), fd),
         ("claim ignores capability", core, fd.replace("if (!capable(CAP_SYS_RAWIO))", "if (!capable(CAP_SYS_RAWIO) && false)")),
-        ("unknown claim released", core, fd.replace("if (xdev_ext_peer_info(p->region, &len, &generation, true))", "if (xdev_ext_peer_info(p->region, &len, &generation, true) && false)")),
+        ("unknown claim released", core, fd.replace("if (xdev_ext_peer_drainable(p->region))", "if (xdev_ext_peer_drainable(p->region) && false)")),
         ("claim loses original file reference", core, fd.replace("p->claimed = a; get_file(file);", "p->claimed = a;")),
     ]
     with tempfile.TemporaryDirectory(prefix="independent-peer-authority-") as tmp:

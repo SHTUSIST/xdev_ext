@@ -36,9 +36,9 @@ def execute(shim, production, main):
         subprocess.run([str(binary)], check=True, timeout=10)
 
 
-def static_function(name):
-    text = (KERNEL / "io_uring/xdev_ext_mech.c").read_text()
-    match = re.search(r"static int " + re.escape(name) + r"\s*\(", text)
+def static_function(name, path="io_uring/xdev_ext_mech.c"):
+    text = (KERNEL / path).read_text()
+    match = re.search(r"static (?:int|bool) " + re.escape(name) + r"\s*\(", text)
     if not match:
         print(f"not ok 1 - {name} missing", flush=True)
         return None
@@ -219,12 +219,16 @@ struct mutex { int held; };
 struct provider { const struct xdev_ext_peer_provider_ops *ops; };
 struct xdev_ext_peer_region {
  struct mutex lock; bool invalid, quarantined; struct provider *provider; void *allocation;
+ const struct xdev_ext_peer_provider_ops *ops;
 };
 static void mutex_lock(struct mutex *m) { assert(!m->held); m->held = 1; }
 static void mutex_unlock(struct mutex *m) { assert(m->held); m->held = 0; }
 static struct pci_dev owner, requester;
 static struct xdev_ext_peer_region region;
 static int allocation, calls, provider_ret;
+static bool allocation_stale;
+static bool provider_stale(void *a)
+{ assert(region.lock.held && a == &allocation); return allocation_stale; }
 static int provider_describe(void *a, struct pci_dev *p, struct xdev_ext_peer_backing *out)
 {
  assert(region.lock.held && a == &allocation && p == &requester); calls++;
@@ -237,7 +241,7 @@ int main(void)
  struct xdev_ext_peer_provider_ops ops = { .describe = provider_describe };
  struct provider provider = { .ops = &ops };
  struct xdev_ext_peer_backing out;
- region.provider = &provider; region.allocation = &allocation;
+ region.provider = &provider; region.ops = &ops; region.allocation = &allocation;
  assert(xdev_ext_peer_describe(NULL, &requester, &out) == -EINVAL);
  assert(xdev_ext_peer_describe(&region, NULL, &out) == -EINVAL);
  assert(xdev_ext_peer_describe(&region, &requester, NULL) == -EINVAL);
@@ -253,6 +257,12 @@ int main(void)
  assert(xdev_ext_peer_describe(&region, &requester, &out) == -ESTALE && calls == 2 && !region.lock.held);
  region.invalid = false; region.quarantined = true;
  assert(xdev_ext_peer_describe(&region, &requester, &out) == -ESTALE && calls == 2 && !region.lock.held);
+ region.quarantined = false; ops.is_stale = provider_stale; allocation_stale = true;
+ assert(xdev_ext_peer_describe(&region, &requester, &out) == -ESTALE && calls == 2 && !region.lock.held);
+ /* A directly imported region owns its ops without a registry provider. */
+ allocation_stale = false; provider_ret = 0; region.provider = NULL;
+ assert(!xdev_ext_peer_describe(&region, &requester, &out));
+ assert(out.owner == &owner && out.flags == 17 && calls == 3 && !region.lock.held);
  puts("ok 6 - provider describe forwards live allocation and requester under the lock and refuses stale or absent providers");
  return 0;
 }
@@ -403,16 +413,17 @@ def main():
     bind = exported("io_uring/family/xdev_ext_requester.c", "int xdev_ext_requester_bind(", "xdev_ext_requester_bind")
     unbind = exported("io_uring/family/xdev_ext_requester.c", "void xdev_ext_requester_unbind(", "xdev_ext_requester_unbind")
     describe = exported("io_uring/xdev_ext_peer.c", "int xdev_ext_peer_describe(", "xdev_ext_peer_describe")
+    stale = static_function("xdev_ext_peer_stale", "io_uring/xdev_ext_peer.c")
     file_describe = exported("io_uring/xdev_ext_peer_fd.c", "int xdev_ext_peer_file_describe(", "xdev_ext_peer_file_describe")
     class_bind = static_function("xdev_ext_mech_class_bind")
     caps_op = static_function("xdev_ext_mech_stage_caps_op")
-    if any(item is None for item in (bind, unbind, describe, file_describe, class_bind, caps_op)):
+    if any(item is None for item in (bind, unbind, describe, stale, file_describe, class_bind, caps_op)):
         return 1
     mech = re.sub(r"\s+", "", (KERNEL / "io_uring/xdev_ext_mech.c").read_text())
     assert "ret=xdev_ext_mech_class_bind(st,&clean[i],c->pool_kind);" in mech, "session CREATE does not call the capability wrapper"
     assert "caseXDEV_EXT_MECH_OP_STAGE_CAPS:returnxdev_ext_mech_stage_caps_op(ctx,u64_to_user_ptr(req.arg));" in mech, "stage capability control op is not dispatched"
     execute(SHIM, bind + unbind, MAIN)
-    execute(DESCRIBE_SHIM, describe, DESCRIBE_MAIN)
+    execute(DESCRIBE_SHIM, stale + describe, DESCRIBE_MAIN)
     execute(CAPS_SHIM, class_bind + caps_op, CAPS_MAIN)
     execute(FILE_DESCRIBE_SHIM, file_describe, FILE_DESCRIBE_MAIN)
     return 0
