@@ -18,6 +18,10 @@ LIBBPF_CFLAGS ?=
 LIBBPF_LIBS ?= -lbpf
 WARN := -std=gnu11 -Wall -Wextra -Werror
 OUT = $(abspath $(GUEST_OUT))
+PROJECT_ROOT := $(abspath ../../..)
+# Native makefiles retain their relative paths in the ordinary-copy view.
+# A view also carries source-layout.json, but must not delegate to itself.
+CANONICAL := $(if $(wildcard $(PROJECT_ROOT)/source-layout.json),$(if $(wildcard $(PROJECT_ROOT)/view.json),,yes))
 
 .PHONY: oracle guest check clean
 oracle: $(BUILD)/eval_session_oracle
@@ -30,6 +34,12 @@ $(BUILD)/eval_session_oracle: eval_session_oracle.c | $(BUILD)
 
 # Files of /opt/xdev_ext/eval in the guest image.
 guest:
+ifeq ($(CANONICAL),yes)
+	view=$$($(PYTHON) -B "$(PROJECT_ROOT)/tools/layout.py" view --root "$(PROJECT_ROOT)") && \
+		$(MAKE) -C "$$view/tests/eval/session_guest" guest GUEST_OUT="$(OUT)" \
+		CC="$(CC)" CLANG="$(CLANG)" PYTHON="$(PYTHON)" \
+		LIBBPF_CFLAGS="$(LIBBPF_CFLAGS)" LIBBPF_LIBS="$(LIBBPF_LIBS)"
+else
 	mkdir -p $(OUT)
 	$(CC) $(CFLAGS) $(WARN) eval_session_oracle.c -o $(OUT)/eval_session_oracle -lz
 	$(CC) $(CFLAGS) $(WARN) ../nvme_gpu/session_nvme_ce.c $(KERNEL)/tools/xdev_ext_gpu_identity.c \
@@ -41,6 +51,7 @@ guest:
 	$(MAKE) -B -C ../chains BUILD=$(OUT)/chains CC="$(CC)" CLANG="$(CLANG)" bench bpf
 	cp $(OUT)/chains/chain_bench $(OUT)/chains/chain_plan.bpf.o $(OUT)/
 	cp $(GUEST_SH) $(OUT)/
+endif
 
 check: | $(BUILD)
 	$(CC) $(CFLAGS) $(WARN) test_fd_check.c -o $(BUILD)/test_fd_check

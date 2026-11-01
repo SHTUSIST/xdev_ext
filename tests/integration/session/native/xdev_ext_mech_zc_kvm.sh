@@ -162,65 +162,128 @@ if (( NIC_FALLBACK && ! LIFECYCLE )) && [[ -z "$FAULT_CAMPAIGN" ]]; then SOCKET_
 [[ $(stat -c %a "$SCRATCH") == 700 && ! -L "$SCRATCH" ]]
 SRC=${SOURCE_OVERRIDE:-$SCRATCH/src}
 verify_source_checkout() {
-    local anchor prefix=''
-    [[ -d "$SRC" && ! -L "$SRC" ]] || {
-        echo 'FAIL source must be a real checkout directory' >&2; return 1;
-    }
-    SRC=$(cd "$SRC" && pwd -P)
-    SOURCE_GIT_ROOT=$(git -C "$SRC" rev-parse --show-toplevel) || {
-        echo 'FAIL source is not a Git checkout' >&2; return 1;
-    }
-    SOURCE_GIT_ROOT=$(cd "$SOURCE_GIT_ROOT" && pwd -P)
-    if [[ "$SOURCE_GIT_ROOT" == "$SRC" ]]; then
-        SOURCE_LAYOUT=kernelgit
-    elif [[ "$SOURCE_GIT_ROOT/kernel" == "$SRC" ]]; then
-        SOURCE_LAYOUT=overlay
-        prefix=kernel/
-        git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- \
-            sources.lock.json scripts/prepare_sources.py >/dev/null || {
-            echo 'FAIL overlay source lacks tracked preparation metadata' >&2; return 1;
-        }
-    else
-        echo 'FAIL source must be the Git root or its prepared kernel directory' >&2; return 1;
-    fi
-    for anchor in net/xdp/xsk_xdev_ext_mech_zc_core.h \
-        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
-        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire.py \
-        tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py; do
-        git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- "$prefix$anchor" >/dev/null || {
-            echo "FAIL source lacks tracked kernel anchor: $anchor" >&2; return 1;
-        }
-    done
-    git -C "$SOURCE_GIT_ROOT" diff --quiet
-    git -C "$SOURCE_GIT_ROOT" diff --cached --quiet
-    [[ -z $(git -C "$SOURCE_GIT_ROOT" ls-files --others --exclude-standard) ]] || {
-        echo 'FAIL source Git root contains untracked files' >&2; return 1;
-    }
-    if [[ "$SOURCE_LAYOUT" == overlay ]]; then
-        python3 - "$SOURCE_GIT_ROOT/sources.lock.json" <<'PYSOURCEPATH'
-import json, sys
-with open(sys.argv[1]) as source:
-    lock = json.load(source)
-if lock.get('components', {}).get('linux', {}).get('path') != 'kernel':
-    raise SystemExit('FAIL overlay preparation must describe kernel/')
-PYSOURCEPATH
-        python3 "$SOURCE_GIT_ROOT/scripts/prepare_sources.py" --component linux --check
-    fi
-    SOURCE_COMMIT=$(git -C "$SOURCE_GIT_ROOT" rev-parse --verify 'HEAD^{commit}')
+    local resolved
+    resolved=$(python3 -B - "$SRC" "${LIFECYCLE:-0}" "${EVAL_SESSION:-0}" <<'PYSOURCE'
+import json
+import os
+from pathlib import Path
+import shlex
+import subprocess
+import sys
+
+
+def fail(message):
+    raise SystemExit('FAIL ' + message)
+
+
+def git(root, *args):
+    result = subprocess.run(['git', '-C', str(root), *args], capture_output=True, text=True)
+    if result.returncode:
+        fail(result.stderr.strip() or 'source Git check failed')
+    return result.stdout.strip()
+
+
+def regular(root, name):
+    path = root / name
+    if Path(name).is_absolute() or '..' in Path(name).parts:
+        fail('invalid source path: ' + name)
+    for part in (path, *path.parents):
+        if part.is_symlink():
+            fail('symlink source path: ' + str(part))
+    if not path.is_file():
+        fail('missing regular source: ' + str(path))
+    return path
+
+
+selected = Path(os.path.abspath(sys.argv[1]))
+if selected.is_symlink() or not selected.is_dir():
+    fail('source must be a real checkout directory')
+for parent in selected.parents:
+    if parent.is_symlink():
+        fail('symlink source parent: ' + str(parent))
+selected = selected.resolve()
+marker = selected / '.xdev-ext-source.json'
+if marker.is_file():
+    receipt = json.loads(regular(selected, marker.name).read_text())
+    repo = Path(receipt['canonical_root'])
+    if not repo.is_absolute():
+        fail('assembly canonical root must be absolute')
+    repo = repo.resolve()
+else:
+    repo = Path(git(selected, 'rev-parse', '--show-toplevel')).resolve()
+if Path(git(repo, 'rev-parse', '--show-toplevel')).resolve() != repo:
+    fail('canonical source directory is not its own Git checkout')
+if git(repo, 'status', '--porcelain', '--untracked-files=all'):
+    fail('source Git root contains dirty or untracked files')
+commit = git(repo, 'rev-parse', '--verify', 'HEAD^{commit}')
+anchors = (
+    'net/xdp/xsk_xdev_ext_mech_zc_core.h',
+    'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh',
+    'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire.py',
+    'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py',
+)
+values = dict(SOURCE_GIT_ROOT=str(repo), SOURCE_COMMIT=commit,
+              NATIVE_COLLECTOR='', EVAL_SESSION_SOURCE='', LIFECYCLE_SOURCE='')
+if (repo / 'source-layout.json').is_file():
+    # Check tracked metadata before importing any source-selected tooling.
+    metadata = ('source-layout.json', 'tools/layout.py', 'tools/build/prepare_sources.py')
+    git(repo, 'ls-files', '--error-unmatch', '--', *metadata)
+    for name in metadata:
+        regular(repo, name)
+    sys.path.insert(0, str(repo / 'tools'))
+    from layout import load_layout, safe_file
+    layout = load_layout(repo)
+    lock = layout.manifest.get('dependency_lock', 'third_party/sources.lock.json')
+    git(repo, 'ls-files', '--error-unmatch', '--', lock, *layout.by_source)
+    safe_file(repo, lock)
+    for anchor in anchors:
+        safe_file(repo, layout.by_native[('linux', anchor)])
+    if selected == repo:
+        selected = repo / 'build/assembled/linux'
+    elif not marker.is_file():
+        fail('source must be the canonical Git root or a registered full assembly')
+    if not (selected / '.xdev-ext-source.json').is_file():
+        fail('native assembly missing; run tools/build/prepare_sources.py --component linux')
+    # This checks marker ownership, locked upstream commit, source membership,
+    # required upstream files and every copied overlay against current sources.
+    checked = subprocess.run([sys.executable, '-B', str(repo / 'tools/build/prepare_sources.py'),
+                              '--component', 'linux', '--output', str(selected), '--check'],
+                             capture_output=True, text=True)
+    if checked.returncode:
+        fail(checked.stdout + checked.stderr)
+
+    def support(logical):
+        source = layout.by_logical.get(logical)
+        if source is None:
+            fail('missing mapped support input: ' + logical)
+        return safe_file(repo, source)
+
+    if int(sys.argv[2]):
+        values['NATIVE_COLLECTOR'] = str(support('tests/eval/native_trace/collector.py'))
+        values['LIFECYCLE_SOURCE'] = str(support(
+            'kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_trace.py').parent)
+    if int(sys.argv[3]):
+        values['EVAL_SESSION_SOURCE'] = str(support('tests/eval/session_guest/Makefile').parent)
+    values['SOURCE_LAYOUT'] = 'overlay'
+else:
+    if selected != repo:
+        fail('native source must be its own Git root')
+    git(repo, 'ls-files', '--error-unmatch', '--', *anchors)
+    for name in anchors:
+        regular(repo, name)
+    if int(sys.argv[2]) or int(sys.argv[3]):
+        fail('lifecycle and eval-session require canonical product support sources')
+    values['SOURCE_LAYOUT'] = 'kernelgit'
+values['SRC'] = str(selected)
+for name, value in values.items():
+    print(name + '=' + shlex.quote(value))
+PYSOURCE
+    ) || return 1
+    eval "$resolved"
 }
 verify_source_checkout
-if (( ${EVAL_SESSION:-0} )); then
-    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/session_guest/Makefile" ]] || {
-        echo 'FAIL --eval-session requires the product overlay with tests/eval/session_guest' >&2; exit 1;
-    }
-fi
 # Use the same campaign geometry for native commands, image creation and
 # the strict full-image validator. The two destination spans never alias.
-if (( LIFECYCLE )); then
-    [[ "$SOURCE_LAYOUT" == overlay && -f "$SOURCE_GIT_ROOT/tests/eval/native_trace/collector.py" ]] || {
-        echo 'FAIL --lifecycle native validation requires the product overlay with tests/eval/native_trace' >&2; exit 1;
-    }
-fi
 read -r SOURCE_SLBA RX_SLBA CE_SLBA IMAGE_BYTES <<<"$(python3 - "$SRC" "$GROUP_COUNT" "${FAULT_CAMPAIGN:-}" <<'PYLAYOUT'
 import pathlib, sys
 sys.path.insert(0, str(pathlib.Path(sys.argv[1])/'tools/testing/selftests/xdev_ext_integration'))
@@ -331,7 +394,7 @@ verify_peer_identity() {
 # These inputs live in the product overlay, outside a legacy kernel-only Git.
 record_eval_session_sources() {
     (cd "$SOURCE_GIT_ROOT"
-        git ls-files -z -- tests/eval kernel/tools/xdev_ext_mech \
+        git -C "$SOURCE_GIT_ROOT" ls-files -z -- src tests frontend lib bpf examples tools source-layout.json third_party/sources.lock.json tests/eval kernel/tools/xdev_ext_mech \
             'kernel/tools/xdev_ext_gpu_identity.*' 'kernel/tools/xdev_ext_xsk_redirect.*' \
             kernel/tools/include kernel/include/uapi 'kernel/include/linux/xdev_ext*' \
             kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_guest.sh \
@@ -435,21 +498,22 @@ printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\nimage_bytes=%s\n' \
 printf 'source_git_root=%s\nsource_directory=%s\nsource_layout=%s\nsource_commit=%s\n' \
     "$SOURCE_GIT_ROOT" "$SRC" "$SOURCE_LAYOUT" "$SOURCE_COMMIT" >>"$EV/provenance.txt"
 printf '%s\n' "$SOURCE_COMMIT" >>"$EV/provenance.txt"
-(cd "$SRC"
-	git diff --binary
-	# A patch-applied checkout has new headers as untracked files. Include
-	# their contents too; git diff by itself is not a complete snapshot.
+(cd "$SOURCE_GIT_ROOT"
+	git -C "$SOURCE_GIT_ROOT" diff --binary
+	# Keep any changed/untracked canonical inputs with the canonical Git root.
 	while IFS= read -r -d '' path; do
-		git diff --no-index --binary -- /dev/null "$path" || [[ $? == 1 ]]
-	done < <(git ls-files --others --exclude-standard -z)
+		git -C "$SOURCE_GIT_ROOT" diff --no-index --binary -- /dev/null "$path" || [[ $? == 1 ]]
+	done < <(git -C "$SOURCE_GIT_ROOT" ls-files --others --exclude-standard -z)
 ) >"$EV/source.patch"
 git -C "$SOURCE_GIT_ROOT" status --porcelain=v1 >"$EV/source-status.txt"
-(cd "$SRC"; { git diff --name-only --diff-filter=ACMRTUXB -z;
-	git ls-files --others --exclude-standard -z; } | sort -zu | xargs -0 -r sha256sum;
-	sha256sum net/xdp/xsk_xdev_ext_mech_zc_core.h \
+(cd "$SOURCE_GIT_ROOT"; { git -C "$SOURCE_GIT_ROOT" diff --name-only --diff-filter=ACMRTUXB -z;
+	git -C "$SOURCE_GIT_ROOT" ls-files --others --exclude-standard -z;
+    } | sort -zu | xargs -0 -r sha256sum) >"$EV/source-files.sha256"
+# Native copies remain the kernel-build inputs even outside any Git checkout.
+(cd "$SRC"; sha256sum net/xdp/xsk_xdev_ext_mech_zc_core.h \
 	tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
 	tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire.py \
-	tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py) >"$EV/source-files.sha256"
+	tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py) >>"$EV/source-files.sha256"
 if (( CE_SIM )); then
 	(cd "$SRC"; sha256sum tools/testing/selftests/xdev_ext_mech/simulate/{Makefile,xdev_ext_ce_sim.c} \
 		tools/xdev_ext_mech/ce_plan.bpf.c) >>"$EV/source-files.sha256"
@@ -589,7 +653,7 @@ if (( ! RUN_ONLY )); then
         kmake M="$PEER_OUT" MODULE_PAHOLE_FLAGS= modules >"$EV/peer-module-build.log" 2>&1
     fi
     if (( EVAL_SESSION )); then
-        lowprio make -C "$SOURCE_GIT_ROOT/tests/eval/session_guest" guest \
+        lowprio make -C "$EVAL_SESSION_SOURCE" guest \
             GUEST_OUT="$EVAL_SESSION_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 \
             >"$EV/eval-session-build.log" 2>&1
         record_eval_session_sources
@@ -1479,11 +1543,11 @@ cleanup_proxy
 tr -d '\r' <"$EV/guest.raw.log" >"$EV/guest.log"
 printf '%s\n' "$rc" >"$EV/qemu.exit"
 if (( LIFECYCLE )); then
-    python3 - "$SOURCE_GIT_ROOT" "$EV" <<'PYFANOUTLOG'
+    python3 - "$LIFECYCLE_SOURCE" "$EV" <<'PYFANOUTLOG'
 from pathlib import Path
 import sys
 root, evidence = map(Path, sys.argv[1:])
-sys.path.insert(0, str(root / 'kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime'))
+sys.path.insert(0, str(root))
 from fanout_trace import merge_fanout_logs
 merge_fanout_logs(evidence / 'guest.raw.log', evidence / 'fanout-native.raw.log',
                   evidence / 'guest.log')
