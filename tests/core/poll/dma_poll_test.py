@@ -35,6 +35,7 @@ FIXTURE = r'''
 #include <string.h>
 #include "io_uring/xdev_ext_mech_dma_core.h"
 #include "io_uring/xdev_ext_mech_window.h"
+/* PRODUCTION_INCLUDES */
 
 typedef __u64 u64; typedef uint32_t u32; typedef uint8_t u8;
 typedef struct { int counter; } atomic_t;
@@ -90,14 +91,15 @@ static const struct xdev_ext_dma_provider_ops with_poll = { .owner = &owner, .bi
 static const struct xdev_ext_dma_provider_ops without_poll = { .owner = &owner, .bind_region = provider_bind_region,
 	.unbind_region = provider_unbind_region, .bind_host = provider_bind_host,
 	.unbind_host = provider_unbind_host, .submit = provider_submit };
-static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *file)
-{ (void)file; mod_gets++; return strcmp(mode, "no-poll-op") ? &with_poll : &without_poll; }
+/* Legacy-only lookup: every selected provider has no scope sidecar. */
+static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *file/* SCOPE_LOOKUP_PARAM */)
+{ (void)file; /* SCOPE_LOOKUP_INIT */ mod_gets++; return strcmp(mode, "no-poll-op") ? &with_poll : &without_poll; }
 
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s) { (void)s;return 4; }
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s)
 { static const struct xdev_ext_mech_layout l={.group_bytes=4096};(void)s;return &l; }
-static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c,u64 off,u64 len)
-{ (void)s;(void)c;(void)off;(void)len;return 0; } /* Uncontended registry, tested separately. */
+static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c/* LEASE_WINDOW_PARAMS */)
+{ (void)s;(void)c;/* LEASE_WINDOW_UNUSED */return 0; } /* Uncontended registry, tested separately. */
 static bool xdev_ext_dma_lease_busy(struct xdev_ext_dma_stage *c) { (void)c;return false; }
 static void xdev_ext_dma_lease_cleanup(struct xdev_ext_dma_stage *c,bool hold) { (void)c;(void)hold; }
 static bool xdev_ext_dma_lease_unbind(struct xdev_ext_dma_stage *c) { (void)c;return true; }
@@ -135,10 +137,39 @@ int main(int argc, char **argv)
 
 def build_fixture():
     text, abi = source(DMA), source(ABI)
-    structs = '\n'.join([structure(abi, 'xdev_ext_dma_region'), structure(abi, 'xdev_ext_dma_xfer'),
-                         structure(abi, 'xdev_ext_dma_provider_ops'), structure(text, 'xdev_ext_dma_stage')])
-    production = '\n'.join(function(text, n) for n in ('xdev_ext_dma_bind', 'xdev_ext_dma_unbind', 'xdev_ext_dma_poll'))
-    return FIXTURE.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
+    bind = function(text, 'xdev_ext_dma_bind')
+    scoped = re.search(r'\bxdev_ext_dma_stage_scope\s*\(', bind) is not None
+    includes, dependencies = [], []
+    structs = [structure(abi, n) for n in
+               ('xdev_ext_dma_region', 'xdev_ext_dma_xfer', 'xdev_ext_dma_provider_ops')]
+    fixture = FIXTURE
+    if scoped:
+        includes.append('#include "include/linux/xdev_ext_dma_scope_core.h"')
+        structs += [structure(abi, n) for n in
+                    ('xdev_ext_dma_scope_info', 'xdev_ext_dma_scope_ops')]
+        version = re.search(r'^#define XDEV_EXT_DMA_SCOPE_OPS_VERSION\s+.*', abi, re.M)
+        if version is None:
+            raise AssertionError('production scope ops version missing')
+        structs.append(version[0])
+        # This fixture has only legacy providers. Unexpected scope ownership
+        # crosses its stated boundary and must fail closed, never be simulated.
+        dependencies.append('static void xdev_ext_dma_scope_put(struct xdev_ext_dma_scope *scope)\n'
+                            '{ if (scope) abort(); }')
+        dependencies.append(function(text, 'xdev_ext_dma_stage_scope'))
+    if '#include "xdev_ext_compfam_copy_core.h"' in text:
+        includes.append('#include "io_uring/xdev_ext_compfam_copy_core.h"')
+    fixture = fixture.replace('/* SCOPE_LOOKUP_PARAM */',
+                              ', const struct xdev_ext_dma_scope_ops **scope_ops' if scoped else '')
+    fixture = fixture.replace('/* SCOPE_LOOKUP_INIT */', '*scope_ops = NULL;' if scoped else '')
+    short_lease = re.search(r'\bxdev_ext_dma_lease_bind\s*\(\s*st\s*,\s*cs\s*\)', bind) is not None
+    fixture = fixture.replace('/* LEASE_WINDOW_PARAMS */', '' if short_lease else ',u64 off,u64 len')
+    fixture = fixture.replace('/* LEASE_WINDOW_UNUSED */', '' if short_lease else '(void)off;(void)len;')
+    structs.append(structure(text, 'xdev_ext_dma_stage'))
+    production = '\n'.join(dependencies + [bind] +
+                           [function(text, n) for n in ('xdev_ext_dma_unbind', 'xdev_ext_dma_poll')])
+    return (fixture.replace('/* PRODUCTION_INCLUDES */', '\n'.join(includes))
+            .replace('/* PRODUCTION_STRUCTS */', '\n'.join(structs))
+            .replace('/* PRODUCTION */', production))
 
 
 class DmaPoll(unittest.TestCase):
