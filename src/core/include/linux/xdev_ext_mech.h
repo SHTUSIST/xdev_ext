@@ -643,7 +643,9 @@ struct xdev_ext_xdomain_trace {
 	int status;
 	bool quiesced;
 };
+/* Any context: non-sleeping observation-enabled check; acquires no lifetime. */
 bool xdev_ext_mech_trace_xdomain_enabled(void);
+/* Any context: caller retains stage/session and event through synchronous tracing. */
 void xdev_ext_mech_trace_xdomain(struct xdev_ext_mech_stage *st,
 			       const struct xdev_ext_xdomain_trace *event);
 /* Any context: matching claim winner only; publish metadata then enqueue. */
