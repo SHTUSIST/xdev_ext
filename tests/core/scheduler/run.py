@@ -27,6 +27,19 @@ def definition(text, name, structure=False):
     return match[0]
 
 
+def session_helpers(text, bodies, extractor):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 def generate():
     core = (ROOT / "io_uring/xdev_ext_mech.c").read_text()
     abi = (ROOT / "include/linux/xdev_ext_mech.h").read_text()
@@ -50,9 +63,13 @@ def generate():
     # New scheduler helpers are compiled verbatim once implemented; the RED
     # baseline still executes the existing batch_run/landed path.
     names += list(dict.fromkeys(re.findall(r"^\w[^;{}]*\b(xdev_ext_mech_fanout_\w+)\([^;{}]*\)\n\{", core, re.M)))
+    names = session_helpers(core, [definition(core, n) for n in names], definition) + names
     functions = [definition(core, n) for n in names]
     prototypes = "\n".join(f[:f.index("\n{")] + ";" for f in functions)
     code = (HERE / "fixture.c").read_text()
+    if not re.search(r'\bdecl\s*;', definition(abi, "xdev_ext_mech_class_ops", True)):
+        code = code.replace('.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_SOCKET],', '')
+        code = code.replace('.decl=xdev_ext_mech_class_desc(c),', '')
     code = code.replace("/* STRUCTURES */", structs)
     code = code.replace("/* PROTOTYPES */", prototypes)
     code = code.replace("/* PRODUCTION */", "\n".join(functions))

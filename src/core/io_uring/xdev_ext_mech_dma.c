@@ -635,6 +635,7 @@ static const struct xdev_ext_comp_hooks xdev_ext_dma_comp_hooks = {
 };
 
 static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_DMA],
 	.class_id	= XDEV_EXT_MECH_CLASS_DMA,
 	.desc_size	= sizeof(struct xdev_ext_dma_copy_desc),
 	.desc_cap	= XDEV_EXT_DMA_MAX_ENTRIES,

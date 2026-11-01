@@ -809,6 +809,7 @@ static const struct xdev_ext_comp_hooks xdev_ext_user_comp_hooks = {
 
 /* Strict USER can consume GPU completion sequences through generic POLL. */
 static const struct xdev_ext_mech_class_ops xdev_ext_user_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_USER],
 	.class_id = XDEV_EXT_MECH_CLASS_USER,
 	.fam.comp = &xdev_ext_user_comp_hooks,
 	.desc_size = sizeof(struct xdev_ext_user_desc), .desc_cap = 1,

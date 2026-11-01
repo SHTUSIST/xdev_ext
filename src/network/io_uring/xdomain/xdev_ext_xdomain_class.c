@@ -2052,6 +2052,7 @@ static void xdev_ext_xd_class_unbind(struct xdev_ext_mech_stage *st)
 	xdev_ext_netfam_fini(&xs->ns); st->priv = NULL; kvfree(xs->facts); kfree(xs);
 }
 static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_XDOMAIN],
 	.stage_diag = xdev_ext_xd_class_stage_diag,
 	.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED,
 	.desc_size = sizeof(struct xdev_ext_xdomain_desc), .desc_cap = XDEV_EXT_MECH_MAX_FRAMES,

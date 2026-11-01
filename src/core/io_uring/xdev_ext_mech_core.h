@@ -662,44 +662,31 @@ static inline bool xdev_ext_mech_class_known(__u32 class_id)
 	return xdev_ext_mech_class_desc(class_id)->family != XDEV_EXT_FAMILY_NONE;
 }
 
-static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,
-				      __u32 callsite, __s32 ret)
+static inline bool xdev_ext_mech_ret_legal_desc(const struct xdev_ext_mech_class_desc *d,
+ __u32 member, __u32 callsite, __s32 ret)
 {
-	if (!xdev_ext_mech_class_known(class_id))
-		return false;
-	switch (member) {
-	case XDEV_EXT_MECH_MEMBER_PREPARE:
-		return callsite == XDEV_EXT_MECH_SITE_CREATE && ret <= 0 &&
-		       ret >= -XDEV_EXT_MECH_ERRNO_MAX;
-	case XDEV_EXT_MECH_MEMBER_BUILD:
-		if (callsite != XDEV_EXT_MECH_SITE_WORKER &&
-		    !(callsite == XDEV_EXT_MECH_SITE_URING_CMD &&
-		      class_id == XDEV_EXT_MECH_CLASS_NVME))
-			return false;
-		return ret >= XDEV_EXT_MECH_BUILD_DEFAULT &&
-		       ret <= XDEV_EXT_MECH_BUILD_ABORT;
-	case XDEV_EXT_MECH_MEMBER_COMPLETE:
-		switch (callsite) {
-		case XDEV_EXT_MECH_SITE_WORKER:
-			return ret >= XDEV_EXT_MECH_NEXT && ret <= XDEV_EXT_MECH_ABORT;
-		case XDEV_EXT_MECH_SITE_URING_CMD:
-			return class_id == XDEV_EXT_MECH_CLASS_NVME &&
-			       (ret == XDEV_EXT_MECH_DONE || ret == XDEV_EXT_MECH_ABORT);
-		case XDEV_EXT_MECH_SITE_RX_GENERIC:
-		case XDEV_EXT_MECH_SITE_RX_NATIVE:
-		case XDEV_EXT_MECH_SITE_RX_HOLD_RESULT:
-			return class_id == XDEV_EXT_MECH_CLASS_AFXDP &&
-			       ret >= XDEV_EXT_MECH_HOLD && ret <= XDEV_EXT_MECH_RECYCLE;
-		default:
-			return false;
-		}
-	case XDEV_EXT_MECH_MEMBER_COMPUTE:
-		return class_id == XDEV_EXT_MECH_CLASS_CPU &&
-		       callsite == XDEV_EXT_MECH_SITE_WORKER && ret <= 0 &&
-		       ret >= -XDEV_EXT_MECH_ERRNO_MAX;
-	default:
-		return false;
-	}
+ __u32 i;
+
+ if (!d || !d->family)
+  return false;
+ for (i = 0; i < d->nr_ret_rules; i++) {
+  const struct xdev_ext_mech_ret_rule *r = &d->ret_rules[i];
+
+  if (r->member != member || r->callsite != callsite)
+   continue;
+  if (r->kind == XDEV_EXT_MECH_RET_RANGE && ret >= r->min && ret <= r->max)
+   return true;
+  if (r->kind == XDEV_EXT_MECH_RET_SET && ret >= 0 && ret < 32 &&
+      (r->values & (1U << ret)))
+   return true;
+ }
+ return false;
+}
+
+static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,
+ __u32 callsite, __s32 ret)
+{
+ return xdev_ext_mech_ret_legal_desc(xdev_ext_mech_class_desc(class_id), member, callsite, ret);
 }
 
 /*
@@ -708,11 +695,11 @@ static inline bool xdev_ext_mech_ret_legal(__u32 class_id, __u32 member,
  * prepare and compute -EPROTO)
  * with *@illegal set so the caller counts a protocol error.
  */
-static inline __s32 xdev_ext_mech_ret_resolve(__u32 class_id, __u32 member,
+static inline __s32 xdev_ext_mech_ret_resolve_desc(const struct xdev_ext_mech_class_desc *d, __u32 member,
 					 __u32 callsite, __s32 ret,
 					 bool *illegal)
 {
-	*illegal = !xdev_ext_mech_ret_legal(class_id, member, callsite, ret);
+	*illegal = !xdev_ext_mech_ret_legal_desc(d, member, callsite, ret);
 	if (!*illegal)
 		return ret;
 	switch (member) {
@@ -727,6 +714,12 @@ static inline __s32 xdev_ext_mech_ret_resolve(__u32 class_id, __u32 member,
 	default:
 		return -EPROTO;
 	}
+}
+
+static inline __s32 xdev_ext_mech_ret_resolve(__u32 class_id, __u32 member,
+ __u32 callsite, __s32 ret, bool *illegal)
+{
+ return xdev_ext_mech_ret_resolve_desc(xdev_ext_mech_class_desc(class_id), member, callsite, ret, illegal);
 }
 
 /*
@@ -788,25 +781,15 @@ static inline __u32 xdev_ext_mech_classify(bool ok, bool submitted)
 #define XDEV_EXT_MECH_NVME_SCT_SC_MASK	0x07ff	/* NVME_SCT_SC_MASK */
 #define XDEV_EXT_MECH_NVME_STATUS_DNR	0x4000	/* NVME_STATUS_DNR */
 
-static inline bool xdev_ext_mech_retry_ok(__u32 class_id, __u32 retries,
-				     __s32 status)
+static inline bool xdev_ext_mech_retry_ok_desc(const struct xdev_ext_mech_class_desc *d,
+ __u32 retries, __s32 status)
 {
-	switch (class_id) {
-	case XDEV_EXT_MECH_CLASS_NVME:
-		return retries < XDEV_EXT_MECH_RETRY_MAX_NVME && status > 0 &&
-		       (status & XDEV_EXT_MECH_NVME_SCT_SC_MASK) &&
-		       !(status & XDEV_EXT_MECH_NVME_STATUS_DNR);
-	case XDEV_EXT_MECH_CLASS_AFXDP:
-		return retries < XDEV_EXT_MECH_RETRY_MAX_AFXDP && status == -EAGAIN;
-	case XDEV_EXT_MECH_CLASS_DMA:
-		return retries < XDEV_EXT_MECH_RETRY_MAX_DMA &&
-		       status == XDEV_EXT_DMA_PRE_SUBMIT_FAILED;
-	case XDEV_EXT_MECH_CLASS_CE:
-		return retries < XDEV_EXT_MECH_RETRY_MAX_CE &&
-		       status == XDEV_EXT_CE_PRE_SUBMIT_FAILED;
-	default:
-		return false;
-	}
+ return d && d->family && d->retry_ok && d->retry_ok(retries, status);
+}
+
+static inline bool xdev_ext_mech_retry_ok(__u32 class_id, __u32 retries, __s32 status)
+{
+ return xdev_ext_mech_retry_ok_desc(xdev_ext_mech_class_desc(class_id), retries, status);
 }
 
 /*

@@ -109,7 +109,12 @@ static u32 crc32c(u32 seed, const void *bytes, size_t length)
  * invoke still compiles; accidentally reaching the new boundary is fatal.
  * The separate XDOMAIN identity suite exercises the real protocol authority.
  */
+struct xdev_ext_mech_class_ops {
+ u32 class_id;
+ const struct xdev_ext_mech_class_desc *decl;
+};
 struct xdev_ext_mech_stage {
+ const struct xdev_ext_mech_class_ops *cls;
  struct xdev_ext_mech_session *s;
  u32 class_id;
 };

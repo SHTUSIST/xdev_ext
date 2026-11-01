@@ -78,7 +78,11 @@ class ComputeWiring(unittest.TestCase):
         self.assertNotIn('sleepable', rows['compute'])
         self.assertNotIn('required', rows['compute'])
         check = body(ops, 'xdev_ext_cpu_mech_ops_check_member')
-        self.assertIn('xdev_ext_ops_check_member(&xdev_ext_cpu_mech_ops_desc,', check)
+        self.assertIn('xdev_ext_ops_check_member(xdev_ext_mech_type_schema(XDEV_EXT_MECH_CLASS_CPU),', check)
+        self.assertIn('XDEV_EXT_MECH_TYPE_ROW(cpu, XDEV_EXT_MECH_CLASS_CPU, xdev_ext_cpu_mech_ops_desc)', ops)
+        schema = body(ops, 'xdev_ext_mech_type_schema')
+        self.assertIn('xdev_ext_mech_types[i].class_id == class_id', schema)
+        self.assertIn('return xdev_ext_mech_types[i].schema;', schema)
         shared = re.search(r'xdev_ext_mech_ops_members\[\] = {\n(.*?)\n};', ops, re.S).group(1)
         self.assertNotIn('compute', shared)
 
@@ -150,7 +154,12 @@ class ComputeWiring(unittest.TestCase):
         self.assertIn('EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_has_member);', mech)
         core = source('io_uring/xdev_ext_mech_core.h')
         legal = body(core, 'xdev_ext_mech_ret_legal')
-        self.assertIn('case XDEV_EXT_MECH_MEMBER_COMPUTE:', legal)
+        self.assertIn('xdev_ext_mech_ret_legal_desc(xdev_ext_mech_class_desc(class_id), member, callsite, ret)', legal)
+        family = source('include/linux/xdev_ext_family_core.h')
+        self.assertIn('XDEV_EXT_DECL_RET_RANGE(XDEV_EXT_MECH_MEMBER_COMPUTE, XDEV_EXT_MECH_SITE_WORKER, -4095, 0)', family)
+        cpu_row = re.search(r'\{ /\* XDEV_EXT_MECH_CLASS_CPU \*/(.*?)\n\s*\},', family, re.S)
+        self.assertIsNotNone(cpu_row)
+        self.assertIn('xdev_ext_decl_cpu_returns', cpu_row.group(1))
 
     def test_cpu_class(self):
         cpu = source(CPU)

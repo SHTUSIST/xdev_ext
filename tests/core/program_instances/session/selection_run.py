@@ -34,6 +34,10 @@ def main():
   replace(definition(text,'xdev_ext_mech_ops_current'),'static bool xdev_ext_mech_ops_current(u32 id,const void *ops,bool pinned) { assert(id==9&&pinned);return ops==host_default; }')
   replace(definition(text,'class_bind'),'static int class_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_stage_uapi *u) { (void)u;describes++;st->priv=st;return 0; }')
   replace('id==XDEV_EXT_MECH_CLASS_NET?&net_class:NULL','id==XDEV_EXT_MECH_CLASS_CPU?&net_class:NULL')
+  # Selection exercises real CPU programs, so its registered fake class must
+  # carry the CPU identity and declaration alongside the existing CPU lookup.
+  replace('.class_id=XDEV_EXT_MECH_CLASS_NET,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NET]',
+          '.class_id=XDEV_EXT_MECH_CLASS_CPU,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CPU]')
   # The original core entry remains intact and renamed, never executes here.
   replace('int main(int argc,char **argv)','int sp_unused_wire_main(int argc,char **argv)')
   body=re.sub(r'^#include[^\n]*\n','',(root/'src/core/io_uring/programs/instances.c').read_text(),flags=re.M)

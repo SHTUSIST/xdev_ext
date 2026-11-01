@@ -22,6 +22,7 @@
 #include <linux/container_of.h>
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/xdev_ext_family_core.h>
 #include <asm/page.h>
 #include <uapi/linux/xdev_ext_mech.h>
 #else
@@ -120,7 +121,8 @@ struct xdev_ext_ce_backend_ops;
  * filter tell classes apart at load time.  check_member accepts a sleepable
  * program only for prepare; no member requests a private stack, so a
  * softirq RX complete may nest inside a worker build of the same program.
- * CE requires XDEV_EXT_CE_MECH_ABI_VERSION; the other types use XDEV_EXT_MECH_ABI_VERSION.
+ * CE and DMA require their class ABI versions; the other types use
+ * XDEV_EXT_MECH_ABI_VERSION.
  * Every type has the compute slot so the layouts stay identical; only the
  * CPU type accepts a program for it (Documentation/userspace-api/xdev_ext-compute.rst).
  */
@@ -180,6 +182,7 @@ struct xdev_ext_xdomain_proto_result {
 
 struct xdev_ext_mech_call {
 	struct xdev_ext_mech_ctx ctx;
+	const struct xdev_ext_mech_class_desc *decl; /* selected, owner-pinned class */
 	u32 magic;
 	u8 member;			/* enum xdev_ext_mech_member */
 	u8 callsite;			/* enum xdev_ext_mech_callsite */
@@ -319,6 +322,7 @@ struct xdev_ext_comp_hooks;
 
 struct xdev_ext_rel_policy;
 struct xdev_ext_mech_class_ops {
+ const struct xdev_ext_mech_class_desc *decl;
 	u32 class_id;			/* enum xdev_ext_mech_class */
 	u32 flags;			/* XDEV_EXT_MECH_CLASS_F_* */
 	u32 desc_size;			/* bytes per scratch slot */
@@ -809,9 +813,12 @@ struct xdev_ext_dma_provider_ops {
 int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops);
 /* Module exit, process context; bound sessions hold owner references. */
 void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *ops);
-/* Read-only claim check for a live submitted or claimed completion ticket. */
+/* Any context: read-only transfer/frame-claim check for a matching SUBMITTED
+ * or COMPLETING ticket; caller keeps the batch and transfers alive. */
 bool xdev_ext_mech_batch_dma_owners_valid(const struct xdev_ext_mech_batch *b,
  u64 ticket, const struct xdev_ext_dma_xfer *x, u32 n);
+/* Any context: read-only check of supplied transfers through a live provider
+ * cookie; does not claim completion or wait. Caller keeps the cookie alive. */
 bool xdev_ext_dma_owners_valid(struct xdev_ext_dma_cookie *cookie, u64 ticket,
  const struct xdev_ext_dma_xfer *x, u32 n);
 /* Any context, once per accepted submit, with its immutable ticket. */

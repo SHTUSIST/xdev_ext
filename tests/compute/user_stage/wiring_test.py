@@ -35,6 +35,9 @@ def main():
     linux = text('kernel/include/linux/xdev_ext_mech.h')
     ops = text('kernel/io_uring/xdev_ext_mech_ops.c')
     core = text('kernel/io_uring/xdev_ext_mech.c')
+    family = text('kernel/include/linux/xdev_ext_family_core.h')
+    user_decl = re.search(r'\{ /\* XDEV_EXT_MECH_CLASS_USER \*/(.*?)\n\s*\},', family, re.S)
+    user_decl = user_decl[1] if user_decl else ''
     internal = text('kernel/io_uring/xdev_ext_mech_internal.h')
     user = text('kernel/io_uring/xdev_ext_mech_user.c')
     tools = text('kernel/tools/xdev_ext_mech/Makefile')
@@ -55,13 +58,16 @@ def main():
          re.search(r'XDEV_EXT_MECH_STRUCT_OPS\(user, XDEV_EXT_MECH_CLASS_USER,', ops)),
         ('type listed for the kfunc filter and BTF lookup', '&bpf_xdev_ext_user_mech_ops,' in ops),
         ('class id resolves to the type',
-         re.search(r'case XDEV_EXT_MECH_CLASS_USER:\s*return &bpf_xdev_ext_user_mech_ops;', ops)),
+         'XDEV_EXT_MECH_TYPE_ROW(user, XDEV_EXT_MECH_CLASS_USER, xdev_ext_mech_ops_desc)' in ops and
+         'return xdev_ext_mech_types[i].st_ops;' in function(ops, 'xdev_ext_mech_st_ops_of') and
+         'xdev_ext_mech_types[i].class_id == class_id' in function(ops, 'xdev_ext_mech_st_ops_of')),
         ('type registered at init',
          re.search(r'register_bpf_struct_ops\(&bpf_xdev_ext_user_mech_ops,\s*xdev_ext_user_mech_ops\)', ops)),
         ('descriptor type in vmlinux BTF', 'BTF_TYPE_EMIT(struct xdev_ext_user_desc);' in ops),
         ('core keeps no file reference for a USER stage',
-         re.search(r'class_id != XDEV_EXT_MECH_CLASS_CPU &&\s*st->class_id != XDEV_EXT_MECH_CLASS_USER', bind)),
-        ('program ctx base: common metadata', 'case XDEV_EXT_MECH_CLASS_USER:' in base),
+         'if (!st->cls->decl->no_file)' in bind and '.no_file = 1' in user_decl),
+        ('program ctx base: common metadata', 'xdev_ext_mech_base_desc(st->cls->decl, st->direction, caps, bytes)' in base and
+         '.base = xdev_ext_decl_common_base' in user_decl),
         ('register sub-op dispatched',
          re.search(r'case XDEV_EXT_MECH_OP_USER_STAGE:\s*return xdev_ext_mech_user_stage_create\(', register)),
         ('register sub-op declared for the core', 'int xdev_ext_mech_user_stage_create(' in internal),

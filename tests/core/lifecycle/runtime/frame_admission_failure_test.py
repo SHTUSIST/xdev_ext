@@ -44,6 +44,19 @@ def function(source, name):
     return match.group()
 
 
+def session_helpers(text, bodies, extractor):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 def make_source(core_include):
     core = (ROOT / 'src/core/io_uring/xdev_ext_mech.c').read_text()
     xsk = (ROOT / 'src/network/net/xdp/xsk_xdev_ext_mech.c').read_text()
@@ -77,7 +90,13 @@ def make_source(core_include):
         'OPEN_FIND': function(core, 'xdev_ext_mech_open_find_locked'),
         'HOLD': function(core, 'xdev_ext_mech_hold_commit'),
     }
+    helpers = session_helpers(core, pieces.values(), function)
+    pieces['CORE'] = '\n'.join(function(core, name) for name in helpers) + '\n' + pieces['CORE']
     source = (HERE / 'frame_admission_failure_fixture.c.in').read_text()
+    family = (Path(core_include).parent / 'include/linux/xdev_ext_family_core.h').read_text()
+    if not re.search(r'\bxdev_ext_mech_class_decls\s*\[', family):
+        # Historical cores do not consume decl; their header has no row symbol.
+        source = re.sub(r'\.decl=&xdev_ext_mech_class_decls\[XDEV_EXT_MECH_CLASS_(?:AFXDP|NVME)\]', '', source)
     source = source.replace('@CORE_INCLUDE@', str(core_include))
     for name, text in pieces.items():
         source = source.replace('/* PRODUCTION_' + name + ' */', text)

@@ -55,6 +55,19 @@ def structure(text, name):
     return match[0]
 
 
+def session_helpers(text, bodies, extractor):
+    """Follow actual session-helper calls; a called missing definition is fatal."""
+    helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
+               'xdev_ext_mech_session_chain_refs', 'xdev_ext_mech_session_start_queue_check')
+    bodies, selected = list(bodies), set()
+    for _ in helpers:
+        for name in helpers:
+            if name not in selected and any(re.search(r'\b' + name + r'\s*\(', body) for body in bodies):
+                bodies.append(extractor(text, name))
+                selected.add(name)
+    return [name for name in helpers if name in selected]
+
+
 def generate(mutation=None):
     core = source("io_uring/xdev_ext_mech.c")
     dma = source("io_uring/xdev_ext_mech_dma.c")
@@ -90,6 +103,9 @@ def generate(mutation=None):
         template = template.replace('static int native_unbind_region(', 'static void native_unbind_region(')
         template = template.replace('if(region_unmap_error)return region_unmap_error;free(r->priv);r->priv=NULL;return 0;',
                                     'if(region_unmap_error)return;free(r->priv);r->priv=NULL;')
+    # Initializer fields must match the selected historical class structure.
+    if not re.search(r'\bdecl\s*;', structure(abi, "xdev_ext_mech_class_ops")):
+        template = template.replace('.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],', '')
     structs = [structure(abi, n) for n in (
         "xdev_ext_mech_frame", "xdev_ext_mech_stage", "xdev_ext_mech_class_ops",
         "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_dma_region",
@@ -139,6 +155,7 @@ def generate(mutation=None):
         after[0:0] = ["xdev_ext_mech_stats_fill", "xdev_ext_mech_transport_stats_fill"]
     if "static void xdev_ext_mech_start_queue_free(" in core:
         after.insert(0, "xdev_ext_mech_start_queue_free")
+    before = session_helpers(core, [function(core, name) for name in before + after], function) + before
     ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
     # These native-cookie/provider fault cases have one uncontended CE owner.
@@ -216,6 +233,10 @@ class ProviderFaults(unittest.TestCase):
             if 'xdev_ext_family_core.h' in (cls.path / "io_uring/xdev_ext_mech_core.h").read_text():
                 rel = "include/linux/xdev_ext_family_core.h"
                 (cls.path / rel).write_text(source(rel))
+            family_header = cls.path / "include/linux/xdev_ext_family_core.h"
+            if family_header.is_file() and 'xdev_ext_binding_ctx.h' in family_header.read_text():
+                rel = "include/linux/xdev_ext_binding_ctx.h"
+                (cls.path / rel).write_text(source(rel))
             # Follow CPU helper dependencies from the selected step snapshot.
             if '"xdev_ext_mech_cpu_core.h"' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
                 rel = "io_uring/xdev_ext_mech_cpu_core.h"
@@ -259,6 +280,7 @@ class ProviderFaults(unittest.TestCase):
 #include <stddef.h>
 #include <stdint.h>
 #include "include/uapi/linux/xdev_ext_mech.h"
+#include "include/linux/xdev_ext_family_core.h"
 typedef __u32 u32;
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 struct xdev_ext_dma_mech_ops { u32 abi_version,flags;void *prepare,*build,*complete; };
@@ -275,6 +297,20 @@ struct xdev_ext_nvme_mech_ops { u32 abi_version,flags;void *prepare,*build,*comp
         code += declaration("static const struct xdev_ext_ops_u32_field "+prefix+"_ops_fields[]")
         code += declaration("static const struct xdev_ext_ops_member xdev_ext_mech_ops_members[]")
         code += declaration("static const struct xdev_ext_ops_desc "+prefix+"_ops_desc")
+        if "xdev_ext_mech_type_schema(" in function(ops, prefix+"_ops_validate"):
+            # This fixture registers only DMA, using its actual production row
+            # and complete schema lookup. BTF identity is an opaque boundary.
+            code += "\nstruct bpf_struct_ops { int unused; };\n"
+            code += "static const struct bpf_struct_ops bpf_xdev_ext_dma_mech_ops;\n"
+            code += structure(ops, "xdev_ext_mech_type_decl") + "\n"
+            macro = re.search(r"^#define XDEV_EXT_MECH_TYPE_ROW[^\n]*\\\n[^\n]*", ops, re.M)
+            if macro is None:
+                raise AssertionError("production type-row macro missing")
+            row = re.search(r"^ XDEV_EXT_MECH_TYPE_ROW\(dma,[^\n]*", ops, re.M)
+            if row is None:
+                raise AssertionError("production DMA type row missing")
+            code += macro[0] + "\nstatic const struct xdev_ext_mech_type_decl xdev_ext_mech_types[] = {\n" + row[0] + "\n};\n#undef XDEV_EXT_MECH_TYPE_ROW\n"
+            code += function(ops, "xdev_ext_mech_type_schema")
         name = prefix+"_ops_validate"
         code += function(ops[ops.index("static int "+name+"("):], name)
         code += r"""

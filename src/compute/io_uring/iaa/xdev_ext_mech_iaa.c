@@ -276,6 +276,7 @@ static const struct xdev_ext_comp_hooks xdev_ext_iaa_comp_hooks = {
  .producer_visibility = XDEV_EXT_CAP_NOT_APPLICABLE,
 };
 static const struct xdev_ext_mech_class_ops xdev_ext_iaa_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_IAA],
  .class_id = XDEV_EXT_MECH_CLASS_IAA, .flags = XDEV_EXT_MECH_CLASS_F_TRANSFORM,
  .desc_size = sizeof(struct xdev_ext_iaa_desc), .desc_cap = 1,
  .info_size = sizeof(struct xdev_ext_iaa_mech_info),

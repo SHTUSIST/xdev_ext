@@ -657,6 +657,7 @@ static const struct xdev_ext_net_hooks xdev_ext_socket_net_hooks = {
 };
 
 static const struct xdev_ext_mech_class_ops xdev_ext_socket_class = {
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_SOCKET],
 	.class_id = XDEV_EXT_MECH_CLASS_SOCKET,
 	.flags = XDEV_EXT_MECH_CLASS_F_ORDERED | XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE,
 	.desc_size = sizeof(struct xdev_ext_socket_send_desc),

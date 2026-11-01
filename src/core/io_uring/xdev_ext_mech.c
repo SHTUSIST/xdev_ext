@@ -270,50 +270,47 @@ static void xdev_ext_mech_notify_locked(struct xdev_ext_mech_session *s, bool le
 
 static bool xdev_ext_mech_rx_first(const struct xdev_ext_mech_session *s)
 {
-	return s->st[0].class_id == XDEV_EXT_MECH_CLASS_AFXDP &&
+	return s->st[0].cls->decl->rx_source &&
 	       s->st[0].direction == XDEV_EXT_MECH_DIR_FROM_DEVICE;
+}
+
+/* Classes are pinned before the session can admit frames or run START. */
+static int xdev_ext_mech_session_stage_role(const struct xdev_ext_mech_session *s, u32 stage)
+{
+ return xdev_ext_mech_stage_role_desc(s->st[stage].cls->decl, &s->plan[stage]);
+}
+
+static void xdev_ext_mech_session_rows(const struct xdev_ext_mech_session *s,
+ const struct xdev_ext_mech_class_desc *rows[XDEV_EXT_MECH_MAX_STAGES])
+{
+ u32 i;
+
+ for (i = 0; i < s->nr_stages; i++)
+  rows[i] = s->st[i].cls->decl;
+}
+
+static u32 xdev_ext_mech_session_chain_refs(const struct xdev_ext_mech_session *s, u32 from)
+{
+ const struct xdev_ext_mech_class_desc *rows[XDEV_EXT_MECH_MAX_STAGES];
+
+ xdev_ext_mech_session_rows(s, rows);
+ return xdev_ext_mech_chain_refs_desc(s->plan, rows, s->nr_stages, from);
+}
+
+static int xdev_ext_mech_session_start_queue_check(const struct xdev_ext_mech_session *s)
+{
+ const struct xdev_ext_mech_class_desc *rows[XDEV_EXT_MECH_MAX_STAGES];
+
+ xdev_ext_mech_session_rows(s, rows);
+ return xdev_ext_mech_start_queue_plan_check_desc(s->plan, rows, s->nr_stages);
 }
 
 static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(const struct xdev_ext_mech_stage *st,
 					       u64 bytes)
 {
-	bool to_dev = st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE;
 	u32 caps = st->s->pool.capabilities;
 
-	switch (st->class_id) {
-	case XDEV_EXT_MECH_CLASS_NVME:
-		return xdev_ext_binding_make_nvme_ctx(to_dev, 0, bytes);
-	case XDEV_EXT_MECH_CLASS_AFXDP:
-		if (caps & XDEV_EXT_BINDING_CAP_ZERO_COPY)
-			return to_dev ? xdev_ext_binding_make_afxdp_native_tx_ctx(0, bytes, caps) :
-					xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, caps);
-		return to_dev ? xdev_ext_binding_make_afxdp_tx_ctx(bytes) :
-				xdev_ext_binding_make_afxdp_rx_ctx(0, bytes, 0);
-	case XDEV_EXT_MECH_CLASS_CPU:
-	case XDEV_EXT_MECH_CLASS_USER:
-	case XDEV_EXT_MECH_CLASS_IAA:
-	case XDEV_EXT_MECH_CLASS_SOCKET:
-	case XDEV_EXT_MECH_CLASS_NET:
-	case XDEV_EXT_MECH_CLASS_DMA:
-		/* Common metadata only; DMA never enters the legacy policy validator. */
-		return (struct xdev_ext_binding_ctx_v2) {
-			.abi_version = XDEV_EXT_BINDING_ABI_VERSION,
-			.ctx_size = sizeof(struct xdev_ext_binding_ctx_v2),
-			.backend = XDEV_EXT_BINDING_BACKEND_UNSPEC,
-			.direction = st->direction,
-			.length = bytes,
-		};
-	default:
-		if (xdev_ext_mech_class_desc(st->class_id)->ctx_rule == XDEV_EXT_CTX_RULE_COMMON)
-			return (struct xdev_ext_binding_ctx_v2) {
-				.abi_version = XDEV_EXT_BINDING_ABI_VERSION,
-				.ctx_size = sizeof(struct xdev_ext_binding_ctx_v2),
-				.backend = XDEV_EXT_BINDING_BACKEND_UNSPEC,
-				.direction = st->direction,
-				.length = bytes,
-			};
-		return xdev_ext_binding_make_gpu_ctx(st->direction, 0, 0, bytes);
-	}
+ return xdev_ext_mech_base_desc(st->cls->decl, st->direction, caps, bytes);
 }
 
 /* Program choice is stage-local; defaults keep their per-class pin. */
@@ -1363,7 +1360,7 @@ static int xdev_ext_mech_batch_handoff(struct xdev_ext_mech_batch *b,
                                       int err, bool *sequester)
 {
  struct xdev_ext_mech_session *s = b->s;
- u32 i, refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, b->bs.stage + 1);
+ u32 i, refs = xdev_ext_mech_session_chain_refs(s, b->bs.stage + 1);
  u32 left = b->transform.produced;
  int rc;
 
@@ -1385,7 +1382,7 @@ static int xdev_ext_mech_batch_handoff(struct xdev_ext_mech_batch *b,
   if (b->producing)
    rc = err ? xdev_ext_mech_life_fail_produce(l, claim) :
     xdev_ext_mech_life_publish(l, claim, refs, b->f[i].data_len);
-  else if (!err && xdev_ext_mech_stage_role(&s->plan[b->bs.stage]) == XDEV_EXT_MECH_ROLE_INPLACE)
+  else if (!err && xdev_ext_mech_session_stage_role(s, b->bs.stage) == XDEV_EXT_MECH_ROLE_INPLACE)
    rc = xdev_ext_mech_life_republish(l, claim, refs, b->f[i].data_len);
   else
    rc = err ? xdev_ext_mech_life_fail_put(l, claim) : xdev_ext_mech_life_put(l, claim);
@@ -1479,7 +1476,7 @@ void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch *b,
 	xdev_ext_native_event_emit("descriptor_bind", "K", b->s->id,
 		b->id, b->key, b->f[pos].index,
 		xdev_ext_mech_life_claim_gen(b->life_token[pos]),
-		b->bs.stage, b->ticket, XDEV_EXT_MECH_CLASS_AFXDP, 1, 0,
+		b->bs.stage, b->ticket, b->s->st[b->bs.stage].class_id, 1, 0,
 		pool, address, bytes, 0, 0, pos, offset, b->f[pos].data_len);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_trace_descriptor_bind);
@@ -1561,8 +1558,8 @@ int xdev_ext_mech_batch_external_complete(struct xdev_ext_mech_batch *b,
  if (ticket != READ_ONCE(b->ticket))
   return -ESTALE;
  st = &s->st[b->bs.stage];
- if (st->class_id != XDEV_EXT_MECH_CLASS_USER ||
-     !(st->flags & XDEV_EXT_USER_F_STRICT_ASYNC)) {
+ if (!st->cls->decl->external_async_flag ||
+     !(st->flags & st->cls->decl->external_async_flag)) {
   xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
   return -EINVAL;
  }
@@ -1975,7 +1972,7 @@ static int xdev_ext_mech_build(struct xdev_ext_mech_session *s, struct xdev_ext_
 		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
 		return err;
 	}
-	ret = xdev_ext_mech_ret_resolve(st->class_id, XDEV_EXT_MECH_MEMBER_BUILD,
+	ret = xdev_ext_mech_ret_resolve_desc(st->cls->decl, XDEV_EXT_MECH_MEMBER_BUILD,
 				   XDEV_EXT_MECH_SITE_WORKER, ret, &illegal);
 	if (illegal)
 		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
@@ -2020,7 +2017,7 @@ int xdev_ext_mech_batch_compute(struct xdev_ext_mech_batch *b, s32 delta)
 	bool illegal;
 	int err;
 
-	if (st->class_id != XDEV_EXT_MECH_CLASS_CPU || !b->nr_frames ||
+	if (!st->cls->decl->compute_worker || !b->nr_frames ||
 	    b->nr_frames > XDEV_EXT_MECH_MAX_FRAMES)
 		return -EINVAL;
 	/* Every frame can take exactly L + D bytes before any byte changes. */
@@ -2042,7 +2039,7 @@ int xdev_ext_mech_batch_compute(struct xdev_ext_mech_batch *b, s32 delta)
 		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
 		return err == -ENOENT ? -EOPNOTSUPP : err;
 	}
-	ret = xdev_ext_mech_ret_resolve(st->class_id, XDEV_EXT_MECH_MEMBER_COMPUTE,
+	ret = xdev_ext_mech_ret_resolve_desc(st->cls->decl, XDEV_EXT_MECH_MEMBER_COMPUTE,
 				   XDEV_EXT_MECH_SITE_WORKER, ret, &illegal);
 	if (illegal)
 		xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
@@ -2094,7 +2091,7 @@ static int xdev_ext_mech_batch_acquire(struct xdev_ext_mech_session *s,
 			ret = xdev_ext_mech_life_claim(l, st->index, &b->life_token[i]);
 		else
 			ret = xdev_ext_mech_life_acquire(l, st->index,
-    xdev_ext_mech_stage_role(&s->plan[st->index]) == XDEV_EXT_MECH_ROLE_INPLACE ?
+    xdev_ext_mech_session_stage_role(s, st->index) == XDEV_EXT_MECH_ROLE_INPLACE ?
     XDEV_EXT_MECH_L_ACQ_EXCLUSIVE :
     ((s->plan[st->index].flags & XDEV_EXT_MECH_STAGE_F_FANOUT) ||
      xdev_ext_mech_stage_group_end(s->plan, s->nr_stages, st->index) > st->index + 1) ?
@@ -2142,7 +2139,7 @@ static int xdev_ext_mech_submit(struct xdev_ext_mech_session *s, struct xdev_ext
 	if (!ret) {
 		b->fifo_accepted = (st->cls->flags & XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE) &&
 			((s->pool.capabilities & XDEV_EXT_BINDING_CAP_ZERO_COPY) ||
-    (st->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
+    (st->cls->decl->fifo_from_device &&
      st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE)) &&
 			!READ_ONCE(b->sequester);
 		return 0;
@@ -2328,8 +2325,7 @@ static void xdev_ext_mech_batch_run(struct xdev_ext_mech_session *s,
   * groups. A preceding transform must restore that group before entering
   * either class; its capacity is never interpreted as valid payload.
   */
- if ((st->class_id == XDEV_EXT_MECH_CLASS_NVME ||
-      st->class_id == XDEV_EXT_MECH_CLASS_AFXDP) &&
+ if (st->cls->decl->fixed_group &&
      b->bytes != s->layout.group_bytes) {
   if (b->parent)
    xdev_ext_mech_fanout_landed(s, b, -EOPNOTSUPP, false);
@@ -2506,7 +2502,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 			xdev_ext_mech_count(s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
 			ret = XDEV_EXT_MECH_ABORT;
 		} else {
-			ret = xdev_ext_mech_ret_resolve(st->class_id,
+			ret = xdev_ext_mech_ret_resolve_desc(st->cls->decl,
 						   XDEV_EXT_MECH_MEMBER_COMPLETE,
 						   XDEV_EXT_MECH_SITE_WORKER, ret,
 						   &illegal);
@@ -2516,7 +2512,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
 	}
 
  if (b->parent) {
-  int step = xdev_ext_mech_complete_step(st->class_id, ret, b->status,
+  int step = xdev_ext_mech_complete_step_desc(st->cls->decl, ret, b->status,
      b->sequester, zombie, b->bs.retries, &err);
 
   xdev_ext_mech_fanout_landed(s, b,
@@ -2524,7 +2520,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
     step == XDEV_EXT_MECH_STEP_SEQUESTER);
   return;
  }
-	switch (xdev_ext_mech_complete_step(st->class_id, ret, b->status,
+	switch (xdev_ext_mech_complete_step_desc(st->cls->decl, ret, b->status,
 				       b->sequester, zombie, b->bs.retries,
 				       &err)) {
 	case XDEV_EXT_MECH_STEP_NEXT:
@@ -2600,9 +2596,9 @@ static int xdev_ext_mech_start_publication(struct xdev_ext_mech_session *s,
   u32 claimed = 0, published = 0;
   int err;
 
-  if (xdev_ext_mech_stage_role(&s->plan[0]) == XDEV_EXT_MECH_ROLE_PRODUCER)
+  if (xdev_ext_mech_session_stage_role(s, 0) == XDEV_EXT_MECH_ROLE_PRODUCER)
    return 0;
-  refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0);
+  refs = xdev_ext_mech_session_chain_refs(s, 0);
   for (i = 0; i < b->nr_frames; i++) {
    err = xdev_ext_mech_life_claim(&s->life[b->f[i].index],
                          XDEV_EXT_MECH_L_OWNER_START, &claims[i]);
@@ -2626,9 +2622,9 @@ ordered_undo:
    WARN_ON_ONCE(xdev_ext_mech_life_rollback(&s->life[b->f[i].index], claims[i]));
   return err;
  }
- if (!s->start_recycle || xdev_ext_mech_stage_role(&s->plan[0]) == XDEV_EXT_MECH_ROLE_PRODUCER)
+ if (!s->start_recycle || xdev_ext_mech_session_stage_role(s, 0) == XDEV_EXT_MECH_ROLE_PRODUCER)
   return 0;
- refs = xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0);
+ refs = xdev_ext_mech_session_chain_refs(s, 0);
  for (i = 0; i < b->nr_frames; i++) {
   struct xdev_ext_mech_life *life = &s->life[b->f[i].index];
   u64 claim;
@@ -3035,7 +3031,7 @@ int xdev_ext_mech_hold_commit(struct xdev_ext_mech_stage *st,
 		if (!ret) {
 			claimed = true;
 			ret = xdev_ext_mech_life_publish(&s->life[f->index], token,
-       xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 1), hold->span_len);
+       xdev_ext_mech_session_chain_refs(s, 1), hold->span_len);
 		}
 		if (ret) {
 			bool idle = claimed ?
@@ -3288,7 +3284,7 @@ static int xdev_ext_mech_prepare(struct xdev_ext_mech_session *s,
 		return 0;
 	if (err)
 		return err;
-	return xdev_ext_mech_ret_resolve(st->class_id, XDEV_EXT_MECH_MEMBER_PREPARE,
+	return xdev_ext_mech_ret_resolve_desc(st->cls->decl, XDEV_EXT_MECH_MEMBER_PREPARE,
 				    XDEV_EXT_MECH_SITE_CREATE, ret, &illegal);
 }
 
@@ -3297,14 +3293,14 @@ static int xdev_ext_mech_class_bind(struct xdev_ext_mech_stage *st,
 				  const struct xdev_ext_mech_stage_uapi *u, __u32 pool_kind)
 {
 	const struct xdev_ext_comp_hooks *comp =
-		xdev_ext_mech_class_family(st->class_id) == XDEV_EXT_FAMILY_COMPUTE ?
+		st->cls->decl->family == XDEV_EXT_FAMILY_COMPUTE ?
 		st->cls->fam.comp : NULL;
 	int ret;
 
-	xdev_ext_mech_stage_caps_default(u, pool_kind, &st->caps);
+	xdev_ext_mech_stage_caps_default_desc(st->cls->decl, u, pool_kind, &st->caps);
  if (st->create_reporting)
   st->create_valid |= XDEV_EXT_MECH_CREATE_VALID_CAPS;
-	if (comp && !xdev_ext_comp_kind_ok(comp->kinds, xdev_ext_comp_kind_of(u)))
+	if (comp && !xdev_ext_comp_kind_ok(comp->kinds, xdev_ext_comp_kind_of_desc(st->cls->decl, u)))
 		return -EINVAL;
 	ret = st->cls->bind(st, u);
 	if (!ret && comp)
@@ -3400,9 +3396,7 @@ static int xdev_ext_mech_session_bind(struct xdev_ext_mech_session *s,
   s->create_phase = XDEV_EXT_MECH_CREATE_STAGE_FILE;
 		/* USER binds the user stage object, not its file: the file's
 		 * release (process exit) must be able to stop the stage. */
-		if (st->class_id != XDEV_EXT_MECH_CLASS_CPU &&
-		    st->class_id != XDEV_EXT_MECH_CLASS_USER &&
-		    !xdev_ext_mech_class_desc(st->class_id)->no_file) {
+		if (!st->cls->decl->no_file) {
 			st->file = fget(c->st[i].fd);
 			if (!st->file)
 				return -EBADF;
@@ -4120,7 +4114,7 @@ static int xdev_ext_mech_take_user_frames(struct xdev_ext_mech_session *s,
 				ret = xdev_ext_mech_life_claim(&s->life[idx[i]], XDEV_EXT_MECH_L_OWNER_START, &token);
 			if (!ret)
 				ret = xdev_ext_mech_life_publish(&s->life[idx[i]], token,
-       xdev_ext_mech_chain_refs(s->plan, s->nr_stages, 0), len);
+       xdev_ext_mech_session_chain_refs(s, 0), len);
 			if (ret)
 				break;
 		}
@@ -4171,7 +4165,7 @@ static int xdev_ext_mech_start(struct io_ring_ctx *ctx, void __user *uarg)
 		return ret;
 	ordered = req.flags & XDEV_EXT_MECH_START_F_ORDERED_FRAMES;
 	if (ordered) {
-		ret = xdev_ext_mech_start_queue_plan_check(s->plan, s->nr_stages);
+		ret = xdev_ext_mech_session_start_queue_check(s);
 		if (ret)
 			return ret;
 	}

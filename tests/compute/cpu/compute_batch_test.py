@@ -30,6 +30,7 @@ struct xdev_ext_mech_frame {
 };
 struct xdev_ext_mech_hold_intent;
 struct xdev_ext_mech_class_ops {
+ u32 class_id; const struct xdev_ext_mech_class_desc *decl;
 	u32 desc_size, desc_cap, info_size, cqe_size, cqe_cap;
 };
 struct xdev_ext_mech_batch;
@@ -127,14 +128,19 @@ static int xdev_ext_mech_batch_cpu_length(struct xdev_ext_mech_batch *b, u32 pos
 MAIN = r'''
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s (calls=%u lengths=%u proto=%lu)\n", \
 	__LINE__, #x, calls, lengths, s.protocol_errors); return 1; } } while (0)
-static struct xdev_ext_mech_class_ops cls = { .desc_size = 16, .desc_cap = 1 };
+static struct xdev_ext_mech_class_ops cls = {
+ .class_id = XDEV_EXT_MECH_CLASS_CPU,
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CPU],
+ .desc_size = 16, .desc_cap = 1 };
 static struct xdev_ext_mech_session s;
 static struct xdev_ext_mech_batch b;
 static u8 scratch[16];
 
 static void reset(void)
 {
-	memset(&s, 0, sizeof(s));
+	cls.class_id = XDEV_EXT_MECH_CLASS_CPU;
+ cls.decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CPU];
+ memset(&s, 0, sizeof(s));
 	memset(&b, 0, sizeof(b));
 	memset(applied, 0, sizeof(applied));
 	s.pool.frame_size = 4096;
@@ -230,6 +236,8 @@ int main(void)
 	/* Only a CPU stage, only a real batch. */
 	reset();
 	s.st[1].class_id = XDEV_EXT_MECH_CLASS_NVME;
+ cls.class_id = XDEV_EXT_MECH_CLASS_NVME;
+ cls.decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME];
 	CHECK(xdev_ext_mech_batch_compute(&b, 0) == -EINVAL && !calls);
 	reset();
 	b.nr_frames = 0;

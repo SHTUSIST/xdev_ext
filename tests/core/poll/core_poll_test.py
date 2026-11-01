@@ -50,6 +50,7 @@ struct xdev_ext_mech_instance;
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops {
 	u32 class_id;
+ const struct xdev_ext_mech_class_desc *decl;
 	int (*bind)(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_stage_uapi *u);
 	int (*unbind_checked)(struct xdev_ext_mech_stage *st);
 	int (*poll)(struct xdev_ext_mech_stage *st);
@@ -93,10 +94,13 @@ static int polling_class_poll(struct xdev_ext_mech_stage *st) { poll_calls[st->i
 static int record_bind(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_stage_uapi *u)
 { bind_calls[st->index]++; bind_flags[st->index] = u->flags; bind_saw_poll[st->index] = st->poll; return 0; }
 static const struct xdev_ext_mech_class_ops polling_nvme = { .class_id = XDEV_EXT_MECH_CLASS_NVME,
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME],
 	.bind = record_bind, .poll = polling_class_poll };
 static const struct xdev_ext_mech_class_ops polling_afxdp = { .class_id = XDEV_EXT_MECH_CLASS_AFXDP,
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_AFXDP],
 	.bind = record_bind, .poll = polling_class_poll };
 static const struct xdev_ext_mech_class_ops plain_ce = { .class_id = XDEV_EXT_MECH_CLASS_CE,
+ .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],
 	.bind = record_bind };
 static const struct xdev_ext_mech_class_ops *xdev_ext_mech_class_get(u32 id)
 { return id == XDEV_EXT_MECH_CLASS_NVME ? &polling_nvme : id == XDEV_EXT_MECH_CLASS_AFXDP ?

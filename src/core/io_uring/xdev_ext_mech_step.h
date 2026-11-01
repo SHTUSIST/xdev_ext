@@ -40,38 +40,18 @@ static inline bool xdev_ext_mech_stage_zero(const struct xdev_ext_mech_stage_uap
 	       !u->arg0 && !u->arg1;
 }
 
-enum xdev_ext_mech_stage_role {
- XDEV_EXT_MECH_ROLE_PRODUCER = 1,
- XDEV_EXT_MECH_ROLE_CONSUMER = 2,
- XDEV_EXT_MECH_ROLE_INPLACE = 3,
- XDEV_EXT_MECH_ROLE_TRANSFORM = 4,
-};
+static inline int xdev_ext_mech_stage_role_desc(const struct xdev_ext_mech_class_desc *d,
+ const struct xdev_ext_mech_stage_uapi *u)
+{
+ if (!d || !d->family || !d->role ||
+     (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE && u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
+  return -EINVAL;
+ return d->role(u);
+}
 
 static inline int xdev_ext_mech_stage_role(const struct xdev_ext_mech_stage_uapi *u)
 {
- const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(u->class_id);
-
- if (!xdev_ext_mech_class_known(u->class_id) ||
-     (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE && u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE))
-  return -EINVAL;
- switch (d->role_rule) {
- case XDEV_EXT_ROLE_RULE_TRANSFORM:
-  return XDEV_EXT_MECH_ROLE_TRANSFORM;
- /* A user thread works in place on the batch's frames, like a fixed CPU
-  * transform: exclusive OUT_PENDING claim, republished READY afterwards. */
- case XDEV_EXT_ROLE_RULE_INPLACE_TX:
-  return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE ? XDEV_EXT_MECH_ROLE_INPLACE : -EINVAL;
- case XDEV_EXT_ROLE_RULE_CPU_XFORM:
-  if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
-   return -EINVAL;
-  /* A BPF compute program changes the frame in place, like a fixed one. */
-  if (xdev_ext_mech_cpu_xform_fixed(u->arg0) || xdev_ext_mech_cpu_xform_bpf(u->arg0))
-   return XDEV_EXT_MECH_ROLE_INPLACE;
-  return xdev_ext_mech_cpu_xform_variable(u->arg0) ? XDEV_EXT_MECH_ROLE_TRANSFORM : -EINVAL;
- default:
-  return u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ?
-   XDEV_EXT_MECH_ROLE_PRODUCER : XDEV_EXT_MECH_ROLE_CONSUMER;
- }
+ return xdev_ext_mech_stage_role_desc(xdev_ext_mech_class_desc(u->class_id), u);
 }
 
 /* This header is also compiled by host tests without <assert.h>. */
@@ -81,9 +61,35 @@ _Static_assert(XDEV_EXT_MECH_ROLE_PRODUCER == 1 &&
 	       XDEV_EXT_MECH_ROLE_TRANSFORM == 4,
 	       "xdev_ext_comp_kind_of_role() numbers the roles");
 
+static inline int xdev_ext_comp_kind_of_desc(const struct xdev_ext_mech_class_desc *d,
+ const struct xdev_ext_mech_stage_uapi *u)
+{
+ return xdev_ext_comp_kind_of_role_desc(d, xdev_ext_mech_stage_role_desc(d, u));
+}
+
 static inline int xdev_ext_comp_kind_of(const struct xdev_ext_mech_stage_uapi *u)
 {
-	return xdev_ext_comp_kind_of_role(u->class_id, xdev_ext_mech_stage_role(u));
+ return xdev_ext_comp_kind_of_desc(xdev_ext_mech_class_desc(u->class_id), u);
+}
+
+/* One role decision for both explicit-row and compatibility traversals. */
+static inline bool xdev_ext_mech_chain_ref_next(int role, __u32 *refs)
+{
+ if (role < 0 || role == XDEV_EXT_MECH_ROLE_PRODUCER)
+  return false;
+ (*refs)++;
+ return role == XDEV_EXT_MECH_ROLE_CONSUMER;
+}
+
+static inline __u32 xdev_ext_mech_chain_refs_desc(const struct xdev_ext_mech_stage_uapi *st,
+ const struct xdev_ext_mech_class_desc *const *rows, __u32 nr_stages, __u32 from)
+{
+ __u32 refs = 0;
+
+ for (; from < nr_stages; from++)
+  if (!xdev_ext_mech_chain_ref_next(xdev_ext_mech_stage_role_desc(rows[from], &st[from]), &refs))
+   break;
+ return refs;
 }
 
 static inline __u32 xdev_ext_mech_chain_refs(const struct xdev_ext_mech_stage_uapi *st,
@@ -91,15 +97,9 @@ static inline __u32 xdev_ext_mech_chain_refs(const struct xdev_ext_mech_stage_ua
 {
  __u32 refs = 0;
 
- for (; from < nr_stages; from++) {
-  int role = xdev_ext_mech_stage_role(&st[from]);
-
-  if (role < 0 || role == XDEV_EXT_MECH_ROLE_PRODUCER)
+ for (; from < nr_stages; from++)
+  if (!xdev_ext_mech_chain_ref_next(xdev_ext_mech_stage_role(&st[from]), &refs))
    break;
-  refs++;
-  if (role != XDEV_EXT_MECH_ROLE_CONSUMER)
-   break;
- }
  return refs;
 }
 
@@ -139,18 +139,19 @@ static inline int xdev_ext_mech_peer_layout_check(const struct xdev_ext_mech_lay
 }
 
 /* CREATE: what every stage records before its class adds facts. */
-static inline void xdev_ext_mech_stage_caps_default(const struct xdev_ext_mech_stage_uapi *u,
+static inline void xdev_ext_mech_stage_caps_default_desc(
+ const struct xdev_ext_mech_class_desc *d, const struct xdev_ext_mech_stage_uapi *u,
 						  __u32 pool_kind,
 						  struct xdev_ext_mech_stage_caps *c)
 {
-	bool peer = pool_kind == XDEV_EXT_MECH_POOL_PEER &&
-		    (xdev_ext_mech_peer_dirs(u->class_id) & (1U << u->direction));
+	bool peer = d && d->family && pool_kind == XDEV_EXT_MECH_POOL_PEER &&
+		    (d->peer_dirs & (1U << u->direction));
 	__u32 na = XDEV_EXT_CAP_NOT_APPLICABLE;
 
 	*c = (struct xdev_ext_mech_stage_caps){
 		.size = sizeof(*c),
 		.version = XDEV_EXT_MECH_STAGE_CAPS_VERSION,
-		.family = xdev_ext_mech_class_family(u->class_id),
+		.family = d ? d->family : XDEV_EXT_FAMILY_NONE,
 		.export_authority = peer ? XDEV_EXT_CAP_ESTABLISHED : na,
 		.reachability = peer ? XDEV_EXT_CAP_UNKNOWN : na,
 		.requester_mapping = peer ? XDEV_EXT_CAP_UNKNOWN : na,
@@ -162,29 +163,10 @@ static inline void xdev_ext_mech_stage_caps_default(const struct xdev_ext_mech_s
 	};
 }
 
-/* CREATE: a USER stage description (Documentation/userspace-api/xdev_ext-user-stage.rst)
- * of a session with @frame_size frames. */
-static inline int xdev_ext_user_stage_check(const struct xdev_ext_mech_stage_uapi *u,
-					    __u32 frame_size, __s64 *delta, bool *varlen)
+static inline void xdev_ext_mech_stage_caps_default(const struct xdev_ext_mech_stage_uapi *u,
+ __u32 pool_kind, struct xdev_ext_mech_stage_caps *c)
 {
-	__s64 d = (__s64)u->arg1;
-
-	if (u->class_id != XDEV_EXT_MECH_CLASS_USER ||
-	    u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || (u->flags & ~(XDEV_EXT_USER_F_VARLEN | XDEV_EXT_USER_F_STRICT_ASYNC)))
-		return -EINVAL;
-	if ((u->flags & XDEV_EXT_USER_F_STRICT_ASYNC) &&
-	    ((u->flags & XDEV_EXT_USER_F_VARLEN) || d))
-		return -EOPNOTSUPP;
-	if (u->fd < 0)
-		return -EBADF;
-	if (!u->arg0 || u->arg0 > XDEV_EXT_USER_DEADLINE_MAX_MS)
-		return -EINVAL;
-	if ((u->flags & XDEV_EXT_USER_F_VARLEN) ? d != 0 :
-	    (d < -(__s64)frame_size || d > (__s64)frame_size))
-		return -EINVAL;
-	*delta = d;
-	*varlen = u->flags & XDEV_EXT_USER_F_VARLEN;
-	return 0;
+ xdev_ext_mech_stage_caps_default_desc(xdev_ext_mech_class_desc(u->class_id), u, pool_kind, c);
 }
 
 /*
@@ -193,8 +175,8 @@ static inline int xdev_ext_user_stage_check(const struct xdev_ext_mech_stage_uap
  * stage 0 of at least two.  On a PEER pool the generic checks of every stage
  * run first, then the geometry, then each stage's class capability.
  */
-static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *c,
-					__u32 *frames)
+static inline int xdev_ext_mech_create_check_desc(const struct xdev_ext_mech_create *c,
+ const struct xdev_ext_mech_class_desc *const rows[XDEV_EXT_MECH_MAX_STAGES], __u32 *frames)
 {
 	__u32 i;
 	int nr;
@@ -233,86 +215,36 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
 		/* Generic, for every class; its capability is checked at bind. */
 		clean.flags &= ~XDEV_EXT_MECH_STAGE_F_POLL;
   if (u->flags & XDEV_EXT_MECH_STAGE_F_FANOUT) {
-   if (!i || xdev_ext_mech_stage_role(u) != XDEV_EXT_MECH_ROLE_CONSUMER ||
-       xdev_ext_mech_stage_role(&c->st[i - 1]) != XDEV_EXT_MECH_ROLE_CONSUMER)
+   if (!i || xdev_ext_mech_stage_role_desc(rows[i], u) != XDEV_EXT_MECH_ROLE_CONSUMER ||
+       xdev_ext_mech_stage_role_desc(rows[i - 1], &c->st[i - 1]) != XDEV_EXT_MECH_ROLE_CONSUMER)
     return -EINVAL;
    clean.flags &= ~XDEV_EXT_MECH_STAGE_F_FANOUT;
   }
   /* A class whose DMA reaches device memory only. */
-  if (xdev_ext_mech_class_desc(u->class_id)->peer_only && c->pool_kind != XDEV_EXT_MECH_POOL_PEER)
+  if (rows[i] && rows[i]->peer_only && c->pool_kind != XDEV_EXT_MECH_POOL_PEER)
    return -EOPNOTSUPP;
   {
-   const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(u->class_id);
+   const struct xdev_ext_mech_class_desc *d = rows[i];
+   struct xdev_ext_mech_stage_facts facts = {};
+   __u32 j;
+   int err;
 
-   if (!xdev_ext_mech_class_known(u->class_id) ||
+   if (!d || !d->family ||
        (!d->flags_later && ((u->flags & ~d->known_flags) || (d->flags_ok && !d->flags_ok(u->flags)))) ||
-       (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
-        u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
+       (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE && u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
     return -EINVAL;
-  }
-  if (u->class_id == XDEV_EXT_MECH_CLASS_CPU) {
-   __s64 delta;
-   __u32 j;
-
-   if (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE || u->fd != -1 || u->flags ||
-       u->arg0 >= XDEV_EXT_CPU_XFORM_MAX)
+   if (!d->check_stage)
     return -EINVAL;
-   if (xdev_ext_mech_cpu_xform_variable(u->arg0)) {
-    if (!u->arg1 || u->arg1 > (__u64)XDEV_EXT_MECH_MAX_FRAMES * c->layout.seg_len)
-     return -EINVAL;
-   } else {
-    if (xdev_ext_mech_cpu_len_delta(u->arg0, u->arg1, &delta))
-     return -EINVAL;
-    for (j = i + 1; delta && j < c->nr_stages; j++) {
-     if (xdev_ext_mech_stage_role(&c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
-      break;
-     if (c->st[j].class_id == XDEV_EXT_MECH_CLASS_NVME ||
-         c->st[j].class_id == XDEV_EXT_MECH_CLASS_AFXDP)
-      return -EOPNOTSUPP;
-    }
-   }
-   continue;
-  }
-  /* USER: its own fd, flag, deadline and length rule; a length change may
-   * not reach a fixed-group NVMe or AF_XDP stage, as for the CPU class. */
-  if (u->class_id == XDEV_EXT_MECH_CLASS_USER) {
-   __s64 delta;
-   bool varlen;
-   __u32 j;
-   int err = xdev_ext_user_stage_check(u, c->layout.frame_size, &delta, &varlen);
-
+   err = d->check_stage(c, i, u, &facts);
    if (err)
     return err;
-   if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER &&
-       !(u->flags & XDEV_EXT_USER_F_STRICT_ASYNC))
-    return -EOPNOTSUPP;
-   for (j = i + 1; (delta || varlen) && j < c->nr_stages; j++) {
-    if (xdev_ext_mech_stage_role(&c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
+   for (j = i + 1; facts.restrict_fixed_followers && j < c->nr_stages; j++) {
+    if (xdev_ext_mech_stage_role_desc(rows[j], &c->st[j]) == XDEV_EXT_MECH_ROLE_TRANSFORM)
      break;
-    if (c->st[j].class_id == XDEV_EXT_MECH_CLASS_NVME ||
-        c->st[j].class_id == XDEV_EXT_MECH_CLASS_AFXDP)
+    if (rows[j] && rows[j]->fixed_group)
      return -EOPNOTSUPP;
    }
-   continue;
   }
-  if (u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
-      (u->flags & XDEV_EXT_SOCKET_F_NXP) &&
-      (!u->arg0 || u->arg1 <= 68 || u->arg1 > 0xffffffffULL))
-   return -EINVAL;
-		if (u->fd < 0)
-			return -EBADF;
-		if (u->class_id == XDEV_EXT_MECH_CLASS_SOCKET &&
-		    u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
-		    (i || c->nr_stages < 2))
-			return -EINVAL;
-		if (u->class_id != XDEV_EXT_MECH_CLASS_AFXDP ||
-      c->pool_kind == XDEV_EXT_MECH_POOL_PEER)
-			continue;
-		if (c->pool_kind != XDEV_EXT_MECH_POOL_XSK)
-			return -EINVAL;
-		if (u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
-		    (i || c->nr_stages < 2))
-			return -EINVAL;
 	}
  if (c->pool_kind == XDEV_EXT_MECH_POOL_PEER) {
   int ret = xdev_ext_mech_peer_layout_check(&c->layout);
@@ -320,11 +252,21 @@ static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *
   if (ret)
    return ret;
   for (i = 0; i < c->nr_stages; i++)
-   if (!(xdev_ext_mech_peer_dirs(c->st[i].class_id) & (1U << c->st[i].direction)))
+   if (!rows[i] || !(rows[i]->peer_dirs & (1U << c->st[i].direction)))
     return -EOPNOTSUPP;
  }
 	*frames = (__u32)nr;
 	return 0;
+}
+
+static inline int xdev_ext_mech_create_check(const struct xdev_ext_mech_create *c, __u32 *frames)
+{
+ const struct xdev_ext_mech_class_desc *rows[XDEV_EXT_MECH_MAX_STAGES];
+ __u32 i;
+
+ for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+  rows[i] = xdev_ext_mech_class_desc(c->st[i].class_id);
+ return xdev_ext_mech_create_check_desc(c, rows, frames);
 }
 
 /*
@@ -459,7 +401,7 @@ static inline int xdev_ext_mech_build_step(__s32 ret, bool has_default, int *err
  * within xdev_ext_mech_retry_ok().  *@err is the errno an ABORT or SEQUESTER
  * records.
  */
-static inline int xdev_ext_mech_complete_step(__u32 class_id, __s32 ret,
+static inline int xdev_ext_mech_complete_step_desc(const struct xdev_ext_mech_class_desc *d, __s32 ret,
 					 __s32 status, bool sequestered,
 					 bool zombie, __u32 retries, int *err)
 {
@@ -485,7 +427,7 @@ static inline int xdev_ext_mech_complete_step(__u32 class_id, __s32 ret,
 	case XDEV_EXT_MECH_RETRY:
 	case XDEV_EXT_MECH_ABORT:
 		if (ret == XDEV_EXT_MECH_RETRY &&
-		    xdev_ext_mech_retry_ok(class_id, retries, status))
+		    xdev_ext_mech_retry_ok_desc(d, retries, status))
 			return XDEV_EXT_MECH_STEP_RETRY;
 		*err = serr ? serr : -ECANCELED;
 		return XDEV_EXT_MECH_STEP_ABORT;
@@ -493,6 +435,13 @@ static inline int xdev_ext_mech_complete_step(__u32 class_id, __s32 ret,
 		*err = -EPROTO;
 		return XDEV_EXT_MECH_STEP_ABORT;
 	}
+}
+
+static inline int xdev_ext_mech_complete_step(__u32 class_id, __s32 ret,
+ __s32 status, bool sequestered, bool zombie, __u32 retries, int *err)
+{
+ return xdev_ext_mech_complete_step_desc(xdev_ext_mech_class_desc(class_id), ret,
+  status, sequestered, zombie, retries, err);
 }
 
 /*

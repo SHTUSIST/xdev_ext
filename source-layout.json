@@ -888,6 +888,11 @@
       "native_path": "include/linux/xdev_ext_binding.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_binding_ctx.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_binding_ctx.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_family_core.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_family_core.h"
@@ -3770,6 +3775,21 @@
       "native_path": "tools/testing/selftests/xdev_ext_binding/xdev_ext_binding_test.c"
     },
     {
+      "source": "tests/core/class_declarations/adapter.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/class_declarations/adapter.h"
+    },
+    {
+      "source": "tests/core/class_declarations/run.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/class_declarations/run.sh"
+    },
+    {
+      "source": "tests/core/class_declarations/test_class_declarations.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/class_declarations/test_class_declarations.c"
+    },
+    {
       "source": "tests/core/family/admit_core_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/family/admit_core_test.c"
@@ -4877,11 +4897,6 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign.h"
     },
     {
-      "source": "tests/core/provider/dma_wave.h",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
-    },
-    {
       "source": "tests/core/provider/dma_campaign_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign_test.c"
@@ -4905,6 +4920,11 @@
       "source": "tests/core/provider/dma_provider_runtime.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_provider_runtime.c"
+    },
+    {
+      "source": "tests/core/provider/dma_wave.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
     },
     {
       "source": "tests/core/provider/faults/provider_fault_fixture.c",

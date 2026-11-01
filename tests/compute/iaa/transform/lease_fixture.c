@@ -48,7 +48,7 @@ struct xdev_ext_mech_pool_ops {
 struct xdev_ext_mech_pool {u32 kind,nr_frames,frame_size,capabilities;u8 state[N];const struct xdev_ext_mech_pool_ops *ops;};
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_batch;
-struct xdev_ext_mech_class_ops {u32 flags;int (*submit)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *);};
+struct xdev_ext_mech_class_ops {u32 class_id,flags;const struct xdev_ext_mech_class_desc *decl;int (*submit)(struct xdev_ext_mech_stage *,struct xdev_ext_mech_batch *);};
 struct xdev_ext_mech_session;
 struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;u32 index,direction,class_id;const struct xdev_ext_mech_class_ops *cls;};
 struct xdev_ext_mech_session {
@@ -94,6 +94,9 @@ static inline bool trace_native_event_enabled(void) { return false; }
 static inline void xdev_ext_mech_trace_frame(struct xdev_ext_mech_batch *b,
  const char *phase, u32 pos, u64 ticket, int status)
 { (void)b; (void)phase; (void)pos; (void)ticket; (void)status; }
+/* xdev_ext_mech_session_stage_role */
+/* xdev_ext_mech_session_rows */
+/* xdev_ext_mech_session_chain_refs */
 /* xdev_ext_mech_frames_move */
 /* xdev_ext_mech_frames_release */
 static bool xdev_ext_mech_transform_alias(struct xdev_ext_mech_pool *,const struct xdev_ext_mech_frame *,const struct xdev_ext_mech_frame *);
@@ -120,12 +123,17 @@ static int refusing_submit(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_b
  return -EAGAIN;
 }
 static const struct xdev_ext_mech_pool_ops poolops={.resolve=resolve,.recycle=recycle,.sync_for_cpu=sync_cpu};
-static const struct xdev_ext_mech_class_ops transformops={.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM};
+static const struct xdev_ext_mech_class_ops transformops={.class_id=XDEV_EXT_MECH_CLASS_IAA,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_IAA],.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM};
+static const struct xdev_ext_mech_class_ops ceops={.class_id=XDEV_EXT_MECH_CLASS_CE,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE]};
 static void setup(struct xdev_ext_mech_session *s) {
  memset(s,0,sizeof(*s));memset(released,0,sizeof(released));memset(synced,0,sizeof(synced));queues=0;resolve_fail_index=N;fail_source_return_index=N;
  s->pool=(struct xdev_ext_mech_pool){.kind=XDEV_EXT_MECH_POOL_IOU_UMEM,.nr_frames=N,.frame_size=FS,.ops=&poolops};
  for(u32 i=0;i<N;i++){page_map[i]=i;pages[i].id=i;}
- for(u32 i=0;i<2;i++)s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=&transformops};
+ for(u32 i=0;i<2;i++)s->st[i]=(struct xdev_ext_mech_stage){.s=s,.index=i,
+  .class_id=i?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_IAA,
+  .direction=i?XDEV_EXT_MECH_DIR_TO_DEVICE:XDEV_EXT_MECH_DIR_FROM_DEVICE,.cls=i?&ceops:&transformops};
  s->admits=true;xdev_ext_mech_sess_init(&s->ss);s->nr_stages=2;
  s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_IAA,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};
  s->plan[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_CE,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
@@ -188,7 +196,8 @@ int main(int argc,char **argv) {
   b.life_token[1]=token;b.life_active|=2;
  }
  if(!strcmp(mode,"preaccept") || !strcmp(mode,"sync_refuse")) {
-  static const struct xdev_ext_mech_class_ops refusalops={.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM,.submit=refusing_submit};
+  static const struct xdev_ext_mech_class_ops refusalops={.class_id=XDEV_EXT_MECH_CLASS_IAA,
+   .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_IAA],.flags=XDEV_EXT_MECH_CLASS_F_TRANSFORM,.submit=refusing_submit};
   s.st[0].cls=&refusalops;synchronous_refusal=!strcmp(mode,"sync_refuse");
   assert(!xdev_ext_mech_completion_cancel(&b.completion,b.ticket));
   s.pool.state[0]=XDEV_EXT_MECH_F_HELD;b.bs.state=XDEV_EXT_MECH_B_READY;
