@@ -4933,6 +4933,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/faults/run.py"
     },
     {
+      "source": "tests/core/provider/guest-short-ambiguous-observe.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/guest-short-ambiguous-observe.sh"
+    },
+    {
       "source": "tests/core/provider/mmap_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/mmap_test.py"

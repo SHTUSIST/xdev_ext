@@ -215,6 +215,36 @@ int main(int argc,char **argv)
  }
  if(quarantine || reject) {
   int actual_stop_ret;
+  /* Observation only: keep the original fault oracle and timeout below. */
+  {
+   struct dma_fixture_observation diagnostic={0};
+   struct bpf_map *observation_map=bpf_object__find_map_by_name(object,"observations");
+   int saved_errno=errno,observation_ret=-1;
+   if(observation_map)
+    observation_ret=bpf_map_lookup_elem(bpf_map__fd(observation_map),&zero,&diagnostic);
+   fprintf(stderr,"DMA_COMPOSITION mode=%s session=%llu state=%u last_err=%d "
+    "done=%llu abort=%llu sequestered=%llu inflight=%llu "
+    "accepted=%llu device_completed=%llu pending=%llu from=%llu to=%llu bytes=%llu "
+    "region_binds=%llu host_binds=%llu region_unbinds=%llu host_unbinds=%llu "
+    "dma_refs=%d ce_refs=%d observation_ret=%d "
+    "dma_build=%llu dma_complete=%llu ce_build=%llu ce_complete=%llu wrong_base=%llu\n",
+    mode,(unsigned long long)c.session_id,stats.state,stats.last_err,
+    (unsigned long long)stats.batches_done,(unsigned long long)stats.batches_abort,
+    (unsigned long long)stats.sequestered,(unsigned long long)stats.inflight,
+    (unsigned long long)device.accepted,(unsigned long long)device.completed,
+    (unsigned long long)device.pending,(unsigned long long)device.from_device,
+    (unsigned long long)device.to_device,(unsigned long long)device.bytes,
+    (unsigned long long)device.region_binds,(unsigned long long)device.host_binds,
+    (unsigned long long)device.region_unbinds,(unsigned long long)device.host_unbinds,
+    module_refs(),named_module_refs("xdev_ext_ce_sim"),observation_ret,
+    (unsigned long long)diagnostic.dma_build,(unsigned long long)diagnostic.dma_complete,
+    (unsigned long long)diagnostic.ce_build,(unsigned long long)diagnostic.ce_complete,
+    (unsigned long long)diagnostic.wrong_base);
+   for(unsigned k=0;k<4;k++)
+    fprintf(stderr,"DMA_COMPOSITION_STAGE mode=%s stage=%u submitted=%llu completed=%llu\n",
+     mode,k,(unsigned long long)stats.submitted[k],(unsigned long long)stats.completed[k]);
+   errno=saved_errno;
+  }
   REQUIRE(!stats.batches_done && stats.last_err && (stats.batches_abort || stats.sequestered));
   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
   REQUIRE(!device.pending && !device.to_device && !device.region_unbinds && !device.host_unbinds);
