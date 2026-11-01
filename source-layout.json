@@ -1853,6 +1853,11 @@
       "native_path": "include/linux/xdev_ext_storfam.h"
     },
     {
+      "source": "src/storage/include/linux/xdev_ext_storfam_block.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_storfam_block.h"
+    },
+    {
       "source": "src/storage/include/linux/xdev_ext_storfam_core.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_storfam_core.h"
@@ -1871,6 +1876,11 @@
       "source": "src/storage/io_uring/family/xdev_ext_storfam.c",
       "component": "linux",
       "native_path": "io_uring/family/xdev_ext_storfam.c"
+    },
+    {
+      "source": "src/storage/io_uring/family/xdev_ext_storfam_block.c",
+      "component": "linux",
+      "native_path": "io_uring/family/xdev_ext_storfam_block.c"
     },
     {
       "source": "tests/benchmarks/Makefile",
@@ -8119,6 +8129,22 @@
       "source": "tests/network/xsk/xsk_xdev_ext_source_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_source_test.py"
+    },
+    {
+      "source": "tests/storage/family_block_runtime/kernel_boundary.h",
+      "logical_path": "tests/storage/family_block_runtime/kernel_boundary.h"
+    },
+    {
+      "source": "tests/storage/family_block_runtime/run.py",
+      "logical_path": "tests/storage/family_block_runtime/run.py"
+    },
+    {
+      "source": "tests/storage/family_block_runtime/test_runtime.c",
+      "logical_path": "tests/storage/family_block_runtime/test_runtime.c"
+    },
+    {
+      "source": "tests/storage/family_block_runtime/test_seg.c",
+      "logical_path": "tests/storage/family_block_runtime/test_seg.c"
     },
     {
       "source": "tests/storage/family_window_schema/generate_vectors.py",

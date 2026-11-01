@@ -514,78 +514,25 @@ nvme_xdev_ext_mech_bind_check(const struct nvme_xdev_ext_identity *id, int write
 					  group_bytes, &window);
 }
 
-/* Queue limits a batch payload must meet to reach the device as it is. */
-struct nvme_xdev_ext_queue_caps {
-	__u64 virt_boundary_mask;
-	__u32 page_size;
-	__u32 dma_align_mask;	/* dma_alignment | dma_pad_mask */
-	__u32 max_segments;
-	__u32 max_segment_size;
-	__u32 max_bytes;	/* max_hw_sectors in bytes */
-	__u32 lba_size;		/* a power of two */
-};
-
-/*
- * Walk of a batch payload, one page-local piece at a time in DMA order,
- * before a bio is built from it: the DMA alignment that blk_rq_append_bio()
- * does not check, and the virtual-boundary gaps and segment limit for which
- * it would have to split (it returns -EREMOTEIO instead).  A piece that
- * starts where the previous one ended in the same page merges with it, as
- * bio_add_page() does.
- */
-struct nvme_xdev_ext_seg_walk {
-	struct nvme_xdev_ext_queue_caps caps;
-	__u32 segs;
-	__u32 seg_len;		/* bytes of the current segment */
-	__u32 bytes;
-	__u32 end;		/* page offset where the last piece ended */
-};
+/* Compatibility names; the storage family owns the segment rules. */
+#define nvme_xdev_ext_queue_caps xdev_ext_stor_queue_caps
+#define nvme_xdev_ext_seg_walk xdev_ext_stor_seg_walk
 
 static inline void nvme_xdev_ext_seg_walk_init(struct nvme_xdev_ext_seg_walk *walk,
 					  const struct nvme_xdev_ext_queue_caps *caps)
 {
-	*walk = (struct nvme_xdev_ext_seg_walk) { .caps = *caps };
+	xdev_ext_stor_seg_walk_init(walk, caps);
 }
 
-/* -EREMOTEIO: the device cannot take the payload as it is. */
 static inline int nvme_xdev_ext_seg_add(struct nvme_xdev_ext_seg_walk *walk,
 				   __u32 page_off, __u32 len, int same_page)
 {
-	const struct nvme_xdev_ext_queue_caps *caps = &walk->caps;
-
-	if (!len || page_off >= caps->page_size ||
-	    len > caps->page_size - page_off)
-		return -EINVAL;
-	if ((page_off | len) & caps->dma_align_mask)
-		return -EREMOTEIO;
-	if (len > caps->max_bytes - walk->bytes)
-		return -EMSGSIZE;
-	if (walk->segs && same_page && page_off == walk->end) {
-		if (len > caps->max_segment_size - walk->seg_len)
-			return -EREMOTEIO;
-		walk->seg_len += len;
-	} else {
-		if (walk->segs && ((page_off | walk->end) &
-				   caps->virt_boundary_mask))
-			return -EREMOTEIO;
-		if (walk->segs >= caps->max_segments ||
-		    len > caps->max_segment_size)
-			return -EREMOTEIO;
-		walk->segs++;
-		walk->seg_len = len;
-	}
-	walk->bytes += len;
-	walk->end = page_off + len;
-	return 0;
+	return xdev_ext_stor_seg_add(walk, page_off, len, same_page);
 }
 
 static inline int nvme_xdev_ext_seg_done(const struct nvme_xdev_ext_seg_walk *walk)
 {
-	if (!walk->segs)
-		return -EINVAL;
-	if (walk->bytes & (walk->caps.lba_size - 1))
-		return -EMSGSIZE;
-	return 0;
+	return xdev_ext_stor_seg_done(walk);
 }
 
 static inline int

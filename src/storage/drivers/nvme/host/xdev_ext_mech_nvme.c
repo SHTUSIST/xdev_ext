@@ -33,6 +33,7 @@
 #include <linux/xdev_ext_peer.h>
 #include <linux/xdev_ext_requester.h>
 #include <linux/xdev_ext_storfam.h>
+#include <linux/xdev_ext_storfam_block.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <linux/capability.h>
 #include "nvme.h"
@@ -701,67 +702,6 @@ static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st)
 	return ret;
 }
 
-static struct nvme_xdev_ext_queue_caps
-nvme_xdev_ext_class_caps(const struct nvme_xdev_ext_mech_stage *p)
-{
-	struct request_queue *q = p->ns->queue;
-
-	return (struct nvme_xdev_ext_queue_caps) {
-		.virt_boundary_mask = queue_virt_boundary(q),
-		.page_size = PAGE_SIZE,
-		.dma_align_mask = blk_lim_dma_alignment_and_pad(&q->limits),
-		.max_segments = queue_max_segments(q),
-		.max_segment_size = queue_max_segment_size(q),
-		.max_bytes = queue_max_hw_sectors(q) << SECTOR_SHIFT,
-		.lba_size = 1U << p->identity.lba_shift,
-	};
-}
-
-/*
- * Worker: visit the batch payload page by page in frame order, checking
- * each piece against the queue (@bio NULL) or adding it to @bio.  Returns
- * the number of pieces or -errno.
- */
-static int nvme_xdev_ext_class_walk(struct xdev_ext_mech_stage *st,
-			       struct xdev_ext_mech_batch *b,
-			       struct nvme_xdev_ext_seg_walk *walk, struct bio *bio)
-{
-	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
-	u32 pos, nr = xdev_ext_mech_batch_nr_frames(b);
-	struct page *prev = NULL;
-	int pieces = 0, ret;
-
-	for (pos = 0; pos < nr; pos++) {
-		struct xdev_ext_mech_frame f;
-		u32 off, left, page_off, len;
-		struct page *page;
-
-		ret = xdev_ext_mech_batch_frame(b, pos, &f);
-		if (ret)
-			return ret;
-		for (off = f.data_off, left = f.data_len; left;
-		     off += len, left -= len) {
-			page = xdev_ext_mech_frame_page(pool, &f, off, &page_off,
-						   &len);
-			if (!page)
-				return -EFAULT;
-			len = min(len, left);
-			if (bio) {
-				if (bio_add_page(bio, page, len, page_off) != len)
-					return -EREMOTEIO;
-			} else {
-				ret = nvme_xdev_ext_seg_add(walk, page_off, len,
-						       page == prev);
-				if (ret)
-					return ret;
-			}
-			prev = page;
-			pieces++;
-		}
-	}
-	return pieces;
-}
-
 /*
  * Worker: the batch payload as the request's bio, built from the frame
  * pages with bio_add_page() (CHK.8).  Fails closed with -EREMOTEIO when the
@@ -773,29 +713,22 @@ static int nvme_xdev_ext_class_map(struct xdev_ext_mech_stage *st,
 			      struct xdev_ext_mech_batch *b, struct request *req,
 			      struct nvme_xdev_ext_mech_batch *bp)
 {
-	struct nvme_xdev_ext_queue_caps caps = nvme_xdev_ext_class_caps(st->priv);
-	struct nvme_xdev_ext_seg_walk walk;
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
+	struct xdev_ext_stor_queue_caps caps =
+		xdev_ext_stor_block_caps(p->ns->queue, p->identity.lba_shift);
 	struct bio *bio;
 	int pieces, ret;
 
-	nvme_xdev_ext_seg_walk_init(&walk, &caps);
-	pieces = nvme_xdev_ext_class_walk(st, b, &walk, NULL);
-	ret = pieces < 0 ? pieces : nvme_xdev_ext_seg_done(&walk);
-	if (!ret && walk.bytes != xdev_ext_mech_batch_bytes(b))
-		ret = -EPROTO;
-	if (!ret && pieces > BIO_MAX_INLINE_VECS)
-		ret = -EREMOTEIO;
+	pieces = xdev_ext_stor_block_preflight(pool, b, &caps);
+	ret = pieces < 0 ? pieces : 0;
 	if (!ret) {
-		struct nvme_xdev_ext_mech_stage *p = st->priv;
-
 		if (!bp->slot || pieces > p->nr_vecs)
 			return -EREMOTEIO;
 		bio = bp->slot->bio;
 		bio_init(bio, NULL, bio->bi_inline_vecs, p->nr_vecs, req->cmd_flags);
 		bp->slot->bio_live = true;
-		ret = nvme_xdev_ext_class_walk(st, b, NULL, bio);
-		if (ret >= 0)
-			ret = blk_rq_append_bio(req, bio);
+		ret = xdev_ext_stor_block_append(pool, b, req, bio);
 		if (!ret) {
 			bp->bio = bio;
 			return 0;

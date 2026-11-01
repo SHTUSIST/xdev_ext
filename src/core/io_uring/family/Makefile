@@ -5,3 +5,8 @@ obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_netfam.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_netfam_rel.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_requester_retention.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_storfam.o
+
+# The mechanism also builds without the optional block subsystem.
+ifeq ($(CONFIG_BLOCK),y)
+obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_storfam_block.o
+endif
