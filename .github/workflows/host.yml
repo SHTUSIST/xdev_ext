@@ -65,6 +65,11 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_source_drain_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
           python3 kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
+      - name: Network family exact-cover consumption
+        working-directory: .
+        run: |
+          python3 tests/network/plan_cover/run.py --source-root "$GITHUB_WORKSPACE" --phase shared --output "$RUNNER_TEMP/network-plan-cover"
+          python3 tests/network/plan_cover/mutations.py --source-root "$GITHUB_WORKSPACE" --phase shared --output "$RUNNER_TEMP/network-plan-mutants"
       - name: Shared receive ownership and composed library contracts
         working-directory: .
         run: |
