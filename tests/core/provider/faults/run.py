@@ -55,6 +55,12 @@ def structure(text, name):
     return match[0]
 
 
+def dma_scope_dependencies(text):
+    """Only the selected production snapshot decides its scope dependencies."""
+    return (("include/linux/xdev_ext_dma_scope_core.h",)
+            if re.search(r"^struct xdev_ext_dma_scope \{", text, re.M) else ())
+
+
 def session_helpers(text, bodies, extractor):
     """Follow actual session-helper calls; a called missing definition is fatal."""
     helpers = ('xdev_ext_mech_session_stage_role', 'xdev_ext_mech_session_rows',
@@ -121,9 +127,24 @@ def generate(mutation=None):
     if "static void xdev_ext_mech_start_queue_free(" in core:
         structs.append(structure(source("io_uring/xdev_ext_mech_start_queue.h"), "xdev_ext_mech_start_queue"))
     structs += [structure(core, n) for n in ("xdev_ext_mech_batch", "xdev_ext_mech_session")]
+    scope_dependencies = dma_scope_dependencies(dma)
+    if scope_dependencies:
+        # Public declarations and the pure comparator are production inputs,
+        # not substitutes for the scope implementation extracted below.
+        structs += [structure(abi, n) for n in
+                    ("xdev_ext_dma_scope_info", "xdev_ext_dma_scope_ops")]
+        version = re.search(r"^#define XDEV_EXT_DMA_SCOPE_OPS_VERSION\s+.*", abi, re.M)
+        if version is None:
+            raise RuntimeError("missing production scope ops version")
+        structs.insert(0, version[0])
+        template = template.replace('#include "io_uring/xdev_ext_mech_dma_core.h"',
+            '#include "include/linux/xdev_ext_dma_scope_core.h"\n#include "io_uring/xdev_ext_mech_dma_core.h"')
     # Preserve the adapter's own structs, registry storage, every function and
-    # class table, stopping before its kernel initcall only.
-    adapter = dma[dma.index("struct xdev_ext_dma_provider {"):dma.index("/* After every late_initcall")]
+    # class table, including scope create/get/put when present, stopping before
+    # its kernel initcall only. Historical refs start at the old registry.
+    adapter_start = ("struct xdev_ext_dma_scope {" if scope_dependencies
+                     else "struct xdev_ext_dma_provider {")
+    adapter = dma[dma.index(adapter_start):dma.index("/* After every late_initcall")]
     before = ["xdev_ext_mech_notify_locked", "xdev_ext_mech_pool_frame_move",
               "xdev_ext_mech_pool_frame_state", "xdev_ext_mech_count", "xdev_ext_mech_frames_move",
               "xdev_ext_mech_session_pool", "xdev_ext_mech_session_layout",
@@ -220,6 +241,10 @@ class ProviderFaults(unittest.TestCase):
                         "io_uring/xdev_ext_mech_dma_core.h", "io_uring/xdev_ext_mech_ce_core.h",
                         "io_uring/xdev_ext_mech_window_copy_core.h",
                         "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h", "io_uring/xdev_ext_mech_ce_lease.h"):
+                p = cls.path / rel
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(source(rel))
+            for rel in dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c")):
                 p = cls.path / rel
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text(source(rel))
@@ -416,6 +441,7 @@ if __name__ == "__main__":
               "io_uring/xdev_ext_mech_ce.c", "io_uring/xdev_ext_mech_ce_core.h",
               "io_uring/xdev_ext_mech_window_copy_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")
+    inputs += dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c"))
     print(json.dumps({"source_root": str(ROOT), "ref": ref,
                       "working_tree": REF is None,
                       "source_sha256": {p: hashlib.sha256(source(p).encode()).hexdigest() for p in inputs}}), flush=True)

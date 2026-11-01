@@ -918,6 +918,11 @@
       "native_path": "include/linux/xdev_ext_binding_ctx.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_dma_scope_core.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_dma_scope_core.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_family_core.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_family_core.h"
@@ -5076,6 +5081,118 @@
     {
       "source": "tests/core/provider_dma/host/vmlinux.h",
       "logical_path": "tests/core/provider_dma/host/vmlinux.h"
+    },
+    {
+      "source": "tests/core/provider_scope/README.md",
+      "logical_path": "tests/core/provider_scope/README.md"
+    },
+    {
+      "source": "tests/core/provider_scope/abi.c",
+      "logical_path": "tests/core/provider_scope/abi.c"
+    },
+    {
+      "source": "tests/core/provider_scope/comparisons.c",
+      "logical_path": "tests/core/provider_scope/comparisons.c"
+    },
+    {
+      "source": "tests/core/provider_scope/contract.h",
+      "logical_path": "tests/core/provider_scope/contract.h"
+    },
+    {
+      "source": "tests/core/provider_scope/kernel_boundary.h",
+      "logical_path": "tests/core/provider_scope/kernel_boundary.h"
+    },
+    {
+      "source": "tests/core/provider_scope/legacy_adapter.h",
+      "logical_path": "tests/core/provider_scope/legacy_adapter.h"
+    },
+    {
+      "source": "tests/core/provider_scope/lifecycle.c",
+      "logical_path": "tests/core/provider_scope/lifecycle.c"
+    },
+    {
+      "source": "tests/core/provider_scope/run.py",
+      "logical_path": "tests/core/provider_scope/run.py"
+    },
+    {
+      "source": "tests/core/provider_scope/run_abi.py",
+      "logical_path": "tests/core/provider_scope/run_abi.py"
+    },
+    {
+      "source": "tests/core/provider_scope/run_lifecycle.py",
+      "logical_path": "tests/core/provider_scope/run_lifecycle.py"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/atomic.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/atomic.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/bug.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/bug.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/compiler.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/compiler.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/err.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/err.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/export.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/export.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/fs.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/fs.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/init.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/init.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/limits.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/limits.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/list.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/list.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/module.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/module.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/mutex.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/mutex.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/overflow.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/overflow.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/printk.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/printk.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/refcount.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/refcount.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/slab.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/slab.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/string.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/string.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/xdev_ext_compfam.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/xdev_ext_compfam.h"
+    },
+    {
+      "source": "tests/core/provider_scope/shim/linux/xdev_ext_mech.h",
+      "logical_path": "tests/core/provider_scope/shim/linux/xdev_ext_mech.h"
     },
     {
       "source": "tests/core/scheduler/README.md",

@@ -768,8 +768,44 @@ void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
 		     bool hw_submitted, u64 bytes_done);
 
 /* Generic provider: registered dynamically by fops, with owner pinned by C. */
+#include <linux/xdev_ext_dma_scope_core.h>
+
 struct xdev_ext_dma_cookie;
 struct xdev_ext_dma_provider_ops;
+
+/* Process context: create one identity and its creator ref, without self-pinning
+ * owner. release is mandatory; ERR_PTR(-EINVAL/-ENOMEM) on failure. */
+struct xdev_ext_dma_scope *xdev_ext_dma_scope_create(struct module *owner,
+ void *private_data, void (*release)(void *private_data));
+/* Process context, creator code still alive: consume the unique creator ref. */
+void xdev_ext_dma_scope_owner_put(struct xdev_ext_dma_scope *scope);
+/* Process context, borrowed pointer protected: acquire one external ref and an
+ * independent scope-owner module pin; -EINVAL/-ENODEV/-ESTALE on failure. */
+int xdev_ext_dma_scope_get(struct xdev_ext_dma_scope *scope);
+/* Process context: consume a successful get; final release precedes module_put
+ * and runs outside provider/lease locks. Not a fallible native unmap hook. */
+void xdev_ext_dma_scope_put(struct xdev_ext_dma_scope *scope);
+
+struct xdev_ext_dma_scope_info {
+ u32 kind, reserved;
+ struct xdev_ext_dma_scope *scope;
+ u64 canonical_start, canonical_len;
+};
+
+#define XDEV_EXT_DMA_SCOPE_OPS_VERSION 1U
+struct xdev_ext_dma_scope_ops {
+ u32 size, version, flags, reserved;
+ /* CREATE, process context, no registry/lease lock: acquire logical identity
+  * only, before any native mapping or DMA effect. A non-NULL out->scope on
+  * ANY return transfers a successful get-ref to C, including error returns.
+  * Return 0 with KNOWN plus a stable +1 canonical interval of requested_len,
+  * or UNKNOWN with NULL scope and zero coordinates; negative errno on error.
+  * All aliases within this provider namespace must share their true scope.
+  * No file/user tag/region.priv guess may authorize independent sharing. */
+ int (*acquire)(struct file *file, u64 requested_off, u64 requested_len,
+                struct xdev_ext_dma_scope_info *out);
+};
+
 struct xdev_ext_dma_region {
 	const struct xdev_ext_dma_provider_ops *ops;
 	void *priv;
@@ -811,6 +847,10 @@ struct xdev_ext_dma_provider_ops {
 };
 /* Module init, process context: duplicate fops fails with -EBUSY. */
 int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops);
+/* Module init, process context: versioned scope sidecar for the same registry;
+ * exact size/version, zero flags/reserved, acquire required. Legacy ABI stays. */
+int xdev_ext_dma_provider_register_scoped(const struct xdev_ext_dma_provider_ops *ops,
+                                        const struct xdev_ext_dma_scope_ops *scope_ops);
 /* Module exit, process context; bound sessions hold owner references. */
 void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *ops);
 /* Any context: read-only transfer/frame-claim check for a matching SUBMITTED
