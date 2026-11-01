@@ -150,6 +150,7 @@ def analyze(events, stats, native=()):
     if not es or len(es) > MAX_EVENTS:
         raise ValueError("no XDOMAIN execution events or excessive capture")
     stages, attempts, groups = {}, defaultdict(list), defaultdict(list)
+    peer_binds = {}
     counts = Counter(e["phase"] for e in es)
     for e in es:
         scope = (e["session_id"], e["stage"])
@@ -164,6 +165,22 @@ def analyze(events, stats, native=()):
             raise ValueError("stage mode/direction changed")
         if any(e[k] != bound[k] for k in ("local_inc", "remote_inc", "pool_generation")):
             raise ValueError("stage incarnation or pool generation changed")
+        if e["early"]:
+            # Only the local bind exists at admission; the peer may pair later.
+            local_bind = "tx_bind" if e["direction"] == 1 else "rx_bind"
+            if not bound[local_bind] or e[local_bind] != bound[local_bind]:
+                raise ValueError("stage local bind missing or changed")
+            peer_bind = e["rx_bind" if e["direction"] == 1 else "tx_bind"]
+            if peer_bind:
+                if peer_binds.setdefault(scope, (peer_bind, e["ts_ns"]))[0] != peer_bind:
+                    raise ValueError("stage peer bind changed")
+            else:
+                if scope in peer_binds and e["ts_ns"] > peer_binds[scope][1]:
+                    raise ValueError("stage peer bind returned to zero")
+                if e["group"] and e["phase"] not in ("tx_attempt", "native_rejected"):
+                    raise ValueError("successful group has no peer bind")
+        elif e["tx_bind"] or e["rx_bind"]:
+            raise ValueError("ordinary stage has nonzero bind")
         if e["phase"] == "tx_attempt":
             attempts[scope + (e["pool_generation"], e["key"])].append(e)
         elif e["phase"] != "stage_bound":
@@ -215,6 +232,9 @@ def analyze(events, stats, native=()):
                 first, receipt = tried[0], received[0]
                 _before(receipt, grant, "grant accepted before CTS receipt")
                 _before(grant, accepted, "native accepted before grant")
+                _before(first, accepted, "native accepted before first TX attempt")
+                _before(first, done, "native complete before first TX attempt")
+                _before(grant, done, "native complete before grant")
                 if base["early"]:
                     lead = first["ts_ns"] - grant["ts_ns"]
                     leads.append(lead)
@@ -228,6 +248,7 @@ def analyze(events, stats, native=()):
             if not all((reserved, accepted, done, first_cts, release, ack)):
                 complete = False
             _before(reserved, accepted, "native accepted before RX reservation")
+            _before(reserved, done, "native complete before RX reservation")
             _before(accepted, first_cts, "CTS sent before RX native acceptance")
             _before(done, release, "consumer release before native completion")
             _before(release, ack, "ACK before consumer release")

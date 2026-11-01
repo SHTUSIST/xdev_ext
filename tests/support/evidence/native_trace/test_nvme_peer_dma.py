@@ -10,7 +10,6 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
 
 def load(name, path):
     spec = importlib.util.spec_from_file_location(name, path)
@@ -19,6 +18,7 @@ def load(name, path):
     return module
 
 hooks = load('peer_dma_hooks', HERE / 'test_dma_backing_hooks.py')
+ROOT = hooks.ROOT
 
 
 def artifact(name, content):

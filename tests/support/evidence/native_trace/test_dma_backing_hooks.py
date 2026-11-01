@@ -4,12 +4,25 @@
 These are software fixtures, not evidence of physical DMA execution.
 """
 from pathlib import Path
+import json
 import re
+import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
-ROOT = Path(__file__).resolve().parents[4]
+for _parent in Path(__file__).resolve().parents:
+    if (_parent / 'tools/layout.py').is_file():
+        sys.path.insert(0, str(_parent / 'tools'))
+        break
+from layout import canonical_root, safe_file
+
+ROOT = canonical_root(Path(__file__))
+# A copied layout manifest alone does not make a view a canonical source tree.
+# Reject missing receipts and stale/non-source targets before fixture extraction.
+safe_file(ROOT, 'src/core/kernel/dma/mapping.c')
+safe_file(ROOT, 'src/storage/drivers/nvme/host/pci.c')
 
 
 def function(source, name):
@@ -290,6 +303,45 @@ int main(void)
  return 0;
 }
 """
+
+
+class SourceRootEntries(unittest.TestCase):
+    def entry(self, module, receipt=True, source_root=None):
+        temp = tempfile.TemporaryDirectory()
+        self.addCleanup(temp.cleanup)
+        view = Path(temp.name) / 'ordinary-copy-view'
+        here = view / 'tests/eval/native_trace'
+        here.mkdir(parents=True)
+        for name in ('test_dma_backing_hooks.py', 'test_nvme_peer_dma.py'):
+            shutil.copyfile(Path(__file__).parent / name, here / name)
+        (view / 'tools').mkdir()
+        shutil.copyfile(ROOT / 'tools/layout.py', view / 'tools/layout.py')
+        shutil.copyfile(ROOT / 'source-layout.json', view / 'source-layout.json')
+        if receipt:
+            (view / 'view.json').write_text(json.dumps(dict(
+                kind='host-source-view', canonical_root=str(source_root or ROOT))))
+        return subprocess.run([sys.executable, '-I', '-c',
+                               'import runpy; print(runpy.run_path(' + repr(str(here / module)) + ')["ROOT"])'],
+                              capture_output=True, text=True)
+
+    def test_out_of_tree_view_entries_resolve_canonical_sources(self):
+        for module in ('test_dma_backing_hooks.py', 'test_nvme_peer_dma.py'):
+            with self.subTest(module=module):
+                result = self.entry(module)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout.strip(), str(ROOT))
+
+    def test_view_without_receipt_rejects_source_setup(self):
+        for module in ('test_dma_backing_hooks.py', 'test_nvme_peer_dma.py'):
+            with self.subTest(module=module):
+                result = self.entry(module, receipt=False)
+                self.assertNotEqual(result.returncode, 0)
+
+    def test_view_with_wrong_source_root_rejects_source_setup(self):
+        for module in ('test_dma_backing_hooks.py', 'test_nvme_peer_dma.py'):
+            with self.subTest(module=module):
+                result = self.entry(module, source_root=ROOT / 'absent-canonical-root')
+                self.assertNotEqual(result.returncode, 0)
 
 
 class DMABackingHooks(unittest.TestCase):
