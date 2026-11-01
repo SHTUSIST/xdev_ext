@@ -68,10 +68,11 @@ jobs:
       - name: Shared receive ownership and composed library contracts
         working-directory: .
         run: |
+          libbpf_archive="$(pkg-config --variable=libdir libbpf)/libbpf.a"
           for scope in rings rx-map-failure receive-options dispatcher socket-identity ownership; do
-            python3 tests/network/shared_receive/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/shared-receive-$scope" --case "$scope" --scenario all
+            python3 tests/network/shared_receive/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/shared-receive-$scope" --case "$scope" --scenario all --libbpf-include /usr/include --libbpf-archive "$libbpf_archive"
           done
-          python3 tests/network/shared_receive/run_library_integration.py --native-root "$GITHUB_WORKSPACE/build/source-view/kernel" --boundary-root "$GITHUB_WORKSPACE/tests/network/shared_receive" --output "$RUNNER_TEMP/shared-receive-library" --case all
+          python3 tests/network/shared_receive/run_library_integration.py --native-root "$GITHUB_WORKSPACE/build/source-view/kernel" --boundary-root "$GITHUB_WORKSPACE/tests/network/shared_receive" --output "$RUNNER_TEMP/shared-receive-library" --case all --libbpf-include /usr/include --libbpf-archive "$libbpf_archive"
           python3 tests/network/shared_receive_native/build.py --candidate-root "$GITHUB_WORKSPACE" --libbpf-build /usr --libbpf-archive "$(pkg-config --variable=libdir libbpf)/libbpf.a" --output "$RUNNER_TEMP/shared-receive-native-build"
       - name: Thin session library contracts
         run: |
