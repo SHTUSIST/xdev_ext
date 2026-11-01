@@ -3747,6 +3747,14 @@
       "logical_path": "tests/core/binding/helper_whitelist_test.py"
     },
     {
+      "source": "tests/core/binding/native/binding_helpers_loader.c",
+      "logical_path": "tests/core/binding/native/binding_helpers_loader.c"
+    },
+    {
+      "source": "tests/core/binding/native/run-binding-helpers.sh",
+      "logical_path": "tests/core/binding/native/run-binding-helpers.sh"
+    },
+    {
       "source": "tests/core/binding/xdev_ext_binding_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_binding/xdev_ext_binding_test.c"
