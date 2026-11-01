@@ -5013,6 +5013,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_provider_runtime.c"
     },
     {
+      "source": "tests/core/provider/dma_scope_runtime.c",
+      "logical_path": "kernel/tools/testing/selftests/xdev_ext_mech/provider/dma_scope_runtime.c"
+    },
+    {
       "source": "tests/core/provider/dma_wave.h",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
@@ -5036,6 +5040,10 @@
       "source": "tests/core/provider/run-guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/run-guest.sh"
+    },
+    {
+      "source": "tests/core/provider/run-scope-guest.sh",
+      "logical_path": "kernel/tools/testing/selftests/xdev_ext_mech/provider/run-scope-guest.sh"
     },
     {
       "source": "tests/core/provider/sim_work_test.py",
