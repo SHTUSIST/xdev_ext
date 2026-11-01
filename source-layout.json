@@ -624,6 +624,11 @@
       "native_path": "kernel-open/common/inc/nvstatuscodes.h"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-dmabuf.c",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-dmabuf.c"
+    },
+    {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-p2p-gpu-identity.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-p2p-gpu-identity.h"
@@ -672,6 +677,11 @@
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-dma-lifetime.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-dma-lifetime.h"
+    },
+    {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-dmabuf.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-dmabuf.h"
     },
     {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-gpu-policy.h",
@@ -3287,6 +3297,21 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_dma_lifetime_test.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_dma_lifetime_test.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_dmabuf_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_dmabuf_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_dmabuf_module_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_dmabuf_module_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_dmabuf_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_dmabuf_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_extract.py",
