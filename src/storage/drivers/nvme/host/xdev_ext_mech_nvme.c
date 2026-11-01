@@ -566,7 +566,9 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 		return -EOPNOTSUPP;
 #endif
  if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
-  if (!capable(CAP_SYS_RAWIO)) return -EPERM;
+  /* The allocation authority seals DMA memory. Namespace fd modes and the
+   * native command-effects check below authorize storage access for PEER too.
+   */
   if (!ns->ctrl->ops->peer_rw || strcmp(ns->ctrl->ops->name, "pcie")) return -EOPNOTSUPP;
   if (!write && !(st->file->f_mode & FMODE_READ)) return -EBADF;
  }

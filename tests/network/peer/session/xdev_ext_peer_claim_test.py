@@ -18,14 +18,22 @@ if 'struct file *xdev_ext_peer_file_claim(' not in fd:
 main=r'''
 int main(void)
 {
- (void)&wrong_fops;
+ struct file wrong={.f_op=&wrong_fops,.refs=1};
+ struct file gpu_only={.f_op=&gpu_fops,.refs=1};
  struct file original; struct file *authority; struct pci_dev peer={0};
  struct xdev_ext_peer_fd_lease h={}; u64 len,gen;
  assert(xdev_ext_peer_provider_register(&ops)==0);
  original=allocation(region());
+ rawio=false; /* Delegated allocation fd is the authority, not caller CAP. */
  authority=xdev_ext_peer_file_claim(&original,&len,&gen);
  assert(!IS_ERR(authority));
+ assert(PTR_ERR(xdev_ext_peer_file_claim(&wrong,&len,&gen))==-EINVAL);
+ assert(PTR_ERR(xdev_ext_peer_file_claim(&gpu_only,&len,&gen))==-EINVAL);
+ assert(PTR_ERR(xdev_ext_peer_file_claim(NULL,&len,&gen))==-EINVAL);
+ assert(wrong.refs==1 && gpu_only.refs==1);
  assert(len==131072 && gen && original.refs==2);
+ assert(PTR_ERR(xdev_ext_peer_file_claim(authority,&len,&gen))==-EINVAL);
+ assert(PTR_ERR(xdev_ext_peer_file_claim(&original,NULL,&gen))==-EINVAL);
  assert(PTR_ERR(xdev_ext_peer_file_claim(&original,&len,&gen))==-EBUSY);
  assert(xdev_ext_peer_file_acquire(&original,&peer,gen,0,512,DMA_TO_DEVICE,&h)==-EBUSY);
  assert(xdev_ext_peer_file_acquire(authority,&peer,gen+1,0,512,DMA_TO_DEVICE,&h)==-ESTALE);
@@ -37,7 +45,7 @@ int main(void)
  assert(unmaps==1 && unpins==1);
  puts("ok 1 - exclusive mechanism authority rejects ordinary fd/duplicate claim and preserves generation and exact file refs");
  original=allocation(region()); gen=xdev_ext_peer_generation(((struct xdev_ext_peer_fd *)original.private_data)->region);
- rawio=false; assert(PTR_ERR(xdev_ext_peer_file_claim(&original,&len,&gen))==-EPERM); rawio=true;
+ rawio=false;
  authority=xdev_ext_peer_file_claim(&original,&len,&gen); assert(!IS_ERR(authority));
  assert(xdev_ext_peer_file_acquire(authority,&peer,gen,0,512,DMA_TO_DEVICE,&h)==0);
  xdev_ext_peer_fd_release(&h,false); fput(authority);
@@ -45,7 +53,7 @@ int main(void)
  assert(PTR_ERR(xdev_ext_peer_file_claim(&original,&len,&gen))==-EBUSY);
  assert(xdev_ext_peer_file_acquire(&original,&peer,gen,0,512,DMA_TO_DEVICE,&h)==-EBUSY);
  fput(&original); assert(original.refs==1 && unmaps==1 && unpins==1);
- puts("ok 2 - unknown DMA retains claim owner and original file permanently; privilege checked at claim");
+ puts("ok 2 - unknown DMA retains claim owner and original file permanently; delegated allocation fd authorizes claim");
  return 0;
 }
 '''
