@@ -62,6 +62,13 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_source_drain_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
           python3 kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
+      - name: Shared receive ownership and composed library contracts
+        working-directory: .
+        run: |
+          for scope in rings rx-map-failure receive-options dispatcher socket-identity ownership; do
+            python3 tests/network/shared_receive/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/shared-receive-$scope" --case "$scope" --scenario all
+          done
+          python3 tests/network/shared_receive/run_library_integration.py --native-root "$GITHUB_WORKSPACE/build/source-view/kernel" --boundary-root "$GITHUB_WORKSPACE/tests/network/shared_receive" --output "$RUNNER_TEMP/shared-receive-library" --case all
       - name: Thin session library contracts
         run: |
           make -C kernel/tools/testing/selftests/xdev_ext_lib CC="$CC" OUTPUT="$RUNNER_TEMP/xdev-ext-lib-tests" run

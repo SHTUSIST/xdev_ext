@@ -76,6 +76,25 @@ struct xdev_ext_pool_opts {
 	__u32 flags;			/* must be 0 */
 };
 
+/* Automatic receive configuration is opt-in and queue-per-session. */
+struct xdev_ext_xsk_receive_opts {
+ size_t sz;
+ __u32 xdp_flags;
+ __u32 dst_ipv4;
+ __u32 payload_magic;
+ __u16 dst_port;
+ __u16 reserved;
+ __u32 flags;
+};
+struct xdev_ext_network_error {
+ int error;
+ char operation[32];
+ char reason[160];
+};
+int xdev_ext_session_configure_receive(struct xdev_ext_session *s,
+ const struct xdev_ext_xsk_receive_opts *opts,
+ struct xdev_ext_network_error *error);
+
 struct xdev_ext_create_opts {
 	size_t sz;
 	__u32 group_bytes;

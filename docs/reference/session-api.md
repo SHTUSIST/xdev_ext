@@ -192,3 +192,22 @@ Counters are cumulative except fields explicitly documented otherwise. Per-stage
 ACTIVE, ERROR, STOPPING, STOPPED and ZOMBIE states distinguish normal execution, a sequestered batch, teardown and retained unresolved work. Accepted work is not replayed as a new native command. A resource whose completion or DMA quiescence is unknown stays retained under the provider's lifetime contract.
 
 A batch that aborts before any device accepted it (for example a provider that refuses the map, so nothing was submitted or sequestered) does not change the session state. The session stays ACTIVE, records the first error in `last_err`, and still attempts the remaining batches of the same START. Such an abort stops the session only when START used `RECYCLE` or a remaining stage belongs to an ordered class (NET, AF_XDP, socket). Callers detect the failure from `batches_abort` and `last_err`; STOP returns `last_err`.
+
+## Automatic receive steering
+
+An XSK pool maps RX/FILL/completion/TX rings. Before CREATE,
+`xdev_ext_session_configure_receive()` can configure the session's exact
+IPv4/UDP destination and payload magic, hardware ntuple rule, shared XDP
+flow/XSKMAP entries and queue lease. AF_XDP permits one receive session per
+queue; cooperating sessions on different queues share one dispatcher per
+network namespace and interface. Hardware cannot steer by payload magic, so
+overlapping UDP tuples are rejected.
+
+The library requires real AF_XDP socket diagnostics, mounted bpffs and safe
+ntuple allocation. Unsupported capabilities return `-EOPNOTSUPP` and an
+operation/reason. It never changes channels or replaces an unrelated XDP
+program. Closing first proves kernel release, then removes only this session's
+network resources; cleanup failures retain the pool for retry. Four mapped
+rings do not authorize adding device- or kernel-owned frames to FILL. See
+[the receive library contract](library-contract.md#11-automatic-af_xdp-receive-configuration)
+for ownership, failure and cross-process scope.

@@ -6,12 +6,16 @@ LIBDIR := $(KERNEL_SRC)/tools/xdev_ext_mech/lib
 CC ?= cc
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -pthread
+LIBBPF_CFLAGS ?=
+LIBBPF_LIBS ?= -lbpf
+SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c
 .PHONY: all clean
 all: user_stage_e2e ordered_frames_guest
-user_stage_e2e: user_stage_e2e.c $(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(LIBDIR)/libxdev_ext.h \
+user_stage_e2e: user_stage_e2e.c $(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(SHARED_SOURCES) $(LIBDIR)/libxdev_ext.h \
+		$(wildcard $(KERNEL_SRC)/tools/include/xdev_ext_xsk_*.h) \
 		$(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h $(KERNEL_SRC)/include/uapi/linux/io_uring.h
-	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi -I$(LIBDIR) user_stage_e2e.c \
-		$(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(LDFLAGS) -o $@ -lbpf -lelf -lz -pthread
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LIBBPF_CFLAGS) -iquote $(KERNEL_SRC)/include/uapi -I$(LIBDIR) user_stage_e2e.c \
+		$(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(SHARED_SOURCES) $(LDFLAGS) -o $@ $(LIBBPF_LIBS) -lelf -lz -pthread
 ordered_frames_guest: ordered_frames_guest.c $(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h \
                 $(KERNEL_SRC)/include/uapi/linux/io_uring.h \
                 $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h \

@@ -20,6 +20,8 @@
 #include <time.h>
 #include <unistd.h>
 #include <linux/if_xdp.h>
+#include <linux/if_link.h>
+#include "../../include/xdev_ext_xsk_shared.h"
 
 #include "../../../include/uapi/linux/io_uring.h"
 #include "../xdev_ext_mech_ctl_core.h"
@@ -104,7 +106,10 @@ struct xdev_ext_session {
 	bool zero_copy, created, started, released, retained;
 	void *umem;			/* XSK UMEM or IOU UMEM */
 	size_t umem_size;
-	struct xring fq, cq, tx;
+	struct xring fq, cq, tx, rx;
+ struct xdev_ext_xsk_shared *network;
+ bool network_failed;
+ __u32 queue;
 	char ifname[IF_NAMESIZE];
 	__u64 id, nr_batches, armed_batches;
 	int owned_fd[XDEV_EXT_MECH_MAX_STAGES];
@@ -127,10 +132,18 @@ int xdev_ext__opts_check(const void *o, size_t sz, size_t known)
 	return 0;
 }
 
+static int session_preflight(const struct xdev_ext_session *s)
+{
+	return s->network ? xdev_ext_xsk_shared_preflight(s->network, NULL) : 0;
+}
+
 static int mech(struct xdev_ext_session *s, __u32 op, __u64 arg)
 {
-	struct io_uring_xdev_ext_mech req = { .op = op, .arg = arg };
+	struct io_uring_xdev_ext_mech req = {.op = op, .arg = arg};
+	int ret = session_preflight(s);
 
+	if (ret)
+		return ret;
 	return sys_uring_register(s->ring, IORING_REGISTER_XDEV_EXT_MECH, &req);
 }
 
@@ -172,7 +185,7 @@ static int xsk_u32(int fd, int opt, __u32 v)
 	return setsockopt(fd, SOL_XDP, opt, &v, sizeof(v)) ? -errno : 0;
 }
 
-/* TX-capable socket with its own aligned UMEM, bound in exactly the mode. */
+/* RX/TX socket with its own aligned UMEM, bound in exactly the mode. */
 static int xsk_open(struct xdev_ext_session *s, unsigned int ifindex, __u32 queue)
 {
 	struct sockaddr_xdp sxdp = { .sxdp_family = AF_XDP };
@@ -199,7 +212,8 @@ static int xsk_open(struct xdev_ext_session *s, unsigned int ifindex, __u32 queu
 		return -errno;
 	if ((ret = xsk_u32(s->xsk, XDP_UMEM_FILL_RING, XRING_SIZE)) ||
 	    (ret = xsk_u32(s->xsk, XDP_UMEM_COMPLETION_RING, XRING_SIZE)) ||
-	    (ret = xsk_u32(s->xsk, XDP_TX_RING, XRING_SIZE)))
+	    (ret = xsk_u32(s->xsk, XDP_TX_RING, XRING_SIZE)) ||
+     (ret = xsk_u32(s->xsk, XDP_RX_RING, XRING_SIZE)))
 		return ret;
 	if (getsockopt(s->xsk, SOL_XDP, XDP_MMAP_OFFSETS, &off, &len))
 		return -errno;
@@ -208,7 +222,9 @@ static int xsk_open(struct xdev_ext_session *s, unsigned int ifindex, __u32 queu
 	    (ret = xring_map(s->xsk, &off.cr, XDP_UMEM_PGOFF_COMPLETION_RING,
 			     sizeof(__u64), &s->cq)) ||
 	    (ret = xring_map(s->xsk, &off.tx, XDP_PGOFF_TX_RING,
-			     sizeof(struct xdp_desc), &s->tx)))
+			     sizeof(struct xdp_desc), &s->tx)) ||
+     (ret = xring_map(s->xsk, &off.rx, XDP_PGOFF_RX_RING,
+        sizeof(struct xdp_desc), &s->rx)))
 		return ret;
 	sxdp.sxdp_ifindex = ifindex;
 	sxdp.sxdp_queue_id = queue;
@@ -257,6 +273,7 @@ static void session_free(struct xdev_ext_session *s)
 	xring_unmap(&s->fq);
 	xring_unmap(&s->cq);
 	xring_unmap(&s->tx);
+ xring_unmap(&s->rx);
 	if (s->xsk >= 0)
 		close(s->xsk);
 	if (s->allocation_fd >= 0)
@@ -270,6 +287,98 @@ static void session_free(struct xdev_ext_session *s)
 	for (i = s->nr_progs; i--;)
 		s->prog_detach(s->prog[i]);
 	free(s);
+}
+
+static int network_error(struct xdev_ext_network_error *out, int ret,
+ const char *operation, const char *reason)
+{
+ if (out) {
+  memset(out, 0, sizeof(*out));
+  out->error = ret;
+  snprintf(out->operation, sizeof(out->operation), "%s", operation);
+  snprintf(out->reason, sizeof(out->reason), "%s", reason);
+ }
+ return ret;
+}
+
+int xdev_ext_session_configure_receive(
+    struct xdev_ext_session *s, const struct xdev_ext_xsk_receive_opts *o,
+    struct xdev_ext_network_error *error)
+{
+	struct xdev_ext_xsk_shared_opts config = {.sz = sizeof(config)};
+	struct xdev_ext_xsk_shared_error detail = {0};
+	struct ifreq ifr;
+	int ret;
+	if (error)
+		memset(error, 0, sizeof(*error));
+	if (!s || !o)
+		return network_error(
+		    error, -EINVAL, "options",
+		    "Session and receive options are required");
+	ret = session_preflight(s);
+	if (ret)
+		return network_error(error, ret, "origin-preflight",
+				     "Receive owner belongs to another process "
+				     "or network namespace");
+	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
+	if (ret)
+		return network_error(error, ret, "options",
+				     "Invalid receive options size or tail");
+	if (o->reserved || !o->dst_port ||
+	    (o->xdp_flags != XDP_FLAGS_DRV_MODE &&
+	     o->xdp_flags != XDP_FLAGS_SKB_MODE))
+		return network_error(
+		    error, -EINVAL, "options",
+		    "Invalid receive mode, port or reserved field");
+	if (o->flags)
+		return network_error(error, -EOPNOTSUPP, "options",
+				     "Receive option flags are unsupported");
+	if (s->pool_kind != XDEV_EXT_MECH_POOL_XSK)
+		return network_error(
+		    error, -EOPNOTSUPP, "pool",
+		    "Receive steering requires an AF_XDP pool");
+	if (s->retained || s->network_failed)
+		return network_error(
+		    error, -EBUSY, "configure",
+		    "Retained session requires close before reconfiguration");
+	if (s->network)
+		return network_error(
+		    error, -EALREADY, "configure",
+		    "Session already owns receive configuration");
+	if (s->created || s->started || s->released)
+		return network_error(
+		    error, -EBUSY, "configure",
+		    "Receive steering must be configured before CREATE");
+	ret = if_query(s->ifname, SIOCGIFHWADDR, &ifr);
+	if (ret)
+		return network_error(error, ret, "interface",
+				     "Cannot read the receiving interface MAC");
+	config.ifname = s->ifname;
+	config.queue_id = s->queue;
+	config.xdp_flags = o->xdp_flags;
+	config.xsk_fd = s->xsk;
+	config.filter.flags =
+	    XDEV_EXT_XSK_FILTER_F_DST_IPV4 | XDEV_EXT_XSK_FILTER_F_DST_PORT |
+	    XDEV_EXT_XSK_FILTER_F_PAYLOAD_MAGIC |
+	    XDEV_EXT_XSK_FILTER_F_DST_MAC | XDEV_EXT_XSK_FILTER_F_MAX_LEN;
+	config.filter.dst_ipv4 = o->dst_ipv4;
+	config.filter.dst_port = o->dst_port;
+	config.filter.payload_magic = o->payload_magic;
+	config.filter.max_len =
+	    XDEV_EXT_FRAME_SIZE - XDEV_EXT_MECH_CTL_XDP_HEADROOM;
+	memcpy(config.filter.dst_mac, ifr.ifr_hwaddr.sa_data, 6);
+	ret = xdev_ext_xsk_shared_open(&config, &s->network, &detail);
+	if (ret && s->network) {
+		s->network_failed = true;
+		s->retained = true;
+	}
+	if (error) {
+		error->error = detail.error;
+		memcpy(error->operation, detail.operation,
+		       sizeof(error->operation));
+		memcpy(error->reason, detail.reason, sizeof(error->reason));
+	}
+	return ret;
 }
 
 /* --- public steps -------------------------------------------------------- */
@@ -310,6 +419,7 @@ int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 	s->ring = s->efd = s->xsk = s->allocation_fd = -1;
 	s->pool_kind = o->pool_kind;
 	s->xsk_mode = o->xsk_mode;
+ s->queue = o->queue;
 	s->nr_frames = o->nr_frames ? o->nr_frames : XDEV_EXT_DEFAULT_FRAMES;
 	memset(&p, 0, sizeof(p));
 	s->ring = sys_uring_setup(8, &p);
@@ -532,18 +642,24 @@ int xdev_ext_create_programs_read(int owning_ring_fd,
 }
 
 static int session_create(struct xdev_ext_session *s,
-    const struct xdev_ext_create_opts *o, struct xdev_ext_mech_create_report *out,
-    const int *program_fds, __u32 nr_programs)
+			  const struct xdev_ext_create_opts *o,
+			  struct xdev_ext_mech_create_report *out,
+			  const int *program_fds, __u32 nr_programs)
 {
 	static const struct xdev_ext_mech_layout zero_layout;
 	static const __u8 zero_mac[6];
-	struct xdev_ext_mech_create c = { 0 };
+	struct xdev_ext_mech_create c = {0};
 	struct ifreq ifr;
 	__u32 i;
 	int ret;
 
 	if (!s || !o)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
+	if (s->network_failed)
+		return -EBUSY;
 	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
 	if (ret)
 		return ret;
@@ -552,13 +668,13 @@ static int session_create(struct xdev_ext_session *s,
 	if (!o->group_bytes || !o->depth || !o->nr_stages ||
 	    o->nr_stages > XDEV_EXT_MECH_MAX_STAGES)
 		return -EINVAL;
- if (program_fds) {
-  ret = program_fds_check(program_fds, nr_programs, o->nr_stages);
-  if (ret)
-   return ret;
- }
+	if (program_fds) {
+		ret = program_fds_check(program_fds, nr_programs, o->nr_stages);
+		if (ret)
+			return ret;
+	}
 	if (s->retained)
-  return -EBUSY;
+		return -EBUSY;
 	if (s->created)
 		return -EALREADY;
 	c.layout = o->layout;
@@ -571,8 +687,8 @@ static int session_create(struct xdev_ext_session *s,
 				return ret;
 			mtu = (__u32)ifr.ifr_mtu;
 		}
-		ret = xdev_ext_mech_ctl_layout(mtu ? mtu : IOU_MTU, o->group_bytes,
-					       &c.layout);
+		ret = xdev_ext_mech_ctl_layout(mtu ? mtu : IOU_MTU,
+					       o->group_bytes, &c.layout);
 		if (ret)
 			return ret;
 	}
@@ -591,33 +707,37 @@ static int session_create(struct xdev_ext_session *s,
 	c.abi_version = XDEV_EXT_MECH_ABI_VERSION;
 	c.nr_stages = o->nr_stages;
 	c.pool_kind = s->pool_kind;
-	c.pool_fd = s->pool_kind == XDEV_EXT_MECH_POOL_XSK ? s->xsk :
-		s->pool_kind == XDEV_EXT_MECH_POOL_PEER ? s->allocation_fd : -1;
+	c.pool_fd = s->pool_kind == XDEV_EXT_MECH_POOL_XSK    ? s->xsk
+		    : s->pool_kind == XDEV_EXT_MECH_POOL_PEER ? s->allocation_fd
+							      : -1;
 	c.depth = o->depth;
 	c.eventfd = s->efd;
 	memcpy(c.st, o->st, sizeof(c.st));
 	for (i = 0; i < c.nr_stages; i++)
 		if (s->pool_kind == XDEV_EXT_MECH_POOL_XSK &&
-		    c.st[i].class_id == XDEV_EXT_MECH_CLASS_AFXDP && c.st[i].fd < 0)
+		    c.st[i].class_id == XDEV_EXT_MECH_CLASS_AFXDP &&
+		    c.st[i].fd < 0)
 			c.st[i].fd = s->xsk;
- if (out || program_fds) {
-  struct xdev_ext_mech_create_report report = {};
+	if (out || program_fds) {
+		struct xdev_ext_mech_create_report report = {};
 
-  ret = program_fds ? xdev_ext_create_programs_read(s->ring, &c, program_fds,
-                      nr_programs, &report) :
-                     xdev_ext_create_report_read(s->ring, &c, &report);
-  if (report.size == sizeof(report)) {
-   if (out)
-    *out = report;
-   if (report.cleanup == XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED)
-    s->retained = true;
-  }
-  if (ret)
-   return ret;
-  c.session_id = report.session_id;
- } else {
-  ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
- }
+		ret = program_fds
+			  ? xdev_ext_create_programs_read(
+				s->ring, &c, program_fds, nr_programs, &report)
+			  : xdev_ext_create_report_read(s->ring, &c, &report);
+		if (report.size == sizeof(report)) {
+			if (out)
+				*out = report;
+			if (report.cleanup ==
+			    XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED)
+				s->retained = true;
+		}
+		if (ret)
+			return ret;
+		c.session_id = report.session_id;
+	} else {
+		ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
+	}
 	if (ret)
 		return ret;
 	s->id = c.session_id;
@@ -684,12 +804,17 @@ int xdev_ext_session_arm(struct xdev_ext_session *s, __u64 batches_target,
 int xdev_ext_session_start(struct xdev_ext_session *s,
 			   const struct xdev_ext_start_opts *o)
 {
-	struct xdev_ext_mech_start st = { 0 };
+	struct xdev_ext_mech_start st = {0};
 	__u32 *user = NULL;
 	int ret;
 
 	if (!s || !o)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
+	if (s->network_failed)
+		return -EBUSY;
 	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
 	if (ret)
 		return ret;
@@ -700,12 +825,13 @@ int xdev_ext_session_start(struct xdev_ext_session *s,
 	if (!live(s))
 		return -ENOTCONN;
 	if (s->started)
-		return -EOPNOTSUPP;	/* appending batches: reserved */
+		return -EOPNOTSUPP; /* appending batches: reserved */
 	st.session_id = s->id;
 	st.nr_batches = o->nr_batches;
 	st.first_seq = o->first_seq ? o->first_seq : 1;
 	if (s->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM) {
-		__u64 groups = o->nr_batches < s->depth ? o->nr_batches : s->depth;
+		__u64 groups =
+		    o->nr_batches < s->depth ? o->nr_batches : s->depth;
 		__u64 k = groups * s->frames_per_batch, i;
 
 		if (k > s->nr_frames)
@@ -749,9 +875,9 @@ static int raw_stats(struct xdev_ext_session *s, struct xdev_ext_mech_stats *out
 }
 
 int xdev_ext_session_start_frames(struct xdev_ext_session *s,
-				 const struct xdev_ext_start_frames_opts *o)
+				  const struct xdev_ext_start_frames_opts *o)
 {
-	struct xdev_ext_mech_start st = { 0 };
+	struct xdev_ext_mech_start st = {0};
 	struct xdev_ext_mech_stats snap;
 	__u32 *indices;
 	__u64 target;
@@ -759,6 +885,11 @@ int xdev_ext_session_start_frames(struct xdev_ext_session *s,
 
 	if (!s || !o)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
+	if (s->network_failed)
+		return -EBUSY;
 	ret = xdev_ext__opts_check(o, o->sz, sizeof(*o));
 	if (ret)
 		return ret;
@@ -794,7 +925,7 @@ int xdev_ext_session_start_frames(struct xdev_ext_session *s,
 	st.nr_batches = o->nr_batches;
 	st.first_seq = o->first_seq ? o->first_seq : 1;
 	st.flags = o->flags | XDEV_EXT_MECH_START_F_USER_FRAMES |
-		XDEV_EXT_MECH_START_F_ORDERED_FRAMES;
+		   XDEV_EXT_MECH_START_F_ORDERED_FRAMES;
 	st.nr_user_frames = o->nr_indices;
 	st.user_frames = (uintptr_t)indices;
 	ret = xdev_ext_session_arm(s, target, 0);
@@ -864,11 +995,16 @@ int xdev_ext_stage_diag_read(int owning_ring_fd, __u64 session_id, __u32 stage,
 int xdev_ext_session_stage_diag(struct xdev_ext_session *s, __u32 stage,
 			       struct xdev_ext_mech_stage_diag *out)
 {
+	int ret;
+
 	if (!out)
 		return -EINVAL;
 	memset(out, 0, sizeof(*out));
 	if (!s)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
 	if (!s->created || !s->id || s->released)
 		return -ENOTCONN;
 	return xdev_ext_stage_diag_read(s->ring, s->id, stage, out);
@@ -899,18 +1035,22 @@ int xdev_ext_session_wait(struct xdev_ext_session *s, int timeout_ms,
 
 	if (!s || !out)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
 	if (!live(s))
 		return -ENOTCONN;
 	for (;;) {
-		struct pollfd pfd = { .fd = s->efd, .events = POLLIN };
+		struct pollfd pfd = {.fd = s->efd, .events = POLLIN};
 		int wait_ms = -1, ready;
 
 		if (timeout_ms >= 0) {
 			__u64 now = now_ms();
 
-			wait_ms = now >= deadline ? 0 :
-				deadline - now > INT32_MAX ? INT32_MAX :
-				(int)(deadline - now);
+			wait_ms = now >= deadline ? 0
+				  : deadline - now > INT32_MAX
+				      ? INT32_MAX
+				      : (int)(deadline - now);
 		}
 		ready = poll(&pfd, 1, wait_ms);
 		if (ready < 0) {
@@ -975,6 +1115,9 @@ int xdev_ext_session_stop(struct xdev_ext_session *s)
 
 	if (!s)
 		return -EINVAL;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
 	if (s->retained)
 		return -EBUSY;
 	if (!s->created)
@@ -1015,17 +1158,31 @@ int xdev_ext_session_close(struct xdev_ext_session *s)
 
 	if (!s)
 		return -EINVAL;
- if (s->retained && !s->created)
-  return -EBUSY;
+	ret = session_preflight(s);
+	if (ret)
+		return ret;
+	if (s->retained && !s->created && !s->network_failed)
+		return -EBUSY;
 	if (s->created && !s->released) {
 		if (!s->retained) {
 			ret = xdev_ext_session_stop(s);
 			if (ret == -EAGAIN)
-				return ret;	/* still live and listed: close again */
+				return ret; /* still live and listed: close
+					       again */
 		}
-		/* Only the kernel's own -ENOENT proves a release STOP did not. */
+		/* Only the kernel's own -ENOENT proves a release STOP did not.
+		 */
 		if (!s->released && raw_stats(s, &snap) != -ENOENT)
 			return s->retained ? -EBUSY : ret;
+	}
+	if (s->network) {
+		ret = xdev_ext_xsk_shared_close(s->network, NULL);
+		if (ret) {
+			s->retained = true;
+			s->network_failed = true;
+			return ret;
+		}
+		s->network = NULL;
 	}
 	session_free(s);
 	return 0;

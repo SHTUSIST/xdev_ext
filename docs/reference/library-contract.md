@@ -11,7 +11,7 @@ generation checks, DMA mapping, drain and quarantine) stays in the kernel.
 
 Public header: `src/lib/libxdev_ext.h`. Build from the repository root: `make lib`
 produces `libxdev_ext.a`. The class program part links libbpf (>= 1.0);
-the session part needs only libc.
+automatic receive configuration also links libbpf, libelf and zlib.
 
 ## 1. Conventions
 
@@ -581,3 +581,76 @@ this load/store-only protocol. Adding atomic RMW would require separate
 qualification. This qualification does not relax remote VRAM write visibility;
 the same native-ordering or supported-flush requirement and physical GPU/NHI
 acceptance remain necessary.
+
+## 11. Automatic AF_XDP receive configuration
+
+Every XSK pool now creates and maps RX, FILL, completion and TX rings. Mapping
+an RX ring does not give the application ownership of frames held by a device
+or kernel session. Existing mode-specific FILL seeding and frame custody rules
+remain authoritative; applications must not independently consume those frames.
+
+Before CREATE, an XSK session can call:
+
+```c
+struct xdev_ext_xsk_receive_opts receive = XDEV_EXT_OPTS_INIT(
+    xdev_ext_xsk_receive_opts,
+    .xdp_flags = XDP_FLAGS_DRV_MODE,
+    .dst_ipv4 = 0xc0000201, .dst_port = 9000,
+    .payload_magic = 0x4e585031);
+struct xdev_ext_network_error error;
+int ret = xdev_ext_session_configure_receive(session, &receive, &error);
+```
+
+Addresses, port and first UDP payload word are host byte order. The flags and
+reserved fields are zero. The XDP mode is explicit (DRV or SKB); there is no
+fallback. Existing `xdev_ext_session_open` and options layouts stay compatible;
+a TX-only or externally configured session need not call the new function.
+IOU_UMEM and PEER pools return `-EOPNOTSUPP`; configuring after CREATE returns
+`-EBUSY`; a second configuration returns `-EALREADY`.
+
+The library validates the actual socket namespace, inode/cookie, interface and
+RX queue through AF_XDP socket diagnostics. Missing diagnostics or cookie
+capability is `-EOPNOTSUPP`. It then owns an ethtool UDP ntuple rule, a queue
+lease, its entry in a shared XSKMAP and its destination/port/magic flow entry.
+The caller does not need to attach XDP or run ethtool. An exact destination
+MAC and a bound on single-frame packet length protect the session's pool.
+Malformed, nonmatching and wrong-queue packets stay with the network stack.
+
+AF_XDP sharing is **one receive session per queue**. Cooperating processes of
+the same effective UID share a pinned dispatcher on each interface in their
+actual network namespace. Control locks under `/run/xdev_ext/xsk` and verified
+BPF pins under `/sys/fs/bpf/xdev_ext/xsk` coordinate ownership across processes.
+A mounted bpffs and the requisite device/BPF privileges are required. An
+existing unrelated XDP program is `-EBUSY`; it is never replaced or detached.
+This interface does not grant cross-UID queue authorization or BPF-token loading.
+
+Hardware ntuple matches the UDP tuple, not payload magic. An overlapping
+existing hardware tuple returns `-EADDRINUSE`, even if magic differs. Missing
+ntuple or safe unused-location allocation support returns `-EOPNOTSUPP` with a
+reason. The library never changes channel count, RSS, offloads or header split.
+Concurrent privileged external reconfiguration has no atomic ethtool compare
+and swap; such changed rules are retained and reported, rather than deleted.
+
+`xdev_ext_session_close` first proves the existing kernel STOP/release, removes
+only this session's flow, XSKMAP entry and exact matching ntuple rule, and then
+releases its pool. Other owners keep the dispatcher. The last owner detaches
+only the verified shared BPF link FD and removes its pins. A cleanup error
+preserves the session and backing in a close-only retained state: CREATE, START
+and reconfiguration are refused; close may retry even before CREATE. A failed configuration
+whose rollback retained ownership also sets `xdev_ext_session_retained`.
+
+An interrupted ntuple insertion whose returned location was never recorded
+cannot prove rule ownership and is quarantined with `-ESTALE`. A changed rule
+at a recorded location is also `-ESTALE` and is not deleted. Inspect that
+interface's control/pin state before administrative recovery. Originating
+process handles must not be used after fork (`-ECHILD`) or from a different
+network namespace (`-EXDEV`); a read-only origin preflight runs before STOP or
+other session mutation. Every ethtool request verifies that its interface name
+still denotes the retained numeric ifindex. Rename/name reuse returns `-EXDEV`
+and retains cleanup without changing the newly named device; all owned FDs are close-on-exec. Serialize calls
+on each individual handle.
+
+The low-level `xdev_ext_xsk_shared_open`/`close` interface is declared in
+`src/cli/include/xdev_ext_xsk_shared.h`. A failed open normally returns NULL;
+if rollback cannot release owned resources, it returns the original error and
+a retained handle that must be closed before releasing the borrowed XSK.

@@ -6,11 +6,13 @@ LIBBPF_LIBS ?= -lbpf
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror
 CTL_LIB := ../../../kernel/tools/xdev_ext_mech/lib
-CTL_LIB_SOURCES := $(CTL_LIB)/xdev_ext_session.c $(CTL_LIB)/xdev_ext_link.c
+CTL_LIB_SOURCES := $(CTL_LIB)/xdev_ext_session.c $(CTL_LIB)/xdev_ext_link.c \
+	../../../kernel/tools/xdev_ext_xsk_shared.c ../../../kernel/tools/xdev_ext_xsk_steer.c
 CTL_LIB_HEADERS := $(CTL_LIB)/libxdev_ext.h $(CTL_LIB)/libxdev_ext_internal.h \
 	$(CTL_LIB)/../xdev_ext_mech_ctl_core.h \
 	../../../kernel/include/uapi/linux/xdev_ext_mech.h \
-	../../../kernel/include/uapi/linux/io_uring.h
+	../../../kernel/include/uapi/linux/io_uring.h \
+	$(wildcard ../../../kernel/tools/include/xdev_ext_xsk_*.h)
 .PHONY: all sink ctl check bpf
 all: sink ctl bpf
 sink: $(BUILD)/mv_sink

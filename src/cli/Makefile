@@ -67,9 +67,9 @@ $(BUILD_DIR)/cpu_plan.bpf.o: xdev_ext_mech_cpu_abi.h
 $(CTL): xdev_ext_mech_ctl.c lib/xdev_ext_link.c lib/xdev_ext_session.c lib/libxdev_ext.h lib/libxdev_ext_internal.h \
 		../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/io_uring.h xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \
 		../xdev_ext_gpu_identity.c ../include/xdev_ext_gpu_identity.h \
-		../xdev_ext_xsk_redirect.c ../include/xdev_ext_xsk_redirect.h \
+		../xdev_ext_xsk_redirect.c ../xdev_ext_xsk_shared.c ../xdev_ext_xsk_steer.c ../include/xdev_ext_xsk_redirect.h \
 		../include/xdev_ext_xsk_redirect_prog.h | $(BUILD_DIR)
-	$(CC) $(CFLAGS) xdev_ext_mech_ctl.c lib/xdev_ext_link.c lib/xdev_ext_session.c ../xdev_ext_xsk_redirect.c ../xdev_ext_gpu_identity.c -o $@ \
+	$(CC) $(CFLAGS) xdev_ext_mech_ctl.c lib/xdev_ext_link.c lib/xdev_ext_session.c ../xdev_ext_xsk_redirect.c ../xdev_ext_xsk_shared.c ../xdev_ext_xsk_steer.c ../xdev_ext_gpu_identity.c -o $@ \
 		$(LDFLAGS) $(LDLIBS)
 
 # The thin session library (lib/SPEC.md); not part of all.

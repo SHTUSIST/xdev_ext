@@ -397,6 +397,21 @@
       "native_path": "tools/include/xdev_ext_xsk_redirect_prog.h"
     },
     {
+      "source": "src/cli/include/xdev_ext_xsk_shared.h",
+      "component": "linux",
+      "native_path": "tools/include/xdev_ext_xsk_shared.h"
+    },
+    {
+      "source": "src/cli/include/xdev_ext_xsk_shared_prog.h",
+      "component": "linux",
+      "native_path": "tools/include/xdev_ext_xsk_shared_prog.h"
+    },
+    {
+      "source": "src/cli/include/xdev_ext_xsk_steer.h",
+      "component": "linux",
+      "native_path": "tools/include/xdev_ext_xsk_steer.h"
+    },
+    {
       "source": "src/cli/xdev_ext_bpf_raw.h",
       "component": "linux",
       "native_path": "tools/xdev_ext_bpf_raw.h"
@@ -460,6 +475,16 @@
       "source": "src/cli/xdev_ext_xsk_redirect.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_xsk_redirect.c"
+    },
+    {
+      "source": "src/cli/xdev_ext_xsk_shared.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_xsk_shared.c"
+    },
+    {
+      "source": "src/cli/xdev_ext_xsk_steer.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_xsk_steer.c"
     },
     {
       "source": "src/compute/collectives/xdev_tp.cc",
@@ -6862,6 +6887,81 @@
       "source": "tests/network/sendpath/sendpath_baseline_source_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_sendpath_baseline/sendpath_baseline_source_test.py"
+    },
+    {
+      "source": "tests/network/shared_receive/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/README.md"
+    },
+    {
+      "source": "tests/network/shared_receive/abi_transport.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/abi_transport.h"
+    },
+    {
+      "source": "tests/network/shared_receive/contract_api.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/contract_api.h"
+    },
+    {
+      "source": "tests/network/shared_receive/dispatcher.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/dispatcher.c"
+    },
+    {
+      "source": "tests/network/shared_receive/library_integration.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/library_integration.c"
+    },
+    {
+      "source": "tests/network/shared_receive/library_integration_boundary.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/library_integration_boundary.c"
+    },
+    {
+      "source": "tests/network/shared_receive/library_integration_boundary.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/library_integration_boundary.h"
+    },
+    {
+      "source": "tests/network/shared_receive/ownership.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/ownership.c"
+    },
+    {
+      "source": "tests/network/shared_receive/ownership_boundary.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/ownership_boundary.c"
+    },
+    {
+      "source": "tests/network/shared_receive/ownership_boundary.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/ownership_boundary.h"
+    },
+    {
+      "source": "tests/network/shared_receive/receive_options.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/receive_options.c"
+    },
+    {
+      "source": "tests/network/shared_receive/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/run.py"
+    },
+    {
+      "source": "tests/network/shared_receive/run_library_integration.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/run_library_integration.py"
+    },
+    {
+      "source": "tests/network/shared_receive/session_rings.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/session_rings.c"
+    },
+    {
+      "source": "tests/network/shared_receive/socket_identity.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/socket_identity.c"
     },
     {
       "source": "tests/network/socket/adapter_test.py",
