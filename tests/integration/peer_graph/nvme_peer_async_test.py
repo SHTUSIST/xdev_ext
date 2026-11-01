@@ -275,6 +275,14 @@ static struct nvme_xdev_ext_mech_batch bps[8];
 static struct xdev_ext_mech_batch bs[8];
 static int failures;
 #define CHECK(cond, text) do { if (!(cond)) { printf("not ok - %s (%s:%d)\n", text, __FILE__, __LINE__); failures++; return; } } while (0)
+static void batch_admitted_rw(int i, u64 slba, u32 len)
+{
+ /* Metadata of the fixture's already-validated literal request. Never refresh
+  * this after a negative case mutates the live batch geometry or byte count. */
+ bps[i].rw = (struct xdev_ext_stor_rw){ .slba = slba,
+   .nlb = (u64)len >> head.lba_shift, .byte_offset = slba << head.lba_shift,
+   .byte_length = len, .write = priv.write };
+}
 static void batch_init(int i, u32 frame, u32 off, u32 len, u64 slba)
 {
  memset(&bps[i], 0, sizeof(bps[i])); memset(&bs[i], 0, sizeof(bs[i]));
@@ -282,6 +290,7 @@ static void batch_init(int i, u32 frame, u32 off, u32 len, u64 slba)
  bs[i].f[0] = (struct xdev_ext_mech_frame){ .umem_addr = (u64)frame * 65536, .index = frame,
    .data_off = off, .data_len = len };
  bps[i].validated = true; bps[i].batch_id = bs[i].id;
+ batch_admitted_rw(i, slba, len);
  bps[i].sqe[40] = slba & 0xff; bps[i].sqe[41] = (slba >> 8) & 0xff;
  bps[i].sqe[42] = (slba >> 16) & 0xff; bps[i].sqe[43] = (slba >> 24) & 0xff;
 }
@@ -448,6 +457,7 @@ static void case_pages(void)
  /* Two frames in one batch, 64 KiB pages: two data blocks; write direction. */
  provider_page = 65536; priv.write = true;
  batch_init(1, 0, 0, 65536, 8); bs[1].nr = 2; bs[1].bytes = 2 * 65536;
+ batch_admitted_rw(1, 8, 2 * 65536);
  bs[1].f[1] = (struct xdev_ext_mech_frame){ .umem_addr = 2 * 65536, .index = 2, .data_len = 65536 };
  CHECK(!SUBMIT(&st, &bs[1]), "two-frame batch accepted");
  r = nth_outstanding(0); c = r->nr.cmd; d = sgl_list(c->rw.dptr.sgl.addr);
@@ -478,6 +488,23 @@ static void case_malformed(void)
  }
  puts("ok 4 - CPU-backed, empty, misplaced or mismatched spans are refused before acceptance");
 }
+static void case_admitted_rw_drift(void)
+{
+ for (int k = 0; k < 2; k++) {
+  int e = executes, a = acquire_calls;
+  batch_init(0, 0, 0, 4096, 8);
+  if (k == 0) bps[0].rw.byte_length--;
+  else bps[0].rw.nlb--;
+  CHECK(SUBMIT(&st, &bs[0]) == -EPROTO && acquire_calls > a && executes == e &&
+        !allocated() && !outstanding() && !live_leases && !bs[0].publishes,
+        "admitted RW drift refuses after valid mapping without retaining a request or lease");
+  batch_init(0, 0, 0, 4096, 8);
+  CHECK(!SUBMIT(&st, &bs[0]), "admitted RW drift refusal returns its slot for a valid request");
+  controller_complete(nth_outstanding(0), 0, 0, 0); worker_consume(0);
+  CHECK(!live_leases && !allocated(), "valid request after admitted RW drift releases its resources");
+ }
+ puts("ok 7 - admitted byte length and NLB drift refuse before acceptance and release mapped resources");
+}
 int main(void)
 {
  int rc;
@@ -491,6 +518,7 @@ int main(void)
  case_slots(); if (failures) return 1;
  case_pages(); if (failures) return 1;
  case_malformed(); if (failures) return 1;
+ case_admitted_rw_drift(); if (failures) return 1;
  /* Last: it retires every slot as uncertain or zombie-retained. */
  case_early_and_stale(); if (failures) return 1;
  case_failures(); if (failures) return 1;
@@ -621,6 +649,8 @@ def main():
         ("DMA-contiguous pages not merged", "nvme_xdev_ext_stor_hooks.extent_align_mask, &n);",
          "nvme_xdev_ext_stor_hooks.extent_align_mask, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
         ("provider page refusal not split", "if (ret != -ERANGE)", "if (true)"),
+        ("admitted byte length drift accepted", "bp->rw.byte_length != plan.bytes", "false"),
+        ("admitted NLB drift accepted", "bp->rw.nlb != (u64)plan.nlb + 1", "false"),
     ]
     with tempfile.TemporaryDirectory(prefix="nvme-peer-async-") as tmp:
         directory = Path(tmp)
