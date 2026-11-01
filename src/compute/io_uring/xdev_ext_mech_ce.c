@@ -30,6 +30,7 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_ce_core.h"
+#include "xdev_ext_compfam_copy_core.h"
 #include "xdev_ext_mech_ce_lease.h"
 #include "xdev_ext_mech_native_cookie.h"
 
@@ -63,15 +64,20 @@ struct xdev_ext_ce_stage {
 	struct xdev_ext_ce_region region;
 	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_ce_geom geom;
+	struct xdev_ext_comp_copy_window window;
 	atomic_t ambiguous;		/* AMBIGUOUS completions on this stage */
 	bool dead;
 	/* session worker only: the plan validate accepted, until submit */
 	struct xdev_ext_mech_batch *staged;
-	struct xdev_ext_ce_plan plan;
-	struct xdev_ext_ce_copy_desc d[XDEV_EXT_CE_MAX_ENTRIES];
+	struct xdev_ext_comp_copy_plan plan;
 	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
 };
+
+_Static_assert(XDEV_EXT_CE_MAX_ENTRIES <=
+	       sizeof(((struct xdev_ext_comp_copy_plan *)0)->entry) /
+	       sizeof(struct xdev_ext_comp_copy_entry),
+	       "CE entries exceed the common copy plan capacity");
 
 /* Stable per-batch storage: never overwritten by another stage's private area.
  * b is initialized once and remains safe to dereference for stale-ticket rejection.
@@ -281,7 +287,7 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
 	const struct xdev_ext_ce_backend_ops *ops;
 	struct xdev_ext_ce_stage *cs;
-	u64 offset;
+	struct xdev_ext_window_copy_geom geom;
 	int err;
 
 	if (u->flags || (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
@@ -314,8 +320,10 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
              pool->first_page_off, pool->frame_size, pool->nr_frames);
  if (err)
   return err;
- err = xdev_ext_mech_window_offset(0, xdev_ext_mech_session_depth(st->s),
-   xdev_ext_mech_session_layout(st->s)->group_bytes, cs->geom.window_len, &offset);
+ geom = xdev_ext_ce_window_geom(&cs->geom);
+ err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
+   st->direction, xdev_ext_mech_session_depth(st->s),
+   xdev_ext_mech_session_layout(st->s)->group_bytes);
  if (err)
   return err;
  err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
@@ -408,8 +416,6 @@ static int xdev_ext_ce_validate(struct xdev_ext_mech_stage *st, struct xdev_ext_
 			   const u8 *scratch, u32 n)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	u64 offset;
-	u32 i, group_bytes = xdev_ext_mech_session_layout(st->s)->group_bytes;
 	int nr, err;
 
 	cs->staged = NULL;
@@ -420,48 +426,48 @@ static int xdev_ext_ce_validate(struct xdev_ext_mech_stage *st, struct xdev_ext_
 	nr = xdev_ext_ce_collect(cs, b);
 	if (nr < 0)
 		return nr;
-	memcpy(cs->d, scratch, n * sizeof(cs->d[0]));
-	err = xdev_ext_ce_plan_check(&cs->geom, cs->fi, cs->index, nr, cs->d, n,
-				&cs->plan);
+	err = xdev_ext_comp_copy_validate(&cs->window, cs->fi, cs->index, nr,
+		scratch, n, XDEV_EXT_CE_MAX_ENTRIES, XDEV_EXT_CE_F_KNOWN_MASK,
+		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), &cs->plan);
 	if (err)
 		return err;
-	err = xdev_ext_mech_window_offset(xdev_ext_mech_batch_slot(b),
-		xdev_ext_mech_session_depth(st->s), group_bytes, cs->geom.window_len,
-		&offset);
-	if (err)
-		return err;
-	for (i = 0; i < n; i++)
-		if (cs->d[i].gpu_off < offset ||
-		    !xdev_ext_mech_span_in(cs->d[i].gpu_off - offset,
-				      cs->d[i].len, group_bytes))
-			return -ERANGE;
 	cs->staged = b;
 	return 0;
 }
 
-/* Worker: the plan validate accepted for @b, as backend transfers. */
+static int xdev_ext_ce_copy_claim(void *batch, __u32 frame_pos,
+				  __u64 *owner, __u64 *generation)
+{
+	return xdev_ext_mech_batch_frame_claim(batch, frame_pos, owner, generation);
+}
+
+/* Worker: consume exactly the typed plan admitted for this batch and slot. */
 static int xdev_ext_ce_stage_xfers(struct xdev_ext_ce_stage *cs, struct xdev_ext_mech_batch *b,
 			      struct xdev_ext_ce_batch *cb)
 {
 	struct xdev_ext_mech_batch *staged = cs->staged;
+	struct xdev_ext_comp_copy_transfer x[XDEV_EXT_CE_MAX_ENTRIES];
 	u32 i;
+	int err;
 
 	cs->staged = NULL;
 	if (READ_ONCE(cs->dead))
 		return -ENODEV;
 	if (staged != b)
 		return -EPROTO;
-	for (i = 0; i < cs->plan.n; i++) {
+	err = xdev_ext_comp_copy_transfer(&cs->plan, xdev_ext_mech_batch_id(b),
+		xdev_ext_mech_batch_slot(b), b, xdev_ext_ce_copy_claim, x);
+	if (err)
+		return err;
+	for (i = 0; i < cs->plan.n; i++)
 		cb->x[i] = (struct xdev_ext_ce_xfer){
-			.host_byte_off	= cs->plan.host_off[i],
-			.gpu_off	= cs->d[i].gpu_off,
-			.len		= cs->d[i].len,
-			.flags		= cs->d[i].flags,
+			.owner		= x[i].owner,
+			.generation	= x[i].generation,
+			.host_byte_off	= x[i].host_byte_off,
+			.gpu_off	= x[i].device_off,
+			.len		= x[i].len,
+			.flags		= x[i].flags,
 		};
-		if (xdev_ext_mech_batch_frame_claim(b, cs->d[i].frame_pos,
-			&cb->x[i].owner, &cb->x[i].generation))
-			return -ESTALE;
-	}
 	cb->n = cs->plan.n;
 	cb->total = cs->plan.total;
 	return 0;

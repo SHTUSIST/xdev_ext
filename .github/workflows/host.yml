@@ -126,6 +126,11 @@ jobs:
           python3 tests/core/provider_scope/run.py --scope-header "$GITHUB_WORKSPACE/src/core/include/linux/xdev_ext_dma_scope_core.h" --output "$RUNNER_TEMP/provider-scope-comparison"
           python3 tests/core/provider_scope/run_lifecycle.py --source-root "$GITHUB_WORKSPACE" --mode candidate --sanitize --output "$RUNNER_TEMP/provider-scope-lifecycle"
           python3 tests/core/provider_scope/run_abi.py --public-header "$GITHUB_WORKSPACE/src/core/include/linux/xdev_ext_mech.h" --output "$RUNNER_TEMP/provider-scope-abi"
+      - name: Typed compute copy windows and admitted plans
+        working-directory: .
+        run: |
+          python3 tests/compute/copy_window/run.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/compute-copy-window"
+          python3 tests/compute/copy_window/mutations.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/compute-copy-mutants"
       - name: DMA reference plan byte coverage and provider limits
         working-directory: .
         run: make -C tests/core/provider_dma test BUILD_DIR="$RUNNER_TEMP/dma-reference"

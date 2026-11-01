@@ -32,6 +32,7 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_dma_core.h"
+#include "xdev_ext_compfam_copy_core.h"
 #include "xdev_ext_mech_native_cookie.h"
 #include "xdev_ext_mech_ce_lease.h"
 #include "xdev_ext_mech_window.h"
@@ -141,15 +142,20 @@ struct xdev_ext_dma_stage {
 	struct xdev_ext_dma_region region;
 	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_dma_geom geom;
+	struct xdev_ext_comp_copy_window window;
 	atomic_t ambiguous;		/* AMBIGUOUS completions on this stage */
 	bool dead;
 	/* session worker only: the plan validate accepted, until submit */
 	struct xdev_ext_mech_batch *staged;
-	struct xdev_ext_dma_plan plan;
-	struct xdev_ext_dma_copy_desc d[XDEV_EXT_DMA_MAX_ENTRIES];
+	struct xdev_ext_comp_copy_plan plan;
 	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
 };
+
+_Static_assert(XDEV_EXT_DMA_MAX_ENTRIES <=
+	       sizeof(((struct xdev_ext_comp_copy_plan *)0)->entry) /
+	       sizeof(struct xdev_ext_comp_copy_entry),
+	       "DMA entries exceed the common copy plan capacity");
 
 /* Stable per-batch storage: never overwritten by another stage's private area.
  * b is initialized once and remains safe to dereference for stale-ticket rejection.
@@ -444,7 +450,7 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
  const struct xdev_ext_dma_provider_ops *ops;
  const struct xdev_ext_dma_scope_ops *scope_ops;
  struct xdev_ext_dma_stage *cs;
- u64 offset;
+ struct xdev_ext_window_copy_geom geom;
  int err;
 
  if (u->flags || (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
@@ -493,8 +499,10 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
   return err;
  if (!(cs->geom.directions & (1U << st->direction)))
   return -EOPNOTSUPP;
- err = xdev_ext_mech_window_offset(0, xdev_ext_mech_session_depth(st->s),
-   xdev_ext_mech_session_layout(st->s)->group_bytes, cs->geom.window_len, &offset);
+ geom = xdev_ext_dma_window_geom(&cs->geom);
+ err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
+   st->direction, xdev_ext_mech_session_depth(st->s),
+   xdev_ext_mech_session_layout(st->s)->group_bytes);
  if (err)
   return err;
  err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
@@ -596,57 +604,57 @@ static int xdev_ext_dma_validate(struct xdev_ext_mech_stage *st, struct xdev_ext
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
 	int nr, err;
- u64 offset;
- u32 i, group_bytes = xdev_ext_mech_session_layout(st->s)->group_bytes;
 
 	cs->staged = NULL;
- if (!b)
-  return -EINVAL;
+	if (!b)
+		return -EINVAL;
 	if (n > XDEV_EXT_DMA_MAX_ENTRIES)
 		return -E2BIG;
 	nr = xdev_ext_dma_collect(cs, b);
 	if (nr < 0)
 		return nr;
-	memcpy(cs->d, scratch, n * sizeof(cs->d[0]));
-	err = xdev_ext_dma_plan_check(&cs->geom, cs->fi, cs->index, nr, st->direction, cs->d, n,
-				&cs->plan);
+	err = xdev_ext_comp_copy_validate(&cs->window, cs->fi, cs->index, nr,
+		scratch, n, XDEV_EXT_DMA_MAX_ENTRIES, XDEV_EXT_DMA_F_KNOWN_MASK,
+		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), &cs->plan);
 	if (err)
 		return err;
- err = xdev_ext_mech_window_offset(xdev_ext_mech_batch_slot(b),
-   xdev_ext_mech_session_depth(st->s), group_bytes, cs->geom.window_len, &offset);
- if (err)
-  return err;
- for (i = 0; i < n; i++)
-  if (cs->d[i].device_off < offset ||
-      !xdev_ext_mech_span_in(cs->d[i].device_off - offset, cs->d[i].len, group_bytes))
-   return -ERANGE;
 	cs->staged = b;
 	return 0;
 }
 
-/* Worker: the plan validate accepted for @b, as provider transfers. */
+static int xdev_ext_dma_copy_claim(void *batch, __u32 frame_pos,
+				  __u64 *owner, __u64 *generation)
+{
+	return xdev_ext_mech_batch_frame_claim(batch, frame_pos, owner, generation);
+}
+
+/* Worker: consume exactly the typed plan admitted for this batch and slot. */
 static int xdev_ext_dma_stage_xfers(struct xdev_ext_dma_stage *cs, struct xdev_ext_mech_batch *b,
 			      struct xdev_ext_dma_batch *cb)
 {
 	struct xdev_ext_mech_batch *staged = cs->staged;
+	struct xdev_ext_comp_copy_transfer x[XDEV_EXT_DMA_MAX_ENTRIES];
 	u32 i;
+	int err;
 
 	cs->staged = NULL;
 	if (READ_ONCE(cs->dead))
 		return -ENODEV;
 	if (staged != b)
 		return -EPROTO;
-	for (i = 0; i < cs->plan.n; i++) {
+	err = xdev_ext_comp_copy_transfer(&cs->plan, xdev_ext_mech_batch_id(b),
+		xdev_ext_mech_batch_slot(b), b, xdev_ext_dma_copy_claim, x);
+	if (err)
+		return err;
+	for (i = 0; i < cs->plan.n; i++)
 		cb->x[i] = (struct xdev_ext_dma_xfer){
-			.host_byte_off	= cs->plan.host_off[i],
-			.device_off	= cs->d[i].device_off,
-			.len		= cs->d[i].len,
-			.flags		= cs->d[i].flags,
+			.owner		= x[i].owner,
+			.generation	= x[i].generation,
+			.host_byte_off	= x[i].host_byte_off,
+			.device_off	= x[i].device_off,
+			.len		= x[i].len,
+			.flags		= x[i].flags,
 		};
-  if (xdev_ext_mech_batch_frame_claim(b, cs->d[i].frame_pos,
-       &cb->x[i].owner, &cb->x[i].generation))
-   return -ESTALE;
- }
 	cb->n = cs->plan.n;
 	cb->total = cs->plan.total;
 	return 0;
