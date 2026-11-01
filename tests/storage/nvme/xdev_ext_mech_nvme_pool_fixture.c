@@ -6,6 +6,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include "include/linux/xdev_ext_storfam_runtime.h"
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define ERR_CAST(p) ((void *)(p))
 #include "include/linux/nvme_xdev_ext_passthru.h"
 typedef uint8_t u8;
 typedef uint16_t u16;
@@ -80,7 +84,7 @@ static const char *mode;
 static unsigned int hot,hot_allocs,cold_allocs,submitted,completed,live,bio_endios;
 static struct request *pending[4];
 static unsigned int pending_count;
-static struct nvme_xdev_ext_mech_completion old_done;
+static struct xdev_ext_stor_completion old_done;
 static struct request requests[512];
 static unsigned int next_request;
 static void *kmalloc(size_t n,int flags)
@@ -157,12 +161,13 @@ static void bio_endio(struct bio *bio) {(void)bio;bio_endios++;}
 static void blk_execute_rq_nowait(struct request *req,bool at_head)
 { (void)at_head;submitted++;
  if(!strcmp(mode,"capacity")){pending[pending_count++]=req;return;}
- if(!strcmp(mode,"stale") && submitted==1)old_done=*(struct nvme_xdev_ext_mech_completion *)req->end_io_data;
+ if(!strcmp(mode,"stale") && submitted==1)old_done=*(struct xdev_ext_stor_completion *)req->end_io_data;
  if(!strncmp(mode,"batch",5)) {
   if(!strcmp(mode,"batch-short"))req->residual=512;
   if(!strcmp(mode,"batch-foreign")) {static struct bio foreign;foreign=*req->bio;req->bio=&foreign;}
   blk_complete_request(req);
  } else {req->bio=NULL;req->residual=!strcmp(mode,"short-native") ? 512 : 0;}
+ if(!strcmp(mode,"host-error"))req->nvme.status=0x182;
  req->end_io(req,0); }
 static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,
  u64 cookie, u64 lba, u32 bytes, u32 plan)

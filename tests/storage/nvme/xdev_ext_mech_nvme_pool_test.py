@@ -16,7 +16,11 @@ def declaration(source, name, struct=False):
     pattern = (r'^struct ' + name + r'\s*\{.*?^};' if struct else
                r'^static [^;{}]*\b' + name + r'\([^;]*?\)\s*\{.*?^}')
     match = re.search(pattern, source, re.M | re.S)
-    return match[0] if match else ''
+    if not match:
+        raise AssertionError('production declaration missing: ' + name)
+    return match[0]
+
+
 
 
 class NvmePool(unittest.TestCase):
@@ -27,28 +31,28 @@ class NvmePool(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         fixture = (HERE / 'xdev_ext_mech_nvme_pool_fixture.c').read_text()
         names = ['nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch',
-                 'nvme_xdev_ext_mech_completion', 'nvme_xdev_ext_mech_slot']
+                 'nvme_xdev_ext_mech_slot']
         definitions = '\n'.join(declaration(source, name, True) for name in names)
         functions = ['nvme_xdev_ext_class_resources_free', 'nvme_xdev_ext_class_resources_init',
                      'nvme_xdev_ext_class_slot_get', 'nvme_xdev_ext_class_slot_put',
                      'nvme_xdev_ext_class_walk', 'nvme_xdev_ext_class_map',
                      'nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
                      'nvme_xdev_ext_poll_arm',
+                     'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_ready',
                      'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_class_submit',
                      'nvme_xdev_ext_class_fill_cqe']
-        functions = '\n\n'.join(declaration(source, name) for name in functions)
-        prealloc = bool(declaration(source, 'nvme_xdev_ext_class_resources_init'))
+        functions = storage_runtime(ROOT) + '\n\n' + '\n\n'.join(declaration(source, name) for name in functions)
         fixture = fixture.replace('/* PRODUCTION_TYPES */', definitions)
         fixture = fixture.replace('/* PRODUCTION_FUNCTIONS */', functions)
         block = (ROOT / 'block/blk-mq.c').read_text()
         fixture = fixture.replace('/* BLOCK_BATCH_COMPLETION */',
                                   declaration(block, 'blk_complete_request'))
         fixture = fixture.replace('/* POOL_INIT */',
-                'rc = nvme_xdev_ext_class_resources_init(&st);' if prealloc else 'rc = 0;')
+                'rc = nvme_xdev_ext_class_resources_init(&st);')
         fixture = fixture.replace('/* POOL_COUNT */',
-                'for(i=0;i<p.nr_slots;i++)retained+=p.slots[i].busy;' if prealloc else '')
+                'for(i=0;i<p.nr_slots;i++)retained+=p.slots[i].runtime.busy;')
         fixture = fixture.replace('/* POOL_FREE */',
-                'nvme_xdev_ext_class_resources_free(&p);' if prealloc else '')
+                'nvme_xdev_ext_class_resources_free(&p);')
         path = Path(cls.temp.name)
         (path / 'probe.c').write_text(fixture)
         cls.probe = path / 'probe'
@@ -125,6 +129,15 @@ class NvmePool(unittest.TestCase):
                 self.assertEqual(result['retained'], 1, result)
                 self.assertGreater(result['live'], 0, result)
 
+    def test_error_without_host_residual_releases_drained_slot(self):
+        result = self.run_case('host-error')
+        self.assertEqual(result['status'], 0x182, result)
+        self.assertEqual(result['uncertain'], 0, result)
+        self.assertEqual(result['retained'], 0, result)
+        self.assertEqual(result['submitted'], 1, result)
+        self.assertEqual(result['completed'], 1, result)
+        self.assertEqual(result['live'], 0, result)
+
     def test_short_native_completion_keeps_its_lease(self):
         result = self.run_case('short-native')
         self.assertEqual(result['submitted'], 1, result)
@@ -132,6 +145,19 @@ class NvmePool(unittest.TestCase):
         self.assertEqual(result['uncertain'], 1, result)
         self.assertEqual(result['retained'], 1, result)
         self.assertGreater(result['live'], 0, result)
+
+
+def storage_runtime(root):
+    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    found = []
+    for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
+                 'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
+        match = re.search(r'^[A-Za-z_][^;{}]*\b' + name +
+                          r'\([^;{}]*\)\s*\{.*?^\}', content, re.M | re.S)
+        if not match:
+            raise AssertionError('production storage runtime symbol missing: ' + name)
+        found.append(match[0])
+    return '\n\n'.join(found)
 
 
 class NvmePoolBounce(NvmePool):

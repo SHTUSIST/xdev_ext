@@ -37,6 +37,7 @@ TEST_FILES += transport_pending/portable_test.c transport_pending/native_ack_fix
 TEST_FILES += xdev_ext_mech_nvme_nowait_fixture.c
 TEST_FILES += xdev_ext_mech_recycle_tail_fixture.c xdev_ext_mech_ce_positive_fixture.c
 TEST_PROGS += xdev_ext_mech_nvme_pool_test.py
+TEST_PROGS += family/storfam_runtime_test.py
 TEST_FILES += xdev_ext_mech_nvme_pool_fixture.c
 TEST_PROGS += iaa_transform/run.sh xdev_ext_mech_variable_length_test.py
 TEST_FILES += $(wildcard iaa_transform/*.py iaa_transform/*.c iaa_transform/*.h iaa_transform/*.md)

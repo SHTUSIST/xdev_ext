@@ -261,10 +261,18 @@ def check_mech_class(source: str, root: Path) -> str:
                 "kmalloc(" not in hot,
                 "the session hot path must not allocate bio/completion metadata")
     end_io = function_body(mech, "static enum rq_end_io_ret nvme_xdev_ext_class_end_io(")
-    require(in_order(end_io, "xdev_ext_mech_batch_completion_claim(b, ticket)",
-                     "NVME_REQ_CANCELLED", "blk_rq_bytes(req)", "nvme_xdev_ext_mech_cqe(",
-                     "xdev_ext_mech_batch_completion_publish(b, ticket, status, uncertain)"),
-            "end_io must claim its native ticket before publishing status/uncertainty")
+    runtime = (root / "io_uring/family/xdev_ext_storfam.c").read_text()
+    handoff = function_body(runtime, "void xdev_ext_stor_done(")
+    complete = function_body(mech, "static int nvme_xdev_ext_class_complete(")
+    require("xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req," in end_io,
+            "end_io must dispatch the native completion to the family")
+    require(in_order(handoff, "xdev_ext_mech_batch_completion_claim(b, done->ticket)",
+                     "status = complete(", "xdev_ext_mech_trace_native_complete(",
+                     "ready(b, status", "xdev_ext_mech_batch_completion_publish("),
+            "family completion must claim before CQE, trace, ready and publish")
+    require(in_order(complete, "NVME_REQ_CANCELLED", "blk_rq_bytes(req)",
+                     "nvme_xdev_ext_mech_cqe("),
+            "member must preserve host status and residual classification under claim")
     require(end_io.rstrip().endswith("return RQ_END_IO_FREE;"),
             "the block layer must retain native request destruction")
     require("kfree(done)" not in end_io, "a preallocated completion lease was freed")
@@ -274,7 +282,7 @@ def check_mech_class(source: str, root: Path) -> str:
                      "nvme_xdev_ext_class_slot_put(", "memcpy(cqe"),
             "the worker does not consume its completion lease before advancing")
     put = function_body(mech, "nvme_xdev_ext_class_slot_put(")
-    require(in_order(put, "slot->done.uncertain", "bio_uninit(", "slot->busy = false"),
+    require(in_order(put, "slot->done.uncertain", "bio_uninit(", "xdev_ext_stor_slot_put("),
             "an uncertain native lease must never rejoin the pool")
     require("kfree(" not in fill_cqe, "the per-group path frees a shared pool bio")
     dead = function_body(mech, "static void nvme_xdev_ext_class_mark_dead(")

@@ -4,6 +4,7 @@
 
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_storfam_core.h>
+#include <linux/xdev_ext_storfam_runtime.h>
 
 struct xdev_ext_stor_hooks {
 	struct xdev_ext_family_hooks_hdr hdr;

@@ -1813,9 +1813,19 @@
       "native_path": "include/linux/xdev_ext_storfam_core.h"
     },
     {
+      "source": "src/storage/include/linux/xdev_ext_storfam_runtime.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_storfam_runtime.h"
+    },
+    {
       "source": "src/storage/include/uapi/linux/nvme_ioctl.h",
       "component": "linux",
       "native_path": "include/uapi/linux/nvme_ioctl.h"
+    },
+    {
+      "source": "src/storage/io_uring/family/xdev_ext_storfam.c",
+      "component": "linux",
+      "native_path": "io_uring/family/xdev_ext_storfam.c"
     },
     {
       "source": "tests/benchmarks/Makefile",
@@ -3803,6 +3813,11 @@
       "source": "tests/core/family/storfam_core_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/family/storfam_core_test.c"
+    },
+    {
+      "source": "tests/core/family/storfam_runtime_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/family/storfam_runtime_test.py"
     },
     {
       "source": "tests/core/family/xdomain_create_test.c",

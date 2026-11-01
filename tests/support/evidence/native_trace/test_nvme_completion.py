@@ -7,6 +7,7 @@ placement come directly from xdev_ext_mech_nvme.c, never a copied model.
 """
 from pathlib import Path
 import shutil
+import re
 import subprocess
 import tempfile
 import unittest
@@ -16,7 +17,10 @@ SOURCE = ROOT / 'kernel/drivers/nvme/host/xdev_ext_mech_nvme.c'
 
 
 def function_body(text, name):
-    start = text.index('static enum rq_end_io_ret ' + name + '(')
+    match = re.search(r'^[A-Za-z_][^;{}]*\b' + re.escape(name) + r'\(', text, re.M)
+    if not match:
+        raise AssertionError('production completion symbol missing: ' + name)
+    start = match.start()
     brace = text.index('{', start)
     depth = 1
     end = brace + 1
@@ -40,7 +44,7 @@ enum rq_end_io_ret { RQ_END_IO_FREE };
 #define WRITE_ONCE(x, v) ((x) = (v))
 struct xdev_ext_mech_batch { int claim; unsigned bytes; };
 /* poll_*: stage polling record, retired by every end_io. */
-struct nvme_xdev_ext_mech_completion {
+struct xdev_ext_stor_completion {
     struct xdev_ext_mech_batch *b; u64 ticket; bool uncertain; bool poll_live; unsigned poll_queue;
 };
 struct nvme_xdev_ext_mech_batch { void *bio; int cqe; };
@@ -73,7 +77,7 @@ SUFFIX = r'''
 int main(int argc, char **argv)
 {
     struct xdev_ext_mech_batch b = { .bytes = 4096 };
-    struct nvme_xdev_ext_mech_completion done = { .b = &b, .ticket = 918 };
+    struct xdev_ext_stor_completion done = { .b = &b, .ticket = 918 };
     int bio;
     struct request req = { .end_io_data = &done, .bio = &bio, .bytes = 4096 };
     int mode = argc == 2 ? atoi(argv[1]) : -1;
@@ -106,8 +110,13 @@ class NativeCompletionHook(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='native-completion-contract-')
         cls.binary = Path(cls.tmp.name) / 'end_io'
         src = cls.binary.with_suffix('.c')
-        src.write_text(PREFIX + function_body(SOURCE.read_text(),
-                       'nvme_xdev_ext_class_end_io') + SUFFIX)
+        member = SOURCE.read_text()
+        runtime = (ROOT / 'kernel/io_uring/family/xdev_ext_storfam.c').read_text()
+        bodies = function_body(runtime, 'xdev_ext_stor_done')
+        for name in ('nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_ready',
+                     'nvme_xdev_ext_class_end_io'):
+            bodies += '\n' + function_body(member, name)
+        src.write_text(PREFIX + bodies + SUFFIX)
         cc = shutil.which('cc')
         if not cc:
             raise RuntimeError('a real C compiler is required')

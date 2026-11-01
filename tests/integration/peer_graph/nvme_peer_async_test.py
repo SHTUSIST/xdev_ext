@@ -37,6 +37,10 @@ SHIM = r'''
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
+#include "include/linux/xdev_ext_storfam_runtime.h"
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define ERR_CAST(p) ((void *)(p))
 #include "include/linux/nvme_xdev_ext_passthru.h"
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64;
 typedef int atomic_t; typedef int blk_status_t; typedef u64 dma_addr_t; typedef u32 gfp_t;
@@ -221,8 +225,11 @@ static struct request *blk_mq_alloc_request(struct request_queue *q, int op, u32
 static void blk_mq_free_request(struct request *r) { assert(r->allocated && !r->executed); r->allocated = false; frees++; }
 static void nvme_init_request(struct request *r, struct nvme_command *c)
 { c->common.flags &= ~NVME_CMD_SGL_ALL; *r->nr.cmd = *c; }
+static int immediate_complete;
+static void controller_complete(struct request *r, u16 status, u32 flags, blk_status_t err);
 static void blk_execute_rq_nowait(struct request *r, bool at_head)
-{ assert(!at_head && r->allocated && !r->executed && r->end_io); r->executed = true; executes++; }
+{ assert(!at_head && r->allocated && !r->executed && r->end_io); r->executed = true; executes++;
+ if (immediate_complete) controller_complete(r,0,0,0); }
 static int nvme_execute_rq(struct request *r, bool at_head)
 { (void)r; (void)at_head; blocked_worker++; return 0; }
 /* Controller side: the request ends exactly once, in interrupt context. */
@@ -305,7 +312,7 @@ static void case_depth(void)
   struct request *q = NULL;
   for (int j = 0; j < NREQ; j++)
    if (requests[j].executed && !requests[j].ended &&
-       ((struct nvme_xdev_ext_mech_completion *)requests[j].end_io_data)->b == &bs[i]) q = &requests[j];
+       ((struct xdev_ext_stor_completion *)requests[j].end_io_data)->b == &bs[i]) q = &requests[j];
   CHECK(q, "end_io context names its own batch");
   q->nr.result.u64 = 0x55 + i;
   controller_complete(q, 0, 0, 0);
@@ -345,6 +352,36 @@ static void case_slots(void)
  controller_complete(nth_outstanding(0), 0, 0, 0); worker_consume(0);
  CHECK(!live_leases, "drained");
  puts("ok 2 - slot exhaustion, tag pressure and stale generation are preaccept refusals with nothing leased or issued");
+}
+static void case_early_and_stale(void)
+{
+ struct xdev_ext_stor_completion saved;
+ struct request duplicate = {};
+ int unq=unquiesced_releases, ex=executes;
+ batch_init(0,0,0,4096,0);
+ immediate_complete=1;
+ CHECK(!SUBMIT(&st,&bs[0]), "immediate native completion accepted");
+ immediate_complete=0;
+ CHECK(bs[0].publishes==1 && !bs[0].sequester && !outstanding(),
+       "end_io before post returns publishes exactly once");
+ CHECK(live_leases==1 && !irq_releases, "end_io leaves native leases for the worker");
+ saved=bps[0].peer_slot->done;
+ duplicate.end_io_data=&saved;
+ duplicate.nr.status=0x182;
+ duplicate.nr.result.u64=0xdeadbeef;
+ in_irq=1; nvme_xdev_ext_peer_end_io(&duplicate,0); in_irq=0;
+ CHECK(bs[0].publishes==1 && bps[0].cqe.status==0 && bps[0].cqe.result!=0xdeadbeef,
+       "duplicate ticket cannot mutate CQE or publish again");
+ worker_consume(0);
+ batch_init(0,0,0,4096,0); bs[0].ticket++;
+ CHECK(!SUBMIT(&st,&bs[0]), "new batch takes a released slot");
+ in_irq=1; nvme_xdev_ext_peer_end_io(&duplicate,0); in_irq=0;
+ CHECK(!bs[0].publishes && !bs[0].claims && !bps[0].cqe.status,
+       "stale native ticket cannot claim or alter the replacement batch");
+ controller_complete(nth_outstanding(0),0,0,0); worker_consume(0);
+ CHECK(executes==ex+2 && !live_leases && unquiesced_releases==unq,
+       "only two accepted commands and success leases release quiesced");
+ puts("ok 6 - immediate end_io, duplicate and stale tickets preserve CQE and lease ownership");
 }
 static void case_failures(void)
 {
@@ -455,10 +492,24 @@ int main(void)
  case_pages(); if (failures) return 1;
  case_malformed(); if (failures) return 1;
  /* Last: it retires every slot as uncertain or zombie-retained. */
+ case_early_and_stale(); if (failures) return 1;
  case_failures(); if (failures) return 1;
  return 0;
 }
 '''
+
+
+def storage_runtime(root):
+    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    found = []
+    for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
+                 'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
+        match = re.search(r'^[A-Za-z_][^;{}]*\b' + name +
+                          r'\([^;{}]*\)\s*\{.*?^\}', content, re.M | re.S)
+        if not match:
+            raise AssertionError('production storage runtime symbol missing: ' + name)
+        found.append(match[0])
+    return '\n\n'.join(found)
 
 
 def production_source():
@@ -470,24 +521,37 @@ def extract(source):
     """Production structures and GPU-memory stage functions, in file order."""
     types = []
     for name in ("nvme_xdev_ext_mech_stage", "nvme_xdev_ext_mech_batch",
-                 "nvme_xdev_ext_mech_completion", "nvme_xdev_ext_mech_slot",
+                 "nvme_xdev_ext_mech_slot",
                  "nvme_xdev_ext_peer_slot", "nvme_xdev_ext_peer_res"):
         m = re.search(r"^struct " + name + r" \{.*?^\};", source, re.M | re.S)
-        if m:
-            types.append((m.start(), m[0]))
+        if not m:
+            raise AssertionError("production structure missing: " + name)
+        types.append((m.start(), m[0]))
     fill = re.search(r"\.fill_cqe = (\w+),", source)[1]
     wanted = (r"(?:nvme_xdev_ext_peer_\w+|nvme_xdev_ext_poll_(?:opf|check|arm)|"
               r"nvme_xdev_ext_class_fill_cqe|" + fill + r")")
     functions = [(m.start(), m[0]) for m in re.finditer(
         r"^static [^;{}=]*\b" + wanted + r"\([^;{]*\)\s*\{.*?^\}", source, re.M | re.S)]
+    required = ('nvme_xdev_ext_peer_resources_free', 'nvme_xdev_ext_peer_resources_init',
+                'nvme_xdev_ext_peer_slot_get', 'nvme_xdev_ext_peer_slot_put',
+                'nvme_xdev_ext_peer_lease', 'nvme_xdev_ext_peer_map',
+                'nvme_xdev_ext_peer_complete', 'nvme_xdev_ext_peer_end_io',
+                'nvme_xdev_ext_peer_submit', 'nvme_xdev_ext_peer_fill_cqe',
+                'nvme_xdev_ext_class_fill_cqe', 'nvme_xdev_ext_poll_opf',
+                'nvme_xdev_ext_poll_check', 'nvme_xdev_ext_poll_arm')
+    for name in required:
+        if not any(re.match(r"^static [^;{}=]*\b" + name + r"\(", body, re.S)
+                   for _, body in functions):
+            raise AssertionError("production NVMe function missing: " + name)
     submit = "nvme_xdev_ext_peer_submit"
     have_res = "nvme_xdev_ext_peer_resources_init(" in source
     types += [(m.start(), m[0]) for m in
               re.finditer(r"^#define NVME_XDEV_EXT_PEER_\w+\s.*$", source, re.M)]
     hooks = re.search(r"^static const struct xdev_ext_stor_hooks "
                       r"nvme_xdev_ext_stor_hooks = \{.*?^\};", source, re.M | re.S)
-    if hooks:
-        types.append((hooks.start(), hooks[0]))
+    if not hooks:
+        raise AssertionError("production storage hooks missing")
+    types.append((hooks.start(), hooks[0]))
     # These are real declarations from the production headers. Pull only the
     # dependencies needed by the extracted object: the full mechanism header
     # also declares stage/batch types supplied by this deterministic shim.
@@ -508,7 +572,7 @@ def extract(source):
     requester = (KERNEL / "io_uring/family/xdev_ext_requester.c").read_text()
     split = requester[requester.index("int xdev_ext_peer_lease_split("):
                       requester.index("EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);")]
-    code = split + "\n\n" + code
+    code = storage_runtime(KERNEL) + "\n\n" + split + "\n\n" + code
     return text, code, fill, submit, have_res
 
 
@@ -543,9 +607,10 @@ static void nvme_xdev_ext_peer_trace_release(
 def main():
     text, code, fill, submit, have_res = extract(production_source())
     mutations = [
+        ("completion claim removed", "if (xdev_ext_mech_batch_completion_claim(b, done->ticket))", "if (0)"),
         ("accepted failure published as an ordinary completion",
-         "xdev_ext_mech_batch_completion_publish(b, ticket, status, done->uncertain);",
-         "xdev_ext_mech_batch_completion_publish(b, ticket, status, false);"),
+         "xdev_ext_mech_batch_completion_publish(b, done->ticket, status, done->uncertain);",
+         "xdev_ext_mech_batch_completion_publish(b, done->ticket, status, false);"),
         ("uncertain lease released quiesced",
          "xdev_ext_peer_fd_release(&slot->leases[i], quiesced);",
          "xdev_ext_peer_fd_release(&slot->leases[i], true);"),
@@ -553,8 +618,8 @@ def main():
         ("native write direction reversed",
          "p->write ? DMA_TO_DEVICE : DMA_FROM_DEVICE", "p->write ? DMA_FROM_DEVICE : DMA_TO_DEVICE"),
         # Merging moved into the pure builder; perturb its input adjacency instead.
-        ("DMA-contiguous pages not merged", "slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);",
-         "slot->spans, nvme_xdev_ext_stor_hooks.max_extents, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
+        ("DMA-contiguous pages not merged", "nvme_xdev_ext_stor_hooks.extent_align_mask, &n);",
+         "nvme_xdev_ext_stor_hooks.extent_align_mask, &n);\n\t\tif (!ret && n < slot->nr_leases) return -EPROTO;"),
         ("provider page refusal not split", "if (ret != -ERANGE)", "if (true)"),
     ]
     with tempfile.TemporaryDirectory(prefix="nvme-peer-async-") as tmp:

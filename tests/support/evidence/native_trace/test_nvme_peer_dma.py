@@ -140,7 +140,8 @@ class NVMePeerDMA(unittest.TestCase):
             native = entry.get('native_path', '')
             if entry.get('component') == 'linux' and (native.startswith('include/') or
                     native in ('io_uring/family/xdev_ext_requester.c',
-                               'drivers/nvme/host/xdev_ext_native_peer_trace.h')):
+                               'drivers/nvme/host/xdev_ext_native_peer_trace.h',
+                               'io_uring/family/xdev_ext_storfam.c')):
                 target = peer.KERNEL / native
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes((ROOT / entry['source']).read_bytes())
