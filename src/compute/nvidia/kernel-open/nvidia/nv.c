@@ -35,6 +35,7 @@
 #include "nv-p2p.h"
 #include "nv-xdev_ext-ce-backend.h"
 #include "nv-xdev_ext-peer.h"
+#include "nv-xdev_ext-dmabuf.h"
 #include "nv-xdev_ext-dma-lifetime.h"
 #include "nv-reg.h"
 #include "nv-msi.h"
@@ -976,6 +977,13 @@ static int __init nvidia_init_module(void)
     }
 #endif
 
+    /* Publish the exact exporter description before a file can export buffers. */
+    rc = nv_xdev_ext_dmabuf_init();
+    if (rc < 0)
+    {
+        goto no_chrdev_exit;
+    }
+
     /*
      * Register char devices for both the region of regular devices
      * as well as the control device.
@@ -1008,6 +1016,7 @@ partial_chrdev_exit:
         &nv_linux_devices_cdev);
 
 no_chrdev_exit:
+    nv_xdev_ext_dmabuf_exit();
 #if defined(NV_UVM_ENABLE)
     nv_uvm_exit();
 #endif
@@ -1034,6 +1043,7 @@ static void __exit nvidia_exit_module(void)
 {
     nvidia_stack_t *sp = __nv_init_sp;
 
+    nv_xdev_ext_dmabuf_exit();
     nv_xdev_ext_peer_exit();
     nv_xdev_ext_ce_backend_exit();
 

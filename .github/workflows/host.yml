@@ -49,6 +49,9 @@ jobs:
           python3 tests/compute/cuda/early_selection/test_selection.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/cuda-early-owner-contracts"
           python3 tests/compute/cuda/early_selection/test_driver.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-early-selection-contracts"
           python3 tests/compute/tp/echo_gpu_mutations_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-echo-gpu-mutations"
+      - name: NVIDIA dma-buf descriptor and module ownership
+        working-directory: .
+        run: python3 -I tests/compute/nvidia/nv_xdev_ext_dmabuf_test.py
       - name: Standalone production-rule checks
         run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
       - name: CPU mechanism BPF target and scratch ABI contracts
