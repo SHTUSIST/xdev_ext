@@ -599,6 +599,11 @@
       "native_path": "io_uring/iaa/xdev_ext_mech_iaa.c"
     },
     {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_core.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_core.h"
+    },
+    {
       "source": "src/compute/io_uring/xdev_ext_mech_ce.c",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_mech_ce.c"
@@ -3009,6 +3014,46 @@
       "source": "tests/compute/ce/xdev_ext_mech_ce_source_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py"
+    },
+    {
+      "source": "tests/compute/copy_window/README.md",
+      "logical_path": "tests/compute/copy_window/README.md"
+    },
+    {
+      "source": "tests/compute/copy_window/abi.c",
+      "logical_path": "tests/compute/copy_window/abi.c"
+    },
+    {
+      "source": "tests/compute/copy_window/abi.expected.txt",
+      "logical_path": "tests/compute/copy_window/abi.expected.txt"
+    },
+    {
+      "source": "tests/compute/copy_window/baseline.c",
+      "logical_path": "tests/compute/copy_window/baseline.c"
+    },
+    {
+      "source": "tests/compute/copy_window/boundary.h",
+      "logical_path": "tests/compute/copy_window/boundary.h"
+    },
+    {
+      "source": "tests/compute/copy_window/boundary_impl.h",
+      "logical_path": "tests/compute/copy_window/boundary_impl.h"
+    },
+    {
+      "source": "tests/compute/copy_window/consumers.c",
+      "logical_path": "tests/compute/copy_window/consumers.c"
+    },
+    {
+      "source": "tests/compute/copy_window/mutations.py",
+      "logical_path": "tests/compute/copy_window/mutations.py"
+    },
+    {
+      "source": "tests/compute/copy_window/run.py",
+      "logical_path": "tests/compute/copy_window/run.py"
+    },
+    {
+      "source": "tests/compute/copy_window/typed.c",
+      "logical_path": "tests/compute/copy_window/typed.c"
     },
     {
       "source": "tests/compute/cpu/compute_batch_test.py",
