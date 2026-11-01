@@ -4539,6 +4539,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_spans/test_user_spans.py"
     },
     {
+      "source": "tests/core/peer_dmabuf/Makefile",
+      "logical_path": "tests/core/peer_dmabuf/Makefile"
+    },
+    {
       "source": "tests/core/peer_dmabuf/contract.h",
       "logical_path": "tests/core/peer_dmabuf/contract.h"
     },
@@ -4573,6 +4577,18 @@
     {
       "source": "tests/core/peer_dmabuf/kernel_shim.h",
       "logical_path": "tests/core/peer_dmabuf/kernel_shim.h"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/native-acceptance.md",
+      "logical_path": "tests/core/peer_dmabuf/native-acceptance.md"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/native_cli_test.py",
+      "logical_path": "tests/core/peer_dmabuf/native_cli_test.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/native_import.c",
+      "logical_path": "tests/core/peer_dmabuf/native_import.c"
     },
     {
       "source": "tests/core/peer_dmabuf/provenance.py",
