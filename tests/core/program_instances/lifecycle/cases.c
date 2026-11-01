@@ -22,6 +22,11 @@ static bool retire_accepted(struct xdev_ext_mech_batch *b){
  struct xdev_ext_mech_session *s=b->s;int result;
  assert(!xdev_ext_mech_completion_consume(&b->completion,b->ticket,&result));b->status=result;
  assert(!xdev_ext_mech_frames_move(s,b,XDEV_EXT_MECH_F_INFLIGHT,b->sequester?XDEV_EXT_MECH_F_SEQUESTERED:XDEV_EXT_MECH_F_HELD));
+ /* The real terminal worker releases class leases after final frame fate and
+  * before dropping its session reference. Execute that actual callback too. */
+ for(u32 i=0;i<s->nr_stages;i++)
+  if(s->st[i].cls->batch_release)
+   s->st[i].cls->batch_release(&s->st[i],b,b->sequester);
  b->queued=0;s->inbox.first=NULL;return xdev_ext_mech_leave_locked(s,b->sequester);
 }
 static int native_lifetime(const char *mode){

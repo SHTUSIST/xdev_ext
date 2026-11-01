@@ -7,7 +7,7 @@
 #define rcu_assign_pointer(p,v) ((p)=(v))
 #define rcu_dereference(p) (p)
 #define smp_store_release(p,v) (*(p)=(v))
-#define smp_load_acquire(p) (*(p))
+/* Reuse the provider fixture's atomic acquire load for production owner checks. */
 typedef __s32 s32;
 struct hlist_node {struct hlist_node *next,**pprev;};
 struct hlist_head {struct hlist_node *first;};
