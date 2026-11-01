@@ -271,10 +271,37 @@ public:
                   actual_device == int(o.device), "bootstrap CUDA device mismatch");
     o.stream = reinterpret_cast<CUstream>(uintptr_t(stream_handle));
     std::string node = options["nvidia_node"].cast<std::string>();
-    std::string bpf = options["bpf_object"].cast<std::string>();
-    std::string user_bpf = options["user_bpf_object"].cast<std::string>();
-    o.nvidia_node = node.c_str(); o.bpf_object = bpf.c_str();
-    o.user_bpf_object = user_bpf.c_str();
+    std::string bpf, user_bpf;
+    if (options.contains("bpf_object") && !options["bpf_object"].is_none())
+      bpf = options["bpf_object"].cast<std::string>();
+    if (options.contains("user_bpf_object") && !options["user_bpf_object"].is_none())
+      user_bpf = options["user_bpf_object"].cast<std::string>();
+    o.nvidia_node = node.c_str(); o.bpf_object = bpf.empty() ? nullptr : bpf.c_str();
+    o.user_bpf_object = user_bpf.empty() ? nullptr : user_bpf.c_str();
+    xdev_ext_cuda_peer_programs_opts programs = XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT;
+    std::string tx_pins[3], rx_pins[2];
+    bool selected_programs = false;
+    for (unsigned direction = 0; direction < 2; ++direction) {
+      const char *key = direction ? "rx_program_pins" : "tx_program_pins";
+      if (!options.contains(key)) continue;
+      auto values = options[key];
+      TORCH_CHECK(py::isinstance<py::list>(values), "stage program pins require a JSON array: ", key);
+      py::list pins = values.cast<py::list>();
+      const unsigned count = direction ? 2 : 3;
+      TORCH_CHECK(pins.size() == count, "incorrect stage program pin count: ", key);
+      std::string *storage = direction ? rx_pins : tx_pins;
+      const char **target = direction ? programs.rx_stage_pins : programs.tx_stage_pins;
+      for (unsigned i = 0; i < count; ++i) {
+        if (pins[i].is_none()) continue;
+        TORCH_CHECK(py::isinstance<py::str>(pins[i]), "stage pin must be a string or null");
+        storage[i] = pins[i].cast<std::string>();
+        TORCH_CHECK(!storage[i].empty() && storage[i][0] == '/' &&
+                      storage[i].find('\0') == std::string::npos,
+                    "PRIVATE stage pin must be a nonempty absolute path without NUL");
+        target[i] = storage[i].c_str();
+        selected_programs = true;
+      }
+    }
 #define OPTION(field, type) o.field = options[#field].cast<type>()
     OPTION(link_token, uint64_t); OPTION(allocation_bytes, uint64_t);
     OPTION(nr_batches, uint64_t); OPTION(first_sequence, uint64_t); OPTION(timeout_ns, uint64_t);
@@ -285,7 +312,9 @@ public:
     const auto epoch = options["epoch"].cast<uint64_t>();
     TORCH_CHECK(o.group_bytes >= 64 && payload <= o.group_bytes-64 && id && epoch,
                 "bootstrap payload/namespace does not fit actual geometry");
-    int rc = xdev_ext_cuda_peer_owner_open(&o, &s.endpoint_owner);
+    int rc = selected_programs
+        ? xdev_ext_cuda_peer_owner_open_programs(&o, 0, &programs, &s.endpoint_owner)
+        : xdev_ext_cuda_peer_owner_open(&o, &s.endpoint_owner);
     TORCH_CHECK(!rc, "native endpoint bootstrap failed; partial ownership retained: ", rc);
     xdev_ext_cuda_peer_owner_view v{}; v.size = sizeof(v);
     rc = xdev_ext_cuda_peer_owner_get_view(s.endpoint_owner, &v);

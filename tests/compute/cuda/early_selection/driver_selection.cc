@@ -43,26 +43,55 @@ extern "C" int xdev_ext_cuda_peer_owner_open(const xdev_ext_cuda_peer_owner_opts
 extern "C" int xdev_ext_cuda_peer_owner_open_flags(const xdev_ext_cuda_peer_owner_opts *o,uint32_t flags,xdev_ext_cuda_peer_owner **p){
  ++owner_calls;observed_mode=o->mode;observed_flags=flags;*p=reinterpret_cast<xdev_ext_cuda_peer_owner *>(1);return partial_open?-EIO:0;
 }
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+extern "C" int xdev_ext_cuda_peer_owner_open_programs(
+ const xdev_ext_cuda_peer_owner_opts *,uint32_t,
+ const xdev_ext_cuda_peer_programs_opts *,xdev_ext_cuda_peer_owner **) {
+ std::cerr<<"FORBIDDEN PRIVATE owner CREATE in default EARLY fixture\n";std::abort();
+}
+#endif
 struct OwnerPrefix {
  xdev_ext_cuda_peer_owner *bootstrap=nullptr;bool started=false;
- void open(const tp_eval_options &o){const char *node="node",*bpf="bpf",*user_bpf="user";
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+ void open(const tp_eval_options &o,const xdev_ext_cuda_peer_programs_opts *programs=nullptr){
+#else
+ void open(const tp_eval_options &o){
+#endif
+ const char *node="node",*bpf="bpf",*user_bpf="user";
 #include EARLY_TP_OWNER_PREFIX
  }
 };
 static tp_eval_options parse(int argc,char **argv){
  tp_eval_options o;const char *node=nullptr,*bpf=nullptr,*user_bpf=nullptr,*tp_ptx=nullptr,*oracle=nullptr,*address=nullptr;
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+ xdev_ext_cuda_peer_programs_opts programs=XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT;
+ bool selected_programs=false;
+ (void)programs;(void)selected_programs;
+#endif
  unsigned port=0;bool have_rank=false;
  (void)node;(void)bpf;(void)user_bpf;(void)tp_ptx;(void)oracle;(void)address;(void)port;(void)have_rank;
 #include EARLY_TP_PARSER
  return o;
 }
 static std::atomic<unsigned> bilateral_opens{0};
-struct PeerOwner {void open(const tp_eval_options &o,const char*,const char*,const char*,const char*,const char*){
+struct PeerOwner {void open(const tp_eval_options &o,const char*,const char*,const char*,const char*,const char*
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+ ,const xdev_ext_cuda_peer_programs_opts *programs=nullptr
+#endif
+ ){
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+ check(!programs,"default EARLY preflight does not forward PRIVATE selection");
+#endif
  check(o.mode==1 || o.mode==2,"serialized EARLY bit never changes actual native mode");++bilateral_opens;
 }};
 struct PairControl:actual_barrier {int supplied=-1;void open(unsigned,const char*,unsigned,uint64_t){fd=supplied;}};
 static void peer(tp_eval_options o,int fd,bool &rejected){
  PairControl control;control.supplied=fd;PeerOwner owner;
+#ifdef XDEV_EXT_CUDA_PEER_PROGRAMS_VERSION
+ xdev_ext_cuda_peer_programs_opts programs=XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT;
+ bool selected_programs=false;
+ (void)programs;(void)selected_programs;
+#endif
  const char *address="unused",*node="node",*bpf="bpf",*user_bpf="user",*oracle="oracle",*tp_ptx="tp";
  unsigned port=1;
  try{

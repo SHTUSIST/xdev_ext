@@ -118,6 +118,14 @@ fail:
 }
 int xdev_ext_peer_endpoint_create(struct xdev_ext_peer_endpoint *e)
 { return e ? xdev_ext_session_create(e->session, &e->create) : -EINVAL; }
+int xdev_ext_peer_endpoint_create_programs(struct xdev_ext_peer_endpoint *e,
+ const int *program_fds, __u32 nr_programs,
+ struct xdev_ext_mech_create_report *report)
+{
+ if (report) memset(report, 0, sizeof(*report));
+ return e ? xdev_ext_session_create_programs(e->session, &e->create,
+                  program_fds, nr_programs, report) : -EINVAL;
+}
 int xdev_ext_peer_endpoint_start(struct xdev_ext_peer_endpoint *e,
 	const struct xdev_ext_start_frames_opts *o)
 { return !e ? -EINVAL : e->error ? e->error : xdev_ext_session_start_frames(e->session, o); }

@@ -36,7 +36,11 @@ def main(argv=None):
         numbers='\n'.join(function(driver,name) for name in ('now_ns','number','small'))
         parser_start=driver.index('for(int i=1;i<argc;++i)');parser_end=driver.index('NATIVE(tp_eval_geometry(o));',parser_start)+len('NATIVE(tp_eval_geometry(o));')
         owner_start=owner.index('xdev_ext_cuda_peer_owner_opts options{};');owner_end=owner.index('NATIVE(rc);',owner_start)+len('NATIVE(rc);')
-        preflight_start=driver.index('control.open(o.rank,address,port,o.timeout_ns);');preflight_end=driver.index('owner.open(o,node,bpf,user_bpf,oracle,tp_ptx);',preflight_start)+len('owner.open(o,node,bpf,user_bpf,oracle,tp_ptx);')
+        preflight_start=driver.index('control.open(o.rank,address,port,o.timeout_ns);')
+        # Preserve the actual call statement, including the additive optional
+        # public programs argument, rather than matching the legacy arity.
+        owner_call_start=driver.index('owner.open(',preflight_start)
+        preflight_end=driver.index(';',owner_call_start)+1
         chunks={'NUMBERS':numbers,'HANDSHAKE':function(driver,'handshake'),'PARSER':driver[parser_start:parser_end],
                 'BARRIER':driver[driver.index('struct barrier {'):driver.index('\nstatic std::string handshake')].replace('struct barrier {','struct actual_barrier {',1),
                 'OWNER_PREFIX':owner[owner_start:owner_end],'PREFLIGHT':driver[preflight_start:preflight_end]}

@@ -28,7 +28,8 @@ struct tp_eval_owner {
  xdev_tp_comm *comm=nullptr;
  bool started=false;
  std::vector<CUdeviceptr> inputs,outputs,bad;
- void open(const tp_eval_options &o,const char *node,const char *bpf,const char *user_bpf,const char *oracle_ptx,const char *tp_ptx) {
+ void open(const tp_eval_options &o,const char *node,const char *bpf,const char *user_bpf,const char *oracle_ptx,const char *tp_ptx,
+           const xdev_ext_cuda_peer_programs_opts *programs=nullptr) {
   xdev_ext_cuda_peer_owner_opts options{};
   options.size=sizeof(options);options.version=1;options.mode=o.mode;
   options.context_mode=XDEV_EXT_CUDA_PEER_CREATE_OWN;options.device=o.device;
@@ -36,7 +37,9 @@ struct tp_eval_owner {
   options.allocation_bytes=o.allocation_bytes;options.nr_batches=o.iterations*o.depth;
   options.first_sequence=o.first_sequence;options.timeout_ns=o.timeout_ns;
   options.group_bytes=o.group_bytes;options.depth=o.depth;
-  int rc=xdev_ext_cuda_peer_owner_open_flags(&options,o.early_cts?XDEV_EXT_PEER_ENDPOINT_F_EARLY:0,&bootstrap);
+  uint32_t endpoint_flags=o.early_cts?XDEV_EXT_PEER_ENDPOINT_F_EARLY:0;
+  int rc=programs?xdev_ext_cuda_peer_owner_open_programs(&options,endpoint_flags,programs,&bootstrap):
+                  xdev_ext_cuda_peer_owner_open_flags(&options,endpoint_flags,&bootstrap);
   started=bootstrap!=nullptr; // Retain partial owner as well as accepted work.
   NATIVE(rc);
   xdev_ext_cuda_peer_owner_view view{};view.size=sizeof(view);

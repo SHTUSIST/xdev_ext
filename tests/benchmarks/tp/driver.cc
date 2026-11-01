@@ -74,6 +74,8 @@ static std::string handshake(const tp_eval_options &o) {
 }
 int main(int argc,char **argv) {
  tp_eval_options o;const char *node=nullptr,*bpf=nullptr,*user_bpf=nullptr,*tp_ptx=nullptr,*oracle=nullptr,*address=nullptr;
+ xdev_ext_cuda_peer_programs_opts programs=XDEV_EXT_CUDA_PEER_PROGRAMS_OPTS_INIT;
+ bool selected_programs=false;
  unsigned port=0;bool have_rank=false;
  tp_eval_owner owner;barrier control;CUgraph graph=nullptr;CUgraphExec exec=nullptr;
  std::vector<xdev_tp_work*> works;
@@ -98,6 +100,17 @@ int main(int argc,char **argv) {
    else if(key=="--nvidia-node")node=v;
    else if(key=="--bpf-object")bpf=v;
    else if(key=="--user-bpf-object")user_bpf=v;
+   else if(key=="--tx-producer-program-pin" || key=="--tx-xdomain-program-pin" ||
+           key=="--tx-terminal-program-pin" || key=="--rx-xdomain-program-pin" ||
+           key=="--rx-consumer-program-pin") {
+    if(v[0]!='/')throw std::runtime_error("PRIVATE program pin must be a nonempty absolute path");
+    if(key=="--tx-producer-program-pin")programs.tx_stage_pins[0]=v;
+    else if(key=="--tx-xdomain-program-pin")programs.tx_stage_pins[1]=v;
+    else if(key=="--tx-terminal-program-pin")programs.tx_stage_pins[2]=v;
+    else if(key=="--rx-xdomain-program-pin")programs.rx_stage_pins[0]=v;
+    else programs.rx_stage_pins[1]=v;
+    selected_programs=true;
+   }
    else if(key=="--tp-ptx")tp_ptx=v;
    else if(key=="--oracle-ptx")oracle=v;
    else if(key=="--control-address")address=v;
@@ -105,11 +118,13 @@ int main(int argc,char **argv) {
    else throw std::runtime_error("unknown argument: "+key);
   }
   NATIVE(tp_eval_geometry(o));
-  if(!have_rank || !o.link || !node || !bpf || !user_bpf || !tp_ptx || !oracle || !address || !port ||
+  bool need_xdomain=!programs.tx_stage_pins[1] || !programs.rx_stage_pins[0];
+  bool need_user=!programs.tx_stage_pins[0] || !programs.tx_stage_pins[2] || !programs.rx_stage_pins[1];
+  if(!have_rank || !o.link || !node || (need_xdomain && !bpf) || (need_user && !user_bpf) || !tp_ptx || !oracle || !address || !port ||
      o.timeout_ns/1000000>INT_MAX || o.timeout_ns<1000000)throw std::runtime_error("missing or invalid runtime prerequisites");
   // This socket only coordinates barriers. Payload never enters it.
   control.open(o.rank,address,port,o.timeout_ns);control.exchange(handshake(o));
-  owner.open(o,node,bpf,user_bpf,oracle,tp_ptx);works.resize(o.depth,nullptr);
+  owner.open(o,node,bpf,user_bpf,oracle,tp_ptx,selected_programs?&programs:nullptr);works.resize(o.depth,nullptr);
   xdev_ext_cuda_peer_owner_view identity{};identity.size=sizeof(identity);
   NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&identity));
   o.tx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.tx_endpoint));
