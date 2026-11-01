@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "experiment": "e4",
+  "block_bytes": [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1048576, 2097152, 4194304],
+  "batch_requests": [1, 8, 32],
+  "worker_threads": 1,
+  "buffer_bytes": 1073741824,
+  "target_bytes": 1073741824,
+  "target_offset": 0,
+  "duration_seconds": 10,
+  "repetitions": 5,
+  "op_type": "read",
+  "target_access": "random",
+  "pinned_slot_kib": 4096,
+  "pinned_slots": 32,
+  "gpu_ordinal": 0
+}

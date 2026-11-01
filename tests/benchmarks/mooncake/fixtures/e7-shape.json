@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "experiment": "e7",
+  "block_bytes": [1048576],
+  "batch_requests": [1],
+  "worker_threads": 1,
+  "buffer_bytes": 1073741824,
+  "target_bytes": 1073741824,
+  "target_offset": 0,
+  "duration_seconds": 10,
+  "repetitions": 1,
+  "op_type": "write",
+  "target_access": "fixed",
+  "gpu_ordinal": 0
+}

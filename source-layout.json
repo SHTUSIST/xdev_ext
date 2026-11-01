@@ -2537,6 +2537,51 @@
       "logical_path": "tests/eval/mechanism_variants/validate_e2.py"
     },
     {
+      "source": "tests/benchmarks/mooncake/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/README.md"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/cli_guard.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/cli_guard.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/e4-rig.json",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/e4-rig.json"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/e4-shape.json",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/e4-shape.json"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/e7-rig.json",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/e7-rig.json"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/e7-shape.json",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/e7-shape.json"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/fixtures/test_cli_assertions.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/test_cli_assertions.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/run.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/test_contract.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mooncake/test_contract.py"
+    },
+    {
       "source": "tests/benchmarks/nvme_gpu/Makefile",
       "logical_path": "tests/eval/nvme_gpu/Makefile"
     },
