@@ -317,6 +317,26 @@
       "native_path": "tools/xdev_ext_reference_policy.bpf.c"
     },
     {
+      "source": "examples/storage/Makefile",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/Makefile"
+    },
+    {
+      "source": "examples/storage/README.md",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/README.md"
+    },
+    {
+      "source": "examples/storage/nvme_blocktable.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.bpf.c"
+    },
+    {
+      "source": "examples/storage/nvme_blocktable.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.h"
+    },
+    {
       "source": "examples/storage/nvme_s0.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/nvme_s0.bpf.c"
@@ -7528,6 +7548,21 @@
       "native_path": "tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_source_test.py"
     },
     {
+      "source": "tests/storage/nvme/blocktable/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/Makefile"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/host/bpf/bpf_helpers.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/host/bpf/bpf_helpers.h"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/test.c"
+    },
+    {
       "source": "tests/storage/nvme/passthru/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext_passthru/Makefile"
@@ -7791,6 +7826,10 @@
       "logical_path": "tests/support/layout/test_review_regressions.py"
     },
     {
+      "source": "tests/tools/test_responsibility.py",
+      "logical_path": "tests/tools/test_responsibility.py"
+    },
+    {
       "source": "third_party/sources.lock.json",
       "logical_path": "third_party/sources.lock.json"
     },
@@ -7809,6 +7848,10 @@
     {
       "source": "tools/analysis/provider_loc.py",
       "logical_path": "tests/eval/providers/loc_report.py"
+    },
+    {
+      "source": "tools/analysis/responsibility.py",
+      "logical_path": "tools/analysis/responsibility.py"
     },
     {
       "source": "tools/boot/kernel_switch.py",
