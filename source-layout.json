@@ -4852,6 +4852,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign.h"
     },
     {
+      "source": "tests/core/provider/dma_wave.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_wave.h"
+    },
+    {
       "source": "tests/core/provider/dma_campaign_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/provider/dma_campaign_test.c"

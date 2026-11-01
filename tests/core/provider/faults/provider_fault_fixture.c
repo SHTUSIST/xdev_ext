@@ -19,6 +19,8 @@
 #include "io_uring/xdev_ext_mech_dma_core.h"
 #include "io_uring/xdev_ext_mech_ce_core.h"
 #include "io_uring/xdev_ext_mech_native_cookie.h"
+#include "io_uring/xdev_ext_mech_ce_lease.h"
+#include "io_uring/xdev_ext_mech_window.h"
 
 typedef __u8 u8;
 typedef __u32 u32;
@@ -53,6 +55,7 @@ static void INIT_LIST_HEAD(struct list_head *h) { h->next=h->prev=h; }
 static void list_add_tail(struct list_head *n,struct list_head *h) {
  n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n;
 }
+static bool list_empty(const struct list_head *h) { return h->next==h; }
 static void list_del(struct list_head *n) { n->prev->next=n->next;n->next->prev=n->prev; }
 static void list_del_init(struct list_head *n) { list_del(n);INIT_LIST_HEAD(n); }
 struct llist_node { struct llist_node *next; };
@@ -81,6 +84,10 @@ static bool llist_add(struct llist_node *n,struct llist_head *h) {
 #define GFP_KERNEL 0
 #define BIT(n) (1U<<(n))
 #define U32_MAX UINT32_MAX
+#define U64_MAX UINT64_MAX
+#define smp_load_acquire(p) __atomic_load_n(p, __ATOMIC_ACQUIRE)
+#define struct_size(p,m,n) (sizeof(*(p))+sizeof((p)->m[0])*(n))
+#define kvzalloc(n,g) calloc(1,n)
 #define XDEV_EXT_MECH_DRAIN_TIMEOUT 5
 /* PRODUCTION_CLASS_FLAGS */
 #define XDEV_EXT_MECH_CLASS_F_FIFO_ENQUEUE (1U<<1)
@@ -152,7 +159,8 @@ static struct file device={&fops};
 static unsigned region_binds,host_binds,region_unbinds,host_unbinds,native_calls;
 static unsigned accepts;
 static int region_error,host_error,submit_error,callback_status;
-static bool inline_completion,submitted=true;
+static int host_unmap_error, region_unmap_error;
+static bool inline_completion,submitted=true,region_partial,host_partial,reset_region;
 static u64 callback_bytes=128;
 static u32 native_directions=XDEV_EXT_DMA_DIR_KNOWN_MASK;
 static u32 native_alignment=1;
@@ -162,20 +170,21 @@ static struct xdev_ext_dma_xfer saved_x[XDEV_EXT_DMA_MAX_ENTRIES];
 static u32 saved_n;
 static int native_bind_region(struct file *f,u64 off,u64 len,struct xdev_ext_dma_region *r) {
  (void)f;(void)off;region_binds++;
- if(region_error)return region_error;
+ if(reset_region)memset(r,0,sizeof(*r));
+ if(region_error&&!region_partial)return region_error;
  r->priv=malloc(8);assert(r->priv);r->len=len;r->segment_size=4096;
  r->max_entry_len=4096;r->alignment=native_alignment;r->directions=native_directions;
- return 0;
+ return region_error;
 }
-static void native_unbind_region(struct xdev_ext_dma_region *r) {
- region_unbinds++;free(r->priv);r->priv=NULL;
+static int native_unbind_region(struct xdev_ext_dma_region *r) {
+ region_unbinds++;if(region_unmap_error)return region_unmap_error;free(r->priv);r->priv=NULL;return 0;
 }
 static int native_bind_host(struct xdev_ext_dma_region *r,struct page **pages,u32 nr,void **h) {
  (void)r;(void)pages;(void)nr;host_binds++;
- if(host_error)return host_error;
- *h=malloc(8);assert(*h);return 0;
+ if(host_error&&!host_partial)return host_error;
+ *h=malloc(8);assert(*h);return host_error;
 }
-static int native_unbind_host(void *h) {host_unbinds++;free(h);return 0;}
+static int native_unbind_host(void *h) {host_unbinds++;if(host_unmap_error)return host_unmap_error;free(h);return 0;}
 static int native_submit(struct xdev_ext_dma_region *r,void *h,u32 dir,
  const struct xdev_ext_dma_xfer *x,u32 n,struct xdev_ext_dma_cookie *ck,u64 ticket) {
  (void)r;(void)h;(void)dir;native_calls++;
@@ -212,14 +221,17 @@ static struct xdev_ext_mech_session *session_new(void) {
 }
 static int bind_session(struct xdev_ext_mech_session *s) {
  struct xdev_ext_mech_stage_uapi u={.arg1=4096};
- int err=xdev_ext_dma_bind(&s->st[0],&u);if(!err)s->nr_bound=1;return err;
+ int err=xdev_ext_dma_bind(&s->st[0],&u);if(!err)s->nr_bound=1;
+ else if(s->st[0].priv) { assert(!xdev_ext_dma_unbind(&s->st[0])); }
+ return err;
 }
 static struct xdev_ext_mech_batch *batch_new(struct xdev_ext_mech_session *s) {
- struct xdev_ext_mech_batch *b=calloc(1,sizeof(*b));assert(b);s->batches=b;
+ struct xdev_ext_mech_batch *b=calloc(s->depth,sizeof(*b));assert(b);s->batches=b;
  s->privs=calloc(1,sizeof(struct xdev_ext_dma_batch));s->cookies=calloc(1,sizeof(struct xdev_ext_dma_cookie));
  assert(s->privs&&s->cookies);b->s=s;b->priv=s->privs;b->cookie=s->cookies;
  b->nr_frames=1;b->present=1;b->bytes=128;
  b->f[0]=(struct xdev_ext_mech_frame){.index=1,.umem_addr=4096,.data_off=64,.data_len=128};
+ b->id=1;
  xdev_ext_mech_bstate_init(&b->bs,1);assert(!xdev_ext_mech_batch_step(&b->bs,XDEV_EXT_MECH_EV_READY,0));
  xdev_ext_mech_completion_init(&b->completion);assert(!xdev_ext_mech_sess_batch_begin(&s->ss));
  return b;
@@ -267,6 +279,7 @@ static void observe_retire(struct xdev_ext_mech_batch *b) {
     assert(!xdev_ext_mech_life_release(life,xdev_ext_mech_life_gen(life)));
   }
  assert(!xdev_ext_mech_leave_locked(s,b->sequester));
+ if(s->st[0].cls->batch_release)s->st[0].cls->batch_release(&s->st[0],b,b->sequester);
  b->queued=0;s->inbox.first=NULL;
 }
 static struct xdev_ext_mech_batch *wait_batch;
@@ -536,10 +549,179 @@ static int test_crossclass(bool ce_first) {
  observe_retire(b);EQ(b->status,0,"exact current-class callback survives old-class replay");
  EQ(warnings,0,"stale crossclass rejected before state/CS access");return 0;
 }
+
+static int test_overlapping_sessions(void) {
+ struct xdev_ext_mech_session *a=bound_session(),*other=session_new();
+ EQ(bind_session(other),0,"second session may bind overlapping configured window");
+ struct xdev_ext_mech_batch *first=batch_new(a),*second=batch_new(other);
+ EQ(submit(first),0,"first overlapping session accepted");
+ EQ(submit(second),-EAGAIN,"second overlapping active window must wait before native submission");
+ EQ(native_calls,1,"foreign overlapping session did not reach provider");
+ EQ(accepts,1,"exactly one native request accepted");
+ xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,128);observe_retire(first);
+ /* Real worker calls this only after final frame fate has been determined. */
+ if(a->st[0].cls->batch_release)a->st[0].cls->batch_release(&a->st[0],first,false);
+ EQ(submit(second),0,"other session proceeds after final release");
+ EQ(native_calls,2,"released range accepted once, no replay of first");return 0;
+}
+static int test_stale_owner(bool live_generation) {
+ struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_mech_batch *b=batch_new(s);
+ EQ(submit(b),0,"native accepted before claim became stale");
+ /* Reproduce an expired saved owner with the original accepted ticket. */
+ if(live_generation)s->life[b->f[0].index].ctrl += 1ULL << XDEV_EXT_MECH_L_GEN_SHIFT;
+ else b->life_token[0] ^= 1ULL << XDEV_EXT_MECH_L_OWNER_SHIFT;
+ xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,128);
+ CHECK(b->sequester,"stale-owner current-ticket completion must quarantine");
+ struct xdev_ext_dma_mech_cqe c;xdev_ext_dma_fill_cqe(&s->st[0],b,&c);
+ EQ(c.outcome,XDEV_EXT_DMA_AMBIGUOUS,"expired ownership cannot become success");
+ EQ((int)c.provider_status,-ESTALE,"expired ownership is explicitly reported");
+ EQ(region_unbinds,0,"expired ownership retains region");EQ(host_unbinds,0,"expired ownership retains host pin");
+ return 0;
+}
+static int test_unmap_retention(bool region) {
+ struct xdev_ext_mech_session *s=bound_session();void *priv=s->st[0].priv;
+ if(region)region_unmap_error=-EIO;else host_unmap_error=-EBUSY;
+ EQ(xdev_ext_mech_session_destroy(s),region?-EIO:-EBUSY,"refusing unmap parks whole session and UMEM pin");
+ EQ(pool_releases,0,"unmap refusal must preserve original pool pins");
+ EQ(owner.refs,1,"unmap refusal must preserve provider module pin");
+ EQ(s->st[0].priv,priv,"unmap refusal preserves residual stage");
+ struct xdev_ext_dma_stage *cs=priv;
+ CHECK(cs->region.priv,"unmap refusal preserves region backing");
+ if(!region){CHECK(cs->host,"host unmap refusal retains host handle");EQ(region_unbinds,0,"host refusal does not touch region");}
+ return 0;
+}
+
+static int test_cleanup_active_group(void) {
+ struct xdev_ext_mech_session *a=bound_session(),*other=session_new();other->depth=2;
+ EQ(bind_session(other),0,"foreign depth2 window configured");
+ struct xdev_ext_mech_batch *b=batch_new(other),*next=b+1;next->s=other;next->id=2;
+ struct xdev_ext_dma_stage *cs=other->st[0].priv;
+ EQ(xdev_ext_dma_lease_get(cs,b),0,"other group already active before idle owner's unmap");
+ host_unmap_error=-EBUSY;EQ(xdev_ext_dma_unbind(&a->st[0]),-EBUSY,"idle owner retains uncertain mapping");
+ EQ(xdev_ext_dma_lease_get(cs,next),-EAGAIN,"active group must recheck new foreign cleanup hold");
+ EQ(xdev_ext_dma_lease_get(cs,b),-EAGAIN,"same batch next-stage native access must also wait");
+ host_unmap_error=0;EQ(xdev_ext_dma_unbind(&a->st[0]),0,"uncertain mapping finally removed");
+ EQ(xdev_ext_dma_lease_get(cs,next),0,"new slot resumes after foreign cleanup");return 0;
+}
+static int test_region_reset(void) {
+ reset_region=true;
+ struct xdev_ext_mech_session *s=bound_session();
+ struct xdev_ext_mech_batch *b=batch_new(s);
+ EQ(submit(b),0,"provider may initialize entire output region without erasing C ownership");
+ xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,128);observe_retire(b);
+ EQ(xdev_ext_dma_unbind(&s->st[0]),0,"provider output reset does not lose dispatch or module pin");
+ EQ(owner.refs,0,"provider output reset releases owner only after safe unmap");return 0;
+}
+static int test_partial_bind_exclusion(bool host) {
+ assert(!xdev_ext_dma_provider_register(&provider));
+ struct xdev_ext_mech_session *s=session_new();
+ if(host){host_error=-ENOMEM;host_partial=true;host_unmap_error=-EBUSY;}
+ else {region_error=-EIO;region_partial=true;region_unmap_error=-EBUSY;}
+ struct xdev_ext_mech_stage_uapi u={.arg1=4096};
+ EQ(xdev_ext_dma_bind(&s->st[0],&u),host?-ENOMEM:-EIO,"provider partial bind reports original error");
+ CHECK(s->st[0].priv,"partial bind ownership published");
+ EQ(xdev_ext_dma_unbind(&s->st[0]),-EBUSY,"partial mapping refuses rollback");
+ host_error=region_error=0;host_partial=region_partial=false;
+ struct xdev_ext_mech_session *other=session_new();EQ(bind_session(other),0,"foreign overlapping CREATE can configure");
+ EQ(submit(batch_new(other)),-EAGAIN,"partial bind unknown mapping retains foreign range exclusion");
+ EQ(native_calls,0,"no native access to retained partial-bind window");return 0;
+}
+static int test_lease_depth(bool shifted) {
+ assert(!xdev_ext_dma_provider_register(&provider));
+ struct xdev_ext_mech_session *s=session_new();s->depth=2;
+ EQ(bind_session(s),0,"depth2 window bound");
+ if(shifted) {
+  s->nr_stages=2;s->st[1]=s->st[0];s->st[1].priv=NULL;
+  struct xdev_ext_mech_stage_uapi u={.arg0=128,.arg1=4096};
+  EQ(xdev_ext_dma_bind(&s->st[1],&u),0,"second shifted window bound in same session");s->nr_bound=2;
+ }
+ struct xdev_ext_dma_stage *cs=s->st[0].priv;
+ struct xdev_ext_mech_batch *first=batch_new(s),*next=first+1;
+ next->s=s;next->id=2;next->nr_frames=first->nr_frames;next->f[0]=first->f[0];
+ struct xdev_ext_dma_copy_desc d={.frame_off=64,.device_off=0,.len=128};
+ EQ(xdev_ext_dma_validate(&s->st[0],next,(const u8 *)&d,1),-ERANGE,"slot1 cannot address slot0 bytes");
+ d.device_off=128;EQ(xdev_ext_dma_validate(&s->st[0],next,(const u8 *)&d,1),0,"slot1 owns exactly its assigned bytes");
+ struct xdev_ext_dma_mech_info info;
+ xdev_ext_dma_fill_info(&s->st[0],next,&info);
+ EQ(info.window_slot,1,"info carries C-issued slot");EQ(info.window_depth,2,"info carries depth");EQ(info.lease_generation,2,"info carries batch generation");
+ xdev_ext_dma_fill_info(&s->st[0],NULL,&info);
+ EQ(info.window_slot,~0U,"prepare has no issued slot");EQ(info.window_depth,0,"prepare has no issued depth");EQ(info.lease_generation,0,"prepare has no generation");
+ EQ(xdev_ext_dma_lease_get(cs,first),0,"first slot leased");
+ EQ(xdev_ext_dma_lease_get(cs,first),0,"same batch lease idempotent across stages");
+ EQ(xdev_ext_dma_lease_get(cs,next),shifted?-EAGAIN:0,"shifted alias serializes; matching base preserves depth");
+ EQ(cs->lease_group->state.active_batches,shifted?1U:2U,"lease active count exact");
+ xdev_ext_dma_batch_release(&s->st[0],first,false);
+ if(shifted) {
+  xdev_ext_dma_batch_release(&s->st[1],first,false);
+  EQ(xdev_ext_dma_lease_get(cs,next),0,"next slot proceeds after shifted predecessor ends");
+ }
+ xdev_ext_dma_batch_release(&s->st[0],next,true);
+ CHECK(cs->lease_group->state.quarantined,"unknown final fate retains group");
+ EQ(xdev_ext_dma_lease_get(cs,next),-EBUSY,"quarantined slot never reused");
+ struct xdev_ext_mech_session *other=session_new();EQ(bind_session(other),0,"foreign window may configure");
+ EQ(submit(batch_new(other)),-EAGAIN,"quarantined range excludes foreign native submission");
+ EQ(xdev_ext_dma_unbind(&s->st[0]),-EBUSY,"unknown lease retains mappings and provider pin");return 0;
+}
+static int test_unmap_exclusion(void) {
+ struct xdev_ext_mech_session *a=bound_session(),*other=session_new();
+ EQ(bind_session(other),0,"foreign overlapping window configured");
+ host_unmap_error=-EBUSY;
+ EQ(xdev_ext_dma_unbind(&a->st[0]),-EBUSY,"host unmap refused");
+ struct xdev_ext_mech_batch *b=batch_new(other);
+ EQ(submit(b),-EAGAIN,"refused unmap keeps window unavailable to foreign native access");
+ EQ(native_calls,0,"foreign provider untouched while residual native mapping exists");
+ host_unmap_error=0;
+ EQ(xdev_ext_dma_unbind(&a->st[0]),0,"successful cleanup removes residual exclusion");
+ EQ(submit(b),0,"foreign session proceeds only after successful unmap");return 0;
+}
+static int test_saved_claims(void) {
+ struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_mech_batch *b=batch_new(s);
+ EQ(submit(b),0,"native accepted before saved claim checks");
+ struct xdev_ext_dma_xfer x=saved_x[0];
+ CHECK(xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,1),"live saved DMA claim accepted");
+ struct xdev_ext_ce_xfer ce={.owner=x.owner,.generation=x.generation,.host_byte_off=x.host_byte_off,.len=x.len};
+ CHECK(xdev_ext_mech_batch_ce_owners_valid(b,pending_ticket,&ce,1),"shared helper preserves CE typed claim admission");
+ x.owner++;CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,1),"wrong saved owner refused");x=saved_x[0];
+ x.generation++;CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,1),"wrong saved generation refused");x=saved_x[0];
+ x.host_byte_off++;CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,1),"saved span outside frame refused");x=saved_x[0];
+ CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,0),"empty saved plan refused");
+ CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket+1,&x,1),"foreign ticket refused before claim reads");
+ xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,128);
+ CHECK(!xdev_ext_dma_owners_valid(pending_cookie,pending_ticket,&x,1),"landed native ticket cannot authorize access");
+ return 0;
+}
+static int test_unmap_retry(void) {
+ struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_dma_stage *cs=s->st[0].priv;
+ host_unmap_error=-EBUSY;
+ EQ(xdev_ext_dma_unbind(&s->st[0]),-EBUSY,"failed host unmap checked");
+ CHECK(cs->host&&cs->region.priv&&owner.refs==1,"failed host unmap retains handles and pin");
+ host_unmap_error=0;region_unmap_error=-EIO;
+ EQ(xdev_ext_dma_unbind(&s->st[0]),-EIO,"failed region unmap checked");
+ CHECK(!cs->host&&cs->region.priv&&owner.refs==1,"only successful host unmap clears handle");
+ region_unmap_error=0;
+ EQ(xdev_ext_dma_unbind(&s->st[0]),0,"remaining region can be released once");
+ EQ(host_unbinds,2,"successful host unmap is not replayed");EQ(region_unbinds,2,"refused region unmap retried once");
+ CHECK(!s->st[0].priv&&!owner.refs,"stage and module released only after complete cleanup");
+ EQ(xdev_ext_dma_unbind(&s->st[0]),0,"empty unbind idempotent");return 0;
+}
 int main(int argc,char **argv) {
  if(argc!=2)return 2;
  const char *m=argv[1];int bad;
- if(!strcmp(m,"registry"))bad=test_registry();
+ if(!strcmp(m,"cleanup_active_group"))bad=test_cleanup_active_group();
+ else if(!strcmp(m,"region_reset"))bad=test_region_reset();
+ else if(!strcmp(m,"partial_region_bind"))bad=test_partial_bind_exclusion(false);
+ else if(!strcmp(m,"partial_host_bind"))bad=test_partial_bind_exclusion(true);
+ else if(!strcmp(m,"lease_depth"))bad=test_lease_depth(false);
+ else if(!strcmp(m,"lease_shifted"))bad=test_lease_depth(true);
+ else if(!strcmp(m,"unmap_exclusion"))bad=test_unmap_exclusion();
+ else if(!strcmp(m,"saved_claims"))bad=test_saved_claims();
+ else if(!strcmp(m,"unmap_retry"))bad=test_unmap_retry();
+ else if(!strcmp(m,"overlapping_sessions"))bad=test_overlapping_sessions();
+ else if(!strcmp(m,"stale_owner"))bad=test_stale_owner(false);
+ else if(!strcmp(m,"stale_generation"))bad=test_stale_owner(true);
+ else if(!strcmp(m,"host_unmap_retention"))bad=test_unmap_retention(false);
+ else if(!strcmp(m,"region_unmap_retention"))bad=test_unmap_retention(true);
+ else if(!strcmp(m,"registry"))bad=test_registry();
  else if(!strcmp(m,"registry_capacity"))bad=test_registry_capacity();
  else if(!strcmp(m,"bind_rollback"))bad=test_bind_rollback();
  else if(!strcmp(m,"directions_and_bounds"))bad=test_directions_and_bounds();

@@ -41,6 +41,7 @@ struct module; struct file_operations; struct file; struct page;
 struct xdev_ext_dma_region; struct xdev_ext_dma_xfer; struct xdev_ext_dma_cookie;
 /* OPS */
 static unsigned unlocked, unmapped, freed, host_unbinds;
+static int host_unmap_error;
 static void *expected_map;
 static void spin_lock(unsigned *lock) { assert(!*lock); *lock = 1; }
 static void spin_unlock(unsigned *lock) { assert(*lock); *lock = 0; unlocked++; }

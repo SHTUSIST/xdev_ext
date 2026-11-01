@@ -242,7 +242,8 @@ int xdev_ext_mech_invoke(const void *ops, const struct xdev_ext_mech_target *t,
 		call.ctx.base.length = t->bytes;
 	}
 	call.ctx.mech_abi_version = t->class_id == XDEV_EXT_MECH_CLASS_CE ?
-		XDEV_EXT_CE_MECH_ABI_VERSION : XDEV_EXT_MECH_ABI_VERSION;
+		XDEV_EXT_CE_MECH_ABI_VERSION : t->class_id == XDEV_EXT_MECH_CLASS_DMA ?
+  XDEV_EXT_DMA_MECH_ABI_VERSION : XDEV_EXT_MECH_ABI_VERSION;
 	call.ctx.member = a->member;
 	call.ctx.class_id = t->class_id;
 	call.ctx.callsite = a->callsite;
@@ -547,6 +548,16 @@ static const struct xdev_ext_ops_u32_field xdev_ext_ce_mech_ops_fields[] = {
 	{ offsetof(struct xdev_ext_ce_mech_ops, flags), xdev_ext_mech_flags_known },
 };
 
+static bool xdev_ext_dma_mech_abi_valid(u32 value)
+{
+	return value == XDEV_EXT_DMA_MECH_ABI_VERSION;
+}
+
+static const struct xdev_ext_ops_u32_field xdev_ext_dma_mech_ops_fields[] = {
+	{ offsetof(struct xdev_ext_dma_mech_ops, abi_version), xdev_ext_dma_mech_abi_valid },
+	{ offsetof(struct xdev_ext_dma_mech_ops, flags), xdev_ext_mech_flags_known },
+};
+
 /* Only prepare, which runs at CREATE in process context, may sleep. */
 static const struct xdev_ext_ops_member xdev_ext_mech_ops_members[] = {
 	{ .off = offsetof(struct xdev_ext_nvme_mech_ops, prepare), .sleepable = true },
@@ -593,6 +604,25 @@ static int xdev_ext_ce_mech_ops_init_member(const struct btf_type *t,
 static int xdev_ext_ce_mech_ops_validate(void *kdata)
 {
 	return xdev_ext_ops_validate(&xdev_ext_ce_mech_ops_desc, kdata);
+}
+
+static const struct xdev_ext_ops_desc xdev_ext_dma_mech_ops_desc = {
+	.fields = xdev_ext_dma_mech_ops_fields,
+	.nr_fields = ARRAY_SIZE(xdev_ext_dma_mech_ops_fields),
+	.members = xdev_ext_mech_ops_members,
+	.nr_members = ARRAY_SIZE(xdev_ext_mech_ops_members),
+};
+
+static int xdev_ext_dma_mech_ops_init_member(const struct btf_type *t,
+				       const struct btf_member *member,
+				       void *kdata, const void *udata)
+{
+	return xdev_ext_ops_init_member(&xdev_ext_dma_mech_ops_desc, t, member, kdata, udata);
+}
+
+static int xdev_ext_dma_mech_ops_validate(void *kdata)
+{
+	return xdev_ext_ops_validate(&xdev_ext_dma_mech_ops_desc, kdata);
 }
 
 static int xdev_ext_mech_ops_init_member(const struct btf_type *t,
@@ -736,7 +766,7 @@ XDEV_EXT_MECH_STRUCT_OPS(afxdp, XDEV_EXT_MECH_CLASS_AFXDP,
 XDEV_EXT_MECH_STRUCT_OPS(ce, XDEV_EXT_MECH_CLASS_CE,
                     xdev_ext_ce_mech_ops_init_member, xdev_ext_ce_mech_ops_validate);
 XDEV_EXT_MECH_STRUCT_OPS(dma, XDEV_EXT_MECH_CLASS_DMA,
-                    xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
+                    xdev_ext_dma_mech_ops_init_member, xdev_ext_dma_mech_ops_validate);
 
 XDEV_EXT_MECH_STRUCT_OPS_X(cpu, XDEV_EXT_MECH_CLASS_CPU,
                       xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate,

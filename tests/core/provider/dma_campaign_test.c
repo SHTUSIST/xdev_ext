@@ -5,8 +5,42 @@
 #include <stdlib.h>
 #include <string.h>
 #include "dma_campaign.h"
+#include "dma_wave.h"
+static unsigned char wave_pattern(unsigned g,unsigned b){return campaign_pattern(g,b);}
+static void wave_oracle(void)
+{
+ unsigned char image[512],before[512],unchanged[512];
+ __u32 source[8],sink[8];bool seen[264]={0};unsigned distinct=0;
+ struct xdev_ext_mech_stats s={.state=XDEV_EXT_MECH_SESSION_ACTIVE};
+ struct dma_fixture_stats d={0};
+ memset(image,0xa6,sizeof(image));memcpy(before,image,sizeof(image));
+ for(unsigned base=0;base<257;) {
+  unsigned count=257-base<8?257-base:8;
+  memcpy(unchanged,image,sizeof(image));d.pending=1;
+  assert(dma_wave_seed(image,before,512,0,8,16,base,wave_pattern,&s,&d,2)==-EAGAIN);
+  assert(!memcmp(image,unchanged,sizeof(image)));d.pending=0;
+  s.inflight=1;assert(dma_wave_seed(image,before,512,0,8,16,base,wave_pattern,&s,&d,2)==-EAGAIN);s.inflight=0;
+  assert(!dma_wave_seed(image,before,512,0,8,16,base,wave_pattern,&s,&d,2));
+  for(unsigned g=0;g<count;g++) {
+   unsigned slot=(g*3+5)%8;source[g]=sink[g]=slot;
+   assert(!seen[base+slot]);seen[base+slot]=true;distinct++;
+   memcpy(image+256+slot*16,image+slot*16,16);
+  }
+  s.batches_done=base+count;s.submitted[0]=s.completed[0]=s.submitted[1]=s.completed[1]=base+count;
+  d.accepted=d.completed=2ULL*(base+count);d.bytes=2ULL*(base+count)*16;
+  assert(!dma_wave_check(image,before,512,256,8,16,base,count,source,sink,wave_pattern,&s,&d,2));
+  image[256+source[0]*16]^=1;
+  assert(dma_wave_check(image,before,512,256,8,16,base,count,source,sink,wave_pattern,&s,&d,2)==-EBADMSG);
+  image[256+source[0]*16]^=1;
+  sink[0]=(source[0]+1)%8;assert(dma_wave_check(image,before,512,256,8,16,base,count,source,sink,wave_pattern,&s,&d,2)==-EPROTO);sink[0]=source[0];
+  base+=count;
+ }
+ assert(distinct==257);
+ puts("PASS wave oracle: 257 distinct sequence patterns in reused depth8 slots, partial final wave, pending/inflight blocks refresh, stale payload and slot mismatch rejected");
+}
 int main(void)
 {
+ wave_oracle();
  uint64_t off=99;
  assert(campaign_offset(256,4096,2048,2U<<20,&off) && off==256*4096);
  off=99;assert(!campaign_offset(UINT64_MAX,4096,2048,2U<<20,&off)&&off==99);

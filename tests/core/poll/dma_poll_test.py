@@ -34,10 +34,14 @@ FIXTURE = r'''
 #include <stdlib.h>
 #include <string.h>
 #include "io_uring/xdev_ext_mech_dma_core.h"
+#include "io_uring/xdev_ext_mech_window.h"
 
-typedef uint64_t u64; typedef uint32_t u32; typedef uint8_t u8;
+typedef __u64 u64; typedef uint32_t u32; typedef uint8_t u8;
 typedef struct { int counter; } atomic_t;
 #define PAGE_SHIFT 12
+#define U64_MAX UINT64_MAX
+struct list_head { struct list_head *next,*prev; };
+struct xdev_ext_dma_lease_group;
 #define GFP_KERNEL 0
 struct page; struct file { int unused; }; struct module { int refs; }; struct file_operations;
 struct xdev_ext_dma_cookie;
@@ -71,7 +75,7 @@ static int provider_bind_region(struct file *f, u64 off, u64 len, struct xdev_ex
 		out->polled = false;
 	return 0;
 }
-static void provider_unbind_region(struct xdev_ext_dma_region *r) { (void)r; unbind_regions++; }
+static int provider_unbind_region(struct xdev_ext_dma_region *r) { r->priv=NULL; unbind_regions++; return 0; }
 static int provider_bind_host(struct xdev_ext_dma_region *r, struct page **p, u32 nr, void **host)
 { (void)r; (void)p; (void)nr; bind_hosts++; *host = &owner; return 0; }
 static int provider_unbind_host(void *h) { (void)h; return 0; }
@@ -89,6 +93,15 @@ static const struct xdev_ext_dma_provider_ops without_poll = { .owner = &owner, 
 static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *file)
 { (void)file; mod_gets++; return strcmp(mode, "no-poll-op") ? &with_poll : &without_poll; }
 
+static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s) { (void)s;return 4; }
+static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s)
+{ static const struct xdev_ext_mech_layout l={.group_bytes=4096};(void)s;return &l; }
+static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c,u64 off,u64 len)
+{ (void)s;(void)c;(void)off;(void)len;return 0; } /* Uncontended registry, tested separately. */
+static bool xdev_ext_dma_lease_busy(struct xdev_ext_dma_stage *c) { (void)c;return false; }
+static void xdev_ext_dma_lease_cleanup(struct xdev_ext_dma_stage *c,bool hold) { (void)c;(void)hold; }
+static bool xdev_ext_dma_lease_unbind(struct xdev_ext_dma_stage *c) { (void)c;return true; }
+static int atomic_read(const atomic_t *a) { return a->counter; }
 /* PRODUCTION */
 
 int main(int argc, char **argv)
@@ -104,6 +117,7 @@ int main(int argc, char **argv)
 	mode = argv[1];
 	st.poll = strcmp(mode, "plain") != 0;
 	ret = xdev_ext_dma_bind(&st, &u);
+ if (ret && st.priv) xdev_ext_dma_unbind(&st);
 	if (!ret) {
 		struct xdev_ext_dma_stage *cs = st.priv;
 		if (st.poll)
@@ -123,7 +137,7 @@ def build_fixture():
     text, abi = source(DMA), source(ABI)
     structs = '\n'.join([structure(abi, 'xdev_ext_dma_region'), structure(abi, 'xdev_ext_dma_xfer'),
                          structure(abi, 'xdev_ext_dma_provider_ops'), structure(text, 'xdev_ext_dma_stage')])
-    production = '\n'.join(function(text, n) for n in ('xdev_ext_dma_bind', 'xdev_ext_dma_poll'))
+    production = '\n'.join(function(text, n) for n in ('xdev_ext_dma_bind', 'xdev_ext_dma_unbind', 'xdev_ext_dma_poll'))
     return FIXTURE.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
 
 

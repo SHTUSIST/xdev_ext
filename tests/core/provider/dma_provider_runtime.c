@@ -21,15 +21,16 @@
 #include "include/uapi/linux/xdev_ext_mech.h"
 #include "dma_provider_fixture.h"
 #include "dma_campaign.h"
+#include "dma_wave.h"
 
 #define FRAME 4096U
 #define POOL_BYTES (32U*FRAME)
-#define STRIDE FRAME
+#define STRIDE PAYLOAD
 #define MAX_DEPTH 8U
 #define HEAD 256U
 #define SEG 1024U
 #define PAYLOAD (2U*SEG)
-struct observation { __u64 dma_build,dma_complete,ce_build,ce_complete,wrong_base,slot_mask; };
+static unsigned char provider_pattern(unsigned g,unsigned b) { return campaign_pattern(g,b); }
 static int bad;
 #define REQUIRE(v) do { if (!(v)) { fprintf(stderr,"FAIL line %d: %s (errno=%d)\n",__LINE__,#v,errno); bad=1; goto out; } } while(0)
 static int mech(int ring,__u32 op,__u64 arg)
@@ -90,7 +91,7 @@ int main(int argc,char **argv)
  struct bpf_object *object=NULL;
  struct bpf_link *dma_link=NULL,*ce_link=NULL;
  struct bpf_map *map;
- struct observation obs={0};
+ struct dma_fixture_observation obs={0};
  struct io_uring_params params={0};
  struct io_uring_xdev_ext_umem_reg reg={.size=POOL_BYTES,.frame_size=FRAME};
  struct xdev_ext_mech_create c={.abi_version=XDEV_EXT_MECH_ABI_VERSION,.nr_stages=4,
@@ -108,7 +109,7 @@ int main(int argc,char **argv)
  struct rlimit lim={RLIM_INFINITY,RLIM_INFINITY};
  int dma=-1,ce=-1,ring=-1,refs=-1,ce_refs=-1,created=0,stopped=0;
  __u64 deadline;
- unsigned int i,j,g;
+ unsigned int i,j,g,waves=0;
  setrlimit(RLIMIT_MEMLOCK,&lim);
  c.depth=depth;start.nr_batches=groups;start.nr_user_frames=2*depth;
  for(i=0;i<2*depth;i++)frame_index[i]=2*i+1;
@@ -120,7 +121,7 @@ int main(int argc,char **argv)
  window=mmap(NULL,DMA_FIXTURE_MAP_BYTES,PROT_READ|PROT_WRITE,MAP_SHARED,dma,0);
  REQUIRE(window!=MAP_FAILED);
  memset(window,0xa6,DMA_FIXTURE_MAP_BYTES);
- for(g=0;g<groups;g++)for(i=0;i<PAYLOAD;i++)
+ for(g=0;g<depth;g++)for(i=0;i<PAYLOAD;i++)
   window[DMA_FIXTURE_INPUT_OFF+g*STRIDE+i]=campaign_pattern(g,i);
  before=malloc(DMA_FIXTURE_MAP_BYTES); REQUIRE(before);
  memcpy(before,window,DMA_FIXTURE_MAP_BYTES);
@@ -161,17 +162,42 @@ int main(int argc,char **argv)
  REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
  REQUIRE(device.region_binds==2 && device.host_binds==2 && !device.accepted);
  start.session_id=c.session_id;
- REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start));
- deadline=now_ms()+10000;
- do {
-  memset(&stats,0,sizeof(stats)); stats.session_id=c.session_id;
-  REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
-  if(pending_stop) {
+ /* A source refresh occurs only after all accepted native work and final
+  * frame leases of the preceding wave have reached a known idle state. */
+ for(unsigned base=0;;) {
+  unsigned count=(pending_stop||quarantine||reject)?groups:(groups-base<depth?groups-base:depth);
+  if(!pending_stop&&!quarantine&&!reject) {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
    REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
-   if(device.pending)break;
-  } else if(stats.batches_done==groups || stats.batches_abort || stats.sequestered) break;
-  usleep(1000);
- } while(now_ms()<deadline);
+   REQUIRE(!dma_wave_seed(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_INPUT_OFF,
+     depth,PAYLOAD,base,provider_pattern,&stats,&device,4));
+   start.first_seq=base;start.nr_batches=count;start.nr_user_frames=2*count;
+  }
+  deadline=now_ms()+10000;
+  int start_ret;
+  do {
+   start_ret=mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start);
+   if(start_ret==-EBUSY)usleep(1000); /* only unaccepted START housekeeping */
+  }while(start_ret==-EBUSY&&now_ms()<deadline);
+  REQUIRE(!start_ret);waves++;
+  do {
+   stats=(struct xdev_ext_mech_stats){.session_id=c.session_id};
+   REQUIRE(!mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats));
+   REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
+   if(pending_stop) {if(device.pending)break;}
+   else if(stats.batches_abort||stats.sequestered||
+           (stats.batches_done==base+count&&!stats.inflight&&!device.pending))break;
+   usleep(1000);
+  }while(now_ms()<deadline);
+  if(pending_stop||quarantine||reject)break;
+  map=bpf_object__find_map_by_name(object,"observations");REQUIRE(map);
+  REQUIRE(!bpf_map_lookup_elem(bpf_map__fd(map),&zero,&obs));
+  REQUIRE(!dma_wave_check(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,
+    depth,PAYLOAD,base,count,obs.source_slot+base,obs.sink_slot+base,
+    provider_pattern,&stats,&device,4));
+  base+=count;if(base==groups)break;
+ }
  if(pending_stop) {
   REQUIRE(device.pending && !device.host_unbinds && !device.region_unbinds);
   REQUIRE(module_refs()>=refs+2);
@@ -217,7 +243,7 @@ int main(int argc,char **argv)
  REQUIRE(stats.batches_done==groups && !stats.batches_abort && !stats.rejects &&
          !stats.sequestered && !stats.protocol_err && !stats.inflight && !stats.last_err);
  for(i=0;i<4;i++) REQUIRE(stats.submitted[i]==groups && stats.completed[i]==groups);
- REQUIRE(!campaign_verify(window,before,DMA_FIXTURE_MAP_BYTES,DMA_FIXTURE_OUTPUT_OFF,groups,STRIDE,PAYLOAD));
+ REQUIRE(!memcmp(window,before,DMA_FIXTURE_MAP_BYTES));
  for(i=0;i<POOL_BYTES;i++) {
   int payload=0;
   for(j=0;j<2*depth;j++) if(i>=frame_index[j]*FRAME+HEAD &&
@@ -225,12 +251,8 @@ int main(int argc,char **argv)
   if(!payload) REQUIRE(pool[i]==0x97);
  }
  REQUIRE(pread(ce,ce_bytes,DMA_FIXTURE_WINDOW_BYTES,0)==DMA_FIXTURE_WINDOW_BYTES);
- for(j=0;j<depth;j++) {
-  uint64_t group=0;
-  for(i=0;i<8;i++)group|=(uint64_t)ce_bytes[j*PAYLOAD+i]<<(i*8);
-  REQUIRE(group<groups);
-  for(i=0;i<PAYLOAD;i++)REQUIRE(ce_bytes[j*PAYLOAD+i]==campaign_pattern(group,i));
- }
+ for(j=0;j<depth;j++)for(i=0;i<PAYLOAD;i++)
+  REQUIRE(ce_bytes[j*PAYLOAD+i]==before[DMA_FIXTURE_OUTPUT_OFF+j*PAYLOAD+i]);
  for(i=depth*PAYLOAD;i<DMA_FIXTURE_WINDOW_BYTES;i++)REQUIRE(ce_bytes[i]==0x38);
  REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
  REQUIRE(device.accepted==2ULL*groups && device.completed==2ULL*groups && !device.pending &&
@@ -246,7 +268,8 @@ int main(int argc,char **argv)
  REQUIRE(!ioctl(dma,DMA_FIXTURE_STATS,&device));
  REQUIRE(device.region_unbinds==2 && device.host_unbinds==2);
  REQUIRE(module_refs()==refs);
- printf("PASS provider case=%s groups=%u depth=%u slots=%u distinct_patterns=1 full_output=1 source_unchanged=1 all_guards=1 stage_counts=%u,%u,%u,%u accepted=%llu completed=%llu pending=0 stale_callbacks=%llu owner_refs_released=1 CPU_simulation=1\n",
+ printf("# provider waves=%u distinct_sequence_patterns=%u\n",waves,groups);
+ printf("PASS provider case=%s groups=%u depth=%u slots=%u distinct_sequence_patterns=1 full_output=1 source_unchanged=1 all_guards=1 stage_counts=%u,%u,%u,%u accepted=%llu completed=%llu pending=0 stale_callbacks=%llu owner_refs_released=1 CPU_simulation=1\n",
   mode,groups,depth,depth,groups,groups,groups,groups,
   (unsigned long long)device.accepted,(unsigned long long)device.completed,(unsigned long long)device.stale_callbacks);
 out:

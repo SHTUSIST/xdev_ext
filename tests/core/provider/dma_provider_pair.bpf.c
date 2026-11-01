@@ -4,6 +4,7 @@
 #include <linux/bpf.h>
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include "dma_provider_fixture.h"
 #define OPS_TYPE(name) struct name { \
  __u32 abi_version,flags; \
  __s32 (*prepare)(const struct xdev_ext_mech_ctx *); \
@@ -15,33 +16,39 @@ OPS_TYPE(xdev_ext_ce_mech_ops);
 extern __u8 *bpf_xdev_ext_info(const struct xdev_ext_mech_ctx *,const __u64 size) __ksym;
 extern __u8 *bpf_xdev_ext_desc(const struct xdev_ext_mech_ctx *,__u32,const __u64 size) __ksym;
 extern __u8 *bpf_xdev_ext_cqe(const struct xdev_ext_mech_ctx *,__u32,const __u64 size) __ksym;
-struct observation { __u64 dma_build,dma_complete,ce_build,ce_complete,wrong_base,slot_mask; };
 struct { __uint(type,BPF_MAP_TYPE_ARRAY); __uint(max_entries,1);
- __type(key,__u32); __type(value,struct observation); } observations SEC(".maps");
-static __always_inline struct observation *observe(void)
+ __type(key,__u32); __type(value,struct dma_fixture_observation); } observations SEC(".maps");
+static __always_inline struct dma_fixture_observation *observe(void)
 { __u32 key=0; return bpf_map_lookup_elem(&observations,&key); }
 SEC("struct_ops/dma_build")
 __s32 BPF_PROG(dma_build,const struct xdev_ext_mech_ctx *m)
 {
  const struct xdev_ext_dma_mech_info *info;
- struct observation *o=observe();
+ struct dma_fixture_observation *o=observe();
  __u64 device_off;
  __u32 i,nr;
  (void)ctx;
  if (o) __sync_fetch_and_add(&o->dma_build,1);
- if (m->class_id!=XDEV_EXT_MECH_CLASS_DMA || m->base.backend!=XDEV_EXT_BINDING_BACKEND_UNSPEC) {
+ if (m->mech_abi_version!=XDEV_EXT_DMA_MECH_ABI_VERSION ||
+     m->class_id!=XDEV_EXT_MECH_CLASS_DMA || m->base.backend!=XDEV_EXT_BINDING_BACKEND_UNSPEC) {
   if (o) __sync_fetch_and_add(&o->wrong_base,1);
   return XDEV_EXT_MECH_BUILD_ABORT;
  }
  info=(void *)bpf_xdev_ext_info(m,sizeof(*info));
  if (!info) return XDEV_EXT_MECH_BUILD_ABORT;
  nr=info->nr_frames;
- /* START sequence addresses a distinct campaign group; CE retains its slots. */
- if (!nr || nr>XDEV_EXT_MECH_MAX_FRAMES || info->l.group_bytes>4096 ||
-     info->l.group_bytes>info->window_len ||
-     m->base.src_offset>(info->window_len-info->l.group_bytes)/4096)
+ /* Native addresses come only from the kernel-issued window lease. */
+ if (!nr || nr>XDEV_EXT_MECH_MAX_FRAMES || !info->lease_generation ||
+     !info->window_depth || info->window_slot>=info->window_depth ||
+     !info->l.group_bytes ||
+     info->window_depth>info->window_len/info->l.group_bytes)
   return XDEV_EXT_MECH_BUILD_ABORT;
- device_off=m->base.src_offset*4096;
+ if(m->base.src_offset>=DMA_FIXTURE_MAX_GROUPS)return XDEV_EXT_MECH_BUILD_ABORT;
+ if(o) {
+  if(m->base.direction==XDEV_EXT_MECH_DIR_FROM_DEVICE)o->source_slot[m->base.src_offset]=info->window_slot;
+  else o->sink_slot[m->base.src_offset]=info->window_slot;
+ }
+ device_off=(__u64)info->window_slot*info->l.group_bytes;
  for (i=0;i<XDEV_EXT_MECH_MAX_FRAMES;i++) {
   struct xdev_ext_dma_copy_desc *d;
   const struct xdev_ext_mech_frame_info *f;
@@ -62,7 +69,7 @@ SEC("struct_ops/dma_complete")
 __s32 BPF_PROG(dma_complete,const struct xdev_ext_mech_ctx *m)
 {
  const struct xdev_ext_dma_mech_cqe *c;
- struct observation *o=observe();
+ struct dma_fixture_observation *o=observe();
  (void)ctx;
  if (o) __sync_fetch_and_add(&o->dma_complete,1);
  c=(void *)bpf_xdev_ext_cqe(m,0,sizeof(*c));
@@ -74,7 +81,7 @@ SEC("struct_ops/ce_build")
 __s32 BPF_PROG(ce_build,const struct xdev_ext_mech_ctx *m)
 {
  const struct xdev_ext_ce_mech_info *info;
- struct observation *o=observe();
+ struct dma_fixture_observation *o=observe();
  __u64 off;
  __u32 i,nr;
  (void)ctx;
@@ -104,14 +111,14 @@ SEC("struct_ops/ce_complete")
 __s32 BPF_PROG(ce_complete,const struct xdev_ext_mech_ctx *m)
 {
  const struct xdev_ext_ce_mech_cqe *c;
- struct observation *o=observe();
+ struct dma_fixture_observation *o=observe();
  (void)ctx;
  if (o) __sync_fetch_and_add(&o->ce_complete,1);
  c=(void *)bpf_xdev_ext_cqe(m,0,sizeof(*c));
  return c && c->outcome==XDEV_EXT_CE_OK ? XDEV_EXT_MECH_NEXT : XDEV_EXT_MECH_ABORT;
 }
 SEC(".struct_ops.link") struct xdev_ext_dma_mech_ops dma_pair={
- .abi_version=XDEV_EXT_MECH_ABI_VERSION,.build=(void *)dma_build,.complete=(void *)dma_complete,
+ .abi_version=XDEV_EXT_DMA_MECH_ABI_VERSION,.build=(void *)dma_build,.complete=(void *)dma_complete,
 };
 SEC(".struct_ops.link") struct xdev_ext_ce_mech_ops ce_pair={
  .abi_version=XDEV_EXT_CE_MECH_ABI_VERSION,.build=(void *)ce_build,.complete=(void *)ce_complete,

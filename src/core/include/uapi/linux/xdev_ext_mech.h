@@ -20,6 +20,8 @@
 #define XDEV_EXT_MECH_ABI_VERSION		1U
 /* CE build requires a C-issued batch window lease; old CE ops are rejected. */
 #define XDEV_EXT_CE_MECH_ABI_VERSION		2U
+/* DMA v2 uses C-issued slots; v1 struct_ops registrations are rejected. */
+#define XDEV_EXT_DMA_MECH_ABI_VERSION		2U
 #define XDEV_EXT_MECH_MAX_FRAMES		32
 #define XDEV_EXT_MECH_MAX_STAGES		4
 /* Explicit per-link mechanism programs; flags0 keeps the class default. */
@@ -347,6 +349,8 @@ struct xdev_ext_dma_mech_info {
 	__u32 segment_size, max_entry_len, alignment, directions, nr_frames;
 	__u32 rsvd;
 	struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+	__u32 window_slot, window_depth;
+	__aligned_u64 lease_generation;
 };
 enum xdev_ext_dma_outcome {
 	XDEV_EXT_DMA_OK = 0,

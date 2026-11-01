@@ -776,10 +776,14 @@ struct xdev_ext_dma_region {
 	bool polled;
 };
 struct xdev_ext_dma_xfer {
+	u64 owner, generation;	/* immutable frame claim, checked on completion */
 	u64 host_byte_off, device_off;
 	u32 len, flags;
 };
-/* Accepted submit returns 0, completes exactly once (possibly inline).
+/* Failed binds may leave region.priv or *host set: checked rollback retains
+ * those handles and original pool pins until unbind succeeds. Unbind failures
+ * must preserve the handle.
+ * Accepted submit returns 0, completes exactly once (possibly inline).
  * Negative return guarantees no submission and no callback. Provider owns
  * dma_map/sync, native queue/doorbell/completion, and reachability checks.
  */
@@ -788,7 +792,7 @@ struct xdev_ext_dma_provider_ops {
 	const struct file_operations *fops;
 	int (*bind_region)(struct file *f, u64 device_off, u64 len,
 			   struct xdev_ext_dma_region *out);
-	void (*unbind_region)(struct xdev_ext_dma_region *r);
+	int (*unbind_region)(struct xdev_ext_dma_region *r);
 	int (*bind_host)(struct xdev_ext_dma_region *r, struct page **pages, u32 nr,
 			 void **host);
 	int  (*unbind_host)(void *host);
@@ -803,6 +807,11 @@ struct xdev_ext_dma_provider_ops {
 int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops);
 /* Module exit, process context; bound sessions hold owner references. */
 void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *ops);
+/* Read-only claim check for a live submitted or claimed completion ticket. */
+bool xdev_ext_mech_batch_dma_owners_valid(const struct xdev_ext_mech_batch *b,
+ u64 ticket, const struct xdev_ext_dma_xfer *x, u32 n);
+bool xdev_ext_dma_owners_valid(struct xdev_ext_dma_cookie *cookie, u64 ticket,
+ const struct xdev_ext_dma_xfer *x, u32 n);
 /* Any context, once per accepted submit, with its immutable ticket. */
 void xdev_ext_dma_complete(struct xdev_ext_dma_cookie *cookie, u64 ticket,
 		      int status, bool hw_submitted, u64 bytes_done);
