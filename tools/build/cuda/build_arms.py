@@ -119,8 +119,14 @@ ARMS = (
     Arm("bench_host_compute", ("cuda_host_compute/bench_host_compute.cu",), "cu",
         headers=("cuda_runtime.h",)),
     Arm("chain_bench", ("chains/chain_bench.c", "chains/chain_session.c", "chains/chain_staged.c",
-                        "../../kernel/tools/xdev_ext_xsk_redirect.c", "../../kernel/tools/xdev_ext_gpu_identity.c"),
-        "host-c", needs=("bpf",), headers=()),
+                        "../../kernel/tools/xdev_ext_xsk_redirect.c", "../../kernel/tools/xdev_ext_gpu_identity.c",
+                        # USER continuation uses the session syscall wrappers;
+                        # that unit also owns the shared RX/steering lifecycle.
+                        "../../kernel/tools/xdev_ext_mech/lib/xdev_ext_user.c",
+                        "../../kernel/tools/xdev_ext_mech/lib/xdev_ext_session.c",
+                        "../../kernel/tools/xdev_ext_xsk_shared.c",
+                        "../../kernel/tools/xdev_ext_xsk_steer.c"),
+        "host-c", needs=("bpf",), headers=(), extra=("-pthread",)),
     Arm("bench_cuda_staging", ("bench_cuda_staging.c",), "host-c", headers=()),
 )
 # host_fixture.cpp (cuda_host_compute) is the SDK-free host twin of the CUDA
