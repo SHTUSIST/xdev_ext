@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='peer-bind-authority-') as tmp:
     probe = directory / 'probe.c'
     probe.write_text(fixture.replace('/* PRODUCTION */', functions))
     subprocess.run(['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                    '-Wno-unused-function', '-fsanitize=undefined',
+                    '-Wno-unused-function', '-I'+str(ROOT / 'build/source-view/kernel'), '-fsanitize=undefined',
                     '-fno-sanitize-recover=all', str(probe), '-o', str(directory / 'probe')], check=True)
     subprocess.run([str(directory / 'probe')], check=True)
     mutations = [
@@ -38,7 +38,7 @@ with tempfile.TemporaryDirectory(prefix='peer-bind-authority-') as tmp:
             raise RuntimeError('mutation anchor missing: ' + name)
         probe.write_text(fixture.replace('/* PRODUCTION */', functions.replace(old, new)))
         subprocess.run(['gcc', '-std=gnu11', '-Wall', '-Wextra', '-Werror',
-                        '-Wno-unused-function', '-fsanitize=undefined',
+                        '-Wno-unused-function', '-I'+str(ROOT / 'build/source-view/kernel'), '-fsanitize=undefined',
                         '-fno-sanitize-recover=all', str(probe), '-o', str(directory / 'probe')], check=True)
         result = subprocess.run([str(directory / 'probe')], capture_output=True, text=True)
         if result.returncode == 0 or 'Assertion' not in result.stderr:

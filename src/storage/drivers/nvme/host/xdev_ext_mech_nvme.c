@@ -46,6 +46,7 @@ struct nvme_xdev_ext_peer_res;
 struct nvme_xdev_ext_mech_stage {
 	struct nvme_ns *ns;		/* pinned by the stage file */
 	struct nvme_xdev_ext_identity identity;
+	struct xdev_ext_stor_window window;
 	const struct nvme_ns_head *head;
 	const struct gendisk *disk;
 	const struct request_queue *queue;
@@ -63,6 +64,7 @@ struct nvme_xdev_ext_mech_stage {
 /* xdev_ext_mech_batch_priv(): ->validate fills it for ->submit of the same batch. */
 struct nvme_xdev_ext_mech_batch {
 	u8 sqe[NVME_XDEV_EXT_SQE_SIZE];	/* the SQE ->validate admitted */
+	struct xdev_ext_stor_rw rw;	/* decoded from that admitted SQE */
 	u64 batch_id;
 	bool validated;
 	struct bio *bio;
@@ -566,8 +568,8 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 	ret = nvme_xdev_ext_capture_identity(ns, &p->identity, &p->head, &p->disk,
 					&p->queue);
 	if (!ret)
-		ret = nvme_xdev_ext_mech_bind_check(&p->identity, write, st->arg0,
-					       st->arg1, l->group_bytes);
+		ret = nvme_xdev_ext_mech_bind_window(&p->identity, write, st->arg0,
+					       st->arg1, l->group_bytes, &p->window);
 	if (ret) {
 		kfree(p);
 		return ret;
@@ -603,13 +605,13 @@ void nvme_xdev_ext_mech_fill_info(struct xdev_ext_mech_stage *st,
 
 	memset(info, 0, sizeof(*info));
 	info->l = *xdev_ext_mech_session_layout(st->s);
-	info->lba_shift = p->identity.lba_shift;
+	info->lba_shift = p->window.lba_shift;
 	info->max_nlb = min_t(u32, NVME_XDEV_EXT_MAX_NLB,
 			      queue_max_hw_sectors(p->ns->queue) >>
-			      (p->identity.lba_shift - SECTOR_SHIFT));
-	info->window_slba = st->arg0;
-	info->window_nlb = st->arg1;
-	info->capacity_lbas = p->identity.capacity_lbas;
+			      (p->window.lba_shift - SECTOR_SHIFT));
+	info->window_slba = p->window.slba;
+	info->window_nlb = p->window.nlb;
+	info->capacity_lbas = p->window.capacity_lbas;
 	info->sgl = nvme_ctrl_sgl_supported(p->ns->ctrl);
 	if (!b)
 		return;
@@ -648,12 +650,12 @@ static int nvme_xdev_ext_class_validate(struct xdev_ext_mech_stage *st,
 	const struct nvme_xdev_ext_mech_stage *p = st->priv;
 	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
 	struct nvme_xdev_ext_mech_bounds bounds = {
-		.window_slba = st->arg0,
-		.window_nlb = st->arg1,
-		.capacity_lbas = p->identity.capacity_lbas,
+		.window_slba = p->window.slba,
+		.window_nlb = p->window.nlb,
+		.capacity_lbas = p->window.capacity_lbas,
 		.data_len = xdev_ext_mech_batch_bytes(b),
-		.lba_shift = p->identity.lba_shift,
-		.write = p->write,
+		.lba_shift = p->window.lba_shift,
+		.write = p->window.write,
 	};
 	struct nvme_xdev_ext_decoded decoded;
 	int ret;
@@ -670,6 +672,11 @@ static int nvme_xdev_ext_class_validate(struct xdev_ext_mech_stage *st,
 	if (ret)
 		return ret;
 	memcpy(bp->sqe, scratch, NVME_XDEV_EXT_SQE_SIZE);
+	bp->rw = (struct xdev_ext_stor_rw) {
+		.slba = decoded.slba, .nlb = decoded.nlb,
+		.byte_offset = decoded.byte_offset, .byte_length = decoded.byte_length,
+		.write = decoded.write,
+	};
 	bp->batch_id = xdev_ext_mech_batch_id(b);
 	bp->validated = true;
 	return 0;
@@ -1074,8 +1081,7 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 		return -EINVAL;
 	if (p->write && get_disk_ro(ns->disk))
 		return -EROFS;
-	slba = (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 10) |
-	       (u64)nvme_xdev_ext_sqe_dw(bp->sqe, 11) << 32;
+	slba = bp->rw.slba;
 	ret = xdev_ext_peer_nvme_plan(ns->head->lba_shift,
 			get_capacity(ns->disk) >> (ns->head->lba_shift - SECTOR_SHIFT),
 			ns->head->ms, ns->head->ids.csi, slba,
@@ -1105,6 +1111,10 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 		return PTR_ERR(slot);
 	}
 	ret = nvme_xdev_ext_peer_map(st, b, slot, plan.bytes, &cmd);
+	/* Preserve native plan/map refusals before rejecting an admitted-plan drift. */
+	if (!ret && (bp->rw.byte_length != plan.bytes ||
+		     bp->rw.nlb != (u64)plan.nlb + 1))
+		ret = -EPROTO;
 	if (ret) {
 		nvme_xdev_ext_peer_slot_put(p->peer, bp);
 		blk_mq_free_request(req);
@@ -1161,11 +1171,11 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
  if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
   return nvme_xdev_ext_peer_submit(st, b);
 	/* Only the admitted opcode, SLBA and NLB; C owns every other field. */
-	cmd.rw.opcode = bp->sqe[0];
+	cmd.rw.opcode = bp->rw.write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ;
 	cmd.rw.nsid = cpu_to_le32(p->identity.nsid);
-	cmd.common.cdw10 = cpu_to_le32(nvme_xdev_ext_sqe_dw(bp->sqe, 10));
-	cmd.common.cdw11 = cpu_to_le32(nvme_xdev_ext_sqe_dw(bp->sqe, 11));
-	cmd.common.cdw12 = cpu_to_le32(nvme_xdev_ext_sqe_dw(bp->sqe, 12));
+	cmd.rw.slba = cpu_to_le64(bp->rw.slba);
+	cmd.common.cdw12 = cpu_to_le32((nvme_xdev_ext_sqe_dw(bp->sqe, 12) & 0xffff0000U) |
+				     (u32)(bp->rw.nlb - 1));
 
 	/*
 	 * Tag pressure is preaccept backpressure: -EWOULDBLOCK is -EAGAIN,

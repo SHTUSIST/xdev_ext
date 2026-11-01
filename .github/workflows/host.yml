@@ -125,6 +125,9 @@ jobs:
       - name: Native peer DMA observation contracts
         working-directory: .
         run: python3 -I tests/support/evidence/native_trace/test_nvme_peer_dma.py
+      - name: Storage typed windows and descriptor schema
+        working-directory: .
+        run: bash tests/storage/family_window_schema/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-schema" new
       - name: Block table mechanism and responsibility facts
         working-directory: .
         run: |

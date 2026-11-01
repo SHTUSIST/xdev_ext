@@ -918,6 +918,11 @@
       "native_path": "include/linux/xdev_ext_binding_ctx.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_desc_schema.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_desc_schema.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_family_core.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_family_core.h"
@@ -7879,6 +7884,26 @@
       "source": "tests/network/xsk/xsk_xdev_ext_source_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_source_test.py"
+    },
+    {
+      "source": "tests/storage/family_window_schema/generate_vectors.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/generate_vectors.py"
+    },
+    {
+      "source": "tests/storage/family_window_schema/run.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/run.sh"
+    },
+    {
+      "source": "tests/storage/family_window_schema/test_window_schema.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/test_window_schema.c"
+    },
+    {
+      "source": "tests/storage/family_window_schema/vectors.inc",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/vectors.inc"
     },
     {
       "source": "tests/storage/nvme/blocktable/Makefile",

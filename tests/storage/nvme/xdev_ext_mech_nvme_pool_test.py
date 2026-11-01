@@ -35,6 +35,7 @@ class NvmePool(unittest.TestCase):
         definitions = '\n'.join(declaration(source, name, True) for name in names)
         functions = ['nvme_xdev_ext_class_resources_free', 'nvme_xdev_ext_class_resources_init',
                      'nvme_xdev_ext_class_slot_get', 'nvme_xdev_ext_class_slot_put',
+                     'nvme_xdev_ext_class_validate',
                      'nvme_xdev_ext_class_walk', 'nvme_xdev_ext_class_map',
                      'nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
                      'nvme_xdev_ext_poll_arm',

@@ -709,11 +709,11 @@ nvme_xdev_ext_build(struct io_uring_cmd *ioucmd, struct nvme_ns *ns,
 		return ret;
 
 	bounds = (struct nvme_xdev_ext_mech_bounds) {
-		.window_slba = st->arg0,
-		.window_nlb = st->arg1,
-		.capacity_lbas = id->capacity_lbas,
+		.window_slba = info.window_slba,
+		.window_nlb = info.window_nlb,
+		.capacity_lbas = info.capacity_lbas,
 		.data_len = sidecar->data_snapshot.data_len,
-		.lba_shift = id->lba_shift,
+		.lba_shift = info.lba_shift,
 		.write = st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE,
 	};
 	ret = nvme_xdev_ext_mech_validate(sqe, &bounds, &validated);
@@ -722,9 +722,10 @@ nvme_xdev_ext_build(struct io_uring_cmd *ioucmd, struct nvme_ns *ns,
 		return ret;
 	}
 
-	c->common.cdw10 = cpu_to_le32(nvme_xdev_ext_sqe_dw(sqe, 10));
-	c->common.cdw11 = cpu_to_le32(nvme_xdev_ext_sqe_dw(sqe, 11));
-	c->common.cdw12 = cpu_to_le32(nvme_xdev_ext_sqe_dw(sqe, 12));
+	c->common.cdw10 = cpu_to_le32((u32)validated.slba);
+	c->common.cdw11 = cpu_to_le32((u32)(validated.slba >> 32));
+	c->common.cdw12 = cpu_to_le32((nvme_xdev_ext_sqe_dw(sqe, 12) & 0xffff0000U) |
+				    (u32)(validated.nlb - 1));
 	rq_cmd->common.cdw10 = c->common.cdw10;
 	rq_cmd->common.cdw11 = c->common.cdw11;
 	rq_cmd->common.cdw12 = c->common.cdw12;

@@ -132,9 +132,16 @@ def check_build_order(source: str) -> str:
                      "nvme_xdev_ext_build_redecode("),
             "build -> validate -> write -> re-decode order")
     for needle in ("XDEV_EXT_MECH_MEMBER_BUILD", "XDEV_EXT_MECH_SITE_URING_CMD",
-                   ".desc_cap = 1", "st->arg0", "st->arg1",
+                   ".desc_cap = 1", ".window_slba = info.window_slba",
+                   ".window_nlb = info.window_nlb",
                    "XDEV_EXT_MECH_CNT_REJECTS"):
         require(needle in build, f"build is missing {needle}")
+    require(in_order(build, "nvme_xdev_ext_mech_fill_info(st, NULL, &info)",
+                     ".window_slba = info.window_slba", ".window_nlb = info.window_nlb",
+                     "nvme_xdev_ext_mech_validate(sqe, &bounds, &validated)"),
+            "build bounds must follow the immutable bound-window information")
+    for needle in (".capacity_lbas = info.capacity_lbas", ".lba_shift = info.lba_shift"):
+        require(needle in build, f"build is missing bound geometry {needle}")
     require("dispatch" not in build, "build must not run the policy dispatch")
 
     complete = function_body(source, "static void nvme_xdev_ext_build_complete(")
@@ -219,9 +226,23 @@ def check_mech_class(source: str, root: Path) -> str:
 
     bind = function_body(mech, "static int nvme_xdev_ext_class_bind(")
     require(in_order(bind, "FMODE_WRITE", "nvme_xdev_ext_mech_cmd_allowed(",
-                     "nvme_xdev_ext_capture_identity(", "nvme_xdev_ext_mech_bind_check(",
+                     "nvme_xdev_ext_capture_identity(", "nvme_xdev_ext_mech_bind_window(",
                      "nvme_xdev_ext_class_resources_init(st)"),
             "bind: write access, passthrough permission, identity, window")
+    require(re.search(r"struct nvme_xdev_ext_mech_stage\s*\{[^}]*"
+                      r"struct xdev_ext_stor_window window;", mech, re.S) is not None,
+            "stage must retain the typed immutable storage window")
+    require(re.search(r"nvme_xdev_ext_mech_bind_window\(&p->identity,\s*write,\s*"
+                      r"st->arg0,\s*st->arg1,\s*l->group_bytes,\s*&p->window\)", bind) is not None,
+            "bind must construct the typed window from identity and both stage bounds")
+    window_tail = bind[bind.index("nvme_xdev_ext_mech_bind_window("):bind.index("st->priv = p;")]
+    require(in_order(window_tail, "&p->window)", "if (ret)", "kfree(p);", "return ret;"),
+            "window admission failure must unwind before resources are initialized")
+    info = function_body(mech, "void nvme_xdev_ext_mech_fill_info(")
+    for field, bound in (("window_slba", "slba"), ("window_nlb", "nlb"),
+                         ("capacity_lbas", "capacity_lbas"), ("lba_shift", "lba_shift")):
+        require(f"info->{field} = p->window.{bound};" in info,
+                f"class information must export typed window {bound}")
     validate = function_body(mech, "static int nvme_xdev_ext_class_validate(")
     require(in_order(validate, "if (n != 1)", "nvme_xdev_ext_mech_validate(",
                      "bp->validated = true"),

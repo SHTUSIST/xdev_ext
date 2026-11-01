@@ -62,12 +62,21 @@ class NvmeNowait(unittest.TestCase):
                                 "nvme_xdev_ext_poll_arm")]
         if not all(helpers):
             raise RuntimeError("production stage-polling helpers missing")
-        production = "\n".join(h[0] for h in helpers) + "\n" + function[0]
+        validate = re.search(r"^static int nvme_xdev_ext_class_validate\([^;{}]*\)\s*"
+                             r"\{.*?^\}", source, re.MULTILINE | re.DOTALL)
+        if validate is None:
+            raise RuntimeError("production NVMe validation function missing")
+        production = validate[0] + "\n" + "\n".join(h[0] for h in helpers) + "\n" + function[0]
         generated = path / "submit.c"
         generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", production))
         cls.probe = path / "probe"
+        include_root = ROOT
+        if _LAYOUT:
+            repo = _LAYOUT.canonical_root(HERE)
+            view = Path(os.environ.get("XDEV_EXT_SOURCE_VIEW", repo / "build/source-view"))
+            include_root = view / "kernel"
         build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
-                                "-DCONFIG_XDEV_EXT_MECH_ZEROCOPY", str(generated),
+                                "-DCONFIG_XDEV_EXT_MECH_ZEROCOPY", "-I" + str(include_root), str(generated),
                                 "-o", str(cls.probe)], text=True, capture_output=True)
         if build.returncode:
             raise RuntimeError("host shim compile failed:\n" + build.stdout + build.stderr)

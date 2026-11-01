@@ -6,7 +6,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "include/linux/nvme_xdev_ext_passthru.h"
 
+typedef uint8_t u8;
 typedef uint64_t u64;
 typedef uint32_t u32;
 #define le64_to_cpu(v) (v)
@@ -16,6 +18,7 @@ typedef uint32_t u32;
 #define NVME_REQ_USERCMD (1U << 0)
 #define NVME_REQ_XDEV_EXT_ZC (1U << 1)
 #define cpu_to_le32(v) (v)
+#define cpu_to_le64(v) (v)
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((int)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-4095)
@@ -31,6 +34,7 @@ struct nvme_xdev_ext_mech_slot;
 struct nvme_xdev_ext_mech_batch {
  struct nvme_xdev_ext_mech_slot *slot;
 	bool validated;
+ struct xdev_ext_stor_rw rw;
 	uint64_t batch_id;
 	unsigned char sqe[64];
 };
@@ -38,7 +42,8 @@ struct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; };
 struct nvme_ns { void *queue; };
 struct nvme_xdev_ext_mech_stage {
 	int dead;
-	struct { uint32_t nsid; } identity;
+	struct nvme_xdev_ext_identity identity;
+ struct xdev_ext_stor_window window;
 	struct nvme_ns *ns;
 };
 struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; void *s; bool poll; };
@@ -92,8 +97,6 @@ static uint64_t xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b)
 { (void)b; return 0x100000001ULL; }
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st)
 { (void)st; return 0; }
-static uint32_t nvme_xdev_ext_sqe_dw(const unsigned char *sqe, unsigned int dw)
-{ (void)sqe; (void)dw; return 0; }
 static int nvme_req_op(struct nvme_command *cmd)
 { (void)cmd; return 0; }
 
@@ -139,17 +142,25 @@ static void blk_execute_rq_nowait(struct request *req, bool at_head)
 	req->end_io(req, 0);
 }
 
+static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,
+ u64 lba,u32 bytes,u32 plan,int ret)
+{ (void)b;(void)lba;(void)bytes;(void)plan;(void)ret; }
+
 /* PRODUCTION_SUBMIT */
 
 int main(int argc, char **argv)
 {
 	struct nvme_ns ns = {0};
-	struct nvme_xdev_ext_mech_stage priv = { .ns = &ns };
+	struct nvme_xdev_ext_mech_stage priv = { .ns = &ns,
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
 	struct xdev_ext_mech_stage st = { .priv = &priv };
-	struct xdev_ext_mech_batch b = { .priv = { .validated = true, .batch_id = 7 } };
+	struct xdev_ext_mech_batch b = {0};
+ const u8 sqe[NVME_XDEV_EXT_SQE_SIZE] = { [0]=NVME_XDEV_EXT_NVM_READ,[48]=7 };
 	int rc;
 
 	mode = argc > 1 ? argv[1] : "success";
+ if (nvme_xdev_ext_class_validate(&st,&b,sqe,1))
+  abort();
 	rc = nvme_xdev_ext_class_submit(&st, &b);
 	printf("rc=%d flags=%u tag_calls=%d blocked=%d done_allocs=%d "
 	       "maps=%d handoffs=%d completions=%d\n", rc, alloc_flags,
