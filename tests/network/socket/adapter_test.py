@@ -91,7 +91,8 @@ static void *fixture_family_calloc(size_t n,size_t size,int flags)
 { (void)flags; fixture_family_allocations++; return calloc(n,size); }
 static void fixture_family_free(const void *ptr)
 { if (ptr) fixture_family_frees++; free((void *)ptr); }
-''' + production_function(mech, 'xdev_ext_mech_batch_frame') + production_function(
+''' + production_function(mech, 'xdev_ext_mech_batch_session') + production_function(
+        mech, 'xdev_ext_mech_batch_frame') + production_function(
         mech, 'xdev_ext_mech_batch_completion_claim') + r'''
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b,u64 ticket,int err,bool sequester)
 {

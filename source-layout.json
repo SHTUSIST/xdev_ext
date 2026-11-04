@@ -1568,6 +1568,11 @@
       "native_path": "include/linux/xdev_ext_netfam_core.h"
     },
     {
+      "source": "src/network/include/linux/xdev_ext_netfam_count.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_netfam_count.h"
+    },
+    {
       "source": "src/network/include/linux/xdev_ext_peer_net_track.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_peer_net_track.h"
@@ -6968,6 +6973,30 @@
     {
       "source": "tests/integration/xdomain/xdomain_gpu_pattern.h",
       "logical_path": "tests/eval/xdomain/xdomain_gpu_pattern.h"
+    },
+    {
+      "source": "tests/network/count_fifo/ASSERTIONS.md",
+      "logical_path": "tests/network/count_fifo/ASSERTIONS.md"
+    },
+    {
+      "source": "tests/network/count_fifo/README.md",
+      "logical_path": "tests/network/count_fifo/README.md"
+    },
+    {
+      "source": "tests/network/count_fifo/adapter.py",
+      "logical_path": "tests/network/count_fifo/adapter.py"
+    },
+    {
+      "source": "tests/network/count_fifo/os_boundary.h",
+      "logical_path": "tests/network/count_fifo/os_boundary.h"
+    },
+    {
+      "source": "tests/network/count_fifo/run.py",
+      "logical_path": "tests/network/count_fifo/run.py"
+    },
+    {
+      "source": "tests/network/count_fifo/test_count.c",
+      "logical_path": "tests/network/count_fifo/test_count.c"
     },
     {
       "source": "tests/network/host_lease/README.md",
