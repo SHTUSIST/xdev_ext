@@ -50,6 +50,7 @@ struct xdev_ext_ce_lease_group {
 	struct xdev_ext_mech_session *session;
 	struct xdev_ext_ce_lease_state state;
 	u32 depth;
+	u32 cleanup_holds;		/* one contribution per cleanup_held stage */
 	struct xdev_ext_ce_lease_slot slots[];
 };
 
@@ -60,7 +61,11 @@ static LIST_HEAD(xdev_ext_ce_lease_groups);
 struct xdev_ext_ce_stage {
 	struct list_head lease_node;
 	struct xdev_ext_ce_lease_group *lease_group;
+	/* C-owned configured identity; native region output cannot weaken it. */
+	const struct xdev_ext_ce_backend_ops *ops;
 	u64 window_start;
+	u64 window_len;
+	bool cleanup_held;
 	struct xdev_ext_ce_region region;
 	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_ce_geom geom;
@@ -165,9 +170,9 @@ static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file
 	return ops;
 }
 
-/* CREATE cannot activate a session until every bound region is registered. */
+/* CREATE publishes configured exclusion before any native mapping can remain. */
 static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
-		struct xdev_ext_ce_stage *cs, u64 start)
+		struct xdev_ext_ce_stage *cs, u64 start, u64 len)
 {
 	struct xdev_ext_ce_lease_group *group, *found = NULL;
 	struct xdev_ext_ce_stage *other;
@@ -196,15 +201,31 @@ static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
 	 */
 	list_for_each_entry(other, &found->regions, lease_node)
 		if (other->window_start != start &&
-		    xdev_ext_ce_lease_overlap(other->region.ops,
-			other->window_start, other->region.len,
-			cs->region.ops, start, cs->region.len))
+		    xdev_ext_ce_lease_overlap(other->ops,
+			other->window_start, other->window_len,
+			cs->ops, start, len))
 			found->state.serial_batches = true;
 	cs->lease_group = found;
 	cs->window_start = start;
+	cs->window_len = len;
+	cs->cleanup_held = true;
+	found->cleanup_holds++;
 	list_add_tail(&cs->lease_node, &found->regions);
 	mutex_unlock(&xdev_ext_ce_lease_lock);
 	return 0;
+}
+
+/* Only complete bind success permits normal overlap scheduling. */
+static void xdev_ext_ce_lease_bind_ready(struct xdev_ext_ce_stage *cs)
+{
+	struct xdev_ext_ce_lease_group *group = cs->lease_group;
+
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	if (cs->cleanup_held) {
+		group->cleanup_holds--;
+		cs->cleanup_held = false;
+	}
+	mutex_unlock(&xdev_ext_ce_lease_lock);
 }
 
 /* Worker: acquire all ranges in one transaction, before any native CE work.
@@ -216,29 +237,37 @@ static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
 	struct xdev_ext_ce_lease_group *group = cs->lease_group, *other;
 	struct xdev_ext_ce_stage *a, *held;
 	u32 slot = xdev_ext_mech_batch_slot(b);
-	bool conflict = false;
+	bool conflict = false, cleanup_conflict = false;
 	int ret;
 
 	if (slot >= group->depth)
 		return -ERANGE;
 	mutex_lock(&xdev_ext_ce_lease_lock);
-	if (!group->state.active_batches)
-		list_for_each_entry(other, &xdev_ext_ce_lease_groups, node) {
-			if (other == group || !other->state.active_batches)
-				continue;
-			list_for_each_entry(a, &group->regions, lease_node)
-				list_for_each_entry(held, &other->regions, lease_node)
-					if (xdev_ext_ce_lease_overlap(a->region.ops,
-						a->window_start, a->region.len,
-						held->region.ops, held->window_start,
-						held->region.len)) {
-						conflict = true;
-						goto checked;
-					}
-		}
+	list_for_each_entry(other, &xdev_ext_ce_lease_groups, node) {
+		if (other == group)
+			continue;
+		if (!other->cleanup_holds &&
+		    (group->state.active_batches || !other->state.active_batches))
+			continue;
+		list_for_each_entry(a, &group->regions, lease_node)
+			list_for_each_entry(held, &other->regions, lease_node)
+				if (xdev_ext_ce_lease_overlap(a->ops,
+					a->window_start, a->window_len,
+					held->ops, held->window_start,
+					held->window_len)) {
+					conflict = true;
+					cleanup_conflict = other->cleanup_holds != 0;
+					goto checked;
+				}
+	}
 checked:
-	ret = xdev_ext_ce_lease_acquire(&group->state, &group->slots[slot],
-				      xdev_ext_mech_batch_id(b), conflict);
+	if (cleanup_conflict)
+		ret = -EAGAIN;
+	else if (group->cleanup_holds)
+		ret = -EBUSY;
+	else
+		ret = xdev_ext_ce_lease_acquire(&group->state, &group->slots[slot],
+					      xdev_ext_mech_batch_id(b), conflict);
 	mutex_unlock(&xdev_ext_ce_lease_lock);
 	return ret;
 }
@@ -263,6 +292,27 @@ static void xdev_ext_ce_batch_release(struct xdev_ext_mech_stage *st,
 	mutex_unlock(&xdev_ext_ce_lease_lock);
 }
 
+/* Checked cleanup holds exclusion before entering either native unmap. */
+static int xdev_ext_ce_lease_cleanup_begin(struct xdev_ext_ce_stage *cs)
+{
+	struct xdev_ext_ce_lease_group *group = cs->lease_group;
+
+	if (!group)
+		return 0;
+	mutex_lock(&xdev_ext_ce_lease_lock);
+	if (group->state.active_batches || group->state.quarantined) {
+		mutex_unlock(&xdev_ext_ce_lease_lock);
+		return -EBUSY;
+	}
+	if (!cs->cleanup_held) {
+		cs->cleanup_held = true;
+		group->cleanup_holds++;
+	}
+	mutex_unlock(&xdev_ext_ce_lease_lock);
+	return 0;
+}
+
+/* Both native handles are clear; release this hold and range atomically. */
 static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs)
 {
 	struct xdev_ext_ce_lease_group *group = cs->lease_group;
@@ -273,7 +323,12 @@ static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs)
 		mutex_unlock(&xdev_ext_ce_lease_lock);
 		return false;
 	}
+	if (cs->cleanup_held) {
+		group->cleanup_holds--;
+		cs->cleanup_held = false;
+	}
 	list_del(&cs->lease_node);
+	cs->lease_group = NULL;
 	empty = list_empty(&group->regions);
 	if (empty)
 		list_del(&group->node);
@@ -308,67 +363,74 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 		err = -ENODEV;
 		goto free;
 	}
- /* Publish residual ownership before either provider bind: a failed bind
-  * may have partially mapped pages. The core includes such a stage in checked
-  * CREATE rollback and retains the original UMEM pins on unmap refusal. */
- cs->region.ops = ops;
- st->priv = cs;
- err = ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
- if (err)
-  return err;
- err = xdev_ext_ce_geom_init(&cs->geom, u->arg1, cs->region.len,
-             cs->region.seg_size, cs->region.max_entry_len,
-             (u64)pool->nr_pages << PAGE_SHIFT,
-             pool->first_page_off, pool->frame_size, pool->nr_frames);
- if (err)
-  return err;
- geom = xdev_ext_ce_window_geom(&cs->geom);
- err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
-   st->direction, xdev_ext_mech_session_depth(st->s),
-   xdev_ext_mech_session_layout(st->s)->group_bytes);
- if (err)
-  return err;
- err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
- if (err)
-  return err;
- return xdev_ext_ce_lease_bind(st, cs, u->arg0);
+	/* Publish ownership and configured exclusion before native effects. A
+	 * failed bind stays in checked CREATE rollback, with its original pool
+	 * pins and exclusion retained if native cleanup refuses.
+	 */
+	cs->ops = ops;
+	cs->region.ops = ops;
+	st->priv = cs;
+	err = xdev_ext_ce_lease_bind(st, cs, u->arg0, u->arg1);
+	if (err)
+		return err;
+	err = cs->ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);
+	cs->region.ops = cs->ops;
+	if (err)
+		return err;
+	err = xdev_ext_ce_geom_init(&cs->geom, u->arg1, cs->region.len,
+			cs->region.seg_size, cs->region.max_entry_len,
+			(u64)pool->nr_pages << PAGE_SHIFT,
+			pool->first_page_off, pool->frame_size, pool->nr_frames);
+	if (err)
+		return err;
+	geom = xdev_ext_ce_window_geom(&cs->geom);
+	err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
+		st->direction, xdev_ext_mech_session_depth(st->s),
+		xdev_ext_mech_session_layout(st->s)->group_bytes);
+	if (err)
+		return err;
+	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
+	if (err)
+		return err;
+	xdev_ext_ce_lease_bind_ready(cs);
+	return 0;
 free:
- kfree(cs);
- return err;
+	kfree(cs);
+	return err;
 }
 
 static int xdev_ext_ce_unbind(struct xdev_ext_mech_stage *st)
 {
- struct xdev_ext_ce_stage *cs = st->priv;
- const struct xdev_ext_ce_backend_ops *ops;
- int err;
+	struct xdev_ext_ce_stage *cs = st->priv;
+	const struct xdev_ext_ce_backend_ops *ops;
+	int err;
 
- if (!cs)
-  return 0;
- ops = cs->region.ops;
- if (atomic_read(&cs->ambiguous))
-  return -EBUSY;
- if (cs->lease_group) {
-  if (!xdev_ext_ce_lease_unbind(cs))
-   return -EBUSY;
-  cs->lease_group = NULL;
- }
- if (cs->host) {
-  err = ops->unbind_host(cs->host);
-  if (err)
-   return err;
-  cs->host = NULL;
- }
- if (cs->region.priv) {
-  err = ops->unbind_region(&cs->region);
-  if (err)
-   return err;
-  cs->region.priv = NULL;
- }
- st->priv = NULL;
- kfree(cs);
- module_put(ops->owner);
- return 0;
+	if (!cs)
+		return 0;
+	ops = cs->ops;
+	if (atomic_read(&cs->ambiguous))
+		return -EBUSY;
+	err = xdev_ext_ce_lease_cleanup_begin(cs);
+	if (err)
+		return err;
+	if (cs->host) {
+		err = ops->unbind_host(cs->host);
+		if (err)
+			return err;
+		cs->host = NULL;
+	}
+	if (cs->region.priv) {
+		err = ops->unbind_region(&cs->region);
+		if (err)
+			return err;
+		cs->region.priv = NULL;
+	}
+	if (cs->lease_group && !xdev_ext_ce_lease_unbind(cs))
+		return -EBUSY;
+	st->priv = NULL;
+	kfree(cs);
+	module_put(ops->owner);
+	return 0;
 }
 
 /* Worker or CREATE: data spans and pool chunk indices of @b's frames. */
@@ -492,9 +554,9 @@ static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_me
 	ck->cs = cs;
 	err = xdev_ext_ce_stage_xfers(cs, b, cb);
 	if (!err)
-		err = cs->region.ops->submit(&cs->region, cs->host,
-					     st->direction, cb->x, cb->n, ck,
-					     xdev_ext_mech_batch_ticket(b));
+		err = cs->ops->submit(&cs->region, cs->host,
+				      st->direction, cb->x, cb->n, ck,
+				      xdev_ext_mech_batch_ticket(b));
 	if (err >= 0)
 		return 0;
 	if (!xdev_ext_ce_cookie_disarm(&ck->state)) {
