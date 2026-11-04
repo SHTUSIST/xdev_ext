@@ -7,12 +7,74 @@ io_uring/xdev_ext_mech_dma.c, with the real geometry rules of
 io_uring/xdev_ext_mech_dma_core.h and the real region and provider ABI
 structures of include/linux/xdev_ext_mech.h. The fixture stands in for the
 provider registry lookup and one provider whose poll support and bind
-behaviour each case selects.
+behaviour each case selects. The shared copy/lease implementations and DMA
+callback table are compiled too; batch submission/completion APIs are unreachable
+fail-closed boundaries in this bind/poll/unbind-only fixture.
 """
+import os
+from pathlib import Path
 import re
+import shlex
+import subprocess
+import sys
+import tempfile
 import unittest
 
-from poll_extract import compile_and_run, fields, function, source
+from poll_extract import fields, function
+
+# Keep this fixture independently usable from canonical sources or a native tree.
+PRODUCT = next(p for p in Path(__file__).resolve().parents
+               if (p / 'tools/layout.py').is_file())
+sys.path.insert(0, str(PRODUCT / 'tools'))
+import layout
+
+
+def source(relative):
+    return layout.read_native(os.environ.get('KERNEL_SRC', PRODUCT),
+                              'linux', relative).decode()
+
+
+# Exact production headers, installed at their native include paths in a private
+# compiler directory. This is an include fixture, not a source-view receipt.
+HEADERS = (
+    'include/linux/xdev_ext_mech.h', 'include/uapi/linux/xdev_ext_mech.h',
+    'include/uapi/linux/xdev_ext_binding.h',
+    'include/linux/xdev_ext_family_core.h', 'include/linux/xdev_ext_binding_ctx.h',
+    'include/linux/xdev_ext_dma_scope_core.h',
+    'include/linux/xdev_ext_compfam_core.h',
+    'io_uring/xdev_ext_mech_core.h', 'io_uring/xdev_ext_mech_dma_core.h',
+    'io_uring/xdev_ext_mech_window_copy_core.h', 'io_uring/xdev_ext_mech_window.h',
+    'io_uring/xdev_ext_mech_native_cookie.h', 'io_uring/xdev_ext_mech_ce_lease.h',
+    'io_uring/xdev_ext_compfam_copy_core.h',
+    'io_uring/xdev_ext_compfam_copy_runtime.h',
+    'io_uring/xdev_ext_compfam_copy_lease.h',
+)
+
+
+def compile_and_run(fixture, args=()):
+    with tempfile.TemporaryDirectory(prefix='xdev-ext-dma-poll-') as temporary:
+        path = Path(temporary)
+        for relative in HEADERS:
+            target = path / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(source(relative))
+        # Same OS include boundary as the published provider/faults fixture.
+        for name in ('atomic', 'fs', 'list', 'module', 'mutex', 'xdev_ext_mech', 'slab'):
+            target = path / 'linux' / (name + '.h')
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text('/* OS types and primitives are supplied by fixture.c. */\n')
+        (path / 'fixture.c').write_text(fixture)
+        command = shlex.split(os.environ.get('CC', 'cc')) + [
+            '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+            '-Wno-unused-function', '-Wno-unused-parameter',
+            '-fsanitize=undefined', '-fno-sanitize-recover=undefined', '-pthread',
+            '-I' + str(path), str(path / 'fixture.c'), '-o', str(path / 'probe')]
+        build = subprocess.run(command, text=True, capture_output=True)
+        if build.returncode:
+            raise AssertionError('fixture compile SETUP failed:\n' + build.stdout + build.stderr)
+        run = subprocess.run([str(path / 'probe'), *args], text=True,
+                             capture_output=True, timeout=10)
+        return run.returncode, run.stdout + run.stderr
 
 DMA = 'io_uring/xdev_ext_mech_dma.c'
 ABI = 'include/linux/xdev_ext_mech.h'
@@ -26,6 +88,8 @@ def structure(text, name):
 
 
 FIXTURE = r'''
+#include <assert.h>
+#include <pthread.h>
 #include <errno.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -42,7 +106,25 @@ typedef struct { int counter; } atomic_t;
 #define PAGE_SHIFT 12
 #define U64_MAX UINT64_MAX
 struct list_head { struct list_head *next,*prev; };
-struct xdev_ext_dma_lease_group;
+#define LIST_HEAD_INIT(n) { &(n), &(n) }
+struct mutex { pthread_mutex_t native; };
+#define __MUTEX_INITIALIZER(n) { .native = PTHREAD_MUTEX_INITIALIZER }
+#define mutex_lock(p) assert(!pthread_mutex_lock(&(p)->native))
+#define mutex_unlock(p) assert(!pthread_mutex_unlock(&(p)->native))
+#define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
+#define list_entry(p,t,m) container_of(p,t,m)
+#define list_for_each_entry(p,h,m) \
+ for ((p)=list_entry((h)->next,typeof(*(p)),m); &(p)->m!=(h); \
+      (p)=list_entry((p)->m.next,typeof(*(p)),m))
+static void INIT_LIST_HEAD(struct list_head *h) { h->next=h->prev=h; }
+static void list_add_tail(struct list_head *n,struct list_head *h) {
+ n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n;
+}
+static bool list_empty(const struct list_head *h) { return h->next==h; }
+static void list_del(struct list_head *n) { n->prev->next=n->next;n->next->prev=n->prev; }
+#define struct_size(p,m,n) (sizeof(*(p))+sizeof((p)->m[0])*(n))
+#define WARN_ON_ONCE(c) ({bool bad=!!(c);assert(!bad);bad;})
+#define WARN_ONCE(c,...) WARN_ON_ONCE(c)
 #define GFP_KERNEL 0
 struct page; struct file { int unused; }; struct module { int refs; }; struct file_operations;
 struct xdev_ext_dma_cookie;
@@ -51,6 +133,10 @@ struct xdev_ext_mech_batch;
 struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct file *file; void *priv;
 	u32 direction; bool poll; };
 struct xdev_ext_mech_pool { struct page **pages; u32 nr_pages, first_page_off, frame_size, nr_frames; };
+
+/* Actual header operations, after the fixture's OS type definitions. */
+#include "io_uring/xdev_ext_compfam_copy_runtime.h"
+#include "io_uring/xdev_ext_compfam_copy_lease.h"
 
 /* PRODUCTION_STRUCTS */
 
@@ -63,6 +149,8 @@ static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mec
 { (void)s; return &pool; }
 static void *kzalloc(size_t n, int gfp) { (void)gfp; allocs++; return calloc(1, n); }
 static void kfree(void *p) { if (p) frees++; free(p); }
+static void *kvzalloc(size_t n, int gfp) { (void)gfp; return calloc(1, n); }
+static void kvfree(void *p) { free(p); }
 static struct module owner;
 static void module_put(struct module *m) { (void)m; mod_puts++; }
 static int provider_bind_region(struct file *f, u64 off, u64 len, struct xdev_ext_dma_region *out)
@@ -98,11 +186,19 @@ static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct 
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s) { (void)s;return 4; }
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s)
 { static const struct xdev_ext_mech_layout l={.group_bytes=4096};(void)s;return &l; }
-static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c/* LEASE_WINDOW_PARAMS */)
-{ (void)s;(void)c;/* LEASE_WINDOW_UNUSED */return 0; } /* Uncontended registry, tested separately. */
-static bool xdev_ext_dma_lease_busy(struct xdev_ext_dma_stage *c) { (void)c;return false; }
-static void xdev_ext_dma_lease_cleanup(struct xdev_ext_dma_stage *c,bool hold) { (void)c;(void)hold; }
-static bool xdev_ext_dma_lease_unbind(struct xdev_ext_dma_stage *c) { (void)c;return true; }
+/* No batch exists in these CREATE/poll/rollback cases. Never fake a claim. */
+static unsigned batch_boundary_calls;
+static _Noreturn void batch_boundary_trap(void)
+{ batch_boundary_calls++; fprintf(stderr, "SETUP opaque batch API reached\n"); abort(); }
+static void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b)
+{ (void)b; batch_boundary_trap(); }
+static u64 xdev_ext_mech_batch_id(const struct xdev_ext_mech_batch *b)
+{ (void)b; batch_boundary_trap(); }
+static u32 xdev_ext_mech_batch_slot(const struct xdev_ext_mech_batch *b)
+{ (void)b; batch_boundary_trap(); }
+static bool xdev_ext_mech_batch_dma_owners_valid(const struct xdev_ext_mech_batch *b,
+ u64 ticket, const struct xdev_ext_dma_xfer *x, u32 n)
+{ (void)b; (void)ticket; (void)x; (void)n; batch_boundary_trap(); }
 static int atomic_read(const atomic_t *a) { return a->counter; }
 /* PRODUCTION */
 
@@ -126,6 +222,7 @@ int main(int argc, char **argv)
 			polled_ret = xdev_ext_dma_poll(&st);
 		printf("# region_polled=%d same_region=%d\n", cs->region.polled, polled_region == &cs->region);
 	}
+	printf("# opaque_batch_calls=%u\n", batch_boundary_calls);
 	printf("ret=%d saw_polled=%d bind_regions=%d unbind_regions=%d bind_hosts=%d gets=%d puts=%d "
 	       "allocs=%d frees=%d poll_calls=%d poll_ret=%d same=%d\n", ret, saw_polled, bind_regions,
 	       unbind_regions, bind_hosts, mod_gets, mod_puts, allocs, frees, poll_calls, polled_ret,
@@ -156,16 +253,29 @@ def build_fixture():
         dependencies.append('static void xdev_ext_dma_scope_put(struct xdev_ext_dma_scope *scope)\n'
                             '{ if (scope) abort(); }')
         dependencies.append(function(text, 'xdev_ext_dma_stage_scope'))
-    if '#include "xdev_ext_compfam_copy_core.h"' in text:
-        includes.append('#include "io_uring/xdev_ext_compfam_copy_core.h"')
     fixture = fixture.replace('/* SCOPE_LOOKUP_PARAM */',
                               ', const struct xdev_ext_dma_scope_ops **scope_ops' if scoped else '')
     fixture = fixture.replace('/* SCOPE_LOOKUP_INIT */', '*scope_ops = NULL;' if scoped else '')
-    short_lease = re.search(r'\bxdev_ext_dma_lease_bind\s*\(\s*st\s*,\s*cs\s*\)', bind) is not None
-    fixture = fixture.replace('/* LEASE_WINDOW_PARAMS */', '' if short_lease else ',u64 off,u64 len')
-    fixture = fixture.replace('/* LEASE_WINDOW_UNUSED */', '' if short_lease else '(void)off;(void)len;')
+    # Missing shared composition is SETUP, never a fallback to lease success.
+    if '#include "xdev_ext_compfam_copy_runtime.h"' not in text or \
+            '#include "xdev_ext_compfam_copy_lease.h"' not in text:
+        raise AssertionError('SETUP shared copy/lease production composition missing')
+    includes.append('#include "io_uring/xdev_ext_compfam_copy_core.h"')
     structs.append(structure(text, 'xdev_ext_dma_stage'))
-    production = '\n'.join(dependencies + [bind] +
+    structs.append(structure(text, 'xdev_ext_dma_batch'))
+    lease = source('io_uring/xdev_ext_compfam_copy_lease.c')
+    runtime = source('io_uring/xdev_ext_compfam_copy.c')
+    dependencies += [function(lease, n) for n in (
+        'xdev_ext_comp_copy_lease_bind', 'xdev_ext_comp_copy_lease_get',
+        'xdev_ext_comp_copy_lease_finish', 'xdev_ext_comp_copy_lease_hold',
+        'xdev_ext_comp_copy_lease_busy', 'xdev_ext_comp_copy_lease_cleanup_begin',
+        'xdev_ext_comp_copy_lease_unbind')]
+    dependencies += [function(runtime, n) for n in
+                     ('xdev_ext_comp_copy_poll', 'xdev_ext_comp_copy_unbind')]
+    # Preserve the actual policy/domain, every callback and its ops table.
+    first = text.index('static bool xdev_ext_dma_lease_key_overlap(')
+    last = text.index('static int xdev_ext_dma_bind(')
+    production = '\n'.join(dependencies + [text[first:last], bind] +
                            [function(text, n) for n in ('xdev_ext_dma_unbind', 'xdev_ext_dma_poll')])
     return (fixture.replace('/* PRODUCTION_INCLUDES */', '\n'.join(includes))
             .replace('/* PRODUCTION_STRUCTS */', '\n'.join(structs))
@@ -180,6 +290,7 @@ class DmaPoll(unittest.TestCase):
     def run_case(self, case):
         code, out = compile_and_run(self.fixture, (case,))
         self.assertEqual(code, 0, out)
+        self.assertIn("# opaque_batch_calls=0\n", out)
         return fields(out)
 
     def test_provider_without_poll_refuses_before_binding(self):
