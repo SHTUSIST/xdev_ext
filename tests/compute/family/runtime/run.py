@@ -42,6 +42,8 @@ def generate(root,out,mutation=None):
     runtime=root/'src/compute/io_uring/xdev_ext_compfam_copy.c'
     if runtime.exists():
         paths.insert(0,str(runtime.relative_to(root)))
+        lease=root/'src/compute/io_uring/xdev_ext_compfam_copy_lease.c'
+        if lease.exists(): paths.insert(0,str(lease.relative_to(root)))
         parts.insert(0,'#define RUNTIME_AVAILABLE 1\n')
     for path in paths:
         text=(root/path).read_text()
@@ -54,6 +56,12 @@ def generate(root,out,mutation=None):
         text=re.sub(r'^#include[^\n]*\n','',text,flags=re.M)
         parts.extend('#include "'+name+'"\n' for name in quoted)
         parts.append('\n#line 1 "'+path+'"\n'+text+'\n')
+    if (root/'src/compute/io_uring/xdev_ext_compfam_copy_lease.h').exists():
+        parts.append('''
+/* Fixture call adapters only: all admission decisions remain production. */
+static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,struct xdev_ext_mech_batch *b){return xdev_ext_ce_copy_lease_get(&cs->copy,b);}
+static int xdev_ext_dma_lease_get(struct xdev_ext_dma_stage *cs,struct xdev_ext_mech_batch *b){return xdev_ext_dma_copy_lease_get(&cs->copy,b);}
+''')
     parts.append('#include "probe.c"\n')
     if mutation and not edits:raise RuntimeError('SETUP mutation applied no production edit: '+mutation)
     if edits:
@@ -130,6 +138,11 @@ def replace_exact(body,old,new):
 def runtime_mutate(path,s,name):
     shared=path.endswith('xdev_ext_compfam_copy.c')
     ce=path.endswith('xdev_ext_mech_ce.c');dma=path.endswith('xdev_ext_mech_dma.c')
+    lease=path.endswith('xdev_ext_compfam_copy_lease.c')
+    if lease and name in ['ce_cleanup_scan','ce_own_hold']:
+        old,new=('if (!other->cleanup_holds &&','if (true &&') if name=='ce_cleanup_scan' else ('else if (group->cleanup_holds)','else if (false)')
+        return function_edit(s,'xdev_ext_comp_copy_lease_get',lambda b:replace_exact(b,old,new))
+
     if shared:
         if name=='dma_alloc_order':
             def move_alloc(body):
@@ -174,10 +187,24 @@ def runtime_mutate(path,s,name):
         if dma and name=='dma_scope_early':
             return function_edit(s,'xdev_ext_dma_copy_unbind_begin',lambda b:replace_exact(b,'\n\t/* Retain configured exclusion','\n\tif (cs->scope) { xdev_ext_dma_scope_put(cs->scope); cs->scope = NULL; }\n\t/* Retain configured exclusion'))
         if ce and name=='ce_cleanup_hold':
-            return function_edit(s,'xdev_ext_ce_copy_unbind_begin',lambda b:replace_exact(b,'return xdev_ext_ce_lease_cleanup_begin(cs);','return 0;'))
+            return function_edit(s,'xdev_ext_ce_copy_unbind_begin',lambda b:replace_exact(b,'return xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);' if 'xdev_ext_compfam_copy_lease.h' in s else 'return xdev_ext_ce_lease_cleanup_begin(cs);','return 0;'))
         if ce and name=='ce_native_identity':
             return function_edit(s,'xdev_ext_ce_copy_submit',lambda b:replace_exact(b,'return cs->ops->submit(&cs->region, copy->host,','return cs->region.ops->submit(&cs->region, copy->host,'))
-        if ce and name=='ce_detach_early':
+        if 'xdev_ext_compfam_copy_lease.h' in s:
+            if ce and name=='ce_detach_early':
+                return function_edit(s,'xdev_ext_ce_copy_unbind_begin',lambda b:replace_exact(b,'return xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);','int err = xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);\n\tif (err) return err;\n\treturn cs->lease.group && !xdev_ext_comp_copy_lease_unbind(&cs->lease, true) ? -EBUSY : 0;'))
+            if ce and name=='ce_initial_hold':
+                return function_edit(s,'xdev_ext_ce_lease_bind',lambda b:replace_exact(b,'cs, true);','cs, false);'))
+            if ce and name=='ce_configured_identity':
+                def provider_identity(b):
+                    for old,new in [('left->ops','left->region.ops'),('left->window_len','left->region.len'),('right->ops','right->region.ops'),('right->window_len','right->region.len')]:
+                        b=replace_exact(b,old,new)
+                    return b
+                return function_edit(s,'xdev_ext_ce_lease_key_overlap',provider_identity)
+            if dma and name=='dma_cleanup':
+                return function_edit(s,'xdev_ext_dma_copy_unbind_begin',lambda b:replace_exact(b,'xdev_ext_comp_copy_lease_hold(&cs->lease, true);','/* mutant omits retained exclusion */'))
+            if name in ['ce_cleanup_scan','ce_own_hold']: return s
+        elif ce and name=='ce_detach_early':
             return function_edit(s,'xdev_ext_ce_copy_unbind_begin',lambda b:replace_exact(b,'return xdev_ext_ce_lease_cleanup_begin(cs);','int err = xdev_ext_ce_lease_cleanup_begin(cs);\n\tif (err) return err;\n\treturn cs->lease_group && !xdev_ext_ce_lease_unbind(cs) ? -EBUSY : 0;'))
         # These actual lease/bind source bodies retain their original seam and meaning.
         old_names=['ce_capacity','ce_initial_hold','ce_region_restore','ce_cleanup_scan','ce_own_hold','ce_configured_identity','dma_cleanup']

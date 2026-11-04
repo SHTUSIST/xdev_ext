@@ -28,7 +28,9 @@ RUNTIME_SHIM = r"""
 #include "xdev_ext_mech_native_cookie.h"
 #define HAVE_RUNTIME 1
 struct mutex { pthread_mutex_t value; };
-#define DEFINE_MUTEX(n) struct mutex n={PTHREAD_MUTEX_INITIALIZER}
+#define __MUTEX_INITIALIZER(n) {PTHREAD_MUTEX_INITIALIZER}
+#define DEFINE_MUTEX(n) struct mutex n=__MUTEX_INITIALIZER(n)
+#define LIST_HEAD_INIT(n) {&(n),&(n)}
 #define mutex_lock(p) assert(!pthread_mutex_lock(&(p)->value))
 #define mutex_unlock(p) assert(!pthread_mutex_unlock(&(p)->value))
 #define LIST_HEAD(n) struct list_head n={&(n),&(n)}
@@ -102,18 +104,29 @@ def extract_runtime(root,out,mech,generated):
         generated.append('struct xdev_ext_comp_copy_stage; struct xdev_ext_comp_copy_cookie;\n')
         generated.append(block(header,name,True))
     generated.extend(line+'\n' for line in header.splitlines() if line.startswith('XDEV_EXT_NATIVE_COOKIE_ASSERT('))
+    lease_header=root/'src/compute/io_uring/xdev_ext_compfam_copy_lease.h'
+    common_lease=lease_header.exists()
+    if common_lease:
+        generated.append('#define HAVE_COMMON_LEASE 1\n')
+        generated.append(re.sub(r'^#include[^\n]*\n','',lease_header.read_text(),flags=re.M))
+        generated.append(re.sub(r'^#include[^\n]*\n','',(root/'src/compute/io_uring/xdev_ext_compfam_copy_lease.c').read_text(),flags=re.M))
     for cls,src in [('ce',CE),('dma',DMA)]:
         text=(root/src).read_text()
         if cls=='dma':
             for name in ['xdev_ext_dma_scope_info','xdev_ext_dma_scope_ops']:
                 generated.append(block(mech,name,True))
             generated.append(block(text,'xdev_ext_dma_scope',True))
-        for suffix in ['lease_group','stage','batch']:
+        for suffix in (['stage','batch'] if common_lease else ['lease_group','stage','batch']):
             generated.append(block(text,'xdev_ext_'+cls+'_'+suffix,True))
-        generated.append('static DEFINE_MUTEX(xdev_ext_'+cls+'_lease_lock);\nstatic LIST_HEAD(xdev_ext_'+cls+'_lease_groups);\n')
+        if not common_lease:
+            generated.append('static DEFINE_MUTEX(xdev_ext_'+cls+'_lease_lock);\nstatic LIST_HEAD(xdev_ext_'+cls+'_lease_groups);\n')
         if cls=='dma':
             for name in ['xdev_ext_dma_scope_create','xdev_ext_dma_scope_ref_put','xdev_ext_dma_scope_owner_put','xdev_ext_dma_scope_get','xdev_ext_dma_scope_put','xdev_ext_dma_stage_scope']:
                 generated.append(block(text,name))
+        if common_lease:
+            generated.append(text[text.index('static bool xdev_ext_'+cls+'_lease_key_overlap('):text.index('/* All stages share final batch fate;')])
+            generated.append(block(text,'xdev_ext_'+cls+'_batch_release'))
+            continue
         for suffix in (['lease_bind','lease_bind_ready','lease_get','batch_release','lease_cleanup_begin','lease_unbind'] if cls=='ce' else ['lease_bind','lease_get','batch_release','lease_unbind','lease_cleanup','lease_busy']):
             generated.append(block(text,'xdev_ext_'+cls+'_'+suffix))
     generated.append('#include "boundary_impl.h"\n')

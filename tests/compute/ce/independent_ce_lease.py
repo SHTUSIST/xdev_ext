@@ -69,11 +69,14 @@ static void list_add_tail(struct list_head *n,struct list_head *h)
 {n->prev=h->prev;n->next=h;h->prev->next=n;h->prev=n;}
 static void list_del(struct list_head *n){n->prev->next=n->next;n->next->prev=n->prev;}
 static bool list_empty(struct list_head *h){return h->next==h;}
-#define mutex_lock pthread_mutex_lock
-#define mutex_unlock pthread_mutex_unlock
-static pthread_mutex_t *xdev_ext_ce_lease_mutex;
+struct mutex { pthread_mutex_t *value; };
+#define __MUTEX_INITIALIZER(n) {NULL}
+#define LIST_HEAD_INIT(n) {&(n),&(n)}
+#define mutex_lock(p) pthread_mutex_lock((p)->value)
+#define mutex_unlock(p) pthread_mutex_unlock((p)->value)
+static pthread_mutex_t *xdev_ext_ce_lease_mutex __attribute__((unused));
 #define xdev_ext_ce_lease_lock (*xdev_ext_ce_lease_mutex)
-static LIST_HEAD(xdev_ext_ce_lease_groups);
+
 static unsigned warnings;
 #define WARN_ON_ONCE(x) ((x)?(++warnings,true):false)
 #define GFP_KERNEL 0
@@ -96,11 +99,11 @@ static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->gener
 '''
 STAGE = r'''
 struct xdev_ext_ce_stage {
- struct list_head lease_node;
- struct xdev_ext_ce_lease_group *lease_group;
+ struct xdev_ext_comp_copy_lease_region lease;
+ struct xdev_ext_comp_copy_stage { int unused; } copy;
  const void *ops;
  u64 window_start, window_len;
- bool cleanup_held;
+
  struct {const void *ops;u64 len;} region;
 };
 '''
@@ -123,7 +126,7 @@ static void same_base_preserves_depth(void)
   assert(!xdev_ext_ce_lease_get(&regions[0],&batches[i]));
   assert(!xdev_ext_ce_lease_get(&regions[1],&batches[i]));
  }
- assert(regions[0].lease_group->state.active_batches==8);
+ assert(regions[0].lease.group->state.active_batches==8);
  for(unsigned i=0;i<8;i++) {
   xdev_ext_ce_batch_release(&stages[0],&batches[i],false);
   xdev_ext_ce_batch_release(&stages[1],&batches[i],false);
@@ -159,10 +162,10 @@ static void shifted_windows_serialize_slots(void)
  if(!admission)memset(device+8192,0x22,8192); /* A slot1 native write. */
  for(unsigned i=8192;i<16384;i++)assert(device[i]==0x11);
  assert(admission==-EAGAIN);
- assert(regions[0].lease_group->state.active_batches==1);
+ assert(regions[0].lease.group->state.active_batches==1);
  xdev_ext_ce_batch_release(&stages[0],&first,false);
  xdev_ext_ce_batch_release(&stages[1],&first,false);
- assert(!regions[0].lease_group->state.active_batches);
+ assert(!regions[0].lease.group->state.active_batches);
  assert(!xdev_ext_ce_lease_get(&regions[0],&next));
  assert(!xdev_ext_ce_lease_get(&regions[1],&next));
  memset(device+8192,0x22,8192);
@@ -174,7 +177,7 @@ static void shifted_windows_serialize_slots(void)
  xdev_ext_ce_batch_release(&stages[0],&first,true);
  xdev_ext_ce_batch_release(&stages[1],&first,true);
  assert(xdev_ext_ce_lease_get(&regions[0],&next)==-EBUSY);
- assert(regions[0].lease_group->state.active_batches==1);
+ assert(regions[0].lease.group->state.active_batches==1);
  assert(!xdev_ext_ce_lease_unbind(&regions[1]));
  assert(!xdev_ext_ce_lease_unbind(&regions[0]));
  puts("ok - actual CE registry: valid shifted-window plans serialize slots, preserve payload, retry after final release and retain unknown ownership");
@@ -191,6 +194,7 @@ int main(void)
  pthread_mutex_t *shared=mmap(NULL,sizeof(*shared),PROT_READ|PROT_WRITE,MAP_SHARED|MAP_ANONYMOUS,-1,0);
  assert(shared!=MAP_FAILED);assert(!pthread_mutex_init(shared,&attr));
  xdev_ext_ce_lease_mutex=shared;
+ xdev_ext_ce_lease_domain.lock.value=shared;
  same_base_preserves_depth();
  fail_allocation=true;assert(xdev_ext_ce_lease_bind(&f,&fr,0,4096)==-ENOMEM);fail_allocation=false;
  assert(list_empty(&xdev_ext_ce_lease_groups)); /* Failed CREATE registered nothing. */
@@ -199,37 +203,37 @@ int main(void)
  for(unsigned i=0;i<8;i++)batch[i]=(struct xdev_ext_mech_batch){.slot=i,.generation=10+i};
  assert(!xdev_ext_ce_lease_get(&ar[0],&batch[0]));
  assert(xdev_ext_ce_lease_get(&br[0],&other)==-EAGAIN); /* All ranges held before stage2. */
- assert(!br[0].lease_group->state.active_batches);
+ assert(!br[0].lease.group->state.active_batches);
  assert(!xdev_ext_ce_lease_unbind(&ar[0])); /* Cannot unbind an active owner. */
  assert(!xdev_ext_ce_lease_get(&ar[1],&batch[0]));
  for(unsigned i=1;i<8;i++)assert(!xdev_ext_ce_lease_get(&ar[i%2],&batch[i]));
- assert(ar[0].lease_group->state.active_batches==8);
+ assert(ar[0].lease.group->state.active_batches==8);
  child=fork();assert(child>=0);
  if(!child){assert(xdev_ext_ce_lease_get(&br[0],&other)==-EAGAIN);_exit(0);}
  assert(waitpid(child,&status,0)==child && WIFEXITED(status) && !WEXITSTATUS(status));
  struct xdev_ext_mech_batch stale=batch[0];stale.generation=99;
  xdev_ext_ce_batch_release(&a[0],&stale,false);
- assert(ar[0].lease_group->state.active_batches==8 && ar[0].lease_group->slots[0].generation==10);
+ assert(ar[0].lease.group->state.active_batches==8 && ar[0].lease.group->slots[0].generation==10);
  for(unsigned i=0;i<8;i++){xdev_ext_ce_batch_release(&a[0],&batch[i],false);xdev_ext_ce_batch_release(&a[1],&batch[i],false);}
- assert(!ar[0].lease_group->state.active_batches);
+ assert(!ar[0].lease.group->state.active_batches);
  assert(!xdev_ext_ce_lease_get(&br[0],&other)); /* Reversed order makes progress, no ABBA. */
  xdev_ext_ce_batch_release(&b[0],&other,false);xdev_ext_ce_batch_release(&b[1],&other,false);
- assert(!br[0].lease_group->state.active_batches);
+ assert(!br[0].lease.group->state.active_batches);
  assert(xdev_ext_ce_lease_unbind(&br[1]));assert(xdev_ext_ce_lease_unbind(&br[0]));
  /* A failed native preaccept with known fate can release; an accepted unknown cannot. */
  batch[0].generation=100;assert(!xdev_ext_ce_lease_get(&ar[0],&batch[0]));
- xdev_ext_ce_batch_release(&a[0],&batch[0],false);assert(!ar[0].lease_group->state.active_batches);
+ xdev_ext_ce_batch_release(&a[0],&batch[0],false);assert(!ar[0].lease.group->state.active_batches);
  batch[0].generation=101;assert(!xdev_ext_ce_lease_get(&ar[0],&batch[0]));
  xdev_ext_ce_batch_release(&a[0],&batch[0],true);xdev_ext_ce_batch_release(&a[1],&batch[0],true);
- assert(ar[0].lease_group->state.quarantined && ar[0].lease_group->state.active_batches==1);
+ assert(ar[0].lease.group->state.quarantined && ar[0].lease.group->state.active_batches==1);
  assert(xdev_ext_ce_lease_get(&ar[0],&batch[0])==-EBUSY);
  bind_region(&b[0],&br[0],0);bind_region(&b[1],&br[1],8192);
  assert(xdev_ext_ce_lease_get(&br[0],&other)==-EAGAIN);
- assert(!br[0].lease_group->state.active_batches); /* Unknown retains every foreign conflict. */
+ assert(!br[0].lease.group->state.active_batches); /* Unknown retains every foreign conflict. */
  assert(xdev_ext_ce_lease_unbind(&br[1]));assert(xdev_ext_ce_lease_unbind(&br[0]));
  xdev_ext_ce_batch_release(&a[0],&batch[0],false);
  assert(!xdev_ext_ce_lease_unbind(&ar[0]) && !xdev_ext_ce_lease_unbind(&ar[1]));
- assert(ar[0].lease_group->state.active_batches==1 && warnings>=4);
+ assert(ar[0].lease.group->state.active_batches==1 && warnings>=4);
  puts("ok - actual CE registry: depth8, all-range ABBA exclusion, failed bind cleanup, fork contention, stale/duplicate terminal and unknown retention");
  shifted_windows_serialize_slots();
  return 0;
@@ -248,7 +252,7 @@ def main():
         failures = {
             'missing-get': 'ValueError: substring not found',
             'early-release': "assert end.index('xdev_ext_mech_frames_release(') < end.index('cls->batch_release(')",
-            'ignore-quarantine': 'ar[0].lease_group->state.quarantined && ar[0].lease_group->state.active_batches==1',
+            'ignore-quarantine': 'ar[0].lease.group->state.quarantined && ar[0].lease.group->state.active_batches==1',
             'first-range-only': 'xdev_ext_ce_lease_get(&br[0],&other)==-EAGAIN',
         }
         for mutant, expected in failures.items():
@@ -262,7 +266,7 @@ def main():
     source = (KERNEL/'src/compute/io_uring/xdev_ext_mech_ce.c').read_text()
     core = (KERNEL/'src/core/io_uring/xdev_ext_mech.c').read_text()
     if args.mutant == 'missing-get':
-        source = source.replace('return xdev_ext_ce_lease_get(cs, b);', 'return 0;', 1)
+        source = source.replace('return xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));', 'return 0;', 1)
     # Final frame disposition can turn an apparent completion into quarantine.
     end = function(core, 'static void xdev_ext_mech_end(')
     if args.mutant == 'early-release':
@@ -276,23 +280,32 @@ def main():
     assert end.index('cls->batch_release(') < end.index('xdev_ext_mech_batch_put_locked(')
     assert 'for (i = 0; i < s->nr_stages; i++)' in end
     assert 'how == XDEV_EXT_MECH_END_SEQUESTER' in end[end.index('cls->batch_release('):]
-    group_start = source.index('struct xdev_ext_ce_lease_group {')
-    group = source[group_start:source.index('\n};', group_start)+3]
-    functions = ''.join(function(source, signature) for signature in (
-        'static int xdev_ext_ce_lease_bind(', 'static void xdev_ext_ce_lease_bind_ready(',
-        'static int xdev_ext_ce_lease_get(',
-        'static void xdev_ext_ce_batch_release(', 'static bool xdev_ext_ce_lease_unbind('))
+    lease_header = (KERNEL/'src/compute/io_uring/xdev_ext_compfam_copy_lease.h').read_text()
+    lease_source = (KERNEL/'src/compute/io_uring/xdev_ext_compfam_copy_lease.c').read_text()
+    import re
+    group = re.sub(r'^#include[^\n]*\n', '', lease_header, flags=re.M)
+    common = re.sub(r'^#include[^\n]*\n', '', lease_source, flags=re.M)
+    policy = source[source.index('static bool xdev_ext_ce_lease_key_overlap('):source.index('/* All stages share final batch fate;')]
+    functions = common + policy + ''.join(function(source, signature) for signature in (
+        'static void xdev_ext_ce_batch_release(',
+        'static int xdev_ext_ce_copy_lease_get(',
+        'static int xdev_ext_ce_copy_unbind_end(')) + r'''
+#define xdev_ext_ce_lease_groups xdev_ext_ce_lease_domain.groups
+static void xdev_ext_ce_lease_bind_ready(struct xdev_ext_ce_stage *cs){xdev_ext_comp_copy_lease_hold(&cs->lease,false);}
+static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,struct xdev_ext_mech_batch *b){return xdev_ext_ce_copy_lease_get(&cs->copy,b);}
+static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs){return !xdev_ext_ce_copy_unbind_end(&cs->copy);}
+'''
     if args.mutant == 'ignore-quarantine':
         functions = functions.replace('xdev_ext_mech_batch_id(b), sequestered);',
                                       'xdev_ext_mech_batch_id(b), false);')
         # Keep the deliberately ignored parameter warning-free for this mutant.
-        functions = functions.replace('int ret;\n\n\tif (WARN_ON_ONCE(slot >= group->depth))',
-                                      'int ret;\n\t(void)sequestered;\n\n\tif (WARN_ON_ONCE(slot >= group->depth))')
+        functions = functions.replace('int ret;\n\n\tret = xdev_ext_comp_copy_lease_finish',
+                                      'int ret;\n\t(void)sequestered;\n\n\tret = xdev_ext_comp_copy_lease_finish')
     if args.mutant == 'first-range-only':
-        functions = functions.replace('list_for_each_entry(a, &group->regions, lease_node)',
-            'for (a=container_of(group->regions.next,__typeof__(*a),lease_node);a;a=NULL)')
-        functions = functions.replace('list_for_each_entry(held, &other->regions, lease_node)',
-            'for (held=container_of(other->regions.next,__typeof__(*held),lease_node);held;held=NULL)')
+        functions = functions.replace('list_for_each_entry(a, &group->regions, node)',
+            'for (a=container_of(group->regions.next,__typeof__(*a),node);a;a=NULL)')
+        functions = functions.replace('list_for_each_entry(held, &other->regions, node)',
+            'for (held=container_of(other->regions.next,__typeof__(*held),node);held;held=NULL)')
     submit = function(source, 'static int xdev_ext_ce_submit(')
     common = (KERNEL/'src/compute/io_uring/xdev_ext_compfam_copy.c').read_text()
     execute = function(common, 'int xdev_ext_comp_copy_stage_submit(')
@@ -302,7 +315,7 @@ def main():
     # Follow the actual class table and both callbacks into the common body.
     assert '.lease_get = xdev_ext_ce_copy_lease_get,' in source
     assert '.submit = xdev_ext_ce_copy_submit,' in source
-    lease.index('xdev_ext_ce_lease_get(cs, b)')
+    lease.index('xdev_ext_comp_copy_lease_get(&cs->lease,')
     assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('xdev_ext_window_copy_cookie_arm(')
     assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('cs->ops->submit(')
     assert 'cs->ops->submit(&cs->region, copy->host, st->direction,' in native

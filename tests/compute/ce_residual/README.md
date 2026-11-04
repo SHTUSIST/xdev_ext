@@ -70,3 +70,15 @@ Host-unmap refusal/early detach target the corresponding CE callbacks, and early
 module-put targets the typed wrapper; those paths execute through common checked
 unmap. Keep the original recipes with an old repaired-source receipt when
 replaying that private historical baseline.
+
+### Common-lease identity mutation scope
+
+For the common-lease source, `provider-field-identity` changes the actual CE
+key-overlap policy to use provider-writable region ops/length. The policy is called
+by both the foreign-group admission scan and the same-group serial predicate, so
+this injection also affects that serial caller. It preserves the original targeted
+fault and decisive cross-group assertion, rather than every possible side effect
+of the old private-get edit: the designated identity control uses separate
+single-region groups, and retains its original expected refusal/error string.
+The published runtime `ce_configured_identity` mutation has the same two-caller
+scope. Neither mutation counts a missing anchor or compile failure as detection.
