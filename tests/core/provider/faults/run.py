@@ -61,10 +61,47 @@ def dma_scope_dependencies(text):
             if re.search(r"^struct xdev_ext_dma_scope \{", text, re.M) else ())
 
 
+def shared_runtime_dependencies(*adapters):
+    """Any shared-runtime marker requires the actual runtime, never old mode."""
+    marker = r"\bxdev_ext_comp_copy_(?:member|registration|registry(?:_\w+)?|cookie|legacy_ops|stage(?:_\w+)?|collect|complete|mark_dead|poll|unbind)\b"
+    return (("io_uring/xdev_ext_compfam_copy_runtime.h",
+             "io_uring/xdev_ext_compfam_copy.c")
+            if any(re.search(marker, text) or
+                   "xdev_ext_compfam_copy_runtime.h" in text for text in adapters)
+            else ())
+
+
 def copy_window_dependencies(text):
-    """Use the typed header only when this actual adapter includes it."""
+    """Follow the selected adapter's actual private or portable header edge."""
     return (("io_uring/xdev_ext_compfam_copy_core.h",)
-            if '#include "xdev_ext_compfam_copy_core.h"' in text else ())
+            if '#include "xdev_ext_compfam_copy_core.h"' in text or
+            shared_runtime_dependencies(text) else ())
+
+
+def mutate_function(text, name, old, new):
+    """A missing or changed mutation anchor is SETUP, not a behavioral kill."""
+    body = function(text, name)
+    if body.count(old) != 1:
+        raise RuntimeError("SETUP mutation anchor: " + name)
+    return text.replace(body, body.replace(old, new, 1), 1)
+
+
+def shared_fixture_layout(template):
+    """Relocate only fixture storage references; keep all comparisons literal."""
+    for field in ("host", "window", "staged", "plan", "ambiguous"):
+        template = re.sub(r"\bcs->" + field + r"\b", "cs->copy." + field, template)
+    for field in ("ambiguous", "window"):
+        template = template.replace(")->" + field, ")->copy." + field)
+    template = template.replace("cs.ambiguous", "cs.copy.ambiguous")
+    template = template.replace("sizeof(struct xdev_ext_dma_cookie)",
+                                "sizeof(struct xdev_ext_comp_copy_cookie)")
+    template = template.replace("struct xdev_ext_dma_cookie before;",
+                                "struct xdev_ext_comp_copy_cookie before;")
+    template = template.replace("((struct xdev_ext_dma_cookie *)b->cookie)",
+                                "((struct xdev_ext_comp_copy_cookie *)b->cookie)")
+    template = template.replace("xdev_ext_dma_providers", "xdev_ext_dma_registry.members")
+    return template.replace("/* FIXTURE_CE_COPY_INIT */",
+                            "cs.copy.ops = &xdev_ext_ce_copy_ops;")
 
 
 def session_helpers(text, bodies, extractor):
@@ -86,27 +123,69 @@ def generate(mutation=None):
     abi = source("include/linux/xdev_ext_mech.h")
     ops = source("io_uring/xdev_ext_mech_ops.c")
     ce = source("io_uring/xdev_ext_mech_ce.c")
-    if mutation == "ce_ticket":
-        ce, n = re.subn(r"if \(xdev_ext_mech_batch_completion_claim\(ck->b, ticket\)\)\n\t\treturn;", "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);", ce)
-        assert n == 1
-    if mutation == "ticket":
-        dma, n = re.subn(r"if \(xdev_ext_mech_batch_completion_claim\(ck->b, ticket\)\)\n\t\treturn;",
-                         "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);", dma)
-        assert n == 1
-    elif mutation == "ambiguous_unbind":
-        dma, n = re.subn(r"if \(atomic_read\(&cs->ambiguous\)\)\n\s+return -EBUSY;", "if (false) return -EBUSY;", dma)
-        assert n == 1
-        # The new window lease is a second independent quarantine barrier.
-        dma = dma.replace("if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)", 1)
-        dma = dma.replace("if (!xdev_ext_dma_lease_unbind(cs))", "if (false)", 1)
-    elif mutation == "lease_get":
-        dma = dma.replace("err = xdev_ext_dma_lease_get(cs, b);", "err = 0;", 1)
-    elif mutation == "owner_guard":
-        dma = dma.replace("if (!xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, cb->x, cb->n))", "if (false)", 1)
-    elif mutation == "duplicate_registry":
-        dma, n = re.subn(r"if \(p->ops->fops == ops->fops\)", "if (false)", dma)
-        assert n == 1
+    runtime_dependencies = shared_runtime_dependencies(dma, ce)
+    runtime = source("io_uring/xdev_ext_compfam_copy.c") if runtime_dependencies else ""
+    if runtime_dependencies:
+        # Both real adapters must require the runtime. A partly new snapshot
+        # cannot quietly enter the historical fixture boundary.
+        for text in (ce, dma):
+            if not shared_runtime_dependencies(text):
+                raise RuntimeError("SETUP partial shared-runtime snapshot")
+        header = source("io_uring/xdev_ext_compfam_copy_runtime.h")
+        for name in ("xdev_ext_comp_copy_member", "xdev_ext_comp_copy_registration",
+                     "xdev_ext_comp_copy_registry", "xdev_ext_comp_copy_cookie",
+                     "xdev_ext_comp_copy_legacy_ops", "xdev_ext_comp_copy_stage"):
+            structure(header, name)
+        for name in ("xdev_ext_comp_copy_registry_register", "xdev_ext_comp_copy_registry_unregister",
+                     "xdev_ext_comp_copy_registry_get", "xdev_ext_comp_copy_collect",
+                     "xdev_ext_comp_copy_stage_validate", "xdev_ext_comp_copy_claim",
+                     "xdev_ext_comp_copy_stage_submit", "xdev_ext_comp_copy_complete",
+                     "xdev_ext_comp_copy_mark_dead", "xdev_ext_comp_copy_poll", "xdev_ext_comp_copy_unbind"):
+            function(runtime, name)
+        if mutation in ("ce_ticket", "ticket"):
+            runtime = mutate_function(runtime, "xdev_ext_comp_copy_complete",
+                "if (xdev_ext_mech_batch_completion_claim(ck->b, ticket))\n\t\treturn;",
+                "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);")
+        elif mutation == "ambiguous_unbind":
+            runtime = mutate_function(runtime, "xdev_ext_comp_copy_unbind",
+                "if (atomic_read(&cs->ambiguous))\n\t\treturn -EBUSY;", "if (false) return -EBUSY;")
+            dma = mutate_function(dma, "xdev_ext_dma_copy_unbind_begin",
+                "if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)")
+            dma = mutate_function(dma, "xdev_ext_dma_copy_unbind_end",
+                "if (!xdev_ext_dma_lease_unbind(cs))", "if (false)")
+        elif mutation == "lease_get":
+            dma = mutate_function(dma, "xdev_ext_dma_copy_lease_get",
+                "return xdev_ext_dma_lease_get(cs, b);", "return 0;")
+        elif mutation == "owner_guard":
+            dma = mutate_function(dma, "xdev_ext_dma_copy_classify",
+                "if (!xdev_ext_mech_batch_dma_owners_valid(b, ticket, cb->x, cb->n))", "if (false)")
+        elif mutation == "duplicate_registry":
+            runtime = mutate_function(runtime, "xdev_ext_comp_copy_registry_register",
+                "if (p->member.fops == member->fops)", "if (false)")
+    else:
+        if mutation == "ce_ticket":
+            ce, n = re.subn(r"if \(xdev_ext_mech_batch_completion_claim\(ck->b, ticket\)\)\n\t\treturn;", "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);", ce)
+            assert n == 1
+        if mutation == "ticket":
+            dma, n = re.subn(r"if \(xdev_ext_mech_batch_completion_claim\(ck->b, ticket\)\)\n\t\treturn;",
+                             "if (false) return;\n\t(void)xdev_ext_mech_batch_completion_claim(ck->b, ticket);", dma)
+            assert n == 1
+        elif mutation == "ambiguous_unbind":
+            dma, n = re.subn(r"if \(atomic_read\(&cs->ambiguous\)\)\n\s+return -EBUSY;", "if (false) return -EBUSY;", dma)
+            assert n == 1
+            # The new window lease is a second independent quarantine barrier.
+            dma = dma.replace("if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)", 1)
+            dma = dma.replace("if (!xdev_ext_dma_lease_unbind(cs))", "if (false)", 1)
+        elif mutation == "lease_get":
+            dma = dma.replace("err = xdev_ext_dma_lease_get(cs, b);", "err = 0;", 1)
+        elif mutation == "owner_guard":
+            dma = dma.replace("if (!xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, cb->x, cb->n))", "if (false)", 1)
+        elif mutation == "duplicate_registry":
+            dma, n = re.subn(r"if \(p->ops->fops == ops->fops\)", "if (false)", dma)
+            assert n == 1
     template = (HERE / "provider_fault_fixture.c").read_text()
+    if runtime_dependencies:
+        template = shared_fixture_layout(template)
     template = template.replace("/* PRODUCTION_CLASS_FLAGS */",
                                 re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0])
     # Historical void callbacks are adapted only at the fixture boundary so the
@@ -196,37 +275,43 @@ def generate(mutation=None):
     configured_ce = bool(re.search(r"^\s*const struct xdev_ext_ce_backend_ops\s*\*ops\b", ce_stage, re.M)) or any(
         marker in ce_stage for marker in ("window_len;", "cleanup_held;")) or any(
         name in ce for name in ("xdev_ext_ce_lease_bind_ready", "xdev_ext_ce_lease_cleanup_begin"))
-    ce_adapter = "#define FIXTURE_CE_CONFIGURED_EXCLUSION " + str(int(configured_ce)) + "\n"
-    if configured_ce:
-        ce_adapter += structure(ce, "xdev_ext_ce_lease_group") + "\n"
-    ce_adapter += "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
-    ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
-    if configured_ce:
-        # These cases manually admit one CE window, but execute its real lease
-        # admission and final release, including the repaired C-owned identity.
-        ce_adapter += "\nstatic DEFINE_MUTEX(xdev_ext_ce_lease_lock);\n"
-        ce_adapter += "static LIST_HEAD(xdev_ext_ce_lease_groups);\n"
-        ce_adapter += "\n\n".join(function(ce, n) for n in (
-            "xdev_ext_ce_lease_bind", "xdev_ext_ce_lease_bind_ready",
-            "xdev_ext_ce_lease_get", "xdev_ext_ce_batch_release",
-            "xdev_ext_ce_lease_cleanup_begin", "xdev_ext_ce_lease_unbind"))
+    if runtime_dependencies:
+        if not configured_ce:
+            raise RuntimeError("SETUP shared CE missing configured exclusion")
+        ce_adapter = "#define FIXTURE_CE_CONFIGURED_EXCLUSION 1\n"
+        ce_adapter += ce[ce.index("#define XDEV_EXT_CE_MAX_BACKENDS"):ce.index("/* After every late_initcall")]
     else:
-        # Original historical fixture precondition: one uncontended CE owner.
-        # Old refs only; repaired sources always execute the real helper above.
-        ce_adapter += """
-static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
-                               struct xdev_ext_mech_batch *b)
-{
-    (void)cs;
-    (void)b;
-    return 0; /* Historical fixture's uncontended registered CE window. */
-}
-"""
-    # Keep the selected adapter's actual frame-claim callback, not a test
-    # replacement. Older adapters have no typed transfer callback.
-    if re.search(r"\bxdev_ext_ce_copy_claim\b", function(ce, "xdev_ext_ce_stage_xfers")):
-        ce_adapter += "\n" + function(ce, "xdev_ext_ce_copy_claim") + "\n"
-    ce_adapter += "\n\n".join(function(ce,n) for n in ("xdev_ext_ce_stage_xfers", "xdev_ext_ce_submit", "xdev_ext_ce_complete"))
+        ce_adapter = "#define FIXTURE_CE_CONFIGURED_EXCLUSION " + str(int(configured_ce)) + "\n"
+        if configured_ce:
+            ce_adapter += structure(ce, "xdev_ext_ce_lease_group") + "\n"
+        ce_adapter += "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
+        ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
+        if configured_ce:
+            # These cases manually admit one CE window, but execute its real lease
+            # admission and final release, including the repaired C-owned identity.
+            ce_adapter += "\nstatic DEFINE_MUTEX(xdev_ext_ce_lease_lock);\n"
+            ce_adapter += "static LIST_HEAD(xdev_ext_ce_lease_groups);\n"
+            ce_adapter += "\n\n".join(function(ce, n) for n in (
+                "xdev_ext_ce_lease_bind", "xdev_ext_ce_lease_bind_ready",
+                "xdev_ext_ce_lease_get", "xdev_ext_ce_batch_release",
+                "xdev_ext_ce_lease_cleanup_begin", "xdev_ext_ce_lease_unbind"))
+        else:
+            # Original historical fixture precondition: one uncontended CE owner.
+            # Old refs only; repaired sources always execute the real helper above.
+            ce_adapter += """
+    static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
+                                   struct xdev_ext_mech_batch *b)
+    {
+        (void)cs;
+        (void)b;
+        return 0; /* Historical fixture's uncontended registered CE window. */
+    }
+    """
+        # Keep the selected adapter's actual frame-claim callback, not a test
+        # replacement. Older adapters have no typed transfer callback.
+        if re.search(r"\bxdev_ext_ce_copy_claim\b", function(ce, "xdev_ext_ce_stage_xfers")):
+            ce_adapter += "\n" + function(ce, "xdev_ext_ce_copy_claim") + "\n"
+        ce_adapter += "\n\n".join(function(ce,n) for n in ("xdev_ext_ce_stage_xfers", "xdev_ext_ce_submit", "xdev_ext_ce_complete"))
     if "xdev_ext_mech_instance_put(" in core:
         # Default-only fixtures have no selected instance handle. Keep the
         # actual release call and fail closed if that precondition changes.
@@ -237,7 +322,9 @@ static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
         abort();
 }
 /* PRODUCTION_OPS */""")
-    blocks = {"CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
+    blocks = {"COPY_DECLS": ('#include "io_uring/xdev_ext_compfam_copy_runtime.h"' if runtime_dependencies else ""),
+              "COPY_RUNTIME": runtime,
+              "CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
               "OPS": "\n\n".join(function(ops, n) for n in
                                     ("xdev_ext_mech_class_put", "xdev_ext_mech_ops_put")),
               "CORE_BEFORE": "\n\n".join(function(core, n) for n in before),
@@ -284,6 +371,14 @@ class ProviderFaults(unittest.TestCase):
             p = cls.path / rel
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text(source(rel))
+        if shared_runtime_dependencies(source("io_uring/xdev_ext_mech_dma.c"),
+                                       source("io_uring/xdev_ext_mech_ce.c")):
+            rel = "io_uring/xdev_ext_compfam_copy_runtime.h"
+            (cls.path / rel).write_text(source(rel))
+            for name in ("atomic", "fs", "list", "module", "mutex", "xdev_ext_mech", "slab"):
+                p = cls.path / "linux" / (name + ".h")
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text("/* OS boundary: definitions are supplied by the fixture. */\n")
         # Report-aware refs need the selected public policy/report ABI;
         # pre-report refs do not borrow the current tree's new types.
         if "static int xdev_ext_mech_session_release_report(" in source("io_uring/xdev_ext_mech.c"):
@@ -317,7 +412,7 @@ class ProviderFaults(unittest.TestCase):
             "-std=gnu11", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-parameter",
             "-fsanitize=undefined", "-fno-sanitize-recover=undefined", "-pthread",
-            "-I" + str(cls.path), "-I" + str(ROOT), str(c), "-o", str(exe)]
+            "-I" + str(cls.path), "-I" + str(cls.path / "io_uring"), "-I" + str(ROOT), str(c), "-o", str(exe)]
         built = subprocess.run(command, capture_output=True, text=True)
         if built.returncode:
             raise RuntimeError(" ".join(command) + "\n" + built.stdout + built.stderr)
@@ -415,7 +510,16 @@ int main(void) {
         self.assertIn("expired ownership cannot become success", run.stderr)
 
     def test_mutation_cookie_prefix_is_detected(self):
-        text=generate().replace("struct xdev_ext_dma_cookie {", "struct xdev_ext_dma_cookie {\n u64 invalid_prefix;",1)
+        text = generate()
+        if shared_runtime_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c")):
+            header = source("io_uring/xdev_ext_compfam_copy_runtime.h")
+            header = header.replace("struct xdev_ext_comp_copy_cookie {",
+                                    "struct xdev_ext_comp_copy_cookie {\n u64 invalid_prefix;", 1)
+            # Inline the actual header with precisely the old deliberate ABI break.
+            header = re.sub(r'^#include [<"].*[>"]\n', '', header, flags=re.M)
+            text = text.replace('#include "io_uring/xdev_ext_compfam_copy_runtime.h"', header, 1)
+        else:
+            text = text.replace("struct xdev_ext_dma_cookie {", "struct xdev_ext_dma_cookie {\n u64 invalid_prefix;", 1)
         with self.assertRaisesRegex(RuntimeError,"native cookie"):
             self.compile("mutant_cookie_prefix",text)
         print("MUTATION_RED cookie_prefix compilation rejected by layout assertions",flush=True)
@@ -460,7 +564,8 @@ for case in CASES:
     setattr(ProviderFaults, "test_" + case, test)
 
 
-if __name__ == "__main__":
+def main():
+    global REF
     parser = argparse.ArgumentParser()
     parser.add_argument("--ref", help="extract this exact local Git commit")
     args, rest = parser.parse_known_args()
@@ -477,10 +582,23 @@ if __name__ == "__main__":
               "io_uring/xdev_ext_mech_ce.c", "io_uring/xdev_ext_mech_ce_core.h",
               "io_uring/xdev_ext_mech_window_copy_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")
+    inputs += shared_runtime_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c"))
     inputs += dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c"))
     inputs += tuple(dict.fromkeys(copy_window_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
                                  copy_window_dependencies(source("io_uring/xdev_ext_mech_ce.c"))))
     print(json.dumps({"source_root": str(ROOT), "ref": ref,
                       "working_tree": REF is None,
                       "source_sha256": {p: hashlib.sha256(source(p).encode()).hexdigest() for p in inputs}}), flush=True)
-    unittest.main(argv=[__file__] + rest, verbosity=2)
+    suite = unittest.main(argv=[__file__] + rest, verbosity=2, exit=False)
+    if suite.result.errors:
+        print("SETUP provider fixture infrastructure error", file=_layout_sys.stderr)
+        return 2
+    return 0 if suite.result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except (RuntimeError, OSError, ValueError, subprocess.CalledProcessError) as error:
+        print("SETUP " + str(error), file=_layout_sys.stderr)
+        raise SystemExit(2)

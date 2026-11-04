@@ -66,10 +66,13 @@ struct kthread_delayed_work { struct kthread_work work; };
 struct work_struct { int unused; };
 struct timer_list { int unused; };
 struct list_head { struct list_head *next, *prev; };
-#define LIST_HEAD(n) struct list_head n = { &(n), &(n) }
-#define DEFINE_MUTEX(n) pthread_mutex_t n = PTHREAD_MUTEX_INITIALIZER
-#define mutex_lock(p) assert(!pthread_mutex_lock(p))
-#define mutex_unlock(p) assert(!pthread_mutex_unlock(p))
+#define LIST_HEAD_INIT(n) { &(n), &(n) }
+#define LIST_HEAD(n) struct list_head n = LIST_HEAD_INIT(n)
+struct mutex { pthread_mutex_t native; };
+#define __MUTEX_INITIALIZER(n) { .native = PTHREAD_MUTEX_INITIALIZER }
+#define DEFINE_MUTEX(n) struct mutex n = __MUTEX_INITIALIZER(n)
+#define mutex_lock(p) assert(!pthread_mutex_lock(&(p)->native))
+#define mutex_unlock(p) assert(!pthread_mutex_unlock(&(p)->native))
 #define container_of(p,t,m) ((t *)((char *)(p)-offsetof(t,m)))
 #define list_entry(p,t,m) container_of(p,t,m)
 #define list_for_each_entry(p,h,m) \
@@ -159,6 +162,7 @@ struct xdev_ext_dma_cookie;
 struct xdev_ext_ce_cookie;
 struct xdev_ext_dma_provider_ops;
 /* PRODUCTION_STRUCTURES */
+/* PRODUCTION_COPY_DECLS */
 
 static LIST_HEAD(xdev_ext_mech_quarantined);
 static DEFINE_MUTEX(xdev_ext_mech_quarantine_lock);
@@ -170,6 +174,7 @@ static void xdev_ext_ops_unpin(const void *p) {(void)p;assert(!"unexpected BPF p
 /* PRODUCTION_OPS */
 /* CORE_BEFORE functions call each other in this order except queue and notify. */
 /* PRODUCTION_CORE_BEFORE */
+/* PRODUCTION_COPY_RUNTIME */
 /* PRODUCTION_ADAPTER */
 /* PRODUCTION_CE_ADAPTER */
 static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s);
@@ -567,6 +572,7 @@ static int test_crossclass(bool ce_first) {
 #if FIXTURE_CE_CONFIGURED_EXCLUSION
  cs.ops=&ce_native_ops;
 #endif
+ /* FIXTURE_CE_COPY_INIT */
  s->st[1]=(struct xdev_ext_mech_stage){.s=s,.cls=&ce_test_class,.priv=&cs,
   .class_id=XDEV_EXT_MECH_CLASS_CE,.index=1,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  s->nr_stages=b->bs.nr_stages=2;

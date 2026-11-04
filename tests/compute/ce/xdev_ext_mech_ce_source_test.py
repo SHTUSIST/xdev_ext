@@ -5,8 +5,22 @@
 import re
 import unittest
 from pathlib import Path
+import json
 
-ROOT = Path(__file__).resolve().parents[3]
+def source_owner():
+    """Find the canonical owner of this test or its ordinary registered copy."""
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / 'view.json'
+        if marker.is_file():
+            receipt = json.loads(marker.read_text())
+            if receipt.get('kind') == 'host-source-view':
+                return Path(receipt['canonical_root']).resolve()
+        if (parent / 'source-layout.json').is_file():
+            return parent
+    raise RuntimeError('SETUP: no canonical owner or registered source view')
+
+
+ROOT = source_owner()
 CE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce.c"
 CE_CORE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce_core.h"
 NVME_CLASS = ROOT / "src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c"
@@ -60,6 +74,7 @@ def ordered(test, text: str, *needles: str):
 class CeClassSourceTest(unittest.TestCase):
     def setUp(self):
         self.text = CE.read_text(encoding="utf-8")
+        self.common = (ROOT / "src/compute/io_uring/xdev_ext_compfam_copy.c").read_text(encoding="utf-8")
 
     def test_built_with_its_config(self):
         makefile = (ROOT / "src/core/io_uring/Makefile").read_text(encoding="utf-8")
@@ -85,9 +100,11 @@ class CeClassSourceTest(unittest.TestCase):
 
     def test_backend_found_by_f_op_and_pinned_under_the_lock(self):
         get = body(self.text, "xdev_ext_ce_backend_get")
-        ordered(self, get, "mutex_lock(&xdev_ext_ce_backend_lock)",
-                "->fops == file->f_op", "try_module_get(",
-                "mutex_unlock(&xdev_ext_ce_backend_lock)")
+        self.assertIn("xdev_ext_comp_copy_registry_get(&xdev_ext_ce_registry, file, &member)", get)
+        ordered(self, get, "xdev_ext_comp_copy_registry_get(", "return member.identity;")
+        ordered(self, body(self.common, "xdev_ext_comp_copy_registry_get"),
+                "mutex_lock(&registry->lock)", "p->member.fops == file->f_op",
+                "try_module_get(", "*out = p->member;", "mutex_unlock(&registry->lock)")
 
     def test_bind_order_and_unwind(self):
         bind = body(self.text, "xdev_ext_ce_bind")
@@ -106,57 +123,75 @@ class CeClassSourceTest(unittest.TestCase):
                          r"if \(st->cls->unbind_checked && st->priv\)\s+s->nr_bound\+\+;")
 
     def test_unbind_never_after_ambiguous(self):
-        # L11: checked unbind returns uncertainty without dropping live handles.
+        # Follow checked common cleanup and the actual CE policy callbacks.
         unbind = body(self.text, "xdev_ext_ce_unbind")
-        ordered(self, unbind, "atomic_read(&cs->ambiguous)", "return -EBUSY;",
-                "xdev_ext_ce_lease_cleanup_begin(cs)",
-                "->unbind_host(", "->unbind_region(",
-                "xdev_ext_ce_lease_unbind(cs)", "st->priv = NULL;",
-                "kfree(cs)", "module_put(")
-        for name, cleared in (("unbind_host", "cs->host = NULL;"),
-                              ("unbind_region", "cs->region.priv = NULL;")):
-            part = unbind[unbind.index("err = ops->" + name):]
-            ordered(self, part, "if (err)", "return err;", cleared)
+        ordered(self, unbind, "xdev_ext_comp_copy_unbind(&cs->copy)",
+                "if (err)", "return err;", "st->priv = NULL;", "kfree(cs)", "module_put(")
+        checked = body(self.common, "xdev_ext_comp_copy_unbind")
+        ordered(self, checked, "atomic_read(&cs->ambiguous)", "return -EBUSY;",
+                "cs->ops->unbind_begin(cs)", "cs->ops->unbind_host(cs)",
+                "cs->host = NULL;", "cs->ops->unbind_region(cs)", "cs->ops->unbind_end(cs)")
+        for name in ("unbind_begin", "unbind_host", "unbind_region"):
+            part = checked[checked.index("err = cs->ops->"+name):]
+            ordered(self, part, "if (err)", "return err;")
+        self.assertIn("xdev_ext_ce_lease_cleanup_begin(cs)", body(self.text, "xdev_ext_ce_copy_unbind_begin"))
+        self.assertIn("cs->ops->unbind_host(copy->host)", body(self.text, "xdev_ext_ce_copy_unbind_host"))
+        region = body(self.text, "xdev_ext_ce_copy_unbind_region")
+        ordered(self, region, "cs->ops->unbind_region(&cs->region)", "if (err)",
+                "return err;", "cs->region.priv = NULL;")
+        self.assertIn("xdev_ext_ce_lease_unbind(cs)", body(self.text, "xdev_ext_ce_copy_unbind_end"))
+        for name in ("unbind_begin", "unbind_host", "unbind_region", "unbind_end"):
+            self.assertIn("."+name+" = xdev_ext_ce_copy_"+name+",", self.text)
         self.assertRegex(self.text, r"\.unbind_checked\s*=\s*xdev_ext_ce_unbind")
 
     def test_validate_stages_only_an_accepted_plan(self):
-        validate = body(self.text, "xdev_ext_ce_validate")
+        self.assertIn("xdev_ext_comp_copy_stage_validate(&cs->copy, b, scratch, n,",
+                      body(self.text, "xdev_ext_ce_validate"))
+        validate = body(self.common, "xdev_ext_comp_copy_stage_validate")
         ordered(self, validate, "cs->staged = NULL;", "xdev_ext_comp_copy_validate(",
                 "if (err)", "cs->staged = b;")
 
     def test_submit_arms_before_the_backend_and_takes_back_a_refusal(self):
-        submit = body(self.text, "xdev_ext_ce_submit")
-        self.assertIn("struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);", submit)
-        ordered(self, submit, "xdev_ext_ce_cookie_arm(", "ck->b = b;",
-                "xdev_ext_ce_stage_xfers(", "->submit(", "xdev_ext_ce_cookie_disarm(")
+        self.assertIn("xdev_ext_comp_copy_stage_submit(&cs->copy, st, b)",
+                      body(self.text, "xdev_ext_ce_submit"))
+        submit = body(self.common, "xdev_ext_comp_copy_stage_submit")
+        self.assertIn("struct xdev_ext_comp_copy_cookie *ck = xdev_ext_mech_batch_cookie(b);", submit)
+        ordered(self, submit, "cs->ops->lease_get(cs, b)", "xdev_ext_window_copy_cookie_arm(",
+                "ck->b = b;", "cs->staged = NULL;", "READ_ONCE(cs->dead)",
+                "staged != b", "xdev_ext_comp_copy_transfer(", "cs->ops->submit(",
+                "xdev_ext_window_copy_cookie_disarm(")
+        self.assertIn("err = -ENODEV;", submit)
         self.assertIn("xdev_ext_mech_batch_ticket(b)", submit)
-        stage = body(self.text, "xdev_ext_ce_stage_xfers")
-        ordered(self, stage, "cs->staged = NULL;", "return -ENODEV;",
-                "staged != b", "cb->x[i]")
+        self.assertIn("return xdev_ext_ce_lease_get(cs, b);", body(self.text, "xdev_ext_ce_copy_lease_get"))
+        adapted = body(self.text, "xdev_ext_ce_copy_submit")
+        ordered(self, adapted, "cb->x[i]", "cs->ops->submit(")
+        for name in ("lease_get", "submit"):
+            self.assertIn("."+name+" = xdev_ext_ce_copy_"+name+",", self.text)
 
     def test_completion_classified_once_and_ambiguous_sequestered(self):
-        complete = body(self.text, "xdev_ext_ce_complete")
-        self.assertIn("xdev_ext_ce_classify(status, hw_submitted)", complete)
-        self.assertRegex(complete, r"if \(xdev_ext_mech_batch_completion_claim\("
-                         r"ck->b, ticket\)\)\s+return;")
-        ordered(self, complete,
-                "xdev_ext_mech_batch_completion_claim(ck->b, ticket)",
-                "xdev_ext_ce_cookie_finish(", "ck->outcome = ",
-                "xdev_ext_ce_disposition(")
-        ambiguous = complete[complete.index("if (xdev_ext_ce_disposition("):]
-        ordered(self, ambiguous, "atomic_inc(&ck->cs->ambiguous)",
-                "xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, true);\n\t\treturn;",
-                "xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, false);")
-        # Both an invalid cookie and an ambiguous native result quarantine;
-        # neither is allowed to publish a reusable normal completion.
-        invalid = complete[complete.index("if (WARN_ONCE(!xdev_ext_ce_cookie_finish("):
-                           complete.index("ck->outcome = ")]
+        wrapper = body(self.text, "xdev_ext_ce_complete")
+        self.assertIn("xdev_ext_comp_copy_complete(", wrapper)
+        self.assertIn("status, hw_submitted, bytes_done, &xdev_ext_ce_copy_ops)", wrapper)
+        classify = body(self.text, "xdev_ext_ce_copy_classify")
+        self.assertIn("xdev_ext_ce_classify(*status, *hw_submitted)", classify)
+        self.assertIn(".classify = xdev_ext_ce_copy_classify,", self.text)
+        complete = body(self.common, "xdev_ext_comp_copy_complete")
+        self.assertRegex(complete, r"if \(xdev_ext_mech_batch_completion_claim\(ck->b, ticket\)\)\s+return;")
+        ordered(self, complete, "xdev_ext_mech_batch_completion_claim(ck->b, ticket)",
+                "xdev_ext_window_copy_cookie_finish(", "ops->classify(",
+                "ck->outcome = ", "xdev_ext_window_copy_disposition(")
+        ambiguous = complete[complete.index("sequester = xdev_ext_window_copy_disposition("):]
+        ordered(self, ambiguous, "if (sequester)", "atomic_inc(&ck->cs->ambiguous)",
+                "xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, sequester);")
+        invalid = complete[complete.index("if (!xdev_ext_window_copy_cookie_finish("):
+                           complete.index("outcome = ops->classify(")]
         ordered(self, invalid, "atomic_inc(&ck->cs->ambiguous)",
-                "xdev_ext_mech_batch_completion_publish(ck->b, ticket, -EPROTO, true);",
-                "return;")
-        self.assertEqual(complete.count("xdev_ext_mech_batch_completion_publish("), 3)
+                "xdev_ext_mech_batch_completion_publish(ck->b, ticket, -EPROTO, true);", "return;")
+        # Normal and ambiguous publish share the exact disposition boolean now;
+        # invalid-cookie publication remains its own unconditional quarantine.
+        self.assertEqual(complete.count("xdev_ext_mech_batch_completion_publish("), 2)
         claim = complete.index("xdev_ext_mech_batch_completion_claim(ck->b, ticket)")
-        for metadata in ("xdev_ext_ce_cookie_finish(", "ck->outcome = ",
+        for metadata in ("xdev_ext_window_copy_cookie_finish(", "ck->outcome = ",
                          "ck->status = ", "ck->bytes_done = "):
             self.assertLess(claim, complete.index(metadata))
 
@@ -164,11 +199,11 @@ class CeClassSourceTest(unittest.TestCase):
         batch = re.search(r"struct xdev_ext_ce_batch {\n(.*?)\n};", self.text,
                           re.S).group(1)
         self.assertNotIn("xdev_ext_ce_cookie", batch)
-        self.assertIn(".batch_cookie_size = sizeof(struct xdev_ext_ce_cookie)", self.text)
-        submit = body(self.text, "xdev_ext_ce_submit")
+        self.assertIn(".batch_cookie_size = sizeof(struct xdev_ext_comp_copy_cookie)", self.text)
+        submit = body(self.common, "xdev_ext_comp_copy_stage_submit")
         self.assertIn("if (!ck->b)\n\t\tck->b = b;", submit)
         fill = body(self.text, "xdev_ext_ce_fill_cqe")
-        self.assertIn("const struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);", fill)
+        self.assertIn("const struct xdev_ext_comp_copy_cookie *ck = xdev_ext_mech_batch_cookie(b);", fill)
         core = (ROOT / "src/core/io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
         buffers = body(core, "xdev_ext_mech_session_buffers")
         # L11: preallocated fan-out branches each retain their own stable cookie.

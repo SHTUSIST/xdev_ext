@@ -30,17 +30,30 @@ def main():
     # and passive module/class registration initializer after mark_dead only.
     body=ce[:ce.index('static const struct xdev_ext_comp_hooks')]
     body=re.sub(r'^#include <linux/.*\n','',body,flags=re.M)
+    runtime_paths = [src/'compute/io_uring/xdev_ext_compfam_copy_runtime.h',
+                     src/'compute/io_uring/xdev_ext_compfam_copy.c']
+    runtime_sources = {}
+    if runtime_paths[0].exists():
+        for path in runtime_paths:
+            raw = path.read_text()
+            runtime_sources[str(path.relative_to(n.source_root))] = raw
+        header, runtime = runtime_sources.values()
+        header = re.sub(r'^#include <linux/.*\n', '', header, flags=re.M)
+        runtime = runtime.replace('#include "xdev_ext_compfam_copy_runtime.h"', '')
+        runtime = re.sub(r'^#include <linux/.*\n', '', runtime, flags=re.M)
+        body = body.replace('#include "xdev_ext_compfam_copy_runtime.h"', '')
+        body = header + '\n' + runtime + '\n' + body
     types=hdr[hdr.index('struct xdev_ext_ce_region {'):hdr.index('/* Worker context: record an exclusive')]
     ops=hdr[hdr.index("struct xdev_ext_ce_backend_ops {"):hdr.index("/* Module init, process context: -EBUSY")]
     (n.output/'actual-ce.c').write_text(body)
     (n.output/'actual-api.h').write_text(types+ops)
     (n.output/'actual-checked.c').write_text(function(core,'xdev_ext_mech_unbind_checked'))
-    cmd=['gcc','-DCE_REPAIRED='+str(int('u32 cleanup_holds;' in ce or re.search(r'u32\s+cleanup_holds;',ce) is not None)),'-std=gnu11','-O0','-g','-fno-strict-aliasing','-funsigned-char','-Wall','-Wextra','-Wno-unused-parameter','-Wno-unused-function','-I'+str(n.output),'-I'+str(src/'compute/io_uring'),'-I'+str(src/'core/io_uring'),'-I'+str(src/'core/include/linux'),'-I'+str(src/'compute/include/linux'),str(P/'harness.c'),'-o',str(n.output/'ce-residual')]
+    cmd=['gcc','-DCE_REPAIRED='+str(int('u32 cleanup_holds;' in ce or re.search(r'u32\s+cleanup_holds;',ce) is not None)),'-DCE_SHARED_RUNTIME='+str(int(bool(runtime_sources))),'-std=gnu11','-O0','-g','-fno-strict-aliasing','-funsigned-char','-Wall','-Wextra','-Wno-unused-parameter','-Wno-unused-function','-I'+str(n.output),'-I'+str(src/'compute/io_uring'),'-I'+str(src/'core/io_uring'),'-I'+str(src/'core/include/linux'),'-I'+str(src/'compute/include/linux'),str(P/'harness.c'),'-o',str(n.output/'ce-residual')]
     build=subprocess.run(cmd,text=True,capture_output=True);(n.output/'build.log').write_text(build.stdout+build.stderr)
     if build.returncode:
         print('SETUP: actual source failed to compile');print(build.stderr);return 2
     run=subprocess.run([str(n.output/'ce-residual'),n.phase],text=True,capture_output=True);(n.output/'run.log').write_text(run.stdout+run.stderr);print(run.stdout,end='');print(run.stderr,end='',file=sys.stderr)
-    receipt={'phase':n.phase,'ce_sha256':hashlib.sha256(ce.encode()).hexdigest(),'compile_command':cmd,'compile_exit':build.returncode,'execution_exit':run.returncode,'boundary':'actual CE functions and checked-unbind; native callbacks/core accessors/kernel primitives are host stubs; no physical DMA or performance claim'}
+    receipt={'source_sha256':{str(path.relative_to(n.source_root)):hashlib.sha256(path.read_bytes()).hexdigest() for path in [src/'compute/io_uring/xdev_ext_mech_ce.c',src/'core/include/linux/xdev_ext_mech.h',src/'core/io_uring/xdev_ext_mech.c']+runtime_paths if path.exists()},'phase':n.phase,'ce_sha256':hashlib.sha256(ce.encode()).hexdigest(),'compile_command':cmd,'compile_exit':build.returncode,'execution_exit':run.returncode,'boundary':'actual CE functions and checked-unbind; native callbacks/core accessors/kernel primitives are host stubs; no physical DMA or performance claim'}
     (n.output/'receipt.json').write_text(json.dumps(receipt,indent=2)+'\n')
     return run.returncode
 if __name__=='__main__':

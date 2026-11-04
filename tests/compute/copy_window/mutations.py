@@ -21,7 +21,11 @@ def last_return(text,statement):
     return text[:at]+statement+'\n'+text[at:]
 
 def detach_validate(text):
-    name='xdev_ext_comp_copy_validate'; at=text.index(name+'(')+len(name)+1
+    name='xdev_ext_comp_copy_validate'
+    if name+'(' not in text:
+        return replace_once(text, 'xdev_ext_comp_copy_stage_validate(&cs->copy,',
+            'xdev_ext_comp_copy_stage_validate(&(struct xdev_ext_comp_copy_stage){.window=cs->copy.window},')
+    at=text.index(name+'(')+len(name)+1
     i=at; depth=0; comma=at
     while i<len(text):
         c=text[i]
@@ -47,6 +51,8 @@ def main():
         f=pathlib.Path(d).resolve()
         if f.is_relative_to(source) and f.relative_to(source).parts[0]=='src': selected.add(str(f.relative_to(source)))
     if a.phase=='typed': selected.add(run.TYPED)
+    shared=(source/run.RUNTIME_HEADER).is_file()
+    if shared: selected.update((run.RUNTIME,run.RUNTIME_HEADER,run.TYPED))
     (out/'selected-sources.json').write_text(json.dumps(sorted(selected),indent=2)+'\n')
     cases=[
       ('host-offset-plus-one','src/core/io_uring/xdev_ext_mech_window_copy_core.h',None,lambda s:replace_once(s,'at = g->first_page_off +','at = 1 + g->first_page_off +')),
@@ -57,6 +63,14 @@ def main():
       ('ce-ignore-dead',run.CE,'xdev_ext_ce_stage_xfers',lambda s:replace_once(s,'READ_ONCE(cs->dead)','false')),
       ('dma-ignore-dead',run.DMA,'xdev_ext_dma_stage_xfers',lambda s:replace_once(s,'READ_ONCE(cs->dead)','false')),
     ]
+    if shared:
+        # Two historical class labels now target the same shared dead/slot
+        # algorithms. Keep both labels and their unchanged rejection oracles.
+        cases=[(name,run.RUNTIME,'xdev_ext_comp_copy_stage_submit',change)
+               if name in ('ce-ignore-dead','dma-ignore-dead') else
+               (name,run.TYPED,'xdev_ext_comp_copy_validate',lambda s:inject_start(s,'slot = 1;'))
+               if 'no-slot-confinement' in name else (name,rel,fn,change)
+               for name,rel,fn,change in cases]
     if a.phase=='typed':
         # Legacy helper mutants remain required, class slot loop is now family-owned.
         cases=[c for c in cases if 'no-slot-confinement' not in c[0]]+[

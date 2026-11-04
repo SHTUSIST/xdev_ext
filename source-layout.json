@@ -8778,6 +8778,34 @@
       "source": "src/compute/io_uring/xdev_ext_compfam_copy_runtime.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy_runtime.h"
+    },
+    {
+      "source": "tests/compute/family/runtime/ASSERTIONS.md",
+      "logical_path": "tests/compute/family/runtime/ASSERTIONS.md"
+    },
+    {
+      "source": "tests/compute/family/runtime/README.md",
+      "logical_path": "tests/compute/family/runtime/README.md"
+    },
+    {
+      "source": "tests/compute/family/runtime/baseline-observables.json",
+      "logical_path": "tests/compute/family/runtime/baseline-observables.json"
+    },
+    {
+      "source": "tests/compute/family/runtime/boundary.h",
+      "logical_path": "tests/compute/family/runtime/boundary.h"
+    },
+    {
+      "source": "tests/compute/family/runtime/probe.c",
+      "logical_path": "tests/compute/family/runtime/probe.c"
+    },
+    {
+      "source": "tests/compute/family/runtime/run.py",
+      "logical_path": "tests/compute/family/runtime/run.py"
+    },
+    {
+      "source": "tests/compute/family/runtime/supplement-observables.json",
+      "logical_path": "tests/compute/family/runtime/supplement-observables.json"
     }
   ]
 }
