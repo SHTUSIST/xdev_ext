@@ -303,7 +303,8 @@ static void observe_retire(struct xdev_ext_mech_batch *b) {
     assert(!xdev_ext_mech_life_release(life,xdev_ext_mech_life_gen(life)));
   }
  assert(!xdev_ext_mech_leave_locked(s,b->sequester));
- if(s->st[0].cls->batch_release)s->st[0].cls->batch_release(&s->st[0],b,b->sequester);
+ for(u32 i=0;i<s->nr_stages;i++)
+  if(s->st[i].cls->batch_release)s->st[i].cls->batch_release(&s->st[i],b,b->sequester);
  b->queued=0;s->inbox.first=NULL;
 }
 static struct xdev_ext_mech_batch *wait_batch;
@@ -533,7 +534,11 @@ static int ce_native_submit(struct xdev_ext_ce_region *r,void *host,u32 dir,
 }
 static const struct xdev_ext_ce_backend_ops ce_native_ops={.submit=ce_native_submit};
 static const struct xdev_ext_mech_class_ops ce_test_class={.class_id=XDEV_EXT_MECH_CLASS_CE,
- .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],.submit=xdev_ext_ce_submit};
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],.submit=xdev_ext_ce_submit,
+#if FIXTURE_CE_CONFIGURED_EXCLUSION
+ .batch_release=xdev_ext_ce_batch_release,
+#endif
+};
 static int ce_submit_admitted(struct xdev_ext_mech_session *s,struct xdev_ext_mech_batch *b) {
  struct xdev_ext_ce_stage *cs=s->st[1].priv;
  cs->staged=b;cs->plan.n=1;cs->plan.total=128;
@@ -558,10 +563,17 @@ static int ce_submit_admitted(struct xdev_ext_mech_session *s,struct xdev_ext_me
 }
 static int test_crossclass(bool ce_first) {
  struct xdev_ext_mech_session *s=bound_session();struct xdev_ext_mech_batch *b=batch_new(s);
- struct xdev_ext_ce_stage cs={.region={.ops=&ce_native_ops}};
+ struct xdev_ext_ce_stage cs={.region={.ops=&ce_native_ops,.len=4096}};
+#if FIXTURE_CE_CONFIGURED_EXCLUSION
+ cs.ops=&ce_native_ops;
+#endif
  s->st[1]=(struct xdev_ext_mech_stage){.s=s,.cls=&ce_test_class,.priv=&cs,
   .class_id=XDEV_EXT_MECH_CLASS_CE,.index=1,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  s->nr_stages=b->bs.nr_stages=2;
+#if FIXTURE_CE_CONFIGURED_EXCLUSION
+ EQ(xdev_ext_ce_lease_bind(&s->st[1],&cs,0,4096),0,"register uncontended configured CE window");
+ xdev_ext_ce_lease_bind_ready(&cs);
+#endif
  if(ce_first) { b->bs.stage=1;EQ(ce_submit_admitted(s,b),0,"initial CE production submit");
   xdev_ext_ce_complete(ce_pending_cookie,ce_pending_ticket,0,true,128);
  } else { EQ(submit(b),0,"initial DMA production submit");
@@ -588,7 +600,12 @@ static int test_crossclass(bool ce_first) {
  if(ce_first)xdev_ext_dma_complete(pending_cookie,pending_ticket,0,true,128);
  else xdev_ext_ce_complete(ce_pending_cookie,ce_pending_ticket,0,true,128);
  observe_retire(b);EQ(b->status,0,"exact current-class callback survives old-class replay");
- EQ(warnings,0,"stale crossclass rejected before state/CS access");return 0;
+ EQ(warnings,0,"stale crossclass rejected before state/CS access");
+#if FIXTURE_CE_CONFIGURED_EXCLUSION
+ EQ(xdev_ext_ce_lease_cleanup_begin(&cs),0,"CE terminal release permits cleanup");
+ CHECK(xdev_ext_ce_lease_unbind(&cs),"remove uncontended CE fixture window");
+#endif
+ return 0;
 }
 
 static int test_overlapping_sessions(void) {

@@ -1,4 +1,6 @@
-/* Literal expectations are frozen from compute-copy-typed-v1. */
+/* COPY_WINDOW literals remain frozen from compute-copy-typed-v1.
+ * CE bind event order is rebased by ce-residual-exclusion-v1: exclusion must
+ * precede any native effect and becomes ready only after successful host bind. */
 static struct xdev_ext_mech_session session(void) {
  struct xdev_ext_mech_session s={0}; s.depth=2; s.layout.group_bytes=1024;
  s.pool=(struct xdev_ext_mech_pool){.pages=(void *)1,.nr_pages=2,.first_page_off=64,.frame_size=512,.nr_frames=8}; return s;
@@ -48,14 +50,14 @@ static void pure_baseline(void) {
 static void bind_baseline(void) {
  struct xdev_ext_mech_session s=session(); struct xdev_ext_mech_stage st={.s=&s,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  struct xdev_ext_mech_stage_uapi u={.arg1=4096};
- nevents=0; EQ(xdev_ext_ce_bind(&st,&u),0); EQ(nevents,4); EQ(events[0],0); EQ(events[1],1); EQ(events[2],2); EQ(events[3],3); free(st.priv);
+ nevents=0; EQ(xdev_ext_ce_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); EQ(events[3],2); EQ(events[4],5); free(st.priv);
  st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],4); EQ(events[2],3); EQ(events[3],1); EQ(events[4],2); free(st.priv);
  /* Bind capacity refuses before host entry; DMA direction refusal precedes capacity. */
- s.depth=5; st.priv=NULL; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-ENOSPC); EQ(nevents,2); free(st.priv);
+ s.depth=5; st.priv=NULL; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-ENOSPC); EQ(nevents,3); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); free(st.priv);
  native_directions=1U<<XDEV_EXT_MECH_DIR_FROM_DEVICE; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EOPNOTSUPP); EQ(nevents,4); free(st.priv);
  native_directions=XDEV_EXT_WINDOW_COPY_DIRS; native_alignment=3; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,4); free(st.priv); native_alignment=1;
  u.flags=1; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-EINVAL); EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,0);
- puts("baseline bind: CE native-region→geometry/window→host→lease; DMA scope/lease→region→geometry/direction/window→host");
+ puts("baseline bind: CE lease→native-region→geometry/window→host→ready; DMA scope/lease→region→geometry/direction/window→host");
 }
 static void consumer_baseline(void) {
  struct xdev_ext_mech_session s=session(); struct xdev_ext_mech_batch b=batch();

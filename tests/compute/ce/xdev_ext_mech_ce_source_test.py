@@ -6,11 +6,11 @@ import re
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
-CE = ROOT / "io_uring/xdev_ext_mech_ce.c"
-CE_CORE = ROOT / "io_uring/xdev_ext_mech_ce_core.h"
-NVME_CLASS = ROOT / "drivers/nvme/host/xdev_ext_mech_nvme.c"
-SIM = Path(__file__).resolve().parent / "simulate"
+ROOT = Path(__file__).resolve().parents[3]
+CE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce.c"
+CE_CORE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce_core.h"
+NVME_CLASS = ROOT / "src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c"
+SIM = ROOT / "tests/support/ce_sim"
 
 
 def body(text: str, name: str) -> str:
@@ -62,7 +62,7 @@ class CeClassSourceTest(unittest.TestCase):
         self.text = CE.read_text(encoding="utf-8")
 
     def test_built_with_its_config(self):
-        makefile = (ROOT / "io_uring/Makefile").read_text(encoding="utf-8")
+        makefile = (ROOT / "src/core/io_uring/Makefile").read_text(encoding="utf-8")
         self.assertRegex(makefile,
                          r"(?m)^obj-\$\(CONFIG_XDEV_EXT_MECH_CE\)\s*\+= xdev_ext_mech_ce\.o$")
 
@@ -93,11 +93,14 @@ class CeClassSourceTest(unittest.TestCase):
         bind = body(self.text, "xdev_ext_ce_bind")
         # L11: preserve partially created mappings in st->priv before bind;
         # checked core rollback, not a local unconditional free, owns unwind.
-        ordered(self, bind, "xdev_ext_ce_backend_get(", "st->priv = cs;",
-                "->bind_region(", "xdev_ext_ce_geom_init(", "->bind_host(")
+        ordered(self, bind, "xdev_ext_ce_backend_get(", "cs->ops = ops;", "st->priv = cs;",
+                "xdev_ext_ce_lease_bind(st, cs, u->arg0, u->arg1)",
+                "->bind_region(", "cs->region.ops = cs->ops;",
+                "xdev_ext_ce_geom_init(", "->bind_host(",
+                "xdev_ext_ce_lease_bind_ready(cs)")
         self.assertNotIn("->unbind_region(", bind)
         self.assertNotIn("module_put(", bind)
-        core = (ROOT / "io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
+        core = (ROOT / "src/core/io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
         bind_stages = body(core, "xdev_ext_mech_session_bind")
         self.assertRegex(bind_stages,
                          r"if \(st->cls->unbind_checked && st->priv\)\s+s->nr_bound\+\+;")
@@ -106,7 +109,9 @@ class CeClassSourceTest(unittest.TestCase):
         # L11: checked unbind returns uncertainty without dropping live handles.
         unbind = body(self.text, "xdev_ext_ce_unbind")
         ordered(self, unbind, "atomic_read(&cs->ambiguous)", "return -EBUSY;",
-                "->unbind_host(", "->unbind_region(", "st->priv = NULL;",
+                "xdev_ext_ce_lease_cleanup_begin(cs)",
+                "->unbind_host(", "->unbind_region(",
+                "xdev_ext_ce_lease_unbind(cs)", "st->priv = NULL;",
                 "kfree(cs)", "module_put(")
         for name, cleared in (("unbind_host", "cs->host = NULL;"),
                               ("unbind_region", "cs->region.priv = NULL;")):
@@ -164,7 +169,7 @@ class CeClassSourceTest(unittest.TestCase):
         self.assertIn("if (!ck->b)\n\t\tck->b = b;", submit)
         fill = body(self.text, "xdev_ext_ce_fill_cqe")
         self.assertIn("const struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);", fill)
-        core = (ROOT / "io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
+        core = (ROOT / "src/core/io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
         buffers = body(core, "xdev_ext_mech_session_buffers")
         # L11: preallocated fan-out branches each retain their own stable cookie.
         self.assertIn("s->cookies = kvcalloc(s->depth * (XDEV_EXT_MECH_MAX_STAGES + 1), cookie, GFP_KERNEL);", buffers)
@@ -215,9 +220,10 @@ class CeSimulateTest(unittest.TestCase):
         self.assertRegex(makefile, r"(?m)^obj-m\s*:=\s*xdev_ext_ce_sim\.o$")
 
     def test_real_implementation_never_names_the_stand_in(self):
-        paths = sorted((ROOT / "io_uring").rglob("*"))
-        paths += [ROOT / "include/linux/xdev_ext_mech.h",
-                  ROOT / "include/uapi/linux/xdev_ext_mech.h"]
+        paths = sorted(path for area in ("core", "compute", "storage", "network")
+                       for path in (ROOT / "src" / area / "io_uring").rglob("*"))
+        paths += [ROOT / "src/core/include/linux/xdev_ext_mech.h",
+                  ROOT / "src/core/include/uapi/linux/xdev_ext_mech.h"]
         for path in paths:
             if path.is_file():
                 self.assertNotIn("xdev_ext_ce_sim", path.read_text(

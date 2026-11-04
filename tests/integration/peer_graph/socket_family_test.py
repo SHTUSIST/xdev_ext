@@ -5,7 +5,7 @@
 Requirement: exact ordered one-descriptor-per-frame plans retain their original
 pool spans; malformed coverage remains -EINVAL and existing size/bounds rules
 stay effective. The source contract separately requires actual family delegation
-and INBAND/no-reliable-state registration. Draft: activate only after F6 acceptance.
+and STACK/no-reliable-state registration for the socket HOST member.
 """
 import os
 from pathlib import Path
@@ -15,6 +15,14 @@ import tempfile
 import unittest
 
 ROOT = Path(os.environ.get("XDEV_EXT_KERNEL_ROOT", Path(__file__).resolve().parents[5]))
+import importlib.util
+_support = ROOT / "tools/testing/selftests/xdev_ext_mech/socket_sink/adapter_test.py"
+if not _support.is_file():
+    _support = Path(__file__).resolve().parents[2] / "network/socket/adapter_test.py"
+_spec = importlib.util.spec_from_file_location("socket_fixture_support", _support)
+_support_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_support_module)
+
 
 
 def uncomment(text):
@@ -240,7 +248,7 @@ def fixture_source(text):
         adapter += block(text, r"^struct xdev_ext_socket_cover\s*\{", ";") + "\n"
     if re.search(r"^static\s+void\s+xdev_ext_socket_span\s*\(", text, re.M):
         adapter += function(text, "xdev_ext_socket_span") + "\n"
-    return PRELUDE + declarations(text) + adapter + function(
+    return PRELUDE + _support_module.socket_family_declarations(ROOT) + declarations(text) + adapter + function(
         text, "xdev_ext_socket_validate") + CASES
 
 
@@ -274,7 +282,7 @@ class SocketFamily(unittest.TestCase):
         hooks = block(text, r"^static const struct xdev_ext_net_hooks\s+"
                       r"xdev_ext_socket_net_hooks\s*=\s*\{")
         self.assertRegex(hooks, r"\.family\s*=\s*XDEV_EXT_FAMILY_NETWORK\b")
-        self.assertRegex(hooks, r"\.hdr_policy\s*=\s*XDEV_EXT_NET_HDR_INBAND\b")
+        self.assertRegex(hooks, r"\.hdr_policy\s*=\s*XDEV_EXT_NET_HDR_STACK\b")
         rel = re.search(r"\.rel\s*=\s*([^,}\n]+)", hooks)
         if rel:
             self.assertIn(rel[1].strip(), ("NULL", "0"), "SOCKET must have no reliable view")

@@ -11,6 +11,7 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 #include "include/linux/xdev_ext_mech.h"
+#include "io_uring/xdev_ext_mech_lifecycle.h"
 /* Boundary stubs a given fixture may not call (clang -Wunused-function). */
 #define SHIM_INLINE static inline __attribute__((unused))
 typedef int32_t s32;
@@ -89,8 +90,8 @@ struct kvec {void *iov_base;size_t iov_len;};
 struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_len;};
 struct xdev_ext_mech_pool {u32 frame_size,nr_frames;u8 state[256];};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;u32 depth;bool admits;};
-struct xdev_ext_mech_stage {void *priv;struct file *file;struct xdev_ext_mech_session *s;u32 direction;u32 class_id,flags,index;u64 arg0,arg1;};
-struct xdev_ext_mech_batch {u32 nr,bytes,slot;u64 ticket;struct xdev_ext_mech_frame f[32];int status;u64 completed_ticket;u32 completions;
+struct xdev_ext_mech_stage {void *priv;struct file *file;struct xdev_ext_mech_session *s;u32 direction;bool create_reporting;u32 create_phase;u32 class_id,flags,index;u64 arg0,arg1;};
+struct xdev_ext_mech_batch {struct xdev_ext_mech_completion completion;union {u32 nr,nr_frames;};u32 bytes,slot;u64 ticket;struct xdev_ext_mech_frame f[32];int status;u64 completed_ticket;u32 completions;
  u64 key,id;u32 produced,cancelled,stale,order;};
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->l;}
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s){return s->depth;}
@@ -100,7 +101,6 @@ static u32 xdev_ext_mech_batch_nr_frames(struct xdev_ext_mech_batch *b){return b
 static u32 xdev_ext_mech_batch_bytes(struct xdev_ext_mech_batch *b){return b->bytes;}
 static u32 xdev_ext_mech_batch_slot(struct xdev_ext_mech_batch *b){return b->slot;}
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b){return b->ticket;}
-static int xdev_ext_mech_batch_frame(struct xdev_ext_mech_batch *b,u32 i,struct xdev_ext_mech_frame *f){if(i>=b->nr)return -ERANGE;*f=b->f[i];return 0;}
 static u32 xdev_ext_mech_pool_frame_state(struct xdev_ext_mech_pool *p,u32 i){return i<p->nr_frames?p->state[i]:99;}
 static int xdev_ext_mech_batch_status(struct xdev_ext_mech_batch *b){return b->status;}
 static void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch *b,u64 t,int e){assert(t==b->ticket);b->status=e;b->completions++;b->completed_ticket=t;}

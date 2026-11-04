@@ -3050,6 +3050,46 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_ce_source_test.py"
     },
     {
+      "source": "tests/compute/ce_residual/README.md",
+      "logical_path": "tests/compute/ce_residual/README.md"
+    },
+    {
+      "source": "tests/compute/ce_residual/harness.c",
+      "logical_path": "tests/compute/ce_residual/harness.c"
+    },
+    {
+      "source": "tests/compute/ce_residual/multistage_valid.c",
+      "logical_path": "tests/compute/ce_residual/multistage_valid.c"
+    },
+    {
+      "source": "tests/compute/ce_residual/mutation-recipes.json",
+      "logical_path": "tests/compute/ce_residual/mutation-recipes.json"
+    },
+    {
+      "source": "tests/compute/ce_residual/mutation_driver.c",
+      "logical_path": "tests/compute/ce_residual/mutation_driver.c"
+    },
+    {
+      "source": "tests/compute/ce_residual/nonconflict_hold.c",
+      "logical_path": "tests/compute/ce_residual/nonconflict_hold.c"
+    },
+    {
+      "source": "tests/compute/ce_residual/run.py",
+      "logical_path": "tests/compute/ce_residual/run.py"
+    },
+    {
+      "source": "tests/compute/ce_residual/run_mutants.py",
+      "logical_path": "tests/compute/ce_residual/run_mutants.py"
+    },
+    {
+      "source": "tests/compute/ce_residual/run_nonconflict.py",
+      "logical_path": "tests/compute/ce_residual/run_nonconflict.py"
+    },
+    {
+      "source": "tests/compute/ce_residual/run_supplement.py",
+      "logical_path": "tests/compute/ce_residual/run_supplement.py"
+    },
+    {
       "source": "tests/compute/copy_window/README.md",
       "logical_path": "tests/compute/copy_window/README.md"
     },

@@ -13,7 +13,8 @@ static const struct xdev_ext_ce_backend_ops ce_ops={.bind_region=ce_region,.bind
 static const struct xdev_ext_dma_provider_ops dma_ops={.bind_region=dma_region,.bind_host=dma_host};
 static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file *f) { event(0); return &ce_ops; }
 static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *f,const struct xdev_ext_dma_scope_ops **s) { event(0); *s=NULL; return &dma_ops; }
-static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_ce_stage *c,u64 off) { event(3); return 0; }
+static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_ce_stage *c,u64 off,u64 len) { event(3); return 0; }
+static void xdev_ext_ce_lease_bind_ready(struct xdev_ext_ce_stage *c) { event(5); }
 static int xdev_ext_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c) { event(3); return 0; }
 static int xdev_ext_dma_stage_scope(struct xdev_ext_dma_stage *c,const struct xdev_ext_dma_scope_ops *s,struct file *f,u64 off,u64 len) { event(4); return 0; }
 #ifdef HAVE_TYPED

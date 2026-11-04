@@ -1,0 +1,59 @@
+# CE residual exclusion regression
+
+Execute the production CE bind, lease admission, typed validation, submit,
+completion, cleanup, and core checked-unbind functions in a host harness.
+Requirements are Python 3, GCC, and Linux userspace type headers. Every test input
+comes from this folder or the explicit source tree; no private recipe generator,
+prebuilt executable, Git metadata, or previously generated source is required.
+
+From the checkout root:
+
+```sh
+python3 tests/compute/ce_residual/run.py --source-root . --phase repaired --output build/ce-residual/repaired
+python3 tests/compute/ce_residual/run_supplement.py --base-evidence build/ce-residual/repaired --output build/ce-residual/multistage
+python3 tests/compute/ce_residual/run_nonconflict.py --base-evidence build/ce-residual/repaired --output build/ce-residual/nonconflict
+python3 tests/compute/ce_residual/run_mutants.py --base-evidence build/ce-residual/repaired --recipes tests/compute/ce_residual/mutation-recipes.json --output build/ce-residual/mutants
+```
+
+The combined mutation entry first verifies a fresh repaired base, then runs all
+packaged recipes:
+
+```sh
+python3 tests/compute/ce_residual/run.py --source-root . --phase mutations --output build/ce-residual/mutation-phase
+```
+
+All commands also work from another directory with explicit source, evidence and
+output paths. `run_mutants.py` defaults to the recipe file beside the script; an
+explicit `--recipes` argument selects another file. Supplements consume the
+actual-source extraction and compiler command recorded by the repaired run.
+Keep the scripts, C files and recipe JSON together when copying the test folder.
+
+`old-red` runs the same safety expectations against the previous source and
+returns 1 when it demonstrates unsafe admission. Build/extraction failures return
+2 and never count as behavioral failure evidence. `repaired` must return 0.
+Mutations count as detected only after compilation succeeds and the chosen
+unchanged scenario exits normally with its designated assertion failure. Signals,
+timeouts, compilation errors and unrelated failures are not detections.
+
+The extractor keeps every selected executable function body unchanged. Kernel
+headers/passive class registration are omitted. Pure CE/lease/copy/cookie helpers
+and native API structures come from the selected source tree. Native hooks,
+module/allocation/list/mutex primitives, core accessors and completion-ticket
+boundary services are host test facilities. Native hooks use the existing backend
+registration API and can reenter the real B submit during A bind/unmap. No CE
+policy is replaced and no new virtual device is registered. Missing source or
+unmatched recipe targets fail; packaged snippets never replace absent source.
+
+Assertions cover configured-range residual admission, cleanup refusal and retry,
+same-generation later-stage admission, ordinary bind success, disjoint ranges,
+different backend identities, malformed provider outputs, pin/count retention,
+multistage holds, pre-native allocation failure, errno ordering, UNKNOWN/active
+refusal, atomic detach, and exact successful CQE bytes. A mutex-unlock observer
+checks the cleanup hold/removal boundary. The additional multistage control uses
+successful native binds followed by direct class cleanup reentry; core checked
+cleanup normally stops on its first refusal. The nonconflict control retains A's
+cleanup region while B uses an adjacent range or independent registered backend.
+
+The host harness proves class behavior. It does not execute physical mapping/GPU
+DMA, Linux scheduler locking, complete core session teardown, VM or performance
+experiments.

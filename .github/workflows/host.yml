@@ -57,6 +57,13 @@ jobs:
         run: bash tests/core/class_declarations/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/class-declarations" candidate all
       - name: Standalone production-rule checks
         run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
+      - name: CE residual exclusion and retained cleanup ownership
+        working-directory: .
+        run: |
+          python3 tests/compute/ce_residual/run.py --source-root "$GITHUB_WORKSPACE" --phase repaired --output "$RUNNER_TEMP/ce-residual"
+          python3 tests/compute/ce_residual/run_supplement.py --base-evidence "$RUNNER_TEMP/ce-residual" --output "$RUNNER_TEMP/ce-residual-multistage"
+          python3 tests/compute/ce_residual/run_nonconflict.py --base-evidence "$RUNNER_TEMP/ce-residual" --output "$RUNNER_TEMP/ce-residual-nonconflict"
+          python3 tests/compute/ce_residual/run_mutants.py --base-evidence "$RUNNER_TEMP/ce-residual" --output "$RUNNER_TEMP/ce-residual-mutants"
       - name: CPU mechanism BPF target and scratch ABI contracts
         run: make -C kernel/tools/xdev_ext_mech check-cpu-bpf
       - name: Tool accounting, buffer bounds and SGL profile contracts

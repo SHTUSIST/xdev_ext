@@ -10,7 +10,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
-from adapter_test import socket_family_declarations, socket_family_reference
+from adapter_test import socket_family_declarations, socket_family_reference, socket_family_runtime, socket_submission_setup
 
 HERE = Path(__file__).resolve().parent
 KERNEL = HERE.parents[4]
@@ -49,14 +49,14 @@ int main(void)
  assert(!xdev_ext_socket_validate(&stage,&b,(const u8*)&desc,1));
  xdev_ext_socket_fill_info(&stage,&b,&info);assert(info.nr_frames==1);
  active_cred=&worker_cred;
- assert(!xdev_ext_socket_submit(&stage,&b));
+ fixture_prepare_submission(&stage,&b);assert(!xdev_ext_socket_submit(&stage,&b));
  if(observed_subject!=user_cred.subject){fprintf(stderr,"RED: kernel_sendmsg sees worker subject=%d instead of creator subject=%d\n",observed_subject,user_cred.subject);return 1;}
  assert(active_cred==&worker_cred && send_calls==1 && b.completions==1 && !b.status);
- forced_result=-EAGAIN;assert(xdev_ext_socket_submit(&stage,&b)==-EAGAIN && active_cred==&worker_cred && send_calls==2 && b.completions==1 && observed_subject==1001);
- forced_result=-EACCES;assert(!xdev_ext_socket_submit(&stage,&b) && active_cred==&worker_cred && send_calls==3 && b.completions==2 && b.status==-EACCES && observed_subject==1001);
+ forced_result=-EAGAIN;fixture_prepare_submission(&stage,&b);assert(xdev_ext_socket_submit(&stage,&b)==-EAGAIN && active_cred==&worker_cred && send_calls==2 && b.completions==1 && observed_subject==1001);
+ forced_result=-EACCES;fixture_prepare_submission(&stage,&b);assert(!xdev_ext_socket_submit(&stage,&b) && active_cred==&worker_cred && send_calls==3 && b.completions==2 && b.status==-EACCES && observed_subject==1001);
  xdev_ext_socket_fill_cqe(&stage,&b,&cqe);assert(cqe.status==-EACCES);
- xdev_ext_socket_mark_dead(&stage);assert(xdev_ext_socket_submit(&stage,&b)==-ENODEV && send_calls==3);
- xdev_ext_socket_unbind(&stage);
+ xdev_ext_socket_mark_dead(&stage);fixture_prepare_submission(&stage,&b);assert(xdev_ext_socket_submit(&stage,&b)==-ENODEV && send_calls==3);
+ fixture_drain_stage(&stage);xdev_ext_socket_unbind(&stage);
  assert(user_cred.refs==1 && worker_cred.refs==1);
  puts("ok - actual socket native send uses bound creator credentials, restores worker creds on success/EAGAIN/error, releases credential ref");
  return 0;
@@ -74,7 +74,7 @@ def main():
         cfile = Path(tmp) / "actual.c"
         binary = Path(tmp) / "actual"
         cfile.write_text(shim + CREDENTIALS + socket_family_declarations(KERNEL) +
-                        source + socket_family_reference() + MAIN)
+                        socket_family_runtime(KERNEL) + source + socket_family_reference() + socket_submission_setup() + MAIN)
         # -Wno-unused-function: this TX oracle does not call the receive-direction entry points.
         compiled = subprocess.run(["cc", "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-fsanitize=undefined", "-I" + str(KERNEL), str(cfile), "-o", str(binary)], capture_output=True, text=True)
         assert compiled.returncode == 0, compiled.stderr

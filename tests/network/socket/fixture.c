@@ -32,23 +32,23 @@ int main(void)
   for(i=0;i<1000;i++)pages[0][16+i]=(u8)(g+i*13);
   for(i=0;i<500;i++)pages[1][16+i]=(u8)(g+(1000+i)*13);
   assert(!xdev_ext_socket_validate(&st,&b,(void *)d,2));
-  assert(!xdev_ext_socket_submit(&st,&b));assert(b.completions==1 && !b.status && b.completed_ticket==b.ticket);
+  fixture_prepare_submission(&st,&b);assert(!xdev_ext_socket_submit(&st,&b));assert(b.completions==1 && !b.status && b.completed_ticket==b.ticket);
   assert(recv(peer,received,sizeof(received),MSG_DONTWAIT)==1500);
   for(i=0;i<1500;i++)assert(received[i]==(u8)(g+i*13));
   assert(pages[0][15]==0xa5 && pages[0][1016]==0xa5 && pages[1][15]==0xa5 && pages[1][516]==0xa5);
   xdev_ext_socket_fill_cqe(&st,&b,&cqe);assert(!cqe.status && cqe.bytes_sent==1500);
  }
  assert(send_calls==257 && last_send_flags==(MSG_DONTWAIT|MSG_NOSIGNAL));
- b.completions=0;forced_send=-EAGAIN;assert(xdev_ext_socket_submit(&st,&b)==-EAGAIN && !b.completions);
- forced_send=-ECONNREFUSED;assert(!xdev_ext_socket_submit(&st,&b) && b.completions==1 && b.status==-ECONNREFUSED);
- forced_send=123;assert(!xdev_ext_socket_submit(&st,&b) && b.status==-EIO);
+ b.completions=0;forced_send=-EAGAIN;fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-EAGAIN && !b.completions);
+ forced_send=-ECONNREFUSED;fixture_prepare_submission(&st,&b);assert(!xdev_ext_socket_submit(&st,&b) && b.completions==1 && b.status==-ECONNREFUSED);
+ forced_send=123;fixture_prepare_submission(&st,&b);assert(!xdev_ext_socket_submit(&st,&b) && b.status==-EIO);
  forced_send=999999;session.pool.state[1]=XDEV_EXT_MECH_F_HELD;i=send_calls;
- assert(xdev_ext_socket_submit(&st,&b)==-EBUSY && send_calls==(int)i);session.pool.state[1]=XDEV_EXT_MECH_F_INFLIGHT;
- session.admits=false;assert(xdev_ext_socket_submit(&st,&b)==-ESHUTDOWN);session.admits=true;
- sk.udp.cork=true;assert(xdev_ext_socket_submit(&st,&b)==-EOPNOTSUPP);sk.udp.cork=false;
- sk.sk_shutdown=SEND_SHUTDOWN;assert(xdev_ext_socket_submit(&st,&b)==-ESHUTDOWN);sk.sk_shutdown=0;
- xdev_ext_socket_mark_dead(&st);assert(xdev_ext_socket_submit(&st,&b)==-ENODEV);
- xdev_ext_socket_unbind(&st);assert(!st.priv);
+ fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-EBUSY && send_calls==(int)i);session.pool.state[1]=XDEV_EXT_MECH_F_INFLIGHT;
+ session.admits=false;fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-ESHUTDOWN);session.admits=true;
+ sk.udp.cork=true;fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-EOPNOTSUPP);sk.udp.cork=false;
+ sk.sk_shutdown=SEND_SHUTDOWN;fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-ESHUTDOWN);sk.sk_shutdown=0;
+ xdev_ext_socket_mark_dead(&st);fixture_prepare_submission(&st,&b);assert(xdev_ext_socket_submit(&st,&b)==-ENODEV);
+ fixture_drain_stage(&st);xdev_ext_socket_unbind(&st);assert(!st.priv);
  u.arg0=1;assert(xdev_ext_socket_bind(&st,&u)==-EINVAL);u.arg0=0;
  sk.sk_state=0;assert(xdev_ext_socket_bind(&st,&u)==-ENOTCONN);sk.sk_state=TCP_ESTABLISHED;
  sk.sk_protocol=IPPROTO_TCP;assert(xdev_ext_socket_bind(&st,&u)==-EPROTONOSUPPORT);sk.sk_protocol=IPPROTO_UDP;
@@ -71,12 +71,12 @@ int main(void)
   reused=socket(AF_INET6,SOCK_DGRAM,0);assert(reused>=0);
   if(reused!=original){assert(dup2(reused,original)==original);close(reused);}
   assert(!xdev_ext_socket_validate(&st,&b,(void *)d,2));
-  assert(!xdev_ext_socket_submit(&st,&b));
+  fixture_prepare_submission(&st,&b);assert(!xdev_ext_socket_submit(&st,&b));
   assert(recv(peer6,received,sizeof(received),MSG_DONTWAIT)==1500);
   for(i=0;i<1500;i++)assert(received[i]==(u8)(256+i*13));
   assert(!shutdown(retained,SHUT_WR));
-  assert(!xdev_ext_socket_submit(&st,&b) && b.status==-EPIPE);
-  xdev_ext_socket_unbind(&st);close(peer6);close(retained);close(original);
+  fixture_prepare_submission(&st,&b);assert(!xdev_ext_socket_submit(&st,&b) && b.status==-EPIPE);
+  fixture_drain_stage(&st);xdev_ext_socket_unbind(&st);close(peer6);close(retained);close(original);
  }
 
  puts("PASS socket sink production adapter: 257 datagrams, 8 request slots, bounds, guards, native errors, ownership, STOP");

@@ -14,17 +14,128 @@ ROOT = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
 
 
+def production_function(text, name):
+    """Extract a complete production definition; missing dependencies fail setup."""
+    match = re.search(r"^(?:static )?(?:inline )?[^\n;{}]+\b" + name +
+                      r"\s*\([^;{}]*\)\s*\{", text, re.M)
+    if not match:
+        raise AssertionError("missing production definition: " + name)
+    opening = text.index("{", match.start())
+    depth, end = 1, opening + 1
+    while depth:
+        depth += (text[end] == "{") - (text[end] == "}")
+        end += 1
+    return text[match.start():end] + "\n"
+
+
 def socket_family_declarations(root):
-    """Pure coverage plus actual contract types, without kernel runtime headers."""
+    """Actual family types and tracker, with only kernel OS types substituted."""
     mech = (root / 'include/linux/xdev_ext_mech.h').read_text()
+    peer = (root / 'include/linux/xdev_ext_peer.h').read_text()
+    requester = (root / 'include/linux/xdev_ext_requester.h').read_text()
+    rqcore = (root / 'include/linux/xdev_ext_requester_core.h').read_text()
     net = (root / 'include/linux/xdev_ext_netfam.h').read_text()
     declarations = [
+        '#include "include/linux/xdev_ext_netfam_core.h"',
+        '#include "include/linux/xdev_ext_peer_net_track.h"',
+        'typedef __u16 u16; typedef int spinlock_t;',
+        'struct module; struct pci_dev;',
         re.search(r'struct xdev_ext_family_hooks_hdr \{.*?\n\};', mech, re.S)[0],
-        re.search(r'enum xdev_ext_net_hdr_policy \{.*?\n\};', net, re.S)[0],
-        'struct xdev_ext_net_rel_view;',
-        re.search(r'struct xdev_ext_net_hooks \{.*?\n\};', net, re.S)[0],
     ]
-    return '#include "include/linux/xdev_ext_netfam_core.h"\n' + '\n'.join(declarations) + '\n'
+    for text, names in ((peer, ('xdev_ext_peer_lease', 'xdev_ext_peer_fd_lease')),
+                        (rqcore, ('xdev_ext_admission',)),
+                        (requester, ('xdev_ext_requester',))):
+        declarations.extend(re.search(r'struct ' + name + r' \{.*?\n\};', text, re.S)[0]
+                            for name in names)
+    declarations.append(re.sub(r'^#include[^\n]*\n', '', net, flags=re.M))
+    return '\n'.join(declarations) + '\n'
+
+
+def socket_family_runtime(root):
+    """Compile the real runtime; unused PEER/OS boundaries abort if reached.
+
+    Keep the old class allocation counters scoped to their original allocations;
+    family allocations remain real calloc/free and have separate accounting.
+    Completion uses the production ticket state machine before the old core
+    queue observation boundary records the single batch publication.
+    """
+    mech = (root / 'io_uring/xdev_ext_mech.c').read_text()
+    runtime = (root / 'io_uring/family/xdev_ext_netfam.c').read_text()
+    runtime = re.sub(r'^#include[^\n]*\n', '', runtime, flags=re.M)
+    return r'''
+#define THIS_MODULE NULL
+#define EXPORT_SYMBOL_GPL(name)
+#define NSEC_PER_MSEC 1000000ULL
+#define spin_lock_init(lock) (*(lock)=0)
+#define spin_lock_irqsave(lock,flags) do {(flags)=0; if (*(lock)) abort(); *(lock)=1;} while (0)
+#define spin_unlock_irqrestore(lock,flags) do {(void)(flags); if (!*(lock)) abort(); *(lock)=0;} while (0)
+static u64 ktime_get_boottime_ns(void) { return 1000000ULL; }
+static unsigned long msecs_to_jiffies(unsigned int ms) { return ms; }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err)
+{ (void)st; (void)err; abort(); }
+static int xdev_ext_requester_bind(struct xdev_ext_requester *r,struct xdev_ext_mech_stage *s,struct pci_dev *p,u32 f)
+{ (void)r; (void)s; (void)p; (void)f; abort(); }
+static void xdev_ext_requester_unbind(struct xdev_ext_requester *r)
+{ (void)r; abort(); }
+static void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *l,bool q)
+{ (void)l; (void)q; abort(); }
+enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA_NONE };
+static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p)
+{ (void)p; abort(); }
+static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p)
+{ (void)p; abort(); }
+static int xdev_ext_peer_file_acquire(struct file *f,struct pci_dev *p,u64 g,u64 off,u32 n,enum dma_data_direction d,struct xdev_ext_peer_fd_lease *l)
+{ (void)f; (void)p; (void)g; (void)off; (void)n; (void)d; (void)l; abort(); }
+static unsigned int fixture_family_allocations,fixture_family_frees;
+static void *fixture_family_calloc(size_t n,size_t size,int flags)
+{ (void)flags; fixture_family_allocations++; return calloc(n,size); }
+static void fixture_family_free(const void *ptr)
+{ if (ptr) fixture_family_frees++; free((void *)ptr); }
+''' + production_function(mech, 'xdev_ext_mech_batch_frame') + production_function(
+        mech, 'xdev_ext_mech_batch_completion_claim') + r'''
+static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b,u64 ticket,int err,bool sequester)
+{
+    if (xdev_ext_mech_completion_publish_begin(&b->completion,ticket)) return;
+    if (sequester) abort(); /* No native DMA in this old socket OS boundary. */
+    xdev_ext_mech_completion_publish_end(&b->completion,ticket,err);
+    xdev_ext_mech_batch_complete(b,ticket,err); /* existing core queue observer */
+}
+#pragma push_macro("kvcalloc")
+#pragma push_macro("kvfree")
+#undef kvcalloc
+#undef kvfree
+#define kvcalloc fixture_family_calloc
+#define kvfree fixture_family_free
+''' + runtime + r'''
+#pragma pop_macro("kvfree")
+#pragma pop_macro("kvcalloc")
+'''
+
+
+def socket_submission_setup():
+    """Old manual batches now drive the real core prepare/fill boundaries."""
+    return r'''
+static void fixture_drain_stage(struct xdev_ext_mech_stage *st)
+{
+    struct xdev_ext_socket_stage *ss=st->priv;
+    for (u32 i=0;i<ss->depth;i++)
+        xdev_ext_netfam_fill_cqe(&ss->ns,&ss->request[i].tx_slot);
+}
+static void fixture_prepare_submission(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b)
+{
+    int result;
+    __u64 ticket;
+    fixture_drain_stage(st);
+    if ((b->completion.ctrl&7)==XDEV_EXT_MECH_C_LANDED) {
+        if (xdev_ext_mech_completion_consume(&b->completion,b->completion.ctrl>>3,&result)) abort();
+    } else if ((b->completion.ctrl&7)==XDEV_EXT_MECH_C_SUBMITTED) {
+        if (xdev_ext_mech_completion_cancel(&b->completion,b->completion.ctrl>>3)) abort();
+    }
+    /* Preserve each old explicitly chosen ticket in this hand-driven batch. */
+    b->completion.ctrl=(b->ticket-1)<<3;
+    if (xdev_ext_mech_completion_begin(&b->completion,&ticket) || ticket!=b->ticket) abort();
+}
+'''
 
 
 def socket_family_reference():
@@ -67,7 +178,7 @@ class SocketAdapter(unittest.TestCase):
             cfile = Path(tmp) / 'adapter.c'
             exe = Path(tmp) / 'adapter'
             cfile.write_text((HERE/'shim.h').read_text() + '\n' + socket_family_declarations(ROOT) +
-                             text + socket_family_reference() + '\n' + (HERE/'fixture.c').read_text())
+                             socket_family_runtime(ROOT) + text + socket_family_reference() + socket_submission_setup() + '\n' + (HERE/'fixture.c').read_text())
             # -Wno-unused-function: this TX fixture does not call the receive-direction entry points.
             subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
                             '-fsanitize=undefined', '-fno-sanitize-recover=undefined',

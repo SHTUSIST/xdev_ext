@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 
-KERNEL = Path(__file__).resolve().parents[4]
+KERNEL = Path(__file__).resolve().parents[3]
 
 
 def function(source, signature):
@@ -81,14 +81,16 @@ STAGE = r'''
 struct xdev_ext_ce_stage {
  struct list_head lease_node;
  struct xdev_ext_ce_lease_group *lease_group;
- u64 window_start;
+ const void *ops;
+ u64 window_start, window_len;
+ bool cleanup_held;
  struct {const void *ops;u64 len;} region;
 };
 '''
 MAIN = r'''
 static const int provider;
 static void bind_window(struct xdev_ext_mech_stage *st,struct xdev_ext_ce_stage *cs,u64 start,u64 len)
-{st->priv=cs;cs->region.ops=&provider;cs->region.len=len;assert(!xdev_ext_ce_lease_bind(st,cs,start));}
+{st->priv=cs;cs->ops=&provider;cs->region.ops=&provider;cs->region.len=len;assert(!xdev_ext_ce_lease_bind(st,cs,start,len));xdev_ext_ce_lease_bind_ready(cs);}
 static void bind_region(struct xdev_ext_mech_stage *st,struct xdev_ext_ce_stage *cs,u64 start)
 {bind_window(st,cs,start,4096);}
 static void same_base_preserves_depth(void)
@@ -173,7 +175,7 @@ int main(void)
  assert(shared!=MAP_FAILED);assert(!pthread_mutex_init(shared,&attr));
  xdev_ext_ce_lease_mutex=shared;
  same_base_preserves_depth();
- fail_allocation=true;assert(xdev_ext_ce_lease_bind(&f,&fr,0)==-ENOMEM);fail_allocation=false;
+ fail_allocation=true;assert(xdev_ext_ce_lease_bind(&f,&fr,0,4096)==-ENOMEM);fail_allocation=false;
  assert(list_empty(&xdev_ext_ce_lease_groups)); /* Failed CREATE registered nothing. */
  bind_region(&a[0],&ar[0],0);bind_region(&a[1],&ar[1],8192);
  bind_region(&b[0],&br[0],8192);bind_region(&b[1],&br[1],0); /* Reversed multirange order. */
@@ -240,8 +242,8 @@ def main():
             assert expected in evidence, evidence
             print('ok - rejected actual-function mutant '+mutant)
         return
-    source = (KERNEL/'io_uring/xdev_ext_mech_ce.c').read_text()
-    core = (KERNEL/'io_uring/xdev_ext_mech.c').read_text()
+    source = (KERNEL/'src/compute/io_uring/xdev_ext_mech_ce.c').read_text()
+    core = (KERNEL/'src/core/io_uring/xdev_ext_mech.c').read_text()
     if args.mutant == 'missing-get':
         source = source.replace('err = xdev_ext_ce_lease_get(cs, b);', 'err = 0;', 1)
     # Final frame disposition can turn an apparent completion into quarantine.
@@ -260,7 +262,8 @@ def main():
     group_start = source.index('struct xdev_ext_ce_lease_group {')
     group = source[group_start:source.index('\n};', group_start)+3]
     functions = ''.join(function(source, signature) for signature in (
-        'static int xdev_ext_ce_lease_bind(', 'static int xdev_ext_ce_lease_get(',
+        'static int xdev_ext_ce_lease_bind(', 'static void xdev_ext_ce_lease_bind_ready(',
+        'static int xdev_ext_ce_lease_get(',
         'static void xdev_ext_ce_batch_release(', 'static bool xdev_ext_ce_lease_unbind('))
     if args.mutant == 'ignore-quarantine':
         functions = functions.replace('xdev_ext_mech_batch_id(b), sequestered);',
@@ -275,17 +278,19 @@ def main():
             'for (held=container_of(other->regions.next,__typeof__(*held),lease_node);held;held=NULL)')
     submit = function(source, 'static int xdev_ext_ce_submit(')
     assert submit.index('xdev_ext_ce_lease_get(') < submit.index('xdev_ext_ce_cookie_arm(')
-    assert submit.index('xdev_ext_ce_lease_get(') < submit.index('region.ops->submit(')
+    assert submit.index('xdev_ext_ce_lease_get(') < submit.index('cs->ops->submit(')
     with tempfile.TemporaryDirectory(prefix='independent-ce-lease-') as tmp:
         c, binary = Path(tmp)/'actual.c', Path(tmp)/'actual'
-        headers = ('include/uapi/linux/xdev_ext_mech.h',
-                   'io_uring/xdev_ext_mech_ce_core.h',
-                   'io_uring/xdev_ext_mech_ce_lease.h')
+        headers = ('src/core/include/uapi/linux/xdev_ext_mech.h',
+                   'src/compute/io_uring/xdev_ext_mech_ce_core.h',
+                   'src/compute/io_uring/xdev_ext_mech_ce_lease.h')
         c.write_text(SHIM+''.join('\n#include "'+str(KERNEL/header)+'"\n'
                                  for header in headers)+group+STAGE+functions+MAIN)
         compiled = subprocess.run(['cc','-std=gnu11','-O1','-Wall','-Wextra','-Werror',
-            '-fsanitize=undefined','-pthread',str(c),'-o',str(binary)], capture_output=True,text=True)
-        assert compiled.returncode == 0, compiled.stderr
+            '-fsanitize=undefined','-pthread','-I'+str(KERNEL/'src/core/include'),'-I'+str(KERNEL/'src/core/io_uring'),str(c),'-o',str(binary)], capture_output=True,text=True)
+        if compiled.returncode:
+            print("SETUP: compile failed\n"+compiled.stdout+compiled.stderr)
+            raise SystemExit(2)
         result = subprocess.run([str(binary)],capture_output=True,text=True,timeout=10)
         print(result.stdout,end='')
         print(result.stderr,end='')

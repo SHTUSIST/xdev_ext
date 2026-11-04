@@ -189,20 +189,37 @@ def generate(mutation=None):
     if "static void xdev_ext_mech_start_queue_free(" in core:
         after.insert(0, "xdev_ext_mech_start_queue_free")
     before = session_helpers(core, [function(core, name) for name in before + after], function) + before
-    ce_adapter = "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
+    ce_stage = structure(ce, "xdev_ext_ce_stage")
+    # Only a wholly pre-repair source may use the historical uncontended
+    # boundary. A partial new source still requires every actual new helper;
+    # missing symbols are SETUP failures, never a fallback to success.
+    configured_ce = bool(re.search(r"^\s*const struct xdev_ext_ce_backend_ops\s*\*ops\b", ce_stage, re.M)) or any(
+        marker in ce_stage for marker in ("window_len;", "cleanup_held;")) or any(
+        name in ce for name in ("xdev_ext_ce_lease_bind_ready", "xdev_ext_ce_lease_cleanup_begin"))
+    ce_adapter = "#define FIXTURE_CE_CONFIGURED_EXCLUSION " + str(int(configured_ce)) + "\n"
+    if configured_ce:
+        ce_adapter += structure(ce, "xdev_ext_ce_lease_group") + "\n"
+    ce_adapter += "\n\n".join([structure(ce,n) for n in ("xdev_ext_ce_stage", "xdev_ext_ce_cookie", "xdev_ext_ce_batch")])
     ce_adapter += "\nXDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);\n"
-    # These native-cookie/provider fault cases have one uncontended CE owner.
-    # Shared-window admission is exercised by independent_ce_lease.py using
-    # the actual registry functions, including process and quarantine cases.
-    # Keep that admission boundary explicit while preserving real submit and
-    # completion decisions below (including stale-ticket mutation checks).
-    ce_adapter += """
+    if configured_ce:
+        # These cases manually admit one CE window, but execute its real lease
+        # admission and final release, including the repaired C-owned identity.
+        ce_adapter += "\nstatic DEFINE_MUTEX(xdev_ext_ce_lease_lock);\n"
+        ce_adapter += "static LIST_HEAD(xdev_ext_ce_lease_groups);\n"
+        ce_adapter += "\n\n".join(function(ce, n) for n in (
+            "xdev_ext_ce_lease_bind", "xdev_ext_ce_lease_bind_ready",
+            "xdev_ext_ce_lease_get", "xdev_ext_ce_batch_release",
+            "xdev_ext_ce_lease_cleanup_begin", "xdev_ext_ce_lease_unbind"))
+    else:
+        # Original historical fixture precondition: one uncontended CE owner.
+        # Old refs only; repaired sources always execute the real helper above.
+        ce_adapter += """
 static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
                                struct xdev_ext_mech_batch *b)
 {
     (void)cs;
     (void)b;
-    return 0; /* Fixture precondition: uncontended registered CE window. */
+    return 0; /* Historical fixture's uncontended registered CE window. */
 }
 """
     # Keep the selected adapter's actual frame-claim callback, not a test
