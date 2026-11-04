@@ -152,3 +152,85 @@ int xdev_ext_stor_block_poll(struct request_queue *queue,
 	return found;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll);
+
+/* CREATE: native authorization precedes identity admission and window binding. */
+int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
+		const struct xdev_ext_mech_stage_uapi *u,
+		const struct xdev_ext_stor_dev_ops *dev)
+{
+	struct xdev_ext_stor_stage *ss;
+	void *member;
+	int ret;
+
+	if (!dev || !dev->bind || !dev->unbind || !dev->identity ||
+	    !dev->requester || !dev->queue || !dev->decode || !dev->poll)
+		return -EINVAL;
+	ret = dev->bind(st, u, &ss, &member);
+	if (ret)
+		return ret;
+	ss->st = st;
+	ss->dev = dev;
+	ss->member = member;
+	memset(ss->poll_views, 0, sizeof(ss->poll_views));
+	atomic_set(&ss->dead, 0);
+	ret = dev->identity(member, false, &ss->geometry);
+	if (!ret)
+		ret = xdev_ext_stor_window_bind(&ss->window,
+			ss->geometry.capacity_lbas, ss->geometry.lba_shift,
+			st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE,
+			st->arg0, st->arg1,
+			xdev_ext_mech_session_layout(st->s)->group_bytes);
+	if (ret) {
+		dev->unbind(member);
+		return ret;
+	}
+	st->priv = member;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_bind);
+
+int xdev_ext_storfam_validate(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb,
+		const __u8 scratch[64], __u32 nr_slots)
+{
+	struct xdev_ext_stor_rw rw;
+	int ret;
+
+	sb->validated = false;
+	if (nr_slots != 1)
+		return -EPROTO;
+	ret = ss->dev->decode(ss->member, batch, scratch, &ss->window,
+			      xdev_ext_mech_batch_bytes(batch), &rw);
+	if (ret)
+		return ret;
+	memcpy(sb->sqe, scratch, sizeof(sb->sqe));
+	sb->rw = rw;
+	sb->batch_id = xdev_ext_mech_batch_id(batch);
+	sb->validated = true;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_validate);
+
+int xdev_ext_storfam_submit_check(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb)
+{
+	if (atomic_read(&ss->dead))
+		return -ENODEV;
+	if (!sb->validated || sb->batch_id != xdev_ext_mech_batch_id(batch))
+		return -EPROTO;
+	return ss->dev->identity(ss->member, true, &ss->geometry);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_submit_check);
+
+int xdev_ext_storfam_poll(struct xdev_ext_stor_stage *ss)
+{
+	return ss->dev->poll(ss->member, ss->poll_views,
+			     ARRAY_SIZE(ss->poll_views));
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_poll);
+
+void xdev_ext_storfam_mark_dead(struct xdev_ext_stor_stage *ss)
+{
+	atomic_set(&ss->dead, 1);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_mark_dead);

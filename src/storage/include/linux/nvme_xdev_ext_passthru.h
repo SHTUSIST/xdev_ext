@@ -468,19 +468,16 @@ static inline void nvme_xdev_ext_mech_cqe(int status, __u64 result,
 
 /*
  * CREATE of an NVMe mechanism stage: the namespace admission of
- * nvme_xdev_ext_admit() for the stage direction, a non-empty LBA window inside
- * the capacity, and session batches of @group_bytes that are whole LBAs one
- * command can carry and the window can hold.
+ * nvme_xdev_ext_admit() for the stage direction. Window geometry is bound
+ * separately after this native namespace authorization succeeds.
  */
 static inline int
-nvme_xdev_ext_mech_bind_window(const struct nvme_xdev_ext_identity *id, int write,
-			 __u64 window_slba, __u64 window_nlb,
-			 __u32 group_bytes, struct xdev_ext_stor_window *window)
+nvme_xdev_ext_mech_bind_identity(const struct nvme_xdev_ext_identity *id, int write,
+			       __u32 group_bytes)
 {
 	struct nvme_xdev_ext_admission input;
-	int ret;
 
-	if (!id || !window)
+	if (!id)
 		return -EINVAL;
 	input = (struct nvme_xdev_ext_admission) {
 		.opcode = write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ,
@@ -496,7 +493,20 @@ nvme_xdev_ext_mech_bind_window(const struct nvme_xdev_ext_identity *id, int writ
 		.data_len = group_bytes,
 		.capacity_lbas = id->capacity_lbas,
 	};
-	ret = nvme_xdev_ext_admit_identity(&input);
+	return nvme_xdev_ext_admit_identity(&input);
+}
+
+/* Bind a nonempty window that can hold a whole-LBA session batch. */
+static inline int
+nvme_xdev_ext_mech_bind_window(const struct nvme_xdev_ext_identity *id, int write,
+			 __u64 window_slba, __u64 window_nlb,
+			 __u32 group_bytes, struct xdev_ext_stor_window *window)
+{
+	int ret;
+
+	if (!id || !window)
+		return -EINVAL;
+	ret = nvme_xdev_ext_mech_bind_identity(id, write, group_bytes);
 	if (ret)
 		return ret;
 	return xdev_ext_stor_window_bind(window, id->capacity_lbas,
