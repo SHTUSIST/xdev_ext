@@ -288,6 +288,7 @@ static void xd_result(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_bat
 	f->published = true;
 }
 static const struct xdev_ext_net_member xd_member = {
+	.lease_kind = XDEV_EXT_NET_LEASE_PEER_DMA,
 	.dev = &xdev_ext_xd_dev_ops, .admit = true, .result = xd_result,
 	.local = xd_local, .withdraw = xd_withdraw, .link_fail = xd_link_fail,
 };
