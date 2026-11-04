@@ -414,51 +414,6 @@ struct nvme_xdev_ext_sidecar {
 
 static atomic64_t nvme_xdev_ext_policy_errors;
 
-/* Shared with the NVMe mechanism class, which binds a namespace once. */
-int nvme_xdev_ext_capture_identity(struct nvme_ns *ns,
-			      struct nvme_xdev_ext_identity *identity,
-			      const struct nvme_ns_head **head_out,
-			      const struct gendisk **disk_out,
-			      const struct request_queue **queue_out)
-{
-	struct nvme_ns_head *head = READ_ONCE(ns->head);
-	struct gendisk *disk = READ_ONCE(ns->disk);
-	struct request_queue *queue = READ_ONCE(ns->queue);
-	sector_t sectors;
-	u8 lba_shift;
-
-	if (!head || !disk || !queue)
-		return -ENODEV;
-
-	lba_shift = READ_ONCE(head->lba_shift);
-	if (lba_shift < SECTOR_SHIFT || lba_shift >= 32)
-		return -EINVAL;
-	sectors = get_capacity(disk);
-	if (lba_shift > SECTOR_SHIFT &&
-	    (sectors & ((1ULL << (lba_shift - SECTOR_SHIFT)) - 1)))
-		return -EINVAL;
-
-	*identity = (struct nvme_xdev_ext_identity) {
-		.nsid = READ_ONCE(head->ns_id),
-		.lba_shift = lba_shift,
-		.namespace_ready = test_bit(NVME_NS_READY, &ns->flags),
-		.namespace_removing = test_bit(NVME_NS_REMOVING, &ns->flags),
-		.csi = READ_ONCE(head->ids.csi),
-		.metadata_size = READ_ONCE(head->ms),
-		.pi_size = READ_ONCE(head->pi_size),
-		.pi_type = READ_ONCE(head->pi_type),
-		.capacity_lbas = sectors >> (lba_shift - SECTOR_SHIFT),
-		.diskseq = READ_ONCE(disk->diskseq),
-	};
-	memcpy(identity->eui64, head->ids.eui64, sizeof(identity->eui64));
-	memcpy(identity->nguid, head->ids.nguid, sizeof(identity->nguid));
-	memcpy(identity->uuid, &head->ids.uuid, sizeof(identity->uuid));
-	*head_out = head;
-	*disk_out = disk;
-	*queue_out = queue;
-	return 0;
-}
-
 static struct nvme_xdev_ext_admission
 nvme_xdev_ext_make_admission(const struct nvme_command *c,
 			const struct nvme_uring_data *data,

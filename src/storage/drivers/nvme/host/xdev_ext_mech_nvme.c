@@ -45,14 +45,13 @@ struct nvme_xdev_ext_peer_slot;
 struct nvme_xdev_ext_peer_res;
 
 struct nvme_xdev_ext_mech_stage {
+	struct xdev_ext_stor_stage family;
 	struct nvme_ns *ns;		/* pinned by the stage file */
 	struct nvme_xdev_ext_identity identity;
-	struct xdev_ext_stor_window window;
 	const struct nvme_ns_head *head;
 	const struct gendisk *disk;
 	const struct request_queue *queue;
 	bool write;
-	atomic_t dead;
 	/* Only this session's worker mutates the free list. End_io records a
   * terminal outcome; fill_cqe returns a definitively drained slot. */
 	struct nvme_xdev_ext_mech_slot *slots;
@@ -64,10 +63,7 @@ struct nvme_xdev_ext_mech_stage {
 
 /* xdev_ext_mech_batch_priv(): ->validate fills it for ->submit of the same batch. */
 struct nvme_xdev_ext_mech_batch {
-	u8 sqe[NVME_XDEV_EXT_SQE_SIZE];	/* the SQE ->validate admitted */
-	struct xdev_ext_stor_rw rw;	/* decoded from that admitted SQE */
-	u64 batch_id;
-	bool validated;
+	struct xdev_ext_stor_batch family;
 	struct bio *bio;
 	struct nvme_xdev_ext_mech_slot *slot;
 	struct page **bounce;
@@ -99,6 +95,7 @@ static bool nvme_xdev_ext_class_resources_free(struct nvme_xdev_ext_mech_stage *
 	for (i = 0; i < p->nr_slots; i++)
 		if (WARN_ON_ONCE(p->slots[i].runtime.busy))
 			return false; /* Accepted or quarantined leases remain pinned. */
+	p->family.poll_views[0] = (struct xdev_ext_stor_poll_view) {};
 	for (i = 0; i < p->nr_slots; i++) {
 		struct nvme_xdev_ext_mech_slot *slot = &p->slots[i];
 
@@ -174,6 +171,11 @@ static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st)
 #endif
 		xdev_ext_stor_slot_add(&p->pool, &slot->runtime);
 	}
+	p->family.poll_views[0] = (struct xdev_ext_stor_poll_view) {
+		.first = &p->slots[0].done,
+		.stride = sizeof(*p->slots),
+		.count = p->nr_slots,
+	};
 	return 0;
 fail:
 	nvme_xdev_ext_class_resources_free(p);
@@ -272,6 +274,7 @@ static bool nvme_xdev_ext_peer_resources_free(struct nvme_xdev_ext_mech_stage *p
 	for (i = 0; i < res->nr_slots; i++)
 		if (WARN_ON_ONCE(res->slots[i].runtime.busy))
 			return false; /* The controller may still read the list. */
+	p->family.poll_views[1] = (struct xdev_ext_stor_poll_view) {};
 	if (res->sgl)
 		dma_free_coherent(res->dma_dev, res->sgl_bytes, res->sgl,
 				  res->sgl_dma);
@@ -292,14 +295,17 @@ static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
 	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
 	u32 i, stride, depth = xdev_ext_mech_session_depth(st->s);
-	struct device *dev = p->ns->ctrl->dev;
+	struct pci_dev *requester;
+	struct device *dev;
 	struct nvme_xdev_ext_peer_res *res;
 	u64 pieces;
 
 	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER)
 		return 0;
-	if (!dev || !dev_is_pci(dev))
+	requester = p->family.dev->requester(p->family.member);
+	if (!requester)
 		return -EOPNOTSUPP;
+	dev = &requester->dev;
 	if (!depth || !l->seg_len || !l->group_bytes || !l->frame_size)
 		return -EINVAL;
 	pieces = DIV_ROUND_UP((u64)l->group_bytes, l->seg_len) *
@@ -334,6 +340,11 @@ static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st)
 			(dma_addr_t)i * stride * sizeof(*slot->sgl);
 		xdev_ext_stor_slot_add(&res->pool, &slot->runtime);
 	}
+	p->family.poll_views[1] = (struct xdev_ext_stor_poll_view) {
+		.first = &res->slots[0].done,
+		.stride = sizeof(*res->slots),
+		.count = res->nr_slots,
+	};
 	return 0;
 }
 
@@ -483,14 +494,13 @@ static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *file)
 	return container_of(file_inode(file)->i_cdev, struct nvme_ns, cdev);
 }
 
-static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
-			       const struct xdev_ext_mech_stage_uapi *u)
+static int nvme_xdev_ext_member_bind(struct xdev_ext_mech_stage *st,
+		const struct xdev_ext_mech_stage_uapi *u,
+		struct xdev_ext_stor_stage **family, void **member)
 {
-	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
 	bool write = st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE;
 	struct nvme_xdev_ext_mech_stage *p;
 	struct nvme_ns *ns;
-	int ret;
 
 	if (u->flags || (!write && st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 		return -EINVAL;
@@ -524,32 +534,63 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 		return -ENOMEM;
 	p->ns = ns;
 	p->write = write;
-	ret = nvme_xdev_ext_capture_identity(ns, &p->identity, &p->head, &p->disk,
-					&p->queue);
-	if (!ret)
-		ret = nvme_xdev_ext_mech_bind_window(&p->identity, write, st->arg0,
-					       st->arg1, l->group_bytes, &p->window);
-	if (ret) {
-		kfree(p);
+	*family = &p->family;
+	*member = p;
+	return 0;
+}
+
+static void nvme_xdev_ext_member_unbind(void *member)
+{
+	kfree(member);
+}
+
+static struct pci_dev *nvme_xdev_ext_member_requester(void *member)
+{
+	struct nvme_xdev_ext_mech_stage *p = member;
+	struct device *dev = p->ns->ctrl->dev;
+
+	return dev && dev_is_pci(dev) ? to_pci_dev(dev) : NULL;
+}
+
+static struct request_queue *nvme_xdev_ext_member_queue(void *member)
+{
+	struct nvme_xdev_ext_mech_stage *p = member;
+
+	return p->ns->queue;
+}
+
+static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops;
+
+static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
+			       const struct xdev_ext_mech_stage_uapi *u)
+{
+	struct nvme_xdev_ext_mech_stage *p;
+	int ret;
+
+	ret = xdev_ext_storfam_bind(st, u, &nvme_xdev_ext_member_ops);
+	if (ret)
 		return ret;
-	}
-	st->priv = p;
+	p = st->priv;
 	ret = nvme_xdev_ext_class_resources_init(st);
 	if (!ret)
 		ret = nvme_xdev_ext_peer_resources_init(st);
 	if (ret) {
+		nvme_xdev_ext_peer_resources_free(p);
+		nvme_xdev_ext_class_resources_free(p);
 		st->priv = NULL;
-		kfree(p);
+		p->family.dev->unbind(p->family.member);
 	}
 	return ret;
 }
 
 static void nvme_xdev_ext_class_unbind(struct xdev_ext_mech_stage *st)
 {
-	if (!nvme_xdev_ext_peer_resources_free(st->priv) ||
-	    !nvme_xdev_ext_class_resources_free(st->priv))
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+
+	if (!nvme_xdev_ext_peer_resources_free(p) ||
+	    !nvme_xdev_ext_class_resources_free(p))
 		return;
-	kfree(st->priv);
+	p->family.dev->unbind(p->family.member);
 	st->priv = NULL;
 }
 
@@ -564,13 +605,14 @@ void nvme_xdev_ext_mech_fill_info(struct xdev_ext_mech_stage *st,
 
 	memset(info, 0, sizeof(*info));
 	info->l = *xdev_ext_mech_session_layout(st->s);
-	info->lba_shift = p->window.lba_shift;
+	info->lba_shift = p->family.window.lba_shift;
 	info->max_nlb = min_t(u32, NVME_XDEV_EXT_MAX_NLB,
-			      queue_max_hw_sectors(p->ns->queue) >>
-			      (p->window.lba_shift - SECTOR_SHIFT));
-	info->window_slba = p->window.slba;
-	info->window_nlb = p->window.nlb;
-	info->capacity_lbas = p->window.capacity_lbas;
+			      queue_max_hw_sectors(
+			      p->family.dev->queue(p->family.member)) >>
+			      (p->family.window.lba_shift - SECTOR_SHIFT));
+	info->window_slba = p->family.window.slba;
+	info->window_nlb = p->family.window.nlb;
+	info->capacity_lbas = p->family.window.capacity_lbas;
 	info->sgl = nvme_ctrl_sgl_supported(p->ns->ctrl);
 	if (!b)
 		return;
@@ -593,7 +635,7 @@ int nvme_xdev_ext_mech_stage_matches(struct xdev_ext_mech_stage *st, struct nvme
 {
 	const struct nvme_xdev_ext_mech_stage *p = st->priv;
 
-	if (!p || atomic_read(&p->dead))
+	if (!p || atomic_read(&p->family.dead))
 		return -ENODEV;
 	if (p->ns != ns)
 		return -EXDEV;
@@ -602,61 +644,78 @@ int nvme_xdev_ext_mech_stage_matches(struct xdev_ext_mech_stage *st, struct nvme
 	return 0;
 }
 
-static int nvme_xdev_ext_class_validate(struct xdev_ext_mech_stage *st,
-				   struct xdev_ext_mech_batch *b, const u8 *scratch,
-				   u32 n)
+static int nvme_xdev_ext_member_decode(void *member,
+		struct xdev_ext_mech_batch *b, const u8 scratch[64],
+		const struct xdev_ext_stor_window *window, u32 bytes,
+		struct xdev_ext_stor_rw *rw)
 {
-	const struct nvme_xdev_ext_mech_stage *p = st->priv;
-	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
 	struct nvme_xdev_ext_mech_bounds bounds = {
-		.window_slba = p->window.slba,
-		.window_nlb = p->window.nlb,
-		.capacity_lbas = p->window.capacity_lbas,
-		.data_len = xdev_ext_mech_batch_bytes(b),
-		.lba_shift = p->window.lba_shift,
-		.write = p->window.write,
+		.window_slba = window->slba,
+		.window_nlb = window->nlb,
+		.capacity_lbas = window->capacity_lbas,
+		.data_len = bytes,
+		.lba_shift = window->lba_shift,
+		.write = window->write,
 	};
 	struct nvme_xdev_ext_decoded decoded;
 	int ret;
 
-	bp->validated = false;
-	if (n != 1)
-		return -EPROTO;
 	ret = nvme_xdev_ext_mech_validate(scratch, &bounds, &decoded);
-	xdev_ext_mech_trace_plan(b,
-		(u64)nvme_xdev_ext_sqe_dw(scratch, 10) |
-		(u64)nvme_xdev_ext_sqe_dw(scratch, 11) << 32,
-		bounds.data_len, scratch[0] |
-		(nvme_xdev_ext_sqe_dw(scratch, 12) & 0xffff) << 8, ret);
+	if (b)
+		xdev_ext_mech_trace_plan(b,
+			(u64)nvme_xdev_ext_sqe_dw(scratch, 10) |
+			(u64)nvme_xdev_ext_sqe_dw(scratch, 11) << 32,
+			bounds.data_len, scratch[0] |
+			(nvme_xdev_ext_sqe_dw(scratch, 12) & 0xffff) << 8, ret);
 	if (ret)
 		return ret;
-	memcpy(bp->sqe, scratch, NVME_XDEV_EXT_SQE_SIZE);
-	bp->rw = (struct xdev_ext_stor_rw) {
+	*rw = (struct xdev_ext_stor_rw) {
 		.slba = decoded.slba, .nlb = decoded.nlb,
 		.byte_offset = decoded.byte_offset, .byte_length = decoded.byte_length,
 		.write = decoded.write,
 	};
-	bp->batch_id = xdev_ext_mech_batch_id(b);
-	bp->validated = true;
 	return 0;
 }
 
-/* Worker: the namespace is still the one CREATE bound; else the stage dies. */
-static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st)
+static int nvme_xdev_ext_class_validate(struct xdev_ext_mech_stage *st,
+		struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
-	const struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+	struct nvme_xdev_ext_mech_batch *bp = xdev_ext_mech_batch_priv(b);
+
+	return xdev_ext_storfam_validate(&p->family, b, &bp->family, scratch, n);
+}
+
+/* Native identity admission at CREATE, or the original worker recheck. */
+static int nvme_xdev_ext_member_identity(void *member, bool final,
+		struct xdev_ext_stor_geometry *geometry)
+{
+	struct nvme_xdev_ext_mech_stage *p = member;
 	const struct request_queue *queue;
 	const struct nvme_ns_head *head;
 	struct nvme_xdev_ext_identity id;
 	const struct gendisk *disk;
 	int ret;
 
+	if (!final) {
+		ret = nvme_xdev_ext_capture_identity(p->ns, &p->identity,
+					&p->head, &p->disk, &p->queue);
+		if (!ret)
+			ret = nvme_xdev_ext_mech_bind_identity(&p->identity, p->write,
+				xdev_ext_mech_session_layout(p->family.st->s)->group_bytes);
+		if (!ret)
+			*geometry = (struct xdev_ext_stor_geometry) {
+				.capacity_lbas = p->identity.capacity_lbas,
+				.lba_shift = p->identity.lba_shift,
+			};
+		return ret;
+	}
 	ret = nvme_xdev_ext_capture_identity(p->ns, &id, &head, &disk, &queue);
 	if (!ret && (head != p->head || disk != p->disk || queue != p->queue ||
 		     !nvme_xdev_ext_identity_equal(&p->identity, &id)))
 		ret = -ESTALE;
 	if (ret)
-		xdev_ext_mech_stage_dead(st, ret);
+		xdev_ext_mech_stage_dead(p->family.st, ret);
 	return ret;
 }
 
@@ -674,7 +733,8 @@ static int nvme_xdev_ext_class_map(struct xdev_ext_mech_stage *st,
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
 	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
 	struct xdev_ext_stor_queue_caps caps =
-		xdev_ext_stor_block_caps(p->ns->queue, p->identity.lba_shift);
+		xdev_ext_stor_block_caps(p->family.dev->queue(p->family.member),
+				 p->identity.lba_shift);
 	struct bio *bio;
 	int pieces, ret;
 
@@ -972,14 +1032,15 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 		return -EINVAL;
 	if (p->write && get_disk_ro(ns->disk))
 		return -EROFS;
-	slba = bp->rw.slba;
+	slba = bp->family.rw.slba;
 	ret = xdev_ext_peer_nvme_plan(ns->head->lba_shift,
 			get_capacity(ns->disk) >> (ns->head->lba_shift - SECTOR_SHIFT),
 			ns->head->ms, ns->head->ids.csi, slba,
 			xdev_ext_mech_batch_bytes(b), p->write, &plan);
 	if (ret)
 		return ret;
-	if (plan.bytes > (u64)queue_max_hw_sectors(ns->queue) << SECTOR_SHIFT)
+	if (plan.bytes > (u64)queue_max_hw_sectors(
+			p->family.dev->queue(p->family.member)) << SECTOR_SHIFT)
 		return -E2BIG;
 	cmd.rw.opcode = plan.opcode;
 	cmd.rw.nsid = cpu_to_le32(p->identity.nsid);
@@ -987,7 +1048,7 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	cmd.rw.length = cpu_to_le16(plan.nlb);
 
 	/* Tag pressure is preaccept backpressure, as for host pages. */
-	req = blk_mq_alloc_request(ns->queue,
+	req = blk_mq_alloc_request(p->family.dev->queue(p->family.member),
 				   xdev_ext_stor_block_poll_opf(st->poll,
 							 nvme_req_op(&cmd)),
 				   BLK_MQ_REQ_NOWAIT);
@@ -1005,8 +1066,8 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	}
 	ret = nvme_xdev_ext_peer_map(st, b, slot, plan.bytes, &cmd);
 	/* Preserve native plan/map refusals before rejecting an admitted-plan drift. */
-	if (!ret && (bp->rw.byte_length != plan.bytes ||
-		     bp->rw.nlb != (u64)plan.nlb + 1))
+	if (!ret && (bp->family.rw.byte_length != plan.bytes ||
+		     bp->family.rw.nlb != (u64)plan.nlb + 1))
 		ret = -EPROTO;
 	if (ret) {
 		nvme_xdev_ext_peer_slot_put(p->peer, bp);
@@ -1053,28 +1114,26 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	struct nvme_xdev_ext_mech_slot *slot;
 	int ret;
 
-	if (atomic_read(&p->dead))
-		return -ENODEV;
-	if (!bp->validated || bp->batch_id != xdev_ext_mech_batch_id(b))
-		return -EPROTO;
-	ret = nvme_xdev_ext_class_recheck(st);
+	ret = xdev_ext_storfam_submit_check(&p->family, b, &bp->family);
 	if (ret)
 		return ret;
 
  if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
   return nvme_xdev_ext_peer_submit(st, b);
 	/* Only the admitted opcode, SLBA and NLB; C owns every other field. */
-	cmd.rw.opcode = bp->rw.write ? NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ;
+	cmd.rw.opcode = bp->family.rw.write ?
+		NVME_XDEV_EXT_NVM_WRITE : NVME_XDEV_EXT_NVM_READ;
 	cmd.rw.nsid = cpu_to_le32(p->identity.nsid);
-	cmd.rw.slba = cpu_to_le64(bp->rw.slba);
-	cmd.common.cdw12 = cpu_to_le32((nvme_xdev_ext_sqe_dw(bp->sqe, 12) & 0xffff0000U) |
-				     (u32)(bp->rw.nlb - 1));
+	cmd.rw.slba = cpu_to_le64(bp->family.rw.slba);
+	cmd.common.cdw12 = cpu_to_le32(
+		(nvme_xdev_ext_sqe_dw(bp->family.sqe, 12) & 0xffff0000U) |
+		(u32)(bp->family.rw.nlb - 1));
 
 	/*
 	 * Tag pressure is preaccept backpressure: -EWOULDBLOCK is -EAGAIN,
 	 * which the core rolls back and retries after a delay.
 	 */
-	req = blk_mq_alloc_request(p->ns->queue,
+	req = blk_mq_alloc_request(p->family.dev->queue(p->family.member),
 				   xdev_ext_stor_block_poll_opf(st->poll,
 							 nvme_req_op(&cmd)),
 				   BLK_MQ_REQ_NOWAIT);
@@ -1123,25 +1182,30 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
  * this stage's live requests, host-page and device-memory slots alike.
  * Completions found run the same end_io, claim and publish as interrupts.
  */
+static int nvme_xdev_ext_member_poll(void *member,
+		const struct xdev_ext_stor_poll_view *views, u32 nr_views)
+{
+	struct nvme_xdev_ext_mech_stage *p = member;
+
+	return xdev_ext_stor_block_poll(p->family.dev->queue(member), views, nr_views);
+}
+
 static int nvme_xdev_ext_class_poll(struct xdev_ext_mech_stage *st)
 {
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
-	struct xdev_ext_stor_poll_view views[] = {
-		{
-			.first = p->nr_slots ? &p->slots[0].done : NULL,
-			.stride = sizeof(*p->slots),
-			.count = p->nr_slots,
-		},
-		{
-			.first = p->peer && p->peer->nr_slots ?
-				 &p->peer->slots[0].done : NULL,
-			.stride = sizeof(*p->peer->slots),
-			.count = p->peer ? p->peer->nr_slots : 0,
-		},
-	};
 
-	return xdev_ext_stor_block_poll(p->ns->queue, views, ARRAY_SIZE(views));
+	return xdev_ext_storfam_poll(&p->family);
 }
+
+static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops = {
+	.bind = nvme_xdev_ext_member_bind,
+	.unbind = nvme_xdev_ext_member_unbind,
+	.identity = nvme_xdev_ext_member_identity,
+	.requester = nvme_xdev_ext_member_requester,
+	.queue = nvme_xdev_ext_member_queue,
+	.decode = nvme_xdev_ext_member_decode,
+	.poll = nvme_xdev_ext_member_poll,
+};
 
 static void nvme_xdev_ext_class_fill_cqe(struct xdev_ext_mech_stage *st,
 				    struct xdev_ext_mech_batch *b, void *cqe)
@@ -1152,7 +1216,7 @@ static void nvme_xdev_ext_class_fill_cqe(struct xdev_ext_mech_stage *st,
 	if (xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
 		nvme_xdev_ext_class_slot_put(st, bp);
 	memcpy(cqe, &bp->cqe, sizeof(bp->cqe));
-	bp->validated = false;
+	bp->family.validated = false;
 }
 
 /* Worker: a GPU-memory completion; its leases go back here, never in end_io. */
@@ -1166,7 +1230,7 @@ static void nvme_xdev_ext_peer_fill_cqe(struct xdev_ext_mech_stage *st,
 	if (xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
 		nvme_xdev_ext_peer_slot_put(p->peer, bp);
 	memcpy(cqe, &bp->cqe, sizeof(bp->cqe));
-	bp->validated = false;
+	bp->family.validated = false;
 }
 
 /* Worker: ->fill_cqe for either pool kind. */
@@ -1184,7 +1248,7 @@ static void nvme_xdev_ext_class_mark_dead(struct xdev_ext_mech_stage *st)
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
 
 	if (p)
-		atomic_set(&p->dead, 1);
+		xdev_ext_storfam_mark_dead(&p->family);
 }
 
 static const struct xdev_ext_mech_class_ops nvme_xdev_ext_mech_class = {

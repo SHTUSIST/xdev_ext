@@ -39,16 +39,34 @@ static int alloc_error,map_error,slot_error,recheck_error,claim_error,completion
 static bool namespace_present,allowed,early;
 static unsigned family_capable,family_check,family_arm,claim_calls,publish_calls;
 static blk_opf_t allocation_opf,native_opf;
+#ifdef STORAGE_MEMBER_FAMILY
+static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops;
+static inline int nvme_xdev_ext_capture_identity(struct nvme_ns*,struct nvme_xdev_ext_identity*,const struct nvme_ns_head**,const struct gendisk**,const struct request_queue**);
+#endif
 static struct xdev_ext_stor_completion *active_done;
 static void reset(bool peer){
  memset(&member,0,sizeof(member));memset(&bp,0,sizeof(bp));memset(&host_slot,0,sizeof(host_slot));memset(&peer_slot,0,sizeof(peer_slot));memset(&request,0,sizeof(request));memset(&native,0,sizeof(native));memset(&uapi,0,sizeof(uapi));memset(maps,0,sizeof(maps));
  maps[2].nr_queues=1;tags=(struct blk_mq_tag_set){.nr_maps=3,.map=maps};queue=(struct request_queue){.limits={.features=BLK_FEAT_POLL},.tag_set=&tags,.sectors=1024};hctx=(struct blk_mq_hw_ctx){.type=HCTX_TYPE_POLL,.queue_num=7};request.mq_hctx=&hctx;
- ctrl_ops=(struct nvme_ctrl_ops){.name="pcie",.peer_rw=(void*)(uintptr_t)1};ctrl=(struct nvme_ctrl){.ops=&ctrl_ops,.state=NVME_CTRL_LIVE};head=(struct nvme_ns_head){.lba_shift=9};disk=(struct gendisk){.capacity=4096};ns=(struct nvme_ns){.queue=&queue,.ctrl=&ctrl,.head=&head,.disk=&disk,.flags=1};file.f_mode=FMODE_READ|FMODE_WRITE;
- session=(struct xdev_ext_mech_session){.pool={.kind=peer?XDEV_EXT_MECH_POOL_PEER:0},.layout={.group_bytes=512}};stage=(struct xdev_ext_mech_stage){.priv=&member,.poll=true,.s=&session,.file=&file,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE};peer_res=(struct nvme_xdev_ext_peer_res){.slots=&peer_slot,.nr_slots=1};member.ns=&ns;member.peer=&peer_res;member.slots=&host_slot;member.nr_slots=1;
- batch=(struct xdev_ext_mech_batch){.id=17,.ticket=0x55,.priv=&bp};bp.validated=true;bp.batch_id=17;bp.rw=(struct xdev_ext_stor_rw){.slba=2,.nlb=1,.byte_length=512};host_slot.done.poll_queue=peer_slot.done.poll_queue=91;
+ ctrl_ops=(struct nvme_ctrl_ops){.name="pcie",.peer_rw=(void*)(uintptr_t)1};ctrl=(struct nvme_ctrl){.ops=&ctrl_ops,.state=NVME_CTRL_LIVE};head=(struct nvme_ns_head){.lba_shift=9,.ns_id=4};disk=(struct gendisk){.capacity=4096};ns=(struct nvme_ns){.queue=&queue,.ctrl=&ctrl,.head=&head,.disk=&disk,.flags=1};file.f_mode=FMODE_READ|FMODE_WRITE;
+ session=(struct xdev_ext_mech_session){.pool={.kind=peer?XDEV_EXT_MECH_POOL_PEER:0},.layout={.group_bytes=512}};stage=(struct xdev_ext_mech_stage){.priv=&member,.poll=true,.s=&session,.file=&file,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.arg1=4096};peer_res=(struct nvme_xdev_ext_peer_res){.slots=&peer_slot,.nr_slots=1};member.ns=&ns;member.peer=&peer_res;member.slots=&host_slot;member.nr_slots=1;
+ batch=(struct xdev_ext_mech_batch){.id=17,.ticket=0x55,.priv=&bp};
+#ifdef STORAGE_MEMBER_FAMILY
+ member.family=(struct xdev_ext_stor_stage){.st=&stage,.dev=&nvme_xdev_ext_member_ops,.member=&member};
+ if(nvme_xdev_ext_capture_identity(&ns,&member.identity,&member.head,&member.disk,&member.queue))abort();
+ bp.family.validated=true;bp.family.batch_id=17;bp.family.rw=
+#else
+ bp.validated=true;bp.batch_id=17;bp.rw=
+#endif
+(struct xdev_ext_stor_rw){.slba=2,.nlb=1,.byte_length=512};host_slot.done.poll_queue=peer_slot.done.poll_queue=91;
  nr_events=family_capable=family_check=family_arm=claim_calls=publish_calls=0;alloc_error=map_error=slot_error=recheck_error=claim_error=completion_error=0;namespace_present=allowed=true;early=false;native_opf=UINT32_C(0x80000003);allocation_opf=0;active_done=peer?&peer_slot.done:&host_slot.done;
 }
-void boundary_read(const void *p,size_t n){(void)p;(void)n;}
+void boundary_read(const void *p,size_t n){(void)n;
+#ifdef STORAGE_MEMBER_FAMILY
+ if(p==&ns.head)event(IDENTITY);
+#else
+ (void)p;
+#endif
+}
 void boundary_before_write(const void *p,size_t n,const void *v){if(p==&active_done->poll_live&&n==sizeof(bool)&&*(const bool*)v){event(ARM);EQ("queue-before-live",active_done->poll_queue,7);EQ("batch-before-live",active_done->b==&batch,1);EQ("ticket-before-live",active_done->ticket,0x55);EQ("callback-before-live",request.end_io!=NULL,1);EQ("context-before-live",request.end_io_data==active_done,1);}}
 #define blk_rq_is_poll production_blk_rq_is_poll
 #include "actual_blk_predicate.inc"
@@ -58,24 +76,43 @@ int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch *b,u64 ticke
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch *b,u64 ticket,int status,bool uncertain){event(PUBLISH);publish_calls++;EQ("publish-batch",b==&batch,1);EQ("publish-ticket",ticket,0x55);EQ("publish-status",status,completion_error);EQ("UNKNOWN-keeps-resource",uncertain,completion_error!=0);}
 void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch *b,u64 ticket,int status){(void)b;(void)ticket;(void)status;}
 #include "actual_stor_done.inc"
-static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->layout;}
+const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->layout;}
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s){return &s->pool;}
 static void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b){return b->priv;}
 u32 xdev_ext_mech_batch_bytes(const struct xdev_ext_mech_batch *b){(void)b;return 512;}
-static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->id;}
+u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->id;}
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b){return b->ticket;}
 static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *f){event(NS);EQ("namespace-file",f==&file,1);return namespace_present?&ns:NULL;}
 static bool nvme_xdev_ext_mech_cmd_allowed(struct nvme_ns *n,struct file *f,bool write){(void)n;(void)f;(void)write;event(ALLOW);return allowed;}
+#ifndef STORAGE_MEMBER_FAMILY
 static int nvme_xdev_ext_capture_identity(struct nvme_ns *n,struct nvme_xdev_ext_identity *i,const struct nvme_ns_head **h,const struct gendisk **d,const struct request_queue **q){event(IDENTITY);*i=(struct nvme_xdev_ext_identity){.nsid=4,.lba_shift=9};*h=n->head;*d=n->disk;*q=n->queue;return 0;}
 static int nvme_xdev_ext_mech_bind_window(const struct nvme_xdev_ext_identity *i,bool w,u64 a,u64 b,u32 bytes,struct xdev_ext_stor_window *out){(void)i;(void)w;(void)a;(void)b;(void)bytes;(void)out;event(WINDOW);return 0;}
+#else
+int fixture_window_bind(struct xdev_ext_stor_window *out,u64 capacity,u8 shift,bool write,u64 start,u64 length,u32 bytes)
+{event(WINDOW);return (xdev_ext_stor_window_bind)(out,capacity,shift,write,start,length,bytes);}
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *s,int ret){(void)s;(void)ret;abort();}
+static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,u64 l,u32 bytes,u32 plan,int ret)
+{(void)b;(void)l;(void)bytes;(void)plan;(void)ret;abort();}
+int blk_mq_poll_hw_queue(struct request_queue *q,unsigned index,void *iob)
+{(void)q;(void)index;(void)iob;abort();}
+#define WARN_ON_ONCE(v) (v)
+#define kvfree free
+static void bio_uninit(struct bio *b){(void)b;abort();}
+static void dma_free_coherent(struct device *dev,size_t bytes,void *cpu,dma_addr_t dma)
+{(void)dev;(void)bytes;(void)cpu;(void)dma;abort();}
+#endif
 static void *kzalloc(size_t n,int flags){(void)flags;return calloc(1,n);}
 static void kfree(void *p){free(p);}
 static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st){(void)st;return 0;}
 static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st){(void)st;return 0;}
 static bool nvme_ctrl_sgl_supported(struct nvme_ctrl *c){(void)c;return true;}
+#ifndef STORAGE_MEMBER_FAMILY
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st){(void)st;return recheck_error;}
+#endif
 static blk_opf_t nvme_req_op(struct nvme_command *cmd){(void)cmd;return native_opf;}
+#ifndef STORAGE_MEMBER_FAMILY
 static u32 nvme_xdev_ext_sqe_dw(const u8 *sqe,unsigned n){(void)sqe;(void)n;return 0;}
+#endif
 static struct nvme_request *nvme_req(struct request *r){EQ("native-rq-identity",r==&request,1);return &native;}
 static struct request *blk_mq_alloc_request(struct request_queue *q,blk_opf_t opf,unsigned flags){event(ALLOC);EQ("allocation-queue",q==&queue,1);EQ("NOWAIT-preserved",flags,BLK_MQ_REQ_NOWAIT);allocation_opf=opf;request.cmd_flags=opf;return alloc_error?ERR_PTR(alloc_error):&request;}
 static void blk_mq_free_request(struct request *r){event(FREE);EQ("free-rq",r==&request,1);}
@@ -86,7 +123,9 @@ static void nvme_xdev_ext_class_slot_put(struct xdev_ext_mech_stage *s,struct nv
 static void nvme_xdev_ext_peer_slot_put(struct nvme_xdev_ext_peer_res *p,struct nvme_xdev_ext_mech_batch *b){(void)p;(void)b;event(PUT);}
 static int nvme_xdev_ext_class_map(struct xdev_ext_mech_stage *s,struct xdev_ext_mech_batch *b,struct request *r,struct nvme_xdev_ext_mech_batch *private){(void)s;(void)b;event(MAP);private->bio=(void*)(uintptr_t)0x1000;r->bio=private->bio;r->bytes=512;return map_error;}
 static int nvme_xdev_ext_peer_map(struct xdev_ext_mech_stage *s,struct xdev_ext_mech_batch *b,struct nvme_xdev_ext_peer_slot *slot,u32 bytes,struct nvme_command *c){(void)s;(void)b;(void)slot;(void)bytes;(void)c;event(MAP);return map_error;}
+#ifndef STORAGE_MEMBER_FAMILY
 static void nvme_xdev_ext_mech_cqe(int status,u64 result,struct xdev_ext_nvme_mech_cqe *c){c->err=status;c->result=result;}
+#endif
 static void xdev_ext_mech_trace_native_submit(struct xdev_ext_mech_batch *b,u64 cookie,u64 slba,u32 bytes,u32 desc){(void)cookie;(void)slba;(void)bytes;(void)desc;event(TRACE);EQ("trace-batch",b==&batch,1);EQ("live-before-trace",active_done->poll_live,stage.poll);EQ("callback-before-trace",request.end_io!=NULL,1);}
 static void blk_execute_rq_nowait(struct request *r,bool at_head){event(EXEC);EQ("execute-at-head",at_head,0);EQ("execute-rq",r==&request,1);EQ("envelope-batch",active_done->b==&batch,1);EQ("envelope-ticket",active_done->ticket,0x55);EQ("envelope-end_io_data",r->end_io_data==active_done,1);EQ("live-before-execute",active_done->poll_live,stage.poll);if(early){native.status=completion_error;EQ("real-end_io-free",r->end_io(r,completion_error),RQ_END_IO_FREE);memset(r,0xa5,sizeof(*r));}}
 #ifdef POLL_NEW
@@ -98,6 +137,7 @@ int __wrap_xdev_ext_stor_block_poll_check(bool poll,struct request *r){family_ch
 void __wrap_xdev_ext_stor_block_poll_arm(bool poll,struct request *r,struct xdev_ext_stor_completion *d){family_arm++;__real_xdev_ext_stor_block_poll_arm(poll,r,d);}
 #endif
 #include "actual_old_poll.inc"
+#include "actual_member_callbacks.inc"
 #include "nvme_xdev_ext_class_bind.inc"
 #include "nvme_xdev_ext_class_complete.inc"
 #include "nvme_xdev_ext_class_ready.inc"

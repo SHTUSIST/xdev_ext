@@ -10,7 +10,10 @@ import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[3]
+ROOT = next(p for p in HERE.parents if (p / 'source-layout.json').is_file())
+HELPERS = runpy.run_path(str(ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
+def native(path):
+    return HELPERS['read_native'](ROOT, path)
 
 
 def declaration(source, name, struct=False):
@@ -27,7 +30,7 @@ def declaration(source, name, struct=False):
 class NvmePool(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        source = (ROOT / 'drivers/nvme/host/xdev_ext_mech_nvme.c').read_text()
+        source = native('drivers/nvme/host/xdev_ext_mech_nvme.c')
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-nvme-pool-')
         cls.addClassCleanup(cls.temp.cleanup)
         fixture = (HERE / 'xdev_ext_mech_nvme_pool_fixture.c').read_text()
@@ -46,7 +49,7 @@ class NvmePool(unittest.TestCase):
         dependencies = ''
         if 'xdev_ext_stor_block_preflight(' in source:
             functions.remove('nvme_xdev_ext_class_walk')
-            block = (ROOT / 'io_uring/family/xdev_ext_storfam_block.c').read_text()
+            block = native('io_uring/family/xdev_ext_storfam_block.c')
             dependencies += '\n\n'.join(declaration(block, name) for name in (
                 'xdev_ext_stor_block_caps', 'xdev_ext_stor_block_walk',
                 'xdev_ext_stor_block_preflight', 'xdev_ext_stor_block_append'))
@@ -64,17 +67,19 @@ static unsigned queue_max_hw_sectors(struct request_queue *q) { (void)q; return 
             start = fixture.index('static struct nvme_xdev_ext_queue_caps nvme_xdev_ext_class_caps(')
             end = fixture.index('\nstatic int nvme_xdev_ext_class_bounce(', start)
             fixture = fixture[:start] + external + fixture[end:]
-            fixture = fixture.replace('.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}',
-                                      '.identity={.lba_shift=9},\n  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}')
         if 'xdev_ext_stor_block_poll_opf(' in source:
             functions = [name for name in functions if not name.startswith('nvme_xdev_ext_poll_')]
-            helper = ROOT / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
+            helper = ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'
             dependencies += '\n\n' + runpy.run_path(str(helper))['storage_poll_runtime'](ROOT)
         functions = storage_runtime(ROOT) + '\n\n' + dependencies + '\n\n' + '\n\n'.join(
             declaration(source, name) for name in functions)
+        if 'struct xdev_ext_stor_stage family;' in source:
+            fixture = fixture.replace('/* IDENTITY_OS_TYPES */', HELPERS['identity_boundary']())
+            fixture = fixture.replace('/* FAMILY_TYPES */', HELPERS['family_types'](ROOT))
+            functions = HELPERS['worker_runtime'](ROOT, source) + '\n' + HELPERS['worker_fixture_init']() + '\n' + functions
         fixture = fixture.replace('/* PRODUCTION_TYPES */', definitions)
         fixture = fixture.replace('/* PRODUCTION_FUNCTIONS */', functions)
-        block = (ROOT / 'block/blk-mq.c').read_text()
+        block = native('block/blk-mq.c')
         fixture = fixture.replace('/* BLOCK_BATCH_COMPLETION */',
                                   declaration(block, 'blk_complete_request'))
         fixture = fixture.replace('/* POOL_INIT */',
@@ -87,10 +92,10 @@ static unsigned queue_max_hw_sectors(struct request_queue *q) { (void)q; return 
         (path / 'probe.c').write_text(fixture)
         cls.probe = path / 'probe'
         command = [os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-g',
-                   '-Wall', '-Wextra', '-Werror', '-Wno-unused-function',
+                   '-Wall', '-Wextra', '-Werror', '-Wno-unused-parameter', '-Wno-unused-function',
                    '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
                    ('-DCONFIG_XDEV_EXT_MECH_KVM_BOUNCE' if getattr(cls, 'bounce', False)
-                    else '-DCONFIG_XDEV_EXT_MECH_ZEROCOPY'), '-I' + str(ROOT),
+                    else '-DCONFIG_XDEV_EXT_MECH_ZEROCOPY'), '-I' + str(HELPERS['host_headers'](ROOT, path / 'headers')),
                    str(path / 'probe.c'), '-o', str(cls.probe)]
         subprocess.run(command, check=True)
 
@@ -178,7 +183,7 @@ static unsigned queue_max_hw_sectors(struct request_queue *q) { (void)q; return 
 
 
 def storage_runtime(root):
-    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    content = HELPERS['read_native'](root, 'io_uring/family/xdev_ext_storfam.c')
     found = []
     for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                  'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):

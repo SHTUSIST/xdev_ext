@@ -7,6 +7,12 @@ from pathlib import Path
 import os
 import re
 import sys
+import runpy
+_CANONICAL = next(p for p in Path(__file__).resolve().parents if (p / "source-layout.json").is_file())
+_HELPERS = runpy.run_path(str(_CANONICAL / "tests/integration/peer_graph/nvme_peer_async_test.py"))
+
+def read_native(root, name):
+    return _HELPERS["read_native"](root, name)
 
 
 def require(condition: bool, message: str) -> None:
@@ -187,20 +193,27 @@ CLASS_BLOCK_CALLS = {
 def check_mech_class(source: str, root: Path) -> str:
     """The NVMe class of the mechanism layer: plan 2.5 W-NVME, 2.6, CHK.8."""
     host = root / "drivers/nvme/host"
-    makefile = (host / "Makefile").read_text()
+    makefile = read_native(root, "drivers/nvme/host/Makefile")
     require(re.search(r"^nvme-core-\$\(CONFIG_XDEV_EXT_MECH\)\s*\+= xdev_ext_mech_nvme\.o$",
                       makefile, re.M) is not None,
             "xdev_ext_mech_nvme.o is not part of nvme-core under CONFIG_XDEV_EXT_MECH")
-    core = (host / "core.c").read_text()
+    core = read_native(root, "drivers/nvme/host/core.c")
     require(in_order(function_body(core, "static int __init nvme_core_init("),
                      "nvme_init_auth()", "nvme_xdev_ext_mech_init();", "return 0;"),
             "the class is not registered from nvme-core init")
     exit_body = function_body(core, "static void __exit nvme_core_exit(")
     require(exit_body.lstrip().startswith("nvme_xdev_ext_mech_exit();"),
             "the class is not unregistered first at nvme-core exit")
-    require("static int nvme_xdev_ext_capture_identity(" not in source and
-            "\nint nvme_xdev_ext_capture_identity(" in source,
-            "nvme_xdev_ext_capture_identity is not shared inside nvme-core")
+    if "\nint nvme_xdev_ext_capture_identity(" in source:
+        require("static int nvme_xdev_ext_capture_identity(" not in source and
+                "\nint nvme_xdev_ext_capture_identity(" in source,
+                "nvme_xdev_ext_capture_identity is not shared inside nvme-core")
+    else:
+        nvme_header = read_native(root, "drivers/nvme/host/nvme.h")
+        require(nvme_header.count("static inline int nvme_xdev_ext_capture_identity(") == 1 and
+                "nvme_xdev_ext_capture_identity(" in source and
+                '#include "nvme.h"' in source,
+                "native identity capture must have one shared nvme.h definition and a real ioctl consumer")
 
     build = function_body(source, "\nnvme_xdev_ext_build(struct io_uring_cmd")
     require(in_order(build, "nvme_xdev_ext_mech_stage_matches(st, ns, id)",
@@ -211,7 +224,7 @@ def check_mech_class(source: str, root: Path) -> str:
     require("nvme_xdev_ext_mech_fill_info(st, NULL, &info)" in complete,
             "the completion callback gets no class information")
 
-    mech = (host / "xdev_ext_mech_nvme.c").read_text()
+    mech = read_native(root, "drivers/nvme/host/xdev_ext_mech_nvme.c")
     for needle in (".class_id = XDEV_EXT_MECH_CLASS_NVME",
                    ".desc_size = NVME_XDEV_EXT_SQE_SIZE", ".desc_cap = 1",
                    ".info_size = sizeof(struct xdev_ext_nvme_mech_info)",
@@ -224,55 +237,135 @@ def check_mech_class(source: str, root: Path) -> str:
             "xdev_ext_mech_class_unregister(&nvme_xdev_ext_mech_class)" in mech,
             "class registration is missing")
 
-    bind = function_body(mech, "static int nvme_xdev_ext_class_bind(")
-    require(in_order(bind, "FMODE_WRITE", "nvme_xdev_ext_mech_cmd_allowed(",
-                     "nvme_xdev_ext_capture_identity(", "nvme_xdev_ext_mech_bind_window(",
-                     "nvme_xdev_ext_class_resources_init(st)"),
-            "bind: write access, passthrough permission, identity, window")
-    require(re.search(r"struct nvme_xdev_ext_mech_stage\s*\{[^}]*"
-                      r"struct xdev_ext_stor_window window;", mech, re.S) is not None,
-            "stage must retain the typed immutable storage window")
-    require(re.search(r"nvme_xdev_ext_mech_bind_window\(&p->identity,\s*write,\s*"
-                      r"st->arg0,\s*st->arg1,\s*l->group_bytes,\s*&p->window\)", bind) is not None,
-            "bind must construct the typed window from identity and both stage bounds")
-    window_tail = bind[bind.index("nvme_xdev_ext_mech_bind_window("):bind.index("st->priv = p;")]
-    require(in_order(window_tail, "&p->window)", "if (ret)", "kfree(p);", "return ret;"),
-            "window admission failure must unwind before resources are initialized")
-    info = function_body(mech, "void nvme_xdev_ext_mech_fill_info(")
-    for field, bound in (("window_slba", "slba"), ("window_nlb", "nlb"),
-                         ("capacity_lbas", "capacity_lbas"), ("lba_shift", "lba_shift")):
-        require(f"info->{field} = p->window.{bound};" in info,
-                f"class information must export typed window {bound}")
-    validate = function_body(mech, "static int nvme_xdev_ext_class_validate(")
-    require(in_order(validate, "if (n != 1)", "nvme_xdev_ext_mech_validate(",
-                     "bp->validated = true"),
-            "validate: exactly one slot through nvme_xdev_ext_mech_validate")
+    family = "struct xdev_ext_stor_stage family;" in mech
+    if family:
+        runtime_block = read_native(root, "io_uring/family/xdev_ext_storfam_block.c")
+        block_header = read_native(root, "include/linux/xdev_ext_storfam_block.h")
+        adapter_bind = function_body(mech, "static int nvme_xdev_ext_class_bind(")
+        native_bind = function_body(mech, "static int nvme_xdev_ext_member_bind(")
+        common_bind = function_body(runtime_block, "int xdev_ext_storfam_bind(")
+        identity = function_body(mech, "static int nvme_xdev_ext_member_identity(")
+        require(in_order(native_bind, "FMODE_WRITE", "nvme_xdev_ext_mech_cmd_allowed(", "kzalloc("),
+                "native fd/effects authorization must precede member allocation")
+        require(in_order(adapter_bind, "xdev_ext_storfam_bind(st, u, &nvme_xdev_ext_member_ops)",
+                         "if (ret)", "nvme_xdev_ext_class_resources_init(st)"),
+                "class resources must follow successful common bind")
+        require(in_order(common_bind, "dev->bind(st, u, &ss, &member)",
+                         "dev->identity(member, false, &ss->geometry)", "xdev_ext_stor_window_bind(",
+                         "dev->unbind(member)", "st->priv = member") and
+                in_order(common_bind[common_bind.index("ret = dev->identity"):], "xdev_ext_stor_window_bind(",
+                         "if (ret)", "dev->unbind(member)", "return ret;", "st->priv = member"),
+                "identity/window admission must unwind before publication and resources")
+        require(in_order(identity, "if (!final)", "nvme_xdev_ext_capture_identity(p->ns, &p->identity",
+                         "nvme_xdev_ext_mech_bind_identity(&p->identity, p->write,"),
+                "CREATE identity capture and native bind authority must precede common window construction")
+        require("struct xdev_ext_stor_stage family;" in mech and
+                "struct xdev_ext_stor_window window;" in block_header,
+                "native stage must retain its typed immutable window through the embedded family stage")
+        require(in_order(common_bind, "ss->geometry.capacity_lbas, ss->geometry.lba_shift",
+                         "st->arg0, st->arg1", "xdev_ext_mech_session_layout(st->s)->group_bytes"),
+                "common bind must construct typed window from identity geometry and both stage bounds")
+        info = function_body(mech, "void nvme_xdev_ext_mech_fill_info(")
+        for field, bound in (("window_slba", "slba"), ("window_nlb", "nlb"),
+                             ("capacity_lbas", "capacity_lbas"), ("lba_shift", "lba_shift")):
+            require(f"info->{field} = p->family.window.{bound};" in info,
+                    f"class information must export typed window {bound}")
+        validate = function_body(mech, "static int nvme_xdev_ext_class_validate(")
+        common_validate = function_body(runtime_block, "int xdev_ext_storfam_validate(")
+        decode = function_body(mech, "static int nvme_xdev_ext_member_decode(")
+        require("xdev_ext_storfam_validate(&p->family, b, &bp->family, scratch, n)" in validate and
+                in_order(common_validate, "sb->validated = false", "if (nr_slots != 1)",
+                         "ss->dev->decode(", "sb->validated = true") and
+                "nvme_xdev_ext_mech_validate(scratch, &bounds, &decoded)" in decode,
+                "exactly one slot must consume the actual native schema/window decode before validation publishes")
+        submit = function_body(mech, "static int nvme_xdev_ext_class_submit(")
+        submit_check = function_body(runtime_block, "int xdev_ext_storfam_submit_check(")
+        require(in_order(submit, "xdev_ext_storfam_submit_check(&p->family, b, &bp->family)",
+                         "blk_mq_alloc_request(", "nvme_init_request(", "nvme_xdev_ext_class_map(",
+                         "req->end_io = ", "req->end_io_data = done;", "blk_execute_rq_nowait(req, false);"),
+                "submit: common recheck, request, bio, end_io, then execute")
+        require(in_order(submit_check, "atomic_read(&ss->dead)", "!sb->validated",
+                         "sb->batch_id != xdev_ext_mech_batch_id(batch)",
+                         "ss->dev->identity(ss->member, true, &ss->geometry)"),
+                "worker gate must preserve dead, validation/batch identity and native final identity order")
+        tail = submit.split("blk_execute_rq_nowait(req, false);", 1)[1]
+        require(tail.strip() == "return 0;", "nothing may touch the batch after blk_execute_rq_nowait()")
+        require(in_order(identity, "nvme_xdev_ext_capture_identity(p->ns, &id", "head != p->head",
+                         "disk != p->disk", "queue != p->queue", "nvme_xdev_ext_identity_equal(",
+                         "xdev_ext_mech_stage_dead(p->family.st, ret)"),
+                "worker native identity hook must retain pointer/value recheck and stage-dead error path")
+        table = mech[mech.index("static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops ="):]
+        table = table[:table.index("};")]
+        for hook in ("bind", "unbind", "identity", "requester", "queue", "decode", "poll"):
+            require(f".{hook} = nvme_xdev_ext_member_{hook}," in table,
+                    f"common runtime must consume real native {hook} hook")
+    else:
+        bind = function_body(mech, "static int nvme_xdev_ext_class_bind(")
+        require(in_order(bind, "FMODE_WRITE", "nvme_xdev_ext_mech_cmd_allowed(",
+                         "nvme_xdev_ext_capture_identity(", "nvme_xdev_ext_mech_bind_window(",
+                         "nvme_xdev_ext_class_resources_init(st)"),
+                "bind: write access, passthrough permission, identity, window")
+        require(re.search(r"struct nvme_xdev_ext_mech_stage\s*\{[^}]*"
+                          r"struct xdev_ext_stor_window window;", mech, re.S) is not None,
+                "stage must retain the typed immutable storage window")
+        require(re.search(r"nvme_xdev_ext_mech_bind_window\(&p->identity,\s*write,\s*"
+                          r"st->arg0,\s*st->arg1,\s*l->group_bytes,\s*&p->window\)", bind) is not None,
+                "bind must construct the typed window from identity and both stage bounds")
+        window_tail = bind[bind.index("nvme_xdev_ext_mech_bind_window("):bind.index("st->priv = p;")]
+        require(in_order(window_tail, "&p->window)", "if (ret)", "kfree(p);", "return ret;"),
+                "window admission failure must unwind before resources are initialized")
+        info = function_body(mech, "void nvme_xdev_ext_mech_fill_info(")
+        for field, bound in (("window_slba", "slba"), ("window_nlb", "nlb"),
+                             ("capacity_lbas", "capacity_lbas"), ("lba_shift", "lba_shift")):
+            require(f"info->{field} = p->window.{bound};" in info,
+                    f"class information must export typed window {bound}")
+        validate = function_body(mech, "static int nvme_xdev_ext_class_validate(")
+        require(in_order(validate, "if (n != 1)", "nvme_xdev_ext_mech_validate(",
+                         "bp->validated = true"),
+                "validate: exactly one slot through nvme_xdev_ext_mech_validate")
 
-    submit = function_body(mech, "static int nvme_xdev_ext_class_submit(")
-    require(in_order(submit, "bp->validated", "nvme_xdev_ext_class_recheck(st)",
-                     "blk_mq_alloc_request(", "nvme_init_request(",
-                     "nvme_xdev_ext_class_map(", "req->end_io = ",
-                     "req->end_io_data = done;",
-                     "blk_execute_rq_nowait(req, false);"),
-            "submit: recheck, request, bio, end_io, then execute")
-    tail = submit.split("blk_execute_rq_nowait(req, false);", 1)[1]
-    require(tail.strip() == "return 0;",
-            "nothing may touch the batch after blk_execute_rq_nowait()")
-    recheck = function_body(mech, "static int nvme_xdev_ext_class_recheck(")
-    require(in_order(recheck, "nvme_xdev_ext_capture_identity(",
-                     "nvme_xdev_ext_identity_equal(", "xdev_ext_mech_stage_dead(st, ret)"),
-            "the worker does not recheck the namespace identity")
+        submit = function_body(mech, "static int nvme_xdev_ext_class_submit(")
+        require(in_order(submit, "bp->validated", "nvme_xdev_ext_class_recheck(st)",
+                         "blk_mq_alloc_request(", "nvme_init_request(",
+                         "nvme_xdev_ext_class_map(", "req->end_io = ",
+                         "req->end_io_data = done;",
+                         "blk_execute_rq_nowait(req, false);"),
+                "submit: recheck, request, bio, end_io, then execute")
+        tail = submit.split("blk_execute_rq_nowait(req, false);", 1)[1]
+        require(tail.strip() == "return 0;",
+                "nothing may touch the batch after blk_execute_rq_nowait()")
+        recheck = function_body(mech, "static int nvme_xdev_ext_class_recheck(")
+        require(in_order(recheck, "nvme_xdev_ext_capture_identity(",
+                         "nvme_xdev_ext_identity_equal(", "xdev_ext_mech_stage_dead(st, ret)"),
+                "the worker does not recheck the namespace identity")
 
     mapping = function_body(mech, "static int nvme_xdev_ext_class_map(")
-    require(in_order(mapping, "nvme_xdev_ext_seg_walk_init(",
-                     "nvme_xdev_ext_seg_done(", "bio = bp->slot->bio;", "bio_init(",
-                     "blk_rq_append_bio(", "if (ret != -EREMOTEIO)",
-                     "nvme_xdev_ext_class_bounce("),
-            "map: precheck, bio from frames, fail closed before any bounce")
-    walk = function_body(mech, "static int nvme_xdev_ext_class_walk(")
-    require(in_order(walk, "xdev_ext_mech_batch_frame(", "xdev_ext_mech_frame_page(",
-                     "bio_add_page(", "nvme_xdev_ext_seg_add("),
-            "the bio is not built page by page from the batch frames")
+    if "xdev_ext_stor_block_preflight(" in mapping:
+        block = read_native(root, "io_uring/family/xdev_ext_storfam_block.c")
+        require(in_order(mapping, "xdev_ext_stor_block_caps(", "xdev_ext_stor_block_preflight(",
+                         "bio = bp->slot->bio;", "bio_init(", "xdev_ext_stor_block_append(",
+                         "if (ret != -EREMOTEIO)", "nvme_xdev_ext_class_bounce("),
+                "map: actual common precheck/append, fixture-owned bio, fail closed before bounce")
+        preflight = function_body(block, "int xdev_ext_stor_block_preflight(")
+        require(in_order(preflight, "xdev_ext_stor_seg_walk_init(", "xdev_ext_stor_block_walk(",
+                         "xdev_ext_stor_seg_done("), "common payload preflight must consume the segment validator")
+        walk = function_body(block, "static int xdev_ext_stor_block_walk(")
+        require(in_order(walk, "xdev_ext_mech_batch_frame(", "xdev_ext_mech_frame_page(",
+                         "bio_add_page(", "xdev_ext_stor_seg_add("),
+                "common bio append must build page by page from actual batch frames")
+        append = function_body(block, "int xdev_ext_stor_block_append(")
+        require(in_order(append, "xdev_ext_stor_block_walk(", "blk_rq_append_bio("),
+                "common append must hand the actual frame bio to block")
+    else:
+        require(in_order(mapping, "nvme_xdev_ext_seg_walk_init(",
+                         "nvme_xdev_ext_seg_done(", "bio = bp->slot->bio;", "bio_init(",
+                         "blk_rq_append_bio(", "if (ret != -EREMOTEIO)",
+                         "nvme_xdev_ext_class_bounce("),
+                "map: precheck, bio from frames, fail closed before any bounce")
+        walk = function_body(mech, "static int nvme_xdev_ext_class_walk(")
+        require(in_order(walk, "xdev_ext_mech_batch_frame(", "xdev_ext_mech_frame_page(",
+                         "bio_add_page(", "nvme_xdev_ext_seg_add("),
+                "the bio is not built page by page from the batch frames")
 
     resources = function_body(mech, "static int nvme_xdev_ext_class_resources_init(")
     require(in_order(resources, "xdev_ext_mech_session_depth(", "kcalloc(", "bio_kmalloc("),
@@ -282,7 +375,7 @@ def check_mech_class(source: str, root: Path) -> str:
                 "kmalloc(" not in hot,
                 "the session hot path must not allocate bio/completion metadata")
     end_io = function_body(mech, "static enum rq_end_io_ret nvme_xdev_ext_class_end_io(")
-    runtime = (root / "io_uring/family/xdev_ext_storfam.c").read_text()
+    runtime = read_native(root, "io_uring/family/xdev_ext_storfam.c")
     handoff = function_body(runtime, "void xdev_ext_stor_done(")
     complete = function_body(mech, "static int nvme_xdev_ext_class_complete(")
     require("xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req," in end_io,
@@ -313,7 +406,7 @@ def check_mech_class(source: str, root: Path) -> str:
     calls = set(re.findall(r"\b((?:__)?(?:blk|bio)_\w+)\s*\(", mech))
     require(calls <= CLASS_BLOCK_CALLS,
             f"unexported or bouncing block calls: {sorted(calls - CLASS_BLOCK_CALLS)}")
-    blk_mq = (root / "block/blk-mq.c").read_text()
+    blk_mq = read_native(root, "block/blk-mq.c")
     for name in ("blk_rq_is_poll", "blk_mq_poll_hw_queue"):
         require(f"EXPORT_SYMBOL_GPL({name});" in blk_mq,
                 f"nvme-core calls {name}, which block/blk-mq.c must export")
@@ -334,13 +427,13 @@ def main() -> int:
     candidates.extend(Path(__file__).resolve().parents)
     root = next(
         (candidate for candidate in candidates
-         if (candidate / "drivers/nvme/host/ioctl.c").is_file()),
+         if (candidate / "drivers/nvme/host/ioctl.c").is_file() or (candidate / "source-layout.json").is_file()),
         None,
     )
     if root is None:
         print("ok 1 - source tree unavailable # SKIP")
         return 4
-    source = (root / "drivers/nvme/host/ioctl.c").read_text()
+    source = read_native(root, "drivers/nvme/host/ioctl.c")
 
     checks = (check_fixed_vector, check_build_order,
               lambda text: check_mech_class(text, root))

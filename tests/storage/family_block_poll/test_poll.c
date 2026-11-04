@@ -23,7 +23,19 @@ static unsigned claim_calls,complete_calls,publish_calls,helper_checks,write_cal
 static struct xdev_ext_stor_completion *observed_done,*callback_done;
 static u32 published_queue;
 static unsigned family_polls;
-static void reset(void){memset(host,0,sizeof(host));memset(peer,0,sizeof(peer));memset(answers,0,sizeof(answers));memset(called,0,sizeof(called));memset(&member,0,sizeof(member));memset(maps,0,sizeof(maps));tags=(struct blk_mq_tag_set){.nr_maps=3,.map=maps};maps[2].nr_queues=1;queue=(struct request_queue){.limits={.features=BLK_FEAT_POLL},.tag_set=&tags};ns.queue=&queue;peer_res=(struct nvme_xdev_ext_peer_res){.slots=peer,.nr_slots=0};member=(struct nvme_xdev_ext_mech_stage){.ns=&ns,.slots=host,.nr_slots=0,.peer=&peer_res};stage=(struct xdev_ext_mech_stage){.priv=&member,.poll=true};batch=(struct xdev_ext_mech_batch){.id=17,.ticket=0x55};nr_called=claim_calls=complete_calls=publish_calls=helper_checks=write_calls=live_published=family_polls=0;claim_error=0;observed_done=callback_done=NULL;published_queue=7;}
+#ifdef STORAGE_MEMBER_FAMILY
+static const struct xdev_ext_stor_dev_ops fixture_poll_ops;
+/* This fixture bypasses CREATE; install borrowed views at resource injection,
+ * never immediately before a production poll or between repeated polls. */
+static void fixture_install_views(void){
+ member.family.st=&stage;member.family.dev=&fixture_poll_ops;member.family.member=&member;
+ member.family.poll_views[0]=(struct xdev_ext_stor_poll_view){.first=member.nr_slots?&host[0].done:NULL,.stride=sizeof(host[0]),.count=member.nr_slots};
+ member.family.poll_views[1]=(struct xdev_ext_stor_poll_view){.first=member.peer&&member.peer->nr_slots?&peer[0].done:NULL,.stride=sizeof(peer[0]),.count=member.peer?member.peer->nr_slots:0};
+}
+#else
+static void fixture_install_views(void){}
+#endif
+static void reset(void){memset(host,0,sizeof(host));memset(peer,0,sizeof(peer));memset(answers,0,sizeof(answers));memset(called,0,sizeof(called));memset(&member,0,sizeof(member));memset(maps,0,sizeof(maps));tags=(struct blk_mq_tag_set){.nr_maps=3,.map=maps};maps[2].nr_queues=1;queue=(struct request_queue){.limits={.features=BLK_FEAT_POLL},.tag_set=&tags};ns.queue=&queue;peer_res=(struct nvme_xdev_ext_peer_res){.slots=peer,.nr_slots=0};member=(struct nvme_xdev_ext_mech_stage){.ns=&ns,.slots=host,.nr_slots=0,.peer=&peer_res};stage=(struct xdev_ext_mech_stage){.priv=&member,.poll=true};batch=(struct xdev_ext_mech_batch){.id=17,.ticket=0x55};nr_called=claim_calls=complete_calls=publish_calls=helper_checks=write_calls=live_published=family_polls=0;claim_error=0;observed_done=callback_done=NULL;published_queue=7;fixture_install_views();}
 void boundary_read(const void *p,size_t n){(void)p;(void)n;}
 void boundary_before_write(const void *p,size_t n,const void *v){
  if(observed_done&&p==&observed_done->poll_live&&n==sizeof(bool)){write_calls++;if(*(const bool*)v){live_published++;EQ("queue-before-live-publication",observed_done->poll_queue,published_queue);EQ("batch-before-publication",observed_done->b==&batch,1);EQ("ticket-before-publication",observed_done->ticket,0x55);}}
@@ -80,7 +92,7 @@ static void decisions(void){
  label="arm-false-preserves-envelope";reset();struct xdev_ext_stor_completion d={.b=&batch,.ticket=0x55,.uncertain=true,.poll_live=true,.poll_queue=91};observed_done=&d;arm(false,NULL,&d);EQ("live-cleared",d.poll_live,0);EQ("queue-preserved",d.poll_queue,91);EQ("batch-preserved",d.b==&batch,1);EQ("ticket-preserved",d.ticket,0x55);EQ("uncertain-preserved",d.uncertain,1);EQ("one-live-write",write_calls,1);
  label="arm-true-publication";write_calls=0;h.type=HCTX_TYPE_POLL;h.queue_num=7;r.mq_hctx=&h;arm(true,&r,&d);EQ("queue7",d.poll_queue,7);EQ("live",d.poll_live,1);EQ("live-published-once",live_published,1);EQ("write-once",write_calls,1);EQ("uncertain-unchanged",d.uncertain,1);
 }
-static void populate(void){member.nr_slots=3;peer_res.nr_slots=2;const unsigned h[]={7,7,8},p[]={8,9};for(unsigned i=0;i<3;i++)host[i].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=h[i]};for(unsigned i=0;i<2;i++)peer[i].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=p[i]};}
+static void populate(void){member.nr_slots=3;peer_res.nr_slots=2;const unsigned h[]={7,7,8},p[]={8,9};for(unsigned i=0;i<3;i++)host[i].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=h[i]};for(unsigned i=0;i<2;i++)peer[i].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=p[i]};fixture_install_views();}
 static void views(void){
  label="merged-two-layouts";reset();populate();answers[0]=2;answers[1]=-5;answers[2]=3;EQ("result5",nvme_xdev_ext_class_poll(&stage),5);EQ("three-native-polls",nr_called,3);EQ("queue-order0",called[0],7);EQ("queue-order1",called[1],8);EQ("queue-order2",called[2],9);
 #ifdef POLL_NEW
@@ -88,11 +100,11 @@ static void views(void){
 #endif
  nr_called=0;EQ("fresh-per-call-seen",nvme_xdev_ext_class_poll(&stage),5);EQ("same-three-polls",nr_called,3);
  label="first-zero-still-deduplicates";nr_called=0;answers[0]=0;answers[1]=-5;answers[2]=3;EQ("result3",nvme_xdev_ext_class_poll(&stage),3);EQ("record-before-native-result",nr_called,3);
- label="inactive-poison-and-empty";reset();member.nr_slots=1;host[0].done.poll_queue=0xdeadbeefU;member.peer=NULL;EQ("no-live-result",nvme_xdev_ext_class_poll(&stage),0);EQ("no-native-poll",nr_called,0);member.slots=NULL;member.nr_slots=0;EQ("empty-NULL-arrays",nvme_xdev_ext_class_poll(&stage),0);
- label="seen64-tail-continues";reset();member.nr_slots=64;peer_res.nr_slots=5;for(unsigned i=0;i<64;i++)host[i].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=i};const unsigned tail[]={0,64,64,1,65};for(unsigned i=0;i<5;i++)peer[i].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=tail[i]};for(unsigned i=0;i<256;i++)answers[i]=1;EQ("literal-result67",nvme_xdev_ext_class_poll(&stage),67);EQ("literal-call-count67",nr_called,67);for(unsigned i=0;i<64;i++)EQ("first64-order",called[i],i);EQ("tail64-first",called[64],64);EQ("tail64-repeat",called[65],64);EQ("tail65",called[66],65);
+ label="inactive-poison-and-empty";reset();member.nr_slots=1;host[0].done.poll_queue=0xdeadbeefU;member.peer=NULL;fixture_install_views();EQ("no-live-result",nvme_xdev_ext_class_poll(&stage),0);EQ("no-native-poll",nr_called,0);member.slots=NULL;member.nr_slots=0;fixture_install_views();EQ("empty-NULL-arrays",nvme_xdev_ext_class_poll(&stage),0);
+ label="seen64-tail-continues";reset();member.nr_slots=64;peer_res.nr_slots=5;for(unsigned i=0;i<64;i++)host[i].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=i};const unsigned tail[]={0,64,64,1,65};for(unsigned i=0;i<5;i++)peer[i].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=tail[i]};for(unsigned i=0;i<256;i++)answers[i]=1;fixture_install_views();EQ("literal-result67",nvme_xdev_ext_class_poll(&stage),67);EQ("literal-call-count67",nr_called,67);for(unsigned i=0;i<64;i++)EQ("first64-order",called[i],i);EQ("tail64-first",called[64],64);EQ("tail64-repeat",called[65],64);EQ("tail65",called[66],65);
 }
 static void callbacks(void){
- const int errors[]={0,-EALREADY,-ESTALE};for(unsigned i=0;i<3;i++){label="actual-stor-done-sync-poll";reset();member.nr_slots=1;host[0].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=7};callback_done=&host[0].done;claim_error=errors[i];answers[0]=1;EQ("first-poll",nvme_xdev_ext_class_poll(&stage),1);EQ("live-cleared-even-rejected-claim",callback_done->poll_live,0);EQ("claim-once",claim_calls,1);EQ("complete-only-valid-claim",complete_calls,errors[i]?0:1);EQ("publish-only-valid-claim",publish_calls,errors[i]?0:1);unsigned before=nr_called;EQ("next-poll-skip",nvme_xdev_ext_class_poll(&stage),0);EQ("no-extra-native-poll",nr_called,before);}
+ const int errors[]={0,-EALREADY,-ESTALE};for(unsigned i=0;i<3;i++){label="actual-stor-done-sync-poll";reset();member.nr_slots=1;host[0].done=(struct xdev_ext_stor_completion){.b=&batch,.ticket=0x55,.poll_live=true,.poll_queue=7};callback_done=&host[0].done;claim_error=errors[i];answers[0]=1;fixture_install_views();EQ("first-poll",nvme_xdev_ext_class_poll(&stage),1);EQ("live-cleared-even-rejected-claim",callback_done->poll_live,0);EQ("claim-once",claim_calls,1);EQ("complete-only-valid-claim",complete_calls,errors[i]?0:1);EQ("publish-only-valid-claim",publish_calls,errors[i]?0:1);unsigned before=nr_called;EQ("next-poll-skip",nvme_xdev_ext_class_poll(&stage),0);EQ("no-extra-native-poll",nr_called,before);}
 #ifdef POLL_NEW
  label="direct-zero-view-runtime";reset();EQ("zero-views",__real_xdev_ext_stor_block_poll(&queue,NULL,0),0);struct xdev_ext_stor_poll_view v={.first=NULL,.stride=64,.count=0};EQ("empty-view",__real_xdev_ext_stor_block_poll(&queue,&v,1),0);EQ("no-poll",nr_called,0);
 #endif

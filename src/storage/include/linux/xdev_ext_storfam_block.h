@@ -28,6 +28,7 @@ int xdev_ext_stor_block_append(struct xdev_ext_mech_pool *pool,
 		struct bio *bio);
 
 #ifdef CONFIG_BLOCK
+#include <linux/atomic.h>
 #include <linux/blk_types.h>
 
 struct xdev_ext_stor_completion;
@@ -55,6 +56,65 @@ struct xdev_ext_stor_poll_view {
 	size_t stride;
 	__u32 count;
 };
+
+struct pci_dev;
+struct xdev_ext_mech_stage;
+struct xdev_ext_mech_stage_uapi;
+struct xdev_ext_stor_stage;
+
+struct xdev_ext_stor_geometry {
+	__u64 capacity_lbas;
+	__u8 lba_shift;
+};
+
+/* Native member boundaries consumed by the block family runtime. */
+struct xdev_ext_stor_dev_ops {
+	int (*bind)(struct xdev_ext_mech_stage *st,
+		const struct xdev_ext_mech_stage_uapi *u,
+		struct xdev_ext_stor_stage **family, void **member);
+	void (*unbind)(void *member);
+	int (*identity)(void *member, bool final,
+		struct xdev_ext_stor_geometry *geometry);
+	struct pci_dev *(*requester)(void *member);
+	struct request_queue *(*queue)(void *member);
+	int (*decode)(void *member, struct xdev_ext_mech_batch *batch,
+		const __u8 sqe[64], const struct xdev_ext_stor_window *window,
+		__u32 bytes, struct xdev_ext_stor_rw *rw);
+	int (*poll)(void *member, const struct xdev_ext_stor_poll_view *views,
+		__u32 nr_views);
+};
+
+/* Native container and stage file pin the member and borrowed slot arrays.
+ * In 7A the member still owns those arrays and clears a view before freeing it.
+ */
+struct xdev_ext_stor_stage {
+	struct xdev_ext_mech_stage *st;
+	const struct xdev_ext_stor_dev_ops *dev;
+	void *member;
+	struct xdev_ext_stor_window window;
+	struct xdev_ext_stor_geometry geometry;
+	atomic_t dead;
+	struct xdev_ext_stor_poll_view poll_views[2];
+};
+
+struct xdev_ext_stor_batch {
+	__u8 sqe[64];
+	struct xdev_ext_stor_rw rw;
+	__u64 batch_id;
+	bool validated;
+};
+
+/* CREATE: publish st->priv as the native member only after binding its window. */
+int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
+		const struct xdev_ext_mech_stage_uapi *u,
+		const struct xdev_ext_stor_dev_ops *dev);
+int xdev_ext_storfam_validate(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb,
+		const __u8 scratch[64], __u32 nr_slots);
+int xdev_ext_storfam_submit_check(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb);
+int xdev_ext_storfam_poll(struct xdev_ext_stor_stage *ss);
+void xdev_ext_storfam_mark_dead(struct xdev_ext_stor_stage *ss);
 
 /* Worker: one queue-number pass over all views, without retaining requests. */
 int xdev_ext_stor_block_poll(struct request_queue *queue,

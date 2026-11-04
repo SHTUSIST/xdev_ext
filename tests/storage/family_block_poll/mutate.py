@@ -56,13 +56,14 @@ old_prefix='nvme_xdev_ext_poll_';new_prefix='xdev_ext_stor_block_poll_'
 prefix=new_prefix if a.new else old_prefix
 poll_name='xdev_ext_stor_block_poll' if a.new else 'nvme_xdev_ext_class_poll'
 poll_file=R if a.new else N
+member_family='struct xdev_ext_stor_stage family;' in (source/N).read_text()
 cases=[
  ('hctx-check-skipped',R if a.new else N,prefix+'check',lambda b:'{ return 0; }'),
  ('false-opf-clears-POLLED',H if a.new else N,prefix+'opf',lambda b:subonce(b,r':\s*opf\s*;',': opf & ~REQ_POLLED;')),
  ('arm-live-before-queue',R if a.new else N,prefix+'arm',lambda b:subonce(b,r'(done->poll_queue\s*=\s*[^;]+;)\s*(WRITE_ONCE\(done->poll_live, true\);)',r'\2\n\1')),
  ('arm-wrong-queue',R if a.new else N,prefix+'arm',lambda b:subonce(b,r'(\w+->mq_hctx->queue_num)',r'\1 + 1')),
- ('missing-PEER',N,'nvme_xdev_ext_class_poll',call_limit if a.new else lambda b:once(b,'i < 2','i < 1')),
- ('wrong-done-stride',N,'nvme_xdev_ext_class_poll',lambda b:subonce(b,r'\.stride\s*=\s*sizeof\(\*p->slots\)', '.stride = sizeof(struct xdev_ext_stor_completion)') if a.new else once(b,'&p->slots[j].done','(struct xdev_ext_stor_completion *)((char *)&p->slots[0].done + j * sizeof(struct xdev_ext_stor_completion))')),
+ ('missing-PEER',N,'nvme_xdev_ext_member_poll' if member_family else 'nvme_xdev_ext_class_poll',call_limit if a.new else lambda b:once(b,'i < 2','i < 1')),
+ ('wrong-done-stride',R if member_family else N,'xdev_ext_storfam_poll' if member_family else 'nvme_xdev_ext_class_poll',lambda b:once(b,'return ss->dev->poll(', 'ss->poll_views[0].stride = sizeof(struct xdev_ext_stor_completion);\n return ss->dev->poll(') if member_family else subonce(b,r'\.stride\s*=\s*sizeof\(\*p->slots\)', '.stride = sizeof(struct xdev_ext_stor_completion)') if a.new else once(b,'&p->slots[j].done','(struct xdev_ext_stor_completion *)((char *)&p->slots[0].done + j * sizeof(struct xdev_ext_stor_completion))')),
  ('seen-reset-per-view',poll_file,poll_name,lambda b:subonce(b,r'(for\s*\([^{}]*\)\s*\{)',r'\1\n nr_seen = 0;')),
  ('stop-at-seen64',poll_file,poll_name,lambda b:subonce(b,r'(\w+\s*=\s*blk_mq_poll_hw_queue\()',r'if (nr_seen >= ARRAY_SIZE(seen)) return found;\n\1')),
  ('negative-key-forgotten',poll_file,poll_name,lambda b:subonce(b,r'(if\s*\(ret\s*>\s*0\))',r'if (ret <= 0 && nr_seen) nr_seen--;\n\1')),

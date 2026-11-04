@@ -22,7 +22,8 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
-sys.path.insert(0, str(HERE.parent / 'poll'))
+ROOT = next(p for p in HERE.parents if (p / 'source-layout.json').is_file())
+sys.path.insert(0, str(ROOT / 'tests/core/poll'))
 from core_poll_test import build_fixture  # noqa: E402
 from poll_extract import KERNEL, compile_and_run, fields, function, source  # noqa: E402
 
@@ -36,7 +37,10 @@ def git(*args):
 
 def guard(relative, name):
     """Extract the complete initial production if(flags) return -EINVAL."""
-    body = function(source(relative), name)
+    text = source(relative)
+    if name == 'nvme_xdev_ext_class_bind' and 'nvme_xdev_ext_member_bind(' in text:
+        name = 'nvme_xdev_ext_member_bind'
+    body = function(text, name)
     match = re.search(r'\tif \(\(?u->flags\b.*?\n\t\treturn -EINVAL;', body, re.S)
     if not match:
         raise AssertionError('native flag guard missing: ' + name)
@@ -88,7 +92,7 @@ static int bind_case(const char *mode)
     const struct xdev_ext_mech_create *input = &c;
     /* PLAN_COPY */
     admission = xdev_ext_mech_create_check(&c, &frames);
-    ret = admission ? admission : xdev_ext_mech_session_bind(&s, &c);
+    ret = admission ? admission : xdev_ext_mech_session_bind(&s, &c, NULL);
     printf("admission=%d bind_ret=%d nr_bound=%u frames=%u "
            "bind0=%u bind1=%u bind2=%u class_flags2=%u bound_flags2=%u "
            "caller_flags2=%u plan_flags2=%u group_end=%u consumer_refs=%u poll2=%u\n",
