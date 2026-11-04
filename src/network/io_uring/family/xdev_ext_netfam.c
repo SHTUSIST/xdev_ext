@@ -31,7 +31,8 @@ int xdev_ext_netfam_init(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_
 	if (m->dev->hdr_policy == XDEV_EXT_NET_HDR_CHANNEL &&
 	    (!m->local || !m->withdraw || !m->link_fail))
 		return -EINVAL;
-	if (m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA)
+	if (m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA &&
+	    m->lease_kind != XDEV_EXT_NET_LEASE_HOST_CPU)
 		return -EINVAL;
 	ns->st = st;
 	ns->m = m;
@@ -152,6 +153,47 @@ int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_
 }
 EXPORT_SYMBOL_GPL(xdev_ext_netfam_lease);
 
+/* Worker: borrow only a resolved authoritative batch frame. The core batch
+ * claim and INFLIGHT custody keep this mapping valid; no new reference or
+ * requester mapping is acquired by this CPU-only lease. */
+int xdev_ext_netfam_lease_host(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_net_slot *slot, u32 i, u32 frame_pos,
+		u32 frame_off, u32 len)
+{
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(ns->st->s);
+	struct xdev_ext_mech_frame f;
+	struct xdev_ext_net_elem *e;
+	u64 off = frame_off;
+	int ret;
+
+	if (i >= ns->max_elems || !len ||
+	    ns->m->lease_kind != XDEV_EXT_NET_LEASE_HOST_CPU)
+		return -EPROTO;
+	ret = xdev_ext_mech_batch_frame(slot->batch, frame_pos, &f);
+	if (ret)
+		return ret;
+	if (!f.kaddr || f.index >= pool->nr_frames || !f.data_len ||
+	    f.data_off > pool->frame_size ||
+	    f.data_len > pool->frame_size - f.data_off)
+		return -EINVAL;
+	if (off < f.data_off || off - f.data_off > f.data_len ||
+	    len > f.data_len - (off - f.data_off))
+		return -ERANGE;
+	e = &slot->elem[i];
+	if (e->lease.kind != XDEV_EXT_NET_LEASE_NONE)
+		return -EBUSY;
+	e->lease.u.host.addr = (u8 *)f.kaddr + off;
+	e->lease.u.host.len = len;
+	e->lease.kind = XDEV_EXT_NET_LEASE_HOST_CPU;
+	e->slot = slot;
+	e->len = len;
+	e->buf_len = len;
+	if (i + 1 > slot->nr)
+		slot->nr = i + 1;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_netfam_lease_host);
+
 void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 {
 	u32 i;
@@ -159,6 +201,15 @@ void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 	for (i = 0; i < slot->nr; i++) {
 		struct xdev_ext_net_lease *lease = &slot->elem[i].lease;
 
+		if (lease->kind == XDEV_EXT_NET_LEASE_HOST_CPU) {
+			/* UNKNOWN custody must retain the borrow and the busy slot. */
+			if (quiesced) {
+				lease->u.host.addr = NULL;
+				lease->u.host.len = 0;
+				lease->kind = XDEV_EXT_NET_LEASE_NONE;
+			}
+			continue;
+		}
 		if (lease->kind != XDEV_EXT_NET_LEASE_PEER_DMA)
 			continue;
 		xdev_ext_peer_fd_release(&lease->u.peer, quiesced);
@@ -171,8 +222,9 @@ void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 EXPORT_SYMBOL_GPL(xdev_ext_netfam_release);
 
 /* Worker: post @slot's elements.  The caller records @slot in its batch area
- * first: completion may run before this returns.  On error nothing reached
- * the device and every lease is released. */
+ * first: completion may run before this returns. On error no native payload
+ * owner remains and every lease is released. HOST NXP may have copied a wire
+ * prefix, whose retry cursor stays with the socket request. */
 int xdev_ext_netfam_post(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot)
 {
 	int ret = xdev_ext_peer_net_track_init_max(&slot->track, slot->nr, ns->max_elems);

@@ -14,7 +14,8 @@
 enum xdev_ext_net_hdr_policy {
 	XDEV_EXT_NET_HDR_SPLIT = 1,	/* host header bytes + device payload per element (mlx5, ice) */
 	XDEV_EXT_NET_HDR_CHANNEL = 2,	/* payload-only elements; headers on a host control ring (XDomain) */
-	XDEV_EXT_NET_HDR_INBAND = 3,	/* header and payload in one host frame (AF_XDP, SOCKET) */
+	XDEV_EXT_NET_HDR_INBAND = 3,	/* header and payload in one host frame (AF_XDP) */
+	XDEV_EXT_NET_HDR_STACK = 4,	/* socket stack owns L2-L4 headers */
 };
 #define XDEV_EXT_NET_DEV_AREA	64U
 #define XDEV_EXT_NETFAM_MAX_ELEMS	64U
@@ -23,15 +24,20 @@ struct xdev_ext_netfam_stage;
 enum xdev_ext_net_lease_kind {
 	XDEV_EXT_NET_LEASE_NONE = 0,
 	XDEV_EXT_NET_LEASE_PEER_DMA = 1,
+	XDEV_EXT_NET_LEASE_HOST_CPU = 2,
 };
 struct xdev_ext_net_lease {
 	u32 kind;
 	union {
 		struct xdev_ext_peer_fd_lease peer;
+		struct {
+			void *addr;
+			u32 len;
+		} host;
 	} u;
 };
 struct xdev_ext_net_elem {
-	struct xdev_ext_net_lease lease;	/* stable payload lease for dev->requester() */
+	struct xdev_ext_net_lease lease;	/* stable payload acquisition or CPU borrow */
 	struct xdev_ext_net_slot *slot;
 	u32 len;			/* payload bytes this element carries */
 	u32 buf_len;			/* bytes the device may write: TX len, RX full device frame */
@@ -43,7 +49,7 @@ struct xdev_ext_net_elem {
 };
 struct xdev_ext_net_dev_ops {
 	struct module *owner;
-	u32 hdr_policy;			/* SPLIT or CHANNEL */
+	u32 hdr_policy;			/* enum xdev_ext_net_hdr_policy */
 	u32 max_elems;			/* elements per batch, <= XDEV_EXT_NETFAM_MAX_ELEMS */
 	/* CREATE, may sleep: bind @u to a device endpoint; dead(arg) once when it goes away */
 	void *(*bind)(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_stage_uapi *u,
@@ -54,7 +60,10 @@ struct xdev_ext_net_dev_ops {
 	struct pci_dev *(*requester)(void *lk);
 	/* any context: largest element payload; 0 once the device is gone */
 	u32 (*max_payload)(void *lk);
-	/* worker: all or none of @n elements; bounded native submit; negative: no DMA, no callback */
+	/* worker: bounded submit; callbacks may finish before return.
+	 * PEER: all or none, negative means no DMA/callback.
+	 * HOST: negative means no outstanding buffer owner/callback; a copied
+	 * NXP prefix may already be sent and its retry cursor must survive. */
 	int (*post_tx)(void *lk, struct xdev_ext_net_elem *e, u32 n);
 	int (*post_rx)(void *lk, struct xdev_ext_net_elem *e, u32 n);
 	/* optional, may sleep: cancel posted RX elements; each completes exactly once */
@@ -127,6 +136,9 @@ struct xdev_ext_net_slot *xdev_ext_netfam_slot_get(struct xdev_ext_netfam_stage 
 						   struct xdev_ext_mech_batch *b);
 int  xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot,
 			   u32 i, u64 off, u32 len, u32 buf_len);
+/* Worker-only borrow from slot->batch; stage/session/batch custody stays held. */
+int  xdev_ext_netfam_lease_host(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot,
+				u32 i, u32 frame_pos, u32 frame_off, u32 len);
 int  xdev_ext_netfam_post(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot);
 void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced);
 void xdev_ext_netfam_fill_cqe(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot **slotp);
