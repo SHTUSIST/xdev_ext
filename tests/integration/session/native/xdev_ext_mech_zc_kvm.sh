@@ -740,7 +740,7 @@ if (( ! RUN_ONLY )); then
     if (( CE_SIM )); then
         sha256sum "$CE_SIM_OUT/xdev_ext_ce_sim.ko" \
             "$DMA_SIM_OUT/xdev_ext_dma_provider_sim.ko" \
-            "$DMA_SIM_OUT/dma_provider_runtime" "$DMA_SIM_OUT/dma_provider_pair.bpf.o" \
+            "$DMA_SIM_OUT/dma_provider_runtime" "$DMA_SIM_OUT/dma_poll_runtime" "$DMA_SIM_OUT/dma_provider_pair.bpf.o" \
             >>"$BUILD/xdev-ext-artifacts.sha256"
         if [[ "$PROVIDER_CASE" == normal ]]; then
             sha256sum "$IAA_OUT/iaa_runtime" "$IAA_OUT/iaa_pair.bpf.o" >>"$BUILD/xdev-ext-artifacts.sha256"
