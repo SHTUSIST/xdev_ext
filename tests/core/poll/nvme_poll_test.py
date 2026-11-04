@@ -12,18 +12,15 @@ import json
 import os
 from pathlib import Path
 import re
-import runpy
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from poll_extract import KERNEL, body, compile_and_run, fields, function, source
+from poll_extract import KERNEL, _helpers as HELPERS, body, compile_and_run, fields, function, source
 
 NVME = 'drivers/nvme/host/xdev_ext_mech_nvme.c'
 BLK = 'block/blk-mq.c'
 BLK_H = 'include/linux/blk-mq.h'
-TEST_ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'source-layout.json').is_file())
-HELPERS = runpy.run_path(str(TEST_ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
 
 
 def structure(text, name):

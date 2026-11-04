@@ -6,17 +6,28 @@ Every test compiles production functions copied verbatim from the kernel tree
 supplies only the surrounding kernel types and calls. No production decision
 is reimplemented in a fixture.
 """
+import importlib.util
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-KERNEL = Path(os.environ.get('KERNEL_SRC', next(p for p in HERE.parents if (p / 'source-layout.json').is_file()))).resolve()
-import runpy
-_helpers = runpy.run_path(str(next(p for p in HERE.parents if (p / 'source-layout.json').is_file()) / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
+# Bootstrap the existing layout API; a nearby manifest may belong to a view.
+# The API resolves the script's receipt-backed canonical helper owner.
+_layout_path = next(p / 'tools/layout.py' for p in HERE.parents
+                    if (p / 'tools/layout.py').is_file())
+_layout_spec = importlib.util.spec_from_file_location('_xdev_ext_poll_layout', _layout_path)
+_layout = importlib.util.module_from_spec(_layout_spec)
+sys.modules[_layout_spec.name] = _layout
+_layout_spec.loader.exec_module(_layout)
+SCRIPT_ROOT = _layout.canonical_root(HERE)
+KERNEL = Path(os.environ.get('KERNEL_SRC', SCRIPT_ROOT)).resolve()
+_helpers = runpy.run_path(str(SCRIPT_ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
 
 
 def source(relative):
