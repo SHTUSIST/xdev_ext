@@ -8771,13 +8771,11 @@
     },
     {
       "source": "src/compute/io_uring/xdev_ext_compfam_copy.c",
-      "logical_path": "kernel/io_uring/xdev_ext_compfam_copy.c",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy.c"
     },
     {
       "source": "src/compute/io_uring/xdev_ext_compfam_copy_runtime.h",
-      "logical_path": "kernel/io_uring/xdev_ext_compfam_copy_runtime.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy_runtime.h"
     }
