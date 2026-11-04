@@ -30,9 +30,8 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_ce_core.h"
-#include "xdev_ext_compfam_copy_core.h"
+#include "xdev_ext_compfam_copy_runtime.h"
 #include "xdev_ext_mech_ce_lease.h"
-#include "xdev_ext_mech_native_cookie.h"
 
 #define XDEV_EXT_CE_MAX_BACKENDS	4
 
@@ -67,18 +66,8 @@ struct xdev_ext_ce_stage {
 	u64 window_len;
 	bool cleanup_held;
 	struct xdev_ext_ce_region region;
-	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_ce_geom geom;
-	struct xdev_ext_comp_copy_window window;
-	atomic_t ambiguous;		/* AMBIGUOUS completions on this stage */
-	bool dead;
-	/* session worker only: the plan validate accepted, until submit */
-	struct xdev_ext_mech_batch *staged;
-	struct xdev_ext_comp_copy_plan plan;
-	/* Worker-only scratch; native callbacks retain the typed batch copy. */
-	struct xdev_ext_comp_copy_transfer transfer[XDEV_EXT_CE_MAX_ENTRIES];
-	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
-	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
+	struct xdev_ext_comp_copy_stage copy;
 };
 
 _Static_assert(XDEV_EXT_CE_MAX_ENTRIES <=
@@ -86,88 +75,51 @@ _Static_assert(XDEV_EXT_CE_MAX_ENTRIES <=
 	       sizeof(struct xdev_ext_comp_copy_entry),
 	       "CE entries exceed the common copy plan capacity");
 
-/* Stable per-batch storage: never overwritten by another stage's private area.
- * b is initialized once and remains safe to dereference for stale-ticket rejection.
- */
-struct xdev_ext_ce_cookie {
-	struct xdev_ext_mech_batch *b;
-	struct xdev_ext_ce_stage *cs;
-	u64 bytes_done;
-	int status;
-	u32 outcome;			/* enum xdev_ext_ce_outcome */
-	u8 state;			/* enum xdev_ext_ce_cookie_state */
-};
-XDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_ce_cookie);
-
 struct xdev_ext_ce_batch {
 	u64 total;
 	u32 n;
 	struct xdev_ext_ce_xfer x[XDEV_EXT_CE_MAX_ENTRIES];
 };
 
-static DEFINE_MUTEX(xdev_ext_ce_backend_lock);
-static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backends[XDEV_EXT_CE_MAX_BACKENDS];
+static struct xdev_ext_comp_copy_registration
+xdev_ext_ce_backends[XDEV_EXT_CE_MAX_BACKENDS];
+static struct xdev_ext_comp_copy_registry xdev_ext_ce_registry = {
+	.lock = __MUTEX_INITIALIZER(xdev_ext_ce_registry.lock),
+	.members = LIST_HEAD_INIT(xdev_ext_ce_registry.members),
+	.fixed = xdev_ext_ce_backends,
+	.capacity = XDEV_EXT_CE_MAX_BACKENDS,
+};
 
 int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *ops)
 {
-	int i, slot = -1, err = 0;
+	struct xdev_ext_comp_copy_member member;
 
 	if (!ops || !ops->fops || !ops->bind_region || !ops->unbind_region ||
 	    !ops->bind_host || !ops->unbind_host || !ops->submit)
 		return -EINVAL;
-
-	mutex_lock(&xdev_ext_ce_backend_lock);
-	for (i = 0; i < XDEV_EXT_CE_MAX_BACKENDS; i++) {
-		if (!xdev_ext_ce_backends[i]) {
-			if (slot < 0)
-				slot = i;
-		} else if (xdev_ext_ce_backends[i]->fops == ops->fops) {
-			err = -EBUSY;
-			break;
-		}
-	}
-	if (!err && slot < 0)
-		err = -ENOSPC;
-	if (!err)
-		xdev_ext_ce_backends[slot] = ops;
-	mutex_unlock(&xdev_ext_ce_backend_lock);
-	return err;
+	member = (struct xdev_ext_comp_copy_member){
+		.identity = ops,
+		.fops = ops->fops,
+		.owner = ops->owner,
+	};
+	return xdev_ext_comp_copy_registry_register(&xdev_ext_ce_registry, &member);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_register);
 
 void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops)
 {
-	int i;
-
-	mutex_lock(&xdev_ext_ce_backend_lock);
-	for (i = 0; i < XDEV_EXT_CE_MAX_BACKENDS; i++) {
-		if (xdev_ext_ce_backends[i] == ops) {
-			xdev_ext_ce_backends[i] = NULL;
-			break;
-		}
-	}
-	mutex_unlock(&xdev_ext_ce_backend_lock);
-	WARN_ON_ONCE(i == XDEV_EXT_CE_MAX_BACKENDS);
+	WARN_ON_ONCE(!xdev_ext_comp_copy_registry_unregister(&xdev_ext_ce_registry, ops));
 }
 EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_unregister);
 
 /* CREATE, process context: the backend of @file, its module pinned. */
 static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file *file)
 {
-	const struct xdev_ext_ce_backend_ops *ops = NULL;
-	int i;
+	struct xdev_ext_comp_copy_member member;
 
-	mutex_lock(&xdev_ext_ce_backend_lock);
-	for (i = 0; i < XDEV_EXT_CE_MAX_BACKENDS; i++) {
-		const struct xdev_ext_ce_backend_ops *b = xdev_ext_ce_backends[i];
-
-		if (b && b->fops == file->f_op && try_module_get(b->owner)) {
-			ops = b;
-			break;
-		}
-	}
-	mutex_unlock(&xdev_ext_ce_backend_lock);
-	return ops;
+	if (!xdev_ext_comp_copy_registry_get(&xdev_ext_ce_registry, file, &member))
+		return NULL;
+	return member.identity;
 }
 
 /* CREATE publishes configured exclusion before any native mapping can remain. */
@@ -338,6 +290,105 @@ static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs)
 	return true;
 }
 
+static int xdev_ext_ce_copy_lease_get(struct xdev_ext_comp_copy_stage *copy,
+	struct xdev_ext_mech_batch *b)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+
+	return xdev_ext_ce_lease_get(cs, b);
+}
+
+/* Native callbacks retain the typed batch array, never the worker scratch. */
+static int xdev_ext_ce_copy_submit(struct xdev_ext_comp_copy_stage *copy,
+	struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
+	const struct xdev_ext_comp_copy_transfer *x, u32 n, u64 total,
+	struct xdev_ext_comp_copy_cookie *ck, u64 ticket)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+	struct xdev_ext_ce_batch *cb = xdev_ext_mech_batch_priv(b);
+	u32 i;
+
+	for (i = 0; i < n; i++)
+		cb->x[i] = (struct xdev_ext_ce_xfer){
+			.owner = x[i].owner,
+			.generation = x[i].generation,
+			.host_byte_off = x[i].host_byte_off,
+			.gpu_off = x[i].device_off,
+			.len = x[i].len,
+			.flags = x[i].flags,
+		};
+	cb->n = n;
+	cb->total = total;
+	return cs->ops->submit(&cs->region, copy->host, st->direction,
+		cb->x, cb->n, (struct xdev_ext_ce_cookie *)ck, ticket);
+}
+
+static u32 xdev_ext_ce_copy_classify(struct xdev_ext_mech_batch *b, u64 ticket,
+	int *status, bool *hw_submitted, u64 bytes_done)
+{
+	const struct xdev_ext_ce_batch *cb = xdev_ext_mech_batch_priv(b);
+
+	*status = xdev_ext_ce_completion_status(*status, *hw_submitted, bytes_done,
+		cb->total);
+	return xdev_ext_ce_classify(*status, *hw_submitted);
+}
+
+static int xdev_ext_ce_copy_unbind_begin(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+
+	return xdev_ext_ce_lease_cleanup_begin(cs);
+}
+
+static int xdev_ext_ce_copy_unbind_host(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+
+	return cs->ops->unbind_host(copy->host);
+}
+
+static int xdev_ext_ce_copy_unbind_region(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+	int err;
+
+	if (!cs->region.priv)
+		return 0;
+	err = cs->ops->unbind_region(&cs->region);
+	if (err)
+		return err;
+	cs->region.priv = NULL;
+	return 0;
+}
+
+static int xdev_ext_ce_copy_unbind_end(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
+
+	if (cs->lease_group && !xdev_ext_ce_lease_unbind(cs))
+		return -EBUSY;
+	return 0;
+}
+
+static void xdev_ext_ce_copy_warn(bool refused_submit)
+{
+	if (refused_submit)
+		WARN_ONCE(1, "xdev_ext_mech_ce: backend completed a refused submit\n");
+	else
+		WARN_ONCE(1, "xdev_ext_mech_ce: completion without an accepted submit\n");
+}
+
+static const struct xdev_ext_comp_copy_legacy_ops xdev_ext_ce_copy_ops = {
+	.lease_get = xdev_ext_ce_copy_lease_get,
+	.submit = xdev_ext_ce_copy_submit,
+	.classify = xdev_ext_ce_copy_classify,
+	.unbind_begin = xdev_ext_ce_copy_unbind_begin,
+	.unbind_host = xdev_ext_ce_copy_unbind_host,
+	.unbind_region = xdev_ext_ce_copy_unbind_region,
+	.unbind_end = xdev_ext_ce_copy_unbind_end,
+	.warn = xdev_ext_ce_copy_warn,
+};
+
 static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 		       const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -368,6 +419,7 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	 * pins and exclusion retained if native cleanup refuses.
 	 */
 	cs->ops = ops;
+	cs->copy.ops = &xdev_ext_ce_copy_ops;
 	cs->region.ops = ops;
 	st->priv = cs;
 	err = xdev_ext_ce_lease_bind(st, cs, u->arg0, u->arg1);
@@ -384,12 +436,12 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	if (err)
 		return err;
 	geom = xdev_ext_ce_window_geom(&cs->geom);
-	err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
+	err = xdev_ext_comp_copy_prepare(&cs->copy.window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
 		st->direction, xdev_ext_mech_session_depth(st->s),
 		xdev_ext_mech_session_layout(st->s)->group_bytes);
 	if (err)
 		return err;
-	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
+	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->copy.host);
 	if (err)
 		return err;
 	xdev_ext_ce_lease_bind_ready(cs);
@@ -402,71 +454,32 @@ free:
 static int xdev_ext_ce_unbind(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	const struct xdev_ext_ce_backend_ops *ops;
+	const struct xdev_ext_ce_backend_ops *native_ops;
 	int err;
 
 	if (!cs)
 		return 0;
-	ops = cs->ops;
-	if (atomic_read(&cs->ambiguous))
-		return -EBUSY;
-	err = xdev_ext_ce_lease_cleanup_begin(cs);
+	native_ops = cs->ops;
+	err = xdev_ext_comp_copy_unbind(&cs->copy);
 	if (err)
 		return err;
-	if (cs->host) {
-		err = ops->unbind_host(cs->host);
-		if (err)
-			return err;
-		cs->host = NULL;
-	}
-	if (cs->region.priv) {
-		err = ops->unbind_region(&cs->region);
-		if (err)
-			return err;
-		cs->region.priv = NULL;
-	}
-	if (cs->lease_group && !xdev_ext_ce_lease_unbind(cs))
-		return -EBUSY;
 	st->priv = NULL;
 	kfree(cs);
-	module_put(ops->owner);
+	module_put(native_ops->owner);
 	return 0;
-}
-
-/* Worker or CREATE: data spans and pool chunk indices of @b's frames. */
-static int xdev_ext_ce_collect(struct xdev_ext_ce_stage *cs, struct xdev_ext_mech_batch *b)
-{
-	u32 i, nr = xdev_ext_mech_batch_nr_frames(b);
-	struct xdev_ext_mech_frame f;
-	int err;
-
-	if (nr > XDEV_EXT_MECH_MAX_FRAMES)
-		return -E2BIG;
-	for (i = 0; i < nr; i++) {
-		err = xdev_ext_mech_batch_frame(b, i, &f);
-		if (err)
-			return err;
-		cs->fi[i] = (struct xdev_ext_mech_frame_info){
-			.umem_addr	= f.umem_addr,
-			.data_off	= f.data_off,
-			.data_len	= f.data_len,
-		};
-		cs->index[i] = f.index;
-	}
-	return nr;
 }
 
 static void xdev_ext_ce_fill_info(struct xdev_ext_mech_stage *st,
 			     struct xdev_ext_mech_batch *b, void *info)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	int nr = b ? xdev_ext_ce_collect(cs, b) : 0;
+	int nr = b ? xdev_ext_comp_copy_collect(&cs->copy, b) : 0;
 
 	/* Unreadable frames show as none; validate then refuses the batch. */
 	if (nr < 0)
 		nr = 0;
 	xdev_ext_ce_info_fill(info, xdev_ext_mech_session_layout(st->s), &cs->geom,
-			 cs->fi, nr);
+			 cs->copy.fi, nr);
 	if (b) {
 		struct xdev_ext_ce_mech_info *ci = info;
 
@@ -476,133 +489,38 @@ static void xdev_ext_ce_fill_info(struct xdev_ext_mech_stage *st,
 	}
 }
 
-static int xdev_ext_ce_validate(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
-			   const u8 *scratch, u32 n)
+static int xdev_ext_ce_validate(struct xdev_ext_mech_stage *st,
+	struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	int nr, err;
 
-	cs->staged = NULL;
-	if (!b)
-		return -EINVAL;
-	if (n > XDEV_EXT_CE_MAX_ENTRIES)
-		return -E2BIG;
-	nr = xdev_ext_ce_collect(cs, b);
-	if (nr < 0)
-		return nr;
-	err = xdev_ext_comp_copy_validate(&cs->window, cs->fi, cs->index, nr,
-		scratch, n, XDEV_EXT_CE_MAX_ENTRIES, XDEV_EXT_CE_F_KNOWN_MASK,
-		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), &cs->plan);
-	if (err)
-		return err;
-	cs->staged = b;
-	return 0;
+	return xdev_ext_comp_copy_stage_validate(&cs->copy, b, scratch, n,
+		XDEV_EXT_CE_MAX_ENTRIES, XDEV_EXT_CE_F_KNOWN_MASK);
 }
 
-static int xdev_ext_ce_copy_claim(void *batch, __u32 frame_pos,
-				  __u64 *owner, __u64 *generation)
-{
-	return xdev_ext_mech_batch_frame_claim(batch, frame_pos, owner, generation);
-}
-
-/* Worker: consume exactly the typed plan admitted for this batch and slot. */
-static int xdev_ext_ce_stage_xfers(struct xdev_ext_ce_stage *cs, struct xdev_ext_mech_batch *b,
-			      struct xdev_ext_ce_batch *cb)
-{
-	struct xdev_ext_mech_batch *staged = cs->staged;
-	struct xdev_ext_comp_copy_transfer *x = cs->transfer;
-	u32 i;
-	int err;
-
-	cs->staged = NULL;
-	if (READ_ONCE(cs->dead))
-		return -ENODEV;
-	if (staged != b)
-		return -EPROTO;
-	err = xdev_ext_comp_copy_transfer(&cs->plan, xdev_ext_mech_batch_id(b),
-		xdev_ext_mech_batch_slot(b), b, xdev_ext_ce_copy_claim, x);
-	if (err)
-		return err;
-	for (i = 0; i < cs->plan.n; i++)
-		cb->x[i] = (struct xdev_ext_ce_xfer){
-			.owner		= x[i].owner,
-			.generation	= x[i].generation,
-			.host_byte_off	= x[i].host_byte_off,
-			.gpu_off	= x[i].device_off,
-			.len		= x[i].len,
-			.flags		= x[i].flags,
-		};
-	cb->n = cs->plan.n;
-	cb->total = cs->plan.total;
-	return 0;
-}
-
-static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
+static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st,
+	struct xdev_ext_mech_batch *b)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	struct xdev_ext_ce_batch *cb = xdev_ext_mech_batch_priv(b);
-	struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);
-	int err;
 
-	err = xdev_ext_ce_lease_get(cs, b);
-	if (err)
-		return err;
-	if (!xdev_ext_ce_cookie_arm(&ck->state))
-		return -EBUSY;
-	if (!ck->b)
-		ck->b = b;
-	ck->cs = cs;
-	err = xdev_ext_ce_stage_xfers(cs, b, cb);
-	if (!err)
-		err = cs->ops->submit(&cs->region, cs->host,
-				      st->direction, cb->x, cb->n, ck,
-				      xdev_ext_mech_batch_ticket(b));
-	if (err >= 0)
-		return 0;
-	if (!xdev_ext_ce_cookie_disarm(&ck->state)) {
-		/* Completed, so it reached the device path despite the error. */
-		WARN_ONCE(1, "xdev_ext_mech_ce: backend completed a refused submit\n");
-		return 0;
-	}
-	ck->status = err;
-	return err;
+	return xdev_ext_comp_copy_stage_submit(&cs->copy, st, b);
 }
 
-bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
-                             const struct xdev_ext_ce_xfer *x, u32 n)
+bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *native_ck, u64 ticket,
+	const struct xdev_ext_ce_xfer *x, u32 n)
 {
- /* b is initialized once; all mutable cookie fields follow ticket admission. */
- return ck && ck->b && xdev_ext_mech_batch_ce_owners_valid(ck->b, ticket, x, n);
+	struct xdev_ext_comp_copy_cookie *ck = (struct xdev_ext_comp_copy_cookie *)native_ck;
+
+	/* b is stable; the core admits the ticket before reading transfers. */
+	return ck && ck->b && xdev_ext_mech_batch_ce_owners_valid(ck->b, ticket, x, n);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_ce_owners_valid);
 
 void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
-		     bool hw_submitted, u64 bytes_done)
+	bool hw_submitted, u64 bytes_done)
 {
-	u32 outcome;
-	int err;
-
-	/* Validate the immutable native ticket before touching reused cookie data. */
-	if (xdev_ext_mech_batch_completion_claim(ck->b, ticket))
-		return;
-	if (WARN_ONCE(!xdev_ext_ce_cookie_finish(&ck->state),
-		      "xdev_ext_mech_ce: completion without an accepted submit\n")) {
-		atomic_inc(&ck->cs->ambiguous);
-		xdev_ext_mech_batch_completion_publish(ck->b, ticket, -EPROTO, true);
-		return;
-	}
-	status = xdev_ext_ce_completion_status(status, hw_submitted, bytes_done,
-		((const struct xdev_ext_ce_batch *)xdev_ext_mech_batch_priv(ck->b))->total);
-	outcome = xdev_ext_ce_classify(status, hw_submitted);
-	ck->outcome = outcome;
-	ck->status = status;
-	ck->bytes_done = bytes_done;
-	if (xdev_ext_ce_disposition(outcome, status, &err)) {
-		atomic_inc(&ck->cs->ambiguous);
-		xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, true);
-		return;
-	}
-	xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, false);
+	xdev_ext_comp_copy_complete((struct xdev_ext_comp_copy_cookie *)ck, ticket,
+		status, hw_submitted, bytes_done, &xdev_ext_ce_copy_ops);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_ce_complete);
 
@@ -610,7 +528,7 @@ static void xdev_ext_ce_fill_cqe(struct xdev_ext_mech_stage *st, struct xdev_ext
 			    void *cqe)
 {
 	const struct xdev_ext_ce_batch *cb = xdev_ext_mech_batch_priv(b);
-	const struct xdev_ext_ce_cookie *ck = xdev_ext_mech_batch_cookie(b);
+	const struct xdev_ext_comp_copy_cookie *ck = xdev_ext_mech_batch_cookie(b);
 
 	xdev_ext_ce_cqe_fill(cqe, READ_ONCE(ck->state), ck->outcome, ck->status,
 			ck->bytes_done, cb->total, cb->n);
@@ -620,7 +538,7 @@ static void xdev_ext_ce_mark_dead(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
 
-	WRITE_ONCE(cs->dead, true);
+	xdev_ext_comp_copy_mark_dead(&cs->copy);
 }
 
 static const struct xdev_ext_comp_hooks xdev_ext_ce_comp_hooks = {
@@ -638,7 +556,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.cqe_size	= sizeof(struct xdev_ext_ce_mech_cqe),
 	.cqe_cap	= 1,
 	.batch_priv_size = sizeof(struct xdev_ext_ce_batch),
-	.batch_cookie_size = sizeof(struct xdev_ext_ce_cookie),
+	.batch_cookie_size = sizeof(struct xdev_ext_comp_copy_cookie),
 	.owner		= THIS_MODULE,
 	.bind		= xdev_ext_ce_bind,
 	.unbind_checked	= xdev_ext_ce_unbind,

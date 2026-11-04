@@ -26,6 +26,9 @@ obj-$(CONFIG_IO_URING_XDEV_EXT_BPF_POLICY) += xdev_ext_ops_core.o xdev_ext_bindi
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech.o xdev_ext_mech_ops.o xdev_ext_mech_programs.o xdev_ext_peer.o xdev_ext_peer_fd.o xdev_ext_peer_net.o xdev_ext_mech_peer_pool.o xdev_ext_mech_net.o xdev_ext_mech_user.o
 obj-$(CONFIG_XDEV_EXT_MECH_CE) += xdev_ext_mech_ce.o
 obj-$(CONFIG_XDEV_EXT_MECH_DMA) += xdev_ext_mech_dma.o
+ifneq ($(filter y,$(CONFIG_XDEV_EXT_MECH_CE) $(CONFIG_XDEV_EXT_MECH_DMA)),)
+obj-y += xdev_ext_compfam_copy.o
+endif
 obj-$(CONFIG_IO_WQ)		+= io-wq.o
 obj-$(CONFIG_FUTEX)		+= futex.o
 obj-$(CONFIG_EPOLL)		+= epoll.o
