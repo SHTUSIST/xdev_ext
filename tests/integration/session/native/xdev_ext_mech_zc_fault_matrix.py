@@ -3,15 +3,69 @@
 """Run isolated software-device correctness campaigns using the existing KVM image builder."""
 import argparse
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
+import stat
 import subprocess
 import sys
 
 import xdev_ext_mech_zc_fault_validate as oracle
+
+
+def archive_api(native):
+    """Locate the clean canonical helper through the explicit Linux receipt."""
+    def real(path):
+        if not path.is_absolute() or '..' in path.parts or path.resolve() != path:
+            raise ValueError('source paths must be absolute real paths')
+        if any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError('source paths must not contain symlinks')
+        return path
+
+    def regular(path):
+        real(path)
+        if not stat.S_ISREG(path.stat().st_mode):
+            raise ValueError('source input must be regular: ' + str(path))
+        return path
+
+    def git(repo, *args):
+        return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+
+    native = real(native)
+    receipt = json.loads(regular(native / '.xdev-ext-source.json').read_text())
+    repo = real(Path(receipt['canonical_root']))
+    if (receipt.get('kind') != 'full-assembly' or receipt.get('component') != 'linux'
+            or receipt.get('output') != str(native)):
+        raise ValueError('source must be its recorded full Linux assembly')
+    if git(repo, 'rev-parse', '--show-toplevel') != str(repo):
+        raise ValueError('canonical source must be its own Git root')
+    if git(repo, 'status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('canonical source contains dirty or untracked files')
+    git(repo, 'ls-files', '--error-unmatch', '--', 'tools/layout.py', 'source-layout.json')
+    spec = importlib.util.spec_from_file_location('_fault_matrix_layout',
+                                                  regular(repo / 'tools/layout.py'))
+    layout_module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = layout_module
+    try:
+        spec.loader.exec_module(layout_module)
+        layout = layout_module.load_layout(repo)
+    finally:
+        sys.modules.pop(spec.name, None)
+    name = 'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py'
+    source = layout.by_native[('linux', name)]
+    git(repo, 'ls-files', '--error-unmatch', '--', source)
+    helper = regular(repo / source)
+    actual = regular(native / name)
+    if (receipt.get('source_origins', {}).get(name) != source
+            or actual.read_bytes() != helper.read_bytes()):
+        raise ValueError('native archive helper differs from its mapped canonical source')
+    spec = importlib.util.spec_from_file_location('_fault_matrix_archive', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module, repo
 
 
 def qemu_command(scratch, readonly=False):
@@ -99,39 +153,60 @@ def main(argv=None):
     if scratch.is_symlink() or not scratch.is_dir() or scratch.stat().st_mode & 0o777 != 0o700:
         parser.error('scratch must already exist, mode 0700, and not be a symlink')
     os.umask(0o077)
+    native = Path(args.source)
+    try:
+        archive, source_root = archive_api(native)
+    except (ValueError, OSError, KeyError, TypeError, subprocess.CalledProcessError) as error:
+        parser.error('archive source: ' + str(error))
     results = scratch / 'fault-campaigns'
     results.mkdir(exist_ok=True)
     for item in plans:
         output = results / item['campaign']
+        case_dir = scratch / 'acceptance/cases' / item['campaign']
         if output.exists():
             parser.error(f'campaign evidence already exists: {output}')
+        if case_dir.exists() or case_dir.is_symlink():
+            parser.error(f'campaign archive already exists: {case_dir}')
         output.mkdir()
         (output / 'plan.json').write_text(json.dumps(item, indent=2) + '\n')
         before = snapshot_other_qemu()
         (output / 'other-qemu-before.txt').write_text(before)
         print(item['expectation'], flush=True)
         # The harness validates exact source/build identity and boots one guest.
-        status = subprocess.run(item['harness_command'], check=False).returncode
-        after = snapshot_other_qemu()
+        archive_error = None
+        try:
+            receipt = archive.run_command(item['harness_command'], scratch, case_dir,
+                                          source_root, native)
+            status = receipt['command_exit']
+        except (ValueError, OSError, KeyError, TypeError) as error:
+            archive_error = error
+            # A failed freeze must not hide the actual child exit, if recorded.
+            status_file = case_dir / 'command.exit'
+            status = int(status_file.read_text()) if status_file.is_file() else 1
+        finally:
+            after = snapshot_other_qemu()
         (output / 'other-qemu-after.txt').write_text(after)
-        evidence = scratch / 'evidence'
+        evidence = case_dir / 'evidence'
         if evidence.is_dir():
-            shutil.copytree(evidence, output / 'harness', symlinks=True)
+            shutil.copytree(evidence, output / 'harness')
         for name in ('guest.log', 'qemu.exit'):
             if (evidence / name).is_file():
                 shutil.copyfile(evidence / name, output / name)
         for name in ('source-before.raw', 'source.raw', 'destination-before.raw', 'destination.raw'):
-            if (scratch / name).is_file():
-                shutil.copyfile(scratch / name, output / name)
+            if (case_dir / 'images' / name).is_file():
+                shutil.copyfile(case_dir / 'images' / name, output / name)
         (output / 'harness.exit').write_text(str(status) + '\n')
+        if archive_error is not None:
+            print('FAIL campaign archive: ' + str(archive_error), file=sys.stderr)
+            return status if status > 0 else (128 - status if status < 0 else 1)
         if before != after:
             print('FAIL foreign QEMU process identities changed during campaign', file=sys.stderr)
-            return 1
+            return status if status > 0 else (128 - status if status < 0 else 1)
         verdict = oracle.main(['check', '--campaign', item['campaign'], '--dir', str(output),
                                '--groups', str(args.groups), '--depth', str(args.depth)])
         (output / 'matrix.exit').write_text(str(verdict) + '\n')
         if status or verdict:
-            return verdict or 1
+            return status if status > 0 else (128 - status if status < 0 else verdict or 1)
     print(f'XDEV_EXT_ZC_FAULT_MATRIX=PASS campaigns={len(plans)} performance_claim=none')
     return 0
 
