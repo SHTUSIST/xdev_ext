@@ -386,8 +386,179 @@ def storage_runtime(root):
     return '\n\n'.join(found)
 
 
+def family_owns_io(text):
+    # Old native sources need not carry the newer family header at all.
+    # Read it only when the selected class actually delegates submission.
+    if 'xdev_ext_storfam_submit(&p->family, b, &bp->family)' not in function(
+            text, 'nvme_xdev_ext_class_submit'):
+        return False
+    return bool(re.search(r'^struct xdev_ext_stor_io \{',
+                          source('include/linux/xdev_ext_storfam_block.h'), re.M))
+
+
+FAMILY_IO_FIXTURE = r'''
+#define __aligned(n) __attribute__((aligned(n)))
+#define REQ_OP_DRV_IN 34U
+#define REQ_OP_DRV_OUT 35U
+#define SZ_4K 4096U
+#define XDEV_EXT_STOR_PEER_MAX_SPANS 512U
+#define NVME_CTRL_LIVE 1
+struct nvme_ctrl { int state; };
+static int nvme_ctrl_state(struct nvme_ctrl *ctrl) { return ctrl->state; }
+static bool nvme_ctrl_sgl_supported(struct nvme_ctrl *ctrl) { (void)ctrl; return false; }
+static int get_disk_ro(struct gendisk *disk) { (void)disk; return 0; }
+static unsigned queue_max_hw_sectors(struct request_queue *q) { (void)q; return 1024; }
+
+/* FAMILY_IO_TYPES */
+
+/* These are the original fixture's bypassed slot/map operations, now owned
+ * by the family. No submit, post, completion or polling decision lives here. */
+static struct xdev_ext_stor_io slot_storage;
+static struct xdev_ext_stor_io *xdev_ext_storfam_host_get(struct xdev_ext_stor_stage *ss,
+                                                        struct xdev_ext_stor_batch *sb)
+{ (void)ss; slot_gets++; sb->host_io = &slot_storage; return &slot_storage; }
+static void xdev_ext_storfam_host_put(struct xdev_ext_stor_stage *ss, struct xdev_ext_stor_batch *sb)
+{ (void)ss; slot_puts++; sb->host_io = NULL; }
+static int xdev_ext_storfam_host_map(struct xdev_ext_stor_stage *ss, struct xdev_ext_mech_batch *b,
+                                    struct request *req, struct xdev_ext_stor_batch *sb)
+{ (void)ss; (void)b; (void)req; (void)sb; maps++; return 0; }
+/* Existing runtime submit cases are HOST. An accidental PEER submission
+ * must abort at the unchanged resource boundary, never silently succeed. */
+static struct xdev_ext_stor_io *xdev_ext_storfam_peer_get(struct xdev_ext_stor_stage *ss,
+                                                        struct xdev_ext_stor_batch *sb)
+{ (void)ss; (void)sb; abort(); }
+static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss, struct xdev_ext_stor_batch *sb)
+{ (void)ss; (void)sb; abort(); }
+static int xdev_ext_storfam_peer_map(struct xdev_ext_stor_stage *ss, struct xdev_ext_mech_batch *b,
+                                    struct xdev_ext_stor_io *io, u32 bytes)
+{ (void)ss; (void)b; (void)io; (void)bytes; abort(); }
+static int fixture_encode_dptr(void *member, struct xdev_ext_stor_command *command,
+                               const struct xdev_ext_stor_extent *spans, u32 nr,
+                               struct xdev_ext_stor_extent *work, u32 capacity,
+                               void *cpu, __u64 dma, u32 bytes)
+{ (void)member; (void)command; (void)spans; (void)nr; (void)work; (void)capacity;
+  (void)cpu; (void)dma; (void)bytes; abort(); }
+
+/* FAMILY_IO_PRODUCTION */
+
+static const struct xdev_ext_stor_dev_ops fixture_member_ops = {
+ .identity = nvme_xdev_ext_member_identity,
+ .queue = nvme_xdev_ext_member_queue,
+ .decode = nvme_xdev_ext_member_decode,
+ .encode = nvme_xdev_ext_member_encode,
+ .encode_dptr = fixture_encode_dptr,
+ .request_init = nvme_xdev_ext_member_request_init,
+ .post = nvme_xdev_ext_member_post,
+ .poll = nvme_xdev_ext_member_poll,
+};
+'''
+
+
+def build_family_io_fixture(text):
+    """Actual common submit/native post chain; original OS/resource boundary."""
+    header = source('include/linux/xdev_ext_storfam_block.h')
+    block = source('io_uring/family/xdev_ext_storfam_block.c')
+    plan = source('drivers/nvme/host/xdev_ext_peer_nvme_core.h')
+    trace = structure(source('drivers/nvme/host/xdev_ext_native_peer_trace.h'),
+                      'nvme_xdev_ext_peer_trace')
+    command = re.search(r'^struct xdev_ext_stor_command \{.*?^\} __aligned\(8\);',
+                        header, re.M | re.S)
+    if not command:
+        raise AssertionError('production aligned structure missing: xdev_ext_stor_command')
+    types = command[0] + '\n' + '\n'.join(structure(header, n) for n in (
+        'xdev_ext_stor_poll_view', 'xdev_ext_stor_geometry',
+        'xdev_ext_stor_dev_ops', 'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
+        'xdev_ext_stor_stage', 'xdev_ext_stor_batch'))
+    types += '\n' + trace + '\n' + '\n'.join(structure(text, n) for n in (
+        'nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch', 'nvme_xdev_ext_peer_slot'))
+    types += '\nstruct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; u64 ticket; };'
+    # Reuse unchanged recorders, but remove the original owner-specific resource
+    # shims; their moved signatures are supplied in FAMILY_IO_FIXTURE instead.
+    recorders = FIXTURE[FIXTURE.index('/* Recorders and the modelled block layer. */'):
+                       FIXTURE.index('/* PRODUCTION */')]
+    start = recorders.index('static int nvme_xdev_ext_peer_submit(')
+    end = recorders.index('static struct nvme_xdev_ext_mech_batch *xdev_ext_mech_batch_priv(')
+    recorders = recorders[:start] + recorders[end:]
+    recorders = recorders.replace('(void)req; (void)cmd; }',
+                                  'req->nvme.cmd = cmd; }')
+    recorders = recorders.replace(
+        'static struct nvme_xdev_ext_mech_batch *xdev_ext_mech_batch_priv(',
+        'static void *xdev_ext_mech_batch_priv(')
+    identity = HELPERS['identity_boundary']().replace(
+        'struct nvme_ns { struct request_queue *queue;',
+        'struct nvme_ctrl;\nstruct nvme_ns { struct nvme_ctrl *ctrl; struct request_queue *queue;')
+    prefix = FIXTURE[:FIXTURE.index('/* IDENTITY_OS_TYPES */')]
+    prefix += identity + '''
+#define FIXTURE_MEMBER_FAMILY 1
+struct pci_dev; struct xdev_ext_mech_stage_uapi;
+struct xdev_ext_stor_stage; struct xdev_ext_stor_io;
+'''
+    # Type declarations must precede recorders and complete batch consumers.
+    setup, remainder = FAMILY_IO_FIXTURE.split('/* FAMILY_IO_TYPES */')
+    boundary, ops = remainder.split('/* FAMILY_IO_PRODUCTION */')
+    code = ''
+    # This portable structure is one line in the selected header.
+    plan_type = re.search(r'^struct xdev_ext_peer_nvme_plan \{[^\n]*\};', plan, re.M)
+    if not plan_type:
+        raise AssertionError('production structure missing: xdev_ext_peer_nvme_plan')
+    code += plan_type[0] + '\n' + function(plan, 'xdev_ext_peer_nvme_plan')
+    code += '\n' + storage_runtime(KERNEL) + '\n' + HELPERS['storage_poll_runtime'](KERNEL, (
+        'xdev_ext_stor_block_poll_capable', 'xdev_ext_stor_block_poll_opf',
+        'xdev_ext_stor_block_poll_check', 'xdev_ext_stor_block_poll_arm',
+        'xdev_ext_stor_block_poll'))
+    code += '\n' + function(source('drivers/nvme/host/nvme.h'), 'nvme_xdev_ext_capture_identity')
+    native_names = ('nvme_xdev_ext_member_identity', 'nvme_xdev_ext_member_queue',
+                    'nvme_xdev_ext_member_decode', 'nvme_xdev_ext_member_encode',
+                    'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_peer_complete',
+                    'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_peer_end_io',
+                    'nvme_xdev_ext_member_request_init', 'nvme_xdev_ext_member_post',
+                    'nvme_xdev_ext_member_poll', 'nvme_xdev_ext_class_validate',
+                    'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_class_poll')
+    common_names = ('xdev_ext_storfam_validate', 'xdev_ext_storfam_submit_check',
+                    'xdev_ext_storfam_submit', 'xdev_ext_storfam_poll',
+                    'xdev_ext_storfam_host_ready')
+    definitions = [function(block, n) for n in common_names]
+    definitions += [function(text, n) for n in native_names]
+    # Original function signatures, not handwritten behavioral wrappers.
+    prototypes = '\n'.join(d[:d.index('{')].rstrip() + ';' for d in definitions)
+    code += '\n' + prototypes + '\n' + '\n\n'.join(definitions)
+    cases = FIXTURE[FIXTURE.index('static void report(int rc)'):]
+    # Replace complete fixture case functions at their resource-injection
+    # boundary. Reports, command modes and Python assertions stay unchanged.
+    old_pass = function(cases, 'pass_case')
+    new_pass = old_pass.replace('struct nvme_xdev_ext_mech_slot host[4]',
+                               'struct xdev_ext_stor_io host[4]')
+    new_pass = new_pass.replace('\n\tstruct nvme_xdev_ext_peer_res res = { 0 };', '')
+    new_pass = new_pass.replace('peers[0].done', 'peers[0].common.io.done')
+    new_pass = new_pass.replace('peers[1].done', 'peers[1].common.io.done')
+    new_pass = new_pass.replace('peers[2].done', 'peers[2].common.io.done')
+    old_resources = '''\t\tres.slots = peers;
+\t\tres.nr_slots = 3;
+\t\tp.peer = &res;
+\t} else {
+\t\tp.slots = host;
+\t\tp.nr_slots = 4;
+\t}'''
+    new_pass = new_pass.replace(old_resources, '\t}')
+    old_views = ''' p.family.poll_views[0]=(struct xdev_ext_stor_poll_view){.first=p.nr_slots?&host[0].done:NULL,.stride=sizeof(host[0]),.count=p.nr_slots};
+ p.family.poll_views[1]=(struct xdev_ext_stor_poll_view){.first=p.peer?&peers[0].done:NULL,.stride=sizeof(peers[0]),.count=p.peer?p.peer->nr_slots:0};'''
+    new_views = ''' p.family.poll_views[0]=(struct xdev_ext_stor_poll_view){.first=peer?NULL:&host[0].done,.stride=sizeof(host[0]),.count=peer?0:4};
+ p.family.poll_views[1]=(struct xdev_ext_stor_poll_view){.first=peer?&peers[0].common.io.done:NULL,.stride=sizeof(peers[0]),.count=peer?3:0};'''
+    # Match the original injection after migrating the peer completion field.
+    migrated_views = old_views.replace('peers[0].done', 'peers[0].common.io.done')
+    if migrated_views not in new_pass or old_resources not in old_pass:
+        raise AssertionError('family IO fixture resource-injection boundary changed')
+    new_pass = new_pass.replace(migrated_views, new_views)
+    cases = cases.replace(old_pass, new_pass)
+    cases = cases.replace('nvme_xdev_ext_poll_capable(', 'xdev_ext_stor_block_poll_capable(')
+    return (prefix + setup + types + '\n' + recorders + boundary + code + ops +
+            HELPERS['worker_fixture_init']() + '\n' + cases)
+
+
 def build_fixture():
     text = source(NVME)
+    if family_owns_io(text):
+        return build_family_io_fixture(text)
     trace = structure(source('drivers/nvme/host/xdev_ext_native_peer_trace.h'),
                       'nvme_xdev_ext_peer_trace')
     structs = trace + '\n' + '\n'.join(structure(text, n) for n in (
@@ -560,6 +731,43 @@ class NvmePollStructure(unittest.TestCase):
         self.assertIn('return -EOPNOTSUPP;', bind[check:check + 120])
 
     def test_peer_submit_uses_the_same_poll_steps_in_order(self):
+        if family_owns_io(self.text):
+            common = source('io_uring/family/xdev_ext_storfam_block.c')
+            submit = body(common, 'xdev_ext_storfam_submit')
+            post = body(self.text, 'nvme_xdev_ext_member_post')
+            class_submit = body(self.text, 'nvme_xdev_ext_class_submit')
+            self.assertIn('return xdev_ext_storfam_submit(&p->family, b, &bp->family);', class_submit)
+            bind = body(self.text, 'nvme_xdev_ext_class_bind')
+            self.assertIn('xdev_ext_storfam_bind(st, u, &nvme_xdev_ext_member_ops)', bind)
+            common_bind = body(common, 'xdev_ext_storfam_bind')
+            self.assertIn('ss->dev = dev;', common_bind)
+            self.assertIn('ss->member = member;', common_bind)
+            table = re.search(r'^static const struct xdev_ext_stor_dev_ops '
+                              r'nvme_xdev_ext_member_ops = \{.*?^\};', self.text, re.M | re.S)
+            self.assertIsNotNone(table, 'native callback table must own the common submit boundaries')
+            self.assertIn('.post = nvme_xdev_ext_member_post,', table[0])
+            self.assertIn('.queue = nvme_xdev_ext_member_queue,', table[0])
+            self.assertIn('return p->ns->queue;', body(self.text, 'nvme_xdev_ext_member_queue'))
+            alloc = submit.index('blk_mq_alloc_request(ss->dev->queue(ss->member),')
+            opf = submit.index('xdev_ext_stor_block_poll_opf(ss->st->poll,')
+            check = submit.index('xdev_ext_stor_block_poll_check(ss->st->poll, req)')
+            get = submit.index('io = peer ? xdev_ext_storfam_peer_get(ss, sb)')
+            mapping = submit.index('xdev_ext_storfam_peer_map(ss, b, io, sb->posting.byte_length)')
+            call = submit.index('ss->dev->post(ss->member, req, io, b, &sb->command, peer);')
+            self.assertTrue(alloc < opf < check < get < mapping < call)
+            self.assertIn('if (ret)\n\t\tgoto free_request;', submit[check:get])
+            self.assertIn('blk_mq_free_request(req);', submit[submit.index('free_request:'):])
+            self.assertEqual(submit.count('ss->dev->post('), 1)
+            peer_done = submit.index('if (peer) {\n\t\tio->done.b = b;')
+            ticket = submit.index('io->done.ticket = xdev_ext_mech_batch_ticket(b);', peer_done)
+            self.assertTrue(mapping < peer_done < ticket < call)
+            peer_branch = post[post.index('if (peer) {'):post.index('} else {')]
+            self.assertIn('req->end_io = nvme_xdev_ext_peer_end_io;', peer_branch)
+            context = post.index('req->end_io_data = &io->done;')
+            arm = post.index('xdev_ext_stor_block_poll_arm(p->family.st->poll, req, &io->done);')
+            execute = post.index('blk_execute_rq_nowait(req, false);')
+            self.assertTrue(context < arm < execute)
+            return
         peer = body(self.text, 'nvme_xdev_ext_peer_submit')
         queue = 'p->family.dev->queue(p->family.member)' if 'struct xdev_ext_stor_stage family;' in self.text else 'ns->queue'
         alloc = peer.index('blk_mq_alloc_request(' + queue + ',\n\t\t\t\t   xdev_ext_stor_block_poll_opf(st->poll,')
