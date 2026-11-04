@@ -11,7 +11,7 @@ import re
 import subprocess
 import tempfile
 import unittest
-from acquire_red_test import function
+from acquire_red_test import function, session_helpers
 from lease_test import FUNCTIONS, start_queue_closure
 
 HERE = Path(__file__).resolve().parent
@@ -55,7 +55,8 @@ def build_source(adapter, core):
     if FRAME_PAGE not in shared:
         raise RuntimeError('lease fixture frame_page boundary changed')
     shared = shared.replace(FRAME_PAGE, SPLIT_FRAME_PAGE)
-    for name in FUNCTIONS:
+    names = session_helpers(core, [function(core, name) for name in FUNCTIONS]) + list(FUNCTIONS)
+    for name in names:
         shared = shared.replace('/* ' + name + ' */', function(core, name))
     source = (HERE / 'adapter_fixture.c').read_text().replace('/* LEASE_BOUNDARY */', shared)
     structures = []
