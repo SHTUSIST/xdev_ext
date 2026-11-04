@@ -8,6 +8,7 @@ import importlib.util
 import json
 from pathlib import Path
 import re
+import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
@@ -29,11 +30,63 @@ def load_json(text):
 
 def validate(text, qemu_exit, request):
     # Reuse the actual experiment validator, never a host-fixture oracle.
-    path = HERE.parents[4] / 'tests/eval/dmabuf_lifecycle/run.py'
+    # The native assembly and ordinary view have different receipts. Resolve
+    # the canonical authority before importing the mapped experiment runner.
+    context = Path(HERE).absolute()
+    for parent in (context, *context.parents):
+        if parent.is_symlink():
+            raise ValueError('symlink validator source path')
+    native = view = None
+    for parent in (context, *context.parents):
+        if (parent / '.xdev-ext-source.json').is_file():
+            marker = parent / '.xdev-ext-source.json'
+            native = parent
+            break
+        if (parent / 'view.json').is_file():
+            marker = parent / 'view.json'
+            view = parent
+            break
+        if (parent / 'source-layout.json').is_file():
+            marker = None
+            repo = parent
+            break
+    else:
+        raise ValueError('validator source has no canonical/assembly/view receipt')
+    if marker is not None:
+        if marker.is_symlink():
+            raise ValueError('symlink validator source receipt')
+        repo = Path(load_json(marker.read_text())['canonical_root'])
+    if not repo.is_absolute() or any(p.is_symlink() for p in (repo, *repo.parents)):
+        raise ValueError('invalid canonical source root')
+    repo = repo.resolve()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+    if Path(git('rev-parse', '--show-toplevel')).resolve() != repo or git('status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('canonical authority must be its own clean Git checkout')
+    git('ls-files', '--error-unmatch', '--', 'source-layout.json', 'tools/layout.py', 'tools/build/prepare_sources.py')
+    for name in ('source-layout.json', 'tools/layout.py', 'tools/build/prepare_sources.py'):
+        path = repo / name
+        if not path.is_file() or any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError('invalid fence canonical metadata: ' + name)
+    sys.path.insert(0, str(repo / 'tools'))
+    from layout import load_layout, safe_file, isolated_file
+    layout = load_layout(repo)
+    path = safe_file(repo, layout.by_logical['tests/eval/dmabuf_lifecycle/run.py'])
     spec = importlib.util.spec_from_file_location('fence_actual_runner', path)
     runner = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(runner)
-    spec = importlib.util.spec_from_file_location('fence_debug', HERE / 'xdev_ext_mech_zc_debug.py')
+    if native is not None:
+        subprocess.run([sys.executable, '-B', str(safe_file(repo, 'tools/build/prepare_sources.py')),
+                        '--component', 'linux', '--output', str(native), '--check'],
+                       check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        view = repo / 'build/source-view'
+    identity = runner.source_identity(view / 'tests/eval/dmabuf_lifecycle' if view is not None else path.parent)
+    for key, actual in (('exact_sha', identity['revision']),
+                        ('lifecycle_header_sha256', identity['lifecycle_header_sha256'])):
+        if request.get(key) != actual:
+            raise ValueError('request differs from canonical source identity: ' + key)
+    debug_path = safe_file(repo, layout.by_native[('linux', 'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py')])
+    spec = importlib.util.spec_from_file_location('fence_debug', debug_path)
     debug = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(debug)
     debug.check_console(text)
@@ -139,7 +192,7 @@ def main(argv):
     try:
         result = validate(Path(argv[0]).read_text(), int(Path(argv[1]).read_text()),
                           load_json(Path(argv[2]).read_text()))
-    except (OSError, ValueError, TypeError, AttributeError) as error:
+    except (OSError, ValueError, KeyError, TypeError, AttributeError, subprocess.SubprocessError) as error:
         print('XDEV_EXT_FENCE_VALIDATE=FAIL ' + str(error), file=sys.stderr)
         return 1
     print('XDEV_EXT_FENCE_VALIDATE=PASS cases=%d performance_claim=none' % result['cases'])
