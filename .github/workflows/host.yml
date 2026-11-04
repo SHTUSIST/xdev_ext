@@ -70,6 +70,11 @@ jobs:
         run: |
           python3 tests/network/plan_cover/run.py --source-root "$GITHUB_WORKSPACE" --phase shared --output "$RUNNER_TEMP/network-plan-cover"
           python3 tests/network/plan_cover/mutations.py --source-root "$GITHUB_WORKSPACE" --phase shared --output "$RUNNER_TEMP/network-plan-mutants"
+      - name: Typed NET and XDomain peer lease ownership
+        working-directory: .
+        run: |
+          python3 tests/network/peer_lease/run.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/network-peer-lease"
+          python3 tests/network/peer_lease/mutations.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/network-peer-lease-mutants"
       - name: Shared receive ownership and composed library contracts
         working-directory: .
         run: |

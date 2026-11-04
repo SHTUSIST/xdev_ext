@@ -6989,6 +6989,42 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h"
     },
     {
+      "source": "tests/network/peer_lease/README.md",
+      "logical_path": "tests/network/peer_lease/README.md"
+    },
+    {
+      "source": "tests/network/peer_lease/boundary.h",
+      "logical_path": "tests/network/peer_lease/boundary.h"
+    },
+    {
+      "source": "tests/network/peer_lease/boundary_impl.h",
+      "logical_path": "tests/network/peer_lease/boundary_impl.h"
+    },
+    {
+      "source": "tests/network/peer_lease/checks.h",
+      "logical_path": "tests/network/peer_lease/checks.h"
+    },
+    {
+      "source": "tests/network/peer_lease/contract.c",
+      "logical_path": "tests/network/peer_lease/contract.c"
+    },
+    {
+      "source": "tests/network/peer_lease/mutations.py",
+      "logical_path": "tests/network/peer_lease/mutations.py"
+    },
+    {
+      "source": "tests/network/peer_lease/peer_native.h",
+      "logical_path": "tests/network/peer_lease/peer_native.h"
+    },
+    {
+      "source": "tests/network/peer_lease/run.py",
+      "logical_path": "tests/network/peer_lease/run.py"
+    },
+    {
+      "source": "tests/network/peer_lease/xd_native.h",
+      "logical_path": "tests/network/peer_lease/xd_native.h"
+    },
+    {
       "source": "tests/network/plan_cover/README.md",
       "logical_path": "tests/network/plan_cover/README.md"
     },
