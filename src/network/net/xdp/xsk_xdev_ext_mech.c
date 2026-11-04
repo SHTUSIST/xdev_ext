@@ -125,6 +125,7 @@ struct xsk_xdev_ext_mech_tx_batch {
 	struct xsk_mech_zc_batch completion;
 	u32 n;
 	s32 err[XDEV_EXT_MECH_MAX_FRAMES];
+	struct xdev_ext_net_lease pool_lease[XDEV_EXT_MECH_MAX_FRAMES];
 };
 
 static const struct xdev_ext_mech_pool_ops xsk_xdev_ext_mech_pool_ops;
@@ -482,6 +483,56 @@ static const struct xdev_ext_mech_pool_ops xsk_xdev_ext_mech_pool_ops = {
 	.recycle = xsk_xdev_ext_mech_pool_recycle,
 	.release = xsk_xdev_ext_mech_pool_release,
 };
+
+/* tx_lock excludes pool_dead before the native mapping can be invalidated. */
+static int xsk_mech_pool_dma_check_locked(void *owner,
+		struct xdev_ext_mech_pool *pool,
+		const struct xdev_ext_mech_frame *frame, u32 frame_off, u32 len)
+{
+	struct xsk_xdev_ext_mech_provider *p = owner;
+	struct xsk_buff_pool *xp = p->xp;
+	u64 base = frame->umem_addr, limit;
+
+	lockdep_assert_held(&p->tx_lock);
+	if (pool->ops != &xsk_xdev_ext_mech_pool_ops || pool->priv != p || !p->zc)
+		return -EINVAL;
+	if (p->stopped || !xp || !xp->umem || !xp->dev || !xp->dma_pages ||
+	    xp->dma_pages_cnt != xp->umem->npgs)
+		return -ENXIO;
+	if (p->xs->pool != xp || p->xs->umem != xp->umem ||
+	    pool->pages != xp->umem->pgs || pool->frame_size != xp->chunk_size ||
+	    pool->nr_frames != xp->umem->chunks || xp->heads_cnt != pool->nr_frames)
+		return -EXDEV;
+	if (xp->unaligned || base != (u64)frame->index * pool->frame_size ||
+	    frame->pool_priv != &xp->heads[frame->index])
+		return -ERANGE;
+	limit = xp->umem->size;
+	if (base > limit || frame_off > limit - base ||
+	    len > limit - base - frame_off)
+		return -ERANGE;
+	limit = (u64)xp->dma_pages_cnt << PAGE_SHIFT;
+	if (base > limit || frame_off > limit - base ||
+	    len > limit - base - frame_off)
+		return -ERANGE;
+	return 0;
+}
+
+static const struct xdev_ext_net_pool_dma_ops xsk_mech_pool_dma_ops = {
+	.check_locked = xsk_mech_pool_dma_check_locked,
+};
+
+/* Admission and publication share this uninterrupted provider lock interval.
+ * The admitted UMEM span is the only input to the native mapping lookup. */
+static void xsk_mech_pool_dma_sync_locked(struct xsk_xdev_ext_mech_provider *p,
+		const struct xdev_ext_net_lease *lease)
+{
+	const struct xdev_ext_net_pool_dma *ref = &lease->u.pool;
+
+	lockdep_assert_held(&p->tx_lock);
+	xp_dma_sync_for_device(p->xp,
+			xp_raw_get_dma(p->xp, ref->umem_addr + ref->frame_off),
+			ref->len);
+}
 
 /*
  * xsk_bind(), XDP_SHARED_UMEM onto @umem_xs, process context: hold
@@ -999,7 +1050,7 @@ static void xsk_mech_zc_done(struct list_head *done)
 
 /* tx_lock held. No batch callback runs with this lock held. */
 static void xsk_mech_zc_retire(struct xsk_xdev_ext_mech_provider *p, u32 at,
-			     int result, struct list_head *done)
+			     int result, bool quiesced, struct list_head *done)
 {
 	struct xsk_mech_zc_slot *slot = &p->slots[at];
 	struct xsk_xdev_ext_mech_tx_batch *tb = slot->batch;
@@ -1021,6 +1072,7 @@ static void xsk_mech_zc_retire(struct xsk_xdev_ext_mech_provider *p, u32 at,
 		xsk_mech_zc_mark_done(&p->ring, p->slots, at);
 	else
 		slot->state = XSK_MECH_ZC_DONE;
+	xdev_ext_net_lease_pool_release(&tb->pool_lease[slot->slot], quiesced);
 	if (xsk_mech_zc_retire_result(&tb->completion, result,
 				    &tb->err[slot->slot]))
 		list_add_tail(&tb->done, done);
@@ -1051,7 +1103,7 @@ static void xsk_mech_zc_cancel_pending(struct xsk_xdev_ext_mech_provider *p, int
 			dma_sync_single_for_cpu(p->xp->dev,
 				xp_raw_get_dma(p->xp, slot->desc.addr), slot->desc.len,
 				DMA_BIDIRECTIONAL);
-		xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result, &done);
+		xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result, true, &done);
 	}
 	p->ring.issued = p->ring.prod;
 	xsk_mech_zc_reclaim(&p->ring, p->slots);
@@ -1086,7 +1138,8 @@ static void xsk_mech_zc_stop(struct xsk_xdev_ext_mech_provider *p, int result)
 				xp_raw_get_dma(p->xp, slot->desc.addr), slot->desc.len,
 				DMA_BIDIRECTIONAL);
 		if (slot->state != XSK_MECH_ZC_DONE)
-			xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result, &done);
+			xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result,
+					   slot->state == XSK_MECH_ZC_PENDING, &done);
 	}
 	p->ring.cons = p->ring.issued = p->ring.prod;
 	spin_unlock_irqrestore(&p->tx_lock, flags);
@@ -1201,7 +1254,7 @@ int xsk_xdev_ext_mech_tx_complete(struct xsk_buff_pool *pool, u32 n, int result,
 			tb->native_error = result ?: slot->result;
 		xsk_mech_zc_set_result(&p->ring, p->slots, at, result);
 		if (!set_only)
-			xsk_mech_zc_retire(p, at, result ?: slot->result, &done);
+			xsk_mech_zc_retire(p, at, result ?: slot->result, true, &done);
 		at = next;
 	}
 	if (!set_only)
@@ -1260,6 +1313,26 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 	err = xsk_mech_zc_reserve(&p->ring, nr, &start);
 	if (err)
 		goto unlock;
+	/* Prepare every original frame index before the first native effect. */
+	for (i = 0; i < xst->tx_n; i++) {
+		const struct xdp_desc *d = &xst->tx_desc[i];
+		struct xdev_ext_mech_frame f;
+
+		if (*xst->tx_tag[i] == xdev_ext_mech_batch_id(b))
+			continue;
+		err = xdev_ext_mech_batch_frame(b, i, &f);
+		if (err)
+			goto rollback;
+		if (d->addr < f.umem_addr || d->addr - f.umem_addr > U32_MAX) {
+			err = -ERANGE;
+			goto rollback;
+		}
+		err = xdev_ext_net_lease_pool(&tb->pool_lease[i], b, i,
+				d->addr - f.umem_addr, d->len,
+				&xsk_mech_pool_dma_ops, p);
+		if (err)
+			goto rollback;
+	}
 	for (i = 0; i < xst->tx_n; i++) {
 		const struct xdp_desc *d = &xst->tx_desc[i];
 		struct xsk_mech_zc_slot *slot;
@@ -1268,7 +1341,7 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 		if (*xst->tx_tag[i] == xdev_ext_mech_batch_id(b))
 			continue;
 		xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[i]);
-		xp_dma_sync_for_device(p->xp, xp_raw_get_dma(p->xp, d->addr), d->len);
+		xsk_mech_pool_dma_sync_locked(p, &tb->pool_lease[i]);
 		slot = &p->slots[(start + out++) & (p->ring.capacity - 1)];
 		*slot = (struct xsk_mech_zc_slot) {
 			.desc = *d, .batch = tb, .slot = i,
@@ -1294,6 +1367,13 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 		xdev_ext_mech_stage_dead(st, err);
 	}
 	return 0;
+rollback:
+	/* Only indices before the refusal acquired metadata in this attempt. */
+	while (i--) {
+		if (*xst->tx_tag[i] != xdev_ext_mech_batch_id(b))
+			xdev_ext_net_lease_pool_release(&tb->pool_lease[i], true);
+	}
+	p->ring.prod = start;
 unlock:
 	spin_unlock_irqrestore(&p->tx_lock, flags);
 	mutex_unlock(&xs->mutex);

@@ -49,7 +49,7 @@ struct xdev_ext_mech_pool{struct file *authority;u64 generation;u32 nr_frames,fr
 struct xdev_ext_mech_session{u32 depth;bool admits;struct xdev_ext_mech_pool pool;};
 struct xdev_ext_mech_stage{void *priv;struct xdev_ext_mech_session *s;u32 direction;bool create_reporting;u32 create_phase;};
 #include "actual_frame.h"
-struct xdev_ext_mech_batch{struct xdev_ext_mech_frame frame[32];int frame_error;u32 bad_frame;u64 ticket;void *priv;unsigned claims,publishes;u64 claimed_ticket,published_ticket;int status;bool sequester;};
+struct xdev_ext_mech_batch{struct xdev_ext_mech_session *s;struct xdev_ext_mech_frame frame[32];int frame_error;u32 bad_frame;u64 ticket;void *priv;unsigned claims,publishes;u64 claimed_ticket,published_ticket;int status;bool sequester;};
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s){return s->depth;}
 static bool xdev_ext_mech_session_admits(struct xdev_ext_mech_session *s){return s->admits;}
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s){return &s->pool;}

@@ -114,6 +114,22 @@ jobs:
           python3 -I tests/core/peer_dmabuf/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-admission"
           python3 -I tests/core/peer_dmabuf/importer_run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-importer"
           make -C tests/core/peer_dmabuf cli-test OUTPUT="$RUNNER_TEMP/dmabuf-native-cli"
+      - name: Ordinary XSK DATA pool authority and count-journal contracts
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 tests/network/pool_dma/run.py --source "$GITHUB_WORKSPACE" --out-root "$RUNNER_TEMP/network-pool-data" --mutations
+          python3 - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          reports = list((Path(os.environ['RUNNER_TEMP']) / 'network-pool-data').glob('pool-dma-*/summary.json'))
+          assert len(reports) == 1, reports
+          runs = json.loads(reports[0].read_text())['runs']
+          assert len(runs) == 12, runs
+          assert runs[0]['verdict'] == 'PASS' and runs[0]['candidate_setup'] == 'available', runs[0]
+          assert runs[0]['invalid_mapping_verdict'] == 'PASS', runs[0]
+          assert all(r['compile_exit'] == 0 and r['verdict'] == 'KILLED' for r in runs[1:]), runs[1:]
+          PYCODE
       - name: Reference-counted lifecycle and CPU transform contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
       - name: CPU class BPF compute callback rules, kfuncs and wiring

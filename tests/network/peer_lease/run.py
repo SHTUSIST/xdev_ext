@@ -2,7 +2,7 @@
 """Execute actual NET family, peer and selected NET/XD adapter bodies."""
 import argparse,json,pathlib,re,subprocess,sys,tempfile
 HERE=pathlib.Path(__file__).resolve().parent
-FILES={'family':'src/network/io_uring/family/xdev_ext_netfam.c','types':'src/network/include/linux/xdev_ext_netfam.h','peer':'src/core/io_uring/xdev_ext_peer.c','fd':'src/core/io_uring/xdev_ext_peer_fd.c','net':'src/network/io_uring/xdev_ext_mech_net.c','xd':'src/network/io_uring/xdomain/xdev_ext_xdomain_ring.c','xdc':'src/network/io_uring/xdomain/xdev_ext_xdomain_class.c','xdh':'src/network/io_uring/xdomain/xdev_ext_xdomain_core.h','tb':'src/network/include/linux/thunderbolt.h'}
+FILES={'family':'src/network/io_uring/family/xdev_ext_netfam.c','types':'src/network/include/linux/xdev_ext_netfam.h','core':'src/core/io_uring/xdev_ext_mech.c','peer':'src/core/io_uring/xdev_ext_peer.c','fd':'src/core/io_uring/xdev_ext_peer_fd.c','net':'src/network/io_uring/xdev_ext_mech_net.c','xd':'src/network/io_uring/xdomain/xdev_ext_xdomain_ring.c','xdc':'src/network/io_uring/xdomain/xdev_ext_xdomain_class.c','xdh':'src/network/io_uring/xdomain/xdev_ext_xdomain_core.h','tb':'src/network/include/linux/thunderbolt.h'}
 def block(text,name,kind='function'):
  if kind=='struct':pat=r'^struct\s+'+re.escape(name)+r'\s*\{'
  elif kind=='variable':pat=r'^static\s+const\s+struct\s+\w+\s+'+re.escape(name)+r'\s*=\s*\{'
@@ -33,7 +33,9 @@ def extract(root,out):
  for name in ['xdev_ext_peer_stale','xdev_ext_peer_direction_valid','xdev_ext_peer_acquire','xdev_ext_peer_release']:peer.append(block(t['peer'],name))
  for name in ['xdev_ext_peer_file_acquire','xdev_ext_peer_fd_release']:peer.append(block(t['fd'],name))
  (out/'actual_peer.h').write_text('\n'.join(peer))
- (out/'actual_runtime.h').write_text(without_includes(t['family']))
+ # Full family compilation needs this actual core accessor; POOL leases are
+ # outside this PEER cohort's behavior coverage.
+ (out/'actual_runtime.h').write_text(block(t['core'],'xdev_ext_mech_batch_session')+'\n'+without_includes(t['family']))
  net=[block(t['net'].split('#else',1)[-1],'xdev_ext_net_batch','struct')]
  # Select the completion-driven branch declarations; legacy macro branch must not shadow them.
  n=t['net'][t['net'].index('static void xdev_ext_net_tx_done'):]

@@ -194,6 +194,61 @@ int xdev_ext_netfam_lease_host(struct xdev_ext_netfam_stage *ns,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_netfam_lease_host);
 
+/* The batch is authoritative; the provider certifies only its live mapping.
+ * This metadata owns no mapping or reference independently of batch custody. */
+int xdev_ext_net_lease_pool(struct xdev_ext_net_lease *lease,
+		struct xdev_ext_mech_batch *batch, u32 frame_pos,
+		u32 frame_off, u32 len,
+		const struct xdev_ext_net_pool_dma_ops *ops, void *owner)
+{
+	struct xdev_ext_net_pool_dma ref;
+	struct xdev_ext_mech_pool *pool;
+	struct xdev_ext_mech_frame f;
+	int ret;
+
+	if (!lease || !batch || !ops || !ops->check_locked || !owner)
+		return -EINVAL;
+	if (!len)
+		return -EPROTO;
+	ret = xdev_ext_mech_batch_frame(batch, frame_pos, &f);
+	if (ret)
+		return ret;
+	pool = xdev_ext_mech_session_pool(xdev_ext_mech_batch_session(batch));
+	if (!pool || f.index >= pool->nr_frames ||
+	    f.data_off > pool->frame_size ||
+	    f.data_len > pool->frame_size - f.data_off)
+		return -EINVAL;
+	if (frame_off > f.data_off ||
+	    len != (u64)f.data_off - frame_off + f.data_len)
+		return -ERANGE;
+	if (lease->kind != XDEV_EXT_NET_LEASE_NONE)
+		return -EBUSY;
+	ret = ops->check_locked(owner, pool, &f, frame_off, len);
+	if (ret)
+		return ret;
+	ref = (struct xdev_ext_net_pool_dma) {
+		.owner = owner,
+		.umem_addr = f.umem_addr,
+		.frame_index = f.index,
+		.frame_off = frame_off,
+		.len = len,
+	};
+	lease->u.pool = ref;
+	lease->kind = XDEV_EXT_NET_LEASE_POOL_DMA;
+	return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_net_lease_pool);
+
+void xdev_ext_net_lease_pool_release(struct xdev_ext_net_lease *lease,
+		bool quiesced)
+{
+	if (lease->kind != XDEV_EXT_NET_LEASE_POOL_DMA || !quiesced)
+		return;
+	memset(&lease->u.pool, 0, sizeof(lease->u.pool));
+	lease->kind = XDEV_EXT_NET_LEASE_NONE;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_net_lease_pool_release);
+
 void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 {
 	u32 i;

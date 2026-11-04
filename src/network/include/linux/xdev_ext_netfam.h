@@ -25,6 +25,21 @@ enum xdev_ext_net_lease_kind {
 	XDEV_EXT_NET_LEASE_NONE = 0,
 	XDEV_EXT_NET_LEASE_PEER_DMA = 1,
 	XDEV_EXT_NET_LEASE_HOST_CPU = 2,
+	XDEV_EXT_NET_LEASE_POOL_DMA = 3,
+};
+struct xdev_ext_net_pool_dma {
+	void *owner;		/* provider identity, opaque to the family */
+	u64 umem_addr;		/* chunk base, never a DMA address */
+	u32 frame_index;
+	u32 frame_off;
+	u32 len;		/* complete packet, including header room */
+};
+struct xdev_ext_net_pool_dma_ops {
+	/* Provider lock held through check and publication. No allocation,
+	 * sync, reference acquisition, callback or publication here. */
+	int (*check_locked)(void *owner, struct xdev_ext_mech_pool *pool,
+			    const struct xdev_ext_mech_frame *frame,
+			    u32 frame_off, u32 len);
 };
 struct xdev_ext_net_lease {
 	u32 kind;
@@ -34,6 +49,7 @@ struct xdev_ext_net_lease {
 			void *addr;
 			u32 len;
 		} host;
+		struct xdev_ext_net_pool_dma pool;
 	} u;
 };
 struct xdev_ext_net_elem {
@@ -139,6 +155,13 @@ int  xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net
 /* Worker-only borrow from slot->batch; stage/session/batch custody stays held. */
 int  xdev_ext_netfam_lease_host(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot,
 				u32 i, u32 frame_pos, u32 frame_off, u32 len);
+/* Worker-only, with batch/session custody and the provider lock held. */
+int xdev_ext_net_lease_pool(struct xdev_ext_net_lease *lease,
+		struct xdev_ext_mech_batch *batch, u32 frame_pos,
+		u32 frame_off, u32 len,
+		const struct xdev_ext_net_pool_dma_ops *ops, void *owner);
+void xdev_ext_net_lease_pool_release(struct xdev_ext_net_lease *lease,
+		bool quiesced);
 int  xdev_ext_netfam_post(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot);
 void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced);
 void xdev_ext_netfam_fill_cqe(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot **slotp);
