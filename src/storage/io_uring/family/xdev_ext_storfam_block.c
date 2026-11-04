@@ -1,8 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Storage-family block payload qualification and bio assembly. */
+/* Storage-family block resources, payload mapping and async issue/consume. */
 #include <linux/bio.h>
 #include <linux/blk-mq.h>
 #include <linux/export.h>
+#include <linux/dma-mapping.h>
+#include <linux/highmem.h>
+#include <linux/pci.h>
+#include <linux/sizes.h>
+#include <linux/slab.h>
+#include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_requester.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_storfam_block.h>
 #include <linux/xdev_ext_storfam_runtime.h>
@@ -153,6 +160,467 @@ int xdev_ext_stor_block_poll(struct request_queue *queue,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll);
 
+/* Process context: only after drain, or unwinding a failed CREATE. */
+static bool xdev_ext_storfam_host_resources_free(struct xdev_ext_stor_stage *p)
+{
+	u32 i;
+
+	if (!p->slots)
+		return true;
+	for (i = 0; i < p->nr_slots; i++)
+		if (WARN_ON_ONCE(p->slots[i].runtime.busy))
+			return false; /* Accepted or quarantined leases remain pinned. */
+	p->poll_views[0] = (struct xdev_ext_stor_poll_view) {};
+	for (i = 0; i < p->nr_slots; i++) {
+		struct xdev_ext_stor_io *slot = &p->slots[i];
+
+		if (slot->bio_live)
+			bio_uninit(slot->bio);
+#if !defined(CONFIG_XDEV_EXT_MECH_ZEROCOPY) && defined(CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)
+		{
+			u32 j;
+
+			for (j = 0; j < slot->nr_bounce; j++)
+				if (slot->bounce[j])
+					__free_page(slot->bounce[j]);
+			kfree(slot->bounce);
+		}
+#endif
+		kfree(slot->bio);
+	}
+	kfree(p->slots);
+	p->slots = NULL;
+	p->pool.free = NULL;
+	p->nr_slots = 0;
+	return true;
+}
+
+/*
+ * CREATE: reserve metadata by depth, never native request tags or DMA state.
+ * A frame may start at the last byte of a physical page. The conservative
+ * page bound is capped at the same bio limit enforced by map admission.
+ */
+static int xdev_ext_storfam_host_resources_init(struct xdev_ext_stor_stage *p)
+{
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(p->st->s);
+	u64 pieces;
+	u32 i;
+
+	if (xdev_ext_mech_session_pool(p->st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
+		return 0;
+	p->nr_slots = xdev_ext_mech_session_depth(p->st->s);
+	if (!p->nr_slots || !l->seg_len || !l->group_bytes || !l->frame_size)
+		return -EINVAL;
+	pieces = DIV_ROUND_UP((u64)l->group_bytes, l->seg_len) *
+		 DIV_ROUND_UP((u64)l->frame_size + PAGE_SIZE - 1, PAGE_SIZE);
+	if (!pieces)
+		return -EINVAL;
+	p->nr_vecs = min_t(u64, pieces, BIO_MAX_INLINE_VECS);
+	p->slots = kcalloc(p->nr_slots, sizeof(*p->slots), GFP_KERNEL);
+	if (!p->slots)
+		return -ENOMEM;
+	for (i = 0; i < p->nr_slots; i++) {
+		struct xdev_ext_stor_io *slot = &p->slots[i];
+
+		slot->bio = bio_kmalloc(p->nr_vecs, GFP_KERNEL);
+		if (!slot->bio)
+			goto fail;
+#if !defined(CONFIG_XDEV_EXT_MECH_ZEROCOPY) && defined(CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)
+		{
+			u32 j, nr = DIV_ROUND_UP(l->group_bytes, PAGE_SIZE);
+
+			/* This explicitly marked compatibility build may copy CPU payloads. */
+			if (nr && nr <= BIO_MAX_INLINE_VECS) {
+				slot->bounce = kcalloc(nr, sizeof(*slot->bounce), GFP_KERNEL);
+				if (!slot->bounce)
+					goto fail;
+				slot->nr_bounce = nr;
+				for (j = 0; j < nr; j++) {
+					slot->bounce[j] = alloc_page(GFP_KERNEL);
+					if (!slot->bounce[j])
+						goto fail;
+				}
+			}
+		}
+#endif
+		xdev_ext_stor_slot_add(&p->pool, &slot->runtime);
+	}
+	p->poll_views[0] = (struct xdev_ext_stor_poll_view) {
+		.first = &p->slots[0].done,
+		.stride = sizeof(*p->slots),
+		.count = p->nr_slots,
+	};
+	return 0;
+fail:
+	xdev_ext_storfam_host_resources_free(p);
+	return -ENOMEM;
+}
+
+/* Worker: no accepted command can share a bio or completion context. */
+static struct xdev_ext_stor_io *
+xdev_ext_storfam_host_get(struct xdev_ext_stor_stage *p,
+		struct xdev_ext_stor_batch *bp)
+{
+	struct xdev_ext_stor_io *slot;
+	struct xdev_ext_stor_slot *node;
+
+	node = xdev_ext_stor_slot_get(&p->pool, bp->host_io != NULL);
+	if (IS_ERR(node))
+		return ERR_CAST(node);
+	slot = container_of(node, struct xdev_ext_stor_io, runtime);
+	slot->done.uncertain = false;
+	bp->host_io = slot;
+	return slot;
+}
+
+/* Worker: preaccept unwind, or native completion consumed by fill_cqe. */
+static void xdev_ext_storfam_host_put(struct xdev_ext_stor_stage *p,
+		struct xdev_ext_stor_batch *bp)
+{
+	struct xdev_ext_stor_io *slot = bp->host_io;
+
+	if (!slot || slot->done.uncertain)
+		return;
+	if (slot->bio_live) {
+		bio_uninit(slot->bio);
+		slot->bio_live = false;
+	}
+	bp->bio = NULL;
+	bp->bounce = NULL;
+	bp->nr_bounce = 0;
+	bp->host_io = NULL;
+	xdev_ext_stor_slot_put(&p->pool, &slot->runtime, false);
+}
+
+/* One descriptor page and one inline-span container per possible command. */
+#define XDEV_EXT_STOR_PEER_MAX_SPANS 512U
+struct xdev_ext_stor_peer_resources {
+	struct device *dma_dev;
+	void *slots;
+	struct xdev_ext_stor_pool pool;
+	struct xdev_ext_peer_fd_lease *leases;
+	void *list_cpu;
+	dma_addr_t list_dma;
+	size_t list_bytes;
+	u32 nr_slots, max_pieces;
+};
+
+static struct xdev_ext_stor_io *
+xdev_ext_storfam_peer_io(struct xdev_ext_stor_stage *ss, u32 index)
+{
+	return (void *)((char *)ss->peer->slots +
+		(size_t)index * ss->dev->peer_slot_bytes);
+}
+
+static bool xdev_ext_storfam_peer_resources_free(struct xdev_ext_stor_stage *ss)
+{
+	struct xdev_ext_stor_peer_resources *res = ss->peer;
+	u32 i;
+
+	if (!res)
+		return true;
+	for (i = 0; i < res->nr_slots; i++)
+		if (WARN_ON_ONCE(xdev_ext_storfam_peer_io(ss, i)->runtime.busy))
+			return false;
+	ss->poll_views[1] = (struct xdev_ext_stor_poll_view) {};
+	if (res->list_cpu)
+		dma_free_coherent(res->dma_dev, res->list_bytes, res->list_cpu,
+				  res->list_dma);
+	kvfree(res->leases);
+	kvfree(res->slots);
+	kfree(res);
+	ss->peer = NULL;
+	return true;
+}
+
+static int xdev_ext_storfam_peer_resources_init(struct xdev_ext_stor_stage *ss)
+{
+	struct xdev_ext_mech_stage *st = ss->st;
+	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
+	u32 i, depth = xdev_ext_mech_session_depth(st->s);
+	struct pci_dev *requester;
+	struct device *dev;
+	struct xdev_ext_stor_peer_resources *res;
+	u64 pieces;
+
+	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER)
+		return 0;
+	requester = ss->dev->requester(ss->member);
+	if (!requester)
+		return -EOPNOTSUPP;
+	dev = &requester->dev;
+	if (!depth || !l->seg_len || !l->group_bytes || !l->frame_size)
+		return -EINVAL;
+	pieces = DIV_ROUND_UP((u64)l->group_bytes, l->seg_len) *
+		 (DIV_ROUND_UP((u64)l->frame_size, SZ_4K) + 1);
+	res = kzalloc(sizeof(*res), GFP_KERNEL);
+	if (!res)
+		return -ENOMEM;
+	ss->peer = res;
+	res->dma_dev = dev;
+	res->max_pieces = min_t(u64, pieces, XDEV_EXT_STOR_PEER_MAX_SPANS);
+	res->slots = kvcalloc(depth, ss->dev->peer_slot_bytes, GFP_KERNEL);
+	res->leases = kvcalloc((size_t)depth * res->max_pieces,
+			       sizeof(*res->leases), GFP_KERNEL);
+	res->list_bytes = (size_t)depth * SZ_4K;
+	if (res->slots && res->leases)
+		res->list_cpu = dma_alloc_coherent(dev, res->list_bytes,
+						  &res->list_dma, GFP_KERNEL);
+	if (!res->list_cpu) {
+		xdev_ext_storfam_peer_resources_free(ss);
+		return -ENOMEM;
+	}
+	res->nr_slots = depth;
+	for (i = 0; i < depth; i++) {
+		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);
+		struct xdev_ext_stor_peer_io *prefix = (void *)io;
+
+		io->leases = &res->leases[(size_t)i * res->max_pieces];
+		io->spans = prefix->spans;
+		io->list_cpu = (char *)res->list_cpu + (size_t)i * SZ_4K;
+		io->list_dma = res->list_dma + (dma_addr_t)i * SZ_4K;
+		io->peer_native = (char *)io + ss->dev->peer_native_offset;
+		xdev_ext_stor_slot_add(&res->pool, &io->runtime);
+	}
+	ss->poll_views[1] = (struct xdev_ext_stor_poll_view) {
+		.first = &xdev_ext_storfam_peer_io(ss, 0)->done,
+		.stride = ss->dev->peer_slot_bytes,
+		.count = res->nr_slots,
+	};
+	return 0;
+}
+
+static struct xdev_ext_stor_io *
+xdev_ext_storfam_peer_get(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_stor_batch *sb)
+{
+	struct xdev_ext_stor_io *io;
+	struct xdev_ext_stor_slot *node;
+
+	node = xdev_ext_stor_slot_get(&ss->peer->pool, sb->peer_io != NULL);
+	if (IS_ERR(node))
+		return ERR_CAST(node);
+	io = container_of(node, struct xdev_ext_stor_io, runtime);
+	io->nr_leases = 0;
+	io->done.uncertain = false;
+	sb->peer_io = io;
+	return io;
+}
+
+static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_stor_batch *sb)
+{
+	struct xdev_ext_stor_io *io = sb->peer_io;
+	bool quiesced;
+	u32 i;
+
+	if (!io)
+		return;
+	quiesced = !io->done.uncertain;
+	for (i = 0; i < io->nr_leases; i++)
+		xdev_ext_peer_fd_release(&io->leases[i], quiesced);
+	ss->dev->retire_peer(ss->member, io, quiesced);
+	io->nr_leases = 0;
+	sb->peer_io = NULL;
+	if (!quiesced)
+		return;
+	xdev_ext_stor_slot_put(&ss->peer->pool, &io->runtime, false);
+}
+
+static int xdev_ext_storfam_peer_map(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_io *io,
+		u32 bytes)
+{
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(ss->st->s);
+	struct file *authority = xdev_ext_peer_mech_pool_file(pool);
+	u64 generation = xdev_ext_peer_mech_pool_generation(pool);
+	enum dma_data_direction dir = ss->window.write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+	u32 pos, total = 0, nr = xdev_ext_mech_batch_nr_frames(b);
+	int ret;
+
+	if (!authority || !nr)
+		return -EINVAL;
+	for (pos = 0; pos < nr; pos++) {
+		struct xdev_ext_mech_frame f;
+		u32 left, len;
+		u64 off;
+
+		ret = xdev_ext_mech_batch_frame(b, pos, &f);
+		if (ret)
+			return ret;
+		if (f.kaddr || !f.data_len || f.data_off > pool->frame_size ||
+		    f.data_len > pool->frame_size - f.data_off ||
+		    f.umem_addr != (u64)f.index * pool->frame_size)
+			return -EPROTO;
+		for (off = f.umem_addr + f.data_off, left = f.data_len; left;
+		     off += len, left -= len) {
+			struct xdev_ext_peer_fd_lease *l;
+
+			if (io->nr_leases == ss->peer->max_pieces)
+				return -EREMOTEIO;
+			l = &io->leases[io->nr_leases];
+			ret = xdev_ext_peer_lease_split(authority,
+					to_pci_dev(ss->peer->dma_dev), generation,
+					off, left, dir, l);
+			if (ret)
+				return ret;
+			io->nr_leases++;
+			len = l->lease.len;
+			if (!len || len > left || total > bytes || len > bytes - total)
+				return -EPROTO;
+			io->spans[io->nr_leases - 1] =
+				(struct xdev_ext_stor_extent){ l->lease.dma_address, len };
+			total += len;
+		}
+	}
+	return total == bytes ? 0 : -EINVAL;
+}
+#if !defined(CONFIG_XDEV_EXT_MECH_ZEROCOPY) && defined(CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)
+#define XDEV_EXT_STOR_BOUNCE_AVAILABLE
+/* Worker: the batch payload, in frame order, to or from the bounce pages. */
+static void xdev_ext_storfam_bounce_copy(struct xdev_ext_mech_batch *b,
+				       struct xdev_ext_stor_batch *bp,
+				       bool to_pages)
+{
+	u32 pos, nr = xdev_ext_mech_batch_nr_frames(b), done = 0;
+	struct xdev_ext_mech_frame f;
+
+	for (pos = 0; pos < nr && !xdev_ext_mech_batch_frame(b, pos, &f); pos++) {
+		u8 *data = (u8 *)f.kaddr + f.data_off;
+		u32 off, len;
+
+		for (off = 0; off < f.data_len; off += len, done += len) {
+			struct page *page = bp->bounce[done >> PAGE_SHIFT];
+
+			len = min_t(u32, f.data_len - off,
+				    PAGE_SIZE - offset_in_page(done));
+			if (to_pages)
+				memcpy_to_page(page, offset_in_page(done),
+					       data + off, len);
+			else
+				memcpy_from_page(data + off, page,
+						 offset_in_page(done), len);
+		}
+	}
+}
+
+/*
+ * KVM test builds only (plan section 4.1, failure branch 3): when the
+ * emulated controller cannot take the frames as they are, copy the payload
+ * into whole kernel pages. The native member observes successful bounce posts.
+ */
+static int xdev_ext_storfam_bounce(struct xdev_ext_stor_stage *p,
+				 struct xdev_ext_mech_batch *b, struct request *req,
+				 struct xdev_ext_stor_batch *bp)
+{
+	u32 bytes = xdev_ext_mech_batch_bytes(b);
+	u32 i, len, nr = DIV_ROUND_UP(bytes, PAGE_SIZE);
+	struct xdev_ext_stor_io *slot = bp->host_io;
+	struct bio *bio;
+	int ret = -ENOMEM;
+
+	if (!nr || nr > BIO_MAX_INLINE_VECS)
+		return -EREMOTEIO;
+	if (!slot || nr > slot->nr_bounce)
+		return -EREMOTEIO;
+	bp->bounce = slot->bounce;
+	bp->nr_bounce = nr;
+	if (p->window.write)
+		xdev_ext_storfam_bounce_copy(b, bp, true);
+
+	bio = slot->bio;
+	bio_init(bio, NULL, bio->bi_inline_vecs,
+		 p->nr_vecs, req->cmd_flags);
+	slot->bio_live = true;
+	for (i = 0; i < nr; i++) {
+		len = min_t(u32, bytes - i * PAGE_SIZE, PAGE_SIZE);
+		if (bio_add_page(bio, bp->bounce[i], len, 0) != len) {
+			ret = -EREMOTEIO;
+			goto out_bio;
+		}
+	}
+	ret = blk_rq_append_bio(req, bio);
+	if (ret)
+		goto out_bio;
+	bp->bio = bio;
+	return 0;
+
+out_bio:
+	bio_uninit(bio);
+	slot->bio_live = false;
+	bp->bounce = NULL;
+	bp->nr_bounce = 0;
+	return ret;
+}
+
+/* Worker: a READ's payload goes back into the frames only on success. */
+static void xdev_ext_storfam_bounce_release(struct xdev_ext_mech_batch *b,
+					  struct xdev_ext_stor_batch *bp,
+					  bool copy_back)
+{
+	if (!bp->bounce)
+		return;
+	if (copy_back)
+		xdev_ext_storfam_bounce_copy(b, bp, false);
+	bp->bounce = NULL;
+	bp->nr_bounce = 0;
+}
+#endif /* compatibility bounce */
+
+#ifndef XDEV_EXT_STOR_BOUNCE_AVAILABLE
+static int xdev_ext_storfam_bounce(struct xdev_ext_stor_stage *p,
+				 struct xdev_ext_mech_batch *b, struct request *req,
+				 struct xdev_ext_stor_batch *bp)
+{
+	return -EREMOTEIO;
+}
+
+static void xdev_ext_storfam_bounce_release(struct xdev_ext_mech_batch *b,
+					  struct xdev_ext_stor_batch *bp,
+					  bool copy_back)
+{
+}
+#endif /* !XDEV_EXT_STOR_BOUNCE_AVAILABLE */
+
+/*
+ * Worker: the batch payload as the request's bio, built from the frame
+ * pages with bio_add_page() (CHK.8).  Fails closed with -EREMOTEIO when the
+ * queue cannot take the pieces as they are: DMA alignment, a gap under the
+ * virtual boundary, too many segments, or a split that blk_rq_append_bio()
+ * refuses.  Only a CONFIG_XDEV_EXT_MECH_KVM_BOUNCE build copies instead.
+ */
+static int xdev_ext_storfam_host_map(struct xdev_ext_stor_stage *p,
+			      struct xdev_ext_mech_batch *b, struct request *req,
+			      struct xdev_ext_stor_batch *bp)
+{
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(p->st->s);
+	struct xdev_ext_stor_queue_caps caps =
+		xdev_ext_stor_block_caps(p->dev->queue(p->member),
+				 p->geometry.lba_shift);
+	struct bio *bio;
+	int pieces, ret;
+
+	pieces = xdev_ext_stor_block_preflight(pool, b, &caps);
+	ret = pieces < 0 ? pieces : 0;
+	if (!ret) {
+		if (!bp->host_io || pieces > p->nr_vecs)
+			return -EREMOTEIO;
+		bio = bp->host_io->bio;
+		bio_init(bio, NULL, bio->bi_inline_vecs, p->nr_vecs, req->cmd_flags);
+		bp->host_io->bio_live = true;
+		ret = xdev_ext_stor_block_append(pool, b, req, bio);
+		if (!ret) {
+			bp->bio = bio;
+			return 0;
+		}
+		bio_uninit(bio);
+		bp->host_io->bio_live = false;
+	}
+	if (ret != -EREMOTEIO)
+		return ret;
+	return xdev_ext_storfam_bounce(p, b, req, bp);
+}
+
 /* CREATE: native authorization precedes identity admission and window binding. */
 int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 		const struct xdev_ext_mech_stage_uapi *u,
@@ -163,7 +631,12 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 	int ret;
 
 	if (!dev || !dev->bind || !dev->unbind || !dev->identity ||
-	    !dev->requester || !dev->queue || !dev->decode || !dev->poll)
+	    !dev->requester || !dev->queue || !dev->decode || !dev->poll ||
+	    !dev->encode || !dev->encode_dptr || !dev->request_init ||
+	    !dev->post || !dev->retire_peer ||
+	    dev->peer_slot_bytes < sizeof(struct xdev_ext_stor_peer_io) ||
+	    dev->peer_native_offset < sizeof(struct xdev_ext_stor_peer_io) ||
+	    dev->peer_native_offset >= dev->peer_slot_bytes)
 		return -EINVAL;
 	ret = dev->bind(st, u, &ss, &member);
 	if (ret)
@@ -172,6 +645,11 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 	ss->dev = dev;
 	ss->member = member;
 	memset(ss->poll_views, 0, sizeof(ss->poll_views));
+	ss->slots = NULL;
+	ss->pool.free = NULL;
+	ss->nr_slots = 0;
+	ss->nr_vecs = 0;
+	ss->peer = NULL;
 	atomic_set(&ss->dead, 0);
 	ret = dev->identity(member, false, &ss->geometry);
 	if (!ret)
@@ -185,7 +663,16 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 		return ret;
 	}
 	st->priv = member;
-	return 0;
+	ret = xdev_ext_storfam_host_resources_init(ss);
+	if (!ret)
+		ret = xdev_ext_storfam_peer_resources_init(ss);
+	if (ret) {
+		xdev_ext_storfam_peer_resources_free(ss);
+		xdev_ext_storfam_host_resources_free(ss);
+		st->priv = NULL;
+		dev->unbind(member);
+	}
+	return ret;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_storfam_bind);
 
@@ -234,3 +721,115 @@ void xdev_ext_storfam_mark_dead(struct xdev_ext_stor_stage *ss)
 	atomic_set(&ss->dead, 1);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_storfam_mark_dead);
+
+/* Process context: leave the member and all pins intact on retained resources. */
+bool xdev_ext_storfam_unbind(struct xdev_ext_stor_stage *ss)
+{
+	return xdev_ext_storfam_peer_resources_free(ss) &&
+	       xdev_ext_storfam_host_resources_free(ss);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_unbind);
+
+int xdev_ext_storfam_submit(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_batch *sb)
+{
+	bool peer;
+	struct xdev_ext_stor_io *io;
+	struct request *req;
+	int ret;
+
+	ret = xdev_ext_storfam_submit_check(ss, b, sb);
+	if (ret)
+		return ret;
+	peer = xdev_ext_mech_session_pool(ss->st->s)->kind == XDEV_EXT_MECH_POOL_PEER;
+	if (peer && !ss->peer)
+		return -EINVAL;
+	ret = ss->dev->encode(ss->member, &sb->rw, sb->sqe,
+			xdev_ext_mech_batch_bytes(b), peer, &sb->posting, &sb->command);
+	if (ret)
+		return ret;
+	req = blk_mq_alloc_request(ss->dev->queue(ss->member),
+		xdev_ext_stor_block_poll_opf(ss->st->poll,
+			sb->posting.write ? REQ_OP_DRV_OUT : REQ_OP_DRV_IN),
+		BLK_MQ_REQ_NOWAIT);
+	if (IS_ERR(req))
+		return PTR_ERR(req);
+	ret = xdev_ext_stor_block_poll_check(ss->st->poll, req);
+	if (ret)
+		goto free_request;
+	if (!peer)
+		ss->dev->request_init(ss->member, req, &sb->command, false);
+	io = peer ? xdev_ext_storfam_peer_get(ss, sb) :
+		xdev_ext_storfam_host_get(ss, sb);
+	if (IS_ERR(io)) {
+		ret = PTR_ERR(io);
+		goto free_request;
+	}
+	if (peer) {
+		ret = xdev_ext_storfam_peer_map(ss, b, io, sb->posting.byte_length);
+		if (!ret)
+			ret = ss->dev->encode_dptr(ss->member, &sb->command,
+				io->spans, io->nr_leases, io->spans,
+				XDEV_EXT_STOR_PEER_MAX_SPANS, io->list_cpu,
+				io->list_dma, SZ_4K);
+		if (!ret && (sb->rw.byte_length != sb->posting.byte_length ||
+			     sb->rw.nlb != sb->posting.nlb))
+			ret = -EPROTO;
+		if (ret) {
+			xdev_ext_storfam_peer_put(ss, sb);
+			goto free_request;
+		}
+		ss->dev->request_init(ss->member, req, &sb->command, true);
+	} else {
+		io->done.b = b;
+		io->done.ticket = xdev_ext_mech_batch_ticket(b);
+		ret = xdev_ext_storfam_host_map(ss, b, req, sb);
+		if (ret) {
+			xdev_ext_storfam_host_put(ss, sb);
+			goto free_request;
+		}
+	}
+	if (peer) {
+		io->done.b = b;
+		io->done.ticket = xdev_ext_mech_batch_ticket(b);
+	}
+	ss->dev->post(ss->member, req, io, b, &sb->command, peer);
+	return 0;
+
+free_request:
+	blk_mq_free_request(req);
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_submit);
+
+void xdev_ext_storfam_host_ready(struct xdev_ext_mech_batch *b,
+		int status, bool uncertain)
+{
+#ifdef XDEV_EXT_STOR_BOUNCE_AVAILABLE
+	struct xdev_ext_stor_batch *sb = xdev_ext_mech_batch_priv(b);
+	struct xdev_ext_mech_stage *st = xdev_ext_mech_batch_stage(b);
+
+	if (!status && !uncertain && sb->bounce &&
+	    st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+	    xdev_ext_mech_session_state(st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+		xdev_ext_storfam_bounce_copy(b, sb, false);
+#endif
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_host_ready);
+
+void xdev_ext_storfam_consume(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_batch *sb)
+{
+	if (xdev_ext_mech_session_pool(ss->st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
+		/* ZOMBIE retains even the handle records and native trace. */
+		if (xdev_ext_mech_session_state(ss->st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+			xdev_ext_storfam_peer_put(ss, sb);
+	} else {
+		/* Active bounce references are cleared even when the slot is retained. */
+		xdev_ext_storfam_bounce_release(b, sb, false);
+		if (xdev_ext_mech_session_state(ss->st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)
+			xdev_ext_storfam_host_put(ss, sb);
+	}
+	sb->validated = false;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_consume);
