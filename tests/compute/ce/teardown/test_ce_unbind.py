@@ -2,12 +2,26 @@
 # SPDX-License-Identifier: GPL-2.0
 """Execute actual CE cleanup and lease helpers at refusing native boundaries."""
 from pathlib import Path
+import json
 import os
 import runpy
 import subprocess
 import tempfile
 
-ROOT = Path(__file__).resolve().parents[4]
+def source_owner():
+    """Find the canonical owner of this test or its ordinary registered copy."""
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / 'view.json'
+        if marker.is_file():
+            receipt = json.loads(marker.read_text())
+            if receipt.get('kind') == 'host-source-view':
+                return Path(receipt['canonical_root']).resolve()
+        if (parent / 'source-layout.json').is_file():
+            return parent
+    raise RuntimeError('SETUP: no canonical owner or registered source view')
+
+
+ROOT = source_owner()
 # Reuse only host OS/list/allocation primitives and the old extractor. Every
 # cleanup/hold/detach decision below is an unchanged production function body.
 legacy = runpy.run_path(str(ROOT / 'tests/compute/ce/independent_ce_lease.py'))

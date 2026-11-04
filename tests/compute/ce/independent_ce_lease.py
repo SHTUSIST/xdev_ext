@@ -6,13 +6,27 @@ Only kernel list/allocation/locking primitives are replaced by host equivalents.
 The production ownership helpers and registry functions are compiled unchanged.
 """
 from pathlib import Path
+import json
 import argparse
 import resource
 import subprocess
 import sys
 import tempfile
 
-KERNEL = Path(__file__).resolve().parents[3]
+def source_owner():
+    """Find the canonical owner of this test or its ordinary registered copy."""
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / 'view.json'
+        if marker.is_file():
+            receipt = json.loads(marker.read_text())
+            if receipt.get('kind') == 'host-source-view':
+                return Path(receipt['canonical_root']).resolve()
+        if (parent / 'source-layout.json').is_file():
+            return parent
+    raise RuntimeError('SETUP: no canonical owner or registered source view')
+
+
+KERNEL = source_owner()
 
 
 def function(source, signature):

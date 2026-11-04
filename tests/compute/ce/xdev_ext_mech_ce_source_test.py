@@ -5,8 +5,22 @@
 import re
 import unittest
 from pathlib import Path
+import json
 
-ROOT = Path(__file__).resolve().parents[3]
+def source_owner():
+    """Find the canonical owner of this test or its ordinary registered copy."""
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / 'view.json'
+        if marker.is_file():
+            receipt = json.loads(marker.read_text())
+            if receipt.get('kind') == 'host-source-view':
+                return Path(receipt['canonical_root']).resolve()
+        if (parent / 'source-layout.json').is_file():
+            return parent
+    raise RuntimeError('SETUP: no canonical owner or registered source view')
+
+
+ROOT = source_owner()
 CE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce.c"
 CE_CORE = ROOT / "src/compute/io_uring/xdev_ext_mech_ce_core.h"
 NVME_CLASS = ROOT / "src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c"
