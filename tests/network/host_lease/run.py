@@ -45,7 +45,7 @@ parts.append(block(h,'struct xdev_ext_family_hooks_hdr',';'))
 (a.out/'types.inc').write_text('\n'.join(parts))
 core=read('src/core/io_uring/xdev_ext_mech.c')
 names=['xdev_ext_mech_pool_frame_state','xdev_ext_mech_session_layout',
-'xdev_ext_mech_session_pool','xdev_ext_mech_session_depth','xdev_ext_mech_batch_id',
+'xdev_ext_mech_session_pool','xdev_ext_mech_session_depth','xdev_ext_mech_batch_session','xdev_ext_mech_batch_id',
 'xdev_ext_mech_batch_key','xdev_ext_mech_batch_slot','xdev_ext_mech_batch_nr_frames',
 'xdev_ext_mech_batch_bytes','xdev_ext_mech_batch_frame','xdev_ext_mech_batch_status',
 'xdev_ext_mech_batch_produced','xdev_ext_mech_batch_ticket',
