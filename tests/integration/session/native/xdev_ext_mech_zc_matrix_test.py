@@ -5,10 +5,12 @@
 This checks campaign selection, argv, failure propagation and evidence copies;
 the recording harness is not a guest execution or a data-path simulation.
 """
+import importlib.util
 import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -21,15 +23,41 @@ ORIGINAL = {"normal", "reliable-drop-data", "reliable-drop-ack",
             "reliable-budget-unknown", "credit-window-one", "provider-short", "provider-ambiguous"}
 
 
+def source_layout():
+    """Use the real layout API from canonical or ordinary logical-view paths."""
+    for parent in HERE.parents:
+        tooling = parent / 'tools/layout.py'
+        if tooling.is_file():
+            spec = importlib.util.spec_from_file_location('_legacy_matrix_layout', tooling)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            repo = module.canonical_root(HERE)
+            return repo, module.load_layout(repo)
+    raise RuntimeError('matrix test requires a canonical or logical source layout')
+
+
 class MatrixCampaigns(unittest.TestCase):
     def execute(self, fail_fault=""):
         tmp = tempfile.TemporaryDirectory(prefix="xdev-matrix-contract-")
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        scratch, source = root / "scratch", root / "source"
+        scratch = root / "scratch"
         scratch.mkdir(mode=0o700)
-        harness = source / "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh"
-        harness.parent.mkdir(parents=True)
+        repo, layout = source_layout()
+        setup_path = repo / 'tests/integration/session/source_setup/fixture.py'
+        spec = importlib.util.spec_from_file_location('_legacy_matrix_setup', setup_path)
+        setup = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(setup)
+        fixture = setup.Fixture()
+        self.addCleanup(fixture.cleanup)
+        archive_native = 'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py'
+        archive_source = layout.by_native[('linux', archive_native)]
+        fixture.entries.append(dict(source=archive_source, component='linux',
+                                    native_path=archive_native))
+        setup.write(fixture.repo / archive_source, (repo / archive_source).read_bytes())
+        setup.write_json(fixture.repo / 'source-layout.json', fixture.manifest)
+        harness = fixture.repo / setup.HARNESS
         harness.write_text("""#!/bin/sh
 set -eu
 python3 - "$@" <<'PYRECORD'
@@ -48,6 +76,11 @@ fault = args[args.index('--fault') + 1] if '--fault' in args else 'none'
 raise SystemExit(7 if fault == os.environ.get('MATRIX_FAKE_FAIL_FAULT') else 0)
 PYRECORD
 """)
+        # Commit the recording boundary before real preparation: the copied
+        # harness and archive helper must match clean canonical Git bytes.
+        fixture.sha = fixture.commit(fixture.repo)
+        source = fixture.repo / 'build/matrix-source/linux'
+        fixture.prepare(source)
         env = dict(os.environ, MATRIX_FAKE_FAIL_FAULT=fail_fault)
         run = subprocess.run(["bash", str(MATRIX), str(scratch), str(source)],
                              env=env, capture_output=True, text=True, timeout=20)

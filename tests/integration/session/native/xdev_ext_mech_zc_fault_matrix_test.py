@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 """Host checks for the real guest campaign orchestration, not device execution."""
+import importlib.util
 import json
 from pathlib import Path
 import subprocess
+import sys
 import re
 import tempfile
 import unittest
@@ -14,6 +16,20 @@ HERE = Path(__file__).resolve().parent
 DRIVER = HERE / 'xdev_ext_mech_zc_fault_matrix.sh'
 GUEST = HERE / 'xdev_ext_mech_zc_fault_guest.sh'
 KVM = HERE / 'xdev_ext_mech_zc_kvm.sh'
+
+
+def source_layout():
+    """Use the real layout API from canonical or ordinary logical-view paths."""
+    for parent in HERE.parents:
+        tooling = parent / 'tools/layout.py'
+        if tooling.is_file():
+            spec = importlib.util.spec_from_file_location('_legacy_matrix_layout', tooling)
+            module = importlib.util.module_from_spec(spec)
+            sys.modules[spec.name] = module
+            spec.loader.exec_module(module)
+            repo = module.canonical_root(HERE)
+            return repo, module.load_layout(repo)
+    raise RuntimeError('matrix test requires a canonical or logical source layout')
 
 
 class MatrixContract(unittest.TestCase):
@@ -76,7 +92,8 @@ class MatrixContract(unittest.TestCase):
         self.assertIn('--fault-campaign)', KVM.read_text())
 
     def test_guest_command_options_are_real_ctl_options(self):
-        source = (HERE.parents[2] / 'xdev_ext_mech/xdev_ext_mech_ctl.c').read_text()
+        _, layout = source_layout()
+        source = layout.source('linux', 'tools/xdev_ext_mech/xdev_ext_mech_ctl.c').read_text()
         options = set(re.findall(r'\{\s*"([a-z][a-z0-9-]*)",\s*(?:no|required)_argument', source))
         guest = GUEST.read_text()
         # Execute the real argument constructors with spawn intercepted. This
