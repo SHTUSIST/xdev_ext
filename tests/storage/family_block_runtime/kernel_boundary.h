@@ -1,6 +1,9 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 #ifndef STORAGE_BLOCK_TEST_BOUNDARY_H
 #define STORAGE_BLOCK_TEST_BOUNDARY_H
+#if defined(BLOCK_NEW) && (!defined(CONFIG_BLOCK) || CONFIG_BLOCK != 1)
+#error The whole block runtime fixture requires CONFIG_BLOCK=1
+#endif
 #include <stdbool.h>
 #include <stdint.h>
 #include <stddef.h>
@@ -10,6 +13,15 @@
 #include <errno.h>
 #include <linux/types.h>
 typedef __u8 u8;typedef __u16 u16;typedef __u32 u32;typedef __u64 u64;
+#define __force
+/* Exact scalar/flag/hctx declarations extracted from the supplied locked source. */
+#include "actual_block_native.inc"
+_Static_assert(sizeof(blk_opf_t)==sizeof(__u32),"native blk_opf_t must remain u32");
+/* Exact include/linux/blkdev.h declarations, Linux
+ * 89be9a83ccf1f88522317ce02f854f30d6115c41 (GPL-2.0).
+ * Portions Copyright (C) 1992 Drew Eckhardt. */
+typedef unsigned int __bitwise blk_features_t;
+#define BLK_FEAT_POLL			((__force blk_features_t)(1u << 9))
 #define PAGE_SHIFT 12
 #define PAGE_SIZE (1U<<PAGE_SHIFT)
 #define PAGE_MASK (~(PAGE_SIZE-1UL))
@@ -24,9 +36,15 @@ typedef __u8 u8;typedef __u16 u16;typedef __u32 u32;typedef __u64 u64;
 #define EXPORT_SYMBOL_GPL(name)
 #define pr_warn_once(...) ((void)0)
 #define atomic64_inc(p) (++*(p))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define READ_ONCE(x) (*(volatile __typeof__(x) *)&(x))
+#define WRITE_ONCE(x,v) (*(volatile __typeof__(x) *)&(x)=(v))
 struct page {unsigned opaque_id;};
-struct queue_limits {u32 align_and_pad;};
-struct request_queue {struct queue_limits limits;u64 boundary;u32 segments,segment_size,sectors;};
+struct blk_mq_queue_map {unsigned nr_queues;};
+struct blk_mq_tag_set {unsigned nr_maps;struct blk_mq_queue_map map[HCTX_MAX_TYPES];};
+struct blk_mq_hw_ctx {unsigned short type;unsigned queue_num;};
+struct queue_limits {u32 align_and_pad;blk_features_t features;};
+struct request_queue {struct queue_limits limits;u64 boundary;u32 segments,segment_size,sectors;struct blk_mq_tag_set *tag_set;};
 #define queue_virt_boundary(q) ((q)->boundary)
 #define blk_lim_dma_alignment_and_pad(l) ((l)->align_and_pad)
 #define queue_max_segments(q) ((q)->segments)
@@ -34,7 +52,10 @@ struct request_queue {struct queue_limits limits;u64 boundary;u32 segments,segme
 #define queue_max_hw_sectors(q) ((q)->sectors)
 struct bio_vec {struct page *page;u32 off,len;};
 struct bio {struct bio_vec bi_inline_vecs[128];unsigned initialized;};
-struct request {unsigned cmd_flags;struct bio *bio;};
+struct request {blk_opf_t cmd_flags;struct bio *bio;struct blk_mq_hw_ctx *mq_hctx;};
+/* 6A never calls these native poll boundaries. No success stub or poll model. */
+static inline bool blk_rq_is_poll(struct request *req){(void)req;fputs("unexpected blk_rq_is_poll in 6A cohort\n",stderr);abort();}
+static inline int blk_mq_poll_hw_queue(struct request_queue *q,unsigned n,void *batch){(void)q;(void)n;(void)batch;fputs("unexpected blk_mq_poll_hw_queue in 6A cohort\n",stderr);abort();}
 struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_len;void *pool_priv;};
 struct xdev_ext_mech_pool {struct page **pages;u32 frame_size,nr_frames,nr_pages,first_page_off;u32 kind;};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;};

@@ -50,6 +50,19 @@ if a.new:
  if missing:
   (out/'setup.json').write_text(json.dumps({'state':'SETUP','missing':missing},indent=2));print('SETUP missing new runtime:',missing);exit(2)
 try:
+ pinned='89be9a83ccf1f88522317ce02f854f30d6115c41'
+ if json.loads((root/'third_party/sources.lock.json').read_text())['components']['linux']['commit']!=pinned:
+  raise ValueError('SETUP: native block fixture requires Linux lock '+pinned)
+ def required(pattern,text):
+  m=re.search(pattern,text,re.M|re.S)
+  if not m:raise ValueError('SETUP: missing actual native declaration '+pattern)
+  return m.group(0)+'\n'
+ blktypes=(root/'src/core/include/linux/blk_types.h').read_text()
+ mqheader=(root/'src/core/include/linux/blk-mq.h').read_text()
+ native_types=required(r'^typedef[^;\n]*\bblk_opf_t;',blktypes)
+ native_types+=required(r'^#define REQ_OP_BITS[^\n]*',blktypes)+required(r'^enum req_flag_bits\s*\{.*?^\};',blktypes)
+ native_types+=required(r'^#define REQ_POLLED[^\n]*',blktypes)+required(r'^enum hctx_type\s*\{.*?^\};',mqheader)
+ (out/'actual_block_native.inc').write_text(native_types)
  core=(root/'src/core/io_uring/xdev_ext_mech.c').read_text();header=(root/'src/core/include/linux/xdev_ext_mech.h').read_text()
  core_parts='\n'.join(function(core,n) for n in ['xdev_ext_mech_session_pool','xdev_ext_mech_batch_nr_frames','xdev_ext_mech_batch_bytes','xdev_ext_mech_batch_frame'])+function(header,'xdev_ext_mech_frame_page')
  (out/'actual_core.inc').write_text(core_parts)
@@ -59,9 +72,9 @@ try:
  bounce_enabled=function(native,'nvme_xdev_ext_class_bounce_copy')+function(native,'nvme_xdev_ext_class_bounce',which=0)
  bounce_disabled=function(native,'nvme_xdev_ext_class_bounce',which=1)
  shim=out/'shim/linux';shim.mkdir(parents=True,exist_ok=True)
- for h in ['bio.h','blkdev.h','blk-mq.h','mm.h','module.h','kernel.h','export.h','xdev_ext_mech.h']:(shim/h).write_text('#include "kernel_boundary.h"\n')
+ for h in ['bio.h','blkdev.h','blk-mq.h','blk_types.h','mm.h','module.h','kernel.h','export.h','xdev_ext_mech.h']:(shim/h).write_text('#include "kernel_boundary.h"\n')
  include=['-I',str(tests),'-I',str(out),'-I',str(out/'shim'),'-I',str(root/'src/storage/include/linux'),'-I',str(root/'src/storage/include'),'-I',str(root/'src/core/include/linux')]
- mode=['-DBLOCK_NEW=1'] if a.new else []
+ mode=['-DBLOCK_NEW=1','-DCONFIG_BLOCK=1'] if a.new else []
  for profile in ['gcc','ubsan']:
   flags=['-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-Wno-sign-compare']
   if profile=='ubsan':flags+=['-fsanitize=undefined','-fno-sanitize-recover=all']
@@ -74,7 +87,7 @@ try:
    cmd=['gcc',*flags,*mode,*options,'-I',str(folder),*include,tests/'test_runtime.c']
    if a.new:
     obj=folder/'family.o'
-    r=run(['gcc',*flags,*include,'-include',tests/'kernel_boundary.h','-c',root/'src/storage/io_uring/family/xdev_ext_storfam_block.c','-o',obj],profile+'-family-compile-'+str(bounce))
+    r=run(['gcc',*flags,*mode,*include,'-include',tests/'kernel_boundary.h','-c',root/'src/storage/io_uring/family/xdev_ext_storfam_block.c','-o',obj],profile+'-family-compile-'+str(bounce))
     if r.returncode:continue
     cmd += [obj,'-Wl,--wrap=xdev_ext_stor_block_caps','-Wl,--wrap=xdev_ext_stor_block_preflight','-Wl,--wrap=xdev_ext_stor_block_append']
    r=run([*cmd,'-o',binary],profile+'-runtime-compile-'+str(bounce))
