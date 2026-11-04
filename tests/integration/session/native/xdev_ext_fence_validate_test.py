@@ -15,17 +15,48 @@ ROOT = HERE.parents[4]
 HARNESS = HERE / 'xdev_ext_mech_zc_kvm.sh'
 VALIDATOR = HERE / 'xdev_ext_fence_validate.py'
 NONCE = 'a' * 31
+SOURCE_SHA = None
+HEADER_SHA = None
+
+
+def source_fixture():
+    """Load only test setup from the declared canonical owner, never parent Git."""
+    import importlib.util
+    import json
+    import os
+    candidates = []
+    if os.environ.get('XDEV_EXT_CANONICAL_ROOT'):
+        candidates.append(Path(os.environ['XDEV_EXT_CANONICAL_ROOT']))
+    for parent in (HERE, *HERE.parents):
+        receipt = next((parent / name for name in ('view.json', '.xdev-ext-source.json')
+                        if (parent / name).is_file()), None)
+        if receipt is not None:
+            candidates.append(Path(json.loads(receipt.read_text())['canonical_root']))
+            break
+        if (parent / 'source-layout.json').is_file():
+            candidates.append(parent)
+            break
+    if not candidates:
+        raise RuntimeError('test setup requires declared canonical source owner')
+    product = candidates[0].resolve()
+    helper = product / 'tests/integration/session/source_setup/fixture.py'
+    spec = importlib.util.spec_from_file_location('legacy_source_fixture', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.PRODUCT = product
+    module.ARTIFACTS = Path(os.environ.get('XDEV_SETUP_ARTIFACTS', product / 'build/source-setup-tests'))
+    return module.Fixture(actual_core=True)
 
 
 def request():
-    return dict(exact_sha='b' * 40, lifecycle_header_sha256='c' * 64,
+    return dict(exact_sha=SOURCE_SHA, lifecycle_header_sha256=HEADER_SHA,
                 module_sha256='d' * 64, kernel_release='test-kernel',
                 nonce_prefix=NONCE, iterations=8)
 
 
 def raw_report():
     report = dict(schema_version=1, experiment_kind='kernel_sync_primitive',
-                  exact_sha='b' * 40, lifecycle_header_sha256='c' * 64,
+                  exact_sha=SOURCE_SHA, lifecycle_header_sha256=HEADER_SHA,
                   run_nonce=NONCE + '0', mode='check', status='ok', iterations=8,
                   execution_context='serial-process', kernel_runtime=True,
                   evidence_kind='kernel-runtime', oracle_in_timing=False,
@@ -60,7 +91,13 @@ def console(report=None):
 class FenceValidation(unittest.TestCase):
     def setUp(self):
         self.assertTrue(VALIDATOR.exists(), 'fence guest evidence validator is missing')
-        spec = importlib.util.spec_from_file_location('fence_validate', VALIDATOR)
+        global SOURCE_SHA, HEADER_SHA
+        self.fixture = source_fixture()
+        self.addCleanup(self.fixture.cleanup)
+        SOURCE_SHA = self.fixture.sha
+        HEADER_SHA = self.fixture.header_hash()
+        validator = self.fixture.repo / 'tests/integration/session/native/xdev_ext_fence_validate.py'
+        spec = importlib.util.spec_from_file_location('fence_validate', validator)
         self.v = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(self.v)
 
@@ -163,7 +200,7 @@ class HarnessWiring(unittest.TestCase):
                 ('MODULES', 'MODULE_UNLOAD', 'DMA_SHARED_BUFFER', 'DEBUG_FS')))
             (p/'xdev-ext-artifacts.sha256').write_text('')
             # Deliberately absent Module.symvers: no fabricated export table.
-            cmd = f'BUILD={p}; FENCE_OUT={p}; FENCE_RUNNER={p}/run.py; SRC={p}; FENCE_GUEST={p}/guest; FENCE_VALIDATOR={p}/validator; DEBUG_HELPER={p}/debug;\n' + function + '\nverify_fence_identity'
+            cmd = f'BUILD={p}; FENCE_OUT={p}; FENCE_RUNNER={p}/run.py; SRC={p}; FENCE_GUEST={p}/guest; FENCE_VALIDATOR={p}/validator; DEBUG_HELPER={p}/debug; LIFECYCLE_HEADER_SOURCE={p}/header-source; LIFECYCLE_HEADER_COPY={p}/header-copy;\n' + function + '\nverify_fence_identity'
             r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
             self.assertNotEqual(r.returncode, 0)
             self.assertIn('artifact/dependency identity absent', r.stderr)

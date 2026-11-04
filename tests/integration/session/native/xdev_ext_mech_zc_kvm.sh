@@ -163,7 +163,7 @@ if (( NIC_FALLBACK && ! LIFECYCLE )) && [[ -z "$FAULT_CAMPAIGN" ]]; then SOCKET_
 SRC=${SOURCE_OVERRIDE:-$SCRATCH/src}
 verify_source_checkout() {
     local resolved
-    resolved=$(python3 -B - "$SRC" "${LIFECYCLE:-0}" "${EVAL_SESSION:-0}" <<'PYSOURCE'
+    resolved=$(python3 -B - "$SRC" "${LIFECYCLE:-0}" "${EVAL_SESSION:-0}" "${MECHANISM_VARIANTS:-0}" "${FENCE_CHECK:-0}" "${RUN_ONLY:-0}" <<'PYSOURCE'
 import json
 import os
 from pathlib import Path
@@ -208,6 +208,9 @@ if marker.is_file():
     repo = Path(receipt['canonical_root'])
     if not repo.is_absolute():
         fail('assembly canonical root must be absolute')
+    for parent in (repo, *repo.parents):
+        if parent.is_symlink():
+            fail('symlink assembly canonical root: ' + str(parent))
     repo = repo.resolve()
 else:
     repo = Path(git(selected, 'rev-parse', '--show-toplevel')).resolve()
@@ -223,7 +226,9 @@ anchors = (
     'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py',
 )
 values = dict(SOURCE_GIT_ROOT=str(repo), SOURCE_COMMIT=commit,
-              NATIVE_COLLECTOR='', EVAL_SESSION_SOURCE='', LIFECYCLE_SOURCE='')
+              NATIVE_COLLECTOR='', EVAL_SESSION_SOURCE='', LIFECYCLE_SOURCE='',
+              SOURCE_SUPPORT_VIEW='', E2_SOURCE='', FENCE_OUT='',
+              LIFECYCLE_HEADER_SOURCE='', LIFECYCLE_HEADER_COPY='')
 if (repo / 'source-layout.json').is_file():
     # Check tracked metadata before importing any source-selected tooling.
     metadata = ('source-layout.json', 'tools/layout.py', 'tools/build/prepare_sources.py')
@@ -231,7 +236,7 @@ if (repo / 'source-layout.json').is_file():
     for name in metadata:
         regular(repo, name)
     sys.path.insert(0, str(repo / 'tools'))
-    from layout import load_layout, safe_file
+    from layout import load_layout, safe_file, isolated_file, materialize_view
     layout = load_layout(repo)
     lock = layout.manifest.get('dependency_lock', 'third_party/sources.lock.json')
     git(repo, 'ls-files', '--error-unmatch', '--', lock, *layout.by_source)
@@ -264,6 +269,40 @@ if (repo / 'source-layout.json').is_file():
             'kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_trace.py').parent)
     if int(sys.argv[3]):
         values['EVAL_SESSION_SOURCE'] = str(support('tests/eval/session_guest/Makefile').parent)
+    if int(sys.argv[4]) or int(sys.argv[5]):
+        # Setup alone may refresh support. Reuse must inspect the existing
+        # receipt and copies, never repair a missing or altered build input.
+        required = []
+        if int(sys.argv[4]):
+            required.append('tests/eval/mechanism_variants/Makefile')
+        if int(sys.argv[5]):
+            required.extend(('tests/eval/dmabuf_lifecycle/Makefile',
+                             'kernel/io_uring/xdev_ext_mech_lifecycle.h'))
+        for logical in required:
+            support(logical)
+        view = repo / 'build/source-view'
+        if not int(sys.argv[6]):
+            view = materialize_view(repo).root
+        for parent in (view, *view.parents):
+            if parent.is_symlink():
+                fail('symlink support view: ' + str(parent))
+        view_receipt = json.loads(isolated_file(view, 'view.json', True).read_text())
+        if (view_receipt.get('schema') != 1 or view_receipt.get('kind') != 'host-source-view' or
+                view_receipt.get('canonical_root') != str(repo) or
+                view_receipt.get('revision') != commit or
+                view_receipt.get('source_origins') != layout.by_logical or
+                view_receipt.get('manifest') != layout.manifest):
+            fail('support view identity/mapping differs from canonical authority')
+        for logical, source in layout.by_logical.items():
+            if isolated_file(view, logical, True).read_bytes() != safe_file(repo, source).read_bytes():
+                fail('support view copy differs from canonical source: ' + logical)
+        values['SOURCE_SUPPORT_VIEW'] = str(view)
+        if int(sys.argv[4]):
+            values['E2_SOURCE'] = str(view / 'tests/eval/mechanism_variants')
+        if int(sys.argv[5]):
+            values['FENCE_OUT'] = str(view / 'tests/eval/dmabuf_lifecycle')
+            values['LIFECYCLE_HEADER_SOURCE'] = str(support('kernel/io_uring/xdev_ext_mech_lifecycle.h'))
+            values['LIFECYCLE_HEADER_COPY'] = str(view / 'kernel/io_uring/xdev_ext_mech_lifecycle.h')
     values['SOURCE_LAYOUT'] = 'overlay'
 else:
     if selected != repo:
@@ -271,8 +310,8 @@ else:
     git(repo, 'ls-files', '--error-unmatch', '--', *anchors)
     for name in anchors:
         regular(repo, name)
-    if int(sys.argv[2]) or int(sys.argv[3]):
-        fail('lifecycle and eval-session require canonical product support sources')
+    if any(int(value) for value in sys.argv[2:6]):
+        fail('selected modes require canonical product support sources')
     values['SOURCE_LAYOUT'] = 'kernelgit'
 values['SRC'] = str(selected)
 for name, value in values.items():
@@ -312,22 +351,18 @@ EVAL_SESSION_OUT=$TOOLS/eval-session
 EVAL_SESSION_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_validate.py
 if (( MECHANISM_VARIANTS )); then
     [[ "$SOURCE_LAYOUT" == overlay ]] || { echo 'mechanism-variants requires prepared product overlay' >&2; exit 2; }
-    E2_SOURCE=$SOURCE_GIT_ROOT/tests/eval/mechanism_variants
     source "$E2_SOURCE/kvm_mode.sh"
     SOURCE_SLBA=2048
 fi
 QEMU=/usr/local/bin/qemu-system-x86_64
-FENCE_OUT=$SOURCE_GIT_ROOT/tests/eval/dmabuf_lifecycle
 FENCE_GUEST=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh
 FENCE_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py
 FENCE_RUNNER=$FENCE_OUT/run.py
 if (( FENCE_CHECK )); then
     # Require the real experiment and its production-header relative path.
     [[ "$SOURCE_LAYOUT" == overlay ]] || { echo 'FAIL fence-check requires the product overlay source' >&2; exit 2; }
-    git -C "$SOURCE_GIT_ROOT" ls-files --error-unmatch -- \
-        tests/eval/dmabuf_lifecycle/{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
-        kernel/io_uring/xdev_ext_mech_lifecycle.h \
-        kernel/tools/testing/selftests/xdev_ext_integration/{xdev_ext_fence_guest.sh,xdev_ext_fence_validate.py} >/dev/null
+    # Source membership and actual copies were checked by the source gate.
+    python3 -B "$FENCE_RUNNER" --identity-field revision >/dev/null
 fi
 mkdir -p "$BUILD" "$EV" "$TOOLS"
 # Only current-run derived verdicts are invalidated. Historical campaign
@@ -435,6 +470,33 @@ stage_eval_session_image() {
     cp "$EVAL_SESSION_OUT/"{chain_bench,session_nvme_ce,session_gpu_nic,eval_session_oracle,chain_plan.bpf.o,xdev_ext_eval_session_guest.sh} \
         "$ROOT/opt/xdev_ext/eval/"
 }
+record_fence_sources() {
+    python3 -B - "$SOURCE_GIT_ROOT" "$SRC" "$SOURCE_SUPPORT_VIEW" <<'PY_FENCE_SOURCES'
+import hashlib,pathlib,sys
+repo,native,view=map(pathlib.Path,sys.argv[1:])
+sys.path.insert(0,str(repo/'tools'))
+from layout import load_layout,safe_file,isolated_file
+layout=load_layout(repo)
+logical_inputs={name for name in layout.by_logical if name.startswith('tests/eval/dmabuf_lifecycle/')}
+logical_inputs.update(('kernel/io_uring/xdev_ext_mech_lifecycle.h',
+    'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh',
+    'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py',
+    'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py'))
+paths=set()
+for logical in sorted(logical_inputs):
+    original=safe_file(repo,layout.by_logical[logical]);copy=isolated_file(view,logical,True)
+    if original.read_bytes()!=copy.read_bytes():raise ValueError('fence logical copy differs: '+logical)
+    paths.update((original,copy))
+    if logical.startswith('kernel/'):
+        actual=safe_file(native,logical[len('kernel/'):])
+        if actual.read_bytes()!=original.read_bytes():raise ValueError('fence native source differs: '+logical)
+        paths.add(actual)
+for name in ('source-layout.json','tools/layout.py',layout.manifest.get('dependency_lock','third_party/sources.lock.json')):
+    paths.add(safe_file(repo,name))
+paths.update((isolated_file(view,'view.json',True),safe_file(native,'.xdev-ext-source.json')))
+for path in sorted(paths):print(hashlib.sha256(path.read_bytes()).hexdigest()+'  '+str(path.absolute()))
+PY_FENCE_SOURCES
+}
 verify_fence_identity() {
     local symbol artifact
     for symbol in MODULES MODULE_UNLOAD DMA_SHARED_BUFFER DEBUG_FS; do
@@ -445,14 +507,15 @@ verify_fence_identity() {
     # This file must be produced by a full matching kernel build, never made
     # up or replaced by a headers-only compile. Hash it together with vmlinux.
     for artifact in "$BUILD/Module.symvers" "$BUILD/vmlinux" \
-        "$BUILD/include/config/kernel.release" "$FENCE_OUT/lifecycle_bench.ko" \
+        "$BUILD/include/config/kernel.release" "$BUILD/xdev-ext-fence-sources.sha256" "$FENCE_OUT/lifecycle_bench.ko" \
         "$FENCE_OUT/Kbuild" "$FENCE_OUT/Makefile" "$FENCE_OUT/lifecycle_bench.c" \
         "$FENCE_OUT/lifecycle_core.h" "$FENCE_RUNNER" \
-        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER"; do
+        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$LIFECYCLE_HEADER_SOURCE" "$LIFECYCLE_HEADER_COPY" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER"; do
         [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
             echo 'FAIL fence-check artifact/dependency identity absent; rebuild exact source' >&2; return 1;
         }
     done
+    sha256sum -c "$BUILD/xdev-ext-fence-sources.sha256" >/dev/null || return 1
     [[ $(modinfo -F name "$FENCE_OUT/lifecycle_bench.ko") == lifecycle_bench ]]
     [[ $(modinfo -F vermagic "$FENCE_OUT/lifecycle_bench.ko" | cut -d' ' -f1) == "$(cat "$BUILD/include/config/kernel.release")" ]]
 }
@@ -495,6 +558,7 @@ printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\nimage_bytes=%s\n' \
     "$SOURCE_SLBA" "$RX_SLBA" "$CE_SLBA" "$IMAGE_BYTES" >>"$EV/provenance.txt"
+printf 'source_support_view=%s\ne2_source=%s\nfence_out=%s\n' "$SOURCE_SUPPORT_VIEW" "$E2_SOURCE" "$FENCE_OUT" >>"$EV/provenance.txt"
 printf 'source_git_root=%s\nsource_directory=%s\nsource_layout=%s\nsource_commit=%s\n' \
     "$SOURCE_GIT_ROOT" "$SRC" "$SOURCE_LAYOUT" "$SOURCE_COMMIT" >>"$EV/provenance.txt"
 printf '%s\n' "$SOURCE_COMMIT" >>"$EV/provenance.txt"
@@ -519,8 +583,11 @@ if (( CE_SIM )); then
 		tools/xdev_ext_mech/ce_plan.bpf.c) >>"$EV/source-files.sha256"
 fi
 if (( FENCE_CHECK )); then
+    if (( ! RUN_ONLY )); then record_fence_sources >"$BUILD/xdev-ext-fence-sources.sha256"; fi
+    [[ -s "$BUILD/xdev-ext-fence-sources.sha256" ]]
+    cat "$BUILD/xdev-ext-fence-sources.sha256" >>"$EV/source-files.sha256"
     sha256sum "$FENCE_OUT/"{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
-        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
+        "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$LIFECYCLE_HEADER_SOURCE" "$LIFECYCLE_HEADER_COPY" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
         >>"$EV/source-files.sha256"
 fi
 if (( ! RUN_ONLY )); then
@@ -697,8 +764,10 @@ if (( ! RUN_ONLY )); then
     if (( FENCE_CHECK )); then
         sha256sum "$BUILD/Module.symvers" "$BUILD/include/config/kernel.release" \
             "$FENCE_OUT/lifecycle_bench.ko" "$FENCE_OUT/"{Kbuild,Makefile,lifecycle_bench.c,lifecycle_core.h,run.py} \
-            "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
+            "$SRC/io_uring/xdev_ext_mech_lifecycle.h" "$LIFECYCLE_HEADER_SOURCE" "$LIFECYCLE_HEADER_COPY" "$FENCE_GUEST" "$FENCE_VALIDATOR" "$DEBUG_HELPER" \
             >>"$BUILD/xdev-ext-artifacts.sha256"
+        sha256sum "$BUILD/xdev-ext-fence-sources.sha256" >>"$BUILD/xdev-ext-artifacts.sha256"
+        cat "$BUILD/xdev-ext-fence-sources.sha256" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
     if (( MECHANISM_VARIANTS )); then e2_record_artifacts; fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
@@ -719,13 +788,18 @@ if (( FENCE_CHECK )); then
     verify_fence_identity
     FENCE_NONCE_PREFIX=$(python3 -c 'import secrets; print(secrets.token_hex(16)[:31])')
     python3 - "$EV/fence-request.json" "$SOURCE_COMMIT" "$FENCE_NONCE_PREFIX" \
-        "$FENCE_OUT/lifecycle_bench.ko" "$SRC/io_uring/xdev_ext_mech_lifecycle.h" \
+        "$FENCE_OUT/lifecycle_bench.ko" "$FENCE_RUNNER" \
         "$BUILD/include/config/kernel.release" <<'PYFENCEREQUEST'
-import hashlib, json, pathlib, sys
-out, sha, nonce, module, header, release = sys.argv[1:]
+import hashlib, importlib.util, json, pathlib, sys
+out, sha, nonce, module, runner_path, release = sys.argv[1:]
+spec = importlib.util.spec_from_file_location('fence_request_runner', runner_path)
+runner = importlib.util.module_from_spec(spec); spec.loader.exec_module(runner)
+identity = runner.source_identity()
+if identity['revision'] != sha:
+    raise ValueError('fence request source identity differs from checked source')
 hashfile = lambda path: hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
 pathlib.Path(out).write_text(json.dumps(dict(exact_sha=sha, nonce_prefix=nonce, iterations=8,
-    module_sha256=hashfile(module), lifecycle_header_sha256=hashfile(header),
+    module_sha256=hashfile(module), lifecycle_header_sha256=identity['lifecycle_header_sha256'],
     kernel_release=pathlib.Path(release).read_text().strip())) + '\n')
 PYFENCEREQUEST
 fi

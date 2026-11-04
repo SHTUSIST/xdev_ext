@@ -17,6 +17,7 @@ import subprocess
 import tempfile
 import unittest
 import shlex
+import sys
 from artifacts import extract
 from decode_trace import audit_collection,decode,decode_negative
 from guard import verify as verify_guards
@@ -75,12 +76,69 @@ def validate_trace_configs(capture):
     return normalized
 
 
+def source_inputs(source,scratch,evidence):
+    """Resolve canonical/native/view inputs without borrowing a parent Git."""
+    source=Path(source).absolute()
+    if any(p.is_symlink() for p in (source,*source.parents)):
+        raise ValueError('symlink E2 canonical source')
+    top=subprocess.check_output(['git','-C',str(source),'rev-parse','--show-toplevel'],text=True).strip()
+    require(Path(top).resolve()==source.resolve(),'E2 source-root must be the canonical Git root')
+    require(not subprocess.check_output(['git','-C',str(source),'status','--porcelain','--untracked-files=all'],text=True).strip(),
+            'E2 canonical source is dirty')
+    subprocess.run(['git','-C',str(source),'ls-files','--error-unmatch','--',
+                    'source-layout.json','tools/layout.py','tools/build/prepare_sources.py'],check=True,stdout=subprocess.PIPE)
+    for name in ('source-layout.json','tools/layout.py','tools/build/prepare_sources.py'):
+        path=source/name
+        require(path.is_file() and not any(p.is_symlink() for p in (path,*path.parents)), 'invalid E2 canonical metadata')
+    sys.path.insert(0,str(source/'tools'))
+    from layout import load_layout,provenance,safe_file,isolated_file,read_source
+    layout=load_layout(source);identity=provenance(source)
+    require(not identity['dirty'],'E2 canonical source is dirty')
+    subprocess.run(['git','-C',str(source),'ls-files','--error-unmatch','--',*layout.by_source],check=True,stdout=subprocess.PIPE)
+    layout.validate_sources()
+    fields={}
+    for line in (evidence/'provenance.txt').read_text().splitlines():
+        if '=' in line:
+            key,value=line.split('=',1)
+            if key in ('source_directory','source_support_view','source_git_root','source_commit'):
+                require(key not in fields,'duplicate E2 source provenance field: '+key)
+                fields[key]=value
+    require(fields.get('source_git_root')==str(source) and fields.get('source_commit')==identity['revision'],
+            'E2 provenance canonical identity differs')
+    native=Path(fields['source_directory']);view=Path(fields['source_support_view'])
+    for root in (native,view):
+        require(root.is_absolute() and root.is_dir() and not any(p.is_symlink() for p in (root,*root.parents)),
+                'invalid E2 native/view location')
+    subprocess.run([sys.executable,'-B',str(safe_file(source,'tools/build/prepare_sources.py')),
+                    '--component','linux','--output',str(native),'--check'],check=True,stdout=subprocess.PIPE,stderr=subprocess.PIPE)
+    receipt=json.loads(isolated_file(view,'view.json',True).read_text())
+    require(receipt.get('kind')=='host-source-view' and receipt.get('schema')==1 and
+            receipt.get('canonical_root')==str(source) and receipt.get('revision')==identity['revision'] and
+            receipt.get('source_origins')==layout.by_logical and receipt.get('manifest')==layout.manifest,
+            'E2 support view identity/mapping differs')
+    for logical,canonical in layout.by_logical.items():
+        require(isolated_file(view,logical,True).read_bytes()==safe_file(source,canonical).read_bytes(),
+                'E2 logical copy differs: '+logical)
+    def native_source(name):
+        canonical=safe_file(source,layout.by_native[('linux',name)])
+        actual=safe_file(native,name)
+        expected=read_source(source,'linux',name,identity['revision'])
+        require(actual.read_bytes()==expected and canonical.read_bytes()==expected,'E2 native/canonical bytes differ: '+name)
+        return canonical
+    def logical_source(name):
+        canonical=safe_file(source,layout.by_logical[name])
+        require(isolated_file(view,name,True).read_bytes()==canonical.read_bytes(),'E2 support copy differs: '+name)
+        return canonical
+    return identity['revision'],native_source,logical_source
+
+
 def validate(source,scratch,evidence):
-    source=source.resolve();scratch=scratch.resolve();evidence=evidence.resolve()
+    source=source.absolute();scratch=scratch.resolve();evidence=evidence.resolve()
+    sha_source,native_source,logical_source=source_inputs(source,scratch,evidence)
     console=(evidence/'guest.log').read_text()
     # Use the production shared detector on the entire console, including
     # reports emitted before, during, or after artifact export.
-    debug_path=source/'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py'
+    debug_path=native_source('tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py')
     debug_spec=importlib.util.spec_from_file_location('e2_debug',debug_path)
     debug=importlib.util.module_from_spec(debug_spec);debug_spec.loader.exec_module(debug)
     debug.check_console(console)
@@ -106,7 +164,6 @@ def validate(source,scratch,evidence):
         else:
             capture.mkdir(mode=0o700)
             for name,data in files.items(): (capture/name).write_bytes(data)
-    sha_source=subprocess.check_output(['git','-C',str(source),'rev-parse','HEAD'],text=True).strip()
     require((scratch/'build/xdev-ext-source.commit').read_text().strip()==sha_source,'actual build source SHA differs')
     require((scratch/'build/xdev-ext-e2-mode.txt').read_text().splitlines()==['mechanism_variants=1','source_commit='+sha_source],'dedicated build identity missing')
     subprocess.run(['sha256sum','-c',str(scratch/'build/xdev-ext-artifacts.sha256')],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
@@ -132,7 +189,7 @@ def validate(source,scratch,evidence):
     ledger=json.loads((software/'source.json').read_text())
     require(negative.get('evidence_kind')=='actual-core-host-fixture' and ledger.get('evidence_kind')=='actual-core-host-fixture','old ticket has no explicit software boundary')
     require(ledger['kernel_git_sha']==sha_source,'software completion fixture is from another source SHA')
-    for path,digest in ledger['source_sha256'].items(): require(sha(source/'kernel'/path)==digest,'old-ticket production/fixture source changed: '+path)
+    for path,digest in ledger['source_sha256'].items(): require(sha(native_source(path))==digest,'old-ticket production/fixture source changed: '+path)
     raw_old=(software/'old-ticket.log').read_text()
     observations=[json.loads(line.split(' ',1)[1]) for line in raw_old.splitlines() if line.startswith('E2_OLD_TICKET_SNAPSHOT ')]
     require(len(observations)==2 and [x['phase'] for x in observations]==['before','after'],'no actual old-ticket snapshots')
@@ -176,8 +233,8 @@ def validate(source,scratch,evidence):
         require(bool(shared),'actual shared AF_XDP program identity missing')
         policy=dict(shared_afxdp_program_ids=shared,actual_initial_map_images=policy_initial,nxp_object_sha256=sha(capture/'nxp_mech.bpf.o'))
         layout=create['create']['layout'];st=create['create']['stages'][0]
-        config=dict(kernel_git_sha=sha_source,core_sha256=sha(source/'kernel/io_uring/xdev_ext_mech.c'),
-                    nvme_provider_sha256=sha(source/'kernel/drivers/nvme/host/xdev_ext_mech_nvme.c'),
+        config=dict(kernel_git_sha=sha_source,core_sha256=sha(native_source('io_uring/xdev_ext_mech.c')),
+                    nvme_provider_sha256=sha(native_source('drivers/nvme/host/xdev_ext_mech_nvme.c')),
                     kernel_image_sha256=sha(scratch/'build/arch/x86/boot/bzImage'),kernel_config_sha256=sha(scratch/'build/.config'),
                     input_sha256=hashlib.sha256(window).hexdigest(),create=create['create'],policy=policy,
                     nvme=dict(window_slba=st['arg0'],window_nlb=st['arg1'],group_bytes=layout['group_bytes'],lba_shift=9,direction='read' if st['direction']==2 else 'unsupported'))
@@ -202,7 +259,7 @@ def validate(source,scratch,evidence):
     manifest=dict(schema='xdev-ext-e2-v1',evidence_kind='guest-correctness',timing_claim='none',chain='nvme_nic',
                   source='source-window.bin',runs=runs,negatives=negatives)
     write_derived(capture/'capture.json',manifest)
-    frozen=source/'tests/eval/mechanism_variants/tests/test_guest_capture.py'
+    frozen=logical_source('tests/eval/mechanism_variants/tests/test_guest_capture.py')
     spec=importlib.util.spec_from_file_location('e2_frozen_capture',frozen);module=importlib.util.module_from_spec(spec);spec.loader.exec_module(module)
     os.environ['E2_CAPTURE_DIR']=str(capture)
     report=io.StringIO();result=unittest.TextTestRunner(stream=report,verbosity=2).run(unittest.defaultTestLoader.loadTestsFromTestCase(module.GuestCapture))

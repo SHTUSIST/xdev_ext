@@ -1,5 +1,20 @@
 # SPDX-License-Identifier: GPL-2.0
 obj-m += lifecycle_bench.o
-# Build-time identities are reported by the module and verified by the runner.
-ccflags-y += -DXB_BUILD_SHA='"$(shell git -C $(src) rev-parse HEAD)"'
-ccflags-y += -DXB_LIFE_HASH='"$(shell sha256sum $(src)/../../../kernel/io_uring/xdev_ext_mech_lifecycle.h | cut -d' ' -f1)"'
+# Query the actual runner; caller-supplied macros and enclosing Git are not authority.
+override XB_BUILD_SHA := $(shell python3 -B "$(src)/run.py" --identity-field revision)
+ifneq ($(.SHELLSTATUS),0)
+$(error lifecycle source revision query failed)
+endif
+override XB_LIFE_HASH := $(shell python3 -B "$(src)/run.py" --identity-field lifecycle_header_sha256)
+ifneq ($(.SHELLSTATUS),0)
+$(error lifecycle header identity query failed)
+endif
+ifeq ($(strip $(XB_BUILD_SHA)),)
+$(error lifecycle source revision is empty)
+endif
+ifeq ($(strip $(XB_LIFE_HASH)),)
+$(error lifecycle header identity is empty)
+endif
+ccflags-y += -DXB_BUILD_SHA='"$(XB_BUILD_SHA)"'
+ccflags-y += -DXB_LIFE_HASH='"$(XB_LIFE_HASH)"'
+$(obj)/lifecycle_bench.o: $(src)/run.py $(src)/../../../kernel/io_uring/xdev_ext_mech_lifecycle.h

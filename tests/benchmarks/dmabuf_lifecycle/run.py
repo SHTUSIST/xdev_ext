@@ -3,12 +3,14 @@
 """Explicit Linux primitive experiment runner; never implicitly loads a module."""
 import argparse
 import hashlib
+import importlib.util
 import json
 from pathlib import Path
 import platform
 import re
 import secrets
 import subprocess
+import sys
 
 HERE = Path(__file__).resolve().parent
 MODULE_ROOT = Path('/sys/module/lifecycle_bench')
@@ -16,6 +18,88 @@ RESULT_PATH = Path('/sys/kernel/debug/xdev_lifecycle_bench/result')
 CHECKS = ('two_phase', 'signal_before_add', 'identity', 'duplicates',
           'held_reference', 'independent_frames', 'allocation_failure',
           'callback_failure', 'teardown')
+
+
+def source_identity(directory: Path = HERE) -> dict[str, str]:
+    """Check canonical authority and the actual logical include, without runtime I/O."""
+    directory = Path(directory).absolute()
+    for parent in (directory, *directory.parents):
+        if parent.is_symlink():
+            raise ValueError('symlink source directory: ' + str(parent))
+    view = None
+    for parent in (directory, *directory.parents):
+        marker = parent / 'view.json'
+        if marker.is_file():
+            if marker.is_symlink():
+                raise ValueError('symlink source view receipt')
+            view = parent
+            receipt = json.loads(marker.read_text())
+            repo = Path(receipt['canonical_root'])
+            break
+        if (parent / 'source-layout.json').is_file():
+            repo = parent
+            break
+    else:
+        raise ValueError('missing canonical layout or logical view receipt')
+    if not repo.is_absolute():
+        raise ValueError('canonical root must be absolute')
+    for parent in (repo, *repo.parents):
+        if parent.is_symlink():
+            raise ValueError('symlink canonical root')
+    repo = repo.resolve()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repo), *args], text=True).strip()
+    if Path(git('rev-parse', '--show-toplevel')).resolve() != repo:
+        raise ValueError('canonical source directory is not its own Git checkout')
+    if git('status', '--porcelain', '--untracked-files=all'):
+        raise ValueError('canonical sources must be committed and clean')
+    revision = git('rev-parse', '--verify', 'HEAD^{commit}')
+    if not re.fullmatch('[0-9a-f]{40}', revision):
+        raise ValueError('invalid canonical revision')
+    git('ls-files', '--error-unmatch', '--', 'source-layout.json', 'tools/layout.py')
+    for name in ('source-layout.json', 'tools/layout.py'):
+        path = repo / name
+        if not path.is_file() or any(p.is_symlink() for p in (path, *path.parents)):
+            raise ValueError('invalid canonical metadata: ' + name)
+    tool = repo / 'tools/layout.py'
+    if tool.is_symlink() or tool.parent.is_symlink():
+        raise ValueError('symlink layout tool')
+    spec = importlib.util.spec_from_file_location('_lifecycle_source_layout', tool)
+    layout_api = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = layout_api
+    spec.loader.exec_module(layout_api)
+    layout = layout_api.load_layout(repo)
+    git('ls-files', '--error-unmatch', '--', *layout.by_source,
+        layout.manifest.get('dependency_lock', 'third_party/sources.lock.json'))
+    layout_api.safe_file(repo, layout.manifest.get('dependency_lock', 'third_party/sources.lock.json'))
+    layout.validate_sources()
+    logical_runner = 'tests/eval/dmabuf_lifecycle/run.py'
+    canonical_runner = layout_api.safe_file(repo, layout.by_logical[logical_runner])
+    header_logical = 'kernel/io_uring/xdev_ext_mech_lifecycle.h'
+    header = layout_api.safe_file(repo, layout.by_native[('linux', 'io_uring/xdev_ext_mech_lifecycle.h')])
+    expected = layout_api.read_source(repo, 'linux', 'io_uring/xdev_ext_mech_lifecycle.h', revision)
+    if header.read_bytes() != expected:
+        raise ValueError('canonical lifecycle header differs from exact revision')
+    if view is None:
+        if directory != canonical_runner.parent:
+            raise ValueError('runner directory is not the mapped canonical source')
+    else:
+        if (receipt.get('kind') != 'host-source-view' or receipt.get('schema') != 1 or
+                receipt.get('canonical_root') != str(repo) or receipt.get('revision') != revision or
+                receipt.get('source_origins') != layout.by_logical or
+                receipt.get('manifest') != layout.manifest):
+            raise ValueError('source view identity/mapping differs from canonical authority')
+        if directory != view / 'tests/eval/dmabuf_lifecycle':
+            raise ValueError('runner directory is not the mapped logical source')
+        # Every consumed experiment source and the actual relative include are
+        # independent regular copies of the exact canonical inputs.
+        for logical, source in layout.by_logical.items():
+            if logical.startswith('tests/eval/dmabuf_lifecycle/') or logical == header_logical:
+                actual = layout_api.isolated_file(view, logical, True)
+                if actual.read_bytes() != layout_api.safe_file(repo, source).read_bytes():
+                    raise ValueError('logical source copy differs: ' + logical)
+    return dict(canonical_root=str(repo), revision=revision,
+                lifecycle_header_sha256=hashlib.sha256(expected).hexdigest())
 
 
 def admit_environment(mode, environment):
@@ -113,14 +197,23 @@ def detected_environment():
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--mode', choices=('check', 'time'), required=True)
+    parser.add_argument('--identity-field', choices=('revision', 'lifecycle_header_sha256'))
+    parser.add_argument('--mode', choices=('check', 'time'))
     parser.add_argument('--iterations', type=int, default=8)
-    parser.add_argument('--module', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--module', type=Path)
+    parser.add_argument('--output', type=Path)
     parser.add_argument('--environment-manifest', type=Path)
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args(argv)
+    if args.identity_field:
+        try:
+            print(source_identity()[args.identity_field])
+        except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+            parser.exit(1, 'source identity: ' + str(error) + '\n')
+        return 0
+    if args.mode is None or args.module is None or args.output is None:
+        parser.error('--mode, --module and --output are required')
     if not 1 <= args.iterations <= 65536:
         parser.error('iterations must be 1..65536')
     command = ['insmod', str(args.module.resolve()), 'mode=' + args.mode,
@@ -143,11 +236,10 @@ def main(argv=None):
     if errors or not args.module.is_file():
         print(json.dumps(dict(plan, errors=errors or ['module is unavailable'])))
         return 2
-    source_status = subprocess.check_output(
-        ['git', '-C', str(HERE), 'status', '--porcelain', '--', str(HERE),
-         str(HERE.parents[2] / 'kernel/io_uring/xdev_ext_mech_lifecycle.h')], text=True)
-    if source_status.strip():
-        print(json.dumps(dict(plan, errors=['experiment sources must be committed before execution'])))
+    try:
+        identity = source_identity()
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError) as error:
+        print(json.dumps(dict(plan, errors=['source identity: ' + str(error)])))
         return 2
     # Never consume an old run or unload a module owned by another invocation.
     if args.output.exists():
@@ -213,10 +305,11 @@ def main(argv=None):
             if not isinstance(parsed_report, dict):
                 raise ValueError('report must be a JSON object')
             report = parsed_report
-            expected_sha = subprocess.check_output(
-                ['git', '-C', str(HERE), 'rev-parse', 'HEAD'], text=True).strip()
-            expected_header = hashlib.sha256(
-                (HERE.parents[2] / 'kernel/io_uring/xdev_ext_mech_lifecycle.h').read_bytes()).hexdigest()
+            current_identity = source_identity()
+            if current_identity != identity:
+                errors.append('source identity changed during execution')
+            expected_sha = identity['revision']
+            expected_header = identity['lifecycle_header_sha256']
             if report.get('exact_sha') != expected_sha or report.get('lifecycle_header_sha256') != expected_header:
                 errors.append('module compiled source/header identity differs from current checkout')
             if report.get('run_nonce') != nonce:

@@ -8,14 +8,51 @@ e2_paths() {
     grep -q 'xdev-native-v1-nvme-xsk-batch' "$SRC/include/trace/events/xdev_ext.h"
 }
 e2_record_sources() {
-    (set -o pipefail
-        cd "$SOURCE_GIT_ROOT" || exit 1
-        git ls-files -z -- tests/eval/mechanism_variants kernel/include/trace/events/xdev_ext.h \
-            kernel/io_uring kernel/drivers/nvme/host/xdev_ext_mech_nvme.c kernel/net/xdp/xsk.c \
-            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh \
-            kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py \
-            | while IFS= read -r -d '' path; do sha256sum "$SOURCE_GIT_ROOT/$path" || exit 1; done
-    ) > "$BUILD/xdev-ext-e2-sources.sha256" || return 1
+    python3 -B - "$SOURCE_GIT_ROOT" "$SRC" "$SOURCE_SUPPORT_VIEW" "$SOURCE_COMMIT" <<'PY_E2_SOURCES' > "$BUILD/xdev-ext-e2-sources.sha256" || return 1
+import hashlib,json,pathlib,sys
+repo,native,view=map(pathlib.Path,sys.argv[1:4]);revision=sys.argv[4]
+sys.path.insert(0,str(repo/'tools'))
+from layout import load_layout,provenance,safe_file,isolated_file,read_source
+identity=provenance(repo)
+if identity['dirty'] or identity['revision']!=revision:raise ValueError('E2 canonical identity changed')
+layout=load_layout(repo)
+receipt=json.loads(isolated_file(view,'view.json',True).read_text())
+if (receipt.get('schema')!=1 or receipt.get('kind')!='host-source-view' or receipt.get('canonical_root')!=str(repo) or
+    receipt.get('revision')!=revision or receipt.get('source_origins')!=layout.by_logical or
+    receipt.get('manifest')!=layout.manifest):raise ValueError('E2 support view identity differs')
+logical_inputs={name for name in layout.by_logical if name.startswith('tests/eval/mechanism_variants/')}
+if 'tests/eval/mechanism_variants/Makefile' not in logical_inputs:raise ValueError('missing E2 support sources')
+natives={'include/trace/events/xdev_ext.h','drivers/nvme/host/xdev_ext_mech_nvme.c','net/xdp/xsk.c',
+         'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh',
+         'tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py'}
+core={name for component,name in layout.by_native if component=='linux' and name.startswith('io_uring/')}
+if 'io_uring/xdev_ext_mech.c' not in core:raise ValueError('missing E2 core sources')
+natives.update(core)
+natives.update(name for component,name in layout.by_native if component=='linux' and
+    name.startswith(('tools/xdev_ext_mech/','tools/include/','tools/xdev_ext_')))
+natives.update(('include/linux/xdev_ext_mech.h','include/uapi/linux/xdev_ext_mech.h','include/uapi/linux/io_uring.h'))
+logical_inputs.update('kernel/'+name for name in natives)
+# The unchanged actual-core exporter also consumes these support fixture files.
+logical_inputs.update(name for name in layout.by_logical if name.startswith((
+    'kernel/tools/testing/selftests/xdev_ext_mech/fanout_scheduler/',
+    'kernel/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/')))
+paths=set()
+for logical in sorted(logical_inputs):
+    source=layout.by_logical[logical]
+    original=safe_file(repo,source);copy=isolated_file(view,logical,True)
+    if original.read_bytes()!=copy.read_bytes():raise ValueError('E2 logical copy differs: '+logical)
+    paths.update((original,copy))
+    if logical.startswith('kernel/'):
+        name=logical[len('kernel/'):]
+        actual=safe_file(native,name)
+        expected=read_source(repo,'linux',name,revision)
+        if actual.read_bytes()!=expected or original.read_bytes()!=expected:raise ValueError('E2 native input differs: '+name)
+        paths.add(actual)
+for name in ('source-layout.json','tools/layout.py',layout.manifest.get('dependency_lock','third_party/sources.lock.json')):
+    paths.add(safe_file(repo,name))
+paths.update((isolated_file(view,'view.json',True),safe_file(native,'.xdev-ext-source.json')))
+for path in sorted(paths):print(hashlib.sha256(path.read_bytes()).hexdigest()+'  '+str(path.absolute()))
+PY_E2_SOURCES
     [[ -s "$BUILD/xdev-ext-e2-sources.sha256" ]]
 }
 # Publish a new receipt only after the non-overwriting exporter succeeds.
@@ -25,7 +62,7 @@ e2_export_old_ticket() {
     parent=$(mktemp -d "$E2_OUT/software-old-ticket.XXXXXXXX") || return 1
     parent=$(realpath -e -- "$parent") || return 1
     capture=$parent/capture
-    python3 "$E2_SOURCE/export_old_ticket.py" "$SRC" "$capture" --cc gcc-14 > "$EV/e2-old-ticket-host.log" 2>&1 || return 1
+    python3 "$E2_SOURCE/export_old_ticket.py" "$SOURCE_SUPPORT_VIEW/kernel" "$capture" --cc gcc-14 > "$EV/e2-old-ticket-host.log" 2>&1 || return 1
     receipt=$(mktemp "$BUILD/xdev-ext-e2-old-ticket.path.XXXXXXXX") || return 1
     printf '%s\n' "$capture" > "$receipt" || return 1
     mv -f -- "$receipt" "$BUILD/xdev-ext-e2-old-ticket.path"
