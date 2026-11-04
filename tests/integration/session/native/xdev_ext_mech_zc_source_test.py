@@ -94,7 +94,8 @@ class SourceGate(unittest.TestCase):
             # prerequisite. Unrelated device-driver sources are not exercised.
             files = [f for f in manifest['files'] if f['source'].startswith((
                 'tests/integration/session/', 'tests/benchmarks/chains/',
-                'tests/support/benchmarks/', 'src/cli/',
+                'tests/support/benchmarks/', 'src/cli/', 'src/lib/',
+                'src/core/include/uapi/', 'src/bpf/',
             )) or f['source'] in (
                 'tests/benchmarks/nvme_gpu/session_nvme_ce.c',
                 'tests/benchmarks/gpu_nic/session_gpu_nic.c',

@@ -9,7 +9,6 @@ import json
 import os
 from pathlib import Path
 import shutil
-import shlex
 import subprocess
 import tempfile
 import unittest
@@ -18,6 +17,35 @@ HERE = Path(__file__).resolve().parent
 PRODUCT = HERE.parents[2]
 MODE = HERE / 'kvm_mode.sh'
 PATH_RECEIPT = 'xdev-ext-e2-old-ticket.path'
+
+
+def source_fixture():
+    """Load only test setup from the declared canonical owner, never parent Git."""
+    import importlib.util
+    import json
+    import os
+    candidates = []
+    if os.environ.get('XDEV_EXT_CANONICAL_ROOT'):
+        candidates.append(Path(os.environ['XDEV_EXT_CANONICAL_ROOT']))
+    for parent in (HERE, *HERE.parents):
+        receipt = next((parent / name for name in ('view.json', '.xdev-ext-source.json')
+                        if (parent / name).is_file()), None)
+        if receipt is not None:
+            candidates.append(Path(json.loads(receipt.read_text())['canonical_root']))
+            break
+        if (parent / 'source-layout.json').is_file():
+            candidates.append(parent)
+            break
+    if not candidates:
+        raise RuntimeError('test setup requires declared canonical source owner')
+    product = candidates[0].resolve()
+    helper = product / 'tests/integration/session/source_setup/fixture.py'
+    spec = importlib.util.spec_from_file_location('legacy_source_fixture', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.PRODUCT = product
+    module.ARTIFACTS = Path(os.environ.get('XDEV_SETUP_ARTIFACTS', product / 'build/source-setup-tests'))
+    return module.Fixture(actual_core=True)
 
 
 class OldTicketCache(unittest.TestCase):
@@ -69,53 +97,15 @@ else: raise AssertionError(directory)
 root.mkdir(parents=True,exist_ok=True)
 for name in names: (root/name).write_bytes(b'host make/BPF boundary fixture, never executed\\n')
 ''')
-        git_env = dict(os.environ)
-        receipt = PRODUCT/'view.json'
-        if receipt.is_file():
-            view = json.loads(receipt.read_text())
-            self.assertEqual(view['kind'], 'host-source-view')
-            canonical = view['canonical_root']
-            # The view contains native copies but has no native Git index.
-            # Select the actual harness's source paths, then index their current
-            # bytes in private objects. Canonical Git metadata stays read-only.
-            command = MODE.read_text().split('git ls-files -z --', 1)[1].split('| while', 1)[0]
-            source_paths = shlex.split(command.replace('\\\n', ''))
-            tracked = subprocess.check_output(
-                ['git', '-C', canonical, 'ls-files', '--stage', '-z'])
-            entries = {}
-            for row in filter(None, tracked.split(b'\0')):
-                metadata, path = row.split(b'\t', 1)
-                mode, _blob, stage = metadata.split()
-                self.assertEqual(stage, b'0', 'source fixture requires resolved inputs')
-                entries[os.fsdecode(path)] = mode
-            selected = sorted(logical for logical in view['source_origins']
-                              if any(logical == path or logical.startswith(path+'/')
-                                     for path in source_paths))
-            self.assertTrue(selected, 'actual source-record selection is empty')
-            git_env.update(GIT_DIR=subprocess.check_output(
-                ['git', '-C', canonical, 'rev-parse', '--absolute-git-dir'],
-                text=True).strip(), GIT_WORK_TREE=str(PRODUCT),
-                GIT_INDEX_FILE=str(self.root/'native-source.index'),
-                GIT_OBJECT_DIRECTORY=str(self.root/'native-objects'),
-                GIT_ALTERNATE_OBJECT_DIRECTORIES=subprocess.check_output(
-                    ['git', '-C', canonical, 'rev-parse', '--path-format=absolute',
-                     '--git-path', 'objects'], text=True).strip())
-            Path(git_env['GIT_OBJECT_DIRECTORY']).mkdir()
-            blobs = subprocess.check_output(
-                ['git', 'hash-object', '-w', '--no-filters', '--stdin-paths'],
-                input=''.join(str(PRODUCT/name)+'\n' for name in selected).encode(),
-                env=git_env).splitlines()
-            self.assertEqual(len(blobs), len(selected))
-            native = b''.join(entries[view['source_origins'][logical]]+b' '+blob+
-                              b'\t'+os.fsencode(logical)+b'\0'
-                              for logical, blob in zip(selected, blobs))
-            subprocess.run(['git', 'update-index', '-z', '--index-info'],
-                           input=native, env=git_env, check=True)
-        self.env = dict(git_env, SRC=str(PRODUCT/'kernel'), TOOLS=str(self.tools),
+        self.source = source_fixture()
+        self.addCleanup(self.source.cleanup)
+        admitted, _ = self.source.gate(e2=True)
+        self.assertEqual(admitted.returncode, 0, admitted.stdout + admitted.stderr)
+        self.env = dict(os.environ, SRC=str(self.source.native), TOOLS=str(self.tools),
             BUILD=str(self.build), EV=str(self.evidence), ROOT=str(self.guest),
-            E2_SOURCE=str(HERE), SOURCE_GIT_ROOT=str(PRODUCT), E2_MODE=str(MODE),
-            SOURCE_COMMIT=subprocess.check_output(['git', '-C', str(PRODUCT),
-                                                  'rev-parse', 'HEAD'], text=True, env=git_env).strip(),
+            E2_SOURCE=str(self.source.view/'tests/eval/mechanism_variants'),
+            SOURCE_GIT_ROOT=str(self.source.repo), SOURCE_SUPPORT_VIEW=str(self.source.view),
+            SCRATCH=str(self.root), E2_MODE=str(MODE), SOURCE_COMMIT=self.source.sha,
             BUILD_STUB=str(self.stub), E2_TEST_MAKE_CALLS=str(self.root/'make-calls.jsonl'),
             PYTHONDONTWRITEBYTECODE='1', PATH=str(self.wrappers)+':'+os.environ['PATH'])
 
@@ -230,7 +220,7 @@ for name in names: (root/name).write_bytes(b'host make/BPF boundary fixture, nev
         parent = Path(tempfile.mkdtemp(prefix='independent-export-', dir=self.e2))
         selected = parent/'capture'
         run = subprocess.run(['python3', '-B', str(HERE/'export_old_ticket.py'),
-            str(PRODUCT/'kernel'), str(selected), '--cc', 'gcc-14'], env=self.env,
+            str(self.source.view/'kernel'), str(selected), '--cc', 'gcc-14'], env=self.env,
             text=True, capture_output=True, timeout=60)
         self.assert_success(run); self.assert_actual_export(selected)
         (self.build/PATH_RECEIPT).write_text(str(selected.resolve())+'\n')
@@ -306,13 +296,14 @@ for name in names: (root/name).write_bytes(b'host make/BPF boundary fixture, nev
 
     def test_failed_source_record_cannot_qualify_partial_new_build(self):
         selected = self.qualify_fixture(); old = self.snapshot(selected)
-        actual_git = shutil.which('git')
-        wrapper = self.wrappers/'git'
+        actual_python = shutil.which('python3')
+        wrapper = self.wrappers/'python3'
         marker = self.root/'source-record-failure-reached'
-        wrapper.write_text('#!/bin/sh\ncase " $* " in\n'
-            '  *" ls-files "*) echo reached > "$E2_TEST_GIT_FAILURE_MARKER"; '
-            'echo "intentional source-record boundary failure" >&2; exit 41;;\nesac\n'
-            f'exec "{actual_git}" "$@"\n')
+        wrapper.write_text('#!/bin/sh\n'
+            'if [ "$1" = "-B" ] && [ "$2" = "-" ]; then\n'
+            '  echo reached > "$E2_TEST_GIT_FAILURE_MARKER"\n'
+            '  echo "intentional source-record boundary failure" >&2; exit 41\nfi\n'
+            f'exec "{actual_python}" "$@"\n')
         wrapper.chmod(0o700)
         failed = self.shell('e2_build', E2_TEST_GIT_FAILURE_MARKER=str(marker))
         self.assertNotEqual(failed.returncode, 0)

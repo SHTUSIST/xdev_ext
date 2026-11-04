@@ -97,17 +97,33 @@ def source_revision(kernel):
     actual_headers={p.relative_to(kernel).as_posix() for p in paths if p.parent==kernel/'io_uring' and p.suffix=='.h'}
     if actual_headers!=expected_headers:
         raise ValueError('old-ticket lifecycle helper membership differs from canonical source')
-    for path in paths:
-        name=path.relative_to(kernel).as_posix()
-        source=layout.by_native[('linux',name)]
-        actual=isolated_file(view,'kernel/'+name,True) if view is not None else safe_file(native,name)
-        canonical=safe_file(repo,source)
-        # The checkout is clean and the mapping is loaded once. A fixed Git
-        # blob read binds each consumed input to the exact revision without
-        # reloading the full committed layout for every unrelated Linux file.
-        committed=subprocess.check_output(['git','-C',str(repo),'show',revision+':'+source])
-        if actual.read_bytes()!=committed or canonical.read_bytes()!=committed:
-            raise ValueError('old-ticket source copy differs: '+name)
+    # Qualify every mapped Linux copy, including transitive quoted includes
+    # outside the emitted ledger. One batch process reads exact blobs using the
+    # already loaded layout, without per-input manifest reloads or Git startup.
+    entries=[(name,source) for (component,name),source in layout.by_native.items() if component=='linux']
+    with subprocess.Popen(['git','-C',str(repo),'cat-file','--batch'],
+                          stdin=subprocess.PIPE,stdout=subprocess.PIPE) as blobs:
+        try:
+            for name,source in entries:
+                actual=isolated_file(view,'kernel/'+name,True) if view is not None else safe_file(native,name)
+                canonical=safe_file(repo,source)
+                blobs.stdin.write((revision+':'+source+'\n').encode())
+                blobs.stdin.flush()
+                header=blobs.stdout.readline().split()
+                if len(header)!=3 or header[1]!=b'blob' or not header[2].isdigit():
+                    raise ValueError('old-ticket committed blob unavailable: '+name)
+                size=int(header[2])
+                committed=blobs.stdout.read(size)
+                if len(committed)!=size or blobs.stdout.read(1)!=b'\n':
+                    raise ValueError('old-ticket committed blob is truncated: '+name)
+                if actual.read_bytes()!=committed or canonical.read_bytes()!=committed:
+                    raise ValueError('old-ticket source copy differs: '+name)
+            blobs.stdin.close()
+            if blobs.stdout.read(1) or blobs.wait()!=0:
+                raise ValueError('old-ticket committed source batch failed')
+        except BaseException:
+            blobs.kill()
+            raise
     if not re.fullmatch('[0-9a-f]{40}',revision):raise ValueError('invalid canonical source revision')
     return revision
 

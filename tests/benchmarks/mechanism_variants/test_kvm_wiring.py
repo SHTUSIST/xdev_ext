@@ -5,6 +5,8 @@ import subprocess
 import unittest
 HERE=Path(__file__).resolve().parent
 HARNESS=HERE.parents[2]/'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh'
+if not HARNESS.is_file():
+    HARNESS=HERE.parents[2]/'tests/integration/session/native/xdev_ext_mech_zc_kvm.sh'
 class Wiring(unittest.TestCase):
     def test_mode_refuses_other_campaigns_before_touching_scratch(self):
         for args in (['--ce-sim'],['--compat'],['--reliable'],['--fault','drop-middle'],['--groups','257']):
@@ -91,11 +93,13 @@ class CaptureWiring(unittest.TestCase):
         import tempfile
         tools=root/'tools'; out=tools/'e2'; out.mkdir(parents=True)
         build=root/'build'; build.mkdir(); ev=root/'evidence'; ev.mkdir()
-        src=root/'kernel'; hook=src/'include/trace/events/xdev_ext.h'
-        hook.parent.mkdir(parents=True); hook.write_text('xdev-native-v1-nvme-xsk-batch\n')
+        setup=source_fixture(); self.addCleanup(setup.cleanup)
+        admitted, values=setup.gate(e2=True)
+        self.assertEqual(admitted.returncode,0,admitted.stdout+admitted.stderr)
+        src=setup.native; hook=src/'include/trace/events/xdev_ext.h'
         symbols=('TRACING','FTRACE','BPF_EVENTS','XDEV_EXT_MECH','XDEV_EXT_MECH_ZEROCOPY')
         (build/'.config').write_text(''.join('CONFIG_'+s+'=y\n' for s in symbols))
-        (build/'xdev-ext-e2-mode.txt').write_text('mechanism_variants=1\nsource_commit=host-fixture\n')
+        (build/'xdev-ext-e2-mode.txt').write_text('mechanism_variants=1\nsource_commit='+setup.sha+'\n')
         def receipt(path): return hashlib.sha256(path.read_bytes()).hexdigest()+'  '+str(path)+'\n'
         artifacts=[]
         for name in ('mv_ctl','mv_sink','bpftool','nvme_reverse.bpf.o','nvme_gray.bpf.o',
@@ -108,13 +112,15 @@ class CaptureWiring(unittest.TestCase):
         parent=Path(tempfile.mkdtemp(prefix='software-old-ticket.',dir=out))
         capture=parent/'capture'
         subprocess.run(['python3','-B',str(HERE/'export_old_ticket.py'),
-                        str(HERE.parents[2]/'kernel'),str(capture),'--cc','gcc'],
+                        str(setup.view/'kernel'),str(capture),'--cc','gcc'],
                        check=True,capture_output=True,text=True,timeout=60)
         selected=build/'xdev-ext-e2-old-ticket.path'
         selected.write_text(str(capture.resolve())+'\n')
         artifacts += [selected,*sorted(capture.iterdir())]
         (build/'xdev-ext-artifacts.sha256').write_text(''.join(receipt(p) for p in artifacts))
-        return dict(SRC=src,TOOLS=tools,BUILD=build,EV=ev,SOURCE_COMMIT='host-fixture')
+        return dict(SRC=src,TOOLS=tools,BUILD=build,EV=ev,SOURCE_COMMIT=setup.sha,
+                    SOURCE_GIT_ROOT=setup.repo,SOURCE_SUPPORT_VIEW=setup.view,
+                    E2_SOURCE=setup.view/'tests/eval/mechanism_variants')
 
     def test_run_only_identity_rejects_old_config_without_virtio_console(self):
         import tempfile
@@ -150,7 +156,44 @@ class CaptureWiring(unittest.TestCase):
             self.assertNotIn('E2_ARTIFACT_DATA',run.stdout)
 
 
+def source_fixture():
+    """Load only test setup from the declared canonical owner, never parent Git."""
+    import importlib.util
+    import json
+    import os
+    candidates = []
+    if os.environ.get('XDEV_EXT_CANONICAL_ROOT'):
+        candidates.append(Path(os.environ['XDEV_EXT_CANONICAL_ROOT']))
+    for parent in (HERE, *HERE.parents):
+        receipt = next((parent / name for name in ('view.json', '.xdev-ext-source.json')
+                        if (parent / name).is_file()), None)
+        if receipt is not None:
+            candidates.append(Path(json.loads(receipt.read_text())['canonical_root']))
+            break
+        if (parent / 'source-layout.json').is_file():
+            candidates.append(parent)
+            break
+    if not candidates:
+        raise RuntimeError('test setup requires declared canonical source owner')
+    product = candidates[0].resolve()
+    helper = product / 'tests/integration/session/source_setup/fixture.py'
+    spec = importlib.util.spec_from_file_location('legacy_source_fixture', helper)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    module.PRODUCT = product
+    module.ARTIFACTS = Path(os.environ.get('XDEV_SETUP_ARTIFACTS', product / 'build/source-setup-tests'))
+    return module.Fixture(actual_core=True)
+
+
 class FinalCaptureGate(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.source=source_fixture()
+        cls.addClassCleanup(cls.source.cleanup)
+        admitted, _=cls.source.gate(e2=True)
+        if admitted.returncode:
+            raise RuntimeError(admitted.stdout+admitted.stderr)
+
     MARKERS=('XDEV_EXT_ZC_GUEST_EXIT=0\nE2_GUEST_CAPTURE_EXIT=0\n'
              'E2_EXECUTION_COMPLETE=PASS scope=guest-correctness performance_claim=none\n')
 
@@ -167,6 +210,11 @@ class FinalCaptureGate(unittest.TestCase):
         (ev/'e2-artifacts.raw.log').write_bytes(run.stdout)
         (ev/'guest.log').write_text('Linux boot\n'+self.MARKERS)
         (ev/'qemu.exit').write_text('0\n')
+        (ev/'provenance.txt').write_text(
+            'source_directory='+str(self.source.native)+'\n'
+            'source_support_view='+str(self.source.view)+'\n'
+            'source_git_root='+str(self.source.repo)+'\n'
+            'source_commit='+self.source.sha+'\n')
         # Deliberately wrong source identity is a later-boundary sentinel,
         # never a fabricated successful capture or build.
         build=scratch/'build'; build.mkdir()
@@ -178,7 +226,7 @@ class FinalCaptureGate(unittest.TestCase):
         return scratch,ev,run.stdout
 
     def validate(self, scratch, ev):
-        return subprocess.run(['python3','-B',str(HERE/'validate_e2.py'),'--source-root',str(HERE.parents[2]),
+        return subprocess.run(['python3','-B',str(HERE/'validate_e2.py'),'--source-root',str(self.source.repo),
                                '--scratch',str(scratch),'--evidence',str(ev)],
                               text=True,capture_output=True,timeout=20)
 
@@ -200,7 +248,7 @@ class FinalCaptureGate(unittest.TestCase):
                     return original(*args,**kwargs)
                 module.extract=observe
                 with self.assertRaises((OSError,ValueError)):
-                    module.validate(HERE.parents[2],scratch,ev)
+                    module.validate(self.source.repo,scratch,ev)
                 self.assertTrue(calls,'actual validator never called the bounded extractor')
                 self.assertTrue(calls[0][0][0] == wire.decode('ascii'),
                                  'actual E2 gate still extracts console instead of dedicated port')
