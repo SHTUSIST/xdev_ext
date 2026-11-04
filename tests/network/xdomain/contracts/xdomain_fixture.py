@@ -77,6 +77,10 @@ def declarations(syntax):
     if not macro:
         raise AssertionError("missing real struct_ops layout")
     parts = [macro.group(), "XDEV_EXT_MECH_OPS_TYPE(xdev_ext_nvme_mech_ops);"]
+    class_ops = definition(header, "xdev_ext_mech_class_ops", True)
+    parts.extend("struct " + name + ";" for name in sorted(
+        set(re.findall(r"\bstruct\s+(\w+)", class_ops)) - {"xdev_ext_mech_class_ops"}))
+    parts.append(class_ops)
     if syntax and "struct xdev_ext_xdomain_proto_result {" not in header:
         parts.append("struct xdev_ext_xdomain_proto_result { struct xdev_ext_xdomain_proto_verdict verdict; __u32 calls; };")
     else:
@@ -108,6 +112,7 @@ struct xdev_ext_mech_session {
 };
 struct xdev_ext_mech_stage {
  struct xdev_ext_mech_session *s; u32 class_id, index, direction; void *priv;
+ const struct xdev_ext_mech_class_ops *cls;
 };
 /* Existing X1 cases select default tables only. No PRIVATE lookup model. */
 static const void *xdev_ext_mech_instance_ops(const struct xdev_ext_mech_instance *instance)
@@ -162,13 +167,42 @@ def production():
     return "\n\n".join(parts)
 
 
+def registered_setup(cases):
+    """Add only the environmental class pin after the frozen original setup."""
+    body = definition(cases, "setup")
+    if (cases.count(body) != 1 or
+            body.split("{", 1)[0].strip() != "static void setup(xdev_ext_mech_cb_t callback)" or
+            len(re.findall(r"\bsetup\b", scrub(body))) != 1 or
+            re.search(r"\bfixture_(?:original_setup|registered_xdomain_class)\b", cases)):
+        raise AssertionError("original X1 setup alias is no longer exact")
+    wrapper = r'''
+static struct xdev_ext_mech_class_ops fixture_registered_xdomain_class;
+static void setup(xdev_ext_mech_cb_t callback)
+{
+ fixture_original_setup(callback);
+ fixture_registered_xdomain_class = (struct xdev_ext_mech_class_ops) {
+  .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN,
+  .decl = xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_XDOMAIN),
+ };
+ stage.cls = &fixture_registered_xdomain_class;
+}
+'''
+    wrapped = ('#pragma push_macro("setup")\n#undef setup\n'
+               '#define setup fixture_original_setup\n' + body +
+               '\n#pragma pop_macro("setup")\n' + wrapper)
+    return cases.replace(body, wrapped, 1)
+
+
 def source(syntax=False):
     env = local("xdomain_fixture.c.in").read_text()
     if syntax:
         env = env.replace('/* DECLARATIONS */', '#include "' + str(local("xdomain_declarations.h")) + '"')
     bodies = "" if syntax else production()
+    cases = local("xdomain_cases.c.in").read_text()
+    if not syntax:
+        cases = registered_setup(cases)
     return (env.replace("/* PRODUCTION */", declarations(syntax) + bodies)
-            .replace("/* CASES */", local("xdomain_cases.c.in").read_text()))
+            .replace("/* CASES */", cases))
 
 
 def build_and_run(names, syntax=False):

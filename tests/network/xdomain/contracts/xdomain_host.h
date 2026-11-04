@@ -142,6 +142,7 @@ struct xdev_ext_mech_session {
  struct kthread_delayed_work progress_work;
 };
 struct xdev_ext_mech_batch {
+ struct xdev_ext_mech_session *s;
  void *priv,*cookie;
  struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];
  struct { unsigned state,stage; } bs;

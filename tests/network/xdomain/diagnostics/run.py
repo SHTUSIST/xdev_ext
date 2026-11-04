@@ -102,7 +102,7 @@ def class_unit(root,out):
     declarations+=mod.no_includes(link)
     helpers=('xdev_ext_mech_settled','xdev_ext_mech_settle_locked',
         'xdev_ext_mech_progress_work','xdev_ext_mech_session_stop','xdev_ext_mech_session_stop_started_ns',
-        'xdev_ext_mech_stage_native_get','xdev_ext_mech_stage_native_put','xdev_ext_mech_end')
+        'xdev_ext_mech_stage_native_get','xdev_ext_mech_stage_native_put','xdev_ext_mech_batch_session','xdev_ext_mech_end')
     if '\nvoid xdev_ext_mech_stage_stop(' in core:helpers+=('xdev_ext_mech_stage_stop',)
     enum=re.search(r'enum xdev_ext_mech_end\s*\{[^}]+\};',core)
     if not enum:raise RuntimeError('missing core disposition enum')
@@ -133,7 +133,7 @@ def class_unit(root,out):
     generated=generated.replace('@BPF@',mod.no_includes((root/bpf).read_text()))
     generated=generated.replace('@POLL@',mod.poll_unit(k,root/'src/network/io_uring/xdomain/xdev_ext_xdomain_ring.c'))
     generated=generated.replace('@CLASS@',boundary+'\n'+mod.no_includes(clstext))
-    generated=generated.replace('@BOUNDARIES@',(contracts/'xdomain_boundaries.c').read_text())
+    generated=generated.replace('@BOUNDARIES@',mod.typed_peer_boundaries((contracts/'xdomain_boundaries.c').read_text()))
     generated=generated.replace('@CASES@',(HERE/'class.c').read_text())
     generated=generated.replace('@PRESSURE@','')
     return '#define DIAG_CLASS_HAS_HOOK '+str(int(have))+'\n'+generated

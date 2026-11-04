@@ -8,11 +8,13 @@ and rollback decisions; does not prove NHI hardware behavior or BPF policy.
 Production is required; missing artifacts are setup errors, never behavioral RED.
 """
 import argparse
+import re
 from pathlib import Path
 HERE = Path(__file__).resolve().parent
 import subprocess
 import sys
 import tempfile
+from xdomain_fixture import definition, scrub
 
 
 def no_includes(text):
@@ -34,6 +36,48 @@ def declaration(text, key):
                 end = text.index(";", pos) + 1
                 return text[start:end] + "\n"
     raise ValueError("unterminated declaration: " + key)
+
+
+def typed_lease_declarations(net):
+    """Complete real typed lease, after peer_fd and before net_elem."""
+    return "\n".join(declaration(net, name) for name in (
+        "enum xdev_ext_net_lease_kind", "struct xdev_ext_net_pool_dma",
+        "struct xdev_ext_net_lease"))
+
+
+def typed_ring_inputs(cases):
+    """Map only four frozen input LHS paths; retain values and assertions."""
+    if len(re.findall(r"\.\s*lease\s*\.\s*lease\s*\.", scrub(cases))) != 4:
+        raise ValueError("original ring input field count changed")
+    edits = []
+    for name, array in (("bare", "elems"),
+                        ("rejected_count_has_no_native_effects", "many")):
+        body = definition(cases, name)
+        if cases.count(body) != 1:
+            raise ValueError("ambiguous original ring input setup: " + name)
+        matches = list(re.finditer(
+            r"(?m)^[ \t]*" + array +
+            r"\[i\](?P<path>\.lease\.lease\.)(?P<member>dma_address|len)(?=\s*=(?!=))",
+            scrub(body)))
+        if len(matches) != 2 or {m.group("member") for m in matches} != {"dma_address", "len"}:
+            raise ValueError("original ring assignment locations changed: " + name)
+        offset = cases.index(body)
+        edits.extend((offset + m.start("path"), offset + m.end("path")) for m in matches)
+    if len(set(edits)) != 4:
+        raise ValueError("original ring assignments are not unique")
+    mapped, reverse, shift = cases, [], 0
+    replacement = ".lease.u.peer.lease."
+    for start, end in sorted(edits):
+        reverse.append((start + shift, start + shift + len(replacement), cases[start:end]))
+        shift += len(replacement) - (end - start)
+    for start, end in sorted(edits, reverse=True):
+        mapped = mapped[:start] + replacement + mapped[end:]
+    restored = mapped
+    for start, end, original in reversed(reverse):
+        restored = restored[:start] + original + restored[end:]
+    if restored != cases:
+        raise ValueError("ring input field mapping is not byte-reversible")
+    return mapped
 
 
 def main():
@@ -69,7 +113,7 @@ def main():
         lease = (declaration(peer, "struct xdev_ext_peer_lease") +
                  declaration(peer, "struct xdev_ext_peer_fd_lease"))
         net = (kernel / names[3]).read_text()
-        family = (declaration(net, "enum xdev_ext_net_hdr_policy") +
+        family = (typed_lease_declarations(net) + declaration(net, "enum xdev_ext_net_hdr_policy") +
                   "\n".join(line for line in net.splitlines()
                             if line.startswith("#define XDEV_EXT_NET_DEV_AREA") or
                             line.startswith("#define XDEV_EXT_NETFAM_MAX_ELEMS")) + "\n" +
@@ -82,7 +126,7 @@ def main():
                 '\n#include "include/linux/xdev_ext_mech_reliable_core.h"\n' +
                 lease + family + no_includes((kernel / names[1]).read_text()) +
                 (here / "xdomain_ring_boundaries.c").read_text() + retention_unit(kernel) + descriptor_unit(kernel) + ring +
-                (here / "xdomain_ring_cases.c").read_text())
+                typed_ring_inputs((here / "xdomain_ring_cases.c").read_text()))
     except (OSError, ValueError) as error:
         print("# SETUP_EXTRACTION: " + str(error), file=sys.stderr)
         return 2

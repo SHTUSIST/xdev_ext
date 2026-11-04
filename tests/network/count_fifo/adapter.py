@@ -59,10 +59,6 @@ def generate(root,out,mutation=None):
  root=Path(root);out=Path(out)
  family_exists=(root/'src/network/include/linux/xdev_ext_netfam_count.h').exists()
  have,manifest=old.generate(root,out,mutation if mutation in OLD_MUTANTS and not family_exists else None)
- h=root/'src/network/include/linux/xdev_ext_netfam_count.h'
- if h.exists():
-  s='\n'.join(l for l in h.read_text().splitlines() if not l.lstrip().startswith('#include'))
-  j=out/'production_journal.h';j.write_text(s+'\n'+j.read_text())
  rel=(root/'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc').read_text()
  enqueue=old.function(rel,'xsk_rel_enqueue');manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':'xsk_rel_enqueue','bytes':len(enqueue)})
  p=out/'production.c.inc'

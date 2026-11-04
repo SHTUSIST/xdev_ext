@@ -60,7 +60,13 @@ int __wrap_xdev_ext_stor_block_append(struct xdev_ext_mech_pool *p,struct xdev_e
 #define nvme_xdev_ext_class_bounce actual_bounce
 #include "actual_bounce.inc"
 #undef nvme_xdev_ext_class_bounce
-static int nvme_xdev_ext_class_bounce(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b,struct request *r,struct nvme_xdev_ext_mech_batch *bp){bounces++;event('B');if(bp->slot)EQ("fallback-sees-bio-not-live",bp->slot->bio_live,0);return actual_bounce(st,b,r,bp);}
+#ifdef BLOCK_FAMILY_7B
+#define FIXTURE_BOUNCE_STAGE xdev_ext_stor_stage
+#else
+#define FIXTURE_BOUNCE_STAGE xdev_ext_mech_stage
+#endif
+static int nvme_xdev_ext_class_bounce(struct FIXTURE_BOUNCE_STAGE *st,struct xdev_ext_mech_batch *b,struct request *r,struct nvme_xdev_ext_mech_batch *bp){bounces++;event('B');if(bp->slot)EQ("fallback-sees-bio-not-live",bp->slot->bio_live,0);return actual_bounce(st,b,r,bp);}
+#undef FIXTURE_BOUNCE_STAGE
 #include "actual_map.inc"
 static struct page opaque_pages[512];static struct page *page_list[512],*bounce_pages[128];
 static struct xdev_ext_mech_session session;
@@ -86,7 +92,23 @@ static void reset(void){
  adds=inits=uninits=appends=bounces=frames=pages=byte_queries=family_caps=family_preflight=family_append=0;
  partial_at=append_error=0;frame_error_at=-1;nr_events=0;events[0]=0;nvme_xdev_ext_mech_bounces=0;
 }
-static int map(void){return nvme_xdev_ext_class_map(&stage,&batch,&request,&bp);}
+#if defined(BLOCK_FAMILY_7A) || defined(BLOCK_FAMILY_7B)
+/* Native queue identity only; queue limits remain production decisions. */
+static struct request_queue *fixture_member_queue(void *opaque){return ((struct nvme_xdev_ext_mech_stage *)opaque)->ns->queue;}
+static const struct xdev_ext_stor_dev_ops fixture_member_ops={.queue=fixture_member_queue};
+#endif
+static int map(void){
+#if defined(BLOCK_FAMILY_7A) || defined(BLOCK_FAMILY_7B)
+ member.family.st=&stage;member.family.dev=&fixture_member_ops;member.family.member=&member;
+#endif
+#ifdef BLOCK_FAMILY_7B
+ /* Refresh inputs here because old cases change vector capacity after reset. */
+ member.family.geometry.lba_shift=member.identity.lba_shift;member.family.window.write=member.write;member.family.nr_vecs=member.nr_vecs;
+ return fixture_family_map(&member.family,&batch,&request,&bp);
+#else
+ return nvme_xdev_ext_class_map(&stage,&batch,&request,&bp);
+#endif
+}
 static void consumption(unsigned append){
 #ifdef BLOCK_NEW
  EQ("family-caps-consumed",family_caps,1);EQ("family-preflight-consumed",family_preflight,1);EQ("family-append-consumed",family_append,append);
