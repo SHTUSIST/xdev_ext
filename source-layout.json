@@ -6975,6 +6975,30 @@
       "logical_path": "tests/eval/xdomain/xdomain_gpu_pattern.h"
     },
     {
+      "source": "tests/network/count_fifo/ASSERTIONS.md",
+      "logical_path": "tests/network/count_fifo/ASSERTIONS.md"
+    },
+    {
+      "source": "tests/network/count_fifo/README.md",
+      "logical_path": "tests/network/count_fifo/README.md"
+    },
+    {
+      "source": "tests/network/count_fifo/adapter.py",
+      "logical_path": "tests/network/count_fifo/adapter.py"
+    },
+    {
+      "source": "tests/network/count_fifo/os_boundary.h",
+      "logical_path": "tests/network/count_fifo/os_boundary.h"
+    },
+    {
+      "source": "tests/network/count_fifo/run.py",
+      "logical_path": "tests/network/count_fifo/run.py"
+    },
+    {
+      "source": "tests/network/count_fifo/test_count.c",
+      "logical_path": "tests/network/count_fifo/test_count.c"
+    },
+    {
       "source": "tests/network/host_lease/README.md",
       "logical_path": "tests/network/host_lease/README.md"
     },

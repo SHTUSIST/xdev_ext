@@ -130,6 +130,50 @@ jobs:
           assert runs[0]['invalid_mapping_verdict'] == 'PASS', runs[0]
           assert all(r['compile_exit'] == 0 and r['verdict'] == 'KILLED' for r in runs[1:]), runs[1:]
           PYCODE
+      - name: COUNT_FIFO public behavior, ownership and mutations
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 tests/network/count_fifo/run.py --source "$GITHUB_WORKSPACE" --out-root "$RUNNER_TEMP/count-fifo" --mutations
+          python3 - <<'PYCODE'
+          import hashlib, json, os
+          from pathlib import Path
+          reports = list((Path(os.environ['RUNNER_TEMP']) / 'count-fifo').glob('count-*/summary.json'))
+          assert len(reports) == 1, reports
+          report = reports[0]
+          summary = json.loads(report.read_text())
+          runs = summary['runs']
+          expected = [
+              'cpu_derived_dma', 'data_only_sync', 'callback_under_lock',
+              'accepted_eagain_retry', 'fifo_head_is_cons', 'accessor_outside_lock',
+              'compacted_frame_index', 'checksum_before_prepare', 'rollback_prod_missing',
+              'unknown_lease_clear', 'set_only_early_release', 'disconnected_public_consumer',
+              'family_peek_no_membership', 'family_unlink_resets_cons', 'family_tail_by_cons',
+              'family_overwrite_fatal', 'family_retry_eagain', 'family_wrong_stride',
+              'family_rollback_issued', 'set_only_retires', 'stage_dead_under_lock',
+              'control_unknown_cleared', 'stop_first_pass_removed', 'reliable_wrong_tag',
+          ]
+          assert summary['accepted'] is True, summary
+          assert summary['structural'] == {'verdict': 'PASS', 'assertions': []}, summary['structural']
+          assert summary['expected_mutations'] == expected, summary['expected_mutations']
+          assert len(runs) == 25 and [r['label'] for r in runs] == ['baseline'] + expected, runs
+          baseline = runs[0]
+          assert baseline['compile_exit'] == baseline['exit'] == 0, baseline
+          assert baseline['verdict'] == baseline['frozen_golden'] == 'PASS', baseline
+          golden = (report.parent / 'baseline/run.stdout').read_bytes()
+          assert len(golden) == 89721, len(golden)
+          assert hashlib.sha256(golden).hexdigest() == '9fc5b51ce2e82c7b6411021549e3c4291e5cbe9797b210d0af3de71d514bdf81'
+          assert all(r['compile_exit'] == 0 and r['verdict'] == 'KILLED' for r in runs[1:]), runs[1:]
+          for r in runs[1:]:
+              if r['label'] == 'disconnected_public_consumer':
+                  assert r['exit'] == 0 and r['kill_kind'] == 'ownership_wiring', r
+                  assert r['structural_mutation']['verdict'] == 'OWNERSHIP_WIRING_RED', r
+                  assert r['designated_assertion'] in r['structural_mutation']['assertions'], r
+              else:
+                  assert r['exit'] in (1, 42) and r['kill_kind'] == 'runtime_assertion', r
+                  stderr = (report.parent / r['label'] / 'run.stderr').read_text()
+                  assert r['designated_assertion'] in stderr, r
+          PYCODE
       - name: Reference-counted lifecycle and CPU transform contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/refs_suite.py
       - name: CPU class BPF compute callback rules, kfuncs and wiring
