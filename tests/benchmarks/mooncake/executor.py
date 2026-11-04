@@ -1,4 +1,5 @@
 """Bounded local processes and fixed-source Mooncake evidence qualification."""
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 import json
 import math
@@ -279,6 +280,8 @@ class Capture:
         self.term_at = None
         self.kill_at = None
         self._io_lock=threading.RLock()
+        self._control_condition=threading.Condition()
+        self._control_pending=set()
         self._finish_lock=threading.Lock()
         self._done=threading.Event()
         self._collector=None
@@ -307,8 +310,23 @@ class Capture:
             except ProcessLookupError:
                 pass
 
+    @contextmanager
+    def _control_io(self):
+        if self._collector is not None and threading.current_thread() is self._collector:
+            # Collector-internal control already owns, or can reenter, the I/O lock.
+            with self._io_lock:yield
+            return
+        request=object()
+        try:
+            with self._control_condition:self._control_pending.add(request)
+            with self._io_lock:yield
+        finally:
+            with self._control_condition:
+                self._control_pending.discard(request)
+                self._control_condition.notify_all()
+
     def terminate(self, reason):
-        with self._io_lock:
+        with self._control_io():
             if self.closed:return
             if self.termination == 'exited':self.termination=reason
             if self.term_at is None:
@@ -316,14 +334,18 @@ class Capture:
                 self._signal(signal.SIGTERM)
 
     def start_background(self):
-        with self._io_lock:
+        with self._control_io():
             if self._collector is not None:raise ValueError('collector already started')
             self._collector=threading.Thread(target=self._collect,name='mooncake-owned-capture')
             self._collector.start()
 
     def _collect(self):
         try:
-            while not self.closed:self.pump()
+            while not self.closed:
+                # Only one pump admitted before a published control request can race it.
+                with self._control_condition:
+                    while self._control_pending:self._control_condition.wait()
+                self.pump()
         except BaseException as error:
             self.error='capture collector failure: '+str(error)
             self._abort_owned('capture_error')
@@ -337,7 +359,7 @@ class Capture:
             self._signal(signal.SIGKILL)
             try:self.process.wait(timeout=2)
             except subprocess.TimeoutExpired:self.error+='; failed to reap owned child'
-        with self._io_lock:self._close()
+        with self._control_io():self._close()
 
     def pump(self, wait=.05):
         collector=self._collector
@@ -424,7 +446,7 @@ class Capture:
             if self.process is not None:
                 try:code=self.process.wait(timeout=.5)
                 except subprocess.TimeoutExpired:self.error='failed to reap owned child'
-            with self._io_lock:
+            with self._control_io():
                 self._check_native()
                 if self.native_path is not None and self.native_bytes>NATIVE_LIMIT and code is not None:
                     fd=os.open(self.native_path,os.O_RDWR|getattr(os,'O_NOFOLLOW',0)|os.O_NONBLOCK)
@@ -434,7 +456,7 @@ class Capture:
             joined=self._collector is None or not self._collector.is_alive()
             self._finished_outcome=ProcessOutcome(code,self.termination,'stdout.raw','stderr.raw',
                                   time.monotonic_ns()-self.started,
-                                  joined and (self.process is None or code is not None),
+                                  joined and self.closed and (self.process is None or code is not None),
                                   tuple(self.signals),self.counts['stdout'],self.counts['stderr'],self.error,self.native_bytes)
             if interrupted is not None:raise interrupted
             return self._finished_outcome
@@ -700,7 +722,8 @@ def stop_target(handle, source_receipt):
     if not alive:errors.append('target exited before source completion')
     process=handle.capture.finish('target_stop')
     # Requested single TERM with upstream's clean exit0 is normal target shutdown.
-    normal=process.returncode==0 and process.cleanup_complete and process.termination=='target_stop' and 'SIGKILL' not in process.signals
+    normal=(process.returncode==0 and process.cleanup_complete and not process.error
+            and process.termination=='target_stop' and 'SIGKILL' not in process.signals)
     if not normal:errors.append('target did not stop cleanly')
     try:
         if parse_target_ready(handle.output_dir/'stdout.raw') != ready['segment_name']:
