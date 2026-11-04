@@ -7226,6 +7226,30 @@
       "logical_path": "tests/network/plan_cover/run.py"
     },
     {
+      "source": "tests/network/pool_dma/ASSERTIONS.md",
+      "logical_path": "tests/network/pool_dma/ASSERTIONS.md"
+    },
+    {
+      "source": "tests/network/pool_dma/README.md",
+      "logical_path": "tests/network/pool_dma/README.md"
+    },
+    {
+      "source": "tests/network/pool_dma/adapter.py",
+      "logical_path": "tests/network/pool_dma/adapter.py"
+    },
+    {
+      "source": "tests/network/pool_dma/os_boundary.h",
+      "logical_path": "tests/network/pool_dma/os_boundary.h"
+    },
+    {
+      "source": "tests/network/pool_dma/run.py",
+      "logical_path": "tests/network/pool_dma/run.py"
+    },
+    {
+      "source": "tests/network/pool_dma/test_pool_dma.c",
+      "logical_path": "tests/network/pool_dma/test_pool_dma.c"
+    },
+    {
       "source": "tests/network/reliable/bpf_glue/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/reliable/bpf_glue/Makefile"
