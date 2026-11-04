@@ -8794,6 +8794,11 @@
       "source": "tests/core/poll/source-setup.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source-setup.md"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py"
     }
   ]
 }
