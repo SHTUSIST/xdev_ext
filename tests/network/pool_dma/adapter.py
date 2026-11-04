@@ -42,6 +42,8 @@ def generate(root, output, mutation=None):
       'zc':'src/network/net/xdp/xsk_xdev_ext_mech_zc_core.h',
       'rules':'src/core/io_uring/xdev_ext_mech_core.h'}
     src={k:(root/v).read_text() for k,v in paths.items()}
+    count_path=root/'src/network/include/linux/xdev_ext_netfam_count.h'
+    count=count_path.read_text() if count_path.is_file() else ''
     have='xdev_ext_net_lease_pool(' in src['family']
     manifest=[]; pieces=[]
     def add(k,n):
@@ -54,9 +56,11 @@ def generate(root, output, mutation=None):
     # Strip include directives only; retain every executable/header body byte.
     tx='\n'.join(l for l in tx.splitlines() if not l.lstrip().startswith('#include'))
     zc='\n'.join(l for l in zc.splitlines() if not l.lstrip().startswith('#include'))
+    count='\n'.join(l for l in count.splitlines() if not l.lstrip().startswith('#include'))
     structures = [record(src['mech'],'xsk_xdev_ext_mech_provider'),record(src['mech'],'xsk_xdev_ext_mech_tx_batch')]
     output.joinpath('production_types.h').write_text('\n'.join(types))
-    output.joinpath('production_journal.h').write_text(function(src['rules'],'xdev_ext_mech_span_in')+'\n'+tx+'\n'+zc+'\n'+'\n'.join(structures))
+    journal=count+'\n'+function(src['rules'],'xdev_ext_mech_span_in')+'\n'+tx+'\n'+zc+'\n'+'\n'.join(structures)
+    output.joinpath('production_journal.h').write_text(journal)
     add('core','xdev_ext_mech_batch_session'); add('core','xdev_ext_mech_batch_frame')
     add('family','xdev_ext_netfam_lease_host'); add('family','xdev_ext_netfam_release')
     if have:
@@ -101,9 +105,11 @@ def generate(root, output, mutation=None):
         elif mutation=='compacted_frame_index':
             mutate_function('xsk_xdev_ext_mech_zc_submit',lambda f: re.sub(r'(xdev_ext_net_lease_pool\([^,]+,\s*b,\s*)i,',r'\1(i == 2 && *xst->tx_tag[1] == xdev_ext_mech_batch_id(b) ? 1 : i),',f,count=1))
         elif mutation=='checksum_before_prepare':
-            mutate_function('xsk_xdev_ext_mech_zc_submit',lambda f: re.sub(r'(err = xsk_mech_zc_reserve\(&p->ring, nr, &start\);\s*if \(err\)\s*goto unlock;)',r'\1\n xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[0]);',f,count=1))
+            reserve='xdev_ext_net_count_reserve' if count else 'xsk_mech_zc_reserve'
+            mutate_function('xsk_xdev_ext_mech_zc_submit',lambda f: re.sub(r'(err = '+reserve+r'\(&p->ring, nr, &start\);\s*if \(err\)\s*goto unlock;)',r'\1\n xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[0]);',f,count=1))
         elif mutation=='rollback_prod_missing':
-            mutate_function('xsk_xdev_ext_mech_zc_submit',lambda f: re.sub(r'p->ring\.prod\s*=\s*start;', '(void)start;',f,count=1))
+            rollback=r'xdev_ext_net_count_rollback\(&p->ring,\s*start\);' if count else r'p->ring\.prod\s*=\s*start;'
+            mutate_function('xsk_xdev_ext_mech_zc_submit',lambda f: re.sub(rollback, '(void)start;',f,count=1))
         elif mutation=='unknown_lease_clear':
             mutate_function('xdev_ext_net_lease_pool_release',lambda f:f.replace('{','{\nquiesced=true;',1))
         elif mutation=='set_only_early_release':
@@ -112,7 +118,7 @@ def generate(root, output, mutation=None):
         if mutation not in mutations: raise SetupError('unknown mutation')
         old,new=mutations[mutation]
         if old in body: body=body.replace(old,new,1)
-        elif old in zc:
+        elif old in journal:
             j=output.joinpath('production_journal.h'); j.write_text(j.read_text().replace(old,new,1))
         else: raise SetupError('mutation anchor missing '+mutation)
     output.joinpath('production.c.inc').write_text(body)
