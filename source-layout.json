@@ -599,9 +599,19 @@
       "native_path": "io_uring/iaa/xdev_ext_mech_iaa.c"
     },
     {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy.c"
+    },
+    {
       "source": "src/compute/io_uring/xdev_ext_compfam_copy_core.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy_core.h"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_runtime.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_runtime.h"
     },
     {
       "source": "src/compute/io_uring/xdev_ext_mech_ce.c",
@@ -2639,6 +2649,22 @@
       "logical_path": "tests/benchmarks/mooncake/qualification.py"
     },
     {
+      "source": "tests/benchmarks/mooncake/regression/capture_control/child.py",
+      "logical_path": "tests/benchmarks/mooncake/regression/capture_control/child.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/regression/capture_control/test_capture_control.py",
+      "logical_path": "tests/benchmarks/mooncake/regression/capture_control/test_capture_control.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/regression/publication_interrupt/child.py",
+      "logical_path": "tests/benchmarks/mooncake/regression/publication_interrupt/child.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/regression/publication_interrupt/test_publication_interrupt.py",
+      "logical_path": "tests/benchmarks/mooncake/regression/publication_interrupt/test_publication_interrupt.py"
+    },
+    {
       "source": "tests/benchmarks/mooncake/run.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/run.py"
@@ -3294,6 +3320,34 @@
       "source": "tests/compute/examples/run.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/compute_examples/run.py"
+    },
+    {
+      "source": "tests/compute/family/runtime/ASSERTIONS.md",
+      "logical_path": "tests/compute/family/runtime/ASSERTIONS.md"
+    },
+    {
+      "source": "tests/compute/family/runtime/README.md",
+      "logical_path": "tests/compute/family/runtime/README.md"
+    },
+    {
+      "source": "tests/compute/family/runtime/baseline-observables.json",
+      "logical_path": "tests/compute/family/runtime/baseline-observables.json"
+    },
+    {
+      "source": "tests/compute/family/runtime/boundary.h",
+      "logical_path": "tests/compute/family/runtime/boundary.h"
+    },
+    {
+      "source": "tests/compute/family/runtime/probe.c",
+      "logical_path": "tests/compute/family/runtime/probe.c"
+    },
+    {
+      "source": "tests/compute/family/runtime/run.py",
+      "logical_path": "tests/compute/family/runtime/run.py"
+    },
+    {
+      "source": "tests/compute/family/runtime/supplement-observables.json",
+      "logical_path": "tests/compute/family/runtime/supplement-observables.json"
     },
     {
       "source": "tests/compute/iaa/provider/Makefile",
@@ -4992,6 +5046,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/poll/run.py"
     },
     {
+      "source": "tests/core/poll/source-setup.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source-setup.md"
+    },
+    {
+      "source": "tests/core/poll/source_setup_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source_setup_test.py"
+    },
+    {
       "source": "tests/core/poll/xsk_poll_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/poll/xsk_poll_test.py"
@@ -6249,6 +6313,15 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_lifecycle_guest.sh"
     },
     {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py",
+      "logical_path": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_compat_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_compat_test.py"
@@ -6392,6 +6465,30 @@
       "source": "tests/integration/session/native/xdev_ext_mech_zc_wire_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire_test.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/README.md",
+      "logical_path": "tests/integration/session/source_setup/README.md"
+    },
+    {
+      "source": "tests/integration/session/source_setup/archive_recording_child.py",
+      "logical_path": "tests/integration/session/source_setup/archive_recording_child.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/archive_recording_harness.py",
+      "logical_path": "tests/integration/session/source_setup/archive_recording_harness.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/fixture.py",
+      "logical_path": "tests/integration/session/source_setup/fixture.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/test_export_source_inputs.py",
+      "logical_path": "tests/integration/session/source_setup/test_export_source_inputs.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/test_source_setup.py",
+      "logical_path": "tests/integration/session/source_setup/test_source_setup.py"
     },
     {
       "source": "tests/integration/session/test_cleanup.py",
@@ -8768,87 +8865,6 @@
     {
       "source": "tools/test.py",
       "logical_path": "tools/test.py"
-    },
-    {
-      "source": "tests/integration/session/source_setup/README.md",
-      "logical_path": "tests/integration/session/source_setup/README.md"
-    },
-    {
-      "source": "tests/integration/session/source_setup/fixture.py",
-      "logical_path": "tests/integration/session/source_setup/fixture.py"
-    },
-    {
-      "source": "tests/integration/session/source_setup/test_source_setup.py",
-      "logical_path": "tests/integration/session/source_setup/test_source_setup.py"
-    },
-    {
-      "source": "tests/integration/session/source_setup/test_export_source_inputs.py",
-      "logical_path": "tests/integration/session/source_setup/test_export_source_inputs.py"
-    },
-    {
-      "source": "tests/core/poll/source_setup_test.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source_setup_test.py"
-    },
-    {
-      "source": "tests/core/poll/source-setup.md",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source-setup.md"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py",
-      "logical_path": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py"
-    },
-    {
-      "source": "tests/integration/session/source_setup/archive_recording_child.py",
-      "logical_path": "tests/integration/session/source_setup/archive_recording_child.py"
-    },
-    {
-      "source": "tests/integration/session/source_setup/archive_recording_harness.py",
-      "logical_path": "tests/integration/session/source_setup/archive_recording_harness.py"
-    },
-    {
-      "source": "src/compute/io_uring/xdev_ext_compfam_copy.c",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_copy.c"
-    },
-    {
-      "source": "src/compute/io_uring/xdev_ext_compfam_copy_runtime.h",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_copy_runtime.h"
-    },
-    {
-      "source": "tests/compute/family/runtime/ASSERTIONS.md",
-      "logical_path": "tests/compute/family/runtime/ASSERTIONS.md"
-    },
-    {
-      "source": "tests/compute/family/runtime/README.md",
-      "logical_path": "tests/compute/family/runtime/README.md"
-    },
-    {
-      "source": "tests/compute/family/runtime/baseline-observables.json",
-      "logical_path": "tests/compute/family/runtime/baseline-observables.json"
-    },
-    {
-      "source": "tests/compute/family/runtime/boundary.h",
-      "logical_path": "tests/compute/family/runtime/boundary.h"
-    },
-    {
-      "source": "tests/compute/family/runtime/probe.c",
-      "logical_path": "tests/compute/family/runtime/probe.c"
-    },
-    {
-      "source": "tests/compute/family/runtime/run.py",
-      "logical_path": "tests/compute/family/runtime/run.py"
-    },
-    {
-      "source": "tests/compute/family/runtime/supplement-observables.json",
-      "logical_path": "tests/compute/family/runtime/supplement-observables.json"
     }
   ]
 }
