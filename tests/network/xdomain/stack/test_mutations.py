@@ -96,8 +96,8 @@ def mutate(kernel, name):
         replace_once(ring, '.callback = rx ? xdev_ext_xd_rx_cb : xdev_ext_xd_tx_cb,',
                      '.callback = rx ? xdev_ext_xd_rx_cb : stack_mutation_callback,')
     elif name == 'shift_mapping_offset':
-        replace_once(ring, '.buffer_phy = e[i].lease.lease.dma_address,',
-                     '.buffer_phy = e[i].lease.lease.dma_address + 128,')
+        replace_once(ring, '.buffer_phy = e[i].lease.u.peer.lease.dma_address,',
+                     '.buffer_phy = e[i].lease.u.peer.lease.dma_address + 128,')
     elif name == 'omit_batch_release':
         anchor = 'static void xdev_ext_xd_class_batch_release('
         helper = ('static void stack_mutation_no_release(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, bool s)\n'

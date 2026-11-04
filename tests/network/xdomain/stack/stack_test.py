@@ -53,7 +53,11 @@ def facade(kernel, directory):
     # helper. Reuse the qualified extraction instead of inventing a quota.
     sys.path.insert(0, str(kernel / 'tools/testing/selftests/xdev_ext_mech/peer_graph'))
     from xdomain_retention_fixture import descriptor_unit
+    from xdomain_fixture import definition
     (directory / 'stack_descriptor_source.inc').write_text(descriptor_unit(kernel))
+    core = (kernel / 'io_uring/xdev_ext_mech.c').read_text()
+    (directory / 'stack_batch_session_source.inc').write_text(
+        definition(core, 'xdev_ext_mech_batch_session') + '\n')
 
 
 def execute(kernel, out, case=None, sanitize=False):

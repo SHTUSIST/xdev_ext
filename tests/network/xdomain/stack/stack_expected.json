@@ -2,6 +2,7 @@
   "version": 1,
   "spec": "2026-10-26 thunderbolt software E2E closure \u00a78.2",
   "source_units": [
+    "kernel/io_uring/xdev_ext_mech.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_main.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_class.c",

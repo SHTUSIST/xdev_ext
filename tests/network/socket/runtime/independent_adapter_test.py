@@ -62,7 +62,7 @@ struct socket {struct sock *sk;int type,fd;};
 struct file;
 struct kvec {void *iov_base;size_t iov_len;};
 struct xdev_ext_mech_frame {u64 umem_addr;u32 index,data_off,data_len;void *kaddr;};
-struct xdev_ext_mech_batch {struct xdev_ext_mech_completion completion;union {u32 nr,nr_frames;};u32 slot,bytes;u64 ticket;int status;struct xdev_ext_mech_frame f[32];};
+struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;struct xdev_ext_mech_completion completion;union {u32 nr,nr_frames;};u32 slot,bytes;u64 ticket;int status;struct xdev_ext_mech_frame f[32];};
 struct xdev_ext_mech_pool {u32 nr_frames,frame_size;__u8 states[32];};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;u32 depth;bool admits;};
 struct xdev_ext_mech_stage {bool create_reporting;u32 create_phase;u32 direction;struct socket *file;void *priv;struct xdev_ext_mech_session *s;};
@@ -114,6 +114,7 @@ struct fixture {struct sock sk;struct socket socket;struct xdev_ext_mech_stage s
 static void initialize(struct fixture *f){
  memset(f,0,sizeof(*f));f->sk=(struct sock){.sk_family=AF_INET,.sk_protocol=IPPROTO_UDP,.sk_state=TCP_ESTABLISHED};f->socket=(struct socket){&f->sk,SOCK_DGRAM,-1};f->s.depth=8;f->s.admits=true;f->s.pool.nr_frames=2;f->s.pool.frame_size=256;
  f->s.layout=(struct xdev_ext_mech_layout){256,16,64,128};f->st=(struct xdev_ext_mech_stage){.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.file=&f->socket,.s=&f->s};
+ f->b.s=&f->s;
  f->b.nr=2;f->b.bytes=128;f->b.ticket=123;
  for(u32 i=0;i<2;i++){f->b.f[i]=(struct xdev_ext_mech_frame){.index=i,.data_off=16,.data_len=64,.umem_addr=i*256,.kaddr=f->pool[i]};f->desc[i]=(struct xdev_ext_socket_send_desc){.frame_pos=i,.frame_off=16,.len=64};f->s.pool.states[i]=XDEV_EXT_MECH_F_INFLIGHT;memset(f->pool[i],0xa7,256);}
  calls=completions=complete_error=allocations=frees=fail_alloc=0;forced_result=INT32_MAX;

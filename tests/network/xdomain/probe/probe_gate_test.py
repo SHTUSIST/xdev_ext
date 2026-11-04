@@ -17,6 +17,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 STACK = Path('tools/testing/selftests/xdev_ext_mech/xdomain')
 UNITS = (
+ 'io_uring/xdev_ext_mech.c',
  'io_uring/xdomain/xdev_ext_xdomain_main.c',
  'io_uring/xdomain/xdev_ext_xdomain_ring.c',
  'io_uring/xdomain/xdev_ext_xdomain_class.c',

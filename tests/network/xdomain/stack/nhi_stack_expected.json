@@ -4,6 +4,7 @@
   "production_mode": "Unmodified XDOMAIN uses interrupt-driven, unbatched tb_ring_tx/tb_ring_rx",
   "experimental_modes": "NO_INTERRUPT, batching and tiny data rings are selected by the host adapter only; no production support or hardware claim",
   "source_units": [
+    "kernel/io_uring/xdev_ext_mech.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_main.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_ring.c",
     "kernel/io_uring/xdomain/xdev_ext_xdomain_class.c",
