@@ -4,6 +4,7 @@
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import unittest
@@ -14,7 +15,7 @@ ROOT = HERE.parents[3]
 
 def declaration(source, name, struct=False):
     pattern = (r'^struct ' + name + r'\s*\{.*?^};' if struct else
-               r'^static [^;{}]*\b' + name + r'\([^;]*?\)\s*\{.*?^}')
+               r'^[A-Za-z_][^;{}]*\b' + name + r'\([^;]*?\)\s*\{.*?^}')
     match = re.search(pattern, source, re.M | re.S)
     if not match:
         raise AssertionError('production declaration missing: ' + name)
@@ -42,7 +43,35 @@ class NvmePool(unittest.TestCase):
                      'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_ready',
                      'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_class_submit',
                      'nvme_xdev_ext_class_fill_cqe']
-        functions = storage_runtime(ROOT) + '\n\n' + '\n\n'.join(declaration(source, name) for name in functions)
+        dependencies = ''
+        if 'xdev_ext_stor_block_preflight(' in source:
+            functions.remove('nvme_xdev_ext_class_walk')
+            block = (ROOT / 'io_uring/family/xdev_ext_storfam_block.c').read_text()
+            dependencies += '\n\n'.join(declaration(block, name) for name in (
+                'xdev_ext_stor_block_caps', 'xdev_ext_stor_block_walk',
+                'xdev_ext_stor_block_preflight', 'xdev_ext_stor_block_append'))
+            # OS queue facts previously supplied by class_caps; the real family
+            # caps function now captures these same literal external limits.
+            external = r'''
+#define SECTOR_SHIFT 9
+struct request_queue { struct { unsigned unused; } limits; };
+static unsigned long queue_virt_boundary(struct request_queue *q) { (void)q; return 0; }
+#define blk_lim_dma_alignment_and_pad(l) ((void)(l), 0U)
+static unsigned queue_max_segments(struct request_queue *q) { (void)q; return 256; }
+static unsigned queue_max_segment_size(struct request_queue *q) { (void)q; return 1U << 20; }
+static unsigned queue_max_hw_sectors(struct request_queue *q) { (void)q; return 2048; }
+'''
+            start = fixture.index('static struct nvme_xdev_ext_queue_caps nvme_xdev_ext_class_caps(')
+            end = fixture.index('\nstatic int nvme_xdev_ext_class_bounce(', start)
+            fixture = fixture[:start] + external + fixture[end:]
+            fixture = fixture.replace('.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}',
+                                      '.identity={.lba_shift=9},\n  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}')
+        if 'xdev_ext_stor_block_poll_opf(' in source:
+            functions = [name for name in functions if not name.startswith('nvme_xdev_ext_poll_')]
+            helper = ROOT / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
+            dependencies += '\n\n' + runpy.run_path(str(helper))['storage_poll_runtime'](ROOT)
+        functions = storage_runtime(ROOT) + '\n\n' + dependencies + '\n\n' + '\n\n'.join(
+            declaration(source, name) for name in functions)
         fixture = fixture.replace('/* PRODUCTION_TYPES */', definitions)
         fixture = fixture.replace('/* PRODUCTION_FUNCTIONS */', functions)
         block = (ROOT / 'block/blk-mq.c').read_text()

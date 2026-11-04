@@ -21,6 +21,7 @@ block or a last-segment list when they are not DMA-contiguous.
 XDEV_EXT_NVME_TEST_SOURCE may select another copy of the production file.
 """
 import os
+import json
 from pathlib import Path
 import re
 import subprocess
@@ -540,6 +541,35 @@ def storage_runtime(root):
     return '\n\n'.join(found)
 
 
+
+def storage_poll_runtime(root, names=("xdev_ext_stor_block_poll_opf",
+                                      "xdev_ext_stor_block_poll_check",
+                                      "xdev_ext_stor_block_poll_arm")):
+    """The real block-family helpers, including the public inline opf helper."""
+    native = "io_uring/family/xdev_ext_storfam_block.c"
+    path = root / native
+    if not path.is_file():
+        # Native-trace consumers provide a minimal header/runtime view. Resolve
+        # this moved dependency through that run's actual canonical manifest.
+        canonical = Path(os.environ["XDEV_EXT_CANONICAL_ROOT"])
+        manifest = json.loads((canonical / "source-layout.json").read_text())
+        entries = [e for e in manifest["files"] if e.get("component") == "linux"
+                   and e.get("native_path") == native]
+        if len(entries) != 1:
+            raise AssertionError("production block runtime mapping missing: " + native)
+        path = canonical / entries[0]["source"]
+    content = (root / "include/linux/xdev_ext_storfam_block.h").read_text()
+    content += "\n" + path.read_text()
+    found = []
+    for name in names:
+        match = re.search(r"^[A-Za-z_][^;{}]*\b" + name +
+                          r"\([^;{}]*\)\s*\{.*?^\}", content, re.M | re.S)
+        if not match:
+            raise AssertionError("production storage polling symbol missing: " + name)
+        found.append(match[0])
+    return "\n\n".join(found)
+
+
 def production_source():
     path = Path(os.environ.get("XDEV_EXT_NVME_TEST_SOURCE", str(KERNEL / RELATIVE)))
     return path.read_text()
@@ -565,8 +595,11 @@ def extract(source):
                 'nvme_xdev_ext_peer_lease', 'nvme_xdev_ext_peer_map',
                 'nvme_xdev_ext_peer_complete', 'nvme_xdev_ext_peer_end_io',
                 'nvme_xdev_ext_peer_submit', 'nvme_xdev_ext_peer_fill_cqe',
-                'nvme_xdev_ext_class_fill_cqe', 'nvme_xdev_ext_poll_opf',
-                'nvme_xdev_ext_poll_check', 'nvme_xdev_ext_poll_arm')
+                'nvme_xdev_ext_class_fill_cqe')
+    family_poll = 'xdev_ext_stor_block_poll_opf(' in source
+    if not family_poll:
+        required += ('nvme_xdev_ext_poll_opf', 'nvme_xdev_ext_poll_check',
+                     'nvme_xdev_ext_poll_arm')
     for name in required:
         if not any(re.match(r"^static [^;{}=]*\b" + name + r"\(", body, re.S)
                    for _, body in functions):
@@ -600,7 +633,8 @@ def extract(source):
     requester = (KERNEL / "io_uring/family/xdev_ext_requester.c").read_text()
     split = requester[requester.index("int xdev_ext_peer_lease_split("):
                       requester.index("EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);")]
-    code = storage_runtime(KERNEL) + "\n\n" + split + "\n\n" + code
+    poll = storage_poll_runtime(KERNEL) + "\n\n" if family_poll else ""
+    code = storage_runtime(KERNEL) + "\n\n" + poll + split + "\n\n" + code
     return text, code, fill, submit, have_res
 
 

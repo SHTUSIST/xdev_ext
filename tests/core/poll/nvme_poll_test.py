@@ -9,6 +9,7 @@ blk_rq_is_poll(), execute, and blk_mq_poll_hw_queue() as a recorder. The
 model does not reproduce nvme-pci queues, DMA or timing.
 """
 import re
+import runpy
 import unittest
 
 from poll_extract import KERNEL, body, compile_and_run, fields, function, source
@@ -347,8 +348,22 @@ def build_fixture():
         'nvme_xdev_ext_mech_slot',
         'nvme_xdev_ext_peer_slot', 'nvme_xdev_ext_peer_res'))
     structs = structs.replace('struct device *dma_dev;', 'void *dma_dev;')
-    production = storage_runtime(KERNEL) + '\n' + '\n'.join(function(text, n) for n in PRODUCTION)
-    return FIXTURE.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
+    names = PRODUCTION
+    dependencies = ''
+    fixture = FIXTURE
+    if 'xdev_ext_stor_block_poll_opf(' in text:
+        names = tuple(n for n in names if not n.startswith('nvme_xdev_ext_poll_'))
+        structs += '\n' + structure(source('include/linux/xdev_ext_storfam_block.h'),
+                                    'xdev_ext_stor_poll_view')
+        helper = KERNEL / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
+        dependencies = runpy.run_path(str(helper))['storage_poll_runtime'](KERNEL, (
+            'xdev_ext_stor_block_poll_capable', 'xdev_ext_stor_block_poll_opf',
+            'xdev_ext_stor_block_poll_check', 'xdev_ext_stor_block_poll_arm',
+            'xdev_ext_stor_block_poll'))
+        fixture = fixture.replace('nvme_xdev_ext_poll_capable(', 'xdev_ext_stor_block_poll_capable(')
+    production = storage_runtime(KERNEL) + '\n' + dependencies + '\n' + '\n'.join(
+        function(text, n) for n in names)
+    return fixture.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
 
 
 class NvmePoll(unittest.TestCase):
@@ -417,15 +432,15 @@ class NvmePollStructure(unittest.TestCase):
 
     def test_bind_refuses_an_unpollable_namespace_before_allocating(self):
         bind = body(self.text, 'nvme_xdev_ext_class_bind')
-        check = bind.index('if (st->poll && !nvme_xdev_ext_poll_capable(ns->queue))')
+        check = bind.index('if (st->poll && !xdev_ext_stor_block_poll_capable(ns->queue))')
         self.assertLess(check, bind.index('kzalloc('))
         self.assertIn('return -EOPNOTSUPP;', bind[check:check + 120])
 
     def test_peer_submit_uses_the_same_poll_steps_in_order(self):
         peer = body(self.text, 'nvme_xdev_ext_peer_submit')
-        alloc = peer.index('blk_mq_alloc_request(ns->queue, nvme_xdev_ext_poll_opf(st,')
-        check = peer.index('nvme_xdev_ext_poll_check(st, req)')
-        arm = peer.index('nvme_xdev_ext_poll_arm(st, req, &slot->done);')
+        alloc = peer.index('blk_mq_alloc_request(ns->queue,\n\t\t\t\t   xdev_ext_stor_block_poll_opf(st->poll,')
+        check = peer.index('xdev_ext_stor_block_poll_check(st->poll, req)')
+        arm = peer.index('xdev_ext_stor_block_poll_arm(st->poll, req, &slot->done);')
         execute = peer.index('blk_execute_rq_nowait(req, false);')
         self.assertTrue(alloc < check < arm < execute)
         self.assertLess(peer.index('req->end_io_data = &slot->done;'), arm)

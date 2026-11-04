@@ -65,7 +65,9 @@ static bool nvme_is_write(struct nvme_command *c) { return c->common.opcode==nvm
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s) { return &s->layout; }
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s) { return &s->pool; }
 static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *f) { return f->native_ns ? &ns : NULL; }
-static bool nvme_xdev_ext_poll_capable(void *q) { (void)q; return true; }
+/* These authority cases are unpolled; an unexpected poll query is a failure. */
+struct request_queue;
+static bool xdev_ext_stor_block_poll_capable(const struct request_queue *q) { (void)q; abort(); }
 static int nvme_xdev_ext_capture_identity(struct nvme_ns *n,struct nvme_xdev_ext_identity *i,void **h,void **d,void **q)
 { assert(n==&ns); *i=(struct nvme_xdev_ext_identity){.nsid=1,.namespace_ready=1,.lba_shift=9,.capacity_lbas=32}; *h=&head; *d=&ns; *q=&ctrl; return 0; }
 /* Preserve the old fixture's argument observations while executing the

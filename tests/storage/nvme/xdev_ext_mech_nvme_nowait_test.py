@@ -19,6 +19,7 @@ for _parent in (Path(__file__).resolve().parent, *Path(__file__).resolve().paren
         import layout as _LAYOUT
         break
 import re
+import runpy
 import shutil
 import subprocess
 import tempfile
@@ -55,26 +56,31 @@ class NvmeNowait(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         path = Path(cls.temp.name)
         fixture = (HERE / "xdev_ext_mech_nvme_nowait_fixture.c").read_text()
-        # The stage-polling helpers the submit calls, verbatim, before it.
-        helpers = [re.search(r"^static [^;{}]*\b" + name + r"\([^)]*\)\s*\{.*?^\}",
-                             source, re.MULTILINE | re.DOTALL)
-                   for name in ("nvme_xdev_ext_poll_opf", "nvme_xdev_ext_poll_check",
-                                "nvme_xdev_ext_poll_arm")]
-        if not all(helpers):
-            raise RuntimeError("production stage-polling helpers missing")
-        validate = re.search(r"^static int nvme_xdev_ext_class_validate\([^;{}]*\)\s*"
-                             r"\{.*?^\}", source, re.MULTILINE | re.DOTALL)
-        if validate is None:
-            raise RuntimeError("production NVMe validation function missing")
-        production = validate[0] + "\n" + "\n".join(h[0] for h in helpers) + "\n" + function[0]
-        generated = path / "submit.c"
-        generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", production))
-        cls.probe = path / "probe"
         include_root = ROOT
         if _LAYOUT:
             repo = _LAYOUT.canonical_root(HERE)
             view = Path(os.environ.get("XDEV_EXT_SOURCE_VIEW", repo / "build/source-view"))
             include_root = view / "kernel"
+        # The stage-polling helpers the submit calls, verbatim, before it.
+        helpers = [re.search(r"^static [^;{}]*\b" + name + r"\([^)]*\)\s*\{.*?^\}",
+                             source, re.MULTILINE | re.DOTALL)
+                   for name in ("nvme_xdev_ext_poll_opf", "nvme_xdev_ext_poll_check",
+                                "nvme_xdev_ext_poll_arm")]
+        if 'xdev_ext_stor_block_poll_opf(' in source:
+            helper = include_root / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
+            polling = runpy.run_path(str(helper))['storage_poll_runtime'](include_root)
+        else:
+            if not all(helpers):
+                raise RuntimeError("production stage-polling helpers missing")
+            polling = "\n".join(h[0] for h in helpers)
+        validate = re.search(r"^static int nvme_xdev_ext_class_validate\([^;{}]*\)\s*"
+                             r"\{.*?^\}", source, re.MULTILINE | re.DOTALL)
+        if validate is None:
+            raise RuntimeError("production NVMe validation function missing")
+        production = validate[0] + "\n" + polling + "\n" + function[0]
+        generated = path / "submit.c"
+        generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", production))
+        cls.probe = path / "probe"
         build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
                                 "-DCONFIG_XDEV_EXT_MECH_ZEROCOPY", "-I" + str(include_root), str(generated),
                                 "-o", str(cls.probe)], text=True, capture_output=True)
