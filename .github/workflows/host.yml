@@ -237,7 +237,7 @@ jobs:
         run: python3 tests/storage/family_block_runtime/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-block-runtime" --new
       - name: Native storage member hook and worker contracts
         working-directory: .
-        run: python3 tests/storage/native_member_7a/run_candidate.py --source-root "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/storage-native-member" --fixture-views --mutants
+        run: python3 tests/storage/native_member_7b/verify.py --source-root "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/storage-native-member-7b"
       - name: Storage typed windows and descriptor schema
         working-directory: .
         run: bash tests/storage/family_window_schema/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-schema" new

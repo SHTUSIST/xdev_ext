@@ -8509,6 +8509,50 @@
       "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/vectors.inc"
     },
     {
+      "source": "tests/storage/native_member_7b/INPUTS.json",
+      "logical_path": "tests/storage/native_member_7b/INPUTS.json"
+    },
+    {
+      "source": "tests/storage/native_member_7b/README.md",
+      "logical_path": "tests/storage/native_member_7b/README.md"
+    },
+    {
+      "source": "tests/storage/native_member_7b/adapter.py",
+      "logical_path": "tests/storage/native_member_7b/adapter.py"
+    },
+    {
+      "source": "tests/storage/native_member_7b/assemble.py",
+      "logical_path": "tests/storage/native_member_7b/assemble.py"
+    },
+    {
+      "source": "tests/storage/native_member_7b/assertions_7b.c",
+      "logical_path": "tests/storage/native_member_7b/assertions_7b.c"
+    },
+    {
+      "source": "tests/storage/native_member_7b/boundary_ext.h",
+      "logical_path": "tests/storage/native_member_7b/boundary_ext.h"
+    },
+    {
+      "source": "tests/storage/native_member_7b/common_gate.c",
+      "logical_path": "tests/storage/native_member_7b/common_gate.c"
+    },
+    {
+      "source": "tests/storage/native_member_7b/extra_common.c",
+      "logical_path": "tests/storage/native_member_7b/extra_common.c"
+    },
+    {
+      "source": "tests/storage/native_member_7b/mutations.py",
+      "logical_path": "tests/storage/native_member_7b/mutations.py"
+    },
+    {
+      "source": "tests/storage/native_member_7b/mutations_candidate.py",
+      "logical_path": "tests/storage/native_member_7b/mutations_candidate.py"
+    },
+    {
+      "source": "tests/storage/native_member_7b/verify.py",
+      "logical_path": "tests/storage/native_member_7b/verify.py"
+    },
+    {
       "source": "tests/storage/nvme/blocktable/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/blocktable/Makefile"
