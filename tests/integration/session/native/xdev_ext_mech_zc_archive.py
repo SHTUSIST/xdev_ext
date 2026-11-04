@@ -27,6 +27,7 @@ IMAGE_NAMES = ('source-before.raw', 'source.raw', 'destination-before.raw',
                'compat.raw', 'peer.raw')
 BUILD_NAMES = ('.config', 'xdev-ext-source.commit', 'xdev-ext-debug-profile.json',
                'include/config/kernel.release', 'Module.symvers',
+               'xdev-ext-e2-mode.txt',
                'xdev-ext-artifacts.sha256', 'xdev-ext-e2-sources.sha256',
                'xdev-ext-eval-session-source.sha256', 'xdev-ext-fence-sources.sha256')
 MANIFEST_BASES = {'xdev-ext-artifacts.sha256': 'scratch',
@@ -394,6 +395,56 @@ def manifest_records(manifest, cwd, scratch, cache_roots, authority, artifact_ma
             yield path, expected.decode('ascii')
 
 
+def freeze_e2_manifest(case_dir, scratch, cache_roots, archived, authority, source_root):
+    """Preserve raw manifests and derive replay copies from checked frozen bytes."""
+    build = cache_roots.get('build', scratch / 'build')
+    specifications = (
+        ('xdev-ext-artifacts.sha256', scratch, 'frozen-e2-manifest.json', True),
+        ('xdev-ext-e2-sources.sha256', source_root, 'frozen-e2-sources-manifest.json', False),
+    )
+    pending = []
+    # Preserve every raw manifest first: another raw manifest may hash it.
+    # Renaming a frozen alias keeps its immutable blob untouched; the replay
+    # file is then created exclusively with a new inode.
+    for name, cwd, map_name, artifact_manifest in specifications:
+        manifest = case_dir / 'build' / name
+        if not manifest.exists() and not manifest.is_symlink():
+            continue  # A failed command may not have produced this input.
+        regular(manifest)
+        key = str(build / name)
+        require(key in archived and digest(manifest) == archived[key]['sha256'],
+                'E2 original manifest was not frozen correctly: ' + name)
+        original = manifest.with_name(manifest.stem + '.original' + manifest.suffix)
+        require(not original.exists() and not original.is_symlink(),
+                'E2 original manifest already exists: ' + name)
+        manifest.rename(original)
+        archived[key]['file'] = str(original.relative_to(case_dir))
+        pending.append((manifest, original, cwd, map_name, artifact_manifest))
+    for manifest, original, cwd, map_name, artifact_manifest in pending:
+        rewritten = []
+        mapping = {}
+        for path, expected in manifest_records(original, cwd, scratch, cache_roots,
+                                               authority, artifact_manifest):
+            require(str(path) in archived, 'E2 target was not archived: ' + str(path))
+            record = archived[str(path)]
+            relative = Path(record['file'])
+            require(not relative.is_absolute() and '..' not in relative.parts,
+                    'E2 frozen target escapes archive')
+            target = regular(case_dir / relative)
+            require(record['sha256'] == expected and digest(target) == expected,
+                    'E2 frozen manifest target missing/corrupt: ' + str(path))
+            rewritten.append(expected + '  ' + str(target) + '\n')
+            mapping[str(path)] = str(target)
+        with manifest.open('x') as stream:
+            stream.write(''.join(rewritten))
+        manifest.chmod(0o444)
+        write_json(case_dir / map_name,
+                   dict(original=str(original.relative_to(case_dir)),
+                        original_sha256=digest(original),
+                        frozen=str(manifest.relative_to(case_dir)),
+                        frozen_sha256=digest(manifest), targets=mapping))
+
+
 def archive_case(scratch: Path, case_dir: Path,
                  source_root: Path, native_root: Path) -> None:
     scratch, case_dir = case_location(scratch, case_dir)
@@ -479,6 +530,8 @@ def archive_case(scratch: Path, case_dir: Path,
             for name in IMAGE_NAMES:
                 if (case_dir / 'images' / name).exists():
                     frozen_alias(case_dir / 'images' / name, case_dir / name)
+            freeze_e2_manifest(case_dir, scratch, cache_roots, archived,
+                               authority, Path(source_root))
     finally:
         # Partial failure archives are useful evidence, never a success verdict.
         write_json(case_dir / 'archived-artifacts.json', archived)

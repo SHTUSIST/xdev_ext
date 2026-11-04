@@ -132,8 +132,21 @@ def source_inputs(source,scratch,evidence):
     return identity['revision'],native_source,logical_source
 
 
-def validate(source,scratch,evidence):
+def validate_transport_command(evidence: Path, original_scratch: Path) -> None:
+    """Check the original QEMU path while reading its frozen command bytes."""
+    # The archived command is shell-quoted by the harness; parse its actual
+    # arguments rather than searching a substring that might occur in a path.
+    qemu_args=shlex.split((evidence/'qemu.command').read_text())
+    for option,value in (('-device','virtio-serial-pci'),
+                         ('-chardev','file,id=e2_artifacts,path='+str((original_scratch/'evidence').resolve()/'e2-artifacts.raw.log')),
+                         ('-device','virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts')):
+        require(sum(a==option and b==value for a,b in zip(qemu_args,qemu_args[1:]))==1,
+                'missing/ambiguous actual E2 virtio transport argument: '+value)
+
+
+def validate(source,scratch,evidence,original_scratch=None):
     source=source.absolute();scratch=scratch.resolve();evidence=evidence.resolve()
+    original_scratch=scratch if original_scratch is None else Path(original_scratch)
     sha_source,native_source,logical_source=source_inputs(source,scratch,evidence)
     console=(evidence/'guest.log').read_text()
     # Use the production shared detector on the entire console, including
@@ -170,14 +183,7 @@ def validate(source,scratch,evidence):
     subprocess.run(['sha256sum','-c',str(scratch/'build/xdev-ext-e2-sources.sha256')],check=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)
     config_lines=(scratch/'build/.config').read_text().splitlines()
     require('CONFIG_VIRTIO_CONSOLE=y' in config_lines,'E2 kernel lacks built-in virtio console')
-    # The archived command is shell-quoted by the harness; parse its actual
-    # arguments rather than searching a substring that might occur in a path.
-    qemu_args=shlex.split((evidence/'qemu.command').read_text())
-    for option,value in (('-device','virtio-serial-pci'),
-                         ('-chardev','file,id=e2_artifacts,path='+str(evidence/'e2-artifacts.raw.log')),
-                         ('-device','virtserialport,chardev=e2_artifacts,name=xdev-e2-artifacts')):
-        require(sum(a==option and b==value for a,b in zip(qemu_args,qemu_args[1:]))==1,
-                'missing/ambiguous actual E2 virtio transport argument: '+value)
+    validate_transport_command(evidence,original_scratch)
     validate_trace_configs(capture)
     window=(capture/'source-window.bin').read_bytes()
     require(len(window)==32768,'missing complete real source window')
@@ -276,8 +282,9 @@ def validate(source,scratch,evidence):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-root',required=True,type=Path);p.add_argument('--scratch',required=True,type=Path);p.add_argument('--evidence',required=True,type=Path)
+    p.add_argument('--original-scratch',type=Path)
     a=p.parse_args()
-    try:validate(a.source_root,a.scratch,a.evidence)
+    try:validate(a.source_root,a.scratch,a.evidence,a.original_scratch)
     except (OSError,ValueError,KeyError,AssertionError,subprocess.SubprocessError) as exc:p.exit(1,f'XDEV_EXT_E2_KVM=FAIL reason={exc}\n')
     print('XDEV_EXT_E2_KVM=PASS scope=guest-correctness old_ticket=actual-core-host-fixture performance_claim=none')
 if __name__=='__main__':main()
