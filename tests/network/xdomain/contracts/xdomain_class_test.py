@@ -56,7 +56,7 @@ def struct(source, name):
 
 def function(source, name):
     # Anchored line begins avoid calls/prototypes. Function body is retained byte-for-byte.
-    match = re.search(r"(?m)^(?:static\s+)?(?:inline\s+)?(?:void|bool|int|u64|unsigned long)\s+" +
+    match = re.search(r"(?m)^(?:static\s+)?(?:inline\s+)?(?:(?:void|bool|int|u64|unsigned long)\s+|struct\s+xdev_ext_mech_session\s*\*\s*)" +
                       re.escape(name) + r"\s*\([^;]*?\)\s*\{", source)
     if not match: raise ValueError(f"actual function missing: {name}")
     end = balanced(source, source.index("{", match.start()))
@@ -67,6 +67,19 @@ def region(source, begin, end):
     if source.count(begin) != 1 or source.count(end) != 1:
         raise ValueError(f"missing/ambiguous runtime markers: {begin}")
     return source.split(begin, 1)[1].split(end, 1)[0]
+
+
+def typed_peer_boundaries(source):
+    """Retain original recorder assertions with a function-local field alias."""
+    body = function(source, "device_post")
+    tokens = re.sub(r"/\*.*?\*/|//[^\n]*|\"(?:\\.|[^\"\\])*\"|'(?:\\.|[^'\\])*'",
+                    " ", body, flags=re.S)
+    if (source.count(body) != 1 or len(re.findall(r"\bfile\b", tokens)) != 2 or
+            len(re.findall(r"\.\s*lease\s*\.\s*file\b", tokens)) != 2):
+        raise ValueError("legacy device_post field alias is no longer exact")
+    wrapped = ('#pragma push_macro("file")\n#undef file\n#define file u.peer.file\n' +
+               body + '#pragma pop_macro("file")\n')
+    return source.replace(body, wrapped, 1)
 
 
 def poll_unit(kernel, ring_source=None):
@@ -139,7 +152,7 @@ def main():
     if not end_enum: raise ValueError("actual core end disposition enum missing")
     core = end_enum.group(0) + "\n" + "\n".join(function(texts["core"], name) for name in (
         "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_progress_work", "xdev_ext_mech_session_stop", "xdev_ext_mech_session_stop_started_ns",
-        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_end") +
+        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_batch_session", "xdev_ext_mech_end") +
         (("xdev_ext_mech_stage_stop",) if "\nvoid xdev_ext_mech_stage_stop(" in texts["core"] else ()))
     # Diagnostic selection copies the selected original case byte-for-byte;
     # the default full-suite body and every oracle remain unchanged.
@@ -167,7 +180,7 @@ def main():
               .replace("@BPF@", no_includes(texts["X6 policy"]))
               .replace("@POLL@", poll_unit(kernel))
               .replace("@CLASS@", no_includes(texts["class"]))
-              .replace("@BOUNDARIES@", texts["xdomain_boundaries.c"])
+              .replace("@BOUNDARIES@", typed_peer_boundaries(texts["xdomain_boundaries.c"]))
               .replace("@CASES@", texts["xdomain_cases.c"])
               .replace("@PRESSURE@", texts["pressure adapter"]))
     leftovers = re.findall(r"@[A-Z_]+@", source)

@@ -10,7 +10,7 @@ import re
 import shlex
 import subprocess
 import tempfile
-from xdomain_fixture import KERNEL, PRIVATE, local, definition, closure
+from xdomain_fixture import KERNEL, PRIVATE, local, definition, closure, scrub
 
 ENV = r'''
 #include <assert.h>
@@ -102,6 +102,58 @@ def object_shims():
         ("afxdp", "nvme", "iaa", "ce", "dma", "socket", "net", "cpu", "user", "xdomain")))
 
 
+def type_metadata(ops, core_h, functions):
+    """Real class/type mapping; schema objects are UNREAD identities only."""
+    clean = scrub(ops)
+    decl = definition(ops, "xdev_ext_mech_type_decl", True)
+    if ops.count(decl) != 1:
+        raise AssertionError("ambiguous real mechanism type declaration")
+    start = ops.index(decl)
+    macros = list(re.finditer(r"^#define[ \t]+XDEV_EXT_MECH_TYPE_ROW\(", clean, re.M))
+    arrays = list(re.finditer(
+        r"^static const struct xdev_ext_mech_type_decl xdev_ext_mech_types\[\]\s*=\s*\{",
+        clean, re.M))
+    if len(macros) != 1 or len(arrays) != 1:
+        raise AssertionError("missing/ambiguous real mechanism type mapping")
+    macro, array = macros[0], arrays[0]
+    line = macro.start()
+    while True:
+        end = clean.index("\n", line) + 1
+        if not clean[line:end].rstrip("\n\r").endswith("\\"):
+            break
+        line = end
+    if (clean[start + len(decl):macro.start()].strip() or
+            clean[end:array.start()].strip()):
+        raise AssertionError("real type mapping declaration closure changed")
+    end, depth = array.end(), 1
+    while depth and end < len(clean):
+        depth += (clean[end] == "{") - (clean[end] == "}")
+        end += 1
+    tail = re.match(r"\s*;\s*#undef[ \t]+XDEV_EXT_MECH_TYPE_ROW[ \t]*(?:\n|$)", clean[end:])
+    if depth or not tail:
+        raise AssertionError("incomplete real mechanism type mapping")
+    rows = re.findall(r"\bXDEV_EXT_MECH_TYPE_ROW\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)",
+                      clean[array.end():end])
+    schemas = sorted({row[2] for row in rows})
+    if (len(rows) != 10 or len({row[0] for row in rows}) != 10 or
+            len({row[1] for row in rows}) != 10 or len(schemas) != 4):
+        raise AssertionError("real mechanism type rows changed; review required")
+    consumers = scrub(functions)
+    if (re.search(r"(?:\.|->)\s*schema\b|\bxdev_ext_mech_type_schema\s*\(", consumers) or
+            any(re.search(r"\b" + re.escape(name) + r"\b", consumers) for name in schemas)):
+        raise AssertionError("schema identity boundary would be read by real filter closure")
+    schema_decl = definition(core_h, "xdev_ext_ops_desc", True)
+    forwards = "\n".join("struct " + name + ";" for name in sorted(
+        set(re.findall(r"\bstruct\s+(\w+)", schema_decl)) - {"xdev_ext_ops_desc"}))
+    identities = "\n".join("static const struct xdev_ext_ops_desc " + name + " = {0};"
+                           for name in schemas)
+    # No schema fields are executed here. These distinct objects provide only
+    # addresses for the unchanged production rows, not schema/BTF qualification.
+    return (forwards + "\n" + schema_decl +
+            "\n/* UNREAD controlled schema identities; no schema validation claim. */\n" +
+            identities + "\n" + ops[start:end + tail.end()])
+
+
 def runtime_boundary():
     ops = (KERNEL / "io_uring/xdev_ext_mech_ops.c").read_text()
     private = PRIVATE.read_text()
@@ -168,7 +220,7 @@ def runtime_boundary():
     # Wrapper aliases refer to actual extracted functions, with no substitute
     # result or filtering logic. Only their identifiers are implementation-private.
     functions += "\n#define private_filter " + filters[0] + "\n#define private_helper " + helper + "\n"
-    return rules + "\n" + "\n".join(sets) + "\n" + functions
+    return type_metadata(ops, core_h, functions) + "\n" + rules + "\n" + "\n".join(sets) + "\n" + functions
 
 
 def build_boundary(syntax=False):

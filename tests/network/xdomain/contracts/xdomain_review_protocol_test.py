@@ -36,7 +36,7 @@ def source(kernel, here):
     core = enum.group() + "\n" + "\n".join(fixture.function(core_text, name) for name in (
         "xdev_ext_mech_settled", "xdev_ext_mech_settle_locked", "xdev_ext_mech_progress_work",
         "xdev_ext_mech_session_stop", "xdev_ext_mech_session_stop_started_ns",
-        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_stage_kick", "xdev_ext_mech_end") +
+        "xdev_ext_mech_stage_native_get", "xdev_ext_mech_stage_native_put", "xdev_ext_mech_batch_session", "xdev_ext_mech_stage_kick", "xdev_ext_mech_end") +
         (("xdev_ext_mech_stage_stop",) if "\nvoid xdev_ext_mech_stage_stop(" in core_text else ()))
     family = fixture.region(read("io_uring/family/xdev_ext_netfam.c"),
         "/* xdev_ext_netfam runtime begin */", "/* xdev_ext_netfam runtime end */")
@@ -71,7 +71,7 @@ static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w
         "@BPF@": fixture.no_includes(read("tools/xdev_ext_mech/xdomain_peer.bpf.c")),
         "@POLL@": fixture.poll_unit(kernel),
         "@CLASS@": fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain_class.c")),
-        "@BOUNDARIES@": (here / "xdomain_boundaries.c").read_text(), "@CASES@": cases,
+        "@BOUNDARIES@": fixture.typed_peer_boundaries((here / "xdomain_boundaries.c").read_text()), "@CASES@": cases,
     }.items():
         result = result.replace(token, value)
     result = result.replace("@PRESSURE@", (here / "xdomain_pressure_adapter.c").read_text())
@@ -91,7 +91,7 @@ def ring_source(kernel, here):
     lease = "\n".join(declaration(read("include/linux/xdev_ext_peer.h"), "struct " + name)
                        for name in ("xdev_ext_peer_lease", "xdev_ext_peer_fd_lease"))
     net = read("include/linux/xdev_ext_netfam.h")
-    family = (declaration(net, "enum xdev_ext_net_hdr_policy") +
+    family = (ring_fixture.typed_lease_declarations(net) + declaration(net, "enum xdev_ext_net_hdr_policy") +
               "\n".join(line for line in net.splitlines() if line.startswith("#define XDEV_EXT_NET_DEV_AREA") or
                         line.startswith("#define XDEV_EXT_NETFAM_MAX_ELEMS")) + "\n" +
               declaration(net, "struct xdev_ext_net_elem") + declaration(net, "struct xdev_ext_net_dev_ops"))
@@ -100,7 +100,7 @@ def ring_source(kernel, here):
             lease + family + fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain.h")) +
             (here / "xdomain_ring_boundaries.c").read_text() + support +
             fixture.no_includes(read("io_uring/xdomain/xdev_ext_xdomain_ring.c")) +
-            "\n#define main review_unused_ring_original_main\n" + (here / "xdomain_ring_cases.c").read_text() +
+            "\n#define main review_unused_ring_original_main\n" + ring_fixture.typed_ring_inputs((here / "xdomain_ring_cases.c").read_text()) +
             "\n#undef main\n" + (here / "xdomain_review_protocol_ring_cases.c").read_text())
 
 
