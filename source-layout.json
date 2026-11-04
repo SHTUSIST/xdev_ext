@@ -8859,6 +8859,26 @@
       "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy_lease.h"
+    },
+    {
+      "source": "tests/compute/family/lease/boundary.h",
+      "logical_path": "tests/compute/family/lease/boundary.h"
+    },
+    {
+      "source": "tests/compute/family/lease/cases.c",
+      "logical_path": "tests/compute/family/lease/cases.c"
+    },
+    {
+      "source": "tests/compute/family/lease/core.h",
+      "logical_path": "tests/compute/family/lease/core.h"
+    },
+    {
+      "source": "tests/compute/family/lease/mutations.py",
+      "logical_path": "tests/compute/family/lease/mutations.py"
+    },
+    {
+      "source": "tests/compute/family/lease/run.py",
+      "logical_path": "tests/compute/family/lease/run.py"
     }
   ]
 }

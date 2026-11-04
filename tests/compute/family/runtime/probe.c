@@ -1,4 +1,9 @@
 /* Literal behavioral vectors frozen from the runtime contract. */
+#ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_LEASE_H
+/* This file follows all actual production bodies: project fixture fields only. */
+#define lease_group lease.group
+#define cleanup_held lease.cleanup_held
+#endif
 #ifdef RUNTIME_AVAILABLE
 #define STATE(cs) (&(cs)->copy)
 #else

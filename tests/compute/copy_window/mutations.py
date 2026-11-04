@@ -53,6 +53,8 @@ def main():
     if a.phase=='typed': selected.add(run.TYPED)
     shared=(source/run.RUNTIME_HEADER).is_file()
     if shared: selected.update((run.RUNTIME,run.RUNTIME_HEADER,run.TYPED))
+    for rel in ('src/compute/io_uring/xdev_ext_compfam_copy_lease.h','src/compute/io_uring/xdev_ext_compfam_copy_lease.c'):
+        if (source/rel).is_file(): selected.add(rel)
     (out/'selected-sources.json').write_text(json.dumps(sorted(selected),indent=2)+'\n')
     cases=[
       ('host-offset-plus-one','src/core/io_uring/xdev_ext_mech_window_copy_core.h',None,lambda s:replace_once(s,'at = g->first_page_off +','at = 1 + g->first_page_off +')),

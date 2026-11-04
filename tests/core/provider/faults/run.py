@@ -71,6 +71,11 @@ def shared_runtime_dependencies(*adapters):
             else ())
 
 
+def common_lease_dependencies(*adapters):
+    return (("io_uring/xdev_ext_compfam_copy_lease.h", "io_uring/xdev_ext_compfam_copy_lease.c")
+            if any('xdev_ext_compfam_copy_lease.h' in text for text in adapters) else ())
+
+
 def copy_window_dependencies(text):
     """Follow the selected adapter's actual private or portable header edge."""
     return (("io_uring/xdev_ext_compfam_copy_core.h",)
@@ -124,6 +129,7 @@ def generate(mutation=None):
     ops = source("io_uring/xdev_ext_mech_ops.c")
     ce = source("io_uring/xdev_ext_mech_ce.c")
     runtime_dependencies = shared_runtime_dependencies(dma, ce)
+    lease_dependencies = common_lease_dependencies(dma, ce)
     runtime = source("io_uring/xdev_ext_compfam_copy.c") if runtime_dependencies else ""
     if runtime_dependencies:
         # Both real adapters must require the runtime. A partly new snapshot
@@ -150,12 +156,12 @@ def generate(mutation=None):
             runtime = mutate_function(runtime, "xdev_ext_comp_copy_unbind",
                 "if (atomic_read(&cs->ambiguous))\n\t\treturn -EBUSY;", "if (false) return -EBUSY;")
             dma = mutate_function(dma, "xdev_ext_dma_copy_unbind_begin",
-                "if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)")
+                "if (cs->lease.group && xdev_ext_comp_copy_lease_busy(&cs->lease))" if lease_dependencies else "if (cs->lease_group && xdev_ext_dma_lease_busy(cs))", "if (false)")
             dma = mutate_function(dma, "xdev_ext_dma_copy_unbind_end",
-                "if (!xdev_ext_dma_lease_unbind(cs))", "if (false)")
+                "if (cs->lease.group &&\n\t    WARN_ON_ONCE(!xdev_ext_comp_copy_lease_unbind(&cs->lease, false)))" if lease_dependencies else "if (!xdev_ext_dma_lease_unbind(cs))", "if (false)")
         elif mutation == "lease_get":
             dma = mutate_function(dma, "xdev_ext_dma_copy_lease_get",
-                "return xdev_ext_dma_lease_get(cs, b);", "return 0;")
+                "return xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));" if lease_dependencies else "return xdev_ext_dma_lease_get(cs, b);", "return 0;")
         elif mutation == "owner_guard":
             dma = mutate_function(dma, "xdev_ext_dma_copy_classify",
                 "if (!xdev_ext_mech_batch_dma_owners_valid(b, ticket, cb->x, cb->n))", "if (false)")
@@ -186,6 +192,14 @@ def generate(mutation=None):
     template = (HERE / "provider_fault_fixture.c").read_text()
     if runtime_dependencies:
         template = shared_fixture_layout(template)
+    if lease_dependencies:
+        for field, target in (("lease_group", "lease.group"), ("cleanup_held", "lease.cleanup_held")):
+            template = re.sub(r'(->|\.)'+field+r'\b', lambda m:m[1]+target, template)
+        template = template.replace('xdev_ext_ce_lease_bind_ready(&cs);', 'xdev_ext_comp_copy_lease_hold(&cs.lease,false);')
+        template = template.replace('xdev_ext_ce_lease_cleanup_begin(&cs)', 'xdev_ext_comp_copy_lease_cleanup_begin(&cs.lease)')
+        template = template.replace('xdev_ext_ce_lease_unbind(&cs)', 'xdev_ext_comp_copy_lease_unbind(&cs.lease,true)')
+        template = re.sub(r'xdev_ext_dma_lease_get\((cs),([^()]*)\)', r'xdev_ext_dma_copy_lease_get(&\1->copy,\2)', template)
+
     template = template.replace("/* PRODUCTION_CLASS_FLAGS */",
                                 re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0])
     # Historical void callbacks are adapted only at the fixture boundary so the
@@ -322,7 +336,9 @@ static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
         abort();
 }
 /* PRODUCTION_OPS */""")
-    blocks = {"COPY_DECLS": ('#include "io_uring/xdev_ext_compfam_copy_runtime.h"' if runtime_dependencies else ""),
+    if lease_dependencies:
+        runtime = re.sub(r'^#include[^\n]*\n', '', source(lease_dependencies[1]), flags=re.M) + '\n' + runtime
+    blocks = {"COPY_DECLS": ('#include "io_uring/xdev_ext_compfam_copy_runtime.h"' if runtime_dependencies else "") + ('\n#include \"io_uring/xdev_ext_compfam_copy_lease.h\"' if lease_dependencies else ''),
               "COPY_RUNTIME": runtime,
               "CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
               "OPS": "\n\n".join(function(ops, n) for n in
@@ -379,6 +395,9 @@ class ProviderFaults(unittest.TestCase):
                 p = cls.path / "linux" / (name + ".h")
                 p.parent.mkdir(parents=True, exist_ok=True)
                 p.write_text("/* OS boundary: definitions are supplied by the fixture. */\n")
+        for rel in common_lease_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c")):
+            if rel.endswith('.h'):
+                (cls.path / rel).write_text(source(rel))
         # Report-aware refs need the selected public policy/report ABI;
         # pre-report refs do not borrow the current tree's new types.
         if "static int xdev_ext_mech_session_release_report(" in source("io_uring/xdev_ext_mech.c"):
@@ -583,6 +602,7 @@ def main():
               "io_uring/xdev_ext_mech_window_copy_core.h",
               "io_uring/xdev_ext_mech_native_cookie.h", "io_uring/xdev_ext_mech_window.h")
     inputs += shared_runtime_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c"))
+    inputs += common_lease_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c"))
     inputs += dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c"))
     inputs += tuple(dict.fromkeys(copy_window_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
                                  copy_window_dependencies(source("io_uring/xdev_ext_mech_ce.c"))))

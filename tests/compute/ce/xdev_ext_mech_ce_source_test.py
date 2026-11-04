@@ -75,6 +75,8 @@ class CeClassSourceTest(unittest.TestCase):
     def setUp(self):
         self.text = CE.read_text(encoding="utf-8")
         self.common = (ROOT / "src/compute/io_uring/xdev_ext_compfam_copy.c").read_text(encoding="utf-8")
+        lease = ROOT / "src/compute/io_uring/xdev_ext_compfam_copy_lease.c"
+        self.lease = lease.read_text(encoding="utf-8") if lease.is_file() else None
 
     def test_built_with_its_config(self):
         makefile = (ROOT / "src/core/io_uring/Makefile").read_text(encoding="utf-8")
@@ -114,7 +116,22 @@ class CeClassSourceTest(unittest.TestCase):
                 "xdev_ext_ce_lease_bind(st, cs, u->arg0, u->arg1)",
                 "->bind_region(", "cs->region.ops = cs->ops;",
                 "xdev_ext_ce_geom_init(", "->bind_host(",
-                "xdev_ext_ce_lease_bind_ready(cs)")
+                ("xdev_ext_comp_copy_lease_hold(&cs->lease, false)" if self.lease is not None
+                 else "xdev_ext_ce_lease_bind_ready(cs)"))
+        if self.lease is not None:
+            # Actual-boundary companions: residual allocation/residual/positive/
+            # errors and runtime ce_v2_bind_and_identity; initial/late/ready mutants.
+            configured = body(self.text, "xdev_ext_ce_lease_bind")
+            ordered(self, configured, "cs->window_start = start;", "cs->window_len = len;",
+                    "return xdev_ext_comp_copy_lease_bind(&xdev_ext_ce_lease_domain, &cs->lease,",
+                    "st->s, xdev_ext_mech_session_depth(st->s), cs, true)")
+            held = body(self.lease, "xdev_ext_comp_copy_lease_bind")
+            ordered(self, held, "mutex_lock(&domain->lock)", "region->cleanup_held = hold_at_bind;",
+                    "if (hold_at_bind)", "found->cleanup_holds++;",
+                    "list_add_tail(&region->node, &found->regions)")
+            host = bind[bind.index("err = cs->ops->bind_host("):]
+            ordered(self, host, "if (err)", "return err;",
+                    "xdev_ext_comp_copy_lease_hold(&cs->lease, false)", "return 0;")
         self.assertNotIn("->unbind_region(", bind)
         self.assertNotIn("module_put(", bind)
         core = (ROOT / "src/core/io_uring/xdev_ext_mech.c").read_text(encoding="utf-8")
@@ -134,12 +151,46 @@ class CeClassSourceTest(unittest.TestCase):
         for name in ("unbind_begin", "unbind_host", "unbind_region"):
             part = checked[checked.index("err = cs->ops->"+name):]
             ordered(self, part, "if (err)", "return err;")
-        self.assertIn("xdev_ext_ce_lease_cleanup_begin(cs)", body(self.text, "xdev_ext_ce_copy_unbind_begin"))
+        begin = body(self.text, "xdev_ext_ce_copy_unbind_begin")
+        if self.lease is None:
+            self.assertIn("xdev_ext_ce_lease_cleanup_begin(cs)", begin)
+        else:
+            # Teardown refusing-host/region/retry and residual multistage/refusals/
+            # atomic_cleanup exercise these real begin/end boundaries and locks.
+            self.assertIn("return xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);", begin)
+            cleanup = body(self.lease, "xdev_ext_comp_copy_lease_cleanup_begin")
+            ordered(self, cleanup, "if (!group)", "return 0;", "mutex_lock(&domain->lock)",
+                    "group->state.active_batches || group->state.quarantined",
+                    "mutex_unlock(&domain->lock)", "return -EBUSY;",
+                    "if (!region->cleanup_held)", "region->cleanup_held = true;",
+                    "group->cleanup_holds++;")
+            self.assertEqual(cleanup.count("mutex_lock(&domain->lock)"), 1)
+            hold = cleanup[cleanup.index("if (!region->cleanup_held)"):]
+            ordered(self, hold, "group->cleanup_holds++;", "mutex_unlock(&domain->lock)", "return 0;")
         self.assertIn("cs->ops->unbind_host(copy->host)", body(self.text, "xdev_ext_ce_copy_unbind_host"))
         region = body(self.text, "xdev_ext_ce_copy_unbind_region")
         ordered(self, region, "cs->ops->unbind_region(&cs->region)", "if (err)",
                 "return err;", "cs->region.priv = NULL;")
-        self.assertIn("xdev_ext_ce_lease_unbind(cs)", body(self.text, "xdev_ext_ce_copy_unbind_end"))
+        end = body(self.text, "xdev_ext_ce_copy_unbind_end")
+        if self.lease is None:
+            self.assertIn("xdev_ext_ce_lease_unbind(cs)", end)
+        else:
+            ordered(self, end, "if (cs->lease.group &&",
+                    "WARN_ON_ONCE(!xdev_ext_comp_copy_lease_unbind(&cs->lease, true))",
+                    "return -EBUSY;", "return 0;")
+            detach = body(self.lease, "xdev_ext_comp_copy_lease_unbind")
+            ordered(self, detach, "mutex_lock(&domain->lock)",
+                    "group->state.active_batches || group->state.quarantined",
+                    "mutex_unlock(&domain->lock)", "return false;",
+                    "if (release_hold && region->cleanup_held)", "group->cleanup_holds--;",
+                    "region->cleanup_held = false;", "list_del(&region->node)",
+                    "region->group = NULL;")
+            critical = detach[detach.index("if (release_hold && region->cleanup_held)"):
+                              detach.index("region->group = NULL;")]
+            self.assertNotIn("mutex_unlock(", critical)
+            self.assertEqual(detach.count("mutex_lock(&domain->lock)"), 1)
+            ordered(self, detach[detach.index("region->group = NULL;"):],
+                    "list_del(&group->node)", "mutex_unlock(&domain->lock)", "kvfree(group)")
         for name in ("unbind_begin", "unbind_host", "unbind_region", "unbind_end"):
             self.assertIn("."+name+" = xdev_ext_ce_copy_"+name+",", self.text)
         self.assertRegex(self.text, r"\.unbind_checked\s*=\s*xdev_ext_ce_unbind")
@@ -162,7 +213,19 @@ class CeClassSourceTest(unittest.TestCase):
                 "xdev_ext_window_copy_cookie_disarm(")
         self.assertIn("err = -ENODEV;", submit)
         self.assertIn("xdev_ext_mech_batch_ticket(b)", submit)
-        self.assertIn("return xdev_ext_ce_lease_get(cs, b);", body(self.text, "xdev_ext_ce_copy_lease_get"))
+        get = body(self.text, "xdev_ext_ce_copy_lease_get")
+        if self.lease is None:
+            self.assertIn("return xdev_ext_ce_lease_get(cs, b);", get)
+        else:
+            # Runtime lease_refusal, provider overlap/depth/shifted/unmap controls
+            # and the actual-get bypass mutation exercise this admission edge.
+            self.assertIn("return xdev_ext_comp_copy_lease_get(&cs->lease,\n"
+                          "\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));", get)
+            self.assertNotIn("xdev_ext_mech_batch_ticket", get)
+        refusal = submit[submit.index("err = cs->ops->lease_get(cs, b)"):
+                         submit.index("xdev_ext_window_copy_cookie_arm(")]
+        ordered(self, refusal, "if (err)", "return err;")
+        self.assertNotIn("cs->staged = NULL;", refusal)
         adapted = body(self.text, "xdev_ext_ce_copy_submit")
         ordered(self, adapted, "cb->x[i]", "cs->ops->submit(")
         for name in ("lease_get", "submit"):

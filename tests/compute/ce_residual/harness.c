@@ -79,6 +79,13 @@ static bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch
 static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch*b,u64 t){return t==b->ticket?0:-ESTALE;}
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch*b,u64 t,int e,bool q){}
 #include "actual-ce.c"
+#ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_LEASE_H
+#define xdev_ext_ce_lease_lock xdev_ext_ce_lease_domain.lock
+#define xdev_ext_ce_lease_groups xdev_ext_ce_lease_domain.groups
+/* Fixture field spelling only; all production definitions precede these aliases. */
+#define lease_group lease.group
+#define cleanup_held lease.cleanup_held
+#endif
 /* Mechanical state projection only; tested production bodies stay unchanged. */
 #if CE_SHARED_RUNTIME
 #define CE_STATE(cs) ((cs)->copy)

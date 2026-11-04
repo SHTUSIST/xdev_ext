@@ -31,8 +31,17 @@ static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file
 static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(struct file *f,const struct xdev_ext_dma_scope_ops **s) { event(0); *s=NULL; return &dma_ops; }
 #ifdef HAVE_RUNTIME
 static int traced_ce_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_ce_stage *c,u64 off,u64 len) { event(3); return xdev_ext_ce_lease_bind(s,c,off,len); }
+#ifdef HAVE_COMMON_LEASE
+static int traced_common_bind(struct xdev_ext_comp_copy_lease_domain *d,struct xdev_ext_comp_copy_lease_region *r,struct xdev_ext_mech_session *s,u32 depth,const void *key,bool held) { if(d==&xdev_ext_dma_lease_domain)event(3);return xdev_ext_comp_copy_lease_bind(d,r,s,depth,key,held); }
+static void traced_common_hold(struct xdev_ext_comp_copy_lease_region *r,bool hold) { if(r->domain==&xdev_ext_ce_lease_domain&&!hold)event(5);xdev_ext_comp_copy_lease_hold(r,hold); }
+#define xdev_ext_comp_copy_lease_bind(...) traced_common_bind(__VA_ARGS__)
+#define xdev_ext_comp_copy_lease_hold(...) traced_common_hold(__VA_ARGS__)
+#else
 static void traced_ce_lease_ready(struct xdev_ext_ce_stage *c) { event(5); xdev_ext_ce_lease_bind_ready(c); }
+#endif
+#ifndef HAVE_COMMON_LEASE
 static int traced_dma_lease_bind(struct xdev_ext_mech_stage *s,struct xdev_ext_dma_stage *c) { event(3); return xdev_ext_dma_lease_bind(s,c); }
+#endif
 static int traced_dma_stage_scope(struct xdev_ext_dma_stage *c,const struct xdev_ext_dma_scope_ops *s,struct file *f,u64 off,u64 len) { event(4); return xdev_ext_dma_stage_scope(c,s,f,off,len); }
 #define xdev_ext_ce_lease_bind(...) traced_ce_lease_bind(__VA_ARGS__)
 #define xdev_ext_ce_lease_bind_ready(...) traced_ce_lease_ready(__VA_ARGS__)
