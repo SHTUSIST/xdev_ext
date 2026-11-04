@@ -1,7 +1,7 @@
-# Mooncake baseline command plans
+# Mooncake baseline plans and execution
 
 This directory prepares Mooncake E4 storage-to-GPU and E7 host-memory-to-remote-GPU
-baseline commands. It does not execute benchmarks. Read the
+baseline commands and executes a selected cell after qualification. Read the
 [performance evaluation policy](../../../docs/reference/performance-policy.md)
 before changing comparison geometry or interpreting results.
 
@@ -31,11 +31,75 @@ or install a dependency. Valid input returns 0 with `status=planned`,
 `execution=none` and `performance_claim=none`. A missing binary produces
 `needs_build=true`; planned commands are not build or device validation.
 
-`--mode check-setup` aggregates missing declarations, source/binary and compile
-feature metadata, without starting `tebench`. This delivery has no independently
-qualified physical execution evidence, so setup remains `setup_refused`, exit 4.
-`--mode run` also always returns `setup_refused`, exit 4. Setting
-`physical_run_authorized=true` in a JSON file cannot enable execution.
+`--mode check-setup` without qualification preserves the declaration-only setup
+refusal, exit 4. With `--qualification`, `--profile` and `--cell-id`, it checks
+retained receipts, current fixed Git source/clean submodule, binary/runtime ELF
+identity and the local rig/input match. The only checker subprocesses are bounded
+read-only Git and `/usr/bin/readelf`; it never runs a loader, GPU probe or tebench.
+A qualified setup returns 0 with `execution=none`; missing evidence returns 4.
+
+`--mode run` without qualification preserves exit 4 before requiring a new
+profile/cell selection. With qualification it uses those same checks and then
+executes exactly the selected cell
+on its selected local profile. The operator invokes the action directly; a
+`physical_run_authorized=true` declaration alone cannot enable it. There is no
+permission-token service, source-file manifest or validation-cache database.
+Existing correctness, route and CPU observations remain retained evidence
+statements, distinguished from current file/Git/ELF checks. A build with CUDA
+`stubs` in its actual RUNPATH or resolved library paths is refused at runtime
+qualification even if compile/link succeeded.
+
+```sh
+python3 tests/benchmarks/mooncake/run.py --mode run --experiment e4 \
+  --shape /campaign/e4-shape.json --rig /campaign/rig.json \
+  --source-root /campaign/Mooncake --tebench /campaign/build/tebench \
+  --profile native --cell-id native-iouring-default-b1048576-q1-r0 \
+  --qualification /campaign/qualification.json --output-dir /campaign/new-result
+```
+
+Qualification has exactly this small schema. Paths can be absolute or relative
+to the qualification file; receipt/raw evidence must exist as bounded ordinary
+files. JSON is limited to 1 MiB, raw supporting logs to 64 MiB. Only critical
+source/build/runtime identities receive necessary pre-execution checks; ordinary
+logs receive no mandatory digest.
+
+```json
+{
+  "schema_version": 1,
+  "build_receipt": "root-build-receipt.json",
+  "runtime_receipt": "runtime.json",
+  "correctness_receipt": "correctness/result.json",
+  "budget_receipt": "cpu-budget.json"
+}
+```
+
+The build receipt uses the retained GCC target-build format: fixed source query,
+clean source result, submodule identity, compiler/SDK output, actual target byte
+count/SHA256, CMake feature entries and linked-library evidence. The runtime
+receipt contains `schema_version=1`, `source_revision`, `tebench_sha256`,
+`profile`, `endpoint`, `kernel_release`, `libraries`, `library_search_dirs`,
+`evidence`, and the applicable rig GPU/driver/CUDA identities. Each library is
+`{needed,path}` with SHA256 for libcuda, libcudart and GDS's libcufile. It covers
+every current direct DT_NEEDED/SONAME, exact selected search order and retained
+loader-resolution evidence. No loader is invoked to collect that evidence here.
+Unrelated opaque resolver-log bytes are preserved. Required library mapping
+lines must be valid UTF-8, and ASCII error markers refuse setup even beside
+opaque bytes; the existing stream and line limits still apply.
+
+The separate correctness receipt contains `status=passed`,
+`scope=separate-upstream-roundtrip`, fixed source/profile/experiment/arm,
+covered block/batch/worker shape, matching rig identities and raw evidence paths.
+The budget receipt contains fixed source/profile/endpoint, rig `cpuset`,
+`cpu_budget_description` and evidence paths. Input/extent/exclusive-window and
+E7 route/link receipts stay in the existing rig. Missing or mismatched evidence
+is refused rather than interpreted as a measurement. Where recorded, E7
+`host_id`, `address`, `interface` and `rpc_port` match the endpoint owning the
+receipt; `source_host_id` and `destination_host_id` match the declared host pair.
+Absent optional identity fields remain compatible with otherwise valid retained
+evidence. These comparisons do not rerun a route observation. Recorded input ranges and
+where-recorded `stat`/top-level `st_dev`, `st_ino`, `st_size`, `st_mtime_ns` facts
+are checked against current file metadata; no new stat manifest is required. A successful child alone
+does not prove the GPU, pinned, cuFile compatibility or USB4 path.
 
 Invalid JSON, invalid types or geometry, overflow, duplicate values/keys, unknown
 fields and unsafe output paths return 2. JSON inputs must be ordinary files no
@@ -160,8 +224,11 @@ access; the planner never touches a namespace, filesystem or GPU.
 omissions and explicit access/completion semantics. Per-cell paths are relative
 descendants of the output directory. `command.json` stores `argv`, explicit
 `env`, config path and `needs_build`; configs and receipts have no fabricated
-measurement fields. There are no raw output files, native JSONL or performance
-numbers because no benchmark runs.
+measurement fields in nonexecuting plans. Executed cells additionally preserve
+`stdout.raw`, `stderr.raw`, `native.jsonl`, `process.json`, `receipt.json` and
+`parsed-native.json` when parsable. `summary.json` retains every planned cell,
+including unselected/refused rows; one selected success does not complete both
+profiles or the entire matrix.
 
 E4 uses the real `--backend=tent --metadata_type=p2p --xport_type=iouring`
 CLI. The configuration key is spelled `transports/io_uring`. Default sets
@@ -172,14 +239,15 @@ and `staging_slots`. GDS uses `--xport_type=gds`, an empty TENT config and
 E7 source commands allocate DRAM and WRITE to the remote VRAM target. Commands
 include a separate `target_command` for the destination. The source contains
 only the nonexecuting `{FRESH_TARGET_SEGMENT_NAME}` segment placeholder and
-`target_segment_source=fresh-target-stdout`. A future launcher must obtain a
-fresh segment from that target's current stdout before executing anything;
-this planner implements no launcher or SSH workflow.
+`target_segment_source=fresh-target-stdout`. Execution obtains the segment from
+the current target banner and validates campaign/cell/profile, both hosts, launch
+UUID, GPU identity and allocation scope. There is no SSH workflow.
 
 The command `env` mapping is the explicitly requested configuration, not a copy
-of ambient environment variables. A future executor must clear conflicting
+of ambient environment variables. The executor clears conflicting
 `MC_IOURING_*`, `MC_FORCE_TCP`, `MOONCAKE_LOCAL_HOSTNAME` and other undeclared
-Mooncake/GDS overrides, rather than merge them into the plan silently.
+Mooncake/GDS overrides, uses a small fixed environment and records removed
+variable names without their values. Arguments are passed without a shell.
 
 Pinned pools can fall back to pageable buffers if allocation fails, requests
 exceed the slot or slots run out. Pool-success and no-fallback evidence are
@@ -199,6 +267,70 @@ that separate correctness campaign must use an authorized writable scratch
 file and must not be reported as read-only performance. Upstream random mode
 cannot use `write_seed/read_verify` and exports no full per-random-READ byte
 oracle. These scope limits remain visible.
+
+## E7 local endpoint handoff
+
+Use the same `--campaign-id`, `--profile` and `--cell-id` at both endpoints.
+The destination invocation adds `--endpoint destination --source-completion
+/campaign/new-destination/source-inbox.json`; that inbox must be absent under
+its new output directory and cannot conflict with generated artifacts. It
+prints the path to its fresh `target-ready.json` and keeps its owned target alive.
+The source invocation adds `--endpoint source --ready-receipt
+/campaign/copied-target-ready.json`, using the newly transferred destination
+receipt, and emits `source-completion.json` in its output root. Ready evidence
+binds destination taskset/transport/VRAM/GPU/buffer/RPC semantics and the actual
+`target_config` hostname to the current destination rig. Legitimate host-local
+binary/config/output paths may differ; no remote artifact is opened locally. Transfer that
+small file to the destination inbox. Transfer/orchestration is the operator's
+existing tooling; this runner performs no network setup, SSH or uploads.
+
+The destination verifies the source host, target launch, segment and successful
+source exit/cleanup before stopping its target. Source-only success is
+`source_completed` with `e7_qualification=awaiting_destination_final` and no
+performance claim or published final E7 metric fields; native numbers remain
+nested local evidence. The matching destination final receipt qualifies the
+limited source/target lifetime obligation. Bad or missing completion still
+triggers bounded stop/reaping and retains a failed result. The destination's
+final receipt is needed to qualify E7 lifetime; a source result alone cannot do
+so. Target-ready allocation evidence is explicitly the upstream banner scope,
+not a physical mapping trace.
+
+## Process and metric qualification
+
+Initiator lifetime has a `duration_seconds+120` hang bound; target readiness is
+bounded to 120 seconds and total target lifetime to `duration_seconds+240`.
+After readiness the target's owned collector continuously drains both streams,
+even while its caller sleeps. Collector shutdown and reaping are synchronized;
+ready printing, receipt handling and interrupts share an unconditional cleanup
+boundary. Timeout/output overflow/interrupt sends one TERM to the owned process group,
+then KILL after five seconds if needed, with exit and cleanup recorded. Each raw
+stream is capped at 64 MiB and native JSONL at 1 MiB. Overflow retains the prefix
+and byte counts and cannot qualify a result. No retry or transport fallback is
+relabeled as the requested arm.
+
+The parser requires exactly one complete fixed-source `target_metrics` JSONL
+row and one target matching the selected block/batch/workers/operation/segment.
+It verifies positive completed-batch counts, exact bytes and native
+throughput/latency arithmetic, rejecting nonfinite, duplicate, missing or
+mismatched data. Native `*_gbps` denotes decimal GB/s. Wrapper spawn-to-reap time
+is diagnostic and never substituted for native Tx/wall metrics. A buffered-I/O
+warning, pinned fallback, missing exact `IOUringTransport:` pool success, error
+or unresolved warning prevents route qualification. Unrelated opaque raw bytes
+are retained; required parsed evidence must be valid, and ASCII failure/warning
+markers are checked even beside invalid UTF-8. Ready lines are parsed
+incrementally with a 1 MiB line bound. Retained cuFile/USB4 evidence is required for
+those routes.
+
+Upstream NUMA binding can expand a taskset-only CPU mask, so disclose the full
+all-thread budget or provide evidence of existing effective cpuset constraints;
+the runner creates no cgroup or scheduler setting. Random warmup advances each
+worker's RNG before measurement, so equal seeds do not establish identical timed
+address sequences. Preserve upstream setup, warmup, complete-batch waits, native
+timers and negative results. Private host controls are always
+`execution=contract-fixture`/`performance_claim=none` and export no summary
+benchmark values. A fixture route may be source-scoped `qualified` when its
+required logs/receipts pass, but missing TCP/GDS route evidence refuses fixtures
+as well. These labels establish software behavior only.
 
 ## Building the existing dependency
 

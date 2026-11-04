@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Serialize fixed Mooncake benchmark plans without executing benchmarks."""
+"""Plan or execute one qualified fixed-source Mooncake baseline cell."""
 
 import argparse
 import json
@@ -399,9 +399,9 @@ def write_json(path, value):
         stream.write("\n")
 
 
-def serialize(args, shape, rig):
-    problems = missing_setup(rig, args)
-    status, code = ("planned", 0) if args.mode == "dry-run" else ("setup_refused", 4)
+def serialize(args, shape, rig, prepare_execution=False):
+    problems = [] if prepare_execution else missing_setup(rig, args)
+    status, code = ("planned", 0) if args.mode == "dry-run" or prepare_execution else ("setup_refused", 4)
     build = rig.get("build_receipt")
     needs_build = (not executable_file(args.tebench) or not isinstance(build, dict)
                    or any(build.get(key) is not True for key in ("USE_TENT", "USE_CUDA", "liburing")))
@@ -423,6 +423,10 @@ def serialize(args, shape, rig):
                 execution="none", performance_claim="none", shape=shape,
                 rig_identity=identity, cells=[], setup_missing=problems, **semantics)
     protected = [args.shape, args.rig, args.source_root, args.tebench]
+    for name in ("qualification", "ready_receipt"):
+        value = getattr(args, name, None)
+        if value is not None:
+            protected.append(value)
     if "input_file" in rig:
         protected.append(absolute_path(rig["input_file"], "rig.input_file"))
     if any(output == source or source in output.parents
@@ -430,6 +434,8 @@ def serialize(args, shape, rig):
            for source in (args.source_root, resolved_path(args.source_root))):
         raise InvalidInput("output directory must be outside the Mooncake source tree")
     prepare_output(args.output_dir, protected)
+    if prepare_execution:
+        args.output_dir.chmod(0o700)
     for profile in PROFILES:
         for repetition in range(shape["repetitions"]):
             arms = ARMS[repetition % 3:] + ARMS[:repetition % 3] if args.experiment == "e4" else ("tcp",)
@@ -439,7 +445,7 @@ def serialize(args, shape, rig):
                         cell_id = f"{profile}-{arm}-b{block}-q{batch}-r{repetition}"
                         relative = Path("cells") / cell_id
                         directory = args.output_dir / relative
-                        directory.mkdir(parents=True)
+                        directory.mkdir(parents=True, mode=0o700 if prepare_execution else 0o777)
                         config_file = relative / "config.json"
                         command_file = relative / "command.json"
                         receipt_file = relative / "receipt.json"
@@ -488,7 +494,10 @@ def serialize(args, shape, rig):
                                        command_env=env, exit_code=code, raw_evidence=[],
                                        route_requested=arm, route_qualification="pending",
                                        correctness_scope="not_run", setup_missing=problems, **semantics)
-                        write_json(args.output_dir / receipt_file, receipt)
+                        if not prepare_execution or cell_id != args.cell_id:
+                            if prepare_execution:
+                                receipt.update(status="not_selected", exit_code=4)
+                            write_json(args.output_dir / receipt_file, receipt)
                         plan["cells"].append(dict(cell_id=cell_id, profile=profile, arm=arm,
                                                   block_bytes=block, batch_requests=batch,
                                                   repetition=repetition, command_file=str(command_file),
@@ -500,12 +509,178 @@ def serialize(args, shape, rig):
                       cell_count=len(plan["cells"]), setup_missing=problems)
 
 
-def main(argv=None):
+def selected_cell(args, shape, rig):
+    if args.profile is None or args.cell_id is None:
+        raise InvalidInput("execution selection requires --profile and --cell-id")
+    text_value(args.cell_id, "cell_id")
+    arms = ARMS if args.experiment == "e4" else ("tcp",)
+    found = None
+    for arm in arms:
+        for block in shape["block_bytes"]:
+            for batch in shape["batch_requests"]:
+                for repetition in range(shape["repetitions"]):
+                    name = f"{args.profile}-{arm}-b{block}-q{batch}-r{repetition}"
+                    if name == args.cell_id:
+                        found = dict(cell_id=name, profile=args.profile, arm=arm,
+                                     block_bytes=block, batch_requests=batch,
+                                     repetition=repetition)
+    if found is None:
+        raise InvalidInput("cell-id does not match selected profile and shape")
+    if args.experiment == "e4":
+        if args.endpoint != "local" or args.ready_receipt or args.source_completion:
+            raise InvalidInput("E4 requires the local endpoint")
+    else:
+        if args.endpoint not in ("source", "destination") or not args.campaign_id:
+            raise InvalidInput("E7 requires endpoint and --campaign-id")
+        text_value(args.campaign_id, "campaign_id")
+        if args.endpoint == "source" and (args.ready_receipt is None or args.source_completion):
+            raise InvalidInput("E7 source requires only --ready-receipt")
+        if args.endpoint == "destination":
+            if args.source_completion is None or args.ready_receipt:
+                raise InvalidInput("E7 destination requires only --source-completion")
+            inbox = args.source_completion
+            if inbox.name in {"plan.json", "summary.json", "qualification.json", "command.json", "config.json",
+                              "target-config.json", "receipt.json", "process.json", "native.jsonl", "stdout.raw",
+                              "stderr.raw", "target-ready.json", "source-completion.json", "parsed-native.json"}:
+                raise InvalidInput("completion inbox conflicts with a reserved output artifact")
+            if args.output_dir not in inbox.parents or inbox.exists() or inbox.is_symlink():
+                raise InvalidInput("source completion inbox must be absent under the new output directory")
+            for parent in (inbox, *inbox.parents):
+                if parent.is_symlink():
+                    raise InvalidInput("completion inbox cannot contain symlinks")
+    cell_shape = dict(shape, block_bytes=[found["block_bytes"]], batch_requests=[found["batch_requests"]])
+    endpoints = rig.get("endpoints", {})
+    found.update(experiment=args.experiment, shape=cell_shape, rig_identity=rig,
+                 campaign_id=args.campaign_id,
+                 source_host_id=endpoints.get("source", {}).get("host_id", ""),
+                 destination_host_id=endpoints.get("destination", {}).get("host_id", ""),
+                 expected_segment="file://" + rig.get("input_file", "{UNRESOLVED_ABSOLUTE_INPUT_FILE}")
+                                  if args.experiment == "e4" else "{FRESH_TARGET_SEGMENT_NAME}")
+    return found
+
+
+def run_selected(args, shape, rig, execution_context=None):
+    import executor
+    import qualification
+
+    cell = selected_cell(args, shape, rig)
+    if execution_context is not None:
+        if not isinstance(execution_context, executor.ExecutionContext) or execution_context.kind != "contract-fixture":
+            raise InvalidInput("only a private fixture context may be injected")
+        if execution_context.profile != args.profile or execution_context.endpoint != args.endpoint:
+            raise InvalidInput("private fixture context disagrees with selection")
+    serialize(args, shape, rig, prepare_execution=True)
+    plan = load_object(str(args.output_dir / "plan.json"), "prepared plan")
+    row = next(row for row in plan["cells"] if row["cell_id"] == args.cell_id)
+    directory = args.output_dir / Path(row["command_file"]).parent
+    command = load_object(str(args.output_dir / row["command_file"]), "prepared command")
+    if execution_context is None:
+        if args.qualification is None:
+            verdict = dict(qualified=False, status="setup_refused", missing=["--qualification is required"],
+                           execution="none", performance_claim="none", ratio_eligible=False)
+        else:
+            verdict = qualification.validate_qualification(args.qualification, args, shape, rig, cell)
+        write_json(args.output_dir / "qualification.json", verdict)
+        if not verdict.get("qualified") or args.mode == "check-setup":
+            ok = verdict.get("qualified") is True
+            receipt = dict(verdict, cell_id=args.cell_id, profile=args.profile,
+                           status="setup_qualified" if ok else "setup_refused", exit_code=0 if ok else 4,
+                           execution="none", performance_claim="none", ratio_eligible=False)
+            write_json(directory / "receipt.json", receipt)
+            return finish_selected(args, plan, row, receipt)
+        context = qualification.context_from_qualification(verdict)
+        command["needs_build"] = False
+    else:
+        context = execution_context
+    if args.experiment == "e7" and args.endpoint == "source":
+        ready = load_object(str(args.ready_receipt), "fresh target ready receipt")
+        try:
+            segment = executor.validate_ready(ready, cell, context)
+        except ValueError as error:
+            # Parsed evidence that does not bind this run is a setup refusal,
+            # separate from malformed JSON or CLI/shape validation above.
+            receipt = dict(schema_version=1, contract_version="mooncake-executor-v3",
+                           cell_id=args.cell_id, profile=args.profile, status="setup_refused",
+                           refusal_scope="ready_evidence", evidence_qualification="refused",
+                           exit_code=4, execution="none", performance_claim="none", ratio_eligible=False,
+                           setup_missing=[str(error)], errors=[str(error)],
+                           raw_evidence=[str(args.ready_receipt)])
+            write_json(directory / "receipt.json", receipt)
+            return finish_selected(args, plan, row, receipt)
+        original = "--target_seg_name={FRESH_TARGET_SEGMENT_NAME}"
+        if command["argv"].count(original) != 1:
+            raise InvalidInput("generated source command lacks exact target placeholder")
+        command["argv"] = ["--target_seg_name=" + segment if value == original else value for value in command["argv"]]
+        cell["expected_segment"] = segment
+    if args.experiment == "e7" and args.endpoint == "destination":
+        if args.source_completion.exists() or args.source_completion.is_symlink():
+            raise InvalidInput("completion inbox is already populated")
+        handle = None
+        completion = None
+        try:
+            handle = executor.start_target(command, cell, context, directory)
+            print(json.dumps(dict(status="target_ready", execution=context.kind, performance_claim="none",
+                                  ready_receipt=str(directory / "target-ready.json"))), flush=True)
+            while not handle.capture.closed:
+                handle.capture.pump(.1)
+                if args.source_completion.exists() or args.source_completion.is_symlink():
+                    completion = load_object(str(args.source_completion), "source completion receipt")
+                    break
+                if handle.process.poll() is not None:
+                    break
+        except (KeyboardInterrupt, OSError, ValueError):
+            if handle is None:
+                raise
+            completion = None
+        finally:
+            # Acquisition and every post-start action share the same cleanup boundary.
+            if handle is not None:
+                receipt = executor.stop_target(handle, completion)
+    else:
+        timeout = cell["shape"]["duration_seconds"] + 120
+        if context.kind == "contract-fixture":
+            timeout = context.qualified_receipt.get("timeout_seconds", timeout)
+        receipt = executor.execute_cell(command, cell, context, directory, timeout)
+        if args.experiment == "e7":
+            success = receipt["exit_code"] == 0
+            completion = dict(schema_version=1, campaign_id=args.campaign_id, cell_id=args.cell_id,
+                              profile=args.profile, destination_host_id=cell["destination_host_id"],
+                              source_host_id=cell["source_host_id"], launch_id=ready["launch_id"],
+                              segment_name=segment, endpoint="source", execution=context.kind,
+                              status="source_completed" if success else "source_failed",
+                              source_returncode=receipt["process"]["returncode"],
+                              source_cleanup_complete=receipt["process"]["cleanup_complete"],
+                              source_receipt=str(directory / "receipt.json"))
+            write_json(args.output_dir / "source-completion.json", completion)
+    return finish_selected(args, plan, row, receipt)
+
+
+def finish_selected(args, plan, selected, receipt):
+    summary = dict(schema_version=1, contract_version="mooncake-executor-v3",
+                   status=receipt["status"], execution=receipt["execution"],
+                   performance_claim=receipt.get("performance_claim", "none"), ratio_eligible=False,
+                   cell_id=args.cell_id, profile=args.profile, exit_code=receipt["exit_code"],
+                   receipt_file=selected["receipt_file"], campaign_status="incomplete", rows=[])
+    for row in plan["cells"]:
+        summary["rows"].append(dict(cell_id=row["cell_id"], receipt_file=row["receipt_file"],
+                                    status=receipt["status"] if row["cell_id"] == args.cell_id else "not_selected"))
+    write_json(args.output_dir / "summary.json", summary)
+    return receipt["exit_code"], summary
+
+
+def main(argv=None, execution_context=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", required=True, choices=("dry-run", "check-setup", "run"))
     parser.add_argument("--experiment", required=True, choices=("e4", "e7"))
     for key in ("shape", "rig", "source-root", "tebench", "output-dir"):
         parser.add_argument("--" + key, required=True)
+    parser.add_argument("--profile", choices=PROFILES)
+    parser.add_argument("--cell-id")
+    parser.add_argument("--qualification")
+    parser.add_argument("--endpoint", choices=("local", "source", "destination"), default="local")
+    parser.add_argument("--campaign-id")
+    parser.add_argument("--ready-receipt")
+    parser.add_argument("--source-completion")
     args = parser.parse_args(argv)
     try:
         for name in ("shape", "rig", "source_root", "tebench", "output_dir"):
@@ -513,12 +688,25 @@ def main(argv=None):
         shape, rig = load_object(str(args.shape), "shape"), load_object(str(args.rig), "rig")
         validate_shape(shape, args.experiment)
         validate_rig(rig, shape)
-        code, summary = serialize(args, shape, rig)
-    except (InvalidInput, OSError, UnicodeError, RecursionError) as error:
+        for name in ("qualification", "ready_receipt", "source_completion"):
+            if getattr(args, name) is not None:
+                setattr(args, name, absolute_path(getattr(args, name), name))
+        if execution_context is not None and getattr(execution_context, "kind", None) != "contract-fixture":
+            raise InvalidInput("injected physical execution context is not accepted")
+        if args.mode == "run" and args.qualification is None and execution_context is None:
+            code, summary = serialize(args, shape, rig)
+        elif args.mode == "run" or (args.mode == "check-setup" and args.qualification is not None):
+            code, summary = run_selected(args, shape, rig, execution_context)
+        else:
+            code, summary = serialize(args, shape, rig)
+    except (ValueError, OSError, UnicodeError, RecursionError, KeyError, TypeError) as error:
         print(json.dumps({"status": "invalid_input", "execution": "none",
                           "performance_claim": "none", "error": str(error)}), file=sys.stderr)
         return 2
-    print(json.dumps(summary, sort_keys=True))
+    try:
+        print(json.dumps(summary, sort_keys=True))
+    except (BrokenPipeError, KeyboardInterrupt):
+        return 1
     return code
 
 
