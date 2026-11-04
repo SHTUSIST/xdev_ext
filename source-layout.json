@@ -8849,6 +8849,16 @@
     {
       "source": "tests/compute/family/runtime/supplement-observables.json",
       "logical_path": "tests/compute/family/runtime/supplement-observables.json"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_lease.c"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_lease.h"
     }
   ]
 }

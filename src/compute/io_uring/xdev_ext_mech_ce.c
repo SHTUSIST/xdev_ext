@@ -31,7 +31,7 @@
 
 #include "xdev_ext_mech_ce_core.h"
 #include "xdev_ext_compfam_copy_runtime.h"
-#include "xdev_ext_mech_ce_lease.h"
+#include "xdev_ext_compfam_copy_lease.h"
 
 #define XDEV_EXT_CE_MAX_BACKENDS	4
 
@@ -43,28 +43,13 @@
  * Distinct VAs aliasing the same physical bytes require backend canonical
  * identity; this contract covers overlapping configured address windows.
  */
-struct xdev_ext_ce_lease_group {
-	struct list_head node;
-	struct list_head regions;
-	struct xdev_ext_mech_session *session;
-	struct xdev_ext_ce_lease_state state;
-	u32 depth;
-	u32 cleanup_holds;		/* one contribution per cleanup_held stage */
-	struct xdev_ext_ce_lease_slot slots[];
-};
-
-static DEFINE_MUTEX(xdev_ext_ce_lease_lock);
-static LIST_HEAD(xdev_ext_ce_lease_groups);
-
 /* One CE stage from bind to unbind; parked for good after AMBIGUOUS. */
 struct xdev_ext_ce_stage {
-	struct list_head lease_node;
-	struct xdev_ext_ce_lease_group *lease_group;
+	struct xdev_ext_comp_copy_lease_region lease;
 	/* C-owned configured identity; native region output cannot weaken it. */
 	const struct xdev_ext_ce_backend_ops *ops;
 	u64 window_start;
 	u64 window_len;
-	bool cleanup_held;
 	struct xdev_ext_ce_region region;
 	struct xdev_ext_ce_geom geom;
 	struct xdev_ext_comp_copy_stage copy;
@@ -122,172 +107,55 @@ static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file
 	return member.identity;
 }
 
-/* CREATE publishes configured exclusion before any native mapping can remain. */
+static bool xdev_ext_ce_lease_key_overlap(const void *a, const void *b)
+{
+	const struct xdev_ext_ce_stage *left = a, *right = b;
+
+	return xdev_ext_ce_lease_overlap(left->ops, left->window_start,
+		left->window_len, right->ops, right->window_start, right->window_len);
+}
+
+static bool xdev_ext_ce_lease_key_serial(const void *a, const void *b)
+{
+	const struct xdev_ext_ce_stage *left = a, *right = b;
+
+	return left->window_start != right->window_start &&
+		xdev_ext_ce_lease_key_overlap(a, b);
+}
+
+static const struct xdev_ext_comp_copy_lease_policy xdev_ext_ce_lease_policy = {
+	.overlap = xdev_ext_ce_lease_key_overlap,
+	.serial = xdev_ext_ce_lease_key_serial,
+};
+
+static struct xdev_ext_comp_copy_lease_domain xdev_ext_ce_lease_domain = {
+	.lock = __MUTEX_INITIALIZER(xdev_ext_ce_lease_domain.lock),
+	.groups = LIST_HEAD_INIT(xdev_ext_ce_lease_domain.groups),
+	.policy = &xdev_ext_ce_lease_policy,
+};
+
+/* Publish the requested C-owned key before any native mapping can remain. */
 static int xdev_ext_ce_lease_bind(struct xdev_ext_mech_stage *st,
 		struct xdev_ext_ce_stage *cs, u64 start, u64 len)
 {
-	struct xdev_ext_ce_lease_group *group, *found = NULL;
-	struct xdev_ext_ce_stage *other;
-	u32 depth = xdev_ext_mech_session_depth(st->s);
-
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	list_for_each_entry(group, &xdev_ext_ce_lease_groups, node)
-		if (group->session == st->s) {
-			found = group;
-			break;
-		}
-	if (!found) {
-		found = kvzalloc(struct_size(found, slots, depth), GFP_KERNEL);
-		if (!found) {
-			mutex_unlock(&xdev_ext_ce_lease_lock);
-			return -ENOMEM;
-		}
-		INIT_LIST_HEAD(&found->regions);
-		found->session = st->s;
-		found->depth = depth;
-		list_add_tail(&found->node, &xdev_ext_ce_lease_groups);
-	}
-	/* Relative slot offsets are shared across stages. With shifted bases,
-	 * slot N of one stage may overlap slot M of another. Bind finishes
-	 * before ACTIVE, so this conservative group policy is then immutable.
-	 */
-	list_for_each_entry(other, &found->regions, lease_node)
-		if (other->window_start != start &&
-		    xdev_ext_ce_lease_overlap(other->ops,
-			other->window_start, other->window_len,
-			cs->ops, start, len))
-			found->state.serial_batches = true;
-	cs->lease_group = found;
 	cs->window_start = start;
 	cs->window_len = len;
-	cs->cleanup_held = true;
-	found->cleanup_holds++;
-	list_add_tail(&cs->lease_node, &found->regions);
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-	return 0;
+	return xdev_ext_comp_copy_lease_bind(&xdev_ext_ce_lease_domain, &cs->lease,
+		st->s, xdev_ext_mech_session_depth(st->s), cs, true);
 }
 
-/* Only complete bind success permits normal overlap scheduling. */
-static void xdev_ext_ce_lease_bind_ready(struct xdev_ext_ce_stage *cs)
-{
-	struct xdev_ext_ce_lease_group *group = cs->lease_group;
-
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	if (cs->cleanup_held) {
-		group->cleanup_holds--;
-		cs->cleanup_held = false;
-	}
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-}
-
-/* Worker: acquire all ranges in one transaction, before any native CE work.
- * EAGAIN uses the core's preaccept retry; no accepted command is replayed.
- */
-static int xdev_ext_ce_lease_get(struct xdev_ext_ce_stage *cs,
-		struct xdev_ext_mech_batch *b)
-{
-	struct xdev_ext_ce_lease_group *group = cs->lease_group, *other;
-	struct xdev_ext_ce_stage *a, *held;
-	u32 slot = xdev_ext_mech_batch_slot(b);
-	bool conflict = false, cleanup_conflict = false;
-	int ret;
-
-	if (slot >= group->depth)
-		return -ERANGE;
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	list_for_each_entry(other, &xdev_ext_ce_lease_groups, node) {
-		if (other == group)
-			continue;
-		if (!other->cleanup_holds &&
-		    (group->state.active_batches || !other->state.active_batches))
-			continue;
-		list_for_each_entry(a, &group->regions, lease_node)
-			list_for_each_entry(held, &other->regions, lease_node)
-				if (xdev_ext_ce_lease_overlap(a->ops,
-					a->window_start, a->window_len,
-					held->ops, held->window_start,
-					held->window_len)) {
-					conflict = true;
-					cleanup_conflict = other->cleanup_holds != 0;
-					goto checked;
-				}
-	}
-checked:
-	if (cleanup_conflict)
-		ret = -EAGAIN;
-	else if (group->cleanup_holds)
-		ret = -EBUSY;
-	else
-		ret = xdev_ext_ce_lease_acquire(&group->state, &group->slots[slot],
-					      xdev_ext_mech_batch_id(b), conflict);
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-	return ret;
-}
-
-/* All CE stages see the same final batch fate. The slot marker releases
- * exactly once, and an unknown batch keeps the entire group quarantined.
- */
+/* All stages share final batch fate; quarantine retains slot ownership. */
 static void xdev_ext_ce_batch_release(struct xdev_ext_mech_stage *st,
 		struct xdev_ext_mech_batch *b, bool sequestered)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
-	struct xdev_ext_ce_lease_group *group = cs->lease_group;
-	u32 slot = xdev_ext_mech_batch_slot(b);
 	int ret;
 
-	if (WARN_ON_ONCE(slot >= group->depth))
+	ret = xdev_ext_comp_copy_lease_finish(&cs->lease,
+		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), sequestered);
+	if (WARN_ON_ONCE(ret == -ERANGE))
 		return;
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	ret = xdev_ext_ce_lease_finish(&group->state, &group->slots[slot],
-				     xdev_ext_mech_batch_id(b), sequestered);
 	WARN_ON_ONCE(ret && ret != -EBUSY);
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-}
-
-/* Checked cleanup holds exclusion before entering either native unmap. */
-static int xdev_ext_ce_lease_cleanup_begin(struct xdev_ext_ce_stage *cs)
-{
-	struct xdev_ext_ce_lease_group *group = cs->lease_group;
-
-	if (!group)
-		return 0;
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	if (group->state.active_batches || group->state.quarantined) {
-		mutex_unlock(&xdev_ext_ce_lease_lock);
-		return -EBUSY;
-	}
-	if (!cs->cleanup_held) {
-		cs->cleanup_held = true;
-		group->cleanup_holds++;
-	}
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-	return 0;
-}
-
-/* Both native handles are clear; release this hold and range atomically. */
-static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs)
-{
-	struct xdev_ext_ce_lease_group *group = cs->lease_group;
-	bool empty;
-
-	mutex_lock(&xdev_ext_ce_lease_lock);
-	if (WARN_ON_ONCE(group->state.active_batches || group->state.quarantined)) {
-		mutex_unlock(&xdev_ext_ce_lease_lock);
-		return false;
-	}
-	if (cs->cleanup_held) {
-		group->cleanup_holds--;
-		cs->cleanup_held = false;
-	}
-	list_del(&cs->lease_node);
-	cs->lease_group = NULL;
-	empty = list_empty(&group->regions);
-	if (empty)
-		list_del(&group->node);
-	mutex_unlock(&xdev_ext_ce_lease_lock);
-	if (empty)
-		kvfree(group);
-	return true;
 }
 
 static int xdev_ext_ce_copy_lease_get(struct xdev_ext_comp_copy_stage *copy,
@@ -295,7 +163,8 @@ static int xdev_ext_ce_copy_lease_get(struct xdev_ext_comp_copy_stage *copy,
 {
 	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
 
-	return xdev_ext_ce_lease_get(cs, b);
+	return xdev_ext_comp_copy_lease_get(&cs->lease,
+		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));
 }
 
 /* Native callbacks retain the typed batch array, never the worker scratch. */
@@ -337,7 +206,7 @@ static int xdev_ext_ce_copy_unbind_begin(struct xdev_ext_comp_copy_stage *copy)
 {
 	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
 
-	return xdev_ext_ce_lease_cleanup_begin(cs);
+	return xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);
 }
 
 static int xdev_ext_ce_copy_unbind_host(struct xdev_ext_comp_copy_stage *copy)
@@ -365,7 +234,8 @@ static int xdev_ext_ce_copy_unbind_end(struct xdev_ext_comp_copy_stage *copy)
 {
 	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
 
-	if (cs->lease_group && !xdev_ext_ce_lease_unbind(cs))
+	if (cs->lease.group &&
+	    WARN_ON_ONCE(!xdev_ext_comp_copy_lease_unbind(&cs->lease, true)))
 		return -EBUSY;
 	return 0;
 }
@@ -444,7 +314,7 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->copy.host);
 	if (err)
 		return err;
-	xdev_ext_ce_lease_bind_ready(cs);
+	xdev_ext_comp_copy_lease_hold(&cs->lease, false);
 	return 0;
 free:
 	kfree(cs);

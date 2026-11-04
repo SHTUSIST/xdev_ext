@@ -27,7 +27,7 @@ obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech.o xdev_ext_mech_ops.o xdev_ext_mech
 obj-$(CONFIG_XDEV_EXT_MECH_CE) += xdev_ext_mech_ce.o
 obj-$(CONFIG_XDEV_EXT_MECH_DMA) += xdev_ext_mech_dma.o
 ifneq ($(filter y,$(CONFIG_XDEV_EXT_MECH_CE) $(CONFIG_XDEV_EXT_MECH_DMA)),)
-obj-y += xdev_ext_compfam_copy.o
+obj-y += xdev_ext_compfam_copy.o xdev_ext_compfam_copy_lease.o
 endif
 obj-$(CONFIG_IO_WQ)		+= io-wq.o
 obj-$(CONFIG_FUTEX)		+= futex.o
