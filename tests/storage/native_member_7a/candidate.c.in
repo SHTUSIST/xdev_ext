@@ -1,0 +1,144 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Pre-candidate freeze. Include after the unmodified production functions and
+ * assertions.c (with its main renamed only). candidate_adapter.h may provide
+ * identifiers/types/field lvalues ONLY; see ADAPTER.md. Missing API is SETUP. */
+#include "candidate_adapter.h"
+static const struct xdev_ext_stor_dev_ops *original_dev;
+static unsigned identity_hook_calls,decode_hook_calls,queue_hook_calls,poll_hook_calls;
+static int identity_result,decode_result,poll_result;
+static struct xdev_ext_stor_poll_view observed_views[2];
+static u32 observed_nr_views;
+static int changed_identity(void *member,bool final,struct xdev_ext_stor_geometry *geometry)
+{
+ identity_hook_calls++;
+ if(final && identity_result)return identity_result;
+ return original_dev->identity(member,final,geometry);
+}
+static struct request_queue *changed_queue(void *member)
+{
+ (void)member;queue_hook_calls++;return &queue_b;
+}
+static int changed_decode(void *member,struct xdev_ext_mech_batch *b,const u8 scratch[64],
+ const struct xdev_ext_stor_window *window,u32 bytes,struct xdev_ext_stor_rw *rw)
+{
+ decode_hook_calls++;
+ if(decode_result)return decode_result;
+ int ret=original_dev->decode(member,b,scratch,window,bytes,rw);
+ if(!ret)rw->slba=101;
+ return ret;
+}
+static int changed_poll(void *member,const struct xdev_ext_stor_poll_view *views,u32 nr)
+{
+ (void)member;poll_hook_calls++;observed_nr_views=nr;
+ if(nr==2){observed_views[0]=views[0];observed_views[1]=views[1];}
+ return poll_result;
+}
+static void test_candidate_consumes_hooks(void)
+{
+ fixture();bind_ok();
+ struct xdev_ext_stor_stage *ss=TEST_COMMON_STAGE(&stage);
+ struct xdev_ext_stor_batch *sb=TEST_COMMON_BATCH(&batch);
+ EQ("actual_native_ops_consumed",ss->dev,&TEST_NATIVE_DEV_OPS);
+ EQ("actual_common_stage_points_to_native_stage",ss->st,&stage);
+ CK("actual_common_member_borrowed",ss->member!=NULL);
+ original_dev=ss->dev;
+ struct xdev_ext_stor_dev_ops replacement=*original_dev;
+ replacement.identity=changed_identity;
+ ss->dev=&replacement;identity_hook_calls=0;identity_result=-ESTALE;
+ validate_ok();clear_observers();
+ EQ("candidate_class_submit_consumes_identity_hook",TEST_NATIVE_CLASS_OPS.submit(&stage,&batch),-ESTALE);
+ EQ("candidate_identity_exactly_once",identity_hook_calls,1);
+ EQ("candidate_identity_failure_zero_native_post",posts,0);
+ EQ("candidate_identity_failure_zero_request_alloc",rq_allocs,0);
+ /* The public common gate must be the same production mechanism, not unused. */
+ atomic_set(&ss->dead,0);identity_hook_calls=0;identity_result=-ENODEV;
+ EQ("candidate_direct_common_gate_identity",xdev_ext_storfam_submit_check(ss,&batch,sb),-ENODEV);
+ EQ("candidate_direct_gate_calls_actual_hook",identity_hook_calls,1);
+ ss->dev=original_dev;unbind_ok();
+
+ fixture();bind_ok();ss=TEST_COMMON_STAGE(&stage);sb=TEST_COMMON_BATCH(&batch);original_dev=ss->dev;
+ replacement=*original_dev;replacement.decode=changed_decode;ss->dev=&replacement;
+ decode_hook_calls=0;decode_result=-ERANGE;
+ EQ("candidate_class_validate_consumes_decode_error",TEST_NATIVE_CLASS_OPS.validate(&stage,&batch,sqe,1),-ERANGE);
+ EQ("candidate_decode_error_no_publish",sb->validated,false);
+ EQ("candidate_decode_exactly_once",decode_hook_calls,1);
+ decode_result=0;
+ EQ("candidate_class_validate_consumes_decode_RW",TEST_NATIVE_CLASS_OPS.validate(&stage,&batch,sqe,1),0);
+ EQ("candidate_decode_changed_RW_reaches_admitted",sb->rw.slba,101);
+ EQ("candidate_decode_preserves64_scratch",memcmp(sb->sqe,sqe,64),0);
+ EQ("candidate_decode_publishes_batchid41",sb->batch_id,41);
+ EQ("candidate_decode_publishes_validated",sb->validated,true);
+ ss->dev=original_dev;unbind_ok();
+
+ fixture();bind_ok();ss=TEST_COMMON_STAGE(&stage);original_dev=ss->dev;
+ replacement=*original_dev;replacement.queue=changed_queue;ss->dev=&replacement;
+ queue_b.max_hw_sectors=7;queue_hook_calls=0;validate_ok();clear_observers();
+ EQ("candidate_class_submit_runtime_queue_caps",TEST_NATIVE_CLASS_OPS.submit(&stage,&batch),-EMSGSIZE);
+ EQ("candidate_class_alloc_consumes_queue_hook",allocated_queue,&queue_b);
+ CK("candidate_queue_hook_called_by_consumers",queue_hook_calls>=2);
+ EQ("candidate_queue_failure_zero_post",posts,0);
+ EQ("candidate_queue_failure_request_freed_once",rq_frees,1);
+ ss->dev=original_dev;unbind_ok();
+
+ fixture();bind_ok();ss=TEST_COMMON_STAGE(&stage);original_dev=ss->dev;
+ replacement=*original_dev;replacement.poll=changed_poll;ss->dev=&replacement;
+ struct host_view_owner {u64 prefix;struct xdev_ext_stor_completion done;u8 suffix[3];} host[2]={0};
+ struct peer_view_owner {u8 prefix[19];struct xdev_ext_stor_completion done;u8 suffix[73];} peer[3]={0};
+ TEST_POLL_VIEWS(ss)[0]=(struct xdev_ext_stor_poll_view){.first=&host[0].done,.stride=sizeof(host[0]),.count=2};
+ TEST_POLL_VIEWS(ss)[1]=(struct xdev_ext_stor_poll_view){.first=&peer[0].done,.stride=sizeof(peer[0]),.count=3};
+ poll_result=73;poll_hook_calls=0;observed_nr_views=0;
+ EQ("candidate_class_poll_consumes_family_hook_result",TEST_NATIVE_CLASS_OPS.poll(&stage),73);
+ EQ("candidate_poll_hook_exactly_once",poll_hook_calls,1);
+ EQ("candidate_poll_two_views",observed_nr_views,2);
+ EQ("candidate_poll_host_first_pointer",observed_views[0].first,&host[0].done);
+ EQ("candidate_poll_host_stride",observed_views[0].stride,sizeof(host[0]));
+ EQ("candidate_poll_host_count2",observed_views[0].count,2);
+ EQ("candidate_poll_peer_second_pointer",observed_views[1].first,&peer[0].done);
+ EQ("candidate_poll_peer_stride",observed_views[1].stride,sizeof(peer[0]));
+ EQ("candidate_poll_peer_count3",observed_views[1].count,3);
+ poll_result=19;
+ EQ("candidate_public_family_poll_changes_output",xdev_ext_storfam_poll(ss),19);
+ /* Restore actual native poll hook, retain changed queue hook, and execute
+  * the real common block poll via the native consumer over the same views. */
+ host[0].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=8};
+ host[1].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=3};
+ peer[0].done=host[1].done;peer[2].done=(struct xdev_ext_stor_completion){.poll_live=true,.poll_queue=6};
+ replacement.poll=original_dev->poll;replacement.queue=changed_queue;clear_observers();
+ EQ("candidate_native_hook_consumes_real_block_poll",TEST_NATIVE_CLASS_OPS.poll(&stage),3);
+ EQ("candidate_native_poll_uses_queue_hook",polled_queue,&queue_b);
+ EQ("candidate_native_poll_dedup_count3",poll_count,3);
+ EQ("candidate_native_poll_host_first8",poll_keys[0],8);
+ EQ("candidate_native_poll_host_second3",poll_keys[1],3);
+ EQ("candidate_native_poll_peer_stride6",poll_keys[2],6);
+ /* Clear borrowed fixture views before native resource teardown. */
+ TEST_POLL_VIEWS(ss)[0]=(struct xdev_ext_stor_poll_view){};
+ TEST_POLL_VIEWS(ss)[1]=(struct xdev_ext_stor_poll_view){};
+ ss->dev=original_dev;unbind_ok();
+
+ fixture();session.pool.kind=XDEV_EXT_MECH_POOL_PEER;bind_ok();
+ ss=TEST_COMMON_STAGE(&stage);original_dev=ss->dev;
+ EQ("candidate_requester_exact_ctrl_transport_function",original_dev->requester(ss->member),&pci_a);
+ CK("candidate_requester_not_ctrl_class_device",&original_dev->requester(ss->member)->dev!=ctrl.device);
+ pci_a.dev.pci=false;
+ EQ("candidate_requester_nonPCI_is_NULL",original_dev->requester(ss->member),NULL);
+ pci_a.dev.pci=true;unbind_ok();
+
+ /* Every contracted 7A hook is mandatory. No native allocation/post is
+  * permitted to turn a missing-hook setup into a successful CREATE. */
+ for(unsigned hook=0;hook<7;hook++){
+  fixture();replacement=TEST_NATIVE_DEV_OPS;
+  switch(hook){case 0:replacement.bind=NULL;break;case 1:replacement.unbind=NULL;break;
+   case 2:replacement.identity=NULL;break;case 3:replacement.requester=NULL;break;
+   case 4:replacement.queue=NULL;break;case 5:replacement.decode=NULL;break;
+   case 6:replacement.poll=NULL;break;}
+  EQ("candidate_missing_required_hook_EINVAL",xdev_ext_storfam_bind(&stage,&uapi,&replacement),-EINVAL);
+  EQ("candidate_missing_hook_zero_native_post",posts,0);
+  EQ("candidate_missing_hook_no_leak",live_allocs,0);
+ }
+}
+int main(void)
+{
+ test_bind_order();test_validate();test_gate_and_identity();test_queue_consumers();
+ test_peer_resources_requester();test_poll_views();test_candidate_consumes_hooks();
+ printf("PASS native_member_7a candidate %u literal assertions\n",checks);return 0;
+}

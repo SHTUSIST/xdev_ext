@@ -48,7 +48,7 @@ struct page { unsigned char data[PAGE_SIZE]; };
 struct nvme_ns_head;
 struct gendisk;
 struct request_queue;
-struct nvme_ns { void *queue; };
+/* IDENTITY_OS_TYPES */
 struct bio {
  unsigned int bi_inline_vecs[256];
  unsigned int used, capacity, bytes;
@@ -60,6 +60,7 @@ struct nvme_command {
 };
 struct xdev_ext_mech_batch;
 struct nvme_xdev_ext_mech_slot;
+/* FAMILY_TYPES */
 /* PRODUCTION_TYPES */
 #define XDEV_EXT_MECH_POOL_PEER 3
 struct xdev_ext_mech_pool { struct page pages[2]; unsigned int kind; };
@@ -136,7 +137,7 @@ static struct request *blk_mq_alloc_request(void *q,int op,unsigned int flags)
 static void blk_mq_free_request(struct request *req) { (void)req; }
 static bool blk_rq_is_poll(struct request *req) { (void)req; abort(); }
 static void nvme_init_request(struct request *req,struct nvme_command *cmd) { (void)req;(void)cmd; }
-static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st) { (void)st;return 0; }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int ret) { (void)st;(void)ret;abort(); }
 static struct nvme_xdev_ext_queue_caps nvme_xdev_ext_class_caps(const struct nvme_xdev_ext_mech_stage *p)
 { (void)p;return (struct nvme_xdev_ext_queue_caps){.page_size=PAGE_SIZE,.max_segments=256,.max_segment_size=1U<<20,.max_bytes=1U<<20,.lba_size=512}; }
 static int nvme_xdev_ext_class_bounce(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_batch *b,struct request *req,struct nvme_xdev_ext_mech_batch *bp)
@@ -184,7 +185,7 @@ int main(int argc,char **argv)
 {
  struct nvme_ns ns={};
  struct nvme_xdev_ext_mech_stage p={.ns=&ns,
-  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}};
+  .family={.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}}};
  struct xdev_ext_mech_session session={.layout={.frame_size=4096,.hdr_room=384,.seg_len=512,.group_bytes=1024},.depth=2};
  struct xdev_ext_mech_stage st={.priv=&p,.s=&session};
  struct xdev_ext_mech_batch batches[3]={},*b=&batches[0];
@@ -193,6 +194,7 @@ int main(int argc,char **argv)
  unsigned int i,rounds,denied=0,retained=0,uncertain=0;
  int rc;
  mode=argc>1 ? argv[1] : "flow";
+ fixture_worker_init(&p,&st);
  /* POOL_INIT */
  if(rc)goto out;
  hot=1;

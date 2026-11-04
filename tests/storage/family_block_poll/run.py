@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Production poll endpoint bodies, literal oracle, public native boundaries."""
-import argparse,hashlib,json,re,subprocess
+import argparse,hashlib,json,re,subprocess,runpy
 from pathlib import Path
 p=argparse.ArgumentParser();p.add_argument('source',type=Path);p.add_argument('output',type=Path);p.add_argument('--new',action='store_true');a=p.parse_args()
 root=a.source.resolve();out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);tests=Path(__file__).resolve().parent
@@ -60,6 +60,7 @@ try:
   raise ValueError('SETUP native excerpt inventory mismatch')
  (out/'native-inputs.json').write_text(json.dumps({'linux_commit':pinned,'excerpts':provenance['excerpts']},indent=2)+'\n')
  native=(root/'src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c').read_text()
+ member_family='struct xdev_ext_stor_stage family;' in native
  blktypes=(root/'src/core/include/linux/blk_types.h').read_text()
  def required(pattern,text):
   m=re.search(pattern,text,re.M|re.S)
@@ -78,25 +79,38 @@ try:
   return m.group(0)+'\n'
  passthru=(root/'src/storage/include/linux/nvme_xdev_ext_passthru.h').read_text()
  uapi=(root/'src/core/include/uapi/linux/xdev_ext_mech.h').read_text()
- types=declaration(passthru,'nvme_xdev_ext_identity')+declaration(uapi,'xdev_ext_nvme_mech_cqe')
+ types='' if member_family else declaration(passthru,'nvme_xdev_ext_identity')+declaration(uapi,'xdev_ext_nvme_mech_cqe')
  types+='\n'.join(declaration(native,n) for n in ['nvme_xdev_ext_mech_stage','nvme_xdev_ext_mech_batch','nvme_xdev_ext_mech_slot','nvme_xdev_ext_peer_slot','nvme_xdev_ext_peer_res'])
  (out/'actual_member_types.inc').write_text(types)
  for name in ['nvme_xdev_ext_class_bind','nvme_xdev_ext_peer_submit','nvme_xdev_ext_class_submit','nvme_xdev_ext_class_complete','nvme_xdev_ext_class_ready','nvme_xdev_ext_class_end_io','nvme_xdev_ext_peer_complete','nvme_xdev_ext_peer_end_io']:
   (out/(name+'.inc')).write_text(function(native,name))
  (out/'actual_old_poll.inc').write_text('\n'.join(function(native,n,optional=a.new) for n in ['nvme_xdev_ext_poll_capable','nvme_xdev_ext_poll_opf','nvme_xdev_ext_poll_check','nvme_xdev_ext_poll_arm']))
- (out/'actual_class_poll.inc').write_text(function(native,'nvme_xdev_ext_class_poll'))
+ poll_member=''
+ if member_family:
+  poll_member=function(native,'nvme_xdev_ext_member_queue')+function(native,'nvme_xdev_ext_member_poll')
+  poll_member+='static const struct xdev_ext_stor_dev_ops fixture_poll_ops={.queue=nvme_xdev_ext_member_queue,.poll=nvme_xdev_ext_member_poll};\n'
+ (out/'actual_class_poll.inc').write_text(poll_member+function(native,'nvme_xdev_ext_class_poll'))
+ member_code=''
+ if member_family:
+  member_code=function((root/'src/storage/drivers/nvme/host/nvme.h').read_text(),'nvme_xdev_ext_capture_identity')
+  member_code+=''.join(function(native,n) for n in ('nvme_xdev_ext_member_bind','nvme_xdev_ext_member_unbind','nvme_xdev_ext_member_requester','nvme_xdev_ext_member_queue','nvme_xdev_ext_member_identity','nvme_xdev_ext_member_decode','nvme_xdev_ext_member_poll','nvme_xdev_ext_class_resources_free','nvme_xdev_ext_peer_resources_free'))
+  member_code+=required(r'^static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops = \{.*?^\};',native)
+ (out/'actual_member_callbacks.inc').write_text(member_code)
  (out/'actual_stor_done.inc').write_text(function((root/'src/storage/io_uring/family/xdev_ext_storfam.c').read_text(),'xdev_ext_stor_done'))
  # Actual target body, retained byte-exact in the local pinned excerpt.
  (out/'actual_blk_predicate.inc').write_text(function(excerpts['blk_rq_is_poll.inc'],'blk_rq_is_poll'))
  shim=out/'shim/linux';shim.mkdir(parents=True,exist_ok=True)
- for h in ['blk-mq.h','bio.h','blkdev.h','mm.h','export.h','module.h','xdev_ext_mech.h']:(shim/h).write_text('#include "native_boundary.h"\n')
+ for h in ['blk-mq.h','bio.h','blkdev.h','mm.h','export.h','module.h','xdev_ext_mech.h','atomic.h']:(shim/h).write_text('#include "native_boundary.h"\n')
  (shim/'blk_types.h').write_text('#ifdef NO_BLOCK_TEST\n#error forbidden poll native include without CONFIG_BLOCK\n#endif\n#include "native_boundary.h"\n')
- inc=['-I',tests,'-I',out,'-I',out/'shim','-I',root/'src/storage/include','-I',root/'src/storage/include/linux','-I',root/'src/core/include/linux','-I',root/'src/storage/drivers/nvme/host']
+ portable=out/'portable';portable.mkdir(exist_ok=True)
+ helpers=runpy.run_path(str(tests.parents[1]/'integration/peer_graph/nvme_peer_async_test.py'))
+ helpers['host_headers'](root,portable)
+ inc=['-I',tests,'-I',out,'-I',out/'shim','-I',portable/'include','-I',root/'src/storage/include','-I',root/'src/storage/include/linux','-I',root/'src/core/include/linux','-I',root/'src/storage/drivers/nvme/host']
  for profile in ['gcc','ubsan']:
   flags=['-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-Wno-sign-compare','-ffunction-sections','-fdata-sections']
   if profile=='ubsan':flags+=['-fsanitize=undefined','-fno-sanitize-recover=all']
   run(['gcc',*flags,*inc,'-DNO_BLOCK_TEST=1',tests/'no_block.c','-o',out/(profile+'-no-block')],profile+'-no-block-compile')
-  mode=['-DCONFIG_BLOCK=1']+(['-DPOLL_NEW=1'] if a.new else [])
+  mode=['-DCONFIG_BLOCK=1']+(['-DPOLL_NEW=1'] if a.new else [])+(['-DSTORAGE_MEMBER_FAMILY=1'] if member_family else [])
   binary=out/(profile+'-poll');cmd=['gcc',*flags,*mode,*inc,tests/'test_poll.c']
   if a.new:
    obj=out/(profile+'-runtime.o');r=run(['gcc',*flags,*mode,*inc,'-include',tests/'native_boundary.h','-c',root/'src/storage/io_uring/family/xdev_ext_storfam_block.c','-o',obj],profile+'-runtime-compile')

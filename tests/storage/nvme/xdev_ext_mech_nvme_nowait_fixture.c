@@ -9,6 +9,7 @@
 #include "include/linux/nvme_xdev_ext_passthru.h"
 
 typedef uint8_t u8;
+typedef uint16_t u16;
 typedef uint64_t u64;
 typedef uint32_t u32;
 #define le64_to_cpu(v) (v)
@@ -31,20 +32,30 @@ typedef unsigned int blk_opf_t;
 struct blk_mq_hw_ctx { unsigned int queue_num; };
 
 struct nvme_xdev_ext_mech_slot;
+typedef int atomic_t;
+/* FAMILY_TYPES */
 struct nvme_xdev_ext_mech_batch {
+#ifdef FIXTURE_MEMBER_FAMILY
+ struct xdev_ext_stor_batch family;
+#else
+ bool validated; struct xdev_ext_stor_rw rw; u64 batch_id; u8 sqe[64];
+#endif
  struct nvme_xdev_ext_mech_slot *slot;
-	bool validated;
- struct xdev_ext_stor_rw rw;
-	uint64_t batch_id;
-	unsigned char sqe[64];
 };
 struct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; };
-struct nvme_ns { void *queue; };
+/* IDENTITY_OS_TYPES */
 struct nvme_xdev_ext_mech_stage {
-	int dead;
-	struct nvme_xdev_ext_identity identity;
- struct xdev_ext_stor_window window;
-	struct nvme_ns *ns;
+#ifdef FIXTURE_MEMBER_FAMILY
+ struct xdev_ext_stor_stage family;
+#else
+ int dead; struct xdev_ext_stor_window window;
+#endif
+ struct nvme_xdev_ext_identity identity;
+ struct nvme_ns *ns;
+ const struct nvme_ns_head *head;
+ const struct gendisk *disk;
+ const struct request_queue *queue;
+ bool write;
 };
 struct xdev_ext_mech_stage { struct nvme_xdev_ext_mech_stage *priv; void *s; bool poll; };
 #define XDEV_EXT_MECH_POOL_PEER 3
@@ -95,8 +106,12 @@ static uint64_t xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b)
 { (void)b; return 7; }
 static uint64_t xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b)
 { (void)b; return 0x100000001ULL; }
+
+#ifndef FIXTURE_MEMBER_FAMILY
+/* Original published replay boundary, before the family extraction. */
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st)
 { (void)st; return 0; }
+#endif
 static int nvme_req_op(struct nvme_command *cmd)
 { (void)cmd; return 0; }
 
@@ -146,19 +161,32 @@ static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,
  u64 lba,u32 bytes,u32 plan,int ret)
 { (void)b;(void)lba;(void)bytes;(void)plan;(void)ret; }
 
+#ifdef FIXTURE_MEMBER_FAMILY
+static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(void *s)
+{ static const struct xdev_ext_mech_layout layout={.group_bytes=4096}; (void)s;return &layout; }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int ret) { (void)st;(void)ret;abort(); }
+#endif
 /* PRODUCTION_SUBMIT */
 
 int main(int argc, char **argv)
 {
 	struct nvme_ns ns = {0};
 	struct nvme_xdev_ext_mech_stage priv = { .ns = &ns,
-  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
+ #ifdef FIXTURE_MEMBER_FAMILY
+ .family={.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}}
+#else
+ .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}
+#endif
+ };
 	struct xdev_ext_mech_stage st = { .priv = &priv };
 	struct xdev_ext_mech_batch b = {0};
  const u8 sqe[NVME_XDEV_EXT_SQE_SIZE] = { [0]=NVME_XDEV_EXT_NVM_READ,[48]=7 };
 	int rc;
 
 	mode = argc > 1 ? argv[1] : "success";
+#ifdef FIXTURE_MEMBER_FAMILY
+ fixture_worker_init(&priv,&st);
+#endif
  if (nvme_xdev_ext_class_validate(&st,&b,sqe,1))
   abort();
 	rc = nvme_xdev_ext_class_submit(&st, &b);

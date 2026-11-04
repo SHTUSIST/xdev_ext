@@ -28,7 +28,131 @@ import subprocess
 import sys
 import tempfile
 
-KERNEL = Path(__file__).resolve().parents[5]
+KERNEL = next(p for p in Path(__file__).resolve().parents
+              if (p / 'source-layout.json').is_file())
+sys.path.insert(0, str(KERNEL / 'tools'))
+import layout as _layout
+
+
+def read_native(root, native):
+    """Read an explicit native tree or its canonical Layout.by_native file."""
+    path = Path(root) / native
+    try:
+        # A selected checkout or genuine view receipt owns every dependency.
+        # A foreign hint must not replace its mapping or hide a missing file.
+        canonical = _layout.canonical_root(root)
+    except _layout.LayoutError:
+        if path.is_file():
+            return path.read_text()
+        hint = os.environ.get('XDEV_EXT_CANONICAL_ROOT')
+        if not hint:
+            raise
+        # Minimal native fixtures may omit moved dependencies. Only these
+        # roots, with no canonical authority, can use the explicit hint.
+        canonical = Path(hint)
+    mapping = _layout.load_layout(canonical)
+    return mapping.source('linux', native).read_text()
+
+
+def host_headers(root, output):
+    """Only portable project headers, under a disposable test include boundary.
+
+    This is not an assembled Linux tree and emits no source-view receipt.
+    Linux scalar types and errno continue to come from the host OS headers.
+    """
+    output = Path(output)
+    try:
+        mapping = _layout.load_layout(root)
+    except _layout.LayoutError:
+        return Path(root)
+    for (component, native), source in mapping.by_native.items():
+        if component != 'linux' or not native.endswith('.h'):
+            continue
+        if (native.startswith(('include/linux/xdev_ext_', 'include/uapi/linux/xdev_ext_'))
+            or native in ('include/linux/nvme_xdev_ext_passthru.h', 'include/uapi/linux/nvme_ioctl.h')
+            or native.startswith(('drivers/nvme/host/xdev_ext_', 'io_uring/xdev_ext_'))):
+            target = output / native
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes((mapping.repo / source).read_bytes())
+    return output
+
+
+def definition(text, name):
+    match = re.search(r'^[A-Za-z_][^;{}]*\b' + re.escape(name) +
+                      r'\([^;{}]*\)\s*\{.*?^\}', text, re.M | re.S)
+    if not match:
+        raise AssertionError('production definition missing: ' + name)
+    return match[0]
+
+
+def family_types(root):
+    text = read_native(root, 'include/linux/xdev_ext_storfam_block.h')
+    names = ('xdev_ext_stor_poll_view', 'xdev_ext_stor_geometry',
+             'xdev_ext_stor_dev_ops', 'xdev_ext_stor_stage', 'xdev_ext_stor_batch')
+    return ('struct xdev_ext_mech_stage; struct xdev_ext_mech_stage_uapi; '
+            'struct xdev_ext_mech_batch; struct xdev_ext_stor_stage; struct pci_dev;\n' +
+            '\n'.join(re.search(r'^struct ' + name + r' \{.*?^\};', text, re.M | re.S)[0]
+                      for name in names))
+
+
+def worker_runtime(root, native, poll=False):
+    """Actual worker common gates and native callbacks (no recheck stub)."""
+    block = read_native(root, 'io_uring/family/xdev_ext_storfam_block.c')
+    header = read_native(root, 'drivers/nvme/host/nvme.h')
+    code = '\n\n'.join([definition(header, 'nvme_xdev_ext_capture_identity'),
+        definition(native, 'nvme_xdev_ext_member_identity'),
+        definition(native, 'nvme_xdev_ext_member_queue'),
+        definition(native, 'nvme_xdev_ext_member_decode'),
+        definition(block, 'xdev_ext_storfam_validate'),
+        definition(block, 'xdev_ext_storfam_submit_check')])
+    if poll:
+        code += '\n' + definition(native, 'nvme_xdev_ext_member_poll') + '\n' + definition(block, 'xdev_ext_storfam_poll')
+    return code + ('\n#define FIXTURE_POLL_OP .poll=nvme_xdev_ext_member_poll,\n' if poll else '\n#define FIXTURE_POLL_OP\n') + r'''
+static const struct xdev_ext_stor_dev_ops fixture_member_ops = {
+ .identity = nvme_xdev_ext_member_identity,
+ .queue = nvme_xdev_ext_member_queue,
+ .decode = nvme_xdev_ext_member_decode,
+ FIXTURE_POLL_OP
+};
+'''
+
+def identity_boundary():
+    """OS namespace objects read by the actual nvme.h capture inline."""
+    return r'''
+typedef u64 sector_t;
+#ifndef READ_ONCE
+#define READ_ONCE(x) (x)
+#endif
+#define SECTOR_SHIFT 9
+#define NVME_NS_READY 0
+#define NVME_NS_REMOVING 1
+struct nvme_ns_head { u32 ns_id; u8 lba_shift,pi_type; u16 ms,pi_size;
+ struct { u8 csi,eui64[8],nguid[16],uuid[16]; } ids; };
+struct gendisk { u64 capacity,diskseq; };
+struct request_queue;
+struct nvme_ns { struct request_queue *queue; struct nvme_ns_head *head;
+ struct gendisk *disk; unsigned long flags; };
+static sector_t get_capacity(struct gendisk *disk) { return disk->capacity; }
+static bool test_bit(unsigned bit,const unsigned long *flags) { return !!(*flags & (1UL << bit)); }
+'''
+
+
+def worker_fixture_init():
+    """Populate namespace facts only at the fixture's bypassed bind boundary."""
+    return r'''
+static void fixture_worker_init(struct nvme_xdev_ext_mech_stage *p,
+ struct xdev_ext_mech_stage *st)
+{
+ static struct nvme_ns_head head = { .ns_id=7,.lba_shift=9 };
+ static struct gendisk disk = { .capacity=32,.diskseq=1 };
+ static char queue_identity;
+ p->ns->head=&head; p->ns->disk=&disk; p->ns->flags=1UL << NVME_NS_READY;
+ if (!p->ns->queue) p->ns->queue=(void *)&queue_identity;
+ p->family.st=st; p->family.dev=&fixture_member_ops; p->family.member=p;
+ if(nvme_xdev_ext_capture_identity(p->ns,&p->identity,&p->head,&p->disk,&p->queue))abort();
+}
+'''
+
 RELATIVE = "drivers/nvme/host/xdev_ext_mech_nvme.c"
 
 SHIM = r'''
@@ -529,7 +653,7 @@ int main(void)
 
 
 def storage_runtime(root):
-    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    content = read_native(root, 'io_uring/family/xdev_ext_storfam.c')
     found = []
     for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                  'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
@@ -546,20 +670,8 @@ def storage_poll_runtime(root, names=("xdev_ext_stor_block_poll_opf",
                                       "xdev_ext_stor_block_poll_check",
                                       "xdev_ext_stor_block_poll_arm")):
     """The real block-family helpers, including the public inline opf helper."""
-    native = "io_uring/family/xdev_ext_storfam_block.c"
-    path = root / native
-    if not path.is_file():
-        # Native-trace consumers provide a minimal header/runtime view. Resolve
-        # this moved dependency through that run's actual canonical manifest.
-        canonical = Path(os.environ["XDEV_EXT_CANONICAL_ROOT"])
-        manifest = json.loads((canonical / "source-layout.json").read_text())
-        entries = [e for e in manifest["files"] if e.get("component") == "linux"
-                   and e.get("native_path") == native]
-        if len(entries) != 1:
-            raise AssertionError("production block runtime mapping missing: " + native)
-        path = canonical / entries[0]["source"]
-    content = (root / "include/linux/xdev_ext_storfam_block.h").read_text()
-    content += "\n" + path.read_text()
+    content = read_native(root, "include/linux/xdev_ext_storfam_block.h")
+    content += "\n" + read_native(root, "io_uring/family/xdev_ext_storfam_block.c")
     found = []
     for name in names:
         match = re.search(r"^[A-Za-z_][^;{}]*\b" + name +
@@ -572,7 +684,7 @@ def storage_poll_runtime(root, names=("xdev_ext_stor_block_poll_opf",
 
 def production_source():
     path = Path(os.environ.get("XDEV_EXT_NVME_TEST_SOURCE", str(KERNEL / RELATIVE)))
-    return path.read_text()
+    return path.read_text() if "XDEV_EXT_NVME_TEST_SOURCE" in os.environ else read_native(KERNEL, RELATIVE)
 
 
 def extract(source):
@@ -617,12 +729,14 @@ def extract(source):
     # dependencies needed by the extracted object: the full mechanism header
     # also declares stage/batch types supplied by this deterministic shim.
     declarations = []
-    trace = (KERNEL / "drivers/nvme/host/xdev_ext_native_peer_trace.h").read_text()
+    if 'struct xdev_ext_stor_stage family;' in source:
+        declarations.append(family_types(KERNEL))
+    trace = read_native(KERNEL, "drivers/nvme/host/xdev_ext_native_peer_trace.h")
     declarations.append(re.search(r"^struct nvme_xdev_ext_peer_trace \{.*?^\};",
                                   trace, re.M | re.S)[0])
     for header, name in (("xdev_ext_mech.h", "xdev_ext_family_hooks_hdr"),
                          ("xdev_ext_storfam.h", "xdev_ext_stor_hooks")):
-        content = (KERNEL / "include/linux" / header).read_text()
+        content = read_native(KERNEL, "include/linux/" + header)
         declarations.append(re.search(r"^struct " + name + r" \{.*?^\};",
                                       content, re.M | re.S)[0])
     text = "\n".join(declarations + [t for _, t in sorted(types)])
@@ -630,10 +744,17 @@ def extract(source):
     # NVMe's lease wrapper delegates to the requester base. Execute that real
     # dependency too, so the page-splitting cases and mutation still exercise
     # production code rather than substituting a successful lease stub.
-    requester = (KERNEL / "io_uring/family/xdev_ext_requester.c").read_text()
+    requester = read_native(KERNEL, "io_uring/family/xdev_ext_requester.c")
     split = requester[requester.index("int xdev_ext_peer_lease_split("):
                       requester.index("EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);")]
     poll = storage_poll_runtime(KERNEL) + "\n\n" if family_poll else ""
+    if 'struct xdev_ext_stor_stage family;' in source:
+        code = '\n\n'.join(definition(source, name) for name in
+                            ('nvme_xdev_ext_member_requester', 'nvme_xdev_ext_member_queue')) + r'''
+static const struct xdev_ext_stor_dev_ops fixture_peer_ops = {
+ .requester=nvme_xdev_ext_member_requester, .queue=nvme_xdev_ext_member_queue,
+};
+''' + code
     code = storage_runtime(KERNEL) + "\n\n" + poll + split + "\n\n" + code
     return text, code, fill, submit, have_res
 
@@ -646,6 +767,11 @@ def build(text, code, fill, submit, have_res, directory, name):
     else:
         defines += ["#define INIT_RESOURCES rc = 0"]
     shim = SHIM.replace("/* PRODUCTION_TYPES */", text)
+    main_source = MAIN
+    if 'struct xdev_ext_stor_stage family;' in text:
+        for field in ('rw', 'validated', 'batch_id', 'sqe'):
+            main_source = re.sub(r'(bps\[[^]]+\])\.' + field + r'\b', r'\1.family.' + field, main_source)
+        main_source = main_source.replace('INIT_RESOURCES;', 'priv.family.dev=&fixture_peer_ops; priv.family.member=&priv; priv.family.st=&st;\n INIT_RESOURCES;')
     # This ownership suite does not inspect observation events. The native
     # trace suite consumes SHIM directly and supplies the real trace helper.
     shim = shim.replace("/* PEER_TRACE_RELEASE */", """
@@ -656,10 +782,10 @@ static void nvme_xdev_ext_peer_trace_release(
     shim = shim.replace("/* PRODUCTION_FUNCTIONS */", code)
     source = directory / (name + ".c")
     binary = directory / name
-    source.write_text("\n".join(defines) + "\n" + shim + MAIN)
+    source.write_text("\n".join(defines) + "\n" + shim + main_source)
     compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra",
                                "-Werror", "-Wno-unused-function", "-fsanitize=undefined",
-                               "-fno-sanitize-recover=undefined", "-I" + str(KERNEL),
+                               "-fno-sanitize-recover=undefined", "-I" + str(host_headers(KERNEL, directory / "headers")),
                                str(source), "-o", str(binary)], capture_output=True, text=True)
     if compiled.returncode:
         raise SystemExit("host shim compile failed:\n" + compiled.stderr)
@@ -694,6 +820,8 @@ def main():
             print(result.stderr, end="", file=sys.stderr)
             raise SystemExit("not ok - production GPU-memory NVMe stage violates the asynchronous contract")
         for i, (name, old, new) in enumerate(mutations):
+            if "struct xdev_ext_stor_stage family;" in text:
+                old = old.replace("bp->rw.", "bp->family.rw.")
             if old not in code:
                 raise SystemExit("not ok - mutation anchor missing: " + name)
             result = build(text, code.replace(old, new), fill, submit, have_res, directory,

@@ -8849,6 +8849,34 @@
     {
       "source": "tests/compute/family/runtime/supplement-observables.json",
       "logical_path": "tests/compute/family/runtime/supplement-observables.json"
+    },
+    {
+      "source": "tests/storage/native_member_7a/README.md",
+      "logical_path": "tests/storage/native_member_7a/README.md"
+    },
+    {
+      "source": "tests/storage/native_member_7a/assertions.c",
+      "logical_path": "tests/storage/native_member_7a/assertions.c"
+    },
+    {
+      "source": "tests/storage/native_member_7a/boundary.h",
+      "logical_path": "tests/storage/native_member_7a/boundary.h"
+    },
+    {
+      "source": "tests/storage/native_member_7a/candidate.c.in",
+      "logical_path": "tests/storage/native_member_7a/candidate.c.in"
+    },
+    {
+      "source": "tests/storage/native_member_7a/candidate_adapter.h",
+      "logical_path": "tests/storage/native_member_7a/candidate_adapter.h"
+    },
+    {
+      "source": "tests/storage/native_member_7a/run.py",
+      "logical_path": "tests/storage/native_member_7a/run.py"
+    },
+    {
+      "source": "tests/storage/native_member_7a/run_candidate.py",
+      "logical_path": "tests/storage/native_member_7a/run_candidate.py"
     }
   ]
 }

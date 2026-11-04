@@ -8,15 +8,22 @@ touch: request allocation (which hardware queue type a request landed on),
 blk_rq_is_poll(), execute, and blk_mq_poll_hw_queue() as a recorder. The
 model does not reproduce nvme-pci queues, DMA or timing.
 """
+import json
+import os
+from pathlib import Path
 import re
 import runpy
+import tempfile
 import unittest
+from unittest.mock import patch
 
 from poll_extract import KERNEL, body, compile_and_run, fields, function, source
 
 NVME = 'drivers/nvme/host/xdev_ext_mech_nvme.c'
 BLK = 'block/blk-mq.c'
 BLK_H = 'include/linux/blk-mq.h'
+TEST_ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'source-layout.json').is_file())
+HELPERS = runpy.run_path(str(TEST_ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
 
 
 def structure(text, name):
@@ -41,6 +48,7 @@ FIXTURE = r'''
 #include "include/uapi/linux/xdev_ext_mech.h"
 #include "include/linux/nvme_xdev_ext_passthru.h"
 
+typedef int atomic_t;
 typedef uint64_t u64; typedef uint32_t u32; typedef uint16_t u16; typedef uint8_t u8;
 typedef unsigned int blk_opf_t; typedef int blk_status_t; typedef u64 dma_addr_t;
 #define atomic_read(p) (*(p))
@@ -107,24 +115,38 @@ static struct xdev_ext_mech_pool host_pool = { .kind = 2 }, peer_pool = { .kind 
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s)
 { return s->pool_kind == 3 ? &peer_pool : &host_pool; }
 struct xdev_ext_mech_batch;
-struct nvme_ns { struct request_queue *queue; };
+/* IDENTITY_OS_TYPES */
+/* FAMILY_TYPES */
 
 /* PRODUCTION_STRUCTS */
 
 struct nvme_xdev_ext_mech_stage {
 	struct nvme_ns *ns;
-	int dead;
-	struct nvme_xdev_ext_identity identity;
+#ifdef FIXTURE_MEMBER_FAMILY
+ struct xdev_ext_stor_stage family;
+ struct nvme_xdev_ext_identity identity;
+ const struct nvme_ns_head *head;
+ const struct gendisk *disk;
+ const struct request_queue *queue;
+ bool write;
+#else
+ int dead;
+ struct nvme_xdev_ext_identity identity;
  struct xdev_ext_stor_window window;
+#endif
 	struct nvme_xdev_ext_mech_slot *slots, *free;
 	u32 nr_slots;
 	struct nvme_xdev_ext_peer_res *peer;
 };
 struct nvme_xdev_ext_mech_batch {
-	u8 sqe[NVME_XDEV_EXT_SQE_SIZE];
+#ifdef FIXTURE_MEMBER_FAMILY
+ struct xdev_ext_stor_batch family;
+#else
+ u8 sqe[NVME_XDEV_EXT_SQE_SIZE];
  struct xdev_ext_stor_rw rw;
-	u64 batch_id;
-	bool validated;
+ u64 batch_id;
+ bool validated;
+#endif
 	struct bio *bio;
 	struct nvme_xdev_ext_mech_slot *slot;
 	struct page **bounce;
@@ -175,7 +197,14 @@ static int blk_mq_poll_hw_queue(struct request_queue *q, unsigned int queue_num,
 }
 static int blk_status_to_errno(blk_status_t s) { return s ? -5 : 0; }
 static unsigned int blk_rq_bytes(struct request *rq) { return rq->bytes; }
+#ifdef FIXTURE_MEMBER_FAMILY
+static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s)
+{ static const struct xdev_ext_mech_layout layout={.group_bytes=4096};(void)s;return &layout; }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int ret) { (void)st;(void)ret;abort(); }
+#else
+/* The original pre-extraction fixture boundary, only for old production. */
 static int nvme_xdev_ext_class_recheck(struct xdev_ext_mech_stage *st) { (void)st; return 0; }
+#endif
 static blk_opf_t nvme_req_op(struct nvme_command *cmd) { (void)cmd; return 1; }
 static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 { (void)st; (void)b; abort(); }
@@ -219,12 +248,20 @@ static int submit_case(bool poll)
 {
 	struct nvme_ns ns = { 0 };
 	struct nvme_xdev_ext_mech_stage p = { .ns = &ns,
-  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
+#ifdef FIXTURE_MEMBER_FAMILY
+  .family={.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}}
+#else
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}
+#endif
+ };
 	struct xdev_ext_mech_session s = { .pool_kind = 2 };
 	struct xdev_ext_mech_stage st = { .s = &s, .priv = &p, .poll = poll };
 	static struct xdev_ext_mech_batch b;
 
 	const u8 sqe[NVME_XDEV_EXT_SQE_SIZE] = { [0]=NVME_XDEV_EXT_NVM_READ,[48]=7 };
+#ifdef FIXTURE_MEMBER_FAMILY
+ fixture_worker_init(&p,&st);
+#endif
  if (nvme_xdev_ext_class_validate(&st,&b,sqe,1))
   abort();
 	b.ticket = 11;
@@ -261,7 +298,12 @@ static int pass_case(bool peer)
 	struct nvme_xdev_ext_peer_slot peers[3];
 	struct nvme_xdev_ext_peer_res res = { 0 };
 	struct nvme_xdev_ext_mech_stage p = { .ns = &ns,
-  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9} };
+#ifdef FIXTURE_MEMBER_FAMILY
+  .family={.window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}}
+#else
+  .window={.slba=0,.nlb=32,.capacity_lbas=32,.lba_shift=9}
+#endif
+ };
 	struct xdev_ext_mech_stage st = { .priv = &p, .poll = true };
 	u32 qs[4] = { 2, 3, 2, 9 };
 	unsigned i;
@@ -283,7 +325,14 @@ static int pass_case(bool peer)
 		p.slots = host;
 		p.nr_slots = 4;
 	}
-	ret = nvme_xdev_ext_class_poll(&st);
+#ifdef FIXTURE_MEMBER_FAMILY
+ fixture_worker_init(&p,&st);
+ /* This fixture injects resources instead of executing CREATE. Install its
+  * borrowed views once here, exactly where those arrays are injected. */
+ p.family.poll_views[0]=(struct xdev_ext_stor_poll_view){.first=p.nr_slots?&host[0].done:NULL,.stride=sizeof(host[0]),.count=p.nr_slots};
+ p.family.poll_views[1]=(struct xdev_ext_stor_poll_view){.first=p.peer?&peers[0].done:NULL,.stride=sizeof(peers[0]),.count=p.peer?p.peer->nr_slots:0};
+#endif
+ ret = nvme_xdev_ext_class_poll(&st);
 	printf("ret=%d n=%u q0=%u q1=%u q2=%u same_queue=%d iob_null=%d\n", ret, polled_n,
 	       polled_queue[0], polled_queue[1], polled_queue[2], polled_q == &q, polled_iob_null);
 	return 0;
@@ -328,7 +377,7 @@ PRODUCTION = ('nvme_xdev_ext_poll_capable', 'nvme_xdev_ext_poll_opf', 'nvme_xdev
 
 
 def storage_runtime(root):
-    content = (root / 'io_uring/family/xdev_ext_storfam.c').read_text()
+    content = HELPERS['read_native'](root, 'io_uring/family/xdev_ext_storfam.c')
     found = []
     for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                  'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
@@ -353,17 +402,94 @@ def build_fixture():
     fixture = FIXTURE
     if 'xdev_ext_stor_block_poll_opf(' in text:
         names = tuple(n for n in names if not n.startswith('nvme_xdev_ext_poll_'))
-        structs += '\n' + structure(source('include/linux/xdev_ext_storfam_block.h'),
-                                    'xdev_ext_stor_poll_view')
-        helper = KERNEL / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
-        dependencies = runpy.run_path(str(helper))['storage_poll_runtime'](KERNEL, (
+
+        dependencies = HELPERS['storage_poll_runtime'](KERNEL, (
             'xdev_ext_stor_block_poll_capable', 'xdev_ext_stor_block_poll_opf',
             'xdev_ext_stor_block_poll_check', 'xdev_ext_stor_block_poll_arm',
             'xdev_ext_stor_block_poll'))
         fixture = fixture.replace('nvme_xdev_ext_poll_capable(', 'xdev_ext_stor_block_poll_capable(')
+    api = HELPERS
+    if 'struct xdev_ext_stor_stage family;' in text:
+        fixture = '#define FIXTURE_MEMBER_FAMILY 1\n' + fixture
+        fixture = fixture.replace('/* IDENTITY_OS_TYPES */', api['identity_boundary']())
+        fixture = fixture.replace('/* FAMILY_TYPES */', api['family_types'](KERNEL))
+        dependencies += '\n' + api['worker_runtime'](KERNEL, text, poll=True) + '\n' + api['worker_fixture_init']()
+    else:
+        # Pre-7A production owns its window/gates and builds the borrowed views.
+        # Keep the original namespace, private fields and recheck boundary.
+        fixture = fixture.replace('/* IDENTITY_OS_TYPES */', 'struct nvme_ns { struct request_queue *queue; };')
+        fixture = fixture.replace('/* FAMILY_TYPES */', '')
+        if 'xdev_ext_stor_block_poll_opf(' in text:
+            structs += '\n' + structure(source('include/linux/xdev_ext_storfam_block.h'),
+                                        'xdev_ext_stor_poll_view')
     production = storage_runtime(KERNEL) + '\n' + dependencies + '\n' + '\n'.join(
         function(text, n) for n in names)
     return fixture.replace('/* PRODUCTION_STRUCTS */', structs).replace('/* PRODUCTION */', production)
+
+
+class NativeSourceSelection(unittest.TestCase):
+    """Filesystem source selection only; marker inputs are never compiled."""
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory(prefix='nvme-source-selection-')
+        self.addCleanup(self.temporary.cleanup)
+        self.directory = Path(self.temporary.name)
+        self.first = self.canonical('first', '/* explicit root */\n')
+        self.other = self.canonical('other', '/* environment hint */\n')
+
+    def canonical(self, name, marker):
+        root = self.directory / name
+        native = root / 'src/storage/input.c'
+        header = root / 'src/storage/include/linux/xdev_ext_boundary.h'
+        header.parent.mkdir(parents=True)
+        native.write_text(marker)
+        header.write_text(marker)
+        (root / 'source-layout.json').write_text(json.dumps({'schema': 1, 'files': [
+            {'component': 'linux', 'native_path': NVME, 'source': 'src/storage/input.c'},
+            {'component': 'linux', 'native_path': 'include/linux/xdev_ext_boundary.h',
+             'source': 'src/storage/include/linux/xdev_ext_boundary.h'}]}))
+        return root
+
+    def test_explicit_canonical_source_and_headers_ignore_foreign_hint(self):
+        with patch.dict(os.environ, {'XDEV_EXT_CANONICAL_ROOT': str(self.other)}):
+            selected = HELPERS['read_native'](self.first, NVME)
+            headers = HELPERS['host_headers'](self.first, self.directory / 'headers')
+        self.assertEqual(selected, '/* explicit root */\n')
+        self.assertEqual((headers / 'include/linux/xdev_ext_boundary.h').read_text(), selected)
+
+    def test_canonical_mapping_keeps_code_with_its_headers(self):
+        native_alias = self.first / NVME
+        native_alias.parent.mkdir(parents=True)
+        native_alias.write_text('/* unselected native alias */\n')
+        with patch.dict(os.environ, {'XDEV_EXT_CANONICAL_ROOT': str(self.other)}):
+            selected = HELPERS['read_native'](self.first, NVME)
+            headers = HELPERS['host_headers'](self.first, self.directory / 'headers')
+        self.assertEqual(selected, '/* explicit root */\n')
+        self.assertEqual((headers / 'include/linux/xdev_ext_boundary.h').read_text(), selected)
+
+    def test_explicit_canonical_child_ignores_foreign_hint(self):
+        child = self.first / 'nested'
+        child.mkdir()
+        with patch.dict(os.environ, {'XDEV_EXT_CANONICAL_ROOT': str(self.other)}):
+            selected = HELPERS['read_native'](child, NVME)
+        self.assertEqual(selected, '/* explicit root */\n')
+
+    def test_missing_selected_mapping_does_not_borrow_foreign_source(self):
+        selected = self.directory / 'missing'
+        selected.mkdir()
+        (selected / 'source-layout.json').write_text(json.dumps({'schema': 1, 'files': []}))
+        with patch.dict(os.environ, {'XDEV_EXT_CANONICAL_ROOT': str(self.other)}):
+            with self.assertRaises(ValueError):
+                HELPERS['read_native'](selected, NVME)
+
+    def test_minimal_native_dependency_hint_is_only_fallback(self):
+        minimal = self.directory / 'minimal'
+        minimal.mkdir()
+        with patch.dict(os.environ, {'XDEV_EXT_CANONICAL_ROOT': str(self.other)}):
+            self.assertEqual(HELPERS['read_native'](minimal, NVME), '/* environment hint */\n')
+            explicit = minimal / NVME
+            explicit.parent.mkdir(parents=True)
+            explicit.write_text('/* explicit native file */\n')
+            self.assertEqual(HELPERS['read_native'](minimal, NVME), '/* explicit native file */\n')
 
 
 class NvmePoll(unittest.TestCase):
@@ -431,14 +557,15 @@ class NvmePollStructure(unittest.TestCase):
         cls.text = source(NVME)
 
     def test_bind_refuses_an_unpollable_namespace_before_allocating(self):
-        bind = body(self.text, 'nvme_xdev_ext_class_bind')
+        bind = body(self.text, 'nvme_xdev_ext_member_bind' if 'nvme_xdev_ext_member_bind(' in self.text else 'nvme_xdev_ext_class_bind')
         check = bind.index('if (st->poll && !xdev_ext_stor_block_poll_capable(ns->queue))')
         self.assertLess(check, bind.index('kzalloc('))
         self.assertIn('return -EOPNOTSUPP;', bind[check:check + 120])
 
     def test_peer_submit_uses_the_same_poll_steps_in_order(self):
         peer = body(self.text, 'nvme_xdev_ext_peer_submit')
-        alloc = peer.index('blk_mq_alloc_request(ns->queue,\n\t\t\t\t   xdev_ext_stor_block_poll_opf(st->poll,')
+        queue = 'p->family.dev->queue(p->family.member)' if 'struct xdev_ext_stor_stage family;' in self.text else 'ns->queue'
+        alloc = peer.index('blk_mq_alloc_request(' + queue + ',\n\t\t\t\t   xdev_ext_stor_block_poll_opf(st->poll,')
         check = peer.index('xdev_ext_stor_block_poll_check(st->poll, req)')
         arm = peer.index('xdev_ext_stor_block_poll_arm(st->poll, req, &slot->done);')
         execute = peer.index('blk_execute_rq_nowait(req, false);')

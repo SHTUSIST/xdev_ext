@@ -56,19 +56,24 @@ class NvmeNowait(unittest.TestCase):
         cls.addClassCleanup(cls.temp.cleanup)
         path = Path(cls.temp.name)
         fixture = (HERE / "xdev_ext_mech_nvme_nowait_fixture.c").read_text()
-        include_root = ROOT
-        if _LAYOUT:
-            repo = _LAYOUT.canonical_root(HERE)
-            view = Path(os.environ.get("XDEV_EXT_SOURCE_VIEW", repo / "build/source-view"))
-            include_root = view / "kernel"
+        repo = _LAYOUT.canonical_root(HERE) if _LAYOUT else ROOT
+        helper = repo / 'tests/integration/peer_graph/nvme_peer_async_test.py'
+        helpers_api = runpy.run_path(str(helper))
+        include_root = helpers_api['host_headers'](repo, path / 'headers')
+        family = 'struct xdev_ext_stor_stage family;' in source
+        if family:
+            fixture = fixture.replace('/* IDENTITY_OS_TYPES */', helpers_api['identity_boundary']())
+            fixture = '#define FIXTURE_MEMBER_FAMILY 1\n' + fixture
+            fixture = fixture.replace('/* FAMILY_TYPES */', helpers_api['family_types'](repo))
+        else:
+            fixture = fixture.replace('/* IDENTITY_OS_TYPES */', 'struct nvme_ns { void *queue; };')
         # The stage-polling helpers the submit calls, verbatim, before it.
         helpers = [re.search(r"^static [^;{}]*\b" + name + r"\([^)]*\)\s*\{.*?^\}",
                              source, re.MULTILINE | re.DOTALL)
                    for name in ("nvme_xdev_ext_poll_opf", "nvme_xdev_ext_poll_check",
                                 "nvme_xdev_ext_poll_arm")]
         if 'xdev_ext_stor_block_poll_opf(' in source:
-            helper = include_root / 'tools/testing/selftests/xdev_ext_mech/peer_graph/nvme_peer_async_test.py'
-            polling = runpy.run_path(str(helper))['storage_poll_runtime'](include_root)
+            polling = helpers_api['storage_poll_runtime'](repo)
         else:
             if not all(helpers):
                 raise RuntimeError("production stage-polling helpers missing")
@@ -77,11 +82,12 @@ class NvmeNowait(unittest.TestCase):
                              r"\{.*?^\}", source, re.MULTILINE | re.DOTALL)
         if validate is None:
             raise RuntimeError("production NVMe validation function missing")
-        production = validate[0] + "\n" + polling + "\n" + function[0]
+        production = ((helpers_api['worker_runtime'](repo, source) + "\n" + helpers_api['worker_fixture_init']()) if family else '')
+        production += "\n" + validate[0] + "\n" + polling + "\n" + function[0]
         generated = path / "submit.c"
         generated.write_text(fixture.replace("/* PRODUCTION_SUBMIT */", production))
         cls.probe = path / "probe"
-        build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror",
+        build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter",
                                 "-DCONFIG_XDEV_EXT_MECH_ZEROCOPY", "-I" + str(include_root), str(generated),
                                 "-o", str(cls.probe)], text=True, capture_output=True)
         if build.returncode:

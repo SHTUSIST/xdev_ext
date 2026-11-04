@@ -9,11 +9,14 @@ import re
 import unittest
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[4]
+ROOT = next(p for p in Path(__file__).resolve().parents if (p / 'source-layout.json').is_file())
+import sys
+sys.path.insert(0, str(ROOT / 'tools'))
+import layout
 
 
 def read(path):
-    return (ROOT / path).read_text()
+    return layout.load_layout(ROOT).source('linux', path).read_text()
 
 
 def body(path, name):
@@ -35,6 +38,18 @@ class StrictDmaTest(unittest.TestCase):
     def test_bpf_observes_the_native_zero_copy_path(self):
         b = body("io_uring/xdev_ext_mech.c", "static struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base(")
         self.assertIn("st->s->pool.capabilities", b)
+        if "xdev_ext_mech_base_desc(" in b:
+            self.assertIn("xdev_ext_mech_base_desc(st->cls->decl, st->direction, caps, bytes)", b)
+            desc = body("include/linux/xdev_ext_family_core.h", "static inline struct xdev_ext_binding_ctx_v2 xdev_ext_mech_base_desc(")
+            self.assertIn("d->base(direction, caps, bytes)", desc)
+            declarations = read("include/linux/xdev_ext_family_core.h")
+            afxdp = declarations.split("{ /* XDEV_EXT_MECH_CLASS_AFXDP */", 1)[1].split("\n\t},", 1)[0]
+            self.assertIn(".base = xdev_ext_decl_afxdp_base", afxdp)
+            native = body("include/linux/xdev_ext_family_core.h", "static inline struct xdev_ext_binding_ctx_v2 xdev_ext_decl_afxdp_base(")
+            self.assertIn("bool native = caps & XDEV_EXT_BINDING_CAP_ZERO_COPY;", native)
+            self.assertIn("dir == XDEV_EXT_MECH_DIR_TO_DEVICE", native)
+            self.assertIn("native ? xdev_ext_binding_make_afxdp_native_tx_ctx(0, bytes, caps)", native)
+            b += desc + native
         self.assertIn("xdev_ext_binding_make_afxdp_native_tx_ctx", b)
         rx = body("net/xdp/xsk_xdev_ext_mech.c", "static int xsk_xdev_ext_mech_rx_call(")
         self.assertIn("XDEV_EXT_BINDING_CAP_ZERO_COPY", rx)

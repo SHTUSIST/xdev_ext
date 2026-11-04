@@ -1,14 +1,30 @@
 /* External native/accessor field boundary only; real member layouts below. */
 #ifndef STORAGE_POLL_CONSUMER_TYPES_H
 #define STORAGE_POLL_CONSUMER_TYPES_H
+#ifdef STORAGE_MEMBER_FAMILY
+#include <linux/nvme_xdev_ext_passthru.h>
+#else
 #include <linux/xdev_ext_storfam_core.h>
+#endif
+#ifndef NVME_XDEV_EXT_SQE_SIZE
 #define NVME_XDEV_EXT_SQE_SIZE 64U
+#endif
 #define NVME_XDEV_EXT_PEER_MAX_SPANS 512U
+#ifndef NVME_XDEV_EXT_NVM_WRITE
 #define NVME_XDEV_EXT_NVM_WRITE 1U
+#endif
+#ifndef NVME_XDEV_EXT_NVM_READ
 #define NVME_XDEV_EXT_NVM_READ 2U
+#endif
+#ifndef XDEV_EXT_MECH_POOL_PEER
 #define XDEV_EXT_MECH_POOL_PEER 2
+#endif
+#ifndef XDEV_EXT_MECH_DIR_TO_DEVICE
 #define XDEV_EXT_MECH_DIR_TO_DEVICE 1
+#endif
+#ifndef XDEV_EXT_MECH_DIR_FROM_DEVICE
 #define XDEV_EXT_MECH_DIR_FROM_DEVICE 2
+#endif
 #define FMODE_READ 1
 #define FMODE_WRITE 2
 #define GFP_KERNEL 0
@@ -29,6 +45,7 @@
 #define PTR_ERR(p) ((long)(intptr_t)(p))
 #define ERR_PTR(e) ((void*)(intptr_t)(e))
 #define atomic_read(p) (*(p))
+#define atomic_set(p,v) (*(p)=(v))
 #define test_bit(b,p) ((*(p)>>(b))&1)
 #define get_disk_ro(d) ((d)->ro)
 #define get_capacity(d) ((d)->capacity)
@@ -38,16 +55,25 @@
 typedef int atomic_t;
 typedef u64 dma_addr_t;
 struct file {unsigned f_mode;};
-struct gendisk {bool ro;u64 capacity;};
+struct gendisk {bool ro;u64 capacity,diskseq;};
+typedef u64 sector_t;
 struct nvme_ctrl_ops {const char *name;void *peer_rw;};
-struct nvme_ctrl {const struct nvme_ctrl_ops *ops;int state;};
-struct nvme_ns_head {u8 lba_shift;u16 ms;struct {u8 csi;} ids;};
+struct device {bool is_pci;};
+struct pci_dev {struct device dev;};
+#define dev_is_pci(d) ((d)->is_pci)
+#define to_pci_dev(d) ((struct pci_dev *)(d))
+struct nvme_ctrl {const struct nvme_ctrl_ops *ops;int state;struct device *dev;};
+struct nvme_ns_head {u8 lba_shift,pi_type;u16 ms,pi_size;u32 ns_id;struct {u8 csi,eui64[8],nguid[16],uuid[16];} ids;};
 struct nvme_ns {struct request_queue *queue;struct nvme_ctrl *ctrl;struct nvme_ns_head *head;struct gendisk *disk;unsigned long flags;};
 struct xdev_ext_mech_pool {int kind;};
+#ifndef STORAGE_MEMBER_FAMILY
 struct xdev_ext_mech_layout {u32 group_bytes;};
+#endif
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;};
 struct xdev_ext_mech_stage {void *priv;bool poll;struct xdev_ext_mech_session *s;struct file *file;unsigned direction;u64 arg0,arg1;};
+#ifndef STORAGE_MEMBER_FAMILY
 struct xdev_ext_mech_stage_uapi {u32 flags;};
+#endif
 struct nvme_sgl_desc {u64 addr;u32 length;u8 reserved[3],type;};
 struct nvme_xdev_ext_peer_trace {const struct xdev_ext_peer_fd_lease *leases;u32 nr_leases,bytes;const char *origin;u64 cookie;};
 #define xdev_ext_peer_nvme_seg xdev_ext_stor_extent
@@ -56,6 +82,9 @@ struct nvme_request {struct nvme_command *cmd;unsigned flags;int status;union {u
 struct nvme_xdev_ext_mech_slot;
 struct nvme_xdev_ext_peer_slot;
 struct nvme_xdev_ext_peer_res;
+#ifdef STORAGE_MEMBER_FAMILY
+#include <linux/xdev_ext_storfam_block.h>
+#endif
 /* Byte-for-byte declarations extracted from baseline/candidate, not invented slot strides. */
 #include "actual_member_types.inc"
 #endif

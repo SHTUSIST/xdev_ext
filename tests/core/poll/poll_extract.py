@@ -14,11 +14,13 @@ import subprocess
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-KERNEL = Path(os.environ.get('KERNEL_SRC', HERE.parents[4])).resolve()
+KERNEL = Path(os.environ.get('KERNEL_SRC', next(p for p in HERE.parents if (p / 'source-layout.json').is_file()))).resolve()
+import runpy
+_helpers = runpy.run_path(str(next(p for p in HERE.parents if (p / 'source-layout.json').is_file()) / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
 
 
 def source(relative):
-    return (KERNEL / relative).read_text()
+    return _helpers['read_native'](KERNEL, relative)
 
 
 def function(text, name):
@@ -53,7 +55,7 @@ def compile_and_run(fixture, args=(), defines=(), timeout=10):
         command = [compiler, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                    '-Wno-unused-function', '-Wno-unused-parameter',
                    '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
-                   '-I' + str(KERNEL), *('-D' + d for d in defines),
+                   '-I' + str(_helpers['host_headers'](KERNEL, path / 'headers')), *('-D' + d for d in defines),
                    str(path / 'fixture.c'), '-o', str(path / 'probe')]
         build = subprocess.run(command, text=True, capture_output=True)
         if build.returncode:

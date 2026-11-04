@@ -51,4 +51,10 @@ int blk_mq_poll_hw_queue(struct request_queue*,unsigned,void*);
 int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch*,u64);
 void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch*,u64,int,bool);
 void xdev_ext_mech_trace_native_complete(struct xdev_ext_mech_batch*,u64,int);
+#ifdef STORAGE_MEMBER_FAMILY
+const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session*);
+u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch*);
+int fixture_window_bind(struct xdev_ext_stor_window*,u64,u8,bool,u64,u64,u32);
+#define xdev_ext_stor_window_bind(...) fixture_window_bind(__VA_ARGS__)
+#endif
 #endif

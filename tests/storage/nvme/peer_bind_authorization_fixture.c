@@ -8,6 +8,12 @@
 #include <stdio.h>
 #include <string.h>
 #include "include/linux/nvme_xdev_ext_passthru.h"
+#include "include/linux/xdev_ext_storfam_runtime.h"
+#include <stddef.h>
+typedef uint8_t u8;
+typedef uint16_t u16;
+typedef int atomic_t;
+typedef uint64_t dma_addr_t;
 typedef uint32_t u32;
 typedef uint64_t u64;
 #define GFP_KERNEL 0
@@ -45,17 +51,47 @@ struct nvme_command {
 };
 struct file { unsigned f_mode; bool native_ns; };
 struct nvme_ops { const char *name; bool peer_rw; };
-struct nvme_ctrl { struct nvme_ops *ops; };
-struct nvme_ns_head { unsigned ns_id; };
-struct nvme_ns { struct nvme_ctrl *ctrl; struct nvme_ns_head *head; void *queue; };
+struct device { bool is_pci; };
+struct pci_dev { struct device dev; };
+#define dev_is_pci(d) ((d)->is_pci)
+#define to_pci_dev(d) ((struct pci_dev *)(d))
+struct nvme_ctrl { struct nvme_ops *ops; struct device *dev; };
+struct nvme_ns_head { unsigned ns_id; u8 lba_shift,pi_type; u16 ms,pi_size;
+ struct { u8 csi,eui64[8],nguid[16],uuid[16]; } ids; };
+struct gendisk { u64 capacity,diskseq; };
+struct request_queue;
+struct nvme_ns { struct nvme_ctrl *ctrl; struct nvme_ns_head *head;
+ struct request_queue *queue; struct gendisk *disk; unsigned long flags; };
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x,v) ((x)=(v))
+#define atomic_set(p,v) (*(p)=(v))
+#define atomic_read(p) (*(p))
+#define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
+#define SECTOR_SHIFT 9
+#define NVME_NS_READY 0
+#define NVME_NS_REMOVING 1
+typedef u64 sector_t;
+static sector_t get_capacity(struct gendisk *d) { return d->capacity; }
+static bool test_bit(unsigned bit,const unsigned long *p) { return !!(*p&(1UL<<bit)); }
+struct blk_mq_hw_ctx { unsigned queue_num; };
+struct request { struct blk_mq_hw_ctx *mq_hctx; };
+struct bio;struct page;
+struct nvme_sgl_desc { u64 addr;u32 length;u8 flags[4]; };
+struct xdev_ext_peer_fd_lease;
+#define xdev_ext_peer_nvme_seg xdev_ext_stor_extent
+#define NVME_XDEV_EXT_PEER_MAX_SPANS 512
+/* FAMILY_TYPES */
+/* MEMBER_TYPES */
 struct xdev_ext_mech_pool { unsigned kind; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_layout layout; struct xdev_ext_mech_pool pool; };
-struct nvme_xdev_ext_mech_stage { struct nvme_ns *ns; bool write; struct nvme_xdev_ext_identity identity; struct xdev_ext_stor_window window; void *head, *disk, *queue; };
+
 struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct file *file; unsigned direction; bool poll; unsigned arg0,arg1; void *priv; };
 static struct nvme_ops ops={"pcie",true};
-static struct nvme_ctrl ctrl={&ops};
-static struct nvme_ns_head head={1};
-static struct nvme_ns ns={&ctrl,&head,NULL};
+static struct nvme_ctrl ctrl={.ops=&ops};
+static struct nvme_ns_head head={.ns_id=1,.lba_shift=9};
+static struct gendisk disk={.capacity=32,.diskseq=1};
+static char queue_identity;
+static struct nvme_ns ns={.ctrl=&ctrl,.head=&head,.queue=(void *)&queue_identity,.disk=&disk,.flags=1};
 static unsigned effects=NVME_CMD_EFFECTS_CSUPP, resources;
 static bool rawio, admin;
 static bool capable(int cap) { return cap==CAP_SYS_RAWIO ? rawio : admin; }
@@ -68,17 +104,23 @@ static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *f) { return f->native
 /* These authority cases are unpolled; an unexpected poll query is a failure. */
 struct request_queue;
 static bool xdev_ext_stor_block_poll_capable(const struct request_queue *q) { (void)q; abort(); }
-static int nvme_xdev_ext_capture_identity(struct nvme_ns *n,struct nvme_xdev_ext_identity *i,void **h,void **d,void **q)
-{ assert(n==&ns); *i=(struct nvme_xdev_ext_identity){.nsid=1,.namespace_ready=1,.lba_shift=9,.capacity_lbas=32}; *h=&head; *d=&ns; *q=&ctrl; return 0; }
-/* Preserve the old fixture's argument observations while executing the
- * actual portable admission and typed-window construction. */
-static int fixture_bind_window(const struct nvme_xdev_ext_identity *i,int write,
- u64 start,u64 len,u32 bytes,struct xdev_ext_stor_window *window)
-{
- assert(i->nsid==1);assert(bytes==4096);
- return nvme_xdev_ext_mech_bind_window(i,write,start,len,bytes,window);
-}
-#define nvme_xdev_ext_mech_bind_window fixture_bind_window
+/* Keep the published fixture's boundary observations while invoking the
+ * actual inline capture and portable identity admission, without replacing
+ * either production decision. */
+static void fixture_capture_observe(struct nvme_ns *n) { assert(n==&ns); }
+static void fixture_bind_observe(const struct nvme_xdev_ext_identity *i,u32 bytes)
+{ assert(i->nsid==1);assert(bytes==4096); }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int ret) { (void)st;(void)ret;abort(); }
+static u32 xdev_ext_mech_batch_bytes(struct xdev_ext_mech_batch *b) { (void)b;abort(); }
+static void xdev_ext_mech_trace_plan(struct xdev_ext_mech_batch *b,u64 l,u32 bytes,u32 plan,int ret)
+{ (void)b;(void)l;(void)bytes;(void)plan;(void)ret;abort(); }
+static int blk_mq_poll_hw_queue(struct request_queue *q,u32 index,void *iob)
+{ (void)q;(void)index;(void)iob;abort(); }
+#define WARN_ON_ONCE(v) (v)
+#define kvfree free
+static void bio_uninit(struct bio *b) { (void)b;abort(); }
+static void dma_free_coherent(struct device *d,size_t n,void *cpu,dma_addr_t dma)
+{ (void)d;(void)n;(void)cpu;(void)dma;abort(); }
 static int nvme_xdev_ext_class_resources_init(struct xdev_ext_mech_stage *st) { assert(st->priv); resources++; return 0; }
 static int nvme_xdev_ext_peer_resources_init(struct xdev_ext_mech_stage *st) { assert(st->priv); return 0; }
 /* PRODUCTION */
