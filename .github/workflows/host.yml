@@ -75,6 +75,13 @@ jobs:
         run: |
           python3 tests/network/peer_lease/run.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/network-peer-lease"
           python3 tests/network/peer_lease/mutations.py --source-root "$GITHUB_WORKSPACE" --phase typed --output "$RUNNER_TEMP/network-peer-lease-mutants"
+      - name: Socket HOST network member and borrowed frame custody
+        working-directory: .
+        run: |
+          python3 tests/network/host_lease/run.py --source "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/network-host-consumer"
+          python3 tests/network/host_lease/run.py --source "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/network-host-authority" --suite host
+          python3 tests/network/host_lease/run.py --source "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/network-host-existing-mutants" --check-mutants
+          python3 tests/network/host_lease/host_mutants.py --source "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/network-host-mutants"
       - name: Shared receive ownership and composed library contracts
         working-directory: .
         run: |

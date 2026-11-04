@@ -6833,6 +6833,30 @@
       "logical_path": "tests/eval/xdomain/xdomain_gpu_pattern.h"
     },
     {
+      "source": "tests/network/host_lease/README.md",
+      "logical_path": "tests/network/host_lease/README.md"
+    },
+    {
+      "source": "tests/network/host_lease/host_cases.c",
+      "logical_path": "tests/network/host_lease/host_cases.c"
+    },
+    {
+      "source": "tests/network/host_lease/host_mutants.py",
+      "logical_path": "tests/network/host_lease/host_mutants.py"
+    },
+    {
+      "source": "tests/network/host_lease/host_shim.h",
+      "logical_path": "tests/network/host_lease/host_shim.h"
+    },
+    {
+      "source": "tests/network/host_lease/run.py",
+      "logical_path": "tests/network/host_lease/run.py"
+    },
+    {
+      "source": "tests/network/host_lease/socket_cases.c",
+      "logical_path": "tests/network/host_lease/socket_cases.c"
+    },
+    {
       "source": "tests/network/peer/session/.gitignore",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/.gitignore"
