@@ -33,7 +33,7 @@ static int control(struct io_ring_ctx *ctx,struct xdev_ext_mech_stop_report *r) 
  mutex_unlock(&ctx->uring_lock);return err;
 }
 static int report_case(const char *mode) {
- struct io_ring_ctx ctx={.uring_lock=PTHREAD_MUTEX_INITIALIZER};
+ struct io_ring_ctx ctx={.uring_lock=__MUTEX_INITIALIZER(ctx.uring_lock)};
  INIT_LIST_HEAD(&ctx.xdev_ext_mech_sessions);
  struct xdev_ext_mech_session *s=bound_session();tracked_session=s;
  s->id=0x100000003ULL;INIT_LIST_HEAD(&s->ring_node);

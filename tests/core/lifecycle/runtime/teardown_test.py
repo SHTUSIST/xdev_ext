@@ -159,12 +159,18 @@ class Teardown(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='xdev_ext-core-teardown-')
         cls.addClassCleanup(cls.tmp.cleanup)
         path = Path(cls.tmp.name)
+        # Shared executor includes use the provider fixture's OS primitives.
+        for name in ('atomic', 'fs', 'list', 'module', 'mutex', 'xdev_ext_mech', 'slab'):
+            header = path / 'linux' / (name + '.h')
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
         (path / 'probe.c').write_text(build())
         cls.binary = path / 'probe'
         built = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra',
                                 '-Werror', '-Wno-unused-function', '-Wno-unused-variable',
                                 '-Wno-unused-parameter', '-fsanitize=undefined',
-                                '-fno-sanitize-recover=undefined', '-pthread', '-I' + str(extract.ROOT),
+                                '-fno-sanitize-recover=undefined', '-pthread', '-I' + str(path),
+                                '-I' + str(extract.ROOT), '-I' + str(extract.ROOT / 'io_uring'),
                                 str(path / 'probe.c'), '-o', str(cls.binary)],
                                capture_output=True, text=True)
         if built.returncode:

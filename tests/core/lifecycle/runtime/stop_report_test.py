@@ -45,7 +45,7 @@ BOUNDARY = r'''
 #define __must_hold(x)
 #define u64_to_user_ptr(x) ((void *)(uintptr_t)(x))
 #define list_del_rcu list_del
-struct io_ring_ctx { pthread_mutex_t uring_lock; struct list_head xdev_ext_mech_sessions; };
+struct io_ring_ctx { struct mutex uring_lock; struct list_head xdev_ext_mech_sessions; };
 static void *copy_read_fault;
 static bool copy_write_fault;
 static unsigned copy_writes;
@@ -112,12 +112,17 @@ class StopReportBehavior(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='xdev-stop-report-')
         cls.addClassCleanup(cls.tmp.cleanup)
         path = Path(cls.tmp.name)
+        # Shared executor includes use the provider fixture's OS primitives.
+        for name in ('atomic', 'fs', 'list', 'module', 'mutex', 'xdev_ext_mech', 'slab'):
+            header = path / 'linux' / (name + '.h')
+            header.parent.mkdir(parents=True, exist_ok=True)
+            header.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
         (path / 'probe.c').write_text(build())
         cls.binary = path / 'probe'
         result = subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-O1','-g','-Wall','-Wextra',
             '-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter',
             '-fsanitize=address,undefined','-fno-sanitize-recover=all','-pthread',
-            '-I'+str(extract.ROOT),str(path/'probe.c'),'-o',str(cls.binary)],capture_output=True,text=True)
+            '-I'+str(path),'-I'+str(extract.ROOT),'-I'+str(extract.ROOT/'io_uring'),str(path/'probe.c'),'-o',str(cls.binary)],capture_output=True,text=True)
         if result.returncode:
             raise RuntimeError(result.stdout+result.stderr)
 

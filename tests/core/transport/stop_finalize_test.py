@@ -66,12 +66,20 @@ class FinalStop(unittest.TestCase):
   code=extract.generate()
   definitions='\n'.join(extract.function(source,n) for n in ('xdev_ext_mech_stage_dead','xdev_ext_mech_set_err_locked','xdev_ext_mech_batch_complete_cancelled'))
   code=code.replace('static struct module owner;',definitions+'\nstatic struct xdev_ext_mech_stage *sync_subject;\nstatic struct module owner;')
-  code=code.replace('host_unbinds++;free(h);','host_unbinds++;if(sync_subject)xdev_ext_mech_stage_dead(sync_subject,-EIO);free(h);')
+  # Observe the successful native unmap before free, after its refusal guard.
+  # A moved fixture boundary must fail setup instead of silently losing the hook.
+  unmap='if(host_unmap_error)return host_unmap_error;free(h);'
+  if code.count(unmap)!=1:raise RuntimeError('missing unique native host-unmap boundary')
+  code=code.replace(unmap,'if(host_unmap_error)return host_unmap_error;if(sync_subject)xdev_ext_mech_stage_dead(sync_subject,-EIO);free(h);',1)
   code=code.replace('int main(int argc,char **argv) {',EXTRA+'\nint main(int argc,char **argv) {')
   code=code.replace('if(argc!=2)return 2;','if(argc!=2)return 2;\n return final_stop(argv[1]);')
   cls.tmp=tempfile.TemporaryDirectory(prefix='stop-finalize-');cls.addClassCleanup(cls.tmp.cleanup)
   p=Path(cls.tmp.name);(p/'probe.c').write_text(code);cls.binary=p/'probe'
-  subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread','-I'+str(ROOT),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
+  # Shared executor includes use the provider fixture's OS primitives.
+  for name in ('atomic','fs','list','module','mutex','xdev_ext_mech','slab'):
+   header=p/'linux'/(name+'.h');header.parent.mkdir(parents=True,exist_ok=True)
+   header.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
+  subprocess.run([os.environ.get('CC','cc'),'-std=gnu11','-O2','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread','-I'+str(p),'-I'+str(ROOT),'-I'+str(ROOT/'io_uring'),str(p/'probe.c'),'-o',str(cls.binary)],check=True)
  def test_drain_and_synchronized_final_errors(self):
   for mode in ('idle','first','late','unbind','pending-fatal','native-error','published-before-stop','published-before-fatal','cancelled-native','cancel'):
    with self.subTest(mode=mode):

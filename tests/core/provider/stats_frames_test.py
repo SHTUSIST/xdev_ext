@@ -73,13 +73,18 @@ int main(void) {
 """
         with tempfile.TemporaryDirectory(prefix="xdev-ext-stats-") as temporary:
             path = Path(temporary)
+            # Shared executor includes use the provider fixture's OS primitives.
+            for name in ('atomic', 'fs', 'list', 'module', 'mutex', 'xdev_ext_mech', 'slab'):
+                header = path / 'linux' / (name + '.h')
+                header.parent.mkdir(parents=True, exist_ok=True)
+                header.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
             source = path / "test.c"
             source.write_text(code)
             executable = path / "test"
             command = [os.environ.get("CC", "cc"), "-std=gnu11", "-O2", "-Wall", "-Wextra",
                        "-Werror", "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-parameter",
                        "-fsanitize=undefined", "-fno-sanitize-recover=undefined", "-pthread",
-                       "-I" + str(ROOT), str(source), "-o", str(executable)]
+                       "-I" + str(path), "-I" + str(ROOT), "-I" + str(ROOT / 'io_uring'), str(source), "-o", str(executable)]
             built = subprocess.run(command, capture_output=True, text=True)
             self.assertEqual(built.returncode, 0, built.stderr)
             run = subprocess.run([str(executable)], capture_output=True, text=True)
