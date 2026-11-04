@@ -59,7 +59,7 @@ struct xsk_xdev_ext_mech_provider {
 	bool stopped;
 	u32 source_first, source_next;
 	spinlock_t tx_lock;
-	struct xsk_mech_zc_ring ring;
+	struct xdev_ext_net_count_ring ring;
 	struct xsk_mech_zc_slot *slots;
 };
 
@@ -122,7 +122,7 @@ struct xsk_xdev_ext_mech_tx_batch {
 	struct list_head done;
 	struct xdev_ext_mech_batch *batch;
 	u64 ticket;
-	struct xsk_mech_zc_batch completion;
+	struct xdev_ext_net_count_batch completion;
 	u32 n;
 	s32 err[XDEV_EXT_MECH_MAX_FRAMES];
 	struct xdev_ext_net_lease pool_lease[XDEV_EXT_MECH_MAX_FRAMES];
@@ -1055,10 +1055,10 @@ static void xsk_mech_zc_retire(struct xsk_xdev_ext_mech_provider *p, u32 at,
 	struct xsk_mech_zc_slot *slot = &p->slots[at];
 	struct xsk_xdev_ext_mech_tx_batch *tb = slot->batch;
 
-	if (slot->state == XSK_MECH_ZC_DONE)
+	if (slot->count.state == XDEV_EXT_NET_COUNT_DONE)
 		return;
-	if (slot->state == XSK_MECH_ZC_NATIVE && !result &&
-	    slot->owner == XSK_MECH_ZC_DATA && tb->batch) {
+	if (slot->count.state == XDEV_EXT_NET_COUNT_NATIVE && !result &&
+	    slot->count.tag == XSK_MECH_ZC_DATA && tb->batch) {
 		struct xdev_ext_mech_frame f;
 
 		if (!xdev_ext_mech_batch_frame(tb->batch, slot->slot, &f)) {
@@ -1068,13 +1068,13 @@ static void xsk_mech_zc_retire(struct xsk_xdev_ext_mech_provider *p, u32 at,
 			xdev_ext_mech_count(s, xdev_ext_mech_nic_bytes_counter(p->zc), f.data_len);
 		}
 	}
-	if (slot->state == XSK_MECH_ZC_NATIVE)
-		xsk_mech_zc_mark_done(&p->ring, p->slots, at);
+	if (slot->count.state == XDEV_EXT_NET_COUNT_NATIVE)
+		xdev_ext_net_count_mark_done(&p->ring, xsk_mech_zc_view(p->slots), at);
 	else
-		slot->state = XSK_MECH_ZC_DONE;
+		slot->count.state = XDEV_EXT_NET_COUNT_DONE;
 	xdev_ext_net_lease_pool_release(&tb->pool_lease[slot->slot], quiesced);
-	if (xsk_mech_zc_retire_result(&tb->completion, result,
-				    &tb->err[slot->slot]))
+	if (xdev_ext_net_count_retire_result(&tb->completion, result,
+					   &tb->err[slot->slot]))
 		list_add_tail(&tb->done, done);
 }
 
@@ -1105,8 +1105,7 @@ static void xsk_mech_zc_cancel_pending(struct xsk_xdev_ext_mech_provider *p, int
 				DMA_BIDIRECTIONAL);
 		xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result, true, &done);
 	}
-	p->ring.issued = p->ring.prod;
-	xsk_mech_zc_reclaim(&p->ring, p->slots);
+	xdev_ext_net_count_pending_end(&p->ring, xsk_mech_zc_view(p->slots));
 	spin_unlock_irqrestore(&p->tx_lock, flags);
 	xsk_mech_zc_done(&done);
 }
@@ -1122,26 +1121,28 @@ static void xsk_mech_zc_stop(struct xsk_xdev_ext_mech_provider *p, int result)
 
 	spin_lock_irqsave(&p->tx_lock, flags);
 	p->stopped = true;
-	xsk_mech_zc_fail(&p->ring, result);
+	xdev_ext_net_count_fail(&p->ring, result);
 	for (i = p->ring.cons; i != p->ring.prod; i++) {
 		struct xsk_mech_zc_slot *slot = &p->slots[i & (p->ring.capacity - 1)];
 		struct xsk_xdev_ext_mech_tx_batch *tb = slot->batch;
 
-		if (slot->state == XSK_MECH_ZC_NATIVE)
+		if (slot->count.state == XDEV_EXT_NET_COUNT_NATIVE)
 			tb->completion.uncertain = true;
 	}
 	for (i = p->ring.cons; i != p->ring.prod; i++) {
 		struct xsk_mech_zc_slot *slot = &p->slots[i & (p->ring.capacity - 1)];
 
-		if (slot->state == XSK_MECH_ZC_PENDING && p->xp->dev && p->xp->dma_pages)
+		if (slot->count.state == XDEV_EXT_NET_COUNT_PENDING &&
+		    p->xp->dev && p->xp->dma_pages)
 			dma_sync_single_for_cpu(p->xp->dev,
 				xp_raw_get_dma(p->xp, slot->desc.addr), slot->desc.len,
 				DMA_BIDIRECTIONAL);
-		if (slot->state != XSK_MECH_ZC_DONE)
+		if (slot->count.state != XDEV_EXT_NET_COUNT_DONE)
 			xsk_mech_zc_retire(p, i & (p->ring.capacity - 1), result,
-					   slot->state == XSK_MECH_ZC_PENDING, &done);
+					   slot->count.state == XDEV_EXT_NET_COUNT_PENDING,
+					   &done);
 	}
-	p->ring.cons = p->ring.issued = p->ring.prod;
+	xdev_ext_net_count_stop_end(&p->ring);
 	spin_unlock_irqrestore(&p->tx_lock, flags);
 	xsk_mech_zc_done(&done);
 }
@@ -1167,7 +1168,8 @@ int xsk_xdev_ext_mech_tx_peek(struct xsk_buff_pool *pool, struct xdp_desc *desc)
 	p = rcu_dereference(pool->xdev_ext_mech_tx);
 	if (p) {
 		spin_lock_irqsave(&p->tx_lock, flags);
-		at = p->stopped ? -ENOENT : xsk_mech_zc_peek(&p->ring, p->slots);
+		at = p->stopped ? -ENOENT :
+			xdev_ext_net_count_peek(&p->ring, xsk_mech_zc_view(p->slots));
 		if (at >= 0)
 			*desc = p->slots[at].desc;
 		ret = at >= 0;
@@ -1190,7 +1192,7 @@ int xsk_xdev_ext_mech_tx_batch(struct xsk_buff_pool *pool, u32 n)
 		n = min(n, pool->tx_descs_capacity);
 		ret = 0;
 		while (!p->stopped && ret < n) {
-			at = xsk_mech_zc_peek(&p->ring, p->slots);
+			at = xdev_ext_net_count_peek(&p->ring, xsk_mech_zc_view(p->slots));
 			if (at < 0)
 				break;
 			pool->tx_descs[ret++] = p->slots[at].desc;
@@ -1218,10 +1220,10 @@ int xsk_xdev_ext_mech_tx_complete(struct xsk_buff_pool *pool, u32 n, int result,
 	if (!p)
 		goto out;
 	spin_lock_irqsave(&p->tx_lock, flags);
-	if (n > xsk_mech_zc_native(&p->ring, p->slots)) {
+	if (n > xdev_ext_net_count_native(&p->ring)) {
 		/* An unmatched hardware count is ambiguous: do not recycle. */
 		p->stopped = true;
-		at = xsk_mech_zc_complete(&p->ring, p->slots);
+		at = xdev_ext_net_count_head(&p->ring);
 		if (at >= 0) {
 			struct xsk_xdev_ext_mech_tx_batch *tb = p->slots[at].batch;
 
@@ -1238,8 +1240,9 @@ int xsk_xdev_ext_mech_tx_complete(struct xsk_buff_pool *pool, u32 n, int result,
 		ret = -EPROTO;
 		goto out;
 	}
-	at = tail ? xsk_mech_zc_tail(&p->ring, p->slots, 0) :
-		    xsk_mech_zc_complete(&p->ring, p->slots);
+	at = tail ?
+		xdev_ext_net_count_tail(&p->ring, xsk_mech_zc_view(p->slots), 0) :
+		xdev_ext_net_count_head(&p->ring);
 	for (i = 0; i < n; i++) {
 		struct xsk_mech_zc_slot *slot;
 		struct xsk_xdev_ext_mech_tx_batch *tb;
@@ -1249,16 +1252,17 @@ int xsk_xdev_ext_mech_tx_complete(struct xsk_buff_pool *pool, u32 n, int result,
 		tb = slot->batch;
 		if (tb->reliable_stage)
 			failed_stage = tb->reliable_stage;
-		next = tail ? slot->native_prev : slot->native_next;
-		if (!tb->native_error && (result || slot->result))
-			tb->native_error = result ?: slot->result;
-		xsk_mech_zc_set_result(&p->ring, p->slots, at, result);
+		next = tail ? slot->count.native_prev : slot->count.native_next;
+		if (!tb->native_error && (result || slot->count.result))
+			tb->native_error = result ?: slot->count.result;
+		xdev_ext_net_count_set_result(&p->ring, xsk_mech_zc_view(p->slots),
+					      at, result);
 		if (!set_only)
-			xsk_mech_zc_retire(p, at, result ?: slot->result, true, &done);
+			xsk_mech_zc_retire(p, at, result ?: slot->count.result, true, &done);
 		at = next;
 	}
 	if (!set_only)
-		xsk_mech_zc_reclaim(&p->ring, p->slots);
+		xdev_ext_net_count_reclaim(&p->ring, xsk_mech_zc_view(p->slots));
 	if (p->ring.fatal) {
 		fatal = p->ring.fatal;
 		p->stopped = true;
@@ -1310,7 +1314,7 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 		err = -ENXIO;
 		goto unlock;
 	}
-	err = xsk_mech_zc_reserve(&p->ring, nr, &start);
+	err = xdev_ext_net_count_reserve(&p->ring, nr, &start);
 	if (err)
 		goto unlock;
 	/* Prepare every original frame index before the first native effect. */
@@ -1345,7 +1349,7 @@ static int xsk_xdev_ext_mech_zc_submit(struct xdev_ext_mech_stage *st,
 		slot = &p->slots[(start + out++) & (p->ring.capacity - 1)];
 		*slot = (struct xsk_mech_zc_slot) {
 			.desc = *d, .batch = tb, .slot = i,
-			.state = XSK_MECH_ZC_PENDING,
+			.count = { .state = XDEV_EXT_NET_COUNT_PENDING },
 		};
 		xdev_ext_mech_trace_descriptor_bind(b, i, (u64)(unsigned long)p->xp,
 					     d->addr, d->len);
@@ -1373,7 +1377,7 @@ rollback:
 		if (*xst->tx_tag[i] != xdev_ext_mech_batch_id(b))
 			xdev_ext_net_lease_pool_release(&tb->pool_lease[i], true);
 	}
-	p->ring.prod = start;
+	xdev_ext_net_count_rollback(&p->ring, start);
 unlock:
 	spin_unlock_irqrestore(&p->tx_lock, flags);
 	mutex_unlock(&xs->mutex);

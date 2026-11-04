@@ -428,9 +428,9 @@ static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_me
  u32 start,i;
  int err;
  if (p->stopped || ((struct xsk_xdev_ext_mech_stage *)st->priv)->dead) return -ENXIO;
- err=xsk_mech_zc_reserve(&p->ring,count,&start);
+ err=xdev_ext_net_count_reserve(&p->ring,count,&start);
  if (err) return err;
- INIT_LIST_HEAD(&tb->done); tb->completion=(struct xsk_mech_zc_batch){.pending=count};
+ INIT_LIST_HEAD(&tb->done); tb->completion=(struct xdev_ext_net_count_batch){.pending=count};
  tb->cancelled_before_native=false;
  tb->native_error=0;
  tb->reliable_stage=st; tb->n=count;
@@ -438,8 +438,8 @@ static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_me
   struct xsk_mech_zc_slot *slot=&p->slots[(start+i)&(p->ring.capacity-1)];
   xp_dma_sync_for_device(p->xp,xp_raw_get_dma(p->xp,desc[i].addr),desc[i].len);
   *slot=(struct xsk_mech_zc_slot){.desc=desc[i],.batch=tb,.slot=i,
-                                .state=XSK_MECH_ZC_PENDING,
-                                .owner=tb->control ? XSK_MECH_ZC_CONTROL : XSK_MECH_ZC_DATA};
+                                .count={.state=XDEV_EXT_NET_COUNT_PENDING,
+                                        .tag=tb->control ? XSK_MECH_ZC_CONTROL : XSK_MECH_ZC_DATA}};
  }
  return 0;
 }
