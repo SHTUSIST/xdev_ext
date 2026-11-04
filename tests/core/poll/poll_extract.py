@@ -52,10 +52,22 @@ def compile_and_run(fixture, args=(), defines=(), timeout=10):
     with tempfile.TemporaryDirectory(prefix='xdev-ext-poll-') as temporary:
         path = Path(temporary)
         (path / 'fixture.c').write_text(fixture)
+        include_root = _helpers['host_headers'](KERNEL, path / 'headers')
+        if include_root == path / 'headers' and re.search(
+                r'^\s*#\s*include\s*["<]tools/xdev_ext_mech/xdev_ext_mech_ctl_core\.h[">]',
+                fixture, re.M):
+            # The CLI core's quoted sibling and relative portable includes
+            # must share this disposable include boundary. Read both through
+            # the selected source's native mapping, never a foreign hint.
+            for native in ('tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h',
+                           'tools/xdev_ext_mech/xdev_ext_mech_prog.h'):
+                target = include_root / native
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(source(native))
         command = [compiler, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                    '-Wno-unused-function', '-Wno-unused-parameter',
                    '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
-                   '-I' + str(_helpers['host_headers'](KERNEL, path / 'headers')), *('-D' + d for d in defines),
+                   '-I' + str(include_root), *('-D' + d for d in defines),
                    str(path / 'fixture.c'), '-o', str(path / 'probe')]
         build = subprocess.run(command, text=True, capture_output=True)
         if build.returncode:
