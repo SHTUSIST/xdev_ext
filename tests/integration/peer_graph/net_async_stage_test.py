@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import subprocess
 import tempfile
+from xdomain_fixture import definition
 KERNEL = Path(__file__).resolve().parents[5]
 SHIM = r'''
 #include <assert.h>
@@ -43,7 +44,7 @@ struct xdev_ext_mech_pool {u32 kind, frame_size, nr_frames;};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;struct xdev_ext_mech_peer peer;u32 depth;bool admits;};
 struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction;bool create_reporting;u32 create_phase;};
 struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_len;};
-struct xdev_ext_mech_batch {void *priv;struct xdev_ext_mech_frame f[16];u32 nr;u64 ticket;int claims,publishes,status;bool sequester;};
+struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;void *priv;struct xdev_ext_mech_frame f[16];u32 nr;u64 ticket;int claims,publishes,status;bool sequester;};
 struct xdev_ext_peer_net_endpoint {bool rx;};
 static struct xdev_ext_peer_net_endpoint endpoint;
 static struct pci_dev peer;
@@ -178,7 +179,9 @@ def family_runtime():
     source = require_family().read_text()
     begin = "/* xdev_ext_netfam runtime begin */"
     end = "/* xdev_ext_netfam runtime end */"
-    return source[source.index(begin) + len(begin):source.index(end)]
+    core = (KERNEL / "io_uring/xdev_ext_mech.c").read_text()
+    return (definition(core, "xdev_ext_mech_batch_session") + "\n" +
+            source[source.index(begin) + len(begin):source.index(end)])
 
 
 def net_completion_body():

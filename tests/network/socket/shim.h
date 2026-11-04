@@ -91,7 +91,7 @@ struct xdev_ext_mech_frame {void *kaddr;u64 umem_addr;u32 index,data_off,data_le
 struct xdev_ext_mech_pool {u32 frame_size,nr_frames;u8 state[256];};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;u32 depth;bool admits;};
 struct xdev_ext_mech_stage {void *priv;struct file *file;struct xdev_ext_mech_session *s;u32 direction;bool create_reporting;u32 create_phase;u32 class_id,flags,index;u64 arg0,arg1;};
-struct xdev_ext_mech_batch {struct xdev_ext_mech_completion completion;union {u32 nr,nr_frames;};u32 bytes,slot;u64 ticket;struct xdev_ext_mech_frame f[32];int status;u64 completed_ticket;u32 completions;
+struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;struct xdev_ext_mech_completion completion;union {u32 nr,nr_frames;};u32 bytes,slot;u64 ticket;struct xdev_ext_mech_frame f[32];int status;u64 completed_ticket;u32 completions;
  u64 key,id;u32 produced,cancelled,stale,order;};
 static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->l;}
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session *s){return s->depth;}
