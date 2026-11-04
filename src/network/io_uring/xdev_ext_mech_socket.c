@@ -19,12 +19,14 @@
 #include <net/tcp_states.h>
 
 struct xdev_ext_socket_request {
+	struct xdev_ext_net_slot *tx_slot; /* TX only, published before inline completion */
 	struct kvec vec[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 nr, bytes, cursor;
  u64 batch_id;
  struct xdev_ext_mech_frame frame[XDEV_EXT_MECH_MAX_FRAMES];
 };
 struct xdev_ext_socket_stage {
+	struct xdev_ext_netfam_stage ns; /* initialized only for TX */
 	struct socket *sock; /* st->file owns the original socket until unbind */
 	struct xdev_ext_socket_request *request;
 	const struct cred *cred;	/* CREATE caller, retained until worker drain */
@@ -38,6 +40,25 @@ struct xdev_ext_socket_stage {
  struct xdev_ext_socket_packet_desc plan;
  u8 received_header[XDEV_EXT_SOCKET_HEADER_SIZE];
 };
+
+static const struct xdev_ext_net_member xdev_ext_socket_net_member;
+
+/* The checked socket stage lends its endpoint to the family. Class unbind
+ * owns the request/credential/stage lifetime after the family is drained. */
+static void *xdev_ext_socket_net_bind(struct xdev_ext_mech_stage *st,
+		const struct xdev_ext_mech_stage_uapi *u,
+		void (*dead)(void *arg), void *arg)
+{
+	(void)u;
+	(void)dead;
+	(void)arg;
+	return st->priv;
+}
+
+static void xdev_ext_socket_net_unbind(void *lk)
+{
+	(void)lk;
+}
 
 static bool xdev_ext_socket_config_ok(const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -96,8 +117,24 @@ static int xdev_ext_socket_bind(struct xdev_ext_mech_stage *st,
  ss->wire_session = u->arg0;
  ss->mtu = u->arg1;
 	ss->cred = get_current_cred();
+	err = xdev_ext_netfam_init(&ss->ns, st, &xdev_ext_socket_net_member, false, 0);
+	if (err)
+		goto free;
+	/* The family bind borrows this already-checked endpoint. CREATE has
+	 * not published the stage externally; clear this on every failure. */
 	st->priv = ss;
+	err = xdev_ext_netfam_attach(&ss->ns, u, 0);
+	if (err) {
+		st->priv = NULL;
+		xdev_ext_netfam_fini(&ss->ns);
+		goto free;
+	}
 	return 0;
+free:
+	put_cred(ss->cred);
+	kvfree(ss->request);
+	kfree(ss);
+	return err;
 }
 
 static void xdev_ext_socket_unbind(struct xdev_ext_mech_stage *st)
@@ -107,6 +144,8 @@ static void xdev_ext_socket_unbind(struct xdev_ext_mech_stage *st)
 	/* Common core drains the worker before dropping st->file. No deferred
 	 * socket callback or skb can retain these original pool spans.
 	 */
+	if (!ss->rx)
+		xdev_ext_netfam_fini(&ss->ns);
 	kvfree(ss->request);
 	put_cred(ss->cred);
 	kfree(ss);
@@ -285,6 +324,80 @@ static int xdev_ext_socket_packet_send(struct xdev_ext_mech_stage *st,
  return 0;
 }
 
+/* Worker-only synchronous native copy. Both helpers restore credentials
+ * before the family sees any completion, including terminal error paths. */
+static int xdev_ext_socket_net_post_tx(void *lk, struct xdev_ext_net_elem *e, u32 n)
+{
+	struct xdev_ext_socket_stage *ss = lk;
+	struct xdev_ext_net_slot *slot = e[0].slot;
+	struct xdev_ext_mech_stage *st = slot->ns->st;
+	struct xdev_ext_mech_batch *b = slot->batch;
+	struct xdev_ext_socket_request *r = &ss->request[xdev_ext_mech_batch_slot(b)];
+	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
+	const struct cred *old_cred;
+	u32 i;
+	int err;
+
+	/* sendmsg requires one contiguous kvec array, not element-union stride. */
+	for (i = 0; i < n; i++)
+		r->vec[i] = (struct kvec) {
+			.iov_base = e[i].lease.u.host.addr,
+			.iov_len = e[i].lease.u.host.len,
+		};
+	if (ss->wire_session) {
+		err = xdev_ext_socket_packet_send(st, b, r);
+		/* Copied prefix has no outstanding owner; preserve its cursor. */
+		if (err == -EAGAIN)
+			return err;
+	} else {
+		/* Native socket LSM checks see the session's bound caller. */
+		old_cred = override_creds(ss->cred);
+		err = kernel_sendmsg(ss->sock, &msg, r->vec, r->nr, r->bytes);
+		revert_creds(old_cred);
+		/* UDP EAGAIN accepted no datagram; core restores HELD/retries. */
+		if (err == -EAGAIN)
+			return err;
+		if (err >= 0)
+			err = (u32)err == r->bytes ? 0 : -EIO;
+		if (!err) {
+			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_OPS, 1);
+			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_BYTES, r->bytes);
+		}
+	}
+	for (i = 0; i < n; i++)
+		xdev_ext_net_elem_done(&e[i], err, err ? 0 : e[i].len, 0, true);
+	return 0;
+}
+
+/* The family tracker owns immutable-ticket claim/publish. The socket class
+ * CQE is still constructed from batch status, including partial failures. */
+static void xdev_ext_socket_net_result(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_mech_batch *b, const struct xdev_ext_net_slot *slot,
+		int status, bool sequester)
+{
+	(void)ns;
+	(void)b;
+	(void)slot;
+	(void)status;
+	(void)sequester;
+}
+
+static const struct xdev_ext_net_dev_ops xdev_ext_socket_net_dev_ops = {
+	.owner = THIS_MODULE,
+	.hdr_policy = XDEV_EXT_NET_HDR_STACK,
+	.max_elems = XDEV_EXT_MECH_MAX_FRAMES,
+	.bind = xdev_ext_socket_net_bind,
+	.unbind = xdev_ext_socket_net_unbind,
+	.post_tx = xdev_ext_socket_net_post_tx,
+};
+
+static const struct xdev_ext_net_member xdev_ext_socket_net_member = {
+	.dev = &xdev_ext_socket_net_dev_ops,
+	.lease_kind = XDEV_EXT_NET_LEASE_HOST_CPU,
+	.admit = false,
+	.result = xdev_ext_socket_net_result,
+};
+
 static int xdev_ext_socket_submit(struct xdev_ext_mech_stage *st,
 				struct xdev_ext_mech_batch *b)
 {
@@ -292,10 +405,8 @@ static int xdev_ext_socket_submit(struct xdev_ext_mech_stage *st,
 	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
 	struct xdev_ext_socket_request *r;
 	struct xdev_ext_mech_frame f;
-	struct msghdr msg = { .msg_flags = MSG_DONTWAIT | MSG_NOSIGNAL };
-	const struct cred *old_cred;
+	struct xdev_ext_net_slot *tx_slot;
 	u32 i, slot = xdev_ext_mech_batch_slot(b);
-	u64 ticket = xdev_ext_mech_batch_ticket(b);
 	int err;
 
 	if (READ_ONCE(ss->dead))
@@ -312,40 +423,34 @@ static int xdev_ext_socket_submit(struct xdev_ext_mech_stage *st,
 		if (xdev_ext_mech_batch_frame(b, i, &f) ||
 		    xdev_ext_mech_pool_frame_state(pool, f.index) != XDEV_EXT_MECH_F_INFLIGHT)
 			return -EBUSY;
- if (ss->wire_session) {
-  err = xdev_ext_socket_packet_send(st, b, r);
-  if (err == -EAGAIN) return err;
-  xdev_ext_mech_batch_complete(b, ticket, err);
-  return 0;
- }
-	/* Native socket LSM checks must see the session's bound caller, not
-	 * the shared kernel worker's credentials. Restore before every exit,
-	 * including preaccept EAGAIN and native errors.
-	 */
-	old_cred = override_creds(ss->cred);
-	err = kernel_sendmsg(ss->sock, &msg, r->vec, r->nr, r->bytes);
-	revert_creds(old_cred);
-	/* UDP EAGAIN guarantees no datagram was accepted. Common core restores
-	 * HELD and schedules preaccept backpressure; native RETRY is forbidden.
-	 */
-	if (err == -EAGAIN)
-		return err;
-	if (err >= 0)
-		err = (u32)err == r->bytes ? 0 : -EIO;
-	if (!err) {
-		xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_OPS, 1);
-		xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_NIC_COPY_BYTES, r->bytes);
+	tx_slot = xdev_ext_netfam_slot_get(&ss->ns, b);
+	if (!tx_slot)
+		return -EAGAIN;
+	for (i = 0; i < r->nr; i++) {
+		err = xdev_ext_netfam_lease_host(&ss->ns, tx_slot, i, i,
+					     r->frame[i].data_off, r->frame[i].data_len);
+		if (err) {
+			xdev_ext_netfam_release(tx_slot, true);
+			return err;
+		}
 	}
-	xdev_ext_mech_batch_complete(b, ticket, err);
-	return 0;
+	/* All terminal HOST callbacks run inline in post; publish before it. */
+	r->tx_slot = tx_slot;
+	err = xdev_ext_netfam_post(&ss->ns, tx_slot);
+	if (err)
+		r->tx_slot = NULL;
+	return err;
 }
 
 static void xdev_ext_socket_fill_cqe(struct xdev_ext_mech_stage *st,
 				   struct xdev_ext_mech_batch *b, void *out)
 {
-	int status = xdev_ext_mech_batch_status(b);
+	struct xdev_ext_socket_stage *ss = st->priv;
+	struct xdev_ext_socket_request *r = &ss->request[xdev_ext_mech_batch_slot(b)];
+	int status;
 
-	(void)st;
+	xdev_ext_netfam_fill_cqe(&ss->ns, &r->tx_slot);
+	status = xdev_ext_mech_batch_status(b);
 	*(struct xdev_ext_socket_mech_cqe *)out = (struct xdev_ext_socket_mech_cqe) {
 		.status = status,
 		.bytes_sent = status ? 0 : xdev_ext_mech_batch_bytes(b),
@@ -652,7 +757,7 @@ static void xdev_ext_socket_class_mark_dead(struct xdev_ext_mech_stage *st)
 
 static const struct xdev_ext_net_hooks xdev_ext_socket_net_hooks = {
 	.hdr = { .family = XDEV_EXT_FAMILY_NETWORK },
-	.hdr_policy = XDEV_EXT_NET_HDR_INBAND,
+	.hdr_policy = XDEV_EXT_NET_HDR_STACK,
 	.rel = NULL,
 };
 
