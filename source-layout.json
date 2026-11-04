@@ -2597,6 +2597,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/README.md"
     },
     {
+      "source": "tests/benchmarks/mooncake/executor.py",
+      "logical_path": "tests/benchmarks/mooncake/executor.py"
+    },
+    {
       "source": "tests/benchmarks/mooncake/fixtures/cli_guard.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/cli_guard.py"
@@ -2622,9 +2626,17 @@
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/e7-shape.json"
     },
     {
+      "source": "tests/benchmarks/mooncake/fixtures/executor/child.py",
+      "logical_path": "tests/benchmarks/mooncake/fixtures/executor/child.py"
+    },
+    {
       "source": "tests/benchmarks/mooncake/fixtures/test_cli_assertions.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/fixtures/test_cli_assertions.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/qualification.py",
+      "logical_path": "tests/benchmarks/mooncake/qualification.py"
     },
     {
       "source": "tests/benchmarks/mooncake/run.py",
@@ -2635,6 +2647,18 @@
       "source": "tests/benchmarks/mooncake/test_contract.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mooncake/test_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/test_executor.py",
+      "logical_path": "tests/benchmarks/mooncake/test_executor.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/test_qualification.py",
+      "logical_path": "tests/benchmarks/mooncake/test_qualification.py"
+    },
+    {
+      "source": "tests/benchmarks/mooncake/test_review_regressions.py",
+      "logical_path": "tests/benchmarks/mooncake/test_review_regressions.py"
     },
     {
       "source": "tests/benchmarks/nvme_gpu/Makefile",
