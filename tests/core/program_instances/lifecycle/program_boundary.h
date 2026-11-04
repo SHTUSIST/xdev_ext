@@ -52,7 +52,7 @@ void xdev_ext_mech_instance_gone(struct xdev_ext_mech_instance *);
 void xdev_ext_mech_generation_gone(u32,const void *);
 /* ACTUAL_GLOBAL_REGISTRY_STRUCT */
 static const void *default_slots[XDEV_EXT_MECH_CLASS_MAX];
-static struct xdev_ext_ops_registry xdev_ext_mech_registry={.lock=PTHREAD_MUTEX_INITIALIZER,.slots=default_slots,.nr_slots=XDEV_EXT_MECH_CLASS_MAX};
+static struct xdev_ext_ops_registry xdev_ext_mech_registry={.lock=__MUTEX_INITIALIZER(xdev_ext_mech_registry.lock),.slots=default_slots,.nr_slots=XDEV_EXT_MECH_CLASS_MAX};
 static DEFINE_MUTEX(xdev_ext_mech_class_lock);
 static const struct xdev_ext_mech_c_ops *xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_MAX];
 static struct module *xdev_ext_mech_c_owner[XDEV_EXT_MECH_CLASS_MAX];

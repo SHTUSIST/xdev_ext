@@ -31,7 +31,7 @@ def generate(root):
  layout=re.search(r'^#define XDEV_EXT_MECH_OPS_TYPE\(name\).*?^}',abi,re.M|re.S)
  if not layout:raise RuntimeError('actual ops layout missing')
  types=layout.group()+'\nXDEV_EXT_MECH_OPS_TYPE(xdev_ext_nvme_mech_ops);\nXDEV_EXT_MECH_OPS_TYPE(xdev_ext_mech_c_ops);'
- start=header.index('struct xdev_ext_ops_registry {');registry=header[start:header.index('\n};',start)+3].replace('struct mutex lock;','pthread_mutex_t lock;')
+ start=header.index('struct xdev_ext_ops_registry {');registry=header[start:header.index('\n};',start)+3]
  boundary=(HERE/'program_boundary.h').read_text().replace('/* ACTUAL_OPS_TYPES */',types).replace('/* ACTUAL_GLOBAL_REGISTRY_STRUCT */',registry)
  names=[(header,'xdev_ext_ops_is_current'),(shared,'xdev_ext_ops_publish'),(shared,'xdev_ext_ops_pin'),(shared,'xdev_ext_ops_unpin'),(ops,'xdev_ext_mech_ops_get'),(ops,'xdev_ext_mech_ops_current')]
  helpers='\n'.join(definition(source,name) for source,name in names)
@@ -56,8 +56,14 @@ def main(argv=None):
   for (component,native),source in layout.by_native.items():
    if component=='linux' and native.endswith('.h'):
     path=headers/native;path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes((root/source).read_bytes())
+  # The imported provider generator supplies the actual shared copy executor.
+  # Its kernel includes use the host primitives already defined by that fixture;
+  # keep only those OS include boundaries empty, never production helpers.
+  for name in ('atomic','fs','list','module','mutex','xdev_ext_mech','slab'):
+   path=headers/'linux'/(name+'.h');path.parent.mkdir(parents=True,exist_ok=True)
+   path.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
   src=out/'lifecycle.c';src.write_text(generate(root));binary=out/'lifecycle'
-  cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=all','-pthread','-DCONFIG_XDEV_EXT_MECH_C_REFERENCE=1','-I'+str(headers),str(src),'-o',str(binary)]
+  cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter','-fsanitize=undefined','-fno-sanitize-recover=all','-pthread','-DCONFIG_XDEV_EXT_MECH_C_REFERENCE=1','-I'+str(headers),'-I'+str(headers/'io_uring'),str(src),'-o',str(binary)]
   built=subprocess.run(cmd,capture_output=True,text=True,timeout=60);(out/'compile.log').write_text(built.stdout+built.stderr);result.update(compile_exit=built.returncode,compile_command=cmd)
   if built.returncode:raise RuntimeError('native lifetime composition compile/setup failure; not behavior evidence')
   for case in ('late-exact','late-ambiguous','native-control','c-reference'):
