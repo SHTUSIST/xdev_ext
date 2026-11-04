@@ -56,6 +56,7 @@ static int boundary_warning(int condition)
 #define WARN_ONCE(x,...) boundary_warning(!!(x))
 #define WARN_ON(x) boundary_warning(!!(x))
 struct mutex {unsigned int held;const char *name;};
+#define __MUTEX_INITIALIZER(lockname) {0,#lockname}
 #define DEFINE_MUTEX(name) struct mutex name={0,#name}
 static inline void mutex_lock(struct mutex *m)
 {assert(!m->held);m->held=1;held_locks++;}
@@ -90,6 +91,7 @@ static inline bool refcount_inc_not_zero(refcount_t *r){if(!r->refs)return false
 static inline bool refcount_dec_and_test(refcount_t *r){assert(r->refs);return --r->refs==0;}
 static inline unsigned int refcount_read(const refcount_t *r){return r->refs;}
 struct list_head {struct list_head *next,*prev;};
+#define LIST_HEAD_INIT(name) {&(name),&(name)}
 #define LIST_HEAD(name) struct list_head name={&name,&name}
 static inline void INIT_LIST_HEAD(struct list_head *head){head->next=head->prev=head;}
 static inline bool list_empty(const struct list_head *head){return head->next==head;}

@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 
@@ -35,6 +36,18 @@ def main():
     scope=args.scope_header.resolve() if args.scope_header else root/'src/core/include/linux/xdev_ext_dma_scope_core.h'
     receipt={'mode':args.mode,'cohort':'actual production DMA control flow','source_root':str(root),'commands':[],'runs':[]}
     required=[source,public]+([scope] if args.mode=='candidate' else [])
+    # Follow the selected adapter's production include edges. Historical DMA
+    # sources without the shared helpers must keep their own actual algorithms.
+    shared_sources={}
+    if source.is_file():
+        adapter=source.read_text()
+        for header,unit,macro in (
+                ('xdev_ext_compfam_copy_runtime.h','xdev_ext_compfam_copy.c','XDEV_COPY_RUNTIME_SOURCE'),
+                ('xdev_ext_compfam_copy_lease.h','xdev_ext_compfam_copy_lease.c','XDEV_COPY_LEASE_SOURCE')):
+            if re.search(r'^\s*#\s*include\s*"'+re.escape(header)+r'"',adapter,re.M):
+                path=root/'src/compute/io_uring'/unit
+                required.append(path);shared_sources[macro]=path
+    receipt['shared_sources']={macro:str(path) for macro,path in shared_sources.items()}
     if any(not path.is_file() for path in required):
         receipt.update(status='SETUP',reason='required production source/API unavailable')
         (out/'result.json').write_text(json.dumps(receipt,indent=2)+'\n');print('SETUP: production scoped API/source unavailable');return 2
@@ -48,6 +61,7 @@ def main():
              '-I'+str(root/'src/compute/io_uring'),'-I'+str(fixtures)]
     if args.mode=='candidate':command+=['-DXDEV_SCOPE_HEADER="'+str(scope)+'"']
     else:command+=['-DDMA_SCOPE_LEGACY_CONTROL']
+    for macro,path in shared_sources.items():command+=['-D'+macro+'="'+str(path)+'"']
     if args.sanitize:command+=['-fsanitize=address,undefined','-fno-sanitize-recover=all','-fno-omit-frame-pointer']
     command+=[str(fixtures/'lifecycle.c'),'-o',str(out/'lifecycle')]
     result=subprocess.run(command,text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT)

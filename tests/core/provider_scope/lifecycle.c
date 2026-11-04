@@ -2,6 +2,12 @@
 /* All orchestration expectations come from frozen ASSERTIONS.md. This
  * includes the whole production DMA translation unit, without editing it. */
 #include "kernel_boundary.h"
+#ifdef XDEV_COPY_RUNTIME_SOURCE
+#include XDEV_COPY_RUNTIME_SOURCE
+#endif
+#ifdef XDEV_COPY_LEASE_SOURCE
+#include XDEV_COPY_LEASE_SOURCE
+#endif
 #include XDEV_DMA_SOURCE
 
 static int failures;
