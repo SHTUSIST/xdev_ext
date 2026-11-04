@@ -8768,6 +8768,22 @@
     {
       "source": "tools/test.py",
       "logical_path": "tools/test.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/README.md",
+      "logical_path": "tests/integration/session/source_setup/README.md"
+    },
+    {
+      "source": "tests/integration/session/source_setup/fixture.py",
+      "logical_path": "tests/integration/session/source_setup/fixture.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/test_source_setup.py",
+      "logical_path": "tests/integration/session/source_setup/test_source_setup.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/test_export_source_inputs.py",
+      "logical_path": "tests/integration/session/source_setup/test_export_source_inputs.py"
     }
   ]
 }

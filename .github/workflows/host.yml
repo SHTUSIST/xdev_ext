@@ -261,6 +261,11 @@ jobs:
         run: |
           python3 tests/storage/family_block_poll/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-block-poll" --new
           python3 tests/storage/family_block_poll/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-block-poll-mutants" --new
+      - name: Canonical native source setup and copied compiler inputs
+        working-directory: .
+        run: |
+          python3 -B tests/integration/session/source_setup/test_source_setup.py
+          python3 -B tests/integration/session/source_setup/test_export_source_inputs.py
       - name: Native-view evidence, trace and dma-fence contracts
         run: make -C tests/eval native-eval-check
       - name: Original timer endpoints and shared CPU capture contracts
