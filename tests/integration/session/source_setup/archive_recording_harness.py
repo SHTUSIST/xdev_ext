@@ -19,4 +19,6 @@ count = len(index.read_text().splitlines()) if index.exists() else 0
 record(args.scratch, args.source, specification, 'invocation-' + str(count))
 if spec.get('malformed_manifest'):
     (args.scratch / 'evidence/artifacts.sha256').write_text('deliberately malformed ordinary archive input\n')
+if spec.get('child_signal') is not None:
+    os.kill(os.getpid(), spec['child_signal'])
 sys.exit(spec.get('child_exit', 0))

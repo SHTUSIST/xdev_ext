@@ -674,6 +674,62 @@ class WrapperContract(unittest.TestCase):
     def test_policy_archive_failure_stops_before_case_two(self):
         self.check_archive_failure('policy')
 
+    def test_network_child_seven_survives_actual_archive_failure(self):
+        self.configure(child_exit=7, malformed_manifest=True)
+        result = self.wrapper('network')
+        case = self.scratch / 'acceptance/cases/normal'
+        self.assertEqual((case / 'command.exit').read_text(), '7\n')
+        self.assertEqual(json.loads((case / 'receipt.json').read_text())['command_exit'], 7)
+        self.assertIn('RECORDING_CHILD label=invocation-0', (case / 'command.log').read_text())
+        self.assertEqual((case / 'evidence/artifacts.sha256').read_text(), 'deliberately malformed ordinary archive input\n')
+        self.assertEqual((case / 'images/source.raw').read_bytes(), b'archive-recording-only:invocation-0:source.raw\n')
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertEqual(len((self.scratch / 'recording-launches.jsonl').read_text().splitlines()), 1, 'a later child was launched after dual failure')
+        self.assertNotIn('=PASS', result.stdout)
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+
+    def test_policy_child_seven_survives_actual_archive_failure(self):
+        self.configure(child_exit=7, malformed_manifest=True)
+        result = self.wrapper('policy')
+        case = self.scratch / 'acceptance/cases/window1'
+        self.assertEqual((case / 'command.exit').read_text(), '7\n')
+        self.assertEqual(json.loads((case / 'receipt.json').read_text())['command_exit'], 7)
+        self.assertIn('RECORDING_CHILD label=invocation-0', (case / 'command.log').read_text())
+        self.assertEqual((case / 'evidence/artifacts.sha256').read_text(), 'deliberately malformed ordinary archive input\n')
+        self.assertEqual((case / 'images/source.raw').read_bytes(), b'archive-recording-only:invocation-0:source.raw\n')
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertEqual(len((self.scratch / 'recording-launches.jsonl').read_text().splitlines()), 1, 'a later child was launched after dual failure')
+        self.assertNotIn('=PASS', result.stdout)
+        self.assertEqual(result.returncode, 7, result.stdout + result.stderr)
+
+    def test_network_sigterm_survives_actual_archive_failure_as_143(self):
+        self.configure(child_signal=15, malformed_manifest=True)
+        result = self.wrapper('network')
+        case = self.scratch / 'acceptance/cases/normal'
+        self.assertEqual((case / 'command.exit').read_text(), '-15\n')
+        self.assertEqual(json.loads((case / 'receipt.json').read_text())['command_exit'], -15)
+        self.assertIn('RECORDING_CHILD label=invocation-0', (case / 'command.log').read_text())
+        self.assertEqual((case / 'evidence/artifacts.sha256').read_text(), 'deliberately malformed ordinary archive input\n')
+        self.assertEqual((case / 'images/source.raw').read_bytes(), b'archive-recording-only:invocation-0:source.raw\n')
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertEqual(len((self.scratch / 'recording-launches.jsonl').read_text().splitlines()), 1, 'a later child was launched after signal/archive failure')
+        self.assertNotIn('=PASS', result.stdout)
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+
+    def test_policy_sigterm_survives_actual_archive_failure_as_143(self):
+        self.configure(child_signal=15, malformed_manifest=True)
+        result = self.wrapper('policy')
+        case = self.scratch / 'acceptance/cases/window1'
+        self.assertEqual((case / 'command.exit').read_text(), '-15\n')
+        self.assertEqual(json.loads((case / 'receipt.json').read_text())['command_exit'], -15)
+        self.assertIn('RECORDING_CHILD label=invocation-0', (case / 'command.log').read_text())
+        self.assertEqual((case / 'evidence/artifacts.sha256').read_text(), 'deliberately malformed ordinary archive input\n')
+        self.assertEqual((case / 'images/source.raw').read_bytes(), b'archive-recording-only:invocation-0:source.raw\n')
+        self.assertEqual(len(self.recorded()), 1)
+        self.assertEqual(len((self.scratch / 'recording-launches.jsonl').read_text().splitlines()), 1, 'a later child was launched after signal/archive failure')
+        self.assertNotIn('=PASS', result.stdout)
+        self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
+
     def fault_wrapper(self, child_exit):
         temporary = tempfile.TemporaryDirectory(prefix='xdev-ext-e2e.', dir='/tmp')
         self.addCleanup(temporary.cleanup)
@@ -768,6 +824,22 @@ class ReplayTransportContract(unittest.TestCase):
 
     def test_live_default_original_path_remains_accepted(self):
         self.assertIsNone(self.validator.validate_transport_command(self.live_evidence, self.original))
+
+    def test_live_evidence_directory_alias_uses_resolved_original_transport(self):
+        """The live harness resolves EV before recording its QEMU path."""
+        actual_evidence = self.original / 'actual-evidence'
+        self.live_evidence.rename(actual_evidence)
+        self.live_evidence.symlink_to(actual_evidence, target_is_directory=True)
+        self.assertTrue(self.live_evidence.is_symlink())
+        argv = list(self.argv)
+        argv[argv.index('-chardev') + 1] = ('file,id=e2_artifacts,path=' +
+            str(self.live_evidence.resolve() / 'e2-artifacts.raw.log'))
+        write(actual_evidence / 'qemu.command', shlex.join(argv) + '\n')
+        shutil.copyfile(actual_evidence / 'qemu.command', self.evidence / 'qemu.command')
+        shutil.copyfile(actual_evidence / 'e2-artifacts.raw.log', self.evidence / 'e2-artifacts.raw.log')
+        frozen_before = snapshot(self.evidence)
+        self.assertIsNone(self.transport())
+        self.assertEqual(snapshot(self.evidence), frozen_before)
 
     def test_wrong_original_scratch_rejected(self):
         with self.assertRaises((ValueError, OSError, AssertionError)):

@@ -276,7 +276,7 @@ jobs:
           python3 -B tests/integration/session/source_setup/test_export_source_inputs.py
       - name: Immutable case archive source and file boundaries
         working-directory: .
-        run: python3 -B tests/integration/session/native/xdev_ext_mech_zc_archive_test.py ArchiveContract RecordingControls -v
+        run: python3 -B tests/integration/session/native/xdev_ext_mech_zc_archive_test.py -v
       - name: Native-view evidence, trace and dma-fence contracts
         run: make -C tests/eval native-eval-check
       - name: Original timer endpoints and shared CPU capture contracts
