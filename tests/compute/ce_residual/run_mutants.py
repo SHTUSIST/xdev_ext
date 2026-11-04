@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import pathlib
+import re
 import shutil
 import subprocess
 import sys
@@ -33,13 +34,14 @@ def main():
         directory = args.output / recipe['name']
         directory.mkdir(exist_ok=True)
         mutant = source
-        result = {'name': recipe['name'], 'expected_failure': recipe['expected_failure']}
+        result = {'name': recipe['name'], 'expected_failure': recipe['expected_failure'], 'applied_edits': []}
         try:
             for edit in recipe['edits']:
                 count = mutant.count(edit['old'])
                 if count != edit.get('matches', 1):
                     raise ValueError(f"edit matches {count}, expected {edit.get('matches', 1)}")
                 mutant = mutant.replace(edit['old'], edit['new'])
+                result['applied_edits'].append({'matches': count, 'old_sha256': hashlib.sha256(edit['old'].encode()).hexdigest(), 'new_sha256': hashlib.sha256(edit['new'].encode()).hexdigest()})
             if mutant == source:
                 raise ValueError('mutation made no change')
             (directory / 'actual-ce.c').write_text(mutant)
@@ -61,7 +63,10 @@ def main():
                 (directory / 'run.log').write_text(run.stdout + run.stderr)
                 result['execution_exit'] = run.returncode
                 result['specific_assertion_seen'] = recipe['expected_failure'] in run.stdout
-                if run.returncode == 1 and result['specific_assertion_seen']:
+                result['assertion_summary_seen'] = bool(re.search(r'^checks=[1-9][0-9]* failures=[1-9][0-9]*$', run.stdout, re.M))
+                result['sanitizer_error_seen'] = 'runtime error:' in run.stdout + run.stderr
+                if (run.returncode == 1 and result['specific_assertion_seen']
+                        and result['assertion_summary_seen'] and not result['sanitizer_error_seen']):
                     result['verdict'] = 'DETECTED'
                 elif run.returncode < 0:
                     result['verdict'] = 'SETUP_SIGNAL'
@@ -76,7 +81,7 @@ def main():
         outcomes.append(result)
         (directory / 'receipt.json').write_text(json.dumps(result, indent=2) + '\n')
         print(recipe['name'], result['verdict'])
-    (args.output / 'receipt.json').write_text(json.dumps({'base_evidence': str(args.base_evidence), 'base_ce_sha256': base['ce_sha256'], 'mutants': outcomes}, indent=2) + '\n')
+    (args.output / 'receipt.json').write_text(json.dumps({'base_evidence': str(args.base_evidence), 'base_ce_sha256': base['ce_sha256'], 'base_source_sha256': base.get('source_sha256', {}), 'mutants': outcomes}, indent=2) + '\n')
     return 0 if outcomes and all(row['verdict'] == 'DETECTED' for row in outcomes) else 1
 
 

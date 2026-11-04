@@ -1,0 +1,7 @@
+[
+  "SUPP NULL CE empty warning_condition=0 pins=0",
+  "SUPP NULL CE full warning_condition=1 registered=4 pins=0",
+  "SUPP NULL CE freed_slot warning_condition=0 reusable=1",
+  "SUPP NULL DMA empty warning_condition=1 pins=0",
+  "SUPP NULL DMA populated warning_condition=1 registered=5 pins=0"
+]

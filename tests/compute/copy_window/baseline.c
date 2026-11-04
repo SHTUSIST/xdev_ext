@@ -50,12 +50,12 @@ static void pure_baseline(void) {
 static void bind_baseline(void) {
  struct xdev_ext_mech_session s=session(); struct xdev_ext_mech_stage st={.s=&s,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
  struct xdev_ext_mech_stage_uapi u={.arg1=4096};
- nevents=0; EQ(xdev_ext_ce_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); EQ(events[3],2); EQ(events[4],5); free(st.priv);
- st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],4); EQ(events[2],3); EQ(events[3],1); EQ(events[4],2); free(st.priv);
+ nevents=0; EQ(xdev_ext_ce_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); EQ(events[3],2); EQ(events[4],5); fixture_unbind(&st,false);
+ st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),0); EQ(nevents,5); EQ(events[0],0); EQ(events[1],4); EQ(events[2],3); EQ(events[3],1); EQ(events[4],2); fixture_unbind(&st,true);
  /* Bind capacity refuses before host entry; DMA direction refusal precedes capacity. */
- s.depth=5; st.priv=NULL; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-ENOSPC); EQ(nevents,3); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); free(st.priv);
- native_directions=1U<<XDEV_EXT_MECH_DIR_FROM_DEVICE; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EOPNOTSUPP); EQ(nevents,4); free(st.priv);
- native_directions=XDEV_EXT_WINDOW_COPY_DIRS; native_alignment=3; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,4); free(st.priv); native_alignment=1;
+ s.depth=5; st.priv=NULL; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-ENOSPC); EQ(nevents,3); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); fixture_unbind(&st,false);
+ native_directions=1U<<XDEV_EXT_MECH_DIR_FROM_DEVICE; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EOPNOTSUPP); EQ(nevents,4); fixture_unbind(&st,true);
+ native_directions=XDEV_EXT_WINDOW_COPY_DIRS; native_alignment=3; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,4); fixture_unbind(&st,true); native_alignment=1;
  u.flags=1; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-EINVAL); EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,0);
  puts("baseline bind: CE lease→native-region→geometry/window→host→ready; DMA scope/lease→region→geometry/direction/window→host");
 }
@@ -72,20 +72,20 @@ static void consumer_baseline(void) {
  nevents=0; EQ(xdev_ext_dma_bind(&ds,&(struct xdev_ext_mech_stage_uapi){.arg1=4096}),0);
 #endif
  EQ(xdev_ext_ce_validate(&cs,&b,(void *)&cd,1),0);
- EQ(xdev_ext_ce_stage_xfers(cs.priv,&b,&cb),0); EQ(cb.n,1); EQ(cb.total,128); EQ(cb.x[0].host_byte_off,1104); EQ(cb.x[0].gpu_off,1024); EQ(cb.x[0].owner,b.owner[0]); EQ(cb.x[0].generation,b.generation[0]);
+ EQ(fixture_ce_stage_xfers(cs.priv,&b,&cb),0); EQ(cb.n,1); EQ(cb.total,128); EQ(cb.x[0].host_byte_off,1104); EQ(cb.x[0].gpu_off,1024); EQ(cb.x[0].owner,b.owner[0]); EQ(cb.x[0].generation,b.generation[0]);
  EQ(xdev_ext_dma_validate(&ds,&b,(void *)&dd,1),0);
- EQ(xdev_ext_dma_stage_xfers(ds.priv,&b,&db),0); EQ(db.n,1); EQ(db.total,128); EQ(db.x[0].host_byte_off,1104); EQ(db.x[0].device_off,1024); EQ(db.x[0].owner,b.owner[0]); EQ(db.x[0].generation,b.generation[0]);
- EQ(xdev_ext_ce_stage_xfers(cs.priv,&b,&cb),-EPROTO); EQ(xdev_ext_dma_stage_xfers(ds.priv,&b,&db),-EPROTO);
- ((struct xdev_ext_ce_stage *)cs.priv)->dead=true; ((struct xdev_ext_dma_stage *)ds.priv)->dead=true;
- EQ(xdev_ext_ce_stage_xfers(cs.priv,&b,&cb),-ENODEV); EQ(xdev_ext_dma_stage_xfers(ds.priv,&b,&db),-ENODEV);
- ((struct xdev_ext_ce_stage *)cs.priv)->dead=false; ((struct xdev_ext_dma_stage *)ds.priv)->dead=false;
+ EQ(fixture_dma_stage_xfers(ds.priv,&b,&db),0); EQ(db.n,1); EQ(db.total,128); EQ(db.x[0].host_byte_off,1104); EQ(db.x[0].device_off,1024); EQ(db.x[0].owner,b.owner[0]); EQ(db.x[0].generation,b.generation[0]);
+ EQ(fixture_ce_stage_xfers(cs.priv,&b,&cb),-EPROTO); EQ(fixture_dma_stage_xfers(ds.priv,&b,&db),-EPROTO);
+ fixture_dead(((struct xdev_ext_ce_stage *)cs.priv))=true; fixture_dead(((struct xdev_ext_dma_stage *)ds.priv))=true;
+ EQ(fixture_ce_stage_xfers(cs.priv,&b,&cb),-ENODEV); EQ(fixture_dma_stage_xfers(ds.priv,&b,&db),-ENODEV);
+ fixture_dead(((struct xdev_ext_ce_stage *)cs.priv))=false; fixture_dead(((struct xdev_ext_dma_stage *)ds.priv))=false;
  b.frame_error=-EFAULT; EQ(xdev_ext_ce_validate(&cs,&b,(void *)&cd,33),-E2BIG); EQ(xdev_ext_dma_validate(&ds,&b,(void *)&dd,33),-E2BIG);
  EQ(xdev_ext_ce_validate(&cs,&b,(void *)&cd,1),-EFAULT); EQ(xdev_ext_dma_validate(&ds,&b,(void *)&dd,1),-EFAULT); b.frame_error=0;
  b.slot=0; EQ(xdev_ext_ce_validate(&cs,&b,(void *)&cd,1),-ERANGE); EQ(xdev_ext_dma_validate(&ds,&b,(void *)&dd,1),-ERANGE);
  b.slot=1; cd.gpu_off=960; dd.device_off=960; EQ(xdev_ext_ce_validate(&cs,&b,(void *)&cd,1),-ERANGE); EQ(xdev_ext_dma_validate(&ds,&b,(void *)&dd,1),-ERANGE);
  for(size_t i=0;i<sizeof(b.payload);i++) EQ(b.payload[i],0x5a);
 #ifdef HAVE_TYPED
- free(cs.priv); free(ds.priv);
+ fixture_unbind(&cs,false); fixture_unbind(&ds,true);
 #endif
  puts("baseline consumers: real validate/stage offsets, claims, payload, dead/staged and count/collect ordering");
 }

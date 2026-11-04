@@ -30,7 +30,7 @@ int main(void)
  CHECK(unhost_calls == 2, "successful host unmaps not repeated");
  CHECK(module_a.refs == 3 && module_a.puts == 0, "all three stage pins retained");
  after_block(&b.st[0], &bb);
- if (((struct xdev_ext_ce_cookie *)bb.cookie)->state == XDEV_EXT_CE_CK_ARMED)
+ if (((struct CE_COOKIE *)bb.cookie)->state == XDEV_EXT_CE_CK_ARMED)
   finish(&b.st[0], &bb, false);
  unregion_errno = 0;
  CHECK(!xdev_ext_ce_unbind(&a.st[0]), "stage0 releases region");
@@ -40,7 +40,7 @@ int main(void)
  before = native_calls;
  after_block(&b.st[0], &bb);
  CHECK(native_calls == before, "mark dead preserves native exclusion");
- if (((struct xdev_ext_ce_cookie *)bb.cookie)->state == XDEV_EXT_CE_CK_ARMED)
+ if (((struct CE_COOKIE *)bb.cookie)->state == XDEV_EXT_CE_CK_ARMED)
   finish(&b.st[0], &bb, false);
  CHECK(!xdev_ext_ce_unbind(&a.st[1]), "last valid-bound stage releases region");
  CHECK(!submit(&b.st[0], &bb), "B admitted after final A cleanup");

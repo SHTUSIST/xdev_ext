@@ -32,8 +32,7 @@
 #include <linux/xdev_ext_mech.h>
 
 #include "xdev_ext_mech_dma_core.h"
-#include "xdev_ext_compfam_copy_core.h"
-#include "xdev_ext_mech_native_cookie.h"
+#include "xdev_ext_compfam_copy_runtime.h"
 #include "xdev_ext_mech_ce_lease.h"
 #include "xdev_ext_mech_window.h"
 
@@ -104,13 +103,6 @@ void xdev_ext_dma_scope_put(struct xdev_ext_dma_scope *scope)
 }
 EXPORT_SYMBOL_GPL(xdev_ext_dma_scope_put);
 
-/* Registry has no fixed provider count; sessions pin ops->owner under lock. */
-struct xdev_ext_dma_provider {
-	struct list_head node;
-	const struct xdev_ext_dma_provider_ops *ops;
-	const struct xdev_ext_dma_scope_ops *scope_ops;
-};
-
 /* A session atomically owns ALL its bound DMA windows while any batch can
  * use them. Reentrant batches keep per-slot depth parallelism for matching
  * bases or disjoint windows; shifted overlapping bases serialize batches.
@@ -140,18 +132,8 @@ struct xdev_ext_dma_stage {
 	struct xdev_ext_dma_scope *scope; /* one owned external ref; key borrows it */
  bool cleanup_held;
 	struct xdev_ext_dma_region region;
-	void *host;			/* bind_host() handle of the pool pages */
 	struct xdev_ext_dma_geom geom;
-	struct xdev_ext_comp_copy_window window;
-	atomic_t ambiguous;		/* AMBIGUOUS completions on this stage */
-	bool dead;
-	/* session worker only: the plan validate accepted, until submit */
-	struct xdev_ext_mech_batch *staged;
-	struct xdev_ext_comp_copy_plan plan;
-	/* Worker-only scratch; native callbacks retain the typed batch copy. */
-	struct xdev_ext_comp_copy_transfer transfer[XDEV_EXT_DMA_MAX_ENTRIES];
-	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
-	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
+	struct xdev_ext_comp_copy_stage copy;
 };
 
 _Static_assert(XDEV_EXT_DMA_MAX_ENTRIES <=
@@ -159,34 +141,22 @@ _Static_assert(XDEV_EXT_DMA_MAX_ENTRIES <=
 	       sizeof(struct xdev_ext_comp_copy_entry),
 	       "DMA entries exceed the common copy plan capacity");
 
-/* Stable per-batch storage: never overwritten by another stage's private area.
- * b is initialized once and remains safe to dereference for stale-ticket rejection.
- */
-struct xdev_ext_dma_cookie {
-	struct xdev_ext_mech_batch *b;
-	struct xdev_ext_dma_stage *cs;
-	u64 bytes_done;
-	int status;
-	u32 outcome;			/* enum xdev_ext_dma_outcome */
-	u8 state;			/* enum xdev_ext_dma_cookie_state */
-};
-XDEV_EXT_NATIVE_COOKIE_ASSERT(struct xdev_ext_dma_cookie);
-
 struct xdev_ext_dma_batch {
 	u64 total;
 	u32 n;
 	struct xdev_ext_dma_xfer x[XDEV_EXT_DMA_MAX_ENTRIES];
 };
 
-static DEFINE_MUTEX(xdev_ext_dma_provider_lock);
-static LIST_HEAD(xdev_ext_dma_providers);
+static struct xdev_ext_comp_copy_registry xdev_ext_dma_registry = {
+	.lock = __MUTEX_INITIALIZER(xdev_ext_dma_registry.lock),
+	.members = LIST_HEAD_INIT(xdev_ext_dma_registry.members),
+};
 
 static int xdev_ext_dma_provider_register_common(
  const struct xdev_ext_dma_provider_ops *ops,
  const struct xdev_ext_dma_scope_ops *scope_ops, bool scoped)
 {
-	struct xdev_ext_dma_provider *p, *new;
-	int err = 0;
+	struct xdev_ext_comp_copy_member member;
 
 	if (!ops || !ops->fops || !ops->bind_region || !ops->unbind_region ||
 	    !ops->bind_host || !ops->unbind_host || !ops->submit)
@@ -199,25 +169,15 @@ static int xdev_ext_dma_provider_register_common(
 		if (scope_ops->flags || scope_ops->reserved || !scope_ops->acquire)
 			return -EINVAL;
 	}
-	new = kmalloc(sizeof(*new), GFP_KERNEL);
-	if (!new)
-		return -ENOMEM;
-	new->ops = ops;
-	new->scope_ops = scope_ops;
-	mutex_lock(&xdev_ext_dma_provider_lock);
-	list_for_each_entry(p, &xdev_ext_dma_providers, node) {
-		if (p->ops->fops == ops->fops) {
-			err = -EBUSY;
-			break;
-		}
-	}
-	if (!err)
-		list_add_tail(&new->node, &xdev_ext_dma_providers);
-	mutex_unlock(&xdev_ext_dma_provider_lock);
-	if (err)
-		kfree(new);
-	return err;
+	member = (struct xdev_ext_comp_copy_member){
+		.identity = ops,
+		.fops = ops->fops,
+		.owner = ops->owner,
+		.scope_ops = scope_ops,
+	};
+	return xdev_ext_comp_copy_registry_register(&xdev_ext_dma_registry, &member);
 }
+
 int xdev_ext_dma_provider_register(const struct xdev_ext_dma_provider_ops *ops)
 {
  return xdev_ext_dma_provider_register_common(ops, NULL, false);
@@ -233,40 +193,19 @@ EXPORT_SYMBOL_GPL(xdev_ext_dma_provider_register_scoped);
 
 void xdev_ext_dma_provider_unregister(const struct xdev_ext_dma_provider_ops *ops)
 {
-	struct xdev_ext_dma_provider *p, *found = NULL;
-
-	mutex_lock(&xdev_ext_dma_provider_lock);
-	list_for_each_entry(p, &xdev_ext_dma_providers, node) {
-		if (p->ops == ops) {
-			list_del(&p->node);
-			found = p;
-			break;
-		}
-	}
-	mutex_unlock(&xdev_ext_dma_provider_lock);
-	WARN_ON_ONCE(!found);
-	kfree(found);
+	WARN_ON_ONCE(!xdev_ext_comp_copy_registry_unregister(&xdev_ext_dma_registry, ops));
 }
 EXPORT_SYMBOL_GPL(xdev_ext_dma_provider_unregister);
 
 /* CREATE: select by file operations and pin before releasing registry lock. */
 static const struct xdev_ext_dma_provider_ops *xdev_ext_dma_provider_get(
- struct file *file, const struct xdev_ext_dma_scope_ops **scope_ops)
+	struct file *file, const struct xdev_ext_dma_scope_ops **scope_ops)
 {
-	const struct xdev_ext_dma_provider_ops *ops = NULL;
-	struct xdev_ext_dma_provider *p;
+	struct xdev_ext_comp_copy_member member;
 
-	*scope_ops = NULL;
-	mutex_lock(&xdev_ext_dma_provider_lock);
-	list_for_each_entry(p, &xdev_ext_dma_providers, node) {
-		if (p->ops->fops == file->f_op && try_module_get(p->ops->owner)) {
-			ops = p->ops;
-			*scope_ops = p->scope_ops;
-			break;
-		}
-	}
-	mutex_unlock(&xdev_ext_dma_provider_lock);
-	return ops;
+	xdev_ext_comp_copy_registry_get(&xdev_ext_dma_registry, file, &member);
+	*scope_ops = member.scope_ops;
+	return member.identity;
 }
 
 /* No native effects here. A non-NULL output always transfers one get-ref,
@@ -445,6 +384,129 @@ static bool xdev_ext_dma_lease_busy(struct xdev_ext_dma_stage *cs)
  return busy;
 }
 
+static int xdev_ext_dma_copy_lease_get(struct xdev_ext_comp_copy_stage *copy,
+	struct xdev_ext_mech_batch *b)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+
+	return xdev_ext_dma_lease_get(cs, b);
+}
+
+/* Native callbacks retain the typed batch array, never the worker scratch. */
+static int xdev_ext_dma_copy_submit(struct xdev_ext_comp_copy_stage *copy,
+	struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
+	const struct xdev_ext_comp_copy_transfer *x, u32 n, u64 total,
+	struct xdev_ext_comp_copy_cookie *ck, u64 ticket)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+	struct xdev_ext_dma_batch *cb = xdev_ext_mech_batch_priv(b);
+	u32 i;
+
+	for (i = 0; i < n; i++)
+		cb->x[i] = (struct xdev_ext_dma_xfer){
+			.owner = x[i].owner,
+			.generation = x[i].generation,
+			.host_byte_off = x[i].host_byte_off,
+			.device_off = x[i].device_off,
+			.len = x[i].len,
+			.flags = x[i].flags,
+		};
+	cb->n = n;
+	cb->total = total;
+	return cs->ops->submit(&cs->region, copy->host, st->direction,
+		cb->x, cb->n, (struct xdev_ext_dma_cookie *)ck, ticket);
+}
+
+static u32 xdev_ext_dma_copy_classify(struct xdev_ext_mech_batch *b, u64 ticket,
+	int *status, bool *hw_submitted, u64 bytes_done)
+{
+	const struct xdev_ext_dma_batch *cb = xdev_ext_mech_batch_priv(b);
+
+	if (!xdev_ext_mech_batch_dma_owners_valid(b, ticket, cb->x, cb->n)) {
+		*status = -ESTALE;
+		*hw_submitted = true;
+	}
+	if (!*status && !*hw_submitted)
+		*status = -EIO;
+	return xdev_ext_dma_classify(*status, *hw_submitted, bytes_done, cb->total);
+}
+
+static int xdev_ext_dma_copy_unbind_begin(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+
+	if (cs->lease_group && xdev_ext_dma_lease_busy(cs))
+		return -EBUSY;
+	/* Retain configured exclusion throughout either native unmap. */
+	xdev_ext_dma_lease_cleanup(cs, true);
+	return 0;
+}
+
+static int xdev_ext_dma_copy_unbind_host(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+
+	return cs->ops->unbind_host(copy->host);
+}
+
+static int xdev_ext_dma_copy_unbind_region(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+	int err;
+
+	if (!cs->region.priv)
+		return 0;
+	err = cs->ops->unbind_region(&cs->region);
+	if (err)
+		return err;
+	cs->region.priv = NULL;
+	return 0;
+}
+
+static int xdev_ext_dma_copy_unbind_end(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+
+	xdev_ext_dma_lease_cleanup(cs, false);
+	if (cs->lease_group) {
+		if (!xdev_ext_dma_lease_unbind(cs))
+			return -EBUSY;
+		cs->lease_group = NULL;
+	}
+	if (cs->scope) {
+		xdev_ext_dma_scope_put(cs->scope);
+		cs->scope = NULL;
+	}
+	return 0;
+}
+
+static int xdev_ext_dma_copy_poll(struct xdev_ext_comp_copy_stage *copy)
+{
+	struct xdev_ext_dma_stage *cs = container_of(copy, struct xdev_ext_dma_stage, copy);
+
+	return cs->ops->poll(&cs->region);
+}
+
+static void xdev_ext_dma_copy_warn(bool refused_submit)
+{
+	if (refused_submit)
+		WARN_ONCE(1, "xdev_ext_mech_dma: provider completed a refused submit\n");
+	else
+		WARN_ONCE(1, "xdev_ext_mech_dma: completion without an accepted submit\n");
+}
+
+static const struct xdev_ext_comp_copy_legacy_ops xdev_ext_dma_copy_ops = {
+	.lease_get = xdev_ext_dma_copy_lease_get,
+	.submit = xdev_ext_dma_copy_submit,
+	.classify = xdev_ext_dma_copy_classify,
+	.unbind_begin = xdev_ext_dma_copy_unbind_begin,
+	.unbind_host = xdev_ext_dma_copy_unbind_host,
+	.unbind_region = xdev_ext_dma_copy_unbind_region,
+	.unbind_end = xdev_ext_dma_copy_unbind_end,
+	.poll = xdev_ext_dma_copy_poll,
+	.warn = xdev_ext_dma_copy_warn,
+};
+
 static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
                        const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -476,6 +538,7 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
  /* Failed native binds can retain partial mappings. Publish them for the
   * core's checked CREATE rollback before entering either provider hook. */
  cs->ops = ops;
+ cs->copy.ops = &xdev_ext_dma_copy_ops;
  cs->region.ops = ops;
  cs->region.polled = st->poll;
  st->priv = cs;
@@ -502,12 +565,12 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
  if (!(cs->geom.directions & (1U << st->direction)))
   return -EOPNOTSUPP;
  geom = xdev_ext_dma_window_geom(&cs->geom);
- err = xdev_ext_comp_copy_prepare(&cs->window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
+ err = xdev_ext_comp_copy_prepare(&cs->copy.window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
    st->direction, xdev_ext_mech_session_depth(st->s),
    xdev_ext_mech_session_layout(st->s)->group_bytes);
  if (err)
   return err;
- err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->host);
+ err = ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->copy.host);
  if (err)
   return err;
  return 0;
@@ -515,84 +578,33 @@ static int xdev_ext_dma_bind(struct xdev_ext_mech_stage *st,
 
 static int xdev_ext_dma_unbind(struct xdev_ext_mech_stage *st)
 {
- struct xdev_ext_dma_stage *cs = st->priv;
- const struct xdev_ext_dma_provider_ops *ops;
- int err;
-
- if (!cs)
-  return 0;
- ops = cs->ops;
- if (atomic_read(&cs->ambiguous))
-  return -EBUSY;
- if (cs->lease_group && xdev_ext_dma_lease_busy(cs))
-  return -EBUSY;
- /* No new foreign native access may race the unmap result itself. */
- xdev_ext_dma_lease_cleanup(cs, true);
- if (cs->host) {
-  err = ops->unbind_host(cs->host);
-  if (err)
-   goto retain;
-  cs->host = NULL;
- }
- if (cs->region.priv) {
-  err = ops->unbind_region(&cs->region);
-  if (err)
-   goto retain;
-  cs->region.priv = NULL;
- }
- xdev_ext_dma_lease_cleanup(cs, false);
- if (cs->lease_group) {
-  if (!xdev_ext_dma_lease_unbind(cs))
-   return -EBUSY;
-  cs->lease_group = NULL;
- }
- if (cs->scope) {
-  xdev_ext_dma_scope_put(cs->scope);
-  cs->scope = NULL;
- }
- st->priv = NULL;
- kfree(cs);
- module_put(ops->owner);
- return 0;
-retain:
- xdev_ext_dma_lease_cleanup(cs, true);
- return err;
-}
-
-/* Worker or CREATE: data spans and pool chunk indices of @b's frames. */
-static int xdev_ext_dma_collect(struct xdev_ext_dma_stage *cs, struct xdev_ext_mech_batch *b)
-{
-	u32 i, nr = xdev_ext_mech_batch_nr_frames(b);
-	struct xdev_ext_mech_frame f;
+	struct xdev_ext_dma_stage *cs = st->priv;
+	const struct xdev_ext_dma_provider_ops *native_ops;
 	int err;
 
-	if (nr > XDEV_EXT_MECH_MAX_FRAMES)
-		return -E2BIG;
-	for (i = 0; i < nr; i++) {
-		err = xdev_ext_mech_batch_frame(b, i, &f);
-		if (err)
-			return err;
-		cs->fi[i] = (struct xdev_ext_mech_frame_info){
-			.umem_addr	= f.umem_addr,
-			.data_off	= f.data_off,
-			.data_len	= f.data_len,
-		};
-		cs->index[i] = f.index;
-	}
-	return nr;
+	if (!cs)
+		return 0;
+	native_ops = cs->ops;
+	err = xdev_ext_comp_copy_unbind(&cs->copy);
+	if (err)
+		return err;
+	st->priv = NULL;
+	kfree(cs);
+	module_put(native_ops->owner);
+	return 0;
 }
 
 static void xdev_ext_dma_fill_info(struct xdev_ext_mech_stage *st,
 			     struct xdev_ext_mech_batch *b, void *info)
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
-	int nr = b ? xdev_ext_dma_collect(cs, b) : 0;
+	int nr = b ? xdev_ext_comp_copy_collect(&cs->copy, b) : 0;
 
 	/* Unreadable frames show as none; validate then refuses the batch. */
 	if (nr < 0)
 		nr = 0;
 	xdev_ext_dma_info_fill(info, xdev_ext_mech_session_layout(st->s), &cs->geom,
-			 cs->fi, nr);
+			 cs->copy.fi, nr);
  if (b) {
   struct xdev_ext_dma_mech_info *di = info;
   di->window_slot = xdev_ext_mech_batch_slot(b);
@@ -601,138 +613,37 @@ static void xdev_ext_dma_fill_info(struct xdev_ext_mech_stage *st,
  }
 }
 
-static int xdev_ext_dma_validate(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b,
-			   const u8 *scratch, u32 n)
+static int xdev_ext_dma_validate(struct xdev_ext_mech_stage *st,
+	struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
-	int nr, err;
 
-	cs->staged = NULL;
-	if (!b)
-		return -EINVAL;
-	if (n > XDEV_EXT_DMA_MAX_ENTRIES)
-		return -E2BIG;
-	nr = xdev_ext_dma_collect(cs, b);
-	if (nr < 0)
-		return nr;
-	err = xdev_ext_comp_copy_validate(&cs->window, cs->fi, cs->index, nr,
-		scratch, n, XDEV_EXT_DMA_MAX_ENTRIES, XDEV_EXT_DMA_F_KNOWN_MASK,
-		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), &cs->plan);
-	if (err)
-		return err;
-	cs->staged = b;
-	return 0;
+	return xdev_ext_comp_copy_stage_validate(&cs->copy, b, scratch, n,
+		XDEV_EXT_DMA_MAX_ENTRIES, XDEV_EXT_DMA_F_KNOWN_MASK);
 }
 
-static int xdev_ext_dma_copy_claim(void *batch, __u32 frame_pos,
-				  __u64 *owner, __u64 *generation)
-{
-	return xdev_ext_mech_batch_frame_claim(batch, frame_pos, owner, generation);
-}
-
-/* Worker: consume exactly the typed plan admitted for this batch and slot. */
-static int xdev_ext_dma_stage_xfers(struct xdev_ext_dma_stage *cs, struct xdev_ext_mech_batch *b,
-			      struct xdev_ext_dma_batch *cb)
-{
-	struct xdev_ext_mech_batch *staged = cs->staged;
-	struct xdev_ext_comp_copy_transfer *x = cs->transfer;
-	u32 i;
-	int err;
-
-	cs->staged = NULL;
-	if (READ_ONCE(cs->dead))
-		return -ENODEV;
-	if (staged != b)
-		return -EPROTO;
-	err = xdev_ext_comp_copy_transfer(&cs->plan, xdev_ext_mech_batch_id(b),
-		xdev_ext_mech_batch_slot(b), b, xdev_ext_dma_copy_claim, x);
-	if (err)
-		return err;
-	for (i = 0; i < cs->plan.n; i++)
-		cb->x[i] = (struct xdev_ext_dma_xfer){
-			.owner		= x[i].owner,
-			.generation	= x[i].generation,
-			.host_byte_off	= x[i].host_byte_off,
-			.device_off	= x[i].device_off,
-			.len		= x[i].len,
-			.flags		= x[i].flags,
-		};
-	cb->n = cs->plan.n;
-	cb->total = cs->plan.total;
-	return 0;
-}
-
-static int xdev_ext_dma_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
+static int xdev_ext_dma_submit(struct xdev_ext_mech_stage *st,
+	struct xdev_ext_mech_batch *b)
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
-	struct xdev_ext_dma_batch *cb = xdev_ext_mech_batch_priv(b);
-	struct xdev_ext_dma_cookie *ck = xdev_ext_mech_batch_cookie(b);
-	int err;
 
-	err = xdev_ext_dma_lease_get(cs, b);
-	if (err)
-		return err;
-	if (!xdev_ext_dma_cookie_arm(&ck->state))
-		return -EBUSY;
-	if (!ck->b)
-		ck->b = b;
-	ck->cs = cs;
-	err = xdev_ext_dma_stage_xfers(cs, b, cb);
-	if (!err)
-		err = cs->ops->submit(&cs->region, cs->host,
-					     st->direction, cb->x, cb->n, ck,
-					     xdev_ext_mech_batch_ticket(b));
-	if (err >= 0)
-		return 0;
-	if (!xdev_ext_dma_cookie_disarm(&ck->state)) {
-		/* Completed, so it reached the device path despite the error. */
-		WARN_ONCE(1, "xdev_ext_mech_dma: provider completed a refused submit\n");
-		return 0;
-	}
-	ck->status = err;
-	return err;
+	return xdev_ext_comp_copy_stage_submit(&cs->copy, st, b);
 }
 
-bool xdev_ext_dma_owners_valid(struct xdev_ext_dma_cookie *ck, u64 ticket,
- const struct xdev_ext_dma_xfer *x, u32 n)
+bool xdev_ext_dma_owners_valid(struct xdev_ext_dma_cookie *native_ck, u64 ticket,
+	const struct xdev_ext_dma_xfer *x, u32 n)
 {
- return ck && ck->b && xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, x, n);
+	struct xdev_ext_comp_copy_cookie *ck = (struct xdev_ext_comp_copy_cookie *)native_ck;
+
+	return ck && ck->b && xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, x, n);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_dma_owners_valid);
 
 void xdev_ext_dma_complete(struct xdev_ext_dma_cookie *ck, u64 ticket, int status,
-		     bool hw_submitted, u64 bytes_done)
+	bool hw_submitted, u64 bytes_done)
 {
-	const struct xdev_ext_dma_batch *cb;
-	u32 outcome;
-	int err;
-
-	/* Validate the immutable native ticket before touching reused cookie data. */
-	if (xdev_ext_mech_batch_completion_claim(ck->b, ticket))
-		return;
-	if (WARN_ONCE(!xdev_ext_dma_cookie_finish(&ck->state),
-		      "xdev_ext_mech_dma: completion without an accepted submit\n")) {
-		atomic_inc(&ck->cs->ambiguous);
-		xdev_ext_mech_batch_completion_publish(ck->b, ticket, -EPROTO, true);
-		return;
-	}
-	cb = xdev_ext_mech_batch_priv(ck->b);
- if (!xdev_ext_mech_batch_dma_owners_valid(ck->b, ticket, cb->x, cb->n)) {
-  status = -ESTALE;
-  hw_submitted = true; /* Accepted access cannot be proved to belong to us. */
- }
-	if (!status && !hw_submitted)
-		status = -EIO;
-	outcome = xdev_ext_dma_classify(status, hw_submitted, bytes_done, cb->total);
-	ck->outcome = outcome;
-	ck->status = status;
-	ck->bytes_done = bytes_done;
-	if (xdev_ext_dma_disposition(outcome, status, &err)) {
-		atomic_inc(&ck->cs->ambiguous);
-		xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, true);
-		return;
-	}
-	xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, false);
+	xdev_ext_comp_copy_complete((struct xdev_ext_comp_copy_cookie *)ck, ticket,
+		status, hw_submitted, bytes_done, &xdev_ext_dma_copy_ops);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_dma_complete);
 
@@ -740,7 +651,7 @@ static void xdev_ext_dma_fill_cqe(struct xdev_ext_mech_stage *st, struct xdev_ex
 			    void *cqe)
 {
 	const struct xdev_ext_dma_batch *cb = xdev_ext_mech_batch_priv(b);
-	const struct xdev_ext_dma_cookie *ck = xdev_ext_mech_batch_cookie(b);
+	const struct xdev_ext_comp_copy_cookie *ck = xdev_ext_mech_batch_cookie(b);
 
 	xdev_ext_dma_cqe_fill(cqe, READ_ONCE(ck->state), ck->outcome, ck->status,
 			ck->bytes_done, cb->total, cb->n);
@@ -750,7 +661,7 @@ static void xdev_ext_dma_mark_dead(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
 
-	WRITE_ONCE(cs->dead, true);
+	xdev_ext_comp_copy_mark_dead(&cs->copy);
 }
 
 /* Session worker, polled stage: the provider's completion pass of the region. */
@@ -758,7 +669,7 @@ static int xdev_ext_dma_poll(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_dma_stage *cs = st->priv;
 
-	return cs->ops->poll(&cs->region);
+	return xdev_ext_comp_copy_poll(&cs->copy);
 }
 
 static const struct xdev_ext_comp_hooks xdev_ext_dma_comp_hooks = {
@@ -776,7 +687,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_dma_class = {
 	.cqe_size	= sizeof(struct xdev_ext_dma_mech_cqe),
 	.cqe_cap	= 1,
 	.batch_priv_size = sizeof(struct xdev_ext_dma_batch),
-	.batch_cookie_size = sizeof(struct xdev_ext_dma_cookie),
+	.batch_cookie_size = sizeof(struct xdev_ext_comp_copy_cookie),
 	.owner		= THIS_MODULE,
 	.bind		= xdev_ext_dma_bind,
 	.unbind_checked	= xdev_ext_dma_unbind,

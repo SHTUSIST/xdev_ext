@@ -30,6 +30,9 @@ KERNEL = source_owner()
 
 
 def function(source, signature):
+    if signature not in source:
+        print("SETUP: missing actual definition " + signature)
+        raise SystemExit(2)
     start = source.index(signature)
     brace = source.index('{', start)
     depth, end = 1, brace + 1
@@ -259,7 +262,7 @@ def main():
     source = (KERNEL/'src/compute/io_uring/xdev_ext_mech_ce.c').read_text()
     core = (KERNEL/'src/core/io_uring/xdev_ext_mech.c').read_text()
     if args.mutant == 'missing-get':
-        source = source.replace('err = xdev_ext_ce_lease_get(cs, b);', 'err = 0;', 1)
+        source = source.replace('return xdev_ext_ce_lease_get(cs, b);', 'return 0;', 1)
     # Final frame disposition can turn an apparent completion into quarantine.
     end = function(core, 'static void xdev_ext_mech_end(')
     if args.mutant == 'early-release':
@@ -291,8 +294,18 @@ def main():
         functions = functions.replace('list_for_each_entry(held, &other->regions, lease_node)',
             'for (held=container_of(other->regions.next,__typeof__(*held),lease_node);held;held=NULL)')
     submit = function(source, 'static int xdev_ext_ce_submit(')
-    assert submit.index('xdev_ext_ce_lease_get(') < submit.index('xdev_ext_ce_cookie_arm(')
-    assert submit.index('xdev_ext_ce_lease_get(') < submit.index('cs->ops->submit(')
+    common = (KERNEL/'src/compute/io_uring/xdev_ext_compfam_copy.c').read_text()
+    execute = function(common, 'int xdev_ext_comp_copy_stage_submit(')
+    lease = function(source, 'static int xdev_ext_ce_copy_lease_get(')
+    native = function(source, 'static int xdev_ext_ce_copy_submit(')
+    assert 'xdev_ext_comp_copy_stage_submit(&cs->copy, st, b)' in submit
+    # Follow the actual class table and both callbacks into the common body.
+    assert '.lease_get = xdev_ext_ce_copy_lease_get,' in source
+    assert '.submit = xdev_ext_ce_copy_submit,' in source
+    lease.index('xdev_ext_ce_lease_get(cs, b)')
+    assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('xdev_ext_window_copy_cookie_arm(')
+    assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('cs->ops->submit(')
+    assert 'cs->ops->submit(&cs->region, copy->host, st->direction,' in native
     with tempfile.TemporaryDirectory(prefix='independent-ce-lease-') as tmp:
         c, binary = Path(tmp)/'actual.c', Path(tmp)/'actual'
         headers = ('src/core/include/uapi/linux/xdev_ext_mech.h',
