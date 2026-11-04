@@ -483,48 +483,6 @@ static struct nvme_ns *nvme_xdev_ext_class_ns(struct file *file)
 	return container_of(file_inode(file)->i_cdev, struct nvme_ns, cdev);
 }
 
-/*
- * CREATE: the namespace takes REQ_POLLED requests on interrupt-free poll
- * queues (nvme-pci poll_queues > 0 and at least two I/O queues).
- */
-static bool nvme_xdev_ext_poll_capable(const struct request_queue *q)
-{
-	return (q->limits.features & BLK_FEAT_POLL) && q->tag_set &&
-	       q->tag_set->nr_maps > HCTX_TYPE_POLL &&
-	       q->tag_set->map[HCTX_TYPE_POLL].nr_queues;
-}
-
-/* Worker: the operation of a stage's native request, polled when asked. */
-static blk_opf_t nvme_xdev_ext_poll_opf(const struct xdev_ext_mech_stage *st,
-					blk_opf_t opf)
-{
-	return st->poll ? opf | REQ_POLLED : opf;
-}
-
-/*
- * Worker, right after allocation: a polled stage never issues on an
- * interrupt queue.  The poll queues can vanish with a controller reset that
- * changes the queue count; such a request is refused before the device.
- */
-static int nvme_xdev_ext_poll_check(const struct xdev_ext_mech_stage *st,
-				    struct request *req)
-{
-	return st->poll && !blk_rq_is_poll(req) ? -EOPNOTSUPP : 0;
-}
-
-/* Worker, immediately before execute: let the poll pass find the request. */
-static void nvme_xdev_ext_poll_arm(const struct xdev_ext_mech_stage *st,
-				   struct request *req,
-				   struct xdev_ext_stor_completion *done)
-{
-	if (!st->poll) {
-		WRITE_ONCE(done->poll_live, false);
-		return;
-	}
-	done->poll_queue = req->mq_hctx->queue_num;
-	WRITE_ONCE(done->poll_live, true);
-}
-
 static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 			       const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -540,7 +498,7 @@ static int nvme_xdev_ext_class_bind(struct xdev_ext_mech_stage *st,
 	if (!ns)
 		return -EOPNOTSUPP;
 	/* No interrupt fallback: polling needs this namespace's poll queues. */
-	if (st->poll && !nvme_xdev_ext_poll_capable(ns->queue))
+	if (st->poll && !xdev_ext_stor_block_poll_capable(ns->queue))
 		return -EOPNOTSUPP;
 #ifdef CONFIG_XDEV_EXT_MECH_ZEROCOPY
 	/* Only PCI has the strict SGL/no-bounce transport contract below. */
@@ -1029,11 +987,13 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	cmd.rw.length = cpu_to_le16(plan.nlb);
 
 	/* Tag pressure is preaccept backpressure, as for host pages. */
-	req = blk_mq_alloc_request(ns->queue, nvme_xdev_ext_poll_opf(st, nvme_req_op(&cmd)),
+	req = blk_mq_alloc_request(ns->queue,
+				   xdev_ext_stor_block_poll_opf(st->poll,
+							 nvme_req_op(&cmd)),
 				   BLK_MQ_REQ_NOWAIT);
 	if (IS_ERR(req))
 		return PTR_ERR(req);
-	ret = nvme_xdev_ext_poll_check(st, req);
+	ret = xdev_ext_stor_block_poll_check(st->poll, req);
 	if (ret) {
 		blk_mq_free_request(req);
 		return ret;
@@ -1073,7 +1033,7 @@ static int nvme_xdev_ext_peer_submit(struct xdev_ext_mech_stage *st,
 	slot->done.ticket = xdev_ext_mech_batch_ticket(b);
 	req->end_io = nvme_xdev_ext_peer_end_io;
 	req->end_io_data = &slot->done;
-	nvme_xdev_ext_poll_arm(st, req, &slot->done);
+	xdev_ext_stor_block_poll_arm(st->poll, req, &slot->done);
 	/* As for host pages, end_io may run before this returns. */
 	xdev_ext_mech_trace_native_submit(b, (u64)(unsigned long)req,
 				 le64_to_cpu(cmd.rw.slba), xdev_ext_mech_batch_bytes(b),
@@ -1115,11 +1075,12 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	 * which the core rolls back and retries after a delay.
 	 */
 	req = blk_mq_alloc_request(p->ns->queue,
-				   nvme_xdev_ext_poll_opf(st, nvme_req_op(&cmd)),
+				   xdev_ext_stor_block_poll_opf(st->poll,
+							 nvme_req_op(&cmd)),
 				   BLK_MQ_REQ_NOWAIT);
 	if (IS_ERR(req))
 		return PTR_ERR(req);
-	ret = nvme_xdev_ext_poll_check(st, req);
+	ret = xdev_ext_stor_block_poll_check(st->poll, req);
 	if (ret) {
 		blk_mq_free_request(req);
 		return ret;
@@ -1145,7 +1106,7 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 	}
 	req->end_io = nvme_xdev_ext_class_end_io;
 	req->end_io_data = done;
-	nvme_xdev_ext_poll_arm(st, req, done);
+	xdev_ext_stor_block_poll_arm(st->poll, req, done);
 	/*
 	 * The core marked the batch IN_FLIGHT before ->submit: end_io may
 	 * run before this returns, even from here when the queue is dead.
@@ -1165,32 +1126,21 @@ static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
 static int nvme_xdev_ext_class_poll(struct xdev_ext_mech_stage *st)
 {
 	struct nvme_xdev_ext_mech_stage *p = st->priv;
-	u32 seen[64], nr_seen = 0, i, j, k, n;	/* past 64 queues: no dedup */
-	int found = 0;
+	struct xdev_ext_stor_poll_view views[] = {
+		{
+			.first = p->nr_slots ? &p->slots[0].done : NULL,
+			.stride = sizeof(*p->slots),
+			.count = p->nr_slots,
+		},
+		{
+			.first = p->peer && p->peer->nr_slots ?
+				 &p->peer->slots[0].done : NULL,
+			.stride = sizeof(*p->peer->slots),
+			.count = p->peer ? p->peer->nr_slots : 0,
+		},
+	};
 
-	for (i = 0; i < 2; i++) {
-		n = i ? (p->peer ? p->peer->nr_slots : 0) : p->nr_slots;
-		for (j = 0; j < n; j++) {
-			struct xdev_ext_stor_completion *done =
-				i ? &p->peer->slots[j].done : &p->slots[j].done;
-			u32 queue;
-			int ret;
-
-			if (!READ_ONCE(done->poll_live))
-				continue;
-			queue = done->poll_queue;
-			for (k = 0; k < nr_seen && seen[k] != queue; k++)
-				;
-			if (k < nr_seen)
-				continue;
-			if (nr_seen < ARRAY_SIZE(seen))
-				seen[nr_seen++] = queue;
-			ret = blk_mq_poll_hw_queue(p->ns->queue, queue, NULL);
-			if (ret > 0)
-				found += ret;
-		}
-	}
-	return found;
+	return xdev_ext_stor_block_poll(p->ns->queue, views, ARRAY_SIZE(views));
 }
 
 static void nvme_xdev_ext_class_fill_cqe(struct xdev_ext_mech_stage *st,
