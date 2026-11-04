@@ -43,7 +43,7 @@ def main():
  ('duplicate-handle-cleared','fd','xdev_ext_peer_file_acquire','function',lambda s:prepend(s,'if (handle) memset(handle, 0, sizeof(*handle));')),
  ('skip-false-release','family','xdev_ext_netfam_release','function',lambda s:prepend(s,'if (!quiesced) return;')),
  ('skip-quarantine','peer','xdev_ext_peer_release','function',lambda s:once(s,'if (!quiesced) r->invalid = r->quarantined = true;','if (false) r->invalid = r->quarantined = true;')),
- ('reuse-unknown-slot','family','xdev_ext_netfam_release','function',lambda s:once(s,'if (quiesced)','if (true)')),
+ ('reuse-unknown-slot','family','xdev_ext_netfam_release','function',lambda s:once(s,'if (quiesced)\n\t\tslot->busy = false;','if (true)\n\t\tslot->busy = false;')),
  ('read-current-not-saved-ticket','family','xdev_ext_netfam_handoff','function',lambda s:once(s,'xdev_ext_mech_batch_completion_claim(b, slot->ticket)','xdev_ext_mech_batch_completion_claim(b, xdev_ext_mech_batch_ticket(b))')),
  ('native-before-tracker-init','family','xdev_ext_netfam_post','function',lambda s:once(s,'int ret = xdev_ext_peer_net_track_init_max(&slot->track, slot->nr, ns->max_elems);','int ret = 0;')),
  ('NET-TX-wrong-DMA','net','xdev_ext_net_dev_post_tx','function',lambda s:shifted_dma(s,'dma_address')),

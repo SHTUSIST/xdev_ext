@@ -45,7 +45,7 @@ static void *kvcalloc(size_t n,size_t size,int flags){return allocation(n*size);
 #define NSEC_PER_MSEC 1000000ULL
 static u64 now_ms=100;
 static u64 ktime_get_boottime_ns(void){return now_ms*NSEC_PER_MSEC;}static unsigned long msecs_to_jiffies(unsigned long n){return n;}
-struct xdev_ext_mech_pool{struct file *authority;u64 generation;};
+struct xdev_ext_mech_pool{struct file *authority;u64 generation;u32 nr_frames,frame_size;};
 struct xdev_ext_mech_session{u32 depth;bool admits;struct xdev_ext_mech_pool pool;};
 struct xdev_ext_mech_stage{void *priv;struct xdev_ext_mech_session *s;u32 direction;bool create_reporting;u32 create_phase;};
 #include "actual_frame.h"

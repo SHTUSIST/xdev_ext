@@ -111,7 +111,8 @@ static void typed_misuse(void) {
  EQ(xdev_ext_netfam_lease(&w.ns,s,0,64,128,128),-EPROTO);EQ(acquire_calls,a);EQ(requester_calls,r);EQ(s->nr,0);assert(!memcmp(old,&s->elem[0],sizeof(old)));w.member.lease_kind=99;EQ(xdev_ext_netfam_lease(&w.ns,s,0,64,128,128),-EPROTO);EQ(acquire_calls,a);
  /* NONE release must not call the peer boundary. */
  s->nr=1;xdev_ext_netfam_release(s,true);EQ(release_calls,0);discard_world(&w);
- for(u32 kind=0;kind<3;kind+=2){struct xdev_ext_netfam_stage ns={0};struct xdev_ext_net_member m=xdev_ext_net_member;m.lease_kind=kind;alloc_calls=0;EQ(xdev_ext_netfam_init(&ns,&w.stage,&m,false,14),-EINVAL);EQ(alloc_calls,0);}
+ /* HOST_CPU=2 is supported; NONE and unknown 99 must still reject. */
+ for(u32 kind=0;kind<100;kind+=99){struct xdev_ext_netfam_stage ns={0};struct xdev_ext_net_member m=xdev_ext_net_member;m.lease_kind=kind;alloc_calls=0;EQ(xdev_ext_netfam_init(&ns,&w.stage,&m,false,14),-EINVAL);EQ(alloc_calls,0);}
  puts("typed PEER:actual NET/XD declarations,new kind misuse,publication and release tag transitions");
 }
 #endif
