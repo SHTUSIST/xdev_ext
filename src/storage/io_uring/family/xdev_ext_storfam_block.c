@@ -5,6 +5,7 @@
 #include <linux/export.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_storfam_block.h>
+#include <linux/xdev_ext_storfam_runtime.h>
 
 struct xdev_ext_stor_queue_caps
 xdev_ext_stor_block_caps(struct request_queue *queue, __u8 lba_shift)
@@ -92,3 +93,62 @@ int xdev_ext_stor_block_append(struct xdev_ext_mech_pool *pool,
 	return blk_rq_append_bio(request, bio);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_stor_block_append);
+
+bool xdev_ext_stor_block_poll_capable(const struct request_queue *queue)
+{
+	return (queue->limits.features & BLK_FEAT_POLL) && queue->tag_set &&
+	       queue->tag_set->nr_maps > HCTX_TYPE_POLL &&
+	       queue->tag_set->map[HCTX_TYPE_POLL].nr_queues;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll_capable);
+
+int xdev_ext_stor_block_poll_check(bool poll, struct request *request)
+{
+	return poll && !blk_rq_is_poll(request) ? -EOPNOTSUPP : 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll_check);
+
+void xdev_ext_stor_block_poll_arm(bool poll, struct request *request,
+		struct xdev_ext_stor_completion *done)
+{
+	if (!poll) {
+		WRITE_ONCE(done->poll_live, false);
+		return;
+	}
+	done->poll_queue = request->mq_hctx->queue_num;
+	WRITE_ONCE(done->poll_live, true);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll_arm);
+
+int xdev_ext_stor_block_poll(struct request_queue *queue,
+		const struct xdev_ext_stor_poll_view *views, __u32 nr_views)
+{
+	u32 seen[64], nr_seen = 0, i, j, k;
+	int found = 0;
+
+	for (i = 0; i < nr_views; i++) {
+		for (j = 0; j < views[i].count; j++) {
+			const struct xdev_ext_stor_completion *done =
+				(const void *)((const char *)views[i].first +
+					       (size_t)j * views[i].stride);
+			u32 queue_num;
+			int ret;
+
+			if (!READ_ONCE(done->poll_live))
+				continue;
+			queue_num = done->poll_queue;
+			for (k = 0; k < nr_seen && seen[k] != queue_num; k++)
+				;
+			if (k < nr_seen)
+				continue;
+			/* Past 64 recorded queues, keep polling unrecorded keys. */
+			if (nr_seen < ARRAY_SIZE(seen))
+				seen[nr_seen++] = queue_num;
+			ret = blk_mq_poll_hw_queue(queue, queue_num, NULL);
+			if (ret > 0)
+				found += ret;
+		}
+	}
+	return found;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_block_poll);
