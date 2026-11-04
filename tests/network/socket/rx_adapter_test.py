@@ -19,7 +19,8 @@ import re
 import subprocess
 import tempfile
 import unittest
-from adapter_test import socket_family_declarations, socket_family_reference
+from adapter_test import (socket_family_declarations, socket_family_reference,
+                          socket_family_runtime, socket_submission_setup)
 
 ROOT = Path(__file__).resolve().parents[5]
 HERE = Path(__file__).resolve().parent
@@ -36,6 +37,30 @@ def production_text():
     return text[:text.index('static const struct xdev_ext_mech_class_ops')]
 
 
+# The unchanged mixed-direction cohort includes tx_accounting. Its hand-driven
+# TX batches need the same real core preparation as the old TX-only fixture.
+# RX retains its original submit/unbind path and never prepares a family slot.
+TX_FIXTURE_SETUP = r'''
+static int fixture_class_submit(struct xdev_ext_mech_stage *st,
+                                struct xdev_ext_mech_batch *b)
+{
+    struct xdev_ext_socket_stage *ss=st->priv;
+    if (!ss->rx)
+        fixture_prepare_submission(st,b);
+    return xdev_ext_socket_class_submit(st,b);
+}
+static void fixture_class_unbind(struct xdev_ext_mech_stage *st)
+{
+    struct xdev_ext_socket_stage *ss=st->priv;
+    if (!ss->rx)
+        fixture_drain_stage(st);
+    xdev_ext_socket_class_unbind(st);
+}
+#define xdev_ext_socket_class_submit fixture_class_submit
+#define xdev_ext_socket_class_unbind fixture_class_unbind
+'''
+
+
 class SocketReceiveAdapter(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -43,7 +68,8 @@ class SocketReceiveAdapter(unittest.TestCase):
         source = Path(cls.tmp.name) / 'rx.c'
         cls.binary = Path(cls.tmp.name) / 'rx'
         source.write_text((HERE / 'shim.h').read_text() + '\n' + socket_family_declarations(ROOT) +
-                          production_text() + socket_family_reference() + '\n' +
+                          socket_family_runtime(ROOT) + production_text() + socket_family_reference() +
+                          socket_submission_setup() + TX_FIXTURE_SETUP + '\n' +
                           (HERE / 'rx_fixture.c').read_text())
         cc = os.environ.get('CC', 'cc')
         cls.build = subprocess.run([cc, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
