@@ -8784,6 +8784,16 @@
     {
       "source": "tests/integration/session/source_setup/test_export_source_inputs.py",
       "logical_path": "tests/integration/session/source_setup/test_export_source_inputs.py"
+    },
+    {
+      "source": "tests/core/poll/source_setup_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source_setup_test.py"
+    },
+    {
+      "source": "tests/core/poll/source-setup.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/poll/source-setup.md"
     }
   ]
 }
