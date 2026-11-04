@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "linux_commit": "89be9a83ccf1f88522317ce02f854f30d6115c41",
+  "license": "GPL-2.0",
+  "source_repository": "https://github.com/torvalds/linux.git",
+  "source_kind": "Root-retained target source snapshots from the locked Linux assembly; only the exact listed excerpts are distributed.",
+  "excerpts": [
+    {
+      "file": "hctx_type.inc",
+      "source_path": "include/linux/blk-mq.h",
+      "retained_snapshot": "blk-mq-target-89be9a83.h",
+      "source_sha256": "e8b35d57f71ef43b2eb7897c95a82fd9c2273ff46c310f32d69ae5818750348a",
+      "source_byte_start": 13134,
+      "source_byte_end_exclusive": 13226,
+      "source_line_start": 486,
+      "source_line_end": 492,
+      "payload_byte_start": 196,
+      "payload_bytes": 92,
+      "payload_sha256": "83dc26385acc0c272f349b75de63d3260804724fc6a6093b460057fa1e309dc3",
+      "file_sha256": "f5b3a10858a4aa3c38082283f5ac26ad6402dfcccbea23bc1ac41128d540b6bb"
+    },
+    {
+      "file": "blk_features_t.inc",
+      "source_path": "include/linux/blkdev.h",
+      "retained_snapshot": "blkdev-target-89be9a83.h",
+      "source_sha256": "b7ddf55e9bc1eee4f578910884c7838cb169bf479a2db8be3324ffa76b2f5240",
+      "source_byte_start": 8368,
+      "source_byte_end_exclusive": 8415,
+      "source_line_start": 299,
+      "source_line_end": 299,
+      "payload_byte_start": 242,
+      "payload_bytes": 47,
+      "payload_sha256": "f482fb504bd5bece553cf11a0dfb3737dbc99397c914482e9b3d9dc7e2b6da59",
+      "file_sha256": "b5d75bf6e3220a74cce3378b667cc569673b5e759457878967a01f2f60386545"
+    },
+    {
+      "file": "blk_feat_poll.inc",
+      "source_path": "include/linux/blkdev.h",
+      "retained_snapshot": "blkdev-target-89be9a83.h",
+      "source_sha256": "b7ddf55e9bc1eee4f578910884c7838cb169bf479a2db8be3324ffa76b2f5240",
+      "source_byte_start": 9364,
+      "source_byte_end_exclusive": 9424,
+      "source_line_start": 329,
+      "source_line_end": 329,
+      "payload_byte_start": 242,
+      "payload_bytes": 60,
+      "payload_sha256": "ee845b8ebde754d2bead167fbc957a046e84ef067599495bc0f3abbf17d81426",
+      "file_sha256": "7716616dc24cb2759987a9d0ee916dcb72efd7b645531008c7d087095e316322"
+    },
+    {
+      "file": "blk_rq_is_poll.inc",
+      "source_path": "block/blk-mq.c",
+      "retained_snapshot": "blk-mq-target-89be9a83.c",
+      "source_sha256": "988c21dd859f03c3150eb1fb4eda8eab3c00daf3f73eaaa3ece6e99e52455b08",
+      "source_byte_start": 37026,
+      "source_byte_end_exclusive": 37177,
+      "source_line_start": 1453,
+      "source_line_end": 1460,
+      "payload_byte_start": 270,
+      "payload_bytes": 151,
+      "payload_sha256": "d19c03b3a9263703bfa7dc3f4ebae94fb4c0cac2b6ddd2821b6c8a1fede0456e",
+      "file_sha256": "83c216c4517c9a522f19fcc9a05f2d1c2b6527d95003637335034bd6d41f78dc"
+    }
+  ]
+}

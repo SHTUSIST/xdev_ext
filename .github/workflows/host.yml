@@ -242,6 +242,11 @@ jobs:
           python3 tests/benchmarks/mooncake/fixtures/test_cli_assertions.py
       - name: Reviewer-driven evaluation harness contracts
         run: make -C tests/eval reviewer-eval-check
+      - name: Storage block poll runtime and native consumers
+        working-directory: .
+        run: |
+          python3 tests/storage/family_block_poll/run.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-block-poll" --new
+          python3 tests/storage/family_block_poll/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-block-poll-mutants" --new
       - name: Native-view evidence, trace and dma-fence contracts
         run: make -C tests/eval native-eval-check
       - name: Original timer endpoints and shared CPU capture contracts

@@ -8207,6 +8207,58 @@
       "native_path": "tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_source_test.py"
     },
     {
+      "source": "tests/storage/family_block_poll/README.md",
+      "logical_path": "tests/storage/family_block_poll/README.md"
+    },
+    {
+      "source": "tests/storage/family_block_poll/consumer_types.h",
+      "logical_path": "tests/storage/family_block_poll/consumer_types.h"
+    },
+    {
+      "source": "tests/storage/family_block_poll/mutate.py",
+      "logical_path": "tests/storage/family_block_poll/mutate.py"
+    },
+    {
+      "source": "tests/storage/family_block_poll/native_boundary.h",
+      "logical_path": "tests/storage/family_block_poll/native_boundary.h"
+    },
+    {
+      "source": "tests/storage/family_block_poll/no_block.c",
+      "logical_path": "tests/storage/family_block_poll/no_block.c"
+    },
+    {
+      "source": "tests/storage/family_block_poll/run.py",
+      "logical_path": "tests/storage/family_block_poll/run.py"
+    },
+    {
+      "source": "tests/storage/family_block_poll/test_consumers.c",
+      "logical_path": "tests/storage/family_block_poll/test_consumers.c"
+    },
+    {
+      "source": "tests/storage/family_block_poll/test_poll.c",
+      "logical_path": "tests/storage/family_block_poll/test_poll.c"
+    },
+    {
+      "source": "tests/storage/family_block_poll/upstream/blk_feat_poll.inc",
+      "logical_path": "tests/storage/family_block_poll/upstream/blk_feat_poll.inc"
+    },
+    {
+      "source": "tests/storage/family_block_poll/upstream/blk_features_t.inc",
+      "logical_path": "tests/storage/family_block_poll/upstream/blk_features_t.inc"
+    },
+    {
+      "source": "tests/storage/family_block_poll/upstream/blk_rq_is_poll.inc",
+      "logical_path": "tests/storage/family_block_poll/upstream/blk_rq_is_poll.inc"
+    },
+    {
+      "source": "tests/storage/family_block_poll/upstream/hctx_type.inc",
+      "logical_path": "tests/storage/family_block_poll/upstream/hctx_type.inc"
+    },
+    {
+      "source": "tests/storage/family_block_poll/upstream/provenance.json",
+      "logical_path": "tests/storage/family_block_poll/upstream/provenance.json"
+    },
+    {
       "source": "tests/storage/family_block_runtime/kernel_boundary.h",
       "logical_path": "tests/storage/family_block_runtime/kernel_boundary.h"
     },
