@@ -231,7 +231,7 @@ static int xdev_ext_net_dev_post_tx(void *lk, struct xdev_ext_net_elem *e, u32 n
  u32 i;
  for (i = 0; i < n; i++)
   *(struct xdev_ext_peer_tx *)e[i].dev.bytes = (struct xdev_ext_peer_tx){
-   .dma_address = e[i].lease.lease.dma_address, .len = e[i].len,
+   .dma_address = e[i].lease.u.peer.lease.dma_address, .len = e[i].len,
    .header_len = e[i].hdr_len, .header = e[i].hdr, .complete = xdev_ext_net_tx_done,
    .next = i + 1 < n ? (void *)e[i + 1].dev.bytes : NULL };
  return xdev_ext_peer_net_post_tx(lk, (void *)e[0].dev.bytes);
@@ -241,7 +241,7 @@ static int xdev_ext_net_dev_post_rx(void *lk, struct xdev_ext_net_elem *e, u32 n
  u32 i;
  for (i = 0; i < n; i++)
   *(struct xdev_ext_peer_rx *)e[i].dev.bytes = (struct xdev_ext_peer_rx){
-   .dma_address = e[i].lease.lease.dma_address, .len = e[i].len,
+   .dma_address = e[i].lease.u.peer.lease.dma_address, .len = e[i].len,
    .header_room = e[i].hdr_len, .header = e[i].hdr, .complete = xdev_ext_net_rx_done,
    .next = i + 1 < n ? (void *)e[i + 1].dev.bytes : NULL };
  return xdev_ext_peer_net_post_rx(lk, (void *)e[0].dev.bytes);
@@ -274,6 +274,7 @@ static void xdev_ext_net_result(struct xdev_ext_netfam_stage *ns, struct xdev_ex
  }
 }
 static const struct xdev_ext_net_member xdev_ext_net_member = {
+ .lease_kind = XDEV_EXT_NET_LEASE_PEER_DMA,
  .dev = &xdev_ext_net_dev_ops, .admit = false, .result = xdev_ext_net_result,
 };
 static const struct xdev_ext_net_hooks xdev_ext_net_hooks = {

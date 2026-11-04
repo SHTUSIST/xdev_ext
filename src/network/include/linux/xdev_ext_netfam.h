@@ -20,8 +20,18 @@ enum xdev_ext_net_hdr_policy {
 #define XDEV_EXT_NETFAM_MAX_ELEMS	64U
 struct xdev_ext_net_slot;
 struct xdev_ext_netfam_stage;
+enum xdev_ext_net_lease_kind {
+	XDEV_EXT_NET_LEASE_NONE = 0,
+	XDEV_EXT_NET_LEASE_PEER_DMA = 1,
+};
+struct xdev_ext_net_lease {
+	u32 kind;
+	union {
+		struct xdev_ext_peer_fd_lease peer;
+	} u;
+};
 struct xdev_ext_net_elem {
-	struct xdev_ext_peer_fd_lease lease;	/* payload lease for dev->requester() */
+	struct xdev_ext_net_lease lease;	/* stable payload lease for dev->requester() */
 	struct xdev_ext_net_slot *slot;
 	u32 len;			/* payload bytes this element carries */
 	u32 buf_len;			/* bytes the device may write: TX len, RX full device frame */
@@ -66,6 +76,7 @@ struct xdev_ext_net_slot {
 };
 struct xdev_ext_net_member {
 	const struct xdev_ext_net_dev_ops *dev;
+	u32 lease_kind;			/* enum xdev_ext_net_lease_kind */
 	bool admit;				/* run xdev_ext_requester_bind() in attach */
 	/* any context, tracker or protocol winner only: write the class CQE */
 	void (*result)(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_batch *b,

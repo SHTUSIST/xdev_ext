@@ -31,6 +31,8 @@ int xdev_ext_netfam_init(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_
 	if (m->dev->hdr_policy == XDEV_EXT_NET_HDR_CHANNEL &&
 	    (!m->local || !m->withdraw || !m->link_fail))
 		return -EINVAL;
+	if (m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA)
+		return -EINVAL;
 	ns->st = st;
 	ns->m = m;
 	ns->rx = rx;
@@ -131,13 +133,16 @@ int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_
 
 	if (i >= ns->max_elems || !len || buf_len < len)
 		return -EPROTO;
+	if (ns->m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA)
+		return -EPROTO;
 	e = &slot->elem[i];
 	ret = xdev_ext_peer_file_acquire(xdev_ext_peer_mech_pool_file(pool),
 					 ns->m->dev->requester(ns->lk),
 					 xdev_ext_peer_mech_pool_generation(pool), off, buf_len,
-					 ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &e->lease);
+					 ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &e->lease.u.peer);
 	if (ret)
 		return ret;
+	e->lease.kind = XDEV_EXT_NET_LEASE_PEER_DMA;
 	e->slot = slot;
 	e->len = len;
 	e->buf_len = buf_len;
@@ -151,8 +156,15 @@ void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 {
 	u32 i;
 
-	for (i = 0; i < slot->nr; i++)
-		xdev_ext_peer_fd_release(&slot->elem[i].lease, quiesced);
+	for (i = 0; i < slot->nr; i++) {
+		struct xdev_ext_net_lease *lease = &slot->elem[i].lease;
+
+		if (lease->kind != XDEV_EXT_NET_LEASE_PEER_DMA)
+			continue;
+		xdev_ext_peer_fd_release(&lease->u.peer, quiesced);
+		if (!lease->u.peer.file && !lease->u.peer.lease.mapping)
+			lease->kind = XDEV_EXT_NET_LEASE_NONE;
+	}
 	if (quiesced)
 		slot->busy = false;
 }
