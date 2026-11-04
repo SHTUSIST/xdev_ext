@@ -8799,6 +8799,18 @@
       "source": "tests/integration/session/native/xdev_ext_mech_zc_archive.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_archive.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py",
+      "logical_path": "tests/integration/session/native/xdev_ext_mech_zc_archive_test.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/archive_recording_child.py",
+      "logical_path": "tests/integration/session/source_setup/archive_recording_child.py"
+    },
+    {
+      "source": "tests/integration/session/source_setup/archive_recording_harness.py",
+      "logical_path": "tests/integration/session/source_setup/archive_recording_harness.py"
     }
   ]
 }
