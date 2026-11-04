@@ -32,6 +32,15 @@ static void e2_snapshot(const char *phase,struct xdev_ext_mech_session *s,
 '''
 
 
+def source_paths(kernel):
+    """The exact production/fixture source set recorded by the old-ticket ledger."""
+    here=kernel/'tools/testing/selftests/xdev_ext_mech/fanout_scheduler'
+    original=kernel/'tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py'
+    paths=[kernel/'io_uring/xdev_ext_mech.c',original,here/'run.py',here/'fixture.c',here/'shim.h']
+    paths+=list((kernel/'io_uring').glob('xdev_ext_mech*.h'))+[kernel/'include/linux/xdev_ext_mech.h',kernel/'include/uapi/linux/xdev_ext_mech.h']
+    return paths
+
+
 def source_revision(kernel):
     """Bind actual native fixture inputs to their canonical authority."""
     kernel=Path(kernel).absolute()
@@ -64,7 +73,7 @@ def source_revision(kernel):
         if not path.is_file() or any(p.is_symlink() for p in (path,*path.parents)):
             raise ValueError('invalid old-ticket canonical metadata: '+name)
     sys.path.insert(0,str(repo/'tools'))
-    from layout import load_layout,provenance,safe_file,isolated_file,read_source
+    from layout import load_layout,provenance,safe_file,isolated_file
     identity=provenance(repo);revision=identity['revision'];layout=load_layout(repo)
     subprocess.run(['git','-C',str(repo),'ls-files','--error-unmatch','--',*layout.by_source],check=True,stdout=subprocess.PIPE)
     lock=layout.manifest.get('dependency_lock','third_party/sources.lock.json')
@@ -79,19 +88,35 @@ def source_revision(kernel):
             receipt.get('canonical_root')!=str(repo) or receipt.get('revision')!=revision or
             receipt.get('source_origins')!=layout.by_logical or receipt.get('manifest')!=layout.manifest):
             raise ValueError('old-ticket view identity differs from canonical source')
-        for (component,name),source in layout.by_native.items():
-            if component!='linux':continue
-            actual=isolated_file(view,'kernel/'+name,True)
-            if actual.read_bytes()!=safe_file(repo,source).read_bytes() or actual.read_bytes()!=read_source(repo,'linux',name,revision):
-                raise ValueError('old-ticket source copy differs: '+name)
+    paths=source_paths(kernel)
+    # Check wildcard membership against the one already loaded canonical
+    # layout, so a missing copied helper cannot disappear from qualification.
+    expected_headers={name for component,name in layout.by_native if component=='linux' and
+                      Path(name).parent.as_posix()=='io_uring' and
+                      Path(name).name.startswith('xdev_ext_mech') and name.endswith('.h')}
+    actual_headers={p.relative_to(kernel).as_posix() for p in paths if p.parent==kernel/'io_uring' and p.suffix=='.h'}
+    if actual_headers!=expected_headers:
+        raise ValueError('old-ticket lifecycle helper membership differs from canonical source')
+    for path in paths:
+        name=path.relative_to(kernel).as_posix()
+        source=layout.by_native[('linux',name)]
+        actual=isolated_file(view,'kernel/'+name,True) if view is not None else safe_file(native,name)
+        canonical=safe_file(repo,source)
+        # The checkout is clean and the mapping is loaded once. A fixed Git
+        # blob read binds each consumed input to the exact revision without
+        # reloading the full committed layout for every unrelated Linux file.
+        committed=subprocess.check_output(['git','-C',str(repo),'show',revision+':'+source])
+        if actual.read_bytes()!=committed or canonical.read_bytes()!=committed:
+            raise ValueError('old-ticket source copy differs: '+name)
     if not re.fullmatch('[0-9a-f]{40}',revision):raise ValueError('invalid canonical source revision')
     return revision
 
 
 def run(kernel,out,cc):
-    revision=source_revision(kernel)
-    kernel=kernel.resolve(); out=out.resolve()
+    out=out.resolve()
     if out.exists(): raise ValueError('refuse existing software-evidence directory')
+    revision=source_revision(kernel)
+    kernel=kernel.resolve()
     here=kernel/'tools/testing/selftests/xdev_ext_mech/fanout_scheduler'
     original=kernel/'tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/recycle_input_test.py'
     # Read the established testcase instead of restating its lifecycle decisions.
@@ -138,9 +163,7 @@ def run(kernel,out,cc):
        published_before=before['published'],published_after=after['published'],
        current_state_before=before['state'],current_state_after=after['state'],trace='old-ticket.log')
     (out/'old_ticket.json').write_text(json.dumps(negative,indent=2)+'\n')
-    paths=[kernel/'io_uring/xdev_ext_mech.c',original,here/'run.py',here/'fixture.c',here/'shim.h']
-    paths+=list((kernel/'io_uring').glob('xdev_ext_mech*.h'))+[kernel/'include/linux/xdev_ext_mech.h',kernel/'include/uapi/linux/xdev_ext_mech.h']
-    ledger={str(p.relative_to(kernel)):hashlib.sha256(p.read_bytes()).hexdigest() for p in paths}
+    ledger={str(p.relative_to(kernel)):hashlib.sha256(p.read_bytes()).hexdigest() for p in source_paths(kernel)}
     sha=source_revision(kernel)
     if sha!=revision:raise ValueError('old-ticket source revision changed during export')
     (out/'source.json').write_text(json.dumps(dict(kernel_git_sha=sha,evidence_kind='actual-core-host-fixture',source_sha256=ledger),indent=2)+'\n')
