@@ -157,12 +157,13 @@ programs run unchanged. The reference program chooses from the stage's mode
 fact: RTS/CTS without the flag, pairing with it, and then it answers an RTS
 only by refusal.
 
-A stage keeps the first binding its program chose. Once pairing started, v1
-control is counted as dropped and RTS/CTS actions are refused. Once the
-program announced, posted on an RTS or declined pairing (IGNORE on PAIR_DUE
-or HELLO), pairing and grant inputs are dropped and pairing actions refused;
-such a stage, and a receiver no peer has asked to pair, follow the version-1
-deadline and STOP rules.
+A stage keeps the first binding its program chose. Once pairing started, new
+v1 control is counted as dropped and an RTS cannot be encoded, so no group is
+announced or posted on an RTS; an RTS queued before pairing can still be
+refused, which settles its sequence. Once the program announced, posted on an
+RTS or declined pairing (IGNORE on PAIR_DUE or HELLO), pairing and grant
+inputs are dropped and pairing actions refused; such a stage, and a receiver
+no peer has asked to pair, follow the version-1 deadline and STOP rules.
 
 A paired stage grants one actual posted RX batch to its exact future TX key.
 The ordered layout must use one full-span descriptor per logical frame and the
