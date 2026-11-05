@@ -18,8 +18,19 @@ import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
-ROOT = Path(os.environ.get("KERNEL_SRC", next(p for p in HERE.parents
-            if (p / "io_uring/xdev_ext_mech.c").is_file())))
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, read_native, owned_dependency, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/compute/user_stage/scheduler_test.py')
+
+ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
 CASES = ("complete", "sleep", "varlen", "deadline", "stop", "dead", "stale",
          "badlen", "status", "full", "full-timeout", "full-stop", "multi", "kick-race")
 
@@ -47,12 +58,16 @@ def session_helpers(text, bodies, extractor):
 
 
 def generate():
-    core = (ROOT / "io_uring/xdev_ext_mech.c").read_text()
-    user = (ROOT / "io_uring/xdev_ext_mech_user.c").read_text()
-    abi = (ROOT / "include/linux/xdev_ext_mech.h").read_text()
+    core = read_native(ROOT, "io_uring/xdev_ext_mech.c")
+    selected = TransformSource(core, lambda path: read_native(ROOT, path), definition)
+    core = selected.text
+    user = read_native(ROOT, "io_uring/xdev_ext_mech_user.c")
+    abi = read_native(ROOT, "include/linux/xdev_ext_mech.h")
     names = ["xdev_ext_mech_frame", "xdev_ext_mech_stage", "xdev_ext_mech_class_ops",
              "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_mech_call_args"]
     structs = "\n".join(definition(abi, n, True) for n in names)
+    if selected.split:
+        structs += '\n' + selected.types
     structs += "\n" + "\n".join(definition(core, n, True) for n in
                                 ("xdev_ext_mech_batch", "xdev_ext_mech_session"))
     structs += "\n" + "\n".join(definition(user, n, True) for n in
@@ -85,11 +100,15 @@ def generate():
                    "xdev_ext_mech_programs_current", "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
     user_names += ["xdev_ext_user_drain", "xdev_ext_user_external_end",
                    "xdev_ext_user_strict_progress"]
+    if selected.split:
+        core_names.insert(core_names.index('xdev_ext_mech_batch_handoff'),
+                          'xdev_ext_mech_transform_handoff')
     core_names = session_helpers(core, [definition(core, n) for n in core_names], definition) + core_names
     functions = [definition(core, n) for n in core_names]
+    functions = selected.helpers(functions) + functions
     functions += [definition(user, n) for n in user_names]
     prototypes = "\n".join(f[:f.index("\n{")] + ";" for f in functions)
-    code = (HERE / "scheduler_fixture.c").read_text()
+    code = owned_dependency(__file__, 'tests/compute/user_stage/scheduler_fixture.c').read_text()
     if not re.search(r'\bdecl\s*;', definition(abi, "xdev_ext_mech_class_ops", True)):
         code = re.sub(r'\.decl=&xdev_ext_mech_class_decls\[XDEV_EXT_MECH_CLASS_(?:DMA|NVME|USER)\],', '', code)
     outcome = re.search(r'^enum xdev_ext_mech_external_outcome \{\n.*?^\};', abi, re.M | re.S)
@@ -119,7 +138,12 @@ def main():
     with tempfile.TemporaryDirectory(prefix="user-stage-scheduler-") as tmp:
         tmp = Path(tmp)
         try:
+            shim = tmp / 'fanout_scheduler/shim.h'
+            shim.parent.mkdir(parents=True)
+            shim_text = owned_dependency(__file__, 'tests/core/scheduler/shim.h').read_text()
+            shim.write_text(shim_text)
             code = generate()
+            include_root = compiler_headers(ROOT, tmp / 'qualified-include', code + '\n' + shim_text)
         except (OSError, RuntimeError) as error:
             print(f"1..1\nnot ok 1 - extract the production code ({error})", flush=True)
             return 1
@@ -129,7 +153,7 @@ def main():
         command = shlex.split(os.environ.get("CC", "cc")) + ["-std=gnu11", "-O1", "-g",
             "-Wall", "-Wextra", "-Werror", "-Wno-unused-function", "-Wno-unused-variable",
             "-Wno-unused-parameter", "-fsanitize=address,undefined", "-fno-sanitize-recover=undefined",
-            "-pthread", "-I" + str(ROOT), "-I" + str(HERE.parent), "-I" + str(HERE),
+            "-pthread", "-I" + str(include_root), "-I" + str(HERE.parent), "-I" + str(HERE),
             str(source), "-o", str(binary)]
         build = subprocess.run(command, text=True, capture_output=True)
         if build.returncode:

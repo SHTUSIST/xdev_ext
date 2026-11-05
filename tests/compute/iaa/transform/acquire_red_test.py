@@ -12,9 +12,21 @@ import re
 import subprocess
 import tempfile
 import unittest
+import sys
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[4]
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, read_native, select_core, owned_dependency, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/compute/iaa/transform/acquire_red_test.py')
+ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
 
 
 def function(text, name):
@@ -40,8 +52,8 @@ def session_helpers(text, bodies, extractor=function):
 class AcquisitionContract(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        text = Path(os.environ.get('XDEV_EXT_IAA_ACQUIRE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
-        source = (HERE / 'acquire_fixture.c').read_text()
+        text = select_core(ROOT, os.environ.get('XDEV_EXT_IAA_ACQUIRE_SOURCE'))
+        source = owned_dependency(__file__, 'tests/compute/iaa/transform/acquire_fixture.c').read_text()
         names = ('xdev_ext_mech_life_undo', 'xdev_ext_mech_batch_acquire')
         names = session_helpers(text, [function(text, name) for name in names]) + list(names)
         for name in names:
@@ -49,11 +61,12 @@ class AcquisitionContract(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-acquire-')
         cls.addClassCleanup(cls.tmp.cleanup)
         path = Path(cls.tmp.name)
+        include_root = compiler_headers(ROOT, path / 'qualified-include', source)
         (path / 'probe.c').write_text(source)
         cls.probe = path / 'probe'
         build = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra', '-Werror',
                                 '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
-                                '-I' + str(ROOT), str(path / 'probe.c'), '-o', str(cls.probe)],
+                                '-I' + str(include_root), str(path / 'probe.c'), '-o', str(cls.probe)],
                                capture_output=True, text=True)
         if build.returncode:
             raise RuntimeError(build.stdout + build.stderr)

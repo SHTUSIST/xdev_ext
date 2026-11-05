@@ -11,7 +11,7 @@ every frame met L + D, and the call is the compute member at the worker.
 """
 import unittest
 
-from compute_extract import compile_and_run, function, source
+from compute_extract import compile_and_run, function, source, TransformSource, field, structure
 
 PRELUDE = r'''
 #include <errno.h>
@@ -258,8 +258,33 @@ int main(void)
 class BatchCompute(unittest.TestCase):
     def test_production_batch_compute(self):
         mech = source('io_uring/xdev_ext_mech.c')
-        code = (PRELUDE + function(mech, 'xdev_ext_mech_worker_args') + '\n' +
-                function(mech, 'xdev_ext_mech_batch_compute') + MAIN)
+        selected = TransformSource(mech, source, function)
+        compute = function(selected.text, 'xdev_ext_mech_batch_compute')
+        prelude = PRELUDE
+        bridge = ''
+        if selected.split:
+            # Keep the original program and cpu_length recorders. Only their
+            # surrounding storage binds the authentic production access views.
+            declarations = ('struct xdev_ext_mech_life;\n' +
+                            structure(source('include/linux/xdev_ext_mech.h'),
+                                      'xdev_ext_mech_pool') + '\n' + selected.types)
+            prelude = prelude.replace('struct xdev_ext_mech_session {',
+                                      declarations + '\nstruct xdev_ext_mech_session {', 1)
+            prelude = prelude.replace('struct { u32 frame_size; } pool;',
+                                      'struct xdev_ext_mech_pool pool;', 1)
+            prelude = prelude.replace('unsigned long protocol_errors;',
+                'unsigned long protocol_errors;\n' + '\n'.join(
+                    field(mech, 'xdev_ext_mech_session', name)
+                    for name in ('life', 'transform_owner')), 1)
+            prelude = prelude.replace('u64 bytes;', field(mech, 'xdev_ext_mech_batch', 'bytes'), 1)
+            prelude = prelude.replace('struct xdev_ext_mech_batch {',
+                'struct xdev_ext_mech_batch {\n' + '\n'.join(
+                    field(mech, 'xdev_ext_mech_batch', name)
+                    for name in ('life_token', 'life_active', 'present', 'transform')), 1)
+            prelude = prelude.replace(function(prelude, 'xdev_ext_mech_base'), '')
+            bridge = function(mech, 'xdev_ext_mech_base') + '\n'
+        code = (prelude + bridge + '\n'.join(selected.helpers([compute])) + '\n' +
+                function(mech, 'xdev_ext_mech_worker_args') + '\n' + compute + MAIN)
         rc, output = compile_and_run(code)
         print(output.strip())
         self.assertEqual(rc, 0, output)

@@ -13,9 +13,21 @@ import shlex
 import subprocess
 import sys
 import tempfile
-import scheduler_test as scheduler
 
 HERE = Path(__file__).resolve().parent
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import owned_dependency, verify_entry  # noqa: E402
+verify_entry(__file__, 'tests/compute/user_stage/strict_async_test.py')
+sys.path.insert(0, str(owned_dependency(__file__, 'tests/compute/user_stage/scheduler_test.py').parent))
+import scheduler_test as scheduler  # noqa: E402
 ROOT = scheduler.ROOT
 CASES = ('legacy-stop', 'strict-bind-peer', 'strict-bind-cpu', 'stop-late',
          'deadline-late', 'stop-noack', 'deadline-noack', 'negative', 'positive',
@@ -29,7 +41,7 @@ CASES = ('legacy-stop', 'strict-bind-peer', 'strict-bind-cpu', 'stop-late',
 
 def generate():
     code = scheduler.generate()
-    user = (ROOT / 'io_uring/xdev_ext_mech_user.c').read_text()
+    user = scheduler.read_native(ROOT, 'io_uring/xdev_ext_mech_user.c')
     # Replace the USER subset with its complete production translation unit.
     for name in ('xdev_ext_user_held', 'xdev_ext_user_stage'):
         code = code.replace(scheduler.definition(user, name, True), '')
@@ -40,13 +52,13 @@ def generate():
                  'xdev_ext_user_drain', 'xdev_ext_user_external_end',
                  'xdev_ext_user_strict_progress'):
         code = code.replace(scheduler.definition(user, name), '')
-    core = (ROOT / 'io_uring/xdev_ext_mech.c').read_text()
+    core = scheduler.read_native(ROOT, 'io_uring/xdev_ext_mech.c')
     # Future production external completion entry and its direct helpers.
     extra = [scheduler.definition(core, "xdev_ext_mech_poll_work")]
     for name in re.findall(r'^\w[^;{}]*\b(xdev_ext_mech_\w*external\w*)\([^;{}]*\)\n\{', core, re.M):
         extra.append(scheduler.definition(core, name))
     declaration = re.search(r'^enum xdev_ext_mech_external_outcome \{\n.*?^\};',
-                            (ROOT / 'include/linux/xdev_ext_mech.h').read_text(), re.M | re.S)
+                            scheduler.read_native(ROOT, 'include/linux/xdev_ext_mech.h'), re.M | re.S)
     if declaration and declaration[0] not in code:
         code = code.replace('enum xdev_ext_mech_end', declaration[0] + '\nenum xdev_ext_mech_end', 1)
     if "xdev_ext_mech_batch_external_complete" in core:
@@ -70,7 +82,7 @@ def generate():
     user = '\n'.join(line for line in user.splitlines()
                      if not line.lstrip().startswith('#include'))
     code = code.replace('static int native_submit(', '\n'.join(extra) + '\n' + user + '\nstatic int native_submit(', 1)
-    shim = (HERE.parent / 'fanout_scheduler/shim.h').read_text()
+    shim = owned_dependency(__file__, 'tests/core/scheduler/shim.h').read_text()
     shim = shim.replace('struct file_operations { int tag; };', '''struct inode { int unused; };
 struct vm_area_struct { unsigned long vm_pgoff, vm_end, vm_start; };
 struct file;
@@ -82,7 +94,7 @@ struct file_operations { struct module *owner; int (*release)(struct inode *,str
                         'struct file { const struct file_operations *f_op; void *private_data; unsigned refs; };')
     shim = shim.replace('static void fput(struct file *f) {(void)f;file_puts++;}',
                         'static void fput(struct file *f) { file_puts++; if (!--f->refs) f->f_op->release(NULL,f); }')
-    boundary = (HERE / 'strict_async_fixture.c').read_text()
+    boundary = owned_dependency(__file__, 'tests/compute/user_stage/strict_async_fixture.c').read_text()
     prefix, tests = boundary.split('/* STRICT CASES */', 1)
     code = code.replace('#include "fanout_scheduler/shim.h"', shim + '\n' + prefix)
     # Existing fixture setup and worker boundary are shared; replace its test
@@ -107,7 +119,9 @@ def main():
         temp = Path(temp)
         src = temp / 'strict.c'
         try:
-            src.write_text(generate())
+            code = generate()
+            include_root = scheduler.compiler_headers(ROOT, temp / 'qualified-include', code)
+            src.write_text(code)
         except (OSError, RuntimeError) as error:
             print(f'1..1\nnot ok 1 - production extraction: {error}')
             return 1
@@ -116,7 +130,7 @@ def main():
             '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
             '-Wno-unused-function', '-Wno-unused-variable', '-Wno-unused-parameter',
             '-fsanitize=undefined', '-fno-sanitize-recover=undefined', '-pthread',
-            '-I' + str(ROOT), '-I' + str(HERE.parent), '-I' + str(HERE),
+            '-I' + str(include_root), '-I' + str(HERE.parent), '-I' + str(HERE),
             str(src), '-o', str(binary)]
         build = subprocess.run(command, text=True, capture_output=True)
         if build.returncode:

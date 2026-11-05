@@ -7,10 +7,23 @@ from pathlib import Path
 import subprocess
 import tempfile
 import unittest
-from acquire_red_test import function, session_helpers
+import sys
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[4]
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, read_native, select_core, owned_dependency, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/compute/iaa/transform/lease_test.py')
+sys.path.insert(0, str(owned_dependency(__file__, 'tests/compute/iaa/transform/acquire_red_test.py').parent))
+from acquire_red_test import function, session_helpers  # noqa: E402
+ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
 FUNCTIONS = (
     'xdev_ext_mech_frames_move', 'xdev_ext_mech_frames_release',
     'xdev_ext_mech_transform_alias_free',
@@ -44,19 +57,36 @@ def start_queue_closure(fixture, production):
 class TransformLease(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        production = Path(os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
-        fixture = start_queue_closure((HERE / 'lease_fixture.c').read_text(), production)
-        names = session_helpers(production, [function(production, name) for name in FUNCTIONS]) + list(FUNCTIONS)
+        core = select_core(ROOT, os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE'))
+        selected = TransformSource(core, lambda path: read_native(ROOT, path), function)
+        production = selected.text
+        fixture = start_queue_closure(owned_dependency(__file__, 'tests/compute/iaa/transform/lease_fixture.c').read_text(), production)
+        names = list(FUNCTIONS)
+        if selected.split:
+            names.append('xdev_ext_mech_transform_handoff')
+            fixture = selected.storage(fixture)
+            bodies = [function(production, name) for name in names]
+            fixture = fixture.replace('struct xdev_ext_mech_batch {',
+                                      selected.types + '\nstruct xdev_ext_mech_batch {', 1)
+            fixture = fixture.replace('/* xdev_ext_mech_frames_move */',
+                                      '\n'.join(selected.helpers(bodies)) +
+                                      '\n/* xdev_ext_mech_frames_move */', 1)
+            fixture = fixture.replace('/* xdev_ext_mech_batch_handoff */',
+                                      function(production, 'xdev_ext_mech_transform_handoff') +
+                                      '\n/* xdev_ext_mech_batch_handoff */', 1)
+            names.remove('xdev_ext_mech_transform_handoff')
+        names = session_helpers(production, [function(production, name) for name in names]) + names
         for name in names:
             fixture = fixture.replace('/* ' + name + ' */', function(production, name))
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-lease-')
         cls.addClassCleanup(cls.temp.cleanup)
         path = Path(cls.temp.name)
+        include_root = compiler_headers(ROOT, path / 'qualified-include', fixture)
         (path / 'probe.c').write_text(fixture)
         cls.binary = path / 'probe'
         result = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
                                  '-Werror', '-Wno-unused-function', '-fsanitize=undefined',
-                                 '-fno-sanitize-recover=undefined', '-I' + str(ROOT),
+                                 '-fno-sanitize-recover=undefined', '-I' + str(include_root),
                                  str(path / 'probe.c'), '-o', str(cls.binary)], capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)

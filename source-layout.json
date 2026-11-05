@@ -9035,6 +9035,10 @@
     {
       "source": "tests/storage/native_member_7a/run_candidate.py",
       "logical_path": "tests/storage/native_member_7a/run_candidate.py"
+    },
+    {
+      "source": "tests/compute/transform_source.py",
+      "logical_path": "tests/compute/transform_source.py"
     }
   ]
 }

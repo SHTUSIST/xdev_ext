@@ -14,13 +14,26 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import sys
 
 HERE = Path(__file__).resolve().parent
-KERNEL = Path(os.environ.get('KERNEL_SRC', HERE.parents[4])).resolve()
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, field, read_native, structure, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/compute/cpu/compute_extract.py')
+
+KERNEL = source_root(__file__, os.environ.get('KERNEL_SRC'))
 
 
 def source(relative):
-    return (KERNEL / relative).read_text()
+    return read_native(KERNEL, relative)
 
 
 def function(text, name):
@@ -45,17 +58,18 @@ def body(text, name):
 
 
 def compile_and_run(fixture, args=(), timeout=20):
-    """Build @fixture (C source text) with -I<kernel>; return (exit code, output)."""
+    """Build @fixture with qualified native headers; return (exit code, output)."""
     compiler = shlex.split(os.environ.get('CC', 'cc'))
     if not shutil.which(compiler[0]):
         raise AssertionError('C compiler unavailable: ' + compiler[0])
     with tempfile.TemporaryDirectory(prefix='xdev-ext-compute-') as temporary:
         path = Path(temporary)
+        include_root = compiler_headers(KERNEL, path / 'qualified-include', fixture)
         (path / 'fixture.c').write_text(fixture)
         command = compiler + ['-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                               '-Wno-unused-function', '-Wno-unused-parameter',
                               '-fsanitize=undefined,address', '-fno-sanitize-recover=all',
-                              '-I' + str(KERNEL), str(path / 'fixture.c'),
+                              '-I' + str(include_root), str(path / 'fixture.c'),
                               '-o', str(path / 'probe')]
         build = subprocess.run(command, text=True, capture_output=True)
         if build.returncode:

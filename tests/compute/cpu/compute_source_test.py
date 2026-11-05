@@ -13,7 +13,7 @@ declarations. The verifier and a guest run check the loaded behaviour
 import re
 import unittest
 
-from compute_extract import body, function, source
+from compute_extract import body, function, source, TransformSource
 
 OPS = 'io_uring/xdev_ext_mech_ops.c'
 CPU = 'io_uring/xdev_ext_mech_cpu.c'
@@ -143,12 +143,13 @@ class ComputeWiring(unittest.TestCase):
 
     def test_core_call_site_and_requirement(self):
         mech = source(MECH)
-        compute = body(mech, 'xdev_ext_mech_batch_compute')
+        owner = TransformSource(mech, source, function).text
+        compute = body(owner, 'xdev_ext_mech_batch_compute')
         self.assertLess(compute.index('xdev_ext_mech_cpu_out_len('),
                         compute.index('xdev_ext_mech_call('))
         self.assertLess(compute.index('xdev_ext_mech_call('),
                         compute.index('xdev_ext_mech_batch_cpu_length('))
-        self.assertIn('EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_compute);', mech)
+        self.assertIn('EXPORT_SYMBOL_GPL(xdev_ext_mech_batch_compute);', owner)
         has = body(mech, 'xdev_ext_mech_stage_has_member')
         self.assertIn('xdev_ext_mech_ops_has_member(', has)
         self.assertIn('EXPORT_SYMBOL_GPL(xdev_ext_mech_stage_has_member);', mech)
