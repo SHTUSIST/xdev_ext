@@ -494,7 +494,8 @@ int main(int argc, char **argv)
 		probe_buf = heap_alloc(heap, &probe_ino);
 		CHECK(!pipe2(idpipe, O_CLOEXEC), "kill: session id pipe");
 		child = fork();
-		CHECK(child >= 0, "kill: fork importer process");
+		/* TAP is reported by the parent only, never after fork in the child. */
+		if (child < 0) CHECK(0, "kill: fork importer process");
 		if (!child) {	/* never report TAP from the child */
 			struct session c;
 			uint64_t cgen;

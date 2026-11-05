@@ -175,6 +175,10 @@ class Oracle(unittest.TestCase):
     def test_tap_count(self):
         self.rejects('TAP', log=self.log.replace('1..9', '1..10'))
 
+    def test_duplicated_check_line(self):
+        # A check printed by both parent and child after fork.
+        self.rejects('TAP', log=self.log.replace('ok 4 - setup 3\n', 'ok 4 - setup 3\nok 4 - setup 3\n'))
+
     def test_skip(self):
         self.rejects('TAP', log=self.log.replace('ok 2 - setup 1', 'ok 2 - setup 1 # SKIP'))
 
