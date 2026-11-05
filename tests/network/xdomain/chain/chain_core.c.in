@@ -76,12 +76,14 @@ bool xdev_ext_mech_ops_current(u32 class_id, const void *ops, bool pinned)
 	(void)pinned;
 	return class_id < XDEV_EXT_MECH_CLASS_MAX && ops == &chain_default_program[class_id];
 }
+#ifndef CHAIN_HOST_POOL
 int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct io_ring_ctx *ctx,
 				    const struct xdev_ext_mech_layout *l)
 {
 	(void)pool; (void)ctx; (void)l;
-	return -EOPNOTSUPP; /* only PEER pools are composed here */
+	return -EOPNOTSUPP; /* --pool host compiles the production provider (chain_umem.c) */
 }
+#endif
 int xsk_xdev_ext_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *f,
 				const struct xdev_ext_mech_layout *l)
 {
@@ -249,6 +251,60 @@ int chain_session_start(struct xdev_ext_mech_session *s, u64 nr_batches, u64 fir
 	return ret;
 }
 
+/* --pool host: START with USER_FRAMES | RECYCLE, as user space hands its
+ * UMEM frames to an IOU_UMEM session.  The custody transfer is the
+ * production xdev_ext_mech_take_user_frames(); the admission and publication
+ * below follow xdev_ext_mech_start() for these flags (min(batches, depth)
+ * groups of frames, lent once and recycled until the START drains). */
+int chain_session_start_host(struct xdev_ext_mech_session *s, u64 nr_batches, u64 first_seq)
+{
+	u32 idx[64], nr = (u32)min_t(u64, nr_batches, s->depth) * s->frames, i;
+	unsigned long flags;
+	bool publish;
+	int ret = 0;
+
+	if (!nr || nr > ARRAY_SIZE(idx) || nr > s->pool.nr_frames)
+		return -EINVAL;
+	for (i = 0; i < nr; i++)
+		idx[i] = i;
+	spin_lock_irqsave(&s->lock, flags);
+	if (!xdev_ext_mech_session_admits(s))
+		ret = -ESHUTDOWN;
+	else if (s->start_preparing || s->start_return_pending || s->start_left ||
+		 s->start_queue || s->start_recycle || s->ss.inflight)
+		ret = -EBUSY;
+	else
+		s->start_preparing = true;
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret)
+		return ret;
+	ret = xdev_ext_mech_take_user_frames(s, idx, nr);
+	spin_lock_irqsave(&s->lock, flags);
+	publish = !ret && xdev_ext_mech_session_admits(s);
+	if (publish) {
+		s->start_left = nr_batches;
+		s->start_seq = first_seq;
+		s->start_to_user = true;
+		s->start_ordered = false;
+		s->start_recycle = true;
+		s->start_return_pending = true;
+	} else if (!ret) {
+		s->start_return_pending = true;
+		ret = -ESHUTDOWN;
+	}
+	s->start_preparing = false;
+	xdev_ext_mech_settle_locked(s);
+	xdev_ext_mech_notify_locked(s, false);
+	if (!s->worker_gone) {
+		if (!xdev_ext_mech_session_admits(s))
+			kthread_queue_work(s->worker, &s->stop_work);
+		else if (!ret)
+			kthread_queue_work(s->worker, &s->kick_work);
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
 /* ---- observation only: read raw core state, never decide ------------- */
 u32 chain_frame_custody(struct xdev_ext_mech_session *s, u32 index)
 { return xdev_ext_mech_pool_frame_state(&s->pool, index); }
@@ -256,6 +312,16 @@ u32 chain_frame_phase(struct xdev_ext_mech_session *s, u32 index)
 { return xdev_ext_mech_life_phase(&s->life[index]); }
 u32 chain_pool_frames(struct xdev_ext_mech_session *s) { return s->pool.nr_frames; }
 u32 chain_frame_state_free(void) { return XDEV_EXT_MECH_F_K_FREE; }
+u32 chain_frame_state_user(void) { return XDEV_EXT_MECH_F_USER; }
+u32 chain_frame_state_sequestered(void) { return XDEV_EXT_MECH_F_SEQUESTERED; }
+/* The release decision's first question to a stage: may it give back its
+ * device state?  0 for a class without the hook. */
+int chain_stage_unbind_checked(struct xdev_ext_mech_session *s, u32 i)
+{
+	struct xdev_ext_mech_stage *st = &s->st[i];
+
+	return st->cls->unbind_checked ? st->cls->unbind_checked(st) : 0;
+}
 u64 chain_session_done(struct xdev_ext_mech_session *s) { return atomic64_read(&s->done); }
 u64 chain_session_aborted(struct xdev_ext_mech_session *s) { return atomic64_read(&s->aborted); }
 u64 chain_session_counter(struct xdev_ext_mech_session *s, u32 c) { return atomic64_read(&s->cnt[c]); }

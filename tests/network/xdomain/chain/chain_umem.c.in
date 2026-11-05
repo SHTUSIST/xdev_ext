@@ -1,0 +1,73 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * --pool host: the ring's IOU_UMEM pool provider of the mechanism layer.
+ * run.py pastes the production block of io_uring/xdev_ext_umem.c from
+ * struct io_xdev_ext_umem_mech to io_xdev_ext_umem_mech_pool_bind() at
+ * REAL_UMEM_POOL, unchanged.  Below that block's boundary: the registered
+ * UMEM itself (IORING_REGISTER_XDEV_EXT_UMEM pins and maps user pages; here
+ * the endpoint's frame memory and page objects of chain_boundary.c) and the
+ * ring's UMEM lookup.
+ */
+#include "chain_core_env.h"
+#include <linux/xdev_ext_mech.h>
+#include "xdev_ext_mech_core.h"
+#include "chain_api.h"
+
+#define kvzalloc(n, g) chain_kzalloc(n)
+#define struct_size(p, member, n) (sizeof(*(p)) + sizeof((p)->member[0]) * (size_t)(n))
+
+/* The fields of struct io_xdev_ext_umem (io_uring/xdev_ext_umem.h) the pool
+ * provider reads; registration and accounting fields are outside this unit. */
+struct io_xdev_ext_umem {
+	struct page **pages;
+	void *vmap_addr;
+	u32 page_offset;
+	u64 size;
+	u32 nr_pages, frame_size, nr_frames;
+	unsigned refs;
+	u8 *mech_state;
+	bool legacy_used;
+	struct xdev_ext_mech_life *frames;
+};
+DEFINE_MUTEX(xdev_ext_umem_lock);
+static struct io_xdev_ext_umem chain_umems[CHAIN_ENDPOINTS];
+static bool chain_umem_live[CHAIN_ENDPOINTS];
+
+/* The ring's UMEM of the session being created (one ring per endpoint). */
+struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx(struct io_ring_ctx *ctx);
+struct io_xdev_ext_umem *io_xdev_ext_umem_get_ctx(struct io_ring_ctx *ctx)
+{
+	int endpoint = chain_creating_endpoint();
+
+	(void)ctx;
+	if (endpoint < 0 || endpoint >= CHAIN_ENDPOINTS || !chain_umem_live[endpoint])
+		return NULL;
+	chain_umems[endpoint].refs++;
+	return &chain_umems[endpoint];
+}
+void io_xdev_ext_umem_put(struct io_xdev_ext_umem *umem);
+void io_xdev_ext_umem_put(struct io_xdev_ext_umem *umem)
+{
+	assert(umem->refs);
+	umem->refs--;
+}
+
+/* Fixture registration: @page_offset is where the UMEM starts in its first
+ * page; nr_pages covers [page_offset, page_offset + size) as registration does. */
+int chain_umem_register(unsigned endpoint, uint32_t frame_size, uint32_t nr_frames, uint32_t page_offset)
+{
+	struct io_xdev_ext_umem *u = &chain_umems[endpoint];
+	size_t bytes;
+
+	assert(endpoint < CHAIN_ENDPOINTS && !chain_umem_live[endpoint]);
+	*u = (struct io_xdev_ext_umem){ .frame_size = frame_size, .nr_frames = nr_frames,
+		.size = (u64)frame_size * nr_frames, .page_offset = page_offset, .refs = 1 };
+	u->nr_pages = (u32)((page_offset + u->size + PAGE_SIZE - 1) >> PAGE_SHIFT);
+	u->pages = (struct page **)chain_host_pages(endpoint, u->nr_pages);
+	u->vmap_addr = chain_frame_memory(endpoint, &bytes) - page_offset;
+	assert(bytes >= u->size && u->pages);
+	chain_umem_live[endpoint] = true;
+	return 0;
+}
+
+/* REAL_UMEM_POOL */
