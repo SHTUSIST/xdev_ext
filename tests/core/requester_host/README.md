@@ -41,6 +41,7 @@ PEER path can run as a regression case.
 | `host_coherent_no_sync` | a coherent, unbounced NHI gets no sync calls |
 | `host_unknown_retains_mapping` | after an element ends with unknown device access, no CPU sync, no new lease (`-ESTALE`), the stage is not settled, and unbind never unmaps; the mapping keeps its NHI reference |
 | `host_outstanding_lease_retains_mapping` | an unbind with an outstanding lease keeps the whole mapping |
+| `host_unknown_then_quiesced` | with two receive elements in flight, the first ends with unknown device access and the second ends quiesced later: the mapping stays not settled, refuses new leases with `-ESTALE` and is never unmapped |
 | `host_quiesced_unbind_unmaps_once` | once every lease ended quiesced, unbind unmaps each page exactly once with the mapping's size and direction |
 | `peer_bind_unchanged` | a PEER pool still describes and premaps, and the requester maps nothing itself |
 | `host_create_report` | the CREATE report names the NHI and records the decision, without a provider description |
@@ -67,6 +68,7 @@ it. A mutant counts as killed only with exit 1 and a named assertion.
 | `unmap-outstanding-lease` | unbind unmaps with a lease outstanding | `host_outstanding_lease_retains_mapping` |
 | `peer-bind-takes-host-pool` | the PEER bind maps an IOU_UMEM pool itself, through the host bind | `host_bind_maps_every_page` |
 | `host-bind-takes-peer-pool` | the host bind accepts a PEER pool | `host_lease_refuses_spans` |
+| `review-latch-not-sticky` | a later quiesced end clears the unknown mark | `host_unknown_then_quiesced` |
 
 ## Limits
 

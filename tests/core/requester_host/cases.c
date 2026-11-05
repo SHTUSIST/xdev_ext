@@ -347,6 +347,29 @@ static void host_unknown_retains_mapping(void)
 	CHECK(rh_live_allocs > base_allocs, "the retained mapping record is kept");
 }
 
+/* Two receive elements in flight at once (depth > 1): the first ends with
+ * unknown device access, the second ends quiesced later.  The unknown mark
+ * covers the whole mapping and a later quiesced end never clears it: not
+ * settled, no new lease, never unmapped. */
+static void host_unknown_then_quiesced(void)
+{
+	u64 a = 0, b = 0, c = 0x77;
+
+	need_api();
+	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
+	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &a) == 0, "RX lease a");
+	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_FROM_DEVICE, &b) == 0, "RX lease b");
+	xdev_ext_requester_host_release(&rq, a, 4096, false);
+	xdev_ext_requester_host_release(&rq, b, 4096, true);
+	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO,
+	      "a later quiesced end does not settle a mapping with unknown device access");
+	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &c) == -ESTALE && c == 0x77,
+	      "no new lease after unknown device access, whatever ended later");
+	xdev_ext_requester_unbind_host(&rq);
+	CHECK(rh_count(RH_UNMAP) == 0, "the mapping with unknown device access is never unmapped");
+}
+
 static void host_outstanding_lease_retains_mapping(void)
 {
 	u64 dma = 0;
@@ -441,6 +464,7 @@ static const struct { const char *name; void (*fn)(void); } cases[] = {
 	{ "host_coherent_no_sync", host_coherent_no_sync },
 	{ "host_unknown_retains_mapping", host_unknown_retains_mapping },
 	{ "host_outstanding_lease_retains_mapping", host_outstanding_lease_retains_mapping },
+	{ "host_unknown_then_quiesced", host_unknown_then_quiesced },
 	{ "host_quiesced_unbind_unmaps_once", host_quiesced_unbind_unmaps_once },
 	{ "peer_bind_unchanged", peer_bind_unchanged },
 	{ "host_create_report", host_create_report },

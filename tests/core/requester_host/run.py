@@ -27,8 +27,8 @@ CASES = ('host_bind_maps_every_page', 'host_bind_rx_maps_from_device',
          'host_bind_refuses_misaligned_pool', 'host_bind_refuses_partial_page',
          'host_bind_map_error_unwinds', 'host_lease_page_address', 'host_lease_refuses_spans',
          'host_noncoherent_sync', 'host_coherent_no_sync', 'host_unknown_retains_mapping',
-         'host_outstanding_lease_retains_mapping', 'host_quiesced_unbind_unmaps_once',
-         'peer_bind_unchanged', 'host_create_report')
+         'host_outstanding_lease_retains_mapping', 'host_unknown_then_quiesced',
+         'host_quiesced_unbind_unmaps_once', 'peer_bind_unchanged', 'host_create_report')
 # name: (case that must catch it, [(old, new)] in UNIT); each makes one requirement false.
 MUTATIONS = {
     'accept-misaligned-pool': ('host_bind_refuses_misaligned_pool', [
@@ -63,6 +63,12 @@ MUTATIONS = {
          '\tif (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)\n')]),
     'host-bind-takes-peer-pool': ('host_lease_refuses_spans', [
         ('pool->kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !pdev || rq->pdev', '!pdev || rq->pdev')]),
+    # A later quiesced end clears the unknown mark (review of d3dced6).
+    'review-latch-not-sticky': ('host_unknown_then_quiesced', [
+        ('\tif (!quiesced)\n\t\tWRITE_ONCE(h->unknown, true);\n'
+         '\telse if (h->need_sync && h->dir == DMA_FROM_DEVICE)\n',
+         '\tWRITE_ONCE(h->unknown, !quiesced);\n'
+         '\tif (quiesced && h->need_sync && h->dir == DMA_FROM_DEVICE)\n')]),
 }
 
 
