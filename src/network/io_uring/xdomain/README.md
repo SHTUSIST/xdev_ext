@@ -32,7 +32,9 @@ gone cannot restart.
 
 Lock ordering is `xdev_ext_xd_links_lock` -> `xl->lock` for the handler, and
 `ctl_mutex` -> `ep_mutex` -> stage family lock (`ns->lock`) -> `xl->lock` ->
-ring lock for link teardown and data operations. The handler does not take
+ring lock for link teardown and data operations. `poll_irq_lock` is innermost:
+it may be taken under `xl->lock` or under the NHI and ring locks, and nothing
+else is acquired while it is held. The handler does not take
 `ctl_mutex`: login requests wait for responses while holding that mutex.
 `tb_ring_stop` is called with neither `ep_mutex` nor a spinlock held, and
 never from a frame callback. Endpoint detachment is recorded under both
@@ -134,6 +136,32 @@ pointer and does not take `ctl_mutex`. A session with pending completions
 or native/protocol commitments queues a further worker turn; idle sessions
 retain their existing deadline schedule. The cadence is a scheduling
 choice and gives no latency guarantee.
+
+The read-only module parameter `poll_on_interrupt` also defaults to false and
+cannot be combined with `poll_completions`; module load fails with `-EINVAL`
+when both are set. It follows upstream thunderbolt-net: control and data RX
+rings pass a `start_poll` callback, while TX rings keep interrupt completion
+through the native ring work. The NHI masks a ring's interrupt and then calls
+`start_poll` with its NHI and ring spinlocks held. The callback only marks the
+ring and queues the link poll work without delay; it never polls or runs a
+frame callback.
+
+The queued work runs the same bounded pass on the RX rings only. When the pass
+ends below its 64-frame budget, every ring that `start_poll` marked gets one
+`tb_ring_poll_complete()`, which re-enables its interrupt. A completion that
+arrives between the last empty poll and that re-enable is found by
+`tb_ring_poll_pending()` and queues another pass at once, whether or not the
+controller raises an interrupt for it. A full budget leaves the interrupts
+masked and queues the next pass. No delayed fallback exists in this mode, and
+session progress does not poll.
+
+Start opens the interrupt gate under `poll_irq_lock` after the poll gate and
+queues a pass if an interrupt arrived before it. Stop closes both gates before
+it cancels the work, and a later interrupt only marks its ring. Stopping a
+ring whose interrupt `start_poll` masked raises no NHI warning: the NHI copy
+carries the later upstream rule that a polled ring may already be masked when
+it is disabled. These are host software composition results; they establish
+no interrupt latency, timing or physical DMA behavior.
 
 The polling mutex covers native poll return through the entire callback.
 Stop closes UP, receive readiness, starting and the poll gate under

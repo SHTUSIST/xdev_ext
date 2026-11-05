@@ -70,6 +70,12 @@ struct xdev_ext_xd_link {
 	u64 poll_generation, poll_wake;
 	struct mutex poll_mutex;
 	struct delayed_work poll_work;
+	/* Immutable mode: receive-ring interrupts queue poll_work. start_poll runs
+	 * under the NHI and ring spinlocks, which nest inside xl->lock, so its
+	 * gate and the per-ring masked marks use the leaf poll_irq_lock.
+	 */
+	bool poll_on_interrupt, poll_irq_live;
+	spinlock_t poll_irq_lock;
 	bool up, going_away, suspended, gone, nhi_gone;
 	bool logged_in, remote_logged_in, e2e;
 	bool receive_ready;			/* native rings + receive paths; lock */
