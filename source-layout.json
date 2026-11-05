@@ -6852,7 +6852,8 @@
     },
     {
       "source": "tests/integration/xdomain/observer_contract.h",
-      "logical_path": "tests/eval/xdomain/observer_contract.h"
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_eval/xdomain/observer_contract.h"
     },
     {
       "source": "tests/integration/xdomain/observer_test.c",

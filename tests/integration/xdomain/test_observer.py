@@ -34,7 +34,7 @@ def main():
     old = kernel / 'tools/testing/selftests/xdev_ext_mech/peer_graph'
     wrapper = kernel / 'tools/xdev_ext_mech/xdomain_check.bpf.c'
     reference = kernel / 'tools/xdev_ext_mech/xdomain_peer.bpf.c'
-    contract = here / 'observer_contract.h'
+    contract = kernel / 'tools/testing/selftests/xdev_ext_eval/xdomain/observer_contract.h'
     fixture = here / 'observer_test.c'
     required = [reference, contract, fixture, old / 'xdomain_program_fixture.c',
                 old / 'xdomain_program_test.py']

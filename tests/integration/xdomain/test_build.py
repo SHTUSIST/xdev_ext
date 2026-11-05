@@ -160,7 +160,10 @@ class RequiredSourcesTest(unittest.TestCase):
                     'agent_supervisor.cc', 'xdomain_agent.cc', 'xdomain_gpu_pattern.cu',
                     'xdomain_gpu_pattern.h', 'check_contract.h', 'epoch_control.h',
                     'gpu_adapter.h', 'agent_supervisor.h', 'observer_contract.h'}
-        self.assertTrue({root / name for name in expected} <= set(paths),
+        expected_paths = {root / name for name in expected if name != 'observer_contract.h'}
+        expected_paths.add(root.parents[2] / (
+            'kernel/tools/testing/selftests/xdev_ext_eval/xdomain/observer_contract.h'))
+        self.assertTrue(expected_paths <= set(paths),
                         'incorrect source_root convention for original local inputs')
         self.assertTrue(expected <= {p.name for p in paths},
                         'actual C observer header missing from required inventory')

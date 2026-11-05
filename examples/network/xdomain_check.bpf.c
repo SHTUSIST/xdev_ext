@@ -6,7 +6,7 @@
 #include <bpf/bpf_tracing.h>
 #include "xdev_ext_mech_prog.h"
 #include "xdev_ext_mech_kfunc.h"
-#include "../../../tests/eval/xdomain/observer_contract.h"
+#include "../testing/selftests/xdev_ext_eval/xdomain/observer_contract.h"
 
 struct {
 	__uint(type, BPF_MAP_TYPE_ARRAY);

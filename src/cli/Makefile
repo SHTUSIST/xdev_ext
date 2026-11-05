@@ -85,4 +85,4 @@ $(PEER_CTL): xdev_ext_peer_chain.c xdev_ext_mech_cuda.h ../../include/uapi/linux
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS) $(LDLIBS)
 
 $(BUILD_DIR)/xdomain_check.bpf.o: BPF_CFLAGS += -mcpu=v3
-$(BUILD_DIR)/xdomain_check.bpf.o: xdomain_peer.bpf.c ../../../tests/eval/xdomain/observer_contract.h
+$(BUILD_DIR)/xdomain_check.bpf.o: xdomain_peer.bpf.c ../testing/selftests/xdev_ext_eval/xdomain/observer_contract.h
