@@ -33,6 +33,14 @@ struct tb_ring *stack_ring_alloc_tx(struct tb_nhi *nhi,int hop,int size,unsigned
 struct production_irq_record{void(*poll)(void *);void *arg;struct tb_ring *ring;unsigned endpoint;};
 static struct production_irq_record irq_records[64];
 static unsigned irq_record_count;
+static _Thread_local bool production_poll_in_interrupt;
+/* X4 is about to call tb_ring_poll(): never from the interrupt itself. */
+void production_poll_before_poll(struct tb_ring *ring)
+{
+ (void)ring;
+ if(production_poll_in_interrupt){
+  fprintf(stderr,"STACK_ASSERT start_poll: native poll runs inside the ring interrupt\n");exit(1);}
+}
 static void production_poll_start_trampoline(void *data)
 {
  struct production_irq_record *r=data;
@@ -42,7 +50,9 @@ static void production_poll_start_trampoline(void *data)
  assert(r->ring&&spins>=2&&!stack_nhi_irq_enabled(r->ring));
  stack_record((struct stack_event){.kind=1002,.endpoint=r->endpoint,.owner=(uintptr_t)r->ring,
   .control=ring_info(r->ring)->control,.direction=2,.seq=world->pump_serial,.flags=production_poll_context});
+ production_poll_in_interrupt=true;
  r->poll(r->arg);
+ production_poll_in_interrupt=false;
  if(stack_spins!=spins||stack_mutexes!=mutexes){
   fprintf(stderr,"STACK_ASSERT start_poll: interrupt-context callback changed the held lock set\n");exit(1);}
  for(size_t i=before;i<world->logs;i++)
@@ -208,8 +218,9 @@ void stack_ring_stop(struct tb_ring *ring)
  struct stack_ring_info *info=ring_info(ring);
  if(late_endpoint==info->endpoint){
   late_endpoint=2;
+  /* Marker first: the delivered completion raises its interrupt at once. */
+  stack_record((struct stack_event){.kind=1006,.endpoint=info->endpoint,.owner=(uintptr_t)ring});
   late_injected=production_poll_deliver_control(1-info->endpoint);
-  stack_record((struct stack_event){.kind=1006,.endpoint=info->endpoint,.owner=(uintptr_t)ring,.length=late_injected});
  }
  shared_poll_ring_stop(ring);
 }

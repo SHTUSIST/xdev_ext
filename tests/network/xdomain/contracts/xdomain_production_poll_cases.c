@@ -302,7 +302,8 @@ static void irq_startup(struct stack_world *w)
 static void no_delayed_poll(struct stack_world *w,size_t begin)
 {
  for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
-  if(e.kind==1004)CHECK(!e.length,"interrupt-started mode never arms a delayed link poll");}
+  if(e.kind==1004)CHECK(!e.length,"interrupt-started mode never arms a delayed link poll");
+  if(e.kind==1000)CHECK(e.direction==2,"interrupt-started drains never poll a transmit ring");}
 }
 static uint64_t first_irq_ring(struct stack_world *w,size_t begin,unsigned endpoint,bool control)
 {
@@ -501,14 +502,14 @@ static void irq_stop_late_interrupt(void)
   CHECK((mode?stack_suspend(w,1):stack_remove(w,1))==0,"teardown with a late receiver interrupt");
   for(unsigned i=0;i<10;i++)pump(w,1000000);
   CHECK(production_poll_late_injected()==1,"the RTS completes into the running control RX after the poll gate closed");
-  bool late=false,masked=false;
+  bool late=false,masked=false;size_t after=begin;
   for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
-   if(e.kind==1006&&e.endpoint==1)late=true;
-   if(late&&e.kind==1002&&e.endpoint==1&&e.control)masked=true;
+   if(e.kind==1006&&e.endpoint==1){late=true;continue;}
+   if(!late||e.endpoint!=1)continue;
+   if(e.kind==1002&&e.control&&!masked){masked=true;after=i+1;continue;}
+   CHECK(e.kind!=1004&&e.kind!=1000,"a late interrupt queues no drain and polls nothing after the poll gate closed");
   }
   CHECK(late&&masked,"the late interrupt reached production start_poll");
-  size_t after=begin;
-  for(size_t i=begin;i<stack_log_count(w);i++)if(ev(w,i).kind==1006)after=i;
   no_link_activity(w,after,1);
   CHECK(production_poll_nhi_warns()==warns,"stopping the ring start_poll just masked raises no NHI WARN");
   fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);for(unsigned i=0;i<10;i++)pump(w,1000000);
