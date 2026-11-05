@@ -78,6 +78,7 @@ it. A mutant counts as killed only with exit 1 and a named assertion.
 | `peer-bind-takes-host-pool` | the PEER bind maps an IOU_UMEM pool itself, through the host bind | `host_bind_maps_every_page` |
 | `host-bind-takes-peer-pool` | the host bind accepts a PEER pool | `host_lease_refuses_spans` |
 | `review-latch-not-sticky` | a later quiesced end clears the unknown mark | `host_unknown_then_quiesced` |
+| `settled-reads-unknown-first` | the settled check reads the unknown mark before the lease count, as at d3dced6 | `host_release_during_settled_check` |
 
 ## Limits
 

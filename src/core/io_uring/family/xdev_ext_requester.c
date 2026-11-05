@@ -40,10 +40,17 @@ static void xdev_ext_requester_host_unmap(struct xdev_ext_requester_host *h, u32
 				     DMA_ATTR_SKIP_CPU_SYNC);
 }
 
-/* An outstanding lease or an unknown end: the device may still use pages. */
+/*
+ * An outstanding lease or an unknown end: the device may still use pages.
+ * Lockless, so the lease count is read first, with acquire semantics, pairing
+ * with smp_mb__before_atomic() in xdev_ext_requester_host_release(): a release
+ * whose decrement is seen here has its unknown mark seen by the read after
+ * it. Reading the mark first could miss both the mark and the lease of a
+ * release that ends between the two reads.
+ */
 static bool xdev_ext_requester_host_busy(const struct xdev_ext_requester_host *h)
 {
-	return READ_ONCE(h->unknown) || atomic_read(&h->active);
+	return atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);
 }
 
 static void xdev_ext_requester_host_free(struct xdev_ext_requester_host *h)
@@ -182,6 +189,8 @@ void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma,
 		WRITE_ONCE(h->unknown, true);
 	else if (h->need_sync && h->dir == DMA_FROM_DEVICE)
 		dma_sync_single_for_cpu(&h->pdev->dev, dma, len, DMA_FROM_DEVICE);
+	/* The mark is visible before the count drops; pairs with the acquire
+	 * read in xdev_ext_requester_host_busy(). */
 	smp_mb__before_atomic();
 	atomic_dec(&h->active);
 }
