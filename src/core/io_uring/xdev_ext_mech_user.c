@@ -193,6 +193,27 @@ static void xdev_ext_user_external_end(struct xdev_ext_mech_stage *st,
 }
 
 /*
+ * The GPU borrows PEER frames by allocation offset, without a core peer
+ * lease, so the lease's admission rule applies at both ends of its custody:
+ * an invalidated, quarantined or provider-stale region, or one whose
+ * generation is not the one CREATE claimed, answers -ESTALE.  0 for host
+ * pages.  Worker context: the region lock is a mutex.
+ */
+static int xdev_ext_user_peer_admit(struct xdev_ext_mech_pool *pool)
+{
+	u64 len, generation;
+	int err;
+
+	if (pool->kind != XDEV_EXT_MECH_POOL_PEER)
+		return 0;
+	err = xdev_ext_peer_file_info(xdev_ext_peer_mech_pool_file(pool),
+				      &len, &generation);
+	if (!err && generation != xdev_ext_peer_mech_pool_generation(pool))
+		err = -ESTALE;
+	return err;
+}
+
+/*
  * Worker, the batch already IN_FLIGHT: describe it in the slot table, hand
  * it out through the ready ring and hold it until its completion entry,
  * its deadline or a stop.  A negative return handed out nothing.
@@ -223,22 +244,10 @@ static int xdev_ext_user_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_
 	h = &us->held[slot];
 	if (h->b)
 		return -EBUSY;
-	/*
-	 * The GPU borrows PEER frames by allocation offset, without a core peer
-	 * lease, so apply the lease's admission rule here: an invalidated,
-	 * quarantined or provider-stale region, or one whose generation is not
-	 * the one CREATE claimed, is never handed out.
-	 */
-	if (pool->kind == XDEV_EXT_MECH_POOL_PEER) {
-		u64 len, generation;
-
-		err = xdev_ext_peer_file_info(xdev_ext_peer_mech_pool_file(pool),
-					      &len, &generation);
-		if (!err && generation != xdev_ext_peer_mech_pool_generation(pool))
-			err = -ESTALE;
-		if (err)
-			return err;
-	}
+	/* A region a lease would be refused on is never handed out. */
+	err = xdev_ext_user_peer_admit(pool);
+	if (err)
+		return err;
 	/*
 	 * Entries of batches cancelled before the user thread read them still
 	 * fill the ring.  -EAGAIN puts the batch on the core's retry path; a
@@ -352,6 +361,13 @@ static void xdev_ext_user_reap_one(struct xdev_ext_mech_stage *st, const struct 
 				err = -EPROTO;
 		if (err)
 			xdev_ext_mech_count(st->s, XDEV_EXT_MECH_CNT_PROTOCOL_ERR, 1);
+		/*
+		 * Status 0 proves the GPU's last use, but a VRAM region invalidated
+		 * while it held the frames is not a result to pass on: end the batch
+		 * with the region's answer and still return the frames as quiesced.
+		 */
+		if (!err)
+			err = xdev_ext_user_peer_admit(xdev_ext_mech_session_pool(st->s));
 		/* STOP may have arrived while copying user-controlled lengths. */
 		if (READ_ONCE(us->dead)) {
 			xdev_ext_user_external_end(st, e->slot, -EPIPE,
