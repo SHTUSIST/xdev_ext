@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import sys
 import tempfile
@@ -226,8 +227,25 @@ class ReviewRegressions(Adapter):
                     call = next(n for n in ast.walk(tree) if isinstance(n, ast.Call)
                                 and isinstance(n.func, ast.Attribute) and n.func.attr == 'write_bytes')
                     actual = eval(compile(ast.Expression(call.args[0]), scriptname, 'eval'), scope).decode()
+                elif kind == 'nowait':
+                    utility = runpy.run_path(str(ROOT / 'tests/storage/nvme/_legacy_storfam_fixture.py'))
+                    scope['selected_source'] = utility['selected_source']
+                    scope['source_path'] = self.repo / native
+                    selection = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                                     and any(isinstance(t, ast.Name) and t.id == 'selected' for t in n.targets)
+                                     and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Name)
+                                     and n.value.func.id == 'selected_source')
+                    assignment = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)
+                                      and any(isinstance(t, ast.Name) and t.id == 'source' for t in n.targets)
+                                      and isinstance(n.value, ast.Call) and isinstance(n.value.func, ast.Attribute)
+                                      and isinstance(n.value.func.value, ast.Name)
+                                      and n.value.func.value.id == 'selected' and n.value.func.attr == 'read')
+                    with mock.patch.dict(os.environ, {}, clear=True):
+                        scope['selected'] = eval(compile(ast.Expression(selection.value), scriptname, 'eval'), scope)
+                        actual = eval(compile(ast.Expression(assignment.value), scriptname, 'eval'), scope)
+                        scope['selected'].verify()
                 else:
-                    variable = {'socket': 'data', 'fork': 'preload', 'nowait': 'source'}[kind]
+                    variable = {'socket': 'data', 'fork': 'preload'}[kind]
                     assignments = [n for n in ast.walk(tree) if isinstance(n, ast.Assign)
                                    and any(isinstance(t, ast.Name) and t.id == variable for t in n.targets)]
                     assignment = next(n for n in assignments if any(isinstance(v, ast.Attribute) and v.attr == 'read_native'

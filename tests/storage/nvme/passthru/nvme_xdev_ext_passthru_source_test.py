@@ -8,11 +8,13 @@ import os
 import re
 import sys
 import runpy
-_CANONICAL = next(p for p in Path(__file__).resolve().parents if (p / "source-layout.json").is_file())
+_LAYOUT_FILE = next(p / 'tools/layout.py' for p in Path(__file__).resolve().parents
+                    if (p / 'tools/layout.py').is_file())
+_CANONICAL = runpy.run_path(str(_LAYOUT_FILE))['canonical_root'](Path(__file__))
 _HELPERS = runpy.run_path(str(_CANONICAL / "tests/integration/peer_graph/nvme_peer_async_test.py"))
 
 def read_native(root, name):
-    return _HELPERS["read_native"](root, name)
+    return _HELPERS["SourceSelection"](root).read(name)
 
 
 def require(condition: bool, message: str) -> None:
@@ -247,8 +249,10 @@ def check_mech_class(source: str, root: Path) -> str:
         identity = function_body(mech, "static int nvme_xdev_ext_member_identity(")
         require(in_order(native_bind, "FMODE_WRITE", "nvme_xdev_ext_mech_cmd_allowed(", "kzalloc("),
                 "native fd/effects authorization must precede member allocation")
-        require(in_order(adapter_bind, "xdev_ext_storfam_bind(st, u, &nvme_xdev_ext_member_ops)",
-                         "if (ret)", "nvme_xdev_ext_class_resources_init(st)"),
+        require(adapter_bind.strip() == "return xdev_ext_storfam_bind(st, u, &nvme_xdev_ext_member_ops);" and
+                in_order(common_bind[common_bind.index("st->priv = member"):], "st->priv = member", "xdev_ext_storfam_host_resources_init(ss)",
+                         "xdev_ext_storfam_peer_resources_init(ss)", "xdev_ext_storfam_peer_resources_free(ss)",
+                         "xdev_ext_storfam_host_resources_free(ss)", "st->priv = NULL", "dev->unbind(member)"),
                 "class resources must follow successful common bind")
         require(in_order(common_bind, "dev->bind(st, u, &ss, &member)",
                          "dev->identity(member, false, &ss->geometry)", "xdev_ext_stor_window_bind(",
@@ -280,23 +284,38 @@ def check_mech_class(source: str, root: Path) -> str:
                 "exactly one slot must consume the actual native schema/window decode before validation publishes")
         submit = function_body(mech, "static int nvme_xdev_ext_class_submit(")
         submit_check = function_body(runtime_block, "int xdev_ext_storfam_submit_check(")
-        require(in_order(submit, "xdev_ext_storfam_submit_check(&p->family, b, &bp->family)",
-                         "blk_mq_alloc_request(", "nvme_init_request(", "nvme_xdev_ext_class_map(",
-                         "req->end_io = ", "req->end_io_data = done;", "blk_execute_rq_nowait(req, false);"),
+        common_submit = function_body(runtime_block, "int xdev_ext_storfam_submit(")
+        post = function_body(mech, "static void nvme_xdev_ext_member_post(")
+        request_init = function_body(mech, "static void nvme_xdev_ext_member_request_init(")
+        require(submit.rstrip().endswith("return xdev_ext_storfam_submit(&p->family, b, &bp->family);") and
+                in_order(common_submit, "xdev_ext_storfam_submit_check(ss, b, sb)", "ss->dev->encode(",
+                         "blk_mq_alloc_request(", "BLK_MQ_REQ_NOWAIT", "xdev_ext_stor_block_poll_check(",
+                         "if (!peer)", "ss->dev->request_init(ss->member, req, &sb->command, false)",
+                         "xdev_ext_storfam_peer_get(", "xdev_ext_storfam_host_get(",
+                         "xdev_ext_storfam_peer_map(", "ss->dev->encode_dptr(",
+                         "sb->rw.byte_length != sb->posting.byte_length", "ss->dev->request_init(ss->member, req, &sb->command, true)",
+                         "xdev_ext_storfam_host_map(", "ss->dev->post(") and
+                "nvme_init_request(req, cmd)" in request_init and
+                in_order(post, "req->end_io = nvme_xdev_ext_peer_end_io", "req->end_io = nvme_xdev_ext_class_end_io",
+                         "req->end_io_data = &io->done", "xdev_ext_stor_block_poll_arm(",
+                         "xdev_ext_mech_trace_native_submit(", "blk_execute_rq_nowait(req, false);"),
                 "submit: common recheck, request, bio, end_io, then execute")
         require(in_order(submit_check, "atomic_read(&ss->dead)", "!sb->validated",
                          "sb->batch_id != xdev_ext_mech_batch_id(batch)",
                          "ss->dev->identity(ss->member, true, &ss->geometry)"),
                 "worker gate must preserve dead, validation/batch identity and native final identity order")
-        tail = submit.split("blk_execute_rq_nowait(req, false);", 1)[1]
-        require(tail.strip() == "return 0;", "nothing may touch the batch after blk_execute_rq_nowait()")
+        tail = post.split("blk_execute_rq_nowait(req, false);", 1)[1]
+        caller_tail = common_submit.split("ss->dev->post(ss->member, req, io, b, &sb->command, peer);", 1)[1]
+        require(not tail.strip() and caller_tail.split("free_request:",1)[0].strip() == "return 0;",
+                "nothing may touch the batch after blk_execute_rq_nowait()")
         require(in_order(identity, "nvme_xdev_ext_capture_identity(p->ns, &id", "head != p->head",
                          "disk != p->disk", "queue != p->queue", "nvme_xdev_ext_identity_equal(",
                          "xdev_ext_mech_stage_dead(p->family.st, ret)"),
                 "worker native identity hook must retain pointer/value recheck and stage-dead error path")
         table = mech[mech.index("static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops ="):]
         table = table[:table.index("};")]
-        for hook in ("bind", "unbind", "identity", "requester", "queue", "decode", "poll"):
+        for hook in ("bind", "unbind", "identity", "requester", "queue", "decode", "encode", "encode_dptr",
+                     "request_init", "post", "retire_peer", "poll"):
             require(f".{hook} = nvme_xdev_ext_member_{hook}," in table,
                     f"common runtime must consume real native {hook} hook")
     else:
@@ -339,12 +358,12 @@ def check_mech_class(source: str, root: Path) -> str:
                          "nvme_xdev_ext_identity_equal(", "xdev_ext_mech_stage_dead(st, ret)"),
                 "the worker does not recheck the namespace identity")
 
-    mapping = function_body(mech, "static int nvme_xdev_ext_class_map(")
+    mapping = function_body(runtime_block, "static int xdev_ext_storfam_host_map(") if family else function_body(mech, "static int nvme_xdev_ext_class_map(")
     if "xdev_ext_stor_block_preflight(" in mapping:
         block = read_native(root, "io_uring/family/xdev_ext_storfam_block.c")
         require(in_order(mapping, "xdev_ext_stor_block_caps(", "xdev_ext_stor_block_preflight(",
-                         "bio = bp->slot->bio;", "bio_init(", "xdev_ext_stor_block_append(",
-                         "if (ret != -EREMOTEIO)", "nvme_xdev_ext_class_bounce("),
+                         "bio = bp->host_io->bio;" if family else "bio = bp->slot->bio;", "bio_init(", "xdev_ext_stor_block_append(",
+                         "if (ret != -EREMOTEIO)", "xdev_ext_storfam_bounce(" if family else "nvme_xdev_ext_class_bounce("),
                 "map: actual common precheck/append, fixture-owned bio, fail closed before bounce")
         preflight = function_body(block, "int xdev_ext_stor_block_preflight(")
         require(in_order(preflight, "xdev_ext_stor_seg_walk_init(", "xdev_ext_stor_block_walk(",
@@ -367,10 +386,10 @@ def check_mech_class(source: str, root: Path) -> str:
                          "bio_add_page(", "nvme_xdev_ext_seg_add("),
                 "the bio is not built page by page from the batch frames")
 
-    resources = function_body(mech, "static int nvme_xdev_ext_class_resources_init(")
+    resources = function_body(runtime_block, "static int xdev_ext_storfam_host_resources_init(") if family else function_body(mech, "static int nvme_xdev_ext_class_resources_init(")
     require(in_order(resources, "xdev_ext_mech_session_depth(", "kcalloc(", "bio_kmalloc("),
             "CREATE must bound private bio/completion leases by session depth")
-    for hot in (submit, mapping):
+    for hot in ((common_submit, mapping, post) if family else (submit, mapping)):
         require("GFP_KERNEL" not in hot and "bio_kmalloc(" not in hot and
                 "kmalloc(" not in hot,
                 "the session hot path must not allocate bio/completion metadata")
@@ -391,19 +410,27 @@ def check_mech_class(source: str, root: Path) -> str:
             "the block layer must retain native request destruction")
     require("kfree(done)" not in end_io, "a preallocated completion lease was freed")
     require("xdev_ext_mech_call" not in end_io, "end_io must not run a program")
-    fill_cqe = function_body(mech, "static void nvme_xdev_ext_class_fill_cqe(")
-    require(in_order(fill_cqe, "nvme_xdev_ext_class_bounce_release(",
-                     "nvme_xdev_ext_class_slot_put(", "memcpy(cqe"),
+    fill_cqe = function_body(mech, "static void nvme_xdev_ext_stage_fill_cqe(" if family else "static void nvme_xdev_ext_class_fill_cqe(")
+    consume = function_body(runtime_block, "void xdev_ext_storfam_consume(") if family else fill_cqe
+    require((in_order(fill_cqe, "xdev_ext_storfam_consume(", "memcpy(cqe") and
+             in_order(consume, "xdev_ext_storfam_bounce_release(", "xdev_ext_storfam_host_put(") and
+             consume.count("XDEV_EXT_MECH_SESSION_ZOMBIE") == 2) if family else
+            in_order(fill_cqe, "nvme_xdev_ext_class_bounce_release(", "nvme_xdev_ext_class_slot_put(", "memcpy(cqe"),
             "the worker does not consume its completion lease before advancing")
-    put = function_body(mech, "nvme_xdev_ext_class_slot_put(")
+    put = function_body(runtime_block, "static void xdev_ext_storfam_host_put(") if family else function_body(mech, "nvme_xdev_ext_class_slot_put(")
     require(in_order(put, "slot->done.uncertain", "bio_uninit(", "xdev_ext_stor_slot_put("),
             "an uncertain native lease must never rejoin the pool")
     require("kfree(" not in fill_cqe, "the per-group path frees a shared pool bio")
     dead = function_body(mech, "static void nvme_xdev_ext_class_mark_dead(")
     for word in ("mutex", "wait", "sleep", "synchronize", "flush", "lock"):
         require(word not in dead, f"mark_dead must not block ({word})")
+        if family:
+            require(word not in function_body(runtime_block, "void xdev_ext_storfam_mark_dead("),
+                    f"mark_dead must not block ({word}) [common owner]")
 
     calls = set(re.findall(r"\b((?:__)?(?:blk|bio)_\w+)\s*\(", mech))
+    if family:
+        calls |= set(re.findall(r"\b((?:__)?(?:blk|bio)_\w+)\s*\(", runtime_block))
     require(calls <= CLASS_BLOCK_CALLS,
             f"unexported or bouncing block calls: {sorted(calls - CLASS_BLOCK_CALLS)}")
     blk_mq = read_native(root, "block/blk-mq.c")
@@ -416,6 +443,13 @@ def check_mech_class(source: str, root: Path) -> str:
             bounce[1].split("#endif", 1)[0] and
             "atomic64_inc(&nvme_xdev_ext_mech_bounces)" in bounce[1],
             "the KVM bounce fallback is not confined to its option or not counted")
+    if family:
+        region = runtime_block.split('#if !defined(CONFIG_XDEV_EXT_MECH_ZEROCOPY) && defined(CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)\n#define XDEV_EXT_STOR_BOUNCE_AVAILABLE',1)
+        require(len(region)==2 and all(name in region[1].split('#endif /* compatibility bounce */',1)[0]
+                for name in ('xdev_ext_storfam_bounce_copy(', 'static int xdev_ext_storfam_bounce(',
+                             'xdev_ext_storfam_bounce_release(')) and
+                in_order(post, 'if (sb->bounce)', 'atomic64_inc(&nvme_xdev_ext_mech_bounces)'),
+                "the KVM bounce fallback is not confined to its option or not counted [common owner]")
     return "NVMe mechanism class: bind, validate, submit, end_io, teardown"
 
 
@@ -423,8 +457,9 @@ def main() -> int:
     candidates = []
     if os.environ.get("NVME_XDEV_EXT_SOURCE_ROOT"):
         candidates.append(Path(os.environ["NVME_XDEV_EXT_SOURCE_ROOT"]))
-    candidates.extend([Path.cwd(), *Path.cwd().parents])
-    candidates.extend(Path(__file__).resolve().parents)
+    else:
+        candidates.extend([Path.cwd(), *Path.cwd().parents])
+        candidates.extend(Path(__file__).resolve().parents)
     root = next(
         (candidate for candidate in candidates
          if (candidate / "drivers/nvme/host/ioctl.c").is_file() or (candidate / "source-layout.json").is_file()),

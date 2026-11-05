@@ -6,7 +6,13 @@ import runpy
 import subprocess
 import tempfile
 import unittest
-ROOT=next(p for p in Path(__file__).resolve().parents if (p/'source-layout.json').is_file())
+import sys
+_LAYOUT_FILE = next(p / 'tools/layout.py' for p in Path(__file__).resolve().parents
+                    if (p / 'tools/layout.py').is_file())
+ROOT = runpy.run_path(str(_LAYOUT_FILE))['canonical_root'](Path(__file__))
+_LEGACY = runpy.run_path(str(ROOT / 'tests/storage/nvme/_legacy_storfam_fixture.py'))
+LegacySelection, selected_source, adapt_fixture, COMMAND_BOUNDARY = (
+ _LEGACY[name] for name in ('LegacySelection', 'selected_source', 'adapt_fixture', 'COMMAND_BOUNDARY'))
 HELPERS=runpy.run_path(str(ROOT/'tests/integration/peer_graph/nvme_peer_async_test.py'))
 SOURCE=Path(os.environ.get('NATIVE_TRACE_TEST_SOURCE',ROOT/'src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c'))
 def body(text,name):
@@ -62,18 +68,22 @@ int main(void) {
 }
 '''
   with tempfile.TemporaryDirectory() as tmp:
-   text=SOURCE.read_text()
+   if 'NATIVE_TRACE_TEST_SOURCE' in os.environ and 'NATIVE_TRACE_TEST_ROOT' not in os.environ:
+    raise ValueError('SETUP NATIVE_TRACE_TEST_SOURCE requires NATIVE_TRACE_TEST_ROOT')
+   selected=selected_source(Path(os.environ.get('NATIVE_TRACE_TEST_ROOT',ROOT)),SOURCE if 'NATIVE_TRACE_TEST_SOURCE' in os.environ else None)
+   text=selected.read('drivers/nvme/host/xdev_ext_mech_nvme.c')
    types='\n'.join(declaration(text,name) for name in ('nvme_xdev_ext_mech_stage','nvme_xdev_ext_mech_batch'))
    production = body(text,'nvme_xdev_ext_class_validate')
    if 'struct xdev_ext_stor_stage family;' in text:
-    types = HELPERS['family_types'](ROOT) + '\n' + types
-    production = body(text,'nvme_xdev_ext_member_decode') + '\n' + HELPERS['definition'](HELPERS['read_native'](ROOT,'io_uring/family/xdev_ext_storfam_block.c'),'xdev_ext_storfam_validate') + '\n' + production
+    prefix, prefix_edits=adapt_fixture(prefix,[dict(old='typedef uint64_t u64;',new='typedef __u64 u64;\ntypedef u64 dma_addr_t;\n'+COMMAND_BOUNDARY,count=1,reason='native scalar and command ABI',source_owner='external OS boundary')])
+    types = selected.declarations()
+    production = selected.closure('validate','strict')
     production += '\nstatic const struct xdev_ext_stor_dev_ops fixture_ops={.decode=nvme_xdev_ext_member_decode};\n'
-    suffix = suffix.replace('.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9}', '.family={.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9},.dev=&fixture_ops}')
-    suffix = suffix.replace('bp.validated','bp.family.validated')
+    suffix, suffix_edits=adapt_fixture(suffix,[dict(old='.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9}',new='.family={.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9},.dev=&fixture_ops}',count=1,reason='embedded immutable window',source_owner='io_uring/family/xdev_ext_storfam_block.c'),dict(old='bp.validated',new='bp.family.validated',count=3,reason='embedded validated state',source_owner='io_uring/family/xdev_ext_storfam_block.c')])
+   selected.verify()
    c=Path(tmp)/'test.c'; c.write_text(prefix.replace('PROVIDER_TYPES',types)+production+suffix)
    binary=Path(tmp)/'test'
-   result=subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I'+str(HELPERS['host_headers'](ROOT,Path(tmp)/'headers')),str(c),'-o',str(binary)],capture_output=True,text=True)
+   result=subprocess.run(['cc','-std=gnu11','-Wall','-Wextra','-Werror','-Wno-unused-parameter','-I'+str(HELPERS['host_headers'](selected.root,Path(tmp)/'headers')),str(c),'-o',str(binary)],capture_output=True,text=True)
    self.assertEqual(result.returncode,0,result.stderr)
    self.assertEqual(subprocess.run([str(binary)]).returncode,0,'provider class validation event missing or wrong')
 if __name__=='__main__': unittest.main()

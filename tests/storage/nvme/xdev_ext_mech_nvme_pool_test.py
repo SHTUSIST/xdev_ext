@@ -8,9 +8,15 @@ import runpy
 import subprocess
 import tempfile
 import unittest
+import sys
+import json
 
 HERE = Path(__file__).resolve().parent
-ROOT = next(p for p in HERE.parents if (p / 'source-layout.json').is_file())
+_LAYOUT_FILE = next(p / 'tools/layout.py' for p in Path(__file__).resolve().parents
+                    if (p / 'tools/layout.py').is_file())
+ROOT = runpy.run_path(str(_LAYOUT_FILE))['canonical_root'](Path(__file__))
+_LEGACY = runpy.run_path(str(ROOT / 'tests/storage/nvme/_legacy_storfam_fixture.py'))
+LegacySelection, pool_fixture = (_LEGACY[name] for name in ('LegacySelection', 'pool_fixture'))
 HELPERS = runpy.run_path(str(ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py'))
 def native(path):
     return HELPERS['read_native'](ROOT, path)
@@ -34,6 +40,25 @@ class NvmePool(unittest.TestCase):
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-nvme-pool-')
         cls.addClassCleanup(cls.temp.cleanup)
         fixture = (HERE / 'xdev_ext_mech_nvme_pool_fixture.c').read_text()
+        if 'return xdev_ext_storfam_submit(&p->family, b, &bp->family);' in source:
+            selected=LegacySelection(ROOT)
+            profile='bounce' if getattr(cls,'bounce',False) else 'strict'
+            fixture,records=pool_fixture(selected,fixture,profile)
+            path=Path(cls.temp.name)
+            (path/'probe.c').write_text(fixture)
+            (path/'assembly.json').write_text(json.dumps(selected.report(),indent=2))
+            (path/'fixture-edits.json').write_text(json.dumps(records,indent=2))
+            cls.probe=path/'probe'
+            command=[os.environ.get('CC','cc'),'-std=gnu11','-O1','-g',
+                     '-Wall','-Wextra','-Werror','-Wno-unused-parameter','-Wno-unused-function',
+                     '-fsanitize=undefined','-fno-sanitize-recover=undefined',
+                     ('-DCONFIG_XDEV_EXT_MECH_KVM_BOUNCE' if getattr(cls,'bounce',False)
+                      else '-DCONFIG_XDEV_EXT_MECH_ZEROCOPY'),
+                     '-I'+str(HELPERS['host_headers'](selected.root,path/'headers')),
+                     str(path/'probe.c'),'-o',str(cls.probe)]
+            selected.verify()
+            subprocess.run(command,check=True)
+            return
         names = ['nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch',
                  'nvme_xdev_ext_mech_slot']
         definitions = '\n'.join(declaration(source, name, True) for name in names)
