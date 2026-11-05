@@ -89,6 +89,12 @@ try:
   if not m:raise ValueError('SETUP missing actual declaration '+name)
   return m.group(0)+'\n'
  if current_common:
+  if selected.requester_profile():
+   (types,types_edits),(boundary,boundary_edits)=selected.poll_header_projection(
+    (tests/'native_boundary.h').read_text(),(tests/'consumer_types.h').read_text())
+   for filename,payload,edits in [('consumer_types.h',types,types_edits),('native_boundary.h',boundary,boundary_edits)]:
+    (out/filename).write_text(payload)
+    (out/(filename+'.edits.json')).write_text(json.dumps(edits,indent=2)+'\n')
   (out/'actual_command_boundary.inc').write_text(COMMAND_BOUNDARY)
   (out/'actual_member_types.inc').write_text(selected.poll_declarations())
   (out/'actual_old_poll.inc').write_text('')
@@ -141,7 +147,8 @@ try:
   if current_common:mode+=['-DSTORAGE_CURRENT_COMMON=1','-DCONFIG_XDEV_EXT_MECH_ZEROCOPY=1']
   binary=out/(profile+'-poll');cmd=['gcc',*flags,*mode,*inc,(out if current_common else tests)/'test_poll.c']
   if a.new:
-   obj=out/(profile+'-runtime.o');r=run(['gcc',*flags,*mode,*(['-DSTORAGE_COMMON_TU=1'] if current_common else []),*inc,'-include',tests/'native_boundary.h','-c',(out/'actual_common.c' if current_common else selected._selection.file(B)),'-o',obj],profile+'-runtime-compile')
+   boundary=(out if current_common and selected.requester_profile() else tests)/'native_boundary.h'
+   obj=out/(profile+'-runtime.o');r=run(['gcc',*flags,*mode,*(['-DSTORAGE_COMMON_TU=1'] if current_common else []),*inc,'-include',boundary,'-c',(out/'actual_common.c' if current_common else selected._selection.file(B)),'-o',obj],profile+'-runtime-compile')
    if r.returncode:continue
    cmd +=[obj,'-Wl,--wrap=xdev_ext_stor_block_poll']
   r=run([*cmd,'-Wl,--gc-sections','-o',binary],profile+'-poll-compile')

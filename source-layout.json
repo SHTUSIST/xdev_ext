@@ -8651,6 +8651,10 @@
       "logical_path": "tests/eval/nvme/_legacy_storfam_fixture.py"
     },
     {
+      "source": "tests/storage/nvme/_locked_nvme_opcode.h",
+      "logical_path": "tests/eval/nvme/_locked_nvme_opcode.h"
+    },
+    {
       "source": "tests/storage/nvme/peer_bind_authorization_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_test.py"
@@ -9033,6 +9037,10 @@
     {
       "source": "tests/storage/native_member_7a/run_candidate.py",
       "logical_path": "tests/storage/native_member_7a/run_candidate.py"
+    },
+    {
+      "source": "tests/storage/nvme/_locked_requester_native.h",
+      "logical_path": "tests/eval/nvme/_locked_requester_native.h"
     }
   ]
 }

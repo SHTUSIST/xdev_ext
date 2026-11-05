@@ -34,6 +34,10 @@ KERNEL = next(p for p in Path(__file__).resolve().parents
 sys.path.insert(0, str(KERNEL / 'tools'))
 import layout as _layout
 
+LOCKED_NVME_OPCODE = 'tests/storage/nvme/_locked_nvme_opcode.h'
+LOCKED_REQUESTER_NATIVE = 'tests/storage/nvme/_locked_requester_native.h'
+LOCKED_NVME_COMMIT = '89be9a83ccf1f88522317ce02f854f30d6115c41'
+
 
 class SourceSelection:
     """One explicit canonical checkout, receipt owner, or complete native tree.
@@ -55,6 +59,9 @@ class SourceSelection:
     def file(self, native):
         if self.mapping is None:
             return _layout.safe_file(self.root, native)
+        if native in (LOCKED_NVME_OPCODE, LOCKED_REQUESTER_NATIVE, self.mapping.manifest.get(
+                'dependency_lock', 'third_party/sources.lock.json')):
+            return _layout.safe_file(self.root, native)
         source = self.mapping.source('linux', native)
         return _layout.safe_file(self.root, source.relative_to(self.root).as_posix())
 
@@ -69,6 +76,30 @@ class SourceSelection:
         for native, expected in self.inputs.items():
             if self.file(native).read_text() != expected:
                 raise AssertionError('SETUP selected dependency changed: ' + native)
+
+    def nvme_opcode_owner(self):
+        """An explicit native header or this canonical owner's locked type fact."""
+        return self.locked_native_owner('include/linux/nvme.h', LOCKED_NVME_OPCODE)
+
+    def locked_native_owner(self, native, public):
+        """A named selected native fact, never a fallback source tree."""
+        if (native, public) not in (
+                ('include/linux/nvme.h', LOCKED_NVME_OPCODE),
+                ('include/linux/dma-direction.h', LOCKED_REQUESTER_NATIVE)):
+            raise AssertionError('SETUP unsupported locked native type fact')
+        if self.mapping is None:
+            self.read(native)
+        else:
+            lock = self.mapping.manifest.get('dependency_lock', 'third_party/sources.lock.json')
+            try:
+                commit = json.loads(self.read(lock))['components']['linux']['commit']
+            except (KeyError, TypeError, ValueError) as error:
+                raise AssertionError('SETUP invalid selected Linux dependency lock') from error
+            if commit != LOCKED_NVME_COMMIT:
+                raise AssertionError('SETUP selected Linux lock has no native type fact')
+            native = public
+        self.read(native)  # Missing selected facts never borrow a different root.
+        return native
 
 
 class ProductionSource(str):
@@ -823,11 +854,12 @@ def extract_common(source, selected):
         content = original if content is None else content
         if structure:
             close = r'\}[^;]*;' if structure == 'inline' else r'^\}[^;]*;'
-            match = re.search(r'^struct ' + re.escape(name) + r' \{.*?' + close,
-                              content, re.M | re.S)
-            if not match:
+            kind = 'enum' if structure == 'enum' else 'struct'
+            matches = list(re.finditer(r'^' + kind + ' ' + re.escape(name) +
+                                      r' \{.*?' + close, content, re.M | re.S))
+            if len(matches) != 1:
                 raise AssertionError('SETUP production structure missing: ' + name)
-            body = match[0]
+            body = matches[0][0]
         else:
             body = definition(content, name)
         offset = original.find(body)
@@ -862,6 +894,20 @@ def extract_common(source, selected):
         if not match:
             raise AssertionError('SETUP actual peer macro missing: ' + macro)
         declarations.append(match[0])
+    requester_field = 'struct xdev_ext_requester requester;'
+    if requester_field in header:
+        declarations.append(record('include/linux/xdev_ext_requester.h',
+                                   'xdev_ext_requester', True))
+    encode_dptr = definition(source, 'nvme_xdev_ext_member_encode_dptr')
+    shared_builder = 'nvme_xdev_ext_peer_build_cmd(' in encode_dptr
+    if shared_builder:
+        declarations.append(record(selected.nvme_opcode_owner(), 'nvme_opcode', 'enum'))
+        nvme_header = selected.read('drivers/nvme/host/nvme.h')
+        for macro in ('NVME_CTRL_PAGE_SHIFT', 'NVME_CTRL_PAGE_SIZE'):
+            matches = list(re.finditer(r'^#define ' + macro + r'\s+[^\n]+$', nvme_header, re.M))
+            if len(matches) != 1:
+                raise AssertionError('SETUP actual native page constant count: ' + macro)
+            declarations.append(matches[0][0])
     for name in ('xdev_ext_stor_poll_view', 'xdev_ext_stor_command',
                  'xdev_ext_stor_geometry', 'xdev_ext_stor_dev_ops',
                  'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
@@ -887,6 +933,8 @@ def extract_common(source, selected):
     if not match:
         raise AssertionError('SETUP production storage hooks missing')
     declarations.append(match[0])
+    declarations.append('static const void *const fixture_stor_hooks_reference '
+                        '__attribute__((used)) = &nvme_xdev_ext_stor_hooks;')
     # Every body remains separately identifiable and byte-exact. The two
     # fallback bodies are selected under the same strict/no-bounce profile.
     # Native W1 uses -Wno-sign-compare. Keep this scope around actual kernel
@@ -896,6 +944,10 @@ def extract_common(source, selected):
     for name in ('xdev_ext_peer_nvme_plan', 'xdev_ext_peer_nvme_sgl_build',
                  'xdev_ext_peer_nvme_prp_build'):
         code.append(record(peer_header, name))
+    if shared_builder:
+        code.append(record('drivers/nvme/host/core.c', 'nvme_xdev_ext_peer_build_cmd'))
+    if 'xdev_ext_stor_leases_retire(' in definition(block, 'xdev_ext_storfam_peer_put'):
+        code.append(record('io_uring/family/xdev_ext_storfam.c', 'xdev_ext_stor_leases_retire'))
     for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                  'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
         code.append(record('io_uring/family/xdev_ext_storfam.c', name))
@@ -1181,11 +1233,22 @@ def build(text, code, fill, submit, have_res, directory, name):
     main_source = MAIN
     if common:
         shim, main_source, edits = common_fixture(shim, main_source)
+        bind_facts = COMMON_BIND_FACTS
+        if 'struct xdev_ext_requester requester;' in text:
+            bind_edits = []
+            bind_facts = positional_replace(bind_facts, ' fixture_peer_identity(p);',
+                ' p->family.requester.pdev=nvme_xdev_ext_member_requester(p);\n'
+                ' p->family.requester.authority=xdev_ext_peer_mech_pool_file(&st->s->pool);\n'
+                ' p->family.requester.generation=xdev_ext_peer_mech_pool_generation(&st->s->pool);\n'
+                ' fixture_peer_identity(p);', 1, bind_edits)
+            if inverse_fixture(bind_facts, bind_edits) != COMMON_BIND_FACTS:
+                raise AssertionError('SETUP complete bind facts inverse differs')
+            edits['bind'] = bind_edits
         (directory / (name + '.fixture-edits.json')).write_text(json.dumps(edits, indent=2) + '\n')
         (directory / (name + '.source-owner.json')).write_text(json.dumps(dict(
             root=str(selected.root), inputs={path: len(value) for path, value in selected.inputs.items()},
             definitions=selected.definitions), indent=2) + '\n')
-        code += '\n' + COMMON_BIND_FACTS
+        code += '\n' + bind_facts
     elif 'struct xdev_ext_stor_stage family;' in text:
         for field in ('rw', 'validated', 'batch_id', 'sqe'):
             main_source = re.sub(r'(bps\[[^]]+\])\.' + field + r'\b', r'\1.family.' + field, main_source)
@@ -1256,6 +1319,12 @@ def main():
 
 def common_mutation(code, name, old, new):
     """Rehome the original nine faults into one actual owning definition."""
+    retirement = re.search(r'^void xdev_ext_stor_leases_retire\(', code, re.M)
+    shared = re.search(r'^int nvme_xdev_ext_peer_build_cmd\(', code, re.M)
+    if retirement or shared:
+        if not retirement or not shared:
+            raise ValueError('SETUP_UNQUALIFIED incomplete current mutation source profile')
+        return common_mutation_requester_shared_v2(code, name)
     owners = {
         'completion claim removed': 'xdev_ext_stor_done',
         'accepted failure published as an ordinary completion': 'xdev_ext_stor_done',
@@ -1279,6 +1348,50 @@ def common_mutation(code, name, old, new):
     elif name == 'admitted NLB drift accepted':
         old, new = 'sb->rw.nlb != sb->posting.nlb', 'false'
     body = definition(code, owners[name])
+    changed = positional_replace(body, old, new)
+    return positional_replace(code, body, changed)
+
+
+COMMON_MUTATION_RELOCATION_V2 = 'requester-shared-nvme-v2'
+
+
+def common_mutation_requester_shared_v2(code, name):
+    """Versioned relocation of the same nine faults; no behavior-oracle changes.
+
+    The full old recipes remain in main and the earlier common profile above.
+    Current helper relocation changes the same quiescence argument. The merge
+    relocation still rejects successful coalescing of one span per leased page.
+    """
+    targets = {
+        'completion claim removed': ('xdev_ext_stor_done',
+            'if (xdev_ext_mech_batch_completion_claim(b, done->ticket))', 'if (0)'),
+        'accepted failure published as an ordinary completion': ('xdev_ext_stor_done',
+            'xdev_ext_mech_batch_completion_publish(b, done->ticket, status, done->uncertain);',
+            'xdev_ext_mech_batch_completion_publish(b, done->ticket, status, false);'),
+        'uncertain lease released quiesced': ('xdev_ext_stor_leases_retire',
+            'xdev_ext_peer_fd_release(&leases[i], quiesced);',
+            'xdev_ext_peer_fd_release(&leases[i], true);'),
+        'GPU subspan offset omitted': ('xdev_ext_storfam_peer_map',
+            'off = f.umem_addr + f.data_off', 'off = f.umem_addr'),
+        'native write direction reversed': ('xdev_ext_storfam_peer_map',
+            'ss->window.write ? DMA_TO_DEVICE : DMA_FROM_DEVICE',
+            'ss->window.write ? DMA_FROM_DEVICE : DMA_TO_DEVICE'),
+        'DMA-contiguous pages not merged': ('nvme_xdev_ext_peer_build_cmd',
+            'if (n > 1 && (!sgl || n > list_bytes / sizeof(*sgl)))',
+            'if (n < nr) return -EPROTO;\n\t\tif (n > 1 && (!sgl || n > list_bytes / sizeof(*sgl)))'),
+        'provider page refusal not split': ('xdev_ext_peer_lease_split',
+            'if (ret != -ERANGE)', 'if (true)'),
+        'admitted byte length drift accepted': ('xdev_ext_storfam_submit',
+            'sb->rw.byte_length != sb->posting.byte_length', 'false'),
+        'admitted NLB drift accepted': ('xdev_ext_storfam_submit',
+            'sb->rw.nlb != sb->posting.nlb', 'false'),
+    }
+    if name not in targets:
+        raise ValueError('SETUP_UNQUALIFIED unknown fault for ' + COMMON_MUTATION_RELOCATION_V2)
+    owner, old, new = targets[name]
+    body = definition(code, owner)
+    if body.count(old) != 1:
+        raise ValueError('SETUP_UNQUALIFIED current fault anchor count: ' + name)
     changed = positional_replace(body, old, new)
     return positional_replace(code, body, changed)
 

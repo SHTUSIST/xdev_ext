@@ -92,6 +92,8 @@ cases=[
 
 if current_common:
  selection.declarations();selection.closure('poll','strict');selection.poll_common_source()
+ if selection.requester_profile():
+  selection.requester_native_types();selection.requester_stage()
  selection.read('include/linux/blk_types.h')
 else:
  for native in [NATIVE_OWNER,'io_uring/family/xdev_ext_storfam.c','include/linux/blk_types.h']:

@@ -129,9 +129,11 @@ class LegacySelection:
         self.root = self._selection.root
         self._bytes = {}
         self._definitions = {}
+        self._source_facts = {}
         self._declarations = None
         self._closures = {}
         self._common_observers = []
+        self._dependency_projections = []
 
     def read(self, native):
         if not isinstance(native, str) or native.startswith('/') or '..' in Path(native).parts:
@@ -155,18 +157,35 @@ class LegacySelection:
         except (AssertionError, RuntimeError) as error:
             raise ValueError(str(error)) from error
 
-    def _record(self, native, symbol, start, end):
+    def _locked_native_owner(self, native, public):
+        """Keep selected native facts inside this utility's invalid-input API."""
+        try:
+            owner = self._selection.locked_native_owner(native, public)
+            if self._selection.mapping is not None:
+                self.read(self._selection.mapping.manifest.get(
+                    'dependency_lock', 'third_party/sources.lock.json'))
+            self.read(owner)
+            return owner
+        except (AssertionError, RuntimeError, OSError) as error:
+            raise ValueError(str(error)) from error
+
+    def _record(self, native, symbol, start, end, *, purpose=None):
         text = self.read(native)
         if start < 0 or end <= start or end > len(text):
             raise ValueError('SETUP invalid production span')
         offset = len(text[:start].encode())
         length = len(text[start:end].encode())
         key = (native, symbol, offset, length)
-        self._definitions[key] = dict(native=native, symbol=symbol,
-                                      offset=offset, length=length)
+        record = dict(native=native, symbol=symbol, offset=offset, length=length)
+        if purpose is None:
+            self._definitions[key] = record
+        elif purpose == 'profile-inspection-only':
+            self._source_facts[key] = dict(record, purpose=purpose)
+        else:
+            raise ValueError('SETUP unsupported source fact purpose')
         return text[start:end]
 
-    def definition(self, native, symbol, kind='function'):
+    def definition(self, native, symbol, kind='function', *, purpose=None):
         text = self.read(native)
         if kind == 'struct':
             pattern = r'^struct ' + re.escape(symbol) + r'\s*\{'
@@ -190,7 +209,7 @@ class LegacySelection:
             if symbol=='xdev_ext_stor_command' and not re.fullmatch(r'\s*__aligned\(8\)\s*;',suffix[0]):
                 raise ValueError('SETUP command declaration must retain aligned(8) suffix')
             end += suffix.end()
-        return self._record(native, symbol, match.start(), end)
+        return self._record(native, symbol, match.start(), end, purpose=purpose)
 
     def _portable(self, native, visited=None):
         """Snapshot actual portable includes, without a foreign-root fallback."""
@@ -244,6 +263,16 @@ class LegacySelection:
         for name in ('NVME_XDEV_EXT_PEER_MAX_PIECES',
                      'NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT'):
             matches = list(re.finditer(r'^#define ' + name + r'[^\n]*', native, re.M))
+            if not matches and name == 'NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT':
+                owned = [native]
+                shared = re.search(r'\bnvme_xdev_ext_peer_build_cmd\s*\(', native)
+                if shared or re.search(r'^#include\s+[<"]' + re.escape(posixpath.basename(P)) + r'[>"]', native, re.M):
+                    owned.append(self.read(P))
+                if shared:
+                    owned.append(self.read('drivers/nvme/host/core.c'))
+                if any(re.search(r'\b' + name + r'\b', text) for text in owned):
+                    raise ValueError('SETUP unresolved selected native bound: ' + name)
+                continue
             if len(matches) != 1:
                 raise ValueError('SETUP native bound count: ' + name)
             match = matches[0]
@@ -253,6 +282,117 @@ class LegacySelection:
         pieces.append('static const void *const fixture_stor_hooks_reference '
                       '__attribute__((used)) = &nvme_xdev_ext_stor_hooks;')
         return '\n\n'.join(pieces)
+
+    def requester_profile(self):
+        return 'struct xdev_ext_requester requester;' in self.read(H)
+
+    def requester_stage(self):
+        """Whole selected declaration, including authentic caps/report fields."""
+        self._portable('include/uapi/linux/xdev_ext_mech.h')
+        return self.definition('include/linux/xdev_ext_mech.h', 'xdev_ext_mech_stage', 'struct')
+
+    def requester_native_types(self):
+        owner = self._locked_native_owner('include/linux/dma-direction.h',
+                                          _API['LOCKED_REQUESTER_NATIVE'])
+        dma = self.definition(owner, 'dma_data_direction', 'enum')
+        if self._selection.mapping is not None:
+            return dma, '\n'.join(self.definition(owner, n, 'struct') for n in ('pci_bus', 'pci_dev'))
+        native = 'include/linux/pci.h'
+        def fields(symbol, patterns):
+            body = self.definition(native, symbol, 'struct')
+            source = self.read(native)
+            start = source.index(body)
+            values = []
+            for pattern in patterns:
+                matches = list(re.finditer(pattern, body, re.M))
+                if len(matches) != 1:
+                    raise ValueError('SETUP selected native PCI field count: ' + symbol)
+                match = matches[0]
+                values.append(self._record(native, symbol + '.field',
+                              start + match.start(), start + match.end()))
+            return 'struct ' + symbol + ' {\n' + '\n'.join(values) + '\n};'
+        bus = fields('pci_bus', (r'^\s*unsigned char\s+number;[^\n]*',))
+        pci = fields('pci_dev', (r'^\s*struct device\s+dev;[^\n]*',
+            r'^\s*struct pci_bus\s*\*bus;[^\n]*', r'^\s*unsigned int\s+devfn;[^\n]*',
+            r'^\s*unsigned int\s+untrusted:1;[^\n]*'))
+        return dma, bus + '\n' + pci
+
+    def requester_type_projection(self, raw):
+        """Only external native field/type facts; record their full inverse."""
+        dma, pci = self.requester_native_types()
+        dma_matches = list(re.finditer(r'^enum dma_data_direction \{[^\n]+\};', raw, re.M))
+        pci_matches = list(re.finditer(r'^struct pci_dev \{[^\n]+\};', raw, re.M))
+        if len(dma_matches) != 1 or len(pci_matches) != 1:
+            raise ValueError('SETUP external requester type projection count')
+        edits = [dict(old=dma_matches[0][0],new=dma,count=1,
+                      reason='genuine selected DMA direction enum',source_owner='selected native type owner'),
+                 dict(old=pci_matches[0][0],new=pci,count=1,
+                      reason='explicit authentic PCI field projection, no native layout claim',source_owner='selected native type owner')]
+        value, records = adapt_fixture(raw, edits)
+        self._dependency_projections.append(dict(kind='requester-native-types',records=records))
+        return value
+
+    def opcode_boundary_projection(self, raw):
+        """Remove old external macro aliases, without changing native policy."""
+        edits = []
+        for line in ('#define nvme_cmd_write 1\n', '#define nvme_cmd_read 2\n',
+                     '#define nvme_cmd_vendor_start 0xc0\n'):
+            edits.append(dict(old=line,new='',count=1,reason='actual whole native opcode enum owns policy',
+                              source_owner='selected native opcode owner'))
+        value, records = adapt_fixture(raw, edits)
+        self._dependency_projections.append(dict(kind='native-opcode-macro-removal',records=records))
+        return value
+
+    def poll_header_projection(self, native_raw, types_raw):
+        """Preserve public raw headers; project only their current type boundary."""
+        self.definition('include/uapi/linux/xdev_ext_mech.h','xdev_ext_mech_pool_kind','enum')
+        split = '#else\n#ifndef STORAGE_POLL_CONSUMER_TYPES_H'
+        if types_raw.count(split) != 1:
+            raise ValueError('SETUP poll current header profile count')
+        original = types_raw[:types_raw.index(split)]
+        current = self.requester_type_projection(original)
+        stages = re.findall(r'^struct xdev_ext_mech_stage \{[^\n]+\};', current, re.M)
+        if len(stages) != 1:
+            raise ValueError('SETUP poll current stage declaration count')
+        requester = ('#include "include/linux/xdev_ext_requester_core.h"\n' +
+                     self.definition('include/linux/xdev_ext_requester.h','xdev_ext_requester','struct') + '\n')
+        current, inner = adapt_fixture(current,[
+            dict(old=stages[0],new=self.requester_stage(),count=1,
+                 reason='whole actual selected stage and typed reporting fields',source_owner='include/linux/xdev_ext_mech.h'),
+            dict(old='#define XDEV_EXT_MECH_POOL_PEER 2\n',new='',count=1,
+                 reason='symbolic PEER setup uses genuine UAPI pool enum instead of historical external value 2',
+                 source_owner='include/uapi/linux/xdev_ext_mech.h'),
+            dict(old='#include <linux/xdev_ext_storfam_block.h>',
+                 new=requester+'#include <linux/xdev_ext_storfam_block.h>',count=1,
+                 reason='complete actual requester before embedding family stage',source_owner='include/linux/xdev_ext_requester.h')])
+        self._dependency_projections.append(dict(kind='poll-header-inner-types',records=inner))
+        types, types_records = adapt_fixture(types_raw,[dict(old=original,new=current,count=1,
+            reason='current-only external native and stage declaration projection',source_owner='selected current source owner')])
+        prototypes = []
+        for name in ('xdev_ext_requester_bind','xdev_ext_requester_unbind'):
+            body = self.definition(Q,name)
+            prototypes.append(body[:body.index('{')].rstrip()+';')
+        anchor = 'int __wrap_xdev_ext_stor_block_poll_check(bool,struct request*);'
+        native, native_records = adapt_fixture(native_raw,[dict(old=anchor,
+            new=anchor+'\n'+'\n'.join(prototypes),count=1,
+            reason='prototypes derived from actual requester bodies linked by matching utility TU',source_owner=Q)])
+        return ((types,types_records),(native,native_records))
+
+    def _native_command_declarations(self):
+        """Exact selected command policy and page bounds for each fixture TU."""
+        pieces = []
+        if 'nvme_xdev_ext_peer_build_cmd(' in self.definition(
+                N, 'nvme_xdev_ext_member_encode_dptr', purpose='profile-inspection-only'):
+            owner = self._locked_native_owner('include/linux/nvme.h', _API['LOCKED_NVME_OPCODE'])
+            pieces.append(self.definition(owner, 'nvme_opcode', 'enum'))
+            nvme_header = self.read(I)
+            for name in ('NVME_CTRL_PAGE_SHIFT', 'NVME_CTRL_PAGE_SIZE'):
+                matches = list(re.finditer(r'^#define ' + name + r'\s+[^\n]+$', nvme_header, re.M))
+                if len(matches) != 1:
+                    raise ValueError('SETUP actual native page constant count: ' + name)
+                match = matches[0]
+                pieces.append(self._record(I, name, match.start(), match.end()))
+        return pieces
 
     def declarations(self):
         self.verify()
@@ -275,7 +415,16 @@ class LegacySelection:
                  'xdev_ext_stor_geometry', 'xdev_ext_stor_dev_ops',
                  'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
                  'xdev_ext_stor_stage', 'xdev_ext_stor_batch')
-        pieces = [prelude] + [self.definition(H, name, 'struct') for name in names]
+        pieces = [prelude]
+        if 'struct xdev_ext_requester requester;' in self.read(H):
+            self._portable('include/linux/xdev_ext_requester_core.h')
+            pieces += ['#include "include/linux/xdev_ext_requester_core.h"',
+                       self.definition('include/linux/xdev_ext_requester.h',
+                                       'xdev_ext_requester', 'struct'),
+                       self.definition('include/linux/xdev_ext_peer.h',
+                                       'xdev_ext_peer_backing', 'struct')]
+        pieces += self._native_command_declarations()
+        pieces += [self.definition(H, name, 'struct') for name in names]
         block = self.read(B)
         constant = re.search(r'^#define XDEV_EXT_STOR_PEER_MAX_SPANS[^\n]*', block, re.M)
         if not constant:
@@ -347,6 +496,11 @@ class LegacySelection:
             items += [(P, n) for n in ('xdev_ext_peer_nvme_plan',
                                       'xdev_ext_peer_nvme_sgl_build',
                                       'xdev_ext_peer_nvme_prp_build')]
+            if 'nvme_xdev_ext_peer_build_cmd(' in self.definition(
+                    N, 'nvme_xdev_ext_member_encode_dptr', purpose='profile-inspection-only'):
+                items.append(('drivers/nvme/host/core.c', 'nvme_xdev_ext_peer_build_cmd'))
+            if 'xdev_ext_stor_leases_retire(' in self.definition(B, 'xdev_ext_storfam_peer_put'):
+                items.append((R, 'xdev_ext_stor_leases_retire'))
             items += [(R, n) for n in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                                       'xdev_ext_stor_slot_put', 'xdev_ext_stor_done')]
             items += [(Q, 'xdev_ext_peer_lease_split'), (I, 'nvme_xdev_ext_capture_identity')]
@@ -380,6 +534,10 @@ class LegacySelection:
         if group == 'pool':
             items.append(('block/blk-mq.c', 'blk_complete_request'))
         if group in ('bind', 'poll'):
+            if self.requester_profile():
+                self._portable('include/linux/xdev_ext_requester_core.h')
+                self.definition('include/linux/xdev_ext_requester_core.h', 'xdev_ext_admit_decide')
+                items += [(Q, n) for n in ('xdev_ext_requester_bind', 'xdev_ext_requester_unbind')]
             items += [('drivers/nvme/host/ioctl.c', n) for n in
                       ('nvme_cmd_allowed', 'nvme_xdev_ext_mech_cmd_allowed')]
             items += [(N, n) for n in ('nvme_xdev_ext_class_ns', 'nvme_xdev_ext_member_bind',
@@ -429,6 +587,8 @@ class LegacySelection:
         self.verify()
         return {'root': str(self.root), 'inputs': sorted(self._selection.inputs),
                 'definitions': list(self._definitions.values()),
+                'source_facts': list(self._source_facts.values()),
+                'dependency_projections':list(self._dependency_projections),
                 'common_observers':list(self._common_observers)}
 
     def headers(self, output):
@@ -444,7 +604,8 @@ class LegacySelection:
 
     def poll_declarations(self):
         self.declarations()
-        pieces=[self.definition('include/trace/events/xdev_ext.h','xdev_ext_native_event','struct'),
+        pieces=self._native_command_declarations()+[
+                self.definition('include/trace/events/xdev_ext.h','xdev_ext_native_event','struct'),
                 self.definition(B,'xdev_ext_stor_peer_resources','struct'),
                 self.definition(T,'nvme_xdev_ext_peer_trace','struct')]
         pieces += [self.definition(N,n,'struct') for n in
@@ -848,6 +1009,66 @@ struct inode *file_inode(struct file *file)
 { static struct inode inode;(void)file;inode.i_cdev=&ns.cdev;return &inode; }
 '''
 
+# Explicit dependency responses, not provider policy/cache/region execution.
+# Admission, authority capture and requester binding remain the real bodies.
+REQUESTER_DEPENDENCY_FACTS = r'''
+struct fixture_requester_dependency_facts {
+ struct pci_dev *owner;
+ u32 backing;
+ int distance, describe_error, premap_error, domain;
+ bool bounce, dma_iommu, dma_ops;
+};
+static struct pci_dev fixture_backing_owner={.dev={.is_pci=true}};
+static struct fixture_requester_dependency_facts fixture_requester_dependencies = {
+ .owner=&fixture_backing_owner,
+ .backing=XDEV_EXT_PEER_BACKING_MMIO_BAR|XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR,
+ .distance=0,
+};
+static unsigned fixture_pci_references;
+static struct pci_dev *pci_dev_get(struct pci_dev *p)
+{ assert(p && fixture_pci_references<64);fixture_pci_references++;return p; }
+static void pci_dev_put(struct pci_dev *p)
+{ assert(p && fixture_pci_references);fixture_pci_references--; }
+static int pci_domain_nr(struct pci_bus *bus)
+{ assert(bus);return fixture_requester_dependencies.domain; }
+static int pci_p2pdma_distance(struct pci_dev *owner,struct device *client,bool verbose)
+{ assert(owner==fixture_requester_dependencies.owner && client && verbose);return fixture_requester_dependencies.distance; }
+static bool is_swiotlb_force_bounce(struct device *dev)
+{ assert(dev);return fixture_requester_dependencies.bounce; }
+static bool use_dma_iommu(struct device *dev)
+{ assert(dev);return fixture_requester_dependencies.dma_iommu; }
+struct dma_map_ops;
+static const struct dma_map_ops *get_dma_ops(struct device *dev)
+{ static char identity;assert(dev);return fixture_requester_dependencies.dma_ops?(const void *)&identity:NULL; }
+int xdev_ext_peer_file_describe(struct file *authority,struct pci_dev *requester,struct xdev_ext_peer_backing *out)
+{
+ assert(authority && requester && out);
+ if(fixture_requester_dependencies.describe_error)return fixture_requester_dependencies.describe_error;
+ *out=(struct xdev_ext_peer_backing){.owner=fixture_requester_dependencies.owner,.flags=fixture_requester_dependencies.backing};
+ return 0;
+}
+int xdev_ext_peer_file_premap(struct file *authority,struct pci_dev *requester)
+{ assert(authority && requester);return fixture_requester_dependencies.premap_error; }
+'''
+
+REQUESTER_BIND_AUTHORITY = r'''
+static struct file fixture_allocation_authority;
+struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *pool)
+{ assert(pool->kind==XDEV_EXT_MECH_POOL_PEER);return &fixture_allocation_authority; }
+u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *pool)
+{ assert(pool->kind==XDEV_EXT_MECH_POOL_PEER);return 1; }
+'''
+
+
+def _preserve_legacy_vendor_inputs(raw, edit):
+    """Keep concrete old 0xc0 test inputs separate from the real native enum."""
+    lines = [line for line in raw.splitlines(keepends=True)
+             if re.search(r'\bnvme_cmd_vendor_start\b', line) and
+             not line.startswith('#define nvme_cmd_vendor_start ')]
+    for line in dict.fromkeys(lines):
+        edit(line, re.sub(r'\bnvme_cmd_vendor_start\b', '0xc0', line), raw.count(line),
+             reason='preserve original concrete vendor test input while actual policy uses genuine enum')
+
 
 def bind_fixture(selected, raw):
     prefix = raw[:raw.index('static struct nvme_ops ops=')]
@@ -856,6 +1077,10 @@ def bind_fixture(selected, raw):
         'struct file_operations { int (*uring_cmd)(void); };\nstruct file { unsigned f_mode; bool native_ns; const struct file_operations *f_op; };')
     types = types.replace('void *peer_rw;', 'bool peer_rw;')
     types = types.replace('unsigned long flags; };', 'unsigned long flags; void *cdev; };')
+    requester = selected.requester_profile()
+    if requester:
+        types = selected.requester_type_projection(types)
+        policy = selected.opcode_boundary_projection(policy)
     boundary = r'''
 enum rq_end_io_ret { RQ_END_IO_FREE };
 struct request { struct blk_mq_hw_ctx *mq_hctx; unsigned cmd_flags,bytes;
@@ -868,6 +1093,12 @@ struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct file *file;
 struct xdev_ext_mech_batch { void *priv; };
 struct xdev_ext_mech_frame { void *kaddr;u64 umem_addr;u32 index,data_off,data_len;void *pool_priv; };
 '''
+    if requester:
+        old_stage = 'struct xdev_ext_mech_stage { struct xdev_ext_mech_session *s; struct file *file; unsigned direction; bool poll; unsigned arg0,arg1; void *priv; };'
+        boundary, records = adapt_fixture(boundary,[dict(old=old_stage,new=selected.requester_stage(),count=1,
+            reason='whole actual stage caps and reporting declaration; old zeroed fixtures stay nonreporting',
+            source_owner='include/linux/xdev_ext_mech.h')])
+        selected._dependency_projections.append(dict(kind='bind-stage-type',records=records))
     code = selected.closure('bind','strict')
     observer = selected.definition(B,'xdev_ext_storfam_host_resources_init')
     if code.count(observer) != 1:
@@ -888,13 +1119,26 @@ struct xdev_ext_mech_frame { void *kaddr;u64 umem_addr;u32 index,data_off,data_l
         edit(_fixture_function(raw,name),'')
     edit('#define WARN_ON_ONCE(v) (v)\n','')
     # Define the external file/inode facts before compiling the actual class_ns.
-    edit('/* PRODUCTION */', HOST_OS+BIND_OS+code)
+    host_os = HOST_OS
+    if requester:
+        old_authority = ('struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p)\n'
+                         '{ (void)p;abort(); }\n'
+                         'u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p)\n'
+                         '{ (void)p;abort(); }')
+        host_os, records = adapt_fixture(host_os,[dict(old=old_authority,new=REQUESTER_BIND_AUTHORITY,count=1,
+            reason='explicit external allocation authority/generation facts, real requester captures them',
+            source_owner='public bind fixture dependency boundary')])
+        selected._dependency_projections.append(dict(kind='bind-authority-facts',records=records))
+    requester_deps = REQUESTER_DEPENDENCY_FACTS if requester else ''
+    edit('/* PRODUCTION */', host_os+BIND_OS+requester_deps+code)
     edit('struct file f={FMODE_READ,true};','struct file f={.f_mode=FMODE_READ,.native_ns=true};')
     edit('int rc=nvme_xdev_ext_class_bind(st,u);',
          'static struct pci_dev pci={.dev={.is_pci=true}}; st->file->f_op=st->file->native_ns?&fixture_fops:NULL; ctrl.dev=&pci.dev; ctrl.state=NVME_CTRL_LIVE; st->s->depth=1; st->s->layout.seg_len=4096; st->s->layout.frame_size=4096; st->s->pool.frame_size=4096; int rc=nvme_xdev_ext_class_bind(st,u);')
     edit('free(st->priv); st->priv=NULL;',
          'struct nvme_xdev_ext_mech_stage *member=st->priv; assert(xdev_ext_storfam_unbind(&member->family)); free(st->priv); st->priv=NULL;',
          reason='actual successful resource cleanup before original member free')
+    if requester:
+        _preserve_legacy_vendor_inputs(raw[len(prefix):], edit)
     return adapt_fixture(raw,edits),code
 
 
@@ -1046,7 +1290,34 @@ def poll_fixture(selected, raw, consumers=False):
         'actual_old_poll.inc','actual_member_callbacks.inc','nvme_xdev_ext_class_bind.inc',
         'nvme_xdev_ext_class_complete.inc','nvme_xdev_ext_class_ready.inc',
         'nvme_xdev_ext_class_end_io.inc','nvme_xdev_ext_peer_complete.inc','nvme_xdev_ext_peer_end_io.inc'))
-    edit(includes,POLL_OS+selected.closure('poll','strict')+
+    poll_os = POLL_OS
+    if selected.requester_profile():
+        poll_os = selected.opcode_boundary_projection(poll_os)
+        owner = 'include/linux/xdev_ext_mech.h'
+        header = selected.read(owner)
+        prototypes = []
+        for name in ('xdev_ext_peer_mech_pool_file', 'xdev_ext_peer_mech_pool_generation'):
+            matches = list(re.finditer(r'^[^;{}\n]*\b' + name + r'\([^;{}]*\);', header, re.M))
+            if len(matches) != 1:
+                raise ValueError('SETUP actual pool accessor declaration count: ' + name)
+            match = matches[0]
+            prototypes.append(selected._record(owner, name, match.start(), match.end()))
+        anchor = 'static void no_work(void);'
+        poll_os, records = adapt_fixture(poll_os,[dict(old=anchor,
+            new=anchor+'\n'+'\n'.join(prototypes),count=1,
+            reason='actual pool accessor declarations before already-bound requester setup calls',
+            source_owner=owner)])
+        selected._dependency_projections.append(dict(kind='poll-authority-declarations',records=records))
+        anchor = ' member.family.geometry=(struct xdev_ext_stor_geometry){.capacity_lbas=4096,.lba_shift=9};'
+        poll_os, records = adapt_fixture(poll_os,[dict(old=anchor,new=anchor+'\n'
+            ' member.family.requester.pdev=&fixture_pci;\n'
+            ' member.family.requester.authority=xdev_ext_peer_mech_pool_file(&session.pool);\n'
+            ' member.family.requester.generation=xdev_ext_peer_mech_pool_generation(&session.pool);',count=1,
+            reason='explicit already-bound requester facts at existing resource injection only; not CREATE coverage',
+            source_owner='public poll fixture setup boundary')])
+        selected._dependency_projections.append(dict(kind='poll-already-bound-facts',records=records))
+        poll_os += REQUESTER_DEPENDENCY_FACTS
+    edit(includes,poll_os+selected.closure('poll','strict')+
          '\n#define nvme_xdev_ext_class_bind(s,u) (fixture_bind_facts(), (nvme_xdev_ext_class_bind)(s,u))\n')
     edit('#define __KERNEL__ 1\n#include <xdev_ext_peer_nvme_core.h>\n#undef __KERNEL__','')
     edit('#include "nvme_xdev_ext_peer_submit.inc"','')
@@ -1086,4 +1357,6 @@ static int submit(bool peer)
     edit('EQ("plain-existing-POLLED-submit",submit(peer),0);EQ("plain-keeps-existing-POLLED",allocation_opf,native_opf);',
          'EQ("plain-existing-POLLED-submit",xdev_ext_stor_block_poll_opf(false,34U|REQ_POLLED),34U|REQ_POLLED);EQ("plain-keeps-existing-POLLED",xdev_ext_stor_block_poll_opf(false,native_opf),native_opf);',
          reason='root qualification: unreachable native injected bits retained as helper-only property')
+    if selected.requester_profile():
+        _preserve_legacy_vendor_inputs(raw, edit)
     return adapt_fixture(raw,edits)
