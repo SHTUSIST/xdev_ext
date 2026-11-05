@@ -4349,6 +4349,7 @@ static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,
 
 	memset(out, 0, sizeof(*out));
 	out->session_id = s->id;
+	spin_lock_irqsave(&s->lock, flags);
 	out->rejects = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_REJECTS]);
 	out->recycled = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_RECYCLED]);
 	out->held = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_HELD]);
@@ -4360,7 +4361,6 @@ static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,
 		out->submitted[i] = atomic64_read(&s->submitted[i]);
 		out->completed[i] = atomic64_read(&s->completed[i]);
 	}
-	spin_lock_irqsave(&s->lock, flags);
 	out->batches_done = atomic64_read(&s->done);
 	out->batches_abort = atomic64_read(&s->aborted);
 	out->published = atomic64_read(&s->cnt[XDEV_EXT_MECH_CNT_PUBLISHED]);
