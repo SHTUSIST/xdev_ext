@@ -124,6 +124,11 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #endif
 
 /* Real definitions in other units (core, peer pool, XDOMAIN class). */
+int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
+				  enum dma_data_direction dir, dma_addr_t *dma);
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len,
+				     bool quiesced);
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq);
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_session_id(const struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_batch_id(const struct xdev_ext_mech_batch *b);
