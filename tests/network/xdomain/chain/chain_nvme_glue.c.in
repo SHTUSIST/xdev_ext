@@ -1,0 +1,257 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * NVMe controller and block-queue environment of the real NVMe class.
+ * run.py pastes two production functions at REAL_NVME_HELPERS:
+ * nvme_xdev_ext_peer_build_cmd() (drivers/nvme/host/core.c) and
+ * nvme_xdev_ext_mech_cmd_allowed() (drivers/nvme/host/ioctl.c).
+ *
+ * The controller model acts only on what a real submitted command names:
+ * opcode, SLBA, NLB and the SGL data pointer built by the real class.  A READ
+ * copies disk bytes to those DMA addresses, a WRITE copies from them, both
+ * through the lease provider's per-requester translation (chain_dma_access),
+ * then it completes the request through its own end_io, as nvme-pci would.
+ * It never touches frames by index and never completes a held controller.
+ */
+#include "nvme.h"
+#include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_storfam.h>
+#include "xdev_ext_peer_nvme_core.h"
+#include "chain_api.h"
+#include "chain_core_api.h"
+
+/* REAL_NVME_HELPERS */
+
+int nvme_ns_chr_uring_cmd(struct io_uring_cmd *ioucmd, unsigned int issue_flags)
+{
+	(void)ioucmd; (void)issue_flags;
+	abort(); /* identity of the namespace character device only */
+}
+/* Upstream: permission and command-effects check of the open file. The
+ * fixture process is authorized for both directions of its namespace. */
+bool nvme_cmd_allowed(struct nvme_ns *ns, struct nvme_command *c, unsigned flags, bool open_for_write)
+{
+	(void)ns; (void)flags;
+	return c->rw.opcode == nvme_cmd_read || open_for_write;
+}
+void nvme_init_request(struct request *req, struct nvme_command *cmd)
+{
+	req->cmd_storage = *cmd;
+	nvme_req(req)->cmd = &req->cmd_storage;
+	nvme_req(req)->flags = 0;
+	nvme_req(req)->status = 0;
+	nvme_req(req)->result.u64 = 0;
+}
+static int chain_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_rw *rw,
+			 struct file *file, bool *accepted)
+{
+	(void)ns; (void)rw; (void)file; (void)accepted;
+	abort(); /* the synchronous peer ioctl is outside this composition */
+}
+
+#define CHAIN_REQS 32
+struct chain_nvme {
+	bool used, hold;
+	unsigned endpoint;
+	struct pci_dev pdev;
+	struct nvme_ctrl_ops ops;
+	struct nvme_ctrl ctrl;
+	struct nvme_ns_head head;
+	struct nvme_ns ns;
+	struct gendisk disk;
+	struct request_queue queue;
+	struct blk_mq_hw_ctx hctx;
+	struct inode inode;
+	struct file_operations fops;
+	struct file file;
+	uint8_t *bytes;
+	size_t size;
+	struct request reqs[CHAIN_REQS];
+	struct request *pending[CHAIN_REQS];
+	unsigned npending;
+	uint64_t order;
+};
+static struct chain_nvme controllers[CHAIN_ENDPOINTS];
+#define CHAIN_NVME_LOG 512
+static struct chain_nvme_command nvme_log[CHAIN_NVME_LOG];
+static size_t nvme_logs;
+
+static struct chain_nvme *by_queue(struct request_queue *q)
+{
+	for (unsigned e = 0; e < CHAIN_ENDPOINTS; e++)
+		if (controllers[e].used && &controllers[e].queue == q)
+			return &controllers[e];
+	abort();
+}
+
+void *chain_nvme_create(unsigned endpoint, uint32_t lba_shift, uint64_t lbas, bool write_open,
+			void **file_out)
+{
+	struct chain_nvme *c = &controllers[endpoint];
+
+	assert(endpoint < CHAIN_ENDPOINTS && !c->used);
+	memset(c, 0, sizeof(*c));
+	c->used = true;
+	c->endpoint = endpoint;
+	c->pdev = (struct pci_dev){ .dev = { .is_pci = true, .endpoint = endpoint,
+		.name = endpoint ? "0000:42:00.0" : "0000:41:00.0" },
+		.endpoint = endpoint, .name = endpoint ? "0000:42:00.0" : "0000:41:00.0" };
+	c->ops = (struct nvme_ctrl_ops){ .name = "pcie", .peer_rw = chain_peer_rw };
+	c->ctrl = (struct nvme_ctrl){ .state = NVME_CTRL_LIVE, .dev = &c->pdev.dev, .ops = &c->ops,
+		.sgls = true };
+	c->head = (struct nvme_ns_head){ .ns_id = 1, .lba_shift = (u8)lba_shift };
+	c->head.ids.eui64[7] = (u8)(endpoint + 1);
+	c->queue.limits = (struct queue_limits){ .max_hw_sectors = 2048, .max_segments = 128,
+		.max_segment_size = 65536, .virt_boundary_mask = 0, .dma_alignment = 3 };
+	c->disk = (struct gendisk){ .capacity = lbas << (lba_shift - SECTOR_SHIFT),
+		.diskseq = 100 + endpoint, .queue = &c->queue };
+	c->ns = (struct nvme_ns){ .ctrl = &c->ctrl, .flags = 1UL << NVME_NS_READY,
+		.head = &c->head, .disk = &c->disk, .queue = &c->queue };
+	c->inode.i_cdev = &c->ns.cdev;
+	c->fops.uring_cmd = nvme_ns_chr_uring_cmd;
+	c->file = (struct file){ .f_op = &c->fops, .inode = &c->inode,
+		.f_mode = FMODE_READ | (write_open ? FMODE_WRITE : 0), .endpoint = endpoint };
+	c->size = (size_t)lbas << lba_shift;
+	c->bytes = calloc(1, c->size);
+	assert(c->bytes);
+	chain_register_device(&c->pdev, endpoint, CHAIN_DEV_NVME);
+	*file_out = &c->file;
+	return &c->pdev;
+}
+uint8_t *chain_nvme_disk(unsigned endpoint, size_t *bytes)
+{
+	*bytes = controllers[endpoint].size;
+	return controllers[endpoint].bytes;
+}
+void chain_nvme_hold(unsigned endpoint, bool hold) { controllers[endpoint].hold = hold; }
+unsigned chain_nvme_pending(unsigned endpoint) { return controllers[endpoint].npending; }
+size_t chain_nvme_log_count(void) { return nvme_logs; }
+const struct chain_nvme_command *chain_nvme_log(size_t i) { return i < nvme_logs ? &nvme_log[i] : NULL; }
+void chain_nvme_init_class(void) { nvme_xdev_ext_mech_init(); }
+
+struct request *blk_mq_alloc_request(struct request_queue *q, blk_opf_t opf, unsigned flags)
+{
+	struct chain_nvme *c = by_queue(q);
+
+	assert(flags & BLK_MQ_REQ_NOWAIT); /* the worker never sleeps for a tag */
+	for (unsigned i = 0; i < CHAIN_REQS; i++) {
+		struct request *rq = &c->reqs[i];
+		if (rq->allocated)
+			continue;
+		memset(rq, 0, sizeof(*rq));
+		rq->allocated = true;
+		rq->q = q;
+		rq->mq_hctx = &c->hctx;
+		rq->cmd_flags = opf;
+		rq->slot = i;
+		return rq;
+	}
+	return ERR_PTR(-EWOULDBLOCK);
+}
+void blk_mq_free_request(struct request *rq)
+{
+	assert(rq->allocated);
+	rq->allocated = false;
+}
+
+/* What the real command names: SGL data block or a last-segment list. */
+static void decode(struct chain_nvme *c, const struct nvme_command *cmd, struct chain_nvme_command *out)
+{
+	const struct nvme_sgl_desc *sgl = &cmd->rw.dptr.sgl;
+
+	*out = (struct chain_nvme_command){ .endpoint = c->endpoint, .opcode = cmd->rw.opcode,
+		.slba = cmd->rw.slba, .nlb = (u32)cmd->rw.length + 1u,
+		.bytes = ((u32)cmd->rw.length + 1u) << c->head.lba_shift };
+	assert(cmd->rw.flags & NVME_CMD_SGL_METABUF);
+	if ((sgl->type >> 4) == NVME_SGL_FMT_DATA_DESC) {
+		out->spans = 1;
+		out->span_addr[0] = sgl->addr;
+		out->span_len[0] = sgl->length;
+	} else {
+		const struct nvme_sgl_desc *list = (const void *)(uintptr_t)sgl->addr;
+		assert((sgl->type >> 4) == NVME_SGL_FMT_LAST_SEG_DESC && sgl->length % sizeof(*list) == 0);
+		out->spans = sgl->length / sizeof(*list);
+		assert(out->spans <= 64);
+		for (u32 i = 0; i < out->spans; i++) {
+			assert((list[i].type >> 4) == NVME_SGL_FMT_DATA_DESC);
+			out->span_addr[i] = list[i].addr;
+			out->span_len[i] = list[i].length;
+		}
+	}
+}
+
+void blk_execute_rq_nowait(struct request *rq, bool at_head)
+{
+	struct chain_nvme *c = by_queue(rq->q);
+	struct chain_nvme_command *log;
+
+	(void)at_head;
+	assert(rq->allocated && !rq->executed && nvme_req(rq)->cmd && c->npending < CHAIN_REQS);
+	rq->executed = true;
+	assert(nvme_logs < CHAIN_NVME_LOG);
+	log = &nvme_log[nvme_logs++];
+	decode(c, nvme_req(rq)->cmd, log);
+	log->order = ++c->order;
+	log->worker = chain_core_current_worker();
+	c->pending[c->npending++] = rq;
+	chain_record((struct chain_event){ .kind = CHAIN_EV_NVME_SUBMIT, .endpoint = c->endpoint,
+		.worker = (u32)log->worker, .address = log->slba, .length = log->bytes,
+		.offset = nvme_logs - 1, .control_type = log->opcode });
+}
+
+bool chain_nvme_ready(void)
+{
+	for (unsigned e = 0; e < CHAIN_ENDPOINTS; e++)
+		if (controllers[e].used && controllers[e].npending && !controllers[e].hold)
+			return true;
+	return false;
+}
+
+int chain_nvme_complete_one(void)
+{
+	for (unsigned e = 0; e < CHAIN_ENDPOINTS; e++) {
+		struct chain_nvme *c = &controllers[e];
+		struct chain_nvme_command cmd;
+		struct request *rq;
+		u64 cursor;
+		int status = 0;
+
+		if (!c->used || !c->npending || c->hold)
+			continue;
+		rq = c->pending[0];
+		memmove(&c->pending[0], &c->pending[1], (c->npending - 1) * sizeof(c->pending[0]));
+		c->npending--;
+		decode(c, nvme_req(rq)->cmd, &cmd);
+		cursor = cmd.slba << c->head.lba_shift;
+		for (u32 i = 0; i < cmd.spans && !status; i++) {
+			if (cursor + cmd.span_len[i] > c->size) { status = -EFAULT; break; }
+			status = chain_dma_access(&c->pdev, cmd.span_addr[i], c->bytes + cursor,
+						  cmd.span_len[i], cmd.opcode == nvme_cmd_read);
+			cursor += cmd.span_len[i];
+		}
+		if (!status && cursor != (cmd.slba << c->head.lba_shift) + cmd.bytes)
+			status = -EMSGSIZE;
+		nvme_req(rq)->status = status ? 0x4 /* data transfer error */ : 0;
+		nvme_req(rq)->result.u64 = 0;
+		chain_record((struct chain_event){ .kind = CHAIN_EV_NVME_COMPLETE, .endpoint = e,
+			.worker = chain_core_current_worker(), .address = cmd.slba, .length = cmd.bytes,
+			.status = status, .control_type = cmd.opcode });
+		/* Interrupt context: the class claims the ticket and publishes. */
+		if (rq->end_io(rq, 0) == RQ_END_IO_FREE)
+			blk_mq_free_request(rq);
+		return status;
+	}
+	return -ENOENT;
+}
+
+int blk_mq_poll_hw_queue(struct request_queue *q, unsigned queue_num, void *iob)
+{ (void)q; (void)queue_num; (void)iob; abort(); }
+void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
+	      unsigned short max_vecs, blk_opf_t opf)
+{ (void)bio; (void)bdev; (void)table; (void)max_vecs; (void)opf; abort(); }
+void bio_uninit(struct bio *bio) { (void)bio; abort(); }
+struct bio *bio_kmalloc(unsigned short nr_vecs, gfp_t gfp) { (void)nr_vecs; (void)gfp; abort(); }
+int bio_add_page(struct bio *bio, struct page *page, unsigned len, unsigned off)
+{ (void)bio; (void)page; (void)len; (void)off; abort(); }
+int blk_rq_append_bio(struct request *rq, struct bio *bio) { (void)rq; (void)bio; abort(); }
+struct page *alloc_page(gfp_t gfp) { (void)gfp; abort(); }
+void __free_page(struct page *page) { (void)page; abort(); }
