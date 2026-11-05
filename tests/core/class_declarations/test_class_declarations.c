@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
-/* Oracle: core-family/CONTRACT.md core-table-v1, not a production algorithm.
+/* Oracles: core-family/CONTRACT.md core-table-v1; block-v2 additionally uses
+ * storage-second-member-next/CONTRACT.md section 2. Neither is production.
  * All calls below execute production static inline rules. No syscall or DMA. */
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,6 +9,7 @@
 #include "adapter.h"
 
 static unsigned checks, failures;
+static bool block_v2;
 static char context[160];
 static void eq(const char *name, long long got, long long want)
 {
@@ -89,10 +91,11 @@ static void returns(void)
 {
  static const int values[]={INT_MIN,-4096,-4095,-2,-1,0,1,2,3,4,5,6,7,31,32,INT_MAX};
  static const unsigned ids[]={0,1,2,3,4,5,6,7,8,9,10,11,12,77,UINT_MAX};
+ static const unsigned ids_v2[]={0,1,2,3,4,5,6,7,8,9,10,11,13,77,UINT_MAX};
  size_t a,v; unsigned m,s;
  for(a=0;a<sizeof(ids)/sizeof(*ids);a++) for(m=0;m<=5;m++) for(s=0;s<=8;s++)
   for(v=0;v<sizeof(values)/sizeof(*values);v++) {
-   unsigned id=ids[a]; int r=values[v], want; bool legal=golden_ret(id,m,s,r),illegal=legal;
+   unsigned id=block_v2?ids_v2[a]:ids[a]; int r=values[v], want; bool legal=golden_ret(id,m,s,r),illegal=legal;
    snprintf(context,sizeof(context),"ret id=%u member=%u site=%u ret=%d",id,m,s,r);
    EQ("legality",test_ret(xdev_ext_mech_class_desc(id),id,m,s,r),legal);
    if(legal) want=r;
@@ -230,7 +233,7 @@ static void precedence(void)
   create("fd-before-final-peer-capability",&c,-EBADF);
   c.st[0].fd=7;create("peer-capability-last",&c,id==3?0:-EOPNOTSUPP);
  }
- for(id=0;id<=13;id++) if(id<2 || id>11) {
+ for(id=0;id<=13;id++) if(id<2 || id>(block_v2?12U:11U)) {
   c=fixture(3);c.st[0].class_id=id;create("unknown-id",&c,-EINVAL);
   c.layout.frame_size=0;create("layout-before-unknown",&c,-EINVAL);
  }
@@ -407,16 +410,144 @@ static void descriptor_edges(void)
  EQ("info-identity",xdev_ext_mech_info_view_ok_desc(&custom,63,63),1);
 }
 #endif
+
+/* Independent block-v2 literals frozen before editing in maintenance PLAN.md.
+ * Keep the historical masks above unchanged: bit12 is not a v1 known class. */
+#ifdef CLASS_DECLARATIONS_BLOCK_V2
+static const D block_expected={
+ .family=2, .peer_dirs=0, .known_flags=0,
+ .peer_only=0, .flags_later=0, .role_rule=1, .ctx_rule=4, .no_file=0,
+ .mech_abi_version=1, .fixed_group=true, .rx_source=false,
+ .fifo_from_device=false, .compute_worker=false, .external_async_flag=0,
+};
+static bool block_golden_ret(unsigned member,unsigned site,int ret)
+{
+ if(member==1 && site==4) return ret>=-4095 && ret<=0;
+ if(member==2 && site==0) return ret>=0 && ret<=2;
+ if(member==3 && site==0) return ret>=0 && ret<=3;
+ return false;
+}
+static void block_returns(void)
+{
+ static const int values[]={INT_MIN,-4096,-4095,-2,-1,0,1,2,3,4,5,6,7,31,32,INT_MAX};
+ const D *d=xdev_ext_mech_class_desc(12);
+ size_t v; unsigned m,s;
+ for(m=0;m<=5;m++) for(s=0;s<=8;s++) for(v=0;v<sizeof(values)/sizeof(*values);v++) {
+  int r=values[v],want; bool legal=block_golden_ret(m,s,r),illegal=legal;
+  snprintf(context,sizeof(context),"block-v2 ret id=12 member=%u site=%u ret=%d",m,s,r);
+  EQ("legality",test_ret(d,12,m,s,r),legal);
+  if(legal) want=r;
+  else if(m==2) want=2;
+  else if(m==3 && s==5) want=6;
+  else if(m==3 && (s==1 || s==2)) want=5;
+  else if(m==3) want=3;
+  else want=-EPROTO;
+  EQ("replacement",test_resolve(d,12,m,s,r,&illegal),want);
+  EQ("illegal-indication",illegal,!legal);
+ }
+}
+static void block_declaration(void)
+{
+ const D *d=xdev_ext_mech_class_desc(12);
+ static const unsigned unknown[]={13,77,UINT_MAX};
+ static const int statuses[]={INT_MIN,-EAGAIN,-EIO,0,1,2,3,0x4001,INT_MAX};
+ static const unsigned counts[]={0,1,2,3,4,UINT_MAX};
+ C c; size_t i,j; unsigned dir; int err;
+ snprintf(context,sizeof(context),"block-v2 literal-row");
+ EQ("BLOCK-id",XDEV_EXT_MECH_CLASS_BLOCK,12);
+ EQ("MAX",XDEV_EXT_MECH_CLASS_MAX,13);
+ EQ("family",d->family,block_expected.family);
+ EQ("peer-dirs",d->peer_dirs,block_expected.peer_dirs);
+ EQ("known-flags",d->known_flags,block_expected.known_flags);
+ EQ("peer-only",d->peer_only,block_expected.peer_only);
+ EQ("flags-later",d->flags_later,block_expected.flags_later);
+ EQ("direction-rule",d->role_rule,block_expected.role_rule);
+ EQ("COMMON-context",d->ctx_rule,block_expected.ctx_rule);
+ EQ("requires-file",d->no_file,block_expected.no_file);
+ EQ("mech-ABI",d->mech_abi_version,block_expected.mech_abi_version);
+ EQ("fixed-group",d->fixed_group,block_expected.fixed_group);
+ EQ("no-rx-source",d->rx_source,block_expected.rx_source);
+ EQ("no-fifo-from-device",d->fifo_from_device,block_expected.fifo_from_device);
+ EQ("no-compute-worker",d->compute_worker,block_expected.compute_worker);
+ EQ("no-external-async",d->external_async_flag,block_expected.external_async_flag);
+ EQ("role-callback",d->role!=NULL,1);
+ EQ("file-check-callback",d->check_stage!=NULL,1);
+ EQ("COMMON-base-callback",d->base!=NULL,1);
+ EQ("no-retry-callback",d->retry_ok==NULL,1);
+ for(dir=1;dir<=2;dir++) {
+  snprintf(context,sizeof(context),"block-v2 CREATE direction=%u",dir);
+  c=fixture(12);c.st[0].direction=dir;
+  create("HOST-valid",&c,0);start("fixed-template",&c,0);
+  EQ("direction-role",test_role(d,&c.st[0]),dir==1?2:1);
+  c.st[0].fd=-1;create("requires-file",&c,-EBADF);
+  c.st[0].fd=-2;create("negative-file",&c,-EBADF);
+  c.st[0].fd=7;c.st[0].flags=1;create("no-class-flags",&c,-EINVAL);
+  c.st[0].flags=1U<<24;create("unknown-class-flags",&c,-EINVAL);
+  /* Pure CREATE strips the common flag. Native POLL capability is a separate
+   * root-owned bind gate; this assertion does not grant it to BLOCK. */
+  c.st[0].flags=XDEV_EXT_MECH_STAGE_F_POLL;create("common-POLL-stripping",&c,0);
+  c.st[0].flags=0;c.pool_kind=3;c.pool_fd=6;
+  create("no-PEER",&c,-EOPNOTSUPP);
+  c.st[0].fd=-2;create("fd-before-final-PEER",&c,-EBADF);
+ }
+ c=fixture(12);c.st[0].direction=0;create("invalid-direction",&c,-EINVAL);
+ for(i=0;i<sizeof(unknown)/sizeof(*unknown);i++) {
+  snprintf(context,sizeof(context),"block-v2 unknown=%u",unknown[i]);
+  EQ("NONE-family",xdev_ext_mech_class_desc(unknown[i])->family,0);
+  c=fixture(unknown[i]);create("unknown-CREATE",&c,-EINVAL);
+ }
+ for(i=0;i<sizeof(counts)/sizeof(*counts);i++) for(j=0;j<sizeof(statuses)/sizeof(*statuses);j++) {
+  snprintf(context,sizeof(context),"block-v2 no-retry count=%u status=%d",counts[i],statuses[j]);
+  EQ("no-retry",test_retry(d,12,counts[i],statuses[j]),0);
+ }
+ for(i=0;i<2;i++) {
+  c=fixture(i?10:9);c.st[0].arg0=1;if(i)c.st[0].flags=1;
+  c.nr_stages=2;c.st[1]=(S){.class_id=12,.direction=TO,.fd=7};
+  snprintf(context,sizeof(context),"block-v2 fixed-follower predecessor=%u",c.st[0].class_id);
+  create("length-change-before-BLOCK",&c,-EOPNOTSUPP);
+  c.nr_stages=3;c.st[2]=c.st[1];c.st[1]=(S){.class_id=4,.direction=TO,.fd=7};
+  create("transform-stops-fixed-scan",&c,0);
+ }
+ for(i=0;i<3;i++) {
+  static const int status[]={0,-EIO,-ENOENT};
+  static const int error[]={-ECANCELED,-EIO,-ENOENT};
+  err=0;snprintf(context,sizeof(context),"block-v2 COMPLETE RETRY status=%d",status[i]);
+  EQ("ABORT-no-resubmit",xdev_ext_mech_complete_step(12,2,status[i],false,false,0,&err),5);
+  EQ("original-errno",err,error[i]);
+ }
+#ifdef CLASS_DECLARATIONS_DESC
+ unsigned native;
+ for(dir=1;dir<=2;dir++) for(native=0;native<=1;native++) {
+  struct xdev_ext_binding_ctx_v2 b=xdev_ext_mech_base_desc(d,dir,native?16:0,12345);
+  struct xdev_ext_binding_ctx_v2 expected={.abi_version=2,.ctx_size=sizeof(b),.direction=dir,.length=12345};
+  snprintf(context,sizeof(context),"block-v2 COMMON-base direction=%u native=%u",dir,native);
+  EQ("COMMON-exact",memcmp(&b,&expected,sizeof(b)),0);
+ }
+ snprintf(context,sizeof(context),"block-v2 info-view");
+ EQ("exact-size",xdev_ext_mech_info_view_ok_desc(d,117,117),1);
+ EQ("no-arbitrary-prefix",xdev_ext_mech_info_view_ok_desc(d,117,116),0);
+#endif
+}
+#endif /* CLASS_DECLARATIONS_BLOCK_V2 */
 int main(int argc,char **argv)
 {
+ const char *contract=argc>2?argv[2]:"core-table-v1";
+ block_v2=!strcmp(contract,"block-v2");
+ if(argc>3 || (!block_v2 && strcmp(contract,"core-table-v1"))) return 2;
+#ifndef CLASS_DECLARATIONS_BLOCK_V2
+ if(block_v2) return 2;
+#endif
  bool legacy=argc<2 || !strcmp(argv[1],"legacy") || !strcmp(argv[1],"all");
  bool ext=argc<2 || !strcmp(argv[1],"extension") || !strcmp(argv[1],"all");
  if(!legacy&&!ext) return 2;
  if(legacy) {returns();retries();completions();per_class();precedence();length_and_start();}
+#ifdef CLASS_DECLARATIONS_BLOCK_V2
+ if(legacy && block_v2) {block_returns();block_declaration();}
+#endif
  if(ext) extension();
 #ifdef CLASS_DECLARATIONS_DESC
  if(legacy) { descriptor_edges();descriptor_bases(); }
 #endif
- printf("class_declarations assertions=%u failures=%u mode=%s\n",checks,failures,argc>1?argv[1]:"all");
+ printf("class_declarations assertions=%u failures=%u mode=%s contract=%s\n",checks,failures,argc>1?argv[1]:"all",contract);
  return failures?1:0;
 }

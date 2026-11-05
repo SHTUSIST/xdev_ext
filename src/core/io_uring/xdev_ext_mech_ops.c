@@ -60,6 +60,7 @@ XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_socket_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_net_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_user_mech_ops);
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_xdomain_mech_ops);
+XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_block_mech_ops);
 #ifdef CONFIG_XDEV_EXT_MECH_C_REFERENCE
 XDEV_EXT_MECH_SAME_LAYOUT(xdev_ext_mech_c_ops);
 #endif
@@ -777,6 +778,8 @@ XDEV_EXT_MECH_STRUCT_OPS(net, XDEV_EXT_MECH_CLASS_NET,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 XDEV_EXT_MECH_STRUCT_OPS(user, XDEV_EXT_MECH_CLASS_USER,
                     xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
+XDEV_EXT_MECH_STRUCT_OPS(block, XDEV_EXT_MECH_CLASS_BLOCK,
+                    xdev_ext_mech_ops_init_member, xdev_ext_mech_ops_validate);
 
 /* Keep the existing types on their shared verifier table. */
 static int xdev_ext_xdomain_mech_reg(void *kdata, struct bpf_link *link)
@@ -819,6 +822,7 @@ static const struct bpf_struct_ops *const xdev_ext_mech_st_ops[] = {
 	&bpf_xdev_ext_net_mech_ops,
 	&bpf_xdev_ext_user_mech_ops,
 	&bpf_xdev_ext_xdomain_mech_ops,
+	&bpf_xdev_ext_block_mech_ops,
 };
 
 /* Type identity and schema are class metadata, never inferred from a family. */
@@ -840,6 +844,7 @@ static const struct xdev_ext_mech_type_decl xdev_ext_mech_types[] = {
  XDEV_EXT_MECH_TYPE_ROW(net, XDEV_EXT_MECH_CLASS_NET, xdev_ext_mech_ops_desc),
  XDEV_EXT_MECH_TYPE_ROW(user, XDEV_EXT_MECH_CLASS_USER, xdev_ext_mech_ops_desc),
  XDEV_EXT_MECH_TYPE_ROW(xdomain, XDEV_EXT_MECH_CLASS_XDOMAIN, xdev_ext_mech_ops_desc),
+ XDEV_EXT_MECH_TYPE_ROW(block, XDEV_EXT_MECH_CLASS_BLOCK, xdev_ext_mech_ops_desc),
 };
 #undef XDEV_EXT_MECH_TYPE_ROW
 
@@ -1223,6 +1228,9 @@ static void __init xdev_ext_mech_emit_btf_types(void)
 	BTF_TYPE_EMIT(struct xdev_ext_xdomain_mech_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_dma_mech_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_nvme_mech_cqe);
+	BTF_TYPE_EMIT(struct xdev_ext_block_rw_desc);
+	BTF_TYPE_EMIT(struct xdev_ext_block_mech_info);
+	BTF_TYPE_EMIT(struct xdev_ext_block_mech_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_afxdp_tx_cqe);
 	BTF_TYPE_EMIT(struct xdev_ext_ce_mech_cqe);
 }
@@ -1262,6 +1270,9 @@ static int __init xdev_ext_mech_ops_init(void)
 	if (!ret)
 		ret = register_bpf_struct_ops(&bpf_xdev_ext_xdomain_mech_ops,
 					      xdev_ext_xdomain_mech_ops);
+	if (!ret)
+		ret = register_bpf_struct_ops(&bpf_xdev_ext_block_mech_ops,
+					      xdev_ext_block_mech_ops);
 	if (!ret && !xdev_ext_mech_types_findable())
 		ret = -ENOENT;
 	if (ret) {

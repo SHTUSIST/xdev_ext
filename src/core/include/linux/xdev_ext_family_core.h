@@ -341,7 +341,7 @@ typedef char xdev_ext_mech_class_table_ids[
 	 XDEV_EXT_MECH_CLASS_DMA == 6 && XDEV_EXT_MECH_CLASS_SOCKET == 7 &&
 	 XDEV_EXT_MECH_CLASS_NET == 8 && XDEV_EXT_MECH_CLASS_CPU == 9 &&
 	 XDEV_EXT_MECH_CLASS_USER == 10 && XDEV_EXT_MECH_CLASS_XDOMAIN == 11 &&
-	 XDEV_EXT_MECH_CLASS_MAX == 12) ? 1 : -1];
+	 XDEV_EXT_MECH_CLASS_BLOCK == 12 && XDEV_EXT_MECH_CLASS_MAX == 13) ? 1 : -1];
 
 /* Class declarations are immutable; registration and pure wrappers share these rows. */
 static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_MAX] = {
@@ -474,6 +474,17 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_
 		.ret_rules = xdev_ext_decl_common_returns, .nr_ret_rules = XDEV_EXT_DECL_ARRAY_SIZE(xdev_ext_decl_common_returns),
 		.base = xdev_ext_decl_common_base,
 		.protocol_info_ok = xdev_ext_decl_protocol_info_ok,
+	},
+	{ /* XDEV_EXT_MECH_CLASS_BLOCK */
+		.family = XDEV_EXT_FAMILY_STORAGE,
+		.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION,
+		.ctx_rule = XDEV_EXT_CTX_RULE_COMMON,
+		.mech_abi_version = XDEV_EXT_MECH_ABI_VERSION,
+		.fixed_group = true,
+		.role = xdev_ext_decl_direction_role,
+		.check_stage = xdev_ext_decl_file_check,
+		.ret_rules = xdev_ext_decl_common_returns, .nr_ret_rules = XDEV_EXT_DECL_ARRAY_SIZE(xdev_ext_decl_common_returns),
+		.base = xdev_ext_decl_common_base,
 	},
 };
 #undef XDEV_EXT_DECL_ARRAY_SIZE

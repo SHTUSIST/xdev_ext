@@ -2,7 +2,8 @@
 #ifndef CLASS_DECLARATIONS_TEST_ADAPTER_H
 #define CLASS_DECLARATIONS_TEST_ADAPTER_H
 /* Entry selection only. Baseline runs existing production public wrappers.
- * It deliberately cannot use an explicit row: that is the missing behavior. */
+ * It deliberately cannot use an explicit row: that is the missing behavior.
+ * core-table-v1/block-v2 selects the independent oracle, not these entries. */
 #include "xdev_ext_mech_start_queue.h"
 static inline bool test_ret(const struct xdev_ext_mech_class_desc *d,
  __u32 id, __u32 member, __u32 site, __s32 ret)

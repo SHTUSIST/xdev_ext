@@ -89,11 +89,17 @@ int xdev_ext_stor_block_preflight(struct xdev_ext_mech_pool *pool,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_stor_block_preflight);
 
+static int xdev_ext_stor_block_fill(struct xdev_ext_mech_pool *pool,
+		struct xdev_ext_mech_batch *batch, struct bio *bio)
+{
+	return xdev_ext_stor_block_walk(pool, batch, NULL, bio);
+}
+
 int xdev_ext_stor_block_append(struct xdev_ext_mech_pool *pool,
 		struct xdev_ext_mech_batch *batch, struct request *request,
 		struct bio *bio)
 {
-	int ret = xdev_ext_stor_block_walk(pool, batch, NULL, bio);
+	int ret = xdev_ext_stor_block_fill(pool, batch, bio);
 
 	if (ret < 0)
 		return ret;
@@ -226,7 +232,7 @@ static int xdev_ext_storfam_host_resources_init(struct xdev_ext_stor_stage *p)
 		if (!slot->bio)
 			goto fail;
 #if !defined(CONFIG_XDEV_EXT_MECH_ZEROCOPY) && defined(CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)
-		{
+		if (p->dev->host_path == XDEV_EXT_STOR_HOST_NATIVE_RQ) {
 			u32 j, nr = DIV_ROUND_UP(l->group_bytes, PAGE_SIZE);
 
 			/* This explicitly marked compatibility build may copy CPU payloads. */
@@ -628,13 +634,26 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 	int ret;
 
 	if (!dev || !dev->bind || !dev->unbind || !dev->identity ||
-	    !dev->requester || !dev->queue || !dev->decode || !dev->poll ||
-	    !dev->encode || !dev->encode_dptr || !dev->request_init ||
-	    !dev->post || !dev->retire_peer ||
-	    dev->peer_slot_bytes < sizeof(struct xdev_ext_stor_peer_io) ||
-	    dev->peer_native_offset < sizeof(struct xdev_ext_stor_peer_io) ||
-	    dev->peer_native_offset >= dev->peer_slot_bytes)
+	    !dev->queue || !dev->decode || !dev->post)
 		return -EINVAL;
+	switch (dev->host_path) {
+	case XDEV_EXT_STOR_HOST_NATIVE_RQ:
+		if (!dev->requester || !dev->poll || !dev->encode ||
+		    !dev->encode_dptr || !dev->request_init || !dev->retire_peer ||
+		    dev->peer_slot_bytes < sizeof(struct xdev_ext_stor_peer_io) ||
+		    dev->peer_native_offset < sizeof(struct xdev_ext_stor_peer_io) ||
+		    dev->peer_native_offset >= dev->peer_slot_bytes)
+			return -EINVAL;
+		break;
+	case XDEV_EXT_STOR_HOST_BIO:
+		if (!dev->bdev)
+			return -EINVAL;
+		if (xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER)
+			return -EOPNOTSUPP;
+		break;
+	default:
+		return -EINVAL;
+	}
 	ret = dev->bind(st, u, &ss, &member);
 	if (ret)
 		return ret;
@@ -740,6 +759,56 @@ bool xdev_ext_storfam_unbind(struct xdev_ext_stor_stage *ss)
 }
 EXPORT_SYMBOL_GPL(xdev_ext_storfam_unbind);
 
+/* Worker: ordinary root BIO, sharing the existing host slots and page walk. */
+static int xdev_ext_storfam_submit_bio(struct xdev_ext_stor_stage *ss,
+		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_batch *sb)
+{
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(ss->st->s);
+	struct xdev_ext_stor_queue_caps caps;
+	struct xdev_ext_stor_io *io;
+	struct bio *bio;
+	int pieces, ret;
+
+	sb->posting = sb->rw;
+	io = xdev_ext_storfam_host_get(ss, sb);
+	if (IS_ERR(io))
+		return PTR_ERR(io);
+	io->done.b = b;
+	io->done.ticket = xdev_ext_mech_batch_ticket(b);
+	WRITE_ONCE(io->done.poll_live, false);
+	caps = xdev_ext_stor_block_caps(ss->dev->queue(ss->member),
+					ss->geometry.lba_shift);
+	pieces = xdev_ext_stor_block_preflight(pool, b, &caps);
+	if (pieces < 0) {
+		ret = pieces;
+		goto put;
+	}
+	if (pieces > ss->nr_vecs) {
+		ret = -EREMOTEIO;
+		goto put;
+	}
+	bio = io->bio;
+	bio_init(bio, ss->dev->bdev(ss->member), bio->bi_inline_vecs,
+		 ss->nr_vecs, sb->posting.write ? REQ_OP_WRITE : REQ_OP_READ);
+	io->bio_live = true;
+	bio->bi_iter.bi_sector = sb->posting.byte_offset >> SECTOR_SHIFT;
+	ret = xdev_ext_stor_block_fill(pool, b, bio);
+	if (ret < 0)
+		goto put;
+	if (bio->bi_iter.bi_size != sb->posting.byte_length ||
+	    bio->bi_iter.bi_size != xdev_ext_mech_batch_bytes(b)) {
+		ret = -EMSGSIZE;
+		goto put;
+	}
+	sb->bio = bio;
+	/* The post can complete inline. Do not access any context after it. */
+	ss->dev->post(ss->member, NULL, io, b, NULL, false);
+	return 0;
+put:
+	xdev_ext_storfam_host_put(ss, sb);
+	return ret;
+}
+
 int xdev_ext_storfam_submit(struct xdev_ext_stor_stage *ss,
 		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_batch *sb)
 {
@@ -751,6 +820,8 @@ int xdev_ext_storfam_submit(struct xdev_ext_stor_stage *ss,
 	ret = xdev_ext_storfam_submit_check(ss, b, sb);
 	if (ret)
 		return ret;
+	if (ss->dev->host_path == XDEV_EXT_STOR_HOST_BIO)
+		return xdev_ext_storfam_submit_bio(ss, b, sb);
 	peer = xdev_ext_mech_session_pool(ss->st->s)->kind == XDEV_EXT_MECH_POOL_PEER;
 	if (peer && !ss->peer)
 		return -EINVAL;

@@ -40,7 +40,8 @@ enum xdev_ext_mech_class {
 	XDEV_EXT_MECH_CLASS_CPU = 9,
 	XDEV_EXT_MECH_CLASS_USER = 10,	/* a user thread; see the USER stage below */
 	XDEV_EXT_MECH_CLASS_XDOMAIN = 11,
-	XDEV_EXT_MECH_CLASS_MAX	= 12,
+	XDEV_EXT_MECH_CLASS_BLOCK = 12,
+	XDEV_EXT_MECH_CLASS_MAX	= 13,
 };
 
 /*
@@ -226,6 +227,34 @@ struct xdev_ext_nvme_mech_info {
 	__u32 sgl;
 	__u32 nr_frames;
 	struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+};
+
+/* Ordinary block RW: actual NLB count and partition-relative SLBA. */
+#define XDEV_EXT_BLOCK_MECH_DESC_SIZE	64U
+#define XDEV_EXT_BLOCK_OP_READ		0U
+#define XDEV_EXT_BLOCK_OP_WRITE		1U
+struct xdev_ext_block_rw_desc {
+	__u8 opcode;
+	__u8 reserved0[7];
+	__le64 slba;
+	__le32 nlb;
+	__u8 reserved1[44];
+};
+
+struct xdev_ext_block_mech_info {
+	struct xdev_ext_mech_layout l;
+	__u32 lba_shift, max_nlb;
+	__aligned_u64 window_slba, window_nlb, capacity_lbas;
+	__aligned_u64 diskseq;
+	__u32 nr_frames, reserved;
+	struct xdev_ext_mech_frame_info f[XDEV_EXT_MECH_MAX_FRAMES];
+};
+
+struct xdev_ext_block_mech_cqe {
+	__s32 err;
+	__u32 submitted_bytes;
+	__u32 residual_bytes;
+	__u32 blk_status;
 };
 
 /* Opt-in AF_XDP v3. arg0 is wire session, arg1 points to this CREATE-only config. */

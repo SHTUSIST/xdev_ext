@@ -358,7 +358,7 @@ int main(void)
  EQ(XDEV_EXT_MECH_CLASS_NET, 8);
  EQ(XDEV_EXT_MECH_CLASS_CPU, 9);
  EQ(XDEV_EXT_MECH_CLASS_USER, 10);
- EQ(XDEV_EXT_MECH_CLASS_MAX, 12);
+ EQ(XDEV_EXT_MECH_CLASS_MAX, 13);
  EQ(XDEV_EXT_ROLE_RULE_DIRECTION, 1);
  EQ(XDEV_EXT_ROLE_RULE_TRANSFORM, 2);
  EQ(XDEV_EXT_ROLE_RULE_INPLACE_TX, 3);
@@ -415,6 +415,33 @@ int main(void)
     EQ(new_flags_bad(d, bit), !!(bit & ~3U));
    for (dir = 0; dir < 4; dir++) {
     struct xdev_ext_mech_stage_uapi u = { .class_id = 11, .direction = dir };
+    EQ(xdev_ext_mech_stage_role(&u), dir == 1 ? XDEV_EXT_MECH_ROLE_CONSUMER :
+       dir == 2 ? XDEV_EXT_MECH_ROLE_PRODUCER : -EINVAL);
+   }
+   continue;
+  }
+  /* BLOCK is appended after the frozen pre-BLOCK oracle. Its complete
+   * CREATE/context/return rules are covered by the block-v2 cohort. */
+  if (c == 12) {
+   EQ(old_class_known(c), false);
+   EQ(xdev_ext_mech_class_known(c), true);
+   EQ(xdev_ext_mech_peer_dirs(c), 0);
+   EQ(d->peer_dirs, 0);
+   EQ(d->family, 2);
+   EQ(xdev_ext_mech_class_family(c), 2);
+   EQ(d->peer_only, 0);
+   EQ(d->known_flags, 0);
+   EQ(d->flags_later, 0);
+   EQ(d->role_rule, 1);
+   EQ(d->ctx_rule, 4);
+   EQ(d->no_file, 0);
+   EQ(d->flags_ok == NULL, true);
+   for (pool = 0; pool <= 4; pool++)
+    EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER, false);
+   for (bit = 0; bit < 32; bit++)
+    EQ(new_flags_bad(d, 1U << bit), true);
+   for (dir = 0; dir < 4; dir++) {
+    struct xdev_ext_mech_stage_uapi u = { .class_id = 12, .direction = dir };
     EQ(xdev_ext_mech_stage_role(&u), dir == 1 ? XDEV_EXT_MECH_ROLE_CONSUMER :
        dir == 2 ? XDEV_EXT_MECH_ROLE_PRODUCER : -EINVAL);
    }

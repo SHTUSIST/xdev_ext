@@ -54,7 +54,7 @@ jobs:
         run: python3 -I tests/compute/nvidia/nv_xdev_ext_dmabuf_test.py
       - name: Declarative class rules and independent extension rows
         working-directory: .
-        run: bash tests/core/class_declarations/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/class-declarations" candidate all
+        run: bash tests/core/class_declarations/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/class-declarations" candidate all block-v2
       - name: Standalone production-rule checks
         run: python3 "$GITHUB_WORKSPACE/tools/ci/test_host.py"
       - name: CE residual exclusion and retained cleanup ownership

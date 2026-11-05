@@ -93,11 +93,13 @@ static void test_uapi_values(void)
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_CPU, 9);
 	/* The USER stage class (10) is appended after CPU. */
 	EXPECT_EQ(XDEV_EXT_MECH_CLASS_USER, 10);
-	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 12);
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_BLOCK, 12);
+	EXPECT_EQ(XDEV_EXT_MECH_CLASS_MAX, 13);
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_CPU), 1);
 	EXPECT_EQ(xdev_ext_mech_class_known(XDEV_EXT_MECH_CLASS_USER), 1);
 	EXPECT_EQ(xdev_ext_mech_class_known(11), 1);
-	EXPECT_EQ(xdev_ext_mech_class_known(12), 0);
+	EXPECT_EQ(xdev_ext_mech_class_known(12), 1);
+	EXPECT_EQ(xdev_ext_mech_class_known(13), 0);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_CRC32C_APPEND, 1);
 	EXPECT_EQ(XDEV_EXT_CPU_XFORM_INFLATE, 9);
 	/* Id 10 is the BPF compute transform (xdev_ext-compute.rst). */
