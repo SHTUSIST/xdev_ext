@@ -33,7 +33,23 @@ and endpoint bind identities come from the environment, read before the
 exchange. The cases also check that every sender post follows a CTS for its
 group and every CTS follows the receiver's posts, run mismatched program pairs,
 and force refused bindings (an RTS on a paired stage, an early post without a
-grant).
+grant, a decline after pairing started).
+
+Further own cases cover the stage rules around the choice. `hello_stop_*` and
+`hello_link_down_*` hold a HELLO at a receiver nobody paired with (its program
+waited for control room), then STOP or fail the link: the stage must end in a
+bounded number of steps with no FAIL_LINK request and no re-offer of the HELLO;
+on STOP the link stays up in the same incarnation and the armed batch is
+canceled without a stage failure, after a link failure the program sees no
+further event and the successor link stays up. `stray_rts_then_pair_*` queue a
+version-1 RTS from another stream at a receiver before it pairs; the pair's
+transfer must complete with no refusal in the pair's envelope.
+`stray_cts_then_pair` does the same with a version-1 CTS at a sender before it
+pairs. `rts_cts_v2_idle` keeps an RTS/CTS session on the version-2 envelope
+idle for 31 s before its transfer (no pairing deadline applies).
+`paired_drops_v1` checks that the link drops version-1 RTS and CTS to paired
+endpoints before any program sees them. Each runs with the early-grant program
+and, where named `*_reference`, with the reference program.
 
 `bpf_names` checks that the two programs and `xdomain_policy.h` use, outside
 comments, only XDEV_EXT names a real BPF build can see: macros of the BPF-side
@@ -61,9 +77,18 @@ not latch the RTS/CTS choice), `offer_after_choice` (PAIR_DUE offered after
 the RTS/CTS choice),
 `input_after_choice` (pairing input kept after that choice),
 `early_facts_for_v1` (v1 events of an unpaired stage get early facts),
-`drop_rts_authority` (the early snapshot loses the selected RTS record) and
+`drop_rts_authority` (the early snapshot loses the selected RTS record),
 `v1_blocked` (the old dispatch that kept v1 control from v2-envelope
-endpoints). Each must make at least one case fail with a named assertion.
+endpoints), `held_offer_after_end` (a stopping or ended stage under the
+version-1 rules is still offered its held HELLO), `safety_binds_rts_cts` and
+`safety_binds_unpaired_rx` (early mandatory safety also binds an RTS/CTS stage
+or a receiver nobody paired), `v1_reaches_paired` (version-1 control reaches
+a paired endpoint), `decline_after_pairing` (IGNORE on PAIR_DUE accepted after
+pairing started) and `v1_kept_at_challenge` (a receiver keeps its RTS records
+when it starts pairing). Each must make at least one case fail with a named
+assertion. Not covered by a mutation: the refusal of early actions after the
+RTS/CTS choice; only a program that waits on a HELLO and then posts on an RTS
+can reach it.
 
 Compilation or setup failures, signals and timeouts are not semantic RED. This
 is deterministic host composition: kernel verifier acceptance, physical DMA,
