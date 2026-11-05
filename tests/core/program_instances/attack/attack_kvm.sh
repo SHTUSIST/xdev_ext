@@ -164,7 +164,7 @@ grep -q 'XDEV_EXT_ATTACK_ISOLATION=PASS' "$EV/guest.log" || { echo 'FAIL guest d
 grep -q 'XDEV_EXT_ATTACK_C_EXIT=0' "$EV/guest.log" || { echo 'FAIL nonzero guest C exit'; exit 1; }
 grep -q 'XDEV_EXT_ATTACK_GUEST_EXIT=0' "$EV/guest.log" || { echo 'FAIL nonzero guest exit'; exit 1; }
 if sed -n '/XDEV_EXT_ATTACK_DMESG_BEGIN/,/XDEV_EXT_ATTACK_DMESG_END/p' "$EV/guest.log" | \
-    grep -E 'WARNING:|BUG:|Oops|KASAN|UBSAN|circular locking|inconsistent lock|stall|blocked for more than|quarantin'; then
+    grep -E 'WARNING:|BUG:|Oops|KASAN|UBSAN|circular locking|inconsistent lock|RCU stall|soft lockup|hung task|blocked for more than|quarantined|deferred drain'; then
     echo 'FAIL kernel log shows a warning, debug report, stall or quarantine'; exit 1
 fi
 
