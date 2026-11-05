@@ -422,6 +422,7 @@ static size_t proto_hello_held(unsigned prog)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(prog, prog);
  early_flags = 2;
  struct stack_session_config rx = {.direction = 2, .groups = 2};
@@ -576,6 +577,7 @@ static void proto_stray_rts_then_pair(unsigned prog)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(prog, prog);
  early_flags = 2;
  struct stack_session_config rx = {.direction = 2, .groups = 2}, tx = {.direction = 1, .groups = 2};
@@ -623,6 +625,7 @@ static void proto_stray_cts_then_pair(void)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(PROTO_EARLY, PROTO_EARLY);
  early_flags = 2;
  u64 tx_bind = link(0)->early_bind_next;
@@ -667,6 +670,7 @@ static void proto_rts_cts_v2_idle(void)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(PROTO_RTS_CTS, PROTO_RTS_CTS);
  early_flags = 2;
  sessions(w, 1, 0);
@@ -696,6 +700,7 @@ static void proto_paired_drops_v1(void)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(PROTO_EARLY, PROTO_EARLY);
  early_flags = 2;
  u64 tx_bind = link(0)->early_bind_next;
@@ -734,6 +739,7 @@ static void proto_paired_refuses_decline(void)
  struct stack_config c = geometry();
  struct stack_world *w = create(&c);
  login(w);
+ budget = 512; /* a loop fails a named bounded-pump check, not the log limit */
  proto_programs(PROTO_EARLY, PROTO_EARLY);
  early_flags = 2;
  struct stack_session_config tx = {.direction = 1, .groups = 1};
