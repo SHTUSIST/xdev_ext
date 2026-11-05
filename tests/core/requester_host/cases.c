@@ -9,7 +9,9 @@
  * outside the pool, wrong direction), synchronizes for the device before use
  * and for the CPU after a definite receive when the mapping needs it, and
  * after an element ends with unknown device access never unmaps or reuses the
- * mapping; the PEER requester path is unchanged.
+ * mapping.  Unbinding a mapping the device may still use is a caller error
+ * (callers check the settled state first) and warns.  The PEER requester path
+ * is unchanged.
  *
  * Expected values are literals or come from the fixture window (rh_window),
  * never from the code under test.
@@ -43,6 +45,10 @@ static struct xdev_ext_mech_session session;
 static struct xdev_ext_mech_stage stage;
 static struct xdev_ext_requester rq;
 static unsigned base_allocs;
+
+/* Kernel warnings a case provokes on purpose; main() fails a case with any
+ * other count (shim.h counts WARN_ON_ONCE). */
+static unsigned expected_warnings;
 
 static void need_api(void)
 {
@@ -325,6 +331,18 @@ static void host_coherent_no_sync(void)
 	xdev_ext_requester_unbind_host(&rq);
 }
 
+/* Unbind a mapping the device may still use, as only a caller that skipped
+ * xdev_ext_requester_host_settled() can: the requester warns about it. */
+static void unbind_busy(void)
+{
+	unsigned before = shim_warnings;
+
+	xdev_ext_requester_unbind_host(&rq);
+	expected_warnings++;
+	CHECK(shim_warnings == before + 1,
+	      "unbinding a mapping the device may still use warns: the caller skipped the settled check");
+}
+
 static void host_unknown_retains_mapping(void)
 {
 	u64 dma = 0, other = 0x77;
@@ -340,7 +358,7 @@ static void host_unknown_retains_mapping(void)
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_FROM_DEVICE, &other) == -ESTALE,
 	      "no new lease from a mapping with unknown device access");
 	CHECK(other == 0x77, "the refused lease returns no address");
-	xdev_ext_requester_unbind_host(&rq);
+	unbind_busy();
 	CHECK(rh_count(RH_UNMAP) == 0, "unknown device access: the mapping is never unmapped");
 	CHECK(rq.pdev == NULL, "the requester itself is unbound");
 	CHECK(nhi.refs > 1, "the retained mapping still holds the NHI");
@@ -366,7 +384,7 @@ static void host_unknown_then_quiesced(void)
 	      "a later quiesced end does not settle a mapping with unknown device access");
 	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &c) == -ESTALE && c == 0x77,
 	      "no new lease after unknown device access, whatever ended later");
-	xdev_ext_requester_unbind_host(&rq);
+	unbind_busy();
 	CHECK(rh_count(RH_UNMAP) == 0, "the mapping with unknown device access is never unmapped");
 }
 
@@ -395,7 +413,7 @@ static void host_release_during_settled_check(void)
 	      "a lease ending with unknown device access during the settled check: not settled");
 	CHECK(rh_scheduled_runs == 1, "the release ran inside the settled check, after its first shared read");
 	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO, "after that release: still not settled");
-	xdev_ext_requester_unbind_host(&rq);
+	unbind_busy();
 	CHECK(rh_count(RH_UNMAP) == 0, "the mapping with unknown device access is never unmapped");
 }
 
@@ -408,7 +426,7 @@ static void host_outstanding_lease_retains_mapping(void)
 	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_TO_DEVICE, &dma) == 0, "TX lease");
 	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO, "an outstanding lease is not settled");
-	xdev_ext_requester_unbind_host(&rq);
+	unbind_busy();
 	CHECK(rh_count(RH_UNMAP) == 0, "an outstanding lease keeps the whole mapping");
 	CHECK(nhi.refs > 1, "the retained mapping still holds the NHI");
 }
@@ -511,6 +529,7 @@ int main(int argc, char **argv)
 			continue;
 		case_name = cases[i].name;
 		cases[i].fn();
+		CHECK(shim_warnings == expected_warnings, "a kernel warning only where the case provokes one");
 		assert(!shim_spins);
 		printf("REQUESTER_HOST_CASE %s assertions=%u\n", case_name, assertions);
 		return 0;

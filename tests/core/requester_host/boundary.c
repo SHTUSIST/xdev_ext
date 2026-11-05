@@ -9,7 +9,7 @@
 #define RH_WINDOW_PAGES 64U
 
 struct rh_event rh_log[RH_EVENTS];
-unsigned rh_events, rh_fail_map_at, rh_live_allocs, shim_spins;
+unsigned rh_events, rh_fail_map_at, rh_live_allocs, shim_spins, shim_warnings;
 static unsigned rh_maps;
 static struct file rh_authority = { .id = 1 };
 struct pci_dev rh_gpu = { .dev = { .dma_coherent = true, .id = 9 } };
