@@ -819,16 +819,27 @@ int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_d
 		     dma_addr_t *dma)
 {
 	struct chain_device *dev = chain_device_of(rq->pdev);
-	int ret = xdev_ext_requester_host_lease(rq, off, len, dir, dma);
+	u64 want;
+	size_t at;
+	int ret;
 
-	if (ret)
-		return ret;
 	assert(dev && chain_nleases < CHAIN_LEASES);
-	if (*dma != chain_page_dma(dev, off)) {
+	/* Recorded when the family asks, so effects of the lease call (its sync
+	 * for the device) follow this event; a refusal is marked in it. */
+	want = chain_page_dma(dev, off);
+	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint,
+		.device = rq->pdev, .offset = off, .length = len, .address = want, .member = dir,
+		.worker = chain_core_current_worker() });
+	at = chain_nevents - 1;
+	ret = xdev_ext_requester_host_lease(rq, off, len, dir, dma);
+	if (ret) {
+		chain_events[at].status = ret;
+		return ret;
+	}
+	if (*dma != want) {
 		chain_host_map_violations++;
 		fprintf(stderr, "CHAIN_HOST_LEASE_ADDRESS off=%llu dma=%llx want=%llx\n",
-			(unsigned long long)off, (unsigned long long)*dma,
-			(unsigned long long)chain_page_dma(dev, off));
+			(unsigned long long)off, (unsigned long long)*dma, (unsigned long long)want);
 	}
 	for (unsigned i = 0; i < chain_nleases; i++) {
 		struct chain_lease *o = &chain_leases[i];
@@ -840,9 +851,6 @@ int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_d
 		}
 	}
 	chain_leases[chain_nleases++] = (struct chain_lease){ dev, off, ++chain_ticket, len, dir, true, false };
-	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint,
-		.device = rq->pdev, .offset = off, .length = len, .address = *dma, .member = dir,
-		.worker = chain_core_current_worker() });
 	return 0;
 }
 void chain_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len, bool quiesced)
