@@ -187,6 +187,8 @@ MUTATIONS = {
                            'if (m->channel != xs->channel || xs->failed ||')),
     # IGNORE on PAIR_DUE declines pairing even after pairing started.
     'decline_after_pairing': ((CLASS, 'if (!declined || xd_paired(xs) ||', 'if (!declined ||'),),
+    # The RTS records a receiver queued before pairing survive its start.
+    'v1_kept_at_challenge': ((CLASS, 'xd_drop_input(xs); xd_drop_v1_locked(xs); }', 'xd_drop_input(xs); }'),),
 }
 
 
