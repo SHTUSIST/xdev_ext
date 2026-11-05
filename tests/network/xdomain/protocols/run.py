@@ -167,6 +167,10 @@ MUTATIONS = {
                            'xd_early_snapshot_locked(xs, s, r, ev, false, false, false, i);'),
     # v1 control never reaches a v2-envelope endpoint (the old dispatch).
     'v1_blocked': ('if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))', 'if (ep && !ep->early)'),
+    # A stopping or ended v1-rules stage is still offered its held HELLO
+    # before the v1 STOP and terminal rules (the unguarded order).
+    'held_offer_after_end': ('\tif (xs->early_ctl_count && xd_v1_rules(xs) &&\n',
+                             '\tif (0 && xs->early_ctl_count && xd_v1_rules(xs) &&\n'),
 }
 
 
