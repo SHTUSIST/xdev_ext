@@ -232,7 +232,61 @@ static void same_worker_tx(unsigned k)
 	CHECK(tx_bytes == GROUP, "TX descriptors carry exactly the group's bytes");
 }
 
-/* (f) Host 2's k-th WRITE carries host 1's k-th READ bytes. */
+/* (f) at host 1: every byte the link read from host 1's frames for the k-th
+ * group is the byte the k-th READ placed at that frame offset, per the oracle
+ * of host 1's disk address (the READ's SGL order gives each frame byte's
+ * position in the transfer). */
+static void sent_bytes_match(unsigned k)
+{
+	const struct chain_nvme_command *r = command(0, k);
+	static uint8_t expect[FRAMES * FRAME];
+	static bool known[FRAMES * FRAME];
+	uint64_t position = 0;
+	uint32_t sent = 0;
+	size_t done = nth(CHAIN_EV_NVME_COMPLETE, 0, k);
+
+	CHECK(r && r->opcode == 0x02 && r->bytes == GROUP && done, "host 1 read and completed the k-th group");
+	memset(known, 0, sizeof(known));
+	for (unsigned i = 0; i < r->spans; i++)
+		for (uint32_t moved = 0; moved < r->span_len[i];) {
+			uint64_t dma = r->span_addr[i] + moved;
+			uint32_t chunk = FRAME - (uint32_t)(dma % FRAME);
+			int64_t off = offset_of(0, CHAIN_DEV_NVME, dma);
+			if (chunk > r->span_len[i] - moved)
+				chunk = r->span_len[i] - moved;
+			CHECK(off >= 0, "READ data pointer lies in host 1's NVMe window");
+			for (uint32_t t = 0; t < chunk; t++) {
+				expect[off + t] = pattern(r->slba * 512 + position + t);
+				known[off + t] = true;
+			}
+			position += chunk;
+			moved += chunk;
+		}
+	for (size_t i = done; i < chain_event_count() && sent < GROUP; i++) {
+		const struct chain_event *e = chain_event_get(i);
+		int64_t off;
+		const uint8_t *bytes;
+
+		if (e->kind != CHAIN_EV_DATA_DELIVER || e->endpoint != 0)
+			continue;
+		off = offset_of(0, CHAIN_DEV_NHI, e->address);
+		if (off < 0 || !known[off])
+			continue; /* control ring, or another group's frames */
+		bytes = chain_delivered_bytes(e);
+		CHECK(!e->status && bytes, "the link read host 1's frame and delivered it");
+		for (uint32_t t = 0; t < e->length; t++)
+			if (off + t >= FRAMES * FRAME || !known[off + t] || bytes[t] != expect[off + t]) {
+				fprintf(stderr, "frame offset %lld: sent %u expected %u\n", (long long)(off + t),
+					bytes[t], off + t < FRAMES * FRAME ? expect[off + t] : 0);
+				CHECK(0, "host 1 sent the bytes its READ placed in those frames");
+			}
+		sent += (uint32_t)e->length;
+	}
+	CHECK(sent == GROUP, "the link carried the whole group from host 1's frames");
+	assertions++;
+}
+
+/* (f) at host 2: host 2's k-th WRITE carries host 1's k-th READ bytes. */
 static void bytes_match(unsigned k)
 {
 	const struct chain_nvme_command *r = command(0, k), *w = command(1, k);
@@ -288,6 +342,7 @@ static void chain_same_worker(void)
 	CHECK(commands(0) == 4 && commands(1) == 4, "four READs on host 1, four WRITEs on host 2");
 	for (unsigned k = 1; k <= 4; k++) {
 		same_worker_tx(k);
+		sent_bytes_match(k);
 		bytes_match(k);
 	}
 	finished(4);
@@ -324,8 +379,10 @@ static void reuse_waits_for_ack(void)
 	CHECK(nth_ctl_rx(0, ACK, 1) && nth_ctl_rx(0, ACK, 1) < nth(CHAIN_EV_NVME_SUBMIT, 0, 3),
 	      "the reusing READ follows the first ACK");
 	CHECK(read_frames(3) == first, "the third READ reuses batch 1's frames");
-	for (unsigned k = 1; k <= 3; k++)
+	for (unsigned k = 1; k <= 3; k++) {
+		sent_bytes_match(k);
 		bytes_match(k);
+	}
 }
 
 /* (c) An ACK before local TX completion still waits. */
@@ -352,8 +409,10 @@ static void ack_before_local_done(void)
 	finished(3);
 	CHECK(nth(CHAIN_EV_NVME_SUBMIT, 0, 3) > nth_ctl_rx(0, ACK, 1), "reuse follows both events");
 	CHECK(read_frames(3) == first, "the third READ reuses batch 1's frames");
-	for (unsigned k = 1; k <= 3; k++)
+	for (unsigned k = 1; k <= 3; k++) {
+		sent_bytes_match(k);
 		bytes_match(k);
+	}
 }
 
 /* (d) The receiver acknowledges only after its consumer released the group. */
@@ -370,8 +429,10 @@ static void consumer_holds_ack(void)
 	settle(50);
 	finished(2);
 	CHECK(chain_control_tx_count(1, ACK) == 2, "one ACK per group after the WRITE completed");
-	for (unsigned k = 1; k <= 2; k++)
+	for (unsigned k = 1; k <= 2; k++) {
+		sent_bytes_match(k);
 		bytes_match(k);
+	}
 }
 
 /* (e) A duplicate of an old ACK cannot finish the group now in its frames. */
@@ -412,8 +473,10 @@ static void stale_ack_after_reuse(void)
 	settle(50);
 	CHECK(chain_session_done(tx) == 3, "group 3 finishes on its own ACK");
 	CHECK(chain_violations() == 0, "no lease overlap");
-	for (unsigned k = 1; k <= 3; k++)
+	for (unsigned k = 1; k <= 3; k++) {
+		sent_bytes_match(k);
 		bytes_match(k);
+	}
 }
 
 /* No Thunderbolt link behind the token: CREATE fails cleanly with ENODEV. */

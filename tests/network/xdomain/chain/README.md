@@ -88,6 +88,15 @@ device models check such an access page by page.
 | `stale_ack_after_reuse` | after batch 3 occupies batch 1's frames, a copy of group 1's ACK is delivered through a real control RX descriptor: it is dispatched, finishes no batch, and the frames stay leased to group 3 until group 3's own ACK |
 | `no_link_enodev` | an XDOMAIN stage whose token names no link: CREATE fails with `-ENODEV` |
 
+Every case that moves data compares bytes at both ends against one oracle, a
+pattern of host 1's disk byte address that the test computes itself. At host
+1, the bytes the link read from host 1's frames for each TX element of group k
+must be the bytes the k-th READ placed at those frame offsets (each frame
+byte's position in the transfer comes from the READ's SGL order). At host 2,
+the disk after the k-th WRITE must hold the k-th READ's bytes in order. The
+link model keeps a copy of each delivered element for the first comparison and
+checks nothing about content itself.
+
 Each case except `no_link_enodev` also runs as `NAME_early`, with both
 XDOMAIN stages in EARLY mode: the receiver grants buffers ahead, paired by the
 batch key (both hosts START from the same first key), so the sender posts its

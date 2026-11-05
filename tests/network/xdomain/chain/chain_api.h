@@ -87,6 +87,7 @@ struct chain_event {
 	int32_t status;
 	bool quiesced;
 	const void *device;
+	uint32_t wire;      /* DATA_DELIVER: 1-based slot of the bytes the link carried */
 };
 void chain_record(struct chain_event e);
 size_t chain_event_count(void);
@@ -100,4 +101,6 @@ bool chain_real_peer_mode(void);
 bool chain_stage_admission(struct xdev_ext_mech_session *s, unsigned stage, uint32_t *backing,
 			   uint32_t *reachability, uint32_t *refused);
 const struct chain_event *chain_event_get(size_t i);
+/* The bytes a DATA_DELIVER event carried, as read from the sender's frame memory. */
+const uint8_t *chain_delivered_bytes(const struct chain_event *e);
 #endif

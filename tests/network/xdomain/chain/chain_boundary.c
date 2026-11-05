@@ -451,19 +451,35 @@ fault:
 	return -EFAULT;
 }
 
+/* Bytes the link read from the sender, kept so a case can compare them with
+ * its own oracle (the model itself checks nothing about content). */
+#define CHAIN_WIRE_SLOTS 256
+static u8 chain_wire[CHAIN_WIRE_SLOTS][CHAIN_PAGE];
+static unsigned chain_nwire;
+
+const uint8_t *chain_delivered_bytes(const struct chain_event *e)
+{
+	return e->kind == CHAIN_EV_DATA_DELIVER && e->wire ? chain_wire[e->wire - 1] : NULL;
+}
+
 /* Called by the real-NHI adapter when the link delivers one data frame. */
 static void chain_link_payload(unsigned from, unsigned long long tx_dma, unsigned to,
 			       unsigned long long rx_dma, unsigned len)
 {
 	u8 bounce[CHAIN_PAGE];
+	uint32_t wire = 0;
 	int status;
 
 	assert(len <= CHAIN_PAGE);
 	status = chain_dma_access(&world->side[from].pci, tx_dma, bounce, len, false);
+	if (!status && chain_nwire < CHAIN_WIRE_SLOTS) {
+		memcpy(chain_wire[chain_nwire], bounce, len);
+		wire = ++chain_nwire;
+	}
 	if (!status)
 		status = chain_dma_access(&world->side[to].pci, rx_dma, bounce, len, true);
 	chain_record((struct chain_event){ .kind = CHAIN_EV_DATA_DELIVER, .endpoint = from,
-		.address = tx_dma, .offset = rx_dma, .length = len, .status = status });
+		.address = tx_dma, .offset = rx_dma, .length = len, .status = status, .wire = wire });
 }
 
 /* Recording requester bind; the stage keeps its own device as requester. */
