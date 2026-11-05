@@ -39,6 +39,7 @@
 #include <linux/vmalloc.h>
 #include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_peer.h>
 
 #include "xdev_ext_mech_internal.h"
 #include "xdev_ext_mech_step.h"
@@ -222,6 +223,22 @@ static int xdev_ext_user_submit(struct xdev_ext_mech_stage *st, struct xdev_ext_
 	h = &us->held[slot];
 	if (h->b)
 		return -EBUSY;
+	/*
+	 * The GPU borrows PEER frames by allocation offset, without a core peer
+	 * lease, so apply the lease's admission rule here: an invalidated,
+	 * quarantined or provider-stale region, or one whose generation is not
+	 * the one CREATE claimed, is never handed out.
+	 */
+	if (pool->kind == XDEV_EXT_MECH_POOL_PEER) {
+		u64 len, generation;
+
+		err = xdev_ext_peer_file_info(xdev_ext_peer_mech_pool_file(pool),
+					      &len, &generation);
+		if (!err && generation != xdev_ext_peer_mech_pool_generation(pool))
+			err = -ESTALE;
+		if (err)
+			return err;
+	}
 	/*
 	 * Entries of batches cancelled before the user thread read them still
 	 * fill the ring.  -EAGAIN puts the batch on the core's retry path; a

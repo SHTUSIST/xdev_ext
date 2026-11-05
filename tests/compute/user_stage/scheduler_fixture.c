@@ -69,6 +69,21 @@ struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops;
 struct xdev_ext_mech_pool;
 struct xdev_ext_user_obj;
+/* Peer-memory boundary (xdev_ext_mech_peer_pool.c, xdev_ext_peer_fd.c): the
+ * pool's claimed authority, the generation CREATE captured, and the region's
+ * current admission answer. -ESTALE stands for an invalidated, quarantined or
+ * provider-stale region, exactly what every leasing class is refused with.
+ * Only a PEER pool reaches it; host-page cases never call it. */
+static struct file peer_authority;
+static int peer_region_err;
+static u64 peer_region_generation=41,peer_pool_generation=41;
+static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p) {(void)p;return &peer_authority;}
+static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p) {(void)p;return peer_pool_generation;}
+static int xdev_ext_peer_file_info(struct file *f,u64 *len,u64 *generation) {
+ if(f!=&peer_authority||!len||!generation)return -EINVAL;
+ if(peer_region_err)return peer_region_err;
+ *len=4*4096;*generation=peer_region_generation;return 0;
+}
 /* STRUCTURES */
 enum xdev_ext_mech_end {XDEV_EXT_MECH_END_DONE,XDEV_EXT_MECH_END_ABORT,XDEV_EXT_MECH_END_SEQUESTER};
 /* PROTOTYPES */
@@ -187,6 +202,9 @@ static void setup(u32 depth,u32 entries,s64 delta,bool varlen){
  ends=0;end_how=-1;end_err=1;progress_kicks=retry_arms=0;event_signals=0;
  memset(attempts,0,sizeof(attempts));memset(accepts,0,sizeof(accepts));
 }
+/* Producer outcome start() reports: default status 0, provably quiescent. */
+static int start_native_err;
+static bool start_native_unknown;
 static struct xdev_ext_mech_batch *start(u32 slot,u32 len){
  struct xdev_ext_mech_session*s=&session;
  struct xdev_ext_mech_batch*b=&batches[slot];
@@ -202,7 +220,8 @@ static struct xdev_ext_mech_batch *start(u32 slot,u32 len){
  /* The producer's native completion: the device wrote len bytes per frame. */
  for(u32 i=0;i<FRAMES;i++)b->f[i].data_len=len;
  b->bytes=FRAMES*len;
- callback(0,0);
+ if(start_native_unknown)xdev_ext_mech_batch_sequester(accepted[0],tickets[0],start_native_err);
+ else callback(0,start_native_err);
  xdev_ext_mech_batch_drain(&s->drain_work);
  accepts[0]=0;
  return b;

@@ -56,6 +56,8 @@ struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops;
 static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *,int);
 static int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops *c) {(void)c;return 0;}
+/* The peer-memory boundary (peer_region_err, peer_*_generation) is in
+ * scheduler_fixture.c, shared with the scheduler cases. */
 /* STRICT CASES */
 static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int err) {
  (void)err;st->cls->mark_dead(st);
@@ -166,9 +168,36 @@ static int exercise(const char *mode) {
   if(!strcmp(mode,"peer-reject-delta"))bind_delta=1;
   CHECK(real_setup(strict,true,false,false)==-EOPNOTSUPP,"PEER USER requires strict, fixed lengths and zero delta");return failures!=0;
  }
- bool legacy=!strcmp(mode,"legacy-stop")||!strcmp(mode,"external-nonstrict"),peer=!strcmp(mode,"strict-bind-peer");
- REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")),"specified USER mode binds through production bind");
+ bool legacy=!strcmp(mode,"legacy-stop")||!strcmp(mode,"external-nonstrict"),peer=!strcmp(mode,"strict-bind-peer")||!strncmp(mode,"peer-",5);
+ REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")||!strcmp(mode,"peer-admitted")),"specified USER mode binds through production bind");
  if(!strncmp(mode,"strict-bind",11))return failures!=0;
+ if(!strcmp(mode,"peer-stale")||!strcmp(mode,"peer-generation")){
+  /* VRAM frames the producer (NVMe READ) completed into; the region was
+   * invalidated or replaced before the GPU borrower takes them. */
+  if(!strcmp(mode,"peer-stale"))peer_region_err=-ESTALE;else peer_region_generation=peer_pool_generation+1;
+  struct xdev_ext_mech_batch*sb=start(0,4092);
+  CHECK(sb!=NULL,"producer completion reaches the USER stage");
+  CHECK(us->nr_held==0&&us->hdr->ready_prod==0,"stale or replaced VRAM region is never handed to the GPU borrower");
+  CHECK(!attempts[2],"nothing downstream of a refused hand-out");
+  CHECK(ends==1&&end_err==-ESTALE,"refused hand-out ends the batch with the region's -ESTALE");
+  for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"nothing was handed out, so nothing is isolated as unknown");
+  CHECK(!warnings,"production warning count is zero");return failures!=0;
+ }
+ if(!strcmp(mode,"peer-producer-error")||!strcmp(mode,"peer-producer-unknown")){
+  /* The VRAM producer (NVMe READ) fails, or cannot prove its DMA stopped. */
+  bool unknown=!strcmp(mode,"peer-producer-unknown");
+  start_native_err=-EIO;start_native_unknown=unknown;
+  struct xdev_ext_mech_batch*fb=start(0,4092);
+  CHECK(fb!=NULL,"producer was accepted and completed");
+  CHECK(us->nr_held==0&&us->hdr->ready_prod==0,"failed or unknown producer never hands VRAM frames to the GPU consumer");
+  CHECK(!attempts[2],"nothing downstream of a failed producer");
+  CHECK(ends==1&&end_err==-EIO,"producer error is the batch result");
+  if(unknown){
+   CHECK(fb&&quarantined(fb),"unknown producer DMA isolates every frame");
+   CHECK(xdev_ext_mech_pool_frame_move(&session.pool,0,XDEV_EXT_MECH_F_K_FREE,XDEV_EXT_MECH_F_HELD)==-EBUSY,"isolated VRAM frame cannot be claimed again");
+  }else for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"a quiesced failure is not isolated");
+  CHECK(!warnings,"production warning count is zero");return failures!=0;
+ }
  struct xdev_ext_mech_batch*b=start(0,4092);
  REQUIRE(b&&us->nr_held==1,"real producer completion publishes USER ready");
  struct xdev_ext_user_ready r=take();
@@ -250,6 +279,19 @@ static int exercise(const char *mode) {
   unsigned before=accepts[2];post(0,old.ticket,0);progress();drain();
   CHECK(us->nr_held==1&&held_out_pending(b)&&accepts[2]==before,"previous message ticket cannot complete reused slot");
   post(0,r.ticket,0);progress();drain();CHECK(accepts[2]==before+1,"new matching ticket advances its message");
+ }else if(!strcmp(mode,"peer-stop-late-stale")){
+  /* The GPU still holds the frames when the region is invalidated and the
+   * session is closed; its late last-use completion arrives within grace. */
+  peer_region_err=-ESTALE;xdev_ext_mech_sess_stop(&session.ss);progress();drain();
+  CHECK(us->nr_held==1&&held_out_pending(b)&&!ends,"invalidation and close do not end the GPU's custody");
+  jiffies+=999;post(0,r.ticket,0);progress();drain();
+  CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESHUTDOWN,"late last-use completion ends the closed batch");
+  CHECK(!attempts[2],"late completion after invalidation and close never submits downstream");
+  for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"proved last use is not isolated as unknown");
+ }else if(!strcmp(mode,"peer-admitted")){
+  /* The d2 shape: VRAM pool, strict USER, kernel POLL; no KICK, no user thread. */
+  post(0,r.ticket,0);xdev_ext_mech_poll_work(&session.poll_work.work);drain();
+  CHECK(accepts[2]==1,"admitted VRAM region: GPU done reaped by POLL advances exactly once");
  }else if(!strcmp(mode,"poll")){
   /* Actual worker progress, no KICK ioctl. */
   post(0,r.ticket,0);xdev_ext_mech_poll_work(&session.poll_work.work);drain();
