@@ -420,23 +420,57 @@ static int xsk_rel_build(struct xdev_ext_mech_stage *st,struct xdev_ext_mech_bat
  }
  return 0;
 }
+/* tx_lock held; prepare this attempt's DATA metadata without native effects. */
+static int xsk_rel_data_lease_locked(struct xdev_ext_mech_stage *st,
+ struct xsk_xdev_ext_mech_tx_batch *tb,const struct xdp_desc *desc,u32 count,u32 *acquired)
+{
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ u32 i;
+ int err;
+ *acquired=0;
+ for(i=0;i<count;i++) {
+  struct xdev_ext_mech_frame f;
+  u64 offset;
+  err=xdev_ext_mech_batch_frame(tb->batch,i,&f);
+  if (err) return err;
+  if (desc[i].addr<f.umem_addr) return -ERANGE;
+  offset=desc[i].addr-f.umem_addr;
+  if (offset>U32_MAX) return -ERANGE;
+  err=xdev_ext_net_lease_pool(&tb->pool_lease[i],tb->batch,i,(u32)offset,desc[i].len,
+                             &xsk_mech_pool_dma_ops,p);
+  if (err) return err;
+  (*acquired)++;
+ }
+ return 0;
+}
 /* tx_lock held; reserve all descriptors before the native attempt exists. */
 static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_mech_tx_batch *tb,
                            const struct xdp_desc *desc,u32 count)
 {
  struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
- u32 start,i;
+ u32 start,i,acquired=0;
  int err;
  if (p->stopped || ((struct xsk_xdev_ext_mech_stage *)st->priv)->dead) return -ENXIO;
  err=xdev_ext_net_count_reserve(&p->ring,count,&start);
  if (err) return err;
+ if (!tb->control) {
+  err=xsk_rel_data_lease_locked(st,tb,desc,count,&acquired);
+  if (err) {
+   while (acquired) xdev_ext_net_lease_pool_release(&tb->pool_lease[--acquired],true);
+   xdev_ext_net_count_rollback(&p->ring,start);
+   return err;
+  }
+ }
  INIT_LIST_HEAD(&tb->done); tb->completion=(struct xdev_ext_net_count_batch){.pending=count};
  tb->cancelled_before_native=false;
  tb->native_error=0;
  tb->reliable_stage=st; tb->n=count;
  for(i=0;i<count;i++) {
   struct xsk_mech_zc_slot *slot=&p->slots[(start+i)&(p->ring.capacity-1)];
-  xp_dma_sync_for_device(p->xp,xp_raw_get_dma(p->xp,desc[i].addr),desc[i].len);
+  if (tb->control)
+   xp_dma_sync_for_device(p->xp,xp_raw_get_dma(p->xp,desc[i].addr),desc[i].len);
+  else
+   xsk_mech_pool_dma_sync_locked(p,&tb->pool_lease[i]);
   *slot=(struct xsk_mech_zc_slot){.desc=desc[i],.batch=tb,.slot=i,
                                 .count={.state=XDEV_EXT_NET_COUNT_PENDING,
                                         .tag=tb->control ? XSK_MECH_ZC_CONTROL : XSK_MECH_ZC_DATA}};
