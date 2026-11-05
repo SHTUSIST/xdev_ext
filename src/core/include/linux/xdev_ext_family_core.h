@@ -150,6 +150,18 @@ static inline int xdev_ext_decl_file_check(const struct xdev_ext_mech_create *c,
 	*f = (struct xdev_ext_mech_stage_facts){ .template_safe = true };
 	return u->fd < 0 ? -EBADF : 0;
 }
+/* XDOMAIN frames are PEER device memory or the ring's host-page UMEM, which
+ * the class maps for its NHI; an AF_XDP UMEM belongs to its netdev driver. */
+static inline int xdev_ext_decl_xdomain_check(const struct xdev_ext_mech_create *c, __u32 i,
+	const struct xdev_ext_mech_stage_uapi *u, struct xdev_ext_mech_stage_facts *f)
+{
+	int err = xdev_ext_decl_file_check(c, i, u, f);
+
+	if (err)
+		return err;
+	return c->pool_kind == XDEV_EXT_MECH_POOL_PEER ||
+	       c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM ? 0 : -EOPNOTSUPP;
+}
 static inline int xdev_ext_decl_cpu_check(const struct xdev_ext_mech_create *c, __u32 i,
 	const struct xdev_ext_mech_stage_uapi *u, struct xdev_ext_mech_stage_facts *f)
 {
@@ -465,12 +477,11 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_
 		.family = XDEV_EXT_FAMILY_NETWORK,
 		.peer_dirs = XDEV_EXT_DMA_DIR_TO_DEVICE | XDEV_EXT_DMA_DIR_FROM_DEVICE,
 		.known_flags = XDEV_EXT_XDOMAIN_KNOWN_FLAGS,
-		.peer_only = 1,
 		.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION,
 		.ctx_rule = XDEV_EXT_CTX_RULE_COMMON,
 		.mech_abi_version = XDEV_EXT_MECH_ABI_VERSION,
 		.role = xdev_ext_decl_direction_role,
-		.check_stage = xdev_ext_decl_file_check,
+		.check_stage = xdev_ext_decl_xdomain_check,
 		.ret_rules = xdev_ext_decl_common_returns, .nr_ret_rules = XDEV_EXT_DECL_ARRAY_SIZE(xdev_ext_decl_common_returns),
 		.base = xdev_ext_decl_common_base,
 		.protocol_info_ok = xdev_ext_decl_protocol_info_ok,
