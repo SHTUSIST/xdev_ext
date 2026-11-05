@@ -77,8 +77,17 @@ struct xdev_ext_stor_geometry {
 	__u8 lba_shift;
 };
 
+enum xdev_ext_stor_host_path {
+	XDEV_EXT_STOR_HOST_NATIVE_RQ = 0,
+	XDEV_EXT_STOR_HOST_BIO = 1,
+};
+
 /* Native member boundaries consumed by the block family runtime. */
 struct xdev_ext_stor_dev_ops {
+	/* Zero preserves the original native-request route. */
+	enum xdev_ext_stor_host_path host_path;
+	/* Borrowed opened device; required only for the ordinary BIO route. */
+	struct block_device *(*bdev)(void *member);
 	int (*bind)(struct xdev_ext_mech_stage *st,
 		const struct xdev_ext_mech_stage_uapi *u,
 		struct xdev_ext_stor_stage **family, void **member);
@@ -100,7 +109,8 @@ struct xdev_ext_stor_dev_ops {
 	/* HOST: before slot/map. PEER: after lease/DPTR/drift admission. */
 	void (*request_init)(void *member, struct request *request,
 		struct xdev_ext_stor_command *cmd, bool peer);
-	/* Accept exactly once; end_io may free request before this void call returns.
+	/* BIO passes NULL request/command and peer=false; io->bio is initialized.
+	 * Accept exactly once; end_io may free request before this void call returns.
 	 * post retains no command pointer and performs no fallible preaccept work.
 	 */
 	void (*post)(void *member, struct request *request,

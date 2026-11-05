@@ -47,3 +47,7 @@ obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_policy.o
 obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech_xdomain_kfunc.o
 
 obj-$(CONFIG_XDEV_EXT_PEER_DMABUF) += xdev_ext_peer_dmabuf.o
+
+ifeq ($(CONFIG_BLOCK),y)
+obj-$(CONFIG_XDEV_EXT_MECH) += xdev_ext_mech_block.o
+endif

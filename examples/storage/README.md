@@ -59,3 +59,32 @@ tree reports include staged, unstaged, and untracked paths. Reports include raw 
 changes. Binary and untracked counts are explicitly unavailable. These are
 descriptive Git facts, without treating line counts as evidence of contribution,
 novelty, efficiency, or engineering cost.
+
+## Ordinary block RW
+
+`block_rw.bpf.c` uses `xdev_ext_block_mech_ops` and class
+`XDEV_EXT_MECH_CLASS_BLOCK` (12). CREATE takes an already opened ordinary block
+device FD with the required read or write mode and an exclusive claim held by
+that same file. `arg0` and `arg1` authorize the partition-relative LBA window.
+The session's existing file reference keeps the open and claim alive after the
+application closes its FD. A regular file or another holder's claim is refused.
+
+The build callback selects a whole group inside the authorized window using
+`base.request_id`, writes READ (0) or WRITE (1) according to the stage direction,
+and encodes SLBA and the actual NLB count in a zeroed 64-byte little-endian
+descriptor. C independently admits the descriptor, rechecks the captured device
+identity and submits host pages through the ordinary block BIO path. A partition
+uses relative sectors; the block layer performs its native partition remap.
+Completion errors abort the chain, including a terminal error after partial
+I/O; the program never retries an accepted batch.
+
+This member supports host pools and interrupt completion. PEER pools and POLL
+are refused. It provides ordinary READ/WRITE, without flush/FUA or durability,
+discard, zoned I/O, integrity payloads, compute or uring_cmd BUILD. Queue
+admission can sleep in the existing session worker. Driver DMA mapping, native
+splitting and merging remain block-layer responsibilities; this example makes
+no zero-copy, physical DMA or performance claim.
+
+The same `make` command above builds `block_rw.bpf.o` using target-kernel BTF
+that includes the BLOCK types. Bytecode build, verifier loading, program
+selection and actual device correctness require separate validation.

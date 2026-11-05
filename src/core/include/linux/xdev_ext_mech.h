@@ -150,6 +150,7 @@ XDEV_EXT_MECH_OPS_TYPE(xdev_ext_socket_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_net_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_user_mech_ops);
 XDEV_EXT_MECH_OPS_TYPE(xdev_ext_xdomain_mech_ops);
+XDEV_EXT_MECH_OPS_TYPE(xdev_ext_block_mech_ops);
 
 /*
  * A frame resolved to kernel memory.  [kaddr, kaddr + frame_size) is one

@@ -327,6 +327,11 @@
       "native_path": "tools/xdev_ext_mech/examples/storage/README.md"
     },
     {
+      "source": "examples/storage/block_rw.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/block_rw.bpf.c"
+    },
+    {
       "source": "examples/storage/nvme_blocktable.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.bpf.c"
@@ -1836,6 +1841,11 @@
       "source": "src/storage/drivers/nvme/host/tcp.c",
       "component": "linux",
       "native_path": "drivers/nvme/host/tcp.c"
+    },
+    {
+      "source": "src/storage/io_uring/xdev_ext_mech_block.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_mech_block.c"
     },
     {
       "source": "src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c",
