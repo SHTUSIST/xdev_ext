@@ -530,6 +530,45 @@ static void test_order_holds(void)
 	EXPECT_FALSE(xdev_ext_mech_order_holds(7, 2, 3, &o));
 }
 
+/*
+ * An ordered stage with a window (stage 2 here): what each earlier key means
+ * for key 7 entering it.  HOLD: not submitted at the stage yet; AT: in flight
+ * at the stage; PAST: submitted there, further down; FREE: later or ended.
+ */
+static void test_order_window_role(void)
+{
+	struct xdev_ext_mech_bstate o;
+
+	o = bstate_at(XDEV_EXT_MECH_B_OPEN, 0);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 6, &o) == XDEV_EXT_MECH_ORDER_HOLD);
+	o = bstate_at(XDEV_EXT_MECH_B_READY, 1);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_HOLD);
+	o = bstate_at(XDEV_EXT_MECH_B_IN_FLIGHT, 1);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_HOLD);
+	/* READY at the stage itself: not submitted yet, still ahead in line. */
+	o = bstate_at(XDEV_EXT_MECH_B_READY, 2);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 6, &o) == XDEV_EXT_MECH_ORDER_HOLD);
+	o = bstate_at(XDEV_EXT_MECH_B_IN_FLIGHT, 2);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 6, &o) == XDEV_EXT_MECH_ORDER_AT);
+	/* Submitted at the stage and further down the chain: occupies the window. */
+	o = bstate_at(XDEV_EXT_MECH_B_READY, 3);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 6, &o) == XDEV_EXT_MECH_ORDER_PAST);
+	o = bstate_at(XDEV_EXT_MECH_B_IN_FLIGHT, 3);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 6, &o) == XDEV_EXT_MECH_ORDER_PAST);
+	/* A larger or equal key, and an ended or free batch, mean nothing. */
+	o = bstate_at(XDEV_EXT_MECH_B_IN_FLIGHT, 2);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 8, &o) == XDEV_EXT_MECH_ORDER_FREE);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 7, &o) == XDEV_EXT_MECH_ORDER_FREE);
+	o = bstate_at(XDEV_EXT_MECH_B_DONE, 1);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_FREE);
+	o = bstate_at(XDEV_EXT_MECH_B_ABORT, 1);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_FREE);
+	o = bstate_at(XDEV_EXT_MECH_B_SEQUESTERED, 2);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_FREE);
+	o = bstate_at(XDEV_EXT_MECH_B_FREE, 0);
+	EXPECT_TRUE(xdev_ext_mech_order_window_role(7, 2, 3, &o) == XDEV_EXT_MECH_ORDER_FREE);
+}
+
 int main(void)
 {
 	test_create_check();
@@ -540,6 +579,7 @@ int main(void)
 	test_status_convention();
 	test_status_errno();
 	test_order_holds();
+	test_order_window_role();
 
 	if (failures) {
 		printf("FAIL: %u/%u XDEV_EXT mechanism step checks failed\n", failures,

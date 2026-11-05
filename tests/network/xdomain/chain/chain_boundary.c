@@ -819,15 +819,16 @@ int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t firs
 
 /* ---- holds and injected wire duplicates ------------------------------- */
 void chain_hold_tx_completions(unsigned endpoint, bool hold) { world->hold_callbacks[endpoint] = hold; }
-void chain_hold_ack(unsigned endpoint, bool hold)
+void chain_hold_control(unsigned endpoint, unsigned type, bool hold)
 {
 	world->hold_controls[endpoint] = hold;
-	world->hold_control_type[endpoint] = hold ? XDEV_EXT_XD_ACK : 0;
+	world->hold_control_type[endpoint] = hold ? type : 0;
 	if (!hold)
 		for (unsigned i = 0; i < world->nn; i++)
 			if (ring_info(world->n[i].r)->endpoint == endpoint)
 				world->n[i].held = false;
 }
+void chain_hold_ack(unsigned endpoint, bool hold) { chain_hold_control(endpoint, XDEV_EXT_XD_ACK, hold); }
 /* Deliver again the bytes of the nth control message of @type that
  * @from_endpoint sent, into a posted control RX descriptor of the peer:
  * the real NHI completes it and real X4/X5 dispatch the duplicate. */

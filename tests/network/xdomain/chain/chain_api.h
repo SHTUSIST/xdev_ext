@@ -63,6 +63,8 @@ struct xdev_ext_mech_session *chain_rx_session(int *err);
 int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t first_seq);
 void chain_hold_tx_completions(unsigned endpoint, bool hold);
 void chain_hold_ack(unsigned endpoint, bool hold);
+/* Hold @endpoint's outgoing control messages of one wire type on the wire. */
+void chain_hold_control(unsigned endpoint, unsigned type, bool hold);
 int chain_inject_stale_control(unsigned from_endpoint, unsigned type, uint64_t nth);
 unsigned chain_worker_of(struct xdev_ext_mech_session *s);
 

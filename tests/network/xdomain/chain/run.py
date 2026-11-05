@@ -33,11 +33,12 @@ BASE_CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done
 # NAME_early: both XDOMAIN stages in EARLY mode (paired receive grants).
 # NAME_wN: both XDOMAIN stages with an in-flight window of N groups (arg1 bits 32..63).
 WINDOWS = ('_w2', '_w4')
-WINDOW_CASES = ('window_fills_w2', 'window_fills_w4', 'window_waits_for_receiver')
+WINDOW_CASES = ('window_fills_w2', 'window_fills_w4', 'window_waits_for_receiver', 'window_refills_receiver')
 CASES = (BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',) +
          tuple(c + w for w in WINDOWS for c in BASE_CASES) +
          tuple(c + w + '_early' for w in WINDOWS for c in BASE_CASES) +
-         WINDOW_CASES + tuple(c + '_early' for c in WINDOW_CASES) + ('window_withdrawn_head',))
+         WINDOW_CASES + tuple(c + '_early' for c in WINDOW_CASES) +
+         ('window_next_after_cts', 'window_withdrawn_head'))
 # A window of 1 must behave exactly as no window: NAME and its window-1 twin.
 IDENTITY = BASE_CASES + tuple(c + '_early' for c in BASE_CASES)
 
@@ -127,6 +128,31 @@ MUTATIONS = {
         ('io_uring/family/xdev_ext_netfam.c',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), off, buf_len,',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), ns->rx ? off : off ^ 4096, buf_len,')]),
+    # In-flight window. A later group is announced as soon as the previous one
+    # is announced, not once its data post was accepted.
+    'window-release-at-announce': dict(case='window_withdrawn_head', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         's->ticket == xdev_ext_mech_batch_ticket(b) &&\n\t\txd_fact(xs, s)->accepted;',
+         's->ticket == xdev_ext_mech_batch_ticket(b) &&\n\t\ts->state != XDEV_EXT_RDV_IDLE;')]),
+    # The core no longer counts the window: any number of released keys pass.
+    'window-bound-ignored': dict(case='window_fills_w2', edits=[
+        ('io_uring/xdev_ext_mech.c', '\tif (entered >= st->order_window)\n\t\treturn true;\n', '')]),
+    # RX batches are released like TX ones: a second RX batch enters the RX stage.
+    'window-rx-released': dict(case='window_fills_w2', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         '\tif (!xs || xs->ns.rx)\n\t\treturn false;\n\tspin_lock_irqsave(&xs->ns.lock, flags);\n\ts = bp->slot;',
+         '\tif (!xs)\n\t\treturn false;\n\tspin_lock_irqsave(&xs->ns.lock, flags);\n\ts = bp->slot;')]),
+    # No re-check after a class pass: neither a CTS that fixed a sender
+    # group's place nor a receiver group that left the RX stage lets the next
+    # key go until a batch ends or a timer fires.
+    'window-no-progress-kick': dict(case='window_next_after_cts', edits=[
+        ('io_uring/xdev_ext_mech.c',
+         ' for (i = 0; i < s->nr_stages; i++)\n  if (s->st[i].order_window > 1) {\n'
+         '   xdev_ext_mech_order_kick(s);\n   break;\n  }\n', '')]),
+    # The class accepts the window but does not hand it to the core.
+    'window-bind-ignored': dict(case='window_fills_w2', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',
+         '\tst->order_window = 0;\n')]),
 }
 
 

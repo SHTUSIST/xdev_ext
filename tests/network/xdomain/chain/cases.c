@@ -37,6 +37,7 @@
 #define MAX_FRAMES 32u
 #define GROUP 8192u
 #define RTS 1u
+#define CTS 2u
 #define ACK 3u
 #define FAIL 5u
 #define CANCEL 6u
@@ -661,6 +662,79 @@ static void window_waits_for_receiver(void)
 	printf("CHAIN_OBSERVE tx_stage_peak=%u rx_held_peak=%u\n", peak.tx_stage, peak.rx_held);
 }
 
+static bool rx_posted(uint64_t group)
+{
+	for (size_t i = 0; i < chain_event_count(); i++)
+		if (chain_event_get(i)->kind == CHAIN_EV_DATA_RX_POST && chain_event_get(i)->endpoint == 1 &&
+		    chain_event_get(i)->group == group)
+			return true;
+	return false;
+}
+
+/* The receiver refills its RX stage when a group leaves it, not on a timer.
+ * Host 2's data completions are held, so group 1 stays in host 2's RX stage
+ * while host 1 already announced group 2 (ordinary mode); once the
+ * completions run, group 1 moves on to its consumer and group 2 must be posted
+ * in the same event-driven drain, with no virtual time passing. */
+static void window_refills_receiver(void)
+{
+	up();
+	chain_nvme_hold(1, true);
+	chain_hold_tx_completions(1, true); /* host 2's data-ring callbacks */
+	start(depth);
+	if (early)
+		settle(5); /* host 1 has no grant yet; nothing on host 2 needs time */
+	else
+		pump(0);
+	CHECK(rx_posted(1) && !rx_posted(2), "group 1 is posted at host 2 and waits for its completions");
+	CHECK(chain_stage_completed(rx, 0) == 0 && chain_stage_submitted(rx, 0) == 1,
+	      "group 1 is still in host 2's RX stage");
+	if (!early)
+		CHECK(nth_ctl_rx(1, RTS, 2) != 0, "group 2's announcement already reached host 2");
+	chain_hold_tx_completions(1, false);
+	pump(0);
+	CHECK(chain_stage_completed(rx, 0) >= 1, "group 1 left host 2's RX stage");
+	CHECK(rx_posted(2), "group 2 was posted at host 2 in the same drain, without a timer");
+	CHECK(peak.rx_held == window_rx, "host 2 holds W groups");
+	if (!early)
+		CHECK(nth_ctl_rx(0, CTS, 2) != 0, "host 1 got group 2's clear-to-send");
+	chain_nvme_hold(1, false);
+	settle(50);
+	finished(depth);
+	for (unsigned k = 1; k <= depth; k++) {
+		sent_bytes_match(k);
+		bytes_match(k);
+	}
+}
+
+/* The next group goes out when the previous group's clear-to-send has been
+ * processed, not when it finishes. Host 2's CTS is held until host 1 has read
+ * ahead into every batch (they wait at its XDOMAIN stage); once released,
+ * host 1 fills its window in the same event-driven drain (ordinary mode). */
+static void window_next_after_cts(void)
+{
+	up();
+	chain_nvme_hold(1, true);
+	chain_hold_control(1, CTS, true);
+	start(depth);
+	pump(0);
+	CHECK(commands(0) == depth, "host 1 read ahead into every batch");
+	CHECK(chain_control_tx_count(0, RTS) == 1, "only group 1 is announced while its CTS is held");
+	CHECK(peak.tx_stage == 1, "one group in flight while its CTS is held");
+	chain_hold_control(1, CTS, false);
+	pump(0);
+	CHECK(peak.tx_stage == window_tx, "host 1 reached its window once group 1's CTS was processed");
+	CHECK(nth_ctl_rx(1, RTS, 2) != 0 && chain_session_done(tx) == 0,
+	      "group 2 was announced before group 1 finished");
+	chain_nvme_hold(1, false);
+	settle(50);
+	finished(depth);
+	for (unsigned k = 1; k <= depth; k++) {
+		sent_bytes_match(k);
+		bytes_match(k);
+	}
+}
+
 /* An announced group the receiver never posted buffers for is withdrawn and
  * refused, then the receiver arms its first batch. No later group of host 1
  * may take that receive batch: host 2 must not write host 1's second group
@@ -758,6 +832,14 @@ int main(int argc, char **argv)
 		depth = 6;
 		frames = 12;
 		window_waits_for_receiver();
+	} else if (!strcmp(base, "window_refills_receiver") && !w) {
+		window_tx = window_rx = 2;
+		window_refills_receiver();
+	} else if (!strcmp(base, "window_next_after_cts") && !w && !early) {
+		window_tx = window_rx = 2;
+		depth = 4;
+		frames = 8;
+		window_next_after_cts();
 	} else if (!strcmp(base, "window_withdrawn_head") && !w && !early) {
 		window_tx = window_rx = 2;
 		window_withdrawn_head();
