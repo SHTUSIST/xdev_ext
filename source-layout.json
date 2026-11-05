@@ -7217,6 +7217,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_dptr_test.c"
     },
     {
+      "source": "tests/network/peer/session/xdev_ext_peer_nvme_batch_admit_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_batch_admit_test.c"
+    },
+    {
       "source": "tests/network/peer/session/xdev_ext_peer_nvme_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_test.c"
