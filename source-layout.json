@@ -8235,6 +8235,22 @@
       "logical_path": "tests/network/xdomain/probe/vectors/ready.bin"
     },
     {
+      "source": "tests/network/xdomain/protocols/README.md",
+      "logical_path": "tests/network/xdomain/protocols/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/cases.c",
+      "logical_path": "tests/network/xdomain/protocols/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/equivalence.c",
+      "logical_path": "tests/network/xdomain/protocols/equivalence.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/run.py",
+      "logical_path": "tests/network/xdomain/protocols/run.py"
+    },
+    {
       "source": "tests/network/xdomain/stack/NHI_STACK.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdomain/NHI_STACK.md"
