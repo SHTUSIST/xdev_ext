@@ -8705,6 +8705,16 @@
       "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/README.md"
     },
     {
+      "source": "tests/storage/nvme/window_handle/host_window_fixture.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/host_window_fixture.c"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/host_window_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/host_window_test.py"
+    },
+    {
       "source": "tests/storage/nvme/window_handle/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/Makefile"

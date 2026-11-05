@@ -27,7 +27,13 @@ under test (correctness only, nothing timed, no hardware touched):
   (`window_validate.py`, which checks itself first with
   `window_validate_test.py`).
 
-Run on a host with KVM, from a clean checkout of the commit under test:
+Host test of the same code without a kernel: `host_window_test.py [ROOT]`
+pastes the production window handle block and `nvme_xdev_ext_member_bind`
+verbatim into `host_window_fixture.c` (OS objects only), runs it under gcc
+and UBSan, and requires each of its listed production mutants to fail.
+
+Run the guest test on a host with KVM, from a clean checkout of the commit
+under test:
 
     bash tests/storage/nvme/window_handle/window_kvm.sh --scratch DIR \
         --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD

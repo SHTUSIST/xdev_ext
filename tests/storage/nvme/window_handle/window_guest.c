@@ -488,11 +488,11 @@ int main(int argc, char **argv)
 	CHECK(!socketpair(AF_UNIX, SOCK_SEQPACKET | SOCK_CLOEXEC, 0, sv), "tenant socket pair");
 	fflush(stdout);
 	child = fork();
-	CHECK(child >= 0, "fork the tenant");
 	if (!child) {
 		close(sv[0]);
 		exit(tenant(sv[1], argv[2], argv[4], argv[5]));
 	}
+	CHECK(child > 0, "fork the tenant");
 	close(sv[1]);
 
 	src = open_ok(argv[1], O_RDONLY); srcng = open_ok(argv[2], O_RDONLY);

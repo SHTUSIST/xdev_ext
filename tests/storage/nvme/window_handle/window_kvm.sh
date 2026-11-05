@@ -48,11 +48,19 @@ git -C "$SOURCE" diff --quiet
 git -C "$SOURCE" diff --cached --quiet
 SHA=$(git -C "$SOURCE" rev-parse HEAD)
 BUILD_SHA=$(cat "$BUILD/xdev-ext-source.commit")
-NATIVE_SHA=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("source_commit", ""))' \
+# The assembly records the canonical checkout it was prepared from.
+NATIVE_ROOT=$(python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1])).get("canonical_root", ""))' \
     "$NATIVE/.xdev-ext-source.json" 2>/dev/null || true)
+NATIVE_SHA=
+[[ -n "$NATIVE_ROOT" && -d "$NATIVE_ROOT" ]] && NATIVE_SHA=$(git -C "$NATIVE_ROOT" rev-parse HEAD 2>/dev/null || true)
 same=no; [[ "$BUILD_SHA" == "$SHA" ]] && same=yes
-printf 'test_source=%s\ntest_commit=%s\nnative=%s\nnative_commit=%s\nkernel_build=%s\nkernel_commit=%s\nkernel_is_test_commit=%s\nscope=nvme-lba-window-handle-software-correctness\ntiming=none\n' \
-    "$SOURCE" "$SHA" "$NATIVE" "$NATIVE_SHA" "$BUILD" "$BUILD_SHA" "$same" >"$EV/provenance.txt"
+# Whether the kernel sources (src/) of the build commit equal the test commit's.
+src_same=unknown
+if git -C "$SOURCE" cat-file -e "$BUILD_SHA^{commit}" 2>/dev/null; then
+    src_same=no; git -C "$SOURCE" diff --quiet "$BUILD_SHA" HEAD -- src && src_same=yes
+fi
+printf 'test_source=%s\ntest_commit=%s\nnative=%s\nnative_commit=%s\nkernel_build=%s\nkernel_commit=%s\nkernel_is_test_commit=%s\nkernel_src_equals_test_src=%s\nscope=nvme-lba-window-handle-software-correctness\ntiming=none\n' \
+    "$SOURCE" "$SHA" "$NATIVE" "$NATIVE_SHA" "$BUILD" "$BUILD_SHA" "$same" "$src_same" >"$EV/provenance.txt"
 for symbol in MODULES XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD RD_GZIP \
     DEVTMPFS DEVTMPFS_MOUNT TMPFS PROC_FS SYSFS BLOCK PCI PCI_MSI IO_URING BPF BPF_SYSCALL \
     BPF_JIT DEBUG_INFO_BTF UNIX; do
@@ -185,7 +193,8 @@ seed=$(sed -n 's/^seed=//p' "$EV/source-seed.txt")
 oks=$(grep -c '^ok ' "$EV/guest.log" || true)
 cat >"$EV/result.json" <<JSON
 {"scope":"NVMe LBA window handles (prototype for ASK.69), real QEMU NVMe, software correctness only",
- "test_commit":"$SHA","kernel_commit":"$BUILD_SHA","kernel_is_test_commit":"$same","kernel_release":"$release",
+ "test_commit":"$SHA","kernel_commit":"$BUILD_SHA","kernel_is_test_commit":"$same",
+ "kernel_src_equals_test_src":"$src_same","kernel_release":"$release",
  "guest_ok":$oks,"source_seed":"$seed","qemu_exit":0,"timing":"none","hardware":false,"performance":false}
 JSON
 echo 'XDEV_EXT_WINDOW_KVM=PASS' | tee "$EV/verdict.txt"
