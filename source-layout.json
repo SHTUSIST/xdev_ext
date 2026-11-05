@@ -8543,6 +8543,21 @@
       "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/vectors.inc"
     },
     {
+      "source": "tests/storage/family_window_grant/mutate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/mutate.py"
+    },
+    {
+      "source": "tests/storage/family_window_grant/run.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/run.sh"
+    },
+    {
+      "source": "tests/storage/family_window_grant/test_window_grant.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/test_window_grant.c"
+    },
+    {
       "source": "tests/storage/native_member_7b/INPUTS.json",
       "logical_path": "tests/storage/native_member_7b/INPUTS.json"
     },

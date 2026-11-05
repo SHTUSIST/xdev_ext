@@ -149,6 +149,62 @@ static inline int xdev_ext_stor_window_check(__u64 window_slba,
 	return 0;
 }
 
+/*
+ * A delegated LBA range of one namespace (prototype for ASK.69).  A holder of
+ * the namespace issues it; a stage presenting it binds a window only inside
+ * the range and only in a granted direction.  Grants of one namespace that
+ * share an LBA conflict unless both are read-only.
+ */
+#define XDEV_EXT_STOR_GRANT_READ	(1U << 0)
+#define XDEV_EXT_STOR_GRANT_WRITE	(1U << 1)
+
+struct xdev_ext_stor_grant {
+	__u64 slba, nlb;
+	__u32 access;
+};
+
+/* Issue: a nonempty range inside the namespace; publish only on success. */
+static inline int xdev_ext_stor_grant_make(struct xdev_ext_stor_grant *out,
+		__u64 capacity_lbas, __u64 slba, __u64 nlb, __u32 access)
+{
+	if (!out || !access ||
+	    (access & ~(XDEV_EXT_STOR_GRANT_READ | XDEV_EXT_STOR_GRANT_WRITE)))
+		return -EINVAL;
+	if (!nlb)
+		return -EINVAL;
+	if (slba > capacity_lbas || nlb > capacity_lbas - slba)
+		return -ERANGE;
+	*out = (struct xdev_ext_stor_grant) {
+		.slba = slba, .nlb = nlb, .access = access,
+	};
+	return 0;
+}
+
+/* CREATE: an ungranted direction (-EBADF) precedes the range (-EACCES). */
+static inline int xdev_ext_stor_grant_admit(const struct xdev_ext_stor_grant *grant,
+		bool write, __u64 slba, __u64 nlb)
+{
+	if (!grant)
+		return -EINVAL;
+	if (!(grant->access & (write ? XDEV_EXT_STOR_GRANT_WRITE :
+				       XDEV_EXT_STOR_GRANT_READ)))
+		return -EBADF;
+	if (xdev_ext_stor_window_check(grant->slba, grant->nlb, slba, nlb))
+		return -EACCES;
+	return 0;
+}
+
+/* Two grants of one namespace: a shared LBA that either side may write. */
+static inline bool xdev_ext_stor_grant_conflict(const struct xdev_ext_stor_grant *a,
+		const struct xdev_ext_stor_grant *b)
+{
+	if (!((a->access | b->access) & XDEV_EXT_STOR_GRANT_WRITE))
+		return false;
+	if (a->slba >= b->slba)
+		return a->slba - b->slba < b->nlb;
+	return b->slba - a->slba < a->nlb;
+}
+
 /* Publish the immutable window only after every geometry check succeeds. */
 static inline int xdev_ext_stor_window_bind(struct xdev_ext_stor_window *out,
 		__u64 capacity_lbas, __u8 lba_shift, bool write,
