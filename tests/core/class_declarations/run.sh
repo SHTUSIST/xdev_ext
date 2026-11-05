@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 set -eu
-# run.sh SOURCE_ROOT OUTPUT_DIR [baseline|candidate] [legacy|extension|all]
+# run.sh SOURCE_ROOT OUTPUT_DIR [baseline|candidate] [legacy|extension|all] [core-table-v1|block-v2]
 source_root=$(realpath "${1:?source root}")
 output_dir=${2:?output directory}
 mode=${3:-baseline}
 selection=${4:-all}
+contract=${5:-core-table-v1}
+case "$contract" in core-table-v1|block-v2) ;; *) exit 2;; esac
 mkdir -p "$output_dir"
 test_dir=$(cd "$(dirname "$0")" && pwd)
 extra=()
 case "$mode" in baseline) ;; candidate) extra+=(-DCLASS_DECLARATIONS_DESC=1);; *) exit 2;; esac
-printf 'source_root=%s\nmode=%s\nselection=%s\n' "$source_root" "$mode" "$selection" > "$output_dir/context.txt"
+if [ "$contract" = block-v2 ]; then extra+=(-DCLASS_DECLARATIONS_BLOCK_V2=1); fi
+printf 'source_root=%s\nmode=%s\nselection=%s\ncontract=%s\n' "$source_root" "$mode" "$selection" "$contract" > "$output_dir/context.txt"
 gcc --version > "$output_dir/compiler.txt"
 rc=0
 for profile in gcc ubsan; do
@@ -19,7 +22,7 @@ for profile in gcc ubsan; do
  printf '%q ' "${command[@]}" > "$output_dir/$profile.command"
  printf '\n' >> "$output_dir/$profile.command"
  if "${command[@]}" > "$output_dir/$profile.compile.log" 2>&1; then
-  if "$output_dir/$profile" "$selection" > "$output_dir/$profile.run.log" 2>&1; then
+  if "$output_dir/$profile" "$selection" "$contract" > "$output_dir/$profile.run.log" 2>&1; then
    printf '0\n' > "$output_dir/$profile.exit"
   else
    result=$?; printf '%s\n' "$result" > "$output_dir/$profile.exit"; rc=1
