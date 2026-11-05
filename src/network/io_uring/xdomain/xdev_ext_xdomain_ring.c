@@ -6,6 +6,7 @@
 #include <linux/dma-mapping.h>
 #include <linux/jiffies.h>
 #include <linux/pci.h>
+#include <linux/xdev_ext_requester_backing.h>
 #include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
 #include "xdev_ext_xdomain_probe_core.h"
@@ -43,23 +44,17 @@ struct xdev_ext_xd_rings {
 	u64 retained_bytes;
 	bool starting, retention_sealed;
 };
-/* Each direction is one coherent allocation. A canceled accepted slot taints
- * the whole allocation. The record is prepared before any DMA acceptance.
- * Once quarantined this object has no link, frame or executable pointer.
+/* Each direction has a live custody ledger for one core-owned coherent
+ * allocation. A canceled accepted slot taints the whole allocation.
  */
 struct xdev_ext_xd_ctl_allocation {
-	struct list_head node;
-	struct pci_dev *pdev;
-	u8 *cpu;
-	dma_addr_t dma;
-	size_t bytes;
+	struct xdev_ext_requester_backing *backing;
+	struct xdev_ext_requester_backing_view view;
 	u64 generation;
 	u64 accepted, retired;
 	bool pending[XDEV_EXT_XD_CTL_RING];
 	bool unknown, callbacks_drained, ever_started, rx;
 };
-static LIST_HEAD(xdev_ext_xd_ctl_quarantine);
-static DEFINE_SPINLOCK(xdev_ext_xd_ctl_quarantine_lock);
 
 static void xdev_ext_xd_ctl_tx_cb(struct tb_ring *, struct ring_frame *, bool);
 static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *, struct ring_frame *, bool);
@@ -202,32 +197,30 @@ static int xdev_ext_xd_ctl_alloc(struct xdev_ext_xd_link *xl, bool rx)
 	a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return -ENOMEM;
-	a->pdev = pci_dev_get(xl->nhi_pdev);
-	a->bytes = XDEV_EXT_XD_CTL_RING * stride;
 	a->rx = rx;
-	a->cpu = dma_alloc_coherent(&a->pdev->dev, a->bytes, &a->dma, GFP_KERNEL);
-	if (!a->cpu) {
-		pci_dev_put(a->pdev);
+	a->backing = xdev_ext_requester_backing_alloc(xl->nhi_pdev,
+			XDEV_EXT_XD_CTL_RING * stride, GFP_KERNEL);
+	if (!a->backing) {
 		kfree(a);
 		return -ENOMEM;
 	}
+	xdev_ext_requester_backing_view(a->backing, &a->view);
 	a->generation = ++xl->rings->generation;
 	a->callbacks_drained = true;
-	INIT_LIST_HEAD(&a->node);
 	for (i = 0; i < XDEV_EXT_XD_CTL_RING; i++)
 		frames[i] = (struct xdev_ext_xd_ctl_frame) {
-			.xl = xl, .index = i, .buf = a->cpu + i * stride,
-			.frame = { .buffer_phy = a->dma + i * stride,
+			.xl = xl, .index = i, .buf = a->view.cpu + i * stride,
+			.frame = { .buffer_phy = a->view.dma + i * stride,
 			.callback = rx ? xdev_ext_xd_ctl_rx_cb : xdev_ext_xd_ctl_tx_cb },
 		};
 	if (rx) {
 		xl->ctl_rx_alloc = a;
-		xl->ctl_rx_buf = a->cpu;
-		xl->ctl_rx_dma = a->dma;
+		xl->ctl_rx_buf = a->view.cpu;
+		xl->ctl_rx_dma = a->view.dma;
 	} else {
 		xl->ctl_tx_alloc = a;
-		xl->ctl_tx_buf = a->cpu;
-		xl->ctl_tx_dma = a->dma;
+		xl->ctl_tx_buf = a->view.cpu;
+		xl->ctl_tx_dma = a->view.dma;
 		bitmap_fill(xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
 	}
 	return 0;
@@ -238,22 +231,16 @@ static void xdev_ext_xd_ctl_release(struct xdev_ext_xd_link *xl, bool rx)
 {
 	struct xdev_ext_xd_ctl_allocation **ap = rx ? &xl->ctl_rx_alloc : &xl->ctl_tx_alloc;
 	struct xdev_ext_xd_ctl_allocation *a = *ap;
-	unsigned long flags;
+	u64 retained;
 
 	if (!a)
 		return;
 	if (a->accepted != a->retired)
 		a->unknown = true;
-	if (a->unknown) {
-		xl->rings->retained_bytes += a->bytes;
-		spin_lock_irqsave(&xdev_ext_xd_ctl_quarantine_lock, flags);
-		list_add_tail(&a->node, &xdev_ext_xd_ctl_quarantine);
-		spin_unlock_irqrestore(&xdev_ext_xd_ctl_quarantine_lock, flags);
-	} else {
-		dma_free_coherent(&a->pdev->dev, a->bytes, a->cpu, a->dma);
-		pci_dev_put(a->pdev);
-		kfree(a);
-	}
+	retained = xdev_ext_requester_backing_retire(&a->backing, a->unknown);
+	if (retained)
+		xl->rings->retained_bytes += retained;
+	kfree(a);
 	*ap = NULL;
 	if (rx) {
 		xl->ctl_rx_buf = NULL;

@@ -1,19 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
 /* Transport-owned startup challenge. Scratch never enters a business pool. */
-#include <linux/dma-mapping.h>
-#include <linux/pci.h>
 #include <linux/random.h>
+#include <linux/xdev_ext_requester_backing.h>
 #include "xdev_ext_xdomain.h"
 #include "xdev_ext_xdomain_probe_core.h"
 
-/* A retained allocation has no executable pointer or reference to a link. */
+/* Live view and allocation identity; core owns coherent storage after retire. */
 struct xdev_ext_xd_probe_allocation {
-	struct list_head node;
-	struct pci_dev *pdev;
-	u8 *cpu;
-	dma_addr_t dma;
+	struct xdev_ext_requester_backing *backing;
+	struct xdev_ext_requester_backing_view view;
 	u64 generation;
-	size_t bytes;
 };
 struct xdev_ext_xd_probe_frame {
 	struct ring_frame frame;
@@ -41,8 +37,6 @@ struct xdev_ext_xd_probe {
 	int first_error;
 	struct xdev_ext_xd_probe_channel chan[XDEV_EXT_XD_MAX_CHANNELS];
 };
-static LIST_HEAD(xdev_ext_xd_probe_quarantine);
-static DEFINE_SPINLOCK(xdev_ext_xd_probe_quarantine_lock);
 
 static bool xdev_ext_xd_probe_closing(struct xdev_ext_xd_link *xl)
 {
@@ -195,16 +189,14 @@ int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *xl, const struct xdev_ext
 			a = kzalloc(sizeof(*a), GFP_KERNEL);
 			if (!a)
 				return -ENOMEM;
-			a->pdev = pci_dev_get(xl->nhi_pdev);
-			a->bytes = XD_PROBE_BYTES;
 			a->generation = epoch;
-			INIT_LIST_HEAD(&a->node);
-			a->cpu = dma_alloc_coherent(&a->pdev->dev, a->bytes, &a->dma, GFP_KERNEL);
-			if (!a->cpu) {
-				pci_dev_put(a->pdev);
+			a->backing = xdev_ext_requester_backing_alloc(xl->nhi_pdev,
+					XD_PROBE_BYTES, GFP_KERNEL);
+			if (!a->backing) {
 				kfree(a);
 				return -ENOMEM;
 			}
+			xdev_ext_requester_backing_view(a->backing, &a->view);
 			ch->allocation = a;
 		}
 		get_random_bytes(ch->nonce, sizeof(ch->nonce));
@@ -215,7 +207,7 @@ int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *xl, const struct xdev_ext
 		for (i = 0; i < 4; i++)
 			ch->frames[i] = (struct xdev_ext_xd_probe_frame) {
 				.xl = xl, .epoch = epoch, .channel = c, .slot = i,
-				.frame = { .buffer_phy = a->dma + i * XD_PROBE_PONG_LEN,
+				.frame = { .buffer_phy = a->view.dma + i * XD_PROBE_PONG_LEN,
 				.callback = xdev_ext_xd_probe_callback,
 				.size = i == 2 ? XD_PROBE_PING_LEN : 0,
 				.sof = XDEV_EXT_XD_PDF_START, .eof = XDEV_EXT_XD_PDF_END },
@@ -358,7 +350,7 @@ static int xdev_ext_xd_probe_process_rx(struct xdev_ext_xd_link *xl, u32 c, u32 
 		return -EPROTO;
 	if (f->actual_len != XD_PROBE_PING_LEN && f->actual_len != XD_PROBE_PONG_LEN)
 		return -EMSGSIZE;
-	ret = xdev_ext_xd_probe_data_decode(ch->allocation->cpu + slot * 4096,
+	ret = xdev_ext_xd_probe_data_decode(ch->allocation->view.cpu + slot * 4096,
 					 f->actual_len, xdev_ext_xd_crc, &m);
 	if (ret)
 		return ret;
@@ -447,7 +439,7 @@ void xdev_ext_xd_probe_work(struct work_struct *work)
 			if (!send)
 				continue;
 			m = xdev_ext_xd_probe_message(p, c, i == 2 ? XD_PROBE_PING : XD_PROBE_PONG, false);
-			ret = xdev_ext_xd_probe_data_encode(ch->allocation->cpu + i * 4096,
+			ret = xdev_ext_xd_probe_data_encode(ch->allocation->view.cpu + i * 4096,
 							 i == 2 ? 128 : 4096, &m, xdev_ext_xd_crc);
 			if (ret)
 				goto failed;
@@ -542,7 +534,6 @@ u64 xdev_ext_xd_probe_retire(struct xdev_ext_xd_link *xl, u32 stopped_rx,
 	struct xdev_ext_xd_probe *p = xl->probe;
 	u64 retained = 0;
 	u32 c;
-	unsigned long flags;
 
 	if (!p)
 		return 0;
@@ -557,10 +548,8 @@ u64 xdev_ext_xd_probe_retire(struct xdev_ext_xd_link *xl, u32 stopped_rx,
 			ch->accepted == ch->retired);
 		if (ch->reusable)
 			continue;
-		retained += a->bytes;
-		spin_lock_irqsave(&xdev_ext_xd_probe_quarantine_lock, flags);
-		list_add_tail(&a->node, &xdev_ext_xd_probe_quarantine);
-		spin_unlock_irqrestore(&xdev_ext_xd_probe_quarantine_lock, flags);
+		retained += xdev_ext_requester_backing_retire(&a->backing, true);
+		kfree(a);
 		ch->allocation = NULL;
 	}
 	return retained;
@@ -577,8 +566,7 @@ void xdev_ext_xd_probe_free(struct xdev_ext_xd_link *xl)
 
 		if (!a)
 			continue;
-		dma_free_coherent(&a->pdev->dev, a->bytes, a->cpu, a->dma);
-		pci_dev_put(a->pdev);
+		xdev_ext_requester_backing_retire(&a->backing, false);
 		kfree(a);
 	}
 	xl->probe = NULL;

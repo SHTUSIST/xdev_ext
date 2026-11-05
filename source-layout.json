@@ -988,6 +988,11 @@
       "native_path": "include/linux/xdev_ext_requester_retention.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_requester_backing.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_requester_backing.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_trace_journal.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_trace_journal.h"
@@ -1056,6 +1061,11 @@
       "source": "src/core/io_uring/family/xdev_ext_requester_retention.c",
       "component": "linux",
       "native_path": "io_uring/family/xdev_ext_requester_retention.c"
+    },
+    {
+      "source": "src/core/io_uring/family/xdev_ext_requester_backing.c",
+      "component": "linux",
+      "native_path": "io_uring/family/xdev_ext_requester_backing.c"
     },
     {
       "source": "src/core/io_uring/io_uring.c",
