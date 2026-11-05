@@ -1617,8 +1617,10 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		    act != XDEV_EXT_XDP_ACT_FAIL_LINK) return -EPROTO;
 		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST) {
 			/* The first RTS/CTS binding latches the choice. A paired stage
-			 * never holds an RTS or CTS record and cannot encode an RTS,
-			 * so the v1 checks refuse every RTS/CTS action there. */
+			 * takes no new v1 control and cannot encode an RTS: TX_ANNOUNCE
+			 * fails, TX_POST and WITHDRAW find no announced slot, and an RTS
+			 * queued before pairing can still be refused (settling its
+			 * sequence) but not posted on, its stream not being the pair's. */
 			spin_lock_irqsave(&xs->ns.lock, flags);
 			if (!xd_paired(xs)) {
 				xs->rts_cts = true;
