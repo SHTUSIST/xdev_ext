@@ -134,7 +134,8 @@ jobs:
         working-directory: .
         if: matrix.cc == 'gcc'
         run: |
-          python3 tests/network/count_fifo/run.py --source "$GITHUB_WORKSPACE" --out-root "$RUNNER_TEMP/count-fifo" --mutations
+          python3 -B -m unittest discover -s tests/network/count_fifo -p test_typed_fixture.py
+          python3 tests/network/count_fifo/run.py --source "$GITHUB_WORKSPACE" --out-root "$RUNNER_TEMP/count-fifo" --mutations --fixture-contract typed-data-v1
           python3 - <<'PYCODE'
           import hashlib, json, os
           from pathlib import Path
@@ -161,8 +162,9 @@ jobs:
           assert baseline['compile_exit'] == baseline['exit'] == 0, baseline
           assert baseline['verdict'] == baseline['frozen_golden'] == 'PASS', baseline
           golden = (report.parent / 'baseline/run.stdout').read_bytes()
-          assert len(golden) == 89721, len(golden)
-          assert hashlib.sha256(golden).hexdigest() == '9fc5b51ce2e82c7b6411021549e3c4291e5cbe9797b210d0af3de71d514bdf81'
+          assert len(golden) == 90093, len(golden)
+          assert summary['fixture_contract'] == 'typed-data-v1', summary['fixture_contract']
+          assert hashlib.sha256(golden).hexdigest() == '66b024a622d5b206786011a26c81fd01747fdd724da1e65bf0bb2e28cf34f11e'
           assert all(r['compile_exit'] == 0 and r['verdict'] == 'KILLED' for r in runs[1:]), runs[1:]
           for r in runs[1:]:
               if r['label'] == 'disconnected_public_consumer':

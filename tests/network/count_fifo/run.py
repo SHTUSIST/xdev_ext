@@ -3,20 +3,28 @@ import argparse,json,subprocess,sys,tempfile,resource,hashlib,os
 from pathlib import Path
 sys.dont_write_bytecode=True
 from adapter import generate,structure,freeze_inputs,FIXTURE,OLD_MUTANTS,NEW_MUTANTS,SetupError
+from typed_fixture import migrate,FixtureContractError,CONTRACT,GOLDEN_BYTES as TYPED_GOLDEN_BYTES,GOLDEN_SHA256 as TYPED_GOLDEN_SHA256
 # SHA256 and length of the complete frozen preproducer old-source stdout.
 GOLDEN_SHA256="9fc5b51ce2e82c7b6411021549e3c4291e5cbe9797b210d0af3de71d514bdf81"
 GOLDEN_BYTES=89721
-p=argparse.ArgumentParser(description='COUNT_FIFO actual-body correctness, fixed old golden and ownership/wiring gate');p.add_argument('--source',type=Path,required=True,help='canonical repository containing source-layout.json and src/');p.add_argument('--out-root',type=Path);g=p.add_mutually_exclusive_group();g.add_argument('--mutations',action='store_true');p.add_argument('--compare-baseline',type=Path,help='optional additional exact comparison with an external old capture');g.add_argument('--only-mutation',choices=list(OLD_MUTANTS)+list(NEW_MUTANTS));a=p.parse_args()
+p=argparse.ArgumentParser(description='COUNT_FIFO actual-body correctness, explicit fixture contract and ownership/wiring gate');p.add_argument('--source',type=Path,required=True,help='canonical repository containing source-layout.json and src/');p.add_argument('--out-root',type=Path);p.add_argument('--fixture-contract',choices=['historical-raw-v0',CONTRACT],default='historical-raw-v0',help='explicit fixture/golden profile; historical raw is the default and requires its matching production root');g=p.add_mutually_exclusive_group();g.add_argument('--mutations',action='store_true');p.add_argument('--compare-baseline',type=Path,help='optional additional exact comparison with an external capture matching the selected fixture contract');g.add_argument('--only-mutation',choices=list(OLD_MUTANTS)+list(NEW_MUTANTS));a=p.parse_args()
+golden_bytes,golden_sha256=(TYPED_GOLDEN_BYTES,TYPED_GOLDEN_SHA256) if a.fixture_contract==CONTRACT else (GOLDEN_BYTES,GOLDEN_SHA256)
 a.source=a.source.resolve()
 if not (a.source/'source-layout.json').is_file() or not (a.source/'src/network').is_dir():p.error('--source must name the canonical repository, not a generated view')
-base=Path(__file__).resolve().parent;outroot=a.out_root or a.source/'build/count-fifo';outroot.mkdir(parents=True,exist_ok=True);out=Path(tempfile.mkdtemp(prefix='count-',dir=outroot));summary={'source':str(a.source),'inputs':freeze_inputs(a.source),'structural':structure(a.source),'runs':[]}
+base=Path(__file__).resolve().parent;outroot=a.out_root or a.source/'build/count-fifo';outroot.mkdir(parents=True,exist_ok=True);out=Path(tempfile.mkdtemp(prefix='count-',dir=outroot));summary={'source':str(a.source),'fixture_contract':a.fixture_contract,'golden':{'bytes':golden_bytes,'sha256':golden_sha256},'inputs':freeze_inputs(a.source),'structural':structure(a.source),'runs':[]}
 def limits():resource.setrlimit(resource.RLIMIT_AS,(128*1024*1024,128*1024*1024))
 def execute(label,mutation=None):
  d=out/label;d.mkdir();entry={'label':label};summary['runs'].append(entry)
  for n in ['os_boundary.h','test_count.c']:(d/n).write_bytes((base/n).read_bytes())
  (d/'frozen_pool_test.c').write_bytes((FIXTURE/'test_pool_dma.c').read_bytes())
- try:have,manifest=generate(a.source,d,mutation)
- except SetupError as e:entry.update(verdict='SETUP',reason=str(e));return
+ try:
+  if a.fixture_contract==CONTRACT:
+   generated,receipt=migrate((d/'test_count.c').read_bytes())
+   (d/'fixture-transform.json').write_text(json.dumps(receipt,indent=2)+'\n')
+   entry['fixture_transform']=receipt
+   (d/'test_count.c').write_bytes(generated)
+  have,manifest=generate(a.source,d,mutation,fixture_contract=a.fixture_contract)
+ except (SetupError,FixtureContractError) as e:entry.update(verdict='SETUP',reason=str(e));return
  (d/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
  cmd=['gcc','-std=gnu11','-O0','-funsigned-char','-fno-strict-aliasing','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-Wno-sign-compare',f'-DHAVE_POOL={int(have)}',f'-DHAVE_COUNT={int((a.source/"src/network/include/linux/xdev_ext_netfam_count.h").exists())}','test_count.c','-o','test_count'];(d/'command.json').write_text(json.dumps(cmd)+'\n')
  r=subprocess.run(cmd,cwd=d,capture_output=True,text=True);(d/'compile.stdout').write_text(r.stdout);(d/'compile.stderr').write_text(r.stderr);entry['compile_exit']=r.returncode
@@ -36,7 +44,7 @@ def execute(label,mutation=None):
  else:
   entry['verdict']='PASS' if not r.returncode else 'FAIL'
   observed=r.stdout.encode('utf-8');entry['stdout_bytes']=len(observed);entry['stdout_sha256']=hashlib.sha256(observed).hexdigest()
-  entry['frozen_golden']='PASS' if len(observed)==GOLDEN_BYTES and entry['stdout_sha256']==GOLDEN_SHA256 else 'FAIL'
+  entry['frozen_golden']='PASS' if len(observed)==golden_bytes and entry['stdout_sha256']==golden_sha256 else 'FAIL'
   if entry['frozen_golden']=='FAIL':entry['verdict']='FAIL'
   if a.compare_baseline:
    entry['golden_compare']='PASS' if a.compare_baseline.read_bytes()==observed else 'FAIL'

@@ -55,11 +55,16 @@ def structure(root,overrides=None):
   f=old.function(zc,'xsk_mech_zc_'+n)
   if re.search(r'\b(if|while|for)\s*\(',f) or 'xdev_ext_net_count_' not in f:problems.append('legacy '+n+' retains independent algorithm')
  return {'verdict':'OWNERSHIP_WIRING_RED' if problems else 'PASS','assertions':problems}
-def generate(root,out,mutation=None):
+def generate(root,out,mutation=None,fixture_contract='historical-raw-v0'):
+ if fixture_contract not in ('historical-raw-v0','typed-data-v1'):raise SetupError('unknown fixture contract: '+fixture_contract)
  root=Path(root);out=Path(out)
  family_exists=(root/'src/network/include/linux/xdev_ext_netfam_count.h').exists()
  have,manifest=old.generate(root,out,mutation if mutation in OLD_MUTANTS and not family_exists else None)
  rel=(root/'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc').read_text()
+ data_lease=[]
+ if fixture_contract=='typed-data-v1':
+  helper=old.function(rel,'xsk_rel_data_lease_locked');manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':'xsk_rel_data_lease_locked','bytes':len(helper)})
+  data_lease=[helper]
  enqueue=old.function(rel,'xsk_rel_enqueue');manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':'xsk_rel_enqueue','bytes':len(enqueue)})
  p=out/'production.c.inc'
  reliable_core=(root/'src/core/include/linux/xdev_ext_mech_reliable_core.h').read_text()
@@ -81,7 +86,7 @@ static int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool*p,u32 i,int f
 /* BPF envelope builder boundary: presealed descriptor fixtures, no journal. */
 static int xsk_rel_build(struct xdev_ext_mech_stage*s,struct xdev_ext_mech_batch*b,struct xsk_rel_control*c,u64 group,u32 attempt,u64 credit){(void)s;(void)b;(void)c;(void)credit;REQUIRE("build_outside_lock",!lock_depth);build_calls++;build_group=group;build_attempt=attempt;return 0;}
 '''
- extra=[enqueue,old.function(rel,'xsk_rel_wakeup'),old.function(rel,'xsk_rel_submit'),old.function(rel,'xsk_rel_native_done').replace('xsk_rel_native_done(', 'actual_xsk_rel_native_done(',1),old.function(rel,'xsk_rel_resend')]
+ extra=data_lease+[enqueue,old.function(rel,'xsk_rel_wakeup'),old.function(rel,'xsk_rel_submit'),old.function(rel,'xsk_rel_native_done').replace('xsk_rel_native_done(', 'actual_xsk_rel_native_done(',1),old.function(rel,'xsk_rel_resend')]
  for n in ['xsk_rel_wakeup','xsk_rel_submit','xsk_rel_native_done','xsk_rel_resend']:manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':n,'bytes':len(old.function(rel,n))})
  admit=(root/'src/network/net/xdp/xsk_xdev_ext_mech_core.h').read_text()
  core_rules=(root/'src/core/io_uring/xdev_ext_mech_core.h').read_text()
