@@ -288,6 +288,7 @@ void tb_ring_start(struct tb_ring*);void tb_ring_stop(struct tb_ring*);void tb_r
 int tb_ring_tx(struct tb_ring*,struct ring_frame*);int tb_ring_rx(struct tb_ring*,struct ring_frame*);
 struct ring_frame *tb_ring_poll(struct tb_ring *);
 bool tb_ring_poll_pending(struct tb_ring *);
+void tb_ring_poll_complete(struct tb_ring *);
 struct device*tb_ring_dma_device(struct tb_ring*);
 #endif
 size_t tb_ring_descriptor_bytes(unsigned int);

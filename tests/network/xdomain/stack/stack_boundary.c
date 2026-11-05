@@ -4,13 +4,6 @@
 #include "stack_kernel_compat.h"
 /* Actual built-in requester budget, with only kernel OS facilities facaded. */
 #include "../../../../../io_uring/family/xdev_ext_requester_retention.c"
-/* Actual built-in coherent backing owner used by X4 control and startup scratch. */
-#include "../../../../../io_uring/family/xdev_ext_requester_backing.c"
-struct pci_dev *stack_backing_requester(struct xdev_ext_requester_backing *b, size_t *bytes)
-{
-	*bytes = b->bytes;
-	return b->pdev;
-}
 #ifndef STACK_REAL_NHI
 /* Actual NHI declaration and sizing body; never a copied byte formula. */
 #include "stack_descriptor_source.inc"
@@ -420,6 +413,12 @@ bool tb_ring_poll_pending(struct tb_ring *ring)
 {
 	(void)ring;
 	assert(!"unexpected native poll query in IRQ stack fixture");
+	abort();
+}
+void tb_ring_poll_complete(struct tb_ring *ring)
+{
+	(void)ring;
+	assert(!"unexpected ring interrupt re-enable in IRQ stack fixture");
 	abort();
 }
 static struct tb_ring*ring_alloc(struct tb_nhi*n,int size,unsigned flags,bool tx){
@@ -983,6 +982,10 @@ int stack_new(const struct stack_config*c,struct stack_world**out){
 	}
 	int r=stack_x3_init();
 	if(r){
+#ifdef STACK_REAL_NHI
+		/* No ring exists yet; release both simulated controllers. */
+		for(unsigned e=0;e<2;e++)stack_nhi_destroy(&w->side[e].nhi);
+#endif
 		world=NULL;
 		free(w->n);
 		free(w->log);
