@@ -555,6 +555,18 @@ static void proto_v1_raw_to_sender(u8 *p, unsigned type, u64 stream, u64 group, 
  early_put(p + 8, link(1)->local_inc, 8); early_put(p + 16, link(0)->local_inc, 8);
  early_recrc(p);
 }
+/* Diagnostic: every failure record and the link state. */
+static void proto_failure_report(const char *when)
+{
+ for (size_t i = 0; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind == STACK_EV_FAILURE)
+   fprintf(stderr, "PROTO_FAILURE %s endpoint=%u id=%llu status=%d group=%llu\n", when, e.endpoint,
+           (unsigned long long)e.id, e.status, (unsigned long long)e.group);
+ }
+ fprintf(stderr, "PROTO_LINK %s up0=%u up1=%u rx_dead=%u tx_dead=%u\n", when, (unsigned)link(0)->up,
+         (unsigned)link(1)->up, stage_facts(world, 1, 0).stage_dead, stage_facts(world, 0, 0).stage_dead);
+}
 /* A version-1 RTS from another stream reached a receiver nobody had paired
  * with yet. Pairing drops it with the rest of the stage's version-1 control,
  * as the link drops version-1 control to a paired endpoint: the pair's
@@ -581,7 +593,9 @@ static void proto_stray_rts_then_pair(unsigned prog)
  for (unsigned i = 0; i < 8; i++) pump(w, 25000000);
  CHECK(count(w, STACK_EV_CONTROL_TX, 0, PROTO_V2_CONFIRM) >= 1, "the endpoints pair");
  CHECK(early_data(1) == PROTO_ELEMS, "the receiver posted its group for the pair");
- CHECK(stack_start(w, 0, c.first_seq, 0) == 0, "the sender batch consumes its grant");
+ int started = stack_start(w, 0, c.first_seq, 0);
+ proto_failure_report("after-pairing");
+ CHECK(started == 0, "the sender batch consumes its grant");
  for (unsigned i = 0; i < 4; i++) pump(w, 25000000);
  release_group(w, c.first_seq);
  CHECK(early_data(0) == PROTO_ELEMS && early_data(1) == PROTO_ELEMS,
