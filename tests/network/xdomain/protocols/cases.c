@@ -491,7 +491,10 @@ static void proto_hello_then_stop(unsigned prog)
  CHECK(stop == 0 || stop == -EAGAIN, "STOP is accepted");
  proto_no_offer_after(mark, false);
  CHECK(link(1)->up && link(1)->local_inc == inc1, "STOP keeps the link up in the same incarnation");
- CHECK(!proto_failures(1), "an uncommitted receiver stops without a stage failure");
+ /* The harness records each nonzero CQE as a failure: the canceled batch is
+  * the only one, and the stage itself is not ended. */
+ CHECK(proto_failures(1) == 1 && !stage_facts(world, 1, 0).stage_dead,
+       "an uncommitted receiver stops without a stage failure");
  CHECK(count(world, STACK_EV_PUBLISH, 1, -1) == 1, "the armed batch completes once");
  for (size_t i = 0; i < world->logs; i++)
   if (world->log[i].kind == STACK_EV_PUBLISH && world->log[i].endpoint == 1)
