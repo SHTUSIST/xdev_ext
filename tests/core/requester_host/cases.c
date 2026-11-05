@@ -135,9 +135,11 @@ static void host_bind_rx_maps_from_device(void)
 	CHECK(rh_count(RH_UNMAP) == 3, "each RX page unmapped at unbind");
 }
 
-static void refused_geometry(u32 frame_size, u32 nr_frames, u32 first_page_off)
+static void refused_geometry(u32 frame_size, u32 nr_frames, u32 first_page_off, u32 nr_pages)
 {
 	host_pool(frame_size, nr_frames, first_page_off, XDEV_EXT_MECH_DIR_TO_DEVICE);
+	if (nr_pages)
+		session.pool.nr_pages = nr_pages;
 	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == -EINVAL, "pool geometry refused with -EINVAL");
 	CHECK(rh_events == 0, "a refused pool is never mapped or described");
 	CHECK(rq.pdev == NULL && nhi.refs == 1 && rh_live_allocs == base_allocs,
@@ -148,14 +150,18 @@ static void refused_geometry(u32 frame_size, u32 nr_frames, u32 first_page_off)
  * straddle two pages that need not be contiguous for the NHI. */
 static void host_bind_refuses_misaligned_pool(void)
 {
-	refused_geometry(4096, 2, 256);
-	refused_geometry(8192, 1, 2048);
+	refused_geometry(4096, 2, 256, 0);
+	refused_geometry(8192, 1, 2048, 0);
+	/* Also when the description counts only whole pages: an element address
+	 * is its page's mapping plus the offset, valid only from a page-aligned
+	 * pool start. */
+	refused_geometry(4096, 2, 256, 2);
 }
 
 /* The last page would expose bytes beyond the pool to the NHI. */
 static void host_bind_refuses_partial_page(void)
 {
-	refused_geometry(2048, 3, 0);
+	refused_geometry(2048, 3, 0, 0);
 }
 
 static void host_bind_map_error_unwinds(void)
