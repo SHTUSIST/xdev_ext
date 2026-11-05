@@ -27,10 +27,11 @@ For the first six cases every attacker batch ends (refused, failed or timed
 out), the attack session stays ACTIVE with `last_err` latched to the declared
 reason, and the user STOP returns that reason. For the refused SQEs the write
 stage counts no native submission. In the detach case the attacker runs NVMe
-READ to USER to NVMe WRITE; its user thread completes two batches and holds the
-next, the victim STARTs, and the attacker detaches its write-stage link. The
-retraction stops the attack session with `-ECANCELED`: exactly two batches are
-written, the held batch is cancelled, the rest are never admitted, and a new
+READ to USER to NVMe WRITE; its user thread completes two batches and holds
+every later one, the victim STARTs, and the attacker detaches its write-stage
+link. The retraction stops the attack session with `-ECANCELED`: exactly two
+batches are written, the batches in flight are cancelled, the rest are never
+admitted, and a new
 valid START is refused with `-ESHUTDOWN` (a START with mismatched frame counts
 fails its argument check with `-EINVAL` first, so the two are told apart).
 
