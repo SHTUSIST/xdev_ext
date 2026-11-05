@@ -1,0 +1,8 @@
+// SPDX-License-Identifier: GPL-2.0
+/* The PEER pool needs one core ownership-word helper; run.py inserts the
+ * production definition of xdev_ext_mech_pool_frame_move unchanged. */
+#include "kernel_shim.h"
+#include <linux/xdev_ext_mech.h>
+#include "xdev_ext_mech_core.h"
+
+CORE_FRAME_MOVE

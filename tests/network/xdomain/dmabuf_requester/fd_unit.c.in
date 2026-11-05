@@ -1,0 +1,16 @@
+// SPDX-License-Identifier: GPL-2.0
+/* The complete production peer fd unit, compiled unchanged. run.py replaces
+ * PEER_FD_SOURCE with the path of the selected source's xdev_ext_peer_fd.c.
+ * The functions after it only reach its static control-file operations. */
+#include "kernel_shim.h"
+#include "boundary.h"
+#include PEER_FD_SOURCE
+
+long fixture_ctl_ioctl(unsigned int cmd, void *arg)
+{
+	struct file control = {.f_op = &xdev_ext_peer_ctl_fops, .refs = 1};
+	return xdev_ext_peer_ctl_ioctl(&control, cmd, (unsigned long)arg);
+}
+static struct file control_file = {.f_op = &xdev_ext_peer_ctl_fops, .refs = 1};
+struct file *fixture_control_file(void) { return &control_file; }
+bool fixture_is_control(struct file *file) { return xdev_ext_peer_control_file(file); }
