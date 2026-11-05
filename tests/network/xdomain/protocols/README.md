@@ -48,8 +48,10 @@ transfer must complete with no refusal in the pair's envelope.
 pairs. `rts_cts_v2_idle` keeps an RTS/CTS session on the version-2 envelope
 idle for 31 s before its transfer (no pairing deadline applies).
 `paired_drops_v1` checks that the link drops version-1 RTS and CTS to paired
-endpoints before any program sees them. Each runs with the early-grant program
-and, where named `*_reference`, with the reference program.
+endpoints before any program sees them. The `hello_*` and `stray_rts_*` cases
+run with the early-grant program, or the reference program where named
+`*_reference`; `rts_cts_v2_idle` runs the RTS/CTS program at both ends and the
+other two the early-grant program.
 
 `bpf_names` checks that the two programs and `xdomain_policy.h` use, outside
 comments, only XDEV_EXT names a real BPF build can see: macros of the BPF-side
