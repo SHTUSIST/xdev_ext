@@ -6482,6 +6482,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate_test.py"
     },
     {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_viommu.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_viommu_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu_test.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_wire.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire.py"
