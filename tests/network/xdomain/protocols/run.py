@@ -42,7 +42,9 @@ OWN_CASES = ('rts_cts_v2', 'rts_cts_legacy', 'reference_legacy', 'early_v2', 're
              'mismatch_rts_sender', 'mismatch_pair_sender', 'rts_drops_hello',
              'announce_latches_choice', 'paired_refuses_announce', 'post_needs_grant',
              'hello_stop_early', 'hello_stop_reference', 'hello_link_down_early',
-             'hello_link_down_reference')
+             'hello_link_down_reference', 'stray_rts_then_pair_early',
+             'stray_rts_then_pair_reference', 'rts_cts_v2_idle', 'paired_drops_v1',
+             'paired_refuses_decline')
 RTS, EARLY = 1, 2
 # Early contract cases whose endpoints are not both early: the version-1 end
 # runs the RTS/CTS program (mixed_v1_tx: version-1 sender, early receiver).
@@ -150,39 +152,54 @@ static __s32 xdomain_peer_complete(void *c, const struct xdev_ext_mech_ctx *m)
 
 
 # Each mutation removes one rule of the class change in the assembled copy;
-# at least one case must then fail with a named assertion.
+# at least one case must then fail with a named assertion. Each edit is
+# (unit, old, new); every old text must occur exactly once.
+CLASS = 'io_uring/xdomain/xdev_ext_xdomain_class.c'
+RING = 'io_uring/xdomain/xdev_ext_xdomain_ring.c'
+V1_RULES = '{ return xs->rts_cts || (xs->ns.rx && !xd_paired(xs)); }'
 MUTATIONS = {
     # An RTS or an RX post on an RTS does not latch the RTS/CTS choice.
-    'no_binding_latch': ('\t\t\tif (!xd_paired(xs)) {\n\t\t\t\txs->rts_cts = true;',
-                         '\t\t\tif (0) {\n\t\t\t\txs->rts_cts = true;'),
+    'no_binding_latch': ((CLASS, '\t\t\tif (!xd_paired(xs)) {\n\t\t\t\txs->rts_cts = true;',
+                          '\t\t\tif (0) {\n\t\t\t\txs->rts_cts = true;'),),
     # PAIR_DUE is offered again after the RTS/CTS choice.
-    'offer_after_choice': ('xs->pair_next_retry <= now && !xs->rts_cts &&', 'xs->pair_next_retry <= now &&'),
+    'offer_after_choice': ((CLASS, 'xs->pair_next_retry <= now && !xs->rts_cts &&', 'xs->pair_next_retry <= now &&'),),
     # Pairing input is retained after the RTS/CTS choice.
-    'input_after_choice': ('if (!xd_pair_allowed(xs) || xs->failed || xs->stop_latched',
-                           'if (xs->failed || xs->stop_latched'),
+    'input_after_choice': ((CLASS, 'if (!xd_pair_allowed(xs) || xs->failed || xs->stop_latched',
+                            'if (xs->failed || xs->stop_latched'),),
     # v1 events of an unpaired stage get the early fact overrides.
-    'early_facts_for_v1': ('\tif (v1_view) return;\n', ''),
+    'early_facts_for_v1': ((CLASS, '\tif (v1_view) return;\n', ''),),
     # The early snapshot drops the RTS/control record selected by xd_next_locked.
-    'drop_rts_authority': ('xd_early_snapshot_locked(xs, s, r, ev, xs->worker_event.rts, xs->worker_event.ctl, false, i);',
-                           'xd_early_snapshot_locked(xs, s, r, ev, false, false, false, i);'),
+    'drop_rts_authority': ((CLASS, 'xd_early_snapshot_locked(xs, s, r, ev, xs->worker_event.rts, xs->worker_event.ctl, false, i);',
+                            'xd_early_snapshot_locked(xs, s, r, ev, false, false, false, i);'),),
     # v1 control never reaches a v2-envelope endpoint (the old dispatch).
-    'v1_blocked': ('if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))', 'if (ep && !ep->early)'),
+    'v1_blocked': ((RING, 'if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))', 'if (ep && !ep->early)'),),
     # A stopping or ended v1-rules stage is still offered its held HELLO
     # before the v1 STOP and terminal rules (the unguarded order).
-    'held_offer_after_end': ('\tif (xs->early_ctl_count && xd_v1_rules(xs) &&\n',
-                             '\tif (0 && xs->early_ctl_count && xd_v1_rules(xs) &&\n'),
+    'held_offer_after_end': ((CLASS, '\tif (xs->early_ctl_count && xd_v1_rules(xs) &&\n',
+                              '\tif (0 && xs->early_ctl_count && xd_v1_rules(xs) &&\n'),),
+    # Early mandatory safety (pairing deadline, STOP as failure) also binds
+    # an RTS/CTS stage, or a receiver nobody asked to pair.
+    'safety_binds_rts_cts': ((CLASS, V1_RULES, '{ return xs->ns.rx && !xd_paired(xs); }'),),
+    'safety_binds_unpaired_rx': ((CLASS, V1_RULES, '{ return xs->rts_cts; }'),),
+    # v1 control reaches a paired endpoint (ring predicate and class drop).
+    'v1_reaches_paired': ((RING, 'if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))', 'if (ep)'),
+                          (CLASS, 'if (xd_paired(xs) || m->channel != xs->channel || xs->failed ||',
+                           'if (m->channel != xs->channel || xs->failed ||')),
+    # IGNORE on PAIR_DUE declines pairing even after pairing started.
+    'decline_after_pairing': ((CLASS, 'if (!declined || xd_paired(xs) ||', 'if (!declined ||'),),
 }
 
 
 def mutate(kernel, out, name):
-    old, new = MUTATIONS[name]
-    unit = 'io_uring/xdomain/' + ('xdev_ext_xdomain_ring.c' if name == 'v1_blocked' else 'xdev_ext_xdomain_class.c')
-    path = kernel / unit
-    text = path.read_text()
-    if text.count(old) != 1:
-        raise ValueError('mutation anchor absent or not unique: ' + name)
-    path.write_text(text.replace(old, new, 1))
-    (out / 'mutation.json').write_text(json.dumps(dict(name=name, source=unit, old=old, new=new), indent=2) + '\n')
+    edits = []
+    for unit, old, new in MUTATIONS[name]:
+        path = kernel / unit
+        text = path.read_text()
+        if text.count(old) != 1:
+            raise ValueError('mutation anchor absent or not unique: %s in %s' % (name, unit))
+        path.write_text(text.replace(old, new, 1))
+        edits.append(dict(source=unit, old=old, new=new))
+    (out / 'mutation.json').write_text(json.dumps(dict(name=name, edits=edits), indent=2) + '\n')
 
 
 def bpf_visible_names(kernel):

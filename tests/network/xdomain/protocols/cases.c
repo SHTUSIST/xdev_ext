@@ -536,6 +536,157 @@ static void proto_hello_then_link_down(unsigned prog)
        "the ended receiver never pairs and posts nothing");
 }
 
+/* Raw version-1 control message for injection (same layout as proto_v1). */
+static void proto_v1_raw(u8 *p, unsigned type, u64 stream, u64 group, u64 credit, u32 total,
+                         u32 count, u64 data_seq, u64 key)
+{
+ memset(p, 0, 128);
+ memcpy(p, "NXD1", 4); p[4] = 1; p[5] = (u8)type;
+ early_put(p + 8, link(0)->local_inc, 8); early_put(p + 16, link(1)->local_inc, 8);
+ early_put(p + 24, stream, 8); early_put(p + 32, group, 8); early_put(p + 40, credit, 8);
+ early_put(p + 48, total, 4); early_put(p + 52, count, 2);
+ early_put(p + 56, data_seq, 8);
+ if (key) proto_tag(p + 64, key);
+ early_recrc(p);
+}
+static void proto_v1_raw_to_sender(u8 *p, unsigned type, u64 stream, u64 group, u64 credit)
+{
+ proto_v1_raw(p, type, stream, group, credit, 0, 0, 0, 0);
+ early_put(p + 8, link(1)->local_inc, 8); early_put(p + 16, link(0)->local_inc, 8);
+ early_recrc(p);
+}
+/* A version-1 RTS from another stream reached a receiver nobody had paired
+ * with yet. Pairing drops it with the rest of the stage's version-1 control,
+ * as the link drops version-1 control to a paired endpoint: the pair's
+ * transfer completes and the RTS is never answered with the pair's facts. */
+static void proto_stray_rts_then_pair(unsigned prog)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(prog, prog);
+ early_flags = 2;
+ struct stack_session_config rx = {.direction = 2, .groups = 2}, tx = {.direction = 1, .groups = 2};
+ CHECK(stack_session(w, 1, &rx) == 0, "the v2-envelope receiver binds first");
+ CHECK(stack_start(w, 1, c.first_seq, 0) == 0, "the receiver arms one batch");
+ pump(w, 1000000);
+ u64 inc0 = link(0)->local_inc, inc1 = link(1)->local_inc;
+ u8 raw[128];
+ proto_v1_raw(raw, PROTO_V1_RTS, link(0)->early_bind_next + 7, 1, 0, PROTO_GROUP_BYTES, PROTO_ELEMS, 0, 999);
+ early_inject(1, raw);
+ pump(w, 1000000);
+ CHECK(!count(w, STACK_EV_CONTROL_TX, 1, -1) && !stage_facts(w, 1, 0).stage_dead,
+       "precondition: the live receiver holds the RTS unanswered");
+ CHECK(stack_session(w, 0, &tx) == 0, "the early sender binds");
+ for (unsigned i = 0; i < 8; i++) pump(w, 25000000);
+ CHECK(count(w, STACK_EV_CONTROL_TX, 0, PROTO_V2_CONFIRM) >= 1, "the endpoints pair");
+ CHECK(early_data(1) == PROTO_ELEMS, "the receiver posted its group for the pair");
+ CHECK(stack_start(w, 0, c.first_seq, 0) == 0, "the sender batch consumes its grant");
+ for (unsigned i = 0; i < 4; i++) pump(w, 25000000);
+ release_group(w, c.first_seq);
+ CHECK(early_data(0) == PROTO_ELEMS && early_data(1) == PROTO_ELEMS,
+       "the pair's group is posted once at each end");
+ CHECK(count(w, STACK_EV_PUBLISH, 0, -1) == 1 && count(w, STACK_EV_PUBLISH, 1, -1) == 1,
+       "the pair's group completes once at each end");
+ for (size_t i = 0; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind == STACK_EV_PUBLISH) CHECK(e.status == 0, "the pair's group completes successfully");
+  if (e.kind == STACK_EV_CONTROL_TX && e.endpoint == 1)
+   CHECK(!memcmp(e.raw, "NXD2", 4) && e.control_type != PROTO_V1_FAIL,
+         "the receiver never refuses the stray RTS with the pair's facts");
+ }
+ CHECK(!stage_facts(w, 0, 0).stage_dead && !stage_facts(w, 1, 0).stage_dead, "both stages stay alive");
+ CHECK(link(0)->up && link(1)->up && link(0)->local_inc == inc0 && link(1)->local_inc == inc1,
+       "the link stays up in the same incarnation");
+ safety(w);
+}
+/* An RTS/CTS session on the version-2 envelope has no pairing deadline: after
+ * the sender declined pairing, both stages outlive 30 s and then transfer. */
+static void proto_rts_cts_v2_idle(void)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(PROTO_RTS_CTS, PROTO_RTS_CTS);
+ early_flags = 2;
+ sessions(w, 1, 0);
+ pump(w, 1000000);
+ CHECK(count(w, STACK_EV_PROTOCOL, 0, 18) >= 1, "the sender was offered pairing and declined it");
+ pump(w, UINT64_C(31000000000));
+ for (unsigned i = 0; i < 4; i++) pump(w, 25000000);
+ CHECK(!stage_facts(w, 0, 0).stage_dead && !stage_facts(w, 1, 0).stage_dead,
+       "neither RTS/CTS stage ends at the 30-second pairing deadline");
+ start(w, c.first_seq, 0);
+ pump(w, 1000000);
+ release_group(w, c.first_seq);
+ CHECK(count(w, STACK_EV_PUBLISH, 0, -1) == 1 && count(w, STACK_EV_PUBLISH, 1, -1) == 1,
+       "the group completes at both ends after 31 s");
+ for (size_t i = 0; i < world->logs; i++)
+  if (world->log[i].kind == STACK_EV_PUBLISH) CHECK(world->log[i].status == 0, "the late group completes successfully");
+ proto_no_v2_after(0);
+ proto_no_v2_after(1);
+ CHECK(!proto_failures(0) && !proto_failures(1), "no stage failure");
+ safety(w);
+}
+/* A paired endpoint takes no version-1 control: the link drops an RTS to the
+ * paired receiver and a CTS to the paired sender before any program sees
+ * them, and the pair's transfer is unaffected. */
+static void proto_paired_drops_v1(void)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(PROTO_EARLY, PROTO_EARLY);
+ early_flags = 2;
+ u64 tx_bind = link(0)->early_bind_next;
+ struct stack_session_config rx = {.direction = 2, .groups = 1}, tx = {.direction = 1, .groups = 1};
+ CHECK(stack_session(w, 1, &rx) == 0 && stack_session(w, 0, &tx) == 0, "v2-envelope endpoints bind");
+ pump(w, 1000000);
+ CHECK(count(w, STACK_EV_CONTROL_TX, 0, PROTO_V2_CONFIRM) >= 1, "pairing completed");
+ u64 dropped0 = link(0)->ctl_dropped, dropped1 = link(1)->ctl_dropped;
+ size_t mark = world->logs;
+ u8 raw[128];
+ proto_v1_raw(raw, PROTO_V1_RTS, tx_bind, 1, 0, PROTO_GROUP_BYTES, PROTO_ELEMS, 0, c.first_seq);
+ early_inject(1, raw);
+ proto_v1_raw_to_sender(raw, PROTO_V1_CTS, tx_bind, 1, 1 + PROTO_WINDOW);
+ early_inject(0, raw);
+ for (unsigned i = 0; i < 2; i++) pump(w, 25000000);
+ CHECK(link(1)->ctl_dropped == dropped1 + 1 && link(0)->ctl_dropped == dropped0 + 1,
+       "the link drops version-1 control to each paired endpoint");
+ for (size_t i = mark; i < world->logs; i++)
+  if (world->log[i].kind == STACK_EV_PROTOCOL)
+   CHECK(world->log[i].control_type != 3 && world->log[i].control_type != 4,
+         "no program of a paired endpoint is offered a version-1 RTS or CTS");
+ CHECK(stack_start(w, 1, c.first_seq, 0) == 0, "receiver batch arms");
+ pump(w, 1000000);
+ CHECK(stack_start(w, 0, c.first_seq, 0) == 0, "sender batch consumes its grant");
+ pump(w, 1000000);
+ release_group(w, c.first_seq);
+ CHECK(count(w, STACK_EV_PUBLISH, 0, -1) == 1 && count(w, STACK_EV_PUBLISH, 1, -1) == 1,
+       "the pair's group completes at both ends");
+ CHECK(!proto_failures(0) && !proto_failures(1), "no stage failure");
+ safety(w);
+}
+/* Pairing started cannot be declined: a forced IGNORE on PAIR_DUE of a sender
+ * that already sent HELLO is refused, and the stage never falls back to RTS. */
+static void proto_paired_refuses_decline(void)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(PROTO_EARLY, PROTO_EARLY);
+ early_flags = 2;
+ struct stack_session_config tx = {.direction = 1, .groups = 1};
+ CHECK(stack_session(w, 0, &tx) == 0, "the early sender binds alone");
+ pump(w, 1000000);
+ CHECK(count(w, STACK_EV_CONTROL_TX, 0, PROTO_V2_HELLO) >= 1, "the sender started pairing");
+ stack_force_endpoint = 0; stack_force_event = 18; stack_force_action = 2; /* PAIR_DUE -> IGNORE */
+ for (unsigned i = 0; i < 2; i++) pump(w, 25000000);
+ CHECK(stack_force_hits == 1, "the forced decline reached the class");
+ CHECK(proto_failures(0) > 0, "the class refuses to decline pairing after it started");
+ CHECK(!count(w, STACK_EV_CONTROL_TX, 0, PROTO_V1_RTS), "the sender never falls back to RTS");
+}
+
 static void proto_set_programs(const char *spec)
 {
  unsigned tx = 0, rx = 0;
@@ -567,6 +718,11 @@ int main(int argc, char **argv)
  else if (!strcmp(name, "hello_stop_reference")) proto_hello_then_stop(PROTO_REFERENCE);
  else if (!strcmp(name, "hello_link_down_early")) proto_hello_then_link_down(PROTO_EARLY);
  else if (!strcmp(name, "hello_link_down_reference")) proto_hello_then_link_down(PROTO_REFERENCE);
+ else if (!strcmp(name, "stray_rts_then_pair_early")) proto_stray_rts_then_pair(PROTO_EARLY);
+ else if (!strcmp(name, "stray_rts_then_pair_reference")) proto_stray_rts_then_pair(PROTO_REFERENCE);
+ else if (!strcmp(name, "rts_cts_v2_idle")) proto_rts_cts_v2_idle();
+ else if (!strcmp(name, "paired_drops_v1")) proto_paired_drops_v1();
+ else if (!strcmp(name, "paired_refuses_decline")) proto_paired_refuses_decline();
  else return 2;
  printf("PROTOCOL_ASSERTIONS %s %u\n", name, assertions);
  return 0;
