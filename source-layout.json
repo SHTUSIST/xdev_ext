@@ -8112,6 +8112,38 @@
       "logical_path": "tests/network/xdomain/diagnostics/stack_run.py"
     },
     {
+      "source": "tests/network/xdomain/dmabuf_requester/boundary.c",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/boundary.h",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/boundary.h"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/cases.c",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/core_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/core_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/fd_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/fd_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/README.md",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/run.py",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/run.py"
+    },
+    {
       "source": "tests/network/xdomain/early/README.md",
       "logical_path": "tests/network/xdomain/early/README.md"
     },
