@@ -175,6 +175,34 @@ def mutate(kernel, out, name):
     (out / 'mutation.json').write_text(json.dumps(dict(name=name, source=unit, old=old, new=new), indent=2) + '\n')
 
 
+def bpf_visible_names(kernel):
+    """A BPF object sees only vmlinux.h (BTF types and enums) and its own headers.
+
+    The host composition includes the UAPI header, so a program that uses a
+    UAPI-only macro compiles here and fails the real BPF build. Every
+    XDEV_EXT_* name a program uses outside comments must be a macro of the BPF
+    side headers or an enumerator of the two protocol enums the kernel emits
+    to BTF. Returns a list of (program, name) violations.
+    """
+    tools = kernel / 'tools/xdev_ext_mech'
+    strip = lambda text: re.sub(r'//[^\n]*', '', re.sub(r'/\*.*?\*/', '', text, flags=re.S))
+    allowed = set()
+    for header in ('xdev_ext_mech_prog.h', 'xdev_ext_mech_kfunc.h', 'xdomain_policy.h'):
+        allowed |= set(re.findall(r'^\s*#\s*define\s+(XDEV_EXT_\w+)', (tools / header).read_text(), re.M))
+    uapi = (kernel / 'include/uapi/linux/xdev_ext_mech.h').read_text()
+    for name in ('xdev_ext_xdomain_proto_event', 'xdev_ext_xdomain_proto_action'):
+        body = re.search(r'enum\s+' + name + r'\s*\{(.*?)\}', uapi, re.S).group(1)
+        allowed |= set(re.findall(r'(XDEV_EXT_\w+)\s*=', body))
+    bad = []
+    for _, path in PROGRAMS[1:]:
+        program = Path(path).name
+        for header in (program, 'xdomain_policy.h') if program != 'xdomain_policy.h' else (program,):
+            for used in sorted(set(re.findall(r'\b(XDEV_EXT_\w+)', strip((tools / header).read_text())))):
+                if used not in allowed and used != 'XDEV_EXT_XDOMAIN_POLICY_H':
+                    bad.append((header, used))
+    return sorted(set(bad))
+
+
 def combined_cases(early_dir):
     early = (early_dir / 'cases.c').read_text()
     signature = 'int main(int argc,char **argv)'
@@ -229,7 +257,11 @@ def main():
     (out / 'equivalence-compile.log').write_text(build.stdout + build.stderr)
     early_cases = re.findall(r"'([a-z0-9_]+)'", (early_dir / 'run.py').read_text().split(
         'cases = [', 1)[1].split(']', 1)[0])
-    plan = [('equivalence', None, 'PROTOCOL_EQUIVALENCE checks=')]
+    names = bpf_visible_names(kernel)
+    (out / 'bpf-names.log').write_text(''.join('BPF_NAME_MISSING %s %s\n' % item for item in names) +
+                                       'BPF_NAMES checks=%u missing=%u\n' % (1 + len(names), len(names)))
+    plan = [('bpf_names', 'names', 'BPF_NAMES checks=')]
+    plan += [('equivalence', None, 'PROTOCOL_EQUIVALENCE checks=')]
     plan += [(name, [name], 'PROTOCOL_ASSERTIONS ' + name + ' ') for name in OWN_CASES]
     for name in early_cases:
         tx, rx = EARLY_MAPPING.get(name, (EARLY, EARLY))
@@ -243,7 +275,10 @@ def main():
     print('TAP version 13\n1..' + str(len(plan)), flush=True)
     for index, (name, argv, marker) in enumerate(plan, 1):
         command = [str(out / 'equivalence')] if argv is None else [str(out / 'early-cts'), *argv]
-        if argv is None and build.returncode:
+        if argv == 'names':
+            log = (out / 'bpf-names.log').read_text()
+            code = 1 if names else 0
+        elif argv is None and build.returncode:
             log, code = 'SETUP_ERROR equivalence compile failed\n' + build.stdout + build.stderr, None
         else:
             try:
