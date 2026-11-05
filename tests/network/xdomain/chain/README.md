@@ -113,9 +113,9 @@ held, the sender must fill its window. Further cases:
 
 | Case | Requirement |
 | --- | --- |
-| `window_fills_w2`, `window_fills_w4` | depth W+2, host 2's NVMe WRITE held: host 1 reaches exactly W groups in flight at its XDOMAIN stage and host 2 holds exactly W; group W+1 is not announced; in ordinary mode all of this happens with no virtual time passing (no protocol or worker timer); after the release every group arrives in order |
+| `window_fills_w2`, `window_fills_w4` | depth W+2, host 2's NVMe WRITE held: host 1 reaches exactly W groups in flight at its XDOMAIN stage and host 2 holds exactly W; group W+1 is not announced; all of this happens with no virtual time passing (no protocol, retry or worker timer); after the release every group arrives in order |
 | `window_waits_for_receiver` | sender window 4, receiver window 2: host 1 has in flight what host 2 holds plus one announced group (ordinary) or exactly what host 2 holds (EARLY, no grant yet for the next group) |
-| `window_refills_receiver` | host 2's data completions held while host 1 already announced group 2; once released, group 1 moves on and group 2 is posted at host 2 in the same drain, without a timer |
+| `window_refills_receiver` | host 2's data completions held while host 1 already announced group 2 (ordinary) or already waits for group 2's grant (EARLY); once released, group 1 moves on, and group 2 is posted at host 2 and then at host 1 in the same drain, without a timer |
 | `window_next_after_cts` | host 2's CTS held until host 1 read ahead into every batch: only group 1 is announced; once the CTS is processed host 1 fills its window in the same drain (ordinary only) |
 | `window_stop_unknown` | window 2, host 1's TX completions and host 2's ACKs held, STOP of host 1 with both groups in flight: past the 1 s stop grace neither group is reported delivered, no frame of either group returns to the pool or the application, not even after the held completions run late, and nothing is leased over retained bytes |
 | `window_withdrawn_head` | host 2 not started: host 1's announced group 1 is withdrawn at 15 s and refused; host 2 starts right after the refusal; host 2 must write nothing, host 1 posts no data and reports neither group delivered (ordinary only) |
@@ -157,6 +157,7 @@ failures do not count.
 | `window-no-progress-kick` | no re-check of the ordered stage after a class pass | `window_next_after_cts` (also `window_refills_receiver`) |
 | `window-bind-ignored` | the class accepts the window but does not hand it to the core | `window_fills_w2` |
 | `stop-unknown-reused` | at link teardown a TX slot whose native completion is unknown is published as quiesced (existing rule) | `window_stop_unknown` |
+| `window-early-ready-without-grant` | an EARLY sender releases the next key before the receiver granted buffers for it, so its submit waits for the core retry timer | `window_refills_receiver_early` |
 
 The existing mutants are also killed on the window variants
 (`--case NAME_w2`, `NAME_w4`, `NAME_w2_early`, `NAME_w4_early`).

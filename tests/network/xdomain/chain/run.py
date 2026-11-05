@@ -156,6 +156,11 @@ MUTATIONS = {
         ('io_uring/xdomain/xdev_ext_xdomain_class.c',
          'xdev_ext_netfam_publish_locked(&xs->ns, s, s->local_status ? s->local_status : -ENOLINK, !s->local_quiesced);',
          'xdev_ext_netfam_publish_locked(&xs->ns, s, s->local_status ? s->local_status : -ENOLINK, false);')]),
+    # EARLY: the next key is released before the receiver granted buffers for
+    # it, so its submit bounces to the core retry timer.
+    'window-early-ready-without-grant': dict(case='window_refills_receiver_early', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         '\tif (ready && xs->early)\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n', '')]),
     # The class accepts the window but does not hand it to the core.
     'window-bind-ignored': dict(case='window_fills_w2', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',

@@ -605,10 +605,7 @@ static void window_fills(void)
 	up();
 	chain_nvme_hold(1, true);
 	start(n);
-	if (early)
-		settle(50); /* a sender waiting for its grant retries on the core timer */
-	else
-		pump(0);    /* event driven: no protocol or worker timer may be needed */
+	pump(0); /* event driven: no protocol, retry or worker timer may be needed */
 	CHECK(chain_nvme_pending(1) == window_rx, "host 2 took in and holds W groups");
 	CHECK(peak.tx_stage == window_tx, "host 1 reached W groups in flight at its XDOMAIN stage");
 	CHECK(peak.rx_held == window_rx, "host 2 held W groups at once");
@@ -641,10 +638,7 @@ static void window_waits_for_receiver(void)
 	up();
 	chain_nvme_hold(1, true);
 	start(n);
-	if (early)
-		settle(50);
-	else
-		pump(0);
+	pump(0);
 	CHECK(chain_nvme_pending(1) == window_rx, "host 2 holds the groups it armed for");
 	CHECK(peak.rx_held == window_rx, "host 2 never took more than its window");
 	CHECK(peak.tx_stage == window_rx + announced,
@@ -682,10 +676,7 @@ static void window_refills_receiver(void)
 	chain_nvme_hold(1, true);
 	chain_hold_tx_completions(1, true); /* host 2's data-ring callbacks */
 	start(depth);
-	if (early)
-		settle(5); /* host 1 has no grant yet; nothing on host 2 needs time */
-	else
-		pump(0);
+	pump(0);
 	CHECK(rx_posted(1) && !rx_posted(2), "group 1 is posted at host 2 and waits for its completions");
 	CHECK(chain_stage_completed(rx, 0) == 0 && chain_stage_submitted(rx, 0) == 1,
 	      "group 1 is still in host 2's RX stage");
@@ -698,6 +689,7 @@ static void window_refills_receiver(void)
 	CHECK(peak.rx_held == window_rx, "host 2 holds W groups");
 	if (!early)
 		CHECK(nth_ctl_rx(0, CTS, 2) != 0, "host 1 got group 2's clear-to-send");
+	CHECK(peak.tx_stage == window_tx, "host 1 posted group 2 in the same drain");
 	chain_nvme_hold(1, false);
 	settle(50);
 	finished(depth);
