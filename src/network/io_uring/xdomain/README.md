@@ -111,8 +111,13 @@ ARMED batch). RX batches are never ready: one RX batch at a time is in the RX
 stage, so the single posted group above and the binding of each RTS to the
 next receive batch in key order are unchanged, while up to W received groups
 are in the RX stage or its consumer (their ACK or FAIL follows the end of
-their chain). The wire format is unchanged; several data channels are a
-separate change.
+their chain). An EARLY sender also waits for the next group's grant before
+releasing the next key, so that key is not bounced to the core retry timer.
+Give the receiving stage a window at least as large as the sending stage's:
+otherwise the sender's next announced group waits at the receiver until the
+receiver ends a group, and one that waits past the 15 s withdrawal point is
+withdrawn and stops the sending session (no group is misplaced). The wire
+format is unchanged; several data channels are a separate change.
 
 Startup data verification requires LOGIN protocol version 3 and the mandatory
 DATA_CHALLENGE capability. Version 2 peers are refused. The existing link `up`
