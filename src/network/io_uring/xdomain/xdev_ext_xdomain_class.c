@@ -1980,10 +1980,15 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	struct xdev_ext_xd_stage *xs;
 	struct xdev_ext_xd_ep *ep;
 	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(st->s);
+	/* The device layer sees the data channel only; the window is the core's. */
+	struct xdev_ext_mech_stage_uapi channel = *u;
 	struct xdev_ext_rel_cfg cfg;
 	u32 depth = xdev_ext_mech_session_depth(st->s), elems = xdev_ext_xd_layout_elems(l), exact = 0;
+	u32 window = u->arg1 >> XDEV_EXT_XDOMAIN_WINDOW_SHIFT;
 	unsigned long flags;
 	int ret;
+
+	channel.arg1 = (u32)u->arg1;
 	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER ||
 	    (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE && st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)) return -EOPNOTSUPP;
 	if (st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE && st->index) return -EOPNOTSUPP;
@@ -1992,7 +1997,8 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 		if (ret) return ret;
 		elems = exact;
 	}
-	if (!xdev_ext_peer_control_file(st->file) || !u->arg0 || u->arg1 >= XDEV_EXT_XD_CHANNELS_V1 ||
+	if (!xdev_ext_peer_control_file(st->file) || !u->arg0 || channel.arg1 >= XDEV_EXT_XD_CHANNELS_V1 ||
+	    window > XDEV_EXT_XDOMAIN_MAX_WINDOW ||
 	    (u->flags & ~XDEV_EXT_XDOMAIN_KNOWN_FLAGS) || !xdev_ext_xd_budget_ok(depth, elems, XDEV_EXT_XD_DATA_RING)) return -EINVAL;
 	if (u->flags & XDEV_EXT_XDOMAIN_F_EARLY) {
 		ret = xdev_ext_xd_early_shape(l->group_bytes, l->seg_len, &exact);
@@ -2003,14 +2009,14 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	xs = kzalloc(sizeof(*xs), GFP_KERNEL); if (!xs) return -ENOMEM;
 	xs->early = !!(u->flags & XDEV_EXT_XDOMAIN_F_EARLY);
 	xs->shape_count = exact; xs->rx_next_group = 1;
-	xs->channel = u->arg1;
+	xs->channel = channel.arg1;
 	xs->stream = st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ? 0 : xdev_ext_mech_session_id(st->s);
 	xs->facts = kvcalloc(depth, sizeof(*xs->facts), GFP_KERNEL);
 	if (!xs->facts) { kfree(xs); return -ENOMEM; }
 	ret = xdev_ext_netfam_init(&xs->ns, st, &xd_member, st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE, 0);
 	if (ret) goto free;
 	st->priv = xs;
-	ret = xdev_ext_netfam_attach(&xs->ns, u, u->flags & XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED ? XDEV_EXT_ADMIT_F_ALLOW_UNVERIFIED : 0);
+	ret = xdev_ext_netfam_attach(&xs->ns, &channel, u->flags & XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED ? XDEV_EXT_ADMIT_F_ALLOW_UNVERIFIED : 0);
 	if (xs->ns.lk) {
 		struct pci_dev *pdev = xs->ns.m->dev->requester(xs->ns.lk);
 		dev_dbg(&pdev->dev, "XDEV_EXT_XDOMAIN_ADMIT session=%llu stage=%u requester=%s errno=%d reachability=%u distance=%d backing=0x%x refused=0x%x mapped=%u\n",
@@ -2036,6 +2042,7 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	if (ret) goto fini;
 	xd_trace(xs, "stage_bound", 0, 0, 0,
 		xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(st->s)), 0, false);
+	st->order_window = window;
 	return 0;
  fini:
 	if (st->create_reporting && xs->ns.lk &&

@@ -288,6 +288,14 @@ struct xdev_ext_mech_stage {
 	u32 index;			/* position in the chain */
 	/* XDEV_EXT_MECH_STAGE_F_POLL accepted: set by the core before ->bind */
 	bool poll;
+	/*
+	 * Class ->bind, for an XDEV_EXT_MECH_CLASS_F_ORDERED stage: up to this
+	 * many batches may be at or past the stage at once (0 or 1: one, the
+	 * plain ordered rule). A later key still enters only after every
+	 * smaller key entered, and passes a smaller key still in flight at the
+	 * stage only once ->order_ready() reports that key's place fixed.
+	 */
+	u32 order_window;
 	struct xdev_ext_mech_stage_caps caps; /* CREATE record, OP_STAGE_CAPS */
  /* Synchronous CREATE_REPORT observations; never an object query handle. */
  bool create_reporting;
