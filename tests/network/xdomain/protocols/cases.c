@@ -414,6 +414,105 @@ static void proto_post_needs_grant(void)
  CHECK(!early_data(0), "no sender payload DMA without CTS credit");
 }
 
+/* A v2-envelope receiver that no peer paired with holds a pairing offer: its
+ * program answered the HELLO with WAIT because control TX was full. Returns
+ * the log index after the precondition. */
+static size_t proto_hello_held(unsigned prog)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(prog, prog);
+ early_flags = 2;
+ struct stack_session_config rx = {.direction = 2, .groups = 2};
+ CHECK(stack_session(w, 1, &rx) == 0, "the v2-envelope receiver binds alone");
+ CHECK(stack_start(w, 1, c.first_seq, 0) == 0, "the receiver arms one batch");
+ pump(w, 1000000);
+ fault(w, STACK_FAULT_CONTROL_REFUSE, 1, 0, 0, 1, 0);
+ u8 hello[128] = {0};
+ memcpy(hello, "NXD2", 4); hello[4] = 2; hello[5] = PROTO_V2_HELLO;
+ early_put(hello + 8, link(0)->local_inc, 8); early_put(hello + 16, link(1)->local_inc, 8);
+ early_put(hello + 24, link(0)->early_bind_next, 8);
+ early_put(hello + 72, PROTO_GROUP_BYTES, 4); early_put(hello + 76, PROTO_ELEMS, 2);
+ early_put(hello + 80, PROTO_SEG_LEN, 4);
+ early_recrc(hello);
+ early_inject(1, hello);
+ size_t offers = 0, waits = 0;
+ for (size_t i = 0; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind == STACK_EV_PROTOCOL && e.endpoint == 1 && e.control_type == 19) {
+   offers++;
+   if (e.length == 1) waits++;
+  }
+ }
+ CHECK(offers && offers == waits, "precondition: the receiver's program waits on the HELLO for control room");
+ CHECK(!count(w, STACK_EV_CONTROL_TX, 1, -1) && !stage_facts(w, 1, 0).stage_dead,
+       "precondition: the live receiver has answered nothing yet");
+ return world->logs;
+}
+/* Protocol events of the receiver's program from log index mark on. */
+static void proto_no_offer_after(size_t mark, bool none)
+{
+ for (size_t i = mark; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind != STACK_EV_PROTOCOL || e.endpoint != 1) continue;
+  CHECK(e.length != 16, "the ending receiver's program is never asked to fail the link");
+  CHECK(e.control_type != 19, "an ending receiver is not offered its held pairing offer");
+  CHECK(!none, "an ended receiver's program is offered no further event");
+ }
+}
+/* STOP: the receiver nobody paired follows the version-1 STOP rules. It ends
+ * in a bounded number of steps, cancels its armed batch, keeps the link up
+ * in the same incarnation and records no stage failure. */
+static void proto_hello_then_stop(unsigned prog)
+{
+ size_t mark = proto_hello_held(prog);
+ u64 inc1 = link(1)->local_inc;
+ int stop = stack_stop(world, 1);
+ for (unsigned i = 0; i < 4; i++)
+  CHECK(stack_pump(world, 64, 25000000) == 0,
+        "STOP of a receiver holding a pairing offer ends in a bounded number of steps");
+ CHECK(stop == 0 || stop == -EAGAIN, "STOP is accepted");
+ proto_no_offer_after(mark, false);
+ CHECK(link(1)->up && link(1)->local_inc == inc1, "STOP keeps the link up in the same incarnation");
+ CHECK(!proto_failures(1), "an uncommitted receiver stops without a stage failure");
+ CHECK(count(world, STACK_EV_PUBLISH, 1, -1) == 1, "the armed batch completes once");
+ for (size_t i = 0; i < world->logs; i++)
+  if (world->log[i].kind == STACK_EV_PUBLISH && world->log[i].endpoint == 1)
+   CHECK(world->log[i].status == -ECANCELED, "STOP cancels the armed batch");
+ CHECK(!count(world, STACK_EV_CONTROL_TX, 1, -1), "the stopped receiver sends no control");
+ CHECK(!early_data(1), "no payload DMA");
+ CHECK(stack_stop(world, 1) == 0, "STOP drains");
+ safety(world);
+}
+/* Link failure: the receiver ends in a bounded number of steps without its
+ * program seeing another event, and it does not end the successor link. */
+static void proto_hello_then_link_down(unsigned prog)
+{
+ size_t mark = proto_hello_held(prog);
+ u64 inc1 = link(1)->local_inc;
+ xdev_ext_xd_link_fail(link(1), NULL, -ENOLINK);
+ CHECK(stack_pump(world, 64, 1000000) == 0,
+       "a link failure ends a receiver holding a pairing offer in a bounded number of steps");
+ CHECK(link(1)->local_inc != inc1, "the link failure ended the receiver's incarnation");
+ CHECK(stage_facts(world, 1, 0).stage_dead, "the link failure ends the receiver stage");
+ proto_no_offer_after(mark, true);
+ CHECK(count(world, STACK_EV_PUBLISH, 1, -1) == 1, "the armed batch completes once");
+ for (size_t i = 0; i < world->logs; i++)
+  if (world->log[i].kind == STACK_EV_PUBLISH && world->log[i].endpoint == 1)
+   CHECK(world->log[i].status < 0, "the armed batch reports the failure");
+ for (unsigned i = 0; i < 8 && !(link(0)->up && link(1)->up); i++)
+  CHECK(stack_pump(world, 256, 1000000000) == 0, "relogin runs in a bounded number of steps");
+ CHECK(link(0)->up && link(1)->up, "the link logs in again");
+ u64 succ = link(1)->local_inc;
+ for (unsigned i = 0; i < 4; i++)
+  CHECK(stack_pump(world, 256, 25000000) == 0, "the ended receiver stays quiet");
+ proto_no_offer_after(mark, true);
+ CHECK(link(1)->up && link(1)->local_inc == succ, "the ended receiver does not end the successor link");
+ CHECK(!count(world, STACK_EV_CONTROL_TX, 1, PROTO_V2_CHALLENGE) && !early_data(1),
+       "the ended receiver never pairs and posts nothing");
+}
+
 static void proto_set_programs(const char *spec)
 {
  unsigned tx = 0, rx = 0;
@@ -441,6 +540,10 @@ int main(int argc, char **argv)
  else if (!strcmp(name, "announce_latches_choice")) proto_announce_latches_choice();
  else if (!strcmp(name, "paired_refuses_announce")) proto_paired_refuses_announce();
  else if (!strcmp(name, "post_needs_grant")) proto_post_needs_grant();
+ else if (!strcmp(name, "hello_stop_early")) proto_hello_then_stop(PROTO_EARLY);
+ else if (!strcmp(name, "hello_stop_reference")) proto_hello_then_stop(PROTO_REFERENCE);
+ else if (!strcmp(name, "hello_link_down_early")) proto_hello_then_link_down(PROTO_EARLY);
+ else if (!strcmp(name, "hello_link_down_reference")) proto_hello_then_link_down(PROTO_REFERENCE);
  else return 2;
  printf("PROTOCOL_ASSERTIONS %s %u\n", name, assertions);
  return 0;
