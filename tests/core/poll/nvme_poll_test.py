@@ -12,11 +12,12 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import tempfile
 import unittest
 from unittest.mock import patch
 
-from poll_extract import KERNEL, _helpers as HELPERS, body, compile_and_run, fields, function, source
+from poll_extract import KERNEL, SCRIPT_ROOT, _helpers as HELPERS, body, compile_and_run, fields, function, source
 
 NVME = 'drivers/nvme/host/xdev_ext_mech_nvme.c'
 BLK = 'block/blk-mq.c'
@@ -454,6 +455,21 @@ static const struct xdev_ext_stor_dev_ops fixture_member_ops = {
 '''
 
 
+def requester_declarations(native, header):
+    """Actual by-value requester dependencies from the same selected owner."""
+    if 'struct xdev_ext_requester requester;' not in header:
+        return ''
+    utility = runpy.run_path(str(SCRIPT_ROOT / 'tests/storage/nvme/_legacy_storfam_fixture.py'))
+    selected = utility['LegacySelection'](KERNEL)
+    if selected.read(NVME) != native or selected.read('include/linux/xdev_ext_storfam_block.h') != header:
+        raise ValueError('SETUP original NVMe poll requester source owner mismatch')
+    declarations = [selected.definition(owner, symbol, 'struct') for owner, symbol in (
+        ('include/linux/xdev_ext_requester_core.h', 'xdev_ext_admission'),
+        ('include/linux/xdev_ext_requester.h', 'xdev_ext_requester'))]
+    selected.verify()
+    return '\n'.join(declarations) + '\n'
+
+
 def build_family_io_fixture(text):
     """Actual common submit/native post chain; original OS/resource boundary."""
     header = source('include/linux/xdev_ext_storfam_block.h')
@@ -465,7 +481,7 @@ def build_family_io_fixture(text):
                         header, re.M | re.S)
     if not command:
         raise AssertionError('production aligned structure missing: xdev_ext_stor_command')
-    types = command[0] + '\n' + '\n'.join(structure(header, n) for n in (
+    types = requester_declarations(text, header) + command[0] + '\n' + '\n'.join(structure(header, n) for n in (
         'xdev_ext_stor_poll_view', 'xdev_ext_stor_geometry',
         'xdev_ext_stor_dev_ops', 'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
         'xdev_ext_stor_stage', 'xdev_ext_stor_batch'))
