@@ -46,6 +46,40 @@ pins() {
     [ -n "$pin_a" ] && [ -n "$pin_r" ] && [ -n "$pin_m" ]
     echo "XDEV_EXT_ZC_FAULT_PINS phase=$1 acquired=$pin_a released=$pin_r mlocked_kb=$pin_m"
 }
+vmstat_refreshed() {
+    if [ ! -r /proc/sys/vm/stat_refresh ]; then
+        echo "XDEV_EXT_VMSTAT_REFRESH_STATUS phase=$1 diagnostic=SETUP reason=missing_interface"
+        return 2
+    fi
+    refresh_status=0
+    cat /proc/sys/vm/stat_refresh >/dev/null || refresh_status=$?
+    echo "XDEV_EXT_VMSTAT_REFRESH_STATUS phase=$1 read_status=$refresh_status"
+    if [ "$refresh_status" != 0 ]; then
+        echo "FAIL diagnostic=SETUP phase=$1 reason=stat_refresh_read" >&2
+        return 2
+    fi
+    refresh_snapshot_status=0
+    refresh_snapshot=$(pins "$1") || refresh_snapshot_status=$?
+    if [ "$refresh_snapshot_status" != 0 ] || [ "${#refresh_snapshot}" -gt 256 ]; then
+        echo "FAIL diagnostic=SETUP phase=$1 reason=pin_snapshot status=$refresh_snapshot_status" >&2
+        return 2
+    fi
+    refresh_fields=${refresh_snapshot#"XDEV_EXT_ZC_FAULT_PINS phase=$1 acquired="}
+    refresh_acquired=${refresh_fields%% released=*}
+    refresh_fields=${refresh_fields#"$refresh_acquired released="}
+    refresh_released=${refresh_fields%% mlocked_kb=*}
+    refresh_mlocked=${refresh_fields#"$refresh_released mlocked_kb="}
+    case "$refresh_acquired" in ''|*[!0-9]*) refresh_snapshot_status=2 ;; esac
+    case "$refresh_released" in ''|*[!0-9]*) refresh_snapshot_status=2 ;; esac
+    case "$refresh_mlocked" in ''|*[!0-9]*) refresh_snapshot_status=2 ;; esac
+    if [ "$refresh_snapshot" != "XDEV_EXT_ZC_FAULT_PINS phase=$1 acquired=$refresh_acquired released=$refresh_released mlocked_kb=$refresh_mlocked" ] ||
+        [ "$refresh_snapshot_status" != 0 ]; then
+        echo "FAIL diagnostic=SETUP phase=$1 reason=pin_snapshot_format" >&2
+        return 2
+    fi
+    # Refresh folds CPU statistics; it does not join asynchronous unpin work.
+    printf '%s\n' "XDEV_EXT_VMSTAT_REFRESHED${refresh_snapshot#XDEV_EXT_ZC_FAULT_PINS}"
+}
 ce_config() {
     echo "XDEV_EXT_ZC_FAULT_CE_CONFIG phase=$1 fail_mode=$(cat "$ce_params/fail_mode") delay_us=$(cat "$ce_params/delay_us")"
 }
@@ -211,6 +245,7 @@ remove_netdev() {
 }
 
 pins before
+vmstat_refreshed before
 insmod /opt/xdev_ext/xdev_ext_ce_sim.ko window_size=4194304 \
     "fail_mode=$ce_fail_mode" "delay_us=$ce_fault_delay_us"
 ce_config campaign
@@ -350,4 +385,5 @@ echo "XDEV_EXT_ZC_FAULT_CE_REFS refcnt=$ce_refs settled=$ce_settled"
 if rmmod xdev_ext_ce_sim; then ce_unload=unloaded; else ce_unload=refused; fi
 echo "XDEV_EXT_ZC_FAULT_CE_UNLOAD result=$ce_unload"
 pins after
+vmstat_refreshed after
 echo "XDEV_EXT_ZC_FAULT_CAMPAIGN_DONE campaign=$fault_campaign"
