@@ -32,6 +32,8 @@ KERNEL = HERE.parents[4]
 GUEST = HERE.parent / 'xdomain' / 'guest'
 OBSERVER = 'observer-attach'
 OBJECTS = ('xdomain_peer.bpf.o', 'xdomain_check.bpf.o')
+# Two independent protocol programs, each compiled and verified as its own object.
+PROTOCOLS = (('rts-cts', 'xdomain_rts_cts.bpf.o'), ('early', 'xdomain_early.bpf.o'))
 
 
 def executable(path, source):
@@ -76,7 +78,7 @@ print('/* controlled BTF dump boundary */')
             self.assertEqual(json.loads((root / 'btf-command').read_text()),
                              ['btf', 'dump', 'file', str(btf), 'format', 'c'])
             calls = [json.loads(line) for line in (root / 'compiles').read_text().splitlines()]
-            for obj in OBJECTS:
+            for obj in OBJECTS + tuple(obj for _, obj in PROTOCOLS):
                 source = str(KERNEL / 'tools' / 'xdev_ext_mech' / obj.replace('.o', '.c'))
                 matching = [args for args in calls if '-c' in args and source in args]
                 self.assertEqual(len(matching), 1, 'full source was not compiled exactly once: ' + source)
@@ -105,7 +107,7 @@ print('/* controlled BTF dump boundary */')
         self.assertIn('VMLINUX_BTF="$BUILD/vmlinux"', build.group())
 
     def run_guest(self, *, missing=False, reject=False, matrix_name=None,
-                  diagnostic='', loader_exit=1, dmesg_extra=''):
+                  diagnostic='', loader_exit=1, dmesg_extra='', missing_protocol=None):
         with tempfile.TemporaryDirectory(prefix='xd-check-guest-') as temp:
             root = Path(temp)
             bindir = root / 'bin'
@@ -194,8 +196,8 @@ elif args[0] == 'xdomain-probe':
             (root / 'matrix.txt').write_text(matrix_name + ' DENY\n' if matrix_name else '')
             if matrix_name:
                 (root / (matrix_name + '.bpf.o')).write_bytes(b'negative-object-boundary')
-            for name in (*OBJECTS, 'nvme_s0.bpf.o'):
-                if not (missing and name == 'xdomain_check.bpf.o'):
+            for name in (*OBJECTS, 'nvme_s0.bpf.o', *(obj for _, obj in PROTOCOLS)):
+                if not (missing and name == 'xdomain_check.bpf.o') and name != missing_protocol:
                     (root / name).write_bytes(b'object-boundary')
             # Remap absolute environment paths only; shell control flow and
             # loader commands are copied unchanged from the real guest runner.
@@ -254,6 +256,27 @@ elif args[0] == 'xdomain-probe':
                       if row[:2] == ['ctl', 'detach'] and '--pin' in row
                       and row[row.index('--pin') + 1] == pin)
         self.assertTrue(all(probe_ref_index < i < detach for i in probes))
+
+    def test_each_protocol_object_is_verified_attached_and_detached(self):
+        result, calls = self.run_guest()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        for name, obj in PROTOCOLS:
+            self.assertIn('XDEV_EXT_XDOMAIN_PROTOCOL_OBJECT=PASS name=%s object=%s' % (name, obj), result.stdout)
+            self.assertIn('VERIFIER_DIAGNOSTIC object=' + obj, result.stdout)
+            loads = [i for i, args in enumerate(calls)
+                     if args[0] == 'load' and len(args) == 3 and Path(args[1]).name == obj]
+            self.assertEqual(len(loads), 1, 'protocol object must be loaded once by the full loader: ' + obj)
+            self.assertEqual(calls[loads[0]][2], 'xdomain_peer_ops')
+            self.assertIn(['load-attach', obj, 'xdomain_peer_ops'], calls[loads[0] + 1:])
+            self.assertIn(['load-detach', obj, 'xdomain_peer_ops'], calls[loads[0] + 1:])
+        self.assertNotIn('XDEV_EXT_XDOMAIN_CASE=PASS name=protocol-', result.stdout,
+                         'protocol receipts stay outside the frozen named inventory')
+
+    def test_missing_protocol_object_cannot_pass(self):
+        for _, obj in PROTOCOLS:
+            with self.subTest(obj=obj):
+                result, _ = self.run_guest(missing_protocol=obj)
+                self.assertNotEqual(result.returncode, 0, 'missing protocol object silently passed')
 
     def test_missing_observer_object_cannot_pass(self):
         result, _ = self.run_guest(missing=True)

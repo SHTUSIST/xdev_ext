@@ -60,8 +60,15 @@ def facade(kernel, directory):
         definition(core, 'xdev_ext_mech_batch_session') + '\n')
 
 
-def execute(kernel, out, case=None, sanitize=False):
+# Each program registers the same struct_ops symbols as the reference one.
+PROGRAMS = {'reference': 'xdomain_peer.bpf.c', 'rts-cts': 'xdomain_rts_cts.bpf.c',
+            'early': 'xdomain_early.bpf.c'}
+
+
+def execute(kernel, out, case=None, sanitize=False, program='reference'):
     expected = json.loads((HERE / 'stack_expected.json').read_text())
+    expected['source_units'] = [name.replace('/xdomain_peer.bpf.c', '/' + PROGRAMS[program])
+                                for name in expected['source_units']]
     expected['source_units'] = expected['source_units'] + ['kernel/io_uring/xdomain/xdev_ext_xdomain_probe.c', RETENTION]
     provenance = expected['source_units'] + [
         'kernel/drivers/thunderbolt/nhi.c',
@@ -69,6 +76,18 @@ def execute(kernel, out, case=None, sanitize=False):
         'kernel/include/linux/thunderbolt.h',
         'kernel/include/linux/xdev_ext_requester_retention.h']
     sources = [HERE / name for name in expected['wrappers']] + [HERE / 'stack_cases.c']
+    if program != 'reference':
+        # Same bridge, another complete program: only the include changes.
+        anchor = '#include "../../../../../tools/xdev_ext_mech/xdomain_peer.bpf.c"'
+        bridge = (HERE / 'stack_x6.c').read_text()
+        if bridge.count(anchor) != 1:
+            raise ValueError('program bridge include anchor changed')
+        selected = kernel / 'tools/xdev_ext_mech' / PROGRAMS[program]
+        if not selected.is_file():
+            print('STACK_MISSING_COMPOSITION_RED: program ' + str(selected), flush=True)
+            return 2
+        (out / 'stack_x6.c').write_text(bridge.replace(anchor, '#include "' + str(selected) + '"', 1))
+        sources = [out / 'stack_x6.c' if p.name == 'stack_x6.c' else p for p in sources]
     absent = [str(p) for p in sources + [HERE / 'stack_kernel_compat.h'] if not p.is_file()]
     absent += [str(kernel.parent / p) for p in provenance if not (kernel.parent / p).is_file()]
     if absent:
@@ -135,12 +154,14 @@ def main():
     parser.add_argument('--keep-build', type=Path)
     parser.add_argument('--case')
     parser.add_argument('--sanitize', action='store_true')
+    parser.add_argument('--program', choices=sorted(PROGRAMS), default='reference',
+                        help='XDOMAIN protocol program at both endpoints')
     args = parser.parse_args()
     if args.keep_build:
         args.keep_build.mkdir(parents=True, exist_ok=True)
-        return execute(args.kernel.resolve(), args.keep_build.resolve(), args.case, args.sanitize)
+        return execute(args.kernel.resolve(), args.keep_build.resolve(), args.case, args.sanitize, args.program)
     with tempfile.TemporaryDirectory(prefix='xdomain-actual-stack-') as temp:
-        return execute(args.kernel.resolve(), Path(temp), args.case, args.sanitize)
+        return execute(args.kernel.resolve(), Path(temp), args.case, args.sanitize, args.program)
 
 
 if __name__ == '__main__':
