@@ -21,8 +21,8 @@
 
 /* Weak, so a tree without the host requester still compiles and fails here. */
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
-				  enum dma_data_direction dir, dma_addr_t *dma) __attribute__((weak));
-void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len,
+				  enum dma_data_direction dir, u64 *dma) __attribute__((weak));
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len,
 				     bool quiesced) __attribute__((weak));
 int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq) __attribute__((weak));
 
@@ -187,7 +187,7 @@ static void host_bind_map_error_unwinds(void)
 
 static void host_lease_page_address(void)
 {
-	dma_addr_t dma = 0;
+	u64 dma = 0;
 
 	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
@@ -209,7 +209,7 @@ static void host_lease_page_address(void)
 
 static void host_lease_refuses_spans(void)
 {
-	dma_addr_t dma = 0x5a5a;
+	u64 dma = 0x5a5a;
 
 	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
@@ -256,7 +256,7 @@ static void host_lease_refuses_spans(void)
 
 static void host_noncoherent_sync(void)
 {
-	dma_addr_t dma = 0;
+	u64 dma = 0;
 	unsigned before;
 
 	need_api();
@@ -301,7 +301,7 @@ static void host_noncoherent_sync(void)
 
 static void host_coherent_no_sync(void)
 {
-	dma_addr_t dma = 0;
+	u64 dma = 0;
 
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
@@ -315,7 +315,7 @@ static void host_coherent_no_sync(void)
 
 static void host_unknown_retains_mapping(void)
 {
-	dma_addr_t dma = 0, other = 0x77;
+	u64 dma = 0, other = 0x77;
 
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
@@ -337,7 +337,7 @@ static void host_unknown_retains_mapping(void)
 
 static void host_outstanding_lease_retains_mapping(void)
 {
-	dma_addr_t dma = 0;
+	u64 dma = 0;
 
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
@@ -351,7 +351,7 @@ static void host_outstanding_lease_retains_mapping(void)
 
 static void host_quiesced_unbind_unmaps_once(void)
 {
-	dma_addr_t dma = 0;
+	u64 dma = 0;
 	u32 i, j;
 
 	need_api();

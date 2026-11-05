@@ -6,6 +6,9 @@ static void observed_release(struct xdev_ext_peer_fd_lease *h,bool q){unsigned i
 #define xdev_ext_peer_file_acquire observed_acquire
 #define xdev_ext_peer_fd_release observed_release
 static int xdev_ext_requester_bind(struct xdev_ext_requester *r,struct xdev_ext_mech_stage *s,struct pci_dev *p,u32 flags){return 0;}static void xdev_ext_requester_unbind(struct xdev_ext_requester *r){}
+/* PEER cohort: no requester here maps IOU_UMEM host pages, so the family's host leases are unreachable. */
+static int xdev_ext_requester_host_lease(struct xdev_ext_requester *r,u64 off,u32 len,enum dma_data_direction dir,u64 *dma){abort();}
+static void xdev_ext_requester_host_release(struct xdev_ext_requester *r,u64 dma,u32 len,bool quiesced){abort();}
 struct xdev_ext_peer_net_endpoint *xdev_ext_peer_net_bind_dir(u32 a,u32 b,bool c,void(*dead)(void *),void *arg){return (void *)0x101;}
 void xdev_ext_peer_net_unbind(struct xdev_ext_peer_net_endpoint *p){}
 static unsigned requester_calls;

@@ -136,7 +136,7 @@ int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_
 	if (i >= ns->max_elems || !len || buf_len < len)
 		return -EPROTO;
 	if (ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA) {
-		dma_addr_t dma;
+		u64 dma;
 
 		/* @off is the pool offset; the requester's host mapping checks the
 		 * span lies in one page and one frame and syncs for the device. */

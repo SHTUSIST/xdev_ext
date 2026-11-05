@@ -86,6 +86,9 @@ static u64 ktime_get_boottime_ns(void) {return 5000000;}
 static unsigned long msecs_to_jiffies(unsigned long n) {return n;}
 static int xdev_ext_requester_bind(struct xdev_ext_requester *r,struct xdev_ext_mech_stage *s,struct pci_dev *p,u32 f) {requester_calls++; return -EINVAL;}
 static void xdev_ext_requester_unbind(struct xdev_ext_requester *r) {requester_calls++;}
+/* HOST CPU borrows only: the family's IOU_UMEM host DMA leases are unreachable. */
+static int xdev_ext_requester_host_lease(struct xdev_ext_requester *r,u64 o,u32 n,enum dma_data_direction d,u64 *dma) {abort();}
+static void xdev_ext_requester_host_release(struct xdev_ext_requester *r,u64 dma,u32 n,bool q) {abort();}
 static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p) {peer_calls++; return NULL;}
 static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p) {peer_calls++;return 0;}
 static int xdev_ext_peer_file_acquire(struct file *f,struct pci_dev *p,u64 g,u64 o,u32 n,enum dma_data_direction d,struct xdev_ext_peer_fd_lease *l) {peer_calls++;return -EINVAL;}

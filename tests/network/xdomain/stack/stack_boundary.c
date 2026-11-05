@@ -800,11 +800,11 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester*r){
 }
 /* PEER-only environment: the recording bind above never creates a host-page
  * mapping, so no host lease can be reached and every requester is settled. */
-int xdev_ext_requester_host_lease(struct xdev_ext_requester*r,u64 off,u32 len,enum dma_data_direction dir,dma_addr_t*dma){
+int xdev_ext_requester_host_lease(struct xdev_ext_requester*r,u64 off,u32 len,enum dma_data_direction dir,u64*dma){
 	(void)r;(void)off;(void)len;(void)dir;(void)dma;
 	abort();
 }
-void xdev_ext_requester_host_release(struct xdev_ext_requester*r,dma_addr_t dma,u32 len,bool quiesced){
+void xdev_ext_requester_host_release(struct xdev_ext_requester*r,u64 dma,u32 len,bool quiesced){
 	(void)r;(void)dma;(void)len;(void)quiesced;
 	abort();
 }
