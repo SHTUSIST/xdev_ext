@@ -55,8 +55,8 @@ def validate_socket(console):
 def validate_peer(console):
     rows = [dict(re.findall(r'(\w+)=([^\s]+)', line)) for line in console.splitlines()
             if line.startswith('XDEV_EXT_PEER_NATIVE=PASS ')]
-    want = dict(XDEV_EXT_PEER_NATIVE='PASS', reads='259', writes='257', groups='257', batches='5', max_desc='64',
-        native_depth='1', source_whole_disk_unchanged='1', destination_whole_disk='1',
+    want = dict(XDEV_EXT_PEER_NATIVE='PASS', reads='258', writes='257', groups='257', batches='5', max_desc='64',
+        native_depth='batch', source_whole_disk_unchanged='1', destination_whole_disk='1',
         allocation_guards='1', maps='2', pins='2', live_maps='0', live_pins='0',
         memory='host-RAM-standin')
     if len(rows) != 1 or rows[0] != want:

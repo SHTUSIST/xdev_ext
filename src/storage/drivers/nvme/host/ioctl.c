@@ -1247,6 +1247,24 @@ static int nvme_peer_rw_allowed(struct nvme_ns *ns,
  if (!nvme_cmd_allowed(ns, &cmd, flags, open_for_write)) return -EACCES;
  return ns->ctrl->ops->peer_rw(ns, u, allocation, NULL);
 }
+/* One admission for the whole list; the controller issues it as a unit. */
+static int nvme_peer_batch_allowed(struct nvme_ns *ns,
+                                  struct xdev_ext_peer_nvme_batch *batch,
+                                  unsigned int flags, bool open_for_write,
+                                  struct file *allocation)
+{
+ struct nvme_command cmd = {};
+ bool write = batch->flags & XDEV_EXT_PEER_NVME_F_WRITE;
+ if (!capable(CAP_SYS_RAWIO)) return -EPERM;
+ if (batch->flags & ~XDEV_EXT_PEER_NVME_F_WRITE) return -EINVAL;
+ if (flags & NVME_IOCTL_PARTITION) return -EOPNOTSUPP;
+ if (write && !open_for_write) return -EBADF;
+ if (!ns->ctrl->ops->peer_batch) return -EOPNOTSUPP;
+ cmd.rw.opcode = write ? nvme_cmd_write : nvme_cmd_read;
+ cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
+ if (!nvme_cmd_allowed(ns, &cmd, flags, open_for_write)) return -EACCES;
+ return ns->ctrl->ops->peer_batch(ns, batch, allocation);
+}
 static int nvme_peer_ioctl(struct nvme_ns *ns, unsigned int cmd,
                            void __user *argp, unsigned int flags, bool open_for_write)
 {
@@ -1272,16 +1290,8 @@ static int nvme_peer_ioctl(struct nvme_ns *ns, unsigned int cmd,
   if (batch->desc[i].reserved) { ret = -EINVAL; goto out; }
  allocation = fget(batch->allocation_fd);
  if (!allocation) { ret = -EBADF; goto out; }
- for (i = 0; i < batch->nr; i++) {
-  u = (struct xdev_ext_peer_nvme_rw){ .allocation_fd = batch->allocation_fd,
-        .flags = batch->flags, .generation = batch->generation,
-        .offset = batch->desc[i].offset, .slba = batch->desc[i].slba,
-        .bytes = batch->desc[i].bytes };
-  ret = nvme_peer_rw_allowed(ns, &u, flags, open_for_write, allocation);
-  batch->status = ret;
-  if (ret) break;
-  batch->completed++;
- }
+ /* The kernel snapshot is admitted as a whole before any native command. */
+ batch->status = nvme_peer_batch_allowed(ns, batch, flags, open_for_write, allocation);
  fput(allocation);
  ret = copy_to_user(argp, batch, sizeof(*batch)) ? -EFAULT : batch->status;
 out:

@@ -23,6 +23,7 @@
 #include <linux/pci.h>
 #ifdef CONFIG_XDEV_EXT_MECH
 #include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_requester.h>
 #include <linux/xdev_ext_storfam_runtime.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <trace/events/xdev_ext.h>
@@ -3398,6 +3399,251 @@ release:
 }
 #endif
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/*
+ * Synchronous peer batch. Every request is admitted, leased and built before
+ * the first one reaches the device. A request is one native command whose SGL
+ * names its real provider extents, so it may span provider pages. Commands
+ * are issued in order with any number in flight; none is issued after a
+ * failure was observed, and the call returns after every issued command
+ * completed. A command's leases are released after its completion only.
+ */
+#define NVME_PCI_PEER_MAX_LEASES	512U	/* per command, as for session slots */
+#define NVME_PCI_PEER_WAIT		(10 * HZ)
+
+struct nvme_pci_peer_batch_ctx;
+
+struct nvme_pci_peer_cmd {
+	struct nvme_command cmd;
+	struct nvme_xdev_ext_peer_trace trace;
+	struct xdev_ext_peer_nvme_plan plan;
+	struct nvme_pci_peer_batch_ctx *batch;
+	struct xdev_ext_peer_fd_lease *leases;
+	struct xdev_ext_stor_extent *spans;
+	void *list;
+	dma_addr_t list_dma;
+	u32 nr_leases;
+	int status;
+	bool accepted;
+};
+
+struct nvme_pci_peer_batch_ctx {
+	atomic_t pending;	/* issued, not completed, plus the issuer's bias */
+	atomic_t failed;	/* a command completed with an error */
+	struct completion done;
+	struct xdev_ext_peer_nvme_range dst[XDEV_EXT_PEER_NVME_MAX_DESCS];
+	struct nvme_pci_peer_cmd cmd[];
+};
+
+static enum rq_end_io_ret nvme_pci_peer_batch_end_io(struct request *req,
+						     blk_status_t err)
+{
+	struct nvme_pci_peer_cmd *c = req->end_io_data;
+	struct nvme_pci_peer_batch_ctx *b = c->batch;
+
+	if (nvme_req(req)->flags & NVME_REQ_CANCELLED)
+		c->status = -EINTR;
+	else
+		c->status = nvme_req(req)->status ?: blk_status_to_errno(err);
+	nvme_req(req)->flags &= ~NVME_REQ_XDEV_EXT_PEER;
+	nvme_req(req)->peer_trace = NULL;
+	if (c->status)
+		atomic_set(&b->failed, 1);
+	if (atomic_dec_and_test(&b->pending))
+		complete(&b->done);
+	return RQ_END_IO_FREE;
+}
+
+/* Process context, after the command completed or when it was never issued. */
+static void nvme_pci_peer_batch_retire(struct nvme_dev *dev,
+				       struct nvme_pci_peer_cmd *c)
+{
+	/* An error or a cancellation does not prove that peer DMA stopped. */
+	bool quiesced = !c->accepted || !c->status;
+	u32 i;
+
+	/* Reverse acquisition order finds each lease at the provider list head. */
+	for (i = c->nr_leases; i--; )
+		xdev_ext_peer_fd_release(&c->leases[i], quiesced);
+	nvme_xdev_ext_peer_trace_release(&c->trace, quiesced);
+	/* The device may still read the list of an UNKNOWN command: never reuse. */
+	if (c->list && quiesced)
+		dma_free_coherent(dev->dev, NVME_CTRL_PAGE_SIZE, c->list,
+				  c->list_dma);
+}
+
+static int nvme_pci_peer_batch_map(struct nvme_ns *ns, struct nvme_dev *dev,
+		const struct xdev_ext_peer_nvme_batch *u, u32 i,
+		struct file *allocation, struct nvme_pci_peer_cmd *c, u32 cap)
+{
+	bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE;
+	enum dma_data_direction dir = write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
+	u64 off = u->desc[i].offset;
+	u32 left = u->desc[i].bytes;
+	struct xdev_ext_stor_rw rw;
+	int ret;
+
+	while (left) {
+		struct xdev_ext_peer_fd_lease *l;
+
+		if (c->nr_leases == cap)
+			return -EREMOTEIO;
+		l = &c->leases[c->nr_leases];
+		ret = xdev_ext_peer_lease_split(allocation, to_pci_dev(dev->dev),
+				u->generation, off, left, dir, l);
+		if (ret)
+			return ret;
+		c->nr_leases++;
+		if (!l->lease.len || l->lease.len > left)
+			return -EPROTO;
+		c->spans[c->nr_leases - 1] = (struct xdev_ext_stor_extent){
+			.addr = l->lease.dma_address, .len = l->lease.len,
+		};
+		off += l->lease.len;
+		left -= l->lease.len;
+	}
+	if (c->nr_leases > 1) {
+		c->list = dma_alloc_coherent(dev->dev, NVME_CTRL_PAGE_SIZE,
+					     &c->list_dma, GFP_KERNEL);
+		if (!c->list)
+			return -ENOMEM;
+	}
+	rw = (struct xdev_ext_stor_rw) {
+		.slba = c->plan.slba, .nlb = (u64)c->plan.nlb + 1,
+		.byte_length = c->plan.bytes, .write = write,
+	};
+	ret = nvme_xdev_ext_peer_build_cmd(&rw, ns->head->ns_id, true, false,
+			c->spans, c->nr_leases, c->spans, c->nr_leases, c->list,
+			c->list_dma, c->list ? NVME_CTRL_PAGE_SIZE : 0, &c->cmd);
+	if (ret)
+		return ret;
+	c->trace = (struct nvme_xdev_ext_peer_trace) {
+		.leases = c->leases, .nr_leases = c->nr_leases,
+		.bytes = c->plan.bytes, .origin = "U",
+	};
+	return 0;
+}
+
+/* Fills u->completed with the successful prefix; returns the batch status. */
+static int nvme_pci_peer_batch(struct nvme_ns *ns,
+			       struct xdev_ext_peer_nvme_batch *u,
+			       struct file *allocation)
+{
+	struct nvme_dev *dev = to_nvme_dev(ns->ctrl);
+	struct xdev_ext_peer_fd_lease *leases = NULL;
+	struct xdev_ext_stor_extent *spans = NULL;
+	struct nvme_pci_peer_batch_ctx *b;
+	bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE;
+	u32 i, nr = u->nr, total = 0, at = 0, max_bytes;
+	u64 capacity;
+	int ret = 0, issue_err = 0;
+
+	if (nvme_ctrl_state(ns->ctrl) != NVME_CTRL_LIVE ||
+	    !test_bit(NVME_NS_READY, &ns->flags) ||
+	    test_bit(NVME_NS_REMOVING, &ns->flags))
+		return -ENODEV;
+	if (!nvme_ctrl_sgl_supported(ns->ctrl))
+		return -EOPNOTSUPP;
+	if (ns->head->lba_shift < SECTOR_SHIFT || ns->head->lba_shift > 31)
+		return -EINVAL;
+	if (write && get_disk_ro(ns->disk))
+		return -EROFS;
+	if (!nr || nr > XDEV_EXT_PEER_NVME_MAX_DESCS)
+		return -EINVAL;
+	b = kvzalloc(struct_size(b, cmd, nr), GFP_KERNEL);
+	if (!b)
+		return -ENOMEM;
+	capacity = get_capacity(ns->disk) >> (ns->head->lba_shift - SECTOR_SHIFT);
+	max_bytes = min_t(u64, (u64)queue_max_hw_sectors(ns->queue) << SECTOR_SHIFT,
+			  U32_MAX);
+	/* Namespace, transfer limit and pairwise-disjoint destinations. */
+	for (i = 0; i < nr; i++) {
+		ret = xdev_ext_peer_nvme_batch_admit(ns->head->lba_shift, capacity,
+				ns->head->ms, ns->head->ids.csi, max_bytes, write,
+				u->desc[i].offset, u->desc[i].slba, u->desc[i].bytes,
+				b->dst, i, &b->cmd[i].plan);
+		if (ret)
+			goto out_free;
+		/* Provider pages are at least 4 KiB: a bound on the leases. */
+		total += min_t(u64, ((u->desc[i].offset & (SZ_4K - 1)) +
+				     u->desc[i].bytes + SZ_4K - 1) >> 12,
+			       NVME_PCI_PEER_MAX_LEASES);
+	}
+	leases = kvcalloc(total, sizeof(*leases), GFP_KERNEL);
+	spans = kvcalloc(total, sizeof(*spans), GFP_KERNEL);
+	if (!leases || !spans) {
+		ret = -ENOMEM;
+		goto out_free;
+	}
+	for (i = 0; i < nr; i++) {
+		struct nvme_pci_peer_cmd *c = &b->cmd[i];
+		u32 cap = min_t(u64, ((u->desc[i].offset & (SZ_4K - 1)) +
+				      u->desc[i].bytes + SZ_4K - 1) >> 12,
+				NVME_PCI_PEER_MAX_LEASES);
+
+		c->batch = b;
+		c->leases = &leases[at];
+		c->spans = &spans[at];
+		at += cap;
+		ret = nvme_pci_peer_batch_map(ns, dev, u, i, allocation, c, cap);
+		if (ret)
+			goto out_retire;
+	}
+
+	atomic_set(&b->pending, 1);
+	init_completion(&b->done);
+	for (i = 0; i < nr; i++) {
+		struct nvme_pci_peer_cmd *c = &b->cmd[i];
+		struct request *req;
+
+		if (atomic_read(&b->failed))
+			break;
+		req = blk_mq_alloc_request(ns->queue, nvme_req_op(&c->cmd), 0);
+		if (IS_ERR(req)) {
+			issue_err = PTR_ERR(req);
+			break;
+		}
+		nvme_init_request(req, &c->cmd);
+		/* Already-mapped peer SGL; init masks it for host passthrough. */
+		nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;
+		req->cmd_flags |= REQ_FAILFAST_MASK;
+		c->trace.cookie = (u64)(unsigned long)req;
+		nvme_req(req)->peer_trace = &c->trace;
+		nvme_req(req)->flags |= NVME_REQ_USERCMD | NVME_REQ_XDEV_EXT_PEER;
+		req->end_io = nvme_pci_peer_batch_end_io;
+		req->end_io_data = c;
+		c->accepted = true;
+		atomic_inc(&b->pending);
+		blk_execute_rq_nowait(req, false);
+	}
+	if (!atomic_dec_and_test(&b->pending))
+		while (!wait_for_completion_io_timeout(&b->done,
+						       NVME_PCI_PEER_WAIT))
+			;
+	/* The successful prefix; the first other request names the status. */
+	for (i = 0; i < nr; i++) {
+		struct nvme_pci_peer_cmd *c = &b->cmd[i];
+
+		if (c->accepted && !c->status) {
+			u->completed++;
+			continue;
+		}
+		ret = c->accepted ? c->status : issue_err;
+		if (WARN_ON_ONCE(!ret))
+			ret = -EIO;
+		break;
+	}
+out_retire:
+	for (i = nr; i--; )
+		nvme_pci_peer_batch_retire(dev, &b->cmd[i]);
+out_free:
+	kvfree(spans);
+	kvfree(leases);
+	kvfree(b);
+	return ret;
+}
+#endif
+
 static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {
 	.name			= "pcie",
 	.module			= THIS_MODULE,
@@ -3415,6 +3661,7 @@ static const struct nvme_ctrl_ops nvme_pci_ctrl_ops = {
 	.get_virt_boundary	= nvme_pci_get_virt_boundary,
 #ifdef CONFIG_XDEV_EXT_MECH
 	.peer_rw		= nvme_pci_peer_rw,
+	.peer_batch		= nvme_pci_peer_batch,
 #endif
 };
 

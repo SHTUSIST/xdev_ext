@@ -7187,6 +7187,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_native_test.py"
     },
     {
+      "source": "tests/network/peer/session/xdev_ext_peer_batch_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_batch_test.py"
+    },
+    {
       "source": "tests/network/peer/session/xdev_ext_peer_net_plan_frames_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_net_plan_frames_test.c"

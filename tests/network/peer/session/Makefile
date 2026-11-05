@@ -38,6 +38,7 @@ run_tests: all
 	./xdev_ext_peer_net_plan_test
 	python3 xdev_ext_peer_claim_test.py
 	python3 xdev_ext_peer_native_test.py
+	python3 xdev_ext_peer_batch_test.py
 	python3 xdev_ext_peer_mlx5_test.py
 	python3 independent_peer_lifetime.py
 	python3 independent_peer_ioctl.py
