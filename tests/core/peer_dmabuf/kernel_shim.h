@@ -28,6 +28,8 @@ typedef signed int __s32;
 typedef signed long long __s64;
 typedef __u16 __be16;
 typedef __u32 __be32;
+typedef __u32 __le32;
+typedef __u64 __le64;
 #define __aligned_u64 __u64 __attribute__((aligned(8)))
 typedef u64 dma_addr_t;
 typedef unsigned int gfp_t;
