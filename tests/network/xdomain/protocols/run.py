@@ -43,7 +43,7 @@ OWN_CASES = ('rts_cts_v2', 'rts_cts_legacy', 'reference_legacy', 'early_v2', 're
              'announce_latches_choice', 'paired_refuses_announce', 'post_needs_grant',
              'hello_stop_early', 'hello_stop_reference', 'hello_link_down_early',
              'hello_link_down_reference', 'stray_rts_then_pair_early',
-             'stray_rts_then_pair_reference', 'rts_cts_v2_idle', 'paired_drops_v1',
+             'stray_rts_then_pair_reference', 'stray_cts_then_pair', 'rts_cts_v2_idle', 'paired_drops_v1',
              'paired_refuses_decline')
 RTS, EARLY = 1, 2
 # Early contract cases whose endpoints are not both early: the version-1 end
