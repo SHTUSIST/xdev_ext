@@ -221,8 +221,8 @@ def expected_regions(seen, source, error):
     apply(dest, written, by_case['C1'], True)
     apply(dest, written, by_case['C2'], True)
     issued = number(seen, 'E1', 'setups')
-    if not 3 <= issued <= 6:
-        raise ValueError('phase E issued count outside 3..6')
+    if issued != 3:
+        raise ValueError('phase E: not exactly the three requests up to the failure were issued')
     q = bytearray(pattern('q', Q_BYTES))
     apply(q, error, [d for k, d in enumerate(by_case['E1']) if k != 2 and k < issued], False)
     dest[DUMP_A:DUMP_A + P_BYTES] = after_a
@@ -278,6 +278,8 @@ def validate(images, log):
         raise ValueError('phase E: native failure status or completed prefix')
     if number(seen, 'E1', 'd2_setups') != 1 or number(seen, 'E1', 'completes') != number(seen, 'E1', 'setups'):
         raise ValueError('phase E: failed command resubmitted or an issued command not completed')
+    if number(seen, 'E1', 'max_outstanding') != 1:
+        raise ValueError('phase E: the one-entry queue held more than one command')
     if number(seen, 'E3', 'vmpin_before_close') != number(seen, 'E3', 'vmpin_after_close'):
         raise ValueError('phase E: MEMLOCK charge of the UNKNOWN allocation was returned')
     if not seen.get(('E3', 'attached')):

@@ -38,15 +38,18 @@ measures time.
   the tracepoints must show no command on any controller; the pool and the
   destination must be unchanged.
 - E: the third controller's QEMU block backend fails reads of one sector
-  (`blkdebug`, configured by the launcher). A six-request read batch into a
-  separate 1 MiB dma-buf must return the native NVMe status with
-  `completed == 2`. The failing command must be issued exactly once and
-  every issued command must complete. The later requests must each be
-  either fully landed (when issued) or untouched. The allocation must then
-  be refused (`ESTALE`); after its fd is closed, the MEMLOCK charge and the
-  requester attachment stay, and importing the same dma-buf again fails
-  with `EBUSY`. Closing the pool's own allocation fd returns its charge and
-  drops its attachments.
+  (`blkdebug`), and its I/O queues hold one command (`mqes=1`); the guest
+  program runs on CPU 0, so it uses one of those queues. A six-request read
+  batch into a separate 1 MiB dma-buf, whose third request covers the
+  failing sector, must return the native NVMe status with
+  `completed == 2`. Each request allocation waits for the previous
+  completion, so the failure is seen before the fourth request is issued:
+  exactly three commands, one at a time, the failed one once, and the last
+  three requests untouched (a partial accept). The allocation must then be
+  refused (`ESTALE`); after its fd is closed, the MEMLOCK charge and the
+  requester attachment stay, and importing the same dma-buf again fails with
+  `EBUSY`. Closing the pool's own allocation fd returns its charge and drops
+  its attachments.
 
 The host oracle `validate.py` regenerates the three disk images, rebuilds
 the plan on its own (the random phases from the same generator, A3 from the
@@ -61,9 +64,8 @@ oracle to reject each mutation; it boots nothing.
 The tracepoints give the order of submissions and completions only; the
 number of commands outstanding at once and the count of completions that
 overtook an earlier submission are observations, not performance results.
-Which later requests of phase E were issued depends on when the failure
-completed, so the oracle takes that count from the tracepoints and checks
-the landed bytes against it.
+The oracle also takes the number of issued requests of phase E from the
+tracepoints and requires exactly three.
 
 ## Running
 
@@ -82,6 +84,6 @@ verifies both before booting.
 
 Not covered: GPU memory, an IOMMU, exporters other than the system heap,
 fences, a device reset during a batch, and any timing. A partial accept
-caused by a request-allocation failure cannot be produced in the guest; the
+caused by a request-allocation error cannot be produced in the guest; the
 host test `tests/network/peer/session/xdev_ext_peer_batch_test.py` covers
-it, together with deterministic completion orders.
+it, together with chosen completion orders and cancellation.

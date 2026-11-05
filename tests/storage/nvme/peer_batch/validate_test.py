@@ -16,13 +16,14 @@ import validate as v  # noqa: E402
 BOUNDARY = 5 * v.MIB
 
 
-def correct_log(issued=4, extra=()):
+def correct_log(issued=3, extra=()):
     lines = ['TAP version 13', 'OBSERVE case=queue max_hw_sectors_kb=1024',
              'OBSERVE case=pool dma_runs=9 boundary=%d' % BOUNDARY]
     obs = {'A1': 'setups=1 lens=2047 slba=4096', 'A2': 'setups=3 max_outstanding=3 completion_inversions=1',
            'B': 'setups=40 max_outstanding=17 completion_inversions=9',
            'C2': 'setups=32 max_outstanding=12 completion_inversions=4',
-           'E1': 'ret=16769 completed=2 status=16769 setups=%d d2_setups=1 completes=%d' % (issued, issued)}
+           'E1': 'ret=16769 completed=2 status=16769 setups=%d d2_setups=1 completes=%d max_outstanding=1' %
+           (issued, issued)}
     refusal = dict(v.REFUSALS)
     n = 0
     for case, write, descs in v.plans(BOUNDARY):
@@ -71,7 +72,7 @@ class Oracle(unittest.TestCase):
 
     def test_correct_run_passes(self):
         summary = self.run_with()
-        self.assertEqual(summary['e1']['issued'], 4)
+        self.assertEqual(summary['e1']['issued'], 3)
         self.assertEqual(summary['boundary'], BOUNDARY)
 
     def flip(self, offset):
@@ -84,7 +85,7 @@ class Oracle(unittest.TestCase):
                              ('A dump start', v.DUMP_A), ('A dump discontiguous request', v.DUMP_A + BOUNDARY),
                              ('A dump tail', v.DUMP_A + 4 * v.MIB + 1024), ('guard between dumps', 23 * v.MIB),
                              ('B dump', v.DUMP_B + 3 * v.MIB + 7), ('B dump end', v.DUMP_B + v.P_BYTES - 1),
-                             ('Q completed prefix', v.DUMP_Q + 10), ('Q later issued', v.DUMP_Q + 3 * 128 * v.KIB),
+                             ('Q completed prefix', v.DUMP_Q + 10), ('Q after the failure', v.DUMP_Q + 3 * 128 * v.KIB),
                              ('Q not issued', v.DUMP_Q + 5 * 128 * v.KIB), ('Q between requests', v.DUMP_Q + 70000),
                              ('last guard byte', v.DST_BYTES - 1)):
             with self.subTest(name=name):
@@ -94,9 +95,9 @@ class Oracle(unittest.TestCase):
         self.run_with(dest=self.flip(v.DUMP_Q + 2 * 128 * v.KIB + 5))
 
     def test_issued_count_must_match_the_landed_requests(self):
-        self.rejects(log=correct_log(issued=5))
-        self.rejects(log=correct_log(issued=2))
-        self.rejects(log=correct_log(issued=7))
+        for issued in (2, 4, 5, 6, 7):
+            with self.subTest(issued=issued):
+                self.rejects(log=correct_log(issued=issued))
 
     def test_source_and_error_images_must_be_unchanged(self):
         for name in ('source.raw', 'error.raw'):
@@ -127,7 +128,8 @@ class Oracle(unittest.TestCase):
             ('case=D4-target-past-pool ret=-34 completed=0', 'case=D4-target-past-pool ret=-34 completed=4'),
             ('case=D6-offset-wrap ret=-75', 'case=D6-offset-wrap ret=-34'),
             ('ret=16769 completed=2', 'ret=16769 completed=3'), ('ret=16769 completed=2', 'ret=-5 completed=2'),
-            ('d2_setups=1', 'd2_setups=2'), ('vmpin_after_close=7454720', 'vmpin_after_close=6406144'),
+            ('d2_setups=1', 'd2_setups=2'), ('completes=3 max_outstanding=1', 'completes=3 max_outstanding=2'),
+            ('vmpin_after_close=7454720', 'vmpin_after_close=6406144'),
             ('attached=0000:00:04.0', 'attached='),
             ('[    0.000000] Linux version 6.16.0-rc7', 'BUG: KASAN: use-after-free in nvme_pci_peer_batch'),
             ('[    0.000000] Linux version 6.16.0-rc7', 'WARNING: CPU: 1 PID: 1 at drivers/nvme/host/pci.c'),

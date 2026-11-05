@@ -134,7 +134,8 @@ GUEST
 chmod 755 "$ROOT/init"
 (cd "$ROOT" && find . | cpio -o -H newc --quiet | gzip -1) >"$OUT/initramfs.cpio.gz"
 
-# Private disks; ERR fails reads of one sector in QEMU's block layer (blkdebug).
+# Private disks; ERR fails reads of one sector in QEMU's block layer (blkdebug)
+# and has one-entry I/O queues (mqes=1), so it holds one command at a time.
 python3 -I "$SOURCE/$TEST_REL/validate.py" make-images "$OUT"
 printf '[inject-error]\nevent = "read_aio"\nerrno = "5"\nsector = "%s"\n' \
 	"$(python3 -I "$SOURCE/$TEST_REL/validate.py" err-sector)" >"$OUT/blkdebug.conf"
@@ -147,7 +148,7 @@ args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
 	-drive "file=$OUT/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"
 	-device nvme,drive=dst,serial=XDEVPBDST01,mdts=8
 	-drive "file=blkdebug:$OUT/blkdebug.conf:$OUT/error.raw,if=none,id=err,format=raw,cache=none,aio=threads"
-	-device nvme,drive=err,serial=XDEVPBERR01,mdts=8)
+	-device nvme,drive=err,serial=XDEVPBERR01,mdts=8,mqes=1)
 printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"; printf '\n' >>"$EV/qemu.command"
 { date -u +%FT%TZ; uptime; ps -eo pid,etimes,args | grep -E 'qemu-system' | grep -v grep | cut -c1-200 || true; } \
 	>"$EV/host-before-guest.txt"

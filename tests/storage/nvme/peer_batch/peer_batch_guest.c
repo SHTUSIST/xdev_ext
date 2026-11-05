@@ -18,15 +18,20 @@
  *   B  40 random disjoint read targets, shuffled, two duplicate source LBAs
  *   C  1 MiB write and 32 random disjoint LBA write targets
  *   D  refusals: no command may reach any controller, nothing changes
- *   E  one accepted command fails on ERR: completed prefix, no resubmission,
- *      the allocation is retained (UNKNOWN): later batches refused, MEMLOCK
- *      charge and device attachment kept after close, re-import refused
+ *   E  one accepted command fails on ERR, whose I/O queues hold one command
+ *      (QEMU mqes=1) while this program runs on one CPU: the next request
+ *      allocation waits for that failing completion, so exactly three of six
+ *      requests are issued (partial accept). Completed prefix, no
+ *      resubmission, and the allocation is retained (UNKNOWN): later batches
+ *      refused, MEMLOCK charge and device attachment kept after close,
+ *      re-import refused
  * P and the pool of E are dumped to DST with ordinary writes for the host.
  */
 #define _GNU_SOURCE
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <sched.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
 #include <linux/fs.h>
@@ -345,6 +350,12 @@ int main(int argc, char **argv)
 	}
 	CHECK(getenv("XDEV_EXT_PEER_BATCH_GUEST") && !strcmp(getenv("XDEV_EXT_PEER_BATCH_GUEST"), "1"), "guest-only opt-in");
 	ctrl_name[SRC] = argv[7]; ctrl_name[DST] = argv[8]; ctrl_name[ERR] = argv[9];
+	{
+		cpu_set_t one;
+		CPU_ZERO(&one);
+		CPU_SET(0, &one);
+		CHECK(!sched_setaffinity(0, sizeof(one), &one), "run on CPU 0: one hardware queue per controller");
+	}
 	CHECK(!setrlimit(RLIMIT_MEMLOCK, &unlimited), "MEMLOCK limit lifted for the imports");
 	srcb = open_ok(argv[1], O_RDONLY); srcng = open_ok(argv[2], O_RDONLY);
 	dstb = open_ok(argv[3], O_RDWR); dstng = open_ok(argv[4], O_RDWR);
@@ -367,6 +378,11 @@ int main(int argc, char **argv)
 		fclose(f);
 		printf("OBSERVE case=queue max_hw_sectors_kb=%u\n", kb);
 		CHECK(kb == 1024, "the controller takes exactly a 1 MiB command (QEMU mdts=8)");
+		snprintf(path, sizeof(path), "/sys/block/%sn1/queue/nr_requests", ctrl_name[ERR]);
+		f = fopen(path, "re");
+		CHECK(f && fscanf(f, "%u", &kb) == 1, "ERR queue request count readable");
+		fclose(f);
+		printf("OBSERVE case=queue err_nr_requests=%u\n", kb);
 	}
 	src_image = malloc(SRC_BYTES); err_image = malloc(ERR_BYTES); dst_expect = malloc(DST_BYTES);
 	p_expect = malloc(P_BYTES); q_expect = malloc(Q_BYTES); scratch = malloc(DST_BYTES);
@@ -537,12 +553,12 @@ int main(int argc, char **argv)
 		unsigned d2 = 0, k;
 		for (k = 0; k < t.nr_setup_list; k++) d2 += t.setup_slba[k] == 2304;
 		issued = t.setups[ERR];
-		printf("OBSERVE case=E1 ret=%d completed=%u status=%d setups=%u d2_setups=%u completes=%u\n",
-		       ret, batch.completed, batch.status, issued, d2, t.completes[ERR]);
+		printf("OBSERVE case=E1 ret=%d completed=%u status=%d setups=%u d2_setups=%u completes=%u max_outstanding=%u\n",
+		       ret, batch.completed, batch.status, issued, d2, t.completes[ERR], t.max_out);
 		CHECK(ret > 0 && batch.status == ret && batch.completed == 2,
 		      "native NVMe status of the failed command; completed is the two-request prefix");
-		CHECK(d2 == 1 && issued >= 3 && issued <= 6 && t.completes[ERR] == issued,
-		      "the failed command was issued once and never resubmitted; every issued command completed");
+		CHECK(d2 == 1 && issued == 3 && t.completes[ERR] == issued && t.max_out == 1,
+		      "one command at a time: the failed command was issued once, nothing after it, all completed");
 		for (k = 0; k < 6; k++) {
 			if (k == 2 || k >= issued) continue;
 			read_direct(errb, err_image, 65536, (off_t)(batch.desc[k].slba * LBA));
