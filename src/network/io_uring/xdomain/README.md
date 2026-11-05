@@ -138,6 +138,9 @@ per-channel data gates, startup results, actual RX lengths and flags, submitted
 TX lengths and TX completions. Startup uses internal coherent host memory;
 `backing_qualified=not_queried` remains explicit. This does not prove VRAM DMA,
 GPU visibility or GPU last use. Business PEER admission is unchanged.
+Successful startup hands over the same native rings and HopIDs without a reset.
+Failed startup closes admission and stops through the existing native barriers;
+unknown scratch DMA retains the entire allocation in the requester quota.
 
 A stage may also use the ring's IOU_UMEM pool (host pages) instead of a PEER
 allocation, for TX and for RX at stage 0. At bind the requester maps every
@@ -153,9 +156,6 @@ comes from its header inside each frame). An element that ends with unknown
 device access keeps the whole mapping, as a PEER region is quarantined: the
 mapping is never unmapped, the batch's frames are sequestered, and the
 stage's checked unbind refuses release so the session keeps its UMEM pins.
-Successful startup hands over the same native rings and HopIDs without a reset.
-Failed startup closes admission and stops through the existing native barriers;
-unknown scratch DMA retains the entire allocation in the requester quota.
 
 The read-only module parameter `poll_completions` defaults to false. Probe
 snapshots it before allocating rings. When enabled, every control and data
