@@ -17,10 +17,12 @@ static _Thread_local uint64_t production_poll_pass;
 #define stack_ring_alloc_tx shared_poll_alloc_tx
 #define stack_ring_alloc_rx shared_poll_alloc_rx
 #define stack_ring_stop shared_poll_ring_stop
+#define stack_ring_rx shared_poll_ring_rx
 #include "stack_boundary.c"
 #undef stack_ring_alloc_tx
 #undef stack_ring_alloc_rx
 #undef stack_ring_stop
+#undef stack_ring_rx
 static unsigned allocation_fail,allocation_seen;
 void production_poll_fail_allocation(unsigned ordinal){allocation_fail=ordinal;allocation_seen=0;}
 static void production_poll_allocation(struct tb_nhi *nhi)
@@ -223,6 +225,23 @@ void stack_ring_stop(struct tb_ring *ring)
   late_injected=production_poll_deliver_control(1-info->endpoint);
  }
  shared_poll_ring_stop(ring);
+}
+/* Interrupt before the gate: while rings start, the first control RX post of
+ * an endpoint whose interrupt gate is still closed receives one pending
+ * control message of its peer, and its completion interrupts at once. */
+static unsigned prestart_endpoint=2,prestart_injected;
+void production_poll_irq_before_gate(unsigned endpoint){prestart_endpoint=endpoint;prestart_injected=0;}
+unsigned production_poll_prestart_injected(void){return prestart_injected;}
+int stack_ring_rx(struct tb_ring *ring,struct ring_frame *frame)
+{
+ int ret=shared_poll_ring_rx(ring,frame);
+ struct stack_ring_info *info=ring_info(ring);
+ if(!ret&&prestart_endpoint==info->endpoint&&info->control&&!link(info->endpoint)->poll_irq_live){
+  stack_record((struct stack_event){.kind=1007,.endpoint=info->endpoint,.owner=(uintptr_t)ring});
+  prestart_injected=production_poll_deliver_control(1-info->endpoint);
+  if(prestart_injected)prestart_endpoint=2;
+ }
+ return ret;
 }
 /* start_poll lock order: return while another context holds this link lock. */
 static pthread_t lock_thread;

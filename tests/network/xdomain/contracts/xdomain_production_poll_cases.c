@@ -28,6 +28,8 @@ unsigned production_poll_injected(void);
 void production_poll_irq_at_stop(unsigned);
 unsigned production_poll_late_injected(void);
 int production_poll_lock_order(unsigned);
+void production_poll_irq_before_gate(unsigned);
+unsigned production_poll_prestart_injected(void);
 static size_t native_callbacks(struct stack_world *w,unsigned endpoint,bool data)
 {
  size_t n=0;for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
@@ -516,6 +518,31 @@ static void irq_stop_late_interrupt(void)
   safety(w);stack_destroy(w);
  }
 }
+static void irq_interrupt_before_gate(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_world(&c);irq_startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_suspend(w,1)==0,"receiver link suspends and stops its rings");
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_start(w,0,c.first_seq,0)==0,"sender announces while the receiver rings are stopped");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ size_t begin=stack_log_count(w);
+ production_poll_irq_before_gate(1);
+ CHECK(stack_resume(w,1)==0,"receiver link resumes and starts its rings again");
+ for(unsigned i=0;i<100;i++)pump(w,1000000);
+ CHECK(production_poll_prestart_injected()==1,"a peer control message completes into the receiver control RX before its interrupt gate opens");
+ uint64_t ring=0;bool marked=false,queued=false,enabled=false;
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind==1007&&e.endpoint==1)ring=e.owner;
+  if(!ring||e.endpoint!=1)continue;
+  if(e.kind==1002&&e.owner==ring&&!marked){marked=true;continue;}
+  if(marked&&!queued&&e.kind==1004){CHECK(!e.length,"the gate opening queues the drain without delay");queued=true;}
+  if(queued&&e.kind==1003&&e.owner==ring)enabled=true;
+ }
+ CHECK(marked&&queued&&enabled,"an interrupt before the gate is drained and re-enabled once the gate opens");
+ CHECK(production_poll_rx_irq(1,true)==1,"the receiver control RX interrupt ends enabled");
+ safety(w);stack_destroy(w);
+}
 static void irq_start_poll_lock_order(void)
 {
  struct stack_config c=geometry();struct stack_world *w=irq_held_rts(&c);
@@ -541,7 +568,7 @@ static const struct named poll_cases[]={
  {"irq-drain-rearm-once",irq_drain_rearm_once},{"irq-lost-wakeup-latching",irq_lost_wakeup_latching},
  {"irq-lost-wakeup-nonlatching",irq_lost_wakeup_nonlatching},{"pure-rts-waits-fallback",pure_rts_waits_fallback},
  {"irq-stop-pending-drain",irq_stop_pending_drain},{"irq-stop-late-interrupt",irq_stop_late_interrupt},
- {"irq-start-poll-lock-order",irq_start_poll_lock_order},
+ {"irq-start-poll-lock-order",irq_start_poll_lock_order},{"irq-interrupt-before-gate",irq_interrupt_before_gate},
 };
 int main(int argc,char **argv)
 {
