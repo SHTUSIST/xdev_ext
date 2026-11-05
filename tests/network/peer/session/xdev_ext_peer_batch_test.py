@@ -696,6 +696,18 @@ int main(void)
  ret = run();
  CHECK(!ret && ub.completed == 1 && images_match() && clean(0), "the same allocation serves the next batch");
 
+ /* --- Partial accept when the failure completes while an allocation waits. --- */
+ begin(16, RUNS3);
+ batch_init(false, 6);
+ for (i = 0; i < 6; i++) desc(i, (6 * i + 1) * (64U << 10), 900 + 512 * i, 192U << 10);
+ expect(0); expect(1);
+ tag_limit = 1; outcome[2] = NVME_ERR;
+ ret = run();
+ CHECK(ret == 0x281 && ub.completed == 2 && ub.status == 0x281 && issued == 3 && once_each(3),
+       "one tag: the failure completes during the next allocation, so nothing after it is issued");
+ CHECK(images_match_except(13 * (64U << 10), 192U << 10) && region.quarantined && clean(1),
+       "requests after the failure untouched; the failed command's list retained");
+
  /* --- Partial accept after an observed failure; UNKNOWN retention. --- */
  begin(16, RUNS3);
  batch_init(false, 6);
@@ -854,7 +866,15 @@ MUTANTS = [
     ('one provider page per command', 'PCI_BATCH', 'ret = xdev_ext_peer_lease_split(allocation,',
      'ret = xdev_ext_peer_file_acquire(allocation,'),
     ('issue continues after an observed failure', 'PCI_BATCH',
-     '\t\tif (atomic_read(&b->failed))\n\t\t\tbreak;\n', ''),
+     '\t\tif (atomic_read(&b->failed)) {\n\t\t\tblk_mq_free_request(req);\n\t\t\tbreak;\n\t\t}\n', ''),
+    ('failure checked only before the allocation', 'PCI_BATCH',
+     '\t\treq = blk_mq_alloc_request(ns->queue, nvme_req_op(&c->cmd), 0);\n'
+     '\t\tif (IS_ERR(req)) {\n\t\t\tissue_err = PTR_ERR(req);\n\t\t\tbreak;\n\t\t}\n'
+     '\t\t/* Checked after the allocation, which may wait for a failed completion. */\n'
+     '\t\tif (atomic_read(&b->failed)) {\n\t\t\tblk_mq_free_request(req);\n\t\t\tbreak;\n\t\t}\n',
+     '\t\tif (atomic_read(&b->failed))\n\t\t\tbreak;\n'
+     '\t\treq = blk_mq_alloc_request(ns->queue, nvme_req_op(&c->cmd), 0);\n'
+     '\t\tif (IS_ERR(req)) {\n\t\t\tissue_err = PTR_ERR(req);\n\t\t\tbreak;\n\t\t}\n'),
     ('one command in flight at a time', 'PCI_BATCH', '\t\tblk_execute_rq_nowait(req, false);\n',
      '\t\tblk_execute_rq_nowait(req, false);\n\t\twhile (atomic_read(&b->pending) > 1)\n'
      '\t\t\twait_for_completion_io_timeout(&b->done, 1);\n'),

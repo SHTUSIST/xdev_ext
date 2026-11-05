@@ -3596,11 +3596,14 @@ static int nvme_pci_peer_batch(struct nvme_ns *ns,
 		struct nvme_pci_peer_cmd *c = &b->cmd[i];
 		struct request *req;
 
-		if (atomic_read(&b->failed))
-			break;
 		req = blk_mq_alloc_request(ns->queue, nvme_req_op(&c->cmd), 0);
 		if (IS_ERR(req)) {
 			issue_err = PTR_ERR(req);
+			break;
+		}
+		/* Checked after the allocation, which may wait for a failed completion. */
+		if (atomic_read(&b->failed)) {
+			blk_mq_free_request(req);
 			break;
 		}
 		nvme_init_request(req, &c->cmd);
