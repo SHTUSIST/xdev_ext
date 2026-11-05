@@ -8,7 +8,7 @@ output=$(realpath "$2")
 [[ -f "$root/init" && -x "$root/bin/busybox" && ! -e "$root/opt/deflate-original" ]]
 mkdir -p "$root/opt/deflate-original"
 cp -a "$output/." "$root/opt/deflate-original/"
-for app in sh mount mkdir cat grep uname sha256sum dmesg sync poweroff; do
+for app in sh mount mkdir cat grep uname id sha256sum dmesg sync poweroff; do
  ln -sf busybox "$root/bin/$app"
 done
 ldd "$output/capture" | awk '/=> \// {print $3} /^[[:space:]]*\// {print $1}' > "$output/guest-libraries.txt"
