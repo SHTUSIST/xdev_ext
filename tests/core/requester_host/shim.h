@@ -59,7 +59,11 @@ typedef unsigned int gfp_t;
 #define WARN_ON_ONCE(x) (!!(x))
 #define likely(x) (x)
 #define unlikely(x) (x)
-#define READ_ONCE(x) (x)
+/* Each shared read (READ_ONCE, atomic_read, atomic_read_acquire) is an
+ * interleaving point: right after it, boundary.c runs an action a case
+ * scheduled, as another CPU could at that point (rh_schedule_after_reads). */
+void rh_after_shared_read(void);
+#define READ_ONCE(x) ({ __typeof__(x) rh_read_ = (x); rh_after_shared_read(); rh_read_; })
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
 #define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
@@ -73,7 +77,9 @@ typedef unsigned int gfp_t;
 typedef struct { _Atomic int counter; } atomic_t;
 typedef struct { _Atomic long long counter; } atomic64_t;
 #define ATOMIC_INIT(v) { (v) }
-#define atomic_read(a) atomic_load(&(a)->counter)
+#define atomic_read(a) ({ int rh_read_ = atomic_load(&(a)->counter); rh_after_shared_read(); rh_read_; })
+#define atomic_read_acquire(a) ({ int rh_read_ = atomic_load_explicit(&(a)->counter, \
+	memory_order_acquire); rh_after_shared_read(); rh_read_; })
 #define atomic_set(a, v) atomic_store(&(a)->counter, (v))
 #define atomic_inc(a) ((void)atomic_fetch_add(&(a)->counter, 1))
 #define atomic_dec(a) ((void)atomic_fetch_sub(&(a)->counter, 1))

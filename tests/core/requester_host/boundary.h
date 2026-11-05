@@ -26,6 +26,12 @@ dma_addr_t rh_window(const struct device *dev, unsigned index, size_t offset);
 void rh_reset(void);
 unsigned rh_count(enum rh_kind kind);
 
+/* Run @fn once, right after the @n-th shared read of the unit from now
+ * (n >= 1), as another CPU could at that point; rh_scheduled_runs counts the
+ * scheduled actions that ran. */
+void rh_schedule_after_reads(unsigned n, void (*fn)(void));
+extern unsigned rh_scheduled_runs;
+
 /* Fixture session: the core keeps its session private; the requester reads
  * only its pool through xdev_ext_mech_session_pool(). */
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; };
