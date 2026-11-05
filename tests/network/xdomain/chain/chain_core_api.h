@@ -29,6 +29,7 @@ __u32 chain_frame_state_free(void); /* XDEV_EXT_MECH_F_K_FREE: kernel partition,
 __u32 chain_frame_state_user(void); /* XDEV_EXT_MECH_F_USER: lent back to user space */
 __u32 chain_frame_state_sequestered(void); /* XDEV_EXT_MECH_F_SEQUESTERED: never reused */
 int chain_stage_unbind_checked(struct xdev_ext_mech_session *s, __u32 i);
+int chain_stage_unbind_now(struct xdev_ext_mech_session *s, __u32 i);
 __u64 chain_session_done(struct xdev_ext_mech_session *s);
 __u64 chain_session_aborted(struct xdev_ext_mech_session *s);
 __u64 chain_session_counter(struct xdev_ext_mech_session *s, __u32 c);

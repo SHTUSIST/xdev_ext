@@ -32,9 +32,10 @@ BASE_CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done
               'consumer_holds_ack', 'stale_ack_after_reuse')
 # NAME_early: both XDOMAIN stages in EARLY mode (paired receive grants).
 CASES = BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',)
-# --pool host only: element synchronization, UNKNOWN custody, pool geometry.
+# --pool host only: element synchronization, UNKNOWN custody, pool geometry,
+# release of a settled stage.
 HOST_CASES = ('host_sync_order', 'host_sync_order_early', 'host_unknown_retained',
-              'host_misaligned_refused')
+              'host_misaligned_refused', 'host_destroy_unmaps')
 # Worker entry points; their call-graph closure inside the core text is compiled.
 CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
@@ -135,6 +136,12 @@ MUTATIONS = {
     'host-peer-member': dict(case='chain_same_worker', pool='host', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c',
          'pool_kind == XDEV_EXT_MECH_POOL_PEER ? &xd_member : &xd_member_host', '&xd_member')]),
+    # The family's fini forgets the host-page unbind, so a host-page stage takes
+    # the PEER unbind and keeps its whole mapping (review of d3dced6).
+    'review-fini-skips-host-unbind': dict(case='host_destroy_unmaps', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c',
+         '\tif (ns->admitted && ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA) {\n'
+         '\t\txdev_ext_requester_unbind_host(&ns->rq);\n\t\tns->admitted = false;\n\t}\n', '')]),
     'tx-wrong-frame': dict(case='chain_same_worker', edits=[
         ('io_uring/family/xdev_ext_netfam.c',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), off, buf_len,',

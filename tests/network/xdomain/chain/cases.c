@@ -684,6 +684,45 @@ static void host_misaligned_refused(void)
 	      "nothing was mapped for either NHI");
 }
 
+/* --pool host: four groups end quiesced, then each XDOMAIN stage is released
+ * in the order of the core's release decision.  Its checked unbind allows
+ * release, and the class unbind, through the network family's fini, unmaps
+ * every pool page of that stage's NHI exactly once, with the mapping's size
+ * and direction and without CPU sync. */
+static void host_destroy_unmaps(void)
+{
+	struct { struct xdev_ext_mech_session *s; unsigned stage, endpoint, dir; } xd[2];
+
+	up();
+	xd[0].s = tx; xd[0].stage = 1; xd[0].endpoint = 0; xd[0].dir = TO_DEVICE;
+	xd[1].s = rx; xd[1].stage = 0; xd[1].endpoint = 1; xd[1].dir = FROM_DEVICE;
+	start(4);
+	settle(50);
+	finished(4);
+	for (unsigned i = 0; i < 2; i++) {
+		unsigned seen = 0, mask = 0;
+
+		CHECK(chain_stage_unbind_now(xd[i].s, xd[i].stage) == 0,
+		      "a settled XDOMAIN stage passes its checked unbind and unbinds");
+		for (size_t k = 0; k < chain_event_count(); k++) {
+			const struct chain_event *e = chain_event_get(k);
+			int64_t off;
+
+			if (e->kind != CHAIN_EV_DMA_UNMAP || e->endpoint != xd[i].endpoint)
+				continue;
+			seen++;
+			off = offset_of(xd[i].endpoint, CHAIN_DEV_NHI, e->address);
+			CHECK(e->device == chain_device(xd[i].endpoint, CHAIN_DEV_NHI), "unmap is for the NHI");
+			CHECK(e->length == FRAME && e->member == xd[i].dir && e->control_type == 1,
+			      "unmap uses the mapping size and direction, without CPU sync");
+			CHECK(off >= 0 && off % FRAME == 0 && !(mask & (1u << (off / FRAME))),
+			      "an unmapped address is one pool page, unmapped once");
+			mask |= 1u << (off / FRAME);
+		}
+		CHECK(seen == FRAMES && mask == (1u << FRAMES) - 1, "every pool page unmapped at release");
+	}
+}
+
 /* No Thunderbolt link behind the token: CREATE fails cleanly with ENODEV. */
 static void no_link_enodev(void)
 {
@@ -721,6 +760,7 @@ int main(int argc, char **argv)
 	else if (!strcmp(base, "host_sync_order") && chain_host_mode()) host_sync_order();
 	else if (!strcmp(base, "host_unknown_retained") && !early && chain_host_mode()) host_unknown_retained();
 	else if (!strcmp(base, "host_misaligned_refused") && !early && chain_host_mode()) host_misaligned_refused();
+	else if (!strcmp(base, "host_destroy_unmaps") && !early && chain_host_mode()) host_destroy_unmaps();
 	else return 2;
 	printf("CHAIN_CASE %s assertions=%u\n", case_name, assertions);
 	return 0;
