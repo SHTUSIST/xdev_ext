@@ -75,7 +75,6 @@ static_assert(sizeof(struct nvme_xdev_ext_peer_slot) %
 	__alignof__(struct nvme_xdev_ext_peer_trace) == 0);
 
 #define NVME_XDEV_EXT_PEER_MAX_PIECES 256U
-#define NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT 12
 
 static const struct xdev_ext_stor_hooks nvme_xdev_ext_stor_hooks = {
 	.hdr = { .family = XDEV_EXT_FAMILY_STORAGE },
@@ -463,45 +462,17 @@ static int nvme_xdev_ext_member_encode_dptr(void *member,
 {
 	struct nvme_xdev_ext_mech_stage *p = member;
 	struct nvme_command *cmd = (void *)command->bytes;
-	struct nvme_sgl_desc *sgl = list_cpu;
-	u32 pos, n = 0;
-	u64 prp1, prp2;
-	int ret;
+	/* encode() already admitted these native RW fields before mapping. */
+	struct xdev_ext_stor_rw rw = {
+		.slba = le64_to_cpu(cmd->rw.slba),
+		.nlb = (u64)le16_to_cpu(cmd->rw.length) + 1,
+		.write = cmd->rw.opcode == nvme_cmd_write,
+	};
+	u32 nsid = le32_to_cpu(cmd->rw.nsid);
 
-	if (nvme_ctrl_sgl_supported(p->ns->ctrl)) {
-		ret = xdev_ext_peer_nvme_sgl_build(spans, nr, work,
-			min(capacity, nvme_xdev_ext_stor_hooks.max_extents),
-			nvme_xdev_ext_stor_hooks.extent_align_mask, &n);
-		if (ret)
-			return ret;
-		for (pos = 0; pos < n; pos++)
-			sgl[pos] = (struct nvme_sgl_desc) {
-				.addr = cpu_to_le64(work[pos].addr),
-				.length = cpu_to_le32(work[pos].len),
-				.type = NVME_SGL_FMT_DATA_DESC << 4,
-			};
-		if (n == 1)
-			cmd->rw.dptr.sgl = sgl[0];
-		else
-			cmd->rw.dptr.sgl = (struct nvme_sgl_desc) {
-				.addr = cpu_to_le64(list_dma),
-				.length = cpu_to_le32(n * sizeof(*sgl)),
-				.type = NVME_SGL_FMT_LAST_SEG_DESC << 4,
-			};
-	} else {
-		u64 *list = list_cpu;
-
-		ret = xdev_ext_peer_nvme_prp_build(spans, nr,
-			NVME_XDEV_EXT_PEER_MIN_PAGE_SHIFT, list_dma,
-			list, list_bytes / sizeof(*list), &prp1, &prp2, &n);
-		if (ret)
-			return ret;
-		for (pos = 0; pos < n; pos++)
-			list[pos] = cpu_to_le64(list[pos]);
-		cmd->rw.dptr.prp1 = cpu_to_le64(prp1);
-		cmd->rw.dptr.prp2 = cpu_to_le64(prp2);
-	}
-	return 0;
+	return nvme_xdev_ext_peer_build_cmd(&rw, nsid,
+		nvme_ctrl_sgl_supported(p->ns->ctrl), false, spans, nr,
+		work, capacity, list_cpu, list_dma, list_bytes, cmd);
 }
 
 static void nvme_xdev_ext_member_request_init(void *member, struct request *req,

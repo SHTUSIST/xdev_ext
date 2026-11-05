@@ -23,6 +23,7 @@
 #include <linux/pci.h>
 #ifdef CONFIG_XDEV_EXT_MECH
 #include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_storfam_runtime.h>
 #include <uapi/linux/xdev_ext_peer.h>
 #include <trace/events/xdev_ext.h>
 #include "xdev_ext_peer_nvme_core.h"
@@ -3334,6 +3335,8 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
 {
  struct nvme_dev *dev = to_nvme_dev(ns->ctrl);
  struct xdev_ext_peer_nvme_plan plan;
+ struct xdev_ext_stor_rw rw;
+ struct xdev_ext_stor_extent span;
  struct xdev_ext_peer_fd_lease handle = {};
  struct nvme_xdev_ext_peer_trace trace = { .leases = &handle, .nr_leases = 1, .origin = "U" };
  struct nvme_command cmd = {};
@@ -3356,14 +3359,16 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  ret = xdev_ext_peer_file_acquire(allocation, to_pci_dev(dev->dev),
        u->generation, u->offset, u->bytes, write ? DMA_TO_DEVICE : DMA_FROM_DEVICE, &handle);
  if (ret) return ret;
- if (handle.lease.dma_address & 3) { ret = -EINVAL; goto release; }
- cmd.rw.opcode = plan.opcode;
- cmd.rw.nsid = cpu_to_le32(ns->head->ns_id);
- cmd.rw.slba = cpu_to_le64(plan.slba);
- cmd.rw.length = cpu_to_le16(plan.nlb);
- cmd.rw.dptr.sgl.addr = cpu_to_le64(handle.lease.dma_address);
- cmd.rw.dptr.sgl.length = cpu_to_le32(plan.bytes);
- cmd.rw.dptr.sgl.type = NVME_SGL_FMT_DATA_DESC << 4;
+ rw = (struct xdev_ext_stor_rw) {
+  .slba = plan.slba, .nlb = (u64)plan.nlb + 1,
+  .byte_length = plan.bytes, .write = write,
+ };
+ span = (struct xdev_ext_stor_extent) {
+  .addr = handle.lease.dma_address, .len = handle.lease.len,
+ };
+ ret = nvme_xdev_ext_peer_build_cmd(&rw, ns->head->ns_id, true, true,
+       &span, 1, &span, 1, NULL, 0, 0, &cmd);
+ if (ret) goto release;
  req = blk_mq_alloc_request(ns->queue, nvme_req_op(&cmd), 0);
  if (IS_ERR(req)) { ret = PTR_ERR(req); goto release; }
  nvme_init_request(req, &cmd);
@@ -3384,11 +3389,11 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  /* Errors/cancellation do not prove that no peer DMA can still arrive.
   * Retain mapping/allocation on all accepted failures; never retry here.
   */
- xdev_ext_peer_fd_release(&handle, ret == 0);
+ xdev_ext_stor_leases_retire(&handle, 1, ret == 0);
  nvme_xdev_ext_peer_trace_release(&trace, ret == 0);
  return ret;
 release:
- xdev_ext_peer_fd_release(&handle, true);
+ xdev_ext_stor_leases_retire(&handle, 1, true);
  return ret;
 }
 #endif
