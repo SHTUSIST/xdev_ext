@@ -60,13 +60,15 @@ static void xdev_ext_requester_host_free(struct xdev_ext_requester_host *h)
  * page boundary (else every element spans two pages) and end on one (else
  * the device would see bytes outside the pool).
  */
-static int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
-		struct xdev_ext_mech_stage *st, struct xdev_ext_mech_pool *pool,
-		struct pci_dev *pdev)
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
+		struct xdev_ext_mech_stage *st, struct pci_dev *pdev)
 {
+	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(st->s);
 	struct xdev_ext_requester_host *h;
 	u32 i;
 
+	if (pool->kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !pdev || rq->pdev)
+		return -EINVAL;
 	if (!pool->pages || !pool->nr_pages || !pool->frame_size ||
 	    (pool->frame_size & (pool->frame_size - 1)) || pool->first_page_off ||
 	    pool->size != (u64)pool->nr_pages << PAGE_SHIFT)
@@ -119,6 +121,28 @@ static int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
 	rq->pdev = pci_dev_get(pdev);
 	return 0;
 }
+EXPORT_SYMBOL_GPL(xdev_ext_requester_bind_host);
+
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq)
+{
+	struct xdev_ext_requester_host *h = rq->host;
+	unsigned long flags;
+
+	rq->host = NULL;
+	if (h && xdev_ext_requester_host_busy(h)) {
+		/* The device may still access these pages: never unmap them. */
+		kvfree(h->dma);
+		h->dma = NULL;
+		spin_lock_irqsave(&xdev_ext_requester_host_lock, flags);
+		list_add_tail(&h->node, &xdev_ext_requester_host_retained);
+		spin_unlock_irqrestore(&xdev_ext_requester_host_lock, flags);
+	} else if (h) {
+		xdev_ext_requester_host_unmap(h, h->nr_pages);
+		xdev_ext_requester_host_free(h);
+	}
+	xdev_ext_requester_unbind(rq);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_requester_unbind_host);
 
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
 				  enum dma_data_direction dir, u64 *dma)
@@ -200,11 +224,7 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 	struct xdev_ext_admit_facts f = { .distance = -1 };
 	int ret;
 
-	if (!pdev || rq->pdev)
-		return -EINVAL;
-	if (pool->kind == XDEV_EXT_MECH_POOL_IOU_UMEM)
-		return xdev_ext_requester_bind_host(rq, st, pool, pdev);
-	if (pool->kind != XDEV_EXT_MECH_POOL_PEER)
+	if (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)
 		return -EINVAL;
  if (st->create_reporting) {
   st->create_requester = pci_dev_get(pdev);
@@ -260,21 +280,6 @@ EXPORT_SYMBOL_GPL(xdev_ext_requester_bind);
 
 void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
 {
-	struct xdev_ext_requester_host *h = rq->host;
-	unsigned long flags;
-
-	rq->host = NULL;
-	if (h && xdev_ext_requester_host_busy(h)) {
-		/* The device may still access these pages: never unmap them. */
-		kvfree(h->dma);
-		h->dma = NULL;
-		spin_lock_irqsave(&xdev_ext_requester_host_lock, flags);
-		list_add_tail(&h->node, &xdev_ext_requester_host_retained);
-		spin_unlock_irqrestore(&xdev_ext_requester_host_lock, flags);
-	} else if (h) {
-		xdev_ext_requester_host_unmap(h, h->nr_pages);
-		xdev_ext_requester_host_free(h);
-	}
 	pci_dev_put(rq->pdev);
 	rq->pdev = NULL;
 }

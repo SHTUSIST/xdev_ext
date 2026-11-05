@@ -36,6 +36,8 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #define xdev_ext_requester_host_lease stackfake_requester_host_lease
 #define xdev_ext_requester_host_release stackfake_requester_host_release
 #define xdev_ext_requester_host_settled stackfake_requester_host_settled
+#define xdev_ext_requester_bind_host stackfake_requester_bind_host
+#define xdev_ext_requester_unbind_host stackfake_requester_unbind_host
 #define xdev_ext_mech_session_pool stackfake_session_pool
 #define xdev_ext_mech_session_layout stackfake_session_layout
 #define xdev_ext_mech_session_depth stackfake_session_depth
@@ -78,6 +80,8 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #undef xdev_ext_requester_host_lease
 #undef xdev_ext_requester_host_release
 #undef xdev_ext_requester_host_settled
+#undef xdev_ext_requester_bind_host
+#undef xdev_ext_requester_unbind_host
 #undef xdev_ext_mech_session_pool
 #undef xdev_ext_mech_session_layout
 #undef xdev_ext_mech_session_depth
@@ -116,12 +120,7 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #else
 #define CHAIN_STUB(name) name
 #endif
-/* The recording requester bind is wrapped by DMA-BUF and host-page modes. */
-#if defined(CHAIN_REAL_PEER) || defined(CHAIN_HOST_POOL)
-#define CHAIN_RQ_STUB(name) chain_stub_##name
-#else
-#define CHAIN_RQ_STUB(name) name
-#endif
+
 
 /* Real definitions in other units (core, peer pool, XDOMAIN class). */
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
@@ -129,6 +128,9 @@ int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 le
 void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len,
 				     bool quiesced);
 int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq);
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+				 struct pci_dev *pdev);
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq);
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_session_id(const struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_batch_id(const struct xdev_ext_mech_batch *b);
@@ -501,7 +503,7 @@ static void chain_link_payload(unsigned from, unsigned long long tx_dma, unsigne
 }
 
 /* Recording requester bind; the stage keeps its own device as requester. */
-int CHAIN_RQ_STUB(xdev_ext_requester_bind)(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+int CHAIN_STUB(xdev_ext_requester_bind)(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
 			    struct pci_dev *pdev, u32 flags)
 {
 	struct chain_device *dev = chain_device_of(pdev);
@@ -523,7 +525,7 @@ int CHAIN_RQ_STUB(xdev_ext_requester_bind)(struct xdev_ext_requester *rq, struct
 		.device = pdev, .stage = st->index, .member = 99 });
 	return 0;
 }
-void CHAIN_RQ_STUB(xdev_ext_requester_unbind)(struct xdev_ext_requester *rq) { rq->pdev = NULL; }
+void CHAIN_STUB(xdev_ext_requester_unbind)(struct xdev_ext_requester *rq) { rq->pdev = NULL; }
 
 #ifdef CHAIN_REAL_PEER
 /* Host 1 (endpoint 0): real REGISTER/claim/requester bind/leases on a
@@ -784,34 +786,23 @@ void chain_host_dma_unmap(const void *device, uint64_t dma, uint32_t len, bool q
 		.worker = chain_core_current_worker() });
 }
 
-int chain_real_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
-			      struct pci_dev *pdev, u32 flags);
-void chain_real_requester_unbind(struct xdev_ext_requester *rq);
-/* A host-page stage binds through the real requester; the event records what
- * the bind reported, read by the cases. */
-int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
-			    struct pci_dev *pdev, u32 flags)
+/* The network family's host-page bind comes here (renamed in the family
+ * unit): the real requester maps the pool for the stage's own NHI, and the
+ * event records what the bind reported, read by the cases. */
+int chain_host_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st, struct pci_dev *pdev)
 {
 	struct chain_device *dev = chain_device_of(pdev);
 	int ret;
 
-	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_IOU_UMEM)
-		return chain_stub_xdev_ext_requester_bind(rq, st, pdev, flags);
 	if (!dev || (int)dev->endpoint != session_endpoint(st->s))
 		return -EXDEV;
-	ret = chain_real_requester_bind(rq, st, pdev, flags);
+	ret = xdev_ext_requester_bind_host(rq, st, pdev);
 	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint, .device = pdev,
 		.stage = st->index, .member = 99, .address = rq->adm.backing,
 		.length = st->caps.reachability, .offset = rq->adm.refused, .status = ret });
 	return ret;
 }
-void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
-{
-	if (rq->host)
-		chain_real_requester_unbind(rq);
-	else
-		chain_stub_xdev_ext_requester_unbind(rq);
-}
+void chain_host_unbind(struct xdev_ext_requester *rq) { xdev_ext_requester_unbind_host(rq); }
 /* The network family's host leases come here (renamed in the family unit):
  * a granted element becomes a live lease of the NHI for the device model,
  * and its address must be the NHI's mapping of exactly that page and offset. */
@@ -867,7 +858,10 @@ void chain_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool qu
 	xdev_ext_requester_host_release(rq, dma, len, quiesced);
 }
 #else
-/* PEER modes: the family never reaches a host lease. */
+/* PEER modes: the family never reaches a host-page bind or lease. */
+int chain_host_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st, struct pci_dev *pdev)
+{ (void)rq; (void)st; (void)pdev; abort(); }
+void chain_host_unbind(struct xdev_ext_requester *rq) { (void)rq; abort(); }
 int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_data_direction dir,
 		     u64 *dma)
 { (void)rq; (void)off; (void)len; (void)dir; (void)dma; abort(); }

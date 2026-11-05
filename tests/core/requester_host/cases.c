@@ -25,6 +25,9 @@ int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 le
 void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len,
 				     bool quiesced) __attribute__((weak));
 int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq) __attribute__((weak));
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+				 struct pci_dev *pdev) __attribute__((weak));
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq) __attribute__((weak));
 
 static unsigned assertions;
 static const char *case_name;
@@ -44,7 +47,8 @@ static unsigned base_allocs;
 static void need_api(void)
 {
 	CHECK(xdev_ext_requester_host_lease && xdev_ext_requester_host_release &&
-	      xdev_ext_requester_host_settled, "host requester lease/release/settled API exists");
+	      xdev_ext_requester_host_settled && xdev_ext_requester_bind_host &&
+	      xdev_ext_requester_unbind_host, "host requester bind/lease/release/settled/unbind API exists");
 }
 
 /* An IOU_UMEM pool as io_xdev_ext_umem_mech_pool_bind() describes one. */
@@ -105,8 +109,11 @@ static void check_maps(u32 nr_pages, int dir)
 
 static void host_bind_maps_every_page(void)
 {
+	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "IOU_UMEM pool binds the NHI");
+	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == -EINVAL && !rq.pdev && !rh_events,
+	      "the PEER bind still refuses an IOU_UMEM pool");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "IOU_UMEM pool binds the NHI");
 	check_maps(4, DMA_TO_DEVICE);
 	CHECK(rq.pdev == &nhi, "the requester is the NHI");
 	CHECK(rh_count(RH_DESCRIBE) == 0 && rh_count(RH_PREMAP) == 0, "no PEER provider call");
@@ -120,27 +127,29 @@ static void host_bind_maps_every_page(void)
 	CHECK(rq.adm.reachability == XDEV_EXT_CAP_HOST_DMA_MAPPED && rq.adm.refused == 0,
 	      "admission record: host DMA mapped, nothing refused");
 	CHECK(nhi.refs > 1, "a bound mapping holds the NHI");
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == -EINVAL, "a bound requester cannot bind again");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == -EINVAL, "a bound requester cannot bind again");
 	CHECK(rh_count(RH_MAP) == 4, "the refused second bind maps nothing");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(nhi.refs == 1 && rh_live_allocs == base_allocs, "unbind returns every reference and allocation");
 }
 
 static void host_bind_rx_maps_from_device(void)
 {
+	need_api();
 	host_pool(4096, 3, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "RX stage binds an IOU_UMEM pool");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "RX stage binds an IOU_UMEM pool");
 	check_maps(3, DMA_FROM_DEVICE);
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(rh_count(RH_UNMAP) == 3, "each RX page unmapped at unbind");
 }
 
 static void refused_geometry(u32 frame_size, u32 nr_frames, u32 first_page_off, u32 nr_pages)
 {
+	need_api();
 	host_pool(frame_size, nr_frames, first_page_off, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	if (nr_pages)
 		session.pool.nr_pages = nr_pages;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == -EINVAL, "pool geometry refused with -EINVAL");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == -EINVAL, "pool geometry refused with -EINVAL");
 	CHECK(rh_events == 0, "a refused pool is never mapped or described");
 	CHECK(rq.pdev == NULL && nhi.refs == 1 && rh_live_allocs == base_allocs,
 	      "a refused bind keeps no reference or allocation");
@@ -168,9 +177,10 @@ static void host_bind_map_error_unwinds(void)
 {
 	dma_addr_t first, second;
 
+	need_api();
 	host_pool(4096, 4, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	rh_fail_map_at = 3;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == -ENOMEM, "a mapping error fails the bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == -ENOMEM, "a mapping error fails the bind");
 	CHECK(rh_count(RH_MAP) == 3, "mapping stops at the failed page");
 	first = rh_window(&nhi.dev, 0, 0);
 	second = rh_window(&nhi.dev, 1, 0);
@@ -191,7 +201,7 @@ static void host_lease_page_address(void)
 
 	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 8192, 4096, DMA_TO_DEVICE, &dma) == 0,
 	      "full 4096-byte element: the data ring carries payload only");
 	CHECK(dma == rh_window(&nhi.dev, 2, 0), "frame 1 element 0 is page 2");
@@ -204,7 +214,7 @@ static void host_lease_page_address(void)
 	CHECK(dma == rh_window(&nhi.dev, 0, 0), "page 0");
 	xdev_ext_requester_host_release(&rq, dma, 4096, true);
 	CHECK(xdev_ext_requester_host_settled(&rq) == 0, "every lease ended quiesced");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 }
 
 static void host_lease_refuses_spans(void)
@@ -213,7 +223,7 @@ static void host_lease_refuses_spans(void)
 
 	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096 - 100, 200, DMA_TO_DEVICE, &dma) == -ERANGE,
 	      "an element crossing a page boundary is refused");
 	CHECK(xdev_ext_requester_host_lease(&rq, 2048, 4096, DMA_TO_DEVICE, &dma) == -ERANGE,
@@ -231,22 +241,24 @@ static void host_lease_refuses_spans(void)
 	CHECK(dma == 0x5a5a, "a refused lease returns no address");
 	CHECK(rh_count(RH_SYNC_DEVICE) == 0, "a refused lease syncs nothing");
 	CHECK(xdev_ext_requester_host_settled(&rq) == 0, "refusals leave no outstanding lease");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 
 	/* Frames smaller than a page: one element must stay inside one frame. */
 	host_pool(2048, 4, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind 2048-byte frames");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind 2048-byte frames");
 	CHECK(xdev_ext_requester_host_lease(&rq, 2000, 100, DMA_TO_DEVICE, &dma) == -ERANGE,
 	      "an element crossing into the next frame is refused even inside one page");
 	CHECK(xdev_ext_requester_host_lease(&rq, 2048, 2048, DMA_TO_DEVICE, &dma) == 0,
 	      "a whole small frame");
 	CHECK(dma == rh_window(&nhi.dev, 0, 2048), "frame 1 is the upper half of page 0");
 	xdev_ext_requester_host_release(&rq, dma, 2048, true);
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 
 	/* A PEER requester has no host mapping to lease from. */
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	session.pool.kind = XDEV_EXT_MECH_POOL_PEER;
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == -EINVAL && !rq.pdev,
+	      "the host bind refuses a PEER pool");
 	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "PEER bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_TO_DEVICE, &dma) == -EINVAL,
 	      "no host lease on a PEER requester");
@@ -262,7 +274,7 @@ static void host_noncoherent_sync(void)
 	need_api();
 	host_pool(8192, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	nhi.dev.dma_coherent = false;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "non-coherent NHI binds host pages");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "non-coherent NHI binds host pages");
 	CHECK(rh_count(RH_SYNC_DEVICE) == 0, "bind itself does not sync");
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096 + 512, 1000, DMA_TO_DEVICE, &dma) == 0, "TX lease");
 	CHECK(rh_count(RH_SYNC_DEVICE) == 1, "one sync for the device per TX lease");
@@ -273,11 +285,11 @@ static void host_noncoherent_sync(void)
 	before = rh_events;
 	xdev_ext_requester_host_release(&rq, dma, 1000, true);
 	CHECK(rh_events == before, "a definite TX end needs no CPU sync");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
 	nhi.dev.dma_coherent = false;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "non-coherent NHI binds RX host pages");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "non-coherent NHI binds RX host pages");
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_FROM_DEVICE, &dma) == 0, "RX lease");
 	CHECK(rh_count(RH_SYNC_DEVICE) == 1 && nth(RH_SYNC_DEVICE, 0)->addr == rh_window(&nhi.dev, 1, 0) &&
 	      nth(RH_SYNC_DEVICE, 0)->size == 4096 && nth(RH_SYNC_DEVICE, 0)->dir == DMA_FROM_DEVICE,
@@ -287,16 +299,16 @@ static void host_noncoherent_sync(void)
 	CHECK(rh_count(RH_SYNC_CPU) == 1 && nth(RH_SYNC_CPU, 0)->addr == rh_window(&nhi.dev, 1, 0) &&
 	      nth(RH_SYNC_CPU, 0)->size == 4096 && nth(RH_SYNC_CPU, 0)->dir == DMA_FROM_DEVICE,
 	      "a definite RX end makes the whole device-written buffer CPU visible");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 
 	/* A forced bounce buffer needs the same synchronization. */
 	host_pool(4096, 1, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
 	nhi.dev.force_bounce = true;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bounced NHI binds host pages");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bounced NHI binds host pages");
 	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &dma) == 0, "bounced RX lease");
 	xdev_ext_requester_host_release(&rq, dma, 4096, true);
 	CHECK(rh_count(RH_SYNC_DEVICE) == 1 && rh_count(RH_SYNC_CPU) == 1, "bounced RX synchronized both ways");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 }
 
 static void host_coherent_no_sync(void)
@@ -305,12 +317,12 @@ static void host_coherent_no_sync(void)
 
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "coherent NHI binds RX host pages");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "coherent NHI binds RX host pages");
 	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &dma) == 0, "RX lease");
 	xdev_ext_requester_host_release(&rq, dma, 4096, true);
 	CHECK(rh_count(RH_SYNC_DEVICE) == 0 && rh_count(RH_SYNC_CPU) == 0,
 	      "a coherent unbounced mapping needs no sync calls");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 }
 
 static void host_unknown_retains_mapping(void)
@@ -320,7 +332,7 @@ static void host_unknown_retains_mapping(void)
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
 	nhi.dev.dma_coherent = false;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &dma) == 0, "RX lease");
 	xdev_ext_requester_host_release(&rq, dma, 4096, false);
 	CHECK(rh_count(RH_SYNC_CPU) == 0, "an unknown end never hands the buffer to the CPU");
@@ -328,7 +340,7 @@ static void host_unknown_retains_mapping(void)
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_FROM_DEVICE, &other) == -ESTALE,
 	      "no new lease from a mapping with unknown device access");
 	CHECK(other == 0x77, "the refused lease returns no address");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(rh_count(RH_UNMAP) == 0, "unknown device access: the mapping is never unmapped");
 	CHECK(rq.pdev == NULL, "the requester itself is unbound");
 	CHECK(nhi.refs > 1, "the retained mapping still holds the NHI");
@@ -341,10 +353,10 @@ static void host_outstanding_lease_retains_mapping(void)
 
 	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(xdev_ext_requester_host_lease(&rq, 4096, 4096, DMA_TO_DEVICE, &dma) == 0, "TX lease");
 	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO, "an outstanding lease is not settled");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(rh_count(RH_UNMAP) == 0, "an outstanding lease keeps the whole mapping");
 	CHECK(nhi.refs > 1, "the retained mapping still holds the NHI");
 }
@@ -357,14 +369,14 @@ static void host_quiesced_unbind_unmaps_once(void)
 	need_api();
 	host_pool(8192, 3, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	nhi.dev.dma_coherent = false;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	for (i = 0; i < 6; i++) {
 		CHECK(xdev_ext_requester_host_lease(&rq, (u64)i * 4096, 4096, DMA_TO_DEVICE, &dma) == 0, "lease");
 		xdev_ext_requester_host_release(&rq, dma, 4096, true);
 	}
 	CHECK(xdev_ext_requester_host_settled(&rq) == 0, "every lease ended quiesced");
 	CHECK(rh_count(RH_UNMAP) == 0, "nothing unmapped while bound");
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(rh_count(RH_UNMAP) == 6, "each page unmapped exactly once");
 	for (i = 0; i < 6; i++) {
 		const struct rh_event *u = nth(RH_UNMAP, i);
@@ -402,9 +414,10 @@ static void peer_bind_unchanged(void)
 
 static void host_create_report(void)
 {
+	need_api();
 	host_pool(4096, 2, 0, XDEV_EXT_MECH_DIR_TO_DEVICE);
 	stage.create_reporting = true;
-	CHECK(xdev_ext_requester_bind(&rq, &stage, &nhi, 0) == 0, "bind");
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
 	CHECK(stage.create_requester == &nhi, "CREATE report names the NHI requester");
 	CHECK(stage.create_requester_id.bus == 0x3a && stage.create_requester_id.devfn == 0x10 &&
 	      stage.create_requester_id.domain == 0, "requester identity");
@@ -412,7 +425,7 @@ static void host_create_report(void)
 	      (stage.create_valid & XDEV_EXT_MECH_CREATE_VALID_DECIDED), "requester and decision reported");
 	CHECK(!(stage.create_valid & XDEV_EXT_MECH_CREATE_VALID_DESCRIBED), "no provider description for host pages");
 	pci_dev_put(stage.create_requester);	/* the core drops the report reference */
-	xdev_ext_requester_unbind(&rq);
+	xdev_ext_requester_unbind_host(&rq);
 	CHECK(nhi.refs == 1, "report and requester references both returned");
 }
 

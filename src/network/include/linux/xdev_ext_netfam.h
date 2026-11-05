@@ -52,6 +52,7 @@ struct xdev_ext_net_lease {
 		} host;
 		struct xdev_ext_net_pool_dma pool;
 		struct {
+			struct xdev_ext_requester *rq;	/* owner of the host mapping */
 			u64 dma;		/* as xdev_ext_peer_lease.dma_address */
 			u32 len;
 		} hdma;

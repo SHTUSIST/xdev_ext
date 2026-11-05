@@ -811,6 +811,14 @@ void xdev_ext_requester_host_release(struct xdev_ext_requester*r,u64 dma,u32 len
 int xdev_ext_requester_host_settled(const struct xdev_ext_requester*r){
 	return r->host?-EIO:0;
 }
+int xdev_ext_requester_bind_host(struct xdev_ext_requester*r,struct xdev_ext_mech_stage*st,struct pci_dev*p){
+	(void)r;(void)st;(void)p;
+	abort();
+}
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester*r){
+	(void)r;
+	abort();
+}
 struct xdev_ext_mech_pool*xdev_ext_mech_session_pool(struct xdev_ext_mech_session*s){
 	return &s->pool;
 }
