@@ -4,10 +4,12 @@ XDEV_EXT_ZC_FAULT_ENV campaign=nvme-readonly-dest groups=4 depth=2
 XDEV_EXT_ZC_FAULT_PINS phase=before acquired=1000 released=1000 mlocked_kb=0
 XDEV_EXT_ZC_FAULT_CE_CONFIG phase=campaign fail_mode=none delay_us=10000
 XDEV_EXT_ZC_FAULT_LOG_BEGIN role=SRC exit=1
-XDEV_EXT_MECH_READY mode=source session=31 frames=2 seg_len=4096 xsk=none
+XDEV_EXT_MECH_READY mode=source session=31 frames=6 seg_len=1432 xsk=none
 XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1
-XDEV_EXT_MECH_CE_SIM=FAIL chain=a
-XDEV_EXT_MECH_STATS session=31 state=STOPPED last_err=-EIO batches_done=0 batches_abort=2 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,2,2,2 completed=2,2,2,2
+XDEV_EXT_MECH_STATS session=31 state=STOPPED last_err=-EIO batches_done=0 batches_abort=2 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=12 submitted=2,2,2,2 completed=2,2,2,2
+XDEV_EXT_MECH_STATS session=31 state=STOPPED last_err=-EIO batches_done=0 batches_abort=2 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=12 submitted=2,2,2,2 completed=2,2,2,2
+XDEV_EXT_MECH_SOURCE_DRAIN session=31 result=settled wait_err=-5 drain_err=0 stats_reads=1
+xdev_ext_mech_ctl: chain a: Input/output error
 XDEV_EXT_ZC_FAULT_LOG_END role=SRC
 XDEV_EXT_ZC_FAULT_SESSION role=SRC session=31 state=FREED
 XDEV_EXT_ZC_FAULT_CE_SIM_STATS accepted=4 completed=4 pending=0 peak_pending=2 submit_before_first_complete=2

@@ -7,6 +7,11 @@ fault_fixtures/<campaign>.log are synthetic passing consoles (4 groups, depth
 evidence that a guest was actually run.  Disk images are generated in a
 temporary directory.  Every failing fixture changes exactly one invariant of a
 passing one and must fail for that stated reason.
+The ctl lines of the fixtures follow what xdev_ext_mech_ctl actually prints: a
+chain a/d session is laid out like an AF_XDP one (six 4 KiB frames per 8 KiB
+group at MTU 1500), and a ce-chain run whose session latched an error prints
+its final STATS, XDEV_EXT_MECH_SOURCE_DRAIN and 'xdev_ext_mech_ctl: chain X:'
+instead of an XDEV_EXT_MECH_CE_* verdict.
 Run directly with python3 xdev_ext_mech_zc_fault_validate_test.py -v.
 """
 import contextlib
@@ -23,6 +28,7 @@ FIXTURES = HERE / 'fault_fixtures'
 CTL_SOURCES = (HERE.parents[2] / 'xdev_ext_mech' / 'xdev_ext_mech_ctl.c',
                HERE.parents[2] / 'xdev_ext_mech' / 'xdev_ext_mech_ctl_core.h')
 VERIFIER = HERE / 'verifier'
+GUEST = HERE / 'xdev_ext_mech_zc_fault_guest.sh'
 G, D = 4, 2
 
 
@@ -62,6 +68,32 @@ def section_replace(text, role, old, new):
     begin = text.index(f'XDEV_EXT_ZC_FAULT_LOG_BEGIN role={role} ')
     end = text.index(f'XDEV_EXT_ZC_FAULT_LOG_END role={role}\n', begin)
     return text[:begin] + replace(text[begin:end], old, new) + text[end:]
+
+
+def final_stats_replace(text, role, old, new):
+    """Edit the last STATS line of @role, the snapshot the validator reads."""
+    begin = text.index(f'XDEV_EXT_ZC_FAULT_LOG_BEGIN role={role} ')
+    end = text.index(f'XDEV_EXT_ZC_FAULT_LOG_END role={role}\n', begin)
+    start = text.rindex('\nXDEV_EXT_MECH_STATS ', begin, end) + 1
+    stop = text.index('\n', start)
+    return text[:start] + replace(text[start:stop], old, new) + text[stop:]
+
+
+def edit(text, role, old, new):
+    """role None: whole console; 'R': section R; 'R:final': last STATS line of R."""
+    if role is None:
+        return replace(text, old, new)
+    if role.endswith(':final'):
+        return final_stats_replace(text, role[:-len(':final')], old, new)
+    return section_replace(text, role, old, new)
+
+
+def section_set(text, role, exit_code, body):
+    """Replace the whole ctl log of @role (exit status and lines)."""
+    begin = text.index(f'XDEV_EXT_ZC_FAULT_LOG_BEGIN role={role} ')
+    end = text.index(f'XDEV_EXT_ZC_FAULT_LOG_END role={role}\n', begin)
+    return (text[:begin] + f'XDEV_EXT_ZC_FAULT_LOG_BEGIN role={role} exit={exit_code}\n' +
+            body.rstrip('\n') + '\n' + text[end:])
 
 
 class FaultValidator(unittest.TestCase):
@@ -163,7 +195,10 @@ class FaultValidator(unittest.TestCase):
                        'XDEV_EXT_MECH_NATIVE_COPY=%s held=', 'XDEV_EXT_MECH_CE_%s=%s chain=%c',
                        'XDEV_EXT_MECH_NIC_NVME_E2E=%s groups=', 'XDEV_EXT_MECH_NIC_CE_NVME_E2E=%s groups=',
                        'XDEV_EXT_MECH_NVME_NIC_E2E=%s groups=', 'XDEV_EXT_MECH_DETACH=PASS pin=',
-                       'XDEV_EXT_MECH_NOTIFY mode=terminal', '"STATS %llu: %s\\n"'):
+                       'XDEV_EXT_MECH_NOTIFY mode=terminal', '"STATS %llu: %s\\n"',
+                       '"chain %c: %s\\n"',
+                       'XDEV_EXT_MECH_SOURCE_DRAIN session=%llu result=%s wait_err=%d drain_err=%d '
+                       'stats_reads=%u'):
             self.assertIn(marker, ctl)
         verifier = '\n'.join(p.read_text() for p in VERIFIER.glob('run*.sh'))
         for marker in ('XDEV_EXT_MECH_VERIFIER_NEGATIVES=PASS', 'XDEV_EXT_MECH_VERIFIER_STATES=PASS',
@@ -173,6 +208,47 @@ class FaultValidator(unittest.TestCase):
             for line in self.console(name).splitlines():
                 if line.startswith('XDEV_EXT_MECH_STATS '):
                     self.assertEqual(re.findall(r'([a-z_]+)=', line), stats_keys, name)
+                if line.startswith('XDEV_EXT_MECH_SOURCE_DRAIN '):
+                    self.assertEqual(re.findall(r'([a-z_]+)=', line),
+                                     ['session', 'result', 'wait_err', 'drain_err', 'stats_reads'], name)
+
+    def test_ce_chain_error_path_prints_no_verdict(self):
+        """cmd_ce_chain reports a latched session error only by errno, never by verdict."""
+        ctl = CTL_SOURCES[0].read_text()
+        body = ctl[ctl.index('static int cmd_ce_chain('):]
+        body = body[:body.index('\n}\n')]
+        error = body[body.index('ret = ctl_run_source(&src, &s, &frames_ok);'):]
+        error = error[:error.index('goto out;')]
+        self.assertIn('ctl_err("chain %c: %s\\n", o->chain, strerror(-ret));', error)
+        self.assertIn('verdict = src.started ? CTL_FAIL : CTL_SETUP;', error)
+        self.assertNotIn('report', error)
+        # A failed source wait goes through the drain record that names wait_err.
+        wait = ctl[ctl.index('static int ctl_wait_coarse('):]
+        wait = wait[:wait.index('\n}\n')]
+        self.assertIn('return ctl_source_error_drain(r, groups, s, ret);', wait)
+        self.assertIn('.source_error_drain = !o->expect_unbind', ctl)
+        # The only CE verdict is the core report, printed once the wait succeeded.
+        self.assertEqual(ctl.count('xdev_ext_mech_ctl_report_ce_chain('), 1)
+
+    def test_ctl_layout_model_matches_the_ctl(self):
+        """Frames per group come from the layout xdev_ext_mech_ctl registers, at MTU 1500."""
+        core = CTL_SOURCES[1].read_text()
+        ctl = CTL_SOURCES[0].read_text()
+        self.assertIn('#define XDEV_EXT_MECH_CTL_FRAME_SIZE\t\t4096U', core)
+        self.assertIn('#define XDEV_EXT_MECH_CTL_XDP_HEADROOM\t256U', core)
+        self.assertIn('(XDEV_EXT_MECH_CTL_XDP_HEADROOM + 22U + \\\n\t\t\t\t\t XDEV_EXT_MP_PKT_HDR_LEN)', core)
+        self.assertIn('o->mtu = 1500;', ctl)
+        # Without a NIC the layout uses --mtu; the guest never passes one.
+        self.assertIn('/* The NXP layout on @ifname, or on --mtu (default 1500) without a NIC. */', ctl)
+        self.assertNotIn('--mtu', GUEST.read_text())
+        self.assertEqual(fv.ctl_frames_per_group(1500), 6)
+        self.assertEqual(fv.ctl_frames_per_group(9000), 3)
+        self.assertEqual(fv.IOU_FRAMES_PER_GROUP, 6)
+        self.assertEqual(fv.AFXDP_FRAMES_PER_GROUP, 6)
+        for name in fv.CAMPAIGNS:
+            for line in self.console(name).splitlines():
+                if line.startswith('XDEV_EXT_MECH_READY mode=source ') and 'xsk=none' in line:
+                    self.assertIn(' frames=6 seg_len=1432 ', line, name)
 
     # --- passing fixtures -------------------------------------------------
 
@@ -186,7 +262,8 @@ class FaultValidator(unittest.TestCase):
 
     def test_quarantine_fixture_reports_retained_session(self):
         _, result = self.verdict('ce-ambiguous-multi')
-        self.assertEqual((result['retained'], result['pin_delta']), (['SRC'], 4))
+        # Two groups were accepted, each of six frames: 12 frames stay pinned.
+        self.assertEqual((result['retained'], result['pin_delta']), (['SRC'], 12))
 
     def test_detach_accepts_a_tx_source_cancelled_by_the_same_retraction(self):
         tx = ('XDEV_EXT_MECH_STATS session=21 state=STOPPED last_err=-ECANCELED batches_done=2 '
@@ -206,7 +283,7 @@ class FaultValidator(unittest.TestCase):
     # --- failing fixtures: one invariant each -----------------------------
 
     def test_invariant_failures(self):
-        stats_ce_ambiguous = 'sequestered=4 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,0,0,0'
+        stats_ce_ambiguous = 'sequestered=12 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,0,0,0'
         cases = [
             # early reuse: a destination group carries another group's bytes
             ('ring-exit-rx', 'early reuse of a destination group', None, ('rx', 1, ('rx', 3)),
@@ -230,63 +307,63 @@ class FaultValidator(unittest.TestCase):
              ('RX', 'submitted=0,2,0,0', 'submitted=0,1,0,0'), None,
              'FAIL', r'RX stage 1 completed more than accepted \(stale completion\)'),
             ('netdev-remove-tx', 'completed > submitted',
-             ('SRC', 'submitted=2,2,2,6', 'submitted=2,1,2,6'), None,
+             ('SRC:final', 'submitted=2,2,2,6', 'submitted=2,1,2,6'), None,
              'FAIL', r'SRC stage 1 completed more than accepted'),
             ('concurrent-ce-disjoint', 'completed > submitted',
              ('A', 'submitted=4,4,4,4', 'submitted=4,4,3,4'), None,
              'FAIL', r'A stage 2 completed more than accepted'),
             ('nvme-readonly-dest', 'accepted NVMe write reissued',
-             ('SRC', 'submitted=2,2,2,2 completed=2,2,2,2', 'submitted=2,2,2,5 completed=2,2,2,5'), None,
+             ('SRC:final', 'submitted=2,2,2,2 completed=2,2,2,2', 'submitted=2,2,2,5 completed=2,2,2,5'), None,
              'FAIL', r'NVMe stage 3 reissued an accepted command'),
             ('window-reject', 'out-of-window command reached NVMe',
-             ('SRC', 'submitted=0,0,0,0 completed=0,0,0,0', 'submitted=1,0,0,0 completed=1,0,0,0'), None,
+             ('SRC:final', 'submitted=0,0,0,0 completed=0,0,0,0', 'submitted=1,0,0,0 completed=1,0,0,0'), None,
              'FAIL', r'out-of-window plan reached NVMe or CE'),
             # leaked pins
             ('exit-rx', 'leaked pin count',
              (None, 'PINS phase=after acquired=9000', 'PINS phase=after acquired=9006'), None,
              'FAIL', r'6 FOLL_PIN pins leaked after every session was freed'),
             ('ce-ambiguous-multi', 'sequestered frames unpinned early',
-             (None, 'PINS phase=after acquired=9004', 'PINS phase=after acquired=9000'), None,
+             (None, 'PINS phase=after acquired=9012', 'PINS phase=after acquired=9000'), None,
              'FAIL', r'sequestered frames were unpinned early'),
             ('ce-ambiguous-multi', 'parked session holds more pins than its pool',
-             (None, 'PINS phase=after acquired=9004', 'PINS phase=after acquired=9005'), None,
-             'FAIL', r'parked sessions hold 5 pins, pool bound 4'),
+             (None, 'PINS phase=after acquired=9012', 'PINS phase=after acquired=9013'), None,
+             'FAIL', r'parked sessions hold 13 pins, pool bound 12'),
             # sequestered count above the pool
             ('exit-source', 'parked quarantine above the pool',
-             (None, 'role=SRC session=31 state=FREED', 'role=SRC session=31 state=ZOMBIE inflight=0 sequestered=6'), None,
+             (None, 'role=SRC session=31 state=FREED', 'role=SRC session=31 state=ZOMBIE inflight=0 sequestered=13'), None,
              'FAIL', r'SRC parked quarantine exceeds its pool'),
             ('ce-ambiguous-multi', 'sequestered count above the pool',
-             ('SRC', stats_ce_ambiguous, stats_ce_ambiguous.replace('sequestered=4', 'sequestered=6')), None,
+             ('SRC:final', stats_ce_ambiguous, stats_ce_ambiguous.replace('sequestered=12', 'sequestered=13')), None,
              'FAIL', r'SRC quarantine exceeds its pool'),
             ('nvme-reset-mid-run', 'parked session still in flight',
              (None, 'role=SRC session=31 state=FREED', 'role=SRC session=31 state=ZOMBIE inflight=1 sequestered=0'), None,
              'FAIL', r'SRC parked session still in flight \(lost completion\)'),
             # missing quarantine
             ('ce-ambiguous-multi', 'missing quarantine',
-             ('SRC', stats_ce_ambiguous, stats_ce_ambiguous.replace('sequestered=4', 'sequestered=0')), None,
+             ('SRC:final', stats_ce_ambiguous, stats_ce_ambiguous.replace('sequestered=12', 'sequestered=0')), None,
              'FAIL', r'ambiguous copies left no quarantine'),
             ('ce-ambiguous-multi', 'quarantined session freed',
-             (None, 'state=ZOMBIE inflight=0 sequestered=4', 'state=FREED'), None,
+             (None, 'state=ZOMBIE inflight=0 sequestered=12', 'state=FREED'), None,
              'FAIL', r'ambiguous quarantine not parked as ZOMBIE'),
             ('ce-ambiguous-multi', 'quarantined session lost its CE module reference',
              (None, 'CE_UNLOAD result=refused', 'CE_UNLOAD result=unloaded'), None,
              'FAIL', r'CE module removable under quarantine'),
             ('ce-presubmit', 'pre-submit refusal sequestered frames',
-             ('SRC', 'sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,2,0,0',
+             ('SRC:final', 'sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,2,0,0',
               'sequestered=2 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=2,2,0,0'), None,
              'FAIL', r'pre-submit sequestered'),
             ('ce-presubmit', 'CE module reference leaked',
              (None, 'CE_REFS refcnt=0 settled=1', 'CE_REFS refcnt=1 settled=0'), None,
              'FAIL', r'CE module reference leaked'),
             ('ce-presubmit', 'a later stage ran after the refused copy',
-             ('SRC', 'submitted=2,2,0,0 completed=2,2,0,0', 'submitted=2,2,1,0 completed=2,2,1,0'), None,
+             ('SRC:final', 'submitted=2,2,0,0 completed=2,2,0,0', 'submitted=2,2,1,0 completed=2,2,1,0'), None,
              'FAIL', r'a stage after the refused copy ran'),
             # wrong terminal outcome
             ('netdev-remove-rx', 'receiver claims success after its NIC went away',
              ('RX', 'XDEV_EXT_MECH_NOTIFY mode=terminal', f'XDEV_EXT_MECH_NIC_CE_NVME_E2E=PASS groups={G}\nXDEV_EXT_MECH_NOTIFY mode=terminal'),
              None, 'FAIL', r'receiver falsely succeeded'),
             ('netdev-remove-tx', 'still in flight after the removal',
-             ('SRC', 'inflight=0', 'inflight=1'), None, 'FAIL', r'SRC still in flight'),
+             ('SRC:final', 'inflight=0', 'inflight=1'), None, 'FAIL', r'SRC still in flight'),
             ('exit-rx', 'killed run claims a verdict',
              ('RX', 'xsk=zc', 'xsk=zc\nXDEV_EXT_MECH_NIC_CE_NVME_E2E=PASS groups=4'), None,
              'FAIL', r'RX exited run claims a verdict'),
@@ -313,7 +390,8 @@ class FaultValidator(unittest.TestCase):
               'XDEV_EXT_MECH_STATS session=51 state=ACTIVE'), None,
              'FAIL', r'another uid could read the victim session'),
             ('window-reject', 'out-of-window chain claims success',
-             ('SRC', 'XDEV_EXT_MECH_CE_SIM=FAIL chain=a', 'XDEV_EXT_MECH_CE_SIM=PASS chain=a'), None,
+             ('SRC', 'xdev_ext_mech_ctl: chain a: Numerical result out of range',
+              'XDEV_EXT_MECH_CE_SIM=PASS chain=a\nxdev_ext_mech_ctl: chain a: Numerical result out of range'), None,
              'FAIL', r'out-of-window chain falsely succeeded'),
             ('ring-exit-rx', 'ring exit left a batch in flight',
              ('RX', 'RING_EXIT=PASS inflight=0', 'RING_EXIT=PASS inflight=1'), None,
@@ -326,8 +404,7 @@ class FaultValidator(unittest.TestCase):
             with self.subTest(name=name, reason=reason):
                 text = self.console(name)
                 if console_edit:
-                    role, old, new = console_edit
-                    text = section_replace(text, role, old, new) if role else replace(text, old, new)
+                    text = edit(text, *console_edit)
                 destination = None
                 if image_edit:
                     destination = self.destination(name)
@@ -342,6 +419,177 @@ class FaultValidator(unittest.TestCase):
                 self.assertEqual(self.verdict(name)[0], 'PASS')
                 self.assertVerdict(expected, pattern, name, text, destination)
         self.assertGreaterEqual(len({case[0] for case in cases}), 18)
+
+    # --- ce-chain runs that end with a latched session error ------------------
+
+    WR_ERR = 'xdev_ext_mech_ctl: chain a: Numerical result out of range'
+    WR_DRAIN = 'XDEV_EXT_MECH_SOURCE_DRAIN session=31 result=settled wait_err=-34 drain_err=0 stats_reads=1'
+    AMB_DRAIN = 'XDEV_EXT_MECH_SOURCE_DRAIN session=31 result=quarantine wait_err=-5 drain_err=0 stats_reads=1'
+
+    def test_ce_chain_failure_records(self):
+        """The terminal-error record must match the latched error, the chain and the session."""
+        done = ('XDEV_EXT_MECH_READY mode=source session=31 frames=6 seg_len=1432 xsk=none\n'
+                'XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1\n'
+                'XDEV_EXT_MECH_CE_SIM=PASS chain=a\n'
+                'XDEV_EXT_MECH_STATS session=31 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 '
+                'rejects=0 recycled=12 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 '
+                'protocol_err=0 published=12 submitted=4,4,4,4 completed=4,4,4,4')
+        cases = [
+            # out-of-window chain that actually completed, exactly as ctl reports success
+            ('window-reject', 'chain completed and reported PASS',
+             [lambda x: section_set(x, 'SRC', 0, done)], 'FAIL', r'out-of-window chain must fail the run'),
+            ('window-reject', 'every group completed behind an error record',
+             [('SRC:final', 'batches_done=0 batches_abort=1', 'batches_done=4 batches_abort=0'),
+              ('SRC:final', 'submitted=0,0,0,0 completed=0,0,0,0', 'submitted=4,4,4,4 completed=4,4,4,4')],
+             'FAIL', r'an out-of-window group completed'),
+            ('window-reject', 'FAIL verdict naming another chain',
+             [('SRC', self.WR_ERR, 'XDEV_EXT_MECH_CE_SIM=FAIL chain=b\n' + self.WR_ERR)],
+             'FAIL', r'SRC verdict names chain b, ran chain a'),
+            # wrong error code
+            ('window-reject', 'refused for another reason than the window',
+             [('SRC:final', 'last_err=-ERANGE', 'last_err=-EINVAL'),
+              ('SRC', 'wait_err=-34', 'wait_err=-22')],
+             'FAIL', r'SRC expected -ERANGE, latched -EINVAL'),
+            ('window-reject', 'run error is a timeout, not the latched refusal',
+             [('SRC', 'wait_err=-34', 'wait_err=-110')],
+             'FAIL', r'SRC run error -110 differs from the latched -ERANGE'),
+            ('window-reject', 'failed run with no latched error',
+             [('SRC:final', 'last_err=-ERANGE', 'last_err=0')],
+             'FAIL', r'SRC failed run without a latched error'),
+            ('ce-ambiguous-multi', 'ambiguous copy latched a timeout',
+             [('SRC:final', 'last_err=-EIO', 'last_err=-ETIMEDOUT'), ('SRC', 'wait_err=-5', 'wait_err=-110')],
+             'FAIL', r'SRC expected -EIO, latched -ETIMEDOUT'),
+            # the record itself
+            ('window-reject', 'error line of another chain',
+             [('SRC', 'chain a: Numerical', 'chain d: Numerical')], 'FAIL', r'SRC chain a failure not reported'),
+            ('window-reject', 'error line missing',
+             [('SRC', self.WR_ERR + '\n', '')], 'FAIL', r'SRC chain a failure not reported'),
+            ('window-reject', 'drain record missing',
+             [('SRC', self.WR_DRAIN + '\n', '')], 'FAIL', r'SRC failed without exactly one source drain record'),
+            ('window-reject', 'drain record repeated',
+             [('SRC', self.WR_DRAIN, self.WR_DRAIN + '\n' + self.WR_DRAIN)],
+             'FAIL', r'SRC failed without exactly one source drain record'),
+            ('window-reject', 'drain of another session',
+             [('SRC', 'SOURCE_DRAIN session=31', 'SOURCE_DRAIN session=32')],
+             'FAIL', r'SRC source drain record names another session'),
+            ('window-reject', 'final snapshot unreadable',
+             [('SRC', 'drain_err=0', 'drain_err=-2')], 'FAIL', r'SRC final STATS of the failed run could not be read'),
+            ('window-reject', 'drain claims quarantine of a stopped session',
+             [('SRC', 'result=settled', 'result=quarantine')],
+             'FAIL', r'SRC source drain result quarantine differs from the final state STOPPED'),
+            ('ce-ambiguous-multi', 'drain claims a parked session settled',
+             [('SRC', 'result=quarantine', 'result=settled')],
+             'FAIL', r'SRC source drain result settled differs from the final state ZOMBIE'),
+            ('ce-ambiguous-multi', 'drain never settled',
+             [('SRC', 'result=quarantine', 'result=timeout')],
+             'FAIL', r'SRC source drain result timeout differs'),
+            # quarantine count off by one, below (the pool bound covers above)
+            ('ce-ambiguous-multi', 'one sequestered frame short',
+             [('SRC:final', 'sequestered=12', 'sequestered=11'),
+              (None, 'state=ZOMBIE inflight=0 sequestered=12', 'state=ZOMBIE inflight=0 sequestered=11'),
+              (None, 'PINS phase=after acquired=9012', 'PINS phase=after acquired=9011')],
+             'FAIL', r'not every ambiguous group was sequestered'),
+            ('ce-ambiguous-multi', 'parked count differs from the final snapshot',
+             [(None, 'state=ZOMBIE inflight=0 sequestered=12', 'state=ZOMBIE inflight=0 sequestered=11')],
+             'FAIL', r'parked quarantine differs from the final snapshot'),
+            # pool layout: frames per group must be the ctl layout
+            ('ce-ambiguous-multi', 'quarantined pool registered with another layout',
+             [('SRC', 'session=31 frames=6 seg_len=1432', 'session=31 frames=2 seg_len=4096')],
+             'FAIL', r'SRC pool layout frames=2 differs from the ctl layout \(6\)'),
+            ('nvme-reset-mid-run', 'AFTER pool registered with another layout',
+             [('AFTER', 'frames=6 seg_len=1432', 'frames=7 seg_len=1232')],
+             'FAIL', r'AFTER pool layout frames=7 differs from the ctl layout \(6\)'),
+            # the other chains with the same error path
+            ('ce-presubmit', 'pre-submit run claims success',
+             [('SRC', 'xdev_ext_mech_ctl: chain b:', 'XDEV_EXT_MECH_CE_SIM=PASS chain=b\nxdev_ext_mech_ctl: chain b:')],
+             'FAIL', r'pre-submit failure falsely succeeded'),
+            ('ce-presubmit', 'pre-submit run error differs from the latched one',
+             [('SRC', 'wait_err=-16', 'wait_err=-5')],
+             'FAIL', r'SRC run error -5 differs from the latched -EBUSY'),
+            ('netdev-remove-tx', 'stopped chain b claims success',
+             [('SRC', 'xdev_ext_mech_ctl: chain b:', 'XDEV_EXT_MECH_CE_SIM=PASS chain=b\nxdev_ext_mech_ctl: chain b:')],
+             'FAIL', r'chain b falsely succeeded after its NIC went away'),
+            ('netdev-remove-tx', 'stopped run reported as another chain',
+             [('SRC', 'chain b: No such', 'chain a: No such')], 'FAIL', r'SRC chain b failure not reported'),
+            ('netdev-remove-tx', 'stopped with another error than the removal',
+             [('SRC:final', 'last_err=-ENXIO', 'last_err=-ECANCELED'), ('SRC', 'wait_err=-6', 'wait_err=-125')],
+             'FAIL', r'SRC expected STOPPED with -ENXIO'),
+            ('netdev-remove-tx', 'removal error reported as a timeout',
+             [('SRC', 'wait_err=-6', 'wait_err=-110')],
+             'FAIL', r'SRC run error -110 differs from the latched -ENXIO'),
+        ]
+        for name, reason, edits, expected, pattern in cases:
+            with self.subTest(name=name, reason=reason):
+                text = self.console(name)
+                for change in edits:
+                    text = change(text) if callable(change) else edit(text, *change)
+                self.assertNotEqual(text, self.console(name))
+                self.assertVerdict(expected, pattern, name, text)
+
+    def test_ce_chain_failure_may_also_print_a_fail_verdict(self):
+        """A FAIL verdict for the same chain beside the record is consistent; PASS never is."""
+        text = edit(self.console('window-reject'), 'SRC', self.WR_ERR,
+                    'XDEV_EXT_MECH_CE_SIM=FAIL chain=a\n' + self.WR_ERR)
+        self.assertEqual(self.verdict('window-reject', text)[0], 'PASS')
+
+    def test_refused_and_quarantined_victim_bytes(self):
+        """Victim bytes: no window may receive bytes of another group, the AFTER run stays exact."""
+        for name in ('window-reject', 'ce-ambiguous-multi'):
+            for reason, (window, index, data), pattern in (
+                    ('AFTER group carries another group', ('after', 1, ('after', 2)),
+                     r'after window holds bytes of no source group'),
+                    ('one AFTER sector flipped', ('after', 0, 'flip'), r'after window holds bytes of no source group'),
+                    ('refused group reached the CE window', ('ce', 0, ('ce', 0)), r'write outside every declared window')):
+                with self.subTest(name=name, reason=reason):
+                    destination = self.destination(name)
+                    if data == 'flip':
+                        payload = bytearray(self.group(window, index))
+                        payload[100] ^= 0xff
+                        data = bytes(payload)
+                    else:
+                        data = self.group(*data)
+                    self.put(destination, window, index, data)
+                    self.assertVerdict('FAIL', pattern, name, None, destination)
+
+    def reset_failure(self):
+        """nvme-reset-mid-run where the reset failed the run: ctl's terminal-error record."""
+        stats = ('XDEV_EXT_MECH_STATS session=31 state=STOPPED last_err=-EIO batches_done=1 batches_abort=1 '
+                 'rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 '
+                 'protocol_err=0 published=12 submitted=2,2,2,2 completed=2,2,2,2')
+        body = '\n'.join(('XDEV_EXT_MECH_READY mode=source session=31 frames=6 seg_len=1432 xsk=none',
+                          'XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1', stats, stats,
+                          'XDEV_EXT_MECH_SOURCE_DRAIN session=31 result=settled wait_err=-5 drain_err=0 stats_reads=1',
+                          'xdev_ext_mech_ctl: chain a: Input/output error'))
+        destination = self.destination('nvme-reset-mid-run')
+        for index in range(1, G):
+            self.put(destination, 'ce', index, bytes(fv.GROUP_BYTES))
+        return section_set(self.console('nvme-reset-mid-run'), 'SRC', 1, body), destination
+
+    def test_reset_failure_branch(self):
+        text, destination = self.reset_failure()
+        verdict, result = self.verdict('nvme-reset-mid-run', text, destination)
+        self.assertEqual(verdict, 'PASS', result)
+        self.assertEqual(result['observed'], 'native-failure')
+        for reason, change, pattern in (
+                ('no error record', lambda x: replace(replace(x, 'xdev_ext_mech_ctl: chain a: Input/output error\n', ''),
+                                                     'XDEV_EXT_MECH_SOURCE_DRAIN session=31 result=settled wait_err=-5 '
+                                                     'drain_err=0 stats_reads=1\n', ''),
+                 r'SRC failed without exactly one source drain record'),
+                ('claims success', lambda x: replace(x, 'xdev_ext_mech_ctl: chain a:',
+                                                    'XDEV_EXT_MECH_CE_SIM=PASS chain=a\nxdev_ext_mech_ctl: chain a:'),
+                 r'reset failure not reported'),
+                ('run error differs', lambda x: replace(x, 'wait_err=-5', 'wait_err=-110'),
+                 r'SRC run error -110 differs from the latched -EIO'),
+                ('setup exit, not a run failure', lambda x: replace(x, 'LOG_BEGIN role=SRC exit=1', 'LOG_BEGIN role=SRC exit=3'),
+                 r'reset failure not reported'),
+                ('fewer source groups than done', None, r'fewer source groups than batches reported done')):
+            with self.subTest(reason=reason):
+                if change is None:
+                    bad = bytearray(destination)
+                    self.put(bad, 'ce', 0, bytes(fv.GROUP_BYTES))
+                    self.assertVerdict('FAIL', pattern, 'nvme-reset-mid-run', text, bad)
+                else:
+                    self.assertVerdict('FAIL', pattern, 'nvme-reset-mid-run', change(text), destination)
 
     def test_console_failures_apply_to_every_campaign(self):
         for name in fv.CAMPAIGNS:
@@ -396,14 +644,11 @@ class FaultValidator(unittest.TestCase):
              r'RX: nothing observed in flight'),
             ('exit-source', (None, 'LOG_BEGIN role=SRC exit=137', 'LOG_BEGIN role=SRC exit=0'),
              r'SRC finished before the signal was delivered'),
-            ('netdev-remove-tx', ('SRC', 'state=STOPPED last_err=-ENXIO batches_done=1 batches_abort=1',
-                                  'state=ACTIVE last_err=0 batches_done=4 batches_abort=0'),
-             r'SRC: the fault arrived after every group ended'),
             ('netdev-remove-rx', (None, 'INFLIGHT_SEEN role=RX seen=1', 'INFLIGHT_SEEN role=RX seen=0'),
              r'nothing observed in flight'),
             ('nvme-reset-mid-run', (None, 'INFLIGHT_SEEN role=SRC seen=1', 'INFLIGHT_SEEN role=SRC seen=0'),
              r'nothing observed in flight'),
-            ('window-reject', ('SRC', 'batches_abort=4', 'batches_abort=0'), r'no group was offered'),
+            ('window-reject', ('SRC:final', 'batches_abort=1', 'batches_abort=0'), r'no group was offered'),
             ('fq-dup', ('RX', 'FQ_DUP_REJECT=PASS pushed=1', 'FQ_DUP_REJECT=FAIL pushed=0'),
              r'fill ring had no room'),
             ('concurrent-ce-overlap', (None, 'CONCURRENT both_ready=1', 'CONCURRENT both_ready=0'),
@@ -411,18 +656,34 @@ class FaultValidator(unittest.TestCase):
             ('cross-session-isolation', (None, 'VICTIM_ALIVE alive=1', 'VICTIM_ALIVE alive=0'),
              r'victim finished before every attempt ran'),
         ]
-        single = ('SRC', 'sequestered=4 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 '
-                         'submitted=2,0,0,0 completed=2,0,0,0',
-                  'sequestered=2 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 '
+        single = ('SRC:final', 'sequestered=12 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 '
+                               'submitted=2,0,0,0 completed=2,0,0,0',
+                  'sequestered=6 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 '
                   'submitted=1,0,0,0 completed=1,0,0,0')
-        for name, (role, old, new), pattern in cases + [('ce-ambiguous-multi', single, r'only one group')]:
+        for name, console_edit, pattern in cases + [('ce-ambiguous-multi', single, r'only one group')]:
             with self.subTest(name=name):
-                text = self.console(name)
-                text = section_replace(text, role, old, new) if role else replace(text, old, new)
+                text = edit(self.console(name), *console_edit)
                 if name == 'ce-ambiguous-multi':
-                    text = replace(text, 'state=ZOMBIE inflight=0 sequestered=4', 'state=ZOMBIE inflight=0 sequestered=2')
-                    text = replace(text, 'acquired=9004', 'acquired=9002')
+                    text = replace(text, 'state=ZOMBIE inflight=0 sequestered=12', 'state=ZOMBIE inflight=0 sequestered=6')
+                    text = replace(text, 'acquired=9012', 'acquired=9006')
                 self.assertVerdict('INCONCLUSIVE', pattern, name, text)
+
+    def late_netdev_remove_tx(self, *, marker):
+        """chain b finished before its NIC went away: ctl printed its verdict, no error record."""
+        body = ('XDEV_EXT_MECH_READY mode=source session=31 frames=6 seg_len=1448 xsk=zc\n'
+                'XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1\n' +
+                ('XDEV_EXT_MECH_CE_SIM=PASS chain=b\n' if marker else '') +
+                'XDEV_EXT_MECH_STATS session=31 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 '
+                'rejects=0 recycled=24 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 '
+                'protocol_err=0 published=0 submitted=4,4,4,24 completed=4,4,4,24')
+        return section_set(self.console('netdev-remove-tx'), 'SRC', 0, body)
+
+    def test_netdev_removal_after_the_last_group_is_inconclusive(self):
+        self.assertVerdict('INCONCLUSIVE', r'SRC: the fault arrived after every group ended',
+                           'netdev-remove-tx', self.late_netdev_remove_tx(marker=True))
+        # A finished chain b still states its verdict; without it the run proves nothing.
+        self.assertVerdict('FAIL', r'chain b verdict missing', 'netdev-remove-tx',
+                           self.late_netdev_remove_tx(marker=False))
 
     def test_detach_after_the_last_group_is_inconclusive(self):
         text = self.console('detach-afxdp-mid-run')
@@ -478,7 +739,7 @@ class FaultValidator(unittest.TestCase):
             self.assertEqual(result['retained'], ['SRC'])
             (Path(directory) / 'validation.json').unlink()
 
-            text = replace(self.console('ce-ambiguous-multi'), 'acquired=9004', 'acquired=9000')
+            text = replace(self.console('ce-ambiguous-multi'), 'acquired=9012', 'acquired=9000')
             self.evidence(directory, 'ce-ambiguous-multi', text)
             code, out = self.run_main(argv(directory, 'ce-ambiguous-multi'))
             self.assertEqual(code, fv.EXIT_FAIL)
