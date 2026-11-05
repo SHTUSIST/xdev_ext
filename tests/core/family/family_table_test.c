@@ -35,6 +35,7 @@ int main(void)
 		{ XDEV_EXT_MECH_CLASS_SOCKET, 1 },
 		{ XDEV_EXT_MECH_CLASS_XDOMAIN, 1 },
 		{ XDEV_EXT_MECH_CLASS_NVME, 2 },
+		{ XDEV_EXT_MECH_CLASS_BLOCK, 2 },
 		{ XDEV_EXT_MECH_CLASS_CE, 3 },
 		{ XDEV_EXT_MECH_CLASS_DMA, 3 },
 		{ XDEV_EXT_MECH_CLASS_IAA, 3 },
@@ -74,7 +75,7 @@ int main(void)
 			EXPECT_EQ(xdev_ext_family_hooks_ok(c, &f),
 				  expected != 0 && f == expected);
 	}
-	EXPECT_EQ(known, 10);
+	EXPECT_EQ(known, 11);
 	EXPECT_EQ(xdev_ext_mech_class_family(UINT32_MAX), 0);
 	f = 1;
 	EXPECT_EQ(xdev_ext_family_hooks_ok(UINT32_MAX, &f), false);
