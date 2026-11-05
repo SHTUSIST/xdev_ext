@@ -312,3 +312,6 @@ void xdev_ext_xd_probe_free(struct xdev_ext_xd_link *xl){assert(!xl->probe);}
 
 void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *stage,const struct xdev_ext_xd_msg_v2 *msg)
 { (void)stage;(void)msg;assert(!"v2 dispatch outside original v1 ring fixture");abort(); }
+/* Asked only for a v2-envelope endpoint, which this v1 ring fixture never binds. */
+bool xdev_ext_xd_class_ctl_rts_cts(struct xdev_ext_mech_stage *stage)
+{ (void)stage;assert(!"v2-envelope endpoint outside original v1 ring fixture");abort(); }
