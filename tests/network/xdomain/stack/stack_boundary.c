@@ -4,6 +4,9 @@
 #include "stack_kernel_compat.h"
 /* Actual built-in requester budget, with only kernel OS facilities facaded. */
 #include "../../../../../io_uring/family/xdev_ext_requester_retention.c"
+/* Actual built-in coherent backing owner: X4 control storage lives here and
+ * an UNKNOWN allocation stays on this owner's retained list. */
+#include "../../../../../io_uring/family/xdev_ext_requester_backing.c"
 #ifndef STACK_REAL_NHI
 /* Actual NHI declaration and sizing body; never a copied byte formula. */
 #include "stack_descriptor_source.inc"
@@ -167,6 +170,24 @@ void stack_record(struct stack_event e){
 	}
 	world->log[world->logs++]=e;
 	if(getenv("STACK_TRACE"))fprintf(stderr,"EV id=%llu t=%llu ep=%u kind=%u ctl=%u type=%u owner=%llx seq=%llu group=%llu sid=%llu status=%d\n",(unsigned long long)e.id,(unsigned long long)e.now_ns,e.endpoint,e.kind,e.control,e.control_type,(unsigned long long)e.owner,(unsigned long long)e.seq,(unsigned long long)e.group,(unsigned long long)e.session_id,e.status);
+}
+/* Observe UNKNOWN X4 control storage on the actual built-in owner's retained
+ * list. Each record is reported once, while its endpoint's world is live. */
+void stack_x4_quarantine_records(void){
+	struct xdev_ext_requester_backing*b;
+	static void*seen[1024];
+	static unsigned count;
+	list_for_each_entry(b,&xdev_ext_requester_backing_retained,node){
+		bool known=false;
+		for(unsigned i=0;i<count;i++)if(seen[i]==b)known=true;
+		if(known)continue;
+		assert(count<ARRAY_SIZE(seen));
+		seen[count++]=b;
+		stack_record((struct stack_event){
+			.kind=STACK_EV_RETAIN,.endpoint=b->pdev->dev.endpoint,.control=1,.owner=(uintptr_t)b,.address=(uintptr_t)b->pdev,.length=b->bytes,.status=-ENOLINK
+		}
+		);
+	}
 }
 void stack_lock_error(void){
 	if(world)stack_record((struct stack_event){
