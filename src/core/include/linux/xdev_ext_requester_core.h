@@ -57,15 +57,21 @@ struct xdev_ext_admission {
  * Admit trusted host RAM or discrete BAR-backed VRAM with an unbounced requester.
  * A raw bus address cannot cross a translating DMA layer. An explicit admin
  * override admits only a missing topology path, recorded UNVERIFIED_FORCED.
+ * Prototype for ASK.70: UNDESCRIBED alone (the exporter's own per-requester
+ * mapping, nothing else known) is admitted like host RAM: no topology claim,
+ * reachability UNKNOWN, same bounce/untrusted refusals; any other bit with it
+ * is refused.
  */
 static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 				      __u32 flags, struct xdev_ext_admission *out)
 {
+	bool undescribed = f->backing & XDEV_EXT_PEER_BACKING_UNDESCRIBED;
 	__u32 r = 0;
 
 	out->distance = f->distance;
 	out->backing = f->backing;
-	if (!(f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) && f->distance < 0)
+	if (!(f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) && !undescribed &&
+	    f->distance < 0)
 		r |= XDEV_EXT_PEER_REFUSE_NO_P2P_PATH;
 	if (f->swiotlb_force)
 		r |= XDEV_EXT_PEER_REFUSE_SWIOTLB_FORCE;
@@ -74,7 +80,10 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 	if ((f->dma_iommu || f->dma_ops) &&
 	    (f->backing & XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR))
 		r |= XDEV_EXT_PEER_REFUSE_IOMMU_RAW_ADDR;
-	if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+	if (undescribed) {
+		if (f->backing != XDEV_EXT_PEER_BACKING_UNDESCRIBED)
+			r |= XDEV_EXT_PEER_REFUSE_BACKING;
+	} else if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
 		if (f->backing != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
 				   XDEV_EXT_PEER_BACKING_STRUCT_PAGE))
 			r |= XDEV_EXT_PEER_REFUSE_BACKING;
@@ -90,7 +99,7 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 	if (f->backing & XDEV_EXT_PEER_BACKING_EXTERNAL)
 		r |= XDEV_EXT_PEER_REFUSE_EXTERNAL_OWNER;
 	out->refused = r;
-	if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
+	if ((f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) || undescribed) {
 		out->reachability = XDEV_EXT_CAP_UNKNOWN;
 		return r ? -EXDEV : 0;
 	}

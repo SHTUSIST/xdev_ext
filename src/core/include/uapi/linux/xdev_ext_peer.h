@@ -8,6 +8,13 @@
  * for a successful peer completion before launching CUDA consumers.
  */
 #define XDEV_EXT_PEER_REGISTER_F_DMABUF (1U << 0)
+/* Bit 1 is reserved and rejected. Prototype for ASK.70: with F_DMABUF, also
+ * accept an exporter that registered no backing descriptor. The kernel then
+ * uses only the mapping that exporter returns for each requester device,
+ * reports backing XDEV_EXT_PEER_BACKING_UNDESCRIBED, and refuses requesters
+ * whose mapping may bounce or need CPU sync. A described exporter is unchanged.
+ */
+#define XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED (1U << 2)
 /* DMABUF: gpu_fd is the source fd, gpu_va=0, len is the whole export. */
 struct xdev_ext_peer_register {
  __s32 gpu_fd;
