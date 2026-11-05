@@ -7975,6 +7975,10 @@
       "logical_path": "tests/network/xdomain/chain/run.py"
     },
     {
+      "source": "tests/network/xdomain/chain/host_run.py",
+      "logical_path": "tests/network/xdomain/chain/host_run.py"
+    },
+    {
       "source": "tests/network/xdomain/chain/chain_umem.c.in",
       "logical_path": "tests/network/xdomain/chain/chain_umem.c.in"
     },

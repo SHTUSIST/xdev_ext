@@ -80,6 +80,14 @@ static void xdev_ext_requester_unbind(struct xdev_ext_requester *r)
 static void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *l,bool q)
 { (void)l; (void)q; abort(); }
 enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA_NONE };
+static int xdev_ext_requester_bind_host(struct xdev_ext_requester *r,struct xdev_ext_mech_stage *s,struct pci_dev *p)
+{ (void)r; (void)s; (void)p; abort(); }
+static void xdev_ext_requester_unbind_host(struct xdev_ext_requester *r)
+{ (void)r; abort(); }
+static int xdev_ext_requester_host_lease(struct xdev_ext_requester *r,u64 off,u32 n,enum dma_data_direction d,u64 *dma)
+{ (void)r; (void)off; (void)n; (void)d; (void)dma; abort(); }
+static void xdev_ext_requester_host_release(struct xdev_ext_requester *r,u64 dma,u32 n,bool q)
+{ (void)r; (void)dma; (void)n; (void)q; abort(); }
 static struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p)
 { (void)p; abort(); }
 static u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p)
