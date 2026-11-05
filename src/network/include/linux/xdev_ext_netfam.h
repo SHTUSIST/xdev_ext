@@ -68,12 +68,6 @@ struct xdev_ext_net_elem {
 	u8 hdr[XDEV_EXT_NET_HEADER_MAX];
 	union { u64 align; u8 bytes[XDEV_EXT_NET_DEV_AREA]; } dev;	/* subclass native object */
 };
-/* The requester's DMA address of a PEER or HOST_DMA element lease. */
-static inline u64 xdev_ext_net_elem_dma(const struct xdev_ext_net_elem *e)
-{
-	return e->lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA ? e->lease.u.hdma.dma :
-	       e->lease.u.peer.lease.dma_address;
-}
 struct xdev_ext_net_dev_ops {
 	struct module *owner;
 	u32 hdr_policy;			/* enum xdev_ext_net_hdr_policy */
