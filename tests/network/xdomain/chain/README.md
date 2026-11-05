@@ -56,6 +56,27 @@ RX descriptor's buffer. Every access must fall inside a live lease of that
 device in the right direction, and no device may write bytes another live
 lease covers; any violation fails the case.
 
+## Host 1 frames from a system-heap DMA-BUF (`--pool dmabuf`)
+
+With `--pool dmabuf`, host 1's frame memory is a system-heap DMA-BUF
+registered through the real REGISTER ioctl and claimed by the real PEER pool
+bind, and host 1's NVMe and NHI requester binds and every host 1 lease run
+through the real requester bind, peer region core, DMA-BUF importer and peer
+fd unit, compiled as in `../dmabuf_requester` (`chain_peer_bridge.c`). Those
+units use the `tests/core/peer_dmabuf` kernel shim, whose `pci_dev` differs
+from the other units', so each NVMe and NHI function gets a trusted, coherent,
+unbounced twin there; the fake exporter's attachment for a twin maps the two
+halves of the export at swapped positions of that device's window. Host 2
+keeps the recording provider. The cases additionally require the real bind to
+report host RAM with struct pages and an established host DMA mapping, and
+every lease address to be the device's own attachment address; the
+`dmabuf-lease-first-mapping` mutant (a lease uses whichever attachment came
+first) is caught by `chain_same_worker`.
+
+In this mode the two pages of each half are contiguous in the device window,
+and the real NVMe SGL builder merges them into one 8 KiB data block; the
+device models check such an access page by page.
+
 ## Cases
 
 | Case | Requirement |
@@ -88,6 +109,7 @@ failures do not count.
 | `stale-ack-matches-reused-slot` | control lookup ignores the group number | `stale_ack_after_reuse` |
 | `drain-in-completion-context` | the core continues an NVMe completion in the completion context | `chain_same_worker` |
 | `tx-wrong-frame` | TX leases swap the two frames of a group | `chain_same_worker` |
+| `dmabuf-lease-first-mapping` | (`--pool dmabuf`, set automatically) a host 1 lease uses the first attachment made, not its own device's | `chain_same_worker` |
 
 ## Observation reported, not asserted
 

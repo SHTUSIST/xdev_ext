@@ -7729,6 +7729,10 @@
       "logical_path": "tests/network/xdomain/chain/chain_core_api.h"
     },
     {
+      "source": "tests/network/xdomain/chain/chain_peer_bridge.c",
+      "logical_path": "tests/network/xdomain/chain/chain_peer_bridge.c"
+    },
+    {
       "source": "tests/network/xdomain/chain/chain_core.c.in",
       "logical_path": "tests/network/xdomain/chain/chain_core.c.in"
     },

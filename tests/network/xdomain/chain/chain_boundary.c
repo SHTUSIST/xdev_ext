@@ -105,6 +105,11 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #undef stack_endpoint_stage
 #include "chain_api.h"
 #include "chain_core_api.h"
+#ifdef CHAIN_REAL_PEER
+#define CHAIN_STUB(name) chain_stub_##name
+#else
+#define CHAIN_STUB(name) name
+#endif
 
 /* Real definitions in other units (core, peer pool, XDOMAIN class). */
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s);
@@ -239,14 +244,14 @@ void fput(struct file *f)
 	assert(d && d->refs);
 	d->refs--;
 }
-bool xdev_ext_peer_control_file(struct file *file)
+bool CHAIN_STUB(xdev_ext_peer_control_file)(struct file *file)
 {
 	struct chain_fd *d = chain_fd_of(file);
 	return d && d->kind == CHAIN_FILE_CONTROL;
 }
 /* REGISTER already sealed a whole-export region: claiming its allocation
  * fd yields the authority the pool keeps. */
-struct file *xdev_ext_peer_file_claim(struct file *file, u64 *len, u64 *generation)
+struct file *CHAIN_STUB(xdev_ext_peer_file_claim)(struct file *file, u64 *len, u64 *generation)
 {
 	struct chain_fd *d = chain_fd_of(file);
 	unsigned e;
@@ -286,10 +291,25 @@ static struct chain_device *chain_device_of(const void *device)
 }
 static u32 chain_pages(void) { return (u32)(chain_memory_bytes / CHAIN_PAGE); }
 /* Page p of the endpoint's export appears at window page pages-1-p. */
+static bool chain_dmabuf_endpoint(unsigned endpoint)
+{
+#ifdef CHAIN_REAL_PEER
+	return endpoint == 0;
+#else
+	(void)endpoint;
+	return false;
+#endif
+}
+static u64 chain_window_page(const struct chain_device *d, u64 page)
+{
+	u64 half = chain_pages() / 2;
+	if (chain_dmabuf_endpoint(d->endpoint))
+		return page < half ? half + page : page - half;
+	return chain_pages() - 1 - page;
+}
 static u64 chain_page_dma(const struct chain_device *d, u64 offset)
 {
-	u64 page = offset / CHAIN_PAGE;
-	return d->base + (chain_pages() - 1 - page) * CHAIN_PAGE + offset % CHAIN_PAGE;
+	return d->base + chain_window_page(d, offset / CHAIN_PAGE) * CHAIN_PAGE + offset % CHAIN_PAGE;
 }
 uint64_t chain_device_dma(unsigned endpoint, enum chain_device_kind kind, uint64_t offset)
 {
@@ -318,7 +338,7 @@ static u64 chain_ticket;
 unsigned chain_lease_violations;
 
 static bool chain_overlap(u64 a, u32 alen, u64 b, u32 blen) { return a < b + blen && b < a + alen; }
-int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 generation, u64 offset,
+int CHAIN_STUB(xdev_ext_peer_file_acquire)(struct file *file, struct pci_dev *peer, u64 generation, u64 offset,
 			       u32 len, enum dma_data_direction dir, struct xdev_ext_peer_fd_lease *h)
 {
 	struct chain_fd *auth = chain_fd_of(file);
@@ -361,7 +381,7 @@ int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 gene
 		.member = dir, .worker = chain_core_current_worker() });
 	return 0;
 }
-void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h, bool quiesced)
+void CHAIN_STUB(xdev_ext_peer_fd_release)(struct xdev_ext_peer_fd_lease *h, bool quiesced)
 {
 	struct chain_lease *l;
 
@@ -379,16 +399,37 @@ void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h, bool quiesced)
 }
 /* LEASE_SPLIT */
 
+static int chain_dma_page(const struct chain_device *dev, uint64_t dma, u8 *buf, uint32_t len,
+			  bool device_writes);
+/* One device access may span pages that are contiguous in its own window
+ * (an SGL data block over two leased pages); each page is checked alone. */
 int chain_dma_access(const void *device, uint64_t dma, void *buf, uint32_t len, bool device_writes)
 {
 	const struct chain_device *dev = chain_device_of(device);
+	u8 *bytes = buf;
+
+	while (len) {
+		uint32_t chunk = min_t(uint32_t, len, CHAIN_PAGE - dma % CHAIN_PAGE);
+		int ret = chain_dma_page(dev, dma, bytes, chunk, device_writes);
+		if (ret)
+			return ret;
+		dma += chunk;
+		bytes += chunk;
+		len -= chunk;
+	}
+	return 0;
+}
+static int chain_dma_page(const struct chain_device *dev, uint64_t dma, u8 *buf, uint32_t len,
+			  bool device_writes)
+{
 	u64 window_page, page, offset;
 
 	if (!dev || dma < dev->base || dma >= dev->base + (u64)chain_pages() * CHAIN_PAGE ||
 	    dma % CHAIN_PAGE + len > CHAIN_PAGE)
 		goto fault;
 	window_page = (dma - dev->base) / CHAIN_PAGE;
-	page = chain_pages() - 1 - window_page;
+	for (page = 0; page < chain_pages() && chain_window_page(dev, page) != window_page; page++)
+		;
 	offset = page * CHAIN_PAGE + dma % CHAIN_PAGE;
 	/* The device reaches only bytes it holds a live lease for, in that direction. */
 	for (unsigned i = chain_nleases; i; i--) {
@@ -405,8 +446,8 @@ int chain_dma_access(const void *device, uint64_t dma, void *buf, uint32_t len, 
 	}
 fault:
 	chain_lease_violations++;
-	fprintf(stderr, "CHAIN_DMA_FAULT device=%p dma=%llx len=%u write=%d\n", device,
-		(unsigned long long)dma, len, device_writes);
+	fprintf(stderr, "CHAIN_DMA_FAULT device=%p dma=%llx len=%u write=%d\n",
+		dev ? dev->device : NULL, (unsigned long long)dma, len, device_writes);
 	return -EFAULT;
 }
 
@@ -426,7 +467,7 @@ static void chain_link_payload(unsigned from, unsigned long long tx_dma, unsigne
 }
 
 /* Recording requester bind; the stage keeps its own device as requester. */
-int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+int CHAIN_STUB(xdev_ext_requester_bind)(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
 			    struct pci_dev *pdev, u32 flags)
 {
 	struct chain_device *dev = chain_device_of(pdev);
@@ -448,7 +489,120 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 		.device = pdev, .stage = st->index, .member = 99 });
 	return 0;
 }
-void xdev_ext_requester_unbind(struct xdev_ext_requester *rq) { rq->pdev = NULL; }
+void CHAIN_STUB(xdev_ext_requester_unbind)(struct xdev_ext_requester *rq) { rq->pdev = NULL; }
+
+#ifdef CHAIN_REAL_PEER
+/* Host 1 (endpoint 0): real REGISTER/claim/requester bind/leases on a
+ * system-heap DMA-BUF (chain_peer_bridge.c); host 2 keeps the provider above. */
+int chain_bridge_setup(u64 bytes);
+struct file *chain_bridge_register(u64 bytes, u64 *generation);
+struct file *chain_bridge_control(void);
+void *chain_bridge_twin(const void *original, u32 id);
+const void *chain_bridge_original(const void *pointer);
+bool chain_bridge_owns_twin(const void *pointer);
+void chain_bridge_window(u64 first, u32 first_len, u64 second, u32 second_len);
+int chain_bridge_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st, void *twin);
+void chain_bridge_requester_unbind(struct xdev_ext_requester *rq);
+int chain_bridge_acquire(struct file *f, void *twin, u64 generation, u64 offset, u32 len,
+			 enum dma_data_direction dir, struct xdev_ext_peer_fd_lease *h);
+void chain_bridge_release(struct xdev_ext_peer_fd_lease *h, bool quiesced);
+struct file *chain_real_peer_file_claim(struct file *, u64 *, u64 *);
+bool chain_real_peer_control_file(struct file *);
+static struct file *chain_real_allocation, *chain_real_control;
+static struct { struct xdev_ext_peer_fd_lease *h; u64 ticket; unsigned lease; } chain_real_leases[4096];
+static unsigned chain_nreal;
+
+bool xdev_ext_peer_control_file(struct file *file)
+{
+	return file == chain_real_control ? chain_real_peer_control_file(file) :
+	       chain_stub_xdev_ext_peer_control_file(file);
+}
+struct file *xdev_ext_peer_file_claim(struct file *file, u64 *len, u64 *generation)
+{
+	return file == chain_real_allocation ? chain_real_peer_file_claim(file, len, generation) :
+	       chain_stub_xdev_ext_peer_file_claim(file, len, generation);
+}
+int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+			    struct pci_dev *pdev, u32 flags)
+{
+	struct chain_device *dev = chain_device_of(pdev);
+	u64 half = chain_pages() / 2;
+	int ret;
+
+	if (!dev || dev->endpoint != 0 || session_endpoint(st->s) != 0)
+		return chain_stub_xdev_ext_requester_bind(rq, st, pdev, flags);
+	chain_bridge_window(dev->base + half * CHAIN_PAGE, (u32)(half * CHAIN_PAGE),
+			    dev->base, (u32)((chain_pages() - half) * CHAIN_PAGE));
+	ret = chain_bridge_requester_bind(rq, st, chain_bridge_twin(pdev, dev->kind));
+	if (!ret)
+		chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = 0, .device = pdev,
+			.stage = st->index, .member = 99, .address = rq->adm.backing,
+			.length = st->caps.reachability, .offset = rq->adm.refused });
+	return ret;
+}
+void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
+{
+	if (chain_bridge_owns_twin(rq->pdev))
+		chain_bridge_requester_unbind(rq);
+	else
+		chain_stub_xdev_ext_requester_unbind(rq);
+}
+int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 generation, u64 offset,
+			       u32 len, enum dma_data_direction dir, struct xdev_ext_peer_fd_lease *h)
+{
+	const void *original = chain_bridge_original(peer) ? chain_bridge_original(peer) : peer;
+	struct chain_device *dev = chain_device_of(original);
+	int ret;
+
+	if (chain_fd_of(file))
+		return chain_stub_xdev_ext_peer_file_acquire(file, peer, generation, offset, len, dir, h);
+	if (!dev || dev->endpoint != 0)
+		return -EINVAL;
+	ret = chain_bridge_acquire(file, chain_bridge_twin(original, dev->kind), generation, offset, len, dir, h);
+	if (ret)
+		return ret;
+	assert(chain_nleases < CHAIN_LEASES && chain_nreal < ARRAY_SIZE(chain_real_leases));
+	for (unsigned i = 0; i < chain_nleases; i++) {
+		struct chain_lease *o = &chain_leases[i];
+		if (o->dev->endpoint == 0 && chain_overlap(o->offset, o->len, offset, len) &&
+		    (o->retained || (o->live && (dir == DMA_FROM_DEVICE || o->dir == DMA_FROM_DEVICE)))) {
+			chain_lease_violations++;
+			fprintf(stderr, "CHAIN_LEASE_VIOLATION ep=0 off=%llu len=%u\n", (unsigned long long)offset, len);
+		}
+	}
+	chain_leases[chain_nleases] = (struct chain_lease){ dev, offset, h->lease.ticket, len, dir, true, false };
+	chain_real_leases[chain_nreal++] = (typeof(chain_real_leases[0])){ h, h->lease.ticket, chain_nleases++ };
+	if (h->lease.dma_address != chain_page_dma(dev, offset))
+		chain_lease_violations++; /* the importer's address must be this device's attachment */
+	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = 0, .device = original,
+		.offset = offset, .length = len, .address = h->lease.dma_address, .member = dir,
+		.worker = chain_core_current_worker() });
+	return 0;
+}
+void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h, bool quiesced)
+{
+	if (!h || !h->file)
+		return;
+	if (chain_fd_of(h->file)) {
+		chain_stub_xdev_ext_peer_fd_release(h, quiesced);
+		return;
+	}
+	for (unsigned i = chain_nreal; i; i--)
+		if (chain_real_leases[i - 1].h == h && chain_real_leases[i - 1].ticket == h->lease.ticket) {
+			struct chain_lease *l = &chain_leases[chain_real_leases[i - 1].lease];
+			assert(l->live);
+			l->live = false;
+			l->retained = !quiesced;
+			chain_record((struct chain_event){ .kind = CHAIN_EV_RELEASE, .endpoint = 0,
+				.device = l->dev->device, .offset = l->offset, .length = l->len,
+				.quiesced = quiesced, .worker = chain_core_current_worker() });
+			chain_real_leases[i - 1].h = NULL;
+			chain_bridge_release(h, quiesced);
+			return;
+		}
+	abort(); /* a real lease this fixture never saw */
+}
+#endif
 
 /* ---- BPF invocation of the reference programs ------------------------- */
 struct xdev_ext_mech_ctx chain_program_ctx(struct xdev_ext_mech_stage *st,
@@ -544,6 +698,17 @@ int chain_world(const struct chain_link_config *cfg)
 		chain_install(&chain_control[e], CHAIN_FILE_CONTROL, e);
 		chain_install(&chain_allocation[e], CHAIN_FILE_ALLOCATION, e);
 	}
+#ifdef CHAIN_REAL_PEER
+	ret = chain_bridge_setup(chain_memory_bytes);
+	if (ret)
+		return ret;
+	chain_real_allocation = chain_bridge_register(chain_memory_bytes, &chain_generation[0]);
+	chain_real_control = chain_bridge_control();
+	if (!chain_real_allocation || !chain_real_control)
+		return -EIO;
+	chain_install(chain_real_allocation, CHAIN_FILE_FOREIGN, 0);
+	chain_install(chain_real_control, CHAIN_FILE_FOREIGN, 0);
+#endif
 	chain_nvme_init_class();
 	ret = stack_probe(w, 0);
 	if (!ret)
@@ -572,12 +737,28 @@ static struct xdev_ext_mech_session *chain_create(unsigned endpoint, const struc
 		chain_sessions[endpoint] = s;
 	return s;
 }
+static void *chain_host1_allocation(void)
+{
+#ifdef CHAIN_REAL_PEER
+	return chain_real_allocation;
+#else
+	return &chain_allocation[0];
+#endif
+}
+static void *chain_host1_control(void)
+{
+#ifdef CHAIN_REAL_PEER
+	return chain_real_control;
+#else
+	return &chain_control[0];
+#endif
+}
 /* Host 1: stage 0 NVMe READ of the LBA window, stage 1 XDOMAIN TX. */
 struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override)
 {
 	struct xdev_ext_mech_create c = {
 		.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
-		.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = chain_fd_for(&chain_allocation[0]),
+		.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = chain_fd_for(chain_host1_allocation()),
 		.layout = { .frame_size = chain_cfg.frame_size, .seg_len = chain_cfg.frame_size,
 			    .group_bytes = chain_cfg.group_bytes },
 		.depth = chain_cfg.depth, .eventfd = -1,
@@ -585,7 +766,7 @@ struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override
 			{ .class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
 			  .fd = chain_nvme_fd[0], .arg0 = 256, .arg1 = 256 },
 			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
-			  .fd = chain_fd_for(&chain_control[0]),
+			  .fd = chain_fd_for(chain_host1_control()),
 			  .arg0 = token_override ? token_override : chain_link_token(0), .arg1 = 0,
 			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
 		},
@@ -711,6 +892,30 @@ const void *chain_stage_requester(struct xdev_ext_mech_session *s, unsigned stag
 		    (int)chain_events[i].endpoint == endpoint && chain_events[i].stage == stage)
 			return chain_events[i].device;
 	return NULL;
+}
+
+bool chain_real_peer_mode(void)
+{
+#ifdef CHAIN_REAL_PEER
+	return true;
+#else
+	return false;
+#endif
+}
+/* What the real requester bind recorded for host 1's stage (DMA-BUF mode). */
+bool chain_stage_admission(struct xdev_ext_mech_session *s, unsigned stage, uint32_t *backing,
+			   uint32_t *reachability, uint32_t *refused)
+{
+	int endpoint = session_endpoint(s);
+	for (size_t i = 0; i < chain_nevents; i++)
+		if (chain_events[i].kind == CHAIN_EV_LEASE && chain_events[i].member == 99 &&
+		    (int)chain_events[i].endpoint == endpoint && chain_events[i].stage == stage) {
+			*backing = (uint32_t)chain_events[i].address;
+			*reachability = (uint32_t)chain_events[i].length;
+			*refused = (uint32_t)chain_events[i].offset;
+			return true;
+		}
+	return false;
 }
 
 /* ---- one deterministic scheduler ------------------------------------- */

@@ -77,6 +77,16 @@ static void up(void)
 	CHECK(chain_stage_requester(rx, 0) == chain_device(1, CHAIN_DEV_NHI) &&
 	      chain_stage_requester(rx, 1) == chain_device(1, CHAIN_DEV_NVME),
 	      "host 2 stages use host 2's NHI and NVMe");
+	if (chain_real_peer_mode())
+		for (unsigned stage = 0; stage < 2; stage++) {
+			uint32_t backing = 0, reachability = 0, refused = ~0u;
+			CHECK(chain_stage_admission(tx, stage, &backing, &reachability, &refused),
+			      "the real requester bind ran for host 1's stage");
+			CHECK(backing == (XDEV_EXT_PEER_BACKING_HOST_SYSTEM | XDEV_EXT_PEER_BACKING_STRUCT_PAGE),
+			      "host 1 frames are host RAM with struct pages (system-heap DMA-BUF)");
+			CHECK(reachability == XDEV_EXT_CAP_HOST_DMA_MAPPED && !refused,
+			      "a host DMA-API mapping was established for that requester, nothing refused");
+		}
 }
 
 static void start(uint64_t n)
@@ -147,13 +157,20 @@ static unsigned read_frames(unsigned k)
 	unsigned mask = 0, total = 0;
 
 	CHECK(c && c->opcode == 0x02, "host 1 command is an NVMe READ");
-	for (unsigned i = 0; i < c->spans; i++) {
-		int64_t off = offset_of(0, CHAIN_DEV_NVME, c->span_addr[i]);
-		CHECK(off >= 0, "READ data pointer lies in host 1's NVMe window");
-		CHECK(off % FRAME + c->span_len[i] <= FRAME, "a span stays inside one frame");
-		mask |= 1u << (off / FRAME);
-		total += c->span_len[i];
-	}
+	/* A span may cover several frames that are contiguous in the NVMe
+	 * window (one SGL data block); map it page by page. */
+	for (unsigned i = 0; i < c->spans; i++)
+		for (uint32_t done = 0; done < c->span_len[i];) {
+			uint64_t dma = c->span_addr[i] + done;
+			uint32_t chunk = FRAME - (uint32_t)(dma % FRAME);
+			int64_t off = offset_of(0, CHAIN_DEV_NVME, dma);
+			if (chunk > c->span_len[i] - done)
+				chunk = c->span_len[i] - done;
+			CHECK(off >= 0, "READ data pointer lies in host 1's NVMe window");
+			mask |= 1u << (off / FRAME);
+			done += chunk;
+			total += chunk;
+		}
 	CHECK(total == GROUP && c->bytes == GROUP, "READ covers exactly one group");
 	CHECK(__builtin_popcount(mask) == GROUP / FRAME, "READ covers group/frame distinct frames");
 	return mask;

@@ -96,5 +96,8 @@ const void *chain_device(unsigned endpoint, enum chain_device_kind kind);
 unsigned chain_violations(void);
 unsigned chain_live_leases(unsigned endpoint, enum chain_device_kind kind, uint64_t offset, uint32_t len);
 const void *chain_stage_requester(struct xdev_ext_mech_session *s, unsigned stage);
+bool chain_real_peer_mode(void);
+bool chain_stage_admission(struct xdev_ext_mech_session *s, unsigned stage, uint32_t *backing,
+			   uint32_t *reachability, uint32_t *refused);
 const struct chain_event *chain_event_get(size_t i);
 #endif

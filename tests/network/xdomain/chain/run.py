@@ -105,6 +105,9 @@ MUTATIONS = {
          '\t\tif (s->st[b->bs.stage].class_id == XDEV_EXT_MECH_CLASS_NVME)\n'
          '\t\t\txdev_ext_mech_batch_drain(&s->drain_work);\n'
          '\t\telse\n\t\t\tkthread_queue_work(worker, &s->drain_work);\n\t}')]),
+    # DMA-BUF pool only: a lease uses whichever attachment was made first.
+    'dmabuf-lease-first-mapping': dict(case='chain_same_worker', pool='dmabuf', edits=[
+        ('io_uring/xdev_ext_peer_fd.c', '  if (m->peer == peer) goto acquire;', '  goto acquire;')]),
     'tx-wrong-frame': dict(case='chain_same_worker', edits=[
         ('io_uring/family/xdev_ext_netfam.c',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), off, buf_len,',
@@ -319,7 +322,7 @@ int chain_x6_program_call(struct xdev_ext_mech_stage *stage, const struct xdev_e
 """
 
 
-def xdomain_units(kernel, build, root):
+def xdomain_units(kernel, build, root, pool='provider'):
     """Existing XDOMAIN stack wrappers; only environment lines are adapted."""
     fixture = kernel / STACK
     env = build / 'xd-facade'
@@ -380,13 +383,61 @@ def xdomain_units(kernel, build, root):
     boundary = (HERE / 'chain_boundary.c').read_text()
     split = find_definition(requester, 'xdev_ext_peer_lease_split')
     generated = build / 'chain_boundary.c'
-    generated.write_text(replace(boundary, '/* LEASE_SPLIT */', split, 'lease split'))
+    # In DMA-BUF mode the real requester unit supplies xdev_ext_peer_lease_split.
+    generated.write_text(replace(boundary, '/* LEASE_SPLIT */', split if pool == 'provider' else
+                                 '/* xdev_ext_peer_lease_split: real requester unit */', 'lease split'))
     units[-1] = generated
     flags = ['-DSTACK_STARTUP_EVENTS', '-DSTACK_REAL_NHI', '-I', str(env), '-I', str(fixture),
              '-I', str(kernel), '-idirafter', str(kernel / 'include'),
              '-idirafter', str(kernel / 'include/uapi'), '-I', str(kernel / 'tools/xdev_ext_mech'),
-             '-I', str(HERE)]
+             '-I', str(HERE)] + (['-DCHAIN_REAL_PEER'] if pool == 'dmabuf' else [])
     return units, flags, edits
+
+
+PEER_RENAMES = ['-Dxdev_ext_peer_file_claim=chain_real_peer_file_claim',
+                '-Dxdev_ext_peer_file_acquire=chain_real_peer_file_acquire',
+                '-Dxdev_ext_peer_fd_release=chain_real_peer_fd_release',
+                '-Dxdev_ext_peer_control_file=chain_real_peer_control_file']
+REQUESTER_RENAMES = ['-Dxdev_ext_requester_bind=chain_real_requester_bind',
+                     '-Dxdev_ext_requester_unbind=chain_real_requester_unbind']
+
+
+def peer_units(root, kernel, build, common):
+    """--pool dmabuf: the real peer/importer/fd/requester units of host 1.
+
+    Same inputs as tests/network/xdomain/dmabuf_requester, whose kernel shim
+    edits, empty Linux headers and system-heap extraction are reused."""
+    step1 = load('chain_dmabuf_requester', HERE.parent / 'dmabuf_requester/run.py')
+    peer = build / 'peer'
+    include = peer / 'include'
+    for name in step1.BOUNDARY_HEADERS:
+        path = include / 'linux' / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text('/* kernel boundary supplied by kernel_shim.h and boundary.h */\n')
+    (include / 'linux/errno.h').write_text('#include <asm-generic/errno.h>\n')
+    (include / 'asm').mkdir(parents=True, exist_ok=True)
+    (include / 'asm/page.h').write_text('/* PAGE_* from kernel_shim.h */\n')
+    shim = (root / step1.SHIM / 'kernel_shim.h').read_text()
+    for old, new in step1.SHIM_EDITS:
+        shim = replace(shim, old, new, 'kernel_shim edit')
+    (peer / 'kernel_shim.h').write_text(shim)
+    shutil.copyfile(root / step1.SHIM / 'kernel_shim.c', peer / 'kernel_shim.c')
+    heap = (kernel / 'drivers/dma-buf/heaps/system_heap.c').read_text()
+    (peer / 'heap_unit.c').write_text((HERE.parent / 'dmabuf_requester/heap_unit.c.in').read_text().replace(
+        'SYSTEM_HEAP_DESCRIBE', step1.definition(heap, 'system_heap_xdev_ext_describe') + '\n' +
+        step1.initializer(heap, 'system_heap_xdev_ext_desc')))
+    (peer / 'fd_unit.c').write_text((HERE.parent / 'dmabuf_requester/fd_unit.c.in').read_text().replace(
+        'PEER_FD_SOURCE', '"' + str(kernel / 'io_uring/xdev_ext_peer_fd.c') + '"'))
+    flags = common + ['-include', str(peer / 'kernel_shim.h'),
+                      '-include', str(HERE.parent / 'dmabuf_requester/boundary.h'),
+                      '-I', str(include), '-I', str(peer), '-I', str(HERE.parent / 'dmabuf_requester'),
+                      '-I', str(kernel / 'io_uring'), '-I', str(kernel / 'include'), '-I', str(kernel)]
+    units = [(peer / 'kernel_shim.c', []), (kernel / 'io_uring/xdev_ext_peer.c', PEER_RENAMES),
+             (kernel / 'io_uring/xdev_ext_peer_dmabuf.c', PEER_RENAMES), (peer / 'fd_unit.c', PEER_RENAMES),
+             (peer / 'heap_unit.c', PEER_RENAMES),
+             (kernel / 'io_uring/family/xdev_ext_requester.c', REQUESTER_RENAMES),
+             (HERE / 'chain_peer_bridge.c', PEER_RENAMES + REQUESTER_RENAMES)]
+    return flags, units
 
 
 def compile_unit(cc, flags, unit, obj, log):
@@ -408,7 +459,7 @@ def mutate(kernel, name):
         path.write_text(path.read_text() + text)
 
 
-def build_all(root, out, sanitize, only, mutation=None):
+def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
     kernel, hashes = assemble(root, out)
     if mutation:
         mutate(kernel, mutation)
@@ -453,7 +504,13 @@ def build_all(root, out, sanitize, only, mutation=None):
         pool_flags = core_flags + ['-include', str(HERE / 'chain_core_env.h')]
         compile_unit(cc, pool_flags, kernel / 'io_uring/xdev_ext_mech_peer_pool.c', build / 'pool.o', log)
         objects.append(build / 'pool.o')
-        units, xd_flags, edits = xdomain_units(kernel, build, root)
+        units, xd_flags, edits = xdomain_units(kernel, build, root, pool)
+        if pool == 'dmabuf':
+            peer_flags, peer_list = peer_units(root, kernel, build, common)
+            for number, (unit, renames) in enumerate(peer_list):
+                obj = build / ('peer-%d.o' % number)
+                compile_unit(cc, peer_flags + renames, unit, obj, log)
+                objects.append(obj)
         (out / 'fixture-edits.json').write_text(json.dumps(edits, indent=1) + '\n')
         for number, unit in enumerate(units):
             obj = build / ('xd-%d.o' % number)
@@ -502,17 +559,23 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--only', choices=('core', 'nvme', 'link'))
     parser.add_argument('--mutation', choices=sorted(MUTATIONS))
+    parser.add_argument('--pool', choices=('provider', 'dmabuf'), default='provider',
+                        help='host 1 frames: recording provider, or a system-heap DMA-BUF through '
+                             'the real REGISTER/requester/importer/lease code')
     args = parser.parse_args()
+    if args.mutation and MUTATIONS[args.mutation].get('pool'):
+        args.pool = MUTATIONS[args.mutation]['pool']
     root, out = args.source_root.resolve(), args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
     record = dict(scope='host composition of real core worker, PEER pool, NVMe class/storage family, '
                   'XDOMAIN X3/X4/X5/network family, reference programs and NHI ring section; '
                   'device models move bytes only at addresses named by real descriptors; '
-                  'no kernel/hardware/DMA/performance', sanitize=args.sanitize, mutation=args.mutation)
+                  'no kernel/hardware/DMA/performance', sanitize=args.sanitize, mutation=args.mutation,
+                  pool=args.pool)
     try:
         record['head'] = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
                                         capture_output=True, text=True).stdout.strip()
-        kernel, hashes, names, binary = build_all(root, out, args.sanitize, args.only, args.mutation)
+        kernel, hashes, names, binary = build_all(root, out, args.sanitize, args.only, args.mutation, args.pool)
         record.update(core_functions=len(names), inputs_sha256={k: v for k, v in hashes.items() if k.startswith((
             'io_uring/xdev_ext_mech', 'io_uring/xdomain/', 'io_uring/family/', 'drivers/nvme/host/xdev_ext',
             'drivers/thunderbolt/nhi', 'tools/xdev_ext_mech/xdomain_peer', 'tools/xdev_ext_mech/nvme_s0',
