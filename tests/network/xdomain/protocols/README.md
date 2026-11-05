@@ -51,8 +51,9 @@ program through `stack_test.py --program rts-cts`, in the stack suite's own
 environment. `--case NAME` (repeatable) selects cases.
 
 `--mutation NAME` removes one rule of the class change in the assembled copy
-before compiling: `paired_announce` (a paired stage accepts an RTS/CTS
-action), `offer_after_choice` (PAIR_DUE offered after the RTS/CTS choice),
+before compiling: `no_binding_latch` (an RTS or an RX post on an RTS does
+not latch the RTS/CTS choice), `offer_after_choice` (PAIR_DUE offered after
+the RTS/CTS choice),
 `input_after_choice` (pairing input kept after that choice),
 `early_facts_for_v1` (v1 events of an unpaired stage get early facts),
 `drop_rts_authority` (the early snapshot loses the selected RTS record) and

@@ -1592,9 +1592,6 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 	    v->event_id != i->base.event_id || v->epoch != i->base.epoch ||
 	    act < XDEV_EXT_XDP_ACT_WAIT || act > XDEV_EXT_XDP_ACT_TX_POST_EARLY) return -EPROTO;
 	if (act < XDEV_EXT_XDP_ACT_SEND_HELLO) {
-		bool rts_cts = act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST ||
-			act == XDEV_EXT_XDP_ACT_TX_POST || act == XDEV_EXT_XDP_ACT_REJECT_RTS ||
-			act == XDEV_EXT_XDP_ACT_WITHDRAW;
 		bool declined;
 
 		if (act == XDEV_EXT_XDP_ACT_IGNORE && (i->base.event == XDEV_EXT_XDP_EV_PAIR_DUE ||
@@ -1618,17 +1615,16 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		}
 		if (i->base.event >= XDEV_EXT_XDP_EV_PAIR_DUE && act != XDEV_EXT_XDP_ACT_WAIT &&
 		    act != XDEV_EXT_XDP_ACT_FAIL_LINK) return -EPROTO;
-		if (rts_cts) {
-			/* RTS/CTS actions bind or refuse a group from an RTS. A paired
-			 * stage has none: pairing, not an RTS, binds its groups. */
+		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST) {
+			/* The first RTS/CTS binding latches the choice. A paired stage
+			 * never holds an RTS or CTS record and cannot encode an RTS,
+			 * so the v1 checks refuse every RTS/CTS action there. */
 			spin_lock_irqsave(&xs->ns.lock, flags);
-			if (xd_paired(xs)) ret = -EPROTO;
-			else if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST) {
+			if (!xd_paired(xs)) {
 				xs->rts_cts = true;
 				xs->pair_deadline = 0;
 			}
 			spin_unlock_irqrestore(&xs->ns.lock, flags);
-			if (ret) return ret;
 		}
 		if (act == XDEV_EXT_XDP_ACT_WAIT && !xs->stop_latched) {
 			/* Shared validator owns wake bounds. This stage wake also applies to no-slot events. */
