@@ -6995,6 +6995,14 @@
       "logical_path": "tests/network/count_fifo/run.py"
     },
     {
+      "source": "tests/network/count_fifo/typed_fixture.py",
+      "logical_path": "tests/network/count_fifo/typed_fixture.py"
+    },
+    {
+      "source": "tests/network/count_fifo/test_typed_fixture.py",
+      "logical_path": "tests/network/count_fifo/test_typed_fixture.py"
+    },
+    {
       "source": "tests/network/count_fifo/test_count.c",
       "logical_path": "tests/network/count_fifo/test_count.c"
     },
