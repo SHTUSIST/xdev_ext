@@ -49,9 +49,23 @@ size_t chain_nvme_log_count(void);
 const struct chain_nvme_command *chain_nvme_log(size_t i);
 void chain_nvme_init_class(void);
 
+/* --pool host: each endpoint's frame memory is the ring's IOU_UMEM.  Page
+ * objects (chain_boundary.c) name its pages; a device reaches a page only
+ * through a mapping into its own window (the real requester's for an NHI,
+ * the block layer's per-request one for NVMe), modeled in chain_boundary.c. */
+bool chain_host_mode(void);
+int chain_creating_endpoint(void);
+void *const *chain_host_pages(unsigned endpoint, uint32_t nr);
+int chain_host_dma_map(const void *device, const void *page, uint32_t off, uint32_t len,
+		       bool device_writes, uint64_t *dma);
+void chain_host_dma_unmap(const void *device, uint64_t dma, uint32_t len, bool quiesced);
+int chain_umem_register(unsigned endpoint, uint32_t frame_size, uint32_t nr_frames, uint32_t page_offset);
+
 /* Composite world and scheduler (chain_boundary.c). */
 struct xdev_ext_mech_session;
-struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early; };
+/* host_page_offset: --pool host only, where the UMEM starts in its first page. */
+struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early;
+	uint32_t host_page_offset; };
 int chain_world(const struct chain_link_config *cfg);
 int chain_pump(unsigned budget, uint64_t advance_ns);
 uint64_t chain_link_token(unsigned endpoint);
@@ -79,6 +93,9 @@ enum chain_event_kind {
 	CHAIN_EV_PROGRAM,           /* program member invoked */
 	CHAIN_EV_START,             /* fixture START */
 	CHAIN_EV_INJECT,            /* injected duplicate control bytes */
+	CHAIN_EV_DMA_MAP,           /* --pool host: dma_map_page_attrs() by the requester */
+	CHAIN_EV_DMA_UNMAP,         /* --pool host: dma_unmap_page_attrs() */
+	CHAIN_EV_DMA_SYNC,          /* --pool host: control_type 1 for the device, 2 for the CPU */
 };
 struct chain_event {
 	uint64_t id, now_ns;
@@ -96,6 +113,7 @@ unsigned chain_data_tx_done(unsigned endpoint);
 const void *chain_device(unsigned endpoint, enum chain_device_kind kind);
 unsigned chain_violations(void);
 unsigned chain_live_leases(unsigned endpoint, enum chain_device_kind kind, uint64_t offset, uint32_t len);
+unsigned chain_retained_leases(unsigned endpoint, enum chain_device_kind kind, uint64_t offset, uint32_t len);
 const void *chain_stage_requester(struct xdev_ext_mech_session *s, unsigned stage);
 bool chain_real_peer_mode(void);
 bool chain_stage_admission(struct xdev_ext_mech_session *s, unsigned stage, uint32_t *backing,

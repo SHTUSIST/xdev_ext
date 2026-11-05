@@ -180,6 +180,7 @@ static inline void chain_spin_unlock(spinlock_t *l) { assert(l->depth == 1); l->
 #define DEFINE_MUTEX(n) int n
 #define mutex_lock(m) ((void)(m))
 #define mutex_unlock(m) ((void)(m))
+#define cond_resched() ((void)0)
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
 #define synchronize_rcu() ((void)0)
