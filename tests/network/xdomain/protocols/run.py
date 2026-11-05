@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0
+"""Two independent XDOMAIN protocol programs on the actual host composition.
+
+The runner reuses tests/network/xdomain/early/run.py to assemble the mapped
+production sources (NHI ring, XDOMAIN transport/class, family, core pieces)
+and its environment patches. It then rewrites only the program bridge
+(stack_x6.c): the reference program, the RTS/CTS program and the early-grant
+program are all included, under private symbol names, and stack_program[]
+selects the program attached at each endpoint. Each program stays a complete
+separate source file; the kernel loads each as its own object.
+
+Cases:
+  own cases (cases.c)  fixed golden control bytes, the CTS invariant, mismatched
+                       programs, and refused bindings;
+  equivalence          each new program takes the reference decision for its
+                       own protocol on generated fact records;
+  early:<case>         the existing early contract cases with the early-grant
+                       program at the early endpoints.
+The existing version-1 stack suite runs separately with
+stack_test.py --program rts-cts in its own unmodified environment.
+Compilation failures, signals and timeouts are setup errors, never RED.
+"""
+import argparse
+import hashlib
+import importlib.util
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+import tempfile
+
+HERE = Path(__file__).resolve().parent
+ROOT = next(p for p in HERE.parents if (p / 'source-layout.json').is_file())
+PROGRAMS = (('stack_ref', 'tools/xdev_ext_mech/xdomain_peer.bpf.c'),
+            ('stack_rts', 'tools/xdev_ext_mech/xdomain_rts_cts.bpf.c'),
+            ('stack_early', 'tools/xdev_ext_mech/xdomain_early.bpf.c'))
+SYMBOLS = ('xdomain_peer_prepare', 'xdomain_peer_build', 'xdomain_peer_complete',
+           'xdomain_peer_ops', 'LICENSE')
+OWN_CASES = ('rts_cts_v2', 'rts_cts_legacy', 'reference_legacy', 'early_v2', 'reference_early',
+             'mismatch_rts_sender', 'mismatch_pair_sender', 'rts_drops_hello',
+             'paired_refuses_announce', 'post_needs_grant')
+RTS, EARLY = 1, 2
+# Early contract cases whose endpoints are not both early: the version-1 end
+# runs the RTS/CTS program (mixed_v1_tx: version-1 sender, early receiver).
+# Every other early case runs the early program at both ends.
+EARLY_MAPPING = {'default_v1': (RTS, RTS), 'mixed_v1_tx': (RTS, EARLY),
+                 'mixed_v1_rx': (EARLY, RTS)}
+
+
+def module(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    loaded = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(loaded)
+    return loaded
+
+
+def copy_program_closure(kernel, root):
+    """Copy each program and its project includes by the layout's native paths."""
+    entries = json.loads((root / 'source-layout.json').read_text())['files']
+    native = {e['native_path']: root / e['source'] for e in entries if e.get('component') == 'linux'}
+    include = re.compile(r'^\s*#\s*include\s*"([^"\n]+)"', re.M)
+    pending, copied = [path for _, path in PROGRAMS], {}
+    while pending:
+        name = pending.pop()
+        if name in copied:
+            continue
+        if name not in native:
+            raise FileNotFoundError('program input not mapped in source-layout.json: ' + name)
+        data = native[name].read_bytes()
+        copied[name] = {'source': str(native[name].relative_to(root)),
+                        'sha256': hashlib.sha256(data).hexdigest()}
+        dest = kernel / name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_bytes(data)
+        for inc in include.findall(data.decode()):
+            candidate = str(Path(name).parent / inc)
+            if candidate in native:
+                pending.append(candidate)
+    return copied
+
+
+def bridge(stack):
+    """Include all three programs under private names; dispatch per endpoint."""
+    x6 = stack / 'stack_x6.c'
+    text = x6.read_text()
+    anchor = '#include "../../../../../tools/xdev_ext_mech/xdomain_peer.bpf.c"\n'
+    if text.count(anchor) != 1:
+        raise ValueError('program bridge include anchor changed')
+    parts = []
+    for prefix, path in PROGRAMS:
+        parts += ['#define %s %s_%s' % (s, prefix, s) for s in SYMBOLS]
+        parts.append('#include "../../../../../%s"' % path)
+        parts += ['#undef %s' % s for s in SYMBOLS]
+    parts += ['unsigned stack_program[2];',
+              'unsigned stack_force_endpoint = 2, stack_force_event, stack_force_action, stack_force_hits;',
+              'static __s32 xdomain_peer_prepare(void *, const struct xdev_ext_mech_ctx *);',
+              'static __s32 xdomain_peer_build(void *, const struct xdev_ext_mech_ctx *);',
+              'static __s32 xdomain_peer_complete(void *, const struct xdev_ext_mech_ctx *);', '']
+    text = text.replace(anchor, '\n'.join(parts) + '\n', 1)
+    text += r'''
+/* Program table: 0 reference, 1 RTS/CTS, 2 early grant. A forced action
+ * replaces one recorded verdict before the class validates it, so the class
+ * invariants are exercised independently of program policy. */
+static __s32 xdomain_peer_prepare(void *c, const struct xdev_ext_mech_ctx *m)
+{
+ switch (stack_program[active_endpoint & 1]) {
+ case 1: return stack_rts_xdomain_peer_prepare(c, m);
+ case 2: return stack_early_xdomain_peer_prepare(c, m);
+ default: return stack_ref_xdomain_peer_prepare(c, m);
+ }
+}
+static __s32 xdomain_peer_build(void *c, const struct xdev_ext_mech_ctx *m)
+{
+ switch (stack_program[active_endpoint & 1]) {
+ case 1: return stack_rts_xdomain_peer_build(c, m);
+ case 2: return stack_early_xdomain_peer_build(c, m);
+ default: return stack_ref_xdomain_peer_build(c, m);
+ }
+}
+static __s32 xdomain_peer_complete(void *c, const struct xdev_ext_mech_ctx *m)
+{
+ __s32 ret;
+ switch (stack_program[active_endpoint & 1]) {
+ case 1: ret = stack_rts_xdomain_peer_complete(c, m); break;
+ case 2: ret = stack_early_xdomain_peer_complete(c, m); break;
+ default: ret = stack_ref_xdomain_peer_complete(c, m); break;
+ }
+ if (!ret && active && active->xdomain && active->xdomain->calls == 1 &&
+     m->callsite == XDEV_EXT_MECH_SITE_WORKER_PROTOCOL && active_endpoint == stack_force_endpoint &&
+     ((const struct xdev_ext_xdomain_proto_info *)active->info)->event == stack_force_event) {
+  active->xdomain->verdict.action = stack_force_action;
+  active->xdomain->verdict.credit = 0;
+  active->xdomain->verdict.status = 0;
+  active->xdomain->verdict.wake_ns = 0;
+  stack_force_endpoint = 2;
+  stack_force_hits++;
+ }
+ return ret;
+}
+'''
+    x6.write_text(text)
+
+
+def combined_cases(early_dir):
+    early = (early_dir / 'cases.c').read_text()
+    signature = 'int main(int argc,char **argv)'
+    if early.count(signature) != 1:
+        raise ValueError('early case driver anchor changed')
+    early = early.replace(signature, 'int early_cases_main(int argc,char **argv)', 1)
+    return early + '\n' + (HERE / 'cases.c').read_text()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--source-root', type=Path, default=ROOT)
+    parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--case', action='append', help='run only these cases (repeatable)')
+    parser.add_argument('--sanitize', action='store_true')
+    args = parser.parse_args()
+    root = args.source_root.resolve()
+    out = args.output.resolve()
+    out.mkdir(parents=True, exist_ok=False)
+    early_dir = root / 'tests/network/xdomain/early'
+    early = module('protocols_early_runner', early_dir / 'run.py')
+    early.ROOT = root
+    kernel, stack = early.assemble(out)
+    units = copy_program_closure(kernel, root)
+    (out / 'program-units.json').write_text(json.dumps(units, indent=2) + '\n')
+    (out / 'protocol-fixture-inputs.json').write_text(json.dumps({
+        name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
+        for name in ('run.py', 'cases.c', 'equivalence.c', 'README.md')}, indent=2) + '\n')
+    bridge(stack)
+    with tempfile.TemporaryDirectory(prefix='xdomain-protocols-cases-') as temp:
+        cases_dir = Path(temp)
+        (cases_dir / 'cases.c').write_text(combined_cases(early_dir))
+        early.HERE = cases_dir
+        built = early.prepare(kernel, stack, out, args.sanitize, False)
+    if not built:
+        (out / 'result.json').write_text(json.dumps(dict(status='setup-error', compile_exit=1,
+            scope='host actual NHI/XDOMAIN composition', hardware=False,
+            kernel_execution=False, cases=[]), indent=2) + '\n')
+        return 2
+    # Pure decision equivalence of each new program with the reference policy.
+    equivalence = ['gcc', '-std=gnu11', '-O2', '-Wall', '-Wextra',
+                   '-Werror=implicit-function-declaration', '-Wno-unused-function',
+                   '-Wno-unused-parameter', '-I', str(out / 'facade'), '-I', str(stack),
+                   '-I', str(kernel), '-idirafter', str(kernel / 'include'),
+                   '-idirafter', str(kernel / 'include/uapi'), '-I', str(kernel / 'tools/xdev_ext_mech'),
+                   str(HERE / 'equivalence.c'), '-o', str(out / 'equivalence')]
+    (out / 'equivalence-command.json').write_text(json.dumps(equivalence, indent=2) + '\n')
+    build = subprocess.run(equivalence, capture_output=True, text=True, timeout=120)
+    (out / 'equivalence-compile.log').write_text(build.stdout + build.stderr)
+    early_cases = re.findall(r"'([a-z0-9_]+)'", (early_dir / 'run.py').read_text().split(
+        'cases = [', 1)[1].split(']', 1)[0])
+    plan = [('equivalence', None, 'PROTOCOL_EQUIVALENCE checks=')]
+    plan += [(name, [name], 'PROTOCOL_ASSERTIONS ' + name + ' ') for name in OWN_CASES]
+    for name in early_cases:
+        tx, rx = EARLY_MAPPING.get(name, (EARLY, EARLY))
+        plan.append(('early:' + name, ['early:' + name, '%u,%u' % (tx, rx)],
+                     'EARLY_ASSERTIONS ' + name + ' '))
+    if args.case:
+        plan = [p for p in plan if p[0] in args.case]
+        if len(plan) != len(set(args.case)):
+            parser.error('unknown case in --case')
+    records = []
+    print('TAP version 13\n1..' + str(len(plan)), flush=True)
+    for index, (name, argv, marker) in enumerate(plan, 1):
+        command = [str(out / 'equivalence')] if argv is None else [str(out / 'early-cts'), *argv]
+        if argv is None and build.returncode:
+            log, code = 'SETUP_ERROR equivalence compile failed\n' + build.stdout + build.stderr, None
+        else:
+            try:
+                r = subprocess.run(command, capture_output=True, text=True, timeout=300)
+                log, code = r.stdout + r.stderr, r.returncode
+            except subprocess.TimeoutExpired as error:
+                log, code = str(error.stdout or '') + str(error.stderr or '') + '\nTIMEOUT', None
+        (out / (name.replace(':', '-') + '.log')).write_text(log + '\nruntime_exit=' + str(code) + '\n')
+        assertions = [int(line[len(marker):].split()[0]) for line in log.splitlines()
+                      if line.startswith(marker) and line[len(marker):].split()[:1] != [] and
+                      line[len(marker):].split()[0].isdigit()]
+        ok = code == 0 and bool(assertions) and assertions[-1] > 0
+        semantic_red = code == 1 and ('STACK_ASSERT ' in log or 'PROTOCOL_EQUIVALENCE_FAIL' in log)
+        records.append(dict(case=name, argv=argv, runtime_exit=code, passed=ok,
+                            failure_kind=None if ok else 'behavioral' if semantic_red else 'runtime-error'))
+        print(('ok ' if ok else 'not ok ') + str(index) + ' - ' + name, flush=True)
+        if not ok:
+            print(log, flush=True)
+    failed = any(not r['passed'] for r in records)
+    setup = any(r['failure_kind'] == 'runtime-error' for r in records)
+    (out / 'result.json').write_text(json.dumps(dict(
+        status='setup-or-runtime-error' if setup else 'behavioral-red' if failed else 'pass',
+        scope='host actual NHI/XDOMAIN composition', hardware=False, kernel_execution=False,
+        compile_exit=0, sanitize=args.sanitize, cases=records), indent=2) + '\n')
+    return int(failed)
+
+
+if __name__ == '__main__':
+    sys.exit(main())
