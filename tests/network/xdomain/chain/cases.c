@@ -111,8 +111,12 @@ static void up(void)
 	for (size_t i = 0; i < bytes; i++)
 		disk[i] = pattern(i);
 	rx = chain_rx_session(&err);
+	if (err)
+		fprintf(stderr, "CHAIN_CREATE host=2 err=%d\n", err);
 	CHECK(!err, "host 2 CREATE: XDOMAIN RX stage 0 + NVMe WRITE stage 1");
 	tx = chain_tx_session(&err, 0);
+	if (err)
+		fprintf(stderr, "CHAIN_CREATE host=1 err=%d\n", err);
 	CHECK(!err, "host 1 CREATE: NVMe READ stage 0 + XDOMAIN TX stage 1");
 	if (chain_host_mode()) {
 		host_mappings();
@@ -671,8 +675,10 @@ static void host_misaligned_refused(void)
 
 	CHECK(chain_world(&cfg) == 0, "world");
 	chain_tx_session(&err, 0);
+	fprintf(stderr, "CHAIN_CREATE host=1 err=%d\n", err);
 	CHECK(err == -EINVAL, "host 1 CREATE refused: the UMEM does not start on a page");
 	chain_rx_session(&err);
+	fprintf(stderr, "CHAIN_CREATE host=2 err=%d\n", err);
 	CHECK(err == -EINVAL, "host 2 CREATE refused likewise");
 	CHECK(count(CHAIN_EV_DMA_MAP, 0) == 0 && count(CHAIN_EV_DMA_MAP, 1) == 0,
 	      "nothing was mapped for either NHI");
