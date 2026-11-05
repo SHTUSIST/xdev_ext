@@ -443,6 +443,54 @@ static int xsk_rel_data_lease_locked(struct xdev_ext_mech_stage *st,
  }
  return 0;
 }
+/* tx_lock held; only this instance's CREATE reservation grants CONTROL custody. */
+static int xsk_rel_control_acquire_locked(struct xdev_ext_mech_stage *st,
+ struct xsk_xdev_ext_mech_tx_batch *tb,const struct xdp_desc *desc,u32 count)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ struct xdev_ext_mech_pool *pool=xdev_ext_mech_session_pool(st->s);
+ struct xsk_xdev_ext_mech_provider *p=pool->priv;
+ const struct xdev_ext_mech_layout *l=xdev_ext_mech_session_layout(st->s);
+ struct xdev_ext_net_pool_dma ref;
+ struct xsk_rel_control *c=NULL;
+ u64 offset;
+ u32 j;
+ int err;
+
+ if (count!=1) return -EINVAL;
+ for(j=0;j<r->rx.cfg.window;j++)
+  if (tb==&r->control[j].tb) { c=&r->control[j]; break; }
+ if (!c || !tb->control || tb->reliable_stage!=st || tb->batch) return -EXDEV;
+ if (c->busy || c->uncertain || tb->pool_lease[0].kind!=XDEV_EXT_NET_LEASE_NONE)
+  return -EBUSY;
+ if (!pool->state || r->rx.cfg.window>pool->nr_frames || j>=r->rx.cfg.window ||
+     c->frame.index!=pool->nr_frames-1-j || c->frame.index<p->source_first ||
+     c->frame.index>=pool->nr_frames) return -ERANGE;
+ if (c->frame.data_len) return -EPROTO;
+ if (c->frame.data_off!=l->hdr_room || c->frame.data_off<106 ||
+     c->frame.data_off>pool->frame_size) return -ERANGE;
+ if (desc->options) return -EINVAL;
+ if (desc->len!=106) return -EPROTO;
+ if (desc->addr<c->frame.umem_addr) return -ERANGE;
+ offset=desc->addr-c->frame.umem_addr;
+ if (offset>U32_MAX || offset!=c->frame.data_off-106 ||
+     offset>pool->frame_size || 106>pool->frame_size-offset) return -ERANGE;
+ err=xsk_mech_pool_dma_check_locked(p,pool,&c->frame,(u32)offset,106);
+ if (err) return err;
+ if (pool->vaddr!=p->xp->umem->addrs || pool->size!=p->xp->umem->size ||
+     c->frame.kaddr!=(u8 *)pool->vaddr+c->frame.umem_addr) return -EXDEV;
+ ref=(struct xdev_ext_net_pool_dma){.owner=p,.umem_addr=c->frame.umem_addr,
+       .frame_index=c->frame.index,.frame_off=(u32)offset,.len=106};
+ /* The real ownership CAS is the last fallible step before publication. */
+ err=xdev_ext_mech_pool_frame_move(pool,c->frame.index,
+                                  XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_INFLIGHT);
+ if (err) return err;
+ tb->pool_lease[0].u.pool=ref;
+ tb->pool_lease[0].kind=XDEV_EXT_NET_LEASE_POOL_DMA;
+ c->busy=true;
+ return 0;
+}
 /* tx_lock held; reserve all descriptors before the native attempt exists. */
 static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_mech_tx_batch *tb,
                            const struct xdp_desc *desc,u32 count)
@@ -453,7 +501,13 @@ static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_me
  if (p->stopped || ((struct xsk_xdev_ext_mech_stage *)st->priv)->dead) return -ENXIO;
  err=xdev_ext_net_count_reserve(&p->ring,count,&start);
  if (err) return err;
- if (!tb->control) {
+ if (tb->control) {
+  err=xsk_rel_control_acquire_locked(st,tb,desc,count);
+  if (err) {
+   xdev_ext_net_count_rollback(&p->ring,start);
+   return err;
+  }
+ } else {
   err=xsk_rel_data_lease_locked(st,tb,desc,count,&acquired);
   if (err) {
    while (acquired) xdev_ext_net_lease_pool_release(&tb->pool_lease[--acquired],true);
@@ -467,15 +521,51 @@ static int xsk_rel_enqueue(struct xdev_ext_mech_stage *st,struct xsk_xdev_ext_me
  tb->reliable_stage=st; tb->n=count;
  for(i=0;i<count;i++) {
   struct xsk_mech_zc_slot *slot=&p->slots[(start+i)&(p->ring.capacity-1)];
-  if (tb->control)
-   xp_dma_sync_for_device(p->xp,xp_raw_get_dma(p->xp,desc[i].addr),desc[i].len);
-  else
-   xsk_mech_pool_dma_sync_locked(p,&tb->pool_lease[i]);
+  xsk_mech_pool_dma_sync_locked(p,&tb->pool_lease[i]);
   *slot=(struct xsk_mech_zc_slot){.desc=desc[i],.batch=tb,.slot=i,
                                 .count={.state=XDEV_EXT_NET_COUNT_PENDING,
                                         .tag=tb->control ? XSK_MECH_ZC_CONTROL : XSK_MECH_ZC_DATA}};
  }
  return 0;
+}
+/* Both workers use one admission/publication transaction after lock-free build. */
+static int xsk_rel_control_publish(struct xdev_ext_mech_stage *st,
+ struct xsk_rel_control *c,u32 owed_slot,u64 group)
+{
+ struct xsk_xdev_ext_mech_stage *xst=st->priv;
+ struct xsk_mech_reliable *r=xst->rel;
+ struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
+ unsigned long flags;
+ bool got=false;
+ int err;
+
+ spin_lock_irqsave(&p->tx_lock,flags);
+ if (owed_slot>=r->rx.cfg.window) { err=-ERANGE; goto out; }
+ /* Provider -> session: STOP observes this reference or denies admission. */
+ err=xdev_ext_mech_stage_native_get(st);
+ if (err) goto out;
+ got=true;
+ /* A false discriminant must never route this reservation through DATA. */
+ err=c->tb.control ? xsk_rel_enqueue(st,&c->tb,r->scratch,1) : -EXDEV;
+ if (!err) {
+#ifdef XDEV_EXT_REL_C_GLUE
+  if (r->ack_pending[owed_slot]==group) r->ack_pending[owed_slot]=0;
+#else
+  const struct xdev_ext_net_pool_dma *ref=&c->tb.pool_lease[0].u.pool;
+  const u8 *pkt=(u8 *)c->frame.kaddr+ref->frame_off;
+
+  if (pkt[48]==XDEV_EXT_REL_ACK_CUM) xsk_rel_owed_covered(r,xdev_ext_rel_be(pkt+58,8));
+  else if (r->ack_pending[owed_slot]==group) {
+   r->ack_pending[owed_slot]=0; r->owed_since[owed_slot]=0; r->owed_dup[owed_slot]=0;
+  }
+#endif
+ }
+out:
+ spin_unlock_irqrestore(&p->tx_lock,flags);
+ /* mark_dead may retake tx_lock; publish fatal refusal before the last put. */
+ if (err && got && err!=-EAGAIN) xdev_ext_mech_stage_dead(st,err);
+ if (err && got) xdev_ext_mech_stage_native_put(st);
+ return err;
 }
 static void xsk_rel_wakeup(struct xdev_ext_mech_stage *st)
 {
@@ -729,24 +819,9 @@ static unsigned long xsk_rel_progress(struct xdev_ext_mech_stage *st)
   if (!c) continue;
   err=xsk_rel_build(st,NULL,c,group,attempt,credit);
   if (err) { xdev_ext_mech_stage_dead(st,err); return 0; }
-  spin_lock_irqsave(&p->tx_lock,flags);
-  /* Lock order matches RX HOLD: provider -> session. STOP must either
-   * observe this lease before deciding release, or deny the admission. */
-  err=xdev_ext_mech_stage_native_get(st);
-  if (!err) {
-   err=xsk_rel_enqueue(st,&c->tb,r->scratch,1);
-   if (err) xdev_ext_mech_stage_native_put(st);
-   else {
-    c->busy=true;
-    xdev_ext_mech_pool_frame_move(xdev_ext_mech_session_pool(st->s),c->frame.index,
-                             XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_INFLIGHT);
-    if (r->ack_pending[i]==group) r->ack_pending[i]=0;
-    wake=true;
-   }
-  }
-  spin_unlock_irqrestore(&p->tx_lock,flags);
-  if (err==-ESHUTDOWN) return 0;
-  if (err && err!=-EAGAIN) { xdev_ext_mech_stage_dead(st,err); return 0; }
+  err=xsk_rel_control_publish(st,c,i,group);
+  if (!err) wake=true;
+  else if (err!=-EAGAIN) return 0;
  }
  if (wake) xsk_rel_wakeup(st);
  return again ? max_t(unsigned long,1,nsecs_to_jiffies(r->tx.cfg.timeout_ns/4)) : 0;
@@ -892,30 +967,9 @@ static unsigned long xsk_rel_progress(struct xdev_ext_mech_stage *st)
   err=xsk_rel_build(st,NULL,c,group,attempt,credit);
   if (err==1) continue; /* The owed reply remains scheduled until its delay expires. */
   if (err) { xdev_ext_mech_stage_dead(st,err); return 0; }
-  spin_lock_irqsave(&p->tx_lock,flags);
-  /* Lock order matches RX HOLD: provider -> session. STOP must either
-   * observe this lease before deciding release, or deny the admission. */
-  err=xdev_ext_mech_stage_native_get(st);
-  if (!err) {
-   err=xsk_rel_enqueue(st,&c->tb,r->scratch,1);
-   if (err) xdev_ext_mech_stage_native_put(st);
-   else {
-    c->busy=true;
-    xdev_ext_mech_pool_frame_move(xdev_ext_mech_session_pool(st->s),c->frame.index,
-                             XDEV_EXT_MECH_F_HELD,XDEV_EXT_MECH_F_INFLIGHT);
-    {
-     const u8 *pkt=c->frame.kaddr+(r->scratch[0].addr-c->frame.umem_addr);
-     if (pkt[48]==XDEV_EXT_REL_ACK_CUM) xsk_rel_owed_covered(r,xdev_ext_rel_be(pkt+58,8));
-     else if (r->ack_pending[i]==group) {
-      r->ack_pending[i]=0; r->owed_since[i]=0; r->owed_dup[i]=0;
-     }
-    }
-    wake=true;
-   }
-  }
-  spin_unlock_irqrestore(&p->tx_lock,flags);
-  if (err==-ESHUTDOWN) return 0;
-  if (err && err!=-EAGAIN) { xdev_ext_mech_stage_dead(st,err); return 0; }
+  err=xsk_rel_control_publish(st,c,i,group);
+  if (!err) wake=true;
+  else if (err!=-EAGAIN) return 0;
  }
  if (wake) xsk_rel_wakeup(st);
  if (again) {
