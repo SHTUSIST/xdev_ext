@@ -10,6 +10,7 @@ a controller without SGL support the same batch is one command whose PRP1/PRP2
 and PRP list name every 4 KiB page of the peer span in payload order.
 """
 from pathlib import Path
+import json
 import runpy
 import subprocess
 import sys
@@ -133,17 +134,26 @@ def main():
          "{ (void)g; assert(d == &pci_device); coherent_live++; *dma = coherent_base; coherent_len = n; return coherent_ptr = calloc(1, n); }"),
         ("/* PRODUCTION_FUNCTIONS */", EXTRA_SHIM),
     ):
-        if old not in shim:
-            raise SystemExit("not ok - harness anchor moved in nvme_peer_async_test.py: " + old)
-        shim = shim.replace(old, new, 1)
+        shim = BASE["positional_replace"](shim, old, new)
     # The allocator records where the descriptor lists live.
-    shim = shim.replace("static u64 coherent_base = 0x9000000ULL;",
+    shim = BASE["positional_replace"](shim, "static u64 coherent_base = 0x9000000ULL;",
                         "static u64 coherent_base = 0x9000000ULL;\nstatic void *coherent_ptr;\nstatic size_t coherent_len;", 1)
     prefix = BASE["MAIN"][:BASE["MAIN"].index("static void case_depth(void)")]
+    # This positive request is admitted after its literal sixteen-frame
+    # payload is complete, just as the original two-frame case does. Never
+    # refresh admission in SUBMIT or after a negative geometry mutation.
+    case_edits = []
+    cases = BASE["positional_replace"](
+        CASES, ' bs[i].nr = FRAMES; bs[i].bytes = FRAMES * 65536;',
+        ' bs[i].nr = FRAMES; bs[i].bytes = FRAMES * 65536;\n'
+        ' batch_admitted_rw(i, slba, FRAMES * 65536);', edits=case_edits)
+    if BASE["inverse_fixture"](cases, case_edits) != CASES:
+        raise AssertionError('SETUP multiframe CASES inverse differs from original literal')
     text, code, fill, submit, have_res = BASE["extract"](BASE["production_source"]())
     BASE["build"].__globals__["SHIM"] = shim
-    BASE["build"].__globals__["MAIN"] = prefix + CASES
+    BASE["build"].__globals__["MAIN"] = prefix + cases
     with tempfile.TemporaryDirectory(prefix="nvme-peer-multiframe-") as tmp:
+        (Path(tmp) / 'multiframe-case-edits.json').write_text(json.dumps(case_edits, indent=2) + '\n')
         result = BASE["build"](text, code, fill, submit, have_res, Path(tmp), "actual")
         print(result.stdout, end="")
         if result.returncode:

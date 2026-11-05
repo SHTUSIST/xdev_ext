@@ -18,7 +18,8 @@ an accepted failure is never resubmitted and keeps its slot; preaccept refusal
 leaves no lease and no request; GPU pages are described by one inline SGL data
 block or a last-segment list when they are not DMA-contiguous.
 
-XDEV_EXT_NVME_TEST_SOURCE may select another copy of the production file.
+XDEV_EXT_NVME_TEST_SOURCE selects a file only with its matching
+XDEV_EXT_NVME_TEST_ROOT. Foreign source bytes never borrow current headers.
 """
 import os
 import json
@@ -32,6 +33,98 @@ KERNEL = next(p for p in Path(__file__).resolve().parents
               if (p / 'source-layout.json').is_file())
 sys.path.insert(0, str(KERNEL / 'tools'))
 import layout as _layout
+
+
+class SourceSelection:
+    """One explicit canonical checkout, receipt owner, or complete native tree.
+
+    Unlike read_native's compatibility API, this boundary has no environment
+    hint fallback. A copied source file alone is not a dependency authority.
+    """
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        try:
+            canonical = _layout.canonical_root(self.root)
+        except _layout.LayoutError:
+            self.mapping = None
+        else:
+            self.root = canonical
+            self.mapping = _layout.load_layout(canonical)
+        self.inputs = {}
+
+    def file(self, native):
+        if self.mapping is None:
+            return _layout.safe_file(self.root, native)
+        source = self.mapping.source('linux', native)
+        return _layout.safe_file(self.root, source.relative_to(self.root).as_posix())
+
+    def read(self, native):
+        value = self.file(native).read_text()
+        previous = self.inputs.setdefault(native, value)
+        if previous != value:
+            raise AssertionError('SETUP selected source changed: ' + native)
+        return value
+
+    def verify(self):
+        for native, expected in self.inputs.items():
+            if self.file(native).read_text() != expected:
+                raise AssertionError('SETUP selected dependency changed: ' + native)
+
+
+class ProductionSource(str):
+    def __new__(cls, value, selection):
+        instance = super().__new__(cls, value)
+        instance.selection = selection
+        return instance
+
+
+class ExtractedTypes(str):
+    """String-compatible five-item API, carrying the selected dependency owner."""
+    def __new__(cls, value, selection, common=False):
+        instance = super().__new__(cls, value)
+        instance.selection = selection
+        instance.common = common
+        return instance
+
+
+def positional_replace(value, old, new, count=1, edits=None):
+    """Replace counted source spans and prove their complete byte inverse."""
+    starts = [m.start() for m in re.finditer(re.escape(old), value)]
+    if len(starts) != count:
+        raise AssertionError('SETUP fixture anchor count %d != %d: %s' %
+                             (len(starts), count, old))
+    result, records, shift = value, [], 0
+    for start in starts:
+        target = start + shift
+        result = result[:target] + new + result[target + len(old):]
+        records.append(dict(offset=target, old=old, new=new))
+        shift += len(new) - len(old)
+    restored = result
+    for record in reversed(records):
+        start = record['offset']
+        if restored[start:start + len(new)] != new:
+            raise AssertionError('SETUP fixture inverse span mismatch')
+        restored = restored[:start] + old + restored[start + len(new):]
+    if restored != value:
+        raise AssertionError('SETUP fixture inverse bytes differ')
+    if edits is not None:
+        edits.append(dict(before_length=len(value), after_length=len(result),
+                          replacements=records))
+    return result
+
+
+def inverse_fixture(value, edits):
+    for edit in reversed(edits):
+        if len(value) != edit['after_length']:
+            raise AssertionError('SETUP fixture inverse step mismatch')
+        for record in reversed(edit['replacements']):
+            start, old, new = record['offset'], record['old'], record['new']
+            if value[start:start + len(new)] != new:
+                raise AssertionError('SETUP fixture inverse bytes mismatch')
+            value = value[:start] + old + value[start + len(new):]
+        if len(value) != edit['before_length']:
+            raise AssertionError('SETUP fixture inverse preimage mismatch')
+    return value
 
 
 def read_native(root, native):
@@ -682,12 +775,185 @@ def storage_poll_runtime(root, names=("xdev_ext_stor_block_poll_opf",
     return "\n\n".join(found)
 
 
-def production_source():
-    path = Path(os.environ.get("XDEV_EXT_NVME_TEST_SOURCE", str(KERNEL / RELATIVE)))
-    return path.read_text() if "XDEV_EXT_NVME_TEST_SOURCE" in os.environ else read_native(KERNEL, RELATIVE)
+def production_source(root=None):
+    override = os.environ.get('XDEV_EXT_NVME_TEST_SOURCE')
+    if override and root is None and 'XDEV_EXT_NVME_TEST_ROOT' not in os.environ:
+        raise AssertionError('SETUP XDEV_EXT_NVME_TEST_SOURCE requires matching XDEV_EXT_NVME_TEST_ROOT')
+    selected = SourceSelection(root or os.environ.get('XDEV_EXT_NVME_TEST_ROOT', KERNEL))
+    value = selected.read(RELATIVE)
+    if override and (Path(override).resolve() != selected.file(RELATIVE).resolve() or
+                     Path(override).read_text() != value):
+        raise AssertionError('SETUP selected NVMe source/dependency root mismatch')
+    return ProductionSource(value, selected)
 
 
-def extract(source):
+def extract(source, root=None):
+    """Require a coherent selected owner, then retain the five-item API."""
+    selected = SourceSelection(root) if root is not None else getattr(source, 'selection', None)
+    if selected is None:
+        raise AssertionError('SETUP extract requires production_source() or explicit root=')
+    if str(source) != selected.read(RELATIVE):
+        raise AssertionError('SETUP production text differs from selected NVMe owner')
+    common = 'return xdev_ext_storfam_submit(&p->family, b, &bp->family);' in definition(
+        source, 'nvme_xdev_ext_class_submit')
+    if common:
+        text, code, fill, submit, have_res = extract_common(source, selected)
+    else:
+        # The compatibility helpers below must not invoke their minimal-tree
+        # hint fallback for any dependency of a selected historical source.
+        for native in ('include/linux/xdev_ext_mech.h',
+                       'include/linux/xdev_ext_storfam.h',
+                       'drivers/nvme/host/xdev_ext_native_peer_trace.h',
+                       'io_uring/family/xdev_ext_requester.c',
+                       'io_uring/family/xdev_ext_storfam.c'):
+            selected.read(native)
+        if 'struct xdev_ext_stor_stage family;' in source or 'xdev_ext_stor_block_poll_opf(' in source:
+            selected.read('include/linux/xdev_ext_storfam_block.h')
+            selected.read('io_uring/family/xdev_ext_storfam_block.c')
+        text, code, fill, submit, have_res = extract_legacy(source, selected.root)
+    return ExtractedTypes(text, selected, common), code, fill, submit, have_res
+
+
+def extract_common(source, selected):
+    """Whole current family/native definitions; no fused replacement function."""
+    selected.definitions = []
+
+    def record(native, name, structure=False, content=None):
+        original = selected.read(native)
+        content = original if content is None else content
+        if structure:
+            close = r'\}[^;]*;' if structure == 'inline' else r'^\}[^;]*;'
+            match = re.search(r'^struct ' + re.escape(name) + r' \{.*?' + close,
+                              content, re.M | re.S)
+            if not match:
+                raise AssertionError('SETUP production structure missing: ' + name)
+            body = match[0]
+        else:
+            body = definition(content, name)
+        offset = original.find(body)
+        if offset < 0:
+            raise AssertionError('SETUP definition not owned by source: ' + name)
+        selected.definitions.append(dict(native=native, symbol=name,
+                                         offset=offset, length=len(body)))
+        return body
+
+    block_path = 'io_uring/family/xdev_ext_storfam_block.c'
+    header_path = 'include/linux/xdev_ext_storfam_block.h'
+    block = selected.read(block_path)
+    header = selected.read(header_path)
+    selected.read('include/linux/xdev_ext_storfam_runtime.h')
+    # Portable headers are included directly, from this selected owner.
+    for native in ('include/linux/nvme_xdev_ext_passthru.h',
+                   'include/linux/xdev_ext_peer.h',
+                   'include/linux/xdev_ext_requester_core.h',
+                   'include/linux/xdev_ext_storfam_core.h',
+                   'include/uapi/linux/xdev_ext_peer.h',
+                   'drivers/nvme/host/xdev_ext_peer_nvme_core.h'):
+        selected.read(native)
+    forward = ('struct xdev_ext_mech_stage; struct xdev_ext_mech_stage_uapi; '
+               'struct xdev_ext_mech_batch; struct xdev_ext_stor_stage; '
+               'struct xdev_ext_stor_io; struct xdev_ext_stor_peer_resources; '
+               'struct pci_dev; struct bio; struct page;\n')
+    declarations = [forward]
+    peer_header = 'drivers/nvme/host/xdev_ext_peer_nvme_core.h'
+    declarations.append(record(peer_header, 'xdev_ext_peer_nvme_plan', 'inline'))
+    for macro in ('XDEV_EXT_PEER_NVME_DPTR', 'xdev_ext_peer_nvme_seg'):
+        match = re.search(r'^#define ' + macro + r'\s+[^\n]+$', selected.read(peer_header), re.M)
+        if not match:
+            raise AssertionError('SETUP actual peer macro missing: ' + macro)
+        declarations.append(match[0])
+    for name in ('xdev_ext_stor_poll_view', 'xdev_ext_stor_command',
+                 'xdev_ext_stor_geometry', 'xdev_ext_stor_dev_ops',
+                 'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
+                 'xdev_ext_stor_stage', 'xdev_ext_stor_batch'):
+        declarations.append(record(header_path, name, True))
+    declarations.append(record(block_path, 'xdev_ext_stor_peer_resources', True))
+    limit = re.search(r'^#define XDEV_EXT_STOR_PEER_MAX_SPANS\s+[^\n]+$', block, re.M)
+    if not limit:
+        raise AssertionError('SETUP actual peer span limit missing')
+    declarations.append(limit[0])
+    declarations.append(record('drivers/nvme/host/xdev_ext_native_peer_trace.h',
+                               'nvme_xdev_ext_peer_trace', True))
+    for name in ('nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch',
+                 'nvme_xdev_ext_peer_slot'):
+        declarations.append(record(RELATIVE, name, True))
+    for native, name in (('include/linux/xdev_ext_mech.h', 'xdev_ext_family_hooks_hdr'),
+                         ('include/linux/xdev_ext_storfam.h', 'xdev_ext_stor_hooks')):
+        declarations.append(record(native, name, True))
+    for match in re.finditer(r'^#define NVME_XDEV_EXT_PEER_\w+\s.*$', source, re.M):
+        declarations.append(match[0])
+    match = re.search(r'^static const struct xdev_ext_stor_hooks '
+                      r'nvme_xdev_ext_stor_hooks = \{.*?^\};', source, re.M | re.S)
+    if not match:
+        raise AssertionError('SETUP production storage hooks missing')
+    declarations.append(match[0])
+    # Every body remains separately identifiable and byte-exact. The two
+    # fallback bodies are selected under the same strict/no-bounce profile.
+    # Native W1 uses -Wno-sign-compare. Keep this scope around actual kernel
+    # definitions only; fixture/oracle diagnostics retain the original flags.
+    code = ['#pragma GCC diagnostic push\n#pragma GCC diagnostic ignored "-Wunused-parameter"\n'
+            '#pragma GCC diagnostic ignored "-Wsign-compare"']
+    for name in ('xdev_ext_peer_nvme_plan', 'xdev_ext_peer_nvme_sgl_build',
+                 'xdev_ext_peer_nvme_prp_build'):
+        code.append(record(peer_header, name))
+    for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
+                 'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
+        code.append(record('io_uring/family/xdev_ext_storfam.c', name))
+    code.append(record('io_uring/family/xdev_ext_requester.c', 'xdev_ext_peer_lease_split'))
+    code.append(record(header_path, 'xdev_ext_stor_block_poll_opf'))
+    for name in ('xdev_ext_stor_block_caps', 'xdev_ext_stor_block_walk',
+                 'xdev_ext_stor_block_preflight', 'xdev_ext_stor_block_append',
+                 'xdev_ext_stor_block_poll_check', 'xdev_ext_stor_block_poll_arm',
+                 'xdev_ext_storfam_host_resources_free', 'xdev_ext_storfam_host_resources_init',
+                 'xdev_ext_storfam_host_get', 'xdev_ext_storfam_host_put',
+                 'xdev_ext_storfam_peer_io', 'xdev_ext_storfam_peer_resources_free',
+                 'xdev_ext_storfam_peer_resources_init', 'xdev_ext_storfam_peer_get',
+                 'xdev_ext_storfam_peer_put', 'xdev_ext_storfam_peer_map'):
+        code.append(record(block_path, name))
+        if name == 'xdev_ext_storfam_host_put':
+            # Preserve the existing assertion that PEER never takes HOST
+            # cleanup. The observer still calls the real, unchanged body.
+            code.append('#define xdev_ext_storfam_host_put(...) '
+                        '(host_slot_puts++, (xdev_ext_storfam_host_put)(__VA_ARGS__))')
+    fallback = block[block.index('#ifndef XDEV_EXT_STOR_BOUNCE_AVAILABLE'):]
+    for name in ('xdev_ext_storfam_bounce', 'xdev_ext_storfam_bounce_release'):
+        code.append(record(block_path, name, content=fallback))
+    code.append('#define xdev_ext_storfam_bounce_release(...) '
+                '(host_bounce_releases++, (xdev_ext_storfam_bounce_release)(__VA_ARGS__))')
+    for name in ('xdev_ext_storfam_host_map', 'xdev_ext_storfam_submit_check',
+                 'xdev_ext_storfam_submit', 'xdev_ext_storfam_host_ready',
+                 'xdev_ext_storfam_consume'):
+        code.append(record(block_path, name))
+    code.append(record('drivers/nvme/host/nvme.h', 'nvme_xdev_ext_capture_identity'))
+    for name in ('nvme_xdev_ext_member_requester', 'nvme_xdev_ext_member_queue',
+                 'nvme_xdev_ext_member_identity', 'nvme_xdev_ext_class_complete',
+                 'nvme_xdev_ext_class_end_io', 'nvme_xdev_ext_peer_complete',
+                 'nvme_xdev_ext_peer_end_io', 'nvme_xdev_ext_member_encode',
+                 'nvme_xdev_ext_member_encode_dptr', 'nvme_xdev_ext_member_request_init',
+                 'nvme_xdev_ext_member_post', 'nvme_xdev_ext_member_retire_peer',
+                 'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_stage_fill_cqe'):
+        code.append(record(RELATIVE, name))
+    # This suite bypasses CREATE/poll/validate. Select only the actual member
+    # initializer fields reached by submit/consume; never invent a callback.
+    ops = re.search(r'^static const struct xdev_ext_stor_dev_ops '
+                    r'nvme_xdev_ext_member_ops = \{.*?^\};', source, re.M | re.S)
+    if not ops:
+        raise AssertionError('SETUP actual member initializer missing')
+    fields = []
+    for field in ('identity', 'requester', 'queue', 'encode', 'encode_dptr',
+                  'request_init', 'post', 'retire_peer', 'peer_slot_bytes',
+                  'peer_native_offset'):
+        lines = re.findall(r'^\s*\.' + field + r' = [^\n]+,$', ops[0], re.M)
+        if len(lines) != 1:
+            raise AssertionError('SETUP member initializer field missing: ' + field)
+        fields.append(lines[0])
+    code.append('static const struct xdev_ext_stor_dev_ops fixture_peer_ops = {\n' +
+                '\n'.join(fields) + '\n};\n#pragma GCC diagnostic pop')
+    return ('\n'.join(declarations), '\n\n'.join(code),
+            'nvme_xdev_ext_stage_fill_cqe', 'nvme_xdev_ext_class_submit', True)
+
+
+def extract_legacy(source, root):
     """Production structures and GPU-memory stage functions, in file order."""
     types = []
     for name in ("nvme_xdev_ext_mech_stage", "nvme_xdev_ext_mech_batch",
@@ -730,13 +996,13 @@ def extract(source):
     # also declares stage/batch types supplied by this deterministic shim.
     declarations = []
     if 'struct xdev_ext_stor_stage family;' in source:
-        declarations.append(family_types(KERNEL))
-    trace = read_native(KERNEL, "drivers/nvme/host/xdev_ext_native_peer_trace.h")
+        declarations.append(family_types(root))
+    trace = read_native(root, "drivers/nvme/host/xdev_ext_native_peer_trace.h")
     declarations.append(re.search(r"^struct nvme_xdev_ext_peer_trace \{.*?^\};",
                                   trace, re.M | re.S)[0])
     for header, name in (("xdev_ext_mech.h", "xdev_ext_family_hooks_hdr"),
                          ("xdev_ext_storfam.h", "xdev_ext_stor_hooks")):
-        content = read_native(KERNEL, "include/linux/" + header)
+        content = read_native(root, "include/linux/" + header)
         declarations.append(re.search(r"^struct " + name + r" \{.*?^\};",
                                       content, re.M | re.S)[0])
     text = "\n".join(declarations + [t for _, t in sorted(types)])
@@ -744,10 +1010,10 @@ def extract(source):
     # NVMe's lease wrapper delegates to the requester base. Execute that real
     # dependency too, so the page-splitting cases and mutation still exercise
     # production code rather than substituting a successful lease stub.
-    requester = read_native(KERNEL, "io_uring/family/xdev_ext_requester.c")
+    requester = read_native(root, "io_uring/family/xdev_ext_requester.c")
     split = requester[requester.index("int xdev_ext_peer_lease_split("):
                       requester.index("EXPORT_SYMBOL_GPL(xdev_ext_peer_lease_split);")]
-    poll = storage_poll_runtime(KERNEL) + "\n\n" if family_poll else ""
+    poll = storage_poll_runtime(root) + "\n\n" if family_poll else ""
     if 'struct xdev_ext_stor_stage family;' in source:
         code = '\n\n'.join(definition(source, name) for name in
                             ('nvme_xdev_ext_member_requester', 'nvme_xdev_ext_member_queue')) + r'''
@@ -755,23 +1021,176 @@ static const struct xdev_ext_stor_dev_ops fixture_peer_ops = {
  .requester=nvme_xdev_ext_member_requester, .queue=nvme_xdev_ext_member_queue,
 };
 ''' + code
-    code = storage_runtime(KERNEL) + "\n\n" + poll + split + "\n\n" + code
+    code = storage_runtime(root) + "\n\n" + poll + split + "\n\n" + code
     return text, code, fill, submit, have_res
+
+
+COMMON_EXTERNAL = r'''
+/* OS boundaries only. These fixtures run PEER; a HOST-only OS operation
+ * aborts instead of furnishing an untested successful mapping algorithm. */
+#define PAGE_SIZE 4096U
+#define PAGE_SHIFT 12
+#define BIO_MAX_INLINE_VECS 1024
+#define NVME_REQ_XDEV_EXT_ZC (1U << 4)
+#define REQ_OP_DRV_IN 0U
+#define REQ_OP_DRV_OUT 1U
+#define __aligned(n) __attribute__((aligned(n)))
+#define READ_ONCE(x) (x)
+typedef u64 sector_t;
+struct page { u8 data[4096]; };
+struct bio { int bi_inline_vecs[256]; };
+static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,
+ const struct xdev_ext_mech_frame *f, u32 off, u32 *page_off, u32 *len)
+{ (void)p; (void)f; (void)off; (void)page_off; (void)len; abort(); }
+static struct bio *bio_kmalloc(u32 nr, gfp_t flags)
+{ (void)nr; (void)flags; abort(); }
+static void bio_uninit(struct bio *b) { (void)b; abort(); }
+static void bio_init(struct bio *b, void *dev, void *vec, u32 nr, u32 op)
+{ (void)b; (void)dev; (void)vec; (void)nr; (void)op; abort(); }
+static int bio_add_page(struct bio *b, struct page *p, u32 len, u32 off)
+{ (void)b; (void)p; (void)len; (void)off; abort(); }
+static int blk_rq_append_bio(struct request *r, struct bio *b)
+{ (void)r; (void)b; abort(); }
+static unsigned long queue_virt_boundary(struct request_queue *q)
+{ (void)q; abort(); }
+#define blk_lim_dma_alignment_and_pad(l) ((void)(l), 0U)
+static u32 queue_max_segments(struct request_queue *q) { (void)q; abort(); }
+static u32 queue_max_segment_size(struct request_queue *q) { (void)q; abort(); }
+static u32 blk_rq_bytes(struct request *r) { return r->residual; }
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st, int error)
+{ (void)st; (void)error; abort(); }
+'''
+
+COMMON_BIND_FACTS = r'''
+/* Test-only CREATE facts for the already admitted literal cases. Identity is
+ * captured by the real inline, never replaced with a successful recheck. */
+static void fixture_peer_identity(struct nvme_xdev_ext_mech_stage *p)
+{
+ assert(!nvme_xdev_ext_capture_identity(p->ns, &p->identity,
+                                     &p->head, &p->disk, &p->queue));
+ p->family.geometry = (struct xdev_ext_stor_geometry){
+  .capacity_lbas=p->identity.capacity_lbas, .lba_shift=p->identity.lba_shift };
+ p->family.window = (struct xdev_ext_stor_window){ .slba=0,
+  .nlb=p->identity.capacity_lbas, .capacity_lbas=p->identity.capacity_lbas,
+  .lba_shift=p->identity.lba_shift, .write=p->write };
+}
+static void fixture_peer_bind(struct nvme_xdev_ext_mech_stage *p,
+                              struct xdev_ext_mech_stage *st)
+{
+ p->family.st=st; p->family.dev=&fixture_peer_ops; p->family.member=p;
+ fixture_peer_identity(p);
+}
+'''
+
+
+def common_fixture(shim, main_source):
+    """Only external type/setup and fixture-lvalue transformations."""
+    original_shim, original_main = shim, main_source
+    shim_edits, main_edits = [], []
+
+    def s(old, new, count=1):
+        nonlocal shim
+        shim = positional_replace(shim, old, new, count, shim_edits)
+
+    def m(old, new, count=1):
+        nonlocal main_source
+        main_source = positional_replace(main_source, old, new, count, main_edits)
+
+    # The selected public dev_ops uses __u64. On LP64, uint64_t may instead
+    # name unsigned long; native kernel u64 and __u64 are unsigned long long.
+    # Preserve the original SHIM literal and record this external type edit.
+    s('typedef uint64_t u64;', 'typedef __u64 u64;')
+    # The portable header's non-kernel preamble typedefs u64 to uint64_t.
+    # Extract its unchanged actual declarations/functions instead, so this
+    # native-profile fixture uses the kernel scalar type without a cast.
+    peer_include = re.findall(r'^#include "[^"\n]*xdev_ext_peer_nvme_core\.h"$', shim, re.M)
+    if len(peer_include) != 1:
+        raise AssertionError('SETUP selected peer header include count changed')
+    s(peer_include[0], '/* Actual peer NVMe plan/DPTR definitions are extracted below. */')
+    s('struct nvme_ns_head { u8 lba_shift; u16 ms; struct { u8 csi; } ids; u32 ns_id; };',
+      'struct nvme_ns_head { u8 lba_shift; u16 ms; struct { u8 csi,eui64[8],nguid[16],uuid[16]; } ids; u32 ns_id; u8 pi_type; u16 pi_size; };')
+    s('struct gendisk { u64 sectors; bool ro; };',
+      'struct gendisk { u64 sectors; bool ro; u64 diskseq; };')
+    s('struct request_queue { u32 max_hw_sectors; };',
+      'struct request_queue { u32 max_hw_sectors; struct { u32 unused; } limits; };')
+    s(' struct nvme_command storage;',
+      ' struct nvme_command storage;\n struct bio *bio; u32 residual;')
+    s('/* PRODUCTION_TYPES */', COMMON_EXTERNAL + '\n/* PRODUCTION_TYPES */')
+    # The original external struct definitions precede COMMON_EXTERNAL.
+    # Forward declarations make the pointer-only request additions explicit.
+    s('struct request {', 'struct bio;\nstruct request {')
+    multi = '#define FRAMES 16' in main_source
+    traced = 'static void case_sync_trace(void)' in main_source
+    expected = dict(rw=1 if multi else 3, validated=1, batch_id=1, sqe=4,
+                    peer_slot=0 if multi else 2 if traced else 1)
+    for field, count in expected.items():
+        pattern = r'\bbps\[[^]]+\]\.' + field + r'\b'
+        matches = re.findall(pattern, main_source)
+        if len(matches) != count:
+            raise AssertionError('SETUP original fixture field count changed: ' + field)
+        for old in sorted(set(matches)):
+            new = old.rsplit('.', 1)[0] + '.family.' + ('peer_io' if field == 'peer_slot' else field)
+            m(old, new, matches.count(old))
+    m('static struct gendisk disk = { 1U << 30, false };',
+      'static struct gendisk disk = { .sectors=1U << 30, .ro=false, .diskseq=1 };')
+    m('static struct request_queue queue = { 4096 };',
+      'static struct request_queue queue = { .max_hw_sectors=4096 };')
+    m(' INIT_RESOURCES;', ' fixture_peer_bind(&priv, &st);\n INIT_RESOURCES;')
+    m(' bps[i].family.rw =', ' priv.family.window.write=priv.write;\n bps[i].family.rw =')
+    if multi:
+        m('nvme_xdev_ext_peer_resources_free(&priv)',
+          'xdev_ext_storfam_peer_resources_free(&priv.family)')
+        m('nvme_xdev_ext_peer_resources_init(&st)',
+          'xdev_ext_storfam_peer_resources_init(&priv.family)')
+    else:
+        m('nvme_xdev_ext_peer_resources_free(&priv)',
+          'xdev_ext_storfam_peer_resources_free(&priv.family)')
+        m('priv.peer->slots[i].sgl_dma',
+          'xdev_ext_storfam_peer_io(&priv.family, i)->list_dma')
+        m('priv.peer->slots[i].sgl',
+          '(const struct nvme_sgl_desc *)xdev_ext_storfam_peer_io(&priv.family, i)->list_cpu')
+        m('priv.peer', 'priv.family.peer', 3)
+        m('provider_page = 4096; head.lba_shift = 12;',
+          'provider_page = 4096; head.lba_shift = 12; fixture_peer_identity(&priv);')
+        m('disk.ro = false; priv.write = false; head.lba_shift = 9;',
+          'disk.ro = false; priv.write = false; head.lba_shift = 9; fixture_peer_identity(&priv);')
+    if traced:
+        m('bps[i].family.peer_io->trace.cookie',
+          '((struct nvme_xdev_ext_peer_trace *)bps[i].family.peer_io->peer_native)->cookie')
+    if inverse_fixture(shim, shim_edits) != original_shim or inverse_fixture(main_source, main_edits) != original_main:
+        raise AssertionError('SETUP complete fixture inverse differs from original literals')
+    return shim, main_source, dict(shim=shim_edits, main=main_edits)
 
 
 def build(text, code, fill, submit, have_res, directory, name):
     defines = ["#define FILL_CQE " + fill, "#define SUBMIT " + submit]
-    if have_res:
+    selected = getattr(text, 'selection', None)
+    if selected is None:
+        raise AssertionError('SETUP build requires extraction with source authority')
+    selected.verify()
+    common = getattr(text, 'common', False)
+    if common:
+        defines += ['#define CONFIG_XDEV_EXT_MECH_ZEROCOPY 1', '#define HAVE_PEER_RES 1',
+                    '#define INIT_RESOURCES rc = xdev_ext_storfam_peer_resources_init(&priv.family)']
+    elif have_res:
         defines += ["#define HAVE_PEER_RES 1",
                     "#define INIT_RESOURCES rc = nvme_xdev_ext_peer_resources_init(&st)"]
     else:
         defines += ["#define INIT_RESOURCES rc = 0"]
-    shim = SHIM.replace("/* PRODUCTION_TYPES */", text)
+    shim = SHIM
     main_source = MAIN
-    if 'struct xdev_ext_stor_stage family;' in text:
+    if common:
+        shim, main_source, edits = common_fixture(shim, main_source)
+        (directory / (name + '.fixture-edits.json')).write_text(json.dumps(edits, indent=2) + '\n')
+        (directory / (name + '.source-owner.json')).write_text(json.dumps(dict(
+            root=str(selected.root), inputs={path: len(value) for path, value in selected.inputs.items()},
+            definitions=selected.definitions), indent=2) + '\n')
+        code += '\n' + COMMON_BIND_FACTS
+    elif 'struct xdev_ext_stor_stage family;' in text:
         for field in ('rw', 'validated', 'batch_id', 'sqe'):
             main_source = re.sub(r'(bps\[[^]]+\])\.' + field + r'\b', r'\1.family.' + field, main_source)
         main_source = main_source.replace('INIT_RESOURCES;', 'priv.family.dev=&fixture_peer_ops; priv.family.member=&priv; priv.family.st=&st;\n INIT_RESOURCES;')
+    shim = positional_replace(shim, "/* PRODUCTION_TYPES */", str(text))
     # This ownership suite does not inspect observation events. The native
     # trace suite consumes SHIM directly and supplies the real trace helper.
     shim = shim.replace("/* PEER_TRACE_RELEASE */", """
@@ -785,7 +1204,7 @@ static void nvme_xdev_ext_peer_trace_release(
     source.write_text("\n".join(defines) + "\n" + shim + main_source)
     compiled = subprocess.run([os.environ.get("CC", "cc"), "-std=gnu11", "-Wall", "-Wextra",
                                "-Werror", "-Wno-unused-function", "-fsanitize=undefined",
-                               "-fno-sanitize-recover=undefined", "-I" + str(host_headers(KERNEL, directory / "headers")),
+                               "-fno-sanitize-recover=undefined", "-I" + str(host_headers(selected.root, directory / "headers")),
                                str(source), "-o", str(binary)], capture_output=True, text=True)
     if compiled.returncode:
         raise SystemExit("host shim compile failed:\n" + compiled.stderr)
@@ -820,15 +1239,48 @@ def main():
             print(result.stderr, end="", file=sys.stderr)
             raise SystemExit("not ok - production GPU-memory NVMe stage violates the asynchronous contract")
         for i, (name, old, new) in enumerate(mutations):
-            if "struct xdev_ext_stor_stage family;" in text:
-                old = old.replace("bp->rw.", "bp->family.rw.")
-            if old not in code:
-                raise SystemExit("not ok - mutation anchor missing: " + name)
-            result = build(text, code.replace(old, new), fill, submit, have_res, directory,
+            if getattr(text, 'common', False):
+                candidate = common_mutation(code, name, old, new)
+            else:
+                if "struct xdev_ext_stor_stage family;" in text:
+                    old = old.replace("bp->rw.", "bp->family.rw.")
+                if code.count(old) != 1:
+                    raise SystemExit("SETUP mutation anchor missing or repeated: " + name)
+                candidate = positional_replace(code, old, new)
+            result = build(text, candidate, fill, submit, have_res, directory,
                            "mutation%d" % i)
             if result.returncode == 0:
                 raise SystemExit("not ok - mutation survived: " + name)
             print("ok mutation - " + name + " rejected by behavior checks")
+
+
+def common_mutation(code, name, old, new):
+    """Rehome the original nine faults into one actual owning definition."""
+    owners = {
+        'completion claim removed': 'xdev_ext_stor_done',
+        'accepted failure published as an ordinary completion': 'xdev_ext_stor_done',
+        'uncertain lease released quiesced': 'xdev_ext_storfam_peer_put',
+        'GPU subspan offset omitted': 'xdev_ext_storfam_peer_map',
+        'native write direction reversed': 'xdev_ext_storfam_peer_map',
+        'DMA-contiguous pages not merged': 'nvme_xdev_ext_member_encode_dptr',
+        'provider page refusal not split': 'xdev_ext_peer_lease_split',
+        'admitted byte length drift accepted': 'xdev_ext_storfam_submit',
+        'admitted NLB drift accepted': 'xdev_ext_storfam_submit',
+    }
+    if name == 'uncertain lease released quiesced':
+        old, new = 'xdev_ext_peer_fd_release(&io->leases[i], quiesced);', 'xdev_ext_peer_fd_release(&io->leases[i], true);'
+    elif name == 'native write direction reversed':
+        old = 'ss->window.write ? DMA_TO_DEVICE : DMA_FROM_DEVICE'
+        new = 'ss->window.write ? DMA_FROM_DEVICE : DMA_TO_DEVICE'
+    elif name == 'DMA-contiguous pages not merged':
+        new = old + '\n\t\tif (!ret && n < nr) return -EPROTO;'
+    elif name == 'admitted byte length drift accepted':
+        old, new = 'sb->rw.byte_length != sb->posting.byte_length', 'false'
+    elif name == 'admitted NLB drift accepted':
+        old, new = 'sb->rw.nlb != sb->posting.nlb', 'false'
+    body = definition(code, owners[name])
+    changed = positional_replace(body, old, new)
+    return positional_replace(code, body, changed)
 
 
 if __name__ == "__main__":

@@ -130,46 +130,34 @@ int main(void)
 class NVMePeerDMA(unittest.TestCase):
     def test_actual_peer_submit_completion_and_retirement_keep_lease_identity(self):
         peer = load('peer_trace_async', ROOT / 'tests/integration/peer_graph/nvme_peer_async_test.py')
-        # Materialize only fixture headers and its requester dependency using
-        # the canonical manifest; no full upstream tree or legacy aliases.
-        fixture = tempfile.TemporaryDirectory()
-        self.addCleanup(fixture.cleanup)
-        peer.KERNEL = Path(fixture.name)
-        manifest = json.loads((ROOT / 'source-layout.json').read_text())
-        for entry in manifest['files']:
-            native = entry.get('native_path', '')
-            if entry.get('component') == 'linux' and (native.startswith('include/') or
-                    native in ('io_uring/family/xdev_ext_requester.c',
-                               'drivers/nvme/host/xdev_ext_native_peer_trace.h',
-                               'io_uring/family/xdev_ext_storfam.c')):
-                target = peer.KERNEL / native
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes((ROOT / entry['source']).read_bytes())
+        # The selected production and every common/native dependency belong to
+        # this explicit canonical owner. No incomplete tree or foreign hint.
         path = ROOT / 'src/storage/drivers/nvme/host'
-        production = (path / 'xdev_ext_mech_nvme.c').read_text()
+        production = peer.production_source(root=ROOT)
         text, code, fill, submit, have_res = peer.extract(production)
-        shim = peer.SHIM.replace('#include "drivers/nvme/host/xdev_ext_peer_nvme_core.h"',
+        shim = peer.positional_replace(peer.SHIM, '#include "drivers/nvme/host/xdev_ext_peer_nvme_core.h"',
                                  '#include "' + str(path / 'xdev_ext_peer_nvme_core.h') + '"')
         # This suite supplies the actual trace helper below instead of the
         # ownership-only suite's observation stub.
-        shim = shim.replace('/* PEER_TRACE_RELEASE */', '')
+        shim = peer.positional_replace(shim, '/* PEER_TRACE_RELEASE */', '')
         event_prefix = hooks.TRACE_PREFIX[hooks.TRACE_PREFIX.index('struct xdev_ext_native_event {'):]
-        event_prefix = event_prefix.replace('u64 cookie,address;', 'u64 cookie,address,ticket;')
-        event_prefix = event_prefix.replace('events[64]', 'events[65536]').replace('emitted<64', 'emitted<65536')
-        shim = shim.replace('struct request {', '#define U64_MAX UINT64_MAX\n' + event_prefix + 'struct request {', 1)
-        shim = shim.replace('h->lease.dma_address = provider_dma(offset);',
+        event_prefix = peer.positional_replace(event_prefix, 'u64 cookie,address;', 'u64 cookie,address,ticket;')
+        event_prefix = peer.positional_replace(event_prefix, 'events[64]', 'events[65536]')
+        event_prefix = peer.positional_replace(event_prefix, 'emitted<64', 'emitted<65536')
+        shim = peer.positional_replace(shim, 'struct request {', '#define U64_MAX UINT64_MAX\n' + event_prefix + 'struct request {', 1)
+        shim = peer.positional_replace(shim, 'h->lease.dma_address = provider_dma(offset);',
                             'h->lease.ticket = acquire_calls; h->lease.dma_address = provider_dma(offset);', 1)
-        shim = shim.replace('static void blk_execute_rq_nowait(', 'static void issue_trace(struct request *);\nstatic void blk_execute_rq_nowait(', 1)
-        shim = shim.replace('r->executed = true; executes++;', 'issue_trace(r); r->executed = true; executes++;', 1)
-        shim = shim.replace('r->allocated = false;\n}',
+        shim = peer.positional_replace(shim, 'static void blk_execute_rq_nowait(', 'static void issue_trace(struct request *);\nstatic void blk_execute_rq_nowait(', 1)
+        shim = peer.positional_replace(shim, 'r->executed = true; executes++;', 'issue_trace(r); r->executed = true; executes++;', 1)
+        shim = peer.positional_replace(shim, 'r->allocated = false;\n}',
                             'assert(!(r->nr.flags & NVME_REQ_XDEV_EXT_PEER) && !r->nr.peer_trace); r->allocated = false;\n}', 1)
         helper = hooks.function((path / 'xdev_ext_native_peer_trace.h').read_text(),
                                 'nvme_xdev_ext_peer_trace_release')
-        shim = shim.replace('static struct request requests[NREQ];',
+        shim = peer.positional_replace(shim, 'static struct request requests[NREQ];',
                             'static bool sync_mode; static int sync_status; static const char *expected_origin="K";\nstatic struct request requests[NREQ];', 1)
-        shim = shim.replace('if (!(flags & BLK_MQ_REQ_NOWAIT))',
+        shim = peer.positional_replace(shim, 'if (!(flags & BLK_MQ_REQ_NOWAIT))',
                             'if (!(flags & BLK_MQ_REQ_NOWAIT) && !sync_mode)', 1)
-        shim = shim.replace('(void)r; (void)at_head; blocked_worker++; return 0;',
+        shim = peer.positional_replace(shim, '(void)r; (void)at_head; blocked_worker++; return 0;',
                             'assert(sync_mode && !at_head); issue_trace(r); executes++; return sync_status;', 1)
         code = 'struct nvme_dev { struct device *dev; };\n' + (
             'static struct nvme_dev *to_nvme_dev(struct nvme_ctrl *c) '
@@ -197,7 +185,7 @@ static void issue_trace(struct request *r)
 """
         code += '\n' + hooks.function((path / 'pci.c').read_text(), 'nvme_pci_peer_rw')
         peer.SHIM = shim
-        peer.MAIN = peer.MAIN.replace('int main(void)', r"""
+        peer.MAIN = peer.positional_replace(peer.MAIN, 'int main(void)', r"""
 static void case_sync_trace(void)
 {
  struct xdev_ext_peer_nvme_rw u={.generation=87,.offset=512,.bytes=4096,.slba=8};
@@ -214,11 +202,11 @@ static void case_sync_trace(void)
  acquire_error=0; sync_mode=false; expected_origin="K";
 }
 int main(void)""", 1)
-        peer.MAIN = peer.MAIN.replace('case_failures();', 'case_sync_trace(); case_failures();', 1)
+        peer.MAIN = peer.positional_replace(peer.MAIN, 'case_failures();', 'case_sync_trace(); case_failures();', 1)
         # Validate retirement in the existing actual worker consume boundary.
-        peer.MAIN = peer.MAIN.replace('{ struct xdev_ext_nvme_mech_cqe cqe;',
+        peer.MAIN = peer.positional_replace(peer.MAIN, '{ struct xdev_ext_nvme_mech_cqe cqe;',
             '{ unsigned before=emitted; u64 cookie=bps[i].peer_slot->trace.cookie; bool zombie=session.state==XDEV_EXT_MECH_SESSION_ZOMBIE; struct xdev_ext_nvme_mech_cqe cqe;', 1)
-        peer.MAIN = peer.MAIN.replace('assert(cqe.status == bps[i].cqe.status && cqe.err == bps[i].cqe.err);',
+        peer.MAIN = peer.positional_replace(peer.MAIN, 'assert(cqe.status == bps[i].cqe.status && cqe.err == bps[i].cqe.err);',
             'assert(cqe.status == bps[i].cqe.status && cqe.err == bps[i].cqe.err); '
             'assert(emitted==before+(zombie ? 0U:1U)); '
             'if(!zombie) { assert(!strcmp(events[emitted-1].phase,"peer_dma_release")); '
@@ -229,6 +217,10 @@ int main(void)""", 1)
             artifact('peer-lifetime.c', (Path(temp) / 'peer_lifetime.c').read_text())
             artifact('peer-lifetime.stdout', result.stdout)
             artifact('peer-lifetime.stderr', result.stderr)
+            for suffix in ('fixture-edits.json', 'source-owner.json'):
+                report = Path(temp) / ('peer_lifetime.' + suffix)
+                if report.is_file():
+                    artifact('peer-lifetime.' + suffix, report.read_text())
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_actual_sq_sites_use_lease_extents_and_refused_prep_emits_nothing(self):
