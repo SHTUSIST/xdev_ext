@@ -55,8 +55,11 @@ typedef unsigned int gfp_t;
 #define ERR_PTR(e) ((void *)(intptr_t)(e))
 #define PTR_ERR(p) ((long)(intptr_t)(p))
 #define IS_ERR(p) ((uintptr_t)(p) >= (uintptr_t)-MAX_ERRNO)
-#define WARN_ON(x) (!!(x))
-#define WARN_ON_ONCE(x) (!!(x))
+/* A kernel warning is counted, not printed; each case states how many it
+ * provokes (cases.c). */
+extern unsigned shim_warnings;
+#define WARN_ON_ONCE(x) ({ bool shim_bad_ = !!(x); shim_warnings += shim_bad_; shim_bad_; })
+#define WARN_ON(x) WARN_ON_ONCE(x)
 #define likely(x) (x)
 #define unlikely(x) (x)
 /* Each shared read (READ_ONCE, atomic_read, atomic_read_acquire) is an

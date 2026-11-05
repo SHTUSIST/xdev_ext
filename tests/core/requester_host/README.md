@@ -34,6 +34,12 @@ middle of the lockless settled check a deterministic case. It checks the
 order of the two reads, not the memory ordering of a weakly ordered CPU: the
 fixture's atomics are sequentially consistent.
 
+`WARN_ON_ONCE()` is counted, not printed. A case that unbinds a mapping the
+device may still use, as only a caller that skipped
+`xdev_ext_requester_host_settled()` could, does so through `unbind_busy()`,
+which expects exactly one warning; every case fails if the number of
+warnings differs from the number it provoked.
+
 ## Cases
 
 | Case | Requirement |
@@ -47,8 +53,8 @@ fixture's atomics are sequentially consistent.
 | `host_lease_refuses_spans` | `-ERANGE` for an element that crosses a page or frame boundary, leaves the pool or is empty; `-EACCES` against the mapping direction; the host bind refuses a PEER pool, and a host lease on a PEER requester is `-EINVAL` |
 | `host_noncoherent_sync` | a non-coherent or bounced NHI gets one sync for the device per lease, covering exactly the element, and an RX buffer gets one sync for the CPU after a definite end; a TX end needs none |
 | `host_coherent_no_sync` | a coherent, unbounced NHI gets no sync calls |
-| `host_unknown_retains_mapping` | after an element ends with unknown device access, no CPU sync, no new lease (`-ESTALE`), the stage is not settled, and unbind never unmaps; the mapping keeps its NHI reference |
-| `host_outstanding_lease_retains_mapping` | an unbind with an outstanding lease keeps the whole mapping |
+| `host_unknown_retains_mapping` | after an element ends with unknown device access, no CPU sync, no new lease (`-ESTALE`), the stage is not settled, and unbind never unmaps; the mapping keeps its NHI reference; the unbind warns |
+| `host_outstanding_lease_retains_mapping` | an unbind with an outstanding lease keeps the whole mapping and warns |
 | `host_release_during_settled_check` | a lease ends with unknown device access right after the first shared read of the lockless settled check: the check still reports `-EIO`, and unbind never unmaps |
 | `host_unknown_then_quiesced` | with two receive elements in flight, the first ends with unknown device access and the second ends quiesced later: the mapping stays not settled, refuses new leases with `-ESTALE` and is never unmapped |
 | `host_quiesced_unbind_unmaps_once` | once every lease ended quiesced, unbind unmaps each page exactly once with the mapping's size and direction |
