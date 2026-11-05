@@ -45,6 +45,27 @@ PEER path can run as a regression case.
 | `peer_bind_unchanged` | a PEER pool still describes and premaps, and the requester maps nothing itself |
 | `host_create_report` | the CREATE report names the NHI and records the decision, without a provider description |
 
+## Mutations
+
+Each mutant edits one line group of a private copy of the requester unit so
+that one requirement above becomes false, then runs the case that must catch
+it. A mutant counts as killed only with exit 1 and a named assertion.
+
+| Mutant | Change | Caught by |
+| --- | --- | --- |
+| `accept-misaligned-pool` | the page-alignment check of the pool is removed | `host_bind_refuses_misaligned_pool` |
+| `accept-partial-page` | the whole-page check of the pool end is removed | `host_bind_refuses_partial_page` |
+| `map-error-keeps-pages` | a mapping error no longer unmaps the pages already mapped | `host_bind_map_error_unwinds` |
+| `lease-first-page` | every lease uses page 0's address | `host_lease_page_address` |
+| `lease-crosses-page` | a lease may cross a page boundary | `host_lease_refuses_spans` |
+| `lease-crosses-frame` | a lease may cross a frame boundary | `host_lease_refuses_spans` |
+| `no-sync-for-device` | a lease no longer syncs for the device | `host_noncoherent_sync` |
+| `no-sync-for-cpu` | a definite RX end no longer syncs for the CPU | `host_noncoherent_sync` |
+| `sync-coherent-too` | a lease syncs even when the mapping needs no sync | `host_coherent_no_sync` |
+| `lease-after-unknown` | a mapping with unknown device access still leases | `host_unknown_retains_mapping` |
+| `unmap-after-unknown` | unbind unmaps after an unknown end | `host_unknown_retains_mapping` |
+| `unmap-outstanding-lease` | unbind unmaps with a lease outstanding | `host_outstanding_lease_retains_mapping` |
+
 ## Limits
 
 This is host software only. It does not exercise a real IOMMU, swiotlb or

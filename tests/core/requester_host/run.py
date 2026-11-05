@@ -29,8 +29,35 @@ CASES = ('host_bind_maps_every_page', 'host_bind_rx_maps_from_device',
          'host_noncoherent_sync', 'host_coherent_no_sync', 'host_unknown_retains_mapping',
          'host_outstanding_lease_retains_mapping', 'host_quiesced_unbind_unmaps_once',
          'peer_bind_unchanged', 'host_create_report')
-# name: (case that must catch it, [(old, new)] in UNIT)
-MUTATIONS = {}
+# name: (case that must catch it, [(old, new)] in UNIT); each makes one requirement false.
+MUTATIONS = {
+    'accept-misaligned-pool': ('host_bind_refuses_misaligned_pool', [
+        ('(pool->frame_size & (pool->frame_size - 1)) || pool->first_page_off ||',
+         '(pool->frame_size & (pool->frame_size - 1)) ||')]),
+    'accept-partial-page': ('host_bind_refuses_partial_page', [
+        ('    pool->size != (u64)pool->nr_pages << PAGE_SHIFT)\n\t\treturn -EINVAL;',
+         '    0)\n\t\treturn -EINVAL;')]),
+    'map-error-keeps-pages': ('host_bind_map_error_unwinds', [
+        ('\t\t\txdev_ext_requester_host_unmap(h, i);\n', '')]),
+    'lease-first-page': ('host_lease_page_address', [
+        ('addr = h->dma[off >> PAGE_SHIFT] + page_off;', 'addr = h->dma[0] + page_off;')]),
+    'lease-crosses-page': ('host_lease_refuses_spans', [
+        (' || len > PAGE_SIZE - page_off ||', ' ||')]),
+    'lease-crosses-frame': ('host_lease_refuses_spans', [
+        (' ||\n\t    (off & frame_mask) != ((off + len - 1) & frame_mask))', ')')]),
+    'no-sync-for-device': ('host_noncoherent_sync', [
+        ('\t\tdma_sync_single_for_device(&h->pdev->dev, addr, len, h->dir);\n', '\t\t;\n')]),
+    'no-sync-for-cpu': ('host_noncoherent_sync', [
+        ('\t\tdma_sync_single_for_cpu(&h->pdev->dev, dma, len, DMA_FROM_DEVICE);\n', '\t\t;\n')]),
+    'sync-coherent-too': ('host_coherent_no_sync', [
+        ('\tif (h->need_sync)\n\t\tdma_sync_single_for_device', '\tif (1)\n\t\tdma_sync_single_for_device')]),
+    'lease-after-unknown': ('host_unknown_retains_mapping', [
+        ('\tif (READ_ONCE(h->unknown))\n\t\treturn -ESTALE;\n', '')]),
+    'unmap-after-unknown': ('host_unknown_retains_mapping', [
+        ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn atomic_read(&h->active);')]),
+    'unmap-outstanding-lease': ('host_outstanding_lease_retains_mapping', [
+        ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn READ_ONCE(h->unknown);')]),
+}
 
 
 class Setup(Exception):
