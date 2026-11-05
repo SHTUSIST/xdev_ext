@@ -35,6 +35,11 @@ group and every CTS follows the receiver's posts, run mismatched program pairs,
 and force refused bindings (an RTS on a paired stage, an early post without a
 grant).
 
+`bpf_names` checks that the two programs and `xdomain_policy.h` use, outside
+comments, only XDEV_EXT names a real BPF build can see: macros of the BPF-side
+headers and enumerators of the two protocol enums emitted to BTF. The host
+composition includes the UAPI header and cannot show this.
+
 `equivalence` compiles the three programs' decision functions together and
 draws four million fact records from a fixed-seed generator. The RTS/CTS
 program must return the reference program's result and verdict in mode 0 for

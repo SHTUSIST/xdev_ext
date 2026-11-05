@@ -48,16 +48,16 @@ xd_early_bind(const struct xdev_ext_xdomain_proto_info_v2 *info,
 	switch (b->event) {
 	case XDEV_EXT_XDP_EV_PAIR_DUE:
 		/* Start or repeat this endpoint's pairing step. */
-		if (b->ctl_room && (info->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE))
+		if (b->ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
 			action = b->direction == XDEV_EXT_MP_DIR_TO_DEVICE ?
 				XDEV_EXT_XDP_ACT_SEND_HELLO : XDEV_EXT_XDP_ACT_SEND_CHALLENGE;
 		break;
 	case XDEV_EXT_XDP_EV_HELLO:
-		if (b->ctl_room && (info->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE))
+		if (b->ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
 			action = XDEV_EXT_XDP_ACT_SEND_CHALLENGE;
 		break;
 	case XDEV_EXT_XDP_EV_CHALLENGE:
-		if (b->ctl_room && (info->early_facts & XDEV_EXT_XDP_EARLY_F_PAIR_RETRY_DUE))
+		if (b->ctl_room && (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_PAIR_RETRY_DUE))
 			action = XDEV_EXT_XDP_ACT_SEND_CONFIRM;
 		break;
 	case XDEV_EXT_XDP_EV_CONFIRM:
@@ -68,12 +68,12 @@ xd_early_bind(const struct xdev_ext_xdomain_proto_info_v2 *info,
 		break;
 	case XDEV_EXT_XDP_EV_EARLY_RX_READY:
 		/* Post the next group before the sender asks; its CTS follows. */
-		if (info->early_facts & XDEV_EXT_XDP_EARLY_F_RX_POSTABLE)
+		if (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_RX_POSTABLE)
 			action = XDEV_EXT_XDP_ACT_RX_POST_EARLY;
 		break;
 	case XDEV_EXT_XDP_EV_TX_SUBMIT:
 		/* Send a batch only on the grant advertised for its exact key. */
-		if (info->early_facts & XDEV_EXT_XDP_EARLY_F_TX_POSTABLE)
+		if (info->early_facts & XDEV_EXT_MP_XDP_EARLY_F_TX_POSTABLE)
 			action = XDEV_EXT_XDP_ACT_TX_POST_EARLY;
 		break;
 	default:
