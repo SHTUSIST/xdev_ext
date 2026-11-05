@@ -394,6 +394,14 @@ struct xdev_ext_mech_class_ops {
 	 * member refuses in ->bind (-EOPNOTSUPP) a device it cannot poll.
 	 */
 	int (*poll)(struct xdev_ext_mech_stage *st);
+	/*
+	 * Optional, for a stage with st->order_window > 1; session worker, no
+	 * session lock held, never sleeps.  True once @b, in flight at @st,
+	 * holds its final place in the native order, so a later key may be
+	 * submitted behind it; false while it could still be withdrawn or
+	 * refused.  Without this member a key in flight holds the next one.
+	 */
+	bool (*order_ready)(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b);
 	/* Optional family hooks; checked at class registration. */
 	union {
 		const struct xdev_ext_family_hooks_hdr *hdr;

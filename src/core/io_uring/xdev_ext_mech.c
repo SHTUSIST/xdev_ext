@@ -69,6 +69,7 @@ static_assert(sizeof(struct xdp_desc) == 16);
 static_assert(sizeof(struct nvme_command) == XDEV_EXT_NVME_MECH_DESC_SIZE);
 static_assert(offsetof(struct xdev_ext_mech_call, ctx) == 0);
 static_assert(XDEV_EXT_MECH_MAX_STAGES == 4);
+static_assert(XDEV_EXT_MECH_MAX_DEPTH <= 64); /* order_blocked's u64 batch mask */
 static_assert(offsetof(struct xdev_ext_mech_create_programs, request) == 24);
 static_assert(__builtin_types_compatible_p(typeof(&crc32c), xdev_ext_mech_crc32c_fn));
 
@@ -1816,14 +1817,21 @@ static int xdev_ext_mech_submit(struct xdev_ext_mech_session *s, struct xdev_ext
  * Worker: a stage whose class has XDEV_EXT_MECH_CLASS_F_ORDERED submits @b only
  * after every live batch with a smaller key was submitted there.  A session
  * that no longer admits lets every batch through to its abort.
+ *
+ * With a window W (st->order_window > 1) at most W smaller keys may be at or
+ * past the stage and not ended, and a smaller key still in flight at the
+ * stage holds @b until the class reports its place fixed (->order_ready).
+ * W of 0 or 1 is exactly the rule above.
  */
 static bool xdev_ext_mech_order_blocked(struct xdev_ext_mech_session *s,
 				   const struct xdev_ext_mech_batch *b)
 {
-	const struct xdev_ext_mech_stage *st = &s->st[b->bs.stage];
+	struct xdev_ext_mech_stage *st = &s->st[b->bs.stage];
+	bool windowed = st->order_window > 1;
 	unsigned long flags;
 	bool blocked = false;
-	u32 i;
+	u64 at_stage = 0;
+	u32 i, entered = 0;
 
 	if (!(st->cls->flags & XDEV_EXT_MECH_CLASS_F_ORDERED) ||
 	    !xdev_ext_mech_session_admits(s))
@@ -1833,11 +1841,37 @@ static bool xdev_ext_mech_order_blocked(struct xdev_ext_mech_session *s,
 	for (i = 0; i < s->depth && !blocked; i++) {
 		const struct xdev_ext_mech_batch *o = &s->batches[i];
 
-		blocked = o != b && o != b->parent && xdev_ext_mech_order_holds_ex(b->key, b->bs.stage,
-							    o->key, &o->bs, o->fifo_accepted);
+		if (!windowed) {
+			blocked = o != b && o != b->parent && xdev_ext_mech_order_holds_ex(b->key, b->bs.stage,
+								    o->key, &o->bs, o->fifo_accepted);
+			continue;
+		}
+		if (o == b || o == b->parent)
+			continue;
+		switch (xdev_ext_mech_order_window_role(b->key, b->bs.stage, o->key, &o->bs)) {
+		case XDEV_EXT_MECH_ORDER_HOLD:
+			blocked = true;
+			break;
+		case XDEV_EXT_MECH_ORDER_AT:
+			at_stage |= 1ULL << i;
+			entered++;
+			break;
+		case XDEV_EXT_MECH_ORDER_PAST:
+			entered++;
+			break;
+		}
 	}
 	spin_unlock_irqrestore(&s->lock, flags);
-	return blocked;
+	if (blocked || !windowed)
+		return blocked;
+	if (entered >= st->order_window)
+		return true;
+	/* Outside s->lock: a class takes its own lock, then s->lock. */
+	for (i = 0; i < s->depth; i++)
+		if ((at_stage & (1ULL << i)) &&
+		    (!st->cls->order_ready || !st->cls->order_ready(st, &s->batches[i])))
+			return true;
+	return false;
 }
 
 /* Worker: wait in key order for the turn of @b at its ordered stage. */
@@ -2524,6 +2558,15 @@ static void xdev_ext_mech_progress_work(struct kthread_work *work)
   next = s->st[i].cls->progress(&s->st[i]);
   if (next && (!delay || next < delay)) delay = next;
  }
+ /* At a windowed ordered stage the next key re-checks its turn after each
+  * pass: the pass may have fixed a batch's place (->order_ready), or a batch
+  * the previous pass published has since left the stage (that publish kicked
+  * this work, queued behind the drain that moved the batch on). */
+ for (i = 0; i < s->nr_stages; i++)
+  if (s->st[i].order_window > 1) {
+   xdev_ext_mech_order_kick(s);
+   break;
+  }
  /* Queue, never modify: a stage kick that requeued this work while the pass
   * ran (delay 0) must not be pushed back to the earliest stage delay. */
  if (delay && !READ_ONCE(s->worker_gone))

@@ -1875,6 +1875,32 @@ static void xdev_ext_xd_class_batch_release(struct xdev_ext_mech_stage *st, stru
 	}
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
 }
+/*
+ * Worker, no session lock. A TX group's place on the wire is fixed once its
+ * data post was accepted (after the peer's CTS, or an EARLY grant): its group
+ * number and data sequence were taken in key order and the peer posted its
+ * buffers for it. Before that the announcement can still be withdrawn or
+ * refused, and a later group announced behind it would take the receive batch
+ * it leaves. RX never releases: one RX batch at a time takes the next
+ * announcement (one posted group, version 1).
+ */
+static bool xdev_ext_xd_class_order_ready(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	struct xdev_ext_xd_batch *bp = xdev_ext_mech_batch_priv(b);
+	struct xdev_ext_net_slot *s;
+	unsigned long flags;
+	bool ready;
+
+	if (!xs || xs->ns.rx)
+		return false;
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	s = bp->slot;
+	ready = s && s->busy && s->batch == b && s->ticket == xdev_ext_mech_batch_ticket(b) &&
+		xd_fact(xs, s)->accepted;
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+	return ready;
+}
 static void xdev_ext_xd_class_mark_dead(struct xdev_ext_mech_stage *st)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
@@ -2070,7 +2096,8 @@ static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
 	.default_build = xdev_ext_xd_class_default_build, .validate = xdev_ext_xd_class_validate, .submit = xdev_ext_xd_class_submit,
 	.fill_cqe = xdev_ext_xd_class_fill_cqe, .mark_dead = xdev_ext_xd_class_mark_dead,
 	.batch_end = xdev_ext_xd_class_batch_end, .batch_release = xdev_ext_xd_class_batch_release,
-	.progress = xdev_ext_xd_class_progress, .transport_stats = xdev_ext_xd_class_transport_stats, .fam.net = &xd_hooks,
+	.progress = xdev_ext_xd_class_progress, .transport_stats = xdev_ext_xd_class_transport_stats,
+	.order_ready = xdev_ext_xd_class_order_ready, .fam.net = &xd_hooks,
 };
 int xdev_ext_xd_class_register(void) { return xdev_ext_mech_class_register(&xdev_ext_xd_class); }
 void xdev_ext_xd_class_unregister(void) { xdev_ext_mech_class_unregister(&xdev_ext_xd_class); }
