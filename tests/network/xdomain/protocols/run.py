@@ -119,9 +119,13 @@ static __s32 xdomain_peer_build(void *c, const struct xdev_ext_mech_ctx *m)
  default: return stack_ref_xdomain_peer_build(c, m);
  }
 }
+void proto_observe(unsigned endpoint, unsigned program, unsigned event);
 static __s32 xdomain_peer_complete(void *c, const struct xdev_ext_mech_ctx *m)
 {
  __s32 ret;
+ if (m->callsite == XDEV_EXT_MECH_SITE_WORKER_PROTOCOL && active && active->info)
+  proto_observe(active_endpoint, stack_program[active_endpoint & 1],
+                ((const struct xdev_ext_xdomain_proto_info *)active->info)->event);
  switch (stack_program[active_endpoint & 1]) {
  case 1: ret = stack_rts_xdomain_peer_complete(c, m); break;
  case 2: ret = stack_early_xdomain_peer_complete(c, m); break;

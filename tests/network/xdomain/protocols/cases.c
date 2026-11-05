@@ -157,8 +157,20 @@ static void proto_no_v2_after(unsigned endpoint)
 }
 static size_t proto_failures(unsigned endpoint)
 { return count(world, STACK_EV_FAILURE, (int)endpoint, -1); }
+/* Called by the bridge after each protocol callback. An RTS/CTS endpoint
+ * declines the first pairing offer; a repeated offer is a class fault (a few
+ * stale re-offers are tolerated). */
+static unsigned proto_pair_offers[2];
+void proto_observe(unsigned endpoint, unsigned program, unsigned event)
+{
+ if (endpoint > 1 || program != PROTO_RTS_CTS || event != 18) return;
+ CHECK(++proto_pair_offers[endpoint] <= 3, "an RTS/CTS endpoint is not offered pairing again after declining it");
+}
 static void proto_programs(unsigned tx, unsigned rx)
-{ stack_program[0] = tx; stack_program[1] = rx; stack_force_endpoint = 2; stack_force_hits = 0; }
+{
+ stack_program[0] = tx; stack_program[1] = rx; stack_force_endpoint = 2; stack_force_hits = 0;
+ proto_pair_offers[0] = proto_pair_offers[1] = 0;
+}
 
 /* RTS -> receiver posts -> CTS -> sender posts -> release -> ACK, two groups. */
 static void proto_rts_cts(unsigned tx_prog, unsigned rx_prog, unsigned flags)
