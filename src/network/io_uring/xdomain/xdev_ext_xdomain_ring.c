@@ -812,7 +812,7 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		/* Cancellation alone proves nothing about DMA.  A healthy native
 		 * STOPPED barrier, however, disables the host ring and drains its
 		 * callbacks.  This backing contains control messages only; payload
-		 * payload custody remains UNKNOWN in the data callbacks.
+		 * custody remains UNKNOWN in the data callbacks.
 		 */
 		if (n->disposition == XDEV_EXT_XD_NATIVE_STOPPED &&
 		    !xl->nhi_gone && *n->slot && !(*n->slot)->nhi->going_away &&
