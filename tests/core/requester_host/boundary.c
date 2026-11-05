@@ -27,12 +27,37 @@ dma_addr_t rh_window(const struct device *dev, unsigned index, size_t offset)
 	       (dma_addr_t)(RH_WINDOW_PAGES - 1 - index) * PAGE_SIZE + offset;
 }
 
+static void (*rh_pending)(void);
+static unsigned rh_pending_reads;
+unsigned rh_scheduled_runs;
+
 void rh_reset(void)
 {
 	rh_events = 0;
 	rh_maps = 0;
 	rh_fail_map_at = 0;
+	rh_pending = NULL;
+	rh_pending_reads = 0;
+	rh_scheduled_runs = 0;
 	memset(rh_log, 0, sizeof(rh_log));
+}
+
+void rh_schedule_after_reads(unsigned n, void (*fn)(void))
+{
+	assert(n && fn && !rh_pending);
+	rh_pending_reads = n;
+	rh_pending = fn;
+}
+
+void rh_after_shared_read(void)
+{
+	void (*fn)(void) = rh_pending;
+
+	if (!fn || --rh_pending_reads)
+		return;
+	rh_pending = NULL;
+	rh_scheduled_runs++;
+	fn();
 }
 
 unsigned rh_count(enum rh_kind kind)

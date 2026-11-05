@@ -26,6 +26,14 @@ non-coherent device or a forced bounce buffer. The PEER provider calls
 (describe, premap) are stand-ins that report a BAR owner, so the unchanged
 PEER path can run as a regression case.
 
+Each shared read of the unit (`READ_ONCE()`, `atomic_read()`,
+`atomic_read_acquire()`) is an interleaving point: a case can schedule an
+action to run right after the n-th such read (`rh_schedule_after_reads()`),
+as another CPU could at that point. This makes a release that runs in the
+middle of the lockless settled check a deterministic case. It checks the
+order of the two reads, not the memory ordering of a weakly ordered CPU: the
+fixture's atomics are sequentially consistent.
+
 ## Cases
 
 | Case | Requirement |
@@ -41,6 +49,7 @@ PEER path can run as a regression case.
 | `host_coherent_no_sync` | a coherent, unbounced NHI gets no sync calls |
 | `host_unknown_retains_mapping` | after an element ends with unknown device access, no CPU sync, no new lease (`-ESTALE`), the stage is not settled, and unbind never unmaps; the mapping keeps its NHI reference |
 | `host_outstanding_lease_retains_mapping` | an unbind with an outstanding lease keeps the whole mapping |
+| `host_release_during_settled_check` | a lease ends with unknown device access right after the first shared read of the lockless settled check: the check still reports `-EIO`, and unbind never unmaps |
 | `host_unknown_then_quiesced` | with two receive elements in flight, the first ends with unknown device access and the second ends quiesced later: the mapping stays not settled, refuses new leases with `-ESTALE` and is never unmapped |
 | `host_quiesced_unbind_unmaps_once` | once every lease ended quiesced, unbind unmaps each page exactly once with the mapping's size and direction |
 | `peer_bind_unchanged` | a PEER pool still describes and premaps, and the requester maps nothing itself |

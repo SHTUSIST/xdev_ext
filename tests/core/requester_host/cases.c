@@ -370,6 +370,35 @@ static void host_unknown_then_quiesced(void)
 	CHECK(rh_count(RH_UNMAP) == 0, "the mapping with unknown device access is never unmapped");
 }
 
+static u64 race_dma;
+
+/* Stands in for the worker on another CPU: it ends the outstanding lease
+ * with unknown device access. */
+static void race_release_unknown(void)
+{
+	xdev_ext_requester_host_release(&rq, race_dma, 4096, false);
+}
+
+/* The settled check takes no lock: it reads the outstanding-lease count and
+ * the unknown mark while a release may be ending the last lease with unknown
+ * device access.  Here that release runs right after the check's first
+ * shared read.  Whichever field the check reads first, it must not report
+ * settled for a mapping whose last lease ended with unknown device access. */
+static void host_release_during_settled_check(void)
+{
+	need_api();
+	host_pool(4096, 1, 0, XDEV_EXT_MECH_DIR_FROM_DEVICE);
+	CHECK(xdev_ext_requester_bind_host(&rq, &stage, &nhi) == 0, "bind");
+	CHECK(xdev_ext_requester_host_lease(&rq, 0, 4096, DMA_FROM_DEVICE, &race_dma) == 0, "RX lease");
+	rh_schedule_after_reads(1, race_release_unknown);
+	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO,
+	      "a lease ending with unknown device access during the settled check: not settled");
+	CHECK(rh_scheduled_runs == 1, "the release ran inside the settled check, after its first shared read");
+	CHECK(xdev_ext_requester_host_settled(&rq) == -EIO, "after that release: still not settled");
+	xdev_ext_requester_unbind_host(&rq);
+	CHECK(rh_count(RH_UNMAP) == 0, "the mapping with unknown device access is never unmapped");
+}
+
 static void host_outstanding_lease_retains_mapping(void)
 {
 	u64 dma = 0;
@@ -465,6 +494,7 @@ static const struct { const char *name; void (*fn)(void); } cases[] = {
 	{ "host_unknown_retains_mapping", host_unknown_retains_mapping },
 	{ "host_outstanding_lease_retains_mapping", host_outstanding_lease_retains_mapping },
 	{ "host_unknown_then_quiesced", host_unknown_then_quiesced },
+	{ "host_release_during_settled_check", host_release_during_settled_check },
 	{ "host_quiesced_unbind_unmaps_once", host_quiesced_unbind_unmaps_once },
 	{ "peer_bind_unchanged", peer_bind_unchanged },
 	{ "host_create_report", host_create_report },
