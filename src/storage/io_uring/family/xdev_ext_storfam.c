@@ -3,7 +3,18 @@
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_peer.h>
 #include <linux/xdev_ext_storfam_runtime.h>
+
+void xdev_ext_stor_leases_retire(struct xdev_ext_peer_fd_lease *leases,
+			       u32 nr, bool quiesced)
+{
+	u32 i;
+
+	for (i = 0; i < nr; i++)
+		xdev_ext_peer_fd_release(&leases[i], quiesced);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_leases_retire);
 
 /* CREATE adds exactly one node for each member-owned depth slot. */
 void xdev_ext_stor_slot_add(struct xdev_ext_stor_pool *pool,

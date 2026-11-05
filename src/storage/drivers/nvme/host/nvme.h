@@ -861,6 +861,17 @@ static inline enum req_op nvme_req_op(struct nvme_command *cmd)
 
 #define NVME_QID_ANY -1
 void nvme_init_request(struct request *req, struct nvme_command *cmd);
+#ifdef CONFIG_XDEV_EXT_MECH
+struct xdev_ext_stor_rw;
+struct xdev_ext_stor_extent;
+int nvme_xdev_ext_peer_build_cmd(
+		const struct xdev_ext_stor_rw *rw, u32 nsid,
+		bool sgl_supported, bool strict_single,
+		const struct xdev_ext_stor_extent *spans, u32 nr,
+		struct xdev_ext_stor_extent *work, u32 capacity,
+		void *list_cpu, u64 list_dma, u32 list_bytes,
+		struct nvme_command *cmd);
+#endif
 void nvme_cleanup_cmd(struct request *req);
 blk_status_t nvme_setup_cmd(struct nvme_ns *ns, struct request *req);
 blk_status_t nvme_fail_nonready_command(struct nvme_ctrl *ctrl,

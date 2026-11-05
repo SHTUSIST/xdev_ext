@@ -412,13 +412,11 @@ static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss,
 {
 	struct xdev_ext_stor_io *io = sb->peer_io;
 	bool quiesced;
-	u32 i;
 
 	if (!io)
 		return;
 	quiesced = !io->done.uncertain;
-	for (i = 0; i < io->nr_leases; i++)
-		xdev_ext_peer_fd_release(&io->leases[i], quiesced);
+	xdev_ext_stor_leases_retire(io->leases, io->nr_leases, quiesced);
 	ss->dev->retire_peer(ss->member, io, quiesced);
 	io->nr_leases = 0;
 	sb->peer_io = NULL;

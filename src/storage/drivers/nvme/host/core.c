@@ -26,6 +26,9 @@
 
 #include "nvme.h"
 #include "fabrics.h"
+#ifdef CONFIG_XDEV_EXT_MECH
+#include "xdev_ext_peer_nvme_core.h"
+#endif
 #include <linux/nvme-auth.h>
 
 #define CREATE_TRACE_POINTS
@@ -743,6 +746,98 @@ void nvme_init_request(struct request *req, struct nvme_command *cmd)
 	memcpy(nr->cmd, cmd, sizeof(*cmd));
 }
 EXPORT_SYMBOL_GPL(nvme_init_request);
+
+#ifdef CONFIG_XDEV_EXT_MECH
+/* Callers retain native admission and ownership of the mapped spans/list. */
+int nvme_xdev_ext_peer_build_cmd(
+		const struct xdev_ext_stor_rw *rw, u32 nsid,
+		bool sgl_supported, bool strict_single,
+		const struct xdev_ext_stor_extent *spans, u32 nr,
+		struct xdev_ext_stor_extent *work, u32 capacity,
+		void *list_cpu, u64 list_dma, u32 list_bytes,
+		struct nvme_command *cmd)
+{
+	struct nvme_sgl_desc *sgl = list_cpu;
+	u32 pos, n = 0;
+	u64 prp1, prp2;
+	int ret;
+
+	/* Preserve the original synchronous SGL-only qualification first. */
+	if (strict_single) {
+		if (!sgl_supported)
+			return -EOPNOTSUPP;
+		if (nr != 1 || !spans || (spans[0].addr & 3))
+			return -EINVAL;
+	}
+	if (!rw || !cmd || !rw->nlb || rw->write > 1)
+		return -EINVAL;
+	if (rw->nlb > 65536)
+		return -E2BIG;
+
+	memset(cmd, 0, sizeof(*cmd));
+	cmd->rw.opcode = rw->write ? nvme_cmd_write : nvme_cmd_read;
+	cmd->rw.nsid = cpu_to_le32(nsid);
+	cmd->rw.slba = cpu_to_le64(rw->slba);
+	cmd->rw.length = cpu_to_le16(rw->nlb - 1);
+	list_bytes = min_t(u32, list_bytes, NVME_CTRL_PAGE_SIZE);
+	if (sgl_supported) {
+		if (strict_single) {
+			if (!work || !spans[0].len || (spans[0].len & 3))
+				return -EINVAL;
+			/* The original provider validates the inclusive last byte. */
+			if (spans[0].addr + spans[0].len - 1 < spans[0].addr)
+				return -EOVERFLOW;
+			if (!capacity)
+				return -EREMOTEIO;
+			work[0] = spans[0];
+			n = 1;
+		} else {
+			ret = xdev_ext_peer_nvme_sgl_build(spans, nr, work,
+				min_t(u32, capacity,
+					NVME_CTRL_PAGE_SIZE / sizeof(*sgl)), 3, &n);
+			if (ret)
+				return ret;
+		}
+		if (n > 1 && (!sgl || n > list_bytes / sizeof(*sgl)))
+			return -EREMOTEIO;
+		/* The strict single-span caller needs no descriptor allocation. */
+		if (list_bytes < sizeof(*sgl))
+			sgl = NULL;
+		for (pos = 0; pos < n; pos++) {
+			struct nvme_sgl_desc desc = {
+				.addr = cpu_to_le64(work[pos].addr),
+				.length = cpu_to_le32(work[pos].len),
+				.type = NVME_SGL_FMT_DATA_DESC << 4,
+			};
+
+			if (sgl)
+				sgl[pos] = desc;
+			if (n == 1)
+				cmd->rw.dptr.sgl = desc;
+		}
+		if (n > 1)
+			cmd->rw.dptr.sgl = (struct nvme_sgl_desc) {
+				.addr = cpu_to_le64(list_dma),
+				.length = cpu_to_le32(n * sizeof(*sgl)),
+				.type = NVME_SGL_FMT_LAST_SEG_DESC << 4,
+			};
+	} else {
+		u64 *list = list_cpu;
+
+		ret = xdev_ext_peer_nvme_prp_build(spans, nr,
+			NVME_CTRL_PAGE_SHIFT, list_dma, list,
+			list_bytes / sizeof(*list), &prp1, &prp2, &n);
+		if (ret)
+			return ret;
+		for (pos = 0; pos < n; pos++)
+			list[pos] = cpu_to_le64(list[pos]);
+		cmd->rw.dptr.prp1 = cpu_to_le64(prp1);
+		cmd->rw.dptr.prp2 = cpu_to_le64(prp2);
+	}
+	return 0;
+}
+EXPORT_SYMBOL_GPL(nvme_xdev_ext_peer_build_cmd);
+#endif
 
 /*
  * For something we're not in a state to send to the device the default action
