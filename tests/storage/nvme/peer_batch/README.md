@@ -14,12 +14,16 @@ measures time.
 ## Phases (one guest boot)
 
 - Pool setup: 32 dma-bufs of 1 MiB are allocated and every other one is
-  freed, then the 6 MiB + 68 KiB pool is allocated. `/proc/self/pagemap`
-  must show at least one physical discontinuity inside the window
-  [4 MiB + 128 KiB, end - 64 KiB]; the first one is the boundary used in A3.
+  freed, then the 6 MiB + 68 KiB pool is allocated and imported. One probe
+  read per MiB runs with the `xdev_ext:native_event` tracepoint enabled; its
+  `peer_dma_span` events give the DMA address the controller received for
+  every 4 KiB page. There must be at least one DMA discontinuity inside the
+  window [4 MiB + 128 KiB, end - 64 KiB]; the first one is the boundary used
+  in A3. (`/proc/self/pagemap` cannot be used: the system heap maps the
+  buffer with `remap_pfn_range`, and pagemap reports such ranges as holes.)
 - A: one 1 MiB read (the NVMe tracepoints must show one 2048-LBA command),
   three 1 MiB reads in one batch out of address order (three commands, at
-  least two outstanding at once), and three reads across the physical
+  least two outstanding at once), and three reads across the DMA
   boundary and inside page tails. The whole pool is compared in the guest
   and dumped to the destination disk.
 - B: 40 random disjoint read targets in shuffled order, two of them reading
@@ -65,8 +69,8 @@ the landed bytes against it.
 
 `peer_batch_kvm.sh` builds no kernel. It takes a kernel `O=` directory with
 `CONFIG_DMABUF_HEAPS_SYSTEM=y`, `CONFIG_XDEV_EXT_PEER_DMABUF=y`,
-`CONFIG_DEBUG_FS=y`, `CONFIG_EVENT_TRACING=y` and
-`CONFIG_PROC_PAGE_MONITOR=y`, and a clean canonical checkout that differs
+`CONFIG_DEBUG_FS=y` and `CONFIG_EVENT_TRACING=y`, and a clean canonical
+checkout that differs
 from the build's recorded commit only in test inputs outside the kernel:
 
     bash tests/storage/nvme/peer_batch/peer_batch_kvm.sh --scratch PRIVATE_0700_DIR \

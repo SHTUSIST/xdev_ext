@@ -9,11 +9,12 @@
  * Controllers: SRC (read source), DST (private destination), ERR (a private
  * image whose QEMU block backend fails reads of one sector). The pool P is
  * 6 MiB + 68 KiB, allocated while 1 MiB holes fragment free memory so that
- * its pages form several physically separate runs (checked with pagemap).
+ * its pages form several separate DMA runs; probe reads with the xdev_ext
+ * native tracepoint give each page's device-visible address.
  * Phases, one boot (the host validator duplicates this plan, it does not
  * import it):
  *   A  1 MiB read as one command; three 1 MiB reads in one batch; a request
- *      across a physical discontinuity and two page-tail requests
+ *      across a DMA discontinuity and two page-tail requests
  *   B  40 random disjoint read targets, shuffled, two duplicate source LBAs
  *   C  1 MiB write and 32 random disjoint LBA write targets
  *   D  refusals: no command may reach any controller, nothing changes
@@ -143,24 +144,6 @@ static void cpu_access(int buf, unsigned char *data, uint64_t len, bool write)
 	sync.flags = DMA_BUF_SYNC_END | (write ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ);
 	CHECK(!ioctl(buf, DMA_BUF_IOCTL_SYNC, &sync), "DMA_BUF_IOCTL_SYNC end");
 	CHECK(!munmap(map, len), "drop CPU mapping before device work");
-}
-/* Physical frame of every 4 KiB page of the dma-buf (root reads pagemap PFNs). */
-static void physical_pages(int buf, uint64_t len, uint64_t *pfn)
-{
-	unsigned char *map = mmap(NULL, len, PROT_READ, MAP_SHARED, buf, 0);
-	uint64_t i, pages = len / PAGE;
-	int pm = open_ok("/proc/self/pagemap", O_RDONLY);
-	CHECK(map != MAP_FAILED, "CPU mapping for pagemap");
-	for (i = 0; i < pages; i++) {
-		volatile unsigned char touch = map[i * PAGE];
-		uint64_t entry = 0;
-		(void)touch;
-		CHECK(pread(pm, &entry, 8, (off_t)(((uintptr_t)map / PAGE + i) * 8)) == 8, "pagemap entry");
-		if (!(entry >> 63) || !(entry & ((1ULL << 55) - 1))) CHECK(0, "pagemap reports a present page frame");
-		pfn[i] = entry & ((1ULL << 55) - 1);
-	}
-	close(pm);
-	CHECK(!munmap(map, len), "drop pagemap mapping");
 }
 static int reg(int ctl, int buf, uint64_t len, uint64_t *generation)
 {
@@ -309,10 +292,45 @@ static void refused(int ng, int expected, int ctrl_to_watch, const char *msg)
 	CHECK(!t.setups[SRC] && !t.setups[DST] && !t.setups[ERR], "refused batch: no command reached any controller");
 }
 
+/* Device-visible DMA address of every 4 KiB page of the pool: one probe read
+ * per MiB with the xdev_ext native tracepoint, whose peer_dma_span events
+ * carry each lease's address as the controller was given it. */
+static void dma_layout(int ng, int alloc, uint64_t gen, uint64_t *dma)
+{
+	static char text[1 << 22];
+	uint64_t off, pages = P_BYTES / PAGE, seen = 0, bad = 0;
+	write_file(TRACE "/events/xdev_ext/native_event/enable", "1");
+	for (off = 0; off < P_BYTES; off += MIB) {
+		uint64_t len = P_BYTES - off < MIB ? P_BYTES - off : MIB;
+		char *line, *save = NULL;
+		ssize_t n, got = 0;
+		int fd, ret;
+		batch_init(alloc, gen, false, 1); desc(0, off, 0, (uint32_t)len);
+		trace_begin(); ret = run(ng);
+		CHECK(!ret && batch.completed == 1, "layout probe read of one MiB of the pool");
+		fd = open_ok(TRACE "/trace", O_RDONLY);
+		while (got < (ssize_t)sizeof(text) - 1 && (n = read(fd, text + got, sizeof(text) - 1 - got)) > 0) got += n;
+		close(fd);
+		text[got] = 0;
+		CHECK(got < (ssize_t)sizeof(text) - 1 && !strstr(text, "LOST"), "layout probe trace complete");
+		for (line = strtok_r(text, "\n", &save); line; line = strtok_r(NULL, "\n", &save)) {
+			const char *b = strstr(line, " bytes="), *a = strstr(line, " aux="), *d = strstr(line, " native_user_data=");
+			unsigned long long bytes = 0, aux = 0, addr = 0, k;
+			if (!strstr(line, "phase=peer_dma_span ")) continue;
+			if (!b || !a || !d || sscanf(b, " bytes=%llu", &bytes) != 1 || sscanf(a, " aux=%llu", &aux) != 1 ||
+			    sscanf(d, " native_user_data=%llu", &addr) != 1 || aux + bytes > len || (aux % PAGE) ||
+			    !bytes || (bytes % PAGE) || (addr % PAGE)) { bad++; continue; }
+			for (k = 0; k < bytes; k += PAGE) { dma[(off + aux + k) / PAGE] = addr + k; seen++; }
+		}
+	}
+	write_file(TRACE "/events/xdev_ext/native_event/enable", "0");
+	CHECK(!bad && seen == pages, "every pool page has one device-visible DMA address");
+}
+
 int main(int argc, char **argv)
 {
 	int srcb, srcng, dstb, dstng, errb, errng, ctl, heap, holes[HOLES], pbuf, qbuf, palloc, qalloc, ret;
-	uint64_t pgen, qgen, *pfn, boundary = 0, i, vm0, vm1, vm2;
+	uint64_t pgen, qgen, *dma, boundary = 0, i, vm0, vm1, vm2;
 	unsigned long pino, qino;
 	struct trace_view t;
 	struct rlimit unlimited = {RLIM_INFINITY, RLIM_INFINITY};
@@ -352,8 +370,8 @@ int main(int argc, char **argv)
 	}
 	src_image = malloc(SRC_BYTES); err_image = malloc(ERR_BYTES); dst_expect = malloc(DST_BYTES);
 	p_expect = malloc(P_BYTES); q_expect = malloc(Q_BYTES); scratch = malloc(DST_BYTES);
-	pfn = calloc(P_BYTES / PAGE, sizeof(*pfn));
-	CHECK(src_image && err_image && dst_expect && p_expect && q_expect && scratch && pfn, "verification buffers");
+	dma = calloc(P_BYTES / PAGE, sizeof(*dma));
+	CHECK(src_image && err_image && dst_expect && p_expect && q_expect && scratch && dma, "verification buffers");
 	read_all(srcb, src_image, SRC_BYTES, 0);
 	read_all(dstb, dst_expect, DST_BYTES, 0);
 	for (i = 0; i < DST_BYTES; i++) if (dst_expect[i] != GUARD) break;
@@ -374,22 +392,22 @@ int main(int argc, char **argv)
 	for (i = 0; i < HOLES; i += 2) CHECK(!close(holes[i]), "free every other 1 MiB block");
 	pbuf = heap_alloc(heap, P_BYTES, &pino);
 	CHECK(pbuf >= 0, "system heap allocates the 6 MiB + 68 KiB pool");
-	physical_pages(pbuf, P_BYTES, pfn);
-	for (i = 1, runs = 1; i < P_BYTES / PAGE; i++) {
-		if (pfn[i] == pfn[i - 1] + 1) continue;
-		runs++;
-		if (!boundary && i * PAGE >= 4 * MIB + 128 * KIB && i * PAGE <= P_BYTES - 64 * KIB) boundary = i * PAGE;
-	}
-	printf("OBSERVE case=pool physical_runs=%u boundary=%llu\n", runs, (unsigned long long)boundary);
-	CHECK(boundary, "the pool has a physical discontinuity inside the frozen window");
-	for (i = 0; i < P_BYTES; i++) p_expect[i] = pattern_p(i);
-	cpu_access(pbuf, p_expect, P_BYTES, true);
 	ctl = open_ok("/dev/xdev_ext_peer", O_RDWR);
 	vm0 = vmpin();
 	palloc = reg(ctl, pbuf, P_BYTES, &pgen);
 	CHECK(palloc >= 0 && pgen, "REGISTER imports the pool dma-buf");
 	vm1 = vmpin();
 	CHECK(vm1 - vm0 == P_BYTES, "VmPin rises by exactly the pool while registered");
+	dma_layout(srcng, palloc, pgen, dma);
+	for (i = 1, runs = 1; i < P_BYTES / PAGE; i++) {
+		if (dma[i] == dma[i - 1] + PAGE) continue;
+		runs++;
+		if (!boundary && i * PAGE >= 4 * MIB + 128 * KIB && i * PAGE <= P_BYTES - 64 * KIB) boundary = i * PAGE;
+	}
+	printf("OBSERVE case=pool dma_runs=%u boundary=%llu\n", runs, (unsigned long long)boundary);
+	CHECK(boundary, "the pool has a DMA discontinuity inside the frozen window");
+	for (i = 0; i < P_BYTES; i++) p_expect[i] = pattern_p(i);
+	cpu_access(pbuf, p_expect, P_BYTES, true);
 
 	/* A1: one 1 MiB read is one native command. */
 	batch_init(palloc, pgen, false, 1); desc(0, 0, 4096, 1 << 20);
@@ -409,7 +427,7 @@ int main(int argc, char **argv)
 	      "three 2048-LBA commands, one per request");
 	CHECK(t.max_out >= 2, "commands of one batch were in flight together");
 	for (i = 0; i < 3; i++) expect_read(p_expect, src_image, i);
-	/* A3: across a physical discontinuity, and page tails. */
+	/* A3: across a DMA discontinuity, and page tails. */
 	batch_init(palloc, pgen, false, 3);
 	desc(0, boundary - 33280, 24576, 65536); desc(1, 4 * MIB + 1024, 24832, 3072); desc(2, 4 * MIB + 7680, 24840, 4096);
 	plan_line("A3"); trace_begin(); ret = run(srcng); trace_end(&t, SRC);

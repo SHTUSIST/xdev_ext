@@ -63,7 +63,7 @@ print('source_commit=' + new)
 print('changed_since_build=' + ' '.join(changed))
 PYDELTA
 required=(DMABUF_HEAPS DMABUF_HEAPS_SYSTEM XDEV_EXT_PEER_DMABUF DMA_SHARED_BUFFER DEBUG_FS XDEV_EXT_MECH
-	BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS PROC_PAGE_MONITOR TRACING EVENT_TRACING PCI_MSI SERIAL_8250_CONSOLE)
+	BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS TRACING EVENT_TRACING PCI_MSI SERIAL_8250_CONSOLE)
 for symbol in "${required[@]}"; do
 	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
 done

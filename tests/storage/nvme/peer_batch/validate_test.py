@@ -18,7 +18,7 @@ BOUNDARY = 5 * v.MIB
 
 def correct_log(issued=4, extra=()):
     lines = ['TAP version 13', 'OBSERVE case=queue max_hw_sectors_kb=1024',
-             'OBSERVE case=pool physical_runs=9 boundary=%d' % BOUNDARY]
+             'OBSERVE case=pool dma_runs=9 boundary=%d' % BOUNDARY]
     obs = {'A1': 'setups=1 lens=2047 slba=4096', 'A2': 'setups=3 max_outstanding=3 completion_inversions=1',
            'B': 'setups=40 max_outstanding=17 completion_inversions=9',
            'C2': 'setups=32 max_outstanding=12 completion_inversions=4',
@@ -114,7 +114,7 @@ class Oracle(unittest.TestCase):
         replace = [
             ('ok 3 - ', 'not ok 3 - '), ('ok 3 - A3', 'ok 3 - A3 # SKIP'), ('1..', '1..9'),
             (v.FINAL, v.FINAL + ' extra'), ('XDEV_EXT_PEER_BATCH_GUEST_EXIT=0', 'XDEV_EXT_PEER_BATCH_GUEST_EXIT=1'),
-            ('max_hw_sectors_kb=1024', 'max_hw_sectors_kb=512'), ('physical_runs=9', 'physical_runs=1'),
+            ('max_hw_sectors_kb=1024', 'max_hw_sectors_kb=512'), ('dma_runs=9', 'dma_runs=1'),
             ('boundary=%d' % BOUNDARY, 'boundary=%d' % (BOUNDARY + 512)),
             ('boundary=%d' % BOUNDARY, 'boundary=%d' % (4 * v.MIB)),
             ('setups=1 lens=2047', 'setups=2 lens=2047'), ('lens=2047', 'lens=1023'),

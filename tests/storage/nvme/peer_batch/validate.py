@@ -206,8 +206,8 @@ def expected_regions(seen, source, error):
     boundary = number(seen, 'pool', 'boundary')
     if boundary % 4096 or not 4 * MIB + 128 * KIB <= boundary <= P_BYTES - 64 * KIB:
         raise ValueError('discontiguity boundary outside the frozen window')
-    if number(seen, 'pool', 'physical_runs') < 2:
-        raise ValueError('pool has no physical discontinuity')
+    if number(seen, 'pool', 'dma_runs') < 2:
+        raise ValueError('pool has no DMA discontinuity')
     batches = plans(boundary)
     by_case = {case: descs for case, _, descs in batches}
     pool = bytearray(pattern('p', P_BYTES))
@@ -289,7 +289,7 @@ def validate(images, log):
         raise ValueError('kernel console section missing')
     check_console(console)
     return dict(checks=checks, boundary=number(seen, 'pool', 'boundary'),
-                physical_runs=number(seen, 'pool', 'physical_runs'),
+                dma_runs=number(seen, 'pool', 'dma_runs'),
                 max_outstanding=dict(A2=number(seen, 'A2', 'max_outstanding'), B=number(seen, 'B', 'max_outstanding'),
                                      C2=number(seen, 'C2', 'max_outstanding')),
                 completion_inversions=dict(A2=number(seen, 'A2', 'completion_inversions'),
