@@ -93,6 +93,8 @@ CANONICAL_ENTRYPOINTS = {
     "tests/compute/user_stage/user_stop_origin_test.py": ("--output",),
     "tests/network/xdomain/dmabuf_requester/run.py": ("--output",),
     "tests/network/xdomain/chain/run.py": ("--output",),
+    "tests/network/xdomain/chain/host_run.py": ("--output",),
+    "tests/core/requester_host/run.py": ("--output",),
 }
 
 REJECT_OUTPUT = re.compile(

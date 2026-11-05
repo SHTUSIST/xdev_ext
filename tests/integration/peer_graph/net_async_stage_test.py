@@ -100,6 +100,16 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_
 { (void)rq; (void)st; (void)pdev; (void)flags; assert(!"NET unexpectedly requested admission"); return -EINVAL; }
 void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
 { (void)rq; assert(!"NET unexpectedly released admission"); }
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+                                 struct pci_dev *pdev)
+{ (void)rq; (void)st; (void)pdev; assert(!"NET unexpectedly mapped host pages"); return -EINVAL; }
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq)
+{ (void)rq; assert(!"NET unexpectedly released a host-page mapping"); }
+int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
+                                  enum dma_data_direction dir, u64 *dma)
+{ (void)rq; (void)off; (void)len; (void)dir; (void)dma; assert(!"NET unexpectedly leased a host page"); return -EINVAL; }
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool quiesced)
+{ (void)rq; (void)dma; (void)len; (void)quiesced; assert(!"NET unexpectedly released a host page"); }
 '''
 MAIN = r'''
 static struct xdev_ext_mech_session session;

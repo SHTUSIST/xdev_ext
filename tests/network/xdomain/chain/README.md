@@ -119,6 +119,10 @@ once, in the stage direction, without CPU sync. Four cases run only here:
 | `host_unknown_retained` | host 1's TX descriptors never complete, then STOP: after the one-second STOP bound the batch ends with unknown device access, its frames are sequestered, its NHI host leases are retained, the NHI mapping is never unmapped, nothing is synchronized for the CPU, and the XDOMAIN stage's checked unbind returns `-EIO` |
 | `host_misaligned_refused` | a UMEM registered 256 bytes into a page: CREATE fails with the requester's `-EINVAL` on both hosts and nothing is mapped |
 
+`host_run.py` is the same as `run.py --pool host`; the shared XDOMAIN host
+runner (`tools/ci/check_xdomain_host.py`) runs it after `run.py`, because the
+runner passes only `--source-root` and `--output` to an entry point.
+
 ## Cases
 
 | Case | Requirement |
