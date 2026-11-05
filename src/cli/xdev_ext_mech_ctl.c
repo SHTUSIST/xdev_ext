@@ -747,12 +747,27 @@ static bool ctl_socket_rx_report(char *line, size_t size,
 		const struct xdev_ext_mech_stats *s, __u64 groups,
 		__u32 frames, __u32 pool_frames, __u32 nr_stages)
 {
-	bool pass = s->state == XDEV_EXT_MECH_SESSION_ACTIVE &&
+	__u64 total_frames;
+	bool loans_ok = false, pass;
+	__u32 i;
+
+	if (groups && frames && pool_frames && groups <= UINT64_MAX / frames) {
+		total_frames = groups * frames;
+		if (pool_frames <= total_frames && !(pool_frames % frames)) {
+			/* Idle returns keep earlier recycle events. At least the last full
+			 * group publishes directly; an all-initial pool never recycles.
+			 */
+			loans_ok = pool_frames == total_frames ? !s->recycled :
+				s->recycled >= total_frames - pool_frames &&
+				s->recycled <= total_frames - frames &&
+				!(s->recycled % frames);
+		}
+	}
+	pass = loans_ok && s->state == XDEV_EXT_MECH_SESSION_ACTIVE &&
 		s->batches_done == groups && !s->batches_abort && !s->last_err &&
 		!s->rejects && !s->protocol_err && !s->held &&
-		s->published == pool_frames && s->recycled == groups * frames - pool_frames &&
+		s->published == pool_frames &&
 		xdev_ext_mech_ctl_settled(s);
-	__u32 i;
 
 	for (i = 0; i < nr_stages; i++)
 		pass = pass && s->submitted[i] == groups && s->completed[i] == groups;
