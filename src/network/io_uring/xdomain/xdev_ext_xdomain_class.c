@@ -312,6 +312,12 @@ static const struct xdev_ext_net_member xd_member = {
 	.dev = &xdev_ext_xd_dev_ops, .admit = true, .result = xd_result,
 	.local = xd_local, .withdraw = xd_withdraw, .link_fail = xd_link_fail,
 };
+/* The ring's IOU_UMEM: the requester maps its pages for the NHI. */
+static const struct xdev_ext_net_member xd_member_host = {
+	.lease_kind = XDEV_EXT_NET_LEASE_HOST_DMA,
+	.dev = &xdev_ext_xd_dev_ops, .admit = true, .result = xd_result,
+	.local = xd_local, .withdraw = xd_withdraw, .link_fail = xd_link_fail,
+};
 
 static void xdev_ext_xd_class_fill_info(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, void *out)
 {
@@ -2124,11 +2130,12 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	struct xdev_ext_rel_cfg cfg;
 	u32 depth = xdev_ext_mech_session_depth(st->s), elems = xdev_ext_xd_layout_elems(l), exact = 0;
 	u32 window = u->arg1 >> XDEV_EXT_XDOMAIN_WINDOW_SHIFT;
+	u32 pool_kind = xdev_ext_mech_session_pool(st->s)->kind;
 	unsigned long flags;
 	int ret;
 
 	channel.arg1 = (u32)u->arg1;
-	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER ||
+	if ((pool_kind != XDEV_EXT_MECH_POOL_PEER && pool_kind != XDEV_EXT_MECH_POOL_IOU_UMEM) ||
 	    (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE && st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)) return -EOPNOTSUPP;
 	if (st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE && st->index) return -EOPNOTSUPP;
 	if (u->flags & XDEV_EXT_XDOMAIN_F_EARLY) {
@@ -2152,7 +2159,8 @@ static int xdev_ext_xd_class_bind(struct xdev_ext_mech_stage *st, const struct x
 	xs->stream = st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE ? 0 : xdev_ext_mech_session_id(st->s);
 	xs->facts = kvcalloc(depth, sizeof(*xs->facts), GFP_KERNEL);
 	if (!xs->facts) { kfree(xs); return -ENOMEM; }
-	ret = xdev_ext_netfam_init(&xs->ns, st, &xd_member, st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE, 0);
+	ret = xdev_ext_netfam_init(&xs->ns, st, pool_kind == XDEV_EXT_MECH_POOL_PEER ? &xd_member : &xd_member_host,
+				   st->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE, 0);
 	if (ret) goto free;
 	st->priv = xs;
 	ret = xdev_ext_netfam_attach(&xs->ns, &channel, u->flags & XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED ? XDEV_EXT_ADMIT_F_ALLOW_UNVERIFIED : 0);
@@ -2198,6 +2206,13 @@ static void xdev_ext_xd_class_unbind(struct xdev_ext_mech_stage *st)
 	struct xdev_ext_xd_stage *xs = st->priv;
 	xdev_ext_netfam_fini(&xs->ns); st->priv = NULL; kvfree(xs->facts); kfree(xs);
 }
+/* Release decision: host pages the NHI may still access keep the session,
+ * its UMEM pins and the mapping (unknown => never reuse, never unmap). */
+static int xdev_ext_xd_class_unbind_checked(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	return xs && xs->ns.admitted ? xdev_ext_requester_host_settled(&xs->ns.rq) : 0;
+}
 static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
  .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_XDOMAIN],
 	.stage_diag = xdev_ext_xd_class_stage_diag,
@@ -2206,6 +2221,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
 	.info_size = sizeof(struct xdev_ext_xdomain_mech_info), .cqe_size = sizeof(struct xdev_ext_xdomain_mech_cqe), .cqe_cap = 1,
 	.batch_priv_size = sizeof(struct xdev_ext_xd_batch), .batch_cookie_size = sizeof(struct xdev_ext_xd_cookie), .owner = THIS_MODULE,
 	.bind = xdev_ext_xd_class_bind, .unbind = xdev_ext_xd_class_unbind, .fill_info = xdev_ext_xd_class_fill_info,
+	.unbind_checked = xdev_ext_xd_class_unbind_checked,
 	.default_build = xdev_ext_xd_class_default_build, .validate = xdev_ext_xd_class_validate, .submit = xdev_ext_xd_class_submit,
 	.fill_cqe = xdev_ext_xd_class_fill_cqe, .mark_dead = xdev_ext_xd_class_mark_dead,
 	.batch_end = xdev_ext_xd_class_batch_end, .batch_release = xdev_ext_xd_class_batch_release,
