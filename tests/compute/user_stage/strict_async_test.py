@@ -38,7 +38,8 @@ CASES = ('legacy-stop', 'strict-bind-peer', 'strict-bind-cpu', 'stop-late',
          'peer-reject-varlen', 'peer-reject-delta', 'ticket-reuse',
          'external-stale', 'external-nonstrict', 'peer-admitted', 'peer-noack',
          'peer-stale', 'peer-generation', 'peer-producer-error',
-         'peer-producer-unknown', 'peer-stop-late-stale')
+         'peer-producer-unknown', 'peer-stop-late-stale', 'peer-held-stale',
+         'peer-held-unbind')
 
 
 def generate():

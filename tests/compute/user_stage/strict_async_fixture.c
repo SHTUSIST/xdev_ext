@@ -169,7 +169,7 @@ static int exercise(const char *mode) {
   CHECK(real_setup(strict,true,false,false)==-EOPNOTSUPP,"PEER USER requires strict, fixed lengths and zero delta");return failures!=0;
  }
  bool legacy=!strcmp(mode,"legacy-stop")||!strcmp(mode,"external-nonstrict"),peer=!strcmp(mode,"strict-bind-peer")||!strncmp(mode,"peer-",5);
- REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")||!strcmp(mode,"peer-admitted")),"specified USER mode binds through production bind");
+ REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")||!strcmp(mode,"peer-admitted")||!strcmp(mode,"peer-held-stale")),"specified USER mode binds through production bind");
  if(!strncmp(mode,"strict-bind",11))return failures!=0;
  if(!strcmp(mode,"peer-stale")||!strcmp(mode,"peer-generation")){
   /* VRAM frames the producer (NVMe READ) completed into; the region was
@@ -285,9 +285,30 @@ static int exercise(const char *mode) {
   peer_region_err=-ESTALE;xdev_ext_mech_sess_stop(&session.ss);progress();drain();
   CHECK(us->nr_held==1&&held_out_pending(b)&&!ends,"invalidation and close do not end the GPU's custody");
   jiffies+=999;post(0,r.ticket,0);progress();drain();
-  CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESHUTDOWN,"late last-use completion ends the closed batch");
+  /* The region's own error, not the stop reason: without the invalidation
+   * this is plain stop-late on a PEER pool and ends -ESHUTDOWN. */
+  CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESTALE,"late last-use completion after invalidation ends the batch with the region's -ESTALE");
   CHECK(!attempts[2],"late completion after invalidation and close never submits downstream");
   for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"proved last use is not isolated as unknown");
+ }else if(!strcmp(mode,"peer-held-stale")){
+  /* d2 shape. The region is invalidated (provider stale, quarantine by
+   * another lease holder) while the GPU holds the frames; the GPU then
+   * reports last use with status 0 and the kernel POLL reaps it. */
+  peer_region_err=-ESTALE;
+  post(0,r.ticket,0);xdev_ext_mech_poll_work(&session.poll_work.work);drain();
+  CHECK(!accepts[2]&&!attempts[2],"batch whose VRAM was invalidated during GPU custody is never passed downstream");
+  CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESTALE,"invalidation during GPU custody ends the batch with the region's -ESTALE");
+  CHECK(us->nr_held==0,"status-0 done still proves last use and ends the GPU's custody");
+  for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"proved last use after invalidation is not isolated as unknown");
+ }else if(!strcmp(mode,"peer-held-unbind")){
+  /* The GPU borrows VRAM frames without a region lease, so the region's own
+   * drain count never sees this custody. What keeps the pool, its authority
+   * file and the allocation file (and so the pinned region) alive is this
+   * refusal: session release quarantines everything on a nonzero answer. */
+  CHECK(session.st[1].cls->unbind_checked&&session.st[1].cls->unbind_checked(&session.st[1])==-EBUSY,"session cannot release a VRAM pool while the GPU holds its frames");
+  post(0,r.ticket,0);progress();drain();
+  REQUIRE(accepts[2]==1,"last-use done advances the batch");
+  CHECK(session.st[1].cls->unbind_checked(&session.st[1])==0,"after proven last use the USER stage permits release");
  }else if(!strcmp(mode,"peer-admitted")){
   /* The d2 shape: VRAM pool, strict USER, kernel POLL; no KICK, no user thread. */
   post(0,r.ticket,0);xdev_ext_mech_poll_work(&session.poll_work.work);drain();
