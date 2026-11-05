@@ -323,5 +323,45 @@ class HarnessWiringTest(unittest.TestCase):
         self.assertNotRegex(self.script, r"-netdev\s+(?:tap|bridge|user)[,\s]")
 
 
+class BusyboxAppletProbe(unittest.TestCase):
+    """The host check for busybox's arp applet runs under set -euo pipefail.
+
+    A reader that stops at the first match (grep -q) can make busybox --list
+    die of SIGPIPE while it still writes; pipefail then reports a missing
+    applet and the harness exits before any guest boots.
+    """
+
+    def probe(self, listing, *, fail_after=False):
+        script = HARNESS.read_text()
+        lines = [line.strip() for line in script.splitlines() if 'busybox lacks the arp applet' in line]
+        self.assertEqual(len(lines), 1)
+        with tempfile.TemporaryDirectory(prefix='xdev-busybox-probe-') as directory:
+            fake = Path(directory) / 'busybox'
+            # The applet name comes first, then output keeps flowing after a
+            # pause: an early-exiting reader leaves the writer a closed pipe.
+            fake.write_text('#!/bin/sh\n[ "$1" = --list ] || exit 2\n' +
+                            ''.join(f'echo {name}\n' for name in listing) +
+                            'sleep 0.3\ni=0\nwhile [ $i -lt 4000 ]; do echo filler$i; i=$((i+1)); done\n' +
+                            ('exit 1\n' if fail_after else ''))
+            fake.chmod(0o755)
+            body = lines[0].replace('/bin/busybox', str(fake))
+            return subprocess.run(['bash', '-c', 'set -euo pipefail\n' + body + '\necho PROBE_OK'],
+                                  text=True, capture_output=True, timeout=30)
+
+    def test_present_applet_survives_a_writer_still_writing(self):
+        run = self.probe(['acpid', 'arch', 'arp', 'ash'])
+        self.assertEqual((run.returncode, run.stdout), (0, 'PROBE_OK\n'), run.stderr)
+
+    def test_missing_applet_still_fails(self):
+        run = self.probe(['acpid', 'arch', 'ash'])
+        self.assertEqual(run.returncode, 1)
+        self.assertIn('FAIL busybox lacks the arp applet', run.stderr)
+
+    def test_failing_listing_still_fails(self):
+        run = self.probe(['arp'], fail_after=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertNotIn('PROBE_OK', run.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

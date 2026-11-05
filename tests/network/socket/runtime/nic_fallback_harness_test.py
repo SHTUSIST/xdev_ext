@@ -86,8 +86,9 @@ class NicFallbackHarness(unittest.TestCase):
                         s.index('/bin/busybox arp -i eth0 -s 192.0.2.2'))
         self.assertLess(s.index('/bin/busybox arp -i eth0 -d 192.0.2.2'),
                         s.index('ip addr del 192.0.2.1/24 dev eth0'))
-        # The host refuses to build an image whose busybox lacks the applet.
-        self.assertIn("/bin/busybox --list | grep -Fxq arp", self.text)
+        # The host refuses to build an image whose busybox lacks the applet;
+        # grep reads the whole list so pipefail never sees busybox's SIGPIPE.
+        self.assertIn("/bin/busybox --list | grep -Fx arp >/dev/null ||", self.text)
 
     def test_host_checks_marker(self):
         self.assertIn('grep -Fxq "XDEV_EXT_ZC_NIC_FALLBACK=PASS socket_groups=$GROUP_COUNT', self.text)
