@@ -615,8 +615,9 @@ static void proto_stray_rts_then_pair(unsigned prog)
  safety(w);
 }
 /* A stray version-1 CTS reached an early sender that had not started pairing
- * (its first PAIR_DUE waited for control room). Pairing drops it, so the
- * paired sender's program never sees a version-1 CTS it cannot answer. */
+ * (its first PAIR_DUE waited for control room); it names a group the sender
+ * never announced. The sender still pairs and transfers, and its program never
+ * takes the record for a CTS. */
 static void proto_stray_cts_then_pair(void)
 {
  struct stack_config c = geometry();
@@ -642,7 +643,7 @@ static void proto_stray_cts_then_pair(void)
  CHECK(count(w, STACK_EV_CONTROL_TX, 0, PROTO_V2_CONFIRM) >= 1, "the endpoints pair");
  for (size_t i = mark; i < world->logs; i++)
   if (world->log[i].kind == STACK_EV_PROTOCOL && world->log[i].endpoint == 0)
-   CHECK(world->log[i].control_type != 4, "the paired sender's program is never offered the version-1 CTS");
+   CHECK(world->log[i].control_type != 4, "the version-1 CTS never reaches the sender's program as a CTS");
  CHECK(stack_start(w, 1, c.first_seq, 0) == 0, "the receiver arms one batch");
  pump(w, 1000000);
  int started = stack_start(w, 0, c.first_seq, 0);
