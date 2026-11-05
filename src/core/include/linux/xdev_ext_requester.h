@@ -33,9 +33,13 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester *rq);
  * boundaries (-EINVAL). */
 int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
 				 struct xdev_ext_mech_stage *st, struct pci_dev *pdev);
-/* Process context, after device use has ended: unmap the host mapping and
+/* Process context, with no outstanding lease and no unknown end (that is,
+ * xdev_ext_requester_host_settled() returns 0): unmap the host mapping and
  * release the requester ref.  A mapping with an outstanding lease or an
- * unknown end is kept for good, never unmapped, with its own device ref. */
+ * unknown end warns, as the caller skipped that check: it is kept for good,
+ * never unmapped, with its own device ref, but its pages stay pinned only
+ * while the caller keeps the pool (the core keeps it by quarantining the
+ * session). */
 void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq);
 
 /* Worker, host mapping: the requester's DMA address of pool bytes
