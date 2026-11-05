@@ -130,6 +130,27 @@ MUTATIONS = {
     # DMA-BUF pool only: a lease uses whichever attachment was made first.
     'dmabuf-lease-first-mapping': dict(case='chain_same_worker', pool='dmabuf', edits=[
         ('io_uring/xdev_ext_peer_fd.c', '  if (m->peer == peer) goto acquire;', '  goto acquire;')]),
+    # --pool host (set automatically): each makes one host-page requirement false.
+    'host-release-always-quiesced': dict(case='host_unknown_retained', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c', 'lease->u.hdma.len, quiesced);', 'lease->u.hdma.len, true);')]),
+    'host-unbind-checked-passes': dict(case='host_unknown_retained', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         'return xs && xs->ns.admitted ? xdev_ext_requester_host_settled(&xs->ns.rq) : 0;', 'return 0;')]),
+    'host-no-device-sync': dict(case='host_sync_order', pool='host', edits=[
+        ('io_uring/family/xdev_ext_requester.c',
+         '\t\tdma_sync_single_for_device(&h->pdev->dev, addr, len, h->dir);\n', '\t\t;\n')]),
+    'host-no-cpu-sync': dict(case='host_sync_order', pool='host', edits=[
+        ('io_uring/family/xdev_ext_requester.c',
+         '\t\tdma_sync_single_for_cpu(&h->pdev->dev, dma, len, DMA_FROM_DEVICE);\n', '\t\t;\n')]),
+    'host-post-peer-address': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_ring.c', '.buffer_phy = xdev_ext_net_elem_dma(&e[i]),',
+         '.buffer_phy = e[i].lease.u.peer.lease.dma_address,')]),
+    'host-lease-wrong-frame': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c', 'ret = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,',
+         'ret = xdev_ext_requester_host_lease(&ns->rq, ns->rx ? off : off ^ 4096, buf_len,')]),
+    'host-peer-member': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         'pool_kind == XDEV_EXT_MECH_POOL_PEER ? &xd_member : &xd_member_host', '&xd_member')]),
     'tx-wrong-frame': dict(case='chain_same_worker', edits=[
         ('io_uring/family/xdev_ext_netfam.c',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), off, buf_len,',
