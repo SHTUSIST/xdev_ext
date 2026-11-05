@@ -95,7 +95,10 @@ static struct xdev_ext_xd_fact *xd_fact(struct xdev_ext_xd_stage *xs, struct xde
  * authenticated peer has posted and advertised by CTS credit. A v2-envelope
  * stage starts unbound; it is paired once pairing started, and RTS/CTS once its
  * program announced, posted on an RTS or declined pairing. Never both.
- * ns.lock held, or exclusive bind/worker context.
+ * Pairing starts only on the stage's worker (SEND_HELLO, SEND_CHALLENGE, under
+ * ns.lock), and a paired state only moves to another paired state. So read
+ * xd_paired() under ns.lock, in exclusive bind context, on the worker, or in
+ * xd_post, which runs on the worker or posts for a bound pair.
  */
 static bool xd_paired(const struct xdev_ext_xd_stage *xs)
 { return xs->early && xs->pair_state != XDEV_EXT_XDP_PAIR_IDLE; }
@@ -1587,6 +1590,22 @@ static int xd_early_tx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_
 	xd_fact(xs, s)->reserved = true; xd_fact(xs, s)->cts_received = true;
 	return 0;
 }
+/* A receiver starts pairing: from now on the link and class_ctl drop v1
+ * control to it, and the RTS records it queued before are dropped too, as the
+ * link would have dropped them. None was answered: an RTS the program posted
+ * on latched RTS/CTS, which forbids pairing, and a refused one is gone.
+ * ns.lock held. */
+static void xd_drop_v1_locked(struct xdev_ext_xd_stage *xs)
+{
+	u32 k;
+	for (k = 0; k < xs->rts_count; k++)
+		if (xs->rts[k].admission) {
+			xs->rts[k].admission = false;
+			xdev_ext_mech_stage_native_put(xs->ns.st);
+		}
+	xs->rts_count = 0;
+	xs->ctl_count = 0;
+}
 static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xdomain_proto_info_v2 *i,
 		const struct xdev_ext_xdomain_proto_verdict *v)
 {
@@ -1627,11 +1646,11 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		if (i->base.event >= XDEV_EXT_XDP_EV_PAIR_DUE && act != XDEV_EXT_XDP_ACT_WAIT &&
 		    act != XDEV_EXT_XDP_ACT_FAIL_LINK) return -EPROTO;
 		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST) {
-			/* The first RTS/CTS binding latches the choice. A paired stage
-			 * takes no new v1 control and cannot encode an RTS: TX_ANNOUNCE
-			 * fails, TX_POST and WITHDRAW find no announced slot, and an RTS
-			 * queued before pairing can still be refused (settling its
-			 * sequence) but not posted on, its stream not being the pair's. */
+			/* The first RTS/CTS binding latches the choice. A paired
+			 * receiver holds no RTS (pairing dropped them, the link drops new
+			 * ones), and a paired stage cannot encode an RTS: TX_ANNOUNCE
+			 * fails, and RX_POST, TX_POST and WITHDRAW find no RTS or
+			 * announced slot. */
 			spin_lock_irqsave(&xs->ns.lock, flags);
 			if (!xd_paired(xs)) {
 				xs->rts_cts = true;
@@ -1689,7 +1708,7 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		m.tx_bind = xs->tx_bind ? xs->tx_bind : in->tx_bind; m.type = XDEV_EXT_XD_CHALLENGE;
 		ret = xdev_ext_xd_msg_send_v2(ep->xl, ep, &m);
 		if (!ret) { xs->tx_bind = xs->stream = m.tx_bind; xs->pair_state = XDEV_EXT_XDP_PAIR_CHALLENGE_SENT;
-			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); }
+			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); xd_drop_v1_locked(xs); }
 		break;
 	case XDEV_EXT_XDP_ACT_SEND_CONFIRM:
 		if (xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_CHALLENGE || !in ||
