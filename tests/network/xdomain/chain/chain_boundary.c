@@ -183,6 +183,15 @@ void stack_record_dispatch(struct xdev_ext_mech_stage *st, const struct xdev_ext
 		.session = chain_real_session_id(st->s) });
 	xdev_ext_xd_class_ctl(st, m);
 }
+void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m);
+void chain_record_dispatch_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m);
+void chain_record_dispatch_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m)
+{
+	chain_record((struct chain_event){ .kind = CHAIN_EV_CTL_RX, .endpoint = stack_endpoint_stage(st),
+		.control_type = m->type, .group = m->group, .worker = chain_core_current_worker(),
+		.session = chain_real_session_id(st->s), .member = 2 });
+	xdev_ext_xd_class_ctl_v2(st, m);
+}
 unsigned chain_worker_of(struct xdev_ext_mech_session *s) { return chain_session_worker_id(s); }
 /* The real X4 posted one data-ring frame; called from native_post. */
 static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct xdev_ext_net_elem *el)

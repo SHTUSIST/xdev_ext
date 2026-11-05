@@ -36,12 +36,13 @@ directory and compiles one executable from these units:
 | programs | `nvme_s0.bpf.c` (NVMe build/complete) and `xdomain_peer.bpf.c`, called with the context `xdev_ext_mech_invoke()` builds | BPF verification/JIT and struct_ops are not run |
 | boundary | | stage files, requester bind (records the requester; the real one is tested in `../dmabuf_requester`), lease provider, link byte copy, scheduler |
 
-Six environment edits of the stack fixture are made in the private copy and
+Seven environment edits of the stack fixture are made in the private copy and
 listed in `fixture-edits.json` of each run: the family unit uses the real
 core's `xdev_ext_mech_batch_session`; X6 builds the program context from real
 batch accessors, reads the real session id, and gains a helper that runs the
 NVMe program with the same kfunc views; the data-post record reads the real
-session id and generation; and the real-NHI adapter, which copies no payload
+session id and generation; the ring unit routes EARLY (v2) control dispatch
+through a recorder as it already does for v1; and the real-NHI adapter, which copies no payload
 in the stack tests, calls `chain_link_payload()` for each delivered data
 frame. No production body and no existing assertion is edited.
 
@@ -66,10 +67,16 @@ lease covers; any violation fails the case.
 | `stale_ack_after_reuse` | after batch 3 occupies batch 1's frames, a copy of group 1's ACK is delivered through a real control RX descriptor: it is dispatched, finishes no batch, and the frames stay leased to group 3 until group 3's own ACK |
 | `no_link_enodev` | an XDOMAIN stage whose token names no link: CREATE fails with `-ENODEV` |
 
+Each case except `no_link_enodev` also runs as `NAME_early`, with both
+XDOMAIN stages in EARLY mode: the receiver grants buffers ahead, paired by the
+batch key (both hosts START from the same first key), so the sender posts its
+TX descriptors without an RTS/CTS round trip.
+
 ## Mutations
 
 Each mutant changes production or reference-program lines in the private copy
-so one claim becomes false, then runs the case that must catch it. KILLED
+so one claim becomes false, then runs the case that must catch it
+(`--case NAME_early` runs the same mutant against the EARLY variant). KILLED
 requires exit 1 and a named `CHAIN_ASSERT`; crashes, signals and compile
 failures do not count.
 
@@ -97,5 +104,8 @@ cases do not assert it.
 Host software composition, not kernel execution: real kthread concurrency,
 IRQ delivery, lockdep, RCU, BPF verification, IOMMU translation, PCIe ordering
 and physical Thunderbolt DMA are not exercised, and nothing here measures
-performance. Session teardown (reap, DESTROY), polling stages, EARLY mode and
-per-stage program fds are outside this composition.
+performance. Session teardown (reap, DESTROY), polling stages and
+per-stage program fds are outside this composition. A mutant that ran the
+protocol inline in the NHI control-RX callback was not usable: the existing
+stack fixture's lock-context assertion in `stack_x6.c` aborts first, so it is
+not listed.

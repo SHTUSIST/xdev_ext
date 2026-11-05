@@ -53,10 +53,11 @@ static void settle(unsigned rounds)
 		pump(1000000); /* 1 ms of virtual time per round, far below protocol deadlines */
 }
 
+static bool early;
 static void up(void)
 {
 	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = FRAMES, .depth = DEPTH,
-		.group_bytes = GROUP };
+		.group_bytes = GROUP, .early = early };
 	size_t bytes;
 	uint8_t *disk;
 	int err;
@@ -80,7 +81,9 @@ static void up(void)
 
 static void start(uint64_t n)
 {
-	CHECK(chain_start(rx, n, 1) == 0, "host 2 START");
+	/* Both sides number groups from the same key: EARLY pairs a receive
+	 * grant with the sender batch carrying that key. */
+	CHECK(chain_start(rx, n, 37) == 0, "host 2 START");
 	CHECK(chain_start(tx, n, 37) == 0, "host 1 START");
 }
 
@@ -271,7 +274,8 @@ static void chain_same_worker(void)
 		bytes_match(k);
 	}
 	finished(4);
-	printf("CHAIN_OBSERVE xdomain_groups_in_flight_max=%u\n", groups_in_flight_max());
+	if (!early)
+		printf("CHAIN_OBSERVE xdomain_groups_in_flight_max=%u\n", groups_in_flight_max());
 	CHECK(read_frames(3) == read_frames(1) && read_frames(4) == read_frames(2),
 	      "batches 3 and 4 reuse the frames of batches 1 and 2");
 }
@@ -409,15 +413,26 @@ static void no_link_enodev(void)
 
 int main(int argc, char **argv)
 {
-	if (argc != 2)
+	char base[64];
+	size_t n;
+
+	if (argc != 2 || strlen(argv[1]) >= sizeof(base))
 		return 2;
 	case_name = argv[1];
-	if (!strcmp(case_name, "chain_same_worker")) chain_same_worker();
-	else if (!strcmp(case_name, "reuse_waits_for_ack")) reuse_waits_for_ack();
-	else if (!strcmp(case_name, "ack_before_local_done")) ack_before_local_done();
-	else if (!strcmp(case_name, "consumer_holds_ack")) consumer_holds_ack();
-	else if (!strcmp(case_name, "stale_ack_after_reuse")) stale_ack_after_reuse();
-	else if (!strcmp(case_name, "no_link_enodev")) no_link_enodev();
+	strcpy(base, case_name);
+	n = strlen(base);
+	/* NAME_early: the same requirement with both XDOMAIN stages in EARLY
+	 * mode (receive grants paired by key; no RTS/CTS round trip). */
+	if (n > 6 && !strcmp(base + n - 6, "_early")) {
+		early = true;
+		base[n - 6] = 0;
+	}
+	if (!strcmp(base, "chain_same_worker")) chain_same_worker();
+	else if (!strcmp(base, "reuse_waits_for_ack")) reuse_waits_for_ack();
+	else if (!strcmp(base, "ack_before_local_done")) ack_before_local_done();
+	else if (!strcmp(base, "consumer_holds_ack")) consumer_holds_ack();
+	else if (!strcmp(base, "stale_ack_after_reuse")) stale_ack_after_reuse();
+	else if (!strcmp(base, "no_link_enodev") && !early) no_link_enodev();
 	else return 2;
 	printf("CHAIN_CASE %s assertions=%u\n", case_name, assertions);
 	return 0;

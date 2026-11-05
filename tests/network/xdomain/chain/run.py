@@ -28,8 +28,10 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 STACK = Path('tools/testing/selftests/xdev_ext_mech/xdomain')
-CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done',
-         'consumer_holds_ack', 'stale_ack_after_reuse', 'no_link_enodev')
+BASE_CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done',
+              'consumer_holds_ack', 'stale_ack_after_reuse')
+# NAME_early: both XDOMAIN stages in EARLY mode (paired receive grants).
+CASES = BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',)
 # Worker entry points; their call-graph closure inside the core text is compiled.
 CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
@@ -358,6 +360,12 @@ def xdomain_units(kernel, build, root):
          '\t\tunsigned endpoint = ring_info(rx->r)->endpoint;\n'
          '\t\tif (world->rx_length_set[endpoint]) rx->completion_len = world->rx_length[endpoint];',
          'link model moves payload bytes between the two leased frame memories')
+    edit('stack_x4.c', '#define xdev_ext_xd_class_ctl stack_record_dispatch\n',
+         '#define xdev_ext_xd_class_ctl stack_record_dispatch\n'
+         'struct xdev_ext_xd_msg_v2;\n'
+         'void chain_record_dispatch_v2(struct xdev_ext_mech_stage *, const struct xdev_ext_xd_msg_v2 *);\n'
+         '#define xdev_ext_xd_class_ctl_v2 chain_record_dispatch_v2\n',
+         'EARLY (v2) control dispatch is recorded like the v1 dispatch')
     probe = build / 'xd_probe.c'
     probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n#include "stack_nhi_api.h"\n'
                      '#define tb_ring_tx stack_ring_tx\n#define tb_ring_rx stack_ring_rx\n'
@@ -513,7 +521,10 @@ def main():
             record['verdict'] = 'COMPILED'
             code = 0
         else:
-            cases = [MUTATIONS[args.mutation]['case']] if args.mutation else ([args.case] if args.case else list(CASES))
+            if args.mutation:
+                cases = [args.case or MUTATIONS[args.mutation]['case']]
+            else:
+                cases = [args.case] if args.case else list(CASES)
             record['cases'] = run_cases(binary, out, cases)
             if args.mutation:
                 killed = all(c['exit'] == 1 and c['failed_assertion'] for c in record['cases'])
