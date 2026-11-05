@@ -143,16 +143,32 @@ UNKNOWN retirement consume rings and allocations. Posts and callback
 reposts schedule fallback under the same gate lock. Completed native
 ownership and UNKNOWN backing follow the existing custody ledger.
 
-Early CTS is an explicit opt-in: pass `XDEV_EXT_XDOMAIN_F_EARLY` to
-`xdev_ext_stage_xdomain()`, or `XDEV_EXT_PEER_ENDPOINT_F_EARLY` in existing
-endpoint options, on both endpoints. The updated reference BPF policy supports
-ordinary and early sessions. Ordinary sessions keep the v1 RTS protocol.
+`XDEV_EXT_XDOMAIN_F_EARLY`, passed to `xdev_ext_stage_xdomain()` (or
+`XDEV_EXT_PEER_ENDPOINT_F_EARLY` in existing endpoint options) on both
+endpoints, selects the version-2 envelope: 320-byte protocol facts, fresh
+endpoint bind identities, and the pairing and grant actions. On such a stage
+the attached program chooses the protocol, and the class enforces one rule for
+both: the sender posts only a group the authenticated peer has posted and
+advertised by CTS credit. `examples/network/xdomain_rts_cts.bpf.c` uses RTS/CTS
+and declines pairing; `examples/network/xdomain_early.bpf.c` pairs and grants.
+Both register `xdomain_peer_ops`, so a caller changes protocol by loading the
+other object. Without the flag a stage keeps the version-1 envelope, where v1
+programs run unchanged. The reference program chooses from the stage's mode
+fact: RTS/CTS without the flag, pairing with it, and then it answers an RTS
+only by refusal.
 
-Early endpoints bind fresh endpoint identities before batches, then grant one
-actual posted RX batch to its exact future TX key. The ordered layout must use
-one full-span descriptor per logical frame and the TX tag is the key as eight
-big-endian bytes followed by sixteen zero bytes. Early and ordinary modes do
-not negotiate an in-place fallback; close an uncommitted early session and
-explicitly create an ordinary session when required. Pairing has a fixed
-30-second deadline and bounded identical control retries. CRC and pair freshness
-checks do not provide cryptographic authentication.
+A stage keeps the first binding its program chose. Once pairing started, v1
+control is counted as dropped and RTS/CTS actions are refused. Once the
+program announced, posted on an RTS or declined pairing (IGNORE on PAIR_DUE
+or HELLO), pairing and grant inputs are dropped and pairing actions refused;
+such a stage, and a receiver no peer has asked to pair, follow the version-1
+deadline and STOP rules.
+
+A paired stage grants one actual posted RX batch to its exact future TX key.
+The ordered layout must use one full-span descriptor per logical frame and the
+TX tag is the key as eight big-endian bytes followed by sixteen zero bytes.
+Neither binding falls back to the other in place; close an uncommitted session
+and create one with the other program when required. Pairing has a fixed
+30-second deadline, counted from the sender's first progress and from the
+receiver's first CHALLENGE, and bounded identical control retries. CRC and pair
+freshness checks do not provide cryptographic authentication.

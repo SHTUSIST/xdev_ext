@@ -50,6 +50,15 @@ RTS/CTS program). The existing version-1 stack suite runs with the RTS/CTS
 program through `stack_test.py --program rts-cts`, in the stack suite's own
 environment. `--case NAME` (repeatable) selects cases.
 
+`--mutation NAME` removes one rule of the class change in the assembled copy
+before compiling: `paired_announce` (a paired stage accepts an RTS/CTS
+action), `offer_after_choice` (PAIR_DUE offered after the RTS/CTS choice),
+`input_after_choice` (pairing input kept after that choice),
+`early_facts_for_v1` (v1 events of an unpaired stage get early facts),
+`drop_rts_authority` (the early snapshot loses the selected RTS record) and
+`v1_blocked` (the old dispatch that kept v1 control from v2-envelope
+endpoints). Each must make at least one case fail with a named assertion.
+
 Compilation or setup failures, signals and timeouts are not semantic RED. This
 is deterministic host composition: kernel verifier acceptance, physical DMA,
 IRQ concurrency and performance need separate evidence.

@@ -143,6 +143,38 @@ static __s32 xdomain_peer_complete(void *c, const struct xdev_ext_mech_ctx *m)
     x6.write_text(text)
 
 
+# Each mutation removes one rule of the class change in the assembled copy;
+# at least one case must then fail with a named assertion.
+MUTATIONS = {
+    # A paired stage accepts an RTS/CTS binding action.
+    'paired_announce': ('\t\t\tif (xd_paired(xs)) ret = -EPROTO;\n\t\t\telse if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE',
+                        '\t\t\tif (0) ret = -EPROTO;\n\t\t\telse if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE'),
+    # PAIR_DUE is offered again after the RTS/CTS choice.
+    'offer_after_choice': ('xs->pair_next_retry <= now && !xs->rts_cts &&', 'xs->pair_next_retry <= now &&'),
+    # Pairing input is retained after the RTS/CTS choice.
+    'input_after_choice': ('if (!xd_pair_allowed(xs) || xs->failed || xs->stop_latched',
+                           'if (xs->failed || xs->stop_latched'),
+    # v1 events of an unpaired stage get the early fact overrides.
+    'early_facts_for_v1': ('\tif (v1_view) return;\n', ''),
+    # The early snapshot drops the RTS/control record selected by xd_next_locked.
+    'drop_rts_authority': ('xd_early_snapshot_locked(xs, s, r, ev, xs->worker_event.rts, xs->worker_event.ctl, false, i);',
+                           'xd_early_snapshot_locked(xs, s, r, ev, false, false, false, i);'),
+    # v1 control never reaches a v2-envelope endpoint (the old dispatch).
+    'v1_blocked': ('if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))', 'if (ep && !ep->early)'),
+}
+
+
+def mutate(kernel, out, name):
+    old, new = MUTATIONS[name]
+    unit = 'io_uring/xdomain/' + ('xdev_ext_xdomain_ring.c' if name == 'v1_blocked' else 'xdev_ext_xdomain_class.c')
+    path = kernel / unit
+    text = path.read_text()
+    if text.count(old) != 1:
+        raise ValueError('mutation anchor absent or not unique: ' + name)
+    path.write_text(text.replace(old, new, 1))
+    (out / 'mutation.json').write_text(json.dumps(dict(name=name, source=unit, old=old, new=new), indent=2) + '\n')
+
+
 def combined_cases(early_dir):
     early = (early_dir / 'cases.c').read_text()
     signature = 'int main(int argc,char **argv)'
@@ -158,6 +190,7 @@ def main():
     parser.add_argument('--output', type=Path, required=True)
     parser.add_argument('--case', action='append', help='run only these cases (repeatable)')
     parser.add_argument('--sanitize', action='store_true')
+    parser.add_argument('--mutation', choices=sorted(MUTATIONS))
     args = parser.parse_args()
     root = args.source_root.resolve()
     out = args.output.resolve()
@@ -172,6 +205,8 @@ def main():
         name: hashlib.sha256((HERE / name).read_bytes()).hexdigest()
         for name in ('run.py', 'cases.c', 'equivalence.c', 'README.md')}, indent=2) + '\n')
     bridge(stack)
+    if args.mutation:
+        mutate(kernel, out, args.mutation)
     with tempfile.TemporaryDirectory(prefix='xdomain-protocols-cases-') as temp:
         cases_dir = Path(temp)
         (cases_dir / 'cases.c').write_text(combined_cases(early_dir))
@@ -232,7 +267,7 @@ def main():
     (out / 'result.json').write_text(json.dumps(dict(
         status='setup-or-runtime-error' if setup else 'behavioral-red' if failed else 'pass',
         scope='host actual NHI/XDOMAIN composition', hardware=False, kernel_execution=False,
-        compile_exit=0, sanitize=args.sanitize, cases=records), indent=2) + '\n')
+        compile_exit=0, sanitize=args.sanitize, mutation=args.mutation, cases=records), indent=2) + '\n')
     return int(failed)
 
 
