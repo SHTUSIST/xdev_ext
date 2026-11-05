@@ -138,6 +138,21 @@ per-channel data gates, startup results, actual RX lengths and flags, submitted
 TX lengths and TX completions. Startup uses internal coherent host memory;
 `backing_qualified=not_queried` remains explicit. This does not prove VRAM DMA,
 GPU visibility or GPU last use. Business PEER admission is unchanged.
+
+A stage may also use the ring's IOU_UMEM pool (host pages) instead of a PEER
+allocation, for TX and for RX at stage 0. At bind the requester maps every
+pool page for the NHI, in the stage's DMA direction. A pool that does not
+start and end on page boundaries is refused with `-EINVAL`, because each NHI
+element is one contiguous buffer of at most 4096 bytes and could not cross a
+page. Each element lease takes its page's address plus the offset, with a
+sync for the NHI when the mapping needs one (a non-coherent or bounced NHI);
+a received buffer is synced for the CPU when its element ends quiesced,
+before the next stage reads it. The data ring still carries payload only, so
+an element may be a full 4096 bytes (the tbnet limit of 4084 payload bytes
+comes from its header inside each frame). An element that ends with unknown
+device access keeps the whole mapping, as a PEER region is quarantined: the
+mapping is never unmapped, the batch's frames are sequestered, and the
+stage's checked unbind refuses release so the session keeps its UMEM pins.
 Successful startup hands over the same native rings and HopIDs without a reset.
 Failed startup closes admission and stops through the existing native barriers;
 unknown scratch DMA retains the entire allocation in the requester quota.
