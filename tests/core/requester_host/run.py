@@ -90,6 +90,9 @@ def facade(kernel, directory, units):
         target = directory / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('/* kernel boundary supplied by shim.h */\n')
+    # Host <errno.h> reaches <linux/errno.h>: keep the real numeric constants.
+    (directory / 'linux').mkdir(parents=True, exist_ok=True)
+    (directory / 'linux/errno.h').write_text('#include <asm-generic/errno.h>\n')
     return sorted(names)
 
 
