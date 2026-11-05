@@ -4,6 +4,13 @@
 #include "stack_kernel_compat.h"
 /* Actual built-in requester budget, with only kernel OS facilities facaded. */
 #include "../../../../../io_uring/family/xdev_ext_requester_retention.c"
+/* Actual built-in coherent backing owner used by X4 control and startup scratch. */
+#include "../../../../../io_uring/family/xdev_ext_requester_backing.c"
+struct pci_dev *stack_backing_requester(struct xdev_ext_requester_backing *b, size_t *bytes)
+{
+	*bytes = b->bytes;
+	return b->pdev;
+}
 #ifndef STACK_REAL_NHI
 /* Actual NHI declaration and sizing body; never a copied byte formula. */
 #include "stack_descriptor_source.inc"
@@ -1499,7 +1506,6 @@ int stack_remove(struct stack_world*w,unsigned e){
 	w->active=e;
 	stack_x3_remove(&w->side[e].svc);
 	w->side[e].removed=true;
-	stack_x4_quarantine_records();
 	fprintf(stderr,"STACK_DIAG remove endpoint=%u pci_refs=%u\n",e,w->side[e].pci.refs);
 	return 0;
 }
