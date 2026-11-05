@@ -65,6 +65,8 @@ it. A mutant counts as killed only with exit 1 and a named assertion.
 | `lease-after-unknown` | a mapping with unknown device access still leases | `host_unknown_retains_mapping` |
 | `unmap-after-unknown` | unbind unmaps after an unknown end | `host_unknown_retains_mapping` |
 | `unmap-outstanding-lease` | unbind unmaps with a lease outstanding | `host_outstanding_lease_retains_mapping` |
+| `peer-bind-takes-host-pool` | the PEER bind maps an IOU_UMEM pool itself, through the host bind | `host_bind_maps_every_page` |
+| `host-bind-takes-peer-pool` | the host bind accepts a PEER pool | `host_lease_refuses_spans` |
 
 ## Limits
 
