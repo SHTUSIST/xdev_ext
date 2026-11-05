@@ -287,9 +287,24 @@
       "native_path": "tools/xdev_ext_mech/xdomain_check.bpf.c"
     },
     {
+      "source": "examples/network/xdomain_early.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_early.bpf.c"
+    },
+    {
       "source": "examples/network/xdomain_peer.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/xdomain_peer.bpf.c"
+    },
+    {
+      "source": "examples/network/xdomain_policy.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_policy.h"
+    },
+    {
+      "source": "examples/network/xdomain_rts_cts.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_rts_cts.bpf.c"
     },
     {
       "source": "examples/pipelines/nxp_mech.bpf.c",
