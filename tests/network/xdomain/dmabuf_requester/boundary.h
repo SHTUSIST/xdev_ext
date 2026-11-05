@@ -39,6 +39,7 @@ typedef struct { bool held; } spinlock_t;
 #define spin_lock_irqsave(l, f) do { (f) = 0; assert(!(l)->held); (l)->held = true; } while (0)
 #define spin_unlock_irqrestore(l, f) do { (void)(f); assert((l)->held); (l)->held = false; } while (0)
 #define smp_mb__before_atomic() atomic_thread_fence(memory_order_seq_cst)
+#define atomic_read_acquire(a) atomic_load_explicit(&(a)->counter, memory_order_acquire)
 #define DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)
 struct page;
 dma_addr_t dma_map_page_attrs(struct device *dev, struct page *page, size_t offset, size_t size,

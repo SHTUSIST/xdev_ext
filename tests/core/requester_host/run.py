@@ -55,9 +55,14 @@ MUTATIONS = {
     'lease-after-unknown': ('host_unknown_retains_mapping', [
         ('\tif (READ_ONCE(h->unknown))\n\t\treturn -ESTALE;\n', '')]),
     'unmap-after-unknown': ('host_unknown_retains_mapping', [
-        ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn atomic_read(&h->active);')]),
+        ('\treturn atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);',
+         '\treturn atomic_read_acquire(&h->active);')]),
     'unmap-outstanding-lease': ('host_outstanding_lease_retains_mapping', [
-        ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn READ_ONCE(h->unknown);')]),
+        ('\treturn atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);', '\treturn READ_ONCE(h->unknown);')]),
+    # The settled check reads the unknown mark before the lease count, as at d3dced6.
+    'settled-reads-unknown-first': ('host_release_during_settled_check', [
+        ('\treturn atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);',
+         '\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);')]),
     'peer-bind-takes-host-pool': ('host_bind_maps_every_page', [
         ('\tif (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)\n',
          '\tif (pool->kind == XDEV_EXT_MECH_POOL_IOU_UMEM)\n\t\treturn xdev_ext_requester_bind_host(rq, st, pdev);\n'
