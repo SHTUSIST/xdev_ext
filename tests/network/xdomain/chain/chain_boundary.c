@@ -125,8 +125,8 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 
 /* Real definitions in other units (core, peer pool, XDOMAIN class). */
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
-				  enum dma_data_direction dir, dma_addr_t *dma);
-void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len,
+				  enum dma_data_direction dir, u64 *dma);
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len,
 				     bool quiesced);
 int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq);
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s);
@@ -816,7 +816,7 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester *rq)
  * a granted element becomes a live lease of the NHI for the device model,
  * and its address must be the NHI's mapping of exactly that page and offset. */
 int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_data_direction dir,
-		     dma_addr_t *dma)
+		     u64 *dma)
 {
 	struct chain_device *dev = chain_device_of(rq->pdev);
 	u64 want;
@@ -853,7 +853,7 @@ int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_d
 	chain_leases[chain_nleases++] = (struct chain_lease){ dev, off, ++chain_ticket, len, dir, true, false };
 	return 0;
 }
-void chain_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len, bool quiesced)
+void chain_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool quiesced)
 {
 	struct chain_device *dev = chain_device_of(rq->pdev);
 	struct chain_lease *l = dev ? chain_live_lease_at(dev, dma, len) : NULL;
@@ -869,9 +869,9 @@ void chain_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len, 
 #else
 /* PEER modes: the family never reaches a host lease. */
 int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_data_direction dir,
-		     dma_addr_t *dma)
+		     u64 *dma)
 { (void)rq; (void)off; (void)len; (void)dir; (void)dma; abort(); }
-void chain_host_release(struct xdev_ext_requester *rq, dma_addr_t dma, u32 len, bool quiesced)
+void chain_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool quiesced)
 { (void)rq; (void)dma; (void)len; (void)quiesced; abort(); }
 void *const *chain_host_pages(unsigned endpoint, uint32_t nr) { (void)endpoint; (void)nr; abort(); }
 int chain_host_dma_map(const void *device, const void *page, uint32_t off, uint32_t len,

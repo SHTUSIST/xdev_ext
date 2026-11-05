@@ -52,7 +52,7 @@ struct xdev_ext_net_lease {
 		} host;
 		struct xdev_ext_net_pool_dma pool;
 		struct {
-			dma_addr_t dma;
+			u64 dma;		/* as xdev_ext_peer_lease.dma_address */
 			u32 len;
 		} hdma;
 	} u;
@@ -69,7 +69,7 @@ struct xdev_ext_net_elem {
 	union { u64 align; u8 bytes[XDEV_EXT_NET_DEV_AREA]; } dev;	/* subclass native object */
 };
 /* The requester's DMA address of a PEER or HOST_DMA element lease. */
-static inline dma_addr_t xdev_ext_net_elem_dma(const struct xdev_ext_net_elem *e)
+static inline u64 xdev_ext_net_elem_dma(const struct xdev_ext_net_elem *e)
 {
 	return e->lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA ? e->lease.u.hdma.dma :
 	       e->lease.u.peer.lease.dma_address;

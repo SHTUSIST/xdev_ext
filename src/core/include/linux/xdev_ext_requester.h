@@ -37,10 +37,10 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester *rq);
  * -ESTALE once a lease ended with unknown device access; -EINVAL without a
  * host mapping. */
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
-				  enum dma_data_direction dir, dma_addr_t *dma);
+				  enum dma_data_direction dir, u64 *dma);
 /* Any context, once per granted lease: a quiesced receive buffer is
  * synchronized for the CPU; an unquiesced end keeps the whole mapping. */
-void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, dma_addr_t dma,
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma,
 				     u32 len, bool quiesced);
 /* Process context: 0 when unbind may unmap the host mapping (or there is
  * none); -EIO with an outstanding lease or after unknown device access. */

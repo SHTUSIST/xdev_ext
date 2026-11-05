@@ -121,7 +121,7 @@ static int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
 }
 
 int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
-				  enum dma_data_direction dir, dma_addr_t *dma)
+				  enum dma_data_direction dir, u64 *dma)
 {
 	struct xdev_ext_requester_host *h = rq->host;
 	u64 frame_mask, page_off;
@@ -147,7 +147,7 @@ int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 le
 }
 EXPORT_SYMBOL_GPL(xdev_ext_requester_host_lease);
 
-void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, dma_addr_t dma,
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma,
 				     u32 len, bool quiesced)
 {
 	struct xdev_ext_requester_host *h = rq->host;
