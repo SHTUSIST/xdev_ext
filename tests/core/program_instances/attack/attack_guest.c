@@ -2,23 +2,35 @@
 /*
  * GUEST TEST ONLY: attacker-brought program isolation on real QEMU NVMe PCI.
  * Correctness only; nothing here is timed. Two sessions share the same NVMe
- * namespaces at once: a VICTIM (NVMe READ source-window -> NVMe WRITE
- * destination victim-window) and an ATTACK session that loads its own PRIVATE
- * mechanism program. Both select programs through CREATE_PROGRAMS, so the two
- * run different programs over the same device simultaneously.
+ * namespaces at once: a VICTIM (NVMe READ source window -> NVMe WRITE victim
+ * window) and an ATTACK session that loads its own PRIVATE mechanism program.
+ * Both select programs through CREATE_PROGRAMS, so the two run different
+ * programs over the same device at the same time.
  *
  * Each attack keeps a valid session topology but crosses one boundary the
- * kernel enforces. The test asserts the attack session stops with its declared
- * reason while the victim completes with zero aborts and a byte-exact window,
- * and that no attacker byte reached the victim window. The host validator
- * (attack_validate.py) repeats the whole-image comparison independently.
+ * kernel enforces. The test asserts the attack session ends with its declared
+ * reason while the victim completes with zero aborts, and a whole-disk oracle
+ * (repeated independently on the host by attack_validate.py) checks every
+ * destination byte against an expected image.
  *
- *   1 reserved  a valid in-window WRITE SQE with a nonzero reserved dword   -EPERM
- *   2 outside   a WRITE SQE one window past the attacker's bound LBA window  -ERANGE
- *   3 frame     reads frame bytes past the frame (host-frame window)         -EPROTO
- *   4 verdict   returns an illegal build verdict                            -ECANCELED
- *   5 user      an attacker USER stage whose thread never completes a batch -ETIMEDOUT
- *   6 detach    detaches its own PRIVATE link mid-run                       -ECANCELED
+ *   case           what the attacker does                                reason
+ *   reserved       in-window WRITE SQE with a nonzero reserved dword      -EPERM
+ *   outside        WRITE SQE one window past its own = the victim's LBAs  -ERANGE
+ *   outside-after  same, after the victim already wrote its window        -ERANGE
+ *   frame          reads frame bytes past the frame (host-frame window)   -EPROTO
+ *   verdict        returns an illegal build verdict                       -ECANCELED
+ *   user-stall     its USER stage thread never completes a batch          -ETIMEDOUT
+ *   detach         detaches its PRIVATE write link with a batch in flight -ECANCELED
+ *
+ * For attacks 1-5 the attack session stays ACTIVE with last_err latched after
+ * every batch ended; the user STOP then returns that reason. The detach
+ * retraction stops the session itself.
+ *
+ * Layout, in 64-LBA windows: case c owns destination windows 3c (attacker,
+ * directly below the victim), 3c+1 (victim) and 3c+2 (spare); its victim
+ * reads source window 2c and its attacker source window 2c+1. The source disk
+ * is position-unique (see check_source), so a group copied from the wrong
+ * place, in the wrong order or from the attacker cannot match.
  *
  * Usage: attack_guest SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR
  */
@@ -51,20 +63,24 @@
 #define GROUPS 8U
 #define DEPTH 4U
 #define WIN_NLB (GROUPS * GROUP / LBA)	/* 64 LBAs per window */
+#define WIN_BYTES ((__u64)WIN_NLB * LBA)
 #define FIRST_KEY 1ULL
 #define GUARD 0x6bU
 #define WAIT_MS 60000
-#define USER_DEADLINE_MS 300U
+#define USER_DEADLINE_MS 300U		/* user-stall: the held batch expires */
+#define DETACH_DEADLINE_MS 60000U	/* detach: the hold outlives the retraction */
+#define DETACH_DONE 2U			/* batches the detach attacker completes */
+#define SPAN (4ULL << 20)		/* exact disk image size */
 
-/* Disjoint destination windows (in LBAs); source read window is shared at 0. */
-#define SRC_SLBA   0ULL
-#define VIC_SLBA   (1ULL * WIN_NLB)	/* 64 */
-#define ATK1_SLBA  (2ULL * WIN_NLB)	/* 128 reserved */
-#define ATK2_SLBA  (3ULL * WIN_NLB)	/* 192 outside */
-#define ATK3_SLBA  (4ULL * WIN_NLB)	/* 256 frame */
-#define ATK4_SLBA  (5ULL * WIN_NLB)	/* 320 verdict */
-#define ATK6_SLBA  (6ULL * WIN_NLB)	/* 384 detach */
-#define DISK_LBAS  (8ULL * WIN_NLB)	/* 512 LBAs span checked */
+enum { C_RESERVED, C_OUTSIDE, C_OUTSIDE_AFTER, C_FRAME, C_VERDICT, C_USER, C_DETACH, NR_CASES };
+static const char *const case_name[NR_CASES] = {
+	"reserved", "outside", "outside-after", "frame", "verdict", "user-stall", "detach",
+};
+
+static __u64 atk_dst(unsigned c) { return 3ULL * c * WIN_NLB; }
+static __u64 vic_dst(unsigned c) { return (3ULL * c + 1) * WIN_NLB; }
+static __u64 vic_src(unsigned c) { return 2ULL * c * WIN_NLB; }
+static __u64 atk_src(unsigned c) { return (2ULL * c + 1) * WIN_NLB; }
 
 static unsigned int checks;
 #define CHECK(c, msg) do { \
@@ -111,17 +127,7 @@ static void object_open(const char *dir, const char *name, struct object *o)
 	CHECK(o->map, what);
 }
 
-/* A fresh PRIVATE link each call; destroyed at session teardown. */
-static int link_fd(struct object *o, struct bpf_link **keep)
-{
-	struct bpf_link *l = bpf_map__attach_struct_ops(o->map);
-
-	CHECK(l && !libbpf_get_error(l), "attach PRIVATE struct_ops link");
-	*keep = l;
-	return bpf_link__fd(l);
-}
-
-/* ---- one NVMe session (its own ring, UMEM and lent frames) ---- */
+/* ---- one session (its own ring, UMEM and lent frames) ---- */
 struct session {
 	int ring;
 	void *pool;
@@ -130,10 +136,20 @@ struct session {
 	__u32 frames[GROUPS];
 	struct xdev_ext_mech_create_programs cp;
 	__u64 id;
-	struct xdev_ext_user_stage *u;	/* attack 5 only */
+	struct xdev_ext_user_stage *u;	/* user-stall and detach only */
 	struct bpf_link *links[XDEV_EXT_MECH_MAX_STAGES];
 	unsigned nr_links;
 };
+
+/* A fresh PRIVATE link each call, owned by @s and destroyed at teardown. */
+static int link_fd(struct session *s, struct object *o)
+{
+	struct bpf_link *l = bpf_map__attach_struct_ops(o->map);
+
+	CHECK(l && !libbpf_get_error(l), "attach PRIVATE struct_ops link");
+	s->links[s->nr_links++] = l;
+	return bpf_link__fd(l);
+}
 
 static void ring_up(struct session *s)
 {
@@ -159,22 +175,43 @@ static void ring_up(struct session *s)
 		s->frames[i] = i;
 }
 
-/* NVMe READ (src window) -> {NVMe WRITE dst window | USER}. The third fd is a
- * USER stage fd when user_fd >= 0 (attack 5); otherwise a second NVMe stage. */
-static int create_programs(struct session *s, int src_ng, __u64 src_slba,
-			   int dst_ng, __u64 dst_slba, int user_fd,
-			   int read_link, int second_link)
+static void user_open(struct session *s)
+{
+	struct xdev_ext_user_stage_opts o = XDEV_EXT_OPTS_INIT(xdev_ext_user_stage_opts,
+		.ring_fd = s->ring, .umem = s->pool, .entries = DEPTH);
+
+	CHECK(!xdev_ext_user_stage_open(&o, &s->u), "attack: open a USER stage fd");
+}
+
+/* One stage of a CREATE_PROGRAMS request and the PRIVATE link that runs it. */
+struct stage { __u32 class_id, direction; int fd; __u64 arg0, arg1; int link; };
+
+static struct stage nvme_read(int ng, __u64 slba, int link)
+{
+	return (struct stage){ XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE, ng, slba, WIN_NLB, link };
+}
+
+static struct stage nvme_write(int ng, __u64 slba, int link)
+{
+	return (struct stage){ XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_TO_DEVICE, ng, slba, WIN_NLB, link };
+}
+
+static struct stage user_stage(const struct session *s, __u32 deadline_ms, int link)
+{
+	return (struct stage){ XDEV_EXT_MECH_CLASS_USER, XDEV_EXT_MECH_DIR_TO_DEVICE,
+			       xdev_ext_user_stage_fd(s->u), deadline_ms, 0, link };
+}
+
+static int create_programs(struct session *s, const struct stage *st, __u32 n)
 {
 	struct xdev_ext_mech_create *c = &s->cp.request.create;
-	__u32 n = 0;
+	__u32 i;
 	int ret;
 
 	s->cp.size = sizeof(s->cp);
 	s->cp.version = XDEV_EXT_MECH_CREATE_PROGRAMS_VERSION;
-	s->cp.program_fds[0] = read_link;
-	s->cp.program_fds[1] = second_link;
-	s->cp.program_fds[2] = -1;
-	s->cp.program_fds[3] = -1;
+	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+		s->cp.program_fds[i] = i < n ? st[i].link : -1;
 	s->cp.request.size = sizeof(s->cp.request);
 	s->cp.request.version = XDEV_EXT_MECH_CREATE_REPORT_VERSION;
 	*c = (struct xdev_ext_mech_create){
@@ -182,17 +219,10 @@ static int create_programs(struct session *s, int src_ng, __u64 src_slba,
 		.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1,
 		.layout = { FRAME, 0, GROUP, GROUP }, .depth = DEPTH, .eventfd = -1,
 	};
-	c->st[n++] = (struct xdev_ext_mech_stage_uapi){
-		.class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
-		.fd = src_ng, .arg0 = src_slba, .arg1 = WIN_NLB };
-	if (user_fd >= 0)
-		c->st[n++] = (struct xdev_ext_mech_stage_uapi){
-			.class_id = XDEV_EXT_MECH_CLASS_USER, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
-			.fd = user_fd, .arg0 = USER_DEADLINE_MS, .arg1 = 0 };
-	else
-		c->st[n++] = (struct xdev_ext_mech_stage_uapi){
-			.class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
-			.fd = dst_ng, .arg0 = dst_slba, .arg1 = WIN_NLB };
+	for (i = 0; i < n; i++)
+		c->st[i] = (struct xdev_ext_mech_stage_uapi){ .class_id = st[i].class_id,
+			.direction = st[i].direction, .fd = st[i].fd,
+			.arg0 = st[i].arg0, .arg1 = st[i].arg1 };
 	c->nr_stages = n;
 	ret = mech(s->ring, XDEV_EXT_MECH_OP_CREATE_PROGRAMS, (uintptr_t)&s->cp);
 	if (ret)
@@ -217,37 +247,69 @@ static void start(struct session *s)
 	CHECK(!mech(s->ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&st), "exactly one START");
 }
 
-static int stats_of(int ring, __u64 id, struct xdev_ext_mech_stats *st)
+static void stats(const struct session *s, struct xdev_ext_mech_stats *st)
 {
 	memset(st, 0, sizeof(*st));
-	st->session_id = id;
-	return mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)st);
+	st->session_id = s->id;
+	if (mech(s->ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)st))
+		CHECK(0, "STATS");
 }
 
 static void print_stats(const char *name, const struct xdev_ext_mech_stats *st)
 {
 	printf("# %s: done=%llu abort=%llu rejects=%llu protocol_err=%llu timeouts=%llu "
-	       "inflight=%llu sequestered=%llu last_err=%d state=%u\n", name,
+	       "inflight=%llu sequestered=%llu last_err=%d state=%u submitted=%llu,%llu,%llu "
+	       "completed=%llu,%llu,%llu\n", name,
 	       (unsigned long long)st->batches_done, (unsigned long long)st->batches_abort,
 	       (unsigned long long)st->rejects, (unsigned long long)st->protocol_err,
 	       (unsigned long long)st->timeouts, (unsigned long long)st->inflight,
-	       (unsigned long long)st->sequestered, st->last_err, st->state);
+	       (unsigned long long)st->sequestered, st->last_err, st->state,
+	       (unsigned long long)st->submitted[0], (unsigned long long)st->submitted[1],
+	       (unsigned long long)st->submitted[2], (unsigned long long)st->completed[0],
+	       (unsigned long long)st->completed[1], (unsigned long long)st->completed[2]);
 }
 
-/* Poll until done+abort reaches GROUPS (idle), or the wait bound. */
+static bool settled(const struct xdev_ext_mech_stats *st)
+{
+	return st->batches_done + st->batches_abort >= GROUPS && !st->inflight;
+}
+
+/* Poll one session until every batch ended, or the wait bound. */
 static struct xdev_ext_mech_stats wait_settled(struct session *s)
 {
 	struct xdev_ext_mech_stats st;
 	int i;
 
 	for (i = 0; i < WAIT_MS / 5; i++) {
-		if (stats_of(s->ring, s->id, &st))
-			CHECK(0, "STATS while waiting");
-		if (st.batches_done + st.batches_abort >= GROUPS && !st.inflight)
+		stats(s, &st);
+		if (settled(&st))
 			break;
 		usleep(5000);
 	}
 	return st;
+}
+
+/*
+ * Poll both sessions until both settled. Records (does not assert, since it
+ * is timing dependent) whether a refused attacker batch was seen while the
+ * victim still had unfinished batches.
+ */
+static void wait_pair(struct session *v, struct session *a, const char *name,
+		      struct xdev_ext_mech_stats *vs, struct xdev_ext_mech_stats *as)
+{
+	unsigned overlap = 0, polls;
+
+	for (polls = 0; polls < WAIT_MS; polls++) {
+		stats(v, vs);
+		stats(a, as);
+		if (as->batches_abort && vs->batches_done + vs->batches_abort < GROUPS)
+			overlap++;
+		if (settled(vs) && settled(as))
+			break;
+		usleep(1000);
+	}
+	printf("# overlap case=%s polls_with_attacker_refusal_while_victim_unfinished=%u of %u\n",
+	       name, overlap, polls + 1);
 }
 
 static void stop_ok(struct session *s, int expect, const char *what)
@@ -255,7 +317,10 @@ static void stop_ok(struct session *s, int expect, const char *what)
 	struct xdev_ext_mech_stats st;
 
 	CHECK(mech(s->ring, XDEV_EXT_MECH_OP_STOP, s->id) == expect, what);
-	CHECK(stats_of(s->ring, s->id, &st) == -ENOENT, "released session is gone");
+	memset(&st, 0, sizeof(st));
+	st.session_id = s->id;
+	CHECK(mech(s->ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&st) == -ENOENT,
+	      "released session is gone");
 }
 
 static void links_destroy(struct session *s)
@@ -278,20 +343,42 @@ static void ring_down(struct session *s)
 		munmap(s->pool, s->pool_bytes);
 }
 
-/* The victim: correct PRIVATE programs on both NVMe stages. */
-static void victim_create(struct session *v, int srcng, int dstng, struct object *correct)
+static void teardown(struct session *v, struct session *a)
 {
-	int rl, wl;
-
-	ring_up(v);
-	rl = link_fd(correct, &v->links[v->nr_links++]);
-	wl = link_fd(correct, &v->links[v->nr_links++]);
-	CHECK(!create_programs(v, srcng, SRC_SLBA, dstng, VIC_SLBA, -1, rl, wl),
-	      "victim: CREATE_PROGRAMS NVMe READ -> NVMe WRITE");
+	links_destroy(a);
+	links_destroy(v);
+	ring_down(a);
+	ring_down(v);
 }
 
-/* ---- the user thread for attack 5: hold the first batch forever ---- */
-struct holder { struct xdev_ext_user_stage *u; volatile unsigned taken; volatile int exit_code; pthread_t thread; };
+/* The victim of case @c: correct PRIVATE programs on both NVMe stages. */
+static void victim_create(struct session *v, unsigned c, int srcng, int dstng, struct object *correct)
+{
+	struct stage st[2];
+
+	ring_up(v);
+	st[0] = nvme_read(srcng, vic_src(c), link_fd(v, correct));
+	st[1] = nvme_write(dstng, vic_dst(c), link_fd(v, correct));
+	CHECK(!create_programs(v, st, 2), "victim: CREATE_PROGRAMS NVMe READ -> NVMe WRITE");
+}
+
+static void check_victim(const struct xdev_ext_mech_stats *vs, const char *what)
+{
+	CHECK(vs->batches_done == GROUPS && !vs->batches_abort && !vs->rejects &&
+	      !vs->protocol_err && !vs->timeouts && !vs->sequestered && !vs->last_err &&
+	      !vs->inflight && vs->state == XDEV_EXT_MECH_SESSION_ACTIVE &&
+	      vs->submitted[1] == GROUPS && vs->completed[1] == GROUPS, what);
+}
+
+/* ---- the attacker's user thread: complete @complete_first, hold the rest ---- */
+struct holder {
+	struct xdev_ext_user_stage *u;
+	unsigned complete_first;
+	volatile unsigned taken, completed, held;
+	volatile int exit_code;
+	pthread_t thread;
+};
+
 static void *hold_thread(void *arg)
 {
 	struct holder *h = arg;
@@ -300,45 +387,87 @@ static void *hold_thread(void *arg)
 
 	for (;;) {
 		ret = xdev_ext_user_stage_next(h->u, -1, &b);
-		if (ret) { h->exit_code = ret; return NULL; }
+		if (ret) {
+			h->exit_code = ret;
+			return NULL;
+		}
 		h->taken++;
-		/* Never complete: the kernel cancels the held batch at its deadline. */
+		if (h->completed < h->complete_first) {
+			ret = xdev_ext_user_stage_complete(h->u, &b, 0);
+			if (ret) {
+				h->exit_code = ret;
+				return NULL;
+			}
+			h->completed++;
+			continue;
+		}
+		/* Never complete: the kernel cancels it at its deadline or a stop. */
+		h->held++;
 	}
 }
 
-static unsigned cases;
-
-/* Attacks 1-4: malicious program on the WRITE stage; read stage correct. */
-static void run_nvme_attack(int srcng, int dstng, struct object *correct,
-			    struct object *malicious, const char *name,
-			    __u64 atk_slba, int want_last_err, bool want_reject,
-			    bool want_protocol)
+static void holder_start(struct holder *h, struct session *a, unsigned complete_first)
 {
+	memset(h, 0, sizeof(*h));
+	h->u = a->u;
+	h->complete_first = complete_first;
+	CHECK(!pthread_create(&h->thread, NULL, hold_thread, h), "attack: start the user thread");
+}
+
+static unsigned cases;
+static __u64 detach_done;	/* the detach attacker's completed batches */
+
+/*
+ * Attacks 1-4: malicious program on the attacker's WRITE stage, read stage
+ * correct. @victim_first: the victim completes its window before the attacker
+ * STARTs, so an accepted attacker write would land after the victim's data.
+ */
+static void run_nvme_attack(unsigned c, int srcng, int dstng, struct object *correct,
+			    struct object *malicious, int want_last_err, bool want_reject,
+			    bool want_protocol, bool victim_first)
+{
+	const char *name = case_name[c];
 	struct session v, a;
-	struct xdev_ext_mech_stats vs, as;
-	int rl, wl;
+	struct xdev_ext_mech_stats vs, as, vs2;
+	struct stage st[2];
 
-	victim_create(&v, srcng, dstng, correct);
+	victim_create(&v, c, srcng, dstng, correct);
 	ring_up(&a);
-	rl = link_fd(correct, &a.links[a.nr_links++]);
-	wl = link_fd(malicious, &a.links[a.nr_links++]);
-	CHECK(!create_programs(&a, srcng, SRC_SLBA, dstng, atk_slba, -1, rl, wl),
-	      "attack: CREATE_PROGRAMS with its own PRIVATE write program");
+	st[0] = nvme_read(srcng, atk_src(c), link_fd(&a, correct));
+	st[1] = nvme_write(dstng, atk_dst(c), link_fd(&a, malicious));
+	CHECK(!create_programs(&a, st, 2), "attack: CREATE_PROGRAMS with its own PRIVATE write program");
 
-	start(&v);
-	start(&a);
-	vs = wait_settled(&v);
-	as = wait_settled(&a);
-	print_stats("victim", &vs);
-	print_stats(name, &as);
-
-	CHECK(vs.batches_done == GROUPS && !vs.batches_abort && !vs.rejects &&
-	      !vs.protocol_err && !vs.timeouts && !vs.sequestered && !vs.last_err &&
-	      vs.state == XDEV_EXT_MECH_SESSION_ACTIVE,
-	      "victim completes every batch with zero aborts while the attack runs");
-	CHECK(as.batches_abort == GROUPS && !as.batches_done && !as.sequestered,
+	if (victim_first) {
+		start(&v);
+		vs = wait_settled(&v);
+		print_stats("victim (before the attacker starts)", &vs);
+		check_victim(&vs, "victim completes its window before the attacker starts");
+		start(&a);
+		as = wait_settled(&a);
+		stats(&v, &vs2);
+		print_stats("victim (after the attacker ran)", &vs2);
+		print_stats(name, &as);
+		CHECK(vs2.batches_done == vs.batches_done && vs2.batches_abort == vs.batches_abort &&
+		      vs2.rejects == vs.rejects && vs2.protocol_err == vs.protocol_err &&
+		      vs2.timeouts == vs.timeouts && vs2.sequestered == vs.sequestered &&
+		      vs2.inflight == vs.inflight && vs2.last_err == vs.last_err &&
+		      vs2.state == vs.state && vs2.submitted[1] == vs.submitted[1] &&
+		      vs2.completed[1] == vs.completed[1],
+		      "victim counters unchanged by the attacker's run");
+	} else {
+		start(&v);
+		start(&a);
+		wait_pair(&v, &a, name, &vs, &as);
+		print_stats("victim", &vs);
+		print_stats(name, &as);
+		check_victim(&vs, "victim completes every batch with zero aborts while the attack runs");
+	}
+	CHECK(as.batches_abort == GROUPS && !as.batches_done && !as.sequestered && !as.inflight,
 	      "attack: every batch is refused, none completes, nothing sequestered");
-	CHECK(as.last_err == want_last_err, "attack: stops with its declared reason");
+	CHECK(as.submitted[1] == 0 && as.completed[1] == 0,
+	      "attack: no write command of the attacker reached the device");
+	CHECK(as.last_err == want_last_err && as.state == XDEV_EXT_MECH_SESSION_ACTIVE,
+	      "attack: last_err latches its declared reason (session ACTIVE)");
 	if (want_reject)
 		CHECK(as.rejects == GROUPS, "attack: each bad SQE counts a reject");
 	if (want_protocol)
@@ -346,10 +475,7 @@ static void run_nvme_attack(int srcng, int dstng, struct object *correct,
 
 	stop_ok(&a, want_last_err, "attack: STOP returns the declared reason");
 	stop_ok(&v, 0, "victim: STOP releases the session (0)");
-	links_destroy(&a);
-	links_destroy(&v);
-	ring_down(&a);
-	ring_down(&v);
+	teardown(&v, &a);
 	printf("XDEV_EXT_ATTACK_CASE=PASS case=%s\n", name);
 	cases++;
 }
@@ -359,73 +485,84 @@ static void run_user_stall(int srcng, int dstng, struct object *correct, struct 
 {
 	struct session v, a;
 	struct xdev_ext_mech_stats vs, as;
-	struct holder h = {0};
-	int rl, ul;
+	struct holder h;
+	struct stage st[2];
 
-	victim_create(&v, srcng, dstng, correct);
+	victim_create(&v, C_USER, srcng, dstng, correct);
 	ring_up(&a);
-	{
-		struct xdev_ext_user_stage_opts o = XDEV_EXT_OPTS_INIT(xdev_ext_user_stage_opts,
-			.ring_fd = a.ring, .umem = a.pool, .entries = DEPTH);
-		CHECK(!xdev_ext_user_stage_open(&o, &a.u), "attack: open a USER stage fd");
-	}
-	rl = link_fd(correct, &a.links[a.nr_links++]);
-	ul = link_fd(userp, &a.links[a.nr_links++]);
-	CHECK(!create_programs(&a, srcng, SRC_SLBA, -1, 0, xdev_ext_user_stage_fd(a.u), rl, ul),
-	      "attack: CREATE_PROGRAMS NVMe READ -> USER (no write stage)");
+	user_open(&a);
+	st[0] = nvme_read(srcng, atk_src(C_USER), link_fd(&a, correct));
+	st[1] = user_stage(&a, USER_DEADLINE_MS, link_fd(&a, userp));
+	CHECK(!create_programs(&a, st, 2), "attack: CREATE_PROGRAMS NVMe READ -> USER (no write stage)");
 
-	h.u = a.u;
-	CHECK(!pthread_create(&h.thread, NULL, hold_thread, &h), "attack: start the holding user thread");
+	holder_start(&h, &a, 0);
 	start(&v);
 	start(&a);
-	vs = wait_settled(&v);
-	as = wait_settled(&a);
+	wait_pair(&v, &a, "user-stall", &vs, &as);
 	print_stats("victim", &vs);
 	print_stats("user-stall", &as);
 
-	CHECK(vs.batches_done == GROUPS && !vs.batches_abort && !vs.last_err,
-	      "victim completes every batch while the attacker's USER stage stalls");
-	CHECK(as.timeouts >= 1 && as.batches_abort >= 1 && as.last_err == -ETIMEDOUT &&
-	      !as.sequestered, "user-stall: held batch cancelled at its deadline (-ETIMEDOUT)");
+	check_victim(&vs, "victim completes every batch while the attacker's USER stage stalls");
+	CHECK(as.timeouts >= 1 && as.batches_abort == GROUPS && !as.batches_done &&
+	      as.last_err == -ETIMEDOUT && !as.sequestered && as.state == XDEV_EXT_MECH_SESSION_ACTIVE,
+	      "user-stall: held batches cancelled at their deadline (-ETIMEDOUT)");
 
 	stop_ok(&a, -ETIMEDOUT, "user-stall: STOP returns the deadline error");
-	/* STOP wakes next() with -ESHUTDOWN, so the holding thread returns. */
+	/* STOP wakes next() with an error, so the holding thread returns. */
 	pthread_join(h.thread, NULL);
-	CHECK(h.exit_code != 0, "user-stall: the held user thread left next() after STOP");
+	CHECK(h.exit_code != 0 && !h.completed, "user-stall: the user thread left next() after STOP");
 	stop_ok(&v, 0, "victim: STOP releases the session (0)");
-	links_destroy(&a);
-	links_destroy(&v);
-	ring_down(&a);
-	ring_down(&v);
+	teardown(&v, &a);
 	puts("XDEV_EXT_ATTACK_CASE=PASS case=user-stall");
 	cases++;
 }
 
-/* Attack 6: detach the attacker's own PRIVATE link while the session runs. */
-static void run_detach(int srcng, int dstng, struct object *correct)
+/*
+ * Attack 6: NVMe READ -> USER -> NVMe WRITE, all PRIVATE. The user thread
+ * completes DETACH_DONE batches and holds the next one, so the session is
+ * mid-run with a batch in flight; then the victim STARTs and the attacker
+ * detaches its write-stage link.
+ */
+static void run_detach(int srcng, int dstng, struct object *correct, struct object *userp)
 {
 	struct session v, a;
 	struct xdev_ext_mech_stats vs, as;
-	int rl, i;
 	struct bpf_link *wlink;
+	struct holder h;
+	struct stage st[3];
+	__u32 one = 0;
+	int i;
 
-	victim_create(&v, srcng, dstng, correct);
+	victim_create(&v, C_DETACH, srcng, dstng, correct);
 	ring_up(&a);
-	rl = link_fd(correct, &a.links[a.nr_links++]);
-	/* The write-stage link is detached mid-run; keep it separately. */
+	user_open(&a);
+	/* The write-stage link is detached mid-run; keep it outside a.links. */
 	wlink = bpf_map__attach_struct_ops(correct->map);
 	CHECK(wlink && !libbpf_get_error(wlink), "attack: attach the write-stage PRIVATE link");
-	CHECK(!create_programs(&a, srcng, SRC_SLBA, dstng, ATK6_SLBA, -1, rl, bpf_link__fd(wlink)),
-	      "attack: CREATE_PROGRAMS with a correct in-window write program");
+	st[0] = nvme_read(srcng, atk_src(C_DETACH), link_fd(&a, correct));
+	st[1] = user_stage(&a, DETACH_DEADLINE_MS, link_fd(&a, userp));
+	st[2] = nvme_write(dstng, atk_dst(C_DETACH), bpf_link__fd(wlink));
+	CHECK(!create_programs(&a, st, 3),
+	      "attack: CREATE_PROGRAMS NVMe READ -> USER -> NVMe WRITE, all PRIVATE");
+
+	holder_start(&h, &a, DETACH_DONE);
+	start(&a);
+	for (i = 0; i < WAIT_MS / 5; i++) {
+		stats(&a, &as);
+		if (as.batches_done >= DETACH_DONE && h.held >= 1)
+			break;
+		usleep(5000);
+	}
+	print_stats("detach (before the detach)", &as);
+	CHECK(as.state == XDEV_EXT_MECH_SESSION_ACTIVE && as.batches_done == DETACH_DONE &&
+	      !as.batches_abort && as.inflight >= 1 && h.held >= 1 && as.completed[2] == DETACH_DONE,
+	      "detach: attacker is mid-run (batches written, a batch held in flight)");
 
 	start(&v);
-	start(&a);
-	/* Retract the attacker's write-stage link immediately; admission closes. */
 	CHECK(!bpf_link__detach(wlink), "attack: detach the PRIVATE write link mid-run");
 	vs = wait_settled(&v);
 	for (i = 0; i < WAIT_MS / 5; i++) {
-		if (stats_of(a.ring, a.id, &as))
-			CHECK(0, "attack STATS while waiting");
+		stats(&a, &as);
 		if (as.state != XDEV_EXT_MECH_SESSION_ACTIVE && !as.inflight)
 			break;
 		usleep(5000);
@@ -433,30 +570,114 @@ static void run_detach(int srcng, int dstng, struct object *correct)
 	print_stats("victim", &vs);
 	print_stats("detach", &as);
 
-	CHECK(vs.batches_done == GROUPS && !vs.batches_abort && !vs.last_err,
-	      "victim completes every batch while the attacker detaches its link");
-	CHECK(as.last_err == -ECANCELED &&
+	check_victim(&vs, "victim completes every batch while the attacker detaches its link");
+	CHECK(as.last_err == -ECANCELED && !as.timeouts &&
 	      (as.state == XDEV_EXT_MECH_SESSION_STOPPING ||
-	       as.state == XDEV_EXT_MECH_SESSION_STOPPED),
-	      "detach: the session stops with -ECANCELED and admits no new batch");
-	/* No further admission: a START now is refused. */
+	       as.state == XDEV_EXT_MECH_SESSION_STOPPED) && !as.inflight,
+	      "detach: the retraction stops the session with -ECANCELED");
+	CHECK(as.batches_done == DETACH_DONE && as.completed[2] == DETACH_DONE &&
+	      as.batches_abort >= 1 && as.batches_done + as.batches_abort < GROUPS,
+	      "detach: the in-flight batch is cancelled and the remaining batches are never admitted");
+	detach_done = as.batches_done;
+	printf("# detach: sequestered=%llu (attacker pool only)\n", (unsigned long long)as.sequestered);
+	/* No further admission. An argument-invalid START fails its argument
+	 * check first; a valid one must hit the closed admission. */
 	{
-		struct xdev_ext_mech_start st2 = { .session_id = a.id, .nr_batches = 1,
+		struct xdev_ext_mech_start bad = { .session_id = a.id, .nr_batches = 1,
 			.first_seq = FIRST_KEY + GROUPS, .flags = XDEV_EXT_MECH_START_F_USER_FRAMES,
 			.nr_user_frames = a.nr_loan, .user_frames = (uintptr_t)a.frames };
-		CHECK(mech(a.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&st2) < 0,
-		      "detach: a new START is refused after retraction");
+		struct xdev_ext_mech_start st2 = { .session_id = a.id, .nr_batches = 1,
+			.first_seq = FIRST_KEY + GROUPS, .flags = XDEV_EXT_MECH_START_F_USER_FRAMES,
+			.nr_user_frames = 1, .user_frames = (uintptr_t)&one };
+		int r_bad = mech(a.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&bad);
+		int r = mech(a.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&st2);
+
+		printf("# detach: START nr_batches=1 nr_user_frames=%u -> %d; nr_user_frames=1 -> %d\n",
+		       a.nr_loan, r_bad, r);
+		CHECK(r_bad == -EINVAL, "detach: a START with mismatched frames is refused by its argument check (-EINVAL)");
+		CHECK(r == -ESHUTDOWN, "detach: a valid new START is refused by the closed admission (-ESHUTDOWN)");
 	}
 
 	stop_ok(&a, -ECANCELED, "detach: STOP returns -ECANCELED");
+	pthread_join(h.thread, NULL);
+	printf("# detach: user thread taken=%u completed=%u held=%u exit=%d\n",
+	       h.taken, h.completed, h.held, h.exit_code);
+	CHECK(h.exit_code != 0 && h.completed == DETACH_DONE,
+	      "detach: the user thread left next() after the stop");
 	stop_ok(&v, 0, "victim: STOP releases the session (0)");
 	bpf_link__destroy(wlink);
-	links_destroy(&a);
-	links_destroy(&v);
-	ring_down(&a);
-	ring_down(&v);
+	teardown(&v, &a);
 	puts("XDEV_EXT_ATTACK_CASE=PASS case=detach");
 	cases++;
+}
+
+/*
+ * The source disk is position-unique: the 8-byte word at byte offset o holds
+ * low32 = ((o / 512) << 7) | (((o % 512) / 8) << 1) | 1 and high32 = the seed
+ * (the high word of word 0). attack_kvm.sh writes it; attack_validate.py
+ * regenerates it.
+ */
+static void check_source(const unsigned char *src, __u64 bytes)
+{
+	__u32 seed, low, high;
+	__u64 o;
+
+	memcpy(&seed, src + 4, sizeof(seed));
+	for (o = 0; o < bytes; o += 8) {
+		memcpy(&low, src + o, sizeof(low));
+		memcpy(&high, src + o + 4, sizeof(high));
+		if (high != seed || low != (__u32)(((o / LBA) << 7) | (((o % LBA) / 8) << 1) | 1))
+			break;
+	}
+	printf("# source seed=0x%08x\n", seed);
+	CHECK(o == bytes, "source disk holds the position-unique pattern");
+}
+
+/*
+ * Whole-disk oracle: every victim window is an exact copy of its victim's
+ * source window; the detach attacker window holds exactly detach_done groups,
+ * each its own source group at the same slot, guard elsewhere; every other
+ * byte is guard.
+ */
+static void check_destination(const unsigned char *source, const unsigned char *dest, __u64 bytes)
+{
+	unsigned char *expect = malloc(bytes);
+	const unsigned char *own, *got;
+	__u64 lo, g, b, copied = 0;
+	unsigned c;
+
+	CHECK(expect, "oracle buffer");
+	memset(expect, GUARD, bytes);
+	for (c = 0; c < NR_CASES; c++)
+		memcpy(expect + vic_dst(c) * LBA, source + vic_src(c) * LBA, WIN_BYTES);
+	lo = atk_dst(C_DETACH) * LBA;
+	for (g = 0; g < GROUPS; g++) {
+		got = dest + lo + g * GROUP;
+		own = source + atk_src(C_DETACH) * LBA + g * GROUP;
+		if (!memcmp(got, own, GROUP)) {
+			memcpy(expect + lo + g * GROUP, own, GROUP);
+			copied++;
+		} else {
+			for (b = 0; b < GROUP && got[b] == GUARD; b++)
+				;
+			CHECK(b == GROUP, "detach attacker group is guard or its own source group at its slot");
+		}
+	}
+	printf("# oracle: detach attacker groups written=%llu\n", (unsigned long long)copied);
+	CHECK(copied == detach_done && copied == DETACH_DONE,
+	      "detach attacker window holds exactly its completed groups");
+	for (b = 0; b < bytes && dest[b] == expect[b]; b++)
+		;
+	if (b < bytes) {
+		__u64 w = b / WIN_BYTES;
+
+		printf("# oracle: first mismatch byte=%llu lba=%llu window=%llu (case %s, %s)\n",
+		       (unsigned long long)b, (unsigned long long)(b / LBA), (unsigned long long)w,
+		       w / 3 < NR_CASES ? case_name[w / 3] : "none",
+		       w / 3 < NR_CASES ? (const char *[]){ "attacker", "victim", "spare" }[w % 3] : "unused");
+	}
+	CHECK(b == bytes, "whole-disk oracle: victim windows exact, no attacker byte anywhere else");
+	free(expect);
 }
 
 int main(int argc, char **argv)
@@ -464,7 +685,7 @@ int main(int argc, char **argv)
 	struct rlimit lim = { RLIM_INFINITY, RLIM_INFINITY };
 	struct object correct, reserved, outside, frame, verdict, userp;
 	unsigned char *source, *dest, *dest_after;
-	__u64 src_bytes, dst_bytes, off, g, b;
+	__u64 src_bytes, dst_bytes, off;
 	int src, srcng, dst, dstng;
 
 	setbuf(stdout, NULL);
@@ -480,14 +701,11 @@ int main(int argc, char **argv)
 	dst = open_ok(argv[3], O_RDWR); dstng = open_ok(argv[4], O_RDWR);
 	CHECK(!ioctl(src, BLKGETSIZE64, &src_bytes) && !ioctl(dst, BLKGETSIZE64, &dst_bytes),
 	      "disk capacities");
-	CHECK(dst_bytes == src_bytes && dst_bytes >= DISK_LBAS * LBA,
-	      "bounded whole-disk comparison");
+	CHECK(src_bytes == SPAN && dst_bytes == SPAN, "whole-disk comparison over the exact image size");
 	source = malloc(src_bytes); dest = malloc(dst_bytes); dest_after = malloc(dst_bytes);
 	CHECK(source && dest && dest_after, "verification buffers");
 	CHECK(pread(src, source, src_bytes, 0) == (ssize_t)src_bytes, "read the source disk");
-	for (off = 1; off < src_bytes && source[off] == source[0]; off++)
-		;
-	CHECK(off < src_bytes, "source disk holds a nonuniform pattern");
+	check_source(source, src_bytes);
 	CHECK(pread(dst, dest, dst_bytes, 0) == (ssize_t)dst_bytes, "read the destination disk");
 	for (off = 0; off < dst_bytes && dest[off] == GUARD; off++)
 		;
@@ -500,46 +718,25 @@ int main(int argc, char **argv)
 	object_open(argv[5], "attack_verdict", &verdict);
 	object_open(argv[5], "attack_user", &userp);
 
-	run_nvme_attack(srcng, dstng, &correct, &reserved, "reserved", ATK1_SLBA, -EPERM, true, false);
-	run_nvme_attack(srcng, dstng, &correct, &outside, "outside", ATK2_SLBA, -ERANGE, true, false);
-	run_nvme_attack(srcng, dstng, &correct, &frame, "frame", ATK3_SLBA, -EPROTO, false, true);
-	run_nvme_attack(srcng, dstng, &correct, &verdict, "verdict", ATK4_SLBA, -ECANCELED, false, true);
+	run_nvme_attack(C_RESERVED, srcng, dstng, &correct, &reserved, -EPERM, true, false, false);
+	run_nvme_attack(C_OUTSIDE, srcng, dstng, &correct, &outside, -ERANGE, true, false, false);
+	run_nvme_attack(C_OUTSIDE_AFTER, srcng, dstng, &correct, &outside, -ERANGE, true, false, true);
+	run_nvme_attack(C_FRAME, srcng, dstng, &correct, &frame, -EPROTO, false, true, false);
+	run_nvme_attack(C_VERDICT, srcng, dstng, &correct, &verdict, -ECANCELED, false, true, false);
 	run_user_stall(srcng, dstng, &correct, &userp);
-	run_detach(srcng, dstng, &correct);
+	run_detach(srcng, dstng, &correct, &userp);
 
 	bpf_object__close(correct.obj); bpf_object__close(reserved.obj);
 	bpf_object__close(outside.obj); bpf_object__close(frame.obj);
 	bpf_object__close(verdict.obj); bpf_object__close(userp.obj);
 
-	/* Whole-disk oracle: the victim window is an exact copy of the source
-	 * read window; every byte outside it is guard, except the detach
-	 * attacker window which may hold completed source groups or guard. No
-	 * byte is anything else, proving no attacker reached the victim window. */
 	CHECK(!ioctl(dst, BLKFLSBUF), "invalidate the block cache before readback");
 	CHECK(pread(dst, dest_after, dst_bytes, 0) == (ssize_t)dst_bytes, "read back the destination");
-	for (g = 0; g < GROUPS; g++) {
-		unsigned char *f = dest_after + VIC_SLBA * LBA + g * GROUP;
-		CHECK(!memcmp(f, source + SRC_SLBA * LBA + g * GROUP, GROUP),
-		      "victim window group is an exact source copy");
-	}
-	for (b = 0; b < dst_bytes; b++) {
-		__u64 lba = b / LBA;
-		if (lba >= VIC_SLBA && lba < VIC_SLBA + WIN_NLB)
-			continue;			/* checked above */
-		if (lba >= ATK6_SLBA && lba < ATK6_SLBA + WIN_NLB) {
-			__u64 within = b - ATK6_SLBA * LBA;
-			if (dest_after[b] == GUARD || dest_after[b] == source[SRC_SLBA * LBA + within])
-				continue;		/* guard or a completed group byte */
-			CHECK(0, "detach attacker window holds only guard or its own source copy");
-		}
-		if (dest_after[b] != GUARD)
-			CHECK(0, "no byte outside the victim window changed");
-	}
-	CHECK(1, "whole-disk oracle: victim window exact, attacker windows never touched it");
+	check_destination(source, dest_after, dst_bytes);
 
 	close(src); close(srcng); close(dst); close(dstng);
 	free(source); free(dest); free(dest_after);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_ATTACK_ISOLATION=PASS cases=%u order=reserved,outside,frame,verdict,user-stall,detach timing=none\n", cases);
+	printf("XDEV_EXT_ATTACK_ISOLATION=PASS cases=%u order=reserved,outside,outside-after,frame,verdict,user-stall,detach timing=none\n", cases);
 	return 0;
 }

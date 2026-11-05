@@ -130,20 +130,36 @@ GUEST
 chmod 755 "$ROOT/init"
 (cd "$ROOT" && find . -print0 | cpio --null -o -H newc --quiet | gzip -1) >"$OUT/initramfs.cpio.gz"
 
-# Disk images, independent of QEMU: a deterministic nonuniform source and a
-# guard destination. The source pattern matches attack_validate.py's reads.
-python3 -I - "$OUT" <<'PY'
+# The oracle checks itself first: it must accept the expected image and reject
+# attacker bytes, misplaced or misordered victim groups and wrong detach output.
+TMPDIR=$OUT python3 -I "$SOURCE/tests/core/program_instances/attack/attack_validate_test.py" \
+    >"$EV/oracle-selftest.log" 2>&1 || { cat "$EV/oracle-selftest.log"; echo 'FAIL oracle self-test'; exit 1; }
+
+# Disk images, independent of QEMU: a position-unique source (the 8-byte word at
+# byte offset o holds low32 = (LBA << 7) | (word-in-LBA << 1) | 1 and high32 =
+# a random per-run seed) and a guard destination. attack_validate.py
+# regenerates the source from the seed; the guest checks the same formula.
+python3 -I - "$OUT" "$EV/source-seed.txt" <<'PY'
 from pathlib import Path
+import os
+import struct
 import sys
 out = Path(sys.argv[1])
 span = 4 << 20
-source = bytes((i * 31 + 7) & 0xff for i in range(span))
+seed = 0x6b6b6b6b
+while seed == 0x6b6b6b6b:
+    seed = int.from_bytes(os.urandom(4), 'little')
+source = bytearray(span)
+for o in range(0, span, 8):
+    struct.pack_into('<II', source, o, ((o // 512) << 7) | (((o % 512) // 8) << 1) | 1, seed)
 (out / 'source.raw').write_bytes(source)
 (out / 'source-before.raw').write_bytes(source)
 (out / 'destination.raw').write_bytes(bytes([0x6b]) * span)
+Path(sys.argv[2]).write_text('seed=0x%08x\n' % seed)
 PY
 sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" \
-    "$GUEST/attack_guest" "$GUEST"/attack_*.bpf.o "$OUT/source-before.raw" >"$EV/artifacts.sha256"
+    "$GUEST/attack_guest" "$GUEST"/attack_*.bpf.o "$OUT/source-before.raw" \
+    "$SOURCE/tests/core/program_instances/attack/attack_validate.py" >"$EV/artifacts.sha256"
 
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" ]] || { echo 'FAIL KVM/QEMU unavailable'; exit 1; }
 args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
@@ -173,10 +189,11 @@ python3 -I "$SOURCE/tests/core/program_instances/attack/attack_validate.py" \
     "$OUT/source-before.raw" "$OUT/destination.raw" >"$EV/whole-disk.json"
 grep -q '"state": "PASS"' "$EV/whole-disk.json" || { echo 'FAIL host whole-disk oracle rejected the run'; exit 1; }
 
+seed=$(sed -n 's/^seed=//p' "$EV/source-seed.txt")
 cat >"$EV/result.json" <<JSON
 {"scope":"attacker-victim program isolation, real QEMU NVMe, software correctness only",
  "test_commit":"$SHA","kernel_commit":"$BUILD_SHA","kernel_release":"$release",
- "qemu_exit":0,"timing":"none","hardware":false,"performance":false}
+ "source_seed":"$seed","qemu_exit":0,"timing":"none","hardware":false,"performance":false}
 JSON
 echo 'XDEV_EXT_ATTACK_KVM=PASS' | tee "$EV/verdict.txt"
 trap - EXIT
