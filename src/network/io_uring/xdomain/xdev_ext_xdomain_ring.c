@@ -607,7 +607,8 @@ static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf,
 	}
 	spin_unlock_irqrestore(&xl->lock, flags);
 	ep = xl->chan[m.channel].ep[to_rx];
-	if (ep && !ep->early)
+	/* A v2-envelope endpoint takes v1 control until its program pairs. */
+	if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))
 		xdev_ext_xd_class_ctl(ep->st, &m);
 	else if (!ep && m.type == XDEV_EXT_XD_RTS)
 		xdev_ext_xd_refuse_rts(xl, &m);
