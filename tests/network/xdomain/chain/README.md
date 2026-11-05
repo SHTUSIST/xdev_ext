@@ -77,6 +77,47 @@ In this mode the two pages of each half are contiguous in the device window,
 and the real NVMe SGL builder merges them into one 8 KiB data block; the
 device models check such an access page by page.
 
+## Host-page frames on both hosts (`--pool host`)
+
+With `--pool host`, each endpoint's frame memory is its ring's IOU_UMEM pool
+(obligation 42-XDOMAIN-HOST: the XDOMAIN class carries host pages, not only
+PEER device memory). Production code added to the composition in this mode:
+
+- the IOU_UMEM pool provider block of `io_uring/xdev_ext_umem.c`, from
+  `struct io_xdev_ext_umem_mech` to `io_xdev_ext_umem_mech_pool_bind()`, with a
+  fixture registration that stands in for `IORING_REGISTER_XDEV_EXT_UMEM`;
+- `xdev_ext_mech_take_user_frames()`, through which START lends the UMEM
+  frames (`USER_FRAMES | RECYCLE`; the admission and publication around that
+  call follow `xdev_ext_mech_start()` in `chain_core.c.in`);
+- the requester unit `io_uring/family/xdev_ext_requester.c`, compiled in the
+  stack environment, which maps every pool page for each NHI. Its DMA API
+  calls go to `chain_boundary.c`, which maps a page into that NHI's own window
+  and records each map, unmap and sync. Both NHIs report that they need CPU
+  synchronization, as a non-coherent controller would;
+- the storage family's bio path for the NVMe stages. The NVMe model maps each
+  bio piece into the controller's window when the request is submitted and
+  unmaps it when the request ends, as nvme-pci does with the DMA API.
+
+The family unit's calls to the requester's host lease and release go through
+`chain_boundary.c`, which forwards them unchanged and keeps each granted
+element as a live NHI lease for the device model. It also checks that the
+address the requester returned is the NHI's mapping of exactly that pool page
+and offset. After a run, the frames are back with user space (the START with
+`RECYCLE` returns them when it drains), not in the kernel pool.
+
+The eleven cases below run unchanged in this mode, with the requester checks
+of `up()` replaced: an NVMe stage binds no requester (the block layer maps
+each request), and each XDOMAIN stage binds its own NHI, whose bind reports
+host RAM with struct pages and a host DMA-API mapping and maps every pool page
+once, in the stage direction, without CPU sync. Four cases run only here:
+
+| Case | Requirement |
+| --- | --- |
+| `host_sync_order` | every TX element is synchronized for the NHI after its lease and before its descriptor post; every RX buffer is synchronized for the NHI before its post and for the CPU after the link wrote it and before host 2's NVMe WRITE of that group is submitted; TX elements are never synchronized for the CPU; no mapping is unmapped while bound |
+| `host_sync_order_early` | the same, with both XDOMAIN stages in EARLY mode |
+| `host_unknown_retained` | host 1's TX descriptors never complete, then STOP: after the one-second STOP bound the batch ends with unknown device access, its frames are sequestered, its NHI host leases are retained, the NHI mapping is never unmapped, nothing is synchronized for the CPU, and the XDOMAIN stage's checked unbind returns `-EIO` |
+| `host_misaligned_refused` | a UMEM registered 256 bytes into a page: CREATE fails with the requester's `-EINVAL` on both hosts and nothing is mapped |
+
 ## Cases
 
 | Case | Requirement |
@@ -119,6 +160,13 @@ failures do not count.
 | `drain-in-completion-context` | the core continues an NVMe completion in the completion context | `chain_same_worker` |
 | `tx-wrong-frame` | TX leases swap the two frames of a group | `chain_same_worker` |
 | `dmabuf-lease-first-mapping` | (`--pool dmabuf`, set automatically) a host 1 lease uses the first attachment made, not its own device's | `chain_same_worker` |
+| `host-release-always-quiesced` | (`--pool host`, set automatically, as for the rows below) the family releases a host lease as quiesced even after unknown device access | `host_unknown_retained` |
+| `host-unbind-checked-passes` | the XDOMAIN checked unbind always allows release | `host_unknown_retained` |
+| `host-no-device-sync` | the requester's lease no longer syncs for the device | `host_sync_order` |
+| `host-no-cpu-sync` | a quiesced RX release no longer syncs for the CPU | `host_sync_order` |
+| `host-post-peer-address` | the NHI descriptor takes the PEER lease field for every element | `chain_same_worker` |
+| `host-lease-wrong-frame` | TX host leases name the other frame of the group | `chain_same_worker` |
+| `host-peer-member` | an IOU_UMEM stage uses the PEER member, whose leases need a PEER authority | `chain_same_worker` |
 
 ## Observation reported, not asserted
 
