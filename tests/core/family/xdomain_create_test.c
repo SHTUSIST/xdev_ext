@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Frozen X1 §4.1/X1: adding one NETWORK row admits only PEER XDOMAIN I/O.
+/* Frozen X1 §4.1/X1: adding one NETWORK row admits PEER XDOMAIN I/O.
+ * 42-XDOMAIN-HOST (ASK.43 option b) extends the row to IOU_UMEM host-page
+ * frames for both directions; an AF_XDP (XSK) pool stays refused.
  * Catch a missing/wrong row, broadened flags/pools/roles and ABI drift.
  * Pure rules only; no native-I/O, verifier or hardware claim.
  */
@@ -72,10 +74,25 @@ int main(void)
 		c.st[1].flags = 1U << bit;
 		EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	}
+	/* Host pages: NVMe READ -> XDOMAIN TX at stage 1 on the ring's UMEM. */
 	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM; c.pool_fd = -1;
-	EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP);
+	frames = UINT32_MAX;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	EQ(frames, 2);
+	/* Host pages: XDOMAIN RX at stage 0 -> NVMe WRITE. */
+	c.st[0] = request().st[1]; c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	c.st[1] = request().st[0]; c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	frames = UINT32_MAX;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	EQ(frames, 2);
+	/* The generic UMEM rule still applies: the UMEM is not an fd. */
+	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM; c.pool_fd = 3;
+	EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
 	EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP);
+	/* An XSK pool is refused by the XDOMAIN row, after the generic flag rule. */
+	c.st[1].flags = 1U << 24;
+	EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	c = request(); c.st[0] = c.st[1];
 	c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
 	c.st[1] = request().st[0]; c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
@@ -84,7 +101,7 @@ int main(void)
 	EQ(xdev_ext_mech_stage_role(&c.st[1]), XDEV_EXT_MECH_ROLE_CONSUMER);
 	EQ(xdev_ext_mech_peer_dirs(11), 6);
 	EQ(xdev_ext_mech_class_family(11), XDEV_EXT_FAMILY_NETWORK);
-	EQ(d->family, 1); EQ(d->peer_dirs, 6); EQ(d->peer_only, 1);
+	EQ(d->family, 1); EQ(d->peer_dirs, 6); EQ(d->peer_only, 0);
 	EQ(d->known_flags, 3); EQ(d->flags_later, 0);
 	EQ(d->role_rule, 1); EQ(d->ctx_rule, 4); EQ(d->no_file, 0);
 	EQ(d->flags_ok == NULL, 1);
