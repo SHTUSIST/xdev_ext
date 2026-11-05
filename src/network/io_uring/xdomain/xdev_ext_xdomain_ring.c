@@ -317,7 +317,7 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 		struct ring_frame *f = xdev_ext_xd_frame(&e[i]);
 
 		*f = (struct ring_frame){
-			.buffer_phy = e[i].lease.u.peer.lease.dma_address,
+			.buffer_phy = xdev_ext_net_elem_dma(&e[i]),
 			.callback = rx ? xdev_ext_xd_rx_cb : xdev_ext_xd_tx_cb,
 			.size = rx || e[i].len == XDEV_EXT_XDOMAIN_MAX_FRAME ? 0 : e[i].len,
 			.sof = XDEV_EXT_XD_PDF_START,

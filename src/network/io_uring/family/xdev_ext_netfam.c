@@ -32,7 +32,8 @@ int xdev_ext_netfam_init(struct xdev_ext_netfam_stage *ns, struct xdev_ext_mech_
 	    (!m->local || !m->withdraw || !m->link_fail))
 		return -EINVAL;
 	if (m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA &&
-	    m->lease_kind != XDEV_EXT_NET_LEASE_HOST_CPU)
+	    m->lease_kind != XDEV_EXT_NET_LEASE_HOST_CPU &&
+	    m->lease_kind != XDEV_EXT_NET_LEASE_HOST_DMA)
 		return -EINVAL;
 	ns->st = st;
 	ns->m = m;
@@ -134,6 +135,26 @@ int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_
 
 	if (i >= ns->max_elems || !len || buf_len < len)
 		return -EPROTO;
+	if (ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA) {
+		dma_addr_t dma;
+
+		/* @off is the pool offset; the requester's host mapping checks the
+		 * span lies in one page and one frame and syncs for the device. */
+		e = &slot->elem[i];
+		ret = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,
+						    ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &dma);
+		if (ret)
+			return ret;
+		e->lease.u.hdma.dma = dma;
+		e->lease.u.hdma.len = buf_len;
+		e->lease.kind = XDEV_EXT_NET_LEASE_HOST_DMA;
+		e->slot = slot;
+		e->len = len;
+		e->buf_len = buf_len;
+		if (i + 1 > slot->nr)
+			slot->nr = i + 1;
+		return 0;
+	}
 	if (ns->m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA)
 		return -EPROTO;
 	e = &slot->elem[i];
@@ -263,6 +284,15 @@ void xdev_ext_netfam_release(struct xdev_ext_net_slot *slot, bool quiesced)
 				lease->u.host.len = 0;
 				lease->kind = XDEV_EXT_NET_LEASE_NONE;
 			}
+			continue;
+		}
+		if (lease->kind == XDEV_EXT_NET_LEASE_HOST_DMA) {
+			/* An unquiesced end keeps the whole host mapping, as an
+			 * unquiesced PEER release quarantines its region. */
+			xdev_ext_requester_host_release(&slot->ns->rq, lease->u.hdma.dma,
+							lease->u.hdma.len, quiesced);
+			memset(&lease->u.hdma, 0, sizeof(lease->u.hdma));
+			lease->kind = XDEV_EXT_NET_LEASE_NONE;
 			continue;
 		}
 		if (lease->kind != XDEV_EXT_NET_LEASE_PEER_DMA)

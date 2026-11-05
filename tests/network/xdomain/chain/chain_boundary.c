@@ -33,6 +33,9 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #define xdev_ext_peer_control_file stackfake_peer_control_file
 #define xdev_ext_requester_bind stackfake_requester_bind
 #define xdev_ext_requester_unbind stackfake_requester_unbind
+#define xdev_ext_requester_host_lease stackfake_requester_host_lease
+#define xdev_ext_requester_host_release stackfake_requester_host_release
+#define xdev_ext_requester_host_settled stackfake_requester_host_settled
 #define xdev_ext_mech_session_pool stackfake_session_pool
 #define xdev_ext_mech_session_layout stackfake_session_layout
 #define xdev_ext_mech_session_depth stackfake_session_depth
@@ -72,6 +75,9 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #undef xdev_ext_peer_control_file
 #undef xdev_ext_requester_bind
 #undef xdev_ext_requester_unbind
+#undef xdev_ext_requester_host_lease
+#undef xdev_ext_requester_host_release
+#undef xdev_ext_requester_host_settled
 #undef xdev_ext_mech_session_pool
 #undef xdev_ext_mech_session_layout
 #undef xdev_ext_mech_session_depth
