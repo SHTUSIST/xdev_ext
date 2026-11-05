@@ -37,10 +37,11 @@
 #define ATK_FIRST_KEY 1
 #endif
 
-/* Build an in-window READ/WRITE for this batch's group slot. Shared by the
- * correct program and by RESERVED (which then dirties one reserved dword). */
-static __always_inline __s32 attack_build_inwindow(const struct xdev_ext_mech_ctx *mctx,
-						   __u8 **out_sqe)
+/* Build a READ/WRITE for this batch's group slot. @mode is WINDOW for a valid
+ * in-window SQE or OUTSIDE for one placed one window past the bound window
+ * (which C must refuse). Shared by every program variant. */
+static __always_inline __s32 attack_build_sqe(const struct xdev_ext_mech_ctx *mctx,
+					      __u32 mode, __u8 **out_sqe)
 {
 	const struct xdev_ext_nvme_mech_info *info;
 	__u64 key = mctx->base.src_offset;
@@ -59,8 +60,7 @@ static __always_inline __s32 attack_build_inwindow(const struct xdev_ext_mech_ct
 		return XDEV_EXT_MP_BUILD_ABORT;
 	if (xdev_ext_mp_nvme_slba(info->window_slba, info->window_nlb,
 				  info->lba_shift, info->l.group_bytes,
-				  key - ATK_FIRST_KEY, XDEV_EXT_MP_NVME_MODE_WINDOW,
-				  &slba) ||
+				  key - ATK_FIRST_KEY, mode, &slba) ||
 	    xdev_ext_mp_nvme_rw(sqe, mctx->base.direction, slba,
 				(__u32)info->l.group_bytes, info->lba_shift))
 		return XDEV_EXT_MP_BUILD_ABORT;
@@ -76,50 +76,30 @@ __s32 BPF_PROG(attack_build, const struct xdev_ext_mech_ctx *mctx)
 
 	(void)ctx;
 #if ATK_MODE == ATK_OUTSIDE
-	{
-		const struct xdev_ext_nvme_mech_info *info;
-		__u64 slba;
-
-		if (mctx->base.src_offset < ATK_FIRST_KEY)
-			return XDEV_EXT_MP_BUILD_ABORT;
-		info = (const void *)bpf_xdev_ext_info(mctx, sizeof(*info));
-		if (!info || !info->l.group_bytes ||
-		    mctx->base.length != info->l.group_bytes)
-			return XDEV_EXT_MP_BUILD_ABORT;
-		sqe = bpf_xdev_ext_desc(mctx, 0, XDEV_EXT_MP_NVME_DESC_SIZE);
-		if (!sqe)
-			return XDEV_EXT_MP_BUILD_ABORT;
-		/* One window past the bound window: C must refuse (-ERANGE). */
-		if (xdev_ext_mp_nvme_slba(info->window_slba, info->window_nlb,
-					  info->lba_shift, info->l.group_bytes,
-					  mctx->base.src_offset - ATK_FIRST_KEY,
-					  XDEV_EXT_MP_NVME_MODE_OUTSIDE, &slba) ||
-		    xdev_ext_mp_nvme_rw(sqe, mctx->base.direction, slba,
-					(__u32)info->l.group_bytes, info->lba_shift))
-			return XDEV_EXT_MP_BUILD_ABORT;
-		return XDEV_EXT_MP_BUILD_SUBMIT;
-	}
-#elif ATK_MODE == ATK_FRAME
+	/* One window past the bound window: C must refuse (-ERANGE). */
+	ret = attack_build_sqe(mctx, XDEV_EXT_MP_NVME_MODE_OUTSIDE, &sqe);
+	return ret;
+#else
+	ret = attack_build_sqe(mctx, XDEV_EXT_MP_NVME_MODE_WINDOW, &sqe);
+#if ATK_MODE == ATK_FRAME
 	/* A view one byte past the first frame latches a protocol error; the
 	 * callback then fails regardless of this returned verdict. */
 	(void)bpf_xdev_ext_frame_crc32c(mctx, 0, 1, (__u32)mctx->base.length, 0);
-	ret = attack_build_inwindow(mctx, &sqe);
 	return ret;
 #elif ATK_MODE == ATK_VERDICT
 	/* An out-of-range build verdict; C replaces it with ABORT. */
-	ret = attack_build_inwindow(mctx, &sqe);
 	if (ret != XDEV_EXT_MP_BUILD_SUBMIT)
 		return ret;
 	return 7;
-#else
-	ret = attack_build_inwindow(mctx, &sqe);
+#elif ATK_MODE == ATK_RESERVED
+	/* Dirty one reserved dword of an otherwise valid SQE: C refuses it. */
 	if (ret != XDEV_EXT_MP_BUILD_SUBMIT)
 		return ret;
-#if ATK_MODE == ATK_RESERVED
-	/* Dirty one reserved dword of an otherwise valid SQE: C refuses it. */
 	xdev_ext_mp_nvme_set_reserved(sqe);
-#endif
 	return XDEV_EXT_MP_BUILD_SUBMIT;
+#else
+	return ret;
+#endif
 #endif
 }
 

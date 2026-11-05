@@ -360,14 +360,15 @@ static void run_user_stall(int srcng, int dstng, struct object *correct, struct 
 	struct session v, a;
 	struct xdev_ext_mech_stats vs, as;
 	struct holder h = {0};
-	struct xdev_ext_user_stage_opts o;
 	int rl, ul;
 
 	victim_create(&v, srcng, dstng, correct);
 	ring_up(&a);
-	o = (struct xdev_ext_user_stage_opts)XDEV_EXT_OPTS_INIT(xdev_ext_user_stage_opts,
-		.ring_fd = a.ring, .umem = a.pool, .entries = DEPTH);
-	CHECK(!xdev_ext_user_stage_open(&o, &a.u), "attack: open a USER stage fd");
+	{
+		struct xdev_ext_user_stage_opts o = XDEV_EXT_OPTS_INIT(xdev_ext_user_stage_opts,
+			.ring_fd = a.ring, .umem = a.pool, .entries = DEPTH);
+		CHECK(!xdev_ext_user_stage_open(&o, &a.u), "attack: open a USER stage fd");
+	}
 	rl = link_fd(correct, &a.links[a.nr_links++]);
 	ul = link_fd(userp, &a.links[a.nr_links++]);
 	CHECK(!create_programs(&a, srcng, SRC_SLBA, -1, 0, xdev_ext_user_stage_fd(a.u), rl, ul),
@@ -388,8 +389,9 @@ static void run_user_stall(int srcng, int dstng, struct object *correct, struct 
 	      !as.sequestered, "user-stall: held batch cancelled at its deadline (-ETIMEDOUT)");
 
 	stop_ok(&a, -ETIMEDOUT, "user-stall: STOP returns the deadline error");
-	CHECK(pthread_cancel(h.thread) == 0 || 1, "user-stall: cancel the holding thread");
+	/* STOP wakes next() with -ESHUTDOWN, so the holding thread returns. */
 	pthread_join(h.thread, NULL);
+	CHECK(h.exit_code != 0, "user-stall: the held user thread left next() after STOP");
 	stop_ok(&v, 0, "victim: STOP releases the session (0)");
 	links_destroy(&a);
 	links_destroy(&v);
