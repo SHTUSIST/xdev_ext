@@ -18,14 +18,17 @@ def required_sources(source_root: Path) -> list[Path]:
     names = ['check_contract.c', 'epoch_control.c', 'gpu_adapter.cc',
              'agent_supervisor.cc', 'xdomain_agent.cc', 'xdomain_gpu_pattern.cu',
              'xdomain_gpu_pattern.h', 'check_contract.h', 'epoch_control.h',
-             'gpu_adapter.h', 'agent_supervisor.h', 'observer_contract.h',
+             'gpu_adapter.h', 'agent_supervisor.h',
              'native_trace_owner.cc', 'native_trace_owner.h',
              'platform_facts.py', 'native_barrier.py', 'action_provider.py',
              'check_protocol.py']
     abi_names = ['xdev_ext_mech.h', 'xdev_ext_policy.h',
                  'xdev_ext_binding.h', 'xdev_ext_peer.h', 'io_uring.h']
     uapi = source_root.parents[2] / 'kernel/include/uapi/linux'
+    observer = source_root.parents[2] / (
+        'kernel/tools/testing/selftests/xdev_ext_eval/xdomain/observer_contract.h')
     return ([source_root / name for name in names] +
+            [observer] +
             [uapi / name for name in abi_names])
 
 
@@ -120,7 +123,9 @@ def main():
                 receipt['sdk']['cuda_version'] = int(match.group(1))
                 break
     sdk_includes = ['-I' + str(header.parent), '-I' + str(source)]
-    includes = sdk_includes + ['-iquote' + str(repo / 'kernel/include/uapi')]
+    includes = sdk_includes + [
+        '-iquote' + str(repo / 'kernel/include/uapi'),
+        '-iquote' + str(repo / 'kernel/tools/testing/selftests/xdev_ext_eval/xdomain')]
     bpf_flags = shlex.split(bpf['stdout'])
     ptx = out / 'xdomain_gpu_pattern.ptx'
     executable = out / 'xdomain_agent'

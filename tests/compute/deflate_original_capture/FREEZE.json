@@ -1,0 +1,87 @@
+{
+  "status": "TESTS_READY_SOURCE_ONLY_NOT_COMPILED_OR_EXECUTED",
+  "source_root": "/root/xdev_ext/staging/recovery-20261031/wt-integration",
+  "baseline_inputs": {
+    "src/core/include/uapi/linux/io_uring.h": "2cbfbf9c39ac52de8d194b945a82ba3ffab9a5e58ce8da7e33a28732ba05964d",
+    "src/core/include/uapi/linux/xdev_ext_mech.h": "48c55c8121fd27c873d24a8cff9fd7eebb22fa27fe1e86d05918de85c19228d2",
+    "src/core/include/uapi/linux/xdev_ext_binding.h": "b068c393bf031e64b47700efa352a3fa3166ceb54948d56e92a3ae7cd64eabef",
+    "src/core/include/linux/xdev_ext_mech.h": "8d01d88b3371d1bfda6c09204104c56e99ca76736b072aa95475f6fb6fd0b891",
+    "src/compute/include/linux/xdev_ext_compfam.h": "5244b6a53a0456fcf4d53913243c5c7cb1ba6fc8f766118bcc4c789d16a7a329",
+    "src/core/include/linux/xdev_ext_family_core.h": "02403174cb8755b7e3d4827e45e61b49a044055bdb5a536eadf5097c76e7a86e",
+    "src/core/io_uring/xdev_ext_mech.c": "18362d932058d45b8e43b636050707db26dc0967dc3f9acec83b88bac0d5f546",
+    "src/core/io_uring/xdev_ext_mech_ops.c": "f3bd415d0667dcbe566adf5b1cff5c93b7d3f47c85ca44e6e502a6fd28b0a996",
+    "src/core/io_uring/xdev_ext_mech_user.c": "7b79aa4503b3a873e86ae106134aec5d95ff4110c8733071a89e168b3cbed52f",
+    "src/core/io_uring/xdev_ext_mech_core.h": "e3ccd8aeb07a65ec363d88423eaa3588abffb07437a64273c890335fc653f956",
+    "src/compute/io_uring/xdev_ext_mech_cpu.c": "32e4e474945f2fe8e57eac95e82016aa97bd531f1d712b292f00b1bb710593df",
+    "src/compute/io_uring/xdev_ext_mech_cpu_core.h": "cbf9c8ed3c1e892ce5dd0ebbc6a85961687a8a0a5eef5d54c5a9157901e068f3",
+    "src/compute/io_uring/iaa/xdev_ext_mech_iaa.c": "db07f994fcdbec5d3c75c36d0a55dd46b3812f997d6993e525a0ba2784a9478c",
+    "third_party/sources.lock.json": "a0efa7d6117b8a10d9da2e8f127d7a981f377328ac3ff76fad69f4e429d3ed37"
+  },
+  "test_files": {
+    "CONTRACT.md": "3324c00bd380ce41d771d4b62431fc4f3524842ba7617f78fb5164b0af054100",
+    "PLAN.md": "5fe3c4d04c5621b4c6fc94364ecd04621cbe64ee2e5ecc61cd13beb881313be7",
+    "README.md": "43fe3d1e81d89e679b090f34ca3e8b6946ded718088280ca711ae686dee05d44",
+    "build.sh": "1ea29e403e1cf2155e5fad4c8c3f19ad38be2bc16764753c6e3be6ba98b9748a",
+    "capture.c": "1c8129a35961d9f525a2fd42e4339b73c04975dfca8d1b6a630da706be229aa6",
+    "plans.bpf.c": "5ec7165027a073016f6bf80b485f38ce28103c35938ba95e39fe0362defcd0d2",
+    "run-guest.sh": "0894baf04c0bdb8e02f7991797c4b512a5d46dd487cf32aa928b2bfdfdb0bf9e",
+    "stage-profile.sh": "eb1d056d62e0f19a41775b658120cb1a6fc0d513188b3ffc387be7a68ff08745",
+    "upstream-claims.jsonl": "b48c233d35f907be6f2123ad38c60c39463637e6247eafd1b5dfba469b9366a6",
+    "verify-capture.py": "99547797f086965e8ef94d6e6686bd5efeea38c293b390192fe9ac37d1b407a9"
+  },
+  "expected_compressed_bytes": null,
+  "baseline_original_must_be_actual_unchanged_production": true,
+  "input": {
+    "bytes": 4096,
+    "formula": "(((i%64)*13+7)^(((i//64)%7)*29))&255"
+  },
+  "execution_owner": "root",
+  "producer_visibility": "Independent test/evidence; do not deliver this oracle boundary to future COMP-4 producer",
+  "retry2_provenance": {
+    "preimages": "retry2/v1",
+    "v1_freeze_sha256": "670fdda2cde6d7ccd2b3e50b2e35e60b6d143a9e281bf81ac7123ecbc317f312",
+    "production_inputs": "inherited from v1; root must verify actual files",
+    "files": {
+      "PLAN.md": "005208add6fe648012b93201d4f5a026158e321fa6303278f417a68ba6d52e4b",
+      "HANDOFF.md": "9a9f363ff48e8cc706a9d3de2e4e209950c425e9633d1ad4434e3792ebac9e2d",
+      "source.diff": "a4f903d8ff2fa87d59a557a12105ae97c55a91b768b3cc5a03e916393e767522"
+    }
+  },
+  "retry3_provenance": {
+    "preimages": "retry3/v2",
+    "v2_freeze_sha256": "03a87d98a1565fd313ced44c7a86fd2c8779d0a0f24e4885894ea5178fe8b045",
+    "production_inputs": "inherited unchanged; no production-source reread in restricted retry",
+    "files": {
+      "PLAN.md": "eb8c98764994bb8eae99c490421460d95efb3989babd17be85518c90a286da6b",
+      "HANDOFF.md": "731d8142bfbd4b8059e856aa89d010cb82bfd2f4ffe145617a465ff06f2f18d2",
+      "source.diff": "2e8d3647d647dbc986226e327a3b74d8e25b3d0293bdc50ce5199a824a8d7ca6"
+    }
+  },
+  "retry4_provenance": {
+    "preimages": "retry4/v3",
+    "v3_freeze_sha256": "580b8016d4780687f758eb86be80c47f0656a50ac4cca1ba364e65f6c549a6ac",
+    "first_candidate_preimages": "retry4/first-candidate",
+    "first_candidate_freeze_sha256": "a1bdbc693b053cdcfecedfea3b75a94b0e0f7e235442d6c6cac46996466b1239",
+    "production_inputs": "inherited unchanged from exact v3 freeze; no production-source reread in restricted retry4",
+    "status": "SOURCE_READY_ONLY_FRESH_SPEC_THEN_QUALITY_AND_ROOT_RUNTIME_GATES_PENDING",
+    "files": {
+      "PLAN.md": "224b45e26c11cc9f7a0bd0b8ddddd749d80184c76ccfedb725be40037eb4fb3a",
+      "HANDOFF.md": "b40fb53f86fe97e8aa88b9a913f909edd21a9b62f11d8a7f1065c2fd816edaf9",
+      "source.diff": "91103ce3a5117e59cf4c294f02aca580753136981e7f90b4827826f3b4eee0a6",
+      "v3/MANIFEST.json": "ad5bdcb52e944d07daa5185c9c66dcba577f94082472768e10a8fee1c70feffe",
+      "first-candidate/MANIFEST.json": "d586e83bc8f35f1d98325fdf73d5987f5697e3c0d3b01e76ddca605143ff3a36"
+    }
+  },
+  "publication_profile_fix": {
+    "scope": "stage existing profile also supplies id busybox applet required by unchanged run-guest.sh",
+    "previous_public_commit": "3c183548125a95070543328c7887f72ab61d4f5b",
+    "source_evidence": "actual prepared session-programs-user.2uisAmlB/initroot lacks bin/id; stage-profile already supplies other required busybox symlinks",
+    "no_native_or_parser_bytes_changed": true
+  },
+  "publication_btf_grep_fix": {
+    "scope": "BTF NUL-separated strings checked with existing BusyBox grep -zqF; names and failure path unchanged",
+    "previous_public_commit": "dbd96e5c2b9f919ac015883c29a8ef4d9bbabedf",
+    "evidence": "ROOT-CHARACTERIZATION.json actual native27 BTF:3present false negatives corrected;missing name rejected withboth modes",
+    "other_native_parser_and_production_bytes_unchanged": true
+  }
+}
