@@ -110,8 +110,9 @@ announced would take the receive batch it leaves (an RTS goes to the oldest
 ARMED batch). RX batches are never ready: one RX batch at a time is in the RX
 stage, so the single posted group above and the binding of each RTS to the
 next receive batch in key order are unchanged, while up to W received groups
-wait for their consumer and final reply. The wire format is unchanged;
-several data channels are a separate change.
+are in the RX stage or its consumer (their ACK or FAIL follows the end of
+their chain). The wire format is unchanged; several data channels are a
+separate change.
 
 Startup data verification requires LOGIN protocol version 3 and the mandatory
 DATA_CHALLENGE capability. Version 2 peers are refused. The existing link `up`

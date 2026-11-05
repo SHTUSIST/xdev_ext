@@ -889,11 +889,12 @@ struct xdev_ext_mech_stats {
  * attribute, and the low 32 bits of arg1 are its data channel (0 in this
  * version). Bits 32..63 of arg1 are the stage's in-flight window W: a
  * TO_DEVICE stage keeps at most W groups of the session announced and not
- * finished, and a FROM_DEVICE stage at most W groups between its receive and
- * their final reply (ACK or FAIL). 0 and 1 mean one group, as before the
- * window existed; at most XDEV_EXT_XDOMAIN_MAX_WINDOW. Groups still leave in
- * key order, data is still posted only after the peer posted buffers for that
- * group, and the receiver still posts one group's buffers at a time.
+ * finished, and a FROM_DEVICE stage at most W groups between entering it and
+ * the end of their chain on this host (the ACK or FAIL follows that end).
+ * 0 and 1 mean one group, as before the window existed; at most
+ * XDEV_EXT_XDOMAIN_MAX_WINDOW. Groups still leave in key order, data is
+ * still posted only after the peer posted buffers for that group, and the
+ * receiver still posts one group's buffers at a time.
  * TO_DEVICE sends and FROM_DEVICE receives device-memory leases for the NHI.
  * Protocol messages use a separate host-memory control ring. Local TX
  * completion proves only that the local NHI finished reading; REMOTE_ACKED

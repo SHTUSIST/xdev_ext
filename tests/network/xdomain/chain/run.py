@@ -33,7 +33,8 @@ BASE_CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done
 # NAME_early: both XDOMAIN stages in EARLY mode (paired receive grants).
 # NAME_wN: both XDOMAIN stages with an in-flight window of N groups (arg1 bits 32..63).
 WINDOWS = ('_w2', '_w4')
-WINDOW_CASES = ('window_fills_w2', 'window_fills_w4', 'window_waits_for_receiver', 'window_refills_receiver')
+WINDOW_CASES = ('window_fills_w2', 'window_fills_w4', 'window_waits_for_receiver', 'window_refills_receiver',
+                'window_stop_unknown')
 CASES = (BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',) +
          tuple(c + w for w in WINDOWS for c in BASE_CASES) +
          tuple(c + w + '_early' for w in WINDOWS for c in BASE_CASES) +
@@ -149,6 +150,12 @@ MUTATIONS = {
         ('io_uring/xdev_ext_mech.c',
          ' for (i = 0; i < s->nr_stages; i++)\n  if (s->st[i].order_window > 1) {\n'
          '   xdev_ext_mech_order_kick(s);\n   break;\n  }\n', '')]),
+    # STOP: a slot whose native TX completion is unknown is published as if
+    # quiesced, so its frames could be reused (existing rule, W groups at once).
+    'stop-unknown-reused': dict(case='window_stop_unknown', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         'xdev_ext_netfam_publish_locked(&xs->ns, s, s->local_status ? s->local_status : -ENOLINK, !s->local_quiesced);',
+         'xdev_ext_netfam_publish_locked(&xs->ns, s, s->local_status ? s->local_status : -ENOLINK, false);')]),
     # The class accepts the window but does not hand it to the core.
     'window-bind-ignored': dict(case='window_fills_w2', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',

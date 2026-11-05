@@ -735,6 +735,44 @@ static void window_next_after_cts(void)
 	}
 }
 
+/* STOP while W groups are in flight and host 1's TX completions are held, so
+ * their local native outcome is unknown: no group is reported delivered and
+ * no frame of those groups returns to the pool or is leased again. */
+static void window_stop_unknown(void)
+{
+	unsigned frames_in_flight = 0;
+
+	up();
+	chain_hold_tx_completions(0, true);
+	chain_hold_ack(1, true);
+	start(depth);
+	settle(5);
+	CHECK(peak.tx_stage == window_tx, "W groups in flight at host 1");
+	CHECK(chain_data_tx_done(0) == 0, "no host 1 TX completion");
+	for (unsigned k = 1; k <= window_tx; k++)
+		frames_in_flight |= read_frames(k);
+	CHECK(chain_session_stop(tx, -ECANCELED) == 0, "host 1 STOP");
+	pump(1500000000ULL); /* past the 1 s stop grace */
+	settle(50);
+	printf("CHAIN_OBSERVE stop_unknown done=%llu aborted=%llu session_state=%u\n",
+	       (unsigned long long)chain_session_done(tx), (unsigned long long)chain_session_aborted(tx),
+	       chain_session_state(tx));
+	CHECK(chain_session_done(tx) == 0, "no group with an unknown TX completion is reported delivered");
+	CHECK(commands(0) == depth, "no READ after STOP");
+	for (unsigned f = 0; f < frames; f++)
+		if (frames_in_flight & (1u << f))
+			CHECK(chain_frame_custody(tx, f) != F_K_FREE && chain_frame_custody(tx, f) != 0 /* USER */,
+			      "a frame whose TX completion is unknown never returns to the pool or the application");
+	chain_hold_tx_completions(0, false);
+	settle(50);
+	for (unsigned f = 0; f < frames; f++)
+		if (frames_in_flight & (1u << f))
+			CHECK(chain_frame_custody(tx, f) != F_K_FREE && chain_frame_custody(tx, f) != 0 /* USER */,
+			      "a late TX completion does not return a retired frame");
+	CHECK(chain_session_done(tx) == 0, "nor report its group delivered");
+	CHECK(chain_violations() == 0, "nothing leased over retained bytes, no device outside its leases");
+}
+
 /* An announced group the receiver never posted buffers for is withdrawn and
  * refused, then the receiver arms its first batch. No later group of host 1
  * may take that receive batch: host 2 must not write host 1's second group
@@ -840,6 +878,9 @@ int main(int argc, char **argv)
 		depth = 4;
 		frames = 8;
 		window_next_after_cts();
+	} else if (!strcmp(base, "window_stop_unknown") && !w) {
+		window_tx = window_rx = 2;
+		window_stop_unknown();
 	} else if (!strcmp(base, "window_withdrawn_head") && !w && !early) {
 		window_tx = window_rx = 2;
 		window_withdrawn_head();
