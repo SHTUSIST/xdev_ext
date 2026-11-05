@@ -21,7 +21,11 @@ import tempfile
 
 HERE = Path(__file__).resolve().parent
 FIXTURE = Path('tools/testing/selftests/xdev_ext_mech/xdomain')
-CASES = ('legacy-irq', 'mode-selection', 'startup-before-create', 'four-ring-progress', 'budget-64-65', 'pending-256', 'worker-gone', 'stop-remove-unknown', 'partial-allocation', 'poll-return-stop-race', 'poll-return-remove-race', 'control-tx-tail-progress', 'idle-control-rx-no-spin', 'diagnostic-progress-gap')
+CASES = ('legacy-irq', 'mode-selection', 'startup-before-create', 'four-ring-progress', 'budget-64-65', 'pending-256', 'worker-gone', 'stop-remove-unknown', 'partial-allocation', 'poll-return-stop-race', 'poll-return-remove-race', 'control-tx-tail-progress', 'idle-control-rx-no-spin', 'diagnostic-progress-gap',
+         # Interrupt-started polling (poll_on_interrupt) and the unchanged pure mode.
+         'irq-mode-selection', 'irq-no-timer-group', 'irq-drain-rearm-once', 'irq-lost-wakeup-latching',
+         'irq-lost-wakeup-nonlatching', 'pure-rts-waits-fallback', 'irq-stop-pending-drain',
+         'irq-stop-late-interrupt', 'irq-start-poll-lock-order')
 
 
 def load(name, path):
@@ -41,6 +45,7 @@ def execute(args, out):
     manifest = dict(status='setup', scope='host-real-NHI-XDOMAIN-composition',
                     hardware='none', kernel_execution=False, fixture_dependency=str(fixture),
                     production_native_completion_polling=True,
+                    interrupt_started_polling_cases=[name for name in CASES if name.startswith('irq-')],
                     production_adapter_batch=False,
                     production_adapter_poll=args.case == 'diagnostic-progress-gap',
                     external_poll_dispatch='startup-only diagnostic' if args.case == 'diagnostic-progress-gap' else False,
@@ -154,7 +159,8 @@ def execute(args, out):
             body=path.read_text()
             point='#include "stack_kernel_compat.h"'
             if body.count(point)!=1: raise ValueError('wrapper boundary changed: '+wrapper)
-            path.write_text(body.replace(point,point+'\nstruct ring_frame *production_poll_ring(struct tb_ring *);\nvoid production_poll_complete(struct tb_ring *);\n#define tb_ring_poll production_poll_ring\n#define tb_ring_poll_complete production_poll_complete'))
+            path.write_text(body.replace(point,point+'\nstruct ring_frame *production_poll_ring(struct tb_ring *);\nvoid production_poll_complete(struct tb_ring *);\n#define tb_ring_poll production_poll_ring\n#define tb_ring_poll_complete production_poll_complete'
+                                         '\nbool production_poll_mod_delayed_work(void *, struct delayed_work *, unsigned long);\n#define mod_delayed_work production_poll_mod_delayed_work'))
         probe = out / 'startup-probe.c'
         probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
                          '#include "stack_nhi_api.h"\n#define tb_ring_tx stack_ring_tx\n'

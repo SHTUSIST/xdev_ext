@@ -10,8 +10,11 @@ struct ring_frame *production_poll_ring(struct tb_ring *ring)
  return frame;
 }
 
+void production_poll_before_unmask(struct tb_ring *);
 void production_poll_complete(struct tb_ring *ring)
 {
  if(ring->flags&RING_FLAG_NO_INTERRUPT){fprintf(stderr,"STACK_ASSERT no-interrupt: pure production polling must never rearm IRQ\n");exit(1);}
+ if(!ring->start_poll){fprintf(stderr,"STACK_ASSERT poll-complete: only a start_poll ring has an interrupt to re-enable\n");exit(1);}
+ production_poll_before_unmask(ring);
  tb_ring_poll_complete(ring);
 }
