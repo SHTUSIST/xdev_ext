@@ -884,13 +884,15 @@ struct xdev_ext_mech_stats {
 
 /* XDOMAIN host-to-host descriptors and pointer-free protocol records. */
 /*
- * XDOMAIN stages require POOL_PEER. fd is the xdev_ext_peer control file;
- * arg0 is the never-reused link token from the service's xdev_ext_link sysfs
- * attribute, and arg1 is its data channel (0 in this version). TO_DEVICE
- * sends and FROM_DEVICE receives device-memory leases for the NHI. Protocol
- * messages use a separate host-memory control ring. Local TX completion
- * proves only that the local NHI finished reading; REMOTE_ACKED means the
- * receiver's chain finished the group.
+ * XDOMAIN stages take POOL_PEER (device memory) or POOL_IOU_UMEM (the ring's
+ * host pages; a UMEM that does not start and end on a page boundary is
+ * refused with -EINVAL). fd is the xdev_ext_peer control file; arg0 is the
+ * never-reused link token from the service's xdev_ext_link sysfs attribute,
+ * and arg1 is its data channel (0 in this version). TO_DEVICE sends and
+ * FROM_DEVICE receives payload leases for the NHI. Protocol messages use a
+ * separate host-memory control ring. Local TX completion proves only that the
+ * local NHI finished reading; REMOTE_ACKED means the receiver's chain finished
+ * the group.
  */
 #define XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED (1U << 0)	/* CAP_SYS_ADMIN: bind without a judged P2P path */
 #define XDEV_EXT_XDOMAIN_F_EARLY (1U << 1)
