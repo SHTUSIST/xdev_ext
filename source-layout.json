@@ -8720,6 +8720,26 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_nvme_pool_test.py"
     },
     {
+      "source": "tests/storage/nvme/peer_batch/README.md",
+      "logical_path": "tests/storage/nvme/peer_batch/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/peer_batch_guest.c",
+      "logical_path": "tests/storage/nvme/peer_batch/peer_batch_guest.c"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/peer_batch_kvm.sh",
+      "logical_path": "tests/storage/nvme/peer_batch/peer_batch_kvm.sh"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/validate.py",
+      "logical_path": "tests/storage/nvme/peer_batch/validate.py"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/validate_test.py",
+      "logical_path": "tests/storage/nvme/peer_batch/validate_test.py"
+    },
+    {
       "source": "tests/support/benchmarks/cpu_timer.h",
       "logical_path": "tests/eval/common/cpu_timer.h"
     },
