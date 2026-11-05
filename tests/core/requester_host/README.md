@@ -30,13 +30,13 @@ PEER path can run as a regression case.
 
 | Case | Requirement |
 | --- | --- |
-| `host_bind_maps_every_page` | an IOU_UMEM pool binds the NHI; every pool page is mapped once for the NHI in the stage direction, without CPU sync; the stage reports host RAM reached through a DMA-API mapping; unbind returns every reference |
+| `host_bind_maps_every_page` | the PEER bind (`xdev_ext_requester_bind()`) still refuses an IOU_UMEM pool; the host bind (`xdev_ext_requester_bind_host()`) binds the NHI and maps every pool page once in the stage direction, without CPU sync; the stage reports host RAM reached through a DMA-API mapping; `xdev_ext_requester_unbind_host()` returns every reference |
 | `host_bind_rx_maps_from_device` | an RX stage maps for `DMA_FROM_DEVICE` |
 | `host_bind_refuses_misaligned_pool` | a pool that does not start on a page boundary is refused with `-EINVAL` before any mapping (a 4 KiB NHI element would span two pages) |
 | `host_bind_refuses_partial_page` | a pool whose last page is only partly inside it is refused with `-EINVAL` |
 | `host_bind_map_error_unwinds` | a mapping error unmaps exactly the pages already mapped and keeps no reference |
 | `host_lease_page_address` | an element gets its own page's address plus its offset; a full 4096-byte element is allowed, because the data ring carries payload only and headers travel on the control ring |
-| `host_lease_refuses_spans` | `-ERANGE` for an element that crosses a page or frame boundary, leaves the pool or is empty; `-EACCES` against the mapping direction; `-EINVAL` on a PEER requester |
+| `host_lease_refuses_spans` | `-ERANGE` for an element that crosses a page or frame boundary, leaves the pool or is empty; `-EACCES` against the mapping direction; the host bind refuses a PEER pool, and a host lease on a PEER requester is `-EINVAL` |
 | `host_noncoherent_sync` | a non-coherent or bounced NHI gets one sync for the device per lease, covering exactly the element, and an RX buffer gets one sync for the CPU after a definite end; a TX end needs none |
 | `host_coherent_no_sync` | a coherent, unbounced NHI gets no sync calls |
 | `host_unknown_retains_mapping` | after an element ends with unknown device access, no CPU sync, no new lease (`-ESTALE`), the stage is not settled, and unbind never unmaps; the mapping keeps its NHI reference |

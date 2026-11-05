@@ -21,15 +21,22 @@ struct xdev_ext_requester {
 	struct xdev_ext_requester_host *host;
 };
 
-/* CREATE, process context: judge reachability before creating the mapping.
- * On the ring's IOU_UMEM pool, map every pool page for @pdev instead; the
- * pool must start and end on page boundaries (-EINVAL). */
+/* CREATE, process context: judge reachability before creating the mapping. */
 int xdev_ext_requester_bind(struct xdev_ext_requester *rq,
 			  struct xdev_ext_mech_stage *st, struct pci_dev *pdev,
 			  u32 admit_flags);
-/* Process context, after device use has ended: release the requester ref.
- * A host mapping with an outstanding or unknown lease is kept, never unmapped. */
+/* Process context, after device use has ended: release the requester ref. */
 void xdev_ext_requester_unbind(struct xdev_ext_requester *rq);
+
+/* CREATE, process context, the ring's IOU_UMEM pool: map every pool page for
+ * @pdev in the stage's DMA direction; the pool must start and end on page
+ * boundaries (-EINVAL). */
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,
+				 struct xdev_ext_mech_stage *st, struct pci_dev *pdev);
+/* Process context, after device use has ended: unmap the host mapping and
+ * release the requester ref.  A mapping with an outstanding lease or an
+ * unknown end is kept for good, never unmapped, with its own device ref. */
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq);
 
 /* Worker, host mapping: the requester's DMA address of pool bytes
  * [off, off + len), synchronized for the device. The span must lie in one

@@ -437,7 +437,9 @@ def xdomain_units(kernel, build, root, pool='provider'):
     # Per-unit flags: the family's host leases reach the device model through
     # chain_boundary.c, which calls the real requester (host mode) or aborts.
     extra = {fixture / 'stack_family.c': ['-Dxdev_ext_requester_host_lease=chain_host_lease',
-                                         '-Dxdev_ext_requester_host_release=chain_host_release']}
+                                         '-Dxdev_ext_requester_host_release=chain_host_release',
+                                         '-Dxdev_ext_requester_bind_host=chain_host_bind',
+                                         '-Dxdev_ext_requester_unbind_host=chain_host_unbind']}
     if pool == 'host':
         extra[units[-1]] = ['-Dxdev_ext_requester_bind=chain_real_requester_bind',
                             '-Dxdev_ext_requester_unbind=chain_real_requester_unbind']

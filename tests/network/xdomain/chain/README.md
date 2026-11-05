@@ -98,9 +98,10 @@ PEER device memory). Production code added to the composition in this mode:
   bio piece into the controller's window when the request is submitted and
   unmaps it when the request ends, as nvme-pci does with the DMA API.
 
-The family unit's calls to the requester's host lease and release go through
-`chain_boundary.c`, which forwards them unchanged and keeps each granted
-element as a live NHI lease for the device model. It also checks that the
+The family unit's calls to the requester's host bind, unbind, lease and
+release go through `chain_boundary.c`, which forwards them unchanged, records
+what the bind reported and keeps each granted element as a live NHI lease for
+the device model. It also checks that the
 address the requester returned is the NHI's mapping of exactly that pool page
 and offset. After a run, the frames are back with user space (the START with
 `RECYCLE` returns them when it drains), not in the kernel pool.

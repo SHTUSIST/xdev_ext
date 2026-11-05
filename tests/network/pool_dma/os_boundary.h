@@ -75,6 +75,8 @@ struct xdev_ext_net_slot {struct xdev_ext_mech_batch *batch;struct xdev_ext_net_
 struct xdev_ext_net_member {u32 lease_kind;};
 struct xdev_ext_netfam_stage {struct xdev_ext_mech_stage *st;struct xdev_ext_net_member *m;u32 max_elems;};
 static void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *l,bool q){REQUIRE("no_peer_release",false);(void)l;(void)q;}
+struct xdev_ext_requester;
+static void xdev_ext_requester_host_release(struct xdev_ext_requester *r,u64 dma,u32 len,bool q){REQUIRE("no_host_dma_release",false);(void)r;(void)dma;(void)len;(void)q;}
 struct xsk_queue {int queue_empty_descs;};
 struct sock {void (*sk_write_space)(struct sock *);};
 struct net_device;
