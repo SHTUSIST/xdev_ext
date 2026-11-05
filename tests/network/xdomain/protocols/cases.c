@@ -336,6 +336,33 @@ static void proto_rts_drops_hello(void)
  CHECK(!proto_failures(0) && !proto_failures(1), "no stage failure");
  safety(w);
 }
+/* A sender that announces before its first progress pass chose RTS/CTS by
+ * that RTS: it is never offered pairing afterwards. */
+static void proto_announce_latches_choice(void)
+{
+ struct stack_config c = geometry();
+ struct stack_world *w = create(&c);
+ login(w);
+ proto_programs(PROTO_RTS_CTS, PROTO_RTS_CTS);
+ early_flags = 2;
+ sessions(w, 1, 0);
+ start(w, c.first_seq, 0);
+ u64 rts = first(w, STACK_EV_CONTROL_TX, 0, PROTO_V1_RTS);
+ CHECK(rts, "the sender announced by RTS");
+ /* Precondition of this case: the RTS came before any pairing offer. */
+ for (size_t i = 0; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind == STACK_EV_PROTOCOL && e.endpoint == 0 && e.id < rts)
+   CHECK(e.control_type == 1, "the sender's only event before its RTS was TX_SUBMIT");
+ }
+ for (unsigned k = 0; k < 4; k++) pump(w, 25000000);
+ release_group(w, c.first_seq);
+ proto_no_v2_after(0);
+ proto_no_v2_after(1);
+ CHECK(count(w, STACK_EV_PUBLISH, 0, -1) == 1 && count(w, STACK_EV_PUBLISH, 1, -1) == 1,
+       "the group completes at both ends");
+ safety(w);
+}
 /* A paired stage cannot fall back to an RTS: a forced TX_ANNOUNCE is refused. */
 static void proto_paired_refuses_announce(void)
 {
@@ -399,6 +426,7 @@ int main(int argc, char **argv)
  else if (!strcmp(name, "mismatch_rts_sender")) proto_mismatch_rts_sender();
  else if (!strcmp(name, "mismatch_pair_sender")) proto_mismatch_pair_sender();
  else if (!strcmp(name, "rts_drops_hello")) proto_rts_drops_hello();
+ else if (!strcmp(name, "announce_latches_choice")) proto_announce_latches_choice();
  else if (!strcmp(name, "paired_refuses_announce")) proto_paired_refuses_announce();
  else if (!strcmp(name, "post_needs_grant")) proto_post_needs_grant();
  else return 2;

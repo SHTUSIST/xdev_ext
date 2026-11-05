@@ -40,7 +40,7 @@ SYMBOLS = ('xdomain_peer_prepare', 'xdomain_peer_build', 'xdomain_peer_complete'
            'xdomain_peer_ops', 'LICENSE')
 OWN_CASES = ('rts_cts_v2', 'rts_cts_legacy', 'reference_legacy', 'early_v2', 'reference_early',
              'mismatch_rts_sender', 'mismatch_pair_sender', 'rts_drops_hello',
-             'paired_refuses_announce', 'post_needs_grant')
+             'announce_latches_choice', 'paired_refuses_announce', 'post_needs_grant')
 RTS, EARLY = 1, 2
 # Early contract cases whose endpoints are not both early: the version-1 end
 # runs the RTS/CTS program (mixed_v1_tx: version-1 sender, early receiver).
@@ -146,9 +146,9 @@ static __s32 xdomain_peer_complete(void *c, const struct xdev_ext_mech_ctx *m)
 # Each mutation removes one rule of the class change in the assembled copy;
 # at least one case must then fail with a named assertion.
 MUTATIONS = {
-    # A paired stage accepts an RTS/CTS binding action.
-    'paired_announce': ('\t\t\tif (xd_paired(xs)) ret = -EPROTO;\n\t\t\telse if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE',
-                        '\t\t\tif (0) ret = -EPROTO;\n\t\t\telse if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE'),
+    # An RTS or an RX post on an RTS does not latch the RTS/CTS choice.
+    'no_binding_latch': ('\t\t\tif (!xd_paired(xs)) {\n\t\t\t\txs->rts_cts = true;',
+                         '\t\t\tif (0) {\n\t\t\t\txs->rts_cts = true;'),
     # PAIR_DUE is offered again after the RTS/CTS choice.
     'offer_after_choice': ('xs->pair_next_retry <= now && !xs->rts_cts &&', 'xs->pair_next_retry <= now &&'),
     # Pairing input is retained after the RTS/CTS choice.
