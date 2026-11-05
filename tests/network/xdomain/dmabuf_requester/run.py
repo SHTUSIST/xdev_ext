@@ -114,6 +114,40 @@ def initializer(text, name):
     return match[0]
 
 
+# Kernel-tree files this script extracts code from (the compiler then reads the
+# generated units, so its dependency files do not name these).
+DIRECT_READS = ("drivers/dma-buf/heaps/system_heap.c", "io_uring/xdev_ext_mech.c")
+
+
+def read_inputs(root, out, kernel, hashes):
+    """Every input of this run: kernel-tree files the compiler opened (gcc -MD) or this
+    script extracted from, keyed by native path with the hash of the source-tree file
+    (before any mutation), and the test files and templates this script read."""
+    production, tests = {}, {}
+
+    def add(path):
+        path = Path(path).resolve()
+        for base, table in ((kernel, production), (root, tests)):
+            try:
+                key = str(path.relative_to(base))
+            except ValueError:
+                continue
+            if table is tests and (out == path or out in path.parents):
+                return  # generated from inputs recorded elsewhere
+            table[key] = hashes[key] if table is production and key in hashes else \
+                hashlib.sha256(path.read_bytes()).hexdigest()
+            return
+
+    for dep in sorted((out / "build").rglob("*.d")):
+        for item in dep.read_text().replace("\\\n", " ").split(":", 1)[-1].split():
+            add(item)
+    for native in DIRECT_READS:
+        add(kernel / native)
+    for f in [f for f in HERE.iterdir() if f.is_file()] + [root / SHIM / "kernel_shim.h", root / SHIM / "kernel_shim.c"]:
+        add(f)
+    return dict(sorted(production.items())), dict(sorted(tests.items()))
+
+
 def build(root, out, mutation, sanitize):
     kernel, hashes = assemble(root, out, mutation)
     build_dir = out / "build"
@@ -162,7 +196,8 @@ def build(root, out, mutation, sanitize):
     objects, log = [], []
     for number, unit in enumerate(units):
         obj = build_dir / f"unit-{number}.o"
-        result = subprocess.run(flags + ["-c", str(unit), "-o", str(obj)], capture_output=True,
+        result = subprocess.run(flags + ["-MD", "-MF", str(obj) + ".d", "-c", str(unit), "-o", str(obj)],
+                                capture_output=True,
                                 text=True, timeout=120)
         log.append("$ cc -c " + str(unit) + "\n" + result.stdout + result.stderr)
         if result.returncode:
@@ -176,7 +211,7 @@ def build(root, out, mutation, sanitize):
     (out / "compile.log").write_text("\n".join(log))
     if result.returncode:
         raise Setup("link failed\n" + result.stderr[-4000:])
-    return binary, hashes
+    return binary, hashes, kernel
 
 
 def run_cases(binary, out, cases):
@@ -211,11 +246,11 @@ def main():
     try:
         record["head"] = subprocess.run(["git", "-C", str(root), "rev-parse", "HEAD"],
                                         capture_output=True, text=True).stdout.strip()
-        binary, hashes = build(root, out, args.mutation, args.sanitize)
-        record["inputs_sha256"] = {k: v for k, v in hashes.items() if k.startswith((
-            "io_uring/xdev_ext_peer", "io_uring/family/xdev_ext_requester", "io_uring/xdev_ext_mech_peer_pool",
-            "io_uring/xdev_ext_mech.c", "drivers/dma-buf/heaps/system_heap.c", "include/linux/xdev_ext_requester",
-            "include/linux/xdev_ext_peer"))}
+        binary, hashes, kernel = build(root, out, args.mutation, args.sanitize)
+        record["inputs_sha256"], record["test_inputs_sha256"] = read_inputs(root, out, kernel, hashes)
+        record["inputs_rule"] = ("inputs_sha256: kernel-tree files the compiler opened (gcc -MD) or the runner "
+                                 "extracted from, hashed in the source tree before any mutation; "
+                                 "test_inputs_sha256: test files and templates the runner read")
         cases = [MUTATIONS[args.mutation][1]] if args.mutation else ([args.case] if args.case else list(CASES))
         record["cases"] = run_cases(binary, out, cases)
         if args.mutation:

@@ -440,8 +440,56 @@ def peer_units(root, kernel, build, common):
     return flags, units
 
 
+# Kernel-tree files this script extracts code or declarations from (the compiler
+# then reads generated units, so its dependency files do not name these).
+DIRECT_READS = ('io_uring/xdev_ext_mech.c', 'io_uring/xdev_ext_compfam_transform.c', 'io_uring/xdev_ext_mech_ops.c',
+                'drivers/nvme/host/nvme.h', 'drivers/nvme/host/core.c', 'drivers/nvme/host/ioctl.c',
+                'include/trace/events/xdev_ext.h', 'io_uring/family/xdev_ext_requester.c',
+                # NHI ring section extracted by the stack fixture's generator, and the
+                # stack fixture scripts this runner executes.
+                'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h', 'include/linux/thunderbolt.h',
+                str(STACK / 'stack_test.py'), str(STACK / 'stack_nhi_source.py'))
+DMABUF_DIRECT_READS = ('drivers/dma-buf/heaps/system_heap.c',)
+
+
+def sha256(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def read_inputs(root, out, kernel, hashes, pool):
+    """Every input of this run: kernel-tree files the compiler opened (gcc -MD) or this
+    script extracted from, keyed by native path with the hash of the source-tree file
+    (before any mutation), and the test files and templates this script read."""
+    production, tests = {}, {}
+
+    def add(path):
+        path = Path(path).resolve()
+        for base, table in ((kernel, production), (root, tests)):
+            try:
+                key = str(path.relative_to(base))
+            except ValueError:
+                continue
+            if table is tests and (out == path or out in path.parents):
+                return  # generated from inputs recorded elsewhere
+            table[key] = hashes.get(key) if table is production and key in hashes else sha256(path)
+            return
+
+    for dep in sorted((out / 'build').rglob('*.d')):
+        for item in dep.read_text().replace('\\\n', ' ').split(':', 1)[-1].split():
+            add(item)
+    for native in DIRECT_READS + (DMABUF_DIRECT_READS if pool == 'dmabuf' else ()):
+        add(kernel / native)
+    files = [f for f in HERE.iterdir() if f.is_file()]
+    if pool == 'dmabuf':
+        files += [f for f in (HERE.parent / 'dmabuf_requester').iterdir() if f.is_file()]
+        files += [root / 'tests/core/peer_dmabuf' / name for name in ('kernel_shim.h', 'kernel_shim.c')]
+    for f in files:
+        add(f)
+    return dict(sorted(production.items())), dict(sorted(tests.items()))
+
+
 def compile_unit(cc, flags, unit, obj, log):
-    result = subprocess.run([cc] + flags + ['-c', str(unit), '-o', str(obj)],
+    result = subprocess.run([cc] + flags + ['-MD', '-MF', str(obj) + '.d', '-c', str(unit), '-o', str(obj)],
                             capture_output=True, text=True, timeout=300)
     log.append('$ %s -c %s\n%s%s' % (cc, unit, result.stdout, result.stderr))
     if result.returncode:
@@ -576,10 +624,11 @@ def main():
         record['head'] = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
                                         capture_output=True, text=True).stdout.strip()
         kernel, hashes, names, binary = build_all(root, out, args.sanitize, args.only, args.mutation, args.pool)
-        record.update(core_functions=len(names), inputs_sha256={k: v for k, v in hashes.items() if k.startswith((
-            'io_uring/xdev_ext_mech', 'io_uring/xdomain/', 'io_uring/family/', 'drivers/nvme/host/xdev_ext',
-            'drivers/thunderbolt/nhi', 'tools/xdev_ext_mech/xdomain_peer', 'tools/xdev_ext_mech/nvme_s0',
-            'include/linux/xdev_ext_netfam', 'include/linux/xdev_ext_storfam', 'include/linux/xdev_ext_mech'))})
+        production, tests = read_inputs(root, out, kernel, hashes, args.pool)
+        record.update(core_functions=len(names), inputs_sha256=production, test_inputs_sha256=tests,
+                      inputs_rule='inputs_sha256: kernel-tree files the compiler opened (gcc -MD) or the runner '
+                                  'extracted from, hashed in the source tree before any mutation; '
+                                  'test_inputs_sha256: test files and templates the runner read')
         if binary is None:
             record['verdict'] = 'COMPILED'
             code = 0
