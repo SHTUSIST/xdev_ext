@@ -136,8 +136,17 @@ void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq)
 	unsigned long flags;
 
 	rq->host = NULL;
-	if (h && xdev_ext_requester_host_busy(h)) {
-		/* The device may still access these pages: never unmap them. */
+	/*
+	 * Not reached with a busy mapping: the core calls the class unbind only
+	 * after xdev_ext_requester_host_settled() returned 0, and otherwise
+	 * quarantines the session with its pool, whose UMEM reference keeps every
+	 * page pinned (xdev_ext_mech_session_release_disposition()); a failed
+	 * class bind unbinds before any lease. A busy mapping here means a caller
+	 * skipped that check. The device may still access these pages: the
+	 * mapping and its device ref are kept for good, but the pages stay pinned
+	 * only while the caller keeps the pool.
+	 */
+	if (h && WARN_ON_ONCE(xdev_ext_requester_host_busy(h))) {
 		kvfree(h->dma);
 		h->dma = NULL;
 		spin_lock_irqsave(&xdev_ext_requester_host_lock, flags);

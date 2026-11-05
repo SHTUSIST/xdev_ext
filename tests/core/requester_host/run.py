@@ -59,6 +59,10 @@ MUTATIONS = {
          '\treturn atomic_read_acquire(&h->active);')]),
     'unmap-outstanding-lease': ('host_outstanding_lease_retains_mapping', [
         ('\treturn atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);', '\treturn READ_ONCE(h->unknown);')]),
+    # Unbinding a busy mapping no longer warns.
+    'busy-unbind-silent': ('host_unknown_retains_mapping', [
+        ('\tif (h && WARN_ON_ONCE(xdev_ext_requester_host_busy(h))) {\n',
+         '\tif (h && xdev_ext_requester_host_busy(h)) {\n')]),
     # The settled check reads the unknown mark before the lease count, as at d3dced6.
     'settled-reads-unknown-first': ('host_release_during_settled_check', [
         ('\treturn atomic_read_acquire(&h->active) || READ_ONCE(h->unknown);',
