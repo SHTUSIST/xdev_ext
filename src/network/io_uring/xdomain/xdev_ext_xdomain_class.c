@@ -1320,14 +1320,18 @@ static void xd_early_fail_locked(struct xdev_ext_xd_stage *xs, int err)
 	xs->ns.dead = true; xs->stage_error = err;
 	xd_terminal_locked(xs, err);
 }
+/* An RTS/CTS stage, and a receiver no peer has asked to pair, keep the v1
+ * rules of xd_next_locked (per-slot deadlines, graceful STOP, v1 terminal).
+ * The only early input such a stage can hold is a pairing offer (HELLO),
+ * which creates no obligation. ns.lock held. */
+static bool xd_v1_rules(const struct xdev_ext_xd_stage *xs)
+{ return xs->rts_cts || (xs->ns.rx && !xd_paired(xs)); }
 /* Mandatory checks run before policy, including when there are no batch slots.
- * They bind a paired stage and a sender that has not chosen yet; an RTS/CTS
- * stage, and a receiver no peer has asked to pair, keep the v1 rules of
- * xd_next_locked (per-slot deadlines, graceful STOP). */
+ * They bind a paired stage and a sender that has not chosen yet. */
 static bool xd_early_safety_locked(struct xdev_ext_xd_stage *xs, u64 now)
 {
 	u32 k;
-	if (xs->rts_cts || (xs->ns.rx && !xd_paired(xs)))
+	if (xd_v1_rules(xs))
 		return true;
 	if (!xs->stop_latched && !xdev_ext_mech_session_admits(xs->ns.st->s)) {
 		xdev_ext_mech_stage_stop(xs->ns.st, 0);
@@ -1487,6 +1491,13 @@ static bool xd_early_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_x
 	u64 now = ktime_get_boottime_ns();
 	u32 ev;
 	if (!xd_early_safety_locked(xs, now)) return false;
+	/* A stopping or ended v1-rules stage drops the pairing offers it holds,
+	 * as ingress refuses new ones, so xd_next_locked applies the v1 STOP and
+	 * terminal rules before any offer reaches policy again. */
+	if (xs->early_ctl_count && xd_v1_rules(xs) &&
+	    (xs->stop_latched || xs->failed || xs->ns.dead || xs->down_latched || xs->overflow ||
+	     !xdev_ext_mech_session_admits(xs->ns.st->s)))
+		xs->early_ctl_count = 0;
 	if (xs->early_ctl_count && xs->pair_wake <= now) {
 		struct xdev_ext_xd_msg_v2 *m = &xs->early_ctl[0];
 		s = m->group ? xd_group(xs, m->group) : NULL;
