@@ -136,6 +136,7 @@ typedef int32_t s32; typedef int64_t s64; typedef uintptr_t dma_addr_t;
 #define __init
 #define __exit
 #define GFP_KERNEL 0
+typedef unsigned int gfp_t;
 #define THIS_MODULE NULL
 #define EXPORT_SYMBOL_GPL(x)
 #define MODULE_LICENSE(x)
