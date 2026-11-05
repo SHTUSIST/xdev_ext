@@ -59,13 +59,13 @@ struct xdev_ext_admission {
  * override admits only a missing topology path, recorded UNVERIFIED_FORCED.
  * Prototype for ASK.70: UNDESCRIBED alone (the exporter's own per-requester
  * mapping, nothing else known) is admitted like host RAM: no topology claim,
- * reachability UNKNOWN, same bounce/untrusted refusals; any other bit with it
- * is refused.
+ * reachability UNKNOWN, same bounce/untrusted refusals. Mixed with any other
+ * bit it is just an unknown bit of the BAR/host classification below.
  */
 static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 				      __u32 flags, struct xdev_ext_admission *out)
 {
-	bool undescribed = f->backing & XDEV_EXT_PEER_BACKING_UNDESCRIBED;
+	bool undescribed = f->backing == XDEV_EXT_PEER_BACKING_UNDESCRIBED;
 	__u32 r = 0;
 
 	out->distance = f->distance;
@@ -81,8 +81,7 @@ static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 	    (f->backing & XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR))
 		r |= XDEV_EXT_PEER_REFUSE_IOMMU_RAW_ADDR;
 	if (undescribed) {
-		if (f->backing != XDEV_EXT_PEER_BACKING_UNDESCRIBED)
-			r |= XDEV_EXT_PEER_REFUSE_BACKING;
+		/* The exporter's own mapping is the only fact; nothing to classify. */
 	} else if (f->backing & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
 		if (f->backing != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
 				   XDEV_EXT_PEER_BACKING_STRUCT_PAGE))
