@@ -33,8 +33,9 @@ gone cannot restart.
 Lock ordering is `xdev_ext_xd_links_lock` -> `xl->lock` for the handler, and
 `ctl_mutex` -> `ep_mutex` -> stage family lock (`ns->lock`) -> `xl->lock` ->
 ring lock for link teardown and data operations. `poll_irq_lock` is innermost:
-it may be taken under `xl->lock` or under the NHI and ring locks, and nothing
-else is acquired while it is held. The handler does not take
+it may be taken under `xl->lock` or under the NHI and ring locks. While it is
+held, no lock of this module, the NHI or a ring is taken; queuing the poll work
+takes only workqueue-internal locks. The handler does not take
 `ctl_mutex`: login requests wait for responses while holding that mutex.
 `tb_ring_stop` is called with neither `ep_mutex` nor a spinlock held, and
 never from a frame callback. Endpoint detachment is recorded under both
