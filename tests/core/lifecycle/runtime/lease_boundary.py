@@ -14,8 +14,19 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[4]
-LEASE = HERE.parent / 'iaa_transform'
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, read_native, select_core, owned_dependency, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/core/lifecycle/runtime/lease_boundary.py')
+ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
+LEASE = owned_dependency(__file__, 'tests/compute/iaa/transform/lease_test.py').parent
 sys.path.insert(0, str(LEASE))
 from lease_test import FUNCTIONS  # noqa: E402
 from acquire_red_test import function, session_helpers  # noqa: E402
@@ -37,8 +48,14 @@ static void test_kvfree(void *p) { if (p) test_live_allocs--; free(p); }
 
 
 def build(scenario, directory, nr_frames=None, name='probe', patches=()):
-    production = Path(os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
-    fixture = (LEASE / 'lease_fixture.c').read_text().split('int main(', 1)[0]
+    core = select_core(ROOT, os.environ.get('XDEV_EXT_IAA_LEASE_SOURCE'))
+    selected = TransformSource(core, lambda path: read_native(ROOT, path), function)
+    production = selected.text
+    fixture = owned_dependency(__file__, 'tests/compute/iaa/transform/lease_fixture.c').read_text().split('int main(', 1)[0]
+    if selected.split:
+        fixture = selected.storage(fixture)
+        fixture = fixture.replace('struct xdev_ext_mech_batch {',
+                                  selected.types + '\nstruct xdev_ext_mech_batch {', 1)
     if nr_frames is not None:
         fixture, n = re.subn(r'^#define N 80$', '#define N ' + str(nr_frames), fixture, flags=re.M)
         if n != 1:
@@ -68,6 +85,11 @@ def build(scenario, directory, nr_frames=None, name='probe', patches=()):
             except RuntimeError:
                 pass
         bodies[fn] = body
+    if selected.split:
+        bodies['xdev_ext_mech_transform_handoff'] = function(production, 'xdev_ext_mech_transform_handoff')
+        fixture = fixture.replace(marker, '\n'.join(selected.helpers(bodies.values())) + '\n' + marker, 1)
+        fixture = fixture.replace('/* xdev_ext_mech_batch_handoff */',
+            bodies['xdev_ext_mech_transform_handoff'] + '\n/* xdev_ext_mech_batch_handoff */', 1)
     # Match the real compiled closure, including historical source overrides.
     # The shared extractor rejects a called helper absent from that source.
     helpers = session_helpers(production, bodies.values())
@@ -85,11 +107,12 @@ def build(scenario, directory, nr_frames=None, name='probe', patches=()):
             raise RuntimeError('lease fixture production marker changed: ' + fn)
         fixture = fixture.replace(token, bodies[fn], 1)
     source = Path(directory) / (name + '.c')
+    include_root = compiler_headers(ROOT, Path(directory) / (name + '-qualified-include'), fixture + scenario)
     source.write_text(fixture + scenario)
     binary = Path(directory) / name
     built = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O1', '-Wall', '-Wextra', '-Werror',
                             '-Wno-unused-function', '-fsanitize=undefined',
-                            '-fno-sanitize-recover=undefined', '-I' + str(ROOT), str(source),
+                            '-fno-sanitize-recover=undefined', '-I' + str(include_root), str(source),
                             '-o', str(binary)], capture_output=True, text=True)
     if built.returncode:
         raise RuntimeError(built.stdout + built.stderr)

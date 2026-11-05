@@ -3,11 +3,11 @@
 #define _LINUX_XDEV_EXT_COMPFAM_H
 
 /*
- * Compute family contract. Shared helpers remain at their existing paths:
+ * Compute family contract. Shared runtime helpers live at:
  * io_uring/xdev_ext_mech_window_copy_core.h for CE and DMA;
- * xdev_ext_mech_transform_reserve()/xdev_ext_mech_batch_transform_begin()
- * for IAA and variable CPU transforms; the in-place length API for CPU
- * and USER stages.
+ * io_uring/xdev_ext_compfam_transform.c for IAA and variable CPU transforms
+ * and the in-place length API for CPU and USER stages. Its private state
+ * and worker/callback hooks are in io_uring/xdev_ext_compfam_transform.h.
  */
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_compfam_core.h>

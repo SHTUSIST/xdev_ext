@@ -15,9 +15,21 @@ import shutil
 import subprocess
 import tempfile
 import unittest
+import sys
 
 HERE = Path(__file__).resolve().parent
-KERNEL = Path(os.environ.get("KERNEL_SRC", HERE.parents[3])).resolve()
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import read_native, owned_dependency, source_root, verify_entry, compiler_headers  # noqa: E402
+verify_entry(__file__, 'tests/core/identity/call_identity_test.py')
+KERNEL = source_root(__file__, os.environ.get('KERNEL_SRC'))
 
 
 def definition(source, name, structure=False):
@@ -36,9 +48,9 @@ def definition(source, name, structure=False):
 
 
 def production():
-    header = (KERNEL / "include/linux/xdev_ext_mech.h").read_text()
-    ops = (KERNEL / "io_uring/xdev_ext_mech_ops.c").read_text()
-    internal = (KERNEL / "io_uring/xdev_ext_mech_internal.h").read_text()
+    header = read_native(KERNEL, 'include/linux/xdev_ext_mech.h')
+    ops = read_native(KERNEL, 'io_uring/xdev_ext_mech_ops.c')
+    internal = read_native(KERNEL, 'io_uring/xdev_ext_mech_internal.h')
     layout = re.search(r"^#define XDEV_EXT_MECH_OPS_TYPE\(name\).*?^}", header, re.M | re.S)
     if layout is None:
         raise AssertionError("production struct_ops layout missing")
@@ -82,12 +94,14 @@ class CallIdentityTests(unittest.TestCase):
         cls.directory = tempfile.TemporaryDirectory(prefix="xdev-ext-call-identity-")
         cls.addClassCleanup(cls.directory.cleanup)
         directory = Path(cls.directory.name)
-        fixture = (HERE / "call_identity_fixture.c.in").read_text()
-        (directory / "fixture.c").write_text(fixture.replace("/* PRODUCTION */", production()))
+        fixture = owned_dependency(__file__, 'tests/core/identity/call_identity_fixture.c.in').read_text()
+        code = fixture.replace("/* PRODUCTION */", production())
+        include_root = compiler_headers(KERNEL, directory / 'qualified-include', code)
+        (directory / "fixture.c").write_text(code)
         cls.binary = directory / "probe"
         command = compiler + ["-std=gnu11", "-O1", "-g", "-Wall", "-Wextra", "-Werror",
                               "-Wno-unused-function", "-Wno-unused-parameter", "-pthread",
-                              "-I" + str(KERNEL), str(directory / "fixture.c"),
+                              "-I" + str(include_root), str(directory / "fixture.c"),
                               "-o", str(cls.binary)]
         built = subprocess.run(command, capture_output=True, text=True, timeout=30)
         if built.returncode:

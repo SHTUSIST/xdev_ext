@@ -1118,6 +1118,21 @@
       "native_path": "io_uring/xdev_ext_config.h"
     },
     {
+      "source": "src/compute/io_uring/xdev_ext_compfam_transform.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_transform.c"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_transform.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_transform.h"
+    },
+    {
+      "source": "src/core/io_uring/xdev_ext_mech_compute_internal.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_mech_compute_internal.h"
+    },
+    {
       "source": "src/core/io_uring/xdev_ext_mech.c",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_mech.c"
@@ -9051,6 +9066,10 @@
     {
       "source": "tests/storage/nvme/_locked_requester_native.h",
       "logical_path": "tests/eval/nvme/_locked_requester_native.h"
+    },
+    {
+      "source": "tests/compute/transform_source.py",
+      "logical_path": "tests/compute/transform_source.py"
     }
   ]
 }

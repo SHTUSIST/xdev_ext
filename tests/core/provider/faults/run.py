@@ -10,28 +10,37 @@ import json
 import os
 from pathlib import Path
 
-# Import the central path contract explicitly; isolated Python ignores PYTHONPATH.
 import sys as _layout_sys
-_LAYOUT = None
-for _parent in (Path(__file__).resolve().parent, *Path(__file__).resolve().parents):
-    if (_parent / "tools/layout.py").is_file():
-        _layout_sys.path.insert(0, str(_parent / "tools"))
-        import layout as _LAYOUT
-        break
 import re
 import shlex
 import subprocess
 import tempfile
 import unittest
 
-HERE = Path(__file__).resolve().parent
-DEFAULT_ROOT = next((p for p in HERE.parents if (p / "io_uring/xdev_ext_mech.c").is_file()), HERE)
-ROOT = Path(os.environ.get("KERNEL_SRC", DEFAULT_ROOT)).resolve()
+try:
+    HERE = Path(__file__).resolve().parent
+    for _base in (HERE, *HERE.parents):
+        if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+            _shared = _base / 'tests/compute/transform_source.py'
+            if not _shared.is_file():
+                raise RuntimeError('missing owned transform source helper')
+            _layout_sys.path.insert(0, str(_shared.parent))
+            break
+    else:
+        raise RuntimeError('missing owned checkout/view')
+    from transform_source import TransformSource, read_native, owned_dependency, source_root, verify_entry, compiler_headers, layout as _LAYOUT  # noqa: E402
+    verify_entry(__file__, 'tests/core/provider/faults/run.py')
+    ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
+except Exception as error:
+    print("SETUP " + str(error), file=_layout_sys.stderr)
+    raise SystemExit(2)
 REF = None
 
 
 def source(path):
     if globals().get("_LAYOUT"):
+        if REF is None:
+            return read_native(ROOT if "KERNEL_SRC" in os.environ else HERE, path)
         return _LAYOUT.read_native(ROOT if "KERNEL_SRC" in os.environ else HERE, "linux", path, REF).decode()
     if REF:
         return subprocess.check_output(["git", "show", f"{REF}:./{path}"],
@@ -124,6 +133,8 @@ def session_helpers(text, bodies, extractor):
 
 def generate(mutation=None):
     core = source("io_uring/xdev_ext_mech.c")
+    selected = TransformSource(core, source, function)
+    core = selected.text
     dma = source("io_uring/xdev_ext_mech_dma.c")
     abi = source("include/linux/xdev_ext_mech.h")
     ops = source("io_uring/xdev_ext_mech_ops.c")
@@ -189,7 +200,7 @@ def generate(mutation=None):
         elif mutation == "duplicate_registry":
             dma, n = re.subn(r"if \(p->ops->fops == ops->fops\)", "if (false)", dma)
             assert n == 1
-    template = (HERE / "provider_fault_fixture.c").read_text()
+    template = owned_dependency(__file__, 'tests/core/provider/faults/provider_fault_fixture.c').read_text()
     if runtime_dependencies:
         template = shared_fixture_layout(template)
     if lease_dependencies:
@@ -225,6 +236,8 @@ def generate(mutation=None):
                                  "xdev_ext_comp_hooks"))
     if "static void xdev_ext_mech_start_queue_free(" in core:
         structs.append(structure(source("io_uring/xdev_ext_mech_start_queue.h"), "xdev_ext_mech_start_queue"))
+    if selected.split:
+        structs.append(selected.types)
     structs += [structure(core, n) for n in ("xdev_ext_mech_batch", "xdev_ext_mech_session")]
     copy_dependencies = tuple(dict.fromkeys(copy_window_dependencies(dma) +
                                             copy_window_dependencies(ce)))
@@ -266,6 +279,9 @@ def generate(mutation=None):
     after = ["xdev_ext_mech_transform_undo", "xdev_ext_mech_submit",
              "xdev_ext_mech_unbind_checked", "xdev_ext_mech_session_release", "xdev_ext_mech_quarantine",
              "xdev_ext_mech_session_destroy"]
+    if selected.split:
+        before.insert(before.index("xdev_ext_mech_batch_handoff"),
+                      "xdev_ext_mech_transform_handoff")
     # Legacy NULL-report wrappers still execute the actual shared release and
     # destroy bodies. Extract their new dependencies rather than stub them.
     if "static int xdev_ext_mech_session_release_report(" in core:
@@ -281,7 +297,9 @@ def generate(mutation=None):
         after[0:0] = ["xdev_ext_mech_stats_fill", "xdev_ext_mech_transport_stats_fill"]
     if "static void xdev_ext_mech_start_queue_free(" in core:
         after.insert(0, "xdev_ext_mech_start_queue_free")
-    before = session_helpers(core, [function(core, name) for name in before + after], function) + before
+    bodies = [function(core, name) for name in before + after]
+    accessors = selected.helpers(bodies)
+    before = session_helpers(core, bodies, function) + before
     ce_stage = structure(ce, "xdev_ext_ce_stage")
     # Only a wholly pre-repair source may use the historical uncontended
     # boundary. A partial new source still requires every actual new helper;
@@ -343,7 +361,7 @@ static void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
               "CE_ADAPTER": ce_adapter,"STRUCTURES": "\n\n".join(structs),
               "OPS": "\n\n".join(function(ops, n) for n in
                                     ("xdev_ext_mech_class_put", "xdev_ext_mech_ops_put")),
-              "CORE_BEFORE": "\n\n".join(function(core, n) for n in before),
+              "CORE_BEFORE": "\n\n".join(accessors + [function(core, n) for n in before]),
               "ADAPTER": adapter,
               "CORE_AFTER": "\n\n".join(function(core, n) for n in after)}
     for key, value in blocks.items():
@@ -420,7 +438,10 @@ class ProviderFaults(unittest.TestCase):
         if 'xdev_ext_compfam_core.h' in (cls.path / "io_uring/xdev_ext_mech_step.h").read_text():
             rel = "include/linux/xdev_ext_compfam_core.h"
             (cls.path / rel).write_text(source(rel))
-        cls.binary = cls.compile("production", generate())
+        code = generate()
+        cls.include_root = compiler_headers(ROOT, cls.path / 'qualified-include', code,
+                                            reader=source, search=('', 'io_uring'))
+        cls.binary = cls.compile("production", code)
 
     @classmethod
     def compile(cls, name, text):
@@ -431,7 +452,7 @@ class ProviderFaults(unittest.TestCase):
             "-std=gnu11", "-O2", "-g", "-Wall", "-Wextra", "-Werror",
             "-Wno-unused-function", "-Wno-unused-variable", "-Wno-unused-parameter",
             "-fsanitize=undefined", "-fno-sanitize-recover=undefined", "-pthread",
-            "-I" + str(cls.path), "-I" + str(cls.path / "io_uring"), "-I" + str(ROOT), str(c), "-o", str(exe)]
+            "-I" + str(cls.path), "-I" + str(cls.include_root / "io_uring"), "-I" + str(cls.include_root), str(c), "-o", str(exe)]
         built = subprocess.run(command, capture_output=True, text=True)
         if built.returncode:
             raise RuntimeError(" ".join(command) + "\n" + built.stdout + built.stderr)
@@ -604,6 +625,7 @@ def main():
     inputs += shared_runtime_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c"))
     inputs += common_lease_dependencies(source("io_uring/xdev_ext_mech_dma.c"), source("io_uring/xdev_ext_mech_ce.c"))
     inputs += dma_scope_dependencies(source("io_uring/xdev_ext_mech_dma.c"))
+    inputs += TransformSource.dependencies(source("io_uring/xdev_ext_mech.c"))
     inputs += tuple(dict.fromkeys(copy_window_dependencies(source("io_uring/xdev_ext_mech_dma.c")) +
                                  copy_window_dependencies(source("io_uring/xdev_ext_mech_ce.c"))))
     print(json.dumps({"source_root": str(ROOT), "ref": ref,

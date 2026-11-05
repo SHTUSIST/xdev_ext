@@ -19,9 +19,21 @@ import re
 import subprocess
 import tempfile
 import unittest
+import sys
 
 HERE = Path(__file__).resolve().parent
-EXTRACT = HERE.parent / 'provider/faults/run.py'
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import owned_dependency, verify_entry  # noqa: E402
+verify_entry(__file__, 'tests/core/lifecycle/runtime/teardown_test.py')
+EXTRACT = owned_dependency(__file__, 'tests/core/provider/faults/run.py')
 spec = importlib.util.spec_from_file_location('provider_extract', EXTRACT)
 extract = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(extract)
@@ -164,13 +176,16 @@ class Teardown(unittest.TestCase):
             header = path / 'linux' / (name + '.h')
             header.parent.mkdir(parents=True, exist_ok=True)
             header.write_text('/* OS boundary: definitions are supplied by the fixture. */\n')
-        (path / 'probe.c').write_text(build())
+        code = build()
+        include_root = extract.compiler_headers(extract.ROOT, path / 'qualified-include', code,
+                                               reader=extract.source, search=('', 'io_uring'))
+        (path / 'probe.c').write_text(code)
         cls.binary = path / 'probe'
         built = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra',
                                 '-Werror', '-Wno-unused-function', '-Wno-unused-variable',
                                 '-Wno-unused-parameter', '-fsanitize=undefined',
                                 '-fno-sanitize-recover=undefined', '-pthread', '-I' + str(path),
-                                '-I' + str(extract.ROOT), '-I' + str(extract.ROOT / 'io_uring'),
+                                '-I' + str(include_root), '-I' + str(include_root / 'io_uring'),
                                 str(path / 'probe.c'), '-o', str(cls.binary)],
                                capture_output=True, text=True)
         if built.returncode:
