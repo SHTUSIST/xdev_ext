@@ -1024,6 +1024,8 @@ void nvme_xdev_ext_mech_fill_info(struct xdev_ext_mech_stage *st,
 			     struct xdev_ext_mech_batch *b, void *info);
 int nvme_xdev_ext_mech_stage_matches(struct xdev_ext_mech_stage *st, struct nvme_ns *ns,
 				const struct nvme_xdev_ext_identity *identity);
+long nvme_xdev_ext_window_ioctl(struct nvme_ns *ns, struct file *file,
+		void __user *argp);
 void nvme_xdev_ext_mech_init(void);
 void nvme_xdev_ext_mech_exit(void);
 #else

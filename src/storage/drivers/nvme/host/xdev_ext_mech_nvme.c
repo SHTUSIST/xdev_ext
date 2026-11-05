@@ -19,12 +19,18 @@
  * the worker releases the leases in ->fill_cqe, quiesced only on success.
  */
 
+#include <linux/anon_inodes.h>
 #include <linux/blk-mq.h>
 #include <linux/build_bug.h>
+#include <linux/fcntl.h>
+#include <linux/file.h>
+#include <linux/list.h>
 #include <linux/moduleparam.h>
+#include <linux/mutex.h>
 #include <linux/nvme_xdev_ext_passthru.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/uaccess.h>
 #include <linux/xdev_ext_mech.h>
 #include <linux/xdev_ext_peer.h>
 #include <linux/xdev_ext_storfam.h>
@@ -112,6 +118,145 @@ MODULE_PARM_DESC(xdev_ext_mech_bounces,
 #endif
 
 /*
+ * LBA window handles (prototype for ASK.69).  NVME_IOCTL_XDEV_EXT_WINDOW on a
+ * /dev/ngXnY returns a file naming one range of that namespace; its open mode
+ * is its access.  A stage presenting it binds the namespace file the holder
+ * opened, and only inside the range.  A handle stays registered until its last
+ * reference: a session holds its stage file until it is released (or keeps it
+ * for good when quarantined), so no overlapping range is issued while the
+ * previous owner may still write it.
+ */
+struct nvme_xdev_ext_window_handle {
+	struct list_head node;			/* nvme_xdev_ext_windows */
+	struct file *target;			/* the holder's /dev/ngXnY */
+	const struct nvme_ns_head *head;	/* one namespace across paths */
+	struct xdev_ext_stor_grant grant;
+};
+
+static LIST_HEAD(nvme_xdev_ext_windows);
+static DEFINE_MUTEX(nvme_xdev_ext_windows_lock);
+
+static_assert(NVME_XDEV_EXT_WINDOW_F_READ == XDEV_EXT_STOR_GRANT_READ);
+static_assert(NVME_XDEV_EXT_WINDOW_F_WRITE == XDEV_EXT_STOR_GRANT_WRITE);
+
+static int nvme_xdev_ext_window_release(struct inode *inode, struct file *file)
+{
+	struct nvme_xdev_ext_window_handle *w = file->private_data;
+
+	mutex_lock(&nvme_xdev_ext_windows_lock);
+	list_del_init(&w->node);
+	mutex_unlock(&nvme_xdev_ext_windows_lock);
+	fput(w->target);
+	kfree(w);
+	return 0;
+}
+
+static const struct file_operations nvme_xdev_ext_window_fops = {
+	.owner = THIS_MODULE,
+	.release = nvme_xdev_ext_window_release,
+};
+
+/* The holder delegates only what its own fd and the native policy allow. */
+static int nvme_xdev_ext_window_access(struct nvme_ns *ns, struct file *file,
+		u32 access)
+{
+	bool rd = access & XDEV_EXT_STOR_GRANT_READ;
+	bool wr = access & XDEV_EXT_STOR_GRANT_WRITE;
+
+	if ((rd && !(file->f_mode & FMODE_READ)) ||
+	    (wr && !(file->f_mode & FMODE_WRITE)))
+		return -EBADF;
+	if ((rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)) ||
+	    (wr && !nvme_xdev_ext_mech_cmd_allowed(ns, file, true)))
+		return -EACCES;
+	return 0;
+}
+
+/* ioctl on @file, a /dev/ngXnY of @ns: the new handle's fd or -errno. */
+long nvme_xdev_ext_window_ioctl(struct nvme_ns *ns, struct file *file,
+		void __user *argp)
+{
+	struct nvme_xdev_ext_window_handle *w, *o;
+	const struct request_queue *queue;
+	const struct nvme_ns_head *head;
+	struct nvme_xdev_ext_identity id;
+	struct nvme_xdev_ext_window u;
+	const struct gendisk *disk;
+	struct file *handle;
+	int fd, ret;
+
+	if (copy_from_user(&u, argp, sizeof(u)))
+		return -EFAULT;
+	if (u.rsvd)
+		return -EINVAL;
+	w = kzalloc(sizeof(*w), GFP_KERNEL);
+	if (!w)
+		return -ENOMEM;
+	INIT_LIST_HEAD(&w->node);
+	ret = nvme_xdev_ext_capture_identity(ns, &id, &head, &disk, &queue);
+	if (!ret)
+		ret = xdev_ext_stor_grant_make(&w->grant, id.capacity_lbas,
+					       u.slba, u.nlb, u.flags);
+	if (!ret)
+		ret = nvme_xdev_ext_window_access(ns, file, u.flags);
+	if (ret) {
+		kfree(w);
+		return ret;
+	}
+	w->head = head;
+	w->target = get_file(file);
+	handle = anon_inode_getfile("[nvme_xdev_ext_window]",
+			&nvme_xdev_ext_window_fops, w,
+			!(u.flags & XDEV_EXT_STOR_GRANT_WRITE) ? O_RDONLY :
+			(u.flags & XDEV_EXT_STOR_GRANT_READ) ? O_RDWR : O_WRONLY);
+	if (IS_ERR(handle)) {
+		fput(w->target);
+		kfree(w);
+		return PTR_ERR(handle);
+	}
+	fd = get_unused_fd_flags(O_CLOEXEC);
+	if (fd < 0) {
+		fput(handle);	/* ->release frees @w, never listed */
+		return fd;
+	}
+	mutex_lock(&nvme_xdev_ext_windows_lock);
+	list_for_each_entry(o, &nvme_xdev_ext_windows, node) {
+		if (o->head == w->head &&
+		    xdev_ext_stor_grant_conflict(&o->grant, &w->grant)) {
+			mutex_unlock(&nvme_xdev_ext_windows_lock);
+			put_unused_fd(fd);
+			fput(handle);
+			return -EBUSY;
+		}
+	}
+	list_add(&w->node, &nvme_xdev_ext_windows);
+	mutex_unlock(&nvme_xdev_ext_windows_lock);
+	fd_install(fd, handle);
+	return fd;
+}
+
+/* CREATE: the namespace file a stage on @file binds. */
+static struct file *nvme_xdev_ext_window_target(struct file *file)
+{
+	if (file->f_op != &nvme_xdev_ext_window_fops)
+		return file;
+	return ((struct nvme_xdev_ext_window_handle *)file->private_data)->target;
+}
+
+/* CREATE: a stage on a handle binds only inside it; the namespace file
+ * itself keeps its whole capacity. */
+static int nvme_xdev_ext_window_admit(const struct xdev_ext_mech_stage *st,
+		bool write)
+{
+	const struct nvme_xdev_ext_window_handle *w;
+
+	if (st->file->f_op != &nvme_xdev_ext_window_fops)
+		return 0;
+	w = st->file->private_data;
+	return xdev_ext_stor_grant_admit(&w->grant, write, st->arg0, st->arg1);
+}
+
+/*
  * CREATE: only a non-multipath /dev/ngXnY (the one whose uring_cmd is
  * nvme_ns_chr_uring_cmd) binds; its open pins the namespace.
  */
@@ -129,10 +274,12 @@ static int nvme_xdev_ext_member_bind(struct xdev_ext_mech_stage *st,
 	bool write = st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE;
 	struct nvme_xdev_ext_mech_stage *p;
 	struct nvme_ns *ns;
+	int ret;
 
 	if (u->flags || (!write && st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 		return -EINVAL;
-	ns = nvme_xdev_ext_class_ns(st->file);
+	/* Directly, or the file a window handle names. */
+	ns = nvme_xdev_ext_class_ns(nvme_xdev_ext_window_target(st->file));
 	if (!ns)
 		return -EOPNOTSUPP;
 	/* No interrupt fallback: polling needs this namespace's poll queues. */
@@ -156,6 +303,9 @@ static int nvme_xdev_ext_member_bind(struct xdev_ext_mech_stage *st,
 		return -EBADF;
 	if (!nvme_xdev_ext_mech_cmd_allowed(ns, st->file, write))
 		return -EACCES;
+	ret = nvme_xdev_ext_window_admit(st, write);
+	if (ret)
+		return ret;
 
 	p = kzalloc(sizeof(*p), GFP_KERNEL);
 	if (!p)
