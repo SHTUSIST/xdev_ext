@@ -11,6 +11,18 @@
  *    through the requester's window (the environment's mapping, not output);
  *  - "same worker" means the worker that submitted the READ also runs the
  *    XDOMAIN submit and posts the TX descriptors, with no START in between.
+ *
+ * In-flight window (NAME_wN and the window_* cases): each XDOMAIN stage takes
+ * a window W in bits 32..63 of its arg1.  The sender keeps at most W groups
+ * in flight (announced and not yet finished) and the receiver keeps at most W
+ * groups between its RX stage and their final reply, while
+ *  - every group still reaches the peer in key order (host 2's k-th WRITE
+ *    holds host 1's k-th READ);
+ *  - a group's data is posted only into receive buffers the peer posted for
+ *    that group, and the peer posts one group's buffers at a time (version 1);
+ *  - reuse still waits for the peer's ACK and the local TX completion, and an
+ *    old ACK still finishes nothing;
+ *  - a window of 1 behaves exactly as no window (the runner compares traces).
  */
 #include <stdio.h>
 #include <stdlib.h>
@@ -22,10 +34,12 @@
 #include "chain_core_api.h"
 
 #define FRAME 4096u
-#define FRAMES 4u
+#define MAX_FRAMES 32u
 #define GROUP 8192u
-#define DEPTH 2u
+#define RTS 1u
 #define ACK 3u
+#define FAIL 5u
+#define CANCEL 6u
 #define F_K_FREE chain_frame_state_free()
 #define BUDGET 200000u
 
@@ -35,6 +49,9 @@ static const char *case_name = "?";
 	fprintf(stderr, "CHAIN_ASSERT %s: %s (%s:%d)\n", case_name, why, __FILE__, __LINE__); \
 	exit(1); } } while (0)
 
+/* Session shape of this case; the defaults are the original composition. */
+static unsigned depth = 2, frames = 4, window_tx, window_rx;
+
 static uint8_t pattern(uint64_t a)
 {
 	uint32_t x = (uint32_t)(a * 2654435761u) ^ (uint32_t)(a >> 9) * 40503u;
@@ -43,9 +60,50 @@ static uint8_t pattern(uint64_t a)
 
 static struct xdev_ext_mech_session *tx, *rx;
 
+/* Most of each quantity seen between any two scheduler steps. */
+static struct { unsigned tx_stage, rx_stage, rx_held; } peak;
+static unsigned limit(unsigned w) { return w > 1 ? w : 1; }
+static void observe(void)
+{
+	unsigned tx_stage, rx_stage, rx_held = 0;
+	bool aborted;
+
+	if (!tx || !rx)
+		return;
+	/* Groups host 1 has in flight at its XDOMAIN stage (accepted, not landed). */
+	tx_stage = (unsigned)(chain_stage_submitted(tx, 1) - chain_stage_completed(tx, 1));
+	/* Groups host 2 has in its XDOMAIN RX stage. */
+	rx_stage = (unsigned)(chain_stage_submitted(rx, 0) - chain_stage_completed(rx, 0));
+	/* Groups host 2 took in and has not finished (RX stage or consumer);
+	 * exact only while no host 2 batch was aborted (an abort may end a batch
+	 * that never entered the RX stage). */
+	aborted = chain_session_aborted(rx) != 0;
+	if (!aborted)
+		rx_held = (unsigned)(chain_stage_submitted(rx, 0) - chain_session_done(rx));
+	if (tx_stage > peak.tx_stage)
+		peak.tx_stage = tx_stage;
+	if (rx_stage > peak.rx_stage)
+		peak.rx_stage = rx_stage;
+	if (rx_held > peak.rx_held)
+		peak.rx_held = rx_held;
+	CHECK(tx_stage <= limit(window_tx), "host 1 never has more XDOMAIN groups in flight than its window");
+	CHECK(rx_stage <= 1, "host 2 has at most one group in its XDOMAIN RX stage (one posted group, version 1)");
+	if (window_rx > 1 && !aborted)
+		CHECK(rx_held <= window_rx, "host 2 never holds more groups than the window it armed");
+}
+
+/* The bounded deterministic scheduler, one step at a time so the window
+ * rules hold between any two steps. @advance moves virtual time first. */
 static void pump(uint64_t advance)
 {
-	CHECK(chain_pump(BUDGET, advance) == 0, "bounded scheduler drains without budget exhaustion");
+	unsigned steps = 0;
+
+	while (chain_pump(1, advance) == -ELOOP) {
+		advance = 0;
+		observe();
+		CHECK(++steps < BUDGET, "bounded scheduler drains without budget exhaustion");
+	}
+	observe();
 }
 static void settle(unsigned rounds)
 {
@@ -56,12 +114,13 @@ static void settle(unsigned rounds)
 static bool early;
 static void up(void)
 {
-	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = FRAMES, .depth = DEPTH,
-		.group_bytes = GROUP, .early = early };
+	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = frames, .depth = depth,
+		.group_bytes = GROUP, .early = early, .window_tx = window_tx, .window_rx = window_rx };
 	size_t bytes;
 	uint8_t *disk;
 	int err;
 
+	CHECK(frames <= MAX_FRAMES, "case shape fits the oracle tables");
 	CHECK(chain_world(&cfg) == 0, "two XDOMAIN endpoints probed, logged in and data rings verified");
 	disk = chain_nvme_disk(0, &bytes);
 	for (size_t i = 0; i < bytes; i++)
@@ -100,7 +159,7 @@ static void start(uint64_t n)
 /* Frame offset of a DMA address in a requester window; independent lookup. */
 static int64_t offset_of(unsigned endpoint, enum chain_device_kind kind, uint64_t dma)
 {
-	for (uint64_t page = 0; page < FRAMES; page++) {
+	for (uint64_t page = 0; page < frames; page++) {
 		uint64_t base = chain_device_dma(endpoint, kind, page * FRAME);
 		if (dma >= base && dma < base + FRAME)
 			return (int64_t)(page * FRAME + (dma - base));
@@ -208,7 +267,7 @@ static void same_worker_tx(unsigned k)
 		CHECK(chain_event_get(build - 1)->worker == worker,
 		      "XDOMAIN stage built by the session worker that issued the READ");
 	}
-	next_read = nth(CHAIN_EV_NVME_SUBMIT, 0, k + DEPTH);
+	next_read = nth(CHAIN_EV_NVME_SUBMIT, 0, k + depth);
 	for (size_t i = done; i < chain_event_count(); i++) {
 		const struct chain_event *e = chain_event_get(i);
 		if (e->kind == CHAIN_EV_START)
@@ -239,8 +298,8 @@ static void same_worker_tx(unsigned k)
 static void sent_bytes_match(unsigned k)
 {
 	const struct chain_nvme_command *r = command(0, k);
-	static uint8_t expect[FRAMES * FRAME];
-	static bool known[FRAMES * FRAME];
+	static uint8_t expect[MAX_FRAMES * FRAME];
+	static bool known[MAX_FRAMES * FRAME];
 	uint64_t position = 0;
 	uint32_t sent = 0;
 	size_t done = nth(CHAIN_EV_NVME_COMPLETE, 0, k);
@@ -275,9 +334,9 @@ static void sent_bytes_match(unsigned k)
 		bytes = chain_delivered_bytes(e);
 		CHECK(!e->status && bytes, "the link read host 1's frame and delivered it");
 		for (uint32_t t = 0; t < e->length; t++)
-			if (off + t >= FRAMES * FRAME || !known[off + t] || bytes[t] != expect[off + t]) {
+			if (off + t >= frames * FRAME || !known[off + t] || bytes[t] != expect[off + t]) {
 				fprintf(stderr, "frame offset %lld: sent %u expected %u\n", (long long)(off + t),
-					bytes[t], off + t < FRAMES * FRAME ? expect[off + t] : 0);
+					bytes[t], off + t < frames * FRAME ? expect[off + t] : 0);
 				CHECK(0, "host 1 sent the bytes its READ placed in those frames");
 			}
 		sent += (uint32_t)e->length;
@@ -305,6 +364,45 @@ static void bytes_match(unsigned k)
 	assertions++;
 }
 
+/* Receive-side credit, from the record of real data-ring posts: host 1 posts
+ * a group's data only after host 2 posted receive buffers for that group, and
+ * host 2 posts the next group's buffers only after every buffer it posted
+ * before was filled (one posted group per data RX ring, version 1). */
+static void credit_rule(void)
+{
+	uint64_t rx_groups[64], last = 0;
+	unsigned nrx = 0, posted = 0, filled = 0;
+	bool started = false;
+
+	for (size_t i = 0; i < chain_event_count(); i++) {
+		const struct chain_event *e = chain_event_get(i);
+
+		if (e->kind == CHAIN_EV_START)
+			started = true;
+		if (!started)
+			continue; /* link start-up verification uses its own scratch buffers */
+		if (e->kind == CHAIN_EV_DATA_RX_POST && e->endpoint == 1) {
+			if (e->group != last) {
+				CHECK(filled == posted,
+				      "host 2 posts a group's receive buffers only after its earlier ones were filled");
+				CHECK(nrx < 64, "bounded group record");
+				rx_groups[nrx++] = last = e->group;
+			}
+			posted++;
+		}
+		if (e->kind == CHAIN_EV_DATA_DELIVER && e->endpoint == 0 && !e->status &&
+		    offset_of(1, CHAIN_DEV_NHI, e->offset) >= 0)
+			filled++;
+		if (e->kind == CHAIN_EV_DATA_TX_POST && e->endpoint == 0) {
+			bool armed = false;
+			for (unsigned g = 0; g < nrx; g++)
+				armed |= rx_groups[g] == e->group;
+			CHECK(armed, "host 1 posts a group's data only into buffers host 2 posted for that group");
+		}
+	}
+	CHECK(filled <= posted, "no data frame landed outside a posted receive buffer");
+}
+
 static void finished(uint64_t n)
 {
 	CHECK(chain_session_done(tx) == n && !chain_session_aborted(tx), "host 1 finished every batch");
@@ -312,13 +410,14 @@ static void finished(uint64_t n)
 	CHECK(!chain_session_last_err(tx) && !chain_session_last_err(rx), "no session error");
 	CHECK(chain_violations() == 0,
 	      "no device touched bytes outside its live leases; no program ran in a callback");
-	for (unsigned f = 0; f < FRAMES; f++)
+	for (unsigned f = 0; f < frames; f++)
 		CHECK(chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
 		      "every frame back in the pool");
+	credit_rule();
 }
 
-/* Observation, not a requirement: most XDOMAIN groups in flight at once on
- * host 1, counted from RTS arrivals at host 2 and ACK arrivals at host 1. */
+/* Most XDOMAIN groups in flight at once on host 1, counted from RTS
+ * arrivals at host 2 and ACK arrivals at host 1 (ordinary mode). */
 static unsigned groups_in_flight_max(void)
 {
 	unsigned now = 0, most = 0;
@@ -326,7 +425,7 @@ static unsigned groups_in_flight_max(void)
 		const struct chain_event *e = chain_event_get(i);
 		if (e->kind != CHAIN_EV_CTL_RX)
 			continue;
-		if (e->endpoint == 1 && e->control_type == 1 && ++now > most)
+		if (e->endpoint == 1 && e->control_type == RTS && ++now > most)
 			most = now;
 		if (e->endpoint == 0 && e->control_type == ACK && now)
 			now--;
@@ -336,20 +435,26 @@ static unsigned groups_in_flight_max(void)
 
 static void chain_same_worker(void)
 {
+	unsigned n = 2 * depth;
+
 	up();
-	start(4);
+	start(n);
 	settle(50);
-	CHECK(commands(0) == 4 && commands(1) == 4, "four READs on host 1, four WRITEs on host 2");
-	for (unsigned k = 1; k <= 4; k++) {
+	CHECK(commands(0) == n && commands(1) == n, "every READ on host 1 and every WRITE on host 2");
+	for (unsigned k = 1; k <= n; k++) {
 		same_worker_tx(k);
 		sent_bytes_match(k);
 		bytes_match(k);
 	}
-	finished(4);
+	finished(n);
 	if (!early)
 		printf("CHAIN_OBSERVE xdomain_groups_in_flight_max=%u\n", groups_in_flight_max());
-	CHECK(read_frames(3) == read_frames(1) && read_frames(4) == read_frames(2),
-	      "batches 3 and 4 reuse the frames of batches 1 and 2");
+	printf("CHAIN_OBSERVE tx_stage_peak=%u rx_held_peak=%u\n", peak.tx_stage, peak.rx_held);
+	if (!early)
+		CHECK(groups_in_flight_max() <= limit(window_tx), "RTS minus ACK never exceeds the window");
+	for (unsigned k = 1; k <= depth; k++)
+		CHECK(read_frames(k + depth) == read_frames(k),
+		      "the second round of batches reuses the frames of the first round");
 }
 
 /* (b) No reuse without the peer ACK. */
@@ -359,14 +464,16 @@ static void reuse_waits_for_ack(void)
 
 	up();
 	chain_hold_ack(1, true);
-	start(3);
+	start(depth + 1);
 	settle(50);
 	CHECK(commands(1) >= 1, "host 2 wrote group 1: its consumer released it");
 	CHECK(chain_control_tx_count(1, ACK) >= 1, "host 2 produced an ACK, held on the wire");
 	CHECK(nth_ctl_rx(0, ACK, 1) == 0, "host 1 has received no ACK");
-	CHECK(commands(0) == 2, "no third READ: frames of batch 1 are not reused");
+	CHECK(commands(0) == depth, "no further READ: frames of batch 1 are not reused");
+	if (window_tx > 1)
+		CHECK(peak.tx_stage == window_tx, "with every ACK held, host 1 fills its window");
 	first = read_frames(1);
-	for (unsigned f = 0; f < FRAMES; f++)
+	for (unsigned f = 0; f < frames; f++)
 		if (first & (1u << f)) {
 			CHECK(chain_frame_custody(tx, f) != F_K_FREE, "batch 1 frames stay out of the pool");
 			CHECK(chain_live_leases(0, CHAIN_DEV_NHI, f * FRAME, FRAME) >= 1,
@@ -375,11 +482,11 @@ static void reuse_waits_for_ack(void)
 	CHECK(chain_session_done(tx) == 0, "no host 1 batch finished");
 	chain_hold_ack(1, false);
 	settle(50);
-	finished(3);
-	CHECK(nth_ctl_rx(0, ACK, 1) && nth_ctl_rx(0, ACK, 1) < nth(CHAIN_EV_NVME_SUBMIT, 0, 3),
+	finished(depth + 1);
+	CHECK(nth_ctl_rx(0, ACK, 1) && nth_ctl_rx(0, ACK, 1) < nth(CHAIN_EV_NVME_SUBMIT, 0, depth + 1),
 	      "the reusing READ follows the first ACK");
-	CHECK(read_frames(3) == first, "the third READ reuses batch 1's frames");
-	for (unsigned k = 1; k <= 3; k++) {
+	CHECK(read_frames(depth + 1) == first, "the reusing READ takes batch 1's frames");
+	for (unsigned k = 1; k <= depth + 1; k++) {
 		sent_bytes_match(k);
 		bytes_match(k);
 	}
@@ -392,13 +499,15 @@ static void ack_before_local_done(void)
 
 	up();
 	chain_hold_tx_completions(0, true);
-	start(3);
+	start(depth + 1);
 	settle(50);
 	CHECK(nth_ctl_rx(0, ACK, 1) != 0, "host 1 received group 1's ACK");
 	CHECK(chain_data_tx_done(0) == 0, "no host 1 TX descriptor has completed");
-	CHECK(commands(0) == 2, "no third READ while TX completion is outstanding");
+	CHECK(commands(0) == depth, "no further READ while TX completion is outstanding");
+	if (window_tx > 1)
+		CHECK(peak.tx_stage == window_tx, "with every TX completion held, host 1 fills its window");
 	first = read_frames(1);
-	for (unsigned f = 0; f < FRAMES; f++)
+	for (unsigned f = 0; f < frames; f++)
 		if (first & (1u << f))
 			CHECK(chain_frame_custody(tx, f) != F_K_FREE &&
 			      chain_live_leases(0, CHAIN_DEV_NHI, f * FRAME, FRAME) >= 1,
@@ -406,10 +515,10 @@ static void ack_before_local_done(void)
 	CHECK(chain_session_done(tx) == 0, "no host 1 batch finished on ACK alone");
 	chain_hold_tx_completions(0, false);
 	settle(50);
-	finished(3);
-	CHECK(nth(CHAIN_EV_NVME_SUBMIT, 0, 3) > nth_ctl_rx(0, ACK, 1), "reuse follows both events");
-	CHECK(read_frames(3) == first, "the third READ reuses batch 1's frames");
-	for (unsigned k = 1; k <= 3; k++) {
+	finished(depth + 1);
+	CHECK(nth(CHAIN_EV_NVME_SUBMIT, 0, depth + 1) > nth_ctl_rx(0, ACK, 1), "reuse follows both events");
+	CHECK(read_frames(depth + 1) == first, "the reusing READ takes batch 1's frames");
+	for (unsigned k = 1; k <= depth + 1; k++) {
 		sent_bytes_match(k);
 		bytes_match(k);
 	}
@@ -420,16 +529,18 @@ static void consumer_holds_ack(void)
 {
 	up();
 	chain_nvme_hold(1, true);
-	start(2);
+	start(depth);
 	settle(50);
 	CHECK(chain_nvme_pending(1) >= 1, "host 2 NVMe WRITE submitted and held");
+	if (window_rx > 1)
+		CHECK(chain_nvme_pending(1) == window_rx, "host 2 took in as many groups as its window");
 	CHECK(chain_control_tx_count(1, ACK) == 0, "no ACK while the consumer holds the group");
 	CHECK(chain_session_done(tx) == 0, "host 1 does not finish without the ACK");
 	chain_nvme_hold(1, false);
 	settle(50);
-	finished(2);
-	CHECK(chain_control_tx_count(1, ACK) == 2, "one ACK per group after the WRITE completed");
-	for (unsigned k = 1; k <= 2; k++) {
+	finished(depth);
+	CHECK(chain_control_tx_count(1, ACK) == depth, "one ACK per group after the WRITE completed");
+	for (unsigned k = 1; k <= depth; k++) {
 		sent_bytes_match(k);
 		bytes_match(k);
 	}
@@ -443,46 +554,156 @@ static void stale_ack_after_reuse(void)
 
 	up();
 	chain_hold_ack(1, true);
-	start(3);
+	start(depth + 1);
 	settle(50);
-	CHECK(commands(0) == 2, "groups 1 and 2 wait for ACKs");
+	CHECK(commands(0) == depth, "the first round of groups waits for ACKs");
 	chain_hold_ack(1, false);
-	/* Step until host 1 holds both ACKs, then hold host 2's next ACK. */
-	while (!nth_ctl_rx(0, ACK, 2)) {
+	/* Step until host 1 holds every held ACK, then hold host 2's next ACK. */
+	while (!nth_ctl_rx(0, ACK, depth)) {
 		CHECK(chain_pump(1, 0) == 0 || 1, "single-step scheduler");
-		CHECK(++guard < 100000, "both held ACKs arrive");
+		observe();
+		CHECK(++guard < 100000, "every held ACK arrives");
 	}
 	chain_hold_ack(1, true);
 	settle(50);
 	first = read_frames(1);
-	CHECK(commands(0) == 3 && read_frames(3) == first, "batch 3 now occupies batch 1's frames");
-	CHECK(commands(1) == 3, "host 2 wrote group 3; its ACK is held");
-	CHECK(chain_session_done(tx) == 2, "groups 1 and 2 finished on host 1");
+	CHECK(commands(0) == depth + 1 && read_frames(depth + 1) == first,
+	      "the next batch now occupies batch 1's frames");
+	CHECK(commands(1) == depth + 1, "host 2 wrote that group; its ACK is held");
+	CHECK(chain_session_done(tx) == depth, "the first round finished on host 1");
 	ret = chain_inject_stale_control(1, ACK, 1);
 	CHECK(ret == 0, "a copy of group 1's ACK reaches host 1's control RX ring");
 	settle(20);
-	CHECK(nth_ctl_rx(0, ACK, 3) != 0, "the stale ACK was dispatched to the class");
-	CHECK(chain_session_done(tx) == 2, "the stale ACK finished no batch");
-	for (unsigned f = 0; f < FRAMES; f++)
+	CHECK(nth_ctl_rx(0, ACK, depth + 1) != 0, "the stale ACK was dispatched to the class");
+	CHECK(chain_session_done(tx) == depth, "the stale ACK finished no batch");
+	for (unsigned f = 0; f < frames; f++)
 		if (first & (1u << f))
 			CHECK(chain_frame_custody(tx, f) != F_K_FREE &&
 			      chain_live_leases(0, CHAIN_DEV_NHI, f * FRAME, FRAME) >= 1,
-			      "reused frames stay leased to group 3");
-	CHECK(commands(0) == 3, "no further READ reused the frames");
+			      "reused frames stay leased to the group now in them");
+	CHECK(commands(0) == depth + 1, "no further READ reused the frames");
 	chain_hold_ack(1, false);
 	settle(50);
-	CHECK(chain_session_done(tx) == 3, "group 3 finishes on its own ACK");
+	CHECK(chain_session_done(tx) == depth + 1, "that group finishes on its own ACK");
 	CHECK(chain_violations() == 0, "no lease overlap");
-	for (unsigned k = 1; k <= 3; k++) {
+	for (unsigned k = 1; k <= depth + 1; k++) {
 		sent_bytes_match(k);
 		bytes_match(k);
 	}
+	credit_rule();
+}
+
+/* Window of W on both stages, host 2's consumer holding every group, more
+ * batches than the window: host 1 reaches exactly W groups in flight, host 2
+ * holds exactly W, nothing more is announced, and after the release every
+ * group arrives in order. Ordinary mode needs no timer for any of this. */
+static void window_fills(void)
+{
+	unsigned n = depth + 2;
+
+	up();
+	chain_nvme_hold(1, true);
+	start(n);
+	if (early)
+		settle(50); /* a sender waiting for its grant retries on the core timer */
+	else
+		pump(0);    /* event driven: no protocol or worker timer may be needed */
+	CHECK(chain_nvme_pending(1) == window_rx, "host 2 took in and holds W groups");
+	CHECK(peak.tx_stage == window_tx, "host 1 reached W groups in flight at its XDOMAIN stage");
+	CHECK(peak.rx_held == window_rx, "host 2 held W groups at once");
+	if (!early) {
+		CHECK(chain_control_tx_count(0, RTS) == window_tx, "group W+1 is not announced while W are unfinished");
+		CHECK(groups_in_flight_max() == window_tx, "RTS minus ACK reached W");
+	}
+	CHECK(chain_control_tx_count(1, ACK) == 0 && chain_session_done(tx) == 0,
+	      "no ACK and no finished group while the consumer holds them");
+	CHECK(commands(0) == depth, "host 1 read ahead into every batch it has");
+	chain_nvme_hold(1, false);
+	settle(50);
+	finished(n);
+	CHECK(commands(1) == n, "host 2 wrote every group");
+	for (unsigned k = 1; k <= n; k++) {
+		same_worker_tx(k);
+		sent_bytes_match(k);
+		bytes_match(k);
+	}
+	printf("CHAIN_OBSERVE tx_stage_peak=%u rx_held_peak=%u\n", peak.tx_stage, peak.rx_held);
+}
+
+/* The receiver arms fewer groups than the sender's window: host 1 has in
+ * flight what host 2 holds plus at most the one group it announced, and posts
+ * data only for groups host 2 posted buffers for. */
+static void window_waits_for_receiver(void)
+{
+	unsigned announced = early ? 0 : 1, n = depth;
+
+	up();
+	chain_nvme_hold(1, true);
+	start(n);
+	if (early)
+		settle(50);
+	else
+		pump(0);
+	CHECK(chain_nvme_pending(1) == window_rx, "host 2 holds the groups it armed for");
+	CHECK(peak.rx_held == window_rx, "host 2 never took more than its window");
+	CHECK(peak.tx_stage == window_rx + announced,
+	      "host 1 waits for host 2: what host 2 holds, plus one announced group in ordinary mode");
+	if (!early)
+		CHECK(chain_control_tx_count(0, RTS) == window_rx + 1, "only the next group is announced ahead");
+	credit_rule();
+	chain_nvme_hold(1, false);
+	settle(50);
+	finished(n);
+	for (unsigned k = 1; k <= n; k++) {
+		sent_bytes_match(k);
+		bytes_match(k);
+	}
+	printf("CHAIN_OBSERVE tx_stage_peak=%u rx_held_peak=%u\n", peak.tx_stage, peak.rx_held);
+}
+
+/* An announced group the receiver never posted buffers for is withdrawn and
+ * refused, then the receiver arms its first batch. No later group of host 1
+ * may take that receive batch: host 2 must not write host 1's second group
+ * where the first belongs, and host 1 reports no group delivered. */
+static void window_withdrawn_head(void)
+{
+	unsigned guard = 0;
+
+	up();
+	CHECK(chain_start(tx, 2, 37) == 0, "host 1 START; host 2 has not started");
+	settle(20);
+	CHECK(commands(0) == 2, "host 1 read both groups");
+	CHECK(chain_control_tx_count(0, RTS) >= 1, "host 1 announced group 1");
+	/* Past the sender's 15 s withdrawal point, then one step at a time until
+	 * host 2 has refused group 1. */
+	CHECK(chain_pump(1, 15500000000ULL) == -ELOOP, "the withdrawal timer runs");
+	observe();
+	while (chain_control_tx_count(1, FAIL) == 0) {
+		CHECK(chain_pump(1, 0) == -ELOOP, "the refusal is reached without more time");
+		observe();
+		CHECK(++guard < BUDGET, "bounded");
+	}
+	CHECK(chain_control_tx_count(0, CANCEL) >= 1, "host 1 withdrew group 1");
+	CHECK(chain_start(rx, 2, 37) == 0, "host 2 START right after it refused group 1");
+	settle(50);
+	for (unsigned k = 1; k <= commands(1); k++)
+		bytes_match(k);
+	CHECK(commands(1) == 0, "host 2 wrote nothing: no later group took group 1's receive batch");
+	CHECK(count(CHAIN_EV_DATA_TX_POST, 0) == 0, "host 1 posted no data");
+	CHECK(chain_session_done(tx) == 0 && chain_session_aborted(tx) == 2,
+	      "host 1 reports neither group delivered");
+	CHECK(chain_session_stop(rx, -ECANCELED) == 0, "host 2 STOP");
+	settle(50);
+	CHECK(chain_violations() == 0, "no device touched bytes outside its live leases");
+	for (unsigned f = 0; f < frames; f++)
+		CHECK(chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
+		      "every frame back in the pool");
 }
 
 /* No Thunderbolt link behind the token: CREATE fails cleanly with ENODEV. */
 static void no_link_enodev(void)
 {
-	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = FRAMES, .depth = DEPTH,
+	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = frames, .depth = depth,
 		.group_bytes = GROUP };
 	int err = 0;
 
@@ -491,28 +712,61 @@ static void no_link_enodev(void)
 	CHECK(err == -ENODEV, "XDOMAIN stage bind without that link returns ENODEV");
 }
 
+static bool strip(char *name, const char *suffix)
+{
+	size_t n = strlen(name), s = strlen(suffix);
+
+	if (n <= s || strcmp(name + n - s, suffix))
+		return false;
+	name[n - s] = 0;
+	return true;
+}
+
 int main(int argc, char **argv)
 {
 	char base[64];
-	size_t n;
+	unsigned w = 0;
 
 	if (argc != 2 || strlen(argv[1]) >= sizeof(base))
 		return 2;
 	case_name = argv[1];
 	strcpy(base, case_name);
-	n = strlen(base);
 	/* NAME_early: the same requirement with both XDOMAIN stages in EARLY
 	 * mode (receive grants paired by key; no RTS/CTS round trip). */
-	if (n > 6 && !strcmp(base + n - 6, "_early")) {
-		early = true;
-		base[n - 6] = 0;
+	early = strip(base, "_early");
+	/* NAME_wN: both stages with window N, depth max(2, N), two frames a group. */
+	if (strip(base, "_w1"))
+		w = 1;
+	else if (strip(base, "_w2"))
+		w = 2;
+	else if (strip(base, "_w4"))
+		w = 4;
+	if (w) {
+		window_tx = window_rx = w;
+		depth = w > 2 ? w : 2;
+		frames = 2 * depth;
 	}
-	if (!strcmp(base, "chain_same_worker")) chain_same_worker();
+	if (!strcmp(base, "window_fills")) {
+		if (w < 2)
+			return 2;
+		depth = w + 2; /* more batches than the window */
+		frames = 2 * depth;
+		window_fills();
+	} else if (!strcmp(base, "window_waits_for_receiver") && !w) {
+		window_tx = 4;
+		window_rx = 2;
+		depth = 6;
+		frames = 12;
+		window_waits_for_receiver();
+	} else if (!strcmp(base, "window_withdrawn_head") && !w && !early) {
+		window_tx = window_rx = 2;
+		window_withdrawn_head();
+	} else if (!strcmp(base, "chain_same_worker")) chain_same_worker();
 	else if (!strcmp(base, "reuse_waits_for_ack")) reuse_waits_for_ack();
 	else if (!strcmp(base, "ack_before_local_done")) ack_before_local_done();
 	else if (!strcmp(base, "consumer_holds_ack")) consumer_holds_ack();
 	else if (!strcmp(base, "stale_ack_after_reuse")) stale_ack_after_reuse();
-	else if (!strcmp(base, "no_link_enodev") && !early) no_link_enodev();
+	else if (!strcmp(base, "no_link_enodev") && !early && !w) no_link_enodev();
 	else return 2;
 	printf("CHAIN_CASE %s assertions=%u\n", case_name, assertions);
 	return 0;

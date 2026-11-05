@@ -31,7 +31,22 @@ STACK = Path('tools/testing/selftests/xdev_ext_mech/xdomain')
 BASE_CASES = ('chain_same_worker', 'reuse_waits_for_ack', 'ack_before_local_done',
               'consumer_holds_ack', 'stale_ack_after_reuse')
 # NAME_early: both XDOMAIN stages in EARLY mode (paired receive grants).
-CASES = BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',)
+# NAME_wN: both XDOMAIN stages with an in-flight window of N groups (arg1 bits 32..63).
+WINDOWS = ('_w2', '_w4')
+WINDOW_CASES = ('window_fills_w2', 'window_fills_w4', 'window_waits_for_receiver')
+CASES = (BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev',) +
+         tuple(c + w for w in WINDOWS for c in BASE_CASES) +
+         tuple(c + w + '_early' for w in WINDOWS for c in BASE_CASES) +
+         WINDOW_CASES + tuple(c + '_early' for c in WINDOW_CASES) + ('window_withdrawn_head',))
+# A window of 1 must behave exactly as no window: NAME and its window-1 twin.
+IDENTITY = BASE_CASES + tuple(c + '_early' for c in BASE_CASES)
+
+
+def w1_twin(name):
+    return name[:-len('_early')] + '_w1_early' if name.endswith('_early') else name + '_w1'
+
+
+ALL_CASES = CASES + tuple(w1_twin(c) for c in IDENTITY)
 # Worker entry points; their call-graph closure inside the core text is compiled.
 CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
@@ -599,11 +614,47 @@ def run_cases(binary, out, cases):
     return results
 
 
+def canonical_trace(stderr):
+    """The CHAIN_TRACE event lines; a worker event's function address (which
+    ASLR moves between processes) becomes its order of first appearance."""
+    names, lines = {}, []
+    for line in stderr.splitlines():
+        if not line.startswith('CEV '):
+            continue
+        if ' kind=9 ' in line:
+            line = re.sub(r' addr=([0-9a-f]+) ',
+                          lambda m: ' addr=fn%d ' % names.setdefault(m[1], len(names)), line)
+        lines.append(line)
+    return lines
+
+
+def trace_identity(binary, cases):
+    """Run NAME and its window-1 twin with CHAIN_TRACE=1 and compare every
+    recorded event line (time, worker, addresses, groups, statuses)."""
+    env = dict(os.environ, CHAIN_TRACE='1')
+    results = []
+    for name in cases:
+        traces = []
+        for case in (name, w1_twin(name)):
+            try:
+                run = subprocess.run([str(binary), case], capture_output=True, text=True, timeout=120, env=env)
+                stderr, code = run.stderr, run.returncode
+            except subprocess.TimeoutExpired as error:
+                stderr, code = str(error.stderr or ''), 124
+            lines = canonical_trace(stderr)
+            traces.append(dict(case=case, exit=code, events=len(lines),
+                               sha256=hashlib.sha256('\n'.join(lines).encode()).hexdigest()))
+        results.append(dict(case=name, identical=traces[0]['exit'] == 0 == traces[1]['exit'] and
+                            traces[0]['events'] > 0 and traces[0]['sha256'] == traces[1]['sha256'],
+                            traces=traces))
+    return results
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--case', choices=CASES)
+    parser.add_argument('--case', choices=ALL_CASES)
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--only', choices=('core', 'nvme', 'link'))
     parser.add_argument('--mutation', choices=sorted(MUTATIONS))
@@ -643,7 +694,11 @@ def main():
                 record['verdict'] = 'KILLED' if killed else 'SURVIVED'
                 code = 0 if killed else 1
             else:
-                record['verdict'] = 'PASS' if all(c['passed'] for c in record['cases']) else 'FAIL'
+                passed = all(c['passed'] for c in record['cases'])
+                if not args.case:
+                    record['w1_identity'] = trace_identity(binary, IDENTITY)
+                    passed = passed and all(c['identical'] for c in record['w1_identity'])
+                record['verdict'] = 'PASS' if passed else 'FAIL'
                 code = 0 if record['verdict'] == 'PASS' else 1
     except (Setup, OSError, subprocess.SubprocessError) as error:
         record.update(verdict='SETUP_ERROR', error=str(error))
@@ -654,6 +709,10 @@ def main():
               % (case['assertions'], case['exit']) + ('' if case['passed'] else ' ' + str(case['failed_assertion'])))
         for line in case['observations']:
             print('# ' + line)
+    for item in record.get('w1_identity', []):
+        print(('ok' if item['identical'] else 'not ok') + ' - window 1 identical to no window: ' + item['case'] +
+              ' events=%d' % item['traces'][0]['events'] +
+              ('' if item['identical'] else ' %s' % [(t['case'], t['exit'], t['events']) for t in item['traces']]))
     print('CHAIN_VERDICT ' + record['verdict'] + ('' if code != 2 else '\n' + record.get('error', '')[-6000:]))
     return code
 

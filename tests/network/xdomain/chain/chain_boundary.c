@@ -783,7 +783,8 @@ struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override
 			  .fd = chain_nvme_fd[0], .arg0 = 256, .arg1 = 256 },
 			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
 			  .fd = chain_fd_for(chain_host1_control()),
-			  .arg0 = token_override ? token_override : chain_link_token(0), .arg1 = 0,
+			  .arg0 = token_override ? token_override : chain_link_token(0),
+			  .arg1 = (u64)chain_cfg.window_tx << 32,
 			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
 		},
 	};
@@ -800,7 +801,8 @@ struct xdev_ext_mech_session *chain_rx_session(int *err)
 		.depth = chain_cfg.depth, .eventfd = -1,
 		.st = {
 			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
-			  .fd = chain_fd_for(&chain_control[1]), .arg0 = chain_link_token(1), .arg1 = 0,
+			  .fd = chain_fd_for(&chain_control[1]), .arg0 = chain_link_token(1),
+			  .arg1 = (u64)chain_cfg.window_rx << 32,
 			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
 			{ .class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
 			  .fd = chain_nvme_fd[1], .arg0 = 512, .arg1 = 256 },
