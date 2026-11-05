@@ -126,8 +126,9 @@ MUTATIONS = {
         ('io_uring/family/xdev_ext_requester.c',
          '\t\tdma_sync_single_for_cpu(&h->pdev->dev, dma, len, DMA_FROM_DEVICE);\n', '\t\t;\n')]),
     'host-post-peer-address': dict(case='chain_same_worker', pool='host', edits=[
-        ('io_uring/xdomain/xdev_ext_xdomain_ring.c', '.buffer_phy = xdev_ext_net_elem_dma(&e[i]),',
-         '.buffer_phy = e[i].lease.u.peer.lease.dma_address,')]),
+        ('io_uring/xdomain/xdev_ext_xdomain_ring.c',
+         '\t\tif (e[i].lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA)\n\t\t\tf->buffer_phy = e[i].lease.u.hdma.dma;\n',
+         '')]),
     'host-lease-wrong-frame': dict(case='chain_same_worker', pool='host', edits=[
         ('io_uring/family/xdev_ext_netfam.c', 'ret = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,',
          'ret = xdev_ext_requester_host_lease(&ns->rq, ns->rx ? off : off ^ 4096, buf_len,')]),

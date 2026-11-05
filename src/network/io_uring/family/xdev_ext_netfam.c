@@ -125,6 +125,31 @@ struct xdev_ext_net_slot *xdev_ext_netfam_slot_get(struct xdev_ext_netfam_stage 
 }
 EXPORT_SYMBOL_GPL(xdev_ext_netfam_slot_get);
 
+/* Worker, IOU_UMEM host pages: @off is the pool offset. The requester's host
+ * mapping gives the element's page address, refusing a span outside one page
+ * or one frame, and syncs it for the device when the mapping needs that. */
+static int xdev_ext_netfam_lease_hdma(struct xdev_ext_netfam_stage *ns,
+		struct xdev_ext_net_slot *slot, u32 i, u64 off, u32 len, u32 buf_len)
+{
+	struct xdev_ext_net_elem *e = &slot->elem[i];
+	u64 dma;
+	int err;
+
+	err = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,
+					    ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &dma);
+	if (err)
+		return err;
+	e->lease.u.hdma.dma = dma;
+	e->lease.u.hdma.len = buf_len;
+	e->lease.kind = XDEV_EXT_NET_LEASE_HOST_DMA;
+	e->slot = slot;
+	e->len = len;
+	e->buf_len = buf_len;
+	if (i + 1 > slot->nr)
+		slot->nr = i + 1;
+	return 0;
+}
+
 /* Worker: lease element @i; @buf_len >= @len is what the device may write. */
 int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_slot *slot,
 			  u32 i, u64 off, u32 len, u32 buf_len)
@@ -135,26 +160,8 @@ int xdev_ext_netfam_lease(struct xdev_ext_netfam_stage *ns, struct xdev_ext_net_
 
 	if (i >= ns->max_elems || !len || buf_len < len)
 		return -EPROTO;
-	if (ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA) {
-		u64 dma;
-
-		/* @off is the pool offset; the requester's host mapping checks the
-		 * span lies in one page and one frame and syncs for the device. */
-		e = &slot->elem[i];
-		ret = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,
-						    ns->rx ? DMA_FROM_DEVICE : DMA_TO_DEVICE, &dma);
-		if (ret)
-			return ret;
-		e->lease.u.hdma.dma = dma;
-		e->lease.u.hdma.len = buf_len;
-		e->lease.kind = XDEV_EXT_NET_LEASE_HOST_DMA;
-		e->slot = slot;
-		e->len = len;
-		e->buf_len = buf_len;
-		if (i + 1 > slot->nr)
-			slot->nr = i + 1;
-		return 0;
-	}
+	if (ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA)
+		return xdev_ext_netfam_lease_hdma(ns, slot, i, off, len, buf_len);
 	if (ns->m->lease_kind != XDEV_EXT_NET_LEASE_PEER_DMA)
 		return -EPROTO;
 	e = &slot->elem[i];
