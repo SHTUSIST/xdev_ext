@@ -322,6 +322,19 @@ int chain_stage_unbind_checked(struct xdev_ext_mech_session *s, u32 i)
 
 	return st->cls->unbind_checked ? st->cls->unbind_checked(st) : 0;
 }
+/* The release decision's order for one stage, as in
+ * xdev_ext_mech_session_release_disposition(): the checked unbind first, then
+ * the class unbind only when the checked unbind allowed release.  Called with
+ * nothing in flight, as the core calls it after its drain. */
+int chain_stage_unbind_now(struct xdev_ext_mech_session *s, u32 i)
+{
+	struct xdev_ext_mech_stage *st = &s->st[i];
+	int err = st->cls->unbind_checked ? st->cls->unbind_checked(st) : 0;
+
+	if (!err && st->cls->unbind)
+		st->cls->unbind(st);
+	return err;
+}
 u64 chain_session_done(struct xdev_ext_mech_session *s) { return atomic64_read(&s->done); }
 u64 chain_session_aborted(struct xdev_ext_mech_session *s) { return atomic64_read(&s->aborted); }
 u64 chain_session_counter(struct xdev_ext_mech_session *s, u32 c) { return atomic64_read(&s->cnt[c]); }

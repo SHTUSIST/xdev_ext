@@ -110,7 +110,7 @@ The eleven cases below run unchanged in this mode, with the requester checks
 of `up()` replaced: an NVMe stage binds no requester (the block layer maps
 each request), and each XDOMAIN stage binds its own NHI, whose bind reports
 host RAM with struct pages and a host DMA-API mapping and maps every pool page
-once, in the stage direction, without CPU sync. Four cases run only here:
+once, in the stage direction, without CPU sync. Five cases run only here:
 
 | Case | Requirement |
 | --- | --- |
@@ -118,6 +118,7 @@ once, in the stage direction, without CPU sync. Four cases run only here:
 | `host_sync_order_early` | the same, with both XDOMAIN stages in EARLY mode |
 | `host_unknown_retained` | host 1's TX descriptors never complete, then STOP: after the one-second STOP bound the batch ends with unknown device access, its frames are sequestered, its NHI host leases are retained, the NHI mapping is never unmapped, nothing is synchronized for the CPU, and the XDOMAIN stage's checked unbind returns `-EIO` |
 | `host_misaligned_refused` | a UMEM registered 256 bytes into a page: CREATE fails with the requester's `-EINVAL` on both hosts and nothing is mapped |
+| `host_destroy_unmaps` | four groups end quiesced, then each XDOMAIN stage is released in the order of the core's release decision (`chain_stage_unbind_now()`: the checked unbind, then the class unbind only when the checked unbind allowed it): the checked unbind allows release, and the class unbind, through the network family's fini, unmaps every pool page of that stage's NHI exactly once, with the page size, the stage direction and `DMA_ATTR_SKIP_CPU_SYNC` |
 
 `host_run.py` is the same as `run.py --pool host`; the shared XDOMAIN host
 runner (`tools/ci/check_xdomain_host.py`) runs it after `run.py`, because the
@@ -211,6 +212,7 @@ failures do not count.
 | `host-post-peer-address` | the NHI descriptor takes the PEER lease field for every element | `chain_same_worker` |
 | `host-lease-wrong-frame` | TX host leases name the other frame of the group | `chain_same_worker` |
 | `host-peer-member` | an IOU_UMEM stage uses the PEER member, whose leases need a PEER authority | `chain_same_worker` |
+| `review-fini-skips-host-unbind` | the network family's fini skips the host-page unbind, so a host-page stage takes the PEER unbind and its mapping is never unmapped | `host_destroy_unmaps` |
 
 The existing mutants are also killed on the window variants
 (`--case NAME_w2`, `NAME_w4`, `NAME_w2_early`, `NAME_w4_early`).
@@ -231,8 +233,12 @@ reaches the window. Nothing here is a performance number.
 Host software composition, not kernel execution: real kthread concurrency,
 IRQ delivery, lockdep, RCU, BPF verification, IOMMU translation, PCIe ordering
 and physical Thunderbolt DMA are not exercised, and nothing here measures
-performance. Session teardown (reap, DESTROY), polling stages and
-per-stage program fds are outside this composition. A mutant that ran the
+performance. The core's session teardown (reap, DESTROY) is outside this
+composition: `host_destroy_unmaps` runs the class unbind of each XDOMAIN
+stage in the order of `xdev_ext_mech_session_release_disposition()`, and the
+core's own rule that a failed checked unbind quarantines the session without
+a class unbind or pool release is checked in `tests/core/admission_report`.
+Polling stages and per-stage program fds are also outside this composition. A mutant that ran the
 protocol inline in the NHI control-RX callback was not usable: the existing
 stack fixture's lock-context assertion in `stack_x6.c` aborts first, so it is
 not listed.
