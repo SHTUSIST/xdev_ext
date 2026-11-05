@@ -130,8 +130,8 @@ MUTATIONS = {
          '\t\tif (e[i].lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA)\n\t\t\tf->buffer_phy = e[i].lease.u.hdma.dma;\n',
          '')]),
     'host-lease-wrong-frame': dict(case='chain_same_worker', pool='host', edits=[
-        ('io_uring/family/xdev_ext_netfam.c', 'ret = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,',
-         'ret = xdev_ext_requester_host_lease(&ns->rq, ns->rx ? off : off ^ 4096, buf_len,')]),
+        ('io_uring/family/xdev_ext_netfam.c', 'err = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,',
+         'err = xdev_ext_requester_host_lease(&ns->rq, ns->rx ? off : off ^ 4096, buf_len,')]),
     'host-peer-member': dict(case='chain_same_worker', pool='host', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c',
          'pool_kind == XDEV_EXT_MECH_POOL_PEER ? &xd_member : &xd_member_host', '&xd_member')]),
