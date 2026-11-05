@@ -450,6 +450,20 @@ static size_t proto_hello_held(unsigned prog)
        "precondition: the live receiver has answered nothing yet");
  return world->logs;
 }
+/* Diagnostic: what the receiver's program was asked from log index mark on. */
+static void proto_offer_report(size_t mark, const char *when)
+{
+ size_t events = 0, hello = 0, fail_link = 0;
+ for (size_t i = mark; i < world->logs; i++) {
+  struct stack_event e = world->log[i];
+  if (e.kind != STACK_EV_PROTOCOL || e.endpoint != 1) continue;
+  events++;
+  if (e.control_type == 19) hello++;
+  if (e.length == 16) fail_link++;
+ }
+ fprintf(stderr, "PROTO_RECEIVER_EVENTS %s events=%zu hello=%zu fail_link=%zu up1=%u\n",
+         when, events, hello, fail_link, (unsigned)link(1)->up);
+}
 /* Protocol events of the receiver's program from log index mark on. */
 static void proto_no_offer_after(size_t mark, bool none)
 {
@@ -469,9 +483,11 @@ static void proto_hello_then_stop(unsigned prog)
  size_t mark = proto_hello_held(prog);
  u64 inc1 = link(1)->local_inc;
  int stop = stack_stop(world, 1);
- for (unsigned i = 0; i < 4; i++)
-  CHECK(stack_pump(world, 64, 25000000) == 0,
-        "STOP of a receiver holding a pairing offer ends in a bounded number of steps");
+ for (unsigned i = 0; i < 4; i++) {
+  int pumped = stack_pump(world, 64, 25000000);
+  proto_offer_report(mark, "after-stop");
+  CHECK(pumped == 0, "STOP of a receiver holding a pairing offer ends in a bounded number of steps");
+ }
  CHECK(stop == 0 || stop == -EAGAIN, "STOP is accepted");
  proto_no_offer_after(mark, false);
  CHECK(link(1)->up && link(1)->local_inc == inc1, "STOP keeps the link up in the same incarnation");
@@ -492,8 +508,12 @@ static void proto_hello_then_link_down(unsigned prog)
  size_t mark = proto_hello_held(prog);
  u64 inc1 = link(1)->local_inc;
  xdev_ext_xd_link_fail(link(1), NULL, -ENOLINK);
- CHECK(stack_pump(world, 64, 1000000) == 0,
-       "a link failure ends a receiver holding a pairing offer in a bounded number of steps");
+ /* The second pump runs after the program's wake on the HELLO expired. */
+ for (unsigned i = 0; i < 2; i++) {
+  int pumped = stack_pump(world, 64, i ? 25000000 : 1000000);
+  proto_offer_report(mark, "after-link-failure");
+  CHECK(pumped == 0, "a link failure ends a receiver holding a pairing offer in a bounded number of steps");
+ }
  CHECK(link(1)->local_inc != inc1, "the link failure ended the receiver's incarnation");
  CHECK(stage_facts(world, 1, 0).stage_dead, "the link failure ends the receiver stage");
  proto_no_offer_after(mark, true);
