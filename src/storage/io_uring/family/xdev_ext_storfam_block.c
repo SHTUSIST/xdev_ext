@@ -345,7 +345,7 @@ static int xdev_ext_storfam_peer_resources_init(struct xdev_ext_stor_stage *ss)
 
 	if (xdev_ext_mech_session_pool(st->s)->kind != XDEV_EXT_MECH_POOL_PEER)
 		return 0;
-	requester = ss->dev->requester(ss->member);
+	requester = ss->requester.pdev;
 	if (!requester)
 		return -EOPNOTSUPP;
 	dev = &requester->dev;
@@ -432,13 +432,12 @@ static int xdev_ext_storfam_peer_map(struct xdev_ext_stor_stage *ss,
 		u32 bytes)
 {
 	struct xdev_ext_mech_pool *pool = xdev_ext_mech_session_pool(ss->st->s);
-	struct file *authority = xdev_ext_peer_mech_pool_file(pool);
-	u64 generation = xdev_ext_peer_mech_pool_generation(pool);
+	struct xdev_ext_requester *requester = &ss->requester;
 	enum dma_data_direction dir = ss->window.write ? DMA_TO_DEVICE : DMA_FROM_DEVICE;
 	u32 pos, total = 0, nr = xdev_ext_mech_batch_nr_frames(b);
 	int ret;
 
-	if (!authority || !nr)
+	if (!requester->authority || !nr)
 		return -EINVAL;
 	for (pos = 0; pos < nr; pos++) {
 		struct xdev_ext_mech_frame f;
@@ -459,8 +458,8 @@ static int xdev_ext_storfam_peer_map(struct xdev_ext_stor_stage *ss,
 			if (io->nr_leases == ss->peer->max_pieces)
 				return -EREMOTEIO;
 			l = &io->leases[io->nr_leases];
-			ret = xdev_ext_peer_lease_split(authority,
-					to_pci_dev(ss->peer->dma_dev), generation,
+			ret = xdev_ext_peer_lease_split(requester->authority,
+					requester->pdev, requester->generation,
 					off, left, dir, l);
 			if (ret)
 				return ret;
@@ -644,6 +643,7 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 	ss->st = st;
 	ss->dev = dev;
 	ss->member = member;
+	ss->requester = (struct xdev_ext_requester) {};
 	memset(ss->poll_views, 0, sizeof(ss->poll_views));
 	ss->slots = NULL;
 	ss->pool.free = NULL;
@@ -658,6 +658,12 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 			st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE,
 			st->arg0, st->arg1,
 			xdev_ext_mech_session_layout(st->s)->group_bytes);
+	if (!ret && xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
+		struct pci_dev *requester = dev->requester(member);
+
+		ret = requester ? xdev_ext_requester_bind(&ss->requester, st,
+							requester, 0) : -EOPNOTSUPP;
+	}
 	if (ret) {
 		dev->unbind(member);
 		return ret;
@@ -669,6 +675,8 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 	if (ret) {
 		xdev_ext_storfam_peer_resources_free(ss);
 		xdev_ext_storfam_host_resources_free(ss);
+		if (ss->requester.pdev)
+			xdev_ext_requester_unbind(&ss->requester);
 		st->priv = NULL;
 		dev->unbind(member);
 	}
@@ -725,8 +733,12 @@ EXPORT_SYMBOL_GPL(xdev_ext_storfam_mark_dead);
 /* Process context: leave the member and all pins intact on retained resources. */
 bool xdev_ext_storfam_unbind(struct xdev_ext_stor_stage *ss)
 {
-	return xdev_ext_storfam_peer_resources_free(ss) &&
-	       xdev_ext_storfam_host_resources_free(ss);
+	if (!xdev_ext_storfam_peer_resources_free(ss) ||
+	    !xdev_ext_storfam_host_resources_free(ss))
+		return false;
+	if (ss->requester.pdev)
+		xdev_ext_requester_unbind(&ss->requester);
+	return true;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_storfam_unbind);
 

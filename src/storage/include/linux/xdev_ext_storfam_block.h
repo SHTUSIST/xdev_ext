@@ -30,6 +30,7 @@ int xdev_ext_stor_block_append(struct xdev_ext_mech_pool *pool,
 #ifdef CONFIG_BLOCK
 #include <linux/atomic.h>
 #include <linux/blk_types.h>
+#include <linux/xdev_ext_requester.h>
 #include <linux/xdev_ext_storfam_runtime.h>
 
 struct xdev_ext_stor_completion;
@@ -140,6 +141,7 @@ struct xdev_ext_stor_stage {
 	struct xdev_ext_mech_stage *st;
 	const struct xdev_ext_stor_dev_ops *dev;
 	void *member;
+	struct xdev_ext_requester requester;
 	struct xdev_ext_stor_window window;
 	struct xdev_ext_stor_geometry geometry;
 	atomic_t dead;
