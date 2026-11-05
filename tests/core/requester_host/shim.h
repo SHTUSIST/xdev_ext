@@ -80,6 +80,7 @@ typedef struct { _Atomic long long counter; } atomic64_t;
 #define atomic_inc_return(a) (atomic_fetch_add(&(a)->counter, 1) + 1)
 #define atomic_dec_return(a) (atomic_fetch_sub(&(a)->counter, 1) - 1)
 #define atomic64_inc_return(a) (atomic_fetch_add(&(a)->counter, 1) + 1)
+#define smp_mb__before_atomic() atomic_thread_fence(memory_order_seq_cst)
 
 typedef struct { bool held; } spinlock_t;
 #define DEFINE_SPINLOCK(n) spinlock_t n = { false }
