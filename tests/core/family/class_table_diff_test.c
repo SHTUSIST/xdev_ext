@@ -324,7 +324,8 @@ int main(void)
   { XDEV_EXT_MECH_CLASS_NET, 1, 1, 4, 0, 1, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_CPU, 3, 4, 4, 0, 0, 0, 1, 0 },
   { XDEV_EXT_MECH_CLASS_USER, 3, 3, 4, 0, 0, 1, 1, 0 },
-  { XDEV_EXT_MECH_CLASS_XDOMAIN, 1, 1, 4, XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 1, 0, 0, 0 },
+  /* 42-XDOMAIN-HOST: XDOMAIN also takes host-page frames (peer_only 0). */
+  { XDEV_EXT_MECH_CLASS_XDOMAIN, 1, 1, 4, XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 0, 0, 0, 0 },
  };
  static const __u32 afxdp[] = {
   0, XDEV_EXT_AFXDP_F_RELIABLE, XDEV_EXT_AFXDP_F_FINITE, XDEV_EXT_AFXDP_F_POLICY,
