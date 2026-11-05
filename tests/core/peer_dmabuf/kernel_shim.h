@@ -151,7 +151,9 @@ static inline void get_file(struct file *f) { assert(f->refs); f->refs++; }
 static inline void fput(struct file *f)
 { assert(f->refs); if (!--f->refs) { if (f->f_op && f->f_op->release) f->f_op->release(NULL, f); module_put(f->exporter); } }
 struct io_tlb_mem { bool force_bounce; };
-struct device { bool dma_coherent; struct io_tlb_mem *dma_io_tlb_mem; };
+/* dma_base: per-device offset the fake exporter adds to the addresses it maps
+ * for that device, so a test can tell whose mapping a lease used. */
+struct device { bool dma_coherent; struct io_tlb_mem *dma_io_tlb_mem; dma_addr_t dma_base; };
 struct pci_dev { struct device dev; unsigned refs, id; unsigned int untrusted:1; };
 static inline struct pci_dev *pci_dev_get(struct pci_dev *p) { p->refs++; return p; }
 static inline void pci_dev_put(struct pci_dev *p) { assert(p->refs); p->refs--; }
@@ -226,6 +228,7 @@ void dma_buf_put(struct dma_buf *);
 static inline void get_dma_buf(struct dma_buf *b) { get_file(b->file); }
 static inline bool dma_buf_is_dynamic(struct dma_buf *b) { return !!b->ops->pin; }
 bool dma_need_sync(struct device *, dma_addr_t);
+bool dma_sgtable_is_unbounced(struct device *, struct sg_table *);
 struct test_env {
 	struct user_struct user;
 	struct mm_struct mm;
@@ -241,6 +244,8 @@ struct test_env {
 	int attach_error, pin_error, map_error, wait_error;
 	bool move_on_pin, move_on_map;
 	u64 needs_sync_address;
+	bool bounced; /* the next certification sees a bounce slot */
+	unsigned unbounced_checks;
 	struct dma_buf_attachment *last_attach;
 };
 extern struct test_env env;

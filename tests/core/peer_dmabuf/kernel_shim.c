@@ -92,6 +92,9 @@ struct dma_buf_attachment *dma_buf_dynamic_attach(struct dma_buf *b,
 	a->sg[0] = env.sg[0];
 	a->sg[0].next = &a->sg[1];
 	a->sg[1] = env.sg[1];
+	/* The exporter maps for this attaching device only. */
+	a->sg[0].dma_address += d->dma_base;
+	a->sg[1].dma_address += d->dma_base;
 	a->table = (struct sg_table){.sgl = a->sg, .nents = 2, .orig_nents = 2};
 	env.last_attach = &a->base;
 	return &a->base;
@@ -179,3 +182,12 @@ void dma_buf_put(struct dma_buf *b)
 
 bool dma_need_sync(struct device *d, dma_addr_t address)
 { return !d->dma_coherent || address == env.needs_sync_address; }
+
+/* Overlay certifier (src/core/kernel/dma/mapping.c dma_sgtable_is_unbounced):
+ * observes an exporter-returned mapping for this device; never changes it. */
+bool dma_sgtable_is_unbounced(struct device *d, struct sg_table *sgt)
+{
+	assert(d && sgt && sgt->sgl && sgt->nents);
+	env.unbounced_checks++;
+	return !env.bounced;
+}

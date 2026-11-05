@@ -429,6 +429,302 @@ static void close_case(bool active, bool unknown)
 	}
 }
 
+/* Prototype for ASK.70 (plan-review D8). An exporter that registered no
+ * descriptor may be imported only when the caller opts in. xdev_ext then knows
+ * nothing about the backing: each requester device gets the exporter's own
+ * mapping for that device, bounce/sync/untrusted/noncoherent requesters are
+ * refused, and the backing is reported as UNDESCRIBED, never as host RAM. */
+static const struct dma_buf_ops undescribed_ops;
+#define UNDESCRIBED XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED
+
+static struct xdev_ext_peer_region *import_undescribed(void)
+{
+	struct xdev_ext_peer_region *r = NULL;
+	env.buf.ops = &undescribed_ops;
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == 0 && r);
+	assert(atomic_long_read(&env.user.locked_vm) == 3);
+	assert(atomic64_read(&env.mm.pinned_vm) == 3);
+	assert(env.user.refs == 2 && env.mm.refs == 2);
+	/* No descriptor is involved, so none is referenced. */
+	assert(env.file.refs == 2 && env.descriptor.refs == 0);
+	return r;
+}
+
+static void undescribed_import_case(void)
+{
+	struct xdev_ext_peer_region *r = NULL, *duplicate = NULL;
+	struct xdev_ext_peer_mapping *m = NULL, *same = NULL, *m2 = NULL;
+	struct xdev_ext_peer_lease first = {0}, second_lease = {0};
+	struct xdev_ext_peer_backing back;
+	struct dma_buf_attachment *first_attach;
+	struct pci_dev second = {.dev = {.dma_coherent = true, .dma_base = 0x4000000}, .id = 2};
+	u64 len, gen;
+	setup();
+	env.buf.ops = &undescribed_ops;
+	/* The default contract is unchanged: no descriptor and no opt-in refuses. */
+	assert(xdev_ext_peer_dmabuf_import(&env.buf, 12288, &r) == -EOPNOTSUPP && !r);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, 0, &r) == -EOPNOTSUPP && !r);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, 1U << 1, &r) == -EINVAL && !r);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, ~0U, &r) == -EINVAL && !r);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 4096, UNDESCRIBED, &r) == -EINVAL && !r);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, NULL) == -EINVAL);
+	assert(env.file.refs == 1 && env.user.refs == 1 && env.mm.refs == 1);
+	assert(atomic_long_read(&env.user.locked_vm) == 0);
+	r = import_undescribed();
+	/* Identity exclusion covers both paths. */
+	get_dma_buf(&env.buf);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &duplicate) == -EBUSY && !duplicate);
+	assert(xdev_ext_peer_dmabuf_import(&env.buf, 12288, &duplicate) == -EBUSY && !duplicate);
+	dma_buf_put(&env.buf);
+	assert(atomic_long_read(&env.user.locked_vm) == 3);
+	/* Registry operations for other exporters are unaffected by this import. */
+	assert(xdev_ext_peer_dmabuf_desc_unregister(&descriptor) == 0);
+	assert(xdev_ext_peer_dmabuf_desc_register(&descriptor) == 0);
+	assert(env.attaches == 0 && env.pins == 0 && env.maps == 0);
+	assert(xdev_ext_peer_info(r, &len, &gen, true) == 0 && len == 12288 && gen);
+	assert(xdev_ext_peer_describe(r, &requester, &back) == 0);
+	assert(back.owner == NULL && back.flags == XDEV_EXT_PEER_BACKING_UNDESCRIBED);
+	assert(env.attaches == 0);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0 && m);
+	first_attach = env.last_attach;
+	assert(first_attach && first_attach->dev == &requester.dev);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &same) == 0 && same == m);
+	assert(env.attaches == 1 && env.pins == 1 && env.maps == 1 && env.unbounced_checks == 1);
+	/* A second device gets its own attachment and its own exporter mapping. */
+	assert(xdev_ext_peer_map(r, &second, DMA_BIDIRECTIONAL, &m2) == 0 && m2 && m2 != m);
+	assert(env.last_attach != first_attach && env.last_attach->dev == &second.dev);
+	assert(env.attaches == 2 && env.pins == 2 && env.maps == 2 && env.unbounced_checks == 2);
+	assert(xdev_ext_peer_acquire(m, gen, 8209, 32, DMA_TO_DEVICE, &first) == 0);
+	assert(first.dma_address == 0x90011 && first.len == 32);
+	assert(xdev_ext_peer_acquire(m2, gen, 8209, 32, DMA_FROM_DEVICE, &second_lease) == 0);
+	assert(second_lease.dma_address == 0x4000000 + 0x90011);
+	assert(xdev_ext_peer_unmap(m) == -EBUSY && env.unmaps == 0);
+	assert(xdev_ext_peer_release(&first, first.ticket, true) == 0);
+	assert(xdev_ext_peer_release(&second_lease, second_lease.ticket, true) == 0);
+	assert(xdev_ext_peer_unmap(m) == 0 && env.unmaps == 0);
+	assert(xdev_ext_peer_unmap(same) == 0 && xdev_ext_peer_unmap(m2) == 0);
+	assert(env.unmaps == 2 && env.unpins == 2 && env.detaches == 2);
+	assert(xdev_ext_peer_unpin(r) == 0);
+	assert(second.refs == 0);
+	finish();
+	/* The opt-in never downgrades an exporter that does describe itself. */
+	setup();
+	r = NULL;
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == 0 && r);
+	assert(env.descriptor.refs == 1);
+	assert(xdev_ext_peer_describe(r, &requester, &back) == 0);
+	assert(back.flags == (XDEV_EXT_PEER_BACKING_STRUCT_PAGE | XDEV_EXT_PEER_BACKING_HOST_SYSTEM));
+	assert(xdev_ext_peer_unpin(r) == 0);
+	finish();
+	/* A dying descriptor is not bypassed by falling back to the generic path. */
+	setup();
+	r = NULL;
+	env.descriptor.dying = true;
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == -ENODEV && !r);
+	assert(env.file.refs == 1 && atomic_long_read(&env.user.locked_vm) == 0);
+	env.descriptor.dying = false;
+	dma_buf_put(&env.buf);
+	finish();
+	puts("undescribed import: opt-in only, per-device attach and addresses, UNDESCRIBED backing");
+}
+
+static void undescribed_guards_case(void)
+{
+	struct xdev_ext_peer_region *r;
+	struct xdev_ext_peer_mapping *m = NULL;
+	struct xdev_ext_peer_backing back;
+	struct io_tlb_mem bounce = {.force_bounce = true};
+	setup();
+	r = import_undescribed();
+	requester.untrusted = 1;
+	assert(xdev_ext_peer_describe(r, &requester, &back) == -EXDEV);
+	assert(back.owner == NULL && back.flags == 0);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EXDEV && !m);
+	requester.untrusted = 0;
+	requester.dev.dma_io_tlb_mem = &bounce;
+	assert(xdev_ext_peer_describe(r, &requester, &back) == -EXDEV && back.flags == 0);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EXDEV && !m);
+	requester.dev.dma_io_tlb_mem = NULL;
+	requester.dev.dma_coherent = false;
+	assert(xdev_ext_peer_describe(r, &requester, &back) == -EOPNOTSUPP && back.flags == 0);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EOPNOTSUPP && !m);
+	/* These refusals happen before the exporter is ever asked to attach. */
+	assert(env.attaches == 0 && env.maps == 0);
+	requester.dev.dma_coherent = true;
+	/* An extent that needs CPU sync for this device is refused after map. */
+	env.needs_sync_address = 0x90000;
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EOPNOTSUPP && !m);
+	assert(env.attaches == 1 && env.unmaps == 1 && env.unpins == 1 && env.detaches == 1);
+	env.needs_sync_address = UINT64_MAX;
+	/* A bounced mapping (dma-direct sets no SG flag) is refused after map. */
+	env.bounced = true;
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EXDEV && !m);
+	assert(env.attaches == 2 && env.unmaps == 2 && env.unpins == 2 && env.detaches == 2);
+	env.bounced = false;
+	/* Refused requesters leave the region usable for a suitable one. */
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0 && m);
+	assert(xdev_ext_peer_unmap(m) == 0);
+	assert(xdev_ext_peer_unpin(r) == 0);
+	finish();
+	setup();
+	r = import_undescribed();
+	env.buf.size = 16384;
+	m = NULL;
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -ESTALE && !m);
+	assert(xdev_ext_peer_unpin(r) == 0);
+	finish();
+	puts("undescribed guards: untrusted, forced bounce, noncoherent, sync, bounce and size fail closed");
+}
+
+static void undescribed_move_case(void)
+{
+	struct xdev_ext_peer_region *r;
+	struct xdev_ext_peer_mapping *m = NULL, *other = NULL;
+	struct xdev_ext_peer_lease owned = {0}, fresh = {0};
+	struct xdev_ext_peer_backing back;
+	u64 gen, len;
+	setup();
+	r = import_undescribed();
+	gen = xdev_ext_peer_generation(r);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	assert(xdev_ext_peer_acquire(m, gen, 0, 32, DMA_FROM_DEVICE, &owned) == 0);
+	dma_resv_lock(&env.resv, NULL);
+	test_notify(env.last_attach);
+	dma_resv_unlock(&env.resv);
+	/* No new use of any frame after the exporter moved the buffer. */
+	assert(xdev_ext_peer_info(r, &len, &gen, false) == -ESTALE);
+	assert(xdev_ext_peer_describe(r, &requester, &back) == -ESTALE);
+	assert(xdev_ext_peer_acquire(m, gen, 4096, 32, DMA_TO_DEVICE, &fresh) == -ESTALE);
+	/* The accepted request keeps its mapping until it completes. */
+	assert(env.unmaps == 0 && env.unpins == 0 && env.detaches == 0);
+	assert(xdev_ext_peer_release(&owned, owned.ticket, true) == 0);
+	assert(xdev_ext_peer_drainable(r) == 0);
+	assert(xdev_ext_peer_unmap(m) == 0);
+	/* Re-mapping does not make the moved region reusable. */
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &other) == -ESTALE && !other);
+	assert(env.attaches == 1 && env.maps == 1);
+	assert(xdev_ext_peer_unpin(r) == 0);
+	finish();
+	puts("undescribed move: no new lease or mapping after move_notify, accepted DMA drains");
+}
+
+static void undescribed_unknown_case(void)
+{
+	struct xdev_ext_peer_region *r, *duplicate = NULL;
+	struct xdev_ext_peer_mapping *m = NULL, *m2 = NULL, *other = NULL;
+	struct xdev_ext_peer_lease owned = {0}, held = {0};
+	struct pci_dev second = {.dev = {.dma_coherent = true, .dma_base = 0x4000000}, .id = 2};
+	u64 gen;
+	setup();
+	r = import_undescribed();
+	gen = xdev_ext_peer_generation(r);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	assert(xdev_ext_peer_map(r, &second, DMA_BIDIRECTIONAL, &m2) == 0);
+	assert(xdev_ext_peer_acquire(m, gen, 0, 32, DMA_FROM_DEVICE, &owned) == 0);
+	assert(xdev_ext_peer_acquire(m2, gen, 4096, 32, DMA_TO_DEVICE, &held) == 0);
+	dma_resv_lock(&env.resv, NULL);
+	test_notify(env.last_attach);
+	dma_resv_unlock(&env.resv);
+	assert(xdev_ext_peer_release(&owned, owned.ticket, true) == 0);
+	assert(xdev_ext_peer_drainable(r) == -EBUSY);
+	/* The second device's DMA could not be proven stopped. */
+	assert(xdev_ext_peer_release(&held, held.ticket, false) == 0);
+	assert(xdev_ext_peer_drainable(r) == -EIO);
+	assert(xdev_ext_peer_unmap(m) == -EIO && xdev_ext_peer_unmap(m2) == -EIO);
+	assert(xdev_ext_peer_unpin(r) == -EIO);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &other) == -ESTALE && !other);
+	assert(env.unmaps == 0 && env.unpins == 0 && env.detaches == 0);
+	assert(env.file.refs == 2 && env.exporter.refs == 1 && env.descriptor.refs == 0);
+	assert(env.user.refs == 2 && env.mm.refs == 2 && requester.refs == 1 && second.refs == 1);
+	assert(atomic_long_read(&env.user.locked_vm) == 3 && atomic64_read(&env.mm.pinned_vm) == 3);
+	get_dma_buf(&env.buf);
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &duplicate) == -EBUSY && !duplicate);
+	dma_buf_put(&env.buf);
+	/* Deliberately exit with retained kernel resources (see unknown_case). */
+	puts("undescribed unknown: moved region with unproven DMA retains maps, budget and owner");
+}
+
+static void undescribed_allocation_case(void)
+{
+	struct xdev_ext_peer_region *r = NULL;
+	struct xdev_ext_peer_mapping *m = NULL;
+	unsigned import_allocations, map_allocations;
+	setup();
+	env.alloc_calls = 0;
+	r = import_undescribed();
+	import_allocations = env.alloc_calls;
+	env.alloc_calls = 0;
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	map_allocations = env.alloc_calls;
+	assert(xdev_ext_peer_unmap(m) == 0 && xdev_ext_peer_unpin(r) == 0);
+	finish();
+	assert(import_allocations && map_allocations);
+	for (unsigned at = 1; at <= import_allocations; at++) {
+		setup();
+		env.buf.ops = &undescribed_ops;
+		env.alloc_calls = 0;
+		env.fail_alloc = at;
+		r = NULL;
+		assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == -ENOMEM && !r);
+		assert(env.file.refs == 1 && env.user.refs == 1 && env.mm.refs == 1);
+		assert(atomic_long_read(&env.user.locked_vm) == 0);
+		env.fail_alloc = 0;
+		/* The failed import released its identity: a retry succeeds. */
+		assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == 0 && r);
+		assert(xdev_ext_peer_unpin(r) == 0);
+		finish();
+	}
+	for (unsigned at = 1; at <= map_allocations; at++) {
+		setup();
+		r = import_undescribed();
+		env.alloc_calls = 0;
+		env.fail_alloc = at;
+		m = NULL;
+		assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -ENOMEM && !m);
+		env.fail_alloc = 0;
+		assert(xdev_ext_peer_unpin(r) == 0);
+		finish();
+	}
+	puts("undescribed allocation: each import/map allocation failure unwinds owned refs");
+}
+
+/* The application closes its exporter fd right after import, then the
+ * importer session dies (its authority fd is closed by the actual close code). */
+static void close_undescribed_case(bool active, bool unknown)
+{
+	struct xdev_ext_peer_region *r;
+	struct xdev_ext_peer_mapping *m = NULL;
+	struct xdev_ext_peer_lease lease = {0};
+	struct test_authority_handle *h;
+	setup();
+	get_dma_buf(&env.buf); /* the application's own exporter fd */
+	r = NULL;
+	env.buf.ops = &undescribed_ops;
+	assert(xdev_ext_peer_dmabuf_import_flags(&env.buf, 12288, UNDESCRIBED, &r) == 0 && r);
+	dma_buf_put(&env.buf); /* exporter fd closed */
+	assert(env.file.refs == 2 && env.exporter.refs == 1);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	if (active || unknown)
+		assert(xdev_ext_peer_acquire(m, xdev_ext_peer_generation(r), 0, 32,
+					    DMA_FROM_DEVICE, &lease) == 0);
+	if (unknown) assert(xdev_ext_peer_release(&lease, lease.ticket, false) == 0);
+	h = test_authority_setup(r, m, &requester);
+	if (!active && !unknown) {
+		assert(xdev_ext_peer_drainable(r) == 0);
+		assert(test_authority_close(h));
+		test_authority_destroy_closed(h);
+		finish();
+		puts("undescribed close: exporter fd and session gone, idle region releases everything");
+	} else {
+		assert(xdev_ext_peer_drainable(r) == (unknown ? -EIO : -EBUSY));
+		assert(!test_authority_close(h));
+		assert(env.file.refs == 2 && env.exporter.refs == 1 && env.descriptor.refs == 0);
+		assert(atomic_long_read(&env.user.locked_vm) == 3);
+		assert(env.unmaps == 0 && env.unpins == 0 && env.detaches == 0);
+		puts("undescribed close: active or unknown region keeps the buffer, mapping and budget");
+	}
+}
+
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
@@ -446,6 +742,14 @@ int main(int argc, char **argv)
 	else if (!strcmp(argv[1], "close_stale_idle")) close_case(false, false);
 	else if (!strcmp(argv[1], "close_stale_active")) close_case(true, false);
 	else if (!strcmp(argv[1], "close_unknown")) close_case(false, true);
+	else if (!strcmp(argv[1], "undescribed_import")) undescribed_import_case();
+	else if (!strcmp(argv[1], "undescribed_guards")) undescribed_guards_case();
+	else if (!strcmp(argv[1], "undescribed_move")) undescribed_move_case();
+	else if (!strcmp(argv[1], "undescribed_unknown")) undescribed_unknown_case();
+	else if (!strcmp(argv[1], "undescribed_allocation")) undescribed_allocation_case();
+	else if (!strcmp(argv[1], "close_undescribed_idle")) close_undescribed_case(false, false);
+	else if (!strcmp(argv[1], "close_undescribed_active")) close_undescribed_case(true, false);
+	else if (!strcmp(argv[1], "close_undescribed_unknown")) close_undescribed_case(false, true);
 	else return 2;
 	return 0;
 }
