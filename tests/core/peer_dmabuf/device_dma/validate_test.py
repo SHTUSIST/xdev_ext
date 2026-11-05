@@ -47,6 +47,7 @@ PLANS = [
     'PLAN case=chain frame=4096 seg=4096 group=8192 depth=4 groups=96 src_slba=4096 dst_slba=4096 copies=ALL',
     'PLAN case=exporter-close frame=4096 seg=4096 group=8192 depth=4 groups=1024 src_slba=8192 dst_slba=8192 copies=ALL',
     'PLAN case=kill frame=4096 seg=4096 group=8192 depth=4 groups=512 src_slba=32768 dst_slba=32768 copies=PART',
+    'PLAN case=victim frame=4096 seg=4096 group=8192 depth=4 groups=1536 src_slba=40960 dst_slba=40960 copies=ALL',
 ]
 
 
@@ -54,7 +55,7 @@ def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
     dest = bytearray([GUARD]) * IMAGE
     pattern = bytes((((o * 131) + 7) & 0xff) ^ 0x5a for o in range(EXPORT))
     dest[2048 * LBA:2048 * LBA + EXPORT] = pattern
-    for slba, groups in ((4096, 96), (8192, 1024)):
+    for slba, groups in ((4096, 96), (8192, 1024), (40960, 1536)):
         dest[slba * LBA:slba * LBA + groups * 8192] = source[slba * LBA:slba * LBA + groups * 8192]
     for g in copied_kill:
         off = 32768 * LBA + g * 8192
@@ -85,7 +86,7 @@ def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
     for i in range(5):
         ok('setup %d' % i)
     lines.append('OBSERVE case=batch-read fnv64=%016x' % fnv64(read_view))
-    for case in ('batch', 'chain', 'exporter-close'):
+    for case in ('batch', 'chain', 'exporter-close', 'victim'):
         ok(case + ' register')
         lines.append('OBSERVE case=%s vmpin_baseline=4096 vmpin_registered=%d vmpin_closed=4096' % (case, 4096 + EXPORT))
         lines.append('OBSERVE case=%s bufinfo attached=%s' % (case, ','.join(NVME)))
@@ -96,9 +97,10 @@ def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
     lines.append('OBSERVE case=kill quota_while_owner_alive=ENOMEM quota_after_owner_exit=ok copied_groups=%d'
                  % len(copied_kill))
     lines.append('OBSERVE case=kill bufinfo_after_owner_exit=absent')
+    lines.append('OBSERVE case=victim running_at_kill=1 done_at_kill=40 groups=1536')
     ok('final')
     lines.append('1..%d' % checks)
-    lines.append('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill '
+    lines.append('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim '
                  'exporter=system-heap requesters=2 timing=none')
     lines.append('XDEV_EXT_DMABUF_GUEST_EXIT=0')
     return '\n'.join(lines) + '\n', bytes(dest)
@@ -129,7 +131,7 @@ class Oracle(unittest.TestCase):
         result = self.check()
         self.assertEqual(result['kill_copied_groups'], 4)
         self.assertEqual(result['requesters'], list(NVME))
-        self.assertEqual(result['checks'], 9)
+        self.assertEqual(result['checks'], 10)
 
     def test_good_viommu_run_passes(self):
         result = self.check(log=self.vlog, viommu=True)
@@ -158,6 +160,19 @@ class Oracle(unittest.TestCase):
         mutated[off:off + 4096] = self.source[off:off + 4096]
         self.rejects('kill', dest=bytes(mutated))
 
+    def test_victim_byte(self):
+        self.rejects('destination', dest=self.flip(self.dest, 40960 * LBA + 1536 * 8192 - 1))
+
+    def test_victim_finished_before_kill(self):
+        self.rejects('victim', log=self.log.replace('running_at_kill=1 done_at_kill=40', 'running_at_kill=1 done_at_kill=1536'))
+
+    def test_victim_not_running_at_kill(self):
+        self.rejects('victim', log=self.log.replace('running_at_kill=1', 'running_at_kill=0'))
+
+    def test_victim_vmpin(self):
+        self.rejects('VmPin', log=self.log.replace('case=victim vmpin_baseline=4096 vmpin_registered=69632 vmpin_closed=4096',
+                                                   'case=victim vmpin_baseline=4096 vmpin_registered=69632 vmpin_closed=69632'))
+
     def test_kill_copied_count(self):
         self.rejects('copied', log=self.log.replace('copied_groups=4', 'copied_groups=5'))
 
@@ -173,7 +188,9 @@ class Oracle(unittest.TestCase):
         self.rejects('TAP', log=self.log.replace('ok 3 - setup 2', 'not ok 3 - setup 2'))
 
     def test_tap_count(self):
-        self.rejects('TAP', log=self.log.replace('1..9', '1..10'))
+        plan = [line for line in self.log.splitlines() if line.startswith('1..')]
+        self.assertEqual(len(plan), 1)
+        self.rejects('TAP', log=self.log.replace(plan[0], '1..%d' % (int(plan[0][3:]) + 1)))
 
     def test_duplicated_check_line(self):
         # A check printed by both parent and child after fork.

@@ -35,12 +35,13 @@ PLANS = (
     'PLAN case=chain frame=4096 seg=4096 group=8192 depth=4 groups=96 src_slba=4096 dst_slba=4096 copies=ALL',
     'PLAN case=exporter-close frame=4096 seg=4096 group=8192 depth=4 groups=1024 src_slba=8192 dst_slba=8192 copies=ALL',
     'PLAN case=kill frame=4096 seg=4096 group=8192 depth=4 groups=512 src_slba=32768 dst_slba=32768 copies=PART',
+    'PLAN case=victim frame=4096 seg=4096 group=8192 depth=4 groups=1536 src_slba=40960 dst_slba=40960 copies=ALL',
 )
-FINAL = ('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill '
+FINAL = ('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim '
          'exporter=system-heap requesters=2 timing=none')
 BATCH_READ_SLBA = 2048
 BATCH_WRITE_SLBA = 2048
-ALL_CASES = ((4096, 96), (8192, 1024))
+ALL_CASES = ((4096, 96), (8192, 1024), (40960, 1536))
 KILL_SLBA, KILL_GROUPS = 32768, 512
 
 
@@ -126,7 +127,7 @@ def validate(source, dest, log, viommu=False):
     nvme = sorted(set(re.findall(r'nvme nvme[0-9]+: pci function (0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])', text)))
     if len(nvme) != 2:
         raise ValueError('expected two NVMe PCI functions in the guest log, found %d' % len(nvme))
-    for case in ('batch', 'chain', 'exporter-close'):
+    for case in ('batch', 'chain', 'exporter-close', 'victim'):
         base = int(one(seen, case, 'vmpin_baseline'))
         registered = int(one(seen, case, 'vmpin_registered'))
         closed = int(one(seen, case, 'vmpin_closed'))
@@ -153,6 +154,9 @@ def validate(source, dest, log, viommu=False):
         raise ValueError('kill: MEMLOCK quota not held by the live owner or not returned after its exit')
     if one(seen, 'kill', 'bufinfo_after_owner_exit') != 'absent':
         raise ValueError('kill: dma-buf still listed in bufinfo after the owner exited')
+    if one(seen, 'victim', 'running_at_kill') != '1' or \
+            int(one(seen, 'victim', 'done_at_kill')) >= int(one(seen, 'victim', 'groups')):
+        raise ValueError('victim session had already finished when the other importer was killed')
 
     expected = bytearray([GUARD]) * IMAGE
     offset = BATCH_WRITE_SLBA * LBA

@@ -26,12 +26,17 @@ fixture, device stand-in or GPU is involved; nothing measures time.
   closes.
 - `kill`: a child process allocates and imports its own dma-buf, starts a
   512-group session and is killed with SIGKILL after native commands were
-  observed in flight. With the soft MEMLOCK limit set to exactly one export,
-  a second import fails with `ENOMEM` while the child lives and succeeds after
-  its exit, which shows the dead importer's charge was returned. Each
-  destination group must be its source group or untouched guard bytes.
+  observed in flight. With the soft MEMLOCK limit set to exactly the victim's
+  export plus one more, a further import fails with `ENOMEM` while the child
+  lives and succeeds after its exit, which shows the dead importer's charge
+  was returned. Each destination group must be its source group or untouched
+  guard bytes.
+- `victim`: before the child starts, the parent imports a separate dma-buf and
+  starts a 1536-group session on it. STATS taken just before the kill must
+  show it still running; after the kill it must still complete every group
+  exactly, and its accounting and attachments follow the same rules as below.
 
-For `batch`, `chain` and `exporter-close`, `VmPin` must rise by exactly the
+For `batch`, `chain`, `exporter-close` and `victim`, `VmPin` must rise by exactly the
 64 KiB export while the allocation fd is open and return after it closes.
 The dma-buf debugfs file `bufinfo` must list both NVMe PCI functions as
 attached devices while the buffer is registered (one attachment per

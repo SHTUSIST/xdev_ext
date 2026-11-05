@@ -19,6 +19,9 @@
  *                  native commands in flight; the session is released, its
  *                  MEMLOCK charge is returned and the buffer is freed; each
  *                  destination group is its source group or untouched guard
+ *   victim         an unrelated POOL_PEER session on its own dma-buf, started
+ *                  before the child and still running when the child is
+ *                  killed, completes every group exactly
  * Accounting: VmPin rises by exactly the export while registered and returns
  * after the last allocation fd closes; dma-buf debugfs lists both NVMe PCI
  * functions as attached while registered and drops the buffer after close.
@@ -71,6 +74,7 @@ struct plan {
 static const struct plan CHAIN = {"chain", 4096, 4096, 8192, 4, 96, 4096, 4096, "ALL"};
 static const struct plan CLOSE = {"exporter-close", 4096, 4096, 8192, 4, 1024, 8192, 8192, "ALL"};
 static const struct plan KILL = {"kill", 4096, 4096, 8192, 4, 512, 32768, 32768, "PART"};
+static const struct plan VICTIM = {"victim", 4096, 4096, 8192, 4, 1536, 40960, 40960, "ALL"};
 
 static unsigned int checks;
 #define CHECK(c, msg) do { if (!(c)) { \
@@ -359,12 +363,12 @@ int main(int argc, char **argv)
 	unsigned char *source, *source_after, *dest, *dest_after;
 	struct xdev_ext_mech_stats st;
 	struct ops_link ops = {};
-	struct session s;
+	struct session s, victim;
 	struct stat ss, ds;
 	struct rlimit original, quota;
-	unsigned long ino;
-	uint64_t gen, base, value;
-	int heap, ctl, src, srcng, dst, dstng, buf, alloc, ret, lb;
+	unsigned long ino, vino;
+	uint64_t gen, base, value, vgen, vbase, vvalue;
+	int heap, ctl, src, srcng, dst, dstng, buf, alloc, vbuf, valloc, ret, lb;
 	uint64_t source_bytes, dest_bytes, kill_copied = 0, g;
 	unsigned int i;
 
@@ -377,8 +381,8 @@ int main(int argc, char **argv)
 	CHECK(getenv("XDEV_EXT_DMABUF_GUEST") && !strcmp(getenv("XDEV_EXT_DMABUF_GUEST"), "1"), "guest-only opt-in");
 	printf("PLAN case=batch-read src_slba=%llu pages=%u order=reverse\n", BATCH_READ_SLBA, PAGES);
 	printf("PLAN case=batch-write dst_slba=%llu pages=%u pattern=xor5a\n", BATCH_WRITE_SLBA, PAGES);
-	for (i = 0; i < 3; i++) {
-		const struct plan *p = i == 0 ? &CHAIN : i == 1 ? &CLOSE : &KILL;
+	for (i = 0; i < 4; i++) {
+		const struct plan *p = i == 0 ? &CHAIN : i == 1 ? &CLOSE : i == 2 ? &KILL : &VICTIM;
 		printf("PLAN case=%s frame=%u seg=%u group=%u depth=%u groups=%llu src_slba=%llu dst_slba=%llu copies=%s\n",
 		       p->name, p->frame, p->seg, p->group, p->depth, (unsigned long long)p->groups,
 		       (unsigned long long)p->src_slba, (unsigned long long)p->dst_slba, p->copies);
@@ -478,12 +482,22 @@ int main(int argc, char **argv)
 	printf("OBSERVE case=exporter-close vmpin_baseline=%llu vmpin_registered=%llu vmpin_closed=%llu\n",
 	       (unsigned long long)base, (unsigned long long)value, (unsigned long long)vmpin());
 
-	/* kill: the importing process dies with native work in flight. */
+	/* kill: the importing process dies with native work in flight, while an
+	 * unrelated victim session on its own dma-buf keeps running. */
+	vbase = vmpin();
+	vbuf = heap_alloc(heap, &vino);
+	valloc = register_ok(ctl, vbuf, &vgen, "victim: REGISTER");
+	vvalue = vmpin();
+	ret = create(&victim, &VICTIM, valloc, srcng, dstng);
+	errno = ret < 0 ? -ret : 0;
+	CHECK(!ret, "victim: CREATE");
+	attached_both("victim", vino, argv[5], argv[6]);
+	arm_and_start(&victim, &VICTIM);
 	CHECK(!getrlimit(RLIMIT_MEMLOCK, &original), "read MEMLOCK limit");
 	quota = original;
-	quota.rlim_cur = EXPORT;
-	CHECK(original.rlim_max == RLIM_INFINITY || original.rlim_max >= EXPORT, "MEMLOCK hard limit allows one export");
-	CHECK(!setrlimit(RLIMIT_MEMLOCK, &quota), "kill: soft MEMLOCK limit of exactly one export");
+	quota.rlim_cur = 2 * EXPORT;
+	CHECK(original.rlim_max == RLIM_INFINITY || original.rlim_max >= 2 * EXPORT, "MEMLOCK hard limit allows two exports");
+	CHECK(!setrlimit(RLIMIT_MEMLOCK, &quota), "kill: soft MEMLOCK limit of exactly victim plus one export");
 	{
 		unsigned long probe_ino, child_ino = 0;
 		uint64_t id = 0, probe_gen;
@@ -531,7 +545,12 @@ int main(int argc, char **argv)
 		ret = reg(ctl, probe_buf, &probe_gen);
 		if (ret >= 0) close(ret);
 		printf("# kill quota probe while owner alive returned %d\n", ret);
-		CHECK(ret == -ENOMEM, "kill: live owner's charge fills the one-export MEMLOCK quota");
+		CHECK(ret == -ENOMEM, "kill: live owner's charge fills the remaining MEMLOCK quota");
+		CHECK(!session_stats(victim.ring, victim.c.session_id, &st), "victim: STATS just before the kill");
+		print_run(VICTIM.name, "at kill", &st);
+		printf("OBSERVE case=victim running_at_kill=%d done_at_kill=%llu groups=%llu\n",
+		       st.state == XDEV_EXT_MECH_SESSION_ACTIVE && st.batches_done < VICTIM.groups,
+		       (unsigned long long)st.batches_done, (unsigned long long)VICTIM.groups);
 		CHECK(!kill(child, SIGKILL) && waitpid(child, &status, 0) == child &&
 		      WIFSIGNALED(status) && WTERMSIG(status) == SIGKILL, "kill: importer died of SIGKILL");
 		for (tries = 0; tries < 6000 && session_stats(observer, id, &st) != -ENOENT; tries++) usleep(10000);
@@ -547,6 +566,13 @@ int main(int argc, char **argv)
 		expect_absent("kill", child_ino, "bufinfo_after_owner_exit");
 	}
 	CHECK(!setrlimit(RLIMIT_MEMLOCK, &original), "restore MEMLOCK limit");
+	st = wait_done(&victim, &VICTIM);
+	exact_success(&VICTIM, &st);
+	finish(&victim, 0);
+	CHECK(!close(vbuf) && !close(valloc), "victim: close dma-buf and allocation fds");
+	expect_absent("victim", vino, "bufinfo_after_close");
+	printf("OBSERVE case=victim vmpin_baseline=%llu vmpin_registered=%llu vmpin_closed=%llu\n",
+	       (unsigned long long)vbase, (unsigned long long)vvalue, (unsigned long long)vmpin());
 
 	/* Whole-disk data oracle, independent of session statistics. */
 	bpf_link__destroy(ops.link); bpf_object__close(ops.object);
@@ -555,6 +581,7 @@ int main(int argc, char **argv)
 	memcpy(dest + BATCH_WRITE_SLBA * LBA, pattern, EXPORT);
 	memcpy(dest + CHAIN.dst_slba * LBA, source + CHAIN.src_slba * LBA, bytes(&CHAIN));
 	memcpy(dest + CLOSE.dst_slba * LBA, source + CLOSE.src_slba * LBA, bytes(&CLOSE));
+	memcpy(dest + VICTIM.dst_slba * LBA, source + VICTIM.src_slba * LBA, bytes(&VICTIM));
 	for (g = 0; g < KILL.groups; g++) {
 		const unsigned char *from = source + KILL.src_slba * LBA + g * KILL.group;
 		if (!memcmp(dest_after + KILL.dst_slba * LBA + g * KILL.group, from, KILL.group)) {
@@ -571,7 +598,7 @@ int main(int argc, char **argv)
 	CHECK(!memcmp(dest, dest_after, IMAGE), "whole destination disk equals copies plus every guard byte");
 	close(heap); close(ctl); close(src); close(srcng); close(dst); close(dstng);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill "
+	printf("XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim "
 	       "exporter=system-heap requesters=2 timing=none\n");
 	return 0;
 }
