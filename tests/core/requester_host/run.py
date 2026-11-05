@@ -57,6 +57,12 @@ MUTATIONS = {
         ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn atomic_read(&h->active);')]),
     'unmap-outstanding-lease': ('host_outstanding_lease_retains_mapping', [
         ('\treturn READ_ONCE(h->unknown) || atomic_read(&h->active);', '\treturn READ_ONCE(h->unknown);')]),
+    'peer-bind-takes-host-pool': ('host_bind_maps_every_page', [
+        ('\tif (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)\n',
+         '\tif (pool->kind == XDEV_EXT_MECH_POOL_IOU_UMEM)\n\t\treturn xdev_ext_requester_bind_host(rq, st, pdev);\n'
+         '\tif (pool->kind != XDEV_EXT_MECH_POOL_PEER || !pdev || rq->pdev)\n')]),
+    'host-bind-takes-peer-pool': ('host_lease_refuses_spans', [
+        ('pool->kind != XDEV_EXT_MECH_POOL_IOU_UMEM || !pdev || rq->pdev', '!pdev || rq->pdev')]),
 }
 
 
