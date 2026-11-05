@@ -6,7 +6,7 @@ here=${1:-/opt/deflate-original}
 [ -r /sys/kernel/btf/vmlinux ] || { echo 'FAIL BTF unavailable'; exit 1; }
 [ "$(uname -r)" = "$(cat "$here/identity/kernel.release")" ] || { echo 'FAIL kernel release mismatch'; exit 1; }
 for name in xdev_ext_cpu_mech_ops xdev_ext_iaa_mech_ops xdev_ext_user_mech_ops; do
- grep -aqF "$name" /sys/kernel/btf/vmlinux || { echo "FAIL native class BTF absent: $name"; exit 1; }
+ grep -zqF "$name" /sys/kernel/btf/vmlinux || { echo "FAIL native class BTF absent: $name"; exit 1; }
 done
 (cd "$here" && sha256sum -c artifacts.sha256)
 echo XDEV_EXT_DEFLATE_IDENTITY_BEGIN

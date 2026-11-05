@@ -24,7 +24,7 @@
     "build.sh": "1ea29e403e1cf2155e5fad4c8c3f19ad38be2bc16764753c6e3be6ba98b9748a",
     "capture.c": "1c8129a35961d9f525a2fd42e4339b73c04975dfca8d1b6a630da706be229aa6",
     "plans.bpf.c": "5ec7165027a073016f6bf80b485f38ce28103c35938ba95e39fe0362defcd0d2",
-    "run-guest.sh": "e8f5c1a78501fa5424ea175981e559a1329ed9e5a3f0210c2c585c6090a46fef",
+    "run-guest.sh": "0894baf04c0bdb8e02f7991797c4b512a5d46dd487cf32aa928b2bfdfdb0bf9e",
     "stage-profile.sh": "eb1d056d62e0f19a41775b658120cb1a6fc0d513188b3ffc387be7a68ff08745",
     "upstream-claims.jsonl": "b48c233d35f907be6f2123ad38c60c39463637e6247eafd1b5dfba469b9366a6",
     "verify-capture.py": "99547797f086965e8ef94d6e6686bd5efeea38c293b390192fe9ac37d1b407a9"
@@ -77,5 +77,11 @@
     "previous_public_commit": "3c183548125a95070543328c7887f72ab61d4f5b",
     "source_evidence": "actual prepared session-programs-user.2uisAmlB/initroot lacks bin/id; stage-profile already supplies other required busybox symlinks",
     "no_native_or_parser_bytes_changed": true
+  },
+  "publication_btf_grep_fix": {
+    "scope": "BTF NUL-separated strings checked with existing BusyBox grep -zqF; names and failure path unchanged",
+    "previous_public_commit": "dbd96e5c2b9f919ac015883c29a8ef4d9bbabedf",
+    "evidence": "ROOT-CHARACTERIZATION.json actual native27 BTF:3present false negatives corrected;missing name rejected withboth modes",
+    "other_native_parser_and_production_bytes_unchanged": true
   }
 }
