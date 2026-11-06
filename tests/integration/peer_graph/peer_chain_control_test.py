@@ -8,6 +8,14 @@ import subprocess
 import tempfile
 ROOT=Path(__file__).resolve().parents[5]
 source=(ROOT/'tools/xdev_ext_mech/xdev_ext_peer_chain.c').read_text()
+import re
+# REGISTER runs in main(), outside the extracted controller: the step
+# label in force at that ioctl must name it, and the failure line prints it.
+main_body=source[source.index('int main('):]
+register=main_body.index('ioctl(control,XDEV_EXT_PEER_REGISTER')
+steps=re.findall(r'peer_step = "([a-z-]+)";',main_body[:register])
+assert steps and steps[-1]=='register', steps
+assert 'fprintf(stderr,"peer chain failed at %s: %s (%d)\\n",peer_step,' in main_body
 code=source[source.index('static int mech('):source.index('static int parse_u64(')]
 code+=source[source.index('static int mac('):source.index('int main(')]
 shim=r'''

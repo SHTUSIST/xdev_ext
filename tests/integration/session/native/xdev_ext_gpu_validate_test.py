@@ -28,6 +28,13 @@ UNSUPPORTED = {
     'peer-nvme': 'reason=cuda-no-gpudirect-rdma step=register errno=-22 gpu_direct_rdma=0 pointer_rdma=0',
     'dmabuf-peer': 'reason=cuda-no-dma-buf dma_buf_supported=0',
 }
+# The raw output and kernel lines those refusals leave in the console.
+RAW = {
+    'peer-nvme': ['XDEV_EXT_GPU_LOG peer-nvme: peer chain: cuda va=0x7f0000000000 bytes=65536',
+                  'XDEV_EXT_GPU_LOG peer-nvme: peer chain failed at register: Invalid argument (-22)',
+                  '[   14.1] NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22'],
+    'dmabuf-peer': ['XDEV_EXT_GPU_LOG dmabuf-peer: XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=0'],
+}
 
 
 def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', extra='', caps=None):
@@ -38,10 +45,14 @@ def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', ext
     lines = ['[    1.0] boot',
              f'XDEV_EXT_GPU_MODULES={modules} release=590.48.01 device=10de:2b85 bdf=0000:01:00.0']
     if caps:
+        if 'probe=failed' not in caps:
+            lines.append('XDEV_EXT_GPU_LOG caps: ' + caps)
         lines.append(caps)
-    lines += [f'XDEV_EXT_GPU_CASE name={name} result={value} ' +
-              (UNSUPPORTED.get(name, 'reason=none') if value == 'UNSUPPORTED' else 'bytes=32768')
-              for name, value in results.items()]
+    for name, value in results.items():
+        if value == 'UNSUPPORTED':
+            lines += RAW.get(name, [])
+        lines.append(f'XDEV_EXT_GPU_CASE name={name} result={value} ' +
+                     (UNSUPPORTED.get(name, 'reason=none') if value == 'UNSUPPORTED' else 'bytes=32768'))
     lines.append(f'XDEV_EXT_GPU_GUEST={summary} failed={failed} unsupported={unsupported}')
     lines.append(extra)
     lines.append(unload)
@@ -138,6 +149,19 @@ class GpuConsole(unittest.TestCase):
             with self.subTest(name):
                 result = self.mod.validate(console(results, caps=caps), release='590.48.01',
                                            device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn('UNSUPPORTED without', ' '.join(result['problems']))
+
+    def test_unsupported_needs_the_raw_refusal_in_the_console(self):
+        # The guest's own labels are not evidence: the tool output and the
+        # kernel line from NVIDIA's persistent pin must be there as well.
+        for name, line in (('no NVIDIA pin refusal in the kernel log', RAW['peer-nvme'][2]),
+                           ('no raw REGISTER failure', RAW['peer-nvme'][1]),
+                           ('no raw dma_buf refusal', RAW['dmabuf-peer'][0]),
+                           ('CAPS line without the probe output', 'XDEV_EXT_GPU_LOG caps: ' + GEFORCE_CAPS)):
+            with self.subTest(name):
+                text = console(self.geforce(), caps=GEFORCE_CAPS).replace(line + '\n', '')
+                result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
                 self.assertEqual(result['verdict'], 'FAIL')
                 self.assertIn('UNSUPPORTED without', ' '.join(result['problems']))
 

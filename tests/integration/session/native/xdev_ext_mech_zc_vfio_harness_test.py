@@ -272,6 +272,7 @@ class GpuGuestCases(unittest.TestCase):
         for path, text in ((root / 'ctl', FAKE_CTL), (gpu / 'xdev_ext_peer_chain', FAKE_PEER),
                            (gpu / 'xdev_ext_gpu_dmabuf', FAKE_DMABUF),
                            (bin_dir / 'insmod', '#!/bin/sh\necho "$*" >>"$FAKE/insmod.calls"\n'),
+                           (bin_dir / 'dmesg', '#!/bin/sh\ncat "$FAKE/dmesg.out" 2>/dev/null\n'),
                            (bin_dir / 'nvidia-smi', '#!/bin/sh\necho "NVIDIA GeForce RTX 5090, '
                             '00000000:01:00.0, 590.48.01, 98.02.2E.40.EE, 32607 MiB"\n')):
             path.write_text(text)
@@ -327,17 +328,21 @@ class GpuGuestCases(unittest.TestCase):
     def test_cuda_capabilities_are_printed_for_the_validator(self):
         self.assertIn('\nXDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1\n',
                       self.guest())
-        console = self.guest(caps_out='', caps_rc='1\n')
-        self.assertIn('\nXDEV_EXT_GPU_CAPS bdf=0000:01:00.0 probe=failed\n', console)
+        for outputs in (dict(caps_out='', caps_rc='1\n'), dict(caps_rc='1\n')):
+            with self.subTest(**outputs):
+                # A probe that failed, even after printing values, is no evidence.
+                console = self.guest(**outputs)
+                self.assertIn('\nXDEV_EXT_GPU_CAPS bdf=0000:01:00.0 probe=failed\n', console)
 
     REGISTER_EINVAL = ('peer chain: cuda va=0x7f0000000000 bytes=65536\n'
                        'peer chain failed at register: Invalid argument (-22)\n')
     NO_DMA_BUF = 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=0\n'
+    PIN_REFUSED = '[   14.1] NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22\n'
 
     def test_geforce_refusals_are_unsupported_not_failed(self):
         # What CUDA reported on the RTX 5090: no GPUDirect RDMA, no dma_buf.
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
-                             dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n')
+                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n')
         cases = self.verdicts(console)
         self.assertEqual({key: cases['peer-nvme'].get(key) for key in ('result', 'reason', 'step', 'errno')},
                          dict(result='UNSUPPORTED', reason='cuda-no-gpudirect-rdma', step='register',
@@ -349,10 +354,12 @@ class GpuGuestCases(unittest.TestCase):
     def test_refusals_without_matching_cuda_evidence_still_fail(self):
         for name, outputs in (
                 ('peer refused later than REGISTER',
-                 dict(caps_out=CAPS_GEFORCE, peer_rc='1\n',
+                 dict(caps_out=CAPS_GEFORCE, peer_rc='1\n', dmesg_out=self.PIN_REFUSED,
                       peer_out='peer chain failed at create: Invalid argument (-22)\n')),
+                ('REGISTER -22 not from NVIDIA\'s persistent pin',
+                 dict(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n')),
                 ('peer REGISTER refused although CUDA reports RDMA',
-                 dict(peer_out=self.REGISTER_EINVAL, peer_rc='1\n')),
+                 dict(peer_out=self.REGISTER_EINVAL, peer_rc='1\n', dmesg_out=self.PIN_REFUSED)),
                 ('no dma_buf although CUDA reports dma_buf',
                  dict(dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n')),
                 ('dma_buf export failed after CUDA reported support',
@@ -368,7 +375,8 @@ class GpuGuestCases(unittest.TestCase):
 
     def test_one_failure_keeps_the_summary_failed(self):
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
-                             dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n', ce_d_out='', ce_d_rc='3\n')
+                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n',
+                             ce_d_out='', ce_d_rc='3\n')
         self.assertIn('\nXDEV_EXT_GPU_GUEST=FAIL failed=1 unsupported=2\n', console)
 
 
@@ -386,19 +394,32 @@ CUresult cuDeviceGet(CUdevice *device, int ordinal) { *device = ordinal; return 
 CUresult cuDeviceGetPCIBusId(char *text, int size, CUdevice device)
 { (void)device; snprintf(text, size, "%s", getenv("FAKE_BDF")); return 0; }
 CUresult cuDeviceGetAttribute(int *out, int attribute, CUdevice device)
-{ (void)device; *out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") : 7; return 0; }
+{
+	(void)device;
+	if (value("FAKE_ATTR_FAIL"))
+		return 1;
+	*out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") : 7;
+	return 0;
+}
 CUresult cuDevicePrimaryCtxRetain(CUcontext *context, CUdevice device) { (void)device; *context = (void *)1; return 0; }
 CUresult cuDevicePrimaryCtxRelease_v2(CUdevice device) { (void)device; fputs("FAKE release\n", stderr); return 0; }
 CUresult cuCtxSetCurrent(CUcontext context) { (void)context; return 0; }
-CUresult cuMemAlloc_v2(CUdeviceptr *pointer, size_t size) { (void)size; *pointer = 0x7f0000000000ULL; return 0; }
-CUresult cuMemFree_v2(CUdeviceptr pointer) { (void)pointer; fputs("FAKE free\n", stderr); return 0; }
+CUresult cuMemAlloc_v2(CUdeviceptr *pointer, size_t size)
+{ (void)size; if (value("FAKE_ALLOC_FAIL")) return 2; *pointer = 0x7f0000000000ULL; return 0; }
+CUresult cuMemFree_v2(CUdeviceptr pointer) { (void)pointer; fputs("FAKE free\n", stderr); return value("FAKE_FREE_FAIL"); }
 CUresult cuMemsetD8_v2(CUdeviceptr pointer, unsigned char byte, size_t size) { (void)pointer; (void)byte; (void)size; return 0; }
 CUresult cuMemcpyDtoH_v2(void *host, CUdeviceptr pointer, size_t size) { (void)host; (void)pointer; (void)size; return 0; }
 CUresult cuCtxSynchronize(void) { return 0; }
 CUresult cuMemGetHandleForAddressRange(void *handle, CUdeviceptr pointer, size_t size, int type, unsigned long long flags)
 { (void)handle; (void)pointer; (void)size; (void)type; (void)flags; return 801; }
 CUresult cuPointerGetAttribute(void *data, int attribute, CUdeviceptr pointer)
-{ (void)pointer; if (attribute != 15) return 1; *(int *)data = value("FAKE_POINTER_RDMA"); return 0; }
+{
+	(void)pointer;
+	if (attribute != 15 || value("FAKE_POINTER_FAIL"))
+		return 1;
+	*(int *)data = value("FAKE_POINTER_RDMA");
+	return 0;
+}
 '''
 
 
@@ -437,6 +458,23 @@ class GpuCapsProbe(unittest.TestCase):
                 self.assertEqual(run.stdout, f'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma={rdma} '
                                              f'dma_buf={dma_buf} pointer_rdma={pointer}\n')
                 self.assertEqual(run.stderr.split(), ['FAKE', 'free', 'FAKE', 'release'])
+
+    def test_cuda_failures_never_print_a_value_and_still_clean_up(self):
+        # A refused device attribute or allocation prints no CAPS line; a refused
+        # pointer attribute is -1, never 0; every acquired resource is released.
+        for knob, code, stdout, cleanup in (
+                ('attr_fail', 1, '', []),
+                ('alloc_fail', 1, '', ['FAKE', 'release']),
+                ('pointer_fail', 0, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
+                                    'pointer_rdma=-1\n', ['FAKE', 'free', 'FAKE', 'release']),
+                ('free_fail', 1, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
+                                 'pointer_rdma=0\n', ['FAKE', 'free', 'FAKE', 'release'])):
+            with self.subTest(knob):
+                run = self.probe(**{knob: 1})
+                self.assertEqual(run.returncode, code, run.stdout + run.stderr)
+                self.assertEqual(run.stdout, stdout)
+                self.assertEqual([word for word in run.stderr.split() if word in ('FAKE', 'free', 'release')],
+                                 cleanup, run.stderr)
 
     def test_fails_without_a_cuda_device_at_that_address(self):
         run = self.probe(bdf='0000:02:00.0')

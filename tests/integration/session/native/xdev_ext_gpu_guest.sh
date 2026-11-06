@@ -96,9 +96,11 @@ grep -h '' /proc/driver/nvidia/version 2>/dev/null | sed 's/^/XDEV_EXT_GPU_LOG v
 echo "XDEV_EXT_GPU_MODULES=PASS release=$release device=${vendor#0x}:${device#0x} bdf=$gpu_bdf"
 
 # --- CUDA's own report on this GPU: the only evidence for UNSUPPORTED ------
-"$dir/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf" >/tmp/gpu-caps.log 2>&1
+caps=
+if "$dir/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf" >/tmp/gpu-caps.log 2>&1; then
+	caps=$(grep '^XDEV_EXT_GPU_CAPS ' /tmp/gpu-caps.log | head -n 1)
+fi
 log_file caps /tmp/gpu-caps.log
-caps=$(grep '^XDEV_EXT_GPU_CAPS ' /tmp/gpu-caps.log | head -n 1)
 [ -n "$caps" ] || caps="XDEV_EXT_GPU_CAPS bdf=$gpu_bdf probe=failed"
 echo "$caps"
 caps_have() {
@@ -181,10 +183,12 @@ if clear_window; then
 	if [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-peer.log && compare_window; then
 		case_result peer-nvme PASS bytes=$((window_nlb * 512))
 	elif [ "$rc" != 0 ] && grep -Eq '^peer chain failed at register: .* \(-22\)$' /tmp/gpu-peer.log &&
+	     dmesg | grep -Fq 'NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22' &&
 	     caps_have gpu_direct_rdma=0 pointer_rdma=0; then
 		# CUDA supports no GPUDirect RDMA on this GPU and marks the block
-		# unusable with it; the persistent P2P pin of REGISTER then has no
-		# third-party P2P registration to resolve the VA (EINVAL).
+		# unusable with it, and NVIDIA's persistent pin itself refused the
+		# VA (no third-party P2P registration to resolve it: EINVAL), not
+		# one of the provider's own checks.
 		case_result peer-nvme UNSUPPORTED reason=cuda-no-gpudirect-rdma step=register errno=-22 \
 			gpu_direct_rdma=0 pointer_rdma=0
 	else
