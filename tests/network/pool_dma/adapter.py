@@ -76,7 +76,7 @@ def generate(root, output, mutation=None):
     pieces[-1]=pieces[-1].replace('xp_raw_get_dma(', 'actual_xp_raw_get_dma(',1)
     pieces.append('static dma_addr_t xp_raw_get_dma(struct xsk_buff_pool *p,u64 a) { boundary_raw(p,a); return actual_xp_raw_get_dma(p,a); }')
     add('poolh','xp_dma_sync_for_device')
-    for n in ['xsk_mech_zc_done','xsk_mech_zc_retire','xsk_mech_zc_cancel_pending','xsk_mech_zc_stop','xsk_xdev_ext_mech_pool_dead','xsk_xdev_ext_mech_tx_peek','xsk_xdev_ext_mech_tx_batch','xsk_xdev_ext_mech_tx_complete','xsk_xdev_ext_mech_zc_submit','xsk_xdev_ext_mech_submit','xsk_xdev_ext_mech_fill_cqe']:
+    for n in ['xsk_mech_zc_done','xsk_mech_zc_retire','xsk_mech_zc_cancel_pending','xsk_mech_zc_stop','xsk_xdev_ext_mech_pool_dead','xsk_xdev_ext_mech_tx_peek','xsk_xdev_ext_mech_tx_batch','xsk_xdev_ext_mech_tx_complete','xsk_mech_zc_wake','xsk_xdev_ext_mech_zc_submit','xsk_xdev_ext_mech_submit','xsk_xdev_ext_mech_fill_cqe']:
         add('mech',n)
     add('pool','xp_find_dma_map'); add('pool','xp_dma_unmap')
     for n in ['xsk_tx_completed','xsk_tx_cancel_tail','xsk_tx_set_tail_result','xsk_tx_peek_desc','xsk_tx_release','xsk_tx_peek_release_fallback','xsk_tx_peek_release_desc_batch']:

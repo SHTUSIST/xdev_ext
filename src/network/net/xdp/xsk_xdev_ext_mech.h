@@ -87,6 +87,12 @@ void xsk_xdev_ext_mech_share_end(struct xdp_sock *umem_xs);
  */
 void xsk_xdev_ext_mech_unbind_dev(struct xdp_sock *xs);
 
+/*
+ * xsk_notifier(), under rcu_read_lock() only, xs->dev running with carrier:
+ * have the session worker repeat a TX wakeup a down link swallowed or refused.
+ */
+void xsk_xdev_ext_mech_link_up(struct xdp_sock *xs);
+
 /* RX, under RCU: @xs is the AF_XDP RX stage of a mechanism session. */
 static inline bool xsk_xdev_ext_mech_rx_session(const struct xdp_sock *xs)
 {
@@ -149,6 +155,10 @@ static inline void xsk_xdev_ext_mech_share_end(struct xdp_sock *umem_xs)
 }
 
 static inline void xsk_xdev_ext_mech_unbind_dev(struct xdp_sock *xs)
+{
+}
+
+static inline void xsk_xdev_ext_mech_link_up(struct xdp_sock *xs)
 {
 }
 

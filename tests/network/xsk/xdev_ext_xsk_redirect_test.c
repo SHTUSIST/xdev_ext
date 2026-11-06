@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <errno.h>
 #include <linux/if_link.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -61,6 +62,7 @@ struct fake_control {
 	int xsk_fd;
 	uint32_t attach_flags;
 	struct xdev_ext_xsk_flow_filter loaded_filter;
+	bool expect_pass;
 };
 
 static struct fake_control fake;
@@ -99,8 +101,8 @@ static int fake_prog_load(int map_fd,
 			  const struct xdev_ext_xsk_flow_filter *filter)
 {
 	note(CALL_PROG_LOAD);
-	EXPECT_EQ(map_fd, 10);
-	EXPECT_EQ(filter != NULL, 1);
+	EXPECT_EQ(map_fd, fake.expect_pass ? -1 : 10);
+	EXPECT_EQ(filter != NULL, !fake.expect_pass);
 	if (filter)
 		fake.loaded_filter = *filter;
 	return fake.prog_load_ret;
@@ -1170,6 +1172,125 @@ static void test_bpf_raw_encodes_each_command(void)
 	EXPECT_EQ(bpf_fake.calls, 0);
 }
 
+/* A transmit-only zero-copy socket needs only XDP mode: no map, no redirect. */
+static void test_pass_program_attach_owns_only_its_program(void)
+{
+	struct xdev_ext_xsk_redirect redirect;
+
+	fake_reset();
+	fake.expect_pass = true;
+	xdev_ext_xsk_redirect_init(&redirect);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), 0);
+	EXPECT_EQ(fake.nr_calls, 4);
+	EXPECT_EQ(fake.calls[0], CALL_PROG_LOAD);
+	EXPECT_EQ(fake.calls[1], CALL_PROG_ID);
+	EXPECT_EQ(fake.calls[2], CALL_ATTACH);
+	EXPECT_EQ(fake.calls[3], CALL_QUERY);
+	EXPECT_EQ(fake.attach_flags, XDP_FLAGS_DRV_MODE);
+	EXPECT_EQ(redirect.prog_id, 77);
+	EXPECT_EQ(redirect.attached, 1);
+	EXPECT_EQ(redirect.mapped, 0);
+	EXPECT_EQ(redirect.map_fd, -1);
+	EXPECT_EQ(xdev_ext_xsk_redirect_is_active(&redirect), 1);
+	EXPECT_EQ(xdev_ext_xsk_redirect_detach_with(&redirect, &fake_ops), 0);
+	EXPECT_EQ(fake.nr_calls, 7);
+	EXPECT_EQ(fake.calls[4], CALL_QUERY);
+	EXPECT_EQ(fake.calls[5], CALL_DETACH);
+	EXPECT_EQ(fake.calls[6], CALL_CLOSE);
+	for (unsigned int i = 0; i < fake.nr_calls; i++) {
+		EXPECT_EQ(fake.calls[i] == CALL_MAP_CREATE, 0);
+		EXPECT_EQ(fake.calls[i] == CALL_UPDATE, 0);
+		EXPECT_EQ(fake.calls[i] == CALL_DELETE, 0);
+	}
+	expect_reset(&redirect);
+}
+
+static void test_pass_program_never_detaches_a_replacement(void)
+{
+	struct xdev_ext_xsk_redirect redirect;
+
+	fake_reset();
+	fake.expect_pass = true;
+	xdev_ext_xsk_redirect_init(&redirect);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), 0);
+	fake.current_prog_id = 88;
+	EXPECT_EQ(xdev_ext_xsk_redirect_detach_with(&redirect, &fake_ops), -ESTALE);
+	for (unsigned int i = 0; i < fake.nr_calls; i++)
+		EXPECT_EQ(fake.calls[i] == CALL_DETACH, 0);
+	EXPECT_EQ(fake.calls[fake.nr_calls - 1], CALL_CLOSE);
+	expect_reset(&redirect);
+}
+
+/* XDP_FLAGS_UPDATE_IF_NOEXIST refuses another owner's program: keep it. */
+static void test_pass_attach_refusal_closes_only_its_program(void)
+{
+	struct xdev_ext_xsk_redirect redirect;
+
+	fake_reset();
+	fake.expect_pass = true;
+	fake.attach_ret = -EBUSY;
+	xdev_ext_xsk_redirect_init(&redirect);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), -EBUSY);
+	for (unsigned int i = 0; i < fake.nr_calls; i++)
+		EXPECT_EQ(fake.calls[i] == CALL_DETACH, 0);
+	EXPECT_EQ(fake.calls[fake.nr_calls - 1], CALL_CLOSE);
+	expect_reset(&redirect);
+
+	fake_reset();
+	fake.expect_pass = true;
+	fake.prog_load_ret = -EPERM;
+	xdev_ext_xsk_redirect_init(&redirect);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), -EPERM);
+	EXPECT_EQ(fake.nr_calls, 1);
+	expect_reset(&redirect);
+}
+
+static void test_pass_attach_invalid_inputs_are_side_effect_free(void)
+{
+	struct xdev_ext_xsk_redirect redirect;
+
+	fake_reset();
+	fake.expect_pass = true;
+	xdev_ext_xsk_redirect_init(&redirect);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(NULL, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), -EINVAL);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, NULL, 9,
+						      XDP_FLAGS_DRV_MODE), -EINVAL);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 0,
+						      XDP_FLAGS_DRV_MODE), -EINVAL);
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_HW_MODE), -EINVAL);
+	redirect.prog_fd = 5;
+	EXPECT_EQ(xdev_ext_xsk_redirect_attach_pass_with(&redirect, &fake_ops, 9,
+						      XDP_FLAGS_DRV_MODE), -EBUSY);
+	EXPECT_EQ(fake.nr_calls, 0);
+}
+
+static void test_pass_program_is_exactly_xdp_pass(void)
+{
+	struct bpf_insn program[4];
+	size_t count = 0;
+
+	memset(program, 0xa5, sizeof(program));
+	EXPECT_EQ(xdev_ext_xsk_redirect_build_pass_program(program, 4, &count), 0);
+	EXPECT_EQ(count, 2);
+	EXPECT_EQ(program[0].code, BPF_ALU64 | BPF_MOV | BPF_K);
+	EXPECT_EQ(program[0].dst_reg, BPF_REG_0);
+	EXPECT_EQ(program[0].src_reg, 0);
+	EXPECT_EQ(program[0].off, 0);
+	EXPECT_EQ(program[0].imm, XDP_PASS);
+	EXPECT_EQ(program[1].code, BPF_JMP | BPF_EXIT);
+	EXPECT_EQ(program[1].dst_reg, 0);
+	EXPECT_EQ(program[1].imm, 0);
+	EXPECT_EQ(xdev_ext_xsk_redirect_build_pass_program(program, 1, &count), -E2BIG);
+	EXPECT_EQ(xdev_ext_xsk_redirect_build_pass_program(NULL, 4, &count), -EINVAL);
+	EXPECT_EQ(xdev_ext_xsk_redirect_build_pass_program(program, 4, NULL), -EINVAL);
+}
+
 int main(void)
 {
 	test_attach_and_exact_owner_detach();
@@ -1189,6 +1310,11 @@ int main(void)
 	test_tx_action_replaces_only_the_redirect_tail();
 	test_incomplete_tuple_filters_are_rejected();
 	test_bpf_raw_encodes_each_command();
+	test_pass_program_attach_owns_only_its_program();
+	test_pass_program_never_detaches_a_replacement();
+	test_pass_attach_refusal_closes_only_its_program();
+	test_pass_attach_invalid_inputs_are_side_effect_free();
+	test_pass_program_is_exactly_xdp_pass();
 	printf("xdev_ext_xsk_redirect: %u checks, %u failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

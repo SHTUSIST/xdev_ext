@@ -48,6 +48,22 @@ int xdev_ext_xsk_redirect_build_program(int map_fd,
 				  program_count);
 }
 
+int xdev_ext_xsk_redirect_build_pass_program(struct bpf_insn *program,
+					 size_t program_capacity,
+					 size_t *program_count)
+{
+	if (!program || !program_count)
+		return -EINVAL;
+	if (program_capacity < 2)
+		return -E2BIG;
+	program[0] = XDEV_EXT_XSK_PROG_INSN(BPF_ALU64 | BPF_MOV | BPF_K, BPF_REG_0, 0, 0,
+				       XDP_PASS);
+	program[1] = XDEV_EXT_XSK_PROG_INSN(BPF_JMP | BPF_EXIT, 0, 0, 0, 0);
+	*program_count = 2;
+	return 0;
+}
+
+/* No @filter: the pass program of xdev_ext_xsk_redirect_attach_pass_with(). */
 static int production_prog_load(int map_fd,
 				const struct xdev_ext_xsk_flow_filter *filter)
 {
@@ -57,9 +73,13 @@ static int production_prog_load(int map_fd,
 	int fd;
 	int ret;
 
-	ret = xdev_ext_xsk_redirect_build_program(map_fd, filter, program,
-					     XDEV_EXT_XSK_REDIRECT_MAX_INSNS,
-					     &program_count);
+	ret = filter ?
+		xdev_ext_xsk_redirect_build_program(map_fd, filter, program,
+					       XDEV_EXT_XSK_REDIRECT_MAX_INSNS,
+					       &program_count) :
+		xdev_ext_xsk_redirect_build_pass_program(program,
+					       XDEV_EXT_XSK_REDIRECT_MAX_INSNS,
+					       &program_count);
 	if (ret)
 		return ret;
 
@@ -332,6 +352,68 @@ int xdev_ext_xsk_redirect_attach_with(struct xdev_ext_xsk_redirect *redirect,
 fail:
 	(void)xdev_ext_xsk_redirect_detach_with(redirect, ops);
 	return ret;
+}
+
+/*
+ * igb, ice, i40e, ixgbe, igc and mlx5 run a zero-copy TX queue only while an
+ * XDP program is attached.  A transmit-only socket needs that mode, not a
+ * redirect: attach a program that passes every frame, owned exactly as a
+ * redirect program is (no XSKMAP; detach only our own program).
+ */
+int xdev_ext_xsk_redirect_attach_pass_with(struct xdev_ext_xsk_redirect *redirect,
+				      const struct xdev_ext_xsk_redirect_ops *ops,
+				      int ifindex, uint32_t xdp_flags)
+{
+	uint32_t id = 0;
+	int ret;
+
+	if (!redirect || !valid_ops(ops) || ifindex <= 0 ||
+	    (xdp_flags != XDP_FLAGS_DRV_MODE &&
+	     xdp_flags != XDP_FLAGS_SKB_MODE))
+		return -EINVAL;
+	if (redirect->attached || redirect->mapped || redirect->map_fd >= 0 ||
+	    redirect->prog_fd >= 0)
+		return -EBUSY;
+	redirect->ifindex = ifindex;
+	redirect->queue_id = 0;
+	redirect->xdp_flags = xdp_flags;
+	redirect->prog_fd = ops->prog_load(-1, NULL);
+	if (redirect->prog_fd < 0) {
+		ret = redirect->prog_fd;
+		xdev_ext_xsk_redirect_init(redirect);
+		return ret;
+	}
+	ret = ops->prog_id(redirect->prog_fd, &id);
+	if (ret || !id) {
+		ret = ret ? ret : -EPROTO;
+		goto fail;
+	}
+	redirect->prog_id = id;
+	ret = ops->attach(ifindex, redirect->prog_fd, xdp_flags);
+	if (ret)
+		goto fail;
+	redirect->attached = true;
+	ret = ops->query_id(ifindex, xdp_flags, &id);
+	if (ret || !id) {
+		ret = ret ? ret : -EPROTO;
+		goto fail;
+	}
+	if (id != redirect->prog_id) {
+		ret = -ESTALE;
+		goto fail;
+	}
+	return 0;
+
+fail:
+	(void)xdev_ext_xsk_redirect_detach_with(redirect, ops);
+	return ret;
+}
+
+int xdev_ext_xsk_redirect_attach_pass(struct xdev_ext_xsk_redirect *redirect,
+				 int ifindex, uint32_t xdp_flags)
+{
+	return xdev_ext_xsk_redirect_attach_pass_with(redirect, &production_ops,
+						 ifindex, xdp_flags);
 }
 
 int xdev_ext_xsk_redirect_attach(struct xdev_ext_xsk_redirect *redirect,

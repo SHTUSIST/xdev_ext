@@ -100,4 +100,24 @@ static inline void xsk_mech_zc_reclaim(struct xsk_mech_zc_ring *r,
 {
 	xdev_ext_net_count_reclaim(r, xsk_mech_zc_view(s));
 }
+
+/*
+ * A TX wakeup changes no custody: descriptors the driver already took stay
+ * native and the rest stay in the source.  -ENETDOWN while the device is not
+ * running or has no carrier only reports the link (ice_xsk_wakeup() checks
+ * carrier; igb, ixgbe, igc and virtio_net check the interface state), so the
+ * descriptors wait for the link-up wakeup.  Every other refusal, and
+ * -ENETDOWN with the link up (mlx5 without an active XDP program), is a
+ * configuration failure.
+ */
+static inline bool xsk_mech_zc_wake_deferred(int err, bool running, bool carrier)
+{
+	return err == -ENETDOWN && (!running || !carrier);
+}
+
+/* Descriptors published to the source that the driver has not yet taken. */
+static inline bool xsk_mech_zc_unissued(const struct xsk_mech_zc_ring *r)
+{
+	return !r->fatal && r->issued != r->prod;
+}
 #endif

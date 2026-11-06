@@ -101,6 +101,16 @@ int xdev_ext_xsk_redirect_build_program(int map_fd,
 				   size_t *program_count);
 
 int xdev_ext_xsk_redirect_detach(struct xdev_ext_xsk_redirect *redirect);
+/* XDP mode for a transmit-only zero-copy socket: a program passing every
+ * frame, no XSKMAP; xdev_ext_xsk_redirect_detach() removes it. */
+int xdev_ext_xsk_redirect_attach_pass_with(struct xdev_ext_xsk_redirect *redirect,
+				      const struct xdev_ext_xsk_redirect_ops *ops,
+				      int ifindex, uint32_t xdp_flags);
+int xdev_ext_xsk_redirect_attach_pass(struct xdev_ext_xsk_redirect *redirect,
+				 int ifindex, uint32_t xdp_flags);
+int xdev_ext_xsk_redirect_build_pass_program(struct bpf_insn *program,
+					 size_t program_capacity,
+					 size_t *program_count);
 
 #ifdef __cplusplus
 }

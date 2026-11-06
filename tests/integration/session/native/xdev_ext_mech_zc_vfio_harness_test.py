@@ -171,5 +171,50 @@ class GuestGpuWiring(unittest.TestCase):
         self.assertIn('cfg -e NET_VENDOR_INTEL -e IGB', self.script)
 
 
+
+class GuestLinkReadiness(unittest.TestCase):
+    """igb resets its link whenever an XDP program is attached or removed (a
+    receiver's redirect, the transmit-only pass program, their detach at exit),
+    so a sender must not start before both wire ports carry traffic again."""
+
+    def setUp(self):
+        self.script = HARNESS.read_text()
+
+    def wait(self, carriers, rounds=3):
+        tmp = tempfile.TemporaryDirectory(prefix='link-wait-')
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        for name, value in carriers.items():
+            (root / name).mkdir()
+            if value is not None:
+                (root / name / 'carrier').write_text(value + '\n')
+        program = ('set -eu\ntimeout_factor=1\nsleep() { :; }\n' +
+                   function(self.script, 'nic_link_wait').replace('/sys/class/net', str(root)) +
+                   f'nic_link_wait {rounds}\n')
+        return subprocess.run(['sh', '-c', program], capture_output=True, text=True)
+
+    def test_wait_returns_once_both_ports_have_carrier(self):
+        self.assertEqual(self.wait({'eth0': '1', 'eth1': '1'}).returncode, 0)
+
+    def test_wait_fails_bounded_when_a_port_stays_down(self):
+        for carriers in ({'eth0': '1', 'eth1': '0'}, {'eth0': '0', 'eth1': '1'},
+                         {'eth0': None, 'eth1': '1'}):
+            run = self.wait(carriers)
+            self.assertNotEqual(run.returncode, 0, carriers)
+            self.assertIn('FAIL wire link down', run.stderr)
+
+    def test_every_wire_sender_waits_for_both_links(self):
+        guest = self.script[self.script.index("cat >\"$ROOT/init\" <<'GUEST'"):]
+        guest = guest[:guest.index('\nGUEST\n')]
+        senders = [m.start() for m in re.finditer(
+            r'(?m)^\s*\$ctl (?:"\$@"|nvme-nic) .*--ifname (?:eth0|"\$nicfb_tx_if")', guest)]
+        self.assertGreaterEqual(len(senders), 4, 'main, socket, copy and mixed senders')
+        for at in senders:
+            before = guest[:at]
+            ready = max(before.rfind('test "$ready" = 1'), before.rfind('nicfb_ready /tmp/'))
+            self.assertGreaterEqual(ready, 0)
+            self.assertIn('nic_link_wait', before[ready:], guest[at:at + 80])
+
+
 if __name__ == '__main__':
     unittest.main()

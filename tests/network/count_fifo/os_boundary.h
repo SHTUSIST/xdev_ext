@@ -80,6 +80,11 @@ struct sock {void (*sk_write_space)(struct sock *);};
 struct net_device;
 struct net_device_ops {int (*ndo_xsk_wakeup)(struct net_device *,u32,u32);};
 struct net_device {const struct net_device_ops *netdev_ops;};
+/* Link state is an OS boundary; these fixtures keep the link up. */
+#ifndef XDEV_EXT_TEST_LINK_STATE
+static bool netif_running(const struct net_device *d){(void)d;return true;}
+static bool netif_carrier_ok(const struct net_device *d){(void)d;return true;}
+#endif
 struct xdp_umem {struct list_head xsk_dma_list;u32 npgs,chunks;u64 size;void **pgs;};
 struct xsk_buff_pool {struct net_device *netdev;void *xdev_ext_mech_tx;struct device *dev;dma_addr_t *dma_pages;u32 dma_pages_cnt,chunk_size,heads_cnt;bool unaligned;struct xdp_umem *umem;struct xdp_buff_xsk *heads;u8 *addrs;u32 tx_descs_capacity;struct xdp_desc *tx_descs;struct list_head xsk_tx_list;spinlock_t cq_lock;struct xsk_queue *cq;};
 struct xdp_sock {struct xsk_buff_pool *pool;struct xdp_umem *umem;struct net_device *dev;u32 queue_id;int mutex,state;bool zc;struct xdev_ext_mech_stage *xdev_ext_mech_rx,*xdev_ext_mech_tx;struct list_head tx_list;u32 tx_budget_spent;struct xsk_queue *tx;struct sock sk;};
