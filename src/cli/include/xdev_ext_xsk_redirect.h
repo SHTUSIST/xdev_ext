@@ -111,6 +111,22 @@ int xdev_ext_xsk_redirect_attach_pass(struct xdev_ext_xsk_redirect *redirect,
 int xdev_ext_xsk_redirect_build_pass_program(struct bpf_insn *program,
 					 size_t program_capacity,
 					 size_t *program_count);
+/* A transmit-only zero-copy socket @xsk_fd on @ifindex, before CREATE: kick
+ * its TX queue as an AF_XDP application does (an empty TX ring, so nothing is
+ * sent).  igb, ice, i40e and ixgbe refuse with EINVAL, igc with ENXIO and mlx5
+ * with ENETDOWN while no XDP program is attached; only those refusals attach
+ * the pass program in @xdp_flags mode.  Another owner's native program
+ * (-EBUSY) already selects XDP mode and leaves nothing owned.  Returns 0 or a
+ * negative errno; xdev_ext_xsk_redirect_is_active() then tells whether
+ * @redirect owns a program for xdev_ext_xsk_redirect_detach() to remove.
+ * @kick returns 0 or a negative errno, as sendto(@xsk_fd, NULL, 0,
+ * MSG_DONTWAIT, NULL, 0) does in the production wrapper. */
+int xdev_ext_xsk_redirect_zc_tx_xdp_with(struct xdev_ext_xsk_redirect *redirect,
+				    const struct xdev_ext_xsk_redirect_ops *ops,
+				    int (*kick)(int xsk_fd), int xsk_fd,
+				    int ifindex, uint32_t xdp_flags);
+int xdev_ext_xsk_redirect_zc_tx_xdp(struct xdev_ext_xsk_redirect *redirect,
+			       int xsk_fd, int ifindex, uint32_t xdp_flags);
 
 #ifdef __cplusplus
 }
