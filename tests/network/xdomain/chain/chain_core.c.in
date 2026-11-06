@@ -1,0 +1,281 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * The session core of io_uring/xdev_ext_mech.c (and the compute transform
+ * hooks it calls), pasted verbatim by run.py at the markers below: CREATE
+ * stage binding, buffers, PEER pool bind, START batch admission, the worker
+ * run/acquire/build/submit path, native completion claim/publish/handoff,
+ * drain/landing, frame release and recycling, stage kick/progress, STOP.
+ * The class registry functions are pasted from io_uring/xdev_ext_mech_ops.c.
+ *
+ * Host boundary only: kthread workers (deterministic FIFO), the program
+ * invocation (xdev_ext_mech_call, in chain_boundary.c), per-class default
+ * program lookup, file descriptors, eventfd, tracepoints, allocation.
+ * No production decision is restated in this file.
+ */
+#include "chain_core_env.h"
+#include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_peer.h>
+#include "xdev_ext_mech_core.h"
+#include "xdev_ext_mech_lifecycle.h"
+#include "xdev_ext_mech_notify.h"
+#include "xdev_ext_mech_poll.h"
+#include "xdev_ext_mech_step.h"
+#include "xdev_ext_mech_start_queue.h"
+#include "xdev_ext_mech_produced.h"
+#include "xdev_ext_mech_internal.h"
+#include "xdev_ext_mech_programs.h"
+#include "xdev_ext_mech_compute_internal.h"
+#include "xdev_ext_compfam_transform.h"
+#include <linux/xdev_ext_compfam.h>
+#include "chain_core_api.h"
+
+/* CORE_TYPES */
+
+/* PROTOTYPES */
+
+/* Work functions whose bodies are outside this composition: no stage is
+ * polled, no RX group timer is armed, and session teardown (reap) is not
+ * exercised.  Reaching one is a fixture failure, never a silent success. */
+static void xdev_ext_mech_poll_work(struct kthread_work *work) { (void)work; abort(); }
+static void xdev_ext_mech_reap(struct work_struct *work) { (void)work; abort(); }
+static void xdev_ext_mech_group_timeout(struct timer_list *t) { (void)t; abort(); }
+
+/* CORE_GLOBALS */
+
+/* PRODUCTION */
+
+/* ---- host boundary of this unit ------------------------------------- */
+unsigned chain_core_spins, chain_core_warnings;
+
+/* Default (per-class) program generations: CREATE pins one per class. The
+ * program bodies themselves are invoked through xdev_ext_mech_call(). */
+static const int chain_default_program[XDEV_EXT_MECH_CLASS_MAX];
+const void *xdev_ext_mech_ops_get(u32 class_id, bool *pinned, struct module **owner)
+{
+	*pinned = false;
+	*owner = NULL;
+	return class_id < XDEV_EXT_MECH_CLASS_MAX ? &chain_default_program[class_id] : NULL;
+}
+int xdev_ext_mech_instance_get_from_fd(u32 class_id, int fd, struct xdev_ext_mech_instance **out)
+{
+	(void)class_id; (void)fd; (void)out;
+	abort(); /* this composition binds no per-stage program fds */
+}
+const void *xdev_ext_mech_instance_ops(const struct xdev_ext_mech_instance *instance)
+{
+	(void)instance;
+	abort();
+}
+bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instance)
+{
+	(void)instance;
+	abort();
+}
+bool xdev_ext_mech_ops_current(u32 class_id, const void *ops, bool pinned)
+{
+	(void)pinned;
+	return class_id < XDEV_EXT_MECH_CLASS_MAX && ops == &chain_default_program[class_id];
+}
+int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct io_ring_ctx *ctx,
+				    const struct xdev_ext_mech_layout *l)
+{
+	(void)pool; (void)ctx; (void)l;
+	return -EOPNOTSUPP; /* only PEER pools are composed here */
+}
+int xsk_xdev_ext_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *f,
+				const struct xdev_ext_mech_layout *l)
+{
+	(void)pool; (void)f; (void)l;
+	return -EOPNOTSUPP;
+}
+
+/* Deterministic kthread worker: one FIFO per process, ordered by due time
+ * and then by queue order; no work runs concurrently with another. */
+#define CHAIN_WORKERS 8
+#define CHAIN_QUEUED 256
+static struct kthread_worker chain_workers[CHAIN_WORKERS];
+static unsigned chain_nr_workers;
+static struct kthread_work *chain_queue[CHAIN_QUEUED];
+static unsigned chain_nr_queued;
+static unsigned long long chain_order;
+static struct kthread_worker *chain_running;
+
+struct kthread_worker *kthread_run_worker(unsigned flags, const char *fmt, ...)
+{
+	(void)flags; (void)fmt;
+	assert(chain_nr_workers < CHAIN_WORKERS);
+	chain_workers[chain_nr_workers].id = chain_nr_workers + 1;
+	return &chain_workers[chain_nr_workers++];
+}
+static bool chain_enqueue(struct kthread_worker *w, struct kthread_work *work, unsigned long delay,
+			  bool modify)
+{
+	unsigned long long due = chain_now_ns() + (unsigned long long)delay * 1000000ULL;
+
+	assert(w && work->func);
+	if (work->pending) {
+		if (!modify)
+			return false;
+		work->due = due;
+		return true;
+	}
+	assert(chain_nr_queued < CHAIN_QUEUED);
+	work->worker = w;
+	work->pending = true;
+	work->due = due;
+	work->order = ++chain_order;
+	chain_queue[chain_nr_queued++] = work;
+	return true;
+}
+bool kthread_queue_work(struct kthread_worker *w, struct kthread_work *work)
+{ return chain_enqueue(w, work, 0, false); }
+bool kthread_queue_delayed_work(struct kthread_worker *w, struct kthread_delayed_work *d,
+				unsigned long delay)
+{ return chain_enqueue(w, &d->work, delay, false); }
+bool kthread_mod_delayed_work(struct kthread_worker *w, struct kthread_delayed_work *d,
+			      unsigned long delay)
+{ return chain_enqueue(w, &d->work, delay, true); }
+static void chain_dequeue(struct kthread_work *work)
+{
+	for (unsigned i = 0; i < chain_nr_queued; i++)
+		if (chain_queue[i] == work) {
+			memmove(&chain_queue[i], &chain_queue[i + 1],
+				(chain_nr_queued - i - 1) * sizeof(chain_queue[0]));
+			chain_nr_queued--;
+			break;
+		}
+	work->pending = false;
+}
+void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *d)
+{
+	if (d->work.pending)
+		chain_dequeue(&d->work);
+}
+void kthread_destroy_worker(struct kthread_worker *w) { (void)w; }
+
+static struct kthread_work *chain_due(void)
+{
+	struct kthread_work *best = NULL;
+	unsigned long long now = chain_now_ns();
+
+	for (unsigned i = 0; i < chain_nr_queued; i++) {
+		struct kthread_work *w = chain_queue[i];
+		if (w->due > now)
+			continue;
+		if (!best || w->due < best->due || (w->due == best->due && w->order < best->order))
+			best = w;
+	}
+	return best;
+}
+bool chain_core_ready(void) { return chain_due() != NULL; }
+unsigned long long chain_core_next_due(void)
+{
+	unsigned long long due = ULLONG_MAX;
+	for (unsigned i = 0; i < chain_nr_queued; i++)
+		if (chain_queue[i]->due < due)
+			due = chain_queue[i]->due;
+	return due;
+}
+/* Returns the worker id that ran, or 0 when nothing is due. */
+unsigned chain_core_run_one(void)
+{
+	struct kthread_work *work = chain_due();
+	unsigned id;
+
+	if (!work)
+		return 0;
+	chain_dequeue(work);
+	assert(!chain_core_spins && !chain_running);
+	chain_running = work->worker;
+	id = work->worker->id;
+	chain_observe_worker(id, (const void *)work->func, true);
+	work->func(work);
+	chain_observe_worker(id, (const void *)work->func, false);
+	assert(!chain_core_spins);
+	chain_running = NULL;
+	return id;
+}
+unsigned chain_core_current_worker(void) { return chain_running ? chain_running->id : 0; }
+
+/* ---- fixture entry points: CREATE tail and START publication ---------- */
+struct xdev_ext_mech_session *chain_session_create(const struct xdev_ext_mech_create *c,
+						  int *err)
+{
+	struct xdev_ext_mech_session *s = kzalloc(sizeof(*s), GFP_KERNEL);
+	u32 frames = 0;
+	int ret;
+
+	assert(s);
+	ret = xdev_ext_mech_create_check(c, &frames);
+	if (!ret) {
+		xdev_ext_mech_session_init(s, NULL, c, frames);
+		ret = xdev_ext_mech_session_bind(s, c, NULL);
+	}
+	if (!ret)
+		ret = xdev_ext_mech_sess_activate(&s->ss);
+	if (!ret) {
+		/* The tail of CREATE after publication (create_common). */
+		smp_store_release(&s->progress_ready, true);
+		kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+	}
+	*err = ret;
+	return s;
+}
+
+/* The publication branch of the START command for flags 0: kernel frames
+ * from the pool, every batch through the chain, then back to the pool. */
+int chain_session_start(struct xdev_ext_mech_session *s, u64 nr_batches, u64 first_seq)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&s->lock, flags);
+	if (!xdev_ext_mech_session_admits(s))
+		ret = -ESHUTDOWN;
+	else if (s->start_preparing || s->start_return_pending || s->start_left)
+		ret = -EBUSY;
+	else {
+		s->start_left = nr_batches;
+		s->start_seq = first_seq;
+		s->start_to_user = false;
+		s->start_ordered = false;
+		s->start_recycle = false;
+	}
+	xdev_ext_mech_settle_locked(s);
+	xdev_ext_mech_notify_locked(s, false);
+	if (!ret && !s->worker_gone)
+		kthread_queue_work(s->worker, &s->kick_work);
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
+/* ---- observation only: read raw core state, never decide ------------- */
+u32 chain_frame_custody(struct xdev_ext_mech_session *s, u32 index)
+{ return xdev_ext_mech_pool_frame_state(&s->pool, index); }
+u32 chain_frame_phase(struct xdev_ext_mech_session *s, u32 index)
+{ return xdev_ext_mech_life_phase(&s->life[index]); }
+u32 chain_pool_frames(struct xdev_ext_mech_session *s) { return s->pool.nr_frames; }
+u32 chain_frame_state_free(void) { return XDEV_EXT_MECH_F_K_FREE; }
+u64 chain_session_done(struct xdev_ext_mech_session *s) { return atomic64_read(&s->done); }
+u64 chain_session_aborted(struct xdev_ext_mech_session *s) { return atomic64_read(&s->aborted); }
+u64 chain_session_counter(struct xdev_ext_mech_session *s, u32 c) { return atomic64_read(&s->cnt[c]); }
+u64 chain_stage_submitted(struct xdev_ext_mech_session *s, u32 i) { return atomic64_read(&s->submitted[i]); }
+u64 chain_stage_completed(struct xdev_ext_mech_session *s, u32 i) { return atomic64_read(&s->completed[i]); }
+int chain_session_last_err(struct xdev_ext_mech_session *s) { return s->last_err; }
+u32 chain_session_inflight(struct xdev_ext_mech_session *s) { return s->ss.inflight; }
+u32 chain_session_state(struct xdev_ext_mech_session *s) { return s->ss.state; }
+u64 chain_session_start_left(struct xdev_ext_mech_session *s) { return s->start_left; }
+struct xdev_ext_mech_stage *chain_session_stage(struct xdev_ext_mech_session *s, u32 i) { return &s->st[i]; }
+struct xdev_ext_mech_pool *chain_session_pool_of(struct xdev_ext_mech_session *s) { return &s->pool; }
+/* Stage index currently owning batch b (for event attribution). */
+u32 chain_batch_stage_index(const struct xdev_ext_mech_batch *b) { return b->bs.stage; }
+u64 chain_batch_id(const struct xdev_ext_mech_batch *b) { return b->id; }
+u32 chain_batch_frame_index(const struct xdev_ext_mech_batch *b, u32 pos) { return b->f[pos].index; }
+u32 chain_batch_frames(const struct xdev_ext_mech_batch *b) { return b->nr_frames; }
+struct xdev_ext_mech_session *chain_batch_session(const struct xdev_ext_mech_batch *b) { return b->s; }
+unsigned chain_session_worker_id(struct xdev_ext_mech_session *s) { return s->worker ? s->worker->id : 0; }
+int chain_session_stop(struct xdev_ext_mech_session *s, int err)
+{
+	xdev_ext_mech_session_stop(s, err);
+	return 0;
+}

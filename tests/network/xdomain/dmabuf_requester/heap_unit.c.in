@@ -1,0 +1,22 @@
+// SPDX-License-Identifier: GPL-2.0
+/* Real system-heap describe hook and descriptor, copied verbatim from
+ * drivers/dma-buf/heaps/system_heap.c by run.py.  The heap's own buffer
+ * operations are the exporter boundary: only their object identity is used
+ * by the importer registry, so the fixture supplies an empty ops object. */
+#include "kernel_shim.h"
+#include <linux/xdev_ext_peer.h>
+#include <linux/xdev_ext_peer_dmabuf.h>
+#include <uapi/linux/xdev_ext_mech.h>
+#include "boundary.h"
+
+static const struct dma_buf_ops system_heap_buf_ops;
+static const struct dma_buf_ops other_exporter_ops;
+
+SYSTEM_HEAP_DESCRIBE
+
+int fixture_system_heap_register(void)
+{ return xdev_ext_peer_dmabuf_desc_register(&system_heap_xdev_ext_desc); }
+int fixture_system_heap_unregister(void)
+{ return xdev_ext_peer_dmabuf_desc_unregister(&system_heap_xdev_ext_desc); }
+const struct dma_buf_ops *fixture_system_heap_ops(void) { return &system_heap_buf_ops; }
+const struct dma_buf_ops *fixture_other_exporter_ops(void) { return &other_exporter_ops; }

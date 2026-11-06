@@ -7743,6 +7743,54 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/socket_sink/xsk_tx_copy_accounting_test.py"
     },
     {
+      "source": "tests/network/xdomain/chain/cases.c",
+      "logical_path": "tests/network/xdomain/chain/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_api.h",
+      "logical_path": "tests/network/xdomain/chain/chain_api.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_boundary.c",
+      "logical_path": "tests/network/xdomain/chain/chain_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_core_api.h",
+      "logical_path": "tests/network/xdomain/chain/chain_core_api.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_peer_bridge.c",
+      "logical_path": "tests/network/xdomain/chain/chain_peer_bridge.c"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_core.c.in",
+      "logical_path": "tests/network/xdomain/chain/chain_core.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_core_env.h",
+      "logical_path": "tests/network/xdomain/chain/chain_core_env.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_nvme_env.h",
+      "logical_path": "tests/network/xdomain/chain/chain_nvme_env.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_nvme_glue.c.in",
+      "logical_path": "tests/network/xdomain/chain/chain_nvme_glue.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_nvme_host.h",
+      "logical_path": "tests/network/xdomain/chain/chain_nvme_host.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/README.md",
+      "logical_path": "tests/network/xdomain/chain/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/chain/run.py",
+      "logical_path": "tests/network/xdomain/chain/run.py"
+    },
+    {
       "source": "tests/network/xdomain/contracts/tb_protocol_handler_lifetime_cases.c.in",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_cases.c.in"
@@ -8140,6 +8188,38 @@
     {
       "source": "tests/network/xdomain/diagnostics/stack_run.py",
       "logical_path": "tests/network/xdomain/diagnostics/stack_run.py"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/boundary.c",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/boundary.h",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/boundary.h"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/cases.c",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/core_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/core_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/fd_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/fd_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/README.md",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/dmabuf_requester/run.py",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/run.py"
     },
     {
       "source": "tests/network/xdomain/early/README.md",
