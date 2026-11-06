@@ -189,6 +189,10 @@ struct nvme_dev {
 	unsigned int nr_allocated_queues;
 	unsigned int nr_write_queues;
 	unsigned int nr_poll_queues;
+#ifdef CONFIG_XDEV_EXT_MECH
+	/* DMA-stop evidence for UNKNOWN peer leases; NULL proves nothing. */
+	struct xdev_ext_peer_requester *peer_requester;
+#endif
 	struct nvme_descriptor_pools descriptor_pools[];
 };
 
@@ -1190,6 +1194,55 @@ static blk_status_t nvme_map_metadata(struct nvme_dev *dev, struct request *req)
 	return nvme_pci_setup_meta_mptr(dev, req);
 }
 
+#ifdef CONFIG_XDEV_EXT_MECH
+/*
+ * Peer-DMA stop evidence (xdev_ext_peer_requester_quiesced()). The epoch
+ * begins before nvme_quiesce_io_queues(): its RCU/SRCU wait finishes every
+ * dispatch that read an older epoch, with its doorbell, before CC.EN=0.
+ */
+static u64 nvme_pci_peer_quiesce_begin(struct nvme_dev *dev)
+{
+	return xdev_ext_peer_requester_begin(dev->peer_requester);
+}
+
+/*
+ * A Controller Reset (CC.EN 1 to 0) completes with CSTS.RDY clear once the
+ * controller stopped processing outstanding commands and deleted its queues
+ * (NVMe Base 2.0c 3.7.2). With Bus Master Enable read back clear the
+ * function issues no further request. A shutdown, a dead controller, a
+ * failed wait or an error response proves nothing.
+ */
+static void nvme_pci_peer_quiesce_end(struct nvme_dev *dev, u64 epoch, bool reset)
+{
+	struct pci_dev *pdev = to_pci_dev(dev->dev);
+	u16 command;
+
+	/* An error response reads as all ones, Bus Master included. */
+	if (!reset || pci_read_config_word(pdev, PCI_COMMAND, &command) ||
+	    (command & PCI_COMMAND_MASTER))
+		return;
+	xdev_ext_peer_requester_quiesced(dev->peer_requester, epoch);
+}
+
+/*
+ * Last preparation step, inside the dispatch section that the quiesce above
+ * waits for and before the SQ copy: the epoch this peer command becomes
+ * visible to the controller in.
+ */
+static void nvme_pci_peer_note_submit(struct nvme_dev *dev, struct request *req)
+{
+	struct nvme_xdev_ext_peer_trace *ctx = nvme_req(req)->peer_trace;
+
+	if ((nvme_req(req)->flags & NVME_REQ_XDEV_EXT_PEER) && ctx &&
+	    ctx->cookie == (u64)(unsigned long)req)
+		ctx->submit_epoch = xdev_ext_peer_requester_epoch(dev->peer_requester);
+}
+#else
+static inline u64 nvme_pci_peer_quiesce_begin(struct nvme_dev *dev) { return 0; }
+static inline void nvme_pci_peer_quiesce_end(struct nvme_dev *dev, u64 epoch, bool reset) { }
+static inline void nvme_pci_peer_note_submit(struct nvme_dev *dev, struct request *req) { }
+#endif
+
 static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 {
 	struct nvme_iod *iod = blk_mq_rq_to_pdu(req);
@@ -1216,6 +1269,7 @@ static blk_status_t nvme_prep_rq(struct nvme_dev *dev, struct request *req)
 			goto out_unmap_data;
 	}
 
+	nvme_pci_peer_note_submit(dev, req);
 	nvme_start_request(req);
 	return BLK_STS_OK;
 out_unmap_data:
@@ -3063,9 +3117,11 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)
 {
 	enum nvme_ctrl_state state = nvme_ctrl_state(&dev->ctrl);
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
-	bool dead;
+	bool dead, reset = false;
+	u64 epoch;
 
 	mutex_lock(&dev->shutdown_lock);
+	epoch = nvme_pci_peer_quiesce_begin(dev);
 	dead = nvme_pci_ctrl_is_dead(dev);
 	if (state == NVME_CTRL_LIVE || state == NVME_CTRL_RESETTING) {
 		if (pci_is_enabled(pdev))
@@ -3082,7 +3138,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)
 
 	if (!dead && dev->ctrl.queue_count > 0) {
 		nvme_delete_io_queues(dev);
-		nvme_disable_ctrl(&dev->ctrl, shutdown);
+		reset = !nvme_disable_ctrl(&dev->ctrl, shutdown) && !shutdown;
 		nvme_poll_irqdisable(&dev->queues[0]);
 	}
 	nvme_suspend_io_queues(dev);
@@ -3090,6 +3146,7 @@ static void nvme_dev_disable(struct nvme_dev *dev, bool shutdown)
 	pci_free_irq_vectors(pdev);
 	if (pci_is_enabled(pdev))
 		pci_disable_device(pdev);
+	nvme_pci_peer_quiesce_end(dev, epoch, reset);
 	nvme_reap_pending_cqes(dev);
 
 	nvme_cancel_tagset(&dev->ctrl);
@@ -3154,6 +3211,9 @@ static void nvme_pci_free_ctrl(struct nvme_ctrl *ctrl)
 	struct nvme_dev *dev = to_nvme_dev(ctrl);
 
 	nvme_free_tagset(dev);
+#ifdef CONFIG_XDEV_EXT_MECH
+	xdev_ext_peer_requester_unregister(dev->peer_requester);
+#endif
 	put_device(dev->dev);
 	kfree(dev->queues);
 	kfree(dev);
@@ -3338,10 +3398,11 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  struct xdev_ext_stor_rw rw;
  struct xdev_ext_stor_extent span;
  struct xdev_ext_peer_fd_lease handle = {};
- struct nvme_xdev_ext_peer_trace trace = { .leases = &handle, .nr_leases = 1, .origin = "U" };
+ struct nvme_xdev_ext_peer_trace trace = { .leases = &handle, .nr_leases = 1, .origin = "U",
+                                           .submit_epoch = XDEV_EXT_PEER_EPOCH_NONE };
  struct nvme_command cmd = {};
  struct request *req;
- bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE;
+ bool write = u->flags & XDEV_EXT_PEER_NVME_F_WRITE, quiesced = true;
  int ret;
  if (accepted) *accepted = false;
  if (nvme_ctrl_state(ns->ctrl) != NVME_CTRL_LIVE ||
@@ -3388,9 +3449,15 @@ static int nvme_pci_peer_rw(struct nvme_ns *ns, const struct xdev_ext_peer_nvme_
  blk_mq_free_request(req);
  /* Errors/cancellation do not prove that no peer DMA can still arrive.
   * Retain mapping/allocation on all accepted failures; never retry here.
+  * A Controller Reset of this function proven after the submission epoch
+  * (already, or later) is the evidence that releases them.
   */
- xdev_ext_stor_leases_retire(&handle, 1, ret == 0);
- nvme_xdev_ext_peer_trace_release(&trace, ret == 0);
+ if (ret)
+  quiesced = xdev_ext_peer_fd_release_unknown(&handle, dev->peer_requester,
+                                              trace.submit_epoch);
+ else
+  xdev_ext_stor_leases_retire(&handle, 1, true);
+ nvme_xdev_ext_peer_trace_release(&trace, quiesced);
  return ret;
 release:
  xdev_ext_stor_leases_retire(&handle, 1, true);
@@ -3550,6 +3617,10 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 			     quirks);
 	if (ret)
 		goto out_put_device;
+#ifdef CONFIG_XDEV_EXT_MECH
+	/* Freed with the controller; a failure only loses UNKNOWN recovery. */
+	dev->peer_requester = xdev_ext_peer_requester_register(pdev);
+#endif
 
 	if (dev->ctrl.quirks & NVME_QUIRK_DMA_ADDRESS_BITS_48)
 		dma_set_mask_and_coherent(&pdev->dev, DMA_BIT_MASK(48));

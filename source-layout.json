@@ -4965,6 +4965,10 @@
       "logical_path": "tests/core/peer_quarantine/mutations.py"
     },
     {
+      "source": "tests/core/peer_quarantine/native_mutations.py",
+      "logical_path": "tests/core/peer_quarantine/native_mutations.py"
+    },
+    {
       "source": "tests/core/peer_quarantine/recovery_cases.c",
       "logical_path": "tests/core/peer_quarantine/recovery_cases.c"
     },
