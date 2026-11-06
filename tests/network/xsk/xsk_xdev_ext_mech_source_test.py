@@ -394,7 +394,7 @@ class ZeroCopySourceTest(unittest.TestCase):
                           "batch_complete(b, ticket, status)"):
             self.assertNotIn(forbidden, submit)
         self.assertIn("xp_dma_sync_for_device", submit)
-        self.assertIn("ndo_xsk_wakeup", submit)
+        self.assertIn("xsk_mech_zc_wake(xs)", submit)
         complete = function_body(self.mech, "int xsk_xdev_ext_mech_tx_complete(")
         self.assertNotIn("pool->cq", complete)
         self.assertNotIn("xskq_", complete)

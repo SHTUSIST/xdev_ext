@@ -1648,6 +1648,23 @@ struct ctl_source {
 	struct xdev_ext_mech_transport_stats_v3 accounting;
 };
 
+/* The reliable sender's ACK flow reaches its socket's RX ring. */
+static int ctl_reliable_redirect(struct xdev_ext_xsk_redirect *redirect,
+				 const struct ctl_source *src, const struct ctl_opts *o,
+				 int xsk_fd)
+{
+	const struct xdev_ext_xsk_flow_filter filter = {
+		.flags = XDEV_EXT_XSK_FILTER_F_ALL,
+		.src_ipv4 = ntohl(o->peer.peer_ip), .dst_ipv4 = ntohl(o->peer.local_ip),
+		.payload_magic = 0x4e585033, .src_port = ntohs(o->peer.peer_port),
+		.dst_port = ntohs(o->peer.local_port),
+	};
+
+	return xdev_ext_xsk_redirect_attach(redirect, &filter,
+					    (int)if_nametoindex(src->ifname),
+					    (__u32)o->queue, xsk_fd, XDP_FLAGS_DRV_MODE);
+}
+
 /*
  * Run a source session: CREATE, hand frames over (fill ring or START user
  * frames), START @o->groups batches, wait for all of them.  *@frames_ok is
@@ -1754,6 +1771,19 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		if (ret)
 			goto out;
 	}
+	/*
+	 * igb, ice, i40e, ixgbe, igc and mlx5 run a zero-copy TX queue only in
+	 * XDP mode, and CREATE refuses a queue that rejects a TX wakeup: attach
+	 * first, the reliable redirect for its ACKs, else a program passing
+	 * every frame.  The fill ring stays empty for CREATE's admission.
+	 */
+	if (!iou_umem && x.zero_copy) {
+		ret = o->reliable ? ctl_reliable_redirect(&redirect, src, o, x.fd) :
+			xdev_ext_xsk_redirect_attach_pass(&redirect,
+				(int)if_nametoindex(src->ifname), XDP_FLAGS_DRV_MODE);
+		if (ret)
+			goto out;
+	}
  ret = ctl_create(r.ring, &c, &r.session);
  ctl_diag_stages(&r, &c);
 	if (ret)
@@ -1764,15 +1794,10 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 			goto out;
 	}
 	if (!iou_umem) {
-		ret = x.zero_copy && !o->reliable ? 0 : ctl_fq_fill(&x);
-  if (!ret && o->reliable) {
-   const struct xdev_ext_xsk_flow_filter filter={.flags=XDEV_EXT_XSK_FILTER_F_ALL,
-    .src_ipv4=ntohl(o->peer.peer_ip),.dst_ipv4=ntohl(o->peer.local_ip),
-    .payload_magic=0x4e585033,.src_port=ntohs(o->peer.peer_port),
-    .dst_port=ntohs(o->peer.local_port)};
-   ret=xdev_ext_xsk_redirect_attach(&redirect,&filter,(int)if_nametoindex(src->ifname),(__u32)o->queue,
-                               x.fd,XDP_FLAGS_DRV_MODE);
-  }
+		/* An XDP-mode receive queue polls an empty fill ring without end. */
+		ret = ctl_fq_fill(&x);
+		if (!ret && o->reliable && !x.zero_copy)
+			ret = ctl_reliable_redirect(&redirect, src, o, x.fd);
 		if (ret)
 			goto out;
 	}

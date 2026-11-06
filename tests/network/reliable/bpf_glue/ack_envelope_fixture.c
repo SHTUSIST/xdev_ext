@@ -66,6 +66,8 @@ static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st){(void)st;ki
 /* No stage here asks for polling; ../../poll tests the AF_XDP poll bind. */
 struct xsk_xdev_ext_mech_stage;
 static int xsk_mech_poll_bind(struct xsk_xdev_ext_mech_stage *xst,struct xdp_sock *xs,bool tx,bool reliable){(void)xst;(void)xs;(void)tx;(void)reliable;abort();}
+/* CREATE wakes a zero-copy TX queue once; tests/network/xsk_wakeup runs the real helper. */
+static int xsk_mech_zc_wake(struct xdp_sock *xs){(void)xs;return 0;}
 static u64 ktime_get_ns(void){return 1000;}
 static struct socket *sock_from_file(void *f){return f;}
 static struct xdp_sock *xdp_sk(struct sock *s){return s->owner;}

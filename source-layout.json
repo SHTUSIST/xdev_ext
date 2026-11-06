@@ -8455,6 +8455,14 @@
       "native_path": "tools/testing/selftests/xsk_xdev_ext/xsk_xdev_ext_source_test.py"
     },
     {
+      "source": "tests/network/xsk_wakeup/test_zc_wakeup.py",
+      "logical_path": "tests/network/xsk_wakeup/test_zc_wakeup.py"
+    },
+    {
+      "source": "tests/network/xsk_wakeup/zc_wakeup_fixture.c",
+      "logical_path": "tests/network/xsk_wakeup/zc_wakeup_fixture.c"
+    },
+    {
       "source": "tests/storage/family_block_poll/README.md",
       "logical_path": "tests/storage/family_block_poll/README.md"
     },

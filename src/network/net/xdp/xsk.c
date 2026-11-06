@@ -2420,6 +2420,24 @@ static int xsk_notifier(struct notifier_block *this,
 		}
 		mutex_unlock(&net->xdp.lock);
 		break;
+	case NETDEV_UP:
+	case NETDEV_CHANGE:
+		/* A mechanism TX source may wait for the link to carry traffic. */
+		if (!netif_running(dev) || !netif_carrier_ok(dev))
+			break;
+		mutex_lock(&net->xdp.lock);
+		sk_for_each(sk, &net->xdp.list) {
+			struct xdp_sock *xs = xdp_sk(sk);
+
+			/* xsk_bind() sets xs->dev under RTNL, which is held here. */
+			if (xs->dev != dev)
+				continue;
+			mutex_lock(&xs->mutex);
+			xsk_xdev_ext_mech_link_up(xs);
+			mutex_unlock(&xs->mutex);
+		}
+		mutex_unlock(&net->xdp.lock);
+		break;
 	}
 	return NOTIFY_DONE;
 }

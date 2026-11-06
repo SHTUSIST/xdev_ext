@@ -573,8 +573,7 @@ static void xsk_rel_wakeup(struct xdev_ext_mech_stage *st)
  struct xsk_xdev_ext_mech_provider *p=xdev_ext_mech_session_pool(st->s)->priv;
  int err;
  mutex_lock(&xst->xs->mutex);
- err=xst->xs->state==XSK_BOUND && !READ_ONCE(xst->dead) ?
-     xst->xs->dev->netdev_ops->ndo_xsk_wakeup(xst->xs->dev,xst->xs->queue_id,XDP_WAKEUP_TX) : -ENXIO;
+ err=xst->xs->state==XSK_BOUND && !READ_ONCE(xst->dead) ? xsk_mech_zc_wake(xst->xs) : -ENXIO;
  mutex_unlock(&xst->xs->mutex);
  if (err) { xsk_mech_zc_cancel_pending(p,err); xdev_ext_mech_stage_dead(st,err); }
 }
