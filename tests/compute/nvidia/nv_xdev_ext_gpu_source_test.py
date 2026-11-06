@@ -177,6 +177,20 @@ assert osapi_bind_export.index("rmapiLockAcquire(") < \
     osapi_bind_export.index("_rmP2PUmemExportHandle(pExportNvfp, expected, &hExport)") < \
     osapi_bind_export.index("RmP2PUmemVidmemBindExport(") < \
     osapi_bind_export.index("rmapiLockRelease()")
+# CeUtils runs under the API lock and every GPU lock (NVIDIA's NV_CE_UTILS
+# class); the CE host entry points take both and release both.
+for entry, call in (("rm_p2p_umem_ce_host_bind(", "RmP2PUmemCeHostBind("),
+                    ("rm_p2p_umem_ce_host_unbind(", "RmP2PUmemCeHostUnbind("),
+                    ("rm_p2p_umem_ce_async_submit(", "RmP2PUmemCeAsyncSubmit("),
+                    ("rm_p2p_umem_ce_progress(", "RmP2PUmemCeProgress(")):
+    body = function_body(OSAPI, "NV_STATUS NV_API_CALL " + entry)
+    assert body.index("_rmP2PUmemCeLocksAcquire()") < body.index(call) < \
+        body.index("_rmP2PUmemCeLocksRelease()"), entry
+    assert "rmapiLockAcquire(" not in body, entry
+ce_locks = function_body(OSAPI, "static NV_STATUS _rmP2PUmemCeLocksAcquire(")
+assert ce_locks.index("rmapiLockAcquire(") < ce_locks.index("rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE")
+ce_unlock = function_body(OSAPI, "static void _rmP2PUmemCeLocksRelease(")
+assert ce_unlock.index("rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE") < ce_unlock.index("rmapiLockRelease()")
 for body, call in ((osapi_bind, "RmP2PUmemVidmemBind("),
                    (osapi_bind_export, "RmP2PUmemVidmemBindExport("),
                    (osapi_unbind, "RmP2PUmemVidmemUnbind(")):

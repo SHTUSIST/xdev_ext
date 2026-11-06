@@ -81,7 +81,7 @@ LIFECYCLE_TESTS := nv_xdev_ext_ce_backend_harness_test.py nv_xdev_ext_ce_rm_even
 	nv_xdev_ext_vidmem_owner_test.py nv_xdev_ext_native_peer_cleanup_test.py \
 	nv_xdev_ext_direct_dma_test.py nv_xdev_ext_gpu_export_test.py \
 	nv_xdev_ext_ce_owner_api_test.py nv_xdev_ext_registered_dma_test.py \
-	nv_xdev_ext_ce_memory_attach_test.py
+	nv_xdev_ext_ce_memory_attach_test.py nv_xdev_ext_ce_rm_locks_test.py
 
 run-lifecycle-contract:
 	@status=0; for test in $(LIFECYCLE_TESTS); do \

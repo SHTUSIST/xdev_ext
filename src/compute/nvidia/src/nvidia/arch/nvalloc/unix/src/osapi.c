@@ -4739,6 +4739,34 @@ NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
 }
 
 /* The API lock covers CPU work only; no request-completion wait. */
+/*
+ * The CE host entry points run CeUtils, which needs the API lock and every
+ * GPU lock: NVIDIA's own CeUtils API (NV_CE_UTILS) is allocated and freed
+ * with RS_FLAGS_ACQUIRE_GPUS_LOCK and its memcopy and check-progress controls
+ * run without RMCTRL_FLAGS_NO_GPUS_LOCK.  CeUtils channel setup
+ * (memmgrMemUtilsChannelInitialize_GM107) releases all GPU locks around its
+ * allocations and acquires them again, so a caller holding only the API
+ * lock came back owning every GPU lock, and the next RM entry of the thread
+ * failed (NV_ERR_INVALID_LOCK_STATE) while RM waited on that thread forever.
+ */
+static NV_STATUS _rmP2PUmemCeLocksAcquire(void)
+{
+    NV_STATUS status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+
+    if (status != NV_OK)
+        return status;
+    status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    if (status != NV_OK)
+        rmapiLockRelease();
+    return status;
+}
+
+static void _rmP2PUmemCeLocksRelease(void)
+{
+    rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+    rmapiLockRelease();
+}
+
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding, NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes, P2P_UMEM_CE_EVENT event, void *eventArg, void **out)
 {
     THREAD_STATE_NODE threadState;
@@ -4746,17 +4774,17 @@ NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding
     void *fp;
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    status = _rmP2PUmemCeLocksAcquire();
     if (status == NV_OK) {
         status = RmP2PUmemCeHostBind(binding, phys, count, pageSize, bytes, event, eventArg, out);
-        rmapiLockRelease();
+        _rmP2PUmemCeLocksRelease();
     }
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
     NV_EXIT_RM_RUNTIME(sp, fp);
     return status;
 }
 
-/* The API lock covers CPU work only; no request-completion wait. */
+/* The locks cover CPU work only; no request-completion wait. */
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_unbind(nvidia_stack_t *sp, void *host)
 {
     THREAD_STATE_NODE threadState;
@@ -4764,17 +4792,17 @@ NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_unbind(nvidia_stack_t *sp, void *host)
     void *fp;
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    status = _rmP2PUmemCeLocksAcquire();
     if (status == NV_OK) {
         status = RmP2PUmemCeHostUnbind(host);
-        rmapiLockRelease();
+        _rmP2PUmemCeLocksRelease();
     }
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
     NV_EXIT_RM_RUNTIME(sp, fp);
     return status;
 }
 
-/* The API lock covers CPU work only; no request-completion wait. */
+/* The locks cover CPU work only; no request-completion wait. */
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_async_submit(nvidia_stack_t *sp, void *host, const P2P_UMEM_XFER *x, NvU32 n, NvU32 direction, NvBool *issued, NvU64 *token)
 {
     THREAD_STATE_NODE threadState;
@@ -4782,17 +4810,17 @@ NV_STATUS NV_API_CALL rm_p2p_umem_ce_async_submit(nvidia_stack_t *sp, void *host
     void *fp;
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    status = _rmP2PUmemCeLocksAcquire();
     if (status == NV_OK) {
         status = RmP2PUmemCeAsyncSubmit(host, x, n, direction, issued, token);
-        rmapiLockRelease();
+        _rmP2PUmemCeLocksRelease();
     }
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
     NV_EXIT_RM_RUNTIME(sp, fp);
     return status;
 }
 
-/* The API lock covers CPU work only; no request-completion wait. */
+/* The locks cover CPU work only; no request-completion wait. */
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_progress(nvidia_stack_t *sp, void *host, NvU64 *watermark)
 {
     THREAD_STATE_NODE threadState;
@@ -4800,10 +4828,10 @@ NV_STATUS NV_API_CALL rm_p2p_umem_ce_progress(nvidia_stack_t *sp, void *host, Nv
     void *fp;
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
-    status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    status = _rmP2PUmemCeLocksAcquire();
     if (status == NV_OK) {
         status = RmP2PUmemCeProgress(host, watermark);
-        rmapiLockRelease();
+        _rmP2PUmemCeLocksRelease();
     }
     threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
     NV_EXIT_RM_RUNTIME(sp, fp);

@@ -3638,6 +3638,16 @@
       "native_path": "tests/nv_xdev_ext_ce_memory_attach_test.py"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_test.py"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_event_harness.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_rm_event_harness.c"
