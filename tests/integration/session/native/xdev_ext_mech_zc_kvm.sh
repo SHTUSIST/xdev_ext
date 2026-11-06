@@ -37,6 +37,8 @@ MECHANISM_VARIANTS=0
 MECHANISM_VARIANTS_TIMEOUT=''
 GROUP_COUNT_SET=0
 DEPTH_SET=0
+# Optional emulated Intel VT-d (--viommu); off keeps the QEMU command unchanged.
+VIOMMU=0
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -64,9 +66,13 @@ while (($#)); do
  --rel-policy) REL_POLICY=$2; shift 2 ;;
  --provider-case) PROVIDER_CASE=$2; CE_SIM=1; shift 2 ;;
  --fault-campaign) FAULT_CAMPAIGN=$2; CE_SIM=1; shift 2 ;;
+ --viommu) VIOMMU=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
+if (( XDOMAIN && VIOMMU )); then
+    echo 'viommu does not apply to xdomain (its run-only guest uses its own QEMU command)' >&2; exit 2
+fi
 if (( XDOMAIN )); then
     if (( CE_SIM || COMPAT || PEER || RX_CE || RELIABLE || LIFECYCLE || FENCE_CHECK || EVAL_SESSION || MECHANISM_VARIANTS )) || [[ "$FAULT" != none || "$PROVIDER_CASE" != normal || -n "$FAULT_CAMPAIGN" ]]; then
         echo 'xdomain requires its exclusive correctness mode' >&2; exit 2
@@ -373,6 +379,7 @@ clear_derived_results() {
         "$EV/fence-result.txt" "$EV/fence-request.json" "$EV/fanout-result.json"
 }
 clear_derived_results
+rm -f -- "$EV/viommu-result.txt" "$EV/viommu.json"
 exec > >(tee -a "$EV/harness.log") 2>&1
 DEBUG_HELPER=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_debug.py
 verify_socket_config() {
@@ -554,6 +561,7 @@ printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
 printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/provenance.txt"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
+printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
 printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\nimage_bytes=%s\n' \
@@ -617,6 +625,7 @@ if (( ! RUN_ONLY )); then
         cfg -e MODULES -e MODULE_UNLOAD -e MEMORY_HOTPLUG -e MEMORY_HOTREMOVE -e MIGRATION -e SPARSEMEM_VMEMMAP -e ZONE_DEVICE -e PCI_P2PDMA -e DEBUG_INFO_BTF -e DEBUG_INFO_BTF_MODULES -e XDEV_EXT_MECH_SOCKET -e KUNIT -e USB4_KUNIT_TEST -m USB4 -m XDEV_EXT_MECH_XDOMAIN
     fi
     if (( SOCKET_REQUIRED )); then cfg -e XDEV_EXT_MECH_SOCKET; fi
+    if (( VIOMMU )); then cfg -e IOMMU_SUPPORT -e INTEL_IOMMU; fi
     if (( COMPAT )); then cfg -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
     if (( DEBUG_LOCKING )); then
@@ -1553,6 +1562,22 @@ args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
 	-device nvme,drive=src,serial=UBRZCSRC01
 	-drive "$destination_drive"
 	-device nvme,drive=dst,serial=UBRZCDST01)
+# --- vIOMMU QEMU arguments (optional; default off leaves args unchanged).
+# Emulated Intel VT-d in front of every PCI device. QEMU requires the split
+# irqchip for interrupt remapping and the IOMMU before the devices it covers.
+if (( VIOMMU )); then
+    viommu_args=()
+    for viommu_arg in "${args[@]}"; do
+        case "$viommu_arg" in
+        q35,accel=kvm) viommu_args+=(q35,accel=kvm,kernel-irqchip=split -device intel-iommu,intremap=on,caching-mode=on) ;;
+        console=ttyS0\ *) viommu_args+=("$viommu_arg intel_iommu=on iommu.strict=1") ;;
+        *) viommu_args+=("$viommu_arg") ;;
+        esac
+    done
+    args=("${viommu_args[@]}")
+    unset viommu_args viommu_arg
+fi
+# --- end vIOMMU QEMU arguments
 if (( LIFECYCLE )); then
     grep -Fxq 'CONFIG_VIRTIO_CONSOLE=y' "$BUILD/.config"
     args+=(-device virtio-serial-pci
@@ -1607,6 +1632,9 @@ if (( FENCE_CHECK )); then
         "$ROOT/opt/xdev_ext/xdev_ext_fence_guest.sh" "$EV/fence-request.json" \
         >>"$EV/artifacts.sha256"
 fi
+if (( VIOMMU )); then
+    grep -Fxq CONFIG_INTEL_IOMMU=y "$BUILD/.config" || { echo 'FAIL viommu requires CONFIG_INTEL_IOMMU=y' >&2; exit 1; }
+fi
 cat /proc/modules >"$EV/host-modules-before.txt"
 ip -details link show >"$EV/host-links-before.txt"
 set +e
@@ -1641,6 +1669,12 @@ cat /proc/modules >"$EV/host-modules-after.txt"
 ip -details link show >"$EV/host-links-after.txt"
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
+if (( VIOMMU )); then
+    # Translation must have been active for every NVMe/virtio function, with no DMA fault.
+    python3 "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu.py" "$EV/guest.log" "$EV/viommu.json" \
+        | tee "$EV/viommu-result.txt"
+    grep -q '^XDEV_EXT_ZC_VIOMMU=PASS ' "$EV/viommu-result.txt"
+fi
 if (( FENCE_CHECK )); then
     python3 "$FENCE_VALIDATOR" "$EV/guest.log" "$EV/qemu.exit" "$EV/fence-request.json" \
         | tee "$EV/fence-result.txt"
