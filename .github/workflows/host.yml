@@ -243,6 +243,13 @@ jobs:
       - name: Storage typed windows and descriptor schema
         working-directory: .
         run: bash tests/storage/family_window_schema/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-schema" new
+      - name: Storage LBA window grants and NVMe window handle host contracts
+        working-directory: .
+        run: |
+          bash tests/storage/family_window_grant/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant"
+          python3 tests/storage/family_window_grant/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant-mutants"
+          python3 tests/storage/nvme/window_handle/host_window_test.py "$GITHUB_WORKSPACE"
+          python3 -I tests/storage/nvme/window_handle/window_validate_test.py
       - name: Block table mechanism and responsibility facts
         working-directory: .
         run: |

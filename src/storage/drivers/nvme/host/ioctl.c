@@ -1347,6 +1347,10 @@ long nvme_ns_chr_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 	bool open_for_write = file->f_mode & FMODE_WRITE;
 	void __user *argp = (void __user *)arg;
 
+#ifdef CONFIG_XDEV_EXT_MECH
+	if (cmd == NVME_IOCTL_XDEV_EXT_WINDOW)
+		return nvme_xdev_ext_window_ioctl(ns, file, argp);
+#endif
 	if (is_ctrl_ioctl(cmd))
 		return nvme_ctrl_ioctl(ns->ctrl, cmd, argp, open_for_write);
 	return nvme_ns_ioctl(ns, cmd, argp, 0, open_for_write);

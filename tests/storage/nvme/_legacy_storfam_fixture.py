@@ -23,6 +23,23 @@ P = 'drivers/nvme/host/xdev_ext_peer_nvme_core.h'
 T = 'drivers/nvme/host/xdev_ext_native_peer_trace.h'
 
 
+# A fixture stage file is always the namespace file, never an LBA window
+# handle (tests/storage/nvme/window_handle covers handles): the namespace-file
+# branch of the two helpers nvme_xdev_ext_member_bind calls, as fixture text.
+WINDOW_NAMESPACE_FILE = '''static struct file *nvme_xdev_ext_window_target(struct file *file)
+{
+\treturn file;
+}
+
+static int nvme_xdev_ext_window_admit(const struct xdev_ext_mech_stage *st, bool write)
+{
+\t(void)st;
+\t(void)write;
+\treturn 0;
+}'''
+WINDOW_FLAG_MACROS = ('NVME_XDEV_EXT_WINDOW_F_READ', 'NVME_XDEV_EXT_WINDOW_F_WRITE')
+
+
 def _balanced(text, start):
     """Return one complete C brace body, ignoring comments and literals."""
     depth, quote, comment, escaped = 0, None, None, False
@@ -438,15 +455,32 @@ class LegacySelection:
         pieces += [self.definition(N, name, 'struct') for name in
                    ('nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch',
                     'nvme_xdev_ext_peer_slot')]
-        native = self.read(N)
-        assertions = list(re.finditer(r'^static_assert\([^;]*\);', native, re.M))
-        if not assertions:
+        assertions = self._native_assertions()
+        if len(assertions) == 0:
             raise ValueError('SETUP missing native ABI assertions')
-        pieces += [self._record(N, 'static_assert', m.start(), m.end()) for m in assertions]
+        pieces += assertions
         pieces.append(self._hook_declarations())
         self.verify()
         self._declarations = '\n\n'.join(pieces) + '\n'
         return self._declarations
+
+    def _native_assertions(self):
+        """N's file-scope ABI assertions, verbatim. The window handle flags they
+        compare are UAPI macros, recorded verbatim from their header first."""
+        native = self.read(N)
+        assertions = list(re.finditer(r'^static_assert\([^;]*\);', native, re.M))
+        pieces = []
+        if any('NVME_XDEV_EXT_WINDOW_F_' in m[0] for m in assertions):
+            uapi = 'include/uapi/linux/nvme_ioctl.h'
+            header = self.read(uapi)
+            for macro in WINDOW_FLAG_MACROS:
+                match = re.search(r'^#define ' + macro + r'\b[^\n]*', header, re.M)
+                if not match:
+                    raise ValueError('SETUP window flag macro missing: ' + macro)
+                pieces.append(self._record(uapi, macro, match.start(), match.end()))
+        if not assertions:
+            return []
+        return pieces + [self._record(N, 'static_assert', m.start(), m.end()) for m in assertions]
 
     def _bounce(self):
         text = self.read(B)
@@ -551,6 +585,9 @@ class LegacySelection:
                                       'xdev_ext_storfam_bind', 'xdev_ext_storfam_unbind',
                                       'xdev_ext_storfam_poll', 'xdev_ext_storfam_mark_dead')]
             extra.append('static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops;')
+            if 'nvme_xdev_ext_window_admit(' in self.definition(
+                    N, 'nvme_xdev_ext_member_bind', purpose='profile-inspection-only'):
+                extra.append(WINDOW_NAMESPACE_FILE)
         if group == 'poll':
             items.append((I,'nvme_req_op'))
         # Select once in this translation unit. poll links the exact separate B TU.
@@ -610,9 +647,7 @@ class LegacySelection:
                 self.definition(T,'nvme_xdev_ext_peer_trace','struct')]
         pieces += [self.definition(N,n,'struct') for n in
                    ('nvme_xdev_ext_mech_stage','nvme_xdev_ext_mech_batch','nvme_xdev_ext_peer_slot')]
-        native=self.read(N)
-        pieces += [self._record(N,'static_assert',m.start(),m.end()) for m in
-                   re.finditer(r'^static_assert\([^;]*\);',native,re.M)]
+        pieces += self._native_assertions()
         pieces.append(self._hook_declarations())
         return '\n\n'.join(pieces)+'\n'
 

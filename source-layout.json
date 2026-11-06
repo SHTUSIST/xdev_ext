@@ -8693,6 +8693,21 @@
       "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/vectors.inc"
     },
     {
+      "source": "tests/storage/family_window_grant/mutate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/mutate.py"
+    },
+    {
+      "source": "tests/storage/family_window_grant/run.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/run.sh"
+    },
+    {
+      "source": "tests/storage/family_window_grant/test_window_grant.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/test_window_grant.c"
+    },
+    {
       "source": "tests/storage/native_member_7b/INPUTS.json",
       "logical_path": "tests/storage/native_member_7b/INPUTS.json"
     },
@@ -8833,6 +8848,51 @@
       "source": "tests/storage/nvme/peer_bind_authorization_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_test.py"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/host_window_fixture.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/host_window_fixture.c"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/host_window_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/host_window_test.py"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/Makefile"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_guest.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_guest.c"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_kvm.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_kvm.sh"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_nvme.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_nvme.bpf.c"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_validate.py"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_validate_test.py"
     },
     {
       "source": "tests/storage/nvme/xdev_ext_mech_nvme_nowait_fixture.c",
