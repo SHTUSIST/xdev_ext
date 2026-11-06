@@ -157,6 +157,16 @@ int xdev_ext_stage_xdomain(struct xdev_ext_mech_stage_uapi *out, int control_fd,
 
 int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 			  struct xdev_ext_session **out);
+/* A zero-copy XSK session whose AF_XDP stages only transmit, none reliable:
+ * before CREATE every create step kicks the TX queue (an empty sendto()).
+ * When the driver refuses it for want of XDP mode (EINVAL, ENXIO, ENETDOWN:
+ * igb, ice, i40e, ixgbe, igc, mlx5), a program passing every frame is
+ * attached in driver mode on the interface; another owner's program is used
+ * as it is.  After CREATE, chunks from the lower half of the UMEM, at most
+ * one fill ring's worth, go onto the fill ring.  The session owns that
+ * program: a failed CREATE drops it, and xdev_ext_session_close() detaches
+ * it after the session is released; a retained session keeps it, also past
+ * process exit if it is never closed. */
 int xdev_ext_session_create(struct xdev_ext_session *s,
 			    const struct xdev_ext_create_opts *o);
 /* Explicit diagnostics: syscall delivery and report.result are distinct.

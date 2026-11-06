@@ -173,6 +173,12 @@ extern "C" int xdev_ext_prog_detach(xdev_ext_prog *p){++detaches[p->kind];delete
 #include "xdev_ext_xsk_shared.h"
 extern "C" int xdev_ext_xsk_shared_preflight(const xdev_ext_xsk_shared*,xdev_ext_xsk_shared_error*){forbidden("network preflight");return -1;}
 extern "C" int xdev_ext_xsk_shared_close(xdev_ext_xsk_shared*,xdev_ext_xsk_shared_error*){forbidden("network close");return -1;}
+// A transmit-only zero-copy XSK session's XDP mode: a PEER session never owns
+// a program, so ownership queries answer none and any XDP operation aborts.
+extern "C" void xdev_ext_xsk_redirect_init(xdev_ext_xsk_redirect *r){*r=xdev_ext_xsk_redirect{};r->map_fd=r->prog_fd=-1;}
+extern "C" bool xdev_ext_xsk_redirect_is_active(const xdev_ext_xsk_redirect *r){return r&&(r->attached||r->mapped);}
+extern "C" int xdev_ext_xsk_redirect_zc_tx_xdp(xdev_ext_xsk_redirect*,int,int,uint32_t){forbidden("zero-copy TX XDP mode");return -1;}
+extern "C" int xdev_ext_xsk_redirect_detach(xdev_ext_xsk_redirect*){forbidden("XDP detach");return -1;}
 
 // All prototypes/types come from actual NVIDIA cuda.h. Only API control
 // tokens and status codes are supplied; no PTX, payload or kernel executes.

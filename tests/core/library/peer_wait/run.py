@@ -32,7 +32,8 @@ def main():
         if logical.startswith('kernel/') and (source.endswith('.h') or source in (
                 'src/lib/xdev_ext_session.c', 'src/lib/xdev_ext_user.c',
                 'src/lib/xdev_ext_link.c', 'src/lib/xdev_ext_peer_message.c',
-                'src/cli/xdev_ext_xsk_shared.c', 'src/cli/xdev_ext_xsk_steer.c')):
+                'src/cli/xdev_ext_xsk_shared.c', 'src/cli/xdev_ext_xsk_steer.c',
+                'src/cli/xdev_ext_xsk_redirect.c')):
             inputs.append(source)
     (out / 'inputs.json').write_text(json.dumps({'canonical_root': str(root),
                                                'inputs': inputs}, indent=2) + '\n')
@@ -45,7 +46,7 @@ def main():
     objects = []
     with (out / 'build.log').open('w') as log:
         for unit in ('xdev_ext_session', 'xdev_ext_user', 'xdev_ext_link', 'xdev_ext_peer_message',
-                     'xdev_ext_xsk_shared', 'xdev_ext_xsk_steer'):
+                     'xdev_ext_xsk_shared', 'xdev_ext_xsk_steer', 'xdev_ext_xsk_redirect'):
             obj = out / (unit + '.o')
             command = [compiler, *flags]
             if unit == 'xdev_ext_user':

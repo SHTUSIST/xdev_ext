@@ -65,7 +65,7 @@ def product(expected,producer):
     remote=command(['git','-C',str(ROOT),'remote','get-url','origin'])
     if remote.lower() not in ('https://github.com/shtusist/xdev_ext.git','git@github.com:shtusist/xdev_ext.git'):
         refuse('predeploy from the pinned product GitHub repository','not_run_capability')
-    paths=['tests/eval/hft/'+name for name in (*build.C_SOURCES,'hardware_measure.py','hardware_gate.py','hardware_build.py','oracle.py','run.py','campaign_oracle.py')]+list(build.BPF_SOURCES)+['kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c']
+    paths=['tests/eval/hft/'+name for name in (*build.C_SOURCES,'hardware_measure.py','hardware_gate.py','hardware_build.py','oracle.py','run.py','campaign_oracle.py')]+list(build.BPF_SOURCES)+list(build.HELPER_SOURCES)+['kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c']
     command(['git','-C',str(ROOT),'ls-files','--error-unmatch','--',*paths])
     if command(['git','-C',str(ROOT),'status','--porcelain','--untracked-files=no','--',*paths]):refuse('predeployed measured source differs from pinned SHA','not_run_capability')
     if producer:

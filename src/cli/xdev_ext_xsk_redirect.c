@@ -19,6 +19,7 @@
 #include <stddef.h>
 #include <stdio.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <unistd.h>
 
 static int production_map_create(uint32_t max_entries)
@@ -414,6 +415,42 @@ int xdev_ext_xsk_redirect_attach_pass(struct xdev_ext_xsk_redirect *redirect,
 {
 	return xdev_ext_xsk_redirect_attach_pass_with(redirect, &production_ops,
 						 ifindex, xdp_flags);
+}
+
+/*
+ * The rule of xdev_ext_mech_ctl's transmit-only source: only a kick refused
+ * for want of XDP mode attaches the pass program.  Drivers without that
+ * precondition (virtio_net) get no program unless they are down, where
+ * ENETDOWN cannot tell the two apart.
+ */
+int xdev_ext_xsk_redirect_zc_tx_xdp_with(struct xdev_ext_xsk_redirect *redirect,
+				    const struct xdev_ext_xsk_redirect_ops *ops,
+				    int (*kick)(int xsk_fd), int xsk_fd,
+				    int ifindex, uint32_t xdp_flags)
+{
+	int ret;
+
+	if (!redirect || !valid_ops(ops) || !kick || xsk_fd < 0)
+		return -EINVAL;
+	ret = kick(xsk_fd);
+	if (ret != -EINVAL && ret != -ENXIO && ret != -ENETDOWN)
+		return 0;
+	ret = xdev_ext_xsk_redirect_attach_pass_with(redirect, ops, ifindex,
+						xdp_flags);
+	return ret == -EBUSY ? 0 : ret;
+}
+
+static int production_kick(int xsk_fd)
+{
+	return sendto(xsk_fd, NULL, 0, MSG_DONTWAIT, NULL, 0) < 0 ? -errno : 0;
+}
+
+int xdev_ext_xsk_redirect_zc_tx_xdp(struct xdev_ext_xsk_redirect *redirect,
+			       int xsk_fd, int ifindex, uint32_t xdp_flags)
+{
+	return xdev_ext_xsk_redirect_zc_tx_xdp_with(redirect, &production_ops,
+					       production_kick, xsk_fd,
+					       ifindex, xdp_flags);
 }
 
 int xdev_ext_xsk_redirect_attach(struct xdev_ext_xsk_redirect *redirect,

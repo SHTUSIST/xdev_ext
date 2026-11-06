@@ -668,6 +668,7 @@ static void cs_user_join(struct cs_user *u, struct chain_result *r)
 int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 {
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
+	struct xdev_ext_xsk_redirect pass = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct xdev_ext_mech_create c = { 0 };
 	struct xdev_ext_mech_stats st;
 	struct xdev_ext_mech_layout l;
@@ -866,6 +867,22 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	c.eventfd = efd;
 	c.peer = s->peer;
 	chain_stage_uapi(s, fds, x.fd, ce.va, iou.iaa_first, c.st);
+	/*
+	 * CREATE refuses a transmit-only zero-copy queue that rejects a TX
+	 * wakeup: a sender kicks it first and attaches the pass program only if
+	 * the driver wants XDP mode, as xdev_ext_mech_ctl does.  out: detaches
+	 * it once the session's ring is closed.
+	 */
+	if (ax >= 0 && !rx && x.zero_copy) {
+		ret = xdev_ext_xsk_redirect_zc_tx_xdp(&pass, x.fd,
+						      (int)if_nametoindex(s->st[ax].ifname),
+						      XDP_FLAGS_DRV_MODE);
+		if (ret) {
+			cb_fail(r, CB_NOT_RUN, "XDP mode for zero-copy TX on %s: %s",
+				s->st[ax].ifname, strerror(-ret));
+			goto out;
+		}
+	}
 	ret = cs_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c, &r->syscalls);
 	if (ret) {
 		cb_fail(r, CB_NOT_RUN, "CREATE: %s", xdev_ext_mech_ctl_errname(ret));
@@ -887,8 +904,13 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 		}
 		continuation.running = true;
 	}
-	/* As ctl_run_source(): a copy-mode source socket gets the fill ring too. */
-	if (!rx && ax >= 0 && !x.zero_copy)
+	/*
+	 * As ctl_run_source(): every source socket gets the fill ring after
+	 * CREATE, whose admission needed it empty; an XDP-mode receive queue
+	 * polls an empty one without end.  Chunks [0, CS_RING_SIZE) are the
+	 * half the zero-copy kernel source never claims.
+	 */
+	if (!rx && ax >= 0)
 		cs_fq_fill(&x);
 	if (rx) {
 		const struct xdev_ext_xsk_flow_filter filter = {
@@ -1150,6 +1172,14 @@ out:
 			cb_copy_source(r, CHAIN_COPY_IAA_SW);
 	if (unsafe) {
 		fprintf(stderr, "chain_bench: STOP failed; leaving the session's memory mapped\n");
+		/*
+		 * A netlink-attached XDP program would outlive the process, and a
+		 * session whose STOP failed keeps its socket past exit too.  The
+		 * pass program has no XSKMAP and no UMEM reference: it goes here as
+		 * well, and the driver reconfigures the queue.
+		 */
+		if (xdev_ext_xsk_redirect_is_active(&pass))
+			xdev_ext_xsk_redirect_detach(&pass);
 		free(ref);
 		return r->status;
 	}
@@ -1161,6 +1191,9 @@ out:
 		close(ring);
 	if (efd >= 0)
 		close(efd);
+	/* The session's ring is closed: its transmit queue's XDP mode may go. */
+	if (xdev_ext_xsk_redirect_is_active(&pass))
+		xdev_ext_xsk_redirect_detach(&pass);
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
 		if (fds[i] >= 0 && (i >= s->nr_stages || s->st[i].cls != CH_USER))
 			close(fds[i]);

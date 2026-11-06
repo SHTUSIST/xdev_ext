@@ -24,10 +24,12 @@
 #include <bpf/bpf.h>
 #include <bpf/btf.h>
 #include <bpf/libbpf.h>
+#include <linux/if_link.h>
 #include <linux/if_xdp.h>
 #include <linux/fs.h>
 #include "../../../kernel/include/uapi/linux/io_uring.h"
 #include "../../../kernel/include/uapi/linux/xdev_ext_mech.h"
+#include "../../../kernel/tools/include/xdev_ext_xsk_redirect.h"
 #define CTL_RING_SIZE 64U
 #define XDEV_EXT_MECH_CTL_FRAME_SIZE 4096U
 static struct bpf_map *ctl_section_map(struct bpf_object *obj, const char *sec)
@@ -340,6 +342,7 @@ int hft_session(struct hft_actor *a)
 {
  const struct hft_config *c=a->c;struct bpf_object *obj=NULL;struct bpf_link *links[2]={NULL,NULL};
  struct ctl_xsk x={.fd=-1};struct io_uring_params params={0};struct xdev_ext_mech_create create={0};
+ struct xdev_ext_xsk_redirect pass=XDEV_EXT_XSK_REDIRECT_INIT;
  struct xdev_ext_mech_stats stats={0};int ring=-1,efd=-1,ng=-1,block=-1,ctl=-1,ret=4,stop=0,started=0,unsafe=0,guarded=0;
  hft_setup_begin(a);
  unsigned sector=0;uint64_t capacity=0,groups=(uint64_t)c->burst*c->bursts;
@@ -368,10 +371,24 @@ int hft_session(struct hft_actor *a)
  create.peer.local_port=htons(c->local_port);create.peer.peer_port=htons(c->peer_port);
  create.st[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.fd=ng,.arg0=c->slba,.arg1=c->nlb};
  create.st[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=x.fd};
+ /* CREATE refuses a transmit-only zero-copy queue that rejects a TX wakeup:
+  * kick it, and attach the pass program only if the driver wants XDP mode,
+  * as xdev_ext_mech_ctl does. */
+ if(xdev_ext_xsk_redirect_zc_tx_xdp(&pass,x.fd,(int)if_nametoindex(c->ifname),XDP_FLAGS_DRV_MODE)) goto setup;
  /* Strict kernel admission also checks native NVMe SGL and every NIC mapping.
   * Stock UAPI or bounce-mode kernels cannot pass the locked config gate. */
  if(mech(ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&create)) goto setup;
  a->native_create=1;
+ /* After CREATE, whose admission needs an empty fill ring: an XDP-mode receive
+  * queue polls an empty one without end and drops what it receives.  A
+  * measured run checks no chunk below depth, the half the kernel source never
+  * claims, so the receive queue gets those.  An unmeasured run checks the
+  * guard bytes of every chunk: its fill ring stays empty. */
+ if(c->measured) {
+  uint32_t prod=*x.fq.producer,n=c->depth<CTL_RING_SIZE?c->depth:CTL_RING_SIZE;
+  for(uint32_t i=0;i<n;i++)((__u64 *)x.fq.descs)[(prod+i)&x.fq.mask]=(__u64)i*4096;
+  __atomic_store_n(x.fq.producer,prod+n,__ATOMIC_RELEASE);
+ }
  ret=0;
  setup:
  if(ret) atomic_store(a->startup_error,4);
@@ -413,6 +430,11 @@ int hft_session(struct hft_actor *a)
   stop=mech(ring,XDEV_EXT_MECH_OP_STOP,create.session_id);a->native.stop_ret=stop;
   if(stop) {ret=1;unsafe=1;fputs("{\"status\":\"error\",\"diagnostic\":\"STOP failed; UNKNOWN native resources retained\"}\n",stderr);}
  }
+ /* A netlink-attached XDP program would outlive the process, and a session
+  * whose STOP failed keeps its socket past exit too.  The pass program has no
+  * XSKMAP and no UMEM reference: it goes after STOP even when the other native
+  * resources are retained, and the driver reconfigures the queue. */
+ if(xdev_ext_xsk_redirect_is_active(&pass)) xdev_ext_xsk_redirect_detach(&pass);
  if(started&&ret) ret=1;
  if(!unsafe) {
   if(c->measured&&!c->probe&&started&&a->history&&obj) {

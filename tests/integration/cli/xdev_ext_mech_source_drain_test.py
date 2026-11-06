@@ -141,6 +141,7 @@ with tempfile.TemporaryDirectory(prefix='source-drain-', dir=os.environ.get(
         *shlex.split(os.environ.get('CPPFLAGS', '')),
         str(source), str(ROOT/'tools/xdev_ext_mech/lib/xdev_ext_session.c'),
         str(ROOT/'tools/xdev_ext_xsk_shared.c'), str(ROOT/'tools/xdev_ext_xsk_steer.c'),
+        str(ROOT/'tools/xdev_ext_xsk_redirect.c'),
         *shlex.split(os.environ.get('LDFLAGS', '')),
         *shlex.split(os.environ.get('LIBBPF_LIBS', '-lbpf')), '-lelf', '-lz',
         '-o', str(binary)]

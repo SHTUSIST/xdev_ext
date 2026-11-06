@@ -23,6 +23,9 @@ BPF_SOURCES=('kernel/tools/xdev_ext_mech/nxp_mech.bpf.c','kernel/tools/xdev_ext_
  'kernel/tools/xdev_ext_mech/xdev_ext_mech_kfunc.h','kernel/include/uapi/linux/xdev_ext_mech.h',
  'kernel/include/uapi/linux/xdev_ext_binding.h')
 C_SOURCES=('hft_replay.c','hft_posix.c','hft_uring.c','hft_session.c','hft_runtime.h','hft_core.h','hft_send_zc.h','benchmark_policy.h')
+# The pass-program helper a session build links for its transmit-only queue.
+HELPER_SOURCES=('kernel/tools/xdev_ext_xsk_redirect.c','kernel/tools/include/xdev_ext_xsk_redirect.h',
+ 'kernel/tools/include/xdev_ext_xsk_redirect_prog.h')
 
 
 def sha(path):
@@ -41,7 +44,7 @@ def source_digest(paths):
 
 def bpf_source_sha():return source_digest([ROOT/path for path in BPF_SOURCES])
 def benchmark_bpf_source_sha():return source_digest([ROOT/"kernel/tools/xdev_ext_mech/hft_benchmark.bpf.c"]+[ROOT/path for path in BPF_SOURCES[1:]])
-def binary_source_sha():return source_digest([HERE/path for path in C_SOURCES]+[ROOT/path for path in ('kernel/include/uapi/linux/io_uring.h','kernel/include/uapi/linux/stat.h',*BPF_SOURCES[1:])])
+def binary_source_sha():return source_digest([HERE/path for path in C_SOURCES]+[ROOT/path for path in ('kernel/include/uapi/linux/io_uring.h','kernel/include/uapi/linux/stat.h',*BPF_SOURCES[1:],*HELPER_SOURCES)])
 
 
 def product_sha():

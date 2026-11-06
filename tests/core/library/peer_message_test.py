@@ -37,7 +37,7 @@ def main():
         print("+", " ".join(command), flush=True)
         subprocess.run(command, check=True)
         objects.append(str(obj))
-    for unit in ("xdev_ext_xsk_shared", "xdev_ext_xsk_steer"):
+    for unit in ("xdev_ext_xsk_shared", "xdev_ext_xsk_steer", "xdev_ext_xsk_redirect"):
         obj = out / (unit + ".o")
         command = [compiler, *flags, "-I", str(kernel), "-c",
                    str(kernel / "tools" / (unit + ".c")), "-o", str(obj)]

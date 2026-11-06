@@ -13,6 +13,8 @@ endif
 ifeq ($(ENABLE_SESSION),1)
 CPPFLAGS += -DHFT_HAVE_SESSION
 LDLIBS += -lbpf -lelf -lz
+# A transmit-only zero-copy queue may need the pass program before CREATE.
+SOURCES += ../../../kernel/tools/xdev_ext_xsk_redirect.c
 endif
 all: $(BUILD_DIR)/hft_replay $(BUILD_DIR)/test_ownership $(BUILD_DIR)/test_send_zc $(BUILD_DIR)/test_guard_history $(BUILD_DIR)/test_benchmark_bpf_body
 $(BUILD_DIR):

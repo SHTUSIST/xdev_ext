@@ -313,6 +313,7 @@ static int session_setup(struct nnb_arm *a)
 	struct xdev_ext_mech_create create = { 0 };
 	struct io_uring_params params = { 0 };
 	uint64_t depth = (uint64_t)c->qd * g->groups_per_unit;
+	uint64_t addr[S_RING];
 	int ret;
 
 	if (!p)
@@ -378,6 +379,21 @@ static int session_setup(struct nnb_arm *a)
 			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = p->ng,
 			.arg0 = c->slba, .arg1 = c->nlb };
 	}
+	/*
+	 * CREATE refuses a transmit-only zero-copy queue that rejects a TX
+	 * wakeup: kick it first and attach the pass program only if the driver
+	 * wants XDP mode, as xdev_ext_mech_ctl does.  Teardown detaches what
+	 * this attached, after STOP.
+	 */
+	if (!c->reverse) {
+		ret = xdev_ext_xsk_redirect_zc_tx_xdp(&p->redirect, p->x.fd,
+						      (int)if_nametoindex(c->ifname),
+						      XDP_FLAGS_DRV_MODE);
+		if (ret) {
+			nnb_diag(a, "XDP mode for zero-copy TX: %s", strerror(-ret));
+			return ret;
+		}
+	}
 	/* Strict kernel admission checks native NVMe SGL and every NIC mapping. */
 	ret = mech(p->ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&create);
 	if (ret) {
@@ -386,6 +402,15 @@ static int session_setup(struct nnb_arm *a)
 	}
 	p->session = create.session_id;
 	a->registrations = 1;
+	/*
+	 * CREATE admission needed an empty fill ring; an XDP-mode receive queue
+	 * polls an empty one without end.  Both directions hand over the lower
+	 * half of the chunks, which the zero-copy kernel source never claims.
+	 */
+	for (uint32_t i = 0; i < S_RING; i++)
+		addr[i] = (uint64_t)i * NNB_FRAME_SIZE;
+	if (fq_push(&p->x.fq, addr, S_RING) != S_RING)
+		return -ENOSPC;
 	if (c->reverse) {
 		const struct xdev_ext_xsk_flow_filter filter = {
 			.flags = XDEV_EXT_XSK_FILTER_F_ALL,
@@ -393,12 +418,7 @@ static int session_setup(struct nnb_arm *a)
 			.payload_magic = NNB_MAGIC,
 			.src_port = c->peer_port, .dst_port = a->port,
 		};
-		uint64_t addr[S_RING];
 
-		for (uint32_t i = 0; i < S_RING; i++)
-			addr[i] = (uint64_t)i * NNB_FRAME_SIZE;
-		if (fq_push(&p->x.fq, addr, S_RING) != S_RING)
-			return -ENOSPC;
 		ret = xdev_ext_xsk_redirect_attach(&p->redirect, &filter, (int)if_nametoindex(c->ifname),
 						   c->queue, p->x.fd, XDP_FLAGS_DRV_MODE);
 		if (ret) {
@@ -538,6 +558,14 @@ static void session_teardown(struct nnb_arm *a)
 	if (stop || p->unsafe) {
 		/* UNKNOWN native ownership: keep UMEM, rings and links until exit. */
 		fprintf(stderr, "nnb_producer: session STOP %d; native resources retained\n", stop);
+		/*
+		 * A netlink-attached XDP program would outlive the process, and a
+		 * session whose STOP failed keeps its socket past exit too.  The
+		 * forward pass program has no XSKMAP and no UMEM reference: it goes
+		 * here as well, and the driver reconfigures the queue.
+		 */
+		if (!a->c->reverse && xdev_ext_xsk_redirect_is_active(&p->redirect))
+			xdev_ext_xsk_redirect_detach(&p->redirect);
 		return;
 	}
 	if (xdev_ext_xsk_redirect_is_active(&p->redirect))

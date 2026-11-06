@@ -24,7 +24,7 @@ def main():
    native=layout_module.materialize_view(root).root/'kernel'
    target=native/'tools/xdev_ext_mech/lib/xdev_ext_session.c'
    (out/'session_wire.h').write_bytes((HERE/'wire.h').read_bytes());exe=out/'library'
-   shared=[str(native/'tools/xdev_ext_xsk_shared.c'),str(native/'tools/xdev_ext_xsk_steer.c')]
+   shared=[str(native/'tools/xdev_ext_xsk_shared.c'),str(native/'tools/xdev_ext_xsk_steer.c'),str(native/'tools/xdev_ext_xsk_redirect.c')]
    cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror','-fsanitize=undefined','-fno-sanitize-recover=all',*shlex.split(os.environ.get('CPPFLAGS','')),'-I'+str(native),'-I'+str(out),str(HERE/'library.c'),str(target),*shared,*shlex.split(os.environ.get('LDFLAGS','')),*shlex.split(os.environ.get('LIBBPF_LIBS','-lbpf')),'-lelf','-lz','-o',str(exe)]
    r=subprocess.run(cmd,text=True,capture_output=True,timeout=60);(out/'compile.log').write_text(r.stdout+r.stderr);result.update(compile_command=cmd,compile_exit=r.returncode)
    if r.returncode:raise RuntimeError('library compile failed; setup only')
