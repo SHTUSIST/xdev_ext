@@ -1921,6 +1921,15 @@ elif [[ -z "$FAULT_CAMPAIGN" ]]; then
 fi
 cat /proc/modules >"$EV/host-modules-after.txt"
 ip -details link show >"$EV/host-links-after.txt"
+# Preserve a machine-readable FAIL even when QEMU times out or exits nonzero,
+# and before a debug-locking FAIL below stops the harness.
+if (( ${GPU:-0} )); then
+    set +e
+    python3 -B "$GPU_VALIDATOR" "$EV/guest.log" "$EV/gpu-result.json" \
+        --release "$(cat "$GPU_OUT/release")" --device "$GPU_DEVICE_ID" | tee "$EV/gpu-result.txt"
+    gpu_status=${PIPESTATUS[0]}
+    set -e
+fi
 python3 "$DEBUG_HELPER" console "$EV/guest.log" "$EV/debug-locking.json" "$DEBUG_LOCKING" \
     | tee "$EV/debug-locking-result.txt"
 if (( VIOMMU )); then
@@ -1932,14 +1941,6 @@ fi
 if (( FENCE_CHECK )); then
     python3 "$FENCE_VALIDATOR" "$EV/guest.log" "$EV/qemu.exit" "$EV/fence-request.json" \
         | tee "$EV/fence-result.txt"
-fi
-# Preserve a machine-readable FAIL even when QEMU times out or exits nonzero.
-if (( ${GPU:-0} )); then
-    set +e
-    python3 -B "$GPU_VALIDATOR" "$EV/guest.log" "$EV/gpu-result.json" \
-        --release "$(cat "$GPU_OUT/release")" --device "$GPU_DEVICE_ID" | tee "$EV/gpu-result.txt"
-    gpu_status=${PIPESTATUS[0]}
-    set -e
 fi
 if (( LIFECYCLE )); then
     python3 "$SRC/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate.py" \

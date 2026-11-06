@@ -47,6 +47,8 @@ static int mech(int ring, __u32 op, uint64_t argument)
  int ret = syscall(__NR_io_uring_register, ring, IORING_REGISTER_XDEV_EXT_MECH, &req, 1);
  return ret < 0 ? -errno : ret;
 }
+/* The operation a failed chain stopped at, for its failure line. */
+static const char *peer_step = "arguments";
 static int parse_u64(const char *s, uint64_t *value)
 {
  char *end;
@@ -83,13 +85,16 @@ static int run_chain(int allocation, const char *source, const char *target,
  unsigned int ifindex, queue;
  char local[18], remote[18], extra;
  bool created = false;
+ peer_step = "arguments";
  if (!groups || shift < 9 || shift > 31 || !bytes || bytes > 65536 ||
      (bytes & ((1U << shift)-1)) || groups > UINT64_MAX / (bytes >> shift)) return -EINVAL;
  if (!strncmp(target, "net/", 4) && bytes > 16384) return -EINVAL;
  nlb = groups * (bytes >> shift);
  if (source_slba > UINT64_MAX - nlb || target_slba > UINT64_MAX - nlb) return -EOVERFLOW;
+ peer_step = "open-source";
  src = open(source, O_RDONLY | O_CLOEXEC);
  if (src < 0) { ret=-errno; goto out; }
+ peer_step = "open-target";
  if (!strncmp(target,"net/",4)) {
   if (sscanf(target,"net/%u/%u/%17[^/]/%17s%c",&ifindex,&queue,local,remote,&extra)!=4 ||
       !ifindex || mac(local,create.peer.local_mac) || mac(remote,create.peer.peer_mac)) { ret=-EINVAL; goto out; }
@@ -104,23 +109,30 @@ static int run_chain(int allocation, const char *source, const char *target,
  if (dst < 0) { ret=-errno; goto out; }
  create.st[0] = (struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,
     .direction=XDEV_EXT_MECH_DIR_FROM_DEVICE,.fd=src,.arg0=source_slba,.arg1=nlb};
+ peer_step = "eventfd";
  notify = eventfd(0,EFD_CLOEXEC|EFD_NONBLOCK);
  if (notify<0) { ret=-errno; goto out; }
  create.eventfd=notify;
+ peer_step = "ring";
  ring=syscall(__NR_io_uring_setup,8,&params);
  if (ring<0) { ret=-errno; goto out; }
+ peer_step = "create";
  ret=mech(ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&create);
  if (ret) goto out;
  created=true;
  arm.session_id=start.session_id=stats.session_id=create.session_id;
+ peer_step = "arm";
  ret=mech(ring,XDEV_EXT_MECH_OP_NOTIFY_ARM,(uintptr_t)&arm);
- if (!ret) ret=mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start);
+ if (!ret) { peer_step = "start"; ret=mech(ring,XDEV_EXT_MECH_OP_START,(uintptr_t)&start); }
  if (ret) goto out;
+ peer_step = "wait";
  wait=(struct pollfd){.fd=notify,.events=POLLIN};
  do { ret=poll(&wait,1,120000); } while (ret<0 && errno==EINTR);
  if (ret<=0) { ret=ret ? -errno : -ETIMEDOUT; goto out; }
+ peer_step = "stats";
  ret=mech(ring,XDEV_EXT_MECH_OP_STATS,(uintptr_t)&stats);
  if (ret) goto out;
+ peer_step = "verdict";
  fprintf(stdout,"peer chain: done=%llu abort=%llu inflight=%llu sequestered=%llu status=%d\n",
    (unsigned long long)stats.batches_done,(unsigned long long)stats.batches_abort,
    (unsigned long long)stats.inflight,(unsigned long long)stats.sequestered,stats.last_err);
@@ -129,7 +141,7 @@ static int run_chain(int allocation, const char *source, const char *target,
 out:
  if (created) {
   int stop=mech(ring,XDEV_EXT_MECH_OP_STOP,create.session_id);
-  if (!ret && stop) ret=stop;
+  if (!ret && stop) { ret=stop; peer_step = "stop"; }
  }
  if (ring>=0) close(ring);
  if (notify>=0) close(notify);
@@ -155,15 +167,21 @@ int main(int argc, char **argv)
  if (parse_u64(argv[base+2],&groups) || parse_u64(argv[base+3],&bytes) || bytes>UINT32_MAX ||
      parse_u64(argv[base+4],&shift) || shift>31 || parse_u64(argv[base+5],&srcslba) ||
      parse_u64(argv[base+6],&dstslba)) goto usage;
+ peer_step = "bpf";
  ret=load_ops(argv[base+7],"nvme_s0",&nvme);
  if (!ret && !strncmp(argv[base+1],"net/",4)) ret=load_ops(argv[base+7],"net_peer",&net);
  if (ret) goto out;
  if (allocation<0) {
+  peer_step = "cuda";
   ret=xdev_ext_mech_cuda_open(&cuda,argv[2],65536);
   if (ret) goto out;
+  printf("peer chain: cuda va=0x%llx bytes=65536\n",(unsigned long long)cuda.va);
+  fflush(stdout);
+  peer_step = "open-gpu";
   gpu=open(argv[3],O_RDWR|O_CLOEXEC); control=open("/dev/xdev_ext_peer",O_RDWR|O_CLOEXEC);
   if (gpu<0 || control<0) { ret=-errno; goto out; }
   registration=(struct xdev_ext_peer_register){.gpu_fd=gpu,.gpu_va=cuda.va,.len=65536};
+  peer_step = "register";
   allocation=ioctl(control,XDEV_EXT_PEER_REGISTER,&registration);
   if (allocation<0) { ret=-errno; goto out; }
   owns_allocation=true;
@@ -175,8 +193,8 @@ out:
  if (gpu>=0) close(gpu);
  bpf_link__destroy(net.link); bpf_object__close(net.object);
  bpf_link__destroy(nvme.link); bpf_object__close(nvme.object);
- { int cleanup=xdev_ext_mech_cuda_close(&cuda); if (!ret) ret=cleanup; }
- if (ret) fprintf(stderr,"peer chain failed: %s (%d)\n",strerror(-ret),ret);
+ { int cleanup=xdev_ext_mech_cuda_close(&cuda); if (!ret && cleanup) { ret=cleanup; peer_step = "cuda-close"; } }
+ if (ret) fprintf(stderr,"peer chain failed at %s: %s (%d)\n",peer_step,strerror(-ret),ret);
  return ret ? 1 : 0;
 usage:
  ret=2;

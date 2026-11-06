@@ -769,6 +769,11 @@
       "native_path": "kernel-open/nvidia/nvidia.Kbuild"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/os-interface.c",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/os-interface.c"
+    },
+    {
       "source": "src/compute/nvidia/src/nvidia/arch/nvalloc/unix/src/osapi.c",
       "component": "nvidia",
       "native_path": "src/nvidia/arch/nvalloc/unix/src/osapi.c"
@@ -3551,6 +3556,16 @@
       "source": "tests/compute/nvidia/fake_include/linux/xdev_ext_binding.h",
       "component": "nvidia",
       "native_path": "tests/fake_include/linux/xdev_ext_binding.h"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_os_spinlock_lockdep_kvm.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_os_spinlock_lockdep_kvm.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_os_spinlock_lockdep_kvm_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_os_spinlock_lockdep_kvm_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_async_contract.h",

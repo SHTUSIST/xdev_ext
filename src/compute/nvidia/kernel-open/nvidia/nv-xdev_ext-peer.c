@@ -62,7 +62,11 @@ static int nv_xdev_ext_peer_pin(struct file *f, u64 va, u64 len, void **out)
   * pinned GPU-resident allocation type and holds the allocation itself.
   */
  rc = nvidia_p2p_get_pages_persistent(va, len, &a->pages, NVIDIA_P2P_FLAGS_DEFAULT);
- if (rc) goto stack;
+ if (rc) {
+  /* Tells NVIDIA's refusal apart from this provider's own -EINVAL checks. */
+  nv_printf(NV_DBG_ERRORS, "NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: %d\n", rc);
+  goto stack;
+ }
  if (!NVIDIA_P2P_PAGE_TABLE_VERSION_COMPATIBLE(a->pages) ||
      !a->pages->gpu_uuid || memcmp(uuid, a->pages->gpu_uuid, NVIDIA_P2P_GPU_UUID_LEN)) {
   rc = -EXDEV;

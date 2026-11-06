@@ -32,6 +32,7 @@ CONTROLS = ("put-success", "unmap-success", "peer-pin-mismatch-put-ok")
 G15 = ("put-fail-keeps-ref", "peer-unpin-fail")
 G16 = ("unmap-alloc-fail", "unmap-os-fail", "peer-unmap-propagates", "table-cleanup-failure", "map-owner-preallocated")
 G17 = ("peer-pin-mismatch-put-fail",)
+REPORTS = ("peer-pin-get-pages-fail-reports-rc",)
 
 
 def public_header(text):
@@ -134,6 +135,9 @@ class NativePeerCleanup(unittest.TestCase):
 
     def test_g17_pin_mismatch_with_failed_put_keeps_gpu_lifetime(self):
         self.run_cases(G17)
+
+    def test_refused_persistent_pin_logs_nvidia_status(self):
+        self.run_cases(REPORTS)
 
 
 if __name__ == "__main__":

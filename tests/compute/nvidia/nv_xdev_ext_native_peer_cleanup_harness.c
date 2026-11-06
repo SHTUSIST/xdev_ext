@@ -21,7 +21,8 @@ typedef uint64_t u64;
 #define PAGE_SIZE (1UL << PAGE_SHIFT)
 #define GFP_KERNEL 0
 #define NV_DBG_ERRORS 4
-#define nv_printf(...) ((void)0)
+/* The last driver message, so a case can check what the driver reported. */
+#define nv_printf(level, ...) ((void)(level), (void)snprintf(S.printed, sizeof(S.printed), __VA_ARGS__))
 #define WARN_ON(c) ({ int w_ = !!(c); if (w_) S.warns++; w_; })
 #define BUG_ON(c) do { if (c) { printf("BUG_ON(%s)\n", #c); abort(); } } while (0)
 #define NV_EXPORT_SYMBOL(x)
@@ -79,6 +80,8 @@ static struct {
 	unsigned int live_k_count;
 	const NvU8 *opened_uuid;
 	NvU8 table_uuid[16];
+	int get_pages_rc;
+	char printed[256];
 } S;
 
 static NV_STATUS os_alloc_mem(void **p, NvU64 n)
@@ -180,6 +183,8 @@ int nvidia_p2p_get_pages_persistent(uint64_t va, uint64_t len,
 {
 	nv_p2p_mem_info_t *m;
 	(void)va; (void)len; (void)flags;
+	if (S.get_pages_rc)
+		return S.get_pages_rc;
 	if (os_alloc_mem((void **)&m, sizeof(*m)) != NV_OK)
 		return -ENOMEM;
 	INIT_LIST_HEAD(&m->dma_mapping_list.list_head);
@@ -462,6 +467,25 @@ static void case_peer_pin_mismatch_put_ok(void)
 	      harness_module.refs, S.dev_refs, S.live_os, S.live_k_count);
 }
 
+/* What NVIDIA's persistent pin refused must reach the kernel log. */
+static void case_peer_pin_get_pages_fail_reports_rc(void)
+{
+	void *out = NULL;
+	int rc;
+	prepare_file();
+	S.opened_uuid = uuid_a;
+	S.get_pages_rc = -EINVAL;
+	S.printed[0] = 0;
+	rc = nv_xdev_ext_peer_pin(&gpu_file, 0x10000, 0x10000, &out);
+	S.get_pages_rc = 0;
+	CHECK(rc == -EINVAL && out == NULL, "refused pin rc=%d", rc);
+	CHECK(strstr(S.printed, "NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22\n") != NULL,
+	      "the refusal of nvidia_p2p_get_pages_persistent was not logged: \"%s\"", S.printed);
+	CHECK(harness_module.refs == 0 && S.dev_refs == 0 && S.live_os == 0 && S.live_k_count == 0,
+	      "refused pin must release everything (mod=%d refs=%d os=%d k=%u)",
+	      harness_module.refs, S.dev_refs, S.live_os, S.live_k_count);
+}
+
 struct named_case { const char *name; void (*fn)(void); };
 static const struct named_case cases[] = {
 	{ "put-fail-keeps-ref", case_put_fail_keeps_ref },
@@ -475,6 +499,7 @@ static const struct named_case cases[] = {
 	{ "peer-unpin-fail", case_peer_unpin_fail },
 	{ "peer-pin-mismatch-put-fail", case_peer_pin_mismatch_put_fail },
 	{ "peer-pin-mismatch-put-ok", case_peer_pin_mismatch_put_ok },
+	{ "peer-pin-get-pages-fail-reports-rc", case_peer_pin_get_pages_fail_reports_rc },
 };
 
 int main(int argc, char **argv)

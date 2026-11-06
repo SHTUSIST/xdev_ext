@@ -8,6 +8,14 @@ import subprocess
 import tempfile
 ROOT=Path(__file__).resolve().parents[5]
 source=(ROOT/'tools/xdev_ext_mech/xdev_ext_peer_chain.c').read_text()
+import re
+# REGISTER runs in main(), outside the extracted controller: the step
+# label in force at that ioctl must name it, and the failure line prints it.
+main_body=source[source.index('int main('):]
+register=main_body.index('ioctl(control,XDEV_EXT_PEER_REGISTER')
+steps=re.findall(r'peer_step = "([a-z-]+)";',main_body[:register])
+assert steps and steps[-1]=='register', steps
+assert 'fprintf(stderr,"peer chain failed at %s: %s (%d)\\n",peer_step,' in main_body
 code=source[source.index('static int mech('):source.index('static int parse_u64(')]
 code+=source[source.index('static int mac('):source.index('int main(')]
 shim=r'''
@@ -27,7 +35,7 @@ shim=r'''
 #include "MECH"
 typedef __u32 u32;
 static unsigned int operations[16], calls, opens, closes, starts;
-static int failure;
+static int failure, create_errno;
 static bool reject_device_access;
 static uint64_t identity=0x123456789abcdefULL;
 static struct xdev_ext_mech_create created;
@@ -45,6 +53,7 @@ static long fake_syscall(long number,...)
  assert(va_arg(args,int)==1);va_end(args);operations[calls++]=r->op;
  if(r->op==XDEV_EXT_MECH_OP_CREATE) {
   struct xdev_ext_mech_create *c=(void*)(uintptr_t)r->arg;
+  if(create_errno){errno=create_errno;return -1;}
   assert(c->pool_kind==XDEV_EXT_MECH_POOL_PEER&&c->pool_fd==9&&c->depth==1&&c->nr_stages==2);
   assert(c->layout.frame_size==65536&&!c->layout.hdr_room&&c->layout.group_bytes==8192);
   assert(c->st[0].class_id==XDEV_EXT_MECH_CLASS_NVME&&c->st[0].direction==XDEV_EXT_MECH_DIR_FROM_DEVICE);
@@ -86,6 +95,11 @@ int main(void)
  reject_device_access=true;
  assert(run_chain(9,"src","net/2/0/02:00:00:00:00:01/02:00:00:00:00:02",3,32768,9,100,200)==-EINVAL&&!calls&&!opens);
  puts("ok 3 - actual controller preserves failed verdicts, tears down, and rejects invalid work/reference NET geometry before device access");
+ reject_device_access=false;calls=opens=closes=starts=0;failure=0;create_errno=EINVAL;
+ assert(run_chain(9,"src","dst",3,8192,9,100,200)==-EINVAL&&!strcmp(peer_step,"create")&&calls==1&&closes==4);
+ calls=opens=closes=starts=0;create_errno=0;failure=1;
+ assert(run_chain(9,"src","dst",3,8192,9,100,200)==-EIO&&!strcmp(peer_step,"verdict"));
+ puts("ok 4 - a failed chain names the step that refused it");
  return 0;
 }
 '''

@@ -40,17 +40,23 @@ dir=$2 ctl=$3 source_block=$4 source_ng=$5 destination_block=$6 destination_ng=$
 source_slba=$8 target_slba=$9 groups=${10} depth=${11} ce_len=${12} timeout_ms=${13}
 release=$(cat "$dir/release")
 window_nlb=$((groups * 16))
-failed=0
+failed=0 unsupported=0
 case_result() {
 	# name result detail...
 	name=$1 result=$2
 	shift 2
 	echo "XDEV_EXT_GPU_CASE name=$name result=$result $*"
-	[ "$result" = PASS ] || failed=$((failed + 1))
+	case $result in
+	PASS) ;;
+	UNSUPPORTED) unsupported=$((unsupported + 1)) ;;
+	*) failed=$((failed + 1)) ;;
+	esac
 }
 
 # --- G0: our NVIDIA modules on the physical GPU --------------------------
-if ! insmod "$dir/nvidia.ko" >/tmp/insmod-nvidia.log 2>&1; then
+# The CE mechanism backend registers only with NVreg_EnableXdevExtCeDma=1
+# (nv-xdev_ext-ce-backend.c); without it every CE stage bind is ENODEV.
+if ! insmod "$dir/nvidia.ko" NVreg_EnableXdevExtCeDma=1 >/tmp/insmod-nvidia.log 2>&1; then
 	log_file insmod /tmp/insmod-nvidia.log
 	echo "XDEV_EXT_GPU_MODULES=FAIL step=insmod-nvidia release=$release"
 	exit 1
@@ -89,6 +95,20 @@ fi
 grep -h '' /proc/driver/nvidia/version 2>/dev/null | sed 's/^/XDEV_EXT_GPU_LOG version: /'
 echo "XDEV_EXT_GPU_MODULES=PASS release=$release device=${vendor#0x}:${device#0x} bdf=$gpu_bdf"
 
+# --- CUDA's own report on this GPU: the only evidence for UNSUPPORTED ------
+caps=
+if "$dir/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf" >/tmp/gpu-caps.log 2>&1; then
+	caps=$(grep '^XDEV_EXT_GPU_CAPS ' /tmp/gpu-caps.log | head -n 1)
+fi
+log_file caps /tmp/gpu-caps.log
+[ -n "$caps" ] || caps="XDEV_EXT_GPU_CAPS bdf=$gpu_bdf probe=failed"
+echo "$caps"
+caps_have() {
+	for want in "$@"; do
+		case " $caps " in *" $want "*) ;; *) return 1 ;; esac
+	done
+}
+
 drop_caches() { sync; echo 3 >/proc/sys/vm/drop_caches; }
 # Byte oracle through the block devices: the case wrote with NVMe
 # passthrough commands, so caches are dropped before reading back.
@@ -109,6 +129,10 @@ ce_ok() {
 	grep -Eq "^XDEV_EXT_MECH_STATS .* last_err=0 batches_done=$groups batches_abort=0 rejects=0 .* sequestered=0 timeouts=0 inflight=0 " "$1" &&
 	grep -Fxq 'CUDA allocation=native released=yes' "$1"
 }
+# The --diagnostics CREATE report: which phase and stage refused, and why.
+create_diag() {
+	sed -n 's/^diagnostics result=\(-\{0,1\}[0-9]*\) .* phase=\([0-9]*\) stage=\([0-9]*\) .*$/create_result=\1 phase=\2 stage=\3/p' "$1" | head -n 1
+}
 
 "$ctl" attach --obj "$dir/ce_plan.bpf.o" --map ce_plan_ops --pin /sys/fs/bpf/gpu-ce >/tmp/gpu-attach.log 2>&1 || {
 	log_file attach /tmp/gpu-attach.log
@@ -119,11 +143,11 @@ ce_ok() {
 # --- G1: CE chain d (real GPU copy engines only) -------------------------
 "$ctl" ce-chain --chain d --ce-dev /dev/nvidia0 --ce-alloc --ce-len "$ce_len" \
 	--groups "$groups" --depth "$depth" --group-bytes 8192 \
-	--timeout-ms "$timeout_ms" >/tmp/gpu-d.log 2>&1
+	--timeout-ms "$timeout_ms" --diagnostics >/tmp/gpu-d.log 2>&1
 rc=$?
 log_file ce-chain-d /tmp/gpu-d.log
 if [ "$rc" = 0 ] && ce_ok /tmp/gpu-d.log d; then case_result ce-chain-d PASS groups="$groups"
-else case_result ce-chain-d FAIL rc="$rc"; fi
+else case_result ce-chain-d FAIL rc="$rc" $(create_diag /tmp/gpu-d.log); fi
 
 # --- G2: CE chain a (NVMe -> host UMEM -> VRAM -> host UMEM -> NVMe) ------
 drop_caches
@@ -133,13 +157,14 @@ if clear_window; then
 		--src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
 		--dst-ng "$destination_ng" --dst-slba "$target_slba" --dst-nlb "$window_nlb" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
-		--timeout-ms "$timeout_ms" >/tmp/gpu-a.log 2>&1
+		--timeout-ms "$timeout_ms" --diagnostics >/tmp/gpu-a.log 2>&1
 	rc=$?
 	log_file ce-chain-a /tmp/gpu-a.log
 	if [ "$rc" = 0 ] && ce_ok /tmp/gpu-a.log a && compare_window; then
 		case_result ce-chain-a PASS bytes=$((window_nlb * 512))
 	else
-		case_result ce-chain-a FAIL rc="$rc" compare=$(compare_window && echo equal || echo differs)
+		case_result ce-chain-a FAIL rc="$rc" $(create_diag /tmp/gpu-a.log) \
+			compare=$(compare_window && echo equal || echo differs)
 	fi
 else
 	case_result ce-chain-a FAIL reason=window-not-cleared
@@ -157,6 +182,15 @@ if clear_window; then
 	log_file peer-nvme /tmp/gpu-peer.log
 	if [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-peer.log && compare_window; then
 		case_result peer-nvme PASS bytes=$((window_nlb * 512))
+	elif [ "$rc" != 0 ] && grep -Eq '^peer chain failed at register: .* \(-22\)$' /tmp/gpu-peer.log &&
+	     dmesg | grep -Fq 'NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22' &&
+	     caps_have gpu_direct_rdma=0 pointer_rdma=0; then
+		# CUDA supports no GPUDirect RDMA on this GPU and marks the block
+		# unusable with it, and NVIDIA's persistent pin itself refused the
+		# VA (no third-party P2P registration to resolve it: EINVAL), not
+		# one of the provider's own checks.
+		case_result peer-nvme UNSUPPORTED reason=cuda-no-gpudirect-rdma step=register errno=-22 \
+			gpu_direct_rdma=0 pointer_rdma=0
 	else
 		case_result peer-nvme FAIL rc="$rc" compare=$(compare_window && echo equal || echo differs)
 	fi
@@ -175,6 +209,11 @@ if clear_window; then
 	if [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-dmabuf.log &&
 	   grep -Fq 'XDEV_EXT_GPU_DMABUF vram_holds_last_group=yes' /tmp/gpu-dmabuf.log && compare_window; then
 		case_result dmabuf-peer PASS bytes=$((window_nlb * 512))
+	elif [ "$rc" != 0 ] && grep -Eq '^XDEV_EXT_GPU_DMABUF device=[^ ]+ dma_buf_supported=0$' /tmp/gpu-dmabuf.log &&
+	     caps_have dma_buf=0; then
+		# CUDA refuses DMA-BUF export of device memory on this GPU; the
+		# helper stops before any allocation or PEER registration.
+		case_result dmabuf-peer UNSUPPORTED reason=cuda-no-dma-buf dma_buf_supported=0
 	else
 		case_result dmabuf-peer FAIL rc="$rc" compare=$(compare_window && echo equal || echo differs)
 	fi
@@ -188,5 +227,9 @@ fi
 }
 
 # The window ends with the source bytes, which the host image oracle checks.
-echo "XDEV_EXT_GPU_GUEST=$([ "$failed" = 0 ] && echo PASS || echo FAIL) failed=$failed"
+# UNSUPPORTED is never PASS: the host verdict and the harness stay nonzero.
+if [ "$failed" != 0 ]; then summary=FAIL
+elif [ "$unsupported" != 0 ]; then summary=UNSUPPORTED
+else summary=PASS; fi
+echo "XDEV_EXT_GPU_GUEST=$summary failed=$failed unsupported=$unsupported"
 exit 0
