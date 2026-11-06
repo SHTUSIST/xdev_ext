@@ -65,8 +65,10 @@ int chain_umem_register(unsigned endpoint, uint32_t frame_size, uint32_t nr_fram
 struct xdev_ext_mech_session;
 /* window_tx/window_rx: groups each XDOMAIN stage may keep in flight, passed in
  * bits 32..63 of the stage's arg1 (0 = the stage default, one group).
+ * rts_cts: invoke the actual xdomain_rts_cts program at both endpoints;
+ * early independently selects the stage's v2 envelope, not its protocol.
  * host_page_offset: --pool host only, where the UMEM starts in its first page. */
-struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early;
+struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early, rts_cts;
 	uint32_t window_tx, window_rx;
 	uint32_t host_page_offset; };
 int chain_world(const struct chain_link_config *cfg);

@@ -146,6 +146,10 @@ int chain_x6_program_call(struct xdev_ext_mech_stage *stage, const struct xdev_e
 			  s32 (*fn)(void *, const struct xdev_ext_mech_ctx *), s32 *result);
 s32 nvme_s0_build(void *, const struct xdev_ext_mech_ctx *);
 s32 nvme_s0_complete(void *, const struct xdev_ext_mech_ctx *);
+s32 chain_rts_cts_prepare(void *, const struct xdev_ext_mech_ctx *);
+s32 chain_rts_cts_build(void *, const struct xdev_ext_mech_ctx *);
+s32 chain_rts_cts_complete(void *, const struct xdev_ext_mech_ctx *);
+static struct chain_link_config chain_cfg;
 
 static unsigned long long chain_real_session_id(struct xdev_ext_mech_session *s)
 { return xdev_ext_mech_session_id(s); }
@@ -940,8 +944,17 @@ int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mec
 	chain_record((struct chain_event){ .kind = CHAIN_EV_PROGRAM, .endpoint = stack_endpoint_stage(st),
 		.stage = st->index, .member = a->member, .control_type = a->callsite,
 		.worker = chain_core_current_worker(), .group = a->b ? xdev_ext_mech_batch_key(a->b) : 0 });
-	if (st->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)
-		return stack_x6_call(st, a, ret);
+	if (st->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN) {
+		if (!chain_cfg.rts_cts)
+			return stack_x6_call(st, a, ret);
+		/* The same kfunc views and core invocation context, with the
+		 * complete actual RTS/CTS program selected instead of reference. */
+		ctx = chain_program_ctx(st, a);
+		return chain_x6_program_call(st, a, &ctx,
+			a->member == XDEV_EXT_MECH_MEMBER_PREPARE ? chain_rts_cts_prepare :
+			a->member == XDEV_EXT_MECH_MEMBER_BUILD ? chain_rts_cts_build :
+			chain_rts_cts_complete, ret);
+	}
 	if (st->class_id != XDEV_EXT_MECH_CLASS_NVME)
 		abort();
 	if (a->member == XDEV_EXT_MECH_MEMBER_PREPARE)
@@ -958,7 +971,6 @@ bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st, u32 me
 }
 
 /* ---- world, sessions and START ---------------------------------------- */
-static struct chain_link_config chain_cfg;
 static int chain_nvme_fd[CHAIN_ENDPOINTS];
 int chain_world(const struct chain_link_config *cfg)
 {

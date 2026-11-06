@@ -41,6 +41,9 @@
 #define ACK 3u
 #define FAIL 5u
 #define CANCEL 6u
+#define HELLO 7u
+#define CHALLENGE 8u
+#define CONFIRM 9u
 #define F_K_FREE chain_frame_state_free()
 #define BUDGET 200000u
 /* enum dma_data_direction, as the requester passes it to the DMA API */
@@ -115,7 +118,7 @@ static void settle(unsigned rounds)
 		pump(1000000); /* 1 ms of virtual time per round, far below protocol deadlines */
 }
 
-static bool early;
+static bool early, rts_cts;
 static unsigned count(unsigned kind, unsigned endpoint);
 /* --pool host: both rings' IOU_UMEM.  Each XDOMAIN stage binds its own NHI
  * through the real requester, which maps every pool page once for that NHI
@@ -160,7 +163,8 @@ static void host_mappings(void)
 static void up(void)
 {
 	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = frames, .depth = depth,
-		.group_bytes = GROUP, .early = early, .window_tx = window_tx, .window_rx = window_rx };
+		.group_bytes = GROUP, .early = early, .rts_cts = rts_cts,
+		.window_tx = window_tx, .window_rx = window_rx };
 	size_t bytes;
 	uint8_t *disk;
 	int err;
@@ -785,6 +789,25 @@ static void window_next_after_cts(void)
 	}
 }
 
+/* The actual RTS/CTS program declines pairing even on F_EARLY stages. The
+ * window must advance on its accepted CTS-authorized post, without waiting
+ * for a grant that this protocol never sends. Reusing the held-CTS scenario
+ * checks both that group 2 does not pass before CTS and that it passes in
+ * the same drain afterwards, before group 1's consumer can finish. */
+static void window_rts_cts_v2(void)
+{
+	CHECK(early && rts_cts && window_tx == 2 && window_rx == 2,
+	      "RTS/CTS program with EARLY envelopes and two groups per window");
+	window_next_after_cts();
+	CHECK(chain_control_tx_count(0, RTS) == depth && chain_control_tx_count(1, CTS) == depth,
+	      "each group used RTS then CTS despite the EARLY envelope");
+	for (unsigned endpoint = 0; endpoint < CHAIN_ENDPOINTS; endpoint++)
+		CHECK(chain_control_tx_count(endpoint, HELLO) == 0 &&
+		      chain_control_tx_count(endpoint, CHALLENGE) == 0 &&
+		      chain_control_tx_count(endpoint, CONFIRM) == 0,
+		      "the selected RTS/CTS program never pairs");
+}
+
 /* STOP while W groups are in flight and host 1's TX completions are held, so
  * their local native outcome is unknown: no group is reported delivered and
  * no frame of those groups returns to the pool or is leased again. */
@@ -1047,7 +1070,7 @@ static void host_destroy_unmaps(void)
 			      "an unmapped address is one pool page, unmapped once");
 			mask |= 1u << (off / FRAME);
 		}
-		CHECK(seen == FRAMES && mask == (1u << FRAMES) - 1, "every pool page unmapped at release");
+		CHECK(seen == frames && mask == (1u << frames) - 1, "every pool page unmapped at release");
 	}
 }
 
@@ -1097,7 +1120,13 @@ int main(int argc, char **argv)
 		depth = w > 2 ? w : 2;
 		frames = 2 * depth;
 	}
-	if (!strcmp(base, "window_fills")) {
+	if (!strcmp(base, "window_rts_cts_v2") && !early && !w) {
+		early = rts_cts = true;
+		window_tx = window_rx = 2;
+		depth = 4;
+		frames = 8;
+		window_rts_cts_v2();
+	} else if (!strcmp(base, "window_fills")) {
 		if (w < 2)
 			return 2;
 		depth = w + 2; /* more batches than the window */

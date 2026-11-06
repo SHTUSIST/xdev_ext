@@ -1996,10 +1996,11 @@ static void xdev_ext_xd_class_batch_release(struct xdev_ext_mech_stage *st, stru
  * number and data sequence were taken in key order and the peer posted its
  * buffers for it. Before that the announcement can still be withdrawn or
  * refused, and a later group announced behind it would take the receive batch
- * it leaves. An EARLY sender can post the next group only with that group's
+ * it leaves. A paired sender can post the next group only with that group's
  * own grant, so the next key waits for the grant here instead of bouncing to
- * the core's retry timer. RX never releases: one RX batch at a time takes the
- * next announcement (one posted group, version 1).
+ * the core's retry timer. An unpaired RTS/CTS sender advances on its accepted
+ * post even with a v2 envelope. RX never releases: one RX batch at a time
+ * takes the next announcement (one posted group, version 1).
  */
 static bool xdev_ext_xd_class_order_ready(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b)
 {
@@ -2015,7 +2016,7 @@ static bool xdev_ext_xd_class_order_ready(struct xdev_ext_mech_stage *st, struct
 	s = bp->slot;
 	ready = s && s->busy && s->batch == b && s->ticket == xdev_ext_mech_batch_ticket(b) &&
 		xd_fact(xs, s)->accepted;
-	if (ready && xs->early)
+	if (ready && xd_paired(xs))
 		ready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
 	return ready;

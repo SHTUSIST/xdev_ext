@@ -39,7 +39,7 @@ CASES = (BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev
          tuple(c + w for w in WINDOWS for c in BASE_CASES) +
          tuple(c + w + '_early' for w in WINDOWS for c in BASE_CASES) +
          WINDOW_CASES + tuple(c + '_early' for c in WINDOW_CASES) +
-         ('window_next_after_cts', 'window_withdrawn_head'))
+         ('window_next_after_cts', 'window_withdrawn_head', 'window_rts_cts_v2'))
 # A window of 1 must behave exactly as no window: NAME and its window-1 twin.
 IDENTITY = BASE_CASES + tuple(c + '_early' for c in BASE_CASES)
 
@@ -58,6 +58,7 @@ CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
     'xdev_ext_mech_retry_work', 'xdev_ext_mech_stop_work', 'xdev_ext_mech_session_init',
     'xdev_ext_mech_session_buffers', 'xdev_ext_mech_session_bind',
+    'xdev_ext_mech_session_release_disposition',
     'xdev_ext_mech_batch_complete', 'xdev_ext_mech_batch_sequester',
     'xdev_ext_mech_batch_complete_cancelled', 'xdev_ext_mech_stage_kick',
     'xdev_ext_mech_stage_dead', 'xdev_ext_mech_stage_stop', 'xdev_ext_mech_stage_stop_error',
@@ -77,7 +78,8 @@ CORE_ROOTS = (
     # --pool host: START lends the ring's UMEM frames through this function.
     'xdev_ext_mech_take_user_frames')
 # Fixture-owned in this unit or chain_boundary.c: program invocation, per-stage
-# program instances, and session teardown/report paths outside this scope.
+# program instances, and reap/DESTROY entry paths outside this scope. Failed
+# CREATE uses the actual release disposition and its checked/quarantine rules.
 CORE_STOP = ('xdev_ext_mech_call', 'xdev_ext_mech_stage_has_member', 'xdev_ext_mech_reap',
              'xdev_ext_mech_group_timeout', 'xdev_ext_mech_poll_work', 'xdev_ext_mech_create',
              'xdev_ext_mech_create_common', 'xdev_ext_mech_instance_get_from_fd')
@@ -194,7 +196,13 @@ MUTATIONS = {
     # it, so its submit bounces to the core retry timer.
     'window-early-ready-without-grant': dict(case='window_refills_receiver_early', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c',
-         '\tif (ready && xs->early)\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n', '')]),
+         '\tif (ready && xd_paired(xs))\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n', '')]),
+    # Restoring the envelope flag gate stalls an RTS/CTS program on a grant
+    # that it never requests, even after its first native post was accepted.
+    'window-envelope-as-protocol': dict(case='window_rts_cts_v2', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         '\tif (ready && xd_paired(xs))\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n',
+         '\tif (ready && xs->early)\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n')]),
     # The class accepts the window but does not hand it to the core.
     'window-bind-ignored': dict(case='window_fills_w2', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',
@@ -288,7 +296,16 @@ def core_unit(kernel, build):
     defs = definitions(text)
     names = closure(defs, CORE_ROOTS, set(CORE_STOP))
     preamble = core[:core.index('\n', core.index('enum xdev_ext_mech_end {'))]
-    types = [re.search(r'^enum xdev_ext_mech_end \{\n.*?^\};', core, re.M | re.S)[0]]
+    # Failed-CREATE release also compiles the report/statistics dependencies.
+    # Keep the complete actual policy UAPI (including its guard), with only
+    # includes omitted: chain_core.c.in already includes linux/xdev_ext_mech.h
+    # and hence the actual mechanism UAPI and its v1/v2/v3 transport types.
+    # These declarations must precede generated prototypes, or parameter-only
+    # struct tags would acquire prototype scope instead of the real ABI type.
+    policy = (kernel / 'include/uapi/linux/xdev_ext_policy.h').read_text()
+    policy = replace(policy, '#include <linux/types.h>\n#include "xdev_ext_mech.h"\n', '',
+                     'policy UAPI dependencies supplied by the core header')
+    types = [policy, re.search(r'^enum xdev_ext_mech_end \{\n.*?^\};', core, re.M | re.S)[0]]
     for name in ('xdev_ext_mech_batch', 'xdev_ext_mech_session'):
         match = re.search(r'^struct ' + name + r' \{\n.*?^\};', core, re.M | re.S)
         if not match:
@@ -474,8 +491,16 @@ def xdomain_units(kernel, build, root, pool='provider'):
     prog.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
                     '#define LICENSE chain_nvme_s0_license\n#define mode chain_nvme_s0_mode\n'
                     '#include "' + str(kernel / 'tools/xdev_ext_mech/nvme_s0.bpf.c') + '"\n')
+    rts_prog = build / 'xdomain_rts_cts_prog.c'
+    rts_prog.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
+                        '#define LICENSE chain_rts_cts_license\n'
+                        '#define xdomain_peer_prepare chain_rts_cts_prepare\n'
+                        '#define xdomain_peer_build chain_rts_cts_build\n'
+                        '#define xdomain_peer_complete chain_rts_cts_complete\n'
+                        '#define xdomain_peer_ops chain_rts_cts_ops\n'
+                        '#include "' + str(kernel / 'tools/xdev_ext_mech/xdomain_rts_cts.bpf.c') + '"\n')
     units = [fixture / n for n in ('stack_x3.c', 'stack_x4.c', 'stack_x5.c', 'stack_family.c',
-                                   'stack_x6.c', 'stack_nhi.c')] + [probe, prog, HERE / 'chain_boundary.c']
+                                   'stack_x6.c', 'stack_nhi.c')] + [probe, prog, rts_prog, HERE / 'chain_boundary.c']
     if pool == 'host':
         requester_unit = build / 'host_requester.c'
         requester_unit.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
@@ -557,6 +582,7 @@ def peer_units(root, kernel, build, common):
 DIRECT_READS = ('io_uring/xdev_ext_mech.c', 'io_uring/xdev_ext_compfam_transform.c', 'io_uring/xdev_ext_mech_ops.c',
                 'drivers/nvme/host/nvme.h', 'drivers/nvme/host/core.c', 'drivers/nvme/host/ioctl.c',
                 'include/trace/events/xdev_ext.h', 'io_uring/family/xdev_ext_requester.c',
+                'include/uapi/linux/xdev_ext_policy.h',
                 # NHI ring section extracted by the stack fixture's generator, and the
                 # stack fixture scripts this runner executes.
                 'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h', 'include/linux/thunderbolt.h',
