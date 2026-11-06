@@ -36,18 +36,22 @@ VIOMMU_DEVICE = 'intel-iommu,intremap=on,caching-mode=on'
 VIOMMU_APPEND = ' intel_iommu=on iommu.strict=1'
 
 
-def harness_args(viommu):
-    """Run the harness's args=( ... ) block and its vIOMMU block in bash."""
+def harness_args(viommu, nic=None):
+    """Run the harness's QEMU argument construction (kernel command line, guest
+    memory, NIC model, then args=( ... )) and its vIOMMU block in bash."""
     script = KVM.read_text()
-    block = re.search(r'(?ms)^args=\(-machine .*?\)\n', script)
+    block = re.search(r'(?ms)^KERNEL_APPEND=.*?^args=\(-machine .*?\)\n', script)
     if block is None:
         raise AssertionError('harness QEMU args block not found')
     marked = re.search(r'(?ms)^# --- vIOMMU QEMU arguments.*?^# --- end vIOMMU QEMU arguments\n', script)
     program = '\n'.join([
         'set -euo pipefail',
         'BUILD=/S/build; SCRATCH=/S; VIOMMU=%d' % viommu,
+        'NIC_MODEL=%s' % nic if nic else '',
         'destination_drive="file=$SCRATCH/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"',
         'wire_args=(-netdev hubport,id=wire0,hubid=0 -netdev hubport,id=wire1,hubid=0)',
+        # The harness checks each --vfio device on the host; none is assigned here.
+        'vfio_qemu_args() { VFIO_ARGS=(); }',
         block.group(0),
         marked.group(0) if marked else '',
         'printf "%s\\0" "${args[@]}"', ''])
@@ -81,6 +85,17 @@ class HarnessArguments(unittest.TestCase):
         # The emulated IOMMU must precede every PCI device it translates.
         devices = [args[i + 1] for i, value in enumerate(args) if value == '-device']
         self.assertEqual(devices[0], VIOMMU_DEVICE)
+
+    def test_on_with_the_igb_wire_pair_keeps_vtd_before_its_root_ports(self):
+        # --nic igb puts each igb behind its own pcie-root-port and boots the
+        # guest with maxcpus=1; VT-d still precedes every device.
+        args, _ = harness_args(1, nic='igb')
+        devices = [args[i + 1] for i, value in enumerate(args) if value == '-device']
+        self.assertEqual(devices[0], VIOMMU_DEVICE)
+        self.assertIn('igb,netdev=wire0,mac=02:00:00:00:00:01,bus=nic_rp0', devices)
+        self.assertIn('igb,netdev=wire1,mac=02:00:00:00:00:02,bus=nic_rp1', devices)
+        self.assertFalse(any(d.startswith('virtio-net-pci') for d in devices), devices)
+        self.assertTrue(args[args.index('-append') + 1].endswith(' maxcpus=1' + VIOMMU_APPEND), args)
 
     def run_harness(self, *options):
         return subprocess.run(['bash', str(KVM), *options], capture_output=True,
