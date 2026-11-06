@@ -779,8 +779,10 @@ int main(int argc, char **argv)
 	quiet_stats(&v2, &st);
 	print_stats(&st, "just after closing its handle fds");
 	CHECK(x, "close victim2's only handle fds right after START");
-	/* The runner rate-limits destination writes, so the run outlasts the close. */
-	CHECK(st.batches_done + st.batches_abort < GROUPS && st.inflight,
+	/* The runner rate-limits destination writes, so the run outlasts the
+	 * close. STATS comes after the close and the counts only grow, so a run
+	 * unfinished here was unfinished at the close. */
+	CHECK(st.batches_done + st.batches_abort < GROUPS,
 	      "victim2's session was still running when its handle fds were closed");
 	CHECK_EQ(issue(dstng, win(W_VICTIM2), WIN_NLB, RDWR, 0), -EBUSY,
 		 "closed during the run, the range stays reserved");
