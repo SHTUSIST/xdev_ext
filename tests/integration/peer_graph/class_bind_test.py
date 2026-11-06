@@ -104,6 +104,7 @@ static void reset(u32 class_id, u32 direction, u64 arg0)
  st.class_id = class_id;
  st.cls = &ops;
  ops.class_id = class_id;
+ ops.decl = xdev_ext_mech_class_desc(class_id);
  ops.fam.hdr = NULL;
  expected_u = &stage;
  bind_calls = 0;

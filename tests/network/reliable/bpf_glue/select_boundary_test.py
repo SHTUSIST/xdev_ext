@@ -8,7 +8,7 @@ FIXTURE = r'''
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
-#include "include/uapi/linux/xdev_ext_mech.h"
+#include "include/linux/xdev_ext_family_core.h"
 struct xdev_ext_mech_call_args {
  unsigned member,callsite,nr_frames,info_size,desc_size,desc_cap,cqe_size,cqe_cap;
  void *base,*frames,*info,*scratch,*b,*cqe;
@@ -20,8 +20,9 @@ struct xdev_ext_mech_call_args {
 /* BODY */
 int main(void) {
  int obj,fail=0; unsigned i;
+ const struct xdev_ext_mech_class_desc *decl = xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_AFXDP);
  struct xdev_ext_mech_call_args a={.member=XDEV_EXT_MECH_MEMBER_BUILD,.callsite=XDEV_EXT_MECH_SITE_WORKER_SELECT,.base=&obj,.info=&obj,.info_size=528};
- if (!xdev_ext_mech_args_ok(&a)) fail++;
+ if (!xdev_ext_mech_args_ok(decl, &a)) fail++;
  for(i=0;i<9;i++) {
   struct xdev_ext_mech_call_args b=a;
   switch(i) {
@@ -29,12 +30,12 @@ int main(void) {
    case 3:b.scratch=&obj;break; case 4:b.desc_size=16;break; case 5:b.desc_cap=1;break;
    case 6:b.cqe=&obj;break;case 7:b.cqe_size=8;break;case 8:b.cqe_cap=1;break;
   }
-  if(xdev_ext_mech_args_ok(&b)) fail++;
+  if(xdev_ext_mech_args_ok(decl, &b)) fail++;
  }
- a.member=XDEV_EXT_MECH_MEMBER_COMPLETE; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=XDEV_EXT_MECH_MEMBER_PREPARE; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=XDEV_EXT_MECH_MEMBER_COMPUTE; if(xdev_ext_mech_args_ok(&a)) fail++;
- a.member=XDEV_EXT_MECH_MEMBER_BUILD;a.callsite=XDEV_EXT_MECH_SITE_WORKER;if(xdev_ext_mech_args_ok(&a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_COMPLETE; if(xdev_ext_mech_args_ok(decl, &a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_PREPARE; if(xdev_ext_mech_args_ok(decl, &a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_COMPUTE; if(xdev_ext_mech_args_ok(decl, &a)) fail++;
+ a.member=XDEV_EXT_MECH_MEMBER_BUILD;a.callsite=XDEV_EXT_MECH_SITE_WORKER;if(xdev_ext_mech_args_ok(decl, &a)) fail++;
  printf("SELECT envelope: 14 checks, %d failures\n",fail);return fail!=0;
 }
 '''
