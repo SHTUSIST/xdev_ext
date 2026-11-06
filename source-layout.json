@@ -2444,6 +2444,30 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/kv_plan_cli.c",
+      "logical_path": "tests/eval/kv_restore/kv_plan_cli.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_plan_crosscheck.py",
+      "logical_path": "tests/eval/kv_restore/test_plan_crosscheck.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_plan.h",
+      "logical_path": "tests/eval/kv_restore/kv_plan.h"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_kv_plan.c",
+      "logical_path": "tests/eval/kv_restore/test_kv_plan.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_layout.py",
+      "logical_path": "tests/eval/kv_restore/kv_layout.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_kv_layout.py",
+      "logical_path": "tests/eval/kv_restore/test_kv_layout.py"
+    },
+    {
       "source": "tests/benchmarks/mechanism_variants/Makefile",
       "logical_path": "tests/eval/mechanism_variants/Makefile"
     },
