@@ -783,7 +783,8 @@ struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override
 			  .fd = chain_nvme_fd[0], .arg0 = 256, .arg1 = 256 },
 			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
 			  .fd = chain_fd_for(chain_host1_control()),
-			  .arg0 = token_override ? token_override : chain_link_token(0), .arg1 = 0,
+			  .arg0 = token_override ? token_override : chain_link_token(0),
+			  .arg1 = (u64)chain_cfg.window_tx << 32,
 			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
 		},
 	};
@@ -800,7 +801,8 @@ struct xdev_ext_mech_session *chain_rx_session(int *err)
 		.depth = chain_cfg.depth, .eventfd = -1,
 		.st = {
 			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
-			  .fd = chain_fd_for(&chain_control[1]), .arg0 = chain_link_token(1), .arg1 = 0,
+			  .fd = chain_fd_for(&chain_control[1]), .arg0 = chain_link_token(1),
+			  .arg1 = (u64)chain_cfg.window_rx << 32,
 			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
 			{ .class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
 			  .fd = chain_nvme_fd[1], .arg0 = 512, .arg1 = 256 },
@@ -817,15 +819,16 @@ int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t firs
 
 /* ---- holds and injected wire duplicates ------------------------------- */
 void chain_hold_tx_completions(unsigned endpoint, bool hold) { world->hold_callbacks[endpoint] = hold; }
-void chain_hold_ack(unsigned endpoint, bool hold)
+void chain_hold_control(unsigned endpoint, unsigned type, bool hold)
 {
 	world->hold_controls[endpoint] = hold;
-	world->hold_control_type[endpoint] = hold ? XDEV_EXT_XD_ACK : 0;
+	world->hold_control_type[endpoint] = hold ? type : 0;
 	if (!hold)
 		for (unsigned i = 0; i < world->nn; i++)
 			if (ring_info(world->n[i].r)->endpoint == endpoint)
 				world->n[i].held = false;
 }
+void chain_hold_ack(unsigned endpoint, bool hold) { chain_hold_control(endpoint, XDEV_EXT_XD_ACK, hold); }
 /* Deliver again the bytes of the nth control message of @type that
  * @from_endpoint sent, into a posted control RX descriptor of the peer:
  * the real NHI completes it and real X4/X5 dispatch the duplicate. */

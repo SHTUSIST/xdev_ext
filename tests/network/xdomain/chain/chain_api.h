@@ -51,7 +51,10 @@ void chain_nvme_init_class(void);
 
 /* Composite world and scheduler (chain_boundary.c). */
 struct xdev_ext_mech_session;
-struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early; };
+/* window_tx/window_rx: groups each XDOMAIN stage may keep in flight, passed in
+ * bits 32..63 of the stage's arg1 (0 = the stage default, one group). */
+struct chain_link_config { uint32_t frame_size, nr_frames, depth, group_bytes; bool early;
+			   uint32_t window_tx, window_rx; };
 int chain_world(const struct chain_link_config *cfg);
 int chain_pump(unsigned budget, uint64_t advance_ns);
 uint64_t chain_link_token(unsigned endpoint);
@@ -60,6 +63,8 @@ struct xdev_ext_mech_session *chain_rx_session(int *err);
 int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t first_seq);
 void chain_hold_tx_completions(unsigned endpoint, bool hold);
 void chain_hold_ack(unsigned endpoint, bool hold);
+/* Hold @endpoint's outgoing control messages of one wire type on the wire. */
+void chain_hold_control(unsigned endpoint, unsigned type, bool hold);
 int chain_inject_stale_control(unsigned from_endpoint, unsigned type, uint64_t nth);
 unsigned chain_worker_of(struct xdev_ext_mech_session *s);
 

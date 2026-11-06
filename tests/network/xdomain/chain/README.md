@@ -102,6 +102,38 @@ XDOMAIN stages in EARLY mode: the receiver grants buffers ahead, paired by the
 batch key (both hosts START from the same first key), so the sender posts its
 TX descriptors without an RTS/CTS round trip.
 
+## In-flight window
+
+Each XDOMAIN stage takes a window W in bits 32..63 of its `arg1` (the low half
+stays the data channel). The five data cases above also run as `NAME_w2` and
+`NAME_w4` (and `NAME_w2_early`, `NAME_w4_early`): both stages get window N,
+depth max(2, N) and two frames per group, and every expectation is the same
+requirement scaled to that depth; with every ACK, TX completion or consumer
+held, the sender must fill its window. Further cases:
+
+| Case | Requirement |
+| --- | --- |
+| `window_fills_w2`, `window_fills_w4` | depth W+2, host 2's NVMe WRITE held: host 1 reaches exactly W groups in flight at its XDOMAIN stage and host 2 holds exactly W; group W+1 is not announced; all of this happens with no virtual time passing (no protocol, retry or worker timer); after the release every group arrives in order |
+| `window_waits_for_receiver` | sender window 4, receiver window 2: host 1 has in flight what host 2 holds plus one announced group (ordinary) or exactly what host 2 holds (EARLY, no grant yet for the next group) |
+| `window_refills_receiver` | host 2's data completions held while host 1 already announced group 2 (ordinary) or already waits for group 2's grant (EARLY); once released, group 1 moves on, and group 2 is posted at host 2 and then at host 1 in the same drain, without a timer |
+| `window_next_after_cts` | host 2's CTS held until host 1 read ahead into every batch: only group 1 is announced; once the CTS is processed host 1 fills its window in the same drain (ordinary only) |
+| `window_stop_unknown` | window 2, host 1's TX completions and host 2's ACKs held, STOP of host 1 with both groups in flight: past the 1 s stop grace neither group is reported delivered, no frame of either group returns to the pool or the application, not even after the held completions run late, and nothing is leased over retained bytes |
+| `window_withdrawn_head` | host 2 not started: host 1's announced group 1 is withdrawn at 15 s and refused; host 2 starts right after the refusal; host 2 must write nothing, host 1 posts no data and reports neither group delivered (ordinary only) |
+
+Every scheduler step checks: host 1 never has more groups in flight at its
+XDOMAIN stage than its window, host 2 never has more than one group in its RX
+stage (one posted group, version 1), and host 2 never holds more groups than
+its window. `finished()` also checks receive-side credit on the record of real
+data-ring posts: host 1 posts a group's data only after host 2 posted receive
+buffers for that group, and host 2 posts the next group's buffers only after
+every earlier buffer was filled.
+
+A window of 1 must behave exactly as no window: without `--case`, the runner
+runs each default case and its `NAME_w1` twin with `CHAIN_TRACE=1` and requires
+the same event lines (a worker event's function address, which ASLR moves,
+replaced by its order of first appearance); `w1_identity` in `result.json`
+records both hashes.
+
 ## Mutations
 
 Each mutant changes production or reference-program lines in the private copy
@@ -119,16 +151,27 @@ failures do not count.
 | `drain-in-completion-context` | the core continues an NVMe completion in the completion context | `chain_same_worker` |
 | `tx-wrong-frame` | TX leases swap the two frames of a group | `chain_same_worker` |
 | `dmabuf-lease-first-mapping` | (`--pool dmabuf`, set automatically) a host 1 lease uses the first attachment made, not its own device's | `chain_same_worker` |
+| `window-release-at-announce` | the XDOMAIN class lets the next group pass once the previous one is announced, not once its data post was accepted | `window_withdrawn_head` |
+| `window-bound-ignored` | the core no longer counts the window | `window_fills_w2` |
+| `window-rx-released` | RX batches are released like TX ones (a second batch enters the RX stage) | `window_fills_w2` |
+| `window-no-progress-kick` | no re-check of the ordered stage after a class pass | `window_next_after_cts` (also `window_refills_receiver`) |
+| `window-bind-ignored` | the class accepts the window but does not hand it to the core | `window_fills_w2` |
+| `stop-unknown-reused` | at link teardown a TX slot whose native completion is unknown is published as quiesced (existing rule) | `window_stop_unknown` |
+| `window-early-ready-without-grant` | an EARLY sender releases the next key before the receiver granted buffers for it, so its submit waits for the core retry timer | `window_refills_receiver_early` |
 
-## Observation reported, not asserted
+The existing mutants are also killed on the window variants
+(`--case NAME_w2`, `NAME_w4`, `NAME_w2_early`, `NAME_w4_early`).
 
-`chain_same_worker` prints `CHAIN_OBSERVE xdomain_groups_in_flight_max`. With
-the current core and class it is 1: the XDOMAIN class is `F_ORDERED` without
-`F_FIFO_ENQUEUE`, so `xdev_ext_mech_order_holds_ex()` keeps group N+1 parked
-at the XDOMAIN TX stage while group N is in flight there, and group N leaves
-that stage only after its ACK. The stack fixture's multiwindow case does not
-show this because its core is a stand-in. This affects throughput only; the
-cases do not assert it.
+## Observations
+
+`chain_same_worker` prints `CHAIN_OBSERVE xdomain_groups_in_flight_max` (RTS
+arrivals at host 2 minus ACK arrivals at host 1) and the peaks of groups in
+flight at host 1's XDOMAIN stage and held by host 2. Without a window (or with
+window 1) it is 1: the XDOMAIN class is `F_ORDERED`, so the next group waits
+at host 1's XDOMAIN stage until the previous group's ACK, and the next group
+enters host 2's RX stage only when the previous one ended its NVMe WRITE. The
+cases assert it never exceeds the window; the `window_*` cases assert that it
+reaches the window. Nothing here is a performance number.
 
 ## Limits
 

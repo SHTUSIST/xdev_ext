@@ -288,6 +288,14 @@ struct xdev_ext_mech_stage {
 	u32 index;			/* position in the chain */
 	/* XDEV_EXT_MECH_STAGE_F_POLL accepted: set by the core before ->bind */
 	bool poll;
+	/*
+	 * Class ->bind, for an XDEV_EXT_MECH_CLASS_F_ORDERED stage: up to this
+	 * many batches may be at or past the stage at once (0 or 1: one, the
+	 * plain ordered rule). A later key still enters only after every
+	 * smaller key entered, and passes a smaller key still in flight at the
+	 * stage only once ->order_ready() reports that key's place fixed.
+	 */
+	u32 order_window;
 	struct xdev_ext_mech_stage_caps caps; /* CREATE record, OP_STAGE_CAPS */
  /* Synchronous CREATE_REPORT observations; never an object query handle. */
  bool create_reporting;
@@ -386,6 +394,14 @@ struct xdev_ext_mech_class_ops {
 	 * member refuses in ->bind (-EOPNOTSUPP) a device it cannot poll.
 	 */
 	int (*poll)(struct xdev_ext_mech_stage *st);
+	/*
+	 * Optional, for a stage with st->order_window > 1; session worker, no
+	 * session lock held, never sleeps.  True once @b, in flight at @st,
+	 * holds its final place in the native order, so a later key may be
+	 * submitted behind it; false while it could still be withdrawn or
+	 * refused.  Without this member a key in flight holds the next one.
+	 */
+	bool (*order_ready)(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b);
 	/* Optional family hooks; checked at class registration. */
 	union {
 		const struct xdev_ext_family_hooks_hdr *hdr;

@@ -472,6 +472,44 @@ static inline bool xdev_ext_mech_order_holds_ex(__u64 key, __u32 stage,
 	}
 }
 
+/*
+ * An ordered stage with a window (xdev_ext_mech_stage.order_window > 1):
+ * what an earlier key @other means for @key entering @stage.  HOLD: it has
+ * not been submitted at the stage yet, so @key waits (key order at the stage
+ * is kept).  AT: in flight at the stage; @key may pass it once its class
+ * fixed its place.  PAST: it was submitted there and is further down the
+ * chain.  AT and PAST both occupy the window.  FREE: a later key or a batch
+ * that has ended.
+ */
+enum xdev_ext_mech_order_role {
+	XDEV_EXT_MECH_ORDER_FREE,
+	XDEV_EXT_MECH_ORDER_HOLD,
+	XDEV_EXT_MECH_ORDER_AT,
+	XDEV_EXT_MECH_ORDER_PAST,
+};
+
+static inline int xdev_ext_mech_order_window_role(__u64 key, __u32 stage,
+					    __u64 other_key,
+					    const struct xdev_ext_mech_bstate *other)
+{
+	if (other_key >= key)
+		return XDEV_EXT_MECH_ORDER_FREE;
+	switch (other->state) {
+	case XDEV_EXT_MECH_B_OPEN:
+		return XDEV_EXT_MECH_ORDER_HOLD;
+	case XDEV_EXT_MECH_B_READY:
+		return other->stage <= stage ? XDEV_EXT_MECH_ORDER_HOLD :
+					       XDEV_EXT_MECH_ORDER_PAST;
+	case XDEV_EXT_MECH_B_IN_FLIGHT:
+		if (other->stage < stage)
+			return XDEV_EXT_MECH_ORDER_HOLD;
+		return other->stage == stage ? XDEV_EXT_MECH_ORDER_AT :
+					       XDEV_EXT_MECH_ORDER_PAST;
+	default:
+		return XDEV_EXT_MECH_ORDER_FREE;
+	}
+}
+
 static inline bool xdev_ext_mech_order_holds(__u64 key, __u32 stage,
 					__u64 other_key,
 					const struct xdev_ext_mech_bstate *other)

@@ -98,6 +98,27 @@ pre-CTS FAIL with zero credit never increases peer credit. Reliable entries
 count logical layout segments, while RTS and native posts count the actual
 4096-byte NHI elements (at most 64); these counts are deliberately distinct.
 
+A stage's in-flight window W comes from bits 32..63 of `arg1` (0 or 1: one
+group, the behaviour without a window; at most `XDEV_EXT_XDOMAIN_MAX_WINDOW`,
+32); the device layer sees only the channel. The class hands W to the core
+(`order_window`) and implements `order_ready`. A TX group is ready, and the
+next key may be announced behind it, once its data post was accepted (after
+the CTS, or with an EARLY grant): its group number and data sequence were
+taken in key order and the peer posted its buffers. Before that the
+announcement can still be withdrawn or refused, and a later group already
+announced would take the receive batch it leaves (an RTS goes to the oldest
+ARMED batch). RX batches are never ready: one RX batch at a time is in the RX
+stage, so the single posted group above and the binding of each RTS to the
+next receive batch in key order are unchanged, while up to W received groups
+are in the RX stage or its consumer (their ACK or FAIL follows the end of
+their chain). An EARLY sender also waits for the next group's grant before
+releasing the next key, so that key is not bounced to the core retry timer.
+Give the receiving stage a window at least as large as the sending stage's:
+otherwise the sender's next announced group waits at the receiver until the
+receiver ends a group, and one that waits past the 15 s withdrawal point is
+withdrawn and stops the sending session (no group is misplaced). The wire
+format is unchanged; several data channels are a separate change.
+
 Startup data verification requires LOGIN protocol version 3 and the mandatory
 DATA_CHALLENGE capability. Version 2 peers are refused. The existing link `up`
 state reports control login readiness; it does not report data verification.

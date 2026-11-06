@@ -886,15 +886,25 @@ struct xdev_ext_mech_stats {
 /*
  * XDOMAIN stages require POOL_PEER. fd is the xdev_ext_peer control file;
  * arg0 is the never-reused link token from the service's xdev_ext_link sysfs
- * attribute, and arg1 is its data channel (0 in this version). TO_DEVICE
- * sends and FROM_DEVICE receives device-memory leases for the NHI. Protocol
- * messages use a separate host-memory control ring. Local TX completion
- * proves only that the local NHI finished reading; REMOTE_ACKED means the
- * receiver's chain finished the group.
+ * attribute, and the low 32 bits of arg1 are its data channel (0 in this
+ * version). Bits 32..63 of arg1 are the stage's in-flight window W: a
+ * TO_DEVICE stage keeps at most W groups of the session announced and not
+ * finished, and a FROM_DEVICE stage at most W groups between entering it and
+ * the end of their chain on this host (the ACK or FAIL follows that end).
+ * 0 and 1 mean one group, as before the window existed; at most
+ * XDEV_EXT_XDOMAIN_MAX_WINDOW. Groups still leave in key order, data is
+ * still posted only after the peer posted buffers for that group, and the
+ * receiver still posts one group's buffers at a time.
+ * TO_DEVICE sends and FROM_DEVICE receives device-memory leases for the NHI.
+ * Protocol messages use a separate host-memory control ring. Local TX
+ * completion proves only that the local NHI finished reading; REMOTE_ACKED
+ * means the receiver's chain finished the group.
  */
 #define XDEV_EXT_XDOMAIN_F_ALLOW_UNVERIFIED (1U << 0)	/* CAP_SYS_ADMIN: bind without a judged P2P path */
 #define XDEV_EXT_XDOMAIN_F_EARLY (1U << 1)
 #define XDEV_EXT_XDOMAIN_KNOWN_FLAGS	0x00000003U
+#define XDEV_EXT_XDOMAIN_WINDOW_SHIFT	32	/* arg1 = channel | (__u64)W << this */
+#define XDEV_EXT_XDOMAIN_MAX_WINDOW	32U	/* version 1 announcement window (XDEV_EXT_REL_MAX_WINDOW) */
 #define XDEV_EXT_XDOMAIN_MAX_FRAME	4096U	/* bytes of one NHI ring frame */
 #define XDEV_EXT_XDOMAIN_MAX_ELEMS	64U	/* NHI frames per batch */
 #define XDEV_EXT_XDOMAIN_TAG_LEN	24U
