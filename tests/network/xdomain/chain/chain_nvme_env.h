@@ -62,11 +62,38 @@ struct cdev { int unused; };
 struct inode { struct cdev *i_cdev; };
 struct io_uring_cmd;
 struct file_operations {
+	struct module *owner;
+	int (*release)(struct inode *, struct file *);
 	int (*uring_cmd)(struct io_uring_cmd *, unsigned int);
 };
 struct file { const struct file_operations *f_op; struct inode *inode; fmode_t f_mode;
-	unsigned endpoint; };
+	void *private_data; unsigned endpoint; };
 static inline struct inode *file_inode(const struct file *f) { return f->inode; }
+
+/*
+ * LBA window handles (NVME_IOCTL_XDEV_EXT_WINDOW, nvme_xdev_ext_window_ioctl)
+ * are outside this composition: no case issues one, and a stage file here is
+ * always the namespace file itself, so the class's window target/admit checks
+ * see a non-handle file.  The file and fd services only that ioctl uses must
+ * therefore never run; tests/storage/nvme/window_handle covers the handle.
+ */
+#ifndef O_RDONLY
+#define O_RDONLY 00
+#define O_WRONLY 01
+#define O_RDWR 02
+#endif
+#ifndef O_CLOEXEC
+#define O_CLOEXEC 02000000
+#endif
+static inline unsigned long copy_from_user(void *to, const void __user *from, unsigned long n)
+{ (void)to; (void)from; (void)n; abort(); }
+static inline struct file *get_file(struct file *f) { (void)f; abort(); }
+static inline struct file *anon_inode_getfile(const char *name, const struct file_operations *fops,
+					      void *priv, int flags)
+{ (void)name; (void)fops; (void)priv; (void)flags; abort(); }
+static inline int get_unused_fd_flags(unsigned flags) { (void)flags; abort(); }
+static inline void put_unused_fd(int fd) { (void)fd; abort(); }
+static inline void fd_install(int fd, struct file *file) { (void)fd; (void)file; abort(); }
 
 struct bio_vec { struct page *bv_page; unsigned bv_len, bv_offset; };
 struct bvec_iter { sector_t bi_sector; unsigned bi_size; };
