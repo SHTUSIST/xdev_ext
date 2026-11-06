@@ -504,7 +504,10 @@ struct xdev_ext_net_rx_mech_cqe {
  * TO_DEVICE, fd from XDEV_EXT_MECH_OP_USER_STAGE, flags 0 or VARLEN, arg0
  * the per-batch deadline in ms (1..XDEV_EXT_USER_DEADLINE_MAX_MS), arg1 the
  * exact per-frame length change as a two's complement __s64 (|change| <=
- * layout.frame_size), 0 with VARLEN (any length 1..capacity).
+ * layout.frame_size), 0 with VARLEN (any length 1..capacity). STRICT_ASYNC
+ * (arg1 0, no VARLEN) is for a device owner such as a GPU kernel: frames
+ * return only on its status-0 completion, else stay isolated; PEER pools and
+ * POLL require it.
  */
 #define XDEV_EXT_USER_F_VARLEN		(1U << 0)
 #define XDEV_EXT_USER_F_STRICT_ASYNC	(1U << 1)

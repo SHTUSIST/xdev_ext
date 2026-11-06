@@ -38,9 +38,10 @@ Stage description
   CREATE with the same fd is ``-EBUSY``, also after the first session ended
   and also when the first CREATE failed after binding it.
 ``flags``
-  0, or ``XDEV_EXT_USER_F_VARLEN``. Any other bit is ``-EINVAL``.
-  ``XDEV_EXT_MECH_STAGE_F_POLL`` is ``-EOPNOTSUPP``: the class has no
-  ``->poll`` (section "Polling"). ``XDEV_EXT_MECH_STAGE_F_FANOUT`` is
+  0, ``XDEV_EXT_USER_F_VARLEN``, or ``XDEV_EXT_USER_F_STRICT_ASYNC`` (section
+  "Strict mode"). Any other bit is ``-EINVAL``.
+  ``XDEV_EXT_MECH_STAGE_F_POLL`` is ``-EOPNOTSUPP`` without strict mode
+  (section "Polling"). ``XDEV_EXT_MECH_STAGE_F_FANOUT`` is
   ``-EINVAL``, as for every stage that is not a pure consumer.
 ``arg0``
   The deadline of every batch at this stage, in milliseconds, from 1 to
@@ -56,9 +57,8 @@ Stage description
 
 CREATE also requires, with ``-EOPNOTSUPP`` otherwise:
 
-* a pool with a CPU mapping (``IOU_UMEM`` or ``XSK``). A device-memory
-  (``PEER``) pool is refused for every stage class whose peer capability is
-  empty, USER included (``xdev_ext_mech_peer_dirs()``);
+* a pool with a CPU mapping (``IOU_UMEM`` or ``XSK``), except in strict mode,
+  which also accepts a device-memory (``PEER``) pool (section "Strict mode");
 * when ``D != 0`` or ``XDEV_EXT_USER_F_VARLEN`` is set, no later NVMe or AF_XDP
   stage before a transform stage. Both write fixed groups; this is the same
   rule the CPU class applies to a length-changing transform. At run time the
@@ -236,6 +236,68 @@ dropped (the frames become FREE), and the frames go back to the pool, or to
 user space at the end of a ``USER_FRAMES`` run. A completion is never retried:
 the user thread may already have modified the payload.
 
+Strict mode: external completion and device memory
+--------------------------------------------------
+
+``XDEV_EXT_USER_F_STRICT_ASYNC`` is for an owner that is a device, for
+example a GPU kernel that the CUDA library (``src/compute/cuda``) launches
+after its own work in the same stream to write the completion entry. The
+rings and the checks above stay the same. Strict mode requires ``arg1`` 0
+and no ``XDEV_EXT_USER_F_VARLEN`` (``-EOPNOTSUPP``): output lengths equal
+input lengths. What changes is when a batch may leave the stage:
+
+* A held batch ends only on a status-0 completion entry for its slot and
+  ticket, which returns its frames (the batch result is 0, ``-EPROTO`` for a
+  wrong length, or the region's error below), or as UNKNOWN: a nonzero
+  status, the release of the user stage fd (``-EPIPE``) or a corrupt
+  completion ring. UNKNOWN stops the session and isolates the batch's frames
+  for good.
+* A batch past its deadline stops the session with ``-ETIMEDOUT``; neither
+  that nor STOP cancels a held batch. The kernel sets
+  ``XDEV_EXT_USER_K_DRAINING`` and gives every held batch
+  ``XDEV_EXT_USER_STRICT_GRACE_MS`` (1000 ms) more. A status-0 entry within
+  that time returns the frames and ends the batch with the stop reason; no
+  entry ends it as UNKNOWN (``-ETIMEDOUT``).
+* Unbind is refused while the stage holds a batch, so a released session
+  keeps its pool and the pool's files until every frame has come back.
+* ``XDEV_EXT_MECH_STAGE_F_POLL`` is accepted: the session worker reaps the
+  completion ring by polling, so a device owner never calls
+  ``XDEV_EXT_USER_IOC_KICK``.
+* A ``PEER`` pool is accepted. ``umem_addr`` is then an offset in the pool's
+  device allocation, not a CPU address. Before a batch is handed out, and
+  again when its status-0 entry is reaped, the kernel checks the
+  allocation's region: invalidated, quarantined, stale by the provider's
+  answer, or of another generation than the one CREATE captured is
+  ``-ESTALE``. A refused hand-out isolates nothing; a refused reap returns
+  the frames and ends the batch with that error.
+* A user stage fd created with ``XDEV_EXT_USER_CREATE_F_EXTERNAL_CTL`` can be
+  attached (``XDEV_EXT_USER_IOC_CTL_ATTACH``) before CREATE and detached
+  (``XDEV_EXT_USER_IOC_CTL_DETACH``) after unbind, so the control region
+  stays alive for an owner that outlives the fd. An attached object binds
+  only a strict stage.
+
+Stage capabilities
+------------------
+
+``XDEV_EXT_MECH_OP_STAGE_CAPS`` reports for a USER stage:
+
+``producer_visibility``
+  ``XDEV_EXT_CAP_OWNER_ASSERTED``: the next stage gets the frames only after
+  the owner's completion entry for them. Whether the bytes are visible to
+  the next device by then is the owner's claim (for a GPU, the CUDA
+  library's flush and release), which the kernel cannot check.
+``last_use_quiescence`` on a ``PEER`` pool
+  ``XDEV_EXT_CAP_OWNER_ASSERTED``: frames come back only on that entry and
+  otherwise stay isolated; the kernel cannot check that the device stopped
+  using them.
+``invalidation`` on a ``PEER`` pool
+  ``XDEV_EXT_CAP_ESTABLISHED``: the region check above, at hand-out and at
+  the completion entry. Access already granted is not revoked, and an
+  invalidation after the reap is seen only by a later stage's lease.
+
+On host pages ``last_use_quiescence`` and ``invalidation`` are
+``XDEV_EXT_CAP_NOT_APPLICABLE``. None of these values is a hardware proof.
+
 Lifecycle and frame ownership
 -----------------------------
 
@@ -254,7 +316,8 @@ a fixed CPU transform (``xdev_ext_mech_stage_role()``):
   stage group (``xdev_ext_mech_life_republish()``), as for the CPU class; the
   next stage then runs;
 * on failure or cancellation the claim is dropped as a failed put and the
-  frames become FREE.
+  frames become FREE; in strict mode an UNKNOWN batch is isolated instead
+  (section "Strict mode").
 
 The batches the user thread holds are recorded only in the class's own table
 of held batches, one entry per batch slot with the batch, its ticket and its
@@ -267,8 +330,9 @@ Deadline and cancellation
 
 At submit the class records ``deadline = jiffies + msecs_to_jiffies(arg0)``
 for the batch. ``->progress`` returns the time to the earliest deadline of a
-held batch, so the session worker runs it again then. A held batch is
-cancelled (``xdev_ext_mech_batch_complete_cancelled()``) when:
+held batch, so the session worker runs it again then. Without strict mode
+(section "Strict mode") a held batch is cancelled
+(``xdev_ext_mech_batch_complete_cancelled()``) when:
 
 * its deadline passed: error ``-ETIMEDOUT``, and STATS counts one
   ``timeouts`` (a batch that never got a place in a full ready ring fails the
@@ -294,8 +358,9 @@ still running on the batch. The ticket checks above only cover the moment a
 batch is taken and the moment its lengths are written: a deadline that fires
 while the user thread is in the middle of transforming a batch still lets its
 later payload writes reach frames that returned to the pool and were reused
-by a later batch. This is safe for the kernel: a USER stage refuses ``PEER``
-pools, so the frames are always the application's own UMEM pages, pinned by
+by a later batch. This is safe for the kernel: without strict mode a USER
+stage refuses ``PEER`` pools, so the frames are always the application's own
+UMEM pages, pinned by
 the pool, and no device and no kernel object depends on their content. It
 can corrupt the payload of a later batch. The application must therefore not
 write a batch's payload after its deadline, and must stop touching a batch
@@ -342,11 +407,13 @@ the kernel, so a program can pass a per-batch choice to the user thread.
 Polling
 -------
 
-The USER class has no ``->poll``, so ``XDEV_EXT_MECH_STAGE_F_POLL`` on a USER
-stage fails CREATE with ``-EOPNOTSUPP`` (``xdev_ext-poll.rst``). The poll pass
-re-queues itself with delay 0 for as long as any batch is in flight, which
-would keep a CPU busy for the whole time the user thread computes. The kick
-ioctl and the deadline timer cover completion reaping instead.
+Without strict mode, ``XDEV_EXT_MECH_STAGE_F_POLL`` on a USER stage fails
+CREATE with ``-EOPNOTSUPP`` (``xdev_ext-poll.rst``). The poll pass re-queues
+itself with delay 0 for as long as any batch is in flight, which would keep a
+CPU busy for the whole time the user thread computes. The kick ioctl and the
+deadline timer cover completion reaping instead. A strict stage accepts
+POLL (section "Strict mode"): its owner is a device that writes completion
+entries but does not call the kick ioctl.
 
 Limits and what is not provided
 -------------------------------
