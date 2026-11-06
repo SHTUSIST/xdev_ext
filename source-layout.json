@@ -2444,6 +2444,14 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/Makefile",
+      "logical_path": "tests/eval/kv_restore/Makefile"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_restore.c",
+      "logical_path": "tests/eval/kv_restore/kv_restore.c"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/kv_nvme_read.bpf.c",
       "logical_path": "tests/eval/kv_restore/kv_nvme_read.bpf.c"
     },
