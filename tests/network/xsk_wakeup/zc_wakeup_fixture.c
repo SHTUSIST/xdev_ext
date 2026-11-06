@@ -5,8 +5,9 @@
  * production.c.inc and production_journal.h hold the verbatim production
  * bodies the pool_dma adapter extracts (submit, kernel source peek/batch,
  * completion, cancellation, stop, the wakeup helper); wakeup_extra.c.inc adds
- * xsk_xdev_ext_mech_link_up() and xsk_rel_wakeup().  Only the device is
- * simulated, with the early returns of the pinned drivers:
+ * xsk_xdev_ext_mech_link_up() (netdev notifier side), xsk_mech_zc_rewake()
+ * (session worker side) and xsk_rel_wakeup().  Only the device and the session
+ * worker kick are simulated, with the early returns of the pinned drivers:
  *   igb  igb_xsk_wakeup(): -ENETDOWN when down, -EINVAL without XDP, else 0;
  *        igb_xmit_zc() returns before peeking without carrier.
  *   ice  ice_xsk_wakeup(): -ENETDOWN when down or without carrier, -EINVAL
@@ -18,6 +19,24 @@
 static bool link_running = true, link_carrier = true;
 static bool netif_running(const struct net_device *d) { (void)d; return link_running; }
 static bool netif_carrier_ok(const struct net_device *d) { (void)d; return link_carrier; }
+/* Session core boundary: the worker kick and STOP admission. */
+static int kicks;
+static bool session_admits = true;
+static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st)
+{
+	(void)st;
+	REQUIRE("kick_outside_provider_lock", !lock_depth);
+	kicks++;
+	ev("K ");
+}
+static bool xdev_ext_mech_session_admits(struct xdev_ext_mech_session *s)
+{
+	(void)s;
+	return session_admits;
+}
+#ifndef smp_load_acquire
+#define smp_load_acquire(p) (*(p))
+#endif
 static void boundary_raw(struct xsk_buff_pool *, u64);
 static dma_addr_t xp_raw_get_dma(struct xsk_buff_pool *, u64);
 static void xp_dma_sync_for_device(struct xsk_buff_pool *, dma_addr_t, size_t);
@@ -92,7 +111,8 @@ static void reset(const char *name, int kind)
 	memset(tags, 0, sizeof(tags));
 	drv_kind = kind;
 	drv_xdp = true;
-	drv_wakes = drv_taken = 0;
+	drv_wakes = drv_taken = kicks = 0;
+	session_admits = true;
 	link_running = link_carrier = true;
 	xp.dev = &nic;
 	xp.dma_pages = malloc(sizeof(maps));
@@ -160,12 +180,25 @@ static void reset(const char *name, int kind)
 	observed_stage = &xst;
 }
 
-/* xsk_notifier(): the link-up hook runs with xs->mutex held. */
+/*
+ * xsk_notifier() runs the hook under RCU only (the netdev instance lock may be
+ * held); it may flag the provider and kick the worker but never wake.
+ */
 static void link_up(void)
 {
-	mutex_lock(&xs.mutex);
+	int before = drv_wakes;
+
+	REQUIRE("notifier_holds_no_socket_mutex", !mutex_depth && !lock_depth);
 	xsk_xdev_ext_mech_link_up(&xs);
-	mutex_unlock(&xs.mutex);
+	REQUIRE("notifier_never_wakes_the_driver", drv_wakes == before && !mutex_depth);
+}
+
+/* The session worker's ->progress pass after the kick. */
+static void worker(void)
+{
+	REQUIRE("worker_holds_no_lock", !mutex_depth && !lock_depth);
+	xsk_mech_zc_rewake(&st);
+	REQUIRE("worker_releases_locks", !mutex_depth && !lock_depth);
 }
 
 static int probe(void)
@@ -188,14 +221,19 @@ static void igb_dropped_wakeup_is_repeated_at_link_up(void)
 	      p.ring.prod == 3 && p.ring.issued == 0 && !p.stopped && !dead_status && !callbacks);
 	link_carrier = true;
 	link_up();
+	CHECK("link_up_kicks_worker", kicks == 1 && drv_wakes == 1);
+	worker();
 	CHECK("link_up_wakes_once", drv_wakes == 2);
 	CHECK("link_up_drains_source", drv_taken == 3 && p.ring.issued == 3 && !p.stopped &&
 	      !dead_status);
+	worker();
+	CHECK("rewake_consumed", drv_wakes == 2);
 	xsk_tx_completed(&xp, 3);
 	CHECK("link_up_batch_completes", callbacks == 1 && complete_status == 0 && p.ring.cons == 3 &&
 	      !seq_callbacks && !cancel_callbacks);
 	link_up();
-	CHECK("drained_source_no_wakeup", drv_wakes == 2);
+	worker();
+	CHECK("drained_source_no_wakeup", drv_wakes == 2 && kicks == 1);
 }
 
 /* ice refuses the wakeup outright while the carrier is down. */
@@ -210,6 +248,7 @@ static void ice_link_down_refusal_waits_for_link_up(void)
 	      !p.ring.fatal && tags[0] == 77 && tags[2] == 77);
 	link_carrier = true;
 	link_up();
+	worker();
 	CHECK("link_up_drains_source", drv_wakes == 2 && drv_taken == 3 && p.ring.issued == 3);
 	xsk_tx_completed(&xp, 3);
 	CHECK("link_up_batch_completes", callbacks == 1 && complete_status == 0 && !cancel_callbacks);
@@ -225,6 +264,7 @@ static void interface_down_refusal_waits_for_link_up(void)
 	      p.ring.prod == 3 && p.ring.issued == 0);
 	link_running = link_carrier = true;
 	link_up();
+	worker();
 	CHECK("interface_up_drains_source", drv_wakes == 2 && drv_taken == 3);
 }
 
@@ -264,18 +304,20 @@ static void create_probe_refuses_only_configuration_faults(void)
 	CHECK("probe_interface_down_accepted", probe() == 0);
 }
 
-/* The link-up hook wakes only for descriptors still in a live source. */
+/* The link-up hook asks for a wakeup only for descriptors still in a live source. */
 static void link_up_wakes_only_waiting_live_sources(void)
 {
 	reset("link_up_empty", DRV_IGB);
 	link_up();
-	CHECK("empty_source_no_wakeup", drv_wakes == 0 && !dead_status);
+	worker();
+	CHECK("empty_source_no_wakeup", drv_wakes == 0 && !kicks && !dead_status);
 
 	reset("link_up_already_taken", DRV_IGB);
 	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
 	CHECK("taken_at_submit", drv_taken == 3 && drv_wakes == 1);
 	link_up();
-	CHECK("taken_source_no_wakeup", drv_wakes == 1);
+	worker();
+	CHECK("taken_source_no_wakeup", drv_wakes == 1 && !kicks);
 
 	reset("link_up_stopped", DRV_IGB);
 	link_carrier = false;
@@ -283,7 +325,8 @@ static void link_up_wakes_only_waiting_live_sources(void)
 	link_carrier = true;
 	p.stopped = true;
 	link_up();
-	CHECK("stopped_source_no_wakeup", drv_wakes == 1 && !dead_status);
+	worker();
+	CHECK("stopped_source_no_wakeup", drv_wakes == 1 && !kicks && !dead_status);
 
 	reset("link_up_dead_stage", DRV_IGB);
 	link_carrier = false;
@@ -291,6 +334,7 @@ static void link_up_wakes_only_waiting_live_sources(void)
 	link_carrier = true;
 	xst.dead = true;
 	link_up();
+	worker();
 	CHECK("dead_stage_no_wakeup", drv_wakes == 1);
 
 	reset("link_up_copy_mode", DRV_IGB);
@@ -299,23 +343,53 @@ static void link_up_wakes_only_waiting_live_sources(void)
 	link_carrier = true;
 	xs.zc = false;
 	link_up();
-	CHECK("copy_mode_no_wakeup", drv_wakes == 1);
+	worker();
+	CHECK("copy_mode_no_wakeup", drv_wakes == 1 && !kicks);
 
 	reset("link_up_unbound", DRV_IGB);
 	link_carrier = false;
 	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
 	link_carrier = true;
-	xs.state = 0;
 	link_up();
+	xs.state = 0;
+	worker();
 	CHECK("unbound_no_wakeup", drv_wakes == 1);
 
-	reset("link_up_no_tx_stage", DRV_IGB);
+	reset("link_up_stopping", DRV_IGB);
+	link_carrier = false;
+	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
+	link_carrier = true;
+	link_up();
+	session_admits = false;
+	worker();
+	CHECK("stopping_session_no_wakeup", drv_wakes == 1 && !dead_status);
+	session_admits = true;
+	worker();
+	CHECK("stopping_request_dropped", drv_wakes == 1);
+
+	reset("link_up_no_stage", DRV_IGB);
 	link_carrier = false;
 	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
 	link_carrier = true;
 	xs.xdev_ext_mech_tx = NULL;
 	link_up();
-	CHECK("no_tx_stage_no_wakeup", drv_wakes == 1);
+	CHECK("no_stage_no_kick", !kicks);
+}
+
+/* A reliable receiver's ACK controls share the source but the socket has no TX stage. */
+static void receiver_controls_are_woken_at_link_up(void)
+{
+	reset("receiver_controls", DRV_IGB);
+	link_carrier = false;
+	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
+	CHECK("controls_wait", p.ring.prod == 3 && p.ring.issued == 0);
+	xs.xdev_ext_mech_tx = NULL;
+	xs.xdev_ext_mech_rx = &st;
+	link_carrier = true;
+	link_up();
+	CHECK("receiver_link_up_kicks_worker", kicks == 1);
+	worker();
+	CHECK("receiver_controls_drained", drv_wakes == 2 && drv_taken == 3 && p.ring.issued == 3);
 }
 
 /* A refusal the link no longer explains stops the stage at link up. */
@@ -327,7 +401,10 @@ static void link_up_configuration_refusal_stops_stage(void)
 	link_carrier = true;
 	drv_xdp = false;
 	link_up();
-	CHECK("link_up_refusal_stops_stage", drv_wakes == 2 && dead_status == -EINVAL);
+	worker();
+	CHECK("link_up_refusal_stops_stage", drv_wakes == 2 && dead_status == -EINVAL && p.stopped);
+	CHECK("link_up_refusal_cancels_untaken", callbacks == 1 && cancel_callbacks == 1 &&
+	      !seq_callbacks && p.ring.native_count == 0);
 }
 
 /* The reliable transport's wakeup follows the same rule. */
@@ -369,6 +446,7 @@ int main(void)
 	configuration_refusal_stays_fatal();
 	create_probe_refuses_only_configuration_faults();
 	link_up_wakes_only_waiting_live_sources();
+	receiver_controls_are_woken_at_link_up();
 	link_up_configuration_refusal_stops_stage();
 	reliable_wakeup_follows_link_rule();
 	printf("RESULT assertions_failed=%d\n", failures);

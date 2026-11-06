@@ -2422,21 +2422,23 @@ static int xsk_notifier(struct notifier_block *this,
 		break;
 	case NETDEV_UP:
 	case NETDEV_CHANGE:
-		/* A mechanism TX source may wait for the link to carry traffic. */
+		/*
+		 * A mechanism TX source may wait for the link to carry traffic.
+		 * Ops-locked devices deliver these under the instance lock, which
+		 * xsk_bind() takes inside xs->mutex: walk the RCU list only.
+		 */
 		if (!netif_running(dev) || !netif_carrier_ok(dev))
 			break;
-		mutex_lock(&net->xdp.lock);
-		sk_for_each(sk, &net->xdp.list) {
+		rcu_read_lock();
+		sk_for_each_rcu(sk, &net->xdp.list) {
 			struct xdp_sock *xs = xdp_sk(sk);
 
 			/* xsk_bind() sets xs->dev under RTNL, which is held here. */
-			if (xs->dev != dev)
-				continue;
-			mutex_lock(&xs->mutex);
-			xsk_xdev_ext_mech_link_up(xs);
-			mutex_unlock(&xs->mutex);
+			if (READ_ONCE(xs->dev) == dev &&
+			    READ_ONCE(xs->state) == XSK_BOUND)
+				xsk_xdev_ext_mech_link_up(xs);
 		}
-		mutex_unlock(&net->xdp.lock);
+		rcu_read_unlock();
 		break;
 	}
 	return NOTIFY_DONE;

@@ -5,8 +5,9 @@
 A driver may take a TX wakeup without draining the kernel source while its
 link is down (igb, ice) or refuse it with -ENETDOWN (ice, a down interface);
 the mechanism must wake it again once the link is up, without changing
-custody.  CREATE must refuse a queue whose driver refuses the wakeup for a
-configuration reason.  The production submit, kernel-source peek, completion,
+custody: the netdev notifier only flags the provider and kicks the session
+worker, which wakes the queue.  CREATE must refuse a transmit-only queue whose
+driver refuses the wakeup for a configuration reason.  The production submit, kernel-source peek, completion,
 cancellation and wakeup bodies run verbatim (extracted by the pool_dma
 adapter); only the device is simulated.  Call-site checks cover bind, the
 reliable transport and the xsk netdev notifier.  Each mutation reverts one
@@ -44,6 +45,7 @@ def build_and_run(root, work, mutate=None):
     rel = (root / REL).read_text()
     (work / 'wakeup_extra.c.inc').write_text(
         adapter.function(mech, 'xsk_xdev_ext_mech_link_up') + '\n\n' +
+        adapter.function(mech, 'xsk_mech_zc_rewake') + '\n\n' +
         adapter.function(rel, 'xsk_rel_wakeup') + '\n')
     shutil.copy2(POOL / 'os_boundary.h', work / 'os_boundary.h')
     shutil.copy2(HERE / 'zc_wakeup_fixture.c', work / 'zc_wakeup_fixture.c')
@@ -72,9 +74,10 @@ def build_and_run(root, work, mutate=None):
 
 def bind_problems(mech):
     body = adapter.function(mech, 'xsk_xdev_ext_mech_bind')
-    probe = re.search(r'if \(!err && tx && xs->zc\)\s*err = xsk_mech_zc_wake\(xs\);', body)
+    probe = re.search(r'if \(!err && tx && xs->zc &&\s*!\(u->flags & XDEV_EXT_AFXDP_F_RELIABLE\)\)\s*'
+                      r'err = xsk_mech_zc_wake\(xs\);', body)
     if not probe:
-        return ['CREATE does not probe the zero-copy TX queue']
+        return ['CREATE does not probe the transmit-only zero-copy TX queue']
     order = [('mutex_lock(&xs->mutex)', 'before'), ('xsk_xdev_ext_mech_stage_check(', 'before'),
              ('xsk_rel_bind(st, u)', 'after'), ('smp_store_release(&xs->xdev_ext_mech_tx', 'after'),
              ('mutex_unlock(&xs->mutex)', 'after')]
@@ -103,7 +106,7 @@ def wakeup_site_problems(mech, rel):
     return problems
 
 
-def notifier_problems(xsk, header):
+def notifier_problems(xsk, header, mech):
     problems = []
     body = adapter.function(xsk, 'xsk_notifier')
     case = re.search(r'case NETDEV_UP:\s*case NETDEV_CHANGE:(.*?)(?=\n\tcase |\n\t}\n)', body, re.S)
@@ -112,13 +115,23 @@ def notifier_problems(xsk, header):
     section = case.group(1)
     if not re.search(r'^\s*if \(!netif_running\(dev\) \|\| !netif_carrier_ok\(dev\)\)\s*break;', section, re.M):
         problems.append('link-up hook not limited to a running device with carrier')
-    lock, hook, unlock = (section.find('mutex_lock(&xs->mutex)'),
-                          section.find('xsk_xdev_ext_mech_link_up(xs)'),
-                          section.rfind('mutex_unlock(&xs->mutex)'))
-    if not (0 <= lock < hook < unlock):
-        problems.append('link-up hook does not run under xs->mutex')
-    if 'mutex_lock(&net->xdp.lock)' not in section:
-        problems.append('socket list walked without net->xdp.lock')
+    # The netdev instance lock may be held here: no mutex, no driver call.
+    if re.search(r'mutex_lock|ndo_xsk_wakeup|xsk_mech_zc_wake', section):
+        problems.append('link-up notifier takes a mutex or wakes the driver itself')
+    lock, walk, hook, unlock = (section.find('rcu_read_lock()'),
+                                section.find('sk_for_each_rcu(sk, &net->xdp.list)'),
+                                section.find('xsk_xdev_ext_mech_link_up(xs)'),
+                                section.find('rcu_read_unlock()'))
+    if not (0 <= lock < walk < hook < unlock):
+        problems.append('socket list not walked under RCU around the link-up hook')
+    hook_body = adapter.function(mech, 'xsk_xdev_ext_mech_link_up')
+    if re.search(r'mutex_lock|ndo_xsk_wakeup|xsk_mech_zc_wake\(', hook_body):
+        problems.append('link-up hook wakes the driver in notifier context')
+    if 'xdev_ext_mech_stage_kick(st)' not in hook_body or 'xdev_ext_mech_rx' not in hook_body:
+        problems.append('link-up hook does not kick the worker for a TX or reliable RX stage')
+    progress = adapter.function(mech, 'xsk_mech_progress')
+    if not re.match(r'[^{]*\{\s*(?:[^;{}]*;\s*)*?xsk_mech_zc_rewake\(st\);', progress):
+        problems.append('session worker progress does not run the link-up wakeup first')
     if not re.search(r'#ifdef CONFIG_XDEV_EXT_MECH.*?void xsk_xdev_ext_mech_link_up\(struct xdp_sock \*xs\);'
                      r'.*?#else.*?static inline void xsk_xdev_ext_mech_link_up\(struct xdp_sock \*xs\)',
                      header, re.S):
@@ -128,8 +141,14 @@ def notifier_problems(xsk, header):
 
 # name -> (file, old, new, designated failure in the fixture output)
 MUTATIONS = {
-    'link_up_never_wakes': ('wakeup_extra.c.inc', 'err = xsk_mech_zc_wake(xs);', 'err = 0;',
+    'worker_never_wakes': ('wakeup_extra.c.inc', 'err = xsk_mech_zc_wake(xs);', 'err = 0;',
+                           'ASSERT igb_carrier_down: link_up_wakes_once'),
+    'link_up_never_flags': ('wakeup_extra.c.inc', 'p->rewake = true;', '(void)0;',
                             'ASSERT igb_carrier_down: link_up_wakes_once'),
+    'link_up_ignores_rx_stage': ('wakeup_extra.c.inc', 'st = smp_load_acquire(&xs->xdev_ext_mech_rx);', 'st = NULL;',
+                                 'ASSERT receiver_controls: receiver_link_up_kicks_worker'),
+    'worker_ignores_stopping_session': ('wakeup_extra.c.inc', ' &&\n\t    xdev_ext_mech_session_admits(st->s))', ')',
+                                        'ASSERT link_up_stopping: stopping_session_no_wakeup'),
     'enetdown_always_fatal': ('production_journal.h',
                               'return err == -ENETDOWN && (!running || !carrier);', 'return false;',
                               'ASSERT ice_carrier_down: link_down_refusal_is_not_fatal'),
@@ -145,9 +164,12 @@ MUTATIONS = {
                                     'ASSERT reliable_ice_carrier_down: reliable_link_down_not_fatal'),
     'link_up_ignores_stopped': ('wakeup_extra.c.inc', 'waiting = !p->stopped && ', 'waiting = ',
                                 'ASSERT link_up_stopped: stopped_source_no_wakeup'),
-    'link_up_ignores_refusal': ('wakeup_extra.c.inc', 'if (err)\n\t\txdev_ext_mech_stage_dead(st, err);',
-                                '(void)err;',
-                                'ASSERT link_up_xdp_removed: link_up_refusal_stops_stage'),
+    'worker_ignores_refusal': ('wakeup_extra.c.inc', '\tif (err) {\n\t\txsk_mech_zc_cancel_pending(p, err);\n\t\txdev_ext_mech_stage_dead(st, err);\n\t}',
+                               '\t(void)err;',
+                               'ASSERT link_up_xdp_removed: link_up_refusal_stops_stage'),
+    'worker_refusal_skips_cancel': ('wakeup_extra.c.inc', '\t\txsk_mech_zc_cancel_pending(p, err);\n\t\txdev_ext_mech_stage_dead(st, err);',
+                                    '\t\txdev_ext_mech_stage_dead(st, err);',
+                                    'ASSERT link_up_xdp_removed: link_up_refusal_cancels_untaken'),
 }
 
 
@@ -185,12 +207,15 @@ class CallSites(unittest.TestCase):
         self.assertEqual(wakeup_site_problems(self.mech, self.rel), [])
 
     def test_netdev_notifier_repeats_waiting_tx_wakeups(self):
-        self.assertEqual(notifier_problems(self.xsk, self.hdr), [])
+        self.assertEqual(notifier_problems(self.xsk, self.hdr, self.mech), [])
 
     def test_call_site_mutations_are_detected(self):
-        probe = re.search(r'\tif \(!err && tx && xs->zc\)\n\t\terr = xsk_mech_zc_wake\(xs\);\n',
+        probe = re.search(r'\tif \(!err && tx && xs->zc &&[^\n]*\n[^\n]*\n\t\terr = xsk_mech_zc_wake\(xs\);\n',
                           self.mech)
         self.assertIsNotNone(probe)
+        reliable_too = self.mech.replace(probe.group(0),
+                                         '\tif (!err && tx && xs->zc)\n\t\terr = xsk_mech_zc_wake(xs);\n', 1)
+        self.assertNotEqual(bind_problems(reliable_too), [])
         self.assertNotEqual(bind_problems(self.mech.replace(probe.group(0), '', 1)), [])
         moved = self.mech.replace(probe.group(0), '', 1).replace(
             'bind_unlock:\n', 'bind_unlock:\n' + probe.group(0), 1)
@@ -200,11 +225,15 @@ class CallSites(unittest.TestCase):
                                   'xst->xs->queue_id,XDP_WAKEUP_TX)', 1)
         self.assertNotEqual(wakeup_site_problems(self.mech, bypass), [])
         unwired = self.xsk.replace('xsk_xdev_ext_mech_link_up(xs);', ';', 1)
-        self.assertNotEqual(notifier_problems(unwired, self.hdr), [])
-        unlocked = self.xsk.replace('\t\t\tmutex_lock(&xs->mutex);\n\t\t\txsk_xdev_ext_mech_link_up(xs);',
-                                    '\t\t\txsk_xdev_ext_mech_link_up(xs);\n\t\t\tmutex_lock(&xs->mutex);', 1)
-        self.assertNotEqual(unlocked, self.xsk)
-        self.assertNotEqual(notifier_problems(unlocked, self.hdr), [])
+        self.assertNotEqual(notifier_problems(unwired, self.hdr, self.mech), [])
+        locked = self.xsk.replace('\t\t\txsk_xdev_ext_mech_link_up(xs);',
+                                  '\t\t\tmutex_lock(&xs->mutex);\n\t\t\txsk_xdev_ext_mech_link_up(xs);\n'
+                                  '\t\t\tmutex_unlock(&xs->mutex);', 1)
+        self.assertNotEqual(locked, self.xsk)
+        self.assertNotEqual(notifier_problems(locked, self.hdr, self.mech), [])
+        no_rewake = self.mech.replace('\txsk_mech_zc_rewake(st);\n', '', 1)
+        self.assertNotEqual(no_rewake, self.mech)
+        self.assertNotEqual(notifier_problems(self.xsk, self.hdr, no_rewake), [])
 
 
 CTL = 'src/cli/xdev_ext_mech_ctl.c'
@@ -220,23 +249,31 @@ def source_view():
 
 
 def cli_order_problems(ctl):
-    """The CLI attaches XDP for a zero-copy TX socket before CREATE probes it."""
+    """A transmit-only zero-copy socket gets XDP mode before CREATE only when its
+    driver refuses a TX kick; a reliable sender fills the ring before its redirect."""
     body = adapter.function(ctl, 'ctl_run_source')
     create = body.find('ret = ctl_create(')
-    guard = body.find('if (!iou_umem && x.zero_copy) {')
-    attach_pass = body.find('xdev_ext_xsk_redirect_attach_pass(&redirect,')
-    early_rel = body.find('ctl_reliable_redirect(&redirect, src, o, x.fd)')
+    guard = body.find('if (!iou_umem && x.zero_copy && !o->reliable) {')
+    probe = body.find('ctl_zc_tx_xdp(&redirect, src, &x)')
     fill = body.find('ret = ctl_fq_fill(&x);')
-    late_rel = body.find('if (!ret && o->reliable && !x.zero_copy)')
+    redirect = body.find('ctl_reliable_redirect(&redirect, src, o, x.fd)')
     problems = []
-    if min(create, guard, attach_pass, early_rel, fill, late_rel) < 0:
-        return ['ctl_run_source lacks the zero-copy XDP attach order']
-    if not guard < early_rel < create or not guard < attach_pass < create:
-        problems.append('zero-copy TX XDP program not attached before CREATE')
-    if not create < fill < late_rel:
-        problems.append('fill ring not supplied after CREATE for every AF_XDP source')
+    if min(create, guard, probe, fill, redirect) < 0:
+        return ['ctl_run_source lacks the zero-copy TX XDP order']
+    if not guard < probe < create:
+        problems.append('transmit-only XDP mode not settled before CREATE')
+    if not create < fill < redirect:
+        # igb configures its receive ring when XDP is attached and a TX wakeup
+        # kicks only the TX vector: the fill ring must be full by then.
+        problems.append('reliable redirect attached before the fill ring is supplied')
     if 'x.zero_copy && !o->reliable ? 0 : ctl_fq_fill' in body:
-        problems.append('zero-copy transmit-only socket leaves its XDP receive queue empty')
+        problems.append('zero-copy transmit-only socket leaves its fill ring empty')
+    kick = adapter.function(ctl, 'ctl_zc_tx_xdp')
+    if not re.search(r'sendto\(x->fd, NULL, 0, MSG_DONTWAIT, NULL, 0\)', kick):
+        problems.append('transmit-only probe is not the AF_XDP TX kick')
+    if not re.search(r'errno != EINVAL && errno != ENXIO && errno != ENETDOWN', kick) or \
+            'xdev_ext_xsk_redirect_attach_pass(' not in kick:
+        problems.append('pass program not attached exactly for refused kicks')
     return problems
 
 
@@ -260,14 +297,15 @@ class CliZeroCopyTx(unittest.TestCase):
 
     def test_cli_order_mutations_are_detected(self):
         ctl = (ROOT / CTL).read_text()
-        body = adapter.function(ctl, 'ctl_run_source')
-        guard = body.find('if (!iou_umem && x.zero_copy) {')
-        self.assertGreaterEqual(guard, 0)
-        no_attach = ctl.replace('if (!iou_umem && x.zero_copy) {', 'if (0) {', 1)
-        self.assertNotEqual(cli_order_problems(no_attach), [])
+        guard = 'if (!iou_umem && x.zero_copy && !o->reliable) {'
+        self.assertIn(guard, ctl)
+        self.assertNotEqual(cli_order_problems(ctl.replace(guard, 'if (0) {', 1)), [])
         old_fill = ctl.replace('ret = ctl_fq_fill(&x);',
                                'ret = x.zero_copy && !o->reliable ? 0 : ctl_fq_fill(&x);', 1)
         self.assertNotEqual(cli_order_problems(old_fill), [])
+        always = ctl.replace('errno != EINVAL && errno != ENXIO && errno != ENETDOWN', 'false', 1)
+        self.assertNotEqual(always, ctl)
+        self.assertNotEqual(cli_order_problems(always), [])
 
 
 if __name__ == '__main__':

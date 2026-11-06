@@ -57,6 +57,7 @@ struct xsk_xdev_ext_mech_provider {
 	bool has_rx;
 	bool zc;
 	bool stopped;
+	bool rewake;		/* tx_lock: link up, the session worker wakes */
 	u32 source_first, source_next;
 	spinlock_t tx_lock;
 	struct xdev_ext_net_count_ring ring;
@@ -813,7 +814,7 @@ static int xsk_mech_poll(struct xdev_ext_mech_stage *st)
 /*
  * xs->mutex held, so xs->dev stays bound: ask the driver to drain the kernel
  * source of a zero-copy socket.  0 also when only a down link refused the
- * wakeup (xsk_mech_zc_wake_deferred()); xsk_xdev_ext_mech_link_up() repeats it.
+ * wakeup (xsk_mech_zc_wake_deferred()); the link-up hook repeats it.
  */
 static int xsk_mech_zc_wake(struct xdp_sock *xs)
 {
@@ -912,10 +913,14 @@ static int xsk_xdev_ext_mech_bind(struct xdev_ext_mech_stage *st,
 	/*
 	 * A zero-copy TX queue that refuses a wakeup of the still empty source
 	 * refuses every batch: igb, ice, i40e and ixgbe answer -EINVAL, igc
-	 * -ENXIO and mlx5 -ENETDOWN while no XDP program is attached.  Refuse
-	 * CREATE before any descriptor exists instead of failing the first batch.
+	 * -ENXIO and mlx5 -ENETDOWN while no XDP program is attached.  Refuse a
+	 * transmit-only stage at CREATE, before any descriptor exists.  A
+	 * reliable sender attaches its ACK redirect after CREATE, once its fill
+	 * ring is supplied (admission needs it empty; igb configures the receive
+	 * ring when XDP is attached and its TX wakeup never kicks that vector).
 	 */
-	if (!err && tx && xs->zc)
+	if (!err && tx && xs->zc &&
+	    !(u->flags & XDEV_EXT_AFXDP_F_RELIABLE))
 		err = xsk_mech_zc_wake(xs);
 	if (!err) {
 		xst->mtu = READ_ONCE(xs->dev->mtu);
@@ -1485,35 +1490,35 @@ void xsk_xdev_ext_mech_unbind_dev(struct xdp_sock *xs)
 }
 
 /*
- * xsk_notifier() on NETDEV_UP or NETDEV_CHANGE, RTNL and xs->mutex held,
- * xs->dev running with carrier.  While the link was down the driver may have
- * taken a TX wakeup without draining the source (igb_xmit_zc() and
- * ice_xmit_zc() return early without carrier) or refused it
- * (xsk_mech_zc_wake_deferred()), and nothing wakes its queue again.  Wake it
- * for the descriptors still waiting in the source.  A refusal now has no link
- * excuse and stops the stage as a refused submit does; ->unbind clears the
- * stage pointer under the same mutex, so the stage is alive here.
+ * xsk_notifier() on NETDEV_UP or NETDEV_CHANGE, under rcu_read_lock() only
+ * (the netdev instance lock may be held: no mutex, no driver call), xs->dev
+ * running with carrier.  While the link was down the driver may have taken a
+ * TX wakeup without draining the source (igb_xmit_zc() and ice_xmit_zc()
+ * return early without carrier) or refused it (xsk_mech_zc_wake_deferred()),
+ * and nothing wakes its queue again.  Ask the session worker to wake it, see
+ * xsk_mech_zc_rewake.  The source also carries a reliable receiver's ACK
+ * controls, whose socket has no TX stage.  ->unbind clears the stage pointer
+ * and waits for RCU before the stage, its session or the provider goes away.
  */
 void xsk_xdev_ext_mech_link_up(struct xdp_sock *xs)
 {
-	struct xdev_ext_mech_stage *st = xs->xdev_ext_mech_tx;
+	struct xdev_ext_mech_stage *st = smp_load_acquire(&xs->xdev_ext_mech_tx);
 	struct xsk_xdev_ext_mech_provider *p;
 	unsigned long flags;
 	bool waiting;
-	int err;
 
-	lockdep_assert_held(&xs->mutex);
-	if (!st || !xs->zc || READ_ONCE(xs->state) != XSK_BOUND)
+	if (!st)
+		st = smp_load_acquire(&xs->xdev_ext_mech_rx);
+	if (!st || !READ_ONCE(xs->zc))
 		return;
 	p = xdev_ext_mech_session_pool(st->s)->priv;
 	spin_lock_irqsave(&p->tx_lock, flags);
 	waiting = !p->stopped && xsk_mech_zc_unissued(&p->ring);
+	if (waiting)
+		p->rewake = true;
 	spin_unlock_irqrestore(&p->tx_lock, flags);
-	if (!waiting || READ_ONCE(((struct xsk_xdev_ext_mech_stage *)st->priv)->dead))
-		return;
-	err = xsk_mech_zc_wake(xs);
-	if (err)
-		xdev_ext_mech_stage_dead(st, err);
+	if (waiting)
+		xdev_ext_mech_stage_kick(st);
 }
 
 #include "xsk_xdev_ext_mech_reliable.inc"
@@ -1543,10 +1548,49 @@ static const struct xdev_ext_net_hooks xsk_xdev_ext_net_hooks = {
 	.rel = xsk_xdev_ext_net_rel,
 };
 
+/*
+ * Session worker: the wakeup the link-up hook asked for.  A STOP
+ * cancels the source instead.  A refusal now has no link excuse: stop the
+ * stage as a refused submit does, cancelling only what was never taken.
+ */
+static void xsk_mech_zc_rewake(struct xdev_ext_mech_stage *st)
+{
+	struct xsk_xdev_ext_mech_provider *p = xdev_ext_mech_session_pool(st->s)->priv;
+	struct xsk_xdev_ext_mech_stage *xst = st->priv;
+	struct xdp_sock *xs = xst->xs;
+	unsigned long flags;
+	bool wake;
+	int err = 0;
+
+	if (!p->zc || !READ_ONCE(p->rewake))
+		return;
+	mutex_lock(&xs->mutex);
+	spin_lock_irqsave(&p->tx_lock, flags);
+	wake = !p->stopped && xsk_mech_zc_unissued(&p->ring);
+	p->rewake = false;
+	spin_unlock_irqrestore(&p->tx_lock, flags);
+	if (wake && xs->state == XSK_BOUND && !READ_ONCE(xst->dead) &&
+	    xdev_ext_mech_session_admits(st->s))
+		err = xsk_mech_zc_wake(xs);
+	if (err) {
+		spin_lock_irqsave(&p->tx_lock, flags);
+		p->stopped = true;
+		spin_unlock_irqrestore(&p->tx_lock, flags);
+	}
+	mutex_unlock(&xs->mutex);
+	if (err) {
+		xsk_mech_zc_cancel_pending(p, err);
+		xdev_ext_mech_stage_dead(st, err);
+	}
+}
+
 static unsigned long xsk_mech_progress(struct xdev_ext_mech_stage *st)
 {
-	unsigned long pending = xsk_rx_pending_drain(st, false);
-	unsigned long reliable = xsk_rel_progress(st);
+	unsigned long pending, reliable;
+
+	xsk_mech_zc_rewake(st);
+	pending = xsk_rx_pending_drain(st, false);
+	reliable = xsk_rel_progress(st);
 
 	return pending && reliable ? min(pending, reliable) : pending ?: reliable;
 }

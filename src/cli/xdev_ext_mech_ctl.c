@@ -1666,6 +1666,23 @@ static int ctl_reliable_redirect(struct xdev_ext_xsk_redirect *redirect,
 }
 
 /*
+ * A transmit-only zero-copy socket, before CREATE: kick its TX queue as an
+ * AF_XDP application does (an empty TX ring, so nothing is sent).  igb, ice,
+ * i40e and ixgbe refuse with EINVAL, igc with ENXIO and mlx5 with ENETDOWN
+ * while no XDP program is attached; attach one that passes every frame.
+ * Drivers without that precondition (virtio_net) get no program.
+ */
+static int ctl_zc_tx_xdp(struct xdev_ext_xsk_redirect *redirect,
+			 const struct ctl_source *src, const struct ctl_xsk *x)
+{
+	if (sendto(x->fd, NULL, 0, MSG_DONTWAIT, NULL, 0) >= 0 ||
+	    (errno != EINVAL && errno != ENXIO && errno != ENETDOWN))
+		return 0;
+	return xdev_ext_xsk_redirect_attach_pass(redirect,
+		(int)if_nametoindex(src->ifname), XDP_FLAGS_DRV_MODE);
+}
+
+/*
  * Run a source session: CREATE, hand frames over (fill ring or START user
  * frames), START @o->groups batches, wait for all of them.  *@frames_ok is
  * the compare of chain d.
@@ -1771,16 +1788,9 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		if (ret)
 			goto out;
 	}
-	/*
-	 * igb, ice, i40e, ixgbe, igc and mlx5 run a zero-copy TX queue only in
-	 * XDP mode, and CREATE refuses a queue that rejects a TX wakeup: attach
-	 * first, the reliable redirect for its ACKs, else a program passing
-	 * every frame.  The fill ring stays empty for CREATE's admission.
-	 */
-	if (!iou_umem && x.zero_copy) {
-		ret = o->reliable ? ctl_reliable_redirect(&redirect, src, o, x.fd) :
-			xdev_ext_xsk_redirect_attach_pass(&redirect,
-				(int)if_nametoindex(src->ifname), XDP_FLAGS_DRV_MODE);
+	/* CREATE refuses a transmit-only queue that rejects a TX wakeup. */
+	if (!iou_umem && x.zero_copy && !o->reliable) {
+		ret = ctl_zc_tx_xdp(&redirect, src, &x);
 		if (ret)
 			goto out;
 	}
@@ -1796,7 +1806,11 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 	if (!iou_umem) {
 		/* An XDP-mode receive queue polls an empty fill ring without end. */
 		ret = ctl_fq_fill(&x);
-		if (!ret && o->reliable && !x.zero_copy)
+		/*
+		 * The redirect follows the fill: igb configures its receive ring
+		 * when XDP is attached, and its TX wakeup never kicks that vector.
+		 */
+		if (!ret && o->reliable)
 			ret = ctl_reliable_redirect(&redirect, src, o, x.fd);
 		if (ret)
 			goto out;
