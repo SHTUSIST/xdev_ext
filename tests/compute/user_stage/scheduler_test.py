@@ -99,7 +99,7 @@ def generate():
                    "xdev_ext_mech_count", "xdev_ext_mech_stop_reason",
                    "xdev_ext_mech_programs_current", "xdev_ext_mech_session_admits", "xdev_ext_mech_batch_external_complete"]
     user_names += ["xdev_ext_user_drain", "xdev_ext_user_external_end",
-                   "xdev_ext_user_strict_progress"]
+                   "xdev_ext_user_strict_progress", "xdev_ext_user_peer_admit"]
     if selected.split:
         core_names.insert(core_names.index('xdev_ext_mech_batch_handoff'),
                           'xdev_ext_mech_transform_handoff')

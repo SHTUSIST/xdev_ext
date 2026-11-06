@@ -36,7 +36,10 @@ CASES = ('legacy-stop', 'strict-bind-peer', 'strict-bind-cpu', 'stop-late',
          'retain-owner-exit', 'detach-final', 'attach-legacy', 'attach-nonstrict',
          'attach-owner-exit-pending', 'peer-reject-nonstrict',
          'peer-reject-varlen', 'peer-reject-delta', 'ticket-reuse',
-         'external-stale', 'external-nonstrict')
+         'external-stale', 'external-nonstrict', 'peer-admitted', 'peer-noack',
+         'peer-stale', 'peer-generation', 'peer-producer-error',
+         'peer-producer-unknown', 'peer-stop-late-stale', 'peer-held-stale',
+         'peer-held-unbind')
 
 
 def generate():
@@ -50,7 +53,7 @@ def generate():
                  'xdev_ext_user_reap_one', 'xdev_ext_user_reap',
                  'xdev_ext_user_progress', 'xdev_ext_user_mark_dead',
                  'xdev_ext_user_drain', 'xdev_ext_user_external_end',
-                 'xdev_ext_user_strict_progress'):
+                 'xdev_ext_user_strict_progress', 'xdev_ext_user_peer_admit'):
         code = code.replace(scheduler.definition(user, name), '')
     core = scheduler.read_native(ROOT, 'io_uring/xdev_ext_mech.c')
     # Future production external completion entry and its direct helpers.
