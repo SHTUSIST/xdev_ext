@@ -1757,8 +1757,12 @@ if [[ "${NIC_MODEL:-virtio}" == igb ]]; then
 	# AF_XDP zero-copy path. The guest boots with one CPU so igb sizes one
 	# queue per port (fixed UDP 2-tuple stays on bound queue 0), then onlines
 	# the other vCPUs.
-	nic_args=(-device igb,netdev=wire0,mac=02:00:00:00:00:01
-		-device igb,netdev=wire1,mac=02:00:00:00:00:02)
+	# An igb is an SR-IOV PF; on pcie.0 its VF placeholders would take the
+	# following slots, so each port sits behind its own root port.
+	nic_args=(-device pcie-root-port,id=nic_rp0,chassis=8,slot=8,bus=pcie.0
+		-device igb,netdev=wire0,mac=02:00:00:00:00:01,bus=nic_rp0
+		-device pcie-root-port,id=nic_rp1,chassis=9,slot=9,bus=pcie.0
+		-device igb,netdev=wire1,mac=02:00:00:00:00:02,bus=nic_rp1)
 	KERNEL_APPEND+=' maxcpus=1'
 else
 	nic_args=(-device virtio-net-pci,netdev=wire0,mac=02:00:00:00:00:01,iommu_platform=on,disable-legacy=on,rx_queue_size=1024

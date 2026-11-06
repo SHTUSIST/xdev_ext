@@ -154,7 +154,14 @@ class GuestGpuWiring(unittest.TestCase):
 
     def test_igb_mode_boots_one_cpu_and_uses_the_qemu_igb_model(self):
         self.assertIn("KERNEL_APPEND+=' maxcpus=1'", self.script)
-        self.assertIn('-device igb,netdev=wire0,mac=02:00:00:00:00:01', self.script)
+        # QEMU's igb is an SR-IOV PF: on pcie.0 its VF placeholders take the next
+        # slots ("slot 19 function 0 not available for igbvf" on giga), so each
+        # port sits behind its own pcie-root-port, as a real NIC would.
+        start = self.script.index('nic_args=(-device pcie-root-port')
+        block = self.script[start:self.script.index('\n\tKERNEL_APPEND', start)]
+        for port, wire, mac in (('nic_rp0', 'wire0', '01'), ('nic_rp1', 'wire1', '02')):
+            self.assertIn(f'pcie-root-port,id={port},', block)
+            self.assertIn(f'igb,netdev={wire},mac=02:00:00:00:00:{mac},bus={port}', block)
         self.assertIn('cfg -e NET_VENDOR_INTEL -e IGB', self.script)
 
 
