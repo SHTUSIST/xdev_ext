@@ -2444,6 +2444,14 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/run.py",
+      "logical_path": "tests/eval/kv_restore/run.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_run.py",
+      "logical_path": "tests/eval/kv_restore/test_run.py"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/mooncake_worker.py",
       "logical_path": "tests/eval/kv_restore/mooncake_worker.py"
     },
