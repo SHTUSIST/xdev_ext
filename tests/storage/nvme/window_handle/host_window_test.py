@@ -57,11 +57,23 @@ MUTANTS = [
     ('issue-no-overlap-check', '\t\tif (o->head == w->head &&\n\t\t    xdev_ext_stor_grant_conflict(&o->grant, &w->grant)) {',
      '\t\tif (0 && o->head == w->head &&\n\t\t    xdev_ext_stor_grant_conflict(&o->grant, &w->grant)) {'),
     ('issue-overlap-ignores-namespace', '\t\tif (o->head == w->head &&', '\t\tif ((o->head || w->head) &&'),
-    ('issue-no-fd-mode-check', '\tif ((rd && !(file->f_mode & FMODE_READ)) ||\n\t    (wr && !(file->f_mode & FMODE_WRITE)))\n\t\treturn -EBADF;',
-     '\tif (0 && ((rd && !(file->f_mode & FMODE_READ)) ||\n\t    (wr && !(file->f_mode & FMODE_WRITE))))\n\t\treturn -EBADF;'),
-    ('issue-no-native-policy', '\tif ((rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)) ||',
-     '\tif (0 && (rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)) &&'),
+    ('issue-no-fd-mode-check', '\tif (!(file->f_mode & FMODE_WRITE) ||\n\t    (rd && !(file->f_mode & FMODE_READ)))\n\t\treturn -EBADF;',
+     '\tif (0 && (!(file->f_mode & FMODE_WRITE) ||\n\t    (rd && !(file->f_mode & FMODE_READ))))\n\t\treturn -EBADF;'),
+    ('issue-read-handle-from-read-only-fd', '\tif (!(file->f_mode & FMODE_WRITE) ||',
+     '\tif (((access & XDEV_EXT_STOR_GRANT_WRITE) && !(file->f_mode & FMODE_WRITE)) ||'),
+    ('issue-no-read-fd-check', '\t    (rd && !(file->f_mode & FMODE_READ)))', '\t    (0 && rd && !(file->f_mode & FMODE_READ)))'),
+    ('issue-no-native-policy', '\tif (!nvme_xdev_ext_mech_cmd_allowed(ns, file, true) ||\n\t    (rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)))',
+     '\tif (0 && (!nvme_xdev_ext_mech_cmd_allowed(ns, file, true) ||\n\t    (rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false))))'),
+    ('issue-read-handle-skips-write-policy', '\tif (!nvme_xdev_ext_mech_cmd_allowed(ns, file, true) ||',
+     '\tif (((access & XDEV_EXT_STOR_GRANT_WRITE) && !nvme_xdev_ext_mech_cmd_allowed(ns, file, true)) ||'),
+    ('issue-no-read-policy', '\t    (rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)))',
+     '\t    (0 && rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)))'),
     ('issue-no-rsvd-check', '\tif (u.rsvd)\n\t\treturn -EINVAL;', '\tif (0 && u.rsvd)\n\t\treturn -EINVAL;'),
+    ('issue-ignores-namespace-state', '\tif (!ret && (!id.namespace_ready || id.namespace_removing))',
+     '\tif (0 && !ret && (!id.namespace_ready || id.namespace_removing))'),
+    ('issue-ignores-removing', '(!id.namespace_ready || id.namespace_removing)', '(!id.namespace_ready || 0)'),
+    ('issue-busy-leaks-reserved-fd', '\t\t\tmutex_unlock(&nvme_xdev_ext_windows_lock);\n\t\t\tput_unused_fd(fd);\n',
+     '\t\t\tmutex_unlock(&nvme_xdev_ext_windows_lock);\n'),
     ('issue-always-read-write', '\t\t\t!(u.flags & XDEV_EXT_STOR_GRANT_WRITE) ? O_RDONLY :',
      '\t\t\t0 ? O_RDONLY :'),
     ('release-stays-listed', '\tlist_del_init(&w->node);\n\tmutex_unlock', '\tmutex_unlock'),
@@ -69,6 +81,32 @@ MUTANTS = [
     ('issue-lists-before-check', '\tlist_add(&w->node, &nvme_xdev_ext_windows);\n\tmutex_unlock(&nvme_xdev_ext_windows_lock);\n\tfd_install',
      '\tmutex_unlock(&nvme_xdev_ext_windows_lock);\n\tfd_install'),
 ]
+
+
+IOCTL = re.compile(r"^#define\s+(\w+)\s+_IO(?:R|W|WR)?\(\s*'N'\s*,\s*(0x[0-9a-fA-F]+|\d+)\s*[,)]", re.M)
+# 'N' ranges of the upstream registry,
+# Documentation/userspace-api/ioctl/ioctl-number.rst: scanner, nvme, ntsync.
+UPSTREAM_N = ((0x00, 0x1f), (0x40, 0x7f), (0x80, 0x8f))
+
+
+def uapi_number_check():
+    """The window ioctl has its own ('N', nr): no product ioctl and no
+    upstream-registered range shares it, so the size field is never the only
+    thing telling two commands apart."""
+    numbers = {}
+    for header in sorted((ROOT / 'src').glob('*/include/uapi/linux/*.h')):
+        for name, nr in IOCTL.findall(header.read_text()):
+            numbers.setdefault(int(nr, 0), []).append(name)
+    window = [nr for nr, names in numbers.items() if 'NVME_IOCTL_XDEV_EXT_WINDOW' in names]
+    if len(window) != 1:
+        raise SystemExit('SETUP NVME_IOCTL_XDEV_EXT_WINDOW defined %d times' % len(window))
+    nr = window[0]
+    shared = [name for name in numbers[nr] if name != 'NVME_IOCTL_XDEV_EXT_WINDOW']
+    if shared:
+        return "FAIL uapi: NVME_IOCTL_XDEV_EXT_WINDOW shares 'N' 0x%02x with %s" % (nr, ', '.join(shared))
+    if any(low <= nr <= high for low, high in UPSTREAM_N):
+        return "FAIL uapi: 'N' 0x%02x lies in an upstream-registered range" % nr
+    return "PASS uapi: 'N' 0x%02x used once among %d 'N' ioctls" % (nr, sum(map(len, numbers.values())))
 
 
 def build_and_run(directory, code, profile):
@@ -92,6 +130,10 @@ def build_and_run(directory, code, profile):
 
 
 def main():
+    verdict = uapi_number_check()
+    print(verdict)
+    if not verdict.startswith('PASS'):
+        return 1
     code = production()
     rc = 0
     with tempfile.TemporaryDirectory(prefix='window-handle-host-') as tmp:

@@ -118,13 +118,13 @@ MODULE_PARM_DESC(xdev_ext_mech_bounces,
 #endif
 
 /*
- * LBA window handles (prototype for ASK.69).  NVME_IOCTL_XDEV_EXT_WINDOW on a
- * /dev/ngXnY returns a file naming one range of that namespace; its open mode
- * is its access.  A stage presenting it binds the namespace file the holder
- * opened, and only inside the range.  A handle stays registered until its last
- * reference: a session holds its stage file until it is released (or keeps it
- * for good when quarantined), so no overlapping range is issued while the
- * previous owner may still write it.
+ * LBA window handles.  NVME_IOCTL_XDEV_EXT_WINDOW on a /dev/ngXnY returns a
+ * file naming one range of that namespace; its open mode is its access.  A
+ * stage presenting it binds the namespace file the holder opened, and only
+ * inside the range.  A handle stays registered until its last reference: a
+ * session holds its stage file until it is released (or keeps it for good
+ * when quarantined), so no overlapping range is issued while the previous
+ * owner may still write it.
  */
 struct nvme_xdev_ext_window_handle {
 	struct list_head node;			/* nvme_xdev_ext_windows */
@@ -156,18 +156,21 @@ static const struct file_operations nvme_xdev_ext_window_fops = {
 	.release = nvme_xdev_ext_window_release,
 };
 
-/* The holder delegates only what its own fd and the native policy allow. */
+/*
+ * The holder delegates only what its own fd and the native policy allow.  A
+ * handle of either access also reserves its range against writers, so only an
+ * fd that may write the namespace issues one.
+ */
 static int nvme_xdev_ext_window_access(struct nvme_ns *ns, struct file *file,
 		u32 access)
 {
 	bool rd = access & XDEV_EXT_STOR_GRANT_READ;
-	bool wr = access & XDEV_EXT_STOR_GRANT_WRITE;
 
-	if ((rd && !(file->f_mode & FMODE_READ)) ||
-	    (wr && !(file->f_mode & FMODE_WRITE)))
+	if (!(file->f_mode & FMODE_WRITE) ||
+	    (rd && !(file->f_mode & FMODE_READ)))
 		return -EBADF;
-	if ((rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)) ||
-	    (wr && !nvme_xdev_ext_mech_cmd_allowed(ns, file, true)))
+	if (!nvme_xdev_ext_mech_cmd_allowed(ns, file, true) ||
+	    (rd && !nvme_xdev_ext_mech_cmd_allowed(ns, file, false)))
 		return -EACCES;
 	return 0;
 }
@@ -194,6 +197,9 @@ long nvme_xdev_ext_window_ioctl(struct nvme_ns *ns, struct file *file,
 		return -ENOMEM;
 	INIT_LIST_HEAD(&w->node);
 	ret = nvme_xdev_ext_capture_identity(ns, &id, &head, &disk, &queue);
+	/* Only a live namespace, as CREATE's namespace admission. */
+	if (!ret && (!id.namespace_ready || id.namespace_removing))
+		ret = -ENODEV;
 	if (!ret)
 		ret = xdev_ext_stor_grant_make(&w->grant, id.capacity_lbas,
 					       u.slba, u.nlb, u.flags);

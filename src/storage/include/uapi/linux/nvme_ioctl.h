@@ -103,15 +103,20 @@ struct nvme_uring_cmd {
 	(NVME_URING_CMD_F_XDEV_EXT | NVME_URING_CMD_F_XDEV_EXT_BUILD)
 
 /*
- * XDEV_EXT LBA window handle (prototype for ASK.69).  On a /dev/ngXnY the
- * caller opened, NVME_IOCTL_XDEV_EXT_WINDOW returns a new O_CLOEXEC fd that
- * names exactly [slba, slba + nlb) of that namespace and the access in flags,
- * each of which the caller's own fd must allow.  Passed as an NVMe mechanism
- * stage fd in place of /dev/ngXnY, it bounds the stage: CREATE fails with
- * -EBADF for an ungranted direction and with -EACCES unless the stage window
- * lies inside the handle.  While a handle, or a session created from it,
- * lives, issuing another handle of the same namespace that shares an LBA with
- * it fails with -EBUSY unless both are read-only.
+ * XDEV_EXT LBA window handle.  NVME_IOCTL_XDEV_EXT_WINDOW on a /dev/ngXnY of a
+ * live namespace returns a new O_CLOEXEC fd that names exactly
+ * [slba, slba + nlb) of that namespace and the access in flags.  The caller's
+ * fd and the native command policy must allow each granted access, and write
+ * for any handle, because a handle reserves its range: while a handle, or a
+ * session created from it, lives, issuing another handle of the same
+ * namespace that shares an LBA with it fails with -EBUSY unless both are
+ * read-only.  The handle has no other operation.  Passed (for example over
+ * SCM_RIGHTS) as an NVMe mechanism stage fd in place of /dev/ngXnY, it bounds
+ * the stage: CREATE fails with -EBADF for an ungranted direction and with
+ * -EACCES unless the stage window lies inside the handle, and every command
+ * the stage's program builds is admitted only inside that window.  Tenants are
+ * isolated from each other only when they receive handles, never the
+ * namespace node, which keeps whole-namespace passthrough.
  */
 #define NVME_XDEV_EXT_WINDOW_F_READ	(1U << 0)
 #define NVME_XDEV_EXT_WINDOW_F_WRITE	(1U << 1)
@@ -142,7 +147,10 @@ struct nvme_xdev_ext_window {
 #define NVME_URING_CMD_ADMIN	_IOWR('N', 0x82, struct nvme_uring_cmd)
 #define NVME_URING_CMD_ADMIN_VEC _IOWR('N', 0x83, struct nvme_uring_cmd)
 
-/* XDEV_EXT, outside the upstream ranges above. */
-#define NVME_IOCTL_XDEV_EXT_WINDOW	_IOW('N', 0xe0, struct nvme_xdev_ext_window)
+/*
+ * XDEV_EXT, outside the registered upstream 'N' ranges; 0xe0 and 0xe1 are the
+ * XDEV_EXT_PEER_NVME_* commands of <linux/xdev_ext_peer.h>.
+ */
+#define NVME_IOCTL_XDEV_EXT_WINDOW	_IOW('N', 0xe2, struct nvme_xdev_ext_window)
 
 #endif /* _UAPI_LINUX_NVME_IOCTL_H */

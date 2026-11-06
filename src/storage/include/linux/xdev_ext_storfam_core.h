@@ -150,10 +150,10 @@ static inline int xdev_ext_stor_window_check(__u64 window_slba,
 }
 
 /*
- * A delegated LBA range of one namespace (prototype for ASK.69).  A holder of
- * the namespace issues it; a stage presenting it binds a window only inside
- * the range and only in a granted direction.  Grants of one namespace that
- * share an LBA conflict unless both are read-only.
+ * A delegated LBA range of one namespace.  A holder of the namespace issues
+ * it; a stage presenting it binds a window only inside the range and only in
+ * a granted direction.  Grants of one namespace that share an LBA conflict
+ * unless both are read-only.
  */
 #define XDEV_EXT_STOR_GRANT_READ	(1U << 0)
 #define XDEV_EXT_STOR_GRANT_WRITE	(1U << 1)

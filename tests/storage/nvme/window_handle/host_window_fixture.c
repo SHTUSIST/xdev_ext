@@ -152,7 +152,7 @@ struct nvme_ns_head { int id; };
 struct request_queue { int id; };
 struct gendisk { int id; };
 struct nvme_ns { struct nvme_ctrl *ctrl; struct nvme_ns_head *head; struct request_queue *queue; };
-struct nvme_xdev_ext_identity { u64 capacity_lbas; };
+struct nvme_xdev_ext_identity { u64 capacity_lbas; bool namespace_ready, namespace_removing; };
 static const struct nvme_ctrl_ops pcie = { "pcie", true };
 static struct nvme_ctrl ctrl = { &pcie };
 static struct nvme_ns_head head_a = { 1 }, head_b = { 2 };
@@ -167,10 +167,12 @@ static struct file ng_a_wo = { &ng_fops, FMODE_WRITE, &ns_a, 1, false };
 static struct file ng_b_rw = { &ng_fops, FMODE_READ | FMODE_WRITE, &ns_b, 1, false };
 static const u64 capacity = 8192;
 static bool allowed_read = true, allowed_write = true;
+static bool ns_ready = true, ns_removing;
 static int nvme_xdev_ext_capture_identity(struct nvme_ns *ns, struct nvme_xdev_ext_identity *id,
 		const struct nvme_ns_head **head, const struct gendisk **d, const struct request_queue **q)
 {
-	*id = (struct nvme_xdev_ext_identity){ .capacity_lbas = capacity };
+	*id = (struct nvme_xdev_ext_identity){ .capacity_lbas = capacity,
+		.namespace_ready = ns_ready, .namespace_removing = ns_removing };
 	*head = ns->head;
 	*d = &disk;
 	*q = ns->queue;
@@ -224,6 +226,17 @@ static long issue(struct file *ng, u64 slba, u64 nlb, u32 flags, u32 rsvd)
 	struct nvme_xdev_ext_window w = { .slba = slba, .nlb = nlb, .flags = flags, .rsvd = rsvd };
 
 	return nvme_xdev_ext_window_ioctl(ng->private_data, ng, &w);
+}
+
+/* fd numbers reserved by get_unused_fd_flags() and neither installed nor put. */
+static unsigned reserved_fds(void)
+{
+	unsigned n = 0;
+	int i;
+
+	for (i = 0; i < NR_FDS; i++)
+		n += fd_reserved[i] && !fd_table[i];
+	return n;
 }
 
 static unsigned listed(void)
@@ -281,14 +294,26 @@ int main(void)
 	EQ("past capacity", issue(&ng_a_rw, capacity - 8, 64, RDWR, 0), -ERANGE);
 	EQ("write on a read-only fd", issue(&ng_a_ro, 0, 64, WR, 0), -EBADF);
 	EQ("read on a write-only fd", issue(&ng_a_wo, 0, 64, RD, 0), -EBADF);
+	/* Issuing reserves the range against writers: a read handle too
+	 * needs an issuer that may write the namespace. */
+	EQ("read on a read-only fd", issue(&ng_a_ro, 0, 64, RD, 0), -EBADF);
 	allowed_write = false;
 	EQ("native policy refuses write", issue(&ng_a_rw, 0, 64, RDWR, 0), -EACCES);
+	EQ("native policy refuses write, read handle", issue(&ng_a_rw, 0, 64, RD, 0), -EACCES);
 	allowed_write = true;
 	allowed_read = false;
 	EQ("native policy refuses read", issue(&ng_a_rw, 0, 64, RD, 0), -EACCES);
 	allowed_read = true;
+	/* As CREATE's namespace admission: only a live namespace issues. */
+	ns_ready = false;
+	EQ("namespace not ready", issue(&ng_a_rw, 0, 64, RDWR, 0), -ENODEV);
+	ns_ready = true;
+	ns_removing = true;
+	EQ("namespace being removed", issue(&ng_a_rw, 0, 64, RDWR, 0), -ENODEV);
+	ns_removing = false;
 	EQ("no leak after refusals", allocations - frees, before);
 	EQ("nothing listed", listed(), 0);
+	EQ("no fd reserved after refusals", reserved_fds(), 0);
 	EQ("holder file untouched", ng_a_rw.refs, 1);
 
 	/* A handle: its mode is its access, it pins the holder's file. */
@@ -305,7 +330,8 @@ int main(void)
 	EQ("rw over rw", issue(&ng_a_rw, 32, 64, RDWR, 0), -EBUSY);
 	EQ("read over rw", issue(&ng_a_rw, 63, 1, RD, 0), -EBUSY);
 	EQ("write over read-only", issue(&ng_a_rw, 300, 1, WR, 0), -EBUSY);
-	EQ("refused overlap leaves no fd and no extra pin", ng_a_rw.refs, 4);
+	EQ("refused overlap leaves no extra pin", ng_a_rw.refs, 4);
+	EQ("refused overlap leaves no fd reserved", reserved_fds(), 0);
 	r1 = issue(&ng_a_rw, 280, 64, RD, 0);
 	EQ("read over read-only allowed", r1 >= 3, 1);
 	b = issue(&ng_b_rw, 0, 64, RDWR, 0);
@@ -338,6 +364,7 @@ int main(void)
 	anon_error = 0;
 	EQ("no leak after late failures", allocations - frees, before);
 	EQ("late failures unlisted", listed(), 6);
+	EQ("no fd reserved after late failures", reserved_fds(), 0);
 	x = issue(&ng_a_rw, 1024, 64, RDWR, 0);
 	EQ("range of a failed issue is free", x >= 3, 1);
 	fd_close(x);
@@ -366,6 +393,7 @@ int main(void)
 	EQ("holder pins dropped", ng_a_rw.refs, 1);
 	EQ("other holder pin dropped", ng_b_rw.refs, 1);
 	EQ("no leak", allocations, frees);
+	EQ("no fd reserved", reserved_fds(), 0);
 	printf("PASS host window handle checks=%u\n", checks);
 	return 0;
 }
