@@ -69,6 +69,9 @@ enum xdev_ext_cap_state {
 	XDEV_EXT_CAP_NOT_WIRED		= 5,	/* the mechanism has no code for this part */
 	XDEV_EXT_CAP_NOT_APPLICABLE	= 6,	/* host-page class: no device-memory requester */
 	XDEV_EXT_CAP_HOST_DMA_MAPPED	= 7,	/* coherent host DMA-API mapping established */
+	XDEV_EXT_CAP_OWNER_ASSERTED	= 8,	/* gated on the stage owner's per-batch
+						 * completion record, which the kernel
+						 * binds to the batch but cannot verify */
 };
 /* Provider backing of a device allocation (struct xdev_ext_peer_backing.flags). */
 #define XDEV_EXT_PEER_BACKING_MMIO_BAR		(1U << 0) /* discrete VRAM through a PCI BAR */

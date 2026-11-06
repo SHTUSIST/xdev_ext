@@ -74,6 +74,27 @@ struct session {
  struct xdev_ext_user_ready *ready;struct xdev_ext_user_done *done;
  struct xdev_ext_user_slot *slots;__u64 last_ticket[DEPTH];
 };
+/* STAGE_CAPS of the strict USER stage on the VRAM-shaped (PEER) pool: what
+ * the kernel enforces at this GPU edge, and nothing it cannot prove. */
+static void check_caps(struct session *s)
+{
+ struct xdev_ext_mech_stage_caps c[2];
+ for(__u32 i=0;i<2;i++){
+  c[i]=(struct xdev_ext_mech_stage_caps){.size=sizeof(c[i]),.version=XDEV_EXT_MECH_STAGE_CAPS_VERSION,
+   .session_id=s->c.session_id,.stage=i};
+  CHECK(!mech(s->ring,XDEV_EXT_MECH_OP_STAGE_CAPS,(uintptr_t)&c[i]),"STAGE_CAPS after CREATE");
+  printf("XDEV_EXT_ORDERED_STAGE_CAPS stage=%u family=%u export=%u reach=%u mapping=%u queue=%u "
+         "visibility=%u last_use=%u invalidation=%u\n",i,c[i].family,c[i].export_authority,
+         c[i].reachability,c[i].requester_mapping,c[i].native_queue,c[i].producer_visibility,
+         c[i].last_use_quiescence,c[i].invalidation);
+ }
+ CHECK(c[0].family==XDEV_EXT_FAMILY_COMPUTE&&c[0].export_authority==XDEV_EXT_CAP_ESTABLISHED,
+       "USER stage: compute family over an authority-checked VRAM pool");
+ CHECK(c[0].producer_visibility==XDEV_EXT_CAP_OWNER_ASSERTED&&c[0].last_use_quiescence==XDEV_EXT_CAP_OWNER_ASSERTED,
+       "USER stage: visibility and last use are the owner's per-batch record, not a kernel proof");
+ CHECK(c[0].invalidation==XDEV_EXT_CAP_ESTABLISHED,
+       "USER stage: region invalidation is checked by the kernel at hand-out and at the record");
+}
 static void create(struct session *s,int allocation,int ng,__u64 slba)
 {
  struct io_uring_params p={0};memset(s,0,sizeof(*s));
@@ -93,6 +114,7 @@ static void create(struct session *s,int allocation,int ng,__u64 slba)
  s->c.st[1]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,
   .direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.fd=ng,.arg0=slba,.arg1=MESSAGES*GROUP/512};
  CHECK(!mech(s->ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&s->c),"strict PEER USER -> NVMe CREATE");
+ check_caps(s);
  struct xdev_ext_mech_start r={.session_id=s->c.session_id,.nr_batches=MESSAGES,.first_seq=FIRST,
   .flags=XDEV_EXT_MECH_START_F_USER_FRAMES|XDEV_EXT_MECH_START_F_ORDERED_FRAMES|XDEV_EXT_MECH_START_F_RECYCLE,
   .nr_user_frames=4,.user_frames=(uintptr_t)selected};
