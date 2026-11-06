@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: GPL-2.0
 """Console oracle of the real-GPU guest cases."""
 
+import contextlib
 import importlib.util
+import io
 from pathlib import Path
+import tempfile
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -19,14 +22,27 @@ def load():
 CASES = ('ce-chain-d', 'ce-chain-a', 'peer-nvme', 'dmabuf-peer')
 
 
-def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', extra=''):
+GEFORCE_CAPS = 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 pointer_rdma=0'
+# The case lines xdev_ext_gpu_guest.sh prints for CUDA's refusals.
+UNSUPPORTED = {
+    'peer-nvme': 'reason=cuda-no-gpudirect-rdma step=register errno=-22 gpu_direct_rdma=0 pointer_rdma=0',
+    'dmabuf-peer': 'reason=cuda-no-dma-buf dma_buf_supported=0',
+}
+
+
+def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', extra='', caps=None):
     results = dict.fromkeys(CASES, 'PASS') if results is None else results
-    failed = sum(value != 'PASS' for value in results.values())
+    failed = sum(value not in ('PASS', 'UNSUPPORTED') for value in results.values())
+    unsupported = sum(value == 'UNSUPPORTED' for value in results.values())
+    summary = 'FAIL' if failed else 'UNSUPPORTED' if unsupported else 'PASS'
     lines = ['[    1.0] boot',
              f'XDEV_EXT_GPU_MODULES={modules} release=590.48.01 device=10de:2b85 bdf=0000:01:00.0']
-    lines += [f'XDEV_EXT_GPU_CASE name={name} result={value} bytes=32768'
+    if caps:
+        lines.append(caps)
+    lines += [f'XDEV_EXT_GPU_CASE name={name} result={value} ' +
+              (UNSUPPORTED.get(name, 'reason=none') if value == 'UNSUPPORTED' else 'bytes=32768')
               for name, value in results.items()]
-    lines.append(f'XDEV_EXT_GPU_GUEST={"PASS" if not failed else "FAIL"} failed={failed}')
+    lines.append(f'XDEV_EXT_GPU_GUEST={summary} failed={failed} unsupported={unsupported}')
     lines.append(extra)
     lines.append(unload)
     return '\n'.join(lines) + '\n'
@@ -86,6 +102,57 @@ class GpuConsole(unittest.TestCase):
         text = console() + 'XDEV_EXT_GPU_CASE name=ce-chain-a result=PASS\n'
         result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
         self.assertEqual(result['verdict'], 'FAIL')
+
+    def geforce(self, **changes):
+        results = dict(zip(CASES, ('PASS', 'PASS', 'UNSUPPORTED', 'UNSUPPORTED')))
+        results.update(changes)
+        return results
+
+    def test_cuda_refusals_with_capability_evidence_are_unsupported_not_pass(self):
+        text = console(self.geforce(), caps=GEFORCE_CAPS)
+        result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
+        self.assertEqual(result['verdict'], 'UNSUPPORTED')
+        self.assertEqual(result['unsupported'], ['dmabuf-peer', 'peer-nvme'])
+        self.assertEqual(result['problems'], [])
+        self.assertEqual(result['caps']['gpu_direct_rdma'], '0')
+
+    def test_an_unsupported_verdict_never_exits_zero(self):
+        with tempfile.TemporaryDirectory(prefix='gpu-validate-') as directory:
+            log, out = Path(directory) / 'guest.log', Path(directory) / 'result.json'
+            log.write_text(console(self.geforce(), caps=GEFORCE_CAPS))
+            with contextlib.redirect_stdout(io.StringIO()) as printed:
+                status = self.mod.main([str(log), str(out), '--release', '590.48.01',
+                                        '--device', '10de:2b85'])
+        self.assertEqual(status, 1)
+        self.assertIn('XDEV_EXT_GPU_VFIO=UNSUPPORTED ', printed.getvalue())
+
+    def test_unsupported_without_matching_cuda_evidence_fails(self):
+        for name, caps, results in (
+                ('no capability line', None, self.geforce()),
+                ('CUDA reports RDMA and dma_buf',
+                 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1', self.geforce()),
+                ('block RDMA-capable', GEFORCE_CAPS.replace('pointer_rdma=0', 'pointer_rdma=1'),
+                 self.geforce(**{'dmabuf-peer': 'PASS'})),
+                ('probe failed', 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 probe=failed', self.geforce()),
+                ('a CE chain is never unsupported', GEFORCE_CAPS, self.geforce(**{'ce-chain-d': 'UNSUPPORTED'}))):
+            with self.subTest(name):
+                result = self.mod.validate(console(results, caps=caps), release='590.48.01',
+                                           device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn('UNSUPPORTED without', ' '.join(result['problems']))
+
+    def test_unsupported_reason_must_match_the_case(self):
+        text = console(self.geforce(), caps=GEFORCE_CAPS).replace(
+            'step=register errno=-22', 'step=create errno=-22')
+        result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('peer-nvme', ' '.join(result['problems']))
+
+    def test_a_failed_case_beside_unsupported_ones_fails(self):
+        text = console(self.geforce(**{'ce-chain-a': 'FAIL'}), caps=GEFORCE_CAPS)
+        result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('case ce-chain-a FAIL', result['problems'])
 
     def test_prefixed_tool_output_is_not_mistaken_for_verdicts(self):
         text = console({'ce-chain-d': 'PASS', 'ce-chain-a': 'PASS', 'peer-nvme': 'PASS'})

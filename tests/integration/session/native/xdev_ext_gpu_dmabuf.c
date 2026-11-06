@@ -4,6 +4,11 @@
  *
  *   xdev_ext_gpu_dmabuf --bdf PCI_BDF --bytes N --expect SOURCE_FILE
  *       --group-bytes G --frame-bytes F -- PROGRAM ARG... ('{fd}' -> fd)
+ *   xdev_ext_gpu_dmabuf --caps --bdf PCI_BDF
+ *
+ * --caps prints what CUDA reports for that GPU: GPUDirect RDMA and dma_buf
+ * device support, and whether a fresh 64 KiB cuMemAlloc block can be used
+ * with the GPUDirect RDMA API (nvidia_p2p_get_pages*), then frees it.
  *
  * Allocates N bytes of VRAM on the CUDA device with that PCI address, exports
  * the whole range with cuMemGetHandleForAddressRange(DMA_BUF_FD), registers
@@ -31,7 +36,9 @@ typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
 typedef unsigned long long CUdeviceptr;
+#define CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED 116
 #define CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED 124
+#define CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE 15
 #define CU_MEM_RANGE_HANDLE_TYPE_DMA_BUF_FD 1
 
 static struct {
@@ -49,6 +56,7 @@ static struct {
 	CUresult (*to_host)(void *, CUdeviceptr, size_t);
 	CUresult (*sync)(void);
 	CUresult (*handle)(void *, CUdeviceptr, size_t, int, unsigned long long);
+	CUresult (*pointer_attribute)(void *, int, CUdeviceptr);
 } cu;
 
 static int load(void)
@@ -76,12 +84,71 @@ static int load(void)
 	LOAD(to_host, "cuMemcpyDtoH_v2");
 	LOAD(sync, "cuCtxSynchronize");
 	LOAD(handle, "cuMemGetHandleForAddressRange");
+	LOAD(pointer_attribute, "cuPointerGetAttribute");
 #undef LOAD
 	return 0;
 }
 
 #define CHECK(call, what) do { CUresult r_ = (call); \
 	if (r_) { fprintf(stderr, "%s failed: CUDA status %d\n", what, r_); goto out; } } while (0)
+
+/* The CUDA device whose PCI bus id is bdf, or -1; text gets that id. */
+static CUdevice find_device(const char *bdf, char *text, int size)
+{
+	int n, i;
+
+	if (cu.init(0) || cu.count(&n))
+		return -1;
+	for (i = 0; i < n; i++) {
+		CUdevice candidate;
+
+		if (cu.get(&candidate, i) || cu.bus_id(text, size, candidate))
+			return -1;
+		if (!strcasecmp(text, bdf))
+			return candidate;
+	}
+	return -1;
+}
+
+static int caps(const char *bdf)
+{
+	CUdeviceptr pointer = 0;
+	CUcontext context = NULL;
+	CUdevice device;
+	int rdma = -1, dma_buf = -1, pointer_rdma = -1, ret = 1;
+	char text[32];
+
+	if (load())
+		return 1;
+	device = find_device(bdf, text, sizeof(text));
+	if (device < 0) {
+		fprintf(stderr, "no CUDA device at %s\n", bdf);
+		return 1;
+	}
+	CHECK(cu.attribute(&rdma, CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED, device),
+	      "cuDeviceGetAttribute(GPU_DIRECT_RDMA_SUPPORTED)");
+	CHECK(cu.attribute(&dma_buf, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, device),
+	      "cuDeviceGetAttribute(DMA_BUF_SUPPORTED)");
+	CHECK(cu.retain(&context, device), "cuDevicePrimaryCtxRetain");
+	CHECK(cu.set(context), "cuCtxSetCurrent");
+	CHECK(cu.alloc(&pointer, 65536), "cuMemAlloc");
+	/* A refusal leaves -1: never evidence that the API is unsupported. */
+	if (cu.pointer_attribute(&pointer_rdma, CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE,
+				 pointer))
+		pointer_rdma = -1;
+	printf("XDEV_EXT_GPU_CAPS bdf=%s gpu_direct_rdma=%d dma_buf=%d pointer_rdma=%d\n",
+	       text, rdma, dma_buf, pointer_rdma);
+	ret = 0;
+out:
+	fflush(stdout);
+	if (pointer && cu.free(pointer)) {
+		fprintf(stderr, "cuMemFree failed\n");
+		ret = 1;
+	}
+	if (context)
+		cu.release(device);
+	return ret;
+}
 
 static int read_file(const char *path, unsigned char **data, size_t *size)
 {
@@ -111,6 +178,8 @@ int main(int argc, char **argv)
 	int export_fd = -1, allocation = -1, control = -1, ret = 1, i, n, program = -1;
 	char text[32], fd_text[16];
 
+	if (argc == 4 && !strcmp(argv[1], "--caps") && !strcmp(argv[2], "--bdf"))
+		return caps(argv[3]);
 	for (i = 1; i < argc; i++) {
 		if (!strcmp(argv[i], "--") && i + 1 < argc) { program = i + 1; break; }
 		if (i + 1 >= argc) return 2;
