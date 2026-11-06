@@ -259,7 +259,7 @@ p.write_text(''.join(k+'='+v+'\\n' for k,v in values.items()))
             prefix = '''set -euo pipefail
 SRC=$1; BUILD=$SRC/build; EV=$SRC; DEBUG_HELPER=$SRC/debug.py
 XDOMAIN=1; MECHANISM_VARIANTS=0; RUN_ONLY=0; CE_SIM=0; LIFECYCLE=0; FENCE_CHECK=0
-SOCKET_REQUIRED=0; COMPAT=0; PEER=0; DEBUG_LOCKING=1; PREPARE_ONLY=1
+SOCKET_REQUIRED=0; COMPAT=0; PEER=0; VIOMMU=0; DEBUG_LOCKING=1; PREPARE_ONLY=1
 PROVIDER_CASE=normal
 verify_socket_config() { :; }
 kmake() {
