@@ -48,8 +48,7 @@ are 0.56 to 5.00 GiB.
               "seed": 1, "slba": 2048, "nlb": 10485760}]}
 ```
 
-A restore moves whole groups (default 256 KiB, the most NHI frames one
-XDOMAIN group carries). Host 1's NVMe stage reads slot `key mod slots` of its
+A restore moves whole groups (default 128 KiB). Host 1's NVMe stage reads slot `key mod slots` of its
 window, where slots is the window length in groups. A restore with ordinal r
 uses keys `r × slots + slot0` to `r × slots + slot0 + groups − 1`, where slot0
 is the object's first slot, so key i reads group i of the object and every
@@ -65,9 +64,14 @@ GPU memory after the final notification. Frames lent this way return to the
 application instead of being reused inside the START; a START without user
 frames would reuse frames and overwrite earlier groups. Host 1 recycles a
 staging ring of depth groups (`RECYCLE`). One START lends at most 65,536 frame
-indices (libxdev_ext), so a 5 GiB restore needs frames of at least 128 KiB;
-the default geometry is 256 KiB groups of two 128 KiB frames, depth 32 and an
-XDOMAIN window of 32 groups (`arg1 = window << 32`).
+indices (libxdev_ext), so a 5 GiB restore needs frames of at least 128 KiB.
+The default geometry is 128 KiB groups of one 128 KiB frame, depth 32 and an
+XDOMAIN window of 32 groups (`arg1 = window << 32`). A group may carry up to
+256 KiB (64 NHI frames), but nvme-pci caps one transfer at
+`dma_opt_mapping_size()` (drivers/nvme/host/pci.c), which is 128 KiB with an
+IOMMU DMA domain (`iova_rcache_range()`, drivers/iommu/iova.c). With larger
+groups on such a host the NVMe program refuses every batch (`max_nlb`) and the
+first restore aborts at BUILD; the KVM run below checks that case.
 
 ## Worker protocol
 
@@ -113,7 +117,7 @@ default, or pass `--xdomain-prog` to load it as a PRIVATE instance.
 # host 1
 kv_restore serve --nvme /dev/ng0n1 --nvme-prog build/kv_nvme_read.bpf.o --listen HOST1_TB0:7700 \
   --service SERVICE --window-slba 2048 --window-nlb 83886080 --lba-bytes 512 \
-  --group-bytes 262144 --frame-bytes 131072 --depth 32 --window 32 --early
+  --group-bytes 131072 --frame-bytes 131072 --depth 32 --window 32 --early
 # host 2
 python3 run.py run --arm xdev-ext --manifest kv.json --object qwen3-14b-ctx0 --repetitions 10 \
   --host1-agent HOST1_TB0:7701 --token-file token --drop-caches-host1 --drop-caches-host2 \
@@ -167,6 +171,9 @@ and runs `kv_restore local-verify`: NVMe READ with the key-based program into
 a system-heap dma-buf PEER pool, with host 2's ordered destination placement.
 The oracle requires pattern bytes in each destination range, poison
 everywhere else, a digest equal to the host's, exact cumulative counts,
-planned refusals before any START and a clean exit. The guest run exercises
+planned refusals before any START and a clean exit. Run C uses 256 KiB groups:
+when the guest reports a 128 KiB maximum transfer (`--viommu`), its first
+restore must abort at BUILD with no native command and every later request
+must be refused. The guest run exercises
 neither XDOMAIN, nor GPU memory, nor Thunderbolt; the two-host XDOMAIN chain
 is composed only in the host fixture `tests/network/xdomain/chain`.

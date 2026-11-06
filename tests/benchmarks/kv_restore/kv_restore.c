@@ -18,7 +18,9 @@
  *   -> KV_READY {json}            setup done (or KV_ERROR {json}, exit 1)
  *   <- GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X verify=0|1
  *   -> KV_RESULT {json}           one restore (restore, local-verify)
- *   <- QUIT                       -> KV_BYE {json}, exit 0 (1 if retained)
+ *   <- QUIT                       -> KV_BYE {json}: STOP's result (the session's
+ *                                    final error) and whether resources were released;
+ *                                    exit 1 if retained or a release failed
  * serve reads RESTORE/DONE lines from host 2 over TCP and logs KV_SERVED.
  * Every role refuses a plan whose keys do not exceed every key it already
  * used.  --dry-run opens no device: it validates options and answers GO with
@@ -923,21 +925,23 @@ static int serve_loop(struct worker *wk)
 	}
 }
 
-static int teardown(struct worker *wk, bool *retained)
+/* STOP's own result (the session's final error) is reported apart from the
+ * release of this process's resources. */
+static int teardown(struct worker *wk, bool *retained, int *stop_error)
 {
 	int ret = 0, r;
 
 	*retained = false;
+	*stop_error = 0;
 	if (wk->s) {
 		r = xdev_ext_session_stop(wk->s);
-		/* A stopped session after an error reports that error; keep it. */
-		if (r && r != -ENOTCONN)
-			ret = r;
+		if (r != -ENOTCONN)
+			*stop_error = r;
 		if (xdev_ext_session_close(wk->s)) {
 			/* DMA ownership unknown: the session keeps every resource. */
 			*retained = true;
 			wk->s = NULL;
-			return ret ? ret : -EBUSY;
+			return -EBUSY;
 		}
 		wk->s = NULL;
 	}
@@ -1053,7 +1057,7 @@ int main(int argc, char **argv)
 	char buf[LINE_MAX_BYTES], where[96];
 	const char *step = "options";
 	bool retained = false;
-	int ret;
+	int ret, stop_error = 0;
 
 	signal(SIGPIPE, SIG_IGN);
 	ret = parse(argc, argv, &wk.o);
@@ -1068,7 +1072,7 @@ int main(int argc, char **argv)
 	if (ret) {
 		snprintf(where, sizeof(where), "setup: %s", step);
 		emit_error(where, ret);
-		teardown(&wk, &retained);
+		teardown(&wk, &retained, &stop_error);
 		return 1;
 	}
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
@@ -1099,9 +1103,9 @@ int main(int argc, char **argv)
 			handle_go(&wk, &l);
 		}
 	}
-	ret = teardown(&wk, &retained) ?: ret;
-	printf("KV_BYE {\"error\": %d, \"retained\": %s, \"restores\": %" PRIu64 "}\n", ret,
-	       retained ? "true" : "false", wk.restores);
+	ret = teardown(&wk, &retained, &stop_error) ?: ret;
+	printf("KV_BYE {\"error\": %d, \"stop_error\": %d, \"retained\": %s, \"restores\": %"
+	       PRIu64 "}\n", ret, stop_error, retained ? "true" : "false", wk.restores);
 	fflush(stdout);
 	return retained || ret ? 1 : 0;
 }

@@ -21,16 +21,22 @@ gv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gv)
 
 
-def console(expected, edit=None):
+def console(expected, edit=None, max_kb=512):
     """Lines a correct guest prints; edit(run, index, record) may change one."""
-    out = ['KV_GUEST_FACT lba_bytes=512']
-    for e in expected:
+    out = ['KV_GUEST_FACT lba_bytes=512', f'KV_GUEST_FACT max_hw_sectors_kb={max_kb}']
+    for e in gv.adjust(expected, max_kb * 1024):
         out.append(f'KV_GUEST_RUN_BEGIN {e["name"]}')
         records = [('KV_READY', dict(role='local-verify', dry_run=False, session_id=7,
                                      pool_frames=e['pool_frames']))]
         t = 1000
         for r in e['results']:
-            if r['error']:
+            if r.get('build_abort'):
+                body = dict(run=r['run'], role='local-verify', ok=False, error=r['error'],
+                            dry_run=False, bytes=0, started=True, t0_ns=t, t1_ns=t + 9,
+                            latency_ns=9, worker_cpu_us=1, wait_err=r['error'], verified=None,
+                            stats=dict(done=0, abort=1, inflight=0, sequestered=0,
+                                       last_err=r['error'], submitted=[0, 0], completed=[0, 0]))
+            elif r['error']:
                 body = dict(run=r['run'], role='local-verify', ok=False, error=r['error'],
                             dry_run=False, bytes=0, started=False, t0_ns=0, t1_ns=0, latency_ns=0,
                             worker_cpu_us=0, wait_err=0, verified=None)
@@ -45,7 +51,8 @@ def console(expected, edit=None):
                                        completed=[r['cumulative'], 0]))
                 t += 100
             records.append(('KV_RESULT', body))
-        records.append(('KV_BYE', dict(error=0, retained=False, restores=e['restores'])))
+        records.append(('KV_BYE', dict(error=0, stop_error=e['stop_error'], retained=False,
+                                        restores=e['restores'])))
         for i, (kind, body) in enumerate(records):
             if edit:
                 kind, body = edit(e['name'], i, kind, copy.deepcopy(body))
@@ -62,7 +69,27 @@ class Oracle(unittest.TestCase):
 
     def test_correct_console_passes(self):
         report = gv.validate(console(self.expected), self.expected)
+        self.assertEqual(len(report), 7)
+        # With a 128 KiB maximum transfer the 256 KiB run must abort, not pass.
+        report = gv.validate(console(self.expected, max_kb=128), self.expected)
         self.assertEqual(len(report), 5)
+        with self.assertRaises(gv.OracleError):
+            gv.validate(console(self.expected, max_kb=128).replace(
+                'max_hw_sectors_kb=128', 'max_hw_sectors_kb=512'), self.expected)
+
+    def test_oversize_group_mutations_fail(self):
+        def edit_c(index, change):
+            def edit(name, i, kind, body):
+                return change(kind, body) if name == 'C' and i == index else (kind, body)
+            return console(self.expected, edit, max_kb=128)
+        for why, text in {
+            'abort with a native command': edit_c(1, lambda k, b: (k, dict(b, stats=dict(
+                b['stats'], submitted=[1, 0])))),
+            'later restore accepted': edit_c(2, lambda k, b: (k, dict(b, error=-114))),
+            'stop error hidden': edit_c(3, lambda k, b: (k, dict(b, stop_error=0))),
+        }.items():
+            with self.subTest(why=why), self.assertRaises(gv.OracleError):
+                gv.validate(text, self.expected)
 
     def mutate(self, run, index, change):
         def edit(name, i, kind, body):
@@ -97,6 +124,7 @@ class Oracle(unittest.TestCase):
             'bytes differ': ('B', 1, field('bytes', 1)),
             'first_seq differs': ('A', 2, lambda k, b: (k, dict(b, plan=dict(b['plan'], first_seq=1)))),
             'retained at exit': ('A', 6, field('retained', True)),
+            'stop error reported': ('B', 3, field('stop_error', -125)),
             'missing result': ('B', 2, lambda k, b: (None, b)),
             'dry run': ('B', 0, field('dry_run', True)),
             'wrong pool': ('A', 0, field('pool_frames', 64)),
@@ -120,8 +148,8 @@ class Oracle(unittest.TestCase):
     def test_planned_refusals_must_have_their_stated_reason(self):
         original = gv.RUNS[0]['go']
         bad = list(original)
-        # Eight Qwen3-8B tokens are not whole groups: refused with EINVAL, not EALREADY.
-        bad[3] = ('a4', 'qwen3-8b-ctx', 8, 3, 0, -gv.errno.EALREADY)
+        # One Qwen3-8B token is not whole groups: refused with EINVAL, not EALREADY.
+        bad[3] = ('a4', 'qwen3-8b-ctx', 1, 3, 0, -gv.errno.EALREADY)
         gv.RUNS[0]['go'] = bad
         try:
             with self.assertRaises(gv.kl.LayoutError):

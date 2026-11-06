@@ -361,7 +361,9 @@ def cmd_recompute(args):
 # ---- arguments -----------------------------------------------------------------------
 
 def add_geometry(p):
-    p.add_argument('--group-bytes', type=int, default=256 * KIB)
+    # 128 KiB: nvme-pci caps one transfer at dma_opt_mapping_size(), 128 KiB with an
+    # IOMMU DMA domain; a larger group is refused at BUILD on such a host.
+    p.add_argument('--group-bytes', type=int, default=128 * KIB)
     p.add_argument('--frame-bytes', type=int, default=128 * KIB)
     p.add_argument('--depth', type=int, default=32)
     p.add_argument('--window', type=int, default=32)

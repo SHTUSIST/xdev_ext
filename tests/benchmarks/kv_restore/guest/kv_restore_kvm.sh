@@ -131,7 +131,7 @@ done
 if [ -n "$src" ]; then
 	echo "KV_GUEST_FACT lba_bytes=$(cat /sys/block/${src}n1/queue/logical_block_size)"
 	echo "KV_GUEST_FACT max_hw_sectors_kb=$(cat /sys/block/${src}n1/queue/max_hw_sectors_kb)"
-	for run in A B; do
+	for run in A B C; do
 		echo "KV_GUEST_RUN_BEGIN $run"
 		/opt/kv/kv_restore local-verify --nvme "/dev/ng${src#nvme}n1" --nvme-prog /opt/kv/kv_nvme_read.bpf.o \
 			$(cat /opt/kv/args-$run.txt) < /opt/kv/go-$run.txt

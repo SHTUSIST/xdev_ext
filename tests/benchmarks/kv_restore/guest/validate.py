@@ -53,17 +53,24 @@ MANIFEST = {
 }
 # Two worker invocations (geometries); each GO is (run, object, tokens, ordinal, dst0, error).
 RUNS = [
-    {'name': 'A', 'geometry': dict(group_bytes=256 * KIB, frame_bytes=128 * KIB, depth=4,
-                                   window=4, early=False), 'pool_frames': 128,
+    {'name': 'A', 'geometry': dict(group_bytes=128 * KIB, frame_bytes=64 * KIB, depth=4,
+                                   window=4, early=False), 'pool_frames': 256,
      'go': [('a1', 'qwen3-14b-ctx', 32, 1, 0, 0),
             ('a2', 'qwen3-8b-ctx', 64, 2, 5, 0),
-            ('a3', 'qwen3-14b-ctx', 16, 3, 70, 0),
+            ('a3', 'qwen3-14b-ctx', 16, 3, 200, 0),
             ('a4', 'qwen3-14b-ctx', 16, 3, 0, -errno.EALREADY),
-            ('a5', 'qwen3-8b-ctx', 64, 4, 100, -errno.ENOSPC)]},
-    {'name': 'B', 'geometry': dict(group_bytes=256 * KIB, frame_bytes=256 * KIB, depth=8,
-                                   window=8, early=False), 'pool_frames': 64,
+            ('a5', 'qwen3-8b-ctx', 64, 4, 120, -errno.ENOSPC)]},
+    {'name': 'B', 'geometry': dict(group_bytes=128 * KIB, frame_bytes=128 * KIB, depth=8,
+                                   window=8, early=False), 'pool_frames': 128,
      'go': [('b1', 'qwen3-8b-ctx', 64, 1, 3, 0),
-            ('b2', 'qwen3-14b-ctx', 32, 7, 40, 0)]},
+            ('b2', 'qwen3-14b-ctx', 32, 7, 80, 0)]},
+    # 256 KiB groups exceed a namespace whose maximum transfer is 128 KiB (nvme-pci
+    # caps it at dma_opt_mapping_size(), 128 KiB with an IOMMU DMA domain): then the
+    # first restore must abort at BUILD and the session must refuse every later one.
+    {'name': 'C', 'geometry': dict(group_bytes=256 * KIB, frame_bytes=128 * KIB, depth=4,
+                                   window=4, early=False), 'pool_frames': 128,
+     'go': [('c1', 'qwen3-14b-ctx', 32, 1, 0, 0),
+            ('c2', 'qwen3-8b-ctx', 64, 2, 40, 0)]},
 ]
 
 
@@ -115,7 +122,7 @@ def expectations():
                             digest=fnv1a(kl.pattern_bytes(obj.seed, 0, size)))
             results.append(item)
         out.append(dict(name=run['name'], pool_frames=run['pool_frames'], results=results,
-                        restores=len(results)))
+                        restores=len(results), group_bytes=run['geometry']['group_bytes']))
     return out
 
 
@@ -141,6 +148,26 @@ def make_plan(output):
                 expectations=expectations())
     (out / 'plan.json').write_text(json.dumps(plan, indent=2, sort_keys=True) + '\n')
     return plan
+
+
+def adjust(expected, max_transfer):
+    """Expected outcomes on a namespace whose maximum transfer is max_transfer bytes."""
+    out = json.loads(json.dumps(expected))
+    for e in out:
+        e['stop_error'] = 0
+        if e['group_bytes'] <= max_transfer:
+            continue
+        dirty = False
+        for r in e['results']:
+            if dirty:
+                name = r['run']
+                r.clear()
+                r.update(run=name, error=-errno.ESTALE)
+            elif not r['error']:
+                r.update(error=-errno.ECANCELED, build_abort=True)
+                dirty = True
+        e['stop_error'] = -errno.ECANCELED if dirty else 0
+    return out
 
 
 def _sections(text):
@@ -175,6 +202,9 @@ def validate(text, expected):
     runs, facts = _sections(text)
     if facts.get('lba_bytes') != '512':
         raise OracleError(f'guest namespace LBA size {facts.get("lba_bytes")!r}, expected 512')
+    if not facts.get('max_hw_sectors_kb', '').isdigit():
+        raise OracleError('guest did not report the namespace maximum transfer')
+    expected = adjust(expected, int(facts['max_hw_sectors_kb']) * 1024)
     if set(runs) != {e['name'] for e in expected}:
         raise OracleError(f'guest runs {sorted(runs)}, expected {[e["name"] for e in expected]}')
     report = []
@@ -193,6 +223,12 @@ def validate(text, expected):
         for (_, got), want_r in zip(r['lines'][1:-1], e['results']):
             kp.check_result(got, want_r['run'])
             tag = f'{e["name"]}/{want_r["run"]}'
+            if want_r.get('build_abort'):
+                st = got.get('stats') or {}
+                if got['ok'] or got['error'] != want_r['error'] or got.get('started') is not True or \
+                        (st.get('done'), st.get('abort'), st.get('submitted', [None])[0]) != (0, 1, 0):
+                    raise OracleError(f'{tag}: expected a BUILD abort with no native command, got {got}')
+                continue
             if want_r['error']:
                 if got['ok'] or got['error'] != want_r['error'] or got.get('started') is not False:
                     raise OracleError(f'{tag}: expected refusal {want_r["error"]} before START, got {got}')
@@ -214,7 +250,7 @@ def validate(text, expected):
                                   'done/submitted/completed and nothing aborted or retained')
             report.append(dict(run=tag, bytes=got['bytes'], groups=want_r['groups'],
                                digest=got['digest']))
-        if bye != dict(error=0, retained=False, restores=e['restores']):
+        if bye != dict(error=0, stop_error=e['stop_error'], retained=False, restores=e['restores']):
             raise OracleError(f'run {e["name"]}: KV_BYE {bye}')
     return report
 

@@ -155,7 +155,7 @@ class Runs(Base):
                       '--prefixes', '16,32', '--repetitions', '3', '--host1-agent', address,
                       '--token-file', str(token), '--output', str(out), '--idle-seconds', '0.05',
                       '--worker-argv', json.dumps([sys.executable, '-I', str(fake)]),
-                      '--drop-caches-host1', '--group-bytes', str(256 * 1024)])
+                      '--drop-caches-host1', '--group-bytes', str(128 * 1024)])
         self.assertEqual(rc, 0)
         rows = [json.loads(l) for l in (out / 'results.jsonl').read_text().splitlines()]
         self.assertEqual(len(rows), 6)
@@ -217,7 +217,7 @@ class Runs(Base):
         argv = kr.worker_argv(args, kl.load_manifest(self.manifest))
         self.assertEqual(argv[:2], ['/opt/kv_restore', 'restore'])
         for flag, value in (('--window-slba', '2048'), ('--window-nlb', str(32 * MIB // 512)),
-                            ('--lba-bytes', '512'), ('--group-bytes', str(256 * 1024)),
+                            ('--lba-bytes', '512'), ('--group-bytes', str(128 * 1024)),
                             ('--frame-bytes', str(128 * 1024)), ('--depth', '32'), ('--window', '32'),
                             ('--peer', '10.9.0.1:7700'), ('--service', 'xdevext-1')):
             self.assertEqual(argv[argv.index(flag) + 1], value, flag)
