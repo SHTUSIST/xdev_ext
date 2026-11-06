@@ -135,6 +135,9 @@ CLI_TIMEOUT_MS=$((60000 * TIMEOUT_FACTOR))
 RX_TIMEOUT_MS=$((15000 * TIMEOUT_FACTOR))
 QEMU_TIMEOUT_SECONDS=$((150 * TIMEOUT_FACTOR))
 if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then QEMU_TIMEOUT_SECONDS=$MECHANISM_VARIANTS_TIMEOUT; fi
+# GPU guests boot GSP firmware, CUDA and four real-GPU cases before the
+# normal campaign; give them their own bounded budget.
+if (( ${GPU:-0} )); then QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + 450)); fi
 # Campaign length is independent of the bounded in-flight pool/window.
 [[ "$GROUP_COUNT" =~ ^[1-9][0-9]{0,3}$ && "$GROUP_COUNT" -le 1024 ]]
 [[ -n "$DEPTH" ]] || DEPTH=$((RELIABLE ? 8 : (GROUP_COUNT < 64 ? GROUP_COUNT : 64)))
