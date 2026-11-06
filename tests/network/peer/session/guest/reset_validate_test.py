@@ -22,7 +22,7 @@ def console(cases=oracle.CASES):
 
 class ResetOracle(unittest.TestCase):
     def test_complete_console_passes(self):
-        self.assertEqual(oracle.check_log(console())['checks'], 42)
+        self.assertEqual(oracle.check_log(console())['checks'], 47)
 
     def rejects(self, text):
         with self.assertRaises(ValueError):
@@ -33,7 +33,7 @@ class ResetOracle(unittest.TestCase):
                                        'not ok 13 - error-status: check 13', 1))
 
     def test_failed_case_verdict(self):
-        self.rejects(console().replace('XDEV_EXT_PEER_RESET_CASE=owner-open PASS checks=10',
+        self.rejects(console().replace('XDEV_EXT_PEER_RESET_CASE=owner-open PASS checks=11',
                                        'XDEV_EXT_PEER_RESET_CASE=owner-open FAIL', 1))
 
     def test_missing_case(self):
@@ -46,7 +46,7 @@ class ResetOracle(unittest.TestCase):
         self.rejects(console().replace('ok 7 - error-status: check 7\n', '', 1))
 
     def test_count_mismatch(self):
-        self.rejects(console().replace('timeout-cancel PASS checks=10', 'timeout-cancel PASS checks=9', 1))
+        self.rejects(console().replace('timeout-cancel PASS checks=11', 'timeout-cancel PASS checks=10', 1))
 
     def test_skip_directive(self):
         self.rejects(console().replace('ok 3 - control: check 3', 'ok 3 - control: check 3 # SKIP', 1))

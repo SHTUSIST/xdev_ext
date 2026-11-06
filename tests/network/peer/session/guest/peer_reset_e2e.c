@@ -32,16 +32,16 @@ static unsigned int checks;
 
 struct env { const char *ng, *ctrl, *other, *disk; int ctl, ngfd; };
 
+/* One observer for the whole case: its own open/close would move the counters. */
+static int observer = -1;
 static struct peer_sw_stats stats(void)
 {
 	struct peer_sw_stats s = {};
-	int fd = open("/dev/xdev_ext_peer_sw", O_RDWR | O_CLOEXEC);
 
-	if (fd < 0 || ioctl(fd, PEER_SW_STATS, &s)) {
+	if (ioctl(observer, PEER_SW_STATS, &s)) {
 		printf("not ok - %s: provider counters unavailable\n", case_name);
 		exit(1);
 	}
-	close(fd);
 	return s;
 }
 static void put(const char *path, const char *value)
@@ -168,8 +168,12 @@ static void case_error_status(struct env *e)
 	CHECK(held(stats(), before), "UNKNOWN keeps the allocation pinned and mapped");
 	close(alloc); close(provider);
 	CHECK(held(stats(), before), "closing the owner releases nothing");
+	close(observer); /* an open observer would hold the module itself */
 	CHECK(syscall(SYS_delete_module, "xdev_ext_peer_sw", O_NONBLOCK) == -1 && errno == EWOULDBLOCK,
 	      "the held region keeps the provider module loaded");
+	observer = open("/dev/xdev_ext_peer_sw", O_RDWR | O_CLOEXEC);
+	CHECK(observer >= 0, "reopen the provider counters");
+	before.closes++; /* the observer's own close */
 	reset_controller(e->other);
 	sleep_ms(1500);
 	CHECK(held(stats(), before), "a completed reset of another controller is not evidence");
@@ -233,13 +237,15 @@ int main(int argc, char **argv)
 	e.ctl = open("/dev/xdev_ext_peer", O_RDWR | O_CLOEXEC);
 	e.ngfd = open(e.ng, O_RDONLY | O_CLOEXEC);
 	CHECK(e.ctl >= 0 && e.ngfd >= 0, "peer control and source generic namespace");
+	observer = open("/dev/xdev_ext_peer_sw", O_RDWR | O_CLOEXEC);
+	CHECK(observer >= 0, "provider counters");
 	wait_live(e.ctrl); wait_live(e.other);
 	if (!strcmp(case_name, "control")) case_control(&e);
 	else if (!strcmp(case_name, "error-status")) case_error_status(&e);
 	else if (!strcmp(case_name, "timeout-cancel")) case_timeout_cancel(&e);
 	else if (!strcmp(case_name, "owner-open")) case_owner_open(&e);
 	else { printf("not ok - unknown case %s\n", case_name); return 2; }
-	close(e.ngfd); close(e.ctl);
+	close(e.ngfd); close(e.ctl); close(observer);
 	printf("XDEV_EXT_PEER_RESET_CASE=%s PASS checks=%u\n", case_name, checks);
 	return 0;
 }

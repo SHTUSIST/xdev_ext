@@ -14,9 +14,9 @@ from pathlib import Path
 import re
 import sys
 
-# Case -> check count, kept in step with peer_reset_e2e.c: four common
-# checks (opt-in, devices, two liveness waits) plus the case's own.
-CASES = (('control', 9), ('error-status', 13), ('timeout-cancel', 10), ('owner-open', 10))
+# Case -> check count, kept in step with peer_reset_e2e.c: five common
+# checks (opt-in, devices, observer, two liveness waits) plus the case's own.
+CASES = (('control', 10), ('error-status', 15), ('timeout-cancel', 11), ('owner-open', 11))
 UNLOAD_MARKER = 'XDEV_EXT_PEER_RESET_UNLOAD=PASS module=xdev_ext_peer_sw'
 EXIT_RE = re.compile(r'^XDEV_EXT_RESET_GUEST_EXIT=(\d+)$', re.M)
 CASE_RE = re.compile(r'^XDEV_EXT_PEER_RESET_CASE=(\S+) (PASS|FAIL)(?: checks=(\d+))?$')
