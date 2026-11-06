@@ -8463,6 +8463,18 @@
       "logical_path": "tests/network/xsk_wakeup/zc_wakeup_fixture.c"
     },
     {
+      "source": "tests/network/xsk_zc_tx_callers/library_fixture.c",
+      "logical_path": "tests/network/xsk_zc_tx_callers/library_fixture.c"
+    },
+    {
+      "source": "tests/network/xsk_zc_tx_callers/test_zc_tx_callers.py",
+      "logical_path": "tests/network/xsk_zc_tx_callers/test_zc_tx_callers.py"
+    },
+    {
+      "source": "tests/network/xsk_zc_tx_callers/zc_tx_rule_test.c",
+      "logical_path": "tests/network/xsk_zc_tx_callers/zc_tx_rule_test.c"
+    },
+    {
       "source": "tests/storage/family_block_poll/README.md",
       "logical_path": "tests/storage/family_block_poll/README.md"
     },

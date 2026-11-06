@@ -134,6 +134,10 @@ jobs:
         working-directory: .
         if: matrix.cc == 'gcc'
         run: python3 -B tests/network/xsk_wakeup/test_zc_wakeup.py -v
+      - name: Transmit-only zero-copy callers get XDP mode before CREATE
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: python3 -B tests/network/xsk_zc_tx_callers/test_zc_tx_callers.py -v
       - name: COUNT_FIFO public behavior, ownership and mutations
         working-directory: .
         if: matrix.cc == 'gcc'
