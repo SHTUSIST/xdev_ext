@@ -32,6 +32,48 @@ static inline int xdev_ext_peer_nvme_plan(u8 lba_shift, u64 capacity_lbas,
  return 0;
 }
 
+/* Synchronous batch: requests are admitted together before any is issued. */
+#define XDEV_EXT_PEER_NVME_BATCH_ADMIT 1
+/* Destination of one admitted request: bytes of device memory for a read,
+ * LBAs for a write. */
+struct xdev_ext_peer_nvme_range { u64 start, len; };
+/*
+ * Admit request @i of a batch whose commands may be in flight together:
+ * its namespace plan, the queue transfer limit, a device-memory span whose
+ * end is representable, and a destination disjoint from @dst[0..i-1].
+ * Sources may overlap. The provider still checks the allocation range and
+ * generation when leasing. @dst[i] and @out are written only on success.
+ */
+static inline int xdev_ext_peer_nvme_batch_admit(u8 lba_shift, u64 capacity_lbas,
+                                                u16 metadata, u8 csi, u32 max_bytes,
+                                                int write, u64 offset, u64 slba,
+                                                u32 bytes,
+                                                struct xdev_ext_peer_nvme_range *dst,
+                                                u32 i,
+                                                struct xdev_ext_peer_nvme_plan *out)
+{
+ struct xdev_ext_peer_nvme_plan plan;
+ u64 start, len;
+ u32 j;
+ int ret;
+ if (!dst || !out) return -EINVAL;
+ ret = xdev_ext_peer_nvme_plan(lba_shift, capacity_lbas, metadata, csi, slba,
+                               bytes, write, &plan);
+ if (ret) return ret;
+ if (bytes > max_bytes) return -E2BIG;
+ if (offset > ~(u64)0 - bytes) return -EOVERFLOW;
+ start = write ? plan.slba : offset;
+ len = write ? (u64)plan.nlb + 1 : bytes;
+ /* Both spans are non-empty and end within u64. */
+ for (j = 0; j < i; j++)
+  if (start < dst[j].start ? dst[j].start - start < len :
+                             start - dst[j].start < dst[j].len)
+   return -EINVAL;
+ dst[i] = (struct xdev_ext_peer_nvme_range){ .start = start, .len = len };
+ *out = plan;
+ return 0;
+}
+
 /* Provider DMA spans in payload order; outputs are CPU-endian. */
 #define XDEV_EXT_PEER_NVME_DPTR 1
 /* The NVMe data-pointer extent is the storage family's extent. */
