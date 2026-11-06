@@ -297,15 +297,21 @@ static void check_exact_run(const struct xdev_ext_mech_stats *st, const char *wh
 	      st->submitted[1] == GROUPS && st->completed[1] == GROUPS, what);
 }
 
-static void stop_ok(struct session *s, const char *what)
+/* STOP returns the session's synchronized final error and releases it. */
+static void stop_expect(struct session *s, int want, const char *what)
 {
 	struct xdev_ext_mech_stats st;
 
-	CHECK(!mech(s->ring, XDEV_EXT_MECH_OP_STOP, s->id), what);
+	CHECK_EQ(mech(s->ring, XDEV_EXT_MECH_OP_STOP, s->id), want, what);
 	memset(&st, 0, sizeof(st));
 	st.session_id = s->id;
 	CHECK(mech(s->ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&st) == -ENOENT,
 	      "the stopped session is released");
+}
+
+static void stop_ok(struct session *s, const char *what)
+{
+	stop_expect(s, 0, what);
 }
 
 static void ring_down(struct session *s)
@@ -318,8 +324,9 @@ static void ring_down(struct session *s)
 
 /*
  * A session whose stage @escaping runs the escaping program, on windows C
- * admitted: no batch is done, each fails with -ERANGE, and no command of that
- * stage or a later one was submitted, so nothing reached a window outside.
+ * admitted: every command the program built is refused (one per batch), no
+ * batch is done, and no command of that stage or a later one was submitted,
+ * so nothing reached a window outside.
  */
 static void escape_refused(struct session *e, struct stage src, struct stage dst,
 			   unsigned escaping, const char *what)
@@ -333,9 +340,9 @@ static void escape_refused(struct session *e, struct stage src, struct stage dst
 	st = wait_settled(e);
 	for (k = escaping; k < 2; k++)
 		none_submitted &= !st.submitted[k] && !st.completed[k];
-	CHECK(!st.batches_done && st.batches_abort == GROUPS && st.rejects >= 1 &&
+	CHECK(!st.batches_done && st.batches_abort == GROUPS && st.rejects == GROUPS &&
 	      st.last_err == -ERANGE && !st.inflight && !st.sequestered && none_submitted, what);
-	stop_ok(e, "STOP the session of the escaping program");
+	stop_expect(e, -ERANGE, "STOP the session of the escaping program reports its -ERANGE");
 }
 
 /* A handle names a range for CREATE and nothing else. */
