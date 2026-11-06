@@ -62,7 +62,8 @@ typedef struct { int counter; } atomic_t;
 static int atomic_read(const atomic_t *a) { return a->counter; }
 static void atomic_set(atomic_t *a,int n) { a->counter=n; }
 struct page { unsigned char bytes[4096]; };
-struct bio { unsigned bi_inline_vecs[256]; unsigned bi_vcnt; unsigned bytes; };
+struct bio { unsigned bi_inline_vecs[256]; unsigned bi_vcnt; unsigned bytes;
+ struct { sector_t bi_sector; unsigned int bi_size; } bi_iter; };
 struct queue_limits { u32 features, dma_alignment, dma_pad_mask; };
 struct blk_mq_tag_set { unsigned nr_maps; struct { unsigned nr_queues; } map[3]; };
 struct request_queue { struct queue_limits limits; struct blk_mq_tag_set *tag_set; u32 virt_boundary,max_segments,max_segment_size,max_hw_sectors; int id; };

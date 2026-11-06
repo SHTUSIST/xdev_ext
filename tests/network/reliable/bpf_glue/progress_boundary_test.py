@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
 """Run the real worker selection/dispatch code with recording call boundaries."""
+import re
 import unittest
 import glue_common as G
 
@@ -12,6 +13,8 @@ FIXTURE = r'''
 #include <linux/types.h>
 #include "include/linux/xdev_ext_mech_reliable_core.h"
 typedef __u64 u64; typedef __u32 u32; typedef __s32 s32; typedef __u8 u8;
+/* POOL DMA DECL */
+struct xdev_ext_net_lease {union {struct xdev_ext_net_pool_dma pool;} u;};
 #define XDEV_EXT_MECH_MEMBER_BUILD 1
 #define XDEV_EXT_MECH_SITE_WORKER_SELECT 6
 #define XDEV_EXT_MECH_F_HELD 1
@@ -21,7 +24,7 @@ typedef __u64 u64; typedef __u32 u32; typedef __s32 s32; typedef __u8 u8;
 #define spin_unlock_irqrestore(lock,flags) do{(void)(lock);(void)(flags);}while(0)
 struct xdp_desc {u64 addr;u32 len,options;};
 struct xdev_ext_mech_batch {int unused;};
-struct xsk_xdev_ext_mech_tx_batch {int unused;};
+struct xsk_xdev_ext_mech_tx_batch {bool control;struct xdev_ext_net_lease pool_lease[1];};
 struct xdev_ext_mech_frame {u8 *kaddr;u64 umem_addr;u32 index;};
 struct xsk_rel_control {struct xsk_xdev_ext_mech_tx_batch tb;struct xdev_ext_mech_frame frame;bool busy;};
 struct xsk_rel_data {struct xdev_ext_mech_batch *batch;u64 ticket;};
@@ -109,8 +112,13 @@ int main(void) {
 
 class ProgressBoundary(unittest.TestCase):
     def test_actual_worker_rejects_selection_outside_snapshot(self):
-        body = G.require(G.default_text(G.INC), 'xsk_rel_progress', 'provider')
-        G.build_and_run(self, FIXTURE.replace('/* BODY */', body), name='progress-selection')
+        text = G.default_text(G.INC)
+        body = G.require(text, 'xsk_rel_control_publish', 'provider') + '\n' + G.require(text, 'xsk_rel_progress', 'provider')
+        pool = re.search(r'struct xdev_ext_net_pool_dma \{[^}]+\};',
+                         (G.ROOT / 'include/linux/xdev_ext_netfam.h').read_text())
+        self.assertIsNotNone(pool, 'missing production pool DMA declaration')
+        source = FIXTURE.replace('/* POOL DMA DECL */', pool.group())
+        G.build_and_run(self, source.replace('/* BODY */', body), name='progress-selection')
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
