@@ -527,6 +527,10 @@ jobs:
             echo "XDOMAIN closure checks reported failed or skipped cases"
             exit 1
           fi
+      - name: Cross-device chain sanitizer, dma-buf pool, isolation oracles and retraction abort
+        if: matrix.cc == 'gcc'
+        working-directory: .
+        run: python3 tools/ci/check_cross_device_host.py --log-dir "$RUNNER_TEMP/xdev-ext-cross-device"
       - name: Fence guest evidence rejection controls
         run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py -v
       - name: Integration harness and verdict checks

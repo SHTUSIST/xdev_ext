@@ -9227,6 +9227,10 @@
       "logical_path": "tools/build/tp_framework.py"
     },
     {
+      "source": "tools/ci/check_cross_device_host.py",
+      "logical_path": "scripts/check_cross_device_host.py"
+    },
+    {
       "source": "tools/ci/check_xdomain_host.py",
       "logical_path": "scripts/check_xdomain_host.py"
     },

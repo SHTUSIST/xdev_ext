@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: GPL-2.0-only
 .DEFAULT_GOAL := help
 PYTHON ?= python3
-.PHONY: help source-view prepare-linux prepare-nvidia test host-check lib cli
+.PHONY: help source-view prepare-linux prepare-nvidia test host-check cross-device-check lib cli
 help:
 	@echo 'source-view                  create isolated native input copies (offline)'
 	@echo 'prepare-linux / prepare-nvidia assemble exact pinned upstream + project overlay'
 	@echo 'test TEST=tests/<canonical.py> run one test through the source view'
 	@echo 'host-check                   standalone host production-rule contracts'
+	@echo 'cross-device-check           host checks of guest-tested cross-device features'
 	@echo 'lib / cli                    build library / CLI in the source view'
 source-view:
 	$(PYTHON) tools/layout.py view
@@ -19,6 +20,8 @@ test:
 	$(PYTHON) tools/test.py $(TEST) $(ARGS)
 host-check:
 	$(PYTHON) tools/ci/test_host.py $(ARGS)
+cross-device-check:
+	$(PYTHON) tools/ci/check_cross_device_host.py --log-dir build/cross-device-check $(ARGS)
 lib:
 	$(PYTHON) tools/run.py --cwd src/cli make lib $(ARGS)
 cli:
