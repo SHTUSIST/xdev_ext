@@ -183,6 +183,7 @@ class Worker:
                 self.proc.stdin.close()
             except BrokenPipeError:
                 pass
-        if self._log is not subprocess.DEVNULL and not self._log.closed and \
-                not self._reader.is_alive():
-            self._log.close()
+        if not self._reader.is_alive():
+            self.proc.stdout.close()
+            if self._log is not subprocess.DEVNULL and not self._log.closed:
+                self._log.close()
