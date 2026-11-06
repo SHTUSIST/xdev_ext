@@ -614,9 +614,29 @@
       "native_path": "io_uring/xdev_ext_compfam_copy_core.h"
     },
     {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_lease.c"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_copy_lease.h"
+    },
+    {
       "source": "src/compute/io_uring/xdev_ext_compfam_copy_runtime.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_compfam_copy_runtime.h"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_transform.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_transform.c"
+    },
+    {
+      "source": "src/compute/io_uring/xdev_ext_compfam_transform.h",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_compfam_transform.h"
     },
     {
       "source": "src/compute/io_uring/xdev_ext_mech_ce.c",
@@ -714,14 +734,14 @@
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-classify.h"
     },
     {
-      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-plan.h",
-      "component": "nvidia",
-      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
-    },
-    {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-memory.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-memory.h"
+    },
+    {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-plan.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
     },
     {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-dma-lifetime.h",
@@ -1128,24 +1148,14 @@
       "native_path": "io_uring/xdev_ext_config.h"
     },
     {
-      "source": "src/compute/io_uring/xdev_ext_compfam_transform.c",
+      "source": "src/core/io_uring/xdev_ext_mech.c",
       "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_transform.c"
-    },
-    {
-      "source": "src/compute/io_uring/xdev_ext_compfam_transform.h",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_transform.h"
+      "native_path": "io_uring/xdev_ext_mech.c"
     },
     {
       "source": "src/core/io_uring/xdev_ext_mech_compute_internal.h",
       "component": "linux",
       "native_path": "io_uring/xdev_ext_mech_compute_internal.h"
-    },
-    {
-      "source": "src/core/io_uring/xdev_ext_mech.c",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_mech.c"
     },
     {
       "source": "src/core/io_uring/xdev_ext_mech_core.h",
@@ -1868,11 +1878,6 @@
       "native_path": "drivers/nvme/host/tcp.c"
     },
     {
-      "source": "src/storage/io_uring/xdev_ext_mech_block.c",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_mech_block.c"
-    },
-    {
       "source": "src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c",
       "component": "linux",
       "native_path": "drivers/nvme/host/xdev_ext_mech_nvme.c"
@@ -1931,6 +1936,11 @@
       "source": "src/storage/io_uring/family/xdev_ext_storfam_block.c",
       "component": "linux",
       "native_path": "io_uring/family/xdev_ext_storfam_block.c"
+    },
+    {
+      "source": "src/storage/io_uring/xdev_ext_mech_block.c",
+      "component": "linux",
+      "native_path": "io_uring/xdev_ext_mech_block.c"
     },
     {
       "source": "tests/benchmarks/Makefile",
@@ -3362,6 +3372,26 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/compute_examples/run.py"
     },
     {
+      "source": "tests/compute/family/lease/boundary.h",
+      "logical_path": "tests/compute/family/lease/boundary.h"
+    },
+    {
+      "source": "tests/compute/family/lease/cases.c",
+      "logical_path": "tests/compute/family/lease/cases.c"
+    },
+    {
+      "source": "tests/compute/family/lease/core.h",
+      "logical_path": "tests/compute/family/lease/core.h"
+    },
+    {
+      "source": "tests/compute/family/lease/mutations.py",
+      "logical_path": "tests/compute/family/lease/mutations.py"
+    },
+    {
+      "source": "tests/compute/family/lease/run.py",
+      "logical_path": "tests/compute/family/lease/run.py"
+    },
+    {
       "source": "tests/compute/family/runtime/ASSERTIONS.md",
       "logical_path": "tests/compute/family/runtime/ASSERTIONS.md"
     },
@@ -3613,21 +3643,6 @@
       "native_path": "tests/nv_xdev_ext_ce_fence_algorithm_test.py"
     },
     {
-      "source": "tests/compute/nvidia/nv_xdev_ext_ce_owner_api_test.py",
-      "component": "nvidia",
-      "native_path": "tests/nv_xdev_ext_ce_owner_api_test.py"
-    },
-    {
-      "source": "tests/compute/nvidia/nv_xdev_ext_ce_plan_test.c",
-      "component": "nvidia",
-      "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
-    },
-    {
-      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",
-      "component": "nvidia",
-      "native_path": "tests/nv_xdev_ext_ce_memory_test.c"
-    },
-    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_attach_harness.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_memory_attach_harness.c"
@@ -3638,14 +3653,19 @@
       "native_path": "tests/nv_xdev_ext_ce_memory_attach_test.py"
     },
     {
-      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_harness.c",
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",
       "component": "nvidia",
-      "native_path": "tests/nv_xdev_ext_ce_rm_locks_harness.c"
+      "native_path": "tests/nv_xdev_ext_ce_memory_test.c"
     },
     {
-      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_test.py",
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_owner_api_test.py",
       "component": "nvidia",
-      "native_path": "tests/nv_xdev_ext_ce_rm_locks_test.py"
+      "native_path": "tests/nv_xdev_ext_ce_owner_api_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_plan_test.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_event_harness.c",
@@ -3656,6 +3676,16 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_event_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_rm_event_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_variant_source_test.py",
@@ -4003,6 +4033,10 @@
     {
       "source": "tests/compute/tp/work_stats_retirement_test.py",
       "logical_path": "tests/compute/tp/work_stats_retirement_test.py"
+    },
+    {
+      "source": "tests/compute/transform_source.py",
+      "logical_path": "tests/compute/transform_source.py"
     },
     {
       "source": "tests/compute/user_stage/guest/Makefile",
@@ -4954,6 +4988,26 @@
       "logical_path": "tests/core/peer_dmabuf/contract.h"
     },
     {
+      "source": "tests/core/peer_dmabuf/device_dma/README.md",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/README.md"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/validate.py",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/validate.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/validate_test.py",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/validate_test.py"
+    },
+    {
       "source": "tests/core/peer_dmabuf/fd_boundary.c.in",
       "logical_path": "tests/core/peer_dmabuf/fd_boundary.c.in"
     },
@@ -5006,30 +5060,6 @@
       "logical_path": "tests/core/peer_dmabuf/run.py"
     },
     {
-      "source": "tests/core/peer_dmabuf/device_dma/README.md",
-      "logical_path": "tests/core/peer_dmabuf/device_dma/README.md"
-    },
-    {
-      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c",
-      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c"
-    },
-    {
-      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh",
-      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh"
-    },
-    {
-      "source": "tests/core/peer_dmabuf/device_dma/validate.py",
-      "logical_path": "tests/core/peer_dmabuf/device_dma/validate.py"
-    },
-    {
-      "source": "tests/core/peer_dmabuf/device_dma/validate_test.py",
-      "logical_path": "tests/core/peer_dmabuf/device_dma/validate_test.py"
-    },
-    {
-      "source": "tests/core/peer_dmabuf/undescribed_mutants.py",
-      "logical_path": "tests/core/peer_dmabuf/undescribed_mutants.py"
-    },
-    {
       "source": "tests/core/peer_dmabuf/undescribed_dma/README.md",
       "logical_path": "tests/core/peer_dmabuf/undescribed_dma/README.md"
     },
@@ -5048,6 +5078,10 @@
     {
       "source": "tests/core/peer_dmabuf/undescribed_dma/validate_test.py",
       "logical_path": "tests/core/peer_dmabuf/undescribed_dma/validate_test.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_mutants.py",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_mutants.py"
     },
     {
       "source": "tests/core/peer_quarantine/mutations.py",
@@ -6443,6 +6477,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/verifier/xdev_ext_mech_fail_state_ce.c"
     },
     {
+      "source": "tests/integration/session/native/vfio_passthrough.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/vfio_passthrough.py"
+    },
+    {
+      "source": "tests/integration/session/native/vfio_passthrough_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/vfio_passthrough_test.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_eval_session_guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_guest.sh"
@@ -6481,6 +6525,31 @@
       "source": "tests/integration/session/native/xdev_ext_fence_validate_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_gpu_dmabuf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_dmabuf.c"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_gpu_failfast_kvm.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_failfast_kvm.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_gpu_guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_guest.sh"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_gpu_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_validate.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_gpu_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_validate_test.py"
     },
     {
       "source": "tests/integration/session/native/xdev_ext_mech_lifecycle_guest.sh",
@@ -6627,6 +6696,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate_test.py"
     },
     {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_vfio_harness_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_vfio_harness_test.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_viommu.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu.py"
@@ -6650,6 +6724,11 @@
       "source": "tests/integration/session/native/xdev_ext_mech_zc_wire_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_wire_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_tb_nhi_guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh"
     },
     {
       "source": "tests/integration/session/source_setup/README.md",
@@ -7176,16 +7255,16 @@
       "logical_path": "tests/network/count_fifo/run.py"
     },
     {
-      "source": "tests/network/count_fifo/typed_fixture.py",
-      "logical_path": "tests/network/count_fifo/typed_fixture.py"
+      "source": "tests/network/count_fifo/test_count.c",
+      "logical_path": "tests/network/count_fifo/test_count.c"
     },
     {
       "source": "tests/network/count_fifo/test_typed_fixture.py",
       "logical_path": "tests/network/count_fifo/test_typed_fixture.py"
     },
     {
-      "source": "tests/network/count_fifo/test_count.c",
-      "logical_path": "tests/network/count_fifo/test_count.c"
+      "source": "tests/network/count_fifo/typed_fixture.py",
+      "logical_path": "tests/network/count_fifo/typed_fixture.py"
     },
     {
       "source": "tests/network/host_lease/README.md",
@@ -7893,6 +7972,10 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/socket_sink/xsk_tx_copy_accounting_test.py"
     },
     {
+      "source": "tests/network/xdomain/chain/README.md",
+      "logical_path": "tests/network/xdomain/chain/README.md"
+    },
+    {
       "source": "tests/network/xdomain/chain/cases.c",
       "logical_path": "tests/network/xdomain/chain/cases.c"
     },
@@ -7905,16 +7988,12 @@
       "logical_path": "tests/network/xdomain/chain/chain_boundary.c"
     },
     {
-      "source": "tests/network/xdomain/chain/chain_core_api.h",
-      "logical_path": "tests/network/xdomain/chain/chain_core_api.h"
-    },
-    {
-      "source": "tests/network/xdomain/chain/chain_peer_bridge.c",
-      "logical_path": "tests/network/xdomain/chain/chain_peer_bridge.c"
-    },
-    {
       "source": "tests/network/xdomain/chain/chain_core.c.in",
       "logical_path": "tests/network/xdomain/chain/chain_core.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_core_api.h",
+      "logical_path": "tests/network/xdomain/chain/chain_core_api.h"
     },
     {
       "source": "tests/network/xdomain/chain/chain_core_env.h",
@@ -7933,8 +8012,8 @@
       "logical_path": "tests/network/xdomain/chain/chain_nvme_host.h"
     },
     {
-      "source": "tests/network/xdomain/chain/README.md",
-      "logical_path": "tests/network/xdomain/chain/README.md"
+      "source": "tests/network/xdomain/chain/chain_peer_bridge.c",
+      "logical_path": "tests/network/xdomain/chain/chain_peer_bridge.c"
     },
     {
       "source": "tests/network/xdomain/chain/run.py",
@@ -8340,6 +8419,10 @@
       "logical_path": "tests/network/xdomain/diagnostics/stack_run.py"
     },
     {
+      "source": "tests/network/xdomain/dmabuf_requester/README.md",
+      "logical_path": "tests/network/xdomain/dmabuf_requester/README.md"
+    },
+    {
       "source": "tests/network/xdomain/dmabuf_requester/boundary.c",
       "logical_path": "tests/network/xdomain/dmabuf_requester/boundary.c"
     },
@@ -8362,10 +8445,6 @@
     {
       "source": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in",
       "logical_path": "tests/network/xdomain/dmabuf_requester/heap_unit.c.in"
-    },
-    {
-      "source": "tests/network/xdomain/dmabuf_requester/README.md",
-      "logical_path": "tests/network/xdomain/dmabuf_requester/README.md"
     },
     {
       "source": "tests/network/xdomain/dmabuf_requester/run.py",
@@ -8803,6 +8882,21 @@
       "logical_path": "tests/storage/family_block_runtime/test_seg.c"
     },
     {
+      "source": "tests/storage/family_window_grant/mutate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/mutate.py"
+    },
+    {
+      "source": "tests/storage/family_window_grant/run.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/run.sh"
+    },
+    {
+      "source": "tests/storage/family_window_grant/test_window_grant.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/test_window_grant.c"
+    },
+    {
       "source": "tests/storage/family_window_schema/generate_vectors.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/generate_vectors.py"
@@ -8823,19 +8917,32 @@
       "native_path": "tools/testing/selftests/xdev_ext_stor_window_schema/vectors.inc"
     },
     {
-      "source": "tests/storage/family_window_grant/mutate.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/mutate.py"
+      "source": "tests/storage/native_member_7a/README.md",
+      "logical_path": "tests/storage/native_member_7a/README.md"
     },
     {
-      "source": "tests/storage/family_window_grant/run.sh",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/run.sh"
+      "source": "tests/storage/native_member_7a/assertions.c",
+      "logical_path": "tests/storage/native_member_7a/assertions.c"
     },
     {
-      "source": "tests/storage/family_window_grant/test_window_grant.c",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_stor_window_grant/test_window_grant.c"
+      "source": "tests/storage/native_member_7a/boundary.h",
+      "logical_path": "tests/storage/native_member_7a/boundary.h"
+    },
+    {
+      "source": "tests/storage/native_member_7a/candidate.c.in",
+      "logical_path": "tests/storage/native_member_7a/candidate.c.in"
+    },
+    {
+      "source": "tests/storage/native_member_7a/candidate_adapter.h",
+      "logical_path": "tests/storage/native_member_7a/candidate_adapter.h"
+    },
+    {
+      "source": "tests/storage/native_member_7a/run.py",
+      "logical_path": "tests/storage/native_member_7a/run.py"
+    },
+    {
+      "source": "tests/storage/native_member_7a/run_candidate.py",
+      "logical_path": "tests/storage/native_member_7a/run_candidate.py"
     },
     {
       "source": "tests/storage/native_member_7b/INPUTS.json",
@@ -8880,6 +8987,18 @@
     {
       "source": "tests/storage/native_member_7b/verify.py",
       "logical_path": "tests/storage/native_member_7b/verify.py"
+    },
+    {
+      "source": "tests/storage/nvme/_legacy_storfam_fixture.py",
+      "logical_path": "tests/eval/nvme/_legacy_storfam_fixture.py"
+    },
+    {
+      "source": "tests/storage/nvme/_locked_nvme_opcode.h",
+      "logical_path": "tests/eval/nvme/_locked_nvme_opcode.h"
+    },
+    {
+      "source": "tests/storage/nvme/_locked_requester_native.h",
+      "logical_path": "tests/eval/nvme/_locked_requester_native.h"
     },
     {
       "source": "tests/storage/nvme/blocktable/Makefile",
@@ -8967,17 +9086,14 @@
       "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_fixture.c"
     },
     {
-      "source": "tests/storage/nvme/_legacy_storfam_fixture.py",
-      "logical_path": "tests/eval/nvme/_legacy_storfam_fixture.py"
-    },
-    {
-      "source": "tests/storage/nvme/_locked_nvme_opcode.h",
-      "logical_path": "tests/eval/nvme/_locked_nvme_opcode.h"
-    },
-    {
       "source": "tests/storage/nvme/peer_bind_authorization_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_test.py"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/Makefile"
     },
     {
       "source": "tests/storage/nvme/window_handle/README.md",
@@ -8993,11 +9109,6 @@
       "source": "tests/storage/nvme/window_handle/host_window_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/host_window_test.py"
-    },
-    {
-      "source": "tests/storage/nvme/window_handle/Makefile",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/Makefile"
     },
     {
       "source": "tests/storage/nvme/window_handle/window_guest.c",
@@ -9348,112 +9459,6 @@
     {
       "source": "tools/test.py",
       "logical_path": "tools/test.py"
-    },
-    {
-      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.c",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_copy_lease.c"
-    },
-    {
-      "source": "src/compute/io_uring/xdev_ext_compfam_copy_lease.h",
-      "component": "linux",
-      "native_path": "io_uring/xdev_ext_compfam_copy_lease.h"
-    },
-    {
-      "source": "tests/compute/family/lease/boundary.h",
-      "logical_path": "tests/compute/family/lease/boundary.h"
-    },
-    {
-      "source": "tests/compute/family/lease/cases.c",
-      "logical_path": "tests/compute/family/lease/cases.c"
-    },
-    {
-      "source": "tests/compute/family/lease/core.h",
-      "logical_path": "tests/compute/family/lease/core.h"
-    },
-    {
-      "source": "tests/compute/family/lease/mutations.py",
-      "logical_path": "tests/compute/family/lease/mutations.py"
-    },
-    {
-      "source": "tests/compute/family/lease/run.py",
-      "logical_path": "tests/compute/family/lease/run.py"
-    },
-    {
-      "source": "tests/storage/native_member_7a/README.md",
-      "logical_path": "tests/storage/native_member_7a/README.md"
-    },
-    {
-      "source": "tests/storage/native_member_7a/assertions.c",
-      "logical_path": "tests/storage/native_member_7a/assertions.c"
-    },
-    {
-      "source": "tests/storage/native_member_7a/boundary.h",
-      "logical_path": "tests/storage/native_member_7a/boundary.h"
-    },
-    {
-      "source": "tests/storage/native_member_7a/candidate.c.in",
-      "logical_path": "tests/storage/native_member_7a/candidate.c.in"
-    },
-    {
-      "source": "tests/storage/native_member_7a/candidate_adapter.h",
-      "logical_path": "tests/storage/native_member_7a/candidate_adapter.h"
-    },
-    {
-      "source": "tests/storage/native_member_7a/run.py",
-      "logical_path": "tests/storage/native_member_7a/run.py"
-    },
-    {
-      "source": "tests/storage/native_member_7a/run_candidate.py",
-      "logical_path": "tests/storage/native_member_7a/run_candidate.py"
-    },
-    {
-      "source": "tests/storage/nvme/_locked_requester_native.h",
-      "logical_path": "tests/eval/nvme/_locked_requester_native.h"
-    },
-    {
-      "source": "tests/compute/transform_source.py",
-      "logical_path": "tests/compute/transform_source.py"
-    },
-    {
-      "source": "tests/integration/session/native/vfio_passthrough.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/vfio_passthrough.py"
-    },
-    {
-      "source": "tests/integration/session/native/vfio_passthrough_test.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/vfio_passthrough_test.py"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_gpu_dmabuf.c",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_dmabuf.c"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_gpu_guest.sh",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_guest.sh"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_gpu_validate.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_validate.py"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_gpu_validate_test.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_validate_test.py"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_mech_zc_vfio_harness_test.py",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_vfio_harness_test.py"
-    },
-    {
-      "source": "tests/integration/session/native/xdev_ext_tb_nhi_guest.sh",
-      "component": "linux",
-      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh"
     }
   ]
 }
