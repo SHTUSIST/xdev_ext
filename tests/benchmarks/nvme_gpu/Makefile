@@ -8,6 +8,7 @@ all:
 
 check:
 	$(PYTHON) test_contract.py -v
+	$(PYTHON) -B test_ce_vmm.py -v
 	$(PYTHON) -B test_session_timing.py -v
 	$(PYTHON) -B test_delegate_build.py -v
 

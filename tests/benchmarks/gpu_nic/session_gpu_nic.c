@@ -23,7 +23,7 @@
  *         receiving peer (nxp_peer recv --expect slots:DEPTH) checks every
  *         group against a slot image.  START to terminal wake is timed.
  *
- * The CE window is a GPU allocation (--ce-alloc) or /dev/xdev_ext_ce_sim
+ * The CE window is a GPU allocation (--ce-alloc or --ce-vmm) or /dev/xdev_ext_ce_sim
  * (--ce-va), as in ../nvme_gpu/eval_session.h; with the stand-in the record
  * says execution=kvm-ce-sim and performance_claim=none.
  * Exit: 0 verified, 1 failure, 2 usage, 4 unavailable capability.
@@ -44,7 +44,7 @@ static void endpoint_timer_cleanup(void) { cpu_timer_destroy(&endpoint_timer); }
 #include "xsk_port.h"
 
 struct sg_opts {
-	bool ingest, copy_mode, ce_alloc, have_va;
+	bool ingest, copy_mode, ce_alloc, ce_vmm, have_va;
 	const char *ifname, *ce_dev;
 	uint64_t queue, size, messages, depth, window_groups, wire_session, timeout_ms,
 		 seed, ce_va;
@@ -55,7 +55,7 @@ static void sg_usage(FILE *f)
 {
 	fprintf(f,
 "usage: session_gpu_nic --direction ingest|egress --ifname IF [--queue N] [--copy-mode]\n"
-"         --ce-dev DEV (--ce-va N | --ce-alloc) --size N --messages N --depth N\n"
+"         --ce-dev DEV (--ce-va N | --ce-alloc | --ce-vmm) --size N --messages N --depth N\n"
 "         [--window-groups N] --wire-session N --local-ip A --peer-ip A\n"
 "         --local-port P --peer-port P --peer-mac M [--local-mac M]\n"
 "         [--seed N] [--timeout-ms N]\n");
@@ -76,7 +76,7 @@ static int sg_if_query(const char *ifname, unsigned long req, struct ifreq *ifr)
 
 static int sg_parse(int argc, char **argv, struct sg_opts *o)
 {
-	enum { O_DIR = 1, O_IF, O_QUEUE, O_COPY, O_CE, O_VA, O_ALLOC, O_SIZE, O_MSG, O_DEPTH,
+	enum { O_DIR = 1, O_IF, O_QUEUE, O_COPY, O_CE, O_VA, O_ALLOC, O_VMM, O_SIZE, O_MSG, O_DEPTH,
 	       O_WIN, O_WIRE, O_LIP, O_PIP, O_LPORT, O_PPORT, O_PMAC, O_LMAC, O_SEED, O_TMO,
 	       O_HELP };
 	static const struct option opts[] = {
@@ -87,6 +87,7 @@ static int sg_parse(int argc, char **argv, struct sg_opts *o)
 		{ "ce-dev", required_argument, NULL, O_CE },
 		{ "ce-va", required_argument, NULL, O_VA },
 		{ "ce-alloc", no_argument, NULL, O_ALLOC },
+		{ "ce-vmm", no_argument, NULL, O_VMM },
 		{ "size", required_argument, NULL, O_SIZE },
 		{ "messages", required_argument, NULL, O_MSG },
 		{ "depth", required_argument, NULL, O_DEPTH },
@@ -126,6 +127,7 @@ static int sg_parse(int argc, char **argv, struct sg_opts *o)
 		case O_CE: o->ce_dev = optarg; break;
 		case O_VA: bad |= xg_parse_u64(optarg, UINT64_MAX >> 2, &o->ce_va); o->have_va = true; break;
 		case O_ALLOC: o->ce_alloc = true; break;
+		case O_VMM: o->ce_vmm = true; break;
 		case O_SIZE: bad |= xg_parse_u64(optarg, GN_MAX_SIZE, &o->size); break;
 		case O_MSG: bad |= xg_parse_u64(optarg, GN_MAX_MESSAGES, &o->messages); break;
 		case O_DEPTH: bad |= xg_parse_u64(optarg, GN_MAX_DEPTH, &o->depth); break;
@@ -146,7 +148,7 @@ static int sg_parse(int argc, char **argv, struct sg_opts *o)
 	if (!o->window_groups)
 		o->window_groups = o->depth;
 	if (bad || optind != argc || !have_dir || !o->ifname || !o->ce_dev ||
-	    o->have_va == o->ce_alloc || !o->size || !o->messages || !o->depth ||
+	    o->have_va + o->ce_alloc + o->ce_vmm != 1 || !o->size || !o->messages || !o->depth ||
 	    !o->wire_session || have != 31 || !o->timeout_ms ||
 	    (!o->ingest && o->window_groups != o->depth))
 		return XG_EXIT_USAGE;
@@ -233,7 +235,8 @@ int main(int argc, char **argv)
 		ret = XG_EXIT_FAIL;
 		goto out;
 	}
-	ret = es_ce_open(&ce, o.ce_dev, 1, o.ce_alloc, o.ce_va,
+	ret = es_ce_open(&ce, o.ce_dev, 1,
+			 o.ce_vmm ? ES_CE_VMM : o.ce_alloc ? ES_CE_NATIVE : ES_CE_OFFSET, o.ce_va,
 			 p.depth * (uint64_t)p.l.group_bytes);
 	if (ret)
 		goto out;

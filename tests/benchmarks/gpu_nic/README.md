@@ -114,6 +114,20 @@ between two local addresses never leaves the host stack): ingest runs
 the namespace; egress runs `nxp_peer recv --expect slots:DEPTH` in the
 namespace and `session_gpu_nic --direction egress` on the other interface.
 
+For the session arm, `--ce-alloc` retains native `cuMemAlloc` allocation.
+`--ce-vmm` explicitly uses the existing CUDA VMM helper and attaches the same
+POSIX fd export to every CE stage fd before CREATE. This CE binding does not
+require GPUDirect RDMA VA registration. The allocation choices are mutually
+exclusive; the simulator still uses `--ce-va`. The runner applies this choice
+only to the session arm, preserving baseline commands, group geometry, depth,
+timing and output fields.
+
+VMM selection is a path qualification, not a performance result. A successful
+CLI VMM run does not qualify this arm; use the existing correctness route or
+an unmeasured actual-helper probe before physical measurements. Existing
+kernel attachment and quarantine references keep bound memory alive; caller
+export cleanup does not establish DMA quiescence or recover UNKNOWN work.
+
 ## Build and run
 
 ```sh

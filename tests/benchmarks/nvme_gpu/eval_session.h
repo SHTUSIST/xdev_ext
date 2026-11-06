@@ -13,7 +13,7 @@
  *
  * The copy-engine window is either the CPU stand-in /dev/xdev_ext_ce_sim
  * (correctness only, its window read and written through the device file) or
- * a real GPU allocation made once before CREATE with
+ * a real GPU allocation (native or exported VMM) made once before CREATE with
  * kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h.  Seeding and the oracle
  * readback of a GPU window use cuMemcpyHtoD/DtoH through the same driver
  * handle, before CREATE and after the session settled; never during the
@@ -36,6 +36,7 @@
 
 #include "../../../kernel/include/uapi/linux/io_uring.h"
 #include "../../../kernel/tools/include/xdev_ext_gpu_identity.h"
+#include "../../../kernel/tools/include/xdev_ext_nv_p2p_ioctl.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "nvme_gpu_core.h"
@@ -217,6 +218,12 @@ static inline void es_print_stats(const struct xdev_ext_mech_stats *s)
 typedef int (*es_cu_copy_htod)(uint64_t dst, const void *src, size_t bytes);
 typedef int (*es_cu_copy_dtoh)(void *dst, uint64_t src, size_t bytes);
 
+enum es_ce_allocation_mode {
+	ES_CE_OFFSET = 0,
+	ES_CE_NATIVE = 1,
+	ES_CE_VMM = 2,
+};
+
 struct es_ce {
 	int fd[2];			/* one open per CE stage; fd[1] unused if one stage */
 	bool sim;			/* /dev/xdev_ext_ce_sim: CPU stand-in */
@@ -234,27 +241,45 @@ static inline bool es_ce_is_sim(const char *dev)
 	return !strncmp(base ? base + 1 : dev, "xdev_ext_ce_sim", 15);
 }
 
+/* One export backs every stage fd; the kernel retains its attached reference. */
+static inline int es_ce_attach(const struct xdev_ext_mech_cuda *cuda, int fd)
+{
+	struct xdev_ext_nv_ce_attach_memory attach = {
+		.mem_fd = cuda->export_fd,
+		.gpu_va = cuda->va,
+		.size = cuda->vmm_bytes,
+	};
+	int err;
+
+	if (!xdev_ext_nv_ce_attach_memory(fd, &attach))
+		return 0;
+	err = errno ? errno : EIO;
+	fprintf(stderr, "SKIP: CE stage CUDA export attach: %s (NV status 0x%x)\n",
+		strerror(err), attach.status);
+	return -err;
+}
+
 /*
- * Open @stages CE stage files on @dev.  A GPU device always gets a native
- * allocation of @len (@alloc required); the stand-in takes @va as an offset
- * into its window.  Exit-code style: 0, XG_EXIT_USAGE for a device/flag
+ * Open @stages CE stage files on @dev. A GPU device gets a native or VMM
+ * allocation of @len, explicitly selected by @mode. The stand-in takes @va
+ * as an offset into its window. Exit-code style: 0, XG_EXIT_USAGE for a device/flag
  * mismatch, XG_EXIT_UNAVAILABLE when the device or driver is missing.
  */
 static inline int es_ce_open(struct es_ce *ce, const char *dev, unsigned int stages,
-			     bool alloc, __u64 va, __u64 len)
+			     unsigned int mode, __u64 va, __u64 len)
 {
-	char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
+	char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE], other_bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
 	unsigned int i;
 	int ret;
 
 	memset(ce, 0, sizeof(*ce));
 	ce->fd[0] = ce->fd[1] = -1;
 	ce->sim = es_ce_is_sim(dev);
-	if (!len || stages < 1 || stages > 2)
+	if (!len || stages < 1 || stages > 2 || mode > ES_CE_VMM)
 		return XG_EXIT_USAGE;
-	if (ce->sim == alloc) {
-		fprintf(stderr, "%s\n", ce->sim ? "the CE stand-in takes --ce-va, not --ce-alloc" :
-			"a GPU CE device requires --ce-alloc");
+	if (ce->sim != (mode == ES_CE_OFFSET)) {
+		fprintf(stderr, "%s\n", ce->sim ? "the CE stand-in takes --ce-va, not GPU allocation flags" :
+			"a GPU CE device requires --ce-alloc or --ce-vmm");
 		return XG_EXIT_USAGE;
 	}
 	for (i = 0; i < stages; i++) {
@@ -275,12 +300,26 @@ static inline int es_ce_open(struct es_ce *ce, const char *dev, unsigned int sta
 		fprintf(stderr, "SKIP: GPU identity of %s: %s\n", dev, strerror(-ret));
 		return XG_EXIT_UNAVAILABLE;
 	}
-	ret = xdev_ext_mech_cuda_open(&ce->cuda, bdf, len);
+	for (i = 1; i < stages; i++) {
+		ret = xdev_ext_gpu_identity_from_opened(ce->fd[i], dev,
+					 XDEV_EXT_GPU_IDENTITY_ANY_MINOR, other_bdf);
+		if (ret || strcasecmp(bdf, other_bdf)) {
+			fprintf(stderr, "SKIP: CE stage GPU identities do not match: %s\n",
+				ret ? strerror(-ret) : "different PCI BDFs");
+			return XG_EXIT_UNAVAILABLE;
+		}
+	}
+	ret = mode == ES_CE_VMM ? xdev_ext_mech_cuda_open_vmm(&ce->cuda, bdf, len) :
+		xdev_ext_mech_cuda_open(&ce->cuda, bdf, len);
 	if (ret) {
 		fprintf(stderr, "SKIP: CUDA allocation on %s: %s\n", bdf, strerror(-ret));
 		return XG_EXIT_UNAVAILABLE;
 	}
 	ce->va = ce->cuda.va;
+	if (mode == ES_CE_VMM)
+		for (i = 0; i < stages; i++)
+			if (es_ce_attach(&ce->cuda, ce->fd[i]))
+				return XG_EXIT_UNAVAILABLE;
 	*(void **)(&ce->htod) = dlsym(ce->cuda.lib, "cuMemcpyHtoD_v2");
 	*(void **)(&ce->dtoh) = dlsym(ce->cuda.lib, "cuMemcpyDtoH_v2");
 	if (!ce->htod || !ce->dtoh) {

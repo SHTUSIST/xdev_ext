@@ -2317,6 +2317,10 @@
       "logical_path": "tests/eval/gpu_nic/xsk_port.h"
     },
     {
+      "source": "tests/benchmarks/gpu_nic/test_ce_vmm.py",
+      "logical_path": "tests/eval/gpu_nic/test_ce_vmm.py"
+    },
+    {
       "source": "tests/benchmarks/hft/Makefile",
       "logical_path": "tests/eval/hft/Makefile"
     },
@@ -2785,6 +2789,14 @@
     {
       "source": "tests/benchmarks/nvme_gpu/timer_fixture.c.in",
       "logical_path": "tests/eval/nvme_gpu/timer_fixture.c.in"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_vmm.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_vmm.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/ce_vmm_probe.c",
+      "logical_path": "tests/eval/nvme_gpu/ce_vmm_probe.c"
     },
     {
       "source": "tests/benchmarks/nvme_nic/Makefile",
@@ -9068,6 +9080,10 @@
     {
       "source": "tests/support/benchmarks/test_cpu_timer.py",
       "logical_path": "tests/eval/common/test_cpu_timer.py"
+    },
+    {
+      "source": "tests/support/benchmarks/ce_vmm_contract.py",
+      "logical_path": "tests/eval/common/ce_vmm_contract.py"
     },
     {
       "source": "tests/support/ce_sim/Makefile",

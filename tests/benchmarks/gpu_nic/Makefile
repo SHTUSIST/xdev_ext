@@ -8,6 +8,7 @@ all:
 
 check:
 	$(PYTHON) test_contract.py -v
+	$(PYTHON) -B test_ce_vmm.py -v
 
 cuda-build:
 	$(PYTHON) run.py --arms afxdp-cuda,udp-pinned-cuda --direction nic-gpu --shape ingest \
