@@ -226,3 +226,89 @@ int main(int argc, char **argv) {
 }
 '''
     return Compiled(prelude + actual + main)
+
+
+def runtime(root):
+    """Execute actual process-init boundary plus unchanged real FD checks."""
+    root = Path(root)
+    source = (root / "tests/benchmarks/nvme_gpu/eval_session.h").read_text()
+    actual = function(source, "es_ce_runtime_begin", optional=True)
+    if not actual:
+        return None  # explicit missing-feature RED, never a copied fallback
+    cuda = (root / "src/cli/xdev_ext_mech_cuda.h").read_text()
+    prelude = COMMON + r'''
+#include <dlfcn.h>
+#include <sys/eventfd.h>
+'''
+    prelude += '\n#include "' + str(root / "tests/benchmarks/nvme_gpu/nvme_gpu_core.h") + '"\n'
+    prelude += '\n#include "' + str(root / "tests/support/benchmarks/fd_check.h") + '"\n'
+    prelude += function(cuda, "xdev_ext_mech_cuda_result") + "\n"
+    prelude += r'''
+static unsigned failure, open_calls, symbol_calls, init_calls, close_calls;
+static int process_fd=-1;
+static int fixture_init(unsigned int flags)
+{
+    init_calls++;
+    if (flags || failure == 3) return 1;
+    /* Only the first actual driver-init boundary creates persistent state.
+     * The FD is real: actual /proc/self/fd counting observes its lifetime. */
+    if (process_fd < 0) process_fd=eventfd(0,EFD_CLOEXEC);
+    return process_fd < 0 ? 1 : 0;
+}
+static void *fixture_dlopen(const char *name, int flags)
+{
+    open_calls++;
+    if (failure == 1 || strcmp(name,"libcuda.so.1") ||
+        flags != (RTLD_NOW | RTLD_LOCAL)) return NULL;
+    return (void *)1;
+}
+static void *fixture_dlsym(void *lib, const char *name)
+{
+    symbol_calls++;
+    if (failure == 2 || lib != (void *)1 || strcmp(name,"cuInit")) return NULL;
+    return (void *)fixture_init;
+}
+static int fixture_dlclose(void *lib)
+{
+    close_calls++;
+    return failure == 4 || lib != (void *)1;
+}
+static const char *fixture_dlerror(void) __attribute__((unused));
+static const char *fixture_dlerror(void) { return "injected driver boundary error"; }
+#define dlopen fixture_dlopen
+#define dlsym fixture_dlsym
+#define dlclose fixture_dlclose
+#define dlerror fixture_dlerror
+'''
+    prelude += function(source, "es_ce_is_sim") + "\n" + actual
+    main = r'''
+int main(int argc, char **argv)
+{
+    if (argc != 3) return 2;
+    failure=(unsigned)strtoul(argv[1],NULL,0);
+    const char *dev=atoi(argv[2]) ? "/dev/xdev_ext_ce_sim" : "/dev/nvidia0";
+    int initial=eval_fd_count(), before=-1, repeated=-1;
+    int rc=es_ce_runtime_begin(dev,&before);
+    int first_open=(int)open_calls, first_symbol=(int)symbol_calls;
+    int first_init=(int)init_calls, first_close=(int)close_calls;
+    int clean=-1, leaked=-1, repaired=-1, repeat_rc=-1;
+    if (!rc) {
+        clean=eval_fd_check(before);
+        int owned=open("/dev/null",O_RDONLY|O_CLOEXEC);
+        if (owned < 0) return 3;
+        leaked=eval_fd_check(before);
+        if (close(owned)) return 4;
+        repaired=eval_fd_check(before);
+        repeat_rc=es_ce_runtime_begin(dev,&repeated);
+    }
+    printf("{\"rc\":%d,\"initial\":%d,\"before\":%d,\"process_fd\":%d,"
+           "\"open\":%d,\"symbol\":%d,\"init\":%d,\"close\":%d,"
+           "\"clean\":%d,\"leaked\":%d,\"repaired\":%d,"
+           "\"repeat_rc\":%d,\"repeated\":%d,\"after\":%d}\n",
+           rc,initial,before,process_fd,first_open,first_symbol,first_init,first_close,
+           clean,leaked,repaired,repeat_rc,repeated,eval_fd_count());
+    if (process_fd >= 0) close(process_fd);
+    return 0;
+}
+'''
+    return Compiled(prelude + main)

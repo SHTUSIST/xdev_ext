@@ -188,7 +188,7 @@ static int sg_slots(struct es_ce *ce, const struct gn_plan *p, unsigned char *bu
 
 int main(int argc, char **argv)
 {
-	int fd_before = eval_fd_count();
+	int fd_before;
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct xdev_ext_xsk_redirect pass = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct es_run r = { .ring = -1, .efd = -1 };
@@ -199,6 +199,7 @@ int main(int argc, char **argv)
 	struct sg_opts o;
 	struct gn_plan p;
 	struct ifreq ifr;
+	bool report_zero_copy = false;
 	unsigned char *slots = NULL, *seen = NULL;
 	uint32_t headroom = 0, xsk = 0, cei = 1;
 	uint64_t used = 0, t0 = 0, t1 = 0, cpu0, cpu = 0, busy0, busy = 0, deadline;
@@ -210,6 +211,9 @@ int main(int argc, char **argv)
 			sg_usage(stderr);
 		return ret;
 	}
+	ret = es_ce_runtime_begin(o.ce_dev, &fd_before);
+	if (ret)
+		return ret;
 	{
 		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", 1);
 		if (error)
@@ -373,6 +377,25 @@ int main(int argc, char **argv)
 		if (error)
 			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
 	}
+	ret = XG_EXIT_PASS;
+out:
+	if (xdev_ext_xsk_redirect_is_active(&redirect))
+		xdev_ext_xsk_redirect_detach(&redirect);
+	if (es_close(&r) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	/* The session is closed: drop the transmit queue's XDP mode it needed. */
+	if (xdev_ext_xsk_redirect_is_active(&pass))
+		xdev_ext_xsk_redirect_detach(&pass);
+	report_zero_copy = x.zero_copy;
+	xp_close(&x);
+	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	free(slots);
+	free(seen);
+	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	if (ret != XG_EXIT_PASS)
+		return ret;
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\",\"route\":\"%s\","
 	       "\"execution\":\"%s\",\"performance_claim\":\"%s\",\"size\":%llu,\"messages\":%llu,"
 	       "\"group_bytes\":%u,\"groups\":%llu,\"depth\":%u,\"mtu\":%u,\"xsk\":\"%s\","
@@ -383,25 +406,10 @@ int main(int argc, char **argv)
 	       o.ingest ? "afxdp-rx>shared-host-frame>ce-h2d" : "ce-d2h>shared-host-frame>afxdp-tx",
 	       ce.sim ? "kvm-ce-sim" : "physical-gpu-ce", ce.sim ? "none" : "physical",
 	       (unsigned long long)p.size, (unsigned long long)p.messages, p.l.group_bytes,
-	       (unsigned long long)p.groups, p.depth, p.mtu, x.zero_copy ? "zc" : "copy",
+	       (unsigned long long)p.groups, p.depth, p.mtu, report_zero_copy ? "zc" : "copy",
 	       (unsigned long long)(p.groups * p.l.group_bytes), (unsigned long long)used,
 	       o.ingest ? "device-slot-group-images" : "peer-receipt-required",
 	       (unsigned long long)(t1 - t0), (unsigned long long)cpu, (unsigned long long)busy);
 	ret = fflush(stdout) ? XG_EXIT_FAIL : XG_EXIT_PASS;
-out:
-	if (xdev_ext_xsk_redirect_is_active(&redirect))
-		xdev_ext_xsk_redirect_detach(&redirect);
-	if (es_close(&r) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
-	/* The session is closed: drop the transmit queue's XDP mode it needed. */
-	if (xdev_ext_xsk_redirect_is_active(&pass))
-		xdev_ext_xsk_redirect_detach(&pass);
-	xp_close(&x);
-	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
-	free(slots);
-	free(seen);
-	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
 	return ret;
 }

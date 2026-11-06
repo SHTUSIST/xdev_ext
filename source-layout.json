@@ -2795,6 +2795,10 @@
       "logical_path": "tests/eval/nvme_gpu/test_ce_vmm.py"
     },
     {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_runtime.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_runtime.py"
+    },
+    {
       "source": "tests/benchmarks/nvme_gpu/ce_vmm_probe.c",
       "logical_path": "tests/eval/nvme_gpu/ce_vmm_probe.c"
     },

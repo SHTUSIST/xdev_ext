@@ -128,6 +128,11 @@ an unmeasured actual-helper probe before physical measurements. Existing
 kernel attachment and quarantine references keep bound memory alive; caller
 export cleanup does not establish DMA quiescence or recover UNKNOWN work.
 
+For GPU devices, process-level `cuInit` runs before taking the FD baseline;
+all session-owned CE/export, socket, BPF and ring/eventfd acquisitions remain
+after that baseline. The original FD check remains exact. The pass JSON is
+published only after final cleanup and the FD check succeed.
+
 ## Build and run
 
 ```sh

@@ -388,7 +388,7 @@ static int sn_seed_slots(const struct sn_opts *o, struct es_ce *ce, unsigned cha
 
 int main(int argc, char **argv)
 {
-	int fd_before = eval_fd_count();
+	int fd_before;
 	struct sn_opts o;
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
 	struct sn_pass p, total = { 0 };
@@ -403,6 +403,9 @@ int main(int argc, char **argv)
 		sn_usage(stderr);
 		return ret;
 	}
+	ret = es_ce_runtime_begin(o.ce_dev, &fd_before);
+	if (ret)
+		return ret;
 	{
 		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", o.g.passes);
 		if (error)
@@ -484,6 +487,21 @@ int main(int argc, char **argv)
 		if (error)
 			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
 	}
+	ret = XG_EXIT_PASS;
+out:
+	/* Idempotent: a closed window has no fd and no driver handle left. */
+	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	if (ng >= 0)
+		close(ng);
+	if (fd >= 0)
+		close(fd);
+	free(buf);
+	free(seen);
+	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	if (ret != XG_EXIT_PASS)
+		return ret;
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\","
 	       "\"route\":\"%s\",\"execution\":\"%s\",\"performance_claim\":\"%s\","
 	       "\"destination\":\"slot-ring\",\"completion_wait\":\"block\","
@@ -505,17 +523,5 @@ int main(int argc, char **argv)
 	       (unsigned long long)total.io_ns, (unsigned long long)total.cpu_us,
 	       (unsigned long long)total.host_busy_us);
 	ret = fflush(stdout) ? XG_EXIT_FAIL : XG_EXIT_PASS;
-out:
-	/* Idempotent: a closed window has no fd and no driver handle left. */
-	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
-	if (ng >= 0)
-		close(ng);
-	if (fd >= 0)
-		close(fd);
-	free(buf);
-	free(seen);
-	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
 	return ret;
 }

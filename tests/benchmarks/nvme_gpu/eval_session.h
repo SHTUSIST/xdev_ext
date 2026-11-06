@@ -39,6 +39,7 @@
 #include "../../../kernel/tools/include/xdev_ext_nv_p2p_ioctl.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
+#include "../common/fd_check.h"
 #include "nvme_gpu_core.h"
 
 struct es_run {
@@ -239,6 +240,46 @@ static inline bool es_ce_is_sim(const char *dev)
 	const char *base = strrchr(dev, '/');
 
 	return !strncmp(base ? base + 1 : dev, "xdev_ext_ce_sim", 15);
+}
+
+/* CUDA's process initialization precedes the scope of every owned eval fd. */
+static inline int es_ce_runtime_begin(const char *dev, int *fd_before)
+{
+	int (*init)(unsigned int) = NULL;
+	void *lib;
+	int ret = XG_EXIT_PASS, count, status;
+
+	if (!fd_before)
+		return XG_EXIT_USAGE;
+	*fd_before = -1;
+	if (!dev || !*dev)
+		return XG_EXIT_USAGE;
+	if (!es_ce_is_sim(dev)) {
+		lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_LOCAL);
+		if (!lib) {
+			fprintf(stderr, "SKIP: CUDA process initialization: %s\n", dlerror());
+			return XG_EXIT_UNAVAILABLE;
+		}
+		*(void **)(&init) = dlsym(lib, "cuInit");
+		if (!init) {
+			fprintf(stderr, "SKIP: CUDA driver lacks cuInit: %s\n", dlerror());
+			ret = XG_EXIT_UNAVAILABLE;
+		} else if ((status = init(0))) {
+			fprintf(stderr, "SKIP: cuInit failed: CUDA status %d\n", status);
+			ret = XG_EXIT_UNAVAILABLE;
+		}
+		if (dlclose(lib)) {
+			fprintf(stderr, "CUDA process initialization dlclose: %s\n", dlerror());
+			return XG_EXIT_FAIL;
+		}
+		if (ret)
+			return ret;
+	}
+	count = eval_fd_count();
+	if (count < 0)
+		return XG_EXIT_FAIL;
+	*fd_before = count;
+	return XG_EXIT_PASS;
 }
 
 /* One export backs every stage fd; the kernel retains its attached reference. */

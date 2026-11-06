@@ -104,6 +104,10 @@ every step of every group and the CPU copies no payload.
   physical measurements. Attached kernel references retain bound memory under
   the existing quarantine rules; closing the caller's export does not prove
   DMA quiescence or recover UNKNOWN work.
+- For GPU devices, process-level `cuInit` completes before the FD baseline.
+  The baseline still precedes every session-owned file, NG, CE stage, export
+  and ring/eventfd. The original FD check remains exact; a pass JSON record
+  is emitted only after final cleanup and that check succeed.
 - The struct_ops programs `nxp_nvme_ops` (`nxp_mech.bpf.o`, `nvme_mode=0`,
   `key_base` 1) and `ce_plan_ops` (`ce_plan.bpf.o`) must be attached;
   otherwise CREATE fails and the arm exits 4.
