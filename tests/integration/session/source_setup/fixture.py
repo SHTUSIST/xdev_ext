@@ -92,7 +92,7 @@ class Fixture:
                         or logical.startswith('kernel/tools/include/')
                         or logical in {'kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl.c', 'kernel/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h', 'kernel/tools/xdev_ext_xsk_shared.c', 'kernel/tools/xdev_ext_xsk_steer.c', 'kernel/tools/xdev_ext_xsk_redirect.c', 'kernel/tools/xdev_ext_gpu_identity.c', 'kernel/include/uapi/linux/xdev_ext_mech.h', 'kernel/include/uapi/linux/io_uring.h'})
             if actual_core:
-                selected = (selected or source.startswith((
+                selected = (selected or source == 'tests/compute/transform_source.py' or source.startswith((
                     'src/core/', 'src/network/net/xdp/',
                     'tests/benchmarks/mechanism_variants/',
                     'tests/integration/lifecycle/',
