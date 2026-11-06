@@ -3,7 +3,7 @@
   "source_root": "/root/xdev_ext/staging/recovery-20261031/wt-integration",
   "baseline_inputs": {
     "src/core/include/uapi/linux/io_uring.h": "2cbfbf9c39ac52de8d194b945a82ba3ffab9a5e58ce8da7e33a28732ba05964d",
-    "src/core/include/uapi/linux/xdev_ext_mech.h": "3c8e7db813c4d8816e8f6e32bc5cc2d6ec9635f3a86d46d84a48f4972a17c28b",
+    "src/core/include/uapi/linux/xdev_ext_mech.h": "7c48c326fa398f8fa025f867644ce6c6a0bb13f5920ff6fa04c29b7ec0b495ee",
     "src/core/include/uapi/linux/xdev_ext_binding.h": "b068c393bf031e64b47700efa352a3fa3166ceb54948d56e92a3ae7cd64eabef",
     "src/core/include/linux/xdev_ext_mech.h": "53df9c3ba91a2b31bbff0b1113ec4d37e78071584a549d44e4f4aab2a3b03103",
     "src/compute/include/linux/xdev_ext_compfam.h": "48fd7455029eb16ba2f5e0abec5e4a87f7ff3f68bc7d51e99bf14e4534f20bfd",
@@ -139,5 +139,19 @@
       }
     },
     "command": "python3 refreeze_deflate_capture.py REPO_ROOT integration2_193_refreeze"
+  },
+  "integration2_193_refreeze_after_review": {
+    "scope": "integration re-freeze of the hashes of the unchanged-production baseline inputs after merging the claude-193 branches; test files, input, status and every other field unchanged unless listed",
+    "previous_freeze_commit": "30df0cc280156af569de97fbe8ba1a96cb4bc6e3",
+    "hashed_tree_commit": "d4d1f06cc63f2c2372d406cc2ecdf1c925958fa8",
+    "changed": {
+      "baseline_inputs": {
+        "src/core/include/uapi/linux/xdev_ext_mech.h": {
+          "before": "3c8e7db813c4d8816e8f6e32bc5cc2d6ec9635f3a86d46d84a48f4972a17c28b",
+          "after": "7c48c326fa398f8fa025f867644ce6c6a0bb13f5920ff6fa04c29b7ec0b495ee"
+        }
+      }
+    },
+    "command": "python3 refreeze_deflate_capture.py REPO_ROOT integration2_193_refreeze_after_review"
   }
 }
