@@ -202,7 +202,7 @@ def parse(argv):
                    help='write the expected bytes into the source NVMe window first')
     p.add_argument('--out-dir', default=str(HERE / '.results'))
     p.add_argument('--chain-bench', default=str(HERE / '.build/chain_bench'))
-    p.add_argument('--uo-bench', default=str(ROOT / 'tests/eval/userspace_orchestrator/.build/uo_bench'))
+    p.add_argument('--uo-bench', default=str(HERE.parent / 'userspace_orchestrator/.build/uo_bench'))
     p.add_argument('--role', choices=('both', 'sender', 'receiver'), default='both',
                    help='paired chains: run both ends here, or one end (the other host '
                         'runs the other role with the same --seed)')

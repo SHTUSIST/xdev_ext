@@ -124,7 +124,7 @@ def run_suite(work):
                      'xdev_ext_preload_socket_smoke', 'libio_uring_unified.so',
                      'libxdev_ext_preload_kernel_model.so'):
         if not (BUILD / artifact).is_file():
-            raise ValueError('missing build artifact; run make -C tests/eval/apps first')
+            raise ValueError(f'missing build artifact; run make -C {HERE} first')
     # No ambient device/backend/session settings may alter the advertised shape.
     clean = {k: v for k, v in os.environ.items()
              if not k.startswith('XDEV_EXT_') and k != 'LD_PRELOAD'}
