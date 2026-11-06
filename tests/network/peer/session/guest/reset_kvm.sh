@@ -45,8 +45,11 @@ for artifact in "$BUILD/arch/x86/boot/bzImage" "$MODULE" "$GUEST/peer_reset_e2e.
 {
 	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; host RAM stands in for device memory; no timing; no physical DMA claim\n' \
 		"$(date -u +%FT%TZ)" "$(hostname)"
-	printf 'linux=%s\nlinux_receipt_commit=%s\nbuild=%s\nbuild_commit=%s\nmodule=%s\nkernel_release=%s\n' \
-		"$LINUX" "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("product_commit", "unknown"))' "$LINUX/.xdev-ext-source.json" 2>/dev/null || echo unknown)" \
+	canonical=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["canonical_root"])' \
+		"$LINUX/.xdev-ext-source.json" 2>/dev/null || echo unknown)
+	printf 'linux=%s\nlinux_canonical_root=%s\nlinux_canonical_commit=%s\n' "$LINUX" "$canonical" \
+		"$(git -C "$canonical" rev-parse HEAD 2>/dev/null || echo unknown)"
+	printf 'build=%s\nbuild_commit=%s\nmodule=%s\nkernel_release=%s\n' \
 		"$BUILD" "$(cat "$BUILD/xdev-ext-source.commit" 2>/dev/null || echo unknown)" "$MODULE" "$release"
 	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|FAULT_INJECTION|FAULT_INJECTION_DEBUG_FS|FAIL_IO_TIMEOUT|IOMMU_DEFAULT_DMA_LAZY)=' "$BUILD/.config" || true
 } >"$EV/provenance.txt"
