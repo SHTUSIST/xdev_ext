@@ -53,6 +53,7 @@
 #include "../../include/uapi/linux/xdev_ext_peer.h"
 #include "../include/xdev_ext_xsk_redirect.h"
 #include "../include/xdev_ext_gpu_identity.h"
+#include "../include/xdev_ext_nv_p2p_ioctl.h"
 #include "xdev_ext_mech_cuda.h"
 #include "xdev_ext_mech_ctl_core.h"
 #include "../../io_uring/xdev_ext_policy.h"
@@ -92,7 +93,7 @@ struct ctl_opts {
 	bool have_slba, have_nlb, have_dst_slba, have_dst_nlb, have_session;
 	bool have_local_mac, have_peer_mac, have_local_ip, have_peer_ip;
 	bool have_local_port, have_peer_port;
-	bool ce_alloc, have_ce_va, reliable;
+	bool ce_alloc, ce_vmm, have_ce_va, reliable;
  __u64 wire_session, first_group, remote_window, max_attempts, retry_timeout_ms;
  bool have_policy;
  unsigned int policy_fields;
@@ -1250,6 +1251,28 @@ static int ctl_shared_umem_probe(const struct ctl_opts *o, int session_fd)
 	return ret;
 }
 
+/*
+ * --ce-vmm: each CE stage fd carries the allocation's POSIX file descriptor
+ * export, so the window binds without GPUDirect RDMA (no CUDA third-party
+ * P2P registration exists then for a VA to resolve).
+ */
+static int ctl_ce_attach(const struct xdev_ext_mech_cuda *cuda, int fd)
+{
+	struct xdev_ext_nv_ce_attach_memory attach = {
+		.mem_fd = cuda->export_fd,
+		.gpu_va = cuda->va,
+		.size = cuda->vmm_bytes,
+	};
+	int err;
+
+	if (!xdev_ext_nv_ce_attach_memory(fd, &attach))
+		return 0;
+	err = errno ? errno : EIO;
+	ctl_err("CE stage attach of the CUDA export: %s (NV status 0x%x)\n",
+		strerror(err), attach.status);
+	return -err;
+}
+
 /* Resolve the opened device, never infer GPU identity from an ordinal. */
 static int ctl_cuda_open(struct xdev_ext_mech_cuda *cuda, struct ctl_opts *o, int fd,
 			 int other_fd)
@@ -1272,13 +1295,25 @@ static int ctl_cuda_open(struct xdev_ext_mech_cuda *cuda, struct ctl_opts *o, in
 			ret ? strerror(-ret) : "different PCI BDFs");
 		return ret ? ret : -EXDEV;
 	}
-	ret = xdev_ext_mech_cuda_open(cuda, bdf, o->ce_len);
+	ret = o->ce_vmm ? xdev_ext_mech_cuda_open_vmm(cuda, bdf, o->ce_len) :
+		xdev_ext_mech_cuda_open(cuda, bdf, o->ce_len);
 	if (ret)
 		return ret;
 	o->ce_va = cuda->va;
-	printf("CUDA allocation=native bdf=%s va=0x%llx bytes=%llu\n",
-	       bdf, (unsigned long long)cuda->va,
-	       (unsigned long long)o->ce_len);
+	if (!o->ce_vmm) {
+		printf("CUDA allocation=native bdf=%s va=0x%llx bytes=%llu\n",
+		       bdf, (unsigned long long)cuda->va,
+		       (unsigned long long)o->ce_len);
+		return 0;
+	}
+	ret = ctl_ce_attach(cuda, fd);
+	if (!ret)
+		ret = ctl_ce_attach(cuda, other_fd);
+	if (ret)
+		return ret;
+	printf("CUDA allocation=vmm bdf=%s va=0x%llx bytes=%llu mapped=%llu "
+	       "export=posix-fd attached=2\n", bdf, (unsigned long long)cuda->va,
+	       (unsigned long long)o->ce_len, (unsigned long long)cuda->vmm_bytes);
 	return 0;
 }
 
@@ -1289,14 +1324,15 @@ static int ctl_cuda_close(struct xdev_ext_mech_cuda *cuda, const struct ctl_opts
 
  if (ctl_create_retained) {
   if (o->ce_alloc)
-   fputs("CUDA allocation=native released=no retained=kernel-quarantine\n", stderr);
+   fprintf(stderr, "CUDA allocation=%s released=no retained=kernel-quarantine\n",
+           o->ce_vmm ? "vmm" : "native");
   return verdict;
  }
  ret = xdev_ext_mech_cuda_close(cuda);
 
 	if (o->ce_alloc)
-		printf("CUDA allocation=native released=%s\n",
-		       ret ? "no" : "yes");
+		printf("CUDA allocation=%s released=%s\n",
+		       o->ce_vmm ? "vmm" : "native", ret ? "no" : "yes");
 	if (ret) {
 		ctl_err("CUDA allocation cleanup: %s\n", strerror(-ret));
 		return CTL_SETUP;
@@ -2160,6 +2196,7 @@ enum {
 	OPT_CHAIN, OPT_SESSION, OPT_WINDOW_REJECT, OPT_DETACH_MID_RUN,
 	OPT_FQ_DUP, OPT_SHARED_UMEM, OPT_CLOSE_INFLIGHT, OPT_EXPECT_UNBIND,
 	OPT_EXPECT_TIMEOUT, OPT_QUIET_WAIT, OPT_COPY, OPT_NIC_FALLBACK, OPT_CE_ALLOC,
+	OPT_CE_VMM,
  OPT_RELIABLE, OPT_WIRE_SESSION, OPT_FIRST_GROUP, OPT_REMOTE_WINDOW,
  OPT_MAX_ATTEMPTS, OPT_RETRY_TIMEOUT,
  OPT_XFORM, OPT_XFORM_ARG, OPT_VERIFY_SRC, OPT_VERIFY_DST, OPT_VERIFY_SRC_OFF,
@@ -2224,6 +2261,7 @@ static const struct option ctl_options[] = {
 	{ "ce-dev", required_argument, NULL, OPT_CE_DEV },
 	{ "ce-va", required_argument, NULL, OPT_CE_VA },
 	{ "ce-alloc", no_argument, NULL, OPT_CE_ALLOC },
+	{ "ce-vmm", no_argument, NULL, OPT_CE_VMM },
 	{ "ce-len", required_argument, NULL, OPT_CE_LEN },
 	{ "chain", required_argument, NULL, OPT_CHAIN },
 	{ "session", required_argument, NULL, OPT_SESSION },
@@ -2251,11 +2289,11 @@ static void usage(FILE *f)
 "                [--expect-window-reject | --drv-mode | --fq-dup |\n"
 "                 --detach-mid-run PIN | --close-inflight | --expect-timeout]\n"
 "                [--shared-umem-probe | --quiet-wait] [COMMON]\n"
-"                [--ce-dev DEV (--ce-va VA | --ce-alloc) --ce-len N] (RX -> CE -> CE -> NVMe)\n"
+"                [--ce-dev DEV (--ce-va VA | --ce-alloc | --ce-vmm) --ce-len N] (RX -> CE -> CE -> NVMe)\n"
 "       xdev_ext_mech_ctl nvme-nic --ifname IF --src-ng NG --slba N --nlb N PEER\n"
 "                [--expect-unbind] [COMMON]\n"
 "       xdev_ext_mech_ctl ce-chain --chain a|b|c|d [--ce-dev DEV] --ce-len N\n"
-"                [--ce-va N | --ce-alloc] [--src-ng NG --slba N --nlb N]\n"
+"                [--ce-va N | --ce-alloc | --ce-vmm] [--src-ng NG --slba N --nlb N]\n"
 "                [--dst-ng NG --dst-slba N --dst-nlb N] [--ifname IF PEER]\n"
 "                [COMMON]\n"
 "       xdev_ext_mech_ctl fanout --src-ng NG --slba N --nlb N\n"
@@ -2280,6 +2318,8 @@ static void usage(FILE *f)
 "        --diagnostics: request an explicit CREATE admission value report\n"
 "        --poll: the session worker polls every stage; CREATE fails if one cannot be polled\n"
 "CUDA:   --ce-alloc requires a real GPU --ce-dev; allocates once before CREATE\n"
+"        --ce-vmm: as --ce-alloc with cuMemCreate, its POSIX file descriptor\n"
+"        export attached to each CE stage fd (a GPU without GPUDirect RDMA)\n"
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
 "        b NVMe READ -> CE H2D -> CE D2H -> AF_XDP TX (AF_XDP UMEM)\n"
 "        c as b, received by a nic-nvme session\n"
@@ -2482,6 +2522,7 @@ static int parse_options(int argc, char **argv, struct ctl_opts *o)
 			break;
 		case OPT_CE_DEV: o->ce_dev = optarg; break;
 		case OPT_CE_ALLOC: o->ce_alloc = true; break;
+		case OPT_CE_VMM: o->ce_alloc = o->ce_vmm = true; break;
 		case OPT_CE_VA: ret = parse_u64_opt(optarg, &o->ce_va, &o->have_ce_va);
 			break;
 		case OPT_CE_LEN: ret = parse_u64_opt(optarg, &o->ce_len, NULL);

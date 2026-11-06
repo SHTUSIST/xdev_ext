@@ -5,6 +5,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdarg.h>
+#include <fcntl.h>
+#include <unistd.h>
 
 typedef void *CUcontext;
 static CUcontext current = (void *)(uintptr_t)0x111;
@@ -33,8 +35,10 @@ static int fails(const char *op)
 	return s && !strcmp(s, op);
 }
 
+static int exported_fd_open(void);
 __attribute__((destructor)) static void unload(void)
 {
+	event("export_open=%d", exported_fd_open());
 	event("unload retained=%d live=%d current=%llx", retained, live,
 	      (unsigned long long)(uintptr_t)current);
 }
@@ -136,6 +140,145 @@ int cuMemAlloc_v2(uint64_t *va, size_t bytes)
 	return 0;
 }
 #endif
+/*
+ * CUDA VMM: cuMemCreate + POSIX file descriptor export + cuMemMap.  The
+ * structures are the Driver ABI layouts (CUmemAllocationProp,
+ * CUmemAccessDesc); each live VMM resource counts in live as well.
+ */
+struct fake_prop {
+	int type, handles;
+	struct { int type, id; } loc;
+	void *win32;
+	unsigned char compression, rdma;
+	unsigned short usage;
+	unsigned char reserved[4];
+};
+struct fake_access { struct { int type, id; } loc; int flags; };
+static int created, reserved_va, mapped, exported_fd = -1;
+/* Whether the fd handed out by the export is still open in the caller. */
+static int exported_fd_open(void)
+{
+	return exported_fd >= 0 && fcntl(exported_fd, F_GETFD) != -1;
+}
+static int prop_ok(const struct fake_prop *p)
+{
+	return p && p->type == 1 && p->handles == 1 && p->loc.type == 1 &&
+	       p->loc.id == 11 && !p->win32 && !p->compression && !p->rdma && !p->usage;
+}
+#ifndef OMIT_GRANULARITY
+int cuMemGetAllocationGranularity(size_t *granularity, const struct fake_prop *p, int option)
+{
+	const char *g = getenv("CUDA_TEST_GRANULARITY");
+	event("granularity type=%d handles=%d loc=%d:%d option=%d", p->type, p->handles,
+	      p->loc.type, p->loc.id, option);
+	if (fails("granularity") || !prop_ok(p) || option != 0)
+		return 999;
+	*granularity = g ? (size_t)strtoull(g, NULL, 0) : (size_t)2 << 20;
+	return 0;
+}
+#endif
+#ifndef OMIT_CREATE
+int cuMemCreate(uint64_t *handle, size_t size, const struct fake_prop *p,
+		unsigned long long flags)
+{
+	event("create %zu flags=%llu current=%llx", size, flags,
+	      (unsigned long long)(uintptr_t)current);
+	if (fails("create") || !prop_ok(p) || flags || current != (void *)(uintptr_t)0x222)
+		return 2;
+	*handle = 0xabc0;
+	created++;
+	live++;
+	return 0;
+}
+#endif
+#ifndef OMIT_EXPORT
+int cuMemExportToShareableHandle(void *out, uint64_t handle, int type,
+				 unsigned long long flags)
+{
+	event("export %llx type=%d flags=%llu", (unsigned long long)handle, type, flags);
+	if (fails("export") || handle != 0xabc0 || type != 1 || flags)
+		return 999;
+	*(int *)out = exported_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	return *(int *)out < 0 ? 999 : 0;
+}
+#endif
+#ifndef OMIT_RESERVE
+int cuMemAddressReserve(uint64_t *ptr, size_t size, size_t align, uint64_t addr,
+			unsigned long long flags)
+{
+	event("reserve %zu align=%zu addr=%llx flags=%llu", size, align,
+	      (unsigned long long)addr, flags);
+	if (fails("reserve") || align || addr || flags)
+		return 2;
+	*ptr = 0x7a4879200000ULL;
+	reserved_va++;
+	live++;
+	return 0;
+}
+#endif
+#ifndef OMIT_MAP
+int cuMemMap(uint64_t ptr, size_t size, size_t offset, uint64_t handle,
+	     unsigned long long flags)
+{
+	event("map %llx %zu offset=%zu handle=%llx current=%llx", (unsigned long long)ptr,
+	      size, offset, (unsigned long long)handle, (unsigned long long)(uintptr_t)current);
+	if (fails("map") || ptr != 0x7a4879200000ULL || offset || handle != 0xabc0 ||
+	    flags || !reserved_va || !created)
+		return 999;
+	mapped++;
+	live++;
+	return 0;
+}
+#endif
+#ifndef OMIT_ACCESS
+int cuMemSetAccess(uint64_t ptr, size_t size, const struct fake_access *d, size_t count)
+{
+	event("access %llx %zu loc=%d:%d flags=%d count=%zu current=%llx",
+	      (unsigned long long)ptr, size, d->loc.type, d->loc.id, d->flags, count,
+	      (unsigned long long)(uintptr_t)current);
+	if (fails("access") || count != 1 || d->loc.type != 1 || d->loc.id != 11 ||
+	    d->flags != 3 || !mapped)
+		return 999;
+	return 0;
+}
+#endif
+#ifndef OMIT_UNMAP
+static int unmap_failed;
+int cuMemUnmap(uint64_t ptr, size_t size)
+{
+	event("unmap %llx %zu current=%llx", (unsigned long long)ptr, size,
+	      (unsigned long long)(uintptr_t)current);
+	if ((fails("unmap_once") && !unmap_failed++) || !mapped ||
+	    current != (void *)(uintptr_t)0x222)
+		return 999;
+	mapped--;
+	live--;
+	return 0;
+}
+#endif
+#ifndef OMIT_ADDRESS_FREE
+int cuMemAddressFree(uint64_t ptr, size_t size)
+{
+	event("address_free %llx %zu", (unsigned long long)ptr, size);
+	if (mapped || !reserved_va || ptr != 0x7a4879200000ULL)
+		return 999;
+	reserved_va--;
+	live--;
+	return 0;
+}
+#endif
+#ifndef OMIT_RELEASE_MEM
+int cuMemRelease(uint64_t handle)
+{
+	event("release_mem %llx", (unsigned long long)handle);
+	if (!created || handle != 0xabc0)
+		return 999;
+	created--;
+	live--;
+	return 0;
+}
+#endif
+
 #ifndef OMIT_FREE
 int cuMemFree_v2(uint64_t va)
 {

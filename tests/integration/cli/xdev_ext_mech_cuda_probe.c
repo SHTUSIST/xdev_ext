@@ -38,12 +38,22 @@ int main(int argc, char **argv)
 	const char *bdf = argc > 1 ? argv[1] : "0000:65:00.0";
 	uint64_t bytes = argc > 2 ? strtoull(argv[2], NULL, 0) : 8192;
 
+	int vmm = getenv("CUDA_TEST_VMM") != NULL;
+	int closed;
+
 	printf("zero_close=%d\n", xdev_ext_mech_cuda_close(&cuda));
 	mark("before_open");
-	rc = xdev_ext_mech_cuda_open(&cuda, !strcmp(bdf, "NULL") ? NULL : bdf,
-				bytes);
+	if (vmm)
+		rc = xdev_ext_mech_cuda_open_vmm(&cuda, !strcmp(bdf, "NULL") ? NULL : bdf,
+					    bytes);
+	else
+		rc = xdev_ext_mech_cuda_open(&cuda, !strcmp(bdf, "NULL") ? NULL : bdf,
+					bytes);
 	mark("after_open");
 	printf("open=%d\nva=%llu\n", rc, (unsigned long long)cuda.va);
+	if (vmm)
+		printf("vmm_bytes=%llu\nexport_fd=%d\n",
+		       (unsigned long long)cuda.vmm_bytes, cuda.export_fd);
 	lib = dlopen("libcuda.so.1", RTLD_NOW | RTLD_NOLOAD);
 	printf("loaded_after_open=%d\n", lib != NULL);
 	if (!rc && lib) {
@@ -60,8 +70,15 @@ int main(int argc, char **argv)
 	if (lib && !retry)
 		dlclose(lib);
 	mark("before_close");
-	printf("close=%d\n", xdev_ext_mech_cuda_close(&cuda));
+	closed = xdev_ext_mech_cuda_close(&cuda);
+	printf("close=%d\n", closed);
 	mark("after_close");
+	if (closed && getenv("CUDA_TEST_RETRY_CLOSE")) {
+		/* An unsafe cleanup failure keeps ownership: a retry finishes it. */
+		mark("before_retry_close");
+		printf("retry_close=%d\n", xdev_ext_mech_cuda_close(&cuda));
+	}
+
 	if (retry && !rc && lib) {
 		/* A failed close does not own the next caller's current context. */
 		set_current((void *)(uintptr_t)0x444);

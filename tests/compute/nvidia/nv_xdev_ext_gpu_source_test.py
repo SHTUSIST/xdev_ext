@@ -622,6 +622,19 @@ for closer in ("static void\nnvidia_close_callback(", "nvidia_ctl_close(\n"):
     assert "nv_xdev_ext_ce_memory_release(nvlfp);" in body, closer
 NUMBERS = (ROOT / "kernel-open/common/inc/nv-ioctl-numbers.h").read_text()
 assert "#define NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY (NV_IOCTL_BASE + 23)" in NUMBERS
+# The tools' mirror (tools/include/xdev_ext_nv_p2p_ioctl.h) keeps the field
+# order of the driver's struct; its ABI test checks every offset.
+def field_names(source: str, opener: str) -> list:
+    start = source.index(opener)
+    body = source[source.index("{", start) + 1:source.index("}", start)]
+    return [re.match(r"\s*\w+\s+(\w+)", line).group(1) for line in body.splitlines()
+            if ";" in line and not line.strip().startswith(("/*", "*"))]
+NV_IOCTL_H = (ROOT / "kernel-open/common/inc/nv-ioctl.h").read_text()
+CLI_NV_IOCTL = (ROOT.parent / "kernel/tools/include/xdev_ext_nv_p2p_ioctl.h").read_text()
+assert field_names(NV_IOCTL_H, "typedef struct nv_ioctl_xdev_ext_ce_attach_memory") == \
+    field_names(CLI_NV_IOCTL, "struct xdev_ext_nv_ce_attach_memory {") == \
+    ["mem_fd", "flags", "gpu_va", "size", "status", "reserved"]
+assert "#define XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY\t(XDEV_EXT_NV_IOCTL_BASE + 23U)" in CLI_NV_IOCTL
 
 # bind_host keeps the identity-only variant; the default maps GPU-device IOVAs.
 bind_host = function_body(BACKEND, "static int nv_xdev_ext_ce_bind_host(")
