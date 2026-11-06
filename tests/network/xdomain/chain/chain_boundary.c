@@ -254,10 +254,20 @@ static struct chain_fd *chain_fd_of(const void *file)
 			return &chain_fds[fd];
 	return NULL;
 }
+#ifdef CHAIN_REAL_PEER
+bool chain_bridge_owns_file(const void *pointer);
+void chain_bridge_file_get(struct file *file);
+void chain_bridge_file_put(struct file *file);
+#endif
 struct file *fget(int fd)
 {
 	if (fd < 0 || fd >= CHAIN_FDS || !chain_fds[fd].file)
 		return NULL;
+	assert(chain_fds[fd].refs);
+#ifdef CHAIN_REAL_PEER
+	if (chain_bridge_owns_file(chain_fds[fd].file))
+		chain_bridge_file_get(chain_fds[fd].file);
+#endif
 	chain_fds[fd].refs++;
 	return chain_fds[fd].file;
 }
@@ -265,8 +275,20 @@ void fput(struct file *f)
 {
 	struct chain_fd *d = chain_fd_of(f);
 
+#ifdef CHAIN_REAL_PEER
+	/* The real claim creates an authority with its own file reference but
+	 * no chain descriptor. Do not interpret its layout as a synthetic file. */
+	if (!d && chain_bridge_owns_file(f)) {
+		chain_bridge_file_put(f);
+		return;
+	}
+#endif
 	assert(d && d->refs);
 	d->refs--;
+#ifdef CHAIN_REAL_PEER
+	if (chain_bridge_owns_file(f))
+		chain_bridge_file_put(f);
+#endif
 }
 bool CHAIN_STUB(xdev_ext_peer_control_file)(struct file *file)
 {
