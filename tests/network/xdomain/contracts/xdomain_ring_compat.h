@@ -121,6 +121,8 @@ static struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 { (void)ring;assert(!"unexpected native poll in IRQ ring fixture");abort(); }
 static bool tb_ring_poll_pending(struct tb_ring *ring)
 { (void)ring;assert(!"unexpected native poll query in IRQ ring fixture");abort(); }
+static void tb_ring_poll_complete(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected ring interrupt re-enable in IRQ ring fixture");abort(); }
 static struct device *tb_ring_dma_device(struct tb_ring *);
 static int tb_xdomain_alloc_in_hopid(struct tb_xdomain *,int);
 static int tb_xdomain_alloc_out_hopid(struct tb_xdomain *,int);

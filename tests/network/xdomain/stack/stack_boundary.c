@@ -415,6 +415,12 @@ bool tb_ring_poll_pending(struct tb_ring *ring)
 	assert(!"unexpected native poll query in IRQ stack fixture");
 	abort();
 }
+void tb_ring_poll_complete(struct tb_ring *ring)
+{
+	(void)ring;
+	assert(!"unexpected ring interrupt re-enable in IRQ stack fixture");
+	abort();
+}
 static struct tb_ring*ring_alloc(struct tb_nhi*n,int size,unsigned flags,bool tx){
 	unsigned e=endpoint_pci(n->pdev);
 	if(world->ring_refuse[e]){
@@ -976,6 +982,10 @@ int stack_new(const struct stack_config*c,struct stack_world**out){
 	}
 	int r=stack_x3_init();
 	if(r){
+#ifdef STACK_REAL_NHI
+		/* No ring exists yet; release both simulated controllers. */
+		for(unsigned e=0;e<2;e++)stack_nhi_destroy(&w->side[e].nhi);
+#endif
 		world=NULL;
 		free(w->n);
 		free(w->log);
@@ -1499,7 +1509,6 @@ int stack_remove(struct stack_world*w,unsigned e){
 	w->active=e;
 	stack_x3_remove(&w->side[e].svc);
 	w->side[e].removed=true;
-	stack_x4_quarantine_records();
 	fprintf(stderr,"STACK_DIAG remove endpoint=%u pci_refs=%u\n",e,w->side[e].pci.refs);
 	return 0;
 }

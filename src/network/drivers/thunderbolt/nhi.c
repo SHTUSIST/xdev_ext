@@ -157,7 +157,13 @@ static void ring_interrupt_active(struct tb_ring *ring, bool active)
 		"%s interrupt at register %#x bit %d (%#x -> %#x)\n",
 		active ? "enabling" : "disabling", reg, interrupt_bit, old, new);
 
-	if (new == old)
+	/*
+	 * Backported from later upstream nhi.c: rings that are polled mask
+	 * the interrupt while the completions are being advanced (see
+	 * __ring_interrupt()), so for those it can already be disabled by
+	 * the time the ring is stopped.
+	 */
+	if (new == old && (active || !ring->start_poll))
 		dev_WARN(&ring->nhi->pdev->dev,
 					 "interrupt for %s %d is already %s\n",
 					 RING_TYPE(ring), ring->hop,
