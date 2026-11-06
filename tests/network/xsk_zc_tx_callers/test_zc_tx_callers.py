@@ -77,6 +77,12 @@ def nnb_problems(session, producer):
                        r'xdev_ext_xsk_redirect_detach\(&p->redirect\);', teardown)
     if not detach or stop < 0 or detach.start() < stop:
         problems.append('teardown does not detach the owned program after STOP')
+    # STOP failed or START's acceptance is unknown: UMEM, rings and links stay
+    # until exit, but a netlink-attached program would outlive the process.
+    retained = re.search(r'if \(stop \|\| p->unsafe\) \{(.*?)\n\t\treturn;\n\t\}', teardown, re.S)
+    if not retained or not re.search(r'if \(!a->c->reverse && xdev_ext_xsk_redirect_is_active\(&p->redirect\)\)\s*'
+                                      r'xdev_ext_xsk_redirect_detach\(&p->redirect\);', retained.group(1)):
+        problems.append('a retained teardown leaves the forward pass program attached past exit')
     # A refused setup still reaches that teardown (the producer counts it as set).
     if not re.search(r'ret = a->ops->setup\(a\);.*?if \(ret\) \{\s*set\+\+;\s*goto out;', producer, re.S) or \
             not re.search(r'for \(unsigned i = 0; i < set && i < c->nr_arms; i\+\+\)\s*'
@@ -201,6 +207,8 @@ def insert_before(text, anchor, piece):
 NNB_RULE = r'\tif \(!c->reverse\) \{\n\t\tret = xdev_ext_xsk_redirect_zc_tx_xdp\(.*?\n\t\}\n'
 NNB_FILL = r'\tfor \(uint32_t i = 0; i < S_RING; i\+\+\)\n\t\taddr\[i\][^\n]*\n\tif \(fq_push\(&p->x\.fq, addr, S_RING\) != S_RING\)\n\t\treturn -ENOSPC;\n'
 NNB_DETACH = '\tif (xdev_ext_xsk_redirect_is_active(&p->redirect))\n\t\txdev_ext_xsk_redirect_detach(&p->redirect);\n'
+NNB_RETAINED_DETACH = ('\t\tif (!a->c->reverse && xdev_ext_xsk_redirect_is_active(&p->redirect))\n'
+                       '\t\t\txdev_ext_xsk_redirect_detach(&p->redirect);\n')
 NNB_CREATE = '\t/* Strict kernel admission checks native NVMe SGL and every NIC mapping. */\n'
 NNB_MUTATIONS = {
     'rule_removed': lambda t: cut(t, block(NNB_RULE, t)),
@@ -214,6 +222,7 @@ NNB_MUTATIONS = {
                                              '\tif (c->reverse) {\n' + block(NNB_FILL, t) + '\t}\n', 1),
     'fill_before_create': lambda t: insert_before(cut(t, block(NNB_FILL, t)), NNB_CREATE, block(NNB_FILL, t)),
     'teardown_keeps_program': lambda t: cut(t, NNB_DETACH),
+    'retained_teardown_keeps_pass_program': lambda t: cut(t, NNB_RETAINED_DETACH),
 }
 
 GNB_RULE = r'\tif \(!o\.ingest && x\.zero_copy\) \{\n\t\terr = xdev_ext_xsk_redirect_zc_tx_xdp\(.*?\n\t\}\n'
