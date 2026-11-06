@@ -2444,6 +2444,18 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/guest/kv_restore_kvm.sh",
+      "logical_path": "tests/eval/kv_restore/guest/kv_restore_kvm.sh"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/guest/test_validate.py",
+      "logical_path": "tests/eval/kv_restore/guest/test_validate.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/guest/validate.py",
+      "logical_path": "tests/eval/kv_restore/guest/validate.py"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/kv_protocol.py",
       "logical_path": "tests/eval/kv_restore/kv_protocol.py"
     },
