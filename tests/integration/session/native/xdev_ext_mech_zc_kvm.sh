@@ -39,6 +39,16 @@ GROUP_COUNT_SET=0
 DEPTH_SET=0
 # Optional emulated Intel VT-d (--viommu); off keeps the QEMU command unchanged.
 VIOMMU=0
+# VFIO passthrough (claude-193): host devices already on vfio-pci, a real
+# GPU campaign using them, and the QEMU NIC model of the wire pair.
+VFIO_DEVICES=()
+GPU=0
+GPU_BDF=''
+NVIDIA_USERSPACE=''
+NIC_MODEL=virtio
+TB_NHI=0
+TB_NHI_BDF=''
+TB_NHI_CYCLES=3
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -67,6 +77,11 @@ while (($#)); do
  --provider-case) PROVIDER_CASE=$2; CE_SIM=1; shift 2 ;;
  --fault-campaign) FAULT_CAMPAIGN=$2; CE_SIM=1; shift 2 ;;
  --viommu) VIOMMU=1; shift ;;
+ --vfio) VFIO_DEVICES+=("$2"); shift 2 ;;
+ --gpu) GPU=1; GPU_BDF=$2; shift 2 ;;
+ --nvidia-userspace) NVIDIA_USERSPACE=$2; shift 2 ;;
+ --nic) NIC_MODEL=$2; shift 2 ;;
+ --tb-nhi) TB_NHI=1; TB_NHI_BDF=$2; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -77,6 +92,35 @@ if (( XDOMAIN )); then
     if (( CE_SIM || COMPAT || PEER || RX_CE || RELIABLE || LIFECYCLE || FENCE_CHECK || EVAL_SESSION || MECHANISM_VARIANTS )) || [[ "$FAULT" != none || "$PROVIDER_CASE" != normal || -n "$FAULT_CAMPAIGN" ]]; then
         echo 'xdomain requires its exclusive correctness mode' >&2; exit 2
     fi
+fi
+case "${NIC_MODEL:-virtio}" in
+virtio|igb) ;;
+*) echo 'invalid --nic (expected virtio or igb)' >&2; exit 2 ;;
+esac
+if [[ "${NIC_MODEL:-virtio}" != virtio ]] && (( XDOMAIN || MECHANISM_VARIANTS )); then
+    echo '--nic igb applies to the AF_XDP wire-pair campaigns only' >&2; exit 2
+fi
+# A real GPU replaces the CPU-memcpy CE stand-in; it has its own guest cases.
+if (( ${GPU:-0} )); then
+    if (( CE_SIM || COMPAT || PEER || RX_CE || RELIABLE || LIFECYCLE || FENCE_CHECK || EVAL_SESSION || MECHANISM_VARIANTS || XDOMAIN )) || [[ "$FAULT" != none || "$PROVIDER_CASE" != normal || -n "$FAULT_CAMPAIGN" ]]; then
+        echo 'gpu requires its exclusive correctness mode' >&2; exit 2
+    fi
+    [[ -n "$NVIDIA_USERSPACE" && -d "$NVIDIA_USERSPACE" ]] || {
+        echo 'gpu requires --nvidia-userspace DIR (extracted official NVIDIA package)' >&2; exit 2;
+    }
+    gpu_listed=0
+    for bdf in "${VFIO_DEVICES[@]}"; do [[ "$bdf" != "$GPU_BDF" ]] || gpu_listed=1; done
+    (( gpu_listed )) || VFIO_DEVICES+=("$GPU_BDF")
+fi
+# A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles.
+if (( TB_NHI )); then
+    if (( XDOMAIN || ${GPU:-0} || MECHANISM_VARIANTS || LIFECYCLE || FENCE_CHECK || EVAL_SESSION )) || [[ -n "$FAULT_CAMPAIGN" ]]; then
+        echo 'tb-nhi requires its exclusive correctness mode' >&2; exit 2
+    fi
+    VFIO_DEVICES+=("$TB_NHI_BDF")
+fi
+if (( ${#VFIO_DEVICES[@]} )) && (( XDOMAIN || MECHANISM_VARIANTS )); then
+    echo 'vfio devices are not wired into this mode' >&2; exit 2
 fi
 # Fence checks extend normal plans and run before CE/network setup. The
 # default matrix never selects them. Never combine them with fault campaigns.
@@ -108,6 +152,9 @@ CLI_TIMEOUT_MS=$((60000 * TIMEOUT_FACTOR))
 RX_TIMEOUT_MS=$((15000 * TIMEOUT_FACTOR))
 QEMU_TIMEOUT_SECONDS=$((150 * TIMEOUT_FACTOR))
 if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then QEMU_TIMEOUT_SECONDS=$MECHANISM_VARIANTS_TIMEOUT; fi
+# GPU guests boot GSP firmware, CUDA and four real-GPU cases before the
+# normal campaign; give them their own bounded budget.
+if (( ${GPU:-0} )); then QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + 450)); fi
 # Campaign length is independent of the bounded in-flight pool/window.
 [[ "$GROUP_COUNT" =~ ^[1-9][0-9]{0,3}$ && "$GROUP_COUNT" -le 1024 ]]
 [[ -n "$DEPTH" ]] || DEPTH=$((RELIABLE ? 8 : (GROUP_COUNT < 64 ? GROUP_COUNT : 64)))
@@ -360,7 +407,7 @@ if (( MECHANISM_VARIANTS )); then
     source "$E2_SOURCE/kvm_mode.sh"
     SOURCE_SLBA=2048
 fi
-QEMU=/usr/local/bin/qemu-system-x86_64
+QEMU=${XDEV_EXT_QEMU:-/usr/local/bin/qemu-system-x86_64}
 FENCE_GUEST=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_guest.sh
 FENCE_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_fence_validate.py
 FENCE_RUNNER=$FENCE_OUT/run.py
@@ -526,6 +573,96 @@ verify_fence_identity() {
     [[ $(modinfo -F name "$FENCE_OUT/lifecycle_bench.ko") == lifecycle_bench ]]
     [[ $(modinfo -F vermagic "$FENCE_OUT/lifecycle_bench.ko" | cut -d' ' -f1) == "$(cat "$BUILD/include/config/kernel.release")" ]]
 }
+# --- VFIO and real-GPU mode (claude-193) -----------------------------------
+VFIO_HELPER=$SRC/tools/testing/selftests/xdev_ext_integration/vfio_passthrough.py
+GPU_GUEST=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_guest.sh
+GPU_VALIDATOR=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_validate.py
+GPU_DMABUF_SOURCE=$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_gpu_dmabuf.c
+GPU_OUT=$TOOLS/gpu
+NVIDIA_SRC=$SOURCE_GIT_ROOT/build/assembled/nvidia
+NVIDIA_OUT=$TOOLS/nvidia-build
+# The official package must be the exact release of the open modules: the
+# GSP firmware and libcuda refuse any other kernel-module version.
+gpu_userspace_files() {
+    local release=$1
+    printf '%s\n' "$NVIDIA_USERSPACE/firmware/gsp_ga10x.bin" "$NVIDIA_USERSPACE/firmware/gsp_tu10x.bin" \
+        "$NVIDIA_USERSPACE/libcuda.so.$release" "$NVIDIA_USERSPACE/libnvidia-ml.so.$release" \
+        "$NVIDIA_USERSPACE/libnvidia-ptxjitcompiler.so.$release" "$NVIDIA_USERSPACE/nvidia-smi"
+}
+build_gpu_modules() {
+    local release file
+    [[ "$SOURCE_LAYOUT" == overlay ]] || { echo 'FAIL gpu requires the product overlay source' >&2; return 1; }
+    python3 -B "$SOURCE_GIT_ROOT/tools/build/prepare_sources.py" --component nvidia --check \
+        >"$EV/nvidia-source-check.log" 2>&1 || {
+        echo 'FAIL NVIDIA assembly missing or stale; run prepare_sources.py --component nvidia' >&2; return 1;
+    }
+    release=$(sed -n 's/^NVIDIA_VERSION = //p' "$NVIDIA_SRC/version.mk")
+    [[ "$release" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo 'FAIL NVIDIA release unknown' >&2; return 1; }
+    while IFS= read -r file; do
+        [[ -s "$file" ]] || { echo "FAIL official NVIDIA $release user space lacks $file" >&2; return 1; }
+    done < <(gpu_userspace_files "$release")
+    rm -rf "$NVIDIA_OUT"
+    mkdir -p "$NVIDIA_OUT" "$GPU_OUT"
+    cp -a "$NVIDIA_SRC/." "$NVIDIA_OUT/"
+    lowprio make -C "$NVIDIA_OUT" modules -j"$JOBS" SYSSRC="$SRC" SYSOUT="$BUILD" \
+        XDEV_EXT_ENABLE_GPU_CE_DMA=1 CC=gcc-14 >"$EV/nvidia-build.log" 2>&1
+    cp "$NVIDIA_OUT/kernel-open/"{nvidia.ko,nvidia-uvm.ko,nvidia-modeset.ko,nvidia-drm.ko,nvidia-peermem.ko} "$GPU_OUT/"
+    [[ $(modinfo -F vermagic "$GPU_OUT/nvidia.ko" | cut -d' ' -f1) == "$(cat "$BUILD/include/config/kernel.release")" ]]
+    printf '%s\n' "$release" >"$GPU_OUT/release"
+    gcc-14 -std=gnu11 -O2 -Wall -Wextra -Werror -o "$GPU_OUT/xdev_ext_gpu_dmabuf" \
+        "$GPU_DMABUF_SOURCE" -ldl >"$EV/gpu-dmabuf-build.log" 2>&1
+}
+verify_gpu_identity() {
+    local artifact release
+    release=$(cat "$GPU_OUT/release")
+    for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH_CE XDEV_EXT_MECH_DMA DMA_SHARED_BUFFER XDEV_EXT_PEER_DMABUF; do
+        grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL gpu requires CONFIG_$symbol=y" >&2; return 1; }
+    done
+    for artifact in "$GPU_OUT/nvidia.ko" "$GPU_OUT/nvidia-uvm.ko" "$GPU_OUT/release" \
+        "$GPU_OUT/xdev_ext_gpu_dmabuf" "$TOOLS/xdev_ext_peer_chain" $(gpu_userspace_files "$release"); do
+        [[ -s "$artifact" ]] && awk -v target="$artifact" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
+            echo "FAIL gpu artifact identity absent: $artifact; rebuild exact source" >&2; return 1;
+        }
+    done
+}
+stage_gpu_image() {
+    local release lib
+    release=$(cat "$GPU_OUT/release")
+    mkdir -p "$ROOT/opt/xdev_ext/gpu" "$ROOT/lib/firmware/nvidia/$release" "$ROOT/usr/lib/x86_64-linux-gnu"
+    cp "$GPU_OUT/"{nvidia.ko,nvidia-uvm.ko,release,xdev_ext_gpu_dmabuf} "$TOOLS/xdev_ext_peer_chain" \
+        "$TOOLS/ce_plan.bpf.o" "$TOOLS/nvme_s0.bpf.o" "$TOOLS/net_peer.bpf.o" "$GPU_GUEST" "$ROOT/opt/xdev_ext/gpu/"
+    cp "$NVIDIA_USERSPACE/firmware/"{gsp_ga10x.bin,gsp_tu10x.bin} "$ROOT/lib/firmware/nvidia/$release/"
+    for lib in libcuda libnvidia-ml libnvidia-ptxjitcompiler; do
+        cp "$NVIDIA_USERSPACE/$lib.so.$release" "$ROOT/usr/lib/x86_64-linux-gnu/"
+        ln -sf "$lib.so.$release" "$ROOT/usr/lib/x86_64-linux-gnu/$lib.so.1"
+    done
+    ln -sf libcuda.so.1 "$ROOT/usr/lib/x86_64-linux-gnu/libcuda.so"
+    cp "$NVIDIA_USERSPACE/nvidia-smi" "$ROOT/usr/bin/"
+    for app in insmod rmmod tr ls dd seq; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+}
+# Each assigned device must already be on vfio-pci with a viable group; the
+# harness never binds, unbinds or resets a host device itself.
+GPU_DEVICE_ID=unknown
+vfio_qemu_args() {
+    local bdf canonical port=0
+    VFIO_ARGS=()
+    for bdf in "${VFIO_DEVICES[@]}"; do
+        canonical=$(python3 -B "$VFIO_HELPER" check "$bdf" 2>>"$EV/vfio-check.log" | sed -n 's/^VFIO_READY //p') || canonical=''
+        [[ -n "$canonical" ]] || {
+            echo "FAIL vfio device $bdf not ready for passthrough (see vfio-check.log)" >&2; return 1;
+        }
+        printf 'VFIO_READY %s\n' "$canonical" >>"$EV/vfio-check.log"
+        if (( ${GPU:-0} )) && [[ "$bdf" == "$GPU_BDF" ]]; then
+            GPU_DEVICE_ID=$(sed 's/^0x//' "/sys/bus/pci/devices/$canonical/vendor"):$(sed 's/^0x//' "/sys/bus/pci/devices/$canonical/device")
+        fi
+        port=$((port + 1))
+        # A root port gives the device a PCIe link as on the host.
+        VFIO_ARGS+=(-device "pcie-root-port,id=vfio_rp$port,chassis=$((port + 16)),slot=$((port + 16)),bus=pcie.0"
+            -device "vfio-pci,host=$bdf,bus=vfio_rp$port")
+    done
+    # Large 64-bit BARs (32 GiB GPU BAR1) need a larger window than the default.
+    if (( ${#VFIO_DEVICES[@]} )); then VFIO_ARGS+=(-global q35-pcihost.pci-hole64-size=256G); fi
+}
 if (( XDOMAIN && RUN_ONLY )); then
     exec bash "$SRC/tools/testing/selftests/xdev_ext_mech/xdomain/guest/xdomain_kvm.sh" \
         --scratch "$SCRATCH" --source "$SOURCE_GIT_ROOT" --build "$BUILD" --tools "$TOOLS"
@@ -545,12 +682,15 @@ if (( RUN_ONLY )); then
     }
     verify_socket_config
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
+    if (( ${GPU:-0} )); then verify_gpu_identity; fi
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
     if (( MECHANISM_VARIANTS )); then e2_verify_identity; fi
 fi
 lowprio() { nice -n 10 ionice -c 3 "$@"; }
-kmake() { lowprio make -C "$SRC" O="$BUILD" -j8 CC=gcc-14 HOSTCC=gcc-14 "$@"; }
+JOBS=${XDEV_EXT_JOBS:-8}
+[[ "$JOBS" =~ ^[1-9][0-9]{0,2}$ ]] || { echo 'invalid XDEV_EXT_JOBS' >&2; exit 2; }
+kmake() { lowprio make -C "$SRC" O="$BUILD" -j"$JOBS" CC=gcc-14 HOSTCC=gcc-14 "$@"; }
 printf 'date_utc=%s\nhost=%s\nscratch=%s\nclaim=KVM correctness only; software NIC and NVMe backends\n' \
 	"$(date -u +%FT%TZ)" "$(hostname)" "$SCRATCH" >"$EV/provenance.txt"
 printf 'ce_sim=%s\nce_delay_us=%s\nfault=%s\nrx_ce=%s\nreliable=%s\ndepth=%s\nce_backend=CPU-memcpy stand-in; no GPU claim\n' "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" >>"$EV/provenance.txt"
@@ -560,6 +700,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
 printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/provenance.txt"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
+printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
@@ -628,6 +769,10 @@ if (( ! RUN_ONLY )); then
     if (( VIOMMU )); then cfg -e IOMMU_SUPPORT -e INTEL_IOMMU; fi
     if (( COMPAT )); then cfg -e IO_URING_XDEV_EXT_IAA -e EXT4_FS -e VIRTIO_BLK; fi
     if (( PEER )); then cfg -e NET_VENDOR_MELLANOX -e MLX5_CORE -e MLX5_CORE_EN; fi
+    # The NVIDIA modules are the only loadable guest drivers in GPU mode.
+    if (( ${GPU:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -e XDEV_EXT_MECH_CE -e XDEV_EXT_MECH_DMA -e DMA_SHARED_BUFFER -e XDEV_EXT_PEER_DMABUF -e HOTPLUG_CPU; fi
+    if [[ "${NIC_MODEL:-virtio}" == igb ]]; then cfg -e NET_VENDOR_INTEL -e IGB -e HOTPLUG_CPU; fi
+    if (( ${TB_NHI:-0} )); then cfg -e USB4; fi
     if (( DEBUG_LOCKING )); then
         for symbol in DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do cfg -e "$symbol"; done
         cfg -d KASAN_KUNIT_TEST
@@ -661,6 +806,11 @@ if (( ! RUN_ONLY )); then
     if (( FENCE_CHECK )); then
         for symbol in MODULES MODULE_UNLOAD DMA_SHARED_BUFFER DEBUG_FS; do grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"; done
     fi
+    if (( ${GPU:-0} )); then
+        for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH_CE XDEV_EXT_MECH_DMA DMA_SHARED_BUFFER XDEV_EXT_PEER_DMABUF; do grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"; done
+    fi
+    if [[ "${NIC_MODEL:-virtio}" == igb ]]; then grep -Fxq CONFIG_IGB=y "$BUILD/.config"; grep -Fxq CONFIG_HOTPLUG_CPU=y "$BUILD/.config"; fi
+    if (( ${TB_NHI:-0} )); then grep -Fxq CONFIG_USB4=y "$BUILD/.config"; fi
 	if (( PREPARE_ONLY )); then echo XDEV_EXT_ZC_CONFIG=PASS; exit 0; fi
     if (( FENCE_CHECK )); then
         # Full link + modules produces genuine Module.symvers for this vmlinux.
@@ -688,6 +838,11 @@ if (( ! RUN_ONLY )); then
             cp "$SRC/tools/testing/selftests/xdev_ext_mech/iaa_transform/"{Makefile,iaa_runtime.c,iaa_pair.bpf.c,campaign.h,observations.h,run-guest.sh} "$IAA_OUT/"
             lowprio make -C "$IAA_OUT" runtime KERNEL_SRC="$SRC" PROVIDER_HEADERS="$DMA_SIM_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 >"$EV/iaa-tools-build.log" 2>&1
         fi
+	elif (( ${GPU:-0} )); then
+		kmake bzImage vmlinux modules_prepare >"$EV/kernel-build.log" 2>&1
+		# All other guest drivers are built in; vmlinux.symvers is the whole table.
+		cp "$BUILD/vmlinux.symvers" "$BUILD/Module.symvers"
+		build_gpu_modules
 	elif (( ! XDOMAIN )); then
 		kmake bzImage >"$EV/kernel-build.log" 2>&1
 	fi
@@ -779,6 +934,10 @@ if (( ! RUN_ONLY )); then
         cat "$BUILD/xdev-ext-fence-sources.sha256" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
     if (( MECHANISM_VARIANTS )); then e2_record_artifacts; fi
+    if (( ${GPU:-0} )); then
+        sha256sum "$GPU_OUT/"{nvidia.ko,nvidia-uvm.ko,nvidia-modeset.ko,nvidia-drm.ko,nvidia-peermem.ko,release,xdev_ext_gpu_dmabuf} \
+            "$TOOLS/xdev_ext_peer_chain" $(gpu_userspace_files "$(cat "$GPU_OUT/release")") >>"$BUILD/xdev-ext-artifacts.sha256"
+    fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
 fi
 sha256sum "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" >>"$EV/provenance.txt"
@@ -789,6 +948,7 @@ fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then verify_iaa_identity; fi
 if (( COMPAT )); then verify_compat_identity; fi
 if (( PEER )); then verify_peer_identity; fi
+if (( ${GPU:-0} )); then verify_gpu_identity; fi
 if (( EVAL_SESSION )); then
     verify_eval_session_identity
     cat "$BUILD/xdev-ext-eval-session-source.sha256" >>"$EV/source-files.sha256"
@@ -883,6 +1043,13 @@ if (( PEER )); then
     truncate -s 16M "$SCRATCH/peer.raw"
 fi
 if (( EVAL_SESSION )); then stage_eval_session_image; fi
+if (( ${GPU:-0} )); then stage_gpu_image; fi
+if (( ${TB_NHI:-0} )); then
+    grep -Fxq CONFIG_USB4=y "$BUILD/.config" || { echo 'FAIL tb-nhi requires CONFIG_USB4=y; rebuild' >&2; exit 1; }
+    mkdir -p "$ROOT/opt/xdev_ext/tb"
+    cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh" "$ROOT/opt/xdev_ext/tb/"
+    for app in seq tr; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+fi
 mkdir -p "$ROOT/opt/xdev_ext/verifier"
 cp "$TOOLS/verifier/"*.bpf.o \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run.sh" \
@@ -900,6 +1067,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FENCE_CHECK" "$FENCE_NONCE_PREFIX" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -926,6 +1094,10 @@ fi
 if [[ -n "${FAULT_CAMPAIGN:-}" ]]; then GUEST_PROGRAMS+=("$TOOLS/fault_uid"); fi
 if (( MECHANISM_VARIANTS )); then GUEST_PROGRAMS+=("$TOOLS/e2/mv_ctl" "$TOOLS/e2/mv_sink" "$TOOLS/e2/bpftool"); fi
 if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then GUEST_PROGRAMS+=("$IAA_OUT/iaa_runtime"); fi
+if (( ${GPU:-0} )); then
+    GUEST_PROGRAMS+=("$TOOLS/xdev_ext_peer_chain" "$GPU_OUT/xdev_ext_gpu_dmabuf" "$NVIDIA_USERSPACE/nvidia-smi"
+        "$NVIDIA_USERSPACE/libcuda.so.$(cat "$GPU_OUT/release")" "$NVIDIA_USERSPACE/libnvidia-ml.so.$(cat "$GPU_OUT/release")")
+fi
 if (( ${COMPAT:-0} )); then
     GUEST_PROGRAMS+=("$SOCKET_OUT/socket_runtime" "$PRELOAD_OUT/libio_uring_unified.so" \
         "$PRELOAD_OUT/xdev_ext_preload_mech_workload" "$PRELOAD_OUT/xdev_ext_preload_socket_smoke" \
@@ -971,6 +1143,17 @@ finish() {
 	set +e
 	cat /tmp/rx.log /tmp/tx.log 2>/dev/null
 	cat /tmp/ce-a.log /tmp/ce-d.log 2>/dev/null
+	# Driver counters tell a frame that never left the sender from one the
+	# receiver dropped (diagnostic only; no verdict reads them).
+	for netdev in /sys/class/net/eth*; do
+		[ -d "$netdev/statistics" ] || continue
+		set -- "$netdev/statistics"
+		echo "XDEV_EXT_ZC_NETDEV_STATS if=${netdev##*/} tx_packets=$(cat $1/tx_packets) tx_dropped=$(cat $1/tx_dropped) tx_errors=$(cat $1/tx_errors) rx_packets=$(cat $1/rx_packets) rx_dropped=$(cat $1/rx_dropped) rx_missed_errors=$(cat $1/rx_missed_errors) rx_errors=$(cat $1/rx_errors)"
+	done
+	# The host takes the GPU back without a reset only after a clean unload.
+	if [ -f /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh ]; then
+		sh /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh unload
+	fi
 	echo "XDEV_EXT_ZC_GUEST_EXIT=$code"
 	dmesg
 	sync
@@ -979,6 +1162,14 @@ finish() {
 trap finish EXIT
 set -eu
 . /opt/xdev_ext/zc.env
+if [ "${nic_model:-virtio}" = igb ]; then
+	for cpu_online in /sys/devices/system/cpu/cpu[1-9]*/online; do
+		[ -e "$cpu_online" ] && echo 1 >"$cpu_online"
+	done
+	set -- /sys/class/net/eth0/queues/rx-*
+	echo "XDEV_EXT_ZC_NIC_MODEL=igb eth0_rx_queues=$# cpus=$(cat /sys/devices/system/cpu/online)"
+	set --
+fi
 echo "XDEV_EXT_ZC_CE_DELAY_US=$ce_delay_us"
 if [ "$provider_case" != normal ]; then
     # These cases retain unknown native owners and end this guest immediately.
@@ -1088,6 +1279,15 @@ else
 fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
+if [ "${tb_nhi:-0}" = 1 ]; then
+	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"
+fi
+if [ "${gpu:-0}" = 1 ]; then
+	# Destination CE window: the host image oracle expects the source bytes.
+	sh /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh run /opt/xdev_ext/gpu "$ctl" \
+		"$source_block" "$source_ng" "$destination_block" "$destination_ng" \
+		"$source_slba" "$ce_slba" "$groups" "$depth" "$ce_len" "$cli_timeout_ms"
+fi
 if [ "$lifecycle" = 1 ]; then
     sh /opt/xdev_ext/xdev_ext_mech_lifecycle_guest.sh "$ctl" \
         "$source_ng" "$source_block" "$destination_ng" "$destination_block" \
@@ -1521,6 +1721,20 @@ if lifecycle:
 (p/'evidence/source-before.sha256').write_text(hashlib.sha256(src).hexdigest()+'\n')
 PY
 fi
+if (( ${GPU:-0} )); then
+    python3 - "$SCRATCH" "$GROUP_COUNT" "$SRC" <<'PYGPUEXPECT'
+import pathlib, sys
+scratch, groups = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+sys.path.insert(0, str(pathlib.Path(sys.argv[3])/'tools/testing/selftests/xdev_ext_integration'))
+from xdev_ext_mech_zc_validate import image_layout
+layout = image_layout(groups)
+source = (scratch/'source-before.raw').read_bytes()
+expected = bytearray((scratch/'expected.raw').read_bytes())
+size, source_offset, ce_offset = groups * 8192, layout['source_slba'] * 512, layout['ce_slba'] * 512
+expected[ce_offset:ce_offset+size] = source[source_offset:source_offset+size]
+(scratch/'expected.raw').write_bytes(expected)
+PYGPUEXPECT
+fi
 # Reliable campaigns bound outstanding groups by depth; v2 retains its
 # finite fail-stop experiment. Extra virtual RX capacity is test plumbing.
 # This QEMU requires default TX=256.
@@ -1554,12 +1768,30 @@ if [[ "$FAULT" != none ]]; then
 fi
 destination_drive="file=$SCRATCH/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"
 if (( DESTINATION_READONLY )); then destination_drive+=,readonly=on; fi
-args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
+KERNEL_APPEND='console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr ipv6.disable=1'
+GUEST_MEMORY_MB=4096
+if [[ "${NIC_MODEL:-virtio}" == igb ]]; then
+	# QEMU's 82576 model, driven by the unmodified upstream igb driver and its
+	# AF_XDP zero-copy path. The guest boots with one CPU so igb sizes one
+	# queue per port (fixed UDP 2-tuple stays on bound queue 0), then onlines
+	# the other vCPUs.
+	# An igb is an SR-IOV PF; on pcie.0 its VF placeholders would take the
+	# following slots, so each port sits behind its own root port.
+	nic_args=(-device pcie-root-port,id=nic_rp0,chassis=8,slot=8,bus=pcie.0
+		-device igb,netdev=wire0,mac=02:00:00:00:00:01,bus=nic_rp0
+		-device pcie-root-port,id=nic_rp1,chassis=9,slot=9,bus=pcie.0
+		-device igb,netdev=wire1,mac=02:00:00:00:00:02,bus=nic_rp1)
+	KERNEL_APPEND+=' maxcpus=1'
+else
+	nic_args=(-device virtio-net-pci,netdev=wire0,mac=02:00:00:00:00:01,iommu_platform=on,disable-legacy=on,rx_queue_size=1024
+		-device virtio-net-pci,netdev=wire1,mac=02:00:00:00:00:02,iommu_platform=on,disable-legacy=on,rx_queue_size=1024)
+fi
+if (( ${GPU:-0} )); then GUEST_MEMORY_MB=8192; fi
+vfio_qemu_args
+args=(-machine q35,accel=kvm -cpu host -smp 4 -m "$GUEST_MEMORY_MB" -nographic -no-reboot
 	-kernel "$BUILD/arch/x86/boot/bzImage" -initrd "$SCRATCH/initramfs.cpio.gz"
-	-append 'console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr ipv6.disable=1'
-	-nic none "${wire_args[@]}"
-	-device virtio-net-pci,netdev=wire0,mac=02:00:00:00:00:01,iommu_platform=on,disable-legacy=on,rx_queue_size=1024
-	-device virtio-net-pci,netdev=wire1,mac=02:00:00:00:00:02,iommu_platform=on,disable-legacy=on,rx_queue_size=1024
+	-append "$KERNEL_APPEND"
+	-nic none "${wire_args[@]}" "${nic_args[@]}"
 	-drive "file=$SCRATCH/source.raw,if=none,id=src,format=raw,cache=none,aio=threads"
 	-device nvme,drive=src,serial=UBRZCSRC01
 	-drive "$destination_drive"
@@ -1600,6 +1832,7 @@ if (( PEER )); then
     args+=(-drive "file=$SCRATCH/peer.raw,if=none,id=peer,format=raw,cache=none,aio=threads"
         -device nvme,drive=peer,serial=XDEVPEER01)
 fi
+args+=("${VFIO_ARGS[@]}")
 printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"
 printf '\n' >>"$EV/qemu.command"
 sha256sum "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$TOOLS/xdev_ext_mech_ctl" \
@@ -1682,6 +1915,13 @@ if (( FENCE_CHECK )); then
         | tee "$EV/fence-result.txt"
 fi
 # Preserve a machine-readable FAIL even when QEMU times out or exits nonzero.
+if (( ${GPU:-0} )); then
+    set +e
+    python3 -B "$GPU_VALIDATOR" "$EV/guest.log" "$EV/gpu-result.json" \
+        --release "$(cat "$GPU_OUT/release")" --device "$GPU_DEVICE_ID" | tee "$EV/gpu-result.txt"
+    gpu_status=${PIPESTATUS[0]}
+    set -e
+fi
 if (( LIFECYCLE )); then
     python3 "$SRC/tools/testing/selftests/xdev_ext_mech/lifecycle_runtime/fanout_validate.py" \
         --dir "$SCRATCH" --log "$EV/guest.log" --result "$EV/fanout-result.json" \
@@ -1766,16 +2006,23 @@ if (( CE_SIM )); then
 	grep -Fxq 'XDEV_EXT_DMA_DYNAMIC_PROVIDER=PASS' "$EV/guest.log"
 fi
 ! grep -Eq 'BUG:|WARNING:|Kernel panic|Oops:' "$EV/guest.log"
-python3 - "$SRC" "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" <<'PYVALIDATE'
+if (( ${GPU:-0} )); then (( gpu_status == 0 )); fi
+if (( ${TB_NHI:-0} )); then
+    grep -E '^XDEV_EXT_TB_NHI(=|_CYCLE=|_STATE )' "$EV/guest.log" | tee "$EV/tb-nhi-result.txt"
+    grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
+fi
+python3 - "$SRC" "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "${GPU:-0}" <<'PYVALIDATE'
 import json, pathlib, sys
 src, scratch = map(pathlib.Path, sys.argv[1:3])
 sys.path.insert(0, str(src/'tools/testing/selftests/xdev_ext_integration'))
 from xdev_ext_mech_zc_validate import image_layout, validate_console, validate_images
 options = dict(groups=int(sys.argv[3]), ce_sim=sys.argv[4] == '1', fault=sys.argv[6], rx_ce=sys.argv[7] == '1', reliable=sys.argv[8] == '1', depth=int(sys.argv[9]), ce_slots=int(sys.argv[10]))
 result = validate_console((scratch/'evidence/guest.log').read_text(), ce_delay_us=int(sys.argv[5]), **options)
+# A real GPU run writes the same CE window as the stand-in (chain a, then
+# the PEER cases); its console has no stand-in counters.
 validate_images(*( (scratch/name).read_bytes() for name in
                   ('source-before.raw', 'source.raw', 'destination-before.raw', 'destination.raw')),
-                **options, **result)
+                **dict(options, ce_sim=options['ce_sim'] or sys.argv[11] == '1'), **result)
 if options['fault'] == 'reliable-budget-unknown':
     # Commit the expected image for the observed complete prefix only after
     # the independent full-image validator has checked that exact prefix.
