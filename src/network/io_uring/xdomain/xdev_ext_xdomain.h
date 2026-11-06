@@ -156,6 +156,7 @@ void xdev_ext_xd_probe_ctl_complete_locked(struct xdev_ext_xd_link *, bool);
 void xdev_ext_xd_probe_ctl_error_locked(struct xdev_ext_xd_link *, int);
 ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *, char *);
 /* xdev_ext_xdomain_class.c */
+bool xdev_ext_xd_class_ctl_rts_cts(struct xdev_ext_mech_stage *st);
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m);
 void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m);
 void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st);

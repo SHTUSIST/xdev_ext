@@ -30,6 +30,18 @@ for role in reference observer; do
     echo "XDOMAIN_OBJECT_END name=$role-attach loader_exit=0"
     pass "$role-attach"
 done
+# The two independent protocol programs, each its own object, through the same
+# real verifier, attach and detach. Their receipts are separate from the frozen
+# named inventory; a failed load still fails the guest.
+for protocol in rts-cts early; do
+    object=xdomain_rts_cts.bpf.o
+    [ "$protocol" = rts-cts ] || object=xdomain_early.bpf.o
+    echo "XDOMAIN_OBJECT_BEGIN name=protocol-$protocol-attach expected=ALLOW"
+    ./load "./$object" xdomain_peer_ops > "/tmp/protocol-$protocol.log" 2>&1 || { cat "/tmp/protocol-$protocol.log"; fail "protocol-$protocol-attach"; }
+    cat "/tmp/protocol-$protocol.log"
+    echo "XDOMAIN_OBJECT_END name=protocol-$protocol-attach loader_exit=0"
+    echo "XDEV_EXT_XDOMAIN_PROTOCOL_OBJECT=PASS name=$protocol object=$object"
+done
 # Keep just the reference registered for the following CREATE probes.
 pin=/sys/fs/bpf/xdomain-reference
 ./xdev_ext_mech_ctl attach --obj ./xdomain_peer.bpf.o --map xdomain_peer_ops --pin "$pin" > /tmp/reference-probe.log 2>&1 || { cat /tmp/reference-probe.log; setup reference-probe-attach; }

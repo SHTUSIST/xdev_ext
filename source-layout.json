@@ -287,9 +287,24 @@
       "native_path": "tools/xdev_ext_mech/xdomain_check.bpf.c"
     },
     {
+      "source": "examples/network/xdomain_early.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_early.bpf.c"
+    },
+    {
       "source": "examples/network/xdomain_peer.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/xdomain_peer.bpf.c"
+    },
+    {
+      "source": "examples/network/xdomain_policy.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_policy.h"
+    },
+    {
+      "source": "examples/network/xdomain_rts_cts.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_rts_cts.bpf.c"
     },
     {
       "source": "examples/pipelines/nxp_mech.bpf.c",
@@ -8473,6 +8488,22 @@
     {
       "source": "tests/network/xdomain/probe/vectors/ready.bin",
       "logical_path": "tests/network/xdomain/probe/vectors/ready.bin"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/README.md",
+      "logical_path": "tests/network/xdomain/protocols/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/cases.c",
+      "logical_path": "tests/network/xdomain/protocols/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/equivalence.c",
+      "logical_path": "tests/network/xdomain/protocols/equivalence.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/run.py",
+      "logical_path": "tests/network/xdomain/protocols/run.py"
     },
     {
       "source": "tests/network/xdomain/stack/NHI_STACK.md",

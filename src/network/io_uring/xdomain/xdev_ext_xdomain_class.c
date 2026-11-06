@@ -69,7 +69,9 @@ struct xdev_ext_xd_stage {
 	u64 wait_generation;
 	struct xdev_ext_xd_wait_facts wait_facts;
 	bool stop_latched, down_latched, overflow, failed;
-	bool early;
+	/* early: the stage offers the v2 envelope (XDEV_EXT_XDOMAIN_F_EARLY).
+	 * rts_cts: its program chose the RTS/CTS binding, so it never pairs. */
+	bool early, rts_cts;
 	u32 shape_count, pair_state, grant_state;
 	u64 tx_bind, rx_bind, pair_deadline, pair_next_retry, pair_wake;
 	u64 rx_next_group, grant_deadline, pending_grant_group, pending_grant_deadline;
@@ -85,6 +87,23 @@ static struct xdev_ext_xd_ep *xdev_ext_xd_ep_of(struct xdev_ext_xd_stage *xs)
 { return xs->ns.lk; }
 static struct xdev_ext_xd_fact *xd_fact(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *slot)
 { return &xs->facts[slot - xs->ns.slots]; }
+/*
+ * The attached program chooses how a group is bound; the class never infers
+ * it. RTS/CTS binds each group from the sender's RTS. Pairing first binds the
+ * two endpoints, then the receiver may post a group and advertise it before
+ * the sender asks. Both keep one invariant: the sender posts only a group the
+ * authenticated peer has posted and advertised by CTS credit. A v2-envelope
+ * stage starts unbound; it is paired once pairing started, and RTS/CTS once its
+ * program announced, posted on an RTS or declined pairing. Never both.
+ * Pairing starts only on the stage's worker (SEND_HELLO, SEND_CHALLENGE, under
+ * ns.lock), and a paired state only moves to another paired state. So read
+ * xd_paired() under ns.lock, in exclusive bind context, on the worker, or in
+ * xd_post, which runs on the worker or posts for a bound pair.
+ */
+static bool xd_paired(const struct xdev_ext_xd_stage *xs)
+{ return xs->early && xs->pair_state != XDEV_EXT_XDP_PAIR_IDLE; }
+static bool xd_pair_allowed(const struct xdev_ext_xd_stage *xs)
+{ return xs->early && !xs->rts_cts; }
 /* ns.lock held, or exclusive bind context. Never follow a reply's saved
  * batch pointer: core may already have reused that batch for another key. */
 static void xd_trace(struct xdev_ext_xd_stage *xs, const char *phase,
@@ -200,7 +219,8 @@ static void xd_reply_put(struct xdev_ext_xd_stage *xs, struct xdev_ext_xd_reply 
 static int xd_send(struct xdev_ext_xd_stage *xs, struct xdev_ext_xd_msg *m)
 {
 	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
-	if (xs->early) {
+	/* A paired stage speaks v2 only; RTS/CTS keeps the v1 messages. */
+	if (xd_paired(xs)) {
 		struct xdev_ext_xd_msg_v2 v = { .type = m->type, .tx_bind = xs->tx_bind,
 			.rx_bind = xs->rx_bind, .group = m->group, .credit = m->credit, .status = m->status };
 		if (m->type == XDEV_EXT_XD_CTS) {
@@ -222,7 +242,7 @@ static void xd_fail_locked(struct xdev_ext_xd_stage *xs, int err)
 
 	if (!xs->failed) {
 		xs->failed = true;
-		if (xs->early) { xs->pair_state = XDEV_EXT_XDP_PAIR_FAILED; xs->grant_state = XDEV_EXT_XDP_GRANT_EMPTY; }
+		if (xd_paired(xs)) { xs->pair_state = XDEV_EXT_XDP_PAIR_FAILED; xs->grant_state = XDEV_EXT_XDP_GRANT_EMPTY; }
 		xdev_ext_xd_link_fail(ep->xl, ep, err);
 	}
 	xs->down_latched = true;
@@ -588,17 +608,18 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 	bool family_called = false;
 	int ret;
 	ret = xs->early ? xd_early_canonical(xs, s->batch, bp->desc, bp->nr) : 0;
-	if (!ret && xs->early && xs->ns.rx && (!f->reply || f->reply->batch != s->batch ||
+	/* A paired group was reserved for this exact batch; RTS/CTS was not. */
+	if (!ret && xd_paired(xs) && xs->ns.rx && (!f->reply || f->reply->batch != s->batch ||
 	    f->reply->ticket != ticket || f->reply->pool_generation != i->pool_generation ||
 	    f->reply->tx_bind != xs->tx_bind || f->reply->rx_bind != xs->rx_bind)) ret = -ESTALE;
 	if (!ret) ret = xdev_ext_xd_lease_all(xs, s, bp);
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	if (!ret && (xs->ns.dead || xs->failed ||
-	    ((xs->ns.rx || xs->early) && !xdev_ext_mech_session_admits(xs->ns.st->s)) || s->ticket != ticket ||
+	    ((xs->ns.rx || xd_paired(xs)) && !xdev_ext_mech_session_admits(xs->ns.st->s)) || s->ticket != ticket ||
 	    xdev_ext_mech_batch_ticket(s->batch) != ticket || f->epoch != epoch ||
 	    i->pool_generation != xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)))) ret = -ESTALE;
 	/* A lease-acquisition boundary can cross the immutable grant deadline. */
-	if (!ret && xs->early && i->hard_deadline_ns &&
+	if (!ret && xd_paired(xs) && i->hard_deadline_ns &&
 	    ktime_get_boottime_ns() >= i->hard_deadline_ns) ret = -ETIMEDOUT;
 	spin_lock(&ep->xl->lock);
 	if (!ret && (!ep->xl->up || ep->detached || ep->xl->local_inc != i->local_inc || ep->xl->remote_inc != i->remote_inc)) ret = -ESTALE;
@@ -621,7 +642,7 @@ static int xd_post(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
 			f->reply->local_status = ret;
 			f->reply->final = true;
 		} else xd_fail_locked(xs, ret);
-		if (xs->early) { xd_fail_locked(xs, ret); xs->stage_error = ret; }
+		if (xd_paired(xs)) { xd_fail_locked(xs, ret); xs->stage_error = ret; }
 	} else {
 		f->accepted = true; f->withdrawal = 0;
 		s->state = XDEV_EXT_RDV_POSTED;
@@ -843,7 +864,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		} else {
 			status = xd_reply_status(r);
 			if (!r->final || (act == XDEV_EXT_XDP_ACT_SEND_ACK && (!r->chain_done || status || r->sequestered ||
-			    (xs->early && (!r->native_posted || !r->local_known || !r->local_quiesced)))) ||
+			    (xd_paired(xs) && (!r->native_posted || !r->local_known || !r->local_quiesced)))) ||
 			    (act == XDEV_EXT_XDP_ACT_SEND_FAIL && (!status || status != v->status))) { ret = -EPROTO; break; }
 			m.type = act == XDEV_EXT_XDP_ACT_SEND_ACK ? XDEV_EXT_XD_ACK : XDEV_EXT_XD_FAIL;
 			m.status = status < 0 ? -status : 0;
@@ -994,17 +1015,32 @@ void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st)
 		xdev_ext_xd_refuse_rts(ep->xl, &m);
 	}
 }
+/* X4 delivers v1 control to a v2-envelope endpoint only while it has not
+ * paired; a paired endpoint's v1 control is counted as dropped. ep_mutex held. */
+bool xdev_ext_xd_class_ctl_rts_cts(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_xd_stage *xs = st->priv;
+	unsigned long flags;
+	bool open;
+
+	if (!xs) return true;
+	spin_lock_irqsave(&xs->ns.lock, flags);
+	open = !xd_paired(xs);
+	spin_unlock_irqrestore(&xs->ns.lock, flags);
+	return open;
+}
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
 	unsigned long flags;
 	u32 k;
-	if (!xs || xs->early) return;
+	if (!xs) return;
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	/* dev.bind may have published the endpoint just before ns.lk is set.
 	 * X4 already authenticated this wire record; retain its scalar facts,
-	 * then compare incarnations on the worker after attachment finishes. */
-	if (m->channel != xs->channel || xs->failed ||
+	 * then compare incarnations on the worker after attachment finishes.
+	 * A paired stage has no RTS/CTS binding to answer. */
+	if (xd_paired(xs) || m->channel != xs->channel || xs->failed ||
 	    (xs->local_inc && (m->src_inc != xs->remote_inc || m->dst_inc != xs->local_inc))) goto out;
 	if (!xs->ns.rx && m->stream != xs->stream) goto out;
 	if (xs->ns.rx && m->type == XDEV_EXT_XD_RTS) {
@@ -1210,7 +1246,8 @@ void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_
 	u32 k;
 	if (!xs || !xs->early || !xdev_ext_mech_session_admits(st->s) || xdev_ext_xd_msg_v2_layout(m)) return;
 	spin_lock_irqsave(&xs->ns.lock, flags);
-	if (xs->failed || xs->stop_latched || xs->ns.dead || m->channel != xs->channel ||
+	/* After the RTS/CTS choice no pairing or grant input is retained. */
+	if (!xd_pair_allowed(xs) || xs->failed || xs->stop_latched || xs->ns.dead || m->channel != xs->channel ||
 	    m->src_inc != xs->remote_inc || m->dst_inc != xs->local_inc) goto out;
 	if (xs->ns.rx && m->type == XDEV_EXT_XD_HELLO) {
 		if (!xd_early_shape_match(xs, m) || (xs->tx_bind && xs->tx_bind != m->tx_bind)) goto out;
@@ -1286,10 +1323,19 @@ static void xd_early_fail_locked(struct xdev_ext_xd_stage *xs, int err)
 	xs->ns.dead = true; xs->stage_error = err;
 	xd_terminal_locked(xs, err);
 }
-/* Mandatory checks run before policy, including when there are no batch slots. */
+/* An RTS/CTS stage, and a receiver no peer has asked to pair, keep the v1
+ * rules of xd_next_locked (per-slot deadlines, graceful STOP, v1 terminal).
+ * The only early input such a stage can hold is a pairing offer (HELLO),
+ * which creates no obligation. ns.lock held. */
+static bool xd_v1_rules(const struct xdev_ext_xd_stage *xs)
+{ return xs->rts_cts || (xs->ns.rx && !xd_paired(xs)); }
+/* Mandatory checks run before policy, including when there are no batch slots.
+ * They bind a paired stage and a sender that has not chosen yet. */
 static bool xd_early_safety_locked(struct xdev_ext_xd_stage *xs, u64 now)
 {
 	u32 k;
+	if (xd_v1_rules(xs))
+		return true;
 	if (!xs->stop_latched && !xdev_ext_mech_session_admits(xs->ns.st->s)) {
 		xdev_ext_mech_stage_stop(xs->ns.st, 0);
 		xs->stop_ns = xdev_ext_mech_session_stop_started_ns(xs->ns.st->s);
@@ -1365,24 +1411,36 @@ static u64 xd_early_stage_hard(struct xdev_ext_xd_stage *xs)
 			hard = xs->replies[k].deadline;
 	return hard;
 }
+/* input: the event is the head of early_ctl. rts/ctl: the v1 RTS or control
+ * record xd_next_locked selected, kept as the event's authority. */
 static void xd_early_snapshot_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_net_slot *s,
-		struct xdev_ext_xd_reply *r, u32 event, struct xdev_ext_xdomain_proto_info_v2 *i)
+		struct xdev_ext_xd_reply *r, u32 event, bool rts, bool ctl, bool input,
+		struct xdev_ext_xdomain_proto_info_v2 *i)
 {
 	struct xdev_ext_xd_ep *ep = xdev_ext_xd_ep_of(xs);
 	const struct xdev_ext_mech_layout *l = xdev_ext_mech_session_layout(xs->ns.st->s);
 	struct xdev_ext_xd_msg_v2 *m = NULL;
-	bool input = xs->early_ctl_count && (event == XDEV_EXT_XDP_EV_HELLO || event == XDEV_EXT_XDP_EV_CHALLENGE ||
-		event == XDEV_EXT_XDP_EV_CONFIRM || event == XDEV_EXT_XDP_EV_GRANT ||
-		event == XDEV_EXT_XDP_EV_DUPLICATE || event == XDEV_EXT_XDP_EV_ACK ||
-		event == XDEV_EXT_XDP_EV_HELD || event == XDEV_EXT_XDP_EV_FAIL || event == XDEV_EXT_XDP_EV_CANCEL);
+	/* Before pairing a v1 event keeps its v1 facts, from which an RTS/CTS
+	 * program binds groups; the v2 fields still report the pairing state. */
+	bool v1_view = !xd_paired(xs) && event < XDEV_EXT_XDP_EV_PAIR_DUE && !input;
 	memset(i, 0, sizeof(*i));
-	xd_snapshot(xs, s, r, event, false, false, &i->base);
+	xd_snapshot(xs, s, r, event, rts, ctl, &i->base);
 	if (s) r = xd_fact(xs, s)->reply;
 	i->base.size = sizeof(*i); i->base.version = XDEV_EXT_XDOMAIN_PROTO_V2_VERSION;
 	i->mode = XDEV_EXT_XDP_MODE_EARLY; i->tx_bind = xs->tx_bind; i->rx_bind = xs->rx_bind;
 	i->pair_deadline_ns = xs->pair_deadline; i->pair_state = xs->pair_state;
 	i->shape_total = l->group_bytes; i->shape_seg = l->seg_len; i->shape_count = xs->shape_count;
 	i->grant_state = xs->grant_state;
+	if (xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND) i->early_facts |= XDEV_EXT_XDP_EARLY_F_PAIR_BOUND;
+	if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE) i->early_facts |= XDEV_EXT_XDP_EARLY_F_GRANT_AVAILABLE;
+	if (s) {
+		i->key = xdev_ext_mech_batch_key(s->batch);
+		i->early_facts |= XDEV_EXT_XDP_EARLY_F_HAS_BATCH;
+		if (xd_early_batch_current(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_CANONICAL;
+		if (xd_early_rx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_RX_POSTABLE;
+		if (xd_early_tx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_TX_POSTABLE;
+	}
+	if (v1_view) return;
 	i->base.stream = xs->tx_bind; i->base.want_count = xs->shape_count;
 	if (!s && !r) i->base.hard_deadline_ns = xd_early_stage_hard(xs);
 	if (xs->pair_state != XDEV_EXT_XDP_PAIR_BOUND && xs->pair_deadline < i->base.hard_deadline_ns)
@@ -1390,12 +1448,7 @@ static void xd_early_snapshot_locked(struct xdev_ext_xd_stage *xs, struct xdev_e
 	spin_lock(&ep->xl->lock);
 	i->base.expected_seq = xs->ns.rx ? ep->xl->chan[ep->chan].consumed : ep->xl->chan[ep->chan].announced;
 	spin_unlock(&ep->xl->lock);
-	if (xs->pair_state == XDEV_EXT_XDP_PAIR_BOUND) i->early_facts |= XDEV_EXT_XDP_EARLY_F_PAIR_BOUND;
-	if (xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE) i->early_facts |= XDEV_EXT_XDP_EARLY_F_GRANT_AVAILABLE;
 	if (s) {
-		i->key = xdev_ext_mech_batch_key(s->batch);
-		i->early_facts |= XDEV_EXT_XDP_EARLY_F_HAS_BATCH;
-		if (xd_early_batch_current(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_CANONICAL;
 		i->base.total_len = l->group_bytes; i->base.count = xs->shape_count;
 		i->base.data_seq = xd_fact(xs, s)->data_seq;
 		if (!xs->ns.rx) {
@@ -1406,8 +1459,6 @@ static void xd_early_snapshot_locked(struct xdev_ext_xd_stage *xs, struct xdev_e
 			    xs->grant_deadline < i->base.hard_deadline_ns)
 				i->base.hard_deadline_ns = xs->grant_deadline;
 		}
-		if (xd_early_rx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_RX_POSTABLE;
-		if (xd_early_tx_postable(xs, s)) i->early_facts |= XDEV_EXT_XDP_EARLY_F_TX_POSTABLE;
 	}
 	if (r && r->group) {
 		i->key = r->key; i->tx_bind = r->tx_bind; i->rx_bind = r->rx_bind;
@@ -1443,6 +1494,13 @@ static bool xd_early_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_x
 	u64 now = ktime_get_boottime_ns();
 	u32 ev;
 	if (!xd_early_safety_locked(xs, now)) return false;
+	/* A stopping or ended v1-rules stage drops the pairing offers it holds,
+	 * as ingress refuses new ones, so xd_next_locked applies the v1 STOP and
+	 * terminal rules before any offer reaches policy again. */
+	if (xs->early_ctl_count && xd_v1_rules(xs) &&
+	    (xs->stop_latched || xs->failed || xs->ns.dead || xs->down_latched || xs->overflow ||
+	     !xdev_ext_mech_session_admits(xs->ns.st->s)))
+		xs->early_ctl_count = 0;
 	if (xs->early_ctl_count && xs->pair_wake <= now) {
 		struct xdev_ext_xd_msg_v2 *m = &xs->early_ctl[0];
 		s = m->group ? xd_group(xs, m->group) : NULL;
@@ -1457,21 +1515,21 @@ static bool xd_early_next_locked(struct xdev_ext_xd_stage *xs, struct xdev_ext_x
 		case XDEV_EXT_XD_FAIL: ev = s && !xd_remote_final(s->remote) ? XDEV_EXT_XDP_EV_FAIL : XDEV_EXT_XDP_EV_DUPLICATE; break;
 		default: ev = XDEV_EXT_XDP_EV_DUPLICATE; break;
 		}
-		xd_early_snapshot_locked(xs, s, r, ev, i); return true;
+		xd_early_snapshot_locked(xs, s, r, ev, false, false, true, i); return true;
 	}
-	if (xs->pair_wake <= now && xs->pair_next_retry <= now &&
+	if (xs->pair_wake <= now && xs->pair_next_retry <= now && !xs->rts_cts &&
 	    ((!xs->ns.rx && (xs->pair_state == XDEV_EXT_XDP_PAIR_IDLE || xs->pair_state == XDEV_EXT_XDP_PAIR_HELLO_SENT)) ||
 	     (xs->ns.rx && xs->pair_state == XDEV_EXT_XDP_PAIR_CHALLENGE_SENT))) {
-		xd_early_snapshot_locked(xs, NULL, NULL, XDEV_EXT_XDP_EV_PAIR_DUE, i); return true;
+		xd_early_snapshot_locked(xs, NULL, NULL, XDEV_EXT_XDP_EV_PAIR_DUE, false, false, false, i); return true;
 	}
 	s = xd_armed(xs);
 	if (s && xd_early_rx_postable(xs, s) && !xd_waiting(xs, xd_fact(xs, s)->wake, xd_fact(xs, s)->wait_epoch, now)) {
-		xd_early_snapshot_locked(xs, s, xd_fact(xs, s)->reply, XDEV_EXT_XDP_EV_EARLY_RX_READY, i); return true;
+		xd_early_snapshot_locked(xs, s, xd_fact(xs, s)->reply, XDEV_EXT_XDP_EV_EARLY_RX_READY, false, false, false, i); return true;
 	}
 	/* Existing slot/reply completion and reliable disposition semantics. */
 	if (!xd_next_locked(xs, &i->base)) return false;
 	s = xs->worker_event.slot; r = xs->worker_event.reply; ev = i->base.event;
-	xd_early_snapshot_locked(xs, s, r, ev, i);
+	xd_early_snapshot_locked(xs, s, r, ev, xs->worker_event.rts, xs->worker_event.ctl, false, i);
 	return true;
 }
 /* ns.lock -> xl.lock: reserve the exact whole RX group once, before native work. */
@@ -1532,6 +1590,22 @@ static int xd_early_tx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_
 	xd_fact(xs, s)->reserved = true; xd_fact(xs, s)->cts_received = true;
 	return 0;
 }
+/* A receiver starts pairing: from now on the link and class_ctl drop v1
+ * control to it, and the RTS records it queued before are dropped too, as the
+ * link would have dropped them. None was answered: an RTS the program posted
+ * on latched RTS/CTS, which forbids pairing, and a refused one is gone.
+ * ns.lock held. */
+static void xd_drop_v1_locked(struct xdev_ext_xd_stage *xs)
+{
+	u32 k;
+	for (k = 0; k < xs->rts_count; k++)
+		if (xs->rts[k].admission) {
+			xs->rts[k].admission = false;
+			xdev_ext_mech_stage_native_put(xs->ns.st);
+		}
+	xs->rts_count = 0;
+	xs->ctl_count = 0;
+}
 static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xdomain_proto_info_v2 *i,
 		const struct xdev_ext_xdomain_proto_verdict *v)
 {
@@ -1548,12 +1622,42 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 	    v->event_id != i->base.event_id || v->epoch != i->base.epoch ||
 	    act < XDEV_EXT_XDP_ACT_WAIT || act > XDEV_EXT_XDP_ACT_TX_POST_EARLY) return -EPROTO;
 	if (act < XDEV_EXT_XDP_ACT_SEND_HELLO) {
-		/* No v1 data/announce/refusal action is authority for early mode. */
-		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST ||
-		    act == XDEV_EXT_XDP_ACT_TX_POST || act == XDEV_EXT_XDP_ACT_REJECT_RTS ||
-		    act == XDEV_EXT_XDP_ACT_WITHDRAW) return -EPROTO;
+		bool declined;
+
+		if (act == XDEV_EXT_XDP_ACT_IGNORE && (i->base.event == XDEV_EXT_XDP_EV_PAIR_DUE ||
+		    i->base.event == XDEV_EXT_XDP_EV_HELLO)) {
+			/* Declining pairing chooses RTS/CTS; a HELLO creates no
+			 * obligation and is dropped. Not after pairing started. */
+			if (v->wake_ns || v->credit || v->status) return -EPROTO;
+			spin_lock_irqsave(&xs->ns.lock, flags);
+			declined = xs->worker_event.id == i->base.event_id &&
+				xs->worker_event.event == i->base.event;
+			if (!declined || xd_paired(xs) ||
+			    (i->base.event == XDEV_EXT_XDP_EV_HELLO && !xs->worker_event.early_ctl)) ret = -EPROTO;
+			else if (xs->epoch != i->base.epoch) ret = -ESTALE;
+			else {
+				if (i->base.event == XDEV_EXT_XDP_EV_HELLO) xd_drop_input(xs);
+				xs->rts_cts = true; xs->pair_deadline = 0; xs->pair_wake = 0;
+				xd_changed(xs);
+			}
+			spin_unlock_irqrestore(&xs->ns.lock, flags);
+			return ret;
+		}
 		if (i->base.event >= XDEV_EXT_XDP_EV_PAIR_DUE && act != XDEV_EXT_XDP_ACT_WAIT &&
 		    act != XDEV_EXT_XDP_ACT_FAIL_LINK) return -EPROTO;
+		if (act == XDEV_EXT_XDP_ACT_TX_ANNOUNCE || act == XDEV_EXT_XDP_ACT_RX_POST) {
+			/* The first RTS/CTS binding latches the choice. A paired
+			 * receiver holds no RTS (pairing dropped them, the link drops new
+			 * ones), and a paired stage cannot encode an RTS: TX_ANNOUNCE
+			 * fails, and RX_POST, TX_POST and WITHDRAW find no RTS or
+			 * announced slot. */
+			spin_lock_irqsave(&xs->ns.lock, flags);
+			if (!xd_paired(xs)) {
+				xs->rts_cts = true;
+				xs->pair_deadline = 0;
+			}
+			spin_unlock_irqrestore(&xs->ns.lock, flags);
+		}
 		if (act == XDEV_EXT_XDP_ACT_WAIT && !xs->stop_latched) {
 			/* Shared validator owns wake bounds. This stage wake also applies to no-slot events. */
 			normal = *v; normal.version = 1;
@@ -1568,7 +1672,9 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 	spin_lock_irqsave(&xs->ns.lock, flags);
 	s = xs->worker_event.slot;
 	in = xs->worker_event.early_ctl && xs->early_ctl_count ? &xs->early_ctl[0] : NULL;
-	if (xs->worker_event.id != i->base.event_id || xs->worker_event.event != i->base.event) { ret = -EPROTO; goto out; }
+	/* After the RTS/CTS choice no pairing, grant or early post is authority. */
+	if (xs->worker_event.id != i->base.event_id || xs->worker_event.event != i->base.event ||
+	    xs->rts_cts) { ret = -EPROTO; goto out; }
 	if (xs->epoch != i->base.epoch || xs->stop_latched || xs->failed || xs->ns.dead ||
 	    !xdev_ext_mech_session_admits(xs->ns.st->s) ||
 	    i->base.pool_generation != xdev_ext_peer_mech_pool_generation(xdev_ext_mech_session_pool(xs->ns.st->s)) ||
@@ -1602,7 +1708,7 @@ static int xd_early_apply(struct xdev_ext_xd_stage *xs, const struct xdev_ext_xd
 		m.tx_bind = xs->tx_bind ? xs->tx_bind : in->tx_bind; m.type = XDEV_EXT_XD_CHALLENGE;
 		ret = xdev_ext_xd_msg_send_v2(ep->xl, ep, &m);
 		if (!ret) { xs->tx_bind = xs->stream = m.tx_bind; xs->pair_state = XDEV_EXT_XDP_PAIR_CHALLENGE_SENT;
-			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); }
+			xs->pair_next_retry = xdev_ext_rel_deadline(now, XD_TICK_NS); xd_drop_input(xs); xd_drop_v1_locked(xs); }
 		break;
 	case XDEV_EXT_XDP_ACT_SEND_CONFIRM:
 		if (xs->ns.rx || i->base.event != XDEV_EXT_XDP_EV_CHALLENGE || !in ||
@@ -1692,7 +1798,9 @@ static unsigned long xdev_ext_xd_class_progress(struct xdev_ext_mech_stage *st)
 		if (ret == -EAGAIN) {
 			u64 wake = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_TICK_NS);
 			spin_lock_irqsave(&xs->ns.lock, flags);
-			if (xs->early && (xs->worker_event.early_ctl || !xs->worker_event.slot)) {
+			/* A v1 RTS or control record keeps its own wake. */
+			if (xs->early && (xs->worker_event.early_ctl ||
+			    (!xs->worker_event.slot && !xs->worker_event.rts && !xs->worker_event.ctl))) {
 				xs->pair_wake = wake;
 			} else if (xs->worker_event.rts && xs->rts_count) {
 				xs->rts[0].wake = wake; xs->rts[0].wait_epoch = xs->wait_generation;
@@ -1806,7 +1914,8 @@ static int xdev_ext_xd_class_submit(struct xdev_ext_mech_stage *st, struct xdev_
 		return -EPROTO;
 	}
 	if (xs->early)
-		xd_early_snapshot_locked(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT, &info_v2);
+		xd_early_snapshot_locked(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT,
+			false, false, false, &info_v2);
 	else
 		xd_snapshot(xs, s, NULL, xs->ns.rx ? XDEV_EXT_XDP_EV_RX_SUBMIT : XDEV_EXT_XDP_EV_TX_SUBMIT, false, false, info);
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
