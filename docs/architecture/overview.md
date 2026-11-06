@@ -48,12 +48,20 @@ backing. Core admission, frame ownership and conservative retention still apply
 to the resulting resources. These interfaces do not by themselves guarantee
 producer visibility, device quiescence or physical DMA reachability.
 
-A dma-buf importer is planned as another memory source behind the peer-provider
-boundary. It is not implemented by this contract documentation. The plan does
-not add a memory family or export the session's frame pool: an external consumer
-of a whole buffer cannot be assumed to honor each frame's ownership or permanent
-isolation. Host dma-buf admission and pin accounting remain separate design
-decisions.
+A dma-buf importer (`src/core/io_uring/xdev_ext_peer_dmabuf.c`) is another
+memory source behind the peer-provider boundary. Each import charges the whole
+export against the caller's `RLIMIT_MEMLOCK`. An exporter that registered a
+backing descriptor, such as the system heap or the NVIDIA driver, reports its
+backing facts. With `XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED`, an exporter
+that registered none can also be imported: each requester device then uses
+only the mapping that the exporter returns for that device, the backing is
+reported as `XDEV_EXT_PEER_BACKING_UNDESCRIBED`, and a native command that a
+pending implicit-sync fence of the buffer orders fails with `EBUSY` before any
+DMA. The importer adds no fence for its own device accesses, so the application
+starts later consumers of the buffer after the native work completes. The
+importer does not add a memory family or export the session's frame pool: an
+external consumer of a whole buffer cannot be assumed to honor each frame's
+ownership or permanent isolation.
 
 The source boundary check is part of
 `tests/integration/peer_graph/family_wiring_source_test.py`. It checks stage and
