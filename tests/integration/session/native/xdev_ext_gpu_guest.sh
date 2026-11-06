@@ -87,11 +87,18 @@ case_result() {
 	*) failed=$((failed + 1)) ;;
 	esac
 }
-# timed_out CASE STATUS: a step past its limit stops the GPU cases.
+# timed_out CASE STATUS [LIMIT_S]: a step past its limit stops the GPU cases.
 timed_out() {
 	[ "$2" = 124 ] || return 1
 	gpu_problem=timeout
-	echo "XDEV_EXT_GPU_PROBLEM case=$1 reason=timeout limit_s=$case_limit_s"
+	echo "XDEV_EXT_GPU_PROBLEM case=$1 reason=timeout limit_s=${3:-$case_limit_s}"
+}
+# cleanup_limit_s: the CE plan detach and the NVMe struct_ops re-attach take
+# a short limit after a problem, so a second hang still leaves the main guest
+# its time for the campaign, the module unload and poweroff.
+cleanup_limit_s() {
+	if [ -n "$gpu_problem" ]; then echo "${XDEV_EXT_GPU_CLEANUP_LIMIT_S:-30}"
+	else echo "$case_limit_s"; fi
 }
 # rm_lock_state CASE: RM lock assertions mean a thread was left owning RM
 # locks; RM then waits on it forever and no later GPU step can finish.
@@ -254,8 +261,9 @@ else
 	case_result ce-chain-a FAIL reason=window-not-cleared
 fi
 fi
-bounded "$case_limit_s" /tmp/gpu-detach-ce.log "$ctl" detach --pin /sys/fs/bpf/gpu-ce
-timed_out detach-ce-plan "$?"
+limit_s=$(cleanup_limit_s)
+bounded "$limit_s" /tmp/gpu-detach-ce.log "$ctl" detach --pin /sys/fs/bpf/gpu-ce
+timed_out detach-ce-plan "$?" "$limit_s"
 
 # --- G3: PEER pool in VRAM (NVMe READ into VRAM, NVMe WRITE from VRAM) ---
 # The NVMe struct_ops of the main guest is detached for the peer tool,
@@ -326,11 +334,12 @@ else
 fi
 fi
 if [ "$nvme_detached" = 1 ]; then
-	bounded "$case_limit_s" /tmp/gpu-reattach.log \
+	limit_s=$(cleanup_limit_s)
+	bounded "$limit_s" /tmp/gpu-reattach.log \
 		"$ctl" attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 		--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
 	rc=$?
-	timed_out reattach-nvme "$rc"
+	timed_out reattach-nvme "$rc" "$limit_s"
 	if [ "$rc" != 0 ]; then
 		log_file reattach /tmp/gpu-reattach.log
 		case_result reattach-nvme FAIL rc="$rc"

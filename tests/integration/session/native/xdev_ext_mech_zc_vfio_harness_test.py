@@ -515,6 +515,18 @@ class GpuGuestCases(unittest.TestCase):
         self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=reattach-nvme reason=timeout limit_s=2\n', console)
         self.assertEqual(self.verdicts(console)['reattach-nvme']['result'], 'FAIL')
 
+    def test_cleanup_after_a_problem_gets_the_short_limit(self):
+        # After a hung step the CE plan detach and the NVMe re-attach must not
+        # spend a whole case limit each: the main guest still needs time for
+        # its campaign, the unload and poweroff within the QEMU limit.
+        env = {'XDEV_EXT_GPU_CASE_LIMIT_S': '3', 'XDEV_EXT_GPU_CLEANUP_LIMIT_S': '1'}
+        for hang, step in ((dict(ce_d_sleep='60\n', detach_gpu_ce_sleep='60\n'), 'detach-ce-plan'),
+                           (dict(detach_zc_nvme_sleep='60\n', attach_zc_nvme_sleep='60\n'), 'reattach-nvme')):
+            with self.subTest(step=step):
+                console = self.guest(env=env, **hang)
+                self.assertRegex(console, r'(?m)^XDEV_EXT_GPU_PROBLEM case=\S+ reason=timeout limit_s=3$')
+                self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_PROBLEM case={step} reason=timeout limit_s=1$')
+
     def test_unload_is_bounded(self):
         tmp = tempfile.TemporaryDirectory(prefix='gpu-unload-')
         self.addCleanup(tmp.cleanup)
