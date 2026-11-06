@@ -4445,6 +4445,36 @@ done:
 }
 
 /*
+ * Shared tail of both window binds: report the bound GPU's UUID and segment
+ * size, or drop the new binding again (residual on Free failure).
+ */
+static NV_STATUS
+_rmP2PUmemVidmemBound
+(
+    P2P_UMEM_VIDMEM_BINDING *pBinding,
+    NvU8                    *pGpuUuid,
+    NvU32                   *pSegSize,
+    void                   **ppBinding,
+    void                   **ppResidual
+)
+{
+    const NvU8 *pGid = RmGetGpuUuidRaw(NV_GET_NV_STATE(pBinding->pGpu));
+
+    if (pGid == NULL)
+    {
+        if (RmP2PUmemVidmemUnbind(pBinding) != NV_OK)
+            *ppResidual = pBinding;
+        return NV_ERR_GPU_UUID_NOT_FOUND;
+    }
+
+    os_mem_copy(pBinding->gpuUuid, pGid, GPU_UUID_LEN);
+    os_mem_copy(pGpuUuid, pGid, GPU_UUID_LEN);
+    *pSegSize = pBinding->segSize;
+    *ppBinding = pBinding;
+    return NV_OK;
+}
+
+/*
  * Bind a XDEV_EXT CE window to the vidmem allocation behind [gpuVirtualAddress,
  * gpuVirtualAddress + length) in the calling process; see
  * RmP2PUmemVidmemBind().  Returns the owning GPU's UUID and the window's
@@ -4485,23 +4515,104 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind(
         rmStatus = RmP2PUmemVidmemBind(gpuVirtualAddress, length, expected, &pBinding,
                     (P2P_UMEM_VIDMEM_BINDING **)ppResidual);
         if (rmStatus == NV_OK)
-        {
-            const NvU8 *pGid = RmGetGpuUuidRaw(NV_GET_NV_STATE(pBinding->pGpu));
+            rmStatus = _rmP2PUmemVidmemBound(pBinding, pGpuUuid, pSegSize,
+                                             ppBinding, ppResidual);
 
-            if (pGid == NULL)
-            {
-                if (RmP2PUmemVidmemUnbind(pBinding) != NV_OK)
-                    *ppResidual = pBinding;
-                rmStatus = NV_ERR_GPU_UUID_NOT_FOUND;
-            }
-            else
-            {
-                os_mem_copy(pBinding->gpuUuid, pGid, GPU_UUID_LEN);
-                os_mem_copy(pGpuUuid, pGid, GPU_UUID_LEN);
-                *pSegSize = pBinding->segSize;
-                *ppBinding = pBinding;
-            }
+        rmapiLockRelease();
+    }
+
+    threadStateFree(&threadState, THREAD_STATE_FLAGS_NONE);
+    NV_EXIT_RM_RUNTIME(sp, fp);
+
+    return rmStatus;
+}
+
+/*
+ * The one allocation an export fd names: the only nonzero export handle of
+ * a control fd that EXPORT_OBJECTS_TO_FD or EXPORT_OBJECT_TO_FD filled for a
+ * device of pGpu.  nvfp->handles changes only under the API lock, which the
+ * caller holds; the caller also holds a reference on the fd.
+ */
+static NV_STATUS
+_rmP2PUmemExportHandle
+(
+    nv_file_private_t *pNvfp,
+    OBJGPU            *pGpu,
+    NvHandle          *phExport
+)
+{
+    NvU32 i;
+
+    *phExport = 0;
+    if (pGpu == NULL)
+        return NV_ERR_INVALID_DEVICE;
+    if (pNvfp->handles == NULL)
+        return NV_ERR_INVALID_OBJECT_HANDLE;
+    if (pNvfp->deviceInstance != gpuGetDeviceInstance(pGpu))
+        return NV_ERR_INVALID_DEVICE;
+
+    for (i = 0; i < pNvfp->maxHandles; i++)
+    {
+        if (pNvfp->handles[i] == 0)
+            continue;
+        if (*phExport != 0)
+        {
+            *phExport = 0;
+            return NV_ERR_NOT_SUPPORTED;
         }
+        *phExport = pNvfp->handles[i];
+    }
+
+    return (*phExport != 0) ? NV_OK : NV_ERR_INVALID_OBJECT_HANDLE;
+}
+
+/*
+ * Bind a XDEV_EXT CE window to [offset, offset + length) of the vidmem
+ * allocation exported to the control fd whose RM file private is pExportNvfp
+ * (a CUDA POSIX file descriptor shareable handle); see
+ * RmP2PUmemVidmemBindExport().  Needs no GPUDirect RDMA registration.  The
+ * caller holds a reference on that fd.
+ */
+NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind_export(
+    nvidia_stack_t    *sp,
+    nv_file_private_t *pExportNvfp,
+    NvU64              offset,
+    NvU64              length,
+    const NvU8        *pExpectedGpuUuid,
+    NvU8              *pGpuUuid,
+    NvU32             *pSegSize,
+    void             **ppBinding,
+    void             **ppResidual
+)
+{
+    THREAD_STATE_NODE threadState;
+    P2P_UMEM_VIDMEM_BINDING *pBinding = NULL;
+    NvHandle hExport = 0;
+    NV_STATUS rmStatus;
+    void *fp;
+
+    if (pExportNvfp == NULL || pExpectedGpuUuid == NULL || pGpuUuid == NULL ||
+        pSegSize == NULL || ppBinding == NULL || ppResidual == NULL)
+        return NV_ERR_INVALID_ARGUMENT;
+    *ppBinding = NULL;
+    *ppResidual = NULL;
+
+    NV_ENTER_RM_RUNTIME(sp, fp);
+    threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
+
+    rmStatus = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    if (rmStatus == NV_OK)
+    {
+        OBJGPU *expected = gpumgrGetGpuFromUuid(pExpectedGpuUuid,
+            DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _TYPE, _SHA1) |
+            DRF_DEF(2080_GPU_CMD, _GPU_GET_GID_FLAGS, _FORMAT, _BINARY));
+        rmStatus = _rmP2PUmemExportHandle(pExportNvfp, expected, &hExport);
+        if (rmStatus == NV_OK)
+            rmStatus = RmP2PUmemVidmemBindExport(hExport, offset, length, expected,
+                        &pBinding, (P2P_UMEM_VIDMEM_BINDING **)ppResidual);
+        if (rmStatus == NV_OK)
+            rmStatus = _rmP2PUmemVidmemBound(pBinding, pGpuUuid, pSegSize,
+                                             ppBinding, ppResidual);
 
         rmapiLockRelease();
     }

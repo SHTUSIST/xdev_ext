@@ -1191,6 +1191,7 @@ NV_STATUS  NV_API_CALL  rm_p2p_put_pages          (nvidia_stack_t *, NvU64, NvU3
 NV_STATUS  NV_API_CALL  rm_p2p_put_pages_persistent(nvidia_stack_t *, void *, void *, void *);
 NV_STATUS  NV_API_CALL  rm_p2p_dma_map_pages      (nvidia_stack_t *, nv_dma_device_t *, NvU8 *, NvU64, NvU32, NvU64 *, void **);
 NV_STATUS  NV_API_CALL  rm_p2p_umem_vidmem_bind   (nvidia_stack_t *, NvU64, NvU64, const NvU8 *, NvU8 *, NvU32 *, void **, void **);
+NV_STATUS  NV_API_CALL  rm_p2p_umem_vidmem_bind_export(nvidia_stack_t *, nv_file_private_t *, NvU64, NvU64, const NvU8 *, NvU8 *, NvU32 *, void **, void **);
 NV_STATUS  NV_API_CALL  rm_p2p_umem_vidmem_unbind (nvidia_stack_t *, void *);
 NV_STATUS  NV_API_CALL  rm_p2p_umem_dma_request   (nvidia_stack_t *, NvU64 *, NvU32, NvU32, NvU64, void *, const nv_p2p_umem_xfer_t *, NvU32, NvU32, NvBool *, NvU64 *);
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *, void *, NvU64 *, NvU32, NvU32, NvU64, void (*)(void *, NvU64), void *, void **);

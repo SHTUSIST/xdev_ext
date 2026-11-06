@@ -39,6 +39,7 @@
 #include "vgpu/vgpu_events.h"
 #include "gpu/bus/kern_bus.h"
 #include "class/cl503c.h"
+#include <rmobjexportimport.h>
 
 
 static NvBool _isSpaceAvailableForBar1P2PMapping(OBJGPU *, Subdevice *, RsClient *, NvU64);
@@ -1584,16 +1585,132 @@ NV_STATUS RmP2PGetGpuByAddress(
 }
 
 /*!
+ *  @brief Shared tail of the two window binds below
+ *
+ *  Places a dup of one vidmem allocation in pGpu's RM-internal client and
+ *  accepts it as the window [offset, offset + length): from a handle the
+ *  caller's process registered (hClientSrc, hObjectSrc) or, when bExported,
+ *  from the RmObjExportHandle hObjectSrc of a CUDA shareable-handle export.
+ *  The dup is the reference that keeps the FB pages allocated while the
+ *  window is bound: vidmemCopyConstruct() references the heap or PMA block,
+ *  so the owner freeing its own handle does not release them.  A persistent
+ *  P2P mapping holds its allocation the same way
+ *  (_createOrReuseVidmemInfoPersistent()).  A dup that cannot be freed
+ *  again after a refused check comes back through *ppResidual.
+ *
+ *  The caller holds the API lock and has checked pGpu.
+ */
+static NV_STATUS
+_rmP2PUmemVidmemBindDup
+(
+    OBJGPU                   *pGpu,
+    NvBool                    bExported,
+    NvHandle                  hClientSrc,
+    NvHandle                  hObjectSrc,
+    NvU64                     offset,
+    NvU64                     length,
+    P2P_UMEM_VIDMEM_BINDING **ppBinding,
+    P2P_UMEM_VIDMEM_BINDING **ppResidual
+)
+{
+    RM_API *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
+    MemoryManager *pMemoryManager = GPU_GET_MEMORY_MANAGER(pGpu);
+    P2P_UMEM_VIDMEM_BINDING *pBinding = NULL;
+    MEMORY_DESCRIPTOR *pMemDesc = NULL;
+    RsClient *pClient;
+    Memory *pMemory = NULL;
+    NvHandle hMemory = 0;
+    NvU32 segSize = 0;
+    NV_STATUS status;
+
+    /* Reserve a durable owner before taking the dup: even Free failure on a
+     * later validation error must return a recoverable residual handle. */
+    pBinding = portMemAllocNonPaged(sizeof(*pBinding));
+    if (pBinding == NULL) return NV_ERR_NO_MEMORY;
+    portMemSet(pBinding, 0, sizeof(*pBinding));
+    pBinding->pGpu = pGpu;
+    pBinding->hClient = pMemoryManager->hClient;
+    if (bExported)
+    {
+        // The export client dups under Device first, like RmExportObject().
+        status = RmImportObject(pMemoryManager->hClient,
+                                pMemoryManager->hDevice, &hMemory,
+                                hObjectSrc, NULL);
+        if (status == NV_ERR_INVALID_OBJECT_PARENT)
+            status = RmImportObject(pMemoryManager->hClient,
+                                    pMemoryManager->hSubdevice, &hMemory,
+                                    hObjectSrc, NULL);
+    }
+    else
+    {
+        status = pRmApi->DupObject(pRmApi, pMemoryManager->hClient,
+                                   pMemoryManager->hDevice, &hMemory,
+                                   hClientSrc, hObjectSrc, 0);
+        if (status == NV_ERR_INVALID_OBJECT_PARENT)
+        {
+            // If duping under Device fails, try duping under Subdevice
+            status = pRmApi->DupObject(pRmApi, pMemoryManager->hClient,
+                                       pMemoryManager->hSubdevice, &hMemory,
+                                       hClientSrc, hObjectSrc, 0);
+        }
+    }
+    if (status != NV_OK)
+    {
+        portMemFree(pBinding);
+        return status;
+    }
+    pBinding->hMemory = hMemory;
+
+    status = serverGetClientUnderLock(&g_resServ, pMemoryManager->hClient,
+                                      &pClient);
+    if (status == NV_OK)
+        status = memGetByHandle(pClient, hMemory, &pMemory);
+    if (status == NV_OK)
+    {
+        pMemDesc = pMemory->pMemDesc;
+        // An export names no GPU of its own: its FB must be the opened GPU's.
+        if (bExported && pMemDesc->pGpu != pGpu)
+            status = NV_ERR_INVALID_DEVICE;
+        else if (memdescGetAddressSpace(pMemDesc) != ADDR_FBMEM)
+            status = NV_ERR_NOT_SUPPORTED;
+        else if (!nvP2PVidmemWindowValid(memdescGetSize(pMemDesc), offset,
+                                         length))
+            status = NV_ERR_INVALID_ARGUMENT;
+        else if (!nvP2PVidmemSegSize(memdescGetPteAdjust(pMemDesc) + offset,
+                                     memdescGetPageSize(pMemDesc, AT_GPU),
+                                     memdescGetContiguity(pMemDesc, AT_GPU),
+                                     &segSize))
+            status = NV_ERR_INVALID_STATE;
+    }
+    if (status != NV_OK)
+    {
+        if (pRmApi->Free(pRmApi, pMemoryManager->hClient, hMemory) != NV_OK)
+            *ppResidual = pBinding;
+        else
+            portMemFree(pBinding);
+        return status;
+    }
+
+    portMemSet(pBinding, 0, sizeof(*pBinding));
+    pBinding->pGpu = pGpu;
+    pBinding->hClient = pMemoryManager->hClient;
+    pBinding->hMemory = hMemory;
+    pBinding->pMemDesc = pMemDesc;
+    pBinding->offset = offset;
+    pBinding->length = length;
+    pBinding->segSize = segSize;
+    *ppBinding = pBinding;
+
+    return NV_OK;
+}
+
+/*!
  *  @brief Binds a UBR CE window to the vidmem allocation behind a GPU VA range
  *
  *  Resolves [address, address + length) in the calling process's third-party
  *  P2P registrations to the vidmem allocation's memdesc and the window's
  *  offset in it, and dups the allocation's handle into the GPU's RM-internal
- *  client.  The dup is the reference that keeps the FB pages allocated while
- *  the window is bound: vidmemCopyConstruct() references the heap or PMA
- *  block, so the caller freeing its own handle does not release them.  A
- *  persistent P2P mapping holds its allocation the same way
- *  (_createOrReuseVidmemInfoPersistent()).
+ *  client (_rmP2PUmemVidmemBindDup()).
  *
  *  The caller holds the API lock and runs in the registering process.
  */
@@ -1607,19 +1724,12 @@ RmP2PUmemVidmemBind
     P2P_UMEM_VIDMEM_BINDING **ppResidual
 )
 {
-    RM_API *pRmApi = rmapiGetInterface(RMAPI_GPU_LOCK_INTERNAL);
     ThirdPartyP2P *pThirdPartyP2P = NULL;
     CLI_THIRD_PARTY_P2P_VASPACE_INFO *pVASpaceInfo = NULL;
     CLI_THIRD_PARTY_P2P_VIDMEM_INFO *pVidmemInfo = NULL;
-    P2P_UMEM_VIDMEM_BINDING *pBinding = NULL;
     MemoryManager *pMemoryManager;
-    MEMORY_DESCRIPTOR *pMemDesc = NULL;
-    RsClient *pClient;
-    Memory *pMemory = NULL;
     OBJGPU *pGpu;
-    NvHandle hMemory = 0;
     NvU64 offset;
-    NvU32 segSize = 0;
     NV_STATUS status;
 
     NV_ASSERT_OR_RETURN(ppBinding != NULL && ppResidual != NULL, NV_ERR_INVALID_ARGUMENT);
@@ -1656,69 +1766,60 @@ RmP2PUmemVidmemBind
     if (status != NV_OK)
         return status;
 
-    /* Reserve a durable owner before taking the dup: even Free failure on a
-     * later validation error must return a recoverable residual handle. */
-    pBinding = portMemAllocNonPaged(sizeof(*pBinding));
-    if (pBinding == NULL) return NV_ERR_NO_MEMORY;
-    portMemSet(pBinding, 0, sizeof(*pBinding));
-    pBinding->pGpu = pGpu;
-    pBinding->hClient = pMemoryManager->hClient;
-    status = pRmApi->DupObject(pRmApi, pMemoryManager->hClient,
-                               pMemoryManager->hDevice, &hMemory,
-                               pThirdPartyP2P->hClient, pVidmemInfo->hMemory, 0);
-    if (status == NV_ERR_INVALID_OBJECT_PARENT)
-    {
-        // If duping under Device fails, try duping under Subdevice
-        status = pRmApi->DupObject(pRmApi, pMemoryManager->hClient,
-                                   pMemoryManager->hSubdevice, &hMemory,
-                                   pThirdPartyP2P->hClient,
-                                   pVidmemInfo->hMemory, 0);
-    }
-    if (status != NV_OK)
-    {
-        portMemFree(pBinding);
-        return status;
-    }
-    pBinding->hMemory = hMemory;
+    return _rmP2PUmemVidmemBindDup(pGpu, NV_FALSE, pThirdPartyP2P->hClient,
+                                   pVidmemInfo->hMemory, offset, length,
+                                   ppBinding, ppResidual);
+}
 
-    status = serverGetClientUnderLock(&g_resServ, pMemoryManager->hClient,
-                                      &pClient);
-    if (status == NV_OK)
-        status = memGetByHandle(pClient, hMemory, &pMemory);
-    if (status == NV_OK)
-    {
-        pMemDesc = pMemory->pMemDesc;
-        if (memdescGetAddressSpace(pMemDesc) != ADDR_FBMEM)
-            status = NV_ERR_NOT_SUPPORTED;
-        else if (!nvP2PVidmemWindowValid(memdescGetSize(pMemDesc), offset,
-                                         length))
-            status = NV_ERR_INVALID_ARGUMENT;
-        else if (!nvP2PVidmemSegSize(memdescGetPteAdjust(pMemDesc) + offset,
-                                     memdescGetPageSize(pMemDesc, AT_GPU),
-                                     memdescGetContiguity(pMemDesc, AT_GPU),
-                                     &segSize))
-            status = NV_ERR_INVALID_STATE;
-    }
-    if (status != NV_OK)
-    {
-        if (pRmApi->Free(pRmApi, pMemoryManager->hClient, hMemory) != NV_OK)
-            *ppResidual = pBinding;
-        else
-            portMemFree(pBinding);
-        return status;
-    }
+/*!
+ *  @brief Binds a UBR CE window to a vidmem allocation exported to an fd
+ *
+ *  hExport is the export handle a CUDA POSIX file descriptor shareable
+ *  handle carries (cuMemExportToShareableHandle(): NV0000 EXPORT_OBJECTS_TO_FD
+ *  on a new control fd).  No GPUDirect RDMA registration is involved: RM
+ *  imports the exported allocation into pExpectedGpu's internal client, as
+ *  IMPORT_OBJECTS_FROM_FD does for a CUDA importer, and binds the window
+ *  [offset, offset + length) of it (_rmP2PUmemVidmemBindDup()).  Holding the
+ *  export is the caller's authority over the allocation.
+ *
+ *  The caller holds the API lock.
+ */
+NV_STATUS
+RmP2PUmemVidmemBindExport
+(
+    NvHandle                  hExport,
+    NvU64                     offset,
+    NvU64                     length,
+    OBJGPU                   *pExpectedGpu,
+    P2P_UMEM_VIDMEM_BINDING **ppBinding,
+    P2P_UMEM_VIDMEM_BINDING **ppResidual
+)
+{
+    MemoryManager *pMemoryManager;
 
-    portMemSet(pBinding, 0, sizeof(*pBinding));
-    pBinding->pGpu = pGpu;
-    pBinding->hClient = pMemoryManager->hClient;
-    pBinding->hMemory = hMemory;
-    pBinding->pMemDesc = pMemDesc;
-    pBinding->offset = offset;
-    pBinding->length = length;
-    pBinding->segSize = segSize;
-    *ppBinding = pBinding;
+    NV_ASSERT_OR_RETURN(ppBinding != NULL && ppResidual != NULL, NV_ERR_INVALID_ARGUMENT);
+    *ppBinding = NULL;
+    *ppResidual = NULL;
+    NV_ASSERT_OR_RETURN(rmapiLockIsOwner(), NV_ERR_INVALID_LOCK_STATE);
 
-    return NV_OK;
+    if (hExport == 0)
+        return NV_ERR_INVALID_OBJECT_HANDLE;
+    if (!nvP2PVidmemRangeValid(offset, length))
+        return NV_ERR_INVALID_ARGUMENT;
+    if (pExpectedGpu == NULL)
+        return NV_ERR_INVALID_DEVICE;
+
+    // The internal client below serves only the non-MIG, non-APM case.
+    if (gpuIsApmFeatureEnabled(pExpectedGpu) || IS_MIG_ENABLED(pExpectedGpu))
+        return NV_ERR_NOT_SUPPORTED;
+
+    pMemoryManager = GPU_GET_MEMORY_MANAGER(pExpectedGpu);
+    if (pMemoryManager == NULL || pMemoryManager->hClient == NV01_NULL_OBJECT)
+        return NV_ERR_NOT_SUPPORTED;
+
+    return _rmP2PUmemVidmemBindDup(pExpectedGpu, NV_TRUE, NV01_NULL_OBJECT,
+                                   hExport, offset, length, ppBinding,
+                                   ppResidual);
 }
 
 /*!

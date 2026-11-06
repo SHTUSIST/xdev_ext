@@ -64,6 +64,7 @@
 --undefined=rm_p2p_umem_ce_async_submit
 --undefined=rm_p2p_umem_ce_progress
 --undefined=rm_p2p_umem_vidmem_bind
+--undefined=rm_p2p_umem_vidmem_bind_export
 --undefined=rm_p2p_umem_vidmem_unbind
 --undefined=rm_dma_buf_dup_mem_handle
 --undefined=rm_dma_buf_undup_mem_handle
