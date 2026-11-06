@@ -355,6 +355,8 @@ static void link_up_wakes_only_waiting_live_sources(void)
 	worker();
 	CHECK("unbound_no_wakeup", drv_wakes == 1);
 
+	/* A non-reliable stage has no STOP-time cancellation: a STOPPING session
+	 * drains only if the queue is woken, and a wakeup changes no custody. */
 	reset("link_up_stopping", DRV_IGB);
 	link_carrier = false;
 	CHECK("submit_accepted", xsk_xdev_ext_mech_submit(&st, &batch) == 0);
@@ -362,10 +364,9 @@ static void link_up_wakes_only_waiting_live_sources(void)
 	link_up();
 	session_admits = false;
 	worker();
-	CHECK("stopping_session_no_wakeup", drv_wakes == 1 && !dead_status);
-	session_admits = true;
-	worker();
-	CHECK("stopping_request_dropped", drv_wakes == 1);
+	CHECK("stopping_session_drains", drv_wakes == 2 && drv_taken == 3 && !dead_status);
+	xsk_tx_completed(&xp, 3);
+	CHECK("stopping_session_completes", callbacks == 1 && complete_status == 0);
 
 	reset("link_up_no_stage", DRV_IGB);
 	link_carrier = false;

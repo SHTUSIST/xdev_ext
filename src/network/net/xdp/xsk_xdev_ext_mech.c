@@ -1549,9 +1549,11 @@ static const struct xdev_ext_net_hooks xsk_xdev_ext_net_hooks = {
 };
 
 /*
- * Session worker: the wakeup the link-up hook asked for.  A STOP
- * cancels the source instead.  A refusal now has no link excuse: stop the
- * stage as a refused submit does, cancelling only what was never taken.
+ * Session worker: the wakeup the link-up hook asked for.  A wakeup changes no
+ * custody, so a STOPPING session is woken too: a non-reliable stage has no
+ * STOP-time cancellation and drains only through the driver.  A refusal now
+ * has no link excuse: stop the stage as a refused submit does, cancelling
+ * only what was never taken.
  */
 static void xsk_mech_zc_rewake(struct xdev_ext_mech_stage *st)
 {
@@ -1569,8 +1571,7 @@ static void xsk_mech_zc_rewake(struct xdev_ext_mech_stage *st)
 	wake = !p->stopped && xsk_mech_zc_unissued(&p->ring);
 	p->rewake = false;
 	spin_unlock_irqrestore(&p->tx_lock, flags);
-	if (wake && xs->state == XSK_BOUND && !READ_ONCE(xst->dead) &&
-	    xdev_ext_mech_session_admits(st->s))
+	if (wake && xs->state == XSK_BOUND && !READ_ONCE(xst->dead))
 		err = xsk_mech_zc_wake(xs);
 	if (err) {
 		spin_lock_irqsave(&p->tx_lock, flags);

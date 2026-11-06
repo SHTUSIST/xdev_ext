@@ -147,8 +147,9 @@ MUTATIONS = {
                             'ASSERT igb_carrier_down: link_up_wakes_once'),
     'link_up_ignores_rx_stage': ('wakeup_extra.c.inc', 'st = smp_load_acquire(&xs->xdev_ext_mech_rx);', 'st = NULL;',
                                  'ASSERT receiver_controls: receiver_link_up_kicks_worker'),
-    'worker_ignores_stopping_session': ('wakeup_extra.c.inc', ' &&\n\t    xdev_ext_mech_session_admits(st->s))', ')',
-                                        'ASSERT link_up_stopping: stopping_session_no_wakeup'),
+    'worker_skips_stopping_session': ('wakeup_extra.c.inc', 'if (wake && xs->state == XSK_BOUND && !READ_ONCE(xst->dead))',
+                                      'if (wake && xs->state == XSK_BOUND && !READ_ONCE(xst->dead) &&\n\t    xdev_ext_mech_session_admits(st->s))',
+                                      'ASSERT link_up_stopping: stopping_session_drains'),
     'enetdown_always_fatal': ('production_journal.h',
                               'return err == -ENETDOWN && (!running || !carrier);', 'return false;',
                               'ASSERT ice_carrier_down: link_down_refusal_is_not_fatal'),
@@ -274,6 +275,8 @@ def cli_order_problems(ctl):
     if not re.search(r'errno != EINVAL && errno != ENXIO && errno != ENETDOWN', kick) or \
             'xdev_ext_xsk_redirect_attach_pass(' not in kick:
         problems.append('pass program not attached exactly for refused kicks')
+    if 'return ret == -EBUSY ? 0 : ret;' not in kick:
+        problems.append("another owner's native program is not accepted as XDP mode")
     return problems
 
 
@@ -306,6 +309,9 @@ class CliZeroCopyTx(unittest.TestCase):
         always = ctl.replace('errno != EINVAL && errno != ENXIO && errno != ENETDOWN', 'false', 1)
         self.assertNotEqual(always, ctl)
         self.assertNotEqual(cli_order_problems(always), [])
+        busy = ctl.replace('return ret == -EBUSY ? 0 : ret;', 'return ret;', 1)
+        self.assertNotEqual(busy, ctl)
+        self.assertNotEqual(cli_order_problems(busy), [])
 
 
 if __name__ == '__main__':

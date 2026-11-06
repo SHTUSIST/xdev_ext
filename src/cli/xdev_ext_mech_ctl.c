@@ -1670,16 +1670,27 @@ static int ctl_reliable_redirect(struct xdev_ext_xsk_redirect *redirect,
  * AF_XDP application does (an empty TX ring, so nothing is sent).  igb, ice,
  * i40e and ixgbe refuse with EINVAL, igc with ENXIO and mlx5 with ENETDOWN
  * while no XDP program is attached; attach one that passes every frame.
- * Drivers without that precondition (virtio_net) get no program.
+ * Drivers without that precondition (virtio_net) get no program unless they
+ * are down, where ENETDOWN cannot tell the two apart.
+ *
+ * The attach precedes CREATE, whose admission needs an empty fill ring, so
+ * igb configures this queue's receive ring without buffers.  Its TX wakeup
+ * never kicks the receive vector, and 82576 queues are unpaired with up to
+ * four RSS queues: that queue then drops received frames until the program
+ * is detached.  Another owner's native program (-EBUSY) already selects XDP
+ * mode; when that owner detaches it, the next wakeup fails the session.
  */
 static int ctl_zc_tx_xdp(struct xdev_ext_xsk_redirect *redirect,
 			 const struct ctl_source *src, const struct ctl_xsk *x)
 {
+	int ret;
+
 	if (sendto(x->fd, NULL, 0, MSG_DONTWAIT, NULL, 0) >= 0 ||
 	    (errno != EINVAL && errno != ENXIO && errno != ENETDOWN))
 		return 0;
-	return xdev_ext_xsk_redirect_attach_pass(redirect,
+	ret = xdev_ext_xsk_redirect_attach_pass(redirect,
 		(int)if_nametoindex(src->ifname), XDP_FLAGS_DRV_MODE);
+	return ret == -EBUSY ? 0 : ret;
 }
 
 /*
