@@ -42,8 +42,10 @@ On real QEMU NVMe PCI with a kernel built from the commit under test
     the window end, in either direction, gets every batch refused with
     `-ERANGE` before any command of that stage is submitted;
 - the victim closes its only handle fds right after CREATE, victim2 right
-  after START: each session keeps its window and completes exactly, and the
-  range stays reserved until the session is released;
+  after START while its writes are still in flight (the runner rate-limits
+  writes to the destination image with QEMU's own throttle so that the run
+  outlasts the close): each session keeps its window and completes exactly,
+  and the range stays reserved until the session is released;
 - tenant2 exits with its session, ring and handles still open: its range stays
   reserved while it lives and is free once the kernel has released the
   session;

@@ -168,8 +168,11 @@ args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
     -append 'console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr' -nic none
     -drive "file=$OUT/source.raw,if=none,id=src,format=raw,cache=none,aio=threads"
     -device nvme,drive=src,serial=XDEVWINSRC01
-    -drive "file=$OUT/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads"
+    -drive "file=$OUT/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads,throttling.bps-write=131072"
     -device nvme,drive=dst,serial=XDEVWINDST01)
+# QEMU's own write throttle on the destination backing file (128 KiB/s): a
+# session is still writing when victim2 closes its handle fds right after
+# START. It changes no device model and nothing is timed.
 printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"; printf '\n' >>"$EV/qemu.command"
 qemu_status=0
 timeout "$TIMEOUT_SECONDS" "$QEMU" "${args[@]}" </dev/null >"$EV/guest.log" 2>&1 || qemu_status=$?

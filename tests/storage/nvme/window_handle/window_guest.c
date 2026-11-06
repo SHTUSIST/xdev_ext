@@ -778,9 +778,10 @@ int main(int argc, char **argv)
 	x = !close(hv2) && !close(rv2);
 	quiet_stats(&v2, &st);
 	print_stats(&st, "just after closing its handle fds");
-	printf("# victim2: session %s when its handle fds were closed\n",
-	       st.batches_done + st.batches_abort < GROUPS ? "was still running" : "had already finished");
 	CHECK(x, "close victim2's only handle fds right after START");
+	/* The runner rate-limits destination writes, so the run outlasts the close. */
+	CHECK(st.batches_done + st.batches_abort < GROUPS && st.inflight,
+	      "victim2's session was still running when its handle fds were closed");
 	CHECK_EQ(issue(dstng, win(W_VICTIM2), WIN_NLB, RDWR, 0), -EBUSY,
 		 "closed during the run, the range stays reserved");
 	st = wait_settled(&v2);
