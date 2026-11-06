@@ -51,7 +51,13 @@ PLANS = [
 ]
 
 
-def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
+# Stage caps a correct run prints, per exporter (written independently of the
+# oracle): STORAGE, HOST_DMA_MAPPED or UNKNOWN, ESTABLISHED, backing, refused.
+CAPS = {'system-heap': 'family=2 reachability=7 requester_mapping=1 backing=0x22 refused=0x0',
+        'udmabuf': 'family=2 reachability=0 requester_mapping=1 backing=0x40 refused=0x0'}
+
+
+def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False, exporter='system-heap'):
     dest = bytearray([GUARD]) * IMAGE
     pattern = bytes((((o * 131) + 7) & 0xff) ^ 0x5a for o in range(EXPORT))
     dest[2048 * LBA:2048 * LBA + EXPORT] = pattern
@@ -86,13 +92,19 @@ def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
     for i in range(5):
         ok('setup %d' % i)
     lines.append('OBSERVE case=batch-read fnv64=%016x' % fnv64(read_view))
-    for case in ('batch', 'chain', 'exporter-close', 'victim'):
+    if exporter == 'udmabuf':
+        plans = PLANS[:3] + ['PLAN case=fenced-chain frame=4096 seg=4096 group=8192 depth=4 groups=64 '
+                             'src_slba=24576 dst_slba=24576 copies=NONE'] + PLANS[3:]
+        lines[lines.index(PLANS[0]):lines.index(PLANS[-1]) + 1] = plans
+        lines.append('OBSERVE case=fenced-chain last_err=-16 batches_done=0 batches_abort=64 submitted=0,0')
+    cases = ('batch', 'chain') + (('fenced-chain',) if exporter == 'udmabuf' else ()) + ('exporter-close', 'victim')
+    for case in cases:
         ok(case + ' register')
         lines.append('OBSERVE case=%s vmpin_baseline=4096 vmpin_registered=%d vmpin_closed=4096' % (case, 4096 + EXPORT))
         lines.append('OBSERVE case=%s bufinfo attached=%s' % (case, ','.join(NVME)))
         lines.append('OBSERVE case=%s bufinfo_after_close=absent' % case)
     for stage in (0, 1):
-        lines.append('OBSERVE case=chain stage=%d family=2 reachability=7 requester_mapping=1 backing=0x22 refused=0x0' % stage)
+        lines.append('OBSERVE case=chain stage=%d %s' % (stage, CAPS[exporter]))
     lines.append('OBSERVE case=exporter-close exporter_fd_closed_inflight=1 done_at_close=3 groups=1024')
     lines.append('OBSERVE case=kill quota_while_owner_alive=ENOMEM quota_after_owner_exit=ok copied_groups=%d'
                  % len(copied_kill))
@@ -100,8 +112,8 @@ def good_run(source, copied_kill=(0, 1, 5, 300), viommu=False):
     lines.append('OBSERVE case=victim running_at_kill=1 done_at_kill=40 groups=1536')
     ok('final')
     lines.append('1..%d' % checks)
-    lines.append('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim '
-                 'exporter=system-heap requesters=2 timing=none')
+    lines.append('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,%sexporter-close,kill,victim '
+                 'exporter=%s requesters=2 timing=none' % ('fenced-chain,' if exporter == 'udmabuf' else '', exporter))
     lines.append('XDEV_EXT_DMABUF_GUEST_EXIT=0')
     return '\n'.join(lines) + '\n', bytes(dest)
 
@@ -113,16 +125,54 @@ class Oracle(unittest.TestCase):
         cls.source = source_image()
         cls.log, cls.dest = good_run(cls.source)
         cls.vlog, _ = good_run(cls.source, viommu=True)
+        cls.ulog, _ = good_run(cls.source, exporter='udmabuf')
 
-    def check(self, log=None, dest=None, source=None, viommu=False):
+    def check(self, log=None, dest=None, source=None, viommu=False, exporter='system-heap'):
         return self.v.validate(self.source if source is None else source,
                                self.dest if dest is None else dest,
-                               self.log if log is None else log, viommu=viommu)
+                               self.log if log is None else log, viommu=viommu, exporter=exporter)
 
     def rejects(self, fragment, **kwargs):
         with self.assertRaises(ValueError) as caught:
             self.check(**kwargs)
         self.assertIn(fragment, str(caught.exception))
+
+    def test_undescribed_exporter_run(self):
+        result = self.check(log=self.ulog, exporter='udmabuf')
+        self.assertEqual(result['exporter'], 'udmabuf')
+        # An undescribed import must never be reported as host-mapped RAM.
+        self.rejects('stage caps', log=self.ulog.replace('reachability=0', 'reachability=7'),
+                     exporter='udmabuf')
+        self.rejects('stage caps', log=self.ulog.replace('backing=0x40', 'backing=0x22'),
+                     exporter='udmabuf')
+        # Neither exporter's run certifies the other.
+        self.rejects('final PASS line', log=self.log, exporter='udmabuf')
+        self.rejects('final PASS line', log=self.ulog)
+        with self.assertRaises(ValueError):
+            self.check(exporter='dma-heap')
+
+    def test_fenced_chain(self):
+        fenced = 'OBSERVE case=fenced-chain last_err=-16 batches_done=0 batches_abort=64 submitted=0,0'
+        self.assertIn(fenced, self.ulog)
+        # A fenced batch that reached the device, completed, or failed otherwise.
+        for bad in (fenced.replace('submitted=0,0', 'submitted=1,0'),
+                    fenced.replace('batches_done=0 batches_abort=64', 'batches_done=64 batches_abort=0'),
+                    fenced.replace('last_err=-16', 'last_err=-5'),
+                    fenced.replace('batches_abort=64', 'batches_abort=63')):
+            with self.subTest(bad=bad):
+                self.rejects('fenced-chain', log=self.ulog.replace(fenced, bad), exporter='udmabuf')
+        # Its accounting and release follow the same rules as the other cases.
+        self.rejects('VmPin accounting for fenced-chain',
+                     log=self.ulog.replace('case=fenced-chain vmpin_baseline=4096 vmpin_registered=69632 '
+                                           'vmpin_closed=4096',
+                                           'case=fenced-chain vmpin_baseline=4096 vmpin_registered=69632 '
+                                           'vmpin_closed=69632'), exporter='udmabuf')
+        self.rejects('fenced-chain', log=self.ulog.replace('case=fenced-chain bufinfo_after_close=absent',
+                                                           'case=fenced-chain bufinfo_after_close=present'),
+                     exporter='udmabuf')
+        # The fenced plan line is required in udmabuf runs and refused otherwise.
+        self.rejects('plan mismatch', log=self.ulog.replace('copies=NONE', 'copies=ALL'), exporter='udmabuf')
+        self.rejects('final PASS line', log=self.log.replace('chain,exporter-close', 'chain,fenced-chain,exporter-close'))
 
     def test_source_generator_matches_independent_definition(self):
         self.assertEqual(self.v.make_source(), self.source)

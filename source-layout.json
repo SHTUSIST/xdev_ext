@@ -4981,6 +4981,30 @@
       "logical_path": "tests/core/peer_dmabuf/device_dma/validate_test.py"
     },
     {
+      "source": "tests/core/peer_dmabuf/undescribed_mutants.py",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_mutants.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_dma/README.md",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_dma/README.md"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_dma/undescribed_dma.c",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_dma/undescribed_dma.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_dma/undescribed_dma_kvm.sh",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_dma/undescribed_dma_kvm.sh"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_dma/validate.py",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_dma/validate.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/undescribed_dma/validate_test.py",
+      "logical_path": "tests/core/peer_dmabuf/undescribed_dma/validate_test.py"
+    },
+    {
       "source": "tests/core/peer_quarantine/mutations.py",
       "logical_path": "tests/core/peer_quarantine/mutations.py"
     },

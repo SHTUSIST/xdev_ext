@@ -1,7 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Persistent, whole-export DMA-BUF authority. No frame pool export and no
- * implicit access fence bridge: the application synchronizes producers and
- * consumers. Unknown native DMA retains the entire ledger in peer core.
+/* Persistent, whole-export DMA-BUF authority. No frame pool export, and no
+ * fence is ever added for xdev_ext device access: native DMA can end UNKNOWN,
+ * which would leave such a fence unsignaled forever, and a session may run
+ * indefinitely. The application orders later consumers after completion.
+ * Unknown native DMA retains the entire ledger in peer core.
+ * With IMPORT_UNDESCRIBED, an exporter that registered no descriptor imports
+ * with no backing facts (descriptor == NULL); each requester then uses only
+ * the exporter's own mapping for that device, and a lease that a pending
+ * implicit-sync fence orders is refused (xdev_ext_dmabuf_may_access). A
+ * described exporter keeps the contract in which the application also orders
+ * implicit-sync producers before the device access.
  */
 #include <linux/atomic.h>
 #include <linux/cred.h>
@@ -41,7 +49,7 @@ struct xdev_ext_dmabuf_descriptor {
 struct xdev_ext_dmabuf_allocation {
  struct list_head identity;
  struct dma_buf *buf;
- struct xdev_ext_dmabuf_descriptor *descriptor;
+ struct xdev_ext_dmabuf_descriptor *descriptor; /* NULL: undescribed */
  struct user_struct *user;
  struct mm_struct *mm;
  unsigned long pages;
@@ -96,34 +104,42 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_dmabuf_desc_unregister);
 /* Identity reservation and descriptor acquisition are one transaction; no
  * exporter callback or DMA-BUF operation may run under this registry lock.
  */
-static int xdev_ext_dmabuf_reserve(struct xdev_ext_dmabuf_allocation *a)
+static int xdev_ext_dmabuf_reserve(struct xdev_ext_dmabuf_allocation *a, u32 flags)
 {
  struct xdev_ext_dmabuf_allocation *other;
  struct xdev_ext_dmabuf_descriptor *d;
+ bool described = false;
  int ret = -EOPNOTSUPP;
  mutex_lock(&xdev_ext_dmabuf_registry_lock);
  list_for_each_entry(other, &xdev_ext_dmabuf_identities, identity)
   if (other->buf == a->buf) { ret = -EBUSY; goto done; }
  list_for_each_entry(d, &xdev_ext_dmabuf_descriptors, node)
   if (d->ops->ops == a->buf->ops) {
+   described = true;
    if (d->live == U32_MAX) { ret = -EOVERFLOW; break; }
    if (!try_module_get(d->ops->owner)) { ret = -ENODEV; break; }
    d->live++; a->descriptor = d;
    list_add_tail(&a->identity, &xdev_ext_dmabuf_identities);
    ret = 0; break;
   }
+ /* A described exporter, even a dying one, never falls back. */
+ if (!described && (flags & XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED)) {
+  a->descriptor = NULL;
+  list_add_tail(&a->identity, &xdev_ext_dmabuf_identities);
+  ret = 0;
+ }
 done:
  mutex_unlock(&xdev_ext_dmabuf_registry_lock);
  return ret;
 }
 static void xdev_ext_dmabuf_unreserve(struct xdev_ext_dmabuf_allocation *a)
 {
- struct module *owner = a->descriptor->ops->owner;
+ struct module *owner = a->descriptor ? a->descriptor->ops->owner : NULL;
  mutex_lock(&xdev_ext_dmabuf_registry_lock);
  list_del(&a->identity);
- a->descriptor->live--;
+ if (a->descriptor) a->descriptor->live--;
  mutex_unlock(&xdev_ext_dmabuf_registry_lock);
- module_put(owner);
+ if (a->descriptor) module_put(owner);
 }
 
 /* Unlike a load/add pair, CAS also respects a concurrent charge by another
@@ -229,6 +245,15 @@ static int xdev_ext_dmabuf_describe(void *allocation, struct pci_dev *peer,
 
  *out = (struct xdev_ext_peer_backing){};
  if (a->buf->size != a->len || xdev_ext_dmabuf_stale(a)) return -ESTALE;
+ if (!a->descriptor) {
+  /* Nothing is known beyond the mapping the exporter returns for this
+   * device, so refuse every requester whose mapping could be bounced or
+   * need CPU cache maintenance before the exporter is asked to attach. */
+  if (peer->untrusted || is_swiotlb_force_bounce(&peer->dev)) return -EXDEV;
+  if (!dev_is_dma_coherent(&peer->dev)) return -EOPNOTSUPP;
+  *out = (struct xdev_ext_peer_backing){ .flags = XDEV_EXT_PEER_BACKING_UNDESCRIBED };
+  return 0;
+ }
  ret = a->descriptor->ops->describe(a->buf, peer, &backing);
  if (ret) return ret;
  if (backing.flags & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
@@ -239,6 +264,17 @@ static int xdev_ext_dmabuf_describe(void *allocation, struct pci_dev *peer,
  }
  *out = backing;
  return 0;
+}
+/* Region lock held; must not sleep. Implicit sync (include/linux/dma-buf.h):
+ * a device read waits for writers, a device write also for readers, and
+ * KERNEL fences order both (dma_resv_usage_rw). The lease path cannot wait on
+ * a fence, so the lease is refused and the caller retries after it signals. */
+static int xdev_ext_dmabuf_may_access(void *allocation, enum dma_data_direction dir)
+{
+ struct xdev_ext_dmabuf_allocation *a = allocation;
+ if (a->descriptor) return 0;
+ return dma_resv_test_signaled(a->buf->resv,
+                               dma_resv_usage_rw(dir == DMA_FROM_DEVICE)) ? 0 : -EBUSY;
 }
 static int xdev_ext_dmabuf_map(void *allocation, struct pci_dev *peer,
                               struct xdev_ext_peer_dma *out)
@@ -274,11 +310,17 @@ static int xdev_ext_dmabuf_map(void *allocation, struct pci_dev *peer,
  if (ready <= 0) { ret = ready < 0 ? ready : -ETIMEDOUT; goto unlock; }
  m->sgt = dma_buf_map_attachment(m->attachment, DMA_BIDIRECTIONAL);
  if (IS_ERR(m->sgt)) { ret = PTR_ERR(m->sgt); m->sgt = NULL; goto unlock; }
- if (backing.flags & XDEV_EXT_PEER_BACKING_HOST_SYSTEM)
+ if (backing.flags & (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
+                      XDEV_EXT_PEER_BACKING_UNDESCRIBED))
   for_each_sgtable_dma_sg(m->sgt, sg, i)
    if (dma_need_sync(&peer->dev, sg_dma_address(sg))) {
     ret = -EOPNOTSUPP; goto unlock;
    }
+ /* dma-direct marks no SG flag on bounce; the certifier checks addresses. */
+ if ((backing.flags & XDEV_EXT_PEER_BACKING_UNDESCRIBED) &&
+     !dma_sgtable_is_unbounced(&peer->dev, m->sgt)) {
+  ret = -EXDEV; goto unlock;
+ }
  ret = xdev_ext_peer_dmabuf_geometry(m->sgt, a->len, &m->addresses, &entries);
  if (ret) goto unlock;
  if (xdev_ext_dmabuf_stale(a) || a->buf->size != a->len) {
@@ -338,20 +380,22 @@ static const struct xdev_ext_peer_provider_ops xdev_ext_dmabuf_ops = {
  .unmap = xdev_ext_dmabuf_unmap,
  .describe = xdev_ext_dmabuf_describe,
  .is_stale = xdev_ext_dmabuf_stale,
+ .may_access = xdev_ext_dmabuf_may_access,
 };
-int xdev_ext_peer_dmabuf_import(struct dma_buf *buf, u64 len,
-                               struct xdev_ext_peer_region **out)
+int xdev_ext_peer_dmabuf_import_flags(struct dma_buf *buf, u64 len, u32 flags,
+                                     struct xdev_ext_peer_region **out)
 {
  struct xdev_ext_dmabuf_allocation *a;
  int ret;
  if (!out) return -EINVAL;
  *out = NULL;
+ if (flags & ~XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED) return -EINVAL;
  if (!buf || !len || len != buf->size ||
      (len & (XDEV_EXT_DMABUF_PAGE_SIZE - 1))) return -EINVAL;
  a = kzalloc(sizeof(*a), GFP_KERNEL);
  if (!a) return -ENOMEM;
  a->buf = buf; a->len = len; atomic_set(&a->stale, 0);
- ret = xdev_ext_dmabuf_reserve(a);
+ ret = xdev_ext_dmabuf_reserve(a, flags);
  if (ret) goto free;
  ret = xdev_ext_dmabuf_charge(a, len);
  if (ret) goto unreserve;
@@ -363,6 +407,12 @@ unreserve:
 free:
  kfree(a);
  return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_dmabuf_import_flags);
+int xdev_ext_peer_dmabuf_import(struct dma_buf *buf, u64 len,
+                               struct xdev_ext_peer_region **out)
+{
+ return xdev_ext_peer_dmabuf_import_flags(buf, len, 0, out);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_dmabuf_import);
 MODULE_IMPORT_NS("DMA_BUF");

@@ -25,6 +25,16 @@
  * Accounting: VmPin rises by exactly the export while registered and returns
  * after the last allocation fd closes; dma-buf debugfs lists both NVMe PCI
  * functions as attached while registered and drops the buffer after close.
+ * XDEV_EXT_DMABUF_EXPORTER=udmabuf runs the same cases on udmabuf (memfd)
+ * dma-bufs, whose exporter registers no xdev_ext backing descriptor: they are
+ * imported with XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED, and both chain
+ * stages must report UNDESCRIBED backing with UNKNOWN reachability. That mode
+ * adds one case:
+ *   fenced-chain   POOL_PEER session on a udmabuf whose reservation object
+ *                  holds an unsignaled implicit-sync writer fence (sw_sync
+ *                  timeline, DMA_BUF_IOCTL_IMPORT_SYNC_FILE): every batch
+ *                  must end EBUSY with no native command submitted, and the
+ *                  destination range keeps its guard bytes
  * The plan below is duplicated, not shared, by the host validator.
  */
 #define _GNU_SOURCE
@@ -33,6 +43,7 @@
 #include <limits.h>
 #include <linux/dma-buf.h>
 #include <linux/dma-heap.h>
+#include <linux/udmabuf.h>
 #include <linux/fs.h>
 #include <poll.h>
 #include <signal.h>
@@ -64,6 +75,19 @@
 #define BATCH_READ_SLBA 2048ULL
 #define BATCH_WRITE_SLBA 2048ULL
 #define BUFINFO "/sys/kernel/debug/dma_buf/bufinfo"
+#define SW_SYNC "/sys/kernel/debug/sync/sw_sync"
+
+/* drivers/dma-buf/sw_sync.c (no uapi header): each open of the debugfs file is
+ * a timeline; CREATE_FENCE returns a sync_file fd that signals once the
+ * timeline counter reaches value, and INC advances the counter. */
+struct sw_sync_create_fence_data {
+	__u32 value;
+	char name[32];
+	__s32 fence;
+};
+#define SW_SYNC_IOC_MAGIC 'W'
+#define SW_SYNC_IOC_CREATE_FENCE _IOWR(SW_SYNC_IOC_MAGIC, 0, struct sw_sync_create_fence_data)
+#define SW_SYNC_IOC_INC _IOW(SW_SYNC_IOC_MAGIC, 1, __u32)
 
 struct plan {
 	const char *name;
@@ -75,8 +99,12 @@ static const struct plan CHAIN = {"chain", 4096, 4096, 8192, 4, 96, 4096, 4096, 
 static const struct plan CLOSE = {"exporter-close", 4096, 4096, 8192, 4, 1024, 8192, 8192, "ALL"};
 static const struct plan KILL = {"kill", 4096, 4096, 8192, 4, 512, 32768, 32768, "PART"};
 static const struct plan VICTIM = {"victim", 4096, 4096, 8192, 4, 1536, 40960, 40960, "ALL"};
+/* udmabuf mode only; its range lies in the gap the other plans leave free. */
+static const struct plan FENCED = {"fenced-chain", 4096, 4096, 8192, 4, 64, 24576, 24576, "NONE"};
 
 static unsigned int checks;
+/* XDEV_EXT_DMABUF_EXPORTER=udmabuf: an exporter without a descriptor. */
+static bool undescribed;
 #define CHECK(c, msg) do { if (!(c)) { \
 	fprintf(stderr, "not ok %u - %s (errno=%d %s)\n", ++checks, msg, errno, strerror(errno)); \
 	printf("not ok %u - %s\n", checks, msg); exit(1); } printf("ok %u - %s\n", ++checks, msg); } while (0)
@@ -116,23 +144,46 @@ static uint64_t fnv64(const unsigned char *p, size_t n)
 	while (n--) { h ^= *p++; h *= 0x100000001b3ULL; }
 	return h;
 }
-static int heap_alloc(int heap, unsigned long *ino)
+/* A 64 KiB dma-buf from the selected exporter; no TAP output, so the forked
+ * importer process can use it. udmabuf pins the memfd pages itself, so the
+ * memfd is closed once the dma-buf exists. */
+static int export_one(int heap)
 {
 	struct dma_heap_allocation_data a = {.len = EXPORT, .fd_flags = O_RDWR | O_CLOEXEC};
+	struct udmabuf_create u = {.flags = UDMABUF_FLAGS_CLOEXEC, .size = EXPORT};
+	int memfd, fd, err;
+	if (!undescribed) return ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &a) ? -errno : (int)a.fd;
+	memfd = memfd_create("xdev-ext-dmabuf-dma", MFD_CLOEXEC | MFD_ALLOW_SEALING);
+	if (memfd < 0) return -errno;
+	if (ftruncate(memfd, EXPORT) || fcntl(memfd, F_ADD_SEALS, F_SEAL_SHRINK)) {
+		err = -errno; close(memfd); return err;
+	}
+	u.memfd = (__u32)memfd;
+	fd = ioctl(heap, UDMABUF_CREATE, &u);
+	err = fd < 0 ? -errno : fd;
+	close(memfd);
+	return err;
+}
+static int heap_alloc(int heap, unsigned long *ino)
+{
 	struct stat st;
-	CHECK(!ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &a), "system heap allocates one 64 KiB dma-buf");
-	CHECK(!fstat((int)a.fd, &st), "dma-buf inode");
+	int fd = export_one(heap);
+	errno = fd < 0 ? -fd : 0;
+	CHECK(fd >= 0, undescribed ? "udmabuf turns one 64 KiB memfd into a dma-buf" :
+	      "system heap allocates one 64 KiB dma-buf");
+	CHECK(!fstat(fd, &st), "dma-buf inode");
 	*ino = st.st_ino;
-	return (int)a.fd;
+	return fd;
 }
 /* No TAP output: also used by the forked importer process. */
 static int raw_heap_alloc(int heap, unsigned long *ino)
 {
-	struct dma_heap_allocation_data a = {.len = EXPORT, .fd_flags = O_RDWR | O_CLOEXEC};
 	struct stat st;
-	if (ioctl(heap, DMA_HEAP_IOCTL_ALLOC, &a) || fstat((int)a.fd, &st)) return -errno;
+	int fd = export_one(heap);
+	if (fd < 0) return fd;
+	if (fstat(fd, &st)) return -errno;
 	*ino = st.st_ino;
-	return (int)a.fd;
+	return fd;
 }
 static void cpu_access(int buf, unsigned char *data, bool write)
 {
@@ -147,7 +198,8 @@ static void cpu_access(int buf, unsigned char *data, bool write)
 }
 static int reg(int ctl, int buf, uint64_t *generation)
 {
-	struct xdev_ext_peer_register r = {.gpu_fd = buf, .flags = XDEV_EXT_PEER_REGISTER_F_DMABUF, .len = EXPORT};
+	struct xdev_ext_peer_register r = {.gpu_fd = buf, .flags = XDEV_EXT_PEER_REGISTER_F_DMABUF |
+		(undescribed ? XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED : 0), .len = EXPORT};
 	int fd = ioctl(ctl, XDEV_EXT_PEER_REGISTER, &r);
 	if (fd < 0) return -errno;
 	*generation = r.generation;
@@ -334,10 +386,16 @@ static void stage_caps(struct session *s, const struct plan *p)
 		CHECK(!mech(s->ring, XDEV_EXT_MECH_OP_STAGE_CAPS, (uintptr_t)&c), "STAGE_CAPS for a dma-buf pool stage");
 		printf("OBSERVE case=%s stage=%u family=%u reachability=%u requester_mapping=%u backing=0x%x refused=0x%x\n",
 		       p->name, i, c.family, c.reachability, c.requester_mapping, c.backing, c.refused);
-		CHECK(c.family == XDEV_EXT_FAMILY_STORAGE && c.reachability == XDEV_EXT_CAP_HOST_DMA_MAPPED &&
-		      c.requester_mapping == XDEV_EXT_CAP_ESTABLISHED && !c.refused &&
-		      c.backing == (XDEV_EXT_PEER_BACKING_HOST_SYSTEM | XDEV_EXT_PEER_BACKING_STRUCT_PAGE),
-		      "NVMe requester admitted host-system dma-buf memory and mapped it at CREATE");
+		if (undescribed)
+			CHECK(c.family == XDEV_EXT_FAMILY_STORAGE && c.reachability == XDEV_EXT_CAP_UNKNOWN &&
+			      c.requester_mapping == XDEV_EXT_CAP_ESTABLISHED && !c.refused &&
+			      c.backing == XDEV_EXT_PEER_BACKING_UNDESCRIBED,
+			      "NVMe requester admitted undescribed dma-buf memory and mapped it at CREATE");
+		else
+			CHECK(c.family == XDEV_EXT_FAMILY_STORAGE && c.reachability == XDEV_EXT_CAP_HOST_DMA_MAPPED &&
+			      c.requester_mapping == XDEV_EXT_CAP_ESTABLISHED && !c.refused &&
+			      c.backing == (XDEV_EXT_PEER_BACKING_HOST_SYSTEM | XDEV_EXT_PEER_BACKING_STRUCT_PAGE),
+			      "NVMe requester admitted host-system dma-buf memory and mapped it at CREATE");
 	}
 }
 static void finish(struct session *s, int expect)
@@ -370,10 +428,18 @@ int main(int argc, char **argv)
 	uint64_t gen, base, value, vgen, vbase, vvalue;
 	int heap, ctl, src, srcng, dst, dstng, buf, alloc, vbuf, valloc, ret, lb;
 	uint64_t source_bytes, dest_bytes, kill_copied = 0, g;
+	const char *exporter = getenv("XDEV_EXT_DMABUF_EXPORTER");
 	unsigned int i;
 
 	setbuf(stdout, NULL);
-	puts("TAP version 13\n# guest dma-buf device DMA: system heap exporter, xdev_ext_peer importer, QEMU NVMe PCI DMA, correctness only");
+	undescribed = exporter && !strcmp(exporter, "udmabuf");
+	if (exporter && !undescribed && strcmp(exporter, "system-heap")) {
+		fprintf(stderr, "XDEV_EXT_DMABUF_EXPORTER must be system-heap or udmabuf\n");
+		return 2;
+	}
+	puts("TAP version 13");
+	printf("# guest dma-buf device DMA: %s exporter, xdev_ext_peer importer, QEMU NVMe PCI DMA, correctness only\n",
+	       undescribed ? "udmabuf (undescribed)" : "system heap");
 	if (argc != 8) {
 		fprintf(stderr, "usage: %s SOURCE_BLOCK SOURCE_NG DEST_BLOCK DEST_NG SOURCE_PCI DEST_PCI BPF_DIR\n", argv[0]);
 		return 2;
@@ -381,13 +447,14 @@ int main(int argc, char **argv)
 	CHECK(getenv("XDEV_EXT_DMABUF_GUEST") && !strcmp(getenv("XDEV_EXT_DMABUF_GUEST"), "1"), "guest-only opt-in");
 	printf("PLAN case=batch-read src_slba=%llu pages=%u order=reverse\n", BATCH_READ_SLBA, PAGES);
 	printf("PLAN case=batch-write dst_slba=%llu pages=%u pattern=xor5a\n", BATCH_WRITE_SLBA, PAGES);
-	for (i = 0; i < 4; i++) {
-		const struct plan *p = i == 0 ? &CHAIN : i == 1 ? &CLOSE : i == 2 ? &KILL : &VICTIM;
+	for (i = 0; i < 5; i++) {
+		const struct plan *p = i == 0 ? &CHAIN : i == 1 ? &FENCED : i == 2 ? &CLOSE : i == 3 ? &KILL : &VICTIM;
+		if (p == &FENCED && !undescribed) continue;
 		printf("PLAN case=%s frame=%u seg=%u group=%u depth=%u groups=%llu src_slba=%llu dst_slba=%llu copies=%s\n",
 		       p->name, p->frame, p->seg, p->group, p->depth, (unsigned long long)p->groups,
 		       (unsigned long long)p->src_slba, (unsigned long long)p->dst_slba, p->copies);
 	}
-	heap = open_ok("/dev/dma_heap/system", O_RDONLY);
+	heap = undescribed ? open_ok("/dev/udmabuf", O_RDWR) : open_ok("/dev/dma_heap/system", O_RDONLY);
 	ctl = open_ok("/dev/xdev_ext_peer", O_RDWR);
 	src = open_ok(argv[1], O_RDONLY); srcng = open_ok(argv[2], O_RDONLY);
 	dst = open_ok(argv[3], O_RDWR); dstng = open_ok(argv[4], O_RDWR);
@@ -411,7 +478,8 @@ int main(int argc, char **argv)
 	buf = heap_alloc(heap, &ino);
 	memset(pattern, 0xa5, EXPORT);
 	cpu_access(buf, pattern, true);
-	alloc = register_ok(ctl, buf, &gen, "REGISTER imports the whole system-heap dma-buf");
+	alloc = register_ok(ctl, buf, &gen, undescribed ? "REGISTER imports the whole undescribed udmabuf" :
+			    "REGISTER imports the whole system-heap dma-buf");
 	value = vmpin();
 	ret = nvme_batch(srcng, alloc, gen, false, BATCH_READ_SLBA, true);
 	errno = ret < 0 ? -ret : 0;
@@ -453,6 +521,53 @@ int main(int argc, char **argv)
 	expect_absent("chain", ino, "bufinfo_after_close");
 	printf("OBSERVE case=chain vmpin_baseline=%llu vmpin_registered=%llu vmpin_closed=%llu\n",
 	       (unsigned long long)base, (unsigned long long)value, (unsigned long long)vmpin());
+
+	if (undescribed) {
+		/* fenced-chain: an implicit-sync writer the buffer still waits for. */
+		struct sw_sync_create_fence_data fence = {.value = 1, .name = "xdev-ext-writer"};
+		struct dma_buf_import_sync_file in = {.flags = DMA_BUF_SYNC_WRITE};
+		struct pollfd busy;
+		unsigned int tries;
+		__u32 one = 1;
+		int timeline;
+
+		base = vmpin();
+		buf = heap_alloc(heap, &ino);
+		alloc = register_ok(ctl, buf, &gen, "fenced-chain: REGISTER");
+		value = vmpin();
+		timeline = open_ok(SW_SYNC, O_RDWR);
+		CHECK(!ioctl(timeline, SW_SYNC_IOC_CREATE_FENCE, &fence), "fenced-chain: sw_sync writer fence");
+		in.fd = fence.fence;
+		CHECK(!ioctl(buf, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &in),
+		      "fenced-chain: writer fence imported into the dma-buf reservation object");
+		busy = (struct pollfd){.fd = buf, .events = POLLIN};
+		CHECK(poll(&busy, 1, 0) == 0, "fenced-chain: poll(POLLIN) reports the buffer busy");
+		ret = create(&s, &FENCED, alloc, srcng, dstng);
+		errno = ret < 0 ? -ret : 0;
+		CHECK(!ret, "fenced-chain: CREATE maps both requesters (no device access yet)");
+		attached_both("fenced-chain", ino, argv[5], argv[6]);
+		arm_and_start(&s, &FENCED);
+		st = wait_done(&s, &FENCED);
+		for (tries = 0; tries < 6000 && st.batches_done + st.batches_abort < FENCED.groups; tries++) {
+			usleep(1000);
+			CHECK(!session_stats(s.ring, s.c.session_id, &st), "fenced-chain: STATS");
+		}
+		print_run(FENCED.name, "settled", &st);
+		printf("OBSERVE case=fenced-chain last_err=%d batches_done=%llu batches_abort=%llu submitted=%llu,%llu\n",
+		       st.last_err, (unsigned long long)st.batches_done, (unsigned long long)st.batches_abort,
+		       (unsigned long long)st.submitted[0], (unsigned long long)st.submitted[1]);
+		CHECK(st.last_err == -EBUSY && !st.batches_done && st.batches_abort == FENCED.groups &&
+		      !st.submitted[0] && !st.completed[0] && !st.submitted[1] && !st.completed[1] &&
+		      !st.inflight && !st.sequestered && !st.timeouts,
+		      "fenced-chain: every batch refused EBUSY before any native command");
+		finish(&s, -EBUSY);
+		CHECK(!ioctl(timeline, SW_SYNC_IOC_INC, &one), "fenced-chain: the writer fence signals");
+		CHECK(!close(fence.fence) && !close(timeline), "fenced-chain: close fence and timeline");
+		CHECK(!close(buf) && !close(alloc), "fenced-chain: close dma-buf and allocation fds");
+		expect_absent("fenced-chain", ino, "bufinfo_after_close");
+		printf("OBSERVE case=fenced-chain vmpin_baseline=%llu vmpin_registered=%llu vmpin_closed=%llu\n",
+		       (unsigned long long)base, (unsigned long long)value, (unsigned long long)vmpin());
+	}
 
 	/* exporter-close: the exporter's fd goes away with native work in flight. */
 	base = vmpin();
@@ -598,7 +713,8 @@ int main(int argc, char **argv)
 	CHECK(!memcmp(dest, dest_after, IMAGE), "whole destination disk equals copies plus every guard byte");
 	close(heap); close(ctl); close(src); close(srcng); close(dst); close(dstng);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim "
-	       "exporter=system-heap requesters=2 timing=none\n");
+	printf("XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,%sexporter-close,kill,victim "
+	       "exporter=%s requesters=2 timing=none\n", undescribed ? "fenced-chain," : "",
+	       undescribed ? "udmabuf" : "system-heap");
 	return 0;
 }

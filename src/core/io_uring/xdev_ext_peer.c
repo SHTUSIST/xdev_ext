@@ -277,6 +277,11 @@ int xdev_ext_peer_acquire(struct xdev_ext_peer_mapping *m, u64 generation,
  if (address + (offset & (page_size - 1)) < address ||
      address + (offset & (page_size - 1)) + len - 1 < address) { ret = -EOVERFLOW; goto done; }
  if (m->active == U32_MAX) { ret = -EOVERFLOW; goto done; }
+ /* Last, so only an otherwise valid lease is refused, and only for now. */
+ if (r->ops->may_access) {
+  ret = r->ops->may_access(r->allocation, dir);
+  if (ret) goto done;
+ }
  lease->dma_address = address + (offset & (page_size - 1));
  lease->len = len; lease->mapping = m;
  lease->ticket = atomic64_inc_return(&xdev_ext_peer_serial);

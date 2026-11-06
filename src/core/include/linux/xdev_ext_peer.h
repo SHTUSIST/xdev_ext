@@ -44,6 +44,9 @@ struct xdev_ext_peer_provider_ops {
                  struct xdev_ext_peer_backing *out);
  /* Optional atomic, nonblocking notification state; true forbids new use. */
  bool (*is_stale)(void *allocation);
+ /* Optional, under the region lock, nonblocking: 0 lets one new lease start
+  * device access in this direction now; an error refuses only that lease. */
+ int (*may_access)(void *allocation, enum dma_data_direction);
 };
 /* A lease is owned by one native request. Do not copy or reuse until release.
  * The peer device may use only dma_address..+len; no CPU struct page exists.

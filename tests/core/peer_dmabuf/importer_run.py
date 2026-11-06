@@ -22,7 +22,13 @@ HERE = Path(__file__).resolve().parent
 DEFAULT_ROOT = HERE.parents[2]
 CASES = ("geometry", "normal", "identity", "accounting", "unwind", "stale",
          "unknown", "host_guards", "requester_bound", "allocation",
-         "registration_owner", "close_stale_idle", "close_stale_active", "close_unknown")
+         "registration_owner", "close_stale_idle", "close_stale_active", "close_unknown",
+         # Opt-in import of an exporter without a descriptor.
+         "undescribed_import", "undescribed_guards", "undescribed_move",
+         "undescribed_unknown", "undescribed_allocation", "close_undescribed_idle",
+         "close_undescribed_active", "close_undescribed_unknown",
+         # Implicit-sync fences: refused on the undescribed path only.
+         "undescribed_fences", "described_fences")
 # These headers provide only declarations normally supplied by Linux. The
 # fixture injects their small kernel API boundary from kernel_shim.h. The
 # production peer/importer public headers themselves are never replaced.

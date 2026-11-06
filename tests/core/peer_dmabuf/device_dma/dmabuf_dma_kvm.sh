@@ -5,12 +5,15 @@
 # nvme_s0 BPF object, and builds only the guest test program. All writes stay
 # in --scratch: private raw images, initramfs and evidence. No host module.
 #   bash dmabuf_dma_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR --tools TOOLS_DIR [--viommu]
+#        [--exporter system-heap|udmabuf]
 # GIT_ROOT is a clean canonical product checkout whose HEAD differs from the
 # build's recorded commit only in test inputs that do not enter the kernel or
 # the BPF object. --viommu adds emulated Intel VT-d with strict guest IOMMU.
+# --exporter udmabuf runs the same cases on udmabuf dma-bufs, whose exporter
+# registers no xdev_ext descriptor (the undescribed import path).
 set -euo pipefail
 umask 077
-SCRATCH='' SOURCE='' BUILD='' TOOLS='' VIOMMU=0
+SCRATCH='' SOURCE='' BUILD='' TOOLS='' VIOMMU=0 EXPORTER=system-heap
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-1200}
@@ -21,10 +24,12 @@ while (($#)); do
 	--build) BUILD=$2; shift 2 ;;
 	--tools) TOOLS=$2; shift 2 ;;
 	--viommu) VIOMMU=1; shift ;;
+	--exporter) EXPORTER=$2; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
 [[ -n "$SCRATCH" && -n "$SOURCE" && -n "$BUILD" && -n "$TOOLS" ]] || { echo 'missing option' >&2; exit 2; }
+[[ "$EXPORTER" == system-heap || "$EXPORTER" == udmabuf ]] || { echo 'exporter must be system-heap or udmabuf' >&2; exit 2; }
 [[ -d "$SCRATCH" && ! -L "$SCRATCH" && $(stat -c %a "$SCRATCH") == 700 && $(stat -c %u "$SCRATCH") == $(id -u) ]] || {
 	echo 'FAIL scratch must be an existing private 0700 directory' >&2; exit 1; }
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
@@ -65,8 +70,11 @@ print('build_commit=' + old)
 print('source_commit=' + new)
 print('changed_since_build=' + ' '.join(changed))
 PYDELTA
-required=(DMABUF_HEAPS DMABUF_HEAPS_SYSTEM XDEV_EXT_PEER_DMABUF DMA_SHARED_BUFFER DEBUG_FS XDEV_EXT_MECH
+required=(XDEV_EXT_PEER_DMABUF DMA_SHARED_BUFFER DEBUG_FS XDEV_EXT_MECH
 	BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS IO_URING BPF_SYSCALL DEBUG_INFO_BTF PCI_MSI SERIAL_8250_CONSOLE)
+# udmabuf mode also runs fenced-chain on the upstream sw_sync test timeline.
+if [[ "$EXPORTER" == udmabuf ]]; then required+=(UDMABUF MEMFD_CREATE SYNC_FILE SW_SYNC)
+else required+=(DMABUF_HEAPS DMABUF_HEAPS_SYSTEM); fi
 if (( VIOMMU )); then required+=(INTEL_IOMMU); fi
 for symbol in "${required[@]}"; do
 	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
@@ -78,11 +86,11 @@ grep -Fq "$TOOLS/nvme_s0.bpf.o" "$BUILD/xdev-ext-artifacts.sha256"
 DEBUG_LOCKING=0
 grep -Fxq CONFIG_PROVE_LOCKING=y "$BUILD/.config" && DEBUG_LOCKING=1
 {
-	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; system-heap dma-buf; no timing\n' \
-		"$(date -u +%FT%TZ)" "$(hostname)"
-	printf 'source=%s\nsource_commit=%s\nbuild=%s\nbuild_commit=%s\ntools=%s\nkernel_release=%s\nviommu=%s\n' \
-		"$SOURCE" "$HEAD_SHA" "$BUILD" "$BUILD_SHA" "$TOOLS" "$(cat "$BUILD/include/config/kernel.release")" "$VIOMMU"
-	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|INTEL_IOMMU|IOMMU_DEFAULT_DMA_LAZY|XDEV_EXT_PEER_DMABUF|DMABUF_HEAPS_SYSTEM)=' "$BUILD/.config" || true
+	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; %s dma-buf; no timing\n' \
+		"$(date -u +%FT%TZ)" "$(hostname)" "$EXPORTER"
+	printf 'source=%s\nsource_commit=%s\nbuild=%s\nbuild_commit=%s\ntools=%s\nkernel_release=%s\nviommu=%s\nexporter=%s\n' \
+		"$SOURCE" "$HEAD_SHA" "$BUILD" "$BUILD_SHA" "$TOOLS" "$(cat "$BUILD/include/config/kernel.release")" "$VIOMMU" "$EXPORTER"
+	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|INTEL_IOMMU|IOMMU_DEFAULT_DMA_LAZY|XDEV_EXT_PEER_DMABUF|DMABUF_HEAPS_SYSTEM|UDMABUF)=' "$BUILD/.config" || true
 } >"$EV/provenance.txt"
 cp "$BUILD/.config" "$EV/kernel.config"
 python3 -I "$SOURCE/tests/integration/session/native/xdev_ext_mech_zc_debug.py" config "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
@@ -101,6 +109,7 @@ mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,opt/dmabuf}
 cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo poweroff dmesg sed basename readlink sync; do ln -sf busybox "$ROOT/bin/$app"; done
 cp "$OUT/build/dmabuf_device_dma" "$TOOLS/nvme_s0.bpf.o" "$ROOT/opt/dmabuf/"
+printf '%s\n' "$EXPORTER" >"$ROOT/opt/dmabuf/exporter"
 ldd "$OUT/build/dmabuf_device_dma" | awk '/=> \/|^[[:space:]]*\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' \
 	| sort -u >"$EV/guest-libraries.txt"
 while IFS= read -r lib; do mkdir -p "$ROOT$(dirname "$lib")"; cp -L "$lib" "$ROOT$lib"; done <"$EV/guest-libraries.txt"
@@ -127,7 +136,8 @@ done
 if [ -n "$src" ] && [ -n "$dst" ]; then
 	src_pci=$(basename "$(readlink -f "/sys/class/nvme/$src/device")")
 	dst_pci=$(basename "$(readlink -f "/sys/class/nvme/$dst/device")")
-	XDEV_EXT_DMABUF_GUEST=1 /opt/dmabuf/dmabuf_device_dma "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
+	XDEV_EXT_DMABUF_GUEST=1 XDEV_EXT_DMABUF_EXPORTER="$(cat /opt/dmabuf/exporter)" \
+		/opt/dmabuf/dmabuf_device_dma "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
 		"/dev/${dst}n1" "/dev/ng${dst#nvme}n1" "$src_pci" "$dst_pci" /opt/dmabuf
 	code=$?
 else
@@ -170,11 +180,12 @@ validator_status=0
 viommu_flag=()
 if (( VIOMMU )); then viommu_flag=(--viommu); fi
 python3 -I "$SOURCE/$TEST_REL/validate.py" validate --source "$OUT/source.raw" --dest "$OUT/destination.raw" \
-	--log "$EV/guest.log" --result "$EV/result.json" "${viommu_flag[@]}" | tee "$EV/host-validate.txt" || validator_status=$?
+	--log "$EV/guest.log" --result "$EV/result.json" --exporter "$EXPORTER" "${viommu_flag[@]}" \
+	| tee "$EV/host-validate.txt" || validator_status=$?
 sha256sum "$OUT/source.raw" "$OUT/destination.raw" >"$EV/data.sha256"
 if (( qemu_status == 0 && validator_status == 0 )); then
-	echo "XDEV_EXT_DMABUF_DMA_KVM=PASS viommu=$VIOMMU" | tee "$EV/verdict.txt"
+	echo "XDEV_EXT_DMABUF_DMA_KVM=PASS viommu=$VIOMMU exporter=$EXPORTER" | tee "$EV/verdict.txt"
 else
-	echo "XDEV_EXT_DMABUF_DMA_KVM=FAIL viommu=$VIOMMU qemu_exit=$qemu_status validator_exit=$validator_status" | tee "$EV/verdict.txt"
+	echo "XDEV_EXT_DMABUF_DMA_KVM=FAIL viommu=$VIOMMU exporter=$EXPORTER qemu_exit=$qemu_status validator_exit=$validator_status" | tee "$EV/verdict.txt"
 	exit 1
 fi

@@ -23,12 +23,22 @@ struct xdev_ext_peer_dmabuf_desc_ops {
                  struct xdev_ext_peer_backing *);
 };
 
+/* Import an exporter that registered no descriptor: each requester gets only
+ * the exporter's own mapping for that device, the backing is reported as
+ * UNDESCRIBED, and a lease that a pending implicit-sync fence orders is
+ * refused with -EBUSY. A registered descriptor always takes precedence over
+ * this flag. */
+#define XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED (1U << 0)
+
 #if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
 int xdev_ext_peer_dmabuf_desc_register(const struct xdev_ext_peer_dmabuf_desc_ops *);
 int xdev_ext_peer_dmabuf_desc_unregister(const struct xdev_ext_peer_dmabuf_desc_ops *);
 /* Success consumes one buf reference; failure consumes none. */
 int xdev_ext_peer_dmabuf_import(struct dma_buf *, u64 len,
                                struct xdev_ext_peer_region **);
+/* Same ownership rule; flags are XDEV_EXT_PEER_DMABUF_IMPORT_*. */
+int xdev_ext_peer_dmabuf_import_flags(struct dma_buf *, u64 len, u32 flags,
+                                     struct xdev_ext_peer_region **);
 int xdev_ext_peer_dmabuf_geometry(const struct sg_table *, u64 len,
                                  u64 **addresses, u32 *entries);
 #else
@@ -40,6 +50,13 @@ static inline int xdev_ext_peer_dmabuf_desc_unregister(
 { return -EOPNOTSUPP; }
 static inline int xdev_ext_peer_dmabuf_import(struct dma_buf *buf, u64 len,
                                              struct xdev_ext_peer_region **out)
+{
+ if (out) *out = NULL;
+ return -EOPNOTSUPP;
+}
+static inline int xdev_ext_peer_dmabuf_import_flags(struct dma_buf *buf, u64 len,
+                                                   u32 flags,
+                                                   struct xdev_ext_peer_region **out)
 {
  if (out) *out = NULL;
  return -EOPNOTSUPP;

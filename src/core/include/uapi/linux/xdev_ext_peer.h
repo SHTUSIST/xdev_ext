@@ -8,6 +8,16 @@
  * for a successful peer completion before launching CUDA consumers.
  */
 #define XDEV_EXT_PEER_REGISTER_F_DMABUF (1U << 0)
+/* Bit 1 is reserved and rejected. With F_DMABUF, also accept an exporter that
+ * registered no backing descriptor. The kernel then uses only the mapping that
+ * exporter returns for each requester device, reports backing
+ * XDEV_EXT_PEER_BACKING_UNDESCRIBED, and refuses requesters whose mapping may
+ * bounce or need CPU sync. A native command that an unsignaled implicit-sync
+ * fence of the dma-buf orders (a device read: writers; a device write: readers
+ * and writers) fails with EBUSY before any DMA. xdev_ext adds no fence for its
+ * own accesses. A described exporter is unchanged.
+ */
+#define XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED (1U << 2)
 /* DMABUF: gpu_fd is the source fd, gpu_va=0, len is the whole export. */
 struct xdev_ext_peer_register {
  __s32 gpu_fd;

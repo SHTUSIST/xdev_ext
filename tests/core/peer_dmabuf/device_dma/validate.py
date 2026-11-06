@@ -37,8 +37,17 @@ PLANS = (
     'PLAN case=kill frame=4096 seg=4096 group=8192 depth=4 groups=512 src_slba=32768 dst_slba=32768 copies=PART',
     'PLAN case=victim frame=4096 seg=4096 group=8192 depth=4 groups=1536 src_slba=40960 dst_slba=40960 copies=ALL',
 )
-FINAL = ('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,exporter-close,kill,victim '
-         'exporter=system-heap requesters=2 timing=none')
+# udmabuf mode only: a session behind an unsignaled implicit-sync writer fence.
+FENCED_PLAN = ('PLAN case=fenced-chain frame=4096 seg=4096 group=8192 depth=4 groups=64 '
+               'src_slba=24576 dst_slba=24576 copies=NONE')
+FENCED_GROUPS = 64
+FINAL = ('XDEV_EXT_DMABUF_DMA=PASS cases=batch-read,batch-write,chain,%sexporter-close,kill,victim '
+         'exporter=%s requesters=2 timing=none')
+# What both chain stages must report: (family, reachability, requester_mapping,
+# backing, refused). STORAGE=2, HOST_DMA_MAPPED=7, ESTABLISHED=1, UNKNOWN=0;
+# HOST_SYSTEM|STRUCT_PAGE=0x22, UNDESCRIBED=0x40.
+STAGE_CAPS = {'system-heap': ('2', '7', '1', '0x22', '0x0'),
+              'udmabuf': ('2', '0', '1', '0x40', '0x0')}
 BATCH_READ_SLBA = 2048
 BATCH_WRITE_SLBA = 2048
 ALL_CASES = ((4096, 96), (8192, 1024), (40960, 1536))
@@ -101,7 +110,9 @@ def one(seen, case, key):
     return values[0]
 
 
-def validate(source, dest, log, viommu=False):
+def validate(source, dest, log, viommu=False, exporter='system-heap'):
+    if exporter not in STAGE_CAPS:
+        raise ValueError('unknown exporter ' + exporter)
     if len(source) != IMAGE or len(dest) != IMAGE:
         raise ValueError('image size differs from the frozen 32 MiB plan')
     expected_source = make_source()
@@ -112,10 +123,12 @@ def validate(source, dest, log, viommu=False):
     if 'XDEV_EXT_DMABUF_GUEST_EXIT=0' not in lines:
         raise ValueError('guest exit status 0 not reported')
     checks = check_tap(lines)
-    if FINAL not in lines:
-        raise ValueError('final PASS line missing')
+    fenced = exporter == 'udmabuf'
+    if FINAL % ('fenced-chain,' if fenced else '', exporter) not in lines:
+        raise ValueError('final PASS line missing for exporter ' + exporter)
     plans = tuple(line for line in lines if line.startswith('PLAN '))
-    if plans != PLANS:
+    want_plans = PLANS[:3] + ((FENCED_PLAN,) if fenced else ()) + PLANS[3:]
+    if plans != want_plans:
         raise ValueError('guest plan mismatch: %r' % (plans,))
     seen = observations(lines)
 
@@ -127,7 +140,7 @@ def validate(source, dest, log, viommu=False):
     nvme = sorted(set(re.findall(r'nvme nvme[0-9]+: pci function (0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7])', text)))
     if len(nvme) != 2:
         raise ValueError('expected two NVMe PCI functions in the guest log, found %d' % len(nvme))
-    for case in ('batch', 'chain', 'exporter-close', 'victim'):
+    for case in ('batch', 'chain') + (('fenced-chain',) if fenced else ()) + ('exporter-close', 'victim'):
         base = int(one(seen, case, 'vmpin_baseline'))
         registered = int(one(seen, case, 'vmpin_registered'))
         closed = int(one(seen, case, 'vmpin_closed'))
@@ -145,8 +158,18 @@ def validate(source, dest, log, viommu=False):
         raise ValueError('stage caps: need one observation per chain stage')
     for entry in caps:
         if (entry.get('family'), entry.get('reachability'), entry.get('requester_mapping'),
-                entry.get('backing'), entry.get('refused')) != ('2', '7', '1', '0x22', '0x0'):
-            raise ValueError('stage caps differ from STORAGE/HOST_DMA_MAPPED/ESTABLISHED/HOST_SYSTEM: %r' % entry)
+                entry.get('backing'), entry.get('refused')) != STAGE_CAPS[exporter]:
+            raise ValueError('stage caps differ from %r for %s: %r' % (STAGE_CAPS[exporter], exporter, entry))
+    if fenced:
+        # Every batch refused at its first native lease: nothing submitted.
+        refused = {key: one(seen, 'fenced-chain', key)
+                   for key in ('last_err', 'batches_done', 'batches_abort', 'submitted')}
+        if refused != {'last_err': '-16', 'batches_done': '0', 'batches_abort': str(FENCED_GROUPS),
+                       'submitted': '0,0'}:
+            raise ValueError('fenced-chain: batches were not all refused EBUSY before submission: %r'
+                             % refused)
+    elif 'fenced-chain' in seen:
+        raise ValueError('fenced-chain observed in a system-heap run')
     if one(seen, 'exporter-close', 'exporter_fd_closed_inflight') != '1' or \
             int(one(seen, 'exporter-close', 'done_at_close')) >= int(one(seen, 'exporter-close', 'groups')):
         raise ValueError('exporter fd was not closed while the session still had batches outstanding')
@@ -181,7 +204,7 @@ def validate(source, dest, log, viommu=False):
         raise ValueError('destination image differs from the expected image at byte %d' % first)
 
     check_console(text)
-    result = dict(checks=checks, requesters=nvme, kill_copied_groups=copied, viommu=None)
+    result = dict(checks=checks, requesters=nvme, kill_copied_groups=copied, viommu=None, exporter=exporter)
     if viommu:
         report = validate_viommu_console(text)
         groups = [report['groups'][bdf] for bdf in nvme]
@@ -202,22 +225,24 @@ def main(argv=None):
     for name in ('--source', '--dest', '--log', '--result'):
         check.add_argument(name, type=Path, required=True)
     check.add_argument('--viommu', action='store_true')
+    check.add_argument('--exporter', choices=sorted(STAGE_CAPS), default='system-heap')
     args = parser.parse_args(argv)
     if args.action == 'make-source':
         args.output.write_bytes(make_source())
         return 0
     try:
         result = validate(args.source.read_bytes(), args.dest.read_bytes(),
-                          args.log.read_text(errors='replace'), viommu=args.viommu)
+                          args.log.read_text(errors='replace'), viommu=args.viommu,
+                          exporter=args.exporter)
     except ValueError as error:
         args.result.write_text(json.dumps(dict(status='FAIL', reason=str(error))) + '\n')
         print('XDEV_EXT_DMABUF_DMA_HOST=FAIL ' + str(error))
         return 1
     result['status'] = 'PASS'
     args.result.write_text(json.dumps(result, sort_keys=True) + '\n')
-    print('XDEV_EXT_DMABUF_DMA_HOST=PASS checks=%d requesters=%s kill_copied=%d viommu=%s'
+    print('XDEV_EXT_DMABUF_DMA_HOST=PASS checks=%d requesters=%s kill_copied=%d viommu=%s exporter=%s'
           % (result['checks'], ','.join(result['requesters']), result['kill_copied_groups'],
-             'on' if args.viommu else 'off'))
+             'on' if args.viommu else 'off', args.exporter))
     return 0
 
 

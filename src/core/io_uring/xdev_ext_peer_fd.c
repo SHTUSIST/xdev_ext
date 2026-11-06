@@ -252,8 +252,11 @@ static long xdev_ext_peer_ctl_ioctl(struct file *file, unsigned int cmd, unsigne
  if (cmd != XDEV_EXT_PEER_REGISTER) return -ENOTTY;
  if (!capable(CAP_SYS_RAWIO)) return -EPERM;
  if (copy_from_user(&u, (void __user *)arg, sizeof(u))) return -EFAULT;
- if ((u.flags & ~XDEV_EXT_PEER_REGISTER_F_DMABUF) || u.generation)
+ if ((u.flags & ~(XDEV_EXT_PEER_REGISTER_F_DMABUF |
+                  XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED)) || u.generation)
   return -EINVAL;
+ if ((u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED) &&
+     !(u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF)) return -EINVAL;
  if ((u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF) &&
      (u.gpu_va || !u.len || (u.len & 4095))) return -EINVAL;
 #if !IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
@@ -265,7 +268,9 @@ static long xdev_ext_peer_ctl_ioctl(struct file *file, unsigned int cmd, unsigne
 #if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)
   struct dma_buf *buf = dma_buf_get(u.gpu_fd);
   if (IS_ERR(buf)) { kfree(p); return PTR_ERR(buf); }
-  ret = xdev_ext_peer_dmabuf_import(buf, u.len, &p->region);
+  ret = xdev_ext_peer_dmabuf_import_flags(buf, u.len,
+          (u.flags & XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED) ?
+          XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED : 0, &p->region);
   if (ret) dma_buf_put(buf);
 #endif
  } else {
