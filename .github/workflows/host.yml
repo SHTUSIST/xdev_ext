@@ -114,8 +114,15 @@ jobs:
           python3 -I tests/core/peer_dmabuf/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-admission"
           python3 -I tests/core/peer_dmabuf/importer_run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-importer"
           make -C tests/core/peer_dmabuf cli-test OUTPUT="$RUNNER_TEMP/dmabuf-native-cli"
+      - name: DMA-BUF undescribed import mutants and guest oracle self-test
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 -I tests/core/peer_dmabuf/undescribed_mutants.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-undescribed-mutants"
+          python3 -I tests/core/peer_dmabuf/undescribed_dma/validate_test.py
       - name: UNKNOWN peer DMA quarantine recovery
         working-directory: .
+        if: matrix.cc == 'gcc'
         run: |
           python3 -I tests/core/peer_quarantine/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/peer-quarantine"
           python3 -I tests/core/peer_quarantine/mutations.py --source-root "$GITHUB_WORKSPACE"
@@ -256,6 +263,7 @@ jobs:
         run: bash tests/storage/family_window_schema/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-schema" new
       - name: Storage LBA window grants and NVMe window handle host contracts
         working-directory: .
+        if: matrix.cc == 'gcc'
         run: |
           bash tests/storage/family_window_grant/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant"
           python3 tests/storage/family_window_grant/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant-mutants"
