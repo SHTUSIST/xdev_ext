@@ -153,8 +153,8 @@ def main():
         if name != "hdr":
             checks.append((f"{name} hook type is forward declared",
                            bool(re.search(rf"\bstruct\s+{typename}\s*;", mech))))
-    checks.append(("registration calls family compatibility rule",
-                   bool(re.search(r"\bxdev_ext_family_hooks_ok\s*\(\s*ops\s*->\s*class_id\b", registration))))
+    checks.append(("registration rejects hooks outside its declared family",
+                   bool(re.search(r"ops->fam\.hdr\s*&&\s*ops->fam\.hdr->family\s*!=\s*ops->decl->family", registration))))
     for index, (label, passed) in enumerate(checks, 1):
         print(f"{'ok' if passed else 'not ok'} {index} - source-only: {label}")
     print("# behavioral registration fixture (separate from source-only checks)", flush=True)

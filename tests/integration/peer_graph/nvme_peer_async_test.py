@@ -873,6 +873,7 @@ def extract_common(source, selected):
     header_path = 'include/linux/xdev_ext_storfam_block.h'
     block = selected.read(block_path)
     header = selected.read(header_path)
+    bio_path = 'xdev_ext_storfam_submit_bio(' in definition(block, 'xdev_ext_storfam_submit')
     selected.read('include/linux/xdev_ext_storfam_runtime.h')
     # Portable headers are included directly, from this selected owner.
     for native in ('include/linux/nvme_xdev_ext_passthru.h',
@@ -908,6 +909,8 @@ def extract_common(source, selected):
             if len(matches) != 1:
                 raise AssertionError('SETUP actual native page constant count: ' + macro)
             declarations.append(matches[0][0])
+    if 'enum xdev_ext_stor_host_path host_path;' in header:
+        declarations.append(record(header_path, 'xdev_ext_stor_host_path', 'enum'))
     for name in ('xdev_ext_stor_poll_view', 'xdev_ext_stor_command',
                  'xdev_ext_stor_geometry', 'xdev_ext_stor_dev_ops',
                  'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
@@ -961,6 +964,8 @@ def extract_common(source, selected):
                  'xdev_ext_storfam_peer_io', 'xdev_ext_storfam_peer_resources_free',
                  'xdev_ext_storfam_peer_resources_init', 'xdev_ext_storfam_peer_get',
                  'xdev_ext_storfam_peer_put', 'xdev_ext_storfam_peer_map'):
+        if name == 'xdev_ext_stor_block_append' and 'xdev_ext_stor_block_fill(' in definition(block, name):
+            code.append(record(block_path, 'xdev_ext_stor_block_fill'))
         code.append(record(block_path, name))
         if name == 'xdev_ext_storfam_host_put':
             # Preserve the existing assertion that PEER never takes HOST
@@ -975,6 +980,8 @@ def extract_common(source, selected):
     for name in ('xdev_ext_storfam_host_map', 'xdev_ext_storfam_submit_check',
                  'xdev_ext_storfam_submit', 'xdev_ext_storfam_host_ready',
                  'xdev_ext_storfam_consume'):
+        if name == 'xdev_ext_storfam_submit' and bio_path:
+            code.append(record(block_path, 'xdev_ext_storfam_submit_bio'))
         code.append(record(block_path, name))
     code.append(record('drivers/nvme/host/nvme.h', 'nvme_xdev_ext_capture_identity'))
     for name in ('nvme_xdev_ext_member_requester', 'nvme_xdev_ext_member_queue',
@@ -1086,11 +1093,13 @@ COMMON_EXTERNAL = r'''
 #define NVME_REQ_XDEV_EXT_ZC (1U << 4)
 #define REQ_OP_DRV_IN 0U
 #define REQ_OP_DRV_OUT 1U
+#define REQ_OP_READ 0U
+#define REQ_OP_WRITE 1U
 #define __aligned(n) __attribute__((aligned(n)))
 #define READ_ONCE(x) (x)
 typedef u64 sector_t;
 struct page { u8 data[4096]; };
-struct bio { int bi_inline_vecs[256]; };
+struct bio { int bi_inline_vecs[256]; struct { u64 bi_sector; u32 bi_size; } bi_iter; };
 static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,
  const struct xdev_ext_mech_frame *f, u32 off, u32 *page_off, u32 *len)
 { (void)p; (void)f; (void)off; (void)page_off; (void)len; abort(); }

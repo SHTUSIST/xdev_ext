@@ -11,9 +11,22 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import sys
 import tempfile
 
 HERE = Path(__file__).resolve().parent
+for _base in (HERE, *HERE.parents):
+    if (_base / 'view.json').is_file() or (_base / 'source-layout.json').is_file():
+        _shared = _base / 'tests/compute/transform_source.py'
+        if not _shared.is_file():
+            raise RuntimeError('missing owned transform source helper')
+        sys.path.insert(0, str(_shared.parent))
+        break
+else:
+    raise RuntimeError('missing owned checkout/view')
+from transform_source import TransformSource, read_native, owned_dependency, verify_entry  # noqa: E402
+verify_entry(__file__, 'tests/core/scheduler/run.py')
+
 ROOT = Path(os.environ.get("KERNEL_SRC", next(p for p in HERE.parents
             if (p / "io_uring/xdev_ext_mech.c").is_file())))
 
@@ -41,11 +54,15 @@ def session_helpers(text, bodies, extractor):
 
 
 def generate():
-    core = (ROOT / "io_uring/xdev_ext_mech.c").read_text()
-    abi = (ROOT / "include/linux/xdev_ext_mech.h").read_text()
+    core = read_native(ROOT, "io_uring/xdev_ext_mech.c")
+    selected = TransformSource(core, lambda path: read_native(ROOT, path), definition)
+    core = selected.text
+    abi = read_native(ROOT, "include/linux/xdev_ext_mech.h")
     names = ["xdev_ext_mech_frame", "xdev_ext_mech_stage", "xdev_ext_mech_class_ops",
              "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool", "xdev_ext_mech_call_args"]
     structs = "\n".join(definition(abi, n, True) for n in names)
+    if selected.split:
+        structs += "\n" + selected.types
     structs += "\n" + "\n".join(definition(core, n, True) for n in
                                 ("xdev_ext_mech_batch", "xdev_ext_mech_session"))
     names = ["xdev_ext_mech_pool_frame_state", "xdev_ext_mech_start_queue_release",
@@ -63,10 +80,14 @@ def generate():
     # New scheduler helpers are compiled verbatim once implemented; the RED
     # baseline still executes the existing batch_run/landed path.
     names += list(dict.fromkeys(re.findall(r"^\w[^;{}]*\b(xdev_ext_mech_fanout_\w+)\([^;{}]*\)\n\{", core, re.M)))
+    if selected.split:
+        names.insert(names.index("xdev_ext_mech_batch_handoff"),
+                     "xdev_ext_mech_transform_handoff")
     names = session_helpers(core, [definition(core, n) for n in names], definition) + names
     functions = [definition(core, n) for n in names]
+    functions = selected.helpers(functions) + functions
     prototypes = "\n".join(f[:f.index("\n{")] + ";" for f in functions)
-    code = (HERE / "fixture.c").read_text()
+    code = owned_dependency(__file__, 'tests/core/scheduler/fixture.c').read_text()
     if not re.search(r'\bdecl\s*;', definition(abi, "xdev_ext_mech_class_ops", True)):
         code = code.replace('.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_SOCKET],', '')
         code = code.replace('.decl=xdev_ext_mech_class_desc(c),', '')

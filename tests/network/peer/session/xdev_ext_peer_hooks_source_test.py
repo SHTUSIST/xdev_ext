@@ -232,8 +232,19 @@ def mech_net():
 
 def nvme():
     text = read(KERNEL / "drivers/nvme/host/xdev_ext_mech_nvme.c")
-    check("P2", "xdev_ext_peer_nvme_prp_build(" in text, "mechanism NVMe builds PRP lists over peer pages")
-    check("P2", "xdev_ext_peer_nvme_sgl_build(" in text, "mechanism NVMe builds SGL data blocks with the shared rule")
+    # The class member now delegates DPTR encoding to the same native NVMe
+    # builder as the synchronous path. Check the connected production bodies,
+    # so an unrelated occurrence cannot satisfy either P2 requirement.
+    def code_only(source):
+        return re.sub(r'/\*.*?\*/|//[^\n]*|"(?:[^"\\]|\\.)*"', "", source, flags=re.S)
+    _, encode = body(code_only(text), "nvme_xdev_ext_member_encode_dptr")
+    _, shared = body(code_only(read(KERNEL / "drivers/nvme/host/core.c")),
+                     "nvme_xdev_ext_peer_build_cmd")
+    delegated = encode is not None and "nvme_xdev_ext_peer_build_cmd(" in encode
+    check("P2", delegated and shared is not None and "xdev_ext_peer_nvme_prp_build(" in shared,
+          "mechanism NVMe builds PRP lists over peer pages")
+    check("P2", delegated and shared is not None and "xdev_ext_peer_nvme_sgl_build(" in shared,
+          "mechanism NVMe builds SGL data blocks with the shared rule")
     m = re.search(r"if \(xdev_ext_mech_session_pool\(st->s\)->kind == XDEV_EXT_MECH_POOL_PEER\) \{(.*?)\n \}", text, re.S)
     check("P2", m and "nvme_ctrl_sgl_supported" not in m.group(1),
           "GPU-pool NVMe bind accepts a PCIe controller without SGL (PRP fallback)")

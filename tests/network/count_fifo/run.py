@@ -4,32 +4,48 @@ from pathlib import Path
 sys.dont_write_bytecode=True
 from adapter import generate,structure,freeze_inputs,FIXTURE,OLD_MUTANTS,NEW_MUTANTS,SetupError
 from typed_fixture import migrate,FixtureContractError,CONTRACT,GOLDEN_BYTES as TYPED_GOLDEN_BYTES,GOLDEN_SHA256 as TYPED_GOLDEN_SHA256
+from control_fixture import CONTRACT as CONTROL_CONTRACT,migrate as migrate_control
+from control_expected import load_frozen,compare_stdout,ExpectedSetupError
 # SHA256 and length of the complete frozen preproducer old-source stdout.
 GOLDEN_SHA256="9fc5b51ce2e82c7b6411021549e3c4291e5cbe9797b210d0af3de71d514bdf81"
 GOLDEN_BYTES=89721
-p=argparse.ArgumentParser(description='COUNT_FIFO actual-body correctness, explicit fixture contract and ownership/wiring gate');p.add_argument('--source',type=Path,required=True,help='canonical repository containing source-layout.json and src/');p.add_argument('--out-root',type=Path);p.add_argument('--fixture-contract',choices=['historical-raw-v0',CONTRACT],default='historical-raw-v0',help='explicit fixture/golden profile; historical raw is the default and requires its matching production root');g=p.add_mutually_exclusive_group();g.add_argument('--mutations',action='store_true');p.add_argument('--compare-baseline',type=Path,help='optional additional exact comparison with an external capture matching the selected fixture contract');g.add_argument('--only-mutation',choices=list(OLD_MUTANTS)+list(NEW_MUTANTS));a=p.parse_args()
+p=argparse.ArgumentParser(description='COUNT_FIFO actual-body correctness, explicit fixture contract and ownership/wiring gate');p.add_argument('--source',type=Path,required=True,help='canonical repository containing source-layout.json and src/');p.add_argument('--out-root',type=Path);p.add_argument('--fixture-contract',choices=['historical-raw-v0',CONTRACT,CONTROL_CONTRACT],default='historical-raw-v0',help='explicit fixture/golden profile; historical raw is the default and requires its matching production root');g=p.add_mutually_exclusive_group();g.add_argument('--mutations',action='store_true');p.add_argument('--compare-baseline',type=Path,help='optional additional exact comparison with an external capture matching the selected fixture contract');g.add_argument('--only-mutation',choices=list(OLD_MUTANTS)+list(NEW_MUTANTS));a=p.parse_args()
 golden_bytes,golden_sha256=(TYPED_GOLDEN_BYTES,TYPED_GOLDEN_SHA256) if a.fixture_contract==CONTRACT else (GOLDEN_BYTES,GOLDEN_SHA256)
 a.source=a.source.resolve()
 if not (a.source/'source-layout.json').is_file() or not (a.source/'src/network').is_dir():p.error('--source must name the canonical repository, not a generated view')
-base=Path(__file__).resolve().parent;outroot=a.out_root or a.source/'build/count-fifo';outroot.mkdir(parents=True,exist_ok=True);out=Path(tempfile.mkdtemp(prefix='count-',dir=outroot));summary={'source':str(a.source),'fixture_contract':a.fixture_contract,'golden':{'bytes':golden_bytes,'sha256':golden_sha256},'inputs':freeze_inputs(a.source),'structural':structure(a.source),'runs':[]}
+base=Path(__file__).resolve().parent;outroot=a.out_root or a.source/'build/count-fifo';outroot.mkdir(parents=True,exist_ok=True);out=Path(tempfile.mkdtemp(prefix='count-',dir=outroot));summary={'source':str(a.source),'fixture_contract':a.fixture_contract,'golden':{'bytes':golden_bytes,'sha256':golden_sha256},'inputs':freeze_inputs(a.source,a.fixture_contract),'structural':structure(a.source),'runs':[]}
+control_frozen=None;control_setup=None
+if a.fixture_contract==CONTROL_CONTRACT:
+ summary['source_fixture_inputs']={name:hashlib.sha256((base/name).read_bytes()).hexdigest() for name in ['adapter.py','os_boundary.h','run.py','control_fixture.py','control_support.h','test_control_v2.c','control_expected.py','test_control_fixture.py']}
+ try:control_frozen=load_frozen(base/'control_preproducer.json')
+ except ExpectedSetupError as error:control_setup=str(error)
+ if control_frozen is not None:summary['source_fixture_inputs']['control_freeze.py']=hashlib.sha256((base/'control_freeze.py').read_bytes()).hexdigest()
+ summary['golden']={'kind':'independent root-frozen exact bytes and semantic fields','frozen':control_frozen is not None}
 def limits():resource.setrlimit(resource.RLIMIT_AS,(128*1024*1024,128*1024*1024))
 def execute(label,mutation=None):
  d=out/label;d.mkdir();entry={'label':label};summary['runs'].append(entry)
+ if a.fixture_contract==CONTROL_CONTRACT and control_setup:
+  entry.update(verdict='SETUP',reason=control_setup);return
  for n in ['os_boundary.h','test_count.c']:(d/n).write_bytes((base/n).read_bytes())
  (d/'frozen_pool_test.c').write_bytes((FIXTURE/'test_pool_dma.c').read_bytes())
  try:
-  if a.fixture_contract==CONTRACT:
-   generated,receipt=migrate((d/'test_count.c').read_bytes())
+  if a.fixture_contract in (CONTRACT,CONTROL_CONTRACT):
+   generated,receipt=(migrate_control if a.fixture_contract==CONTROL_CONTRACT else migrate)((d/'test_count.c').read_bytes())
    (d/'fixture-transform.json').write_text(json.dumps(receipt,indent=2)+'\n')
    entry['fixture_transform']=receipt
    (d/'test_count.c').write_bytes(generated)
+  if a.fixture_contract==CONTROL_CONTRACT:
+   for n in ['control_support.h','test_control_v2.c']:(d/n).write_bytes((base/n).read_bytes())
+   (d/'control_vectors.h').write_bytes(control_frozen['vectors_header'])
   have,manifest=generate(a.source,d,mutation,fixture_contract=a.fixture_contract)
  except (SetupError,FixtureContractError) as e:entry.update(verdict='SETUP',reason=str(e));return
  (d/'manifest.json').write_text(json.dumps(manifest,indent=2)+'\n')
  cmd=['gcc','-std=gnu11','-O0','-funsigned-char','-fno-strict-aliasing','-Wall','-Wextra','-Werror','-Wno-unused-function','-Wno-unused-parameter','-Wno-sign-compare',f'-DHAVE_POOL={int(have)}',f'-DHAVE_COUNT={int((a.source/"src/network/include/linux/xdev_ext_netfam_count.h").exists())}','test_count.c','-o','test_count'];(d/'command.json').write_text(json.dumps(cmd)+'\n')
+ if a.fixture_contract==CONTROL_CONTRACT:
+  cmd.insert(1,'-DCOUNT_TYPED_CONTROL_V2=1');(d/'command.json').write_text(json.dumps(cmd)+'\n')
  r=subprocess.run(cmd,cwd=d,capture_output=True,text=True);(d/'compile.stdout').write_text(r.stdout);(d/'compile.stderr').write_text(r.stderr);entry['compile_exit']=r.returncode
  if r.returncode:entry.update(verdict='SETUP',reason='compiler failure is never semantic RED');return
- try:r=subprocess.run([str(d/'test_count')],capture_output=True,text=True,timeout=45,preexec_fn=limits,env={**os.environ,**({'COUNT_MUTATION':mutation,**({'COUNT_FAIL_FAST':'1'} if mutation in NEW_MUTANTS else {})} if mutation else {})})
+ try:r=subprocess.run([str(d/'test_count')],capture_output=True,text=True,timeout=45,preexec_fn=limits,env={**os.environ,**({'COUNT_CONTROL_V2_SEMANTIC_OUT':str((d/'semantic-observed.jsonl').resolve())} if a.fixture_contract==CONTROL_CONTRACT else {}),**({'COUNT_MUTATION':mutation,**({'COUNT_FAIL_FAST':'1'} if mutation in NEW_MUTANTS else {})} if mutation else {})})
  except subprocess.TimeoutExpired:entry.update(verdict='SETUP',reason='runtime bound exceeded');return
  (d/'run.stdout').write_text(r.stdout);(d/'run.stderr').write_text(r.stderr);entry['exit']=r.returncode
  if mutation:
@@ -44,7 +60,14 @@ def execute(label,mutation=None):
  else:
   entry['verdict']='PASS' if not r.returncode else 'FAIL'
   observed=r.stdout.encode('utf-8');entry['stdout_bytes']=len(observed);entry['stdout_sha256']=hashlib.sha256(observed).hexdigest()
-  entry['frozen_golden']='PASS' if len(observed)==golden_bytes and entry['stdout_sha256']==golden_sha256 else 'FAIL'
+  if a.fixture_contract==CONTROL_CONTRACT:
+   entry['independent_errors']=compare_stdout(observed,control_frozen)
+   try:
+    semantic=(d/'semantic-observed.jsonl').read_bytes()
+    if semantic!=control_frozen['expected_semantic']:entry['independent_errors'].append('closed independent semantic receipts differ')
+   except OSError as error:entry['independent_errors'].append('semantic receipt missing: '+str(error))
+   entry['frozen_golden']='FAIL' if entry['independent_errors'] else 'PASS'
+  else:entry['frozen_golden']='PASS' if len(observed)==golden_bytes and entry['stdout_sha256']==golden_sha256 else 'FAIL'
   if entry['frozen_golden']=='FAIL':entry['verdict']='FAIL'
   if a.compare_baseline:
    entry['golden_compare']='PASS' if a.compare_baseline.read_bytes()==observed else 'FAIL'

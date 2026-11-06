@@ -4,9 +4,9 @@ This suite selects an explicit fixture contract, executes complete production bo
 through instrumented OS/device boundaries, compares the whole stdout with that
 contract's fixed golden, and checks shared COUNT_FIFO ownership and public wiring.
 The unchanged sibling `tests/network/pool_dma` extractor and C fixture remain
-required dependencies. Raw `test_count.c` is immutable in both profiles.
+required dependencies. Raw `test_count.c` is immutable in all three profiles.
 
-For current production, select the typed DATA contract explicitly:
+For the historical typed DATA producer, select its matching contract explicitly:
 
 ```sh
 python3 tests/network/count_fifo/run.py --source "$PWD" \
@@ -64,7 +64,7 @@ harness/production inputs. An old root lacking newer family mutations cannot sup
 those kills. This maintained runner does not replace the preserved original
 harness as historical provenance.
 
-## Current typed DATA contract
+## Historical typed DATA contract
 
 `typed-data-v1` uses the independently constructed and frozen complete current
 stdout: 90,093 bytes with SHA256
@@ -112,6 +112,73 @@ Fixture-only unit tests can be run separately without importing production:
 python3 -B -m unittest discover -s tests/network/count_fifo -p test_typed_fixture.py
 ```
 
+## Typed CONTROL v2 contract
+
+`typed-control-v2` is the explicit third profile for the current CONTROL helper.
+It requires independently authored, root-frozen `control_preproducer.json`,
+`control_vectors.h` and semantic receipts. An absent or unfrozen artifact is
+SETUP before generation or compilation. The two older profiles retain their
+whole-output identities and require their matching historical producers; no
+source-content detection, fallback, output-derived golden or ignored field is
+available.
+
+The v2 generated copy composes all four unchanged v1 DATA transformations with
+named, scoped CONTROL changes. Its receipt includes every complete before/after
+span, occurrence, offset, global include/call change and the complete inverse to
+immutable raw bytes. Original C, v1 transforms/tests, every sibling POOL byte,
+all 24 mutation recipes/designated checks and all original compiler/runtime
+flags remain intact. The v2 compile adds only its explicit profile definition.
+
+The adapter extracts actual reliable owner records, CONTROL/data acquisition,
+pool resolver, frame-edge rules and real atomic CAS, actual layout_span and
+packet-check closure. The versioned OS mirror adds only source-typed object
+facts: state/backing/size, UMEM backing, session layout/peer and stage MTU.
+Its historical page-table pointer representation remains an OS boundary;
+this suite makes no native ABI-layout claim. Acquisition, ownership transitions,
+provider admission and packet validation have no successful replacement stub.
+
+C01-C08 migrate the fourteen old CONTROL/mixed snapshot groups. Mixed DATA uses
+one fixed layout128: ordinary descriptors start86/length58; C07 reliable DATA
+starts22/length122, with real tx/rx/open/native_begin at time100 and separately
+owned one-descriptor controls. C06/C08 submit ordinary DATA while rel is NULL,
+then install the reliable owner. The independent full backing vectors check
+packet/payload/CRC bytes. C07's retained U32 DATA descriptors remain separate.
+C08 pending STOP emits ENXIO before its PUT; C29 and C31 retain individual
+UNKNOWN/definite references and the exact ordered error notifications.
+
+The stdout gate compares the complete independently frozen current stream and
+the complete old-byte partition, retaining old literal spans exactly. A second
+closed JSONL channel, selected only by `COUNT_CONTROL_V2_SEMANTIC_OUT`, records
+the declared C01-C08 hidden custody points and C10-C33 dedicated cases. It
+observes full refusal preservation, per-owner state/metadata/refs/PUTs, actual
+CAS attempts/returns, DMA/accounting and ordered stage_dead calls. Unknown,
+missing, duplicate or reordered records fail the independent exact comparator.
+Current stdout cannot create or repair either expectation.
+
+ROOT alone installs `control_freeze.py` after independent validation. Its closed
+nine-file SHA256 map is checked before any artifact data is parsed; absence,
+unknown names or changed bytes is SETUP. The loader matches all78 receipt IDs
+against both `receipt-schema.json` and the public SOURCE inventory, then every
+outer/row/atom metadata item against hash-pinned `field-schema.json`. Component,
+format and source-clause obligations cannot become a whole-row replacement.
+The alias/inverse sidecars are also exact checks. Artifact hashes preserve a
+reviewed independent freeze; they do not replace its semantic review.
+
+Native callback observations keep a bounded invocation token and actual CONTROL
+owner across reentrant STOP. Required notification must occur in that same
+invocation with its reference held before PUT. Separate literal checks bind
+C08/C29/C31 equal-status notifications and callback order to their owners without
+changing the78-record JSONL protocol. All refusal guards, including both C33
+TX-check negatives, perform complete initialized-object preservation comparisons.
+
+Root owns the freeze, source reviews, actual execution, original mutation cohort
+and registration. This source implementation alone has no runtime acceptance.
+
+```sh
+python3 tests/network/count_fifo/run.py --source "$PWD" \
+  --fixture-contract typed-control-v2 --mutations --out-root "$PWD/build/count-fifo"
+```
+
 ## Scope
 
 All original POOL assertions, packet literals, event assertions and TRACE prefix
@@ -127,3 +194,8 @@ publication and DMA are instrumented boundaries. Acceptance covers host actual-b
 correctness and shared ownership for this slice. It supplies no native kernel,
 physical DMA, performance, full family-member migration or whole-network closure
 evidence. Source edits or unexecuted unit tests alone establish no acceptance.
+
+In v2 only, actual frame move/CAS replaces the historical frame-return boundary.
+Native reference input/PUT and terminal publication remain instrumented OS
+boundaries. CREATE/bind, worker/publisher GET/owed rules, BPF execution and
+post-retirement map-incarnation races remain outside this bounded contract.
