@@ -601,6 +601,27 @@ assert "nv_is_control_device(" in bind_region
 assert "nv_p2p_vidmem_bind(uuid, gpu_va, len, &region->vidmem," in bind_region
 assert "out->len = len;" in bind_region
 assert "out->seg_size = seg_size;" in bind_region
+# A stage fd with an attached CUDA export binds from it instead: the window
+# must lie in the attached range before anything is allocated or locked.
+attached = bind_region.index("smp_load_acquire(&nvlfp->xdev_ext_ce_memory)")
+assert attached < bind_region.index("nv_xdev_ext_ce_memory_window(") < \
+    bind_region.index("kzalloc(") < bind_region.index("nv_down_read_interruptible(")
+assert "nv_p2p_vidmem_bind_export(uuid, memory->nvfp, offset, len," in bind_region
+# NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY: an actual GPU fd with the CE passthrough
+# enabled, exact argument size; the attached export is released on both
+# close paths.
+attach_case = NV[NV.index("case NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY:"):]
+attach_case = attach_case[:attach_case.index("break;")]
+assert attach_case.index("NV_XDEV_EXT_CE_DMA_ONLY();") < \
+    attach_case.index("NV_ACTUAL_DEVICE_ONLY(nv);") < \
+    attach_case.index("arg_size != sizeof(nv_ioctl_xdev_ext_ce_attach_memory_t)") < \
+    attach_case.index("nv_xdev_ext_ce_memory_attach(nvlfp, params)")
+for closer in ("static void\nnvidia_close_callback(", "nvidia_ctl_close(\n"):
+    body = NV[NV.index(closer):]
+    body = body[:body.index("\n}\n")]
+    assert "nv_xdev_ext_ce_memory_release(nvlfp);" in body, closer
+NUMBERS = (ROOT / "kernel-open/common/inc/nv-ioctl-numbers.h").read_text()
+assert "#define NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY (NV_IOCTL_BASE + 23)" in NUMBERS
 
 # bind_host keeps the identity-only variant; the default maps GPU-device IOVAs.
 bind_host = function_body(BACKEND, "static int nv_xdev_ext_ce_bind_host(")

@@ -1495,6 +1495,10 @@ typedef struct
     NV_STATUS adapter_status;
 
     struct list_head entry;
+#if defined(XDEV_EXT_ENABLE_GPU_CE_DMA)
+    /* NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY: set once, released on close. */
+    struct nv_xdev_ext_ce_memory *xdev_ext_ce_memory;
+#endif
 } nv_linux_file_private_t;
 
 static inline nv_linux_file_private_t *nv_get_nvlfp_from_nvfp(nv_file_private_t *nvfp)

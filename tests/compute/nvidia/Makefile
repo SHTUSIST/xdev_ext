@@ -7,7 +7,8 @@ TESTS := nv_xdev_ext_gpu_policy_test nv_xdev_ext_gpu_binding_test nv_xdev_ext_gp
 	 nv_xdev_ext_umem_quota_test nv_xdev_ext_handle_lifetime_test \
 	 nv_xdev_ext_ce_chunk_test nv_xdev_ext_dma_lifetime_test \
 	 nv_xdev_ext_gpu_identity_test nv_xdev_ext_ce_classify_test \
-	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test
+	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test \
+	 nv_xdev_ext_ce_memory_test
 
 .PHONY: all run run-async run-host-bookkeeping run-lifecycle-contract run-lifecycle-mutants clean
 
@@ -52,6 +53,9 @@ nv_xdev_ext_vidmem_offset_test: nv_xdev_ext_vidmem_offset_test.c \
 		../src/nvidia/inc/kernel/mem_mgr/p2p_umem_vidmem.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+nv_xdev_ext_ce_memory_test: nv_xdev_ext_ce_memory_test.c \
+		$(wildcard ../kernel-open/nvidia/nv-xdev_ext-ce-memory.h)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 nv_xdev_ext_ce_plan_test: nv_xdev_ext_ce_plan_test.c \
 		../kernel-open/nvidia/nv-xdev_ext-ce-plan.h \
 		../kernel-open/nvidia/nv-xdev_ext-gpu-policy.h

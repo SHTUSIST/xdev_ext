@@ -9,7 +9,11 @@
  * and the batch frames, and the session worker hands it to this backend.  A
  * stage fd is an opened /dev/nvidiaN.  bind_region binds the stage window to
  * the CREATE caller's vidmem allocation (nv_p2p_vidmem_bind(): the RM dup
- * keeps the FB pages allocated, the device reference keeps the GPU open);
+ * keeps the FB pages allocated, the device reference keeps the GPU open),
+ * or, when the fd carries an attached CUDA export
+ * (NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY), to that allocation at the window's
+ * offset in the attached VA range (nv_p2p_vidmem_bind_export(): the same
+ * binding, no GPUDirect RDMA registration needed);
  * bind_host maps the already pinned pool for the GPU DMA device. CeUtils
  * semaphore events queue retirement work, which validates the saved frame
  * claims and reports each ticket once through xdev_ext_ce_complete().  After an AMBIGUOUS outcome the class never
@@ -27,6 +31,7 @@
 #include "nv-xdev_ext-ce-classify.h"
 #include "nv-xdev_ext-ce-plan.h"
 #include "nv-xdev_ext-ce-async.h"
+#include "nv-xdev_ext-ce-memory.h"
 
 #if defined(XDEV_EXT_ENABLE_GPU_CE_DMA) && defined(CONFIG_XDEV_EXT_MECH_CE)
 
@@ -242,7 +247,9 @@ static int nv_xdev_ext_ce_bind_region(struct file *f, u64 gpu_va, u64 len,
     nv_linux_file_private_t *nvlfp = NV_GET_LINUX_FILE_PRIVATE(f);
     struct nv_xdev_ext_ce_region *region;
     nv_p2p_vidmem_binding_t *residual = NULL;
+    const nv_xdev_ext_ce_memory_t *memory;
     nv_linux_state_t *nvl;
+    NvU64 offset = 0;
     nvidia_stack_t *sp = NULL;
     const NvU8 *uuid;
     NV_STATUS status;
@@ -259,6 +266,13 @@ static int nv_xdev_ext_ce_bind_region(struct file *f, u64 gpu_va, u64 len,
     nvl = nvlfp->nvptr;
     if (nvlfp->open_rc != 0 || nvl == NULL)
         return -ENODEV;
+
+    /* Attached once before CREATE; this stage holds the fd, so it stays. */
+    memory = smp_load_acquire(&nvlfp->xdev_ext_ce_memory);
+    if (memory != NULL &&
+        !nv_xdev_ext_ce_memory_window(memory->gpu_va, memory->size, gpu_va, len,
+                                      &offset))
+        return -ERANGE;
 
     region = kzalloc(sizeof(*region), GFP_KERNEL);
     if (region == NULL)
@@ -279,10 +293,18 @@ static int nv_xdev_ext_ce_bind_region(struct file *f, u64 gpu_va, u64 len,
         goto free_stack;
     }
 
-    status = nv_p2p_vidmem_bind(uuid, gpu_va, len, &region->vidmem,
-                                &seg_size, &residual);
+    if (memory != NULL)
+        status = nv_p2p_vidmem_bind_export(uuid, memory->nvfp, offset, len,
+                                           &region->vidmem, &seg_size, &residual);
+    else
+        status = nv_p2p_vidmem_bind(uuid, gpu_va, len, &region->vidmem,
+                                    &seg_size, &residual);
     if (status != NV_OK)
     {
+        if (memory != NULL)
+            nv_printf(NV_DBG_ERRORS,
+                      "NVRM: XDEV_EXT CE window: attached CUDA export refused: 0x%x\n",
+                      status);
         rc = nv_p2p_umem_errno(status);
         if (residual != NULL)
         {

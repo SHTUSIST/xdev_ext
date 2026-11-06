@@ -126,6 +126,13 @@ static struct harness {
 	unsigned int sleep_in_atomic, recursive_lock, warns;
 	unsigned int vidmem_bind, vidmem_unbind, vidmem_live;
 	NV_STATUS vidmem_unbind_status;
+	/* CE window from an attached CUDA export (nv_p2p_vidmem_bind_export) */
+	unsigned int vidmem_bind_export;
+	NV_STATUS export_status;
+	int export_residual;
+	const void *export_nvfp;
+	const NvU8 *export_uuid;
+	NvU64 export_offset, export_len;
 	int translated;
 	unsigned int rm_bind, rm_unbind, rm_submit, rm_progress;
 	NV_STATUS rm_bind_status, rm_unbind_status, rm_progress_status;
@@ -744,7 +751,11 @@ static void dma_sync_sgtable_for_device(struct device *d, struct sg_table *s,
 typedef struct { int unused; } nvidia_stack_t;
 typedef struct { int unused; } nv_state_t;
 typedef struct { struct device *dev; nv_state_t nv_state; } nv_linux_state_t;
-typedef struct { int open_rc; nv_linux_state_t *nvptr; } nv_linux_file_private_t;
+typedef struct {
+	int open_rc;
+	nv_linux_state_t *nvptr;
+	struct nv_xdev_ext_ce_memory *xdev_ext_ce_memory;
+} nv_linux_file_private_t;
 #define NV_GET_LINUX_FILE_PRIVATE(f) ((nv_linux_file_private_t *)(f)->private_data)
 #define NV_FILE_INODE(f) ((f)->inode)
 #define NV_STATE_PTR(nvl) (&(nvl)->nv_state)
@@ -780,6 +791,35 @@ static NV_STATUS nv_p2p_vidmem_bind(const NvU8 *uuid, NvU64 va, NvU64 len,
 	H.vidmem_bind++;
 	H.vidmem_live++;
 	order("vidmem_bind");
+	return NV_OK;
+}
+struct nv_file_private_t;
+static NV_STATUS nv_p2p_vidmem_bind_export(const NvU8 *uuid, struct nv_file_private_t *nvfp,
+	NvU64 offset, NvU64 len, nv_p2p_vidmem_binding_t **out, NvU32 *seg,
+	nv_p2p_vidmem_binding_t **residual)
+{
+	*out = NULL;
+	*residual = NULL;
+	might_sleep_check("nv_p2p_vidmem_bind_export");
+	H.vidmem_bind_export++;
+	H.export_nvfp = nvfp;
+	H.export_uuid = uuid;
+	H.export_offset = offset;
+	H.export_len = len;
+	order("vidmem_bind_export");
+	if (H.export_status != NV_OK) {
+		if (H.export_residual) {
+			*residual = calloc(1, sizeof(**residual));
+			(*residual)->live = 1;
+			H.vidmem_live++;
+		}
+		return H.export_status;
+	}
+	*out = calloc(1, sizeof(**out));
+	(*out)->live = 1;
+	if (seg)
+		*seg = 0;
+	H.vidmem_live++;
 	return NV_OK;
 }
 #if HARNESS_UNBIND_STATUS
@@ -1769,8 +1809,79 @@ static void case_race(void)
 }
 
 struct named_case { const char *name; void (*fn)(void); };
+/* A stage fd with an attached CUDA export binds its window from that export
+ * at the window's offset in the attached VA range; no VA lookup runs. */
+static nv_xdev_ext_ce_memory_t attached;
+static void attach(NvU64 gpu_va, NvU64 size)
+{
+	attached = (nv_xdev_ext_ce_memory_t){ .nvfp = (struct nv_file_private_t *)&attached,
+					      .file = &attached, .gpu_va = gpu_va, .size = size };
+	gpu_fpriv.xdev_ext_ce_memory = &attached;
+}
+
+static void case_bind_attached_window(void)
+{
+	struct xdev_ext_ce_region r = { .ops = ops };
+	unsigned int before = H.live_count;
+	int rc;
+	attach(0x7f0000000000ULL - 0x200000, 1ULL << 25);
+	rc = ops->bind_region(&gpu_file, 0x7f0000000000ULL, 1ULL << 24, &r);
+	REQUIRE(rc == 0, "attached window bind returned %d", rc);
+	CHECK(H.vidmem_bind_export == 1 && H.vidmem_bind == 0,
+	      "export bind %u, VA bind %u", H.vidmem_bind_export, H.vidmem_bind);
+	CHECK(H.export_nvfp == (void *)&attached && H.export_offset == 0x200000 &&
+	      H.export_len == (1ULL << 24) && H.export_uuid &&
+	      !memcmp(H.export_uuid, harness_uuid, 16),
+	      "export bind args offset=0x%llx len=0x%llx", (unsigned long long)H.export_offset,
+	      (unsigned long long)H.export_len);
+	CHECK(r.priv && r.len == (1ULL << 24), "region not bound to the window");
+	CHECK(ops->unbind_region(&r) == 0 && H.vidmem_unbind == 1 && H.vidmem_live == 0,
+	      "unbind of an export window");
+	CHECK(H.live_count == before, "allocations leaked: %u live, %u before", H.live_count, before);
+}
+
+static void case_bind_attached_outside(void)
+{
+	static const struct { NvU64 va, size; } a[] = {
+		{ 0x7f0000000000ULL + 4096, 1ULL << 24 },	/* window starts before it */
+		{ 0x7f0000000000ULL, (1ULL << 24) - 4096 },	/* window ends after it */
+	};
+	unsigned int i, before = H.live_count;
+	for (i = 0; i < 2; i++) {
+		struct xdev_ext_ce_region r = { .ops = ops };
+		attach(a[i].va, a[i].size);
+		CHECK(ops->bind_region(&gpu_file, 0x7f0000000000ULL, 1ULL << 24, &r) == -ERANGE &&
+		      !r.priv, "window outside the attached range %u accepted", i);
+	}
+	CHECK(H.vidmem_bind_export == 0 && H.vidmem_bind == 0,
+	      "an outside window reached a bind (export %u, VA %u)", H.vidmem_bind_export,
+	      H.vidmem_bind);
+	CHECK(H.live_count == before, "refused window leaked %u allocations", H.live_count - before);
+}
+
+static void case_bind_attached_failure(void)
+{
+	struct xdev_ext_ce_region r = { .ops = ops };
+	unsigned int before = H.live_count;
+	attach(0x7f0000000000ULL, 1ULL << 24);
+	H.export_status = NV_ERR_NOT_SUPPORTED;
+	CHECK(ops->bind_region(&gpu_file, 0x7f0000000000ULL, 1ULL << 24, &r) == -EOPNOTSUPP &&
+	      !r.priv, "refused export bind");
+	CHECK(H.vidmem_bind == 0, "a refused export fell back to the VA lookup");
+	CHECK(H.live_count == before, "refused export bind leaked");
+	/* A residual binding stays owned by the failed CREATE, as on the VA path. */
+	H.export_residual = 1;
+	CHECK(ops->bind_region(&gpu_file, 0x7f0000000000ULL, 1ULL << 24, &r) == -EOPNOTSUPP &&
+	      r.priv, "residual export binding lost");
+	CHECK(ops->unbind_region(&r) == -EIO && H.vidmem_unbind == 0,
+	      "a residual (ambiguous) export window must never be unbound");
+}
+
 static const struct named_case cases[] = {
 	{ "bind-unbind-clean", case_bind_unbind_clean },
+	{ "bind-attached-window", case_bind_attached_window },
+	{ "bind-attached-outside", case_bind_attached_outside },
+	{ "bind-attached-failure", case_bind_attached_failure },
 	{ "complete-once", case_complete_once },
 	{ "complete-partial", case_complete_partial },
 	{ "complete-in-submit", case_complete_in_submit },

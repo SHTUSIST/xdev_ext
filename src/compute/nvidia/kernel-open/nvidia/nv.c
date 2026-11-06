@@ -37,6 +37,7 @@
 #include "nv-xdev_ext-peer.h"
 #include "nv-xdev_ext-dmabuf.h"
 #include "nv-xdev_ext-dma-lifetime.h"
+#include "nv-xdev_ext-ce-memory.h"
 #include "nv-reg.h"
 #include "nv-msi.h"
 #include "nv-pci-table.h"
@@ -1412,6 +1413,63 @@ static void nv_p2p_umem_ioctl_handle_release_owner(
         nv_p2p_umem_ioctl_handle_put(found);
     }
 }
+
+/*
+ * NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY: give this CE stage fd the CUDA allocation
+ * exported to params->mem_fd (a control fd of this driver, which
+ * cuMemExportToShareableHandle() fills with one RM export handle), named by
+ * the GPU VA range the caller mapped it at.  Once per fd; the stage fd keeps
+ * a reference on the export fd until it is closed.  The export's handles are
+ * read only under the RM API lock, when a CE window binds.
+ */
+static NV_STATUS nv_xdev_ext_ce_memory_attach(
+    nv_linux_file_private_t *nvlfp,
+    const nv_ioctl_xdev_ext_ce_attach_memory_t *params
+)
+{
+    nv_xdev_ext_ce_memory_t *memory;
+    nv_file_private_t *nvfp;
+    void *file = NULL;
+
+    if (!nv_xdev_ext_ce_memory_args_ok(params->gpu_va, params->size,
+                                       params->flags, params->reserved))
+        return NV_ERR_INVALID_ARGUMENT;
+
+    memory = kzalloc(sizeof(*memory), GFP_KERNEL);
+    if (memory == NULL)
+        return NV_ERR_NO_MEMORY;
+
+    nvfp = nv_get_file_private(params->mem_fd, NV_TRUE, &file);
+    if (nvfp == NULL)
+    {
+        kfree(memory);
+        return NV_ERR_INVALID_OBJECT_HANDLE;
+    }
+    memory->nvfp = nvfp;
+    memory->file = file;
+    memory->gpu_va = params->gpu_va;
+    memory->size = params->size;
+
+    /* Publishes the initialized record to nv_xdev_ext_ce_bind_region(). */
+    if (cmpxchg(&nvlfp->xdev_ext_ce_memory, NULL, memory) != NULL)
+    {
+        nv_put_file_private(file);
+        kfree(memory);
+        return NV_ERR_STATE_IN_USE;
+    }
+    return NV_OK;
+}
+
+/* Close: no CE stage holds this fd any more, so no window can bind from it. */
+static void nv_xdev_ext_ce_memory_release(nv_linux_file_private_t *nvlfp)
+{
+    nv_xdev_ext_ce_memory_t *memory = xchg(&nvlfp->xdev_ext_ce_memory, NULL);
+
+    if (memory == NULL)
+        return;
+    nv_put_file_private(memory->file);
+    kfree(memory);
+}
 #endif /* XDEV_EXT_ENABLE_GPU_CE_DMA */
 
 /*
@@ -2459,6 +2517,7 @@ nvidia_close_callback(
 
 #if defined(XDEV_EXT_ENABLE_GPU_CE_DMA)
     nv_p2p_umem_ioctl_handle_release_owner(nvlfp);
+    nv_xdev_ext_ce_memory_release(nvlfp);
 #endif
 
     nvl = nvlfp->nvptr;
@@ -3101,6 +3160,23 @@ unlock:
         }
 
 #if defined(XDEV_EXT_ENABLE_GPU_CE_DMA)
+        case NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY:
+        {
+            nv_ioctl_xdev_ext_ce_attach_memory_t *params = arg_copy;
+
+            NV_XDEV_EXT_CE_DMA_ONLY();
+            NV_ACTUAL_DEVICE_ONLY(nv);
+
+            if (arg_size != sizeof(nv_ioctl_xdev_ext_ce_attach_memory_t))
+            {
+                status = -EINVAL;
+                goto done;
+            }
+
+            params->status = nv_xdev_ext_ce_memory_attach(nvlfp, params);
+            break;
+        }
+
         case NV_ESC_P2P_PIN_UMEM:
         {
             nv_ioctl_p2p_pin_umem_t *params = arg_copy;
@@ -3744,6 +3820,7 @@ nvidia_ctl_close(
 
 #if defined(XDEV_EXT_ENABLE_GPU_CE_DMA)
     nv_p2p_umem_ioctl_handle_release_owner(nvlfp);
+    nv_xdev_ext_ce_memory_release(nvlfp);
 #endif
 
     down(&nvl->ldata_lock);
