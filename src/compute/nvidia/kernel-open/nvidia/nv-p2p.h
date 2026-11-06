@@ -530,6 +530,7 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(const NvU8 *pExpectedGpuUuid,
                                          NvU32 *pSegSize,
                                          nv_p2p_vidmem_binding_t **ppResidual);
 /* The same window from a CUDA POSIX-FD export: the control fd's RM file private. */
+struct nv_file_private_t;
 NV_STATUS NV_API_CALL nv_p2p_vidmem_bind_export(const NvU8 *pExpectedGpuUuid,
                                                 struct nv_file_private_t *pExportNvfp,
                                                 NvU64 offset, NvU64 length,

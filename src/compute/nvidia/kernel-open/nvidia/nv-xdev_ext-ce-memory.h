@@ -10,10 +10,18 @@
  * attached once by NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY.  The caller passes the
  * allocation's CUDA POSIX file descriptor shareable handle
  * (cuMemExportToShareableHandle(): a control fd holding one RM export
- * handle) and the GPU VA range it mapped the allocation at.  The VA range
- * only names windows, as the address of a third-party P2P registration does;
- * holding the export is the authority over the allocation.  The stage fd
- * keeps a reference on the export fd until it is closed.
+ * handle) and the GPU VA range it mapped the allocation at, gpu_va naming
+ * allocation offset 0.  The VA range only names windows, as the address of a
+ * third-party P2P registration does; holding the export is the authority
+ * over the allocation.  The stage fd keeps a reference on the export fd
+ * until it is closed.
+ *
+ * The CE class keys its window exclusion on these configured addresses
+ * (xdev_ext_mech_ce.c): fds that attach one allocation at different VAs name
+ * the same bytes under different keys and are not excluded from each other,
+ * as two mappings of one allocation were not before.  Only holders of the
+ * export can do that, and an ambiguous window still keeps its binding, so
+ * the memory is never freed or reused by RM.
  */
 struct nv_file_private_t;
 

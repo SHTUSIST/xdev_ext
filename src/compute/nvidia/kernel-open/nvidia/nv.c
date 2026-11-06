@@ -1421,6 +1421,11 @@ static void nv_p2p_umem_ioctl_handle_release_owner(
  * the GPU VA range the caller mapped it at.  Once per fd; the stage fd keeps
  * a reference on the export fd until it is closed.  The export's handles are
  * read only under the RM API lock, when a CE window binds.
+ *
+ * Like NV_ESC_REGISTER_FD this makes a device fd hold a control fd, so it
+ * takes part in the same cycle guard (escape.c): a device fd that an RM
+ * object already holds (NVFP_TYPE_REFCOUNTED) is refused, and the attached
+ * fd becomes NVFP_TYPE_REGISTERED, which no RM object may then hold.
  */
 static NV_STATUS nv_xdev_ext_ce_memory_attach(
     nv_linux_file_private_t *nvlfp,
@@ -1444,6 +1449,20 @@ static NV_STATUS nv_xdev_ext_ce_memory_attach(
     {
         kfree(memory);
         return NV_ERR_INVALID_OBJECT_HANDLE;
+    }
+    /* Only this driver's files carry an nv_linux_file_private_t. */
+    if (((struct file *)file)->f_op != &nvidia_fops)
+    {
+        nv_put_file_private(file);
+        kfree(memory);
+        return NV_ERR_INVALID_OBJECT_HANDLE;
+    }
+    if (cmpxchg(&nvlfp->nvfp.register_or_refcount, NVFP_TYPE_NONE,
+                NVFP_TYPE_REGISTERED) == NVFP_TYPE_REFCOUNTED)
+    {
+        nv_put_file_private(file);
+        kfree(memory);
+        return NV_ERR_IN_USE;
     }
     memory->nvfp = nvfp;
     memory->file = file;

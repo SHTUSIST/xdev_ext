@@ -10,6 +10,7 @@ arguments before touching the fd, refuses non-control fds and a second
 attach, and releases exactly once.  Host C only; no GPU.
 """
 from pathlib import Path
+import re
 import sys
 import unittest
 
@@ -19,8 +20,10 @@ import nv_xdev_ext_extract as ex  # noqa: E402
 
 NV_C = "kernel-open/nvidia/nv.c"
 NV_IOCTL_H = "kernel-open/common/inc/nv-ioctl.h"
+NV_H = "kernel-open/common/inc/nv.h"
 FIXTURE = ex.HERE / "nv_xdev_ext_ce_memory_attach_harness.c"
-CASES = ("attach", "bad-args", "not-control-fd", "alloc-fail", "attach-twice")
+CASES = ("attach", "bad-args", "not-control-fd", "alloc-fail", "attach-twice",
+         "reference-cycle-guard", "foreign-file")
 FUNCTIONS = ("nv_xdev_ext_ce_memory_attach", "nv_xdev_ext_ce_memory_release")
 
 
@@ -35,6 +38,10 @@ class CeMemoryAttach(unittest.TestCase):
         cls.binary = cls.error = None
         if cls.missing:
             return
+        nvfp_types = re.findall(r"^#define NVFP_TYPE_\w+\s+0x[0-9a-fA-F]+$", ex.read(NV_H), re.M)
+        if len(nvfp_types) != 3:
+            raise AssertionError("NVFP_TYPE_* defines not found in nv.h")
+        cls.build.write("nv_xdev_ext_ce_memory_attach_nvfp.h", "\n".join(nvfp_types) + "\n")
         cls.build.write("nv_xdev_ext_ce_memory_attach_types.h",
                         ex.typedef_struct(ioctl_h, "nv_ioctl_xdev_ext_ce_attach_memory_t") + "\n")
         cls.build.write("nv_xdev_ext_ce_memory_attach_actual.inc", "\n\n".join(

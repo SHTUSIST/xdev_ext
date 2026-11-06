@@ -15,15 +15,23 @@
 #include "../kernel-open/nvidia/nv-xdev_ext-ce-memory.h"
 #include "nv_xdev_ext_ce_memory_attach_types.h"   /* the ioctl struct, exact bytes */
 
-typedef struct nv_file_private_t { int id; } nv_file_private_t;
-typedef struct { nv_xdev_ext_ce_memory_t *xdev_ext_ce_memory; } nv_linux_file_private_t;
+#include "nv_xdev_ext_ce_memory_attach_nvfp.h"   /* NVFP_TYPE_* (nv.h), exact bytes */
+typedef struct nv_file_private_t { int id; NvU32 register_or_refcount; } nv_file_private_t;
+typedef struct {
+	nv_file_private_t nvfp;
+	nv_xdev_ext_ce_memory_t *xdev_ext_ce_memory;
+} nv_linux_file_private_t;
+/* Only this driver's files carry an nv_linux_file_private_t. */
+struct file_operations { int id; };
+static struct file_operations nvidia_fops = { 1 }, foreign_fops = { 2 };
+struct file { const struct file_operations *f_op; };
 
 static struct {
 	int lookups, puts, refs, allocs, frees, alloc_fail, not_ctl;
 	int last_fd, last_ctl;
 } S;
-static nv_file_private_t export_fp = { 42 };
-static int export_file;
+static nv_file_private_t export_fp = { 42, NVFP_TYPE_NONE };
+static struct file export_file = { &nvidia_fops };
 
 static nv_file_private_t *nv_get_file_private(NvS32 fd, NvBool ctl, void **os_private)
 {
@@ -125,6 +133,42 @@ static void case_alloc_fail(void)
 	CHECK(!f.xdev_ext_ce_memory && S.refs == 0, "allocation failure kept a reference");
 }
 
+/* Like NV_ESC_REGISTER_FD the stage fd now holds a control fd, so it takes
+ * part in escape.c's cycle guard: an fd an RM object already holds through
+ * its secInfo (NVFP_TYPE_REFCOUNTED) is refused, and an attached fd is
+ * marked NVFP_TYPE_REGISTERED so no RM object can take it afterwards. */
+static void case_reference_cycle_guard(void)
+{
+	nv_ioctl_xdev_ext_ce_attach_memory_t p = args();
+	nv_linux_file_private_t f = { 0 };
+	CHECK(nv_xdev_ext_ce_memory_attach(&f, &p) == NV_OK &&
+	      f.nvfp.register_or_refcount == NVFP_TYPE_REGISTERED,
+	      "attach must register the stage fd (state %u)", f.nvfp.register_or_refcount);
+	nv_xdev_ext_ce_memory_release(&f);
+	f = (nv_linux_file_private_t){ .nvfp = { 7, NVFP_TYPE_REGISTERED } };
+	CHECK(nv_xdev_ext_ce_memory_attach(&f, &p) == NV_OK &&
+	      f.nvfp.register_or_refcount == NVFP_TYPE_REGISTERED,
+	      "a stage fd already registered by NV_ESC_REGISTER_FD may attach");
+	nv_xdev_ext_ce_memory_release(&f);
+	f = (nv_linux_file_private_t){ .nvfp = { 7, NVFP_TYPE_REFCOUNTED } };
+	CHECK(nv_xdev_ext_ce_memory_attach(&f, &p) == NV_ERR_IN_USE && !f.xdev_ext_ce_memory,
+	      "a stage fd an RM object refcounts must not hold a control fd");
+	CHECK(f.nvfp.register_or_refcount == NVFP_TYPE_REFCOUNTED, "refused attach changed the state");
+	CHECK(S.refs == 0 && S.allocs == S.frees, "refused attach leaked: refs=%d allocs=%d frees=%d",
+	      S.refs, S.allocs, S.frees);
+}
+
+static void case_foreign_file(void)
+{
+	nv_ioctl_xdev_ext_ce_attach_memory_t p = args();
+	nv_linux_file_private_t f = { 0 };
+	export_file.f_op = &foreign_fops;
+	CHECK(nv_xdev_ext_ce_memory_attach(&f, &p) == NV_ERR_INVALID_OBJECT_HANDLE &&
+	      !f.xdev_ext_ce_memory, "a file of another driver must be refused");
+	CHECK(S.refs == 0 && S.allocs == S.frees && f.nvfp.register_or_refcount == NVFP_TYPE_NONE,
+	      "foreign file left state: refs=%d", S.refs);
+}
+
 static void case_attach_twice(void)
 {
 	nv_linux_file_private_t f = { 0 };
@@ -150,6 +194,8 @@ static const struct named_case cases[] = {
 	{ "not-control-fd", case_not_control_fd },
 	{ "alloc-fail", case_alloc_fail },
 	{ "attach-twice", case_attach_twice },
+	{ "reference-cycle-guard", case_reference_cycle_guard },
+	{ "foreign-file", case_foreign_file },
 };
 
 int main(int argc, char **argv)
