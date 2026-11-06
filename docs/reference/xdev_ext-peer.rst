@@ -80,8 +80,17 @@ DMA pages. Active leases prevent unmap. Closing an allocation fd invalidates
 new admissions and releases mappings only after native request references
 are gone. Native unmap or persistent unpin failure retains the allocation.
 An unquiesced callback cannot report successful completion, even when its
-native status is zero. An uncertain native DMA result permanently quarantines
-its mappings, PCI and GPU references and provider module. It is not made reusable by a late CQE.
+native status is zero. An uncertain native DMA result quarantines its
+mappings, PCI and GPU references and provider module. It is not made reusable by a late CQE.
+Only the synchronous NVMe ioctl path binds such a result to the DMA-stop
+epochs of the controller that received the command: when that controller
+completes a Controller Reset that began after the command was submitted
+(CC.EN cleared, CSTS.RDY observed clear, Bus Master Enable read back clear),
+the region leaves quarantine but stays invalid. Its owner's close releases it,
+or the core does if the owner already closed. A command cancelled by such a
+reset is released as quiesced. Every other uncertain result, including
+mechanism sessions, controller shutdown or removal and provider failures,
+stays quarantined permanently.
 
 NIC requests have a 30-second wait bound. On timeout, the common worker
 quarantines the lease. Native callback context stays resident until a late CQE
