@@ -2444,6 +2444,10 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/README.md",
+      "logical_path": "tests/eval/kv_restore/README.md"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/analyze.py",
       "logical_path": "tests/eval/kv_restore/analyze.py"
     },
