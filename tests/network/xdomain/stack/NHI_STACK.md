@@ -166,3 +166,61 @@ Thunderbolt DMA: controller/PCIe ordering, coherent DMA visibility, IOMMU
 translation, link faults and payload integrity require matching kernels and
 actual controllers on both hosts. Neither host CI success nor these semantic
 mutation kills upgrades that hardware evidence.
+
+## Production interrupt-poll budget and stop
+
+The production completion suite is a separate entrypoint:
+`tests/network/xdomain/contracts/xdomain_production_poll_test.py`, run through
+`tools/run.py` from the canonical repository. It selects the actual readonly
+`poll_on_interrupt` parameter, keeps TX completion on NHI `ring_work`, and
+drains RX through the actual interrupt-started production worker. Its external
+adapter poller is disabled. This mode differs from the adapter experiments
+described above.
+
+`irq-budget-64-65` uses one legal64-element data group:32 registered frames with
+two4096-byte chunks each. RX_POST permits one posted RX group at a time, and
+the per-group native-element limit is64. The65-completion stimulus therefore
+adds a real next-group RTS completion on the same link's control RX ring;
+it is65 completions across two RX rings. The second receiver batch stays
+unarmed during this window, so it cannot post another data group.
+
+The first real IRQ queues a drain; one existing scheduler step must return
+exactly64 distinct marked owners across the RX rings, keep their interrupts
+masked, and queue one immediate continuation. The same-time continuation must
+return the remaining owner when present, observe both rings empty, and rearm.
+Exact64 also needs that empty continuation. The assertions record the actual
+returned owner subset without prescribing which ring provides the tail. The
+case then releases the first consumer, arms the announced next group when
+present, and checks all legally posted owners and groups with the existing
+independent address/callback oracle.
+
+`irq-budget-stop` suspends the receiver with that full-budget continuation
+queued, for both64 data and64 data plus one control completion. It reads actual
+queue membership before pumping again and rejects poll callbacks/requeues
+after STOP. The public64 budget leaves zero or one marked owner unreturned;
+that owner must cancel through actual native ring work, while the64 returned
+owners retain their successful callbacks. A successful control RX callback may
+repost the same frame; its later cancellation belongs to that new post. Data
+custody follows the actual unreturned owner type: a canceled data tail makes
+the group's quiescence unknown, while a fully returned data group is quiesced.
+
+The existing NHI mutation gate also runs these two unmodified cases before
+mutating production source in private copies. Its four added mutations omit
+the full-budget requeue, rearm at the full budget, raise the budget to65, or omit
+STOP's synchronous work cancellation. It retains the successful-compile,
+named-assertion, exit1 requirement; crashes, timeouts and sanitizer errors are
+not semantic kills.
+
+```sh
+python3 tools/run.py tests/network/xdomain/contracts/xdomain_production_poll_test.py \
+  -- --case irq-budget-64-65 --keep-build /tmp/xdomain-irq-budget
+python3 tools/run.py tests/network/xdomain/contracts/xdomain_production_poll_test.py \
+  -- --case irq-budget-stop --sanitize --keep-build /tmp/xdomain-irq-budget-stop
+python3 tools/run.py tests/network/xdomain/stack/test_nhi_stack_mutations.py \
+  -- --keep-build /tmp/xdomain-nhi-mutations
+```
+
+These remain host software schedules with modeled MMIO, IRQ delivery and device
+completion. They do not establish physical NHI, dual-host cable or DMA payload
+correctness. Preserve sanitizer/leak detection and register actual execution
+evidence separately under `/root/xdev_ext/test-results/`.

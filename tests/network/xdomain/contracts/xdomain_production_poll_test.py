@@ -25,7 +25,8 @@ CASES = ('legacy-irq', 'mode-selection', 'startup-before-create', 'four-ring-pro
          # Interrupt-started polling (poll_on_interrupt) and the unchanged pure mode.
          'irq-mode-selection', 'irq-no-timer-group', 'irq-drain-rearm-once', 'irq-lost-wakeup-latching',
          'irq-lost-wakeup-nonlatching', 'pure-rts-waits-fallback', 'irq-stop-pending-drain',
-         'irq-stop-late-interrupt', 'irq-start-poll-lock-order', 'irq-interrupt-before-gate')
+         'irq-stop-late-interrupt', 'irq-start-poll-lock-order', 'irq-interrupt-before-gate',
+         'irq-budget-64-65', 'irq-budget-stop')
 
 
 def load(name, path):
