@@ -30,6 +30,9 @@ def freeze_inputs(root,fixture_contract='historical-raw-v0'):
  family='src/network/include/linux/xdev_ext_netfam_count.h'
  if (root/family).is_file():paths.append(family)
  if fixture_contract=='typed-control-v2':paths+=['src/core/include/uapi/linux/xdev_ext_policy.h','src/network/include/net/xdp_sock.h']
+ release=old.function((root/'src/network/io_uring/family/xdev_ext_netfam.c').read_text(),'xdev_ext_netfam_release')
+ if re.search(r'\bxdev_ext_requester_host_release\s*\(',release):
+  paths+=['src/core/io_uring/family/xdev_ext_requester.c','src/core/include/linux/xdev_ext_requester.h','src/core/include/linux/xdev_ext_requester_core.h']
  return {'production_inputs':{p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in paths},'original_fixtures':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in FIXTURE.iterdir() if p.is_file()}}
 def structure(root,overrides=None):
  root=Path(root);problems=[];overrides=overrides or {}
@@ -69,6 +72,29 @@ def generate(root,out,mutation=None,fixture_contract='historical-raw-v0'):
   data_lease=[helper]
  enqueue=old.function(rel,'xsk_rel_enqueue');manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':'xsk_rel_enqueue','bytes':len(enqueue)})
  p=out/'production.c.inc'
+ host_release=[]
+ if re.search(r'\bxdev_ext_requester_host_release\s*\(',old.function(p.read_text(),'xdev_ext_netfam_release')):
+  requester_path='src/core/io_uring/family/xdev_ext_requester.c'
+  requester_header='src/core/include/linux/xdev_ext_requester.h'
+  requester_core='src/core/include/linux/xdev_ext_requester_core.h'
+  requester=(root/requester_path).read_text();header=(root/requester_header).read_text()
+  records=[]
+  for path,source,name in [(requester_core,(root/requester_core).read_text(),'xdev_ext_admission'),
+                           (requester_header,header,'xdev_ext_requester'),
+                           (requester_path,requester,'xdev_ext_requester_host')]:
+   body=old.record(source,name);records.append(body)
+   manifest.append({'path':path,'record':name,'bytes':len(body.encode())})
+  declaration=re.search(r'(?m)^void xdev_ext_requester_host_release\([^;]*;',header)
+  if not declaration:raise SetupError('missing requester host release declaration')
+  records.append(declaration.group())
+  manifest.append({'path':requester_header,'fragment':'xdev_ext_requester_host_release declaration','bytes':len(declaration.group().encode())})
+  types=out/'production_types.h';types.write_text(types.read_text()+'\n'+'\n'.join(records)+'\n')
+  # The generic extractor can start in an earlier comment naming this API.
+  definitions=list(re.finditer(r'(?m)^void[ \t]+xdev_ext_requester_host_release[ \t]*\([^;{}]*\)[ \t\r\n]*\{',requester))
+  if len(definitions)!=1:raise SetupError('expected one requester host release definition')
+  definition=definitions[0]
+  body=requester[definition.start():old.balanced(requester,definition.end()-1)];host_release.append(body)
+  manifest.append({'path':requester_path,'function':'xdev_ext_requester_host_release','bytes':len(body.encode())})
  reliable_core=(root/'src/core/include/linux/xdev_ext_mech_reliable_core.h').read_text()
  # Whole portable production protocol header; no protocol replacement.
  records=old.record(rel,'xsk_rel_data')+'\n'+old.record(rel,'xsk_rel_control')
@@ -84,11 +110,11 @@ static void xdev_ext_mech_stage_native_put(struct xdev_ext_mech_stage*s){(void)s
 #define XDEV_EXT_MECH_F_INFLIGHT 3
 #define XDEV_EXT_MECH_F_HELD 2
 static int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool*p,u32 i,int from,int to){(void)p;(void)i;REQUIRE("control_return_lock",lock_depth==1);REQUIRE("control_move",from==3&&to==2);frame_moves++;return 0;}
-#define WARN_ON_ONCE(c) REQUIRE("production_warning",!(c))
+#define WARN_ON_ONCE(c) ({bool count_warn=!!(c);REQUIRE("production_warning",!count_warn);count_warn;})
 /* BPF envelope builder boundary: presealed descriptor fixtures, no journal. */
 static int xsk_rel_build(struct xdev_ext_mech_stage*s,struct xdev_ext_mech_batch*b,struct xsk_rel_control*c,u64 group,u32 attempt,u64 credit){(void)s;(void)b;(void)c;(void)credit;REQUIRE("build_outside_lock",!lock_depth);build_calls++;build_group=group;build_attempt=attempt;return 0;}
 '''
- extra=data_lease+[enqueue,old.function(rel,'xsk_rel_wakeup'),old.function(rel,'xsk_rel_submit'),old.function(rel,'xsk_rel_native_done').replace('xsk_rel_native_done(', 'actual_xsk_rel_native_done(',1),old.function(rel,'xsk_rel_resend')]
+ extra=host_release+data_lease+[enqueue,old.function(rel,'xsk_rel_wakeup'),old.function(rel,'xsk_rel_submit'),old.function(rel,'xsk_rel_native_done').replace('xsk_rel_native_done(', 'actual_xsk_rel_native_done(',1),old.function(rel,'xsk_rel_resend')]
  for n in ['xsk_rel_wakeup','xsk_rel_submit','xsk_rel_native_done','xsk_rel_resend']:manifest.append({'path':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','function':n,'bytes':len(old.function(rel,n))})
  admit=(root/'src/network/net/xdp/xsk_xdev_ext_mech_core.h').read_text()
  core_rules=(root/'src/core/io_uring/xdev_ext_mech_core.h').read_text()

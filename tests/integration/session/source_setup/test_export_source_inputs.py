@@ -137,6 +137,8 @@ sys.exit(subprocess.call([os.environ['EXPORT_INPUT_REAL_CC'],*args]))
                 '--cc', str(cls.compiler)]
         result = subprocess.run(argv, env={**os.environ,
             'PYTHONDONTWRITEBYTECODE': '1', 'EXPORT_INPUT_CASE': str(folder),
+            'XDEV_EXT_CANONICAL_ROOT': str(cls.source.repo),
+            'XDEV_EXT_SOURCE_VIEW': str(cls.source.view),
             'EXPORT_INPUT_REAL_CC': cls.cc,
             'EXPORT_INPUT_REFUSE_COMPILE': str(int(refuse_compile)),
         }, capture_output=True, text=True, timeout=90)
