@@ -3563,6 +3563,11 @@
       "native_path": "tests/nv_os_spinlock_lockdep_kvm.py"
     },
     {
+      "source": "tests/compute/nvidia/nv_os_spinlock_lockdep_kvm_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_os_spinlock_lockdep_kvm_test.py"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_async_contract.h",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_async_contract.h"

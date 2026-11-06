@@ -194,12 +194,13 @@ def build(args, out):
     module.mkdir(parents=True)
     code = section(Path(args.os_interface).read_text())
     (module / f'{MODULE}.c').write_text(SHIM + code + BODY)
-    defines = ' -DCHECK_DEPTH' if 'os_spinlock_depth' in code else ''
+    # Annotated code must expose its counter; a renamed one fails the build.
+    defines = ' -DCHECK_DEPTH' if 'NV_OS_SPINLOCK_NESTING' in code else ''
     (module / 'Kbuild').write_text(f'obj-m += {MODULE}.o\nccflags-y += -Wno-unused-parameter{defines}\n')
     with open(out / 'module-build.log', 'w') as log:
         subprocess.run(['make', '-C', args.kernel_build, f'M={module}', f'CC={args.cc}',
                         f'HOSTCC={args.cc}', 'modules'], stdout=log, stderr=subprocess.STDOUT, check=True)
-    return module / f'{MODULE}.ko'
+    return module / f'{MODULE}.ko', 'NV_OS_SPINLOCK_NESTING' in code
 
 
 def cpio_newc(root):
@@ -256,7 +257,8 @@ def boot(args, out, image):
     return result.returncode, (out / 'console.log').read_text(errors='replace')
 
 
-def judge(console):
+def judge(console, nesting=False):
+    """nesting: the code under test carries the depth annotation."""
     problems, steps, current = [], {}, None
     for line in console.splitlines():
         marker = re.search(r'OS_SPINLOCK_TEST step=(\w+) (begin|end)', line)
@@ -273,10 +275,15 @@ def judge(console):
             problems.append(f'step {step} did not finish')
         for report in steps.get(step + '-reports', []):
             problems.append(f'lockdep in {step}: {report}')
+    nested_end = next((l for l in steps.get('nested', []) if 'irqs_enabled=' in l), '')
+    if 'irqs_enabled=1' not in nested_end:
+        problems.append('interrupts not enabled again after the nested locks')
     irq_end = next((l for l in steps.get('irq', []) if 'ticks=' in l), '')
     fields = dict(re.findall(r'(\w+)=(-?\d+)', irq_end))
     if int(fields.get('ticks', 0)) < 1:
         problems.append('the hardirq timer never took its lock')
+    if nesting and fields.get('depth_checked') != '1':
+        problems.append('nesting depth of the annotated code was not checked')
     if fields.get('depth_checked') == '1' and fields.get('depth_left') != '0':
         problems.append(f'nesting depth left behind: {fields.get("depth_left")}')
     if 'OS_SPINLOCK_TEST debug_locks=1' not in console:
@@ -301,9 +308,10 @@ def main(argv=None):
     args = parser.parse_args(argv)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    ko = build(args, out)
+    ko, nesting = build(args, out)
     rc, console = boot(args, out, initramfs(args, out, ko))
-    result = judge(console)
+    result = judge(console, nesting=nesting)
+    result['nesting_annotation'] = nesting
     result['qemu_exit'] = rc
     result['os_interface'] = str(Path(args.os_interface).resolve())
     (out / 'result.json').write_text(json.dumps(result, indent=1, sort_keys=True) + '\n')

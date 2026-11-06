@@ -1295,8 +1295,10 @@ typedef struct os_spinlock_s
  * Tell lockdep the nesting depth instead.  These locks are held with
  * interrupts disabled, so the number of RM spinlocks a CPU holds changes
  * only on that CPU and only with interrupts off.  Recursion on one lock is
- * still reported by CONFIG_DEBUG_SPINLOCK.  Kernels without lockdep build
- * the upstream code below.
+ * still reported by CONFIG_DEBUG_SPINLOCK.  The depth only splits the one
+ * class, so lockdep still cannot see an AB-BA between two RM spinlocks, and
+ * nesting deeper than MAX_LOCKDEP_SUBCLASSES shares the last subclass.
+ * Kernels without lockdep build the upstream code below.
  */
 #include <linux/percpu.h>
 #define NV_OS_SPINLOCK_NESTING 1
@@ -1330,13 +1332,15 @@ NvU64 NV_API_CALL os_acquire_spinlock(void *pSpinlock)
 {
     os_spinlock_t *os_spinlock = (os_spinlock_t *)pSpinlock;
     unsigned long eflags;
-#if defined(NV_OS_SPINLOCK_NESTING)
-    unsigned int depth;
 
+#if defined(NV_OS_SPINLOCK_NESTING)
     local_irq_save(eflags);
-    depth = __this_cpu_inc_return(os_spinlock_depth) - 1;
-    spin_lock_nested(&os_spinlock->lock,
-                     min_t(unsigned int, depth, MAX_LOCKDEP_SUBCLASSES - 1));
+    {
+        unsigned int depth = __this_cpu_inc_return(os_spinlock_depth) - 1;
+
+        spin_lock_nested(&os_spinlock->lock,
+                         min_t(unsigned int, depth, MAX_LOCKDEP_SUBCLASSES - 1));
+    }
 #else
     NV_SPIN_LOCK_IRQSAVE(&os_spinlock->lock, eflags);
 #endif
@@ -1358,12 +1362,10 @@ void NV_API_CALL os_release_spinlock(void *pSpinlock, NvU64 oldIrql)
     eflags = os_spinlock->eflags;
     os_spinlock->eflags = 0;
 #if defined(NV_OS_SPINLOCK_NESTING)
+    /* Still with interrupts disabled: the count cannot move to another CPU. */
     __this_cpu_dec(os_spinlock_depth);
-    spin_unlock(&os_spinlock->lock);
-    local_irq_restore(eflags);
-#else
-    NV_SPIN_UNLOCK_IRQRESTORE(&os_spinlock->lock, eflags);
 #endif
+    NV_SPIN_UNLOCK_IRQRESTORE(&os_spinlock->lock, eflags);
 }
 
 #define NV_KERNEL_RELEASE    ((LINUX_VERSION_CODE >> 16) & 0x0ff)
