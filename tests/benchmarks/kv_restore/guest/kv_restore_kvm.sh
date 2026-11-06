@@ -131,6 +131,7 @@ done
 if [ -n "$src" ]; then
 	echo "KV_GUEST_FACT lba_bytes=$(cat /sys/block/${src}n1/queue/logical_block_size)"
 	echo "KV_GUEST_FACT max_hw_sectors_kb=$(cat /sys/block/${src}n1/queue/max_hw_sectors_kb)"
+	echo "KV_GUEST_FACT nvme_pci=$(basename "$(readlink -f /sys/class/nvme/$src/device)")"
 	for run in A B C; do
 		echo "KV_GUEST_RUN_BEGIN $run"
 		/opt/kv/kv_restore local-verify --nvme "/dev/ng${src#nvme}n1" --nvme-prog /opt/kv/kv_nvme_read.bpf.o \
@@ -175,6 +176,18 @@ python3 -I "$SOURCE/tests/integration/session/native/xdev_ext_mech_zc_debug.py" 
 	"$EV/debug-console.json" "$DEBUG_LOCKING" | tee "$EV/debug-console.txt" || console_status=$?
 cmp -s <(cut -d' ' -f1 "$EV/source-before.sha256") <(cut -d' ' -f1 "$EV/source-after.sha256") || {
 	echo 'FAIL the read-only source image changed'; validator_status=1; }
+# Emulated IOMMU: translated strict domain for the NVMe function, no remapping fault.
+nvme_pci=$(sed -n 's/^KV_GUEST_FACT nvme_pci=\(.*\)$/\1/p' "$EV/guest.log" | head -1)
+faults=$(grep -Eci 'DMAR: \[DMA (Read|Write)|fault addr|DMAR:.*fault' "$EV/guest.log" || true)
+if (( VIOMMU )); then
+	grep -q 'DMAR: IOMMU enabled' "$EV/guest.log" &&
+	grep -q 'DMA domain TLB invalidation policy: strict mode' "$EV/guest.log" &&
+	[[ -n "$nvme_pci" ]] && grep -q "pci $nvme_pci: Adding to iommu group" "$EV/guest.log" &&
+	(( faults == 0 )) || { echo "FAIL vIOMMU checks (nvme=$nvme_pci faults=$faults)"; validator_status=1; }
+elif grep -q 'DMAR: IOMMU enabled' "$EV/guest.log"; then
+	echo 'FAIL DMAR enabled without --viommu'; validator_status=1
+fi
+printf 'nvme_pci=%s dmar_faults=%s\n' "$nvme_pci" "$faults" >>"$EV/provenance.txt"
 if (( qemu_status == 0 && validator_status == 0 && console_status == 0 )); then
 	echo "KV_RESTORE_LOCAL_VERIFY_KVM=PASS viommu=$VIOMMU" | tee "$EV/verdict.txt"
 else
