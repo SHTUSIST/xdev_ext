@@ -7098,6 +7098,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_nvme_e2e.c"
     },
     {
+      "source": "tests/network/peer/session/guest/peer_reset_e2e.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_e2e.c"
+    },
+    {
       "source": "tests/network/peer/session/guest/peer_session_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_e2e.c"
@@ -7108,9 +7113,29 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_observe_test.c"
     },
     {
+      "source": "tests/network/peer/session/guest/reset_kvm.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_kvm.sh"
+    },
+    {
+      "source": "tests/network/peer/session/guest/reset_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_validate.py"
+    },
+    {
+      "source": "tests/network/peer/session/guest/reset_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_validate_test.py"
+    },
+    {
       "source": "tests/network/peer/session/guest/run-guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/run-guest.sh"
+    },
+    {
+      "source": "tests/network/peer/session/guest/run-reset-guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/run-reset-guest.sh"
     },
     {
       "source": "tests/network/peer/session/guest/run-session-guest.sh",
