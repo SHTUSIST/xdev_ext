@@ -1173,9 +1173,10 @@ out:
 	if (unsafe) {
 		fprintf(stderr, "chain_bench: STOP failed; leaving the session's memory mapped\n");
 		/*
-		 * A netlink-attached XDP program would outlive the process.  The
-		 * pass program has no XSKMAP and no UMEM reference; its removal
-		 * reconfigures the queue, as socket release at exit does.
+		 * A netlink-attached XDP program would outlive the process, and a
+		 * session whose STOP failed keeps its socket past exit too.  The
+		 * pass program has no XSKMAP and no UMEM reference: it goes here as
+		 * well, and the driver reconfigures the queue.
 		 */
 		if (xdev_ext_xsk_redirect_is_active(&pass))
 			xdev_ext_xsk_redirect_detach(&pass);

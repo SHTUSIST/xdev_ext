@@ -559,9 +559,10 @@ static void session_teardown(struct nnb_arm *a)
 		/* UNKNOWN native ownership: keep UMEM, rings and links until exit. */
 		fprintf(stderr, "nnb_producer: session STOP %d; native resources retained\n", stop);
 		/*
-		 * A netlink-attached XDP program would outlive the process.  The
-		 * forward pass program has no XSKMAP and no UMEM reference; its
-		 * removal reconfigures the queue, as socket release at exit does.
+		 * A netlink-attached XDP program would outlive the process, and a
+		 * session whose STOP failed keeps its socket past exit too.  The
+		 * forward pass program has no XSKMAP and no UMEM reference: it goes
+		 * here as well, and the driver reconfigures the queue.
 		 */
 		if (!a->c->reverse && xdev_ext_xsk_redirect_is_active(&p->redirect))
 			xdev_ext_xsk_redirect_detach(&p->redirect);

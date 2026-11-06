@@ -199,9 +199,17 @@ def hft_problems(session, makefile, build, gate):
         # After STOP on every exit, outside the block test_failure_history.py compiles.
         if not found or not stop < found.start() < retained:
             problems.append('the pass program is not detached after STOP on every exit')
-    # Every UMEM chunk carries guard bytes the non-measured oracle checks:
-    # the receive side must not get chunks through the fill ring.
-    if 'fq.producer' in body or 'fq_push' in body or 'fq_fill' in body:
+    # With the pass program on, an empty fill ring keeps the queue's poll
+    # returning its budget.  A measured run checks no chunk below depth, so the
+    # receive queue gets [0, min(depth, ring)) after CREATE; an unmeasured run
+    # checks every chunk's guard bytes, so its fill ring stays empty.
+    fill = re.search(r'if\(c->measured\) \{\s*uint32_t prod=\*x\.fq\.producer,'
+                     r'n=c->depth<CTL_RING_SIZE\?c->depth:CTL_RING_SIZE;\s*'
+                     r'for\(uint32_t i=0;i<n;i\+\+\)\(\(__u64 \*\)x\.fq\.descs\)\[\(prod\+i\)&x\.fq\.mask\]=\(__u64\)i\*4096;\s*'
+                     r'__atomic_store_n\(x\.fq\.producer,prod\+n,__ATOMIC_RELEASE\);\s*\}', body)
+    if not fill or fill.start() < create:
+        problems.append('a measured run leaves the XDP-mode receive queue an empty fill ring')
+    if body.count('fq.') != (fill.group(0).count('fq.') if fill else 0) or 'fq_push' in body or 'fq_fill' in body:
         problems.append('the fill ring would hand guarded chunks to the receive queue')
     section = re.search(r'ifeq \(\$\(ENABLE_SESSION\),1\)(.*?)\nendif', makefile, re.S)
     if not section or not re.search(r'^SOURCES \+= \.\./\.\./\.\./kernel/tools/xdev_ext_xsk_redirect\.c$',
@@ -504,6 +512,7 @@ CHAINS_MUTATIONS = {
 HFT_RULE = ' if(xdev_ext_xsk_redirect_zc_tx_xdp(&pass,x.fd,(int)if_nametoindex(c->ifname),XDP_FLAGS_DRV_MODE)) goto setup;\n'
 HFT_CREATE = ' if(mech(ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&create)) goto setup;\n'
 HFT_DETACH = ' if(xdev_ext_xsk_redirect_is_active(&pass)) xdev_ext_xsk_redirect_detach(&pass);\n'
+HFT_FILL = r' if\(c->measured\) \{\n  uint32_t prod=\*x\.fq\.producer.*?\n \}\n'
 HFT_MUTATIONS = {
     'rule_removed': (0, lambda t: cut(t, HFT_RULE)),
     'rule_after_create': (0, lambda t: insert_after(cut(t, HFT_RULE), HFT_CREATE, HFT_RULE)),
@@ -512,6 +521,10 @@ HFT_MUTATIONS = {
     'detach_inside_retained_block': (0, lambda t: insert_after(cut(t, HFT_DETACH), ' if(!unsafe) {\n', HFT_DETACH)),
     'fill_published': (0, lambda t: insert_after(t, HFT_CREATE,
                                                  ' __atomic_store_n(x.fq.producer,*x.fq.producer,__ATOMIC_RELEASE);\n')),
+    'measured_fill_removed': (0, lambda t: cut(t, block(HFT_FILL, t))),
+    'fill_in_unmeasured_runs_too': (0, lambda t: t.replace(' if(c->measured) {\n  uint32_t prod=', ' {\n  uint32_t prod=', 1)),
+    'fill_before_create': (0, lambda t: insert_before(cut(t, block(HFT_FILL, t)), HFT_CREATE, block(HFT_FILL, t))),
+    'fill_whole_umem': (0, lambda t: t.replace('n=c->depth<CTL_RING_SIZE?c->depth:CTL_RING_SIZE', 'n=CTL_RING_SIZE', 1)),
     'session_build_without_helper': (1, lambda t: cut(t, 'SOURCES += ../../../kernel/tools/xdev_ext_xsk_redirect.c\n')),
     'digest_without_helper': (2, lambda t: t.replace(',*BPF_SOURCES[1:],*HELPER_SOURCES)', ',*BPF_SOURCES[1:])', 1)),
     'gate_without_helper': (3, lambda t: t.replace('+list(build.HELPER_SOURCES)', '', 1)),
