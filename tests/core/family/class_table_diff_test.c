@@ -324,7 +324,8 @@ int main(void)
   { XDEV_EXT_MECH_CLASS_NET, 1, 1, 4, 0, 1, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_CPU, 3, 4, 4, 0, 0, 0, 1, 0 },
   { XDEV_EXT_MECH_CLASS_USER, 3, 3, 4, 0, 0, 1, 1, 0 },
-  { XDEV_EXT_MECH_CLASS_XDOMAIN, 1, 1, 4, XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 1, 0, 0, 0 },
+  /* 42-XDOMAIN-HOST: XDOMAIN also takes host-page frames (peer_only 0). */
+  { XDEV_EXT_MECH_CLASS_XDOMAIN, 1, 1, 4, XDEV_EXT_XDOMAIN_KNOWN_FLAGS, 0, 0, 0, 0 },
  };
  static const __u32 afxdp[] = {
   0, XDEV_EXT_AFXDP_F_RELIABLE, XDEV_EXT_AFXDP_F_FINITE, XDEV_EXT_AFXDP_F_POLICY,
@@ -396,7 +397,9 @@ int main(void)
    EQ(d->peer_dirs, 6);
    EQ(d->family, 1);
    EQ(xdev_ext_mech_class_family(c), 1);
-   EQ(d->peer_only, 1);
+   /* 42-XDOMAIN-HOST: host-page (IOU_UMEM) frames too, so not PEER-only;
+    * the row's own check refuses the remaining XSK pool. */
+   EQ(d->peer_only, 0);
    /* The opt-in EARLY contract adds only bit1 to this new XDOMAIN row;
     * all frozen pre-XDOMAIN old_* oracles remain unchanged. */
    EQ(XDEV_EXT_XDOMAIN_F_EARLY, 2);
@@ -407,8 +410,7 @@ int main(void)
    EQ(d->no_file, 0);
    EQ(d->flags_ok == NULL, true);
    for (pool = 0; pool <= 4; pool++)
-    EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER,
-       pool != XDEV_EXT_MECH_POOL_PEER);
+    EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER, false);
    for (bit = 0; bit < 32; bit++)
     EQ(new_flags_bad(d, 1U << bit), bit > 1);
    for (bit = 0; bit < 8; bit++)

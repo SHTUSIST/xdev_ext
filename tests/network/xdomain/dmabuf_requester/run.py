@@ -36,7 +36,7 @@ BOUNDARY_HEADERS = (
     "overflow.h", "pci.h", "pci-p2pdma.h", "refcount.h", "resource.h", "scatterlist.h",
     "sched.h", "sched/mm.h", "sched/signal.h", "sched/user.h", "slab.h", "swiotlb.h",
     "types.h", "uaccess.h", "uidgid.h", "user.h", "vmalloc.h", "stddef.h", "string.h",
-    "build_bug.h", "bits.h", "bitops.h", "printk.h", "bug.h", "workqueue.h",
+    "build_bug.h", "bits.h", "bitops.h", "printk.h", "bug.h", "workqueue.h", "spinlock.h",
 )
 # One anchor each; a changed upstream shim fails SETUP rather than drifting.
 SHIM_EDITS = (

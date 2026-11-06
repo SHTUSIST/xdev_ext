@@ -190,10 +190,18 @@ static void per_class(void)
  c.nr_stages=2;c.st[1]=(S){.class_id=3,.direction=TO,.fd=7};create("SOCKET-RX-first",&c,0);
  c.st[0].direction=TO;c.st[1]=(S){.class_id=7,.direction=FROM,.fd=7};create("SOCKET-RX-not-first",&c,-EINVAL);
  for(id=8;id<=11;id+=3) {
-  c=fixture(id);c.pool_kind=2;c.pool_fd=-1;c.st[0].flags=1U<<24;c.st[0].direction=0;
-  create("peer-only-before-flags-direction",&c,-EOPNOTSUPP);
   c=fixture(id);c.st[0].direction=FROM;create("peer-both-directions",&c,0);
  }
+ c=fixture(8);c.pool_kind=2;c.pool_fd=-1;c.st[0].flags=1U<<24;c.st[0].direction=0;
+ create("peer-only-before-flags-direction",&c,-EOPNOTSUPP);
+ /* 42-XDOMAIN-HOST: XDOMAIN takes host-page (IOU_UMEM) frames both ways;
+  * an XSK pool is refused by the row's check, after the generic rules. */
+ c=fixture(11);c.pool_kind=2;c.pool_fd=-1;create("XDOMAIN-host-pages-tx",&c,0);
+ c.st[0].direction=FROM;create("XDOMAIN-host-pages-rx",&c,0);
+ c=fixture(11);c.pool_kind=2;c.pool_fd=-1;c.st[0].flags=1U<<24;
+ create("XDOMAIN-host-pages-flags",&c,-EINVAL);
+ c=fixture(11);c.pool_kind=1;create("XDOMAIN-xsk-refused",&c,-EOPNOTSUPP);
+ c.st[0].flags=1U<<24;create("XDOMAIN-xsk-after-flags",&c,-EINVAL);
  c=fixture(11);c.st[0].flags=3;create("XDOMAIN-known-flags",&c,0);
  c=fixture(9);c.st[0].fd=0;create("CPU-no-file",&c,-EINVAL);
  c=fixture(9);c.st[0].arg0=11;create("CPU-max-invalid",&c,-EINVAL);

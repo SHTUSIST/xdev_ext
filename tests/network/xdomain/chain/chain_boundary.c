@@ -33,6 +33,11 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #define xdev_ext_peer_control_file stackfake_peer_control_file
 #define xdev_ext_requester_bind stackfake_requester_bind
 #define xdev_ext_requester_unbind stackfake_requester_unbind
+#define xdev_ext_requester_host_lease stackfake_requester_host_lease
+#define xdev_ext_requester_host_release stackfake_requester_host_release
+#define xdev_ext_requester_host_settled stackfake_requester_host_settled
+#define xdev_ext_requester_bind_host stackfake_requester_bind_host
+#define xdev_ext_requester_unbind_host stackfake_requester_unbind_host
 #define xdev_ext_mech_session_pool stackfake_session_pool
 #define xdev_ext_mech_session_layout stackfake_session_layout
 #define xdev_ext_mech_session_depth stackfake_session_depth
@@ -72,6 +77,11 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #undef xdev_ext_peer_control_file
 #undef xdev_ext_requester_bind
 #undef xdev_ext_requester_unbind
+#undef xdev_ext_requester_host_lease
+#undef xdev_ext_requester_host_release
+#undef xdev_ext_requester_host_settled
+#undef xdev_ext_requester_bind_host
+#undef xdev_ext_requester_unbind_host
 #undef xdev_ext_mech_session_pool
 #undef xdev_ext_mech_session_layout
 #undef xdev_ext_mech_session_depth
@@ -111,7 +121,16 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #define CHAIN_STUB(name) name
 #endif
 
+
 /* Real definitions in other units (core, peer pool, XDOMAIN class). */
+int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len,
+				  enum dma_data_direction dir, u64 *dma);
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len,
+				     bool quiesced);
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq);
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st,
+				 struct pci_dev *pdev);
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq);
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_session_id(const struct xdev_ext_mech_session *s);
 u64 xdev_ext_mech_batch_id(const struct xdev_ext_mech_batch *b);
@@ -178,6 +197,7 @@ int stack_endpoint_stage(const struct xdev_ext_mech_stage *stage)
 {
 	return session_endpoint(stage->s);
 }
+int chain_creating_endpoint(void) { return chain_creating; }
 void stack_record_dispatch(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m)
 {
 	stack_record((struct stack_event){ .kind = STACK_EV_DISPATCH, .endpoint = stack_endpoint_stage(st),
@@ -620,6 +640,261 @@ void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h, bool quiesced)
 }
 #endif
 
+/* ---- --pool host: IOU_UMEM pages, the real requester, DMA API --------- */
+unsigned chain_host_map_violations;
+bool chain_host_mode(void)
+{
+#ifdef CHAIN_HOST_POOL
+	return true;
+#else
+	return false;
+#endif
+}
+#ifdef CHAIN_HOST_POOL
+#include "chain_host_env.h"
+#define CHAIN_HOST_PAGES 64U
+/* Page index i of an endpoint holds bytes [i*PAGE, (i+1)*PAGE) of its frame
+ * memory; production code only passes these objects through. */
+struct page { unsigned endpoint; u32 index; };
+static struct page chain_page_objs[CHAIN_ENDPOINTS][CHAIN_HOST_PAGES];
+static struct page *chain_page_ptrs[CHAIN_ENDPOINTS][CHAIN_HOST_PAGES];
+static u32 chain_host_page_offset;
+/* Both NHIs need CPU synchronization (not coherent), so every sync the
+ * requester owes is visible at this boundary. */
+static const bool chain_host_needs_sync = true;
+
+void *const *chain_host_pages(unsigned endpoint, uint32_t nr)
+{
+	assert(endpoint < CHAIN_ENDPOINTS && nr <= CHAIN_HOST_PAGES);
+	for (u32 i = 0; i < CHAIN_HOST_PAGES; i++) {
+		chain_page_objs[endpoint][i] = (struct page){ endpoint, i };
+		chain_page_ptrs[endpoint][i] = &chain_page_objs[endpoint][i];
+	}
+	return (void *const *)chain_page_ptrs[endpoint];
+}
+static struct chain_device *chain_device_of_dev(struct device *d)
+{
+	return chain_device_of(container_of(d, struct pci_dev, dev));
+}
+static u64 chain_host_page_base(const struct page *page)
+{
+	/* Bytes of a page that starts before the UMEM are outside every frame. */
+	assert(!chain_host_page_offset && page->index < chain_pages());
+	return (u64)page->index * CHAIN_PAGE;
+}
+dma_addr_t dma_map_page_attrs(struct device *d, struct page *page, size_t off, size_t size,
+			      enum dma_data_direction dir, unsigned long attrs)
+{
+	struct chain_device *dev = chain_device_of_dev(d);
+	dma_addr_t addr;
+
+	assert(dev && page && page->endpoint == dev->endpoint && off + size <= CHAIN_PAGE);
+	addr = chain_page_dma(dev, chain_host_page_base(page) + off);
+	chain_record((struct chain_event){ .kind = CHAIN_EV_DMA_MAP, .endpoint = dev->endpoint,
+		.device = dev->device, .address = addr, .offset = chain_host_page_base(page) + off,
+		.length = size, .member = dir, .control_type = (attrs & DMA_ATTR_SKIP_CPU_SYNC) ? 1 : 0,
+		.worker = chain_core_current_worker() });
+	return addr;
+}
+void dma_unmap_page_attrs(struct device *d, dma_addr_t addr, size_t size,
+			  enum dma_data_direction dir, unsigned long attrs)
+{
+	struct chain_device *dev = chain_device_of_dev(d);
+
+	chain_record((struct chain_event){ .kind = CHAIN_EV_DMA_UNMAP, .endpoint = dev->endpoint,
+		.device = dev->device, .address = addr, .length = size, .member = dir,
+		.control_type = (attrs & DMA_ATTR_SKIP_CPU_SYNC) ? 1 : 0 });
+}
+int dma_mapping_error(struct device *d, dma_addr_t addr) { (void)d; return addr == DMA_MAPPING_ERROR; }
+bool dma_need_sync(struct device *d, dma_addr_t addr) { (void)d; (void)addr; return chain_host_needs_sync; }
+static void chain_host_sync(struct device *d, dma_addr_t addr, size_t size, enum dma_data_direction dir,
+			    unsigned target)
+{
+	struct chain_device *dev = chain_device_of_dev(d);
+
+	chain_record((struct chain_event){ .kind = CHAIN_EV_DMA_SYNC, .endpoint = dev->endpoint,
+		.device = dev->device, .address = addr, .length = size, .member = dir,
+		.control_type = target, .worker = chain_core_current_worker() });
+}
+void dma_sync_single_for_device(struct device *d, dma_addr_t addr, size_t size, enum dma_data_direction dir)
+{ chain_host_sync(d, addr, size, dir, 1); }
+void dma_sync_single_for_cpu(struct device *d, dma_addr_t addr, size_t size, enum dma_data_direction dir)
+{ chain_host_sync(d, addr, size, dir, 2); }
+/* The requester's PEER branch is compiled, never reached, on host pages. */
+int pci_p2pdma_distance(struct pci_dev *provider, struct device *client, bool verbose)
+{ (void)provider; (void)client; (void)verbose; abort(); }
+bool is_swiotlb_force_bounce(struct device *d) { (void)d; abort(); }
+bool use_dma_iommu(struct device *d) { (void)d; abort(); }
+const void *get_dma_ops(struct device *d) { (void)d; abort(); }
+int xdev_ext_peer_file_describe(struct file *authority, struct pci_dev *requester,
+				struct xdev_ext_peer_backing *b)
+{ (void)authority; (void)requester; (void)b; abort(); }
+int xdev_ext_peer_file_premap(struct file *authority, struct pci_dev *requester)
+{ (void)authority; (void)requester; abort(); }
+
+/* NVMe in host mode: the block layer maps each bio piece for the controller
+ * for the duration of one request; the device model then reaches only that. */
+int chain_host_dma_map(const void *device, const void *page, uint32_t off, uint32_t len,
+		       bool device_writes, uint64_t *dma)
+{
+	struct chain_device *dev = chain_device_of(device);
+	const struct page *pg = page;
+	u64 offset;
+
+	if (!dev || !pg || pg->endpoint != dev->endpoint || off + len > CHAIN_PAGE || !len)
+		return -EFAULT;
+	offset = chain_host_page_base(pg) + off;
+	for (unsigned i = 0; i < chain_nleases; i++) {
+		struct chain_lease *o = &chain_leases[i];
+		if (o->dev->endpoint != dev->endpoint || !chain_overlap(o->offset, o->len, offset, len))
+			continue;
+		if (o->retained || (o->live && (device_writes || o->dir == DMA_FROM_DEVICE))) {
+			chain_lease_violations++;
+			fprintf(stderr, "CHAIN_LEASE_VIOLATION ep=%u off=%llu len=%u (block mapping)\n",
+				dev->endpoint, (unsigned long long)offset, len);
+		}
+	}
+	assert(chain_nleases < CHAIN_LEASES);
+	chain_leases[chain_nleases++] = (struct chain_lease){ dev, offset, ++chain_ticket, len,
+		device_writes ? DMA_FROM_DEVICE : DMA_TO_DEVICE, true, false };
+	*dma = chain_page_dma(dev, offset);
+	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint,
+		.device = device, .offset = offset, .length = len, .address = *dma,
+		.member = device_writes ? DMA_FROM_DEVICE : DMA_TO_DEVICE,
+		.worker = chain_core_current_worker() });
+	return 0;
+}
+static struct chain_lease *chain_live_lease_at(const struct chain_device *dev, u64 dma, u32 len)
+{
+	for (unsigned i = chain_nleases; i; i--) {
+		struct chain_lease *l = &chain_leases[i - 1];
+		if (l->live && l->dev == dev && l->len == len && chain_page_dma(dev, l->offset) == dma)
+			return l;
+	}
+	return NULL;
+}
+void chain_host_dma_unmap(const void *device, uint64_t dma, uint32_t len, bool quiesced)
+{
+	struct chain_device *dev = chain_device_of(device);
+	struct chain_lease *l = dev ? chain_live_lease_at(dev, dma, len) : NULL;
+
+	assert(l);
+	l->live = false;
+	l->retained = !quiesced;
+	chain_record((struct chain_event){ .kind = CHAIN_EV_RELEASE, .endpoint = dev->endpoint,
+		.device = device, .offset = l->offset, .length = len, .quiesced = quiesced,
+		.worker = chain_core_current_worker() });
+}
+
+/* The network family's host-page bind comes here (renamed in the family
+ * unit): the real requester maps the pool for the stage's own NHI, and the
+ * event records what the bind reported, read by the cases. */
+int chain_host_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st, struct pci_dev *pdev)
+{
+	struct chain_device *dev = chain_device_of(pdev);
+	int ret;
+
+	if (!dev || (int)dev->endpoint != session_endpoint(st->s))
+		return -EXDEV;
+	ret = xdev_ext_requester_bind_host(rq, st, pdev);
+	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint, .device = pdev,
+		.stage = st->index, .member = 99, .address = rq->adm.backing,
+		.length = st->caps.reachability, .offset = rq->adm.refused, .status = ret });
+	return ret;
+}
+void chain_host_unbind(struct xdev_ext_requester *rq) { xdev_ext_requester_unbind_host(rq); }
+/* The network family's host leases come here (renamed in the family unit):
+ * a granted element becomes a live lease of the NHI for the device model,
+ * and its address must be the NHI's mapping of exactly that page and offset. */
+int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_data_direction dir,
+		     u64 *dma)
+{
+	struct chain_device *dev = chain_device_of(rq->pdev);
+	u64 want;
+	size_t at;
+	int ret;
+
+	assert(dev && chain_nleases < CHAIN_LEASES);
+	/* Recorded when the family asks, so effects of the lease call (its sync
+	 * for the device) follow this event; a refusal is marked in it. */
+	want = chain_page_dma(dev, off);
+	chain_record((struct chain_event){ .kind = CHAIN_EV_LEASE, .endpoint = dev->endpoint,
+		.device = rq->pdev, .offset = off, .length = len, .address = want, .member = dir,
+		.worker = chain_core_current_worker() });
+	at = chain_nevents - 1;
+	ret = xdev_ext_requester_host_lease(rq, off, len, dir, dma);
+	if (ret) {
+		chain_events[at].status = ret;
+		return ret;
+	}
+	if (*dma != want) {
+		chain_host_map_violations++;
+		fprintf(stderr, "CHAIN_HOST_LEASE_ADDRESS off=%llu dma=%llx want=%llx\n",
+			(unsigned long long)off, (unsigned long long)*dma, (unsigned long long)want);
+	}
+	for (unsigned i = 0; i < chain_nleases; i++) {
+		struct chain_lease *o = &chain_leases[i];
+		if (o->dev->endpoint == dev->endpoint && chain_overlap(o->offset, o->len, off, len) &&
+		    (o->retained || (o->live && (dir == DMA_FROM_DEVICE || o->dir == DMA_FROM_DEVICE)))) {
+			chain_lease_violations++;
+			fprintf(stderr, "CHAIN_LEASE_VIOLATION ep=%u off=%llu len=%u (host lease)\n",
+				dev->endpoint, (unsigned long long)off, len);
+		}
+	}
+	chain_leases[chain_nleases++] = (struct chain_lease){ dev, off, ++chain_ticket, len, dir, true, false };
+	return 0;
+}
+void chain_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool quiesced)
+{
+	struct chain_device *dev = chain_device_of(rq->pdev);
+	struct chain_lease *l = dev ? chain_live_lease_at(dev, dma, len) : NULL;
+
+	assert(l);
+	l->live = false;
+	l->retained = !quiesced;
+	chain_record((struct chain_event){ .kind = CHAIN_EV_RELEASE, .endpoint = dev->endpoint,
+		.device = rq->pdev, .offset = l->offset, .length = len, .quiesced = quiesced,
+		.worker = chain_core_current_worker() });
+	xdev_ext_requester_host_release(rq, dma, len, quiesced);
+}
+#else
+/* PEER modes: the family never reaches a host-page bind or lease. */
+int chain_host_bind(struct xdev_ext_requester *rq, struct xdev_ext_mech_stage *st, struct pci_dev *pdev)
+{ (void)rq; (void)st; (void)pdev; abort(); }
+void chain_host_unbind(struct xdev_ext_requester *rq) { (void)rq; abort(); }
+int chain_host_lease(struct xdev_ext_requester *rq, u64 off, u32 len, enum dma_data_direction dir,
+		     u64 *dma)
+{ (void)rq; (void)off; (void)len; (void)dir; (void)dma; abort(); }
+void chain_host_release(struct xdev_ext_requester *rq, u64 dma, u32 len, bool quiesced)
+{ (void)rq; (void)dma; (void)len; (void)quiesced; abort(); }
+void *const *chain_host_pages(unsigned endpoint, uint32_t nr) { (void)endpoint; (void)nr; abort(); }
+int chain_host_dma_map(const void *device, const void *page, uint32_t off, uint32_t len,
+		       bool device_writes, uint64_t *dma)
+{ (void)device; (void)page; (void)off; (void)len; (void)device_writes; (void)dma; abort(); }
+void chain_host_dma_unmap(const void *device, uint64_t dma, uint32_t len, bool quiesced)
+{ (void)device; (void)dma; (void)len; (void)quiesced; abort(); }
+int chain_umem_register(unsigned endpoint, uint32_t frame_size, uint32_t nr_frames, uint32_t page_offset)
+{ (void)endpoint; (void)frame_size; (void)nr_frames; (void)page_offset; abort(); }
+#ifndef CHAIN_REAL_PEER
+/* A PEER requester has no host mapping: always settled. */
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq) { return rq->host ? -EIO : 0; }
+#else
+/* The real requester unit's host-page branch: never reached with PEER pools. */
+#include "chain_host_env.h"
+dma_addr_t dma_map_page_attrs(struct device *d, struct page *page, size_t off, size_t size,
+			      enum dma_data_direction dir, unsigned long attrs)
+{ (void)d; (void)page; (void)off; (void)size; (void)dir; (void)attrs; abort(); }
+void dma_unmap_page_attrs(struct device *d, dma_addr_t addr, size_t size,
+			  enum dma_data_direction dir, unsigned long attrs)
+{ (void)d; (void)addr; (void)size; (void)dir; (void)attrs; abort(); }
+int dma_mapping_error(struct device *d, dma_addr_t addr) { (void)d; (void)addr; abort(); }
+void dma_sync_single_for_device(struct device *d, dma_addr_t addr, size_t size, enum dma_data_direction dir)
+{ (void)d; (void)addr; (void)size; (void)dir; abort(); }
+void dma_sync_single_for_cpu(struct device *d, dma_addr_t addr, size_t size, enum dma_data_direction dir)
+{ (void)d; (void)addr; (void)size; (void)dir; abort(); }
+#endif
+#endif
+
 /* ---- BPF invocation of the reference programs ------------------------- */
 struct xdev_ext_mech_ctx chain_program_ctx(struct xdev_ext_mech_stage *st,
 					   const struct xdev_ext_mech_call_args *a);
@@ -714,6 +989,15 @@ int chain_world(const struct chain_link_config *cfg)
 		chain_install(&chain_control[e], CHAIN_FILE_CONTROL, e);
 		chain_install(&chain_allocation[e], CHAIN_FILE_ALLOCATION, e);
 	}
+#ifdef CHAIN_HOST_POOL
+	/* Each endpoint's ring registers its frame memory as its IOU_UMEM. */
+	chain_host_page_offset = cfg->host_page_offset;
+	for (unsigned e = 0; e < CHAIN_ENDPOINTS; e++) {
+		ret = chain_umem_register(e, cfg->frame_size, cfg->nr_frames, cfg->host_page_offset);
+		if (ret)
+			return ret;
+	}
+#endif
 #ifdef CHAIN_REAL_PEER
 	ret = chain_bridge_setup(chain_memory_bytes);
 	if (ret)
@@ -774,7 +1058,8 @@ struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override
 {
 	struct xdev_ext_mech_create c = {
 		.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
-		.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = chain_fd_for(chain_host1_allocation()),
+		.pool_kind = chain_host_mode() ? XDEV_EXT_MECH_POOL_IOU_UMEM : XDEV_EXT_MECH_POOL_PEER,
+		.pool_fd = chain_host_mode() ? -1 : chain_fd_for(chain_host1_allocation()),
 		.layout = { .frame_size = chain_cfg.frame_size, .seg_len = chain_cfg.frame_size,
 			    .group_bytes = chain_cfg.group_bytes },
 		.depth = chain_cfg.depth, .eventfd = -1,
@@ -795,7 +1080,8 @@ struct xdev_ext_mech_session *chain_rx_session(int *err)
 {
 	struct xdev_ext_mech_create c = {
 		.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
-		.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = chain_fd_for(&chain_allocation[1]),
+		.pool_kind = chain_host_mode() ? XDEV_EXT_MECH_POOL_IOU_UMEM : XDEV_EXT_MECH_POOL_PEER,
+		.pool_fd = chain_host_mode() ? -1 : chain_fd_for(&chain_allocation[1]),
 		.layout = { .frame_size = chain_cfg.frame_size, .seg_len = chain_cfg.frame_size,
 			    .group_bytes = chain_cfg.group_bytes },
 		.depth = chain_cfg.depth, .eventfd = -1,
@@ -814,6 +1100,9 @@ int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t firs
 {
 	chain_record((struct chain_event){ .kind = CHAIN_EV_START, .endpoint = session_endpoint(s),
 		.length = batches, .group = first_seq });
+	/* IOU_UMEM frames are the ring's: user space lends them at START. */
+	if (chain_host_mode())
+		return chain_session_start_host(s, batches, first_seq);
 	return chain_session_start(s, batches, first_seq);
 }
 
@@ -891,13 +1180,26 @@ const void *chain_device(unsigned endpoint, enum chain_device_kind kind)
 			return chain_devices[i].device;
 	return NULL;
 }
-unsigned chain_violations(void) { return chain_lease_violations + chain_program_context_violations; }
+unsigned chain_violations(void)
+{
+	return chain_lease_violations + chain_program_context_violations + chain_host_map_violations;
+}
 unsigned chain_live_leases(unsigned endpoint, enum chain_device_kind kind, uint64_t offset, uint32_t len)
 {
 	unsigned n = 0;
 	for (unsigned i = 0; i < chain_nleases; i++) {
 		const struct chain_lease *l = &chain_leases[i];
 		n += l->live && l->dev->endpoint == endpoint && l->dev->kind == kind &&
+		     chain_overlap(l->offset, l->len, offset, len);
+	}
+	return n;
+}
+unsigned chain_retained_leases(unsigned endpoint, enum chain_device_kind kind, uint64_t offset, uint32_t len)
+{
+	unsigned n = 0;
+	for (unsigned i = 0; i < chain_nleases; i++) {
+		const struct chain_lease *l = &chain_leases[i];
+		n += l->retained && l->dev->endpoint == endpoint && l->dev->kind == kind &&
 		     chain_overlap(l->offset, l->len, offset, len);
 	}
 	return n;

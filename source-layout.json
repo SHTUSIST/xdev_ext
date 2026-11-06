@@ -5706,6 +5706,30 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/transport_pending/transport_counters_test.py"
     },
     {
+      "source": "tests/core/requester_host/README.md",
+      "logical_path": "tests/core/requester_host/README.md"
+    },
+    {
+      "source": "tests/core/requester_host/boundary.c",
+      "logical_path": "tests/core/requester_host/boundary.c"
+    },
+    {
+      "source": "tests/core/requester_host/boundary.h",
+      "logical_path": "tests/core/requester_host/boundary.h"
+    },
+    {
+      "source": "tests/core/requester_host/cases.c",
+      "logical_path": "tests/core/requester_host/cases.c"
+    },
+    {
+      "source": "tests/core/requester_host/run.py",
+      "logical_path": "tests/core/requester_host/run.py"
+    },
+    {
+      "source": "tests/core/requester_host/shim.h",
+      "logical_path": "tests/core/requester_host/shim.h"
+    },
+    {
       "source": "tests/integration/analysis/accounting/Makefile",
       "logical_path": "tests/eval/common/Makefile"
     },
@@ -7949,6 +7973,18 @@
     {
       "source": "tests/network/xdomain/chain/run.py",
       "logical_path": "tests/network/xdomain/chain/run.py"
+    },
+    {
+      "source": "tests/network/xdomain/chain/host_run.py",
+      "logical_path": "tests/network/xdomain/chain/host_run.py"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_umem.c.in",
+      "logical_path": "tests/network/xdomain/chain/chain_umem.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_host_env.h",
+      "logical_path": "tests/network/xdomain/chain/chain_host_env.h"
     },
     {
       "source": "tests/network/xdomain/contracts/tb_protocol_handler_lifetime_cases.c.in",

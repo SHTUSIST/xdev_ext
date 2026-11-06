@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0
-/* XDOMAIN device vtable: NHI data rings carry only device-memory elements;
- * a host-memory control ring pair carries protocol messages. */
+/* XDOMAIN device vtable: NHI data rings carry only payload elements, in PEER
+ * device memory or IOU_UMEM host pages; a host-memory control ring pair
+ * carries protocol messages. */
 #include <linux/bitmap.h>
 #include <linux/crc32.h>
 #include <linux/dma-mapping.h>
@@ -422,6 +423,9 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 			.sof = XDEV_EXT_XD_PDF_START,
 			.eof = XDEV_EXT_XD_PDF_END,
 		};
+		/* IOU_UMEM host pages: the requester's mapping of the element. */
+		if (e[i].lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA)
+			f->buffer_phy = e[i].lease.u.hdma.dma;
 		/* The native API only rejects a stopped ring. Stop clears up
 		 * under xl->lock before touching any ring, so this whole group
 		 * shares one running window. Hardware fullness queues the same
@@ -851,7 +855,7 @@ int xdev_ext_xd_rings_start(struct xdev_ext_xd_link *xl)
 }
 
 /* ctl_mutex held, never from a frame callback, never with ep_mutex or a
- * spinlock held.  Data RX first: its posted device-memory buffers are
+ * spinlock held.  Data RX first: its posted payload buffers are
  * reported canceled (unknown) before the control ring that could still
  * deliver their acknowledgements stops. */
 void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
@@ -933,7 +937,7 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		/* Cancellation alone proves nothing about DMA.  A healthy native
 		 * STOPPED barrier, however, disables the host ring and drains its
 		 * callbacks.  This backing contains control messages only; payload
-		 * device-memory custody remains UNKNOWN in the data callbacks.
+		 * custody remains UNKNOWN in the data callbacks.
 		 */
 		if (n->disposition == XDEV_EXT_XD_NATIVE_STOPPED &&
 		    !xl->nhi_gone && *n->slot && !(*n->slot)->nhi->going_away &&

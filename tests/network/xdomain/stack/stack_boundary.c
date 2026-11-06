@@ -798,6 +798,27 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester*r){
 	pci_dev_put(r->pdev);
 	r->pdev=NULL;
 }
+/* PEER-only environment: the recording bind above never creates a host-page
+ * mapping, so no host lease can be reached and every requester is settled. */
+int xdev_ext_requester_host_lease(struct xdev_ext_requester*r,u64 off,u32 len,enum dma_data_direction dir,u64*dma){
+	(void)r;(void)off;(void)len;(void)dir;(void)dma;
+	abort();
+}
+void xdev_ext_requester_host_release(struct xdev_ext_requester*r,u64 dma,u32 len,bool quiesced){
+	(void)r;(void)dma;(void)len;(void)quiesced;
+	abort();
+}
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester*r){
+	return r->host?-EIO:0;
+}
+int xdev_ext_requester_bind_host(struct xdev_ext_requester*r,struct xdev_ext_mech_stage*st,struct pci_dev*p){
+	(void)r;(void)st;(void)p;
+	abort();
+}
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester*r){
+	(void)r;
+	abort();
+}
 struct xdev_ext_mech_pool*xdev_ext_mech_session_pool(struct xdev_ext_mech_session*s){
 	return &s->pool;
 }

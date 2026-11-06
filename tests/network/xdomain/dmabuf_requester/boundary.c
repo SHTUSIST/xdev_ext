@@ -33,6 +33,20 @@ int pci_p2pdma_distance(struct pci_dev *provider, struct device *client, bool ve
 	abort();
 }
 bool use_dma_iommu(struct device *dev) { (void)dev; return fixture_dma_iommu; }
+/* Host-page requester mapping: never reached with a PEER pool. */
+dma_addr_t dma_map_page_attrs(struct device *dev, struct page *page, size_t offset, size_t size,
+			      enum dma_data_direction dir, unsigned long attrs)
+{ (void)dev; (void)page; (void)offset; (void)size; (void)dir; (void)attrs; abort(); }
+void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr, size_t size,
+			  enum dma_data_direction dir, unsigned long attrs)
+{ (void)dev; (void)addr; (void)size; (void)dir; (void)attrs; abort(); }
+int dma_mapping_error(struct device *dev, dma_addr_t addr) { (void)dev; (void)addr; abort(); }
+void dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size,
+				enum dma_data_direction dir)
+{ (void)dev; (void)addr; (void)size; (void)dir; abort(); }
+void dma_sync_single_for_cpu(struct device *dev, dma_addr_t addr, size_t size,
+			     enum dma_data_direction dir)
+{ (void)dev; (void)addr; (void)size; (void)dir; abort(); }
 const void *get_dma_ops(struct device *dev) { (void)dev; return NULL; }
 int misc_register(struct miscdevice *misc) { (void)misc; return 0; }
 long xdev_ext_peer_net_ioctl(unsigned long arg) { (void)arg; return -ENOTTY; }
