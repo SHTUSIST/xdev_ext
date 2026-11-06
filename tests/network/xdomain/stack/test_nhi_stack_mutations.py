@@ -21,6 +21,8 @@ HERE = Path(__file__).resolve().parent
 FIXTURE = Path('tools/testing/selftests/xdev_ext_mech/xdomain')
 NHI = Path('drivers/thunderbolt/nhi.c')
 CLASS = Path('io_uring/xdomain/xdev_ext_xdomain_class.c')
+RING = Path('io_uring/xdomain/xdev_ext_xdomain_ring.c')
+POLL_FIXTURE = FIXTURE.parent / 'peer_graph'
 MUTATIONS = (
     ('omit_batch_notify', 'batched_doorbells_wrap'),
     ('omit_poll_refill', 'no_interrupt_poll_refill'),
@@ -28,6 +30,10 @@ MUTATIONS = (
     ('omit_quarantine_key_unregister', 'poll_batch_retirement'),
     ('ack_implies_local_completion', 'production_ack_orders'),
     ('shift_nhi_descriptor_address', 'batched_doorbells_wrap'),
+    ('omit_irq_budget_requeue', 'irq-budget-64-65'),
+    ('rearm_irq_at_full_budget', 'irq-budget-64-65'),
+    ('raise_irq_budget_to_65', 'irq-budget-64-65'),
+    ('omit_irq_stop_cancel', 'irq-budget-stop'),
 )
 
 
@@ -50,7 +56,10 @@ def copy_inputs(kernel, dest):
         'stack_nhi.c', 'stack_nhi_compat.h', 'stack_nhi_source.py',
         'test_nhi_stack_mutations.py')]
     extras += [FIXTURE.parent / 'peer_graph' / name for name in (
-        'xdomain_ring_test.py', 'xdomain_fixture.py')]
+        'xdomain_ring_test.py', 'xdomain_fixture.py',
+        'xdomain_production_poll_test.py', 'xdomain_production_poll_cases.c',
+        'xdomain_production_poll_boundary.c', 'xdomain_production_poll_x3.c',
+        'xdomain_production_poll_nhi.c')]
     # Optional declaration-only support headers remain part of the fixture.
     extras += [path.relative_to(kernel) for path in here.glob('stack_nhi*.h')]
     for relative in sorted(set(extras)):
@@ -100,12 +109,29 @@ def mutate(kernel, name):
     elif name == 'shift_nhi_descriptor_address':
         replace_once(path, 'descriptor->phys = frame->buffer_phy;',
                      'descriptor->phys = frame->buffer_phy + 4096;')
+    elif name == 'omit_irq_budget_requeue':
+        replace_in_function(kernel, kernel / RING, 'xdev_ext_xd_irq_drain',
+                            'again = done == XDEV_EXT_XD_POLL_BUDGET;',
+                            'again = false; /* mutation: full budget loses continuation */')
+    elif name == 'rearm_irq_at_full_budget':
+        replace_in_function(kernel, kernel / RING, 'xdev_ext_xd_irq_drain',
+                            'i = 0; done < XDEV_EXT_XD_POLL_BUDGET && i < rs->count; i++',
+                            'i = 0; i < rs->count; i++ /* mutation: unmask at full budget */')
+    elif name == 'raise_irq_budget_to_65':
+        replace_once(kernel / RING, '#define XDEV_EXT_XD_POLL_BUDGET 64U',
+                     '#define XDEV_EXT_XD_POLL_BUDGET 65U')
+    elif name == 'omit_irq_stop_cancel':
+        replace_in_function(kernel, kernel / RING, 'xdev_ext_xd_rings_stop',
+                            'cancel_delayed_work_sync(&xl->poll_work);',
+                            '(void)&xl->poll_work; /* mutation: pending budget work survives STOP */')
     else:
         raise ValueError('unregistered mutation ' + name)
 
 
 def run(kernel, out, case=None):
-    command = [sys.executable, '-I', str(kernel / FIXTURE / 'nhi_stack_test.py'),
+    script = (POLL_FIXTURE / 'xdomain_production_poll_test.py'
+              if case and case.startswith('irq-') else FIXTURE / 'nhi_stack_test.py')
+    command = [sys.executable, '-I', str(kernel / script),
                '--kernel', str(kernel), '--keep-build', str(out)]
     if case:
         command += ['--case', case]
@@ -126,6 +152,20 @@ def execute(kernel, out):
         print('NHI_STACK_MUTATION_BASELINE_NOT_GREEN: no mutation proof', flush=True)
         print(baseline.stdout + baseline.stderr, flush=True)
         return 2
+    # The new mutations must first pass the exact same unmodified IRQ cases.
+    # The adapter-only baseline above does not select poll_on_interrupt.
+    for case in dict.fromkeys(case for _, case in MUTATIONS if case.startswith('irq-')):
+        baseline_case_dir = baseline_dir / case
+        baseline_case_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            result = run(kernel, baseline_case_dir, case)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            print('NHI_STACK_MUTATION_BASELINE_ERROR: ' + str(error), flush=True)
+            return 2
+        if result.returncode:
+            print('NHI_STACK_MUTATION_BASELINE_NOT_GREEN: ' + case, flush=True)
+            print(result.stdout + result.stderr, flush=True)
+            return 2
     print('TAP version 13\n1..' + str(len(MUTATIONS)), flush=True)
     records = []
     for number, (name, case) in enumerate(MUTATIONS, 1):
@@ -138,7 +178,7 @@ def execute(kernel, out):
                 copy_inputs(kernel, private)
                 mutate(private, name)
                 difference = []
-                for relative in (NHI, CLASS):
+                for relative in (NHI, CLASS, RING):
                     difference.extend(difflib.unified_diff(
                         (kernel / relative).read_text().splitlines(keepends=True),
                         (private / relative).read_text().splitlines(keepends=True),
@@ -151,7 +191,9 @@ def execute(kernel, out):
                 named = re.search(r'^STACK_ASSERT ' + re.escape(case) + r': ([^\n]+)', output, re.M)
                 killed = (result.returncode == 1 and manifest.get('compile_exit') == 0 and
                           len(cases) == 1 and cases[0]['returncode'] == 1 and named and
-                          'AddressSanitizer' not in output and 'runtime error:' not in output)
+                          not any(marker in output for marker in (
+                              'AddressSanitizer', 'LeakSanitizer',
+                              'UndefinedBehaviorSanitizer', 'runtime error:')))
                 record.update(status='pass' if killed else 'fail',
                               compile_exit=manifest.get('compile_exit'),
                               runner_exit=result.returncode,
