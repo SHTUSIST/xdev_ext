@@ -1151,6 +1151,21 @@ finish() {
 trap finish EXIT
 set -eu
 . /opt/xdev_ext/zc.env
+# igb resets its link whenever an XDP program is attached or removed (a
+# receiver's redirect, a transmit-only pass program, either one's detach at
+# exit); a sender must not start before both wire ports carry traffic again.
+# virtio-net never drops carrier, so this returns at once there.
+nic_link_wait() {
+	nic_link_rounds=${1:-$((100 * timeout_factor))}
+	while [ "$nic_link_rounds" -gt 0 ]; do
+		[ "$(cat /sys/class/net/eth0/carrier 2>/dev/null)" = 1 ] &&
+			[ "$(cat /sys/class/net/eth1/carrier 2>/dev/null)" = 1 ] && return 0
+		nic_link_rounds=$((nic_link_rounds - 1))
+		sleep 0.05
+	done
+	echo 'FAIL wire link down: eth0 or eth1 has no carrier' >&2
+	return 1
+}
 if [ "${nic_model:-virtio}" = igb ]; then
 	for cpu_online in /sys/devices/system/cpu/cpu[1-9]*/online; do
 		[ -e "$cpu_online" ] && echo 1 >"$cpu_online"
@@ -1369,6 +1384,7 @@ for i in $(/bin/busybox seq 1 "$((200 * timeout_factor))"); do
 	sleep 0.05
 done
 test "$ready" = 1
+nic_link_wait
 # Chain b has the same native AF_XDP TX stage as the default sender.
 if [ "$ce_sim" = 1 ]; then
 	set -- ce-chain --chain b --ce-dev /dev/xdev_ext_ce_sim --ce-len "$ce_len"
@@ -1528,6 +1544,7 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ]; then
         --timeout-ms "$rx_timeout_ms" >/tmp/nicfb-socket-rx.log 2>&1 &
     nicfb_rx=$!
     nicfb_ready /tmp/nicfb-socket-rx.log socket
+    nic_link_wait
     set +e
     $ctl nvme-nic --nic-fallback force --ifname eth0 --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
         --peer-mac 02:00:00:00:00:02 --local-ip 127.0.0.1 --peer-ip 127.0.0.1 \
@@ -1560,6 +1577,7 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ]; then
         --timeout-ms "$rx_timeout_ms" >/tmp/nicfb-copy-rx.log 2>&1 &
     nicfb_rx=$!
     nicfb_ready /tmp/nicfb-copy-rx.log copy
+    nic_link_wait
     set +e
     $ctl nvme-nic --copy --ifname eth0 --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
         --peer-mac 02:00:00:00:00:02 --local-ip 192.0.2.1 --peer-ip 192.0.2.2 \
@@ -1605,6 +1623,7 @@ if [ "$nic_fallback" = 1 ] && [ "$fault" = none ]; then
             --group-bytes 8192 --timeout-ms "$rx_timeout_ms" >/tmp/nicfb-mixed-rx.log 2>&1 &
         nicfb_rx=$!
         nicfb_ready /tmp/nicfb-mixed-rx.log "$nicfb_rx_path"
+        nic_link_wait
         set +e
         $ctl nvme-nic --nic-fallback "$nicfb_tx_policy" --ifname "$nicfb_tx_if" \
             --src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
