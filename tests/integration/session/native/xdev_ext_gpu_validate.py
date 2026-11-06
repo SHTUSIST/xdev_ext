@@ -26,7 +26,9 @@ compare=equal.
 
 An XDEV_EXT_GPU_PROBLEM line (a guest step past its limit, or RM lock
 assertions after which the guest skipped its later GPU cases) is always a
-FAIL problem.
+FAIL problem.  The RM lock assertion lines are NVRM error lines themselves,
+also when they appear during a step the guest does not check after, such as
+the module unload.
 """
 
 import argparse
@@ -48,7 +50,10 @@ UNSUPPORTED_RAW = {
     'dmabuf-peer': (re.compile(r'^XDEV_EXT_GPU_LOG dmabuf-peer: XDEV_EXT_GPU_DMABUF device=\S+ '
                                r'dma_buf_supported=0$', re.M),),
 }
-GPU_ERRORS = re.compile(r'NVRM: (?:Xid \(|.*RmInitAdapter failed|.*GPU has fallen off the bus)')
+# The two RM lock assertions mean a thread was left owning RM's locks.
+GPU_ERRORS = re.compile(r'NVRM: (?:Xid \(|.*RmInitAdapter failed|.*GPU has fallen off the bus'
+                        r'|.*GPU lock already acquired by this thread'
+                        r'|.*rmGpuLocksGetOwnedMask\(\) == 0)')
 CE_CASES = ('ce-chain-d', 'ce-chain-a')
 CE_RAW = {
     'native': r'CUDA allocation=native bdf=\S+ va=0x[0-9a-f]+ bytes=[0-9]+',

@@ -16,10 +16,12 @@
 # with XDEV_EXT_GPU_LOG so the main console validator never parses it.
 #
 # A tool or rmmod blocked in the kernel (RM waiting on a lock that a stuck
-# thread owns) may never return, and even SIGKILL waits for it: no step is
-# waited for past its limit.  A step past its limit, or RM lock assertions in
-# the kernel log, print an XDEV_EXT_GPU_PROBLEM line and every later GPU case
-# is skipped, so the harness still runs the unload and powers off.
+# thread owns, or a GSP still running from an earlier guest) may never
+# return, and even SIGKILL waits for it: no step that enters RM or the
+# xdev_ext module is waited for past its limit.  A step past its limit, or RM
+# lock assertions in the kernel log, print an XDEV_EXT_GPU_PROBLEM line and
+# every later GPU case is skipped, so the harness still runs the unload and
+# powers off.
 set -u
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
 
@@ -105,19 +107,25 @@ skipped() {
 	case_result "$1" FAIL reason="skipped-after-$gpu_problem"
 }
 
+# module_step STEP STATUS LOG: a failed step before the cases ends the run.
+module_step() {
+	[ "$2" = 0 ] && return 0
+	log_file "$1" "$3"
+	if timed_out "$1" "$2"; then
+		echo "XDEV_EXT_GPU_MODULES=FAIL step=$1 reason=timeout limit_s=$case_limit_s release=$release"
+	else
+		echo "XDEV_EXT_GPU_MODULES=FAIL step=$1 release=$release"
+	fi
+	exit 1
+}
+
 # --- G0: our NVIDIA modules on the physical GPU --------------------------
 # The CE mechanism backend registers only with NVreg_EnableXdevExtCeDma=1
 # (nv-xdev_ext-ce-backend.c); without it every CE stage bind is ENODEV.
-if ! insmod "$dir/nvidia.ko" NVreg_EnableXdevExtCeDma=1 >/tmp/insmod-nvidia.log 2>&1; then
-	log_file insmod /tmp/insmod-nvidia.log
-	echo "XDEV_EXT_GPU_MODULES=FAIL step=insmod-nvidia release=$release"
-	exit 1
-fi
-if ! insmod "$dir/nvidia-uvm.ko" >/tmp/insmod-uvm.log 2>&1; then
-	log_file insmod /tmp/insmod-uvm.log
-	echo "XDEV_EXT_GPU_MODULES=FAIL step=insmod-uvm release=$release"
-	exit 1
-fi
+bounded "$case_limit_s" /tmp/insmod-nvidia.log insmod "$dir/nvidia.ko" NVreg_EnableXdevExtCeDma=1
+module_step insmod-nvidia "$?" /tmp/insmod-nvidia.log
+bounded "$case_limit_s" /tmp/insmod-uvm.log insmod "$dir/nvidia-uvm.ko"
+module_step insmod-uvm "$?" /tmp/insmod-uvm.log
 gpu_bdf=
 for link in /sys/bus/pci/drivers/nvidia/????:??:??.?; do
 	[ -e "$link" ] || continue
@@ -133,13 +141,14 @@ mknod -m 666 /dev/nvidiactl c 195 255
 mknod -m 666 /dev/nvidia0 c 195 0
 mknod -m 666 /dev/nvidia-uvm c "$uvm_major" 0
 mknod -m 666 /dev/nvidia-uvm-tools c "$uvm_major" 1
-if nvidia-smi --query-gpu=name,pci.bus_id,driver_version,vbios_version,memory.total --format=csv,noheader >/tmp/smi.log 2>&1; then
-	log_file nvidia-smi /tmp/smi.log
-	smi_version=$(cut -d, -f3 /tmp/smi.log | tr -d ' ')
-else
-	log_file nvidia-smi /tmp/smi.log
-	smi_version=none
-fi
+# RM boots GSP on the first client open.
+bounded "$case_limit_s" /tmp/smi.log \
+	nvidia-smi --query-gpu=name,pci.bus_id,driver_version,vbios_version,memory.total --format=csv,noheader
+rc=$?
+[ "$rc" = 124 ] && module_step nvidia-smi "$rc" /tmp/smi.log
+log_file nvidia-smi /tmp/smi.log
+smi_version=none
+[ "$rc" = 0 ] && smi_version=$(cut -d, -f3 /tmp/smi.log | tr -d ' ')
 [ "$smi_version" = "$release" ] || {
 	echo "XDEV_EXT_GPU_MODULES=FAIL step=nvidia-smi driver=$smi_version release=$release"
 	exit 1
@@ -156,6 +165,7 @@ if [ "$rc" = 0 ]; then
 fi
 log_file caps /tmp/gpu-caps.log
 timed_out caps "$rc"
+rm_lock_state caps
 [ -n "$caps" ] || caps="XDEV_EXT_GPU_CAPS bdf=$gpu_bdf probe=failed"
 echo "$caps"
 caps_have() {
@@ -197,11 +207,9 @@ create_diag() {
 	sed -n 's/^diagnostics result=\(-\{0,1\}[0-9]*\) .* phase=\([0-9]*\) stage=\([0-9]*\) .*$/create_result=\1 phase=\2 stage=\3/p' "$1" | head -n 1
 }
 
-"$ctl" attach --obj "$dir/ce_plan.bpf.o" --map ce_plan_ops --pin /sys/fs/bpf/gpu-ce >/tmp/gpu-attach.log 2>&1 || {
-	log_file attach /tmp/gpu-attach.log
-	echo 'XDEV_EXT_GPU_MODULES=FAIL step=attach-ce-plan'
-	exit 1
-}
+bounded "$case_limit_s" /tmp/gpu-attach.log \
+	"$ctl" attach --obj "$dir/ce_plan.bpf.o" --map ce_plan_ops --pin /sys/fs/bpf/gpu-ce
+module_step attach-ce-plan "$?" /tmp/gpu-attach.log
 
 # --- G1: CE chain d (real GPU copy engines only) -------------------------
 if ! skipped ce-chain-d; then
@@ -246,7 +254,8 @@ else
 	case_result ce-chain-a FAIL reason=window-not-cleared
 fi
 fi
-"$ctl" detach --pin /sys/fs/bpf/gpu-ce >/dev/null 2>&1
+bounded "$case_limit_s" /tmp/gpu-detach-ce.log "$ctl" detach --pin /sys/fs/bpf/gpu-ce
+timed_out detach-ce-plan "$?"
 
 # --- G3: PEER pool in VRAM (NVMe READ into VRAM, NVMe WRITE from VRAM) ---
 # The NVMe struct_ops of the main guest is detached for the peer tool,
@@ -254,9 +263,12 @@ fi
 nvme_detached=0
 if skipped peer-nvme; then :
 else
-"$ctl" detach --pin /sys/fs/bpf/zc-nvme >/tmp/gpu-detach.log 2>&1
+bounded "$case_limit_s" /tmp/gpu-detach.log "$ctl" detach --pin /sys/fs/bpf/zc-nvme
+rc=$?
 nvme_detached=1
-if clear_window; then
+if timed_out detach-nvme "$rc"; then
+	case_result peer-nvme FAIL rc="$rc" reason=timeout step=detach-nvme
+elif clear_window; then
 	bounded "$case_limit_s" /tmp/gpu-peer.log \
 		"$dir/xdev_ext_peer_chain" --cuda "$gpu_bdf" /dev/nvidia0 "$source_ng" "$destination_ng" \
 		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir"
@@ -314,11 +326,15 @@ else
 fi
 fi
 if [ "$nvme_detached" = 1 ]; then
-	"$ctl" attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
-		--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0 >/tmp/gpu-reattach.log 2>&1 || {
+	bounded "$case_limit_s" /tmp/gpu-reattach.log \
+		"$ctl" attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
+		--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
+	rc=$?
+	timed_out reattach-nvme "$rc"
+	if [ "$rc" != 0 ]; then
 		log_file reattach /tmp/gpu-reattach.log
-		case_result reattach-nvme FAIL
-	}
+		case_result reattach-nvme FAIL rc="$rc"
+	fi
 fi
 
 # The window ends with the source bytes, which the host image oracle checks.

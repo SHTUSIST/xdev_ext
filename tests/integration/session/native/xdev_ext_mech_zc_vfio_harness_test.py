@@ -186,7 +186,12 @@ class GuestGpuWiring(unittest.TestCase):
 # exits with $FAKE/<name>.rc (default 0); successful copies move the window.
 FAKE_CTL = r'''#!/bin/sh
 echo "$*" >>"$FAKE/ctl.calls"
-[ "$1" = ce-chain ] || exit 0
+if [ "$1" != ce-chain ]; then
+	verb=$1 pin=
+	while [ $# -gt 0 ]; do [ "$1" != --pin ] || pin=$2; shift; done
+	[ ! -f "$FAKE/$verb-${pin##*/}.sleep" ] || sleep "$(cat "$FAKE/$verb-${pin##*/}.sleep")"
+	exit 0
+fi
 chain= src= slba= dst= dslba= nlb=
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -199,6 +204,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+[ ! -f "$FAKE/ce-$chain.dmesg" ] || cat "$FAKE/ce-$chain.dmesg" >>"$FAKE/dmesg.out"
 [ ! -f "$FAKE/ce-$chain.sleep" ] || sleep "$(cat "$FAKE/ce-$chain.sleep")"
 cat "$FAKE/ce-$chain.out" 2>/dev/null
 rc=$(cat "$FAKE/ce-$chain.rc" 2>/dev/null || echo 0)
@@ -251,7 +257,7 @@ class GpuGuestCases(unittest.TestCase):
     """xdev_ext_gpu_guest.sh against stand-in tools in a scratch root; only the
     case logic and the console lines it prints are under test here."""
 
-    def guest(self, env=None, **outputs):
+    def guest(self, env=None, rc=0, **outputs):
         tmp = tempfile.TemporaryDirectory(prefix='gpu-guest-')
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -275,15 +281,18 @@ class GpuGuestCases(unittest.TestCase):
                     'dmabuf.out': 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=1\n',
                     'caps.out': 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1\n'}
         defaults.update({name.replace('_', '-').replace('-out', '.out').replace('-rc', '.rc')
-                         .replace('-sleep', '.sleep'): value
+                         .replace('-sleep', '.sleep').replace('-dmesg', '.dmesg'): value
                          for name, value in outputs.items()})
         for name, value in defaults.items():
             (fake / name).write_text(value)
         for path, text in ((root / 'ctl', FAKE_CTL), (gpu / 'xdev_ext_peer_chain', FAKE_PEER),
                            (gpu / 'xdev_ext_gpu_dmabuf', FAKE_DMABUF),
-                           (bin_dir / 'insmod', '#!/bin/sh\necho "$*" >>"$FAKE/insmod.calls"\n'),
+                           (bin_dir / 'insmod', '#!/bin/sh\necho "$*" >>"$FAKE/insmod.calls"\n'
+                            '[ ! -f "$FAKE/insmod.sleep" ] || sleep "$(cat "$FAKE/insmod.sleep")"\n'),
                            (bin_dir / 'dmesg', '#!/bin/sh\ncat "$FAKE/dmesg.out" 2>/dev/null\n'),
-                           (bin_dir / 'nvidia-smi', '#!/bin/sh\necho "NVIDIA GeForce RTX 5090, '
+                           (bin_dir / 'nvidia-smi', '#!/bin/sh\n'
+                            '[ ! -f "$FAKE/smi.sleep" ] || sleep "$(cat "$FAKE/smi.sleep")"\n'
+                            'echo "NVIDIA GeForce RTX 5090, '
                             '00000000:01:00.0, 590.48.01, 98.02.2E.40.EE, 32607 MiB"\n')):
             path.write_text(text)
             path.chmod(0o755)
@@ -300,7 +309,7 @@ class GpuGuestCases(unittest.TestCase):
                              capture_output=True, text=True, timeout=120,
                              env=dict(os.environ, FAKE=str(fake), PATH=f'{bin_dir}:/usr/bin:/bin',
                                       **(env or {})))
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual(run.returncode, rc, run.stdout + run.stderr)
         return run.stdout
 
     def verdicts(self, console):
@@ -440,13 +449,71 @@ class GpuGuestCases(unittest.TestCase):
         self.assertEqual(calls.count('ce-chain --chain a'), 0, calls)
 
     def test_rm_lock_assertions_stop_the_gpu_cases(self):
-        console = self.guest(caps_out=CAPS_GEFORCE, dmesg_out=self.RM_LOCK_ASSERT, **GEFORCE_CE)
+        console = self.guest(caps_out=CAPS_GEFORCE, ce_d_dmesg=self.RM_LOCK_ASSERT, **GEFORCE_CE)
         self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=rm-lock-state\n', console)
         cases = self.verdicts(console)
         for name in ('ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
             self.assertEqual((cases[name]['result'], cases[name].get('reason')),
                              ('FAIL', 'skipped-after-rm-lock-state'), name)
         self.assertIn('XDEV_EXT_GPU_GUEST=FAIL', console)
+
+    def test_rm_lock_assertions_after_the_caps_probe_stop_every_case(self):
+        # The probe is CUDA's first use of the GPU; no CE stage may run after it.
+        console = self.guest(caps_out=CAPS_GEFORCE, dmesg_out=self.RM_LOCK_ASSERT, **GEFORCE_CE)
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=caps reason=rm-lock-state\n', console)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-d', 'ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-rm-lock-state'), name)
+        self.assertNotIn('ce-chain', (self.root / 'fake/ctl.calls').read_text())
+
+    # Steps before the cases (module load, the first client open) and the
+    # struct_ops attach and detach around them are bounded the same way.
+    def hung_module_step(self, step, **hang):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, rc=1, **hang)
+        self.assertLess(time.monotonic() - started, 30, f'the guest waited for {step}')
+        # These lines can open the console: match them at any line start.
+        self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_PROBLEM case={step} reason=timeout limit_s=2$')
+        self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_MODULES=FAIL step={step} reason=timeout ')
+        self.assertNotIn('XDEV_EXT_GPU_CASE ', console)
+
+    def test_a_hung_module_load_is_bounded(self):
+        self.hung_module_step('insmod-nvidia', insmod_sleep='60\n')
+
+    def test_a_hung_first_client_open_is_bounded(self):
+        # RM boots GSP on the first open (nvidia-smi); a GPU whose GSP still
+        # runs from an earlier guest may hang it.
+        self.hung_module_step('nvidia-smi', smi_sleep='60\n')
+
+    def test_a_hung_ce_plan_attach_is_bounded(self):
+        self.hung_module_step('attach-ce-plan', attach_gpu_ce_sleep='60\n')
+
+    def test_a_hung_ce_plan_detach_skips_the_later_cases(self):
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, detach_gpu_ce_sleep='60\n')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=detach-ce-plan reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['ce-chain-d']['result'], cases['ce-chain-a']['result']), ('PASS', 'PASS'))
+        for name in ('peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-timeout'), name)
+
+    def test_a_hung_nvme_detach_fails_the_peer_case_and_still_reattaches(self):
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, detach_zc_nvme_sleep='60\n')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=detach-nvme reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['peer-nvme']['result'], cases['peer-nvme'].get('reason')),
+                         ('FAIL', 'timeout'))
+        self.assertEqual((cases['dmabuf-peer']['result'], cases['dmabuf-peer'].get('reason')),
+                         ('FAIL', 'skipped-after-timeout'))
+        self.assertIn('attach --obj /opt/xdev_ext/nxp_mech.bpf.o', (self.root / 'fake/ctl.calls').read_text())
+
+    def test_a_hung_nvme_reattach_is_bounded(self):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, attach_zc_nvme_sleep='60\n')
+        self.assertLess(time.monotonic() - started, 30, 'the guest waited for the re-attach')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=reattach-nvme reason=timeout limit_s=2\n', console)
+        self.assertEqual(self.verdicts(console)['reattach-nvme']['result'], 'FAIL')
 
     def test_unload_is_bounded(self):
         tmp = tempfile.TemporaryDirectory(prefix='gpu-unload-')

@@ -128,6 +128,19 @@ class GpuConsole(unittest.TestCase):
                 self.assertEqual(result['verdict'], 'FAIL')
                 self.assertTrue(result['gpu_errors'])
 
+    def test_rm_lock_assertions_are_gpu_errors(self):
+        # RM asserts these when a thread was left owning its locks; RM then
+        # waits on that thread forever (the RTX 5090 window at 6787f2e).
+        for line in ('[    8.713738] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                     'GPU lock already acquired by this thread @ locks.c:992',
+                     '[    8.754063] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                     'rmGpuLocksGetOwnedMask() == 0 @ rmapi.c:566'):
+            with self.subTest(line=line):
+                result = self.mod.validate(console(extra=line), release='590.48.01',
+                                           device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertEqual(result['gpu_errors'], [line])
+
     def test_duplicate_case_line_fails(self):
         text = console() + 'XDEV_EXT_GPU_CASE name=ce-chain-a result=PASS\n'
         result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
