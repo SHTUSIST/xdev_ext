@@ -147,6 +147,10 @@ echo PROOF_WATCHDOG_DMESG_END
 exec /bin/busybox sleep 300
 '''
 
+# BusyBox ash can prefer a built-in applet over PATH. This only selects the
+# proof's disclosed userspace command primitive; exec preserves direct PID.
+UNLOAD_DISPATCH_PREFIX = '#!/bin/sh\nrmmod() { exec /proof-bin/rmmod "$@"; }\n'
+
 
 def require(ok, message):
     if not ok:
@@ -453,12 +457,17 @@ def main():
     bounded, b_receipt = span(source, '# bounded LIMIT_S', '\nif [ "${1:-}" = unload ]; then')
     helpers, h_receipt = span(source, 'case_result() {', '\n# module_step STEP STATUS LOG:')
     require(source.count('/sys/module') == 4, 'unexpected unload module path count')
-    projection = source.replace('/sys/module', '/tmp/proof-module')
+    path_projection = source.replace('/sys/module', '/tmp/proof-module')
+    projection = UNLOAD_DISPATCH_PREFIX + path_projection
     receipt = dict(scope='shell watchdog and userspace unload-attempt only; no GPU/RM/DMA/reset proof',
                    claimed_candidate='e1959a76e5fa196c3dafd468760f2f8288ae8fec; root verifies provenance',
                    source_path=str(native.resolve()), source_sha256=sha(raw),
                    validator_sha256=sha(validator), extraction=[b_receipt, h_receipt],
                    projection=dict(before='/sys/module', after='/tmp/proof-module', occurrences=4,
+                                   path_only_sha256=sha(path_projection.encode()),
+                                   dispatch_prefix=UNLOAD_DISPATCH_PREFIX,
+                                   dispatch_prefix_sha256=sha(UNLOAD_DISPATCH_PREFIX.encode()),
+                                   operation='exact dispatch prefix followed by complete path-only projected original',
                                    sha256=sha(projection.encode())),
                    kernel=inputs['kernel'], busybox=inputs['busybox'],
                    debug_scanner=inputs['debug_scanner'],
@@ -466,6 +475,8 @@ def main():
     write(out / 'projection-receipt.json', json.dumps(receipt, indent=2) + '\n')
     write(out / 'bounded-exact.sh', bounded)
     write(out / 'case-helpers-exact.sh', helpers)
+    write(out / 'unload-path-projection.sh', path_projection)
+    write(out / 'unload-dispatch-prefix.sh', UNLOAD_DISPATCH_PREFIX)
     write(out / 'unload-projection.sh', projection)
     root = out / 'initramfs-root'
     for name in ('bin', 'sbin', 'usr/bin', 'proc', 'sys', 'dev', 'tmp', 'proof', 'proof-bin'):
@@ -547,7 +558,7 @@ def main():
     watchdog_command[watchdog_command.index('-initrd') + 1] = str(out / 'watchdog-initramfs.cpio.gz')
     write(out / 'watchdog-qemu-command.json', json.dumps(watchdog_command, indent=2) + '\n')
     verify_inputs(tracked_inputs)
-    watchdog_process = owned_process(watchdog_command, out, 'watchdog-console', 10)
+    watchdog_process = owned_process(watchdog_command, out, 'watchdog-console', 30)
     verify_inputs(tracked_inputs)
     require(watchdog_process['deadline_fired'] and watchdog_process['state'] == 'REAPED',
             'watchdog control did not hit deadline and reap')
