@@ -45,6 +45,7 @@
 #include "../../../kernel/tools/include/xdev_ext_gpu_identity.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "chain_bench.h"
+#include "../nvme_gpu/eval_session.h"
 #include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext.h"
 #include "../common/native_process.h"
 #include "chain_cuda.h"
@@ -469,6 +470,44 @@ struct cs_ce {
 	uint64_t va;
 };
 
+/* Allocate once; all already-opened CE stage files bind the same export. */
+static int cs_ce_open_alloc(const struct chain_spec *s, struct cs_ce *ce)
+{
+	unsigned int i;
+	int first = -1, ret;
+
+	ce->va = s->ce_va;
+	if (!s->ce_native && !s->ce_vmm)
+		return 0;
+	for (i = 0; i < s->nr_stages; i++) {
+		char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
+
+		if (ce->fd[i] < 0)
+			continue;
+		ret = xdev_ext_gpu_identity_from_opened(ce->fd[i], s->ce_dev,
+				XDEV_EXT_GPU_IDENTITY_ANY_MINOR, first < 0 ? ce->bdf : bdf);
+		if (!ret && first >= 0 && strcasecmp(ce->bdf, bdf))
+			ret = -EXDEV;
+		if (ret)
+			return ret;
+		first = (int)i;
+	}
+	ret = s->ce_vmm ? xdev_ext_mech_cuda_open_vmm(&ce->cuda, ce->bdf, s->ce_len) :
+			  xdev_ext_mech_cuda_open(&ce->cuda, ce->bdf, s->ce_len);
+	if (ret)
+		return ret;
+	ce->va = ce->cuda.va;
+	if (s->ce_vmm)
+		for (i = 0; i < s->nr_stages; i++) {
+			if (ce->fd[i] < 0)
+				continue;
+			ret = es_ce_attach(&ce->cuda, ce->fd[i]);
+			if (ret)
+				return ret;
+		}
+	return 0;
+}
+
 /* CE window read or write outside every window (oracle, pristine fill). */
 static int cs_ce_access(const struct chain_spec *s, struct cs_ce *ce, uint64_t off,
 			void *buf, size_t len, bool write)
@@ -476,7 +515,7 @@ static int cs_ce_access(const struct chain_spec *s, struct cs_ce *ce, uint64_t o
 	int fd = -1, i;
 	ssize_t n;
 
-	if (s->ce_native)
+	if (s->ce_native || s->ce_vmm)
 		return write ? chain_cuda_fill(ce->bdf, ce->va + off, buf, len) :
 			       chain_cuda_readback(ce->bdf, ce->va + off, buf, len);
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES && fd < 0; i++)
@@ -697,7 +736,8 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	atomic_init(&continuation.stop, false);
 	r->ce_backend = !chain_has(s, CH_CE) ? "none" :
 			strstr(s->ce_dev, "xdev_ext_ce_sim") ? "ce-sim-cpu-standin" :
-			s->ce_native ? "gpu-native-allocation" : "gpu-given-window";
+			s->ce_native ? "gpu-native-allocation" :
+			s->ce_vmm ? "gpu-vmm-allocation" : "gpu-given-window";
 	if (sustained) {
 		r->rec_ns = malloc(chain_records(s) * sizeof(*r->rec_ns));
 		if (!r->rec_ns)
@@ -817,33 +857,11 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 			goto out;
 		}
 	}
-	ce.va = s->ce_va;
-	if (s->ce_native) {
-		int first = -1;
-
-		for (i = 0; i < s->nr_stages; i++) {
-			char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
-
-			if (ce.fd[i] < 0)
-				continue;
-			ret = xdev_ext_gpu_identity_from_opened(ce.fd[i], s->ce_dev,
-					XDEV_EXT_GPU_IDENTITY_ANY_MINOR, first < 0 ? ce.bdf : bdf);
-			if (!ret && first >= 0 && strcasecmp(ce.bdf, bdf))
-				ret = -EXDEV;
-			if (ret) {
-				cb_fail(r, CB_NOT_RUN, "GPU identity of %s: %s", s->ce_dev,
-					strerror(-ret));
-				goto out;
-			}
-			first = (int)i;
-		}
-		ret = xdev_ext_mech_cuda_open(&ce.cuda, ce.bdf, s->ce_len);
-		if (ret) {
-			cb_fail(r, CB_NOT_RUN, "CUDA allocation on %s: %s", ce.bdf,
-				strerror(-ret));
-			goto out;
-		}
-		ce.va = ce.cuda.va;
+	ret = cs_ce_open_alloc(s, &ce);
+	if (ret) {
+		cb_fail(r, CB_NOT_RUN, "CE allocation/attachment on %s: %s", s->ce_dev,
+			strerror(-ret));
+		goto out;
 	}
 	if (s->oracle == CH_ORACLE_CE) {
 		size_t bytes = (size_t)s->depth * s->group_bytes;
@@ -1197,7 +1215,7 @@ out:
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
 		if (fds[i] >= 0 && (i >= s->nr_stages || s->st[i].cls != CH_USER))
 			close(fds[i]);
-	if (s->ce_native && xdev_ext_mech_cuda_close(&ce.cuda) && !r->status)
+	if ((s->ce_native || s->ce_vmm) && xdev_ext_mech_cuda_close(&ce.cuda) && !r->status)
 		cb_fail(r, CB_FAIL, "CUDA allocation cleanup failed");
 	cs_xsk_close(&x);
 	if (pool)

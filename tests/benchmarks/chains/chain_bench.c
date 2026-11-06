@@ -28,6 +28,7 @@
 
 #include "chain_bench.h"
 #include "../common/fd_check.h"
+#include "../nvme_gpu/eval_session.h"
 #include "chain_oracle.h"
 
 int cb_fail(struct chain_result *r, int status, const char *fmt, ...)
@@ -365,7 +366,7 @@ static char *cb_slurp(const char *path, size_t *len)
 
 int main(int argc, char **argv)
 {
-	int fd_before = eval_fd_count();
+	int fd_before;
 	static struct chain_spec spec;
 	struct chain_result r = { .nvme_bounces = -1, .xsk_zero_copy = -1,
 				  .iaa_completes = -1, .iaa_errors = -1 };
@@ -401,6 +402,15 @@ int main(int argc, char **argv)
 	if (check) {
 		cb_plan(&spec);
 		return CB_PASS;
+	}
+	/* Process CUDA initialization precedes every owned session resource. */
+	if (spec.arm != CH_STAGED && chain_has(&spec, CH_CE)) {
+		int ret = es_ce_runtime_begin(spec.ce_dev, &fd_before);
+
+		if (ret)
+			return ret;
+	} else {
+		fd_before = eval_fd_count();
 	}
 	if (spec.mode == CH_TIMING && spec.load == CH_LOAD_CLOSED) {
 		int error = cpu_timer_init(&r.cpu_timer, "CLOCK_MONOTONIC_RAW", chain_windows(&spec));

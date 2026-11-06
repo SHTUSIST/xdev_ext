@@ -84,6 +84,7 @@ struct chain_spec {
 	char ce_dev[CHAIN_PATH_MAX];
 	uint64_t ce_va, ce_len;
 	bool ce_native;
+	bool ce_vmm;
 	char ce_bdf[32];		/* staged arm with CUDA */
 	struct xdev_ext_mech_peer peer;
 	uint64_t nxp_session;
@@ -566,9 +567,10 @@ static inline int chain_parse(const char *text, size_t len, struct chain_spec *s
 		    chain_u64(&doc, o, "len", 0, true, 1, UINT64_MAX >> 1, &s->ce_len, e))
 			return -1;
 		if (cj_str(&doc, o, "alloc", alloc, sizeof(alloc)) < 0 ||
-		    (strcmp(alloc, "given") && strcmp(alloc, "native")))
-			return chain_bad(e, "invalid: ce.alloc must be given or native");
+		    (strcmp(alloc, "given") && strcmp(alloc, "native") && strcmp(alloc, "vmm")))
+			return chain_bad(e, "invalid: ce.alloc must be given, native or vmm");
 		s->ce_native = !strcmp(alloc, "native");
+		s->ce_vmm = !strcmp(alloc, "vmm");
 	}
 	o = cj_get(&doc, root, "peer");
 	if (o >= 0 && (doc.n[o].type != CJ_OBJECT || chain_parse_peer(&doc, o, s, e)))

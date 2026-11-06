@@ -2151,6 +2151,10 @@
       "logical_path": "tests/eval/chains/test_chain_spec.c"
     },
     {
+      "source": "tests/benchmarks/chains/test_ce_vmm.py",
+      "logical_path": "tests/eval/chains/test_ce_vmm.py"
+    },
+    {
       "source": "tests/benchmarks/chains/test_cpu_timer_contract.py",
       "logical_path": "tests/eval/chains/test_cpu_timer_contract.py"
     },
