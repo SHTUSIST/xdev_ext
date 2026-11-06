@@ -3,14 +3,14 @@
   "source_root": "/root/xdev_ext/staging/recovery-20261031/wt-integration",
   "baseline_inputs": {
     "src/core/include/uapi/linux/io_uring.h": "2cbfbf9c39ac52de8d194b945a82ba3ffab9a5e58ce8da7e33a28732ba05964d",
-    "src/core/include/uapi/linux/xdev_ext_mech.h": "48c55c8121fd27c873d24a8cff9fd7eebb22fa27fe1e86d05918de85c19228d2",
+    "src/core/include/uapi/linux/xdev_ext_mech.h": "1c34d0a5e964a516a4c909a940f2310428f3f109f83a253197d4d83c07dd0865",
     "src/core/include/uapi/linux/xdev_ext_binding.h": "b068c393bf031e64b47700efa352a3fa3166ceb54948d56e92a3ae7cd64eabef",
-    "src/core/include/linux/xdev_ext_mech.h": "8d01d88b3371d1bfda6c09204104c56e99ca76736b072aa95475f6fb6fd0b891",
-    "src/compute/include/linux/xdev_ext_compfam.h": "5244b6a53a0456fcf4d53913243c5c7cb1ba6fc8f766118bcc4c789d16a7a329",
-    "src/core/include/linux/xdev_ext_family_core.h": "02403174cb8755b7e3d4827e45e61b49a044055bdb5a536eadf5097c76e7a86e",
-    "src/core/io_uring/xdev_ext_mech.c": "18362d932058d45b8e43b636050707db26dc0967dc3f9acec83b88bac0d5f546",
-    "src/core/io_uring/xdev_ext_mech_ops.c": "f3bd415d0667dcbe566adf5b1cff5c93b7d3f47c85ca44e6e502a6fd28b0a996",
-    "src/core/io_uring/xdev_ext_mech_user.c": "7b79aa4503b3a873e86ae106134aec5d95ff4110c8733071a89e168b3cbed52f",
+    "src/core/include/linux/xdev_ext_mech.h": "53df9c3ba91a2b31bbff0b1113ec4d37e78071584a549d44e4f4aab2a3b03103",
+    "src/compute/include/linux/xdev_ext_compfam.h": "48fd7455029eb16ba2f5e0abec5e4a87f7ff3f68bc7d51e99bf14e4534f20bfd",
+    "src/core/include/linux/xdev_ext_family_core.h": "ab885ce861b51ceb2230b18b1ae011dd9ab53172eb2337375fb8a1e285cf465c",
+    "src/core/io_uring/xdev_ext_mech.c": "f042ec07dcae65f488642a9cd94f63998ce3d9ce55bc7e5a085bb7ed414a0769",
+    "src/core/io_uring/xdev_ext_mech_ops.c": "809047924dda4f94acfa6a16fc7eeea2c0cc50568e60e6bdbd780fe198c20f7e",
+    "src/core/io_uring/xdev_ext_mech_user.c": "a520650422d545d828d691f36bc1513352593a30fddff29841dccab9b1a4f4c6",
     "src/core/io_uring/xdev_ext_mech_core.h": "e3ccd8aeb07a65ec363d88423eaa3588abffb07437a64273c890335fc653f956",
     "src/compute/io_uring/xdev_ext_mech_cpu.c": "32e4e474945f2fe8e57eac95e82016aa97bd531f1d712b292f00b1bb710593df",
     "src/compute/io_uring/xdev_ext_mech_cpu_core.h": "cbf9c8ed3c1e892ce5dd0ebbc6a85961687a8a0a5eef5d54c5a9157901e068f3",
@@ -83,5 +83,43 @@
     "previous_public_commit": "dbd96e5c2b9f919ac015883c29a8ef4d9bbabedf",
     "evidence": "ROOT-CHARACTERIZATION.json actual native27 BTF:3present false negatives corrected;missing name rejected withboth modes",
     "other_native_parser_and_production_bytes_unchanged": true
+  },
+  "integration_193_refreeze": {
+    "scope": "integration re-freeze of the hashes of the unchanged-production baseline inputs after merging the claude-193 branches; test files, input, status and every other field unchanged unless listed",
+    "previous_freeze_commit": "d09ee4670536ae39b037af95565d45d6ad618fa0",
+    "hashed_tree_commit": "962841d353e096981aa68a08cfad2505b78d6fdd",
+    "changed": {
+      "baseline_inputs": {
+        "src/core/include/uapi/linux/xdev_ext_mech.h": {
+          "before": "48c55c8121fd27c873d24a8cff9fd7eebb22fa27fe1e86d05918de85c19228d2",
+          "after": "1c34d0a5e964a516a4c909a940f2310428f3f109f83a253197d4d83c07dd0865"
+        },
+        "src/core/include/linux/xdev_ext_mech.h": {
+          "before": "8d01d88b3371d1bfda6c09204104c56e99ca76736b072aa95475f6fb6fd0b891",
+          "after": "53df9c3ba91a2b31bbff0b1113ec4d37e78071584a549d44e4f4aab2a3b03103"
+        },
+        "src/compute/include/linux/xdev_ext_compfam.h": {
+          "before": "5244b6a53a0456fcf4d53913243c5c7cb1ba6fc8f766118bcc4c789d16a7a329",
+          "after": "48fd7455029eb16ba2f5e0abec5e4a87f7ff3f68bc7d51e99bf14e4534f20bfd"
+        },
+        "src/core/include/linux/xdev_ext_family_core.h": {
+          "before": "02403174cb8755b7e3d4827e45e61b49a044055bdb5a536eadf5097c76e7a86e",
+          "after": "ab885ce861b51ceb2230b18b1ae011dd9ab53172eb2337375fb8a1e285cf465c"
+        },
+        "src/core/io_uring/xdev_ext_mech.c": {
+          "before": "18362d932058d45b8e43b636050707db26dc0967dc3f9acec83b88bac0d5f546",
+          "after": "f042ec07dcae65f488642a9cd94f63998ce3d9ce55bc7e5a085bb7ed414a0769"
+        },
+        "src/core/io_uring/xdev_ext_mech_ops.c": {
+          "before": "f3bd415d0667dcbe566adf5b1cff5c93b7d3f47c85ca44e6e502a6fd28b0a996",
+          "after": "809047924dda4f94acfa6a16fc7eeea2c0cc50568e60e6bdbd780fe198c20f7e"
+        },
+        "src/core/io_uring/xdev_ext_mech_user.c": {
+          "before": "7b79aa4503b3a873e86ae106134aec5d95ff4110c8733071a89e168b3cbed52f",
+          "after": "a520650422d545d828d691f36bc1513352593a30fddff29841dccab9b1a4f4c6"
+        }
+      }
+    },
+    "command": "python3 refreeze_deflate_capture.py REPO_ROOT integration_193_refreeze"
   }
 }
