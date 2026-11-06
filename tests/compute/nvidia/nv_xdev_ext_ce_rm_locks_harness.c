@@ -9,7 +9,10 @@
  *  - rmGpuLocksAcquire() refuses with NV_ERR_STATE_IN_USE when the thread
  *    already owns the GPU locks ("GPU lock already acquired by this thread",
  *    locks.c);
- *  - rmGpuLocksRelease() does nothing when no GPU lock is held (locks.c).
+ *  - rmGpuLocksRelease() does nothing when no GPU lock is held, and
+ *    otherwise releases every GPU lock that is held, whichever thread owns
+ *    it: it reads the global gpusLockedMask and only asserts ownership
+ *    (locks.c); rmGpuLockIsOwner() says whether this thread owns them.
  * The RM CE calls model NVIDIA's CeUtils contract: NV_CE_UTILS is allocated
  * and freed with RS_FLAGS_ACQUIRE_GPUS_LOCK and its memcopy/check-progress
  * controls run without RMCTRL_FLAGS_NO_GPUS_LOCK, i.e. under the API lock and
@@ -21,7 +24,10 @@
 #include "nv_xdev_ext_host_env.h"
 
 static struct {
-	int api, gpus;                  /* locks owned by this (only) thread */
+	int api, gpus;                  /* locks owned by this thread */
+	int other_gpus;                 /* GPU locks another thread owns */
+	int lose_gpus;                  /* RM returns without the GPU locks */
+	unsigned int foreign_releases;  /* another thread's GPU locks released */
 	NV_STATUS api_status, gpu_status;
 	unsigned int api_acquires, api_releases, gpu_acquires, gpu_releases;
 	unsigned int calls, bad_entry;
@@ -70,12 +76,27 @@ static NvU32 rmGpuLocksRelease(NvU32 flags, OBJGPU *dpc)
 	if (L.gpus) {
 		L.gpus = 0;
 		L.gpu_releases++;
+	} else if (L.other_gpus) {
+		L.other_gpus = 0;
+		L.foreign_releases++;
 	}
 	return 0;
 }
+static NvBool rmGpuLockIsOwner(void) { return L.gpus ? NV_TRUE : NV_FALSE; }
 
 typedef struct { NvU64 umemOffset, gpuOffset, size; } P2P_UMEM_XFER;
 typedef void (*P2P_UMEM_CE_EVENT)(void *, NvU64);
+typedef struct MEMORY_DESCRIPTOR MEMORY_DESCRIPTOR;
+typedef struct { NvU8 gpuUuid[16]; NvU64 offset, length; } P2P_UMEM_VIDMEM_BINDING;
+struct OBJGPU { int unused; };
+static OBJGPU gpu0;
+#define NV_P2P_UMEM_STRICT_SECURITY_CHECKS 1
+#define DRF_DEF(d, r, f, c) 0
+static OBJGPU *gpumgrGetGpuFromUuid(const NvU8 *uuid, NvU32 flags)
+{
+	(void)uuid; (void)flags;
+	return &gpu0;
+}
 
 /* The RM CE side: each call checks it entered under both locks. */
 static void entered(const char *what)
@@ -93,6 +114,12 @@ static NV_STATUS RmP2PUmemCeHostBind(void *b, NvU64 *phys, NvU32 count, NvU32 pa
 	(void)b; (void)phys; (void)count; (void)pageSize; (void)bytes; (void)event; (void)eventArg;
 	entered("bind");
 	rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);          /* channel setup */
+	if (L.lose_gpus) {
+		/* Its reacquire failed, or an error path between the release
+		 * and the reacquire; the bottom half takes the GPU locks. */
+		L.other_gpus = 1;
+		return NV_ERR_NO_MEMORY;
+	}
 	if (rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, 0) != NV_OK) /* ...and back */
 		return NV_ERR_GENERIC;
 	*out = (void *)0x1;
@@ -113,6 +140,29 @@ static NV_STATUS RmP2PUmemCeProgress(void *h, NvU64 *watermark)
 	(void)h;
 	entered("progress");
 	*watermark = 1;
+	return NV_OK;
+}
+/* RM asserts rmapiLockIsOwner() here (p2p.c). */
+static NV_STATUS RmP2PUmemVidmemResolve(P2P_UMEM_VIDMEM_BINDING *b, OBJGPU *g, MEMORY_DESCRIPTOR **out)
+{
+	(void)b; (void)g;
+	if (!L.api)
+		return NV_ERR_INVALID_LOCK_STATE;
+	*out = (MEMORY_DESCRIPTOR *)0x10;
+	return NV_OK;
+}
+/* The old synchronous request copies through memmgrMemCopy() on RM's own
+ * shared CeUtils (pMemoryManager->pCeUtils), which RM's scrubber and memset
+ * use under the GPU locks. */
+static NV_STATUS RmP2PUmemDmaRequestDirect(OBJGPU *g, NvU64 *p, NvU32 count, NvU32 pageSize,
+	NvU64 bytes, MEMORY_DESCRIPTOR *md, NvU64 off, NvU64 len, const P2P_UMEM_XFER *x, NvU32 n,
+	NvU32 flags, NvBool *hw, NvU64 *done)
+{
+	(void)g; (void)p; (void)count; (void)pageSize; (void)bytes; (void)md; (void)off; (void)len;
+	(void)n; (void)flags;
+	entered("dma");
+	*hw = NV_TRUE;
+	*done = x[0].size;
 	return NV_OK;
 }
 
@@ -161,6 +211,41 @@ static void case_controls(void)
 	CHECK(L.bad_entry == 0 && L.calls == 3, "a CeUtils call ran without the GPU locks");
 }
 
+/* The old synchronous CE request (NV_ESC_P2P_DMA_XFER) copies on RM's shared
+ * CeUtils: it must run under the same locks as RM's own CeUtils users. */
+static void case_dma_request(void)
+{
+	P2P_UMEM_VIDMEM_BINDING binding = { { 0 }, 0, 1 << 20 };
+	P2P_UMEM_XFER x = { 0, 0, 4096 };
+	NvBool hw = NV_FALSE;
+	NvU64 done = 0;
+	CHECK(rm_p2p_umem_dma_request(&sp, phys, 4, 4096, 16384, &binding, &x, 1, 1, &hw, &done) ==
+	      NV_OK && hw && done == 4096, "synchronous request");
+	all_released("synchronous request");
+	CHECK(L.bad_entry == 0 && L.calls == 1, "the synchronous CE copy ran without the GPU locks");
+	L.gpu_status = NV_ERR_TIMEOUT;
+	CHECK(rm_p2p_umem_dma_request(&sp, phys, 4, 4096, 16384, &binding, &x, 1, 1, &hw, &done) ==
+	      NV_ERR_TIMEOUT && !hw && done == 0, "synchronous request GPU lock failure status");
+	all_released("synchronous request GPU lock failure");
+	CHECK(L.calls == 1, "the synchronous CE copy ran without its locks");
+}
+
+/* RM's channel setup can return without the GPU locks (mem_utils_gm107.c:
+ * the reacquire failed, or an error path between the release and the
+ * reacquire); the release must then leave alone the GPU locks another
+ * thread owns by now. */
+static void case_lost_gpu_locks(void)
+{
+	void *out = NULL;
+	L.lose_gpus = 1;
+	CHECK(rm_p2p_umem_ce_host_bind(&sp, (void *)0x2, phys, 4, 4096, 16384, NULL, NULL, &out) ==
+	      NV_ERR_NO_MEMORY, "bind status");
+	CHECK(L.foreign_releases == 0 && L.other_gpus,
+	      "released the GPU locks another thread owns (%u)", L.foreign_releases);
+	CHECK(!L.api && L.api_acquires == 1 && L.api_releases == 1, "API lock api=%d %u/%u",
+	      L.api, L.api_acquires, L.api_releases);
+}
+
 /* Lock failures return the status, call no RM CE code, and leave no lock. */
 static void case_lock_failures(void)
 {
@@ -186,6 +271,8 @@ static const struct named_case cases[] = {
 	{ "bind", case_bind },
 	{ "controls", case_controls },
 	{ "lock-failures", case_lock_failures },
+	{ "dma-request", case_dma_request },
+	{ "lost-gpu-locks", case_lost_gpu_locks },
 };
 
 int main(int argc, char **argv)

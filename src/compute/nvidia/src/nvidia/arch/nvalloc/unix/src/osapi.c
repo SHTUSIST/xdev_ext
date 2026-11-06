@@ -4653,8 +4653,45 @@ NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_unbind(
 }
 
 /*
+ * The CE entry points run CeUtils, which needs the API lock and every GPU
+ * lock; the synchronous request copies on RM's shared pMemoryManager->pCeUtils,
+ * which RM's own memmgrMemCopy() and memmgrMemSet() users also drive.
+ * NVIDIA's own CeUtils API (NV_CE_UTILS) is allocated and freed with
+ * RS_FLAGS_ACQUIRE_GPUS_LOCK and its memcopy and check-progress controls run
+ * without RMCTRL_FLAGS_NO_GPUS_LOCK.  CeUtils channel setup
+ * (memmgrMemUtilsChannelInitialize_GM107) releases all GPU locks around its
+ * allocations and acquires them again, so a caller holding only the API
+ * lock came back owning every GPU lock, and the next RM entry of the thread
+ * failed (NV_ERR_INVALID_LOCK_STATE) while RM waited on that thread forever.
+ */
+static NV_STATUS _rmP2PUmemCeLocksAcquire(void)
+{
+    NV_STATUS status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+
+    if (status != NV_OK)
+        return status;
+    status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    if (status != NV_OK)
+        rmapiLockRelease();
+    return status;
+}
+
+/*
+ * CeUtils channel setup can return without the GPU locks (its reacquire
+ * failed, or an error path between its release and reacquire), and
+ * rmGpuLocksRelease() releases whatever GPU locks are held, by any thread.
+ */
+static void _rmP2PUmemCeLocksRelease(void)
+{
+    if (rmGpuLockIsOwner())
+        rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
+    rmapiLockRelease();
+}
+
+/*
  * Run xferCount CE transfers between a pinned host region and a bound vidmem
- * window under one API lock hold.  direction 1 = host to GPU, 0 = GPU to host.
+ * window under one hold of the API lock and every GPU lock.  direction 1 =
+ * host to GPU, 0 = GPU to host.
  */
 NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
     nvidia_stack_t      *sp,
@@ -4695,7 +4732,7 @@ NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
     NV_ENTER_RM_RUNTIME(sp, fp);
     threadStateInit(&threadState, THREAD_STATE_FLAGS_NONE);
 
-    rmStatus = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
+    rmStatus = _rmP2PUmemCeLocksAcquire();
     if (rmStatus == NV_OK)
     {
         if (g_xdev_ext_ce_poisoned)
@@ -4726,7 +4763,7 @@ NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
             }
         }
 
-        rmapiLockRelease();
+        _rmP2PUmemCeLocksRelease();
     }
 
     *pHwSubmitted = hwSubmitted;
@@ -4736,35 +4773,6 @@ NV_STATUS NV_API_CALL rm_p2p_umem_dma_request(
     NV_EXIT_RM_RUNTIME(sp, fp);
 
     return rmStatus;
-}
-
-/* The API lock covers CPU work only; no request-completion wait. */
-/*
- * The CE host entry points run CeUtils, which needs the API lock and every
- * GPU lock: NVIDIA's own CeUtils API (NV_CE_UTILS) is allocated and freed
- * with RS_FLAGS_ACQUIRE_GPUS_LOCK and its memcopy and check-progress controls
- * run without RMCTRL_FLAGS_NO_GPUS_LOCK.  CeUtils channel setup
- * (memmgrMemUtilsChannelInitialize_GM107) releases all GPU locks around its
- * allocations and acquires them again, so a caller holding only the API
- * lock came back owning every GPU lock, and the next RM entry of the thread
- * failed (NV_ERR_INVALID_LOCK_STATE) while RM waited on that thread forever.
- */
-static NV_STATUS _rmP2PUmemCeLocksAcquire(void)
-{
-    NV_STATUS status = rmapiLockAcquire(API_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
-
-    if (status != NV_OK)
-        return status;
-    status = rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE, RM_LOCK_MODULES_P2P);
-    if (status != NV_OK)
-        rmapiLockRelease();
-    return status;
-}
-
-static void _rmP2PUmemCeLocksRelease(void)
-{
-    rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE, NULL);
-    rmapiLockRelease();
 }
 
 NV_STATUS NV_API_CALL rm_p2p_umem_ce_host_bind(nvidia_stack_t *sp, void *binding, NvU64 *phys, NvU32 count, NvU32 pageSize, NvU64 bytes, P2P_UMEM_CE_EVENT event, void *eventArg, void **out)

@@ -120,6 +120,10 @@ static void threadStateInit(THREAD_STATE_NODE *t, int f) { (void)t; (void)f; }
 static void threadStateFree(THREAD_STATE_NODE *t, int f) { (void)t; (void)f; }
 static NV_STATUS rmapiLockAcquire(int f, int m) { (void)f; (void)m; return D.lock_fail ? NV_ERR_INVALID_LOCK_STATE : NV_OK; }
 static void rmapiLockRelease(void) {}
+#define GPUS_LOCK_FLAGS_NONE 0
+static NV_STATUS rmGpuLocksAcquire(int f, int m) { (void)f; (void)m; return NV_OK; }
+static NvU32 rmGpuLocksRelease(int f, OBJGPU *dpc) { (void)f; (void)dpc; return 0; }
+static NvBool rmGpuLockIsOwner(void) { return NV_TRUE; }
 #define DRF_DEF(d, r, f, c) 0
 static OBJGPU gpu0 = { .getProperty = harness_get_property };
 static OBJGPU *gpumgrGetGpuFromUuid(const NvU8 *uuid, NvU32 flags) { (void)uuid; (void)flags; return &gpu0; }

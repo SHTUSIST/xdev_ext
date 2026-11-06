@@ -12,8 +12,9 @@ CREATE then found "GPU lock already acquired by this thread" and its API lock
 refused with NV_ERR_INVALID_LOCK_STATE (0x2f), and RM wedged.
 
 Compiles the actual rm_p2p_umem_ce_host_bind / _unbind / _async_submit /
-_progress bodies (and any static helper they use) against stubs that follow
-RM's lock rules.  Host C only; no GPU.
+_progress bodies and the old synchronous rm_p2p_umem_dma_request, which copies
+on RM's shared CeUtils (and any static helper they use), against stubs that
+follow RM's lock rules.  Host C only; no GPU.
 """
 from pathlib import Path
 import re
@@ -27,9 +28,10 @@ import nv_xdev_ext_extract as ex  # noqa: E402
 OSAPI = "src/nvidia/arch/nvalloc/unix/src/osapi.c"
 FIXTURE = ex.HERE / "nv_xdev_ext_ce_rm_locks_harness.c"
 ENTRIES = ("rm_p2p_umem_ce_host_bind", "rm_p2p_umem_ce_host_unbind",
-           "rm_p2p_umem_ce_async_submit", "rm_p2p_umem_ce_progress")
+           "rm_p2p_umem_ce_async_submit", "rm_p2p_umem_ce_progress",
+           "rm_p2p_umem_dma_request")
 HELPERS = ("_rmP2PUmemCeLocksAcquire", "_rmP2PUmemCeLocksRelease")
-CASES = ("bind", "controls", "lock-failures")
+CASES = ("bind", "controls", "lock-failures", "dma-request", "lost-gpu-locks")
 
 
 class CeRmLocks(unittest.TestCase):
