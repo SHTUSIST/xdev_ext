@@ -236,6 +236,19 @@ class GpuConsole(unittest.TestCase):
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertIn('ce-chain-a', ' '.join(result['problems']))
 
+    def test_a_guest_problem_line_fails_and_is_reported(self):
+        # The guest stops its GPU cases after a step past its limit or RM lock
+        # assertions; the validator names the problem, whatever the cases say.
+        for line, words in (('XDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=timeout limit_s=120',
+                             'ce-chain-d reason=timeout'),
+                            ('XDEV_EXT_GPU_PROBLEM case=ce-chain-a reason=rm-lock-state',
+                             'ce-chain-a reason=rm-lock-state')):
+            with self.subTest(line=line):
+                result = self.mod.validate(console(extra=line), release='590.48.01',
+                                           device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn(words, ' '.join(result['problems']))
+
     def test_prefixed_tool_output_is_not_mistaken_for_verdicts(self):
         text = console({'ce-chain-d': 'PASS', 'ce-chain-a': 'PASS', 'peer-nvme': 'PASS'})
         text += 'XDEV_EXT_GPU_LOG peer: XDEV_EXT_GPU_CASE name=dmabuf-peer result=PASS\n'

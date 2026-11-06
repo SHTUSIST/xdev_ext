@@ -14,6 +14,12 @@
 # caller.  TARGET_SLBA starts a destination window that only these cases use.
 # Every case prints one XDEV_EXT_GPU_CASE line; raw tool output is prefixed
 # with XDEV_EXT_GPU_LOG so the main console validator never parses it.
+#
+# A tool or rmmod blocked in the kernel (RM waiting on a lock that a stuck
+# thread owns) may never return, and even SIGKILL waits for it: no step is
+# waited for past its limit.  A step past its limit, or RM lock assertions in
+# the kernel log, print an XDEV_EXT_GPU_PROBLEM line and every later GPU case
+# is skipped, so the harness still runs the unload and powers off.
 set -u
 export LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu:/lib/x86_64-linux-gnu
 
@@ -21,15 +27,39 @@ log_file() {
 	sed "s/^/XDEV_EXT_GPU_LOG $1: /" "$2" 2>/dev/null
 }
 
+# bounded LIMIT_S LOG COMMAND...: the command's status, or 124 when it still
+# runs after LIMIT_S seconds; it is then sent SIGKILL and left behind.
+bounded() {
+	bounded_limit=$1 bounded_log=$2
+	shift 2
+	"$@" >"$bounded_log" 2>&1 &
+	bounded_pid=$!
+	bounded_waited=0
+	while kill -0 "$bounded_pid" 2>/dev/null &&
+	      [ "$bounded_waited" -lt "$((bounded_limit * 10))" ]; do
+		sleep 0.1
+		bounded_waited=$((bounded_waited + 1))
+	done
+	if kill -0 "$bounded_pid" 2>/dev/null; then
+		kill -KILL "$bounded_pid" 2>/dev/null
+		return 124
+	fi
+	wait "$bounded_pid"
+}
+
 if [ "${1:-}" = unload ]; then
 	# Modules must leave cleanly so the host driver can take the GPU back
 	# without a reset: a GSP left running blocks the host re-probe.
+	unload_limit_s=${XDEV_EXT_GPU_UNLOAD_LIMIT_S:-60}
 	for module in nvidia_uvm nvidia; do
 		[ -d "/sys/module/$module" ] || continue
-		if ! rmmod "$module" 2>/tmp/rmmod-$module.err; then
-			echo "XDEV_EXT_GPU_UNLOAD=FAIL module=$module refcnt=$(cat /sys/module/$module/refcnt 2>/dev/null) holders=$(ls /sys/module/$module/holders 2>/dev/null | tr '\n' ',') error=$(tr '\n' ' ' </tmp/rmmod-$module.err)"
-			exit 1
-		fi
+		bounded "$unload_limit_s" "/tmp/rmmod-$module.err" rmmod "$module"
+		rc=$?
+		[ "$rc" = 0 ] && continue
+		reason=error
+		[ "$rc" = 124 ] && reason="timeout limit_s=$unload_limit_s"
+		echo "XDEV_EXT_GPU_UNLOAD=FAIL module=$module reason=$reason refcnt=$(cat /sys/module/$module/refcnt 2>/dev/null) holders=$(ls /sys/module/$module/holders 2>/dev/null | tr '\n' ',') error=$(tr '\n' ' ' </tmp/rmmod-$module.err)"
+		exit 1
 	done
 	[ ! -d /sys/module/nvidia ] && echo XDEV_EXT_GPU_UNLOAD=PASS
 	exit 0
@@ -41,6 +71,9 @@ source_slba=$8 target_slba=$9 groups=${10} depth=${11} ce_len=${12} timeout_ms=$
 release=$(cat "$dir/release")
 window_nlb=$((groups * 16))
 failed=0 unsupported=0
+# The tool's own deadline plus CUDA start-up.
+case_limit_s=${XDEV_EXT_GPU_CASE_LIMIT_S:-$((timeout_ms / 1000 + 60))}
+gpu_problem=
 case_result() {
 	# name result detail...
 	name=$1 result=$2
@@ -51,6 +84,25 @@ case_result() {
 	UNSUPPORTED) unsupported=$((unsupported + 1)) ;;
 	*) failed=$((failed + 1)) ;;
 	esac
+}
+# timed_out CASE STATUS: a step past its limit stops the GPU cases.
+timed_out() {
+	[ "$2" = 124 ] || return 1
+	gpu_problem=timeout
+	echo "XDEV_EXT_GPU_PROBLEM case=$1 reason=timeout limit_s=$case_limit_s"
+}
+# rm_lock_state CASE: RM lock assertions mean a thread was left owning RM
+# locks; RM then waits on it forever and no later GPU step can finish.
+rm_lock_state() {
+	[ -z "$gpu_problem" ] || return 0
+	dmesg | grep -Eq 'GPU lock already acquired by this thread|rmGpuLocksGetOwnedMask\(\) == 0' || return 0
+	gpu_problem=rm-lock-state
+	echo "XDEV_EXT_GPU_PROBLEM case=$1 reason=rm-lock-state"
+}
+# skipped CASE: true, with its FAIL line, after an earlier problem.
+skipped() {
+	[ -n "$gpu_problem" ] || return 1
+	case_result "$1" FAIL reason="skipped-after-$gpu_problem"
 }
 
 # --- G0: our NVIDIA modules on the physical GPU --------------------------
@@ -97,10 +149,13 @@ echo "XDEV_EXT_GPU_MODULES=PASS release=$release device=${vendor#0x}:${device#0x
 
 # --- CUDA's own report on this GPU: the only evidence for UNSUPPORTED ------
 caps=
-if "$dir/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf" >/tmp/gpu-caps.log 2>&1; then
+bounded "$case_limit_s" /tmp/gpu-caps.log "$dir/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf"
+rc=$?
+if [ "$rc" = 0 ]; then
 	caps=$(grep '^XDEV_EXT_GPU_CAPS ' /tmp/gpu-caps.log | head -n 1)
 fi
 log_file caps /tmp/gpu-caps.log
+timed_out caps "$rc"
 [ -n "$caps" ] || caps="XDEV_EXT_GPU_CAPS bdf=$gpu_bdf probe=failed"
 echo "$caps"
 caps_have() {
@@ -149,47 +204,67 @@ create_diag() {
 }
 
 # --- G1: CE chain d (real GPU copy engines only) -------------------------
-"$ctl" ce-chain --chain d --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
-	--groups "$groups" --depth "$depth" --group-bytes 8192 \
-	--timeout-ms "$timeout_ms" --diagnostics >/tmp/gpu-d.log 2>&1
-rc=$?
-log_file ce-chain-d /tmp/gpu-d.log
-if [ "$rc" = 0 ] && ce_ok /tmp/gpu-d.log d; then
-	case_result ce-chain-d PASS groups="$groups" allocation="$ce_mode"
-else case_result ce-chain-d FAIL rc="$rc" allocation="$ce_mode" $(create_diag /tmp/gpu-d.log); fi
+if ! skipped ce-chain-d; then
+	bounded "$case_limit_s" /tmp/gpu-d.log \
+		"$ctl" ce-chain --chain d --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
+		--groups "$groups" --depth "$depth" --group-bytes 8192 \
+		--timeout-ms "$timeout_ms" --diagnostics
+	rc=$?
+	log_file ce-chain-d /tmp/gpu-d.log
+	if timed_out ce-chain-d "$rc"; then
+		case_result ce-chain-d FAIL rc="$rc" reason=timeout allocation="$ce_mode"
+	elif [ "$rc" = 0 ] && ce_ok /tmp/gpu-d.log d; then
+		case_result ce-chain-d PASS groups="$groups" allocation="$ce_mode"
+	else case_result ce-chain-d FAIL rc="$rc" allocation="$ce_mode" $(create_diag /tmp/gpu-d.log); fi
+	rm_lock_state ce-chain-d
+fi
 
 # --- G2: CE chain a (NVMe -> host UMEM -> VRAM -> host UMEM -> NVMe) ------
+if skipped ce-chain-a; then :
+else
 drop_caches
 dd if="$source_block" of=/tmp/gpu-src.bin bs=512 skip="$source_slba" count="$window_nlb" 2>/dev/null
 if clear_window; then
-	"$ctl" ce-chain --chain a --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
+	bounded "$case_limit_s" /tmp/gpu-a.log \
+		"$ctl" ce-chain --chain a --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
 		--src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
 		--dst-ng "$destination_ng" --dst-slba "$target_slba" --dst-nlb "$window_nlb" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
-		--timeout-ms "$timeout_ms" --diagnostics >/tmp/gpu-a.log 2>&1
+		--timeout-ms "$timeout_ms" --diagnostics
 	rc=$?
 	log_file ce-chain-a /tmp/gpu-a.log
-	if [ "$rc" = 0 ] && ce_ok /tmp/gpu-a.log a && compare_window; then
+	if timed_out ce-chain-a "$rc"; then
+		case_result ce-chain-a FAIL rc="$rc" reason=timeout allocation="$ce_mode"
+	elif [ "$rc" = 0 ] && ce_ok /tmp/gpu-a.log a && compare_window; then
 		case_result ce-chain-a PASS bytes=$((window_nlb * 512)) allocation="$ce_mode" compare=equal
 	else
 		case_result ce-chain-a FAIL rc="$rc" allocation="$ce_mode" $(create_diag /tmp/gpu-a.log) \
 			compare=$(compare_window && echo equal || echo differs)
 	fi
+	rm_lock_state ce-chain-a
 else
 	case_result ce-chain-a FAIL reason=window-not-cleared
+fi
 fi
 "$ctl" detach --pin /sys/fs/bpf/gpu-ce >/dev/null 2>&1
 
 # --- G3: PEER pool in VRAM (NVMe READ into VRAM, NVMe WRITE from VRAM) ---
 # The NVMe struct_ops of the main guest is detached for the peer tool,
 # which attaches its own nvme_s0 program, and re-attached afterwards.
+nvme_detached=0
+if skipped peer-nvme; then :
+else
 "$ctl" detach --pin /sys/fs/bpf/zc-nvme >/tmp/gpu-detach.log 2>&1
+nvme_detached=1
 if clear_window; then
-	"$dir/xdev_ext_peer_chain" --cuda "$gpu_bdf" /dev/nvidia0 "$source_ng" "$destination_ng" \
-		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir" >/tmp/gpu-peer.log 2>&1
+	bounded "$case_limit_s" /tmp/gpu-peer.log \
+		"$dir/xdev_ext_peer_chain" --cuda "$gpu_bdf" /dev/nvidia0 "$source_ng" "$destination_ng" \
+		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir"
 	rc=$?
 	log_file peer-nvme /tmp/gpu-peer.log
-	if [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-peer.log && compare_window; then
+	if timed_out peer-nvme "$rc"; then
+		case_result peer-nvme FAIL rc="$rc" reason=timeout
+	elif [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-peer.log && compare_window; then
 		case_result peer-nvme PASS bytes=$((window_nlb * 512))
 	elif [ "$rc" != 0 ] && grep -Eq '^peer chain failed at register: .* \(-22\)$' /tmp/gpu-peer.log &&
 	     dmesg | grep -Fq 'NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22' &&
@@ -203,19 +278,26 @@ if clear_window; then
 	else
 		case_result peer-nvme FAIL rc="$rc" compare=$(compare_window && echo equal || echo differs)
 	fi
+	rm_lock_state peer-nvme
 else
 	case_result peer-nvme FAIL reason=window-not-cleared
 fi
+fi
 
 # --- G4: VRAM exported as DMA-BUF, imported as the PEER pool --------------
+if skipped dmabuf-peer; then :
+else
 if clear_window; then
-	"$dir/xdev_ext_gpu_dmabuf" --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/gpu-src.bin \
+	bounded "$case_limit_s" /tmp/gpu-dmabuf.log \
+		"$dir/xdev_ext_gpu_dmabuf" --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/gpu-src.bin \
 		--group-bytes 8192 --frame-bytes 65536 -- \
 		"$dir/xdev_ext_peer_chain" --allocation-fd '{fd}' "$source_ng" "$destination_ng" \
-		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir" >/tmp/gpu-dmabuf.log 2>&1
+		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir"
 	rc=$?
 	log_file dmabuf-peer /tmp/gpu-dmabuf.log
-	if [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-dmabuf.log &&
+	if timed_out dmabuf-peer "$rc"; then
+		case_result dmabuf-peer FAIL rc="$rc" reason=timeout
+	elif [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-dmabuf.log &&
 	   grep -Fq 'XDEV_EXT_GPU_DMABUF vram_holds_last_group=yes' /tmp/gpu-dmabuf.log && compare_window; then
 		case_result dmabuf-peer PASS bytes=$((window_nlb * 512))
 	elif [ "$rc" != 0 ] && grep -Eq '^XDEV_EXT_GPU_DMABUF device=[^ ]+ dma_buf_supported=0$' /tmp/gpu-dmabuf.log &&
@@ -226,14 +308,18 @@ if clear_window; then
 	else
 		case_result dmabuf-peer FAIL rc="$rc" compare=$(compare_window && echo equal || echo differs)
 	fi
+	rm_lock_state dmabuf-peer
 else
 	case_result dmabuf-peer FAIL reason=window-not-cleared
 fi
-"$ctl" attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
-	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0 >/tmp/gpu-reattach.log 2>&1 || {
-	log_file reattach /tmp/gpu-reattach.log
-	case_result reattach-nvme FAIL
-}
+fi
+if [ "$nvme_detached" = 1 ]; then
+	"$ctl" attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
+		--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0 >/tmp/gpu-reattach.log 2>&1 || {
+		log_file reattach /tmp/gpu-reattach.log
+		case_result reattach-nvme FAIL
+	}
+fi
 
 # The window ends with the source bytes, which the host image oracle checks.
 # UNSUPPORTED is never PASS: the host verdict and the harness stay nonzero.

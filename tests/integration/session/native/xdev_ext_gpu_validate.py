@@ -23,6 +23,10 @@ CUDA reports GPUDirect RDMA, otherwise a VMM allocation whose POSIX-FD export
 each CE stage fd carries (allocation=vmm).  The tool's own allocation and
 release lines must be in the console, and ce-chain-a must report
 compare=equal.
+
+An XDEV_EXT_GPU_PROBLEM line (a guest step past its limit, or RM lock
+assertions after which the guest skipped its later GPU cases) is always a
+FAIL problem.
 """
 
 import argparse
@@ -130,6 +134,10 @@ def validate(text, *, release, device):
         problems.append(f'guest summary not {expected}')
     if module_state == 'PASS' and len(summary) != 1:
         problems.append('guest summary missing or repeated')
+    for line in lines:
+        if line.startswith('XDEV_EXT_GPU_PROBLEM '):
+            fields = _fields(line)
+            problems.append(f'guest problem: case {fields.get("case")} reason={fields.get("reason")}')
     unload = [line for line in lines if line.startswith('XDEV_EXT_GPU_UNLOAD=')]
     unload_clean = unload == ['XDEV_EXT_GPU_UNLOAD=PASS']
     if not unload_clean:

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -198,6 +199,7 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+[ ! -f "$FAKE/ce-$chain.sleep" ] || sleep "$(cat "$FAKE/ce-$chain.sleep")"
 cat "$FAKE/ce-$chain.out" 2>/dev/null
 rc=$(cat "$FAKE/ce-$chain.rc" 2>/dev/null || echo 0)
 [ "$rc" != 0 ] || [ -z "$dst" ] || dd if="$src" of="$dst" bs=512 skip="$slba" seek="$dslba" count="$nlb" conv=notrunc 2>/dev/null
@@ -249,7 +251,7 @@ class GpuGuestCases(unittest.TestCase):
     """xdev_ext_gpu_guest.sh against stand-in tools in a scratch root; only the
     case logic and the console lines it prints are under test here."""
 
-    def guest(self, **outputs):
+    def guest(self, env=None, **outputs):
         tmp = tempfile.TemporaryDirectory(prefix='gpu-guest-')
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -272,7 +274,8 @@ class GpuGuestCases(unittest.TestCase):
                     'peer.out': PEER_PASS, 'dmabuf-peer.out': PEER_PASS,
                     'dmabuf.out': 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=1\n',
                     'caps.out': 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1\n'}
-        defaults.update({name.replace('_', '-').replace('-out', '.out').replace('-rc', '.rc'): value
+        defaults.update({name.replace('_', '-').replace('-out', '.out').replace('-rc', '.rc')
+                         .replace('-sleep', '.sleep'): value
                          for name, value in outputs.items()})
         for name, value in defaults.items():
             (fake / name).write_text(value)
@@ -295,7 +298,8 @@ class GpuGuestCases(unittest.TestCase):
                               str(root / 'ctl'), image[0], image[0], image[1], image[1],
                               '0', '64', '4', '4', '32768', '60000'],
                              capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, FAKE=str(fake), PATH=f'{bin_dir}:/usr/bin:/bin'))
+                             env=dict(os.environ, FAKE=str(fake), PATH=f'{bin_dir}:/usr/bin:/bin',
+                                      **(env or {})))
         self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
         return run.stdout
 
@@ -412,6 +416,59 @@ class GpuGuestCases(unittest.TestCase):
                 self.assertNotIn('UNSUPPORTED', results.values(), results)
                 self.assertIn('FAIL', results.values(), results)
                 self.assertRegex(console, r'\nXDEV_EXT_GPU_GUEST=FAIL failed=[1-9] unsupported=0\n')
+
+    # A tool blocked in the kernel (a thread left owning RM's GPU locks) never
+    # returns; the guest must not wait for it past its limit, must say why,
+    # and must skip the later GPU cases so the harness still unloads.
+    RM_LOCK_ASSERT = ('[    8.7] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                      'GPU lock already acquired by this thread @ locks.c:992\n')
+
+    def test_a_hung_tool_is_bounded_and_the_later_gpu_cases_are_skipped(self):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, ce_d_sleep='60\n',
+                             caps_out=CAPS_GEFORCE, **GEFORCE_CE)
+        self.assertLess(time.monotonic() - started, 30, 'the guest waited for the hung tool')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['ce-chain-d']['result'], cases['ce-chain-d'].get('reason')),
+                         ('FAIL', 'timeout'))
+        for name in ('ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-timeout'), name)
+        self.assertRegex(console, r'\nXDEV_EXT_GPU_GUEST=FAIL failed=4 unsupported=0\n')
+        calls = (self.root / 'fake/ctl.calls').read_text()
+        self.assertEqual(calls.count('ce-chain --chain a'), 0, calls)
+
+    def test_rm_lock_assertions_stop_the_gpu_cases(self):
+        console = self.guest(caps_out=CAPS_GEFORCE, dmesg_out=self.RM_LOCK_ASSERT, **GEFORCE_CE)
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=rm-lock-state\n', console)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-rm-lock-state'), name)
+        self.assertIn('XDEV_EXT_GPU_GUEST=FAIL', console)
+
+    def test_unload_is_bounded(self):
+        tmp = tempfile.TemporaryDirectory(prefix='gpu-unload-')
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bin_dir = root / 'bin'
+        for directory in (bin_dir, root / 'tmp', root / 'sys/module/nvidia_uvm/holders',
+                          root / 'sys/module/nvidia'):
+            directory.mkdir(parents=True, exist_ok=True)
+        (root / 'sys/module/nvidia_uvm/refcnt').write_text('1\n')
+        (bin_dir / 'rmmod').write_text('#!/bin/sh\nsleep 60\n')
+        (bin_dir / 'rmmod').chmod(0o755)
+        script = re.sub(r'/(?:sys|proc|tmp)/|/dev/nvidia',
+                        lambda match: str(root) + match.group(0), GPU_GUEST.read_text())
+        started = time.monotonic()
+        run = subprocess.run(['sh', '-c', script, 'xdev_ext_gpu_guest.sh', 'unload'],
+                             capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, PATH=f'{bin_dir}:/usr/bin:/bin',
+                                      XDEV_EXT_GPU_UNLOAD_LIMIT_S='2'))
+        self.assertLess(time.monotonic() - started, 20, 'unload waited for a blocked rmmod')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertRegex(run.stdout, r'^XDEV_EXT_GPU_UNLOAD=FAIL module=nvidia_uvm reason=timeout limit_s=2 ')
 
     def test_one_failure_keeps_the_summary_failed(self):
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
