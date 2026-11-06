@@ -3658,6 +3658,11 @@
       "native_path": "tests/nv_xdev_ext_ce_rm_event_test.py"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_launch_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_launch_test.py"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_variant_source_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_variant_source_test.py"

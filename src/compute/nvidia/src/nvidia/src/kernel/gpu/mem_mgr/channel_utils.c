@@ -1119,6 +1119,7 @@ channelPushMethod
     NvU32 flushValue = 0;
     NvU32 disablePlcKind = 0;
     NvU32 launchParams = 0;
+    NvU32 intrValue = 0;
     NvU32 *pPtr = *ppPtr;
 
     if (bPipelined)
@@ -1133,6 +1134,8 @@ channelPushMethod
     if (bInsertFinishPayload)
     {
         flushValue = DRF_DEF(B0B5, _LAUNCH_DMA, _FLUSH_ENABLE, _TRUE);
+        if (pChannelPbInfo->pCompletionCallback != NULL)
+            intrValue = DRF_DEF(B0B5, _LAUNCH_DMA, _INTERRUPT_TYPE, _NON_BLOCKING);
     }
     else
     {
@@ -1165,6 +1168,7 @@ channelPushMethod
                    launchType |
                    pipelinedValue |
                    flushValue |
+                   intrValue |
                    semaValue |
                    copyType);
     *ppPtr = pPtr;
