@@ -8,10 +8,12 @@ program is attached).  The CLI's rule (ctl_zc_tx_xdp): kick the TX queue
 before CREATE; attach the pass program only when the kick is refused with
 EINVAL, ENXIO or ENETDOWN; accept another owner's program (-EBUSY); detach
 only what was attached.  This suite checks the shared rule in the redirect
-helper, the NVMe->NIC and GPU->NIC benchmark session arms, and the session
-library, which applies it automatically and owns the program until close.
+helper; the NVMe->NIC, GPU->NIC, chain (sender) and HFT benchmark session
+arms; and the session library, which applies it automatically and owns the
+program until close.
 """
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -38,6 +40,11 @@ _spec.loader.exec_module(adapter)
 NNB = 'tests/benchmarks/nvme_nic/nnb_session.c'
 NNB_PRODUCER = 'tests/benchmarks/nvme_nic/nnb_producer.c'
 GNB = 'tests/benchmarks/gpu_nic/session_gpu_nic.c'
+CHAINS = 'tests/benchmarks/chains/chain_session.c'
+HFT = 'tests/benchmarks/hft/hft_session.c'
+HFT_MAKEFILE = 'tests/benchmarks/hft/Makefile'
+HFT_BUILD = 'tests/benchmarks/hft/hardware_build.py'
+HFT_GATE = 'tests/benchmarks/hft/hardware_gate.py'
 
 
 def run(cmd, **kw):
@@ -125,6 +132,87 @@ def gnb_problems(text):
     if 'xdev_ext_xsk_redirect_attach(&redirect, &filter,' not in body or \
             not re.search(r'if \(!err && o\.ingest\)', body):
         problems.append('ingest redirect changed')
+    return problems
+
+
+def chains_problems(text):
+    """A sender chain (stage 0 is not AF_XDP RX) binds a transmit-only socket."""
+    body = strip_comments(adapter.function(text, 'chain_run_session'))
+    problems = []
+    create = body.find('cs_mech(ring, XDEV_EXT_MECH_OP_CREATE')
+    out = body.find('\nout:\n')
+    if create < 0 or out < 0:
+        return ['chain_run_session lacks CREATE or its out: label']
+    rule = re.search(r'if \((?:ax >= 0 && !rx && x\.zero_copy|!rx && ax >= 0 && x\.zero_copy)\)\s*\{\s*'
+                     r'ret = xdev_ext_xsk_redirect_zc_tx_xdp\(\s*&(\w+),\s*x\.fd,\s*'
+                     r'\(int\)if_nametoindex\(s->st\[ax\]\.ifname\),\s*XDP_FLAGS_DRV_MODE\s*\);', body)
+    if not rule:
+        return ['zero-copy sender gets no XDP-mode rule before CREATE']
+    owner = re.escape(rule.group(1))
+    if rule.start() > create:
+        problems.append('XDP-mode rule runs after CREATE')
+    elif not re.search(r'^\s*if \(ret\)\s*\{[^{}]*\bgoto out;', body[rule.end():create], re.M):
+        problems.append('a failed XDP-mode rule does not end setup before CREATE')
+    if rule.group(1) == 'redirect':
+        problems.append('the pass program shares the receiver redirect')
+    if re.search(r'\breturn\b', body[rule.end():out]):
+        problems.append('an exit after the XDP-mode rule bypasses out:')
+    fill = re.search(r'if \(!rx && ax >= 0\)\s*cs_fq_fill\(&x\);', body)
+    if not fill or fill.start() < create:
+        problems.append('zero-copy transmit-only socket leaves its fill ring empty')
+    tail = body[out:]
+    detach = (r'if \(xdev_ext_xsk_redirect_is_active\(&' + owner + r'\)\)\s*'
+              r'xdev_ext_xsk_redirect_detach\(&' + owner + r'\);')
+    # STOP failed: memory stays mapped until exit, but a netlink-attached
+    # program would outlive the process.
+    unsafe = re.search(r'if \(unsafe\) \{(.*?)\n\t\treturn r->status;\n\t\}', tail, re.S)
+    if not unsafe or not re.search(detach, unsafe.group(1)):
+        problems.append('a STOP-failed exit leaves the pass program attached past exit')
+    rest = tail[unsafe.end():] if unsafe else tail
+    close_ring, found = rest.find('close(ring)'), re.search(detach, rest)
+    if not found or close_ring < 0 or found.start() < close_ring:
+        problems.append('out: does not detach the pass program after the session ring is closed')
+    if 'xdev_ext_xsk_redirect_attach(&redirect, &filter,' not in body:
+        problems.append('receiver redirect changed')
+    return problems
+
+
+def hft_problems(session, makefile, build, gate):
+    """The HFT session arm binds a transmit-only zero-copy socket (ctl_xsk_open rx=false, tx=true)."""
+    body = strip_comments(adapter.function(session, 'hft_session'))
+    problems = []
+    create = body.find('if(mech(ring,XDEV_EXT_MECH_OP_CREATE')
+    stop = body.find('stop=mech(ring,XDEV_EXT_MECH_OP_STOP')
+    retained = body.find('if(!unsafe)')
+    if min(create, stop, retained) < 0:
+        return ['hft_session lacks CREATE, STOP or its retained-resources branch']
+    rule = re.search(r'if\(\s*xdev_ext_xsk_redirect_zc_tx_xdp\(\s*&(\w+)\s*,\s*x\.fd\s*,\s*'
+                     r'\(int\)if_nametoindex\(c->ifname\)\s*,\s*XDP_FLAGS_DRV_MODE\s*\)\s*\)\s*goto setup;', body)
+    if not rule:
+        problems.append('transmit-only zero-copy socket gets no XDP-mode rule before CREATE')
+    elif rule.start() > create:
+        problems.append('XDP-mode rule runs after CREATE')
+    else:
+        owner = re.escape(rule.group(1))
+        found = re.search(r'if\(\s*xdev_ext_xsk_redirect_is_active\(&' + owner + r'\)\s*\)\s*'
+                          r'xdev_ext_xsk_redirect_detach\(&' + owner + r'\);', body)
+        # After STOP on every exit, outside the block test_failure_history.py compiles.
+        if not found or not stop < found.start() < retained:
+            problems.append('the pass program is not detached after STOP on every exit')
+    # Every UMEM chunk carries guard bytes the non-measured oracle checks:
+    # the receive side must not get chunks through the fill ring.
+    if 'fq.producer' in body or 'fq_push' in body or 'fq_fill' in body:
+        problems.append('the fill ring would hand guarded chunks to the receive queue')
+    section = re.search(r'ifeq \(\$\(ENABLE_SESSION\),1\)(.*?)\nendif', makefile, re.S)
+    if not section or not re.search(r'^SOURCES \+= \.\./\.\./\.\./kernel/tools/xdev_ext_xsk_redirect\.c$',
+                                    section.group(1), re.M):
+        problems.append('the session build does not link the redirect helper')
+    helper = re.search(r"^HELPER_SOURCES=\(([^)]*)\)", build, re.M)
+    if not helper or "'kernel/tools/xdev_ext_xsk_redirect.c'" not in helper.group(1) or \
+            not re.search(r'^def binary_source_sha\(\).*\*HELPER_SOURCES', build, re.M):
+        problems.append('the binary source digest omits the redirect helper')
+    if 'list(build.HELPER_SOURCES)' not in gate:
+        problems.append('the hardware gate does not pin the redirect helper sources')
     return problems
 
 
@@ -255,7 +343,7 @@ def source_view():
 
 
 class SessionArmBuilds(unittest.TestCase):
-    """Both arms still compile and link the helper, with the session backend on."""
+    """Every arm still compiles and links the helper, with the session backend on."""
 
     @classmethod
     def setUpClass(cls):
@@ -281,6 +369,27 @@ class SessionArmBuilds(unittest.TestCase):
                          '--build-only', '--build-dir', tmp], timeout=300)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             self.assertTrue((Path(tmp) / 'session_gpu_nic').is_file(), built.stdout + built.stderr)
+
+    def test_chain_bench(self):
+        with tempfile.TemporaryDirectory(prefix='zc-tx-chains-') as tmp:
+            built = run(['make', '-s', '-C', str(self.view / 'tests/eval/chains'), 'bench', 'BUILD=' + tmp,
+                         'CC=' + CC, 'LIBBPF_CFLAGS=' + ' '.join(LIBBPF_CFLAGS),
+                         'LIBBPF_LIBS=' + ' '.join(LIBBPF_LIBS)], timeout=600)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            self.assertTrue((Path(tmp) / 'chain_bench').is_file())
+
+    def test_hft_replay_with_session_backend(self):
+        env = dict(os.environ, CPPFLAGS=' '.join(shlex.split(os.environ.get('CPPFLAGS', '')) +
+                                                  LIBBPF_CFLAGS))
+        with tempfile.TemporaryDirectory(prefix='zc-tx-hft-') as tmp:
+            target = Path(tmp) / 'hft_replay'
+            built = run(['make', '-s', '-C', str(self.view / 'tests/eval/hft'), 'ENABLE_SESSION=1',
+                         'BUILD_DIR=' + tmp, 'CC=' + CC, 'LDLIBS=' + ' '.join(LIBBPF_LIBS + ['-lelf', '-lz']),
+                         str(target)], env=env, timeout=300)
+            self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
+            self.assertTrue(target.is_file())
+            receipt = json.loads(Path(str(target) + '.build.json').read_text())
+            self.assertTrue(receipt['session'], receipt)
 
 
 # The operating-system boundary of library_fixture.c; both libbpf generations.
@@ -368,6 +477,46 @@ class SessionLibrary(unittest.TestCase):
                 self.assertRegex(out, r'not ok - ', name)
 
 
+CHAINS_RULE = r'\tif \(ax >= 0 && !rx && x\.zero_copy\) \{\n\t\tret = xdev_ext_xsk_redirect_zc_tx_xdp\(.*?\n\t\}\n'
+CHAINS_CREATE = '\tret = cs_mech(ring, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c, &r->syscalls);\n'
+CHAINS_UNSAFE_DETACH = '\t\tif (xdev_ext_xsk_redirect_is_active(&pass))\n\t\t\txdev_ext_xsk_redirect_detach(&pass);\n'
+CHAINS_DETACH = ('\t/* The session\'s ring is closed: its transmit queue\'s XDP mode may go. */\n'
+                 '\tif (xdev_ext_xsk_redirect_is_active(&pass))\n\t\txdev_ext_xsk_redirect_detach(&pass);\n')
+CHAINS_MUTATIONS = {
+    'rule_removed': lambda t: cut(t, block(CHAINS_RULE, t)),
+    'rule_for_receivers_too': lambda t: t.replace('if (ax >= 0 && !rx && x.zero_copy) {',
+                                                  'if (ax >= 0 && x.zero_copy) {', 1),
+    'rule_after_create': lambda t: insert_before(cut(t, block(CHAINS_RULE, t)),
+                                                 '\tret = cs_native_bind(s, c.session_id, rx);\n', block(CHAINS_RULE, t)),
+    'rule_failure_ignored': lambda t: t.replace('TX on %s: %s",\n\t\t\t\ts->st[ax].ifname, strerror(-ret));\n\t\t\tgoto out;\n',
+                                                'TX on %s: %s",\n\t\t\t\ts->st[ax].ifname, strerror(-ret));\n', 1),
+    'old_fill_condition': lambda t: t.replace('if (!rx && ax >= 0)\n\t\tcs_fq_fill(&x);',
+                                              'if (!rx && ax >= 0 && !x.zero_copy)\n\t\tcs_fq_fill(&x);', 1),
+    'stop_failed_exit_keeps_program': lambda t: cut(t, CHAINS_UNSAFE_DETACH),
+    'normal_exit_keeps_program': lambda t: cut(t, CHAINS_DETACH),
+    'detached_before_ring_close': lambda t: insert_before(cut(t, CHAINS_DETACH),
+                                                          '\tif (ring >= 0)\n\t\tclose(ring);\n\tif (efd >= 0)\n',
+                                                          CHAINS_DETACH),
+    'shares_receiver_redirect': lambda t: t.replace('&pass', '&redirect'),
+    'exit_bypasses_out': lambda t: insert_before(t, CHAINS_CREATE, '\tif (s->depth == 1234567)\n\t\treturn r->status;\n'),
+}
+
+HFT_RULE = ' if(xdev_ext_xsk_redirect_zc_tx_xdp(&pass,x.fd,(int)if_nametoindex(c->ifname),XDP_FLAGS_DRV_MODE)) goto setup;\n'
+HFT_CREATE = ' if(mech(ring,XDEV_EXT_MECH_OP_CREATE,(uintptr_t)&create)) goto setup;\n'
+HFT_DETACH = ' if(xdev_ext_xsk_redirect_is_active(&pass)) xdev_ext_xsk_redirect_detach(&pass);\n'
+HFT_MUTATIONS = {
+    'rule_removed': (0, lambda t: cut(t, HFT_RULE)),
+    'rule_after_create': (0, lambda t: insert_after(cut(t, HFT_RULE), HFT_CREATE, HFT_RULE)),
+    'rule_failure_ignored': (0, lambda t: t.replace('XDP_FLAGS_DRV_MODE)) goto setup;', 'XDP_FLAGS_DRV_MODE));', 1)),
+    'program_kept': (0, lambda t: cut(t, HFT_DETACH)),
+    'detach_inside_retained_block': (0, lambda t: insert_after(cut(t, HFT_DETACH), ' if(!unsafe) {\n', HFT_DETACH)),
+    'fill_published': (0, lambda t: insert_after(t, HFT_CREATE,
+                                                 ' __atomic_store_n(x.fq.producer,*x.fq.producer,__ATOMIC_RELEASE);\n')),
+    'session_build_without_helper': (1, lambda t: cut(t, 'SOURCES += ../../../kernel/tools/xdev_ext_xsk_redirect.c\n')),
+    'digest_without_helper': (2, lambda t: t.replace(',*BPF_SOURCES[1:],*HELPER_SOURCES)', ',*BPF_SOURCES[1:])', 1)),
+    'gate_without_helper': (3, lambda t: t.replace('+list(build.HELPER_SOURCES)', '', 1)),
+}
+
 class NvmeNicSession(unittest.TestCase):
     def setUp(self):
         self.session = (ROOT / NNB).read_text()
@@ -401,6 +550,37 @@ class GpuNicSession(unittest.TestCase):
                 self.assertNotEqual(mutated, self.text, name + ': no change')
                 self.assertNotEqual(gnb_problems(mutated), [], name + ' survived')
 
+
+
+class ChainsSession(unittest.TestCase):
+    def setUp(self):
+        self.text = (ROOT / CHAINS).read_text()
+
+    def test_sender_socket_gets_xdp_mode_before_create(self):
+        self.assertEqual(chains_problems(self.text), [])
+
+    def test_wiring_mutations_are_detected(self):
+        for name, mutate in CHAINS_MUTATIONS.items():
+            with self.subTest(mutation=name):
+                mutated = mutate(self.text)
+                self.assertNotEqual(mutated, self.text, name + ': no change')
+                self.assertNotEqual(chains_problems(mutated), [], name + ' survived')
+
+
+class HftSession(unittest.TestCase):
+    def setUp(self):
+        self.parts = [(ROOT / name).read_text() for name in (HFT, HFT_MAKEFILE, HFT_BUILD, HFT_GATE)]
+
+    def test_transmit_only_socket_gets_xdp_mode_before_create(self):
+        self.assertEqual(hft_problems(*self.parts), [])
+
+    def test_wiring_mutations_are_detected(self):
+        for name, (index, mutate) in HFT_MUTATIONS.items():
+            with self.subTest(mutation=name):
+                parts = list(self.parts)
+                parts[index] = mutate(parts[index])
+                self.assertNotEqual(parts[index], self.parts[index], name + ': no change')
+                self.assertNotEqual(hft_problems(*parts), [], name + ' survived')
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
