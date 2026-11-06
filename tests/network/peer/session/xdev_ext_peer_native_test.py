@@ -34,6 +34,12 @@ lease_types += '\n'.join(structure(peer_core, name) for name in
     ('xdev_ext_peer_provider', 'xdev_ext_peer_region', 'xdev_ext_peer_mapping'))
 release_functions = '\n'.join(definition(peer_core, name) for name in
     ('xdev_ext_peer_release', 'xdev_ext_peer_unmap', 'xdev_ext_peer_unpin'))
+# The integrated submit path encodes through the shared NVMe builder and
+# retires through the storage family helper; both are the actual sources.
+build_cmd = definition((kernel / 'drivers/nvme/host/core.c').read_text(),
+                       'nvme_xdev_ext_peer_build_cmd')
+leases_retire = definition((kernel / 'io_uring/family/xdev_ext_storfam.c').read_text(),
+                           'xdev_ext_stor_leases_retire')
 fd_release = definition((kernel / 'io_uring/xdev_ext_peer_fd.c').read_text(),
                         'xdev_ext_peer_fd_release').replace(
                             'void xdev_ext_peer_fd_release(', 'void actual_fd_release(', 1)
@@ -74,10 +80,15 @@ shim = r'''
 #define to_pci_dev(p) (p)
 #define nvme_req_op(c) ((c)->rw.opcode == 1)
 #define nvme_req(r) (&(r)->nr)
-struct nvme_sgl { u64 addr; u32 length; unsigned char reserved[3], type; };
+#define NVME_SGL_FMT_LAST_SEG_DESC 3
+#define NVME_CTRL_PAGE_SHIFT 12
+#define NVME_CTRL_PAGE_SIZE 4096
+#define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
+enum { nvme_cmd_write = 1, nvme_cmd_read = 2 };
+struct nvme_sgl_desc { u64 addr; u32 length; unsigned char rsvd[3], type; };
 struct nvme_command {
  union {
-  struct { u8 opcode, flags; u16 cid; u32 nsid; u64 reserved[2]; union { struct nvme_sgl sgl; } dptr; u64 slba; u16 length; } rw;
+  struct { u8 opcode, flags; u16 cid; u32 nsid; u64 reserved[2]; union { struct nvme_sgl_desc sgl; struct { u64 prp1, prp2; }; } dptr; u64 slba; u16 length; } rw;
   struct { u8 opcode, flags; } common;
  };
 };
@@ -104,6 +115,8 @@ static DEFINE_MUTEX(xdev_ext_peer_registry_lock);
 /* ACTUAL_RELEASE_FUNCTIONS */
 /* ACTUAL_FD_RELEASE */
 /* RELEASE_BOUNDARY */
+/* ACTUAL_LEASES_RETIRE */
+/* ACTUAL_BUILD_CMD */
 static unsigned memory_unmaps, memory_unpins;
 static int memory_unmap(void *allocation, struct pci_dev *peer, struct xdev_ext_peer_dma *dma)
 { (void)allocation; (void)peer; (void)dma; memory_unmaps++; return 0; }
@@ -213,7 +226,8 @@ with tempfile.TemporaryDirectory(prefix='xdev-peer-native-') as directory:
     for marker, actual in (('ACTUAL_PEER_FLAG', peer_flag), ('ACTUAL_LEASE_TYPES', lease_types),
                           ('ACTUAL_EVENT_TYPE', event_type), ('ACTUAL_TRACE_HEADER', trace_header),
                           ('ACTUAL_RELEASE_FUNCTIONS', release_functions), ('ACTUAL_FD_RELEASE', fd_release),
-                          ('RELEASE_BOUNDARY', release_boundary)):
+                          ('RELEASE_BOUNDARY', release_boundary),
+                          ('ACTUAL_LEASES_RETIRE', leases_retire), ('ACTUAL_BUILD_CMD', build_cmd)):
         fixture = fixture.replace('/* ' + marker + ' */', actual)
     for name, boundary, entry in (('native', fixture, main), ('unknown', fixture, unknown_main),
             ('old-release-mock', fixture.replace(release_boundary, old_release_boundary), unknown_main)):
