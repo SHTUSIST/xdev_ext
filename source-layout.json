@@ -769,6 +769,11 @@
       "native_path": "kernel-open/nvidia/nvidia.Kbuild"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/os-interface.c",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/os-interface.c"
+    },
+    {
       "source": "src/compute/nvidia/src/nvidia/arch/nvalloc/unix/src/osapi.c",
       "component": "nvidia",
       "native_path": "src/nvidia/arch/nvalloc/unix/src/osapi.c"
