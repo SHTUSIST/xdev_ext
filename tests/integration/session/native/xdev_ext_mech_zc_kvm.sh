@@ -9,6 +9,7 @@
 # confined to private image files and a QEMU hub/private UNIX stream cable.
 set -euo pipefail
 umask 077
+BPF_CLANG=${XDEV_EXT_BPF_CLANG:-/usr/bin/clang-21}
 SCRATCH=''
 SOURCE_OVERRIDE=''
 RUN_ONLY=0
@@ -831,12 +832,12 @@ if (( ! RUN_ONLY )); then
 		kmake M="$CE_SIM_OUT" MODULE_PAHOLE_FLAGS= modules >"$EV/ce-sim-build.log" 2>&1
         mkdir -p "$DMA_SIM_OUT"
         cp "$SRC/tools/testing/selftests/xdev_ext_mech/provider/"{Makefile,*.c,*.h,run-guest.sh} "$DMA_SIM_OUT/"
-        lowprio make -C "$DMA_SIM_OUT" runtime KERNEL_SRC="$SRC" CC=gcc-14 CLANG=/usr/bin/clang-21 >"$EV/dma-tools-build.log" 2>&1
+        lowprio make -C "$DMA_SIM_OUT" runtime KERNEL_SRC="$SRC" CC=gcc-14 CLANG="$BPF_CLANG" >"$EV/dma-tools-build.log" 2>&1
         kmake M="$DMA_SIM_OUT" MODULE_PAHOLE_FLAGS= modules >"$EV/dma-provider-build.log" 2>&1
         if [[ "$PROVIDER_CASE" == normal ]]; then
             mkdir -p "$IAA_OUT"
             cp "$SRC/tools/testing/selftests/xdev_ext_mech/iaa_transform/"{Makefile,iaa_runtime.c,iaa_pair.bpf.c,campaign.h,observations.h,run-guest.sh} "$IAA_OUT/"
-            lowprio make -C "$IAA_OUT" runtime KERNEL_SRC="$SRC" PROVIDER_HEADERS="$DMA_SIM_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 >"$EV/iaa-tools-build.log" 2>&1
+            lowprio make -C "$IAA_OUT" runtime KERNEL_SRC="$SRC" PROVIDER_HEADERS="$DMA_SIM_OUT" CC=gcc-14 CLANG="$BPF_CLANG" >"$EV/iaa-tools-build.log" 2>&1
         fi
 	elif (( ${GPU:-0} )); then
 		kmake bzImage vmlinux modules_prepare >"$EV/kernel-build.log" 2>&1
@@ -853,7 +854,7 @@ if (( ! RUN_ONLY )); then
         [[ -s "$FENCE_OUT/lifecycle_bench.ko" ]]
     fi
 	lowprio make -C "$SRC/tools/xdev_ext_mech" -j8 BUILD_DIR="$TOOLS" \
-		VMLINUX_BTF="$BUILD/vmlinux" CC=gcc-14 CLANG=/usr/bin/clang-21 \
+		VMLINUX_BTF="$BUILD/vmlinux" CC=gcc-14 CLANG="$BPF_CLANG" \
 		all >"$EV/tools-build.log" 2>&1
     if (( XDOMAIN )); then
         mkdir -p "$PEER_OUT"
@@ -871,7 +872,7 @@ if (( ! RUN_ONLY )); then
     if (( COMPAT )); then
         mkdir -p "$SOCKET_OUT" "$PRELOAD_OUT"
         cp "$SRC/tools/testing/selftests/xdev_ext_mech/socket_guest/"{Makefile,socket_runtime.c,observations.h,ce_observe.bpf.c} "$SOCKET_OUT/"
-        lowprio make -C "$SOCKET_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 KERNEL_SRC="$SRC" \
+        lowprio make -C "$SOCKET_OUT" CC=gcc-14 CLANG="$BPF_CLANG" KERNEL_SRC="$SRC" \
             runtime >"$EV/socket-tools-build.log" 2>&1
         lowprio make -C "$SRC/tools/testing/selftests/xdev_ext_preload" OUTPUT="$PRELOAD_OUT" \
             CC=gcc-14 all >"$EV/preload-tools-build.log" 2>&1
@@ -885,7 +886,7 @@ if (( ! RUN_ONLY )); then
     fi
     if (( EVAL_SESSION )); then
         lowprio make -C "$EVAL_SESSION_SOURCE" guest \
-            GUEST_OUT="$EVAL_SESSION_OUT" CC=gcc-14 CLANG=/usr/bin/clang-21 \
+            GUEST_OUT="$EVAL_SESSION_OUT" CC=gcc-14 CLANG="$BPF_CLANG" \
             >"$EV/eval-session-build.log" 2>&1
         record_eval_session_sources
         printf 'eval_session=1\n' >"$BUILD/xdev-ext-eval-session-mode.txt"
@@ -893,7 +894,7 @@ if (( ! RUN_ONLY )); then
 fi
 if (( MECHANISM_VARIANTS && ! RUN_ONLY )); then e2_build; fi
 lowprio make -C "$SRC/tools/testing/selftests/xdev_ext_integration/verifier" -j2 \
-	BUILD_DIR="$TOOLS/verifier" CLANG=/usr/bin/clang-21 HOSTCC=gcc-14 \
+	BUILD_DIR="$TOOLS/verifier" CLANG="$BPF_CLANG" HOSTCC=gcc-14 \
 	all >"$EV/verifier-build.log" 2>&1
 if (( ! RUN_ONLY )); then
     python3 "$DEBUG_HELPER" record "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"

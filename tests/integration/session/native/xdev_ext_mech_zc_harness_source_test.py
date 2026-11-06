@@ -156,6 +156,45 @@ class HarnessWiringTest(unittest.TestCase):
     def setUp(self):
         self.script = HARNESS.read_text()
 
+    def test_bpf_compiler_override_reaches_every_make_invocation(self):
+        # Execute real command expansions and real make, without compiling.
+        # A missed call site or unquoted compiler path must fail this test.
+        initialization = self.script[:self.script.index('while (($#)); do')]
+        priority = next(line for line in self.script.splitlines()
+                        if line.startswith('lowprio()'))
+        commands = [line.strip() for line in self.script.replace('\\\n', ' ').splitlines()
+                    if line.strip().startswith('lowprio make ') and 'CLANG=' in line]
+        self.assertEqual(len(commands), 6, 'cover every BPF make invocation')
+        for value, expected in ((None, '/usr/bin/clang-21'), ('', '/usr/bin/clang-21'),
+                                ('/usr/bin/clang-19', '/usr/bin/clang-19'),
+                                ('/opt/tool chains/clang-19', '/opt/tool chains/clang-19')):
+            with self.subTest(compiler=value), tempfile.TemporaryDirectory() as directory:
+                base = Path(directory)
+                variables = ('SRC', 'BUILD', 'TOOLS', 'DMA_SIM_OUT', 'IAA_OUT',
+                             'SOCKET_OUT', 'EVAL_SESSION_SOURCE', 'EVAL_SESSION_OUT', 'EV')
+                env = dict(os.environ, MAKEFLAGS='--no-print-directory',
+                           **{name: str(base / name) for name in variables})
+                env.pop('XDEV_EXT_BPF_CLANG', None)
+                if value is not None:
+                    env['XDEV_EXT_BPF_CLANG'] = value
+                directories = [Path(env[name]) for name in variables]
+                directories.extend((base / 'SRC/tools/xdev_ext_mech',
+                    base / 'SRC/tools/testing/selftests/xdev_ext_integration/verifier'))
+                for path in directories:
+                    path.mkdir(parents=True, exist_ok=True)
+                    (path / 'Makefile').write_text(
+                        '.PHONY: all runtime guest\nall runtime guest:\n'
+                        '\t@printf \'%s\\n\' "$(CLANG)"\n')
+                run = subprocess.run(['bash', '-euc', initialization + '\n' + priority +
+                                      '\n' + '\n'.join(commands)],
+                    env=env, capture_output=True, text=True, timeout=20)
+                self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                logs = sorted((base / 'EV').glob('*-build.log'))
+                self.assertEqual(len(logs), 6)
+                for log in logs:
+                    with self.subTest(log=log.name):
+                        self.assertEqual(log.read_text(), expected + '\n')
+
     def test_actual_shell_image_preparation_supports_long_disjoint_campaigns(self):
         spec = importlib.util.spec_from_file_location("layout_validator",
                     HERE / "xdev_ext_mech_zc_validate.py")
