@@ -4961,6 +4961,18 @@
       "logical_path": "tests/core/peer_dmabuf/run.py"
     },
     {
+      "source": "tests/core/peer_quarantine/mutations.py",
+      "logical_path": "tests/core/peer_quarantine/mutations.py"
+    },
+    {
+      "source": "tests/core/peer_quarantine/recovery_cases.c",
+      "logical_path": "tests/core/peer_quarantine/recovery_cases.c"
+    },
+    {
+      "source": "tests/core/peer_quarantine/run.py",
+      "logical_path": "tests/core/peer_quarantine/run.py"
+    },
+    {
       "source": "tests/core/policy/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_policy/Makefile"

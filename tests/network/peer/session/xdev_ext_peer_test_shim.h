@@ -31,6 +31,26 @@ static inline bool list_empty(struct list_head *h) { return h->next == h; }
 typedef atomic_ullong atomic64_t;
 #define ATOMIC64_INIT(n) (n)
 #define atomic64_inc_return(a) (atomic_fetch_add(a,1)+1)
+#define atomic64_read(a) atomic_load(a)
+/* One deferred work item; a test runs it when it chooses. Pending is cleared
+ * before the function runs, so rescheduling from it queues it again. */
+struct work_struct { void (*func)(struct work_struct *); bool pending; };
+#define DECLARE_WORK(n,f) struct work_struct n = { .func = (f) }
+static inline struct work_struct **host_pending_work(void) { static struct work_struct *w; return &w; }
+static inline bool schedule_work(struct work_struct *w)
+{
+ if (w->pending) return false;
+ if (*host_pending_work() && *host_pending_work() != w) abort();
+ w->pending = true; *host_pending_work() = w;
+ return true;
+}
+static inline bool host_run_pending_work(void)
+{
+ struct work_struct *w = *host_pending_work();
+ if (!w) return false;
+ *host_pending_work() = NULL; w->pending = false; w->func(w);
+ return true;
+}
 struct module { int refs; };
 static inline bool try_module_get(struct module *m) { if(m) m->refs++; return true; }
 static inline void module_put(struct module *m) { if(m) m->refs--; }

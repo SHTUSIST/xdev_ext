@@ -47,10 +47,12 @@ static int xdev_ext_peer_fd_close(struct inode *inode, struct file *file)
   if (xdev_ext_peer_unmap(m->mapping)) retained = true;
   list_del(&m->node); kfree(m);
  }
- if (!retained) xdev_ext_peer_unpin(p->region);
  /* On uncertain native ownership the region itself retains GPU file, provider
-  * module, peer PCI reference and the persistent allocation indefinitely.
+  * module, peer PCI reference and the persistent allocation until the
+  * requester proves a later DMA-stop epoch; without one, indefinitely.
   */
+ if (!retained) xdev_ext_peer_unpin(p->region);
+ else xdev_ext_peer_orphan(p->region);
  kfree(p);
  return 0;
 }
@@ -223,6 +225,22 @@ void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *handle, bool quiesc
  fput(file);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_fd_release);
+/* UNKNOWN outcome bound to the requester's submission epoch; true when an
+ * already proven later epoch makes the release quiesced. */
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *handle,
+                                      struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+ struct file *file;
+ bool quiesced;
+ if (!handle || !handle->file) return false;
+ file = handle->file;
+ if (xdev_ext_peer_release_unknown(&handle->lease, handle->lease.ticket, rq, epoch, &quiesced))
+  return false;
+ handle->file = NULL;
+ fput(file);
+ return quiesced;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_fd_release_unknown);
 static long xdev_ext_peer_ctl_ioctl(struct file *file, unsigned int cmd, unsigned long arg)
 {
  struct xdev_ext_peer_register u;

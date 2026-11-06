@@ -32,7 +32,7 @@ BOUNDARY_HEADERS = (
     "kernel.h", "limits.h", "list.h", "mm.h", "mm_types.h", "module.h", "mutex.h",
     "overflow.h", "pci.h", "refcount.h", "resource.h", "scatterlist.h", "sched.h",
     "sched/mm.h", "sched/signal.h", "sched/user.h", "slab.h", "swiotlb.h", "types.h", "uidgid.h", "user.h",
-    "vmalloc.h", "stddef.h", "string.h",
+    "vmalloc.h", "stddef.h", "string.h", "workqueue.h",
 )
 
 

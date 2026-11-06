@@ -123,6 +123,11 @@ static inline void mutex_unlock(struct mutex *m)
 { assert(m->held); m->held = false; assert(!pthread_mutex_unlock(&m->raw)); }
 static inline bool mutex_is_locked(struct mutex *m) { return m->held; }
 #define lockdep_assert_held(m) assert((m)->held)
+/* Deferred work: these fixtures record queuing and never run it. */
+struct work_struct { void (*func)(struct work_struct *); bool pending; };
+#define DECLARE_WORK(n, f) struct work_struct n = { .func = (f) }
+static inline bool schedule_work(struct work_struct *w)
+{ bool idle = !w->pending; w->pending = true; return idle; }
 struct list_head { struct list_head *next, *prev; };
 #define LIST_HEAD_INIT(n) { &(n), &(n) }
 #define LIST_HEAD(n) struct list_head n = LIST_HEAD_INIT(n)
