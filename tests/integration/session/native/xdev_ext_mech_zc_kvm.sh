@@ -1132,6 +1132,13 @@ finish() {
 	set +e
 	cat /tmp/rx.log /tmp/tx.log 2>/dev/null
 	cat /tmp/ce-a.log /tmp/ce-d.log 2>/dev/null
+	# Driver counters tell a frame that never left the sender from one the
+	# receiver dropped (diagnostic only; no verdict reads them).
+	for netdev in /sys/class/net/eth*; do
+		[ -d "$netdev/statistics" ] || continue
+		set -- "$netdev/statistics"
+		echo "XDEV_EXT_ZC_NETDEV_STATS if=${netdev##*/} tx_packets=$(cat $1/tx_packets) tx_dropped=$(cat $1/tx_dropped) tx_errors=$(cat $1/tx_errors) rx_packets=$(cat $1/rx_packets) rx_dropped=$(cat $1/rx_dropped) rx_missed_errors=$(cat $1/rx_missed_errors) rx_errors=$(cat $1/rx_errors)"
+	done
 	# The host takes the GPU back without a reset only after a clean unload.
 	if [ -f /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh ]; then
 		sh /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh unload

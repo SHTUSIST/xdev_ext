@@ -152,6 +152,12 @@ class GuestGpuWiring(unittest.TestCase):
         self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"', self.script)
         self.assertIn('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"', self.script)
 
+    def test_finish_reports_driver_counters_of_every_wire_port(self):
+        finish = re.search(r'(?ms)^finish\(\) \{\n.*?^\}', self.script).group()
+        self.assertIn('XDEV_EXT_ZC_NETDEV_STATS', finish)
+        for counter in ('tx_packets', 'rx_packets', 'rx_dropped', 'rx_missed_errors'):
+            self.assertIn(counter, finish)
+
     def test_igb_mode_boots_one_cpu_and_uses_the_qemu_igb_model(self):
         self.assertIn("KERNEL_APPEND+=' maxcpus=1'", self.script)
         # QEMU's igb is an SR-IOV PF: on pcie.0 its VF placeholders take the next
