@@ -10,7 +10,7 @@
 #define XDEV_EXT_PEER_BACKING_EXTERNAL (1U << 3)
 #define XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR (1U << 4)
 #define XDEV_EXT_PEER_BACKING_HOST_SYSTEM (1U << 5)
-/* Prototype for ASK.70: opt-in import of an exporter without a descriptor. */
+/* Opt-in import of an exporter without a descriptor. */
 #define XDEV_EXT_PEER_BACKING_UNDESCRIBED (1U << 6)
 #define XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED (1U << 0)
 struct xdev_ext_peer_dmabuf_desc_ops {

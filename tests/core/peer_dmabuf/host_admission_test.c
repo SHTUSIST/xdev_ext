@@ -16,7 +16,7 @@
 #ifndef XDEV_EXT_PEER_BACKING_HOST_SYSTEM
 #define XDEV_EXT_PEER_BACKING_HOST_SYSTEM (1U << 5)
 #endif
-/* Prototype for ASK.70: an exporter that gave no backing facts. */
+/* An exporter that gave no backing facts. */
 #ifndef XDEV_EXT_PEER_BACKING_UNDESCRIBED
 #define XDEV_EXT_PEER_BACKING_UNDESCRIBED (1U << 6)
 #endif
@@ -125,7 +125,7 @@ int main(void)
 	f.admin = true;
 	check("host policy cannot admit an ownerless BAR", f, override, -EXDEV,
 	      XDEV_EXT_PEER_REFUSE_BACKING);
-	/* Prototype for ASK.70: undescribed exporter memory. The exporter's own
+	/* Undescribed exporter memory. The exporter's own
 	 * per-device mapping is the only fact; no owner, topology or host claim. */
 	{
 		const unsigned und = XDEV_EXT_PEER_BACKING_UNDESCRIBED;

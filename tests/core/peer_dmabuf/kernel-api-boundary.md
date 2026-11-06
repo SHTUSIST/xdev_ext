@@ -12,7 +12,7 @@ The frozen prototypes are in contract.h for pre-implementation fixture compilati
 int xdev_ext_peer_dmabuf_desc_register(const struct xdev_ext_peer_dmabuf_desc_ops *);
 int xdev_ext_peer_dmabuf_desc_unregister(const struct xdev_ext_peer_dmabuf_desc_ops *);
 int xdev_ext_peer_dmabuf_import(struct dma_buf *, u64 len, struct xdev_ext_peer_region **);
-/* Prototype for ASK.70; flags: XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED. */
+/* flags: XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED. */
 int xdev_ext_peer_dmabuf_import_flags(struct dma_buf *, u64 len, u32 flags, struct xdev_ext_peer_region **);
 int xdev_ext_peer_dmabuf_geometry(const struct sg_table *, u64 len, u64 **addresses, u32 *entries);
 int xdev_ext_peer_drainable(struct xdev_ext_peer_region *);
@@ -72,6 +72,6 @@ The `undescribed_*` and `close_undescribed_*` cases use an exporter ops object t
 
 `undescribed_fences` covers implicit synchronization for this path: while a fence that orders the access is unsignaled, a new lease is refused with `-EBUSY` (a device read is ordered by WRITE and KERNEL fences, a device write also by READ fences; BOOKKEEP fences order nothing). A refused lease owns nothing and leaves the region active-free, unstale and describable; argument, generation and permanent stale errors keep precedence; a lease accepted before a fence arrives keeps its mapping until it completes. `described_fences` pins the scope: a described exporter's lease is not refused by a pending fence (its existing contract, the application orders implicit-sync users).
 
-`python3 -I tests/core/peer_dmabuf/undescribed_mutants.py --output DIR` applies 14 single-rule mutants of this path (certifier, sync, untrusted, forced bounce, noncoherent, host-RAM claim, opt-in, flag validation, dying descriptor, admission exactness/topology, move_notify, pin) to a minimal copy of the production inputs and requires each to be killed by a behavioral FAIL of these runners.
+`python3 -I tests/core/peer_dmabuf/undescribed_mutants.py --output DIR` applies 22 single-rule mutants of this path (certifier, sync, untrusted, forced bounce, noncoherent, host-RAM claim, opt-in, flag validation, dying descriptor, admission exactness/topology, move_notify, pin, and for fences: no check, fixed or inverted usage, a retrying errno, the check on described exporters, the check before validation, a refused lease left partly granted) to a minimal copy of the production inputs and requires each to be killed by a behavioral FAIL of these runners.
 
 Exit 0 with FIXTURE_COMPILES means only the independent fixture compiled. Exit 0 with PRODUCTION_COMPILES means the production source linked against the boundary adapters, without running any behavior cases. Exit 3/NOT_IMPLEMENTED means the component or public header is absent. Exit 2/SETUP_ERROR means compiler, interface, extraction or tool setup failed. Only actual linked production execution can yield PASS (0) or FAIL (1). Each behavior runs in its own process so permanent UNKNOWN retention is preserved rather than forcibly freed between tests. This is host software correctness, not physical DMA or performance. Root registers final results in /root/xdev_ext/test-results; this test owner does not update catalog or commit.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Mutants for the undescribed-exporter import (prototype for ASK.70).
+"""Mutants for the undescribed-exporter import.
 
 Each mutant changes one production rule in a minimal git copy of the inputs
 the two runners compile (provenance.PRODUCTION_INPUTS), then runs the real
@@ -28,6 +28,10 @@ WT = args.source_root.resolve(); OUT = args.output.resolve()
 OUT.mkdir(parents=True, exist_ok=True)
 FILES = list(PRODUCTION_INPUTS)
 D = "src/core/io_uring/xdev_ext_peer_dmabuf.c"; A = "src/core/include/linux/xdev_ext_requester_core.h"
+P = "src/core/io_uring/xdev_ext_peer.c"
+FENCE = "dma_resv_usage_rw(dir == DMA_FROM_DEVICE)) ? 0 : -EBUSY;"
+GATE = " if (r->ops->may_access) {\n  ret = r->ops->may_access(r->allocation, dir);\n  if (ret) goto done;\n }\n"
+GRANT = " lease->dma_address = address + (offset & (page_size - 1));\n lease->len = len; lease->mapping = m;\n"
 MUTANTS = [
  ("M1-no-unbounced-certifier", D, "!dma_sgtable_is_unbounced(&peer->dev, m->sgt)", "0"),
  ("M2-undescribed-claims-host-ram", D, ".flags = XDEV_EXT_PEER_BACKING_UNDESCRIBED }",
@@ -54,6 +58,18 @@ MUTANTS = [
   " if (a->descriptor) atomic_set(&a->stale, 1);\n}\nstatic const struct dma_buf_attach_ops"),
  ("M13-undescribed-skips-pin", D, " ret = dma_buf_pin(m->attachment);\n if (ret) goto unlock;\n pinned = true;",
   " ret = 0;\n if (a->descriptor) { ret = dma_buf_pin(m->attachment); pinned = !ret; }\n if (ret) goto unlock;"),
+ # Implicit-sync fences (lease time).
+ ("M14-no-fence-check", D, " if (a->descriptor) return 0;\n return dma_resv_test_signaled(",
+  " if (a) return 0;\n return dma_resv_test_signaled("),
+ ("M15-fence-usage-always-write", D, FENCE, "DMA_RESV_USAGE_WRITE) ? 0 : -EBUSY;"),
+ ("M16-fence-usage-always-read", D, FENCE, "DMA_RESV_USAGE_READ) ? 0 : -EBUSY;"),
+ ("M17-fence-usage-inverted", D, FENCE, "dma_resv_usage_rw(dir == DMA_TO_DEVICE)) ? 0 : -EBUSY;"),
+ ("M18-fence-refusal-retry-errno", D, FENCE, "dma_resv_usage_rw(dir == DMA_FROM_DEVICE)) ? 0 : -EAGAIN;"),
+ ("M19-fence-check-on-described-path", D, " if (a->descriptor) return 0;\n return dma_resv_test_signaled(",
+  " return dma_resv_test_signaled("),
+ ("M20-fence-check-before-validation", P, " if (lease->mapping) { ret = -EBUSY; goto done; }\n",
+  " if (lease->mapping) { ret = -EBUSY; goto done; }\n" + GATE),
+ ("M21-refused-lease-keeps-grant", P, GATE + GRANT, GRANT + GATE),
 ]
 results = []
 for name, rel, old, new in MUTANTS:

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Guest-only correctness test, prototype for ASK.70. The dma-buf comes from
+/* Guest-only correctness test. The dma-buf comes from
  * the upstream udmabuf driver, which registers no xdev_ext backing
  * descriptor. It is imported through /dev/xdev_ext_peer with the opt-in
  * XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED and then read and written by

@@ -429,8 +429,8 @@ static void close_case(bool active, bool unknown)
 	}
 }
 
-/* Prototype for ASK.70 (plan-review D8). An exporter that registered no
- * descriptor may be imported only when the caller opts in. xdev_ext then knows
+/* Plan-review D8. An exporter that registered no descriptor may be imported
+ * only when the caller opts in. xdev_ext then knows
  * nothing about the backing: each requester device gets the exporter's own
  * mapping for that device, bounce/sync/untrusted/noncoherent requesters are
  * refused, and the backing is reported as UNDESCRIBED, never as host RAM. */

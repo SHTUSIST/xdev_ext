@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# Focused KVM correctness run of the undescribed-exporter guest test
-# (prototype for ASK.70), never a performance benchmark. It reuses an already
-# built kernel and builds only the guest test program. All writes stay in
+# Focused KVM correctness run of the undescribed-exporter guest test, never a
+# performance benchmark. It reuses an already built kernel and builds only the
+# guest test program. All writes stay in
 # --scratch: private raw images, initramfs and evidence. No host module, no
 # device model beyond QEMU's own NVMe controllers.
 #   bash undescribed_dma_kvm.sh --scratch DIR --source GIT_ROOT --build O_DIR \

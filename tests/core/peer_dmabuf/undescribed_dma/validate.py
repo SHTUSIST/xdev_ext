@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Host oracle for the undescribed-exporter guest test (prototype for ASK.70).
+"""Host oracle for the undescribed-exporter guest test.
 
 make-source writes the deterministic source image. validate checks one guest
 run: the exact TAP id list for the mode, the plan line, the guest exit code,
