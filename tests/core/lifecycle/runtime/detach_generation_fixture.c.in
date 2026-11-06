@@ -83,12 +83,33 @@ static void xdev_ext_mech_poll_kick(struct xdev_ext_mech_session*s){(void)s;abor
 static int xdev_ext_mech_submit(struct xdev_ext_mech_session*s,struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){(void)s;submit_calls++;return actual_provider?xsk_rel_submit(st,b):0;}
 static void xdev_ext_mech_life_undo(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b){(void)s;(void)b;}
 static void xdev_ext_mech_order_kick(struct xdev_ext_mech_session*s){(void)s;}
-// Endpoint/frames-release OS boundary: the locally refused READY batch is
-// retired; accepted batches retain their actual pure-core session references.
-static void xdev_ext_mech_abort(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,int err){(void)b;last_abort=err;s->aborted++;xdev_ext_mech_set_err_locked(s,err);xdev_ext_mech_sess_batch_end(&s->ss,false);xdev_ext_mech_notify_locked(s,true);}
+/* ACTUAL_END_ENUM */
+// Endpoint/frames-release OS boundary of the actual xdev_ext_mech_abort(): the
+// locally refused READY batch is retired; accepted batches retain their actual
+// pure-core session references. As in the tail of xdev_ext_mech_end(), dropping
+// the batch reference settles a STOPPING session that has nothing left in flight.
+static void xdev_ext_mech_end(struct xdev_ext_mech_session*s,struct xdev_ext_mech_batch*b,int how,int err){(void)b;(void)how;last_abort=err;s->aborted++;xdev_ext_mech_set_err_locked(s,err);xdev_ext_mech_sess_batch_end(&s->ss,false);xdev_ext_mech_settle_locked(s);xdev_ext_mech_notify_locked(s,true);}
 /* ACTUAL_FUNCTIONS */
+// The ACTIVE branch of the CLI's error drain (ctl_source_error_drain): nothing
+// in flight and the finite target exactly finished as done plus aborted.
+static bool cli_reads_active_finished(const struct xdev_ext_mech_session*s){
+ u64 target=s->notify.target.batches_target;
+ return s->ss.state==XDEV_EXT_MECH_SESSION_ACTIVE&&!s->ss.inflight&&s->done<=target&&s->aborted==target-s->done;
+}
+static unsigned hook_batches,hook_stage,hook_active_finished;static int hook_first_state;
 static void synchronize_rcu(void){
  if(!hook_mode)return;
+ if(hook_mode==3){
+  // Inside the retraction window: every remaining READY batch reaches its stage.
+  for(unsigned i=0;i<hook_batches;i++){
+   struct xdev_ext_mech_batch r={.bytes=8192};r.bs.stage=hook_stage;
+   xdev_ext_mech_batch_run(hook_session,&r);
+   if(!i)hook_first_state=hook_session->ss.state;
+   hook_active_finished+=cli_reads_active_finished(hook_session);
+  }
+  hook_error=hook_session->last_err;hook_state=hook_session->ss.state;hook_inflight=hook_session->ss.inflight;
+  return;
+ }
  if(hook_mode==2)slots[XDEV_EXT_MECH_CLASS_AFXDP]=&replacement_token;
  struct xdev_ext_mech_batch b={.bytes=8192};b.bs.stage=0;
  xdev_ext_mech_batch_run(hook_session,&b);
@@ -128,6 +149,18 @@ static void setup(struct xdev_ext_mech_session*s){memset(s,0,sizeof(*s));memset(
  s->notify=(struct xdev_ext_mech_notify_state){.coarse=true,.armed=true,.target={.session_id=2,.batches_target=64}};slots[XDEV_EXT_MECH_CLASS_AFXDP]=&token;xdev_ext_mech_registry.nr_active=1;xdev_ext_mech_all.first=s;hook_session=s;
 }
 static void finish_accepted(struct xdev_ext_mech_session*s){while(s->ss.inflight)xdev_ext_mech_sess_batch_end(&s->ss,false);xdev_ext_mech_settle_locked(s);}
+// An NVMe->AF_XDP source (nvme-nic) whose 64 groups have all started: 59 done,
+// five READY for the TX stage when the AF_XDP generation is retracted.
+static struct xdev_ext_mech_class_ops nvme_cls={.class_id=XDEV_EXT_MECH_CLASS_NVME,
+ .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NVME]};
+static struct xdev_ext_mech_class_ops ordered_cls={.class_id=XDEV_EXT_MECH_CLASS_AFXDP,
+ .flags=XDEV_EXT_MECH_CLASS_F_ORDERED,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_AFXDP]};
+static void setup_source(struct xdev_ext_mech_session*s,bool ordered){setup(s);
+ s->nr_stages=2;s->st[0]=(struct xdev_ext_mech_stage){.class_id=XDEV_EXT_MECH_CLASS_NVME,.cls=&nvme_cls};
+ s->st[1]=(struct xdev_ext_mech_stage){.class_id=XDEV_EXT_MECH_CLASS_AFXDP,.cls=ordered?&ordered_cls:&cls};
+ s->ss=(struct xdev_ext_mech_sess){.state=XDEV_EXT_MECH_SESSION_ACTIVE,.refs=6,.inflight=5};
+ s->start_left=0;s->done=59;s->aborted=0;hook_batches=5;hook_stage=1;hook_active_finished=0;hook_first_state=-1;
+}
 int main(void){struct xdev_ext_mech_session s;
  setup(&s);hook_mode=0;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
  CHECK("ordinary_detach_keeps_cancellation",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED);
@@ -150,6 +183,32 @@ int main(void){struct xdev_ext_mech_session s;
  setup(&s);hook_mode=0;struct xdev_ext_mech_batch valid={.bytes=8192};xdev_ext_mech_batch_run(&s,&valid);CHECK("valid_generation_can_submit",submit_calls==1);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
  setup(&s);hook_mode=2;struct xdev_ext_mech_session replacement={0};replacement.ss.state=XDEV_EXT_MECH_SESSION_ACTIVE;replacement.ops[XDEV_EXT_MECH_CLASS_AFXDP]=&replacement_token;replacement.pinned[XDEV_EXT_MECH_CLASS_AFXDP]=true;s.next_test=&replacement;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);CHECK("replacement_generation_cancels_old_only",s.last_err==-ECANCELED&&s.stop_err==-ECANCELED&&slots[XDEV_EXT_MECH_CLASS_AFXDP]==&replacement_token&&xdev_ext_mech_session_admits(&replacement)&&!replacement.stop_err);finish_accepted(&s);
  setup(&s);hook_mode=0;s.ss.sequestered=1;xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);CHECK("unknown_custody_stays_quarantined",s.ss.state==XDEV_EXT_MECH_SESSION_ZOMBIE&&xdev_ext_mech_sess_ref_fate(&s.ss)==XDEV_EXT_MECH_REFS_QUARANTINE);
+
+ // Session API: an abort stops the session when a remaining stage is ordered
+ // (AF_XDP). Retraction closes admission before generation_gone visits the
+ // session; that window must not leave it ACTIVE with its target finished.
+ setup_source(&s,true);hook_mode=3;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
+ printf("OBSERVED_ORDERED first_state=%d state=%d last_err=%d inflight=%d done=%llu aborted=%llu cli_active_finished=%u\n",
+        hook_first_state,hook_state,hook_error,hook_inflight,(unsigned long long)s.done,(unsigned long long)s.aborted,hook_active_finished);
+ CHECK("ordered_window_abort_stops_session",hook_first_state!=XDEV_EXT_MECH_SESSION_ACTIVE);
+ CHECK("ordered_window_never_reads_ACTIVE_finished",!hook_active_finished);
+ CHECK("ordered_window_settles_STOPPED_cancelled",hook_state==XDEV_EXT_MECH_SESSION_STOPPED&&!hook_inflight&&hook_error==-ECANCELED);
+ CHECK("ordered_window_aborts_without_resubmission",submit_calls==0&&s.aborted==5&&s.done==59);
+ CHECK("ordered_generation_gone_keeps_STOPPED_cancellation",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED&&s.last_err==-ECANCELED&&s.stop_err==-ECANCELED);
+ // Control: with no ordered stage left the abort does not change the state;
+ // generation_gone then stops the session with the same cancellation.
+ setup_source(&s,false);hook_mode=3;xdev_ext_mech_unreg(XDEV_EXT_MECH_CLASS_AFXDP,&token);
+ CHECK("unordered_window_abort_keeps_ACTIVE",hook_state==XDEV_EXT_MECH_SESSION_ACTIVE&&hook_error==-ECANCELED&&!hook_inflight);
+ CHECK("unordered_generation_gone_stops_cancelled",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPED&&s.last_err==-ECANCELED&&s.stop_err==-ECANCELED);
+ // Controls: the same rule with admission open, ordered and not.
+ setup_source(&s,true);hook_mode=0;{struct xdev_ext_mech_batch r={.bytes=8192};r.bs.stage=1;xdev_ext_mech_abort(&s,&r,-EIO);}
+ CHECK("ordered_abort_while_admitted_stops_session",s.ss.state==XDEV_EXT_MECH_SESSION_STOPPING&&s.last_err==-EIO&&s.stop_err==-EIO);finish_accepted(&s);
+ setup_source(&s,false);hook_mode=0;{struct xdev_ext_mech_batch r={.bytes=8192};r.bs.stage=1;xdev_ext_mech_abort(&s,&r,-EIO);}
+ CHECK("unordered_abort_while_admitted_keeps_ACTIVE",s.ss.state==XDEV_EXT_MECH_SESSION_ACTIVE&&s.last_err==-EIO&&!s.stop_err);xdev_ext_mech_session_stop(&s,0);finish_accepted(&s);
+ // Control: an ordered abort of an already stopping session latches nothing.
+ setup_source(&s,true);hook_mode=0;xdev_ext_mech_session_stop(&s,0);
+ {struct xdev_ext_mech_batch r={.bytes=8192};r.bs.stage=1;xdev_ext_mech_batch_run(&s,&r);}
+ CHECK("ordered_abort_after_STOP0_latches_nothing",!s.last_err&&!s.stop_err&&last_abort==-ESHUTDOWN&&s.aborted==1);finish_accepted(&s);
 #ifdef CONFIG_XDEV_EXT_MECH_C_REFERENCE
  setup(&s);hook_mode=0;s.pinned[XDEV_EXT_MECH_CLASS_AFXDP]=false;xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_AFXDP]=&token;
  CHECK("C_reference_current_generation_admits",xdev_ext_mech_session_admits(&s));xdev_ext_mech_c_table[XDEV_EXT_MECH_CLASS_AFXDP]=NULL;

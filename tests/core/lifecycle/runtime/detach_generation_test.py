@@ -66,14 +66,21 @@ static bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *
     source = source.replace('@REGISTRY_STRUCT@', header[start:header.index('\n};', start) + 3])
     names = [(header, 'xdev_ext_ops_is_current'), (registry, 'xdev_ext_ops_retract'),
              (ops, 'xdev_ext_mech_ops_current'), (ops, 'xdev_ext_mech_unreg')]
-    if re.search(r'\bxdev_ext_mech_programs_current\([^;{}]*\)\s*\{', core):
-        names.append((core, 'xdev_ext_mech_programs_current'))
+    for helper in ('xdev_ext_mech_programs_current', 'xdev_ext_mech_session_unstopped'):
+        if re.search(r'\b' + helper + r'\([^;{}]*\)\s*\{', core):
+            names.append((core, helper))
     names += [(core, name) for name in (
         'xdev_ext_mech_session_admits', 'xdev_ext_mech_settle_locked',
         'xdev_ext_mech_set_err_locked', 'xdev_ext_mech_stop_reason',
         'xdev_ext_mech_session_stop', 'xdev_ext_mech_notify_locked',
-        'xdev_ext_mech_generation_gone', 'xdev_ext_mech_batch_run')]
+        'xdev_ext_mech_generation_gone', 'xdev_ext_mech_batch_run',
+        'xdev_ext_mech_abort')]
     bodies = [function(text, name) for text, name in names]
+    # The actual abort ends its batch through this enum; the end is a boundary.
+    end = re.search(r'^enum xdev_ext_mech_end \{.*?^\};', core, re.M | re.S)
+    if end is None:
+        raise AssertionError('production enum xdev_ext_mech_end missing')
+    source = source.replace('/* ACTUAL_END_ENUM */', end.group())
     reliable = (kernel / 'net/xdp/xsk_xdev_ext_mech_reliable.inc').read_text()
     source = source.replace('/* ACTUAL_RELIABLE_SUBMIT */', function(reliable, 'xsk_rel_submit'))
     source = source.replace('/* ACTUAL_PROTOTYPES */', '\n'.join(

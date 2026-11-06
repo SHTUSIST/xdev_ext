@@ -756,7 +756,9 @@ def _after(con, name, groups):
 
 
 def _stopped(con, role, err, *, rx, groups, depth, pool, exits, nvme_stages, ce_stages=()):
-    """The fault stopped the session with @err; or it came after the last group."""
+    """The fault stopped the session with @err (or one of a tuple of errors);
+    or it came after the last group."""
+    errs = (err,) if isinstance(err, str) else tuple(err)
     sec = con.section(role)
     stats = sec.stats()
     _require(stats is not None, role + ' missing STATS')
@@ -768,8 +770,8 @@ def _stopped(con, role, err, *, rx, groups, depth, pool, exits, nvme_stages, ce_
         con.miss(role + ': the fault arrived after every group ended')
         return stats
     _require(sec.exit in exits, f'{role} unexpected exit {sec.exit}')
-    _require(stats.get('state') == 'STOPPED' and stats.get('last_err') == err,
-             f'{role} expected STOPPED with {err}')
+    _require(stats.get('state') == 'STOPPED' and stats.get('last_err') in errs,
+             f'{role} expected STOPPED with {"/".join(errs)}')
     _require(_int(stats, 'batches_done') < groups, role + ' stopped yet reports every group done')
     return stats
 
@@ -840,10 +842,17 @@ def check_detach(con, g, d, pin):
 def check_netdev_remove_tx(con, g, d):
     _inflight_seen(con, 'SRC')
     con.one('NETDEV_REMOVED', ifname='eth0', present='0')
-    stats = _stopped(con, 'SRC', '-ENXIO', rx=False, groups=g, depth=d,
+    # Unregistering closes the device (dev_close_many) before NETDEV_UNREGISTER
+    # unbinds the socket. A TX submit in between gets -ENETDOWN from
+    # ndo_xsk_wakeup and latches it first; after the unbind the stage is dead
+    # with -ENXIO. Only the TX stage submit can latch -ENETDOWN here.
+    stats = _stopped(con, 'SRC', ('-ENXIO', '-ENETDOWN'), rx=False, groups=g, depth=d,
                      pool=AFXDP_POOL_PAGES, exits=(CTL_FAIL,), nvme_stages=(0,), ce_stages=(1, 2))
+    if stats.get('last_err') == '-ENETDOWN':
+        _require(_vector(stats, 'submitted')[3] >= 1,
+                 'SRC latched -ENETDOWN without a submission at its AF_XDP TX stage')
     if stats.get('state') == 'STOPPED':
-        # _stopped pinned -ENXIO already.
+        # _stopped pinned -ENXIO or -ENETDOWN already.
         _chain_failed(con, 'SRC', 'b', 'chain b falsely succeeded after its NIC went away')
     else:
         verdict = con.section('SRC').marker('XDEV_EXT_MECH_CE_SIM')

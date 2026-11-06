@@ -682,6 +682,18 @@ bool xdev_ext_mech_session_admits(const struct xdev_ext_mech_session *s)
 }
 EXPORT_SYMBOL_GPL(xdev_ext_mech_session_admits);
 
+/*
+ * Published and still ACTIVE: no STOP has moved the session on.  Unlike
+ * session_admits() this stays true after a retraction closed admission and
+ * before generation_gone() reaches the session, so a rule that must stop the
+ * session on an abort is not skipped in that window.
+ */
+static bool xdev_ext_mech_session_unstopped(const struct xdev_ext_mech_session *s)
+{
+	return !smp_load_acquire(&s->create_pending_publish) &&
+	       READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ACTIVE;
+}
+
 static bool xdev_ext_mech_settled(struct xdev_ext_mech_session *s)
 {
 	return READ_ONCE(s->ss.state) != XDEV_EXT_MECH_SESSION_STOPPING &&
@@ -1597,10 +1609,12 @@ static void xdev_ext_mech_abort(struct xdev_ext_mech_session *s, struct xdev_ext
   xdev_ext_mech_fanout_landed(s, b, err, false);
   return;
  }
-	/* No wire skip protocol: stop before a later generation can overtake. */
+	/* No wire skip protocol: stop before a later generation can overtake.
+	 * A retracted program closed admission already; stop now as well, as
+	 * generation_gone() will, rather than leave an ACTIVE session behind. */
 	for (i = b->bs.stage; i < s->nr_stages; i++)
 		if ((s->st[i].cls->flags & XDEV_EXT_MECH_CLASS_F_ORDERED) &&
-		    xdev_ext_mech_session_admits(s)) {
+		    xdev_ext_mech_session_unstopped(s)) {
 			xdev_ext_mech_session_stop(s, err ?: -EIO);
 			break;
 		}

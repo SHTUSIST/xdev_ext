@@ -280,6 +280,20 @@ class FaultValidator(unittest.TestCase):
                 else:
                     self.assertEqual(self.verdict(name, text)[0], 'PASS')
 
+    def test_netdev_remove_tx_accepts_the_device_down_window(self):
+        """Unregistering closes the device before NETDEV_UNREGISTER unbinds the
+        socket; a TX submit in between latches -ENETDOWN first. Only a run whose
+        AF_XDP TX stage accepted a submission can carry it."""
+        down = self.console('netdev-remove-tx')
+        for old, new in (('last_err=-ENXIO', 'last_err=-ENETDOWN'), ('wait_err=-6', 'wait_err=-100'),
+                         ('chain b: No such device or address', 'chain b: Network is down')):
+            down = down.replace(old, new)
+        self.assertEqual(self.verdict('netdev-remove-tx', down)[0], 'PASS')
+        never = down.replace('submitted=2,2,2,6 completed=2,2,2,6', 'submitted=2,2,2,0 completed=2,2,2,0')
+        self.assertNotEqual(never, down)
+        self.assertVerdict('FAIL', r'SRC latched -ENETDOWN without a submission at its AF_XDP TX stage',
+                           'netdev-remove-tx', never)
+
     # --- failing fixtures: one invariant each -----------------------------
 
     def test_invariant_failures(self):
