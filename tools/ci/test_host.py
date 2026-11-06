@@ -46,7 +46,7 @@ GPU_TESTS = (
     'nv_xdev_ext_dma_lifetime_test', 'nv_xdev_ext_gpu_identity_test',
     'nv_xdev_ext_ce_classify_test', 'nv_xdev_ext_vidmem_offset_test',
     'nv_xdev_ext_ce_plan_test', 'nv_xdev_ext_ce_async_test',
-    'nv_xdev_ext_peer_backing_test',
+    'nv_xdev_ext_peer_backing_test', 'nv_xdev_ext_ce_memory_test',
 )
 
 
