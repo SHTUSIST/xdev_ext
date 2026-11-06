@@ -188,6 +188,7 @@ int main(int argc, char **argv)
 {
 	int fd_before = eval_fd_count();
 	struct xdev_ext_xsk_redirect redirect = XDEV_EXT_XSK_REDIRECT_INIT;
+	struct xdev_ext_xsk_redirect pass = XDEV_EXT_XSK_REDIRECT_INIT;
 	struct es_run r = { .ring = -1, .efd = -1 };
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
 	struct xp_sock x = { .fd = -1 };
@@ -272,6 +273,22 @@ int main(int argc, char **argv)
 	c.st[cei].fd = ce.fd[0];
 	c.st[cei].arg0 = ce.va;
 	c.st[cei].arg1 = ce.len;
+	/*
+	 * CREATE refuses a transmit-only zero-copy queue that rejects a TX
+	 * wakeup: kick it first and attach the pass program only if the driver
+	 * wants XDP mode, as xdev_ext_mech_ctl does.  out: detaches it once
+	 * the session is closed.
+	 */
+	if (!o.ingest && x.zero_copy) {
+		err = xdev_ext_xsk_redirect_zc_tx_xdp(&pass, x.fd, (int)if_nametoindex(o.ifname),
+						      XDP_FLAGS_DRV_MODE);
+		if (err) {
+			ret = sg_capability_errno(err) ? XG_EXIT_UNAVAILABLE : XG_EXIT_FAIL;
+			fprintf(stderr, "%sXDP mode for zero-copy TX on %s: %s\n",
+				ret == XG_EXIT_UNAVAILABLE ? "SKIP: " : "", o.ifname, strerror(-err));
+			goto out;
+		}
+	}
 	err = es_create(&r, &c, p.groups);
 	if (err) {
 		ret = sg_capability_errno(err) ? XG_EXIT_UNAVAILABLE : XG_EXIT_FAIL;
@@ -279,8 +296,12 @@ int main(int argc, char **argv)
 			ret == XG_EXIT_UNAVAILABLE ? "SKIP: " : "", strerror(-err));
 		goto out;
 	}
-	if (o.ingest || !x.zero_copy)
-		err = xp_fq_fill(&x, 0, XP_RING_SIZE);
+	/*
+	 * CREATE admission needed an empty fill ring; an XDP-mode receive queue
+	 * polls an empty one without end.  Chunks [0, XP_RING_SIZE) are the
+	 * half the zero-copy kernel source never claims.
+	 */
+	err = xp_fq_fill(&x, 0, XP_RING_SIZE);
 	if (!err && o.ingest) {
 		struct xdev_ext_xsk_flow_filter filter;
 
@@ -369,6 +390,9 @@ out:
 		xdev_ext_xsk_redirect_detach(&redirect);
 	if (es_close(&r) && ret == XG_EXIT_PASS)
 		ret = XG_EXIT_FAIL;
+	/* The session is closed: drop the transmit queue's XDP mode it needed. */
+	if (xdev_ext_xsk_redirect_is_active(&pass))
+		xdev_ext_xsk_redirect_detach(&pass);
 	xp_close(&x);
 	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
 		ret = XG_EXIT_FAIL;
