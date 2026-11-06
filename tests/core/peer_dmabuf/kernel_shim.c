@@ -164,6 +164,16 @@ long dma_resv_wait_timeout(struct dma_resv *r, enum dma_resv_usage usage,
 	return env.wait_error ? env.wait_error : 1;
 }
 
+bool dma_resv_test_signaled(struct dma_resv *r, enum dma_resv_usage usage)
+{
+	assert(r == &env.resv && usage <= DMA_RESV_USAGE_BOOKKEEP);
+	env.fence_tests++;
+	env.fence_last_usage = usage;
+	for (unsigned u = 0; u <= (unsigned)usage; u++)
+		if (env.fence_pending[u]) return false;
+	return true;
+}
+
 struct dma_buf *dma_buf_get(int fd)
 {
 	assert(!env.resv.lock.held);

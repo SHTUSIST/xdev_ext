@@ -11,6 +11,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import validate as v  # noqa: E402
 
 SRC_PCI, DST_PCI = "0000:00:03.0", "0000:00:04.0"
+# The guest prints each fenced batch just before its check.
+FENCE_OBSERVED = {"device-read-waits-for-writer": "fence-writer-device-read status=-16 completed=0",
+                  "device-write-waits-for-writer": "fence-writer-device-write status=-16 completed=0",
+                  "device-read-after-writer": "fence-writer-signaled-device-read status=0 completed=16",
+                  "device-read-beside-reader": "fence-reader-device-read status=0 completed=16",
+                  "device-write-waits-for-reader": "fence-reader-device-write status=-16 completed=0",
+                  "device-write-after-reader": "fence-reader-signaled-device-write status=0 completed=16"}
 
 
 def guest_lines(mode, viommu=False):
@@ -28,10 +35,26 @@ def guest_lines(mode, viommu=False):
             lines.append("OBSERVE read status=%d completed=%d" % (status, done))
         if ident in ("batch-write", "batch-write-refused"):
             lines.append("OBSERVE write status=%d completed=%d" % (status, done))
+        if ident in FENCE_OBSERVED:
+            lines.append("OBSERVE " + FENCE_OBSERVED[ident])
         lines.append("ok %d - %s" % (number, ident))
     lines += ["1..%d" % len(v.EXPECTED[mode]),
               "RESULT mode=%s checks=%d PASS" % (mode, len(v.EXPECTED[mode]))]
     return lines
+
+
+def viommu_dmesg(src_group="3", dst_group="4"):
+    """Console lines of a strict translated VT-d boot with both NVMe grouped."""
+    return "\n".join([
+        "[    0.000000] Linux version",
+        "[    0.010000] DMAR: IOMMU enabled",
+        "[    3.021560] pci %s: [1b36:0010] type 00 class 0x010802 PCIe Root Complex Integrated Endpoint" % SRC_PCI,
+        "[    3.045528] pci %s: [1b36:0010] type 00 class 0x010802 PCIe Root Complex Integrated Endpoint" % DST_PCI,
+        "[    3.354681] iommu: Default domain type: Translated",
+        "[    3.354687] iommu: DMA domain TLB invalidation policy: strict mode",
+        "[    3.400000] DMAR: Intel(R) Virtualization Technology for Directed I/O",
+        "[    3.400300] pci %s: Adding to iommu group %s" % (SRC_PCI, src_group),
+        "[    3.400400] pci %s: Adding to iommu group %s" % (DST_PCI, dst_group)])
 
 
 def log_text(lines, exit_code="0", dmesg="[    0.000000] Linux version"):
@@ -52,6 +75,8 @@ class Oracle(unittest.TestCase):
 
     def run_case(self, mode, lines=None, dest=None, viommu=False, **log):
         src = self.source.read_bytes()
+        if viommu:
+            log.setdefault("dmesg", viommu_dmesg())
         (self.root / "dest.raw").write_bytes(dest if dest is not None else
                                              v.expected_destination(mode, src))
         (self.root / "guest.log").write_text(log_text(lines if lines is not None else
@@ -121,10 +146,59 @@ class Oracle(unittest.TestCase):
         lines = [l.replace(" none", " 7", 1) if "IOMMU_GROUP" in l else l for l in guest_lines("normal")]
         self.rejects("normal", "without vIOMMU", lines=lines)
 
+    def test_fence_refusal_rejected(self):
+        # A fenced device access that went ahead instead of being refused.
+        for ident, observed in FENCE_OBSERVED.items():
+            if "status=-16" not in observed:
+                continue
+            with self.subTest(ident=ident):
+                lines = [l.replace(observed, observed.replace("status=-16 completed=0",
+                                                              "status=0 completed=16"))
+                         for l in guest_lines("normal")]
+                self.rejects("normal", "batch observations", lines=lines)
+        # A refusal for some other reason than the fence.
+        lines = [l.replace("fence-reader-device-write status=-16", "fence-reader-device-write status=-5")
+                 for l in guest_lines("normal")]
+        self.rejects("normal", "batch observations", lines=lines)
+        # A signaled fence that still refused the access.
+        lines = [l.replace("fence-writer-signaled-device-read status=0 completed=16",
+                           "fence-writer-signaled-device-read status=-16 completed=0")
+                 for l in guest_lines("normal")]
+        self.rejects("normal", "batch observations", lines=lines)
+        # A missing fence check or a missing observation.
+        lines = [l for l in guest_lines("normal") if not l.endswith(" - reader-fence-pending")]
+        self.rejects("normal", "out of sequence|ids differ", lines=lines)
+        lines = [l for l in guest_lines("normal") if "fence-reader-device-read status" not in l]
+        self.rejects("normal", "batch observations", lines=lines)
+
+    def test_fenced_destination_rejected(self):
+        src = self.source.read_bytes()
+        good = v.expected_destination("normal", src)
+        # The device read the buffer before the producer's bytes landed.
+        early = bytearray(good)
+        early[v.RANGE_C * v.LBA:v.RANGE_C * v.LBA + v.EXPORT] = v.pattern()
+        self.rejects("normal", "differs from plan", dest=bytes(early))
+        # A device write behind the reader fence reached the buffer first.
+        overwritten = bytearray(good)
+        overwritten[v.RANGE_D * v.LBA:v.RANGE_D * v.LBA + v.EXPORT] = \
+            src[v.RANGE_E * v.LBA:v.RANGE_E * v.LBA + v.EXPORT]
+        self.rejects("normal", "differs from plan", dest=bytes(overwritten))
+
+    def test_viommu_console_rejected(self):
+        fault = ("\n[   10.0] DMAR: [DMA Write NO_PASID] Request device [00:04.0] fault addr 0x1000 "
+                 "[fault reason 0x05]")
+        self.rejects("normal", "fault", viommu=True, dmesg=viommu_dmesg() + fault)
+        self.rejects("normal", "two IOMMU groups", viommu=True, dmesg=viommu_dmesg("3", "3"))
+        self.rejects("normal", "IOMMU enabled", viommu=True, dmesg="[    0.000000] Linux version")
+        self.rejects("normal", "strict", viommu=True,
+                     dmesg=viommu_dmesg().replace("strict mode", "lazy mode"))
+        self.rejects("normal", "DMAR enabled", viommu=False, dmesg=viommu_dmesg())
+
     def test_destination_rejected(self):
         src = self.source.read_bytes()
         good = v.expected_destination("normal", src)
-        for offset in (v.RANGE_A * v.LBA + 4095, v.RANGE_B * v.LBA + v.EXPORT - 1, 0, v.DISK - 1):
+        for offset in (v.RANGE_A * v.LBA + 4095, v.RANGE_B * v.LBA + v.EXPORT - 1, 0, v.DISK - 1,
+                       v.RANGE_C * v.LBA, v.RANGE_D * v.LBA + v.EXPORT - 1):
             with self.subTest(offset=offset):
                 bad = bytearray(good)
                 bad[offset] ^= 0x01

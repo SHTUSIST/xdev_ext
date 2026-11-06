@@ -75,6 +75,8 @@ PYDELTA
 required=(UDMABUF XDEV_EXT_PEER_DMABUF DMA_SHARED_BUFFER DEBUG_FS XDEV_EXT_MECH BLK_DEV_NVME
 	BLK_DEV_INITRD DEVTMPFS MEMFD_CREATE PCI_MSI SERIAL_8250_CONSOLE SWIOTLB)
 if (( VIOMMU )); then required+=(INTEL_IOMMU); fi
+# The normal mode's implicit-fence checks use the upstream sw_sync test timeline.
+[[ "$MODE" == normal ]] && required+=(SYNC_FILE SW_SYNC)
 for symbol in "${required[@]}"; do
 	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
 done
@@ -84,12 +86,12 @@ grep -Fq "$BUILD/arch/x86/boot/bzImage" "$BUILD/xdev-ext-artifacts.sha256"
 DEBUG_LOCKING=0
 grep -Fxq CONFIG_PROVE_LOCKING=y "$BUILD/.config" && DEBUG_LOCKING=1
 {
-	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; udmabuf dma-buf without descriptor; no timing\n' \
+	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; udmabuf dma-buf without descriptor; sw_sync implicit fences; no timing\n' \
 		"$(date -u +%FT%TZ)" "$(hostname)"
 	printf 'source=%s\nsource_commit=%s\nbuild=%s\nbuild_commit=%s\nkernel_release=%s\nmode=%s\nviommu=%s\nbaseline_kernel=%s\n' \
 		"$SOURCE" "$HEAD_SHA" "$BUILD" "$BUILD_SHA" "$(cat "$BUILD/include/config/kernel.release")" \
 		"$MODE" "$VIOMMU" "$BASELINE"
-	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|INTEL_IOMMU|UDMABUF|XDEV_EXT_PEER_DMABUF|SWIOTLB)=' "$BUILD/.config" || true
+	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|INTEL_IOMMU|UDMABUF|XDEV_EXT_PEER_DMABUF|SWIOTLB|SYNC_FILE|SW_SYNC)=' "$BUILD/.config" || true
 } >"$EV/provenance.txt"
 cp "$BUILD/.config" "$EV/kernel.config"
 python3 -I "$SOURCE/tests/integration/session/native/xdev_ext_mech_zc_debug.py" config "$BUILD/.config" /dev/null "$DEBUG_LOCKING"

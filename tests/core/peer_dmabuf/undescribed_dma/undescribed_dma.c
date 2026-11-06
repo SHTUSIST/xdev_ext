@@ -8,6 +8,12 @@
  * usage: undescribed_dma MODE SRC_NG DST_NG SRC_PCI DST_PCI
  *   MODE normal: DMA must land; MODE refuse: the guest booted with
  *   swiotlb=force, so every requester must be refused before any attach.
+ *   MODE normal also checks implicit-sync fences: an unsignaled fence from
+ *   the upstream sw_sync test timeline, imported into the buffer's
+ *   reservation object with DMA_BUF_IOCTL_IMPORT_SYNC_FILE, must refuse every
+ *   NVMe command it orders (EBUSY, nothing completed, no byte moved) until it
+ *   signals: a writer fence orders device reads and writes, a reader fence
+ *   orders device writes only.
  *
  * Output is TAP. Each check has a fixed id; the host oracle requires the exact
  * id list for the mode, the plan line, and the destination image.
@@ -18,6 +24,7 @@
 #include <limits.h>
 #include <linux/dma-buf.h>
 #include <linux/udmabuf.h>
+#include <poll.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -35,9 +42,25 @@
 #define LBA 512u
 #define RANGE_A 2048ULL /* reverse-order READ source, WRITE destination */
 #define RANGE_B 4096ULL /* after the exporter fds are closed */
+#define RANGE_C 6144ULL /* WRITE destination behind a writer fence */
+#define RANGE_D 8192ULL /* WRITE destination beside a reader fence */
+#define RANGE_E 10240ULL /* READ source behind a reader fence */
+#define SW_SYNC "/sys/kernel/debug/sync/sw_sync"
 #define BUFINFO "/sys/kernel/debug/dma_buf/bufinfo"
 #define FILL 0xee
 #define BOTH (XDEV_EXT_PEER_REGISTER_F_DMABUF | XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED)
+
+/* drivers/dma-buf/sw_sync.c (no uapi header): each open of the debugfs file is
+ * a timeline; CREATE_FENCE returns a sync_file fd that signals once the
+ * timeline counter reaches value, and INC advances the counter. */
+struct sw_sync_create_fence_data {
+	__u32 value;
+	char name[32];
+	__s32 fence;
+};
+#define SW_SYNC_IOC_MAGIC 'W'
+#define SW_SYNC_IOC_CREATE_FENCE _IOWR(SW_SYNC_IOC_MAGIC, 0, struct sw_sync_create_fence_data)
+#define SW_SYNC_IOC_INC _IOW(SW_SYNC_IOC_MAGIC, 1, __u32)
 
 static unsigned checks;
 static bool failed;
@@ -62,6 +85,11 @@ static unsigned char source_byte(uint64_t sector, unsigned j)
 static unsigned char pattern_byte(unsigned i)
 {
 	return (unsigned char)(((i * 29u) + 0x5au) ^ (i >> 12));
+}
+/* What the implicit-sync producer writes before its fence signals. */
+static unsigned char producer_byte(unsigned i)
+{
+	return (unsigned char)(((i * 13u) + 0xc3u) ^ (i >> 11));
 }
 
 static uint64_t vmpin(void)
@@ -120,6 +148,36 @@ static int nvme_batch(int ng, int alloc, uint64_t generation, bool write, uint64
 	*completed = b.completed;
 	if (ret < 0) return -errno;
 	return b.status;
+}
+
+/* A fence at seqno value on the timeline, imported into the dma-buf's
+ * reservation object as an implicit writer (DMA_BUF_SYNC_WRITE) or reader. */
+static int import_fence(int timeline, int buf, __u32 value, bool writer, int *fence)
+{
+	struct sw_sync_create_fence_data c = {.value = value};
+	struct dma_buf_import_sync_file in = {.flags = writer ? DMA_BUF_SYNC_WRITE : DMA_BUF_SYNC_READ};
+	snprintf(c.name, sizeof(c.name), "xdev-ext-%s", writer ? "writer" : "reader");
+	if (ioctl(timeline, SW_SYNC_IOC_CREATE_FENCE, &c)) return -errno;
+	*fence = c.fence;
+	in.fd = c.fence;
+	if (ioctl(buf, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &in)) return -errno;
+	return 0;
+}
+
+/* dma_buf_poll: POLLIN waits for writers, POLLOUT for readers and writers. */
+static short ready_now(int buf, short events)
+{
+	struct pollfd p = {.fd = buf, .events = events};
+	int ret = poll(&p, 1, 0);
+	return ret < 0 ? -1 : ret == 0 ? 0 : p.revents;
+}
+
+static int fenced_batch(const char *name, int ng, int alloc, uint64_t generation, bool write,
+			uint64_t slba0, unsigned *completed)
+{
+	int ret = nvme_batch(ng, alloc, generation, write, slba0, false, completed);
+	printf("OBSERVE %s status=%d completed=%u\n", name, ret, *completed);
+	return ret;
 }
 
 /* 1 if the buffer with this inode is listed, 0 if not, -1 on error.
@@ -203,6 +261,9 @@ int main(int argc, char **argv)
 	uint64_t base = UINT64_MAX, generation = 0, gen2 = 0;
 	unsigned completed, i, n;
 	int ctl, udm, src, dst, memfd = -1, memfd2 = -1, buf, buf2, peer, peer2, ret, listed;
+	int timeline = -1, writer = -1, reader = -1;
+	__u32 one = 1;
+	short ready;
 	bool refuse, has_src, has_dst;
 
 	setvbuf(stdout, NULL, _IOLBF, 0);
@@ -212,6 +273,8 @@ int main(int argc, char **argv)
 	refuse = !strcmp(mode, "refuse");
 	printf("PLAN mode=%s export=%u pages=%u range_a=%llu range_b=%llu\n", mode, EXPORT, PAGES,
 	       RANGE_A, RANGE_B);
+	if (!refuse)
+		printf("PLAN fences range_c=%llu range_d=%llu range_e=%llu\n", RANGE_C, RANGE_D, RANGE_E);
 	expect = malloc(EXPORT);
 	if (!expect) return 2;
 
@@ -291,6 +354,56 @@ int main(int argc, char **argv)
 		check(listed == 1 && n == 2 && has_src && has_dst, "one-attachment-per-function", 0);
 	else
 		check(listed == 1 && n == 0, "still-no-attachment", 0);
+
+	if (!refuse) {
+		/* An implicit-sync writer, as a GPU job writing this buffer would
+		 * leave it: no NVMe command may read or write the buffer yet. */
+		timeline = open(SW_SYNC, O_RDWR | O_CLOEXEC);
+		check(timeline >= 0, "sw-sync-timeline", errno);
+		ret = timeline >= 0 ? import_fence(timeline, buf, 1, true, &writer) : -EBADF;
+		check(!ret, "writer-fence-imported", ret < 0 ? -ret : 0);
+		ready = ready_now(buf, POLLIN);
+		check(ready == 0, "writer-fence-pending", ready < 0 ? errno : 0);
+		ret = fenced_batch("fence-writer-device-read", dst, peer, generation, true, RANGE_C, &completed);
+		check(ret == -EBUSY && completed == 0, "device-read-waits-for-writer", ret < 0 ? -ret : 0);
+		ret = fenced_batch("fence-writer-device-write", src, peer, generation, false, RANGE_C, &completed);
+		check(ret == -EBUSY && completed == 0, "device-write-waits-for-writer", ret < 0 ? -ret : 0);
+		for (i = 0; i < EXPORT; i++) expect[i] = pattern_byte(i);
+		check(!memcmp(map, expect, EXPORT), "buffer-kept-while-writer-pending", 0);
+		/* The producer finishes its write, then signals. */
+		for (i = 0; i < EXPORT; i++) map[i] = producer_byte(i);
+		ret = timeline >= 0 ? ioctl(timeline, SW_SYNC_IOC_INC, &one) : -1;
+		ready = ready_now(buf, POLLIN);
+		check(!ret && ready > 0 && (ready & POLLIN), "writer-fence-signaled", ret ? errno : 0);
+		ret = fenced_batch("fence-writer-signaled-device-read", dst, peer, generation, true, RANGE_C,
+				   &completed);
+		check(ret == 0 && completed == PAGES, "device-read-after-writer", ret < 0 ? -ret : 0);
+		/* An implicit-sync reader: NVMe may read the buffer beside it, but
+		 * must not overwrite what it reads. */
+		ret = timeline >= 0 ? import_fence(timeline, buf, 2, false, &reader) : -EBADF;
+		check(!ret, "reader-fence-imported", ret < 0 ? -ret : 0);
+		ready = ready_now(buf, POLLIN | POLLOUT);
+		check(ready > 0 && (ready & POLLIN) && !(ready & POLLOUT), "reader-fence-pending",
+		      ready < 0 ? errno : 0);
+		ret = fenced_batch("fence-reader-device-read", dst, peer, generation, true, RANGE_D, &completed);
+		check(ret == 0 && completed == PAGES, "device-read-beside-reader", ret < 0 ? -ret : 0);
+		ret = fenced_batch("fence-reader-device-write", src, peer, generation, false, RANGE_E, &completed);
+		check(ret == -EBUSY && completed == 0, "device-write-waits-for-reader", ret < 0 ? -ret : 0);
+		for (i = 0; i < EXPORT; i++) expect[i] = producer_byte(i);
+		check(!memcmp(map, expect, EXPORT), "buffer-kept-while-reader-pending", 0);
+		ret = timeline >= 0 ? ioctl(timeline, SW_SYNC_IOC_INC, &one) : -1;
+		ready = ready_now(buf, POLLOUT);
+		check(!ret && ready > 0 && (ready & POLLOUT), "reader-fence-signaled", ret ? errno : 0);
+		ret = fenced_batch("fence-reader-signaled-device-write", src, peer, generation, false, RANGE_E,
+				   &completed);
+		check(ret == 0 && completed == PAGES, "device-write-after-reader", ret < 0 ? -ret : 0);
+		for (i = 0; i < EXPORT; i++)
+			expect[i] = source_byte(RANGE_E + i / LBA, i % LBA);
+		check(!memcmp(map, expect, EXPORT), "device-write-after-reader-bytes", 0);
+		ret = (writer >= 0 ? close(writer) : -1) | (reader >= 0 ? close(reader) : -1) |
+		      (timeline >= 0 ? close(timeline) : -1);
+		check(!ret, "fence-fds-closed", errno);
+	}
 
 	/* The application drops every exporter-side handle; the importer's own
 	 * buffer reference keeps the memory and its accounting. */

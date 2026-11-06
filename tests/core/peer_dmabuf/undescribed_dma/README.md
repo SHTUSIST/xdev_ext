@@ -1,4 +1,4 @@
-# Undescribed dma-buf exporter guest test (prototype for ASK.70)
+# Undescribed dma-buf exporter guest test
 
 This test runs only inside a private KVM guest. It checks the opt-in import of a
 dma-buf whose exporter registered no xdev_ext backing descriptor. The exporter
@@ -27,18 +27,37 @@ debugfs `bufinfo`, then importing and releasing a second udmabuf.
   unmaps and closes the memfd and the udmabuf fd; the charge stays, and a
   further READ and WRITE through the allocation fd still copy another source
   range to the destination.
+- `normal`, implicit-sync fences (before the exporter fds are closed): the
+  guest opens the upstream `sw_sync` test timeline
+  (`/sys/kernel/debug/sync/sw_sync`) and imports one of its unsignaled fences
+  into the buffer's reservation object with `DMA_BUF_IOCTL_IMPORT_SYNC_FILE`,
+  as a GPU job that writes the buffer would leave it; `poll(POLLIN)` must
+  report the buffer busy. An NVMe WRITE (the device reads the buffer) and an
+  NVMe READ (the device writes it) must then both fail with `EBUSY` and zero
+  completed commands, and the buffer must keep its bytes. The CPU then writes
+  new bytes, as the producer finishing its job, and the fence signals; the
+  NVMe WRITE now succeeds and the destination must hold those new bytes. A
+  second fence imported as a reader (`DMA_BUF_SYNC_READ`) must leave
+  `poll(POLLIN)` ready but `poll(POLLOUT)` busy; an NVMe WRITE beside it
+  succeeds, an NVMe READ into the buffer fails with `EBUSY` until it signals,
+  and then lands the source bytes.
 - `refuse`: the guest boots with `swiotlb=force`. Both batches must fail with
   `EXDEV` and zero completed commands, the buffer must keep its fill bytes,
   `bufinfo` must list no attachment (the requester was refused before the
   exporter was asked to attach), and the destination disk must stay zero.
 
 The host oracle `validate.py` requires the exact check-id list for the mode,
-the TAP plan and `RESULT` lines, the guest exit code, the two batch results,
-the boot command line (`swiotlb=force` exactly in `refuse`, `intel_iommu=on`
-exactly with `--viommu`), the IOMMU group of both NVMe functions (present
-exactly with `--viommu`), the unmodified source image, the whole destination
-image rebuilt from its own plan, and a kernel console without debug reports
-(`tests/integration/session/native/xdev_ext_mech_zc_debug.py`).
+the TAP plan and `RESULT` lines, the guest exit code, every batch result
+(status and completed count, including the `EBUSY` fence refusals), the boot
+command line (`swiotlb=force` exactly in `refuse`, `intel_iommu=on` exactly
+with `--viommu`), the IOMMU group of both NVMe functions (present exactly with
+`--viommu`), the unmodified source image, the whole destination image rebuilt
+from its own plan, and a kernel console without debug reports
+(`tests/integration/session/native/xdev_ext_mech_zc_debug.py`). With
+`--viommu` it also applies the harness's strict VT-d console check
+(`xdev_ext_mech_zc_viommu.py`: DMAR enabled, translated domains, strict
+invalidation, each NVMe function in its own IOMMU group, no DMA remapping
+fault); without it, DMAR must not be enabled.
 `python3 -I validate_test.py` mutates a correct run one fact at a time and
 requires the oracle to reject each mutation for its own reason; it boots
 nothing.
@@ -47,7 +66,8 @@ nothing.
 
 `undescribed_dma_kvm.sh` builds no kernel. It takes a kernel `O=` directory
 with `CONFIG_UDMABUF=y`, `CONFIG_XDEV_EXT_PEER_DMABUF=y`, `CONFIG_DEBUG_FS=y`
-and `CONFIG_SWIOTLB=y`, and a clean canonical checkout whose HEAD differs from
+and `CONFIG_SWIOTLB=y` (the `normal` mode also needs `CONFIG_SYNC_FILE=y` and
+`CONFIG_SW_SYNC=y`), and a clean canonical checkout whose HEAD differs from
 the build's recorded commit only in test inputs:
 
     bash tests/core/peer_dmabuf/undescribed_dma/undescribed_dma_kvm.sh \
@@ -62,7 +82,9 @@ the behaviour before the feature (a RED run); such a run is labelled
 `BASELINE` and its verdict is always FAIL.
 
 Not covered: exporters with a `pin` operation (dynamic exporters), an
-exporter that calls `move_notify`, device memory, fences, unknown-DMA
+exporter that calls `move_notify`, device memory, a fence that arrives while a
+command is already in flight (xdev_ext publishes no fence of its own; see the
+import notes in `src/core/io_uring/xdev_ext_peer_dmabuf.c`), unknown-DMA
 quarantine, mechanism sessions (`STAGE_CAPS` reporting) and any timing. The
-host importer cases in `../importer_cases.c` cover move_notify, quarantine and
-admission for this path.
+host importer cases in `../importer_cases.c` cover move_notify, quarantine,
+admission and every fence usage (KERNEL, WRITE, READ, BOOKKEEP) for this path.

@@ -725,6 +725,121 @@ static void close_undescribed_case(bool active, bool unknown)
 	}
 }
 
+/* Implicit synchronization (include/linux/dma-buf.h, IMPLICIT SYNCHRONIZATION
+ * and DYNAMIC IMPORTER RULES). An undescribed exporter, or another importer of
+ * the same buffer, may order its accesses with fences in the buffer's
+ * reservation object. xdev_ext adds no fence for its own device access, so it
+ * must never begin a device access that such a fence orders after another
+ * access: a device read waits for writers (dma_resv_usage_rw(false), which
+ * includes KERNEL fences), a device write waits for readers and writers
+ * (dma_resv_usage_rw(true)); BOOKKEEP fences take no part in implicit sync.
+ * The lease path cannot sleep on a fence, so such a lease is refused with
+ * -EBUSY and nothing else changes; the caller retries after the fence. */
+static void fenced_lease_refused(struct xdev_ext_peer_mapping *m, u64 gen, u64 offset,
+				 enum dma_data_direction dir, enum dma_resv_usage usage)
+{
+	struct xdev_ext_peer_lease probe = {0};
+	unsigned before = env.fence_tests;
+	assert(xdev_ext_peer_acquire(m, gen, offset, 32, dir, &probe) == -EBUSY);
+	assert(env.fence_tests > before && env.fence_last_usage == usage);
+	/* A refused lease owns nothing. */
+	assert(!probe.mapping && !probe.next && !probe.ticket && !probe.dma_address && !probe.len);
+}
+
+static void fenced_lease_granted(struct xdev_ext_peer_mapping *m, u64 gen, u64 offset,
+				 enum dma_data_direction dir)
+{
+	struct xdev_ext_peer_lease lease = {0};
+	assert(xdev_ext_peer_acquire(m, gen, offset, 32, dir, &lease) == 0 && lease.mapping == m);
+	assert(xdev_ext_peer_release(&lease, lease.ticket, true) == 0);
+}
+
+static void undescribed_fences_case(void)
+{
+	struct xdev_ext_peer_region *r;
+	struct xdev_ext_peer_mapping *m = NULL;
+	struct xdev_ext_peer_lease accepted = {0}, probe = {0};
+	struct xdev_ext_peer_backing back;
+	u64 gen, len, info_gen;
+	setup();
+	r = import_undescribed();
+	gen = xdev_ext_peer_generation(r);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	/* An implicit-sync writer is still running. */
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 1;
+	fenced_lease_refused(m, gen, 0, DMA_TO_DEVICE, DMA_RESV_USAGE_WRITE);
+	fenced_lease_refused(m, gen, 4096, DMA_FROM_DEVICE, DMA_RESV_USAGE_READ);
+	/* The refusal is transient: nothing is active, stale or quarantined. */
+	assert(xdev_ext_peer_drainable(r) == 0);
+	assert(xdev_ext_peer_info(r, &len, &info_gen, true) == 0 && info_gen == gen);
+	assert(xdev_ext_peer_describe(r, &requester, &back) == 0 &&
+	       back.flags == XDEV_EXT_PEER_BACKING_UNDESCRIBED);
+	/* Argument and generation errors are still reported as before (the lease
+	 * split shrinks on -ERANGE); only an otherwise valid lease is refused. */
+	assert(xdev_ext_peer_acquire(m, gen, 4090, 32, DMA_TO_DEVICE, &probe) == -ERANGE);
+	assert(xdev_ext_peer_acquire(m, gen + 1, 0, 32, DMA_TO_DEVICE, &probe) == -ESTALE);
+	assert(xdev_ext_peer_acquire(m, gen, 0, 32, DMA_BIDIRECTIONAL, &probe) == -EINVAL);
+	assert(!probe.mapping && !probe.ticket);
+	/* The writer signals: device reads and writes start. */
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 0;
+	fenced_lease_granted(m, gen, 0, DMA_TO_DEVICE);
+	fenced_lease_granted(m, gen, 4096, DMA_FROM_DEVICE);
+	/* An implicit-sync reader: device reads start, device writes wait. */
+	env.fence_pending[DMA_RESV_USAGE_READ] = 1;
+	fenced_lease_granted(m, gen, 0, DMA_TO_DEVICE);
+	fenced_lease_refused(m, gen, 4096, DMA_FROM_DEVICE, DMA_RESV_USAGE_READ);
+	env.fence_pending[DMA_RESV_USAGE_READ] = 0;
+	/* Kernel memory-management fences order every device access. */
+	env.fence_pending[DMA_RESV_USAGE_KERNEL] = 1;
+	fenced_lease_refused(m, gen, 0, DMA_TO_DEVICE, DMA_RESV_USAGE_WRITE);
+	fenced_lease_refused(m, gen, 4096, DMA_FROM_DEVICE, DMA_RESV_USAGE_READ);
+	env.fence_pending[DMA_RESV_USAGE_KERNEL] = 0;
+	/* Fences that take no part in implicit sync refuse nothing. */
+	env.fence_pending[DMA_RESV_USAGE_BOOKKEEP] = 1;
+	fenced_lease_granted(m, gen, 0, DMA_TO_DEVICE);
+	fenced_lease_granted(m, gen, 4096, DMA_FROM_DEVICE);
+	env.fence_pending[DMA_RESV_USAGE_BOOKKEEP] = 0;
+	/* A lease accepted before a fence arrives keeps its mapping; the fence
+	 * only refuses new device accesses. */
+	assert(xdev_ext_peer_acquire(m, gen, 8192, 32, DMA_TO_DEVICE, &accepted) == 0);
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 1;
+	assert(xdev_ext_peer_drainable(r) == -EBUSY);
+	assert(xdev_ext_peer_unmap(m) == -EBUSY && env.unmaps == 0);
+	assert(xdev_ext_peer_release(&accepted, accepted.ticket, true) == 0);
+	assert(xdev_ext_peer_drainable(r) == 0);
+	/* Permanent states keep their own error ahead of the transient one. */
+	dma_resv_lock(&env.resv, NULL);
+	test_notify(env.last_attach);
+	dma_resv_unlock(&env.resv);
+	assert(xdev_ext_peer_acquire(m, gen, 0, 32, DMA_TO_DEVICE, &probe) == -ESTALE);
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 0;
+	assert(xdev_ext_peer_unmap(m) == 0 && xdev_ext_peer_unpin(r) == 0);
+	finish();
+	puts("undescribed fences: a lease that an implicit-sync fence orders is refused, never raced");
+}
+
+/* Scope: described exporters (system heap, NVIDIA) keep the contract in which
+ * the application orders implicit-sync users itself; this case pins that the
+ * fence rule above is not applied to them (a deliberate decision, see the
+ * undescribed import notes). */
+static void described_fences_case(void)
+{
+	struct xdev_ext_peer_region *r;
+	struct xdev_ext_peer_mapping *m = NULL;
+	u64 gen;
+	setup();
+	r = import();
+	gen = xdev_ext_peer_generation(r);
+	assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == 0);
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 1;
+	fenced_lease_granted(m, gen, 0, DMA_TO_DEVICE);
+	fenced_lease_granted(m, gen, 4096, DMA_FROM_DEVICE);
+	env.fence_pending[DMA_RESV_USAGE_WRITE] = 0;
+	assert(xdev_ext_peer_unmap(m) == 0 && xdev_ext_peer_unpin(r) == 0);
+	finish();
+	puts("described fences: described exporters keep the application-ordered contract");
+}
+
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
@@ -750,6 +865,8 @@ int main(int argc, char **argv)
 	else if (!strcmp(argv[1], "close_undescribed_idle")) close_undescribed_case(false, false);
 	else if (!strcmp(argv[1], "close_undescribed_active")) close_undescribed_case(true, false);
 	else if (!strcmp(argv[1], "close_undescribed_unknown")) close_undescribed_case(false, true);
+	else if (!strcmp(argv[1], "undescribed_fences")) undescribed_fences_case();
+	else if (!strcmp(argv[1], "described_fences")) described_fences_case();
 	else return 2;
 	return 0;
 }

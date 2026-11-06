@@ -4,9 +4,11 @@
 
 make-source writes the deterministic source image. validate checks one guest
 run: the exact TAP id list for the mode, the plan line, the guest exit code,
-the read/write observations, the boot mode (swiotlb=force or not, vIOMMU or
-not), the whole destination image rebuilt from its own plan, and the kernel
-console with the KVM harness's debug-report detector. Nothing is timed.
+every batch observation (including the implicit-fence refusals of the normal
+mode), the boot mode (swiotlb=force or not; with --viommu the strict VT-d
+console check of the KVM harness, without it no DMAR), the whole destination
+image rebuilt from its own plan, and the kernel console with the KVM
+harness's debug-report detector. Nothing is timed.
 """
 import argparse
 import hashlib
@@ -18,6 +20,7 @@ import sys
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parents[2] / "integration/session/native"))
 from xdev_ext_mech_zc_debug import debug_reports  # noqa: E402
+from xdev_ext_mech_zc_viommu import validate_viommu_console  # noqa: E402
 
 LBA = 512
 PAGE = 4096
@@ -25,6 +28,9 @@ PAGES = 16
 EXPORT = PAGE * PAGES
 RANGE_A = 2048
 RANGE_B = 4096
+RANGE_C = 6144  # destination of the device read behind a writer fence
+RANGE_D = 8192  # destination of the device read beside a reader fence
+RANGE_E = 10240  # source of the device write behind a reader fence
 DISK = 8 << 20
 
 COMMON_HEAD = ["open-control", "open-udmabuf", "open-source-namespace",
@@ -35,10 +41,17 @@ COMMON_HEAD = ["open-control", "open-udmabuf", "open-source-namespace",
 COMMON_TAIL = ["allocation-close", "charge-returned", "buffer-released",
                "second-udmabuf-create", "second-register", "final-charge-baseline",
                "second-buffer-released"]
+FENCES = ["sw-sync-timeline", "writer-fence-imported", "writer-fence-pending",
+          "device-read-waits-for-writer", "device-write-waits-for-writer",
+          "buffer-kept-while-writer-pending", "writer-fence-signaled", "device-read-after-writer",
+          "reader-fence-imported", "reader-fence-pending", "device-read-beside-reader",
+          "device-write-waits-for-reader", "buffer-kept-while-reader-pending",
+          "reader-fence-signaled", "device-write-after-reader", "device-write-after-reader-bytes",
+          "fence-fds-closed"]
 EXPECTED = {
     "normal": COMMON_HEAD + ["batch-read", "batch-read-bytes", "source-function-attached",
-                             "batch-write", "one-attachment-per-function",
-                             "exporter-fds-closed", "charge-kept-after-exporter-close",
+                             "batch-write", "one-attachment-per-function"] + FENCES +
+    ["exporter-fds-closed", "charge-kept-after-exporter-close",
                              "read-after-exporter-close", "write-after-exporter-close"]
     + COMMON_TAIL,
     "refuse": COMMON_HEAD + ["batch-read-refused", "region-untouched", "refused-before-attach",
@@ -46,9 +59,16 @@ EXPECTED = {
                              "exporter-fds-closed", "charge-kept-after-exporter-close"]
     + COMMON_TAIL,
 }
-# Exact native results of the two batches (status, completed).
-BATCHES = {"normal": {"read": (0, PAGES), "write": (0, PAGES)},
-           "refuse": {"read": (-18, 0), "write": (-18, 0)}}  # -EXDEV
+# Exact native results of every observed batch (status, completed). -16 is
+# -EBUSY (a pending implicit-sync fence), -18 -EXDEV (refused before attach).
+BATCHES = {"normal": {"read": (0, PAGES), "write": (0, PAGES),
+                      "fence-writer-device-read": (-16, 0),
+                      "fence-writer-device-write": (-16, 0),
+                      "fence-writer-signaled-device-read": (0, PAGES),
+                      "fence-reader-device-read": (0, PAGES),
+                      "fence-reader-device-write": (-16, 0),
+                      "fence-reader-signaled-device-write": (0, PAGES)},
+           "refuse": {"read": (-18, 0), "write": (-18, 0)}}
 
 
 # Byte j >= 8 of sector s is (s * 131 + j * 7 + 0x3d) & 0xff: one tail per
@@ -68,11 +88,20 @@ def pattern():
     return bytes((((i * 29) + 0x5a) ^ (i >> 12)) & 0xff for i in range(EXPORT))
 
 
+def producer():
+    """Bytes the implicit-sync producer writes before its fence signals."""
+    return bytes((((i * 13) + 0xc3) ^ (i >> 11)) & 0xff for i in range(EXPORT))
+
+
 def expected_destination(mode, source):
     dest = bytearray(DISK)
     if mode == "normal":
         dest[RANGE_A * LBA:RANGE_A * LBA + EXPORT] = pattern()
         dest[RANGE_B * LBA:RANGE_B * LBA + EXPORT] = source[RANGE_B * LBA:RANGE_B * LBA + EXPORT]
+        # Only after the writer signaled: the producer's bytes, never the
+        # older pattern; beside a reader the same bytes.
+        dest[RANGE_C * LBA:RANGE_C * LBA + EXPORT] = producer()
+        dest[RANGE_D * LBA:RANGE_D * LBA + EXPORT] = producer()
     return bytes(dest)
 
 
@@ -108,7 +137,7 @@ def check_tap(lines, mode):
 def check_batches(lines, mode):
     seen = {}
     for line in lines:
-        m = re.match(r"^OBSERVE (read|write) status=(-?\d+) completed=(\d+)$", line)
+        m = re.match(r"^OBSERVE ([a-z][a-z-]*) status=(-?\d+) completed=(\d+)$", line)
         if m:
             if m.group(1) in seen:
                 raise ValueError("duplicate %s observation" % m.group(1))
@@ -117,7 +146,7 @@ def check_batches(lines, mode):
         raise ValueError("batch observations %s != %s" % (seen, BATCHES[mode]))
 
 
-def check_boot(lines, mode, viommu):
+def check_boot(lines, mode, viommu, text):
     cmdline = [l.split("=", 1)[1] for l in lines if l.startswith("XDEV_EXT_UNDESCRIBED_CMDLINE=")]
     if len(cmdline) != 1:
         raise ValueError("guest must report its kernel command line once")
@@ -134,6 +163,17 @@ def check_boot(lines, mode, viommu):
         raise ValueError("vIOMMU run left an NVMe function outside an IOMMU group")
     if not viommu and any(grouped):
         raise ValueError("an NVMe function is in an IOMMU group without vIOMMU")
+    if not viommu:
+        if "DMAR: IOMMU enabled" in text:
+            raise ValueError("vIOMMU off run reports DMAR enabled")
+        return None
+    # Strict translated VT-d with every NVMe function grouped and no DMA
+    # remapping fault: a device address outside its own mapping would fault.
+    report = validate_viommu_console(text)
+    nvme_groups = [report["groups"][bdf] for bdf in report["nvme"]]
+    if len(report["nvme"]) != 2 or len(set(nvme_groups)) != 2:
+        raise ValueError("vIOMMU run needs two NVMe functions in two IOMMU groups: %r" % report["groups"])
+    return report
 
 
 def validate(source, dest, log, mode, viommu=False):
@@ -147,7 +187,7 @@ def validate(source, dest, log, mode, viommu=False):
         raise ValueError("guest exit code %s" % exits)
     ids = check_tap(lines, mode)
     check_batches(lines, mode)
-    check_boot(lines, mode, viommu)
+    report = check_boot(lines, mode, viommu, text)
     src = source.read_bytes()
     if src != make_source():
         raise ValueError("source image was modified")
@@ -162,7 +202,8 @@ def validate(source, dest, log, mode, viommu=False):
     if any(counts.values()):
         raise ValueError("kernel debug diagnostic: " + json.dumps(counts, sort_keys=True))
     return {"verdict": "PASS", "mode": mode, "viommu": viommu, "checks": len(ids),
-            "destination_sha256": hashlib.sha256(got).hexdigest(), "console": counts}
+            "destination_sha256": hashlib.sha256(got).hexdigest(), "console": counts,
+            "viommu_report": report}
 
 
 def main(argv=None):

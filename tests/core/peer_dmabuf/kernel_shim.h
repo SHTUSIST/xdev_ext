@@ -203,6 +203,13 @@ static inline int dma_resv_lock_interruptible(struct dma_resv *r, void *ctx)
 static inline void dma_resv_unlock(struct dma_resv *r) { mutex_unlock(&r->lock); }
 #define dma_resv_assert_held(r) assert((r)->lock.held)
 long dma_resv_wait_timeout(struct dma_resv *, enum dma_resv_usage, bool, unsigned long);
+/* Upstream dma-resv.h: a new write waits for readers and writers, a new read
+ * waits for writers. */
+static inline enum dma_resv_usage dma_resv_usage_rw(bool write)
+{ return write ? DMA_RESV_USAGE_READ : DMA_RESV_USAGE_WRITE; }
+/* Upstream dma-resv.c: true when every fence of a usage <= @usage signaled
+ * (KERNEL < WRITE < READ < BOOKKEEP); no lock is required. */
+bool dma_resv_test_signaled(struct dma_resv *, enum dma_resv_usage);
 struct dma_buf;
 struct dma_buf_attachment;
 struct dma_buf_ops {
@@ -246,6 +253,11 @@ struct test_env {
 	u64 needs_sync_address;
 	bool bounced; /* the next certification sees a bounce slot */
 	unsigned unbounced_checks;
+	/* Unsignaled fences in the reservation object, by usage, and the
+	 * implicit-sync queries the importer made (count and last usage). */
+	unsigned fence_pending[DMA_RESV_USAGE_BOOKKEEP + 1];
+	unsigned fence_tests;
+	enum dma_resv_usage fence_last_usage;
 	struct dma_buf_attachment *last_attach;
 };
 extern struct test_env env;
