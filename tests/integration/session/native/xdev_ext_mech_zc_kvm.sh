@@ -44,6 +44,9 @@ GPU=0
 GPU_BDF=''
 NVIDIA_USERSPACE=''
 NIC_MODEL=virtio
+TB_NHI=0
+TB_NHI_BDF=''
+TB_NHI_CYCLES=3
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -75,6 +78,7 @@ while (($#)); do
  --gpu) GPU=1; GPU_BDF=$2; shift 2 ;;
  --nvidia-userspace) NVIDIA_USERSPACE=$2; shift 2 ;;
  --nic) NIC_MODEL=$2; shift 2 ;;
+ --tb-nhi) TB_NHI=1; TB_NHI_BDF=$2; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -101,6 +105,13 @@ if (( ${GPU:-0} )); then
     gpu_listed=0
     for bdf in "${VFIO_DEVICES[@]}"; do [[ "$bdf" != "$GPU_BDF" ]] || gpu_listed=1; done
     (( gpu_listed )) || VFIO_DEVICES+=("$GPU_BDF")
+fi
+# A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles.
+if (( TB_NHI )); then
+    if (( XDOMAIN || ${GPU:-0} || MECHANISM_VARIANTS || LIFECYCLE || FENCE_CHECK || EVAL_SESSION )) || [[ -n "$FAULT_CAMPAIGN" ]]; then
+        echo 'tb-nhi requires its exclusive correctness mode' >&2; exit 2
+    fi
+    VFIO_DEVICES+=("$TB_NHI_BDF")
 fi
 if (( ${#VFIO_DEVICES[@]} )) && (( XDOMAIN || MECHANISM_VARIANTS )); then
     echo 'vfio devices are not wired into this mode' >&2; exit 2
@@ -682,7 +693,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$EV/provenance.txt"
 printf 'compat=%s\n' "$COMPAT" >>"$EV/provenance.txt"
 printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/provenance.txt"
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
-printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${QEMU:-}" >>"$EV/provenance.txt"
+printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
@@ -752,6 +763,7 @@ if (( ! RUN_ONLY )); then
     # The NVIDIA modules are the only loadable guest drivers in GPU mode.
     if (( ${GPU:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -e XDEV_EXT_MECH_CE -e XDEV_EXT_MECH_DMA -e DMA_SHARED_BUFFER -e XDEV_EXT_PEER_DMABUF -e HOTPLUG_CPU; fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then cfg -e NET_VENDOR_INTEL -e IGB -e HOTPLUG_CPU; fi
+    if (( ${TB_NHI:-0} )); then cfg -e USB4; fi
     if (( DEBUG_LOCKING )); then
         for symbol in DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do cfg -e "$symbol"; done
         cfg -d KASAN_KUNIT_TEST
@@ -789,6 +801,7 @@ if (( ! RUN_ONLY )); then
         for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH_CE XDEV_EXT_MECH_DMA DMA_SHARED_BUFFER XDEV_EXT_PEER_DMABUF; do grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config"; done
     fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then grep -Fxq CONFIG_IGB=y "$BUILD/.config"; grep -Fxq CONFIG_HOTPLUG_CPU=y "$BUILD/.config"; fi
+    if (( ${TB_NHI:-0} )); then grep -Fxq CONFIG_USB4=y "$BUILD/.config"; fi
 	if (( PREPARE_ONLY )); then echo XDEV_EXT_ZC_CONFIG=PASS; exit 0; fi
     if (( FENCE_CHECK )); then
         # Full link + modules produces genuine Module.symvers for this vmlinux.
@@ -1022,6 +1035,12 @@ if (( PEER )); then
 fi
 if (( EVAL_SESSION )); then stage_eval_session_image; fi
 if (( ${GPU:-0} )); then stage_gpu_image; fi
+if (( ${TB_NHI:-0} )); then
+    grep -Fxq CONFIG_USB4=y "$BUILD/.config" || { echo 'FAIL tb-nhi requires CONFIG_USB4=y; rebuild' >&2; exit 1; }
+    mkdir -p "$ROOT/opt/xdev_ext/tb"
+    cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh" "$ROOT/opt/xdev_ext/tb/"
+    for app in seq tr; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+fi
 mkdir -p "$ROOT/opt/xdev_ext/verifier"
 cp "$TOOLS/verifier/"*.bpf.o \
 	"$SRC/tools/testing/selftests/xdev_ext_integration/verifier/run.sh" \
@@ -1039,7 +1058,7 @@ printf 'provider_case=%s\n' "$PROVIDER_CASE" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FENCE_CHECK" "$FENCE_NONCE_PREFIX" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
-printf 'gpu=%s\nnic_model=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -1242,6 +1261,9 @@ else
 fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
+if [ "${tb_nhi:-0}" = 1 ]; then
+	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"
+fi
 if [ "${gpu:-0}" = 1 ]; then
 	# Destination CE window: the host image oracle expects the source bytes.
 	sh /opt/xdev_ext/gpu/xdev_ext_gpu_guest.sh run /opt/xdev_ext/gpu "$ctl" \
@@ -1938,6 +1960,10 @@ if (( CE_SIM )); then
 fi
 ! grep -Eq 'BUG:|WARNING:|Kernel panic|Oops:' "$EV/guest.log"
 if (( ${GPU:-0} )); then (( gpu_status == 0 )); fi
+if (( ${TB_NHI:-0} )); then
+    grep -E '^XDEV_EXT_TB_NHI(=|_CYCLE=|_STATE )' "$EV/guest.log" | tee "$EV/tb-nhi-result.txt"
+    grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
+fi
 python3 - "$SRC" "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "${GPU:-0}" <<'PYVALIDATE'
 import json, pathlib, sys
 src, scratch = map(pathlib.Path, sys.argv[1:3])

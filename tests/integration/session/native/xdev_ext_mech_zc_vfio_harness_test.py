@@ -98,6 +98,12 @@ class ModeRefusals(unittest.TestCase):
                 self.assertIn('gpu requires its exclusive correctness mode',
                               self.refuse('--gpu', '0000:01:00.0', '--nvidia-userspace', '/', *extra))
 
+    def test_tb_nhi_is_exclusive_of_gpu_and_xdomain(self):
+        for extra in (('--gpu', '0000:01:00.0', '--nvidia-userspace', '/'), ('--lifecycle',)):
+            with self.subTest(extra=extra):
+                self.assertIn('exclusive correctness mode',
+                              self.refuse('--tb-nhi', '0000:4a:00.0', *extra))
+
     def test_vfio_is_refused_in_modes_with_their_own_qemu_setup(self):
         self.assertIn('vfio devices are not wired', self.refuse('--vfio', '0000:4a:00.0', '--xdomain'))
 
@@ -119,6 +125,11 @@ class GuestGpuWiring(unittest.TestCase):
                       self.script[block:block + 900])
         self.assertLess(self.script.index("(p/'expected.raw').write_bytes(expected)"), block)
         self.assertIn("ce_sim=options['ce_sim'] or sys.argv[11] == '1'", self.script)
+
+    def test_tb_nhi_mode_builds_usb4_in_and_runs_rebind_cycles(self):
+        self.assertIn('if (( ${TB_NHI:-0} )); then cfg -e USB4; fi', self.script)
+        self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"', self.script)
+        self.assertIn('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"', self.script)
 
     def test_igb_mode_boots_one_cpu_and_uses_the_qemu_igb_model(self):
         self.assertIn("KERNEL_APPEND+=' maxcpus=1'", self.script)

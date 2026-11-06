@@ -9105,6 +9105,11 @@
       "source": "tests/integration/session/native/xdev_ext_mech_zc_vfio_harness_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_vfio_harness_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_tb_nhi_guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh"
     }
   ]
 }
