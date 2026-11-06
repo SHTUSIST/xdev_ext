@@ -10,6 +10,25 @@
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef uint64_t u64; typedef int32_t s32;
 typedef u8 __u8; typedef u16 __u16; typedef u32 __u32; typedef u64 __u64; typedef s32 __s32;
 typedef u64 dma_addr_t;
+#ifdef COUNT_TYPED_CONTROL_V2
+typedef u16 __be16;typedef u32 __be32;
+#define __aligned_u64 __u64 __attribute__((aligned(8)))
+/* count-control-os-v2: observation records have no policy or return path. */
+struct v2_cas_record {u32 index,from,to,nr;int result;u8 before[64],after[64];};
+static struct v2_cas_record v2_cas[256];static u32 v2_cas_count;
+static bool v2_mixed_ordinary,v2_mixed_reliable;
+struct xsk_xdev_ext_mech_tx_batch;
+struct xdev_ext_mech_stage;
+static void v2_note_put(void);
+static void v2_note_dead(struct xdev_ext_mech_stage *,int);
+static int v2_native_enter(struct xsk_xdev_ext_mech_tx_batch *);
+static void v2_native_leave(int);
+static u32 crc32c(u32 crc,const void *data,size_t n)
+{
+ const u8 *p=data;while(n--){crc^=*p++;for(u32 k=0;k<8;k++)crc=(crc>>1)^((crc&1)?0x82f63b78U:0);}
+ return crc;
+}
+#endif
 #define U32_MAX UINT32_MAX
 #define check_add_overflow(a,b,p) __builtin_add_overflow(a,b,p)
 #define PAGE_SHIFT 12
@@ -56,17 +75,31 @@ static void ev(const char *s){size_t n=strlen(s); REQUIRE("event_capacity",event
 struct device {int id;}; struct file{}; struct xdp_buff_xsk{int unused;};
 struct xdp_desc {u64 addr;u32 len,options;};
 struct xdev_ext_mech_frame_info {u64 umem_addr;u32 index,data_off,data_len;};
+#ifndef COUNT_TYPED_CONTROL_V2
 struct xdev_ext_mech_peer {u8 peer_mac[6],local_mac[6];u32 local_ip,peer_ip;u16 local_port,peer_port;};
+#endif
 /* xdev_ext_mech_span_in is extracted verbatim into production_journal.h. */
 
 struct xdev_ext_mech_pool;
 #include "production_types.h"
 struct xdev_ext_mech_pool_ops {int unused;};
-struct xdev_ext_mech_pool {const struct xdev_ext_mech_pool_ops *ops;void *priv;void **pages;u32 frame_size,nr_frames;};
-struct xdev_ext_mech_session {struct xdev_ext_mech_pool *pool;};
+struct xdev_ext_mech_pool {const struct xdev_ext_mech_pool_ops *ops;void *priv;void **pages;u32 frame_size,nr_frames;
+#ifdef COUNT_TYPED_CONTROL_V2
+ u8 *state;void *vaddr;u64 size;
+#endif
+};
+struct xdev_ext_mech_session {struct xdev_ext_mech_pool *pool;
+#ifdef COUNT_TYPED_CONTROL_V2
+ struct xdev_ext_mech_layout layout;struct xdev_ext_mech_peer peer;
+#endif
+};
 struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;void *priv;};
 struct xdev_ext_mech_batch {struct xdev_ext_mech_session *s;struct xdev_ext_mech_frame f[32];u32 nr_frames;u64 id,ticket;void *priv;};
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session *s){return s?s->pool:NULL;}
+#ifdef COUNT_TYPED_CONTROL_V2
+static const struct xdev_ext_mech_layout *xdev_ext_mech_session_layout(struct xdev_ext_mech_session *s){return &s->layout;}
+static const struct xdev_ext_mech_peer *xdev_ext_mech_session_peer(struct xdev_ext_mech_session *s){return &s->peer;}
+#endif
 static void *xdev_ext_mech_batch_priv(struct xdev_ext_mech_batch *b){return b->priv;}
 static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->id;}
 static u64 xdev_ext_mech_batch_ticket(struct xdev_ext_mech_batch *b){return b->ticket;}
@@ -85,10 +118,21 @@ struct net_device {const struct net_device_ops *netdev_ops;};
 static bool netif_running(const struct net_device *d){(void)d;return true;}
 static bool netif_carrier_ok(const struct net_device *d){(void)d;return true;}
 #endif
-struct xdp_umem {struct list_head xsk_dma_list;u32 npgs,chunks;u64 size;void **pgs;};
+struct xdp_umem {struct list_head xsk_dma_list;u32 npgs,chunks;u64 size;void **pgs;
+#ifdef COUNT_TYPED_CONTROL_V2
+ void *addrs;
+#endif
+};
 struct xsk_buff_pool {struct net_device *netdev;void *xdev_ext_mech_tx;struct device *dev;dma_addr_t *dma_pages;u32 dma_pages_cnt,chunk_size,heads_cnt;bool unaligned;struct xdp_umem *umem;struct xdp_buff_xsk *heads;u8 *addrs;u32 tx_descs_capacity;struct xdp_desc *tx_descs;struct list_head xsk_tx_list;spinlock_t cq_lock;struct xsk_queue *cq;};
 struct xdp_sock {struct xsk_buff_pool *pool;struct xdp_umem *umem;struct net_device *dev;u32 queue_id;int mutex,state;bool zc;struct xdev_ext_mech_stage *xdev_ext_mech_rx,*xdev_ext_mech_tx;struct list_head tx_list;u32 tx_budget_spent;struct xsk_queue *tx;struct sock sk;};
-struct xsk_xdev_ext_mech_stage {void *rel;struct xdp_sock *xs;bool dead;u64 *tx_sent;u32 tx_nr_sent;struct xdev_ext_mech_batch *tx_staged;u64 tx_staged_id;u32 tx_n;struct xdp_desc tx_desc[32];u8 *tx_pkt[32];u64 *tx_tag[32];struct xdev_ext_mech_frame_info tx_fi[32];u8 *tx_kaddr[32];};
+struct xsk_mech_reliable;
+struct xsk_xdev_ext_mech_stage {
+#ifdef COUNT_TYPED_CONTROL_V2
+ struct xsk_mech_reliable *rel;u32 mtu;
+#else
+ void *rel;
+#endif
+ struct xdp_sock *xs;bool dead;u64 *tx_sent;u32 tx_nr_sent;struct xdev_ext_mech_batch *tx_staged;u64 tx_staged_id;u32 tx_n;struct xdp_desc tx_desc[32];u8 *tx_pkt[32];u64 *tx_tag[32];struct xdev_ext_mech_frame_info tx_fi[32];u8 *tx_kaddr[32];};
 struct xdev_ext_afxdp_tx_cqe {s32 err;};
 #include "production_journal.h"
 static const struct xdev_ext_mech_pool_ops xsk_xdev_ext_mech_pool_ops;
@@ -105,25 +149,47 @@ static void xdev_ext_mech_batch_complete(struct xdev_ext_mech_batch*b,u64 t,int 
 static void xdev_ext_mech_batch_complete_cancelled(struct xdev_ext_mech_batch*b,u64 t,int s){cancel_callbacks++;callback_common(b,t,s,"K ");}
 static void xdev_ext_mech_batch_sequester(struct xdev_ext_mech_batch*b,u64 t,int s){seq_callbacks++;callback_common(b,t,s,"Q ");}
 static void (*nested_dead)(void);
-static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int s){(void)st;REQUIRE("stage_dead_outside_lock",!lock_depth);dead_status=s;ev("D ");if(nested_dead)nested_dead();}
+static void xdev_ext_mech_stage_dead(struct xdev_ext_mech_stage *st,int s){(void)st;REQUIRE("stage_dead_outside_lock",!lock_depth);dead_status=s;
+#ifdef COUNT_TYPED_CONTROL_V2
+v2_note_dead(st,s);
+#endif
+ev("D ");if(nested_dead)nested_dead();}
 static int xdev_ext_mech_nic_ops_counter(bool zc){REQUIRE("zc_counter",zc);return 0;}
 static int xdev_ext_mech_nic_bytes_counter(bool zc){REQUIRE("zc_counter",zc);return 1;}
 static void xdev_ext_mech_count(struct xdev_ext_mech_session*s,int c,u64 n){(void)s;REQUIRE("count_under_lock",lock_depth==1);if(c)count_bytes+=n;else count_ops+=n;ev(c?"B ":"O ");}
-static void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch*b,u32 i,u64 p,u64 a,u32 len){REQUIRE("bind_lock",lock_depth==1);REQUIRE("bind_original_frame",a==b->f[i].umem_addr+22 && len==58);REQUIRE("bind_pool",p==(u64)(uintptr_t)observed_provider->xp);REQUIRE("tag_after_descriptor_bind",*observed_stage->tx_tag[i]!=b->id);
+static void xdev_ext_mech_trace_descriptor_bind(struct xdev_ext_mech_batch*b,u32 i,u64 p,u64 a,u32 len){REQUIRE("bind_lock",lock_depth==1);
+#ifdef COUNT_TYPED_CONTROL_V2
+REQUIRE("bind_original_frame",a==b->f[i].umem_addr+(v2_mixed_ordinary?86:22) && len==58);
+#else
+REQUIRE("bind_original_frame",a==b->f[i].umem_addr+22 && len==58);
+#endif
+REQUIRE("bind_pool",p==(u64)(uintptr_t)observed_provider->xp);REQUIRE("tag_after_descriptor_bind",*observed_stage->tx_tag[i]!=b->id);
 REQUIRE("slot_before_descriptor_bind",observed_provider->slots[trace_n].state==XSK_MECH_ZC_PENDING && observed_provider->slots[trace_n].slot==i && observed_provider->slots[trace_n].desc.addr==a);
 trace_n++;ev("T ");}
 static void boundary_raw(struct xsk_buff_pool*p,u64 a){(void)p;(void)a;REQUIRE("raw_under_provider_lock",lock_depth==1);
 #if HAVE_POOL
 if(observed_provider && !observed_provider->stopped && (a>>12)<3) REQUIRE("check_sync_one_critical_section",check_epoch[a>>12]==lock_epoch);
 #endif
-if(observed_provider && !observed_provider->stopped && a<12288){u8 *pkt=p->addrs+a;REQUIRE("checksum_before_sync",pkt[24]==0x7c && pkt[25]==0x56 && pkt[40]==0 && pkt[41]==0);}
+if(observed_provider && !observed_provider->stopped && a<12288){u8 *pkt=p->addrs+a;
+#ifdef COUNT_TYPED_CONTROL_V2
+REQUIRE("checksum_before_sync",pkt[24]==0x7c && pkt[25]==(v2_mixed_reliable?0x16:0x56) && pkt[40]==0 && pkt[41]==0);
+#else
+REQUIRE("checksum_before_sync",pkt[24]==0x7c && pkt[25]==0x56 && pkt[40]==0 && pkt[41]==0);
+#endif
+}
 raw_n++;ev("R ");}
 static void dma_sync_single_for_device(struct device*d,dma_addr_t a,size_t n,int dir){REQUIRE("sync_under_provider_lock",lock_depth==1);REQUIRE("live_requester_device",d && d->id==17);REQUIRE("bidirectional",dir==0);sync_addr[sync_dev_n]=a;sync_len[sync_dev_n]=n;sync_epoch[sync_dev_n]=lock_epoch;sync_dev_n++;ev("S ");}
 static void dma_sync_single_for_cpu(struct device*d,dma_addr_t a,size_t n,int dir){(void)a;(void)n;REQUIRE("cpu_sync_lock",lock_depth==1);REQUIRE("cpu_sync_device",d && d->id==17 && dir==0);cpu_sync_addr[sync_cpu_n]=a;cpu_sync_len[sync_cpu_n]=n;cpu_sync_epoch[sync_cpu_n]=lock_epoch;sync_cpu_n++;ev("s ");}
 static int reliable_done_count; static bool reliable_unknown;
 static void frozen_reliable_boundary(struct xsk_xdev_ext_mech_tx_batch*t){(void)t;REQUIRE("reliable_not_in_slice",false);}
 static void actual_xsk_rel_native_done(struct xsk_xdev_ext_mech_tx_batch*);
-static void xsk_rel_native_done(struct xsk_xdev_ext_mech_tx_batch*t){if(t->reliable_stage && ((struct xsk_xdev_ext_mech_stage*)t->reliable_stage->priv)->rel){actual_xsk_rel_native_done(t);return;}REQUIRE("reliable_callback_outside_lock",!lock_depth);reliable_done_count++;reliable_unknown=t->completion.uncertain;ev("REL ");}
+static void xsk_rel_native_done(struct xsk_xdev_ext_mech_tx_batch*t){if(t->reliable_stage && ((struct xsk_xdev_ext_mech_stage*)t->reliable_stage->priv)->rel){
+#ifdef COUNT_TYPED_CONTROL_V2
+int previous=v2_native_enter(t);actual_xsk_rel_native_done(t);v2_native_leave(previous);
+#else
+actual_xsk_rel_native_done(t);
+#endif
+return;}REQUIRE("reliable_callback_outside_lock",!lock_depth);reliable_done_count++;reliable_unknown=t->completion.uncertain;ev("REL ");}
 static int xsk_rel_submit(struct xdev_ext_mech_stage*,struct xdev_ext_mech_batch*);
 static int xsk_xdev_ext_mech_tx_xmit(void*a,u32 i){(void)a;(void)i;return -EOPNOTSUPP;}
 static void xsk_native_trace_complete(struct xsk_buff_pool*p,u32 n){(void)p;(void)n;ev("H ");}
