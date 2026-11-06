@@ -162,7 +162,7 @@ class HarnessWiring(unittest.TestCase):
         end = s.index("printf 'source_slba=", start)
         with tempfile.TemporaryDirectory() as t:
             p = Path(t); (p / 'evidence').mkdir()
-            names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT LIFECYCLE PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS QEMU_TIMEOUT_SECONDS FENCE_CHECK EVAL_SESSION MECHANISM_VARIANTS'
+            names = 'CE_SIM CE_DELAY_US RX_CE RELIABLE DEPTH GROUP_COUNT CE_SLOTS REMOTE_WINDOW COMPAT LIFECYCLE PEER DEBUG_LOCKING TIMEOUT_FACTOR CLI_TIMEOUT_MS RX_TIMEOUT_MS QEMU_TIMEOUT_SECONDS FENCE_CHECK EVAL_SESSION MECHANISM_VARIANTS VIOMMU'
             env = ' '.join(k + '=0' for k in names.split())
             cmd = f'ROOT={p}/initroot; EV={p}/evidence; SCRATCH={p}; FAULT=none; REL_POLICY=default; PROVIDER_CASE=normal; {env};\n' + s[start:end]
             r = subprocess.run(['bash', '-eu', '-c', cmd], capture_output=True, text=True)
