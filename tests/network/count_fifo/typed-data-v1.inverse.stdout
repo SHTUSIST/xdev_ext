@@ -1,0 +1,760 @@
+TRACE all_unsent prod=3 issued=3 cons=3 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=1 cq=0 ops=3 bytes=48 sync_dev=3 sync_cpu=0 tags=77,77,77 events=M L R S T R S T R S T U W m L U N H L O B O B O B U C 
+TRACE partial_sent prod=2 issued=0 cons=0 native=0 fatal=0 pending=2 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=2 sync_cpu=0 tags=77,77,77 events=M L R S T R S T U W m 
+TRACE none_unsent prod=0 issued=0 cons=0 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=1 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=77,77,77 events=C 
+TRACE preflight_priority prod=8 issued=0 cons=0 native=0 fatal=-32 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE preflight_priority prod=8 issued=0 cons=0 native=0 fatal=-32 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE preflight_priority prod=8 issued=0 cons=0 native=0 fatal=-32 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE preflight_priority prod=8 issued=0 cons=0 native=0 fatal=-32 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE preflight_priority prod=8 issued=0 cons=0 native=0 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE staged_identity prod=0 issued=0 cons=0 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=
+TRACE wakeup_error prod=3 issued=3 cons=3 native=0 fatal=0 pending=0 status=-100 raw_native=0 callbacks=1 cq=-100 ops=0 bytes=0 sync_dev=3 sync_cpu=3 tags=77,77,77 events=M L R S T R S T R S T U W L U m L R s R s R s U K D 
+TRACE wakeup_error prod=3 issued=3 cons=3 native=0 fatal=0 pending=0 status=-100 raw_native=0 callbacks=1 cq=-100 ops=1 bytes=16 sync_dev=3 sync_cpu=2 tags=77,77,77 events=M L R S T R S T R S T U W L U N L U m L R s R s U D H L O B U K 
+TRACE wakeup_error prod=3 issued=3 cons=3 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=1 cq=0 ops=3 bytes=48 sync_dev=3 sync_cpu=0 tags=77,77,77 events=M L R S T R S T R S T U W L U N L U N L U N L U m L U D H L O B O B O B U C 
+TRACE tail_done_hole prod=3 issued=3 cons=3 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=1 cq=0 ops=3 bytes=48 sync_dev=3 sync_cpu=0 tags=77,77,77 events=M L R S T R S T R S T U W m L U N X L O B U H L O B U H L O B U C 
+TRACE fifo_independent_cons prod=3 issued=3 cons=0 native=2 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=3 sync_cpu=0 tags=77,77,77 events=M L R S T R S T R S T U W m L U N 
+TRACE set_only_first_error prod=3 issued=3 cons=3 native=0 fatal=-5 pending=0 status=-5 raw_native=-11 callbacks=1 cq=-11 ops=2 bytes=32 sync_dev=3 sync_cpu=0 tags=77,77,77 events=M L R S T R S T R S T U W m L U N Y L U D Y L U D H L O B O B U D C L U 
+TRACE excess_count prod=3 issued=3 cons=3 native=0 fatal=-71 pending=0 status=-71 raw_native=0 callbacks=1 cq=-71 ops=0 bytes=0 sync_dev=3 sync_cpu=2 tags=77,77,77 events=M L R S T R S T R S T U W m L U N L U L R s R s U Q D 
+TRACE mixed_stop_unmap_late prod=3 issued=3 cons=3 native=0 fatal=-6 pending=0 status=-6 raw_native=0 callbacks=1 cq=-6 ops=1 bytes=16 sync_dev=3 sync_cpu=1 tags=77,77,77 events=M L R S T R S T R S T U W m L U N X L O B U L R s U Q L U I V H L U L U D 
+TRACE existing_family_host prod=0 issued=0 cons=0 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=
+TRACE family_pool_success prod=0 issued=0 cons=0 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=
+TRACE provider_mapped_array_bound prod=0 issued=0 cons=0 native=0 fatal=0 pending=0 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=L U 
+TRACE transactional_prefix_failure prod=0 issued=0 cons=0 native=0 fatal=0 pending=2 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,77,0 events=M L U m 
+TRACE prepare_frame_error_rollback prod=0 issued=0 cons=0 native=0 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE prepare_frame_error_rollback prod=0 issued=0 cons=0 native=0 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE prepare_frame_error_rollback prod=0 issued=0 cons=0 native=0 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+TRACE occupied_unsent_lease prod=0 issued=0 cons=0 native=0 fatal=0 pending=3 status=0 raw_native=0 callbacks=0 cq=0 ops=0 bytes=0 sync_dev=0 sync_cpu=0 tags=0,0,0 events=M L U m 
+RESULT assertions_failed=0 pool_api=1
+COUNT public_three_native_pending/submit present=1 stopped=0 p=3 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m 
+S 0 d=22,58,0 frame=0 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_three_native_pending/peek2 present=1 stopped=0 p=3 i=2 c=0 cap=64 h=0 t=1 n=2 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=1 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=0 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_three_native_pending/tail present=1 stopped=0 p=3 i=2 c=0 cap=64 h=0 t=0 n=1 fatal=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=1 bytes=16 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N X L O B U 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_three_native_pending/head present=1 stopped=0 p=3 i=2 c=2 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=1 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=2 bytes=32 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N X L O B U H L O B U 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_three_native_pending/done present=1 stopped=0 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=0 ops=3 bytes=48 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N X L O B U H L O B U L U N H L O B U C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=0 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=0 ops=3 bytes=48 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L O B O B O B U C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=-5 uncertain=0 raw=-11 cancel=0 callbacks=1 complete=-11 dead=-5 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=-11 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-11 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-11 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-11 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=-11 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-11 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=-5 uncertain=0 raw=-5 cancel=0 callbacks=1 complete=-5 dead=-5 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=-5 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-5 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-5 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-5 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=-5 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-5 uncertain=0 raw=-5 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-125 pending=0 status=-125 uncertain=0 raw=-125 cancel=0 callbacks=1 complete=-125 dead=-125 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=-125 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-125 uncertain=0 raw=-125 cancel=0 lease=0 err=-125 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-125 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-125 uncertain=0 raw=-125 cancel=0 lease=0 err=-125 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=-125 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-125 uncertain=0 raw=-125 cancel=0 lease=0 err=-125 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-6 pending=0 status=-6 uncertain=0 raw=-6 cancel=0 callbacks=1 complete=-6 dead=-6 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=-6 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=0 raw=-6 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-6 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=0 raw=-6 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=-6 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=0 raw=-6 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-71 pending=0 status=-71 uncertain=0 raw=-71 cancel=0 callbacks=1 complete=-71 dead=-71 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=-71 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-71 uncertain=0 raw=-71 cancel=0 lease=0 err=-71 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-71 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-71 uncertain=0 raw=-71 cancel=0 lease=0 err=-71 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=-71 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-71 uncertain=0 raw=-71 cancel=0 lease=0 err=-71 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_raw_result/complete present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=1 uncertain=0 raw=1 cancel=0 callbacks=1 complete=1 dead=-5 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U D C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=1 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=1 uncertain=0 raw=1 cancel=0 lease=0 err=1 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=1 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=1 uncertain=0 raw=1 cancel=0 lease=0 err=1 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=1 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=1 uncertain=0 raw=1 cancel=0 lease=0 err=1 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT nested_set_only/reentry present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 callbacks=1 complete=-11 dead=-5 ops=0 bytes=0 cpu=1 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N Y L U D L R s U Q 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=3 err=-6 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-11 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=3 err=-6 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT nested_set_only/late present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 callbacks=1 complete=-11 dead=-71 ops=0 bytes=0 cpu=1 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N Y L U D L R s U Q L U L U L U D 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=3 err=-6 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=-11 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=3 err=-6 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=-11 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_fallback/all present=0 stopped=0 p=0 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=0 policy=6 upstream=2 reliable=0 events=P P P H P FALLBACK X P FALLBACK Y P 
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+COUNT public_fallback/all present=1 stopped=0 p=0 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=0 policy=0 upstream=0 reliable=0 events=L U L U H L U X L U Y L U 
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+COUNT public_fallback/all present=1 stopped=1 p=0 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=0 policy=0 upstream=0 reliable=0 events=L U L U H L U X L U Y L U 
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+COUNT public_excess_no_fallback/u32max present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=-71 pending=0 status=-71 uncertain=1 raw=0 cancel=0 callbacks=1 complete=-71 dead=-71 ops=0 bytes=0 cpu=2 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N H L U L R s R s U Q D 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-71 uncertain=1 raw=0 cancel=0 lease=3 err=-71 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-71 uncertain=1 raw=0 cancel=0 lease=0 err=-71 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-71 uncertain=1 raw=0 cancel=0 lease=0 err=-71 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_zero_clamp/clampzero present=1 stopped=0 p=3 i=1 c=0 cap=64 h=0 t=0 n=1 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L U N L U 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT reliable_enqueue/complete present=1 stopped=0 p=1 i=1 c=1 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=1 bytes=16 cpu=0 dev=1 policy=0 upstream=0 reliable=1 events=L R S U L U N H L O B U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+COUNT reliable_enqueue/complete present=1 stopped=0 p=32 i=32 c=32 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=32 bytes=512 cpu=0 dev=32 policy=0 upstream=0 reliable=1 events=L R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S U L U N H L O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=12310,58,0 frame=3 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 4 d=16406,58,0 frame=4 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 5 d=20502,58,0 frame=5 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 6 d=24598,58,0 frame=6 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 7 d=28694,58,0 frame=7 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 8 d=32790,58,0 frame=8 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 9 d=36886,58,0 frame=9 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 10 d=40982,58,0 frame=10 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 11 d=45078,58,0 frame=11 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 12 d=49174,58,0 frame=12 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 13 d=53270,58,0 frame=13 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 14 d=57366,58,0 frame=14 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 15 d=61462,58,0 frame=15 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 16 d=65558,58,0 frame=16 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 17 d=69654,58,0 frame=17 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 18 d=73750,58,0 frame=18 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 19 d=77846,58,0 frame=19 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 20 d=81942,58,0 frame=20 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 21 d=86038,58,0 frame=21 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 22 d=90134,58,0 frame=22 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 23 d=94230,58,0 frame=23 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 24 d=98326,58,0 frame=24 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 25 d=102422,58,0 frame=25 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 26 d=106518,58,0 frame=26 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 27 d=110614,58,0 frame=27 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 28 d=114710,58,0 frame=28 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 29 d=118806,58,0 frame=29 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 30 d=122902,58,0 frame=30 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 31 d=126998,58,0 frame=31 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=7340054 len=58 epoch=1
+DMA 4 addr=9437206 len=58 epoch=1
+DMA 5 addr=11534358 len=58 epoch=1
+DMA 6 addr=13631510 len=58 epoch=1
+DMA 7 addr=15728662 len=58 epoch=1
+DMA 8 addr=17825814 len=58 epoch=1
+DMA 9 addr=19922966 len=58 epoch=1
+DMA 10 addr=22020118 len=58 epoch=1
+DMA 11 addr=24117270 len=58 epoch=1
+DMA 12 addr=26214422 len=58 epoch=1
+DMA 13 addr=28311574 len=58 epoch=1
+DMA 14 addr=30408726 len=58 epoch=1
+DMA 15 addr=32505878 len=58 epoch=1
+DMA 16 addr=34603030 len=58 epoch=1
+DMA 17 addr=36700182 len=58 epoch=1
+DMA 18 addr=38797334 len=58 epoch=1
+DMA 19 addr=40894486 len=58 epoch=1
+DMA 20 addr=42991638 len=58 epoch=1
+DMA 21 addr=45088790 len=58 epoch=1
+DMA 22 addr=47185942 len=58 epoch=1
+DMA 23 addr=49283094 len=58 epoch=1
+DMA 24 addr=51380246 len=58 epoch=1
+DMA 25 addr=53477398 len=58 epoch=1
+DMA 26 addr=55574550 len=58 epoch=1
+DMA 27 addr=57671702 len=58 epoch=1
+DMA 28 addr=59768854 len=58 epoch=1
+DMA 29 addr=61866006 len=58 epoch=1
+DMA 30 addr=63963158 len=58 epoch=1
+DMA 31 addr=66060310 len=58 epoch=1
+COUNT control_enqueue/complete present=1 stopped=0 p=1 i=1 c=1 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=1 policy=0 upstream=0 reliable=1 events=L R S U L U N H L U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+COUNT control_enqueue/complete present=1 stopped=0 p=32 i=32 c=32 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=32 policy=0 upstream=0 reliable=1 events=L R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S R S U L U N H L U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=22,58,0 frame=1 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=22,58,0 frame=2 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=3 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 4 d=22,58,0 frame=4 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 5 d=22,58,0 frame=5 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 6 d=22,58,0 frame=6 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 7 d=22,58,0 frame=7 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 8 d=22,58,0 frame=8 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 9 d=22,58,0 frame=9 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 10 d=22,58,0 frame=10 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 11 d=22,58,0 frame=11 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 12 d=22,58,0 frame=12 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 13 d=22,58,0 frame=13 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 14 d=22,58,0 frame=14 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 15 d=22,58,0 frame=15 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 16 d=22,58,0 frame=16 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 17 d=22,58,0 frame=17 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 18 d=22,58,0 frame=18 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 19 d=22,58,0 frame=19 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 20 d=22,58,0 frame=20 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 21 d=22,58,0 frame=21 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 22 d=22,58,0 frame=22 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 23 d=22,58,0 frame=23 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 24 d=22,58,0 frame=24 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 25 d=22,58,0 frame=25 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 26 d=22,58,0 frame=26 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 27 d=22,58,0 frame=27 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 28 d=22,58,0 frame=28 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 29 d=22,58,0 frame=29 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 30 d=22,58,0 frame=30 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 31 d=22,58,0 frame=31 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=1048598 len=58 epoch=1
+DMA 2 addr=1048598 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=1
+DMA 4 addr=1048598 len=58 epoch=1
+DMA 5 addr=1048598 len=58 epoch=1
+DMA 6 addr=1048598 len=58 epoch=1
+DMA 7 addr=1048598 len=58 epoch=1
+DMA 8 addr=1048598 len=58 epoch=1
+DMA 9 addr=1048598 len=58 epoch=1
+DMA 10 addr=1048598 len=58 epoch=1
+DMA 11 addr=1048598 len=58 epoch=1
+DMA 12 addr=1048598 len=58 epoch=1
+DMA 13 addr=1048598 len=58 epoch=1
+DMA 14 addr=1048598 len=58 epoch=1
+DMA 15 addr=1048598 len=58 epoch=1
+DMA 16 addr=1048598 len=58 epoch=1
+DMA 17 addr=1048598 len=58 epoch=1
+DMA 18 addr=1048598 len=58 epoch=1
+DMA 19 addr=1048598 len=58 epoch=1
+DMA 20 addr=1048598 len=58 epoch=1
+DMA 21 addr=1048598 len=58 epoch=1
+DMA 22 addr=1048598 len=58 epoch=1
+DMA 23 addr=1048598 len=58 epoch=1
+DMA 24 addr=1048598 len=58 epoch=1
+DMA 25 addr=1048598 len=58 epoch=1
+DMA 26 addr=1048598 len=58 epoch=1
+DMA 27 addr=1048598 len=58 epoch=1
+DMA 28 addr=1048598 len=58 epoch=1
+DMA 29 addr=1048598 len=58 epoch=1
+DMA 30 addr=1048598 len=58 epoch=1
+DMA 31 addr=1048598 len=58 epoch=1
+COUNT actual_reliable_initial_resend/initial present=1 stopped=0 p=3 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=L R S R S R S U M W m 
+S 0 d=22,58,0 frame=0 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+REL_TX next=78 base=77 credit=79 retransmits=0
+REL_ENTRY 0 group=0 attempt=0 deadline=0 native=0 terminal=0 live=0 acked=0 count=0 declined=0 held=0
+REL_ENTRY 1 group=77 attempt=1 deadline=0 native=1 terminal=0 live=1 acked=0 count=3 declined=0 held=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT actual_reliable_initial_resend/initial_done present=1 stopped=0 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=3 bytes=48 cpu=3 dev=3 policy=0 upstream=0 reliable=0 events=L R S R S R S U M W m L U N H L O B O B O B U L R s R s R s U 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+REL_TX next=78 base=77 credit=79 retransmits=0
+REL_ENTRY 0 group=0 attempt=0 deadline=0 native=0 terminal=0 live=0 acked=0 count=0 declined=0 held=0
+REL_ENTRY 1 group=77 attempt=1 deadline=110 native=0 terminal=0 live=1 acked=0 count=3 declined=0 held=0
+CPU_DMA 0 addr=1048598 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 2 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT actual_reliable_initial_resend/resend present=1 stopped=0 p=6 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=3 bytes=48 cpu=3 dev=6 policy=0 upstream=0 reliable=0 events=L R S R S R S U M W m L U N H L O B O B O B U L R s R s R s U L U L R S R S R S U 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+S 3 d=22,58,0 frame=0 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 4 d=4118,58,0 frame=1 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 5 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+REL_TX next=78 base=77 credit=79 retransmits=1
+REL_ENTRY 0 group=0 attempt=0 deadline=0 native=0 terminal=0 live=0 acked=0 count=0 declined=0 held=0
+REL_ENTRY 1 group=77 attempt=2 deadline=110 native=1 terminal=0 live=1 acked=0 count=3 declined=0 held=0
+CPU_DMA 0 addr=1048598 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 2 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=6
+DMA 4 addr=3145750 len=58 epoch=6
+DMA 5 addr=5242902 len=58 epoch=6
+COUNT actual_reliable_initial_resend/resend_done present=1 stopped=0 p=6 i=6 c=6 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=6 bytes=96 cpu=6 dev=6 policy=0 upstream=0 reliable=0 events=L R S R S R S U M W m L U N H L O B O B O B U L R s R s R s U L U L R S R S R S U L U N H L O B O B O B U L R s R s R s U 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 4 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 5 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+REL_TX next=78 base=77 credit=79 retransmits=1
+REL_ENTRY 0 group=0 attempt=0 deadline=0 native=0 terminal=0 live=0 acked=0 count=0 declined=0 held=0
+REL_ENTRY 1 group=77 attempt=2 deadline=120 native=0 terminal=0 live=1 acked=0 count=3 declined=0 held=0
+CPU_DMA 0 addr=1048598 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 2 addr=5242902 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 3 addr=1048598 len=58 epoch=9 dev=17 dir=0
+CPU_DMA 4 addr=3145750 len=58 epoch=9 dev=17 dir=0
+CPU_DMA 5 addr=5242902 len=58 epoch=9 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=6
+DMA 4 addr=3145750 len=58 epoch=6
+DMA 5 addr=5242902 len=58 epoch=6
+COUNT actual_control_definite/control_done present=1 stopped=0 p=1 i=1 c=1 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=1 dev=1 policy=0 upstream=0 reliable=0 events=L R S U L U N H L U L R s U 
+S 0 d=22,106,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=1 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=1048598 len=106 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=106 epoch=1
+COUNT actual_control_unknown/control_done present=1 stopped=1 p=1 i=1 c=1 cap=64 h=4294967295 t=4294967295 n=0 fatal=-6 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=-6 ops=0 bytes=0 cpu=0 dev=1 policy=0 upstream=0 reliable=0 events=L R S U L U N L U L U D 
+S 0 d=22,106,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=-6 uncertain=1 raw=0 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=1 moves=0 control_busy=1 control_unknown=1
+DMA 0 addr=1048598 len=106 epoch=1
+COUNT actual_control_definite/control_done present=1 stopped=1 p=1 i=1 c=1 cap=64 h=4294967295 t=4294967295 n=0 fatal=-5 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=-5 ops=0 bytes=0 cpu=0 dev=1 policy=0 upstream=0 reliable=0 events=L R S U L U N X L U D L U D 
+S 0 d=22,106,0 frame=0 state=2 tag=1 result=-5 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=-5 uncertain=0 raw=-5 cancel=0 lease=0 err=-5 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=1 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=106 epoch=1
+COUNT public_three_native_plus_pending/peek3pending1 present=1 stopped=0 p=4 i=3 c=0 cap=64 h=0 t=2 n=3 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=4 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L R S U L U N 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=1 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=0 next=2 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=1 tag=0 result=0 prev=1 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+S 3 d=22,58,0 frame=0 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_three_native_plus_pending/tail present=1 stopped=0 p=4 i=3 c=0 cap=64 h=0 t=1 n=2 fatal=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=1 bytes=16 cpu=0 dev=4 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L R S U L U N X L O B U 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=1 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=0 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_three_native_plus_pending/head2 present=1 stopped=0 p=4 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=0 ops=3 bytes=48 cpu=0 dev=4 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L R S U L U N X L O B U H L O B O B U C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_three_native_plus_pending/control present=1 stopped=0 p=4 i=4 c=4 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=0 ops=3 bytes=48 cpu=0 dev=4 policy=0 upstream=0 reliable=1 events=M L R S T R S T R S T U W m L R S U L U N X L O B U H L O B O B U C L U N H L U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_physical_wrap_interleave/wrapped3 present=1 stopped=0 p=66 i=65 c=62 cap=64 h=62 t=0 n=3 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=4 policy=0 upstream=0 reliable=0 events=L R S R S R S R S U L U N 
+S 0 d=22,58,0 frame=0 state=1 tag=1 result=0 prev=63 next=4294967295 owner_batch=0 control=1 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 62 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=63 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 63 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=62 next=0 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=1048598 len=58 epoch=1
+DMA 3 addr=3145750 len=58 epoch=1
+COUNT public_physical_wrap_interleave/across_hole present=1 stopped=0 p=66 i=65 c=65 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=2 bytes=32 cpu=0 dev=4 policy=0 upstream=0 reliable=1 events=L R S R S R S R S U L U N X L U H L O B O B U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 62 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 63 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=1048598 len=58 epoch=1
+DMA 3 addr=3145750 len=58 epoch=1
+COUNT public_physical_wrap_interleave/done present=1 stopped=0 p=66 i=66 c=66 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=2 bytes=32 cpu=0 dev=4 policy=0 upstream=0 reliable=2 events=L R S R S R S R S U L U N X L U H L O B O B U REL L U N H L U REL 
+S 0 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=1 result=0 prev=4294967295 next=4294967295 owner_batch=0 control=1 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 62 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 63 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=1048598 len=58 epoch=1
+DMA 3 addr=3145750 len=58 epoch=1
+COUNT public_mixed_batches_stop/before_stop present=1 stopped=0 p=4 i=3 c=0 cap=64 h=0 t=1 n=2 fatal=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=1 bytes=16 cpu=0 dev=4 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W m L R S U L U N X L O B U 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=1 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=0 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=0 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=1 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_mixed_batches_stop/stopped present=1 stopped=1 p=4 i=4 c=4 cap=64 h=4294967295 t=4294967295 n=0 fatal=-6 pending=0 status=-6 uncertain=1 raw=0 cancel=0 callbacks=1 complete=-6 dead=0 ops=1 bytes=16 cpu=1 dev=4 policy=0 upstream=0 reliable=1 events=M L R S T R S T R S T U W m L R S U L U N X L O B U L R s U Q REL 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=0 cancel=0 lease=3 err=-6 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=0 cancel=0 lease=3 err=-6 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-6 uncertain=1 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=22,58,0 frame=0 state=2 tag=1 result=0 prev=0 next=0 owner_batch=0 control=1 pending=0 status=-6 uncertain=0 raw=0 cancel=0 lease=0 err=-6 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=1048598 len=58 epoch=5 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=1048598 len=58 epoch=2
+COUNT public_u32_origin_translation/done present=1 stopped=0 p=0 i=0 c=0 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=2 bytes=32 cpu=0 dev=2 policy=0 upstream=0 reliable=1 events=L R S R S U L U N H L O B O B U REL 
+S 62 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 63 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 16768661672754384151 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+COUNT public_wakeup_error/wakeup present=1 stopped=1 p=3 i=3 c=3 cap=64 h=0 t=0 n=0 fatal=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 callbacks=1 complete=-100 dead=-100 ops=0 bytes=0 cpu=3 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U m L R s R s R s U K D 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=1048598 len=58 epoch=3 dev=17 dir=0
+CPU_DMA 1 addr=3145750 len=58 epoch=3 dev=17 dir=0
+CPU_DMA 2 addr=5242902 len=58 epoch=3 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_wakeup_error/done present=1 stopped=1 p=3 i=3 c=3 cap=64 h=0 t=0 n=0 fatal=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 callbacks=1 complete=-100 dead=-100 ops=0 bytes=0 cpu=3 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U m L R s R s R s U K D 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=1048598 len=58 epoch=3 dev=17 dir=0
+CPU_DMA 1 addr=3145750 len=58 epoch=3 dev=17 dir=0
+CPU_DMA 2 addr=5242902 len=58 epoch=3 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_wakeup_error/wakeup present=1 stopped=1 p=3 i=3 c=0 cap=64 h=0 t=0 n=1 fatal=0 pending=1 status=-100 uncertain=0 raw=0 cancel=1 callbacks=0 complete=0 dead=-100 ops=0 bytes=0 cpu=2 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U N L U m L R s R s U D 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=1 status=-100 uncertain=0 raw=0 cancel=1 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=1 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=1 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_wakeup_error/done present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 callbacks=1 complete=-100 dead=-100 ops=1 bytes=16 cpu=2 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U N L U m L R s R s U D H L O B U K 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=0 status=-100 uncertain=0 raw=0 cancel=1 lease=0 err=-100 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+CPU_DMA 0 addr=3145750 len=58 epoch=4 dev=17 dir=0
+CPU_DMA 1 addr=5242902 len=58 epoch=4 dev=17 dir=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_wakeup_error/wakeup present=1 stopped=1 p=3 i=3 c=0 cap=64 h=0 t=2 n=3 fatal=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=-100 ops=0 bytes=0 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U N L U N L U N L U m L U D 
+S 0 d=22,58,0 frame=0 state=1 tag=0 result=0 prev=4294967295 next=1 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=1 tag=0 result=0 prev=0 next=2 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=1 tag=0 result=0 prev=1 next=4294967295 owner_batch=77 control=0 pending=3 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_wakeup_error/done present=1 stopped=1 p=3 i=3 c=3 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=-100 ops=3 bytes=48 cpu=0 dev=3 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T U W L U N L U N L U N L U m L U D H L O B O B O B U C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 10867584687160986713 tags=77,77,77
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+COUNT public_pool_prefix/refused present=1 stopped=0 p=0 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=2 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=0 policy=0 upstream=0 reliable=0 events=M L U m 
+BYTES 16768661672754384151 tags=0,77,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+COUNT public_ordinary_32/submit present=1 stopped=0 p=32 i=0 c=0 cap=64 h=0 t=0 n=0 fatal=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 callbacks=0 complete=0 dead=0 ops=0 bytes=0 cpu=0 dev=32 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T U W m 
+S 0 d=22,58,0 frame=0 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=0 index=0 off=22 len=58
+S 1 d=4118,58,0 frame=1 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=4096 index=1 off=22 len=58
+S 2 d=8214,58,0 frame=2 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=8192 index=2 off=22 len=58
+S 3 d=12310,58,0 frame=3 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=12288 index=3 off=22 len=58
+S 4 d=16406,58,0 frame=4 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=16384 index=4 off=22 len=58
+S 5 d=20502,58,0 frame=5 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=20480 index=5 off=22 len=58
+S 6 d=24598,58,0 frame=6 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=24576 index=6 off=22 len=58
+S 7 d=28694,58,0 frame=7 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=28672 index=7 off=22 len=58
+S 8 d=32790,58,0 frame=8 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=32768 index=8 off=22 len=58
+S 9 d=36886,58,0 frame=9 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=36864 index=9 off=22 len=58
+S 10 d=40982,58,0 frame=10 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=40960 index=10 off=22 len=58
+S 11 d=45078,58,0 frame=11 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=45056 index=11 off=22 len=58
+S 12 d=49174,58,0 frame=12 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=49152 index=12 off=22 len=58
+S 13 d=53270,58,0 frame=13 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=53248 index=13 off=22 len=58
+S 14 d=57366,58,0 frame=14 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=57344 index=14 off=22 len=58
+S 15 d=61462,58,0 frame=15 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=61440 index=15 off=22 len=58
+S 16 d=65558,58,0 frame=16 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=65536 index=16 off=22 len=58
+S 17 d=69654,58,0 frame=17 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=69632 index=17 off=22 len=58
+S 18 d=73750,58,0 frame=18 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=73728 index=18 off=22 len=58
+S 19 d=77846,58,0 frame=19 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=77824 index=19 off=22 len=58
+S 20 d=81942,58,0 frame=20 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=81920 index=20 off=22 len=58
+S 21 d=86038,58,0 frame=21 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=86016 index=21 off=22 len=58
+S 22 d=90134,58,0 frame=22 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=90112 index=22 off=22 len=58
+S 23 d=94230,58,0 frame=23 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=94208 index=23 off=22 len=58
+S 24 d=98326,58,0 frame=24 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=98304 index=24 off=22 len=58
+S 25 d=102422,58,0 frame=25 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=102400 index=25 off=22 len=58
+S 26 d=106518,58,0 frame=26 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=106496 index=26 off=22 len=58
+S 27 d=110614,58,0 frame=27 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=110592 index=27 off=22 len=58
+S 28 d=114710,58,0 frame=28 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=114688 index=28 off=22 len=58
+S 29 d=118806,58,0 frame=29 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=118784 index=29 off=22 len=58
+S 30 d=122902,58,0 frame=30 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=122880 index=30 off=22 len=58
+S 31 d=126998,58,0 frame=31 state=0 tag=0 result=0 prev=0 next=0 owner_batch=77 control=0 pending=32 status=0 uncertain=0 raw=0 cancel=0 lease=3 err=0 pool_owner=1 umem=126976 index=31 off=22 len=58
+BYTES 1080565717343180931 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=7340054 len=58 epoch=1
+DMA 4 addr=9437206 len=58 epoch=1
+DMA 5 addr=11534358 len=58 epoch=1
+DMA 6 addr=13631510 len=58 epoch=1
+DMA 7 addr=15728662 len=58 epoch=1
+DMA 8 addr=17825814 len=58 epoch=1
+DMA 9 addr=19922966 len=58 epoch=1
+DMA 10 addr=22020118 len=58 epoch=1
+DMA 11 addr=24117270 len=58 epoch=1
+DMA 12 addr=26214422 len=58 epoch=1
+DMA 13 addr=28311574 len=58 epoch=1
+DMA 14 addr=30408726 len=58 epoch=1
+DMA 15 addr=32505878 len=58 epoch=1
+DMA 16 addr=34603030 len=58 epoch=1
+DMA 17 addr=36700182 len=58 epoch=1
+DMA 18 addr=38797334 len=58 epoch=1
+DMA 19 addr=40894486 len=58 epoch=1
+DMA 20 addr=42991638 len=58 epoch=1
+DMA 21 addr=45088790 len=58 epoch=1
+DMA 22 addr=47185942 len=58 epoch=1
+DMA 23 addr=49283094 len=58 epoch=1
+DMA 24 addr=51380246 len=58 epoch=1
+DMA 25 addr=53477398 len=58 epoch=1
+DMA 26 addr=55574550 len=58 epoch=1
+DMA 27 addr=57671702 len=58 epoch=1
+DMA 28 addr=59768854 len=58 epoch=1
+DMA 29 addr=61866006 len=58 epoch=1
+DMA 30 addr=63963158 len=58 epoch=1
+DMA 31 addr=66060310 len=58 epoch=1
+COUNT public_ordinary_32/done present=1 stopped=0 p=32 i=32 c=32 cap=64 h=4294967295 t=4294967295 n=0 fatal=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 callbacks=1 complete=0 dead=0 ops=32 bytes=512 cpu=0 dev=32 policy=0 upstream=0 reliable=0 events=M L R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T R S T U W m L U N H L O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B O B U C 
+S 0 d=22,58,0 frame=0 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 1 d=4118,58,0 frame=1 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 2 d=8214,58,0 frame=2 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 3 d=12310,58,0 frame=3 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 4 d=16406,58,0 frame=4 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 5 d=20502,58,0 frame=5 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 6 d=24598,58,0 frame=6 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 7 d=28694,58,0 frame=7 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 8 d=32790,58,0 frame=8 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 9 d=36886,58,0 frame=9 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 10 d=40982,58,0 frame=10 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 11 d=45078,58,0 frame=11 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 12 d=49174,58,0 frame=12 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 13 d=53270,58,0 frame=13 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 14 d=57366,58,0 frame=14 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 15 d=61462,58,0 frame=15 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 16 d=65558,58,0 frame=16 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 17 d=69654,58,0 frame=17 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 18 d=73750,58,0 frame=18 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 19 d=77846,58,0 frame=19 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 20 d=81942,58,0 frame=20 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 21 d=86038,58,0 frame=21 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 22 d=90134,58,0 frame=22 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 23 d=94230,58,0 frame=23 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 24 d=98326,58,0 frame=24 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 25 d=102422,58,0 frame=25 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 26 d=106518,58,0 frame=26 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 27 d=110614,58,0 frame=27 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 28 d=114710,58,0 frame=28 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 29 d=118806,58,0 frame=29 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 30 d=122902,58,0 frame=30 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+S 31 d=126998,58,0 frame=31 state=2 tag=0 result=0 prev=4294967295 next=4294967295 owner_batch=77 control=0 pending=0 status=0 uncertain=0 raw=0 cancel=0 lease=0 err=0 pool_owner=0 umem=0 index=0 off=0 len=0
+BYTES 1080565717343180931 tags=0,0,0
+CUSTODY refs=0 moves=0 control_busy=0 control_unknown=0
+DMA 0 addr=1048598 len=58 epoch=1
+DMA 1 addr=3145750 len=58 epoch=1
+DMA 2 addr=5242902 len=58 epoch=1
+DMA 3 addr=7340054 len=58 epoch=1
+DMA 4 addr=9437206 len=58 epoch=1
+DMA 5 addr=11534358 len=58 epoch=1
+DMA 6 addr=13631510 len=58 epoch=1
+DMA 7 addr=15728662 len=58 epoch=1
+DMA 8 addr=17825814 len=58 epoch=1
+DMA 9 addr=19922966 len=58 epoch=1
+DMA 10 addr=22020118 len=58 epoch=1
+DMA 11 addr=24117270 len=58 epoch=1
+DMA 12 addr=26214422 len=58 epoch=1
+DMA 13 addr=28311574 len=58 epoch=1
+DMA 14 addr=30408726 len=58 epoch=1
+DMA 15 addr=32505878 len=58 epoch=1
+DMA 16 addr=34603030 len=58 epoch=1
+DMA 17 addr=36700182 len=58 epoch=1
+DMA 18 addr=38797334 len=58 epoch=1
+DMA 19 addr=40894486 len=58 epoch=1
+DMA 20 addr=42991638 len=58 epoch=1
+DMA 21 addr=45088790 len=58 epoch=1
+DMA 22 addr=47185942 len=58 epoch=1
+DMA 23 addr=49283094 len=58 epoch=1
+DMA 24 addr=51380246 len=58 epoch=1
+DMA 25 addr=53477398 len=58 epoch=1
+DMA 26 addr=55574550 len=58 epoch=1
+DMA 27 addr=57671702 len=58 epoch=1
+DMA 28 addr=59768854 len=58 epoch=1
+DMA 29 addr=61866006 len=58 epoch=1
+DMA 30 addr=63963158 len=58 epoch=1
+DMA 31 addr=66060310 len=58 epoch=1
+PURE cap=1 seed=1 steps=256 digest=15565919441693451966
+PURE cap=1 seed=7 steps=256 digest=1565181762620504566
+PURE cap=1 seed=17 steps=256 digest=17635547694502098704
+PURE cap=1 seed=101 steps=256 digest=1997199691234062407
+PURE cap=1 seed=2026 steps=256 digest=1997199691234062407
+PURE cap=1 seed=305419896 steps=256 digest=6484552278344531872
+PURE cap=1 seed=12648430 steps=256 digest=1997199691234062407
+PURE cap=1 seed=3735928559 steps=256 digest=4062634514738200574
+PURE cap=2 seed=1 steps=256 digest=9120026213924612394
+PURE cap=2 seed=7 steps=256 digest=13413752578541193379
+PURE cap=2 seed=17 steps=256 digest=6416984319136678035
+PURE cap=2 seed=101 steps=256 digest=8327555927850182526
+PURE cap=2 seed=2026 steps=256 digest=240329335018675719
+PURE cap=2 seed=305419896 steps=256 digest=240329335018675719
+PURE cap=2 seed=12648430 steps=256 digest=8327555927850182526
+PURE cap=2 seed=3735928559 steps=256 digest=12576694981580618701
+PURE cap=4 seed=1 steps=256 digest=14288916559705109529
+PURE cap=4 seed=7 steps=256 digest=15230731731291150676
+PURE cap=4 seed=17 steps=256 digest=12590708753256863905
+PURE cap=4 seed=101 steps=256 digest=13788487388271437316
+PURE cap=4 seed=2026 steps=256 digest=14517306259072781437
+PURE cap=4 seed=305419896 steps=256 digest=1006782601170609538
+PURE cap=4 seed=12648430 steps=256 digest=13788487388271437316
+PURE cap=4 seed=3735928559 steps=256 digest=17021647372388966729
+PURE cap=8 seed=1 steps=256 digest=11342880814567772521
+PURE cap=8 seed=7 steps=256 digest=6166536475588902344
+PURE cap=8 seed=17 steps=256 digest=10788423840299959749
+PURE cap=8 seed=101 steps=256 digest=13297728401828108376
+PURE cap=8 seed=2026 steps=256 digest=5981380053711708673
+PURE cap=8 seed=305419896 steps=256 digest=3652618562308103598
+PURE cap=8 seed=12648430 steps=256 digest=13297728401828108376
+PURE cap=8 seed=3735928559 steps=256 digest=606919730513124885
+EXPLORE capacity=1 depth=8 unique=162 total=162 bound=100000 hit=0 digest=6584515440110419199
+EXPLORE capacity=2 depth=8 unique=1418 total=1580 bound=100000 hit=0 digest=18102071544571633091
+EXPLORE capacity=4 depth=4 unique=324 total=1904 bound=100000 hit=0 digest=15302143276537585778
+EXPLORE capacity=8 depth=4 unique=420 total=2324 bound=100000 hit=0 digest=5144178506861626849
+COUNT_RESULT failures=0

@@ -21,6 +21,12 @@ def transform(s,label):
   sub(r'member7\(\)->'+field+r'\b','member7()->family.'+field)
  for field in ('sqe','rw','batch_id','validated','bio','bounce','nr_bounce'):
   sub(r'\bprivate_batch\.'+field+r'\b','private_batch.family.'+field)
+ # The post-CREATE fault targets the active captured authority, whose owner
+ # moved from the pool accessor to the bound family requester.
+ if label=='assertions_7b.c':
+  if len(re.findall(r'\bpool_authority=NULL;',s))!=1:
+   raise m.b.Setup('bound authority injection anchor count')
+  sub(r'\bpool_authority=NULL;','member7()->family.requester.authority=NULL;')
  sub(r'\bprivate_batch\.slot\b','private_batch.family.host_io');sub(r'\bprivate_batch\.peer_slot\b','private_batch.family.peer_io')
  sub(r'struct nvme_xdev_ext_mech_slot\b','struct xdev_ext_stor_io');sub(r'struct nvme_xdev_ext_peer_slot\b','struct xdev_ext_stor_io')
  # Opaque slots use trusted stride. Test-only fixture allocations retain depth and separate arrays.
@@ -70,7 +76,7 @@ def assemble(root,out,config,mutation=None):
 m.assemble=assemble
 
 def snapshot(root):
- paths=sorted(set([m.NATIVE,m.BLOCK,m.RUNTIME,m.REQ,m.FD,m.RC,m.CORE,m.TRACE,old.NVME,old.MECH,*m.b.HEADERS.values()]))
+ paths=sorted(set([m.NATIVE,m.BLOCK,m.RUNTIME,m.REQ,m.FD,m.RC,m.CORE,m.TRACE,old.NVME,old.MECH,*m.REQUESTER_SOURCES,*m.b.HEADERS.values()]))
  inputs=json.loads((A/'INPUTS.json').read_text())
  tests={name:hashlib.sha256((A/name).read_bytes()).hexdigest() for name in inputs['files']}
  tests['INPUTS.json']=hashlib.sha256((A/'INPUTS.json').read_bytes()).hexdigest()

@@ -95,6 +95,20 @@ try:
    captured+=required(r'^struct xdev_ext_peer_lease\s*\{.*?^\};',peer)
    captured+=required(r'^struct xdev_ext_peer_fd_lease\s*\{.*?^\};',peer)
    declarations.append(str(peer_path))
+   requester_path=root/'src/core/include/linux/xdev_ext_requester.h'
+   requester_core_path=root/'src/core/include/linux/xdev_ext_requester_core.h'
+   requester=requester_path.read_text()
+   requester_core=requester_core_path.read_text()
+   requester_declarations=('#ifndef _LINUX_XDEV_EXT_REQUESTER_H\n'
+    '#define _LINUX_XDEV_EXT_REQUESTER_H\n'
+    '#include <linux/xdev_ext_requester_core.h>\n')
+   for name in ('file','pci_dev','xdev_ext_mech_stage'):
+    requester_declarations+=required(r'^struct '+name+r';',requester)
+   requester_declarations+=required(r'^struct xdev_ext_requester\s*\{.*?^\};',requester)
+   requester_declarations+=required(r'^int xdev_ext_requester_bind\([^;{}]*\);',requester)
+   requester_declarations+=required(r'^void xdev_ext_requester_unbind\([^;{}]*\);',requester)
+   requester_declarations+='#endif\n'
+   declarations.extend((str(requester_path),str(requester_core_path)))
    extra+=['xdev_ext_mech_session_depth','xdev_ext_mech_session_state','xdev_ext_mech_batch_ticket','xdev_ext_mech_batch_priv','xdev_ext_mech_batch_stage']
   (out/'actual_fixture_native.inc').write_text(captured)
   core_parts+='\n'.join(function(core,n) for n in extra)
@@ -117,7 +131,13 @@ try:
  context.update({'fixture_shape':shape,'map_origin':str(common_path if family7b else root/'src/storage/drivers/nvme/host/xdev_ext_mech_nvme.c'),'map_function':'xdev_ext_storfam_host_map' if family7b else 'nvme_xdev_ext_class_map','bounce_function':bounce_name,'captured_declaration_origins':declarations,'whole_common_tu':str(common_path) if a.new else None,'unreached_export_gc':family7b})
  (out/'context.json').write_text(json.dumps(context,indent=2))
  shim=out/'shim/linux';shim.mkdir(parents=True,exist_ok=True)
- for h in ['bio.h','blkdev.h','blk-mq.h','blk_types.h','mm.h','module.h','kernel.h','export.h','xdev_ext_mech.h','atomic.h','dma-mapping.h','highmem.h','pci.h','sizes.h','slab.h','xdev_ext_peer.h','xdev_ext_requester.h']:(shim/h).write_text('#include "kernel_boundary.h"\n')
+ for h in ['bio.h','blkdev.h','blk-mq.h','blk_types.h','mm.h','module.h','kernel.h','export.h','xdev_ext_mech.h','atomic.h','dma-mapping.h','highmem.h','pci.h','sizes.h','slab.h','xdev_ext_peer.h']:(shim/h).write_text('#include "kernel_boundary.h"\n')
+ if family7b:
+  # Project declarations and pure rules are actual source, not an OS facade.
+  (shim/'xdev_ext_requester.h').write_text(requester_declarations)
+  (shim/'xdev_ext_requester_core.h').write_text(requester_core)
+ else:
+  (shim/'xdev_ext_requester.h').write_text('#include "kernel_boundary.h"\n')
  include=['-I',str(tests),'-I',str(out),'-I',str(out/'shim'),'-I',str(root/'src/storage/include/linux'),'-I',str(root/'src/storage/include'),'-I',str(root/'src/core/include/linux')]
  mode=['-DBLOCK_NEW=1','-DCONFIG_BLOCK=1'] if a.new else []
  if family7a:mode+=['-DBLOCK_FAMILY_7A=1']

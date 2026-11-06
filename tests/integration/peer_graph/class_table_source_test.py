@@ -41,50 +41,70 @@ def main():
     mech = without_comments((KERNEL / "io_uring/xdev_ext_mech.c").read_text())
     family = without_comments((KERNEL / "include/linux/xdev_ext_family_core.h").read_text())
     checks = []
+    # Public helpers keep their descriptor selection; role/CREATE/base now
+    # delegate to the selected row rather than duplicating the class switch.
     for text, name, field in ((core, "xdev_ext_mech_class_known", "family"),
                               (step, "xdev_ext_mech_peer_dirs", "peer_dirs"),
-                              (step, "xdev_ext_mech_stage_role", "role_rule"),
                               (family, "xdev_ext_mech_class_family", "family")):
         function = body(text, name)
         checks.append((f"{name} reads the descriptor {field}",
                        calls_table(function) and bool(re.search(r"->\s*" + field + r"\b", function))))
         checks.append((f"{name} has no per-class conditions",
                        bool(function) and not re.search(r"\bXDEV_EXT_MECH_CLASS_[A-Z_]+\b", function)))
-
-    create = body(step, "xdev_ext_mech_create_check")
+    role = body(step, "xdev_ext_mech_stage_role")
+    role_desc = body(step, "xdev_ext_mech_stage_role_desc")
     checks.extend([
-        ("CREATE reads the class descriptor", calls_table(create)),
-        ("CREATE uses peer_only from the descriptor", bool(re.search(r"->\s*peer_only\b", create))),
+        ("stage role forwards the chosen descriptor and stage",
+         bool(re.search(r"return\s+xdev_ext_mech_stage_role_desc\(xdev_ext_mech_class_desc\(u->class_id\),\s*u\);", role))),
+        ("stage role invokes the descriptor role callback", "return d->role(u);" in role_desc),
+        ("stage role has no per-class conditions",
+         not re.search(r"\bXDEV_EXT_MECH_CLASS_[A-Z_]+\b", role + role_desc)),
+    ])
+    create = body(step, "xdev_ext_mech_create_check")
+    create_desc = body(step, "xdev_ext_mech_create_check_desc")
+    checks.extend([
+        ("CREATE reads each class descriptor and delegates the same rows",
+         "rows[i] = xdev_ext_mech_class_desc(c->st[i].class_id);" in create and
+         "return xdev_ext_mech_create_check_desc(c, rows, frames);" in create),
+        ("CREATE uses peer_only from the descriptor", bool(re.search(r"->\s*peer_only\b", create_desc))),
         ("CREATE uses the descriptor flag properties",
-         all(re.search(r"->\s*" + name + r"\b", create)
+         all(re.search(r"->\s*" + name + r"\b", create_desc)
              for name in ("flags_later", "known_flags", "flags_ok"))),
         ("CREATE removes the NET-specific pool restriction",
-         not re.search(r"u\s*->\s*class_id\s*==\s*XDEV_EXT_MECH_CLASS_NET\s*&&\s*c\s*->\s*pool_kind", create)),
+         not re.search(r"u\s*->\s*class_id\s*==\s*XDEV_EXT_MECH_CLASS_NET\s*&&\s*c\s*->\s*pool_kind", create_desc)),
         ("CREATE removes the old IAA/SOCKET/AF_XDP flag allow-lists",
-         not any(token in create for token in ("XDEV_EXT_IAA_F_SOFTWARE", "~XDEV_EXT_SOCKET_F_NXP",
-                                               "XDEV_EXT_AFXDP_F_RELIABLE", "XDEV_EXT_AFXDP_F_FINITE",
-                                               "XDEV_EXT_AFXDP_F_POLICY"))),
+         not any(token in create_desc for token in ("XDEV_EXT_IAA_F_SOFTWARE", "~XDEV_EXT_SOCKET_F_NXP",
+                                                    "XDEV_EXT_AFXDP_F_RELIABLE", "XDEV_EXT_AFXDP_F_FINITE",
+                                                    "XDEV_EXT_AFXDP_F_POLICY"))),
     ])
+    family_raw = (KERNEL / "include/linux/xdev_ext_family_core.h").read_text()
+    rows = dict(re.findall(r"\{\s*/\*\s*XDEV_EXT_MECH_CLASS_(\w+)\s*\*/(.*?)\n\t}", family_raw, re.S))
     base = body(mech, "xdev_ext_mech_base")
-    default = base.rsplit("default:", 1)[-1] if "default:" in base else ""
+    base_desc = body(family, "xdev_ext_mech_base_desc")
     checks.extend([
-        ("base default consults descriptor context rule",
-         calls_table(default) and bool(re.search(r"->\s*ctx_rule\b", default))
-         and "XDEV_EXT_CTX_RULE_COMMON" in default),
-        ("base default retains GPU context fallback", "xdev_ext_binding_make_gpu_ctx" in default),
-        ("base keeps USER case pinned by user-stage tests", "case XDEV_EXT_MECH_CLASS_USER:" in base),
-        ("base keeps the native AF_XDP capability and constructor texts",
-         "st->s->pool.capabilities" in base and "xdev_ext_binding_make_afxdp_native_tx_ctx" in base),
+        ("base forwards the registered descriptor, direction, pool capabilities and bytes",
+         "caps = st->s->pool.capabilities;" in base and
+         "return xdev_ext_mech_base_desc(st->cls->decl, st->direction, caps, bytes);" in base),
+        ("base invokes the descriptor context constructor", "return d->base(direction, caps, bytes);" in base_desc),
+        ("GPU descriptor retains GPU context constructor",
+         ".base = xdev_ext_decl_gpu_base" in rows.get("CE", "") and
+         "xdev_ext_binding_make_gpu_ctx" in body(family, "xdev_ext_decl_gpu_base")),
+        ("AF_XDP retains native capability and constructor",
+         "caps & XDEV_EXT_BINDING_CAP_ZERO_COPY" in body(family, "xdev_ext_decl_afxdp_base") and
+         "xdev_ext_binding_make_afxdp_native_tx_ctx" in body(family, "xdev_ext_decl_afxdp_base")),
     ])
-    for name in ("NVME", "AFXDP", "CPU", "IAA", "SOCKET", "NET", "DMA"):
-        checks.append((f"base retains existing {name} case", f"case XDEV_EXT_MECH_CLASS_{name}:" in base))
+    for name, callback in (("NVME", "nvme"), ("AFXDP", "afxdp"), ("CPU", "common"),
+                           ("IAA", "common"), ("SOCKET", "common"), ("NET", "common"),
+                           ("DMA", "common"), ("USER", "common")):
+        checks.append((f"base retains existing {name} constructor",
+                       bool(re.search(r"\.base\s*=\s*xdev_ext_decl_" + callback + r"_base\b", rows.get(name, "")))))
 
     bind = body(mech, "xdev_ext_mech_session_bind")
     checks.extend([
-        ("session bind retains the pinned CPU/USER no-file predicate",
-         bool(re.search(r"class_id != XDEV_EXT_MECH_CLASS_CPU &&\s*st->class_id != XDEV_EXT_MECH_CLASS_USER", bind))),
-        ("session bind extends the same no-file predicate through the table",
-         bool(re.search(r"class_id != XDEV_EXT_MECH_CLASS_CPU &&\s*st->class_id != XDEV_EXT_MECH_CLASS_USER\s*&&\s*!\s*xdev_ext_mech_class_desc\s*\(\s*st->class_id\s*\)\s*->\s*no_file", bind))),
+        ("session bind uses the registered descriptor no-file property",
+         bool(re.search(r"if\s*\(!st->cls->decl->no_file\)\s*\{\s*st->file\s*=\s*fget\(c->st\[i\]\.fd\);", bind))),
+        ("CPU and USER descriptors retain no-file admission",
+         all(re.search(r"\.no_file\s*=\s*1\b", rows.get(name, "")) for name in ("CPU", "USER"))),
         ("session bind retains the pinned ops lookup", "xdev_ext_mech_ops_get(st->class_id," in bind),
         ("session bind retains the pinned class owner reference", "&s->c_owner[st->class_id]" in bind),
         ("session bind retains checked-unbind counting on failed bind",

@@ -330,6 +330,7 @@ struct xdev_ext_family_hooks_hdr { u32 family; };
 #define __user
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops {
+ const struct xdev_ext_mech_class_desc *decl;
  int (*bind)(struct xdev_ext_mech_stage *, const struct xdev_ext_mech_stage_uapi *);
  union { const struct xdev_ext_comp_hooks *comp; } fam;
 };
@@ -367,7 +368,8 @@ static struct xdev_ext_mech_stage_caps query(void)
 CAPS_MAIN = r'''
 int main(void)
 {
- struct xdev_ext_mech_class_ops ops = { .bind = class_bind };
+ struct xdev_ext_mech_class_ops ops = {
+  .decl = xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_NET), .bind = class_bind };
  struct xdev_ext_mech_stage_uapi u = { .class_id = XDEV_EXT_MECH_CLASS_NET,
   .direction = XDEV_EXT_MECH_DIR_TO_DEVICE };
  struct xdev_ext_mech_stage_caps in, saved;

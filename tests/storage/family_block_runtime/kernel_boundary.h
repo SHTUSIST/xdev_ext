@@ -60,7 +60,8 @@ struct request_queue {struct queue_limits limits;u64 boundary;u32 segments,segme
 #define queue_max_segment_size(q) ((q)->segment_size)
 #define queue_max_hw_sectors(q) ((q)->sectors)
 struct bio_vec {struct page *page;u32 off,len;};
-struct bio {struct bio_vec bi_inline_vecs[128];unsigned initialized;};
+struct bio {struct bio_vec bi_inline_vecs[128];unsigned initialized;
+struct {u64 bi_sector;unsigned int bi_size;} bi_iter;};
 struct request {blk_opf_t cmd_flags;struct bio *bio;struct blk_mq_hw_ctx *mq_hctx;};
 /* 6A never calls these native poll boundaries. No success stub or poll model. */
 static inline bool blk_rq_is_poll(struct request *req){(void)req;fputs("unexpected blk_rq_is_poll in 6A cohort\n",stderr);abort();}

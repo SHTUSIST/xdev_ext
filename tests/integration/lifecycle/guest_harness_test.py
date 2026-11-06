@@ -101,6 +101,7 @@ else:
                        s.index('if (( MECHANISM_VARIANTS && ! RUN_ONLY )); then')]
             shell = prefix + '''
 SRC=$SOURCE_OVERRIDE
+SOURCE_GIT_ROOT=$SOURCE_OVERRIDE
 BUILD=$SCRATCH/build
 EV=$SCRATCH/evidence
 TOOLS=$SCRATCH/tools

@@ -208,8 +208,14 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertNotIn("kfree(done)", nvme + handoff)
         ce = function_body(ROOT / "io_uring/xdev_ext_mech_ce.c",
                            "void xdev_ext_ce_complete(")
-        self.assertIn("xdev_ext_mech_batch_completion_publish(ck->b, ticket, "
-                      "err, false);", ce)
+        self.assertIn("xdev_ext_comp_copy_complete((struct xdev_ext_comp_copy_cookie *)ck, ticket,", ce)
+        self.assertIn("status, hw_submitted, bytes_done, &xdev_ext_ce_copy_ops);", ce)
+        copy = function_body(ROOT / "io_uring/xdev_ext_compfam_copy.c",
+                             "void xdev_ext_comp_copy_complete(")
+        self.assertLess(copy.index("xdev_ext_mech_batch_completion_claim(ck->b, ticket)"),
+                        copy.index("ops->classify("))
+        self.assertIn("sequester = xdev_ext_window_copy_disposition(outcome, status, &err);", copy)
+        self.assertIn("xdev_ext_mech_batch_completion_publish(ck->b, ticket, err, sequester);", copy)
 
     def test_class_and_backend_tables(self):
         text = HEADER.read_text(encoding="utf-8")

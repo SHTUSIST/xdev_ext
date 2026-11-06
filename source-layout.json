@@ -9459,6 +9459,66 @@
       "source": "tests/integration/session/native/xdev_ext_tb_nhi_guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh"
+    },
+    {
+      "source": "tests/network/count_fifo/control_expected.py",
+      "logical_path": "tests/network/count_fifo/control_expected.py"
+    },
+    {
+      "source": "tests/network/count_fifo/control_fixture.py",
+      "logical_path": "tests/network/count_fifo/control_fixture.py"
+    },
+    {
+      "source": "tests/network/count_fifo/control_freeze.py",
+      "logical_path": "tests/network/count_fifo/control_freeze.py"
+    },
+    {
+      "source": "tests/network/count_fifo/control_preproducer.json",
+      "logical_path": "tests/network/count_fifo/control_preproducer.json"
+    },
+    {
+      "source": "tests/network/count_fifo/control_support.h",
+      "logical_path": "tests/network/count_fifo/control_support.h"
+    },
+    {
+      "source": "tests/network/count_fifo/control_vectors.h",
+      "logical_path": "tests/network/count_fifo/control_vectors.h"
+    },
+    {
+      "source": "tests/network/count_fifo/field-schema.json",
+      "logical_path": "tests/network/count_fifo/field-schema.json"
+    },
+    {
+      "source": "tests/network/count_fifo/partition-and-fields.json",
+      "logical_path": "tests/network/count_fifo/partition-and-fields.json"
+    },
+    {
+      "source": "tests/network/count_fifo/receipt-schema.json",
+      "logical_path": "tests/network/count_fifo/receipt-schema.json"
+    },
+    {
+      "source": "tests/network/count_fifo/semantic-receipts.expected.jsonl",
+      "logical_path": "tests/network/count_fifo/semantic-receipts.expected.jsonl"
+    },
+    {
+      "source": "tests/network/count_fifo/semantic-records.json",
+      "logical_path": "tests/network/count_fifo/semantic-records.json"
+    },
+    {
+      "source": "tests/network/count_fifo/test_control_fixture.py",
+      "logical_path": "tests/network/count_fifo/test_control_fixture.py"
+    },
+    {
+      "source": "tests/network/count_fifo/test_control_v2.c",
+      "logical_path": "tests/network/count_fifo/test_control_v2.c"
+    },
+    {
+      "source": "tests/network/count_fifo/typed-control-v2.expected.stdout",
+      "logical_path": "tests/network/count_fifo/typed-control-v2.expected.stdout"
+    },
+    {
+      "source": "tests/network/count_fifo/typed-data-v1.inverse.stdout",
+      "logical_path": "tests/network/count_fifo/typed-data-v1.inverse.stdout"
     }
   ]
 }

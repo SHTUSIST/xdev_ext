@@ -24,11 +24,12 @@ NEW_MUTANTS={
  'stop_first_pass_removed':('xsk_mech_zc_stop','FIRST_PASS','REMOVE','excess_quarantine'),
  'reliable_wrong_tag':('xsk_rel_enqueue','tb->control ? XSK_MECH_ZC_CONTROL : XSK_MECH_ZC_DATA','XSK_MECH_ZC_DATA','reliable_control_tag'),
 }
-def freeze_inputs(root):
+def freeze_inputs(root,fixture_contract='historical-raw-v0'):
  root=Path(root)
  paths=['src/network/net/xdp/xsk_xdev_ext_mech_zc_core.h','src/network/net/xdp/xsk_xdev_ext_mech.c','src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc','src/network/include/linux/xdev_ext_netfam.h','src/network/io_uring/family/xdev_ext_netfam.c','src/network/net/xdp/xsk.c','src/network/net/xdp/xsk_buff_pool.c','src/network/include/net/xsk_buff_pool.h','src/core/io_uring/xdev_ext_mech.c','src/core/include/linux/xdev_ext_mech.h','src/network/net/xdp/xsk_xdev_ext_mech_tx_core.h','src/core/include/linux/xdev_ext_peer.h','src/core/io_uring/xdev_ext_mech_core.h','src/core/include/linux/xdev_ext_mech_reliable_core.h','src/core/include/uapi/linux/xdev_ext_mech.h','src/network/net/xdp/xsk_xdev_ext_mech_core.h']
  family='src/network/include/linux/xdev_ext_netfam_count.h'
  if (root/family).is_file():paths.append(family)
+ if fixture_contract=='typed-control-v2':paths+=['src/core/include/uapi/linux/xdev_ext_policy.h','src/network/include/net/xdp_sock.h']
  return {'production_inputs':{p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in paths},'original_fixtures':{p.name:hashlib.sha256(p.read_bytes()).hexdigest() for p in FIXTURE.iterdir() if p.is_file()}}
 def structure(root,overrides=None):
  root=Path(root);problems=[];overrides=overrides or {}
@@ -56,6 +57,7 @@ def structure(root,overrides=None):
   if re.search(r'\b(if|while|for)\s*\(',f) or 'xdev_ext_net_count_' not in f:problems.append('legacy '+n+' retains independent algorithm')
  return {'verdict':'OWNERSHIP_WIRING_RED' if problems else 'PASS','assertions':problems}
 def generate(root,out,mutation=None,fixture_contract='historical-raw-v0'):
+ if fixture_contract=='typed-control-v2':return generate_control(root,out,mutation)
  if fixture_contract not in ('historical-raw-v0','typed-data-v1'):raise SetupError('unknown fixture contract: '+fixture_contract)
  root=Path(root);out=Path(out)
  family_exists=(root/'src/network/include/linux/xdev_ext_netfam_count.h').exists()
@@ -142,4 +144,84 @@ static int xsk_rel_build(struct xdev_ext_mech_stage*s,struct xdev_ext_mech_batch
    if anchor not in f:raise SetupError('mutation anchor unavailable: '+mutation)
    after=f.replace(anchor,replacement) if mutation=='control_unknown_cleared' else f.replace(anchor,replacement,1)
   target.write_text(text.replace(f,after,1))
+ return have,manifest
+
+def generate_control(root,out,mutation=None):
+ """Extend the unchanged v1 extraction with the actual CONTROL dependency graph.
+
+ No baseline policy body is rewritten: only named OS observation wrappers are
+ renamed, and the v1 replacement owner/return stub is removed for this profile.
+ """
+ root=Path(root);out=Path(out)
+ have,manifest=generate(root,out,mutation,fixture_contract='typed-data-v1')
+ if not have:raise SetupError('typed-control-v2 requires actual POOL_DMA')
+ paths={
+  'rel':'src/network/net/xdp/xsk_xdev_ext_mech_reliable.inc',
+  'rules':'src/core/io_uring/xdev_ext_mech_core.h',
+  'core':'src/core/io_uring/xdev_ext_mech.c',
+  'mech':'src/network/net/xdp/xsk_xdev_ext_mech.c',
+  'frame':'src/core/include/linux/xdev_ext_mech.h',
+  'uapi':'src/core/include/uapi/linux/xdev_ext_mech.h',
+  'policy':'src/core/include/uapi/linux/xdev_ext_policy.h',
+ }
+ src={k:(root/v).read_text() for k,v in paths.items()}
+ def extract(k,name,record=False,enum=False):
+  body=old.record(src[k],name,enum) if record else old.function(src[k],name)
+  manifest.append({'path':paths[k], 'record' if record else 'function':name,'bytes':len(body.encode())})
+  return body
+ p=out/'production.c.inc';text=p.read_text()
+ # The UAPI layout moves before the versioned session mirror; no duplicate.
+ layout=old.record(src['uapi'],'xdev_ext_mech_layout')
+ if text.count(layout)!=1:raise SetupError('v2 unique layout dependency missing')
+ text=text.replace(layout,'',1)
+ types=out/'production_types.h'
+ types.write_text(types.read_text()+'\n'+'\n'.join([
+  extract('frame','xdev_ext_mech_frame_state',True,True),
+  extract('uapi','xdev_ext_mech_layout',True),
+  extract('uapi','xdev_ext_mech_peer',True),
+  extract('uapi','xdev_ext_afxdp_mech_info',True),
+  extract('uapi','xdev_ext_afxdp_reliable_info',True),
+  extract('policy','xdev_ext_rel_policy',True),
+ ])+'\n')
+ old_owner='struct xsk_mech_reliable {struct xdev_ext_rel_tx tx;struct xsk_rel_data data[XDEV_EXT_REL_MAX_WINDOW];bool initial_unchecked;struct xdp_desc scratch[XDEV_EXT_REL_MAX_SEGMENTS];};'
+ if text.count(old_owner)!=1:raise SetupError('v2 historical owner boundary anchor missing')
+ text=text.replace(old_owner,extract('rel','xsk_rel_rx_intent',True)+'\n'+extract('rel','xsk_mech_reliable',True),1)
+ put=old.function(text,'xdev_ext_mech_stage_native_put')
+ if put.count('native_refs--;')!=1:raise SetupError('v2 native reference observation anchor missing')
+ text=text.replace(put,put.replace('native_refs--;','native_refs--;v2_note_put();',1),1)
+ # CAS macros are source-exact portable expansions, not a success boundary.
+ rules=src['rules'];start=rules.index('#define XDEV_EXT_MECH_LOAD_U8(p)\t\t__atomic_load_n')
+ end=rules.index('\n#endif',start)
+ cas=rules[start:end]
+ manifest.append({'path':paths['rules'],'fragment':'portable LOAD_U8/CAS_U8','bytes':len(cas.encode())})
+ prelude=cas+'\n'+'\n'.join(extract('rules',n) for n in ['xdev_ext_mech_frame_edge_ok','xdev_ext_mech_frame_state','xdev_ext_mech_frame_move'])
+ prelude+='\n'+extract('core','xdev_ext_mech_pool_frame_state')
+ pool_move=extract('core','xdev_ext_mech_pool_frame_move')
+ prelude+='\n'+pool_move.replace('xdev_ext_mech_pool_frame_move(', 'actual_xdev_ext_mech_pool_frame_move(',1)
+ prelude+='\n'+'''static int xdev_ext_mech_pool_frame_move(struct xdev_ext_mech_pool *pool,u32 index,u32 from,u32 to)
+{
+ u8 before[64],after[64];bool bounded=pool->state && pool->nr_frames<=64;
+ if(bounded)memcpy(before,pool->state,pool->nr_frames);
+ int result=actual_xdev_ext_mech_pool_frame_move(pool,index,from,to);
+ if(bounded)memcpy(after,pool->state,pool->nr_frames);
+ REQUIRE("v2_cas_capacity",v2_cas_count<256);
+ struct v2_cas_record *o=&v2_cas[v2_cas_count++];
+ o->index=index;o->from=from;o->to=to;o->result=result;o->nr=bounded?pool->nr_frames:0;
+ if(bounded){memcpy(o->before,before,o->nr);memcpy(o->after,after,o->nr);}
+ if(!result && from==XDEV_EXT_MECH_F_INFLIGHT && to==XDEV_EXT_MECH_F_HELD)frame_moves++;
+ return result;
+}
+'''
+ stub=old.function(text,'xdev_ext_mech_pool_frame_move')
+ text=text.replace('#define XDEV_EXT_MECH_F_INFLIGHT 3\n#define XDEV_EXT_MECH_F_HELD 2\n','',1)
+ text=text.replace(stub,prelude,1)
+ # Only observations and the fixed arithmetic primitive live at this boundary.
+ dependencies=extract('mech','xsk_xdev_ext_mech_pool_resolve')+'\n'+extract('rel','xsk_rel_control_acquire_locked')
+ helper=old.function(text,'xsk_rel_data_lease_locked')
+ text=text.replace(helper,dependencies+'\n'+helper,1)
+ text+='\n'+extract('rules','xdev_ext_mech_layout_span')+'\n'+extract('rel','xsk_rel_packet_check')+'\n'
+ p.write_text(text)
+ for n in ['xsk_rel_data','xsk_rel_control']:
+  extract('rel',n,True)
+ manifest.append({'fixture_contract':'typed-control-v2','os_facts_version':'count-control-os-v2','cas_observation':'delegates exactly once; snapshots all bounded frame words'})
  return have,manifest

@@ -455,6 +455,30 @@ static const struct xdev_ext_stor_dev_ops fixture_member_ops = {
 '''
 
 
+FAMILY_BIO_BOUNDARY = r'''
+/* These NVMe cases keep the native-request path. New BIO/queue OS inputs
+ * terminate on unexpected use; all storage and core helpers remain real. */
+#define PAGE_SHIFT 12
+#define PAGE_SIZE (1UL << PAGE_SHIFT)
+#define PAGE_MASK (~(PAGE_SIZE - 1))
+#define min(a, b) ((a) < (b) ? (a) : (b))
+#define REQ_OP_READ 0U
+#define REQ_OP_WRITE 1U
+static int fixture_bio_inline_vec_limit(void) { abort(); }
+#define BIO_MAX_INLINE_VECS fixture_bio_inline_vec_limit()
+static u64 queue_virt_boundary(struct request_queue *q) { (void)q; abort(); }
+static u32 blk_lim_dma_alignment_and_pad(struct queue_limits *limits)
+{ (void)limits; abort(); }
+static u32 queue_max_segments(struct request_queue *q) { (void)q; abort(); }
+static u32 queue_max_segment_size(struct request_queue *q) { (void)q; abort(); }
+static void bio_init(struct bio *bio, struct block_device *dev, void *vecs,
+                     u32 nr, blk_opf_t opf)
+{ (void)bio; (void)dev; (void)vecs; (void)nr; (void)opf; abort(); }
+static u32 bio_add_page(struct bio *bio, struct page *page, u32 len, u32 off)
+{ (void)bio; (void)page; (void)len; (void)off; abort(); }
+'''
+
+
 def requester_declarations(native, header):
     """Actual by-value requester dependencies from the same selected owner."""
     if 'struct xdev_ext_requester requester;' not in header:
@@ -481,13 +505,38 @@ def build_family_io_fixture(text):
                         header, re.M | re.S)
     if not command:
         raise AssertionError('production aligned structure missing: xdev_ext_stor_command')
-    types = requester_declarations(text, header) + command[0] + '\n' + '\n'.join(structure(header, n) for n in (
+    bio_path = 'xdev_ext_storfam_submit_bio(' in function(block, 'xdev_ext_storfam_submit')
+    bio_types, bio_fields, bio_functions = '', '', []
+    if bio_path:
+        abi = source('include/linux/xdev_ext_mech.h')
+        core = source('io_uring/xdev_ext_mech.c')
+        host_path = re.search(r'^enum xdev_ext_stor_host_path \{\n.*?^\};',
+                              header, re.M | re.S)
+        if not host_path:
+            raise AssertionError('production enum missing: xdev_ext_stor_host_path')
+        bio_types = host_path[0] + '\n'
+        batch = structure(core, 'xdev_ext_mech_batch')
+        for name in ('nr_frames', 'f'):
+            declarations = re.findall(r'^[ \t]*[^;{}\n]*\b' + name +
+                                      r'(?:\[[^\]\n]*\])?\s*;', batch, re.M)
+            if len(declarations) != 1:
+                raise AssertionError('production batch field missing or ambiguous: ' + name)
+            bio_fields += declarations[0] + '\n'
+        bio_functions = [function(abi, 'xdev_ext_mech_frame_page')]
+        bio_functions += [function(core, name) for name in
+                          ('xdev_ext_mech_batch_nr_frames', 'xdev_ext_mech_batch_frame')]
+        bio_functions += [function(block, name) for name in (
+            'xdev_ext_stor_block_caps', 'xdev_ext_stor_block_walk',
+            'xdev_ext_stor_block_preflight', 'xdev_ext_stor_block_fill',
+            'xdev_ext_storfam_submit_bio')]
+    types = bio_types + requester_declarations(text, header) + command[0] + '\n' + '\n'.join(structure(header, n) for n in (
         'xdev_ext_stor_poll_view', 'xdev_ext_stor_geometry',
         'xdev_ext_stor_dev_ops', 'xdev_ext_stor_io', 'xdev_ext_stor_peer_io',
         'xdev_ext_stor_stage', 'xdev_ext_stor_batch'))
     types += '\n' + trace + '\n' + '\n'.join(structure(text, n) for n in (
         'nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch', 'nvme_xdev_ext_peer_slot'))
-    types += '\nstruct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; u64 ticket; };'
+    types += ('\nstruct xdev_ext_mech_batch { struct nvme_xdev_ext_mech_batch priv; u64 ticket;\n' +
+              bio_fields + '};')
     # Reuse unchanged recorders, but remove the original owner-specific resource
     # shims; their moved signatures are supplied in FAMILY_IO_FIXTURE instead.
     recorders = FIXTURE[FIXTURE.index('/* Recorders and the modelled block layer. */'):
@@ -504,6 +553,13 @@ def build_family_io_fixture(text):
         'struct nvme_ns { struct request_queue *queue;',
         'struct nvme_ctrl;\nstruct nvme_ns { struct nvme_ctrl *ctrl; struct request_queue *queue;')
     prefix = FIXTURE[:FIXTURE.index('/* IDENTITY_OS_TYPES */')]
+    if bio_path:
+        prefix = prefix.replace('struct xdev_ext_mech_pool { unsigned int kind; };',
+                                structure(abi, 'xdev_ext_mech_frame') + '\n' +
+                                structure(abi, 'xdev_ext_mech_pool'))
+        prefix = prefix.replace('struct bio { int unused; };',
+                                'struct bio { void *bi_inline_vecs;\n'
+                                ' struct { u64 bi_sector; u32 bi_size; } bi_iter; };')
     prefix += identity + '''
 #define FIXTURE_MEMBER_FAMILY 1
 struct pci_dev; struct xdev_ext_mech_stage_uapi;
@@ -533,7 +589,7 @@ struct xdev_ext_stor_stage; struct xdev_ext_stor_io;
     common_names = ('xdev_ext_storfam_validate', 'xdev_ext_storfam_submit_check',
                     'xdev_ext_storfam_submit', 'xdev_ext_storfam_poll',
                     'xdev_ext_storfam_host_ready')
-    definitions = [function(block, n) for n in common_names]
+    definitions = bio_functions + [function(block, n) for n in common_names]
     definitions += [function(text, n) for n in native_names]
     # Original function signatures, not handwritten behavioral wrappers.
     prototypes = '\n'.join(d[:d.index('{')].rstrip() + ';' for d in definitions)
@@ -567,7 +623,8 @@ struct xdev_ext_stor_stage; struct xdev_ext_stor_io;
     new_pass = new_pass.replace(migrated_views, new_views)
     cases = cases.replace(old_pass, new_pass)
     cases = cases.replace('nvme_xdev_ext_poll_capable(', 'xdev_ext_stor_block_poll_capable(')
-    return (prefix + setup + types + '\n' + recorders + boundary + code + ops +
+    bio_boundary = FAMILY_BIO_BOUNDARY if bio_path else ''
+    return (prefix + setup + types + '\n' + recorders + boundary + bio_boundary + code + ops +
             HELPERS['worker_fixture_init']() + '\n' + cases)
 
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Independent 7B host boundary. Production algorithms remain complete actual definitions."""
-import argparse,hashlib,importlib.util,json,pathlib,subprocess,sys,re
+import argparse,hashlib,importlib.util,json,pathlib,subprocess,sys,re,runpy
 sys.dont_write_bytecode=True
 HERE=pathlib.Path(__file__).resolve().parent
 GOLDEN=HERE.parent/'native_member_7a'
@@ -12,6 +12,13 @@ FD='src/core/io_uring/xdev_ext_peer_fd.c'
 RC='src/core/include/linux/xdev_ext_requester_core.h'
 CORE='src/storage/drivers/nvme/host/core.c'
 TRACE='src/storage/drivers/nvme/host/xdev_ext_native_peer_trace.h'
+RH='src/core/include/linux/xdev_ext_requester.h'
+PH='src/core/include/linux/xdev_ext_peer.h'
+REQUESTER_FIXTURE='tests/storage/nvme/_legacy_storfam_fixture.py'
+REQUESTER_SOURCES=(RH,PH,REQUESTER_FIXTURE,
+ 'tests/integration/peer_graph/nvme_peer_async_test.py',
+ 'tests/storage/nvme/_locked_requester_native.h','tests/storage/nvme/_locked_nvme_opcode.h','tools/layout.py',
+ 'source-layout.json','third_party/sources.lock.json')
 
 def function(s,name):
  if name=='nvme_xdev_ext_class_bounce':s=s.split('#ifndef NVME_XDEV_EXT_MECH_BOUNCE_AVAILABLE')[0]
@@ -58,8 +65,71 @@ struct request {blk_opf_t cmd_flags;struct blk_mq_hw_ctx *mq_hctx;void *end_io_d
  s+='\n#include "boundary_ext.h"\n'+alloc+execute+page
  return s,atom
 
+def requester_dependencies(root,src,bd,inc,out):
+ """Actual requester storage/admission; explicit existing provider/PCI facts."""
+ utility=runpy.run_path(str(root/REQUESTER_FIXTURE))
+ selected=utility['LegacySelection'](root)
+ bd=selected.requester_type_projection(bd)
+ old_stage=old.declaration(bd,'struct xdev_ext_mech_stage {')
+ actual_stage=selected.requester_stage()
+ stage_fields=[]
+ for field in ('caps','create_reporting','create_phase','create_requester_id','create_requester'):
+  fields=re.findall(r'^[ \t]*[^;{}\n]*\b'+field+r'\b[^;{}\n]*;',actual_stage,re.M)
+  if len(fields)!=1:raise b.Setup('actual requester stage field count: '+field)
+  stage_fields.append(fields[0])
+ # Append genuine new storage while preserving every old positional member.
+ bd=replace(bd,old_stage,old_stage.rstrip()[:-2]+'\n'+'\n'.join(stage_fields)+'\n};\n')
+ binder=selected.definition('io_uring/family/xdev_ext_requester.c','xdev_ext_requester_bind')
+ unbinder=selected.definition('io_uring/family/xdev_ext_requester.c','xdev_ext_requester_unbind')
+ requester=selected.definition('include/linux/xdev_ext_requester.h','xdev_ext_requester','struct')
+ backing=selected.definition('include/linux/xdev_ext_peer.h','xdev_ext_peer_backing','struct')
+ project=('#ifndef _LINUX_XDEV_EXT_REQUESTER_H\n#define _LINUX_XDEV_EXT_REQUESTER_H\n'
+          '#include <linux/xdev_ext_requester_core.h>\n'
+          'struct file; struct pci_dev; struct xdev_ext_mech_stage;\n'+requester+'\n'+backing+'\n')
+ project+='\n'.join(body[:body.index('{')].rstrip()+';' for body in (binder,unbinder))+'\n#endif\n'
+ (inc/'linux/xdev_ext_requester.h').write_text(project)
+ (inc/'linux/xdev_ext_requester_core.h').write_text(src[RC])
+ # Reuse already explicit dependency facts, adapting only the original OS
+ # device field spelling. The real binder captures authority and decides.
+ facts=replace(utility['REQUESTER_DEPENDENCY_FACTS'],'.is_pci=true','.pci=true')
+ cap=re.search(r'^#define CAP_SYS_ADMIN[^\n]*',utility['POLL_OS'],re.M)
+ if not cap:raise b.Setup('existing requester capability boundary missing')
+ facts=cap[0]+'\n'+function(utility['POLL_OS'],'capable')+'\n'+facts
+ bd+='\n'+'\n'.join(selected._native_command_declarations())+'\n'+facts
+ selected.verify()
+ (out/'requester-dependencies.json').write_text(json.dumps({
+  'selected':selected.report(),'actual_bodies':['xdev_ext_requester_bind','xdev_ext_requester_unbind','xdev_ext_admit_decide'],
+  'external_facts':{'owner':REQUESTER_FIXTURE,'provider_pci':'REQUESTER_DEPENDENCY_FACTS','capability':'POLL_OS.capable'},
+  'field_spelling_projection':'.is_pci=true -> .pci=true'},indent=2)+'\n')
+ return bd,binder+'\n'+unbinder+'\n',utility['WINDOW_NAMESPACE_FILE']
+
+def namespace_native(source,bd,namespace_file,out):
+ """Qualified namespace-file projection; retain every active native body."""
+ file_type=old.declaration(bd,'struct file {')
+ file_ops=old.declaration(bd,'struct file_operations {')
+ if re.search(r'\bprivate_data\b',file_type) or re.search(r'\brelease\b',file_ops):
+  raise b.Setup('namespace-file boundary cannot represent window handles')
+ start=source.index('struct nvme_xdev_ext_window_handle {')
+ end=source.index('static struct nvme_ns *nvme_xdev_ext_class_ns(',start)
+ excluded=source[start:end]
+ window_names=('nvme_xdev_ext_window_release','nvme_xdev_ext_window_access',
+  'nvme_xdev_ext_window_ioctl','nvme_xdev_ext_window_target','nvme_xdev_ext_window_admit')
+ for name in window_names:function(excluded,name)
+ projected=source[:start]+namespace_file+'\n\n'+source[end:]
+ retained=('nvme_xdev_ext_class_ns','nvme_xdev_ext_member_bind',
+  'nvme_xdev_ext_member_requester','nvme_xdev_ext_class_bind')
+ for name in retained:
+  if projected.count(function(source,name))!=1:raise b.Setup('native body projection count: '+name)
+ (out/'namespace-file-projection.json').write_text(json.dumps({
+  'profile':'opened-namespace-files-only','native_owner':NATIVE,
+  'excluded_span':{'offset':start,'length':end-start,'functions':window_names},
+  'replacement_owner':REQUESTER_FIXTURE,'replacement':'WINDOW_NAMESPACE_FILE',
+  'retained_actual_bodies':retained,
+  'case_preparation':'unchanged; required requester state must come from actual CREATE'},indent=2)+'\n')
+ return b.no_includes(projected)
+
 def assemble(root,out,config,mutation=None):
- paths=[NATIVE,BLOCK,RUNTIME,REQ,FD,RC,CORE,TRACE,old.NVME,old.MECH]
+ paths=[NATIVE,BLOCK,RUNTIME,REQ,FD,RC,CORE,TRACE,old.NVME,old.MECH,*REQUESTER_SOURCES]
  src={p:(root/p).read_text() for p in paths}
  if mutation:
   m=MUTANTS[mutation];p,sym,a,z,want=m;body=function(src[p],sym);changed=replace(body,a,z)
@@ -72,18 +142,23 @@ def assemble(root,out,config,mutation=None):
  for name,path in b.HEADERS.items():
   f=inc/name;f.parent.mkdir(parents=True,exist_ok=True);
   if not f.exists():f.write_bytes((root/path).read_bytes())
- bd,atom=boundary();shared=out.parent/'test-inputs';shared.mkdir(exist_ok=True)
+ bd,atom=boundary()
+ bd,requester_code,namespace_file=requester_dependencies(root,src,bd,inc,out)
+ native=namespace_native(src[NATIVE],bd,namespace_file,out)
+ shared=out.parent/'test-inputs';shared.mkdir(exist_ok=True)
  if not (shared/'boundary.h').exists():
   (shared/'boundary.h').write_text(bd);(shared/'boundary_ext.h').write_bytes((HERE/'boundary_ext.h').read_bytes())
  for name in ('boundary.h','boundary_ext.h'):(out/name).symlink_to(pathlib.Path('../test-inputs')/name)
  (inc/'linux/atomic.h').write_text(atom);(inc/'linux/errno.h').write_text('#include <asm-generic/errno.h>\n');(inc/'linux/blk_types.h').write_text('')
  c='#include "boundary.h"\n'
  c+=old.declaration(src[old.MECH],'struct xdev_ext_mech_class_ops {')
- c+=function(src[RC],'xdev_ext_lease_shrink')+function(src[REQ],'xdev_ext_peer_lease_split')+function(src[FD],'xdev_ext_peer_fd_release')
+ c+=function(src[REQ],'xdev_ext_peer_lease_split')+requester_code+function(src[FD],'xdev_ext_peer_fd_release')
  c+=b.no_includes(src[TRACE])
  c+=function(src[old.NVME],'nvme_req_op')+function(src[CORE],'nvme_clear_nvme_request')+function(src[CORE],'nvme_init_request')
+ if 'nvme_xdev_ext_peer_build_cmd(' in function(src[NATIVE],'nvme_xdev_ext_member_encode_dptr'):
+  c+=function(src[CORE],'nvme_xdev_ext_peer_build_cmd')
  c+=b.no_includes(src[RUNTIME])+b.no_includes(src[BLOCK])+function(src[old.NVME],'nvme_xdev_ext_capture_identity')
- c+=b.no_includes(src[NATIVE])
+ c+=native
  original=(GOLDEN/'assertions.c').read_text();remap,inject,reverse=old.transform_assertions(original,True)
  # Only add entry observation for the real native initializer; unchanged old literal event order retained.
  # Old cohort executes separately under its frozen recipe. This harness includes its fixture/functions unchanged.
@@ -101,7 +176,7 @@ exec((HERE/'mutations.py').read_text())
 
 def main():
  ap=argparse.ArgumentParser();ap.add_argument('--source-root',type=pathlib.Path,required=True);ap.add_argument('--out',type=pathlib.Path,required=True);ap.add_argument('--mutants',action='store_true');ap.add_argument('--only');ap.add_argument('--common',action='store_true');a=ap.parse_args();root=a.source_root.resolve();out=a.out.resolve();out.mkdir(exist_ok=False)
- sources=sorted(set([NATIVE,BLOCK,RUNTIME,REQ,FD,RC,CORE,TRACE,old.NVME,old.MECH,*b.HEADERS.values()]))
+ sources=sorted(set([NATIVE,BLOCK,RUNTIME,REQ,FD,RC,CORE,TRACE,old.NVME,old.MECH,*REQUESTER_SOURCES,*b.HEADERS.values()]))
  (out/'SOURCE.json').write_text(json.dumps({'source_root':str(root),'files':{p:hashlib.sha256((root/p).read_bytes()).hexdigest() for p in sources}},indent=2)+'\n')
  results=[]
  cases=[('strict','strict',None),('bounce','bounce',None),('disabled','disabled',None)]+([(n,'bounce' if n.startswith('bounce_') else 'strict',n) for n in MUTANTS] if a.mutants else [])

@@ -71,7 +71,8 @@ int fixture_window_bind(struct xdev_ext_stor_window*,u64,u8,bool,u64,u64,u32);
 #define NVME_REQ_XDEV_EXT_ZC 16U
 #define WARN_ON_ONCE(v) (!!(v))
 struct page {u8 data[PAGE_SIZE];};
-struct bio {unsigned bi_inline_vecs[BIO_MAX_INLINE_VECS],used,capacity,bytes;};
+struct bio {unsigned bi_inline_vecs[BIO_MAX_INLINE_VECS],used,capacity,bytes;
+struct {sector_t bi_sector;unsigned int bi_size;} bi_iter;};
 #ifdef STORAGE_COMMON_TU
 struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session*);
 u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session*);

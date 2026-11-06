@@ -21,11 +21,11 @@ add('peer_frame_order_reversed','xdev_ext_storfam_peer_map','xdev_ext_mech_batch
 add('peer_lease_count_after_validation','xdev_ext_storfam_peer_map','io->nr_leases++;','if (l->lease.len) io->nr_leases++;')
 add('peer_capacity_extra_acquire','xdev_ext_storfam_peer_map','if (io->nr_leases == ss->peer->max_pieces)','if (io->nr_leases > ss->peer->max_pieces)')
 add('peer_SGL_PDU_flag_lost','nvme_xdev_ext_member_request_init','nvme_req(req)->cmd->common.flags |= NVME_CMD_SGL_METABUF;','nvme_req(req)->cmd->common.flags |= 0;')
-add('peer_PRP_wrong_page','nvme_xdev_ext_member_encode_dptr','cmd->rw.dptr.prp1 = cpu_to_le64(prp1);','cmd->rw.dptr.prp1 = cpu_to_le64(prp1 + 4096);')
+add('peer_PRP_wrong_page','nvme_xdev_ext_peer_build_cmd','cmd->rw.dptr.prp1 = cpu_to_le64(prp1);','cmd->rw.dptr.prp1 = cpu_to_le64(prp1 + 4096);')
 add('peer_drift_before_provider','xdev_ext_storfam_submit','ret = xdev_ext_storfam_peer_map(ss, b, io, sb->posting.byte_length);','ret = sb->rw.nlb != sb->posting.nlb ? -EPROTO : xdev_ext_storfam_peer_map(ss, b, io, sb->posting.byte_length);')
 add('peer_UNKNOWN_slot_returned','xdev_ext_storfam_peer_put','if (!quiesced)','if (false)')
 add('peer_ZOMBIE_retired','xdev_ext_storfam_consume','if (xdev_ext_mech_session_state(ss->st->s) != XDEV_EXT_MECH_SESSION_ZOMBIE)\n\t\t\txdev_ext_storfam_peer_put(ss, sb);','if (true)\n\t\t\txdev_ext_storfam_peer_put(ss, sb);')
-add('peer_release_order_reversed','xdev_ext_storfam_peer_put','&io->leases[i], quiesced','&io->leases[io->nr_leases - 1 - i], quiesced')
+add('peer_release_order_reversed','xdev_ext_stor_leases_retire','&leases[i], quiesced','&leases[nr - 1 - i], quiesced')
 add('peer_preaccept_unquiesced','xdev_ext_storfam_peer_put','quiesced = !io->done.uncertain;','quiesced = ((struct nvme_xdev_ext_peer_trace *)io->peer_native)->cookie && !io->done.uncertain;')
 add('bounce_copyback_lost','xdev_ext_storfam_host_ready','if (!status && !uncertain && sb->bounce &&','if (false && !status && !uncertain && sb->bounce &&')
 add('bounce_count_preallocated','nvme_xdev_ext_member_post','if (sb->bounce) {','if (io->bounce) {')
@@ -36,7 +36,7 @@ add('peer_view_omit','xdev_ext_storfam_poll','ARRAY_SIZE(ss->poll_views)','1','c
 # New common ownership/API consumers, specified by CONTRACT2-7, use frozen common literals.
 add('common_HOST_view_wrong_stride','xdev_ext_storfam_host_resources_init','.stride = sizeof(*p->slots),','.stride = sizeof(*p->slots) + 8,','common_HOST_view_stride_io','common')
 add('common_PEER_view_wrong_stride','xdev_ext_storfam_peer_resources_init','.stride = ss->dev->peer_slot_bytes,','.stride = sizeof(struct xdev_ext_stor_io),','common_PEER_view_native_stride','common')
-add('common_busy_unbind_ignored','xdev_ext_storfam_unbind','return xdev_ext_storfam_peer_resources_free(ss) &&\n\t       xdev_ext_storfam_host_resources_free(ss);','return true;','common_unbind_busy_false','common')
+add('common_busy_unbind_ignored','xdev_ext_storfam_unbind','if (!xdev_ext_storfam_peer_resources_free(ss) ||\n\t    !xdev_ext_storfam_host_resources_free(ss))\n\t\treturn false;','if (!xdev_ext_storfam_peer_resources_free(ss) ||\n\t    !xdev_ext_storfam_host_resources_free(ss))\n\t\treturn true;','common_unbind_busy_false','common')
 add('common_encode_callback_bypassed','xdev_ext_storfam_submit','ss->dev->encode(ss->member, &sb->rw, sb->sqe,','nvme_xdev_ext_member_encode(ss->member, &sb->rw, sb->sqe,','common_class_consumes_encode','common')
 add('common_init_callback_bypassed','xdev_ext_storfam_submit','ss->dev->request_init(ss->member, req, &sb->command, false);','nvme_xdev_ext_member_request_init(ss->member, req, &sb->command, false);','common_post_same_command','common')
 add('common_post_callback_bypassed','xdev_ext_storfam_submit','ss->dev->post(ss->member, req, io, b, &sb->command, peer);','nvme_xdev_ext_member_post(ss->member, req, io, b, &sb->command, peer);','common_class_consumes_post','common')
@@ -44,12 +44,12 @@ add('common_dptr_callback_bypassed','xdev_ext_storfam_submit','ss->dev->encode_d
 add('common_DPTR_capacity_wrong','xdev_ext_storfam_submit','XDEV_EXT_STOR_PEER_MAX_SPANS, io->list_cpu,','256, io->list_cpu,','common_DP_control_capacity512','common')
 add('common_DPTR_list_bytes_wrong','xdev_ext_storfam_submit','io->list_dma, SZ_4K);','io->list_dma, 2048);','common_DP_list_bytes4096','common')
 add('common_retire_callback_bypassed','xdev_ext_storfam_peer_put','ss->dev->retire_peer(ss->member, io, quiesced);','nvme_xdev_ext_member_retire_peer(ss->member, io, quiesced);','common_consume_native_retire_once','common')
-add('common_retire_before_handles','xdev_ext_storfam_peer_put','for (i = 0; i < io->nr_leases; i++)','ss->dev->retire_peer(ss->member, io, quiesced);\n\tfor (i = 0; i < io->nr_leases; i++)','common_retire_after_fd_handle','common')
+add('common_retire_before_handles','xdev_ext_storfam_peer_put','xdev_ext_stor_leases_retire(io->leases, io->nr_leases, quiesced);\n\tss->dev->retire_peer(ss->member, io, quiesced);','ss->dev->retire_peer(ss->member, io, quiesced);\n\txdev_ext_stor_leases_retire(io->leases, io->nr_leases, quiesced);','common_retire_after_fd_handle','common')
 add('extra_encode_NSID_rebuilt','xdev_ext_storfam_submit','if (ret)\n\t\treturn ret;\n\treq = blk_mq_alloc_request', 'if (ret)\n\t\treturn ret;\n\tsb->command.bytes[4] = 7;\n\treq = blk_mq_alloc_request','extra_custom_NSID13_SLBA103_full_PDU64','extra')
 add('extra_encode_SLBA_rebuilt','xdev_ext_storfam_submit','if (ret)\n\t\treturn ret;\n\treq = blk_mq_alloc_request', 'if (ret)\n\t\treturn ret;\n\tsb->command.bytes[40] = 100;\n\treq = blk_mq_alloc_request','extra_custom_NSID13_SLBA103_full_PDU64','extra')
 add('extra_coherent_list_rebuilt','xdev_ext_storfam_submit','ss->dev->request_init(ss->member, req, &sb->command, true);','((u8 *)io->list_cpu)[2] = 0x10;\n\t\tss->dev->request_init(ss->member, req, &sb->command, true);','extra_custom_coherent_list32','extra')
 # Preserve the remaining original 7A mutant semantics on actual 7B owners.
-# The first 45 recipes above remain unchanged; golden literals are reused intact.
+# The first 45 IDs and diagnostics are preserved; golden literals are reused intact.
 def old_add(name,symbol,before,after):
  add(name,symbol,before,after,m.old.MUTANTS[name][-1],'golden')
 old_add('identity_hook_skip','xdev_ext_storfam_submit_check','return ss->dev->identity(ss->member, true, &ss->geometry);','return 0;')
@@ -68,7 +68,6 @@ def change(text,name,d):
  if name=='host_init_after_slot':changed=m.replace(changed,'if (peer) {\n\t\tret = xdev_ext_storfam_peer_map', 'if (!peer) ss->dev->request_init(ss->member, req, &sb->command, false);\n\tif (peer) {\n\t\tret = xdev_ext_storfam_peer_map')
  if name=='peer_init_before_map':changed=m.replace(changed,'io = peer ? xdev_ext_storfam_peer_get(ss, sb) :','if (peer) ss->dev->request_init(ss->member, req, &sb->command, true);\n\tio = peer ? xdev_ext_storfam_peer_get(ss, sb) :')
  if name=='bounce_count_after_execute':changed=m.replace(changed,'blk_execute_rq_nowait(req, false);','blk_execute_rq_nowait(req, false);\n\tif (!peer && sb->bounce) atomic64_inc(&nvme_xdev_ext_mech_bounces);')
- if name=='common_retire_before_handles':changed=m.replace(changed,'xdev_ext_peer_fd_release(&io->leases[i], quiesced);\n\tss->dev->retire_peer(ss->member, io, quiesced);','xdev_ext_peer_fd_release(&io->leases[i], quiesced);')
  result=m.replace(text,body,changed)
  # Declarations only, not implementation replacements.
  declarations=''

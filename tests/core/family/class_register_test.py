@@ -71,6 +71,7 @@ static struct xdev_ext_mech_class_ops valid_ops(u32 class_id)
 {
  struct xdev_ext_mech_class_ops ops = { 0 };
  ops.class_id = class_id;
+ ops.decl = xdev_ext_mech_class_desc(class_id);
  ops.desc_size = 16;
  ops.desc_cap = 1;
  ops.bind = bind_ok;
