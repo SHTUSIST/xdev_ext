@@ -1,14 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Host test of the NVMe LBA window handle code (prototype for ASK.69): the
- * production issue ioctl, release, namespace resolution, CREATE window
- * admission and NVMe member bind run verbatim (pasted at PRODUCTION by
- * host_window_test.py); this file supplies OS objects and records what the
- * production code did with them. Requirement under test, as stated in the
- * design: a holder issues a handle for one range and access its own fd and
- * the native policy allow; handles of one namespace sharing an LBA are
- * refused unless both are read-only; a handle leaves the registry at its last
- * reference; a stage presenting a handle binds the namespace the holder
+ * Host test of the NVMe LBA window handle code: the production issue ioctl,
+ * release, namespace resolution, CREATE window admission and NVMe member bind
+ * run verbatim (pasted at PRODUCTION by host_window_test.py); this file
+ * supplies OS objects and records what the production code did with them.
+ * Requirement under test, as stated in the design: a holder of a live
+ * namespace issues a handle for one range and access its own fd and the
+ * native policy allow, and only from an fd that may write the namespace,
+ * because a handle reserves its range; handles of one namespace sharing an
+ * LBA are refused unless both are read-only; a handle leaves the registry at
+ * its last reference; a refused issue leaves no memory, pin or reserved fd
+ * number behind; a stage presenting a handle binds the namespace the holder
  * opened, only inside the range and in a granted direction; a raw namespace
  * file keeps its whole capacity.
  */

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""The host oracle accepts exactly the expected image (prototype for ASK.69)."""
+"""The host oracle accepts exactly the expected image."""
 import runpy
 import unittest
 from pathlib import Path
@@ -14,7 +14,7 @@ SEED = 0x1234abcd
 def images():
     source = V['expected_source'](SEED)
     dest = bytearray([V['GUARD']]) * V['SPAN']
-    for w in (0, 1, 5):
+    for w in (0, 1, 5, 6, 7):
         dest[w * WIN:(w + 1) * WIN] = source[w * WIN:(w + 1) * WIN]
     return source, dest
 
@@ -62,6 +62,21 @@ class WindowOracle(unittest.TestCase):
             source, dest = images()
             dest[w * WIN:(w + 1) * WIN] = source[w * WIN:(w + 1) * WIN]
             self.assertEqual(self.state(source, dest), 'FAIL')
+
+    def test_missing_victim2_window_fails(self):
+        source, dest = images()
+        dest[6 * WIN:7 * WIN] = bytes([V['GUARD']]) * WIN
+        self.assertEqual(self.state(source, dest), 'FAIL')
+
+    def test_tenant2_window_from_victim2_source_fails(self):
+        source, dest = images()
+        dest[7 * WIN:8 * WIN] = source[6 * WIN:7 * WIN]
+        self.assertEqual(self.state(source, dest), 'FAIL')
+
+    def test_write_past_tenant2_window_fails(self):
+        source, dest = images()
+        dest[8 * WIN] = 0
+        self.assertEqual(self.state(source, dest), 'FAIL')
 
     def test_source_off_formula_fails(self):
         source, dest = images()

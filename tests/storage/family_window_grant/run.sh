@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: GPL-2.0
 set -eu
 # run.sh SOURCE_ROOT OUTPUT_DIR
-# Storage LBA window grant rules (prototype for ASK.69), gcc and UBSan.
+# Storage LBA window grant rules, gcc and UBSan.
 source_root=$(realpath "${1:?source root}")
 output_dir=${2:?output dir}
 mkdir -p "$output_dir"

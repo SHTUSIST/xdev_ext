@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Each grant-rule mutant must make test_window_grant.c fail (prototype for ASK.69).
+"""Each grant-rule mutant must make test_window_grant.c fail.
 
 mutate.py SOURCE_ROOT OUTPUT_DIR. A mutant whose anchor is not found exactly
 once, or that does not compile, is SETUP (exit 2), never a kill.

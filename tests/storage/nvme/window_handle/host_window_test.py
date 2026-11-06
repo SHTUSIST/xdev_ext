@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Host test of the NVMe LBA window handle code (prototype for ASK.69).
+"""Host test of the NVMe LBA window handle code.
 
-host_window_test.py [SOURCE_ROOT]. Pastes the production window handle code
+host_window_test.py [SOURCE_ROOT]. Checks that NVME_IOCTL_XDEV_EXT_WINDOW has
+its own ('N', nr) in the product UAPI. Pastes the production window handle code
 and nvme_xdev_ext_member_bind verbatim into host_window_fixture.c, runs it
 under gcc and UBSan, then requires every listed mutant of the production
 code to make the fixture fail. A missing anchor or a mutant that does not

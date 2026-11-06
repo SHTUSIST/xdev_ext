@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: GPL-2.0
-# Guest program and BPF object of the NVMe LBA window handle test (prototype
-# for ASK.69). window_kvm.sh builds this against the assembled native tree of
-# the exact product commit (KERNEL_SRC: its UAPI headers and BPF program
-# headers) and the tested kernel's BTF.
+# Guest program and BPF object of the NVMe LBA window handle test.
+# window_kvm.sh builds this against the assembled native tree of the exact
+# product commit (KERNEL_SRC: its UAPI headers and BPF program headers) and
+# the tested kernel's BTF.
 KERNEL_SRC ?= $(abspath ../../../..)
 MECHDIR := $(KERNEL_SRC)/tools/xdev_ext_mech
 CC ?= cc

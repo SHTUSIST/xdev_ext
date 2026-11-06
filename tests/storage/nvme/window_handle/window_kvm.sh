@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# NVMe LBA window handles (prototype for ASK.69) on real QEMU NVMe PCI.
+# NVMe LBA window handles on real QEMU NVMe PCI.
 # Correctness only, nothing timed. --build is a kernel build directory
 # (bzImage, vmlinux with BTF, .config, xdev-ext-source.commit), --native the
 # assembled native tree of the commit under test (its UAPI headers and BPF
@@ -192,7 +192,7 @@ grep -q '"state": "PASS"' "$EV/whole-disk.json" || { cat "$EV/whole-disk.json"; 
 seed=$(sed -n 's/^seed=//p' "$EV/source-seed.txt")
 oks=$(grep -c '^ok ' "$EV/guest.log" || true)
 cat >"$EV/result.json" <<JSON
-{"scope":"NVMe LBA window handles (prototype for ASK.69), real QEMU NVMe, software correctness only",
+{"scope":"NVMe LBA window handles, real QEMU NVMe, software correctness only",
  "test_commit":"$SHA","kernel_commit":"$BUILD_SHA","kernel_is_test_commit":"$same",
  "kernel_src_equals_test_src":"$src_same","kernel_release":"$release",
  "guest_ok":$oks,"source_seed":"$seed","qemu_exit":0,"timing":"none","hardware":false,"performance":false}

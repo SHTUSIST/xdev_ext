@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Host whole-disk oracle of the NVMe window handle test (prototype for ASK.69).
+"""Host whole-disk oracle of the NVMe window handle test.
 
 window_validate.py SOURCE_BEFORE DESTINATION: the source must be the
 position-unique image of its own seed (8-byte word at byte offset o:
 low32 = ((o // 512) << 7) | (((o % 512) // 8) << 1) | 1, high32 = seed);
-destination windows W0 (tenant), W1 (victim) and W5 (raw-fd session) must be
-exact copies of the same source windows and every other byte the guard 0x6b.
+destination windows W0 (tenant), W1 (victim), W5 (raw-fd session), W6
+(victim2) and W7 (tenant2) must be exact copies of the same source windows and
+every other byte the guard 0x6b.
 Prints one JSON object; exit 0 only for PASS.
 """
 import json
@@ -18,7 +19,7 @@ WIN_NLB = 64
 WIN_BYTES = WIN_NLB * LBA
 SPAN = 4 << 20
 GUARD = 0x6b
-WRITTEN = {0: 'tenant', 1: 'victim', 5: 'raw'}
+WRITTEN = {0: 'tenant', 1: 'victim', 5: 'raw', 6: 'victim2', 7: 'tenant2'}
 
 
 def expected_source(seed, span=SPAN):

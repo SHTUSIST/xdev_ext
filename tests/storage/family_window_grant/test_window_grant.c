@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * Independent oracle for the storage LBA window grant rules (prototype for
- * ASK.69), written from the stated requirement, not from the implementation:
+ * Independent oracle for the storage LBA window grant rules, written from the
+ * stated requirement, not from the implementation:
  *
  *  - a holder of a namespace issues a grant naming one nonempty LBA range
  *    inside the namespace and its access (read, write or both);
