@@ -840,6 +840,45 @@ static void described_fences_case(void)
 	puts("described fences: described exporters keep the application-ordered contract");
 }
 
+/* XDEV_EXT_PEER_BACKING_UNDESCRIBED is the importer's own report for an
+ * exporter that registered no descriptor: requester admission then admits the
+ * frame on the terms that the lease-time fence rule above protects. A
+ * registered descriptor keeps the application-ordered contract and is never
+ * fenced (described_fences), so a descriptor reporting UNDESCRIBED, alone or
+ * with other bits, is refused before any requester attachment exists. */
+static u32 claimed_backing;
+
+static int claims_undescribed_describe(struct dma_buf *b, struct pci_dev *p,
+				       struct xdev_ext_peer_backing *out)
+{
+	(void)p;
+	assert(b->ops == &trusted_ops);
+	*out = (struct xdev_ext_peer_backing){.owner = NULL, .flags = claimed_backing};
+	return 0;
+}
+
+static void described_claims_undescribed_case(void)
+{
+	const u32 claims[] = {XDEV_EXT_PEER_BACKING_UNDESCRIBED,
+		XDEV_EXT_PEER_BACKING_UNDESCRIBED | XDEV_EXT_PEER_BACKING_STRUCT_PAGE};
+	for (unsigned i = 0; i < ARRAY_SIZE(claims); i++) {
+		struct xdev_ext_peer_region *r;
+		struct xdev_ext_peer_mapping *m = NULL;
+		struct xdev_ext_peer_backing back;
+		setup();
+		descriptor.describe = claims_undescribed_describe;
+		claimed_backing = claims[i];
+		r = import();
+		assert(xdev_ext_peer_describe(r, &requester, &back) == -EOPNOTSUPP);
+		assert(back.owner == NULL && back.flags == 0);
+		assert(xdev_ext_peer_map(r, &requester, DMA_BIDIRECTIONAL, &m) == -EOPNOTSUPP && !m);
+		assert(env.attaches == 0 && env.pins == 0 && env.maps == 0);
+		assert(xdev_ext_peer_unpin(r) == 0);
+		finish();
+	}
+	puts("described claims undescribed: a descriptor cannot report UNDESCRIBED");
+}
+
 int main(int argc, char **argv)
 {
 	assert(argc == 2);
@@ -867,6 +906,7 @@ int main(int argc, char **argv)
 	else if (!strcmp(argv[1], "close_undescribed_unknown")) close_undescribed_case(false, true);
 	else if (!strcmp(argv[1], "undescribed_fences")) undescribed_fences_case();
 	else if (!strcmp(argv[1], "described_fences")) described_fences_case();
+	else if (!strcmp(argv[1], "described_claims_undescribed")) described_claims_undescribed_case();
 	else return 2;
 	return 0;
 }

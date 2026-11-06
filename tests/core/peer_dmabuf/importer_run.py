@@ -28,7 +28,9 @@ CASES = ("geometry", "normal", "identity", "accounting", "unwind", "stale",
          "undescribed_unknown", "undescribed_allocation", "close_undescribed_idle",
          "close_undescribed_active", "close_undescribed_unknown",
          # Implicit-sync fences: refused on the undescribed path only.
-         "undescribed_fences", "described_fences")
+         "undescribed_fences", "described_fences",
+         # A registered descriptor cannot claim the undescribed terms.
+         "described_claims_undescribed")
 # These headers provide only declarations normally supplied by Linux. The
 # fixture injects their small kernel API boundary from kernel_shim.h. The
 # production peer/importer public headers themselves are never replaced.

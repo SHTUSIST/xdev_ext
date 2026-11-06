@@ -15,6 +15,8 @@ struct xdev_ext_peer_region;
 
 /* Only the exporter which owns this exact ops object can describe its backing.
  * The callback runs in process context without the descriptor registry lock.
+ * A report containing XDEV_EXT_PEER_BACKING_UNDESCRIBED is refused: that value
+ * belongs to imports without a descriptor, whose leases are fence-checked.
  */
 struct xdev_ext_peer_dmabuf_desc_ops {
  struct module *owner;

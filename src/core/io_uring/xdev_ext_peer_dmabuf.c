@@ -256,6 +256,10 @@ static int xdev_ext_dmabuf_describe(void *allocation, struct pci_dev *peer,
  }
  ret = a->descriptor->ops->describe(a->buf, peer, &backing);
  if (ret) return ret;
+ /* UNDESCRIBED is this importer's report for an exporter without a
+  * descriptor, whose leases the fence rule orders; a descriptor's leases are
+  * never fenced (may_access), so it cannot claim those admission terms. */
+ if (backing.flags & XDEV_EXT_PEER_BACKING_UNDESCRIBED) return -EOPNOTSUPP;
  if (backing.flags & XDEV_EXT_PEER_BACKING_HOST_SYSTEM) {
   if (backing.flags != (XDEV_EXT_PEER_BACKING_HOST_SYSTEM |
                         XDEV_EXT_PEER_BACKING_STRUCT_PAGE)) return -EOPNOTSUPP;

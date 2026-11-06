@@ -70,6 +70,10 @@ MUTANTS = [
  ("M20-fence-check-before-validation", P, " if (lease->mapping) { ret = -EBUSY; goto done; }\n",
   " if (lease->mapping) { ret = -EBUSY; goto done; }\n" + GATE),
  ("M21-refused-lease-keeps-grant", P, GATE + GRANT, GRANT + GATE),
+ # A registered descriptor that reports UNDESCRIBED would be admitted on the
+ # undescribed terms while may_access skips its fences.
+ ("M22-descriptor-claims-undescribed", D,
+  " if (backing.flags & XDEV_EXT_PEER_BACKING_UNDESCRIBED) return -EOPNOTSUPP;\n", ""),
 ]
 results = []
 for name, rel, old, new in MUTANTS:
