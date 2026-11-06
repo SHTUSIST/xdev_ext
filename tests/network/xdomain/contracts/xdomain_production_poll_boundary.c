@@ -293,6 +293,15 @@ void production_poll_once(unsigned endpoint)
  e->s.st.cls->progress(&e->s.st);
  production_poll_context=0;
 }
+/* Observe the existing OS queue, without invoking, canceling or requeuing work. */
+unsigned production_poll_work_queued(unsigned endpoint)
+{
+ struct work_struct *work=&link(endpoint)->poll_work.work;
+ unsigned queued=0;
+ for(unsigned i=0;i<world->nwork;i++)
+  if(world->work[i]==work&&world->work[i]->pending)queued++;
+ return queued;
+}
 unsigned production_poll_rings(unsigned endpoint,unsigned *noirq,unsigned *startpoll)
 {
  unsigned n=0;*noirq=*startpoll=0;
