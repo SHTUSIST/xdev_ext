@@ -119,6 +119,16 @@ class DryRun(unittest.TestCase):
         self.assertEqual((bye['error'], bye['retained']), (0, False))
         self.assertEqual(w.returncode, 0)
 
+    @unittest.skipIf(os.path.exists('/dev/xdev_ext_peer'), 'this host runs the xdev_ext kernel')
+    def test_setup_failure_names_its_step(self):
+        r = subprocess.run([str(BIN), 'local-verify'] + WINDOW + [
+            '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--pool-bytes', str(64 * 128 * KIB)],
+            capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 1, r.stdout)
+        kind, body = kp.parse_line(r.stdout.strip().splitlines()[-1])
+        self.assertEqual(kind, 'KV_ERROR')
+        self.assertEqual((body['where'], body['error']), ('setup: open /dev/xdev_ext_peer', -errno.ENOENT))
+
     def test_local_verify_and_serve_start_and_quit(self):
         w = self.worker('local-verify', ['--nvme', '/dev/null', '--nvme-prog', '/dev/null',
                                          '--pool-bytes', str(64 * 128 * KIB)])
