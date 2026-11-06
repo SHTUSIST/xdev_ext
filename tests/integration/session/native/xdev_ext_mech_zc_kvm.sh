@@ -902,7 +902,9 @@ printf 'source_slba=%s\nrx_slba=%s\nce_slba=%s\n' \
 printf 'nic_fallback=%s\n' "$NIC_FALLBACK" >"$ROOT/opt/xdev_ext/nic_fallback.env"
 if (( NIC_FALLBACK )); then
     [[ -s "$TOOLS/socket_sink.bpf.o" ]]
-    /bin/busybox --list | grep -Fxq arp || { echo 'FAIL busybox lacks the arp applet (Track S static neighbour)' >&2; exit 1; }
+    # grep reads the whole list: an early -q exit could SIGPIPE busybox and
+    # pipefail would then report a present applet as missing.
+    /bin/busybox --list | grep -Fx arp >/dev/null || { echo 'FAIL busybox lacks the arp applet (Track S static neighbour)' >&2; exit 1; }
     cp "$TOOLS/socket_sink.bpf.o" "$ROOT/opt/xdev_ext/"
     ln -sf /bin/busybox "$ROOT/bin/dd"
 fi

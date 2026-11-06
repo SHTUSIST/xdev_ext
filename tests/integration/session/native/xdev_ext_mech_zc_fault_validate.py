@@ -81,12 +81,23 @@ checked by check_other_qemu().  nvme_sgl_field is not ported: its producer
 (nvme_xdev_ext_passthru/nvme_sgl_gap_runtime) needs a dedicated SGL
 controller and a host recompute of the regions it writes.
 
+What xdev_ext_mech_ctl prints, as the checks read it: every session is laid
+out in NXP segments of an L3 MTU (ctl_layout: the NIC's MTU, else --mtu,
+default 1500), the ring's XDEV_EXT UMEM of chains a and d exactly like an
+AF_XDP UMEM; READY names the frames per group it registered.  A ce-chain
+session that latches an error never reaches the CE verdict
+(xdev_ext_mech_ctl_report_ce_chain): ctl_source_error_drain prints the final
+STATS and 'XDEV_EXT_MECH_SOURCE_DRAIN session= result= wait_err= drain_err=
+stats_reads=', cmd_ce_chain prints 'xdev_ext_mech_ctl: chain <c>: <strerror>'
+and exits CTL_FAIL (checked by _chain_failed).
+
 Exit status of the command line: 0 PASS, 1 FAIL, 2 usage, 5 INCONCLUSIVE
 (every invariant held but the fault never met its precondition, e.g.
 nothing was in flight when the exit or removal was due; never reported as
 PASS).  A violated invariant is FAIL even when the precondition was missed.
 """
 import argparse
+import errno
 import hashlib
 import json
 from pathlib import Path
@@ -100,10 +111,26 @@ SECTOR = 512
 GROUP_BYTES = 8192
 GROUP_SECTORS = GROUP_BYTES // SECTOR
 FRAME_BYTES = 4096
-# xdev_ext_mech_ctl at MTU 1500: six AF_XDP frames carry one 8 KiB group;
-# the ring's XDEV_EXT UMEM (chains a and d) uses two 4 KiB frames.
-AFXDP_FRAMES_PER_GROUP = 6
-IOU_FRAMES_PER_GROUP = GROUP_BYTES // FRAME_BYTES
+# xdev_ext_mech_ctl_layout(): payload of a frame starts at hdr_room = XDP
+# headroom 256 + 22 bytes of UMEM headroom + the 82-byte NXP packet header;
+# a segment is min(MTU - IPv4 20 - UDP 8 - NXP 40, frame - hdr_room), 8-aligned.
+CTL_MTU = 1500
+CTL_HDR_ROOM = 256 + 22 + 14 + 20 + 8 + 40
+NXP_ALIGN = 8
+
+
+def ctl_frames_per_group(mtu=CTL_MTU, group_bytes=GROUP_BYTES):
+    """Frames of one group in the pool layout xdev_ext_mech_ctl registers."""
+    segment = min(mtu - 20 - 8 - 40, FRAME_BYTES - CTL_HDR_ROOM) & ~(NXP_ALIGN - 1)
+    if segment <= 0:
+        raise ValueError('MTU too small for an NXP segment')
+    return (group_bytes - 1) // segment + 1
+
+
+# At MTU 1500 six 4 KiB frames carry one 8 KiB group, for the AF_XDP UMEM
+# and for the ring's XDEV_EXT UMEM (chains a and d) alike.
+AFXDP_FRAMES_PER_GROUP = ctl_frames_per_group()
+IOU_FRAMES_PER_GROUP = ctl_frames_per_group()
 # CTL_NUM_FRAMES 4096-byte frames: the UMEM of every ctl AF_XDP socket.
 AFXDP_POOL_PAGES = 4096
 LONG_GROUPS = 512
@@ -524,8 +551,66 @@ def _bounded_quarantine(stats, role, pool_frames):
     return sequestered
 
 
-def _pool_frames(pool, groups, depth):
-    return AFXDP_POOL_PAGES if pool == 'afxdp' else min(groups, depth) * IOU_FRAMES_PER_GROUP
+def _iou_frames(con, role):
+    """Frames per group of @role's XDEV_EXT UMEM: its READY line, which must be the ctl layout."""
+    ready = con.section(role).ready()
+    _require(ready is not None, role + ' missing READY')
+    frames = _int(ready, 'frames')
+    _require(frames == IOU_FRAMES_PER_GROUP,
+             f'{role} pool layout frames={frames} differs from the ctl layout ({IOU_FRAMES_PER_GROUP})')
+    return frames
+
+
+def _pool_frames(con, role, pool, groups, depth):
+    return AFXDP_POOL_PAGES if pool == 'afxdp' else min(groups, depth) * _iou_frames(con, role)
+
+
+def _errno(value):
+    """-errno of a ctl last_err field: a symbolic -E name, or the decimal fallback."""
+    if value is not None and re.fullmatch(r'-E[A-Z0-9]+', value):
+        code = getattr(errno, value[1:], None)
+        _require(isinstance(code, int), 'unknown errno ' + value)
+        return -code
+    try:
+        return int(value, 10)
+    except (TypeError, ValueError) as exc:
+        raise FaultCheckError('invalid last_err ' + str(value)) from exc
+
+
+def _chain_failed(con, role, chain, claim, *, err=None):
+    """The ce-chain record of a session that latched an error (module docstring).
+
+    @claim is the failure reported when the run exited 0 or printed a PASS
+    verdict; a FAIL verdict may accompany the record only for the same chain.
+    @err, when given, is the error the campaign must latch.
+    """
+    sec = con.section(role)
+    verdicts = [v for v in (sec.marker('XDEV_EXT_MECH_CE_SIM'), sec.marker('XDEV_EXT_MECH_CE_GPU')) if v]
+    _require(sec.exit == CTL_FAIL and not [v for v in verdicts if v[0] == 'PASS'], claim)
+    for _, fields in verdicts:
+        _require(fields.get('chain') == chain,
+                 f'{role} verdict names chain {fields.get("chain")}, ran chain {chain}')
+    stats = sec.stats()
+    _require(stats is not None, role + ' missing STATS')
+    drains = [_pairs(line) for line in sec.starting('XDEV_EXT_MECH_SOURCE_DRAIN ')]
+    _require(len(drains) == 1, role + ' failed without exactly one source drain record')
+    drain, ready = drains[0], sec.ready()
+    _require(ready is not None and drain.get('session') == ready.get('session') == stats.get('session'),
+             role + ' source drain record names another session')
+    _require(_int(drain, 'drain_err') == 0, role + ' final STATS of the failed run could not be read')
+    state = stats.get('state')
+    _require(drain.get('result') == ('quarantine' if state == 'ZOMBIE' else 'settled'),
+             f'{role} source drain result {drain.get("result")} differs from the final state {state}')
+    latched = _errno(stats.get('last_err'))
+    _require(latched < 0, role + ' failed run without a latched error')
+    _require(_int(drain, 'wait_err') == latched,
+             f'{role} run error {_int(drain, "wait_err")} differs from the latched {stats.get("last_err")}')
+    if err is not None:
+        _require(stats.get('last_err') == err, f'{role} expected {err}, latched {stats.get("last_err")}')
+    errors = [line for line in sec.lines if line.startswith('xdev_ext_mech_ctl: chain ')]
+    _require(len(errors) == 1 and errors[0].startswith(f'xdev_ext_mech_ctl: chain {chain}: '),
+             f'{role} chain {chain} failure not reported')
+    return stats
 
 
 def _success(con, role, marker, groups, *, kind):
@@ -585,12 +670,12 @@ def _session_fates(con, name, groups, depth):
             _require(state == 'NOT_CREATED', role + ' session without READY')
             continue
         _require(fate.get('session') == ready.get('session'), role + ' session id mismatch')
+        pool_frames = _pool_frames(con, role, pool, groups, depth)
         if state == 'FREED':
             continue
         _require(state == 'ZOMBIE', role + ' session neither freed nor parked: ' + str(state))
         _require(role != 'AFTER', 'the clean AFTER session was parked')
         _require(_int(fate, 'inflight') == 0, role + ' parked session still in flight (lost completion)')
-        pool_frames = _pool_frames(pool, groups, depth)
         sequestered = _int(fate, 'sequestered')
         _require(sequestered <= pool_frames, role + ' parked quarantine exceeds its pool')
         retained[role] = dict(pool=pool, uses_ce=uses_ce, sequestered=sequestered,
@@ -757,10 +842,12 @@ def check_netdev_remove_tx(con, g, d):
     con.one('NETDEV_REMOVED', ifname='eth0', present='0')
     stats = _stopped(con, 'SRC', '-ENXIO', rx=False, groups=g, depth=d,
                      pool=AFXDP_POOL_PAGES, exits=(CTL_FAIL,), nvme_stages=(0,), ce_stages=(1, 2))
-    verdict = con.section('SRC').marker('XDEV_EXT_MECH_CE_SIM')
-    _require(verdict and verdict[1].get('chain') == 'b', 'chain b verdict missing')
     if stats.get('state') == 'STOPPED':
-        _require(verdict[0] == 'FAIL', 'chain b falsely succeeded after its NIC went away')
+        # _stopped pinned -ENXIO already.
+        _chain_failed(con, 'SRC', 'b', 'chain b falsely succeeded after its NIC went away')
+    else:
+        verdict = con.section('SRC').marker('XDEV_EXT_MECH_CE_SIM')
+        _require(verdict and verdict[1].get('chain') == 'b', 'chain b verdict missing')
     return {}
 
 
@@ -780,11 +867,8 @@ def check_netdev_remove_rx(con, g, d):
 def check_window_reject(con, g, d):
     sec = con.section('SRC')
     _require(sec.exit == CTL_FAIL, 'out-of-window chain must fail the run')
-    verdict = sec.marker('XDEV_EXT_MECH_CE_SIM')
-    _require(verdict and verdict[0] == 'FAIL' and verdict[1].get('chain') == 'a',
-             'out-of-window chain falsely succeeded')
-    stats = sec.stats()
-    _require(stats is not None, 'SRC missing STATS')
+    # The NVMe descriptor check refuses an SLBA outside its window with -ERANGE.
+    stats = _chain_failed(con, 'SRC', 'a', 'out-of-window chain falsely succeeded', err='-ERANGE')
     _require(_int(stats, 'inflight') == 0 and _int(stats, 'sequestered') == 0,
              'refused groups left something in flight or sequestered')
     _require(_int(stats, 'batches_done') == 0, 'an out-of-window group completed')
@@ -840,11 +924,7 @@ def check_afxdp_drv_copy(con, g, d):
 def check_ce_presubmit(con, g, d):
     sec = con.section('SRC')
     _require(sec.exit == CTL_FAIL, 'pre-submit failures must fail the run')
-    verdict = sec.marker('XDEV_EXT_MECH_CE_SIM')
-    _require(verdict and verdict[0] == 'FAIL' and verdict[1].get('chain') == 'b',
-             'pre-submit failure falsely succeeded')
-    stats = sec.stats()
-    _require(stats is not None, 'SRC missing STATS')
+    stats = _chain_failed(con, 'SRC', 'b', 'pre-submit failure falsely succeeded')
     for key in ('batches_done', 'sequestered', 'inflight'):
         _require(_int(stats, key) == 0, 'pre-submit ' + key)
     _require(1 <= _int(stats, 'batches_abort') <= g, 'pre-submit abort count')
@@ -858,20 +938,17 @@ def check_ce_presubmit(con, g, d):
 def check_ce_ambiguous(con, g, d):
     sec = con.section('SRC')
     _require(sec.exit == CTL_FAIL, 'ambiguous copies must fail the run')
-    verdict = sec.marker('XDEV_EXT_MECH_CE_SIM')
-    _require(verdict and verdict[0] == 'FAIL' and verdict[1].get('chain') == 'd',
-             'ambiguous copy falsely succeeded')
-    stats = sec.stats()
-    _require(stats is not None and _int(stats, 'batches_done') == 0 and
-             _int(stats, 'inflight') == 0, 'ambiguous run not settled')
+    # A lost copy outcome is -EIO (xdev_ext_window_copy_disposition).
+    stats = _chain_failed(con, 'SRC', 'd', 'ambiguous copy falsely succeeded', err='-EIO')
+    _require(_int(stats, 'batches_done') == 0 and _int(stats, 'inflight') == 0,
+             'ambiguous run not settled')
     submitted, _ = _stage_balance(stats, 'SRC', rx=False, groups=g, ce_stages=(0, 1))
     _require(submitted[1] == 0, 'a group passed its ambiguous H2D copy')
-    pool = min(g, d) * IOU_FRAMES_PER_GROUP
-    sequestered = _bounded_quarantine(stats, 'SRC', pool)
+    frames = _iou_frames(con, 'SRC')
+    sequestered = _bounded_quarantine(stats, 'SRC', min(g, d) * frames)
     _require(sequestered > 0, 'ambiguous copies left no quarantine (frames released early)')
     # Every accepted copy whose outcome was lost keeps its group's frames.
-    _require(sequestered == submitted[0] * IOU_FRAMES_PER_GROUP,
-             'not every ambiguous group was sequestered')
+    _require(sequestered == submitted[0] * frames, 'not every ambiguous group was sequestered')
     fate = con.one('SESSION', role='SRC')
     _require(fate.get('state') == 'ZOMBIE', 'ambiguous quarantine not parked as ZOMBIE')
     _require(fate.get('sequestered') == str(sequestered),
@@ -895,7 +972,7 @@ def check_nvme_readonly(con, g, d):
              'read-only run reported progress or kept commands in flight')
     _stage_balance(stats, 'SRC', rx=False, groups=g, nvme_stages=(0, 3), ce_stages=(1, 2))
     _require(_vector(stats, 'submitted')[3] >= 1, 'no write reached the read-only namespace')
-    _bounded_quarantine(stats, 'SRC', min(g, d) * IOU_FRAMES_PER_GROUP)
+    _bounded_quarantine(stats, 'SRC', min(g, d) * _iou_frames(con, 'SRC'))
     return dict(outcome='native-error')
 
 
@@ -906,14 +983,13 @@ def check_nvme_reset(con, g, d):
     sec = con.section('SRC')
     stats = sec.stats()
     _require(stats is not None and _int(stats, 'inflight') == 0, 'reset left commands in flight')
-    verdict = sec.marker('XDEV_EXT_MECH_CE_SIM')
     if sec.exit == 0:
         _success(con, 'SRC', 'XDEV_EXT_MECH_CE_SIM', g, kind='chain-a')
         return dict(outcome='success', exact=True)
-    _require(sec.exit == CTL_FAIL and verdict and verdict[0] == 'FAIL', 'reset failure not reported')
+    _chain_failed(con, 'SRC', 'a', 'reset failure not reported')
     _require(stats.get('last_err') != '0', 'failure without a latched error')
     _stage_balance(stats, 'SRC', rx=False, groups=g, nvme_stages=(0, 3), ce_stages=(1, 2))
-    _bounded_quarantine(stats, 'SRC', min(g, d) * IOU_FRAMES_PER_GROUP)
+    _bounded_quarantine(stats, 'SRC', min(g, d) * _iou_frames(con, 'SRC'))
     return dict(outcome='native-failure', ce=_int(stats, 'batches_done'))
 
 

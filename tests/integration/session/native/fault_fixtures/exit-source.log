@@ -6,14 +6,14 @@ XDEV_EXT_ZC_FAULT_CE_CONFIG phase=campaign fail_mode=none delay_us=10000
 XDEV_EXT_ZC_FAULT_INFLIGHT_SEEN role=SRC seen=1 inflight=2
 XDEV_EXT_ZC_FAULT_KILL role=SRC signal=9
 XDEV_EXT_ZC_FAULT_LOG_BEGIN role=SRC exit=137
-XDEV_EXT_MECH_READY mode=source session=31 frames=2 seg_len=4096 xsk=none
+XDEV_EXT_MECH_READY mode=source session=31 frames=6 seg_len=1432 xsk=none
 XDEV_EXT_ZC_FAULT_LOG_END role=SRC
 XDEV_EXT_ZC_FAULT_CE_CONFIG phase=after fail_mode=none delay_us=10000
 XDEV_EXT_ZC_FAULT_LOG_BEGIN role=AFTER exit=0
-XDEV_EXT_MECH_READY mode=source session=99 frames=2 seg_len=4096 xsk=none
+XDEV_EXT_MECH_READY mode=source session=99 frames=6 seg_len=1432 xsk=none
 XDEV_EXT_MECH_NOTIFY mode=terminal eventfd_reads=1 stats_reads=1
 XDEV_EXT_MECH_CE_SIM=PASS chain=a
-XDEV_EXT_MECH_STATS session=99 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=4 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=4 submitted=4,4,4,4 completed=4,4,4,4
+XDEV_EXT_MECH_STATS session=99 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=12 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=12 submitted=4,4,4,4 completed=4,4,4,4
 XDEV_EXT_ZC_FAULT_LOG_END role=AFTER
 XDEV_EXT_ZC_FAULT_SESSION role=SRC session=31 state=FREED
 XDEV_EXT_ZC_FAULT_SESSION role=AFTER session=99 state=FREED
