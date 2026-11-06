@@ -574,7 +574,27 @@ static int create_session(struct worker *wk)
 	return ret;
 }
 
-static int setup(struct worker *wk)
+/* Pinned host pages of a dma-buf registration count against RLIMIT_MEMLOCK. */
+static void raise_memlock(void)
+{
+	struct rlimit lim = { RLIM_INFINITY, RLIM_INFINITY };
+
+	if (setrlimit(RLIMIT_MEMLOCK, &lim) && !getrlimit(RLIMIT_MEMLOCK, &lim)) {
+		lim.rlim_cur = lim.rlim_max;
+		setrlimit(RLIMIT_MEMLOCK, &lim);
+	}
+}
+
+static long long memlock_bytes(void)
+{
+	struct rlimit lim;
+
+	if (getrlimit(RLIMIT_MEMLOCK, &lim))
+		return -2;
+	return lim.rlim_cur == RLIM_INFINITY ? -1 : (long long)lim.rlim_cur;
+}
+
+static int setup(struct worker *wk, const char **where)
 {
 	const struct opts *o = &wk->o;
 	uint64_t len;
@@ -585,45 +605,56 @@ static int setup(struct worker *wk)
 	len = wk->pool_frames * o->g.frame_bytes;
 	if (o->dry_run)
 		return 0;
+	*where = "open /dev/xdev_ext_peer";
 	wk->ctl = open("/dev/xdev_ext_peer", O_RDWR | O_CLOEXEC);
 	if (wk->ctl < 0)
 		return -errno;
 	if (o->role != ROLE_RESTORE) {
+		*where = "load NVMe program";
 		ret = load_private(o->nvme_prog, "kv_nvme_ops", "xdev_ext_nvme_mech_ops", &wk->nvme);
 		if (ret)
 			return ret;
 	}
 	if (o->role != ROLE_LOCAL && o->xdomain_prog) {
+		*where = "load XDOMAIN program";
 		ret = load_private(o->xdomain_prog, o->xdomain_map, "xdev_ext_xdomain_mech_ops",
 				   &wk->xd);
 		if (ret)
 			return ret;
 	}
 	if (o->role == ROLE_RESTORE) {
+		*where = "CUDA allocation";
 		ret = xdev_ext_mech_cuda_open(&wk->cuda, o->gpu_bdf, len);
 		if (ret)
 			return ret;
+		*where = "open GPU node";
 		wk->gpu = open(o->gpu_node, O_RDWR | O_CLOEXEC);
 		if (wk->gpu < 0)
 			return -errno;
+		*where = "register GPU memory";
 		wk->allocation = peer_register(wk->ctl, wk->gpu, 0, wk->cuda.va, len);
 	} else {
+		*where = "system heap allocation";
 		wk->dmabuf = heap_alloc(len);
 		if (wk->dmabuf < 0)
 			return wk->dmabuf;
+		*where = "register dma-buf";
 		wk->allocation = peer_register(wk->ctl, wk->dmabuf, XDEV_EXT_PEER_REGISTER_F_DMABUF,
 					       0, len);
 	}
 	if (wk->allocation < 0)
 		return wk->allocation;
+	*where = "CREATE";
 	ret = create_session(wk);
 	if (ret)
 		return ret;
 	if (o->role == ROLE_SERVE) {
+		*where = "listen";
 		wk->lsock = tcp_open(o->listen, true, o->timeout_ms);
 		return wk->lsock < 0 ? wk->lsock : 0;
 	}
 	if (o->role == ROLE_RESTORE) {
+		*where = "connect to host 1";
 		wk->sock = tcp_open(o->peer, false, o->timeout_ms);
 		return wk->sock < 0 ? wk->sock : 0;
 	}
@@ -1019,7 +1050,8 @@ int main(int argc, char **argv)
 {
 	struct worker wk = { .ctl = -1, .allocation = -1, .dmabuf = -1, .gpu = -1, .lsock = -1,
 			     .sock = -1, .next_key = 1 };
-	char buf[LINE_MAX_BYTES];
+	char buf[LINE_MAX_BYTES], where[96];
+	const char *step = "options";
 	bool retained = false;
 	int ret;
 
@@ -1030,19 +1062,23 @@ int main(int argc, char **argv)
 		emit_error("arguments", ret);
 		return 2;
 	}
-	ret = setup(&wk);
+	if (!wk.o.dry_run)
+		raise_memlock();
+	ret = setup(&wk, &step);
 	if (ret) {
-		emit_error("setup", ret);
+		snprintf(where, sizeof(where), "setup: %s", step);
+		emit_error(where, ret);
 		teardown(&wk, &retained);
 		return 1;
 	}
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
 	       "\"pool_frames\": %" PRIu64 ", \"frame_bytes\": %u, \"group_bytes\": %u, "
-	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s}\n",
+	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s, "
+	       "\"memlock_bytes\": %lld}\n",
 	       argv[1], wk.o.dry_run ? "true" : "false",
 	       wk.s ? (unsigned long long)xdev_ext_session_id(wk.s) : 0ULL, wk.pool_frames,
 	       wk.o.g.frame_bytes, wk.o.g.group_bytes, wk.o.g.depth, wk.o.g.window,
-	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false");
+	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes());
 	fflush(stdout);
 	if (wk.o.role == ROLE_SERVE) {
 		ret = serve_loop(&wk);
