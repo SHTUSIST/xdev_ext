@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0
-/* XDOMAIN device vtable: NHI data rings carry only device-memory elements;
- * a host-memory control ring pair carries protocol messages. */
+/* XDOMAIN device vtable: NHI data rings carry only payload elements, in PEER
+ * device memory or IOU_UMEM host pages; a host-memory control ring pair
+ * carries protocol messages. */
 #include <linux/bitmap.h>
 #include <linux/crc32.h>
 #include <linux/dma-mapping.h>
 #include <linux/jiffies.h>
 #include <linux/pci.h>
+#include <linux/xdev_ext_requester_backing.h>
 #include <linux/xdev_ext_requester_retention.h>
 #include "xdev_ext_xdomain.h"
 #include "xdev_ext_xdomain_probe_core.h"
@@ -28,6 +30,11 @@ struct xdev_ext_xd_native {
 	struct tb_ring **slot;
 	enum xdev_ext_xd_native_disposition disposition;
 	bool started;
+	/* poll_on_interrupt receive rings: start_poll argument, and whether
+	 * start_poll masked this ring's interrupt (poll_irq_lock).
+	 */
+	struct xdev_ext_xd_link *xl;
+	bool irq_masked;
 };
 struct xdev_ext_xd_rings {
 	/* Path teardown follows UNKNOWN retirement, so keep scalar native HopIDs
@@ -43,23 +50,17 @@ struct xdev_ext_xd_rings {
 	u64 retained_bytes;
 	bool starting, retention_sealed;
 };
-/* Each direction is one coherent allocation. A canceled accepted slot taints
- * the whole allocation. The record is prepared before any DMA acceptance.
- * Once quarantined this object has no link, frame or executable pointer.
+/* Each direction has a live custody ledger for one core-owned coherent
+ * allocation. A canceled accepted slot taints the whole allocation.
  */
 struct xdev_ext_xd_ctl_allocation {
-	struct list_head node;
-	struct pci_dev *pdev;
-	u8 *cpu;
-	dma_addr_t dma;
-	size_t bytes;
+	struct xdev_ext_requester_backing *backing;
+	struct xdev_ext_requester_backing_view view;
 	u64 generation;
 	u64 accepted, retired;
 	bool pending[XDEV_EXT_XD_CTL_RING];
 	bool unknown, callbacks_drained, ever_started, rx;
 };
-static LIST_HEAD(xdev_ext_xd_ctl_quarantine);
-static DEFINE_SPINLOCK(xdev_ext_xd_ctl_quarantine_lock);
 
 static void xdev_ext_xd_ctl_tx_cb(struct tb_ring *, struct ring_frame *, bool);
 static void xdev_ext_xd_ctl_rx_cb(struct tb_ring *, struct ring_frame *, bool);
@@ -95,6 +96,51 @@ static void xdev_ext_xd_poll_wake_locked(struct xdev_ext_xd_link *xl)
 	}
 }
 
+/* poll_mutex held. One bounded pass, rotating to the next ring after at most
+ * eight frames. Returns the frames dispatched, or -ESTALE once stop closed
+ * the gate of @generation. @rx_only leaves transmit rings to ring work.
+ */
+static int xdev_ext_xd_poll_pass(struct xdev_ext_xd_link *xl, struct xdev_ext_xd_rings *rs,
+				 u64 generation, bool rx_only)
+{
+	unsigned long flags;
+	u32 done = 0, empty = 0;
+
+	while (done < XDEV_EXT_XD_POLL_BUDGET && empty < rs->count) {
+		u32 index = rs->poll_cursor, quantum = 0;
+		struct tb_ring *ring = *rs->native[index].slot;
+
+		rs->poll_cursor = (index + 1) % rs->count;
+		/* Native order: data RX, data TX, control RX, control TX. */
+		if (rx_only && index >= xl->channels && index != rs->count - 2)
+			ring = NULL;
+		while (ring && quantum < XDEV_EXT_XD_POLL_QUANTUM &&
+		       done < XDEV_EXT_XD_POLL_BUDGET) {
+			struct ring_frame *frame;
+			bool live;
+
+			spin_lock_irqsave(&xl->lock, flags);
+			live = xl->poll_live && generation == xl->poll_generation &&
+			       !xdev_ext_xd_closing(xl);
+			spin_unlock_irqrestore(&xl->lock, flags);
+			if (!live)
+				return -ESTALE;
+			frame = tb_ring_poll(ring);
+			if (!frame)
+				break;
+			/* Even if stop closed the gate after poll returned, this
+			 * callback owns the frame and must finish before retirement.
+			 * Native poll has dropped its ring lock; dispatch may sleep.
+			 */
+			frame->callback(ring, frame, false);
+			done++;
+			quantum++;
+		}
+		empty = quantum ? 0 : empty + 1;
+	}
+	return done;
+}
+
 /* No ctl_mutex: stop may hold it while waiting for this work/callback.
  * Only poll_mutex protects the ring pointers here. Stop first closes the
  * live gate, then waits for this mutex before touching native storage.
@@ -104,7 +150,7 @@ bool xdev_ext_xd_poll(struct xdev_ext_xd_link *xl)
 	struct xdev_ext_xd_rings *rs;
 	unsigned long flags;
 	u64 generation, wake;
-	u32 done = 0, empty = 0, i;
+	u32 i;
 	bool pending = false;
 
 	if (!xl->poll_completions)
@@ -119,35 +165,8 @@ bool xdev_ext_xd_poll(struct xdev_ext_xd_link *xl)
 	generation = xl->poll_generation;
 	wake = xl->poll_wake;
 	spin_unlock_irqrestore(&xl->lock, flags);
-	while (done < XDEV_EXT_XD_POLL_BUDGET && empty < rs->count) {
-		struct tb_ring *ring = *rs->native[rs->poll_cursor].slot;
-		u32 quantum = 0;
-
-		rs->poll_cursor = (rs->poll_cursor + 1) % rs->count;
-		while (ring && quantum < XDEV_EXT_XD_POLL_QUANTUM &&
-		       done < XDEV_EXT_XD_POLL_BUDGET) {
-			struct ring_frame *frame;
-			bool live;
-
-			spin_lock_irqsave(&xl->lock, flags);
-			live = xl->poll_live && generation == xl->poll_generation &&
-			       !xdev_ext_xd_closing(xl);
-			spin_unlock_irqrestore(&xl->lock, flags);
-			if (!live)
-				goto out;
-			frame = tb_ring_poll(ring);
-			if (!frame)
-				break;
-			/* Even if stop closed the gate after poll returned, this
-			 * callback owns the frame and must finish before retirement.
-			 * Native poll has dropped its ring lock; dispatch may sleep.
-			 */
-			frame->callback(ring, frame, false);
-			done++;
-			quantum++;
-		}
-		empty = quantum ? 0 : empty + 1;
-	}
+	if (xdev_ext_xd_poll_pass(xl, rs, generation, false) < 0)
+		goto out;
 	/* A NULL only describes that instant. Observe every native tail and
 	 * the post generation before deciding whether the worker needs a turn.
 	 */
@@ -172,12 +191,88 @@ out:
 	return pending;
 }
 
+/* Receive-ring interrupt with poll_on_interrupt: hard IRQ or NHI interrupt
+ * work, nhi->lock and the ring lock held, the ring interrupt already masked.
+ * Ring locks nest inside xl->lock, so only the leaf poll_irq_lock is taken.
+ * The drain is queued without delay; it never runs here.
+ */
+static void xdev_ext_xd_start_poll(void *data)
+{
+	struct xdev_ext_xd_native *n = data;
+	struct xdev_ext_xd_link *xl = n->xl;
+	unsigned long flags;
+
+	spin_lock_irqsave(&xl->poll_irq_lock, flags);
+	n->irq_masked = true;
+	if (xl->poll_irq_live)
+		mod_delayed_work(system_long_wq, &xl->poll_work, 0);
+	spin_unlock_irqrestore(&xl->poll_irq_lock, flags);
+}
+
+/* poll_on_interrupt drain, queued by start_poll. Receive rings only: a full
+ * budget keeps the interrupts masked and queues the next pass at once.
+ * Otherwise each interrupt start_poll masked is re-enabled after its ring
+ * polled empty, and a completion that lands between that final poll and the
+ * re-enable queues another pass even on a controller that raises nothing.
+ */
+static void xdev_ext_xd_irq_drain(struct xdev_ext_xd_link *xl)
+{
+	struct xdev_ext_xd_rings *rs;
+	unsigned long flags;
+	u64 generation;
+	bool again;
+	int done;
+	u32 i;
+
+	mutex_lock(&xl->poll_mutex);
+	spin_lock_irqsave(&xl->lock, flags);
+	if (!xl->poll_live || xdev_ext_xd_closing(xl)) {
+		spin_unlock_irqrestore(&xl->lock, flags);
+		goto out;
+	}
+	rs = xl->rings;
+	generation = xl->poll_generation;
+	spin_unlock_irqrestore(&xl->lock, flags);
+	done = xdev_ext_xd_poll_pass(xl, rs, generation, true);
+	if (done < 0)
+		goto out;
+	again = done == XDEV_EXT_XD_POLL_BUDGET;
+	for (i = 0; done < XDEV_EXT_XD_POLL_BUDGET && i < rs->count; i++) {
+		struct xdev_ext_xd_native *n = &rs->native[i];
+		struct tb_ring *ring = *n->slot;
+		bool masked;
+
+		spin_lock_irqsave(&xl->poll_irq_lock, flags);
+		masked = n->irq_masked;
+		n->irq_masked = false;
+		spin_unlock_irqrestore(&xl->poll_irq_lock, flags);
+		if (!masked || !ring)
+			continue;
+		/* Not under poll_irq_lock: start_poll takes it under NHI locks. */
+		tb_ring_poll_complete(ring);
+		if (tb_ring_poll_pending(ring))
+			again = true;
+	}
+	if (again) {
+		spin_lock_irqsave(&xl->lock, flags);
+		if (xl->poll_live && generation == xl->poll_generation &&
+		    !xdev_ext_xd_closing(xl))
+			mod_delayed_work(system_long_wq, &xl->poll_work, 0);
+		spin_unlock_irqrestore(&xl->lock, flags);
+	}
+out:
+	mutex_unlock(&xl->poll_mutex);
+}
+
 void xdev_ext_xd_poll_work(struct work_struct *work)
 {
 	struct xdev_ext_xd_link *xl = container_of(to_delayed_work(work),
 						struct xdev_ext_xd_link, poll_work);
 
-	xdev_ext_xd_poll(xl);
+	if (xl->poll_on_interrupt)
+		xdev_ext_xd_irq_drain(xl);
+	else
+		xdev_ext_xd_poll(xl);
 }
 
 /* Also read by post/callback paths under xl->lock. */
@@ -202,32 +297,30 @@ static int xdev_ext_xd_ctl_alloc(struct xdev_ext_xd_link *xl, bool rx)
 	a = kzalloc(sizeof(*a), GFP_KERNEL);
 	if (!a)
 		return -ENOMEM;
-	a->pdev = pci_dev_get(xl->nhi_pdev);
-	a->bytes = XDEV_EXT_XD_CTL_RING * stride;
 	a->rx = rx;
-	a->cpu = dma_alloc_coherent(&a->pdev->dev, a->bytes, &a->dma, GFP_KERNEL);
-	if (!a->cpu) {
-		pci_dev_put(a->pdev);
+	a->backing = xdev_ext_requester_backing_alloc(xl->nhi_pdev,
+			XDEV_EXT_XD_CTL_RING * stride, GFP_KERNEL);
+	if (!a->backing) {
 		kfree(a);
 		return -ENOMEM;
 	}
+	xdev_ext_requester_backing_view(a->backing, &a->view);
 	a->generation = ++xl->rings->generation;
 	a->callbacks_drained = true;
-	INIT_LIST_HEAD(&a->node);
 	for (i = 0; i < XDEV_EXT_XD_CTL_RING; i++)
 		frames[i] = (struct xdev_ext_xd_ctl_frame) {
-			.xl = xl, .index = i, .buf = a->cpu + i * stride,
-			.frame = { .buffer_phy = a->dma + i * stride,
+			.xl = xl, .index = i, .buf = a->view.cpu + i * stride,
+			.frame = { .buffer_phy = a->view.dma + i * stride,
 			.callback = rx ? xdev_ext_xd_ctl_rx_cb : xdev_ext_xd_ctl_tx_cb },
 		};
 	if (rx) {
 		xl->ctl_rx_alloc = a;
-		xl->ctl_rx_buf = a->cpu;
-		xl->ctl_rx_dma = a->dma;
+		xl->ctl_rx_buf = a->view.cpu;
+		xl->ctl_rx_dma = a->view.dma;
 	} else {
 		xl->ctl_tx_alloc = a;
-		xl->ctl_tx_buf = a->cpu;
-		xl->ctl_tx_dma = a->dma;
+		xl->ctl_tx_buf = a->view.cpu;
+		xl->ctl_tx_dma = a->view.dma;
 		bitmap_fill(xl->ctl_tx_free, XDEV_EXT_XD_CTL_RING);
 	}
 	return 0;
@@ -238,22 +331,16 @@ static void xdev_ext_xd_ctl_release(struct xdev_ext_xd_link *xl, bool rx)
 {
 	struct xdev_ext_xd_ctl_allocation **ap = rx ? &xl->ctl_rx_alloc : &xl->ctl_tx_alloc;
 	struct xdev_ext_xd_ctl_allocation *a = *ap;
-	unsigned long flags;
+	u64 retained;
 
 	if (!a)
 		return;
 	if (a->accepted != a->retired)
 		a->unknown = true;
-	if (a->unknown) {
-		xl->rings->retained_bytes += a->bytes;
-		spin_lock_irqsave(&xdev_ext_xd_ctl_quarantine_lock, flags);
-		list_add_tail(&a->node, &xdev_ext_xd_ctl_quarantine);
-		spin_unlock_irqrestore(&xdev_ext_xd_ctl_quarantine_lock, flags);
-	} else {
-		dma_free_coherent(&a->pdev->dev, a->bytes, a->cpu, a->dma);
-		pci_dev_put(a->pdev);
-		kfree(a);
-	}
+	retained = xdev_ext_requester_backing_retire(&a->backing, a->unknown);
+	if (retained)
+		xl->rings->retained_bytes += retained;
+	kfree(a);
 	*ap = NULL;
 	if (rx) {
 		xl->ctl_rx_buf = NULL;
@@ -336,6 +423,9 @@ static int xdev_ext_xd_post(void *lk, struct xdev_ext_net_elem *e, u32 n, bool r
 			.sof = XDEV_EXT_XD_PDF_START,
 			.eof = XDEV_EXT_XD_PDF_END,
 		};
+		/* IOU_UMEM host pages: the requester's mapping of the element. */
+		if (e[i].lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA)
+			f->buffer_phy = e[i].lease.u.hdma.dma;
 		/* The native API only rejects a stopped ring. Stop clears up
 		 * under xl->lock before touching any ring, so this whole group
 		 * shares one running window. Hardware fullness queues the same
@@ -620,7 +710,8 @@ static void xdev_ext_xd_ctl_dispatch(struct xdev_ext_xd_link *xl, const u8 *buf,
 	}
 	spin_unlock_irqrestore(&xl->lock, flags);
 	ep = xl->chan[m.channel].ep[to_rx];
-	if (ep && !ep->early)
+	/* A v2-envelope endpoint takes v1 control until its program pairs. */
+	if (ep && (!ep->early || xdev_ext_xd_class_ctl_rts_cts(ep->st)))
 		xdev_ext_xd_class_ctl(ep->st, &m);
 	else if (!ep && m.type == XDEV_EXT_XD_RTS)
 		xdev_ext_xd_refuse_rts(xl, &m);
@@ -741,18 +832,30 @@ int xdev_ext_xd_rings_start(struct xdev_ext_xd_link *xl)
 		return -EIO;
 	}
 	spin_lock_irqsave(&xl->lock, flags);
-	if (xl->poll_completions && !xdev_ext_xd_closing(xl)) {
+	if ((xl->poll_completions || xl->poll_on_interrupt) && !xdev_ext_xd_closing(xl)) {
 		rs->poll_cursor = 0;
 		xl->poll_generation++;
 		xl->poll_live = true;
 		xdev_ext_xd_poll_wake_locked(xl);
+	}
+	if (xl->poll_on_interrupt && xl->poll_live) {
+		bool masked = false;
+
+		/* An interrupt before this gate masked its ring without a drain. */
+		spin_lock(&xl->poll_irq_lock);
+		xl->poll_irq_live = true;
+		for (i = 0; i < rs->count; i++)
+			masked |= rs->native[i].irq_masked;
+		if (masked)
+			mod_delayed_work(system_long_wq, &xl->poll_work, 0);
+		spin_unlock(&xl->poll_irq_lock);
 	}
 	spin_unlock_irqrestore(&xl->lock, flags);
 	return 0;
 }
 
 /* ctl_mutex held, never from a frame callback, never with ep_mutex or a
- * spinlock held.  Data RX first: its posted device-memory buffers are
+ * spinlock held.  Data RX first: its posted payload buffers are
  * reported canceled (unknown) before the control ring that could still
  * deliver their acknowledgements stops. */
 void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
@@ -770,8 +873,14 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 	xl->poll_generation++;
 	if (rs)
 		rs->starting = false;
+	if (xl->poll_on_interrupt) {
+		/* A receive interrupt may still run until its ring stops. */
+		spin_lock(&xl->poll_irq_lock);
+		xl->poll_irq_live = false;
+		spin_unlock(&xl->poll_irq_lock);
+	}
 	spin_unlock_irqrestore(&xl->lock, flags);
-	if (xl->poll_completions) {
+	if (xl->poll_completions || xl->poll_on_interrupt) {
 		cancel_delayed_work_sync(&xl->poll_work);
 		/* No ep/xl lock: a returned control frame may be in dispatch. */
 		mutex_lock(&xl->poll_mutex);
@@ -798,6 +907,13 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		}
 		n->started = false;
 	}
+	if (xl->poll_on_interrupt) {
+		/* Stopped or retired rings raise no further start_poll. */
+		spin_lock_irqsave(&xl->poll_irq_lock, flags);
+		for (i = 0; i < rs->count; i++)
+			rs->native[i].irq_masked = false;
+		spin_unlock_irqrestore(&xl->poll_irq_lock, flags);
+	}
 	for (i = 0; i < xl->channels; i++) {
 		struct tb_ring *rx = xl->chan[i].rx, *tx = xl->chan[i].tx;
 
@@ -821,7 +937,7 @@ void xdev_ext_xd_rings_stop(struct xdev_ext_xd_link *xl)
 		/* Cancellation alone proves nothing about DMA.  A healthy native
 		 * STOPPED barrier, however, disables the host ring and drains its
 		 * callbacks.  This backing contains control messages only; payload
-		 * device-memory custody remains UNKNOWN in the data callbacks.
+		 * custody remains UNKNOWN in the data callbacks.
 		 */
 		if (n->disposition == XDEV_EXT_XD_NATIVE_STOPPED &&
 		    !xl->nhi_gone && *n->slot && !(*n->slot)->nhi->going_away &&
@@ -849,6 +965,10 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 	unsigned int tx_flags = RING_FLAG_FRAME |
 		(xl->poll_completions ? RING_FLAG_NO_INTERRUPT : 0);
 	unsigned int flags = tx_flags | (xl->e2e ? RING_FLAG_E2E : 0);
+	/* Like thunderbolt-net: receive interrupts start polling, transmit
+	 * rings keep interrupt completion through ring work.
+	 */
+	void (*start_poll)(void *) = xl->poll_on_interrupt ? xdev_ext_xd_start_poll : NULL;
 	u16 sof = BIT(XDEV_EXT_XD_PDF_START), eof = BIT(XDEV_EXT_XD_PDF_END);
 	struct xdev_ext_xd_rings *rs;
 	u32 c, generations;
@@ -889,11 +1009,14 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 		rs->native[rs->count++].slot = &xl->chan[c].tx;
 	rs->native[rs->count++].slot = &xl->ctl_rx;
 	rs->native[rs->count++].slot = &xl->ctl_tx;
+	for (c = 0; c < rs->count; c++)
+		rs->native[c].xl = xl;
 	xl->ctl_tx = tb_ring_alloc_tx(nhi, -1, XDEV_EXT_XD_CTL_RING, tx_flags);
 	if (!xl->ctl_tx)
 		goto fail;
 	xl->ctl_rx = tb_ring_alloc_rx(nhi, -1, XDEV_EXT_XD_CTL_RING, flags,
-				     xl->ctl_tx->hop, sof, eof, NULL, NULL);
+				     xl->ctl_tx->hop, sof, eof, start_poll,
+				     start_poll ? &rs->native[rs->count - 2] : NULL);
 	if (!xl->ctl_rx)
 		goto fail;
 	rs->ctl_tx_hop = xl->ctl_tx->hop;
@@ -903,7 +1026,8 @@ int xdev_ext_xd_rings_alloc(struct xdev_ext_xd_link *xl)
 		if (!xl->chan[c].tx)
 			goto fail;
 		xl->chan[c].rx = tb_ring_alloc_rx(nhi, -1, XDEV_EXT_XD_DATA_RING, flags,
-					       xl->chan[c].tx->hop, sof, eof, NULL, NULL);
+					       xl->chan[c].tx->hop, sof, eof, start_poll,
+					       start_poll ? &rs->native[c] : NULL);
 		if (!xl->chan[c].rx)
 			goto fail;
 		rs->data_tx_hop[c] = xl->chan[c].tx->hop;

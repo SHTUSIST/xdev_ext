@@ -32,7 +32,10 @@ gone cannot restart.
 
 Lock ordering is `xdev_ext_xd_links_lock` -> `xl->lock` for the handler, and
 `ctl_mutex` -> `ep_mutex` -> stage family lock (`ns->lock`) -> `xl->lock` ->
-ring lock for link teardown and data operations. The handler does not take
+ring lock for link teardown and data operations. `poll_irq_lock` is innermost:
+it may be taken under `xl->lock` or under the NHI and ring locks. While it is
+held, no lock of this module, the NHI or a ring is taken; queuing the poll work
+takes only workqueue-internal locks. The handler does not take
 `ctl_mutex`: login requests wait for responses while holding that mutex.
 `tb_ring_stop` is called with neither `ep_mutex` nor a spinlock held, and
 never from a frame callback. Endpoint detachment is recorded under both
@@ -139,6 +142,21 @@ Successful startup hands over the same native rings and HopIDs without a reset.
 Failed startup closes admission and stops through the existing native barriers;
 unknown scratch DMA retains the entire allocation in the requester quota.
 
+A stage may also use the ring's IOU_UMEM pool (host pages) instead of a PEER
+allocation, for TX and for RX at stage 0. At bind the requester maps every
+pool page for the NHI, in the stage's DMA direction. A pool that does not
+start and end on page boundaries is refused with `-EINVAL`, because each NHI
+element is one contiguous buffer of at most 4096 bytes and could not cross a
+page. Each element lease takes its page's address plus the offset, with a
+sync for the NHI when the mapping needs one (a non-coherent or bounced NHI);
+a received buffer is synced for the CPU when its element ends quiesced,
+before the next stage reads it. The data ring still carries payload only, so
+an element may be a full 4096 bytes (the tbnet limit of 4084 payload bytes
+comes from its header inside each frame). An element that ends with unknown
+device access keeps the whole mapping, as a PEER region is quarantined: the
+mapping is never unmapped, the batch's frames are sequestered, and the
+stage's checked unbind refuses release so the session keeps its UMEM pins.
+
 The read-only module parameter `poll_completions` defaults to false. Probe
 snapshots it before allocating rings. When enabled, every control and data
 TX/RX ring uses native `NO_INTERRUPT`; default links retain the IRQ/work
@@ -156,6 +174,32 @@ or native/protocol commitments queues a further worker turn; idle sessions
 retain their existing deadline schedule. The cadence is a scheduling
 choice and gives no latency guarantee.
 
+The read-only module parameter `poll_on_interrupt` also defaults to false and
+cannot be combined with `poll_completions`; module load fails with `-EINVAL`
+when both are set. It follows upstream thunderbolt-net: control and data RX
+rings pass a `start_poll` callback, while TX rings keep interrupt completion
+through the native ring work. The NHI masks a ring's interrupt and then calls
+`start_poll` with its NHI and ring spinlocks held. The callback only marks the
+ring and queues the link poll work without delay; it never polls or runs a
+frame callback.
+
+The queued work runs the same bounded pass on the RX rings only. When the pass
+ends below its 64-frame budget, every ring that `start_poll` marked gets one
+`tb_ring_poll_complete()`, which re-enables its interrupt. A completion that
+arrives between the last empty poll and that re-enable is found by
+`tb_ring_poll_pending()` and queues another pass at once, whether or not the
+controller raises an interrupt for it. A full budget leaves the interrupts
+masked and queues the next pass. No delayed fallback exists in this mode, and
+session progress does not poll.
+
+Start opens the interrupt gate under `poll_irq_lock` after the poll gate and
+queues a pass if an interrupt arrived before it. Stop closes both gates before
+it cancels the work, and a later interrupt only marks its ring. Stopping a
+ring whose interrupt `start_poll` masked raises no NHI warning: the NHI copy
+carries the later upstream rule that a polled ring may already be masked when
+it is disabled. These are host software composition results; they establish
+no interrupt latency, timing or physical DMA behavior.
+
 The polling mutex covers native poll return through the entire callback.
 Stop closes UP, receive readiness, starting and the poll gate under
 `xl->lock`, then cancels fallback and waits for the polling mutex without
@@ -164,16 +208,37 @@ UNKNOWN retirement consume rings and allocations. Posts and callback
 reposts schedule fallback under the same gate lock. Completed native
 ownership and UNKNOWN backing follow the existing custody ledger.
 
-Early CTS is an explicit opt-in: pass `XDEV_EXT_XDOMAIN_F_EARLY` to
-`xdev_ext_stage_xdomain()`, or `XDEV_EXT_PEER_ENDPOINT_F_EARLY` in existing
-endpoint options, on both endpoints. The updated reference BPF policy supports
-ordinary and early sessions. Ordinary sessions keep the v1 RTS protocol.
+`XDEV_EXT_XDOMAIN_F_EARLY`, passed to `xdev_ext_stage_xdomain()` (or
+`XDEV_EXT_PEER_ENDPOINT_F_EARLY` in existing endpoint options) on both
+endpoints, selects the version-2 envelope: 320-byte protocol facts, fresh
+endpoint bind identities, and the pairing and grant actions. On such a stage
+the attached program chooses the protocol. Both bindings keep one invariant,
+checked by the post action of each: the sender posts only a group the
+authenticated peer has posted and advertised by CTS credit (a version-1
+TX_POST needs the CTS record of its group, an early post the grant accepted
+for its key and group). `examples/network/xdomain_rts_cts.bpf.c` uses RTS/CTS
+and declines pairing; `examples/network/xdomain_early.bpf.c` pairs and grants.
+Both register `xdomain_peer_ops`, so a caller changes protocol by loading the
+other object. Without the flag a stage keeps the version-1 envelope, where v1
+programs run unchanged. The reference program chooses from the stage's mode
+fact: RTS/CTS without the flag, pairing with it, and then it answers an RTS
+only by refusal.
 
-Early endpoints bind fresh endpoint identities before batches, then grant one
-actual posted RX batch to its exact future TX key. The ordered layout must use
-one full-span descriptor per logical frame and the TX tag is the key as eight
-big-endian bytes followed by sixteen zero bytes. Early and ordinary modes do
-not negotiate an in-place fallback; close an uncommitted early session and
-explicitly create an ordinary session when required. Pairing has a fixed
-30-second deadline and bounded identical control retries. CRC and pair freshness
-checks do not provide cryptographic authentication.
+A stage keeps the first binding its program chose. When a receiver starts
+pairing it drops the RTS records it holds (none was answered), and from then
+on the link and the class drop version-1 control to a paired endpoint; an RTS
+cannot be encoded, so no group is announced or posted on an RTS. Once the program
+announced, posted on an RTS or declined pairing (IGNORE on PAIR_DUE or HELLO),
+pairing and grant inputs are dropped and pairing actions refused. Such a
+stage, and a receiver no peer has asked to pair, follow the version-1
+deadline, STOP and terminal rules; a HELLO such a receiver still holds when it
+stops or ends is dropped, never offered to its program.
+
+A paired stage grants one actual posted RX batch to its exact future TX key.
+The ordered layout must use one full-span descriptor per logical frame and the
+TX tag is the key as eight big-endian bytes followed by sixteen zero bytes.
+Neither binding falls back to the other in place; close an uncommitted session
+and create one with the other program when required. Pairing has a fixed
+30-second deadline, counted from the sender's first progress and from the
+receiver's first CHALLENGE, and bounded identical control retries. CRC and pair
+freshness checks do not provide cryptographic authentication.

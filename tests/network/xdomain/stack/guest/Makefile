@@ -23,5 +23,9 @@ all:
 
 	$(CLANG) $(BPF_CFLAGS) -I$(OUT) -I$(KERNEL_SRC)/tools/xdev_ext_mech \
 		-c $(KERNEL_SRC)/tools/xdev_ext_mech/xdomain_check.bpf.c -o $(OUT)/xdomain_check.bpf.o
+	$(CLANG) $(BPF_CFLAGS) -I$(OUT) -I$(KERNEL_SRC)/tools/xdev_ext_mech \
+		-c $(KERNEL_SRC)/tools/xdev_ext_mech/xdomain_rts_cts.bpf.c -o $(OUT)/xdomain_rts_cts.bpf.o
+	$(CLANG) $(BPF_CFLAGS) -I$(OUT) -I$(KERNEL_SRC)/tools/xdev_ext_mech \
+		-c $(KERNEL_SRC)/tools/xdev_ext_mech/xdomain_early.bpf.c -o $(OUT)/xdomain_early.bpf.o
 
 .PHONY: all

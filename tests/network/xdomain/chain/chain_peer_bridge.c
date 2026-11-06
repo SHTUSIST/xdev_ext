@@ -35,6 +35,10 @@ bool use_dma_iommu(struct device *dev) { (void)dev; return true; }
 const void *get_dma_ops(struct device *dev) { (void)dev; return NULL; }
 int misc_register(struct miscdevice *misc) { (void)misc; return 0; }
 long xdev_ext_peer_net_ioctl(unsigned long arg) { (void)arg; return -ENOTTY; }
+#define BRIDGE_FILES 64
+/* File objects allocated by this OS boundary, not the chain's NVMe file
+ * layout. An authority has no chain fd, but its actual shim refs still own it. */
+static struct file *bridge_files[BRIDGE_FILES];
 struct file *anon_inode_getfile(const char *name, const struct file_operations *fops,
 				void *priv, int flags)
 {
@@ -42,7 +46,41 @@ struct file *anon_inode_getfile(const char *name, const struct file_operations *
 	(void)name; (void)flags;
 	assert(f);
 	*f = (struct file){ .f_op = fops, .refs = 1, .private_data = priv };
-	return f;
+	for (unsigned i = 0; i < BRIDGE_FILES; i++)
+		if (!bridge_files[i]) {
+			bridge_files[i] = f;
+			return f;
+		}
+	abort();
+}
+bool chain_bridge_owns_file(const void *pointer)
+{
+	if (pointer == fixture_control_file())
+		return true;
+	for (unsigned i = 0; i < BRIDGE_FILES; i++)
+		if (bridge_files[i] && bridge_files[i] == pointer)
+			return true;
+	return false;
+}
+void chain_bridge_file_get(struct file *file)
+{
+	assert(chain_bridge_owns_file(file));
+	get_file(file);
+}
+void chain_bridge_file_put(struct file *file)
+{
+	assert(chain_bridge_owns_file(file));
+	/* The shim checks refs and invokes the real production release callback.
+	 * Only the anonymous file storage itself belongs to this OS boundary. */
+	fput(file);
+	if (file->refs)
+		return;
+	for (unsigned i = 0; i < BRIDGE_FILES; i++)
+		if (bridge_files[i] == file) {
+			bridge_files[i] = NULL;
+			free(file);
+			return;
+		}
 }
 #define BRIDGE_FDS 8
 static struct file *bridge_fds[BRIDGE_FDS];

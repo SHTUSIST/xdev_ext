@@ -31,6 +31,10 @@ static bool poll_completions;
 module_param(poll_completions, bool, 0444);
 MODULE_PARM_DESC(poll_completions, "collect all native ring completions in bounded process-context passes (default false)");
 
+static bool poll_on_interrupt;
+module_param(poll_on_interrupt, bool, 0444);
+MODULE_PARM_DESC(poll_on_interrupt, "receive ring interrupts start bounded process-context polling; transmit completions stay interrupt driven (default false, exclusive with poll_completions)");
+
 static struct tb_property_dir *xdev_ext_xd_dir;
 static DEFINE_MUTEX(xdev_ext_xd_links_lock);
 static LIST_HEAD(xdev_ext_xd_links);
@@ -782,6 +786,8 @@ static int xdev_ext_xd_probe(struct tb_service *svc, const struct tb_service_id 
 	mutex_init(&xl->ep_mutex);
 	mutex_init(&xl->poll_mutex);
 	xl->poll_completions = poll_completions;
+	spin_lock_init(&xl->poll_irq_lock);
+	xl->poll_on_interrupt = poll_on_interrupt;
 	INIT_DELAYED_WORK(&xl->poll_work, xdev_ext_xd_poll_work);
 	xl->svc = svc;
 	xl->xd = xd;
@@ -901,6 +907,9 @@ static int __init xdev_ext_xd_init(void)
 {
 	int ret;
 
+	/* One native completion mode for every link of this module. */
+	if (poll_completions && poll_on_interrupt)
+		return -EINVAL;
 	xdev_ext_xd_dir = tb_property_create_dir(&xdev_ext_xd_dir_uuid);
 	if (!xdev_ext_xd_dir)
 		return -ENOMEM;

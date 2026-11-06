@@ -136,6 +136,7 @@ typedef int32_t s32; typedef int64_t s64; typedef uintptr_t dma_addr_t;
 #define __init
 #define __exit
 #define GFP_KERNEL 0
+typedef unsigned int gfp_t;
 #define THIS_MODULE NULL
 #define EXPORT_SYMBOL_GPL(x)
 #define MODULE_LICENSE(x)
@@ -287,6 +288,7 @@ void tb_ring_start(struct tb_ring*);void tb_ring_stop(struct tb_ring*);void tb_r
 int tb_ring_tx(struct tb_ring*,struct ring_frame*);int tb_ring_rx(struct tb_ring*,struct ring_frame*);
 struct ring_frame *tb_ring_poll(struct tb_ring *);
 bool tb_ring_poll_pending(struct tb_ring *);
+void tb_ring_poll_complete(struct tb_ring *);
 struct device*tb_ring_dma_device(struct tb_ring*);
 #endif
 size_t tb_ring_descriptor_bytes(unsigned int);
@@ -328,7 +330,10 @@ struct file{unsigned endpoint;struct xdev_ext_mech_session *session;};
 struct xdev_ext_mech_session{spinlock_t lock;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout l;struct xdev_ext_mech_sess ss;struct xdev_ext_mech_stage st;u64 id,generation,stop_started_ns;u32 depth,native_controls;bool kicked;struct file authority;};
 struct xdev_ext_mech_batch{struct xdev_ext_mech_session*s;struct xdev_ext_mech_frame f[XDEV_EXT_MECH_MAX_FRAMES];void*priv,*cookie;u64 ticket,key,group;u32 nr,claims,publishes;bool cqe_filled,released,sequester;int status;};
 int stack_x3_init(void);void stack_x3_exit(void);int stack_x3_probe(struct tb_service*);void stack_x3_remove(struct tb_service*);int stack_x3_suspend(struct tb_service*);int stack_x3_resume(struct tb_service*);
-void stack_x3_pci_put(struct pci_dev*);void stack_x4_quarantine_records(void);
+void stack_x3_pci_put(struct pci_dev*);
+struct xdev_ext_requester_backing;
+/* Observation only: the actual core backing identity behind an X4 retirement. */
+struct pci_dev *stack_backing_requester(struct xdev_ext_requester_backing *, size_t *bytes);
 void stack_x4_control_pressure(struct xdev_ext_xd_link*,bool);
 const struct xdev_ext_mech_class_ops*stack_x5_ops(void);
 int stack_x5_stage_facts(struct xdev_ext_mech_stage *,unsigned,struct stack_stage_facts *);

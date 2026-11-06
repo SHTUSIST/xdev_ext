@@ -12,11 +12,18 @@
 #define NHI_WORKS 4096
 
 struct simulated_slot { struct ring_frame *frame; bool visible; };
+struct simulated_nhi;
 struct simulated_ring {
 	struct tb_ring *ring;
 	struct simulated_slot *slots;
 	unsigned size, advertised;
 	struct stack_nhi_stats stats;
+	/* Interrupt status set while the ring interrupt was disabled. Enabling
+	 * the ring raises it asynchronously, as the next scheduler work item. */
+	struct simulated_nhi *owner;
+	unsigned rx, hop;
+	bool irq_latched;
+	struct work_struct irq_work;
 };
 struct simulated_irq {
 	int irq;
@@ -36,6 +43,8 @@ static struct { const struct lock_class_key *key; bool live; } keys[NHI_KEYS];
 static unsigned key_count, key_registers, key_unregisters;
 static struct { struct work_struct *work; void (*fn)(struct work_struct *); } works[NHI_WORKS];
 static unsigned work_count, callback_origin;
+static bool irq_latching = true;
+static unsigned warn_count;
 
 static struct simulated_nhi *controller(const struct tb_nhi *nhi)
 {
@@ -115,6 +124,7 @@ static void enable_ring(struct simulated_nhi *c, unsigned rx, unsigned hop, u32 
 {
 	struct simulated_ring *sim = &c->rings[rx][hop];
 	struct tb_ring *ring = rx ? c->nhi->rx_rings[hop] : c->nhi->tx_rings[hop];
+	sim->irq_latched = false;
 	if (!(value & RING_FLAG_ENABLE)) {
 		if (sim->slots) memset(sim->slots, 0, sim->size * sizeof(*sim->slots));
 		sim->advertised = 0;
@@ -177,6 +187,33 @@ static void iowrite32(u32 value, void *address)
 		c->stats.doorbells++;
 		c->stats.descriptors += count;
 		stack_nhi_observe(STACK_NHI_DOORBELL, ring, NULL, head, count);
+		return;
+	}
+	if (offset >= REG_RING_INTERRUPT_BASE &&
+	    offset < REG_RING_INTERRUPT_BASE + 4 * RING_INTERRUPT_REG_COUNT(nhi)) {
+		u32 old = *word, changed = old ^ value;
+		unsigned reg = (offset - REG_RING_INTERRUPT_BASE) / 4;
+
+		*word = value;
+		for (unsigned bit = 0; bit < 32; bit++) {
+			unsigned index = reg * 32 + bit, rx = index >= nhi->hop_count;
+			unsigned hop = rx ? index - nhi->hop_count : index;
+			struct simulated_ring *sim;
+
+			if (!(changed & BIT(bit)) || index >= 2 * nhi->hop_count || hop >= NHI_HOPS)
+				continue;
+			sim = &c->rings[rx][hop];
+			if (!(value & BIT(bit))) {
+				sim->stats.irq_disables++;
+				c->stats.irq_disables++;
+				continue;
+			}
+			sim->stats.irq_enables++;
+			c->stats.irq_enables++;
+			/* The writer may hold NHI locks; the interrupt arrives after it. */
+			if (sim->irq_latched)
+				queue_work(NULL, &sim->irq_work);
+		}
 		return;
 	}
 	*word = value;
@@ -283,13 +320,55 @@ static void nhi_dma_free(struct device *dev, size_t size, void *p, dma_addr_t dm
 static bool schedule_work(struct work_struct *);
 static bool flush_work(struct work_struct *);
 #define dev_warn(...) ((void)0)
-#define dev_WARN(...) ((void)0)
+#define dev_WARN(...) ((void)warn_count++)
 #define dma_alloc_coherent nhi_dma_alloc
 #define dma_free_coherent nhi_dma_free
 /* Entire ring prefix and real MSI dispatch; no local ring helper is replaced. */
 #include "stack_nhi_source.inc"
 #undef dma_alloc_coherent
 #undef dma_free_coherent
+
+static bool irq_enabled(struct tb_ring *ring)
+{
+	unsigned bit = ring_interrupt_index(ring);
+
+	return *mmio_word(ring->nhi, REG_RING_INTERRUPT_BASE + (bit / 32) * 4) & BIT(bit % 32);
+}
+static void dispatch_irq(struct simulated_nhi *c, struct simulated_ring *sim, struct tb_ring *ring)
+{
+	sim->stats.irq_dispatches++;
+	c->stats.irq_dispatches++;
+	if (ring->irq > 0) {
+		for (unsigned i = 0; i < NHI_IRQS; i++) {
+			struct simulated_irq *irq = &c->irqs[i];
+			if (irq->active && irq->data == ring) {
+				irq->handler(irq->irq, irq->data);
+				return;
+			}
+		}
+		assert(!"completion targeted a retired IRQ");
+	} else {
+		unsigned bit = ring->hop + (!ring->is_tx ? NHI_HOPS : 0);
+		*mmio_word(ring->nhi, REG_RING_NOTIFY_BASE + (bit / 32) * 4) |= BIT(bit % 32);
+		nhi_msi(0, ring->nhi);
+	}
+}
+static void deliver_latched_irq(struct work_struct *work)
+{
+	struct simulated_ring *sim = container_of(work, struct simulated_ring, irq_work);
+	struct simulated_nhi *c = sim->owner;
+	struct tb_ring *ring = sim->rx ? c->nhi->rx_rings[sim->hop] : c->nhi->tx_rings[sim->hop];
+
+	assert(!stack_spins);
+	/* Only the ring still registered at this hop can receive the interrupt. */
+	if (!sim->irq_latched || !ring || ring != sim->ring || c->nhi->going_away ||
+	    !ring->running || !irq_enabled(ring))
+		return;
+	sim->irq_latched = false;
+	sim->stats.irq_replays++;
+	c->stats.irq_replays++;
+	dispatch_irq(c, sim, ring);
+}
 
 static void run_nhi_work(struct work_struct *work)
 {
@@ -348,6 +427,15 @@ void stack_nhi_init(struct tb_nhi *nhi, struct pci_dev *pdev)
 	assert(nhi->iobase && nhi->tx_rings && nhi->rx_rings);
 	spin_lock_init(&nhi->lock);
 	INIT_WORK(&nhi->interrupt_work, nhi_interrupt_work);
+	for (unsigned rx = 0; rx < 2; rx++)
+		for (unsigned hop = 0; hop < NHI_HOPS; hop++) {
+			struct simulated_ring *sim = &c->rings[rx][hop];
+
+			sim->owner = c;
+			sim->rx = rx;
+			sim->hop = hop;
+			INIT_WORK(&sim->irq_work, deliver_latched_irq);
+		}
 	pdev->msix_enabled = true;
 	c->nhi = nhi;
 	c->next = controllers;
@@ -358,6 +446,8 @@ void stack_nhi_destroy(struct tb_nhi *nhi)
 	struct simulated_nhi *c = controller(nhi), **at = &controllers;
 	for (unsigned i = 0; i < NHI_HOPS; i++) {
 		assert(!nhi->tx_rings[i] && !nhi->rx_rings[i]);
+		cancel_work_sync(&c->rings[0][i].irq_work);
+		cancel_work_sync(&c->rings[1][i].irq_work);
 		free(c->rings[0][i].slots);
 		free(c->rings[1][i].slots);
 	}
@@ -404,22 +494,20 @@ void stack_nhi_complete(struct tb_ring *ring, struct ring_frame *frame,
 	stack_nhi_observe(STACK_NHI_COMPLETE, ring, frame, index, 1);
 	if (!interrupt) return;
 	assert(!(ring->flags & RING_FLAG_NO_INTERRUPT));
-	sim->stats.irq_dispatches++;
-	c->stats.irq_dispatches++;
-	if (ring->irq > 0) {
-		for (unsigned i = 0; i < NHI_IRQS; i++) {
-			struct simulated_irq *irq = &c->irqs[i];
-			if (irq->active && irq->data == ring) {
-				irq->handler(irq->irq, irq->data);
-				return;
-			}
+	if (!irq_enabled(ring)) {
+		/* A disabled ring interrupt raises nothing now. */
+		if (irq_latching) {
+			sim->irq_latched = true;
+			sim->stats.irq_latched++;
+			c->stats.irq_latched++;
+		} else {
+			sim->stats.irq_dropped++;
+			c->stats.irq_dropped++;
 		}
-		assert(!"completion targeted a retired IRQ");
-	} else {
-		unsigned bit = ring->hop + (!ring->is_tx ? NHI_HOPS : 0);
-		*mmio_word(ring->nhi, REG_RING_NOTIFY_BASE + (bit / 32) * 4) |= BIT(bit % 32);
-		nhi_msi(0, ring->nhi);
+		return;
 	}
+	sim->irq_latched = false;
+	dispatch_irq(c, sim, ring);
 }
 bool stack_nhi_poll_one(struct tb_ring *ring)
 {
@@ -437,6 +525,9 @@ bool stack_nhi_poll_one(struct tb_ring *ring)
 	return true;
 }
 unsigned stack_nhi_callback_origin(void) { return callback_origin; }
+bool stack_nhi_irq_enabled(struct tb_ring *ring) { return irq_enabled(ring); }
+void stack_nhi_irq_latching(bool on) { irq_latching = on; }
+unsigned stack_nhi_warns(void) { return warn_count; }
 void stack_nhi_snapshot(struct tb_nhi *nhi, struct stack_nhi_stats *stats)
 {
 	*stats = controller(nhi)->stats;

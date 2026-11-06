@@ -32,6 +32,25 @@ struct file *fget(int fd);
 unsigned long copy_from_user(void *to, const void *from, unsigned long n);
 unsigned long copy_to_user(void *to, const void *from, unsigned long n);
 long xdev_ext_peer_net_ioctl(unsigned long arg);
+/* The requester unit's host-page (IOU_UMEM) mapping is compiled, never
+ * reached: every pool of this test is PEER. */
+typedef struct { bool held; } spinlock_t;
+#define DEFINE_SPINLOCK(n) spinlock_t n = { false }
+#define spin_lock_irqsave(l, f) do { (f) = 0; assert(!(l)->held); (l)->held = true; } while (0)
+#define spin_unlock_irqrestore(l, f) do { (void)(f); assert((l)->held); (l)->held = false; } while (0)
+#define smp_mb__before_atomic() atomic_thread_fence(memory_order_seq_cst)
+#define atomic_read_acquire(a) atomic_load_explicit(&(a)->counter, memory_order_acquire)
+#define DMA_ATTR_SKIP_CPU_SYNC (1UL << 5)
+struct page;
+dma_addr_t dma_map_page_attrs(struct device *dev, struct page *page, size_t offset, size_t size,
+			      enum dma_data_direction dir, unsigned long attrs);
+void dma_unmap_page_attrs(struct device *dev, dma_addr_t addr, size_t size,
+			  enum dma_data_direction dir, unsigned long attrs);
+int dma_mapping_error(struct device *dev, dma_addr_t addr);
+void dma_sync_single_for_device(struct device *dev, dma_addr_t addr, size_t size,
+				enum dma_data_direction dir);
+void dma_sync_single_for_cpu(struct device *dev, dma_addr_t addr, size_t size,
+			     enum dma_data_direction dir);
 
 /* Fixture entry points (boundary.c, fd_unit.c, heap_unit.c). */
 struct xdev_ext_mech_session;

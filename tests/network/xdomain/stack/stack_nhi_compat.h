@@ -69,6 +69,10 @@ struct stack_nhi_stats {
 	uint64_t doorbells, descriptors, completions, polls, irq_dispatches;
 	uint64_t irq_allocs, irq_frees, dma_allocs, dma_frees, work_flushes;
 	uint64_t mmio_reads, mmio_writes;
+	/* Ring interrupt enable bit: 1->0 and 0->1 register transitions, completions
+	 * while disabled (latched or, without latching, dropped) and latched
+	 * interrupts delivered after the enable bit returned. */
+	uint64_t irq_disables, irq_enables, irq_latched, irq_dropped, irq_replays;
 };
 void stack_nhi_init(struct tb_nhi *, struct pci_dev *);
 void stack_nhi_destroy(struct tb_nhi *);
@@ -77,6 +81,13 @@ void stack_nhi_complete(struct tb_ring *, struct ring_frame *, unsigned length,
 			unsigned sof, unsigned eof, unsigned flags);
 bool stack_nhi_poll_one(struct tb_ring *);
 unsigned stack_nhi_callback_origin(void); /* 1=real ring_work, 2=real poll */
+/* Current enable bit of the ring interrupt in the simulated register file. */
+bool stack_nhi_irq_enabled(struct tb_ring *);
+/* Default true: a completion while the ring interrupt is disabled sets a status
+ * that raises the interrupt once the enable bit returns. False drops it. */
+void stack_nhi_irq_latching(bool);
+/* dev_WARN() calls executed by the production NHI ring code so far. */
+unsigned stack_nhi_warns(void);
 void stack_nhi_snapshot(struct tb_nhi *, struct stack_nhi_stats *);
 void stack_nhi_ring_snapshot(struct tb_ring *, struct stack_nhi_stats *);
 /* Address-only query remains safe immediately after real free/memset. */

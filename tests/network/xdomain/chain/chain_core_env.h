@@ -180,6 +180,7 @@ static inline void chain_spin_unlock(spinlock_t *l) { assert(l->depth == 1); l->
 #define DEFINE_MUTEX(n) int n
 #define mutex_lock(m) ((void)(m))
 #define mutex_unlock(m) ((void)(m))
+#define cond_resched() ((void)0)
 #define rcu_read_lock() ((void)0)
 #define rcu_read_unlock() ((void)0)
 #define synchronize_rcu() ((void)0)
@@ -231,6 +232,7 @@ bool kthread_queue_delayed_work(struct kthread_worker *w, struct kthread_delayed
 bool kthread_mod_delayed_work(struct kthread_worker *w, struct kthread_delayed_work *d,
 			      unsigned long delay);
 void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *d);
+void kthread_flush_worker(struct kthread_worker *w);
 void kthread_destroy_worker(struct kthread_worker *w);
 extern unsigned long jiffies;
 static inline unsigned long msecs_to_jiffies(unsigned long n) { return n; }
