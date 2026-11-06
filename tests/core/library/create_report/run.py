@@ -35,7 +35,7 @@ def main():
     if bpf:flags+=['-I',str(bpf/'include')]
     shared=[str(kernel/'tools/xdev_ext_xsk_shared.c'),str(kernel/'tools/xdev_ext_xsk_steer.c')]
     bpf_link=str(bpf/'libbpf.a') if bpf else '-lbpf'
-    commands=[ [cc,*flags,str(test/'test.c'),str(lib/'xdev_ext_session.c'),*shared,bpf_link,'-lelf','-lz','-o',str(out/'test')],
+    commands=[ [cc,*flags,str(test/'test.c'),str(lib/'xdev_ext_session.c'),*shared,str(kernel/'tools/xdev_ext_xsk_redirect.c'),bpf_link,'-lelf','-lz','-o',str(out/'test')],
         [cc,*flags,str(kernel/'tools/xdev_ext_mech/xdev_ext_mech_ctl.c'),str(lib/'xdev_ext_link.c'),str(lib/'xdev_ext_session.c'),*shared,str(kernel/'tools/xdev_ext_xsk_redirect.c'),str(kernel/'tools/xdev_ext_gpu_identity.c'),str(test/'ctl_hooks.c'),'-Wl,--wrap=syscall','-Wl,--wrap=ioctl','-Wl,--wrap=open',str(bpf/'libbpf.a') if bpf else '-lbpf','-lelf','-lz','-ldl','-o',str(out/'ctl')] ]
     verdict={'classification':'postimplementation-independent-conformance','scope':'normal lib/ctl CREATE_REPORT op10; injected external syscall replies; no kernel admission, stage_diag, hardware, performance','build_exit':0,'test_exit':None,'ctl':[]}
     with (out/'build.log').open('w') as log:

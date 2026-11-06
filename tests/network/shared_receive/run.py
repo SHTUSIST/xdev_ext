@@ -45,7 +45,9 @@ def main():
              '-I'+str(kernel),'-I'+str(lib),'-I'+str(cli),'-I'+str(fixture)]
     if args.libbpf_include: command+=['-I'+str(args.libbpf_include.resolve())]
     if args.case in ['rings','rx-map-failure','receive-options']:
-        sources=[fixture/('receive_options.c' if args.case=='receive-options' else 'session_rings.c'),lib/'xdev_ext_session.c']
+        # The library links the XSK redirect helper (transmit-only zero-copy XDP mode).
+        sources=[fixture/('receive_options.c' if args.case=='receive-options' else 'session_rings.c'),lib/'xdev_ext_session.c',
+                 cli/'xdev_ext_xsk_redirect.c']
     else:
         fixture_name={'dispatcher':'dispatcher.c','socket-identity':'socket_identity.c','ownership':'ownership.c'}[args.case]
         sources=[fixture/fixture_name]

@@ -8,7 +8,8 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -pthread
 LIBBPF_CFLAGS ?=
 LIBBPF_LIBS ?= -lbpf
-SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c
+SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c \
+	$(KERNEL_SRC)/tools/xdev_ext_xsk_redirect.c
 .PHONY: all clean
 all: user_stage_e2e ordered_frames_guest
 user_stage_e2e: user_stage_e2e.c $(LIBDIR)/xdev_ext_user.c $(LIBDIR)/xdev_ext_session.c $(SHARED_SOURCES) $(LIBDIR)/libxdev_ext.h \

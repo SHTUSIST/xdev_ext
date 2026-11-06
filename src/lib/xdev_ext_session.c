@@ -21,6 +21,7 @@
 #include <unistd.h>
 #include <linux/if_xdp.h>
 #include <linux/if_link.h>
+#include "../../include/xdev_ext_xsk_redirect.h"
 #include "../../include/xdev_ext_xsk_shared.h"
 
 #include "../../../include/uapi/linux/io_uring.h"
@@ -110,6 +111,8 @@ struct xdev_ext_session {
  struct xdev_ext_xsk_shared *network;
  bool network_failed;
  __u32 queue;
+	/* XDP mode a transmit-only zero-copy queue needed for CREATE; owned. */
+	struct xdev_ext_xsk_redirect zc_xdp;
 	char ifname[IF_NAMESIZE];
 	__u64 id, nr_batches, armed_batches;
 	int owned_fd[XDEV_EXT_MECH_MAX_STAGES];
@@ -238,10 +241,14 @@ static int xsk_open(struct xdev_ext_session *s, unsigned int ifindex, __u32 queu
 	return xdev_ext_mech_ctl_xsk_mode_check(copy, options.flags);
 }
 
-/* Copy mode: the kernel source takes its frames from the fill ring. */
-static int xsk_fill(struct xdev_ext_session *s)
+/*
+ * Chunks [0, @frames), at most a ring's worth, onto the fill ring.  Copy
+ * mode: the kernel source takes its frames from there.  Zero-copy: only the
+ * lower half, which the kernel source never claims, for the receive queue.
+ */
+static int xsk_fill(struct xdev_ext_session *s, __u32 frames)
 {
-	__u32 n = s->nr_frames < XRING_SIZE ? s->nr_frames : XRING_SIZE;
+	__u32 n = frames < XRING_SIZE ? frames : XRING_SIZE;
 	__u32 prod = *s->fq.producer;
 	__u32 cons = __atomic_load_n(s->fq.consumer, __ATOMIC_ACQUIRE);
 	__u32 i;
@@ -417,6 +424,7 @@ int xdev_ext_session_open(const struct xdev_ext_pool_opts *o,
 	if (!s)
 		return -ENOMEM;
 	s->ring = s->efd = s->xsk = s->allocation_fd = -1;
+	xdev_ext_xsk_redirect_init(&s->zc_xdp);
 	s->pool_kind = o->pool_kind;
 	s->xsk_mode = o->xsk_mode;
  s->queue = o->queue;
@@ -479,6 +487,7 @@ int xdev_ext_session_open_peer(const struct xdev_ext_peer_pool_opts *o,
 	if (!s)
 		return -ENOMEM;
 	s->ring = s->efd = s->xsk = s->allocation_fd = -1;
+	xdev_ext_xsk_redirect_init(&s->zc_xdp);
 	s->pool_kind = XDEV_EXT_MECH_POOL_PEER;
 	s->allocation_fd = fcntl(o->allocation_fd, F_DUPFD_CLOEXEC, 0);
 	if (s->allocation_fd < 0) {
@@ -641,6 +650,39 @@ int xdev_ext_create_programs_read(int owning_ring_fd,
  return ret ? ret : create_report_validate(create, &e.request, out);
 }
 
+/*
+ * A zero-copy XSK session whose AF_XDP stages only transmit, none reliable
+ * (a reliable sender's ACK redirect follows CREATE): CREATE refuses its
+ * queue when the driver refuses a TX wakeup without XDP.
+ */
+static bool zc_transmit_only(const struct xdev_ext_session *s,
+			     const struct xdev_ext_mech_create *c)
+{
+	bool tx = false;
+	__u32 i;
+
+	if (s->pool_kind != XDEV_EXT_MECH_POOL_XSK || !s->zero_copy)
+		return false;
+	for (i = 0; i < c->nr_stages; i++) {
+		if (c->st[i].class_id != XDEV_EXT_MECH_CLASS_AFXDP)
+			continue;
+		if (c->st[i].direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||
+		    (c->st[i].flags & XDEV_EXT_AFXDP_F_RELIABLE))
+			return false;
+		tx = true;
+	}
+	return tx;
+}
+
+/* No session: drop the XDP mode this attempt attached, unless the kernel
+ * retained native resources, which keep it until a close can free them. */
+static int create_failed(struct xdev_ext_session *s, int ret)
+{
+	if (!s->retained && xdev_ext_xsk_redirect_is_active(&s->zc_xdp))
+		(void)xdev_ext_xsk_redirect_detach(&s->zc_xdp);
+	return ret;
+}
+
 static int session_create(struct xdev_ext_session *s,
 			  const struct xdev_ext_create_opts *o,
 			  struct xdev_ext_mech_create_report *out,
@@ -650,6 +692,7 @@ static int session_create(struct xdev_ext_session *s,
 	static const __u8 zero_mac[6];
 	struct xdev_ext_mech_create c = {0};
 	struct ifreq ifr;
+	bool zc_tx;
 	__u32 i;
 	int ret;
 
@@ -718,6 +761,19 @@ static int session_create(struct xdev_ext_session *s,
 		    c.st[i].class_id == XDEV_EXT_MECH_CLASS_AFXDP &&
 		    c.st[i].fd < 0)
 			c.st[i].fd = s->xsk;
+	/*
+	 * Kick the queue and attach the pass program only if the driver wants
+	 * XDP mode, as xdev_ext_mech_ctl does.  The session owns it until
+	 * xdev_ext_session_close().
+	 */
+	zc_tx = zc_transmit_only(s, &c);
+	if (zc_tx) {
+		ret = xdev_ext_xsk_redirect_zc_tx_xdp(&s->zc_xdp, s->xsk,
+						      (int)if_nametoindex(s->ifname),
+						      XDP_FLAGS_DRV_MODE);
+		if (ret)
+			return ret;
+	}
 	if (out || program_fds) {
 		struct xdev_ext_mech_create_report report = {};
 
@@ -733,17 +789,23 @@ static int session_create(struct xdev_ext_session *s,
 				s->retained = true;
 		}
 		if (ret)
-			return ret;
+			return create_failed(s, ret);
 		c.session_id = report.session_id;
 	} else {
 		ret = mech(s, XDEV_EXT_MECH_OP_CREATE, (uintptr_t)&c);
 	}
 	if (ret)
-		return ret;
+		return create_failed(s, ret);
 	s->id = c.session_id;
 	s->depth = o->depth;
 	s->created = true;
-	return 0;
+	/*
+	 * CREATE admission needed an empty fill ring; an XDP-mode receive
+	 * queue polls an empty one without end.  The ring is empty here, so
+	 * this cannot fall short; if it did, the session is live and close
+	 * stops it.
+	 */
+	return zc_tx ? xsk_fill(s, s->nr_frames / 2) : 0;
 }
 
 int xdev_ext_session_create(struct xdev_ext_session *s,
@@ -846,7 +908,7 @@ int xdev_ext_session_start(struct xdev_ext_session *s,
 		st.nr_user_frames = (__u32)k;
 		st.user_frames = (uintptr_t)user;
 	} else if (!s->zero_copy) {
-		ret = xsk_fill(s);
+		ret = xsk_fill(s, s->nr_frames);
 		if (ret)
 			return ret;
 	}
@@ -1183,6 +1245,13 @@ int xdev_ext_session_close(struct xdev_ext_session *s)
 			return ret;
 		}
 		s->network = NULL;
+	}
+	/* Released: the queue's XDP mode this session attached may go. */
+	if (xdev_ext_xsk_redirect_is_active(&s->zc_xdp)) {
+		ret = xdev_ext_xsk_redirect_detach(&s->zc_xdp);
+		/* A failed exact-owner detach keeps the program: close again. */
+		if (ret && xdev_ext_xsk_redirect_is_active(&s->zc_xdp))
+			return ret;
 	}
 	session_free(s);
 	return 0;

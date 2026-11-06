@@ -45,8 +45,8 @@ def main():
     cc = os.environ.get('CC', 'gcc')
     shared = [str(kernel / 'tools/xdev_ext_xsk_shared.c'), str(kernel / 'tools/xdev_ext_xsk_steer.c')]
     commands = [
-        [cc, *flags, str(test / 'test.c'), str(lib / 'xdev_ext_session.c'), *shared, bpf_link,
-         '-lelf', '-lz', '-o', str(out / 'test')],
+        [cc, *flags, str(test / 'test.c'), str(lib / 'xdev_ext_session.c'), *shared,
+         str(kernel / 'tools/xdev_ext_xsk_redirect.c'), bpf_link, '-lelf', '-lz', '-o', str(out / 'test')],
         [cc, *flags, str(kernel / 'tools/xdev_ext_mech/xdev_ext_mech_ctl.c'),
          str(lib / 'xdev_ext_link.c'), str(lib / 'xdev_ext_session.c'), *shared,
          str(kernel / 'tools/xdev_ext_xsk_redirect.c'), str(kernel / 'tools/xdev_ext_gpu_identity.c'),

@@ -37,8 +37,10 @@ def main():
                  if q.is_file()), None)
     c_sources = [lib / f'xdev_ext_{n}.c' for n in
                  ['session', 'user', 'prog', 'run', 'link', 'peer_message']]
-    # Session receive configuration owns the shared RX/steering lifecycle.
-    c_sources += [tools/'xdev_ext_xsk_shared.c', tools/'xdev_ext_xsk_steer.c']
+    # Session receive configuration owns the shared RX/steering lifecycle; a
+    # transmit-only zero-copy session owns its XDP mode (redirect helper).
+    c_sources += [tools/'xdev_ext_xsk_shared.c', tools/'xdev_ext_xsk_steer.c',
+                  tools/'xdev_ext_xsk_redirect.c']
     cuda_sources = [lib/'libxdev_ext_cuda.cc', lib/'libxdev_ext_cuda_kernels.cu',
                     examples/'peer_message.cc', examples/'peer_message_owner.cu']
     headers = [lib/n for n in ['libxdev_ext.h', 'libxdev_ext_internal.h',

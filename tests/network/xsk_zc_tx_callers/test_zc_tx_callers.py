@@ -15,6 +15,7 @@ import importlib.util
 import os
 from pathlib import Path
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,6 +26,10 @@ HERE = Path(__file__).resolve().parent
 ROOT = Path(os.environ.get('XDEV_EXT_CANONICAL_ROOT') or HERE.parents[2])
 CLI = ROOT / 'src/cli'
 CC = os.environ.get('CC', 'gcc')
+# libbpf >= 1.0 for the library (as tests/core/library/Makefile); override both
+# for a libbpf outside the system paths.
+LIBBPF_CFLAGS = shlex.split(os.environ.get('LIBBPF_CFLAGS', ''))
+LIBBPF_LIBS = shlex.split(os.environ.get('LIBBPF_LIBS', '-lbpf'))
 _spec = importlib.util.spec_from_file_location('zc_tx_callers_adapter',
                                                HERE.parent / 'pool_dma' / 'adapter.py')
 adapter = importlib.util.module_from_spec(_spec)
@@ -129,9 +134,9 @@ def rule_run(redirect_text=None):
             source = tmp / 'xdev_ext_xsk_redirect.c'
             source.write_text(redirect_text)
         exe = tmp / 'zc_tx_rule_test'
-        built = run([CC, '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra', '-Werror',
+        built = run([CC, '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra', '-Werror', *LIBBPF_CFLAGS,
                      '-I' + str(CLI / 'include'), str(HERE / 'zc_tx_rule_test.c'),
-                     str(source), '-o', str(exe), '-lbpf'])
+                     str(source), '-o', str(exe), *LIBBPF_LIBS, '-lelf', '-lz'])
         if built.returncode:
             return built.returncode, 'COMPILE FAILED\n' + built.stdout + built.stderr
         ran = run([str(exe)], timeout=60)
@@ -248,10 +253,15 @@ class SessionArmBuilds(unittest.TestCase):
         cls.view = source_view()
 
     def test_nvme_nic_producer_with_session_backend(self):
+        # One libbpf for headers and link: the Makefile appends to CPPFLAGS
+        # from the environment, and LDLIBS is otherwise its own -lbpf.
+        env = dict(os.environ, CPPFLAGS=' '.join(shlex.split(os.environ.get('CPPFLAGS', '')) +
+                                                  LIBBPF_CFLAGS))
         with tempfile.TemporaryDirectory(prefix='zc-tx-nnb-') as tmp:
             target = Path(tmp) / 'nnb_producer'
             built = run(['make', '-s', '-C', str(self.view / 'tests/eval/nvme_nic'), 'ENABLE_SESSION=1',
-                         'BUILD_DIR=' + tmp, 'CC=' + CC, str(target)], timeout=300)
+                         'BUILD_DIR=' + tmp, 'CC=' + CC, 'LDLIBS=' + ' '.join(LIBBPF_LIBS + ['-lelf', '-lz']),
+                         str(target)], env=env, timeout=300)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             self.assertTrue(target.is_file())
 
@@ -262,6 +272,91 @@ class SessionArmBuilds(unittest.TestCase):
                          '--build-only', '--build-dir', tmp], timeout=300)
             self.assertEqual(built.returncode, 0, built.stdout + built.stderr)
             self.assertTrue((Path(tmp) / 'session_gpu_nic').is_file(), built.stdout + built.stderr)
+
+
+# The operating-system boundary of library_fixture.c; both libbpf generations.
+LIBRARY_WRAPS = ['socket', 'if_nametoindex', 'eventfd', 'close', 'setsockopt', 'getsockopt', 'bind',
+                 'mmap', 'munmap', 'sendto', 'bpf_obj_get_info_by_fd',
+                 'bpf_prog_load', 'bpf_xdp_attach', 'bpf_xdp_query_id', 'bpf_xdp_detach',
+                 'bpf_load_program', 'bpf_set_link_xdp_fd', 'bpf_get_link_xdp_id',
+                 'bpf_set_link_xdp_fd_opts']
+
+
+def library_run(view, session_text=None):
+    """The real library (or a mutated xdev_ext_session.c) against library_fixture.c."""
+    kernel = view / 'kernel'
+    tools = kernel / 'tools'
+    lib = tools / 'xdev_ext_mech/lib'
+    with tempfile.TemporaryDirectory(prefix='zc-tx-lib-') as tmp:
+        session = lib / 'xdev_ext_session.c'
+        if session_text is not None:
+            # Its relative includes miss here and resolve through -iquote lib.
+            session = Path(tmp) / 'mutant/a/b/lib' / 'xdev_ext_session.c'
+            session.parent.mkdir(parents=True)
+            session.write_text(session_text)
+        exe = Path(tmp) / 'library_fixture'
+        built = run([CC, '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror', *LIBBPF_CFLAGS,
+                     '-fsanitize=undefined', '-fno-sanitize-recover=undefined',
+                     '-I' + str(kernel), '-I' + str(lib), '-I' + str(lib.parent),
+                     '-iquote', str(lib), str(HERE / 'library_fixture.c'), str(session),
+                     str(tools / 'xdev_ext_xsk_shared.c'), str(tools / 'xdev_ext_xsk_steer.c'),
+                     str(tools / 'xdev_ext_xsk_redirect.c'), '-o', str(exe)] +
+                    ['-Wl,--wrap=' + name for name in LIBRARY_WRAPS] + [*LIBBPF_LIBS, '-lelf', '-lz'])
+        if built.returncode:
+            return built.returncode, 'COMPILE FAILED\n' + built.stdout + built.stderr
+        ran = run([str(exe)], timeout=60)
+        return ran.returncode, ran.stdout + ran.stderr
+
+
+LIB_CLOSE_DETACH = ('\t/* Released: the queue\'s XDP mode this session attached may go. */\n'
+                    '\tif (xdev_ext_xsk_redirect_is_active(&s->zc_xdp)) {\n'
+                    '\t\tret = xdev_ext_xsk_redirect_detach(&s->zc_xdp);\n'
+                    '\t\t/* A failed exact-owner detach keeps the program: close again. */\n'
+                    '\t\tif (ret && xdev_ext_xsk_redirect_is_active(&s->zc_xdp))\n'
+                    '\t\t\treturn ret;\n\t}\n')
+LIB_CLOSE_TOP = '\tif (s->retained && !s->created && !s->network_failed)\n\t\treturn -EBUSY;\n'
+LIB_MUTATIONS = {
+    'never_kicks': lambda t: t.replace('zc_tx = zc_transmit_only(s, &c);',
+                                       'zc_tx = zc_transmit_only(s, &c) && false;', 1),
+    'receivers_kicked': lambda t: t.replace(
+        'if (c->st[i].direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||\n\t\t    (c->st[i].flags & XDEV_EXT_AFXDP_F_RELIABLE))',
+        'if (0)', 1),
+    'copy_mode_kicked': lambda t: t.replace(
+        'if (s->pool_kind != XDEV_EXT_MECH_POOL_XSK || !s->zero_copy)\n\t\treturn false;\n\tfor',
+        'if (s->pool_kind != XDEV_EXT_MECH_POOL_XSK)\n\t\treturn false;\n\tfor', 1),
+    'close_keeps_program': lambda t: cut(t, LIB_CLOSE_DETACH),
+    'close_detaches_before_stop': lambda t: insert_before(cut(t, LIB_CLOSE_DETACH), LIB_CLOSE_TOP,
+                                                          LIB_CLOSE_DETACH),
+    'failed_create_keeps_program': lambda t: t.replace('return create_failed(s, ret);',
+                                                       'return (void)create_failed, ret;'),
+    'fill_skipped': lambda t: t.replace('return zc_tx ? xsk_fill(s, s->nr_frames / 2) : 0;', 'return 0;', 1),
+    'fill_whole_umem': lambda t: t.replace('xsk_fill(s, s->nr_frames / 2)', 'xsk_fill(s, s->nr_frames)', 1),
+    'fill_before_create': lambda t: insert_before(t, '\tif (out || program_fds) {\n',
+                                                  '\tif (zc_tx)\n\t\t(void)xsk_fill(s, s->nr_frames / 2);\n'),
+}
+
+
+class SessionLibrary(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.view = source_view()
+
+    def test_transmit_only_zero_copy_session_owns_its_xdp_mode(self):
+        code, out = library_run(self.view)
+        self.assertEqual(code, 0, out)
+        self.assertIn('RESULT failures=0', out)
+        self.assertNotIn('not ok', out)
+
+    def test_reverted_library_parts_are_detected(self):
+        text = (self.view / 'kernel/tools/xdev_ext_mech/lib/xdev_ext_session.c').read_text()
+        for name, mutate in LIB_MUTATIONS.items():
+            with self.subTest(mutation=name):
+                mutated = mutate(text)
+                self.assertNotEqual(mutated, text, name + ': no change')
+                code, out = library_run(self.view, mutated)
+                self.assertNotIn('COMPILE FAILED', out, name)
+                self.assertNotEqual(code, 0, name + ' survived')
+                self.assertRegex(out, r'not ok - ', name)
 
 
 class NvmeNicSession(unittest.TestCase):

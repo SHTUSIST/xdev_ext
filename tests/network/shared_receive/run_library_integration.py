@@ -32,7 +32,7 @@ def main():
     for name in ['ownership_boundary.c','ownership_boundary.h','abi_transport.h']:
         shutil.copy2(boundary/name,fixtures/name)
     cli=native/'tools';lib=cli/'xdev_ext_mech/lib'
-    inputs=[lib/'xdev_ext_session.c',cli/'xdev_ext_xsk_shared.c',cli/'xdev_ext_xsk_steer.c',
+    inputs=[lib/'xdev_ext_session.c',cli/'xdev_ext_xsk_shared.c',cli/'xdev_ext_xsk_steer.c',cli/'xdev_ext_xsk_redirect.c',
             lib/'libxdev_ext.h',native/'include/uapi/linux/io_uring.h',native/'include/uapi/linux/xdev_ext_mech.h']
     for path in inputs:
         if not path.is_file():parser.error('required existing native input absent: '+str(path))
@@ -50,7 +50,7 @@ def main():
            'eventfd','mmap','mmap64','munmap']
     compile_boundary=common+rename+['-c',str(fixtures/'ownership_boundary.c'),'-o',str(out/'manager-boundary.o')]
     compile_binary=common+[str(fixtures/'library_integration.c'),str(fixtures/'library_integration_boundary.c'),
-                           str(out/'manager-boundary.o')]+[str(p) for p in inputs[:3]]+[
+                           str(out/'manager-boundary.o')]+[str(p) for p in inputs[:4]]+[
                            '-Wl,--gc-sections','-o',str(out/'library-integration')]
     compile_binary+=['-Wl,--wrap='+name for name in wraps]
     compile_binary += [str(args.libbpf_archive.resolve()),'-lelf','-lz']

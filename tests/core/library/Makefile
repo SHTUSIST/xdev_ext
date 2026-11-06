@@ -25,7 +25,8 @@ CFLAGS += $(LIBBPF_CFLAGS)
 
 LIB_HDRS := $(wildcard $(LIBDIR)/*.h) $(KSRC)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h \
 	$(KSRC)/include/uapi/linux/xdev_ext_mech.h $(wildcard $(KSRC)/tools/include/xdev_ext_xsk_*.h)
-SHARED_SOURCES := $(KSRC)/tools/xdev_ext_xsk_shared.c $(KSRC)/tools/xdev_ext_xsk_steer.c
+SHARED_SOURCES := $(KSRC)/tools/xdev_ext_xsk_shared.c $(KSRC)/tools/xdev_ext_xsk_steer.c \
+	$(KSRC)/tools/xdev_ext_xsk_redirect.c
 SESSION_TEST := $(OUTPUT)/xdev_ext_lib_session_test
 RUN_TEST := $(OUTPUT)/xdev_ext_lib_run_test
 USER_TEST := $(OUTPUT)/xdev_ext_lib_user_test
