@@ -13,6 +13,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import secrets
 import shutil
 import shlex
 import subprocess
@@ -485,6 +486,19 @@ class ArchiveContract(unittest.TestCase):
             shutil.move(self.scratch / name, destination)
             destination.chmod(0o700)
             (self.scratch / name).symlink_to(destination, target_is_directory=True)
+        tools_owner_uid = roots['tools'].stat().st_uid
+
+        def chown_tools(uid):
+            # Only this private fixture directory crosses the privilege boundary.
+            try:
+                os.chown(roots['tools'], uid, -1)
+            except PermissionError:
+                if os.geteuid() == 0:
+                    raise
+                subprocess.run(['sudo', '-n', 'chown', '--', str(uid), str(roots['tools'])],
+                               check=True, timeout=30)
+            self.assertEqual(roots['tools'].stat().st_uid, uid)
+
         decision = dict(schema=1, decision='ALLOW_BUILD_TOOLS_CACHE_LOCATION', approved_by='root', root_approved=True,
                         verifiedcmp=True, source_scratch=str(self.scratch), cache_base=str(base),
                         cache_root=str(run), roots={name: str(path) for name, path in roots.items()},
@@ -516,8 +530,6 @@ class ArchiveContract(unittest.TestCase):
                     receipt.chmod(0o644 if mutation == 'bad-receipt-mode' else 0o600)
                     if mutation == 'bad-directory-mode':
                         roots['tools'].chmod(0o755)
-                    if mutation == 'foreign-directory-owner':
-                        os.chown(roots['tools'], 65534, -1)
                     if mutation == 'wrong-alias':
                         (self.scratch / 'tools').unlink()
                         (self.scratch / 'tools').symlink_to(roots['build'], target_is_directory=True)
@@ -531,12 +543,15 @@ class ArchiveContract(unittest.TestCase):
                     failed_case.mkdir(mode=0o700, parents=True)
                     self.assertEqual(failed_case.stat().st_mode & 0o777, 0o700)
                     try:
+                        if mutation == 'foreign-directory-owner':
+                            chown_tools(65534)
                         with self.assertRaises((ValueError, OSError, RuntimeError, subprocess.SubprocessError)):
                             self.archive.archive_case(self.scratch, failed_case, self.source, self.native)
                     finally:
+                        if mutation == 'foreign-directory-owner':
+                            chown_tools(tools_owner_uid)
                         receipt.chmod(0o600)
                         roots['tools'].chmod(0o700)
-                        os.chown(roots['tools'], os.getuid(), -1)
                         if mutation == 'wrong-alias':
                             (self.scratch / 'tools').unlink()
                             (self.scratch / 'tools').symlink_to(roots['tools'], target_is_directory=True)
@@ -731,10 +746,22 @@ class WrapperContract(unittest.TestCase):
         self.assertEqual(result.returncode, 143, result.stdout + result.stderr)
 
     def fault_wrapper(self, child_exit):
-        temporary = tempfile.TemporaryDirectory(prefix='xdev-ext-e2e.', dir='/tmp')
-        self.addCleanup(temporary.cleanup)
+        # tempfile's alphabet includes '_'; the real fault harness admits only
+        # alphanumeric suffixes. Retry collisions at creation, never execution.
+        for _ in range(16):
+            scratch = Path('/tmp') / ('xdev-ext-e2e.' + secrets.token_hex(16))
+            try:
+                scratch.mkdir(mode=0o700)
+            except FileExistsError:
+                continue
+            self.addCleanup(shutil.rmtree, scratch)
+            break
+        else:
+            self.fail('could not create a unique legal fault scratch directory')
+        self.assertRegex(str(scratch), r'\A/tmp/xdev-ext-e2e\.[A-Za-z0-9]+\Z')
+        self.assertEqual(scratch.stat().st_mode & 0o777, 0o700)
         old = str(self.scratch)
-        self.scratch = Path(temporary.name)
+        self.scratch = scratch
         self.case = self.scratch / 'acceptance/cases/ring-exit-rx'
         spec = json.loads(self.specification.read_text().replace(old, str(self.scratch)))
         spec['child_exit'] = child_exit

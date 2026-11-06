@@ -40,7 +40,10 @@ static u32 crc32c(u32 crc,const void *data,size_t n)
 #define XDEV_EXT_MECH_MAX_FRAMES 32
 #define XSK_BOUND 3
 #define XDP_WAKEUP_TX 2
-#define DMA_BIDIRECTIONAL 0
+enum dma_data_direction {DMA_BIDIRECTIONAL=0,DMA_TO_DEVICE=1,DMA_FROM_DEVICE=2,DMA_NONE=3};
+typedef struct {int counter;} atomic_t;
+static inline void atomic_dec(atomic_t *v){__atomic_fetch_sub(&v->counter,1,__ATOMIC_SEQ_CST);}
+#define smp_mb__before_atomic() __atomic_thread_fence(__ATOMIC_SEQ_CST)
 #define MAX_PER_SOCKET_BUDGET 16
 #define EXPORT_SYMBOL(x)
 #define READ_ONCE(x) (x)
@@ -72,7 +75,7 @@ static void ev(const char *s){size_t n=strlen(s); REQUIRE("event_capacity",event
 #define rcu_read_lock() do{}while(0)
 #define rcu_read_unlock() do{}while(0)
 #define rcu_dereference(p) (p)
-struct device {int id;}; struct file{}; struct xdp_buff_xsk{int unused;};
+struct device {int id;}; struct pci_dev {struct device dev;}; struct file{}; struct xdp_buff_xsk{int unused;};
 struct xdp_desc {u64 addr;u32 len,options;};
 struct xdev_ext_mech_frame_info {u64 umem_addr;u32 index,data_off,data_len;};
 #ifndef COUNT_TYPED_CONTROL_V2
