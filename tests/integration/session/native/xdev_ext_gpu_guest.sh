@@ -124,10 +124,18 @@ clear_window() {
 	dd if="$destination_block" of=/tmp/gpu-dst.bin bs=512 skip="$target_slba" count="$window_nlb" 2>/dev/null
 	! cmp /tmp/gpu-src.bin /tmp/gpu-dst.bin >/dev/null 2>&1
 }
+# The CE window: CUDA resolves a cuMemAlloc address for a CE stage only
+# through its GPUDirect RDMA (third-party P2P) registrations.  Where CUDA
+# reports none, the window is a VMM allocation whose POSIX file descriptor
+# export the tool attaches to both CE stage fds.
+if caps_have gpu_direct_rdma=1; then ce_mode=native ce_alloc=--ce-alloc
+else ce_mode=vmm ce_alloc=--ce-vmm; fi
 ce_ok() {
 	grep -Fxq "XDEV_EXT_MECH_CE_GPU=PASS chain=$2" "$1" &&
 	grep -Eq "^XDEV_EXT_MECH_STATS .* last_err=0 batches_done=$groups batches_abort=0 rejects=0 .* sequestered=0 timeouts=0 inflight=0 " "$1" &&
-	grep -Fxq 'CUDA allocation=native released=yes' "$1"
+	grep -Fxq "CUDA allocation=$ce_mode released=yes" "$1" || return 1
+	[ "$ce_mode" = native ] ||
+		grep -Eq '^CUDA allocation=vmm bdf=[^ ]+ va=0x[0-9a-f]+ bytes=[0-9]+ mapped=[0-9]+ export=posix-fd attached=2$' "$1"
 }
 # The --diagnostics CREATE report: which phase and stage refused, and why.
 create_diag() {
@@ -141,19 +149,20 @@ create_diag() {
 }
 
 # --- G1: CE chain d (real GPU copy engines only) -------------------------
-"$ctl" ce-chain --chain d --ce-dev /dev/nvidia0 --ce-alloc --ce-len "$ce_len" \
+"$ctl" ce-chain --chain d --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
 	--groups "$groups" --depth "$depth" --group-bytes 8192 \
 	--timeout-ms "$timeout_ms" --diagnostics >/tmp/gpu-d.log 2>&1
 rc=$?
 log_file ce-chain-d /tmp/gpu-d.log
-if [ "$rc" = 0 ] && ce_ok /tmp/gpu-d.log d; then case_result ce-chain-d PASS groups="$groups"
-else case_result ce-chain-d FAIL rc="$rc" $(create_diag /tmp/gpu-d.log); fi
+if [ "$rc" = 0 ] && ce_ok /tmp/gpu-d.log d; then
+	case_result ce-chain-d PASS groups="$groups" allocation="$ce_mode"
+else case_result ce-chain-d FAIL rc="$rc" allocation="$ce_mode" $(create_diag /tmp/gpu-d.log); fi
 
 # --- G2: CE chain a (NVMe -> host UMEM -> VRAM -> host UMEM -> NVMe) ------
 drop_caches
 dd if="$source_block" of=/tmp/gpu-src.bin bs=512 skip="$source_slba" count="$window_nlb" 2>/dev/null
 if clear_window; then
-	"$ctl" ce-chain --chain a --ce-dev /dev/nvidia0 --ce-alloc --ce-len "$ce_len" \
+	"$ctl" ce-chain --chain a --ce-dev /dev/nvidia0 "$ce_alloc" --ce-len "$ce_len" \
 		--src-ng "$source_ng" --slba "$source_slba" --nlb "$window_nlb" \
 		--dst-ng "$destination_ng" --dst-slba "$target_slba" --dst-nlb "$window_nlb" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
@@ -161,9 +170,9 @@ if clear_window; then
 	rc=$?
 	log_file ce-chain-a /tmp/gpu-a.log
 	if [ "$rc" = 0 ] && ce_ok /tmp/gpu-a.log a && compare_window; then
-		case_result ce-chain-a PASS bytes=$((window_nlb * 512))
+		case_result ce-chain-a PASS bytes=$((window_nlb * 512)) allocation="$ce_mode" compare=equal
 	else
-		case_result ce-chain-a FAIL rc="$rc" $(create_diag /tmp/gpu-a.log) \
+		case_result ce-chain-a FAIL rc="$rc" allocation="$ce_mode" $(create_diag /tmp/gpu-a.log) \
 			compare=$(compare_window && echo equal || echo differs)
 	fi
 else

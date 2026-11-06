@@ -16,6 +16,13 @@ capability as 0, the case line names the matching refusal, and the console
 holds the raw refusal (tool output, and for peer-nvme the kernel line of
 NVIDIA's persistent pin). The CE chains never qualify: their VA resolution is
 the project's own design, so a refusal there stays FAIL.
+
+A CE chain PASS also names its window allocation, and it must be the one the
+capability line selects: a cuMemAlloc block (allocation=native) only where
+CUDA reports GPUDirect RDMA, otherwise a VMM allocation whose POSIX-FD export
+each CE stage fd carries (allocation=vmm).  The tool's own allocation and
+release lines must be in the console, and ce-chain-a must report
+compare=equal.
 """
 
 import argparse
@@ -38,6 +45,28 @@ UNSUPPORTED_RAW = {
                                r'dma_buf_supported=0$', re.M),),
 }
 GPU_ERRORS = re.compile(r'NVRM: (?:Xid \(|.*RmInitAdapter failed|.*GPU has fallen off the bus)')
+CE_CASES = ('ce-chain-d', 'ce-chain-a')
+CE_RAW = {
+    'native': r'CUDA allocation=native bdf=\S+ va=0x[0-9a-f]+ bytes=[0-9]+',
+    'vmm': r'CUDA allocation=vmm bdf=\S+ va=0x[0-9a-f]+ bytes=[0-9]+ mapped=[0-9]+ '
+           r'export=posix-fd attached=2',
+}
+
+
+def _ce_problems(name, fields, caps, text):
+    """Why a CE chain PASS line does not show the allocation it should."""
+    expected = 'native' if caps.get('gpu_direct_rdma') == '1' else 'vmm'
+    mode = fields.get('allocation')
+    if mode != expected:
+        return [f'case {name} allocation={mode}, capabilities select {expected}']
+    problems = []
+    for what, pattern in (('allocation', CE_RAW[mode]),
+                          ('release', re.escape(f'CUDA allocation={mode} released=yes'))):
+        if not re.search(rf'^XDEV_EXT_GPU_LOG {re.escape(name)}: {pattern}$', text, re.M):
+            problems.append(f'case {name} lacks the tool {what} line')
+    if name == 'ce-chain-a' and fields.get('compare') != 'equal':
+        problems.append(f'case {name} PASS without compare=equal')
+    return problems
 
 
 def _fields(line):
@@ -93,6 +122,8 @@ def validate(text, *, release, device):
                 problems.append(f'case {name} UNSUPPORTED without matching CUDA capability evidence')
         elif state != 'PASS':
             problems.append(f'case {name} {state}')
+        elif name in CE_CASES:
+            problems += _ce_problems(name, case_fields[name], caps, text)
     expected = 'UNSUPPORTED' if unsupported and not problems else 'PASS'
     summary = [line for line in lines if line.startswith('XDEV_EXT_GPU_GUEST=')]
     if module_state == 'PASS' and summary != [s for s in summary if s.startswith(f'XDEV_EXT_GPU_GUEST={expected} ')]:

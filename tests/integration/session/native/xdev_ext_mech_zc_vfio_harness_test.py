@@ -234,8 +234,15 @@ CE_PASS = ('XDEV_EXT_MECH_CE_GPU=PASS chain={chain}\n'
            'XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 '
            'rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0\n'
            'CUDA allocation=native released=yes\n')
+# Without GPUDirect RDMA the window is a VMM allocation whose POSIX-FD
+# export the tool attaches to both CE stage fds.
+CE_PASS_VMM = CE_PASS.replace(
+    'CUDA allocation=native released=yes\n',
+    'CUDA allocation=vmm bdf=0000:01:00.0 va=0x7a4879200000 bytes=32768 mapped=2097152 '
+    'export=posix-fd attached=2\nCUDA allocation=vmm released=yes\n')
 PEER_PASS = 'peer chain: done=4 abort=0 inflight=0 sequestered=0 status=0\n'
 CAPS_GEFORCE = 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 pointer_rdma=0\n'
+GEFORCE_CE = dict(ce_d_out=CE_PASS_VMM.format(chain='d'), ce_a_out=CE_PASS_VMM.format(chain='a'))
 
 
 class GpuGuestCases(unittest.TestCase):
@@ -339,10 +346,43 @@ class GpuGuestCases(unittest.TestCase):
     NO_DMA_BUF = 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=0\n'
     PIN_REFUSED = '[   14.1] NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22\n'
 
+    def ce_calls(self):
+        return [line.split() for line in (self.root / 'fake/ctl.calls').read_text().splitlines()
+                if line.startswith('ce-chain ')]
+
+    def test_ce_chains_use_the_vmm_export_where_cuda_reports_no_rdma(self):
+        console = self.guest(caps_out=CAPS_GEFORCE, **GEFORCE_CE)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-d', 'ce-chain-a'):
+            self.assertEqual((cases[name]['result'], cases[name]['allocation']), ('PASS', 'vmm'),
+                             cases[name])
+        self.assertEqual(cases['ce-chain-a']['compare'], 'equal')
+        for words in self.ce_calls():
+            self.assertIn('--ce-vmm', words)
+            self.assertNotIn('--ce-alloc', words)
+
+    def test_ce_chains_keep_cumemalloc_where_cuda_reports_rdma(self):
+        cases = self.verdicts(self.guest())
+        for name in ('ce-chain-d', 'ce-chain-a'):
+            self.assertEqual((cases[name]['result'], cases[name]['allocation']), ('PASS', 'native'))
+        for words in self.ce_calls():
+            self.assertIn('--ce-alloc', words)
+            self.assertNotIn('--ce-vmm', words)
+
+    def test_a_vmm_pass_needs_the_attach_and_release_lines(self):
+        for name, text in (('no attach', CE_PASS_VMM.replace(' attached=2', ' attached=1')),
+                           ('released=no', CE_PASS_VMM.replace('vmm released=yes', 'vmm released=no')),
+                           ('native lines on GeForce', CE_PASS)):
+            with self.subTest(name):
+                console = self.guest(caps_out=CAPS_GEFORCE, ce_d_out=text.format(chain='d'),
+                                     ce_a_out=CE_PASS_VMM.format(chain='a'))
+                self.assertEqual(self.verdicts(console)['ce-chain-d']['result'], 'FAIL')
+
     def test_geforce_refusals_are_unsupported_not_failed(self):
         # What CUDA reported on the RTX 5090: no GPUDirect RDMA, no dma_buf.
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
-                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n')
+                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n',
+                             **GEFORCE_CE)
         cases = self.verdicts(console)
         self.assertEqual({key: cases['peer-nvme'].get(key) for key in ('result', 'reason', 'step', 'errno')},
                          dict(result='UNSUPPORTED', reason='cuda-no-gpudirect-rdma', step='register',
@@ -376,7 +416,7 @@ class GpuGuestCases(unittest.TestCase):
     def test_one_failure_keeps_the_summary_failed(self):
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
                              dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n',
-                             ce_d_out='', ce_d_rc='3\n')
+                             ce_a_out=CE_PASS_VMM.format(chain='a'), ce_d_out='', ce_d_rc='3\n')
         self.assertIn('\nXDEV_EXT_GPU_GUEST=FAIL failed=1 unsupported=2\n', console)
 
 
@@ -398,7 +438,8 @@ CUresult cuDeviceGetAttribute(int *out, int attribute, CUdevice device)
 	(void)device;
 	if (value("FAKE_ATTR_FAIL"))
 		return 1;
-	*out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") : 7;
+	*out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") :
+	       attribute == 102 ? value("FAKE_VMM") : attribute == 103 ? value("FAKE_POSIX_FD") : 7;
 	return 0;
 }
 CUresult cuDevicePrimaryCtxRetain(CUcontext *context, CUdevice device) { (void)device; *context = (void *)1; return 0; }
@@ -451,12 +492,16 @@ class GpuCapsProbe(unittest.TestCase):
                               capture_output=True, text=True, env=env, timeout=30)
 
     def test_reports_cuda_rdma_and_dma_buf_support_and_releases_the_probe_block(self):
-        for rdma, dma_buf, pointer in ((0, 0, 0), (1, 1, 1)):
-            with self.subTest(rdma=rdma, dma_buf=dma_buf, pointer=pointer):
-                run = self.probe(rdma=rdma, dma_buf=dma_buf, pointer_rdma=pointer)
+        # CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED (102) and
+        # _HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED (103) back the VMM window.
+        for rdma, dma_buf, pointer, vmm in ((0, 0, 0, 1), (1, 1, 1, 0)):
+            with self.subTest(rdma=rdma, dma_buf=dma_buf, pointer=pointer, vmm=vmm):
+                run = self.probe(rdma=rdma, dma_buf=dma_buf, pointer_rdma=pointer, vmm=vmm,
+                                 posix_fd=vmm)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertEqual(run.stdout, f'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma={rdma} '
-                                             f'dma_buf={dma_buf} pointer_rdma={pointer}\n')
+                                             f'dma_buf={dma_buf} pointer_rdma={pointer} '
+                                             f'vmm={vmm} posix_fd={vmm}\n')
                 self.assertEqual(run.stderr.split(), ['FAKE', 'free', 'FAKE', 'release'])
 
     def test_cuda_failures_never_print_a_value_and_still_clean_up(self):
@@ -466,9 +511,9 @@ class GpuCapsProbe(unittest.TestCase):
                 ('attr_fail', 1, '', []),
                 ('alloc_fail', 1, '', ['FAKE', 'release']),
                 ('pointer_fail', 0, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
-                                    'pointer_rdma=-1\n', ['FAKE', 'free', 'FAKE', 'release']),
+                                    'pointer_rdma=-1 vmm=0 posix_fd=0\n', ['FAKE', 'free', 'FAKE', 'release']),
                 ('free_fail', 1, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
-                                 'pointer_rdma=0\n', ['FAKE', 'free', 'FAKE', 'release'])):
+                                 'pointer_rdma=0 vmm=0 posix_fd=0\n', ['FAKE', 'free', 'FAKE', 'release'])):
             with self.subTest(knob):
                 run = self.probe(**{knob: 1})
                 self.assertEqual(run.returncode, code, run.stdout + run.stderr)

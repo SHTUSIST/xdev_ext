@@ -7,8 +7,10 @@
  *   xdev_ext_gpu_dmabuf --caps --bdf PCI_BDF
  *
  * --caps prints what CUDA reports for that GPU: GPUDirect RDMA and dma_buf
- * device support, and whether a fresh 64 KiB cuMemAlloc block can be used
- * with the GPUDirect RDMA API (nvidia_p2p_get_pages*), then frees it.
+ * device support, whether a fresh 64 KiB cuMemAlloc block can be used
+ * with the GPUDirect RDMA API (nvidia_p2p_get_pages*), then frees it, and
+ * whether VMM allocations with POSIX file descriptor exports exist (the CE
+ * window of a GPU without GPUDirect RDMA).
  *
  * Allocates N bytes of VRAM on the CUDA device with that PCI address, exports
  * the whole range with cuMemGetHandleForAddressRange(DMA_BUF_FD), registers
@@ -36,6 +38,8 @@ typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
 typedef unsigned long long CUdeviceptr;
+#define CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED 102
+#define CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED 103
 #define CU_DEVICE_ATTRIBUTE_GPU_DIRECT_RDMA_SUPPORTED 116
 #define CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED 124
 #define CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE 15
@@ -115,7 +119,7 @@ static int caps(const char *bdf)
 	CUdeviceptr pointer = 0;
 	CUcontext context = NULL;
 	CUdevice device;
-	int rdma = -1, dma_buf = -1, pointer_rdma = -1, ret = 1;
+	int rdma = -1, dma_buf = -1, pointer_rdma = -1, vmm = -1, posix_fd = -1, ret = 1;
 	char text[32];
 
 	if (load())
@@ -129,6 +133,10 @@ static int caps(const char *bdf)
 	      "cuDeviceGetAttribute(GPU_DIRECT_RDMA_SUPPORTED)");
 	CHECK(cu.attribute(&dma_buf, CU_DEVICE_ATTRIBUTE_DMA_BUF_SUPPORTED, device),
 	      "cuDeviceGetAttribute(DMA_BUF_SUPPORTED)");
+	CHECK(cu.attribute(&vmm, CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED, device),
+	      "cuDeviceGetAttribute(VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED)");
+	CHECK(cu.attribute(&posix_fd, CU_DEVICE_ATTRIBUTE_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED,
+			   device), "cuDeviceGetAttribute(HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED)");
 	CHECK(cu.retain(&context, device), "cuDevicePrimaryCtxRetain");
 	CHECK(cu.set(context), "cuCtxSetCurrent");
 	CHECK(cu.alloc(&pointer, 65536), "cuMemAlloc");
@@ -136,8 +144,8 @@ static int caps(const char *bdf)
 	if (cu.pointer_attribute(&pointer_rdma, CU_POINTER_ATTRIBUTE_IS_GPU_DIRECT_RDMA_CAPABLE,
 				 pointer))
 		pointer_rdma = -1;
-	printf("XDEV_EXT_GPU_CAPS bdf=%s gpu_direct_rdma=%d dma_buf=%d pointer_rdma=%d\n",
-	       text, rdma, dma_buf, pointer_rdma);
+	printf("XDEV_EXT_GPU_CAPS bdf=%s gpu_direct_rdma=%d dma_buf=%d pointer_rdma=%d "
+	       "vmm=%d posix_fd=%d\n", text, rdma, dma_buf, pointer_rdma, vmm, posix_fd);
 	ret = 0;
 out:
 	fflush(stdout);
