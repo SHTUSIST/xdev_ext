@@ -43,6 +43,23 @@ attached devices while the buffer is registered (one attachment per
 requester), and must no longer list the buffer after its last reference is
 gone.
 
+With `--exporter udmabuf` every case runs on udmabuf dma-bufs instead (a
+memfd turned into a dma-buf by the upstream `udmabuf` driver, which registers
+no xdev_ext backing descriptor). They are imported with
+`XDEV_EXT_PEER_REGISTER_F_DMABUF | XDEV_EXT_PEER_REGISTER_F_DMABUF_UNDESCRIBED`,
+and `chain` requires `STAGE_CAPS` to report the storage family, `UNKNOWN`
+reachability, an established requester mapping and exactly
+`XDEV_EXT_PEER_BACKING_UNDESCRIBED` backing for both stages: the session's
+frames live in memory that xdev_ext knows nothing about beyond the exporter's
+own mapping for each NVMe function. The other observations, the data oracle
+and the accounting rules are unchanged. This mode adds `fenced-chain`: a
+64-group session on a udmabuf whose reservation object holds an unsignaled
+writer fence from the upstream `sw_sync` test timeline (imported with
+`DMA_BUF_IOCTL_IMPORT_SYNC_FILE`). Every batch must end with `EBUSY` before
+any native command is submitted (`STATS` submitted 0 for both stages), `STOP`
+returns `EBUSY`, the destination range keeps its guard bytes, and after the
+fence signals and the fds close the charge returns and the buffer is freed.
+
 STATS sampling and the following close or kill are separate operations, so
 the observation does not prove that a command was still incomplete at the
 exact instant of the close or kill. QEMU NVMe completes every accepted
@@ -58,7 +75,11 @@ and a clean canonical checkout that differs from the build's recorded commit
 only in test inputs outside the kernel and the BPF object:
 
     bash tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh --scratch PRIVATE_0700_DIR \
-        --source CLEAN_CHECKOUT --build KERNEL_O_DIR --tools TOOLS_DIR [--viommu]
+        --source CLEAN_CHECKOUT --build KERNEL_O_DIR --tools TOOLS_DIR [--viommu] \
+        [--exporter system-heap|udmabuf]
+
+`--exporter udmabuf` needs `CONFIG_UDMABUF=y`, `CONFIG_SYNC_FILE=y` and
+`CONFIG_SW_SYNC=y` instead of the DMA heap options.
 
 The build directory must contain `xdev-ext-source.commit` and
 `xdev-ext-artifacts.sha256` (absolute paths of the bzImage and
@@ -79,5 +100,6 @@ harness. `python3 -I validate_test.py` mutates a correct run one fact at a
 time and requires the oracle to reject each mutation; it boots nothing.
 
 Not covered: device memory other than host RAM, exporters other than the
-system heap, fences, an exporter that moves or revokes the buffer, unknown
-DMA quarantine, and any timing.
+system heap and udmabuf, fences on the system-heap path, a fence that
+arrives while commands are in flight, an exporter that moves or revokes the
+buffer, unknown DMA quarantine, and any timing.
