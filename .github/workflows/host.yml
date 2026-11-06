@@ -114,6 +114,13 @@ jobs:
           python3 -I tests/core/peer_dmabuf/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-admission"
           python3 -I tests/core/peer_dmabuf/importer_run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-importer"
           make -C tests/core/peer_dmabuf cli-test OUTPUT="$RUNNER_TEMP/dmabuf-native-cli"
+      - name: UNKNOWN peer DMA quarantine recovery
+        working-directory: .
+        run: |
+          python3 -I tests/core/peer_quarantine/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/peer-quarantine"
+          python3 -I tests/core/peer_quarantine/mutations.py --source-root "$GITHUB_WORKSPACE"
+          python3 -I tests/core/peer_quarantine/native_mutations.py --source-root "$GITHUB_WORKSPACE"
+          python3 -I build/source-view/kernel/tools/testing/selftests/xdev_ext_peer/guest/reset_validate_test.py
       - name: Ordinary XSK DATA pool authority and count-journal contracts
         working-directory: .
         if: matrix.cc == 'gcc'

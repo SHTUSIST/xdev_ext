@@ -83,8 +83,42 @@ Set `HOST_TEST_OUT` to an existing private directory within the project.
         peer_session_observe_test.c -o "$HOST_TEST_OUT/peer_session_observe_test" -lbpf -lelf -lz
     timeout 10s "$HOST_TEST_OUT/peer_session_observe_test"
 
-Not covered: real device memory, GPU copy engines, NIC stages (the provider
-maps only for NVMe functions), IOMMU, unknown-DMA quarantine, ambiguous or
-stale-ticket completions (the fixture can only refuse a map, and QEMU NVMe
-completes every accepted command), a device reset during a run, or any
-timing.
+Not covered by the session test: real device memory, GPU copy engines, NIC
+stages (the provider maps only for NVMe functions), IOMMU, unknown-DMA
+quarantine, ambiguous or stale-ticket completions (the fixture can only
+refuse a map, and QEMU NVMe completes every accepted command), a device reset
+during a run, or any timing.
+
+## Reset recovery test (`peer_reset_e2e`, `run-reset-guest.sh`, `reset_kvm.sh`)
+
+Synchronous `XDEV_EXT_PEER_NVME_RW` reads whose outcome is UNKNOWN, and their
+release by a proven NVMe Controller Reset. The UNKNOWN outcomes come from the
+kernel's own fault injection, so the kernel needs
+`CONFIG_FAULT_INJECTION_DEBUG_FS` and `CONFIG_FAIL_IO_TIMEOUT`: an injected
+error status on a command QEMU completed (`fault_inject`), and a swallowed
+completion that times out, is aborted, times out again and is cancelled by the
+controller reset (`fail_io_timeout`). Each case is its own process:
+
+- `control`: a completed read releases at owner close.
+- `error-status`: the UNKNOWN region stays pinned and mapped through owner
+  close, keeps the provider module loaded, survives a completed reset of the
+  other controller and a wait, and is released once by the source
+  controller's completed reset.
+- `timeout-cancel`: the command cancelled inside the proven reset is released
+  at owner close, with no further reset.
+- `owner-open`: a region recovered while its owner holds it admits no new
+  command (`-ESTALE`) and is released by the owner close.
+
+The provider must then unload. `reset_validate.py` checks every case verdict
+and its exact check count, the unload, the exit status and the kernel console
+for the debug report families `xdev_ext_mech_zc_debug.py` rejects;
+`python3 -I reset_validate_test.py` checks that it rejects single-defect
+consoles. `reset_kvm.sh` builds only the static guest program from an
+assembled Linux tree:
+
+    bash reset_kvm.sh --scratch PRIVATE_0700_DIR --linux ASSEMBLED_TREE \
+        --build KERNEL_O_DIR --module KERNEL_O_DIR_MATCHED/xdev_ext_peer_sw.ko
+
+This certifies the software release state machine against a QEMU controller
+reset. It does not show that a physical controller stops DMA at reset, nor
+anything about IOMMU or provider-side revocation.

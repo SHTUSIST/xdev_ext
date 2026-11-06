@@ -132,6 +132,34 @@ int xdev_ext_peer_release(struct xdev_ext_peer_lease *, u64 ticket, bool quiesce
 void xdev_ext_peer_invalidate(struct xdev_ext_peer_region *);
 int xdev_ext_peer_unmap(struct xdev_ext_peer_mapping *);
 int xdev_ext_peer_unpin(struct xdev_ext_peer_region *);
+/*
+ * DMA-stop evidence of one requester PCI function, per driver instance.
+ * begin() opens epoch k before the driver stops dispatching.  quiesced(k) may
+ * be called only once the function can issue no further DMA for any command
+ * it received before epoch k began (NVMe: a completed Controller Reset with
+ * Bus Master Enable read back clear).  epoch() is read, in any context, where
+ * a native command becomes visible to the device.  A NULL requester (failed
+ * register) has no epochs and proves nothing.  Process context otherwise.
+ */
+#define XDEV_EXT_PEER_EPOCH_NONE (~0ULL)
+struct xdev_ext_peer_requester;
+struct xdev_ext_peer_requester *xdev_ext_peer_requester_register(struct pci_dev *);
+void xdev_ext_peer_requester_unregister(struct xdev_ext_peer_requester *);
+u64 xdev_ext_peer_requester_begin(struct xdev_ext_peer_requester *);
+u64 xdev_ext_peer_requester_epoch(struct xdev_ext_peer_requester *);
+void xdev_ext_peer_requester_quiesced(struct xdev_ext_peer_requester *, u64 epoch);
+/* UNKNOWN outcome of a command that @requester (the lease mapping's PCI
+ * function) received in @epoch.  The lease is retired either way; *quiesced
+ * is true when a later epoch is already proven.  Otherwise the region is
+ * quarantined until one is, and for good without a matching requester and
+ * epoch.  A recovered region stays invalid: it can only be torn down. */
+int xdev_ext_peer_release_unknown(struct xdev_ext_peer_lease *, u64 ticket,
+				  struct xdev_ext_peer_requester *, u64 epoch, bool *quiesced);
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *,
+				      struct xdev_ext_peer_requester *, u64 epoch);
+/* Owner release of a region whose unmap was refused: the core keeps it and
+ * tears it down once no UNKNOWN DMA remains (now, if none remains). */
+void xdev_ext_peer_orphan(struct xdev_ext_peer_region *);
 
 struct xdev_ext_peer_backing {
  struct pci_dev *owner; /* PCI function whose BAR backs the allocation; borrowed */

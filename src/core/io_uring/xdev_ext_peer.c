@@ -2,7 +2,8 @@
 /* Persistent device memory, distinct from the host struct-page UMEM pool.
  * All control operations are process context and may sleep. The native driver
  * must defer end_io release to a worker. Provider mappings remain resident
- * throughout native request ownership; uncertain DMA retains every reference.
+ * throughout native request ownership; uncertain DMA retains every reference
+ * until the requester's driver proves a later DMA-stop epoch, if ever.
  */
 #ifndef XDEV_EXT_PEER_HOST_TEST
 #include <linux/atomic.h>
@@ -15,6 +16,7 @@
 #include <linux/mutex.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <linux/xdev_ext_peer.h>
 #else
 #include "../include/linux/xdev_ext_peer.h"
@@ -33,6 +35,13 @@ struct xdev_ext_peer_region {
  void *allocation;
  u64 len, generation;
  bool invalid, quarantined;
+ /* Quarantine causes. permanent: provider failure or UNKNOWN without
+  * evidence binding. pending: mappings with an uncovered requester record.
+  * queued/qnode: on the recovery list (quarantine lock). orphaned: the owner
+  * released it; the core tears it down when no cause remains. */
+ bool permanent, queued, orphaned;
+ u32 pending;
+ struct list_head qnode;
 };
 struct xdev_ext_peer_mapping {
  struct list_head node;
@@ -42,6 +51,16 @@ struct xdev_ext_peer_mapping {
  enum dma_data_direction direction;
  u32 users, active;
  struct xdev_ext_peer_lease *leases;
+ /* Uncovered UNKNOWN record: requester instance and highest epoch. */
+ struct xdev_ext_peer_requester *unknown;
+ u64 unknown_epoch;
+};
+struct xdev_ext_peer_requester {
+ struct mutex lock; /* proven */
+ struct pci_dev *pdev;
+ atomic64_t started;
+ u64 proven;
+ u32 refs; /* driver and mapping records; quarantine lock */
 };
 static DEFINE_MUTEX(xdev_ext_peer_registry_lock);
 static LIST_HEAD(xdev_ext_peer_providers);
@@ -225,7 +244,7 @@ int xdev_ext_peer_map(struct xdev_ext_peer_region *r, struct pci_dev *peer,
 rollback:
   /* Even malformed provider geometry cannot bypass native cleanup failure. */
   if (r->ops->unmap(r->allocation, peer, &m->dma)) {
-   r->invalid = r->quarantined = true; m->users = 1;
+   r->invalid = r->quarantined = r->permanent = true; m->users = 1;
    list_add_tail(&m->node, &r->maps); goto done;
   }
   goto free;
@@ -278,6 +297,7 @@ int xdev_ext_peer_release(struct xdev_ext_peer_lease *lease, u64 ticket, bool qu
  if (!*cursor || ticket != lease->ticket) { mutex_unlock(&r->lock); return -ESTALE; }
  *cursor = lease->next; lease->next = NULL;
  if (!quiesced) r->invalid = r->quarantined = true;
+ if (!quiesced) r->permanent = true; /* no evidence binding */
  m->active--; lease->mapping = NULL; lease->dma_address = 0; lease->len = 0;
  mutex_unlock(&r->lock); return 0;
 }
@@ -298,7 +318,7 @@ int xdev_ext_peer_unmap(struct xdev_ext_peer_mapping *m)
  if (m->active) { ret = -EBUSY; goto done; }
  if (m->users > 1) { m->users--; goto done; }
  ret = r->ops->unmap(r->allocation, m->peer, &m->dma);
- if (ret) { r->invalid = r->quarantined = true; goto done; }
+ if (ret) { r->invalid = r->quarantined = r->permanent = true; goto done; }
  list_del(&m->node); pci_dev_put(m->peer); kfree(m);
 done:
  mutex_unlock(&r->lock); return ret;
@@ -315,7 +335,7 @@ int xdev_ext_peer_unpin(struct xdev_ext_peer_region *r)
  if (!list_empty(&r->maps)) { ret = -EBUSY; goto done; }
  r->invalid = true; p = r->provider; owner = r->ops->owner;
  ret = r->ops->unpin(r->allocation);
- if (ret) { r->quarantined = true; goto done; }
+ if (ret) { r->quarantined = r->permanent = true; goto done; }
  mutex_unlock(&r->lock);
  if (p) {
   mutex_lock(&xdev_ext_peer_registry_lock); p->allocations--;
@@ -326,3 +346,181 @@ done:
  mutex_unlock(&r->lock); return ret;
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_unpin);
+
+/*
+ * Recovery after UNKNOWN native DMA.  An UNKNOWN lease bound to the requester
+ * instance that received it, and to the epoch it received it in, leaves a
+ * record in its mapping.  The record is covered once that requester proves a
+ * later epoch: the epoch began after the command became visible to the
+ * device, so the proven stop includes it.  A region with no uncovered record
+ * and no permanent cause leaves quarantine; it stays invalid.
+ * Lock order: xdev_ext_peer_quarantine_lock, region lock, requester lock.
+ */
+static DEFINE_MUTEX(xdev_ext_peer_quarantine_lock);
+static LIST_HEAD(xdev_ext_peer_quarantined);
+static void xdev_ext_peer_recovery_work(struct work_struct *work);
+static DECLARE_WORK(xdev_ext_peer_recovery, xdev_ext_peer_recovery_work);
+struct xdev_ext_peer_requester *xdev_ext_peer_requester_register(struct pci_dev *pdev)
+{
+ struct xdev_ext_peer_requester *rq;
+ if (!pdev) return NULL;
+ rq = kzalloc(sizeof(*rq), GFP_KERNEL);
+ if (!rq) return NULL;
+ mutex_init(&rq->lock);
+ rq->pdev = pci_dev_get(pdev);
+ rq->refs = 1;
+ return rq;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_register);
+/* Caller holds xdev_ext_peer_quarantine_lock. */
+static void xdev_ext_peer_requester_put_locked(struct xdev_ext_peer_requester *rq)
+{
+ if (--rq->refs) return;
+ pci_dev_put(rq->pdev);
+ kfree(rq);
+}
+/* The driver instance is gone: no further epoch begins or is proven. */
+void xdev_ext_peer_requester_unregister(struct xdev_ext_peer_requester *rq)
+{
+ if (!rq) return;
+ mutex_lock(&xdev_ext_peer_quarantine_lock);
+ xdev_ext_peer_requester_put_locked(rq);
+ mutex_unlock(&xdev_ext_peer_quarantine_lock);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_unregister);
+u64 xdev_ext_peer_requester_begin(struct xdev_ext_peer_requester *rq)
+{
+ return rq ? (u64)atomic64_inc_return(&rq->started) : 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_begin);
+u64 xdev_ext_peer_requester_epoch(struct xdev_ext_peer_requester *rq)
+{
+ return rq ? (u64)atomic64_read(&rq->started) : XDEV_EXT_PEER_EPOCH_NONE;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_epoch);
+/* Takes no core lock beyond the requester's own: callable from a driver's
+ * reset path. Recovery itself runs later in process context. */
+void xdev_ext_peer_requester_quiesced(struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+ bool advanced = false;
+ if (!rq || !epoch || epoch > (u64)atomic64_read(&rq->started)) return;
+ mutex_lock(&rq->lock);
+ if (epoch > rq->proven) { rq->proven = epoch; advanced = true; }
+ mutex_unlock(&rq->lock);
+ if (advanced) schedule_work(&xdev_ext_peer_recovery);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_quiesced);
+static bool xdev_ext_peer_requester_covers(struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+ bool covers;
+ mutex_lock(&rq->lock); covers = rq->proven > epoch; mutex_unlock(&rq->lock);
+ return covers;
+}
+int xdev_ext_peer_release_unknown(struct xdev_ext_peer_lease *lease, u64 ticket,
+                                  struct xdev_ext_peer_requester *rq, u64 epoch, bool *quiesced)
+{
+ struct xdev_ext_peer_mapping *m;
+ struct xdev_ext_peer_region *r;
+ struct xdev_ext_peer_lease **cursor;
+ bool bound, covered = false;
+ if (quiesced) *quiesced = false;
+ if (!lease || !lease->mapping) return -EINVAL;
+ m = lease->mapping; r = m->region;
+ mutex_lock(&xdev_ext_peer_quarantine_lock); mutex_lock(&r->lock);
+ for (cursor = &m->leases; *cursor && *cursor != lease; cursor = &(*cursor)->next) { }
+ if (!*cursor || ticket != lease->ticket) {
+  mutex_unlock(&r->lock); mutex_unlock(&xdev_ext_peer_quarantine_lock);
+  return -ESTALE;
+ }
+ *cursor = lease->next; lease->next = NULL;
+ m->active--; lease->mapping = NULL; lease->dma_address = 0; lease->len = 0;
+ bound = rq && rq->pdev == m->peer && epoch != XDEV_EXT_PEER_EPOCH_NONE &&
+         (!m->unknown || m->unknown == rq);
+ /* Read under the quarantine lock: a proof stored after this read is
+  * followed by recovery work that finds this region queued below. */
+ if (bound && xdev_ext_peer_requester_covers(rq, epoch)) {
+  covered = true;
+ } else {
+  r->invalid = r->quarantined = true;
+  if (!bound) {
+   r->permanent = true;
+  } else {
+   if (!m->unknown) {
+    m->unknown = rq; rq->refs++; m->unknown_epoch = epoch; r->pending++;
+   } else if (epoch > m->unknown_epoch) {
+    m->unknown_epoch = epoch;
+   }
+   if (!r->queued) {
+    list_add_tail(&r->qnode, &xdev_ext_peer_quarantined); r->queued = true;
+   }
+  }
+ }
+ mutex_unlock(&r->lock); mutex_unlock(&xdev_ext_peer_quarantine_lock);
+ if (quiesced) *quiesced = covered;
+ return 0;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_release_unknown);
+/* Process context, no lock held: no owner and no UNKNOWN DMA remain. A
+ * provider failure on the way keeps everything not yet released for good. */
+static void xdev_ext_peer_region_retire(struct xdev_ext_peer_region *r)
+{
+ struct xdev_ext_peer_mapping *m;
+ for (;;) {
+  mutex_lock(&r->lock);
+  if (list_empty(&r->maps)) { mutex_unlock(&r->lock); break; }
+  m = container_of(r->maps.next, struct xdev_ext_peer_mapping, node);
+  mutex_unlock(&r->lock);
+  /* Each call drops one borrower of the gone owner's cache. */
+  if (xdev_ext_peer_unmap(m)) return;
+ }
+ xdev_ext_peer_unpin(r);
+}
+static void xdev_ext_peer_recovery_work(struct work_struct *work)
+{
+ LIST_HEAD(keep);
+ LIST_HEAD(retire);
+ struct xdev_ext_peer_region *r;
+ struct xdev_ext_peer_mapping *m;
+ (void)work;
+ mutex_lock(&xdev_ext_peer_quarantine_lock);
+ while (!list_empty(&xdev_ext_peer_quarantined)) {
+  r = container_of(xdev_ext_peer_quarantined.next, struct xdev_ext_peer_region, qnode);
+  list_del(&r->qnode);
+  mutex_lock(&r->lock);
+  list_for_each_entry(m, &r->maps, node)
+   if (m->unknown && xdev_ext_peer_requester_covers(m->unknown, m->unknown_epoch)) {
+    xdev_ext_peer_requester_put_locked(m->unknown);
+    m->unknown = NULL; r->pending--;
+   }
+  if (r->pending) {
+   list_add_tail(&r->qnode, &keep);
+  } else {
+   r->queued = false;
+   if (!r->permanent) {
+    r->quarantined = false;
+    if (r->orphaned) list_add_tail(&r->qnode, &retire);
+   }
+  }
+  mutex_unlock(&r->lock);
+ }
+ while (!list_empty(&keep)) {
+  r = container_of(keep.next, struct xdev_ext_peer_region, qnode);
+  list_del(&r->qnode); list_add_tail(&r->qnode, &xdev_ext_peer_quarantined);
+ }
+ mutex_unlock(&xdev_ext_peer_quarantine_lock);
+ while (!list_empty(&retire)) {
+  r = container_of(retire.next, struct xdev_ext_peer_region, qnode);
+  list_del(&r->qnode);
+  xdev_ext_peer_region_retire(r);
+ }
+}
+void xdev_ext_peer_orphan(struct xdev_ext_peer_region *r)
+{
+ bool retire;
+ if (!r) return;
+ mutex_lock(&r->lock);
+ r->orphaned = true;
+ retire = !r->quarantined;
+ mutex_unlock(&r->lock);
+ if (retire) xdev_ext_peer_region_retire(r);
+}

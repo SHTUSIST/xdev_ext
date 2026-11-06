@@ -4981,6 +4981,22 @@
       "logical_path": "tests/core/peer_dmabuf/device_dma/validate_test.py"
     },
     {
+      "source": "tests/core/peer_quarantine/mutations.py",
+      "logical_path": "tests/core/peer_quarantine/mutations.py"
+    },
+    {
+      "source": "tests/core/peer_quarantine/native_mutations.py",
+      "logical_path": "tests/core/peer_quarantine/native_mutations.py"
+    },
+    {
+      "source": "tests/core/peer_quarantine/recovery_cases.c",
+      "logical_path": "tests/core/peer_quarantine/recovery_cases.c"
+    },
+    {
+      "source": "tests/core/peer_quarantine/run.py",
+      "logical_path": "tests/core/peer_quarantine/run.py"
+    },
+    {
       "source": "tests/core/policy/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_policy/Makefile"
@@ -7152,6 +7168,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_nvme_e2e.c"
     },
     {
+      "source": "tests/network/peer/session/guest/peer_reset_e2e.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_e2e.c"
+    },
+    {
       "source": "tests/network/peer/session/guest/peer_session_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_e2e.c"
@@ -7162,9 +7183,29 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_observe_test.c"
     },
     {
+      "source": "tests/network/peer/session/guest/reset_kvm.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_kvm.sh"
+    },
+    {
+      "source": "tests/network/peer/session/guest/reset_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_validate.py"
+    },
+    {
+      "source": "tests/network/peer/session/guest/reset_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/reset_validate_test.py"
+    },
+    {
       "source": "tests/network/peer/session/guest/run-guest.sh",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/run-guest.sh"
+    },
+    {
+      "source": "tests/network/peer/session/guest/run-reset-guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/run-reset-guest.sh"
     },
     {
       "source": "tests/network/peer/session/guest/run-session-guest.sh",

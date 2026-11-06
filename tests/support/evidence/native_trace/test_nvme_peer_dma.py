@@ -159,7 +159,13 @@ class NVMePeerDMA(unittest.TestCase):
                             'if (!(flags & BLK_MQ_REQ_NOWAIT) && !sync_mode)', 1)
         shim = peer.positional_replace(shim, '(void)r; (void)at_head; blocked_worker++; return 0;',
                             'assert(sync_mode && !at_head); issue_trace(r); executes++; return sync_status;', 1)
-        code = 'struct nvme_dev { struct device *dev; };\n' + (
+        # The sync path binds an UNKNOWN release to this controller's DMA-stop
+        # epochs; the fixture has no requester, so it stays unbound.
+        code = ('struct xdev_ext_peer_requester;\n'
+                'struct nvme_dev { struct device *dev; struct xdev_ext_peer_requester *peer_requester; };\n'
+                'bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *h, '
+                'struct xdev_ext_peer_requester *rq, u64 epoch)\n'
+                '{ (void)rq; (void)epoch; xdev_ext_peer_fd_release(h, false); return false; }\n') + (
             'static struct nvme_dev *to_nvme_dev(struct nvme_ctrl *c) '
             '{ static struct nvme_dev dev; dev.dev=c->dev; return &dev; }\n') + helper + '\n' + code
 
