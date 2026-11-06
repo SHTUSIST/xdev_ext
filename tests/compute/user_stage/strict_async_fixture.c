@@ -30,9 +30,10 @@
 #define IS_ERR(p) ((uintptr_t)(p) > (uintptr_t)-4096)
 #define PTR_ERR(p) ((long)(p))
 #define compat_ptr_ioctl NULL
-#define XDEV_EXT_COMP_INPLACE 0
-#define XDEV_EXT_FAMILY_COMPUTE 0
-#define XDEV_EXT_CAP_NOT_WIRED 0
+/* The kind, family and capability values are the real UAPI and compute
+ * family enums (via the scheduler shim), so the production CREATE wrapper
+ * reads the USER hooks exactly as the kernel does. Only the hooks layout is
+ * a boundary: its header is the kernel-only family header. */
 struct xdev_ext_comp_hooks { struct { int family; } hdr; unsigned kinds; int producer_visibility; };
 struct kref { unsigned count; };
 static void kref_init(struct kref *r) { r->count=1; }
@@ -67,6 +68,9 @@ static struct xdev_ext_user_obj *object;
 static int bind_err;
 static u32 bind_extra;
 static s64 bind_delta;
+/* Bind through the production CREATE wrapper xdev_ext_mech_class_bind():
+ * default record, compute kind rule, USER bind, declared visibility. */
+static bool via_create;
 static int real_setup(bool strict,bool peer,bool external,bool polling) {
  setup(2,2,0,false);
  /* Drop the fabricated stage and replace it through actual CREATE/bind. */
@@ -89,7 +93,8 @@ static int real_setup(bool strict,bool peer,bool external,bool polling) {
   session.plan[1]=clean;
  }
  session.st[1].flags=session.plan[1].flags;
- bind_err=xdev_ext_user_bind(&session.st[1],&session.plan[1]);
+ bind_err=via_create?xdev_ext_mech_class_bind(&session.st[1],&session.plan[1],session.pool.kind):
+  xdev_ext_user_bind(&session.st[1],&session.plan[1]);
  if(bind_err){fprintf(stderr,"bind returned %d\n",bind_err);return bind_err;}
  us=session.st[1].priv;region=object->region;
  return 0;
@@ -160,7 +165,52 @@ static int attach_cases(const char *mode) {
  }
  return failures!=0;
 }
+/*
+ * STAGE_CAPS after CREATE says what the code enforces, never more.  A strict
+ * USER stage on a VRAM (PEER) pool: hand-off and frame reuse wait for the
+ * owner's per-batch completion record, which the kernel binds to the batch
+ * but cannot verify (OWNER_ASSERTED); the region's invalidation answer is
+ * applied by the kernel itself at hand-out and at that record (ESTABLISHED).
+ * Host pages: the same owner rule for visibility; last use and invalidation
+ * stay NOT_APPLICABLE.  A refused bind claims nothing beyond the defaults.
+ */
+static int caps_cases(const char *mode) {
+ bool peer=!strncmp(mode,"caps-peer",9),refused=!strcmp(mode,"caps-peer-refused");
+ bool strict=!refused&&strcmp(mode,"caps-legacy")!=0;
+ const struct xdev_ext_mech_stage_caps *c=&session.st[1].caps;
+ via_create=true;
+ int err=real_setup(strict,peer,false,peer&&!refused);
+ fprintf(stderr,"# bind=%d family=%u export=%u reach=%u visibility=%u last_use=%u invalidation=%u\n",err,
+         c->family,c->export_authority,c->reachability,c->producer_visibility,c->last_use_quiescence,c->invalidation);
+ if(refused){
+  CHECK(err==-EOPNOTSUPP,"CREATE refuses a non-strict USER stage on a VRAM pool");
+  CHECK(c->producer_visibility==XDEV_EXT_CAP_NOT_WIRED,"refused bind does not take the class's visibility claim");
+  CHECK(c->last_use_quiescence==XDEV_EXT_CAP_NOT_WIRED&&c->invalidation==XDEV_EXT_CAP_NOT_WIRED,
+        "refused bind keeps the PEER defaults for last use and invalidation");
+  return failures!=0;
+ }
+ REQUIRE(!err,"USER stage binds through the production CREATE wrapper");
+ CHECK(c->size==sizeof(*c)&&c->version==XDEV_EXT_MECH_STAGE_CAPS_VERSION&&c->family==XDEV_EXT_FAMILY_COMPUTE,
+       "record is the compute family's");
+ CHECK(c->producer_visibility==XDEV_EXT_CAP_OWNER_ASSERTED,
+       "visibility at a USER stage is the owner's claim, gated on its completion record");
+ if(peer){
+  CHECK(c->export_authority==XDEV_EXT_CAP_ESTABLISHED,"VRAM pool authority checked at CREATE");
+  CHECK(c->last_use_quiescence==XDEV_EXT_CAP_OWNER_ASSERTED,
+        "VRAM frames return only on the owner's last-use record");
+  CHECK(c->invalidation==XDEV_EXT_CAP_ESTABLISHED,
+        "region invalidation is applied by the kernel at hand-out and at the record");
+ }else{
+  CHECK(c->export_authority==XDEV_EXT_CAP_NOT_APPLICABLE,"host pages have no export authority");
+  CHECK(c->last_use_quiescence==XDEV_EXT_CAP_NOT_APPLICABLE&&c->invalidation==XDEV_EXT_CAP_NOT_APPLICABLE,
+        "host pages keep last use and invalidation not applicable");
+ }
+ CHECK(c->reachability==(peer?XDEV_EXT_CAP_UNKNOWN:XDEV_EXT_CAP_NOT_APPLICABLE)&&c->p2p_distance==-1&&!c->refused&&!c->backing,
+       "nothing else is claimed for a USER stage");
+ return failures!=0;
+}
 static int exercise(const char *mode) {
+ if(!strncmp(mode,"caps-",5))return caps_cases(mode);
  if(strstr(mode,"attach")||strstr(mode,"detach")||strstr(mode,"retain"))return attach_cases(mode);
  if(!strncmp(mode,"peer-reject-",12)){
   bool strict=strcmp(mode,"peer-reject-nonstrict")!=0;
@@ -169,7 +219,8 @@ static int exercise(const char *mode) {
   CHECK(real_setup(strict,true,false,false)==-EOPNOTSUPP,"PEER USER requires strict, fixed lengths and zero delta");return failures!=0;
  }
  bool legacy=!strcmp(mode,"legacy-stop")||!strcmp(mode,"external-nonstrict"),peer=!strcmp(mode,"strict-bind-peer")||!strncmp(mode,"peer-",5);
- REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")||!strcmp(mode,"peer-admitted")||!strcmp(mode,"peer-held-stale")),"specified USER mode binds through production bind");
+ REQUIRE(!real_setup(!legacy,peer,false,!strcmp(mode,"poll")||!strcmp(mode,"peer-admitted")||!strcmp(mode,"peer-held-stale")||
+                     !strcmp(mode,"peer-held-generation")),"specified USER mode binds through production bind");
  if(!strncmp(mode,"strict-bind",11))return failures!=0;
  if(!strcmp(mode,"peer-stale")||!strcmp(mode,"peer-generation")){
   /* VRAM frames the producer (NVMe READ) completed into; the region was
@@ -300,6 +351,16 @@ static int exercise(const char *mode) {
   CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESTALE,"invalidation during GPU custody ends the batch with the region's -ESTALE");
   CHECK(us->nr_held==0,"status-0 done still proves last use and ends the GPU's custody");
   for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"proved last use after invalidation is not isolated as unknown");
+ }else if(!strcmp(mode,"peer-held-generation")){
+  /* d2 shape. The VRAM region is replaced (new generation) while the GPU
+   * holds the frames; its status-0 record belongs to the old region and
+   * must not pass the batch on, though it still proves last use. */
+  peer_region_generation=peer_pool_generation+1;
+  post(0,r.ticket,0);xdev_ext_mech_poll_work(&session.poll_work.work);drain();
+  CHECK(!accepts[2]&&!attempts[2],"batch whose VRAM was replaced during GPU custody is never passed downstream");
+  CHECK(ends==1&&end_how==XDEV_EXT_MECH_END_ABORT&&end_err==-ESTALE,"a replaced region ends the batch with -ESTALE");
+  CHECK(us->nr_held==0,"status-0 done still ends the GPU's custody");
+  for(u32 i=0;i<FRAMES;i++)CHECK(custody[i]!=XDEV_EXT_MECH_F_SEQUESTERED,"proved last use on a replaced region is not isolated as unknown");
  }else if(!strcmp(mode,"peer-held-unbind")){
   /* The GPU borrows VRAM frames without a region lease, so the region's own
    * drain count never sees this custody. What keeps the pool, its authority

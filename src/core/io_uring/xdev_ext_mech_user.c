@@ -365,6 +365,10 @@ static void xdev_ext_user_reap_one(struct xdev_ext_mech_stage *st, const struct 
 		 * Status 0 proves the GPU's last use, but a VRAM region invalidated
 		 * while it held the frames is not a result to pass on: end the batch
 		 * with the region's answer and still return the frames as quiesced.
+		 * The answer is a snapshot. A later invalidation is seen by the next
+		 * stage's lease (xdev_ext_peer_acquire() rechecks under the region
+		 * lock), and not at all when USER is the last stage: its custody
+		 * ended before the invalidation.
 		 */
 		if (!err)
 			err = xdev_ext_user_peer_admit(xdev_ext_mech_session_pool(st->s));
@@ -805,9 +809,21 @@ static int xdev_ext_user_bind(struct xdev_ext_mech_stage *st,
 	}
 	spin_unlock(&obj->lock);
 	fput(f);
-	if (err)
+	if (err) {
 		kfree(us);
-	return err;
+		return err;
+	}
+	if (pool->kind == XDEV_EXT_MECH_POOL_PEER) {
+		/*
+		 * Strict custody: frames come back only on the owner's status-0
+		 * record for the held ticket, else they stay isolated for good.
+		 * The kernel cannot check that the GPU really stopped.
+		 */
+		st->caps.last_use_quiescence = XDEV_EXT_CAP_OWNER_ASSERTED;
+		/* xdev_ext_user_peer_admit() at hand-out and at that record. */
+		st->caps.invalidation = XDEV_EXT_CAP_ESTABLISHED;
+	}
+	return 0;
 }
 
 /* A rejected external completion must never become permission to unbind. */
@@ -834,10 +850,16 @@ static void xdev_ext_user_unbind(struct xdev_ext_mech_stage *st)
 	kref_put(&obj->ref, xdev_ext_user_obj_free);
 }
 
+/*
+ * The next stage gets the frames only after the owner's completion record
+ * for them; whether the owner's writes (or, before it, the previous device's
+ * writes) are visible to that device is the owner's claim. For the GPU that
+ * is the CUDA library's flush and release; hardware ordering is not checked.
+ */
 static const struct xdev_ext_comp_hooks xdev_ext_user_comp_hooks = {
 	.hdr = { .family = XDEV_EXT_FAMILY_COMPUTE },
 	.kinds = 1U << XDEV_EXT_COMP_INPLACE,
-	.producer_visibility = XDEV_EXT_CAP_NOT_WIRED,
+	.producer_visibility = XDEV_EXT_CAP_OWNER_ASSERTED,
 };
 
 /* Strict USER can consume GPU completion sequences through generic POLL. */

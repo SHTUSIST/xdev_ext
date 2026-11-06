@@ -69,6 +69,9 @@ enum xdev_ext_cap_state {
 	XDEV_EXT_CAP_NOT_WIRED		= 5,	/* the mechanism has no code for this part */
 	XDEV_EXT_CAP_NOT_APPLICABLE	= 6,	/* host-page class: no device-memory requester */
 	XDEV_EXT_CAP_HOST_DMA_MAPPED	= 7,	/* coherent host DMA-API mapping established */
+	XDEV_EXT_CAP_OWNER_ASSERTED	= 8,	/* gated on the stage owner's per-batch
+						 * completion record, which the kernel
+						 * binds to the batch but cannot verify */
 };
 /* Provider backing of a device allocation (struct xdev_ext_peer_backing.flags). */
 #define XDEV_EXT_PEER_BACKING_MMIO_BAR		(1U << 0) /* discrete VRAM through a PCI BAR */
@@ -97,9 +100,11 @@ struct xdev_ext_mech_stage_caps {
 	__u32 reachability;
 	__u32 requester_mapping;
 	__u32 native_queue;
-	__u32 producer_visibility;
-	__u32 last_use_quiescence;
-	__u32 invalidation;
+	__u32 producer_visibility;	/* bytes visible to the next device at hand-off */
+	__u32 last_use_quiescence;	/* no device access left when frames are reused */
+	__u32 invalidation;		/* ESTABLISHED: a provider-reported invalidation
+					 * refuses later custody and fails custody that
+					 * ends after it; granted access is not revoked */
 	__s32 p2p_distance;		/* out: pci_p2pdma_distance(), -1 when not judged */
 	__u32 backing;			/* out: XDEV_EXT_PEER_BACKING_* */
 	__u32 refused;			/* out: XDEV_EXT_PEER_REFUSE_* seen at CREATE */
@@ -499,7 +504,10 @@ struct xdev_ext_net_rx_mech_cqe {
  * TO_DEVICE, fd from XDEV_EXT_MECH_OP_USER_STAGE, flags 0 or VARLEN, arg0
  * the per-batch deadline in ms (1..XDEV_EXT_USER_DEADLINE_MAX_MS), arg1 the
  * exact per-frame length change as a two's complement __s64 (|change| <=
- * layout.frame_size), 0 with VARLEN (any length 1..capacity).
+ * layout.frame_size), 0 with VARLEN (any length 1..capacity). STRICT_ASYNC
+ * (arg1 0, no VARLEN) is for a device owner such as a GPU kernel: frames
+ * return only on its status-0 completion, else stay isolated; PEER pools and
+ * POLL require it.
  */
 #define XDEV_EXT_USER_F_VARLEN		(1U << 0)
 #define XDEV_EXT_USER_F_STRICT_ASYNC	(1U << 1)

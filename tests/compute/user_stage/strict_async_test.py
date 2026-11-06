@@ -39,7 +39,8 @@ CASES = ('legacy-stop', 'strict-bind-peer', 'strict-bind-cpu', 'stop-late',
          'external-stale', 'external-nonstrict', 'peer-admitted', 'peer-noack',
          'peer-stale', 'peer-generation', 'peer-producer-error',
          'peer-producer-unknown', 'peer-stop-late-stale', 'peer-held-stale',
-         'peer-held-unbind')
+         'peer-held-unbind', 'peer-held-generation', 'caps-peer', 'caps-host',
+         'caps-legacy', 'caps-peer-refused')
 
 
 def generate():
@@ -57,7 +58,9 @@ def generate():
         code = code.replace(scheduler.definition(user, name), '')
     core = scheduler.read_native(ROOT, 'io_uring/xdev_ext_mech.c')
     # Future production external completion entry and its direct helpers.
-    extra = [scheduler.definition(core, "xdev_ext_mech_poll_work")]
+    # The caps cases bind through the production CREATE wrapper.
+    extra = [scheduler.definition(core, "xdev_ext_mech_poll_work"),
+             scheduler.definition(core, "xdev_ext_mech_class_bind")]
     for name in re.findall(r'^\w[^;{}]*\b(xdev_ext_mech_\w*external\w*)\([^;{}]*\)\n\{', core, re.M):
         extra.append(scheduler.definition(core, name))
     declaration = re.search(r'^enum xdev_ext_mech_external_outcome \{\n.*?^\};',
