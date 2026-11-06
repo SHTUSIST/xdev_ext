@@ -5111,6 +5111,46 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/poll/xsk_poll_test.py"
     },
     {
+      "source": "tests/core/program_instances/attack/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/Makefile"
+    },
+    {
+      "source": "tests/core/program_instances/attack/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/README.md"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack.bpf.c"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack_guest.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack_guest.c"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack_kvm.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack_kvm.sh"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack_user.bpf.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack_user.bpf.c"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack_validate.py"
+    },
+    {
+      "source": "tests/core/program_instances/attack/attack_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/attack/attack_validate_test.py"
+    },
+    {
       "source": "tests/core/program_instances/guest/README.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/program_instances/guest/README.md"
