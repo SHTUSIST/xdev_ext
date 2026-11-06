@@ -1,10 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0
-/* Persistent, whole-export DMA-BUF authority. No frame pool export and no
- * implicit access fence bridge: the application synchronizes producers and
- * consumers. Unknown native DMA retains the entire ledger in peer core.
- * Prototype for ASK.70: with IMPORT_UNDESCRIBED, an exporter that registered
- * no descriptor imports with no backing facts (descriptor == NULL); each
- * requester then uses only the exporter's own mapping for that device.
+/* Persistent, whole-export DMA-BUF authority. No frame pool export, and no
+ * fence is ever added for xdev_ext device access: native DMA can end UNKNOWN,
+ * which would leave such a fence unsignaled forever, and a session may run
+ * indefinitely. The application orders later consumers after completion.
+ * Unknown native DMA retains the entire ledger in peer core.
+ * With IMPORT_UNDESCRIBED, an exporter that registered no descriptor imports
+ * with no backing facts (descriptor == NULL); each requester then uses only
+ * the exporter's own mapping for that device, and a lease that a pending
+ * implicit-sync fence orders is refused (xdev_ext_dmabuf_may_access). A
+ * described exporter keeps the contract in which the application also orders
+ * implicit-sync producers before the device access.
  */
 #include <linux/atomic.h>
 #include <linux/cred.h>
@@ -260,6 +265,17 @@ static int xdev_ext_dmabuf_describe(void *allocation, struct pci_dev *peer,
  *out = backing;
  return 0;
 }
+/* Region lock held; must not sleep. Implicit sync (include/linux/dma-buf.h):
+ * a device read waits for writers, a device write also for readers, and
+ * KERNEL fences order both (dma_resv_usage_rw). The lease path cannot wait on
+ * a fence, so the lease is refused and the caller retries after it signals. */
+static int xdev_ext_dmabuf_may_access(void *allocation, enum dma_data_direction dir)
+{
+ struct xdev_ext_dmabuf_allocation *a = allocation;
+ if (a->descriptor) return 0;
+ return dma_resv_test_signaled(a->buf->resv,
+                               dma_resv_usage_rw(dir == DMA_FROM_DEVICE)) ? 0 : -EBUSY;
+}
 static int xdev_ext_dmabuf_map(void *allocation, struct pci_dev *peer,
                               struct xdev_ext_peer_dma *out)
 {
@@ -364,6 +380,7 @@ static const struct xdev_ext_peer_provider_ops xdev_ext_dmabuf_ops = {
  .unmap = xdev_ext_dmabuf_unmap,
  .describe = xdev_ext_dmabuf_describe,
  .is_stale = xdev_ext_dmabuf_stale,
+ .may_access = xdev_ext_dmabuf_may_access,
 };
 int xdev_ext_peer_dmabuf_import_flags(struct dma_buf *buf, u64 len, u32 flags,
                                      struct xdev_ext_peer_region **out)

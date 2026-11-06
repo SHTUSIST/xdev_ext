@@ -77,7 +77,7 @@ enum xdev_ext_cap_state {
 #define XDEV_EXT_PEER_BACKING_EXTERNAL		(1U << 3) /* provider device is hot-removable */
 #define XDEV_EXT_PEER_BACKING_RAW_BUS_ADDR	(1U << 4) /* provider maps without the IOMMU */
 #define XDEV_EXT_PEER_BACKING_HOST_SYSTEM	(1U << 5) /* trusted ordinary host RAM */
-#define XDEV_EXT_PEER_BACKING_UNDESCRIBED	(1U << 6) /* exporter gave no facts; only its own per-requester mapping (prototype, ASK.70) */
+#define XDEV_EXT_PEER_BACKING_UNDESCRIBED	(1U << 6) /* exporter gave no facts; only its own per-requester mapping */
 /* Why an admission refused (struct xdev_ext_mech_stage_caps.refused). */
 #define XDEV_EXT_PEER_REFUSE_NO_P2P_PATH	(1U << 0)
 #define XDEV_EXT_PEER_REFUSE_SWIOTLB_FORCE	(1U << 1)

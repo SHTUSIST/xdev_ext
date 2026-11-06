@@ -23,10 +23,11 @@ struct xdev_ext_peer_dmabuf_desc_ops {
                  struct xdev_ext_peer_backing *);
 };
 
-/* Prototype for ASK.70 (not merged without that decision). Import an exporter
- * that registered no descriptor: each requester gets only the exporter's own
- * mapping for that device and the backing is reported as UNDESCRIBED. A
- * registered descriptor always takes precedence over this flag. */
+/* Import an exporter that registered no descriptor: each requester gets only
+ * the exporter's own mapping for that device, the backing is reported as
+ * UNDESCRIBED, and a lease that a pending implicit-sync fence orders is
+ * refused with -EBUSY. A registered descriptor always takes precedence over
+ * this flag. */
 #define XDEV_EXT_PEER_DMABUF_IMPORT_UNDESCRIBED (1U << 0)
 
 #if IS_ENABLED(CONFIG_XDEV_EXT_PEER_DMABUF)

@@ -57,10 +57,10 @@ struct xdev_ext_admission {
  * Admit trusted host RAM or discrete BAR-backed VRAM with an unbounced requester.
  * A raw bus address cannot cross a translating DMA layer. An explicit admin
  * override admits only a missing topology path, recorded UNVERIFIED_FORCED.
- * Prototype for ASK.70: UNDESCRIBED alone (the exporter's own per-requester
- * mapping, nothing else known) is admitted like host RAM: no topology claim,
- * reachability UNKNOWN, same bounce/untrusted refusals. Mixed with any other
- * bit it is just an unknown bit of the BAR/host classification below.
+ * UNDESCRIBED alone (the exporter's own per-requester mapping, nothing else
+ * known) is admitted like host RAM: no topology claim, reachability UNKNOWN,
+ * same bounce/untrusted refusals. Mixed with any other bit it is just an
+ * unknown bit of the BAR/host classification below.
  */
 static inline int xdev_ext_admit_decide(const struct xdev_ext_admit_facts *f,
 				      __u32 flags, struct xdev_ext_admission *out)
