@@ -108,6 +108,27 @@ class ModeRefusals(unittest.TestCase):
         self.assertIn('vfio devices are not wired', self.refuse('--vfio', '0000:4a:00.0', '--xdomain'))
 
 
+class BusyboxAppletCheck(unittest.TestCase):
+    """grep -q stops reading early; with pipefail the writer's SIGPIPE turns a
+    present applet into a spurious FAIL (seen with Ubuntu 26.04 busybox)."""
+
+    def test_applet_presence_check_consumes_the_whole_list(self):
+        script = HARNESS.read_text()
+        checks = re.findall(r'(?m)^.*busybox --list \| grep[^\n]*$', script)
+        self.assertTrue(checks)
+        for line in checks:
+            self.assertNotRegex(line, r'grep -[A-Za-z]*q', line)
+
+    def test_check_survives_a_writer_that_outlives_the_match(self):
+        line = next(l for l in HARNESS.read_text().splitlines() if 'busybox --list | grep' in l)
+        condition = line.split('||')[0].strip()
+        fake = ('busybox() { echo arp; for i in $(seq 1 20000); do echo applet$i; done; }\n')
+        program = 'set -euo pipefail\n' + fake + condition.replace('/bin/busybox', 'busybox') + ' && echo FOUND\n'
+        for _ in range(5):
+            run = subprocess.run(['bash', '-c', program], capture_output=True, text=True)
+            self.assertEqual(run.stdout.strip(), 'FOUND', run.stderr)
+
+
 class GuestGpuWiring(unittest.TestCase):
     def setUp(self):
         self.script = HARNESS.read_text()
