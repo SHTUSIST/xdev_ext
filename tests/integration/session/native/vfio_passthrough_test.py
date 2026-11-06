@@ -248,7 +248,9 @@ class BindRestore(Base):
         self.assertEqual(saved['original_driver'], 'nvidia')
         self.assertEqual(saved['original_reset_method'], 'flr bus')
         self.assertEqual(self.fake.read('0000:01:00.0', 'driver_override'), 'vfio-pci')
-        self.assertEqual(self.fake.read('0000:01:00.0', 'reset_method'), '')
+        # sysfs ignores a zero-length write; the kernel disables every reset
+        # method only for an empty line, so the helper must write a newline.
+        self.assertEqual(self.fake.read('0000:01:00.0', 'reset_method'), '\n')
         nvidia = self.fake.sys / 'bus/pci/drivers/nvidia/unbind'
         vfio = self.fake.sys / 'bus/pci/drivers/vfio-pci/bind'
         self.assertEqual(nvidia.read_text(), '0000:01:00.0')

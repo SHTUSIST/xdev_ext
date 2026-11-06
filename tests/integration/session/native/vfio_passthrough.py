@@ -254,7 +254,9 @@ def bind(host, bdf, target, state_path, reset_method=None, dry_run=False):
     if reset_method is not None:
         if not reset_file.exists():
             raise GuardError(f'{bdf} exposes no reset_method')
-        _write(reset_file, reset_method, dry_run, actions)
+        # A zero-length write never reaches the sysfs store; an empty line
+        # is the kernel's request to disable every reset method.
+        _write(reset_file, reset_method or '\n', dry_run, actions)
     _write(device / 'driver_override', target or NO_DRIVER, dry_run, actions)
     if original and original != target:
         _write(host.driver_dir(original) / 'unbind', bdf, dry_run, actions)
@@ -277,7 +279,7 @@ def restore(host, state_path, dry_run=False):
     _write(device / 'driver_override', '\n' if override in ('', '(null)') else override,
            dry_run, actions)
     if state.get('reset_method_written') and state.get('original_reset_method') is not None:
-        _write(device / 'reset_method', state['original_reset_method'], dry_run, actions)
+        _write(device / 'reset_method', state['original_reset_method'] or '\n', dry_run, actions)
     if not original or current == original:
         return 'no-driver-to-restore' if not original else 'already-bound'
     if host.driver_dir(original).is_dir():
