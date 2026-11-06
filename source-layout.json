@@ -4961,6 +4961,26 @@
       "logical_path": "tests/core/peer_dmabuf/run.py"
     },
     {
+      "source": "tests/core/peer_dmabuf/device_dma/README.md",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/README.md"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_device_dma.c"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/dmabuf_dma_kvm.sh"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/validate.py",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/validate.py"
+    },
+    {
+      "source": "tests/core/peer_dmabuf/device_dma/validate_test.py",
+      "logical_path": "tests/core/peer_dmabuf/device_dma/validate_test.py"
+    },
+    {
       "source": "tests/core/policy/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_policy/Makefile"
@@ -6480,6 +6500,16 @@
       "source": "tests/integration/session/native/xdev_ext_mech_zc_validate_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_viommu.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_viommu_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_viommu_test.py"
     },
     {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_wire.py",

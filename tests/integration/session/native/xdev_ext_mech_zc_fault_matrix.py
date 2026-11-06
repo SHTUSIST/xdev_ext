@@ -68,9 +68,9 @@ def archive_api(native):
     return module, repo
 
 
-def qemu_command(scratch, readonly=False):
+def qemu_command(scratch, readonly=False, viommu=False):
     p = str(scratch)
-    return ['/usr/local/bin/qemu-system-x86_64', '-machine', 'q35,accel=kvm',
+    command = ['/usr/local/bin/qemu-system-x86_64', '-machine', 'q35,accel=kvm',
             '-cpu', 'host', '-smp', '4', '-m', '4096', '-nographic', '-no-reboot',
             '-kernel', p + '/build/arch/x86/boot/bzImage', '-initrd', p + '/initramfs.cpio.gz',
             '-append', 'console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr ipv6.disable=1',
@@ -83,6 +83,13 @@ def qemu_command(scratch, readonly=False):
             '-drive', f'file={p}/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads' +
                       (',readonly=on' if readonly else ''),
             '-device', 'nvme,drive=dst,serial=UBRZCDST01']
+    if viommu:
+        # Mirrors the harness --viommu block: split irqchip, VT-d first, strict guest IOMMU.
+        command[2] = 'q35,accel=kvm,kernel-irqchip=split'
+        command[3:3] = ['-device', 'intel-iommu,intremap=on,caching-mode=on']
+        append = command.index('-append') + 1
+        command[append] += ' intel_iommu=on iommu.strict=1'
+    return command
 
 
 def snapshot_other_qemu():
@@ -114,11 +121,13 @@ def plan(args, name, reuse):
         cmd.append('--run-only')
     if args.debug_locking:
         cmd.append('--debug-locking')
+    if args.viommu:
+        cmd.append('--viommu')
     return dict(campaign=name, expectation=oracle.expectation_line(name),
                 groups=args.groups, depth=args.depth, performance_claim='none',
                 readonly_destination=bool(settings['destination_readonly']),
                 harness_command=cmd, qemu_command=qemu_command(args.scratch,
-                                      bool(settings['destination_readonly'])))
+                                      bool(settings['destination_readonly']), args.viommu))
 
 
 def main(argv=None):
@@ -129,6 +138,8 @@ def main(argv=None):
     parser.add_argument('--dry-run', action='store_true')
     parser.add_argument('--run-only', action='store_true')
     parser.add_argument('--debug-locking', action='store_true')
+    parser.add_argument('--viommu', action='store_true',
+                        help='forward --viommu: emulated Intel VT-d, strict guest IOMMU')
     parser.add_argument('scratch')
     parser.add_argument('source')
     args = parser.parse_args(argv)
