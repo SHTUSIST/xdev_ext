@@ -59,10 +59,13 @@ enum xdev_ext_family {
 };
 
 /* Task F3: what the kernel established for one stage at CREATE.  None of
- * these states is a hardware DMA proof. */
+ * these states is a hardware DMA proof.  New values may be added; a consumer
+ * must treat a value it does not know as not established. */
 enum xdev_ext_cap_state {
 	XDEV_EXT_CAP_UNKNOWN		= 0,	/* nothing recorded */
-	XDEV_EXT_CAP_ESTABLISHED	= 1,	/* kernel set the precondition up at CREATE */
+	XDEV_EXT_CAP_ESTABLISHED	= 1,	/* the kernel itself enforces this from
+						 * CREATE on; a field comment may say
+						 * what that covers (invalidation) */
 	XDEV_EXT_CAP_TOPOLOGY_PASSED	= 2,	/* upstream p2pdma topology judged pass, not proven */
 	XDEV_EXT_CAP_TOPOLOGY_FAILED	= 3,	/* upstream p2pdma topology judged no path */
 	XDEV_EXT_CAP_UNVERIFIED_FORCED	= 4,	/* admin override; never a zero-copy pass */
