@@ -72,8 +72,14 @@ def source_revision(kernel):
         path=repo/name
         if not path.is_file() or any(p.is_symlink() for p in (path,*path.parents)):
             raise ValueError('invalid old-ticket canonical metadata: '+name)
-    sys.path.insert(0,str(repo/'tools'))
-    from layout import load_layout,provenance,safe_file,isolated_file
+    # This canonical authority must not occupy the copied scheduler helper's
+    # checked `layout` module identity when the export executes from a view.
+    spec=importlib.util.spec_from_file_location('_e2_old_ticket_layout_authority',repo/'tools/layout.py')
+    authority=importlib.util.module_from_spec(spec)
+    sys.modules[spec.name]=authority
+    spec.loader.exec_module(authority)
+    load_layout,provenance,safe_file,isolated_file=(authority.load_layout,authority.provenance,
+                                                 authority.safe_file,authority.isolated_file)
     identity=provenance(repo);revision=identity['revision'];layout=load_layout(repo)
     subprocess.run(['git','-C',str(repo),'ls-files','--error-unmatch','--',*layout.by_source],check=True,stdout=subprocess.PIPE)
     lock=layout.manifest.get('dependency_lock','third_party/sources.lock.json')
