@@ -100,9 +100,11 @@ struct xdev_ext_mech_stage_caps {
 	__u32 reachability;
 	__u32 requester_mapping;
 	__u32 native_queue;
-	__u32 producer_visibility;
-	__u32 last_use_quiescence;
-	__u32 invalidation;
+	__u32 producer_visibility;	/* bytes visible to the next device at hand-off */
+	__u32 last_use_quiescence;	/* no device access left when frames are reused */
+	__u32 invalidation;		/* ESTABLISHED: a provider-reported invalidation
+					 * refuses later custody and fails custody that
+					 * ends after it; granted access is not revoked */
 	__s32 p2p_distance;		/* out: pci_p2pdma_distance(), -1 when not judged */
 	__u32 backing;			/* out: XDEV_EXT_PEER_BACKING_* */
 	__u32 refused;			/* out: XDEV_EXT_PEER_REFUSE_* seen at CREATE */
