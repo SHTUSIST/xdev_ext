@@ -3526,12 +3526,23 @@ static void nvme_pci_peer_batch_retire(struct nvme_dev *dev,
 				       struct nvme_pci_peer_cmd *c)
 {
 	/* An error or a cancellation does not prove that peer DMA stopped. */
-	bool quiesced = !c->accepted || !c->status;
+	bool unknown = c->accepted && c->status;
+	bool quiesced = true;
 	u32 i;
 
 	/* Reverse acquisition order finds each lease at the provider list head. */
-	for (i = c->nr_leases; i--; )
-		xdev_ext_peer_fd_release(&c->leases[i], quiesced);
+	for (i = c->nr_leases; i--; ) {
+		if (unknown) {
+			bool stopped = xdev_ext_peer_fd_release_unknown(
+				&c->leases[i],
+				dev->peer_requester, c->trace.submit_epoch);
+
+			/* Retire every lease even after an uncovered UNKNOWN. */
+			quiesced &= stopped;
+		} else {
+			xdev_ext_peer_fd_release(&c->leases[i], true);
+		}
+	}
 	nvme_xdev_ext_peer_trace_release(&c->trace, quiesced);
 	/* The device may still read the list of an UNKNOWN command: never reuse. */
 	if (c->list && quiesced)
@@ -3587,6 +3598,7 @@ static int nvme_pci_peer_batch_map(struct nvme_ns *ns, struct nvme_dev *dev,
 	c->trace = (struct nvme_xdev_ext_peer_trace) {
 		.leases = c->leases, .nr_leases = c->nr_leases,
 		.bytes = c->plan.bytes, .origin = "U",
+		.submit_epoch = XDEV_EXT_PEER_EPOCH_NONE,
 	};
 	return 0;
 }

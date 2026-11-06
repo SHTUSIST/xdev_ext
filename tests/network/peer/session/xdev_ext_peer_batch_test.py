@@ -28,7 +28,8 @@ HERE = Path(__file__).resolve().parent
 
 
 def read(rel):
-    return (KERNEL / rel).read_text()
+    base = 'src/storage' if rel.startswith('drivers/nvme/') else 'src/core'
+    return (KERNEL / base / rel).read_text()
 
 
 def braced(source, name):
@@ -67,14 +68,16 @@ def production():
     if 'static int nvme_pci_peer_batch(' not in pci:
         raise LookupError('missing actual definition: nvme_pci_peer_batch (pci.c)')
     peer = read('io_uring/xdev_ext_peer.c')
+    core_include = '#include "../include/linux/xdev_ext_peer.h"'
+    if peer.count(core_include) != 1:
+        raise LookupError('missing actual host-test include of the peer core')
     requester_core = read('include/linux/xdev_ext_requester_core.h')
     parts = {
-        'LEASE_TYPES': '\n'.join(structure(peer, n) for n in
-                                 ('xdev_ext_peer_provider', 'xdev_ext_peer_region', 'xdev_ext_peer_mapping')),
-        'LEASE_FUNCTIONS': '\n'.join(braced(peer, n) for n in
-                                     ('xdev_ext_peer_stale', 'xdev_ext_peer_direction_valid',
-                                      'xdev_ext_peer_acquire', 'xdev_ext_peer_release')),
-        'FD_RELEASE': braced(read('io_uring/xdev_ext_peer_fd.c'), 'xdev_ext_peer_fd_release'),
+        'LEASE_CORE': peer.replace(core_include, '#include "' + str(
+            KERNEL / 'src/core/include/linux/xdev_ext_peer.h') + '"'),
+        'FD_RELEASE': braced(read('io_uring/xdev_ext_peer_fd.c'), 'xdev_ext_peer_fd_release') + '\n' +
+            braced(read('io_uring/xdev_ext_peer_fd.c'), 'xdev_ext_peer_fd_release_unknown').replace(
+                'bool xdev_ext_peer_fd_release_unknown(', 'bool actual_fd_release_unknown(', 1),
         'LEASE_SHRINK': re.search(r'^#define XDEV_EXT_LEASE_MIN_SHIFT .*$', requester_core, re.M).group()
                         + '\n' + braced(requester_core, 'xdev_ext_lease_shrink'),
         'LEASE_SPLIT': braced(read('io_uring/family/xdev_ext_requester.c'), 'xdev_ext_peer_lease_split'),
@@ -85,8 +88,9 @@ def production():
         'PEER_FLAG': re.search(r'NVME_REQ_XDEV_EXT_PEER\s*=\s*([^,]+),', read('drivers/nvme/host/nvme.h')).group(1),
         'NVME_CORE': read('drivers/nvme/host/xdev_ext_peer_nvme_core.h').replace(
             '"../../../include/linux/xdev_ext_storfam_core.h"',
-            '"' + str(KERNEL / 'include/linux/xdev_ext_storfam_core.h') + '"'),
+            '"' + str(KERNEL / 'src/storage/include/linux/xdev_ext_storfam_core.h') + '"'),
         'PCI_BATCH': mech_block(pci, 'static int nvme_pci_peer_batch('),
+        'NOTE_SUBMIT': braced(pci, 'nvme_pci_peer_note_submit'),
         'IOCTL': ioctl[ioctl.index('static int nvme_peer_rw_allowed('):ioctl.index('\n#endif', ioctl.index('static int nvme_peer_rw_allowed('))],
     }
     return parts
@@ -103,8 +107,8 @@ SHIM = r'''
 #include <linux/types.h>
 #include "xdev_ext_peer_test_shim.h"
 #define XDEV_EXT_PEER_HOST_TEST
-#include "@KERNEL@/include/linux/xdev_ext_peer.h"
-#include "@KERNEL@/include/uapi/linux/xdev_ext_peer.h"
+#include "@KERNEL@/src/core/include/linux/xdev_ext_peer.h"
+#include "@KERNEL@/src/core/include/uapi/linux/xdev_ext_peer.h"
 @NVME_CORE@
 typedef int64_t s64;
 typedef uint64_t dma_addr_t;
@@ -161,7 +165,8 @@ static inline int atomic_cmpxchg(atomic_t *a, int o, int n) { int c = a->counter
 struct completion { unsigned int done; };
 static inline void init_completion(struct completion *x) { x->done = 0; }
 static inline void reinit_completion(struct completion *x) { x->done = 0; }
-static inline void complete(struct completion *x) { x->done++; }
+static int complete_calls;
+static inline void complete(struct completion *x) { x->done++; complete_calls++; }
 static unsigned long wait_for_completion_io_timeout(struct completion *x, unsigned long t);
 static void wait_for_completion_io(struct completion *x) { while (!wait_for_completion_io_timeout(x, HZ)) {} }
 static void wait_for_completion(struct completion *x) { wait_for_completion_io(x); }
@@ -232,7 +237,8 @@ static inline int blk_status_to_errno(blk_status_t s) { return s ? -EIO : 0; }
 struct request_queue { u32 max_hw_sectors; };
 struct gendisk { u64 sectors; bool ro; };
 struct nvme_ns_head { u8 lba_shift; u16 ms; struct { u8 csi; } ids; u32 ns_id; };
-struct nvme_dev { struct pci_dev *dev; };
+struct nvme_dev { struct pci_dev *dev; struct xdev_ext_peer_requester *peer_requester; };
+static struct nvme_dev *dispatch_dev;
 struct nvme_ns;
 struct nvme_ctrl_ops {
  int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *);
@@ -261,13 +267,13 @@ static void trace_native_event(const struct xdev_ext_native_event *e)
 @TRACE_HEADER@
 
 /* Real provider lease core on one test mapping. */
-@LEASE_TYPES@
-static atomic64_t xdev_ext_peer_serial = ATOMIC64_INIT(0);
-@LEASE_FUNCTIONS@
+@LEASE_CORE@
 static struct file alloc_file = { .refs = 1 }, provider_file = { .refs = 1 };
 static struct pci_dev pci = { .refs = 1 };
 static struct xdev_ext_peer_region region;
 static struct xdev_ext_peer_mapping mapping;
+static struct xdev_ext_peer_requester *requester;
+static int unknown_release_calls, prove_after_unknown;
 static int acquire_calls;
 int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 generation, u64 offset,
                                u32 len, enum dma_data_direction dir, struct xdev_ext_peer_fd_lease *handle)
@@ -283,6 +289,14 @@ int xdev_ext_peer_file_acquire(struct file *file, struct pci_dev *peer, u64 gene
  return ret;
 }
 @FD_RELEASE@
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *h,
+                                     struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+ bool quiesced = actual_fd_release_unknown(h, rq, epoch);
+ if (++unknown_release_calls == prove_after_unknown)
+  xdev_ext_peer_requester_quiesced(rq, xdev_ext_peer_requester_begin(rq));
+ return quiesced;
+}
 @LEASE_SHRINK@
 @LEASE_SPLIT@
 @BUILD_CMD@
@@ -314,6 +328,8 @@ static struct request reqs[NREQ];
 static int tag_limit = NREQ, issued, inflight, max_outstanding, alloc_calls, fail_alloc_at, fail_alloc_err;
 enum { OK, NVME_ERR, BLK_ERR, CANCEL };
 static int outcome[64], immediate[64], exec_count[64], cmd_extents[64], cmd_inline[64];
+static int no_dispatch[64], prove_on_completion;
+static u64 submitted_epoch[64];
 static u64 cmd_list_dma[64];
 static int order_mode; /* 0 FIFO, 1 LIFO, 2 permutation */
 static int perm[64], nr_perm;
@@ -417,10 +433,12 @@ static void controller_complete(struct request *r)
  int o = r->seq < 64 ? outcome[r->seq] : OK;
  if (!r->executed || r->ended) fail("completion of an idle request");
  exec_count[r->seq]++;
- controller_execute(r, o == OK);
+ if (!no_dispatch[r->seq]) controller_execute(r, o == OK);
  if (o == NVME_ERR) { r->pdu.status = 0x281; err = BLK_STS_IOERR; }
  else if (o == CANCEL) { r->pdu.status = 0x371; r->pdu.flags |= NVME_REQ_CANCELLED; err = BLK_STS_IOERR; }
  else if (o == BLK_ERR) err = BLK_STS_IOERR;
+ if (prove_on_completion)
+  xdev_ext_peer_requester_quiesced(requester, xdev_ext_peer_requester_begin(requester));
  r->ended = true; inflight--;
  if (r->end_io(r, err) == RQ_END_IO_FREE) r->allocated = false;
 }
@@ -469,9 +487,10 @@ static void nvme_init_request(struct request *r, struct nvme_command *c)
  r->pdu.flags = 0; r->pdu.status = 0; r->pdu.peer_trace = NULL;
  *r->pdu.cmd = *c;
 }
+@NOTE_SUBMIT@
 static void blk_execute_rq_nowait(struct request *r, bool at_head)
 {
- const struct nvme_xdev_ext_peer_trace *t = r->pdu.peer_trace;
+ struct nvme_xdev_ext_peer_trace *t = r->pdu.peer_trace;
  u64 sum = 0;
  u32 i;
  if (at_head || !r->allocated || r->executed || !r->end_io) fail("bad native execute");
@@ -486,6 +505,9 @@ static void blk_execute_rq_nowait(struct request *r, bool at_head)
  }
  if (sum != t->bytes || t->bytes != (((u64)r->pdu.cmd->rw.length + 1) << 9)) fail("trace bytes");
  r->executed = true; r->seq = issued++; inflight++;
+ if (t->submit_epoch != XDEV_EXT_PEER_EPOCH_NONE) fail("trace epoch was not initialized as never dispatched");
+ if (!no_dispatch[r->seq]) nvme_pci_peer_note_submit(dispatch_dev, r);
+ submitted_epoch[r->seq] = t->submit_epoch;
  if (inflight > max_outstanding) max_outstanding = inflight;
  if (r->seq >= 64) fail("more commands than descriptors");
  if (user_batch && r->pdu.cmd->rw.slba != user_batch->desc[r->seq].slba && !mutate_on_first)
@@ -502,7 +524,7 @@ static void blk_execute_rq_nowait(struct request *r, bool at_head)
 
 MAIN = r'''
 static const struct nvme_ctrl_ops ops = { .peer_rw = NULL, .peer_batch = nvme_pci_peer_batch };
-static struct nvme_dev dev = { &pci };
+static struct nvme_dev dev = { .dev = &pci };
 static struct nvme_ctrl ctrl = { NVME_CTRL_LIVE, true, &dev, &ops };
 static struct nvme_ns_head head = { .lba_shift = 9, .ns_id = NSID };
 static struct gendisk gdisk = { DISK_LBAS, false };
@@ -543,6 +565,8 @@ static void queue_reset(void)
  memset(cmd_extents, 0, sizeof(cmd_extents)); memset(cmd_inline, 0, sizeof(cmd_inline));
  memset(cmd_list_dma, 0, sizeof(cmd_list_dma));
  order_mode = 0; nr_perm = 0; nr_events = 0; acquire_calls = 0; mutate_on_first = 0; copyouts = 0;
+ complete_calls = unknown_release_calls = prove_after_unknown = prove_on_completion = 0;
+ memset(no_dispatch, 0, sizeof(no_dispatch)); memset(submitted_epoch, 0, sizeof(submitted_epoch));
  ctrl.state = NVME_CTRL_LIVE; ctrl.sgl = true; gdisk.ro = false; queue.max_hw_sectors = 2048; head.ms = 0;
  ns.flags = 1UL << NVME_NS_READY;
 }
@@ -591,7 +615,24 @@ static bool clean(int retained_lists)
         coh_live == coh_base + retained_lists && !warnings;
 }
 static bool list_live(u64 dma) { int i; for (i = 0; i < nr_coh; i++) if (coh[i].dma == dma) return coh[i].live; return false; }
-static void begin(u32 shift, int layout) { device_reset(shift, layout); queue_reset(); coh_base = coh_live; fd3 = &alloc_file; }
+static void begin(u32 shift, int layout)
+{
+ if (requester) {
+  xdev_ext_peer_requester_quiesced(requester, xdev_ext_peer_requester_begin(requester));
+  while (host_run_pending_work()) {}
+  if (mapping.unknown || region.queued) fail("previous fixture retained a recovery record");
+  xdev_ext_peer_requester_unregister(requester);
+ }
+ device_reset(shift, layout); queue_reset(); coh_base = coh_live; fd3 = &alloc_file;
+ requester = xdev_ext_peer_requester_register(&pci);
+ if (!requester) fail("requester allocation");
+ /* Zero is a valid epoch; a nonzero snapshot catches a lost submit hook. */
+ xdev_ext_peer_requester_begin(requester);
+ xdev_ext_peer_requester_begin(requester);
+ xdev_ext_peer_requester_begin(requester);
+ dev.peer_requester = requester;
+ dispatch_dev = &dev;
+}
 
 int main(void)
 {
@@ -679,6 +720,74 @@ int main(void)
  ret = run();
  CHECK(!ret && ub.completed == 16 && max_outstanding == 4 && once_each(16) && images_match() && clean(0),
        "sixteen commands through four tags: allocation waits for completions, nothing is lost");
+
+ /* One tag repeatedly completes while the issuer is still allocating. The
+  * issuer bias must prevent those intermediate end_io calls completing done. */
+ begin(12, SCATTER);
+ batch_init(false, 6);
+ for (i = 0; i < 6; i++) { desc(i, i * (64U << 10), 100 + 200 * i, 32U << 10); expect(i); }
+ tag_limit = 1;
+ ret = run();
+ CHECK(!ret && ub.completed == 6 && !ub.status && issued == 6 && max_outstanding == 1 && once_each(6),
+       "one tag reused for six successes: all descriptors complete exactly once");
+ CHECK(complete_calls == 1 && images_match() && clean(0),
+       "issuer bias suppresses intermediate completion; only the last end_io publishes done");
+ begin(12, SCATTER);
+ batch_init(false, 6);
+ for (i = 0; i < 6; i++) {
+  desc(i, i * (64U << 10), 100 + 200 * i, 32U << 10); expect(i); immediate[i] = 1;
+ }
+ tag_limit = 1;
+ ret = run();
+ CHECK(!ret && ub.completed == 6 && issued == 6 && max_outstanding == 1 && once_each(6) && !complete_calls &&
+       images_match() && clean(0), "all synchronous completions leave the issuer bias as the last reference");
+
+ /* Real FD/core UNKNOWN retirement, not a mock of its boolean result. */
+ begin(12, SCATTER);
+ batch_init(false, 1); desc(0, 4096, 100, 3 * 4096);
+ outcome[0] = NVME_ERR;
+ ret = run();
+ CHECK(ret == 0x281 && !ub.completed && issued == 1 && submitted_epoch[0] == 3 && unknown_release_calls == 3 &&
+       mapping.unknown == requester && mapping.unknown_epoch == 3 && region.pending == 1 &&
+       region.quarantined && !region.permanent && clean(1),
+       "accepted error retires every lease into the real requester's dispatch epoch");
+ CHECK(images_match_except(4096, 3 * 4096) && list_live(cmd_list_dma[0]) && release_events(0) == 1,
+       "UNKNOWN retains its descriptor list and reports no DMA-stop evidence");
+ xdev_ext_peer_requester_quiesced(requester, xdev_ext_peer_requester_begin(requester));
+ while (host_run_pending_work()) {}
+ CHECK(!mapping.unknown && !region.pending && !region.quarantined && region.invalid && list_live(cmd_list_dma[0]),
+       "later actual requester proof recovers mapping quarantine; retained descriptor memory is not reused");
+
+ begin(12, SCATTER);
+ batch_init(false, 1); desc(0, 4096, 100, 3 * 4096);
+ outcome[0] = NVME_ERR; prove_on_completion = 1;
+ ret = run();
+ CHECK(ret == 0x281 && !ub.completed && unknown_release_calls == 3 && submitted_epoch[0] == 3 &&
+       !mapping.unknown && !region.quarantined && clean(0) && !list_live(cmd_list_dma[0]) && release_events(1) == 1,
+       "later epoch proven before retirement permits all leases and the descriptor list to be released");
+
+ begin(12, SCATTER);
+ batch_init(false, 1); desc(0, 4096, 100, 3 * 4096);
+ outcome[0] = NVME_ERR; prove_after_unknown = 1;
+ ret = run();
+ CHECK(ret == 0x281 && unknown_release_calls == 3 && clean(1) && list_live(cmd_list_dma[0]) && release_events(0) == 1,
+       "proof arriving between leases cannot override an earlier uncovered lease or short-circuit retirement");
+
+ begin(12, SCATTER);
+ batch_init(false, 1); desc(0, 4096, 100, 3 * 4096);
+ dev.peer_requester = NULL; outcome[0] = CANCEL;
+ ret = run();
+ CHECK(ret == -EINTR && submitted_epoch[0] == XDEV_EXT_PEER_EPOCH_NONE && unknown_release_calls == 3 &&
+       !mapping.unknown && region.permanent && region.quarantined && clean(1),
+       "missing requester keeps an accepted cancellation permanently UNKNOWN");
+
+ begin(12, SCATTER);
+ batch_init(false, 1); desc(0, 4096, 100, 3 * 4096);
+ outcome[0] = CANCEL; no_dispatch[0] = 1; prove_on_completion = 1;
+ ret = run();
+ CHECK(ret == -EINTR && submitted_epoch[0] == XDEV_EXT_PEER_EPOCH_NONE && unknown_release_calls == 3 &&
+       region.permanent && region.quarantined && !mapping.unknown && clean(1) && images_match(),
+       "cancellation before SQ publication cannot turn an uninitialized epoch zero into DMA-stop evidence");
 
  /* --- Partial accept: request allocation fails after two accepted commands. --- */
  begin(16, RUNS3);
@@ -853,6 +962,8 @@ int main(void)
  begin(16, RUNS3); batch_init(true, 1); desc(0, 0, 1, 4096); gdisk.ro = true;
  CHECK(run() == -EROFS && !issued && !acquire_calls && clean(0), "write to a read-only namespace: refused before any lease");
 
+ xdev_ext_peer_requester_unregister(requester);
+ requester = NULL;
  printf("1..%d\n", checks);
  return failures ? 1 : 0;
 }
@@ -879,7 +990,20 @@ MUTANTS = [
      '\t\tblk_execute_rq_nowait(req, false);\n\t\twhile (atomic_read(&b->pending) > 1)\n'
      '\t\t\twait_for_completion_io_timeout(&b->done, 1);\n'),
     ('accepted failure released as quiesced', 'PCI_BATCH',
-     'bool quiesced = !c->accepted || !c->status;', 'bool quiesced = true;'),
+     'bool unknown = c->accepted && c->status;', 'bool unknown = false;'),
+    ('UNKNOWN loses requester binding', 'PCI_BATCH',
+     'dev->peer_requester, c->trace.submit_epoch', 'NULL, c->trace.submit_epoch'),
+    ('UNKNOWN loses dispatch epoch', 'PCI_BATCH',
+     'dev->peer_requester, c->trace.submit_epoch', 'dev->peer_requester, XDEV_EXT_PEER_EPOCH_NONE'),
+    ('unsubmitted trace starts in a real epoch', 'PCI_BATCH',
+     '.submit_epoch = XDEV_EXT_PEER_EPOCH_NONE,', '.submit_epoch = 0,'),
+    ('last lease overrides an earlier UNKNOWN', 'PCI_BATCH',
+     'quiesced &= stopped;', 'quiesced = stopped;'),
+    ('UNKNOWN retirement short-circuits after one uncovered lease', 'PCI_BATCH',
+     'bool stopped = xdev_ext_peer_fd_release_unknown(',
+     'bool stopped = quiesced && xdev_ext_peer_fd_release_unknown('),
+    ('issuer has no pending bias', 'PCI_BATCH',
+     'atomic_set(&b->pending, 1);', 'atomic_set(&b->pending, 0);'),
     ('UNKNOWN command list reused', 'PCI_BATCH', 'if (c->list && quiesced)', 'if (c->list)'),
     ('later successes extend the prefix', 'PCI_BATCH',
      '\t\tret = c->accepted ? c->status : issue_err;\n\t\tif (WARN_ON_ONCE(!ret))\n\t\t\tret = -EIO;\n\t\tbreak;\n',
@@ -901,7 +1025,7 @@ def build(parts, directory, name, main=MAIN):
     compiled = subprocess.run(['cc', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                                '-Wno-unused-function', '-fsanitize=address,undefined',
                                '-fno-sanitize-recover=undefined',
-                               '-I' + str(HERE), '-I' + str(KERNEL / 'drivers/nvme/host'),
+                               '-I' + str(HERE), '-I' + str(KERNEL / 'src/storage/drivers/nvme/host'),
                                str(path), '-o', str(binary)], capture_output=True, text=True)
     return compiled, binary
 
