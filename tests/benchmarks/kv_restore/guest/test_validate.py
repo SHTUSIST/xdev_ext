@@ -117,6 +117,21 @@ class Oracle(unittest.TestCase):
             with self.subTest(why=why), self.assertRaises((gv.OracleError, gv.kp.ProtocolError)):
                 gv.validate(text, self.expected)
 
+    def test_planned_refusals_must_have_their_stated_reason(self):
+        original = gv.RUNS[0]['go']
+        bad = list(original)
+        # Eight Qwen3-8B tokens are not whole groups: refused with EINVAL, not EALREADY.
+        bad[3] = ('a4', 'qwen3-8b-ctx', 8, 3, 0, -gv.errno.EALREADY)
+        gv.RUNS[0]['go'] = bad
+        try:
+            with self.assertRaises(gv.kl.LayoutError):
+                gv.expectations()
+            bad[3] = ('a4', 'qwen3-8b-ctx', 16, 3, 0, -gv.errno.EALREADY)  # larger keys: accepted
+            with self.assertRaises(gv.OracleError):
+                gv.expectations()
+        finally:
+            gv.RUNS[0]['go'] = original
+
     def test_make_plan_image_has_objects_at_their_lbas(self):
         with tempfile.TemporaryDirectory(prefix='kv-guest-plan-') as tmp:
             plan = gv.make_plan(tmp)

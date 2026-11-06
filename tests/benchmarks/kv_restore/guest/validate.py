@@ -58,7 +58,7 @@ RUNS = [
      'go': [('a1', 'qwen3-14b-ctx', 32, 1, 0, 0),
             ('a2', 'qwen3-8b-ctx', 64, 2, 5, 0),
             ('a3', 'qwen3-14b-ctx', 16, 3, 70, 0),
-            ('a4', 'qwen3-8b-ctx', 8, 3, 0, -errno.EALREADY),
+            ('a4', 'qwen3-14b-ctx', 16, 3, 0, -errno.EALREADY),
             ('a5', 'qwen3-8b-ctx', 64, 4, 100, -errno.ENOSPC)]},
     {'name': 'B', 'geometry': dict(group_bytes=256 * KIB, frame_bytes=256 * KIB, depth=8,
                                    window=8, early=False), 'pool_frames': 64,
@@ -95,13 +95,21 @@ def expectations():
     for run in RUNS:
         g = kl.Geometry(**run['geometry'])
         done, results = 0, []
+        next_key = 0
         for name, obj_name, tokens, ordinal, dst0, error in run['go']:
             obj = m.object(obj_name)
             size = kl.kv_bytes(obj.model, tokens)
             item = dict(run=name, object=obj_name, ordinal=ordinal, dst0=dst0, bytes=size,
                         seed=obj.seed, slba=obj.slba, error=error)
+            # Each planned refusal must fail for exactly its stated reason.
+            plan = kl.plan_restore(m, obj_name, tokens, g, ordinal, dst0)
+            fits = dst0 + plan.groups * plan.frames_per_group <= run['pool_frames']
+            reused = plan.first_seq < next_key
+            reason = 0 if fits and not reused else (-errno.EALREADY if reused else -errno.ENOSPC)
+            if reason != error or (reused and not fits):
+                raise OracleError(f'case {name}: planned outcome {error}, the plan gives {reason}')
             if not error:
-                plan = kl.plan_restore(m, obj_name, tokens, g, ordinal, dst0, run['pool_frames'])
+                next_key = plan.first_seq + plan.groups
                 done += plan.groups
                 item.update(groups=plan.groups, first_seq=plan.first_seq, cumulative=done,
                             digest=fnv1a(kl.pattern_bytes(obj.seed, 0, size)))
