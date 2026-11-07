@@ -82,7 +82,8 @@ def main():
     parser.add_argument('--keep-build', type=Path,
                         help='new evidence/build directory; relative to cwd or absolute')
     parser.add_argument('--suite', choices=('controls', 'flags', 'topology',
-                                          'capacity', 'all'), default='all')
+                                          'capacity', 'xdomain', 'all'),
+                        default='all')
     args = parser.parse_args()
     output = None
     receipt = {'schema': 1, 'status': 'setup', 'suite': args.suite,
@@ -125,7 +126,7 @@ def main():
                           1 if result == 1 else 2)
         if args.suite == 'controls':
             return finish(output, receipt, 'passed', 0)
-        suites = ('flags', 'topology', 'capacity') if args.suite == 'all' else (args.suite,)
+        suites = ('flags', 'topology', 'capacity', 'xdomain') if args.suite == 'all' else (args.suite,)
         failed = False
         for suite in suites:
             result = invoke([str(binary), suite], output, suite, receipt)
