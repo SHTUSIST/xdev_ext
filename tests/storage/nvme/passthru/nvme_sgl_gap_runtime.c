@@ -13,8 +13,11 @@
  *    segments at byte 104 of separate 4 KiB frames, 5 x 1432 + 1032) and the
  *    same-layout READ are DMA'd from the registered buffer: no kernel bounce
  *    copy and no -EAGAIN retry from io-wq, and the bytes match;
- *  - control: a fixed IO_VEC with more segments than max_segments must still
- *    be bounced and retried from io-wq, which shows the counters are live;
+ *  - opted-in retry: a wide fixed IO_VEC with XDEV_EXT set must survive the
+ *    pre-dispatch mapping -EAGAIN and io-wq reissue with its cached vector;
+ *    its distinct payload is checked before the control restores the image;
+ *  - control: the same vector without XDEV_EXT must still be bounced and
+ *    retried from io-wq, which shows the counters are live;
  *  - odirect: O_DIRECT pwritev/preadv with gapped, 4-byte aligned vectors
  *    (including one split by max_segments) keep their data, with the block
  *    split count the queue limits predict;
@@ -1285,9 +1288,19 @@ static void check_pipeline(struct context *context)
 	       ok ? "PASS" : "FAIL", guard_ok ? "PASS" : "FAIL");
 }
 
-static void check_control(struct context *context)
+/*
+ * This exercises a real blk_rq_map_user_iov() -EAGAIN, with no injected
+ * scheduler result.  The opted-in case covers the retained fixed vector and
+ * EMPTY sidecar across io-wq reissue; it does not attach a BPF policy or count
+ * policy-token references.  bounce_count() also requires allocation/free
+ * counts to agree before it can report one successful bounce.
+ */
+static void check_control(struct context *context, bool opted_in)
 {
-	const struct region *region = &sgl_regions[REGION_CONTROL];
+	struct region retry_region = sgl_regions[REGION_CONTROL];
+	const struct region *region = &retry_region;
+	const char *label = opted_in ? "opted-in-retry-write" : "control-write";
+	const char *name = opted_in ? "opted-in retry" : "control";
 	struct segment *segments = calloc(WIDE_SEGMENTS, sizeof(*segments));
 	struct iovec *vector = calloc(WIDE_SEGMENTS, sizeof(*vector));
 	uint8_t *expected = malloc((size_t)region->sectors * LBA_SIZE);
@@ -1300,39 +1313,53 @@ static void check_control(struct context *context)
 		.cdw10 = (uint32_t)region->lba,
 		.cdw11 = (uint32_t)(region->lba >> 32),
 		.cdw12 = region->sectors - 1,
+		.rsvd2 = opted_in ? XDEV_EXT_FLAG_OPT_IN : 0,
 		.fixed = true,
 		.buf_index = 2,
 	};
-	struct counts counts;
+	struct counts counts = {};
 	int32_t result = -1;
 	unsigned int index;
 	long long bounce;
 	bool ok;
 
 	if (!segments || !vector || !expected) {
-		check(false, "control allocation");
+		check(false, "%s allocation", name);
 		goto out;
 	}
+	/*
+	 * Run this case first with different bytes so a missing opted-in submit
+	 * cannot pass by reading the ordinary control's data.  The following
+	 * control write restores the region described by sgl_regions[].
+	 */
+	if (opted_in)
+		retry_region.seed ^= 0x80U;
 	for (index = 0; index < WIDE_SEGMENTS; index++)
 		segments[index] = (struct segment){ index, 0, LBA_SIZE };
 	fill_expected(expected, region);
 	build_vector(context->control_area, segments, WIDE_SEGMENTS, expected,
 		     vector);
 	command.addr = (uintptr_t)vector;
-	ok = run_traced(context, &command, &result, &counts, "control-write");
+	ok = run_traced(context, &command, &result, &counts, label);
+	if (context->ring.poisoned) {
+		/* The kernel may still import vector: main will fail and _exit(). */
+		return;
+	}
 	bounce = bounce_count(&counts);
 	check(ok && result == 0,
-	      "control: %u-segment fixed IO_VEC WRITE completes (res=%d)",
-	      WIDE_SEGMENTS, result);
+	      "%s: %u-segment fixed IO_VEC WRITE completes (res=%d)",
+	      name, WIDE_SEGMENTS, result);
 	check(ok && bounce == 1,
-	      "control: a vector above max_segments is still bounced once (bounce=%lld)",
-	      bounce);
+	      "%s: a vector above max_segments is bounced and unmapped once (bounce=%lld)",
+	      name, bounce);
 	check(ok && counts.map_eagain >= 1 && counts.iowq >= 1,
-	      "control: its nonblocking issue returns -EAGAIN and io-wq retries (eagain=%lld iowq=%lld)",
-	      counts.map_eagain, counts.iowq);
+	      "%s: its nonblocking issue returns -EAGAIN and io-wq retries (eagain=%lld iowq=%lld)",
+	      name, counts.map_eagain, counts.iowq);
 	check(odirect_read_matches(context->block_fd, region, expected),
-	      "control WRITE bytes read back exactly (O_DIRECT)");
-	printf("XDEV_EXT_NVME_SGL_BOUNCE_CONTROL segments=%u res=%d bounce=%lld map_eagain=%lld iowq=%lld\n",
+	      "%s WRITE bytes read back exactly (O_DIRECT)", name);
+	printf("%s segments=%u res=%d bounce=%lld map_eagain=%lld iowq=%lld\n",
+	       opted_in ? "XDEV_EXT_NVME_SGL_OPT_IN_RETRY" :
+			  "XDEV_EXT_NVME_SGL_BOUNCE_CONTROL",
 	       WIDE_SEGMENTS, result, bounce, counts.map_eagain, counts.iowq);
 out:
 	free(segments);
@@ -1692,7 +1719,9 @@ int main(int argc, char **argv)
 	if (tracing && !context.ring.poisoned)
 		check_pipeline(&context);
 	if (tracing && !context.ring.poisoned)
-		check_control(&context);
+		check_control(&context, true);
+	if (tracing && !context.ring.poisoned)
+		check_control(&context, false);
 	if (tracing && !context.ring.poisoned)
 		check_odirect(&context);
 	if (tracing && !context.ring.poisoned)
