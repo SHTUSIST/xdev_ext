@@ -207,4 +207,20 @@ typedef struct nv_ioctl_p2p_dma_batch
     nv_ioctl_p2p_dma_batch_entry_t entries[NV_P2P_DMA_MAX_BATCH];
 } nv_ioctl_p2p_dma_batch_t;
 
+/*
+ * NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY, on a CE stage /dev/nvidiaN fd: the CUDA
+ * allocation the stage's window lies in, by its POSIX file descriptor
+ * shareable handle and the GPU VA range the caller mapped it at (see
+ * nv-xdev_ext-ce-memory.h).  Once per fd.
+ */
+typedef struct nv_ioctl_xdev_ext_ce_attach_memory
+{
+    NvS32 mem_fd;                         /* cuMemExportToShareableHandle() fd */
+    NvU32 flags;                          /* must be zero */
+    NvU64 gpu_va      NV_ALIGN_BYTES(8); /* the caller's mapping of it */
+    NvU64 size        NV_ALIGN_BYTES(8); /* mapped bytes */
+    NvU32 status;                         /* out: NV_STATUS */
+    NvU32 reserved;                       /* must be zero */
+} nv_ioctl_xdev_ext_ce_attach_memory_t;
+
 #endif

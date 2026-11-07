@@ -26,6 +26,7 @@
 #define XDEV_EXT_NV_ESC_P2P_UNPIN_UMEM	(XDEV_EXT_NV_IOCTL_BASE + 20U)
 #define XDEV_EXT_NV_ESC_P2P_DMA_XFER		(XDEV_EXT_NV_IOCTL_BASE + 21U)
 #define XDEV_EXT_NV_ESC_P2P_DMA_XFER_BATCH	(XDEV_EXT_NV_IOCTL_BASE + 22U)
+#define XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY	(XDEV_EXT_NV_IOCTL_BASE + 23U)
 
 /* Explicit raw host registration for non-AF_XDP endpoints (for example NVMe). */
 #define XDEV_EXT_NV_P2P_PIN_F_HOST_REGION	(1U << 0)
@@ -87,6 +88,21 @@ struct xdev_ext_nv_p2p_dma_batch {
 	struct xdev_ext_nv_p2p_dma_batch_entry entries[XDEV_EXT_NV_P2P_MAX_BATCH];
 };
 
+/*
+ * nv_ioctl_xdev_ext_ce_attach_memory_t: on a CE stage /dev/nvidiaN fd, the
+ * CUDA allocation its window lies in, by the allocation's POSIX file
+ * descriptor shareable handle (cuMemExportToShareableHandle) and the GPU VA
+ * range the caller mapped it at.  Once per fd, before CREATE.
+ */
+struct xdev_ext_nv_ce_attach_memory {
+	int32_t mem_fd;
+	uint32_t flags;
+	uint64_t gpu_va __attribute__((aligned(8)));
+	uint64_t size __attribute__((aligned(8)));
+	uint32_t status;
+	uint32_t reserved;
+};
+
 #define XDEV_EXT_NV_IOCTL_XFER_CMD \
 	_IOWR(XDEV_EXT_NV_IOCTL_MAGIC, XDEV_EXT_NV_ESC_IOCTL_XFER_CMD, \
 	      struct xdev_ext_nv_ioctl_xfer)
@@ -127,6 +143,10 @@ XDEV_EXT_NV_STATIC_ASSERT(offsetof(struct xdev_ext_nv_p2p_dma_batch, failed_inde
 	       "NVIDIA P2P DMA batch failure index offset changed");
 XDEV_EXT_NV_STATIC_ASSERT(offsetof(struct xdev_ext_nv_p2p_dma_batch, entries) == 32,
 	       "NVIDIA P2P DMA batch entries offset changed");
+XDEV_EXT_NV_STATIC_ASSERT(sizeof(struct xdev_ext_nv_ce_attach_memory) == 32,
+	       "NVIDIA CE attach ABI size changed");
+XDEV_EXT_NV_STATIC_ASSERT(offsetof(struct xdev_ext_nv_ce_attach_memory, status) == 24,
+	       "NVIDIA CE attach status offset changed");
 
 typedef int (*xdev_ext_nv_ioctl_fn)(int fd, unsigned long request, void *argument);
 
@@ -293,6 +313,31 @@ xdev_ext_nv_p2p_dma_batch_with(int fd, struct xdev_ext_nv_p2p_dma_batch *params,
 	}
 	errno = EIO;
 	return -1;
+}
+
+static inline int
+xdev_ext_nv_ce_attach_memory_with(int fd, struct xdev_ext_nv_ce_attach_memory *params,
+			     xdev_ext_nv_ioctl_fn fn)
+{
+	int ret;
+
+	if (!params || params->mem_fd < 0 || !params->size || params->flags ||
+	    params->reserved) {
+		errno = EINVAL;
+		return -1;
+	}
+	params->status = UINT32_MAX;
+	ret = xdev_ext_nv_p2p_xfer_with(fd, XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY, params,
+				    sizeof(*params), fn);
+	if (ret)
+		return ret;
+	return xdev_ext_nv_p2p_native_result(params->status);
+}
+
+static inline int xdev_ext_nv_ce_attach_memory(int fd,
+					  struct xdev_ext_nv_ce_attach_memory *params)
+{
+	return xdev_ext_nv_ce_attach_memory_with(fd, params, xdev_ext_nv_ioctl_syscall);
 }
 
 static inline int xdev_ext_nv_p2p_pin_umem(int fd,

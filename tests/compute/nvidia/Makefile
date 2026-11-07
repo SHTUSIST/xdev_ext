@@ -7,7 +7,8 @@ TESTS := nv_xdev_ext_gpu_policy_test nv_xdev_ext_gpu_binding_test nv_xdev_ext_gp
 	 nv_xdev_ext_umem_quota_test nv_xdev_ext_handle_lifetime_test \
 	 nv_xdev_ext_ce_chunk_test nv_xdev_ext_dma_lifetime_test \
 	 nv_xdev_ext_gpu_identity_test nv_xdev_ext_ce_classify_test \
-	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test
+	 nv_xdev_ext_vidmem_offset_test nv_xdev_ext_ce_plan_test nv_xdev_ext_ce_async_test \
+	 nv_xdev_ext_ce_memory_test
 
 .PHONY: all run run-async run-host-bookkeeping run-lifecycle-contract run-lifecycle-mutants clean
 
@@ -52,6 +53,9 @@ nv_xdev_ext_vidmem_offset_test: nv_xdev_ext_vidmem_offset_test.c \
 		../src/nvidia/inc/kernel/mem_mgr/p2p_umem_vidmem.h
 	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 
+nv_xdev_ext_ce_memory_test: nv_xdev_ext_ce_memory_test.c \
+		$(wildcard ../kernel-open/nvidia/nv-xdev_ext-ce-memory.h)
+	$(CC) $(CFLAGS) $< -o $@ $(LDFLAGS)
 nv_xdev_ext_ce_plan_test: nv_xdev_ext_ce_plan_test.c \
 		../kernel-open/nvidia/nv-xdev_ext-ce-plan.h \
 		../kernel-open/nvidia/nv-xdev_ext-gpu-policy.h
@@ -76,7 +80,8 @@ LIFECYCLE_TESTS := nv_xdev_ext_ce_backend_harness_test.py nv_xdev_ext_ce_rm_even
 	nv_xdev_ext_host_region_dma_test.py nv_xdev_ext_ce_variant_source_test.py \
 	nv_xdev_ext_vidmem_owner_test.py nv_xdev_ext_native_peer_cleanup_test.py \
 	nv_xdev_ext_direct_dma_test.py nv_xdev_ext_gpu_export_test.py \
-	nv_xdev_ext_ce_owner_api_test.py nv_xdev_ext_registered_dma_test.py
+	nv_xdev_ext_ce_owner_api_test.py nv_xdev_ext_registered_dma_test.py \
+	nv_xdev_ext_ce_memory_attach_test.py nv_xdev_ext_ce_rm_locks_test.py
 
 run-lifecycle-contract:
 	@status=0; for test in $(LIFECYCLE_TESTS); do \

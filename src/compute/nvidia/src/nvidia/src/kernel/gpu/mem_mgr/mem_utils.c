@@ -1099,7 +1099,8 @@ memmgrMemCopy_IMPL
  * Same selection as memmgrMemCopy(): FALSE means CeUtils is absent, its
  * submission is paused, or CE cannot take this surface pair, so a
  * TRANSFER_FLAGS_REQUIRE_CE copy would be refused before anything is pushed
- * to a channel.  Callers serialize with CeUtils users under the RM API lock.
+ * to a channel.  Callers hold the RM API lock and every GPU lock, as every
+ * CeUtils user must.
  *
  * @param[in] pDstInfo  TRANSFER_SURFACE info for destination region
  * @param[in] pSrcInfo  TRANSFER_SURFACE info for source region

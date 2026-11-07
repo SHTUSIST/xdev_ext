@@ -61,8 +61,11 @@ class DirectDma(unittest.TestCase):
             "#define P2P_UMEM_MAX_XFERS " +
             re.search(r"#define\s+P2P_UMEM_MAX_XFERS\s+(\d+)", p2p_h).group(1),
             '#include "%s"' % CHUNK_H, '#include "%s"' % VIDMEM_H]) + "\n")
+        # The bridge takes its locks through osapi.c's CE lock helpers.
         cls.build.write("nv_xdev_ext_direct_dma_actual.inc",
                         ex.license_header(p2p) + p2p_umem_pieces(p2p) + "\n" +
+                        ex.function(osapi, "_rmP2PUmemCeLocksAcquire") + "\n" +
+                        ex.function(osapi, "_rmP2PUmemCeLocksRelease") + "\n" +
                         ex.function(osapi, "rm_p2p_umem_dma_request") + "\n")
         print(f"actual sha256 p2p_umem.c={ex.sha(p2p)} osapi.c={ex.sha(osapi)}")
         cls.binaries, cls.errors = {}, {}

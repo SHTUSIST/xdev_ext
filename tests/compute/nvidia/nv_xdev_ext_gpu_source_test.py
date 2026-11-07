@@ -142,21 +142,61 @@ range_check = rm_bind.index("nvP2PVidmemRangeValid(address, length)")
 lookup = rm_bind.index("RmP2PGetInfoWithoutToken(address, length, NULL,")
 vidmem_info = rm_bind.index(
     "CliGetThirdPartyP2PVidmemInfoFromAddress(pThirdPartyP2P, address,")
-dup = rm_bind.index("DupObject(pRmApi, pMemoryManager->hClient,")
-assert range_check < lookup < vidmem_info < dup
-after_dup = rm_bind[dup:]
+bind_dup = rm_bind.index("_rmP2PUmemVidmemBindDup(pGpu, NV_FALSE, pThirdPartyP2P->hClient,")
+assert range_check < lookup < vidmem_info < bind_dup
+# Both binds share one dup/validate tail: the owner is reserved before the
+# dup (or the import of an export), and every check runs on the dup.
+rm_dup = function_body(RM_P2P, "_rmP2PUmemVidmemBindDup\n(")
+owner = rm_dup.index("portMemAllocNonPaged(sizeof(*pBinding))")
+dup = rm_dup.index("DupObject(pRmApi, pMemoryManager->hClient,")
+imported = rm_dup.index("RmImportObject(pMemoryManager->hClient,")
+after_dup = rm_dup[max(dup, imported):]
+assert owner < min(dup, imported)
+assert "bExported && pMemDesc->pGpu != pGpu" in after_dup
 assert "ADDR_FBMEM" in after_dup
 assert "nvP2PVidmemWindowValid(" in after_dup
 assert "nvP2PVidmemSegSize(" in after_dup
 assert "->Free(pRmApi, pMemoryManager->hClient, hMemory)" in after_dup
+# The export bind resolves no VA: no third-party P2P registration is read.
+rm_bind_export = function_body(RM_P2P, "RmP2PUmemVidmemBindExport\n(")
+assert "rmapiLockIsOwner()" in rm_bind_export
+assert "RmP2PGetInfoWithoutToken" not in rm_bind_export
+assert rm_bind_export.index("nvP2PVidmemRangeValid(offset, length)") < \
+    rm_bind_export.index("_rmP2PUmemVidmemBindDup(pExpectedGpu, NV_TRUE,")
 rm_unbind = function_body(RM_P2P, "RmP2PUmemVidmemUnbind\n(")
 assert "->Free(pRmApi, pBinding->hClient, pBinding->hMemory)" in rm_unbind
 rm_resolve = function_body(RM_P2P, "RmP2PUmemVidmemResolve\n(")
 assert "memGetByHandle(pClient, pBinding->hMemory, &pMemory)" in rm_resolve
 assert "pMemory->pMemDesc != pBinding->pMemDesc" in rm_resolve
 osapi_bind = function_body(OSAPI, "NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind(")
+osapi_bind_export = function_body(
+    OSAPI, "NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_bind_export(")
 osapi_unbind = function_body(OSAPI, "NV_STATUS NV_API_CALL rm_p2p_umem_vidmem_unbind(")
+# The export fd's handles are read under the same API lock hold that binds.
+assert osapi_bind_export.index("rmapiLockAcquire(") < \
+    osapi_bind_export.index("_rmP2PUmemExportHandle(pExportNvfp, expected, &hExport)") < \
+    osapi_bind_export.index("RmP2PUmemVidmemBindExport(") < \
+    osapi_bind_export.index("rmapiLockRelease()")
+# CeUtils runs under the API lock and every GPU lock (NVIDIA's NV_CE_UTILS
+# class); the CE host entry points and the synchronous request, which copies
+# on RM's shared CeUtils, take both and release both.
+for entry, call in (("rm_p2p_umem_ce_host_bind(", "RmP2PUmemCeHostBind("),
+                    ("rm_p2p_umem_ce_host_unbind(", "RmP2PUmemCeHostUnbind("),
+                    ("rm_p2p_umem_ce_async_submit(", "RmP2PUmemCeAsyncSubmit("),
+                    ("rm_p2p_umem_ce_progress(", "RmP2PUmemCeProgress("),
+                    ("rm_p2p_umem_dma_request(", "RmP2PUmemDmaRequestDirect(")):
+    body = function_body(OSAPI, "NV_STATUS NV_API_CALL " + entry)
+    assert body.index("_rmP2PUmemCeLocksAcquire()") < body.index(call) < \
+        body.index("_rmP2PUmemCeLocksRelease()"), entry
+    assert "rmapiLockAcquire(" not in body, entry
+ce_locks = function_body(OSAPI, "static NV_STATUS _rmP2PUmemCeLocksAcquire(")
+assert ce_locks.index("rmapiLockAcquire(") < ce_locks.index("rmGpuLocksAcquire(GPUS_LOCK_FLAGS_NONE")
+ce_unlock = function_body(OSAPI, "static void _rmP2PUmemCeLocksRelease(")
+# RM's release frees every GPU lock held, whichever thread owns it.
+assert ce_unlock.index("if (rmGpuLockIsOwner())") < \
+    ce_unlock.index("rmGpuLocksRelease(GPUS_LOCK_FLAGS_NONE") < ce_unlock.index("rmapiLockRelease()")
 for body, call in ((osapi_bind, "RmP2PUmemVidmemBind("),
+                   (osapi_bind_export, "RmP2PUmemVidmemBindExport("),
                    (osapi_unbind, "RmP2PUmemVidmemUnbind(")):
     assert body.index("rmapiLockAcquire(") < body.index(call) < \
         body.index("rmapiLockRelease()")
@@ -166,7 +206,9 @@ for body, call in ((osapi_bind, "RmP2PUmemVidmemBind("),
 legacy = re.compile(r"\bRmP2PUmemDmaRequest\b")
 for name, body in (("rm_p2p_umem_dma_request", rm_submit),
                    ("rm_p2p_umem_vidmem_bind", osapi_bind),
+                   ("rm_p2p_umem_vidmem_bind_export", osapi_bind_export),
                    ("RmP2PUmemVidmemBind", rm_bind),
+                   ("RmP2PUmemVidmemBindExport", rm_bind_export),
                    ("RmP2PUmemVidmemResolve", rm_resolve),
                    ("nv-p2p.c", P2P)):
     assert not legacy.search(body), name
@@ -184,7 +226,7 @@ assert "const nv_p2p_umem_xfer_t *" in NV_H[NV_H.index("rm_p2p_umem_dma_request"
 # exists only when exports_link_command.txt keeps it.
 EXPORTS = (ROOT / "src/nvidia/exports_link_command.txt").read_text()
 for entry in ("rm_p2p_umem_dma_request", "rm_p2p_umem_vidmem_bind",
-              "rm_p2p_umem_vidmem_unbind"):
+              "rm_p2p_umem_vidmem_bind_export", "rm_p2p_umem_vidmem_unbind"):
     assert f"--undefined={entry}\n" in EXPORTS, entry
 
 # This ioctl is a CE passthrough.  PREFER_CE alone permits a silent CPU copy;
@@ -336,13 +378,17 @@ assert "&call->hwSubmitted" in submit
 # ref and RM external-client ref before RM dups the allocation, and only
 # unbind releases them after RM drops the dup.  The ambiguous branch skips
 # unbind permanently.  The opened GPU must own the allocation.
-vbind = function_body(P2P, "NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(")
+vbind = function_body(P2P, "static NV_STATUS nv_p2p_vidmem_bind_window(")
 vunbind = function_body(P2P, "NV_STATUS NV_API_CALL nv_p2p_vidmem_unbind(")
+for wrapper in ("NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(",
+                "NV_STATUS NV_API_CALL nv_p2p_vidmem_bind_export("):
+    assert "nv_p2p_vidmem_bind_window(pExpectedGpuUuid," in function_body(P2P, wrapper)
 dev_get = function_body(NV, "int nvidia_dev_get_uuid(")
 dev_put = function_body(NV, "void nvidia_dev_put_uuid(")
 dev_ref = vbind.index("nvidia_dev_get_uuid(pExpectedGpuUuid, sp)")
-bound = vbind.index("rm_p2p_umem_vidmem_bind(sp, gpuVA, length,")
+bound = vbind.index("rm_p2p_umem_vidmem_bind(sp, address, length,")
 identity = vbind.index("nv_p2p_gpu_identity_matches(pExpectedGpuUuid, gpu_uuid)")
+assert dev_ref < vbind.index("rm_p2p_umem_vidmem_bind_export(sp, pExportNvfp,") < identity
 assert dev_ref < bound < identity
 assert "rm_p2p_umem_vidmem_unbind(sp, pBinding->rm)" in vbind[identity:]
 assert vunbind.index("rm_p2p_umem_vidmem_unbind(sp, pBinding->rm)") < \
@@ -573,6 +619,40 @@ assert "nv_is_control_device(" in bind_region
 assert "nv_p2p_vidmem_bind(uuid, gpu_va, len, &region->vidmem," in bind_region
 assert "out->len = len;" in bind_region
 assert "out->seg_size = seg_size;" in bind_region
+# A stage fd with an attached CUDA export binds from it instead: the window
+# must lie in the attached range before anything is allocated or locked.
+attached = bind_region.index("smp_load_acquire(&nvlfp->xdev_ext_ce_memory)")
+assert attached < bind_region.index("nv_xdev_ext_ce_memory_window(") < \
+    bind_region.index("kzalloc(") < bind_region.index("nv_down_read_interruptible(")
+assert "nv_p2p_vidmem_bind_export(uuid, memory->nvfp, offset, len," in bind_region
+# NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY: an actual GPU fd with the CE passthrough
+# enabled, exact argument size; the attached export is released on both
+# close paths.
+attach_case = NV[NV.index("case NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY:"):]
+attach_case = attach_case[:attach_case.index("break;")]
+assert attach_case.index("NV_XDEV_EXT_CE_DMA_ONLY();") < \
+    attach_case.index("NV_ACTUAL_DEVICE_ONLY(nv);") < \
+    attach_case.index("arg_size != sizeof(nv_ioctl_xdev_ext_ce_attach_memory_t)") < \
+    attach_case.index("nv_xdev_ext_ce_memory_attach(nvlfp, params)")
+for closer in ("static void\nnvidia_close_callback(", "nvidia_ctl_close(\n"):
+    body = NV[NV.index(closer):]
+    body = body[:body.index("\n}\n")]
+    assert "nv_xdev_ext_ce_memory_release(nvlfp);" in body, closer
+NUMBERS = (ROOT / "kernel-open/common/inc/nv-ioctl-numbers.h").read_text()
+assert "#define NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY (NV_IOCTL_BASE + 23)" in NUMBERS
+# The tools' mirror (tools/include/xdev_ext_nv_p2p_ioctl.h) keeps the field
+# order of the driver's struct; its ABI test checks every offset.
+def field_names(source: str, opener: str) -> list:
+    start = source.index(opener)
+    body = source[source.index("{", start) + 1:source.index("}", start)]
+    return [re.match(r"\s*\w+\s+(\w+)", line).group(1) for line in body.splitlines()
+            if ";" in line and not line.strip().startswith(("/*", "*"))]
+NV_IOCTL_H = (ROOT / "kernel-open/common/inc/nv-ioctl.h").read_text()
+CLI_NV_IOCTL = (ROOT.parent / "kernel/tools/include/xdev_ext_nv_p2p_ioctl.h").read_text()
+assert field_names(NV_IOCTL_H, "typedef struct nv_ioctl_xdev_ext_ce_attach_memory") == \
+    field_names(CLI_NV_IOCTL, "struct xdev_ext_nv_ce_attach_memory {") == \
+    ["mem_fd", "flags", "gpu_va", "size", "status", "reserved"]
+assert "#define XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY\t(XDEV_EXT_NV_IOCTL_BASE + 23U)" in CLI_NV_IOCTL
 
 # bind_host keeps the identity-only variant; the default maps GPU-device IOVAs.
 bind_host = function_body(BACKEND, "static int nv_xdev_ext_ce_bind_host(")

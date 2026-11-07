@@ -46,5 +46,7 @@
 #define NV_ESC_P2P_UNPIN_UMEM       (NV_IOCTL_BASE + 20)
 #define NV_ESC_P2P_DMA_XFER         (NV_IOCTL_BASE + 21)
 #define NV_ESC_P2P_DMA_XFER_BATCH   (NV_IOCTL_BASE + 22)
+/* A CE stage fd's window allocation by its CUDA POSIX-FD export */
+#define NV_ESC_XDEV_EXT_CE_ATTACH_MEMORY (NV_IOCTL_BASE + 23)
 
 #endif

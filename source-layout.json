@@ -719,6 +719,11 @@
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-memory.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-memory.h"
+    },
+    {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-dma-lifetime.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-dma-lifetime.h"
@@ -3618,6 +3623,31 @@
       "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_memory_test.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_attach_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_memory_attach_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_attach_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_memory_attach_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_harness.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_harness.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_locks_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_rm_locks_test.py"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_event_harness.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_rm_event_harness.c"
@@ -3626,6 +3656,11 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_rm_event_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_rm_event_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_launch_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_launch_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_variant_source_test.py",

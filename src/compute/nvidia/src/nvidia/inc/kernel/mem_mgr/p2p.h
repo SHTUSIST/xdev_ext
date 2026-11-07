@@ -31,7 +31,8 @@ struct MEMORY_DESCRIPTOR;
 
 //
 // UBR CE: the GPU side of a transfer is a window of one vidmem allocation,
-// bound from the calling process's GPU VA range by RmP2PUmemVidmemBind().
+// bound from the calling process's GPU VA range by RmP2PUmemVidmemBind(), or
+// from a CUDA shareable-handle export by RmP2PUmemVidmemBindExport().
 // hMemory dups that allocation into the GPU's RM-internal client, which keeps
 // its FB pages allocated until RmP2PUmemVidmemUnbind().
 //
@@ -65,6 +66,7 @@ NV_STATUS  RmP2PPutPages            (NvU64, NvU32, NvU64, void *);
 NV_STATUS  RmP2PGetGpuByAddress     (NvU64, NvU64, OBJGPU **);
 NV_STATUS  RmP2PPutPagesPersistent  (void *, void *, void *);
 NV_STATUS  RmP2PUmemVidmemBind      (NvU64, NvU64, OBJGPU *, P2P_UMEM_VIDMEM_BINDING **, P2P_UMEM_VIDMEM_BINDING **);
+NV_STATUS  RmP2PUmemVidmemBindExport(NvHandle, NvU64, NvU64, OBJGPU *, P2P_UMEM_VIDMEM_BINDING **, P2P_UMEM_VIDMEM_BINDING **);
 NV_STATUS  RmP2PUmemVidmemResolve   (P2P_UMEM_VIDMEM_BINDING *, OBJGPU *, struct MEMORY_DESCRIPTOR **);
 NV_STATUS  RmP2PUmemVidmemUnbind    (P2P_UMEM_VIDMEM_BINDING *);
 NV_STATUS RmP2PUmemDmaRequestDirect(OBJGPU *, NvU64 *, NvU32, NvU32, NvU64, struct MEMORY_DESCRIPTOR *, NvU64, NvU64, const P2P_UMEM_XFER *, NvU32, NvU32, NvBool *, NvU64 *);

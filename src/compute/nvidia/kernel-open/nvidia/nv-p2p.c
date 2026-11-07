@@ -2308,17 +2308,17 @@ NV_STATUS NV_API_CALL nv_unpin_host_region(void *pHandle)
 }
 
 /*
- * nv_p2p_vidmem_bind
- *
- * Binds [gpuVA, gpuVA + length) of the calling process to its vidmem
- * allocation for XDEV_EXT CE transfers.  The GPU side of a CE copy is that
- * allocation's memdesc at an offset: P2P page table entries are BAR1 bus
- * addresses and never name it.  The device reference is taken first and the
- * RM binding must name the same GPU as pExpectedGpuUuid.
+ * One body for both window binds.  The device reference is taken first; RM
+ * then binds the window either by the calling process's GPU VA (address,
+ * resolved through its third-party P2P registrations) or, with pExportNvfp,
+ * by [address, address + length) of the allocation that control fd exports
+ * (a CUDA POSIX file descriptor shareable handle), and the RM binding must
+ * name the same GPU as pExpectedGpuUuid.
  */
-NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
+static NV_STATUS nv_p2p_vidmem_bind_window(
     const NvU8 *pExpectedGpuUuid,
-    NvU64 gpuVA,
+    nv_file_private_t *pExportNvfp,
+    NvU64 address,
     NvU64 length,
     nv_p2p_vidmem_binding_t **ppBinding,
     NvU32 *pSegSize,
@@ -2354,8 +2354,13 @@ NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
     }
     os_mem_copy(pBinding->gpu_uuid, pExpectedGpuUuid, NVIDIA_P2P_GPU_UUID_LEN);
 
-    status = rm_p2p_umem_vidmem_bind(sp, gpuVA, length, pExpectedGpuUuid, gpu_uuid, &seg_size,
-                                     &pBinding->rm, &residual);
+    if (pExportNvfp != NULL)
+        status = rm_p2p_umem_vidmem_bind_export(sp, pExportNvfp, address, length,
+                                                pExpectedGpuUuid, gpu_uuid, &seg_size,
+                                                &pBinding->rm, &residual);
+    else
+        status = rm_p2p_umem_vidmem_bind(sp, address, length, pExpectedGpuUuid,
+                                         gpu_uuid, &seg_size, &pBinding->rm, &residual);
     if (status != NV_OK)
     {
         if (residual != NULL)
@@ -2396,6 +2401,60 @@ free_stack:
 free_binding:
     kfree(pBinding);
     return status;
+}
+
+/*
+ * nv_p2p_vidmem_bind
+ *
+ * Binds [gpuVA, gpuVA + length) of the calling process to its vidmem
+ * allocation for XDEV_EXT CE transfers.  The GPU side of a CE copy is that
+ * allocation's memdesc at an offset: P2P page table entries are BAR1 bus
+ * addresses and never name it.  The device reference is taken first and the
+ * RM binding must name the same GPU as pExpectedGpuUuid.
+ */
+NV_STATUS NV_API_CALL nv_p2p_vidmem_bind(
+    const NvU8 *pExpectedGpuUuid,
+    NvU64 gpuVA,
+    NvU64 length,
+    nv_p2p_vidmem_binding_t **ppBinding,
+    NvU32 *pSegSize,
+    nv_p2p_vidmem_binding_t **ppResidual
+)
+{
+    return nv_p2p_vidmem_bind_window(pExpectedGpuUuid, NULL, gpuVA, length,
+                                     ppBinding, pSegSize, ppResidual);
+}
+
+/*
+ * nv_p2p_vidmem_bind_export
+ *
+ * Binds [offset, offset + length) of the vidmem allocation that a control
+ * fd exports (pExportNvfp: a CUDA POSIX file descriptor shareable handle,
+ * cuMemExportToShareableHandle()) for XDEV_EXT CE transfers, with the same
+ * binding, device reference and identity check as nv_p2p_vidmem_bind().
+ * Works without GPUDirect RDMA.  The caller holds a reference on that fd
+ * for the duration of the call.
+ */
+NV_STATUS NV_API_CALL nv_p2p_vidmem_bind_export(
+    const NvU8 *pExpectedGpuUuid,
+    nv_file_private_t *pExportNvfp,
+    NvU64 offset,
+    NvU64 length,
+    nv_p2p_vidmem_binding_t **ppBinding,
+    NvU32 *pSegSize,
+    nv_p2p_vidmem_binding_t **ppResidual
+)
+{
+    if (pExportNvfp == NULL)
+    {
+        if (ppBinding != NULL)
+            *ppBinding = NULL;
+        if (ppResidual != NULL)
+            *ppResidual = NULL;
+        return NV_ERR_INVALID_ARGUMENT;
+    }
+    return nv_p2p_vidmem_bind_window(pExpectedGpuUuid, pExportNvfp, offset, length,
+                                     ppBinding, pSegSize, ppResidual);
 }
 
 /*

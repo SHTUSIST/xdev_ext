@@ -37,7 +37,21 @@ RAW = {
 }
 
 
-def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', extra='', caps=None):
+# A CE window is a cuMemAlloc block only where CUDA reports GPUDirect RDMA;
+# elsewhere it is a VMM allocation whose POSIX-FD export each CE stage fd
+# carries.  The guest prints the mode on the case line, the tool its lines.
+def ce_lines(name, mode):
+    attach = ' mapped=2097152 export=posix-fd attached=2' if mode == 'vmm' else ''
+    raw = [f'XDEV_EXT_GPU_LOG {name}: CUDA allocation={mode} bdf=0000:01:00.0 '
+           f'va=0x7a4879200000 bytes=1048576{attach}',
+           f'XDEV_EXT_GPU_LOG {name}: CUDA allocation={mode} released=yes']
+    tail = f'groups=2 allocation={mode}' if name == 'ce-chain-d' else \
+        f'bytes=32768 allocation={mode} compare=equal'
+    return raw, tail
+
+
+def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', extra='', caps=None,
+            ce_mode=None):
     results = dict.fromkeys(CASES, 'PASS') if results is None else results
     failed = sum(value not in ('PASS', 'UNSUPPORTED') for value in results.values())
     unsupported = sum(value == 'UNSUPPORTED' for value in results.values())
@@ -48,11 +62,16 @@ def console(results=None, modules='PASS', unload='XDEV_EXT_GPU_UNLOAD=PASS', ext
         if 'probe=failed' not in caps:
             lines.append('XDEV_EXT_GPU_LOG caps: ' + caps)
         lines.append(caps)
+    mode = ce_mode or ('native' if caps and ' gpu_direct_rdma=1' in caps else 'vmm')
     for name, value in results.items():
         if value == 'UNSUPPORTED':
             lines += RAW.get(name, [])
+        tail = 'bytes=32768'
+        if value == 'PASS' and name.startswith('ce-chain-'):
+            raw, tail = ce_lines(name, mode)
+            lines += raw
         lines.append(f'XDEV_EXT_GPU_CASE name={name} result={value} ' +
-                     (UNSUPPORTED.get(name, 'reason=none') if value == 'UNSUPPORTED' else 'bytes=32768'))
+                     (UNSUPPORTED.get(name, 'reason=none') if value == 'UNSUPPORTED' else tail))
     lines.append(f'XDEV_EXT_GPU_GUEST={summary} failed={failed} unsupported={unsupported}')
     lines.append(extra)
     lines.append(unload)
@@ -108,6 +127,19 @@ class GpuConsole(unittest.TestCase):
                                            device='10de:2b85')
                 self.assertEqual(result['verdict'], 'FAIL')
                 self.assertTrue(result['gpu_errors'])
+
+    def test_rm_lock_assertions_are_gpu_errors(self):
+        # RM asserts these when a thread was left owning its locks; RM then
+        # waits on that thread forever (the RTX 5090 window at 6787f2e).
+        for line in ('[    8.713738] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                     'GPU lock already acquired by this thread @ locks.c:992',
+                     '[    8.754063] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                     'rmGpuLocksGetOwnedMask() == 0 @ rmapi.c:566'):
+            with self.subTest(line=line):
+                result = self.mod.validate(console(extra=line), release='590.48.01',
+                                           device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertEqual(result['gpu_errors'], [line])
 
     def test_duplicate_case_line_fails(self):
         text = console() + 'XDEV_EXT_GPU_CASE name=ce-chain-a result=PASS\n'
@@ -177,6 +209,58 @@ class GpuConsole(unittest.TestCase):
         result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
         self.assertEqual(result['verdict'], 'FAIL')
         self.assertIn('case ce-chain-a FAIL', result['problems'])
+
+    def test_ce_chains_pass_through_the_vmm_export_where_cuda_has_no_rdma(self):
+        text = console(self.geforce(), caps=GEFORCE_CAPS)
+        self.assertIn('allocation=vmm', text)
+        result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
+        self.assertEqual(result['verdict'], 'UNSUPPORTED')
+        self.assertEqual(result['cases']['ce-chain-d'], 'PASS')
+        self.assertEqual(result['cases']['ce-chain-a'], 'PASS')
+        self.assertEqual(result['problems'], [])
+
+    def test_ce_allocation_must_be_the_one_cuda_capabilities_select(self):
+        rdma = 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1'
+        for name, caps, mode in (('native on a GPU without RDMA', GEFORCE_CAPS, 'native'),
+                                 ('vmm where RDMA resolves cuMemAlloc', rdma, 'vmm'),
+                                 ('unknown mode', GEFORCE_CAPS, 'pinned')):
+            with self.subTest(name):
+                results = self.geforce() if caps == GEFORCE_CAPS else None
+                result = self.mod.validate(console(results, caps=caps, ce_mode=mode),
+                                           release='590.48.01', device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn('allocation', ' '.join(result['problems']))
+
+    def test_ce_pass_needs_the_tools_own_allocation_lines(self):
+        base = console(self.geforce(), caps=GEFORCE_CAPS)
+        for name, case in (('no attach line', 'ce-chain-d'), ('no release line', 'ce-chain-a')):
+            with self.subTest(name):
+                raw, _ = ce_lines(case, 'vmm')
+                line = raw[0] if name == 'no attach line' else raw[1]
+                result = self.mod.validate(base.replace(line + '\n', ''),
+                                           release='590.48.01', device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn(case, ' '.join(result['problems']))
+
+    def test_ce_chain_a_pass_needs_the_equal_byte_comparison(self):
+        text = console(self.geforce(), caps=GEFORCE_CAPS).replace(
+            'allocation=vmm compare=equal', 'allocation=vmm')
+        result = self.mod.validate(text, release='590.48.01', device='10de:2b85')
+        self.assertEqual(result['verdict'], 'FAIL')
+        self.assertIn('ce-chain-a', ' '.join(result['problems']))
+
+    def test_a_guest_problem_line_fails_and_is_reported(self):
+        # The guest stops its GPU cases after a step past its limit or RM lock
+        # assertions; the validator names the problem, whatever the cases say.
+        for line, words in (('XDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=timeout limit_s=120',
+                             'ce-chain-d reason=timeout'),
+                            ('XDEV_EXT_GPU_PROBLEM case=ce-chain-a reason=rm-lock-state',
+                             'ce-chain-a reason=rm-lock-state')):
+            with self.subTest(line=line):
+                result = self.mod.validate(console(extra=line), release='590.48.01',
+                                           device='10de:2b85')
+                self.assertEqual(result['verdict'], 'FAIL')
+                self.assertIn(words, ' '.join(result['problems']))
 
     def test_prefixed_tool_output_is_not_mistaken_for_verdicts(self):
         text = console({'ce-chain-d': 'PASS', 'ce-chain-a': 'PASS', 'peer-nvme': 'PASS'})

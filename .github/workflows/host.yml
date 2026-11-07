@@ -401,6 +401,10 @@ jobs:
           python3 "$GITHUB_WORKSPACE/tools/build/prepare_sources.py" --component nvidia
           python3 "$GITHUB_WORKSPACE/tools/build/prepare_host_component.py" --component nvidia
           make -C gpu/tests run-lifecycle-contract
+          python3 "$GITHUB_WORKSPACE/tests/compute/nvidia/nv_xdev_ext_ce_launch_test.py" \
+            --source "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/src/kernel/gpu/mem_mgr/channel_utils.c" \
+            --sdk-include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/sdk/nvidia/inc" \
+            --include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/inc"
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+import time
 import unittest
 
 HERE = Path(__file__).resolve().parent
@@ -185,7 +186,12 @@ class GuestGpuWiring(unittest.TestCase):
 # exits with $FAKE/<name>.rc (default 0); successful copies move the window.
 FAKE_CTL = r'''#!/bin/sh
 echo "$*" >>"$FAKE/ctl.calls"
-[ "$1" = ce-chain ] || exit 0
+if [ "$1" != ce-chain ]; then
+	verb=$1 pin=
+	while [ $# -gt 0 ]; do [ "$1" != --pin ] || pin=$2; shift; done
+	[ ! -f "$FAKE/$verb-${pin##*/}.sleep" ] || sleep "$(cat "$FAKE/$verb-${pin##*/}.sleep")"
+	exit 0
+fi
 chain= src= slba= dst= dslba= nlb=
 while [ $# -gt 0 ]; do
 	case $1 in
@@ -198,6 +204,8 @@ while [ $# -gt 0 ]; do
 	esac
 	shift
 done
+[ ! -f "$FAKE/ce-$chain.dmesg" ] || cat "$FAKE/ce-$chain.dmesg" >>"$FAKE/dmesg.out"
+[ ! -f "$FAKE/ce-$chain.sleep" ] || sleep "$(cat "$FAKE/ce-$chain.sleep")"
 cat "$FAKE/ce-$chain.out" 2>/dev/null
 rc=$(cat "$FAKE/ce-$chain.rc" 2>/dev/null || echo 0)
 [ "$rc" != 0 ] || [ -z "$dst" ] || dd if="$src" of="$dst" bs=512 skip="$slba" seek="$dslba" count="$nlb" conv=notrunc 2>/dev/null
@@ -234,15 +242,22 @@ CE_PASS = ('XDEV_EXT_MECH_CE_GPU=PASS chain={chain}\n'
            'XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 '
            'rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0\n'
            'CUDA allocation=native released=yes\n')
+# Without GPUDirect RDMA the window is a VMM allocation whose POSIX-FD
+# export the tool attaches to both CE stage fds.
+CE_PASS_VMM = CE_PASS.replace(
+    'CUDA allocation=native released=yes\n',
+    'CUDA allocation=vmm bdf=0000:01:00.0 va=0x7a4879200000 bytes=32768 mapped=2097152 '
+    'export=posix-fd attached=2\nCUDA allocation=vmm released=yes\n')
 PEER_PASS = 'peer chain: done=4 abort=0 inflight=0 sequestered=0 status=0\n'
 CAPS_GEFORCE = 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 pointer_rdma=0\n'
+GEFORCE_CE = dict(ce_d_out=CE_PASS_VMM.format(chain='d'), ce_a_out=CE_PASS_VMM.format(chain='a'))
 
 
 class GpuGuestCases(unittest.TestCase):
     """xdev_ext_gpu_guest.sh against stand-in tools in a scratch root; only the
     case logic and the console lines it prints are under test here."""
 
-    def guest(self, **outputs):
+    def guest(self, env=None, rc=0, **outputs):
         tmp = tempfile.TemporaryDirectory(prefix='gpu-guest-')
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
@@ -265,15 +280,19 @@ class GpuGuestCases(unittest.TestCase):
                     'peer.out': PEER_PASS, 'dmabuf-peer.out': PEER_PASS,
                     'dmabuf.out': 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=1\n',
                     'caps.out': 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=1 dma_buf=1 pointer_rdma=1\n'}
-        defaults.update({name.replace('_', '-').replace('-out', '.out').replace('-rc', '.rc'): value
+        defaults.update({name.replace('_', '-').replace('-out', '.out').replace('-rc', '.rc')
+                         .replace('-sleep', '.sleep').replace('-dmesg', '.dmesg'): value
                          for name, value in outputs.items()})
         for name, value in defaults.items():
             (fake / name).write_text(value)
         for path, text in ((root / 'ctl', FAKE_CTL), (gpu / 'xdev_ext_peer_chain', FAKE_PEER),
                            (gpu / 'xdev_ext_gpu_dmabuf', FAKE_DMABUF),
-                           (bin_dir / 'insmod', '#!/bin/sh\necho "$*" >>"$FAKE/insmod.calls"\n'),
+                           (bin_dir / 'insmod', '#!/bin/sh\necho "$*" >>"$FAKE/insmod.calls"\n'
+                            '[ ! -f "$FAKE/insmod.sleep" ] || sleep "$(cat "$FAKE/insmod.sleep")"\n'),
                            (bin_dir / 'dmesg', '#!/bin/sh\ncat "$FAKE/dmesg.out" 2>/dev/null\n'),
-                           (bin_dir / 'nvidia-smi', '#!/bin/sh\necho "NVIDIA GeForce RTX 5090, '
+                           (bin_dir / 'nvidia-smi', '#!/bin/sh\n'
+                            '[ ! -f "$FAKE/smi.sleep" ] || sleep "$(cat "$FAKE/smi.sleep")"\n'
+                            'echo "NVIDIA GeForce RTX 5090, '
                             '00000000:01:00.0, 590.48.01, 98.02.2E.40.EE, 32607 MiB"\n')):
             path.write_text(text)
             path.chmod(0o755)
@@ -288,8 +307,9 @@ class GpuGuestCases(unittest.TestCase):
                               str(root / 'ctl'), image[0], image[0], image[1], image[1],
                               '0', '64', '4', '4', '32768', '60000'],
                              capture_output=True, text=True, timeout=120,
-                             env=dict(os.environ, FAKE=str(fake), PATH=f'{bin_dir}:/usr/bin:/bin'))
-        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+                             env=dict(os.environ, FAKE=str(fake), PATH=f'{bin_dir}:/usr/bin:/bin',
+                                      **(env or {})))
+        self.assertEqual(run.returncode, rc, run.stdout + run.stderr)
         return run.stdout
 
     def verdicts(self, console):
@@ -339,10 +359,43 @@ class GpuGuestCases(unittest.TestCase):
     NO_DMA_BUF = 'XDEV_EXT_GPU_DMABUF device=0000:01:00.0 dma_buf_supported=0\n'
     PIN_REFUSED = '[   14.1] NVRM: XDEV_EXT peer pin: nvidia_p2p_get_pages_persistent failed: -22\n'
 
+    def ce_calls(self):
+        return [line.split() for line in (self.root / 'fake/ctl.calls').read_text().splitlines()
+                if line.startswith('ce-chain ')]
+
+    def test_ce_chains_use_the_vmm_export_where_cuda_reports_no_rdma(self):
+        console = self.guest(caps_out=CAPS_GEFORCE, **GEFORCE_CE)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-d', 'ce-chain-a'):
+            self.assertEqual((cases[name]['result'], cases[name]['allocation']), ('PASS', 'vmm'),
+                             cases[name])
+        self.assertEqual(cases['ce-chain-a']['compare'], 'equal')
+        for words in self.ce_calls():
+            self.assertIn('--ce-vmm', words)
+            self.assertNotIn('--ce-alloc', words)
+
+    def test_ce_chains_keep_cumemalloc_where_cuda_reports_rdma(self):
+        cases = self.verdicts(self.guest())
+        for name in ('ce-chain-d', 'ce-chain-a'):
+            self.assertEqual((cases[name]['result'], cases[name]['allocation']), ('PASS', 'native'))
+        for words in self.ce_calls():
+            self.assertIn('--ce-alloc', words)
+            self.assertNotIn('--ce-vmm', words)
+
+    def test_a_vmm_pass_needs_the_attach_and_release_lines(self):
+        for name, text in (('no attach', CE_PASS_VMM.replace(' attached=2', ' attached=1')),
+                           ('released=no', CE_PASS_VMM.replace('vmm released=yes', 'vmm released=no')),
+                           ('native lines on GeForce', CE_PASS)):
+            with self.subTest(name):
+                console = self.guest(caps_out=CAPS_GEFORCE, ce_d_out=text.format(chain='d'),
+                                     ce_a_out=CE_PASS_VMM.format(chain='a'))
+                self.assertEqual(self.verdicts(console)['ce-chain-d']['result'], 'FAIL')
+
     def test_geforce_refusals_are_unsupported_not_failed(self):
         # What CUDA reported on the RTX 5090: no GPUDirect RDMA, no dma_buf.
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
-                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n')
+                             dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n',
+                             **GEFORCE_CE)
         cases = self.verdicts(console)
         self.assertEqual({key: cases['peer-nvme'].get(key) for key in ('result', 'reason', 'step', 'errno')},
                          dict(result='UNSUPPORTED', reason='cuda-no-gpudirect-rdma', step='register',
@@ -373,10 +426,133 @@ class GpuGuestCases(unittest.TestCase):
                 self.assertIn('FAIL', results.values(), results)
                 self.assertRegex(console, r'\nXDEV_EXT_GPU_GUEST=FAIL failed=[1-9] unsupported=0\n')
 
+    # A tool blocked in the kernel (a thread left owning RM's GPU locks) never
+    # returns; the guest must not wait for it past its limit, must say why,
+    # and must skip the later GPU cases so the harness still unloads.
+    RM_LOCK_ASSERT = ('[    8.7] NVRM: nvAssertFailedNoLog: Assertion failed: '
+                      'GPU lock already acquired by this thread @ locks.c:992\n')
+
+    def test_a_hung_tool_is_bounded_and_the_later_gpu_cases_are_skipped(self):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, ce_d_sleep='60\n',
+                             caps_out=CAPS_GEFORCE, **GEFORCE_CE)
+        self.assertLess(time.monotonic() - started, 30, 'the guest waited for the hung tool')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['ce-chain-d']['result'], cases['ce-chain-d'].get('reason')),
+                         ('FAIL', 'timeout'))
+        for name in ('ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-timeout'), name)
+        self.assertRegex(console, r'\nXDEV_EXT_GPU_GUEST=FAIL failed=4 unsupported=0\n')
+        calls = (self.root / 'fake/ctl.calls').read_text()
+        self.assertEqual(calls.count('ce-chain --chain a'), 0, calls)
+
+    def test_rm_lock_assertions_stop_the_gpu_cases(self):
+        console = self.guest(caps_out=CAPS_GEFORCE, ce_d_dmesg=self.RM_LOCK_ASSERT, **GEFORCE_CE)
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=ce-chain-d reason=rm-lock-state\n', console)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-rm-lock-state'), name)
+        self.assertIn('XDEV_EXT_GPU_GUEST=FAIL', console)
+
+    def test_rm_lock_assertions_after_the_caps_probe_stop_every_case(self):
+        # The probe is CUDA's first use of the GPU; no CE stage may run after it.
+        console = self.guest(caps_out=CAPS_GEFORCE, dmesg_out=self.RM_LOCK_ASSERT, **GEFORCE_CE)
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=caps reason=rm-lock-state\n', console)
+        cases = self.verdicts(console)
+        for name in ('ce-chain-d', 'ce-chain-a', 'peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-rm-lock-state'), name)
+        self.assertNotIn('ce-chain', (self.root / 'fake/ctl.calls').read_text())
+
+    # Steps before the cases (module load, the first client open) and the
+    # struct_ops attach and detach around them are bounded the same way.
+    def hung_module_step(self, step, **hang):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, rc=1, **hang)
+        self.assertLess(time.monotonic() - started, 30, f'the guest waited for {step}')
+        # These lines can open the console: match them at any line start.
+        self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_PROBLEM case={step} reason=timeout limit_s=2$')
+        self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_MODULES=FAIL step={step} reason=timeout ')
+        self.assertNotIn('XDEV_EXT_GPU_CASE ', console)
+
+    def test_a_hung_module_load_is_bounded(self):
+        self.hung_module_step('insmod-nvidia', insmod_sleep='60\n')
+
+    def test_a_hung_first_client_open_is_bounded(self):
+        # RM boots GSP on the first open (nvidia-smi); a GPU whose GSP still
+        # runs from an earlier guest may hang it.
+        self.hung_module_step('nvidia-smi', smi_sleep='60\n')
+
+    def test_a_hung_ce_plan_attach_is_bounded(self):
+        self.hung_module_step('attach-ce-plan', attach_gpu_ce_sleep='60\n')
+
+    def test_a_hung_ce_plan_detach_skips_the_later_cases(self):
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, detach_gpu_ce_sleep='60\n')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=detach-ce-plan reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['ce-chain-d']['result'], cases['ce-chain-a']['result']), ('PASS', 'PASS'))
+        for name in ('peer-nvme', 'dmabuf-peer'):
+            self.assertEqual((cases[name]['result'], cases[name].get('reason')),
+                             ('FAIL', 'skipped-after-timeout'), name)
+
+    def test_a_hung_nvme_detach_fails_the_peer_case_and_still_reattaches(self):
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, detach_zc_nvme_sleep='60\n')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=detach-nvme reason=timeout limit_s=2\n', console)
+        cases = self.verdicts(console)
+        self.assertEqual((cases['peer-nvme']['result'], cases['peer-nvme'].get('reason')),
+                         ('FAIL', 'timeout'))
+        self.assertEqual((cases['dmabuf-peer']['result'], cases['dmabuf-peer'].get('reason')),
+                         ('FAIL', 'skipped-after-timeout'))
+        self.assertIn('attach --obj /opt/xdev_ext/nxp_mech.bpf.o', (self.root / 'fake/ctl.calls').read_text())
+
+    def test_a_hung_nvme_reattach_is_bounded(self):
+        started = time.monotonic()
+        console = self.guest(env={'XDEV_EXT_GPU_CASE_LIMIT_S': '2'}, attach_zc_nvme_sleep='60\n')
+        self.assertLess(time.monotonic() - started, 30, 'the guest waited for the re-attach')
+        self.assertIn('\nXDEV_EXT_GPU_PROBLEM case=reattach-nvme reason=timeout limit_s=2\n', console)
+        self.assertEqual(self.verdicts(console)['reattach-nvme']['result'], 'FAIL')
+
+    def test_cleanup_after_a_problem_gets_the_short_limit(self):
+        # After a hung step the CE plan detach and the NVMe re-attach must not
+        # spend a whole case limit each: the main guest still needs time for
+        # its campaign, the unload and poweroff within the QEMU limit.
+        env = {'XDEV_EXT_GPU_CASE_LIMIT_S': '3', 'XDEV_EXT_GPU_CLEANUP_LIMIT_S': '1'}
+        for hang, step in ((dict(ce_d_sleep='60\n', detach_gpu_ce_sleep='60\n'), 'detach-ce-plan'),
+                           (dict(detach_zc_nvme_sleep='60\n', attach_zc_nvme_sleep='60\n'), 'reattach-nvme')):
+            with self.subTest(step=step):
+                console = self.guest(env=env, **hang)
+                self.assertRegex(console, r'(?m)^XDEV_EXT_GPU_PROBLEM case=\S+ reason=timeout limit_s=3$')
+                self.assertRegex(console, rf'(?m)^XDEV_EXT_GPU_PROBLEM case={step} reason=timeout limit_s=1$')
+
+    def test_unload_is_bounded(self):
+        tmp = tempfile.TemporaryDirectory(prefix='gpu-unload-')
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        bin_dir = root / 'bin'
+        for directory in (bin_dir, root / 'tmp', root / 'sys/module/nvidia_uvm/holders',
+                          root / 'sys/module/nvidia'):
+            directory.mkdir(parents=True, exist_ok=True)
+        (root / 'sys/module/nvidia_uvm/refcnt').write_text('1\n')
+        (bin_dir / 'rmmod').write_text('#!/bin/sh\nsleep 60\n')
+        (bin_dir / 'rmmod').chmod(0o755)
+        script = re.sub(r'/(?:sys|proc|tmp)/|/dev/nvidia',
+                        lambda match: str(root) + match.group(0), GPU_GUEST.read_text())
+        started = time.monotonic()
+        run = subprocess.run(['sh', '-c', script, 'xdev_ext_gpu_guest.sh', 'unload'],
+                             capture_output=True, text=True, timeout=60,
+                             env=dict(os.environ, PATH=f'{bin_dir}:/usr/bin:/bin',
+                                      XDEV_EXT_GPU_UNLOAD_LIMIT_S='2'))
+        self.assertLess(time.monotonic() - started, 20, 'unload waited for a blocked rmmod')
+        self.assertEqual(run.returncode, 1, run.stdout + run.stderr)
+        self.assertRegex(run.stdout, r'^XDEV_EXT_GPU_UNLOAD=FAIL module=nvidia_uvm reason=timeout limit_s=2 ')
+
     def test_one_failure_keeps_the_summary_failed(self):
         console = self.guest(caps_out=CAPS_GEFORCE, peer_out=self.REGISTER_EINVAL, peer_rc='1\n',
                              dmesg_out=self.PIN_REFUSED, dmabuf_out=self.NO_DMA_BUF, dmabuf_rc='1\n',
-                             ce_d_out='', ce_d_rc='3\n')
+                             ce_a_out=CE_PASS_VMM.format(chain='a'), ce_d_out='', ce_d_rc='3\n')
         self.assertIn('\nXDEV_EXT_GPU_GUEST=FAIL failed=1 unsupported=2\n', console)
 
 
@@ -398,7 +574,8 @@ CUresult cuDeviceGetAttribute(int *out, int attribute, CUdevice device)
 	(void)device;
 	if (value("FAKE_ATTR_FAIL"))
 		return 1;
-	*out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") : 7;
+	*out = attribute == 116 ? value("FAKE_RDMA") : attribute == 124 ? value("FAKE_DMA_BUF") :
+	       attribute == 102 ? value("FAKE_VMM") : attribute == 103 ? value("FAKE_POSIX_FD") : 7;
 	return 0;
 }
 CUresult cuDevicePrimaryCtxRetain(CUcontext *context, CUdevice device) { (void)device; *context = (void *)1; return 0; }
@@ -451,12 +628,16 @@ class GpuCapsProbe(unittest.TestCase):
                               capture_output=True, text=True, env=env, timeout=30)
 
     def test_reports_cuda_rdma_and_dma_buf_support_and_releases_the_probe_block(self):
-        for rdma, dma_buf, pointer in ((0, 0, 0), (1, 1, 1)):
-            with self.subTest(rdma=rdma, dma_buf=dma_buf, pointer=pointer):
-                run = self.probe(rdma=rdma, dma_buf=dma_buf, pointer_rdma=pointer)
+        # CU_DEVICE_ATTRIBUTE_VIRTUAL_MEMORY_MANAGEMENT_SUPPORTED (102) and
+        # _HANDLE_TYPE_POSIX_FILE_DESCRIPTOR_SUPPORTED (103) back the VMM window.
+        for rdma, dma_buf, pointer, vmm in ((0, 0, 0, 1), (1, 1, 1, 0)):
+            with self.subTest(rdma=rdma, dma_buf=dma_buf, pointer=pointer, vmm=vmm):
+                run = self.probe(rdma=rdma, dma_buf=dma_buf, pointer_rdma=pointer, vmm=vmm,
+                                 posix_fd=vmm)
                 self.assertEqual(run.returncode, 0, run.stderr)
                 self.assertEqual(run.stdout, f'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma={rdma} '
-                                             f'dma_buf={dma_buf} pointer_rdma={pointer}\n')
+                                             f'dma_buf={dma_buf} pointer_rdma={pointer} '
+                                             f'vmm={vmm} posix_fd={vmm}\n')
                 self.assertEqual(run.stderr.split(), ['FAKE', 'free', 'FAKE', 'release'])
 
     def test_cuda_failures_never_print_a_value_and_still_clean_up(self):
@@ -466,9 +647,9 @@ class GpuCapsProbe(unittest.TestCase):
                 ('attr_fail', 1, '', []),
                 ('alloc_fail', 1, '', ['FAKE', 'release']),
                 ('pointer_fail', 0, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
-                                    'pointer_rdma=-1\n', ['FAKE', 'free', 'FAKE', 'release']),
+                                    'pointer_rdma=-1 vmm=0 posix_fd=0\n', ['FAKE', 'free', 'FAKE', 'release']),
                 ('free_fail', 1, 'XDEV_EXT_GPU_CAPS bdf=0000:01:00.0 gpu_direct_rdma=0 dma_buf=0 '
-                                 'pointer_rdma=0\n', ['FAKE', 'free', 'FAKE', 'release'])):
+                                 'pointer_rdma=0 vmm=0 posix_fd=0\n', ['FAKE', 'free', 'FAKE', 'release'])):
             with self.subTest(knob):
                 run = self.probe(**{knob: 1})
                 self.assertEqual(run.returncode, code, run.stdout + run.stderr)

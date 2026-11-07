@@ -19,6 +19,9 @@
 #ifndef HARNESS_NV_UNBIND_STATUS
 #define HARNESS_NV_UNBIND_STATUS 0
 #endif
+#ifndef HARNESS_EXPORT
+#define HARNESS_EXPORT 0
+#endif
 
 static struct {
 	int lock_held;
@@ -31,8 +34,9 @@ static struct {
 	NvU8 rm_uuid[16];
 	char order[256];
 	void *outer;
-	unsigned int lookups, wrong_gpu;
+	unsigned int lookups, wrong_gpu, dups;
 	NvU64 allocation_offset;
+	int sysmem;
 } T;
 static void order(const char *s)
 {
@@ -51,7 +55,8 @@ static void order(const char *s)
 #define GPU_UUID_LEN 16
 #define ct_assert(c) _Static_assert(c, #c)
 typedef struct OBJGPU { int id; } OBJGPU;
-typedef struct MEMORY_DESCRIPTOR { int id; } MEMORY_DESCRIPTOR;
+static OBJGPU gpu0 = { 0 }, gpu1 = { 1 };
+typedef struct MEMORY_DESCRIPTOR { int id; OBJGPU *pGpu; } MEMORY_DESCRIPTOR;
 typedef struct { MEMORY_DESCRIPTOR *pMemDesc; } Memory;
 typedef struct { int id; } RsClient;
 typedef struct RM_API RM_API;
@@ -71,6 +76,7 @@ static NV_STATUS stub_dup(RM_API *api, NvHandle client, NvHandle parent,
 	NvHandle *out, NvHandle src_client, NvHandle src, NvU32 flags)
 {
 	(void)api; (void)client; (void)parent; (void)src_client; (void)src; (void)flags;
+	T.dups++;
 	*out = 0xd1;
 	return NV_OK;
 }
@@ -79,7 +85,7 @@ static RM_API *rmapiGetInterface(int which) { (void)which; return &stub_api; }
 static int rmapiLockIsOwner(void) { return T.lock_held; }
 static struct { int unused; } g_resServ;
 static RsClient stub_client;
-static MEMORY_DESCRIPTOR md_bound, md_other;
+static MEMORY_DESCRIPTOR md_bound = { 1, &gpu0 }, md_other = { 2, &gpu0 };
 static Memory stub_memory = { &md_bound };
 static NV_STATUS serverGetClientUnderLock(void *srv, NvHandle h, RsClient **c)
 {
@@ -99,7 +105,6 @@ static NV_STATUS memGetByHandle(RsClient *c, NvHandle h, Memory **m)
 
 #include "nv_xdev_ext_vidmem_owner_types.h"   /* P2P_UMEM_VIDMEM_BINDING (p2p.h) */
 
-static OBJGPU gpu0 = { 0 }, gpu1 = { 1 };
 typedef struct { NvHandle hClient; } ThirdPartyP2P;
 typedef struct { int unused; } CLI_THIRD_PARTY_P2P_VASPACE_INFO;
 typedef struct { NvHandle hMemory; } CLI_THIRD_PARTY_P2P_VIDMEM_INFO;
@@ -128,7 +133,7 @@ static NvBool gpuIsApmFeatureEnabled(OBJGPU *g) { (void)g; return NV_FALSE; }
 static NV_STATUS CliGetThirdPartyP2PVidmemInfoFromAddress(ThirdPartyP2P *p,
 	NvU64 va, NvU64 len, NvU64 *off, CLI_THIRD_PARTY_P2P_VIDMEM_INFO **v)
 { (void)p; (void)va; (void)len; *off = T.allocation_offset; *v = &vidmem_info; return NV_OK; }
-static int memdescGetAddressSpace(MEMORY_DESCRIPTOR *m) { (void)m; return ADDR_FBMEM; }
+static int memdescGetAddressSpace(MEMORY_DESCRIPTOR *m) { (void)m; return T.sysmem ? 1 : ADDR_FBMEM; }
 static NvU64 memdescGetSize(MEMORY_DESCRIPTOR *m) { (void)m; return 1 << 22; }
 static NvU64 memdescGetPteAdjust(MEMORY_DESCRIPTOR *m) { (void)m; return 0; }
 static NvU64 memdescGetPageSize(MEMORY_DESCRIPTOR *m, int at) { (void)m; (void)at; return 65536; }
@@ -139,6 +144,37 @@ static void *portMemAllocNonPaged(size_t size)
 	T.inner_allocs++;
 	return calloc(1, size);
 }
+
+/* Exported allocation: RmImportObject (rmobjexportimport.c) and the
+ * export fd's RM file private (nv.h, exact bytes in the types header). */
+typedef NvHandle RmObjExportHandle;
+static struct {
+	unsigned int calls;
+	NvHandle client, parent[4], handle;
+	NV_STATUS status, device_status;
+	int object_type_requested;
+} I;
+static NV_STATUS RmImportObject(NvHandle hDstClient, NvHandle hDstParent,
+	NvHandle *phDstObject, RmObjExportHandle hSrcObject, NvU8 *pObjectType)
+{
+	if (I.calls < 4)
+		I.parent[I.calls] = hDstParent;
+	I.calls++;
+	I.client = hDstClient;
+	I.handle = hSrcObject;
+	if (pObjectType != NULL)
+		I.object_type_requested = 1;
+	if (!T.lock_held)
+		T.assert_fail++;
+	if (hDstParent == manager.hDevice && I.device_status != NV_OK)
+		return I.device_status;
+	if (I.status != NV_OK)
+		return I.status;
+	*phDstObject = 0xd2;
+	order("import");
+	return NV_OK;
+}
+static NvU32 gpuGetDeviceInstance(OBJGPU *g) { return (NvU32)g->id; }
 
 /* osapi bridge environment */
 typedef struct { int unused; } nvidia_stack_t;
@@ -207,6 +243,7 @@ static int nvidia_dev_get_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
 		return -ENODEV;
 	T.dev_gets++;
 	T.dev_refs++;
+	order("dev_get");
 	return 0;
 }
 static void nvidia_dev_put_uuid(const NvU8 *uuid, nvidia_stack_t *sp)
@@ -467,6 +504,257 @@ static void case_unbind_stack_fail(void)
 	      "G14 control: stack failure must retain everything");
 }
 
+/* The third-party P2P window keeps its own client dup. */
+static void case_bind_third_party_dup(void)
+{
+	nv_p2p_vidmem_binding_t *b = bind_ok();
+	REQUIRE(b, "bind");
+	CHECK(T.dups == 1 && I.calls == 0 && T.lookups == 1,
+	      "third-party window: dups=%u imports=%u lookups=%u", T.dups, I.calls, T.lookups);
+	CHECK(NV_UNBIND(b) == NV_OK && T.frees == 1, "unbind");
+}
+
+#if HARNESS_EXPORT
+/* A CUDA POSIX-FD export: the fd's RM file private holds one export handle. */
+static NvHandle export_handles[2] = { 0xe5, 0 };
+static nv_file_private_t export_fp = { .handles = export_handles, .maxHandles = 1 };
+
+static void case_export_rm_bind(void)
+{
+	P2P_UMEM_VIDMEM_BINDING *b = NULL;
+	T.lock_held = 1;
+	CHECK(RmP2PUmemVidmemBindExport(0xe5, 0x10000, 1 << 20, &gpu0, &b, &inner_residual) == NV_OK,
+	      "exported allocation bind");
+	REQUIRE(b, "no binding");
+	CHECK(I.calls == 1 && I.client == manager.hClient && I.parent[0] == manager.hDevice &&
+	      I.handle == 0xe5, "import calls=%u client=0x%x parent=0x%x handle=0x%x",
+	      I.calls, I.client, I.parent[0], I.handle);
+	CHECK(!I.object_type_requested, "import asked RM to classify the object");
+	CHECK(T.dups == 0 && T.lookups == 0,
+	      "exported bind used the third-party P2P lookup (%u) or a client dup (%u)",
+	      T.lookups, T.dups);
+	CHECK(b->pGpu == &gpu0 && b->hClient == manager.hClient && b->hMemory == 0xd2 &&
+	      b->pMemDesc == &md_bound && b->offset == 0x10000 && b->length == (1 << 20) &&
+	      b->segSize == 65536 && !inner_residual,
+	      "binding gpu=%d client=0x%x memory=0x%x offset=0x%llx length=0x%llx seg=%u",
+	      b->pGpu ? b->pGpu->id : -1, b->hClient, b->hMemory,
+	      (unsigned long long)b->offset, (unsigned long long)b->length, b->segSize);
+	CHECK(RM_UNBIND(b) == NV_OK && T.frees == 1 && T.inner_frees == 1,
+	      "unbind drops the imported dup once (free=%u inner=%u)", T.frees, T.inner_frees);
+}
+
+static void case_export_rm_parent_retry(void)
+{
+	P2P_UMEM_VIDMEM_BINDING *b = NULL;
+	T.lock_held = 1;
+	I.device_status = NV_ERR_INVALID_OBJECT_PARENT;
+	CHECK(RmP2PUmemVidmemBindExport(0xe5, 0, 1 << 20, &gpu0, &b, &inner_residual) == NV_OK && b,
+	      "subdevice retry");
+	CHECK(I.calls == 2 && I.parent[0] == manager.hDevice && I.parent[1] == manager.hSubdevice,
+	      "import parents 0x%x 0x%x (calls %u)", I.parent[0], I.parent[1], I.calls);
+	if (b)
+		CHECK(RM_UNBIND(b) == NV_OK, "unbind");
+}
+
+static void case_export_rm_import_fail(void)
+{
+	P2P_UMEM_VIDMEM_BINDING *b = (void *)1;
+	T.lock_held = 1;
+	I.status = NV_ERR_INVALID_ARGUMENT;
+	CHECK(RmP2PUmemVidmemBindExport(0xe5, 0, 1 << 20, &gpu0, &b, &inner_residual) ==
+	      NV_ERR_INVALID_ARGUMENT && !b && !inner_residual, "refused import");
+	CHECK(T.inner_allocs == 1 && T.inner_frees == 1 && T.frees == 0,
+	      "refused import: allocs=%u frees=%u rm_frees=%u", T.inner_allocs, T.inner_frees, T.frees);
+}
+
+/* Each rejection after the dup drops it again; Free failure keeps the owner. */
+static void case_export_rm_reject(void)
+{
+	static const struct { const char *what; int sysmem, other_gpu; NvU64 off, len; NV_STATUS st; } r[] = {
+		{ "memory of another GPU", 0, 1, 0, 1 << 20, NV_ERR_INVALID_DEVICE },
+		{ "system memory", 1, 0, 0, 1 << 20, NV_ERR_NOT_SUPPORTED },
+		{ "window past the allocation", 0, 0, (1 << 22) - 4096, 8192, NV_ERR_INVALID_ARGUMENT },
+	};
+	unsigned int i;
+	T.lock_held = 1;
+	for (i = 0; i < 3; i++) {
+		P2P_UMEM_VIDMEM_BINDING *b = (void *)1;
+		unsigned int frees = T.frees, inner = T.inner_frees;
+		T.sysmem = r[i].sysmem;
+		md_bound.pGpu = r[i].other_gpu ? &gpu1 : &gpu0;
+		CHECK(RmP2PUmemVidmemBindExport(0xe5, r[i].off, r[i].len, &gpu0, &b, &inner_residual) ==
+		      r[i].st && !b && !inner_residual, "%s accepted or wrong status", r[i].what);
+		CHECK(T.frees == frees + 1 && T.inner_frees == inner + 1,
+		      "%s: imported dup not dropped once", r[i].what);
+	}
+	T.sysmem = 0;
+	md_bound.pGpu = &gpu0;
+	T.free_status = NV_ERR_INVALID_OBJECT;
+	{
+		P2P_UMEM_VIDMEM_BINDING *b = (void *)1;
+		CHECK(RmP2PUmemVidmemBindExport(0xe5, (1 << 22) - 4096, 8192, &gpu0, &b, &inner_residual) ==
+		      NV_ERR_INVALID_ARGUMENT && !b, "free failure status");
+		CHECK(inner_residual && inner_residual->hMemory == 0xd2 && inner_residual->hClient == manager.hClient,
+		      "free failure lost the residual dup owner");
+		CHECK(T.inner_frees == 3, "binding freed although its dup could not be");
+	}
+}
+
+static void case_export_rm_args(void)
+{
+	static const struct { NvHandle h; NvU64 off, len; int gpu; NV_STATUS st; } a[] = {
+		{ 0, 0, 4096, 1, NV_ERR_INVALID_OBJECT_HANDLE },
+		{ 0xe5, 0, 0, 1, NV_ERR_INVALID_ARGUMENT },
+		{ 0xe5, UINT64_MAX - 4095, 8192, 1, NV_ERR_INVALID_ARGUMENT },
+		{ 0xe5, 0, 4096, 0, NV_ERR_INVALID_DEVICE },
+	};
+	unsigned int i;
+	P2P_UMEM_VIDMEM_BINDING *b = (void *)1;
+	CHECK(RmP2PUmemVidmemBindExport(0xe5, 0, 4096, &gpu0, &b, &inner_residual) ==
+	      NV_ERR_INVALID_LOCK_STATE && !b, "bind without the API lock");
+	T.lock_held = 1;
+	for (i = 0; i < 4; i++) {
+		b = (void *)1;
+		CHECK(RmP2PUmemVidmemBindExport(a[i].h, a[i].off, a[i].len, a[i].gpu ? &gpu0 : NULL, &b,
+						&inner_residual) == a[i].st && !b, "argument case %u", i);
+	}
+	CHECK(I.calls == 0 && T.inner_allocs == 0, "invalid arguments reached import (%u) or "
+	      "allocation (%u)", I.calls, T.inner_allocs);
+}
+
+static NV_STATUS bridge_export(nv_file_private_t *fp, void **inner, NvU8 *uuid, NvU32 *seg)
+{
+	return rm_p2p_umem_vidmem_bind_export(&stack_storage, fp, 0x10000, 1 << 20, opened_uuid,
+					      uuid, seg, inner, &bridge_residual);
+}
+
+static void case_export_bridge(void)
+{
+	P2P_UMEM_VIDMEM_BINDING *inner = NULL;
+	NvU8 uuid[16] = { 0 };
+	NvU32 seg = 0;
+	memcpy(T.rm_uuid, opened_uuid, 16);
+	CHECK(bridge_export(&export_fp, (void **)&inner, uuid, &seg) == NV_OK && inner, "bridge bind");
+	CHECK(I.handle == 0xe5 && I.calls == 1, "bridge imported 0x%x (%u calls)", I.handle, I.calls);
+	CHECK(!memcmp(uuid, opened_uuid, 16) && seg == 65536, "uuid/seg not reported");
+	CHECK(T.lock_held == 0 && T.lock_acquires == 1 && T.lock_releases == 1, "lock imbalance");
+	CHECK(rm_p2p_umem_vidmem_unbind(&stack_storage, inner) == NV_OK && T.frees == 1, "unbind");
+}
+
+static void case_export_bridge_handles(void)
+{
+	static NvHandle two[2] = { 0, 0xe6 }, both[2] = { 0xe5, 0xe6 }, none[1] = { 0 };
+	nv_file_private_t fp;
+	void *inner = (void *)1;
+	NvU8 uuid[16];
+	NvU32 seg;
+	memcpy(T.rm_uuid, opened_uuid, 16);
+	fp = (nv_file_private_t){ .handles = NULL, .maxHandles = 0 };
+	CHECK(bridge_export(&fp, &inner, uuid, &seg) == NV_ERR_INVALID_OBJECT_HANDLE && !inner,
+	      "a control fd without exports was accepted");
+	fp = (nv_file_private_t){ .handles = none, .maxHandles = 1 };
+	inner = (void *)1;
+	CHECK(bridge_export(&fp, &inner, uuid, &seg) == NV_ERR_INVALID_OBJECT_HANDLE && !inner,
+	      "an emptied export slot was accepted");
+	fp = (nv_file_private_t){ .handles = both, .maxHandles = 2 };
+	inner = (void *)1;
+	CHECK(bridge_export(&fp, &inner, uuid, &seg) == NV_ERR_NOT_SUPPORTED && !inner,
+	      "an fd exporting two objects names no single allocation");
+	CHECK(I.calls == 0, "ambiguous export fd reached import");
+	fp = (nv_file_private_t){ .handles = two, .maxHandles = 2 };
+	inner = NULL;
+	CHECK(bridge_export(&fp, &inner, uuid, &seg) == NV_OK && inner && I.handle == 0xe6,
+	      "the only exported object was not used (0x%x)", I.handle);
+	if (inner)
+		CHECK(rm_p2p_umem_vidmem_unbind(&stack_storage, inner) == NV_OK, "unbind");
+}
+
+static void case_export_bridge_device(void)
+{
+	nv_file_private_t fp = export_fp;
+	void *inner = (void *)1;
+	NvU8 uuid[16];
+	NvU32 seg;
+	fp.deviceInstance = 1;
+	memcpy(T.rm_uuid, opened_uuid, 16);
+	CHECK(bridge_export(&fp, &inner, uuid, &seg) == NV_ERR_INVALID_DEVICE && !inner,
+	      "export of another GPU's device accepted");
+	CHECK(I.calls == 0 && T.inner_allocs == 0, "wrong device reached import");
+	CHECK(T.lock_held == 0 && T.lock_acquires == T.lock_releases, "lock imbalance");
+}
+
+static void case_export_bridge_lock_fail(void)
+{
+	void *inner = (void *)1;
+	NvU8 uuid[16];
+	NvU32 seg;
+	T.lock_status = NV_ERR_INVALID_LOCK_STATE;
+	CHECK(bridge_export(&export_fp, &inner, uuid, &seg) == NV_ERR_INVALID_LOCK_STATE && !inner,
+	      "lock failure");
+	CHECK(I.calls == 0 && T.inner_allocs == 0, "lock failure reached import");
+}
+
+static void case_export_bridge_uuid_null_free_fail(void)
+{
+	void *inner = (void *)1;
+	NvU8 uuid[16];
+	NvU32 seg;
+	T.uuid_null = 1;
+	T.free_status = NV_ERR_INVALID_OBJECT;
+	CHECK(bridge_export(&export_fp, &inner, uuid, &seg) == NV_ERR_GPU_UUID_NOT_FOUND && !inner,
+	      "uuid lookup failure");
+	CHECK(bridge_residual != NULL && T.inner_frees == 0,
+	      "UUID failure lost or freed the retained imported dup");
+	CHECK(T.lock_held == 0, "lock left held");
+}
+
+static void case_export_nv_bind(void)
+{
+	nv_p2p_vidmem_binding_t *b = NULL;
+	NvU32 seg = 0;
+	memcpy(T.rm_uuid, opened_uuid, 16);
+	CHECK(nv_p2p_vidmem_bind_export(opened_uuid, &export_fp, 0x10000, 1 << 20, &b, &seg,
+					&outer_residual) == NV_OK && b && seg == 65536, "outer export bind");
+	REQUIRE(b, "bind");
+	{
+		const char *g = strstr(T.order, "dev_get"), *i = strstr(T.order, "import");
+		CHECK(g && i && g < i, "device reference must precede the import: '%s'", T.order);
+	}
+	CHECK(T.dev_refs == 1 && T.dups == 0 && T.lookups == 0, "refs=%d dups=%u lookups=%u",
+	      T.dev_refs, T.dups, T.lookups);
+	T.order[0] = 0;
+	CHECK(NV_UNBIND(b) == NV_OK, "unbind");
+	{
+		const char *f = strstr(T.order, "rm_free"), *p = strstr(T.order, "dev_put"),
+			   *o = strstr(T.order, "outer_free");
+		CHECK(f && p && o && f < p && p < o, "order must be rm_free < dev_put < outer_free: '%s'",
+		      T.order);
+	}
+	CHECK(T.dev_refs == 0 && T.assert_fail == 0, "refs=%d asserts=%u", T.dev_refs, T.assert_fail);
+}
+
+static void case_export_nv_uuid_mismatch(void)
+{
+	nv_p2p_vidmem_binding_t *b = (void *)1;
+	static const NvU8 other[16] = { 0x99 };
+	memcpy(T.rm_uuid, other, 16);
+	CHECK(nv_p2p_vidmem_bind_export(opened_uuid, &export_fp, 0, 1 << 20, &b, NULL,
+					&outer_residual) == NV_ERR_INVALID_DEVICE && !b && !outer_residual,
+	      "mismatched GPU accepted");
+	CHECK(T.frees == 1 && T.inner_frees == 1 && T.dev_refs == 0 && T.outer_frees == 1,
+	      "mismatch cleanup free=%u inner=%u refs=%d outer=%u", T.frees, T.inner_frees,
+	      T.dev_refs, T.outer_frees);
+}
+
+static void case_export_nv_args(void)
+{
+	nv_p2p_vidmem_binding_t *b = (void *)1;
+	CHECK(nv_p2p_vidmem_bind_export(opened_uuid, NULL, 0, 4096, &b, NULL, &outer_residual) ==
+	      NV_ERR_INVALID_ARGUMENT && !b, "no export file private");
+	CHECK(T.outer_allocs == 0 && T.dev_gets == 0 && I.calls == 0, "invalid call took resources");
+}
+#endif /* HARNESS_EXPORT */
+
 struct named_case { const char *name; void (*fn)(void); };
 static const struct named_case cases[] = {
 	{ "resolve", case_resolve },
@@ -481,6 +769,22 @@ static const struct named_case cases[] = {
 	{ "bridge-uuid-null-free-fail", case_bridge_uuid_null_free_fail },
 	{ "unbind-success-order", case_unbind_success_order },
 	{ "unbind-stack-fail", case_unbind_stack_fail },
+	{ "bind-third-party-dup", case_bind_third_party_dup },
+#if HARNESS_EXPORT
+	{ "export-rm-bind", case_export_rm_bind },
+	{ "export-rm-parent-retry", case_export_rm_parent_retry },
+	{ "export-rm-import-fail", case_export_rm_import_fail },
+	{ "export-rm-reject", case_export_rm_reject },
+	{ "export-rm-args", case_export_rm_args },
+	{ "export-bridge", case_export_bridge },
+	{ "export-bridge-handles", case_export_bridge_handles },
+	{ "export-bridge-device", case_export_bridge_device },
+	{ "export-bridge-lock-fail", case_export_bridge_lock_fail },
+	{ "export-bridge-uuid-null-free-fail", case_export_bridge_uuid_null_free_fail },
+	{ "export-nv-bind", case_export_nv_bind },
+	{ "export-nv-uuid-mismatch", case_export_nv_uuid_mismatch },
+	{ "export-nv-args", case_export_nv_args },
+#endif
 };
 
 int main(int argc, char **argv)

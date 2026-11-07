@@ -98,6 +98,14 @@ static int fake_ioctl(int fd, unsigned long request, void *argument)
 		}
 		break;
 	}
+	case XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY: {
+		struct xdev_ext_nv_ce_attach_memory *attach =
+			(void *)(uintptr_t)xfer->ptr;
+
+		EXPECT_EQ(attach->status, UINT32_MAX);
+		attach->status = fake.reply == FAKE_NATIVE_ERROR ? 0x63U : 0U;
+		break;
+	}
 	default:
 		return -1;
 	}
@@ -311,9 +319,67 @@ static void test_bounded_batch_requires_valid_items_and_reports_prefix(void)
 	EXPECT_EQ(fake.calls, 0);
 }
 
+/* A CE stage fd carries the CUDA POSIX-FD export of its window allocation. */
+static void test_ce_attach_memory(void)
+{
+	struct xdev_ext_nv_ce_attach_memory attach = {
+		.mem_fd = 38,
+		.gpu_va = 0x7a4879200000ULL,
+		.size = 2 << 20,
+	};
+
+	EXPECT_EQ(XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY, 223);
+	EXPECT_EQ(sizeof(struct xdev_ext_nv_ce_attach_memory), 32);
+	EXPECT_EQ(offsetof(struct xdev_ext_nv_ce_attach_memory, flags), 4);
+	EXPECT_EQ(offsetof(struct xdev_ext_nv_ce_attach_memory, gpu_va), 8);
+	EXPECT_EQ(offsetof(struct xdev_ext_nv_ce_attach_memory, size), 16);
+	EXPECT_EQ(offsetof(struct xdev_ext_nv_ce_attach_memory, status), 24);
+	EXPECT_EQ(offsetof(struct xdev_ext_nv_ce_attach_memory, reserved), 28);
+
+	reset_fake(FAKE_OK);
+	EXPECT_EQ(xdev_ext_nv_ce_attach_memory_with(17, &attach, fake_ioctl), 0);
+	EXPECT_EQ(fake.calls, 1);
+	EXPECT_EQ(fake.request, XDEV_EXT_NV_IOCTL_XFER_CMD);
+	EXPECT_EQ(fake.command, XDEV_EXT_NV_ESC_CE_ATTACH_MEMORY);
+	EXPECT_EQ(fake.size, sizeof(attach));
+	EXPECT_EQ(attach.status, 0);
+
+	reset_fake(FAKE_NATIVE_ERROR);
+	EXPECT_EQ(xdev_ext_nv_ce_attach_memory_with(17, &attach, fake_ioctl), -1);
+	EXPECT_EQ(errno, EIO);
+	EXPECT_EQ(attach.status, 0x63U);
+
+	reset_fake(FAKE_SYSCALL_ERROR);
+	EXPECT_EQ(xdev_ext_nv_ce_attach_memory_with(17, &attach, fake_ioctl), -1);
+	EXPECT_EQ(errno, ENOTTY);
+
+	/* Refused before the driver: no export, no range, flags or reserved set. */
+	{
+		struct xdev_ext_nv_ce_attach_memory bad[4];
+		unsigned int i;
+
+		for (i = 0; i < 4; i++)
+			bad[i] = attach;
+		bad[0].mem_fd = -1;
+		bad[1].size = 0;
+		bad[2].flags = 1;
+		bad[3].reserved = 1;
+		for (i = 0; i < 4; i++) {
+			reset_fake(FAKE_OK);
+			EXPECT_EQ(xdev_ext_nv_ce_attach_memory_with(17, &bad[i], fake_ioctl), -1);
+			EXPECT_EQ(errno, EINVAL);
+			EXPECT_EQ(fake.calls, 0);
+		}
+	}
+	reset_fake(FAKE_OK);
+	EXPECT_EQ(xdev_ext_nv_ce_attach_memory_with(17, NULL, fake_ioctl), -1);
+	EXPECT_EQ(fake.calls, 0);
+}
+
 int main(void)
 {
 	test_abi_layout();
+	test_ce_attach_memory();
 	test_pin_requires_native_success_and_handle();
 	test_dma_requires_native_success();
 	test_unpin_uses_full_driver_layout();

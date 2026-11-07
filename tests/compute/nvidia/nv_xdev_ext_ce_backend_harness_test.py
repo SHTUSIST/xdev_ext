@@ -134,6 +134,10 @@ class BackendHarness(unittest.TestCase):
     def test_g2_bind_maps_once_and_passes_iovas(self):
         self.run_cases(("bind-unbind-clean", "iova-bind", "iova-segments"))
 
+    def test_window_from_attached_cuda_export(self):
+        self.run_cases(("bind-attached-window", "bind-attached-outside",
+                        "bind-attached-failure"))
+
     def test_g2_mapping_failures_unwind(self):
         self.run_cases(("iova-map-fail", "iova-rm-bind-fail"), ("event+iova", "poll+iova"))
 
