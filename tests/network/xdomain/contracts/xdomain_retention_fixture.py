@@ -6,6 +6,12 @@ def retention_unit(kernel):
     return (no_includes((kernel/'include/linux/xdev_ext_requester_retention.h').read_text())+
             no_includes((kernel/'io_uring/family/xdev_ext_requester_retention.c').read_text()))
 
+def backing_unit(kernel):
+    """One real coherent owner per standalone TU; old list name is observer-only."""
+    return (no_includes((kernel/'include/linux/xdev_ext_requester_backing.h').read_text())+
+            no_includes((kernel/'io_uring/family/xdev_ext_requester_backing.c').read_text())+
+            '#define xdev_ext_xd_ctl_quarantine xdev_ext_requester_backing_retained\n')
+
 def descriptor_unit(kernel):
     # The overlay omits unchanged upstream headers. Explicitly use the prepared
     # locked-upstream source, never a hand-written descriptor byte formula.
