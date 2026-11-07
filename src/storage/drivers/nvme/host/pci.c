@@ -48,20 +48,17 @@
 #define NVME_SMALL_POOL_SIZE	256
 
 /*
- * These can be higher, but we need to ensure that any command doesn't
- * require an sg allocation that needs more than a page of data.
+ * Keep the maximum command size within the PRP descriptor array capacity.
  */
 #define NVME_MAX_KB_SZ	8192
 #define NVME_MAX_NR_DESCRIPTORS	5
 
 /*
- * For data SGLs we support a single descriptors worth of SGL entries, but for
- * now we also limit it to avoid an allocation larger than PAGE_SIZE for the
- * scatterlist.
+ * Limit data SGL entries to one controller page; the input scatterlist
+ * mempool is sized for the same number of entries.
  */
 #define NVME_MAX_SEGS \
-	min(NVME_CTRL_PAGE_SIZE / sizeof(struct nvme_sgl_desc), \
-	    (PAGE_SIZE / sizeof(struct scatterlist)))
+	(NVME_CTRL_PAGE_SIZE / sizeof(struct nvme_sgl_desc))
 
 /*
  * For metadata SGLs, only the small descriptor is supported, and the first
@@ -3892,8 +3889,7 @@ static struct nvme_dev *nvme_pci_alloc_dev(struct pci_dev *pdev,
 	dma_set_max_seg_size(&pdev->dev, 0xffffffff);
 
 	/*
-	 * Limit the max command size to prevent iod->sg allocations going
-	 * over a single page.
+	 * Bound command bytes by the PRP descriptor capacity and DMA mapping limit.
 	 */
 	dev->ctrl.max_hw_sectors = min_t(u32,
 		NVME_MAX_KB_SZ << 1, dma_opt_mapping_size(&pdev->dev) >> 9);
