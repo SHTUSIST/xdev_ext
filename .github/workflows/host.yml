@@ -270,6 +270,10 @@ jobs:
       - name: Native storage member hook and worker contracts
         working-directory: .
         run: python3 tests/storage/native_member_7b/verify.py --source-root "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/storage-native-member-7b"
+      - name: Native NVMe uring retry and completion ownership
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: python3 tests/storage/nvme/uring_lifecycle/run.py --source-root "$GITHUB_WORKSPACE" --out "$RUNNER_TEMP/nvme-uring-lifecycle" --mutations
       - name: Storage typed windows and descriptor schema
         working-directory: .
         run: bash tests/storage/family_window_schema/run.sh "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-schema" new

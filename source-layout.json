@@ -9227,6 +9227,18 @@
       "native_path": "tools/testing/selftests/nvme_xdev_ext/peer_bind_authorization_test.py"
     },
     {
+      "source": "tests/storage/nvme/uring_lifecycle/README.md",
+      "logical_path": "tests/storage/nvme/uring_lifecycle/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/uring_lifecycle/host.c.in",
+      "logical_path": "tests/storage/nvme/uring_lifecycle/host.c.in"
+    },
+    {
+      "source": "tests/storage/nvme/uring_lifecycle/run.py",
+      "logical_path": "tests/storage/nvme/uring_lifecycle/run.py"
+    },
+    {
       "source": "tests/storage/nvme/window_handle/README.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/README.md"

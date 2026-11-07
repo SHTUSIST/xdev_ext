@@ -1,0 +1,489 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/*
+ * External kernel API boundary for the complete production functions inserted
+ * at the markers below. No real io_uring scheduler, block queue, BPF VM or DMA.
+ * Kernel import/map calls are controlled; production issue/unwind/completion
+ * and policy-token consumption are kept verbatim.
+ */
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/uio.h>
+#include <linux/types.h>
+#include "include/linux/nvme_xdev_ext_passthru.h"
+#include "include/linux/xdev_ext_binding.h"
+#include "include/uapi/linux/io_uring.h"
+
+typedef __u8 u8; typedef __u16 u16; typedef __u32 u32; typedef __u64 u64;
+typedef unsigned blk_opf_t;
+typedef unsigned blk_mq_req_flags_t;
+typedef int blk_status_t;
+typedef int gfp_t;
+typedef unsigned long atomic64_t;
+enum rq_end_io_ret { RQ_END_IO_NONE, RQ_END_IO_FREE };
+#define EIOCBQUEUED 529
+#define READ_ONCE(x) (x)
+#define WRITE_ONCE(x, v) ((x) = (v))
+#define xchg(p, v) __atomic_exchange_n((p), (v), __ATOMIC_SEQ_CST)
+#define cpu_to_le32(v) ((u32)(v))
+#define le32_to_cpu(v) ((u32)(v))
+#define le64_to_cpu(v) ((u64)(v))
+#define ERR_PTR(v) ((void *)(intptr_t)(v))
+#define PTR_ERR(v) ((int)(intptr_t)(v))
+#define IS_ERR(v) ((uintptr_t)(v) >= (uintptr_t)-4095)
+#define GFP_NOWAIT 1
+#define GFP_KERNEL 2
+#define REQ_ALLOC_CACHE 1U
+#define REQ_NOWAIT 2U
+#define REQ_POLLED 4U
+#define BLK_MQ_REQ_NOWAIT 1U
+#define IO_URING_F_NONBLOCK 1U
+#define IO_URING_F_IOPOLL 2U
+#define IO_URING_F_TASK_DEAD 4U
+#define IO_URING_F_COMPLETE_DEFER 8U
+#define REQ_F_FIXED_FILE 1U
+#define FMODE_WRITE 2U
+#define READ 0
+#define WRITE 1
+#define NVME_IOCTL_VEC 1U
+#define NVME_REQ_CANCELLED 1U
+#define io_uring_cmd_to_pdu(c, t) ((t *)(c)->pdu)
+#define io_uring_sqe_cmd(s) ((const void *)(s)->cmd)
+#define cmd_to_io_kiocb(c) (&(c)->kiocb)
+#define u64_to_user_ptr(v) ((void *)(uintptr_t)(v))
+#define msecs_to_jiffies(v) (v)
+
+static const char *case_name;
+static void check_at(bool ok, const char *name, int line)
+{
+	if (!ok) {
+		fprintf(stderr, "FAIL %s: %s (fixture line %d)\n", case_name, name, line);
+		exit(1);
+	}
+}
+#define CHECK(v, name) check_at(!!(v), name, __LINE__)
+static bool warn_once(bool value)
+{
+	CHECK(!value, "unexpected WARN");
+	return value;
+}
+#define WARN_ON_ONCE(v) warn_once(!!(v))
+
+struct iov_iter { size_t count; u64 snapshot; };
+struct bio { unsigned live; };
+struct request_queue { int unused; };
+struct gendisk { int unused; };
+struct nvme_ns_head { int unused; };
+struct nvme_ctrl { struct request_queue *admin_q; };
+struct nvme_ns { struct request_queue *queue; };
+struct file { unsigned f_mode; };
+struct io_kiocb { unsigned flags; };
+struct io_uring_cmd_data { void *op_data; };
+struct io_uring_cmd {
+	struct file *file;
+	const struct io_uring_sqe *sqe;
+	unsigned flags;
+	struct io_kiocb kiocb;
+	struct io_uring_cmd_data data;
+	u64 pdu[4];
+};
+struct nvme_command {
+	struct {
+		u8 opcode, flags; u16 command_id; u32 nsid, cdw2[2];
+		u64 metadata;
+		struct { u64 prp1, prp2; } dptr;
+		u32 cdw10, cdw11, cdw12, cdw13, cdw14, cdw15;
+	} common;
+};
+_Static_assert(sizeof(struct nvme_command) == 64, "boundary command layout");
+struct request {
+	struct bio *bio;
+	struct nvme_command command;
+	struct { unsigned flags, status; union { u64 u64; } result;
+		 struct nvme_command *cmd; } nvme;
+	unsigned timeout;
+	void *end_io_data;
+	enum rq_end_io_ret (*end_io)(struct request *, blk_status_t);
+};
+#define nvme_req(r) (&(r)->nvme)
+struct xdev_ext_mech_stage { unsigned refs; };
+
+/* PRODUCTION_TYPES */
+
+static struct {
+	unsigned imports, alloc_calls, allocated, freed, maps, unmapped;
+	unsigned dispatch, complete, pins, unpins, refs, submitted, done, scheduled;
+	int alloc_error, map_error, dispatch_error, final_error;
+	unsigned alloc_failures, map_failures;
+	bool terminal, immediate_task;
+	int done_status;
+	unsigned done_flags;
+	u64 user_vector;
+	struct request *pending;
+	struct io_uring_cmd *task;
+	void (*task_cb)(struct io_uring_cmd *, unsigned);
+} observed;
+
+static struct request_queue queue;
+static struct nvme_ns_head namespace_head;
+static struct gendisk disk;
+static struct nvme_ctrl ctrl = { .admin_q = &queue };
+static struct nvme_ns ns = { .queue = &queue };
+static struct file file = { .f_mode = FMODE_WRITE };
+static int xdev_ext_binding_registry;
+static atomic64_t nvme_xdev_ext_policy_errors;
+static const struct xdev_ext_binding_ops policy = {
+	.abi_version = XDEV_EXT_BINDING_ABI_VERSION,
+	.backend = XDEV_EXT_BINDING_BACKEND_NVME,
+};
+
+static void atomic64_inc(atomic64_t *v) { ++*v; }
+static void *kzalloc(size_t n, gfp_t g) { (void)g; return calloc(1, n); }
+static bool xdev_ext_binding_policy_active(void) { return true; }
+static const struct xdev_ext_binding_ops *xdev_ext_ops_pin(void *registry, unsigned backend)
+{
+	(void)registry;
+	CHECK(backend == XDEV_EXT_BINDING_BACKEND_NVME, "NVMe policy backend");
+	observed.pins++; observed.refs++;
+	return &policy;
+}
+static void xdev_ext_ops_unpin(const struct xdev_ext_binding_ops *ops)
+{
+	CHECK(ops == &policy && observed.refs == 1, "token unpin once");
+	observed.refs--; observed.unpins++;
+}
+static int xdev_ext_binding_invoke(const struct xdev_ext_binding_ops *ops,
+		const struct xdev_ext_binding_ctx_v2 *ctx, bool dispatch,
+		struct xdev_ext_binding_plan *plan)
+{
+	CHECK(ops == &policy && observed.refs == 1, "policy generation remains pinned");
+	if (dispatch) {
+		observed.dispatch++;
+		CHECK(observed.dispatch == 1, "dispatch once");
+		CHECK(ctx->event == XDEV_EXT_BINDING_EVENT_DISPATCH, "dispatch event");
+		plan->action = observed.terminal ? XDEV_EXT_BINDING_ACTION_TERMINAL :
+			XDEV_EXT_BINDING_ACTION_FALLBACK;
+		return observed.dispatch_error;
+	}
+	observed.complete++;
+	CHECK(observed.complete == 1, "policy completion once");
+	CHECK(ctx->event == XDEV_EXT_BINDING_EVENT_COMPLETE, "complete event");
+	CHECK(observed.unmapped == 1, "unmap before policy completion");
+	return 0;
+}
+static struct io_uring_cmd_data *io_uring_cmd_get_async_data(struct io_uring_cmd *cmd)
+{
+	return &cmd->data;
+}
+static int nvme_xdev_ext_capture_identity(struct nvme_ns *namespace,
+	struct nvme_xdev_ext_identity *identity, const struct nvme_ns_head **head,
+	const struct gendisk **out_disk, const struct request_queue **out_queue)
+{
+	CHECK(namespace == &ns, "namespace identity");
+	if (observed.dispatch && observed.final_error)
+		return observed.final_error;
+	*identity = (struct nvme_xdev_ext_identity) {
+		.lba_shift = 9, .nsid = 1, .namespace_ready = 1,
+		.capacity_lbas = 8192, .diskseq = 7,
+	};
+	*head = &namespace_head; *out_disk = &disk; *out_queue = &queue;
+	return 0;
+}
+static bool nvme_validate_passthru_nsid(struct nvme_ctrl *controller,
+	struct nvme_ns *namespace, u32 nsid)
+{
+	(void)controller; (void)namespace; return nsid == 1;
+}
+static bool nvme_cmd_allowed(struct nvme_ns *namespace,
+	struct nvme_command *cmd, unsigned flags, bool write)
+{
+	(void)namespace; (void)flags; (void)write;
+	return cmd->common.opcode == NVME_XDEV_EXT_NVM_READ;
+}
+static bool nvme_is_write(const struct nvme_command *cmd)
+{
+	return cmd->common.opcode & 1;
+}
+static void *nvme_to_user_ptr(uintptr_t p) { return (void *)p; }
+static size_t iov_iter_count(const struct iov_iter *iter) { return iter->count; }
+static int io_uring_cmd_import_fixed_vec(struct io_uring_cmd *cmd,
+	const struct iovec *vector, size_t count, int direction,
+	struct iov_iter *iter, unsigned flags)
+{
+	(void)cmd; (void)vector; (void)direction; (void)flags;
+	CHECK(count == 2, "original vector count");
+	observed.imports++;
+	*iter = (struct iov_iter) { .count = 4096, .snapshot = observed.user_vector };
+	return 0;
+}
+static int io_uring_cmd_import_fixed(u64 address, unsigned long length, int direction,
+	struct iov_iter *iter, struct io_uring_cmd *cmd, unsigned flags)
+{
+	(void)address; (void)direction; (void)cmd; (void)flags;
+	*iter = (struct iov_iter) { .count = length, .snapshot = 17 };
+	return 0;
+}
+static struct request *nvme_alloc_user_request(struct request_queue *q,
+	struct nvme_command *cmd, blk_opf_t flags, blk_mq_req_flags_t blk_flags)
+{
+	struct request *req;
+	(void)flags; (void)blk_flags;
+	CHECK(q == &queue, "request queue");
+	observed.alloc_calls++;
+	if (observed.alloc_failures) {
+		observed.alloc_failures--;
+		return ERR_PTR(observed.alloc_error);
+	}
+	req = calloc(1, sizeof(*req));
+	CHECK(req, "host request allocation");
+	req->command = *cmd; req->nvme.cmd = &req->command;
+	observed.allocated++;
+	return req;
+}
+static int nvme_map_user_request(struct request *req, u64 address, unsigned length,
+	void *metadata, unsigned metadata_length, struct iov_iter *iter, unsigned flags)
+{
+	(void)address; (void)metadata; (void)metadata_length; (void)flags;
+	observed.maps++;
+	CHECK(length == 4096 && iter && iter->count == 4096, "retry restores full iterator");
+	CHECK(iter->snapshot == 17, "fixed vector snapshot retained");
+	iter->count = 0; /* The kernel mapper may advance its local iterator. */
+	if (observed.map_failures) {
+		observed.map_failures--;
+		/* Mapping errors own their partial cleanup and return no live BIO. */
+		return observed.map_error;
+	}
+	req->bio = calloc(1, sizeof(*req->bio));
+	CHECK(req->bio, "host bio allocation");
+	req->bio->live = 1;
+	return 0;
+}
+static void blk_rq_unmap_user(struct bio *bio)
+{
+	CHECK(bio && bio->live, "live mapping unmap once");
+	bio->live = 0; observed.unmapped++; free(bio);
+}
+static void blk_mq_free_request(struct request *req)
+{
+	CHECK(req && observed.freed < observed.allocated, "request free once");
+	observed.freed++; free(req);
+}
+static void xdev_ext_mech_stage_put(struct xdev_ext_mech_stage *stage)
+{
+	CHECK(stage->refs == 1, "stage put once"); stage->refs--;
+}
+static int nvme_xdev_ext_build_stage(struct io_uring_cmd *cmd,
+	const struct nvme_command *native, struct nvme_xdev_ext_sidecar *sidecar)
+{
+	(void)cmd; (void)native; (void)sidecar; return -EOPNOTSUPP;
+}
+static int nvme_xdev_ext_build(struct io_uring_cmd *cmd, struct nvme_ns *namespace,
+	struct request *req, struct nvme_command *native, struct nvme_xdev_ext_sidecar *sidecar)
+{
+	(void)cmd; (void)namespace; (void)req; (void)native; (void)sidecar;
+	return -EOPNOTSUPP;
+}
+static void nvme_xdev_ext_build_complete(struct io_uring_cmd *cmd,
+	struct nvme_xdev_ext_sidecar *sidecar, const struct nvme_uring_cmd_pdu *pdu)
+{
+	(void)cmd; (void)sidecar; (void)pdu;
+	CHECK(false, "BUILD callback is outside this host fixture");
+}
+static void io_uring_cmd_done(struct io_uring_cmd *cmd, int status, u64 result,
+	unsigned flags)
+{
+	struct nvme_xdev_ext_sidecar *sidecar = cmd->data.op_data;
+	(void)result;
+	CHECK(observed.done == 0 && observed.refs == 0, "done once after token release");
+	CHECK(observed.unmapped == 1, "done after unmap");
+	CHECK(!sidecar || !sidecar->token.private, "token consumed before sidecar free");
+	observed.done++; observed.done_status = status; observed.done_flags = flags;
+	/* Same op_data lifetime boundary as io_req_uring_cleanup(). */
+	free(cmd->data.op_data); cmd->data.op_data = NULL;
+}
+static void nvme_uring_native_trace(struct request *req, const char *phase, int status)
+{
+	(void)req; (void)phase; (void)status;
+}
+static int blk_status_to_errno(blk_status_t err) { return err ? -EIO : 0; }
+static void io_uring_cmd_do_in_task_lazy(struct io_uring_cmd *cmd,
+	void (*callback)(struct io_uring_cmd *, unsigned))
+{
+	CHECK(!observed.task && !observed.scheduled, "one task-work publication");
+	observed.scheduled++;
+	if (observed.immediate_task) {
+		/*
+		 * Task-work may run on another CPU before end_io returns: done
+		 * frees op_data here, so ASan reports any later end_io access.
+		 */
+		callback(cmd, IO_URING_F_COMPLETE_DEFER);
+		return;
+	}
+	observed.task = cmd; observed.task_cb = callback;
+}
+static void blk_execute_rq_nowait(struct request *req, bool at_head)
+{
+	(void)at_head;
+	observed.submitted++;
+	CHECK(observed.submitted == 1, "submit once");
+	CHECK(req->end_io && req->end_io_data && req->bio, "complete ownership before submit");
+	observed.pending = req;
+}
+
+/* PRODUCTION_FUNCTIONS */
+
+struct command_fixture {
+	struct { struct io_uring_sqe sqe; unsigned char extra[64]; } sqe128;
+	struct io_uring_cmd command;
+};
+static void setup(struct command_fixture *fixture, const char *name)
+{
+	struct nvme_uring_cmd *native;
+	case_name = name;
+	memset(&observed, 0, sizeof(observed));
+	memset(fixture, 0, sizeof(*fixture));
+	observed.user_vector = 17;
+	fixture->command.file = &file;
+	fixture->command.sqe = &fixture->sqe128.sqe;
+	fixture->command.flags = IORING_URING_CMD_FIXED;
+	native = (void *)fixture->sqe128.sqe.cmd;
+	*native = (struct nvme_uring_cmd) {
+		.opcode = NVME_XDEV_EXT_NVM_READ, .nsid = 1,
+		.rsvd2 = NVME_URING_CMD_F_XDEV_EXT, .addr = 4096,
+		.data_len = 2, .cdw10 = 8, .cdw12 = 7,
+	};
+}
+static int issue(struct command_fixture *fixture, unsigned flags)
+{
+	return nvme_uring_cmd_io(&ctrl, &ns, &fixture->command, flags, true);
+}
+static void sync_cleanup(struct command_fixture *fixture)
+{
+	CHECK(!observed.refs && observed.allocated == observed.freed,
+	      "synchronous error releases token and request");
+	free(fixture->command.data.op_data); fixture->command.data.op_data = NULL;
+}
+static void task(unsigned flags)
+{
+	struct io_uring_cmd *cmd = observed.task;
+	CHECK(cmd && observed.task_cb, "published task-work");
+	observed.task = NULL;
+	observed.task_cb(cmd, flags);
+}
+static void finish(struct command_fixture *fixture, bool task_before_request_free,
+	bool cancelled, unsigned task_flags)
+{
+	struct request *req = observed.pending;
+	struct nvme_xdev_ext_sidecar *sidecar = fixture->command.data.op_data;
+	CHECK(sidecar && observed.refs == 1 && observed.unmapped == 0,
+	      "accepted resources retained before end_io");
+	CHECK(sidecar->resources.lifecycle == NVME_XDEV_EXT_LIFECYCLE_ACCEPTED,
+	      "accepted before end_io");
+	/* blk_update_request has detached req->bio by the end_io boundary. */
+	req->bio = NULL;
+	req->nvme.flags = cancelled ? NVME_REQ_CANCELLED : 0;
+	CHECK(req->end_io(req, 0) == RQ_END_IO_FREE, "block owns final request free");
+	CHECK(sidecar->resources.request_allocated == 0, "request ownership handed to block");
+	CHECK(observed.complete == 0 && observed.refs == 1 && observed.unmapped == 0,
+	      "end_io only publishes completion");
+	if (task_before_request_free)
+		task(task_flags);
+	blk_mq_free_request(req); observed.pending = NULL;
+	if (!task_before_request_free)
+		task(task_flags);
+	CHECK(observed.done == 1 && observed.complete == 1 && observed.unpins == 1,
+	      "one terminal completion");
+	CHECK(observed.done_status == (cancelled ? -EINTR : 0), "native completion status");
+	CHECK(observed.done_flags == task_flags, "task exit flags preserved");
+	CHECK(fixture->command.data.op_data == NULL, "sidecar released by core boundary");
+	CHECK(observed.freed == observed.allocated && observed.unmapped == 1,
+	      "all accepted resources released");
+}
+static void retry_case(bool map_failure)
+{
+	struct command_fixture fixture;
+	setup(&fixture, map_failure ? "map EAGAIN twice" : "allocation EAGAIN twice");
+	if (map_failure) {
+		observed.map_failures = 2; observed.map_error = -EAGAIN;
+	} else {
+		observed.alloc_failures = 2; observed.alloc_error = -EAGAIN;
+	}
+	for (unsigned i = 0; i < 2; i++) {
+		CHECK(issue(&fixture, IO_URING_F_NONBLOCK) == -EAGAIN,
+		      "pre-dispatch EAGAIN stays retryable");
+		CHECK(!observed.dispatch && !observed.submitted && !observed.refs,
+		      "retry has no policy or native submission");
+		CHECK(observed.allocated == observed.freed && !observed.unmapped,
+		      "failed attempt owns no live mapping or request");
+		observed.user_vector = 99; /* Userspace changes iovec after first import. */
+	}
+	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "retry eventually accepted");
+	CHECK(observed.imports == 1, "one fixed vector import");
+	finish(&fixture, false, false, IO_URING_F_COMPLETE_DEFER);
+	printf("PASS %s\n", case_name);
+}
+static void failure_case(const char *name, int allocation, int mapping, int policy_error,
+	int final, bool terminal, int expected)
+{
+	struct command_fixture fixture;
+	setup(&fixture, name);
+	observed.alloc_error = allocation; observed.alloc_failures = !!allocation;
+	observed.map_error = mapping; observed.map_failures = !!mapping;
+	observed.dispatch_error = policy_error; observed.final_error = final;
+	observed.terminal = terminal;
+	CHECK(issue(&fixture, IO_URING_F_NONBLOCK) == expected, "terminal errno");
+	CHECK(!observed.submitted && !observed.complete && !observed.done,
+	      "failed issue never submits or completes asynchronously");
+	CHECK(observed.dispatch == !(allocation || mapping), "policy dispatch boundary");
+	CHECK(observed.unmapped == !(allocation || mapping), "mapping owner released");
+	/* A repeated unwind while the sidecar is still live must do no work. */
+	nvme_xdev_ext_preaccept_unwind(fixture.command.data.op_data, NULL);
+	sync_cleanup(&fixture);
+	printf("PASS %s\n", case_name);
+}
+static void publication_case(void)
+{
+	struct command_fixture fixture;
+	struct request *req;
+	setup(&fixture, "task-work runs at end_io publication");
+	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "accepted");
+	req = observed.pending;
+	CHECK(observed.refs == 1 && observed.unmapped == 0,
+	      "accepted resources retained before end_io");
+	req->bio = NULL;
+	observed.immediate_task = true;
+	CHECK(req->end_io(req, 0) == RQ_END_IO_FREE, "block owns final request free");
+	CHECK(observed.done == 1 && observed.complete == 1 && observed.unpins == 1,
+	      "one terminal completion");
+	CHECK(observed.done_status == 0, "native completion status");
+	CHECK(fixture.command.data.op_data == NULL, "sidecar released by core boundary");
+	blk_mq_free_request(req); observed.pending = NULL;
+	CHECK(observed.freed == observed.allocated && observed.unmapped == 1,
+	      "all accepted resources released");
+	printf("PASS %s\n", case_name);
+}
+int main(void)
+{
+	struct command_fixture fixture;
+	retry_case(false);
+	retry_case(true);
+	failure_case("allocation ENOMEM", -ENOMEM, 0, 0, 0, false, -ENOMEM);
+	failure_case("mapping EFAULT", 0, -EFAULT, 0, 0, false, -EFAULT);
+	failure_case("policy EAGAIN", 0, 0, -EAGAIN, 0, false, -EBUSY);
+	failure_case("policy terminal", 0, 0, 0, 0, true, -EPERM);
+	failure_case("final admission EAGAIN", 0, 0, 0, -EAGAIN, false, -EBUSY);
+	failure_case("final admission ESTALE", 0, 0, 0, -ESTALE, false, -ESTALE);
+	setup(&fixture, "task-work before request free");
+	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "accepted");
+	finish(&fixture, true, false, IO_URING_F_COMPLETE_DEFER);
+	printf("PASS %s\n", case_name);
+	setup(&fixture, "cancelled completion with TASK_DEAD");
+	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "accepted");
+	finish(&fixture, false, true, IO_URING_F_COMPLETE_DEFER | IO_URING_F_TASK_DEAD);
+	printf("PASS %s\n", case_name);
+	publication_case();
+	puts("HOST_LIFECYCLE_PASS cases=11 kernel_scheduler=not_run physical_dma=not_run");
+	return 0;
+}
