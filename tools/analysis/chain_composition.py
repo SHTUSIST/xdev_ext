@@ -42,6 +42,10 @@ function as a whole holds a pair split over several statements:
   F-KINDS    two device kinds named outside the arms of a single-operand
              switch, or within one arm; identities already counted by
              F-OPERANDS and registration statements are not kinds here
+  F-GUARD    an identity compared in an if condition and a different
+             device kind named inside the branch that condition guards
+             (block or single statement); a condition comparing one operand
+             with several identities is a class set and guards none
 
 Otherwise it is per-class when it names a device kind, else shared.
 
@@ -108,7 +112,7 @@ KIND_PATTERNS = (
     ('dma', re.compile(r'^(?:xdev_ext|XDEV_EXT)_(?:dma|DMA)_(?:mech|MECH)_')),
     ('net', re.compile(r'^(?:xdev_ext|XDEV_EXT)_(?:net|NET)_(?:mech|MECH)_')),
 )
-REG_CALL = re.compile(r'register|(?:^|_)reg$|(?:^|_)unreg$|^BTF_TYPE_EMIT$|^static_assert$')
+REG_CALL = re.compile(r'register(?!ed|s(?:_|$))|(?:^|_)reg$|(?:^|_)unreg$|^BTF_TYPE_EMIT$|^static_assert$')
 BPF_NAME_MACROS = ('BPF_PROG', 'BPF_PROG2', 'BPF_STRUCT_OPS', 'BPF_STRUCT_OPS_SLEEPABLE')
 NOT_NAMES = ('SEC', 'if', 'for', 'while', 'switch', 'return', 'sizeof')
 IDENT = re.compile(r'[A-Za-z_]\w*')
@@ -728,7 +732,10 @@ def function_pair(f):
     operands anywhere in the body (case labels compare against the switch
     subject).  F-KINDS: two device kinds named outside the arms of a
     single-operand switch, or within one arm; identities already counted as
-    comparisons and registration statements do not name a kind here."""
+    comparisons and registration statements do not name a kind here.
+    F-GUARD: a compared identity and an identifier of a different device
+    kind inside the branch of the if that the comparison guards (unless the
+    condition compares that operand with several identities, a class set)."""
     code = f['header'] + f['body']
     arms = switch_arms(code)
     comps = [(re.sub(r'\s+', '', op), c, off) for op, c, off in comparisons(code)]
@@ -740,7 +747,8 @@ def function_pair(f):
             names.setdefault(CLASS_KIND[IDENTITY.match(c).group(1)], set()).add(c)
         return dict({k: sorted(v) for k, v in names.items()}, rule='F-OPERANDS')
     compared = {off for _, _, off in comps}
-    groups = {}
+    branches = guarded_branches(code)
+    groups, guard = {}, {}
     for m in IDENT.finditer(code):
         kinds = token_kinds(m.group(0))
         if not kinds or m.start() in compared:
@@ -751,10 +759,62 @@ def function_pair(f):
         arm = min(inner, key=lambda a: a['stop'] - a['start'])['start'] if inner else None
         for k in kinds:
             groups.setdefault(arm, {}).setdefault(k, set()).add(m.group(0))
+        for lo, hi, ident in branches:
+            own = CLASS_KIND[IDENTITY.match(ident).group(1)]
+            if lo <= m.start() < hi and kinds - {own}:
+                guard.setdefault(own, set()).add(ident)
+                for k in kinds - {own}:
+                    guard.setdefault(k, set()).add(m.group(0))
     for found in groups.values():
         if len(found) >= 2:
             return dict({k: sorted(v) for k, v in found.items()}, rule='F-KINDS')
+    if guard:
+        return dict({k: sorted(v) for k, v in guard.items()}, rule='F-GUARD')
     return None
+
+
+def _close(code, i, open_ch, close_ch):
+    """Offset just past the @close_ch matching the @open_ch before @i."""
+    depth = 1
+    while i < len(code) and depth:
+        depth += {open_ch: 1, close_ch: -1}.get(code[i], 0)
+        i += 1
+    return i
+
+
+def guarded_branches(code):
+    """[(start, stop, identity)]: the branch of every if whose condition
+    compares a class identity (== or !=), from the first character after
+    the condition to the end of the block or single statement.  A condition
+    comparing one operand with several identities is a class set and guards
+    no single identity; an else branch is not guarded."""
+    out = []
+    for m in re.finditer(r'\bif\s*\(', code):
+        end = _close(code, m.end(), '(', ')')
+        comps = comparisons(code[m.end():end - 1])
+        per_op = {}
+        for op, c, _ in comps:
+            per_op.setdefault(re.sub(r'\s+', '', op), set()).add(c)
+        i = end
+        while i < len(code) and code[i].isspace():
+            i += 1
+        depth, j = 0, i
+        while j < len(code):
+            ch = code[j]
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif depth == 0 and ch == '{':
+                j = _match(code, j)
+                break
+            elif depth == 0 and ch == ';':
+                break
+            j += 1
+        for op, c, _ in comps:
+            if len(per_op[re.sub(r'\s+', '', op)]) == 1:
+                out.append((i, j + 1, c))
+    return out
 
 
 def foreign_kinds(code, own):
@@ -862,6 +922,8 @@ RULES = {
     'F-KINDS': 'core/family function names two device kinds outside the arms of a single-operand '
                'switch, or within one arm (identities in comparisons and registration statements '
                'excluded) -> per-pair',
+    'F-GUARD': 'core/family function names a device kind other than a compared identity\'s inside '
+               'the if branch that comparison guards (class sets excluded) -> per-pair',
 }
 
 

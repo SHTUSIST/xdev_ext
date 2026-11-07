@@ -220,6 +220,44 @@ static int emit(void)
 static const struct xdev_ext_ops dispatch_ops = { .a = recipe_mask, .b = class_dispatch, .c = emit };
 '''
 
+# A comparison guarding a branch, written once as a one-line if and once as
+# a block: (condition, statement in the branch, statement after the if,
+# expected verdict of both forms).  The one-line form is judged statement by
+# statement (R-PAIR / R-SET / R-ONE); the block form must get the same verdict.
+GUARD_FORMS = {
+    'other': ('a->class_id == XDEV_EXT_MECH_CLASS_NVME', 'return xdev_ext_xsk_send(b, %s);',
+              'return 0;', 'per-pair'),
+    'same': ('a->class_id == XDEV_EXT_MECH_CLASS_NVME', 'return nvme_ok(a, %s);',
+             'return 0;', 'per-class'),
+    'not': ('a->class_id != XDEV_EXT_MECH_CLASS_NVME', 'return xdev_ext_xsk_send(b, %s);',
+            'return 0;', 'per-pair'),
+    'set': ('a->class_id == XDEV_EXT_MECH_CLASS_NVME || a->class_id == XDEV_EXT_MECH_CLASS_AFXDP',
+            'return xdev_ext_xsk_send(b, %s);', 'return 0;', 'per-class'),
+    'after': ('a->class_id == XDEV_EXT_MECH_CLASS_NVME', 'return %s;',
+              'return xdev_ext_xsk_send(b, 0);', 'per-class'),
+}
+
+
+def _guarded():
+    out, names = [], []
+    for form, (cond, stmt, tail, _) in GUARD_FORMS.items():
+        out.append('static int guard_%s_line(struct st *a, struct st *b)\n{\n\tif (%s) %s\n\t%s\n}\n'
+                   % (form, cond, stmt % '1', tail))
+        out.append('static int guard_%s_block(struct st *a, struct st *b)\n{\n\tif (%s) {\n'
+                   '\t\tint x = 1;\n\n\t\t%s\n\t}\n\t%s\n}\n' % (form, cond, stmt % 'x', tail))
+        names += ['guard_%s_line' % form, 'guard_%s_block' % form]
+    # The exact block form found by review.
+    out.append('static int guard_review(struct st *a, struct st *b)\n{\n'
+               '\tif (a->class_id == XDEV_EXT_MECH_CLASS_NVME) { int x = 1; '
+               'return xdev_ext_xsk_send(b, x); }\n\treturn 0;\n}\n')
+    names.append('guard_review')
+    out.append('static const struct xdev_ext_ops guard_ops = {\n%s};\n'
+               % ''.join('\t.f%d = %s,\n' % (i, n) for i, n in enumerate(names)))
+    return '\n'.join(out)
+
+
+GUARDED = _guarded()
+
 
 class FunctionPairs(unittest.TestCase):
     def test_pair_condition_over_nested_statements_is_per_pair(self):
@@ -236,6 +274,16 @@ class FunctionPairs(unittest.TestCase):
         for name in ('recipe_mask', 'class_dispatch', 'emit'):
             self.assertEqual(item(r, name)['scope'], 'per-class', name)
         self.assertEqual(r['chains'][0]['totals']['per_pair_trusted'], 0)
+
+    def test_block_and_one_line_guard_get_the_same_verdict(self):
+        r = run({CORE: GUARDED})
+        for form, (_, _, _, want) in GUARD_FORMS.items():
+            for shape in ('line', 'block'):
+                name = 'guard_%s_%s' % (form, shape)
+                self.assertEqual(item(r, name)['scope'], want, name)
+        self.assertEqual(item(r, 'guard_review')['scope'], 'per-pair')
+        # other, not (two forms each) and guard_review, each with its hook.
+        self.assertEqual(r['chains'][0]['totals']['per_pair_trusted'], 10)
 
 
 NETFAM = 'src/network/io_uring/family/xdev_ext_netfam.c'
@@ -291,6 +339,18 @@ class CoreDecisions(unittest.TestCase):
         self.assertEqual(self.verdict('XDEV_EXT_MECH_CLASS_USER', 'reg_rule'), {('registration', 'R-REGCALL')})
         self.assertEqual(self.verdict('XDEV_EXT_MECH_CLASS_XDOMAIN', 'file scope'), {('registration', 'R-SCOPE')})
         self.assertEqual(self.verdict('xdev_ext_nvme_mech_ops', 'preprocessor'), {('registration', 'R-PP')})
+
+    def test_predicate_about_registered_state_is_not_a_registration_call(self):
+        # "registered" / "registers" name a state or hardware registers; the
+        # call registers nothing, so its statement is classified normally.
+        for call in ('xdev_ext_iaa_has_registered_stats', 'nv_read_registers'):
+            self.assertEqual(cc.classify_statement(
+                'return %s(s) + xdev_ext_xsk_send(b, XDEV_EXT_MECH_CLASS_NVME)' % call),
+                ('per-pair', 'R-PAIR'), call)
+        for call in ('xdev_ext_mech_register_class', 'xdev_ext_mech_unregister', 'cuMemHostUnregister',
+                     'dpaa2_io_service_deregister', 'tb_test_protocol_reregister'):
+            self.assertEqual(cc.classify_statement('%s(XDEV_EXT_MECH_CLASS_NVME, xsk)' % call),
+                             ('registration', 'R-REGCALL'), call)
 
     def test_two_kinds_named_without_comparison_are_a_pair(self):
         self.assertEqual(self.verdict('nvme_command', 'names_two'), {('per-pair', 'R-PAIR')})
