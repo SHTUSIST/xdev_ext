@@ -1930,6 +1930,17 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
  ctl_diag_stages(&r, &c);
 	if (ret)
 		goto out;
+	if (src->ce_window) {
+		/*
+		 * Poison the device window only once CREATE has admitted it, so an
+		 * out-of-range window is refused by the kernel and not by this write.
+		 */
+		ret = ctl_ce_window_fill(src->ce_window);
+		if (ret) {
+			ctl_err("chain %c: device window fill: %s\n", o->chain, strerror(-ret));
+			goto out;
+		}
+	}
 	if (!o->expect_unbind) {
 		ret = ctl_notify_arm(r.ring, r.session, o->groups);
 		if (ret)
@@ -2240,12 +2251,7 @@ static int cmd_ce_chain(struct ctl_opts *o)
 		window.fd = sim ? fds[1] : -1;
 		window.va = o->ce_alloc ? 0 : o->ce_va;
 		window.len = o->ce_len;
-		ret = ctl_ce_window_fill(&window);
-		if (ret) {
-			ctl_err("chain %c: device window fill: %s\n", o->chain, strerror(-ret));
-			goto out;
-		}
-		src.ce_window = &window;
+		src.ce_window = &window;	/* filled after CREATE admits it */
 	}
 	ret = ctl_run_source(&src, &s, &frames_ok);
 	if (ret) {
