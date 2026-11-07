@@ -2167,6 +2167,14 @@
       "logical_path": "tests/benchmarks/chains/test_user_continuation_independent.py"
     },
     {
+      "source": "tests/benchmarks/chains/test_two_session.py",
+      "logical_path": "tests/eval/chains/test_two_session.py"
+    },
+    {
+      "source": "tests/benchmarks/chains/two_session_boundary_fixture.c.in",
+      "logical_path": "tests/eval/chains/two_session_boundary_fixture.c.in"
+    },
+    {
       "source": "tests/benchmarks/chains/uring_min.h",
       "logical_path": "tests/eval/chains/uring_min.h"
     },

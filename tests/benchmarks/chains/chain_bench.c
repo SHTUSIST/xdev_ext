@@ -372,25 +372,34 @@ int main(int argc, char **argv)
 				  .iaa_completes = -1, .iaa_errors = -1 };
 	struct chain_err e = { { 0 } };
 	char why[128];
-	bool check;
+	bool check, two_session;
 	size_t len = 0;
 	char *text;
 	FILE *out;
 
-	if (argc != 3 || (strcmp(argv[1], "--spec") && strcmp(argv[1], "--check"))) {
-		fprintf(stderr, "usage: %s --spec|--check FILE.json\n", argv[0]);
+	if (argc != 3 || (strcmp(argv[1], "--spec") && strcmp(argv[1], "--check") &&
+			 strcmp(argv[1], "--two-session-correctness"))) {
+		fprintf(stderr, "usage: %s --spec|--check|--two-session-correctness FILE.json\n", argv[0]);
 		return CB_INVALID;
 	}
 	check = !strcmp(argv[1], "--check");
+	two_session = !strcmp(argv[1], "--two-session-correctness");
 	text = cb_slurp(argv[2], &len);
 	if (!text) {
 		fprintf(stderr, "chain_bench: cannot read %s\n", argv[2]);
+		if (two_session)
+			printf("TWO_SESSION_QUALIFICATION=FAIL\n");
 		return CB_INVALID;
 	}
 	if (chain_parse(text, len, &spec, &e) || chain_validate(&spec, &e)) {
 		int status = strncmp(e.msg, "unsupported:", 12) ? CB_INVALID : CB_NOT_RUN;
 
 		free(text);
+		if (two_session) {
+			fprintf(stderr, "chain_bench: %s\n", e.msg);
+			printf("TWO_SESSION_QUALIFICATION=FAIL\n");
+			return status;
+		}
 		printf("{\"schema\":\"xdev-chain-result-v1\",\"status\":\"%s\",\"failure\":",
 		       cb_status(status));
 		cb_json_str(stdout, e.msg);
@@ -403,14 +412,36 @@ int main(int argc, char **argv)
 		cb_plan(&spec);
 		return CB_PASS;
 	}
+	if (two_session && (spec.mode != CH_CORRECTNESS || spec.arm != CH_SESSION ||
+			    strcmp(spec.chain, "nvme-gpu"))) {
+		fprintf(stderr, "chain_bench: two-session qualification needs nvme-gpu, "
+			"arm=session and mode=correctness\n");
+		printf("TWO_SESSION_QUALIFICATION=FAIL\n");
+		return CB_INVALID;
+	}
 	/* Process CUDA initialization precedes every owned session resource. */
 	if (spec.arm != CH_STAGED && chain_has(&spec, CH_CE)) {
 		int ret = es_ce_runtime_begin(spec.ce_dev, &fd_before);
 
-		if (ret)
+		if (ret) {
+			if (two_session)
+				printf("TWO_SESSION_QUALIFICATION=FAIL\n");
 			return ret;
+		}
 	} else {
 		fd_before = eval_fd_count();
+	}
+	if (two_session) {
+		int ret = chain_run_two_session_correctness(&spec, &r);
+
+		if (ret && !r.status)
+			cb_fail(&r, ret, "two-session qualification failed");
+		if (eval_fd_check(fd_before))
+			cb_fail(&r, CB_FAIL, "descriptor count changed after cleanup");
+		if (r.failure[0])
+			fprintf(stderr, "chain_bench: %s\n", r.failure);
+		printf("TWO_SESSION_QUALIFICATION=%s\n", r.status ? "FAIL" : "PASS");
+		return r.status;
 	}
 	if (spec.mode == CH_TIMING && spec.load == CH_LOAD_CLOSED) {
 		int error = cpu_timer_init(&r.cpu_timer, "CLOCK_MONOTONIC_RAW", chain_windows(&spec));
