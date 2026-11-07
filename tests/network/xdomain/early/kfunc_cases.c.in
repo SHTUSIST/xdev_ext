@@ -205,7 +205,8 @@ static void *parallel2_thread(void *opaque)
 {
  expected_cpu = (unsigned)(uintptr_t)opaque; cpu_id = expected_cpu;
  struct xdev_ext_mech_session own_session = { .id = 50 + expected_cpu };
- struct xdev_ext_mech_stage own_stage = { .s = &own_session, .class_id = 11, .direction = 1 };
+ struct xdev_ext_mech_stage own_stage = { .s = &own_session, .class_id = 11, .direction = 1,
+  .cls = &fixture_registered_xdomain_class };
  struct xdev_ext_nvme_mech_ops own_ops = { .complete = parallel2_callback };
  struct xdev_ext_xdomain_proto_info_v2 own_info = facts2;
  struct xdev_ext_xdomain_proto_result own_result = {};

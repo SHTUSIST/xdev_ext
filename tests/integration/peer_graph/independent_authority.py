@@ -10,8 +10,17 @@ from pathlib import Path
 import subprocess
 import tempfile
 
-ROOT = next((p for p in Path(__file__).resolve().parents if (p / "source-layout.json").is_file()), None)
-KERNEL = ROOT / "src/core" if ROOT else Path(__file__).resolve().parents[5]
+SCRIPT = Path(__file__).resolve()
+# These are this fixture's actual canonical/native source-layout locations.
+# A logical view also has source-layout.json; that is not a canonical-path hint.
+if SCRIPT.parts[-4:] == ("tests", "integration", "peer_graph", "independent_authority.py"):
+    ROOT = SCRIPT.parents[3]
+    KERNEL = ROOT / "src/core"
+elif SCRIPT.parts[-6:] == ("tools", "testing", "selftests", "xdev_ext_mech", "peer_graph", "independent_authority.py"):
+    ROOT = None
+    KERNEL = SCRIPT.parents[5]
+else:
+    raise AssertionError("unsupported authority fixture source location: " + str(SCRIPT))
 RAW_SHIM = (ROOT / "tests/network/peer/session/xdev_ext_peer_test_shim.h" if ROOT else
             KERNEL / "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_test_shim.h")
 SHIM = RAW_SHIM.read_text()

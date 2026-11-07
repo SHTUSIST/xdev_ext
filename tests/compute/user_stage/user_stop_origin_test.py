@@ -26,6 +26,20 @@ def load(name,path):
     return mod
 
 
+def checked_view(layoutmod,layout,root,path):
+    """Validate an inherited view hint before selecting our private view."""
+    base=Path(path).resolve()
+    receipt=json.loads(layoutmod.safe_file(base,'view.json').read_text())
+    manifest=json.loads(layoutmod.safe_file(base,'source-layout.json').read_text())
+    if (receipt.get('schema')!=1 or receipt.get('kind')!='host-source-view' or
+            receipt.get('canonical_root')!=str(root) or
+            receipt.get('manifest')!=layout.manifest or manifest!=layout.manifest or
+            receipt.get('source_origins')!=layout.by_logical or
+            receipt.get('revision')!=layoutmod.provenance(root)['revision']):
+        raise RuntimeError('stale or foreign inherited source view')
+    return base
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-root',type=Path,required=True)
@@ -37,20 +51,42 @@ def main():
     try:
         layoutmod=load('user_stop_layout',root/'tools/layout.py')
         layout=layoutmod.load_layout(root)
+        if ('XDEV_EXT_CANONICAL_ROOT' in os.environ and
+                Path(os.environ['XDEV_EXT_CANONICAL_ROOT']).resolve()!=root):
+            raise RuntimeError('foreign canonical root environment')
+        inherited=None
+        if 'XDEV_EXT_SOURCE_VIEW' in os.environ:
+            inherited=checked_view(layoutmod,layout,root,os.environ['XDEV_EXT_SOURCE_VIEW'])
+        if 'KERNEL_SRC' in os.environ:
+            kernel_hint=Path(os.environ['KERNEL_SRC']).resolve()
+            if kernel_hint!=root:
+                hinted_view=checked_view(layoutmod,layout,root,kernel_hint.parent)
+                if kernel_hint!=hinted_view/'kernel' or (inherited is not None and hinted_view!=inherited):
+                    raise RuntimeError('foreign kernel source environment')
         view=layoutmod.materialize_view(root,out/'source-view')
         strict_path=view.root/layout.logical('tests/compute/user_stage/strict_async_test.py')
         sys.path.insert(0,str(strict_path.parent))
-        kernel=view.root/'kernel';os.environ['KERNEL_SRC']=str(kernel)
-        strict=load('user_stop_strict',strict_path)
-        code=strict.generate()
-        marker='static int exercise(const char *mode)'
-        if code.count(marker)!=1:raise RuntimeError('strict test entry boundary changed')
-        code=code[:code.index(marker)]+(HERE/'user_stop_origin_fixture.c').read_text()
+        kernel=view.root/'kernel'
+        selected_env={'KERNEL_SRC':str(kernel),'XDEV_EXT_CANONICAL_ROOT':str(root),
+                      'XDEV_EXT_SOURCE_VIEW':str(view.root)}
+        previous={key:os.environ.get(key) for key in selected_env}
+        try:
+            os.environ.update(selected_env)
+            strict=load('user_stop_strict',strict_path)
+            code=strict.generate()
+            marker='static int exercise(const char *mode)'
+            if code.count(marker)!=1:raise RuntimeError('strict test entry boundary changed')
+            code=code[:code.index(marker)]+(HERE/'user_stop_origin_fixture.c').read_text()
+            include_root=strict.scheduler.compiler_headers(strict.ROOT,out/'qualified-include',code)
+        finally:
+            for key,value in previous.items():
+                if value is None:os.environ.pop(key,None)
+                else:os.environ[key]=value
         cfile=out/'actual.c';binary=out/'actual';cfile.write_text(code)
         cmd=[os.environ.get('CC','gcc'),'-std=gnu11','-O1','-g','-Wall','-Wextra','-Werror',
              '-Wno-unused-function','-Wno-unused-variable','-Wno-unused-parameter',
              '-fsanitize=undefined','-fno-sanitize-recover=undefined','-pthread',
-             '-I'+str(kernel),'-I'+str(strict_path.parent.parent),'-I'+str(strict_path.parent),
+             '-I'+str(include_root),'-I'+str(strict_path.parent.parent),'-I'+str(strict_path.parent),
              str(cfile),'-o',str(binary)]
         built=subprocess.run(cmd,text=True,capture_output=True,timeout=60)
         (out/'compile.log').write_text(built.stdout+built.stderr)

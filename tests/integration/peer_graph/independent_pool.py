@@ -28,6 +28,14 @@ def struct(source, name):
     return source[start:source.index("\n};", start) + 3] + "\n"
 
 
+def pointer_projection(source, name, member):
+    """Keep the real metadata pointer declaration, without unrelated OS fields."""
+    fields = [line for line in struct(source, name).splitlines()
+              if line.strip().endswith("*" + member + ";")]
+    assert len(fields) == 1, (name, member, fields)
+    return "struct " + name + " {\n" + fields[0] + "\n};\n"
+
+
 SHIM = r'''
 #include <assert.h>
 #include <stdio.h>
@@ -85,6 +93,7 @@ struct xdev_ext_mech_session {int lock;bool start_preparing,start_to_user,start_
  struct kthread_worker *worker;struct kthread_work stop_work;
  const void *ops[XDEV_EXT_MECH_CLASS_MAX];bool pinned[XDEV_EXT_MECH_CLASS_MAX];
  struct xdev_ext_mech_instance *instances[XDEV_EXT_MECH_MAX_STAGES];
+ struct xdev_ext_mech_stage st[XDEV_EXT_MECH_MAX_STAGES];
  u64 start_left,start_seq;u32 start_user_len,frames,nr_stages;struct xdev_ext_mech_sess ss;struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;struct xdev_ext_mech_batch batches[2];struct xdev_ext_mech_stage_uapi plan[2];struct xdev_ext_mech_life life[2];};
 /* Optional observer disabled; publication below executes the production helper. */
 #define xdev_ext_mech_trace_batch(b,event,status,flags) ((void)0)
@@ -183,9 +192,11 @@ int main(void)
  }
  puts("ok 4 - actual START scheduling admits 257 groups through a two-frame GPU window from one initial START budget, no continuation or CPU backing");
  {struct xdev_ext_mech_session s={.start_recycle=true,.nr_stages=1,.pool={.frame_size=65536}};
+  const struct xdev_ext_mech_class_ops nvme_class={.decl=xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_NVME)};
   struct xdev_ext_mech_batch b={.nr_frames=1,.bytes=4096,.f={{.index=0,.data_off=16,.data_len=4096}}};
   u64 token;
   s.plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
+  s.st[0].cls=&nvme_class;
   xdev_ext_mech_life_init(&s.life[0]);s.life[0].valid_len=32;
   assert(!xdev_ext_mech_start_publication(&s,&b));
   assert(b.bytes==32&&b.f[0].data_len==32&&s.life[0].valid_len==32);
@@ -221,9 +232,12 @@ def main():
     core = (KERNEL / "io_uring/xdev_ext_mech.c").read_text()
     pool = (KERNEL / "io_uring/xdev_ext_mech_peer_pool.c").read_text()
     pool = pool[pool.index("struct xdev_ext_peer_mech_pool {"):]
-    support = "".join(struct(contract, name) for name in ("xdev_ext_mech_frame", "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool")) + GLUE + function(contract, "static inline struct page *xdev_ext_mech_frame_page(") + function(ops, "static u8 *xdev_ext_mech_frame_bytes(")
+    support = "".join(struct(contract, name) for name in ("xdev_ext_mech_frame", "xdev_ext_mech_pool_ops", "xdev_ext_mech_pool")) + pointer_projection(contract, "xdev_ext_mech_class_ops", "decl") + pointer_projection(contract, "xdev_ext_mech_stage", "cls") + GLUE + function(contract, "static inline struct page *xdev_ext_mech_frame_page(") + function(ops, "static u8 *xdev_ext_mech_frame_bytes(")
     start = "".join(function(core, signature) for signature in (
         "u32 xdev_ext_mech_pool_frame_state(",
+        "static int xdev_ext_mech_session_stage_role(",
+        "static void xdev_ext_mech_session_rows(",
+        "static u32 xdev_ext_mech_session_chain_refs(",
         "static bool xdev_ext_mech_programs_current(",
         "bool xdev_ext_mech_session_admits(",
         "static void xdev_ext_mech_settle_locked(",

@@ -87,6 +87,7 @@ def main():
         environment = (fixture_path.parent / 'xdomain_fixture.c.in').read_text()
         code = environment.replace('/* PRODUCTION */', declarations + '\n' + fixture.production())
         legacy = (fixture_path.parent / 'xdomain_cases.c.in').read_text()
+        legacy = fixture.registered_setup(legacy)
         legacy = legacy.replace('int main(int argc, char **argv)', 'static int legacy_main(int argc, char **argv)')
         code = code.replace('/* CASES */', legacy + '\n' + (HERE / 'kfunc_cases.c.in').read_text())
         source = args.output / 'fixture.c'

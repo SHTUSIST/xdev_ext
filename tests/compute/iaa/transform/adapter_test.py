@@ -13,9 +13,13 @@ import tempfile
 import unittest
 from acquire_red_test import function, session_helpers
 from lease_test import FUNCTIONS, start_queue_closure
+from transform_source import (TransformSource, read_native, select_core,
+                              owned_dependency, source_root, verify_entry,
+                              compiler_headers, native_path)
 
 HERE = Path(__file__).resolve().parent
-ROOT = HERE.parents[4]
+verify_entry(__file__, 'tests/compute/iaa/transform/adapter_test.py')
+ROOT = source_root(__file__, os.environ.get('KERNEL_SRC'))
 ADAPTER_FUNCTIONS = ('xdev_ext_iaa_crypto_done', 'xdev_ext_iaa_sg',
                      'xdev_ext_iaa_bind', 'xdev_ext_iaa_unbind',
                      'xdev_ext_iaa_submit', 'xdev_ext_iaa_mark_dead')
@@ -45,7 +49,10 @@ static struct page *xdev_ext_mech_frame_page(struct xdev_ext_mech_pool *p,const 
 def build_source(adapter, core):
     # Reuse only the existing fixture's kernel boundary types and helpers.
     # Its production placeholders are still replaced by the current real code.
-    shared = start_queue_closure((HERE / 'lease_fixture.c').read_text().split('int main(', 1)[0], core)
+    selected = TransformSource(core, lambda path: read_native(ROOT, path), function)
+    production = selected.text
+    shared = start_queue_closure(owned_dependency(
+        __file__, 'tests/compute/iaa/transform/lease_fixture.c').read_text().split('int main(', 1)[0], production)
     shared = shared.replace('const struct xdev_ext_mech_class_ops *cls;};',
                             'const struct xdev_ext_mech_class_ops *cls;void *priv;};')
     shared = shared.replace('struct xdev_ext_mech_session {\n',
@@ -55,10 +62,22 @@ def build_source(adapter, core):
     if FRAME_PAGE not in shared:
         raise RuntimeError('lease fixture frame_page boundary changed')
     shared = shared.replace(FRAME_PAGE, SPLIT_FRAME_PAGE)
-    names = session_helpers(core, [function(core, name) for name in FUNCTIONS]) + list(FUNCTIONS)
+    bodies = [function(production, name) for name in FUNCTIONS]
+    helpers = []
+    if selected.split:
+        handoff = function(production, 'xdev_ext_mech_transform_handoff')
+        shared = selected.storage(shared)
+        shared = shared.replace('struct xdev_ext_mech_batch {',
+                                selected.types + '\nstruct xdev_ext_mech_batch {', 1)
+        helpers = selected.helpers(bodies + [handoff])
+        shared = shared.replace('/* xdev_ext_mech_frames_move */',
+                                '\n'.join(helpers) + '\n/* xdev_ext_mech_frames_move */', 1)
+        shared = shared.replace('/* xdev_ext_mech_batch_handoff */',
+                                handoff + '\n/* xdev_ext_mech_batch_handoff */', 1)
+    names = session_helpers(production, bodies) + list(FUNCTIONS)
     for name in names:
-        shared = shared.replace('/* ' + name + ' */', function(core, name))
-    source = (HERE / 'adapter_fixture.c').read_text().replace('/* LEASE_BOUNDARY */', shared)
+        shared = shared.replace('/* ' + name + ' */', function(production, name))
+    source = owned_dependency(__file__, 'tests/compute/iaa/transform/adapter_fixture.c').read_text().replace('/* LEASE_BOUNDARY */', shared)
     structures = []
     for name in ('xdev_ext_iaa_request', 'xdev_ext_iaa_stage'):
         match = re.search(r'^struct ' + name + r' \{\n.*?^\};', adapter, re.M | re.S)
@@ -67,7 +86,10 @@ def build_source(adapter, core):
         structures.append(match[0])
     source = source.replace('/* ADAPTER_STRUCTS */', '\n'.join(structures))
     for name in ACCESSORS:
-        source = source.replace('/* ' + name + ' */', function(core, name))
+        accessor = function(core, name)
+        # Split transform helpers may already require this exact core getter
+        # before the lease functions (notably batch_bytes). Emit it only once.
+        source = source.replace('/* ' + name + ' */', '' if accessor in helpers else accessor)
     for name in ADAPTER_FUNCTIONS:
         source = source.replace('/* ' + name + ' */', function(adapter, name))
     for name in OPTIONAL_ADAPTER_FUNCTIONS:
@@ -79,8 +101,12 @@ def build_source(adapter, core):
 class AdapterScheduling(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.adapter = Path(os.environ.get('XDEV_EXT_IAA_ADAPTER_SOURCE', ROOT / 'io_uring/iaa/xdev_ext_mech_iaa.c')).read_text()
-        cls.core = Path(os.environ.get('XDEV_EXT_IAA_ADAPTER_CORE_SOURCE', ROOT / 'io_uring/xdev_ext_mech.c')).read_text()
+        adapter_path = native_path(ROOT, 'io_uring/iaa/xdev_ext_mech_iaa.c')
+        override = os.environ.get('XDEV_EXT_IAA_ADAPTER_SOURCE')
+        if override is not None and Path(override).resolve() != adapter_path.resolve():
+            raise RuntimeError('adapter override is not the selected source owner')
+        cls.adapter = read_native(ROOT, 'io_uring/iaa/xdev_ext_mech_iaa.c')
+        cls.core = select_core(ROOT, os.environ.get('XDEV_EXT_IAA_ADAPTER_CORE_SOURCE'))
         cls.temp = tempfile.TemporaryDirectory(prefix='xdev_ext-iaa-adapter-')
         cls.addClassCleanup(cls.temp.cleanup)
         cls.binary = cls.compile(build_source(cls.adapter, cls.core), 'adapter')
@@ -90,9 +116,10 @@ class AdapterScheduling(unittest.TestCase):
         path = Path(cls.temp.name)
         (path / (name + '.c')).write_text(source)
         binary = path / name
+        include_root = compiler_headers(ROOT, path / (name + '-include'), source)
         result = subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu11', '-Wall', '-Wextra',
                                  '-Werror', '-Wno-unused-function', '-fsanitize=undefined',
-                                 '-fno-sanitize-recover=undefined', '-I' + str(ROOT),
+                                 '-fno-sanitize-recover=undefined', '-I' + str(include_root),
                                  str(path / (name + '.c')), '-o', str(binary)], capture_output=True, text=True)
         if result.returncode:
             raise RuntimeError(result.stdout + result.stderr)
