@@ -14,6 +14,7 @@ HERE = Path(__file__).resolve().parent
 HARNESS = HERE / 'xdev_ext_mech_zc_kvm.sh'
 GPU_GUEST = HERE / 'xdev_ext_gpu_guest.sh'
 GPU_DMABUF = HERE / 'xdev_ext_gpu_dmabuf.c'
+TB_GUEST = HERE / 'xdev_ext_tb_nhi_guest.sh'
 
 
 def function(script, name):
@@ -110,6 +111,17 @@ class ModeRefusals(unittest.TestCase):
     def test_vfio_is_refused_in_modes_with_their_own_qemu_setup(self):
         self.assertIn('vfio devices are not wired', self.refuse('--vfio', '0000:4a:00.0', '--xdomain'))
 
+    def test_tb_nhi_cycles_must_be_a_single_digit_count(self):
+        for value in ('x', '10', '-1', ''):
+            with self.subTest(value=value):
+                self.assertIn('invalid --tb-nhi-cycles',
+                              self.refuse('--tb-nhi', '0000:00:0d.2', '--tb-nhi-cycles', value))
+
+    def test_tb_nhi_suboptions_require_the_tb_nhi_mode(self):
+        for extra in (('--tb-nhi-cycles', '0'), ('--tb-nhi-enumerate',)):
+            with self.subTest(extra=extra):
+                self.assertIn('require --tb-nhi', self.refuse(*extra))
+
 
 class BusyboxAppletCheck(unittest.TestCase):
     """grep -q stops reading early; with pipefail the writer's SIGPIPE turns a
@@ -162,6 +174,22 @@ class GuestGpuWiring(unittest.TestCase):
         self.assertIn('if (( ${TB_NHI:-0} )); then cfg -e USB4; fi', self.script)
         self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"', self.script)
         self.assertIn('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"', self.script)
+
+    def test_tb_nhi_defaults_keep_three_rebind_cycles_without_enumeration(self):
+        self.assertRegex(self.script, r'(?m)^TB_NHI_CYCLES=3$')
+        self.assertRegex(self.script, r'(?m)^TB_NHI_ENUMERATE=0$')
+
+    def test_tb_nhi_enumeration_reaches_the_guest_and_its_report_is_kept(self):
+        self.assertIn('--tb-nhi-enumerate) TB_NHI_ENUMERATE=1; shift ;;', self.script)
+        self.assertIn('printf \'tb_nhi_enumerate=%s\\n\' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"',
+                      self.script)
+        self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}"',
+                      self.script)
+        keep = 'grep -E \'^XDEV_EXT_TB_NHI_ENUM \' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true'
+        self.assertIn(keep, self.script)
+        # The report is saved before the verdict can stop the harness.
+        self.assertLess(self.script.index(keep),
+                        self.script.index('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES"'))
 
     def test_finish_reports_driver_counters_of_every_wire_port(self):
         finish = re.search(r'(?ms)^finish\(\) \{\n.*?^\}', self.script).group()
@@ -705,6 +733,101 @@ class GuestLinkReadiness(unittest.TestCase):
             ready = max(before.rfind('test "$ready" = 1'), before.rfind('nicfb_ready /tmp/'))
             self.assertGreaterEqual(ready, 0)
             self.assertIn('nic_link_wait', before[ready:], guest[at:at + 80])
+
+
+
+class TbNhiGuestEnumeration(unittest.TestCase):
+    """The enumerate mode of the guest NHI script against a fake sysfs."""
+
+    def setUp(self):
+        self.script = TB_GUEST.read_text()
+        self.tmp = tempfile.TemporaryDirectory(prefix='tb-enum-')
+        self.sys = Path(self.tmp.name) / 'sys'
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def node(self, relative, **attributes):
+        path = self.sys / relative
+        path.mkdir(parents=True, exist_ok=True)
+        for name, value in attributes.items():
+            (path / name).write_text(value + '\n')
+        return path
+
+    def host_router(self, uuid, port_links):
+        devices = 'bus/thunderbolt/devices'
+        self.node(devices + '/domain0', uevent='DEVTYPE=thunderbolt_domain', security='none',
+                  iommu_dma_protection='0')
+        self.node(devices + '/0-0', uevent='DEVTYPE=thunderbolt_device', vendor='0x8087',
+                  vendor_name='Intel', device='0x7ec2', device_name='Meteor Lake',
+                  unique_id=uuid, generation='4', authorized='1')
+        for number, link in port_links.items():
+            self.node(f'{devices}/0-0/usb4_port{number}', link=link)
+        regs = self.node('kernel/debug/thunderbolt/0-0/port1')
+        (regs / 'regs').write_text('# offset relative_offset cap_id vs_cap_id value\n'
+                                   '0x0000    0 0x00 0x00 0x11111111\n')
+
+    def snapshot(self):
+        return {str(path): (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in sorted(self.sys.rglob('*')) if path.is_file()}
+
+    def enumerate(self):
+        program = ('set -u\n'
+                   f'sysfs={self.sys}\nsettle_max=3\nsettle_stable=2\n'
+                   'sleep() { :; }\nmount() { echo "UNEXPECTED mount $*"; }\n' +
+                   function(self.script, 'topology') + function(self.script, 'enumerate') +
+                   'enumerate\n')
+        before = self.snapshot()
+        run = subprocess.run(['sh', '-c', program], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertEqual(before, self.snapshot(), 'enumeration must not write below sysfs')
+        self.assertNotIn('UNEXPECTED', run.stdout)
+        return run.stdout.splitlines()
+
+    def test_nothing_connected_reports_the_host_router_and_idle_ports(self):
+        uuid = 'd6da8780-0069-3029-ffff-ffffffffffff'
+        self.host_router(uuid, {1: 'none', 3: 'none'})
+        lines = self.enumerate()
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM device=domain0 type=thunderbolt_domain '
+                      'security=none iommu_dma_protection=0', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM device=0-0 type=thunderbolt_device vendor=0x8087 '
+                      'vendor_name=Intel device=0x7ec2 device_name=Meteor_Lake '
+                      f'unique_id={uuid} generation=4', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM port=0-0/usb4_port1 link=none', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM port=0-0/usb4_port3 link=none', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM regs 0-0 port1 0x0000    0 0x00 0x00 0x11111111', lines)
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_ENUM summary routers=1 xdomains=0 '
+                                    'same_uuid_xdomains=0')
+        self.assertTrue(any(line.startswith('XDEV_EXT_TB_NHI_ENUM settle ') for line in lines))
+
+    def test_a_cable_between_the_host_ports_is_an_xdomain_with_the_host_uuid(self):
+        uuid = '7a1d0000-0000-0000-ffff-ffffffffffff'
+        self.host_router(uuid, {1: 'usb4', 3: 'usb4'})
+        self.node('bus/thunderbolt/devices/0-1', uevent='DEVTYPE=thunderbolt_xdomain',
+                  unique_id=uuid, rx_speed='20.0 Gb/s', rx_lanes='1', tx_speed='20.0 Gb/s',
+                  tx_lanes='1', maxhopid='15')
+        lines = self.enumerate()
+        self.assertIn('XDEV_EXT_TB_NHI_ENUM device=0-1 type=thunderbolt_xdomain '
+                      f'unique_id={uuid} rx_speed=20.0_Gb/s rx_lanes=1 tx_speed=20.0_Gb/s '
+                      'tx_lanes=1 maxhopid=15 same_uuid_as_host=yes', lines)
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_ENUM summary routers=1 xdomains=1 '
+                                    'same_uuid_xdomains=1')
+
+    def test_a_different_host_is_not_counted_as_the_same_uuid(self):
+        self.host_router('11111111-0000-0000-ffff-ffffffffffff', {1: 'usb4'})
+        self.node('bus/thunderbolt/devices/0-1', uevent='DEVTYPE=thunderbolt_xdomain',
+                  unique_id='22222222-0000-0000-ffff-ffffffffffff')
+        lines = self.enumerate()
+        self.assertTrue(any(line.startswith('XDEV_EXT_TB_NHI_ENUM device=0-1 ') and
+                            line.endswith(' same_uuid_as_host=no') for line in lines), lines)
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_ENUM summary routers=1 xdomains=1 '
+                                    'same_uuid_xdomains=0')
+
+    def test_rebind_cycles_stay_the_default_path(self):
+        self.assertIn('enumerate_mode=${2:-0}', self.script)
+        self.assertIn('if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then', self.script)
+        self.assertLess(self.script.index('then\n\tenumerate\nfi'),
+                        self.script.index('while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]'))
 
 
 if __name__ == '__main__':

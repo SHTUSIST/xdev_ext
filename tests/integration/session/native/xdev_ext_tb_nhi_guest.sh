@@ -7,12 +7,22 @@
 # interrupt throttling of drivers/thunderbolt/nhi.c) on the real controller.
 # CYCLES unbind/bind cycles repeat ring teardown and re-initialisation.
 #
-#   xdev_ext_tb_nhi_guest.sh CYCLES
+#   xdev_ext_tb_nhi_guest.sh CYCLES [ENUMERATE]
 #
 # Prints XDEV_EXT_TB_NHI_STATE per pass, XDEV_EXT_TB_NHI_CYCLE per cycle and
 # one XDEV_EXT_TB_NHI verdict; raw kernel lines are prefixed XDEV_EXT_TB_NHI_LOG.
+# ENUMERATE=1 first reports, read-only, the topology the guest sees
+# (XDEV_EXT_TB_NHI_ENUM lines): bus devices, USB4 port links, any XDomain
+# and whether it carries the host router's own UUID (a cable between two
+# ports of this host), and the host router adapters' registers.
 set -u
 cycles=$1
+enumerate_mode=${2:-0}
+sysfs=/sys
+# Link training and the XDomain UUID/property exchange finish after the host
+# router appears; wait until the topology has not changed for a while.
+settle_max=30
+settle_stable=6
 nhi=
 for device in /sys/bus/pci/devices/*; do
 	[ "$(cat "$device/class")" = 0x0c0340 ] || continue
@@ -43,6 +53,77 @@ errors() {
 		grep -v 'XDEV_EXT' | sed 's/^/XDEV_EXT_TB_NHI_LOG error: /'
 }
 
+# One line naming every bus device and each USB4 port's link type.
+topology() {
+	for device in "$sysfs"/bus/thunderbolt/devices/*; do
+		[ -e "$device" ] || continue
+		printf '%s' "${device##*/}"
+		for port in "$device"/usb4_port*; do
+			[ -r "$port/link" ] && printf ':%s=%s' "${port##*/}" "$(cat "$port/link" 2>/dev/null)"
+		done
+		printf ' '
+	done
+}
+# Reads sysfs and debugfs only; never writes authorized, forcepower or any
+# other attribute.
+enumerate() {
+	previous=$(topology)
+	stable=0
+	waited=0
+	while [ "$waited" -lt "$settle_max" ] && [ "$stable" -lt "$settle_stable" ]; do
+		sleep 1
+		waited=$((waited + 1))
+		current=$(topology)
+		if [ "$current" = "$previous" ]; then
+			stable=$((stable + 1))
+		else
+			stable=0
+			previous=$current
+		fi
+	done
+	echo "XDEV_EXT_TB_NHI_ENUM settle waited=$waited stable=$stable"
+	host_uuid=$(cat "$sysfs/bus/thunderbolt/devices/0-0/unique_id" 2>/dev/null)
+	routers=0
+	xdomains=0
+	same=0
+	for device in "$sysfs"/bus/thunderbolt/devices/*; do
+		[ -e "$device" ] || continue
+		type=$(sed -n 's/^DEVTYPE=//p' "$device/uevent" 2>/dev/null)
+		line="XDEV_EXT_TB_NHI_ENUM device=${device##*/} type=${type:-unknown}"
+		for attribute in security iommu_dma_protection vendor vendor_name device device_name \
+			unique_id generation nvm_version rx_speed rx_lanes tx_speed tx_lanes maxhopid; do
+			[ -r "$device/$attribute" ] || continue
+			line="$line $attribute=$(cat "$device/$attribute" 2>/dev/null | tr ' ' _)"
+		done
+		case "$type" in
+		thunderbolt_device)
+			routers=$((routers + 1)) ;;
+		thunderbolt_xdomain)
+			xdomains=$((xdomains + 1))
+			if [ -n "$host_uuid" ] && [ "$(cat "$device/unique_id" 2>/dev/null)" = "$host_uuid" ]; then
+				line="$line same_uuid_as_host=yes"
+				same=$((same + 1))
+			else
+				line="$line same_uuid_as_host=no"
+			fi ;;
+		esac
+		echo "$line"
+		for port in "$device"/usb4_port*; do
+			[ -r "$port/link" ] || continue
+			echo "XDEV_EXT_TB_NHI_ENUM port=${device##*/}/${port##*/} link=$(cat "$port/link" 2>/dev/null)"
+		done
+	done
+	debug=$sysfs/kernel/debug
+	[ -d "$debug/thunderbolt" ] || mount -t debugfs debugfs "$debug" 2>/dev/null
+	for regs in "$debug"/thunderbolt/0-0/port*/regs; do
+		[ -r "$regs" ] || continue
+		port=${regs%/regs}
+		port=${port##*/}
+		sed "s|^|XDEV_EXT_TB_NHI_ENUM regs 0-0 $port |" "$regs" 2>/dev/null
+	done
+	echo "XDEV_EXT_TB_NHI_ENUM summary routers=$routers xdomains=$xdomains same_uuid_xdomains=$same"
+}
+
 result=PASS
 if wait_router; then
 	state 0
@@ -52,6 +133,9 @@ else
 	result=FAIL
 fi
 first_id=$(cat "$router/unique_id" 2>/dev/null)
+if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then
+	enumerate
+fi
 cycle=1
 while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]; do
 	reason=
