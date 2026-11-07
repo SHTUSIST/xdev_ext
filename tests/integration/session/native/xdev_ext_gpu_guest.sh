@@ -204,6 +204,7 @@ if caps_have gpu_direct_rdma=1; then ce_mode=native ce_alloc=--ce-alloc
 else ce_mode=vmm ce_alloc=--ce-vmm; fi
 ce_ok() {
 	grep -Fxq "XDEV_EXT_MECH_CE_GPU=PASS chain=$2" "$1" &&
+	grep -Eq "^XDEV_EXT_MECH_CE_WINDOW=PASS chain=$2 written=[1-9][0-9]* " "$1" &&
 	grep -Eq "^XDEV_EXT_MECH_STATS .* last_err=0 batches_done=$groups batches_abort=0 rejects=0 .* sequestered=0 timeouts=0 inflight=0 " "$1" &&
 	grep -Fxq "CUDA allocation=$ce_mode released=yes" "$1" || return 1
 	[ "$ce_mode" = native ] ||

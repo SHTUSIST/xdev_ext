@@ -107,9 +107,13 @@ EV=$SCRATCH/evidence
 TOOLS=$SCRATCH/tools
 SOURCE_COMMIT=fixture
 ''' + checks + config + '\necho CONFIG_BOUNDARY_REACHED\n'
-            (build/'.config').write_text(
+            # A reused build carries P2PDMA, which run-only admission checks.
+            p2pdma = ''.join(f'CONFIG_{key}=y\n' for key in (
+                'MEMORY_HOTPLUG', 'MEMORY_HOTREMOVE', 'MIGRATION', 'SPARSEMEM_VMEMMAP',
+                'ZONE_DEVICE', 'PCI_P2PDMA'))
+            (build/'.config').write_text(p2pdma + (
                 'CONFIG_XDEV_EXT_MECH_SOCKET=y\n' if socket else
-                '# CONFIG_XDEV_EXT_MECH_SOCKET is not set\n')
+                '# CONFIG_XDEV_EXT_MECH_SOCKET is not set\n'))
             (build/'xdev-ext-source.commit').write_text('fixture\n')
             artifact = build/'identity-artifact'
             artifact.write_text('identity\n')

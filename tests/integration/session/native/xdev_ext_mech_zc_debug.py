@@ -9,6 +9,11 @@ import sys
 
 REQUIRED = ('DEBUG_KERNEL', 'PROVE_LOCKING', 'LOCKDEP', 'DEBUG_ATOMIC_SLEEP',
             'KASAN', 'KASAN_GENERIC', 'DETECT_HUNG_TASK')
+# Upstream PCI P2PDMA and its x86_64 dependencies, in every profile: without
+# it pci_p2pdma_distance_many() is the stub returning -1 and every PEER
+# session targeting a device BAR fails REQUESTER_DECIDE with NO_P2P_PATH.
+P2PDMA = ('MEMORY_HOTPLUG', 'MEMORY_HOTREMOVE', 'MIGRATION', 'SPARSEMEM_VMEMMAP',
+          'ZONE_DEVICE', 'PCI_P2PDMA')
 
 
 def check_config(text, enabled):
@@ -22,6 +27,13 @@ def check_config(text, enabled):
     elif any(values.get(key) == 'y' for key in
              ('PROVE_LOCKING', 'DEBUG_ATOMIC_SLEEP', 'KASAN', 'KASAN_GENERIC')):
         raise ValueError('debug kernel cannot certify the default profile')
+
+
+def check_p2pdma(text):
+    values = dict(re.findall(r'^CONFIG_([A-Z0-9_]+)=(\S+)$', text, re.M))
+    missing = [key for key in P2PDMA if values.get(key) != 'y']
+    if missing:
+        raise ValueError('kernel config missing P2PDMA symbols: ' + ','.join(missing))
 
 
 def identity(config, enabled):
@@ -85,6 +97,8 @@ def main():
         check_identity(source, output, enabled)
     elif action == 'config':
         check_config(source.read_text(), enabled)
+    elif action == 'p2pdma':
+        check_p2pdma(source.read_text())
     elif action == 'console':
         counts = debug_reports(source.read_text())
         output.write_text(json.dumps(dict(enabled=enabled, **counts), sort_keys=True) + '\n')

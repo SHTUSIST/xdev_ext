@@ -14,3 +14,13 @@ Existing module parameters select the window and segment sizes, delayed
 completion (delay_us), and fail_mode=none, pre_submit or ambiguous.
 Ambiguous completion deliberately retains resources; use a fresh guest for
 that failure case. See the repository testing guide for evidence checks.
+
+CE chains a and d copy every batch out to the window and back into the same
+host frames, so comparing those frames passes even if no copy ran. The
+control tool therefore fills the window with 0xc3 before the session and
+checks it afterwards (XDEV_EXT_MECH_CE_WINDOW line): at least one slot must
+hold copied data, no data piece may still be 0xc3, chain d's slots must
+match the frame pattern, and nothing may be written past the used slots.
+The read()/write() interface above is what the tool uses here. A D2H copy
+that was skipped while the H2D copy ran is still not detected: the frames
+already hold those bytes.

@@ -695,6 +695,7 @@ if (( RUN_ONLY )); then
     verify_socket_config
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     if (( ${GPU:-0} )); then verify_gpu_identity; fi
+    python3 "$DEBUG_HELPER" p2pdma "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
     if (( MECHANISM_VARIANTS )); then e2_verify_identity; fi
@@ -768,6 +769,8 @@ if (( ! RUN_ONLY )); then
 		XDP_SOCKETS_DIAG CRYPTO IO_URING_XDEV_EXT_BPF_POLICY \
 		XDP_SOCKETS_XDEV_EXT_POLICY XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY \
 		VIRTIO VIRTIO_PCI VIRTIO_NET BPF_JIT_ALWAYS_ON; do cfg -e "$symbol"; done
+	# Every profile: PEER admission of a device BAR needs upstream P2PDMA.
+	for symbol in MEMORY_HOTPLUG MEMORY_HOTREMOVE MIGRATION SPARSEMEM_VMEMMAP ZONE_DEVICE PCI_P2PDMA; do cfg -e "$symbol"; done
 	if (( CE_SIM )); then cfg -e MODULES -e MODULE_UNLOAD -e XDEV_EXT_MECH_CE -e XDEV_EXT_MECH_DMA; fi
     if (( CE_SIM )) && [[ "$PROVIDER_CASE" == normal ]]; then
         cfg -e XDEV_EXT_MECH_IAA -e CRYPTO_DEFLATE
@@ -797,6 +800,7 @@ if (( ! RUN_ONLY )); then
 	for symbol in IO_URING_XDEV_EXT_BPF_POLICY XDP_SOCKETS_XDEV_EXT_POLICY XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY; do cfg -e "$symbol"; done
 	kmake olddefconfig >>"$EV/olddefconfig.log" 2>&1
     verify_socket_config
+    python3 "$DEBUG_HELPER" p2pdma "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
     if (( XDOMAIN )); then
         for symbol in MODULES MODULE_UNLOAD MEMORY_HOTPLUG MEMORY_HOTREMOVE MIGRATION SPARSEMEM_VMEMMAP ZONE_DEVICE PCI_P2PDMA DEBUG_INFO_BTF DEBUG_INFO_BTF_MODULES KUNIT USB4_KUNIT_TEST DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do
             grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "XDOMAIN_SETUP_FAIL CONFIG_$symbol=y required" >&2; exit 1; }
@@ -1374,10 +1378,13 @@ if [ "$ce_sim" = 1 ]; then
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
 		--timeout-ms "$cli_timeout_ms" >/tmp/ce-a.log 2>&1
 	ce_check /tmp/ce-a.log a
+	# Same frames out and back: only the device window shows the copies ran.
+	grep -Eq '^XDEV_EXT_MECH_CE_WINDOW=PASS chain=a written=[1-9][0-9]* ' /tmp/ce-a.log
 	$ctl ce-chain --chain d --ce-dev /dev/xdev_ext_ce_sim --ce-len "$ce_len" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
 		--timeout-ms "$cli_timeout_ms" >/tmp/ce-d.log 2>&1
 	ce_check /tmp/ce-d.log d
+	grep -Eq '^XDEV_EXT_MECH_CE_WINDOW=PASS chain=d written=[1-9][0-9]* .* reference=frames ' /tmp/ce-d.log
 fi
 # The reverse chain owns a distinct simulated device window.
 if [ "$rx_ce" = 1 ]; then

@@ -1019,6 +1019,11 @@ def check_cross_session(con, g, d):
     for role in ('AGG_CEVA', 'AGG_LBA'):
         sec = con.section(role)
         _require(sec.exit == CTL_SETUP and sec.ready() is None, role + ' attempt was admitted')
+    # The out-of-device window must be refused by the kernel at CREATE, not by
+    # the tool before it (e.g. its own window fill through the device file).
+    _require(any(line.endswith('chain a: Invalid argument')
+                 for line in con.section('AGG_CEVA').lines),
+             'AGG_CEVA was not refused by CREATE')
     stats_probe = con.section('AGG_STATS')
     _require(stats_probe.exit == CTL_SETUP and not stats_probe.starting('XDEV_EXT_MECH_STATS ') and
              any('No such file or directory' in line for line in stats_probe.lines),

@@ -258,7 +258,7 @@ class CtlSourceTest(unittest.TestCase):
             "XDEV_EXT_MECH_NIC_CE_NVME_E2E"})
         for report in ("nic_nvme", "fq_dup", "window_reject", "native_copy",
                        "group_timeout", "shared_umem", "prog_detach",
-                       "ring_exit", "unbind", "nvme_nic", "ce_chain", "nic_ce_nvme"):
+                       "ring_exit", "unbind", "nvme_nic", "ce_chain", "ce_window", "nic_ce_nvme"):
             self.assertIn(f"xdev_ext_mech_ctl_report_{report}(", self.ctl)
         self.assertIn("xdev_ext_mech_ctl_stats_line(", self.ctl)
         core = strip_comments((TOOLS / "xdev_ext_mech_ctl_core.h").read_text())

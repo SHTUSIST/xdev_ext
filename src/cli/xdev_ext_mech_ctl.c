@@ -1670,6 +1670,18 @@ static __u8 ctl_pattern(__u32 frame, __u32 off)
 	return (__u8)(frame * 131U + off * 7U + 0x5aU);
 }
 
+/*
+ * Device window of CE chains a and d (xdev_ext_mech_ctl_ce_window_check()):
+ * poisoned before START, read back after the session.
+ */
+struct ctl_ce_window {
+	struct xdev_ext_mech_cuda *cuda;	/* CUDA allocation, else fd */
+	int fd;					/* stand-in: read()/write() */
+	__u64 va, len;
+	int result;				/* oracle result, -EAGAIN: not run */
+	__u32 written;
+};
+
 struct ctl_source {
 	const struct ctl_opts *o;
 	const char *ifname;		/* AF_XDP TX stage, or NULL */
@@ -1679,6 +1691,7 @@ struct ctl_source {
 	__u64 window_groups;
 	bool iou_umem;			/* pool: the ring's XDEV_EXT UMEM */
 	bool user_pattern;		/* chain d: user fills and compares */
+	struct ctl_ce_window *ce_window;	/* chains a and d */
 	bool started;			/* distinguishes runtime from setup failure */
 	__u32 nic_path;
 	struct xdev_ext_mech_transport_stats_v3 accounting;
@@ -1727,6 +1740,78 @@ static int ctl_zc_tx_xdp(struct xdev_ext_xsk_redirect *redirect,
 	ret = xdev_ext_xsk_redirect_attach_pass(redirect,
 		(int)if_nametoindex(src->ifname), XDP_FLAGS_DRV_MODE);
 	return ret == -EBUSY ? 0 : ret;
+}
+
+/* Whole device window: fill with @value (@out NULL) or read into @out. */
+static int ctl_ce_window_io(struct ctl_ce_window *w, void *out, __u8 value)
+{
+	__u8 *buf = out;
+	ssize_t got;
+	__u64 done;
+	int ret = 0;
+
+	if (w->cuda)
+		return xdev_ext_mech_cuda_window(w->cuda, out, value, w->len);
+	if (w->fd < 0)
+		return -EOPNOTSUPP;
+	if (!out) {
+		buf = malloc(w->len);
+		if (!buf)
+			return -ENOMEM;
+		memset(buf, value, w->len);
+	}
+	for (done = 0; !ret && done < w->len; done += (__u64)got) {
+		got = out ? pread(w->fd, buf + done, w->len - done, (off_t)(w->va + done)) :
+			    pwrite(w->fd, buf + done, w->len - done, (off_t)(w->va + done));
+		if (got < 0 && errno == EINTR)
+			got = 0;
+		else if (got <= 0)
+			ret = got < 0 ? -errno : -EIO;
+	}
+	if (!out)
+		free(buf);
+	return ret;
+}
+
+static int ctl_ce_window_fill(struct ctl_ce_window *w)
+{
+	return ctl_ce_window_io(w, NULL, XDEV_EXT_MECH_CTL_CE_POISON);
+}
+
+/* After the session, while the frames are still mapped. */
+static int ctl_ce_window_verify(struct ctl_ce_window *w, const struct ctl_opts *o,
+				const struct xdev_ext_mech_layout *l, bool user_pattern,
+				__u32 nr_user)
+{
+	struct xdev_ext_mech_ctl_ce_ref ref = {
+		.count = nr_user, .stride = XDEV_EXT_MECH_CTL_FRAME_SIZE,
+		.off = l->hdr_room, .len = l->seg_len,
+	};
+	__u8 *window = malloc(w->len), *expected = NULL;
+	__u32 i, j;
+	int ret;
+
+	if (!window)
+		return -ENOMEM;
+	ret = ctl_ce_window_io(w, window, 0);
+	if (!ret && user_pattern) {
+		/* The frames as filled, not as returned: D2H can corrupt them. */
+		expected = malloc((size_t)nr_user * XDEV_EXT_MECH_CTL_FRAME_SIZE);
+		if (!expected)
+			ret = -ENOMEM;
+		for (i = 0; expected && i < nr_user; i++)
+			for (j = 0; j < XDEV_EXT_MECH_CTL_FRAME_SIZE; j++)
+				expected[(size_t)i * XDEV_EXT_MECH_CTL_FRAME_SIZE + j] =
+					ctl_pattern(i, j);
+		ref.base = expected;
+	}
+	if (!ret)
+		ret = xdev_ext_mech_ctl_ce_window_check(window, w->len, (__u32)o->depth,
+							l->group_bytes, o->groups, &ref,
+							&w->written);
+	free(expected);
+	free(window);
+	return ret;
 }
 
 /*
@@ -1845,6 +1930,17 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
  ctl_diag_stages(&r, &c);
 	if (ret)
 		goto out;
+	if (src->ce_window) {
+		/*
+		 * Poison the device window only once CREATE has admitted it, so an
+		 * out-of-range window is refused by the kernel and not by this write.
+		 */
+		ret = ctl_ce_window_fill(src->ce_window);
+		if (ret) {
+			ctl_err("chain %c: device window fill: %s\n", o->chain, strerror(-ret));
+			goto out;
+		}
+	}
 	if (!o->expect_unbind) {
 		ret = ctl_notify_arm(r.ring, r.session, o->groups);
 		if (ret)
@@ -1898,6 +1994,9 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		for (j = 0; *frames_ok && j < XDEV_EXT_MECH_CTL_FRAME_SIZE; j++)
 			*frames_ok = ((__u8 *)umem)[(size_t)i *
 				XDEV_EXT_MECH_CTL_FRAME_SIZE + j] == ctl_pattern(i, j);
+	if (!ret && src->ce_window)
+		src->ce_window->result = ctl_ce_window_verify(src->ce_window, o, &l,
+							      src->user_pattern, nr_user);
 	if (!ret && !o->expect_unbind && iou_umem)
 		*frames_ok = *frames_ok && s->published == nr_user &&
 			s->recycled >= (o->groups - pool_groups) * frames &&
@@ -2072,12 +2171,14 @@ static int cmd_ce_chain(struct ctl_opts *o)
 {
 	struct xdev_ext_mech_cuda cuda = { 0 };
 	struct ctl_source src = { .o = o };
+	struct ctl_ce_window window = { .fd = -1, .result = -EAGAIN };
 	const char *base = strrchr(o->ce_dev, '/');
 	struct xdev_ext_mech_stats s;
 	char line[512];
 	int fds[4] = { -1, -1, -1, -1 };
 	int ret, verdict = CTL_SETUP;
 	bool frames_ok, nic = o->chain == 'b' || o->chain == 'c';
+	bool sim = !strncmp(base ? base + 1 : o->ce_dev, "xdev_ext_ce_sim", 10);
 	__u32 n = 0, i;
 
 	if (o->chain < 'a' || o->chain > 'd' || !o->groups || !o->ce_len ||
@@ -2141,16 +2242,29 @@ static int cmd_ce_chain(struct ctl_opts *o)
 	src.nr_stages = n;
 	src.iou_umem = !nic;
 	src.user_pattern = o->chain == 'd';
+	if (!nic) {
+		/*
+		 * A round trip between the same frames compares equal when the
+		 * copy engine moved nothing: check the device window as well.
+		 */
+		window.cuda = o->ce_alloc ? &cuda : NULL;
+		window.fd = sim ? fds[1] : -1;
+		window.va = o->ce_alloc ? 0 : o->ce_va;
+		window.len = o->ce_len;
+		src.ce_window = &window;	/* filled after CREATE admits it */
+	}
 	ret = ctl_run_source(&src, &s, &frames_ok);
 	if (ret) {
 		ctl_err("chain %c: %s\n", o->chain, strerror(-ret));
 		verdict = src.started ? CTL_FAIL : CTL_SETUP;
 		goto out;
 	}
+	if (src.ce_window)
+		frames_ok = ctl_report(xdev_ext_mech_ctl_report_ce_window(
+			line, sizeof(line), window.result, o->chain, window.written,
+			o->depth, src.user_pattern), line) == CTL_PASS && frames_ok;
 	verdict = ctl_report(xdev_ext_mech_ctl_report_ce_chain(
-		line, sizeof(line), &s, o->chain, o->groups, n,
-		!strncmp(base ? base + 1 : o->ce_dev, "xdev_ext_ce_sim", 10),
-		frames_ok), line);
+		line, sizeof(line), &s, o->chain, o->groups, n, sim, frames_ok), line);
 	if (!o->reliable)
 		ctl_print_stats(&s);
 	if (src.nic_path)
@@ -2323,7 +2437,10 @@ static void usage(FILE *f)
 "chains: a NVMe READ -> CE H2D -> CE D2H -> NVMe WRITE (XDEV_EXT UMEM)\n"
 "        b NVMe READ -> CE H2D -> CE D2H -> AF_XDP TX (AF_XDP UMEM)\n"
 "        c as b, received by a nic-nvme session\n"
-"        d user frames -> CE H2D -> CE D2H, compared by user space\n");
+"        d user frames -> CE H2D -> CE D2H, compared by user space\n"
+"        a and d also fill the device window with 0xc3 before START and check\n"
+"        it after (XDEV_EXT_MECH_CE_WINDOW): the frames compare alone passes\n"
+"        when the copy engine moved nothing.  A lost D2H alone stays unseen.\n");
 }
 
 static int parse_u64_opt(const char *arg, __u64 *v, bool *have)
