@@ -305,12 +305,15 @@ fi
 fi
 
 # --- G4: VRAM exported as DMA-BUF, imported as the PEER pool --------------
+# The window holds $groups slots and the chain runs $groups batches with
+# request ids 1..$groups; the NVMe program reads batch id from slot
+# id % slots, so the last batch read slot 0 into the chain's only frame.
 if skipped dmabuf-peer; then :
 else
 if clear_window; then
 	bounded "$case_limit_s" /tmp/gpu-dmabuf.log \
 		"$dir/xdev_ext_gpu_dmabuf" --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/gpu-src.bin \
-		--group-bytes 8192 --frame-bytes 65536 -- \
+		--group-bytes 8192 --frame-bytes 65536 --batches "$groups" -- \
 		"$dir/xdev_ext_peer_chain" --allocation-fd '{fd}' "$source_ng" "$destination_ng" \
 		"$groups" 8192 9 "$source_slba" "$target_slba" "$dir"
 	rc=$?
@@ -318,7 +321,7 @@ if clear_window; then
 	if timed_out dmabuf-peer "$rc"; then
 		case_result dmabuf-peer FAIL rc="$rc" reason=timeout
 	elif [ "$rc" = 0 ] && grep -Eq "^peer chain: done=$groups abort=0 inflight=0 sequestered=0 status=0$" /tmp/gpu-dmabuf.log &&
-	   grep -Fq 'XDEV_EXT_GPU_DMABUF vram_holds_last_group=yes' /tmp/gpu-dmabuf.log && compare_window; then
+	   grep -Fxq 'XDEV_EXT_GPU_DMABUF vram_holds_last_batch_group=yes group=0' /tmp/gpu-dmabuf.log && compare_window; then
 		case_result dmabuf-peer PASS bytes=$((window_nlb * 512))
 	elif [ "$rc" != 0 ] && grep -Eq '^XDEV_EXT_GPU_DMABUF device=[^ ]+ dma_buf_supported=0$' /tmp/gpu-dmabuf.log &&
 	     caps_have dma_buf=0; then

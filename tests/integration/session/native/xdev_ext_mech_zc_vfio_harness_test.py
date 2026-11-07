@@ -257,13 +257,21 @@ fi
 cat "$FAKE/dmabuf.out" 2>/dev/null
 rc=$(cat "$FAKE/dmabuf.rc" 2>/dev/null || echo 0)
 [ "$rc" = 0 ] || exit "$rc"
-while [ "$1" != -- ]; do shift; done
+batches=
+while [ "$1" != -- ]; do
+	[ "$1" != --batches ] || batches=$2
+	shift
+done
 shift
 program=$1
 shift 3
+groups=$3
 FAKE_DMABUF=1 "$program" --allocation-fd 3 "$@"
 rc=$?
-echo 'XDEV_EXT_GPU_DMABUF vram_holds_last_group=yes'
+# As the tool: the source window holds GROUPS slots, the last batch read
+# slot BATCHES % GROUPS; without --batches the tool refuses to run.
+[ -n "$batches" ] || exit 2
+echo "XDEV_EXT_GPU_DMABUF vram_holds_last_batch_group=yes group=$((batches % groups))"
 exit "$rc"
 '''
 CE_PASS = ('XDEV_EXT_MECH_CE_GPU=PASS chain={chain}\n'
@@ -585,8 +593,10 @@ class GpuGuestCases(unittest.TestCase):
 
 
 FAKE_LIBCUDA = r'''
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 typedef int CUresult;
 typedef int CUdevice;
 typedef void *CUcontext;
@@ -613,10 +623,34 @@ CUresult cuMemAlloc_v2(CUdeviceptr *pointer, size_t size)
 { (void)size; if (value("FAKE_ALLOC_FAIL")) return 2; *pointer = 0x7f0000000000ULL; return 0; }
 CUresult cuMemFree_v2(CUdeviceptr pointer) { (void)pointer; fputs("FAKE free\n", stderr); return value("FAKE_FREE_FAIL"); }
 CUresult cuMemsetD8_v2(CUdeviceptr pointer, unsigned char byte, size_t size) { (void)pointer; (void)byte; (void)size; return 0; }
-CUresult cuMemcpyDtoH_v2(void *host, CUdeviceptr pointer, size_t size) { (void)host; (void)pointer; (void)size; return 0; }
+/* FAKE_VRAM names a file with the device contents; the rest stays 0xa5. */
+CUresult cuMemcpyDtoH_v2(void *host, CUdeviceptr pointer, size_t size)
+{
+	const char *path = getenv("FAKE_VRAM");
+	FILE *file;
+	size_t got = 0;
+
+	(void)pointer;
+	if (path) {
+		file = fopen(path, "rb");
+		if (!file)
+			return 3;
+		got = fread(host, 1, size, file);
+		fclose(file);
+	}
+	memset((char *)host + got, 0xa5, size - got);
+	return 0;
+}
 CUresult cuCtxSynchronize(void) { return 0; }
+/* FAKE_EXPORT=1 exports a descriptor; otherwise CUDA_ERROR_NOT_SUPPORTED. */
 CUresult cuMemGetHandleForAddressRange(void *handle, CUdeviceptr pointer, size_t size, int type, unsigned long long flags)
-{ (void)handle; (void)pointer; (void)size; (void)type; (void)flags; return 801; }
+{
+	(void)pointer; (void)size; (void)flags;
+	if (!value("FAKE_EXPORT") || type != 1)
+		return 801;
+	*(int *)handle = open("/dev/null", O_RDONLY | O_CLOEXEC);
+	return *(int *)handle < 0 ? 1 : 0;
+}
 CUresult cuPointerGetAttribute(void *data, int attribute, CUdeviceptr pointer)
 {
 	(void)pointer;
@@ -689,6 +723,155 @@ class GpuCapsProbe(unittest.TestCase):
         run = self.probe(bdf='0000:02:00.0')
         self.assertNotEqual(run.returncode, 0)
         self.assertNotIn('XDEV_EXT_GPU_CAPS', run.stdout)
+
+
+# /dev/xdev_ext_peer stand-in: REGISTER of a DMA-BUF returns an allocation fd.
+PEER_SHIM = r"""
+#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <fcntl.h>
+#include <stdarg.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <sys/types.h>
+#include "@HEADER@"
+
+static int control = -1;
+
+static int real_open(const char *path, int flags, mode_t mode)
+{
+	int (*next)(const char *, int, ...) = (int (*)(const char *, int, ...))dlsym(RTLD_NEXT, "open");
+
+	return next(path, flags, mode);
+}
+
+static int peer_open(const char *path, int flags, va_list args)
+{
+	mode_t mode = (flags & O_CREAT) ? va_arg(args, mode_t) : 0;
+
+	if (!strcmp(path, "/dev/xdev_ext_peer"))
+		return control = real_open("/dev/null", O_RDWR | (flags & O_CLOEXEC), 0);
+	return real_open(path, flags, mode);
+}
+
+int open(const char *path, int flags, ...)
+{
+	va_list args;
+	int fd;
+
+	va_start(args, flags);
+	fd = peer_open(path, flags, args);
+	va_end(args);
+	return fd;
+}
+
+int open64(const char *path, int flags, ...)
+{
+	va_list args;
+	int fd;
+
+	va_start(args, flags);
+	fd = peer_open(path, flags, args);
+	va_end(args);
+	return fd;
+}
+
+int ioctl(int fd, unsigned long request, ...)
+{
+	int (*next)(int, unsigned long, ...) = (int (*)(int, unsigned long, ...))dlsym(RTLD_NEXT, "ioctl");
+	struct xdev_ext_peer_register *reg;
+	va_list args;
+
+	va_start(args, request);
+	reg = va_arg(args, struct xdev_ext_peer_register *);
+	va_end(args);
+	if (fd != control || control < 0)
+		return next(fd, request, reg);
+	if (request != XDEV_EXT_PEER_REGISTER || reg->flags != XDEV_EXT_PEER_REGISTER_F_DMABUF ||
+	    reg->gpu_fd < 0 || reg->gpu_va || !reg->len)
+		return -1;
+	reg->generation = 3;
+	return real_open("/dev/null", O_RDWR | O_CLOEXEC, 0);
+}
+"""
+
+
+class GpuDmabufVramGroup(unittest.TestCase):
+    """The G4 VRAM oracle names the group the session's last batch read.
+
+    The NVMe program places batch @request_id at slot request_id % slots of
+    the source window (xdev_ext_mp_nvme_s0_slba), and the session numbers its
+    batches from 1 (b->id = ++next_batch_id).  The peer chain runs one frame
+    at depth 1, so after N batches frame 0 holds group N % slots: with one
+    batch per slot that is group 0, not the window's last group."""
+
+    GROUP = 8192
+    FRAME = 65536
+    BYTES = 2 * 1024 * 1024
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory(prefix='gpu-dmabuf-')
+        root = Path(cls.tmp.name)
+        header = (HERE / '../../../../include/uapi/linux/xdev_ext_peer.h').resolve()
+        (root / 'fake.c').write_text(FAKE_LIBCUDA)
+        (root / 'shim.c').write_text(PEER_SHIM.replace('@HEADER@', str(header)))
+        subprocess.run(['cc', '-shared', '-fPIC', '-o', str(root / 'libcuda.so.1'), str(root / 'fake.c')],
+                       check=True)
+        subprocess.run(['cc', '-shared', '-fPIC', '-Wall', '-Wextra', '-Werror', '-o',
+                        str(root / 'peer_shim.so'), str(root / 'shim.c'), '-ldl'], check=True)
+        subprocess.run(['cc', '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror', '-o',
+                        str(root / 'dmabuf'), str(GPU_DMABUF), '-ldl'], check=True)
+        cls.root = root
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    @staticmethod
+    def group_bytes(index):
+        return bytes([0x10 + index]) * GpuDmabufVramGroup.GROUP
+
+    def run_tool(self, slots, batches, frame0_group):
+        root = self.root
+        source = root / f'src-{slots}.bin'
+        source.write_bytes(b''.join(self.group_bytes(i) for i in range(slots)))
+        vram = root / 'vram.bin'
+        vram.write_bytes(self.group_bytes(frame0_group))
+        env = dict(os.environ, LD_LIBRARY_PATH=str(root), LD_PRELOAD=str(root / 'peer_shim.so'),
+                   FAKE_BDF='0000:01:00.0', FAKE_DMA_BUF='1', FAKE_EXPORT='1', FAKE_VRAM=str(vram))
+        return subprocess.run([str(root / 'dmabuf'), '--bdf', '0000:01:00.0', '--bytes', str(self.BYTES),
+                               '--expect', str(source), '--group-bytes', str(self.GROUP),
+                               '--frame-bytes', str(self.FRAME), '--batches', str(batches),
+                               '--', '/bin/true', '{fd}'],
+                              capture_output=True, text=True, env=env, timeout=30)
+
+    def test_frame_zero_must_hold_the_group_of_the_last_request_id(self):
+        # (slots, batches): one batch per slot as the peer chain runs it, and
+        # sequences that wrap the window or stop short of it.
+        for slots, batches in ((4, 4), (4, 6), (3, 7), (4, 3), (1, 5)):
+            expected = batches % slots
+            for held in range(slots):
+                with self.subTest(slots=slots, batches=batches, held=held):
+                    run = self.run_tool(slots, batches, held)
+                    self.assertIn('XDEV_EXT_GPU_DMABUF program_exit=0\n', run.stdout, run.stderr)
+                    verdict = 'yes' if held == expected else 'no'
+                    self.assertIn(f'XDEV_EXT_GPU_DMABUF vram_holds_last_batch_group={verdict} '
+                                  f'group={expected}\n', run.stdout, run.stderr)
+                    self.assertEqual(run.returncode, 0 if held == expected else 1, run.stdout + run.stderr)
+
+    def test_batches_is_required_and_positive(self):
+        root = self.root
+        source = root / 'src-usage.bin'
+        source.write_bytes(self.group_bytes(0) * 4)
+        base = [str(root / 'dmabuf'), '--bdf', '0000:01:00.0', '--bytes', str(self.BYTES),
+                '--expect', str(source), '--group-bytes', str(self.GROUP), '--frame-bytes', str(self.FRAME)]
+        for extra in ([], ['--batches', '0']):
+            with self.subTest(extra=extra):
+                run = subprocess.run(base + extra + ['--', '/bin/true'], capture_output=True, text=True,
+                                     timeout=30)
+                self.assertEqual(run.returncode, 2, run.stdout + run.stderr)
+                self.assertNotIn('XDEV_EXT_GPU_DMABUF', run.stdout)
 
 
 class GuestLinkReadiness(unittest.TestCase):

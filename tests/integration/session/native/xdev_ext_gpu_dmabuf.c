@@ -3,7 +3,7 @@
  * Export real VRAM as a DMA-BUF and hand it to a PEER program.
  *
  *   xdev_ext_gpu_dmabuf --bdf PCI_BDF --bytes N --expect SOURCE_FILE
- *       --group-bytes G --frame-bytes F -- PROGRAM ARG... ('{fd}' -> fd)
+ *       --group-bytes G --frame-bytes F --batches B -- PROGRAM ARG... ('{fd}' -> fd)
  *   xdev_ext_gpu_dmabuf --caps --bdf PCI_BDF
  *
  * --caps prints what CUDA reports for that GPU: GPUDirect RDMA and dma_buf
@@ -16,9 +16,15 @@
  * the whole range with cuMemGetHandleForAddressRange(DMA_BUF_FD), registers
  * the export with /dev/xdev_ext_peer (XDEV_EXT_PEER_REGISTER_F_DMABUF) and
  * runs PROGRAM with the allocation fd.  Afterwards it copies the VRAM back
- * and reports whether the last G-byte group of SOURCE_FILE starts at an F-byte
- * frame boundary: evidence that the NVMe READ landed in VRAM.  The VRAM is
- * released only after every fd is closed.  Correctness only, no timing.
+ * and reports whether the G-byte group of SOURCE_FILE that PROGRAM's last
+ * batch read starts at an F-byte frame boundary: evidence that the NVMe READ
+ * landed in VRAM.  The VRAM is released only after every fd is closed.
+ * Correctness only, no timing.
+ *
+ * SOURCE_FILE is the NVMe window, SOURCE_FILE / G slots of G bytes.  The
+ * session numbers its batches 1..B and the NVMe program reads batch
+ * request_id from slot request_id % slots (xdev_ext_mp_nvme_s0_slba()), so
+ * the last batch, B, read group B % slots: group 0 when B equals the slots.
  */
 #define _GNU_SOURCE
 #include <dlfcn.h>
@@ -177,7 +183,7 @@ static int read_file(const char *path, unsigned char **data, size_t *size)
 int main(int argc, char **argv)
 {
 	const char *bdf = NULL, *expect = NULL;
-	unsigned long long bytes = 0, group = 0, frame = 0;
+	unsigned long long bytes = 0, group = 0, frame = 0, batches = 0;
 	unsigned char *source = NULL, *vram = NULL;
 	size_t source_size = 0;
 	CUdeviceptr pointer = 0;
@@ -196,9 +202,10 @@ int main(int argc, char **argv)
 		else if (!strcmp(argv[i], "--expect")) expect = argv[++i];
 		else if (!strcmp(argv[i], "--group-bytes")) group = strtoull(argv[++i], NULL, 0);
 		else if (!strcmp(argv[i], "--frame-bytes")) frame = strtoull(argv[++i], NULL, 0);
+		else if (!strcmp(argv[i], "--batches")) batches = strtoull(argv[++i], NULL, 0);
 		else return 2;
 	}
-	if (!bdf || !expect || !bytes || !group || !frame || program < 0 || bytes % frame ||
+	if (!bdf || !expect || !bytes || !group || !frame || !batches || program < 0 || bytes % frame ||
 	    group > frame || read_file(expect, &source, &source_size) || source_size < group ||
 	    source_size % group) {
 		fprintf(stderr, "usage: see source header\n");
@@ -275,8 +282,8 @@ int main(int argc, char **argv)
 	}
 	{
 		int program_ret = ret, found = 0;
-		const unsigned char *last = source + source_size - group;
-		unsigned long long offset;
+		unsigned long long last_group = batches % (source_size / group), offset;
+		const unsigned char *last = source + last_group * group;
 
 		ret = 1;
 		vram = malloc(bytes);
@@ -285,7 +292,8 @@ int main(int argc, char **argv)
 		CHECK(cu.to_host(vram, pointer, bytes), "cuMemcpyDtoH");
 		for (offset = 0; offset + group <= bytes; offset += frame)
 			found |= !memcmp(vram + offset, last, group);
-		printf("XDEV_EXT_GPU_DMABUF vram_holds_last_group=%s\n", found ? "yes" : "no");
+		printf("XDEV_EXT_GPU_DMABUF vram_holds_last_batch_group=%s group=%llu\n",
+		       found ? "yes" : "no", last_group);
 		ret = program_ret ? program_ret : !found;
 	}
 out:
