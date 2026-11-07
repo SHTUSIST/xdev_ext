@@ -141,7 +141,10 @@ def runtime_mutate(path,s,name):
     lease=path.endswith('xdev_ext_compfam_copy_lease.c')
     if lease and name in ['ce_cleanup_scan','ce_own_hold']:
         old,new=('if (!other->cleanup_holds &&','if (true &&') if name=='ce_cleanup_scan' else ('else if (group->cleanup_holds)','else if (false)')
-        return function_edit(s,'xdev_ext_comp_copy_lease_get',lambda b:replace_exact(b,old,new))
+        # Range admission moved the scan/hold body into the shared _mode helper
+        # behind the legacy and range entry points; mutate the body that owns it.
+        target='xdev_ext_comp_copy_lease_get_mode' if re.search(r'^static int xdev_ext_comp_copy_lease_get_mode\(',s,re.M) else 'xdev_ext_comp_copy_lease_get'
+        return function_edit(s,target,lambda b:replace_exact(b,old,new))
 
     if shared:
         if name=='dma_alloc_order':

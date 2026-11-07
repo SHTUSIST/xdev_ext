@@ -389,7 +389,7 @@ static void binds(void){
         defaults();
         init_fixture(&f,dma);
         struct xdev_ext_mech_stage_uapi u=bind_u;
-        u.flags=1;
+        u.flags=2;
         int before=allocations;
         CHECK(f.st.cls->bind(&f.st,&u)==-EINVAL&&allocations==before&&!f.st.priv);
         bind_region_errno=-ENXIO;
