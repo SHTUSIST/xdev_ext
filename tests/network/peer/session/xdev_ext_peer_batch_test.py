@@ -16,31 +16,30 @@ plan. This certifies command construction, admission and lifetime only; no
 physical DMA, GPU or timing is involved.
 """
 from pathlib import Path
+import argparse
+import hashlib
+import io
+import json
 import os
 import re
 import resource
+import shutil
 import subprocess
 import sys
 import tempfile
+import unittest
 
-def source_owner():
-    """Find the canonical owner of this test or its ordinary registered copy."""
-    for parent in Path(__file__).resolve().parents:
-        marker = parent / 'view.json'
-        if marker.is_file():
-            import json
-            receipt = json.loads(marker.read_text())
-            if receipt.get('kind') == 'host-source-view':
-                return Path(receipt['canonical_root']).resolve()
-        if (parent / 'source-layout.json').is_file():
-            return parent
-    raise RuntimeError('SETUP: no canonical owner or registered source view')
-
-
-# Production paths below are canonical (src/core, src/storage), so resolve the
-# canonical root from either the canonical file or its registered view copy.
-KERNEL = source_owner()
+KERNEL = None  # Resolved through the real owner at execution, including native views.
 HERE = Path(__file__).resolve().parent
+
+
+def source_root():
+    for parent in Path(__file__).resolve().parents:
+        if (parent / 'tools/layout.py').is_file():
+            sys.path.insert(0, str(parent / 'tools'))
+            from layout import canonical_root
+            return canonical_root(__file__)
+    raise LookupError('project tools/layout.py is absent from the source ancestry')
 
 
 def read(rel):
@@ -163,7 +162,7 @@ static inline long PTR_ERR(const void *p) { return (long)p; }
 static inline bool IS_ERR(const void *p) { return (unsigned long)p >= (unsigned long)-MAX_ERRNO; }
 static inline bool IS_ERR_OR_NULL(const void *p) { return !p || IS_ERR(p); }
 #define ERR_CAST(p) ((void *)(p))
-static void fail(const char *why) { fprintf(stderr, "FATAL: %s\n", why); abort(); }
+static void fail(const char *why) { fprintf(stderr, "ASSERTION PEER_BATCH_MODEL: %s\n", why); fflush(stderr); _Exit(1); }
 
 /* atomic_t and completions; the test is single threaded, the controller runs
  * in the calling thread exactly where the block layer could complete. */
@@ -468,10 +467,13 @@ static bool controller_complete_one(void)
 static int stuck;
 static unsigned long wait_for_completion_io_timeout(struct completion *x, unsigned long t)
 {
+ bool progressed = false;
  (void)t;
- while (!x->done && controller_complete_one()) {}
+ while (!x->done && controller_complete_one()) progressed = true;
  if (x->done) { x->done--; stuck = 0; return 1; }
- if (++stuck > 3) fail("waiting with no command in flight");
+ /* Issuer bias may keep done clear after a real command completed. */
+ if (progressed) stuck = 0;
+ else if (++stuck > 3) fail("waiting with no command in flight");
  return 0;
 }
 static int tags_in_use(void) { int i, n = 0; for (i = 0; i < NREQ; i++) n += reqs[i].allocated; return n; }
@@ -550,7 +552,8 @@ static struct xdev_ext_peer_provider_ops provider_ops;
 static u64 provider_tag;
 static int failures, checks;
 #define CHECK(c, text) do { checks++; if (!(c)) { printf("not ok %d - %s (line %d)\n", checks, text, __LINE__); \
-	failures++; } else printf("ok %d - %s\n", checks, text); } while (0)
+	failures++; fprintf(stderr, "ASSERTION PEER_BATCH_CHECK: %s\n", text); fflush(stderr); _Exit(1); \
+	} else printf("ok %d - %s\n", checks, text); } while (0)
 
 static u8 pattern_disk(u64 i) { return (u8)(((i * 2654435761u) >> 13) ^ (i >> 9) ^ 0x3c); }
 static u8 pattern_vram(u64 i) { return (u8)(((i * 40503u) >> 7) ^ (i >> 12) ^ 0xa7); }
@@ -1031,66 +1034,382 @@ MUTANTS = [
 ]
 
 
-def build(parts, directory, name, main=MAIN):
+# Names/fault edits and all original C wants above are unchanged. These messages
+# bind each fault to its existing first decisive CHECK/model invariant.
+MUTANT_ASSERTIONS = {
+    'destination overlap admitted': (('PEER_BATCH_CHECK', 'duplicate target: whole batch refused, nothing issued'),),
+    'device-memory wrap admitted': (('PEER_BATCH_CHECK', 'device-memory span wrapping u64: refused'),),
+    'one provider page per command': (('PEER_BATCH_CHECK', '1 MiB read is one command and completes (64 KiB provider pages)'),),
+    'issue continues after an observed failure': (('PEER_BATCH_CHECK', 'one tag: the failure completes during the next allocation, so nothing after it is issued'),),
+    'failure checked only before the allocation': (('PEER_BATCH_CHECK', 'one tag: the failure completes during the next allocation, so nothing after it is issued'),),
+    'one command in flight at a time': (('PEER_BATCH_CHECK', 'four 1 MiB commands are all in flight before the first completes (queue depth 4)'),),
+    'accepted failure released as quiesced': (('PEER_BATCH_CHECK', "accepted error retires every lease into the real requester's dispatch epoch"),),
+    'UNKNOWN loses requester binding': (('PEER_BATCH_CHECK', "accepted error retires every lease into the real requester's dispatch epoch"),),
+    'UNKNOWN loses dispatch epoch': (('PEER_BATCH_CHECK', "accepted error retires every lease into the real requester's dispatch epoch"),),
+    'unsubmitted trace starts in a real epoch': (('PEER_BATCH_MODEL', 'trace epoch was not initialized as never dispatched'),),
+    'last lease overrides an earlier UNKNOWN': (('PEER_BATCH_CHECK', 'proof arriving between leases cannot override an earlier uncovered lease or short-circuit retirement'),),
+    'UNKNOWN retirement short-circuits after one uncovered lease': (('PEER_BATCH_CHECK', "accepted error retires every lease into the real requester's dispatch epoch"),),
+    'issuer has no pending bias': (('PEER_BATCH_CHECK', '1 MiB read is one command and completes (64 KiB provider pages)'),),
+    'UNKNOWN command list reused': (('PEER_BATCH_CHECK', "accepted error retires every lease into the real requester's dispatch epoch"),),
+    'later successes extend the prefix': (('PEER_BATCH_CHECK', 'transport error on the first of three accepted commands: completed 0, never resent, unknown retained'),),
+    'request kept until the batch ends': (('PEER_BATCH_CHECK', 'every lease, request and list released after success'),),
+    'refused batch keeps its leases': (('PEER_BATCH_CHECK', '257 discontiguous extents exceed one list: whole batch refused before any command'),),
+}
+
+
+MODEL_PROGRESS_MAIN = r'''int main(void)
+{
+ static const u32 sizes[] = {1, 1, 1, 4, 1};
+ u32 batch, i;
+ int ret;
+ setbuf(stdout, NULL);
+ for (batch = 0; batch < sizeof(sizes) / sizeof(sizes[0]); batch++) {
+  begin(16, RUNS3);
+  batch_init(false, sizes[batch]);
+  for (i = 0; i < sizes[batch]; i++) {
+   desc(i, (u64)i << 20, 1000 + 4096 * i, 1U << 20);
+   expect(i);
+  }
+  ret = run();
+  CHECK(!ret && ub.completed == sizes[batch] && issued == (int)sizes[batch] &&
+        once_each(sizes[batch]) && max_outstanding == 1 && !complete_calls &&
+        images_match() && clean(0), "real completion progress permits another serial batch");
+ }
+ xdev_ext_peer_requester_unregister(requester);
+ requester = NULL;
+ printf("1..%d\n", checks);
+ return failures ? 1 : 0;
+}
+'''
+
+MODEL_NO_PROGRESS_MAIN = r'''int main(void)
+{
+ struct completion empty;
+ setbuf(stdout, NULL);
+ init_completion(&empty);
+ CHECK(!wait_for_completion_io_timeout(&empty, 1), "zero-progress bounded wait 1");
+ CHECK(!wait_for_completion_io_timeout(&empty, 1), "zero-progress bounded wait 2");
+ CHECK(!wait_for_completion_io_timeout(&empty, 1), "zero-progress bounded wait 3");
+ wait_for_completion_io_timeout(&empty, 1);
+ CHECK(false, "fourth zero-progress wait must fail inside the original guard");
+ return failures ? 1 : 0;
+}
+'''
+
+
+def model_contracts(parts):
+    entry = 'int main(void)\n'
+    if MAIN.count(entry) != 1:
+        raise ValueError('exact original fixture main entry required')
+    prefix = MAIN[:MAIN.index(entry)]
+    serial = [row for row in MUTANTS if row[0] == 'one command in flight at a time']
+    if len(serial) != 1:
+        raise ValueError('exact original serialization fault required')
+    _, part, old, new = serial[0]
+    if parts[part].count(old) != 1:
+        raise ValueError('exact original serialization anchor required')
+    serial_parts = dict(parts)
+    serial_parts[part] = parts[part].replace(old, new)
+    return (
+        ('model-progress', serial_parts, prefix + MODEL_PROGRESS_MAIN),
+        ('model-no-progress', parts, prefix + MODEL_NO_PROGRESS_MAIN),
+    )
+
+
+def assertion_markers(stdout, stderr):
+    return re.findall(r'^ASSERTION (PEER_BATCH_CHECK|PEER_BATCH_MODEL): ([^\n]+)$',
+                      stdout + '\n' + stderr, re.M)
+
+
+def setup_status(compile_exit, returncode, stdout, stderr, timed_out):
+    if compile_exit:
+        return 'SETUP_COMPILE'
+    if timed_out:
+        return 'SETUP_TIMEOUT'
+    if returncode is None:
+        return 'SETUP_RUNTIME'
+    if returncode < 0:
+        return 'SETUP_SIGNAL'
+    text = stdout + '\n' + stderr
+    if any(marker in text for marker in ('AddressSanitizer', 'LeakSanitizer',
+                                         'UndefinedBehaviorSanitizer', 'runtime error:')):
+        return 'SETUP_SANITIZER'
+    if returncode not in (0, 1):
+        return 'SETUP_EXIT'
+    return None
+
+
+def classify_mutant(compile_exit, returncode, stdout, stderr, expected, *, timed_out=False):
+    setup = setup_status(compile_exit, returncode, stdout, stderr, timed_out)
+    if setup:
+        return setup
+    markers = assertion_markers(stdout, stderr)
+    if returncode == 0:
+        return 'WRONG_FAILURE' if markers else 'SURVIVED'
+    return 'KILLED' if len(markers) == 1 and markers[0] in expected else 'WRONG_FAILURE'
+
+
+def classify_baseline(compile_exit, returncode, stdout, stderr, *, timed_out=False):
+    setup = setup_status(compile_exit, returncode, stdout, stderr, timed_out)
+    if setup:
+        return setup
+    markers = assertion_markers(stdout, stderr)
+    if returncode:
+        return 'FAIL' if len(markers) == 1 else 'SETUP_RUNTIME'
+    plan = re.findall(r'^1\.\.([1-9][0-9]*)$', stdout, re.M)
+    checks = [int(number) for number in re.findall(r'^ok ([0-9]+) - ', stdout, re.M)]
+    if (markers or len(plan) != 1 or checks != list(range(1, int(plan[0])+1)) or
+            re.search(r'^not ok(?:\s|$)', stdout, re.M)):
+        return 'SETUP_PROTOCOL'
+    return 'PASS'
+
+
+class RunnerClassificationControls(unittest.TestCase):
+    """Decision-only controls: no native/provider/byte oracle is simulated."""
+    expected = ('PEER_BATCH_CHECK', 'independent control')
+    marker = 'ASSERTION PEER_BATCH_CHECK: independent control\n'
+
+    def classify(self, code=1, stdout=None, stderr='', compile_exit=0, timed_out=False):
+        return classify_mutant(compile_exit, code, self.marker if stdout is None else stdout,
+                               stderr, (self.expected,), timed_out=timed_out)
+
+    def test_exact_named_check_exit_one_is_semantic(self):
+        self.assertEqual(self.classify(), 'KILLED')
+
+    def test_exact_named_model_exit_one_is_semantic(self):
+        self.assertEqual(classify_mutant(0, 1, '', 'ASSERTION PEER_BATCH_MODEL: model control\n',
+                                        (('PEER_BATCH_MODEL', 'model control'),)), 'KILLED')
+
+    def test_compile_failure_even_with_marker_is_setup(self):
+        self.assertEqual(self.classify(compile_exit=1), 'SETUP_COMPILE')
+
+    def test_timeout_even_with_marker_is_setup(self):
+        self.assertEqual(self.classify(timed_out=True), 'SETUP_TIMEOUT')
+
+    def test_signal_even_with_marker_is_setup(self):
+        for code in (-6, -9, -11, -15):
+            with self.subTest(code=code):
+                self.assertEqual(self.classify(code=code), 'SETUP_SIGNAL')
+
+    def test_sanitizer_even_with_marker_is_setup(self):
+        for diagnostic in ('AddressSanitizer', 'LeakSanitizer', 'UndefinedBehaviorSanitizer',
+                           'runtime error: invalid load'):
+            with self.subTest(diagnostic=diagnostic):
+                self.assertEqual(self.classify(stderr=diagnostic), 'SETUP_SANITIZER')
+
+    def test_foreign_named_assertion_is_not_a_kill(self):
+        self.assertEqual(self.classify(stdout='ASSERTION PEER_BATCH_CHECK: another condition\n'),
+                         'WRONG_FAILURE')
+
+    def test_bare_nonzero_is_not_a_kill(self):
+        self.assertEqual(self.classify(stdout='unrelated failure\n'), 'WRONG_FAILURE')
+
+    def test_other_exit_even_with_marker_is_setup(self):
+        self.assertEqual(self.classify(code=2), 'SETUP_EXIT')
+
+    def test_zero_exit_survives(self):
+        self.assertEqual(self.classify(code=0, stdout=''), 'SURVIVED')
+
+    def test_zero_exit_cannot_publish_a_failure_marker(self):
+        self.assertEqual(self.classify(code=0), 'WRONG_FAILURE')
+
+    def test_multiple_markers_cannot_choose_a_matching_one(self):
+        self.assertEqual(self.classify(stdout=self.marker+self.marker), 'WRONG_FAILURE')
+
+    def test_baseline_zero_without_complete_case_plan_is_setup(self):
+        self.assertEqual(classify_baseline(0, 0, 'ok 1 - control\n', ''), 'SETUP_PROTOCOL')
+
+    def test_baseline_complete_original_plan_can_pass(self):
+        self.assertEqual(classify_baseline(0, 0, 'ok 1 - control\n1..1\n', ''), 'PASS')
+
+
+def build(parts, directory, name, main=MAIN, artifacts=None):
     code = SHIM.replace('@KERNEL@', str(KERNEL))
     for key, value in parts.items():
         code = code.replace('@' + key + '@', value)
     path = directory / (name + '.c')
     path.write_text(code + main)
     binary = directory / name
-    compiled = subprocess.run(['cc', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
+    command = ['cc', '-std=gnu11', '-O1', '-g', '-Wall', '-Wextra', '-Werror',
                                '-Wno-unused-function', '-fsanitize=address,undefined',
                                '-fno-sanitize-recover=undefined',
                                '-I' + str(HERE), '-I' + str(KERNEL / 'src/storage/drivers/nvme/host'),
-                               str(path), '-o', str(binary)], capture_output=True, text=True)
+                               str(path), '-o', str(binary)]
+    if artifacts:
+        target = artifacts/name
+        target.mkdir()
+        shutil.copy2(path, target/'source.c')
+        (target/'compile-command.json').write_text(json.dumps(command, indent=2)+'\n')
+    compiled = subprocess.run(command, capture_output=True, text=True)
+    if artifacts:
+        (target/'compile.stdout').write_text(compiled.stdout)
+        (target/'compile.stderr').write_text(compiled.stderr)
+        (target/'compile.exit').write_text(str(compiled.returncode)+'\n')
+        if compiled.returncode == 0:
+            shutil.copy2(binary, target/'binary')
     return compiled, binary
 
 
-def main():
-    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+def run_child(binary, timeout, artifacts, name):
+    command = [str(binary)]
+    record = dict(command=command, timeout_seconds=timeout, timed_out=False)
     try:
+        run = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+        record.update(returncode=run.returncode, stdout=run.stdout, stderr=run.stderr)
+    except subprocess.TimeoutExpired as error:
+        text = lambda value: value.decode(errors='replace') if isinstance(value, bytes) else value or ''
+        record.update(returncode=None, stdout=text(error.stdout), stderr=text(error.stderr), timed_out=True)
+    if artifacts:
+        target = artifacts/name
+        (target/'run.stdout').write_text(record['stdout'])
+        (target/'run.stderr').write_text(record['stderr'])
+        (target/'run-result.json').write_text(json.dumps(record, indent=2)+'\n')
+    return record
+
+
+def run_model_contracts(parts, directory, artifacts):
+    records = []
+    for name, selected, main_body in model_contracts(parts):
+        row = dict(name=name)
+        records.append(row)
+        compiled, binary = build(selected, directory, name, main=main_body, artifacts=artifacts)
+        row['compile_exit'] = compiled.returncode
+        if compiled.returncode:
+            row['verdict'] = 'SETUP_COMPILE'
+            print(compiled.stderr[-2000:])
+        else:
+            result = run_child(binary, 120, artifacts, name)
+            row.update(result)
+            if name == 'model-progress':
+                verdict = classify_baseline(0, result['returncode'], result['stdout'], result['stderr'],
+                                            timed_out=result['timed_out'])
+                if verdict == 'PASS' and not re.search(r'^1\.\.5$', result['stdout'], re.M):
+                    verdict = 'SETUP_PROTOCOL'
+                row['verdict'] = verdict
+            else:
+                verdict = classify_mutant(0, result['returncode'], result['stdout'], result['stderr'],
+                    (('PEER_BATCH_MODEL', 'waiting with no command in flight'),),
+                    timed_out=result['timed_out'])
+                prefix = ''.join('ok %d - zero-progress bounded wait %d\n' % (i, i)
+                                 for i in range(1, 4))
+                row['verdict'] = ('PASS' if result['stdout'] == prefix else 'WRONG_FAILURE') \
+                    if verdict == 'KILLED' else verdict
+            row['assertions_seen'] = assertion_markers(result['stdout'], result['stderr'])
+        print(('ok model contract - ' if row['verdict'] == 'PASS' else 'not ok model contract - ') +
+              name + ': ' + row['verdict'])
+        if artifacts:
+            (artifacts/'model-contract-results.json').write_text(json.dumps(records, indent=2)+'\n')
+    return records
+
+
+def main():
+    global KERNEL
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--runner-contract-only', action='store_true',
+                        help='run decision-boundary controls only; no production/mutation execution')
+    parser.add_argument('--model-contract-only', action='store_true',
+                        help='compile/run the two actual completion-model contracts only')
+    args = parser.parse_args()
+    if args.runner_contract_only and args.model_contract_only:
+        parser.error('contract-only modes are mutually exclusive')
+    stream = io.StringIO()
+    controls = unittest.TextTestRunner(stream=stream, verbosity=2).run(
+        unittest.defaultTestLoader.loadTestsFromTestCase(RunnerClassificationControls))
+    print('# runner classification controls: tests=%d failures=%d errors=%d' %
+          (controls.testsRun, len(controls.failures), len(controls.errors)))
+    if controls.testsRun != 14 or not controls.wasSuccessful():
+        print(stream.getvalue(), end='')
+        return 2 if controls.errors or controls.testsRun != 14 else 1
+    artifacts = None
+    try:
+        KERNEL = source_root()
+        print('# actual canonical source root: ' + str(KERNEL))
+        if args.runner_contract_only:
+            print('# controls only: no production or mutant has been compiled or executed')
+            return 0
+        if os.environ.get('XDEV_EXT_TEST_ARTIFACTS'):
+            artifacts = Path(os.environ['XDEV_EXT_TEST_ARTIFACTS']).resolve()/'peer-batch'
+            artifacts.mkdir(parents=True, exist_ok=False)
         parts = production()
-    except (LookupError, ValueError) as error:
-        print('not ok 1 - concurrent multi-page peer batch:', error)
-        return 1
+        if len(MUTANTS) != 17 or {row[0] for row in MUTANTS} != set(MUTANT_ASSERTIONS):
+            raise ValueError('exact original seventeen mutation names required')
+        for expected in MUTANT_ASSERTIONS.values():
+            for kind, message in expected:
+                if message not in (MAIN if kind == 'PEER_BATCH_CHECK' else SHIM):
+                    raise ValueError('designated assertion is absent from the original C fixture')
+    except (ImportError, OSError, LookupError, AttributeError, ValueError, RuntimeError) as error:
+        print('SETUP_EXTRACTION:', type(error).__name__, str(error))
+        return 2
+    outcomes = []
+    def save():
+        if artifacts:
+            (artifacts/'results.json').write_text(json.dumps(dict(
+                source_root=str(KERNEL), reporter='uniform named first-failure reporter',
+                baseline=baseline, mutations=outcomes), indent=2)+'\n')
     with tempfile.TemporaryDirectory(prefix='xdev-peer-batch-') as tmp:
         directory = Path(tmp)
-        compiled, binary = build(parts, directory, 'batch')
+        model_results = run_model_contracts(parts, directory, artifacts)
+        if any(row['verdict'] != 'PASS' for row in model_results):
+            return 2 if any(row['verdict'].startswith('SETUP_') for row in model_results) else 1
+        if args.model_contract_only:
+            print('# model contracts only: original baseline and seventeen mutations were not run')
+            return 0
+        compiled, binary = build(parts, directory, 'batch', artifacts=artifacts)
+        baseline = dict(compile_exit=compiled.returncode)
         if compiled.returncode:
             print(compiled.stdout + compiled.stderr)
-            print('not ok 1 - concurrent multi-page peer batch does not compile against the queue')
-            return 1
-        result = subprocess.run([str(binary)], capture_output=True, text=True, timeout=600)
-        print(result.stdout, end='')
-        if os.environ.get('XDEV_EXT_TEST_ARTIFACTS'):
-            artifacts = Path(os.environ['XDEV_EXT_TEST_ARTIFACTS'])
-            artifacts.mkdir(parents=True, exist_ok=True)
-            (artifacts / 'batch.log').write_text(result.stdout + result.stderr)
-        if result.returncode:
-            print(result.stderr[-4000:], end='')
-            return 1
+            baseline['verdict'] = 'SETUP_COMPILE'
+            save()
+            return 2
+        result = run_child(binary, 600, artifacts, 'batch')
+        baseline.update(result)
+        baseline['verdict'] = classify_baseline(0, result['returncode'], result['stdout'], result['stderr'],
+                                                 timed_out=result['timed_out'])
+        print(result['stdout'], end='')
+        save()
+        if baseline['verdict'] != 'PASS':
+            print(result['stderr'][-4000:], end='')
+            print('BASELINE_' + baseline['verdict'])
+            return 1 if baseline['verdict'] == 'FAIL' else 2
         for index, (name, part, old, new) in enumerate(MUTANTS):
+            row = dict(name=name, expected_assertions=MUTANT_ASSERTIONS[name])
+            outcomes.append(row)
             changed = dict(parts)
+            count = parts[part].count(old)
+            row['anchor_matches'] = count
+            if count != 1:
+                row['verdict'] = 'SETUP_ANCHOR'
+                print('not ok mutation - ' + name + ': exact anchor count ' + str(count))
+                save()
+                continue
             changed[part] = parts[part].replace(old, new)
-            if changed[part] == parts[part]:
-                print('not ok mutation - ' + name + ': production text not found')
-                return 1
-            compiled, binary = build(changed, directory, 'mutant%d' % index)
+            row['original_part_sha256'] = hashlib.sha256(parts[part].encode()).hexdigest()
+            row['mutated_part_sha256'] = hashlib.sha256(changed[part].encode()).hexdigest()
+            label = 'mutant%d' % index
+            compiled, binary = build(changed, directory, label, artifacts=artifacts)
+            row['compile_exit'] = compiled.returncode
             if compiled.returncode:
                 print(compiled.stderr[-2000:])
-                print('not ok mutation - ' + name + ': does not compile')
-                return 1
-            try:
-                mutant = subprocess.run([str(binary)], capture_output=True, text=True, timeout=120)
-                rejected = mutant.returncode != 0
-            except subprocess.TimeoutExpired:
-                rejected = True
-            if not rejected:
-                print('not ok mutation - ' + name + ' passed every behaviour check')
-                return 1
-            print('ok mutation - ' + name + ' rejected by behaviour checks')
-    return 0
+                row['verdict'] = 'SETUP_COMPILE'
+            else:
+                mutant = run_child(binary, 120, artifacts, label)
+                row.update(mutant)
+                row['assertions_seen'] = assertion_markers(mutant['stdout'], mutant['stderr'])
+                row['verdict'] = classify_mutant(0, mutant['returncode'], mutant['stdout'], mutant['stderr'],
+                                                   MUTANT_ASSERTIONS[name], timed_out=mutant['timed_out'])
+            print(('ok mutation - ' if row['verdict'] == 'KILLED' else 'not ok mutation - ') +
+                  name + ': ' + row['verdict'])
+            save()
+    if any(row['verdict'].startswith('SETUP_') for row in outcomes):
+        return 2
+    return 0 if len(outcomes) == 17 and all(row['verdict'] == 'KILLED' for row in outcomes) else 1
 
 
 if __name__ == '__main__':
-    sys.exit(main())
+    try:
+        status = main()
+    except (OSError, LookupError, ValueError, RuntimeError) as error:
+        print('SETUP_DRIVER:', type(error).__name__, str(error))
+        status = 2
+    sys.exit(status)
