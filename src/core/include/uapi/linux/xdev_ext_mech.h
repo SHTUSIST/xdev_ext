@@ -329,6 +329,10 @@ struct xdev_ext_ce_copy_desc {
 	__u32 flags;			/* XDEV_EXT_CE_F_* */
 };
 
+/* Opt-in request targets; the initial admission is one NVMe/CE stage pair. */
+#define XDEV_EXT_CE_STAGE_F_TARGET_RANGE	(1U << 0)
+#define XDEV_EXT_CE_RANGE_MAX_ENTRIES	64U
+
 #define XDEV_EXT_CE_F_COMPLETION_POINT	(1U << 0)
 #define XDEV_EXT_CE_F_BARRIER		(1U << 1)
 #define XDEV_EXT_CE_F_KNOWN_MASK		0x00000003U
@@ -716,6 +720,7 @@ struct xdev_ext_mech_stage_uapi {
 	__u32 direction;		/* enum xdev_ext_mech_dir */
 	__s32 fd;
 	__u32 flags;			/* AF_XDP: XDEV_EXT_AFXDP_F_*; SOCKET: XDEV_EXT_SOCKET_F_*;
+					 * CE: XDEV_EXT_CE_STAGE_F_TARGET_RANGE;
 					 * USER: XDEV_EXT_USER_F_*;
 					 * generic: XDEV_EXT_MECH_STAGE_F_FANOUT, XDEV_EXT_MECH_STAGE_F_POLL */
 	__aligned_u64 arg0;

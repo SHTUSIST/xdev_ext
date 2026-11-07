@@ -71,7 +71,7 @@ struct xdev_ext_comp_copy_stage {
 	bool dead;
 	struct xdev_ext_mech_batch *staged;
 	struct xdev_ext_comp_copy_plan plan;
-	struct xdev_ext_comp_copy_transfer transfer[XDEV_EXT_DMA_MAX_ENTRIES];
+	struct xdev_ext_comp_copy_transfer transfer[XDEV_EXT_COMP_COPY_MAX_ENTRIES];
 	struct xdev_ext_mech_frame_info fi[XDEV_EXT_MECH_MAX_FRAMES];
 	u32 index[XDEV_EXT_MECH_MAX_FRAMES];
 };

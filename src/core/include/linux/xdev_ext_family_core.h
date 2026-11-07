@@ -150,6 +150,29 @@ static inline int xdev_ext_decl_file_check(const struct xdev_ext_mech_create *c,
 	*f = (struct xdev_ext_mech_stage_facts){ .template_safe = true };
 	return u->fd < 0 ? -EBADF : 0;
 }
+
+/* Range targets have one CE stage and no later CE range acquisition. Keep
+ * legacy compositions unchanged; their configured-window lease is separate.
+ */
+static inline int xdev_ext_decl_ce_check(const struct xdev_ext_mech_create *c, __u32 i,
+	const struct xdev_ext_mech_stage_uapi *u, struct xdev_ext_mech_stage_facts *f)
+{
+	const struct xdev_ext_mech_stage_uapi *nvme;
+	int err = xdev_ext_decl_file_check(c, i, u, f);
+
+	if (err || !(u->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE))
+		return err;
+	if (c->nr_stages != 2 || i > 1)
+		return -EOPNOTSUPP;
+	nvme = &c->st[i ^ 1];
+	if (nvme->class_id != XDEV_EXT_MECH_CLASS_NVME ||
+	    (i == 0 && (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE ||
+			nvme->direction != XDEV_EXT_MECH_DIR_TO_DEVICE)) ||
+	    (i == 1 && (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||
+			nvme->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)))
+		return -EOPNOTSUPP;
+	return 0;
+}
 /* XDOMAIN frames are PEER device memory or the ring's host-page UMEM, which
  * the class maps for its NHI; an AF_XDP UMEM belongs to its netdev driver. */
 static inline int xdev_ext_decl_xdomain_check(const struct xdev_ext_mech_create *c, __u32 i,
@@ -400,11 +423,12 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_
 	},
 	{ /* XDEV_EXT_MECH_CLASS_CE */
 		.family = XDEV_EXT_FAMILY_COMPUTE,
+		.known_flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE,
 		.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION,
 		.ctx_rule = XDEV_EXT_CTX_RULE_GPU,
 		.mech_abi_version = XDEV_EXT_CE_MECH_ABI_VERSION,
 		.role = xdev_ext_decl_direction_role,
-		.check_stage = xdev_ext_decl_file_check,
+		.check_stage = xdev_ext_decl_ce_check,
 		.retry_ok = xdev_ext_decl_copy_retry,
 		.ret_rules = xdev_ext_decl_common_returns, .nr_ret_rules = XDEV_EXT_DECL_ARRAY_SIZE(xdev_ext_decl_common_returns),
 		.base = xdev_ext_decl_gpu_base,

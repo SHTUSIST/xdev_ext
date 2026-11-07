@@ -56,7 +56,8 @@ static void bind_baseline(void) {
  s.depth=5; st.priv=NULL; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-ENOSPC); EQ(nevents,3); EQ(events[0],0); EQ(events[1],3); EQ(events[2],1); fixture_unbind(&st,false);
  native_directions=1U<<XDEV_EXT_MECH_DIR_FROM_DEVICE; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EOPNOTSUPP); EQ(nevents,4); fixture_unbind(&st,true);
  native_directions=XDEV_EXT_WINDOW_COPY_DIRS; native_alignment=3; st.priv=NULL; nevents=0; EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,4); fixture_unbind(&st,true); native_alignment=1;
- u.flags=1; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-EINVAL); EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,0);
+ /* CE bit0 now selects TARGET_RANGE; bit1 remains unknown. DMA keeps bit0. */
+ u.flags=2; nevents=0; EQ(xdev_ext_ce_bind(&st,&u),-EINVAL); u.flags=1; EQ(xdev_ext_dma_bind(&st,&u),-EINVAL); EQ(nevents,0);
  puts("baseline bind: CE lease→native-region→geometry/window→host→ready; DMA scope/lease→region→geometry/direction/window→host");
 }
 static void consumer_baseline(void) {

@@ -50,6 +50,9 @@ int xdev_ext_comp_copy_lease_bind(
 int xdev_ext_comp_copy_lease_get(
 	struct xdev_ext_comp_copy_lease_region *region,
 	u32 slot, u64 batch_id);
+int xdev_ext_comp_copy_lease_get_range(
+	struct xdev_ext_comp_copy_lease_region *region,
+	u32 slot, u64 batch_id, u64 start, u64 len);
 int xdev_ext_comp_copy_lease_finish(
 	struct xdev_ext_comp_copy_lease_region *region,
 	u32 slot, u64 batch_id, bool sequestered);
