@@ -2,10 +2,14 @@
 """Run actual kernel selftest readers against nested/standalone Git history."""
 import argparse
 import ast
+import json
+import os
 from pathlib import Path
+import runpy
 import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 PROJECT = Path(__file__).resolve().parents[1]
 CASES = {
@@ -43,14 +47,60 @@ def actual_reader(kind, kernel, revision=None):
                         and any(isinstance(t,ast.Name) and t.id==variable for t in n.targets))
         value=eval(compile(ast.Expression(assignment.value),str(script),'eval'),scope)
         return value if isinstance(value,bytes) else value.encode()
-    # Execute the actual if/else that chooses local versus HEAD in setUpClass.
-    block=next(n for n in ast.walk(tree) if isinstance(n,ast.If)
-               and isinstance(n.test,ast.Call) and isinstance(n.test.func,ast.Attribute)
-               and n.test.func.attr=='is_file')
-    scope.update(source_path=kernel/relative if revision is None else kernel/'explicitly-unavailable-source.c',
-                 RELATIVE_SOURCE=relative)
-    exec(compile(ast.Module(body=[block],type_ignores=[]),str(script),'exec'),scope)
-    return scope['source'].encode()
+    # nowait now selects one dependency owner before reading it. Execute that
+    # actual selection and its complete source branch, not the old is_file elif.
+    setup=next(n for n in ast.walk(tree) if isinstance(n,ast.FunctionDef) and n.name=='setUpClass')
+    selections=[n for n in setup.body if isinstance(n,ast.Assign)
+                and any(isinstance(t,ast.Name) and t.id=='selected' for t in n.targets)
+                and isinstance(n.value,ast.Call) and isinstance(n.value.func,ast.Name)
+                and n.value.func.id=='selected_source']
+    branches=[n for n in setup.body if isinstance(n,ast.If)
+              and any(isinstance(assignment,ast.Assign)
+                      and any(isinstance(t,ast.Name) and t.id=='source' for t in assignment.targets)
+                      and isinstance(assignment.value,ast.Call)
+                      and isinstance(assignment.value.func,ast.Attribute)
+                      and isinstance(assignment.value.func.value,ast.Name)
+                      and assignment.value.func.value.id=='selected'
+                      and assignment.value.func.attr=='read'
+                      and len(assignment.value.args)==1
+                      and isinstance(assignment.value.args[0],ast.Name)
+                      and assignment.value.args[0].id=='RELATIVE_SOURCE'
+                      for assignment in ast.walk(n))]
+    if len(selections)!=1 or len(branches)!=1:
+        raise RuntimeError('expected one actual nowait selection and source branch')
+    layout_file=next(p/'tools/layout.py' for p in script.resolve().parents
+                     if (p/'tools/layout.py').is_file())
+    canonical=runpy.run_path(str(layout_file))['canonical_root'](script)
+    utility=runpy.run_path(str(canonical/'tests/storage/nvme/_legacy_storfam_fixture.py'))
+
+    def selected_read(owner):
+        # A private tree needs its own mapping when TMPDIR has a canonical
+        # checkout ancestor; source selection must stop at this exact owner.
+        (owner/'source-layout.json').write_text(json.dumps(dict(schema=1,files=[
+            dict(source=relative,component='linux',native_path=relative)])))
+        scope.update(Path=Path,os=os,ROOT=owner,source_path=owner/relative,
+                     RELATIVE_SOURCE=relative,selected_source=utility['selected_source'])
+        # Select this owner while retaining parent toolchain and layout hints.
+        with mock.patch.dict(os.environ,{'XDEV_EXT_NVME_TEST_ROOT':str(owner)}):
+            os.environ.pop('XDEV_EXT_NVME_TEST_SOURCE',None)
+            exec(compile(ast.Module(body=[selections[0],branches[0]],type_ignores=[]),
+                         str(script),'exec'),scope)
+            scope['selected'].verify()
+        return scope['source'].encode()
+
+    if revision is None:
+        return selected_read(kernel)
+    # The actual owner API intentionally has no revision/fallback parameter.
+    # Supply a separate tree of the requested snapshot; never current bytes.
+    prefix=git(kernel,'rev-parse','--show-prefix')
+    snapshot=subprocess.check_output(['git','-C',str(kernel),'show',revision+':'+prefix+relative],
+                                     stderr=subprocess.PIPE)
+    with tempfile.TemporaryDirectory(prefix='xdev-nowait-revision-owner-') as temporary:
+        owner=Path(temporary)
+        target=owner/relative
+        target.parent.mkdir(parents=True,exist_ok=True)
+        target.write_bytes(snapshot)
+        return selected_read(owner)
 
 
 class KernelRevisionLayoutTest(unittest.TestCase):
@@ -113,6 +163,30 @@ class KernelRevisionLayoutTest(unittest.TestCase):
             (kernel/relative).write_text('current source cannot substitute history\n')
             with self.subTest(reader=kind),self.assertRaises(subprocess.CalledProcessError):
                 actual_reader(kind,kernel,revision)
+
+    def test_nowait_missing_selected_file_rejects_head_and_other_current_sources(self):
+        kernel,_=self.checkout(True)
+        relative=CASES['nowait'][1]
+        target=kernel/relative
+        decoy=self.root/relative
+        other=self.root/'another-native'/relative
+        other.parent.mkdir(parents=True,exist_ok=True)
+        other.write_text('another current nowait source\n')
+        target.unlink()
+        self.assertTrue(kernel.is_dir())
+        self.assertFalse(target.exists())
+        self.assertEqual(git(self.root,'show','HEAD:kernel/'+relative),
+                         'authoritative kernel nowait')
+        self.assertEqual(decoy.read_text(),'wrong root nowait\n')
+        self.assertEqual(other.read_text(),'another current nowait source\n')
+        # No revision means the actual selected_source/read path must reject;
+        # caller snapshot preparation cannot supply this test's exception.
+        with self.assertRaises(ValueError) as raised:
+            actual_reader('nowait',kernel,revision=None)
+        self.assertEqual(str(raised.exception),'Missing regular source: '+str(target))
+        self.assertFalse(target.exists())
+        self.assertEqual(decoy.read_text(),'wrong root nowait\n')
+        self.assertEqual(other.read_text(),'another current nowait source\n')
 
     def test_invalid_revision_does_not_fall_back_to_head_or_worktree(self):
         kernel,_=self.checkout(True)
