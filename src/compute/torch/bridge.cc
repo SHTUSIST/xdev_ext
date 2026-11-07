@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include "xdev_tp.h"
 #include "peer_endpoint_owner.h"
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <limits>
@@ -394,6 +395,104 @@ public:
   py::object all_reduce(at::Tensor input, uint64_t stream) {
     return submit(input, stream, "all_reduce", 0);
   }
+  // One window of a segmented sum: each pair is one complete legal native
+  // message written into a caller-provided output view. d1 accepts exactly one
+  // pair per call; d2 pipelines up to logical_depth pairs through the batch API.
+  // Every segment is qualified before any native side effect; accepted handles
+  // keep their Tensor storage in custody. No fallback after acceptance.
+  void all_reduce_into(py::list inputs, py::list outputs, uint64_t handle) {
+    auto &s = *s_; TORCH_CHECK(s.comm, "xdev TP communicator is closed");
+    const size_t count = inputs.size();
+    TORCH_CHECK(count >= 1 && count == outputs.size(),
+                "segment input/output lists must be nonempty and equal length");
+    TORCH_CHECK(count <= s.cfg.logical_depth && count <= XDEV_TP_TEMPLATE_CAPACITY,
+                "segment window exceeds admitted logical depth");
+    TORCH_CHECK(count == 1 || s.cfg.mode == XDEV_TP_D2_GPU,
+                "d1 submits exactly one segment per native call");
+    auto stream = reinterpret_cast<CUstream>(uintptr_t(handle));
+    CUstreamCaptureStatus capture;
+    TORCH_CHECK(cuStreamIsCapturing(stream, &capture) == CUDA_SUCCESS,
+                "cannot qualify actual caller stream capture state");
+    const bool capturing = capture != CU_STREAM_CAPTURE_STATUS_NONE;
+    TORCH_CHECK(!capturing || s.cfg.mode == XDEV_TP_D2_GPU,
+                "d1 does not support CUDA graph capture");
+    std::vector<at::Tensor> in(count), out(count);
+    std::vector<TensorPlan> plans;
+    std::vector<xdev_tp_request> requests(count);
+    plans.reserve(count);
+    for (size_t i = 0; i < count; ++i) {
+      in[i] = inputs[i].cast<at::Tensor>();
+      out[i] = outputs[i].cast<at::Tensor>();
+      plans.push_back(plan(in[i], s.settings, "all_reduce", -1, 0));
+      TORCH_CHECK(out[i].defined() && out[i].is_cuda() && out[i].layout() == at::kStrided &&
+                    out[i].is_contiguous() && out[i].scalar_type() == in[i].scalar_type() &&
+                    out[i].get_device() == in[i].get_device() && out[i].numel() == in[i].numel(),
+                  "segment output must be contiguous CUDA storage matching its input");
+      requests[i] = {reinterpret_cast<uintptr_t>(in[i].data_ptr()),
+                     reinterpret_cast<uintptr_t>(out[i].data_ptr()), 1, plans[i].width,
+                     XDEV_TP_SUM, uint32_t(plans[i].dtype), 0, 0};
+    }
+    if (!capturing) { reap(s); (void)statistics(s); }
+    TORCH_CHECK(s.works.size() + count <= XDEV_TP_TEMPLATE_CAPACITY,
+                "native template capacity exhausted; reserve templates before submitting");
+    // Allocate all custody bookkeeping before any possible native side effect.
+    const size_t base = s.works.size();
+    for (size_t i = 0; i < count; ++i)
+      s.works.push_back({nullptr, in[i], out[i], "all_reduce", in[i].sizes().vec(),
+                         int(plans[i].dtype), 0});
+    std::vector<xdev_tp_work *> handles(count, nullptr);
+    int rc;
+    if (s.cfg.mode == XDEV_TP_D1_EAGER)
+      rc = xdev_tp_allreduce_sum(s.comm, requests[0].input, requests[0].output, plans[0].width,
+                                 plans[0].dtype, stream, s.setup_sequence, &handles[0]);
+    else
+      rc = xdev_tp_submit_batch(s.comm, requests.data(), count, stream, s.setup_sequence,
+                                handles.data());
+    // A handle may be returned with a stable accepted error: retain it before
+    // raising. A failed call is never permission to retry native I/O.
+    bool any = false, all = true;
+    for (size_t i = 0; i < count; ++i) {
+      s.works[base + i].handle = handles[i];
+      any = any || handles[i]; all = all && handles[i];
+    }
+    s.works.erase(std::remove_if(s.works.begin() + ptrdiff_t(base), s.works.end(),
+                                 [](const Work &w) { return !w.handle; }), s.works.end());
+    if (any) { s.bound_stream = stream; s.stream_bound = true; }
+    if (s.cfg.mode == XDEV_TP_D1_EAGER && !rc && handles[0]) {
+      TORCH_CHECK(s.setup_sequence != UINT64_MAX, "collective sequence exhausted");
+      ++s.setup_sequence;
+    }
+    TORCH_CHECK(!rc, "xdev TP segmented collective failed (no fallback): ", rc);
+    TORCH_CHECK(all, "native submit returned no accepted work handle");
+    if (!capturing) reap(s);
+  }
+  size_t template_available() const {
+    return XDEV_TP_TEMPLATE_CAPACITY - std::min<size_t>(s_->works.size(), XDEV_TP_TEMPLATE_CAPACITY);
+  }
+  // Outside capture only: wait until count native templates are free. Earlier
+  // accepted work releases its template only after actual completion and
+  // destroy; templates held by live CUDA graphs are never released here.
+  void reserve_templates(size_t count, uint64_t timeout) {
+    auto &s = *s_; TORCH_CHECK(s.comm, "xdev TP communicator is closed");
+    TORCH_CHECK(count >= 1 && count <= XDEV_TP_TEMPLATE_CAPACITY,
+                "segment window exceeds native template capacity");
+    outside_capture(s);
+    const auto start = std::chrono::steady_clock::now();
+    for (;;) {
+      reap(s); (void)statistics(s);
+      if (s.works.size() + count <= XDEV_TP_TEMPLATE_CAPACITY) return;
+      for (const auto &work : s.works) {
+        const int rc = xdev_tp_work_query(work.handle);
+        TORCH_CHECK(rc >= 0, "native work failed while reserving templates; work retained: ", rc);
+      }
+      const auto elapsed = std::chrono::duration_cast<std::chrono::nanoseconds>(
+          std::chrono::steady_clock::now() - start).count();
+      TORCH_CHECK(!timeout || uint64_t(elapsed) < timeout,
+                  "native templates were not released before timeout; ", s.works.size(),
+                  " held (live CUDA graphs keep theirs)");
+      std::this_thread::yield();
+    }
+  }
   py::object gather(at::Tensor input, uint64_t stream, int dst, bool all_gather) {
     return submit(input, stream, all_gather ? "all_gather" : "gather", dst);
   }
@@ -440,6 +539,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     .def(py::init<py::dict, py::object>())
     .def_static("from_options", &Communicator::from_options)
     .def("all_reduce", &Communicator::all_reduce)
+    .def("all_reduce_into", &Communicator::all_reduce_into)
+    .def("template_available", &Communicator::template_available)
+    .def("reserve_templates", &Communicator::reserve_templates)
     .def("gather", &Communicator::gather)
     .def("stats", &Communicator::stats)
     .def("wait", &Communicator::wait)

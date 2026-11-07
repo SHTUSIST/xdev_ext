@@ -46,14 +46,44 @@ class PolicyTests(unittest.TestCase):
                  dict(device_type='cpu'), dict(rank=2), dict(dst=2),
                  dict(operation='all_gather', dim=0), dict(operation='product'),
                  dict(shape=(-1, 2)), dict(shape=(2**62, 8)),
-                 dict(max_payload_bytes=4)]
+                 # Gather/all-gather remain one native message (no splitting).
+                 dict(operation='all_gather', max_payload_bytes=4),
+                 dict(operation='gather', max_payload_bytes=4),
+                 # A segment smaller than one element is truly illegal.
+                 dict(max_payload_bytes=2), dict(max_payload_bytes=0)]
         for case in cases:
             with self.subTest(case=case), self.assertRaises((ValueError, OverflowError)):
                 self.policy(**case)
 
     def test_wire_payload_uint32_is_enforced_before_native(self):
+        # One wire message never carries more than UINT32_MAX payload bytes.
         with self.assertRaises(OverflowError):
-            self.policy(shape=(2**30,), max_payload_bytes=2**40)
+            self.policy(shape=(2**30,), operation='all_gather', max_payload_bytes=2**40)
+        q = self.policy(shape=(2**30,), max_payload_bytes=2**40)
+        self.assertLessEqual(q.segment_elements * 4, (1 << 32) - 1)
+        self.assertEqual(q.segments, 2)
+
+    def test_single_message_allreduce_keeps_one_segment(self):
+        q = self.policy(shape=(2, 3, 4), max_payload_bytes=96)
+        self.assertEqual((q.segments, q.segment_elements), (1, 24))
+        empty = self.policy(shape=(0, 4), max_payload_bytes=96)
+        self.assertEqual((empty.segments, empty.output_shape), (1, (0, 4)))
+
+    def test_large_allreduce_splits_into_legal_segments(self):
+        # 10000 F32 elements = 40000 bytes with a 4096-byte admitted payload.
+        q = self.policy(shape=(100, 100), max_payload_bytes=4096)
+        self.assertEqual(q.output_shape, (100, 100))
+        self.assertEqual((q.segment_elements, q.segments), (1024, 10))
+        q16 = self.policy(shape=(5000,), dtype='bfloat16', max_payload_bytes=4095)
+        self.assertEqual((q16.segment_elements, q16.segments), (2047, 3))
+
+    def test_llama_prefill_allreduce_geometry_is_legal(self):
+        # 2048-token prefill x 8192 hidden x BF16 = 32 MiB, largest legal group.
+        q = self.policy(shape=(2048, 8192), dtype='bfloat16',
+                        max_payload_bytes=32 * 4096 - 64)
+        self.assertEqual(q.segment_elements, (32 * 4096 - 64) // 2)
+        self.assertEqual(q.segments, 257)
+        self.assertLessEqual(q.segment_elements * 2, 32 * 4096 - 64)
 
 
 class Tensor:
@@ -198,6 +228,170 @@ class TorchBoundaryTests(unittest.TestCase):
         self.assertIs(comm.execution_stream, self.dedicated)
         self.assertIn(('bootstrap', 444), self.calls)
         self.assertIs(self.current_stream[0], self.caller)
+
+
+class FlatTensor:
+    """Contiguous fake CUDA tensor whose flat views remember their offset."""
+    def __init__(self, shape, *, dtype='float32', device='cuda', base=None, start=0):
+        self.shape, self.dtype = tuple(shape), dtype
+        self.device = types.SimpleNamespace(type=device, index=1)
+        self.is_meta = device == 'meta'
+        self.base = self if base is None else base
+        self.start = start
+        count = 1
+        for size in self.shape: count *= size
+        self.count = count
+    def is_contiguous(self): return True
+    def numel(self): return self.count
+    def new_empty(self, shape): return FlatTensor(shape, dtype=self.dtype, device=self.device.type)
+    def view(self, *shape):
+        assert shape == (-1,), shape
+        return FlatTensor((self.count,), dtype=self.dtype, base=self.base, start=self.start)
+    def __getitem__(self, item):
+        assert isinstance(item, slice) and item.step is None and len(self.shape) == 1
+        assert 0 <= item.start < item.stop <= self.count
+        return FlatTensor((item.stop - item.start,), dtype=self.dtype, base=self.base,
+                          start=self.start + item.start)
+
+
+class SegmentedAllReduceTests(unittest.TestCase):
+    """T6b: one all-reduce larger than max_payload_bytes becomes legal messages."""
+    def setUp(self):
+        self.calls = []
+        calls = self.calls
+        state = self.state = dict(capacity=256, held=0)
+        class Native:
+            def __init__(self, config, owner): self.config = config
+            def all_reduce(self, tensor, stream):
+                calls.append(('sum', tensor, stream)); return tensor.new_empty(tensor.shape)
+            def all_reduce_into(self, inputs, outputs, stream):
+                calls.append(('into', [(t.base, t.start, t.count) for t in inputs],
+                              [(t.base, t.start, t.count) for t in outputs], stream))
+                state['held'] += len(inputs)
+            def template_available(self):
+                calls.append(('available',)); return state['capacity'] - state['held']
+            def reserve_templates(self, count, timeout_ns):
+                calls.append(('reserve', count, timeout_ns)); state['held'] = 0
+            def stats(self): return dict(submitted=0, completed=0, failed=0)
+            def close(self): calls.append(('close',))
+        class Null:
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+        class Stream:
+            def __init__(self, handle): self.cuda_stream = handle
+            def wait_stream(self, other): pass
+        self.caller = Stream(98765)
+        self.torch = types.SimpleNamespace(
+            __version__='2.8.0', float16='float16', bfloat16='bfloat16', float32='float32',
+            empty_like=lambda t: FlatTensor(t.shape, dtype=t.dtype),
+            cuda=types.SimpleNamespace(device=lambda d: Null(),
+                current_stream=lambda d=None: self.caller, current_device=lambda: 1,
+                stream=lambda stream: Null(), is_current_stream_capturing=lambda: False))
+        self.patch = patch.dict(sys.modules, {'torch': self.torch,
+                                'xdev_tp_torch._native': types.SimpleNamespace(Communicator=Native)})
+        self.patch.start()
+    def tearDown(self): self.patch.stop()
+
+    def comm(self, mode, depth, max_payload=4096):
+        from xdev_tp_torch import TorchCommunicator
+        return TorchCommunicator(dict(rank=0, world_size=2, mode=mode, device_index=1,
+                                      logical_depth=depth, max_payload_bytes=max_payload,
+                                      timeout_ns=5000), object())
+
+    def submissions(self):
+        return [c for c in self.calls if c[0] in ('into', 'sum')]
+
+    def assert_covers(self, x, y, expected_windows):
+        windows = self.submissions()
+        self.assertFalse(any(c[0] == 'sum' for c in windows),
+                         'oversize all-reduce was submitted as one native message')
+        self.assertEqual([len(c[1]) for c in windows], expected_windows)
+        inputs = [seg for c in windows for seg in c[1]]
+        outputs = [seg for c in windows for seg in c[2]]
+        self.assertTrue(all(seg[0] is x for seg in inputs))
+        self.assertTrue(all(seg[0] is y for seg in outputs))
+        # Consecutive, disjoint, complete and each one legal message.
+        self.assertEqual([(s, n) for _, s, n in inputs], [(s, n) for _, s, n in outputs])
+        cursor = 0
+        for _, start, count in inputs:
+            self.assertEqual(start, cursor)
+            self.assertTrue(0 < count <= 1024)
+            cursor += count
+        self.assertEqual(cursor, x.count)
+
+    def test_d1_submits_each_legal_segment_into_one_output(self):
+        c = self.comm(mode=1, depth=1)
+        x = FlatTensor((3, 1000))
+        y = c.all_reduce(x)
+        self.assertEqual(y.shape, (3, 1000))
+        self.assert_covers(x, y, [1, 1, 1])
+        self.assertFalse(any(k[0] == 'sum' for k in self.calls))
+        reserves = [k for k in self.calls if k[0] == 'reserve']
+        self.assertEqual(reserves, [('reserve', 1, 5000)] * 3)
+        framework = c.stats()['framework']
+        self.assertEqual((framework['segmented_calls'], framework['segments_submitted']), (1, 3))
+
+    def test_d2_eager_pipelines_windows_of_logical_depth(self):
+        c = self.comm(mode=2, depth=4)
+        x = FlatTensor((10000,))
+        y = c.all_reduce(x)
+        self.assert_covers(x, y, [4, 4, 2])
+        order = [k[0] if k[0] != 'reserve' else ('reserve', k[1]) for k in self.calls
+                 if k[0] in ('into', 'reserve')]
+        self.assertEqual(order, [('reserve', 4), 'into', ('reserve', 4), 'into',
+                                 ('reserve', 2), 'into'])
+        self.assertTrue(all(k[3] == 98765 for k in self.submissions()))
+
+    def test_capture_rejects_before_any_native_call_without_templates(self):
+        self.torch.cuda.is_current_stream_capturing = lambda: True
+        self.state['capacity'] = 9
+        c = self.comm(mode=2, depth=4)
+        with self.assertRaisesRegex(RuntimeError, 'template'):
+            c.all_reduce(FlatTensor((10000,)))
+        self.assertEqual(self.submissions(), [])
+        self.assertFalse(any(k[0] == 'reserve' for k in self.calls))
+        self.assertEqual(c.stats()['framework']['preflight_rejected'], 1)
+
+    def test_capture_records_all_windows_without_blocking_reservation(self):
+        self.torch.cuda.is_current_stream_capturing = lambda: True
+        self.state['capacity'] = 10
+        c = self.comm(mode=2, depth=4)
+        x = FlatTensor((10000,))
+        y = c.all_reduce(x)
+        self.assert_covers(x, y, [4, 4, 2])
+        self.assertFalse(any(k[0] == 'reserve' for k in self.calls))
+
+    def test_single_message_path_is_unchanged(self):
+        c = self.comm(mode=2, depth=4)
+        x = FlatTensor((1024,))
+        c.all_reduce(x)
+        self.assertEqual([k[0] for k in self.submissions()], ['sum'])
+
+    def test_shape_only_large_allreduce_submits_nothing(self):
+        c = self.comm(mode=2, depth=4)
+        y = c.all_reduce(FlatTensor((10000,), device='meta'))
+        self.assertEqual(y.shape, (10000,))
+        self.assertEqual(self.calls, [])
+
+    def test_vllm_plugin_large_allreduce_never_uses_original_nccl(self):
+        import xdev_tp_vllm as plugin
+        original = []
+        class Cuda:
+            def __init__(self, cpu_group, device=None, device_group=None, unique_name=''):
+                self.unique_name, self.world_size, self.rank_in_group = unique_name, 2, 0
+            def all_reduce(self, input_): original.append('nccl'); return input_
+            def all_gather(self, input_, dim=-1): return input_
+            def gather(self, input_, dst=0, dim=-1): return input_
+            def destroy(self): pass
+        backend = self.comm(mode=2, depth=4)
+        plugin._install_on_class(Cuda, version='0.10.2', factory=lambda c: backend)
+        group = Cuda(None, unique_name='tp:0')
+        x = FlatTensor((2048, 8))
+        y = group.all_reduce(x)
+        self.assertEqual(original, [])
+        self.assertEqual(y.shape, (2048, 8))
+        self.assertFalse(any(k[0] == 'sum' for k in self.submissions()))
+        self.assertEqual(sum(len(k[1]) for k in self.submissions()), 16)
 
 
 class PluginTests(unittest.TestCase):

@@ -59,6 +59,11 @@ unknown stream is rejected. No permanent global `set_stream` change is made.
 must return an actual `TorchCommunicator` with admitted resources and the same
 TP rank/world. The default bootstrap does not require this override.
 
+An all-reduce larger than `max_payload_bytes`, such as a prefill chunk, is
+split into legal native messages as described in the Torch package README; it
+never falls back to the original NCCL or custom all-reduce. Set `nr_batches`
+for the number of native messages, not framework calls.
+
 Call `assert_backend_selected(communicator)` after TP construction. At the end
 of an actual run, before teardown, call `collect_backend_evidence` with the
 explicit expected local ranks; the run coordinator checks both ranks for each

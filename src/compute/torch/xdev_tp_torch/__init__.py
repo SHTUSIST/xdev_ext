@@ -30,6 +30,12 @@ class TorchCommunicator:
         self._closed = False
         self._api_attempts = 0
         self._preflight_rejected = 0
+        self._segmented_calls = 0
+        self._segments_submitted = 0
+        # Native batch windows never exceed the admitted logical depth.
+        self._window = int(config.get('depth', config.get('logical_depth', 1)))
+        if self._window < 1:
+            raise ValueError('logical depth must be positive')
         self._comm_stream = None
         self._bound_stream = None
     def __init__(self, config, owner):
@@ -111,11 +117,22 @@ class TorchCommunicator:
                 self._preflight_rejected += 1
                 raise RuntimeError('d1 does not support CUDA graph capture')
             target = self._comm_stream
+            segmented = operation == 'all_reduce' and q.segments > 1
+            if segmented and capturing:
+                # A capture must hold every segment's template at once; reject
+                # before any native call so no partial collective is recorded.
+                available = self._native.template_available()
+                if q.segments > available:
+                    self._preflight_rejected += 1
+                    raise RuntimeError(f'segmented all-reduce needs {q.segments} native '
+                                       f'templates during capture; {available} available')
             def submit():
                 actual = torch.cuda.current_stream(tensor.device)
                 if self._bound_stream is None:
                     self._bound_stream = actual
                 # No catch/fallback: accepted errors retain native work/storage.
+                if segmented:
+                    return self._segmented_all_reduce(tensor, q, actual.cuda_stream, capturing)
                 if operation == 'all_reduce':
                     return self._native.all_reduce(tensor, actual.cuda_stream)
                 return self._native.gather(tensor, actual.cuda_stream, dst, operation == 'all_gather')
@@ -135,6 +152,33 @@ class TorchCommunicator:
                 # This event dependency also protects accepted input use when
                 # an asynchronous native error makes the Python call raise.
                 caller.wait_stream(target)
+
+    def _segmented_all_reduce(self, tensor, q, stream, capturing):
+        """Split one large sum into consecutive legal native messages.
+
+        Each segment is a complete native all-reduce of at most
+        max_payload_bytes with its own sequence; both ranks derive the same
+        split. d1 submits one segment at a time; d2 pipelines windows of at
+        most the logical depth through the native batch API. Outside capture,
+        native template custody is reserved before each window (which can
+        wait for earlier accepted work to finish); during capture the caller
+        already proved every template is available. There is no fallback.
+        """
+        import torch
+        output = torch.empty_like(tensor)
+        source, target = tensor.view(-1), output.view(-1)
+        step, total = q.segment_elements, q.width
+        bounds = [(start, min(total, start + step)) for start in range(0, total, step)]
+        window = 1 if self.mode == 1 else min(self._window, 256)
+        self._segmented_calls += 1
+        for first in range(0, len(bounds), window):
+            part = bounds[first:first + window]
+            if not capturing:
+                self._native.reserve_templates(len(part), self.config['timeout_ns'])
+            self._native.all_reduce_into([source[a:b] for a, b in part],
+                                         [target[a:b] for a, b in part], stream)
+            self._segments_submitted += len(part)
+        return output
 
     def all_reduce(self, tensor):
         return self._call(tensor, 'all_reduce')
@@ -170,6 +214,8 @@ class TorchCommunicator:
                     device_index=self.config['device_index'], native=native,
                     framework=dict(api_attempts=self._api_attempts,
                                    preflight_rejected=self._preflight_rejected,
+                                   segmented_calls=self._segmented_calls,
+                                   segments_submitted=self._segments_submitted,
                                    fallback_by_reason={}))
 
     def close(self):

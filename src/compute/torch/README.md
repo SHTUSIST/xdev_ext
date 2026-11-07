@@ -80,6 +80,29 @@ Use `all_reduce(tensor)`, `all_gather(tensor, dim=-1)` or
 There is no fallback after an accepted operation. Fake/meta calls perform shape
 propagation without native submission or runtime counters.
 
+One native message carries at most `max_payload_bytes`, and the native group
+holds at most 32 frames of 4 KiB, so a message never exceeds 128 KiB minus the
+64-byte header. An all-reduce larger than `max_payload_bytes` is split into
+consecutive element ranges of `max_payload_bytes // itemsize` elements (the
+last range may be shorter). Each range is a complete native all-reduce with its
+own sequence, written into the matching range of one output tensor. Both ranks
+derive the same split from the agreed geometry; the elementwise sum makes each
+range independent. d1 submits one range per native call. d2 submits windows of
+at most the logical depth through `xdev_tp_submit_batch`, so every TX in a
+window is published before its receives. Each range consumes one native batch
+of the finite START count (`nr_batches`). The only rejected all-reduce geometry
+is a `max_payload_bytes` smaller than one element. Gather and all-gather remain
+exactly one message and are rejected when larger.
+
+Each accepted range holds one of the communicator's 256 native work templates
+until it completes and is destroyed. Outside capture, the adapter reserves
+templates before each window; in eager d2 this waits until earlier accepted work
+on the stream has completed. During CUDA graph capture every range keeps its
+template while the graph lives, so a split all-reduce whose range count exceeds
+the free templates is rejected before any native call and no partial collective
+is recorded. `stats()["framework"]` reports `segmented_calls` and
+`segments_submitted`.
+
 `synchronize(timeout_ns=...)` waits on actual native work and reports stable
 errors. Timeout preserves work and storage; it does not revoke transport or
 retry a collective. `stats()` returns both framework preflight accounting and

@@ -12,7 +12,7 @@
 using namespace xdev_tp_native;
 struct GraphLifetime { std::atomic<bool> released{false}; };
 namespace {
-constexpr unsigned template_capacity=256;
+constexpr unsigned template_capacity=XDEV_TP_TEMPLATE_CAPACITY;
 void CUDA_CB graph_release(void *p) { static_cast<GraphLifetime *>(p)->released.store(true,std::memory_order_release); }
 uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 int drv(CUresult rc) { return rc==CUDA_SUCCESS?0:rc==CUDA_ERROR_NOT_SUPPORTED || rc==CUDA_ERROR_NO_DEVICE || rc==CUDA_ERROR_STUB_LIBRARY?-EOPNOTSUPP:-EIO; }

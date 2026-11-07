@@ -12,14 +12,14 @@ def main():
     a=p.parse_args();out=a.output.resolve();out.mkdir(parents=True,exist_ok=True);result={'scope':'actual batch public API and CUDA source phases on host; no GPU/performance evidence','cases':[]}
     try:
         exe=build(a.source_root,out/'build')
-        for scenario in ('valid','invalid_later','d1','partial_enqueue'):
+        for scenario in ('valid','invalid_later','d1','partial_enqueue','segments','segments_overlap'):
             observed,code=observe({'request':{'action':'batch','scenario':scenario}},exe);errors=[]
             if code:raise RuntimeError(str(observed))
             if observed.get('missing_batch_feature'):errors.append('runtime batch feature is absent; pipeline not executed')
             else:
-                if scenario=='valid':
+                if scenario in ('valid','segments'):
                     expected={'status':0,'handles':2,'completed':2,'logical_high_water':2,'logical_inflight':0,'error':0,'wait_order':[1,1,2,2,3,3]}
-                elif scenario in ('invalid_later','d1'):
+                elif scenario in ('invalid_later','d1','segments_overlap'):
                     expected={'status':-95 if scenario=='d1' else -22,'handles':0,'nodes_before_retry':0,'ready_consumed_count':0,'completed':0,'logical_high_water':0,'error':0}
                 else:
                     expected={'status':-5,'second_submit_result':-5}

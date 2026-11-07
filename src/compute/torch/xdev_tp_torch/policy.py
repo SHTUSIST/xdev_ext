@@ -3,11 +3,19 @@
 from dataclasses import dataclass
 
 
+_WIRE_PAYLOAD_MAX = (1 << 32) - 1
+
+
 @dataclass(frozen=True)
 class Qualified:
     output_shape: tuple | None
     rows: int
     width: int
+    # All-reduce larger than one admitted message is split into consecutive
+    # legal native messages of segment_elements (the last may be shorter).
+    # Gather/all-gather are always exactly one message.
+    segments: int = 1
+    segment_elements: int = 0
 
 
 def qualify(shape, *, dtype, device_type, contiguous, world_size, rank,
@@ -30,10 +38,22 @@ def qualify(shape, *, dtype, device_type, contiguous, world_size, rank,
             raise OverflowError('tensor element count overflows int64')
         numel *= size
     itemsize = 4 if dtype == 'float32' else 2
-    if numel > limit // itemsize or numel * itemsize > min(max_payload_bytes, (1 << 32) - 1):
+    if numel > limit // itemsize:
         raise OverflowError('tensor payload exceeds admitted capacity')
+    message_limit = min(max_payload_bytes, _WIRE_PAYLOAD_MAX)
     if operation == 'all_reduce':
-        return Qualified(shape, 1, numel)
+        # Elementwise sum is exact per element, so consecutive element ranges
+        # are independent legal messages. Both ranks derive the same split
+        # from the agreed max_payload_bytes. No message can hold one element:
+        # the geometry is truly unsupported.
+        segment_elements = message_limit // itemsize
+        if segment_elements == 0:
+            raise ValueError('admitted max_payload_bytes cannot hold one element')
+        segments = max(1, -(-numel // segment_elements))
+        return Qualified(shape, 1, numel, segments, min(numel, segment_elements)
+                         if segments == 1 else segment_elements)
+    if numel * itemsize > message_limit:
+        raise OverflowError('tensor payload exceeds admitted capacity')
     if not shape or dim not in (-1, len(shape) - 1):
         raise ValueError('xdev TP gather supports the last dimension only')
     rows = 1
