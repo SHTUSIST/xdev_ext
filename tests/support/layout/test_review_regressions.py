@@ -178,11 +178,17 @@ class ReviewRegressions(Adapter):
                     decoy = root / relative
                     decoy.parent.mkdir(parents=True)
                     decoy.write_text('root decoy\n')
+                # TMPDIR may be inside another canonical checkout. Give this
+                # private Git snapshot its own real mapping and source owner.
+                (root / 'source-layout.json').write_text(json.dumps(dict(schema=1, files=[
+                    dict(source=target.relative_to(root).as_posix(), component='nvidia',
+                         native_path=relative)])))
                 for args in (('init', '-q'), ('config', 'user.name', 'Fixture'),
                              ('config', 'user.email', 'fixture@example.invalid'), ('add', '.'),
                              ('commit', '-qm', 'native source')):
                     subprocess.run(['git', '-C', str(root), *args], check=True)
                 revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD']).decode().strip()
+                self.assertEqual(layout.canonical_root(native), root)
                 target.write_text('dirty current bytes\n')
                 scope = dict(revision=revision, source='must be replaced', Path=Path,
                              ex=SimpleNamespace(GPU=native, REPO=root), subprocess=subprocess,
@@ -281,10 +287,15 @@ class ReviewRegressions(Adapter):
     def test_a7_dma_explicit_source_root_controls_revision(self):
         with tempfile.TemporaryDirectory() as tmp:
             external = Path(tmp)
+            # The empty external checkout owns its provenance even when the
+            # temporary directory has a different canonical checkout ancestor.
+            (external / 'source-layout.json').write_text(json.dumps(dict(schema=1, files=[])))
             subprocess.run(['git', '-C', str(external), 'init', '-q'], check=True)
+            subprocess.run(['git', '-C', str(external), 'add', 'source-layout.json'], check=True)
             subprocess.run(['git', '-C', str(external), '-c', 'user.name=Fixture', '-c',
                             'user.email=fixture@example.invalid', 'commit', '--allow-empty', '-qm', 'external'], check=True)
             commit = subprocess.check_output(['git', '-C', str(external), 'rev-parse', 'HEAD']).decode().strip()
+            self.assertEqual(layout.canonical_root(external), external)
             script = ROOT / 'tests/core/provider/faults/run.py'
             tree = ast.parse(script.read_text())
             assignment = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign)

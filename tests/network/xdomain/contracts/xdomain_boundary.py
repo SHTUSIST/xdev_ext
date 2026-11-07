@@ -59,6 +59,7 @@ int main(void)
   &bpf_xdev_ext_dma_mech_ops, &bpf_xdev_ext_socket_mech_ops,
   &bpf_xdev_ext_net_mech_ops, &bpf_xdev_ext_cpu_mech_ops,
   &bpf_xdev_ext_user_mech_ops, &bpf_xdev_ext_xdomain_mech_ops,
+  &bpf_xdev_ext_block_mech_ops,
  };
  const u32 members[] = {
   offsetof(struct xdev_ext_nvme_mech_ops,prepare),
@@ -99,7 +100,7 @@ def object_shims():
     # class/member acceptance algorithm; st_ops_of's actual mapping is executed.
     return "\n".join("static const struct bpf_struct_ops bpf_xdev_ext_" + cls +
         "_mech_ops = {" + str(i + 1) + "};" for i, cls in enumerate(
-        ("afxdp", "nvme", "iaa", "ce", "dma", "socket", "net", "cpu", "user", "xdomain")))
+        ("afxdp", "nvme", "iaa", "ce", "dma", "socket", "net", "cpu", "user", "xdomain", "block")))
 
 
 def type_metadata(ops, core_h, functions):
@@ -134,9 +135,24 @@ def type_metadata(ops, core_h, functions):
         raise AssertionError("incomplete real mechanism type mapping")
     rows = re.findall(r"\bXDEV_EXT_MECH_TYPE_ROW\(\s*(\w+)\s*,\s*(\w+)\s*,\s*(\w+)\s*\)",
                       clean[array.end():end])
+    # Review the actual class/type/schema associations, not just their count.
+    # Keep emitting the untouched production rows below; these are only a
+    # fail-closed inventory, never the executed class/member mapping.
+    reviewed_rows = {
+        ("nvme", "XDEV_EXT_MECH_CLASS_NVME", "xdev_ext_mech_ops_desc"),
+        ("afxdp", "XDEV_EXT_MECH_CLASS_AFXDP", "xdev_ext_mech_ops_desc"),
+        ("ce", "XDEV_EXT_MECH_CLASS_CE", "xdev_ext_ce_mech_ops_desc"),
+        ("dma", "XDEV_EXT_MECH_CLASS_DMA", "xdev_ext_dma_mech_ops_desc"),
+        ("cpu", "XDEV_EXT_MECH_CLASS_CPU", "xdev_ext_cpu_mech_ops_desc"),
+        ("iaa", "XDEV_EXT_MECH_CLASS_IAA", "xdev_ext_mech_ops_desc"),
+        ("socket", "XDEV_EXT_MECH_CLASS_SOCKET", "xdev_ext_mech_ops_desc"),
+        ("net", "XDEV_EXT_MECH_CLASS_NET", "xdev_ext_mech_ops_desc"),
+        ("user", "XDEV_EXT_MECH_CLASS_USER", "xdev_ext_mech_ops_desc"),
+        ("xdomain", "XDEV_EXT_MECH_CLASS_XDOMAIN", "xdev_ext_mech_ops_desc"),
+        ("block", "XDEV_EXT_MECH_CLASS_BLOCK", "xdev_ext_mech_ops_desc"),
+    }
     schemas = sorted({row[2] for row in rows})
-    if (len(rows) != 10 or len({row[0] for row in rows}) != 10 or
-            len({row[1] for row in rows}) != 10 or len(schemas) != 4):
+    if len(rows) != len(reviewed_rows) or set(rows) != reviewed_rows:
         raise AssertionError("real mechanism type rows changed; review required")
     consumers = scrub(functions)
     if (re.search(r"(?:\.|->)\s*schema\b|\bxdev_ext_mech_type_schema\s*\(", consumers) or

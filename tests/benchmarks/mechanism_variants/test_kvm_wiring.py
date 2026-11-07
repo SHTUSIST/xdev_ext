@@ -7,6 +7,14 @@ HERE=Path(__file__).resolve().parent
 HARNESS=HERE.parents[2]/'kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_kvm.sh'
 if not HARNESS.is_file():
     HARNESS=HERE.parents[2]/'tests/integration/session/native/xdev_ext_mech_zc_kvm.sh'
+
+def harness_function(name):
+    text=HARNESS.read_text(); anchor=name+'() {\n'
+    if text.count(anchor)!=1:
+        raise ValueError('SETUP expected one actual harness function: '+name)
+    start=text.index(anchor)
+    return text[start:text.index('\n}\n',start)+3]
+
 class Wiring(unittest.TestCase):
     def test_mode_refuses_other_campaigns_before_touching_scratch(self):
         for args in (['--ce-sim'],['--compat'],['--reliable'],['--fault','drop-middle'],['--groups','257']):
@@ -31,14 +39,15 @@ class CaptureWiring(unittest.TestCase):
         # Execute the production argument builder, without starting QEMU.
         start=text.index('destination_drive=')
         stop=text.index("printf '%q '", start)
-        fragment=text[start:stop]
+        fragment='VFIO_DEVICES=();\n'+harness_function('vfio_qemu_args')+'\n'+text[start:stop]
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); (root/'.config').write_text('CONFIG_VIRTIO_CONSOLE=y\n')
             for mode in ('e2','fanout'):
                 with self.subTest(mode=mode):
                     run=self.shell('wire_args=();\n'+fragment+'\nprintf "%s\\n" "${args[@]}"', root,
                         SCRATCH=root,BUILD=root,EV=root,DESTINATION_READONLY=0,
-                        MECHANISM_VARIANTS=int(mode=='e2'),LIFECYCLE=int(mode=='fanout'),COMPAT=0,PEER=0)
+                        MECHANISM_VARIANTS=int(mode=='e2'),LIFECYCLE=int(mode=='fanout'),COMPAT=0,PEER=0,
+                        VIOMMU=0,GPU=0,NIC_MODEL='virtio')
                     self.assertEqual(run.returncode,0,run.stderr)
                     args=run.stdout.splitlines()
                     if mode=='e2':
@@ -54,7 +63,7 @@ class CaptureWiring(unittest.TestCase):
         text=HARNESS.read_text()
         start=text.index('destination_drive=')
         stop=text.index("printf '%q '",start)
-        fragment=text[start:stop]
+        fragment='VFIO_DEVICES=();\n'+harness_function('vfio_qemu_args')+'\n'+text[start:stop]
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); (root/'.config').write_text('CONFIG_VIRTIO_CONSOLE=y\n')
             evidence=root/'actual evidence'; evidence.mkdir()
@@ -63,7 +72,8 @@ class CaptureWiring(unittest.TestCase):
                     alias=root/name; alias.symlink_to(evidence,target_is_directory=True)
                     run=self.shell('wire_args=();\n'+fragment+'\nprintf "%s\\n" "${args[@]}"',root,
                         SCRATCH=root,BUILD=root,EV=alias,DESTINATION_READONLY=0,
-                        MECHANISM_VARIANTS=1,LIFECYCLE=0,COMPAT=0,PEER=0)
+                        MECHANISM_VARIANTS=1,LIFECYCLE=0,COMPAT=0,PEER=0,
+                        VIOMMU=0,GPU=0,NIC_MODEL='virtio')
                     self.assertEqual(run.returncode,0,run.stderr)
                     args=run.stdout.splitlines()
                     self.assertEqual(args[args.index('-chardev')+1],
@@ -73,7 +83,7 @@ class CaptureWiring(unittest.TestCase):
         import tempfile
         text=HARNESS.read_text(); start=text.index('\tcfg()')
         stop=text.index('\tkmake olddefconfig',start)
-        fragment=text[start:stop]
+        fragment='VFIO_DEVICES=();\n'+text[start:stop]
         with tempfile.TemporaryDirectory() as td:
             root=Path(td); (root/'scripts').mkdir(); config=root/'scripts/config'
             # Replace only the external scripts/config executable. The actual
@@ -82,7 +92,8 @@ class CaptureWiring(unittest.TestCase):
             config.chmod(0o700)
             run=self.shell(fragment,root,SRC=root,BUILD=root,MECHANISM_VARIANTS=1,
                 CE_SIM=0,PROVIDER_CASE='normal',LIFECYCLE=0,FENCE_CHECK=0,SOCKET_REQUIRED=0,
-                COMPAT=0,PEER=0,XDOMAIN=0,DEBUG_LOCKING=1,CONFIG_CALLS=root/'calls')
+                COMPAT=0,PEER=0,XDOMAIN=0,DEBUG_LOCKING=1,CONFIG_CALLS=root/'calls',
+                VIOMMU=0,GPU=0,TB_NHI=0,NIC_MODEL='virtio')
             self.assertEqual(run.returncode,0,run.stderr)
             calls=(root/'calls').read_text().splitlines()
             self.assertTrue(any(calls[i:i+2]==['-e','VIRTIO_CONSOLE'] for i in range(len(calls)-1)),
@@ -90,6 +101,7 @@ class CaptureWiring(unittest.TestCase):
 
     def identity_fixture(self, root):
         import hashlib
+        import os
         import tempfile
         tools=root/'tools'; out=tools/'e2'; out.mkdir(parents=True)
         build=root/'build'; build.mkdir(); ev=root/'evidence'; ev.mkdir()
@@ -113,7 +125,9 @@ class CaptureWiring(unittest.TestCase):
         capture=parent/'capture'
         subprocess.run(['python3','-B',str(HERE/'export_old_ticket.py'),
                         str(setup.view/'kernel'),str(capture),'--cc','gcc'],
-                       check=True,capture_output=True,text=True,timeout=60)
+                       check=True,capture_output=True,text=True,timeout=60,
+                       env=dict(os.environ,XDEV_EXT_CANONICAL_ROOT=str(setup.repo),
+                                XDEV_EXT_SOURCE_VIEW=str(setup.view)))
         selected=build/'xdev-ext-e2-old-ticket.path'
         selected.write_text(str(capture.resolve())+'\n')
         artifacts += [selected,*sorted(capture.iterdir())]

@@ -104,6 +104,8 @@ for name in names: (root/name).write_bytes(b'host make/BPF boundary fixture, nev
         self.env = dict(os.environ, SRC=str(self.source.native), TOOLS=str(self.tools),
             BUILD=str(self.build), EV=str(self.evidence), ROOT=str(self.guest),
             E2_SOURCE=str(self.source.view/'tests/eval/mechanism_variants'),
+            XDEV_EXT_CANONICAL_ROOT=str(self.source.repo),
+            XDEV_EXT_SOURCE_VIEW=str(self.source.view),
             SOURCE_GIT_ROOT=str(self.source.repo), SOURCE_SUPPORT_VIEW=str(self.source.view),
             SCRATCH=str(self.root), E2_MODE=str(MODE), SOURCE_COMMIT=self.source.sha,
             BUILD_STUB=str(self.stub), E2_TEST_MAKE_CALLS=str(self.root/'make-calls.jsonl'),

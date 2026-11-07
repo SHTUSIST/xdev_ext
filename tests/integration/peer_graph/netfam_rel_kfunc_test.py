@@ -18,6 +18,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+from xdomain_fixture import definition
 
 KERNEL = Path(__file__).resolve().parents[5]
 RUNTIME = KERNEL / "io_uring/family/xdev_ext_netfam_rel.c"
@@ -93,7 +94,7 @@ struct xsk_xdev_ext_mech_provider { spinlock_t tx_lock; };
 struct fake_pool { void *priv; };
 struct xdev_ext_mech_session { struct fake_pool pool; };
 struct xsk_xdev_ext_mech_stage { struct xsk_mech_reliable *rel; };
-struct xdev_ext_mech_class_ops { union { const struct xdev_ext_net_hooks *net; } fam; };
+struct xdev_ext_mech_class_ops { /* REAL_CLASS_DECL */ union { const struct xdev_ext_net_hooks *net; } fam; };
 struct xdev_ext_mech_stage {
  struct xdev_ext_mech_session *s;
  const struct xdev_ext_mech_class_ops *cls;
@@ -179,7 +180,7 @@ static void init(void)
   .initial_credit=4, .rto_ns=10000, .max_attempts=8, .ack_every=1 };
  xst = (struct xsk_xdev_ext_mech_stage){ .rel=&rel };
  hooks = (struct xdev_ext_net_hooks){ .hdr={XDEV_EXT_FAMILY_NETWORK}, .rel=supply };
- cls = (struct xdev_ext_mech_class_ops){ .fam.net=&hooks };
+ cls = (struct xdev_ext_mech_class_ops){ .decl=xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_AFXDP), .fam.net=&hooks };
  stage = (struct xdev_ext_mech_stage){ .s=&session, .cls=&cls, .priv=&xst };
  call = (struct xdev_ext_mech_call){ .ctx={.class_id=XDEV_EXT_MECH_CLASS_AFXDP},
   .st=&stage, .callsite=XDEV_EXT_MECH_SITE_WORKER, .member=XDEV_EXT_MECH_MEMBER_BUILD };
@@ -192,6 +193,9 @@ static void init(void)
 static void query(int which, u64 group, void *out, u32 size, int want, u32 locks)
 {
  struct xsk_mech_reliable before = rel;
+ /* These cases select a class in their environment as well as its call ctx.
+  * The actual kfunc reads the selected declaration, not a ctx-derived family. */
+ cls.decl=xdev_ext_mech_class_desc(call.ctx.class_id);
  unsigned int acquisitions=provider_lock.acquisitions, releases=provider_lock.releases;
  int ret = which==0 ? bpf_xdev_ext_net_rel_tx_state(&call.ctx,group,out,size) :
            which==1 ? bpf_xdev_ext_net_rel_rx_view(&call.ctx,group,out,size) :
@@ -361,6 +365,12 @@ def fixture(syntax_only=False):
     mech = (KERNEL / "include/linux/xdev_ext_mech.h").read_text()
     net = (KERNEL / "include/linux/xdev_ext_netfam.h").read_text()
     ops = (KERNEL / "io_uring/xdev_ext_ops_core.h").read_text()
+    class_ops = definition(mech, "xdev_ext_mech_class_ops", True)
+    decl_fields = re.findall(r"^\s*const\s+struct\s+xdev_ext_mech_class_desc\s*\*\s*decl\s*;",
+                             class_ops, re.M)
+    if len(decl_fields) != 1 or PROVIDER.count("/* REAL_CLASS_DECL */") != 1:
+        raise AssertionError("missing unique actual selected class declaration member")
+    provider = PROVIDER.replace("/* REAL_CLASS_DECL */", decl_fields[0])
     macro = re.search(r"^#define XDEV_EXT_MECH_OPS_TYPE\(name\).*?^}", mech, re.M | re.S)
     if not macro:
         raise AssertionError("missing real struct_ops layout macro")
@@ -393,7 +403,7 @@ struct xdev_ext_net_rel_tx_state {
                            "xdev_ext_mech_family_kfunc_filter")
         bodies += function((KERNEL / "net/xdp/xsk_xdev_ext_mech.c").read_text(),
                            "xsk_xdev_ext_net_rel")
-    return SHIM + tx_decl + layouts + declarations + PROVIDER + rule + FILTER + bodies + MAIN
+    return SHIM + tx_decl + layouts + declarations + provider + rule + FILTER + bodies + MAIN
 
 
 def main():

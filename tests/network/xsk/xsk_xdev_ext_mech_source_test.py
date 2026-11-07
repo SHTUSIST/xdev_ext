@@ -393,8 +393,52 @@ class ZeroCopySourceTest(unittest.TestCase):
                           "batch_complete(b, status)",
                           "batch_complete(b, ticket, status)"):
             self.assertNotIn(forbidden, submit)
-        self.assertIn("xp_dma_sync_for_device", submit)
-        self.assertIn("xsk_mech_zc_wake(xs)", submit)
+        # All frame leases must be admitted before the publication loop has
+        # any native effect; sync uses that admitted span, not a raw descriptor.
+        lease = submit.index("err = xdev_ext_net_lease_pool(&tb->pool_lease[i], b, i,")
+        refused = submit.index("if (err)\n\t\t\tgoto rollback;", lease)
+        publish_loop = submit.index("for (i = 0; i < xst->tx_n; i++) {", lease)
+        finish = submit.index("xsk_xdev_ext_mech_tx_finish(xst->tx_pkt[i]);")
+        sync_at = submit.index("xsk_mech_pool_dma_sync_locked(p, &tb->pool_lease[i]);")
+        publish = submit.index("*slot = (struct xsk_mech_zc_slot) {")
+        unlock = submit.index("spin_unlock_irqrestore(&p->tx_lock, flags);")
+        wake = submit.index("err = xsk_mech_zc_wake(xs);")
+        order = [submit.index("spin_lock_irqsave(&p->tx_lock, flags);"),
+                 submit.index("if (p->stopped || READ_ONCE(xst->dead) || xs->state != XSK_BOUND)"),
+                 submit.index("xdev_ext_net_count_reserve(&p->ring, nr, &start)"),
+                 lease, refused, publish_loop, finish, sync_at, publish, unlock, wake]
+        self.assertEqual(order, sorted(order))
+        self.assertIn("&xsk_mech_pool_dma_ops, p);", submit[lease:refused])
+        self.assertIn(".count = { .state = XDEV_EXT_NET_COUNT_PENDING }", submit[publish:unlock])
+        self.assertIn("xdev_ext_net_count_rollback(&p->ring, start);", submit[submit.index("rollback:"):])
+        family = function_body(read("io_uring/family/xdev_ext_netfam.c"),
+                               "int xdev_ext_net_lease_pool(")
+        check_at = family.index("ret = ops->check_locked(owner, pool, &f, frame_off, len);")
+        self.assertLess(family.index("xdev_ext_mech_batch_frame(batch, frame_pos, &f)"), check_at)
+        self.assertLess(check_at, family.index("if (ret)\n\t\treturn ret;", check_at))
+        self.assertLess(family.index("if (ret)\n\t\treturn ret;", check_at),
+                        family.index("lease->kind = XDEV_EXT_NET_LEASE_POOL_DMA;"))
+        self.assertRegex(self.mech, r"static const struct xdev_ext_net_pool_dma_ops "
+                         r"xsk_mech_pool_dma_ops = \{\s*"
+                         r"\.check_locked = xsk_mech_pool_dma_check_locked,\s*\};")
+        check = function_body(self.mech, "static int xsk_mech_pool_dma_check_locked(")
+        self.assertIn("lockdep_assert_held(&p->tx_lock);", check)
+        self.assertIn("pool->priv != p || !p->zc", check)
+        self.assertIn("p->stopped || !xp || !xp->umem || !xp->dev || !xp->dma_pages", check)
+        self.assertIn("frame_off > limit - base", check)
+        self.assertIn("len > limit - base - frame_off", check)
+        sync = function_body(self.mech, "static void xsk_mech_pool_dma_sync_locked(")
+        self.assertIn("const struct xdev_ext_net_pool_dma *ref = &lease->u.pool;", sync)
+        self.assertLess(sync.index("lockdep_assert_held(&p->tx_lock);"),
+                        sync.index("xp_dma_sync_for_device("))
+        self.assertRegex(sync, r"xp_dma_sync_for_device\(p->xp,\s*"
+                         r"xp_raw_get_dma\(p->xp, ref->umem_addr \+ ref->frame_off\),\s*ref->len\);")
+        # Following the metadata helper must not hide a payload copy or a
+        # producer write to the user's FQ/CQ or shared descriptor rings.
+        for body in (submit, family, check, sync):
+            for forbidden in ("memcpy", "memmove", "copy_to_user", "copy_from_user",
+                              "skb_", "xsk_kernel_xmit", "xskq_", "->cq", "->fq"):
+                self.assertNotIn(forbidden, strip_comments(body))
         complete = function_body(self.mech, "int xsk_xdev_ext_mech_tx_complete(")
         self.assertNotIn("pool->cq", complete)
         self.assertNotIn("xskq_", complete)
@@ -427,13 +471,42 @@ class ZeroCopySourceTest(unittest.TestCase):
         self.assertIn("spin_lock_irqsave(&p->tx_lock", sync)
         self.assertIn("dma_sync_single_for_cpu", sync)
         stop = function_body(self.mech, "static void xsk_mech_zc_stop(")
-        self.assertIn("XSK_MECH_ZC_NATIVE", stop)
-        self.assertIn("tb->completion.uncertain = true", stop)
+        dead = function_body(self.mech, "void xsk_xdev_ext_mech_pool_dead(")
+        self.assertIn("xsk_mech_zc_stop(p, -ENXIO);", dead)
+        native = stop.index("if (slot->count.state == XDEV_EXT_NET_COUNT_NATIVE)")
+        uncertain = stop.index("tb->completion.uncertain = true;")
+        retire_at = stop.index("xsk_mech_zc_retire(p,")
+        order = [stop.index("spin_lock_irqsave(&p->tx_lock, flags);"),
+                 stop.index("p->stopped = true;"),
+                 stop.index("xdev_ext_net_count_fail(&p->ring, result);"),
+                 native, uncertain, retire_at,
+                 stop.index("xdev_ext_net_count_stop_end(&p->ring);"),
+                 stop.index("spin_unlock_irqrestore(&p->tx_lock, flags);"),
+                 stop.index("xsk_mech_zc_done(&done);")]
+        self.assertEqual(order, sorted(order))
+        self.assertRegex(stop, r"if \(slot->count.state == XDEV_EXT_NET_COUNT_NATIVE\)\s*"
+                         r"tb->completion.uncertain = true;")
+        self.assertEqual(stop.count("for (i = p->ring.cons; i != p->ring.prod; i++)"), 2)
+        self.assertRegex(stop, r"if \(slot->count.state == XDEV_EXT_NET_COUNT_PENDING &&\s*"
+                         r"p->xp->dev && p->xp->dma_pages\)\s*dma_sync_single_for_cpu\(")
+        self.assertRegex(stop, r"xsk_mech_zc_retire\(p,.*?result,\s*"
+                         r"slot->count.state == XDEV_EXT_NET_COUNT_PENDING,\s*&done\);")
+        retire = function_body(self.mech, "static void xsk_mech_zc_retire(")
+        self.assertLess(retire.index("xdev_ext_net_count_mark_done("),
+                        retire.index("xdev_ext_net_lease_pool_release(&tb->pool_lease[slot->slot], quiesced);"))
+        self.assertLess(retire.index("xdev_ext_net_lease_pool_release("),
+                        retire.index("xdev_ext_net_count_retire_result(&tb->completion, result,"))
+        release = function_body(read("io_uring/family/xdev_ext_netfam.c"),
+                                "void xdev_ext_net_lease_pool_release(")
+        self.assertIn("if (lease->kind != XDEV_EXT_NET_LEASE_POOL_DMA || !quiesced)\n\t\treturn;", release)
         done = function_body(self.mech, "static void xsk_mech_zc_done(")
         # Native retirement retains the immutable submission ticket by value;
         # a late callback must never fetch the current batch generation.
         self.assertIn("u64 ticket = tb->ticket;", done)
         self.assertNotIn("xdev_ext_mech_batch_ticket(", done)
+        self.assertIn("bool uncertain = tb->completion.uncertain;", done)
+        self.assertRegex(done, r"if \(uncertain\)\s*"
+                         r"xdev_ext_mech_batch_sequester\(b, ticket, status \?: -ENXIO\);")
         self.assertIn("xdev_ext_mech_batch_sequester(b, ticket, status ?: -ENXIO);", done)
         self.assertIn("xdev_ext_mech_batch_complete(b, ticket, status);", done)
 

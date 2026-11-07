@@ -11,8 +11,10 @@ HERE = Path(__file__).resolve().parent
 BASE = runpy.run_path(str(HERE / "independent_admission.py"))
 KERNEL = BASE["KERNEL"]
 FILES = ("io_uring/xdev_ext_mech_step.h", "io_uring/xdev_ext_mech_core.h", "include/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_mech.h", "include/uapi/linux/xdev_ext_binding.h")
-# F1b: copied core rules now include the production class descriptor table.
-FILES += ("include/linux/xdev_ext_family_core.h",)
+# F1b: copy the actual class descriptor and its pure context constructors.
+# binding_ctx's UAPI dependency is already part of this same header bundle.
+FILES += ("include/linux/xdev_ext_family_core.h",
+          "include/linux/xdev_ext_binding_ctx.h")
 
 
 def compile_and_run(directory, headers, cases):
@@ -41,6 +43,24 @@ def replace_body(text, name, body):
     return text[:m.end() - 1] + "{ " + body.replace("PARAM", param) + " }" + text[i:]
 
 
+def replace_peer_gate(text, expression):
+    """Mutate only CREATE's active descriptor capability read, not its oracle."""
+    matches = list(re.finditer(
+        r"static inline [^;{]*\bxdev_ext_mech_create_check_desc\(([^)]*)\)\s*\{",
+        text))
+    assert len(matches) == 1, "missing unique actual descriptor CREATE gate"
+    match = matches[0]
+    end, depth = match.end(), 1
+    while depth and end < len(text):
+        depth += (text[end] == "{") - (text[end] == "}")
+        end += 1
+    assert depth == 0, "unterminated actual descriptor CREATE gate"
+    body = text[match.end():end - 1]
+    anchor = "rows[i]->peer_dirs"
+    assert body.count(anchor) == 1, "descriptor capability read is not unique"
+    return text[:match.end()] + body.replace(anchor, expression) + text[end - 1:]
+
+
 def main():
     headers = {filename: (KERNEL / filename).read_text() for filename in FILES}
     step = headers[FILES[0]]
@@ -51,14 +71,15 @@ def main():
     if 'xdev_ext_compfam_core.h' in step:
         filename = "include/linux/xdev_ext_compfam_core.h"
         headers[filename] = (KERNEL / filename).read_text()
-    # Updated for P1: the 75b51c2 anchors (64 KiB frame, NVMe-read-first, NVMe/NET-only, TX-only NET)
-    # are replaced by the capability table and the geometry rule; mutate those instead.
+    # CREATE consumes pinned descriptor rows directly. Mutating its compatibility
+    # peer_dirs wrapper would miss admission and can instead change the oracle's
+    # CE capability query. Keep metadata/oracle untouched and mutate the real read.
     mutations = [
-        ("every class claims peer capability", "xdev_ext_mech_peer_dirs", "(void)PARAM; return XDEV_EXT_DMA_DIR_KNOWN_MASK;", "reject_host_stages"),
-        ("NET RX capability dropped", "xdev_ext_mech_peer_dirs",
-         "return PARAM == XDEV_EXT_MECH_CLASS_NVME ? XDEV_EXT_DMA_DIR_KNOWN_MASK : PARAM == XDEV_EXT_MECH_CLASS_NET ? XDEV_EXT_DMA_DIR_TO_DEVICE : 0;", "native_rx"),
-        ("NVMe write capability dropped", "xdev_ext_mech_peer_dirs",
-         "return PARAM == XDEV_EXT_MECH_CLASS_NVME ? XDEV_EXT_DMA_DIR_FROM_DEVICE : PARAM == XDEV_EXT_MECH_CLASS_NET ? XDEV_EXT_DMA_DIR_KNOWN_MASK : 0;", "gpu_first"),
+        ("every class claims peer capability", "xdev_ext_mech_create_check_desc", "XDEV_EXT_DMA_DIR_KNOWN_MASK", "reject_host_stages"),
+        ("NET RX capability dropped", "xdev_ext_mech_create_check_desc",
+         "(c->st[i].class_id == XDEV_EXT_MECH_CLASS_NET ? XDEV_EXT_DMA_DIR_TO_DEVICE : rows[i]->peer_dirs)", "native_rx"),
+        ("NVMe write capability dropped", "xdev_ext_mech_create_check_desc",
+         "(c->st[i].class_id == XDEV_EXT_MECH_CLASS_NVME ? XDEV_EXT_DMA_DIR_FROM_DEVICE : rows[i]->peer_dirs)", "gpu_first"),
         ("GPU geometry unchecked", "xdev_ext_mech_peer_layout_check", "(void)PARAM; return 0;", "reject_geometry"),
     ]
     cases = ("peer_nvme", "peer_net", "native_class", "reject_host_stages", "native_rx", "gpu_first", "reject_geometry", "bounded_start", "legacy_unchanged")
@@ -67,7 +88,8 @@ def main():
         baseline = compile_and_run(directory, headers, cases)
         assert all(result.returncode == 0 for result in baseline), [(result.stdout, result.stderr) for result in baseline]
         for name, function, body, case in mutations:
-            changed_step = replace_body(step, function, body)
+            changed_step = (replace_peer_gate(step, body) if function == "xdev_ext_mech_create_check_desc"
+                            else replace_body(step, function, body))
             assert changed_step and changed_step != step, (name, function + "() missing from xdev_ext_mech_step.h")
             changed = dict(headers)
             changed[FILES[0]] = changed_step

@@ -24,7 +24,9 @@ static int record_tx(void *lk, struct xdev_ext_net_elem *e, u32 n)
  if (post_refusal) return post_refusal;
  int id = batch_index(e[0].slot->batch);
  assert(!posted[id]); posted[id] = e; posted_nr[id] = n; device_posts++;
- for (u32 i=0;i<n;i++) assert(e[i].slot == slots[id] && e[i].lease.file == &allocation);
+ for (u32 i=0;i<n;i++) assert(e[i].slot == slots[id] &&
+  e[i].lease.kind == XDEV_EXT_NET_LEASE_PEER_DMA &&
+  e[i].lease.u.peer.file == &allocation && e[i].lease.u.peer.lease.mapping);
  return 0;
 }
 static int record_rx(void *lk, struct xdev_ext_net_elem *e, u32 n)
@@ -33,7 +35,9 @@ static int record_rx(void *lk, struct xdev_ext_net_elem *e, u32 n)
  if (post_refusal) return post_refusal;
  int id = batch_index(e[0].slot->batch);
  assert(!posted[id]); posted[id] = e; posted_nr[id] = n; device_posts++;
- for (u32 i=0;i<n;i++) assert(e[i].slot == slots[id] && e[i].lease.file == &allocation);
+ for (u32 i=0;i<n;i++) assert(e[i].slot == slots[id] &&
+  e[i].lease.kind == XDEV_EXT_NET_LEASE_PEER_DMA &&
+  e[i].lease.u.peer.file == &allocation && e[i].lease.u.peer.lease.mapping);
  return 0;
 }
 static void result(struct xdev_ext_netfam_stage *n, struct xdev_ext_mech_batch *b,
@@ -56,7 +60,8 @@ static void init(bool rx, u32 max)
   .direction=rx?XDEV_EXT_MECH_DIR_FROM_DEVICE:XDEV_EXT_MECH_DIR_TO_DEVICE};
  dev=(struct xdev_ext_net_dev_ops){.hdr_policy=XDEV_EXT_NET_HDR_SPLIT,.max_elems=max,
   .bind=NULL,.requester=NULL,.post_tx=record_tx,.post_rx=record_rx};
- member=(struct xdev_ext_net_member){.dev=&dev,.admit=false,.result=result};
+ member=(struct xdev_ext_net_member){.dev=&dev,.lease_kind=XDEV_EXT_NET_LEASE_PEER_DMA,
+  .admit=false,.result=result};
  /* Endpoint setup is metadata only; payload submission stays in the real family. */
  assert(!xdev_ext_netfam_init(&ns,&stage,&member,rx,0));
  ns.lk=&endpoint; endpoint.rx=rx;

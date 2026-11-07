@@ -10,7 +10,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
-from xdomain_ring_test import no_includes, declaration
+from xdomain_ring_test import no_includes, declaration, typed_lease_declarations
 from xdomain_retention_fixture import retention_unit, descriptor_unit
 
 HERE = Path(__file__).resolve().parent
@@ -19,7 +19,7 @@ def ring_unit(kernel):
     peer=(kernel/'include/linux/xdev_ext_peer.h').read_text()
     net=(kernel/'include/linux/xdev_ext_netfam.h').read_text()
     lease=declaration(peer,'struct xdev_ext_peer_lease')+declaration(peer,'struct xdev_ext_peer_fd_lease')
-    family=declaration(net,'enum xdev_ext_net_hdr_policy')+'\n'.join(line for line in net.splitlines() if line.startswith('#define XDEV_EXT_NET_DEV_AREA') or line.startswith('#define XDEV_EXT_NETFAM_MAX_ELEMS'))+'\n'+declaration(net,'struct xdev_ext_net_elem')+declaration(net,'struct xdev_ext_net_dev_ops')
+    family=typed_lease_declarations(net)+declaration(net,'enum xdev_ext_net_hdr_policy')+'\n'.join(line for line in net.splitlines() if line.startswith('#define XDEV_EXT_NET_DEV_AREA') or line.startswith('#define XDEV_EXT_NETFAM_MAX_ELEMS'))+'\n'+declaration(net,'struct xdev_ext_net_elem')+declaration(net,'struct xdev_ext_net_dev_ops')
     boundaries=(HERE/'xdomain_ring_boundaries.c').read_text()
     # Recorder capacity only. Existing tests and production source stay intact.
     for old,new in [('all_rings[16]','all_rings[1024]'),('stop_hop[32]','stop_hop[2048]'),('dma_records[64]','dma_records[1024]'),('hops[16]','hops[1024]')]:
