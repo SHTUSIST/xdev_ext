@@ -290,6 +290,7 @@ jobs:
         run: |
           python3 tools/run.py --cwd tests/storage/nvme/blocktable make check BUILD="$RUNNER_TEMP/blocktable"
           python3 -B tests/tools/test_responsibility.py
+          python3 -B tests/tools/test_chain_composition.py
       - name: USER stage rules, scheduler and wiring contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py
       - name: Socket NIC copy fallback and accounting contracts

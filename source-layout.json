@@ -9531,12 +9531,20 @@
       "logical_path": "tests/support/layout/test_review_regressions.py"
     },
     {
+      "source": "tests/tools/test_chain_composition.py",
+      "logical_path": "tests/tools/test_chain_composition.py"
+    },
+    {
       "source": "tests/tools/test_responsibility.py",
       "logical_path": "tests/tools/test_responsibility.py"
     },
     {
       "source": "third_party/sources.lock.json",
       "logical_path": "third_party/sources.lock.json"
+    },
+    {
+      "source": "tools/analysis/chain_composition.py",
+      "logical_path": "tools/analysis/chain_composition.py"
     },
     {
       "source": "tools/analysis/check_eval_data_provenance.py",
