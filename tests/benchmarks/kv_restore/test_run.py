@@ -223,6 +223,51 @@ class Runs(Base):
             self.assertEqual(argv[argv.index(flag) + 1], value, flag)
         self.assertIn('--early', argv)
 
+    def xdev_args(self, *extra):
+        return kr.parser().parse_args([
+            'run', '--arm', 'xdev-ext', '--manifest', str(self.manifest), '--object', 'q8',
+            '--prefixes', '32', '--repetitions', '1', '--host1-agent', '127.0.0.1:1',
+            '--token-file', '/dev/null', '--output', str(self.dir / 'o'), '--worker-bin',
+            '/opt/kv_restore', '--gpu-bdf', '0000:65:00.0', '--peer', '10.9.0.1:7700',
+            '--service', 'xdevext-1', '--pool-bytes', str(64 * MIB)] + list(extra))
+
+    def test_ce_vmm_destination_argv(self):
+        m = kl.load_manifest(self.manifest)
+        argv = kr.worker_argv(self.xdev_args('--dst', 'ce-vmm', '--ce-dev', '/dev/nvidia1',
+                                             '--ce-prog', '/opt/kv_ce_place.bpf.o',
+                                             '--frame-bytes', '4096'), m)
+        for flag, value in (('--dst', 'ce-vmm'), ('--ce-dev', '/dev/nvidia1'),
+                            ('--ce-prog', '/opt/kv_ce_place.bpf.o'), ('--frame-bytes', '4096'),
+                            ('--gpu-bdf', '0000:65:00.0')):
+            self.assertEqual(argv[argv.index(flag) + 1], value, flag)
+        self.assertNotIn('--gpu-node', argv, 'the PEER registration node is not used')
+        peer = kr.worker_argv(self.xdev_args('--gpu-node', '/dev/nvidia0'), m)
+        self.assertEqual(peer[peer.index('--dst') + 1], 'peer', 'PEER pool stays the default')
+        self.assertNotIn('--ce-dev', peer)
+        for bad in (('--dst', 'ce-vmm', '--ce-prog', 'p'), ('--dst', 'ce-vmm', '--ce-dev', 'd'),
+                    ('--dst', 'ce-vmm', '--ce-dev', 'd', '--ce-prog', 'p', '--gpu-node', 'n'),
+                    ('--ce-dev', 'd', '--gpu-node', 'n'), ()):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                kr.worker_argv(self.xdev_args(*bad), m)
+
+    def test_rows_carry_host2_cpu_copy_bytes(self):
+        address, token, _ = self.agent()
+        fake = self.dir / 'fake_worker.py'
+        fake.write_text(FAKE_WORKER.replace("'seen': line.strip()",
+                                            "'seen': line.strip(), 'cpu_copy_bytes': 0"))
+        plain = self.dir / 'plain_worker.py'
+        plain.write_text(FAKE_WORKER)
+        for worker, want in ((fake, 0), (plain, None)):
+            out = self.dir / f'results-{worker.stem}'
+            rc = kr.main(['run', '--arm', 'custom', '--manifest', str(self.manifest), '--object',
+                          'q14', '--prefixes', '16', '--repetitions', '2', '--host1-agent', address,
+                          '--token-file', str(token), '--output', str(out), '--idle-seconds', '0',
+                          '--worker-argv', json.dumps([sys.executable, '-I', str(worker)]),
+                          '--group-bytes', str(128 * 1024)])
+            self.assertEqual(rc, 0)
+            rows = [json.loads(l) for l in (out / 'results.jsonl').read_text().splitlines()]
+            self.assertEqual([r['host2_cpu_copy_bytes'] for r in rows], [want, want])
+
     def test_dry_run_prints_the_schedule_only(self):
         out = self.dir / 'never'
         self.assertEqual(kr.main(['run', '--arm', 'custom', '--manifest', str(self.manifest),

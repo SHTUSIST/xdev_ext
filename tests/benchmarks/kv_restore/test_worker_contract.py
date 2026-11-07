@@ -143,5 +143,128 @@ class DryRun(unittest.TestCase):
         self.assertEqual(s.quit(timeout=30)['error'], 0)
 
 
+CE_WINDOW = ['--window-slba', '2048', '--window-nlb', str(40 * GIB // 512), '--lba-bytes', '512',
+             '--group-bytes', str(128 * KIB), '--frame-bytes', '4096', '--depth', '32',
+             '--window', '32', '--early']
+CE = ['--dst', 'ce-vmm', '--gpu-bdf', '0000:01:00.0', '--ce-dev', '/dev/null',
+      '--ce-prog', '/dev/null']
+RESTORE = ['--pool-bytes', str(6 * GIB), '--peer', '127.0.0.1:9', '--link-token', '5']
+
+
+@unittest.skipUnless(BIN, 'needs libbpf >= 1.0 to build kv_restore (or KV_RESTORE_BIN)')
+class CeVmmDestination(unittest.TestCase):
+    """--dst ce-vmm: host frames of the ring's UMEM, the copy engine into a CUDA
+    VMM allocation; selected explicitly, the PEER/dma-buf defaults unchanged."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='kv-ce-')
+        self.manifest = kl.parse_manifest({
+            'schema': 1, 'kind': 'kv-layout', 'lba_bytes': 512,
+            'window': {'slba': 2048, 'nlb': 40 * GIB // 512},
+            'objects': [{'name': 'q14', 'model': 'qwen3-14b', 'tokens': 32768, 'seed': 9,
+                         'slba': 2048, 'nlb': 5 * GIB // 512}]})
+        self.geometry = kl.Geometry(128 * KIB, 4 * KIB, 32, 32, True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def worker(self, role, extra):
+        return kp.Worker([BIN, role, '--dry-run'] + CE_WINDOW + extra, ready_timeout=30,
+                         log=Path(self.tmp.name) / f'{role}.log')
+
+    def refused(self, argv):
+        r = subprocess.run([str(BIN)] + argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        kind, body = kp.parse_line(r.stdout.strip().splitlines()[-1])
+        self.assertEqual((kind, body['where']), ('KV_ERROR', 'arguments'))
+
+    def test_arguments_refused(self):
+        def without(option):
+            i = CE.index(option)
+            return CE[:i] + CE[i + 2:]
+        restore = ['restore', '--dry-run'] + CE_WINDOW + RESTORE
+        local = ['local-verify', '--dry-run'] + CE_WINDOW + [
+            '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--pool-bytes', str(64 << 20)]
+        cases = {
+            'no CE device': restore + without('--ce-dev'),
+            'no CE program': restore + without('--ce-prog'),
+            'no GPU BDF': restore + without('--gpu-bdf'),
+            'PEER registration node': restore + CE + ['--gpu-node', '/dev/nvidia0'],
+            'host frames are 4096 bytes': ['restore', '--dry-run'] + CE_WINDOW[:8] + [
+                '--frame-bytes', str(128 * KIB)] + CE_WINDOW[10:] + RESTORE + CE,
+            'unknown destination': restore + ['--dst', 'vram'],
+            'restore takes peer or ce-vmm': restore + ['--dst', 'dmabuf'],
+            'local-verify takes dmabuf or ce-vmm': local + ['--dst', 'peer'],
+            'CE options need ce-vmm': restore + ['--gpu-bdf', 'x', '--gpu-node', 'y',
+                                                 '--ce-dev', '/dev/nvidia0'],
+            'CE program needs ce-vmm': local + ['--ce-prog', '/dev/null'],
+            'serve has no destination': ['serve', '--dry-run'] + CE_WINDOW + [
+                '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--listen', '127.0.0.1:0',
+                '--link-token', '5', '--dst', 'ce-vmm'],
+        }
+        for name, argv in cases.items():
+            with self.subTest(name):
+                self.refused(argv)
+
+    def test_restore_receives_into_a_ring(self):
+        w = self.worker('restore', RESTORE + CE)
+        self.assertEqual(w.ready['dst'], 'ce-vmm')
+        self.assertEqual(w.ready['pool_frames'], 6 * GIB // 4096)
+        self.assertEqual(w.ready['ring_frames'], 32 * 32)
+        obj = self.manifest.object('q14')
+        # 5 GiB in 4 KiB frames: 1.3M destination frames, one START lends only the ring.
+        want = kl.plan_restore(self.manifest, 'q14', 32768, self.geometry, 1, 8,
+                               6 * GIB // 4096, host2_ring=True).to_json()
+        r = w.go(run='big', ordinal=1, object_slba=obj.slba, bytes=kl.kv_bytes(obj.model, 32768),
+                 dst_frame0=8, timeout=30)
+        self.assertTrue(r['ok'], r)
+        for key in ('groups', 'first_seq', 'host2_frames', 'host2_dst_frame0',
+                    'host2_start_frames'):
+            self.assertEqual(r['plan'][key], want[key], key)
+        self.assertEqual(r['plan']['host2_start_frames'], 32 * 32)
+        self.assertIs(r['plan']['host2_ring'], True)
+        self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),
+                         ('ce-vmm', 'xdomain-rx>host-frame>ce-h2d', 0))
+        past = w.go(run='past', ordinal=2, object_slba=obj.slba,
+                    bytes=kl.kv_bytes(obj.model, 32768), dst_frame0=6 * GIB // 4096 - 100,
+                    timeout=30)
+        self.assertEqual(past['error'], -errno.ENOSPC, 'destination beyond the VMM allocation')
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_local_verify_ce_vmm(self):
+        w = self.worker('local-verify', ['--nvme', '/dev/null', '--nvme-prog', '/dev/null',
+                                         '--pool-bytes', str(64 << 20)] + CE)
+        self.assertEqual((w.ready['dst'], w.ready['ring_frames']), ('ce-vmm', 32 * 32))
+        r = w.go(run='lv', ordinal=1, object_slba=2048, bytes=40 * 128 * KIB, dst_frame0=3,
+                 timeout=30)
+        self.assertTrue(r['ok'], r)
+        self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),
+                         ('ce-vmm', 'nvme-read>host-frame>ce-h2d', 0))
+        self.assertEqual(r['plan']['host2_start_frames'], 32 * 32)
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_defaults_unchanged(self):
+        w = kp.Worker([BIN, 'restore', '--dry-run'] + WINDOW + [
+            '--gpu-bdf', '0000:00:00.0', '--gpu-node', '/dev/null', '--pool-bytes',
+            str(5 * GIB), '--peer', '127.0.0.1:9', '--link-token', '5'], ready_timeout=30,
+            log=Path(self.tmp.name) / 'peer.log')
+        self.assertEqual(w.ready['dst'], 'peer')
+        r = w.go(run='p', ordinal=1, object_slba=2048, bytes=8 * 256 * KIB, dst_frame0=0,
+                 timeout=30)
+        self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),
+                         ('peer', 'xdomain-rx>gpu-frame', 0))
+        self.assertIs(r['plan']['host2_ring'], False)
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+        w = kp.Worker([BIN, 'local-verify', '--dry-run'] + WINDOW + [
+            '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--pool-bytes', str(64 * 128 * KIB)],
+            ready_timeout=30, log=Path(self.tmp.name) / 'dmabuf.log')
+        self.assertEqual(w.ready['dst'], 'dmabuf')
+        r = w.go(run='d', ordinal=1, object_slba=2048, bytes=8 * 256 * KIB, dst_frame0=0,
+                 timeout=30)
+        self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),
+                         ('dmabuf', 'nvme-read>dmabuf-frame', 0))
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

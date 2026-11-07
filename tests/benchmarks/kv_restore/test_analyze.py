@@ -27,14 +27,15 @@ _spec.loader.exec_module(ka)
 GB = 10 ** 9
 
 
-def rows(arm, latencies, cpu1, cpu2, prefix=4096, bytes_=671088640, ok=True, perf=None):
+def rows(arm, latencies, cpu1, cpu2, prefix=4096, bytes_=671088640, ok=True, perf=None,
+         copy=None):
     out = []
     for i, lat in enumerate(latencies):
         out.append(dict(run=f'{arm}-{prefix}-{i}', arm=arm, model='qwen3-14b', prefix_tokens=prefix,
                         rep=i, ordinal=i + 1, bytes=bytes_, ok=ok, latency_ns=int(lat * 1e9),
                         host1_cpu=dict(busy_core_seconds=cpu1 * bytes_ / GB, wall_seconds=lat),
                         host2_cpu=dict(busy_core_seconds=cpu2 * bytes_ / GB, wall_seconds=lat),
-                        perf=perf))
+                        perf=perf, host2_cpu_copy_bytes=copy))
     return out
 
 
@@ -138,6 +139,52 @@ class Verdicts(unittest.TestCase):
         self.assertAlmostEqual(r['recompute_s_median'], 0.4, msg='the command\'s own prefill time')
         self.assertAlmostEqual(r['restore_over_recompute'], 1.0 / 0.4)
         self.assertTrue(rep['slower_than_recompute_on_all_prefixes'])
+
+
+class Host2Criterion(unittest.TestCase):
+    """K-KV on host 2: the CPU copies no payload byte, and host-2 CPU
+    core-seconds are at most half of the ordinary baseline's (nvmeof)."""
+
+    def analyze(self, xdev, nvmeof):
+        with tempfile.TemporaryDirectory(prefix='kv-h2-') as tmp:
+            return ka.analyze([write_arm(tmp, 'xdev-ext', xdev), write_arm(tmp, 'nvmeof', nvmeof)],
+                              resamples=100, seed=1)
+
+    def test_zero_copy_and_halved_cpu_pass(self):
+        rep = self.analyze(rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0),
+                           rows('nvmeof', [1.0] * 10, 1, 2.5, copy=2 * 671088640))
+        self.assertEqual(rep['arms'][1]['arm'], 'xdev-ext')
+        point = rep['arms'][1]['points'][0]
+        self.assertEqual(point['host2_cpu_copy_bytes'], 0)
+        c = rep['host2_criterion'][0]
+        self.assertEqual((c['arm'], c['baseline']), ('xdev-ext', 'nvmeof'))
+        self.assertEqual((c['cpu_copy_bytes'], c['copy_verdict']), (0, 'pass'))
+        self.assertAlmostEqual(c['core_seconds_ratio'], 2.5)
+        self.assertEqual(c['core_seconds_verdict'], 'pass')
+
+    def test_any_copied_byte_or_missing_count_does_not_pass(self):
+        some = rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0)
+        some[3]['host2_cpu_copy_bytes'] = 4096
+        rep = self.analyze(some, rows('nvmeof', [1.0] * 10, 1, 2.5))
+        c = rep['host2_criterion'][0]
+        self.assertEqual((c['cpu_copy_bytes'], c['copy_verdict']), (4096, 'fail'))
+        missing = rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0)
+        missing[0]['host2_cpu_copy_bytes'] = None
+        c = self.analyze(missing, rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
+        self.assertEqual((c['cpu_copy_bytes'], c['copy_verdict']), (None, 'not_measured'))
+        failed = rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0) + \
+            rows('xdev-ext', [1.0], 1, 1.0, ok=False, copy=9)
+        c = self.analyze(failed, rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
+        self.assertEqual(c['copy_verdict'], 'pass', 'failed runs are counted, not used')
+
+    def test_core_seconds_must_halve(self):
+        c = self.analyze(rows('xdev-ext', [1.0] * 10, 1, 1.5, copy=0),
+                         rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
+        self.assertAlmostEqual(c['core_seconds_ratio'], 2.5 / 1.5)
+        self.assertEqual(c['core_seconds_verdict'], 'fail')
+        c = self.analyze(rows('xdev-ext', [1.0] * 9, 1, 0.5, copy=0),
+                         rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
+        self.assertEqual(c['core_seconds_verdict'], 'insufficient_runs')
 
 
 if __name__ == '__main__':

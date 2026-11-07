@@ -21,13 +21,17 @@ gv = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gv)
 
 
-def console(expected, edit=None, max_kb=512):
+def console(expected, edit=None, max_kb=512, dst='dmabuf'):
     """Lines a correct guest prints; edit(run, index, record) may change one."""
+    ce = dst == 'ce-vmm'
     out = ['KV_GUEST_FACT lba_bytes=512', f'KV_GUEST_FACT max_hw_sectors_kb={max_kb}']
     for e in gv.adjust(expected, max_kb * 1024):
         out.append(f'KV_GUEST_RUN_BEGIN {e["name"]}')
-        records = [('KV_READY', dict(role='local-verify', dry_run=False, session_id=7,
-                                     pool_frames=e['pool_frames']))]
+        ready = dict(role='local-verify', dry_run=False, session_id=7, pool_frames=e['pool_frames'],
+                     dst=dst)
+        if ce:
+            ready['ring_frames'] = e['ring_frames']
+        records = [('KV_READY', ready)]
         t = 1000
         for r in e['results']:
             if r.get('build_abort'):
@@ -47,8 +51,12 @@ def console(expected, edit=None, max_kb=512):
                             wait_err=0, verified=True, first_bad=-1, outside_bad=-1,
                             digest=f'0x{r["digest"]:016x}',
                             stats=dict(done=r['cumulative'], abort=0, inflight=0, sequestered=0,
-                                       last_err=0, submitted=[r['cumulative'], 0],
-                                       completed=[r['cumulative'], 0]))
+                                       last_err=0,
+                                       submitted=[r['cumulative'], r['cumulative'] if ce else 0],
+                                       completed=[r['cumulative'], r['cumulative'] if ce else 0]),
+                            dst=dst, cpu_copy_bytes=0,
+                            payload_path='nvme-read>host-frame>ce-h2d' if ce else
+                            'nvme-read>dmabuf-frame')
                 t += 100
             records.append(('KV_RESULT', body))
         records.append(('KV_BYE', dict(error=0, stop_error=e['stop_error'], retained=False,
@@ -177,6 +185,72 @@ class Oracle(unittest.TestCase):
             self.assertEqual(go[-1], 'QUIT')
             self.assertEqual(len(go), 6)
             self.assertEqual(plan['expectations'], json.loads(json.dumps(gv.expectations())))
+
+
+class CeVmmOracle(unittest.TestCase):
+    """--dst ce-vmm: NVMe READ into a recycled host-frame ring, the GPU copy
+    engine into a CUDA VMM allocation; the CPU copies no payload byte."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.expected = json.loads(json.dumps(gv.expectations('ce-vmm')))
+
+    def console(self, edit=None):
+        return console(self.expected, edit, dst='ce-vmm')
+
+    def test_plan_uses_host_frames_and_a_vram_pool(self):
+        for run in gv.runs('ce-vmm'):
+            args = [str(a) for a in gv.worker_args(run, 'ce-vmm')]
+            self.assertEqual(args[args.index('--frame-bytes') + 1], '4096')
+            self.assertEqual(args[args.index('--dst') + 1], 'ce-vmm')
+            self.assertIn('--ce-prog', args)
+            self.assertIn('--ce-dev', args)
+        self.assertTrue(all(e['ring_frames'] for e in self.expected))
+        self.assertEqual(sum(1 for e in self.expected for r in e['results'] if not r['error']), 5)
+        self.assertEqual(sorted({r['error'] for e in self.expected for r in e['results']}),
+                         [-gv.errno.ENOSPC, -gv.errno.EALREADY, 0])
+
+    def test_correct_console_passes(self):
+        report = gv.validate(self.console(), self.expected, 'ce-vmm')
+        self.assertEqual(len(report), 5)
+
+    def test_mutations_fail(self):
+        def at(run, index, change):
+            def edit(name, i, kind, body):
+                return change(kind, body) if (name, i) == (run, index) else (kind, body)
+            return self.console(edit)
+
+        def stats(key, stage, value):
+            def change(kind, body):
+                body['stats'][key][stage] = value
+                return kind, body
+            return change
+        for why, text in {
+            'CPU copied payload': at('A', 1, lambda k, b: (k, dict(b, cpu_copy_bytes=4096))),
+            'copy count missing': at('A', 2, lambda k, b: (k, {x: y for x, y in b.items()
+                                                                if x != 'cpu_copy_bytes'})),
+            'CE stage did not run': at('A', 1, stats('completed', 1, 0)),
+            'CE submitted short': at('B', 2, stats('submitted', 1, 1)),
+            'other destination': at('B', 1, lambda k, b: (k, dict(b, dst='dmabuf'))),
+            'payload path': at('A', 3, lambda k, b: (k, dict(b, payload_path='nvme-read>dmabuf-frame'))),
+            'ready destination': at('A', 0, lambda k, b: (k, dict(b, dst='peer'))),
+            'ring size': at('B', 0, lambda k, b: (k, dict(b, ring_frames=1))),
+            'digest': at('A', 1, lambda k, b: (k, dict(b, digest='0x0000000000000001'))),
+        }.items():
+            with self.subTest(why=why), self.assertRaises((gv.OracleError, gv.kp.ProtocolError)):
+                gv.validate(text, self.expected, 'ce-vmm')
+        with self.assertRaises(gv.OracleError):
+            gv.validate(console(json.loads(json.dumps(gv.expectations())), dst='dmabuf'),
+                        self.expected, 'ce-vmm')
+
+    def test_make_plan_records_the_destination(self):
+        with tempfile.TemporaryDirectory(prefix='kv-guest-ce-') as tmp:
+            plan = gv.make_plan(tmp, 'ce-vmm')
+            self.assertEqual(plan['dst'], 'ce-vmm')
+            self.assertEqual(plan['expectations'], self.expected)
+            args = (Path(tmp) / 'args-A.txt').read_text().split()
+            self.assertEqual(args[args.index('--dst') + 1], 'ce-vmm')
+            self.assertTrue((Path(tmp) / 'source.raw').exists())
 
 
 if __name__ == '__main__':
