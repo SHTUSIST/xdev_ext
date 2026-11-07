@@ -4,6 +4,9 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import queue
+import select
+import socket
 import stat
 import subprocess
 import sys
@@ -474,11 +477,321 @@ class ObservationFailurePreservesWorkload(unittest.TestCase):
             self.assert_cpu_held(owner)
 
 
+class NestedHandshakeViolation(AssertionError):
+    """A real child advanced across an ungranted test protocol boundary."""
+
+
+class NestedHandshake:
+    """Test-owned coordinator; the original collector alone establishes trust."""
+    def __init__(self, owner, module, semantic_mutant=None):
+        if semantic_mutant not in (None, 'skip-start-wait', 'skip-end-wait', 'callback-now'):
+            raise ValueError('unknown nested handshake semantic mutant')
+        self.owner, self.module, self.semantic_mutant = owner, module, semantic_mutant
+        self.deadline = time.monotonic() + 5
+        # Leave the original run/communicate enough of the same budget to reap.
+        self.protocol_deadline = self.deadline - .5
+        self.nonce = os.urandom(16).hex()
+        self.control, self.child_socket = socket.socketpair(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        self.child_fd = self.child_socket.fileno()
+        self.control.setblocking(False)
+        self.wake_read, self.wake_write = socket.socketpair()
+        self.wake_read.setblocking(False)
+        self.wake_write.setblocking(False)
+        self.samples = queue.Queue(maxsize=512)
+        self.sample_offset, self.sample_sequence = 0, 0
+        self.latest = self.before_start = None
+        self.ready = self.span = None
+        self.start_probe = self.start_ack = self.started = False
+        self.end_probe = self.end_held = self.end_ack = self.old_checked = False
+        self.child_exiting = False
+        self.finished = threading.Event()
+        self.stopping = threading.Event()
+        self.error = None
+        self.error_reported = False
+        self.cleanup_error = None
+        self.error_lock = threading.Lock()
+        self.messages = 0
+        self.evidence = {}
+        self.original_callback = owner.sampler.sample_callback
+        owner.sampler.sample_callback = self.sample_callback
+        self.thread = threading.Thread(target=self.coordinate, name='nested-identity-handshake')
+        try:
+            self.thread.start()
+        except BaseException:
+            owner.sampler.sample_callback = self.original_callback
+            for endpoint in (self.control, self.child_socket, self.wake_read, self.wake_write):
+                endpoint.close()
+            raise
+
+    def remaining(self):
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError('nested identity handshake total deadline')
+        return remaining
+
+    def wake(self):
+        try:
+            self.wake_write.send(b'x')
+        except BlockingIOError:
+            pass  # An unread wakeup already exists; queued rows remain intact.
+
+    def record_error(self, error):
+        with self.error_lock:
+            if self.error is None:
+                self.error = error
+        self.wake()
+
+    def sample_callback(self):
+        try:
+            self.original_callback()
+            if self.finished.is_set() or self.stopping.is_set():
+                return
+            # Called only after the original sampler flush. Never fabricate a row
+            # or wait here for a child/control event.
+            limit = 4 * self.module.CPU.STAT_MAX_BYTES
+            with self.owner.sampler.path.open('rb') as stream:
+                if self.sample_sequence == 0:
+                    # The sampler can have run before this test wrapper was
+                    # installed. Start at its latest complete real row, without
+                    # imposing an artificial four-row startup scheduling limit.
+                    end = stream.seek(0, os.SEEK_END)
+                    start = max(0, end-limit)
+                    stream.seek(start)
+                    tail = stream.read(limit)
+                    if (not tail.endswith(b'\n') or
+                            start and b'\n' not in tail[:-1]):
+                        raise ValueError('nested latest actual sample row incomplete/oversized')
+                    line = tail[:-1].rsplit(b'\n', 1)[-1]+b'\n'
+                    self.sample_offset = end-len(line)
+                stream.seek(self.sample_offset)
+                for _ in range(4):
+                    line = stream.readline(limit + 1)
+                    if not line:
+                        break
+                    if len(line) > limit or not line.endswith(b'\n'):
+                        raise ValueError('nested actual sample row exceeds bound/incomplete')
+                    row = json.loads(line)
+                    bracket = row['clock_brackets']['CLOCK_MONOTONIC_RAW']
+                    if (row['clock'] != 'CLOCK_MONOTONIC' or
+                            any(type(bracket[k]) is not int for k in ('before_ns', 'after_ns')) or
+                            bracket['after_ns'] < bracket['before_ns']):
+                        raise ValueError('nested actual RAW sample bracket invalid')
+                    self.sample_sequence += 1
+                    self.samples.put_nowait((self.sample_sequence, bracket['before_ns'], bracket['after_ns']))
+                    self.sample_offset = stream.tell()
+                if stream.read(1):
+                    raise ValueError('nested actual sample publication backlog exceeds bound')
+            self.wake()
+        except BaseException as error:
+            # CpuSampler catches only its own usual failures. Test coordination
+            # failures must reach the main unittest thread, including assertions.
+            self.record_error(error)
+
+    def live_pair(self):
+        key = self.ready['pid'], self.ready['start']
+        with self.owner._observation_lock:
+            child_entry = self.owner._trusted.get(key)
+            if child_entry is None:
+                return False
+            child = copy.deepcopy(child_entry['base'])
+            parent_entry = self.owner._trusted.get((child['observer_pid'], child['observer_start_ticks']))
+            if parent_entry is None:
+                return False
+            parent = copy.deepcopy(parent_entry['base'])
+            if child.get('observation_error') or parent.get('observation_error') or self.owner._artifact_errors:
+                raise AssertionError('nested original live observation contains errors')
+        actual_child = self.module._proc(key[0])
+        actual_parent = self.module._proc(child['observer_pid'])
+        for actual, recorded in ((actual_child, child), (actual_parent, parent)):
+            if any(actual[k] != recorded[k] for k in ('pid', 'process_start_ticks', 'ppid', 'argv')):
+                raise AssertionError('nested handshake actual live identity mismatch')
+        if (actual_child['ppid'] != actual_parent['pid'] or child['argv'] != child['command'] or
+                actual_child['ppid'] != self.ready['ppid']):
+            raise AssertionError('nested handshake actual parent/command mismatch')
+        return True
+
+    def send(self, phase):
+        if self.error is not None:
+            raise self.error
+        data = json.dumps(dict(phase=phase, nonce=self.nonce,
+                               pid=self.ready['pid'], start=self.ready['start'])).encode()
+        try:
+            if self.control.send(data) != len(data):
+                raise ValueError('nested handshake short control write')
+        except BrokenPipeError:
+            # A skip-END child sends EXITING before closing. Consume that actual
+            # message, rather than accepting generic EOF/crash as a mutant kill.
+            self.receive()
+            raise
+
+    def receive(self):
+        data, _, flags, _ = self.control.recvmsg(4096)
+        if not data or flags & socket.MSG_TRUNC:
+            raise ValueError('nested handshake EOF/oversized child control message')
+        self.messages += 1
+        if self.messages > 16:
+            raise ValueError('nested handshake child control count exceeds bound')
+        message = json.loads(data)
+        if (not isinstance(message, dict) or message.get('nonce') != self.nonce or
+                type(message.get('pid')) is not int or message['pid'] <= 0 or
+                type(message.get('start')) is not int or message['start'] <= 0):
+            raise ValueError('nested handshake child nonce/identity invalid')
+        phase = message.get('phase')
+        if self.ready is None:
+            if phase != 'READY' or type(message.get('ppid')) is not int or message['ppid'] <= 0:
+                raise ValueError('nested handshake first phase is not READY')
+            self.ready = message
+            self.child_socket.close()  # Parent and post-exec child inherited it.
+            return
+        if any(message[k] != self.ready[k] for k in ('pid', 'start')):
+            raise ValueError('nested handshake child identity changed')
+        if phase == 'STARTING':
+            if not self.start_ack:
+                raise NestedHandshakeViolation('START advanced without ACK')
+            if self.started:
+                raise ValueError('nested handshake duplicate STARTING')
+            self.started = True
+        elif phase == 'HELD_START':
+            if not self.start_probe or self.start_ack or not self.live_pair():
+                raise ValueError('nested handshake invalid HELD_START')
+            self.before_start = self.latest
+            self.send('START_ACK')
+            self.start_ack = True
+            self.evidence['start_live'] = True
+        elif phase == 'SPAN_CLOSED':
+            if not self.started or self.span is not None:
+                raise ValueError('nested handshake span outside actual started phase')
+            if (any(type(message.get(k)) is not int for k in ('t0', 't1')) or
+                    message['t1'] <= message['t0']):
+                raise ValueError('nested handshake actual closed span invalid')
+            self.span = message
+        elif phase == 'HELD_END':
+            if not self.end_probe or self.end_ack or not self.live_pair():
+                raise ValueError('nested handshake invalid HELD_END')
+            self.end_held = True
+            self.evidence['end_live'] = True
+        elif phase == 'EXITING':
+            self.child_exiting = True
+            if not self.end_ack:
+                raise NestedHandshakeViolation('END advanced without ACK')
+            self.finished.set()
+        else:
+            raise ValueError('nested handshake unknown child phase')
+
+    def end_ready(self, sample):
+        if self.semantic_mutant == 'callback-now':
+            return time.clock_gettime_ns(time.CLOCK_MONOTONIC_RAW) >= self.span['t1']
+        return sample[1] >= self.span['t1']
+
+    def grant_end(self, sample):
+        if sample[1] < self.span['t1']:
+            raise NestedHandshakeViolation('END accepted a pre-t1 sample')
+        if not self.end_held or not self.live_pair():
+            raise AssertionError('END lacks actual live held parent/child')
+        self.send('END_ACK')
+        self.end_ack = True
+        self.evidence.update(raw_after_before_ns=sample[1], t1=self.span['t1'])
+
+    def advance(self):
+        if self.ready is None or self.latest is None:
+            return
+        if not self.start_probe and self.live_pair():
+            self.send('PROBE_START')
+            self.start_probe = True
+        if self.span is None:
+            return
+        if not self.old_checked:
+            # The same real row which preceded START is considered after t1.
+            # It must still be rejected; current callback/dispatch time is irrelevant.
+            if self.before_start is None or self.before_start[2] > self.span['t0']:
+                raise AssertionError('nested handshake lacks real pre-start sample')
+            if self.end_ready(self.before_start):
+                self.grant_end(self.before_start)
+            self.old_checked = True
+            self.evidence['stale_sample_rejected'] = True
+        if not self.end_probe:
+            self.send('PROBE_END')
+            self.end_probe = True
+        if self.end_held and not self.end_ack and self.end_ready(self.latest):
+            self.grant_end(self.latest)
+
+    def coordinate(self):
+        try:
+            while not self.finished.is_set() and not self.stopping.is_set():
+                if self.error is not None:
+                    raise self.error
+                remaining = self.protocol_deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('nested identity handshake protocol deadline')
+                readable, _, _ = select.select([self.control, self.wake_read], [], [], remaining)
+                if not readable:
+                    raise TimeoutError('nested identity handshake protocol deadline')
+                if self.wake_read in readable:
+                    while True:
+                        try:
+                            if not self.wake_read.recv(4096):
+                                raise ValueError('nested handshake notification EOF')
+                        except BlockingIOError:
+                            break
+                while True:
+                    try:
+                        self.latest = self.samples.get_nowait()
+                    except queue.Empty:
+                        break
+                if self.error is not None:
+                    raise self.error
+                if self.control in readable:
+                    while not self.finished.is_set():
+                        try:
+                            self.receive()
+                        except BlockingIOError:
+                            break
+                if not self.finished.is_set():
+                    self.advance()
+        except BaseException as error:
+            self.record_error(error)
+            # Child sees EOF, fails and is reaped by its original attached.run.
+            if not self.child_exiting:
+                try:
+                    self.control.shutdown(socket.SHUT_RDWR)
+                except OSError as cleanup_error:
+                    self.cleanup_error = cleanup_error
+        finally:
+            self.finished.set()
+
+    def join(self):
+        self.thread.join(max(0, self.deadline - time.monotonic()))
+        if self.thread.is_alive():
+            raise AssertionError('nested handshake coordinator did not terminate by deadline')
+        if self.cleanup_error is not None:
+            raise RuntimeError('nested handshake control shutdown failed') from self.cleanup_error
+        if self.error is not None:
+            self.error_reported = True
+            raise self.error
+        if not (self.start_ack and self.end_ack and self.evidence.get('stale_sample_rejected')):
+            raise AssertionError('nested handshake ended without both actual ACK boundaries')
+
+    def close(self):
+        self.stopping.set()
+        self.wake()
+        # This runs after the original owner sampler joins, including final sample.
+        self.thread.join(max(0, self.deadline - time.monotonic()))
+        self.owner.sampler.sample_callback = self.original_callback
+        for endpoint in (self.control, self.child_socket, self.wake_read, self.wake_write):
+            endpoint.close()
+        if self.thread.is_alive():
+            raise AssertionError('nested handshake coordinator leaked during cleanup')
+        if self.cleanup_error is not None:
+            raise RuntimeError('nested handshake control shutdown failed') from self.cleanup_error
+        if self.error is not None and not self.error_reported:
+            raise self.error
+
+
 class ActualNestedProcessOwnership(unittest.TestCase):
     """Real process ancestry qualifies only when the root observed each child."""
     clean_environment = TimerOwner.clean_environment
 
-    def nested_program(self, observe, child_exit, mutate_receipt=False):
+    def nested_program(self, observe, child_exit, mutate_receipt=False, handshake=None):
         child = """import json,os,time,sys
 from pathlib import Path
 config=json.loads(Path(os.environ['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
@@ -494,6 +807,45 @@ row=dict(kind='cpu-timer-span',metric='window_ns',key=0,start_ns=t0,end_ns=t1)
 print(json.dumps(dict(duration=t1-t0,pid=os.getpid(),ppid=os.getppid(),start_ticks=start_ticks)))
 sys.exit(CHILD_EXIT)
 """.replace('CHILD_EXIT', str(child_exit)).replace('CHILD_SLEEP', repr(.12 if observe else 0))
+        if observe:
+            if handshake is None:
+                raise AssertionError('observed nested child requires actual owner handshake')
+            control = """import socket
+control=socket.socket(fileno=CONTROL_FD)
+nonce=CONTROL_NONCE
+deadline=CONTROL_DEADLINE
+def send(phase,**fields):
+    remaining=deadline-time.monotonic()
+    if remaining<=0: raise TimeoutError('nested child protocol deadline')
+    control.settimeout(remaining)
+    data=json.dumps(dict(phase=phase,nonce=nonce,pid=os.getpid(),start=start_ticks,**fields)).encode()
+    if control.send(data)!=len(data): raise ValueError('nested child partial control send')
+def wait_ack(phase):
+    for _ in range(4):
+        remaining=deadline-time.monotonic()
+        if remaining<=0: raise TimeoutError('nested child protocol deadline')
+        control.settimeout(remaining)
+        data,_,flags,_=control.recvmsg(4096)
+        if not data or flags&socket.MSG_TRUNC: raise ValueError('nested child control EOF/oversize')
+        message=json.loads(data)
+        if (message.get('nonce')!=nonce or message.get('pid')!=os.getpid() or
+                message.get('start')!=start_ticks): raise ValueError('nested child ACK identity mismatch')
+        if message.get('phase')==phase+'_ACK': return
+        if message.get('phase')!='PROBE_'+phase: raise ValueError('nested child unexpected ACK phase')
+        send('HELD_'+phase)
+    raise ValueError('nested child ACK count exceeds bound')
+send('READY',ppid=os.getppid())
+START_WAIT
+send('STARTING')
+""".replace('CONTROL_FD', str(handshake.child_fd)).replace('CONTROL_NONCE', repr(handshake.nonce)).replace(
+                'CONTROL_DEADLINE', repr(handshake.protocol_deadline)).replace(
+                'START_WAIT', '' if handshake.semantic_mutant == 'skip-start-wait' else "wait_ack('START')")
+            ending = "send('SPAN_CLOSED',t0=t0,t1=t1)\n"
+            if handshake.semantic_mutant != 'skip-end-wait':
+                ending += "wait_ack('END')\n"
+            ending += "send('EXITING')\ncontrol.close()\n"
+            child = child.replace('t0=time.clock_gettime_ns', control + 't0=time.clock_gettime_ns', 1)
+            child = child.replace('print(json.dumps(dict(duration=', ending + 'print(json.dumps(dict(duration=', 1)
         parent = """import importlib.util,json,subprocess,sys
 from pathlib import Path
 spec=importlib.util.spec_from_file_location('actual_nested_timer', TIMER_PATH)
@@ -508,6 +860,20 @@ result=attached.measurement([dict(arm='userspace-shared',identity={'fixture':'ne
     endpoint_semantics='original-closed-window',clock='CLOCK_MONOTONIC_RAW')])
 print(json.dumps(dict(child=actual,child_returncode=done.returncode,pending=result)))
 """
+        if observe:
+            parent = parent.replace('import importlib.util,json,subprocess,sys',
+                                    'import importlib.util,json,os,subprocess,sys,time', 1)
+            parent = parent.replace(
+                '    done=RUN_CHILD(command,capture_output=True,text=True,check=False)',
+                "    try:\n"
+                "        remaining=PARENT_DEADLINE-time.monotonic()\n"
+                "        if remaining<=0: raise TimeoutError('nested parent deadline')\n"
+                "        done=RUN_CHILD(command,capture_output=True,text=True,check=False,\n"
+                "                       pass_fds=(CONTROL_FD,),timeout=remaining)\n"
+                "    finally:\n"
+                "        os.close(CONTROL_FD)")
+            parent = parent.replace('CONTROL_FD', str(handshake.child_fd)).replace(
+                'PARENT_DEADLINE', repr(handshake.deadline - .25))
         if mutate_receipt:
             mutation = """import os
 config=json.loads(Path(os.environ['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
@@ -529,30 +895,62 @@ path.write_text(json.dumps(receipt)+'\\n')
         return parent.replace('TIMER_PATH', repr(str(HERE/'timer_scope.py'))).replace(
             'CHILD_SOURCE', repr(child)).replace('RUN_CHILD', 'attached.run' if observe else 'subprocess.run')
 
-    def nested(self, observe, child_exit=0, mutate_receipt=False):
+    def nested(self, observe, child_exit=0, mutate_receipt=False, semantic_mutant=None):
         module = load()
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.clean_environment(), clear=True):
-            with module.TimerCpuRun(Path(tmp)/'owner', extra_clocks=('CLOCK_MONOTONIC_RAW',)) as owner:
-                config = json.loads(Path(owner.environment({})['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
-                sampler_threads = [t for t in threading.enumerate() if t.name == 'native-cpu-sampler']
-                self.assertEqual(len(sampler_threads), 1)
-                done = owner.run([sys.executable, '-c', self.nested_program(observe, child_exit, mutate_receipt)],
-                                 capture_output=True, text=True, check=True, timeout=5)
-                observed = json.loads(done.stdout)
-                self.assertEqual(done.returncode, 0)
-                self.assertEqual(observed['child_returncode'], child_exit)
-                self.assertTrue(observed['pending'] is None or
-                                observed['pending'].get('status') != 'qualified')
-                self.assertEqual([t for t in threading.enumerate() if t.name == 'native-cpu-sampler'],
-                                 sampler_threads)
-            result = owner.measurement([])
-            self.assertFalse(sampler_threads[0].is_alive())
-            rows = [json.loads(line) for line in Path(config['samples_path']).read_text().splitlines()]
-            self.assertGreaterEqual(len(rows), 2)
-            self.assertTrue(all(row['clock'] == 'CLOCK_MONOTONIC' for row in rows))
-            self.assertTrue(all('CLOCK_MONOTONIC_RAW' in row['clock_brackets'] for row in rows))
-            receipts = TimerOwner.closed_receipts(self, config)
-            return result, observed, receipts
+            handshake = None
+            try:
+                with module.TimerCpuRun(Path(tmp)/'owner', extra_clocks=('CLOCK_MONOTONIC_RAW',)) as owner:
+                    config = json.loads(Path(owner.environment({})['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
+                    sampler_threads = [t for t in threading.enumerate() if t.name == 'native-cpu-sampler']
+                    self.assertEqual(len(sampler_threads), 1)
+                    if observe:
+                        handshake = NestedHandshake(owner, module, semantic_mutant)
+                    command_error = None
+                    try:
+                        command = [sys.executable, '-c', self.nested_program(observe, child_exit, mutate_receipt, handshake)]
+                        kwargs = dict(capture_output=True, text=True, check=True, timeout=5)
+                        if handshake is not None:
+                            kwargs.update(pass_fds=(handshake.child_fd,), timeout=handshake.remaining())
+                        done = owner.run(command, **kwargs)
+                    except BaseException as error:
+                        command_error = error
+                    finally:
+                        if handshake is not None:
+                            try:
+                                handshake.join()
+                            except BaseException as error:
+                                if command_error is not None:
+                                    raise error from command_error
+                                raise
+                    if command_error is not None:
+                        raise command_error
+                    observed = json.loads(done.stdout)
+                    self.assertEqual(done.returncode, 0)
+                    self.assertEqual(observed['child_returncode'], child_exit)
+                    self.assertTrue(observed['pending'] is None or
+                                    observed['pending'].get('status') != 'qualified')
+                    self.assertEqual([t for t in threading.enumerate() if t.name == 'native-cpu-sampler'],
+                                     sampler_threads)
+                    if handshake is not None:
+                        self.assertTrue(handshake.evidence['start_live'])
+                        self.assertTrue(handshake.evidence['end_live'])
+                        self.assertTrue(handshake.evidence['stale_sample_rejected'])
+                        self.assertGreaterEqual(handshake.evidence['raw_after_before_ns'], handshake.span['t1'])
+                        self.assertEqual(observed['child']['pid'], handshake.ready['pid'])
+                        self.assertEqual(observed['child']['start_ticks'], handshake.ready['start'])
+                        self.assertEqual(observed['child']['duration'], handshake.span['t1']-handshake.span['t0'])
+                result = owner.measurement([])
+                self.assertFalse(sampler_threads[0].is_alive())
+                rows = [json.loads(line) for line in Path(config['samples_path']).read_text().splitlines()]
+                self.assertGreaterEqual(len(rows), 2)
+                self.assertTrue(all(row['clock'] == 'CLOCK_MONOTONIC' for row in rows))
+                self.assertTrue(all('CLOCK_MONOTONIC_RAW' in row['clock_brackets'] for row in rows))
+                receipts = TimerOwner.closed_receipts(self, config)
+                return result, observed, receipts
+            finally:
+                if handshake is not None:
+                    handshake.close()
 
     def test_actual_observed_parent_and_live_nested_child_qualify_one_raw_view(self):
         result, actual, receipts = self.nested(True)
@@ -585,6 +983,18 @@ path.write_text(json.dumps(receipt)+'\\n')
         self.assertEqual(actual['child_returncode'], 17)
         self.assertNotEqual(result['status'], 'qualified', result)
         self.assertTrue(all(view.get('bounds') is None for view in result.get('views', [])))
+
+    def test_missing_start_wait_is_rejected_by_actual_child_phase(self):
+        with self.assertRaisesRegex(NestedHandshakeViolation, 'START advanced without ACK'):
+            self.nested(True, semantic_mutant='skip-start-wait')
+
+    def test_missing_end_wait_is_rejected_by_actual_child_phase(self):
+        with self.assertRaisesRegex(NestedHandshakeViolation, 'END advanced without ACK'):
+            self.nested(True, semantic_mutant='skip-end-wait')
+
+    def test_callback_now_cannot_replace_a_persisted_raw_after_sample(self):
+        with self.assertRaisesRegex(NestedHandshakeViolation, 'END accepted a pre-t1 sample'):
+            self.nested(True, semantic_mutant='callback-now')
 
 
 class DeferredNativeOwnerFinalization(unittest.TestCase):
