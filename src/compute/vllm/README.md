@@ -29,7 +29,10 @@ Required JSON keys are `version` (1), `rank`, `world_size` (2), `device_index`,
 `mode` (1 eager or 2 GPU), `nvidia_node`,
 `ptx_path`, `link_token`, `allocation_bytes`, `group_bytes`, `depth`,
 `nr_batches`, `first_sequence`, `timeout_ns`, `communicator_id`, `epoch` and
-`max_payload_bytes`. `trace_capacity` is optional. d1 requires depth 1. d2 also
+`max_payload_bytes`. `trace_capacity` is optional. Optional `early_cts` (0 or 1,
+default 0) requests EARLY receiver CTS endpoints; it is an agreement field, so
+both ranks must use the same value. The request alone is not evidence that
+EARLY ran; use the EARLY trace procedure in the TP benchmark README. d1 requires depth 1. d2 also
 requires `control_ptx_path` to identify the same existing file as the process's
 `XDEV_EXT_CUDA_PTX`. BPF and PTX paths name actual compiled inputs. Link tokens
 are the corresponding local native link admission values; communicator/epoch
@@ -58,6 +61,11 @@ unknown stream is rejected. No permanent global `set_stream` change is made.
 `XDEV_TP_FACTORY=package.module:callable` is an optional advanced override. It
 must return an actual `TorchCommunicator` with admitted resources and the same
 TP rank/world. The default bootstrap does not require this override.
+
+An all-reduce larger than `max_payload_bytes`, such as a prefill chunk, is
+split into legal native messages as described in the Torch package README; it
+never falls back to the original NCCL or custom all-reduce. Set `nr_batches`
+for the number of native messages, not framework calls.
 
 Call `assert_backend_selected(communicator)` after TP construction. At the end
 of an actual run, before teardown, call `collect_backend_evidence` with the

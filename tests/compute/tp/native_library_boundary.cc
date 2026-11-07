@@ -288,6 +288,17 @@ static void batch_observations(xdev_tp_comm *comm,const char *scenario){
   tensor_regions[requests[i].input]=16;tensor_regions[requests[i].output]=16;
  }
  if(std::string(scenario)=="invalid_later")requests[1].dtype=99;
+ // T6b: consecutive segments of one input and one output allocation. The
+ // overlapping variant aliases the second output into the first segment.
+ std::vector<unsigned char> whole_input,whole_output;
+ if(std::string(scenario)=="segments" || std::string(scenario)=="segments_overlap"){
+  tensor_regions.clear();whole_input.resize(16*count,0);whole_output.resize(16*count,0xcd);
+  const CUdeviceptr in=reinterpret_cast<CUdeviceptr>(whole_input.data());
+  const CUdeviceptr out=reinterpret_cast<CUdeviceptr>(whole_output.data());
+  tensor_regions[in]=16*count;tensor_regions[out]=16*count;
+  for(unsigned i=0;i<count;i++)requests[i]={in+16*i,out+16*i,1,4,1,3,0,0};
+  if(std::string(scenario)=="segments_overlap")requests[1].output=out+8;
+ }
  if(std::string(scenario)=="partial_enqueue")enqueue_fail_at=2;
  xdev_tp_work *work[count]{};batch_width=count;
  int rc=xdev_tp_submit_batch(comm,requests,count,reinterpret_cast<void *>(1),23,work);

@@ -75,6 +75,25 @@ class BootstrapConfigTests(unittest.TestCase):
         self.assertNotEqual(left, module.agreement_key(self.options(epoch=9)))
 
 
+    def test_early_cts_selection_is_optional_boolean_and_defaults_off(self):
+        # Configuration d2 adds EARLY receiver CTS to the GPU handoff; the
+        # framework must be able to request it, and both ranks must agree.
+        module = self.module()
+        self.assertEqual(module.validate_options(self.options(), rank=0, device_index=1,
+                                                 environ={}).get('early_cts', 0), 0)
+        got = module.validate_options(self.options(early_cts=1), rank=0, device_index=1, environ={})
+        self.assertEqual(got['early_cts'], 1)
+        for value in (2, -1, True, '1', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                module.validate_options(self.options(early_cts=value), rank=0, device_index=1,
+                                        environ={})
+
+    def test_early_cts_is_a_cross_rank_agreement_field(self):
+        module = self.module()
+        off = module.agreement_key(self.options())
+        self.assertEqual(off, module.agreement_key(self.options(early_cts=0)))
+        self.assertNotEqual(off, module.agreement_key(self.options(early_cts=1)))
+
 
 class DefaultWorkerFactoryTests(unittest.TestCase):
     def test_actual_factory_agrees_before_native_owner_bootstrap(self):

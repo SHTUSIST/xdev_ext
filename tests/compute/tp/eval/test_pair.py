@@ -36,7 +36,7 @@ class PairTest(unittest.TestCase):
                  completed=3 * depth, operation=4 if echo else 1, dtype=3,
                  elements=1, rows=1, iterations=3, first_sequence=23,
                  payload_bytes=4, timeout_ns=600000000000,
-                 completion_boundary='kernel-end-prefix',
+                 completion_boundary='kernel-end-prefix', xdomain_poll_completions=True,
                  tx_session_id=21 if early else 11, rx_session_id=22 if early else 12)
         if echo:
             m['execution_kind'] = 'echo'
@@ -105,6 +105,22 @@ class PairTest(unittest.TestCase):
         result = self.pair.compare(self.summary(False), self.summary(True))
         self.assertIsNone(result['actual_early_proven'])
         self.assertEqual(result['on']['early_cts_requested'], True)
+
+    def test_nhi_completion_polling_is_observed_and_matched(self):
+        # Configuration c and later poll NHI completions; an EARLY off/on pair
+        # must not mix polling modes, and an unobserved mode cannot qualify.
+        result = self.pair.compare(self.summary(False), self.summary(True))
+        self.assertIs(result['off']['xdomain_poll_completions'], True)
+        self.assertIs(result['on']['xdomain_poll_completions'], True)
+        for value in (False, None, 1, 'Y'):
+            off, on = self.summary(False), self.summary(True)
+            on['metadata']['xdomain_poll_completions'] = value
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                self.pair.compare(off, on)
+        off, on = self.summary(False), self.summary(True)
+        del off['metadata']['xdomain_poll_completions']
+        with self.assertRaises(ValueError):
+            self.pair.compare(off, on)
 
     def test_incomplete_intervals_or_invalid_payload_not_accepted(self):
         for damage in ('short', 'zero', 'float', 'bytes', 'completed', 'session'):

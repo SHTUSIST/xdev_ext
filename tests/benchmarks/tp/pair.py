@@ -12,7 +12,8 @@ from pathlib import Path
 
 MATCH = ('rank', 'native_mode', 'handoff_mode', 'operation', 'dtype', 'elements',
          'rows', 'iterations', 'first_sequence', 'requested_depth', 'payload_bytes',
-         'group_bytes', 'frame_count', 'frame_size', 'timeout_ns', 'completion_boundary')
+         'group_bytes', 'frame_count', 'frame_size', 'timeout_ns', 'completion_boundary',
+         'xdomain_poll_completions')
 
 
 def integer(value, name, minimum=0):
@@ -41,8 +42,12 @@ def arm(summary, selected, warmup):
     if type(m['early_cts_requested']) is not bool or m['early_cts_requested'] is not selected:
         raise ValueError('off/on must contain the corresponding boolean request')
     config = {field: m[field] for field in MATCH}
+    # Observed xdev_ext_xdomain poll_completions module parameter (NHI
+    # completion polling); a request or an unreadable value cannot qualify.
+    if type(m['xdomain_poll_completions']) is not bool:
+        raise ValueError('observed boolean NHI completion polling mode required')
     for field in MATCH:
-        if field not in ('handoff_mode', 'completion_boundary'):
+        if field not in ('handoff_mode', 'completion_boundary', 'xdomain_poll_completions'):
             integer(m[field], field, 0 if field in ('rank', 'elements', 'rows', 'payload_bytes') else 1)
     if (m['rank'] not in (0, 1) or m['native_mode'] not in (1, 2) or
             m['handoff_mode'] != {1: 'cpu', 2: 'gpu'}[m['native_mode']] or
@@ -93,6 +98,7 @@ def arm(summary, selected, warmup):
                   warmup_discarded=0,
                   definition='whole TP trace including inter-replay gaps; logical occupancy, not DMA overlap')
     return config, dict(early_cts_requested=selected, tx_session_id=tx, rx_session_id=rx,
+                        xdomain_poll_completions=m['xdomain_poll_completions'],
                         communicator=m['communicator'], epoch=m['epoch'], e6=e6, e7=e7)
 
 

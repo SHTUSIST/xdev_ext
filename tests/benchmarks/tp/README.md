@@ -119,8 +119,43 @@ and device state release. Any failed or unknown use retains the resources.
 This benchmark-local echo uses the existing native GPU USER API; it adds no
 collective operation. Every final record identifies `native_mode` (1 or 2) and
 `handoff_mode` (`cpu` or `gpu` respectively); the summary rejects missing or
-inconsistent pairs. These fields identify native handoff primitives. It does not implement the full E6 configuration d2, NHI
-completion polling or a/b/c attribution arms.
+inconsistent pairs. These fields identify native handoff primitives.
+
+## E6 configurations
+
+The evaluation plan's E6 configurations are compositions of existing native
+features, selected per run:
+
+| Configuration | Driver flags | `xdev_ext_xdomain.poll_completions` |
+| --- | --- | --- |
+| b | `--mode d1 --early-cts 0` | N |
+| c | `--mode d1 --early-cts 0` | Y |
+| d1 | `--mode d1 --early-cts 1` | Y |
+| d2 | `--mode d2 --early-cts 1` | Y |
+
+All of them assume the kernel with the backported per-ring interrupt
+throttle. NHI completion polling is the read-only module parameter
+`poll_completions` of `xdev_ext_xdomain`, set at module load (for example
+`xdev_ext_xdomain.poll_completions=1` on the kernel command line). Every
+final metadata record carries `xdomain_poll_completions`, read from
+`/sys/module/xdev_ext_xdomain/parameters/poll_completions`; it is `null` when
+the parameter cannot be read. `pair.py` requires a boolean observation and the
+same value in both arms. `early_cts_requested` remains a request; use the EARLY
+trace procedure below for execution evidence.
+
+In d2 no user thread sits between a native completion and the next stage. The
+GPU publishes completions on the USER completion ring, and the session's kernel
+worker reaps them because every USER stage of the PEER endpoint is created
+`STRICT_ASYNC | POLL`. An XDOMAIN completion is processed by the same worker,
+which hands the batch to the next USER stage through its ready ring, which the
+GPU polls. Unless the device reports GPUDirect RDMA write ordering, the
+receive side orders NHI writes before GPU reads with
+`CU_STREAM_MEM_OP_FLUSH_REMOTE_WRITES` inside the stream or graph; a device
+offering neither is rejected at open. Whether
+these GPU-visibility and DMA paths hold on the target GPU and Thunderbolt
+controller is a hardware question this driver cannot answer. The busy-polling
+user-thread variant (d2-user) and the k=1 TCP attribution arm are not
+implemented here.
 
 ## EARLY execution evidence
 

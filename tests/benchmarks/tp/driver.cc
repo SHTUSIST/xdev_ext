@@ -64,6 +64,16 @@ struct barrier {
   if(remote!=value)throw std::runtime_error("bilateral run configuration/barrier mismatch");
  }
 };
+// Observed NHI completion polling (configuration c and later). The module
+// parameter is read-only after load and copied into every link, so sysfs is
+// the actual mode. An unreadable value is null and cannot qualify a pair.
+static int poll_completions_observation() {
+ FILE *f=fopen("/sys/module/xdev_ext_xdomain/parameters/poll_completions","re");
+ if(!f)return -1;
+ char c=0;size_t n=fread(&c,1,1,f);fclose(f);
+ if(n!=1)return -1;
+ return c=='Y'||c=='1'?1:c=='N'||c=='0'?0:-1;
+}
 static std::string handshake(const tp_eval_options &o) {
  // Fixed-width text avoids differing host endianness/struct padding.
  char text[512];snprintf(text,sizeof(text),"%016llx:%016llx:%016llx:%016llx:%016llx:%08x:%08x:%08x:%08x:%08x:%016llx",
@@ -118,6 +128,7 @@ int main(int argc,char **argv) {
    else throw std::runtime_error("unknown argument: "+key);
   }
   NATIVE(tp_eval_geometry(o));
+  o.poll_completions=poll_completions_observation();
   bool need_xdomain=!programs.tx_stage_pins[1] || !programs.rx_stage_pins[0];
   bool need_user=!programs.tx_stage_pins[0] || !programs.tx_stage_pins[2] || !programs.rx_stage_pins[1];
   if(!have_rank || !o.link || !node || (need_xdomain && !bpf) || (need_user && !user_bpf) || !tp_ptx || !oracle || !address || !port ||
@@ -144,8 +155,8 @@ int main(int argc,char **argv) {
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u,\"requested_depth\":%u,\"frame_count\":%u,\"frame_size\":4096,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
-     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes,o.depth,o.frame_count,
+   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u,\"requested_depth\":%u,\"frame_count\":%u,\"frame_size\":4096,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
+     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes,o.depth,o.frame_count,
      o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,(unsigned long long)o.iterations,
      (unsigned long long)o.first_sequence,(unsigned long long)o.payload_bytes,(unsigned long long)o.timeout_ns,
      (unsigned long long)o.tx_session_id,(unsigned long long)o.rx_session_id);fflush(stdout);
@@ -201,8 +212,8 @@ int main(int argc,char **argv) {
      stats.rx_delivered!=stats.completed)throw std::runtime_error("native final accounting incomplete");
   std::vector<xdev_tp_trace_record> traces(o.trace_capacity);size_t written=0;
   NATIVE(xdev_tp_trace_read(owner.comm,traces.data(),traces.size(),&written));
-  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
-   o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
+  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
+   o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
    (unsigned long long)stats.trace_dropped,o.depth,(unsigned long long)stats.logical_inflight_high_water,
    o.group_bytes,o.frame_count,(unsigned long long)stats.completed,(unsigned long long)stats.gpu_invocations,
    (unsigned long long)stats.host_control_calls,o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,

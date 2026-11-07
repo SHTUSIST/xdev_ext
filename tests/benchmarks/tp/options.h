@@ -11,7 +11,11 @@ struct tp_eval_options {
  unsigned group_bytes=0, frame_count=0, trace_capacity=0;
  uint64_t payload_bytes=0, allocation_bytes=0;
  uint64_t tx_session_id=0, rx_session_id=0; // Observed after native CREATE.
+ int poll_completions=-1; // Observed NHI completion polling: -1 unknown, 0, 1.
 };
+static inline const char *tp_eval_poll_json(const tp_eval_options &o) {
+ return o.poll_completions<0 ? "null" : o.poll_completions ? "true" : "false";
+}
 static inline int tp_eval_geometry(tp_eval_options &o) {
  if (o.early_cts>1 || o.rank>1 || (o.mode!=1 && o.mode!=2) || !o.depth || o.depth>256 ||
      (o.mode==1 && o.depth!=1) || !o.iterations || !o.first_sequence ||
