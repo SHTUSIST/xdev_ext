@@ -141,6 +141,57 @@ __s32 BPF_PROG(request_nvme_build, const struct xdev_ext_mech_ctx *mctx)
 	return XDEV_EXT_MP_BUILD_SUBMIT;
 }
 
+/* Only scalar data crosses this independently verified function boundary.
+ * Keep the trusted callback ctx, readonly info and descriptor kfunc outside.
+ * The ordinary stack object is writable; readonly kfunc memory is never
+ * passed as a generic global-function memory argument. */
+struct request_ce_cursor {
+	__u64 gpu, window_len;
+	__u32 pos, off, total, nr, group_bytes;
+	__u32 seg_size, max_entry_len, data_off, data_len;
+	struct xdev_ext_ce_copy_desc desc;
+};
+
+/* Zero continues; a positive value is the original terminal BUILD verdict.
+ * A negative value means no descriptor was generated for this piece. */
+__attribute__((noinline))
+int request_ce_step(struct request_ce_cursor *c)
+{
+	__u32 piece, remain, max;
+	int err;
+
+	if (!c || c->pos >= c->nr || c->pos >= XDEV_EXT_MP_MAX_FRAMES ||
+	    c->off >= c->data_len)
+		return -EINVAL;
+	max = c->max_entry_len ? c->max_entry_len :
+		c->seg_size ? c->seg_size : 0xffffffffU;
+	piece = c->data_len - c->off;
+	if (piece > max)
+		piece = max;
+	if (c->seg_size) {
+		remain = c->seg_size - c->gpu % c->seg_size;
+		if (piece > remain)
+			piece = remain;
+	}
+	err = xdev_ext_mp_ce_piece(&c->desc, c->pos,
+		c->total + piece == c->group_bytes,
+		c->data_off + c->off, piece, c->gpu, c->window_len,
+		c->seg_size, c->max_entry_len);
+	if (err)
+		return err;
+	c->gpu += piece;
+	c->total += piece;
+	c->off += piece;
+	if (c->off == c->data_len) {
+		c->pos++;
+		c->off = 0;
+	}
+	if (c->total == c->group_bytes)
+		return c->pos == c->nr && !c->off ?
+			XDEV_EXT_MP_BUILD_SUBMIT : XDEV_EXT_MP_BUILD_ABORT;
+	return 0;
+}
+
 SEC("struct_ops/request_ce_build")
 __s32 BPF_PROG(request_ce_build, const struct xdev_ext_mech_ctx *mctx)
 {
@@ -149,8 +200,9 @@ __s32 BPF_PROG(request_ce_build, const struct xdev_ext_mech_ctx *mctx)
 	const struct nvme_ce_request_value *entry;
 	const struct xdev_ext_mech_frame_info *f;
 	struct xdev_ext_ce_copy_desc *d;
-	__u64 gpu;
-	__u32 ordinal, pos = 0, off = 0, total = 0, nr, piece, remain, max;
+	struct request_ce_cursor cursor;
+	__u32 ordinal, nr, piece, remain;
+	int verdict;
 
 	(void)ctx;
 	info = (const void *)bpf_xdev_ext_info(mctx, sizeof(*info));
@@ -174,9 +226,13 @@ __s32 BPF_PROG(request_ce_build, const struct xdev_ext_mech_ctx *mctx)
 	    entry->gpu_byte_offset > info->gpu_window_len ||
 	    entry->byte_length > info->gpu_window_len - entry->gpu_byte_offset)
 		return XDEV_EXT_MP_BUILD_ABORT;
-	gpu = entry->gpu_byte_offset;
-	max = info->max_entry_len ? info->max_entry_len :
-		info->gpu_seg_size ? info->gpu_seg_size : 0xffffffffU;
+	__builtin_memset(&cursor, 0, sizeof(cursor));
+	cursor.gpu = entry->gpu_byte_offset;
+	cursor.window_len = info->gpu_window_len;
+	cursor.nr = nr;
+	cursor.group_bytes = info->l.group_bytes;
+	cursor.seg_size = info->gpu_seg_size;
+	cursor.max_entry_len = info->max_entry_len;
 	/* Validate all spans before writing a descriptor. The canonical lengths
 	 * make CREATE's all-offset bound apply to the live BUILD frame list. */
 	remain = info->l.group_bytes;
@@ -194,34 +250,24 @@ __s32 BPF_PROG(request_ce_build, const struct xdev_ext_mech_ctx *mctx)
 	if (remain)
 		return XDEV_EXT_MP_BUILD_ABORT;
 	for (ordinal = 0; ordinal < NVME_CE_REQUEST_ENTRIES; ordinal++) {
-		if (pos >= nr || pos >= XDEV_EXT_MP_MAX_FRAMES || ordinal >= mctx->desc_cap)
+		if (cursor.pos >= nr || cursor.pos >= XDEV_EXT_MP_MAX_FRAMES ||
+		    ordinal >= mctx->desc_cap)
 			return XDEV_EXT_MP_BUILD_ABORT;
-		f = &info->f[pos];
-		if (off >= f->data_len)
+		f = &info->f[cursor.pos];
+		if (cursor.off >= f->data_len)
 			return XDEV_EXT_MP_BUILD_ABORT;
-		piece = f->data_len - off;
-		if (piece > max)
-			piece = max;
-		if (info->gpu_seg_size) {
-			remain = info->gpu_seg_size - gpu % info->gpu_seg_size;
-			if (piece > remain)
-				piece = remain;
-		}
+		cursor.data_off = f->data_off;
+		cursor.data_len = f->data_len;
 		d = (void *)bpf_xdev_ext_desc(mctx, ordinal, sizeof(*d));
-		if (!d || xdev_ext_mp_ce_piece(d, pos,
-			total + piece == info->l.group_bytes,
-			f->data_off + off, piece, gpu, info->gpu_window_len,
-			info->gpu_seg_size, info->max_entry_len))
+		if (!d)
 			return XDEV_EXT_MP_BUILD_ABORT;
-		gpu += piece;
-		total += piece;
-		off += piece;
-		if (off == f->data_len) {
-			pos++;
-			off = 0;
-		}
-		if (total == info->l.group_bytes)
-			return pos == nr && !off ? XDEV_EXT_MP_BUILD_SUBMIT : XDEV_EXT_MP_BUILD_ABORT;
+		verdict = request_ce_step(&cursor);
+		if (verdict < 0)
+			return XDEV_EXT_MP_BUILD_ABORT;
+		*d = cursor.desc;
+		if (verdict)
+			return verdict == XDEV_EXT_MP_BUILD_SUBMIT ?
+				XDEV_EXT_MP_BUILD_SUBMIT : XDEV_EXT_MP_BUILD_ABORT;
 	}
 	return XDEV_EXT_MP_BUILD_ABORT;
 }
