@@ -23,7 +23,23 @@ import subprocess
 import sys
 import tempfile
 
-KERNEL = Path(__file__).resolve().parents[4]
+def source_owner():
+    """Find the canonical owner of this test or its ordinary registered copy."""
+    for parent in Path(__file__).resolve().parents:
+        marker = parent / 'view.json'
+        if marker.is_file():
+            import json
+            receipt = json.loads(marker.read_text())
+            if receipt.get('kind') == 'host-source-view':
+                return Path(receipt['canonical_root']).resolve()
+        if (parent / 'source-layout.json').is_file():
+            return parent
+    raise RuntimeError('SETUP: no canonical owner or registered source view')
+
+
+# Production paths below are canonical (src/core, src/storage), so resolve the
+# canonical root from either the canonical file or its registered view copy.
+KERNEL = source_owner()
 HERE = Path(__file__).resolve().parent
 
 
