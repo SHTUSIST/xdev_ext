@@ -225,7 +225,10 @@ class HarnessWiring(unittest.TestCase):
         debug = HERE/'xdev_ext_mech_zc_debug.py'
         with tempfile.TemporaryDirectory() as t:
             p = Path(t); (p/'evidence').mkdir()
-            (p/'.config').write_text('CONFIG_MODULES=y\n')
+            # Every reused build must carry P2PDMA (run-only admission checks it).
+            (p/'.config').write_text('CONFIG_MODULES=y\n' + ''.join(
+                f'CONFIG_{key}=y\n' for key in ('MEMORY_HOTPLUG', 'MEMORY_HOTREMOVE', 'MIGRATION',
+                                                  'SPARSEMEM_VMEMMAP', 'ZONE_DEVICE', 'PCI_P2PDMA')))
             (p/'xdev-ext-source.commit').write_text('b' * 40 + '\n')
             dependency = p/'guest.sh'; dependency.write_bytes((HERE/'xdev_ext_fence_guest.sh').read_bytes())
             manifest = subprocess.check_output(['sha256sum', str(dependency)], text=True)

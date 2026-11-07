@@ -6811,6 +6811,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_matrix_test.py"
     },
     {
+      "source": "tests/integration/session/native/xdev_ext_mech_zc_p2pdma_config_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_p2pdma_config_test.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_reliable_random_validate.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_reliable_random_validate.py"
