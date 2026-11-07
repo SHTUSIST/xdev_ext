@@ -311,8 +311,16 @@ static int blk_status_to_errno(blk_status_t err) { return err ? -EIO : 0; }
 static void io_uring_cmd_do_in_task_lazy(struct io_uring_cmd *cmd,
 	void (*callback)(struct io_uring_cmd *, unsigned))
 {
-	CHECK(!observed.task, "one task-work publication");
+	CHECK(!observed.task && !observed.scheduled, "one task-work publication");
 	observed.scheduled++;
+	if (observed.immediate_task) {
+		/*
+		 * Task-work may run on another CPU before end_io returns: done
+		 * frees op_data here, so ASan reports any later end_io access.
+		 */
+		callback(cmd, IO_URING_F_COMPLETE_DEFER);
+		return;
+	}
 	observed.task = cmd; observed.task_cb = callback;
 }
 static void blk_execute_rq_nowait(struct request *req, bool at_head)
@@ -435,6 +443,27 @@ static void failure_case(const char *name, int allocation, int mapping, int poli
 	sync_cleanup(&fixture);
 	printf("PASS %s\n", case_name);
 }
+static void publication_case(void)
+{
+	struct command_fixture fixture;
+	struct request *req;
+	setup(&fixture, "task-work runs at end_io publication");
+	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "accepted");
+	req = observed.pending;
+	CHECK(observed.refs == 1 && observed.unmapped == 0,
+	      "accepted resources retained before end_io");
+	req->bio = NULL;
+	observed.immediate_task = true;
+	CHECK(req->end_io(req, 0) == RQ_END_IO_FREE, "block owns final request free");
+	CHECK(observed.done == 1 && observed.complete == 1 && observed.unpins == 1,
+	      "one terminal completion");
+	CHECK(observed.done_status == 0, "native completion status");
+	CHECK(fixture.command.data.op_data == NULL, "sidecar released by core boundary");
+	blk_mq_free_request(req); observed.pending = NULL;
+	CHECK(observed.freed == observed.allocated && observed.unmapped == 1,
+	      "all accepted resources released");
+	printf("PASS %s\n", case_name);
+}
 int main(void)
 {
 	struct command_fixture fixture;
@@ -454,6 +483,7 @@ int main(void)
 	CHECK(issue(&fixture, 0) == -EIOCBQUEUED, "accepted");
 	finish(&fixture, false, true, IO_URING_F_COMPLETE_DEFER | IO_URING_F_TASK_DEAD);
 	printf("PASS %s\n", case_name);
-	puts("HOST_LIFECYCLE_PASS cases=10 kernel_scheduler=not_run physical_dma=not_run");
+	publication_case();
+	puts("HOST_LIFECYCLE_PASS cases=11 kernel_scheduler=not_run physical_dma=not_run");
 	return 0;
 }

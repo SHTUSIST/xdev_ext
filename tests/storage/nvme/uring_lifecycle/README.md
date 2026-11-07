@@ -22,7 +22,7 @@ pinned kernel cleanup boundary; ASan can therefore catch a later sidecar
 access. The fixture's enclosing async-data object remains embedded in the
 test command and does not model its kernel cache lifetime.
 
-The ten cases are:
+The eleven cases are:
 
 1. Request allocation returns `-EAGAIN` twice, then succeeds.
 2. User/BIO mapping returns `-EAGAIN` twice, then succeeds.
@@ -34,6 +34,9 @@ The ten cases are:
 8. Final admission detects stale identity and returns `-ESTALE`.
 9. Task-work consumes completion before the block layer frees the request.
 10. A cancelled request completes with `IO_URING_F_TASK_DEAD` and `-EINTR`.
+11. Task-work runs inside the `end_io` publication call, so `io_uring_cmd_done()`
+    frees the sidecar before `end_io` returns; ASan reports any `end_io` access
+    to the sidecar after publication.
 
 The retry cases change the simulated userspace iovec after its first import
 and advance each local mapping iterator. They require one import and an
@@ -72,7 +75,7 @@ The first command emits `result.json`, extracted C, build logs and run logs.
 A successful baseline ends with:
 
 ```text
-HOST_LIFECYCLE_PASS cases=10 kernel_scheduler=not_run physical_dma=not_run
+HOST_LIFECYCLE_PASS cases=11 kernel_scheduler=not_run physical_dma=not_run
 ```
 
 The existing `native_member_7b` suite remains responsible for its state,
@@ -84,7 +87,8 @@ transition tables. Host CI invokes both suites independently.
 - Repeated NONBLOCK calls followed by a blocking call simulate driver reentry.
   They do not execute the core io-wq flags or the IOPOLL retry loop.
 - Task-work-before-request-free is a serial interleaving after `end_io`
-  returns. It does not test publication concurrency or cross-CPU memory order.
+  returns; the publication case runs task-work synchronously inside the
+  publication call. It does not test publication concurrency or cross-CPU memory order.
 - TASK_DEAD is an injected flag. Actual process exit, fallback task-work and
   inflight drain do not execute.
 - Import/map and policy pin/invoke are explicit replacements. No fixed pages,

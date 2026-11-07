@@ -114,7 +114,7 @@ def main():
                         ("AddressSanitizer", "LeakSanitizer",
                          "UndefinedBehaviorSanitizer", "runtime error:"))
         accepted = (run.returncode == 0 and not failures and not sanitizer and
-                    "HOST_LIFECYCLE_PASS cases=10" in run.stdout) if diagnostic is None else (
+                    "HOST_LIFECYCLE_PASS cases=11" in run.stdout) if diagnostic is None else (
                         run.returncode == 1 and not sanitizer and len(failures) == 1 and
                         failures[0].startswith(diagnostic + " (fixture line "))
         results.append({"case": name, "compile_exit": build.returncode,
