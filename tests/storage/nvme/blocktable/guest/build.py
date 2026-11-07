@@ -26,6 +26,8 @@ def main():
     parser.add_argument('--libbpf-archive', type=Path,
                         help='optional explicit archive when it is outside the include directory')
     parser.add_argument('--driver-only', action='store_true')
+    parser.add_argument('--private-parallel', action='store_true',
+                        help='build the opt-in same-namespace two-PRIVATE-instance guest case')
     args = parser.parse_args()
     root = args.source_root.resolve()
     out = args.output.resolve()
@@ -52,14 +54,21 @@ def main():
         if not (libbpf / 'include/bpf/libbpf.h').is_file() or not archive.is_file():
             raise RuntimeError('modern libbpf include/bpf/libbpf.h and libbpf.a required')
         common = ['gcc', '-std=gnu11', '-O2', '-g', '-Wall', '-Wextra', '-Werror']
+        driver_name = 'blocktable-private-parallel' if args.private_parallel else 'blocktable-native'
+        driver_flags = ['-DBLOCKTABLE_PRIVATE_PARALLEL'] if args.private_parallel else []
         commands = [common + ['-fsanitize=undefined', '-fno-sanitize-recover=all',
                               str(HERE / 'oracle_test.c'), '-o', str(out / 'oracle-selfcheck')],
                     [str(out / 'oracle-selfcheck')],
-                    common + ['-I' + str(native), '-I' + str(root / 'examples/storage'),
+                    common + driver_flags + ['-I' + str(native), '-I' + str(root / 'examples/storage'),
                               '-I' + str(libbpf / 'include'), str(HERE / 'driver.c'),
                               str(archive), '-lelf', '-lz',
                               *shlex.split(os.environ.get('LDFLAGS', '')),
-                              '-o', str(out / 'blocktable-native')]]
+                              '-o', str(out / driver_name)]]
+        if args.private_parallel:
+            commands += [common + ['-fsanitize=undefined', '-fno-sanitize-recover=all',
+                                   str(HERE / 'parallel_oracle_test.c'), '-o',
+                                   str(out / 'parallel-oracle-controls')],
+                         [str(out / 'parallel-oracle-controls')]]
         if not args.driver_only:
             if not args.vmlinux_h or not args.vmlinux_h.is_file():
                 raise RuntimeError('genuine target --vmlinux-h required; no synthetic BTF supplied')
@@ -79,12 +88,15 @@ def main():
             if child.returncode:
                 raise RuntimeError(f'command {index} failed: {child.stdout}{child.stderr}')
         files = [HERE / name for name in ('driver.c', 'oracle.h', 'oracle_test.c', 'build.py')]
+        if args.private_parallel:
+            files += [HERE / name for name in ('parallel.h', 'parallel_oracle_test.c')]
         files += [root / 'examples/storage' / name for name in ('nvme_blocktable.bpf.c', 'nvme_blocktable.h')]
         result['inputs'] = {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
                             for path in files}
         result['outputs'] = {path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-                             for path in (out / 'blocktable-native', out / 'nvme_blocktable.bpf.o')
+                             for path in (out / driver_name, out / 'nvme_blocktable.bpf.o')
                              if path.is_file()}
+        result['private_parallel'] = args.private_parallel
         result.update(state='DRIVER_BUILD_ONLY' if args.driver_only else 'BPF_AND_DRIVER_BUILD_ONLY', exit=0)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         result['error'] = str(error)

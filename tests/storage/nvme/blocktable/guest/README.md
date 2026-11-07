@@ -1,5 +1,49 @@
 # Blocktable actual-kernel correctness acceptance
 
+## Opt-in same-namespace PRIVATE instance case
+
+`build.py --private-parallel` builds `blocktable-private-parallel` instead of
+the original eight-case driver. All other build/guest arguments and the original
+BPF object, loader, BTF-resolved PRIVATE flag, registered-byte checker and
+CREATE/START/STATS/STOP helpers are retained. The original default mode remains
+the eight cases documented below. This mode adds no provider or descriptor
+algorithm and requires no new kernel/module build.
+
+Two independent loads of the original ELF must produce distinct nonzero HASH,
+struct_ops, link, build-program and complete-program IDs. Two sessions bind the
+same actual namespace rdev and admitted 64-LBA window, opening it read-only;
+both original namespace fds close immediately after their CREATE. Separate
+maps use the same logical key100: A selects slot2, B selects slot5. Cross-session
+decoy entries select other slots, so using the other instance cannot produce
+the expected bytes. A completes first while B's whole allocation stays poison;
+B then completes while A's entire completed allocation stays unchanged.
+
+After that completed boundary, only A's link detaches. A's START101 must return
+`-ESHUTDOWN`, with original completed-owner withdrawal stats and unchanged
+allocations. B's still-selected program then completes key101 from slot7 while
+A's full allocation stays unchanged. STOP A returns `-ECANCELED`, STOP B returns
+zero; both require subsequent STATS/START `-ENOENT`, full memory recheck,
+successful close/unmap and final process FD count equal to the pre-load count.
+Both sessions coexist; this ordered one-batch schedule makes no physical
+concurrent-I/O claim.
+
+The extra `parallel_oracle_test.c` only exercises the unchanged byte checker
+with independent synthetic slot data: exact A/B/continuation inputs, swapped
+slots, zero-slot fallback, stale prior payload, and corruption at payload,
+header, padding and unused-frame boundaries including the final registered
+byte. Its host success never counts as native PRIVATE acceptance. Root first
+reviews these component controls and obtains actual RED for checker mutations;
+runtime source and selector/withdrawal mutations require separate review and
+actual guest acceptance. No RED or runtime success is implied by this source.
+
+Use a fresh private output and the existing exact normal951 kernel/BTF. Root's
+original independent expected-window and whole source-image before/after byte
+oracle remain required. The test never seeds or writes a device; only the
+existing guest owner may prepare its private source image before guest access.
+Record Linux/KVM and QEMU NVMe model truthfully, without a physical DMA or
+performance claim. Do not rerun CPU PRIVATE6 or the original eight cases merely
+to execute this new mode.
+
 This test loads the original `examples/storage/nvme_blocktable.bpf.c` ELF with
 modern libbpf, updates its actual HASH map after CREATE returns the session ID,
 and reads the already existing private guest NVMe source into registered
