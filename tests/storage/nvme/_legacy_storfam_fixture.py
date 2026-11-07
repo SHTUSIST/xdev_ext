@@ -247,8 +247,29 @@ class LegacySelection:
 
     def _validate_portable_declarations(self):
         """Validate whole required types; selected headers still deliver them."""
-        self.definition('include/linux/nvme_xdev_ext_passthru.h',
-                        'nvme_xdev_ext_lifecycle', 'enum')
+        passthru = 'include/linux/nvme_xdev_ext_passthru.h'
+        text = self.read(passthru)
+        resource = ('nvme_xdev_ext_resource_state',)
+        if re.search(r'^#define[ \t]+nvme_xdev_ext_lifecycle\b', text, re.M):
+            # Actual compatibility aliases select the shared type owner;
+            # the original included headers still supply every helper body.
+            for old, new in (
+                    ('nvme_xdev_ext_lifecycle', 'xdev_ext_cmd_lifecycle'),
+                    ('nvme_xdev_ext_cleanup_action', 'xdev_ext_cmd_cleanup_action'),
+                    ('nvme_xdev_ext_resource_state', 'xdev_ext_cmd_resource_state')):
+                matches = list(re.finditer(r'^#define[ \t]+' + re.escape(old) +
+                                          r'[ \t]+' + re.escape(new) + r'[ \t]*$', text, re.M))
+                if len(matches) != 1:
+                    raise ValueError('SETUP selected command alias count: ' + old)
+                match = matches[0]
+                self._record(passthru, old, match.start(), match.end())
+            generic = 'include/linux/xdev_ext_cmd_lifecycle.h'
+            for symbol in ('xdev_ext_cmd_lifecycle', 'xdev_ext_cmd_cleanup_action'):
+                self.definition(generic, symbol, 'enum')
+            self.definition(generic, 'xdev_ext_cmd_resource_state', 'struct')
+            resource = ()
+        else:
+            self.definition(passthru, 'nvme_xdev_ext_lifecycle', 'enum')
         required = {
             'include/linux/xdev_ext_storfam_core.h': (
                 'xdev_ext_stor_window', 'xdev_ext_stor_rw',
@@ -263,8 +284,7 @@ class LegacySelection:
             'include/linux/xdev_ext_desc_schema.h': ('xdev_ext_desc_schema16',),
             'include/linux/nvme_xdev_ext_passthru.h': (
                 'nvme_xdev_ext_admission', 'nvme_xdev_ext_decoded',
-                'nvme_xdev_ext_mech_bounds', 'nvme_xdev_ext_identity',
-                'nvme_xdev_ext_resource_state'),
+                'nvme_xdev_ext_mech_bounds', 'nvme_xdev_ext_identity') + resource,
         }
         for native, symbols in required.items():
             for symbol in symbols:
@@ -424,6 +444,7 @@ class LegacySelection:
                    '#include "include/linux/xdev_ext_storfam_runtime.h"\n'
                    '#ifndef __aligned\n#define __aligned(n) __attribute__((aligned(n)))\n#endif\n'
                    'struct request; struct request_queue; struct bio; struct page;\n'
+                   'struct block_device;\n'
                    'struct device; struct pci_dev; struct xdev_ext_peer_fd_lease;\n'
                    'struct xdev_ext_mech_stage; struct xdev_ext_mech_stage_uapi;\n'
                    'struct xdev_ext_mech_batch; struct xdev_ext_stor_stage;\n'
@@ -441,6 +462,12 @@ class LegacySelection:
                        self.definition('include/linux/xdev_ext_peer.h',
                                        'xdev_ext_peer_backing', 'struct')]
         pieces += self._native_command_declarations()
+        dev_ops = self.definition(H, 'xdev_ext_stor_dev_ops', 'struct')
+        if re.search(r'\bhost_path\s*;', dev_ops):
+            if len(re.findall(r'^\s*enum xdev_ext_stor_host_path\s+host_path\s*;',
+                              dev_ops, re.M)) != 1:
+                raise ValueError('SETUP unexpected storage host_path declaration')
+            pieces.append(self.definition(H, 'xdev_ext_stor_host_path', 'enum'))
         pieces += [self.definition(H, name, 'struct') for name in names]
         block = self.read(B)
         constant = re.search(r'^#define XDEV_EXT_STOR_PEER_MAX_SPANS[^\n]*', block, re.M)
@@ -548,6 +575,14 @@ class LegacySelection:
                 'xdev_ext_storfam_host_map', 'xdev_ext_storfam_submit_check',
                 'xdev_ext_storfam_submit', 'xdev_ext_storfam_host_ready',
                 'xdev_ext_storfam_consume')]
+            # New family routes still compile their whole real callees, even
+            # when these original NVMe cases select the native-request route.
+            for caller, callee in (
+                    ('xdev_ext_stor_block_append', 'xdev_ext_stor_block_fill'),
+                    ('xdev_ext_storfam_submit', 'xdev_ext_storfam_submit_bio')):
+                if re.search(r'\b' + re.escape(callee) + r'\s*\(',
+                             self.definition(B, caller)):
+                    items.append((B, callee))
             items += [(N, n) for n in (
                 'nvme_xdev_ext_member_requester', 'nvme_xdev_ext_member_queue',
                 'nvme_xdev_ext_member_identity', 'nvme_xdev_ext_member_encode',
@@ -766,6 +801,8 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA
 #define NVME_NS_READY 0
 #define NVME_NS_REMOVING 1
 #define REQ_FAILFAST_MASK 0x700U
+#define REQ_OP_READ 0
+#define REQ_OP_WRITE 1U
 #define REQ_OP_DRV_IN 34U
 #define REQ_OP_DRV_OUT 35U
 #define REQ_POLLED (1U<<21)
@@ -789,7 +826,10 @@ enum dma_data_direction { DMA_BIDIRECTIONAL, DMA_TO_DEVICE, DMA_FROM_DEVICE, DMA
 #define le64_to_cpu(x) (x)
 typedef unsigned blk_opf_t;
 struct page { u8 data[PAGE_SIZE]; };
-struct bio { unsigned bi_inline_vecs[256], used, capacity, bytes; struct bio *bi_next; };
+/* Linux block-layer fields used by the real ordinary-BIO callee. Original
+ * NVMe fixture counters and services remain unchanged. */
+struct bio { unsigned bi_inline_vecs[256], used, capacity, bytes; struct bio *bi_next;
+ struct { sector_t bi_sector; unsigned bi_size; } bi_iter; };
 struct blk_mq_hw_ctx { unsigned type,queue_num; };
 struct blk_mq_queue_map { unsigned nr_queues; };
 struct blk_mq_tag_set { unsigned nr_maps; struct blk_mq_queue_map *map; };

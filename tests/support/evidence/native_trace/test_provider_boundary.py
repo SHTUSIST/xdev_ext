@@ -77,9 +77,6 @@ int main(void) {
    if 'struct xdev_ext_stor_stage family;' in text:
     prefix, prefix_edits=adapt_fixture(prefix,[dict(old='typedef uint64_t u64;',new='typedef __u64 u64;\ntypedef u64 dma_addr_t;\n'+COMMAND_BOUNDARY,count=1,reason='native scalar and command ABI',source_owner='external OS boundary')])
     types = selected.declarations()
-    if 'enum xdev_ext_stor_host_path host_path;' in types:
-     types = selected.definition('include/linux/xdev_ext_storfam_block.h',
-                                 'xdev_ext_stor_host_path', 'enum') + '\n' + types
     production = selected.closure('validate','strict')
     production += '\nstatic const struct xdev_ext_stor_dev_ops fixture_ops={.decode=nvme_xdev_ext_member_decode};\n'
     suffix, suffix_edits=adapt_fixture(suffix,[dict(old='.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9}',new='.family={.window={.slba=32,.nlb=16,.capacity_lbas=4096,.lba_shift=9},.dev=&fixture_ops}',count=1,reason='embedded immutable window',source_owner='io_uring/family/xdev_ext_storfam_block.c'),dict(old='bp.validated',new='bp.family.validated',count=3,reason='embedded validated state',source_owner='io_uring/family/xdev_ext_storfam_block.c')])
