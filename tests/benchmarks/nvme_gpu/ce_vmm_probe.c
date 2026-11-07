@@ -84,6 +84,14 @@ static bool cvp_capability(int ret)
 	       ret == -EOPNOTSUPP || ret == -EPERM || ret == -EACCES;
 }
 
+/* After CREATE accepted a session, no error is an unavailable capability. */
+static int cvp_exit_code(int ret, bool created)
+{
+	if (ret >= 0)
+		return ret;
+	return !created && cvp_capability(ret) ? XG_EXIT_UNAVAILABLE : XG_EXIT_FAIL;
+}
+
 static void cvp_pattern(unsigned char *p, size_t bytes, uint64_t seed)
 {
 	size_t i;
@@ -240,7 +248,7 @@ static int cvp_run(const struct cvp_options *o)
 	unsigned char *host = MAP_FAILED, *gpu = NULL, *expected_gpu = NULL;
 	const __u32 frames[CVP_FRAMES] = { 1, 2 };
 	const char *phase = "allocation/attach";
-	bool released = true, complete = false;
+	bool released = true, complete = false, created = false;
 	size_t mapped_bytes = 0;
 	uint64_t now, deadline;
 	int ret, stopped;
@@ -318,6 +326,7 @@ static int cvp_run(const struct cvp_options *o)
 	ret = cvp_create(&r, &c, &released);
 	if (ret)
 		goto out;
+	created = true;
 	now = es_now_ns();
 	if (!now) {
 		ret = -EIO;
@@ -368,9 +377,7 @@ out:
 		ret = XG_EXIT_FAIL;
 	free(gpu);
 	free(expected_gpu);
-	if (ret < 0)
-		return cvp_capability(ret) ? XG_EXIT_UNAVAILABLE : XG_EXIT_FAIL;
-	return ret;
+	return cvp_exit_code(ret, created);
 }
 
 int main(int argc, char **argv)

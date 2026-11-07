@@ -557,5 +557,74 @@ class ControlUncertainty(unittest.TestCase):
                 self.assertNotEqual(result["rc"], 0, result)
 
 
+# Exit 4 means the environment cannot run the probe. Once CREATE has accepted a
+# session the device path is the thing under test, so any later error must be a
+# failure that no SKIP-tolerant harness can file as unsupported.
+EXIT_FIXTURE = r'''
+#include <errno.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdlib.h>
+enum { XG_EXIT_PASS = 0, XG_EXIT_FAIL = 1, XG_EXIT_USAGE = 2, XG_EXIT_UNAVAILABLE = 4 };
+'''
+EXIT_MAIN = r'''
+int main(int argc, char **argv)
+{
+    if (argc != 3) return 97;
+    printf("%d\n", cvp_exit_code(atoi(argv[1]), atoi(argv[2]) != 0));
+    return 0;
+}
+'''
+CAPABILITY_ERRNOS = {"ENODEV": 19, "ENOENT": 2, "ENOSYS": 38, "EOPNOTSUPP": 95,
+                     "EPERM": 1, "EACCES": 13}
+
+
+class ExitClassification(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "tests/support/benchmarks"))
+        from ce_vmm_contract import function
+        build = ROOT / "build"
+        build.mkdir(exist_ok=True)
+        cls.temp = tempfile.TemporaryDirectory(prefix="ce-probe-exit-", dir=build)
+        cls.addClassCleanup(cls.temp.cleanup)
+        work = Path(cls.temp.name)
+        actual = (HERE / "ce_vmm_probe.c").read_text()
+        source = work / "exit.c"
+        try:
+            source.write_text(EXIT_FIXTURE + function(actual, "cvp_capability") + "\n" +
+                              function(actual, "cvp_exit_code") + "\n" + EXIT_MAIN)
+        except AssertionError as error:
+            cls.build_failure = str(error)
+            return
+        cls.binary = work / "exit"
+        cls.build_failure = compile_c(source, cls.binary)
+
+    def code(self, ret, created):
+        self.assertIsNone(self.build_failure, self.build_failure)
+        result = subprocess.run([str(self.binary), str(ret), str(int(created))],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return int(result.stdout)
+
+    def test_capability_errors_before_create_are_unavailable(self):
+        for name, value in CAPABILITY_ERRNOS.items():
+            with self.subTest(errno=name):
+                self.assertEqual(self.code(-value, False), 4)
+        self.assertEqual(self.code(-5, False), 1)  # EIO
+
+    def test_any_error_after_create_is_failure_not_unavailable(self):
+        for name, value in {**CAPABILITY_ERRNOS, "EIO": 5, "ETIMEDOUT": 110,
+                            "ESHUTDOWN": 108, "EPROTO": 71}.items():
+            with self.subTest(errno=name):
+                self.assertEqual(self.code(-value, True), 1)
+
+    def test_exit_codes_pass_through(self):
+        for created in (False, True):
+            for value in (0, 1, 2, 4):
+                with self.subTest(created=created, value=value):
+                    self.assertEqual(self.code(value, created), value)
+
+
 if __name__ == "__main__":
     unittest.main()

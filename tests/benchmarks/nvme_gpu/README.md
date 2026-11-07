@@ -227,7 +227,9 @@ The final `CE_VMM_ACCEPTANCE=PASS` is printed only after data, guards,
 completion, STOP_REPORT, CUDA cleanup and process FD checks succeed. There are
 no timers or throughput fields; the monotonic clock only bounds waiting.
 Exit codes are 0 for verified, 1 for failure, 2 for usage and 4 for unavailable
-capabilities. A missing GPU/CUDA driver returns no acceptance PASS.
+capabilities before CREATE accepts a session; any error after that exits 1.
+A missing GPU/CUDA driver returns no acceptance PASS, and a harness must not
+count exit 4 as a PASS.
 
 The earlier helper-only `CE_VMM_QUALIFICATION` marker is superseded: its
 CUDA seeding/readback did not execute a kernel session. Host tests of this
