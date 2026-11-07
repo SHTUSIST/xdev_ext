@@ -779,7 +779,8 @@ static int setup(struct worker *wk, const char **where)
 		wk->allocation = peer_register(wk->ctl, wk->dmabuf, XDEV_EXT_PEER_REGISTER_F_DMABUF,
 					       0, len);
 	}
-	if (wk->allocation < 0)
+	/* PEER and dma-buf register an allocation; ce-vmm attached its export above. */
+	if (o->dst != DST_CE && wk->allocation < 0)
 		return wk->allocation;
 	*where = "CREATE";
 	ret = create_session(wk);
