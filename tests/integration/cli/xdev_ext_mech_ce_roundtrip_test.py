@@ -37,11 +37,16 @@ class CeRoundTrip(unittest.TestCase):
         source = CTL.read_text()
         start = source.index('static int cmd_ce_chain(')
         body = source[start:source.index('\nstatic int cmd_stats(', start)]
-        # Poison before the session starts, oracle after it, for a and d.
-        self.assertRegex(body, r'ctl_ce_window_fill\(')
-        self.assertLess(body.index('ctl_ce_window_fill('), body.index('ctl_run_source('))
+        # Poison after CREATE admits the window and before START, oracle after
+        # the run, for a and d. Filling before CREATE would let the tool, not
+        # the kernel, refuse an out-of-device window.
+        self.assertLess(body.index('src.ce_window = &window'), body.index('ctl_run_source('))
+        self.assertNotIn('ctl_ce_window_fill(', body)
         run_source = source[source.index('static int ctl_run_source('):]
         run_source = run_source[:run_source.index('\nout:')]
+        fill = run_source.index('ctl_ce_window_fill(')
+        self.assertLess(run_source.index('ctl_create('), fill)
+        self.assertLess(fill, run_source.index('ctl_start('))
         self.assertIn('xdev_ext_mech_ctl_ce_window_check(', source)
         self.assertRegex(run_source, r'src->ce_window')
         self.assertIn('xdev_ext_mech_ctl_report_ce_window(', body)
