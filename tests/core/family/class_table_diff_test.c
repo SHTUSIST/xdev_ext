@@ -309,6 +309,74 @@ static void compare_create(__u32 class_id, __u32 dir, __u32 arg, __u32 flags)
  }
 }
 
+static void ce_range_create_result(const struct xdev_ext_mech_create *c, int want)
+{
+ __u32 frames = UINT32_MAX;
+
+ EQ(xdev_ext_mech_create_check(c, &frames), want);
+ EQ(frames, want ? UINT32_MAX : 1);
+}
+
+/* TARGET_RANGE extends the CE contract after the frozen old_* oracle.
+ * A known flag can still name an unsupported composition or pool. */
+static void check_ce_target_range(void)
+{
+ const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(XDEV_EXT_MECH_CLASS_CE);
+ const struct xdev_ext_mech_create load = {
+  .abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+  .pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1,
+  .depth = 1, .eventfd = -1,
+  .layout = { .frame_size = 4096, .seg_len = 4096, .group_bytes = 4096 },
+  .st = {
+   { .class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
+     .fd = 5, .arg1 = 4096 },
+   { .class_id = XDEV_EXT_MECH_CLASS_CE, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
+     .fd = 6, .flags = 1 },
+  },
+ };
+ struct xdev_ext_mech_create c;
+
+ EQ(XDEV_EXT_CE_STAGE_F_TARGET_RANGE, 1);
+ EQ(d != NULL, true);
+ if (!d)
+  return;
+ EQ(d->known_flags, 1);
+ EQ(new_flags_bad(d, 0), false);
+ EQ(new_flags_bad(d, 1), false);
+ EQ(new_flags_bad(d, 2), true);
+ EQ(new_flags_bad(d, 3), true);
+ ce_range_create_result(&load, 0);
+ c = load;
+ c.st[0] = load.st[1];
+ c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+ c.st[1] = load.st[0];
+ c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+ ce_range_create_result(&c, 0);
+ c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c = load;
+ c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c = load;
+ c.st[0].class_id = XDEV_EXT_MECH_CLASS_DMA;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c = load;
+ c.nr_stages = 3;
+ c.st[2] = (struct xdev_ext_mech_stage_uapi) {
+  .class_id = XDEV_EXT_MECH_CLASS_DMA, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 7,
+ };
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c = load;
+ c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
+ c.pool_fd = 5;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c = load;
+ c.st[1].flags = 2;
+ ce_range_create_result(&c, -EINVAL);
+ c.st[1].flags = 3;
+ ce_range_create_result(&c, -EINVAL);
+}
+
 int main(void)
 {
  static const struct {
@@ -318,7 +386,7 @@ int main(void)
   { XDEV_EXT_MECH_CLASS_AFXDP, 1, 1, 3, XDEV_EXT_AFXDP_F_RELIABLE | XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY, 0, 0, 0, 1 },
   { XDEV_EXT_MECH_CLASS_NVME, 2, 1, 2, 0, 0, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_IAA, 3, 2, 4, XDEV_EXT_IAA_F_SOFTWARE, 0, 0, 0, 0 },
-  { XDEV_EXT_MECH_CLASS_CE, 3, 1, 1, 0, 0, 0, 0, 0 },
+  { XDEV_EXT_MECH_CLASS_CE, 3, 1, 1, XDEV_EXT_CE_STAGE_F_TARGET_RANGE, 0, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_DMA, 3, 1, 4, 0, 0, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_SOCKET, 1, 1, 4, XDEV_EXT_SOCKET_F_NXP, 0, 0, 0, 0 },
   { XDEV_EXT_MECH_CLASS_NET, 1, 1, 4, 0, 1, 0, 0, 0 },
@@ -470,16 +538,26 @@ int main(void)
   for (pool = 0; pool <= 4; pool++)
    EQ(!!d->peer_only && pool != XDEV_EXT_MECH_POOL_PEER, old_peer_only(c, pool));
   for (bit = 0; bit < 32; bit++) {
-   EQ(old_class_known(c) && new_flags_bad(d, 1U << bit), old_class_known(c) && old_flags_bad(c, 1U << bit));
+   __u32 flags = 1U << bit;
+
+   /* Value 1 is now known for CE; retain the old unknown-flag refusal
+    * with value 2. The new value-1 contract is checked separately. */
+   if (c == XDEV_EXT_MECH_CLASS_CE && flags == 1U)
+    flags = 2U;
+   EQ(old_class_known(c) && new_flags_bad(d, flags), old_class_known(c) && old_flags_bad(c, flags));
    EQ(xdev_ext_afxdp_flags_ok(1U << bit),
       !((1U << bit) & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)));
-   compare_create(c, XDEV_EXT_MECH_DIR_TO_DEVICE, 1, 1U << bit);
+   compare_create(c, XDEV_EXT_MECH_DIR_TO_DEVICE, 1, flags);
   }
   for (i = 0; i < sizeof(afxdp) / sizeof(afxdp[0]); i++) {
-   EQ(old_class_known(c) && new_flags_bad(d, afxdp[i]), old_class_known(c) && old_flags_bad(c, afxdp[i]));
+   __u32 flags = afxdp[i];
+
+   if (c == XDEV_EXT_MECH_CLASS_CE && flags == 1U)
+    flags = 2U;
+   EQ(old_class_known(c) && new_flags_bad(d, flags), old_class_known(c) && old_flags_bad(c, flags));
    EQ(xdev_ext_afxdp_flags_ok(afxdp[i]),
       !((afxdp[i] & (XDEV_EXT_AFXDP_F_FINITE | XDEV_EXT_AFXDP_F_POLICY)) && !(afxdp[i] & XDEV_EXT_AFXDP_F_RELIABLE)));
-   compare_create(c, XDEV_EXT_MECH_DIR_TO_DEVICE, 1, afxdp[i]);
+   compare_create(c, XDEV_EXT_MECH_DIR_TO_DEVICE, 1, flags);
   }
   for (dir = 0; dir < 4; dir++)
    for (x = 0; x <= XDEV_EXT_CPU_XFORM_MAX; x++) {
@@ -489,6 +567,7 @@ int main(void)
     compare_create(c, dir, x, 0);
    }
  }
+ check_ce_target_range();
  {
   const struct xdev_ext_mech_class_desc *d = xdev_ext_mech_class_desc(UINT32_MAX);
 
