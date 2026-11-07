@@ -274,7 +274,9 @@ rc=$?
 echo "XDEV_EXT_GPU_DMABUF vram_holds_last_batch_group=yes group=$((batches % groups))"
 exit "$rc"
 '''
-CE_PASS = ('XDEV_EXT_MECH_CE_GPU=PASS chain={chain}\n'
+CE_PASS = ('XDEV_EXT_MECH_CE_WINDOW=PASS chain={chain} written=4 depth=8 poison=0xc3 '
+           'reference=frames error=0\n'
+           'XDEV_EXT_MECH_CE_GPU=PASS chain={chain}\n'
            'XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 '
            'rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0\n'
            'CUDA allocation=native released=yes\n')
@@ -426,6 +428,18 @@ class GpuGuestCases(unittest.TestCase):
                 console = self.guest(caps_out=CAPS_GEFORCE, ce_d_out=text.format(chain='d'),
                                      ce_a_out=CE_PASS_VMM.format(chain='a'))
                 self.assertEqual(self.verdicts(console)['ce-chain-d']['result'], 'FAIL')
+
+    def test_a_ce_pass_needs_the_device_window_check(self):
+        # Chains d and a copy out to VRAM and back into the same frames:
+        # without the device-window line a no-op copy engine would pass.
+        window = CE_PASS.split('\n', 1)[0] + '\n'
+        for name, text in (('no window line', CE_PASS.replace(window, '')),
+                           ('window FAIL', CE_PASS.replace('WINDOW=PASS', 'WINDOW=FAIL')),
+                           ('nothing written', CE_PASS.replace('written=4', 'written=0'))):
+            for case in ('d', 'a'):
+                with self.subTest(name, chain=case):
+                    console = self.guest(**{f'ce_{case}_out': text.format(chain=case)})
+                    self.assertEqual(self.verdicts(console)[f'ce-chain-{case}']['result'], 'FAIL')
 
     def test_geforce_refusals_are_unsupported_not_failed(self):
         # What CUDA reported on the RTX 5090: no GPUDirect RDMA, no dma_buf.

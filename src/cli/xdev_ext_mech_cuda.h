@@ -69,6 +69,10 @@ struct xdev_ext_mech_cuda {
 	int (*mem_unmap)(uint64_t, size_t);
 	int (*address_free)(uint64_t, size_t);
 	int (*mem_release)(uint64_t);
+	/* Optional: CE chain device-window oracle (fill and read back). */
+	int (*memset_d8)(uint64_t, unsigned char, size_t);
+	int (*memcpy_dtoh)(void *, uint64_t, size_t);
+	int (*ctx_sync)(void);
 };
 
 _Static_assert(sizeof(struct xdev_ext_mech_cuda_access) == 12,
@@ -345,6 +349,9 @@ static inline int xdev_ext_mech_cuda_open_alloc(struct xdev_ext_mech_cuda *cuda,
 		XDEV_EXT_CUDA_LOAD(mem_free, "cuMemFree_v2");
 	}
 #undef XDEV_EXT_CUDA_LOAD
+	*(void **)(&cuda->memset_d8) = dlsym(cuda->lib, "cuMemsetD8_v2");
+	*(void **)(&cuda->memcpy_dtoh) = dlsym(cuda->lib, "cuMemcpyDtoH_v2");
+	*(void **)(&cuda->ctx_sync) = dlsym(cuda->lib, "cuCtxSynchronize");
 	ret = xdev_ext_mech_cuda_result(cuda->init(0), "cuInit");
 	if (!ret)
 		ret = xdev_ext_mech_cuda_result(cuda->device_count(&count),
@@ -419,6 +426,36 @@ static inline int xdev_ext_mech_cuda_open_vmm(struct xdev_ext_mech_cuda *cuda,
 					 const char *bdf, uint64_t bytes)
 {
 	return xdev_ext_mech_cuda_open_alloc(cuda, bdf, bytes, 1);
+}
+
+/*
+ * Fill the allocation with @value (@out NULL) or copy it to @out, in its
+ * primary context, restoring the caller's current context.  -ENOSYS when
+ * the driver library lacks the optional entry points.
+ */
+static inline int xdev_ext_mech_cuda_window(struct xdev_ext_mech_cuda *cuda, void *out,
+					    unsigned char value, uint64_t bytes)
+{
+	void *previous = NULL;
+	int ret, restore;
+
+	if (!cuda || !cuda->lib || !cuda->va || !bytes || bytes > SIZE_MAX)
+		return -EINVAL;
+	if (!cuda->memset_d8 || !cuda->memcpy_dtoh || !cuda->ctx_sync)
+		return -ENOSYS;
+	ret = xdev_ext_mech_cuda_result(cuda->ctx_get(&previous), "cuCtxGetCurrent(window)");
+	if (ret)
+		return ret;
+	ret = xdev_ext_mech_cuda_result(cuda->ctx_set(cuda->ctx), "cuCtxSetCurrent(window)");
+	if (!ret)
+		ret = out ? xdev_ext_mech_cuda_result(cuda->memcpy_dtoh(out, cuda->va, (size_t)bytes),
+						      "cuMemcpyDtoH_v2") :
+			    xdev_ext_mech_cuda_result(cuda->memset_d8(cuda->va, value, (size_t)bytes),
+						      "cuMemsetD8_v2");
+	if (!ret)
+		ret = xdev_ext_mech_cuda_result(cuda->ctx_sync(), "cuCtxSynchronize");
+	restore = xdev_ext_mech_cuda_result(cuda->ctx_set(previous), "cuCtxSetCurrent(window restore)");
+	return ret ? ret : restore;
 }
 
 #endif /* XDEV_EXT_MECH_CUDA_H */

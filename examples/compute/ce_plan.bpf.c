@@ -6,7 +6,10 @@
  * last entry.  complete continues on OK, retries a pre-submit failure and
  * aborts otherwise; C sequesters an ambiguous batch whatever it returns.
  * The same plan serves host-to-device and device-to-host stages, so a
- * round trip lands each byte back where it came from.
+ * round trip lands each byte back where it came from.  Comparing the host
+ * frames afterwards therefore cannot show that any copy ran; the control
+ * tool's chains a and d check the device window instead
+ * (xdev_ext_mech_ctl_ce_window_check()).
  */
 #define BPF_NO_KFUNC_PROTOTYPES
 #include "vmlinux.h"

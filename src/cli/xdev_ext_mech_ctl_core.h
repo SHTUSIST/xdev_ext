@@ -430,6 +430,94 @@ static inline bool xdev_ext_mech_ctl_ce_window_ok(__u64 depth, __u64 group_bytes
 	return depth && group_bytes && depth <= ce_len / group_bytes;
 }
 
+/*
+ * Device-window oracle of a CE round trip (chains a and d).  Both chains
+ * copy each batch H2D into its window slot and D2H back into the same host
+ * frames, so a host compare alone is equal when the copy engine moved
+ * nothing.  The tool fills the whole window with XDEV_EXT_MECH_CTL_CE_POISON
+ * before START and reads it back after the session:
+ *  - a slot still all poison was never used; at least one must be used and
+ *    at most min(groups, depth);
+ *  - a used slot is split into pieces of @ref->len bytes (one frame data
+ *    span each, the last one shorter); a piece still all poison is a lost
+ *    copy, and with a byte reference (@ref->base) each piece must equal the
+ *    data of some reference candidate k: base + k * stride + off;
+ *  - bytes past the depth slots must still be poison.
+ * A lost D2H alone is not visible: the frames already hold those bytes.
+ */
+#define XDEV_EXT_MECH_CTL_CE_POISON	0xc3
+
+struct xdev_ext_mech_ctl_ce_ref {
+	const __u8 *base;	/* NULL: no byte reference, poison checks only */
+	__u64 count;		/* reference candidates */
+	__u64 stride;		/* bytes between candidates */
+	__u32 off;		/* first data byte of a candidate */
+	__u32 len;		/* piece length: one frame's data span */
+};
+
+static inline bool xdev_ext_mech_ctl_ce_poisoned(const __u8 *p, __u64 len)
+{
+	__u64 i;
+
+	for (i = 0; i < len; i++)
+		if (p[i] != XDEV_EXT_MECH_CTL_CE_POISON)
+			return false;
+	return true;
+}
+
+static inline int xdev_ext_mech_ctl_ce_window_check(const __u8 *window, __u64 window_len,
+						    __u32 depth, __u32 group_bytes,
+						    __u64 groups,
+						    const struct xdev_ext_mech_ctl_ce_ref *ref,
+						    __u32 *written)
+{
+	__u64 used = (__u64)depth * group_bytes, k;
+	__u32 slot, off, len;
+	bool found;
+
+	*written = 0;
+	if (!ref || !ref->len || !depth || !group_bytes || !groups)
+		return -EINVAL;
+	if (used > window_len)
+		return -ERANGE;
+	for (slot = 0; slot < depth; slot++) {
+		const __u8 *s = window + (__u64)slot * group_bytes;
+
+		if (xdev_ext_mech_ctl_ce_poisoned(s, group_bytes))
+			continue;
+		(*written)++;
+		for (off = 0; off < group_bytes; off += len) {
+			len = group_bytes - off < ref->len ? group_bytes - off : ref->len;
+			if (xdev_ext_mech_ctl_ce_poisoned(s + off, len))
+				return -EIO;
+			if (!ref->base)
+				continue;
+			found = false;
+			for (k = 0; !found && k < ref->count; k++)
+				found = !memcmp(s + off, ref->base + k * ref->stride + ref->off, len);
+			if (!found)
+				return -EIO;
+		}
+	}
+	if (!xdev_ext_mech_ctl_ce_poisoned(window + used, window_len - used))
+		return -EFAULT;
+	if (!*written)
+		return -ENODATA;
+	return *written > (groups < depth ? groups : depth) ? -EIO : 0;
+}
+
+/* Verdict line of the device-window oracle; @result 0 passes. */
+static inline bool xdev_ext_mech_ctl_report_ce_window(char *buf, size_t size, int result,
+						     char chain, __u32 written, __u64 depth,
+						     bool reference)
+{
+	return xdev_ext_mech_ctl_line(buf, size, !result,
+		"XDEV_EXT_MECH_CE_WINDOW=%s chain=%c written=%u depth=%llu poison=0x%02x "
+		"reference=%s error=%d", XDEV_EXT_MECH_CTL_VERDICT(!result), chain, written,
+		XDEV_EXT_MECH_CTL_U(depth), XDEV_EXT_MECH_CTL_CE_POISON,
+		reference ? "frames" : "none", result);
+}
+
 static inline bool xdev_ext_mech_ctl_report_nic_ce_nvme(char *buf, size_t size,
                           const struct xdev_ext_mech_stats *s,
                           __u64 groups, __u32 frames)

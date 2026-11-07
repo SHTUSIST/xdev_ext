@@ -6006,6 +6006,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ce_window_test.c"
     },
     {
+      "source": "tests/integration/cli/xdev_ext_mech_ce_roundtrip_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ce_roundtrip_test.c"
+    },
+    {
+      "source": "tests/integration/cli/xdev_ext_mech_ce_roundtrip_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ce_roundtrip_test.py"
+    },
+    {
       "source": "tests/integration/cli/xdev_ext_mech_ctl_core_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ctl_core_test.c"

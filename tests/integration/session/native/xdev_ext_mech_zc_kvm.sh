@@ -1378,10 +1378,13 @@ if [ "$ce_sim" = 1 ]; then
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
 		--timeout-ms "$cli_timeout_ms" >/tmp/ce-a.log 2>&1
 	ce_check /tmp/ce-a.log a
+	# Same frames out and back: only the device window shows the copies ran.
+	grep -Eq '^XDEV_EXT_MECH_CE_WINDOW=PASS chain=a written=[1-9][0-9]* ' /tmp/ce-a.log
 	$ctl ce-chain --chain d --ce-dev /dev/xdev_ext_ce_sim --ce-len "$ce_len" \
 		--groups "$groups" --depth "$depth" --group-bytes 8192 \
 		--timeout-ms "$cli_timeout_ms" >/tmp/ce-d.log 2>&1
 	ce_check /tmp/ce-d.log d
+	grep -Eq '^XDEV_EXT_MECH_CE_WINDOW=PASS chain=d written=[1-9][0-9]* .* reference=frames ' /tmp/ce-d.log
 fi
 # The reverse chain owns a distinct simulated device window.
 if [ "$rx_ce" = 1 ]; then
