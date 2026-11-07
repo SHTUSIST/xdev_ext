@@ -3,12 +3,12 @@
   "source_root": "/root/xdev_ext/staging/recovery-20261031/wt-integration",
   "baseline_inputs": {
     "src/core/include/uapi/linux/io_uring.h": "2cbfbf9c39ac52de8d194b945a82ba3ffab9a5e58ce8da7e33a28732ba05964d",
-    "src/core/include/uapi/linux/xdev_ext_mech.h": "7c48c326fa398f8fa025f867644ce6c6a0bb13f5920ff6fa04c29b7ec0b495ee",
+    "src/core/include/uapi/linux/xdev_ext_mech.h": "b78de42a2074e519530d548520af407c98dfae3cd31835766289f2dd012e0124",
     "src/core/include/uapi/linux/xdev_ext_binding.h": "b068c393bf031e64b47700efa352a3fa3166ceb54948d56e92a3ae7cd64eabef",
     "src/core/include/linux/xdev_ext_mech.h": "53df9c3ba91a2b31bbff0b1113ec4d37e78071584a549d44e4f4aab2a3b03103",
     "src/compute/include/linux/xdev_ext_compfam.h": "48fd7455029eb16ba2f5e0abec5e4a87f7ff3f68bc7d51e99bf14e4534f20bfd",
-    "src/core/include/linux/xdev_ext_family_core.h": "ab885ce861b51ceb2230b18b1ae011dd9ab53172eb2337375fb8a1e285cf465c",
-    "src/core/io_uring/xdev_ext_mech.c": "f042ec07dcae65f488642a9cd94f63998ce3d9ce55bc7e5a085bb7ed414a0769",
+    "src/core/include/linux/xdev_ext_family_core.h": "df8421ba0189536a7ccd8f268d4c357fa1efdc8edbe4fc25a145e3261d151437",
+    "src/core/io_uring/xdev_ext_mech.c": "b73512298217d246508f849f04a997bcd2cb3a57a3dc4bdfdb53fcb2cbab6cea",
     "src/core/io_uring/xdev_ext_mech_ops.c": "809047924dda4f94acfa6a16fc7eeea2c0cc50568e60e6bdbd780fe198c20f7e",
     "src/core/io_uring/xdev_ext_mech_user.c": "69048723e840b4f7fded0f4ee4134b95c349baa01b5243fb6ba07f2a701f0508",
     "src/core/io_uring/xdev_ext_mech_core.h": "e3ccd8aeb07a65ec363d88423eaa3588abffb07437a64273c890335fc653f956",
@@ -153,5 +153,27 @@
       }
     },
     "command": "python3 refreeze_deflate_capture.py REPO_ROOT integration2_193_refreeze_after_review"
+  },
+  "claude194_main_next_refreeze": {
+    "scope": "integration re-freeze of the hashes of the baseline inputs after merging claude/ce-random-ci-fix (CE TARGET_RANGE core changes) into claude/main-next; test files, input, status and every other field unchanged unless listed",
+    "previous_freeze_commit": "71b4ccc5783506c0e860f1e504e45af4d5f8ef87",
+    "hashed_tree_commit": "e07a7a01ccf56dea46888049d931a93820005fa1",
+    "changed": {
+      "baseline_inputs": {
+        "src/core/include/uapi/linux/xdev_ext_mech.h": {
+          "before": "7c48c326fa398f8fa025f867644ce6c6a0bb13f5920ff6fa04c29b7ec0b495ee",
+          "after": "b78de42a2074e519530d548520af407c98dfae3cd31835766289f2dd012e0124"
+        },
+        "src/core/include/linux/xdev_ext_family_core.h": {
+          "before": "ab885ce861b51ceb2230b18b1ae011dd9ab53172eb2337375fb8a1e285cf465c",
+          "after": "df8421ba0189536a7ccd8f268d4c357fa1efdc8edbe4fc25a145e3261d151437"
+        },
+        "src/core/io_uring/xdev_ext_mech.c": {
+          "before": "f042ec07dcae65f488642a9cd94f63998ce3d9ce55bc7e5a085bb7ed414a0769",
+          "after": "b73512298217d246508f849f04a997bcd2cb3a57a3dc4bdfdb53fcb2cbab6cea"
+        }
+      }
+    },
+    "command": "python3 refreeze_deflate_capture.py REPO_ROOT claude194_main_next_refreeze"
   }
 }
