@@ -208,6 +208,16 @@ else
 	echo 'GATE_RESULT step=dmabuf-patched result=FAIL reason=window-not-cleared'
 fi
 
+# --- (ii-b) where the chain's bytes are in VRAM (diagnostic) ---------------
+if [ -x /opt/gate/dmabuf_vram_dump ] && clear_window; then
+	step dmabuf-dump /tmp/dmabuf-dump.log env LD_LIBRARY_PATH="$PATCHED:$SYSLIB" \
+		/opt/gate/dmabuf_vram_dump --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/src.bin \
+		--group-bytes 8192 -- \
+		"$G/xdev_ext_peer_chain" --allocation-fd '{fd}' "$src_ng" "$dst_ng" \
+		"$groups" 8192 9 "$source_slba" "$target_slba" "$G"
+	echo "GATE_RESULT step=dmabuf-dump compare=$(compare_window)"
+fi
+
 # --- (iii) persistent P2P pin of a cuMemAlloc buffer (patched) -------------
 if clear_window; then
 	dmesg_mark peer-patched-begin
@@ -220,7 +230,7 @@ if clear_window; then
 else
 	echo 'GATE_RESULT step=peer-patched result=FAIL reason=window-not-cleared'
 fi
-dmesg | grep -E 'GATE_DMESG_MARK|XDEV_EXT peer|nvidia_p2p|NVRM: .*(p2p|P2P|dma-buf|dmabuf)' |
+dmesg | grep -E 'GATE_DMESG_MARK|XDEV_EXT peer|nvidia_p2p|peer-to-peer|ACS redirect|NVRM: .*(p2p|P2P|dma-buf|dmabuf)' |
 	sed 's/^/GATE_DMESG: /'
 
 # --- regression: CE chains d/a with the official libcuda ---------------------

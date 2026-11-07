@@ -6,7 +6,8 @@
 #   launch.sh --run DIR --base-initroot DIR --kernel BZIMAGE \
 #       --libcuda OFFICIAL_LIBCUDA --scanner PATCH_SCANNER.py \
 #       --probe CUDA_ATTR_PROBE --report PEER_CREATE_REPORT --gpu PCI_BDF \
-#       [--topology rootcomplex|switch] [--gpu-modules DIR] [--memory-mb N] [--limit-s N]
+#       [--topology rootcomplex|switch] [--gpu-modules DIR] [--dump DMABUF_VRAM_DUMP]
+#       [--memory-mb N] [--limit-s N]
 #
 # --gpu-modules DIR replaces nvidia.ko and nvidia-uvm.ko of the base initroot
 # (modules built against KERNEL, e.g. by build_p2pdma_kernel.sh).
@@ -25,12 +26,13 @@
 # the harness never binds, unbinds or resets a host device.
 set -euo pipefail
 RUN= BASE= KERNEL= LIBCUDA= SCANNER= PROBE= REPORT= GPU= MEMORY_MB=8192 LIMIT_S=2700
-TOPOLOGY=rootcomplex GPU_MODULES=
+TOPOLOGY=rootcomplex GPU_MODULES= DUMP=
 while (($#)); do
 	case $1 in
 	--run) RUN=$2 ;; --base-initroot) BASE=$2 ;; --kernel) KERNEL=$2 ;;
 	--libcuda) LIBCUDA=$2 ;; --scanner) SCANNER=$2 ;; --probe) PROBE=$2 ;;
 	--report) REPORT=$2 ;; --topology) TOPOLOGY=$2 ;; --gpu-modules) GPU_MODULES=$2 ;;
+	--dump) DUMP=$2 ;;
 	--gpu) GPU=$2 ;; --memory-mb) MEMORY_MB=$2 ;; --limit-s) LIMIT_S=$2 ;;
 	*) echo "unknown argument $1" >&2; exit 2 ;;
 	esac
@@ -89,6 +91,10 @@ mkdir -p initroot/opt/gate/patched capture
 cp "$HERE/guest.sh" initroot/opt/gate/guest.sh
 cp "$PROBE" initroot/opt/gate/cuda_attr_probe
 cp "$REPORT" initroot/opt/gate/peer_create_report
+if [[ -n $DUMP ]]; then
+	cp "$DUMP" initroot/opt/gate/dmabuf_vram_dump
+	chmod 0755 initroot/opt/gate/dmabuf_vram_dump
+fi
 if [[ -n $GPU_MODULES ]]; then
 	cp "$GPU_MODULES/nvidia.ko" "$GPU_MODULES/nvidia-uvm.ko" initroot/opt/xdev_ext/gpu/
 fi
