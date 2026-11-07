@@ -92,7 +92,7 @@ struct xdev_ext_xd_link {
 	int ctl_out_hopid, ctl_in_hopid;
 	bool ctl_paths;
 	struct xdev_ext_xd_rings *rings;
-	/* X4 owns per-allocation custody and preallocated quarantine records. */
+	/* Device owns live custody; coherent storage ownership resides in core. */
 	struct xdev_ext_xd_ctl_allocation *ctl_rx_alloc, *ctl_tx_alloc;
 	u8 *ctl_rx_buf, *ctl_tx_buf;
 	dma_addr_t ctl_rx_dma, ctl_tx_dma;

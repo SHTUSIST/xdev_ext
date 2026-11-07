@@ -1499,7 +1499,6 @@ int stack_remove(struct stack_world*w,unsigned e){
 	w->active=e;
 	stack_x3_remove(&w->side[e].svc);
 	w->side[e].removed=true;
-	stack_x4_quarantine_records();
 	fprintf(stderr,"STACK_DIAG remove endpoint=%u pci_refs=%u\n",e,w->side[e].pci.refs);
 	return 0;
 }

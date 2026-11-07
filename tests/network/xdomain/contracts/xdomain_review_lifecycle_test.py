@@ -11,7 +11,7 @@ import subprocess
 import sys
 import tempfile
 from xdomain_ring_test import no_includes, declaration, typed_lease_declarations
-from xdomain_retention_fixture import retention_unit, descriptor_unit
+from xdomain_retention_fixture import retention_unit, backing_unit, descriptor_unit
 
 HERE = Path(__file__).resolve().parent
 
@@ -25,7 +25,7 @@ def ring_unit(kernel):
     for old,new in [('all_rings[16]','all_rings[1024]'),('stop_hop[32]','stop_hop[2048]'),('dma_records[64]','dma_records[1024]'),('hops[16]','hops[1024]')]:
         assert old in boundaries
         boundaries=boundaries.replace(old,new)
-    return ((HERE/'xdomain_ring_compat.h').read_text()+'\n#include "include/uapi/linux/xdev_ext_mech.h"\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n'+lease+family+no_includes((kernel/'io_uring/xdomain/xdev_ext_xdomain.h').read_text())+boundaries+retention_unit(kernel)+descriptor_unit(kernel)+no_includes((kernel/'io_uring/xdomain/xdev_ext_xdomain_ring.c').read_text())+(HERE/'xdomain_review_lifecycle_ring_cases.c').read_text())
+    return ((HERE/'xdomain_ring_compat.h').read_text()+'\n#include "include/uapi/linux/xdev_ext_mech.h"\n#include "io_uring/xdomain/xdev_ext_xdomain_core.h"\n'+lease+family+no_includes((kernel/'io_uring/xdomain/xdev_ext_xdomain.h').read_text())+boundaries+retention_unit(kernel)+backing_unit(kernel)+descriptor_unit(kernel)+no_includes((kernel/'io_uring/xdomain/xdev_ext_xdomain_ring.c').read_text())+(HERE/'xdomain_review_lifecycle_ring_cases.c').read_text())
 
 def function(text, name):
     import re

@@ -16,6 +16,7 @@
 #include <stdarg.h>
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef __u64 u64;
 typedef uintptr_t dma_addr_t;
+typedef unsigned int gfp_t;
 #define BIT(n) (1UL << (n))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define BITS_TO_LONGS(n) (((n) + 8 * sizeof(long) - 1) / (8 * sizeof(long)))
