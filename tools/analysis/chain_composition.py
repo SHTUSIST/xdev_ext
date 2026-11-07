@@ -17,7 +17,8 @@ rows of the core class declaration table.  Every item is classified:
   shared      core or family code that names no device kind.
 
 Each item records where it runs: "kernel" (trusted C) or "bpf" (verified
-program).  Separately, every occurrence under src/core of a named class
+program).  Separately, every occurrence under src/core and in family-layer
+files of a named class
 constant (XDEV_EXT_MECH_CLASS_<NAME>) or of a class-specific identifier is
 classified as a registration entry, a per-class dispatch or a per-pair
 condition, with the deciding rule and the source line:
@@ -33,8 +34,16 @@ condition, with the deciding rule and the source line:
                                                            -> per-class dispatch
   R-ONE      the statement names one device kind           -> per-class dispatch
 
-A core or family function is per-pair when one of its sites is; it is
-per-class when it names a device kind, otherwise shared.
+A core or family function is per-pair when one of its sites is, or when the
+function as a whole holds a pair split over several statements:
+
+  F-OPERANDS identities compared against two different operands anywhere in
+             the body; a case label compares against its switch subject
+  F-KINDS    two device kinds named outside the arms of a single-operand
+             switch, or within one arm; identities already counted by
+             F-OPERANDS and registration statements are not kinds here
+
+Otherwise it is per-class when it names a device kind, else shared.
 
 Functions are found by kernel C layout: a body is a "{" at file scope after a
 header ending in a parameter list.  Comments and string literals never count.
@@ -47,7 +56,8 @@ is an error, never a guess.
 
 Roots of a chain are the ops tables in its components (or only the tables
 a component lists in root_tables), the struct_ops maps of its BPF programs
-and, for components marked root_all_changed (driver hook files stock code
+that the chain names as attached (a map in the same file the chain does not
+attach is not counted; a named map missing from the file is an error) and, for components marked root_all_changed (driver hook files stock code
 calls through pointers), every changed function.  The closure follows
 identifier references inside the chain's components.  A stock function the
 product changed that calls reached code, and any product function that
@@ -182,7 +192,8 @@ COMPONENTS = {
 }
 
 # A chain lists the classes its sessions use, the components it composes and
-# the BPF programs attached.  evidence: (path, literal) pairs that must still
+# the BPF programs attached, each as (file, [struct_ops maps the chain
+# attaches]); other maps in the same file are not used by the chain.  evidence: (path, literal) pairs that must still
 # be in the tree; absent: paths that must not be (a piece only on a branch).
 CHAINS = (
     dict(id='M-TP', title='VRAM <-> Thunderbolt <-> VRAM (TP=2 exchange)',
@@ -194,7 +205,8 @@ CHAINS = (
          components=['core', 'family:network', 'family:compute', 'class:XDOMAIN',
                      'service:xdomain', 'driver:thunderbolt', 'class:USER',
                      'provider:nvidia-vram', 'driver:nvidia'],
-         bpf=['examples/network/xdomain_peer.bpf.c', 'examples/compute/user_plan.bpf.c'],
+         bpf=[('examples/network/xdomain_peer.bpf.c', ['xdomain_peer_ops']),
+              ('examples/compute/user_plan.bpf.c', ['user_plan_ops'])],
          evidence=[('src/lib/xdev_ext_peer_message.c', 'ret = xdev_ext_session_open_peer(&pool, &e->session);'),
                    ('src/lib/xdev_ext_peer_message.c', 'ret = xdev_ext_stage_xdomain(&create.st[native], control, o->link_token,'),
                    ('src/lib/xdev_ext_peer_message.c', '.class_id = XDEV_EXT_MECH_CLASS_USER,'),
@@ -206,7 +218,7 @@ CHAINS = (
          classes=['NVME'],
          components=['core', 'family:storage', 'class:NVME', 'driver:nvme',
                      'provider:nvidia-vram', 'driver:nvidia'],
-         bpf=['examples/storage/nvme_s0.bpf.c'],
+         bpf=[('examples/storage/nvme_s0.bpf.c', ['nvme_s0_ops'])],
          evidence=[('src/cli/xdev_ext_peer_chain.c', '.pool_kind = XDEV_EXT_MECH_POOL_PEER, .pool_fd = allocation,'),
                    ('src/cli/xdev_ext_peer_chain.c', 'create.st[0] = (struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_NVME,'),
                    ('src/cli/xdev_ext_peer_chain.c', 'ret=load_ops(argv[base+7],"nvme_s0",&nvme);')],
@@ -219,10 +231,14 @@ CHAINS = (
          classes=['NVME', 'CE'],
          components=['core', 'family:storage', 'family:compute', 'class:NVME', 'driver:nvme',
                      'class:CE', 'backend:nvidia-ce', 'driver:nvidia'],
-         bpf=['examples/pipelines/nxp_mech.bpf.c', 'examples/compute/ce_plan.bpf.c'],
+         # nxp_mech.bpf.c also holds nxp_afxdp_ops; the arm attaches only
+         # nxp_nvme_ops (guest_correctness.sh, session_nvme_ce.c, README.md).
+         bpf=[('examples/pipelines/nxp_mech.bpf.c', ['nxp_nvme_ops']),
+              ('examples/compute/ce_plan.bpf.c', ['ce_plan_ops'])],
          evidence=[('tests/benchmarks/nvme_gpu/session_nvme_ce.c', 'c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM;'),
                    ('tests/benchmarks/nvme_gpu/session_nvme_ce.c', '.class_id = XDEV_EXT_MECH_CLASS_CE,'),
                    ('tests/benchmarks/nvme_gpu/README.md', '`nxp_nvme_ops` (`nxp_mech.bpf.o`'),
+                   ('tests/benchmarks/nvme_gpu/guest_correctness.sh', '--obj "$dir/nxp_mech.bpf.o" --map nxp_nvme_ops'),
                    ('tests/benchmarks/nvme_gpu/eval_session.h', 'if (!xdev_ext_nv_ce_attach_memory(fd, &attach))')],
          # Driver commands (switch labels the product added to a stock
          # dispatcher) the chain issues; other added arms are not executed.
@@ -234,10 +250,11 @@ CHAINS = (
          classes=['NVME', 'AFXDP'],
          components=['core', 'family:storage', 'family:network', 'class:NVME', 'driver:nvme',
                      'class:AFXDP', 'driver:afxdp', 'driver:ice-xsk'],
-         bpf=['tests/benchmarks/nvme_nic/nnb_bench.bpf.c'],
+         bpf=[('tests/benchmarks/nvme_nic/nnb_bench.bpf.c', ['nnb_nvme_ops', 'nnb_afxdp_ops'])],
          evidence=[('tests/benchmarks/nvme_nic/nnb_session.c', 'create.pool_kind = XDEV_EXT_MECH_POOL_XSK;'),
                    ('tests/benchmarks/nvme_nic/nnb_session.c', 'create.st[1] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_AFXDP,'),
-                   ('tests/benchmarks/nvme_nic/run.py', "default=str(HERE / '.build/bpf/nnb_bench.bpf.o')")],
+                   ('tests/benchmarks/nvme_nic/run.py', "default=str(HERE / '.build/bpf/nnb_bench.bpf.o')"),
+                   ('tests/benchmarks/nvme_nic/nnb_session.c', 'static const char *const names[2] = { "nnb_nvme_ops", "nnb_afxdp_ops" };')],
          absent=[], missing=[]),
     dict(id='K-KV', title='NVMe -> Thunderbolt -> VRAM (KV restore from the neighbour SSD)',
          sessions=[dict(side='host 1', pool='PEER (dma-buf importer or NVIDIA VRAM allocation)',
@@ -248,8 +265,9 @@ CHAINS = (
          components=['core', 'family:storage', 'family:network', 'family:compute', 'class:NVME',
                      'driver:nvme', 'class:XDOMAIN', 'service:xdomain', 'driver:thunderbolt',
                      'class:USER', 'provider:dmabuf', 'provider:nvidia-vram', 'driver:nvidia'],
-         bpf=['examples/storage/nvme_s0.bpf.c', 'examples/network/xdomain_peer.bpf.c',
-              'examples/compute/user_plan.bpf.c'],
+         bpf=[('examples/storage/nvme_s0.bpf.c', ['nvme_s0_ops']),
+              ('examples/network/xdomain_peer.bpf.c', ['xdomain_peer_ops']),
+              ('examples/compute/user_plan.bpf.c', ['user_plan_ops'])],
          evidence=[('tests/network/xdomain/chain/README.md', '# NVMe READ to XDOMAIN TX in one session worker'),
                    ('tests/network/xdomain/chain/README.md', '`nvme_s0.bpf.c` (NVMe build/complete) and `xdomain_peer.bpf.c`'),
                    ('src/lib/xdev_ext_peer_message.c', 'ret = xdev_ext_session_open_peer(&pool, &e->session);')],
@@ -574,16 +592,24 @@ def statement_at(code, offset, lo, hi):
     return code[a + 1:min(ends) if ends else hi].strip()
 
 
+_OPERAND = r'([\w\.\[\]]+(?:->[\w\.\[\]]+)*)'
+
+
+def comparisons(code):
+    """[(operand, identity, offset of the identity)] of every == / != of a
+    class identity constant in @code."""
+    out = [(m.group(1), m.group(3), m.start(3)) for m in
+           re.finditer(_OPERAND + r'\s*(==|!=)\s*(XDEV_EXT_MECH_CLASS_\w+)', code)]
+    out += [(m.group(3), m.group(1), m.start(1)) for m in
+            re.finditer(r'(XDEV_EXT_MECH_CLASS_\w+)\s*(==|!=)\s*' + _OPERAND, code)]
+    return [x for x in out if IDENTITY.match(x[1])]
+
+
 def classify_statement(stmt):
     """(category, rule) of one in-function statement naming a device kind."""
     if any(REG_CALL.search(c) for c in re.findall(r'([A-Za-z_]\w*)\s*\(', stmt)):
         return 'registration', 'R-REGCALL'
-    operand = r'([\w\.\[\]]+(?:->[\w\.\[\]]+)*)'
-    pairs = [(m.group(1), m.group(3)) for m in
-             re.finditer(operand + r'\s*(==|!=)\s*(XDEV_EXT_MECH_CLASS_\w+)', stmt)]
-    pairs += [(m.group(3), m.group(1)) for m in
-              re.finditer(r'(XDEV_EXT_MECH_CLASS_\w+)\s*(==|!=)\s*' + operand, stmt)]
-    pairs = [(op, c) for op, c in pairs if IDENTITY.match(c)]
+    pairs = [(op, c) for op, c, _ in comparisons(stmt)]
     idents, operands = {c for _, c in pairs}, {op for op, _ in pairs}
     if len(idents) >= 2 and len(operands) >= 2:
         return 'per-pair', 'R-PAIR'
@@ -665,6 +691,72 @@ def added_arms(tree, path, f, status):
             for m in label.finditer(f['body']) if m.group(1) not in old]
 
 
+def switch_arms(code):
+    """[{subject, label, start, stop}] of every case/default arm of every
+    switch in @code (nested switches included); an arm runs from its label
+    to the next label of the same switch or the end of the switch."""
+    arms = []
+    for m in re.finditer(r'\bswitch\s*\(', code):
+        depth, j = 1, m.end()
+        while j < len(code) and depth:
+            depth += {'(': 1, ')': -1}.get(code[j], 0)
+            j += 1
+        subject, brace = re.sub(r'\s+', '', code[m.end():j - 1]), code.find('{', j)
+        if brace < 0:
+            continue
+        end, depth, labels = _match(code, brace), 0, []
+        for i in range(brace, end + 1):
+            ch = code[i]
+            if ch == '{':
+                depth += 1
+            elif ch == '}':
+                depth -= 1
+            elif depth == 1 and re.match(r'(?:case|default)\b', code[i:]) and \
+                    not re.match(r'\w', code[i - 1]):
+                labels.append(i)
+        for k, start in enumerate(labels):
+            label = re.match(r'(?:case\s+(.+?)|default)\s*:', code[start:end], re.S)
+            arms.append(dict(subject=subject, label=label.group(1).strip() if label and label.group(1)
+                             else None, start=start,
+                             stop=labels[k + 1] if k + 1 < len(labels) else end))
+    return arms
+
+
+def function_pair(f):
+    """The pair evidence of a core or family function judged as a whole, or
+    None.  F-OPERANDS: class identities compared against two different
+    operands anywhere in the body (case labels compare against the switch
+    subject).  F-KINDS: two device kinds named outside the arms of a
+    single-operand switch, or within one arm; identities already counted as
+    comparisons and registration statements do not name a kind here."""
+    code = f['header'] + f['body']
+    arms = switch_arms(code)
+    comps = [(re.sub(r'\s+', '', op), c, off) for op, c, off in comparisons(code)]
+    comps += [(a['subject'], a['label'], code.index(a['label'], a['start'])) for a in arms
+              if a['label'] and IDENTITY.match(a['label'])]
+    if len({c for _, c, _ in comps}) >= 2 and len({op for op, _, _ in comps}) >= 2:
+        names = {}
+        for _, c, _ in comps:
+            names.setdefault(CLASS_KIND[IDENTITY.match(c).group(1)], set()).add(c)
+        return dict({k: sorted(v) for k, v in names.items()}, rule='F-OPERANDS')
+    compared = {off for _, _, off in comps}
+    groups = {}
+    for m in IDENT.finditer(code):
+        kinds = token_kinds(m.group(0))
+        if not kinds or m.start() in compared:
+            continue
+        if classify_statement(statement_at(code, m.start(), 0, len(code)))[0] == 'registration':
+            continue
+        inner = [a for a in arms if a['start'] <= m.start() < a['stop']]
+        arm = min(inner, key=lambda a: a['stop'] - a['start'])['start'] if inner else None
+        for k in kinds:
+            groups.setdefault(arm, {}).setdefault(k, set()).add(m.group(0))
+    for found in groups.values():
+        if len(found) >= 2:
+            return dict({k: sorted(v) for k, v in found.items()}, rule='F-KINDS')
+    return None
+
+
 def foreign_kinds(code, own):
     return {k: sorted(v) for k, v in kinds_of(code).items() if k not in own}
 
@@ -678,21 +770,26 @@ def func_scope(f, path, comp, site_by_func):
             for s in pair:
                 names.setdefault(s['kind'], []).append(s['token'])
             return 'per-pair', {k: sorted(set(v)) for k, v in names.items()}
+        pair = function_pair(f)
+        if pair:
+            return 'per-pair', pair
         found = foreign_kinds(f['header'] + f['body'], ())
         return ('per-class' if found else 'shared'), found
     foreign = foreign_kinds(f['header'] + f['body'], set(comp['own']))
     return ('per-pair' if foreign else 'per-class'), foreign
 
 
-def bpf_tags(tree, path):
-    """{function: kinds of the struct_ops maps that reach it} in a BPF file."""
+def bpf_tags(tree, path, maps):
+    """({function: kinds of the attached struct_ops maps that reach it},
+    [listed maps that are not struct_ops maps of the file]) in a BPF file."""
     p = tree.parsed(path)
     names = {f['name']: f for f in p['funcs']}
-    tags = {}
+    tags, found = {}, set()
     for t in p['tables']:
         m = re.search(r'struct\s+xdev_ext_(\w+?)_mech_ops\b', t['type'] or '')
-        if not m:
+        if not m or t['name'] not in maps:
             continue
+        found.add(t['name'])
         todo = [e['ident'] for e in t['entries'] if e['ident'] in names]
         while todo:
             name = todo.pop()
@@ -700,7 +797,7 @@ def bpf_tags(tree, path):
                 continue
             tags[name].add(m.group(1))
             todo.extend(tok for tok in tokens(names[name]['body']) if tok in names)
-    return tags
+    return tags, sorted(set(maps) - found)
 
 
 def class_ids(tree):
@@ -760,6 +857,11 @@ RULES = {
     'R-PAIR': 'two identities against two operands, or two kinds without comparison -> per-pair',
     'R-SET': 'several identities against one operand -> per-class dispatch',
     'R-ONE': 'statement names one device kind -> per-class dispatch',
+    'F-OPERANDS': 'core/family function compares identities against two different operands '
+                  'anywhere in its body (case labels against the switch subject) -> per-pair',
+    'F-KINDS': 'core/family function names two device kinds outside the arms of a single-operand '
+               'switch, or within one arm (identities in comparisons and registration statements '
+               'excluded) -> per-pair',
 }
 
 
@@ -774,8 +876,9 @@ def analyze(tree, components=None, chains=None):
         if c:
             comp_files.setdefault(c, []).append(path)
     sites = []
+    family = {p for c, paths in comp_files.items() if components[c]['role'] == 'family' for p in paths}
     for path in sorted(tree.files):
-        if path.startswith('src/core/') and path.endswith(('.c', '.h', '.inc')):
+        if (path.startswith('src/core/') and path.endswith(('.c', '.h', '.inc'))) or path in family:
             sites.extend(decision_sites(tree, path))
     site_by_func = {}
     for s in sites:
@@ -926,14 +1029,22 @@ def chain_items(tree, chain, components, comp_files, defs, tables, site_by_func,
                               file='src/core/include/linux/xdev_ext_family_core.h', line=row['line'],
                               status='new-file', reach='root', scope=row['scope'],
                               names=row['names']))
-    for path in chain['bpf']:
+    programs = []
+    for spec in chain['bpf']:
+        if isinstance(spec, str):
+            errors.append('BPF program %s names no struct_ops map the chain attaches' % spec)
+            continue
+        path, maps = spec[0], sorted(spec[1])
+        programs.append(dict(file=path, maps=maps))
         if path not in tree.files:
             errors.append('missing BPF program ' + path)
             continue
         p = tree.parsed(path)
         funcs = {f['name']: f for f in p['funcs']}
-        entries = {e['ident'] for t in p['tables'] for e in t['entries']}
-        for name, tags in sorted(bpf_tags(tree, path).items()):
+        entries = {e['ident'] for t in p['tables'] if t['name'] in maps for e in t['entries']}
+        tags, unknown = bpf_tags(tree, path, maps)
+        errors.extend('%s has no struct_ops map %s' % (path, m) for m in unknown)
+        for name, tags in sorted(tags.items()):
             f, classes = funcs[name], sorted(tags)
             names = foreign_kinds(f['header'] + f['body'], set(classes))
             scope = 'per-pair' if names else 'per-class'
@@ -967,7 +1078,7 @@ def chain_items(tree, chain, components, comp_files, defs, tables, site_by_func,
     count = lambda pred: sum(1 for i in items if pred(i))  # noqa: E731
     return dict(id=chain['id'], title=chain['title'], sessions=chain['sessions'],
                 classes=chain['classes'], components=chain['components'],
-                bpf_programs=chain['bpf'], evidence=evidence, missing=chain['missing'],
+                bpf_programs=programs, evidence=evidence, missing=chain['missing'],
                 errors=errors,
                 totals=dict(items=len(items), trusted=count(lambda i: i['trust'] == 'kernel'),
                             bpf=count(lambda i: i['trust'] == 'bpf'),
@@ -1016,7 +1127,7 @@ def markdown(result):
         out += ['- not counted: ' + m for m in c['missing']]
         out += ['- ERROR: ' + e for e in c['errors']]
     s = result['core_decisions']['summary']
-    out += ['', '## Named class constants under src/core', '',
+    out += ['', '## Named class constants under src/core and family code', '',
             'Identity constants `XDEV_EXT_MECH_CLASS_<NAME>`: %d sites, %s.' % (
                 s['identity_sites'], json.dumps(s['identity_by_category'], sort_keys=True)),
             'Class-specific identifiers: %d sites, %s.' % (

@@ -152,6 +152,118 @@ static const struct xdev_ext_ops core_ops = {
 '''
 
 
+# A pair condition split over two statements: neither statement compares two
+# identities, the function does.
+NESTED_PAIR = '''
+static bool nested_pair(struct st *a, struct st *b)
+{
+	if (a->class_id == XDEV_EXT_MECH_CLASS_NVME) {
+		if (b->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)
+			return true;
+	}
+	return false;
+}
+
+static bool nested_switch_pair(struct st *a, struct st *b)
+{
+	switch (a->class_id) {
+	case XDEV_EXT_MECH_CLASS_NVME:
+		switch (b->class_id) {
+		case XDEV_EXT_MECH_CLASS_AFXDP:
+			return true;
+		}
+	}
+	return false;
+}
+
+static int split_kinds(struct st *a)
+{
+	int x = sizeof(struct nvme_command);
+
+	return x + sizeof(struct xdev_ext_xdomain_desc);
+}
+
+static const struct xdev_ext_ops nested_ops = {
+	.a = nested_pair, .b = nested_switch_pair, .c = split_kinds,
+};
+'''
+
+# A dispatcher: one operand, each arm names one kind; and a per-class set.
+DISPATCH = '''
+static u32 recipe_mask(u32 backend)
+{
+	switch (backend) {
+	case XDEV_EXT_BINDING_BACKEND_AFXDP:
+		return bit(XDEV_EXT_BINDING_RECIPE_AFXDP_COPY) |
+		       bit(XDEV_EXT_BINDING_RECIPE_AFXDP_RX);
+	case XDEV_EXT_BINDING_BACKEND_NVME:
+		return bit(XDEV_EXT_BINDING_RECIPE_NVME_PT_READ);
+	default:
+		return 0;
+	}
+}
+
+static bool class_dispatch(struct st *a)
+{
+	if (a->class_id == XDEV_EXT_MECH_CLASS_NVME)
+		return nvme_ok(a);
+	return a->class_id == XDEV_EXT_MECH_CLASS_CE;
+}
+
+static int emit(void)
+{
+	BTF_TYPE_EMIT(struct xdev_ext_nvme_mech_ops);
+	BTF_TYPE_EMIT(struct xdev_ext_afxdp_mech_ops);
+	return 0;
+}
+
+static const struct xdev_ext_ops dispatch_ops = { .a = recipe_mask, .b = class_dispatch, .c = emit };
+'''
+
+
+class FunctionPairs(unittest.TestCase):
+    def test_pair_condition_over_nested_statements_is_per_pair(self):
+        r = run({CORE: NESTED_PAIR})
+        for name in ('nested_pair', 'nested_switch_pair', 'split_kinds'):
+            self.assertEqual(item(r, name)['scope'], 'per-pair', name)
+        self.assertEqual(item(r, 'nested_ops.a = nested_pair', 'hook')['scope'], 'per-pair')
+        self.assertEqual(r['chains'][0]['totals']['per_pair_trusted'], 6)
+        self.assertEqual({p['name'] for p in r['inventory']['core']['per_pair']},
+                         {'nested_pair', 'nested_switch_pair', 'split_kinds'})
+
+    def test_single_operand_dispatch_and_registration_stay_per_class(self):
+        r = run({CORE: DISPATCH})
+        for name in ('recipe_mask', 'class_dispatch', 'emit'):
+            self.assertEqual(item(r, name)['scope'], 'per-class', name)
+        self.assertEqual(r['chains'][0]['totals']['per_pair_trusted'], 0)
+
+
+NETFAM = 'src/network/io_uring/family/xdev_ext_netfam.c'
+FAMILY_COMPONENTS = dict(COMPONENTS, **{'family:network': dict(role='family', own=[], files=[
+    'src/network/io_uring/family/*.c'])})
+FAMILY_TEXT = '''
+static bool fam_pair(struct st *a, struct st *b)
+{
+	return a->class_id == XDEV_EXT_MECH_CLASS_AFXDP && b->class_id == XDEV_EXT_MECH_CLASS_NVME;
+}
+
+static const struct xdev_ext_netfam_ops fam_ops = { .pair = fam_pair };
+'''
+
+
+class FamilyCode(unittest.TestCase):
+    def test_family_file_sites_are_collected_and_pairs_found(self):
+        tree = cc.Tree({NETFAM: FAMILY_TEXT}, {NETFAM: None}, None)
+        r = cc.analyze(tree, FAMILY_COMPONENTS,
+                       [chain(components=['core', 'class:NVME', 'driver:nvme', 'family:network'])])
+        fam = [s for s in r['core_decisions']['sites'] if s['file'] == NETFAM]
+        self.assertTrue(fam)
+        self.assertEqual({(s['category'], s['rule']) for s in fam if s['identity']}, {('per-pair', 'R-PAIR')})
+        self.assertEqual(item(r, 'fam_pair')['scope'], 'per-pair')
+        self.assertEqual([p['name'] for p in r['inventory']['family:network']['per_pair']], ['fam_pair'])
+        self.assertEqual(r['chains'][0]['totals']['per_pair_trusted'], 2)
+
+
 class CoreDecisions(unittest.TestCase):
     def setUp(self):
         self.r = run({CORE: CORE_TEXT})
@@ -358,7 +470,7 @@ struct xdev_ext_afxdp_mech_ops b_ops = {
 
 class BpfPrograms(unittest.TestCase):
     def test_helper_shared_by_two_class_programs_is_a_bpf_pair(self):
-        r = run({BPF: BPF_TEXT}, chains=[chain(bpf=[BPF])])
+        r = run({BPF: BPF_TEXT}, chains=[chain(bpf=[(BPF, ['a_ops', 'b_ops'])])])
         shared = item(r, 'shared_helper')
         self.assertEqual((shared['scope'], shared['trust'], shared['kind']), ('per-pair', 'bpf', 'bpf-helper'))
         self.assertEqual(shared['classes'], ['afxdp', 'nvme'])
@@ -366,6 +478,25 @@ class BpfPrograms(unittest.TestCase):
         self.assertEqual(item(r, 'a_build')['kind'], 'bpf-callback')
         t = r['chains'][0]['totals']
         self.assertEqual((t['per_pair_trusted'], t['per_pair_bpf']), (0, 1))
+
+    def test_only_the_struct_ops_maps_the_chain_attaches_count(self):
+        # The chain attaches a_ops only: b_ops and its callback are not used,
+        # and the helper is no longer shared by two attached programs.
+        r = run({BPF: BPF_TEXT}, chains=[chain(bpf=[(BPF, ['a_ops'])])])
+        names = {i['name'] for i in r['chains'][0]['items']}
+        self.assertNotIn('b_build', names)
+        shared = item(r, 'shared_helper')
+        self.assertEqual((shared['scope'], shared['classes']), ('per-class', ['nvme']))
+        t = r['chains'][0]['totals']
+        self.assertEqual((t['bpf'], t['per_pair_bpf']), (3, 0))
+        self.assertEqual(r['chains'][0]['errors'], [])
+        self.assertEqual(r['chains'][0]['bpf_programs'], [dict(file=BPF, maps=['a_ops'])])
+
+    def test_bpf_program_without_named_maps_or_with_an_unknown_map_is_an_error(self):
+        bare = run({BPF: BPF_TEXT}, chains=[chain(bpf=[BPF])])
+        self.assertTrue(any('names no struct_ops map' in e for e in bare['chains'][0]['errors']))
+        unknown = run({BPF: BPF_TEXT}, chains=[chain(bpf=[(BPF, ['a_ops', 'c_ops'])])])
+        self.assertTrue(any('c_ops' in e for e in unknown['chains'][0]['errors']))
 
 
 FAMILY = 'src/core/include/linux/xdev_ext_family_core.h'
@@ -408,6 +539,14 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[4] = {
 
 
 class CatalogAndOutput(unittest.TestCase):
+    def test_catalog_names_the_struct_ops_maps_each_chain_attaches(self):
+        bpf = {c['id']: dict((p, list(m)) for p, m in c['bpf']) for c in cc.CHAINS}
+        # E4-ce attaches nxp_nvme_ops only (session_nvme_ce.c, guest_correctness.sh);
+        # E3-a2 attaches both maps of nnb_bench.bpf.c (nnb_session.c attach()).
+        self.assertEqual(bpf['E4-ce']['examples/pipelines/nxp_mech.bpf.c'], ['nxp_nvme_ops'])
+        self.assertEqual(sorted(bpf['E3-a2']['tests/benchmarks/nvme_nic/nnb_bench.bpf.c']),
+                         ['nnb_afxdp_ops', 'nnb_nvme_ops'])
+
     def test_evidence_and_absent_paths_are_checked(self):
         files = {NVME: CLASS_OK, 'src/lib/x.c': 'int y = XDEV_EXT_MECH_CLASS_NVME;\n',
                  'tests/benchmarks/kv/run.py': ''}
@@ -420,8 +559,8 @@ class CatalogAndOutput(unittest.TestCase):
 
     def test_output_is_byte_identical_across_runs(self):
         files = {NVME: CLASS_PAIR, CORE: CORE_TEXT, BPF: BPF_TEXT}
-        a = run(files, chains=[chain(bpf=[BPF])])
-        b = run(dict(reversed(list(files.items()))), chains=[chain(bpf=[BPF])])
+        a = run(files, chains=[chain(bpf=[(BPF, ['a_ops', 'b_ops'])])])
+        b = run(dict(reversed(list(files.items()))), chains=[chain(bpf=[(BPF, ['a_ops', 'b_ops'])])])
         self.assertEqual(json.dumps(a, sort_keys=True), json.dumps(b, sort_keys=True))
         self.assertEqual(cc.markdown(a), cc.markdown(b))
 
@@ -455,9 +594,19 @@ class RealTree(unittest.TestCase):
         for c in r['chains']:
             self.assertEqual(c['errors'], [], c['id'])
             self.assertTrue(c['evidence'])
+        family = tuple(f.split('*')[0] for n, c in cc.COMPONENTS.items() if c['role'] == 'family'
+                       for f in c['files'])
         for s in r['core_decisions']['sites']:
             self.assertIn(s['category'], ('registration', 'per-class', 'per-pair'))
-            self.assertTrue(s['file'].startswith('src/core/') and s['line'] > 0)
+            self.assertTrue(s['file'].startswith(('src/core/',) + family) and s['line'] > 0, s['file'])
+        self.assertTrue(any(s['file'].startswith(family) for s in r['core_decisions']['sites']))
+        # Single-operand dispatchers and registration functions that name
+        # several kinds are not pairs.
+        core_pairs = {p['name'] for p in r['inventory']['core']['per_pair']}
+        for name in ('xdev_ext_binding_backend_recipe_mask', 'xdev_ext_binding_stage_recipe_mask',
+                     'xdev_ext_binding_backend_stage_direction_valid', 'xdev_ext_mech_emit_btf_types',
+                     'xdev_ext_mech_ops_init', 'io_unified_ops_issue'):
+            self.assertNotIn(name, core_pairs)
 
 
 if __name__ == '__main__':
