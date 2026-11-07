@@ -73,3 +73,26 @@ The owners cohort validates all 64 transfers through actual frame claims and
 the actual native-ticket/owner checker, including a stale last split and a
 missing final frame claim. Retained evidence and SETUP/FAIL handling reuse the
 stage1 runner. These checks still do not claim actual DMA or GPU contents.
+
+## XDOMAIN RX producer
+
+The `xdomain` cohort of `stage1.c` admits one more range composition: XDOMAIN
+RX at stage 0 on the ring's IOU_UMEM host frames, then the CE range stage at
+stage 1 (TO_DEVICE). An RX element ends successfully only with its full posted
+length, so the whole group is in the host frames before CE validates its plan,
+as after an NVMe READ. CE stays the only stage taking a range lease and the
+last stage. PEER/XSK pools, XDOMAIN TX, CE first, CE FROM_DEVICE, three stages
+and other producers stay refused; the NVMe pairs and flags-zero XDOMAIN->CE
+are unchanged. `class_table_diff_test.c` repeats the matrix.
+
+`xdomain_mutations.py` rewrites the new row in a private view (pool rule,
+both directions, stage position, partner class, always-admit, row removed),
+recompiles both tests and requires each mutant to fail an assertion:
+
+```sh
+python3 tests/compute/ce/random_target/xdomain_mutations.py \
+  --output build/ce-random-xdomain-mutants/manual
+```
+
+These are pure admission rules. No XDOMAIN to CE data movement has run: there
+is no Thunderbolt hardware in the test hosts.

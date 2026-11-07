@@ -393,6 +393,8 @@ static void xdomain(void)
 	check_ce_rule("CE rule refuses CE range before XDOMAIN", &c, 0, -EOPNOTSUPP);
 	c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
 	check_create("CE range first then XDOMAIN RX refused", &c, -EOPNOTSUPP);
+	c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	check_ce_rule("CE TO range at stage 0 before XDOMAIN RX refused", &c, 0, -EOPNOTSUPP);
 
 	/* Exactly two stages. */
 	c = xdomain_request();

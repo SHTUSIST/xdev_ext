@@ -7,7 +7,7 @@
     "src/core/include/uapi/linux/xdev_ext_binding.h": "b068c393bf031e64b47700efa352a3fa3166ceb54948d56e92a3ae7cd64eabef",
     "src/core/include/linux/xdev_ext_mech.h": "53df9c3ba91a2b31bbff0b1113ec4d37e78071584a549d44e4f4aab2a3b03103",
     "src/compute/include/linux/xdev_ext_compfam.h": "48fd7455029eb16ba2f5e0abec5e4a87f7ff3f68bc7d51e99bf14e4534f20bfd",
-    "src/core/include/linux/xdev_ext_family_core.h": "df8421ba0189536a7ccd8f268d4c357fa1efdc8edbe4fc25a145e3261d151437",
+    "src/core/include/linux/xdev_ext_family_core.h": "4a746e4ddf5be04bb48c0eefdf6b0564cdfc6397d3649c2d42a66a9fe6acff63",
     "src/core/io_uring/xdev_ext_mech.c": "b73512298217d246508f849f04a997bcd2cb3a57a3dc4bdfdb53fcb2cbab6cea",
     "src/core/io_uring/xdev_ext_mech_ops.c": "809047924dda4f94acfa6a16fc7eeea2c0cc50568e60e6bdbd780fe198c20f7e",
     "src/core/io_uring/xdev_ext_mech_user.c": "69048723e840b4f7fded0f4ee4134b95c349baa01b5243fb6ba07f2a701f0508",
@@ -175,5 +175,18 @@
       }
     },
     "command": "python3 refreeze_deflate_capture.py REPO_ROOT claude194_main_next_refreeze"
+  },
+  "claude194_xdomain_ce_range_refreeze": {
+    "scope": "re-freeze of the hash of the one changed baseline input after the CE TARGET_RANGE admission row for an XDOMAIN RX producer (claude/xdomain-ce-range); test files, input, status and every other field unchanged unless listed",
+    "previous_freeze_commit": "251130072ea7cef503dee2ce57e9b4630b58a17e",
+    "changed": {
+      "baseline_inputs": {
+        "src/core/include/linux/xdev_ext_family_core.h": {
+          "before": "df8421ba0189536a7ccd8f268d4c357fa1efdc8edbe4fc25a145e3261d151437",
+          "after": "4a746e4ddf5be04bb48c0eefdf6b0564cdfc6397d3649c2d42a66a9fe6acff63"
+        }
+      }
+    },
+    "command": "python3: sha256 of the listed file written into baseline_inputs; all other baseline_inputs and test_files re-hashed and unchanged"
   }
 }
