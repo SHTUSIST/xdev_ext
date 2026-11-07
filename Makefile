@@ -30,6 +30,7 @@ cli:
 	$(PYTHON) tools/run.py --cwd src/cli make xdev_ext_mech_ctl $(ARGS)
 ce-random-check:
 	$(PYTHON) tests/compute/ce/random_target/run.py --suite all
+	$(PYTHON) tests/compute/ce/random_target/xdomain_mutations.py
 	$(PYTHON) tests/compute/ce/random_target/runtime_validate.py --suite all
 	$(PYTHON) tests/compute/ce/random_target/range_lease.py --suite all
 	$(PYTHON) tests/compute/ce/random_target/actual_entry.py --suite all

@@ -8,6 +8,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 #include "io_uring/xdev_ext_mech_step.h"
 #include "include/linux/xdev_ext_family_core.h"
 
@@ -375,6 +376,45 @@ static void check_ce_target_range(void)
  ce_range_create_result(&c, -EINVAL);
  c.st[1].flags = 3;
  ce_range_create_result(&c, -EINVAL);
+ /* K-KV host 2: XDOMAIN RX on the ring's host frames feeds one CE range stage. */
+ c = load;
+ c.st[0] = (struct xdev_ext_mech_stage_uapi) {
+  .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
+  .fd = 5, .arg0 = 1,
+ };
+ ce_range_create_result(&c, 0);
+ c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
+ c.pool_fd = 4;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM;
+ c.pool_fd = -1;
+ c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+ c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+ c.st[1].flags = 0;
+ ce_range_create_result(&c, 0);
+ c.st[1].flags = 1;
+ c.nr_stages = 3;
+ c.st[2] = (struct xdev_ext_mech_stage_uapi) {
+  .class_id = XDEV_EXT_MECH_CLASS_NVME, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 7,
+ };
+ ce_range_create_result(&c, -EOPNOTSUPP);
+ c.nr_stages = 2;
+ memset(&c.st[2], 0, sizeof(c.st[2]));
+ {
+  struct xdev_ext_mech_stage_uapi ce = c.st[1];
+
+  c.st[1] = c.st[0];
+  c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+  c.st[0] = ce;
+  c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+  ce_range_create_result(&c, -EOPNOTSUPP);
+ }
 }
 
 int main(void)

@@ -327,6 +327,116 @@ static void topology(void)
 	check_qualified_topology("generic FANOUT refusal preserved", &c, -EINVAL);
 }
 
+/* K-KV host 2: XDOMAIN RX into IOU_UMEM host frames at stage 0, then one CE
+ * TARGET_RANGE stage that places each received group in the GPU window. The
+ * received group is complete in the host frames before CE (an RX element ends
+ * only with its full length), CE is the last stage and the only range holder.
+ */
+static struct xdev_ext_mech_create xdomain_request(void)
+{
+	struct xdev_ext_mech_create c = request(false);
+
+	c.st[0] = (struct xdev_ext_mech_stage_uapi) {
+		.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .fd = 4,
+		.direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .arg0 = 1,
+	};
+	c.st[1].flags = TARGET_RANGE;
+	return c;
+}
+
+static void check_ce_rule(const char *name, const struct xdev_ext_mech_create *c,
+		__u32 i, int want)
+{
+	struct xdev_ext_mech_stage_facts facts;
+
+	expect(name, xdev_ext_decl_ce_check(c, i, &c->st[i], &facts), want);
+}
+
+static void xdomain(void)
+{
+	struct xdev_ext_mech_create c = xdomain_request();
+
+	check_create("XDOMAIN RX -> CE range on host frames", &c, 0);
+	check_ce_rule("CE rule admits XDOMAIN RX producer", &c, 1, 0);
+	c.st[1].flags = TARGET_RANGE | XDEV_EXT_MECH_STAGE_F_POLL;
+	check_create("XDOMAIN RX -> CE range composes with POLL", &c, 0);
+	c = xdomain_request();
+	c.depth = 32;
+	check_create("XDOMAIN RX -> CE range at depth32", &c, 0);
+	c = xdomain_request();
+	c.st[0].flags = XDEV_EXT_XDOMAIN_F_EARLY;
+	check_create("XDOMAIN EARLY RX -> CE range", &c, 0);
+
+	/* Pool: CE copies host pages; only the ring's IOU_UMEM qualifies. */
+	c = xdomain_request();
+	c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
+	c.pool_fd = 3;
+	check_create("XDOMAIN RX -> CE range refuses PEER pool", &c, -EOPNOTSUPP);
+	check_ce_rule("CE rule alone refuses PEER pool", &c, 1, -EOPNOTSUPP);
+	c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
+	check_create("XDOMAIN RX -> CE range refuses XSK pool", &c, -EOPNOTSUPP);
+	check_ce_rule("CE rule alone refuses XSK pool", &c, 1, -EOPNOTSUPP);
+
+	/* Directions and order. */
+	c = xdomain_request();
+	c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	check_create("XDOMAIN TX before CE range refused", &c, -EOPNOTSUPP);
+	c = xdomain_request();
+	c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	check_create("XDOMAIN RX then CE FROM range refused", &c, -EOPNOTSUPP);
+	c = xdomain_request();
+	c.st[0] = c.st[1];
+	c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	c.st[1] = xdomain_request().st[0];
+	c.st[1].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	check_create("CE range first then XDOMAIN TX refused", &c, -EOPNOTSUPP);
+	check_ce_rule("CE rule refuses CE range before XDOMAIN", &c, 0, -EOPNOTSUPP);
+	c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	check_create("CE range first then XDOMAIN RX refused", &c, -EOPNOTSUPP);
+	c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	check_ce_rule("CE TO range at stage 0 before XDOMAIN RX refused", &c, 0, -EOPNOTSUPP);
+
+	/* Exactly two stages. */
+	c = xdomain_request();
+	c.nr_stages = 3;
+	c.st[2] = c.st[1];
+	c.st[2].flags = 0;
+	check_create("XDOMAIN RX -> CE range -> CE refused", &c, -EOPNOTSUPP);
+	c.st[2] = request(true).st[1];
+	check_create("XDOMAIN RX -> CE range -> NVMe refused", &c, -EOPNOTSUPP);
+	c.st[2] = xdomain_request().st[0];
+	c.st[2].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	check_create("XDOMAIN RX -> CE range -> XDOMAIN TX refused", &c, -EOPNOTSUPP);
+	c = xdomain_request();
+	c.nr_stages = 1;
+	c.st[0] = c.st[1];
+	memset(&c.st[1], 0, sizeof(c.st[1]));
+	check_create("lone CE range refused", &c, -EOPNOTSUPP);
+
+	/* Other network producers stay refused. */
+	c = xdomain_request();
+	c.st[0].class_id = XDEV_EXT_MECH_CLASS_SOCKET;
+	check_ce_rule("CE rule refuses SOCKET producer", &c, 1, -EOPNOTSUPP);
+	c.st[0].class_id = XDEV_EXT_MECH_CLASS_AFXDP;
+	check_ce_rule("CE rule refuses AF_XDP producer", &c, 1, -EOPNOTSUPP);
+	c.st[0].class_id = XDEV_EXT_MECH_CLASS_DMA;
+	check_ce_rule("CE rule refuses DMA producer", &c, 1, -EOPNOTSUPP);
+
+	/* Legacy slot mode and the NVMe pairs are unchanged. */
+	c = xdomain_request();
+	c.st[1].flags = 0;
+	check_create("legacy XDOMAIN RX -> CE flags0 retained", &c, 0);
+	c = request(false);
+	c.st[1].flags = TARGET_RANGE;
+	check_ce_rule("NVMe READ -> CE range unchanged", &c, 1, 0);
+	c = request(true);
+	c.st[0].flags = TARGET_RANGE;
+	check_ce_rule("CE range -> NVMe WRITE unchanged", &c, 0, 0);
+	c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
+	c.pool_fd = 3;
+	check_ce_rule("NVMe pair keeps its pool-independent CE rule", &c, 0, 0);
+}
+
 static void capacity(void)
 {
 	static const __u32 counts[] = { 33, 48, 64 };
@@ -366,7 +476,7 @@ static void capacity(void)
 int main(int argc, char **argv)
 {
 	if (argc != 2) {
-		fprintf(stderr, "usage: %s controls|flags|topology|capacity\n", argv[0]);
+		fprintf(stderr, "usage: %s controls|flags|topology|capacity|xdomain\n", argv[0]);
 		return 2;
 	}
 	if (!strcmp(argv[1], "controls"))
@@ -377,6 +487,8 @@ int main(int argc, char **argv)
 		topology();
 	else if (!strcmp(argv[1], "capacity"))
 		capacity();
+	else if (!strcmp(argv[1], "xdomain"))
+		xdomain();
 	else
 		return 2;
 	printf("stage1 %s: %u checks, %u failures\n", argv[1], checks, failures);

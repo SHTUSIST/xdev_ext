@@ -151,25 +151,34 @@ static inline int xdev_ext_decl_file_check(const struct xdev_ext_mech_create *c,
 	return u->fd < 0 ? -EBADF : 0;
 }
 
-/* Range targets have one CE stage and no later CE range acquisition. Keep
- * legacy compositions unchanged; their configured-window lease is separate.
+/* Range targets have one CE stage and no later CE range acquisition: the
+ * per-session range lease keeps one record per batch slot for one window,
+ * taken at CE submit and released with the batch. The partner either fills
+ * the whole group into host frames before CE (NVMe READ, XDOMAIN RX) or
+ * consumes it after CE (NVMe WRITE). XDOMAIN RX must be on the ring's
+ * IOU_UMEM host pages, which CE maps itself. Keep legacy compositions
+ * unchanged; their configured-window lease is separate.
  */
 static inline int xdev_ext_decl_ce_check(const struct xdev_ext_mech_create *c, __u32 i,
 	const struct xdev_ext_mech_stage_uapi *u, struct xdev_ext_mech_stage_facts *f)
 {
-	const struct xdev_ext_mech_stage_uapi *nvme;
+	const struct xdev_ext_mech_stage_uapi *peer;
 	int err = xdev_ext_decl_file_check(c, i, u, f);
 
 	if (err || !(u->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE))
 		return err;
 	if (c->nr_stages != 2 || i > 1)
 		return -EOPNOTSUPP;
-	nvme = &c->st[i ^ 1];
-	if (nvme->class_id != XDEV_EXT_MECH_CLASS_NVME ||
+	peer = &c->st[i ^ 1];
+	if (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)
+		return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&
+		       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+		       c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM ? 0 : -EOPNOTSUPP;
+	if (peer->class_id != XDEV_EXT_MECH_CLASS_NVME ||
 	    (i == 0 && (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE ||
-			nvme->direction != XDEV_EXT_MECH_DIR_TO_DEVICE)) ||
+			peer->direction != XDEV_EXT_MECH_DIR_TO_DEVICE)) ||
 	    (i == 1 && (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||
-			nvme->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)))
+			peer->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)))
 		return -EOPNOTSUPP;
 	return 0;
 }
