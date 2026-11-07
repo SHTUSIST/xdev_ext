@@ -23,7 +23,7 @@ struct module; struct file_operations; struct page; struct file; struct xdev_ext
 struct xdev_ext_ce_cookie; struct xdev_ext_dma_cookie;
 struct xdev_ext_mech_pool { struct page **pages; u32 nr_pages, first_page_off, frame_size, nr_frames; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_layout layout; u32 depth; struct xdev_ext_mech_pool pool; };
-struct xdev_ext_mech_stage { void *priv; struct xdev_ext_mech_session *s; struct file *file; u32 direction; bool poll; };
+struct xdev_ext_mech_stage { void *priv; struct xdev_ext_mech_session *s; struct file *file; u32 direction, flags; bool poll; };
 struct xdev_ext_mech_frame { u64 umem_addr; u32 data_off, data_len, index; };
 struct xdev_ext_mech_batch { u64 id; u32 slot, nr; int frame_error, claim_refuse; u32 claim_calls; struct xdev_ext_mech_frame frame[32]; u64 owner[32], generation[32]; unsigned char payload[8192]; };
 #define PAGE_SHIFT 12

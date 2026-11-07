@@ -415,6 +415,12 @@ bool tb_ring_poll_pending(struct tb_ring *ring)
 	assert(!"unexpected native poll query in IRQ stack fixture");
 	abort();
 }
+void tb_ring_poll_complete(struct tb_ring *ring)
+{
+	(void)ring;
+	assert(!"unexpected ring interrupt re-enable in IRQ stack fixture");
+	abort();
+}
 static struct tb_ring*ring_alloc(struct tb_nhi*n,int size,unsigned flags,bool tx){
 	unsigned e=endpoint_pci(n->pdev);
 	if(world->ring_refuse[e]){
@@ -771,6 +777,27 @@ void xdev_ext_requester_unbind(struct xdev_ext_requester*r){
 	pci_dev_put(r->pdev);
 	r->pdev=NULL;
 }
+/* PEER-only environment: the recording bind above never creates a host-page
+ * mapping, so no host lease can be reached and every requester is settled. */
+int xdev_ext_requester_host_lease(struct xdev_ext_requester*r,u64 off,u32 len,enum dma_data_direction dir,u64*dma){
+	(void)r;(void)off;(void)len;(void)dir;(void)dma;
+	abort();
+}
+void xdev_ext_requester_host_release(struct xdev_ext_requester*r,u64 dma,u32 len,bool quiesced){
+	(void)r;(void)dma;(void)len;(void)quiesced;
+	abort();
+}
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester*r){
+	return r->host?-EIO:0;
+}
+int xdev_ext_requester_bind_host(struct xdev_ext_requester*r,struct xdev_ext_mech_stage*st,struct pci_dev*p){
+	(void)r;(void)st;(void)p;
+	abort();
+}
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester*r){
+	(void)r;
+	abort();
+}
 struct xdev_ext_mech_pool*xdev_ext_mech_session_pool(struct xdev_ext_mech_session*s){
 	return &s->pool;
 }
@@ -976,6 +1003,10 @@ int stack_new(const struct stack_config*c,struct stack_world**out){
 	}
 	int r=stack_x3_init();
 	if(r){
+#ifdef STACK_REAL_NHI
+		/* No ring exists yet; release both simulated controllers. */
+		for(unsigned e=0;e<2;e++)stack_nhi_destroy(&w->side[e].nhi);
+#endif
 		world=NULL;
 		free(w->n);
 		free(w->log);
@@ -1499,7 +1530,6 @@ int stack_remove(struct stack_world*w,unsigned e){
 	w->active=e;
 	stack_x3_remove(&w->side[e].svc);
 	w->side[e].removed=true;
-	stack_x4_quarantine_records();
 	fprintf(stderr,"STACK_DIAG remove endpoint=%u pci_refs=%u\n",e,w->side[e].pci.refs);
 	return 0;
 }

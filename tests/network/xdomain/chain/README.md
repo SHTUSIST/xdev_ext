@@ -29,11 +29,11 @@ directory and compiles one executable from these units:
 
 | Unit | Production code compiled unchanged | Host boundary |
 | --- | --- | --- |
-| core | 105 functions of `io_uring/xdev_ext_mech.c` (the call-graph closure of the worker entry points: CREATE binds, buffers, PEER pool bind, START admission, run/acquire/build/submit, completion claim/publish/handoff, drain/landing, end/frame release, kick/progress, STOP), the compute transform hooks, the class registry of `xdev_ext_mech_ops.c` | kthread workers (one deterministic FIFO), per-class default program lookup, eventfd, tracepoints, allocation, the tail of CREATE after binding and the publication branch of START (flags 0) |
+| core | the call-graph closure of the worker entry points and failed-CREATE release in `io_uring/xdev_ext_mech.c` (CREATE binds, checked rollback or quarantine, buffers, PEER pool bind, START admission, run/acquire/build/submit, completion claim/publish/handoff, drain/landing, end/frame release, kick/progress, STOP), the compute transform hooks, the class registry of `xdev_ext_mech_ops.c` | kthread workers (one deterministic FIFO), per-class default program lookup, eventfd, tracepoints, allocation, the tail of CREATE after binding and the publication branch of START (flags 0) |
 | pool | `io_uring/xdev_ext_mech_peer_pool.c` | pool claim returns a fixture authority file |
 | NVMe | `drivers/nvme/host/xdev_ext_mech_nvme.c`, `io_uring/family/xdev_ext_storfam_block.c`, `xdev_ext_storfam.c`, plus `nvme_xdev_ext_peer_build_cmd` and `nvme_xdev_ext_mech_cmd_allowed`, `nvme_xdev_ext_capture_identity` | reduced NVMe host structures (`chain_nvme_host.h`), block request allocation; the controller model (below) |
 | XDOMAIN | the existing stack fixture units: X3 main, X4 ring, X5 class, network family, X6 reference protocol program `xdomain_peer.bpf.c`, the probe unit, the NHI ring section of `drivers/thunderbolt/nhi.c` with MMIO/IRQ simulation | the stack environment (`stack_boundary.c`, `stack_nhi_boundary.h`) |
-| programs | `nvme_s0.bpf.c` (NVMe build/complete) and `xdomain_peer.bpf.c`, called with the context `xdev_ext_mech_invoke()` builds | BPF verification/JIT and struct_ops are not run |
+| programs | `nvme_s0.bpf.c` (NVMe build/complete), `xdomain_peer.bpf.c`, and the actual `xdomain_rts_cts.bpf.c` for `window_rts_cts_v2`, called with the context `xdev_ext_mech_invoke()` builds | BPF verification/JIT and struct_ops are not run |
 | boundary | | stage files, requester bind (records the requester; the real one is tested in `../dmabuf_requester`), lease provider, link byte copy, scheduler |
 
 Seven environment edits of the stack fixture are made in the private copy and
@@ -45,6 +45,15 @@ session id and generation; the ring unit routes EARLY (v2) control dispatch
 through a recorder as it already does for v1; and the real-NHI adapter, which copies no payload
 in the stack tests, calls `chain_link_payload()` for each delivered data
 frame. No production body and no existing assertion is edited.
+
+Failed CREATE runs the actual `xdev_ext_mech_session_release_disposition()`
+and its extracted dependencies before returning no session pointer, while
+preserving the original CREATE errno. The checked-unbind decision can retain
+the whole session; successful rollback unbinds earlier stages and releases
+the pool and session-owned storage. The ring's registered UMEM remains owned
+by the ring. CREATE validation runs before session allocation. The fixture's
+static default-program put matches its get; unsupported program instances,
+report flushing, or destruction with queued worker callbacks fail explicitly.
 
 Byte movement is the only thing the device models add. The lease provider
 gives each requester (host 1 NVMe, host 1 NHI, host 2 NHI, host 2 NVMe) its
@@ -76,6 +85,53 @@ first) is caught by `chain_same_worker`.
 In this mode the two pages of each half are contiguous in the device window,
 and the real NVMe SGL builder merges them into one 8 KiB data block; the
 device models check such an access page by page.
+
+## Host-page frames on both hosts (`--pool host`)
+
+With `--pool host`, each endpoint's frame memory is its ring's IOU_UMEM pool
+(obligation 42-XDOMAIN-HOST: the XDOMAIN class carries host pages, not only
+PEER device memory). Production code added to the composition in this mode:
+
+- the IOU_UMEM pool provider block of `io_uring/xdev_ext_umem.c`, from
+  `struct io_xdev_ext_umem_mech` to `io_xdev_ext_umem_mech_pool_bind()`, with a
+  fixture registration that stands in for `IORING_REGISTER_XDEV_EXT_UMEM`;
+- `xdev_ext_mech_take_user_frames()`, through which START lends the UMEM
+  frames (`USER_FRAMES | RECYCLE`; the admission and publication around that
+  call follow `xdev_ext_mech_start()` in `chain_core.c.in`);
+- the requester unit `io_uring/family/xdev_ext_requester.c`, compiled in the
+  stack environment, which maps every pool page for each NHI. Its DMA API
+  calls go to `chain_boundary.c`, which maps a page into that NHI's own window
+  and records each map, unmap and sync. Both NHIs report that they need CPU
+  synchronization, as a non-coherent controller would;
+- the storage family's bio path for the NVMe stages. The NVMe model maps each
+  bio piece into the controller's window when the request is submitted and
+  unmaps it when the request ends, as nvme-pci does with the DMA API.
+
+The family unit's calls to the requester's host bind, unbind, lease and
+release go through `chain_boundary.c`, which forwards them unchanged, records
+what the bind reported and keeps each granted element as a live NHI lease for
+the device model. It also checks that the
+address the requester returned is the NHI's mapping of exactly that pool page
+and offset. After a run, the frames are back with user space (the START with
+`RECYCLE` returns them when it drains), not in the kernel pool.
+
+The eleven cases below run unchanged in this mode, with the requester checks
+of `up()` replaced: an NVMe stage binds no requester (the block layer maps
+each request), and each XDOMAIN stage binds its own NHI, whose bind reports
+host RAM with struct pages and a host DMA-API mapping and maps every pool page
+once, in the stage direction, without CPU sync. Five cases run only here:
+
+| Case | Requirement |
+| --- | --- |
+| `host_sync_order` | every TX element is synchronized for the NHI after its lease and before its descriptor post; every RX buffer is synchronized for the NHI before its post and for the CPU after the link wrote it and before host 2's NVMe WRITE of that group is submitted; TX elements are never synchronized for the CPU; no mapping is unmapped while bound |
+| `host_sync_order_early` | the same, with both XDOMAIN stages in EARLY mode |
+| `host_unknown_retained` | host 1's TX descriptors never complete, then STOP: after the one-second STOP bound the batch ends with unknown device access, its frames are sequestered, its NHI host leases are retained, the NHI mapping is never unmapped, nothing is synchronized for the CPU, and the XDOMAIN stage's checked unbind returns `-EIO` |
+| `host_misaligned_refused` | a UMEM registered 256 bytes into a page: CREATE fails with the requester's `-EINVAL` on both hosts and nothing is mapped |
+| `host_destroy_unmaps` | four groups end quiesced, then each XDOMAIN stage is released in the order of the core's release decision (`chain_stage_unbind_now()`: the checked unbind, then the class unbind only when the checked unbind allowed it): the checked unbind allows release, and the class unbind, through the network family's fini, unmaps every pool page of that stage's NHI exactly once, with the page size, the stage direction and `DMA_ATTR_SKIP_CPU_SYNC` |
+
+`host_run.py` is the same as `run.py --pool host`; the shared XDOMAIN host
+runner (`tools/ci/check_xdomain_host.py`) runs it after `run.py`, because the
+runner passes only `--source-root` and `--output` to an entry point.
 
 ## Cases
 
@@ -134,6 +190,16 @@ the same event lines (a worker event's function address, which ASLR moves,
 replaced by its order of first appearance); `w1_identity` in `result.json`
 records both hashes.
 
+`window_rts_cts_v2` selects the complete actual `xdomain_rts_cts.bpf.c`
+prepare/build/complete callbacks at both endpoints through the existing kfunc
+invocation bridge. Both stages have `F_EARLY` and window 2; the flag offers
+the v2 envelope while the program chooses RTS/CTS. With the receiver's CTS
+held, only group 1 is announced. Releasing CTS must fill the sender's window
+in the same drain, without advancing time or finishing group 1, then every
+group must reach the consumer in order with the expected payload bytes. It
+also checks one RTS/CTS exchange per group and no pairing messages. The case
+is in the default matrix for every pool mode.
+
 ## Mutations
 
 Each mutant changes production or reference-program lines in the private copy
@@ -158,6 +224,15 @@ failures do not count.
 | `window-bind-ignored` | the class accepts the window but does not hand it to the core | `window_fills_w2` |
 | `stop-unknown-reused` | at link teardown a TX slot whose native completion is unknown is published as quiesced (existing rule) | `window_stop_unknown` |
 | `window-early-ready-without-grant` | an EARLY sender releases the next key before the receiver granted buffers for it, so its submit waits for the core retry timer | `window_refills_receiver_early` |
+| `window-envelope-as-protocol` | the window gate uses `F_EARLY` rather than the actual pairing state, so RTS/CTS waits for a grant it never requests | `window_rts_cts_v2` |
+| `host-release-always-quiesced` | (`--pool host`, set automatically, as for the rows below) the family releases a host lease as quiesced even after unknown device access | `host_unknown_retained` |
+| `host-unbind-checked-passes` | the XDOMAIN checked unbind always allows release | `host_unknown_retained` |
+| `host-no-device-sync` | the requester's lease no longer syncs for the device | `host_sync_order` |
+| `host-no-cpu-sync` | a quiesced RX release no longer syncs for the CPU | `host_sync_order` |
+| `host-post-peer-address` | the NHI descriptor takes the PEER lease field for every element | `chain_same_worker` |
+| `host-lease-wrong-frame` | TX host leases name the other frame of the group | `chain_same_worker` |
+| `host-peer-member` | an IOU_UMEM stage uses the PEER member, whose leases need a PEER authority | `chain_same_worker` |
+| `review-fini-skips-host-unbind` | the network family's fini skips the host-page unbind, so a host-page stage takes the PEER unbind and its mapping is never unmapped | `host_destroy_unmaps` |
 
 The existing mutants are also killed on the window variants
 (`--case NAME_w2`, `NAME_w4`, `NAME_w2_early`, `NAME_w4_early`).
@@ -178,8 +253,13 @@ reaches the window. Nothing here is a performance number.
 Host software composition, not kernel execution: real kthread concurrency,
 IRQ delivery, lockdep, RCU, BPF verification, IOMMU translation, PCIe ordering
 and physical Thunderbolt DMA are not exercised, and nothing here measures
-performance. Session teardown (reap, DESTROY), polling stages and
-per-stage program fds are outside this composition. A mutant that ran the
+performance. Failed-CREATE release is composed, but the core's reap and
+DESTROY entry paths and STOP reports are outside this
+composition: `host_destroy_unmaps` runs the class unbind of each XDOMAIN
+stage in the order of `xdev_ext_mech_session_release_disposition()`, and the
+core's own rule that a failed checked unbind quarantines the session without
+a class unbind or pool release is checked in `tests/core/admission_report`.
+Polling stages and per-stage program fds are also outside this composition. A mutant that ran the
 protocol inline in the NHI control-RX callback was not usable: the existing
 stack fixture's lock-context assertion in `stack_x6.c` aborts first, so it is
 not listed.

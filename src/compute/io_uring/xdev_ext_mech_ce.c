@@ -55,7 +55,7 @@ struct xdev_ext_ce_stage {
 	struct xdev_ext_comp_copy_stage copy;
 };
 
-_Static_assert(XDEV_EXT_CE_MAX_ENTRIES <=
+_Static_assert(XDEV_EXT_CE_RANGE_MAX_ENTRIES <=
 	       sizeof(((struct xdev_ext_comp_copy_plan *)0)->entry) /
 	       sizeof(struct xdev_ext_comp_copy_entry),
 	       "CE entries exceed the common copy plan capacity");
@@ -63,7 +63,7 @@ _Static_assert(XDEV_EXT_CE_MAX_ENTRIES <=
 struct xdev_ext_ce_batch {
 	u64 total;
 	u32 n;
-	struct xdev_ext_ce_xfer x[XDEV_EXT_CE_MAX_ENTRIES];
+	struct xdev_ext_ce_xfer x[XDEV_EXT_CE_RANGE_MAX_ENTRIES];
 };
 
 static struct xdev_ext_comp_copy_registration
@@ -163,6 +163,24 @@ static int xdev_ext_ce_copy_lease_get(struct xdev_ext_comp_copy_stage *copy,
 {
 	struct xdev_ext_ce_stage *cs = container_of(copy, struct xdev_ext_ce_stage, copy);
 
+	if (copy->window.target_range) {
+		const struct xdev_ext_comp_copy_plan *plan = &copy->plan;
+		u32 slot = xdev_ext_mech_batch_slot(b);
+		u64 batch_id = xdev_ext_mech_batch_id(b);
+
+		/* Only successful C validation can authorize range admission. The
+		 * tuple is copied by value before taking the domain mutex; scratch
+		 * and the worker's next candidate never become an active owner.
+		 */
+		if (copy->staged != b || !plan->target_range ||
+		    plan->slot != slot || plan->batch_id != batch_id ||
+		    plan->target_len != plan->total || plan->total != copy->window.group_bytes ||
+		    !xdev_ext_mech_span_in(plan->target_start, plan->target_len,
+					 copy->window.geom.window_len))
+			return -EPROTO;
+		return xdev_ext_comp_copy_lease_get_range(&cs->lease, slot, batch_id,
+			plan->target_start, plan->target_len);
+	}
 	return xdev_ext_comp_copy_lease_get(&cs->lease,
 		xdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));
 }
@@ -268,7 +286,8 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	struct xdev_ext_window_copy_geom geom;
 	int err;
 
-	if (u->flags || (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
+	if ((u->flags & ~XDEV_EXT_CE_STAGE_F_TARGET_RANGE) ||
+	    (st->direction != XDEV_EXT_MECH_DIR_TO_DEVICE &&
 			 st->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE))
 		return -EINVAL;
 	if (!pool || !pool->pages)
@@ -306,9 +325,15 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 	if (err)
 		return err;
 	geom = xdev_ext_ce_window_geom(&cs->geom);
-	err = xdev_ext_comp_copy_prepare(&cs->copy.window, XDEV_EXT_COMP_COPY_WINDOW, &geom,
-		st->direction, xdev_ext_mech_session_depth(st->s),
-		xdev_ext_mech_session_layout(st->s)->group_bytes);
+	if (u->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE)
+		err = xdev_ext_comp_copy_prepare_mode(&cs->copy.window,
+			XDEV_EXT_COMP_COPY_WINDOW, &geom, st->direction,
+			xdev_ext_mech_session_depth(st->s),
+			xdev_ext_mech_session_layout(st->s)->group_bytes, true);
+	else
+		err = xdev_ext_comp_copy_prepare(&cs->copy.window, XDEV_EXT_COMP_COPY_WINDOW,
+			&geom, st->direction, xdev_ext_mech_session_depth(st->s),
+			xdev_ext_mech_session_layout(st->s)->group_bytes);
 	if (err)
 		return err;
 	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->copy.host);
@@ -363,9 +388,13 @@ static int xdev_ext_ce_validate(struct xdev_ext_mech_stage *st,
 	struct xdev_ext_mech_batch *b, const u8 *scratch, u32 n)
 {
 	struct xdev_ext_ce_stage *cs = st->priv;
+	u32 max_entries = st->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE ?
+		XDEV_EXT_CE_RANGE_MAX_ENTRIES : XDEV_EXT_CE_MAX_ENTRIES;
 
+	/* The stage flag is C-owned and immutable throughout this session. */
+	cs->copy.window.target_range = !!(st->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE);
 	return xdev_ext_comp_copy_stage_validate(&cs->copy, b, scratch, n,
-		XDEV_EXT_CE_MAX_ENTRIES, XDEV_EXT_CE_F_KNOWN_MASK);
+		max_entries, XDEV_EXT_CE_F_KNOWN_MASK);
 }
 
 static int xdev_ext_ce_submit(struct xdev_ext_mech_stage *st,
@@ -421,7 +450,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
  .decl = &xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],
 	.class_id	= XDEV_EXT_MECH_CLASS_CE,
 	.desc_size	= sizeof(struct xdev_ext_ce_copy_desc),
-	.desc_cap	= XDEV_EXT_CE_MAX_ENTRIES,
+	.desc_cap	= XDEV_EXT_CE_RANGE_MAX_ENTRIES,
 	.info_size	= sizeof(struct xdev_ext_ce_mech_info),
 	.cqe_size	= sizeof(struct xdev_ext_ce_mech_cqe),
 	.cqe_cap	= 1,

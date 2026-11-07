@@ -16,6 +16,7 @@
 #include <stdarg.h>
 typedef uint8_t u8; typedef uint16_t u16; typedef uint32_t u32; typedef __u64 u64;
 typedef uintptr_t dma_addr_t;
+typedef unsigned int gfp_t;
 #define BIT(n) (1UL << (n))
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #define BITS_TO_LONGS(n) (((n) + 8 * sizeof(long) - 1) / (8 * sizeof(long)))
@@ -121,6 +122,8 @@ static struct ring_frame *tb_ring_poll(struct tb_ring *ring)
 { (void)ring;assert(!"unexpected native poll in IRQ ring fixture");abort(); }
 static bool tb_ring_poll_pending(struct tb_ring *ring)
 { (void)ring;assert(!"unexpected native poll query in IRQ ring fixture");abort(); }
+static void tb_ring_poll_complete(struct tb_ring *ring)
+{ (void)ring;assert(!"unexpected ring interrupt re-enable in IRQ ring fixture");abort(); }
 static struct device *tb_ring_dma_device(struct tb_ring *);
 static int tb_xdomain_alloc_in_hopid(struct tb_xdomain *,int);
 static int tb_xdomain_alloc_out_hopid(struct tb_xdomain *,int);

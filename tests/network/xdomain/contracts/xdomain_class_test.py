@@ -88,13 +88,16 @@ def poll_unit(kernel, ring_source=None):
     enum = re.search(r"enum xdev_ext_xd_native_disposition\s*\{[^}]+\};", ring)
     if not enum:
         raise ValueError("actual native disposition enum missing")
-    declarations = enum.group(0) + "\n"
+    backing = (kernel / "include/linux/xdev_ext_requester_backing.h").read_text()
+    declarations = struct(backing, "xdev_ext_requester_backing_view")
+    declarations += enum.group(0) + "\n"
     declarations += "".join(struct(ring, name) for name in (
         "xdev_ext_xd_native", "xdev_ext_xd_rings", "xdev_ext_xd_ctl_allocation"))
     limits = "\n".join(line for line in ring.splitlines()
                        if line.startswith("#define XDEV_EXT_XD_POLL_"))
     return declarations + limits + "\n" + "\n".join(function(ring, name) for name in (
-        "xdev_ext_xd_closing", "xdev_ext_xd_poll", "xdev_ext_xd_ctl_tx_pending_locked"))
+        "xdev_ext_xd_closing", "xdev_ext_xd_poll_pass", "xdev_ext_xd_poll",
+        "xdev_ext_xd_ctl_tx_pending_locked"))
 
 
 def main():

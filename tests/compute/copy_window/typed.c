@@ -38,7 +38,7 @@ static void typed_literal(void) {
 #define V(want,slot) do { EQ(xdev_ext_comp_copy_validate(&w,&f,&ix,1,&d,1,32,3,slot,91,&p),want); assert(!memcmp(&p,&old,sizeof(p))); } while(0)
  V(-ERANGE,0); d.device_off=960; V(-ERANGE,1); d.device_off=1024; V(-EINVAL,2);
  /* Max capacity guards precede descriptor reads (NULL is intentional). */
- EQ(xdev_ext_comp_copy_validate(&w,NULL,NULL,0,NULL,1,33,3,1,91,&p),-EINVAL); assert(!memcmp(&p,&old,sizeof(p)));
+ EQ(xdev_ext_comp_copy_validate(&w,NULL,NULL,0,NULL,1,XDEV_EXT_COMP_COPY_MAX_ENTRIES + 1,3,1,91,&p),-EINVAL); assert(!memcmp(&p,&old,sizeof(p)));
  EQ(xdev_ext_comp_copy_validate(&w,NULL,NULL,0,NULL,33,32,3,1,91,&p),-E2BIG); assert(!memcmp(&p,&old,sizeof(p)));
  EQ(xdev_ext_comp_copy_validate(&w,&f,&ix,1,&d,0,32,3,1,91,&p),-EINVAL); assert(!memcmp(&p,&old,sizeof(p)));
  g.max_entry_len=64; EQ(xdev_ext_comp_copy_prepare(&w,1,&g,1,2,1024),0); d.flags=8; V(-EOPNOTSUPP,1); d.flags=0; V(-EMSGSIZE,1);

@@ -287,9 +287,24 @@
       "native_path": "tools/xdev_ext_mech/xdomain_check.bpf.c"
     },
     {
+      "source": "examples/network/xdomain_early.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_early.bpf.c"
+    },
+    {
       "source": "examples/network/xdomain_peer.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/xdomain_peer.bpf.c"
+    },
+    {
+      "source": "examples/network/xdomain_policy.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_policy.h"
+    },
+    {
+      "source": "examples/network/xdomain_rts_cts.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/xdomain_rts_cts.bpf.c"
     },
     {
       "source": "examples/pipelines/nxp_mech.bpf.c",
@@ -340,6 +355,16 @@
       "source": "examples/storage/nvme_blocktable.h",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.h"
+    },
+    {
+      "source": "examples/storage/nvme_ce_request.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_ce_request.bpf.c"
+    },
+    {
+      "source": "examples/storage/nvme_ce_request.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_ce_request.h"
     },
     {
       "source": "examples/storage/nvme_s0.bpf.c",
@@ -1003,6 +1028,11 @@
       "native_path": "include/linux/xdev_ext_requester_retention.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_requester_backing.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_requester_backing.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_trace_journal.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_trace_journal.h"
@@ -1071,6 +1101,11 @@
       "source": "src/core/io_uring/family/xdev_ext_requester_retention.c",
       "component": "linux",
       "native_path": "io_uring/family/xdev_ext_requester_retention.c"
+    },
+    {
+      "source": "src/core/io_uring/family/xdev_ext_requester_backing.c",
+      "component": "linux",
+      "native_path": "io_uring/family/xdev_ext_requester_backing.c"
     },
     {
       "source": "src/core/io_uring/io_uring.c",
@@ -3411,6 +3446,10 @@
       "logical_path": "tests/compute/family/runtime/supplement-observables.json"
     },
     {
+      "source": "tests/compute/family/runtime/target-range-abi.json",
+      "logical_path": "tests/compute/family/runtime/target-range-abi.json"
+    },
+    {
       "source": "tests/compute/iaa/provider/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_iaa/Makefile"
@@ -5732,6 +5771,30 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/transport_pending/transport_counters_test.py"
     },
     {
+      "source": "tests/core/requester_host/README.md",
+      "logical_path": "tests/core/requester_host/README.md"
+    },
+    {
+      "source": "tests/core/requester_host/boundary.c",
+      "logical_path": "tests/core/requester_host/boundary.c"
+    },
+    {
+      "source": "tests/core/requester_host/boundary.h",
+      "logical_path": "tests/core/requester_host/boundary.h"
+    },
+    {
+      "source": "tests/core/requester_host/cases.c",
+      "logical_path": "tests/core/requester_host/cases.c"
+    },
+    {
+      "source": "tests/core/requester_host/run.py",
+      "logical_path": "tests/core/requester_host/run.py"
+    },
+    {
+      "source": "tests/core/requester_host/shim.h",
+      "logical_path": "tests/core/requester_host/shim.h"
+    },
+    {
       "source": "tests/integration/analysis/accounting/Makefile",
       "logical_path": "tests/eval/common/Makefile"
     },
@@ -7388,6 +7451,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_native_test.py"
     },
     {
+      "source": "tests/network/peer/session/xdev_ext_peer_batch_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_batch_test.py"
+    },
+    {
       "source": "tests/network/peer/session/xdev_ext_peer_net_plan_frames_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_net_plan_frames_test.c"
@@ -7416,6 +7484,11 @@
       "source": "tests/network/peer/session/xdev_ext_peer_nvme_dptr_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_dptr_test.c"
+    },
+    {
+      "source": "tests/network/peer/session/xdev_ext_peer_nvme_batch_admit_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/xdev_ext_peer_nvme_batch_admit_test.c"
     },
     {
       "source": "tests/network/peer/session/xdev_ext_peer_nvme_test.c",
@@ -7967,6 +8040,18 @@
       "logical_path": "tests/network/xdomain/chain/run.py"
     },
     {
+      "source": "tests/network/xdomain/chain/host_run.py",
+      "logical_path": "tests/network/xdomain/chain/host_run.py"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_umem.c.in",
+      "logical_path": "tests/network/xdomain/chain/chain_umem.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_host_env.h",
+      "logical_path": "tests/network/xdomain/chain/chain_host_env.h"
+    },
+    {
       "source": "tests/network/xdomain/contracts/tb_protocol_handler_lifetime_cases.c.in",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/peer_graph/tb_protocol_handler_lifetime_cases.c.in"
@@ -8504,6 +8589,22 @@
     {
       "source": "tests/network/xdomain/probe/vectors/ready.bin",
       "logical_path": "tests/network/xdomain/probe/vectors/ready.bin"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/README.md",
+      "logical_path": "tests/network/xdomain/protocols/README.md"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/cases.c",
+      "logical_path": "tests/network/xdomain/protocols/cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/equivalence.c",
+      "logical_path": "tests/network/xdomain/protocols/equivalence.c"
+    },
+    {
+      "source": "tests/network/xdomain/protocols/run.py",
+      "logical_path": "tests/network/xdomain/protocols/run.py"
     },
     {
       "source": "tests/network/xdomain/stack/NHI_STACK.md",
@@ -9071,6 +9172,26 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/xdev_ext_mech_nvme_pool_test.py"
     },
     {
+      "source": "tests/storage/nvme/peer_batch/README.md",
+      "logical_path": "tests/storage/nvme/peer_batch/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/peer_batch_guest.c",
+      "logical_path": "tests/storage/nvme/peer_batch/peer_batch_guest.c"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/peer_batch_kvm.sh",
+      "logical_path": "tests/storage/nvme/peer_batch/peer_batch_kvm.sh"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/validate.py",
+      "logical_path": "tests/storage/nvme/peer_batch/validate.py"
+    },
+    {
+      "source": "tests/storage/nvme/peer_batch/validate_test.py",
+      "logical_path": "tests/storage/nvme/peer_batch/validate_test.py"
+    },
+    {
       "source": "tests/support/benchmarks/cpu_timer.h",
       "logical_path": "tests/eval/common/cpu_timer.h"
     },
@@ -9544,6 +9665,33 @@
     {
       "source": "tests/network/count_fifo/typed-data-v1.inverse.stdout",
       "logical_path": "tests/network/count_fifo/typed-data-v1.inverse.stdout"
-    }
+    },
+    {"source":"tests/compute/ce/random_target/README.md","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/README.md"},
+    {"source":"tests/compute/ce/random_target/stage1.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/stage1.c"},
+    {"source":"tests/compute/ce/random_target/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/run.py"},
+    {"source":"tests/compute/ce/random_target/runtime_validate.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.c"},
+    {"source":"tests/compute/ce/random_target/runtime_validate.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.py"},
+    {"source":"tests/compute/ce/random_target/range_lease.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.c"},
+    {"source":"tests/compute/ce/random_target/range_lease.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.py"},
+    {"source":"tests/compute/ce/random_target/actual_entry.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.c"},
+    {"source":"tests/compute/ce/random_target/actual_entry.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.py"},
+    {"source":"tests/compute/ce/random_target/request_builders.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.c"},
+    {"source":"tests/compute/ce/random_target/request_builders.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.py"},
+    {"source":"tests/compute/ce/random_target/request_prepare.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_prepare.c"},
+    {"source":"tests/integration/nvme_ce_random/contract_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract_test.c"},
+    {"source":"tests/integration/nvme_ce_random/control_test.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/control_test.py"},
+    {"source":"tests/integration/nvme_ce_random/test_expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_expected.py"},
+    {"source":"tests/integration/nvme_ce_random/contract.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract.h"},
+    {"source":"tests/integration/nvme_ce_random/expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/expected.py"},
+    {"source":"tests/integration/nvme_ce_random/private_loader.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.h"},
+    {"source":"tests/integration/nvme_ce_random/private_loader.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.c"},
+    {"source":"tests/integration/nvme_ce_random/loader_check.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/loader_check.c"},
+    {"source":"tests/integration/nvme_ce_random/driver.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/driver.c"},
+    {"source":"tests/integration/nvme_ce_random/build.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/build.py"},
+    {"source":"tests/integration/nvme_ce_random/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/run.py"},
+    {"source":"tests/integration/nvme_ce_random/Makefile","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/Makefile"},
+    {"source":"tests/integration/nvme_ce_random/test_native_bounds.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_native_bounds.py"},
+    {"source":"tests/integration/nvme_ce_random/key_end_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/key_end_test.c"},
+    {"source":"tests/integration/nvme_ce_random/test_generator.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"}
   ]
 }

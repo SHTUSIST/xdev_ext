@@ -11,6 +11,9 @@
  * through the lease provider's per-requester translation (chain_dma_access),
  * then it completes the request through its own end_io, as nvme-pci would.
  * It never touches frames by index and never completes a held controller.
+ * A host-page request (--pool host) names its payload by its bio instead;
+ * like nvme-pci, the model maps each bio piece for the controller at submit
+ * (chain_host_dma_map) and unmaps it when the request ends.
  */
 #include "nvme.h"
 #include <linux/xdev_ext_mech.h>
@@ -71,6 +74,8 @@ struct chain_nvme {
 	uint64_t order;
 };
 static struct chain_nvme controllers[CHAIN_ENDPOINTS];
+/* Host-page requests: the controller-visible spans mapped at submit. */
+static struct chain_nvme_command host_cmd[CHAIN_ENDPOINTS][CHAIN_REQS];
 #define CHAIN_NVME_LOG 512
 static struct chain_nvme_command nvme_log[CHAIN_NVME_LOG];
 static size_t nvme_logs;
@@ -179,6 +184,27 @@ static void decode(struct chain_nvme *c, const struct nvme_command *cmd, struct 
 	}
 }
 
+/* What nvme-pci does for a bio request: map each piece for the controller. */
+static void decode_host(struct chain_nvme *c, struct request *rq, struct chain_nvme_command *out)
+{
+	const struct nvme_command *cmd = nvme_req(rq)->cmd;
+	bool read = cmd->rw.opcode == nvme_cmd_read;
+
+	*out = (struct chain_nvme_command){ .endpoint = c->endpoint, .opcode = cmd->rw.opcode,
+		.slba = cmd->rw.slba, .nlb = (u32)cmd->rw.length + 1u,
+		.bytes = ((u32)cmd->rw.length + 1u) << c->head.lba_shift };
+	assert(rq->bio && rq->bio->bi_vcnt <= 64);
+	for (unsigned i = 0; i < rq->bio->bi_vcnt; i++) {
+		const struct bio_vec *v = &rq->bio->bi_io_vec[i];
+		uint64_t dma;
+		int ret = chain_host_dma_map(&c->pdev, v->bv_page, v->bv_offset, v->bv_len, read, &dma);
+
+		assert(!ret);
+		out->span_addr[out->spans] = dma;
+		out->span_len[out->spans++] = v->bv_len;
+	}
+}
+
 void blk_execute_rq_nowait(struct request *rq, bool at_head)
 {
 	struct chain_nvme *c = by_queue(rq->q);
@@ -189,7 +215,12 @@ void blk_execute_rq_nowait(struct request *rq, bool at_head)
 	rq->executed = true;
 	assert(nvme_logs < CHAIN_NVME_LOG);
 	log = &nvme_log[nvme_logs++];
-	decode(c, nvme_req(rq)->cmd, log);
+	if (rq->bio) {
+		decode_host(c, rq, &host_cmd[c->endpoint][rq->slot]);
+		*log = host_cmd[c->endpoint][rq->slot];
+	} else {
+		decode(c, nvme_req(rq)->cmd, log);
+	}
 	log->order = ++c->order;
 	log->worker = chain_core_current_worker();
 	c->pending[c->npending++] = rq;
@@ -220,7 +251,10 @@ int chain_nvme_complete_one(void)
 		rq = c->pending[0];
 		memmove(&c->pending[0], &c->pending[1], (c->npending - 1) * sizeof(c->pending[0]));
 		c->npending--;
-		decode(c, nvme_req(rq)->cmd, &cmd);
+		if (rq->bio)
+			cmd = host_cmd[e][rq->slot];
+		else
+			decode(c, nvme_req(rq)->cmd, &cmd);
 		cursor = cmd.slba << c->head.lba_shift;
 		for (u32 i = 0; i < cmd.spans && !status; i++) {
 			if (cursor + cmd.span_len[i] > c->size) { status = -EFAULT; break; }
@@ -230,6 +264,9 @@ int chain_nvme_complete_one(void)
 		}
 		if (!status && cursor != (cmd.slba << c->head.lba_shift) + cmd.bytes)
 			status = -EMSGSIZE;
+		/* The request ends: its block-layer mapping goes away. */
+		for (u32 i = 0; rq->bio && i < cmd.spans; i++)
+			chain_host_dma_unmap(&c->pdev, cmd.span_addr[i], cmd.span_len[i], true);
 		nvme_req(rq)->status = status ? 0x4 /* data transfer error */ : 0;
 		nvme_req(rq)->result.u64 = 0;
 		chain_record((struct chain_event){ .kind = CHAIN_EV_NVME_COMPLETE, .endpoint = e,
@@ -245,13 +282,41 @@ int chain_nvme_complete_one(void)
 
 int blk_mq_poll_hw_queue(struct request_queue *q, unsigned queue_num, void *iob)
 { (void)q; (void)queue_num; (void)iob; abort(); }
+/* Block-layer bio bookkeeping of the host-page path (no merging, no split). */
 void bio_init(struct bio *bio, struct block_device *bdev, struct bio_vec *table,
 	      unsigned short max_vecs, blk_opf_t opf)
-{ (void)bio; (void)bdev; (void)table; (void)max_vecs; (void)opf; abort(); }
-void bio_uninit(struct bio *bio) { (void)bio; abort(); }
-struct bio *bio_kmalloc(unsigned short nr_vecs, gfp_t gfp) { (void)nr_vecs; (void)gfp; abort(); }
+{
+	(void)bdev;
+	bio->bi_iter = (struct bvec_iter){ 0 };
+	bio->bi_vcnt = 0;
+	bio->bi_max_vecs = max_vecs;
+	bio->bi_opf = opf;
+	bio->bi_io_vec = table;
+}
+void bio_uninit(struct bio *bio) { (void)bio; }
+struct bio *bio_kmalloc(unsigned short nr_vecs, gfp_t gfp)
+{
+	struct bio *bio = calloc(1, sizeof(*bio) + (size_t)nr_vecs * sizeof(struct bio_vec));
+
+	(void)gfp;
+	assert(bio);
+	bio->bi_max_vecs = nr_vecs;
+	return bio;
+}
 int bio_add_page(struct bio *bio, struct page *page, unsigned len, unsigned off)
-{ (void)bio; (void)page; (void)len; (void)off; abort(); }
-int blk_rq_append_bio(struct request *rq, struct bio *bio) { (void)rq; (void)bio; abort(); }
+{
+	if (bio->bi_vcnt >= bio->bi_max_vecs)
+		return 0;
+	bio->bi_io_vec[bio->bi_vcnt++] = (struct bio_vec){ page, len, off };
+	bio->bi_iter.bi_size += len;
+	return (int)len;
+}
+int blk_rq_append_bio(struct request *rq, struct bio *bio)
+{
+	assert(!rq->bio);
+	rq->bio = bio;
+	rq->__data_len = bio->bi_iter.bi_size;
+	return 0;
+}
 struct page *alloc_page(gfp_t gfp) { (void)gfp; abort(); }
 void __free_page(struct page *page) { (void)page; abort(); }

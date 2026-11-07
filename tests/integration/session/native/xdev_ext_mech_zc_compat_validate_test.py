@@ -29,8 +29,8 @@ class CompatibilityConsole(unittest.TestCase):
             validate_socket('')
 
     def test_peer_requires_all_counts_and_lifetime(self):
-        line = ('XDEV_EXT_PEER_NATIVE=PASS reads=259 writes=257 groups=257 batches=5 max_desc=64 '
-            'native_depth=1 source_whole_disk_unchanged=1 destination_whole_disk=1 allocation_guards=1 '
+        line = ('XDEV_EXT_PEER_NATIVE=PASS reads=258 writes=257 groups=257 batches=5 max_desc=64 '
+            'native_depth=batch source_whole_disk_unchanged=1 destination_whole_disk=1 allocation_guards=1 '
             'maps=2 pins=2 live_maps=0 live_pins=0 memory=host-RAM-standin\n')
         console = line + '# software provider cleanly unloaded after exact reference drain\n' + \
             'XDEV_EXT_PEER_SOFTWARE_GUEST=PASS native=NVMe-SGL memory=host-RAM-standin gpu=none\n'

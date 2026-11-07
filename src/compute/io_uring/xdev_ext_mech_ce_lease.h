@@ -15,7 +15,9 @@
  */
 struct xdev_ext_ce_lease_slot {
 	__u64 generation;
+	__u64 range_start, range_len;
 	bool active;
+	bool target_range;
 };
 
 struct xdev_ext_ce_lease_state {

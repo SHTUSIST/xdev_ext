@@ -23,7 +23,7 @@ BPF_ARCH ?= x86
 BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf \
 	-D__TARGET_ARCH_$(BPF_ARCH)
 
-BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan xdomain_peer xdomain_check
+BPF_NAMES := nvme_s0 nxp_mech nxp_reliable ce_plan dma_plan socket_sink net_peer cpu_plan user_plan xdomain_peer xdomain_check nvme_ce_request
 BPF_OBJECTS := $(BPF_NAMES:%=$(BUILD_DIR)/%.bpf.o)
 VMLINUX_H := $(BUILD_DIR)/vmlinux.h
 CTL := $(BUILD_DIR)/xdev_ext_mech_ctl
@@ -63,6 +63,9 @@ $(BUILD_DIR)/%.bpf.o: %.bpf.c xdev_ext_mech_prog.h xdev_ext_mech_kfunc.h ../../i
 	$(CLANG) $(BPF_CFLAGS) -I$(BUILD_DIR) -c $< -o $@
 
 $(BUILD_DIR)/cpu_plan.bpf.o: xdev_ext_mech_cpu_abi.h
+
+$(BUILD_DIR)/nvme_ce_request.bpf.o: examples/storage/nvme_ce_request.bpf.c examples/storage/nvme_ce_request.h xdev_ext_mech_prog.h xdev_ext_mech_kfunc.h $(VMLINUX_H) | $(BUILD_DIR)
+	$(CLANG) $(BPF_CFLAGS) -I$(BUILD_DIR) -I. -c $< -o $@
 
 $(CTL): xdev_ext_mech_ctl.c lib/xdev_ext_link.c lib/xdev_ext_session.c lib/libxdev_ext.h lib/libxdev_ext_internal.h \
 		../../include/uapi/linux/xdev_ext_mech.h ../../include/uapi/linux/io_uring.h xdev_ext_mech_ctl_fallback.h xdev_ext_mech_ctl_core.h xdev_ext_mech_prog.h xdev_ext_mech_cuda.h \

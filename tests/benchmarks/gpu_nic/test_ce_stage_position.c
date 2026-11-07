@@ -110,8 +110,12 @@ static void test_nvme_gpu_load_and_save(void)
 	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), 0);
 	EXPECT_EQ(start(&c, frames, true, false), 0);
 
-	/* Control: the same shapes with a CE flag the class does not define. */
-	c.st[0].flags = 1;
+	/*
+	 * Control: the same shapes with a CE flag the class does not define.
+	 * Bit 0 is XDEV_EXT_CE_STAGE_F_TARGET_RANGE, admitted for exactly this
+	 * CE D2H -> NVMe WRITE pair, so the undefined bit is the next one.
+	 */
+	c.st[0].flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE << 1;
 	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
 	c = umem_session(XDEV_EXT_MECH_CLASS_NVME, XDEV_EXT_MECH_DIR_FROM_DEVICE,
 			 XDEV_EXT_MECH_CLASS_CE, 0);

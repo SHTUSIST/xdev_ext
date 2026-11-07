@@ -57,12 +57,15 @@ struct xdev_ext_ce_cookie;struct xdev_ext_ce_backend_ops;
 #include "actual-api.h"
 #include "xdev_ext_mech_ce_core.h"
 #include "xdev_ext_compfam_copy_core.h"
+#define CE_RESIDUAL_UNKNOWN_FLAG (1U << 1)
+_Static_assert(XDEV_EXT_CE_STAGE_F_TARGET_RANGE == 1U,"CE RANGE flag input changed");
+_Static_assert((CE_RESIDUAL_UNKNOWN_FLAG & ~XDEV_EXT_CE_STAGE_F_TARGET_RANGE) != 0,"residual negative requires an unknown flag");
 struct xdev_ext_mech_frame {u64 umem_addr;u32 data_off,data_len,index;};
 struct xdev_ext_mech_pool {struct page **pages;u32 nr_pages,first_page_off,frame_size,nr_frames;};
 struct xdev_ext_mech_stage;
 struct xdev_ext_mech_class_ops {int (*unbind_checked)(struct xdev_ext_mech_stage*);};
 struct xdev_ext_mech_session {struct xdev_ext_mech_pool pool;struct xdev_ext_mech_layout layout;u32 depth,nr_bound;struct xdev_ext_mech_stage *st;};
-struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction;const struct xdev_ext_mech_class_ops *cls;};
+struct xdev_ext_mech_stage {struct xdev_ext_mech_session *s;struct file *file;void *priv;u32 direction,flags;const struct xdev_ext_mech_class_ops *cls;};
 struct xdev_ext_mech_batch {u32 slot;u64 id,ticket;_Alignas(16) char priv[4096],cookie[128];};
 static struct xdev_ext_mech_pool *xdev_ext_mech_session_pool(struct xdev_ext_mech_session*s){return &s->pool;}
 static u32 xdev_ext_mech_session_depth(struct xdev_ext_mech_session*s){return s->depth;}
@@ -119,7 +122,7 @@ static void reset(void){INIT_LIST_HEAD(&xdev_ext_ce_lease_groups);memset(xdev_ex
 INIT_LIST_HEAD(&xdev_ext_ce_registry.members);
 #endif
 module_a=(struct module){0};module_b=(struct module){0};bind_errno=host_errno=unhost_errno=unregion_errno=native_calls=bind_calls=host_calls=unhost_calls=unregion_calls=0;forged=zero_len=hook_kind=hook_seen=0;hook_stage=NULL;alloc_calls=fail_alloc_at=native_entered=late_allocs=0;CHECK(!xdev_ext_ce_backend_register(&ops_a),"register actual backend A");CHECK(!xdev_ext_ce_backend_register(&ops_b),"register actual backend B");}
-static void init(struct fixture*f,int ops){memset(f,0,sizeof(*f));f->pages[0]=&f->page;f->s=(struct xdev_ext_mech_session){.pool={f->pages,1,0,64,1},.layout={.group_bytes=64},.depth=2,.st=f->st};for(int i=0;i<4;i++){f->file[i]=(struct file){ops?&fops_b:&fops_a,i};f->st[i]=(struct xdev_ext_mech_stage){&f->s,&f->file[i],NULL,XDEV_EXT_MECH_DIR_TO_DEVICE,&class_ops};}}
+static void init(struct fixture*f,int ops){memset(f,0,sizeof(*f));f->pages[0]=&f->page;f->s=(struct xdev_ext_mech_session){.pool={f->pages,1,0,64,1},.layout={.group_bytes=64},.depth=2,.st=f->st};for(int i=0;i<4;i++){f->file[i]=(struct file){ops?&fops_b:&fops_a,i};f->st[i]=(struct xdev_ext_mech_stage){&f->s,&f->file[i],NULL,XDEV_EXT_MECH_DIR_TO_DEVICE,0,&class_ops};}}
 static int bind_stage(struct fixture*f,int i,u64 start){struct xdev_ext_mech_stage_uapi u={.arg0=start,.arg1=256};native_entered=0;int r=xdev_ext_ce_bind(&f->st[i],&u);native_entered=0;if(!r||f->st[i].priv)f->s.nr_bound++;return r;}
 static void batch_init(struct xdev_ext_mech_batch*b,u64 id,u32 slot){memset(b,0,sizeof(*b));b->id=id;b->ticket=id+100;b->slot=slot;}
 static int submit(struct xdev_ext_mech_stage*st,struct xdev_ext_mech_batch*b){struct xdev_ext_ce_copy_desc d={.len=64,.gpu_off=b->slot*64};int r=xdev_ext_ce_validate(st,b,(u8*)&d,1);CHECK(r==0,"real typed validation before submit");return r?r:xdev_ext_ce_submit(st,b);}
@@ -191,7 +194,7 @@ static void refusals(void){
  CHECK(cs->lease_group->state.quarantined,"unknown batch group quarantine");CHECK(xdev_ext_mech_unbind_checked(&a.s)==-EBUSY,"quarantine refusal");CHECK(!unhost_calls&&!unregion_calls,"quarantine never native unmap");CHECK(module_a.refs==1&&module_a.puts==0,"unknown preserves module");
 }
 static void allocation(void){
- case_name="allocation-and-precheck-order";reset();struct fixture a;init(&a,0);struct xdev_ext_mech_stage_uapi u={.flags=1,.arg1=256};CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"flags reject before allocation");u.flags=0;u.arg1=0;CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"zero length rejects before allocation");u.arg0=U64_MAX;u.arg1=2;CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"overflow before allocation");
+ case_name="allocation-and-precheck-order";reset();struct fixture a;init(&a,0);struct xdev_ext_mech_stage_uapi u={.flags=CE_RESIDUAL_UNKNOWN_FLAG,.arg1=256};CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"flags reject before allocation");u.flags=0;u.arg1=0;CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"zero length rejects before allocation");u.arg0=U64_MAX;u.arg1=2;CHECK(xdev_ext_ce_bind(&a.st[0],&u)==-EINVAL&&alloc_calls==0,"overflow before allocation");
  fail_alloc_at=1;CHECK(bind_stage(&a,0,4096)==-ENOMEM&&bind_calls==0&&module_a.refs==0,"stage allocation failure no native or pin");
  fail_alloc_at=alloc_calls+2;CHECK(bind_stage(&a,0,4096)==-ENOMEM,"group allocation errno");CHECK(bind_calls==0&&host_calls==0,"group allocation before native entry");CHECK(a.st[0].priv&&module_a.refs==1,"unbound stage pin rollback ownership");CHECK(!xdev_ext_mech_unbind_checked(&a.s),"checked rollback before native");CHECK(module_a.refs==0&&module_a.puts==1&&!a.st[0].priv,"one put early group failure");CHECK(unhost_calls==0&&unregion_calls==0,"no cleanup for no native handles");
 }

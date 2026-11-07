@@ -990,7 +990,7 @@ bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch *b,
  u64 expected = (ticket << 3) | XDEV_EXT_MECH_C_SUBMITTED;
  u32 i;
 
- if (!ticket || !n || n > XDEV_EXT_MECH_MAX_FRAMES ||
+ if (!ticket || !n || n > XDEV_EXT_CE_RANGE_MAX_ENTRIES ||
      smp_load_acquire(&b->completion.ctrl) != expected)
   return false;
  for (i = 0; i < n; i++)

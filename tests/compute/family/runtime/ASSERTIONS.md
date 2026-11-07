@@ -14,3 +14,9 @@ The four CE repair expectations were frozen in the v2 artifact EXECUTION.md befo
 Exact inherited-observation allowance: indices1 and3 of the 297-line v1 trace change only lease0→1/cleanup0→1 under D6.1; indices4 and244 change only those same two fields under D6.4. The other293 lines must be byte equal, including every DMA/ABI/CQE/XFER line. D6.2/D6.3 additional vectors are appended separately after V2-ADDITIONAL-BEGIN and mapped to their explicit delta sections.
 
 For candidate-to-v2 comparison there is zero allowed delta. Missing new common runtime remains SETUP/NOT_IMPLEMENTED. Host repair/extraction evidence does not certify physical DMA/quiescence. The original ROOT-FREEZE-v2.json recorded actual repaired CE GCC as a pending root gate. Later kernel build and integration results remain separate root-owned evidence; these host assertions do not establish that gate.
+
+## CE target-range successor
+
+The v2 contract and frozen evidence above remain historical. Sources defining the target-range capacity use exactly one declared successor delta from `target-range-abi.json`: the kernel-private CE batch allocation is 2576 rather than 1296 bytes, for 64 rather than 32 native transfers. This is not a UAPI descriptor, cookie, info, CQE or backend-ops layout change. The runner verifies the exact old ABI row before applying the exact new literal row; every other field and all 329 remaining observations retain their frozen values. Sources without this capacity retain the original v2 row.
+
+The invalid CE/DMA stage-flags vector uses reserved bit 1 and retains the original rejection, no-allocation and no-private-stage assertion. Removing CE unknown-flag rejection must produce assertion exit70, not a crash. All 30 original mutation names and their semantic edits remain, including both cleanup checks after relocation to the shared mode helper.

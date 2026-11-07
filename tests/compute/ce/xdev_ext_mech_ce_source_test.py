@@ -96,7 +96,7 @@ class CeClassSourceTest(unittest.TestCase):
         table = table.group(1)
         self.assertIn(".class_id\t= XDEV_EXT_MECH_CLASS_CE,", table)
         self.assertIn("sizeof(struct xdev_ext_ce_copy_desc)", table)
-        self.assertIn(".desc_cap\t= XDEV_EXT_CE_MAX_ENTRIES,", table)
+        self.assertIn(".desc_cap\t= XDEV_EXT_CE_RANGE_MAX_ENTRIES,", table)
         self.assertNotIn("default_build", table)
         self.assertIn("xdev_ext_mech_class_register(&xdev_ext_ce_class)", self.text)
 

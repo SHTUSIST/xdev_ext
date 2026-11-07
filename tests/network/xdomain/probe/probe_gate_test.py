@@ -23,6 +23,7 @@ UNITS = (
  'io_uring/xdomain/xdev_ext_xdomain_class.c',
  'io_uring/family/xdev_ext_netfam.c',
  'io_uring/family/xdev_ext_requester_retention.c',
+ 'io_uring/family/xdev_ext_requester_backing.c',
  'tools/xdev_ext_mech/xdomain_peer.bpf.c',
  'drivers/thunderbolt/nhi.c',
 )

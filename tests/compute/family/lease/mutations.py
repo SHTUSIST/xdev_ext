@@ -46,12 +46,12 @@ SHARED=[
  ('stale_finish_releases','xdev_ext_ce_lease_finish','if (slot->generation != generation)','if (false)',1),
  ('inactive_finish_quarantines','xdev_ext_ce_lease_finish','if (!slot->active)\n\t\treturn 0;','if (!slot->active) { state->quarantined = true; return 0; }',1),
  ('ce_serial_predicate_omitted','xdev_ext_ce_lease_key_serial','return left->window_start != right->window_start &&\n\t\txdev_ext_ce_lease_key_overlap(a, b);','return false;',1),
- ('ce_native_ticket_generation','xdev_ext_ce_copy_lease_get','xdev_ext_mech_batch_id(b)','xdev_ext_mech_batch_ticket(b)',1),
+ ('ce_native_ticket_generation','xdev_ext_ce_copy_lease_get','return xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));','return xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_ticket(b));',1),
  ('ce_initial_hold_omitted','xdev_ext_ce_lease_bind','cs, true);','cs, false);',1),
- ('ce_cleanup_skipped_own_active','xdev_ext_comp_copy_lease_get','if (!other->cleanup_holds &&\n\t\t    (group->state.active_batches || !other->state.active_batches))','if (group->state.active_batches || !other->state.active_batches)',1),
- ('ce_scan_past_first_hit','xdev_ext_comp_copy_lease_get','goto checked;','continue;',1),
- ('ce_own_hold_ignored','xdev_ext_comp_copy_lease_get','else if (group->cleanup_holds)','else if (group->cleanup_holds && domain->policy != &xdev_ext_ce_lease_policy)',1),
- ('dma_own_hold_ignored','xdev_ext_comp_copy_lease_get','else if (group->cleanup_holds)','else if (group->cleanup_holds && domain->policy != &xdev_ext_dma_lease_policy)',1),
+ ('ce_cleanup_skipped_own_active','xdev_ext_comp_copy_lease_get_mode','if (!other->cleanup_holds &&\n\t\t    (group->state.active_batches || !other->state.active_batches))','if (group->state.active_batches || !other->state.active_batches)',1),
+ ('ce_scan_past_first_hit','xdev_ext_comp_copy_lease_get_mode','goto checked;','continue;',1),
+ ('ce_own_hold_ignored','xdev_ext_comp_copy_lease_get_mode','else if (group->cleanup_holds)','else if (group->cleanup_holds && domain->policy != &xdev_ext_ce_lease_policy)',1),
+ ('dma_own_hold_ignored','xdev_ext_comp_copy_lease_get_mode','else if (group->cleanup_holds)','else if (group->cleanup_holds && domain->policy != &xdev_ext_dma_lease_policy)',1),
  ('dma_duplicate_hold','xdev_ext_comp_copy_lease_hold','if (region->cleanup_held != hold) {','if (region->cleanup_held != hold || domain->policy == &xdev_ext_dma_lease_policy) {',1),
  ('dma_scope_put_omitted','xdev_ext_dma_copy_unbind_end','xdev_ext_dma_scope_put(cs->scope);','/* deliberately omitted external scope put */',1),
  ('ce_nonatomic_hold_detach','xdev_ext_ce_copy_unbind_end','if (cs->lease.group &&','if (cs->lease.group) xdev_ext_comp_copy_lease_hold(&cs->lease, false);\n\tif (cs->lease.group &&',1),
@@ -62,7 +62,7 @@ SHARED=[
  ('scope_provider_namespace_merged','xdev_ext_dma_scope_overlap','if (a->provider != b->provider)\n\t\treturn false;','if (false)\n\t\treturn false;',1),
  # Additional actual common authority/domain/policy and composition sensitivities.
  ('domains_merged','xdev_ext_dma_bind','&xdev_ext_dma_lease_domain','&xdev_ext_ce_lease_domain',1),
- ('ce_retained_private_lock','xdev_ext_ce_copy_lease_get','return xdev_ext_comp_copy_lease_get','mutex_lock(&xdev_ext_ce_lease_domain.lock); mutex_unlock(&xdev_ext_ce_lease_domain.lock);\n\treturn xdev_ext_comp_copy_lease_get',1),
+ ('ce_retained_private_lock','xdev_ext_ce_copy_lease_get','return xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));','mutex_lock(&xdev_ext_ce_lease_domain.lock); mutex_unlock(&xdev_ext_ce_lease_domain.lock);\n\treturn xdev_ext_comp_copy_lease_get(&cs->lease,\n\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b));',1),
  ('dma_retained_private_lock','xdev_ext_dma_copy_lease_get','return xdev_ext_comp_copy_lease_get','mutex_lock(&xdev_ext_dma_lease_domain.lock); mutex_unlock(&xdev_ext_dma_lease_domain.lock);\n\treturn xdev_ext_comp_copy_lease_get',1),
  ('ce_policy_allocates','xdev_ext_ce_lease_key_serial','return left->window_start','(void)kvzalloc(8, GFP_KERNEL);\n\treturn left->window_start',1),
  ('dma_policy_puts_module','xdev_ext_dma_lease_key_serial','return xdev_ext_dma_scope_serial(a, b);','module_put(NULL);\n\treturn xdev_ext_dma_scope_serial(a, b);',1),
@@ -70,6 +70,19 @@ SHARED=[
  ('dma_busy_hold_normalized','xdev_ext_dma_copy_unbind_begin','if (cs->lease.group && xdev_ext_comp_copy_lease_busy(&cs->lease))\n\t\treturn -EBUSY;\n\t/* Retain configured exclusion throughout either native unmap. */\n\txdev_ext_comp_copy_lease_hold(&cs->lease, true);\n\treturn 0;','return xdev_ext_comp_copy_lease_cleanup_begin(&cs->lease);',1),
  ('dma_clearhold_detach_normalized','xdev_ext_dma_copy_unbind_end','xdev_ext_comp_copy_lease_hold(&cs->lease, false);\n\tif (cs->lease.group &&\n\t    WARN_ON_ONCE(!xdev_ext_comp_copy_lease_unbind(&cs->lease, false)))','if (cs->lease.group &&\n\t    WARN_ON_ONCE(!xdev_ext_comp_copy_lease_unbind(&cs->lease, true)))',1),
 ]
+
+# These two original pure-helper faults now have an equivalent rejection in
+# the actual common entry before the same helper. Mutate both occurrences of
+# that identity rule, retaining all unrelated mode/hold/range/terminal guards.
+# Every auxiliary body and local condition must still be uniquely identified.
+SHARED_IDENTITY_GUARDS={
+ 'zero_generation_admitted':('xdev_ext_comp_copy_lease_get_mode',
+  'else if (!batch_id)\n\t\tret = -EINVAL;',
+  'else if (false)\n\t\tret = -EINVAL;'),
+ 'generation_is_ignored':('xdev_ext_comp_copy_lease_get_mode',
+  'if (owner->active && owner->generation != batch_id) {',
+  'if (false) {'),
+}
 
 def function_span(text,name):
  pattern=r'^(?:static\s+)?(?:inline\s+)?(?:int|void|bool)\s+'+re.escape(name)+r'\s*\([^;{}]*\)\s*\{'
@@ -104,6 +117,18 @@ for name,fn,old,new,want in recipes:
   if policy in new and fn and fn.startswith('xdev_ext_comp_copy_lease_'):
    declarations+='static const struct xdev_ext_comp_copy_lease_policy '+policy+';\n'
  changed=prefix[:lo]+declarations+changed_body+prefix[hi:]
+ if a.mode=='shared' and name in SHARED_IDENTITY_GUARDS:
+  auxiliary,guard,replacement=SHARED_IDENTITY_GUARDS[name]
+  try:
+   alo,ahi=function_span(changed,auxiliary)
+  except ValueError as e:
+   row.update(verdict='SETUP_FUNCTION',diagnostic=str(e));rows.append(row);print(name,row['verdict'],row['diagnostic']);continue
+  owner=changed[alo:ahi];anchors=owner.count(guard)
+  row.update(auxiliary_function=auxiliary,auxiliary_anchors=anchors,
+   auxiliary_expected_anchors=1,auxiliary_function_sha256=hashlib.sha256(owner.encode()).hexdigest())
+  if anchors!=1:
+   row.update(verdict='SETUP_ANCHOR',diagnostic='same-identity guard count='+str(anchors));rows.append(row);print(name,row['verdict'],row['diagnostic']);continue
+  changed=changed[:alo]+owner.replace(guard,replacement,1)+changed[ahi:]
  # Preserve the original quarantine recipe's two guard changes exactly.
  if a.mode=='shared' and name=='quarantine_not_retained':
   qlo,qhi=function_span(changed,'xdev_ext_ce_lease_acquire')

@@ -26,6 +26,7 @@ enum xdev_ext_net_lease_kind {
 	XDEV_EXT_NET_LEASE_PEER_DMA = 1,
 	XDEV_EXT_NET_LEASE_HOST_CPU = 2,
 	XDEV_EXT_NET_LEASE_POOL_DMA = 3,
+	XDEV_EXT_NET_LEASE_HOST_DMA = 4,	/* IOU_UMEM page mapped for the requester */
 };
 struct xdev_ext_net_pool_dma {
 	void *owner;		/* provider identity, opaque to the family */
@@ -50,6 +51,11 @@ struct xdev_ext_net_lease {
 			u32 len;
 		} host;
 		struct xdev_ext_net_pool_dma pool;
+		struct {
+			struct xdev_ext_requester *rq;	/* owner of the host mapping */
+			u64 dma;		/* as xdev_ext_peer_lease.dma_address */
+			u32 len;
+		} hdma;
 	} u;
 };
 struct xdev_ext_net_elem {

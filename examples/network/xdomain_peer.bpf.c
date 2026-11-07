@@ -348,6 +348,23 @@ xdomain_peer_choose_v2(struct xdev_ext_xdomain_proto_info_v2 *info,
 	}
 	info->base.size = sizeof(info->base); info->base.version = 1;
 	ret = xdomain_peer_choose(&info->base, verdict);
+	/* The early policy never binds a group from an RTS: no in-place fallback.
+	 * The RTS waits for its cancellation or the teardown refusal. */
+	if (!ret && info->base.event == XDEV_EXT_XDP_EV_RTS &&
+	    verdict->action == XDEV_EXT_XDP_ACT_RX_POST) {
+		wake = info->base.now_ns > ~(__u64)0 - 20000000ULL ? ~(__u64)0 : info->base.now_ns + 20000000ULL;
+		if (info->base.hard_deadline_ns > info->base.now_ns && info->base.hard_deadline_ns < wake)
+			wake = info->base.hard_deadline_ns;
+		if (info->base.policy_deadline_ns > info->base.now_ns && info->base.policy_deadline_ns < wake)
+			wake = info->base.policy_deadline_ns;
+		if (wake <= info->base.now_ns) {
+			verdict->action = XDEV_EXT_XDP_ACT_FAIL_LINK;
+			verdict->status = -XD_ETIMEDOUT;
+		} else {
+			verdict->action = XDEV_EXT_XDP_ACT_WAIT;
+			verdict->wake_ns = wake;
+		}
+	}
 	info->base.size = sizeof(*info); info->base.version = 2;
 	verdict->version = 2;
 	return ret;

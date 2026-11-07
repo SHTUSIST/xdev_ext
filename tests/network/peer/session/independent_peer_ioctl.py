@@ -31,7 +31,8 @@ typedef uint32_t u32;
 struct file { int refs, identity; };
 struct nvme_command { struct { unsigned char opcode; u32 nsid; } rw; };
 struct nvme_ns;
-struct ctrl_ops { int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *); };
+struct ctrl_ops { int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *);
+ int (*peer_batch)(struct nvme_ns *, struct xdev_ext_peer_nvme_batch *, struct file *); };
 struct ctrl { struct ctrl_ops *ops; };
 struct head { u32 ns_id; };
 struct nvme_ns { struct ctrl *ctrl; struct head *head; };
@@ -39,7 +40,7 @@ static bool has_rawio=true, cmd_allowed=true, bad_copyin, bad_copyout;
 static struct file original={1,7}, replacement={1,9};
 static struct file *fd_slot=&original;
 static struct xdev_ext_peer_nvme_batch *user_batch;
-static int calls, fail_at=-1, fail_status=-EIO, close_on_first, mutate_on_first, copyouts;
+static int calls, fail_at=-1, fail_status=-EIO, close_on_first, mutate_on_first, copyouts, batch_calls;
 static u32 last_opcode, last_nsid;
 static bool capable(int cap) { assert(cap==CAP_SYS_RAWIO); return has_rawio; }
 static bool nvme_cmd_allowed(struct nvme_ns *ns, struct nvme_command *cmd, unsigned flags, bool write)
@@ -62,6 +63,22 @@ static int native(struct nvme_ns *ns,const struct xdev_ext_peer_nvme_rw *u,struc
  if(i==0 && mutate_on_first) { user_batch->desc[1].offset=123;user_batch->desc[1].bytes=1;user_batch->generation=99; }
  return i==fail_at?fail_status:0;
 }
+/* The controller receives one kernel snapshot per ioctl and reports the
+ * completed prefix itself; fail_at names the first descriptor it did not
+ * complete, with fail_status. */
+static int native_batch(struct nvme_ns *ns,struct xdev_ext_peer_nvme_batch *b,struct file *f)
+{
+ batch_calls++;
+ assert(ns->head->ns_id==23 && f==&original && f->identity==7 && f->refs>=1);
+ assert(b!=user_batch && !b->completed && !b->status && b->generation==55 && b->nr==user_batch->nr);
+ for(u32 i=0;i<b->nr;i++)
+  assert(b->desc[i].offset==(uint64_t)i*65536 && b->desc[i].slba==(uint64_t)i*8 && b->desc[i].bytes==4096);
+ if(close_on_first) { fput(&original);fd_slot=&replacement; }
+ if(mutate_on_first) { user_batch->desc[1].offset=123;user_batch->desc[1].bytes=1;user_batch->generation=99; }
+ assert(f->refs>=1);
+ b->completed = fail_at<0 ? b->nr : (u32)fail_at;
+ return fail_at<0 ? 0 : fail_status;
+}
 '''
 MAIN = r'''
 static struct ctrl_ops ops={.peer_rw=native};
@@ -71,39 +88,39 @@ static void reset(void)
 {
  memset(&b,0,sizeof(b)); b.allocation_fd=3;b.generation=55;b.nr=3;
  for(u32 i=0;i<b.nr;i++) {b.desc[i].offset=(uint64_t)i*65536;b.desc[i].slba=i*8;b.desc[i].bytes=4096;}
- calls=copyouts=0; fail_at=-1;fail_status=-EIO;close_on_first=mutate_on_first=0;
+ calls=copyouts=batch_calls=0; fail_at=-1;fail_status=-EIO;close_on_first=mutate_on_first=0;
  has_rawio=cmd_allowed=true;bad_copyin=bad_copyout=false;original.refs=replacement.refs=1;
- fd_slot=&original;user_batch=&b;ops.peer_rw=native;
+ fd_slot=&original;user_batch=&b;ops.peer_rw=native;ops.peer_batch=native_batch;
 }
 static int batch(void) { return nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_BATCH,&b,0,true); }
 int main(void)
 {
  struct xdev_ext_peer_nvme_rw u;
  reset();close_on_first=mutate_on_first=1;
- assert(batch()==0 && calls==3 && b.completed==3 && b.status==0 && original.refs==0 && replacement.refs==1);
+ assert(batch()==0 && batch_calls==1 && !calls && b.completed==3 && b.status==0 && original.refs==0 && replacement.refs==1);
  assert(b.generation==55 && b.desc[1].offset==65536 && b.desc[1].bytes==4096);
  puts("ok 1 - actual batch snapshots descriptors once and holds original allocation across concurrent close/fd reuse");
  reset();fail_at=1;fail_status=0x182;
- assert(batch()==0x182 && calls==2 && b.completed==1 && b.status==0x182 && original.refs==1);
- reset();fail_at=0;assert(batch()==-EIO && calls==1 && !b.completed && b.status==-EIO && original.refs==1);
- puts("ok 2 - actual batch stops at first native failure, preserves successful prefix and never resends accepted error");
- reset();has_rawio=false;assert(batch()==-EPERM && !calls && original.refs==1);
- reset();b.flags=2;assert(batch()==-EINVAL && !calls);
+ assert(batch()==0x182 && batch_calls==1 && b.completed==1 && b.status==0x182 && original.refs==1);
+ reset();fail_at=0;assert(batch()==-EIO && batch_calls==1 && !b.completed && b.status==-EIO && original.refs==1);
+ puts("ok 2 - actual batch reports the controller's completed prefix and status and never resubmits the list");
+ reset();has_rawio=false;assert(batch()==-EPERM && !batch_calls && original.refs==1);
+ reset();b.flags=2;assert(batch()==-EINVAL && !batch_calls);
  reset();b.flags=XDEV_EXT_PEER_NVME_F_WRITE;
- assert(nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_BATCH,&b,0,false)==-EBADF && !calls);
- reset();assert(nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_BATCH,&b,NVME_IOCTL_PARTITION,true)==-EOPNOTSUPP && !calls);
- reset();cmd_allowed=false;assert(batch()==-EACCES && !calls);
- reset();ops.peer_rw=NULL;assert(batch()==-EOPNOTSUPP && !calls);
+ assert(nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_BATCH,&b,0,false)==-EBADF && !batch_calls);
+ reset();assert(nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_BATCH,&b,NVME_IOCTL_PARTITION,true)==-EOPNOTSUPP && !batch_calls);
+ reset();cmd_allowed=false;assert(batch()==-EACCES && !batch_calls);
+ reset();ops.peer_batch=NULL;assert(batch()==-EOPNOTSUPP && !batch_calls && !calls);
  puts("ok 3 - actual admission enforces RAWIO, write authority, partition exclusion, command permission and native capability");
- reset();b.desc[2].reserved=1;assert(batch()==-EINVAL && !calls && !copyouts);
- reset();b.nr=65;assert(batch()==-EINVAL && !calls);
- reset();b.nr=0;assert(batch()==-EINVAL && !calls);
- reset();b.completed=1;assert(batch()==-EINVAL && !calls);
- reset();b.status=-1;assert(batch()==-EINVAL && !calls);
- reset();b.reserved=1;assert(batch()==-EINVAL && !calls);
- reset();b.allocation_fd=-1;assert(batch()==-EBADF && !calls);
- reset();bad_copyin=true;assert(batch()==-EFAULT && !calls);
- reset();bad_copyout=true;assert(batch()==-EFAULT && calls==3 && original.refs==1);
+ reset();b.desc[2].reserved=1;assert(batch()==-EINVAL && !batch_calls && !copyouts);
+ reset();b.nr=65;assert(batch()==-EINVAL && !batch_calls);
+ reset();b.nr=0;assert(batch()==-EINVAL && !batch_calls);
+ reset();b.completed=1;assert(batch()==-EINVAL && !batch_calls);
+ reset();b.status=-1;assert(batch()==-EINVAL && !batch_calls);
+ reset();b.reserved=1;assert(batch()==-EINVAL && !batch_calls);
+ reset();b.allocation_fd=-1;assert(batch()==-EBADF && !batch_calls);
+ reset();bad_copyin=true;assert(batch()==-EFAULT && !batch_calls);
+ reset();bad_copyout=true;assert(batch()==-EFAULT && batch_calls==1 && original.refs==1);
  puts("ok 4 - actual batch validates full reserved list and bounded count before native work, handles raw-copy failures");
  reset();u=(struct xdev_ext_peer_nvme_rw){.allocation_fd=3,.generation=55,.bytes=4096};
  assert(nvme_peer_ioctl(&ns,XDEV_EXT_PEER_NVME_RW,&u,0,false)==0 && calls==1 && original.refs==1);
@@ -135,8 +152,12 @@ def main():
         ("RAWIO bypass", code.replace("if (!capable(CAP_SYS_RAWIO))", "if (!capable(CAP_SYS_RAWIO) && false)")),
         ("write permission bypass", code.replace("if (write && !open_for_write)", "if (write && !open_for_write && false)")),
         ("partition escape", code.replace("if (flags & NVME_IOCTL_PARTITION)", "if ((flags & NVME_IOCTL_PARTITION) && false)")),
-        ("accepted error retry", code.replace("if (ret) break;", "if (ret) { ret = nvme_peer_rw_allowed(ns, &u, flags, open_for_write, allocation); }\n  if (ret) break;")),
-        ("missed descriptor snapshot", code.replace(".offset = batch->desc[i].offset", ".offset = ((struct xdev_ext_peer_nvme_batch *)argp)->desc[i].offset")),
+        ("accepted error retry", code.replace(
+            " batch->status = nvme_peer_batch_allowed(ns, batch, flags, open_for_write, allocation);\n",
+            " batch->status = nvme_peer_batch_allowed(ns, batch, flags, open_for_write, allocation);\n"
+            " if (batch->status) batch->status = nvme_peer_batch_allowed(ns, batch, flags, open_for_write, allocation);\n")),
+        ("missed descriptor snapshot", code.replace("nvme_peer_batch_allowed(ns, batch, flags",
+            "nvme_peer_batch_allowed(ns, (struct xdev_ext_peer_nvme_batch *)argp, flags")),
     ]
     with tempfile.TemporaryDirectory(prefix="independent-peer-ioctl-") as tmp:
         directory = Path(tmp)

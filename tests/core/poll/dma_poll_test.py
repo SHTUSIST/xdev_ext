@@ -266,7 +266,8 @@ def build_fixture():
     lease = source('io_uring/xdev_ext_compfam_copy_lease.c')
     runtime = source('io_uring/xdev_ext_compfam_copy.c')
     dependencies += [function(lease, n) for n in (
-        'xdev_ext_comp_copy_lease_bind', 'xdev_ext_comp_copy_lease_get',
+        'xdev_ext_comp_copy_lease_bind', 'xdev_ext_comp_copy_lease_get_mode',
+        'xdev_ext_comp_copy_lease_get',
         'xdev_ext_comp_copy_lease_finish', 'xdev_ext_comp_copy_lease_hold',
         'xdev_ext_comp_copy_lease_busy', 'xdev_ext_comp_copy_lease_cleanup_begin',
         'xdev_ext_comp_copy_lease_unbind')]

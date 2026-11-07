@@ -306,7 +306,7 @@ def run(args):
     args.buffered = False
     if not producer(args).is_file() or not (args.build_dir / 'nnb_peer').is_file():
         if args.build_dir != HERE / '.build' or not args.correctness_only:
-            raise gate.Refused('not_run_capability', 'build first: make -C tests/eval/nvme_nic [ENABLE_URING=1 ENABLE_SESSION=1]')
+            raise gate.Refused('not_run_capability', f'build first: make -C {HERE} [ENABLE_URING=1 ENABLE_SESSION=1]')
         built = subprocess.run(['make', '-s', '-C', str(HERE), 'all'], text=True, capture_output=True)
         if built.returncode:
             raise gate.Refused('not_run_capability', 'build failed: ' + built.stderr)

@@ -252,6 +252,10 @@ static void test_start_check(void)
 
 static void test_class_sizes(void)
 {
+	struct xdev_ext_mech_layout layout = {
+		.frame_size = 4096, .seg_len = 4096, .group_bytes = 32 * 4096,
+	};
+
 	/* NVMe, AF_XDP and CE tables as the classes declare them. */
 	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(568, 64, 1, 16, 1, 64));
 	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(560, 16, 32, 8, 32, 0));
@@ -263,8 +267,19 @@ static void test_class_sizes(void)
 
 	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(0, 0, 1, 0, 0, 0));
 	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(0, 16, 0, 0, 0, 0));
-	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(0, 16, XDEV_EXT_MECH_MAX_FRAMES + 1, 0,
+	/* Descriptor entries can split host frames; the limits are independent. */
+	EXPECT_EQ(XDEV_EXT_MECH_MAX_DESCS, 64);
+	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(0, 16, 33, 0, 0, 0));
+	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(0, 16, 64, 0, 0, 0));
+	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(0, 16, XDEV_EXT_MECH_MAX_DESCS + 1, 0,
 					     0, 0));
+	/* Completion copies and the actual host layout still stop at 32 frames. */
+	EXPECT_EQ(XDEV_EXT_MECH_MAX_FRAMES, 32);
+	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(0, 16, 1, 8, 32, 0));
+	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(0, 16, 1, 8, 33, 0));
+	EXPECT_EQ(xdev_ext_mech_layout_frames(&layout), 32);
+	layout.group_bytes++;
+	EXPECT_EQ(xdev_ext_mech_layout_frames(&layout), -E2BIG);
 	EXPECT_TRUE(xdev_ext_mech_class_sizes_ok(XDEV_EXT_MECH_CLASS_SIZE_MAX, 128, 32,
 					    128, 32, XDEV_EXT_MECH_CLASS_SIZE_MAX));
 	EXPECT_FALSE(xdev_ext_mech_class_sizes_ok(XDEV_EXT_MECH_CLASS_SIZE_MAX + 1, 16,

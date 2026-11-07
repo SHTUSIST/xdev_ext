@@ -6,6 +6,7 @@
 int production_poll_select(bool);
 void production_poll_external_enable(bool);
 void production_poll_once(unsigned);
+unsigned production_poll_work_queued(unsigned);
 unsigned production_poll_rings(unsigned,unsigned *,unsigned *);
 unsigned production_poll_complete_tx(unsigned,unsigned);
 unsigned production_poll_pending(void);
@@ -14,6 +15,23 @@ void production_poll_worker_gone(unsigned);
 int production_poll_race(unsigned,bool);
 void production_poll_fail_allocation(unsigned);
 void production_poll_delay_control_ack(void);
+int production_poll_select_irq(bool);
+unsigned production_poll_complete_rx(unsigned,unsigned);
+unsigned production_poll_deliver_control(unsigned);
+int production_poll_rx_irq(unsigned,bool);
+bool production_poll_rx_pending(unsigned,bool);
+unsigned production_poll_rx_dropped(unsigned,bool);
+unsigned production_poll_ring_modes(unsigned,unsigned *,unsigned *,unsigned *);
+void production_poll_irq_latching(bool);
+unsigned production_poll_nhi_warns(void);
+void production_poll_inject_before_unmask(unsigned);
+unsigned production_poll_injected(void);
+void production_poll_irq_at_stop(unsigned);
+unsigned production_poll_late_injected(void);
+int production_poll_lock_order(unsigned);
+void production_poll_irq_before_gate(unsigned);
+unsigned production_poll_prestart_injected(void);
+static void no_link_activity(struct stack_world *,size_t,unsigned);
 static size_t native_callbacks(struct stack_world *w,unsigned endpoint,bool data)
 {
  size_t n=0;for(size_t i=0;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
@@ -261,12 +279,469 @@ static void diagnostic_progress_gap(void)
        "actual gap: session progress must dispatch already-completed native frames without external adapter poll");
  stack_destroy(w);
 }
+/* Interrupt-started polling (poll_on_interrupt). Private ledger kinds:
+ * 1000 X4 native poll return, 1002 production start_poll entered from the real
+ * __ring_interrupt (owner=ring), 1003 X4 re-enable just before the real
+ * tb_ring_poll_complete (flags=interrupt already enabled, length=completion
+ * waiting), 1004 X4/X5 mod_delayed_work on a link poll work (length=jiffies),
+ * 1005/1006 test device actions in the lost-wakeup and teardown windows. */
+static struct stack_world *irq_world(struct stack_config *c)
+{
+ CHECK(!c->nhi_poll&&!c->nhi_batch,"interrupt-started mode forbids adapter flag and notify injection");
+ CHECK(production_poll_select(false)==0,"pure polling stays at its default");
+ CHECK(production_poll_select_irq(true)==0,"irq-mode missing feature: real readonly default-false poll_on_interrupt bool must exist");
+ production_poll_external_enable(false);return create(c);
+}
+static void irq_startup(struct stack_world *w)
+{
+ CHECK(stack_probe(w,0)==0&&stack_probe(w,1)==0,"real probes allocate interrupt-started rings before CREATE");
+ for(unsigned i=0;i<100;i++)pump(w,1000000);
+ CHECK(count(w,STACK_EV_STARTUP_CONTROL_RX,-1,-1)>0&&count(w,STACK_EV_STARTUP_CALLBACK,-1,-1)>0,
+       "startup challenge completes through interrupt-started drains before CREATE");
+ for(unsigned endpoint=0;endpoint<2;endpoint++){
+  unsigned txirq,rxpoll,noirq,rings=production_poll_ring_modes(endpoint,&txirq,&rxpoll,&noirq);
+  CHECK(rings==4&&txirq==2&&rxpoll==2&&!noirq,"TX rings keep IRQ ring_work, RX rings have start_poll, none NO_INTERRUPT");
+ }
+}
+static void no_delayed_poll(struct stack_world *w,size_t begin)
+{
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind==1004)CHECK(!e.length,"interrupt-started mode never arms a delayed link poll");
+  if(e.kind==1000)CHECK(e.direction==2,"interrupt-started drains never poll a transmit ring");}
+}
+static uint64_t first_irq_ring(struct stack_world *w,size_t begin,unsigned endpoint,bool control)
+{
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind==1002&&e.endpoint==endpoint&&!!e.control==control)return e.owner;}
+ return 0;
+}
+/* One RX ring: start_poll masks and re-enables alternate, each re-enable
+ * follows an empty poll of that ring, and no mask is left open. */
+static unsigned irq_episodes(struct stack_world *w,size_t begin,uint64_t ring,bool allow_waiting)
+{
+ bool masked=false,empty=false;unsigned episodes=0;
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.owner!=ring)continue;
+  if(e.kind==1002){CHECK(!masked,"a masked ring interrupt cannot start polling twice");masked=true;empty=false;}
+  if(e.kind==1000&&masked&&!e.address)empty=true;
+  if(e.kind==1003){
+   CHECK(masked,"tb_ring_poll_complete re-enables only an interrupt start_poll masked");
+   CHECK(!e.flags,"the re-enabled interrupt was disabled until then");
+   CHECK(empty,"the drain polls the ring empty before re-enabling its interrupt");
+   if(!allow_waiting)CHECK(!e.length,"no completion waits at the re-enable");
+   masked=false;episodes++;
+  }
+ }
+ CHECK(!masked,"every interrupt start_poll masked is re-enabled exactly once");
+ return episodes;
+}
+static void irq_mode_selection(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_world(&c);irq_startup(w);
+ CHECK(count(w,STACK_EV_NHI_IRQ_ALLOC,-1,-1)>=8,"every ring of both endpoints has a real IRQ");
+ sessions(w,1,0);for(unsigned i=0;i<10;i++)pump(w,1000000);
+ size_t begin=stack_log_count(w);production_poll_once(0);production_poll_once(1);
+ for(size_t i=begin;i<stack_log_count(w);i++)CHECK(ev(w,i).kind!=1000,"session progress itself never polls native rings in this mode");
+ safety(w);stack_destroy(w);
+ CHECK(production_poll_select(true)==0,"select pure polling as well");
+ struct stack_world *both=NULL;
+ CHECK(stack_new(&c,&both)==-EINVAL&&!both,"module init refuses both completion modes at once");
+ CHECK(production_poll_select(false)==0&&production_poll_select_irq(false)==0,"restore default modes");
+}
+static void irq_no_timer_group(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_world(&c);irq_startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_start(w,1,c.first_seq,0)==0,"receiver arms actual RX slots, which make no commitment");
+ pump(w,0);
+ size_t begin=stack_log_count(w);
+ CHECK(stack_start(w,0,c.first_seq,0)==0,"sender starts the actual group");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ uint64_t t0=ev(w,begin).now_ns;bool ctl_irq=false,rts=false,data=false;
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  CHECK(e.now_ns==t0,"no simulated time passes in this window");
+  if(e.kind==1002&&e.endpoint==1&&e.control)ctl_irq=true;
+  if(e.kind==STACK_EV_CONTROL_RX&&e.endpoint==1&&e.control_type==1){CHECK(ctl_irq,"RTS discovery follows the receiver control RX interrupt");rts=true;}
+  if(e.kind==STACK_EV_NHI_CALLBACK&&e.endpoint==1&&!e.control&&!e.status){CHECK(e.flags==2,"armed data RX completes through the interrupt-started drain");data=true;}
+  if(e.kind==STACK_EV_NHI_CALLBACK&&e.direction==1&&!e.status)CHECK(e.flags==1,"TX completion stays on real ring_work");
+ }
+ CHECK(rts&&data,"control RX and armed data RX are discovered without a timer");
+ CHECK(count(w,STACK_EV_PUBLISH,1,-1)==1,"receiver publishes the group with no simulated time");
+ no_delayed_poll(w,begin);
+ CHECK(stack_release(w,1,c.first_seq)==0,"actual receiver consumer release");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_CONTROL_TX,1,3)==1,"one final ACK after consumer release");
+ CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1,"sender publishes after the ACK with no simulated time");
+ no_delayed_poll(w,begin);
+ addresses(w,&c);safety(w);stack_destroy(w);
+}
+static struct stack_world *irq_held_group(struct stack_config *c)
+{
+ struct stack_world *w=irq_world(c);irq_startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ fault(w,STACK_FAULT_HOLD_CALLBACK,1,0,0,1,0);
+ start(w,c->first_seq,0);for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(native_callbacks(w,1,true)==0,"held receiver data RX descriptors have not completed");
+ return w;
+}
+static void finish_held_group(struct stack_world *w,struct stack_config *c)
+{
+ fault(w,STACK_FAULT_RELEASE_CALLBACKS,1,0,0,0,0);for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_PUBLISH,1,-1)==1,"receiver publishes the group");
+ release_group(w,c->first_seq);
+ CHECK(count(w,STACK_EV_CONTROL_TX,1,3)==1,"one final ACK after consumer release");
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1,"sender publishes after the ACK");
+ addresses(w,c);safety(w);stack_destroy(w);
+}
+static void poll_callbacks_only(struct stack_world *w,size_t begin,unsigned endpoint)
+{
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind==STACK_EV_NHI_CALLBACK&&e.endpoint==endpoint&&!e.control&&!e.status)
+   CHECK(e.flags==2,"data RX callback runs from the interrupt-started drain");}
+}
+static void irq_drain_rearm_once(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_held_group(&c);
+ size_t begin=stack_log_count(w);
+ CHECK(production_poll_complete_rx(1,4)==4,"hardware completes the four delivered data RX descriptors");
+ CHECK(production_poll_rx_irq(1,false)==0,"the first completion's interrupt masked the data RX interrupt");
+ pump(w,0);
+ uint64_t ring=first_irq_ring(w,begin,1,false);
+ CHECK(ring,"the data RX interrupt entered production start_poll");
+ CHECK(irq_episodes(w,begin,ring,false)>=1,"at least one complete drain episode");
+ CHECK(native_callbacks(w,1,true)==4,"each completed data RX frame returns exactly once");
+ poll_callbacks_only(w,begin,1);
+ CHECK(production_poll_rx_irq(1,false)==1,"the data RX interrupt ends enabled");
+ no_delayed_poll(w,begin);
+ finish_held_group(w,&c);
+}
+/* One legal group has64 native elements:32 registered frames, two4096-byte
+ * chunks each. A group cannot have65 elements, and RX_POST forbids another
+ * native group until this one is locally complete. The65-completion stimulus
+ * therefore adds a real next-group RTS on the other (control) RX ring. */
+static struct stack_config irq_budget_geometry(void)
+{
+ struct stack_config c=geometry();c.nr_frames=32;c.native_elems=64;
+ for(unsigned i=0;i<32;i++)c.span[i]=(struct stack_span){65536ULL*(i+1),4096,8192};
+ return c;
+}
+static struct stack_world *irq_budget_backlog(struct stack_config *c,bool control)
+{
+ struct stack_world *w=irq_world(c);irq_startup(w);sessions(w,control?2:1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ fault(w,STACK_FAULT_HOLD_CALLBACK,1,0,0,1,0);
+ start(w,c->first_seq,0);for(unsigned i=0;i<10;i++)pump(w,0);
+ if(control){
+  fault(w,STACK_FAULT_HOLD_CONTROL,0,1,0,0,0);
+  /* No second receiver ARM: only an announcement, not a second RX post. */
+  CHECK(stack_start(w,0,c->first_seq+1,0)==0,"sender legally announces the next group within real credit");
+  for(unsigned i=0;i<10;i++)pump(w,0);
+ }
+ CHECK(count(w,STACK_EV_DATA_POST,0,-1)==64&&count(w,STACK_EV_DATA_POST,1,-1)==64,
+       "one legal real RTS/CTS group posts exactly64 data elements on both endpoints");
+ CHECK(count(w,STACK_EV_CONTROL_TX,0,1)==(control?2U:1U)&&count(w,STACK_EV_CONTROL_RX,1,1)==1,
+       "only the optional next-group RTS is held before control RX delivery");
+ CHECK(native_callbacks(w,1,true)==0&&!production_poll_rx_pending(1,false),
+       "held RX descriptors have neither completed nor returned callbacks");
+ CHECK(!production_poll_work_queued(1),"no old receiver drain precedes the budget stimulus");
+ return w;
+}
+struct irq_budget_window {
+ size_t begin;
+ unsigned completed;
+ uint64_t owner[65];
+ bool control[65],returned[65];
+};
+static struct irq_budget_window irq_budget_first_pass(struct stack_world *w,unsigned completed)
+{
+ struct irq_budget_window window={.begin=stack_log_count(w),.completed=completed};
+ CHECK(production_poll_complete_rx(1,64)==64,"hardware completes the legal group's64 delivered data RX descriptors");
+ if(completed==65)CHECK(production_poll_deliver_control(0)==1,"hardware delivers the real next-group RTS into control RX");
+ unsigned data=0,control=0,n=0;
+ for(size_t i=window.begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind!=STACK_EV_NHI_COMPLETE||e.endpoint!=1)continue;
+  CHECK(e.direction==2&&e.control<=1&&n<completed,"budget stimulus consists only of actual data/control RX completions");
+  for(unsigned j=0;j<n;j++)CHECK(window.owner[j]!=e.owner,"each marked descriptor has a distinct native owner");
+  window.owner[n]=e.owner;window.control[n++]=!!e.control;
+  if(e.control)control++;else data++;
+ }
+ CHECK(data==64&&control==completed-64&&n==completed,"stimulus is64 data plus zero or one real control RX completion");
+ CHECK(first_irq_ring(w,window.begin,1,false)&&production_poll_rx_irq(1,false)==0,
+       "the actual first completion interrupts and masks data RX");
+ if(completed==65)CHECK(first_irq_ring(w,window.begin,1,true)&&production_poll_rx_irq(1,true)==0,
+                       "the real control completion interrupts and masks control RX");
+ CHECK(production_poll_work_queued(1)==1,"actual start_poll queues exactly one receiver drain");
+ CHECK(stack_pump(w,1,0)==-ELOOP,"one real work invocation leaves immediately eligible work");
+ unsigned returned=0;
+ for(size_t i=window.begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind!=1000||e.endpoint!=1||!e.address)continue;
+  unsigned j=0;while(j<completed&&window.owner[j]!=e.address)j++;
+  CHECK(j<completed&&!window.returned[j],"each successful native pull returns a unique marked owner");
+  window.returned[j]=true;returned++;
+ }
+ CHECK(returned==64,"one IRQ worker invocation dispatches exactly64 total RX completions");
+ CHECK((unsigned)production_poll_rx_pending(1,false)+(unsigned)production_poll_rx_pending(1,true)==completed-64,
+       "only the65-total-completion stimulus leaves one completed RX tail across both rings");
+ CHECK(production_poll_rx_irq(1,false)==0,"full IRQ budget keeps the RX interrupt masked");
+ if(completed==65)CHECK(production_poll_rx_irq(1,true)==0,"full IRQ budget also keeps control RX masked");
+ CHECK(production_poll_work_queued(1)==1,"full IRQ budget immediately requeues exactly one drain");
+ unsigned requeues=0;
+ for(size_t i=window.begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.endpoint==1&&e.kind==1003)CHECK(false,"full-budget pass never rearms an RX interrupt");
+  if(e.endpoint==1&&e.kind==1004&&e.flags==2){CHECK(!e.length,"budget continuation has zero delay");requeues++;}
+ }
+ CHECK(requeues==1,"the full-budget worker itself queues one immediate continuation");
+ no_delayed_poll(w,window.begin);poll_callbacks_only(w,window.begin,1);
+ return window;
+}
+/* First callback after this descriptor completion determines its fate. A
+ * successful control callback may repost the same frame: its later STOP
+ * cancellation belongs to that new post, not to this completed ownership. */
+static void irq_budget_fates(struct stack_world *w,const struct irq_budget_window *window,bool stopped)
+{
+ unsigned successes=0,canceled=0;
+ for(unsigned j=0;j<window->completed;j++){
+  bool found=false;
+  for(size_t i=window->begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+   if(e.kind!=STACK_EV_NHI_CALLBACK||e.endpoint!=1||e.owner!=window->owner[j])continue;
+   bool cancel=stopped&&!window->returned[j];
+   CHECK(e.direction==2&&!!e.control==window->control[j],"callback retains its marked RX owner and ring type");
+   CHECK(e.status==(cancel?-ECANCELED:0),"returned owners succeed and only unreturned marked owners cancel at STOP");
+   CHECK(e.flags==(cancel?1U:2U),"marked owner callback comes from actual native ring_work or IRQ polling");
+   if(cancel)canceled++;else successes++;
+   found=true;break;
+  }
+  CHECK(found,"every marked completed owner reaches its actual native callback");
+ }
+ CHECK(successes==(stopped?64U:window->completed)&&canceled==(stopped?window->completed-64:0U),
+       "public64 budget leaves zero or one marked owner for native STOP cancellation");
+}
+static void irq_budget_64_65(void)
+{
+ for(unsigned completed=64;completed<=65;completed++){
+  struct stack_config c=irq_budget_geometry();struct stack_world *w=irq_budget_backlog(&c,completed==65);
+  struct irq_budget_window window=irq_budget_first_pass(w,completed);size_t begin=window.begin;
+  uint64_t now=ev(w,begin).now_ns;
+  pump(w,0);
+  irq_budget_fates(w,&window,false);
+  CHECK(native_callbacks(w,1,true)==64,"same-time continuation completes exactly the single64-element data group");
+  CHECK(!production_poll_rx_pending(1,false)&&!production_poll_rx_pending(1,true)&&
+        production_poll_rx_irq(1,false)==1&&production_poll_rx_irq(1,true)==1,
+        "continuation observes both RX rings empty then rearms even at exact64 total");
+  CHECK(!production_poll_work_queued(1),"empty continuation leaves no recurring IRQ poll work");
+  uint64_t pass=0;unsigned pulls=0,passes=0;
+  for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+   CHECK(e.now_ns==now,"budget drain and rearm require no timer advance");
+   if(e.kind!=1000||e.endpoint!=1||!e.address)continue;
+   CHECK(e.flags==2,"budget completions come from actual queued work, never session progress");
+   if(e.seq!=pass){CHECK(pulls<=64,"each real IRQ work pass respects the64-frame budget");pass=e.seq;pulls=0;passes++;}
+   pulls++;CHECK(pulls<=64,"each real IRQ work pass respects the64-frame budget");
+  }
+  CHECK(passes==(completed==65?2U:1U),"the65th successful native pull belongs to a second work pass");
+  CHECK(irq_episodes(w,begin,first_irq_ring(w,begin,1,false),false)>=1,
+        "budget continuation pairs every mask with an empty-poll rearm");
+  if(completed==65)CHECK(irq_episodes(w,begin,first_irq_ring(w,begin,1,true),false)>=1,
+                        "control RX mask is also paired with its empty-poll rearm");
+  no_delayed_poll(w,begin);poll_callbacks_only(w,begin,1);
+  CHECK(count(w,STACK_EV_DATA_POST,1,-1)==64&&count(w,STACK_EV_PUBLISH,1,-1)==1,
+        "the next RTS cannot native-post another RX group without a receiver ARM");
+  release_group(w,c.first_seq);
+  fault(w,STACK_FAULT_RELEASE_CALLBACKS,1,0,0,0,0);
+  if(completed==65){
+   CHECK(stack_start(w,1,c.first_seq+1,0)==0,"arm the announced second RX only after first consumer release");
+   fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);
+   for(unsigned i=0;i<10;i++)pump(w,1000000);
+   release_group(w,c.first_seq+1);
+  }
+  unsigned groups=completed==65?2U:1U;
+  CHECK(native_callbacks(w,0,true)==64*groups&&native_callbacks(w,1,true)==64*groups&&
+        count(w,STACK_EV_PUBLISH,0,-1)==groups&&count(w,STACK_EV_PUBLISH,1,-1)==groups,
+        "actual consumer releases and ACKs finish every legally posted group and native owner");
+  addresses(w,&c);safety(w);stack_destroy(w);
+ }
+}
+static void irq_budget_stop(void)
+{
+ for(unsigned completed=64;completed<=65;completed++){
+  struct stack_config c=irq_budget_geometry();struct stack_world *w=irq_budget_backlog(&c,completed==65);
+  struct irq_budget_window window=irq_budget_first_pass(w,completed);
+  unsigned warns=production_poll_nhi_warns();
+  CHECK(stack_suspend(w,1)==0,"suspend executes real rings_stop with a full-budget continuation queued");
+  /* The link survives suspend. Check before pumping: a broken cancel must
+   * fail by this assertion, not by executing stale work after ring retirement. */
+  CHECK(!production_poll_work_queued(1),"STOP removes the budget continuation from the actual work queue");
+  irq_budget_fates(w,&window,true);
+  unsigned data_tail=0;
+  for(unsigned j=0;j<window.completed;j++)data_tail+=!window.returned[j]&&!window.control[j];
+  struct stack_stage_facts facts=stage_facts(w,1,0);
+  CHECK(facts.slot_local_known&&facts.slot_local_quiesced==!data_tail,
+        "data custody follows whether any actual unreturned data owner canceled, independent of ring order");
+  size_t stopped=stack_log_count(w);
+  if(completed==65)fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);
+  for(unsigned i=0;i<10;i++)pump(w,1000000);
+  no_link_activity(w,stopped,1);
+  CHECK(production_poll_nhi_warns()==warns,"full-budget masked RX STOP raises no NHI warning");
+  if(data_tail)CHECK(count(w,STACK_EV_LEASE_RELEASE,1,-1)==0,"canceled data RX custody cannot falsely release payload leases");
+  addresses(w,&c);safety(w);stack_destroy(w);
+ }
+}
+static void irq_lost_wakeup(bool latching)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_held_group(&c);
+ production_poll_irq_latching(latching);
+ size_t begin=stack_log_count(w);unsigned dropped=production_poll_rx_dropped(1,false);
+ CHECK(production_poll_complete_rx(1,1)==1,"one held data RX descriptor completes and interrupts");
+ production_poll_inject_before_unmask(1);
+ pump(w,0);
+ CHECK(production_poll_injected()==1,"a completion lands after the final empty poll, before the re-enable");
+ CHECK(native_callbacks(w,1,true)==2,"the completion in the lost-wakeup window is delivered without a timer");
+ poll_callbacks_only(w,begin,1);
+ uint64_t ring=first_irq_ring(w,begin,1,false);
+ CHECK(ring&&irq_episodes(w,begin,ring,true)>=1,"masks and re-enables stay paired around the window");
+ CHECK(production_poll_rx_irq(1,false)==1,"the data RX interrupt ends enabled");
+ if(!latching)CHECK(production_poll_rx_dropped(1,false)==dropped+1,"a non-latching controller dropped the window completion's interrupt");
+ no_delayed_poll(w,begin);
+ production_poll_irq_latching(true);
+ finish_held_group(w,&c);
+}
+static void irq_lost_wakeup_latching(void){irq_lost_wakeup(true);}
+static void irq_lost_wakeup_nonlatching(void){irq_lost_wakeup(false);}
+static void pure_rts_waits_fallback(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=production_world(&c);startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_start(w,1,c.first_seq,0)==0,"receiver arms actual RX slots, which make no commitment");
+ pump(w,0);
+ CHECK(stack_start(w,0,c.first_seq,0)==0,"sender starts the actual group");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==0,"pure polling: the receiver does not see the RTS while no time passes");
+ CHECK(production_poll_rx_pending(1,true),"the RTS is complete in the receiver control RX ring");
+ pump(w,1000000);
+ CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==1,"the one-jiffy link fallback discovers the RTS");
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ release_group(w,c.first_seq);for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1&&count(w,STACK_EV_PUBLISH,1,-1)==1,"pure mode still completes the group");
+ addresses(w,&c);assert_sources(w);safety(w);stack_destroy(w);
+}
+static struct stack_world *irq_held_rts(struct stack_config *c)
+{
+ struct stack_world *w=irq_world(c);irq_startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ fault(w,STACK_FAULT_HOLD_CONTROL,0,1,0,0,0);
+ start(w,c->first_seq,0);for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==0,"the held RTS has not reached the receiver");
+ return w;
+}
+static void no_link_activity(struct stack_world *w,size_t begin,unsigned endpoint)
+{
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.endpoint!=endpoint)continue;
+  CHECK(e.kind!=1000&&e.kind!=1002&&e.kind!=1004,"no drain, start_poll or poll work after the link stopped");
+  if(e.kind==STACK_EV_NHI_CALLBACK)CHECK(e.flags!=2,"no poll-returned callback after the link stopped");
+ }
+}
+static void irq_stop_pending_drain(void)
+{
+ for(unsigned mode=0;mode<2;mode++){
+  struct stack_config c=geometry();struct stack_world *w=irq_held_rts(&c);
+  size_t begin=stack_log_count(w);unsigned warns=production_poll_nhi_warns();
+  CHECK(production_poll_deliver_control(0)==1,"hardware delivers the RTS into the receiver control RX");
+  bool queued=false;
+  for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);if(e.kind==1004&&e.endpoint==1)queued=true;}
+  CHECK(queued,"the receiver control RX interrupt queued its drain");
+  CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==0&&production_poll_rx_irq(1,true)==0,"drain pending, interrupt masked");
+  if(!mode){
+   size_t dispatches=count(w,STACK_EV_DISPATCH,1,-1);
+   production_poll_worker_gone(1);
+   pump(w,0);
+   CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==1,"the pending drain still collects the RTS after unbind");
+   CHECK(count(w,STACK_EV_DISPATCH,1,-1)==dispatches,"no dispatch reaches the unbound and freed receiver endpoint");
+  }
+  size_t removed=stack_log_count(w);
+  CHECK(stack_remove(w,1)==0,"remove the receiver link with its drain state");
+  for(unsigned i=0;i<10;i++)pump(w,1000000);
+  no_link_activity(w,removed,1);
+  CHECK(production_poll_nhi_warns()==warns,"stopping a ring start_poll left masked raises no NHI WARN");
+  fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);for(unsigned i=0;i<10;i++)pump(w,1000000);
+  safety(w);stack_destroy(w);
+ }
+}
+static void irq_stop_late_interrupt(void)
+{
+ for(unsigned mode=0;mode<2;mode++){
+  struct stack_config c=geometry();struct stack_world *w=irq_held_rts(&c);
+  size_t begin=stack_log_count(w);unsigned warns=production_poll_nhi_warns();
+  production_poll_irq_at_stop(1);
+  CHECK((mode?stack_suspend(w,1):stack_remove(w,1))==0,"teardown with a late receiver interrupt");
+  for(unsigned i=0;i<10;i++)pump(w,1000000);
+  CHECK(production_poll_late_injected()==1,"the RTS completes into the running control RX after the poll gate closed");
+  bool late=false,masked=false;size_t after=begin;
+  for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+   if(e.kind==1006&&e.endpoint==1){late=true;continue;}
+   if(!late||e.endpoint!=1)continue;
+   if(e.kind==1002&&e.control&&!masked){masked=true;after=i+1;continue;}
+   CHECK(e.kind!=1004&&e.kind!=1000,"a late interrupt queues no drain and polls nothing after the poll gate closed");
+  }
+  CHECK(late&&masked,"the late interrupt reached production start_poll");
+  no_link_activity(w,after,1);
+  CHECK(production_poll_nhi_warns()==warns,"stopping the ring start_poll just masked raises no NHI WARN");
+  fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);for(unsigned i=0;i<10;i++)pump(w,1000000);
+  safety(w);stack_destroy(w);
+ }
+}
+static void irq_interrupt_before_gate(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_world(&c);irq_startup(w);sessions(w,1,0);
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_suspend(w,1)==0,"receiver link suspends and stops its rings");
+ for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(stack_start(w,0,c.first_seq,0)==0,"sender announces while the receiver rings are stopped");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ size_t begin=stack_log_count(w);
+ production_poll_irq_before_gate(1);
+ CHECK(stack_resume(w,1)==0,"receiver link resumes and starts its rings again");
+ for(unsigned i=0;i<100;i++)pump(w,1000000);
+ CHECK(production_poll_prestart_injected()==1,"a peer control message completes into the receiver control RX before its interrupt gate opens");
+ uint64_t ring=0;bool marked=false,queued=false,enabled=false;
+ for(size_t i=begin;i<stack_log_count(w);i++){struct stack_event e=ev(w,i);
+  if(e.kind==1007&&e.endpoint==1)ring=e.owner;
+  if(!ring||e.endpoint!=1)continue;
+  if(e.kind==1002&&e.owner==ring&&!marked){marked=true;continue;}
+  if(marked&&!queued&&e.kind==1004){CHECK(!e.length,"the gate opening queues the drain without delay");queued=true;}
+  if(queued&&e.kind==1003&&e.owner==ring)enabled=true;
+ }
+ CHECK(marked&&queued&&enabled,"an interrupt before the gate is drained and re-enabled once the gate opens");
+ CHECK(production_poll_rx_irq(1,true)==1,"the receiver control RX interrupt ends enabled");
+ safety(w);stack_destroy(w);
+}
+static void irq_start_poll_lock_order(void)
+{
+ struct stack_config c=geometry();struct stack_world *w=irq_held_rts(&c);
+ size_t begin=stack_log_count(w);
+ CHECK(production_poll_lock_order(1)==0,"start_poll returns while another context holds xl->lock");
+ CHECK(first_irq_ring(w,begin,1,true),"the control RX interrupt entered production start_poll");
+ for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_CONTROL_RX,1,1)==1,"the queued drain collects the RTS once the lock is free");
+ no_delayed_poll(w,begin);
+ fault(w,STACK_FAULT_RELEASE_CONTROLS,0,0,0,0,0);for(unsigned i=0;i<10;i++)pump(w,0);
+ CHECK(count(w,STACK_EV_PUBLISH,1,-1)==1,"receiver publishes the group");
+ release_group(w,c.first_seq);for(unsigned i=0;i<10;i++)pump(w,1000000);
+ CHECK(count(w,STACK_EV_PUBLISH,0,-1)==1,"sender publishes after the ACK");
+ addresses(w,&c);safety(w);stack_destroy(w);
+}
 static const struct named poll_cases[]={
  {"legacy-irq",legacy_irq},{"mode-selection",mode_selection},{"startup-before-create",startup_before_create},
  {"four-ring-progress",four_ring_progress},{"budget-64-65",budget_64_65},{"pending-256",pending_256},
  {"worker-gone",worker_gone},{"stop-remove-unknown",stop_remove_unknown},{"partial-allocation",partial_allocation},
  {"control-tx-tail-progress",control_tx_tail_progress},{"idle-control-rx-no-spin",idle_control_rx_no_spin},
  {"poll-return-stop-race",poll_return_stop_race},{"poll-return-remove-race",poll_return_remove_race},{"diagnostic-progress-gap",diagnostic_progress_gap},
+ {"irq-mode-selection",irq_mode_selection},{"irq-no-timer-group",irq_no_timer_group},
+ {"irq-drain-rearm-once",irq_drain_rearm_once},{"irq-lost-wakeup-latching",irq_lost_wakeup_latching},
+ {"irq-budget-64-65",irq_budget_64_65},{"irq-budget-stop",irq_budget_stop},
+ {"irq-lost-wakeup-nonlatching",irq_lost_wakeup_nonlatching},{"pure-rts-waits-fallback",pure_rts_waits_fallback},
+ {"irq-stop-pending-drain",irq_stop_pending_drain},{"irq-stop-late-interrupt",irq_stop_late_interrupt},
+ {"irq-start-poll-lock-order",irq_start_poll_lock_order},{"irq-interrupt-before-gate",irq_interrupt_before_gate},
 };
 int main(int argc,char **argv)
 {

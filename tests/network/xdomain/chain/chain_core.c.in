@@ -2,8 +2,8 @@
 /*
  * The session core of io_uring/xdev_ext_mech.c (and the compute transform
  * hooks it calls), pasted verbatim by run.py at the markers below: CREATE
- * stage binding, buffers, PEER pool bind, START batch admission, the worker
- * run/acquire/build/submit path, native completion claim/publish/handoff,
+ * stage binding, failed-CREATE release, buffers, PEER pool bind, START batch
+ * admission, the worker run/acquire/build/submit path, native completion claim/publish/handoff,
  * drain/landing, frame release and recycling, stage kick/progress, STOP.
  * The class registry functions are pasted from io_uring/xdev_ext_mech_ops.c.
  *
@@ -56,6 +56,15 @@ const void *xdev_ext_mech_ops_get(u32 class_id, bool *pinned, struct module **ow
 	*owner = NULL;
 	return class_id < XDEV_EXT_MECH_CLASS_MAX ? &chain_default_program[class_id] : NULL;
 }
+void xdev_ext_mech_ops_put(const void *ops, bool pinned, struct module *owner)
+{
+	/* Matching boundary for the static defaults returned above. */
+	assert(!pinned && !owner);
+	for (u32 class_id = 0; class_id < XDEV_EXT_MECH_CLASS_MAX; class_id++)
+		if (ops == &chain_default_program[class_id])
+			return;
+	abort();
+}
 int xdev_ext_mech_instance_get_from_fd(u32 class_id, int fd, struct xdev_ext_mech_instance **out)
 {
 	(void)class_id; (void)fd; (void)out;
@@ -71,17 +80,24 @@ bool xdev_ext_mech_instance_current(const struct xdev_ext_mech_instance *instanc
 	(void)instance;
 	abort();
 }
+void xdev_ext_mech_instance_put(struct xdev_ext_mech_instance *instance)
+{
+	(void)instance;
+	abort(); /* no per-stage program instances are admitted by this fixture */
+}
 bool xdev_ext_mech_ops_current(u32 class_id, const void *ops, bool pinned)
 {
 	(void)pinned;
 	return class_id < XDEV_EXT_MECH_CLASS_MAX && ops == &chain_default_program[class_id];
 }
+#ifndef CHAIN_HOST_POOL
 int io_xdev_ext_umem_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct io_ring_ctx *ctx,
 				    const struct xdev_ext_mech_layout *l)
 {
 	(void)pool; (void)ctx; (void)l;
-	return -EOPNOTSUPP; /* only PEER pools are composed here */
+	return -EOPNOTSUPP; /* --pool host compiles the production provider (chain_umem.c) */
 }
+#endif
 int xsk_xdev_ext_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *f,
 				const struct xdev_ext_mech_layout *l)
 {
@@ -151,7 +167,19 @@ void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *d)
 	if (d->work.pending)
 		chain_dequeue(&d->work);
 }
-void kthread_destroy_worker(struct kthread_worker *w) { (void)w; }
+void kthread_flush_worker(struct kthread_worker *w)
+{
+	(void)w;
+	abort(); /* STOP reports are outside this fixture; CREATE passes NULL */
+}
+void kthread_destroy_worker(struct kthread_worker *w)
+{
+	/* CREATE rollback cancels its delayed work before destruction. An
+	 * outstanding callback needs a real flush, not a silent queue discard. */
+	assert(chain_running != w);
+	for (unsigned i = 0; i < chain_nr_queued; i++)
+		assert(chain_queue[i]->worker != w);
+}
 
 static struct kthread_work *chain_due(void)
 {
@@ -201,24 +229,35 @@ unsigned chain_core_current_worker(void) { return chain_running ? chain_running-
 struct xdev_ext_mech_session *chain_session_create(const struct xdev_ext_mech_create *c,
 						  int *err)
 {
-	struct xdev_ext_mech_session *s = kzalloc(sizeof(*s), GFP_KERNEL);
+	struct xdev_ext_mech_session *s;
 	u32 frames = 0;
 	int ret;
 
-	assert(s);
 	ret = xdev_ext_mech_create_check(c, &frames);
-	if (!ret) {
-		xdev_ext_mech_session_init(s, NULL, c, frames);
-		ret = xdev_ext_mech_session_bind(s, c, NULL);
+	if (ret) {
+		*err = ret;
+		return NULL;
 	}
+	s = kzalloc(sizeof(*s), GFP_KERNEL);
+	if (!s) {
+		*err = -ENOMEM;
+		return NULL;
+	}
+	xdev_ext_mech_session_init(s, NULL, c, frames);
+	ret = xdev_ext_mech_session_bind(s, c, NULL);
 	if (!ret)
 		ret = xdev_ext_mech_sess_activate(&s->ss);
-	if (!ret) {
-		/* The tail of CREATE after publication (create_common). */
-		smp_store_release(&s->progress_ready, true);
-		kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+	if (ret) {
+		/* Production CREATE preserves the refusal errno while the actual
+		 * checked release either unwinds or quarantines the whole session. */
+		xdev_ext_mech_session_release_disposition(s, NULL, NULL);
+		*err = ret;
+		return NULL;
 	}
-	*err = ret;
+	/* The tail of CREATE after publication (create_common). */
+	smp_store_release(&s->progress_ready, true);
+	kthread_queue_delayed_work(s->worker, &s->progress_work, 0);
+	*err = 0;
 	return s;
 }
 
@@ -249,6 +288,60 @@ int chain_session_start(struct xdev_ext_mech_session *s, u64 nr_batches, u64 fir
 	return ret;
 }
 
+/* --pool host: START with USER_FRAMES | RECYCLE, as user space hands its
+ * UMEM frames to an IOU_UMEM session.  The custody transfer is the
+ * production xdev_ext_mech_take_user_frames(); the admission and publication
+ * below follow xdev_ext_mech_start() for these flags (min(batches, depth)
+ * groups of frames, lent once and recycled until the START drains). */
+int chain_session_start_host(struct xdev_ext_mech_session *s, u64 nr_batches, u64 first_seq)
+{
+	u32 idx[64], nr = (u32)min_t(u64, nr_batches, s->depth) * s->frames, i;
+	unsigned long flags;
+	bool publish;
+	int ret = 0;
+
+	if (!nr || nr > ARRAY_SIZE(idx) || nr > s->pool.nr_frames)
+		return -EINVAL;
+	for (i = 0; i < nr; i++)
+		idx[i] = i;
+	spin_lock_irqsave(&s->lock, flags);
+	if (!xdev_ext_mech_session_admits(s))
+		ret = -ESHUTDOWN;
+	else if (s->start_preparing || s->start_return_pending || s->start_left ||
+		 s->start_queue || s->start_recycle || s->ss.inflight)
+		ret = -EBUSY;
+	else
+		s->start_preparing = true;
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (ret)
+		return ret;
+	ret = xdev_ext_mech_take_user_frames(s, idx, nr);
+	spin_lock_irqsave(&s->lock, flags);
+	publish = !ret && xdev_ext_mech_session_admits(s);
+	if (publish) {
+		s->start_left = nr_batches;
+		s->start_seq = first_seq;
+		s->start_to_user = true;
+		s->start_ordered = false;
+		s->start_recycle = true;
+		s->start_return_pending = true;
+	} else if (!ret) {
+		s->start_return_pending = true;
+		ret = -ESHUTDOWN;
+	}
+	s->start_preparing = false;
+	xdev_ext_mech_settle_locked(s);
+	xdev_ext_mech_notify_locked(s, false);
+	if (!s->worker_gone) {
+		if (!xdev_ext_mech_session_admits(s))
+			kthread_queue_work(s->worker, &s->stop_work);
+		else if (!ret)
+			kthread_queue_work(s->worker, &s->kick_work);
+	}
+	spin_unlock_irqrestore(&s->lock, flags);
+	return ret;
+}
+
 /* ---- observation only: read raw core state, never decide ------------- */
 u32 chain_frame_custody(struct xdev_ext_mech_session *s, u32 index)
 { return xdev_ext_mech_pool_frame_state(&s->pool, index); }
@@ -256,6 +349,29 @@ u32 chain_frame_phase(struct xdev_ext_mech_session *s, u32 index)
 { return xdev_ext_mech_life_phase(&s->life[index]); }
 u32 chain_pool_frames(struct xdev_ext_mech_session *s) { return s->pool.nr_frames; }
 u32 chain_frame_state_free(void) { return XDEV_EXT_MECH_F_K_FREE; }
+u32 chain_frame_state_user(void) { return XDEV_EXT_MECH_F_USER; }
+u32 chain_frame_state_sequestered(void) { return XDEV_EXT_MECH_F_SEQUESTERED; }
+/* The release decision's first question to a stage: may it give back its
+ * device state?  0 for a class without the hook. */
+int chain_stage_unbind_checked(struct xdev_ext_mech_session *s, u32 i)
+{
+	struct xdev_ext_mech_stage *st = &s->st[i];
+
+	return st->cls->unbind_checked ? st->cls->unbind_checked(st) : 0;
+}
+/* The release decision's order for one stage, as in
+ * xdev_ext_mech_session_release_disposition(): the checked unbind first, then
+ * the class unbind only when the checked unbind allowed release.  Called with
+ * nothing in flight, as the core calls it after its drain. */
+int chain_stage_unbind_now(struct xdev_ext_mech_session *s, u32 i)
+{
+	struct xdev_ext_mech_stage *st = &s->st[i];
+	int err = st->cls->unbind_checked ? st->cls->unbind_checked(st) : 0;
+
+	if (!err && st->cls->unbind)
+		st->cls->unbind(st);
+	return err;
+}
 u64 chain_session_done(struct xdev_ext_mech_session *s) { return atomic64_read(&s->done); }
 u64 chain_session_aborted(struct xdev_ext_mech_session *s) { return atomic64_read(&s->aborted); }
 u64 chain_session_counter(struct xdev_ext_mech_session *s, u32 c) { return atomic64_read(&s->cnt[c]); }

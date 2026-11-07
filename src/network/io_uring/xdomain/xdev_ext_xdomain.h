@@ -70,6 +70,12 @@ struct xdev_ext_xd_link {
 	u64 poll_generation, poll_wake;
 	struct mutex poll_mutex;
 	struct delayed_work poll_work;
+	/* Immutable mode: receive-ring interrupts queue poll_work. start_poll runs
+	 * under the NHI and ring spinlocks, which nest inside xl->lock, so its
+	 * gate and the per-ring masked marks use the leaf poll_irq_lock.
+	 */
+	bool poll_on_interrupt, poll_irq_live;
+	spinlock_t poll_irq_lock;
 	bool up, going_away, suspended, gone, nhi_gone;
 	bool logged_in, remote_logged_in, e2e;
 	bool receive_ready;			/* native rings + receive paths; lock */
@@ -92,7 +98,7 @@ struct xdev_ext_xd_link {
 	int ctl_out_hopid, ctl_in_hopid;
 	bool ctl_paths;
 	struct xdev_ext_xd_rings *rings;
-	/* X4 owns per-allocation custody and preallocated quarantine records. */
+	/* Device owns live custody; coherent storage ownership resides in core. */
 	struct xdev_ext_xd_ctl_allocation *ctl_rx_alloc, *ctl_tx_alloc;
 	u8 *ctl_rx_buf, *ctl_tx_buf;
 	dma_addr_t ctl_rx_dma, ctl_tx_dma;
@@ -150,6 +156,7 @@ void xdev_ext_xd_probe_ctl_complete_locked(struct xdev_ext_xd_link *, bool);
 void xdev_ext_xd_probe_ctl_error_locked(struct xdev_ext_xd_link *, int);
 ssize_t xdev_ext_xd_probe_show(struct xdev_ext_xd_link *, char *);
 /* xdev_ext_xdomain_class.c */
+bool xdev_ext_xd_class_ctl_rts_cts(struct xdev_ext_mech_stage *st);
 void xdev_ext_xd_class_ctl(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg *m);
 void xdev_ext_xd_class_ctl_v2(struct xdev_ext_mech_stage *st, const struct xdev_ext_xd_msg_v2 *m);
 void xdev_ext_xd_class_detach(struct xdev_ext_mech_stage *st);

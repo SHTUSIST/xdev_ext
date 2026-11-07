@@ -212,6 +212,19 @@ int xdev_ext_requester_bind(struct xdev_ext_requester *rq,struct xdev_ext_mech_s
  return side->admission_error;
 }
 void xdev_ext_requester_unbind(struct xdev_ext_requester *rq) { memset(rq,0,sizeof(*rq)); }
+/* These fixtures bind POOL_PEER only: the IOU_UMEM host-page requester entries
+ * must never be reached, and with no host mapping (rq->host stays NULL) the
+ * actual xdev_ext_requester_host_settled() returns 0. */
+int xdev_ext_requester_bind_host(struct xdev_ext_requester *rq,struct xdev_ext_mech_stage *st,struct pci_dev *pdev)
+{ (void)rq;(void)st;(void)pdev;assert(!"PEER fixture unexpectedly mapped host pages");return -EINVAL; }
+void xdev_ext_requester_unbind_host(struct xdev_ext_requester *rq)
+{ (void)rq;assert(!"PEER fixture unexpectedly released a host-page mapping"); }
+int xdev_ext_requester_host_lease(struct xdev_ext_requester *rq,u64 off,u32 len,enum dma_data_direction dir,u64 *dma)
+{ (void)rq;(void)off;(void)len;(void)dir;(void)dma;assert(!"PEER fixture unexpectedly leased a host page");return -EINVAL; }
+void xdev_ext_requester_host_release(struct xdev_ext_requester *rq,u64 dma,u32 len,bool quiesced)
+{ (void)rq;(void)dma;(void)len;(void)quiesced;assert(!"PEER fixture unexpectedly released a host page"); }
+int xdev_ext_requester_host_settled(const struct xdev_ext_requester *rq)
+{ assert(!rq->host);return 0; }
 static void capture_debug(struct device *dev,const char *format,...) {
  struct side *side=NULL;for(unsigned i=0;i<2;i++)if(dev==&requester[i].dev)side=&sides[i];assert(side);
  va_list ap;va_start(ap,format);vsnprintf(side->diagnostic,sizeof(side->diagnostic),format,ap);va_end(ap);

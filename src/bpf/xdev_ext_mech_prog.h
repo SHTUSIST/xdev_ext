@@ -728,13 +728,13 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_ce_base(__u64 index, __u32 group_bytes,
 }
 
 /*
- * Copy-plan entry for frame @pos of @nr: its data span to @gpu_off, the
- * completion point on the last.  The device side must stay in the window
+ * Copy-plan piece for original frame @pos: its data span to @gpu_off,
+ * with an explicit final-piece completion point. Device bytes stay in the window
  * and in one @seg_size segment (0: one segment) and be at most the largest
  * entry (max_entry_len, else seg_size, else any).
  */
-XDEV_EXT_MP_INLINE int xdev_ext_mp_ce_entry(struct xdev_ext_ce_copy_desc *d, __u32 pos,
-				  __u32 nr, __u32 frame_off, __u32 len,
+XDEV_EXT_MP_INLINE int xdev_ext_mp_ce_piece(struct xdev_ext_ce_copy_desc *d, __u32 pos,
+				  bool final_piece, __u32 frame_off, __u32 len,
 				  __u64 gpu_off, __u64 window_len,
 				  __u32 seg_size, __u32 max_entry_len)
 {
@@ -755,8 +755,18 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_ce_entry(struct xdev_ext_ce_copy_desc *d, __u
 	d->frame_off = frame_off;
 	d->gpu_off = gpu_off;
 	d->len = len;
-	d->flags = pos + 1 == nr ? XDEV_EXT_MP_CE_F_COMPLETION_POINT : 0;
+	d->flags = final_piece ? XDEV_EXT_MP_CE_F_COMPLETION_POINT : 0;
 	return 0;
+}
+
+/* Preserve the original one-entry-per-frame API and its completion rule. */
+XDEV_EXT_MP_INLINE int xdev_ext_mp_ce_entry(struct xdev_ext_ce_copy_desc *d, __u32 pos,
+				  __u32 nr, __u32 frame_off, __u32 len,
+				  __u64 gpu_off, __u64 window_len,
+				  __u32 seg_size, __u32 max_entry_len)
+{
+	return xdev_ext_mp_ce_piece(d, pos, pos + 1 == nr, frame_off, len,
+				   gpu_off, window_len, seg_size, max_entry_len);
 }
 
 /* CE complete: C classified the outcome; only a pre-submit failure retries. */

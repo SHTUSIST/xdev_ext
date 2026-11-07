@@ -39,7 +39,7 @@ CASES = (BASE_CASES + tuple(c + '_early' for c in BASE_CASES) + ('no_link_enodev
          tuple(c + w for w in WINDOWS for c in BASE_CASES) +
          tuple(c + w + '_early' for w in WINDOWS for c in BASE_CASES) +
          WINDOW_CASES + tuple(c + '_early' for c in WINDOW_CASES) +
-         ('window_next_after_cts', 'window_withdrawn_head'))
+         ('window_next_after_cts', 'window_withdrawn_head', 'window_rts_cts_v2'))
 # A window of 1 must behave exactly as no window: NAME and its window-1 twin.
 IDENTITY = BASE_CASES + tuple(c + '_early' for c in BASE_CASES)
 
@@ -48,12 +48,17 @@ def w1_twin(name):
     return name[:-len('_early')] + '_w1_early' if name.endswith('_early') else name + '_w1'
 
 
-ALL_CASES = CASES + tuple(w1_twin(c) for c in IDENTITY)
+# --pool host only: element synchronization, UNKNOWN custody, pool geometry,
+# release of a settled stage.
+HOST_CASES = ('host_sync_order', 'host_sync_order_early', 'host_unknown_retained',
+              'host_misaligned_refused', 'host_destroy_unmaps')
+ALL_CASES = CASES + tuple(w1_twin(c) for c in IDENTITY) + HOST_CASES
 # Worker entry points; their call-graph closure inside the core text is compiled.
 CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
     'xdev_ext_mech_retry_work', 'xdev_ext_mech_stop_work', 'xdev_ext_mech_session_init',
     'xdev_ext_mech_session_buffers', 'xdev_ext_mech_session_bind',
+    'xdev_ext_mech_session_release_disposition',
     'xdev_ext_mech_batch_complete', 'xdev_ext_mech_batch_sequester',
     'xdev_ext_mech_batch_complete_cancelled', 'xdev_ext_mech_stage_kick',
     'xdev_ext_mech_stage_dead', 'xdev_ext_mech_stage_stop', 'xdev_ext_mech_stage_stop_error',
@@ -69,9 +74,12 @@ CORE_ROOTS = (
     'xdev_ext_mech_trace_plan', 'xdev_ext_mech_trace_xdomain_enabled',
     'xdev_ext_mech_trace_xdomain', 'xdev_ext_mech_trace_descriptor_bind',
     'xdev_ext_mech_batch_completion_claim', 'xdev_ext_mech_batch_completion_publish',
-    'xdev_ext_mech_frame_recycle', 'xdev_ext_mech_frame_publish')
+    'xdev_ext_mech_frame_recycle', 'xdev_ext_mech_frame_publish',
+    # --pool host: START lends the ring's UMEM frames through this function.
+    'xdev_ext_mech_take_user_frames')
 # Fixture-owned in this unit or chain_boundary.c: program invocation, per-stage
-# program instances, and session teardown/report paths outside this scope.
+# program instances, and reap/DESTROY entry paths outside this scope. Failed
+# CREATE uses the actual release disposition and its checked/quarantine rules.
 CORE_STOP = ('xdev_ext_mech_call', 'xdev_ext_mech_stage_has_member', 'xdev_ext_mech_reap',
              'xdev_ext_mech_group_timeout', 'xdev_ext_mech_poll_work', 'xdev_ext_mech_create',
              'xdev_ext_mech_create_common', 'xdev_ext_mech_instance_get_from_fd')
@@ -125,6 +133,34 @@ MUTATIONS = {
     # DMA-BUF pool only: a lease uses whichever attachment was made first.
     'dmabuf-lease-first-mapping': dict(case='chain_same_worker', pool='dmabuf', edits=[
         ('io_uring/xdev_ext_peer_fd.c', '  if (m->peer == peer) goto acquire;', '  goto acquire;')]),
+    # --pool host (set automatically): each makes one host-page requirement false.
+    'host-release-always-quiesced': dict(case='host_unknown_retained', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c', 'lease->u.hdma.len, quiesced);', 'lease->u.hdma.len, true);')]),
+    'host-unbind-checked-passes': dict(case='host_unknown_retained', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         'return xs && xs->ns.admitted ? xdev_ext_requester_host_settled(&xs->ns.rq) : 0;', 'return 0;')]),
+    'host-no-device-sync': dict(case='host_sync_order', pool='host', edits=[
+        ('io_uring/family/xdev_ext_requester.c',
+         '\t\tdma_sync_single_for_device(&h->pdev->dev, addr, len, h->dir);\n', '\t\t;\n')]),
+    'host-no-cpu-sync': dict(case='host_sync_order', pool='host', edits=[
+        ('io_uring/family/xdev_ext_requester.c',
+         '\t\tdma_sync_single_for_cpu(&h->pdev->dev, dma, len, DMA_FROM_DEVICE);\n', '\t\t;\n')]),
+    'host-post-peer-address': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_ring.c',
+         '\t\tif (e[i].lease.kind == XDEV_EXT_NET_LEASE_HOST_DMA)\n\t\t\tf->buffer_phy = e[i].lease.u.hdma.dma;\n',
+         '')]),
+    'host-lease-wrong-frame': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c', 'err = xdev_ext_requester_host_lease(&ns->rq, off, buf_len,',
+         'err = xdev_ext_requester_host_lease(&ns->rq, ns->rx ? off : off ^ 4096, buf_len,')]),
+    'host-peer-member': dict(case='chain_same_worker', pool='host', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         'pool_kind == XDEV_EXT_MECH_POOL_PEER ? &xd_member : &xd_member_host', '&xd_member')]),
+    # The family's fini forgets the host-page unbind, so a host-page stage takes
+    # the PEER unbind and keeps its whole mapping (review of d3dced6).
+    'review-fini-skips-host-unbind': dict(case='host_destroy_unmaps', pool='host', edits=[
+        ('io_uring/family/xdev_ext_netfam.c',
+         '\tif (ns->admitted && ns->m->lease_kind == XDEV_EXT_NET_LEASE_HOST_DMA) {\n'
+         '\t\txdev_ext_requester_unbind_host(&ns->rq);\n\t\tns->admitted = false;\n\t}\n', '')]),
     'tx-wrong-frame': dict(case='chain_same_worker', edits=[
         ('io_uring/family/xdev_ext_netfam.c',
          '\t\t\t\t\t xdev_ext_peer_mech_pool_generation(pool), off, buf_len,',
@@ -160,7 +196,13 @@ MUTATIONS = {
     # it, so its submit bounces to the core retry timer.
     'window-early-ready-without-grant': dict(case='window_refills_receiver_early', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c',
-         '\tif (ready && xs->early)\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n', '')]),
+         '\tif (ready && xd_paired(xs))\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n', '')]),
+    # Restoring the envelope flag gate stalls an RTS/CTS program on a grant
+    # that it never requests, even after its first native post was accepted.
+    'window-envelope-as-protocol': dict(case='window_rts_cts_v2', edits=[
+        ('io_uring/xdomain/xdev_ext_xdomain_class.c',
+         '\tif (ready && xd_paired(xs))\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n',
+         '\tif (ready && xs->early)\n\t\tready = xs->grant_state == XDEV_EXT_XDP_GRANT_AVAILABLE;\n')]),
     # The class accepts the window but does not hand it to the core.
     'window-bind-ignored': dict(case='window_fills_w2', edits=[
         ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',
@@ -254,7 +296,16 @@ def core_unit(kernel, build):
     defs = definitions(text)
     names = closure(defs, CORE_ROOTS, set(CORE_STOP))
     preamble = core[:core.index('\n', core.index('enum xdev_ext_mech_end {'))]
-    types = [re.search(r'^enum xdev_ext_mech_end \{\n.*?^\};', core, re.M | re.S)[0]]
+    # Failed-CREATE release also compiles the report/statistics dependencies.
+    # Keep the complete actual policy UAPI (including its guard), with only
+    # includes omitted: chain_core.c.in already includes linux/xdev_ext_mech.h
+    # and hence the actual mechanism UAPI and its v1/v2/v3 transport types.
+    # These declarations must precede generated prototypes, or parameter-only
+    # struct tags would acquire prototype scope instead of the real ABI type.
+    policy = (kernel / 'include/uapi/linux/xdev_ext_policy.h').read_text()
+    policy = replace(policy, '#include <linux/types.h>\n#include "xdev_ext_mech.h"\n', '',
+                     'policy UAPI dependencies supplied by the core header')
+    types = [policy, re.search(r'^enum xdev_ext_mech_end \{\n.*?^\};', core, re.M | re.S)[0]]
     for name in ('xdev_ext_mech_batch', 'xdev_ext_mech_session'):
         match = re.search(r'^struct ' + name + r' \{\n.*?^\};', core, re.M | re.S)
         if not match:
@@ -422,6 +473,16 @@ def xdomain_units(kernel, build, root, pool='provider'):
          'void chain_record_dispatch_v2(struct xdev_ext_mech_stage *, const struct xdev_ext_xd_msg_v2 *);\n'
          '#define xdev_ext_xd_class_ctl_v2 chain_record_dispatch_v2\n',
          'EARLY (v2) control dispatch is recorded like the v1 dispatch')
+    if pool == 'host':
+        edit('stack_kernel_compat.h', 'struct pci_dev{struct device dev;unsigned refs;bool msix_enabled;};',
+             'struct pci_bus{unsigned char number;};struct pci_dev{struct device dev;unsigned refs;'
+             'bool msix_enabled;struct pci_bus*bus;unsigned int devfn;unsigned int untrusted:1;};',
+             'pci_dev has the bus, devfn and untrusted fields the real requester unit reads')
+        # The requester unit's Linux headers: empty, declarations in chain_host_env.h.
+        for name in re.findall(r'^#include <(linux/[^>]+)>', (kernel / 'io_uring/family/xdev_ext_requester.c').read_text(), re.M):
+            if 'xdev_ext' not in name and not (env / name).exists():
+                (env / name).parent.mkdir(parents=True, exist_ok=True)
+                (env / name).write_text('/* kernel environment facade, no production bodies */\n')
     probe = build / 'xd_probe.c'
     probe.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n#include "stack_nhi_api.h"\n'
                      '#define tb_ring_tx stack_ring_tx\n#define tb_ring_rx stack_ring_rx\n'
@@ -430,8 +491,22 @@ def xdomain_units(kernel, build, root, pool='provider'):
     prog.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
                     '#define LICENSE chain_nvme_s0_license\n#define mode chain_nvme_s0_mode\n'
                     '#include "' + str(kernel / 'tools/xdev_ext_mech/nvme_s0.bpf.c') + '"\n')
+    rts_prog = build / 'xdomain_rts_cts_prog.c'
+    rts_prog.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
+                        '#define LICENSE chain_rts_cts_license\n'
+                        '#define xdomain_peer_prepare chain_rts_cts_prepare\n'
+                        '#define xdomain_peer_build chain_rts_cts_build\n'
+                        '#define xdomain_peer_complete chain_rts_cts_complete\n'
+                        '#define xdomain_peer_ops chain_rts_cts_ops\n'
+                        '#include "' + str(kernel / 'tools/xdev_ext_mech/xdomain_rts_cts.bpf.c') + '"\n')
     units = [fixture / n for n in ('stack_x3.c', 'stack_x4.c', 'stack_x5.c', 'stack_family.c',
-                                   'stack_x6.c', 'stack_nhi.c')] + [probe, prog, HERE / 'chain_boundary.c']
+                                   'stack_x6.c', 'stack_nhi.c')] + [probe, prog, rts_prog, HERE / 'chain_boundary.c']
+    if pool == 'host':
+        requester_unit = build / 'host_requester.c'
+        requester_unit.write_text('#define STACK_INTERNAL\n#include "stack_kernel_compat.h"\n'
+                                  '#include "chain_host_env.h"\n#include "' +
+                                  str(kernel / 'io_uring/family/xdev_ext_requester.c') + '"\n')
+        units.append(requester_unit)
     requester = (kernel / 'io_uring/family/xdev_ext_requester.c').read_text()
     boundary = (HERE / 'chain_boundary.c').read_text()
     split = find_definition(requester, 'xdev_ext_peer_lease_split')
@@ -439,12 +514,21 @@ def xdomain_units(kernel, build, root, pool='provider'):
     # In DMA-BUF mode the real requester unit supplies xdev_ext_peer_lease_split.
     generated.write_text(replace(boundary, '/* LEASE_SPLIT */', split if pool == 'provider' else
                                  '/* xdev_ext_peer_lease_split: real requester unit */', 'lease split'))
-    units[-1] = generated
+    units[units.index(HERE / 'chain_boundary.c')] = generated
     flags = ['-DSTACK_STARTUP_EVENTS', '-DSTACK_REAL_NHI', '-I', str(env), '-I', str(fixture),
              '-I', str(kernel), '-idirafter', str(kernel / 'include'),
              '-idirafter', str(kernel / 'include/uapi'), '-I', str(kernel / 'tools/xdev_ext_mech'),
              '-I', str(HERE)] + (['-DCHAIN_REAL_PEER'] if pool == 'dmabuf' else [])
-    return units, flags, edits
+    # Per-unit flags: the family's host leases reach the device model through
+    # chain_boundary.c, which calls the real requester (host mode) or aborts.
+    extra = {fixture / 'stack_family.c': ['-Dxdev_ext_requester_host_lease=chain_host_lease',
+                                         '-Dxdev_ext_requester_host_release=chain_host_release',
+                                         '-Dxdev_ext_requester_bind_host=chain_host_bind',
+                                         '-Dxdev_ext_requester_unbind_host=chain_host_unbind']}
+    if pool == 'host':
+        extra[units[-1]] = ['-Dxdev_ext_requester_bind=chain_real_requester_bind',
+                            '-Dxdev_ext_requester_unbind=chain_real_requester_unbind']
+    return [(u, extra.get(u, [])) for u in units], flags, edits
 
 
 PEER_RENAMES = ['-Dxdev_ext_peer_file_claim=chain_real_peer_file_claim',
@@ -498,11 +582,13 @@ def peer_units(root, kernel, build, common):
 DIRECT_READS = ('io_uring/xdev_ext_mech.c', 'io_uring/xdev_ext_compfam_transform.c', 'io_uring/xdev_ext_mech_ops.c',
                 'drivers/nvme/host/nvme.h', 'drivers/nvme/host/core.c', 'drivers/nvme/host/ioctl.c',
                 'include/trace/events/xdev_ext.h', 'io_uring/family/xdev_ext_requester.c',
+                'include/uapi/linux/xdev_ext_policy.h',
                 # NHI ring section extracted by the stack fixture's generator, and the
                 # stack fixture scripts this runner executes.
                 'drivers/thunderbolt/nhi.c', 'drivers/thunderbolt/nhi_regs.h', 'include/linux/thunderbolt.h',
                 str(STACK / 'stack_test.py'), str(STACK / 'stack_nhi_source.py'))
 DMABUF_DIRECT_READS = ('drivers/dma-buf/heaps/system_heap.c',)
+HOST_DIRECT_READS = ('io_uring/xdev_ext_umem.c',)
 
 
 def sha256(path):
@@ -530,7 +616,8 @@ def read_inputs(root, out, kernel, hashes, pool):
     for dep in sorted((out / 'build').rglob('*.d')):
         for item in dep.read_text().replace('\\\n', ' ').split(':', 1)[-1].split():
             add(item)
-    for native in DIRECT_READS + (DMABUF_DIRECT_READS if pool == 'dmabuf' else ()):
+    for native in DIRECT_READS + (DMABUF_DIRECT_READS if pool == 'dmabuf' else ()) + \
+            (HOST_DIRECT_READS if pool == 'host' else ()):
         add(kernel / native)
     files = [f for f in HERE.iterdir() if f.is_file()]
     if pool == 'dmabuf':
@@ -571,7 +658,8 @@ def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
     cc = os.environ.get('CC', 'gcc')
     common = ['-std=gnu11', '-O0', '-g', '-Wall', '-Wextra', '-Wno-unused-function',
               '-Wno-unused-parameter', '-Wno-missing-field-initializers',
-              '-Werror=implicit-function-declaration', '-pthread']
+              '-Werror=implicit-function-declaration', '-pthread'] + \
+        (['-DCHAIN_HOST_POOL'] if pool == 'host' else [])
     if sanitize:
         common += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer']
     log = []
@@ -605,6 +693,17 @@ def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
         pool_flags = core_flags + ['-include', str(HERE / 'chain_core_env.h')]
         compile_unit(cc, pool_flags, kernel / 'io_uring/xdev_ext_mech_peer_pool.c', build / 'pool.o', log)
         objects.append(build / 'pool.o')
+        if pool == 'host':
+            umem = (kernel / 'io_uring/xdev_ext_umem.c').read_text()
+            begin = umem.find('struct io_xdev_ext_umem_mech {')
+            end = umem.find('#endif /* CONFIG_XDEV_EXT_MECH */', begin)
+            if begin < 0 or end < 0 or 'int io_xdev_ext_umem_mech_pool_bind(' not in umem[begin:end]:
+                raise Setup('IOU_UMEM pool provider block missing in io_uring/xdev_ext_umem.c')
+            unit = build / 'chain_umem.c'
+            unit.write_text(replace((HERE / 'chain_umem.c.in').read_text(), '/* REAL_UMEM_POOL */',
+                                    umem[begin:end], 'umem pool'))
+            compile_unit(cc, pool_flags, unit, build / 'umem.o', log)
+            objects.append(build / 'umem.o')
         units, xd_flags, edits = xdomain_units(kernel, build, root, pool)
         if pool == 'dmabuf':
             peer_flags, peer_list = peer_units(root, kernel, build, common)
@@ -613,9 +712,9 @@ def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
                 compile_unit(cc, peer_flags + renames, unit, obj, log)
                 objects.append(obj)
         (out / 'fixture-edits.json').write_text(json.dumps(edits, indent=1) + '\n')
-        for number, unit in enumerate(units):
+        for number, (unit, extra) in enumerate(units):
             obj = build / ('xd-%d.o' % number)
-            compile_unit(cc, common + xd_flags, unit, obj, log)
+            compile_unit(cc, common + xd_flags + extra, unit, obj, log)
             objects.append(obj)
         compile_unit(cc, common + ['-I', str(HERE), '-I', str(kernel / 'include/uapi')], HERE / 'cases.c',
                      build / 'cases.o', log)
@@ -696,9 +795,11 @@ def main():
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--only', choices=('core', 'nvme', 'link'))
     parser.add_argument('--mutation', choices=sorted(MUTATIONS))
-    parser.add_argument('--pool', choices=('provider', 'dmabuf'), default='provider',
+    parser.add_argument('--pool', choices=('provider', 'dmabuf', 'host'), default='provider',
                         help='host 1 frames: recording provider, or a system-heap DMA-BUF through '
-                             'the real REGISTER/requester/importer/lease code')
+                             'the real REGISTER/requester/importer/lease code; host: both '
+                             'endpoints on the ring\'s IOU_UMEM host pages, NHIs mapped by the '
+                             'real requester')
     args = parser.parse_args()
     if args.mutation and MUTATIONS[args.mutation].get('pool'):
         args.pool = MUTATIONS[args.mutation]['pool']
@@ -725,7 +826,8 @@ def main():
             if args.mutation:
                 cases = [args.case or MUTATIONS[args.mutation]['case']]
             else:
-                cases = [args.case] if args.case else list(CASES)
+                cases = [args.case] if args.case else list(CASES) + \
+                    (list(HOST_CASES) if args.pool == 'host' else [])
             record['cases'] = run_cases(binary, out, cases)
             if args.mutation:
                 killed = all(c['exit'] == 1 and c['failed_assertion'] for c in record['cases'])

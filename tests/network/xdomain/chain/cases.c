@@ -41,8 +41,14 @@
 #define ACK 3u
 #define FAIL 5u
 #define CANCEL 6u
+#define HELLO 7u
+#define CHALLENGE 8u
+#define CONFIRM 9u
 #define F_K_FREE chain_frame_state_free()
 #define BUDGET 200000u
+/* enum dma_data_direction, as the requester passes it to the DMA API */
+#define TO_DEVICE 1u
+#define FROM_DEVICE 2u
 
 static unsigned assertions;
 static const char *case_name = "?";
@@ -112,11 +118,53 @@ static void settle(unsigned rounds)
 		pump(1000000); /* 1 ms of virtual time per round, far below protocol deadlines */
 }
 
-static bool early;
+static bool early, rts_cts;
+static unsigned count(unsigned kind, unsigned endpoint);
+/* --pool host: both rings' IOU_UMEM.  Each XDOMAIN stage binds its own NHI
+ * through the real requester, which maps every pool page once for that NHI
+ * in the stage's direction; an NVMe stage binds no requester (the block
+ * layer maps each request). */
+static void host_mappings(void)
+{
+	struct { struct xdev_ext_mech_session *s; unsigned stage, endpoint, dir; } xd[2] = {
+		{ tx, 1, 0, TO_DEVICE }, { rx, 0, 1, FROM_DEVICE } };
+
+	CHECK(!chain_stage_requester(tx, 0) && !chain_stage_requester(rx, 1),
+	      "an NVMe stage on host pages binds no requester");
+	for (unsigned i = 0; i < 2; i++) {
+		uint32_t backing = 0, reachability = 0, refused = ~0u;
+		unsigned seen = 0, mask = 0;
+
+		CHECK(chain_stage_requester(xd[i].s, xd[i].stage) == chain_device(xd[i].endpoint, CHAIN_DEV_NHI),
+		      "the XDOMAIN stage's requester is its own NHI");
+		CHECK(chain_stage_admission(xd[i].s, xd[i].stage, &backing, &reachability, &refused),
+		      "the real requester bind ran for the XDOMAIN stage");
+		CHECK(backing == (XDEV_EXT_PEER_BACKING_HOST_SYSTEM | XDEV_EXT_PEER_BACKING_STRUCT_PAGE),
+		      "XDOMAIN frames are host RAM with struct pages");
+		CHECK(reachability == XDEV_EXT_CAP_HOST_DMA_MAPPED && !refused,
+		      "a host DMA-API mapping was established for the NHI, nothing refused");
+		for (size_t k = 0; k < chain_event_count(); k++) {
+			const struct chain_event *e = chain_event_get(k);
+			if (e->kind != CHAIN_EV_DMA_MAP || e->endpoint != xd[i].endpoint)
+				continue;
+			seen++;
+			CHECK(e->device == chain_device(xd[i].endpoint, CHAIN_DEV_NHI), "only the NHI is mapped at bind");
+			CHECK(e->length == FRAME && e->offset % FRAME == 0 && e->offset < frames * FRAME &&
+			      !(mask & (1u << (e->offset / FRAME))), "each pool page mapped whole, once");
+			CHECK(e->member == xd[i].dir, "the mapping direction is the stage's");
+			CHECK(e->control_type == 1, "bind maps without CPU sync");
+			CHECK(e->address == chain_device_dma(xd[i].endpoint, CHAIN_DEV_NHI, e->offset),
+			      "the NHI address of the page in its own window");
+			mask |= 1u << (e->offset / FRAME);
+		}
+		CHECK(seen == frames && mask == (1u << frames) - 1, "every pool page mapped for the NHI");
+	}
+}
 static void up(void)
 {
 	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = frames, .depth = depth,
-		.group_bytes = GROUP, .early = early, .window_tx = window_tx, .window_rx = window_rx };
+		.group_bytes = GROUP, .early = early, .rts_cts = rts_cts,
+		.window_tx = window_tx, .window_rx = window_rx };
 	size_t bytes;
 	uint8_t *disk;
 	int err;
@@ -127,9 +175,17 @@ static void up(void)
 	for (size_t i = 0; i < bytes; i++)
 		disk[i] = pattern(i);
 	rx = chain_rx_session(&err);
+	if (err)
+		fprintf(stderr, "CHAIN_CREATE host=2 err=%d\n", err);
 	CHECK(!err, "host 2 CREATE: XDOMAIN RX stage 0 + NVMe WRITE stage 1");
 	tx = chain_tx_session(&err, 0);
+	if (err)
+		fprintf(stderr, "CHAIN_CREATE host=1 err=%d\n", err);
 	CHECK(!err, "host 1 CREATE: NVMe READ stage 0 + XDOMAIN TX stage 1");
+	if (chain_host_mode()) {
+		host_mappings();
+		return;
+	}
 	CHECK(chain_stage_requester(tx, 0) == chain_device(0, CHAIN_DEV_NVME),
 	      "host 1 stage 0 maps frames for its NVMe controller");
 	CHECK(chain_stage_requester(tx, 1) == chain_device(0, CHAIN_DEV_NHI),
@@ -412,8 +468,14 @@ static void finished(uint64_t n)
 	CHECK(chain_violations() == 0,
 	      "no device touched bytes outside its live leases; no program ran in a callback");
 	for (unsigned f = 0; f < frames; f++)
-		CHECK(chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
-		      "every frame back in the pool");
+		CHECK(chain_host_mode() ?
+		      chain_frame_custody(tx, f) == chain_frame_state_user() &&
+		      chain_frame_custody(rx, f) == chain_frame_state_user() :
+		      chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
+		      "every frame back in the pool (host pages: lent back to user space)");
+	if (chain_host_mode())
+		CHECK(count(CHAIN_EV_DMA_UNMAP, 0) == 0 && count(CHAIN_EV_DMA_UNMAP, 1) == 0,
+		      "the NHI mappings stay while the stages are bound");
 	credit_rule();
 }
 
@@ -727,6 +789,25 @@ static void window_next_after_cts(void)
 	}
 }
 
+/* The actual RTS/CTS program declines pairing even on F_EARLY stages. The
+ * window must advance on its accepted CTS-authorized post, without waiting
+ * for a grant that this protocol never sends. Reusing the held-CTS scenario
+ * checks both that group 2 does not pass before CTS and that it passes in
+ * the same drain afterwards, before group 1's consumer can finish. */
+static void window_rts_cts_v2(void)
+{
+	CHECK(early && rts_cts && window_tx == 2 && window_rx == 2,
+	      "RTS/CTS program with EARLY envelopes and two groups per window");
+	window_next_after_cts();
+	CHECK(chain_control_tx_count(0, RTS) == depth && chain_control_tx_count(1, CTS) == depth,
+	      "each group used RTS then CTS despite the EARLY envelope");
+	for (unsigned endpoint = 0; endpoint < CHAIN_ENDPOINTS; endpoint++)
+		CHECK(chain_control_tx_count(endpoint, HELLO) == 0 &&
+		      chain_control_tx_count(endpoint, CHALLENGE) == 0 &&
+		      chain_control_tx_count(endpoint, CONFIRM) == 0,
+		      "the selected RTS/CTS program never pairs");
+}
+
 /* STOP while W groups are in flight and host 1's TX completions are held, so
  * their local native outcome is unknown: no group is reported delivered and
  * no frame of those groups returns to the pool or is leased again. */
@@ -800,8 +881,197 @@ static void window_withdrawn_head(void)
 	settle(50);
 	CHECK(chain_violations() == 0, "no device touched bytes outside its live leases");
 	for (unsigned f = 0; f < frames; f++)
-		CHECK(chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
-		      "every frame back in the pool");
+		CHECK(chain_host_mode() ?
+		      chain_frame_custody(tx, f) == chain_frame_state_user() &&
+		      chain_frame_custody(rx, f) == chain_frame_state_user() :
+		      chain_frame_custody(tx, f) == F_K_FREE && chain_frame_custody(rx, f) == F_K_FREE,
+		      "every frame back in the pool (host pages: lent back to user space)");
+}
+
+/* Index (from 1) of the latest event before @before matching the filter; 0 if none. */
+static size_t last_before(size_t before, unsigned kind, unsigned endpoint, uint64_t address)
+{
+	for (size_t i = before - 1; i > 0; i--) {
+		const struct chain_event *e = chain_event_get(i - 1);
+		if (e->kind == kind && e->endpoint == endpoint && e->address == address)
+			return i;
+	}
+	return 0;
+}
+static bool sync_between(size_t after, size_t before, unsigned endpoint, unsigned target,
+			 unsigned dir, uint64_t address, uint64_t len)
+{
+	for (size_t i = after; i + 1 < before; i++) {
+		const struct chain_event *e = chain_event_get(i);
+		if (e->kind == CHAIN_EV_DMA_SYNC && e->endpoint == endpoint && e->control_type == target &&
+		    e->member == dir && e->address == address && e->length == len)
+			return true;
+	}
+	return false;
+}
+/* --pool host, NHIs not DMA-coherent: every TX element is synchronized for
+ * the NHI after its lease and before its descriptor post; every RX buffer is
+ * synchronized for the NHI before its post and for the CPU after the link
+ * wrote it and before host 2's NVMe WRITE of that group is submitted. */
+static void host_sync_order(void)
+{
+	unsigned tx_posts = 0, rx_posts = 0;
+
+	up();
+	start(4);
+	settle(50);
+	CHECK(commands(0) == 4 && commands(1) == 4, "four READs on host 1, four WRITEs on host 2");
+	for (unsigned k = 1; k <= 4; k++) {
+		sent_bytes_match(k);
+		bytes_match(k);
+	}
+	finished(4);
+	for (size_t i = 0; i < chain_event_count(); i++) {
+		const struct chain_event *e = chain_event_get(i);
+		size_t lease;
+
+		if ((e->kind != CHAIN_EV_DATA_TX_POST || e->endpoint != 0) &&
+		    (e->kind != CHAIN_EV_DATA_RX_POST || e->endpoint != 1))
+			continue;
+		lease = last_before(i + 1, CHAIN_EV_LEASE, e->endpoint, e->address);
+		CHECK(lease, "a posted element has a host lease of its NHI");
+		if (e->kind == CHAIN_EV_DATA_TX_POST) {
+			CHECK(sync_between(lease, i + 1, 0, 1, TO_DEVICE, e->address, e->length),
+			      "TX element synchronized for the NHI between its lease and its post");
+			tx_posts++;
+		} else {
+			CHECK(sync_between(lease, i + 1, 1, 1, FROM_DEVICE, e->address, FRAME),
+			      "RX buffer synchronized for the NHI between its lease and its post");
+			rx_posts++;
+		}
+	}
+	CHECK(tx_posts == 4 * (GROUP / FRAME) && rx_posts == 4 * (GROUP / FRAME),
+	      "one element per frame of each of the four groups on both sides");
+	for (unsigned k = 1; k <= 4; k++) {
+		const struct chain_nvme_command *w = command(1, k);
+		size_t submit = nth(CHAIN_EV_NVME_SUBMIT, 1, k);
+
+		CHECK(w && submit, "host 2 submitted its k-th WRITE");
+		for (unsigned s = 0; s < w->spans; s++)
+			for (uint32_t done = 0; done < w->span_len[s]; done += FRAME) {
+				int64_t off = offset_of(1, CHAIN_DEV_NVME, w->span_addr[s] + done);
+				uint64_t nhi;
+				size_t wrote = 0;
+
+				CHECK(off >= 0 && off % FRAME == 0, "WRITE piece is one host 2 frame");
+				nhi = chain_device_dma(1, CHAIN_DEV_NHI, (uint64_t)off);
+				for (size_t i = submit - 1; i > 0 && !wrote; i--) {
+					const struct chain_event *e = chain_event_get(i - 1);
+					if (e->kind == CHAIN_EV_DATA_DELIVER && e->offset == nhi)
+						wrote = i;
+				}
+				CHECK(wrote, "the link wrote this frame before host 2's WRITE");
+				CHECK(sync_between(wrote, submit, 1, 2, FROM_DEVICE, nhi, FRAME),
+				      "RX frame synchronized for the CPU after the NHI wrote it, before the WRITE");
+			}
+	}
+	for (size_t i = 0; i < chain_event_count(); i++) {
+		const struct chain_event *e = chain_event_get(i);
+		CHECK(!(e->kind == CHAIN_EV_DMA_SYNC && e->endpoint == 0 && e->control_type == 2),
+		      "TX elements are never synchronized for the CPU");
+	}
+}
+
+/* --pool host: a TX whose descriptors never complete, then STOP.  The batch
+ * ends with unknown device access: its frames are sequestered, its NHI host
+ * leases retained, the mapping is never unmapped, and the stage refuses a
+ * checked unbind, which keeps the session and its pinned UMEM. */
+static void host_unknown_retained(void)
+{
+	unsigned first;
+
+	up();
+	chain_hold_tx_completions(0, true);
+	start(1);
+	settle(50);
+	CHECK(commands(0) == 1 && chain_data_tx_done(0) == 0,
+	      "group 1 read and posted; its TX descriptors never complete");
+	first = read_frames(1);
+	CHECK(chain_session_stop(tx, 0) == 0, "STOP host 1 with its TX outstanding");
+	for (unsigned r = 0; r < 40; r++)
+		pump(100000000); /* 4 s of virtual time: past the one-second STOP bound */
+	CHECK(chain_session_done(tx) == 0, "no host 1 batch finished");
+	for (unsigned f = 0; f < frames; f++)
+		if (first & (1u << f)) {
+			CHECK(chain_frame_custody(tx, f) == chain_frame_state_sequestered(),
+			      "frames with unknown NHI access are sequestered, never reused");
+			CHECK(chain_retained_leases(0, CHAIN_DEV_NHI, f * FRAME, FRAME) >= 1 &&
+			      !chain_live_leases(0, CHAIN_DEV_NHI, f * FRAME, FRAME),
+			      "their NHI host leases ended unquiesced: retained");
+		}
+	CHECK(chain_stage_unbind_checked(tx, 1) == -EIO,
+	      "the XDOMAIN stage refuses a checked unbind after unknown device access");
+	CHECK(count(CHAIN_EV_DMA_UNMAP, 0) == 0, "host 1's NHI mapping is never unmapped");
+	for (size_t i = 0; i < chain_event_count(); i++) {
+		const struct chain_event *e = chain_event_get(i);
+		CHECK(!(e->kind == CHAIN_EV_DMA_SYNC && e->endpoint == 0 && e->control_type == 2),
+		      "nothing hands host 1's frames to the CPU");
+	}
+	CHECK(commands(0) == 1, "no READ reused the frames");
+}
+
+/* --pool host: a UMEM registered 256 bytes into a page.  Each 4 KiB NHI
+ * element would span two pages, so the XDOMAIN stage bind fails before any
+ * mapping; CREATE returns the requester's -EINVAL on both hosts. */
+static void host_misaligned_refused(void)
+{
+	struct chain_link_config cfg = { .frame_size = FRAME, .nr_frames = frames, .depth = depth,
+		.group_bytes = GROUP, .host_page_offset = 256 };
+	int err = 0;
+
+	CHECK(chain_world(&cfg) == 0, "world");
+	chain_tx_session(&err, 0);
+	fprintf(stderr, "CHAIN_CREATE host=1 err=%d\n", err);
+	CHECK(err == -EINVAL, "host 1 CREATE refused: the UMEM does not start on a page");
+	chain_rx_session(&err);
+	fprintf(stderr, "CHAIN_CREATE host=2 err=%d\n", err);
+	CHECK(err == -EINVAL, "host 2 CREATE refused likewise");
+	CHECK(count(CHAIN_EV_DMA_MAP, 0) == 0 && count(CHAIN_EV_DMA_MAP, 1) == 0,
+	      "nothing was mapped for either NHI");
+}
+
+/* --pool host: four groups end quiesced, then each XDOMAIN stage is released
+ * in the order of the core's release decision.  Its checked unbind allows
+ * release, and the class unbind, through the network family's fini, unmaps
+ * every pool page of that stage's NHI exactly once, with the mapping's size
+ * and direction and without CPU sync. */
+static void host_destroy_unmaps(void)
+{
+	struct { struct xdev_ext_mech_session *s; unsigned stage, endpoint, dir; } xd[2];
+
+	up();
+	xd[0].s = tx; xd[0].stage = 1; xd[0].endpoint = 0; xd[0].dir = TO_DEVICE;
+	xd[1].s = rx; xd[1].stage = 0; xd[1].endpoint = 1; xd[1].dir = FROM_DEVICE;
+	start(4);
+	settle(50);
+	finished(4);
+	for (unsigned i = 0; i < 2; i++) {
+		unsigned seen = 0, mask = 0;
+
+		CHECK(chain_stage_unbind_now(xd[i].s, xd[i].stage) == 0,
+		      "a settled XDOMAIN stage passes its checked unbind and unbinds");
+		for (size_t k = 0; k < chain_event_count(); k++) {
+			const struct chain_event *e = chain_event_get(k);
+			int64_t off;
+
+			if (e->kind != CHAIN_EV_DMA_UNMAP || e->endpoint != xd[i].endpoint)
+				continue;
+			seen++;
+			off = offset_of(xd[i].endpoint, CHAIN_DEV_NHI, e->address);
+			CHECK(e->device == chain_device(xd[i].endpoint, CHAIN_DEV_NHI), "unmap is for the NHI");
+			CHECK(e->length == FRAME && e->member == xd[i].dir && e->control_type == 1,
+			      "unmap uses the mapping size and direction, without CPU sync");
+			CHECK(off >= 0 && off % FRAME == 0 && !(mask & (1u << (off / FRAME))),
+			      "an unmapped address is one pool page, unmapped once");
+			mask |= 1u << (off / FRAME);
+		}
+		CHECK(seen == frames && mask == (1u << frames) - 1, "every pool page unmapped at release");
+	}
 }
 
 /* No Thunderbolt link behind the token: CREATE fails cleanly with ENODEV. */
@@ -850,7 +1120,13 @@ int main(int argc, char **argv)
 		depth = w > 2 ? w : 2;
 		frames = 2 * depth;
 	}
-	if (!strcmp(base, "window_fills")) {
+	if (!strcmp(base, "window_rts_cts_v2") && !early && !w) {
+		early = rts_cts = true;
+		window_tx = window_rx = 2;
+		depth = 4;
+		frames = 8;
+		window_rts_cts_v2();
+	} else if (!strcmp(base, "window_fills")) {
 		if (w < 2)
 			return 2;
 		depth = w + 2; /* more batches than the window */
@@ -882,6 +1158,10 @@ int main(int argc, char **argv)
 	else if (!strcmp(base, "consumer_holds_ack")) consumer_holds_ack();
 	else if (!strcmp(base, "stale_ack_after_reuse")) stale_ack_after_reuse();
 	else if (!strcmp(base, "no_link_enodev") && !early && !w) no_link_enodev();
+	else if (!strcmp(base, "host_sync_order") && chain_host_mode()) host_sync_order();
+	else if (!strcmp(base, "host_unknown_retained") && !early && chain_host_mode()) host_unknown_retained();
+	else if (!strcmp(base, "host_misaligned_refused") && !early && chain_host_mode()) host_misaligned_refused();
+	else if (!strcmp(base, "host_destroy_unmaps") && !early && chain_host_mode()) host_destroy_unmaps();
 	else return 2;
 	printf("CHAIN_CASE %s assertions=%u\n", case_name, assertions);
 	return 0;

@@ -1,0 +1,5 @@
+{
+  "reason": "The 64-bit host CE private batch grows from 32 to 64 transfers for opt-in target ranges: 16 header bytes + 64 * 40 transfer bytes = 2576. The historical 1296-byte snapshot stays unchanged; all public and DMA sizes stay exact.",
+  "before": "ABI CE cookie=40 batch=1296 desc=24 info=568 cqe=24 ops=56; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64",
+  "after": "ABI CE cookie=40 batch=2576 desc=24 info=568 cqe=24 ops=56; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64"
+}

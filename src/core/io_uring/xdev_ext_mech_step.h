@@ -21,6 +21,7 @@
 #endif
 
 #define XDEV_EXT_MECH_MAX_DEPTH		64	/* live batches per session */
+#define XDEV_EXT_MECH_MAX_DESCS		64	/* entries, not host frames */
 #define XDEV_EXT_MECH_CLASS_SIZE_MAX		4096	/* info, scratch, copies, batch area */
 
 /* What the worker does next with a batch. */
@@ -351,7 +352,7 @@ static inline bool xdev_ext_mech_class_sizes_ok(__u32 info_size, __u32 desc_size
 					   __u32 desc_cap, __u32 cqe_size,
 					   __u32 cqe_cap, __u32 batch_priv_size)
 {
-	if (!desc_size || !desc_cap || desc_cap > XDEV_EXT_MECH_MAX_FRAMES ||
+	if (!desc_size || !desc_cap || desc_cap > XDEV_EXT_MECH_MAX_DESCS ||
 	    !cqe_size != !cqe_cap || cqe_cap > XDEV_EXT_MECH_MAX_FRAMES)
 		return false;
 	return info_size <= XDEV_EXT_MECH_CLASS_SIZE_MAX &&
