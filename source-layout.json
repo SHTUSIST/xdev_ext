@@ -357,6 +357,16 @@
       "native_path": "tools/xdev_ext_mech/examples/storage/nvme_blocktable.h"
     },
     {
+      "source": "examples/storage/nvme_ce_request.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_ce_request.bpf.c"
+    },
+    {
+      "source": "examples/storage/nvme_ce_request.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/examples/storage/nvme_ce_request.h"
+    },
+    {
       "source": "examples/storage/nvme_s0.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/nvme_s0.bpf.c"
@@ -9651,6 +9661,33 @@
     {
       "source": "tests/network/count_fifo/typed-data-v1.inverse.stdout",
       "logical_path": "tests/network/count_fifo/typed-data-v1.inverse.stdout"
-    }
+    },
+    {"source":"tests/compute/ce/random_target/README.md","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/README.md"},
+    {"source":"tests/compute/ce/random_target/stage1.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/stage1.c"},
+    {"source":"tests/compute/ce/random_target/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/run.py"},
+    {"source":"tests/compute/ce/random_target/runtime_validate.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.c"},
+    {"source":"tests/compute/ce/random_target/runtime_validate.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.py"},
+    {"source":"tests/compute/ce/random_target/range_lease.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.c"},
+    {"source":"tests/compute/ce/random_target/range_lease.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.py"},
+    {"source":"tests/compute/ce/random_target/actual_entry.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.c"},
+    {"source":"tests/compute/ce/random_target/actual_entry.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.py"},
+    {"source":"tests/compute/ce/random_target/request_builders.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.c"},
+    {"source":"tests/compute/ce/random_target/request_builders.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.py"},
+    {"source":"tests/compute/ce/random_target/request_prepare.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_prepare.c"},
+    {"source":"tests/integration/nvme_ce_random/contract_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract_test.c"},
+    {"source":"tests/integration/nvme_ce_random/control_test.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/control_test.py"},
+    {"source":"tests/integration/nvme_ce_random/test_expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_expected.py"},
+    {"source":"tests/integration/nvme_ce_random/contract.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract.h"},
+    {"source":"tests/integration/nvme_ce_random/expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/expected.py"},
+    {"source":"tests/integration/nvme_ce_random/private_loader.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.h"},
+    {"source":"tests/integration/nvme_ce_random/private_loader.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.c"},
+    {"source":"tests/integration/nvme_ce_random/loader_check.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/loader_check.c"},
+    {"source":"tests/integration/nvme_ce_random/driver.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/driver.c"},
+    {"source":"tests/integration/nvme_ce_random/build.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/build.py"},
+    {"source":"tests/integration/nvme_ce_random/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/run.py"},
+    {"source":"tests/integration/nvme_ce_random/Makefile","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/Makefile"},
+    {"source":"tests/integration/nvme_ce_random/test_native_bounds.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_native_bounds.py"},
+    {"source":"tests/integration/nvme_ce_random/key_end_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/key_end_test.c"},
+    {"source":"tests/integration/nvme_ce_random/test_generator.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"}
   ]
 }
