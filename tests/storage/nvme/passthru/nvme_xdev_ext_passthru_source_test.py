@@ -45,6 +45,67 @@ def in_order(body: str, *needles: str) -> bool:
     return positions == sorted(positions)
 
 
+def check_common_payload_walk(block: str) -> None:
+    preflight = function_body(block, "int xdev_ext_stor_block_preflight(")
+    require(in_order(preflight, "xdev_ext_stor_seg_walk_init(",
+                     "xdev_ext_stor_block_walk(", "xdev_ext_stor_seg_done("),
+            "common payload preflight must consume the segment validator")
+    preflight = " ".join(preflight.split())
+    require(in_order(preflight,
+                     "pieces = xdev_ext_stor_block_walk(pool, batch, &walk, NULL);",
+                     "ret = pieces < 0 ? pieces : xdev_ext_stor_seg_done(&walk);",
+                     "if (!ret && walk.bytes != xdev_ext_mech_batch_bytes(batch)) ret = -EPROTO;",
+                     "if (!ret && pieces > BIO_MAX_INLINE_VECS) ret = -EREMOTEIO;",
+                     "return ret ? ret : pieces;"),
+            "common preflight must retain walk/SG errors, byte equality and inline capacity")
+
+    walk = function_body(block, "static int xdev_ext_stor_block_walk(")
+    require(in_order(walk, "xdev_ext_mech_batch_frame(", "xdev_ext_mech_frame_page(",
+                     "bio_add_page(", "xdev_ext_stor_seg_add("),
+            "common bio append must build page by page from actual batch frames")
+    walk = " ".join(walk.split())
+    require("ret = xdev_ext_mech_batch_frame(batch, pos, &frame); if (ret) return ret;" in walk and
+            "if (!page) return -EFAULT;" in walk and
+            "len = min(len, left);" in walk and
+            "if (bio) { if (bio_add_page(bio, page, len, page_off) != len) return -EREMOTEIO; } else { ret = xdev_ext_stor_seg_add(walk, page_off, len, page == prev); if (ret) return ret; }" in walk,
+            "common walk must reject frame/page, bio and SG qualification failures")
+
+    fill = function_body(block, "static int xdev_ext_stor_block_fill(")
+    require(" ".join(fill.split()) ==
+            "return xdev_ext_stor_block_walk(pool, batch, NULL, bio);",
+            "common fill must return the actual payload walk result")
+    append = function_body(block, "int xdev_ext_stor_block_append(")
+    require(" ".join(append.split()) ==
+            "int ret = xdev_ext_stor_block_fill(pool, batch, bio); if (ret < 0) return ret; return blk_rq_append_bio(request, bio);",
+            "common append must propagate fill refusal before handing the actual bio to block")
+    for body in (preflight, walk, fill, append):
+        require(re.search(r"\b(?:memcpy|memmove|copy_\w*|kmap\w*|\w*bounce\w*)\s*\(", body) is None,
+                "common payload preflight/fill/append must not copy or bounce bytes")
+
+
+def check_common_payload_refusals(block: str) -> None:
+    # Exercise this SOURCE contract against bypasses, without executing C or
+    # modifying the selected production input.
+    bypasses = (
+        ("int xdev_ext_stor_block_preflight(",
+         "pieces = xdev_ext_stor_block_walk(pool, batch, &walk, NULL);", "pieces = 1;"),
+        ("static int xdev_ext_stor_block_fill(",
+         "return xdev_ext_stor_block_walk(pool, batch, NULL, bio);", "return 0;"),
+        ("int xdev_ext_stor_block_append(",
+         "if (ret < 0)\n\t\treturn ret;", ""),
+    )
+    for signature, original, bypass in bypasses:
+        body = function_body(block, signature)
+        require(body.count(original) == 1 and block.count(body) == 1,
+                f"common payload bypass requires one owned anchor: {signature}")
+        changed = block.replace(body, body.replace(original, bypass, 1), 1)
+        try:
+            check_common_payload_walk(changed)
+        except AssertionError:
+            continue
+        raise AssertionError(f"common payload contract accepted bypass: {signature}")
+
+
 def check_fixed_vector(source: str) -> str:
     body = function_body(source, "static int nvme_uring_cmd_io(")
 
@@ -365,16 +426,8 @@ def check_mech_class(source: str, root: Path) -> str:
                          "bio = bp->host_io->bio;" if family else "bio = bp->slot->bio;", "bio_init(", "xdev_ext_stor_block_append(",
                          "if (ret != -EREMOTEIO)", "xdev_ext_storfam_bounce(" if family else "nvme_xdev_ext_class_bounce("),
                 "map: actual common precheck/append, fixture-owned bio, fail closed before bounce")
-        preflight = function_body(block, "int xdev_ext_stor_block_preflight(")
-        require(in_order(preflight, "xdev_ext_stor_seg_walk_init(", "xdev_ext_stor_block_walk(",
-                         "xdev_ext_stor_seg_done("), "common payload preflight must consume the segment validator")
-        walk = function_body(block, "static int xdev_ext_stor_block_walk(")
-        require(in_order(walk, "xdev_ext_mech_batch_frame(", "xdev_ext_mech_frame_page(",
-                         "bio_add_page(", "xdev_ext_stor_seg_add("),
-                "common bio append must build page by page from actual batch frames")
-        append = function_body(block, "int xdev_ext_stor_block_append(")
-        require(in_order(append, "xdev_ext_stor_block_walk(", "blk_rq_append_bio("),
-                "common append must hand the actual frame bio to block")
+        check_common_payload_walk(block)
+        check_common_payload_refusals(block)
     else:
         require(in_order(mapping, "nvme_xdev_ext_seg_walk_init(",
                          "nvme_xdev_ext_seg_done(", "bio = bp->slot->bio;", "bio_init(",

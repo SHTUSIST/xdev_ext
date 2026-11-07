@@ -963,6 +963,11 @@
       "native_path": "include/linux/xdev_ext_family_core.h"
     },
     {
+      "source": "src/core/include/linux/xdev_ext_cmd_lifecycle.h",
+      "component": "linux",
+      "native_path": "include/linux/xdev_ext_cmd_lifecycle.h"
+    },
+    {
       "source": "src/core/include/linux/xdev_ext_mech.h",
       "component": "linux",
       "native_path": "include/linux/xdev_ext_mech.h"

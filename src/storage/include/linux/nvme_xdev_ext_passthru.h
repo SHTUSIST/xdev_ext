@@ -5,6 +5,7 @@
 #ifdef __KERNEL__
 #include <linux/errno.h>
 #include <linux/types.h>
+#include <linux/xdev_ext_cmd_lifecycle.h>
 #include <linux/xdev_ext_desc_schema.h>
 #include <linux/xdev_ext_storfam_core.h>
 #include <uapi/linux/nvme_ioctl.h>
@@ -13,6 +14,7 @@
 #else
 #include <errno.h>
 #include <linux/types.h>
+#include "xdev_ext_cmd_lifecycle.h"
 #include "xdev_ext_desc_schema.h"
 #include "xdev_ext_storfam_core.h"
 #include "../uapi/linux/nvme_ioctl.h"
@@ -93,30 +95,21 @@ struct nvme_xdev_ext_identity {
 	__u8 uuid[16];
 };
 
-enum nvme_xdev_ext_lifecycle {
-	NVME_XDEV_EXT_LIFECYCLE_EMPTY,
-	NVME_XDEV_EXT_LIFECYCLE_PREPARED,
-	NVME_XDEV_EXT_LIFECYCLE_ACCEPTED,
-	NVME_XDEV_EXT_LIFECYCLE_COMPLETED,
-	NVME_XDEV_EXT_LIFECYCLE_UNWOUND,
-};
-
-enum nvme_xdev_ext_cleanup_action {
-	NVME_XDEV_EXT_CLEANUP_NONE,
-	NVME_XDEV_EXT_CLEANUP_UNMAP,
-	NVME_XDEV_EXT_CLEANUP_FREE_REQUEST,
-	NVME_XDEV_EXT_CLEANUP_PUT_TOKEN,
-	NVME_XDEV_EXT_CLEANUP_COMPLETE_POLICY,
-	NVME_XDEV_EXT_CLEANUP_DONE,
-};
-
-struct nvme_xdev_ext_resource_state {
-	enum nvme_xdev_ext_lifecycle lifecycle;
-	__u8 request_allocated;
-	__u8 user_mapped;
-	__u8 done;
-	__u8 reserved;
-};
+/* Legacy tags and constants name the same generic types and values. */
+#define nvme_xdev_ext_lifecycle xdev_ext_cmd_lifecycle
+#define nvme_xdev_ext_cleanup_action xdev_ext_cmd_cleanup_action
+#define nvme_xdev_ext_resource_state xdev_ext_cmd_resource_state
+#define NVME_XDEV_EXT_LIFECYCLE_EMPTY XDEV_EXT_CMD_LIFECYCLE_EMPTY
+#define NVME_XDEV_EXT_LIFECYCLE_PREPARED XDEV_EXT_CMD_LIFECYCLE_PREPARED
+#define NVME_XDEV_EXT_LIFECYCLE_ACCEPTED XDEV_EXT_CMD_LIFECYCLE_ACCEPTED
+#define NVME_XDEV_EXT_LIFECYCLE_COMPLETED XDEV_EXT_CMD_LIFECYCLE_COMPLETED
+#define NVME_XDEV_EXT_LIFECYCLE_UNWOUND XDEV_EXT_CMD_LIFECYCLE_UNWOUND
+#define NVME_XDEV_EXT_CLEANUP_NONE XDEV_EXT_CMD_CLEANUP_NONE
+#define NVME_XDEV_EXT_CLEANUP_UNMAP XDEV_EXT_CMD_CLEANUP_UNMAP
+#define NVME_XDEV_EXT_CLEANUP_FREE_REQUEST XDEV_EXT_CMD_CLEANUP_FREE_REQUEST
+#define NVME_XDEV_EXT_CLEANUP_PUT_TOKEN XDEV_EXT_CMD_CLEANUP_PUT_TOKEN
+#define NVME_XDEV_EXT_CLEANUP_COMPLETE_POLICY XDEV_EXT_CMD_CLEANUP_COMPLETE_POLICY
+#define NVME_XDEV_EXT_CLEANUP_DONE XDEV_EXT_CMD_CLEANUP_DONE
 
 static inline int nvme_xdev_ext_flags_valid(__u32 flags)
 {
@@ -548,107 +541,52 @@ static inline int nvme_xdev_ext_seg_done(const struct nvme_xdev_ext_seg_walk *wa
 static inline int
 nvme_xdev_ext_lifecycle_prepare(enum nvme_xdev_ext_lifecycle *state)
 {
-	if (!state)
-		return -EINVAL;
-	/* One io_uring command gets at most one policy dispatch. */
-	if (*state != NVME_XDEV_EXT_LIFECYCLE_EMPTY)
-		return -EBUSY;
-	*state = NVME_XDEV_EXT_LIFECYCLE_PREPARED;
-	return 0;
+	return xdev_ext_cmd_lifecycle_prepare(state);
 }
 
 static inline int nvme_xdev_ext_lifecycle_accept(enum nvme_xdev_ext_lifecycle *state)
 {
-	if (!state || *state != NVME_XDEV_EXT_LIFECYCLE_PREPARED)
-		return 0;
-	*state = NVME_XDEV_EXT_LIFECYCLE_ACCEPTED;
-	return 1;
+	return xdev_ext_cmd_lifecycle_accept(state);
 }
 
 static inline int nvme_xdev_ext_lifecycle_complete(enum nvme_xdev_ext_lifecycle *state)
 {
-	if (!state || *state != NVME_XDEV_EXT_LIFECYCLE_ACCEPTED)
-		return 0;
-	*state = NVME_XDEV_EXT_LIFECYCLE_COMPLETED;
-	return 1;
+	return xdev_ext_cmd_lifecycle_complete(state);
 }
 
 static inline int nvme_xdev_ext_lifecycle_unwind(enum nvme_xdev_ext_lifecycle *state)
 {
-	if (!state || *state != NVME_XDEV_EXT_LIFECYCLE_PREPARED)
-		return 0;
-	*state = NVME_XDEV_EXT_LIFECYCLE_UNWOUND;
-	return 1;
+	return xdev_ext_cmd_lifecycle_unwind(state);
 }
 
 static inline void
 nvme_xdev_ext_resource_request_allocated(struct nvme_xdev_ext_resource_state *state)
 {
-	if (state)
-		state->request_allocated = 1;
+	xdev_ext_cmd_resource_request_allocated(state);
 }
 
 static inline void
 nvme_xdev_ext_resource_user_mapped(struct nvme_xdev_ext_resource_state *state)
 {
-	if (state)
-		state->user_mapped = 1;
+	xdev_ext_cmd_resource_user_mapped(state);
 }
 
-/* Return cleanup work one step at a time in the required ownership order. */
 static inline enum nvme_xdev_ext_cleanup_action
 nvme_xdev_ext_preaccept_next(struct nvme_xdev_ext_resource_state *state)
 {
-	if (!state || state->lifecycle == NVME_XDEV_EXT_LIFECYCLE_ACCEPTED ||
-	    state->lifecycle == NVME_XDEV_EXT_LIFECYCLE_COMPLETED)
-		return NVME_XDEV_EXT_CLEANUP_NONE;
-	if (state->user_mapped) {
-		state->user_mapped = 0;
-		return NVME_XDEV_EXT_CLEANUP_UNMAP;
-	}
-	if (state->request_allocated) {
-		state->request_allocated = 0;
-		return NVME_XDEV_EXT_CLEANUP_FREE_REQUEST;
-	}
-	if (nvme_xdev_ext_lifecycle_unwind(&state->lifecycle))
-		return NVME_XDEV_EXT_CLEANUP_PUT_TOKEN;
-	return NVME_XDEV_EXT_CLEANUP_NONE;
+	return xdev_ext_cmd_preaccept_next(state);
 }
 
-/* Task-work order is unmap, one policy completion (or defensive put), done. */
 static inline enum nvme_xdev_ext_cleanup_action
 nvme_xdev_ext_completion_next(struct nvme_xdev_ext_resource_state *state)
 {
-	if (!state || state->done)
-		return NVME_XDEV_EXT_CLEANUP_NONE;
-	if (state->user_mapped) {
-		state->user_mapped = 0;
-		return NVME_XDEV_EXT_CLEANUP_UNMAP;
-	}
-	if (nvme_xdev_ext_lifecycle_complete(&state->lifecycle))
-		return NVME_XDEV_EXT_CLEANUP_COMPLETE_POLICY;
-	if (nvme_xdev_ext_lifecycle_unwind(&state->lifecycle))
-		return NVME_XDEV_EXT_CLEANUP_PUT_TOKEN;
-	state->done = 1;
-	return NVME_XDEV_EXT_CLEANUP_DONE;
+	return xdev_ext_cmd_completion_next(state);
 }
 
-/*
- * io_uring retries a nonblocking issue that returned -EAGAIN from io-wq.  For
- * an opted-in command that is correct only while no policy dispatch has
- * happened (the lifecycle is still EMPTY after pre-accept unwind); afterwards
- * the retry would replay policy-visible work, so the command fails with
- * -EBUSY.  Allocation and mapping run before dispatch so that their -EAGAIN
- * stays retryable.
- */
 static inline int
 nvme_xdev_ext_issue_errno(const struct nvme_xdev_ext_resource_state *state, int ret)
 {
-	if (ret != -EAGAIN)
-		return ret;
-	if (!state || state->lifecycle != NVME_XDEV_EXT_LIFECYCLE_EMPTY)
-		return -EBUSY;
-	return ret;
+	return xdev_ext_cmd_issue_errno(state, ret);
 }
 
 #endif /* _LINUX_NVME_XDEV_EXT_PASSTHRU_H */
