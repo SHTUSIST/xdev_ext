@@ -50,6 +50,8 @@ NIC_MODEL=virtio
 TB_NHI=0
 TB_NHI_BDF=''
 TB_NHI_CYCLES=3
+TB_NHI_CYCLES_SET=0
+TB_NHI_ENUMERATE=0
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -83,6 +85,8 @@ while (($#)); do
  --nvidia-userspace) NVIDIA_USERSPACE=$2; shift 2 ;;
  --nic) NIC_MODEL=$2; shift 2 ;;
  --tb-nhi) TB_NHI=1; TB_NHI_BDF=$2; shift 2 ;;
+ --tb-nhi-cycles) TB_NHI_CYCLES=$2; TB_NHI_CYCLES_SET=1; shift 2 ;;
+ --tb-nhi-enumerate) TB_NHI_ENUMERATE=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -113,7 +117,14 @@ if (( ${GPU:-0} )); then
     for bdf in "${VFIO_DEVICES[@]}"; do [[ "$bdf" != "$GPU_BDF" ]] || gpu_listed=1; done
     (( gpu_listed )) || VFIO_DEVICES+=("$GPU_BDF")
 fi
-# A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles.
+# A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles;
+# --tb-nhi-enumerate adds a read-only topology report before the cycles.
+if (( ! TB_NHI )) && (( TB_NHI_CYCLES_SET || TB_NHI_ENUMERATE )); then
+    echo '--tb-nhi-cycles and --tb-nhi-enumerate require --tb-nhi' >&2; exit 2
+fi
+if [[ ! "$TB_NHI_CYCLES" =~ ^[0-9]$ ]]; then
+    echo 'invalid --tb-nhi-cycles (expected 0-9)' >&2; exit 2
+fi
 if (( TB_NHI )); then
     if (( XDOMAIN || ${GPU:-0} || MECHANISM_VARIANTS || LIFECYCLE || FENCE_CHECK || EVAL_SESSION )) || [[ -n "$FAULT_CAMPAIGN" ]]; then
         echo 'tb-nhi requires its exclusive correctness mode' >&2; exit 2
@@ -703,6 +714,7 @@ printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/prove
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
+printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\n' "$TB_NHI_CYCLES" "$TB_NHI_ENUMERATE" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
@@ -1069,6 +1081,7 @@ printf 'fault_campaign=%s\n' "$FAULT_CAMPAIGN" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FENCE_CHECK" "$FENCE_NONCE_PREFIX" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'tb_nhi_enumerate=%s\n' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -1296,7 +1309,7 @@ fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
 if [ "${tb_nhi:-0}" = 1 ]; then
-	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles"
+	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}"
 fi
 if [ "${gpu:-0}" = 1 ]; then
 	# Destination CE window: the host image oracle expects the source bytes.
@@ -2030,6 +2043,7 @@ fi
 if (( ${GPU:-0} )); then (( gpu_status == 0 )); fi
 if (( ${TB_NHI:-0} )); then
     grep -E '^XDEV_EXT_TB_NHI(=|_CYCLE=|_STATE )' "$EV/guest.log" | tee "$EV/tb-nhi-result.txt"
+    grep -E '^XDEV_EXT_TB_NHI_ENUM ' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true
     grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
 fi
 python3 - "$SRC" "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "${GPU:-0}" <<'PYVALIDATE'
