@@ -30,6 +30,11 @@ to the actual caller stream. It restores the caller's stream on return. The
 native owner stays alive through partial failures and closes only after TP,
 work and graph users are gone.
 
+Optional `early_cts` (0 or 1, default 0) opens both endpoints with
+`XDEV_EXT_PEER_ENDPOINT_F_EARLY` through `xdev_ext_cuda_peer_owner_open_flags`
+or `xdev_ext_cuda_peer_owner_open_programs`. Both ranks must request the same
+value; the agreement check rejects a mismatch before either owner opens.
+
 Optional `tx_program_pins` and `rx_program_pins` arrays select existing PRIVATE
 struct_ops link pins per stage. TX has three entries: USER producer, XDOMAIN
 TX, USER terminal. RX has two: XDOMAIN RX, USER consumer. A null entry keeps

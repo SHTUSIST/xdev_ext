@@ -313,9 +313,16 @@ public:
     const auto epoch = options["epoch"].cast<uint64_t>();
     TORCH_CHECK(o.group_bytes >= 64 && payload <= o.group_bytes-64 && id && epoch,
                 "bootstrap payload/namespace does not fit actual geometry");
+    // Optional EARLY receiver CTS request; both ranks agreed on it already.
+    uint32_t endpoint_flags = 0;
+    if (options.contains("early_cts")) {
+      const auto early = options["early_cts"].cast<uint64_t>();
+      TORCH_CHECK(early <= 1, "early_cts must be 0 or 1");
+      if (early) endpoint_flags |= XDEV_EXT_PEER_ENDPOINT_F_EARLY;
+    }
     int rc = selected_programs
-        ? xdev_ext_cuda_peer_owner_open_programs(&o, 0, &programs, &s.endpoint_owner)
-        : xdev_ext_cuda_peer_owner_open(&o, &s.endpoint_owner);
+        ? xdev_ext_cuda_peer_owner_open_programs(&o, endpoint_flags, &programs, &s.endpoint_owner)
+        : xdev_ext_cuda_peer_owner_open_flags(&o, endpoint_flags, &s.endpoint_owner);
     TORCH_CHECK(!rc, "native endpoint bootstrap failed; partial ownership retained: ", rc);
     xdev_ext_cuda_peer_owner_view v{}; v.size = sizeof(v);
     rc = xdev_ext_cuda_peer_owner_get_view(s.endpoint_owner, &v);

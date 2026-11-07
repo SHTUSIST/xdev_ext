@@ -11,7 +11,8 @@ _NUMBERS = {'version', 'rank', 'world_size', 'device_index', 'mode', 'link_token
 _PATHS = {'nvidia_node', 'ptx_path'}
 _OBJECT_PATHS = {'bpf_object', 'user_bpf_object'}
 _PIN_COUNTS = {'tx_program_pins': 3, 'rx_program_pins': 2}
-_ALLOWED = _NUMBERS | _PATHS | _OBJECT_PATHS | set(_PIN_COUNTS) | {'control_ptx_path', 'trace_capacity'}
+_ALLOWED = (_NUMBERS | _PATHS | _OBJECT_PATHS | set(_PIN_COUNTS) |
+            {'control_ptx_path', 'trace_capacity', 'early_cts'})
 _AGREEMENT = ('version', 'world_size', 'mode', 'allocation_bytes', 'group_bytes',
               'depth', 'nr_batches', 'first_sequence', 'timeout_ns',
               'communicator_id', 'epoch', 'max_payload_bytes')
@@ -46,6 +47,11 @@ def validate_options(options, *, rank, device_index, environ=None):
             data[key] = None
         elif not isinstance(value, str) or not value or '\x00' in value:
             raise ValueError(f'invalid admission path: {key}')
+    # Optional EARLY receiver CTS request (configuration d1/d2 ingredient).
+    # It selects the native endpoint flag; it is not evidence that EARLY ran.
+    if 'early_cts' in data and (type(data['early_cts']) is not int or
+                                data['early_cts'] not in (0, 1)):
+        raise ValueError('early_cts must be 0 or 1')
     for key in _NUMBERS | ({'trace_capacity'} & set(data)):
         value = data[key]
         if type(value) is not int or value < 0 or value > (1 << 64) - 1:
@@ -95,4 +101,6 @@ def load_options(path, *, rank, group, device_index, environ=None):
 
 
 def agreement_key(options):
-    return {key: options[key] for key in _AGREEMENT}
+    key = {name: options[name] for name in _AGREEMENT}
+    key['early_cts'] = options.get('early_cts', 0)
+    return key

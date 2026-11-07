@@ -229,6 +229,17 @@ class TorchBoundaryTests(unittest.TestCase):
         self.assertIn(('bootstrap', 444), self.calls)
         self.assertIs(self.current_stream[0], self.caller)
 
+    def test_bootstrap_forwards_early_cts_request_to_native_owner(self):
+        from xdev_tp_torch import TorchCommunicator
+        options = dict(version=1, rank=1, world_size=2, device_index=1, mode=1,
+            nvidia_node='/dev/nvidia0', bpf_object=__file__, user_bpf_object=__file__, ptx_path=__file__,
+            link_token=7, allocation_bytes=65536, group_bytes=4096, depth=1,
+            nr_batches=10, first_sequence=1, timeout_ns=10**9,
+            communicator_id=11, epoch=2, max_payload_bytes=4000)
+        self.assertEqual(TorchCommunicator.from_options(options)._native.config.get('early_cts', 0), 0)
+        options['early_cts'] = 1
+        self.assertEqual(TorchCommunicator.from_options(options)._native.config['early_cts'], 1)
+
 
 class FlatTensor:
     """Contiguous fake CUDA tensor whose flat views remember their offset."""
