@@ -9486,6 +9486,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh"
     },
     {
+      "source": "tests/integration/session/native/lab_vfio_tb_check.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/lab_vfio_tb_check.sh"
+    },
+    {
+      "source": "tests/integration/session/native/lab_vfio_tb_check_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/lab_vfio_tb_check_test.py"
+    },
+    {
       "source": "tests/network/count_fifo/control_expected.py",
       "logical_path": "tests/network/count_fifo/control_expected.py"
     },
