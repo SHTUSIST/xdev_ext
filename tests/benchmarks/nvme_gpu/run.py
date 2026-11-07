@@ -138,8 +138,10 @@ def arguments(argv=None):
     parser.add_argument("--directory", type=Path)
     parser.add_argument("--cuda-root", type=Path, default=Path("/usr/local/cuda"))
     parser.add_argument("--ng", help="NVMe generic namespace of the directory's device")
-    parser.add_argument("--ce-dev", help="GPU CE device (with --ce-alloc) or /dev/xdev_ext_ce_sim")
-    parser.add_argument("--ce-alloc", action="store_true")
+    parser.add_argument("--ce-dev", help="GPU CE device (with --ce-alloc or --ce-vmm) or /dev/xdev_ext_ce_sim")
+    ce_allocation = parser.add_mutually_exclusive_group()
+    ce_allocation.add_argument("--ce-alloc", action="store_true")
+    ce_allocation.add_argument("--ce-vmm", action="store_true")
     parser.add_argument("--destination", choices=DESTINATIONS, default="slot-ring")
     parser.add_argument("--completion-wait", choices=WAITS, default="block")
     parser.add_argument("--streams", type=decimal, default=2)
@@ -395,7 +397,8 @@ def arm_command(arm, binary, args, direction, size, qd, pattern, path, window, l
         slba, lba_size = lba
         command = [binary, "--ng", args.ng, "--slba", slba, "--lba-size", lba_size,
                    "--file", path, "--ce-dev", args.ce_dev]
-        command += ["--ce-alloc"] if args.ce_alloc else ["--ce-va", 0]
+        command += (["--ce-vmm"] if getattr(args, "ce_vmm", False) else
+                    ["--ce-alloc"] if args.ce_alloc else ["--ce-va", 0])
         return [str(c) for c in command + common]
     baseline = ["--destination", args.destination, "--completion-wait", args.completion_wait]
     if arm == "uring-cuda":

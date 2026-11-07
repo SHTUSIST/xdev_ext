@@ -90,6 +90,24 @@ every step of every group and the CPU copies no payload.
 
 ## Session arm specifics
 
+- `--ce-alloc` retains the native `cuMemAlloc` path. `--ce-vmm` explicitly
+  selects the existing CUDA VMM helper and attaches the same POSIX fd export
+  to every CE stage fd before CREATE, so the CE window can bind without a
+  GPUDirect RDMA VA registration. The choices are mutually exclusive;
+  `/dev/xdev_ext_ce_sim` still takes `--ce-va`. The runner forwards the selected
+  allocation mode only to the session arm. Allocation, attachment, seeding and
+  readback remain outside the existing timed region; the requested window,
+  geometry, baseline commands and result schema are unchanged.
+- VMM availability is a path qualification, not a performance result. A CLI
+  VMM run alone does not qualify this arm. Use the existing correctness route
+  or an unmeasured probe of the actual shared CE helper before collecting
+  physical measurements. Attached kernel references retain bound memory under
+  the existing quarantine rules; closing the caller's export does not prove
+  DMA quiescence or recover UNKNOWN work.
+- For GPU devices, process-level `cuInit` completes before the FD baseline.
+  The baseline still precedes every session-owned file, NG, CE stage, export
+  and ring/eventfd. The original FD check remains exact; a pass JSON record
+  is emitted only after final cleanup and that check succeed.
 - The struct_ops programs `nxp_nvme_ops` (`nxp_mech.bpf.o`, `nvme_mode=0`,
   `key_base` 1) and `ce_plan_ops` (`ce_plan.bpf.o`) must be attached;
   otherwise CREATE fails and the arm exits 4.

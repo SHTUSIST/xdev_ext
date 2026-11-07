@@ -65,7 +65,7 @@ struct sn_opts {
 	uint32_t direction;
 	const char *ng, *file, *ce_dev;
 	uint64_t slba, lba_size, file_offset, frame_size, timeout_ms, ce_va;
-	bool ce_alloc;
+	bool ce_alloc, ce_vmm;
 	struct xg_geometry g;
 };
 
@@ -73,14 +73,14 @@ static void sn_usage(FILE *f)
 {
 	fprintf(f,
 "usage: session_nvme_ce --direction load|save --ng /dev/ngXnY --slba N --lba-size N\n"
-"         --file PATH [--file-offset N] --ce-dev DEV (--ce-va N | --ce-alloc)\n"
+"         --file PATH [--file-offset N] --ce-dev DEV (--ce-va N | --ce-alloc | --ce-vmm)\n"
 "         --size N --qd N --window-bytes N [--passes N] [--pattern seq]\n"
 "         [--seed N] [--frame-size N] [--timeout-ms N]\n");
 }
 
 static int sn_parse(int argc, char **argv, struct sn_opts *o)
 {
-	enum { O_DIR = 1, O_NG, O_SLBA, O_LBA, O_FILE, O_FOFF, O_CE, O_VA, O_ALLOC,
+	enum { O_DIR = 1, O_NG, O_SLBA, O_LBA, O_FILE, O_FOFF, O_CE, O_VA, O_ALLOC, O_VMM,
 	       O_SIZE, O_QD, O_WIN, O_PASS, O_PAT, O_SEED, O_FRAME, O_TMO, O_HELP };
 	static const struct option opts[] = {
 		{ "direction", required_argument, NULL, O_DIR },
@@ -92,6 +92,7 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 		{ "ce-dev", required_argument, NULL, O_CE },
 		{ "ce-va", required_argument, NULL, O_VA },
 		{ "ce-alloc", no_argument, NULL, O_ALLOC },
+		{ "ce-vmm", no_argument, NULL, O_VMM },
 		{ "size", required_argument, NULL, O_SIZE },
 		{ "qd", required_argument, NULL, O_QD },
 		{ "window-bytes", required_argument, NULL, O_WIN },
@@ -122,6 +123,7 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 		case O_CE: o->ce_dev = optarg; break;
 		case O_VA: bad |= xg_parse_u64(optarg, UINT64_MAX >> 2, &o->ce_va); have_va = true; break;
 		case O_ALLOC: o->ce_alloc = true; break;
+		case O_VMM: o->ce_vmm = true; break;
 		case O_SIZE: bad |= xg_parse_u64(optarg, XG_MAX_SIZE, &o->g.size); break;
 		case O_QD: bad |= xg_parse_u64(optarg, XG_MAX_QD, &o->g.qd); break;
 		case O_WIN: bad |= xg_parse_u64(optarg, XG_MAX_WINDOW, &o->g.window); break;
@@ -136,7 +138,7 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 	}
 	o->g.seed = (uint32_t)seed;
 	if (bad || optind != argc || !have_dir || !o->ng || !have_slba || !o->file ||
-	    !o->ce_dev || have_va == o->ce_alloc || !o->timeout_ms ||
+	    !o->ce_dev || have_va + o->ce_alloc + o->ce_vmm != 1 || !o->timeout_ms ||
 	    !o->lba_size || (o->lba_size & (o->lba_size - 1)) || o->lba_size < 512 ||
 	    o->file_offset % SN_IO_ALIGN || xg_geometry_check(&o->g) ||
 	    o->g.size % o->lba_size ||
@@ -386,7 +388,7 @@ static int sn_seed_slots(const struct sn_opts *o, struct es_ce *ce, unsigned cha
 
 int main(int argc, char **argv)
 {
-	int fd_before = eval_fd_count();
+	int fd_before;
 	struct sn_opts o;
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
 	struct sn_pass p, total = { 0 };
@@ -401,6 +403,9 @@ int main(int argc, char **argv)
 		sn_usage(stderr);
 		return ret;
 	}
+	ret = es_ce_runtime_begin(o.ce_dev, &fd_before);
+	if (ret)
+		return ret;
 	{
 		int error = cpu_timer_init(&endpoint_timer, "CLOCK_MONOTONIC", o.g.passes);
 		if (error)
@@ -433,7 +438,9 @@ int main(int argc, char **argv)
 		ret = XG_EXIT_UNAVAILABLE;
 		goto out;
 	}
-	ret = es_ce_open(&ce, o.ce_dev, 1, o.ce_alloc, o.ce_va, o.g.qd * o.g.size);
+	ret = es_ce_open(&ce, o.ce_dev, 1,
+			 o.ce_vmm ? ES_CE_VMM : o.ce_alloc ? ES_CE_NATIVE : ES_CE_OFFSET,
+			 o.ce_va, o.g.qd * o.g.size);
 	if (ret)
 		goto out;
 	if (posix_memalign((void **)&buf, SN_IO_ALIGN, o.g.size) ||
@@ -480,6 +487,21 @@ int main(int argc, char **argv)
 		if (error)
 			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", error);
 	}
+	ret = XG_EXIT_PASS;
+out:
+	/* Idempotent: a closed window has no fd and no driver handle left. */
+	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	if (ng >= 0)
+		close(ng);
+	if (fd >= 0)
+		close(fd);
+	free(buf);
+	free(seen);
+	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
+		ret = XG_EXIT_FAIL;
+	if (ret != XG_EXIT_PASS)
+		return ret;
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\","
 	       "\"route\":\"%s\",\"execution\":\"%s\",\"performance_claim\":\"%s\","
 	       "\"destination\":\"slot-ring\",\"completion_wait\":\"block\","
@@ -501,17 +523,5 @@ int main(int argc, char **argv)
 	       (unsigned long long)total.io_ns, (unsigned long long)total.cpu_us,
 	       (unsigned long long)total.host_busy_us);
 	ret = fflush(stdout) ? XG_EXIT_FAIL : XG_EXIT_PASS;
-out:
-	/* Idempotent: a closed window has no fd and no driver handle left. */
-	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
-	if (ng >= 0)
-		close(ng);
-	if (fd >= 0)
-		close(fd);
-	free(buf);
-	free(seen);
-	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
-		ret = XG_EXIT_FAIL;
 	return ret;
 }

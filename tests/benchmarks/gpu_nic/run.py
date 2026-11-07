@@ -116,7 +116,9 @@ def arguments(argv=None):
     parser.add_argument("--peer-gap-us", type=NG.decimal, default=0,
                         help="ingest sender pause between 64-datagram batches")
     parser.add_argument("--ce-dev")
-    parser.add_argument("--ce-alloc", action="store_true")
+    ce_allocation = parser.add_mutually_exclusive_group()
+    ce_allocation.add_argument("--ce-alloc", action="store_true")
+    ce_allocation.add_argument("--ce-vmm", action="store_true")
     parser.add_argument("--streams", type=NG.decimal, default=2)
     parser.add_argument("--completion-wait", choices=WAITS, default="block")
     parser.add_argument("--timeout-ms", type=NG.decimal, default=60000)
@@ -299,7 +301,9 @@ def _run_cell(args, arm, binary, peer, size, pair, cpu):
     if arm != "session":
         arm_cmd += ["--streams", args.streams, "--completion-wait", args.completion_wait]
     else:
-        arm_cmd += ["--ce-dev", args.ce_dev] + (["--ce-alloc"] if args.ce_alloc else ["--ce-va", 0])
+        arm_cmd += ["--ce-dev", args.ce_dev] + (
+            ["--ce-vmm"] if getattr(args, "ce_vmm", False) else
+            ["--ce-alloc"] if args.ce_alloc else ["--ce-va", 0])
     peer_cmd = shlex.split(args.peer_exec) + [peer]
     peer_cmd += (["send", "--local-ip", args.peer_ip, "--local-port", args.peer_port,
                   "--peer-ip", args.local_ip, "--peer-port", args.local_port,
