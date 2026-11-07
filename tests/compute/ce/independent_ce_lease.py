@@ -100,7 +100,7 @@ static u64 xdev_ext_mech_batch_id(struct xdev_ext_mech_batch *b){return b->gener
 STAGE = r'''
 struct xdev_ext_ce_stage {
  struct xdev_ext_comp_copy_lease_region lease;
- struct xdev_ext_comp_copy_stage { int unused; } copy;
+ struct xdev_ext_comp_copy_stage copy;
  const void *ops;
  u64 window_start, window_len;
 
@@ -319,15 +319,23 @@ static bool xdev_ext_ce_lease_unbind(struct xdev_ext_ce_stage *cs){return !xdev_
     assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('xdev_ext_window_copy_cookie_arm(')
     assert execute.index('cs->ops->lease_get(cs, b)') < execute.index('cs->ops->submit(')
     assert 'cs->ops->submit(&cs->region, copy->host, st->direction,' in native
+    # The lease callback reads the copy stage's window and admitted plan, so
+    # the stage embeds the actual common copy-stage type, not a placeholder.
+    runtime_header = (KERNEL/'src/compute/io_uring/xdev_ext_compfam_copy_runtime.h').read_text()
+    copy_stage = 'typedef int atomic_t; typedef uint8_t u8;\nstruct xdev_ext_comp_copy_stage; struct xdev_ext_comp_copy_cookie;\n'
+    copy_stage += ''.join(function(runtime_header, 'struct '+name+' {')+';\n' for name in (
+        'xdev_ext_comp_copy_legacy_ops', 'xdev_ext_comp_copy_stage'))
     with tempfile.TemporaryDirectory(prefix='independent-ce-lease-') as tmp:
         c, binary = Path(tmp)/'actual.c', Path(tmp)/'actual'
         headers = ('src/core/include/uapi/linux/xdev_ext_mech.h',
                    'src/compute/io_uring/xdev_ext_mech_ce_core.h',
+                   'src/compute/io_uring/xdev_ext_compfam_copy_core.h',
                    'src/compute/io_uring/xdev_ext_mech_ce_lease.h')
         c.write_text(SHIM+''.join('\n#include "'+str(KERNEL/header)+'"\n'
-                                 for header in headers)+group+STAGE+functions+MAIN)
+                                 for header in headers)+copy_stage+group+STAGE+functions+MAIN)
         compiled = subprocess.run(['cc','-std=gnu11','-O1','-Wall','-Wextra','-Werror',
-            '-fsanitize=undefined','-pthread','-I'+str(KERNEL/'src/core/include'),'-I'+str(KERNEL/'src/core/io_uring'),str(c),'-o',str(binary)], capture_output=True,text=True)
+            '-fsanitize=undefined','-pthread','-I'+str(KERNEL/'src/core/include'),
+            '-I'+str(KERNEL/'src/core/include/linux'),'-I'+str(KERNEL/'src/core/io_uring'),str(c),'-o',str(binary)], capture_output=True,text=True)
         if compiled.returncode:
             print("SETUP: compile failed\n"+compiled.stdout+compiled.stderr)
             raise SystemExit(2)
