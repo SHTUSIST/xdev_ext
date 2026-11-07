@@ -3446,6 +3446,10 @@
       "logical_path": "tests/compute/family/runtime/supplement-observables.json"
     },
     {
+      "source": "tests/compute/family/runtime/target-range-abi.json",
+      "logical_path": "tests/compute/family/runtime/target-range-abi.json"
+    },
+    {
       "source": "tests/compute/iaa/provider/Makefile",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_iaa/Makefile"

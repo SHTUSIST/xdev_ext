@@ -1,5 +1,5 @@
 [
-  "ABI CE cookie=40 batch=2576 desc=24 info=568 cqe=24 ops=56; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64",
+  "ABI CE cookie=40 batch=1296 desc=24 info=568 cqe=24 ops=56; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64",
   "OBS CE bind ret=-6 stage=1 host=0 region=1 lease=1 cleanup=1 scope=0 native_pin=1 scope_pin=0 trace=[region+ ]",
   "OBS CE unbind ret=0 stage=0 host=0 region=0 lease=0 cleanup=0 scope=0 native_pin=0 scope_pin=0 trace=[region+ region- ]",
   "OBS CE bind ret=-28 stage=1 host=1 region=1 lease=1 cleanup=1 scope=0 native_pin=1 scope_pin=0 trace=[region+ host+ ]",

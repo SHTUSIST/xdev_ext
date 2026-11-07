@@ -66,7 +66,7 @@ static void ce_configured_observer(bool binding) {
 }
 
 static int ce_bind_region(struct file*f,u64 start,u64 len,struct xdev_ext_ce_region*r){
-    CHECK(!lock_depth&&active_stage->priv);
+    CHECK(!lock_depth&&active_stage&&active_stage->priv);
     event("region+");
     ce_configured_observer(true);
     if(region_zero_output)memset(r,0,sizeof(*r));
@@ -311,6 +311,8 @@ static void init_fixture(struct fixture*f,bool dma){
         .s=&f->session,.file=&f->file,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE,.cls=dma?&xdev_ext_dma_class:&xdev_ext_ce_class
     }
     ;
+    CHECK(f->st.cls->batch_priv_size<=sizeof(f->priv.bytes));
+    CHECK(f->st.cls->batch_cookie_size<=sizeof(f->cookie.bytes));
     f->batch=(struct xdev_ext_mech_batch){
         .priv=f->priv.bytes,.cookie=f->cookie.bytes,.id=91,.ticket=17,.slot=1,.nr=1,.owners_valid=true,.phase=1,.completion={
             .ctrl=(17ULL<<3)|1
@@ -389,7 +391,9 @@ static void binds(void){
         defaults();
         init_fixture(&f,dma);
         struct xdev_ext_mech_stage_uapi u=bind_u;
+        /* Bit 0 enables CE target ranges; bit 1 remains unsupported. */
         u.flags=2;
+        active_stage=NULL; /* This rejection must not reach native callbacks. */
         int before=allocations;
         CHECK(f.st.cls->bind(&f.st,&u)==-EINVAL&&allocations==before&&!f.st.priv);
         bind_region_errno=-ENXIO;

@@ -172,6 +172,9 @@ def runtime_mutate(path,s,name):
             return function_edit(s,'xdev_ext_comp_copy_registry_unregister',lambda b:replace_exact(b,'if (registry->fixed && !identity)','if (false)'))
     if ce or dma:
         cls='ce' if ce else 'dma'
+        if ce and name=='ce_unknown_flags':
+            guard='(u->flags & ~XDEV_EXT_CE_STAGE_F_TARGET_RANGE)' if 'XDEV_EXT_CE_STAGE_F_TARGET_RANGE' in s else 'u->flags'
+            return function_edit(s,'xdev_ext_ce_bind',lambda b:replace_exact(b,guard,'false'))
         if name==cls+'_transfer':
             field='gpu_off' if ce else 'device_off'
             return function_edit(s,'xdev_ext_'+cls+'_copy_submit',lambda b:replace_exact(b,'.'+field+' = x[i].device_off,','.'+field+' = x[i].device_off + 1,'))
@@ -245,7 +248,7 @@ def main():
     results={}
     if a.phase=='mutations':
         names=['ce_capacity','dma_alloc_order','ce_pin_unlock','dma_pin_unlock','ce_transfer','dma_transfer','dead_order','ce_stale_read','dma_stale_read','dma_normalize','ce_normalize','dma_owner','dma_cleanup','dma_scope_early','ce_owner_phase','ce_initial_hold','ce_region_restore','ce_cleanup_hold','ce_native_identity','ce_cleanup_scan','ce_own_hold','ce_configured_identity','ce_detach_early']
-        if (a.source_root/'src/compute/io_uring/xdev_ext_compfam_copy.c').exists():names+=['common_transfer_bypass','common_stale_read','ce_submit_bypass','dma_submit_bypass','ce_complete_bypass','dma_complete_bypass','common_null_fixed']
+        if (a.source_root/'src/compute/io_uring/xdev_ext_compfam_copy.c').exists():names+=['common_transfer_bypass','common_stale_read','ce_submit_bypass','dma_submit_bypass','ce_complete_bypass','dma_complete_bypass','common_null_fixed','ce_unknown_flags']
         for n in names:
             results[n]=execute(a.source_root,a.output/'mutations'/n,mutation=n)
             print(n,results[n]['status'],results[n]['exit'],flush=True)
@@ -268,6 +271,13 @@ def main():
                 print('SETUP missing independently frozen baseline observables');ok=False
             else:
                 expected=json.loads(golden_path.read_text())
+                uapi=(a.source_root/'src/core/include/uapi/linux/xdev_ext_mech.h').read_text()
+                if re.search(r'^#define XDEV_EXT_CE_RANGE_MAX_ENTRIES\b',uapi,re.M):
+                    delta=json.loads((HERE/'target-range-abi.json').read_text())
+                    if expected[0]!=delta['before']:
+                        print('SETUP target-range ABI delta does not match frozen baseline');return 2
+                    expected[0]=delta['after']
+                    print('CE target-range private batch layout: 1296 -> 2576; all other observables frozen')
                 for name,result in results.items():
                     actual=[line for line in pathlib.Path(result['log']).read_text().splitlines() if line.startswith(('OBS ','CQE ','ABI ','XFER '))]
                     same=actual==expected
