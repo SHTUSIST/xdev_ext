@@ -99,8 +99,9 @@ class HandoffMetadataTest(unittest.TestCase):
                 '#include "tests/benchmarks/tp/options.h"\n'
                 'struct Stats {unsigned long long trace_dropped=0,logical_inflight_high_water=1,'
                 'completed=7,gpu_invocations=7,host_control_calls=0;};\n'
-                'int main(int argc,char **argv) { if(argc!=4)return 2; '
+                'int main(int argc,char **argv) { if(argc!=5)return 2; '
                 'tp_eval_options o;o.mode=std::strtoul(argv[1],nullptr,10);'
+                'o.poll_completions=int(std::strtol(argv[4],nullptr,10));'
                 'o.rank=std::strtoul(argv[2],nullptr,10);o.iterations=7;'
                 'o.operation=argv[3][0]==\'e\'?4:3;o.dtype=2;o.rows=2;'
                 'o.elements=512;o.first_sequence=23;if(tp_eval_geometry(o))return 3;'
@@ -116,9 +117,11 @@ class HandoffMetadataTest(unittest.TestCase):
             self.assertEqual(build.returncode, 0, build.stderr)
             for mode, handoff in ((1, 'cpu'), (2, 'gpu')):
                 for rank in (0, 1):
-                    for operation in ('echo', 'collective'):
-                        with self.subTest(mode=mode, rank=rank, operation=operation):
-                            run = subprocess.run([str(executable), str(mode), str(rank), operation],
+                    for operation, poll in (('echo', -1), ('echo', 1), ('collective', 0),
+                                            ('collective', -1)):
+                        with self.subTest(mode=mode, rank=rank, operation=operation, poll=poll):
+                            run = subprocess.run([str(executable), str(mode), str(rank), operation,
+                                                  str(poll)],
                                                  capture_output=True, text=True, timeout=5)
                             self.assertEqual(run.returncode, 0, run.stderr)
                             metadata = json.loads(run.stdout)
@@ -135,6 +138,10 @@ class HandoffMetadataTest(unittest.TestCase):
                                             tx_session_id=0, rx_session_id=0)
                             for field, value in expected.items():
                                 self.assertEqual(metadata.get(field), value, field)
+                            # Observed NHI completion polling; unknown is null.
+                            self.assertIn('xdomain_poll_completions', metadata)
+                            self.assertIs(metadata['xdomain_poll_completions'],
+                                          {-1: None, 0: False, 1: True}[poll])
 
     def test_missing_native_mode_or_handoff_rejected_before_either_operation(self):
         for kind in ('echo', 'collective'):
