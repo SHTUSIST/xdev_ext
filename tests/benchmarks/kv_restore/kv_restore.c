@@ -13,6 +13,17 @@
  *                 check of every byte (pattern) and of every other byte
  *                 (poison).  No XDOMAIN, no timing claim.
  *
+ * --dst ce-vmm (restore, local-verify) replaces the destination frames for a
+ * GPU without GPUDirect RDMA: the receiving stage writes each group into a
+ * recycled ring of host frames (the ring's XDEV_EXT UMEM) and a CE stage
+ * (XDEV_EXT_CE_STAGE_F_TARGET_RANGE, program kv_ce_place.bpf.c) copies it with
+ * the GPU copy engine into a CUDA VMM allocation exported as a POSIX fd and
+ * attached to the CE device, at the same place the PEER layout would put it.
+ * The CPU copies no payload byte on either path; local-verify checks the
+ * whole allocation (pattern inside, poison outside) through CUDA afterwards.
+ * The kernel currently admits a range-target CE stage only next to an NVMe
+ * stage, so restore with ce-vmm is refused at CREATE until XDOMAIN is admitted.
+ *
  * Each role creates its session once at start-up and talks the worker line
  * protocol of kv_protocol.py on stdin/stdout:
  *   -> KV_READY {json}            setup done (or KV_ERROR {json}, exit 1)
@@ -52,26 +63,34 @@
 #include <sys/socket.h>
 #include <time.h>
 #include <unistd.h>
+#include <bpf/bpf.h>
 #include <bpf/btf.h>
 #include <bpf/libbpf.h>
 
 #include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext.h"
 #include "../../../kernel/include/uapi/linux/xdev_ext_peer.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
+#include "../../../kernel/tools/include/xdev_ext_nv_p2p_ioctl.h"
 #include "kv_plan.h"
+#include "kv_ce_place.h"
 
 #define LINE_MAX_BYTES	1024
 #define VERIFY_CHUNK	(64ULL << 20)
 #define POISON		0xA5
 
 enum role { ROLE_SERVE = 1, ROLE_RESTORE, ROLE_LOCAL };
+/* Destination of the received groups: GPU frames (PEER), a system-heap
+ * dma-buf (local-verify), or host frames plus the GPU copy engine. */
+enum dst { DST_NONE = 0, DST_PEER, DST_DMABUF, DST_CE };
+static const char *const dst_names[] = { "none", "peer", "dmabuf", "ce-vmm" };
 
 struct opts {
 	enum role role;
 	struct kv_window w;
 	struct kv_geometry g;
 	const char *nvme, *nvme_prog, *xdomain_prog, *xdomain_map, *service, *sysfs_root;
-	const char *listen, *peer, *gpu_bdf, *gpu_node, *token;
+	const char *listen, *peer, *gpu_bdf, *gpu_node, *token, *ce_dev, *ce_prog;
+	enum dst dst;
 	uint64_t link_token, pool_bytes;
 	int timeout_ms;
 	bool dry_run;
@@ -85,10 +104,12 @@ struct prog {
 struct worker {
 	struct opts o;
 	struct xdev_ext_session *s;
-	struct prog nvme, xd;
+	struct prog nvme, xd, ce;
+	struct bpf_map *ce_target;	/* kv_ce_place.bpf.c .bss: struct kv_ce_target */
 	struct xdev_ext_mech_cuda cuda;
-	int ctl, allocation, dmabuf, gpu, lsock, sock;
-	uint64_t pool_frames, next_key, restores, prev_done;
+	int ctl, allocation, dmabuf, gpu, lsock, sock, ce_fd;
+	uint32_t ring_frames;		/* ce-vmm: host frames of the UMEM ring */
+	uint64_t pool_frames, next_key, restores, prev_done, prev_ce;
 	bool dirty;
 };
 
@@ -405,6 +426,74 @@ static int cuda_verify(struct worker *wk, uint64_t offset, uint64_t bytes, uint6
 	return ret;
 }
 
+/* ce-vmm local-verify: one CUDA copy over the whole VMM allocation (untimed). */
+static int cuda_whole(struct worker *wk, bool write, struct check *c)
+{
+	int (*htod)(uint64_t, const void *, size_t);
+	int (*dtoh)(void *, uint64_t, size_t);
+	void *previous = NULL;
+	uint8_t *buf;
+	int ret = 0;
+
+	*(void **)&htod = dlsym(wk->cuda.lib, "cuMemcpyHtoD_v2");
+	*(void **)&dtoh = dlsym(wk->cuda.lib, "cuMemcpyDtoH_v2");
+	if (!htod || !dtoh)
+		return -ENOSYS;
+	buf = malloc(VERIFY_CHUNK);
+	if (!buf)
+		return -ENOMEM;
+	if (write) {
+		memset(buf, POISON, VERIFY_CHUNK);
+	} else {
+		c->result = 0;
+		c->digest = KV_FNV_OFFSET;
+		c->outside_bad = UINT64_MAX;
+	}
+	if (wk->cuda.ctx_get(&previous) || wk->cuda.ctx_set(wk->cuda.ctx)) {
+		free(buf);
+		return -EIO;
+	}
+	for (uint64_t at = 0; at < wk->cuda.vmm_bytes && !ret; ) {
+		size_t n = wk->cuda.vmm_bytes - at < VERIFY_CHUNK ? (size_t)(wk->cuda.vmm_bytes - at)
+								 : VERIFY_CHUNK;
+
+		if (write) {
+			ret = htod(wk->cuda.va + at, buf, n) ? -EIO : 0;
+			at += n;
+			continue;
+		}
+		if (dtoh(buf, wk->cuda.va + at, n)) {
+			ret = -EIO;
+			break;
+		}
+		for (size_t i = 0; i < n; i++) {
+			uint64_t pos = at + i;
+			bool inside = pos >= c->offset && pos - c->offset < c->bytes;
+
+			if (!inside && buf[i] != POISON && c->outside_bad == UINT64_MAX)
+				c->outside_bad = pos;
+		}
+		/* The pattern part of this chunk, in KV byte order. */
+		if (at + n > c->offset && at < c->offset + c->bytes) {
+			uint64_t lo = at > c->offset ? at : c->offset;
+			uint64_t hi = at + n < c->offset + c->bytes ? at + n : c->offset + c->bytes;
+			uint64_t bad = 0;
+
+			if (!c->result && kv_pattern_check(c->seed, lo - c->offset, buf + (lo - at),
+							   hi - lo, &bad)) {
+				c->result = 1;
+				c->first_bad = bad;
+			}
+			c->digest = kv_fnv1a(c->digest, buf + (lo - at), hi - lo);
+		}
+		at += n;
+	}
+	if (wk->cuda.ctx_set(previous))
+		ret = ret ? ret : -EIO;
+	free(buf);
+	return ret;
+}
+
 /* ---- sockets ------------------------------------------------------------ */
 
 static int split_addr(const char *spec, char *host, size_t cap, char *port, size_t pcap)
@@ -532,11 +621,18 @@ static int create_session(struct worker *wk)
 	struct xdev_ext_mech_create_report report;
 	struct xdev_ext_peer_pool_opts pool = { .sz = sizeof(pool), .allocation_fd = wk->allocation };
 	const struct opts *o = &wk->o;
-	int fds[2] = { -1, -1 }, nvme = -1, ret;
+	int fds[3] = { -1, -1, -1 }, nvme = -1, ret;
 	uint64_t token = 0;
 	__u32 xd = o->g.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0, i = 0;
 
-	ret = xdev_ext_session_open_peer(&pool, &wk->s);
+	if (o->dst == DST_CE) {
+		struct xdev_ext_pool_opts umem = { .sz = sizeof(umem),
+			.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .nr_frames = wk->ring_frames };
+
+		ret = xdev_ext_session_open(&umem, &wk->s);
+	} else {
+		ret = xdev_ext_session_open_peer(&pool, &wk->s);
+	}
 	if (ret)
 		return ret;
 	c.group_bytes = o->g.group_bytes;
@@ -564,6 +660,14 @@ static int create_session(struct worker *wk)
 		}
 		c.st[i].arg1 = kv_plan_xdomain_arg1(&o->g);
 		fds[i++] = prog_fd(&wk->xd);
+	}
+	if (o->dst == DST_CE) {
+		/* The whole allocation is the window; the program picks each group's place. */
+		c.st[i] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_CE,
+			.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = wk->ce_fd,
+			.flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE, .arg0 = wk->cuda.va,
+			.arg1 = o->pool_bytes };
+		fds[i++] = prog_fd(&wk->ce);
 	}
 	c.nr_stages = i;
 	ret = xdev_ext_session_create_programs(wk->s, &c, fds, i, &report);
@@ -605,6 +709,8 @@ static int setup(struct worker *wk, const char **where)
 	wk->pool_frames = o->role == ROLE_SERVE ? (uint64_t)o->g.depth *
 		(o->g.group_bytes / o->g.frame_bytes) : o->pool_bytes / o->g.frame_bytes;
 	len = wk->pool_frames * o->g.frame_bytes;
+	if (o->dst == DST_CE)
+		wk->ring_frames = o->g.depth * (o->g.group_bytes / o->g.frame_bytes);
 	if (o->dry_run)
 		return 0;
 	*where = "open /dev/xdev_ext_peer";
@@ -624,7 +730,36 @@ static int setup(struct worker *wk, const char **where)
 		if (ret)
 			return ret;
 	}
-	if (o->role == ROLE_RESTORE) {
+	if (o->dst == DST_CE) {
+		struct xdev_ext_nv_ce_attach_memory attach = { 0 };
+		size_t size = 0;
+
+		*where = "load CE program";
+		ret = load_private(o->ce_prog, "kv_ce_ops", "xdev_ext_ce_mech_ops", &wk->ce);
+		if (ret)
+			return ret;
+		wk->ce_target = bpf_object__find_map_by_name(wk->ce.obj, ".bss");
+		if (!wk->ce_target || !bpf_map__initial_value(wk->ce_target, &size) ||
+		    size != sizeof(struct kv_ce_target))
+			return -EPROTO;
+		*where = "CUDA VMM allocation";
+		ret = xdev_ext_mech_cuda_open_vmm(&wk->cuda, o->gpu_bdf, len);
+		if (ret)
+			return ret;
+		*where = "open CE device";
+		wk->ce_fd = open(o->ce_dev, O_RDWR | O_CLOEXEC);
+		if (wk->ce_fd < 0)
+			return -errno;
+		/* CREATE claims the VRAM through this attached export. */
+		*where = "attach CUDA export to the CE device";
+		attach = (struct xdev_ext_nv_ce_attach_memory){ .mem_fd = wk->cuda.export_fd,
+			.gpu_va = wk->cuda.va, .size = wk->cuda.vmm_bytes };
+		if (xdev_ext_nv_ce_attach_memory(wk->ce_fd, &attach)) {
+			ret = errno ? -errno : -EIO;
+			fprintf(stderr, "kv_restore: CE attach status 0x%x\n", attach.status);
+			return ret;
+		}
+	} else if (o->role == ROLE_RESTORE) {
 		*where = "CUDA allocation";
 		ret = xdev_ext_mech_cuda_open(&wk->cuda, o->gpu_bdf, len);
 		if (ret)
@@ -669,7 +804,8 @@ static int plan_claim(struct worker *wk, uint64_t ordinal, uint64_t slba, uint64
 {
 	struct kv_request r = { .object_slba = slba, .bytes = bytes, .ordinal = ordinal,
 		.dst_frame0 = dst0,
-		.pool_frames = wk->o.role == ROLE_SERVE ? 0 : wk->pool_frames };
+		.pool_frames = wk->o.role == ROLE_SERVE ? 0 : wk->pool_frames,
+		.host2_ring = wk->o.dst == DST_CE };
 	int ret = kv_plan_make(&wk->o.w, &wk->o.g, &r, p);
 
 	if (ret)
@@ -709,25 +845,52 @@ static int start_plan(struct worker *wk, const struct kv_plan *p, bool host1)
 	return ret;
 }
 
-/* Batches of this restore all finished without abort or sequestering. */
+/* Batches of this restore all finished without abort or sequestering; with
+ * ce-vmm the copy engine stage (the last) completed exactly one command per group. */
 static int outcome(struct worker *wk, const struct xdev_ext_mech_stats *st, uint64_t groups)
 {
+	const unsigned ce = 1;	/* [NVMe READ | XDOMAIN RX, CE] */
 	int ret = 0;
 
 	if (st->batches_done != wk->prev_done + groups || st->batches_abort || st->sequestered ||
 	    st->inflight || st->last_err)
 		ret = st->last_err ? st->last_err : -EIO;
+	if (!ret && wk->o.dst == DST_CE &&
+	    (st->completed[ce] != wk->prev_ce + groups || st->submitted[ce] != st->completed[ce]))
+		ret = -EIO;
 	wk->prev_done = st->batches_done;
+	if (wk->o.dst == DST_CE)
+		wk->prev_ce = st->completed[ce];
 	return ret;
+}
+
+/* ce-vmm: the keys and place of this restore, read by kv_ce_place.bpf.c. */
+static int ce_target(struct worker *wk, const struct kv_plan *p)
+{
+	struct kv_ce_target t = { .first_key = p->first_seq, .groups = p->groups,
+		.dst_off = (uint64_t)p->host2_dst_frame0 * wk->o.g.frame_bytes };
+	__u32 zero = 0;
+
+	return bpf_map_update_elem(bpf_map__fd(wk->ce_target), &zero, &t, BPF_ANY) ? -errno : 0;
+}
+
+static const char *payload_path(const struct worker *wk)
+{
+	if (wk->o.dst == DST_CE)
+		return wk->o.role == ROLE_LOCAL ? "nvme-read>host-frame>ce-h2d"
+						: "xdomain-rx>host-frame>ce-h2d";
+	return wk->o.dst == DST_DMABUF ? "nvme-read>dmabuf-frame" : "xdomain-rx>gpu-frame";
 }
 
 static void plan_json(FILE *f, const struct kv_plan *p)
 {
 	fprintf(f, "{\"groups\": %" PRIu64 ", \"slots\": %" PRIu64 ", \"slot0\": %" PRIu64
 		", \"first_seq\": %" PRIu64 ", \"frames_per_group\": %u, \"host2_frames\": %" PRIu64
-		", \"host2_dst_frame0\": %u, \"host1_recycle_frames\": %u}",
+		", \"host2_dst_frame0\": %u, \"host1_recycle_frames\": %u, \"host2_ring\": %s"
+		", \"host2_start_frames\": %u}",
 		p->groups, p->slots, p->slot0, p->first_seq, p->frames_per_group, p->host2_frames,
-		p->host2_dst_frame0, p->host1_recycle_frames);
+		p->host2_dst_frame0, p->host1_recycle_frames, p->host2_ring ? "true" : "false",
+		p->host2_start_frames);
 }
 
 /* GO for restore and local-verify. */
@@ -738,6 +901,9 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 	struct xdev_ext_mech_stats st = { 0 };
 	struct check chk = { .result = 1, .outside_bad = UINT64_MAX };
 	char line[LINE_MAX_BYTES], reply[LINE_MAX_BYTES] = "";
+	/* Payload bytes this process copies with the CPU between t0 and t1.  No
+	 * path below copies payload: the NIC/NVMe and the copy engine move it. */
+	const uint64_t cpu_copy_bytes = 0;
 	int ret, wait_err = 0, verify_err = 0;
 	bool planned = false, started = false, good;
 	struct kv_plan p;
@@ -758,7 +924,9 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 		goto report;
 	}
 	if (wk->o.role == ROLE_LOCAL) {
-		ret = dmabuf_cpu(wk->dmabuf, wk->pool_frames * wk->o.g.frame_bytes, true, poison_fn, NULL);
+		ret = wk->o.dst == DST_CE ? cuda_whole(wk, true, NULL)
+			: dmabuf_cpu(wk->dmabuf, wk->pool_frames * wk->o.g.frame_bytes, true,
+				     poison_fn, NULL);
 		if (ret)
 			goto report;
 	}
@@ -767,7 +935,9 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 		 ordinal, slba, bytes, p.first_seq, p.groups);
 	c0 = cpu_us();
 	t0 = now_ns();
-	ret = start_plan(wk, &p, false);
+	ret = wk->o.dst == DST_CE ? ce_target(wk, &p) : 0;
+	if (!ret)
+		ret = start_plan(wk, &p, false);
 	started = !ret;
 	if (!ret && wk->o.role == ROLE_RESTORE)
 		ret = send_line(wk->sock, line);
@@ -795,10 +965,13 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 
 		chk = (struct check){ .seed = seed, .offset = off, .bytes = bytes,
 				      .outside_bad = UINT64_MAX };
-		verify_err = wk->o.role == ROLE_LOCAL
-			? dmabuf_cpu(wk->dmabuf, wk->pool_frames * wk->o.g.frame_bytes, false,
-				     check_fn, &chk)
-			: cuda_verify(wk, off, bytes, seed, &chk);
+		if (wk->o.role == ROLE_LOCAL && wk->o.dst == DST_CE)
+			verify_err = cuda_whole(wk, false, &chk);
+		else if (wk->o.role == ROLE_LOCAL)
+			verify_err = dmabuf_cpu(wk->dmabuf, wk->pool_frames * wk->o.g.frame_bytes,
+						false, check_fn, &chk);
+		else
+			verify_err = cuda_verify(wk, off, bytes, seed, &chk);
 	}
 report:
 	wk->restores++;
@@ -809,6 +982,8 @@ report:
 	printf(", \"role\": \"%s\", \"ok\": %s, \"error\": %d, \"dry_run\": %s, \"bytes\": %" PRIu64,
 	       wk->o.role == ROLE_LOCAL ? "local-verify" : "restore", good ? "true" : "false",
 	       ret ? ret : verify_err, wk->o.dry_run ? "true" : "false", good ? bytes : 0);
+	printf(", \"dst\": \"%s\", \"payload_path\": \"%s\", \"cpu_copy_bytes\": %" PRIu64,
+	       dst_names[wk->o.dst], payload_path(wk), cpu_copy_bytes);
 	if (planned) {
 		printf(", \"plan\": ");
 		plan_json(stdout, &p);
@@ -955,9 +1130,12 @@ static int teardown(struct worker *wk, bool *retained, int *stop_error)
 		close(wk->dmabuf);
 	if (wk->gpu >= 0)
 		close(wk->gpu);
+	if (wk->ce_fd >= 0)
+		close(wk->ce_fd);
 	r = wk->cuda.lib ? xdev_ext_mech_cuda_close(&wk->cuda) : 0;
 	if (r && !ret)
 		ret = r;
+	prog_free(&wk->ce);
 	prog_free(&wk->xd);
 	prog_free(&wk->nvme);
 	if (wk->ctl >= 0)
@@ -976,7 +1154,10 @@ static void usage(void)
 		"          [--xdomain-prog OBJ [--xdomain-map NAME]]\n"
 		"  restore: --gpu-bdf BDF --gpu-node /dev/nvidiaN --pool-bytes N --peer HOST:PORT\n"
 		"          (--service NAME [--sysfs-root DIR] | --link-token N) [--xdomain-prog OBJ]\n"
-		"  local-verify: --nvme /dev/ngXnY --nvme-prog kv_nvme_read.bpf.o --pool-bytes N\n");
+		"  local-verify: --nvme /dev/ngXnY --nvme-prog kv_nvme_read.bpf.o --pool-bytes N\n"
+		"  --dst peer|dmabuf|ce-vmm: restore defaults to peer, local-verify to dmabuf;\n"
+		"     ce-vmm: --gpu-bdf BDF --ce-dev /dev/nvidiaN --ce-prog kv_ce_place.bpf.o\n"
+		"     --frame-bytes 4096, no --gpu-node; --pool-bytes sizes the CUDA VMM allocation\n");
 }
 
 static int parse(int argc, char **argv, struct opts *o)
@@ -989,7 +1170,8 @@ static int parse(int argc, char **argv, struct opts *o)
 		{ "xdomain-prog", 1, 0, 13 }, { "xdomain-map", 1, 0, 14 }, { "service", 1, 0, 15 },
 		{ "sysfs-root", 1, 0, 16 }, { "link-token", 1, 0, 17 }, { "listen", 1, 0, 18 },
 		{ "peer", 1, 0, 19 }, { "gpu-bdf", 1, 0, 20 }, { "gpu-node", 1, 0, 21 },
-		{ "pool-bytes", 1, 0, 22 }, { "dry-run", 0, 0, 23 }, { 0, 0, 0, 0 } };
+		{ "pool-bytes", 1, 0, 22 }, { "dry-run", 0, 0, 23 }, { "dst", 1, 0, 24 },
+		{ "ce-dev", 1, 0, 25 }, { "ce-prog", 1, 0, 26 }, { 0, 0, 0, 0 } };
 	uint64_t timeout = 120000;
 	int c, bad = 0;
 
@@ -1028,6 +1210,13 @@ static int parse(int argc, char **argv, struct opts *o)
 		case 21: o->gpu_node = optarg; break;
 		case 22: bad |= parse_u64(optarg, &o->pool_bytes); break;
 		case 23: o->dry_run = true; break;
+		case 24:
+			o->dst = !strcmp(optarg, "peer") ? DST_PEER : !strcmp(optarg, "dmabuf") ? DST_DMABUF
+				: !strcmp(optarg, "ce-vmm") ? DST_CE : DST_NONE;
+			bad |= o->dst == DST_NONE;
+			break;
+		case 25: o->ce_dev = optarg; break;
+		case 26: o->ce_prog = optarg; break;
 		default: return -EINVAL;
 		}
 	}
@@ -1042,7 +1231,18 @@ static int parse(int argc, char **argv, struct opts *o)
 		return -EINVAL;
 	if (o->role == ROLE_SERVE && !o->listen)
 		return -EINVAL;
-	if (o->role == ROLE_RESTORE && (!o->gpu_bdf || !o->gpu_node || !o->peer))
+	/* Destination: explicit, or each role's original one. */
+	if (o->role == ROLE_SERVE ? o->dst != DST_NONE :
+	    o->role == ROLE_RESTORE ? o->dst == DST_DMABUF : o->dst == DST_PEER)
+		return -EINVAL;
+	if (o->dst == DST_NONE && o->role != ROLE_SERVE)
+		o->dst = o->role == ROLE_RESTORE ? DST_PEER : DST_DMABUF;
+	if (o->dst == DST_CE ? !o->gpu_bdf || !o->ce_dev || !o->ce_prog || o->gpu_node ||
+				  o->g.frame_bytes != XDEV_EXT_FRAME_SIZE
+			     : o->ce_dev || o->ce_prog)
+		return -EINVAL;
+	if (o->role == ROLE_RESTORE && (!o->gpu_bdf || !o->peer ||
+					(o->dst == DST_PEER && !o->gpu_node)))
 		return -EINVAL;
 	if (o->role != ROLE_SERVE && (!o->pool_bytes || o->pool_bytes % o->g.frame_bytes ||
 				      o->pool_bytes / o->g.frame_bytes > UINT32_MAX))
@@ -1053,7 +1253,7 @@ static int parse(int argc, char **argv, struct opts *o)
 int main(int argc, char **argv)
 {
 	struct worker wk = { .ctl = -1, .allocation = -1, .dmabuf = -1, .gpu = -1, .lsock = -1,
-			     .sock = -1, .next_key = 1 };
+			     .sock = -1, .ce_fd = -1, .next_key = 1 };
 	char buf[LINE_MAX_BYTES], where[96];
 	const char *step = "options";
 	bool retained = false;
@@ -1078,11 +1278,12 @@ int main(int argc, char **argv)
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
 	       "\"pool_frames\": %" PRIu64 ", \"frame_bytes\": %u, \"group_bytes\": %u, "
 	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s, "
-	       "\"memlock_bytes\": %lld}\n",
+	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u}\n",
 	       argv[1], wk.o.dry_run ? "true" : "false",
 	       wk.s ? (unsigned long long)xdev_ext_session_id(wk.s) : 0ULL, wk.pool_frames,
 	       wk.o.g.frame_bytes, wk.o.g.group_bytes, wk.o.g.depth, wk.o.g.window,
-	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes());
+	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes(),
+	       dst_names[wk.o.dst], wk.ring_frames);
 	fflush(stdout);
 	if (wk.o.role == ROLE_SERVE) {
 		ret = serve_loop(&wk);

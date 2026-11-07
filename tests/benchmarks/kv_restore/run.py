@@ -170,9 +170,18 @@ def worker_argv(args, m):
                 '--window-slba', m.window_slba, '--window-nlb', m.window_nlb,
                 '--lba-bytes', m.lba_bytes, '--group-bytes', g.group_bytes,
                 '--frame-bytes', g.frame_bytes, '--depth', g.depth, '--window', g.window,
-                '--gpu-bdf', args.gpu_bdf, '--gpu-node', args.gpu_node,
-                '--pool-bytes', args.pool_bytes, '--peer', args.peer,
-                '--timeout-ms', args.timeout_ms, '--token', args.request_token]
+                '--gpu-bdf', args.gpu_bdf, '--pool-bytes', args.pool_bytes, '--peer', args.peer,
+                '--timeout-ms', args.timeout_ms, '--token', args.request_token,
+                '--dst', args.dst]
+        if args.dst == 'ce-vmm':
+            # Host frames and the GPU copy engine into a CUDA VMM allocation.
+            if not args.ce_dev or not args.ce_prog or args.gpu_node:
+                raise SystemExit('--dst ce-vmm needs --ce-dev and --ce-prog and no --gpu-node')
+            argv += ['--ce-dev', args.ce_dev, '--ce-prog', args.ce_prog]
+        else:
+            if not args.gpu_node or args.ce_dev or args.ce_prog:
+                raise SystemExit('--dst peer needs --gpu-node and no --ce-dev/--ce-prog')
+            argv += ['--gpu-node', args.gpu_node]
         argv += ['--service', args.service] if args.service else ['--link-token', args.link_token]
         if args.xdomain_prog:
             argv += ['--xdomain-prog', args.xdomain_prog]
@@ -305,6 +314,7 @@ def cmd_run(args):
                        ordinal=item['ordinal'], bytes=kl.kv_bytes(obj.model, item['prefix_tokens']),
                        ok=bool(result and result['ok']), latency_ns=result['latency_ns'] if result else 0,
                        worker=result, worker_error=error, host2_cpu=kc.delta(before, after),
+                       host2_cpu_copy_bytes=result.get('cpu_copy_bytes') if result else None,
                        host1_cpu=host1, host1_drop_caches=args.drop_caches_host1,
                        host2_drop_caches=args.drop_caches_host2,
                        perf=perf.finish() if perf else None)
@@ -418,6 +428,10 @@ def parser():
     p.add_argument('--worker-bin')
     p.add_argument('--gpu-bdf')
     p.add_argument('--gpu-node')
+    p.add_argument('--dst', choices=('peer', 'ce-vmm'), default='peer',
+                   help='xdev-ext: GPU frames (PEER pool) or host frames + GPU copy engine')
+    p.add_argument('--ce-dev', help='xdev-ext --dst ce-vmm: the GPU node /dev/nvidiaN')
+    p.add_argument('--ce-prog', help='xdev-ext --dst ce-vmm: kv_ce_place.bpf.o')
     p.add_argument('--pool-bytes', type=int)
     p.add_argument('--peer', help='xdev-ext: host 1 worker HOST:PORT')
     p.add_argument('--service')

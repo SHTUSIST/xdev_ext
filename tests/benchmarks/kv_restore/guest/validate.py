@@ -14,6 +14,12 @@ validate   reads the guest console and requires, for every planned GO, the
 
 Correctness only (QEMU NVMe, system-heap dma-buf, no XDOMAIN): it measures
 nothing and proves nothing about Thunderbolt, GPU memory or performance.
+
+--dst ce-vmm plans and checks the CE VMM destination instead: NVMe READ into
+a recycled ring of 4 KiB host frames, the GPU copy engine into a CUDA VMM
+allocation of pool_frames frames.  The guest appends --gpu-bdf; the oracle
+additionally requires one CE command per group, cpu_copy_bytes 0 and the
+whole allocation checked (pattern inside the restore, poison elsewhere).
 """
 import argparse
 import errno
@@ -72,6 +78,29 @@ RUNS = [
      'go': [('c1', 'qwen3-14b-ctx', 32, 1, 0, 0),
             ('c2', 'qwen3-8b-ctx', 64, 2, 40, 0)]},
 ]
+# CE VMM destination: 4 KiB host frames (libxdev_ext UMEM), pool_frames 4 KiB
+# frames of VRAM (16 MiB); dst0 in the same unit.
+RUNS_CE = [
+    {'name': 'A', 'geometry': dict(group_bytes=128 * KIB, frame_bytes=4 * KIB, depth=4,
+                                   window=4, early=False), 'pool_frames': 4096,
+     'go': [('a1', 'qwen3-14b-ctx', 32, 1, 0, 0),
+            ('a2', 'qwen3-8b-ctx', 64, 2, 1300, 0),
+            ('a3', 'qwen3-14b-ctx', 16, 3, 3000, 0),
+            ('a4', 'qwen3-14b-ctx', 16, 3, 0, -errno.EALREADY),
+            ('a5', 'qwen3-8b-ctx', 64, 4, 2000, -errno.ENOSPC)]},
+    {'name': 'B', 'geometry': dict(group_bytes=64 * KIB, frame_bytes=4 * KIB, depth=8,
+                                   window=8, early=False), 'pool_frames': 4096,
+     'go': [('b1', 'qwen3-8b-ctx', 64, 1, 3, 0),
+            ('b2', 'qwen3-14b-ctx', 32, 7, 2400, 0)]},
+]
+CE_ARGS = ['--dst', 'ce-vmm', '--ce-dev', '/dev/nvidia0', '--ce-prog', '/opt/kv/kv_ce_place.bpf.o']
+DSTS = ('dmabuf', 'ce-vmm')
+
+
+def runs(dst='dmabuf'):
+    if dst not in DSTS:
+        raise ValueError(f'unknown destination {dst!r}')
+    return RUNS_CE if dst == 'ce-vmm' else RUNS
 
 
 class OracleError(ValueError):
@@ -88,18 +117,19 @@ def fnv1a(data, h=0xCBF29CE484222325):
     return h
 
 
-def worker_args(run):
+def worker_args(run, dst='dmabuf'):
     m, g = manifest(), run['geometry']
     return ['--window-slba', m.window_slba, '--window-nlb', m.window_nlb, '--lba-bytes',
             m.lba_bytes, '--group-bytes', g['group_bytes'], '--frame-bytes', g['frame_bytes'],
             '--depth', g['depth'], '--window', g['window'],
-            '--pool-bytes', run['pool_frames'] * g['frame_bytes']] + (['--early'] if g['early'] else [])
+            '--pool-bytes', run['pool_frames'] * g['frame_bytes']] + \
+        (['--early'] if g['early'] else []) + (CE_ARGS if dst == 'ce-vmm' else [])
 
 
-def expectations():
+def expectations(dst='dmabuf'):
     """Per run: KV_READY facts and the outcome of every GO, computed here."""
-    m, out = manifest(), []
-    for run in RUNS:
+    m, out, ring = manifest(), [], dst == 'ce-vmm'
+    for run in runs(dst):
         g = kl.Geometry(**run['geometry'])
         done, results = 0, []
         next_key = 0
@@ -109,7 +139,7 @@ def expectations():
             item = dict(run=name, object=obj_name, ordinal=ordinal, dst0=dst0, bytes=size,
                         seed=obj.seed, slba=obj.slba, error=error)
             # Each planned refusal must fail for exactly its stated reason.
-            plan = kl.plan_restore(m, obj_name, tokens, g, ordinal, dst0)
+            plan = kl.plan_restore(m, obj_name, tokens, g, ordinal, dst0, host2_ring=ring)
             fits = dst0 + plan.groups * plan.frames_per_group <= run['pool_frames']
             reused = plan.first_seq < next_key
             reason = 0 if fits and not reused else (-errno.EALREADY if reused else -errno.ENOSPC)
@@ -121,12 +151,15 @@ def expectations():
                 item.update(groups=plan.groups, first_seq=plan.first_seq, cumulative=done,
                             digest=fnv1a(kl.pattern_bytes(obj.seed, 0, size)))
             results.append(item)
-        out.append(dict(name=run['name'], pool_frames=run['pool_frames'], results=results,
-                        restores=len(results), group_bytes=run['geometry']['group_bytes']))
+        e = dict(name=run['name'], pool_frames=run['pool_frames'], results=results,
+                 restores=len(results), group_bytes=run['geometry']['group_bytes'])
+        if ring:
+            e['ring_frames'] = g.depth * (g.group_bytes // g.frame_bytes)
+        out.append(e)
     return out
 
 
-def make_plan(output):
+def make_plan(output, dst='dmabuf'):
     out = Path(output)
     out.mkdir(parents=True, exist_ok=True)
     m = manifest()
@@ -137,15 +170,17 @@ def make_plan(output):
     for o in m.objects:
         disk[o.slba * 512:o.slba * 512 + o.bytes] = kl.pattern_bytes(o.seed, 0, o.bytes)
     (out / 'source.raw').write_bytes(disk)
-    for run in RUNS:
+    for run in runs(dst):
         lines = [kp.go_line(name, ordinal, m.object(obj).slba, kl.kv_bytes(m.object(obj).model, tok),
                             dst0, m.object(obj).seed, True)
                  for name, obj, tok, ordinal, dst0, _ in run['go']]
         (out / f'go-{run["name"]}.txt').write_text(''.join(lines) + 'QUIT\n')
-        (out / f'args-{run["name"]}.txt').write_text(' '.join(str(a) for a in worker_args(run)) + '\n')
-    plan = dict(schema=1, serial=SERIAL, disk_bytes=DISK_BYTES, manifest=MANIFEST,
-                runs=[dict(name=r['name'], args=[str(a) for a in worker_args(r)]) for r in RUNS],
-                expectations=expectations())
+        (out / f'args-{run["name"]}.txt').write_text(
+            ' '.join(str(a) for a in worker_args(run, dst)) + '\n')
+    plan = dict(schema=1, serial=SERIAL, disk_bytes=DISK_BYTES, manifest=MANIFEST, dst=dst,
+                runs=[dict(name=r['name'], args=[str(a) for a in worker_args(r, dst)])
+                      for r in runs(dst)],
+                expectations=expectations(dst))
     (out / 'plan.json').write_text(json.dumps(plan, indent=2, sort_keys=True) + '\n')
     return plan
 
@@ -198,7 +233,9 @@ def _sections(text):
     return runs, facts
 
 
-def validate(text, expected):
+def validate(text, expected, dst='dmabuf'):
+    ce = dst == 'ce-vmm'
+    path = 'nvme-read>host-frame>ce-h2d' if ce else 'nvme-read>dmabuf-frame'
     runs, facts = _sections(text)
     if facts.get('lba_bytes') != '512':
         raise OracleError(f'guest namespace LBA size {facts.get("lba_bytes")!r}, expected 512')
@@ -220,6 +257,8 @@ def validate(text, expected):
         if ready.get('role') != 'local-verify' or ready.get('dry_run') is not False or \
                 not ready.get('session_id') or ready.get('pool_frames') != e['pool_frames']:
             raise OracleError(f'run {e["name"]}: bad KV_READY {ready}')
+        if ce and (ready.get('dst') != dst or ready.get('ring_frames') != e['ring_frames']):
+            raise OracleError(f'run {e["name"]}: KV_READY is not the CE VMM destination: {ready}')
         for (_, got), want_r in zip(r['lines'][1:-1], e['results']):
             kp.check_result(got, want_r['run'])
             tag = f'{e["name"]}/{want_r["run"]}'
@@ -248,6 +287,17 @@ def validate(text, expected):
                     st['completed'][0] != want_r['cumulative']:
                 raise OracleError(f'{tag}: session counts {st}, expected {want_r["cumulative"]} '
                                   'done/submitted/completed and nothing aborted or retained')
+            if ce:
+                # One copy-engine command per group carried every byte into VRAM.
+                if st['submitted'][1] != want_r['cumulative'] or \
+                        st['completed'][1] != want_r['cumulative']:
+                    raise OracleError(f'{tag}: CE stage counts {st}, expected '
+                                      f'{want_r["cumulative"]}')
+                if got.get('dst') != dst or got.get('payload_path') != path:
+                    raise OracleError(f'{tag}: not the CE VMM path: {got.get("payload_path")}')
+            if got.get('cpu_copy_bytes') != 0:
+                if ce or 'cpu_copy_bytes' in got:
+                    raise OracleError(f'{tag}: CPU copied payload: {got.get("cpu_copy_bytes")}')
             report.append(dict(run=tag, bytes=got['bytes'], groups=want_r['groups'],
                                digest=got['digest']))
         if bye != dict(error=0, stop_error=e['stop_error'], retained=False, restores=e['restores']):
@@ -260,20 +310,22 @@ def main():
     sub = parser.add_subparsers(dest='action', required=True)
     p = sub.add_parser('make-plan')
     p.add_argument('--output', required=True)
+    p.add_argument('--dst', choices=DSTS, default='dmabuf')
     v = sub.add_parser('validate')
     v.add_argument('--plan', required=True)
     v.add_argument('--log', required=True)
     v.add_argument('--result', required=True)
     args = parser.parse_args()
     if args.action == 'make-plan':
-        make_plan(args.output)
+        make_plan(args.output, args.dst)
         return 0
     plan = json.loads(Path(args.plan).read_text())
-    if plan['expectations'] != json.loads(json.dumps(expectations())):
+    dst = plan.get('dst', 'dmabuf')
+    if plan['expectations'] != json.loads(json.dumps(expectations(dst))):
         print('FAIL plan file does not match this oracle')
         return 1
     try:
-        report = validate(Path(args.log).read_text(errors='replace'), plan['expectations'])
+        report = validate(Path(args.log).read_text(errors='replace'), plan['expectations'], dst)
         verdict, detail = 'PASS', report
     except (OracleError, kp.ProtocolError, KeyError, TypeError, ValueError) as error:
         verdict, detail = 'FAIL', str(error)

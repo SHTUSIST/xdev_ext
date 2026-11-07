@@ -13,7 +13,11 @@ ratio of median latencies with an independent bootstrap of each arm's runs,
 verdict within_10pct / loss_slower_than_10pct / faster_by_more_than_10pct
 (no verdict below 10 runs per arm), CPU reduction per host with a resource
 claim only if both reach 2x, memory traffic pass at <= 0.1 B/B. Against
-recompute: restore latency over the command's own prefill time.
+recompute: restore latency over the command's own prefill time. Host-2
+criterion against the ordinary baseline (nvmeof, same model and prefix): the
+CPU copies no payload byte on host 2 (host2_cpu_copy_bytes of every
+successful run is 0; a run without the count gives not_measured) and host-2
+CPU core-seconds per GB at most half of the baseline's (10 runs per arm).
 Thresholds are those of the K-KV design; the report states no claim itself.
 """
 import argparse
@@ -77,7 +81,26 @@ def summarize(records, idle=None, bytes_per_count=None):
             if r.get('perf'):
                 traffic.append(sum(r['perf'].values()) * bytes_per_count / r['bytes'])
     out['host2_memory_bytes_per_byte'] = statistics.median(traffic) if traffic else None
+    copies = [r.get('host2_cpu_copy_bytes') for r in ok]
+    out['host2_cpu_copy_bytes'] = max(copies) if copies and None not in copies else None
     return out
+
+
+def host2_criterion(name, s, base):
+    """Copy-free host 2 and halved host-2 CPU against the ordinary baseline."""
+    copied = s['host2_cpu_copy_bytes']
+    c = dict(arm=name, baseline='nvmeof', model=s['model'], prefix_tokens=s['prefix_tokens'],
+             cpu_copy_bytes=copied,
+             copy_verdict='not_measured' if copied is None else ('pass' if copied == 0 else 'fail'))
+    mine, theirs = s['host2_core_seconds_per_gb']['raw'], base['host2_core_seconds_per_gb']['raw']
+    c['core_seconds_ratio'] = theirs / mine if mine and theirs is not None else None
+    if s['n_ok'] < MIN_RUNS or base['n_ok'] < MIN_RUNS:
+        c['core_seconds_verdict'] = 'insufficient_runs'
+    elif c['core_seconds_ratio'] is None:
+        c['core_seconds_verdict'] = 'not_measured'
+    else:
+        c['core_seconds_verdict'] = 'pass' if c['core_seconds_ratio'] >= CPU_FACTOR else 'fail'
+    return c
 
 
 def bootstrap_ratio(a, b, resamples=10000, seed=1):
@@ -121,7 +144,7 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
         arm['records'].extend(records)
     report = dict(schema=1, inputs=inputs, thresholds=dict(min_runs=MIN_RUNS, latency_band=LAT_BAND,
                                                           cpu_factor=CPU_FACTOR, memory_limit=MEM_LIMIT),
-                  arms=[], comparisons=[], recompute=[])
+                  arms=[], comparisons=[], recompute=[], host2_criterion=[])
     points = {}
     for name, arm in sorted(arms.items()):
         groups = {}
@@ -134,6 +157,10 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
             entry['points'].append(s)
             points[(name, model, prefix)] = (s, [r['latency_ns'] / 1e9 for r in recs if r.get('ok')])
         report['arms'].append(entry)
+    for (name, model, prefix), (s, _) in sorted(points.items()):
+        ordinary = points.get(('nvmeof', model, prefix))
+        if name == 'xdev-ext' and ordinary:
+            report['host2_criterion'].append(host2_criterion(name, s, ordinary[0]))
     for (name, model, prefix), (s, lat) in sorted(points.items()):
         if name == 'mooncake':
             continue

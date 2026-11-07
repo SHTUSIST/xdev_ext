@@ -207,8 +207,8 @@ class CeVmmOracle(unittest.TestCase):
             self.assertIn('--ce-dev', args)
         self.assertTrue(all(e['ring_frames'] for e in self.expected))
         self.assertEqual(sum(1 for e in self.expected for r in e['results'] if not r['error']), 5)
-        self.assertEqual(sorted({r['error'] for e in self.expected for r in e['results']}),
-                         [-gv.errno.ENOSPC, -gv.errno.EALREADY, 0])
+        self.assertEqual({r['error'] for e in self.expected for r in e['results']},
+                         {-gv.errno.ENOSPC, -gv.errno.EALREADY, 0})
 
     def test_correct_console_passes(self):
         report = gv.validate(self.console(), self.expected, 'ce-vmm')

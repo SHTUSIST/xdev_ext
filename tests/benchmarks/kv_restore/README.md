@@ -26,6 +26,8 @@ the KVM run below check correctness only and produce no performance number.
 - `kv_plan.h`, `kv_pattern.h`: the same plan and pattern in C for the workers;
   `kv_plan_cli.c` exposes them to `test_plan_crosscheck.py`.
 - `kv_nvme_read.bpf.c`: host 1's NVMe program (key-based READ, PRIVATE).
+- `kv_ce_place.bpf.c`, `kv_ce_place.h`: host 2's copy-engine program for the
+  CE VMM destination (below).
 - `kv_restore.c`: the xdev_ext worker (`serve`, `restore`, `local-verify`).
 - `nvmeof_worker.c`, `mooncake_worker.py`: the baseline workers.
 - `kv_protocol.py`: the worker line protocol; `kv_cpu.py`: CPU markers and the
@@ -73,6 +75,43 @@ IOMMU DMA domain (`iova_rcache_range()`, drivers/iommu/iova.c). With larger
 groups on such a host the NVMe program refuses every batch (`max_nlb`) and the
 first restore aborts at BUILD; the KVM run below checks that case.
 
+## CE VMM destination (GPUs without GPUDirect RDMA)
+
+A GeForce GPU refuses the PEER pool: `nvidia_p2p_get_pages_persistent` cannot
+pin its memory. `--dst ce-vmm` (restore and local-verify; the defaults stay
+`peer` and `dmabuf`) gives such a host 2 another destination: the receiving
+stage writes each group into a recycled ring of host frames (the ring's
+XDEV_EXT UMEM, 4096-byte frames, so `--frame-bytes 4096`), and a CE stage with
+`XDEV_EXT_CE_STAGE_F_TARGET_RANGE` copies the group with the GPU copy engine
+into a CUDA VMM allocation of `--pool-bytes`. The allocation is exported as a
+POSIX file descriptor and attached to `--ce-dev /dev/nvidiaN`, so CREATE
+claims it. `kv_ce_place.bpf.c` (`--ce-prog`, PRIVATE) puts batch key k at
+`dst_off + (k - first_key) * group_bytes`; the worker writes the restore's
+first key, group count and `dst_off = dst_frame0 * frame_bytes` into the
+program's `.bss` before each START. The KV ends where the PEER layout puts
+it, contiguous from `dst_frame0`. Host 2's START lends only the ring
+(min(groups, depth) groups, `START_F_RECYCLE`), so the 65,536-index limit no
+longer bounds the restore (`host2_ring` in `kv_plan.h` and `kv_layout.py`).
+
+Every `KV_RESULT` reports `dst`, `payload_path` and `cpu_copy_bytes`: the
+payload bytes the worker copies with the CPU between t0 and t1. None of the
+worker's paths copies payload, so the value is 0 by construction of the code,
+not a measurement. With ce-vmm a restore also fails unless the CE stage
+completed exactly one command per group. local-verify with ce-vmm checks the
+whole allocation through CUDA after the clock: pattern inside the restore,
+poison elsewhere. `run.py run --arm xdev-ext --dst ce-vmm --ce-dev
+/dev/nvidiaN --ce-prog build/kv_ce_place.bpf.o --frame-bytes 4096` passes
+these options; `analyze.py` reports `host2_cpu_copy_bytes` per point and,
+against `nvmeof`, the host-2 criterion: no copied payload byte and host-2
+CPU core-seconds per GB at most half of the baseline's.
+
+Limit: the kernel admits a range-target CE stage only next to one NVMe stage
+(`xdev_ext_decl_ce_check`, src/core/include/linux/xdev_ext_family_core.h).
+local-verify (NVMe READ, then CE) runs; restore (XDOMAIN RX, then CE) is
+refused at CREATE with `-EOPNOTSUPP` until the kernel also admits an XDOMAIN
+FROM_DEVICE stage there. A CE stage without the range flag can only write
+its batch's ring slot, which does not keep the KV contiguous.
+
 ## Worker protocol
 
 Every worker sets up once and then talks line by line on stdin/stdout:
@@ -99,7 +138,7 @@ Build in the source view (`python3 tools/layout.py view`), in
 
 ```sh
 make driver                                     # kv_restore, nvmeof_worker; libbpf >= 1.0
-make bpf VMLINUX_BTF=/sys/kernel/btf/vmlinux CLANG=clang
+make bpf VMLINUX_BTF=/sys/kernel/btf/vmlinux CLANG=clang  # kv_nvme_read, kv_ce_place
 ```
 
 Common steps, as root: write the pattern to host 1's extents (this overwrites
