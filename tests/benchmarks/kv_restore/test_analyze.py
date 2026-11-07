@@ -39,11 +39,12 @@ def rows(arm, latencies, cpu1, cpu2, prefix=4096, bytes_=671088640, ok=True, per
     return out
 
 
-def write_arm(base, arm, records, idle=(0.0, 0.0)):
-    d = Path(base) / arm
+def write_arm(base, arm, records, idle=(0.0, 0.0), dst=None, name=None):
+    d = Path(base) / (name or arm)
     d.mkdir()
     (d / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
-    (d / 'run.json').write_text(json.dumps(dict(schema=1, arm=arm, performance_claim='none', idle=dict(
+    extra = {} if dst is None else dict(dst=dst)
+    (d / 'run.json').write_text(json.dumps(dict(schema=1, arm=arm, performance_claim='none', **extra, idle=dict(
         host1=dict(busy_core_seconds=idle[0], wall_seconds=1.0),
         host2=dict(busy_core_seconds=idle[1], wall_seconds=1.0)))))
     return d
@@ -145,10 +146,10 @@ class Host2Criterion(unittest.TestCase):
     """K-KV on host 2: the CPU copies no payload byte, and host-2 CPU
     core-seconds are at most half of the ordinary baseline's (nvmeof)."""
 
-    def analyze(self, xdev, nvmeof):
+    def analyze(self, xdev, nvmeof, dst='ce-vmm'):
         with tempfile.TemporaryDirectory(prefix='kv-h2-') as tmp:
-            return ka.analyze([write_arm(tmp, 'xdev-ext', xdev), write_arm(tmp, 'nvmeof', nvmeof)],
-                              resamples=100, seed=1)
+            return ka.analyze([write_arm(tmp, 'xdev-ext', xdev, dst=dst),
+                               write_arm(tmp, 'nvmeof', nvmeof)], resamples=100, seed=1)
 
     def test_zero_copy_and_halved_cpu_pass(self):
         rep = self.analyze(rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0),
@@ -158,7 +159,11 @@ class Host2Criterion(unittest.TestCase):
         self.assertEqual(point['host2_cpu_copy_bytes'], 0)
         c = rep['host2_criterion'][0]
         self.assertEqual((c['arm'], c['baseline']), ('xdev-ext', 'nvmeof'))
-        self.assertEqual((c['cpu_copy_bytes'], c['copy_verdict']), (0, 'pass'))
+        # The worker reports 0 because no code path in its timed window copies
+        # payload; that is a property of the code, not a measurement, so the
+        # verdict must say so instead of reading as a measured pass.
+        self.assertEqual((c['cpu_copy_bytes'], c['copy_verdict']), (0, 'by_construction'))
+        self.assertEqual(c['dst'], 'ce-vmm')
         self.assertAlmostEqual(c['core_seconds_ratio'], 2.5)
         self.assertEqual(c['core_seconds_verdict'], 'pass')
 
@@ -175,7 +180,7 @@ class Host2Criterion(unittest.TestCase):
         failed = rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0) + \
             rows('xdev-ext', [1.0], 1, 1.0, ok=False, copy=9)
         c = self.analyze(failed, rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
-        self.assertEqual(c['copy_verdict'], 'pass', 'failed runs are counted, not used')
+        self.assertEqual(c['copy_verdict'], 'by_construction', 'failed runs are counted, not used')
 
     def test_core_seconds_must_halve(self):
         c = self.analyze(rows('xdev-ext', [1.0] * 10, 1, 1.5, copy=0),
@@ -185,6 +190,19 @@ class Host2Criterion(unittest.TestCase):
         c = self.analyze(rows('xdev-ext', [1.0] * 9, 1, 0.5, copy=0),
                          rows('nvmeof', [1.0] * 10, 1, 2.5))['host2_criterion'][0]
         self.assertEqual(c['core_seconds_verdict'], 'insufficient_runs')
+
+    def test_destinations_are_not_mixed_in_one_arm(self):
+        # A peer run and a ce-vmm run of the same arm measure different host-2
+        # paths; pooling them would give a criterion row that covers neither.
+        with tempfile.TemporaryDirectory(prefix='kv-h2-') as tmp:
+            dirs = [write_arm(tmp, 'xdev-ext', rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0),
+                              dst='peer', name='a'),
+                    write_arm(tmp, 'xdev-ext', rows('xdev-ext', [1.0] * 10, 1, 1.0, copy=0),
+                              dst='ce-vmm', name='b'),
+                    write_arm(tmp, 'nvmeof', rows('nvmeof', [1.0] * 10, 1, 2.5))]
+            with self.assertRaises(SystemExit) as e:
+                ka.analyze(dirs, resamples=100, seed=1)
+            self.assertIn('dst', str(e.exception))
 
 
 if __name__ == '__main__':

@@ -271,6 +271,7 @@ def cmd_run(args):
     agent = kc.AgentClient(kc.parse_address(args.host1_agent), token=token, timeout=args.agent_timeout)
     agent.ping()
     meta = dict(schema=1, arm=args.arm, performance_claim='none', worker_argv=argv,
+                dst=args.dst if args.arm == 'xdev-ext' else None,
                 manifest=json.loads(Path(args.manifest).read_text()), object=obj.name,
                 geometry=geometry(args).__dict__, prefixes=args.prefixes,
                 repetitions=args.repetitions, schedule=plan, host2=dict(

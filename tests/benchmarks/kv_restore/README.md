@@ -103,7 +103,12 @@ poison elsewhere. `run.py run --arm xdev-ext --dst ce-vmm --ce-dev
 /dev/nvidiaN --ce-prog build/kv_ce_place.bpf.o --frame-bytes 4096` passes
 these options; `analyze.py` reports `host2_cpu_copy_bytes` per point and,
 against `nvmeof`, the host-2 criterion: no copied payload byte and host-2
-CPU core-seconds per GB at most half of the baseline's.
+CPU core-seconds per GB at most half of the baseline's. Because the copy
+count is a property of the worker's code, a zero is reported as
+`copy_verdict: by_construction`, never as a measured pass; the measured
+quantity behind the same claim is `host2_memory_bytes_per_byte`. `run.json`
+records the arm's `dst`, and `analyze.py` refuses to pool peer and ce-vmm
+runs of one arm.
 
 Limit: the kernel admits a range-target CE stage only next to one NVMe stage
 (`xdev_ext_decl_ce_check`, src/core/include/linux/xdev_ext_family_core.h).

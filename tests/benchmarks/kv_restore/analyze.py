@@ -86,12 +86,17 @@ def summarize(records, idle=None, bytes_per_count=None):
     return out
 
 
-def host2_criterion(name, s, base):
+def host2_criterion(name, s, base, dst=None):
     """Copy-free host 2 and halved host-2 CPU against the ordinary baseline."""
     copied = s['host2_cpu_copy_bytes']
-    c = dict(arm=name, baseline='nvmeof', model=s['model'], prefix_tokens=s['prefix_tokens'],
-             cpu_copy_bytes=copied,
-             copy_verdict='not_measured' if copied is None else ('pass' if copied == 0 else 'fail'))
+    # The worker's count is a property of its code (no timed path copies
+    # payload), not a measurement, so a zero reads 'by_construction', never
+    # 'pass'; a measured quantity for this criterion is host-2 memory traffic.
+    c = dict(arm=name, dst=dst, baseline='nvmeof', model=s['model'],
+             prefix_tokens=s['prefix_tokens'], cpu_copy_bytes=copied,
+             cpu_copy_bytes_basis='worker code, not measured',
+             copy_verdict='not_measured' if copied is None else
+             ('by_construction' if copied == 0 else 'fail'))
     mine, theirs = s['host2_core_seconds_per_gb']['raw'], base['host2_core_seconds_per_gb']['raw']
     c['core_seconds_ratio'] = theirs / mine if mine and theirs is not None else None
     if s['n_ok'] < MIN_RUNS or base['n_ok'] < MIN_RUNS:
@@ -140,7 +145,11 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
         if meta.get('kind') == 'recompute':
             recompute.extend(records)
             continue
-        arm = arms.setdefault(meta['arm'], dict(idle=meta.get('idle'), records=[]))
+        arm = arms.setdefault(meta['arm'], dict(idle=meta.get('idle'), records=[],
+                                                dst=meta.get('dst')))
+        if arm['dst'] != meta.get('dst'):
+            raise SystemExit(f"arm {meta['arm']} mixes dst {arm['dst']} and {meta.get('dst')}; "
+                             'analyze each host-2 destination separately')
         arm['records'].extend(records)
     report = dict(schema=1, inputs=inputs, thresholds=dict(min_runs=MIN_RUNS, latency_band=LAT_BAND,
                                                           cpu_factor=CPU_FACTOR, memory_limit=MEM_LIMIT),
@@ -150,7 +159,7 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
         groups = {}
         for r in arm['records']:
             groups.setdefault((r['model'], r['prefix_tokens']), []).append(r)
-        entry = dict(arm=name, points=[])
+        entry = dict(arm=name, dst=arm['dst'], points=[])
         for (model, prefix), recs in sorted(groups.items()):
             s = dict(model=model, prefix_tokens=prefix, bytes=recs[0]['bytes'],
                      **summarize(recs, arm['idle'], bytes_per_count))
@@ -160,7 +169,8 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
     for (name, model, prefix), (s, _) in sorted(points.items()):
         ordinary = points.get(('nvmeof', model, prefix))
         if name == 'xdev-ext' and ordinary:
-            report['host2_criterion'].append(host2_criterion(name, s, ordinary[0]))
+            report['host2_criterion'].append(host2_criterion(name, s, ordinary[0],
+                                                             arms[name]['dst']))
     for (name, model, prefix), (s, lat) in sorted(points.items()):
         if name == 'mooncake':
             continue

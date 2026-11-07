@@ -173,6 +173,7 @@ class Runs(Base):
         self.assertEqual((proc / 'sys/vm/drop_caches').read_text(), '3\n')
         meta = json.loads((out / 'run.json').read_text())
         self.assertEqual(meta['performance_claim'], 'none')
+        self.assertIsNone(meta['dst'], 'only the xdev-ext arm has a host-2 destination')
         self.assertIn('idle', meta)
         self.assertNotIn('median', json.dumps(meta))
         with self.assertRaises(SystemExit):
