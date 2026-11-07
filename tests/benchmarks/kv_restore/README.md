@@ -110,12 +110,16 @@ quantity behind the same claim is `host2_memory_bytes_per_byte`. `run.json`
 records the arm's `dst`, and `analyze.py` refuses to pool peer and ce-vmm
 runs of one arm.
 
-Limit: the kernel admits a range-target CE stage only next to one NVMe stage
-(`xdev_ext_decl_ce_check`, src/core/include/linux/xdev_ext_family_core.h).
-local-verify (NVMe READ, then CE) runs; restore (XDOMAIN RX, then CE) is
-refused at CREATE with `-EOPNOTSUPP` until the kernel also admits an XDOMAIN
-FROM_DEVICE stage there. A CE stage without the range flag can only write
-its batch's ring slot, which does not keep the KV contiguous.
+The kernel admits a range-target CE stage next to one NVMe stage or after one
+XDOMAIN receive stage on an IOU_UMEM pool (`xdev_ext_decl_ce_check`,
+src/core/include/linux/xdev_ext_family_core.h). local-verify (NVMe READ, then
+CE) has run on an RTX 5090; restore (XDOMAIN RX, then CE) is admitted but has
+not moved data yet, because no Thunderbolt pair exists. The CE program sees
+the receiver's own batch key (START first_seq onward), and XDOMAIN v1 binds
+received groups to receive batches in order, so group k lands at
+first_key + k only while both hosts use the same first_seq and group count;
+the RESTORE line checks that. A CE stage without the range flag can only
+write its batch's ring slot, which does not keep the KV contiguous.
 
 ## Worker protocol
 

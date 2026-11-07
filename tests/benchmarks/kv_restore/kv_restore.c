@@ -21,8 +21,11 @@
  * attached to the CE device, at the same place the PEER layout would put it.
  * The CPU copies no payload byte on either path; local-verify checks the
  * whole allocation (pattern inside, poison outside) through CUDA afterwards.
- * The kernel currently admits a range-target CE stage only next to an NVMe
- * stage, so restore with ce-vmm is refused at CREATE until XDOMAIN is admitted.
+ * The kernel admits a range-target CE stage after an NVMe READ (local-verify)
+ * or after an XDOMAIN receive on the ring's host frames (restore). Placement of
+ * group k at first_key + k relies on both hosts using the same first_seq and
+ * group count, which the RESTORE line checks; XDOMAIN v1 does not compare the
+ * sender's key with the receiver's.
  *
  * Each role creates its session once at start-up and talks the worker line
  * protocol of kv_protocol.py on stdin/stdout:
