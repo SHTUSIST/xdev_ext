@@ -209,12 +209,25 @@ else
 fi
 
 # --- (ii-b) where the chain's bytes are in VRAM (diagnostic) ---------------
+# The native_event tracepoint records each descriptor's frame and DMA
+# address; the GPU BARs give the range those addresses should fall in.
 if [ -x /opt/gate/dmabuf_vram_dump ] && clear_window; then
+	echo "GATE_GPU_RESOURCE $(head -n 4 "/sys/bus/pci/devices/$gpu_bdf/resource" | tr '\n' ' ')"
+	tracing=/sys/kernel/tracing
+	mount -t tracefs tracefs "$tracing" 2>/dev/null
+	echo 8192 >"$tracing/buffer_size_kb" 2>/dev/null
+	echo >"$tracing/trace" 2>/dev/null
+	echo 1 >"$tracing/events/xdev_ext/native_event/enable" 2>/dev/null &&
+		echo 1 >"$tracing/tracing_on"
 	step dmabuf-dump /tmp/dmabuf-dump.log env LD_LIBRARY_PATH="$PATCHED:$SYSLIB" \
 		/opt/gate/dmabuf_vram_dump --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/src.bin \
 		--group-bytes 8192 -- \
 		"$G/xdev_ext_peer_chain" --allocation-fd '{fd}' "$src_ng" "$dst_ng" \
 		"$groups" 8192 9 "$source_slba" "$target_slba" "$G"
+	echo 0 >"$tracing/tracing_on" 2>/dev/null
+	cp "$tracing/trace" "$capture/dmabuf-dump-trace.txt" 2>/dev/null
+	grep -E 'phase=(descriptor_bind|native_submit)' "$tracing/trace" 2>/dev/null |
+		sed 's/^/GATE_TRACE: /' | head -n 64
 	echo "GATE_RESULT step=dmabuf-dump compare=$(compare_window)"
 fi
 
