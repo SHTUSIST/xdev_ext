@@ -11,7 +11,8 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -pthread
 LIBBPF_CFLAGS ?=
 LIBBPF_LIBS ?= -lbpf
-SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c
+SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c \
+	$(KERNEL_SRC)/tools/xdev_ext_xsk_redirect.c
 CLANG ?= clang
 BPFTOOL ?= bpftool
 VMLINUX_BTF ?= /sys/kernel/btf/vmlinux
