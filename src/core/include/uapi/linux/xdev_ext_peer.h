@@ -27,8 +27,8 @@ struct xdev_ext_peer_register {
  __u64 generation; /* output, paired with every peer request */
 };
 #define XDEV_EXT_PEER_REGISTER _IOWR('X', 0xe0, struct xdev_ext_peer_register)
-/* NVMe generic namespace /dev/ngXnY. One DMA-contiguous GPU page span, no
- * host/CE fallback. flags=0 reads NVMe into VRAM; WRITE reads VRAM to NVMe.
+/* NVMe generic namespace /dev/ngXnY, no host/CE fallback. flags=0 reads NVMe
+ * into VRAM; WRITE reads VRAM to NVMe. NVME_RW: one DMA-contiguous GPU page span.
  */
 #define XDEV_EXT_PEER_NVME_F_WRITE 1U
 struct xdev_ext_peer_nvme_rw {
@@ -47,10 +47,19 @@ struct xdev_ext_peer_nvme_desc {
  __u32 bytes;
  __u32 reserved;
 };
-/* The kernel executes this bounded list in order without user continuation.
- * Stop on the first failure; completed is the successfully completed prefix.
- * A failed accepted command is never resent. Its allocation is retained when
- * device DMA quiescence cannot be established from the native result.
+/* Each descriptor names its own VRAM offset and LBA and is one native command.
+ * It may span GPU pages: one SGL entry per real DMA extent, at most 256 after
+ * adjacent pages merge. The whole list is admitted before any command reaches
+ * the device: LBA range, transfer limit, VRAM range and generation, and
+ * destinations (VRAM for a read, LBAs for a write) that do not overlap. A
+ * refused list issues nothing; completed stays 0. Admitted commands are issued
+ * in order without user continuation, several may be in flight and they may
+ * complete in any order; none is issued after a failure was observed. The call
+ * returns after every issued command completed. completed is the successfully
+ * completed prefix and status the result of the first descriptor after it;
+ * destinations past the prefix are then unspecified. A failed accepted command
+ * is never resent. Its allocation is retained when device DMA quiescence
+ * cannot be established from the native result.
  */
 struct xdev_ext_peer_nvme_batch {
  __s32 allocation_fd;

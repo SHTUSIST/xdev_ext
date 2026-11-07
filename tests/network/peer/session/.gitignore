@@ -4,3 +4,4 @@
 /xdev_ext_peer_mech_test
 /xdev_ext_peer_net_plan_test
 /__pycache__/
+/xdev_ext_peer_nvme_batch_admit_test

@@ -573,6 +573,7 @@ static inline unsigned long nvme_get_virt_boundary(struct nvme_ctrl *ctrl,
 }
 
 struct xdev_ext_peer_nvme_rw;
+struct xdev_ext_peer_nvme_batch;
 struct nvme_ctrl_ops {
 	const char *name;
 	struct module *module;
@@ -596,6 +597,8 @@ struct nvme_ctrl_ops {
 	unsigned long (*get_virt_boundary)(struct nvme_ctrl *ctrl, bool is_admin);
 #ifdef CONFIG_XDEV_EXT_MECH
 	int (*peer_rw)(struct nvme_ns *, const struct xdev_ext_peer_nvme_rw *, struct file *, bool *accepted);
+	/* Admits the whole list before any command; returns after every issued one. */
+	int (*peer_batch)(struct nvme_ns *, struct xdev_ext_peer_nvme_batch *, struct file *);
 #endif
 };
 

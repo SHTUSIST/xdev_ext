@@ -97,7 +97,7 @@ int main(int argc, char **argv)
 	struct xdev_ext_peer_nvme_batch b;
 	int src, srcng, dst, dstng, ctl, observer, provider, alloc, original, bad;
 	setbuf(stdout, NULL);
-	puts("TAP version 13\n# guest software provider: host RAM/CPU stand-in, real QEMU NVMe PCI DMA, native serial depth=1");
+	puts("TAP version 13\n# guest software provider: host RAM/CPU stand-in, real QEMU NVMe PCI DMA, batch commands may be in flight together");
 	if (argc != 5 && argc != 6) {
 		fprintf(stderr, "usage: %s SOURCE_BLOCK SOURCE_NG PRIVATE_DEST_BLOCK PRIVATE_DEST_NG [SOURCE_SLBA]\n", argv[0]);
 		return 2;
@@ -138,15 +138,15 @@ int main(int argc, char **argv)
 	refused(srcng, &b, ERANGE);
 	b = batch(alloc, gen, 1, slba, 0); b.nr = 65; refused(srcng, &b, EINVAL);
 	b = batch(alloc, gen, 1, slba, 1); refused(srcng, &b, EBADF);
-	/* A later admission refusal preserves the exactly completed first prefix. */
+	/* A later admission refusal refuses the whole list before any command. */
 	memset(expected, 0x5d, sizeof(expected)); write_all(provider, expected, sizeof(expected), 0);
 	b = batch(alloc, gen, 2, slba, 0); b.desc[1].offset = PEER_SW_BYTES;
 	errno = 0;
 	CHECK(ioctl(srcng, XDEV_EXT_PEER_NVME_BATCH, &b) == -1 && errno == ERANGE &&
-	      b.status == -ERANGE && b.completed == 1, "admission failure preserves exact completed native prefix");
+	      b.status == -ERANGE && b.completed == 0, "admission failure of a later descriptor refuses the whole list");
 	completed_reads += b.completed;
-	memcpy(expected, source + slba * 512, 1024); read_all(provider, memory, sizeof(memory), 0);
-	CHECK(!memcmp(memory, expected, sizeof(memory)), "failed-prefix read changes only the completed descriptor");
+	read_all(provider, memory, sizeof(memory), 0);
+	CHECK(!memcmp(memory, expected, sizeof(memory)), "refused list changes no allocation byte");
 	/* Distinct open/allocation: reject unsupported provider map capability. */
 	bad = open_ok("/dev/xdev_ext_peer_sw", O_RDWR);
 	CHECK(!ioctl(bad, PEER_SW_REJECT_MAP), "configure unsupported software mapping capability");
@@ -210,11 +210,11 @@ int main(int argc, char **argv)
 	      after.pins - before.pins == after.unpins - before.unpins,
 	      "all successful pins/maps released exactly once");
 	CHECK(after.opens - before.opens == after.closes - before.closes, "provider file refs released after original fd closure");
-	CHECK(completed_reads == 259 && completed_writes == 257, "exact successful native descriptor counts including prefix and 64KiB probe");
+	CHECK(completed_reads == 258 && completed_writes == 257, "exact successful native descriptor counts including the 64KiB probe");
 	close(observer); close(ctl); close(src); close(srcng); close(dst); close(dstng);
 	free(source); free(source_after); free(dest); free(dest_after);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_PEER_NATIVE=PASS reads=%u writes=%u groups=257 batches=5 max_desc=64 native_depth=1 source_whole_disk_unchanged=1 destination_whole_disk=1 allocation_guards=1 maps=%llu pins=%llu live_maps=%llu live_pins=%llu memory=host-RAM-standin\n",
+	printf("XDEV_EXT_PEER_NATIVE=PASS reads=%u writes=%u groups=257 batches=5 max_desc=64 native_depth=batch source_whole_disk_unchanged=1 destination_whole_disk=1 allocation_guards=1 maps=%llu pins=%llu live_maps=%llu live_pins=%llu memory=host-RAM-standin\n",
 	       completed_reads, completed_writes,
 	       (unsigned long long)(during.maps-before.maps),
 	       (unsigned long long)(during.pins-before.pins),

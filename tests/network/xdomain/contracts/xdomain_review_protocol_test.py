@@ -83,10 +83,11 @@ static int kthread_queue_delayed_work(void *queue,struct kthread_delayed_work *w
 
 def ring_source(kernel, here):
     read = lambda relative: (kernel / relative).read_text()
-    support = ""
+    from xdomain_retention_fixture import backing_unit
+    support = backing_unit(kernel)
     if (kernel / "include/linux/xdev_ext_requester_retention.h").is_file():
         from xdomain_retention_fixture import retention_unit, descriptor_unit
-        support = retention_unit(kernel) + descriptor_unit(kernel)
+        support = retention_unit(kernel) + support + descriptor_unit(kernel)
     declaration = ring_fixture.declaration
     lease = "\n".join(declaration(read("include/linux/xdev_ext_peer.h"), "struct " + name)
                        for name in ("xdev_ext_peer_lease", "xdev_ext_peer_fd_lease"))
