@@ -2586,6 +2586,18 @@
       "logical_path": "tests/eval/kv_restore/test_kv_bpf.c"
     },
     {
+      "source": "tests/benchmarks/kv_restore/test_kv_ce_bpf.c",
+      "logical_path": "tests/eval/kv_restore/test_kv_ce_bpf.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_ce_place.bpf.c",
+      "logical_path": "tests/eval/kv_restore/kv_ce_place.bpf.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_ce_place.h",
+      "logical_path": "tests/eval/kv_restore/kv_ce_place.h"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/kv_plan_cli.c",
       "logical_path": "tests/eval/kv_restore/kv_plan_cli.c"
     },

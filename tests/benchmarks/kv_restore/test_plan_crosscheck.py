@@ -27,7 +27,8 @@ CC = shutil.which(os.environ.get('CC', 'cc'))
 UAPI = HERE.parents[2] / 'kernel/include/uapi/linux/xdev_ext_mech.h'
 KIB, GIB = 1 << 10, 1 << 30
 FIELDS = ('groups', 'slots', 'slot0', 'first_seq', 'frames_per_group', 'host1_pool_frames',
-          'host1_recycle_frames', 'host2_dst_frame0', 'host2_frames', 'host2_pool_frames')
+          'host1_recycle_frames', 'host2_dst_frame0', 'host2_frames', 'host2_pool_frames',
+          'host2_ring', 'host2_start_frames')
 
 
 def fnv1a(data):
@@ -50,7 +51,7 @@ class CrossCheck(unittest.TestCase):
     def tearDownClass(cls):
         cls.tmp.cleanup()
 
-    def c_plan(self, m, obj, prefix, g, ordinal, dst0, pool):
+    def c_plan(self, m, obj, prefix, g, ordinal, dst0, pool, ring=False):
         args = [str(self.cli), 'plan', '--window-slba', m.window_slba, '--window-nlb',
                 m.window_nlb, '--lba-bytes', m.lba_bytes, '--object-slba', obj.slba,
                 '--bytes', kl.kv_bytes(obj.model, prefix), '--group-bytes', g.group_bytes,
@@ -60,6 +61,8 @@ class CrossCheck(unittest.TestCase):
             args += ['--pool-frames', pool]
         if g.early:
             args.append('--early')
+        if ring:
+            args.append('--host2-ring')
         r = subprocess.run([str(a) for a in args], capture_output=True, text=True)
         self.assertIn(r.returncode, (0, 1), r.stderr)
         return r.returncode, json.loads(r.stdout)
@@ -88,21 +91,23 @@ class CrossCheck(unittest.TestCase):
                       kl.Geometry(128 * KIB, 128 * KIB, 16, 8, True),
                       kl.Geometry(64 * KIB, 64 * KIB, 8, 8, False),
                       kl.Geometry(256 * KIB, 64 * KIB, 4, 4, True),
-                      kl.Geometry(512 * KIB, 128 * KIB, 4, 4, True)]
-        accepted = refused = 0
-        for m, g, name, prefix, ordinal, dst0, pool in itertools.product(
+                      kl.Geometry(512 * KIB, 128 * KIB, 4, 4, True),
+                      kl.Geometry(128 * KIB, 4 * KIB, 32, 32, True)]
+        accepted = refused = ring_only = 0
+        for m, g, name, prefix, ordinal, dst0, pool, ring in itertools.product(
                 manifests, geometries, ('a', 'b'), (8, 4096, 16384, 32768), (1, 5), (0, 7),
-                (None, 30000)):
+                (None, 30000, 2000000), (False, True)):
             obj = m.object(name)
             if prefix > obj.tokens:
                 continue
             with self.subTest(lba=m.lba_bytes, g=g, obj=name, prefix=prefix, ordinal=ordinal,
-                              dst0=dst0, pool=pool):
+                              dst0=dst0, pool=pool, ring=ring):
                 try:
-                    p = kl.plan_restore(m, name, prefix, g, ordinal, dst0, pool).to_json()
+                    p = kl.plan_restore(m, name, prefix, g, ordinal, dst0, pool,
+                                        host2_ring=ring).to_json()
                 except kl.LayoutError:
                     p = None
-                rc, c = self.c_plan(m, obj, prefix, g, ordinal, dst0, pool)
+                rc, c = self.c_plan(m, obj, prefix, g, ordinal, dst0, pool, ring)
                 if p is None:
                     self.assertEqual(rc, 1, f'Python refused, C accepted {c}')
                     refused += 1
@@ -114,9 +119,15 @@ class CrossCheck(unittest.TestCase):
                 self.assertEqual(c['last_group_slba'],
                                  obj.slba + (p['groups'] - 1) * g.group_bytes // m.lba_bytes)
                 self.assertEqual(c['xdomain_arg1'], g.window << 32)
+                self.assertEqual(p['host2_start_frames'],
+                                 min(p['groups'], g.depth) * p['frames_per_group'] if ring
+                                 else p['host2_frames'])
+                if ring and p['host2_frames'] > kl.LIB_MAX_START_FRAMES:
+                    ring_only += 1
                 accepted += 1
         self.assertGreater(accepted, 100)
         self.assertGreater(refused, 20)
+        self.assertGreater(ring_only, 10)
 
     def test_pattern_agrees(self):
         for seed, offset, length in ((7, 0, 4096), (7, 4096, 4096), (9, 100, 9000),

@@ -13,6 +13,12 @@
  * i * frames_per_group and the KV ends contiguous in device memory.  Host 1
  * recycles min(groups, depth) groups of a depth-sized staging ring.
  *
+ * With a CE VMM destination (host2_ring) host 2 receives into a recycled ring
+ * of min(groups, depth) groups of host frames, like host 1, and the copy
+ * engine places group i at frame dst_frame0 + i * frames_per_group of the
+ * GPU allocation; only the ring is lent, so the START frame-index limit does
+ * not bound the restore.
+ *
  * Include the xdev_ext_mech UAPI header before this one.
  */
 #ifndef XDEV_EXT_MECH_ABI_VERSION
@@ -50,12 +56,15 @@ struct kv_request {
 	uint64_t object_slba, bytes, ordinal;
 	uint32_t dst_frame0;
 	uint64_t pool_frames;		/* 0: exactly what the restore needs */
+	bool host2_ring;		/* host 2 lends a recycled ring (CE VMM) */
 };
 
 struct kv_plan {
 	uint64_t groups, blocks_per_group, slots, slot0, ordinal, first_seq;
 	uint32_t frames_per_group, host1_pool_frames, host1_recycle_frames, host2_dst_frame0;
 	uint64_t host2_frames, host2_pool_frames;
+	uint32_t host2_start_frames;	/* frame indices host 2's START lends */
+	bool host2_ring;
 };
 
 /* One START as libxdev_ext's xdev_ext_session_start_frames() takes it. */
@@ -94,7 +103,7 @@ static inline int kv_plan_make(const struct kv_window *w, const struct kv_geomet
 			       const struct kv_request *r, struct kv_plan *out)
 {
 	uint64_t blocks, slots, rel, slot0, groups, frames, need, pool;
-	uint32_t fpg;
+	uint32_t fpg, ring;
 	int ret;
 
 	memset(out, 0, sizeof(*out));
@@ -118,8 +127,9 @@ static inline int kv_plan_make(const struct kv_window *w, const struct kv_geomet
 	if (r->ordinal > (UINT64_MAX - slot0 - groups) / slots)
 		return -EOVERFLOW;
 	fpg = g->group_bytes / g->frame_bytes;
-	if (groups > KV_LIB_MAX_START_FRAMES / fpg)
+	if (!r->host2_ring && groups > KV_LIB_MAX_START_FRAMES / fpg)
 		return -E2BIG;
+	ring = (uint32_t)(groups < g->depth ? groups : g->depth) * fpg;
 	frames = groups * fpg;
 	need = (uint64_t)r->dst_frame0 + frames;
 	pool = r->pool_frames ? r->pool_frames : need;
@@ -131,9 +141,11 @@ static inline int kv_plan_make(const struct kv_window *w, const struct kv_geomet
 		.groups = groups, .blocks_per_group = blocks, .slots = slots, .slot0 = slot0,
 		.ordinal = r->ordinal, .first_seq = r->ordinal * slots + slot0,
 		.frames_per_group = fpg, .host1_pool_frames = g->depth * fpg,
-		.host1_recycle_frames = (uint32_t)(groups < g->depth ? groups : g->depth) * fpg,
+		.host1_recycle_frames = ring,
 		.host2_dst_frame0 = r->dst_frame0, .host2_frames = frames,
 		.host2_pool_frames = pool,
+		.host2_start_frames = r->host2_ring ? ring : (uint32_t)frames,
+		.host2_ring = r->host2_ring,
 	};
 	return 0;
 }
@@ -147,10 +159,11 @@ static inline uint64_t kv_plan_group_slba(const struct kv_plan *p, const struct 
 	return w->slba + ((p->first_seq + i) % p->slots) * p->blocks_per_group;
 }
 
+/* host2_start_frames entries: the destination frames, or the ring from frame 0. */
 static inline void kv_plan_host2_indices(const struct kv_plan *p, uint32_t *idx)
 {
-	for (uint64_t i = 0; i < p->host2_frames; i++)
-		idx[i] = p->host2_dst_frame0 + (uint32_t)i;
+	for (uint32_t i = 0; i < p->host2_start_frames; i++)
+		idx[i] = (p->host2_ring ? 0 : p->host2_dst_frame0) + i;
 }
 
 static inline void kv_plan_host1_indices(const struct kv_plan *p, uint32_t *idx)
@@ -162,7 +175,7 @@ static inline void kv_plan_host1_indices(const struct kv_plan *p, uint32_t *idx)
 static inline void kv_plan_host2_start(const struct kv_plan *p, struct kv_start *s)
 {
 	*s = (struct kv_start){ .nr_batches = p->groups, .first_seq = p->first_seq,
-		.nr_frames = (uint32_t)p->host2_frames, .recycle = false };
+		.nr_frames = p->host2_start_frames, .recycle = p->host2_ring };
 }
 
 static inline void kv_plan_host1_start(const struct kv_plan *p, struct kv_start *s)

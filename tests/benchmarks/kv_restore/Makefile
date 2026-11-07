@@ -3,7 +3,7 @@
 # K-KV restore: run from the source view (tests/eval/kv_restore).
 #   make check                 host tests (no device, no timing)
 #   make driver                kv_restore + nvmeof_worker (libbpf >= 1.0)
-#   make bpf VMLINUX_BTF=...   kv_nvme_read.bpf.o for the target kernel's BTF
+#   make bpf VMLINUX_BTF=...   kv_nvme_read.bpf.o, kv_ce_place.bpf.o for the target kernel's BTF
 # A host check, a build or a bytecode object is not device evidence.
 
 CC ?= cc
@@ -32,6 +32,9 @@ $(BUILD)/test_kv_plan: test_kv_plan.c kv_plan.h | $(BUILD)
 $(BUILD)/test_kv_bpf: test_kv_bpf.c kv_nvme_read.bpf.c | $(BUILD)
 	$(CC) $(WARN) $(SAN) -I$(HOST) -I$(KERNEL) -I$(MECH) -I. $< -o $@
 
+$(BUILD)/test_kv_ce_bpf: test_kv_ce_bpf.c kv_ce_place.bpf.c kv_ce_place.h | $(BUILD)
+	$(CC) $(WARN) $(SAN) -I$(HOST) -I$(KERNEL) -I$(MECH) -I. $< -o $@
+
 $(BUILD)/kv_plan_cli: kv_plan_cli.c kv_plan.h | $(BUILD)
 	$(CC) $(WARN) $(CFLAGS) $< -o $@
 
@@ -46,18 +49,23 @@ $(BUILD)/kv_restore: kv_restore.c kv_plan.h $(BUILD)/lib/libxdev_ext.a | $(BUILD
 
 driver: $(BUILD)/kv_restore $(BUILD)/nvmeof_worker $(BUILD)/kv_plan_cli
 
-check: $(BUILD)/test_kv_plan $(BUILD)/test_kv_bpf
+check: $(BUILD)/test_kv_plan $(BUILD)/test_kv_bpf $(BUILD)/test_kv_ce_bpf
 	$(BUILD)/test_kv_plan
 	$(BUILD)/test_kv_bpf
+	$(BUILD)/test_kv_ce_bpf
 	$(PYTHON) -m unittest discover -s . -p 'test_*.py'
 
-bpf: $(BUILD)/kv_nvme_read.bpf.o
+bpf: $(BUILD)/kv_nvme_read.bpf.o $(BUILD)/kv_ce_place.bpf.o
 $(BUILD)/vmlinux.h: $(VMLINUX_BTF) | $(BUILD)
 	$(BPFTOOL) btf dump file $(VMLINUX_BTF) format c > $@.tmp
 	mv $@.tmp $@
 $(BUILD)/kv_nvme_read.bpf.o: kv_nvme_read.bpf.c $(BUILD)/vmlinux.h
 	$(CLANG) -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH) \
 		-I$(BUILD) -I$(MECH) -c $< -o $@
+
+$(BUILD)/kv_ce_place.bpf.o: kv_ce_place.bpf.c kv_ce_place.h $(BUILD)/vmlinux.h
+	$(CLANG) -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_$(BPF_ARCH) \
+		-I$(BUILD) -I$(MECH) -I. -c $< -o $@
 
 clean:
 	rm -rf $(BUILD) __pycache__

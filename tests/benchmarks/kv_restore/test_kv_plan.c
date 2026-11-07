@@ -195,6 +195,62 @@ static void test_kernel_rules(void)
 		  "arg1 = channel 0 | window << 32");
 }
 
+/*
+ * CE VMM destination: host 2 receives into a recycled ring of host frames
+ * (IOU_UMEM) and the copy engine places each group, so its START lends the
+ * ring, not the destination, and the START frame-index limit does not bound
+ * the restore; the destination extent and its pool check are unchanged.
+ */
+static void test_host2_ring(void)
+{
+	const struct kv_geometry g = { .group_bytes = 128 * KIB, .frame_bytes = 4096,
+		.depth = 32, .window = 32, .early = true };
+	struct kv_request r = req(2048, 32768ULL * 163840, 1);
+	struct xdev_ext_mech_layout l;
+	struct xdev_ext_mech_start st;
+	struct kv_start ks;
+	struct kv_plan p;
+	uint32_t idx[32 * 32 + 1];
+
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), -E2BIG, "PEER: 1.3M destination frames refused");
+	r.host2_ring = true;
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), 0, "ring: 5 GiB restore planned");
+	EXPECT(p.host2_ring, "plan records the ring");
+	EXPECT_EQ(p.groups, 40960, "groups");
+	EXPECT_EQ(p.host2_frames, 40960ULL * 32, "destination extent in frames");
+	EXPECT_EQ(p.host2_start_frames, 32 * 32, "START lends depth groups of frames");
+	kv_plan_host2_start(&p, &ks);
+	EXPECT(ks.recycle, "host 2 recycles its ring");
+	EXPECT_EQ(ks.nr_frames, 32 * 32, "ring templates");
+	EXPECT_EQ(ks.first_seq, p.first_seq, "keys unchanged");
+	EXPECT_EQ(ks.nr_batches, p.groups, "one batch per group");
+	idx[32 * 32] = 0xdeadbeef;
+	kv_plan_host2_indices(&p, idx);
+	EXPECT(idx[0] == 0 && idx[32 * 32 - 1] == 32 * 32 - 1, "ring indices from frame 0");
+	EXPECT_EQ(idx[32 * 32], 0xdeadbeef, "no index past the ring");
+	kv_plan_layout(&g, &l);
+	EXPECT_EQ(xdev_ext_mech_layout_frames(&l), 32, "32 host frames per batch");
+	library_start(&ks, &st);
+	EXPECT_EQ(xdev_ext_mech_start_check(&st, XDEV_EXT_MECH_POOL_IOU_UMEM, false, 32, 32 * 32), 0,
+		  "ring START admitted on a UMEM of depth groups");
+	r.bytes = 16ULL * 163840;	/* 20 groups < depth: the ring shrinks to the restore */
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), 0, "short ring restore");
+	EXPECT_EQ(p.host2_start_frames, 20 * 32, "ring of min(groups, depth)");
+	r.pool_frames = 20 * 32 - 1;
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), -ENOSPC, "destination pool still checked");
+	r.pool_frames = 0;
+	r.dst_frame0 = 7;
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), 0, "destination offset");
+	EXPECT_EQ(p.host2_dst_frame0, 7, "destination offset kept");
+	kv_plan_host2_indices(&p, idx);
+	EXPECT_EQ(idx[0], 0, "ring indices do not follow the destination offset");
+	r.host2_ring = false;
+	EXPECT_EQ(kv_plan_make(&win, &g, &r, &p), 0, "PEER short restore");
+	EXPECT_EQ(p.host2_start_frames, 20 * 32, "PEER START lends the destination frames");
+	kv_plan_host2_indices(&p, idx);
+	EXPECT_EQ(idx[0], 7, "PEER indices start at the destination");
+}
+
 static void test_pattern(void)
 {
 	uint8_t a[4096], b[4096];
@@ -218,6 +274,7 @@ int main(void)
 	test_indices();
 	test_refusals();
 	test_kernel_rules();
+	test_host2_ring();
 	test_pattern();
 	printf("kv_plan: %u checks, %u failures\n", checks, failures);
 	return failures ? 1 : 0;

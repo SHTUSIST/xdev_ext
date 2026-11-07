@@ -3,7 +3,7 @@
  * kv_plan.h as a command, for the cross-check against kv_layout.py:
  *   kv_plan_cli plan --window-slba N --window-nlb N --lba-bytes N --object-slba N
  *       --bytes N --group-bytes N --frame-bytes N --depth N --window N --ordinal N
- *       [--dst-frame0 N] [--pool-frames N] [--early]
+ *       [--dst-frame0 N] [--pool-frames N] [--early] [--host2-ring]
  *   kv_plan_cli pattern SEED OFFSET LENGTH
  * Prints one JSON object; a refused plan prints {"error": -errno} and exits 1.
  */
@@ -53,6 +53,7 @@ static int plan(int argc, char **argv)
 		const char *k = argv[i], *v = i + 1 < argc ? argv[i + 1] : NULL;
 
 		if (!strcmp(k, "--early")) { g.early = true; continue; }
+		if (!strcmp(k, "--host2-ring")) { r.host2_ring = true; continue; }
 		if (!v) return 2;
 		if (!strcmp(k, "--window-slba")) ret = u64(v, &w.slba);
 		else if (!strcmp(k, "--window-nlb")) ret = u64(v, &w.nlb);
@@ -81,12 +82,14 @@ static int plan(int argc, char **argv)
 	       ", \"host1_pool_frames\": %u, \"host1_recycle_frames\": %u"
 	       ", \"host2_dst_frame0\": %u, \"host2_frames\": %" PRIu64
 	       ", \"host2_pool_frames\": %" PRIu64 ", \"first_group_slba\": %" PRIu64
-	       ", \"last_group_slba\": %" PRIu64 ", \"xdomain_arg1\": %llu}\n",
+	       ", \"last_group_slba\": %" PRIu64 ", \"xdomain_arg1\": %llu"
+	       ", \"host2_ring\": %s, \"host2_start_frames\": %u}\n",
 	       p.groups, p.slots, p.slot0, p.first_seq, p.frames_per_group,
 	       p.host1_pool_frames, p.host1_recycle_frames, p.host2_dst_frame0,
 	       p.host2_frames, p.host2_pool_frames, kv_plan_group_slba(&p, &w, 0),
 	       kv_plan_group_slba(&p, &w, p.groups - 1),
-	       (unsigned long long)kv_plan_xdomain_arg1(&g));
+	       (unsigned long long)kv_plan_xdomain_arg1(&g), p.host2_ring ? "true" : "false",
+	       p.host2_start_frames);
 	return 0;
 }
 

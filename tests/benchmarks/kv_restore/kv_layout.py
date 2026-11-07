@@ -198,6 +198,7 @@ class RestorePlan:
     first_seq: int
     host2_dst_frame0: int
     host2_pool_frames: int
+    host2_ring: bool = False
 
     @property
     def frames_per_group(self):
@@ -217,6 +218,9 @@ class RestorePlan:
 
     @property
     def host2_indices(self):
+        """Frame indices host 2's START lends: the destination, or a recycled ring."""
+        if self.host2_ring:
+            return self.host1_indices
         n = self.groups * self.frames_per_group
         return list(range(self.host2_dst_frame0, self.host2_dst_frame0 + n))
 
@@ -242,11 +246,14 @@ class RestorePlan:
             'host2_dst_frame0': self.host2_dst_frame0,
             'host2_frames': self.groups * self.frames_per_group,
             'host2_pool_frames': self.host2_pool_frames,
+            'host2_ring': self.host2_ring,
+            'host2_start_frames': len(self.host2_indices),
         }
 
 
 def plan_restore(manifest, name, prefix_tokens, geometry, ordinal, dst_frame0=0,
-                 pool_frames=None):
+                 pool_frames=None, host2_ring=False):
+    """host2_ring: CE VMM destination; host 2 lends a recycled ring of host frames."""
     obj = manifest.object(name)
     geometry.validate(manifest.lba_bytes)
     prefix = _int(prefix_tokens, 'prefix_tokens', 1, obj.tokens)
@@ -270,7 +277,7 @@ def plan_restore(manifest, name, prefix_tokens, geometry, ordinal, dst_frame0=0,
     fpg = g // geometry.frame_bytes
     dst0 = _int(dst_frame0, 'dst_frame0', 0, (1 << 32) - 1)
     frames = groups * fpg
-    if frames > LIB_MAX_START_FRAMES:
+    if not host2_ring and frames > LIB_MAX_START_FRAMES:
         raise LayoutError(f'{frames} destination frames exceed the {LIB_MAX_START_FRAMES} '
                           'frame indices one START can lend; use larger frames')
     need = dst0 + frames
@@ -279,7 +286,7 @@ def plan_restore(manifest, name, prefix_tokens, geometry, ordinal, dst_frame0=0,
         raise LayoutError(f'destination pool of {pool} frames < {need} needed')
     return RestorePlan(obj, prefix, size, groups, geometry, manifest.lba_bytes,
                        manifest.window_slba, manifest.window_nlb, slots, slot0, ordinal,
-                       first, dst0, pool)
+                       first, dst0, pool, bool(host2_ring))
 
 
 # ---- deterministic payload --------------------------------------------------
