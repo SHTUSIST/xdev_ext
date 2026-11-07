@@ -14,6 +14,98 @@ import subprocess
 import sys
 
 
+def owned_body(source, symbol):
+    """Select one complete actual function, ignoring C comments/literals."""
+    matches = list(re.finditer(r'^(?:static )?int ' + re.escape(symbol) +
+                              r'\([^;{}]*\)\s*\{', source, re.M))
+    if len(matches) != 1:
+        raise ValueError('owned function count is not one: ' + symbol)
+    match = matches[0]
+    start = source.index('{', match.start())
+    depth, quote, comment, escaped = 0, None, None, False
+    i = start
+    while i < len(source):
+        c, following = source[i], source[i + 1:i + 2]
+        if comment == 'line':
+            if c == '\n':
+                comment = None
+        elif comment == 'block':
+            if c == '*' and following == '/':
+                comment = None
+                i += 1
+        elif quote:
+            if escaped:
+                escaped = False
+            elif c == '\\':
+                escaped = True
+            elif c == quote:
+                quote = None
+        elif c == '/' and following in ('/', '*'):
+            comment = 'line' if following == '/' else 'block'
+            i += 1
+        elif c in ('"', "'"):
+            quote = c
+        elif c == '{':
+            depth += 1
+        elif c == '}':
+            depth -= 1
+            if depth == 0:
+                return source[match.start():i + 1]
+        i += 1
+    raise ValueError('incomplete owned function: ' + symbol)
+
+
+def replace_once(source, old, new):
+    if source.count(old) != 1:
+        raise ValueError('owned algorithm anchor count is not one')
+    return source.replace(old, new, 1)
+
+
+def current_edits(recipe, source):
+    """Port only three old full-body anchors; preserve the frozen fault/want."""
+    name = recipe['name']
+    if name not in ('late-publication', 'skip-own-active',
+                    'missing-success-hold-release'):
+        return recipe['edits'], None
+    if len(recipe['edits']) != 1:
+        raise ValueError('ported recipe must have one original edit')
+    edit = recipe['edits'][0]
+    if source.count(edit['old']):
+        return recipe['edits'], None
+    if edit.get('matches', 1) != 1:
+        raise ValueError('ported recipe must retain one exact match')
+    owner = original_owner = 'xdev_ext_ce_bind'
+    if name == 'late-publication':
+        lease = ('\terr = xdev_ext_ce_lease_bind(st, cs, u->arg0, u->arg1);\n'
+                 '\tif (err)\n\t\treturn err;\n')
+        native = ('\terr = cs->ops->bind_region(st->file, u->arg0, u->arg1, &cs->region);\n'
+                  '\tcs->region.ops = cs->ops;\n\tif (err)\n\t\treturn err;\n')
+        old, new = lease + native, native + lease
+        reason = 'same lease publication moved after native bind_region'
+    elif name == 'skip-own-active':
+        original_owner = 'xdev_ext_comp_copy_lease_get'
+        owner = 'xdev_ext_comp_copy_lease_get_mode'
+        old = ('\tmutex_lock(&domain->lock);\n'
+               '\tlist_for_each_entry(other, &domain->groups, node) {')
+        new = ('\tmutex_lock(&domain->lock);\n'
+               '\tif (!group->state.active_batches)\n'
+               '\tlist_for_each_entry(other, &domain->groups, node) {')
+        reason = 'same other-group cleanup scan omitted when own group is active'
+    else:
+        old = '\txdev_ext_comp_copy_lease_hold(&cs->lease, false);\n'
+        new = '\t/* mutation: leave transient hold after successful bind */\n'
+        reason = 'same successful bind retains its transient cleanup hold'
+    if (owned_body(edit['old'], original_owner) != edit['old'] or
+            replace_once(edit['old'], old, new) != edit['new']):
+        raise ValueError('original recipe no longer encodes the named fault')
+    body = owned_body(source, owner)
+    changed = replace_once(body, old, new)
+    return [{'old': body, 'new': changed, 'matches': 1}], {
+        'owner': owner, 'reason': reason,
+        'original_recipe_sha256': hashlib.sha256(
+            json.dumps(recipe, sort_keys=True).encode()).hexdigest()}
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--base-evidence', type=pathlib.Path, required=True)
@@ -36,7 +128,10 @@ def main():
         mutant = source
         result = {'name': recipe['name'], 'expected_failure': recipe['expected_failure'], 'applied_edits': []}
         try:
-            for edit in recipe['edits']:
+            edits, port = current_edits(recipe, source)
+            if port is not None:
+                result['recipe_port'] = port
+            for edit in edits:
                 count = mutant.count(edit['old'])
                 if count != edit.get('matches', 1):
                     raise ValueError(f"edit matches {count}, expected {edit.get('matches', 1)}")
