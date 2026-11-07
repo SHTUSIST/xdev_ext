@@ -13,7 +13,8 @@
 #                             xdev_ext_gpu_dmabuf, xdev_ext_peer_chain,
 #                             ce_plan.bpf.o, nvme_s0.bpf.o, net_peer.bpf.o
 #   /opt/xdev_ext/xdev_ext_mech_ctl, /opt/xdev_ext/nxp_mech.bpf.o
-#   /opt/gate/cuda_attr_probe, /opt/gate/patched/libcuda.so.1 (-> patched copy)
+#   /opt/gate/cuda_attr_probe, /opt/gate/peer_create_report,
+#   /opt/gate/patched/libcuda.so.1 (-> patched copy)
 #   /opt/gate/patched.sha256, /opt/gate/original.sha256
 # The host shares a 9p directory with mount tag "gatecapture".
 #
@@ -108,20 +109,31 @@ echo "GATE_BYTE patched: $(dd if="$PATCHED/libcuda.so.590.48.01" bs=1 skip=$((0x
 # --- NVMe: two emulated controllers, mapped by serial --------------------
 src_ng= dst_ng= src_blk= dst_blk=
 # Controllers probe asynchronously after boot.
+# gate_nvme=N on the kernel command line: controllers to wait for (default 2).
+nvme_expected=$(sed -n 's/.*gate_nvme=\([0-9]*\).*/\1/p' /proc/cmdline)
+[ -n "$nvme_expected" ] || nvme_expected=2
 for _ in $(seq 1 200); do
-	[ "$(cat /sys/class/nvme/nvme*/serial 2>/dev/null | grep -c 'GATE...01')" = 2 ] &&
-		[ -b /dev/nvme0n1 ] && [ -b /dev/nvme1n1 ] && break
+	[ "$(cat /sys/class/nvme/nvme*/serial 2>/dev/null | grep -c 'GATE.*01')" = "$nvme_expected" ] &&
+		[ "$(ls /dev/nvme*n1 2>/dev/null | wc -l)" = "$nvme_expected" ] && break
 	sleep 0.1
 done
+rc_ng= rc_blk=
 for c in /sys/class/nvme/nvme*; do
 	[ -e "$c/serial" ] || continue
 	n=${c##*/}
 	case $(tr -d ' ' <"$c/serial") in
 	GATESRC01) src_ng=/dev/ng${n#nvme}n1 src_blk=/dev/${n}n1 ;;
 	GATEDST01) dst_ng=/dev/ng${n#nvme}n1 dst_blk=/dev/${n}n1 ;;
+	GATERC01) rc_ng=/dev/ng${n#nvme}n1 rc_blk=/dev/${n}n1 ;;
 	esac
 done
-echo "GATE_NVME src=$src_ng,$src_blk dst=$dst_ng,$dst_blk"
+echo "GATE_NVME src=$src_ng,$src_blk dst=$dst_ng,$dst_blk rootcomplex=$rc_ng,$rc_blk"
+for c in /sys/class/nvme/nvme*; do
+	echo "GATE_NVME_PATH ${c##*/} serial=$(tr -d ' ' <"$c/serial") $(readlink -f "$c/device")"
+done
+for d in /sys/bus/pci/devices/*; do
+	[ "$(cat "$d/vendor")" = 0x10de ] && echo "GATE_PCI_PATH ${d##*/} class=$(cat "$d/class") $(readlink -f "$d")"
+done
 [ -c "$src_ng" ] && [ -c "$dst_ng" ] && [ -b "$src_blk" ] && [ -b "$dst_blk" ] || {
 	echo 'GATE_STEP name=nvme result=FAIL reason=devices'; exit 1; }
 source_slba=2048 target_slba=4096 groups=4
@@ -166,6 +178,19 @@ step attrs-patched /tmp/attrs-patched.log env LD_LIBRARY_PATH="$PATCHED:$SYSLIB"
 	/opt/gate/cuda_attr_probe "$gpu_bdf"
 step caps-patched /tmp/caps-patched.log env LD_LIBRARY_PATH="$PATCHED:$SYSLIB" \
 	"$G/xdev_ext_gpu_dmabuf" --caps --bdf "$gpu_bdf"
+
+# --- (ii-a) admission report for the imported dma-buf PEER pool -----------
+# CREATE_REPORT only (no START, no DMA): phase, requester, reachability,
+# pci_p2pdma_distance, backing and refusal flags, once per destination.
+for target in "$dst_ng" "$rc_ng"; do
+	[ -c "$target" ] || continue
+	name=report-${target##*/}
+	step "$name" "/tmp/$name.log" env LD_LIBRARY_PATH="$PATCHED:$SYSLIB" \
+		"$G/xdev_ext_gpu_dmabuf" --bdf "$gpu_bdf" --bytes 2097152 --expect /tmp/src.bin \
+		--group-bytes 8192 --frame-bytes 65536 -- \
+		/opt/gate/peer_create_report --allocation-fd '{fd}' "$src_ng" "$target" \
+		"$window_nlb" "$source_slba" "$target_slba" "$G"
+done
 
 # --- (ii) dma-buf export (patched) imported as the PEER pool, NVMe I/O ------
 # Same command as the product G4 case: NVMe READ into the imported VRAM
