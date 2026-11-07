@@ -42,6 +42,14 @@ explicit scalar fixture and fault contracts. The separate official-NVCC build
 and CUDA execution commands require their stated SDK/device capabilities.
 This workload emits correctness records and no performance measurements.
 
+The [K-KV restore](kv_restore/README.md) workload restores a KV cache stored
+on one host's NVMe into another host's GPU memory over one Thunderbolt/USB4
+cable: the xdev_ext worker, an NVMe-oF/TCP plus cudaMemcpy arm and a Mooncake
+Store SSD-offload arm share one KV layout, worker protocol and CPU accounting.
+`make -C tests/eval/kv_restore check` runs host tests, and a KVM run checks
+the storage half and the destination placement; neither is a performance
+result.
+
 The [SPDK NVMe->TCP pipeline](spdk/README.md) is the native SPDK arm: queue
 depth 1 raw reads with the official user-space NVMe driver, sent over loopback
 TCP. `make -C tests/eval spdk-check` runs its host contract and native-arm
