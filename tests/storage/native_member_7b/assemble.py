@@ -6,6 +6,10 @@ HERE=pathlib.Path(__file__).resolve().parent
 GOLDEN=HERE.parent/'native_member_7a'
 sp=importlib.util.spec_from_file_location('old',GOLDEN/'run_candidate.py');old=importlib.util.module_from_spec(sp);sp.loader.exec_module(old)
 b=old.base
+# The actual NVMe compatibility header includes this shared type/helper owner.
+# Extend only this fixture's inherited inventory; snapshot and copy use it alike.
+b.HEADERS={**b.HEADERS,
+ 'linux/xdev_ext_cmd_lifecycle.h':'src/core/include/linux/xdev_ext_cmd_lifecycle.h'}
 NATIVE,BLOCK,RUNTIME=old.NATIVE,old.BLOCK,old.RUNTIME
 REQ='src/core/io_uring/family/xdev_ext_requester.c'
 FD='src/core/io_uring/xdev_ext_peer_fd.c'
