@@ -145,6 +145,100 @@ every step of every group and the CPU copies no payload.
   runs both directions in an xdev_ext KVM guest with that stand-in; it is not
   run by the host checks.
 
+
+## Untimed VMM CE acceptance
+
+Build the real probe from the canonical checkout:
+
+```sh
+python3 tools/run.py --view "$PWD/build/ce-vmm-source-view" \
+  --cwd tests/benchmarks/nvme_gpu make probe \
+  CC=gcc BUILD_DIR="$PWD/build/ce-vmm-acceptance"
+python3 -B tests/benchmarks/nvme_gpu/test_ce_probe.py -v
+```
+
+The probe requires the running xdev_ext kernel, its matching NVIDIA driver
+built with `XDEV_EXT_ENABLE_GPU_CE_DMA` and loaded with
+`NVreg_EnableXdevExtCeDma=1`, and the existing `ce_plan_ops`
+program. Build and attach that plan using the running kernel's BTF:
+
+```sh
+(
+  set -eu
+  python3 tools/run.py --view "$PWD/build/ce-vmm-source-view" --cwd src/cli make \
+    ctl "$PWD/build/ce-vmm-acceptance/ce_plan.bpf.o" \
+    BUILD_DIR="$PWD/build/ce-vmm-acceptance" \
+    VMLINUX_BTF=/sys/kernel/btf/vmlinux CC=gcc CLANG=clang BPFTOOL=bpftool
+
+  probe_pin="/sys/fs/bpf/ce-vmm-acceptance-$$"
+  sudo build/ce-vmm-acceptance/xdev_ext_mech_ctl attach \
+    --obj "$PWD/build/ce-vmm-acceptance/ce_plan.bpf.o" \
+    --map ce_plan_ops --pin "$probe_pin"
+
+  acceptance_rc=0
+  for case in single-h2d single-d2h multi close-export partial-attach; do
+    sudo timeout 30s build/ce-vmm-acceptance/ce_vmm_probe \
+      --ce-dev /dev/nvidia0 --timeout-ms 5000 --case "$case" || { acceptance_rc=$?; break; }
+  done
+
+  sudo build/ce-vmm-acceptance/xdev_ext_mech_ctl detach \
+    --pin "$probe_pin" || acceptance_rc=$?
+  exit "$acceptance_rc"
+)
+```
+
+Use an otherwise unused GPU/CE test configuration and a unique BPF pin.
+Reuse an already attached compatible CE plan instead of replacing another
+run's plan. Detach only the pin created for this acceptance. A timeout or any
+nonzero result leaves the suite unqualified; process exit does not recover
+UNKNOWN work or prove that kernel references were released.
+
+Each successful case executes one batch at depth 1 with two 2048-byte host
+payload spans. Each selected 4096-byte host frame has 1024-byte head and tail
+guards; two additional unselected frames are guards. Every byte of the host
+mapping and the entire rounded VMM allocation is checked, including all
+unwritten GPU windows and allocation rounding slack.
+
+| Case | Actual kernel CE work and oracle |
+| --- | --- |
+| `single-h2d` | Seed host with a position-dependent pattern and GPU with poison; one H2D stage must fill the GPU destination without changing host or guards. |
+| `single-d2h` | Seed GPU source with the pattern and host with different poison; one D2H stage must fill both host spans without changing GPU source or guards. |
+| `multi` | Two stage FDs share one VMM export. Disjoint GPU window A goes through D2H into host, then H2D into GPU window B. Host and B start poisoned, so omitting either transfer fails. |
+| `close-export` | Attach both stage FDs, close only the caller's exported FD **before CREATE**, clear that FD's cleanup ownership, then execute the same two-stage route. CUDA mapping and allocation remain owned. |
+| `partial-attach` | First attach succeeds; a second real CE FD is passed a closed, nonnegative export FD. Require a driver-returned nonzero NVIDIA status, with no CREATE/START for this setup. Close the partial setup, check process FD scope, then require a fresh two-stage transfer. |
+
+The probe uses the same `es_ce_open` / CUDA VMM helper as the NVMe/GPU
+session arm. It uses reported CREATE admission, terminal eventfd notification,
+STATS settlement, and STOP_REPORT before any oracle readback. A success requires
+exactly one submitted/completed command per used stage, one completed batch,
+two published frames, zero errors/rejects/inflight/sequestered work, an ACTIVE
+settlement, and a STOPPED final report. Two payload descriptors within a stage
+count as one stage command.
+
+STOP_REPORT returns the synchronized final snapshot only after checked
+synchronous release succeeds. An unavailable, malformed or retained CREATE
+report, or an unproven STOP release, prevents oracle readback and explicit CUDA
+unmap/release. The case terminates with failure and does not reuse host pages.
+The kernel's retained attachment/RM/pool references remain authoritative.
+Closing the user's export FD or observing equal process FD counts is never
+used as proof that DMA stopped or that all kernel references disappeared.
+
+The final `CE_VMM_ACCEPTANCE=PASS` is printed only after data, guards,
+completion, STOP_REPORT, CUDA cleanup and process FD checks succeed. There are
+no timers or throughput fields; the monotonic clock only bounds waiting.
+Exit codes are 0 for verified, 1 for failure, 2 for usage and 4 for unavailable
+capabilities before CREATE accepts a session; any error after that exits 1.
+A missing GPU/CUDA driver returns no acceptance PASS, and a harness must not
+count exit 4 as a PASS.
+
+The earlier helper-only `CE_VMM_QUALIFICATION` marker is superseded: its
+CUDA seeding/readback did not execute a kernel session. Host tests of this
+probe validate the acceptance decisions and build/CLI behavior; they do not
+execute or qualify physical CE DMA. A physical PASS covers this small CE
+configuration only. NVMe/NIC route correctness, production queue depths,
+native GDS path counters, equal output placement and completion semantics
+remain separate requirements before a performance comparison.
+
 ## Build and run
 
 ```sh
