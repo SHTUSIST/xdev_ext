@@ -77,6 +77,7 @@ jobs:
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_reliable_accounting_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_source_drain_test.py
           python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_unified_demo_read_test.py
+          python3 kernel/tools/testing/selftests/xdev_ext_mech_tools/xdev_ext_mech_ce_roundtrip_test.py
           python3 kernel/tools/testing/selftests/nvme_xdev_ext_passthru/nvme_sgl_profile_test.py
       - name: Network family exact-cover consumption
         working-directory: .
