@@ -3186,6 +3186,14 @@
       "logical_path": "tests/benchmarks/tp/driver.cc"
     },
     {
+      "source": "tests/benchmarks/tp/test_tp_ce_bpf.c",
+      "logical_path": "tests/benchmarks/tp/test_tp_ce_bpf.c"
+    },
+    {
+      "source": "tests/benchmarks/tp/tp_ce_place.bpf.c",
+      "logical_path": "tests/benchmarks/tp/tp_ce_place.bpf.c"
+    },
+    {
       "source": "tests/benchmarks/tp/early_trace.py",
       "logical_path": "tests/benchmarks/tp/early_trace.py"
     },
@@ -4081,6 +4089,10 @@
     {
       "source": "tests/compute/tp/frames_test.py",
       "logical_path": "tests/compute/tp/frames_test.py"
+    },
+    {
+      "source": "tests/compute/tp/ce_place_test.py",
+      "logical_path": "tests/compute/tp/ce_place_test.py"
     },
     {
       "source": "tests/compute/tp/collective_behavior.py",
