@@ -12,8 +12,11 @@
 # namespace of a two-namespace DST controller while one of them fails; it
 # needs CONFIG_FAULT_INJECTION_DEBUG_FS and CONFIG_FAIL_IO_TIMEOUT (the faults
 # are the kernel's own, on the faulty tenant's private namespace only).
+# --mode multi-reset is a diagnostic on the same devices: a DST controller
+# reset while innocent tenants have commands in flight; it reports what they
+# end with (XDEV_EXT_WINDOW_RESET_DIAG lines) and gates only on the run itself.
 #
-#   bash window_kvm.sh --scratch DIR --source CANON --native LINUX --build BUILD [--mode multi]
+#   bash window_kvm.sh --scratch DIR --source CANON --native LINUX --build BUILD [--mode multi|multi-reset]
 set -euo pipefail
 umask 077
 SCRATCH= SOURCE= NATIVE= BUILD= MODE=window
@@ -33,7 +36,7 @@ while (($#)); do
     esac
 done
 [[ -n "$SCRATCH" && -n "$SOURCE" && -n "$NATIVE" && -n "$BUILD" ]] || { echo 'missing option' >&2; exit 2; }
-[[ "$MODE" == window || "$MODE" == multi ]] || { echo "unknown mode: $MODE" >&2; exit 2; }
+[[ "$MODE" == window || "$MODE" == multi || "$MODE" == multi-reset ]] || { echo "unknown mode: $MODE" >&2; exit 2; }
 [[ -d "$SCRATCH" && ! -L "$SCRATCH" && $(stat -c %a "$SCRATCH") == 700 && $(stat -c %u "$SCRATCH") == $(id -u) ]] || {
     echo 'FAIL scratch must be an existing private 0700 directory' >&2; exit 1; }
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
@@ -68,7 +71,7 @@ fi
 printf 'test_source=%s\ntest_commit=%s\nnative=%s\nnative_commit=%s\nkernel_build=%s\nkernel_commit=%s\nkernel_is_test_commit=%s\nkernel_src_equals_test_src=%s\nmode=%s\nscope=nvme-lba-window-handle-software-correctness\ntiming=none\n' \
     "$SOURCE" "$SHA" "$NATIVE" "$NATIVE_SHA" "$BUILD" "$BUILD_SHA" "$same" "$src_same" "$MODE" >"$EV/provenance.txt"
 extra_symbols=
-[[ "$MODE" == multi ]] && extra_symbols='DEBUG_FS FAULT_INJECTION FAULT_INJECTION_DEBUG_FS FAIL_IO_TIMEOUT'
+[[ "$MODE" == multi* ]] && extra_symbols='DEBUG_FS FAULT_INJECTION FAULT_INJECTION_DEBUG_FS FAIL_IO_TIMEOUT'
 for symbol in MODULES XDEV_EXT_MECH XDEV_EXT_MECH_ZEROCOPY BLK_DEV_NVME BLK_DEV_INITRD RD_GZIP \
     DEVTMPFS DEVTMPFS_MOUNT TMPFS PROC_FS SYSFS BLOCK PCI PCI_MSI IO_URING BPF BPF_SYSCALL \
     BPF_JIT DEBUG_INFO_BTF UNIX $extra_symbols; do
@@ -92,7 +95,8 @@ rm -rf -- "$ROOT"; mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,opt/window}
 cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo printf poweroff dmesg sed grep sync ls; do ln -s busybox "$ROOT/bin/$app"; done
 cp "$GUEST/window_guest" "$GUEST/window_nvme.bpf.o" "$ROOT/opt/window/"
-printf '%s\n' "$MODE" >"$ROOT/opt/window/mode"
+case "$MODE" in multi) verb=multi;; multi-reset) verb=reset;; *) verb=window;; esac
+printf '%s\n' "$verb" >"$ROOT/opt/window/mode"
 : >"$EV/guest-libraries.txt"
 elf=$(readelf -l -- "$GUEST/window_guest") || { echo FAIL; exit 1; }
 if grep -q INTERP <<<"$elf"; then
@@ -126,11 +130,12 @@ main() {
     [ -n "$src" ] && [ -n "$dst" ] || { echo 'FAIL NVMe serials not found'; return 1; }
     echo "XDEV_EXT_WINDOW_ROLES source=$src destination=$dst"
     ls -l "/dev/${src}n1" "/dev/ng${src#nvme}n1" "/dev/${dst}n1" "/dev/ng${dst#nvme}n1"
-    if [ "$(cat /opt/window/mode)" = multi ]; then
+    verb=$(cat /opt/window/mode)
+    if [ "$verb" = multi ] || [ "$verb" = reset ]; then
         mount -t debugfs debugfs /sys/kernel/debug || return 1
         ls -l "/dev/${dst}n2" "/dev/ng${dst#nvme}n2" || return 1
         /opt/window/window_guest "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
-            "/dev/${dst}n1" "/dev/ng${dst#nvme}n1" /opt/window multi \
+            "/dev/${dst}n1" "/dev/ng${dst#nvme}n1" /opt/window "$verb" \
             "/dev/${dst}n2" "/dev/ng${dst#nvme}n2"
         return
     fi
@@ -173,7 +178,7 @@ for o in range(0, span, 8):
 (out / 'source.raw').write_bytes(source)
 (out / 'source-before.raw').write_bytes(source)
 (out / 'destination.raw').write_bytes(bytes([0x6b]) * span)
-if sys.argv[3] == 'multi':
+if sys.argv[3].startswith('multi'):
     (out / 'aux.raw').write_bytes(bytes([0x3c]) * span)
 Path(sys.argv[2]).write_text('seed=0x%08x\n' % seed)
 PY
@@ -185,14 +190,14 @@ sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" \
 append='console=ttyS0 rdinit=/init panic=-1 loglevel=6 nokaslr'
 # multi: no command timeout may fire on its own during the run (the timeout
 # round swallows completions on purpose), so the passthrough timeout is long.
-[[ "$MODE" == multi ]] && append+=' nvme_core.io_timeout=600'
+[[ "$MODE" == multi* ]] && append+=' nvme_core.io_timeout=600'
 args=(-machine q35,accel=kvm -cpu host -smp 4 -m 4096 -nographic -no-reboot
     -kernel "$BUILD/arch/x86/boot/bzImage" -initrd "$OUT/initramfs.cpio.gz"
     -append "$append" -nic none
     -drive "file=$OUT/source.raw,if=none,id=src,format=raw,cache=none,aio=threads"
     -device nvme,drive=src,serial=XDEVWINSRC01
     -drive "file=$OUT/destination.raw,if=none,id=dst,format=raw,cache=none,aio=threads,throttling.bps-write=131072")
-if [[ "$MODE" == multi ]]; then
+if [[ "$MODE" == multi* ]]; then
     # One DST controller, two namespaces: ns1 shared, ns2 the faulty tenant's.
     args+=(-drive "file=$OUT/aux.raw,if=none,id=aux,format=raw,cache=none,aio=threads"
         -device nvme,id=dstctl,serial=XDEVWINDST01
@@ -212,19 +217,22 @@ printf 'qemu_exit=%s\n' "$qemu_status" >>"$EV/provenance.txt"
 
 marker=XDEV_EXT_WINDOW_HANDLE=PASS
 [[ "$MODE" == multi ]] && marker=XDEV_EXT_WINDOW_MULTI=PASS
+[[ "$MODE" == multi-reset ]] && marker=XDEV_EXT_WINDOW_RESET_DIAG=DONE
 grep -q "$marker" "$EV/guest.log" || { echo "FAIL guest did not report $marker"; exit 1; }
 grep -q 'XDEV_EXT_WINDOW_C_EXIT=0' "$EV/guest.log" || { echo 'FAIL nonzero guest C exit'; exit 1; }
 grep -q 'XDEV_EXT_WINDOW_GUEST_EXIT=0' "$EV/guest.log" || { echo 'FAIL nonzero guest exit'; exit 1; }
 if grep -q '^not ok' "$EV/guest.log"; then echo 'FAIL a guest check reported not ok'; exit 1; fi
 sed -n '/XDEV_EXT_WINDOW_DMESG_BEGIN/,/XDEV_EXT_WINDOW_DMESG_END/p' "$EV/guest.log" >"$EV/dmesg.txt"
-# multi: exactly the two expected quarantines (the unknown round's session at
-# STOP, the timeout round's session after the closing reset) and one deferred
-# release of the timeout round; anything else fails as in window mode.
+# multi: exactly the one expected quarantine (the unknown round's session at
+# STOP) and one deferred release (the timeout round's session, released after
+# the closing reset); anything else fails as in window mode. multi-reset only
+# records them.
 allowed='^$'
+[[ "$MODE" == multi-reset ]] && allowed='xdev_ext_mech: (session [0-9]+ quarantined, |drain bound passed )'
 if [[ "$MODE" == multi ]]; then
     allowed='xdev_ext_mech: session [0-9]+ quarantined, '
     n=$(grep -cE "$allowed" "$EV/dmesg.txt" || true)
-    [[ "$n" == 2 ]] || { echo "FAIL expected 2 quarantined sessions, saw $n"; exit 1; }
+    [[ "$n" == 1 ]] || { echo "FAIL expected 1 quarantined session, saw $n"; exit 1; }
     n=$(grep -c 'drain bound passed with [0-9]* batches in flight' "$EV/dmesg.txt" || true)
     [[ "$n" == 1 ]] || { echo "FAIL expected 1 deferred release, saw $n"; exit 1; }
 fi
@@ -238,6 +246,10 @@ if [[ "$MODE" == multi ]]; then
     [[ -n "$kill_min" ]] || { echo 'FAIL no kill point reported'; exit 1; }
     python3 -I "$TEST_DIR/window_validate.py" --multi "$OUT/source-before.raw" "$OUT/destination.raw" \
         "$OUT/aux.raw" "$kill_min" >"$EV/whole-disk.json" || true
+elif [[ "$MODE" == multi-reset ]]; then
+    # Diagnostic: the guest reports per-tenant end states and window exactness.
+    grep '^XDEV_EXT_WINDOW_RESET_DIAG' "$EV/guest.log" >"$EV/reset-diagnostic.txt"
+    printf '{"state": "PASS", "note": "diagnostic mode: no whole-disk gate"}\n' >"$EV/whole-disk.json"
 else
     python3 -I "$TEST_DIR/window_validate.py" "$OUT/source-before.raw" "$OUT/destination.raw" >"$EV/whole-disk.json" || true
 fi

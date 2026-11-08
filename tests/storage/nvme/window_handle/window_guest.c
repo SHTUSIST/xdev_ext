@@ -33,7 +33,7 @@
  * everything it does afterwards uses handles.
  *
  * Usage: window_guest SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR
- *        window_guest ... BPF_DIR multi AUX_BLOCK AUX_NG   (window_multi.h)
+ *        window_guest ... BPF_DIR multi|reset AUX_BLOCK AUX_NG   (window_multi.h)
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -675,8 +675,10 @@ int main(int argc, char **argv)
 	puts("TAP version 13\n# NVMe LBA window handles: QEMU NVMe, correctness only, no timing");
 	if (argc == 9 && !strcmp(argv[6], "multi"))
 		return multi_main(argv);
+	if (argc == 9 && !strcmp(argv[6], "reset"))
+		return reset_main(argv);
 	if (argc != 6) {
-		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR [multi AUX_BLOCK AUX_NG]\n",
+		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR [multi|reset AUX_BLOCK AUX_NG]\n",
 			argv[0]);
 		return 2;
 	}

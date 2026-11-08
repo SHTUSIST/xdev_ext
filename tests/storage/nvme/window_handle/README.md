@@ -81,24 +81,32 @@ windows must hold exactly their source windows:
 - `timeout`: tenant 0 reads ns2 with `fail_io_timeout` swallowing every
   completion: STOP passes the 5 s drain bound with commands in flight
   (`-EBUSY`, release deferred) and its range stays reserved. After this last
-  round, with nothing else running, the holder resets the DST controller so
-  the guest can power off; the session is then quarantined.
+  round, with nothing else running, the holder resets the DST controller:
+  the reset cancels those commands, they end, and the deferred release frees
+  the session and its range (so the guest can also power off).
 
 The runner boots with `nvme_core.io_timeout=600`, so no command timeout fires
 on its own and no controller reset happens while innocent tenants run; the
-faults touch ns2 only. The kernel log must show exactly two quarantined
-sessions and one deferred release. `window_validate.py --multi` repeats the
+faults touch ns2 only. The kernel log must show exactly one quarantined
+session (the `unknown` round) and one deferred release (the `timeout` round). `window_validate.py --multi` repeats the
 whole-disk oracle on the host. Each round prints how its innocent tenants'
 run overlapped the fault and requires at least one of them to be still
 running when the fault began.
 
-A controller reset is a different fault. It aborts every in-flight command of
-every tenant on that controller, and the NVMe class treats an error or
-cancelled completion of a host-page command as uncertain (`class_complete` in
-`xdev_ext_mech_nvme.c`), so an innocent tenant's batch in flight at a reset is
-sequestered. A command timeout that nobody bounds escalates to such a reset
-(abort, then reset on the second expiry). This mode keeps resets out of the
-innocent tenants' runs and does not cover that case.
+A controller reset is a different fault: it aborts every in-flight command of
+every tenant on that controller, and a command timeout escalates to one
+(`nvme_timeout`: abort, then reset on the second expiry). The NVMe class
+(`class_complete` in `xdev_ext_mech_nvme.c`) treats a failed host-page command
+as uncertain only when the request still carries residual bytes, so the
+outcome depends on how the completion arrives: in the `timeout` round a
+command cancelled by the reset ended as a definite failure, while the
+`unknown` round's error status was sequestered. The `multi` mode keeps resets
+out of the innocent tenants' runs. `--mode multi-reset` is a diagnostic, not
+a gate: the same four tenants, with the holder resetting the DST controller
+while the three innocent tenants still have commands in flight; the guest
+prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant (batches done,
+aborted, sequestered, STOP result, window exact) and the runner gates only on
+the run and the kernel log.
 
 ## Host tests (no kernel, no device)
 
@@ -124,7 +132,7 @@ innocent tenants' runs and does not cover that case.
 On a host with KVM, from a clean checkout of the commit under test:
 
     bash tests/storage/nvme/window_handle/window_kvm.sh --scratch DIR \
-        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi]
+        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi|multi-reset]
 
 `DIR` must be an existing private 0700 directory. The kernel build needs the
 config symbols listed in the runner. A kernel from another commit is accepted

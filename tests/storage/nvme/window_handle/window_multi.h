@@ -38,14 +38,21 @@
  *             stays reserved for good; its window guard
  *   timeout : tenant 0 reads ns2 with every completion swallowed: STOP passes
  *             the drain bound with commands in flight (-EBUSY) and its range
- *             stays reserved; after the round the holder resets the DST
- *             controller so the guest can power off (nothing else runs then)
+ *             stays reserved; after the round, with nothing else running, the
+ *             holder resets the DST controller, which cancels those commands;
+ *             they end and the deferred release frees the session and range
  *
  * Innocents must complete 8/8 batches with no abort, reject, timeout or
  * sequester, STOP with 0 and be released, while the fault happens (each
  * round asserts that at least one innocent was still running at the fault),
  * and the whole-disk oracle requires every innocent window to be its exact
  * source window and every byte nobody owns to stay guard.
+ *
+ * "reset" (window_guest ... reset AUX_BLOCK AUX_NG) is a diagnostic, not a
+ * gate: the same four tenants, tenant 0's completions swallowed, and the
+ * holder resets the DST controller while the innocent tenants still have
+ * commands in flight, as nvme_timeout does on a second expiry. It reports
+ * what each innocent tenant ends with and whether it stayed isolated.
  */
 #include <signal.h>
 #include <time.h>
@@ -57,8 +64,9 @@
 #define M_KILL_AFTER 2U
 #define M_STABLE_MS 1000
 
-enum { R_KILL, R_ESCAPE, R_UNKNOWN, R_TIMEOUT };
-static const char *const m_round_name[M_ROUNDS] = { "kill", "escape", "unknown", "timeout" };
+enum { R_KILL, R_ESCAPE, R_UNKNOWN, R_TIMEOUT, R_RESET };
+static const char *const m_round_name[M_ROUNDS + 1] = { "kill", "escape", "unknown", "timeout", "reset" };
+#define M_RESET_AFTER_US 150000	/* reset: innocents are mid-run under the write throttle */
 
 static unsigned m_win(unsigned r, unsigned i) { return 4 * r + i; }
 
@@ -187,6 +195,24 @@ static int m_tenant(int sock, unsigned r, unsigned i, const char *src_ng, const 
 	m.t_start = now_ns();
 	start(&s);
 
+	if (r == R_RESET) {
+		if (faulty) {
+			usleep(M_RESET_AFTER_US);
+			quiet_stats(&s, &st);
+			print_stats(&st, "before the reset");
+			m.kind = MSG_KILLPOINT;
+			m_fill(&m, &st);
+			m_send(sock, &m);
+			memset(&m, 0, sizeof(m));
+		}
+		st = wait_quiet(&s, true);
+		m.t_end = now_ns();
+		m_fill(&m, &st);
+		m.stop_ret = mech(s.ring, XDEV_EXT_MECH_OP_STOP, s.id);
+		printf("# %s: STOP returned %d\n", name, m.stop_ret);
+		m.ok = 1;
+		goto final;
+	}
 	if (!faulty) {
 		st = wait_settled(&s);
 		m.t_end = now_ns();
@@ -303,7 +329,7 @@ static void m_fault(unsigned r, const char *disk, bool on)
 		write_file(path, "-1");
 		snprintf(path, sizeof(path), "/sys/kernel/debug/%s/fault_inject/probability", disk);
 		write_file(path, on ? "100" : "0");
-	} else if (r == R_TIMEOUT) {
+	} else if (r == R_TIMEOUT || r == R_RESET) {
 		write_file("/sys/kernel/debug/fail_io_timeout/verbose", "0");
 		write_file("/sys/kernel/debug/fail_io_timeout/times", "-1");
 		write_file("/sys/kernel/debug/fail_io_timeout/probability", on ? "100" : "0");
@@ -481,9 +507,11 @@ static int multi_main(char **argv)
 			 * A reset cancels them so the guest can power off, and the
 			 * deferred release then quarantines the session. */
 			m_reset_controller(disk);
-			usleep(500000);
-			CHECK_EQ(issue(dstng, win(m_win(r, 0)), WIN_NLB, RDWR, 0), -EBUSY,
-				 "after the reset the timed-out session still keeps its range");
+			for (i = 0; i < 3000 && (fd = issue(dstng, win(m_win(r, 0)), WIN_NLB, RDWR, 0)) == -EBUSY; i++)
+				usleep(10000);
+			printf("# multi: timeout range reserved for %d polls of 10 ms after the reset\n", i);
+			CHECK(fd >= 0, "the reset ended the timed-out commands and the deferred release freed the range");
+			CHECK(!close(fd), "close it");
 		}
 	}
 
@@ -522,5 +550,91 @@ static int multi_main(char **argv)
 	free(source); free(dest); free(aux);
 	printf("1..%u\n", checks);
 	printf("XDEV_EXT_WINDOW_MULTI=PASS timing=none\n");
+	return 0;
+}
+
+/* Diagnostic: a controller reset while innocent tenants have commands in flight. */
+static int reset_main(char **argv)
+{
+	struct mmsg ready[M_TENANTS], fin[M_TENANTS], kp;
+	struct mchild c[M_TENANTS];
+	unsigned char *source, *dest;
+	int src, srcng, dst, dstng, auxng, status, rh[M_TENANTS], wh[M_TENANTS];
+	unsigned t, u, isolated = 0, overlapped = 0;
+	const char *disk = strrchr(argv[7], '/') + 1;
+	const unsigned r = R_RESET;
+	__u64 t_reset;
+	char go = 'g';
+
+	CHECK(getenv("XDEV_EXT_WINDOW_GUEST") && !strcmp(getenv("XDEV_EXT_WINDOW_GUEST"), "1"),
+	      "guest-only opt-in");
+	puts("# reset diagnostic: a DST controller reset while innocent tenants run");
+	for (t = 0; t < M_TENANTS; t++)
+		c[t] = m_fork(r, t, argv);
+	src = open_ok(argv[1], O_RDONLY);
+	srcng = open_ok(argv[2], O_RDWR);
+	dst = open_ok(argv[3], O_RDWR);
+	dstng = open_ok(argv[4], O_RDWR);
+	auxng = open_ok(argv[8], O_RDWR);
+	source = malloc(SPAN); dest = malloc(SPAN);
+	CHECK(source && dest, "verification buffers");
+	read_disk(src, source, SPAN, "read the source disk");
+	check_source(source, SPAN);
+	who = "holder";
+	for (t = 0; t < M_TENANTS; t++) {
+		wh[t] = issue_ok(dstng, win(m_win(r, t)), WIN_NLB, RDWR, "issue a tenant's write handle");
+		rh[t] = issue_ok(t ? srcng : auxng, win(m_win(r, t)), WIN_NLB, RD, "issue a tenant's read handle");
+	}
+	for (t = 0; t < M_TENANTS; t++) {
+		int pass[2] = { rh[t], wh[t] };
+
+		send_fds(c[t].sock, pass, 2, "pass a tenant its two handles");
+		CHECK(!close(rh[t]) && !close(wh[t]), "the holder drops its copies");
+	}
+	for (t = 0; t < M_TENANTS; t++)
+		CHECK(m_recv(c[t].sock, &ready[t], MSG_READY), "a tenant CREATEd and is ready");
+	m_fault(r, disk, true);
+	for (t = 0; t < M_TENANTS; t++)
+		CHECK(write(c[t].sock, &go, 1) == 1, "go");
+	CHECK(m_recv(c[0].sock, &kp, MSG_KILLPOINT), "tenant 0's commands are stuck");
+	m_fault(r, disk, false);
+	t_reset = now_ns();
+	m_reset_controller(disk);
+	for (t = 0; t < M_TENANTS; t++) {
+		CHECK(m_recv(c[t].sock, &fin[t], MSG_FINAL) && fin[t].ok, "a tenant reported its end state");
+		CHECK(waitpid(c[t].pid, &status, 0) == c[t].pid && WIFEXITED(status) && !WEXITSTATUS(status),
+		      "a tenant exited 0");
+	}
+	read_disk(dst, dest, SPAN, "read back the shared destination");
+	for (t = 0; t < M_TENANTS; t++) {
+		bool exact = window_is(dest, source, m_win(r, t));
+		bool ran_over = fin[t].t_end > t_reset;
+		bool ok = fin[t].done == GROUPS && !fin[t].abort_ && !fin[t].sequestered && !fin[t].stop_ret && exact;
+
+		printf("XDEV_EXT_WINDOW_RESET_DIAG tenant=%u role=%s done=%llu abort=%llu sequestered=%llu "
+		       "last_err=%d state=%u stop=%d window_exact=%d ended_after_reset=%d end_us=%+lld\n",
+		       t, t ? "innocent" : "faulty", (unsigned long long)fin[t].done,
+		       (unsigned long long)fin[t].abort_, (unsigned long long)fin[t].sequestered,
+		       fin[t].last_err, fin[t].state, fin[t].stop_ret, exact, ran_over,
+		       ((long long)fin[t].t_end - (long long)t_reset) / 1000);
+		if (t) {
+			isolated += ok;
+			overlapped += ran_over;
+		}
+	}
+	for (u = 0; u < M_TENANTS; u++) {
+		int fd = issue(dstng, win(m_win(r, u)), WIN_NLB, RDWR, 0);
+
+		printf("XDEV_EXT_WINDOW_RESET_DIAG range tenant=%u %s\n", u, fd >= 0 ? "free" : "reserved");
+		if (fd >= 0)
+			close(fd);
+	}
+	printf("XDEV_EXT_WINDOW_RESET_DIAG faulty_stuck inflight=%llu submitted=%llu\n",
+	       (unsigned long long)kp.inflight, (unsigned long long)kp.submitted0);
+	close(src); close(srcng); close(dst); close(dstng); close(auxng);
+	free(source); free(dest);
+	printf("1..%u\n", checks);
+	printf("XDEV_EXT_WINDOW_RESET_DIAG=DONE innocents=%u isolated=%u ran_over_reset=%u timing=none\n",
+	       M_TENANTS - 1, isolated, overlapped);
 	return 0;
 }
