@@ -13,6 +13,11 @@ one command; every byte is still copied exactly once from and to the same
 addresses, and only the final command carries the finish payload.  Callers
 that do not ask keep the page-granular chunking byte for byte.
 
+Each command is min(source run, destination run, remaining bytes), and
+finding it looks only at pages that command uses: when one side is one long
+run and the other is fragmented, the long side is not walked to its end again
+for every command (that walk made a fragmented copy quadratic in its length).
+
 The function body and the parameter struct are taken unchanged from the
 given sources; memory descriptors and the push are host stubs.  This is a
 host command-sequence test; it does not run a GPU or prove DMA.
@@ -98,9 +103,12 @@ static NvU64 memdescGetSize(MEMORY_DESCRIPTOR *m) { return m->size; }
 static NvU32 memdescGetAddressSpace(MEMORY_DESCRIPTOR *m) { return m->addrSpace; }
 static NvBool memdescGetContiguity(MEMORY_DESCRIPTOR *m, ADDRESS_TRANSLATION at)
 { (void)at; return m->contiguous; }
+/* Every page-array lookup, directly or through memdescGetPtePhysAddr. */
+static unsigned long lookups;
 static RmPhysAddr memdescGetPhysAddr(MEMORY_DESCRIPTOR *m, ADDRESS_TRANSLATION at, NvU64 off)
 {
     (void)at;
+    lookups++;
     if (m->contiguous) return m->pte[0] + off;
     return m->pte[off / m->pageArrayGranularity] + off % m->pageArrayGranularity;
 }
@@ -166,6 +174,7 @@ static void run(const char *name, MEMORY_DESCRIPTOR *src, NvU64 src_off,
 {
     CEUTILS_MEMCOPY_PARAMS p;
     NvU64 done = 0;
+    unsigned long used;
     unsigned i;
     NV_STATUS st;
 
@@ -182,9 +191,11 @@ static void run(const char *name, MEMORY_DESCRIPTOR *src, NvU64 src_off,
     }
 #endif
     nchunks = 0;
+    lookups = 0;
     st = ceutilsMemcopy_IMPL(&ce, &p);
+    used = lookups;
     CHECK(st == NV_OK, "status 0x%x", st);
-    printf("%s coalesce=%d chunks=%u:", name, coalesce, nchunks);
+    printf("%s coalesce=%d chunks=%u lookups=%lu:", name, coalesce, nchunks, used);
     for (i = 0; i < nchunks; i++)
         printf(" %u", chunk[i].size);
     printf("\n");
@@ -206,6 +217,20 @@ static void run(const char *name, MEMORY_DESCRIPTOR *src, NvU64 src_off,
           (unsigned long long)done, (unsigned long long)len);
     CHECK(p.submittedWorkId == ce.lastSubmittedPayload && p.submittedWorkId != 0,
           "async work id");
+    if (coalesce) {
+        /*
+         * Per command: 4 lookups for the programmed and logged addresses, 2
+         * per side for its first page, then one per page the command uses
+         * on either side plus the page that ends it.  A walk that runs to
+         * the end of the longer side's run for every command exceeds this.
+         */
+        unsigned long src_pages = (unsigned long)((src_off % PAGE + len + PAGE - 1) / PAGE);
+        unsigned long dst_pages = (unsigned long)((dst_off % PAGE + len + PAGE - 1) / PAGE);
+        unsigned long bound = 11UL * nchunks + src_pages + dst_pages;
+
+        CHECK(used <= bound, "%lu page-array lookups for %u commands over %lu+%lu pages, "
+              "at most %lu expected", used, nchunks, src_pages, dst_pages, bound);
+    }
 }
 
 int main(void)
@@ -214,10 +239,15 @@ int main(void)
     static const unsigned host_break5[] = { 5, 0 };
     static const unsigned vid_runs8[] = { 8, 0 };
     static const unsigned every[] = { 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 0 };
-    NvU32 sizes[16];
+    static const unsigned host_breaks[] = { 3, 8, 12, 0 };
+    static const unsigned vid_breaks[] = { 2, 6, 12, 14, 0 };
+    unsigned every64[MAX_PAGES];
+    NvU32 sizes[MAX_PAGES], unaligned[11];
     unsigned i;
 
-    for (i = 0; i < 16; i++) sizes[i] = PAGE;
+    for (i = 0; i < MAX_PAGES; i++) sizes[i] = PAGE;
+    for (i = 0; i + 1 < MAX_PAGES; i++) every64[i] = i + 1;
+    every64[MAX_PAGES - 1] = 0;
 
     /* Both sides adjacent: one command when asked, page-granular otherwise. */
     fill(&host, ADDR_SYSMEM, 0x40000000ULL, 16, NULL, 0);
@@ -258,6 +288,34 @@ int main(void)
     vid.contiguous = NV_TRUE;
     run("contiguous", &host, 0, &vid, 0, 16 * PAGE, 0, 1, (const NvU32[]){ 16 * PAGE });
     run("contiguous", &host, 0, &vid, 0, 16 * PAGE, 1, 1, (const NvU32[]){ 16 * PAGE });
+
+    /*
+     * One side one long run, the other broken at every page: one command
+     * per page of the fragmented side, each starting where the previous
+     * ended, in both directions.
+     */
+    fill(&host, ADDR_SYSMEM, 0x40000000ULL, MAX_PAGES, NULL, 0);
+    fill(&vid, ADDR_FBMEM, 0x200000000ULL, MAX_PAGES, every64, 0x10000ULL);
+    run("host-long-device-fragmented", &host, 0, &vid, 0, MAX_PAGES * PAGE, 1,
+        MAX_PAGES, sizes);
+    run("device-fragmented-host-long-d2h", &vid, 0, &host, 0, MAX_PAGES * PAGE, 1,
+        MAX_PAGES, sizes);
+    fill(&host, ADDR_SYSMEM, 0x40000000ULL, MAX_PAGES, every64, 0x10000ULL);
+    fill(&vid, ADDR_FBMEM, 0x200000000ULL, MAX_PAGES, NULL, 0);
+    run("host-fragmented-device-long", &host, 0, &vid, 0, MAX_PAGES * PAGE, 1,
+        MAX_PAGES, sizes);
+    /* Unaligned: the fragmented side's page ends decide every split. */
+    unaligned[0] = PAGE - 300;
+    for (i = 1; i < 10; i++) unaligned[i] = PAGE;
+    unaligned[10] = 300;
+    run("device-long-host-fragmented-unaligned", &vid, 100, &host, 300, 10 * PAGE, 1,
+        11, unaligned);
+
+    /* Runs break at different pages on each side: split at every break. */
+    fill(&host, ADDR_SYSMEM, 0x40000000ULL, 16, host_breaks, 0x100000ULL);
+    fill(&vid, ADDR_FBMEM, 0x200000000ULL, 16, vid_breaks, 0x200000ULL);
+    run("interleaved-breaks", &host, 0, &vid, 0, 16 * PAGE, 1, 7,
+        (const NvU32[]){ 2 * PAGE, PAGE, 3 * PAGE, 2 * PAGE, 4 * PAGE, 2 * PAGE, 2 * PAGE });
 
     printf("checks=%u failures=%u\n", checks, failures);
     return failures ? 1 : 0;
