@@ -62,6 +62,14 @@ Keys of `kv_connector_extra_config` (an unknown `xdev_ext.` key is an error):
 | `xdev_ext.scatter` | `triton` (default) or `torch` |
 | `xdev_ext.gpu_bdf` | PCI address the vLLM GPU must have (the worker's GPU) |
 
+The vLLM worker process starts the restore worker as its child, so vLLM needs
+the privileges `kv_restore` needs (root in the K-KV runs). Being the parent
+also gives it the ptrace access that `pidfd_getfd` requires under Yama scope 1.
+The restore worker allocates `xdev_ext.pool_bytes` of GPU memory, plus its own
+CUDA context, after vLLM has sized its KV cache. `--gpu-memory-utilization`
+must therefore leave that much memory free. Mapping the allocation into vLLM
+uses no further GPU memory.
+
 Host 1's `kv_restore serve` refuses a restore whose keys it has already used.
 Every vLLM start therefore needs a larger ordinal than the last one: keep
 `xdev_ext.ordinal_file`, or restart `serve` together with vLLM.
