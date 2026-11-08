@@ -372,6 +372,14 @@ struct xdev_ext_mech_class_ops {
   */
  void (*batch_release)(struct xdev_ext_mech_stage *st,
                        struct xdev_ext_mech_batch *b, bool sequestered);
+ /* Optional pair, process context, quarantined session with no worker and
+  * nothing in flight.  evidence: the worst enum xdev_ext_peer_evidence over
+  * the native resources this stage retained after UNKNOWN outcomes; only a
+  * class with it can account for a batch sequestered at its stage.
+  * evidence_release, only after COVERED: return those resources before the
+  * session's ordinary unbind; 0, or -errno while any stays retained. */
+ int (*evidence)(struct xdev_ext_mech_stage *st);
+ int (*evidence_release)(struct xdev_ext_mech_stage *st);
  /* Same session worker, bounded transport progress; returns next poll delay. */
  unsigned long (*progress)(struct xdev_ext_mech_stage *st);
  /* Process-context, read-only query; owning ring keeps st alive. */

@@ -152,6 +152,7 @@ typedef struct {
     NvU32 flags;
     ChannelCompletionCallback pCompletionCallback;
     void *pCompletionCallbackArg;
+    NvBool bCoalescePhysRuns;
 } CEUTILS_MEMCOPY_PARAMS;
 #define P2P_UMEM_MAX_XFERS 1024
 #define NV0050_CTRL_MEMCOPY_FLAGS_ASYNC 1

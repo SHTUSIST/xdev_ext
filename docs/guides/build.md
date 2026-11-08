@@ -54,7 +54,7 @@ make -C build/assembled/linux O="$kernel_build" olddefconfig
 make -C build/assembled/linux O="$kernel_build" -j"$(nproc)" vmlinux bzImage modules
 ```
 
-Check the resulting `.config`: Kconfig can disable an option whose dependencies are unmet. The resulting `vmlinux` supplies the BTF required by the matching BPF programs. Boot and module installation depend on the chosen target environment; these build commands do not install or load modules.
+Check the resulting `.config`: Kconfig can disable an option whose dependencies are unmet. The resulting `vmlinux` supplies the BTF required by the matching BPF programs. Boot and module installation depend on the chosen target environment; these build commands do not install or load modules. For a host kernel with every device route, use the [bare-metal bring-up](baremetal.md) fragment, checker and staging script.
 
 ## Control tools and BPF objects
 

@@ -33,9 +33,9 @@ jobs:
           python3 tools/layout.py view
           echo "XDEV_EXT_CANONICAL_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "XDEV_EXT_SOURCE_VIEW=$GITHUB_WORKSPACE/build/source-view" >> "$GITHUB_ENV"
-      - name: Kernel switch planning and recovery boundaries
+      - name: Kernel switch planning, recovery boundaries and bare-metal bring-up
         working-directory: .
-        run: python3 -m unittest discover -s tests/integration/boot -p 'test_kernel_switch.py' -v
+        run: python3 -m unittest discover -s tests/integration/boot -p 'test_*.py' -v
       - name: TP host algorithms and native custody contracts
         working-directory: .
         run: python3 tests/compute/tp/native_suite.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-native-contracts"
@@ -417,6 +417,9 @@ jobs:
             --source "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/src/kernel/gpu/mem_mgr/channel_utils.c" \
             --sdk-include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/sdk/nvidia/inc" \
             --include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/inc"
+          python3 "$GITHUB_WORKSPACE/tests/compute/nvidia/nv_xdev_ext_ce_memcopy_runs_test.py" \
+            --source "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c" \
+            --params-header "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/generated/g_ce_utils_nvoc.h"
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

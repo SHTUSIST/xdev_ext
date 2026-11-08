@@ -57,5 +57,43 @@ static inline int nv_xdev_ext_ce_entry_ok(nv_xdev_ext_gpu_u64 host_off,
 	       gpu_off <= window_len && len <= window_len - gpu_off;
 }
 
+/* RM checks every transfer against a 32-bit size. */
+#define NV_XDEV_EXT_CE_SPAN_MAX 0xffffffffULL
+
+/* One RM transfer: len bytes at host_off of the host pages, gpu_off of the window. */
+struct nv_xdev_ext_ce_span {
+	nv_xdev_ext_gpu_u64 host_off;
+	nv_xdev_ext_gpu_u64 gpu_off;
+	nv_xdev_ext_gpu_u64 len;
+};
+
+/*
+ * Appends a validated plan entry to the m transfers in s.  A plan writes one
+ * entry per frame; an entry that continues the previous transfer in both the
+ * host pages and the window extends it (up to NV_XDEV_EXT_CE_SPAN_MAX), so RM
+ * sees one transfer it can cover with as few CE commands as the pages allow.
+ * s holds at least one slot per entry.
+ */
+static inline void nv_xdev_ext_ce_span_add(struct nv_xdev_ext_ce_span *s,
+					   nv_xdev_ext_gpu_u32 *m,
+					   nv_xdev_ext_gpu_u64 host_off,
+					   nv_xdev_ext_gpu_u64 gpu_off,
+					   nv_xdev_ext_gpu_u64 len)
+{
+	if (*m) {
+		struct nv_xdev_ext_ce_span *last = &s[*m - 1];
+
+		if (last->host_off + last->len == host_off &&
+		    last->gpu_off + last->len == gpu_off &&
+		    len <= NV_XDEV_EXT_CE_SPAN_MAX - last->len) {
+			last->len += len;
+			return;
+		}
+	}
+	s[*m].host_off = host_off;
+	s[*m].gpu_off = gpu_off;
+	s[*m].len = len;
+	(*m)++;
+}
 
 #endif /* _NV_XDEV_EXT_CE_PLAN_H_ */

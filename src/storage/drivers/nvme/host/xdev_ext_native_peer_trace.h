@@ -12,9 +12,11 @@
  * owner retains the leases until end_io and worker consumption (or execute
  * returns for synchronous ioctls). NVME_REQ_XDEV_EXT_PEER guards the request
  * pointer; nvme_clear_nvme_request() resets that flag before a request is
- * reused. submit_epoch is not observation: nvme-pci writes the requester's
- * DMA-stop epoch at each SQ preparation; an owner that reads it after
- * completion initializes it to XDEV_EXT_PEER_EPOCH_NONE.
+ * reused. submit_epoch and requester are not observation: nvme-pci writes
+ * the controller's requester record and its DMA-stop epoch at each SQ
+ * preparation; an owner that reads them after completion initializes the
+ * epoch to XDEV_EXT_PEER_EPOCH_NONE. The record lives as long as the
+ * controller, which the owner's namespace reference pins.
  */
 struct nvme_xdev_ext_peer_trace {
 	const struct xdev_ext_peer_fd_lease *leases;
@@ -22,6 +24,7 @@ struct nvme_xdev_ext_peer_trace {
 	const char *origin;
 	u64 cookie;
 	u64 submit_epoch;
+	struct xdev_ext_peer_requester *requester;
 };
 
 /* Lease retirement is not dma_unmap: UNKNOWN keeps the underlying mapping. */

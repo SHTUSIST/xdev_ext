@@ -50,6 +50,15 @@ MUTANTS = (
      ' else xdev_ext_peer_orphan(p->region);', ''),
     ('legacy UNKNOWN not permanent', 'core',
      ' if (!quiesced) r->permanent = true; /* no evidence binding */\n', ''),
+    ('unbound command reported pending', 'core',
+     ' if (!rq || epoch == XDEV_EXT_PEER_EPOCH_NONE) return XDEV_EXT_PEER_EVIDENCE_NEVER;\n', ''),
+    ('evidence ignores the proof', 'core',
+     ' return xdev_ext_peer_requester_covers(rq, epoch) ? XDEV_EXT_PEER_EVIDENCE_COVERED :',
+     ' return false ? XDEV_EXT_PEER_EVIDENCE_COVERED :'),
+    ('watchers never called', 'core', '  w->recovered(w);\n', ''),
+    ('storage UNKNOWN retirement claims quiescence', 'storfam',
+     '\t\tquiesced &= xdev_ext_peer_fd_release_unknown(&leases[i], rq, epoch);',
+     '\t\txdev_ext_peer_fd_release_unknown(&leases[i], rq, epoch);'),
 )
 
 
@@ -60,10 +69,12 @@ def main():
     root = args.source_root.resolve()
     core = (root / run.CORE).read_text()
     fd = (root / run.FD).read_text()
+    storfam = (root / run.STORFAM).read_text()
+    texts = {'core': core, 'fd': fd, 'storfam': storfam}
     survivors, setup = [], []
     with tempfile.TemporaryDirectory(prefix='peer-quarantine-mutants-') as directory:
         for index, (name, where, old, new) in enumerate(MUTANTS):
-            text = core if where == 'core' else fd
+            text = texts[where]
             if text.count(old) != 1:
                 setup.append(name)
                 print('SETUP anchor %r occurs %d times' % (name, text.count(old)))
@@ -71,7 +82,8 @@ def main():
             changed = text.replace(old, new, 1)
             try:
                 source = run.assemble(root, core=changed if where == 'core' else core,
-                                      fd=changed if where == 'fd' else fd)
+                                      fd=changed if where == 'fd' else fd,
+                                      storfam=changed if where == 'storfam' else storfam)
             except run.Setup as error:
                 setup.append(name)
                 print('SETUP %s: %s' % (name, error))

@@ -13,6 +13,9 @@ struct xdev_ext_peer_fd_lease;
 /* Process context; failed releases retain their actual handle fields. */
 void xdev_ext_stor_leases_retire(struct xdev_ext_peer_fd_lease *leases,
 			       __u32 nr, bool quiesced);
+struct xdev_ext_peer_requester;
+bool xdev_ext_stor_leases_retire_unknown(struct xdev_ext_peer_fd_lease *leases, __u32 nr,
+					 struct xdev_ext_peer_requester *rq, __u64 epoch);
 
 /* Embedded in member-owned native resources; only the session worker links it. */
 struct xdev_ext_stor_slot {
