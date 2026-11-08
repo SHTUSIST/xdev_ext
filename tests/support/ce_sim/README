@@ -24,3 +24,29 @@ match the frame pattern, and nothing may be written past the used slots.
 The read()/write() interface above is what the tool uses here. A D2H copy
 that was skipped while the H2D copy ran is still not detected: the frames
 already hold those bytes.
+
+Supplemental D2H diagnostic
+--------------------------
+
+`poison_after_h2d=1` is default-off and captured per submit. It inverts only
+Host payload bytes after every H2D read has finished and before completion
+can submit D2H. With device=P and Host=~P, D2H must restore Host=P. This option
+is restricted to isolated serial diagnostics with non-overlapping Host
+payloads; it is not for shared frames, fan-out or concurrent sessions.
+
+`fail_mode=skip_h2d` and `skip_d2h` preserve success and the nominal full byte
+count while omitting that direction's data copy. They test data observation,
+not backend completion errors. Original campaigns and defaults are unchanged.
+A single group is required to avoid repeated inversion cancelling itself.
+
+Host regression compiles the real copy function and bounds helper under
+GCC ASan/UBSan, compares independent expected buffers including all guards,
+and verifies late invalid SGL entries cannot copy any legal prefix. Generated
+mutants remove inversion, move it before H2D, or move full-request validation
+into the copy loop; only explicit assertion failures count as detections.
+
+Run `python3 tests/support/ce_sim/copy_contract.py --mutations --output build/ce-copy`.
+The existing CE roundtrip Python entry also runs this regression through the
+source view. Host success does not certify a kernel module build, KVM runtime,
+actual GPU DMA or performance. The KVM harness does not yet execute the new
+single-group diagnostic lifecycle.
