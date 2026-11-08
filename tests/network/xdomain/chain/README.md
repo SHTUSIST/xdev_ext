@@ -1,5 +1,9 @@
 # NVMe READ to XDOMAIN TX in one session worker
 
+For host 2's XDOMAIN RX to CE TARGET_RANGE consumer, including independent
+device-window readback and native failure/lifetime tests, see [ce.md](ce.md).
+Run it with `ce_run.py`; the default consumer below remains NVMe WRITE.
+
 This host composition checks host 1's half of the "SSD on one machine, GPU
 memory on the other, one Thunderbolt cable" chain without Thunderbolt
 hardware: an NVMe READ fills frames; on that NVMe completion the same session

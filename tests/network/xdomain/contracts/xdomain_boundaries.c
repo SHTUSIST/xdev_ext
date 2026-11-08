@@ -498,7 +498,7 @@ static void pair(unsigned tx_index,unsigned depth,unsigned bytes) { fresh(tx_ind
 static struct xdev_ext_mech_batch *prepare_raw(struct side *side,unsigned index) {
  assert(index<HOST_GROUPS);struct xdev_ext_mech_batch *b=&side->batches[index];
  *b=(struct xdev_ext_mech_batch){.priv=calloc(1,registered->batch_priv_size),.cookie=calloc(1,registered->batch_cookie_size),.nr=1,.ticket=index+100};
- assert(b->priv&&b->cookie);b->f[0]=(struct xdev_ext_mech_frame){.umem_addr=(u64)(index%128)*65536,.index=index%128,.data_len=side->session.l.seg_len};
+ assert(b->priv&&(!registered->batch_cookie_size||b->cookie));b->f[0]=(struct xdev_ext_mech_frame){.umem_addr=(u64)(index%128)*65536,.index=index%128,.data_len=side->session.l.seg_len};
  return b;
 }
 static const u8 test_tag[24]={0xa5,0x11,0x22,0x33,0x44,0x55,0x66,0x77,0x88,0x99,0xaa,0xbb,0xcc,0xdd,0xee,0xff,1,2,3,4,5,6,7,8};

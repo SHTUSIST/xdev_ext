@@ -115,6 +115,9 @@ static void chain_note_data_post(struct tb_ring *r, struct ring_frame *f, struct
 #undef stack_endpoint_stage
 #include "chain_api.h"
 #include "chain_core_api.h"
+#ifdef CHAIN_CE_RECEIVER
+#include "chain_ce_api.h"
+#endif
 #ifdef CHAIN_REAL_PEER
 #define CHAIN_STUB(name) chain_stub_##name
 #else
@@ -965,6 +968,67 @@ struct xdev_ext_mech_ctx chain_program_ctx(struct xdev_ext_mech_stage *st,
 	return c;
 }
 unsigned chain_program_context_violations;
+#ifdef CHAIN_CE_RECEIVER
+static uint64_t chain_ce_target[64];
+static unsigned chain_ce_target_count;
+
+void chain_ce_targets(const uint64_t *offsets, unsigned count)
+{
+	assert(count && count <= ARRAY_SIZE(chain_ce_target));
+	memcpy(chain_ce_target, offsets, count * sizeof(*offsets));
+	chain_ce_target_count = count;
+}
+
+/* A test-supplied placement policy, at the same invocation boundary as the
+ * reference programs above. No validation, lease, owner or completion decision
+ * is replaced: the real CE class consumes these descriptors and native CQEs. */
+static int chain_ce_program(const struct xdev_ext_mech_call_args *a, s32 *ret)
+{
+	const struct xdev_ext_ce_mech_info *info = a->info;
+	struct xdev_ext_ce_copy_desc *desc = (void *)a->scratch;
+	u64 offset, key;
+	u32 ordinal = 0;
+
+	if (a->member == XDEV_EXT_MECH_MEMBER_PREPARE)
+		return -ENOENT;
+	if (a->member == XDEV_EXT_MECH_MEMBER_COMPLETE) {
+		const struct xdev_ext_ce_mech_cqe *cqe = a->cqe;
+
+		assert(cqe && a->cqe_size == sizeof(*cqe));
+		*ret = cqe->outcome == XDEV_EXT_CE_OK ? XDEV_EXT_MECH_NEXT : XDEV_EXT_MECH_ABORT;
+		return 0;
+	}
+	assert(a->member == XDEV_EXT_MECH_MEMBER_BUILD && info && a->b);
+	assert(a->info_size == sizeof(*info) && a->desc_size == sizeof(*desc));
+	assert(info->nr_frames && info->nr_frames <= a->desc_cap && chain_ce_target_count);
+	key = xdev_ext_mech_batch_key(a->b);
+	assert(key);
+	offset = chain_ce_target[(key - 1) % chain_ce_target_count];
+	for (u32 i = 0; i < info->nr_frames; i++) {
+		u32 used = 0;
+
+		while (used < info->f[i].data_len) {
+			u32 piece = info->f[i].data_len - used;
+
+			if (info->gpu_seg_size)
+				piece = min_t(u32, piece, info->gpu_seg_size - offset % info->gpu_seg_size);
+			if (info->max_entry_len)
+				piece = min(piece, info->max_entry_len);
+			assert(piece && ordinal < a->desc_cap);
+			desc[ordinal++] = (struct xdev_ext_ce_copy_desc){
+				.frame_pos = i, .frame_off = info->f[i].data_off + used,
+				.gpu_off = offset, .len = piece,
+				.flags = i + 1 == info->nr_frames && used + piece == info->f[i].data_len ?
+					 XDEV_EXT_CE_F_COMPLETION_POINT : 0,
+			};
+			used += piece;
+			offset += piece;
+		}
+	}
+	*ret = XDEV_EXT_MECH_BUILD_SUBMIT;
+	return 0;
+}
+#endif
 int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mech_call_args *a,
 		       s32 *ret, struct xdev_ext_mech_hold_intent *hold)
 {
@@ -992,6 +1056,10 @@ int xdev_ext_mech_call(struct xdev_ext_mech_stage *st, const struct xdev_ext_mec
 			a->member == XDEV_EXT_MECH_MEMBER_BUILD ? chain_rts_cts_build :
 			chain_rts_cts_complete, ret);
 	}
+#ifdef CHAIN_CE_RECEIVER
+	if (st->class_id == XDEV_EXT_MECH_CLASS_CE)
+		return chain_ce_program(a, ret);
+#endif
 	if (st->class_id != XDEV_EXT_MECH_CLASS_NVME)
 		abort();
 	if (a->member == XDEV_EXT_MECH_MEMBER_PREPARE)
@@ -1009,6 +1077,9 @@ bool xdev_ext_mech_stage_has_member(const struct xdev_ext_mech_stage *st, u32 me
 
 /* ---- world, sessions and START ---------------------------------------- */
 static int chain_nvme_fd[CHAIN_ENDPOINTS];
+#ifdef CHAIN_CE_RECEIVER
+static int chain_ce_fd;
+#endif
 int chain_world(const struct chain_link_config *cfg)
 {
 	struct stack_config sc;
@@ -1059,6 +1130,12 @@ int chain_world(const struct chain_link_config *cfg)
 	chain_install(chain_real_control, CHAIN_FILE_FOREIGN, 0);
 #endif
 	chain_nvme_init_class();
+#ifdef CHAIN_CE_RECEIVER
+	ret = chain_ce_init_class();
+	if (ret)
+		return ret;
+	chain_ce_fd = chain_install(chain_ce_file(), CHAIN_FILE_FOREIGN, 1);
+#endif
 	ret = stack_probe(w, 0);
 	if (!ret)
 		ret = stack_probe(w, 1);
@@ -1145,6 +1222,30 @@ struct xdev_ext_mech_session *chain_rx_session(int *err)
 	};
 	return chain_create(1, &c, err);
 }
+#ifdef CHAIN_CE_RECEIVER
+/* Host 2 keeps the same IOU_UMEM through RX and the CE native completion. */
+struct xdev_ext_mech_session *chain_ce_rx_session(int *err)
+{
+	struct xdev_ext_mech_create c = {
+		.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+		.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1,
+		.layout = { .frame_size = chain_cfg.frame_size, .seg_len = chain_cfg.frame_size,
+			    .group_bytes = chain_cfg.group_bytes },
+		.depth = chain_cfg.depth, .eventfd = -1,
+		.st = {
+			{ .class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .direction = XDEV_EXT_MECH_DIR_FROM_DEVICE,
+			  .fd = chain_fd_for(&chain_control[1]), .arg0 = chain_link_token(1),
+			  .arg1 = (u64)chain_cfg.window_rx << 32,
+			  .flags = chain_cfg.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0 },
+			{ .class_id = XDEV_EXT_MECH_CLASS_CE, .direction = XDEV_EXT_MECH_DIR_TO_DEVICE,
+			  .flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE,
+			  .fd = chain_ce_fd, .arg0 = 0, .arg1 = CHAIN_CE_WINDOW_BYTES },
+		},
+	};
+
+	return chain_create(1, &c, err);
+}
+#endif
 int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t first_seq)
 {
 	chain_record((struct chain_event){ .kind = CHAIN_EV_START, .endpoint = session_endpoint(s),
@@ -1157,6 +1258,24 @@ int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t firs
 
 /* ---- holds and injected wire duplicates ------------------------------- */
 void chain_hold_tx_completions(unsigned endpoint, bool hold) { world->hold_callbacks[endpoint] = hold; }
+void chain_rx_fault(int length, unsigned flags)
+{
+	if (length >= 0)
+		assert(!stack_fault(world, &(struct stack_fault){
+			.kind = STACK_FAULT_RX_LENGTH, .endpoint = 1, .arg0 = (unsigned)length }));
+	if (flags)
+		assert(!stack_fault(world, &(struct stack_fault){
+			.kind = STACK_FAULT_RX_FLAGS, .endpoint = 1, .arg0 = flags }));
+}
+unsigned chain_rx_callbacks(void)
+{
+	unsigned count = 0;
+
+	for (size_t i = 0; i < world->logs; i++)
+		count += world->log[i].kind == STACK_EV_DATA_CALLBACK &&
+			 world->log[i].endpoint == 1 && world->log[i].direction == 2;
+	return count;
+}
 void chain_hold_control(unsigned endpoint, unsigned type, bool hold)
 {
 	world->hold_controls[endpoint] = hold;
@@ -1339,6 +1458,10 @@ int chain_pump(unsigned budget, uint64_t advance_ns)
 			chain_nvme_complete_one();
 			ran = true;
 		}
+#ifdef CHAIN_CE_RECEIVER
+		else if (chain_ce_run_one())
+			ran = true;
+#endif
 		if (!ran)
 			return 0;
 		used++;

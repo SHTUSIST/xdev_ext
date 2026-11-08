@@ -53,6 +53,10 @@ def w1_twin(name):
 HOST_CASES = ('host_sync_order', 'host_sync_order_early', 'host_unknown_retained',
               'host_misaligned_refused', 'host_destroy_unmaps')
 ALL_CASES = CASES + tuple(w1_twin(c) for c in IDENTITY) + HOST_CASES
+CE_BASE_CASES = ('ce_data_ranges', 'ce_host_hold', 'ce_submit_fail', 'ce_plan_bounds', 'ce_range_overlap',
+                 'ce_unknown_late', 'ce_short_complete', 'ce_stale_reuse',
+                 'rx_partial_wait', 'rx_short', 'rx_error', 'rx_unknown_late')
+CE_CASES = CE_BASE_CASES + tuple(c + '_early' for c in CE_BASE_CASES)
 # Worker entry points; their call-graph closure inside the core text is compiled.
 CORE_ROOTS = (
     'xdev_ext_mech_kick_work', 'xdev_ext_mech_batch_drain', 'xdev_ext_mech_progress_work',
@@ -65,6 +69,7 @@ CORE_ROOTS = (
     'xdev_ext_mech_stage_native_get', 'xdev_ext_mech_stage_native_put',
     'xdev_ext_mech_batch_priv', 'xdev_ext_mech_batch_cookie', 'xdev_ext_mech_batch_ticket',
     'xdev_ext_mech_batch_key', 'xdev_ext_mech_batch_frame', 'xdev_ext_mech_batch_nr_frames',
+    'xdev_ext_mech_batch_ce_owners_valid', 'xdev_ext_mech_batch_frame_claim',
     'xdev_ext_mech_batch_bytes', 'xdev_ext_mech_batch_id', 'xdev_ext_mech_batch_slot',
     'xdev_ext_mech_batch_stage', 'xdev_ext_mech_batch_session', 'xdev_ext_mech_batch_status',
     'xdev_ext_mech_session_pool', 'xdev_ext_mech_session_layout', 'xdev_ext_mech_session_depth',
@@ -208,6 +213,51 @@ MUTATIONS = {
         ('io_uring/xdomain/xdev_ext_xdomain_class.c', '\tst->order_window = window;\n',
          '\tst->order_window = 0;\n')]),
 }
+
+# Runtime mutants use exactly the same integrated byte/lifetime cases. Device
+# mover mutants test the independent oracle; all others change production code.
+# Every change is made only in this run's assembled private source view.
+CE_MUTATIONS = {
+    'ce-wrong-target': dict(case='ce_data_ranges', receiver='ce', pool='host',
+        scope='production CE translation: submit one byte beyond every validated target offset',
+        edits=[('io_uring/xdev_ext_mech_ce.c',
+                '\t\t\t.gpu_off = x[i].device_off,\n',
+                '\t\t\t.gpu_off = x[i].device_off + 1,\n')]),
+    'ce-skipped-copy': dict(case='ce_data_ranges', receiver='ce', pool='host', edits=[],
+        scope='native device model: report successful H2D bytes without moving them',
+        simulator_edits=[('memcpy(dev, mem, req->x[i].len);', '(void)mem;')]),
+    'ce-overlap-granted': dict(case='ce_range_overlap', receiver='ce', pool='host',
+        scope='production range lease: admit overlapping ranges from different live batches',
+        edits=[('io_uring/xdev_ext_compfam_copy_lease.c',
+                '\t\t\tif ((target_range || reserved->target_range) &&\n',
+                '\t\t\tif (false && (target_range || reserved->target_range) &&\n')]),
+    'ce-release-at-callback': dict(case='ce_range_overlap', receiver='ce', pool='host',
+        scope='production CE completion: release the range before final worker batch disposition',
+        edits=[('io_uring/xdev_ext_mech_ce.c',
+                '\txdev_ext_comp_copy_complete((struct xdev_ext_comp_copy_cookie *)ck, ticket,\n',
+                '\tstruct xdev_ext_mech_batch *b = ((struct xdev_ext_comp_copy_cookie *)ck)->b;\n'
+                '\txdev_ext_ce_batch_release(xdev_ext_mech_batch_stage(b), b, false);\n'
+                '\txdev_ext_comp_copy_complete((struct xdev_ext_comp_copy_cookie *)ck, ticket,\n')]),
+    'ce-rx-error-as-success': dict(case='rx_short', cases=('rx_short', 'rx_error'),
+        receiver='ce', pool='host',
+        scope='production NHI RX callback: promote short/failed native elements to success',
+        edits=[('io_uring/xdomain/xdev_ext_xdomain_ring.c',
+                '\tstatus = xdev_ext_xd_rx_frame(f->flags, f->size, e->len);\n',
+                '\tstatus = 0;\n')]),
+    'ce-unknown-range-released': dict(case='ce_unknown_late',
+        cases=('ce_unknown_late', 'ce_unknown_late_early'), receiver='ce', pool='host',
+        scope='production CE final release: discard sequester and clear the uncertain range lease',
+        edits=[('io_uring/xdev_ext_mech_ce.c',
+                '\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), sequestered);\n',
+                '\t\txdev_ext_mech_batch_slot(b), xdev_ext_mech_batch_id(b), false);\n')]),
+    'ce-stale-ticket-accepted': dict(case='ce_stale_reuse', receiver='ce', pool='host',
+        scope='production copy completion: replace the callback ticket by the current generation',
+        edits=[('io_uring/xdev_ext_compfam_copy.c',
+                '\t/* Only the stable batch pointer may be read before ticket admission. */\n',
+                '\t/* Incorrectly admit an old callback as the current native request. */\n'
+                '\tticket = xdev_ext_mech_batch_ticket(ck->b);\n')]),
+}
+MUTATIONS.update(CE_MUTATIONS)
 
 
 class Setup(Exception):
@@ -635,6 +685,7 @@ def compile_unit(cc, flags, unit, obj, log):
                             capture_output=True, text=True, timeout=300)
     log.append('$ %s -c %s\n%s%s' % (cc, unit, result.stdout, result.stderr))
     if result.returncode:
+        (obj.parent.parent / 'compile.log').write_text('\n'.join(log))
         errors = [l for l in result.stderr.splitlines() if ' error: ' in l or 'fatal error' in l]
         raise Setup('compile failed: %s\n%s' % (unit, '\n'.join(errors[:40]) or result.stderr[-6000:]))
 
@@ -649,7 +700,48 @@ def mutate(kernel, name):
         path.write_text(path.read_text() + text)
 
 
-def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
+def ce_units(root, kernel, build, mutation=None):
+    """Actual CE class + shared copy/lease code and the existing simulator mover."""
+    simulator_path = root / 'tests/support/ce_sim/xdev_ext_ce_sim.c'
+    simulator = simulator_path.read_text()
+    if mutation:
+        for old, new in MUTATIONS[mutation].get('simulator_edits', []):
+            simulator = replace(simulator, old, new, 'simulator mutation ' + mutation)
+    simulator_view = kernel.parent / 'ce_sim/xdev_ext_ce_sim.c'
+    simulator_view.parent.mkdir(parents=True, exist_ok=True)
+    simulator_view.write_text(simulator)
+    names = ('xdev_ext_ce_sim_bind_region', 'xdev_ext_ce_sim_unbind_region',
+             'xdev_ext_ce_sim_bind_host', 'xdev_ext_ce_sim_unbind_host',
+             'xdev_ext_ce_sim_in', 'xdev_ext_ce_sim_copy')
+    selected = []
+    for name in ('xdev_ext_ce_sim_host', 'xdev_ext_ce_sim_req'):
+        match = re.search(r'^struct ' + name + r' \{\n.*?^\};', simulator, re.M | re.S)
+        if not match:
+            raise Setup('CE simulator structure missing: ' + name)
+        selected.append(match[0])
+    selected += [find_definition(simulator, name) for name in names]
+    unit = build / 'chain_ce.c'
+    unit.write_text(replace((HERE / 'chain_ce.c.in').read_text(), '/* SIMULATOR */',
+                            '\n\n'.join(selected), 'actual CE simulator functions'))
+    units = [unit, kernel / 'io_uring/xdev_ext_compfam_copy.c',
+             kernel / 'io_uring/xdev_ext_compfam_copy_lease.c']
+    env = build / 'ce-facade'
+    facade(kernel, env, units, (HERE, kernel / 'io_uring'))
+    (build / 'ce-selection.json').write_text(json.dumps(dict(
+        simulator=str(simulator_path.relative_to(root)), simulator_sha256=sha256(simulator_path),
+        simulator_view=str(simulator_view.relative_to(build.parent)),
+        simulator_view_sha256=sha256(simulator_view),
+        simulator_functions=list(names), class_source='io_uring/xdev_ext_mech_ce.c',
+        runtime_sources=[str(p.relative_to(kernel)) for p in units[1:]],
+        boundary='kernel primitives, delayed native backend request queue, native fault facts; '
+                 'no cookie or lease repair, no CPU fill of received Host frames',
+        readback='independent whole-window memcpy; actual simulator movement is software-only'), indent=2) + '\n')
+    flags = ['-include', str(HERE / 'chain_ce_env.h'), '-I', str(env), '-I', str(HERE),
+             '-I', str(kernel / 'io_uring'), '-I', str(kernel / 'include')]
+    return units, flags
+
+
+def build_all(root, out, sanitize, only, mutation=None, pool='provider', receiver='nvme'):
     kernel, hashes = assemble(root, out)
     if mutation:
         mutate(kernel, mutation)
@@ -661,7 +753,8 @@ def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
     common = ['-std=gnu11', '-O0', '-g', '-Wall', '-Wextra', '-Wno-unused-function',
               '-Wno-unused-parameter', '-Wno-missing-field-initializers',
               '-Werror=implicit-function-declaration', '-pthread'] + \
-        (['-DCHAIN_HOST_POOL'] if pool == 'host' else [])
+        (['-DCHAIN_HOST_POOL'] if pool == 'host' else []) + \
+        (['-DCHAIN_CE_RECEIVER'] if receiver == 'ce' else [])
     if sanitize:
         common += ['-fsanitize=address,undefined', '-fno-sanitize-recover=all', '-fno-omit-frame-pointer']
     log = []
@@ -718,7 +811,14 @@ def build_all(root, out, sanitize, only, mutation=None, pool='provider'):
             obj = build / ('xd-%d.o' % number)
             compile_unit(cc, common + xd_flags + extra, unit, obj, log)
             objects.append(obj)
-        compile_unit(cc, common + ['-I', str(HERE), '-I', str(kernel / 'include/uapi')], HERE / 'cases.c',
+        if receiver == 'ce':
+            units, ce_flags = ce_units(root, kernel, build, mutation)
+            for number, unit in enumerate(units):
+                obj = build / ('ce-%d.o' % number)
+                compile_unit(cc, common + ce_flags, unit, obj, log)
+                objects.append(obj)
+        case_source = HERE / ('ce_cases.c' if receiver == 'ce' else 'cases.c')
+        compile_unit(cc, common + ['-I', str(HERE), '-I', str(kernel / 'include/uapi')], case_source,
                      build / 'cases.o', log)
         objects.append(build / 'cases.o')
         binary = build / 'chain-cases'
@@ -743,13 +843,17 @@ def run_cases(binary, out, cases):
         except subprocess.TimeoutExpired as error:
             output, code = str(error.stdout or '') + '\nTIMEOUT\n', 124
         (out / (name + '.log')).write_text(output + '\nexit=%d\n' % code)
-        marker = 'CHAIN_CASE ' + name + ' assertions='
-        counted = [int(l[len(marker):]) for l in output.splitlines() if l.startswith(marker)]
+        markers = ('CHAIN_CASE ' + name + ' assertions=', 'CHAIN_CE_CASE ' + name + ' assertions=')
+        counted = [int(l[len(marker):]) for l in output.splitlines()
+                   for marker in markers if l.startswith(marker)]
         failed = next((l for l in output.splitlines() if l.startswith('CHAIN_ASSERT')), None)
         observe = [l for l in output.splitlines() if l.startswith('CHAIN_OBSERVE')]
+        failure_kind = ('assertion' if failed else 'signal' if code < 0 else
+                        'timeout' if code == 124 else 'unexpected-exit' if code else
+                        'missing-pass-marker' if not counted else None)
         results.append(dict(case=name, exit=code, assertions=counted[-1] if counted else 0,
                             passed=code == 0 and bool(counted) and counted[-1] > 0,
-                            failed_assertion=failed, observations=observe))
+                            failed_assertion=failed, failure_kind=failure_kind, observations=observe))
     return results
 
 
@@ -793,7 +897,9 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--source-root', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
-    parser.add_argument('--case', choices=ALL_CASES)
+    parser.add_argument('--case', help='one named case of the selected receiver suite')
+    parser.add_argument('--receiver', choices=('nvme', 'ce'), default='nvme',
+                        help='receiver tail; ce requires --pool host')
     parser.add_argument('--sanitize', action='store_true')
     parser.add_argument('--only', choices=('core', 'nvme', 'link'))
     parser.add_argument('--mutation', choices=sorted(MUTATIONS))
@@ -803,20 +909,33 @@ def main():
                              'endpoints on the ring\'s IOU_UMEM host pages, NHIs mapped by the '
                              'real requester')
     args = parser.parse_args()
-    if args.mutation and MUTATIONS[args.mutation].get('pool'):
-        args.pool = MUTATIONS[args.mutation]['pool']
+    if args.mutation:
+        spec = MUTATIONS[args.mutation]
+        args.pool = spec.get('pool', args.pool)
+        args.receiver = spec.get('receiver', args.receiver)
+    if args.receiver == 'ce' and args.pool != 'host':
+        parser.error('--receiver ce requires --pool host')
     root, out = args.source_root.resolve(), args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    record = dict(scope='host composition of real core worker, PEER pool, NVMe class/storage family, '
-                  'XDOMAIN X3/X4/X5/network family, reference programs and NHI ring section; '
-                  'device models move bytes only at addresses named by real descriptors; '
-                  'no kernel/hardware/DMA/performance', sanitize=args.sanitize, mutation=args.mutation,
-                  pool=args.pool)
+    pool_scope = 'IOU_UMEM Host pool/requester' if args.pool == 'host' else 'PEER pool'
+    record = dict(scope=('host composition of real core worker, ' + pool_scope + ', '
+                  'NVMe class/storage family, XDOMAIN X3/X4/X5/network family, reference programs '
+                  'and NHI ring section; device models move bytes only at addresses named by '
+                  'real descriptors; no kernel/hardware/DMA/performance'),
+                  sanitize=args.sanitize, mutation=args.mutation, pool=args.pool, receiver=args.receiver)
+    if args.mutation:
+        record['mutation_scope'] = MUTATIONS[args.mutation].get('scope', 'private production-source edits')
+    if args.receiver == 'ce':
+        record['scope'] += ('; actual CE class, common copy runtime and range lease; '
+                            'existing CE simulator byte mover, independent device-window readback')
     try:
         record['head'] = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'],
                                         capture_output=True, text=True).stdout.strip()
-        kernel, hashes, names, binary = build_all(root, out, args.sanitize, args.only, args.mutation, args.pool)
+        kernel, hashes, names, binary = build_all(root, out, args.sanitize, args.only, args.mutation, args.pool, args.receiver)
         production, tests = read_inputs(root, out, kernel, hashes, args.pool)
+        if args.receiver == 'ce':
+            tests['tests/support/ce_sim/xdev_ext_ce_sim.c'] = sha256(root / 'tests/support/ce_sim/xdev_ext_ce_sim.c')
+            record['ce_selection'] = json.loads((out / 'build/ce-selection.json').read_text())
         record.update(core_functions=len(names), inputs_sha256=production, test_inputs_sha256=tests,
                       inputs_rule='inputs_sha256: kernel-tree files the compiler opened (gcc -MD) or the runner '
                                   'extracted from, hashed in the source tree before any mutation; '
@@ -826,10 +945,14 @@ def main():
             code = 0
         else:
             if args.mutation:
-                cases = [args.case or MUTATIONS[args.mutation]['case']]
+                spec = MUTATIONS[args.mutation]
+                cases = [args.case] if args.case else list(spec.get('cases', (spec['case'],)))
             else:
-                cases = [args.case] if args.case else list(CASES) + \
-                    (list(HOST_CASES) if args.pool == 'host' else [])
+                if args.receiver == 'ce':
+                    cases = [args.case] if args.case else list(CE_CASES)
+                else:
+                    cases = [args.case] if args.case else list(CASES) + \
+                        (list(HOST_CASES) if args.pool == 'host' else [])
             record['cases'] = run_cases(binary, out, cases)
             if args.mutation:
                 killed = all(c['exit'] == 1 and c['failed_assertion'] for c in record['cases'])
@@ -837,7 +960,7 @@ def main():
                 code = 0 if killed else 1
             else:
                 passed = all(c['passed'] for c in record['cases'])
-                if not args.case:
+                if not args.case and args.receiver == 'nvme':
                     record['w1_identity'] = trace_identity(binary, IDENTITY)
                     passed = passed and all(c['identical'] for c in record['w1_identity'])
                 record['verdict'] = 'PASS' if passed else 'FAIL'

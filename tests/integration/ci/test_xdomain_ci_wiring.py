@@ -73,6 +73,7 @@ CANONICAL_REQUIRED = (
     "tests/network/xdomain/dmabuf_requester/run.py",
     "tests/network/xdomain/chain/run.py",
     "tests/network/xdomain/chain/host_run.py",
+    "tests/network/xdomain/chain/ce_run.py",
     "tests/core/requester_host/run.py",
     "tests/compute/user_stage/user_stop_origin_test.py",
     "tests/network/xdomain/dmabuf_requester/run.py",

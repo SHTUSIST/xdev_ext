@@ -76,9 +76,17 @@ int chain_pump(unsigned budget, uint64_t advance_ns);
 uint64_t chain_link_token(unsigned endpoint);
 struct xdev_ext_mech_session *chain_tx_session(int *err, uint64_t token_override);
 struct xdev_ext_mech_session *chain_rx_session(int *err);
+/* Optional CE receiver: test-authored target offsets are indexed by group key
+ * starting at 1. The production CE validator still validates every plan. */
+struct xdev_ext_mech_session *chain_ce_rx_session(int *err);
+void chain_ce_targets(const uint64_t *offsets, unsigned count);
 int chain_start(struct xdev_ext_mech_session *s, uint64_t batches, uint64_t first_seq);
 void chain_hold_tx_completions(unsigned endpoint, bool hold);
 void chain_hold_ack(unsigned endpoint, bool hold);
+/* Native RX descriptor facts, consumed by the real NHI callback. A negative
+ * length leaves the completion length unchanged; flags are native RX flags. */
+void chain_rx_fault(int length, unsigned flags);
+unsigned chain_rx_callbacks(void);
 /* Hold @endpoint's outgoing control messages of one wire type on the wire. */
 void chain_hold_control(unsigned endpoint, unsigned type, bool hold);
 int chain_inject_stale_control(unsigned from_endpoint, unsigned type, uint64_t nth);

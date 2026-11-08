@@ -94,5 +94,9 @@ python3 tests/compute/ce/random_target/xdomain_mutations.py \
   --output build/ce-random-xdomain-mutants/manual
 ```
 
-These are pure admission rules. No XDOMAIN to CE data movement has run: there
-is no Thunderbolt hardware in the test hosts.
+These are pure admission rules. The separate
+[XDOMAIN RX to CE runtime composition](../../../network/xdomain/chain/ce.md)
+runs data movement through the actual worker, XDOMAIN and CE runtime with
+IOU_UMEM frames and the CE simulator. It checks payload, destination offsets,
+guards and failure lifetimes; it does not qualify physical Thunderbolt DMA
+or real GPU memory. The admission tests above make no data-movement claim.

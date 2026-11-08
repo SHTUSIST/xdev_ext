@@ -8210,12 +8210,40 @@
       "logical_path": "tests/network/xdomain/chain/cases.c"
     },
     {
+      "source": "tests/network/xdomain/chain/ce_cases.c",
+      "logical_path": "tests/network/xdomain/chain/ce_cases.c"
+    },
+    {
+      "source": "tests/network/xdomain/chain/ce_rx_cases.h",
+      "logical_path": "tests/network/xdomain/chain/ce_rx_cases.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/ce_run.py",
+      "logical_path": "tests/network/xdomain/chain/ce_run.py"
+    },
+    {
+      "source": "tests/network/xdomain/chain/ce.md",
+      "logical_path": "tests/network/xdomain/chain/ce.md"
+    },
+    {
       "source": "tests/network/xdomain/chain/chain_api.h",
       "logical_path": "tests/network/xdomain/chain/chain_api.h"
     },
     {
       "source": "tests/network/xdomain/chain/chain_boundary.c",
       "logical_path": "tests/network/xdomain/chain/chain_boundary.c"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_ce.c.in",
+      "logical_path": "tests/network/xdomain/chain/chain_ce.c.in"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_ce_api.h",
+      "logical_path": "tests/network/xdomain/chain/chain_ce_api.h"
+    },
+    {
+      "source": "tests/network/xdomain/chain/chain_ce_env.h",
+      "logical_path": "tests/network/xdomain/chain/chain_ce_env.h"
     },
     {
       "source": "tests/network/xdomain/chain/chain_core_api.h",

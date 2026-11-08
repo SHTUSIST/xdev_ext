@@ -94,6 +94,7 @@ CANONICAL_ENTRYPOINTS = {
     "tests/network/xdomain/dmabuf_requester/run.py": ("--output",),
     "tests/network/xdomain/chain/run.py": ("--output",),
     "tests/network/xdomain/chain/host_run.py": ("--output",),
+    "tests/network/xdomain/chain/ce_run.py": ("--output",),
     "tests/core/requester_host/run.py": ("--output",),
 }
 

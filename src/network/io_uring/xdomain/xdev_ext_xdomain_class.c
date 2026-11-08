@@ -26,7 +26,8 @@ struct xdev_ext_xd_reply {
 	u32 total_len, seg_len, count;
 	u64 wake, wait_epoch;
 	int chain_status, local_status;
-	bool used, admission, chain_done, sequestered, cts, final, closed, native_posted;
+	bool used, admission, chain_ended, chain_done, sequestered;
+	bool cts, final, closed, native_posted;
 	/* Native callback facts outlive the CQE-released, reusable network slot. */
 	bool local_known, local_quiesced;
 	u8 tag[XDEV_EXT_XDOMAIN_TAG_LEN];
@@ -44,8 +45,6 @@ struct xdev_ext_xd_rts {
 	bool canceled, consumed, admission;
 	int status;
 };
-struct xdev_ext_xd_cookie_entry { u64 group; int status; bool ended, released; };
-struct xdev_ext_xd_cookie { struct xdev_ext_xd_cookie_entry st[XDEV_EXT_MECH_MAX_STAGES]; };
 struct xdev_ext_xd_batch {
 	struct xdev_ext_xdomain_desc desc[XDEV_EXT_MECH_MAX_FRAMES];
 	struct xdev_ext_xdomain_mech_cqe cqe;
@@ -201,6 +200,22 @@ static struct xdev_ext_xd_reply *xd_reply_group(struct xdev_ext_xd_stage *xs, u6
 	u32 i;
 	for (i = 0; i < XD_REPLIES; i++)
 		if (xs->replies[i].used && xs->replies[i].group == group) return &xs->replies[i];
+	return NULL;
+}
+/* ns.lock held. Replies outlive the reusable network slot and may remain
+ * after batch release for duplicate control inputs. Match the saved identity,
+ * never follow its batch pointer or share a later stage's native cookie.
+ */
+static struct xdev_ext_xd_reply *xd_reply_batch(struct xdev_ext_xd_stage *xs,
+		struct xdev_ext_mech_batch *b)
+{
+	u64 key = xdev_ext_mech_batch_key(b);
+	u32 i;
+	for (i = 0; i < XD_REPLIES; i++) {
+		struct xdev_ext_xd_reply *r = &xs->replies[i];
+		if (r->used && !r->chain_done && r->batch == b && r->key == key)
+			return r;
+	}
 	return NULL;
 }
 /* Same final status used by SEND_ACK/FAIL and observational diagnostics. */
@@ -762,8 +777,6 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 			xdev_ext_rel_tx_open(&ns->tx, group, i->want_len,
 				(i->want_len - 1) / ns->tx.cfg.seg_len + 1);
 			s->group = group; s->state = XDEV_EXT_RDV_ANNOUNCED; f->event = 0;
-			((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[ns->st->index] =
-				(struct xdev_ext_xd_cookie_entry){ .group = group };
 		}
 		break;
 	case XDEV_EXT_XDP_ACT_RX_ARM:
@@ -776,7 +789,7 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		ret = xdev_ext_mech_stage_native_get(ns->st);
 		if (ret) { if (ret == -ESHUTDOWN) ret = -ESTALE; break; }
 		r = &xs->replies[k]; *r = (struct xdev_ext_xd_reply){ .used = true, .admission = true, .deadline = xd_hard(xs, s),
-			.key = xdev_ext_mech_batch_key(s->batch), .ticket = s->ticket,
+			.batch = s->batch, .key = xdev_ext_mech_batch_key(s->batch), .ticket = s->ticket,
 			.pool_generation = f->pool_generation };
 		f->reply = r; s->state = XDEV_EXT_RDV_ARMED; f->arm_order = ++xs->order; f->event = 0;
 		for (k = 0; k < xs->rts_count; k++) xs->rts[k].wake = 0;
@@ -801,8 +814,6 @@ static int xdev_ext_xd_apply(struct xdev_ext_xd_stage *xs,
 		xdev_ext_net_rts_accept(&ns->rx_rel, i->group);
 		s->group = i->group;
 		r = f->reply; r->group = i->group; r->stream = i->stream; memcpy(r->tag, i->tag, sizeof(r->tag));
-		((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[ns->st->index] =
-			(struct xdev_ext_xd_cookie_entry){ .group = i->group };
 		xd_drop_input(xs); xs->posted_groups++; f->reserved = true;
 		xd_trace_reply(xs, "rx_reserved", r, 0, false);
 		xd_changed(xs);
@@ -1561,8 +1572,6 @@ static int xd_early_rx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_
 	r->key = i->key; r->data_seq = seq; r->total_len = i->shape_total; r->seg_len = i->shape_seg; r->count = i->shape_count;
 	r->batch = s->batch; r->ticket = s->ticket; r->pool_generation = i->base.pool_generation;
 	xdev_ext_xd_key_tag(r->tag, r->key);
-	((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[xs->ns.st->index] =
-		(struct xdev_ext_xd_cookie_entry){ .group = s->group };
 	xs->posted_groups++; f->reserved = true;
 	xd_trace_reply(xs, "rx_reserved", r, 0, false);
 	return 0;
@@ -1587,8 +1596,6 @@ static int xd_early_tx_reserve_locked(struct xdev_ext_xd_stage *xs, struct xdev_
 	xs->grant_state = XDEV_EXT_XDP_GRANT_CONSUMED;
 	spin_unlock(&ep->xl->lock);
 	s->group = xs->grant.group;
-	((struct xdev_ext_xd_cookie *)xdev_ext_mech_batch_cookie(s->batch))->st[xs->ns.st->index] =
-		(struct xdev_ext_xd_cookie_entry){ .group = s->group };
 	ret = xdev_ext_rel_tx_open(&xs->ns.tx, s->group, i->shape_total, frames);
 	if (ret == XDEV_EXT_REL_SEND) ret = xdev_ext_rel_tx_native_begin(&xs->ns.tx, s->group, i->base.now_ns);
 	if (ret != XDEV_EXT_REL_SEND) { xd_early_fail_locked(xs, -EPROTO); return -EPROTO; }
@@ -1964,25 +1971,25 @@ static void xdev_ext_xd_class_fill_cqe(struct xdev_ext_mech_stage *st, struct xd
 static void xdev_ext_xd_class_batch_end(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, int err)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
-	struct xdev_ext_xd_cookie *ck = xdev_ext_mech_batch_cookie(b);
+	struct xdev_ext_xd_reply *r;
 	unsigned long flags;
 	if (!xs->ns.rx) return;
 	spin_lock_irqsave(&xs->ns.lock, flags);
-	if (!ck->st[st->index].ended) { ck->st[st->index].status = err; ck->st[st->index].ended = true; }
+	r = xd_reply_batch(xs, b);
+	if (r && !r->chain_ended) { r->chain_status = err; r->chain_ended = true; }
 	spin_unlock_irqrestore(&xs->ns.lock, flags);
 }
 static void xdev_ext_xd_class_batch_release(struct xdev_ext_mech_stage *st, struct xdev_ext_mech_batch *b, bool sequestered)
 {
 	struct xdev_ext_xd_stage *xs = st->priv;
-	struct xdev_ext_xd_cookie *ck = xdev_ext_mech_batch_cookie(b);
-	struct xdev_ext_xd_cookie_entry *ce = &ck->st[st->index];
 	struct xdev_ext_xd_reply *r;
 	unsigned long flags;
 	if (!xs->ns.rx) return;
 	spin_lock_irqsave(&xs->ns.lock, flags);
-	if (ce->group && !ce->released && (r = xd_reply_group(xs, ce->group))) {
-		ce->released = true; r->chain_done = true; r->sequestered |= sequestered;
-		r->chain_status = ce->status ? ce->status : sequestered ? -ENOLINK : 0;
+	r = xd_reply_batch(xs, b);
+	if (r && r->group) {
+		r->chain_done = true; r->sequestered |= sequestered;
+		if (!r->chain_status && sequestered) r->chain_status = -ENOLINK;
 		xd_trace_reply(xs, "consumer_release", r, xd_reply_status(r), !r->sequestered);
 		r->final = r->admission || !r->closed; r->deadline = xdev_ext_rel_deadline(ktime_get_boottime_ns(), XD_PHASE_NS);
 		r->wake = 0;
@@ -2220,7 +2227,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_xd_class = {
 	.class_id = XDEV_EXT_MECH_CLASS_XDOMAIN, .flags = XDEV_EXT_MECH_CLASS_F_ORDERED,
 	.desc_size = sizeof(struct xdev_ext_xdomain_desc), .desc_cap = XDEV_EXT_MECH_MAX_FRAMES,
 	.info_size = sizeof(struct xdev_ext_xdomain_mech_info), .cqe_size = sizeof(struct xdev_ext_xdomain_mech_cqe), .cqe_cap = 1,
-	.batch_priv_size = sizeof(struct xdev_ext_xd_batch), .batch_cookie_size = sizeof(struct xdev_ext_xd_cookie), .owner = THIS_MODULE,
+	.batch_priv_size = sizeof(struct xdev_ext_xd_batch), .owner = THIS_MODULE,
 	.bind = xdev_ext_xd_class_bind, .unbind = xdev_ext_xd_class_unbind, .fill_info = xdev_ext_xd_class_fill_info,
 	.unbind_checked = xdev_ext_xd_class_unbind_checked,
 	.default_build = xdev_ext_xd_class_default_build, .validate = xdev_ext_xd_class_validate, .submit = xdev_ext_xd_class_submit,

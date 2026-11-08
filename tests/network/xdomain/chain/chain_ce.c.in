@@ -1,0 +1,225 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* The actual CE class and common-copy runtime are compiled unchanged. The
+ * native backend boundary below queues immutable transfer snapshots. Its byte
+ * mover and mapping functions are taken verbatim from the repository CE
+ * simulator. Scheduling, fault injection and readback are fixture-only.
+ */
+#include "chain_ce_env.h"
+#include "chain_api.h"
+#include "chain_core_api.h"
+#include "chain_ce_api.h"
+#include "xdev_ext_mech_ce.c"
+
+static unsigned long window_size = CHAIN_CE_WINDOW_BYTES;
+static unsigned int seg_size = CHAIN_PAGE;
+static void *xdev_ext_ce_sim_window;
+
+/* vmap aliases exactly the pages that the production IOU_UMEM pool supplied.
+ * There is no payload staging allocation or CPU fill of receiver frames. */
+static void *chain_ce_vmap(struct page **pages, u32 nr, unsigned flags, unsigned prot)
+{
+	(void)flags; (void)prot;
+	for (unsigned ep = 0; ep < CHAIN_ENDPOINTS; ep++) {
+		void *const *known = chain_host_pages(ep, nr);
+		size_t bytes;
+		void *base = chain_frame_memory(ep, &bytes);
+		bool same = (u64)nr * PAGE_SIZE <= bytes;
+		for (u32 i = 0; same && i < nr; i++)
+			same = (void *)pages[i] == known[i];
+		if (same)
+			return base;
+	}
+	return NULL;
+}
+#define vmap(pages, nr, flags, prot) chain_ce_vmap(pages, nr, flags, prot)
+#define vunmap(ptr) ((void)(ptr))
+
+/* SIMULATOR */
+
+#define CHAIN_CE_QUEUE 64U
+static struct xdev_ext_ce_sim_req *chain_ce_queue[CHAIN_CE_QUEUE];
+static unsigned chain_ce_count;
+static bool chain_ce_held;
+static int chain_ce_submit_error;
+static enum chain_ce_mode chain_ce_failure_mode;
+static struct chain_ce_stats chain_ce_observed;
+static struct {
+	struct xdev_ext_ce_cookie *ck;
+	u64 ticket, bytes;
+	int status;
+	bool hw_submitted;
+} chain_ce_last;
+
+static int chain_ce_unbind_host(void *host)
+{
+	int err = xdev_ext_ce_sim_unbind_host(host);
+	if (!err)
+		chain_ce_observed.host_unbinds++;
+	return err;
+}
+static int chain_ce_unbind_region(struct xdev_ext_ce_region *r)
+{
+	int err = xdev_ext_ce_sim_unbind_region(r);
+	if (!err)
+		chain_ce_observed.region_unbinds++;
+	return err;
+}
+static int chain_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 dir,
+	const struct xdev_ext_ce_xfer *x, u32 n, struct xdev_ext_ce_cookie *ck, u64 ticket)
+{
+	struct xdev_ext_ce_sim_req *req;
+
+	/* A native backend may reject before accepting any request. This is
+	 * separate from the simulator's asynchronous pre_submit completion. */
+	if (chain_ce_submit_error) {
+		int err = chain_ce_submit_error;
+		chain_ce_submit_error = 0;
+		chain_ce_observed.rejected++;
+		return err;
+	}
+	assert(chain_ce_count < CHAIN_CE_QUEUE);
+	assert(n && n <= XDEV_EXT_CE_RANGE_MAX_ENTRIES);
+	/* Match the NVIDIA backend's final owner check; do not repair cookies. */
+	assert(xdev_ext_ce_owners_valid(ck, ticket, x, n));
+	req = kzalloc(struct_size(req, x, n), GFP_KERNEL);
+	if (!req)
+		return -ENOMEM;
+	req->n = n;
+	memcpy(req->x, x, n * sizeof(*x));
+	req->ck = ck;
+	req->ticket = ticket;
+	req->window = r->priv;
+	req->window_len = r->len;
+	req->host = host;
+	req->dir = dir;
+	req->mode = chain_ce_failure_mode;
+	chain_ce_queue[chain_ce_count++] = req;
+	chain_ce_observed.accepted++;
+	chain_ce_observed.pending++;
+	return 0;
+}
+static const struct file_operations chain_ce_fops = { .owner = THIS_MODULE };
+static struct file chain_ce_handle = { .f_op = &chain_ce_fops, .endpoint = 1 };
+static const struct xdev_ext_ce_backend_ops chain_ce_backend = {
+	.owner = THIS_MODULE,
+	.fops = &chain_ce_fops,
+	.bind_region = xdev_ext_ce_sim_bind_region,
+	.unbind_region = chain_ce_unbind_region,
+	.bind_host = xdev_ext_ce_sim_bind_host,
+	.unbind_host = chain_ce_unbind_host,
+	.submit = chain_ce_submit,
+};
+int chain_ce_init_class(void)
+{
+	int err;
+
+	assert(!xdev_ext_ce_sim_window);
+	xdev_ext_ce_sim_window = calloc(1, window_size);
+	if (!xdev_ext_ce_sim_window)
+		return -ENOMEM;
+	chain_ce_poison(CHAIN_CE_POISON);
+	err = xdev_ext_ce_backend_register(&chain_ce_backend);
+	return err ? err : xdev_ext_mech_ce_init();
+}
+struct file *chain_ce_file(void) { return &chain_ce_handle; }
+void chain_ce_hold(bool hold) { chain_ce_held = hold; }
+void chain_ce_fail_submit(int status) { assert(status <= 0); chain_ce_submit_error = status; }
+void chain_ce_mode(enum chain_ce_mode mode) { chain_ce_failure_mode = mode; }
+struct chain_ce_stats chain_ce_stats(void) { return chain_ce_observed; }
+struct chain_ce_lease_snapshot chain_ce_lease_snapshot(
+	struct xdev_ext_mech_session *session, unsigned stage, unsigned slot)
+{
+	struct xdev_ext_mech_stage *st = chain_session_stage(session, stage);
+	struct xdev_ext_ce_stage *cs;
+	struct xdev_ext_comp_copy_lease_group *group;
+	const struct xdev_ext_ce_lease_slot *owner;
+	struct chain_ce_lease_snapshot result;
+
+	assert(st && st->class_id == XDEV_EXT_MECH_CLASS_CE && st->priv);
+	cs = st->priv;
+	assert(cs->lease.domain && cs->lease.group);
+	mutex_lock(&cs->lease.domain->lock);
+	group = cs->lease.group;
+	assert(slot < group->depth);
+	owner = &group->slots[slot];
+	result = (struct chain_ce_lease_snapshot){
+		.active_batches = group->state.active_batches,
+		.quarantined = group->state.quarantined,
+		.slot_active = owner->active,
+		.target_range = owner->target_range,
+		.generation = owner->generation,
+		.range_start = owner->range_start,
+		.range_len = owner->range_len,
+	};
+	mutex_unlock(&cs->lease.domain->lock);
+	return result;
+}
+void chain_ce_poison(unsigned char value)
+{
+	assert(xdev_ext_ce_sim_window && !chain_ce_count);
+	memset(xdev_ext_ce_sim_window, value, window_size);
+}
+int chain_ce_read(size_t offset, void *dst, size_t bytes)
+{
+	if (offset > window_size || bytes > window_size - offset)
+		return -ERANGE;
+	memcpy(dst, (unsigned char *)xdev_ext_ce_sim_window + offset, bytes);
+	return 0;
+}
+int chain_ce_complete_next(int status, bool hw_submitted, bool copy, uint64_t bytes_done)
+{
+	struct xdev_ext_ce_sim_req *req;
+	int err;
+
+	if (!chain_ce_count)
+		return 0;
+	req = chain_ce_queue[0];
+	memmove(chain_ce_queue, chain_ce_queue + 1, (--chain_ce_count) * sizeof(chain_ce_queue[0]));
+	/* Check again at the delayed device access, after other core work ran.
+	 * An early frame recycle is an assertion failure, not a benign refusal. */
+	assert(xdev_ext_ce_owners_valid(req->ck, req->ticket, req->x, req->n));
+	if (copy) {
+		err = xdev_ext_ce_sim_copy(req);
+		if (err) {
+			status = err;
+			hw_submitted = false;
+		} else {
+			chain_ce_observed.copies++;
+			chain_ce_observed.bytes += req->bytes;
+		}
+	}
+	if (bytes_done == UINT64_MAX)
+		bytes_done = req->bytes;
+	chain_ce_last.ck = req->ck;
+	chain_ce_last.ticket = req->ticket;
+	chain_ce_last.bytes = bytes_done;
+	chain_ce_last.status = status;
+	chain_ce_last.hw_submitted = hw_submitted;
+	chain_ce_observed.completed++;
+	chain_ce_observed.pending--;
+	xdev_ext_ce_complete(req->ck, req->ticket, status, hw_submitted, bytes_done);
+	kfree(req);
+	return 1;
+}
+int chain_ce_run_one(void)
+{
+	int mode;
+
+	if (chain_ce_held || !chain_ce_count)
+		return 0;
+	mode = chain_ce_queue[0]->mode;
+	return chain_ce_complete_next(mode == CHAIN_CE_PRE_SUBMIT ? -EBUSY :
+		mode == CHAIN_CE_AMBIGUOUS ? -EIO : 0,
+		mode != CHAIN_CE_PRE_SUBMIT, mode != CHAIN_CE_PRE_SUBMIT, UINT64_MAX);
+}
+void chain_ce_replay_last_as(int status, bool hw_submitted, uint64_t bytes_done)
+{
+	assert(chain_ce_last.ck);
+	chain_ce_observed.stale_replays++;
+	xdev_ext_ce_complete(chain_ce_last.ck, chain_ce_last.ticket,
+		status, hw_submitted, bytes_done);
+}
+void chain_ce_replay_last(void)
+{
+	chain_ce_replay_last_as(chain_ce_last.status, chain_ce_last.hw_submitted, chain_ce_last.bytes);
+}
