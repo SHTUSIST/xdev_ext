@@ -58,12 +58,22 @@ struct xdev_ext_mech_ret_rule {
 };
 struct xdev_ext_mech_info_view { __u32 allocated, requested; };
 
+/* A FROM_DEVICE stage fills the whole group into host frames before CE; a
+ * TO_DEVICE stage consumes it from host frames after CE; FILL_UMEM_ONLY: the
+ * filled frames are host pages only on the ring's IOU_UMEM pool. */
+enum {
+	XDEV_EXT_CE_RANGE_FILLS_BEFORE = 1,
+	XDEV_EXT_CE_RANGE_DRAINS_AFTER = 2,
+	XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY = 4,
+};
+
 struct xdev_ext_mech_class_desc {
 	__u32 family, peer_dirs, known_flags;
 	__u8 peer_only, flags_later, role_rule, ctx_rule, no_file;
 	bool (*flags_ok)(__u32 flags);
 	__u32 mech_abi_version;
 	bool fixed_group, rx_source, fifo_from_device, compute_worker;
+	__u8 ce_range_partner;	/* XDEV_EXT_CE_RANGE_* this class offers a CE range stage */
 	__u32 external_async_flag;
 	int (*role)(const struct xdev_ext_mech_stage_uapi *);
 	xdev_ext_mech_stage_check_fn check_stage;
@@ -159,28 +169,33 @@ static inline int xdev_ext_decl_file_check(const struct xdev_ext_mech_create *c,
  * IOU_UMEM host pages, which CE maps itself. Keep legacy compositions
  * unchanged; their configured-window lease is separate.
  */
+static inline int xdev_ext_ce_range_partner_ok(const struct xdev_ext_mech_create *c,
+	__u32 i, const struct xdev_ext_mech_stage_uapi *u, __u32 cap)
+{
+	const struct xdev_ext_mech_stage_uapi *peer = &c->st[i ^ 1];
+
+	if (i == 1)
+		return (cap & XDEV_EXT_CE_RANGE_FILLS_BEFORE) &&
+		       u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&
+		       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+		       (!(cap & XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY) ||
+			c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM) ? 0 : -EOPNOTSUPP;
+	return (cap & XDEV_EXT_CE_RANGE_DRAINS_AFTER) &&
+	       u->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+	       peer->direction == XDEV_EXT_MECH_DIR_TO_DEVICE ? 0 : -EOPNOTSUPP;
+}
+static inline const struct xdev_ext_mech_class_desc *xdev_ext_mech_class_desc(__u32 class_id);
 static inline int xdev_ext_decl_ce_check(const struct xdev_ext_mech_create *c, __u32 i,
 	const struct xdev_ext_mech_stage_uapi *u, struct xdev_ext_mech_stage_facts *f)
 {
-	const struct xdev_ext_mech_stage_uapi *peer;
 	int err = xdev_ext_decl_file_check(c, i, u, f);
 
 	if (err || !(u->flags & XDEV_EXT_CE_STAGE_F_TARGET_RANGE))
 		return err;
 	if (c->nr_stages != 2 || i > 1)
 		return -EOPNOTSUPP;
-	peer = &c->st[i ^ 1];
-	if (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)
-		return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&
-		       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&
-		       c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM ? 0 : -EOPNOTSUPP;
-	if (peer->class_id != XDEV_EXT_MECH_CLASS_NVME ||
-	    (i == 0 && (u->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE ||
-			peer->direction != XDEV_EXT_MECH_DIR_TO_DEVICE)) ||
-	    (i == 1 && (u->direction != XDEV_EXT_MECH_DIR_TO_DEVICE ||
-			peer->direction != XDEV_EXT_MECH_DIR_FROM_DEVICE)))
-		return -EOPNOTSUPP;
-	return 0;
+	return xdev_ext_ce_range_partner_ok(c, i, u,
+		xdev_ext_mech_class_desc(c->st[i ^ 1].class_id)->ce_range_partner);
 }
 /* XDOMAIN frames are PEER device memory or the ring's host-page UMEM, which
  * the class maps for its NHI; an AF_XDP UMEM belongs to its netdev driver. */
@@ -413,6 +428,7 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_
 		.ctx_rule = XDEV_EXT_CTX_RULE_NVME,
 		.mech_abi_version = XDEV_EXT_MECH_ABI_VERSION,
 		.fixed_group = true,
+		.ce_range_partner = XDEV_EXT_CE_RANGE_FILLS_BEFORE | XDEV_EXT_CE_RANGE_DRAINS_AFTER,
 		.role = xdev_ext_decl_direction_role,
 		.check_stage = xdev_ext_decl_file_check,
 		.retry_ok = xdev_ext_decl_nvme_retry,
@@ -513,6 +529,7 @@ static const struct xdev_ext_mech_class_desc xdev_ext_mech_class_decls[XDEV_EXT_
 		.role_rule = XDEV_EXT_ROLE_RULE_DIRECTION,
 		.ctx_rule = XDEV_EXT_CTX_RULE_COMMON,
 		.mech_abi_version = XDEV_EXT_MECH_ABI_VERSION,
+		.ce_range_partner = XDEV_EXT_CE_RANGE_FILLS_BEFORE | XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY,
 		.role = xdev_ext_decl_direction_role,
 		.check_stage = xdev_ext_decl_xdomain_check,
 		.ret_rules = xdev_ext_decl_common_returns, .nr_ret_rules = XDEV_EXT_DECL_ARRAY_SIZE(xdev_ext_decl_common_returns),

@@ -17,23 +17,28 @@ import sys
 import tempfile
 
 HEADER = 'include/linux/xdev_ext_family_core.h'
-BRANCH = ('\tif (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)\n'
-          '\t\treturn u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&\n'
-          '\t\t       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&\n'
-          '\t\t       c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM ? 0 : -EOPNOTSUPP;\n')
+FILL = ('\t\treturn (cap & XDEV_EXT_CE_RANGE_FILLS_BEFORE) &&\n'
+        '\t\t       u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&\n'
+        '\t\t       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&\n'
+        '\t\t       (!(cap & XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY) ||\n'
+        '\t\t\tc->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM) ? 0 : -EOPNOTSUPP;\n')
+# ASK.91: the row is the partner capability, read by the CE range rule.
+BRANCH = FILL
+XDOMAIN_CAP = ('\t\t.ce_range_partner = XDEV_EXT_CE_RANGE_FILLS_BEFORE | '
+               'XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY,\n')
 MUTANTS = (
-    ('no-pool-rule', ' &&\n\t\t       c->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM ?', ' ?'),
-    ('no-ce-direction', 'return u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&', 'return 1 &&'),
+    ('no-pool-rule', ' &&\n\t\t       (!(cap & XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY) ||\n'
+     '\t\t\tc->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM) ?', ' ?'),
+    ('no-ce-direction', '\t\t       u->direction == XDEV_EXT_MECH_DIR_TO_DEVICE &&\n',
+     '\t\t       1 &&\n'),
     ('no-xdomain-direction',
-     'peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&\n\t\t       c->pool_kind',
-     '1 &&\n\t\t       c->pool_kind'),
-    ('ce-any-position', 'if (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)',
-     'if (peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)'),
-    ('any-non-nvme-partner', 'if (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)',
-     'if (i == 1 && peer->class_id != XDEV_EXT_MECH_CLASS_NVME)'),
-    ('xdomain-always-admitted', BRANCH,
-     '\tif (i == 1 && peer->class_id == XDEV_EXT_MECH_CLASS_XDOMAIN)\n\t\treturn 0;\n'),
-    ('xdomain-row-removed', BRANCH, ''),
+     '\t\t       peer->direction == XDEV_EXT_MECH_DIR_FROM_DEVICE &&\n',
+     '\t\t       1 &&\n'),
+    ('ce-any-position', '\tif (i == 1)\n\t\treturn (cap', '\tif (1)\n\t\treturn (cap'),
+    ('any-non-nvme-partner', '\t\treturn (cap & XDEV_EXT_CE_RANGE_FILLS_BEFORE) &&',
+     '\t\treturn 1 &&'),
+    ('xdomain-always-admitted', FILL, '\t\treturn 0;\n'),
+    ('xdomain-row-removed', XDOMAIN_CAP, ''),
 )
 
 
