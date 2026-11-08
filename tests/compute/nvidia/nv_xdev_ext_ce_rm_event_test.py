@@ -25,6 +25,7 @@ FIXTURE = ex.HERE / "nv_xdev_ext_ce_rm_event_harness.c"
 CASES_G1 = ("bind-flags", "one-callback-per-plan", "event-forward", "event-poisoned",
             "event-unbind-pending")
 CASES_G11 = ("invalidate", "progress-watermark", "resolve-before-push", "plan-before-push")
+CASES_RUNS = ("coalesce-requested",)
 
 
 def ce_host_group(text):
@@ -103,6 +104,9 @@ class RmEventHarness(unittest.TestCase):
 
     def test_g11_active_async_controls(self):
         self.run_cases(CASES_G11)
+
+    def test_plan_entries_request_run_coalescing(self):
+        self.run_cases(CASES_RUNS)
 
 
 if __name__ == "__main__":

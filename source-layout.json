@@ -744,6 +744,11 @@
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-sync.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-sync.h"
+    },
+    {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-memory.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-memory.h"
@@ -2983,8 +2988,16 @@
       "logical_path": "tests/eval/nvme_gpu/ce_vmm_probe_check.h"
     },
     {
+      "source": "tests/benchmarks/nvme_gpu/ce_submit_diag.c",
+      "logical_path": "tests/eval/nvme_gpu/ce_submit_diag.c"
+    },
+    {
       "source": "tests/benchmarks/nvme_gpu/test_ce_probe.py",
       "logical_path": "tests/eval/nvme_gpu/test_ce_probe.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_submit_diag.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_submit_diag.py"
     },
     {
       "source": "tests/benchmarks/nvme_nic/Makefile",
@@ -3827,6 +3840,11 @@
       "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_sync_test.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_sync_test.c"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_memory_test.c"
@@ -3865,6 +3883,11 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_launch_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_launch_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memcopy_runs_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_memcopy_runs_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_variant_source_test.py",
