@@ -46,6 +46,9 @@ static struct fake_nic {
 	struct ethtool_rx_flow_spec rule[FAKE_MAX];
 	unsigned int inserts, replaced, deletes, open_fds;
 	uint32_t last_requested_location;
+	int get_absent_errno;	/* GRXCLSRULE on an empty location: ice -EINVAL */
+	int get_force_errno;	/* GRXCLSRULE fails even on a listed location */
+	unsigned int rlall_calls;
 } nic;
 
 static int fake_socket(int domain, int type, int protocol)
@@ -107,6 +110,7 @@ static int fake_ioctl(int fd, unsigned long request, ...)
 						 : 0;
 		return 0;
 	case ETHTOOL_GRXCLSRLALL:
+		nic.rlall_calls++;
 		c->data = nic.size;
 		n = 0;
 		for (i = 0; i < FAKE_MAX; i++) {
@@ -120,8 +124,11 @@ static int fake_ioctl(int fd, unsigned long request, ...)
 		return 0;
 	case ETHTOOL_GRXCLSRULE:
 		i = c->fs.location;
+		if (nic.get_force_errno)
+			return fail(nic.get_force_errno);
 		if (i >= FAKE_MAX || !nic.used[i])
-			return fail(ENOENT);
+			/* ice_get_ethtool_fdir_entry: no rule at index -> -EINVAL */
+			return fail(nic.get_absent_errno);
 		c->fs = nic.rule[i];
 		return 0;
 	case ETHTOOL_SRXCLSRLINS:
@@ -188,6 +195,7 @@ static void reset(bool special, bool cnt_size, uint32_t size)
 	nic.cnt_reports_size = cnt_size;
 	nic.size = size;
 	nic.pool = size;
+	nic.get_absent_errno = ENOENT;
 }
 
 /* A foreign rule that cannot overlap our UDP/IPv4 tuple. */
@@ -211,7 +219,7 @@ static int add(struct ethtool_rx_flow_spec *owned, bool *uncertain,
 				      uncertain, err);
 }
 
-static void fixed_location(const char *model, bool cnt_size)
+static void fixed_location(const char *model, bool cnt_size, int absent)
 {
 	struct ethtool_rx_flow_spec owned, saved[4];
 	struct xdev_ext_xsk_shared_error err;
@@ -221,6 +229,7 @@ static void fixed_location(const char *model, bool cnt_size)
 
 	printf("# %s: empty table\n", model);
 	reset(false, cnt_size, 16);
+	nic.get_absent_errno = absent;
 	ret = add(&owned, &uncertain, &err);
 	snprintf(msg, sizeof(msg),
 		 "%s: insert succeeds without RX_CLS_LOC_SPECIAL (ret=%d)",
@@ -235,6 +244,34 @@ static void fixed_location(const char *model, bool cnt_size)
 	      "no rule replaced; control socket closed");
 	ret = xdev_ext_xsk_steer_remove("eth0", FAKE_IFINDEX, &owned, &err);
 	check(ret == 0 && used_count() == 0, "remove deletes our rule");
+
+	printf("# %s: rule already gone before remove\n", model);
+	reset(false, cnt_size, 16);
+	nic.get_absent_errno = absent;
+	foreign(0);
+	ret = add(&owned, &uncertain, &err);
+	check(ret == 0 && owned.location == 1, "rule inserted at location 1");
+	nic.used[owned.location] = false; /* removed behind our back */
+	memset(&err, 0, sizeof(err));
+	ret = xdev_ext_xsk_steer_remove("eth0", FAKE_IFINDEX, &owned, &err);
+	snprintf(msg, sizeof(msg),
+		 "%s: vanished rule (GRXCLSRULE errno %d) counts as removed "
+		 "(ret=%d)", model, absent, ret);
+	check(ret == 0 && err.error == 0, msg);
+	check(nic.deletes == 0 && nic.used[0] && nic.open_fds == 0,
+	      "nothing deleted; foreign rule kept; socket closed");
+
+	printf("# %s: GRXCLSRULE -EINVAL on a listed location\n", model);
+	reset(false, cnt_size, 16);
+	nic.get_absent_errno = absent;
+	ret = add(&owned, &uncertain, &err);
+	check(ret == 0, "rule inserted");
+	nic.get_force_errno = EINVAL;
+	ret = xdev_ext_xsk_steer_remove("eth0", FAKE_IFINDEX, &owned, &err);
+	check(ret == -EINVAL && err.error == -EINVAL &&
+		  nic.used[owned.location] && nic.deletes == 0,
+	      "-EINVAL while the location is still listed is a failure");
+	check(nic.open_fds == 0, "socket closed after failed remove");
 
 	printf("# %s: existing foreign rules\n", model);
 	reset(false, cnt_size, 16);
@@ -334,8 +371,8 @@ static void no_size(void)
 
 int main(void)
 {
-	fixed_location("ice-like", true);
-	fixed_location("igb/mlx5-like", false);
+	fixed_location("ice-like", true, EINVAL);
+	fixed_location("igb/mlx5-like", false, ENOENT);
 	driver_allocates();
 	no_size();
 	printf("%s steer_location failures=%u\n", failures ? "FAIL" : "PASS",

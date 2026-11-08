@@ -234,6 +234,46 @@ out:
 		: "Cannot install the session's hardware RX rule");
 }
 
+/*
+ * 1 when GRXCLSRLALL lists @location, 0 when it does not, -errno on failure.
+ * ice answers GRXCLSRULE on an empty location with -EINVAL rather than
+ * -ENOENT (ice_get_ethtool_fdir_entry), so -EINVAL alone cannot tell an
+ * absent rule from a refused request.
+ */
+static int location_listed(int fd, const char *ifname,
+			   uint32_t expected_ifindex, uint32_t location)
+{
+	unsigned int attempt;
+	for (attempt = 0; attempt < 3; attempt++) {
+		struct ethtool_rxnfc cnt = {.cmd = ETHTOOL_GRXCLSRLCNT};
+		struct ethtool_rxnfc *all;
+		uint32_t i, count;
+		int ret = eth(fd, ifname, expected_ifindex, &cnt);
+		if (ret)
+			return ret;
+		count = cnt.rule_cnt;
+		if (count > 65536)
+			return -E2BIG;
+		all =
+		    calloc(1, sizeof(*all) + (size_t)count * sizeof(uint32_t));
+		if (!all)
+			return -ENOMEM;
+		all->cmd = ETHTOOL_GRXCLSRLALL;
+		all->rule_cnt = count;
+		ret = eth(fd, ifname, expected_ifindex, all);
+		if (ret == -EMSGSIZE || (!ret && all->rule_cnt > count)) {
+			free(all);
+			continue;
+		}
+		if (!ret)
+			for (i = 0; i < all->rule_cnt && !ret; i++)
+				ret = all->rule_locs[i] == location;
+		free(all);
+		return ret;
+	}
+	return -EAGAIN;
+}
+
 int xdev_ext_xsk_steer_remove(const char *ifname, uint32_t expected_ifindex,
 			      const struct ethtool_rx_flow_spec *owned,
 			      struct xdev_ext_xsk_shared_error *error)
@@ -250,6 +290,15 @@ int xdev_ext_xsk_steer_remove(const char *ifname, uint32_t expected_ifindex,
 				 "Cannot open ethtool control socket");
 	req.fs.location = owned->location;
 	ret = eth(fd, ifname, expected_ifindex, &req);
+	if (ret == -EINVAL) {
+		int listed = location_listed(fd, ifname, expected_ifindex,
+					     owned->location);
+		if (!listed)
+			ret = -ENOENT;
+		else if (listed < 0 && listed != -EOPNOTSUPP &&
+			 listed != -EINVAL)
+			ret = listed;
+	}
 	if (ret == -ENOENT)
 		ret = 0;
 	else if (!ret) {
