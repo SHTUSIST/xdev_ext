@@ -316,6 +316,11 @@
       "native_path": "tools/xdev_ext_mech/nxp_mech.bpf.c"
     },
     {
+      "source": "examples/pipelines/nvme_rand.bpf.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/nvme_rand.bpf.c"
+    },
+    {
       "source": "examples/pipelines/nxp_reliable.bpf.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/nxp_reliable.bpf.c"
@@ -3026,6 +3031,10 @@
     {
       "source": "tests/benchmarks/nvme_gpu/test_delegate_build.py",
       "logical_path": "tests/eval/nvme_gpu/test_delegate_build.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_session_rand.py",
+      "logical_path": "tests/eval/nvme_gpu/test_session_rand.py"
     },
     {
       "source": "tests/benchmarks/nvme_gpu/test_session_timing.py",

@@ -233,6 +233,21 @@ static inline int xdev_ext_stor_window_bind(struct xdev_ext_stor_window *out,
 	return 0;
 }
 
+/*
+ * CREATE: a batch is posted as one native command and the storage family
+ * does not split it, so a group must fit one transfer of the bound queue
+ * (@max_bytes, max_hw_sectors in bytes).  Refusing here replaces the
+ * per-batch -EMSGSIZE/-E2BIG of the first submission.
+ */
+static inline int xdev_ext_stor_group_admit(__u32 group_bytes, __u32 max_bytes)
+{
+	if (!group_bytes || !max_bytes)
+		return -EINVAL;
+	if (group_bytes > max_bytes)
+		return -EMSGSIZE;
+	return 0;
+}
+
 /* The caller supplies a successfully bound window (in particular its shift).
  * Window refusal precedes byte arithmetic, as at the native command boundary.
  */

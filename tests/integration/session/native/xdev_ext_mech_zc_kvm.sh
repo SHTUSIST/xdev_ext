@@ -1051,7 +1051,8 @@ if (( CE_SIM )); then
         cp "$IAA_OUT/"{iaa_runtime,iaa_pair.bpf.o,run-guest.sh} "$ROOT/opt/xdev_ext/iaa/"
     fi
 fi
-cp "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/nxp_reliable.bpf.o" "$ROOT/opt/xdev_ext/"
+cp "$TOOLS/xdev_ext_mech_ctl" "$TOOLS/nxp_mech.bpf.o" "$TOOLS/nvme_rand.bpf.o" "$TOOLS/nxp_reliable.bpf.o" \
+    "$ROOT/opt/xdev_ext/"
 DESTINATION_READONLY=0
 if [[ -n "$FAULT_CAMPAIGN" ]]; then
     cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_fault_guest.sh" "$ROOT/opt/xdev_ext/"
@@ -1926,7 +1927,7 @@ args+=("${VFIO_ARGS[@]}")
 printf '%q ' "$QEMU" "${args[@]}" >"$EV/qemu.command"
 printf '\n' >>"$EV/qemu.command"
 sha256sum "$BUILD/arch/x86/boot/bzImage" "$BUILD/vmlinux" "$TOOLS/xdev_ext_mech_ctl" \
-	"$TOOLS/nxp_mech.bpf.o" "$SCRATCH/initramfs.cpio.gz" >"$EV/artifacts.sha256"
+	"$TOOLS/nxp_mech.bpf.o" "$TOOLS/nvme_rand.bpf.o" "$SCRATCH/initramfs.cpio.gz" >"$EV/artifacts.sha256"
 if [[ -n "$FAULT_CAMPAIGN" ]]; then
     sha256sum "$TOOLS/fault_uid" "$ROOT/opt/xdev_ext/xdev_ext_mech_zc_fault_guest.sh" >>"$EV/artifacts.sha256"
 fi

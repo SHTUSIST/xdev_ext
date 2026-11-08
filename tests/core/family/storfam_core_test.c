@@ -231,6 +231,17 @@ static int window_differential(void)
 	return 0;
 }
 
+static int group_limit_literals(void)
+{
+	CHECK(xdev_ext_stor_group_admit(131072, 131072) == 0);
+	CHECK(xdev_ext_stor_group_admit(4096, 131072) == 0);
+	CHECK(xdev_ext_stor_group_admit(131072 + 512, 131072) == -EMSGSIZE);
+	CHECK(xdev_ext_stor_group_admit(4194304, 131072) == -EMSGSIZE);
+	CHECK(xdev_ext_stor_group_admit(0, 131072) == -EINVAL);
+	CHECK(xdev_ext_stor_group_admit(4096, 0) == -EINVAL);
+	return 0;
+}
+
 int main(void)
 {
 	const struct { const char *name; int (*run)(void); } tests[] = {
@@ -239,6 +250,7 @@ int main(void)
 		{"100000 storage vectors match frozen NVMe SGL behavior", coalesce_differential},
 		{"storage window handles exact boundaries without addition overflow", window_literals},
 		{"100000 storage windows match frozen NVMe window behavior", window_differential},
+		{"storage groups larger than one native transfer are refused", group_limit_literals},
 	};
 	unsigned int i;
 	int failed = 0;

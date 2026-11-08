@@ -796,6 +796,10 @@ int xdev_ext_storfam_bind(struct xdev_ext_mech_stage *st,
 			st->direction == XDEV_EXT_MECH_DIR_TO_DEVICE,
 			st->arg0, st->arg1,
 			xdev_ext_mech_session_layout(st->s)->group_bytes);
+	if (!ret)
+		ret = xdev_ext_stor_group_admit(
+			xdev_ext_mech_session_layout(st->s)->group_bytes,
+			queue_max_hw_sectors(dev->queue(member)) << SECTOR_SHIFT);
 	if (!ret && xdev_ext_mech_session_pool(st->s)->kind == XDEV_EXT_MECH_POOL_PEER) {
 		struct pci_dev *requester = dev->requester(member);
 
