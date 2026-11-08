@@ -296,7 +296,7 @@ jobs:
       - name: USER stage rules, scheduler and wiring contracts
         run: |
           python3 kernel/tools/testing/selftests/xdev_ext_mech/user_stage/run.py
-          python3 kernel/tools/testing/selftests/xdev_ext_mech/user_stage/test_sharedpool_session.py
+          python3 tests/compute/user_stage/test_sharedpool_session.py
           make -C kernel/tools/testing/selftests/xdev_ext_umem run
           make -C kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest \
             KERNEL_SRC="$PWD/kernel" SHAREDPOOL_LIBXDEV="$RUNNER_TEMP/xdev-ext-lib/libxdev_ext.a" \
