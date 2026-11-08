@@ -33,6 +33,14 @@ class CeRoundTrip(unittest.TestCase):
             run = subprocess.run([str(binary)], capture_output=True, text=True)
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
+    def test_actual_simulator_d2h_diagnostic_and_mutations(self):
+        engine = ROOT / 'tools/testing/selftests/xdev_ext_mech/simulate/copy_contract.py'
+        command = [os.environ.get('PYTHON', 'python3'), str(engine), '--mutations']
+        if os.environ.get('XDEV_EXT_CE_COPY_LOG_DIR'):
+            command += ['--output', os.environ['XDEV_EXT_CE_COPY_LOG_DIR']]
+        run = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+
     def test_ce_chain_fills_and_checks_the_device_window(self):
         source = CTL.read_text()
         start = source.index('static int cmd_ce_chain(')

@@ -4,6 +4,7 @@
 import re
 
 from xdev_ext_mech_zc_debug import check_console
+from xdev_ext_mech_ce_d2h_validate import validate_d2h_console
 
 
 def _fields(text, marker):
@@ -263,6 +264,7 @@ def validate_console(text, *, groups, ce_sim=False, ce_delay_us=0,
     for key, value in (('session', 270019), ('generation', 2), ('index', 2), ('count', 6)):
         _require(_integer(fault_stats, key) == value, 'wrong injection target ' + key)
     if ce_sim:
+        validate_d2h_console(text, delay_us=ce_delay_us)
         validate_iaa_console(text)
         ce = _fields(text, 'XDEV_EXT_ZC_CE_SIM_STATS')
         _require(_integer(ce, 'delay_us') == ce_delay_us, 'wrong simulator delay')

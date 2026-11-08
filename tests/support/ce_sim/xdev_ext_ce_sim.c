@@ -31,11 +31,14 @@ enum xdev_ext_ce_sim_fail {
 	SIM_FAIL_NONE,
 	SIM_FAIL_PRE_SUBMIT,
 	SIM_FAIL_AMBIGUOUS,
+	SIM_FAIL_SKIP_H2D,
+	SIM_FAIL_SKIP_D2H,
 };
 
 static const char * const fail_mode_names[] = {
 	[SIM_FAIL_NONE] = "none", [SIM_FAIL_PRE_SUBMIT] = "pre_submit",
 	[SIM_FAIL_AMBIGUOUS] = "ambiguous",
+	[SIM_FAIL_SKIP_H2D] = "skip_h2d", [SIM_FAIL_SKIP_D2H] = "skip_d2h",
 };
 
 static int fail_mode;
@@ -60,11 +63,17 @@ static const struct kernel_param_ops fail_mode_ops = {
 	.get = fail_mode_get,
 };
 module_param_cb(fail_mode, &fail_mode_ops, NULL, 0644);
-MODULE_PARM_DESC(fail_mode, "none, pre_submit or ambiguous; read at each submit");
+MODULE_PARM_DESC(fail_mode, "none, pre_submit, ambiguous, skip_h2d or skip_d2h; read at each submit");
 
 static unsigned int delay_us;
 module_param(delay_us, uint, 0644);
 MODULE_PARM_DESC(delay_us, "complete from an hrtimer this long after the copy; 0: from the workqueue");
+
+/* Diagnostic only: isolated serial a/d, no shared or overlapping payloads.
+ * A request snapshots this option; ordinary software campaigns keep it off. */
+static bool poison_after_h2d;
+module_param(poison_after_h2d, bool, 0644);
+MODULE_PARM_DESC(poison_after_h2d, "invert Host payload after H2D reads, before completion; isolated serial diagnostics only");
 
 static unsigned long window_size = 4UL << 20;
 module_param(window_size, ulong, 0444);
@@ -123,6 +132,7 @@ struct xdev_ext_ce_sim_req {
 	bool hw_submitted;
 	int mode;
 	unsigned int delay_us;
+	bool poison_after_h2d;
 	u32 dir;
 	u32 n;
 	struct xdev_ext_ce_xfer x[] __counted_by(n);
@@ -197,11 +207,23 @@ static int xdev_ext_ce_sim_copy(struct xdev_ext_ce_sim_req *req)
 		void *dev = req->window + req->x[i].gpu_off;
 		void *mem = req->host->vaddr + req->x[i].host_byte_off;
 
-		if (req->dir == XDEV_EXT_MECH_DIR_TO_DEVICE)
-			memcpy(dev, mem, req->x[i].len);
-		else
+		if (req->dir == XDEV_EXT_MECH_DIR_TO_DEVICE) {
+			if (req->mode != SIM_FAIL_SKIP_H2D)
+				memcpy(dev, mem, req->x[i].len);
+		} else if (req->mode != SIM_FAIL_SKIP_D2H) {
 			memcpy(mem, dev, req->x[i].len);
+		}
 		req->bytes += req->x[i].len;
+	}
+	/* H2D has finished every read before changing any Host payload. */
+	if (req->poison_after_h2d && req->dir == XDEV_EXT_MECH_DIR_TO_DEVICE) {
+		for (i = 0; i < req->n; i++) {
+			u8 *mem = req->host->vaddr + req->x[i].host_byte_off;
+			u32 j;
+
+			for (j = 0; j < req->x[i].len; j++)
+				mem[j] ^= 0xff;
+		}
 	}
 	return 0;
 }
@@ -280,6 +302,7 @@ static int xdev_ext_ce_sim_submit(struct xdev_ext_ce_region *r, void *host, u32 
 	req->dir = dir;
 	req->mode = READ_ONCE(fail_mode);
 	req->delay_us = READ_ONCE(delay_us);
+	req->poison_after_h2d = READ_ONCE(poison_after_h2d);
 	spin_lock_irqsave(&xdev_ext_ce_sim_stats_lock, flags);
 	accepted++;
 	pending++;
