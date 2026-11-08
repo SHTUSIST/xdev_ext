@@ -4435,6 +4435,10 @@
       "logical_path": "tests/compute/vllm/kv_connector/test_core.py"
     },
     {
+      "source": "tests/compute/vllm/kv_connector/test_lifecycle.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_lifecycle.py"
+    },
+    {
       "source": "tests/compute/vllm/kv_connector/test_index.py",
       "logical_path": "tests/compute/vllm/kv_connector/test_index.py"
     },

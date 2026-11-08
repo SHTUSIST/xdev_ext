@@ -134,6 +134,16 @@ class TorchDevice:
     def wait_host(self, event):
         event.synchronize()
 
+    def drain(self):
+        """Prove all device work complete, including a partially failed launch.
+
+        A completion event may not have been recorded, and sync-mode scatters
+        use the caller's stream. A successful device synchronization covers both.
+        Failure is not a proof of completion; the caller must retain ownership.
+        """
+        self.torch.cuda.set_device(self.device)
+        self.torch.cuda.synchronize(self.device)
+
     def _inputs(self, buffer, spec):
         src = buffer.tensor[spec.staging_offset:spec.staging_offset + spec.nbytes].view(self.dtype)
         key = (spec.req_id, spec.block_ids)

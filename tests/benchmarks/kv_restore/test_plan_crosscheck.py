@@ -45,11 +45,29 @@ class CrossCheck(unittest.TestCase):
         cls.tmp = tempfile.TemporaryDirectory(prefix='kv-plan-')
         cls.cli = Path(cls.tmp.name) / 'kv_plan_cli'
         subprocess.run([CC, '-std=gnu11', '-O2', '-Wall', '-Wextra', '-Werror',
+                        '-fsanitize=undefined', '-fno-sanitize-recover=all',
                         str(HERE / 'kv_plan_cli.c'), '-o', str(cls.cli)], check=True)
 
     @classmethod
     def tearDownClass(cls):
         cls.tmp.cleanup()
+
+    def test_overflowed_layout_and_group_addresses_are_refused_without_ub(self):
+        # Four legal individual dimensions overflow their uint64 product to
+        # zero OR a nonzero multiple of group_bytes. Both must be refused.
+        for dims in ((1 << 20,) * 4, (1 << 20, 1 << 20, 1 << 20, (1 << 20) - 1)):
+            with self.subTest(dimensions=dims):
+                r = subprocess.run([str(self.cli), 'pages', *map(str, dims), '131072', '0'],
+                                   capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stdout.strip(), '{"error": -22}', r.stderr)
+                self.assertNotIn('runtime error', r.stderr)
+        for group in ((1 << 64) - 1, 1 << 47):
+            with self.subTest(group=group):
+                r = subprocess.run([str(self.cli), 'pages', '16', '36', '8', '512', '131072',
+                                    str(group)], capture_output=True, text=True)
+                self.assertEqual(r.returncode, 1)
+                self.assertEqual(r.stdout.strip(), '{"error": -34}', r.stderr)
 
     def c_plan(self, m, obj, prefix, g, ordinal, dst0, pool, ring=False):
         args = [str(self.cli), 'plan', '--window-slba', m.window_slba, '--window-nlb',
