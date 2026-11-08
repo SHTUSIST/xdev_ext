@@ -7,7 +7,7 @@
 # interrupt throttling of drivers/thunderbolt/nhi.c) on the real controller.
 # CYCLES unbind/bind cycles repeat ring teardown and re-initialisation.
 #
-#   xdev_ext_tb_nhi_guest.sh CYCLES [ENUMERATE]
+#   xdev_ext_tb_nhi_guest.sh CYCLES [ENUMERATE [POLL]]
 #
 # Prints XDEV_EXT_TB_NHI_STATE per pass, XDEV_EXT_TB_NHI_CYCLE per cycle and
 # one XDEV_EXT_TB_NHI verdict; raw kernel lines are prefixed XDEV_EXT_TB_NHI_LOG.
@@ -15,9 +15,15 @@
 # (XDEV_EXT_TB_NHI_ENUM lines): bus devices, USB4 port links, any XDomain
 # and whether it carries the host router's own UUID (a cable between two
 # ports of this host), and the host router adapters' registers.
+# POLL=N (with ENUMERATE=1) then samples, once per second for N seconds and
+# read-only, what could reveal a cable: XDEV_EXT_TB_NHI_POLL lines.
 set -u
 cycles=$1
 enumerate_mode=${2:-0}
+poll_seconds=${3:-0}
+case $poll_seconds in
+''|*[!0-9]*) echo 'XDEV_EXT_TB_NHI=FAIL reason=bad-poll'; exit 0 ;;
+esac
 sysfs=/sys
 # Link training and the XDomain UUID/property exchange finish after the host
 # router appears; wait until the topology has not changed for a while.
@@ -124,6 +130,51 @@ enumerate() {
 	echo "XDEV_EXT_TB_NHI_ENUM summary routers=$routers xdomains=$xdomains same_uuid_xdomains=$same"
 }
 
+# One NHI PCI config dword at byte OFFSET, as hex.
+config_dword() {
+	od -An -tx4 -j "$2" -N 4 "$1/config" 2>/dev/null | tr -d ' '
+}
+# Reads only, once per second for poll_seconds: the NHI runtime PM state,
+# the Intel vendor-specific config dwords that the ICL-family nhi_ops use
+# (VS_CAP_9 at 0xc8, bit 31 FW ready; VS_CAP_22 at 0xfc, bit 1 force power),
+# the bus devices with their USB4 port links, and the host router's lane
+# adapter (cap 0x01) and USB4 port (cap 0x06) capability rows from debugfs.
+# The config reads come first because a debugfs read resumes the router.
+# A sample whose full adapter dump differs from the previous one is counted.
+poll() {
+	nhi_path=$sysfs/bus/pci/devices/$nhi
+	debug=$sysfs/kernel/debug
+	[ -d "$debug/thunderbolt" ] || mount -t debugfs debugfs "$debug" 2>/dev/null
+	previous=
+	changed=0
+	sample=0
+	while [ "$sample" -lt "$poll_seconds" ]; do
+		sample=$((sample + 1))
+		echo "XDEV_EXT_TB_NHI_POLL t=$sample nhi_runtime=$(cat "$nhi_path/power/runtime_status" 2>/dev/null)" \
+			"vs_cap_9=0x$(config_dword "$nhi_path" 200) vs_cap_22=0x$(config_dword "$nhi_path" 252)" \
+			"topology=$(topology | tr ' ' ',')"
+		full=
+		for regs in "$debug"/thunderbolt/0-0/port*/regs; do
+			[ -r "$regs" ] || continue
+			port=${regs%/regs}
+			port=${port##*/}
+			dump=$(cat "$regs" 2>/dev/null)
+			full="$full
+$port
+$dump"
+			printf '%s\n' "$dump" | grep -E '^0x[0-9a-f]+ +[0-9]+ 0x0[16] ' |
+				sed "s|^|XDEV_EXT_TB_NHI_POLL t=$sample regs 0-0 $port |"
+		done
+		if [ "$sample" -gt 1 ] && [ "$full" != "$previous" ]; then
+			changed=$((changed + 1))
+			echo "XDEV_EXT_TB_NHI_POLL t=$sample adapter_dump_changed=1"
+		fi
+		previous=$full
+		[ "$sample" -lt "$poll_seconds" ] && sleep 1
+	done
+	echo "XDEV_EXT_TB_NHI_POLL summary samples=$sample changed_samples=$changed"
+}
+
 result=PASS
 if wait_router; then
 	state 0
@@ -135,6 +186,7 @@ fi
 first_id=$(cat "$router/unique_id" 2>/dev/null)
 if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then
 	enumerate
+	[ "$poll_seconds" -gt 0 ] && poll
 fi
 cycle=1
 while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]; do

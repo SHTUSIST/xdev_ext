@@ -66,6 +66,20 @@ class Refusals(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("bad --nhi", r.stderr)
 
+    def test_bad_poll(self):
+        with tempfile.TemporaryDirectory() as d:
+            for value in ("x", "301", ""):
+                with self.subTest(value=value):
+                    r = run("--source", d, "--poll", value)
+                    self.assertEqual(r.returncode, 2)
+                    self.assertIn("bad --poll", r.stderr)
+
+    def test_poll_reaches_the_harness_and_its_report_is_kept(self):
+        with open(SCRIPT) as f:
+            text = f.read()
+        self.assertIn('(( 10#$POLL )) && FLAGS+=(--tb-nhi-poll "$((10#$POLL))")', text)
+        self.assertIn('cp -a "$SCRATCH/evidence/tb-nhi-poll.txt" "$OUT/"', text)
+
     def test_unknown_option(self):
         r = run("--forcepower")
         self.assertEqual(r.returncode, 2)

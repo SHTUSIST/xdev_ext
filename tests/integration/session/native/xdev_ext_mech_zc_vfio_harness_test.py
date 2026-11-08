@@ -122,6 +122,15 @@ class ModeRefusals(unittest.TestCase):
             with self.subTest(extra=extra):
                 self.assertIn('require --tb-nhi', self.refuse(*extra))
 
+    def test_tb_nhi_poll_needs_enumeration_and_a_bounded_count(self):
+        self.assertIn('--tb-nhi-poll requires --tb-nhi-enumerate',
+                      self.refuse('--tb-nhi', '0000:00:0d.2', '--tb-nhi-poll', '60'))
+        for value in ('x', '-1', '', '301', '1000'):
+            with self.subTest(value=value):
+                self.assertIn('invalid --tb-nhi-poll',
+                              self.refuse('--tb-nhi', '0000:00:0d.2', '--tb-nhi-enumerate',
+                                          '--tb-nhi-poll', value))
+
 
 class BusyboxAppletCheck(unittest.TestCase):
     """grep -q stops reading early; with pipefail the writer's SIGPIPE turns a
@@ -183,10 +192,18 @@ class GuestGpuWiring(unittest.TestCase):
         self.assertIn('--tb-nhi-enumerate) TB_NHI_ENUMERATE=1; shift ;;', self.script)
         self.assertIn('printf \'tb_nhi_enumerate=%s\\n\' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"',
                       self.script)
-        self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}"',
-                      self.script)
+        self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" '
+                      '"${tb_nhi_poll:-0}"', self.script)
+        self.assertIn('printf \'tb_nhi_poll=%s\\n\' "$TB_NHI_POLL" >>"$ROOT/opt/xdev_ext/zc.env"', self.script)
+        # The poll lengthens the guest; the QEMU limit grows with it.
+        self.assertIn('QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + TB_NHI_POLL))', self.script)
+        self.assertIn('for app in seq tr od; do ln -sf /bin/busybox "$ROOT/bin/$app"; done', self.script)
         keep = 'grep -E \'^XDEV_EXT_TB_NHI_ENUM \' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true'
         self.assertIn(keep, self.script)
+        poll = 'grep -E \'^XDEV_EXT_TB_NHI_POLL \' "$EV/guest.log" >"$EV/tb-nhi-poll.txt" || true'
+        self.assertIn(poll, self.script)
+        self.assertLess(self.script.index(poll),
+                        self.script.index('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES"'))
         # The report is saved before the verdict can stop the harness.
         self.assertLess(self.script.index(keep),
                         self.script.index('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES"'))
@@ -1022,9 +1039,70 @@ class TbNhiGuestEnumeration(unittest.TestCase):
 
     def test_rebind_cycles_stay_the_default_path(self):
         self.assertIn('enumerate_mode=${2:-0}', self.script)
+        self.assertIn('poll_seconds=${3:-0}', self.script)
         self.assertIn('if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then', self.script)
-        self.assertLess(self.script.index('then\n\tenumerate\nfi'),
+        self.assertLess(self.script.index('then\n\tenumerate\n\t[ "$poll_seconds" -gt 0 ] && poll\nfi'),
                         self.script.index('while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]'))
+
+    def nhi_config(self, vs_cap_9, vs_cap_22):
+        nhi = self.node('bus/pci/devices/0000:00:0d.2')
+        config = bytearray(256)
+        config[0xc8:0xcc] = vs_cap_9.to_bytes(4, 'little')
+        config[0xfc:0x100] = vs_cap_22.to_bytes(4, 'little')
+        (nhi / 'config').write_bytes(bytes(config))
+        self.node('bus/pci/devices/0000:00:0d.2/power', runtime_status='active')
+
+    def poll(self, seconds, sleep='sleep() { :; }\n'):
+        program = ('set -u\n'
+                   f'sysfs={self.sys}\nnhi=0000:00:0d.2\npoll_seconds={seconds}\n' + sleep +
+                   'mount() { echo "UNEXPECTED mount $*"; }\n' +
+                   function(self.script, 'topology') + function(self.script, 'config_dword') +
+                   function(self.script, 'poll') + 'poll\n')
+        run = subprocess.run(['sh', '-c', program], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertNotIn('UNEXPECTED', run.stdout)
+        return run.stdout.splitlines()
+
+    def lane_regs(self, port, lane_cs_1):
+        regs = self.node(f'kernel/debug/thunderbolt/0-0/{port}')
+        (regs / 'regs').write_text('# offset relative_offset cap_id vs_cap_id value\n'
+                                   '0x0000    0 0x00 0x00 0x00000001\n'
+                                   '0x0036    0 0x01 0x00 0x1c3c013e\n'
+                                   f'0x0037    1 0x01 0x00 0x{lane_cs_1:08x}\n'
+                                   '0x00ae   18 0x06 0x00 0x00000410\n'
+                                   '0x00af   19 0x06 0x00 0x00040006\n')
+        return regs / 'regs'
+
+    def test_poll_reports_nhi_dwords_and_capability_rows_without_writing(self):
+        self.host_router('d6da8780-0069-3029-ffff-ffffffffffff', {1: 'none', 3: 'none'})
+        self.nhi_config(0x80000000, 0x22000002)
+        self.lane_regs('port1', 0x5c18001c)
+        before = self.snapshot()
+        lines = self.poll(3)
+        self.assertEqual(before, self.snapshot(), 'poll must not write below sysfs')
+        first = [line for line in lines if line.startswith('XDEV_EXT_TB_NHI_POLL t=1 ')]
+        self.assertTrue(first[0].startswith('XDEV_EXT_TB_NHI_POLL t=1 nhi_runtime=active '
+                                            'vs_cap_9=0x80000000 vs_cap_22=0x22000002 topology='), first)
+        self.assertIn('0-0:usb4_port1=none:usb4_port3=none', first[0])
+        self.assertIn('XDEV_EXT_TB_NHI_POLL t=1 regs 0-0 port1 0x0037    1 0x01 0x00 0x5c18001c', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_POLL t=3 regs 0-0 port1 0x00ae   18 0x06 0x00 0x00000410', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_POLL t=3 regs 0-0 port1 0x00af   19 0x06 0x00 0x00040006', lines)
+        # Only lane adapter and USB4 port capability rows are repeated.
+        self.assertFalse(any(' 0x0000    0 0x00 ' in line for line in lines))
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_POLL summary samples=3 changed_samples=0')
+
+    def test_poll_counts_a_sample_whose_adapter_dump_changed(self):
+        self.host_router('d6da8780-0069-3029-ffff-ffffffffffff', {1: 'none'})
+        self.nhi_config(0, 0)
+        regs = self.lane_regs('port1', 0x5c18001c)
+        # The "cable" arrives during the first one-second wait.
+        sleep = ('sleep() { [ -e "$sysfs/plugged" ] && return; : >"$sysfs/plugged"; '
+                 f"sed -i 's/0x5c18001c/0x40420040/' {regs}; }}\n")
+        lines = self.poll(3, sleep)
+        self.assertIn('XDEV_EXT_TB_NHI_POLL t=2 adapter_dump_changed=1', lines)
+        self.assertIn('XDEV_EXT_TB_NHI_POLL t=2 regs 0-0 port1 0x0037    1 0x01 0x00 0x40420040', lines)
+        self.assertNotIn('XDEV_EXT_TB_NHI_POLL t=3 adapter_dump_changed=1', lines)
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_POLL summary samples=3 changed_samples=1')
 
 
 if __name__ == '__main__':
