@@ -97,6 +97,10 @@
       "logical_path": "docs/guides/kernel-switch.md"
     },
     {
+      "source": "docs/guides/baremetal.md",
+      "logical_path": "docs/guides/baremetal.md"
+    },
+    {
       "source": "docs/guides/testing.md",
       "logical_path": "docs/testing.md"
     },
@@ -6024,6 +6028,10 @@
       "logical_path": "tests/integration/boot/test_kernel_switch.py"
     },
     {
+      "source": "tests/integration/boot/test_baremetal.py",
+      "logical_path": "tests/integration/boot/test_baremetal.py"
+    },
+    {
       "source": "tests/integration/build/kvm_layout/contracts.py",
       "logical_path": "tests/integration/build/kvm_layout/contracts.py"
     },
@@ -9670,6 +9678,14 @@
     {
       "source": "tools/boot/kernel_switch.py",
       "logical_path": "tools/boot/kernel_switch.py"
+    },
+    {
+      "source": "tools/build/baremetal.config",
+      "logical_path": "tools/build/baremetal.config"
+    },
+    {
+      "source": "tools/build/baremetal.py",
+      "logical_path": "tools/build/baremetal.py"
     },
     {
       "source": "tools/build/collectives.py",
