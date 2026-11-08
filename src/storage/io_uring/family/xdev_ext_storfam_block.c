@@ -413,16 +413,40 @@ xdev_ext_storfam_peer_get(struct xdev_ext_stor_stage *ss,
 	return io;
 }
 
+/* The requester record and submission epoch of a consumed peer command. */
+static void xdev_ext_storfam_peer_evidence(struct xdev_ext_stor_stage *ss,
+		const struct xdev_ext_stor_io *io,
+		struct xdev_ext_peer_requester **rq, u64 *epoch)
+{
+	*rq = NULL;
+	*epoch = XDEV_EXT_PEER_EPOCH_NONE;
+	if (ss->dev->peer_evidence)
+		ss->dev->peer_evidence(ss->member, io, rq, epoch);
+}
+
+/*
+ * Worker.  An UNKNOWN command's leases are retired bound to the requester
+ * epoch it was submitted in; its slot (and SGL list page) stays retained
+ * until that requester proves a later DMA stop, unless one already did.
+ */
 static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss,
 		struct xdev_ext_stor_batch *sb)
 {
 	struct xdev_ext_stor_io *io = sb->peer_io;
+	struct xdev_ext_peer_requester *rq;
 	bool quiesced;
+	u64 epoch;
 
 	if (!io)
 		return;
 	quiesced = !io->done.uncertain;
-	xdev_ext_stor_leases_retire(io->leases, io->nr_leases, quiesced);
+	if (quiesced) {
+		xdev_ext_stor_leases_retire(io->leases, io->nr_leases, true);
+	} else {
+		xdev_ext_storfam_peer_evidence(ss, io, &rq, &epoch);
+		quiesced = xdev_ext_stor_leases_retire_unknown(io->leases,
+				io->nr_leases, rq, epoch);
+	}
 	ss->dev->retire_peer(ss->member, io, quiesced);
 	io->nr_leases = 0;
 	sb->peer_io = NULL;
@@ -430,6 +454,70 @@ static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss,
 		return;
 	xdev_ext_stor_slot_put(&ss->peer->pool, &io->runtime, false);
 }
+
+int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss)
+{
+	struct xdev_ext_stor_peer_resources *res = ss->peer;
+	int worst = XDEV_EXT_PEER_EVIDENCE_COVERED;
+	struct xdev_ext_peer_requester *rq;
+	u64 epoch;
+	u32 i;
+
+	/* A retained host-page slot has no requester evidence. */
+	for (i = 0; ss->slots && i < ss->nr_slots; i++)
+		if (ss->slots[i].runtime.busy)
+			return XDEV_EXT_PEER_EVIDENCE_NEVER;
+	for (i = 0; res && i < res->nr_slots; i++) {
+		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);
+
+		if (!io->runtime.busy)
+			continue;
+		/* Completed definitely; a ZOMBIE session kept its leases. */
+		if (io->nr_leases && !io->done.uncertain)
+			continue;
+		xdev_ext_storfam_peer_evidence(ss, io, &rq, &epoch);
+		worst = max(worst, xdev_ext_peer_requester_evidence(rq, epoch));
+	}
+	return worst;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_evidence);
+
+int xdev_ext_storfam_evidence_release(struct xdev_ext_stor_stage *ss)
+{
+	struct xdev_ext_stor_peer_resources *res = ss->peer;
+	struct xdev_ext_peer_requester *rq;
+	int ret = 0;
+	u64 epoch;
+	u32 i;
+
+	if (xdev_ext_storfam_evidence(ss) != XDEV_EXT_PEER_EVIDENCE_COVERED)
+		return -EBUSY;
+	for (i = 0; res && i < res->nr_slots; i++) {
+		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);
+		bool quiesced = true;
+
+		if (!io->runtime.busy)
+			continue;
+		if (io->nr_leases) {
+			if (io->done.uncertain) {
+				xdev_ext_storfam_peer_evidence(ss, io, &rq, &epoch);
+				quiesced = xdev_ext_stor_leases_retire_unknown(io->leases,
+						io->nr_leases, rq, epoch);
+			} else {
+				xdev_ext_stor_leases_retire(io->leases, io->nr_leases, true);
+			}
+			ss->dev->retire_peer(ss->member, io, quiesced);
+			io->nr_leases = 0;
+		}
+		if (!quiesced) {
+			ret = -EIO;
+			continue;
+		}
+		xdev_ext_stor_slot_put(&res->pool, &io->runtime, false);
+	}
+	return ret;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_storfam_evidence_release);
 
 static int xdev_ext_storfam_peer_map(struct xdev_ext_stor_stage *ss,
 		struct xdev_ext_mech_batch *b, struct xdev_ext_stor_io *io,

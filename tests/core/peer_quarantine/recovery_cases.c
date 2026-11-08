@@ -382,11 +382,125 @@ static void case_no_requester_api_is_inert(void)
 	CHECK(!drain(), "proof without a requester schedules nothing");
 }
 
+/* What a retained command's requester and epoch can still prove. */
+static void case_evidence_of_a_retained_command(void)
+{
+	struct xdev_ext_peer_requester *rq = xdev_ext_peer_requester_register(&nvme_a);
+	u64 e = xdev_ext_peer_requester_epoch(rq), k;
+
+	CHECK(xdev_ext_peer_requester_evidence(NULL, 0) == XDEV_EXT_PEER_EVIDENCE_NEVER &&
+	      xdev_ext_peer_requester_evidence(rq, XDEV_EXT_PEER_EPOCH_NONE) == XDEV_EXT_PEER_EVIDENCE_NEVER,
+	      "no requester or no submission epoch: nothing can ever prove the command stopped");
+	CHECK(xdev_ext_peer_requester_evidence(rq, e) == XDEV_EXT_PEER_EVIDENCE_PENDING,
+	      "a bound command waits for its requester's proof");
+	xdev_ext_peer_requester_begin(rq);
+	CHECK(xdev_ext_peer_requester_evidence(rq, e) == XDEV_EXT_PEER_EVIDENCE_PENDING,
+	      "a begun but unproven epoch is not evidence");
+	k = proven_reset(rq); drain();
+	CHECK(xdev_ext_peer_requester_evidence(rq, e) == XDEV_EXT_PEER_EVIDENCE_COVERED &&
+	      xdev_ext_peer_requester_evidence(rq, k) == XDEV_EXT_PEER_EVIDENCE_PENDING,
+	      "a proven later epoch covers it; the proven epoch itself does not");
+	xdev_ext_peer_requester_unregister(rq);
+}
+
+static unsigned watch_calls;
+static int watch_drainable = 1;
+static struct xdev_ext_peer_region *watch_region;
+static void watch_fn(struct xdev_ext_peer_recovery_watch *w)
+{
+	(void)w;
+	watch_calls++;
+	if (watch_region)
+		watch_drainable = xdev_ext_peer_drainable(watch_region);
+}
+static struct xdev_ext_peer_recovery_watch watch = { .recovered = watch_fn };
+
+/* Watchers run after each recovery pass, once the covered regions left quarantine. */
+static void case_watchers_follow_each_pass(void)
+{
+	struct xdev_ext_peer_requester *rq = xdev_ext_peer_requester_register(&nvme_a);
+	struct owner o; struct xdev_ext_peer_mapping *m; struct xdev_ext_peer_lease l;
+	bool q = true;
+
+	xdev_ext_peer_recovery_watch(&watch);
+	owner_open(&o); m = owner_map(&o, &nvme_a); lease(&o, m, &l);
+	assert(!unknown(&l, rq, xdev_ext_peer_requester_epoch(rq), &q) && !q);
+	watch_region = o.region;
+	xdev_ext_peer_requester_begin(rq); drain();
+	CHECK(!watch_calls, "no pass, no watcher call, without a proof");
+	proven_reset(rq); drain();
+	CHECK(watch_calls == 1 && !watch_drainable,
+	      "the proof's pass calls each watcher once, after the region left quarantine");
+	xdev_ext_peer_recovery_unwatch(&watch);
+	watch_region = NULL;
+	proven_reset(rq); drain();
+	CHECK(watch_calls == 1, "a removed watcher is not called");
+	owner_close(&o); drain();
+	xdev_ext_peer_requester_unregister(rq);
+}
+
+/* The storage family's UNKNOWN retirement of one native command's leases. */
+static void fd_lease(struct owner *o, struct xdev_ext_peer_mapping *m, struct xdev_ext_peer_fd_lease *h)
+{
+	lease(o, m, &h->lease);
+	get_file(&o->file); h->file = &o->file;
+}
+static void case_storage_unknown_command(void)
+{
+	struct xdev_ext_peer_requester *a = xdev_ext_peer_requester_register(&nvme_a);
+	struct xdev_ext_peer_requester *b = xdev_ext_peer_requester_register(&nvme_b);
+	struct xdev_ext_peer_fd_lease h[2];
+	struct owner o; struct xdev_ext_peer_mapping *m;
+	struct counts base;
+	u64 e;
+
+	memset(h, 0, sizeof(h));
+	owner_open(&o); m = owner_map(&o, &nvme_a);
+	fd_lease(&o, m, &h[0]); fd_lease(&o, m, &h[1]);
+	base = now();
+	e = xdev_ext_peer_requester_epoch(a);
+	CHECK(!xdev_ext_stor_leases_retire_unknown(h, 2, a, e),
+	      "an UNKNOWN command without a later proof is not quiesced");
+	CHECK(!h[0].file && !h[0].lease.mapping && !h[1].file && !h[1].lease.mapping &&
+	      o.file.refs == 1, "every lease handle of the command is retired");
+	CHECK(xdev_ext_peer_unmap(m) == -EIO && same(base, now()), "its region is held");
+	proven_reset(b); drain();
+	CHECK(xdev_ext_peer_unmap(m) == -EIO, "another controller's proven reset holds it");
+	proven_reset(a); drain();
+	owner_close(&o); drain();
+	CHECK(unmaps == base.unmaps + 1 && unpins == base.unpins + 1,
+	      "its own controller's proven reset releases it at owner close");
+
+	/* Cancelled inside an already proven reset: quiesced at once. */
+	owner_open(&o); m = owner_map(&o, &nvme_a); fd_lease(&o, m, &h[0]);
+	e = xdev_ext_peer_requester_epoch(a);
+	proven_reset(a); drain();
+	base = now();
+	CHECK(xdev_ext_stor_leases_retire_unknown(h, 1, a, e) && !h[0].file,
+	      "a command already covered by a proven reset is quiesced");
+	owner_close(&o); drain();
+	CHECK(unmaps == base.unmaps + 1 && unpins == base.unpins + 1,
+	      "and its region releases at owner close without another reset");
+
+	/* Never submitted to a queue: no epoch binds it. */
+	owner_open(&o); m = owner_map(&o, &nvme_a); fd_lease(&o, m, &h[0]);
+	CHECK(!xdev_ext_stor_leases_retire_unknown(h, 1, a, XDEV_EXT_PEER_EPOCH_NONE) && !h[0].file,
+	      "an unbound UNKNOWN command retires its leases");
+	proven_reset(a); drain();
+	CHECK(xdev_ext_peer_unmap(m) == -EIO && xdev_ext_peer_drainable(o.region) == -EIO,
+	      "and no proof ever releases its region");
+	xdev_ext_peer_requester_unregister(b);
+	xdev_ext_peer_requester_unregister(a);
+}
+
 int main(void)
 {
 	setbuf(stdout, NULL);
 	puts("TAP version 13");
 	assert(!xdev_ext_peer_provider_register(&fx_ops));
+	case_evidence_of_a_retained_command();
+	case_watchers_follow_each_pass();
+	case_storage_unknown_command();
 	case_no_requester_api_is_inert();
 	case_no_evidence_keeps_everything();
 	case_proof_must_postdate_submission();

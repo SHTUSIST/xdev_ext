@@ -662,10 +662,12 @@ static void nvme_xdev_ext_member_post(void *member, struct request *req,
 	if (peer) {
 		struct nvme_xdev_ext_peer_trace *trace = io->peer_native;
 
+		/* No epoch until nvme-pci prepares the SQ entry. */
 		*trace = (struct nvme_xdev_ext_peer_trace) {
 			.leases = io->leases, .nr_leases = io->nr_leases,
 			.bytes = sb->posting.byte_length, .origin = "K",
 			.cookie = (u64)(unsigned long)req,
+			.submit_epoch = XDEV_EXT_PEER_EPOCH_NONE,
 		};
 		nvme_req(req)->peer_trace = trace;
 		nvme_req(req)->flags |= NVME_REQ_USERCMD | NVME_REQ_XDEV_EXT_PEER;
@@ -694,6 +696,16 @@ static void nvme_xdev_ext_member_retire_peer(void *member,
 
 	nvme_xdev_ext_peer_trace_release(trace, quiesced);
 	trace->cookie = 0;
+}
+
+static void nvme_xdev_ext_member_peer_evidence(void *member,
+		const struct xdev_ext_stor_io *io,
+		struct xdev_ext_peer_requester **rq, u64 *epoch)
+{
+	const struct nvme_xdev_ext_peer_trace *trace = io->peer_native;
+
+	*rq = trace->requester;
+	*epoch = trace->submit_epoch;
 }
 
 static int nvme_xdev_ext_class_submit(struct xdev_ext_mech_stage *st,
@@ -737,6 +749,7 @@ static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops = {
 	.request_init = nvme_xdev_ext_member_request_init,
 	.post = nvme_xdev_ext_member_post,
 	.retire_peer = nvme_xdev_ext_member_retire_peer,
+	.peer_evidence = nvme_xdev_ext_member_peer_evidence,
 	.peer_slot_bytes = sizeof(struct nvme_xdev_ext_peer_slot),
 	.peer_native_offset = offsetof(struct nvme_xdev_ext_peer_slot, trace),
 	.poll = nvme_xdev_ext_member_poll,
@@ -750,6 +763,21 @@ static void nvme_xdev_ext_stage_fill_cqe(struct xdev_ext_mech_stage *st,
 
 	xdev_ext_storfam_consume(&p->family, b, &bp->family);
 	memcpy(cqe, &bp->cqe, sizeof(bp->cqe));
+}
+
+static int nvme_xdev_ext_class_evidence(struct xdev_ext_mech_stage *st)
+{
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+
+	return p ? xdev_ext_storfam_evidence(&p->family) :
+		   XDEV_EXT_PEER_EVIDENCE_NEVER;
+}
+
+static int nvme_xdev_ext_class_evidence_release(struct xdev_ext_mech_stage *st)
+{
+	struct nvme_xdev_ext_mech_stage *p = st->priv;
+
+	return p ? xdev_ext_storfam_evidence_release(&p->family) : -ENODEV;
 }
 
 static void nvme_xdev_ext_class_mark_dead(struct xdev_ext_mech_stage *st)
@@ -778,6 +806,8 @@ static const struct xdev_ext_mech_class_ops nvme_xdev_ext_mech_class = {
 	.fill_cqe = nvme_xdev_ext_stage_fill_cqe,
 	.mark_dead = nvme_xdev_ext_class_mark_dead,
 	.poll = nvme_xdev_ext_class_poll,
+	.evidence = nvme_xdev_ext_class_evidence,
+	.evidence_release = nvme_xdev_ext_class_evidence_release,
 	.fam.stor = &nvme_xdev_ext_stor_hooks,
 };
 

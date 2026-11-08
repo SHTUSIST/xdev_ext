@@ -16,6 +16,21 @@ void xdev_ext_stor_leases_retire(struct xdev_ext_peer_fd_lease *leases,
 }
 EXPORT_SYMBOL_GPL(xdev_ext_stor_leases_retire);
 
+/* Process context: UNKNOWN outcome of one native command that @rq received
+ * in @epoch. Every lease is retired; true when a later proven epoch of that
+ * requester already covers all of them. */
+bool xdev_ext_stor_leases_retire_unknown(struct xdev_ext_peer_fd_lease *leases, u32 nr,
+					 struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+	bool quiesced = true;
+	u32 i;
+
+	for (i = 0; i < nr; i++)
+		quiesced &= xdev_ext_peer_fd_release_unknown(&leases[i], rq, epoch);
+	return quiesced;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_stor_leases_retire_unknown);
+
 /* CREATE adds exactly one node for each member-owned depth slot. */
 void xdev_ext_stor_slot_add(struct xdev_ext_stor_pool *pool,
 			  struct xdev_ext_stor_slot *slot)

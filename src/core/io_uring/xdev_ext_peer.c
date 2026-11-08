@@ -363,6 +363,9 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_unpin);
  */
 static DEFINE_MUTEX(xdev_ext_peer_quarantine_lock);
 static LIST_HEAD(xdev_ext_peer_quarantined);
+/* Called after each recovery pass, no other peer lock held. */
+static DEFINE_MUTEX(xdev_ext_peer_watch_lock);
+static LIST_HEAD(xdev_ext_peer_watchers);
 static void xdev_ext_peer_recovery_work(struct work_struct *work);
 static DECLARE_WORK(xdev_ext_peer_recovery, xdev_ext_peer_recovery_work);
 struct xdev_ext_peer_requester *xdev_ext_peer_requester_register(struct pci_dev *pdev)
@@ -421,6 +424,28 @@ static bool xdev_ext_peer_requester_covers(struct xdev_ext_peer_requester *rq, u
  mutex_lock(&rq->lock); covers = rq->proven > epoch; mutex_unlock(&rq->lock);
  return covers;
 }
+/* Process context: what @rq can prove about a command it received in @epoch. */
+int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+ if (!rq || epoch == XDEV_EXT_PEER_EPOCH_NONE) return XDEV_EXT_PEER_EVIDENCE_NEVER;
+ return xdev_ext_peer_requester_covers(rq, epoch) ? XDEV_EXT_PEER_EVIDENCE_COVERED :
+        XDEV_EXT_PEER_EVIDENCE_PENDING;
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_evidence);
+void xdev_ext_peer_recovery_watch(struct xdev_ext_peer_recovery_watch *w)
+{
+ mutex_lock(&xdev_ext_peer_watch_lock);
+ list_add_tail(&w->node, &xdev_ext_peer_watchers);
+ mutex_unlock(&xdev_ext_peer_watch_lock);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_recovery_watch);
+void xdev_ext_peer_recovery_unwatch(struct xdev_ext_peer_recovery_watch *w)
+{
+ mutex_lock(&xdev_ext_peer_watch_lock);
+ list_del(&w->node);
+ mutex_unlock(&xdev_ext_peer_watch_lock);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_recovery_unwatch);
 int xdev_ext_peer_release_unknown(struct xdev_ext_peer_lease *lease, u64 ticket,
                                   struct xdev_ext_peer_requester *rq, u64 epoch, bool *quiesced)
 {
@@ -484,6 +509,7 @@ static void xdev_ext_peer_recovery_work(struct work_struct *work)
 {
  LIST_HEAD(keep);
  LIST_HEAD(retire);
+ struct xdev_ext_peer_recovery_watch *w;
  struct xdev_ext_peer_region *r;
  struct xdev_ext_peer_mapping *m;
  (void)work;
@@ -518,6 +544,11 @@ static void xdev_ext_peer_recovery_work(struct work_struct *work)
   list_del(&r->qnode);
   xdev_ext_peer_region_retire(r);
  }
+ /* Holders of other evidence-bound state re-check after this pass. */
+ mutex_lock(&xdev_ext_peer_watch_lock);
+ list_for_each_entry(w, &xdev_ext_peer_watchers, node)
+  w->recovered(w);
+ mutex_unlock(&xdev_ext_peer_watch_lock);
 }
 void xdev_ext_peer_orphan(struct xdev_ext_peer_region *r)
 {

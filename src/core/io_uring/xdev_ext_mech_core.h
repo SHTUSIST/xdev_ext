@@ -630,8 +630,9 @@ static inline bool xdev_ext_mech_sess_put(struct xdev_ext_mech_sess *s)
 }
 
 /*
- * The quarantine only ever grows: there is deliberately no operation that
- * gives a parked reference or frame back.
+ * Parked totals.  A session's share goes back only through the evidence rule
+ * below (xdev_ext_mech_sess_recovery); nothing else gives a parked reference
+ * or frame back.
  */
 struct xdev_ext_mech_quarantine {
 	__u64 objects;		/* pool, region and module references */
@@ -645,6 +646,71 @@ static inline void xdev_ext_mech_quarantine_add(struct xdev_ext_mech_quarantine 
 		q->objects = XDEV_EXT_MECH_U64_MAX;
 	if (check_add_overflow(q->frames, (__u64)frames, &q->frames))
 		q->frames = XDEV_EXT_MECH_U64_MAX;
+}
+
+static inline void xdev_ext_mech_quarantine_sub(struct xdev_ext_mech_quarantine *q,
+					   __u32 objects, __u32 frames)
+{
+	q->objects = q->objects > objects ? q->objects - objects : 0;
+	q->frames = q->frames > frames ? q->frames - frames : 0;
+}
+
+/*
+ * DMA-stop evidence a stage keeps for the native commands it retained after
+ * UNKNOWN outcomes, worst first wins (the values of enum xdev_ext_peer_evidence):
+ * COVERED  the device that received each retained command proved a later stop,
+ *          or the command completed definitely;
+ * PENDING  bound to a device that has not proved one yet;
+ * NEVER    a retained command nothing can prove stopped.
+ */
+#define XDEV_EXT_MECH_EVIDENCE_COVERED	0
+#define XDEV_EXT_MECH_EVIDENCE_PENDING	1
+#define XDEV_EXT_MECH_EVIDENCE_NEVER	2
+
+/*
+ * Why a quarantined session is parked.  evidence counts the sequestered
+ * batches whose only cause was their native outcome at a stage that keeps
+ * DMA-stop evidence; unrecoverable records any other cause (a custody
+ * failure, a stage without evidence, a native control reference, a START
+ * handoff, a failed checked unbind).  settled: no worker, timer or native
+ * callback can reach the session any more.
+ */
+struct xdev_ext_mech_qrecovery {
+	__u32 evidence;
+	__u32 objects, frames;	/* this session's share of the parked totals */
+	bool unrecoverable;
+	bool settled;
+};
+
+/* A batch was sequestered: by its native outcome at an evidence stage, or not. */
+static inline void xdev_ext_mech_qrecovery_note(struct xdev_ext_mech_qrecovery *q,
+					     bool evidence)
+{
+	if (evidence && q->evidence != XDEV_EXT_MECH_U32_MAX)
+		q->evidence++;
+	else
+		q->unrecoverable = true;
+}
+
+/*
+ * A quarantined (ZOMBIE) session's references go back (RELEASE) only when
+ * every sequestered batch is one the evidence accounts for and nothing else
+ * caused the quarantine, nothing can reach the session any more, and the
+ * stages' worst @evidence is COVERED.  KEEP: wait for a proof or the last
+ * reference.  QUARANTINE: parked for good.
+ */
+static inline int xdev_ext_mech_sess_recovery(const struct xdev_ext_mech_sess *s,
+					   const struct xdev_ext_mech_qrecovery *q,
+					   int evidence)
+{
+	if (s->state != XDEV_EXT_MECH_SESSION_ZOMBIE || q->unrecoverable ||
+	    !q->evidence || s->sequestered != q->evidence ||
+	    evidence == XDEV_EXT_MECH_EVIDENCE_NEVER)
+		return XDEV_EXT_MECH_REFS_QUARANTINE;
+	if (s->refs || s->inflight || !q->settled ||
+	    evidence != XDEV_EXT_MECH_EVIDENCE_COVERED)
+		return XDEV_EXT_MECH_REFS_KEEP;
+	return XDEV_EXT_MECH_REFS_RELEASE;
 }
 
 /*

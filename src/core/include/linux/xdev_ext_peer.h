@@ -163,6 +163,26 @@ bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *,
 /* Owner release of a region whose unmap was refused: the core keeps it and
  * tears it down once no UNKNOWN DMA remains (now, if none remains). */
 void xdev_ext_peer_orphan(struct xdev_ext_peer_region *);
+/* What @requester can prove about a command it received in @epoch, process
+ * context. COVERED: a later epoch is proven; PENDING: not yet; NEVER: no
+ * requester or no submission epoch, so no proof ever will. */
+enum xdev_ext_peer_evidence {
+ XDEV_EXT_PEER_EVIDENCE_COVERED = 0,
+ XDEV_EXT_PEER_EVIDENCE_PENDING = 1,
+ XDEV_EXT_PEER_EVIDENCE_NEVER = 2,
+};
+int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *, u64 epoch);
+/* recovered() runs in process context after every recovery pass, with no
+ * peer lock held; it must not watch or unwatch.  Owners of other state bound
+ * to requester epochs re-check it there. */
+struct xdev_ext_peer_recovery_watch {
+ struct list_head node;
+ void (*recovered)(struct xdev_ext_peer_recovery_watch *);
+};
+void xdev_ext_peer_recovery_watch(struct xdev_ext_peer_recovery_watch *);
+void xdev_ext_peer_recovery_unwatch(struct xdev_ext_peer_recovery_watch *);
+/* 0 when the authority's region has no UNKNOWN cause and no active lease. */
+int xdev_ext_peer_file_drainable(struct file *authority);
 
 struct xdev_ext_peer_backing {
  struct pci_dev *owner; /* PCI function whose BAR backs the allocation; borrowed */

@@ -41,6 +41,7 @@
 #include <linux/xdev_ext_binding.h>
 #include <linux/xdev_ext_compfam.h>
 #include <linux/xdev_ext_mech.h>
+#include <linux/xdev_ext_peer.h>
 #include <linux/wait.h>
 #include <linux/workqueue.h>
 #include <uapi/linux/if_xdp.h>
@@ -70,6 +71,9 @@ static_assert(sizeof(struct nvme_command) == XDEV_EXT_NVME_MECH_DESC_SIZE);
 static_assert(offsetof(struct xdev_ext_mech_call, ctx) == 0);
 static_assert(XDEV_EXT_MECH_MAX_STAGES == 4);
 static_assert(XDEV_EXT_MECH_MAX_DEPTH <= 64); /* order_blocked's u64 batch mask */
+static_assert(XDEV_EXT_MECH_EVIDENCE_COVERED == XDEV_EXT_PEER_EVIDENCE_COVERED &&
+	      XDEV_EXT_MECH_EVIDENCE_PENDING == XDEV_EXT_PEER_EVIDENCE_PENDING &&
+	      XDEV_EXT_MECH_EVIDENCE_NEVER == XDEV_EXT_PEER_EVIDENCE_NEVER);
 static_assert(offsetof(struct xdev_ext_mech_create_programs, request) == 24);
 static_assert(__builtin_types_compatible_p(typeof(&crc32c), xdev_ext_mech_crc32c_fn));
 
@@ -113,6 +117,7 @@ struct xdev_ext_mech_batch {
 	u32 nr_frames;
 	u32 bytes;
 	bool sequester;			/* the completion was a sequester */
+	bool native_sequester;		/* ... caused only by the native outcome */
 	bool locally_cancelled;		/* explicit non-native cancellation origin */
 	bool to_user;			/* frames go back to user space at the end */
 	bool ordered_loan;
@@ -135,6 +140,9 @@ struct xdev_ext_mech_session {
 
 	spinlock_t lock;		/* the fields up to last_err */
 	struct xdev_ext_mech_sess ss;
+	/* evidence, unrecoverable under lock; settled, objects, frames under
+	 * xdev_ext_mech_quarantine_lock. */
+	struct xdev_ext_mech_qrecovery q;
 	struct xdev_ext_mech_notify_state notify; /* and target counters, under lock */
 	struct list_head open;		/* OPEN RX batches */
 	struct list_head free;		/* unused batch objects */
@@ -259,7 +267,10 @@ static DEFINE_SPINLOCK(xdev_ext_mech_all_lock);
 static LIST_HEAD(xdev_ext_mech_live);
 static DEFINE_MUTEX(xdev_ext_mech_live_lock);
 
-/* Sessions whose references are parked for good; nothing leaves the list. */
+/*
+ * Sessions whose references are parked.  One leaves the list only by
+ * xdev_ext_mech_recovery_work(), once the evidence rule releases it.
+ */
 static LIST_HEAD(xdev_ext_mech_quarantined);
 static DEFINE_MUTEX(xdev_ext_mech_quarantine_lock);
 static struct xdev_ext_mech_quarantine xdev_ext_mech_parked;
@@ -768,6 +779,7 @@ static void xdev_ext_mech_session_stop(struct xdev_ext_mech_session *s, int err)
 }
 
 static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s);
+static void xdev_ext_mech_quarantine_settled(struct xdev_ext_mech_session *s);
 
 /*
  * The last reference of a session that STOP did not release.  One whose
@@ -790,6 +802,7 @@ static void xdev_ext_mech_reap(struct work_struct *work)
 	kthread_cancel_delayed_work_sync(&s->poll_work);
 	synchronize_rcu();
 	kthread_destroy_worker(s->worker);
+	xdev_ext_mech_quarantine_settled(s);
 }
 
 /* Under s->lock; true when that was the last reference. */
@@ -1113,8 +1126,11 @@ static int xdev_ext_mech_batch_handoff(struct xdev_ext_mech_batch *b,
  u32 i, refs = xdev_ext_mech_session_chain_refs(s, b->bs.stage + 1);
  int rc;
 
+ b->native_sequester = false;
  if (*sequester || READ_ONCE(s->ss.state) == XDEV_EXT_MECH_SESSION_ZOMBIE) {
+  /* Nothing below runs: only the native outcome decides this batch. */
   *sequester = true;
+  b->native_sequester = true;
   return err;
  }
  if (!err && b->produced_set && xdev_ext_mech_trim_produced(s, b)) {
@@ -1377,6 +1393,7 @@ xdev_ext_mech_batch_get_locked(struct xdev_ext_mech_session *s)
 	b->nr_frames = 0;
 	b->bytes = 0;
 	b->sequester = false;
+	b->native_sequester = false;
 	b->to_user = false;
 	b->ordered_loan = false;
 	b->fifo_accepted = false;
@@ -1467,6 +1484,7 @@ static int xdev_ext_mech_start_queue_drain(struct xdev_ext_mech_session *s)
   err = -EIO;
   spin_lock_irqsave(&s->lock, flags);
   s->ss.sequestered++;
+  s->q.unrecoverable = true;
   spin_unlock_irqrestore(&s->lock, flags);
  }
  if (err)
@@ -1533,6 +1551,7 @@ static void xdev_ext_mech_return_idle(struct xdev_ext_mech_session *s, bool stop
 		/* A broken queue/custody invariant cannot authorize unmapping. */
 		spin_lock_irqsave(&s->lock, flags);
 		s->ss.sequestered++;
+		s->q.unrecoverable = true;
 		if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPED)
 			s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
 		spin_unlock_irqrestore(&s->lock, flags);
@@ -1549,6 +1568,10 @@ static void xdev_ext_mech_return_idle(struct xdev_ext_mech_session *s, bool stop
 static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_mech_batch *b,
 			 int how, int err)
 {
+	/* Sequestered by its native outcome alone, at a stage with evidence. */
+	bool evidence = how == XDEV_EXT_MECH_END_SEQUESTER && b->native_sequester &&
+		!b->parent && b->bs.stage < s->nr_stages &&
+		s->st[b->bs.stage].cls->evidence;
 	unsigned long flags;
 	bool last, kick;
 	u32 i;
@@ -1586,6 +1609,8 @@ static void xdev_ext_mech_end(struct xdev_ext_mech_session *s, struct xdev_ext_m
 	spin_lock_irqsave(&s->lock, flags);
 	atomic64_inc(how == XDEV_EXT_MECH_END_DONE ? &s->done : &s->aborted);
 	xdev_ext_mech_set_err_locked(s, err);
+	if (how == XDEV_EXT_MECH_END_SEQUESTER)
+		xdev_ext_mech_qrecovery_note(&s->q, evidence);
 	last = xdev_ext_mech_batch_put_locked(s, b, how == XDEV_EXT_MECH_END_SEQUESTER);
 	kick = s->start_left && s->ss.state == XDEV_EXT_MECH_SESSION_ACTIVE;
 	xdev_ext_mech_notify_locked(s, true);
@@ -2189,6 +2214,7 @@ static void xdev_ext_mech_batch_landed(struct xdev_ext_mech_session *s,
  if (b->transform.active && xdev_ext_mech_transform_landed(s, b, seq)) {
   seq = true;
   b->sequester = true;
+  b->native_sequester = false;
   b->status = -EIO;
  }
 	/* After the drain timed out no program runs: C default only. */
@@ -3202,6 +3228,7 @@ static int xdev_ext_mech_session_release_disposition(struct xdev_ext_mech_sessio
   spin_lock_irqsave(&s->lock, flags);
   s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
   s->ss.sequestered++;
+  s->q.unrecoverable = true;
   if (!s->last_err)
    s->last_err = final_err;
   spin_unlock_irqrestore(&s->lock, flags);
@@ -3302,8 +3329,9 @@ static void xdev_ext_mech_quarantine(struct xdev_ext_mech_session *s)
 
 	mutex_lock(&xdev_ext_mech_quarantine_lock);
 	list_add_tail(&s->quarantine_node, &xdev_ext_mech_quarantined);
-	xdev_ext_mech_quarantine_add(&xdev_ext_mech_parked, 1 + s->nr_stages,
-				min_t(u64, frames, U32_MAX));
+	s->q.objects = 1 + s->nr_stages;
+	s->q.frames = min_t(u64, frames, U32_MAX);
+	xdev_ext_mech_quarantine_add(&xdev_ext_mech_parked, s->q.objects, s->q.frames);
 	total = xdev_ext_mech_parked;
 	mutex_unlock(&xdev_ext_mech_quarantine_lock);
 	pr_warn("xdev_ext_mech: session %llu quarantined, inflight=%u sequestered=%u; %llu references and %llu frames parked in all\n",
@@ -3357,6 +3385,11 @@ static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *s,
   s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
   fate = XDEV_EXT_MECH_REFS_QUARANTINE;
  }
+	/* Only sequestered batches can be accounted for by DMA-stop evidence. */
+	if (s->ss.state == XDEV_EXT_MECH_SESSION_ZOMBIE &&
+	    (atomic_read(&s->native_controls) || s->start_preparing ||
+	     s->start_return_pending))
+		s->q.unrecoverable = true;
 	last = xdev_ext_mech_sess_put(&s->ss);
 	if (last)
 		s->worker_gone = true;
@@ -3376,6 +3409,7 @@ static int xdev_ext_mech_session_destroy_report(struct xdev_ext_mech_session *s,
 			kthread_cancel_delayed_work_sync(&s->poll_work);
 			synchronize_rcu();
 			kthread_destroy_worker(s->worker);
+			xdev_ext_mech_quarantine_settled(s);
 		}
 		return -EBUSY;
 	}
@@ -3400,8 +3434,10 @@ static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s)
 
 	spin_lock_irqsave(&s->lock, flags);
 	if (s->ss.state == XDEV_EXT_MECH_SESSION_STOPPING || s->ss.inflight ||
-	    atomic_read(&s->native_controls))
+	    atomic_read(&s->native_controls)) {
 		s->ss.state = XDEV_EXT_MECH_SESSION_ZOMBIE;
+		s->q.unrecoverable = true;	/* fail closed: no evidence clears it */
+	}
 	fate = xdev_ext_mech_sess_ref_fate(&s->ss);
 	xdev_ext_mech_notify_locked(s, false);
 	spin_unlock_irqrestore(&s->lock, flags);
@@ -3416,7 +3452,151 @@ static void xdev_ext_mech_release_late(struct xdev_ext_mech_session *s)
 	kthread_cancel_delayed_work_sync(&s->poll_work);
 	synchronize_rcu();
 	kthread_destroy_worker(s->worker);
+	xdev_ext_mech_quarantine_settled(s);
 }
+
+/*
+ * Recovery from UNKNOWN native outcomes.  A quarantined session whose only
+ * causes are batches sequestered by their native outcome at stages that keep
+ * DMA-stop evidence is released once its worker is gone, nothing is in
+ * flight, and each such stage reports that the device which received every
+ * retained command proved a later stop (an NVMe Controller Reset with Bus
+ * Master Enable read back clear, begun after the submission).  Until then,
+ * and for good without such evidence, it stays parked as before.  It is
+ * re-checked when it settles and after each peer recovery pass.
+ * Lock order: xdev_ext_mech_quarantine_lock, then whatever the stage's
+ * evidence query takes (the requester record lock).
+ */
+static void xdev_ext_mech_recovery_fn(struct work_struct *work);
+static DECLARE_WORK(xdev_ext_mech_recovery_work, xdev_ext_mech_recovery_fn);
+
+/* The worker of a quarantined session is destroyed: evidence may decide. */
+static void xdev_ext_mech_quarantine_settled(struct xdev_ext_mech_session *s)
+{
+	s->worker = NULL;
+	mutex_lock(&xdev_ext_mech_quarantine_lock);
+	s->q.settled = true;
+	mutex_unlock(&xdev_ext_mech_quarantine_lock);
+	queue_work(system_unbound_wq, &xdev_ext_mech_recovery_work);
+}
+
+/* Quarantine lock held, @s settled: the evidence rule on a snapshot. */
+static int xdev_ext_mech_recovery_fate(struct xdev_ext_mech_session *s)
+{
+	int evidence = XDEV_EXT_MECH_EVIDENCE_COVERED, fate;
+	struct xdev_ext_mech_qrecovery q;
+	struct xdev_ext_mech_sess ss;
+	unsigned long flags;
+	u32 i;
+
+	spin_lock_irqsave(&s->lock, flags);
+	ss = s->ss;
+	q = s->q;
+	if (atomic_read(&s->native_controls))
+		q.unrecoverable = true;
+	spin_unlock_irqrestore(&s->lock, flags);
+	q.settled = s->q.settled;
+	fate = xdev_ext_mech_sess_recovery(&ss, &q, evidence);
+	if (fate != XDEV_EXT_MECH_REFS_RELEASE)
+		return fate;
+	for (i = 0; i < s->nr_bound; i++)
+		if (s->st[i].cls->evidence)
+			evidence = max(evidence, s->st[i].cls->evidence(&s->st[i]));
+	return xdev_ext_mech_sess_recovery(&ss, &q, evidence);
+}
+
+/* Back on the list with the same parked share, after a failed attempt. */
+static void xdev_ext_mech_repark(struct xdev_ext_mech_session *s, bool never)
+{
+	unsigned long flags;
+
+	if (never) {
+		spin_lock_irqsave(&s->lock, flags);
+		s->q.unrecoverable = true;
+		spin_unlock_irqrestore(&s->lock, flags);
+	}
+	mutex_lock(&xdev_ext_mech_quarantine_lock);
+	list_add_tail(&s->quarantine_node, &xdev_ext_mech_quarantined);
+	xdev_ext_mech_quarantine_add(&xdev_ext_mech_parked, s->q.objects, s->q.frames);
+	mutex_unlock(&xdev_ext_mech_quarantine_lock);
+}
+
+/* Off the list, evidence COVERED: give the retained resources and then
+ * every reference back, as a release after a clean STOP would. */
+static void xdev_ext_mech_recover(struct xdev_ext_mech_session *s)
+{
+	struct file *authority = xdev_ext_peer_mech_pool_file(&s->pool);
+	unsigned long flags;
+	int err = 0;
+	u32 i;
+
+	for (i = 0; !err && i < s->nr_bound; i++)
+		if (s->st[i].cls->evidence_release)
+			err = s->st[i].cls->evidence_release(&s->st[i]);
+	if (err) {
+		xdev_ext_mech_repark(s, true);
+		return;
+	}
+	/* The covered region records clear in the peer pass that called us,
+	 * or in the next one: until then the pool keeps its authority. */
+	if (authority && xdev_ext_peer_file_drainable(authority)) {
+		xdev_ext_mech_repark(s, false);
+		return;
+	}
+	pr_info("xdev_ext_mech: session %llu leaves quarantine: DMA-stop evidence covers its %u sequestered batches\n",
+		s->id, READ_ONCE(s->ss.sequestered));
+	spin_lock_irqsave(&s->lock, flags);
+	s->ss.state = XDEV_EXT_MECH_SESSION_STOPPED;
+	spin_unlock_irqrestore(&s->lock, flags);
+	xdev_ext_mech_session_release(s);
+}
+
+static void xdev_ext_mech_recovery_fn(struct work_struct *work)
+{
+	struct xdev_ext_mech_session *s, *next;
+	unsigned long flags;
+	LIST_HEAD(ready);
+	int fate;
+
+	mutex_lock(&xdev_ext_mech_quarantine_lock);
+	list_for_each_entry_safe(s, next, &xdev_ext_mech_quarantined, quarantine_node) {
+		if (!s->q.settled)
+			continue;
+		fate = xdev_ext_mech_recovery_fate(s);
+		if (fate == XDEV_EXT_MECH_REFS_QUARANTINE) {
+			spin_lock_irqsave(&s->lock, flags);
+			s->q.unrecoverable = true;
+			spin_unlock_irqrestore(&s->lock, flags);
+			continue;
+		}
+		if (fate != XDEV_EXT_MECH_REFS_RELEASE)
+			continue;
+		list_move_tail(&s->quarantine_node, &ready);
+		xdev_ext_mech_quarantine_sub(&xdev_ext_mech_parked, s->q.objects, s->q.frames);
+	}
+	mutex_unlock(&xdev_ext_mech_quarantine_lock);
+	while (!list_empty(&ready)) {
+		s = list_first_entry(&ready, struct xdev_ext_mech_session, quarantine_node);
+		list_del_init(&s->quarantine_node);
+		xdev_ext_mech_recover(s);
+	}
+}
+
+static void xdev_ext_mech_peer_recovered(struct xdev_ext_peer_recovery_watch *w)
+{
+	queue_work(system_unbound_wq, &xdev_ext_mech_recovery_work);
+}
+
+static struct xdev_ext_peer_recovery_watch xdev_ext_mech_peer_watch = {
+	.recovered = xdev_ext_mech_peer_recovered,
+};
+
+static int __init xdev_ext_mech_recovery_init(void)
+{
+	xdev_ext_peer_recovery_watch(&xdev_ext_mech_peer_watch);
+	return 0;
+}
+late_initcall(xdev_ext_mech_recovery_init);
 
 void xdev_ext_mech_generation_gone(u32 class_id, const void *ops)
 {

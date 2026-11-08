@@ -20,6 +20,7 @@ import tempfile
 HERE = Path(__file__).resolve().parent
 CORE = 'src/core/io_uring/xdev_ext_peer.c'
 FD = 'src/core/io_uring/xdev_ext_peer_fd.c'
+STORFAM = 'src/storage/io_uring/family/xdev_ext_storfam.c'
 HEADER = 'src/core/include/linux/xdev_ext_peer.h'
 SHIM = 'tests/network/peer/session/xdev_ext_peer_test_shim.h'
 PROFILES = (
@@ -46,11 +47,13 @@ def block(text, pattern):
     return text[match.start():i]
 
 
-def assemble(root, core=None, fd=None):
-    """One translation unit: shim, actual core, actual fd close, cases."""
+def assemble(root, core=None, fd=None, storfam=None):
+    """One translation unit: shim, actual core, actual fd close and lease
+    releases, the actual storage-family UNKNOWN retirement, cases."""
     root = Path(root)
     core = (root / CORE).read_text() if core is None else core
     fd = (root / FD).read_text() if fd is None else fd
+    storfam = (root / STORFAM).read_text() if storfam is None else storfam
     shim = (root / SHIM).read_text()
     plain_file = 'struct file { const struct file_operations *f_op; int refs; };'
     if shim.count(plain_file) != 1:
@@ -72,6 +75,9 @@ def assemble(root, core=None, fd=None):
         block(fd, r'^struct xdev_ext_peer_fd \{') + ';\n',
         block(fd, r'^struct xdev_ext_peer_fd_map \{') + ';\n',
         block(fd, r'^static int xdev_ext_peer_fd_close\(') + '\n',
+        block(fd, r'^void xdev_ext_peer_fd_release\(') + '\n',
+        block(fd, r'^bool xdev_ext_peer_fd_release_unknown\(') + '\n',
+        block(storfam, r'^bool xdev_ext_stor_leases_retire_unknown\(') + '\n',
         (HERE / 'recovery_cases.c').read_text(),
     ]
     return ''.join(pieces)
@@ -112,7 +118,7 @@ def main():
     record = {'scope': 'host software state machine only; no device, DMA, IOMMU or timing'}
     try:
         record['inputs'] = {p: hashlib.sha256((root / p).read_bytes()).hexdigest()
-                            for p in (CORE, FD, HEADER, SHIM)}
+                            for p in (CORE, FD, STORFAM, HEADER, SHIM)}
         record['inputs']['tests/core/peer_quarantine/recovery_cases.c'] = hashlib.sha256(
             (HERE / 'recovery_cases.c').read_bytes()).hexdigest()
         source = assemble(root)

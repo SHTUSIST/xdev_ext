@@ -723,6 +723,80 @@ static void test_quarantine(void)
 	xdev_ext_mech_quarantine_add(&q, 0, 5);
 	EXPECT_EQ(q.frames, UINT64_MAX);
 	EXPECT_EQ(q.objects, 4);
+	/* Only what one session parked goes back, never below zero. */
+	q = (struct xdev_ext_mech_quarantine){ 0 };
+	xdev_ext_mech_quarantine_add(&q, 3, 6);
+	xdev_ext_mech_quarantine_add(&q, 2, 1);
+	xdev_ext_mech_quarantine_sub(&q, 3, 6);
+	EXPECT_EQ(q.objects, 2);
+	EXPECT_EQ(q.frames, 1);
+	xdev_ext_mech_quarantine_sub(&q, 5, 9);
+	EXPECT_EQ(q.objects, 0);
+	EXPECT_EQ(q.frames, 0);
+}
+
+/*
+ * A quarantined session gives its references back only when every cause of
+ * its quarantine is a sequestered batch that a stage's DMA-stop evidence
+ * accounts for, nothing can reach it any more, and that evidence covers
+ * every retained command.  Anything else keeps it parked.
+ */
+static void test_quarantine_recovery(void)
+{
+	struct xdev_ext_mech_sess s = {
+		.state = XDEV_EXT_MECH_SESSION_ZOMBIE, .sequestered = 1,
+	};
+	struct xdev_ext_mech_qrecovery q = { 0 };
+
+	EXPECT_EQ(XDEV_EXT_MECH_EVIDENCE_COVERED, 0);
+	EXPECT_TRUE(XDEV_EXT_MECH_EVIDENCE_PENDING > XDEV_EXT_MECH_EVIDENCE_COVERED);
+	EXPECT_TRUE(XDEV_EXT_MECH_EVIDENCE_NEVER > XDEV_EXT_MECH_EVIDENCE_PENDING);
+	xdev_ext_mech_qrecovery_note(&q, true);
+	EXPECT_EQ(q.evidence, 1);
+	EXPECT_FALSE(q.unrecoverable);
+	/* Still reachable: wait, whatever the evidence says. */
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_KEEP);
+	q.settled = true;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_RELEASE);
+	/* The device has not proved a later stop yet. */
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_PENDING),
+		  XDEV_EXT_MECH_REFS_KEEP);
+	/* A retained command no proof can ever cover. */
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_NEVER),
+		  XDEV_EXT_MECH_REFS_QUARANTINE);
+	/* A batch or a command reference still outstanding. */
+	s.refs = 1;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_KEEP);
+	s.refs = 0;
+	s.inflight = 1;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_KEEP);
+	s.inflight = 0;
+	/* One more sequester that no evidence accounts for. */
+	s.sequestered = 2;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_QUARANTINE);
+	s.sequestered = 1;
+	/* Any other recorded cause (custody failure, native control, START). */
+	xdev_ext_mech_qrecovery_note(&q, false);
+	EXPECT_TRUE(q.unrecoverable);
+	EXPECT_EQ(q.evidence, 1);
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_QUARANTINE);
+	/* Quarantined without any sequestered batch: never by evidence. */
+	q = (struct xdev_ext_mech_qrecovery){ .settled = true };
+	s.sequestered = 0;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_QUARANTINE);
+	/* Only a ZOMBIE session is a quarantined one. */
+	q.evidence = 1;
+	s.sequestered = 1;
+	s.state = XDEV_EXT_MECH_SESSION_STOPPED;
+	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
+		  XDEV_EXT_MECH_REFS_QUARANTINE);
 }
 
 static bool ret_expected(__u32 cls, __u32 member, __u32 site, __s32 ret)
@@ -1076,6 +1150,7 @@ int main(void)
 	test_hold_and_group();
 	test_session_rules();
 	test_quarantine();
+	test_quarantine_recovery();
 	test_return_values();
 	test_compute_return_values();
 	test_rx_resolve();
