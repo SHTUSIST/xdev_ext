@@ -56,7 +56,8 @@ class Case(unittest.TestCase):
     def staged(self, s, spec):
         n = kl.staged_elems(s, kl.ScatterRange(spec.first_token, spec.end_token, spec.stage_token))
         g = torch.Generator().manual_seed(spec.end_token)
-        src = torch.randn(spec.staging_offset // 4 + n, generator=g)
+        # Positive values: the caches start at -1, so a written cell never looks unwritten.
+        src = torch.randn(spec.staging_offset // 4 + n, generator=g).abs() + 1
         return src.to(self.dtype or torch.float32).to(self.device)
 
     def expect(self, s, spec, src, layer, token, head, e):
