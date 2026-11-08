@@ -347,6 +347,17 @@ static void test_stream_message_count(void)
 	CHECK(tb_stream_messages(1000, 1, 2500) == 3);
 }
 
+static void test_who_holds_completed_messages(void)
+{
+	/* pingpong: the client waits for the echo, the server echoes it; a
+	 * second message before that is a protocol error.  A stream server
+	 * only acknowledges, so many messages may complete in one RX burst. */
+	CHECK(tb_holds_messages(TB_ROLE_CLIENT, TB_MODE_PINGPONG));
+	CHECK(tb_holds_messages(TB_ROLE_SERVER, TB_MODE_PINGPONG));
+	CHECK(!tb_holds_messages(TB_ROLE_SERVER, TB_MODE_STREAM));
+	CHECK(!tb_holds_messages(TB_ROLE_CLIENT, TB_MODE_STREAM));
+}
+
 int main(void)
 {
 	test_header_roundtrip();
@@ -358,6 +369,7 @@ int main(void)
 	test_options();
 	test_pattern_and_stats();
 	test_stream_message_count();
+	test_who_holds_completed_messages();
 	if (failures) {
 		fprintf(stderr, "dpdk_tb wire: %d failure(s)\n", failures);
 		return 1;

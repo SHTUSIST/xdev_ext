@@ -510,6 +510,18 @@ static inline int tb_parse_opts(int argc, char **argv, struct tb_opts *o, char *
 	return 0;
 }
 
+/*
+ * Whether a completed message stays held until the program consumes it.
+ * In pingpong the next message can only follow the echo, so a second one
+ * before that is an error; in stream mode the receiver only acknowledges,
+ * and several small messages may complete within one RX burst.
+ */
+static inline int tb_holds_messages(int role, int mode)
+{
+	(void)role;
+	return mode == TB_MODE_PINGPONG;
+}
+
 /* ---- payload pattern and statistics ---- */
 
 static inline uint8_t tb_pattern_byte(size_t i, uint32_t msg_id)

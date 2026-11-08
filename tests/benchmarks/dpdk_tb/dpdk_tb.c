@@ -230,7 +230,8 @@ static void message_done(struct tb *t)
 	}
 	if (t->rx.done_flags & TB_F_ACKREQ || tb_rx_should_ack(&t->rx))
 		send_ack(t);
-	t->msg_ready = 1;
+	t->msg_ready = tb_holds_messages(t->o.role, t->o.role == TB_ROLE_SERVER ?
+					 (int)t->peer_mode : t->o.mode);
 }
 
 static void session_reset(struct tb *t, uint32_t run_id)
