@@ -12,7 +12,8 @@ _PATHS = {'nvidia_node', 'ptx_path'}
 _OBJECT_PATHS = {'bpf_object', 'user_bpf_object'}
 _PIN_COUNTS = {'tx_program_pins': 3, 'rx_program_pins': 2}
 _ALLOWED = (_NUMBERS | _PATHS | _OBJECT_PATHS | set(_PIN_COUNTS) |
-            {'control_ptx_path', 'trace_capacity', 'early_cts'})
+            {'control_ptx_path', 'trace_capacity', 'early_cts', 'frames',
+             'ce_bpf_object', 'receive_groups'})
 _AGREEMENT = ('version', 'world_size', 'mode', 'allocation_bytes', 'group_bytes',
               'depth', 'nr_batches', 'first_sequence', 'timeout_ns',
               'communicator_id', 'epoch', 'max_payload_bytes')
@@ -36,10 +37,27 @@ def validate_options(options, *, rank, device_index, environ=None):
             data[key] = list(pins)
     tx = data.get('tx_program_pins', [None] * 3)
     rx = data.get('rx_program_pins', [None] * 2)
+    # Host frames plus the GPU copy engine (GPU without GPUDirect RDMA): d1
+    # only, no USER stages and no PEER stage pins; the CE program is required.
+    frames = data.setdefault('frames', 'peer')
+    if frames not in ('peer', 'host'):
+        raise ValueError('frames must be peer or host')
+    host = frames == 'host'
+    if not host and ({'ce_bpf_object', 'receive_groups'} & set(data)):
+        raise ValueError('ce_bpf_object/receive_groups apply to host frames only')
+    if host:
+        if 'tx_program_pins' in data or 'rx_program_pins' in data:
+            raise ValueError('host frames take no PEER stage pins')
+        groups = data.setdefault('receive_groups', 1)
+        if type(groups) is not int or groups < 1 or groups > 256:
+            raise ValueError('receive_groups must be 1..256')
+        ce = data.get('ce_bpf_object')
+        if not isinstance(ce, str) or not ce or '\x00' in ce or not Path(ce).is_file():
+            raise ValueError('host frames need an existing ce_bpf_object')
     needed_objects = set()
-    if tx[1] is None or rx[0] is None:
+    if host or tx[1] is None or rx[0] is None:
         needed_objects.add('bpf_object')
-    if tx[0] is None or tx[2] is None or rx[1] is None:
+    if not host and (tx[0] is None or tx[2] is None or rx[1] is None):
         needed_objects.add('user_bpf_object')
     for key in _OBJECT_PATHS:
         value = data.get(key)
@@ -75,6 +93,8 @@ def validate_options(options, *, rank, device_index, environ=None):
             data.get('trace_capacity', 0) > (1 << 32)-1 or
             (data['mode'] == 1 and data['depth'] != 1)):
         raise ValueError('unsupported admission geometry/depth/payload capacity')
+    if host and data['mode'] != 1:
+        raise ValueError('host frames run d1 collectives only')
     for key in _PATHS | ({'control_ptx_path'} & set(data)):
         if not isinstance(data[key], str) or not data[key] or '\x00' in data[key]:
             raise ValueError(f'invalid admission path: {key}')
@@ -103,4 +123,7 @@ def load_options(path, *, rank, group, device_index, environ=None):
 def agreement_key(options):
     key = {name: options[name] for name in _AGREEMENT}
     key['early_cts'] = options.get('early_cts', 0)
+    key['frames'] = options.get('frames', 'peer')
+    if key['frames'] == 'host':
+        key['receive_groups'] = options.get('receive_groups', 1)
     return key

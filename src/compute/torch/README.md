@@ -35,6 +35,12 @@ Optional `early_cts` (0 or 1, default 0) opens both endpoints with
 or `xdev_ext_cuda_peer_owner_open_programs`. Both ranks must request the same
 value; the agreement check rejects a mismatch before either owner opens.
 
+Optional `frames` (`peer` or `host`, default `peer`) chooses the transport.
+`host` opens `xdev_ext_cuda_frame_owner` (`src/compute/cuda/frame_endpoint_owner.h`)
+on the current context and stream instead of the PEER owner and creates the
+communicator with `XDEV_TP_F_HOST_FRAMES`; it is d1 only and needs
+`ce_bpf_object`. Both ranks must request the same value.
+
 Optional `tx_program_pins` and `rx_program_pins` arrays select existing PRIVATE
 struct_ops link pins per stage. TX has three entries: USER producer, XDOMAIN
 TX, USER terminal. RX has two: XDOMAIN RX, USER consumer. A null entry keeps

@@ -5,6 +5,7 @@
 #include <cuda.h>
 #include "xdev_tp.h"
 #include "peer_endpoint_owner.h"
+#include "frame_endpoint_owner.h"
 #include <algorithm>
 #include <cerrno>
 #include <chrono>
@@ -92,6 +93,7 @@ struct State {
   xdev_tp_config cfg{};
   xdev_tp_comm *comm = nullptr;
   xdev_ext_cuda_peer_owner *endpoint_owner = nullptr;
+  xdev_ext_cuda_frame_owner *frame_owner = nullptr; // frames=host
   py::dict settings;
   py::object owner;
   std::string ptx;
@@ -191,6 +193,13 @@ int close_native(State &s, bool drain = false) {
       return rc;
     }
   }
+  if (s.frame_owner) {
+    int rc = xdev_ext_cuda_frame_owner_close(&s.frame_owner);
+    if (rc) {
+      s.final_stats["retained"] = 1; s.final_stats["error"] = rc;
+      return rc;
+    }
+  }
   s.owner = py::none();
   return 0;
 }
@@ -200,7 +209,7 @@ class Communicator {
   struct Internal {};
   explicit Communicator(Internal): s_(new State(py::dict(), py::none())) {}
   void preserve_on_failure() noexcept {
-    if (!s_ || (!s_->comm && !s_->endpoint_owner)) return;
+    if (!s_ || (!s_->comm && !s_->endpoint_owner && !s_->frame_owner)) return;
     try { if (close_native(*s_) == 0) return; } catch (...) {}
     (void)s_.release();
   }
@@ -218,15 +227,21 @@ class Communicator {
     NUMBER(communicator_id, uint64_t); NUMBER(epoch, uint64_t); NUMBER(timeout_ns, uint64_t);
 #undef NUMBER
     c.context = reinterpret_cast<CUcontext>(config["context"].cast<uintptr_t>());
-    c.tx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["tx_endpoint"].cast<uintptr_t>());
-    c.rx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["rx_endpoint"].cast<uintptr_t>());
     c.trace_capacity = config.contains("trace_capacity") ? config["trace_capacity"].cast<uint32_t>() : 0;
-    TORCH_CHECK(!config.contains("flags") || config["flags"].cast<unsigned>() == 0,
+    const unsigned flags = config.contains("flags") ? config["flags"].cast<unsigned>() : 0;
+    TORCH_CHECK(flags == 0 || flags == XDEV_TP_F_HOST_FRAMES,
                 "unsupported native configuration flags");
     TORCH_CHECK(!config.contains("version") ||
                   config["version"].cast<unsigned>() == XDEV_TP_ABI_VERSION,
                 "unsupported native ABI version");
-    c.flags = 0;
+    c.flags = flags;
+    if (flags & XDEV_TP_F_HOST_FRAMES) {
+      c.tx_frames = reinterpret_cast<xdev_ext_frame_endpoint *>(config["tx_frames"].cast<uintptr_t>());
+      c.rx_frames = reinterpret_cast<xdev_ext_frame_endpoint *>(config["rx_frames"].cast<uintptr_t>());
+    } else {
+      c.tx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["tx_endpoint"].cast<uintptr_t>());
+      c.rx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["rx_endpoint"].cast<uintptr_t>());
+    }
     if (c.mode == XDEV_TP_D2_GPU) {
       c.d2_tx_producer = reinterpret_cast<xdev_ext_cuda_user *>(config["d2_tx_producer"].cast<uintptr_t>());
       c.d2_tx_terminal = reinterpret_cast<xdev_ext_cuda_user *>(config["d2_tx_terminal"].cast<uintptr_t>());
@@ -256,11 +271,16 @@ public:
     TORCH_CHECK(!stream_owner.is_none(), "actual CUDA stream owner reference required");
     s.owner = stream_owner;
     for (const char *key : {"context", "stream", "tx_endpoint", "rx_endpoint", "tx_va",
-                            "rx_va", "d2_tx_producer", "d2_tx_terminal", "d2_rx_consumer"})
+                            "rx_va", "d2_tx_producer", "d2_tx_terminal", "d2_rx_consumer",
+                            "tx_frames", "rx_frames"})
       TORCH_CHECK(!options.contains(key), "serialized process-local pointers are not admission input");
     auto rank = options["rank"].cast<unsigned>();
     TORCH_CHECK(rank < 2 && options["world_size"].cast<unsigned>() == 2,
                 "bootstrap requires rank 0/1 and world_size 2");
+    if (options.contains("frames") && options["frames"].cast<std::string>() == "host")
+      return from_host_frames(std::move(result), options, rank, stream_handle);
+    TORCH_CHECK(!options.contains("frames") || options["frames"].cast<std::string>() == "peer",
+                "frames must be peer or host");
     xdev_ext_cuda_peer_owner_opts o{}; o.size = sizeof(o); o.version = 1;
     o.mode = options["mode"].cast<uint32_t>();
     o.context_mode = XDEV_EXT_CUDA_PEER_BORROW_CURRENT;
@@ -349,6 +369,67 @@ public:
     s.bound_stream = o.stream; s.stream_bound = true;
     rc = xdev_ext_cuda_peer_owner_start(s.endpoint_owner);
     TORCH_CHECK(!rc, "native endpoint START failed; resources retained: ", rc);
+    return result;
+  }
+  // Host frames plus the GPU copy engine for a GPU without GPUDirect RDMA:
+  // the frame owner creates both host-frame endpoints on the actual current
+  // context and stream; each d1 collective posts its own batches (no START).
+  static std::unique_ptr<Communicator> from_host_frames(std::unique_ptr<Communicator> result,
+      py::dict options, unsigned rank, uint64_t stream_handle) {
+    auto &s = *result->s_;
+    const auto mode = options["mode"].cast<uint32_t>();
+    TORCH_CHECK(mode == XDEV_TP_D1_EAGER, "host frames run d1 collectives only");
+    TORCH_CHECK(!options.contains("tx_program_pins") && !options.contains("rx_program_pins"),
+                "host frames take no PEER stage pins");
+    xdev_ext_cuda_frame_owner_opts o{}; o.size = sizeof(o);
+    o.version = XDEV_EXT_CUDA_FRAME_OWNER_VERSION;
+    o.context_mode = XDEV_EXT_CUDA_PEER_BORROW_CURRENT;
+    o.device = options["device_index"].cast<uint32_t>();
+    TORCH_CHECK(cuCtxGetCurrent(&o.context) == CUDA_SUCCESS && o.context,
+                "bootstrap requires the actual current PyTorch CUDA context");
+    CUdevice actual_device;
+    TORCH_CHECK(cuCtxGetDevice(&actual_device) == CUDA_SUCCESS &&
+                  actual_device == int(o.device), "bootstrap CUDA device mismatch");
+    o.stream = reinterpret_cast<CUstream>(uintptr_t(stream_handle));
+    const std::string node = options["nvidia_node"].cast<std::string>();
+    const std::string bpf = options["bpf_object"].cast<std::string>();
+    const std::string ce = options["ce_bpf_object"].cast<std::string>();
+    o.nvidia_node = node.c_str(); o.bpf_object = bpf.c_str(); o.ce_bpf_object = ce.c_str();
+    o.link_token = options["link_token"].cast<uint64_t>();
+    o.timeout_ns = options["timeout_ns"].cast<uint64_t>();
+    o.group_bytes = options["group_bytes"].cast<uint32_t>();
+    o.receive_groups = options.contains("receive_groups") ? options["receive_groups"].cast<uint32_t>() : 1;
+    if (options.contains("early_cts")) {
+      const auto early = options["early_cts"].cast<uint64_t>();
+      TORCH_CHECK(early <= 1, "early_cts must be 0 or 1");
+      if (early) o.endpoint_flags |= XDEV_EXT_FRAME_ENDPOINT_F_EARLY;
+    }
+    const auto payload = options["max_payload_bytes"].cast<uint64_t>();
+    const auto id = options["communicator_id"].cast<uint64_t>();
+    const auto epoch = options["epoch"].cast<uint64_t>();
+    TORCH_CHECK(o.group_bytes >= 64 && payload <= o.group_bytes-64 && id && epoch,
+                "bootstrap payload/namespace does not fit actual geometry");
+    int rc = xdev_ext_cuda_frame_owner_open(&o, &s.frame_owner);
+    TORCH_CHECK(!rc, "host-frame endpoint bootstrap failed; partial ownership retained: ", rc);
+    xdev_ext_cuda_frame_owner_view v{}; v.size = sizeof(v);
+    rc = xdev_ext_cuda_frame_owner_get_view(s.frame_owner, &v);
+    TORCH_CHECK(!rc, "host-frame endpoint view failed: ", rc);
+    py::dict cfg;
+    cfg["version"] = XDEV_TP_ABI_VERSION; cfg["rank"] = rank; cfg["world_size"] = 2;
+    cfg["mode"] = mode; cfg["device_index"] = o.device;
+    cfg["flags"] = XDEV_TP_F_HOST_FRAMES;
+    cfg["context"] = reinterpret_cast<uintptr_t>(v.context);
+    cfg["tx_frames"] = reinterpret_cast<uintptr_t>(v.tx_frames);
+    cfg["rx_frames"] = reinterpret_cast<uintptr_t>(v.rx_frames);
+    cfg["tx_va"] = v.tx_va; cfg["rx_va"] = v.rx_va;
+    cfg["tx_bytes"] = v.tx_bytes; cfg["rx_bytes"] = v.rx_bytes;
+    cfg["frame_size"] = 4096; cfg["logical_depth"] = 1;
+    cfg["max_payload_bytes"] = payload; cfg["first_sequence"] = options["first_sequence"];
+    cfg["communicator_id"] = id; cfg["epoch"] = epoch; cfg["timeout_ns"] = o.timeout_ns;
+    cfg["ptx_path"] = options["ptx_path"];
+    if (options.contains("trace_capacity")) cfg["trace_capacity"] = options["trace_capacity"];
+    result->initialize(cfg);
+    s.bound_stream = o.stream; s.stream_bound = true;
     return result;
   }
   ~Communicator() {

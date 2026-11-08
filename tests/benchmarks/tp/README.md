@@ -121,6 +121,56 @@ collective operation. Every final record identifies `native_mode` (1 or 2) and
 `handoff_mode` (`cpu` or `gpu` respectively); the summary rejects missing or
 inconsistent pairs. These fields identify native handoff primitives.
 
+## Host frames for a GPU without GPUDirect RDMA
+
+The PEER route above needs GPUDirect RDMA: the XDOMAIN controller reads and
+writes the GPU allocation directly. A GPU without it (for example an RTX 5090,
+which reports `gpu_direct_rdma=0`) refuses the PEER owner. `--frames host`
+selects the host-frame route instead; `--frames peer` is the default.
+
+Each rank then owns two copy-engine windows: CUDA VMM allocations, each
+exported as a POSIX fd and attached to its own `--nvidia-node` CE fd. One
+collective:
+
+1. posts the receive batch: session `[XDOMAIN RX, CE TO_DEVICE + TARGET_RANGE]`
+   on the ring's host frames;
+2. packs header and payload on the GPU into the send window;
+3. posts the send batch: session `[CE FROM_DEVICE, XDOMAIN TX]`, so the copy
+   engine copies the send window into host frames and XDOMAIN transmits them;
+4. waits for the receive batch: XDOMAIN received the peer's group into host
+   frames and the copy engine wrote it into the receive window at
+   `(sequence % receive groups) * group bytes`;
+5. runs the result kernels on that group, then waits for the send batch.
+
+The CPU copies no payload byte. Payload still crosses host memory: one
+GPU-to-host copy on the sender and one host-to-GPU copy on the receiver, by the
+GPU copy engine.
+
+`--ce-bpf-object` names the compiled `tp_ce_place.bpf.c` (PRIVATE, one
+instance per CE stage); `--bpf-object` still names the XDOMAIN program and no
+USER program is used. Build the program for the target kernel's BTF like the
+K-KV programs:
+
+```sh
+bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+clang -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86 \
+  -I. -I"$VIEW/kernel/tools/xdev_ext_mech" -c tp_ce_place.bpf.c -o tp_ce_place.bpf.o
+```
+
+Host frames run d1 collectives only: every collective is driven by host START
+and wait calls, so d2, CUDA graph capture and `--operation echo` refuse it, and
+PRIVATE stage pins are not accepted. Metadata records `"frames": "host"`; the
+handshake marks host frames in bit 30 of the mode word, so both ranks must
+choose the same route.
+
+Host checks: `tests/core/family/xdomain_create_test.c` (CREATE admits both
+pairs on host frames), `tests/core/library/frame_endpoint_test.py`,
+`tests/compute/tp/frames_test.py` (two ranks through loopback endpoints with the
+production kernels run on the host), `tests/compute/tp/ce_place_test.py`,
+`tests/compute/tp/frame_owner_test.py` and the driver tests under
+`tests/compute/tp/eval`. None of them runs a GPU, a copy engine or XDOMAIN, and
+none measures time.
+
 ## E6 configurations
 
 The evaluation plan's E6 configurations are compositions of existing native
@@ -151,7 +201,8 @@ which hands the batch to the next USER stage through its ready ring, which the
 GPU polls. Unless the device reports GPUDirect RDMA write ordering, the
 receive side orders NHI writes before GPU reads with
 `CU_STREAM_MEM_OP_FLUSH_REMOTE_WRITES` inside the stream or graph; a device
-offering neither is rejected at open. Whether
+offering neither is rejected at open; such a GPU can run d1 with
+`--frames host` (see "Host frames" above), not d2. Whether
 these GPU-visibility and DMA paths hold on the target GPU and Thunderbolt
 controller is a hardware question this driver cannot answer. The busy-polling
 user-thread variant (d2-user) and the k=1 TCP attribution arm are not

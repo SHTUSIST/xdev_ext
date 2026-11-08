@@ -94,6 +94,39 @@ class BootstrapConfigTests(unittest.TestCase):
         self.assertEqual(off, module.agreement_key(self.options(early_cts=0)))
         self.assertNotEqual(off, module.agreement_key(self.options(early_cts=1)))
 
+    def test_host_frames_selection_for_gpus_without_gpudirect(self):
+        # TODO.59: a GPU without GPUDirect RDMA uses host frames plus the copy
+        # engine, chosen explicitly; PEER stays the default.
+        module = self.module()
+        got = module.validate_options(self.options(), rank=0, device_index=1, environ={})
+        self.assertEqual(got.get('frames', 'peer'), 'peer')
+        host = self.options(frames='host', ce_bpf_object=__file__, user_bpf_object=None)
+        got = module.validate_options(host, rank=0, device_index=1, environ={})
+        self.assertEqual(got['frames'], 'host')
+        self.assertEqual(got['receive_groups'], 1)
+        self.assertEqual(module.validate_options(dict(host, receive_groups=4), rank=0,
+                         device_index=1, environ={})['receive_groups'], 4)
+        bad = [dict(frames='gpu'), dict(frames='host'),
+               dict(frames='host', ce_bpf_object=__file__, mode=2, control_ptx_path=__file__),
+               dict(frames='host', ce_bpf_object=__file__, tx_program_pins=['/a', None, None]),
+               dict(frames='host', ce_bpf_object='/nonexistent/tp_ce_place.bpf.o'),
+               dict(frames='host', ce_bpf_object=__file__, bpf_object=None),
+               dict(frames='host', ce_bpf_object=__file__, receive_groups=0),
+               dict(ce_bpf_object=__file__), dict(receive_groups=2)]
+        for changes in bad:
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                module.validate_options(self.options(**changes), rank=0, device_index=1,
+                                        environ={'XDEV_EXT_CUDA_PTX': __file__})
+
+    def test_frames_is_a_cross_rank_agreement_field(self):
+        module = self.module()
+        peer = module.agreement_key(self.options())
+        self.assertEqual(peer, module.agreement_key(self.options(frames='peer')))
+        host = module.agreement_key(self.options(frames='host', ce_bpf_object=__file__))
+        self.assertNotEqual(peer, host)
+        self.assertNotEqual(host, module.agreement_key(
+            self.options(frames='host', ce_bpf_object=__file__, receive_groups=2)))
+
 
 class DefaultWorkerFactoryTests(unittest.TestCase):
     def test_actual_factory_agrees_before_native_owner_bootstrap(self):

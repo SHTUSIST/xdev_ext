@@ -38,6 +38,15 @@ requires `control_ptx_path` to identify the same existing file as the process's
 are the corresponding local native link admission values; communicator/epoch
 and operation geometry agree across ranks. Native validation remains final.
 
+Optional `frames` is `peer` (default) or `host`. `host` is for a GPU without
+GPUDirect RDMA: the exchange moves through host frames and the GPU copy engine
+(see "Host frames" in `tests/benchmarks/tp/README.md`). It requires `mode` 1,
+`bpf_object` and `ce_bpf_object` (the compiled `tp_ce_place.bpf.c`), accepts
+optional `receive_groups` (1 to 256, default 1) and takes no
+`user_bpf_object` or stage pins. Because d1 cannot capture CUDA graphs, run vLLM
+in eager mode with host frames. `frames` and `receive_groups` are agreement
+fields.
+
 Optional `tx_program_pins` (three entries: USER producer, XDOMAIN TX, USER
 terminal) and `rx_program_pins` (two: XDOMAIN RX, USER consumer) contain
 absolute PRIVATE link-pin paths or null per stage. Absence means all null.
