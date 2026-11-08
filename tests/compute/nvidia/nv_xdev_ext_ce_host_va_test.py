@@ -45,7 +45,7 @@ typedef NvU64 RmPhysAddr;
 #define NV_U32_MAX UINT32_MAX
 #define RM_PAGE_SIZE 4096ULL
 #define RM_PAGE_SIZE_64K 65536ULL
-#define RM_PAGE_SIZE_2M 2097152ULL
+#define RM_PAGE_SIZE_2M 2097152U
 #define ADDR_SYSMEM 1
 #define NV_MEMORY_CACHED 1
 #define MEMDESC_FLAGS_NONE 0
@@ -79,6 +79,7 @@ typedef struct { void *pbCpuVA,*pControlGPFifo,*pTokenFromNotifier,*pRsClient; N
 typedef struct { OBJCHANNEL *pChannel; NvU64 lastSubmittedPayload; } CeUtils;
 static unsigned maps, reserves, frees, deletes, descs, failures, checks;
 static unsigned fail_map, fail_free, active_va, freed_while_live;
+static NvU64 reserved_bytes;
 static NvU64 map_va[2048],map_dma[2048],map_size[2048],map_page[2048];
 static void *portMemAllocNonPaged(size_t n) { return malloc(n); }
 static void portMemFree(void *p) { free(p); }
@@ -101,12 +102,15 @@ static NV_STATUS vaspaceGetByHandleOrDeviceDefault(void *client,unsigned device,
 static NvU64 vaspaceGetVaStart(OBJVASPACE *v) {(void)v;return 4096;}
 static NvU64 vaspaceGetVaLimit(OBJVASPACE *v) {(void)v;return 1ULL<<48;}
 static NV_STATUS vaspaceAlloc(OBJVASPACE *v,NvU64 size,NvU64 align,NvU64 lo,NvU64 hi,NvU64 mask,VAS_ALLOC_FLAGS flags,NvU64 *out) {
- (void)v;(void)size;(void)align;(void)lo;(void)hi;(void)mask;(void)flags;reserves++;active_va=1;*out=0x8000000000ULL;return 0;
+ (void)v;(void)align;(void)lo;(void)hi;(void)flags;reserves++;
+ /* The real RM locks page-table levels for the whole reservation. */
+ if((mask & RM_PAGE_SIZE_2M) && (size & (RM_PAGE_SIZE_2M-1)))return NV_ERR_INVALID_ARGUMENT;
+ reserved_bytes=size;active_va=1;*out=0x8000000000ULL;return 0;
 }
 static NV_STATUS vaspaceFree(OBJVASPACE *v,NvU64 base) {(void)v;(void)base;frees++;if(fail_free)return NV_ERR_INVALID_STATE;active_va=0;return 0;}
 static NV_STATUS dmaAllocMapping_HAL(OBJGPU *g,void *dma,OBJVASPACE *v,MEMORY_DESCRIPTOR *m,NvU64 *addr,NvU32 flags,NvU32 flags2,void *info,NvU32 swizz) {
  (void)g;(void)dma;(void)v;(void)flags;(void)flags2;(void)info;(void)swizz;
- if(maps>=2048)return NV_ERR_INVALID_ARGUMENT;
+ if(maps>=2048 || *addr<0x8000000000ULL || *addr-0x8000000000ULL>reserved_bytes || m->Size>reserved_bytes-(*addr-0x8000000000ULL))return NV_ERR_INVALID_ARGUMENT;
  map_va[maps]=*addr;map_dma[maps]=m->base;map_size[maps]=m->Size;map_page[maps]=m->pageSize;maps++;
  return fail_map==maps?NV_ERR_INVALID_STATE:NV_OK;
 }
@@ -133,7 +137,7 @@ int main(void) {
  NvU64 pages[1025];void *ptr;unsigned i;
  reset();for(i=0;i<8;i++)pages[i]=0x9000000000ULL+i*8192ULL;
  ptr=bind(pages,8);expect(maps==8&&reserves==1,"fragmented pool gets one VA reservation and one map per DMA run");
- for(i=0;i<maps;i++){expect(map_dma[i]==pages[i],"already translated DMA address passed unchanged");expect(map_va[i]==0x8000000000ULL+i*4096,"mapping preserves logical host offsets");}
+ for(i=0;i<maps;i++){expect(map_dma[i]==pages[i],"already translated DMA address passed unchanged");expect(map_size[i]==4096,"reservation padding has no data mapping");expect(map_va[i]==0x8000000000ULL+i*4096,"mapping preserves logical host offsets");}
  if(ptr){P2P_UMEM_CE_HOST *h=ptr;h->pCeUtils->lastSubmittedPayload=1;
   expect(RmP2PUmemCeHostUnbind(h)==NV_ERR_BUSY_RETRY&&frees==0&&deletes==0,"pending work retains all mappings");
   h->pCeUtils->lastSubmittedPayload=0;h->poisoned=1;
@@ -146,6 +150,13 @@ int main(void) {
  reset();for(i=0;i<8;i++)pages[i]=0x9000000000ULL+i*8192ULL;fail_map=2;ptr=NULL;
  int rc=RmP2PUmemCeHostBind(&binding,pages,8,4096,32768,NULL,NULL,&ptr);
  expect(rc!=0&&ptr==NULL&&descs==0&&active_va==0,"partial bind mapping failure releases isolated channel and descriptors");
+ reset();{
+  unsigned n=1048578;NvU64 *big=malloc((size_t)n*sizeof(*big));expect(big!=NULL,"large-address fixture array allocated");
+  if(big){for(i=0;i<n-1;i++)big[i]=0x100000000ULL+(NvU64)i*4096;big[n-1]=0x400000000ULL;
+   ptr=bind(big,n);expect(reserved_bytes>UINT32_MAX&&maps==2,"reservation rounding preserves bits above4GiB");
+   if(ptr){expect(RmP2PUmemCeHostUnbind(ptr)==0&&descs==0,"large-address pool teardown");}
+   free(big);}
+ }
  reset();ptr=bind(pages,8);if(ptr){unsigned before=descs;fail_free=1;
   expect(RmP2PUmemCeHostUnbind(ptr)!=0&&descs==before&&deletes==0,"failed VA free keeps host channel and descriptors");
   expect(((P2P_UMEM_CE_HOST*)ptr)->poisoned,"failed VA free quarantines host");}
