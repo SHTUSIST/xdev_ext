@@ -12,8 +12,12 @@ extern "C" {
 #endif
 #define XDEV_TP_ABI_VERSION 1U
 /* Native work templates per communicator. Each accepted work, including a
- * captured template retained by a live CUDA graph, holds one until destroy. */
+ * captured template retained by a live CUDA graph, holds one until destroy.
+ * xdev_tp_config.template_capacity selects the count at creation; zero keeps
+ * the original default below. All template device state is allocated and
+ * zeroed at creation, never during stream capture. */
 #define XDEV_TP_TEMPLATE_CAPACITY 256U
+#define XDEV_TP_TEMPLATE_CAPACITY_MAX (1U << 20)
 typedef struct xdev_tp_comm xdev_tp_comm;
 typedef struct xdev_tp_work xdev_tp_work;
 enum xdev_tp_dtype { XDEV_TP_F16 = 1, XDEV_TP_BF16 = 2, XDEV_TP_F32 = 3 };
@@ -52,7 +56,12 @@ struct xdev_tp_config {
 	/* Open/attach before endpoint_create; required in d2, NULL in d1. */
 	struct xdev_ext_cuda_user *d2_tx_producer, *d2_tx_terminal, *d2_rx_consumer;
 	uint32_t trace_capacity, flags; /* flags=0; trace_capacity0 disables tracing */
+	/* Appended in ABI 1. A caller passing size == XDEV_TP_CONFIG_SIZE_V1_BASE
+	 * (the struct without these two fields) gets the default capacity. */
+	uint32_t template_capacity; /* 0 = XDEV_TP_TEMPLATE_CAPACITY; <= _MAX */
+	uint32_t reserved; /* must be 0 */
 };
+#define XDEV_TP_CONFIG_SIZE_V1_BASE offsetof(struct xdev_tp_config, template_capacity)
 struct xdev_tp_stats {
 	size_t size;
 	uint32_t version, rank;
@@ -95,6 +104,9 @@ int xdev_tp_submit_batch(xdev_tp_comm *, const struct xdev_tp_request *,
  size_t count, CUstream caller_stream, uint64_t first_sequence,
  xdev_tp_work **out);
 int xdev_tp_create(const struct xdev_tp_config *, xdev_tp_comm **);
+/* Effective template capacity and templates currently held (accepted or
+ * captured work not yet destroyed). Host bookkeeping only; no CUDA call. */
+int xdev_tp_get_template_usage(xdev_tp_comm *, uint32_t *capacity, uint32_t *in_use);
 int xdev_tp_allreduce_sum(xdev_tp_comm *, CUdeviceptr input, CUdeviceptr output,
 	uint64_t numel, enum xdev_tp_dtype, CUstream caller_stream,
 	uint64_t collective_seq, xdev_tp_work **);

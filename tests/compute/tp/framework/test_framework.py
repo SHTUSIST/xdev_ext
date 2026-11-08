@@ -86,6 +86,62 @@ class PolicyTests(unittest.TestCase):
         self.assertLessEqual(q.segment_elements * 2, 32 * 4096 - 64)
 
 
+class CaptureTemplateBudgetTests(unittest.TestCase):
+    """TODO.54 G0-f: templates a vLLM capture keeps alive at once.
+
+    vLLM 0.10.2 (commit 01efc7ef) defaults, read from its source: on a GPU
+    below 70 GiB max_num_seqs=256 (engine/arg_utils.py), cuda_graph_sizes=
+    [min(2*256, 512)] (config/scheduler.py), capture list [1, 2, 4] + 8..512
+    step 8 = 67 sizes (config/__init__.py), PIECEWISE graphs kept for every
+    size (config/__init__.py, v1/worker/gpu_model_runner.py capture_model).
+    Per forward: one all-reduce after VocabParallelEmbedding, one after each
+    o_proj RowParallelLinear, one after each MLP down_proj (dense) or FusedMoE
+    reduce_results (MoE); logits gather runs outside the graph.
+    Qwen3-32B: 64 layers, hidden 5120; Qwen3-30B-A3B: 48 layers, hidden 2048,
+    every layer sparse (Hugging Face config.json).
+    """
+    SIZES = [1, 2, 4] + list(range(8, 513, 8))
+
+    def budget(self, **kw):
+        from xdev_tp_torch.policy import capture_template_budget
+        return capture_template_budget(**kw)
+
+    def test_single_message_steps_hold_one_template_per_all_reduce(self):
+        self.assertEqual(self.budget(capture_sizes=[1], hidden_size=5120, all_reduces_per_step=129,
+                                     dtype='bfloat16', max_payload_bytes=131008), 129)
+        self.assertEqual(self.budget(capture_sizes=[1], hidden_size=2048, all_reduces_per_step=97,
+                                     dtype='bfloat16', max_payload_bytes=131008), 97)
+
+    def test_batch_16_dense_step_already_exceeds_the_old_256(self):
+        # 16 x 5120 x 2 B = 163,840 B > 131,008 B: two legal segments each.
+        self.assertEqual(self.budget(capture_sizes=[16], hidden_size=5120, all_reduces_per_step=129,
+                                     dtype='bfloat16', max_payload_bytes=131008), 258)
+
+    def test_default_vllm_capture_of_planned_models(self):
+        self.assertEqual(len(self.SIZES), 67)
+        self.assertEqual(self.budget(capture_sizes=self.SIZES, hidden_size=5120, all_reduces_per_step=129,
+                                     dtype='bfloat16', max_payload_bytes=131008), 172731)
+        self.assertEqual(self.budget(capture_sizes=self.SIZES, hidden_size=2048, all_reduces_per_step=97,
+                                     dtype='bfloat16', max_payload_bytes=131008), 54611)
+
+    def test_segments_follow_the_runtime_split_policy(self):
+        from xdev_tp_torch.policy import qualify
+        for size in self.SIZES:
+            q = qualify((size, 5120), dtype='bfloat16', device_type='meta', contiguous=True,
+                        world_size=2, rank=0, operation='all_reduce', max_payload_bytes=131008)
+            self.assertEqual(self.budget(capture_sizes=[size], hidden_size=5120, all_reduces_per_step=1,
+                                         dtype='bfloat16', max_payload_bytes=131008), q.segments)
+
+    def test_rejects_invalid_geometry(self):
+        for kw in (dict(capture_sizes=[0]), dict(capture_sizes=[]), dict(hidden_size=0),
+                   dict(all_reduces_per_step=-1), dict(dtype='int8'), dict(max_payload_bytes=1)):
+            args = dict(capture_sizes=[1], hidden_size=5120, all_reduces_per_step=1,
+                        dtype='bfloat16', max_payload_bytes=131008)
+            args.update(kw)
+            with self.subTest(kw=kw), self.assertRaises(ValueError):
+                self.budget(**args)
+
+
 class Tensor:
     def __init__(self, shape=(2, 2), *, dtype='float32', device='cuda', contiguous=True):
         self.shape, self.dtype = shape, dtype

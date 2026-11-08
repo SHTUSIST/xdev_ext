@@ -99,6 +99,7 @@ struct State {
   CUstream bound_stream = nullptr;
   bool stream_bound = false;
   std::vector<Work> works;
+  size_t template_capacity = XDEV_TP_TEMPLATE_CAPACITY; // native effective pool
   py::list finished;
   py::dict final_stats;
   explicit State(py::dict d, py::object o): settings(d), owner(o) {}
@@ -221,6 +222,7 @@ class Communicator {
     c.tx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["tx_endpoint"].cast<uintptr_t>());
     c.rx_endpoint = reinterpret_cast<xdev_ext_peer_endpoint *>(config["rx_endpoint"].cast<uintptr_t>());
     c.trace_capacity = config.contains("trace_capacity") ? config["trace_capacity"].cast<uint32_t>() : 0;
+    c.template_capacity = config.contains("template_capacity") ? config["template_capacity"].cast<uint32_t>() : 0;
     TORCH_CHECK(!config.contains("flags") || config["flags"].cast<unsigned>() == 0,
                 "unsupported native configuration flags");
     TORCH_CHECK(!config.contains("version") ||
@@ -242,6 +244,10 @@ class Communicator {
                 "admitted CUDA context device differs from Tensor device");
     const int rc = xdev_tp_create(&c, &s.comm);
     TORCH_CHECK(!rc, "xdev TP creation failed: ", rc);
+    uint32_t capacity = 0, in_use = 0;
+    TORCH_CHECK(xdev_tp_get_template_usage(s.comm, &capacity, &in_use) == 0 && capacity && !in_use,
+                "native template pool query failed");
+    s.template_capacity = capacity;
     s.setup_sequence = c.first_sequence;
   }
 public:
@@ -340,6 +346,7 @@ public:
     cfg["communicator_id"] = id; cfg["epoch"] = epoch; cfg["timeout_ns"] = o.timeout_ns;
     cfg["ptx_path"] = options["ptx_path"];
     if (options.contains("trace_capacity")) cfg["trace_capacity"] = options["trace_capacity"];
+    if (options.contains("template_capacity")) cfg["template_capacity"] = options["template_capacity"];
     if (o.mode == XDEV_TP_D2_GPU) {
       cfg["d2_tx_producer"] = reinterpret_cast<uintptr_t>(v.tx_producer);
       cfg["d2_tx_terminal"] = reinterpret_cast<uintptr_t>(v.tx_terminal);
@@ -412,7 +419,7 @@ public:
     const size_t count = inputs.size();
     TORCH_CHECK(count >= 1 && count == outputs.size(),
                 "segment input/output lists must be nonempty and equal length");
-    TORCH_CHECK(count <= s.cfg.logical_depth && count <= XDEV_TP_TEMPLATE_CAPACITY,
+    TORCH_CHECK(count <= s.cfg.logical_depth && count <= s.template_capacity,
                 "segment window exceeds admitted logical depth");
     TORCH_CHECK(count == 1 || s.cfg.mode == XDEV_TP_D2_GPU,
                 "d1 submits exactly one segment per native call");
@@ -440,7 +447,7 @@ public:
                      XDEV_TP_SUM, uint32_t(plans[i].dtype), 0, 0};
     }
     if (!capturing) { reap(s); (void)statistics(s); }
-    TORCH_CHECK(s.works.size() + count <= XDEV_TP_TEMPLATE_CAPACITY,
+    TORCH_CHECK(s.works.size() + count <= s.template_capacity,
                 "native template capacity exhausted; reserve templates before submitting");
     // Allocate all custody bookkeeping before any possible native side effect.
     const size_t base = s.works.size();
@@ -474,20 +481,21 @@ public:
     if (!capturing) reap(s);
   }
   size_t template_available() const {
-    return XDEV_TP_TEMPLATE_CAPACITY - std::min<size_t>(s_->works.size(), XDEV_TP_TEMPLATE_CAPACITY);
+    const size_t capacity = s_->template_capacity;
+    return capacity - std::min<size_t>(s_->works.size(), capacity);
   }
   // Outside capture only: wait until count native templates are free. Earlier
   // accepted work releases its template only after actual completion and
   // destroy; templates held by live CUDA graphs are never released here.
   void reserve_templates(size_t count, uint64_t timeout) {
     auto &s = *s_; TORCH_CHECK(s.comm, "xdev TP communicator is closed");
-    TORCH_CHECK(count >= 1 && count <= XDEV_TP_TEMPLATE_CAPACITY,
+    TORCH_CHECK(count >= 1 && count <= s.template_capacity,
                 "segment window exceeds native template capacity");
     outside_capture(s);
     const auto start = std::chrono::steady_clock::now();
     for (;;) {
       reap(s); (void)statistics(s);
-      if (s.works.size() + count <= XDEV_TP_TEMPLATE_CAPACITY) return;
+      if (s.works.size() + count <= s.template_capacity) return;
       for (const auto &work : s.works) {
         const int rc = xdev_tp_work_query(work.handle);
         TORCH_CHECK(rc >= 0, "native work failed while reserving templates; work retained: ", rc);

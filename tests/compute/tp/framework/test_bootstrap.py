@@ -94,6 +94,41 @@ class BootstrapConfigTests(unittest.TestCase):
         self.assertEqual(off, module.agreement_key(self.options(early_cts=0)))
         self.assertNotEqual(off, module.agreement_key(self.options(early_cts=1)))
 
+    def test_template_capacity_is_optional_bounded_and_agreed(self):
+        # TODO.54 G0-f: one captured vLLM decode graph can need more than the
+        # 256 native templates the library used to fix at compile time.
+        module = self.module()
+        self.assertNotIn('template_capacity',
+                         module.validate_options(self.options(), rank=0, device_index=1, environ={}))
+        for value in (1, 300, 172731, 1 << 20):
+            got = module.validate_options(self.options(template_capacity=value), rank=0,
+                                          device_index=1, environ={})
+            self.assertEqual(got['template_capacity'], value)
+        for value in ((1 << 20) + 1, -1, True, False, 2.0, '300', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                module.validate_options(self.options(template_capacity=value), rank=0,
+                                        device_index=1, environ={})
+        default = module.agreement_key(self.options())
+        self.assertEqual(default, module.agreement_key(self.options(template_capacity=256)))
+        self.assertNotEqual(default, module.agreement_key(self.options(template_capacity=4096)))
+
+    def test_zero_template_capacity_selects_native_default_without_mutating_input(self):
+        module = self.module()
+        original = self.options(template_capacity=0)
+        got = module.validate_options(original, rank=0, device_index=1, environ={})
+        self.assertEqual(got['template_capacity'], module.TEMPLATE_CAPACITY_DEFAULT)
+        self.assertEqual(original['template_capacity'], 0)
+        absent = module.validate_options(self.options(rank=1, device_index=0), rank=1,
+                                         device_index=0, environ={})
+        self.assertEqual(module.agreement_key(got), module.agreement_key(absent))
+
+    def test_zero_absent_and_explicit_default_agree_before_bootstrap(self):
+        module = self.module()
+        absent = module.agreement_key(self.options())
+        self.assertEqual(absent, module.agreement_key(self.options(template_capacity=0)))
+        self.assertEqual(absent, module.agreement_key(self.options(template_capacity=256)))
+        self.assertNotEqual(absent, module.agreement_key(self.options(template_capacity=300)))
+
 
 class DefaultWorkerFactoryTests(unittest.TestCase):
     def test_actual_factory_agrees_before_native_owner_bootstrap(self):

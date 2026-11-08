@@ -66,3 +66,26 @@ def qualify(shape, *, dtype, device_type, contiguous, world_size, rank,
     output = (*shape[:-1], shape[-1] * 2)
     return Qualified(output if operation == 'all_gather' or rank == dst else None,
                      rows, shape[-1])
+
+
+def capture_template_budget(*, capture_sizes, hidden_size, all_reduces_per_step,
+                            dtype, max_payload_bytes):
+    """Native templates held at once after capturing one graph per size.
+
+    Each captured all-reduce keeps one native template per legal segment
+    while its graph lives (the split is qualify()'s, from max_payload_bytes).
+    A token row is hidden_size elements, so a size-n graph reduces n rows.
+    Use the result as the communicator's template_capacity.
+    """
+    sizes = list(capture_sizes)
+    if (not sizes or any(not isinstance(n, int) or n < 1 for n in sizes) or
+            not isinstance(hidden_size, int) or hidden_size < 1 or
+            not isinstance(all_reduces_per_step, int) or all_reduces_per_step < 0):
+        raise ValueError('capture sizes, hidden size and all-reduce count must be positive')
+    total = 0
+    for n in sizes:
+        q = qualify((n, hidden_size), dtype=dtype, device_type='meta', contiguous=True,
+                    world_size=2, rank=0, operation='all_reduce',
+                    max_payload_bytes=max_payload_bytes)
+        total += all_reduces_per_step * q.segments
+    return total
