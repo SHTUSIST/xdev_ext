@@ -2277,6 +2277,54 @@
       "logical_path": "tests/eval/dmabuf_lifecycle/test_runner_provenance.py"
     },
     {
+      "source": "tests/benchmarks/dpdk_tb/Makefile",
+      "logical_path": "tests/eval/dpdk_tb/Makefile"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/README.md",
+      "logical_path": "tests/eval/dpdk_tb/README.md"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/build.py",
+      "logical_path": "tests/eval/dpdk_tb/build.py"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/dpdk_tb.c",
+      "logical_path": "tests/eval/dpdk_tb/dpdk_tb.c"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/hugepages.sh",
+      "logical_path": "tests/eval/dpdk_tb/hugepages.sh"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/tb_gpu.h",
+      "logical_path": "tests/eval/dpdk_tb/tb_gpu.h"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/tb_gpu_cuda.c",
+      "logical_path": "tests/eval/dpdk_tb/tb_gpu_cuda.c"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/tb_gpu_host.c",
+      "logical_path": "tests/eval/dpdk_tb/tb_gpu_host.c"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/tb_wire.h",
+      "logical_path": "tests/eval/dpdk_tb/tb_wire.h"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/test_contract.py",
+      "logical_path": "tests/eval/dpdk_tb/test_contract.py"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/test_wire.c",
+      "logical_path": "tests/eval/dpdk_tb/test_wire.c"
+    },
+    {
+      "source": "tests/benchmarks/dpdk_tb/vm_check.sh",
+      "logical_path": "tests/eval/dpdk_tb/vm_check.sh"
+    },
+    {
       "source": "tests/benchmarks/gds/Makefile",
       "logical_path": "tests/eval/gds/Makefile"
     },
