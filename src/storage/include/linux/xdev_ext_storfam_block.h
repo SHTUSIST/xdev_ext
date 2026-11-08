@@ -122,12 +122,18 @@ struct xdev_ext_stor_dev_ops {
 		bool quiesced);
 	/* Optional; after the command's completion was consumed: the requester
 	 * record and the DMA-stop epoch the command became visible to the device
-	 * in.  NULL and XDEV_EXT_PEER_EPOCH_NONE when it never reached a queue.
-	 * Without it an UNKNOWN peer command can never be released. */
+	 * in, read from io->peer_native (a device-memory slot, or a host-page
+	 * slot when host_native_bytes is set).  NULL and
+	 * XDEV_EXT_PEER_EPOCH_NONE when it never reached a queue.  Without it an
+	 * UNKNOWN command can never be released. */
 	void (*peer_evidence)(void *member, const struct xdev_ext_stor_io *io,
 		struct xdev_ext_peer_requester **rq, __u64 *epoch);
 	__u32 peer_slot_bytes;
 	__u32 peer_native_offset;
+	/* Native-request host-page slots: bytes of member state per slot, at
+	 * io->peer_native, a multiple of 8; 0 for none (no evidence for those
+	 * slots). */
+	__u32 host_native_bytes;
 	int (*poll)(void *member, const struct xdev_ext_stor_poll_view *views,
 		__u32 nr_views);
 };
@@ -163,7 +169,7 @@ struct xdev_ext_stor_stage {
 	struct xdev_ext_stor_geometry geometry;
 	atomic_t dead;
 	struct xdev_ext_stor_poll_view poll_views[2];
-	struct xdev_ext_stor_io *slots;
+	struct xdev_ext_stor_io *slots;	/* then nr_slots * dev->host_native_bytes */
 	struct xdev_ext_stor_pool pool;
 	__u32 nr_slots;
 	__u16 nr_vecs;
@@ -199,9 +205,9 @@ void xdev_ext_storfam_consume(struct xdev_ext_stor_stage *ss,
 		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb);
 bool xdev_ext_storfam_unbind(struct xdev_ext_stor_stage *ss);
 /* Process context, quarantined session, nothing in flight and no worker:
- * the worst enum xdev_ext_peer_evidence over the slots retained after
- * UNKNOWN outcomes, and, once COVERED, their return (0, or -errno while
- * any stays retained). */
+ * the worst enum xdev_ext_peer_evidence over the host-page and device-memory
+ * slots retained after UNKNOWN outcomes, and, once COVERED, their return (0,
+ * or -errno while any stays retained). */
 int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss);
 int xdev_ext_storfam_evidence_release(struct xdev_ext_stor_stage *ss);
 void xdev_ext_storfam_host_ready(struct xdev_ext_mech_batch *batch,

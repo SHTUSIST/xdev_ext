@@ -132,6 +132,7 @@ jobs:
           python3 -I tests/core/peer_quarantine/mutations.py --source-root "$GITHUB_WORKSPACE"
           python3 -I tests/core/peer_quarantine/native_mutations.py --source-root "$GITHUB_WORKSPACE"
           python3 -I build/source-view/kernel/tools/testing/selftests/xdev_ext_peer/guest/reset_validate_test.py
+          python3 -I tests/storage/family_block_evidence/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/family-block-evidence"
       - name: Ordinary XSK DATA pool authority and count-journal contracts
         working-directory: .
         if: matrix.cc == 'gcc'

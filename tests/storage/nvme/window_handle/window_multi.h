@@ -35,7 +35,9 @@
  *             refused with -ERANGE, no write submitted, its window guard
  *   unknown : tenant 0 reads ns2 with an injected error status: its batches
  *             are sequestered, STOP quarantines it (-EBUSY) and its range
- *             stays reserved for good; its window guard
+ *             stays reserved while no reset has proven those commands
+ *             stopped; the timeout round's closing reset of the DST
+ *             controller does, and then releases it; its window guard
  *   timeout : tenant 0 reads ns2 with every completion swallowed: STOP passes
  *             the drain bound with commands in flight (-EBUSY) and its range
  *             stays reserved; after the round, with nothing else running, the
@@ -48,11 +50,16 @@
  * and the whole-disk oracle requires every innocent window to be its exact
  * source window and every byte nobody owns to stay guard.
  *
- * "reset" (window_guest ... reset AUX_BLOCK AUX_NG) is a diagnostic, not a
- * gate: the same four tenants, tenant 0's completions swallowed, and the
- * holder resets the DST controller while the innocent tenants still have
- * commands in flight, as nvme_timeout does on a second expiry. It reports
- * what each innocent tenant ends with and whether it stayed isolated.
+ * "reset" (window_guest ... reset AUX_BLOCK AUX_NG): the same four tenants,
+ * tenant 0's completions swallowed, and the holder resets the DST controller
+ * while the innocent tenants may still have commands in flight, as
+ * nvme_timeout does on a second expiry. A write the reset aborts ends
+ * UNKNOWN and is sequestered, so that innocent's STOP quarantines it; the
+ * reset's own DMA-stop proof covers every command prepared before it began,
+ * so the session is then released. Gate: each innocent either STOPs with 0
+ * after all its batches with its exact window, or is released; every range
+ * is free in the end. It reports what each tenant ends with; the runner's
+ * whole-disk oracle (window_validate.py --reset) checks the destination.
  */
 #include <signal.h>
 #include <time.h>
@@ -512,6 +519,12 @@ static int multi_main(char **argv)
 			printf("# multi: timeout range reserved for %d polls of 10 ms after the reset\n", i);
 			CHECK(fd >= 0, "the reset ended the timed-out commands and the deferred release freed the range");
 			CHECK(!close(fd), "close it");
+			/* The same reset proves the unknown round's UNKNOWN READs stopped. */
+			for (i = 0; i < 3000 && (fd = issue(dstng, win(m_win(R_UNKNOWN, 0)), WIN_NLB, RDWR, 0)) == -EBUSY; i++)
+				usleep(10000);
+			printf("# multi: unknown range reserved for %d polls of 10 ms after the reset\n", i);
+			CHECK(fd >= 0, "the reset's DMA-stop proof releases the quarantined unknown session and its range");
+			CHECK(!close(fd), "close it");
 		}
 	}
 
@@ -559,8 +572,10 @@ static int reset_main(char **argv)
 	struct mmsg ready[M_TENANTS], fin[M_TENANTS], kp;
 	struct mchild c[M_TENANTS];
 	unsigned char *source, *dest;
-	int src, srcng, dst, dstng, auxng, status, rh[M_TENANTS], wh[M_TENANTS];
-	unsigned t, u, isolated = 0, overlapped = 0;
+	int src, srcng, dst, dstng, auxng, status, rh[M_TENANTS], wh[M_TENANTS], polls;
+	unsigned t, u, isolated = 0, released = 0, overlapped = 0;
+	bool clean[M_TENANTS] = { false };
+	char exact[2 * M_TENANTS + 1] = "";
 	const char *disk = strrchr(argv[7], '/') + 1;
 	const unsigned r = R_RESET;
 	__u64 t_reset;
@@ -611,6 +626,8 @@ static int reset_main(char **argv)
 		bool ran_over = fin[t].t_end > t_reset;
 		bool ok = fin[t].done == GROUPS && !fin[t].abort_ && !fin[t].sequestered && !fin[t].stop_ret && exact;
 
+		clean[t] = ok;
+
 		printf("XDEV_EXT_WINDOW_RESET_DIAG tenant=%u role=%s done=%llu abort=%llu sequestered=%llu "
 		       "last_err=%d state=%u stop=%d window_exact=%d ended_after_reset=%d end_us=%+lld\n",
 		       t, t ? "innocent" : "faulty", (unsigned long long)fin[t].done,
@@ -622,19 +639,31 @@ static int reset_main(char **argv)
 			overlapped += ran_over;
 		}
 	}
+	/* A quarantined session is released by the recovery work after its STOP. */
 	for (u = 0; u < M_TENANTS; u++) {
-		int fd = issue(dstng, win(m_win(r, u)), WIN_NLB, RDWR, 0);
+		int fd = -EBUSY;
 
-		printf("XDEV_EXT_WINDOW_RESET_DIAG range tenant=%u %s\n", u, fd >= 0 ? "free" : "reserved");
+		for (polls = 0; polls < 3000 && (fd = issue(dstng, win(m_win(r, u)), WIN_NLB, RDWR, 0)) == -EBUSY; polls++)
+			usleep(10000);
+		printf("XDEV_EXT_WINDOW_RESET_DIAG range tenant=%u %s polls=%d\n", u,
+		       fd >= 0 ? "free" : "reserved", polls);
+		CHECK(fd >= 0, "the tenant's range is free once its session is released");
 		if (fd >= 0)
 			close(fd);
+		if (u && !clean[u])
+			released += fd >= 0;
+		if (u && clean[u])
+			snprintf(exact + strlen(exact), sizeof(exact) - strlen(exact), "%s%u", *exact ? "," : "", u);
 	}
+	CHECK(isolated + released == M_TENANTS - 1,
+	      "every innocent STOPs with 0 and its exact window, or is released after the reset's proof");
 	printf("XDEV_EXT_WINDOW_RESET_DIAG faulty_stuck inflight=%llu submitted=%llu\n",
 	       (unsigned long long)kp.inflight, (unsigned long long)kp.submitted0);
+	printf("XDEV_EXT_WINDOW_RESET_EXACT tenants=%s\n", *exact ? exact : "-");
 	close(src); close(srcng); close(dst); close(dstng); close(auxng);
 	free(source); free(dest);
 	printf("1..%u\n", checks);
-	printf("XDEV_EXT_WINDOW_RESET_DIAG=DONE innocents=%u isolated=%u ran_over_reset=%u timing=none\n",
-	       M_TENANTS - 1, isolated, overlapped);
+	printf("XDEV_EXT_WINDOW_RESET_DIAG=DONE innocents=%u isolated=%u released=%u ran_over_reset=%u timing=none\n",
+	       M_TENANTS - 1, isolated, released, overlapped);
 	return 0;
 }

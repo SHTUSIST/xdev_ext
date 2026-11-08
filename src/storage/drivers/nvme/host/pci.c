@@ -1209,29 +1209,39 @@ static u64 nvme_pci_peer_quiesce_begin(struct nvme_dev *dev)
  * (NVMe Base 2.0c 3.7.2). With Bus Master Enable read back clear the
  * function issues no further request. A shutdown, a dead controller, a
  * failed wait or an error response proves nothing.
+ *
+ * The I/O queues are still quiesced here: a dispatch that read @epoch
+ * entered its section before the quiesce finished and rang its doorbell
+ * before CC.EN=0, so the stop covers @epoch too. The next epoch begins for
+ * the dispatches after the restart; proving it covers every earlier one.
  */
 static void nvme_pci_peer_quiesce_end(struct nvme_dev *dev, u64 epoch, bool reset)
 {
 	struct pci_dev *pdev = to_pci_dev(dev->dev);
 	u16 command;
+	u64 next;
 
 	/* An error response reads as all ones, Bus Master included. */
 	if (!reset || pci_read_config_word(pdev, PCI_COMMAND, &command) ||
 	    (command & PCI_COMMAND_MASTER))
 		return;
-	xdev_ext_peer_requester_quiesced(dev->peer_requester, epoch);
+	/* shutdown_lock: no other epoch began since @epoch; fail closed if one did. */
+	next = xdev_ext_peer_requester_begin(dev->peer_requester);
+	if (next == epoch + 1)
+		xdev_ext_peer_requester_quiesced(dev->peer_requester, next);
 }
 
 /*
  * Last preparation step, inside the dispatch section that the quiesce above
- * waits for and before the SQ copy: the epoch this peer command becomes
- * visible to the controller in.
+ * waits for and before the SQ copy: the epoch this peer or mechanism
+ * host-page command becomes visible to the controller in.
  */
 static void nvme_pci_peer_note_submit(struct nvme_dev *dev, struct request *req)
 {
 	struct nvme_xdev_ext_peer_trace *ctx = nvme_req(req)->peer_trace;
 
-	if ((nvme_req(req)->flags & NVME_REQ_XDEV_EXT_PEER) && ctx &&
+	if ((nvme_req(req)->flags &
+	     (NVME_REQ_XDEV_EXT_PEER | NVME_REQ_XDEV_EXT_EPOCH)) && ctx &&
 	    ctx->cookie == (u64)(unsigned long)req) {
 		ctx->requester = dev->peer_requester;
 		ctx->submit_epoch = xdev_ext_peer_requester_epoch(dev->peer_requester);

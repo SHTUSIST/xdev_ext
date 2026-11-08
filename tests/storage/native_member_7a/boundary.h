@@ -49,6 +49,7 @@ typedef uint64_t sector_t; typedef uint64_t dma_addr_t; typedef unsigned blk_opf
 #define NVME_REQ_USERCMD 1
 #define NVME_REQ_XDEV_EXT_ZC 2
 #define NVME_REQ_XDEV_EXT_PEER 4
+#define NVME_REQ_XDEV_EXT_EPOCH 64
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_SGL_FMT_DATA_DESC 0
 #define NVME_SGL_FMT_LAST_SEG_DESC 3

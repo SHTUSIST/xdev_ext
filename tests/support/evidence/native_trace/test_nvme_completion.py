@@ -88,6 +88,7 @@ typedef uint64_t u64;
 typedef int blk_status_t;
 enum rq_end_io_ret { RQ_END_IO_FREE };
 #define NVME_REQ_CANCELLED 1
+#define NVME_REQ_XDEV_EXT_EPOCH 64
 #define le64_to_cpu(x) (x)
 #define WRITE_ONCE(x, v) ((x) = (v))
 struct xdev_ext_mech_batch { int claim; unsigned bytes; };
@@ -96,7 +97,7 @@ struct xdev_ext_stor_completion {
     struct xdev_ext_mech_batch *b; u64 ticket; bool uncertain; bool poll_live; unsigned poll_queue;
 };
 struct nvme_xdev_ext_mech_batch { void *bio; int cqe; };
-struct nvme_req_data { int flags, status; struct { u64 u64; } result; };
+struct nvme_req_data { int flags, status; struct { u64 u64; } result; void *peer_trace; };
 struct request { void *end_io_data, *bio; unsigned bytes; struct nvme_req_data nvme; };
 static struct nvme_xdev_ext_mech_batch bp;
 static unsigned traced, published, sequence, trace_order, publish_order;

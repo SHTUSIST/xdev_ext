@@ -212,6 +212,7 @@ static void kvfree(const void *p) { if (p) kv_live--; free((void *)p); }
 #define NVME_REQ_CANCELLED (1 << 0)
 #define NVME_REQ_USERCMD (1 << 1)
 #define NVME_REQ_XDEV_EXT_PEER (@PEER_FLAG@)
+#define NVME_REQ_XDEV_EXT_EPOCH (1U << 6)
 #define REQ_FAILFAST_DEV (1U << 8)
 #define REQ_FAILFAST_TRANSPORT (1U << 9)
 #define REQ_FAILFAST_DRIVER (1U << 10)

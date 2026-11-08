@@ -9104,6 +9104,18 @@
       "logical_path": "tests/network/xsk_zc_tx_callers/zc_tx_rule_test.c"
     },
     {
+      "source": "tests/storage/family_block_evidence/cases.c",
+      "logical_path": "tests/storage/family_block_evidence/cases.c"
+    },
+    {
+      "source": "tests/storage/family_block_evidence/run.py",
+      "logical_path": "tests/storage/family_block_evidence/run.py"
+    },
+    {
+      "source": "tests/storage/family_block_evidence/shim.h",
+      "logical_path": "tests/storage/family_block_evidence/shim.h"
+    },
+    {
       "source": "tests/storage/family_block_poll/README.md",
       "logical_path": "tests/storage/family_block_poll/README.md"
     },

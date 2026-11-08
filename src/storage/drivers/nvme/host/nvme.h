@@ -215,6 +215,7 @@ enum {
 	NVME_MPATH_CNT_ACTIVE		= (1 << 3),
 	NVME_REQ_XDEV_EXT_ZC			= (1 << 4), /* mechanism: SGL only, no bounce */
 	NVME_REQ_XDEV_EXT_PEER		= (1 << 5), /* private lease observation context */
+	NVME_REQ_XDEV_EXT_EPOCH		= (1 << 6), /* mechanism host pages: DMA-stop epoch record */
 };
 
 static inline struct nvme_request *nvme_req(struct request *req)

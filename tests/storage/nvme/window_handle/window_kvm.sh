@@ -12,9 +12,12 @@
 # namespace of a two-namespace DST controller while one of them fails; it
 # needs CONFIG_FAULT_INJECTION_DEBUG_FS and CONFIG_FAIL_IO_TIMEOUT (the faults
 # are the kernel's own, on the faulty tenant's private namespace only).
-# --mode multi-reset is a diagnostic on the same devices: a DST controller
-# reset while innocent tenants have commands in flight; it reports what they
-# end with (XDEV_EXT_WINDOW_RESET_DIAG lines) and gates only on the run itself.
+# --mode multi-reset runs on the same devices: a DST controller reset while
+# innocent tenants may have commands in flight. It reports what they end with
+# (XDEV_EXT_WINDOW_RESET_DIAG lines) and gates on each innocent STOPping with
+# 0 and its exact window or being released after the reset's DMA-stop proof,
+# on every range being free, on each quarantined session leaving quarantine,
+# and on the whole-disk oracle (window_validate.py --reset).
 #
 #   bash window_kvm.sh --scratch DIR --source CANON --native LINUX --build BUILD [--mode multi|multi-reset]
 set -euo pipefail
@@ -133,10 +136,21 @@ main() {
     verb=$(cat /opt/window/mode)
     if [ "$verb" = multi ] || [ "$verb" = reset ]; then
         mount -t debugfs debugfs /sys/kernel/debug || return 1
-        ls -l "/dev/${dst}n2" "/dev/ng${dst#nvme}n2" || return 1
+        # Disk names follow namespace discovery order, not the NSID:
+        # pick the shared (NSID 1) and the private (NSID 2) namespace.
+        shared= private=
+        for b in /sys/block/${dst}n*; do
+            case "$(cat "$b/nsid" 2>/dev/null)" in
+            1) shared=${b##*/} ;;
+            2) private=${b##*/} ;;
+            esac
+        done
+        [ -n "$shared" ] && [ -n "$private" ] || { echo 'FAIL DST namespaces 1 and 2 not found'; return 1; }
+        echo "XDEV_EXT_WINDOW_NAMESPACES shared=$shared private=$private"
+        ls -l "/dev/$shared" "/dev/ng${shared#nvme}" "/dev/$private" "/dev/ng${private#nvme}" || return 1
         /opt/window/window_guest "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
-            "/dev/${dst}n1" "/dev/ng${dst#nvme}n1" /opt/window "$verb" \
-            "/dev/${dst}n2" "/dev/ng${dst#nvme}n2"
+            "/dev/$shared" "/dev/ng${shared#nvme}" /opt/window "$verb" \
+            "/dev/$private" "/dev/ng${private#nvme}"
         return
     fi
     /opt/window/window_guest "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
@@ -225,8 +239,8 @@ if grep -q '^not ok' "$EV/guest.log"; then echo 'FAIL a guest check reported not
 sed -n '/XDEV_EXT_WINDOW_DMESG_BEGIN/,/XDEV_EXT_WINDOW_DMESG_END/p' "$EV/guest.log" >"$EV/dmesg.txt"
 # multi: exactly the one expected quarantine (the unknown round's session at
 # STOP) and one deferred release (the timeout round's session, released after
-# the closing reset); anything else fails as in window mode. multi-reset only
-# records them.
+# the closing reset); anything else fails as in window mode. multi-reset
+# allows them, but every quarantined session must leave quarantine.
 allowed='^$'
 [[ "$MODE" == multi-reset ]] && allowed='xdev_ext_mech: (session [0-9]+ quarantined, |drain bound passed )'
 if [[ "$MODE" == multi ]]; then
@@ -235,6 +249,13 @@ if [[ "$MODE" == multi ]]; then
     [[ "$n" == 1 ]] || { echo "FAIL expected 1 quarantined session, saw $n"; exit 1; }
     n=$(grep -c 'drain bound passed with [0-9]* batches in flight' "$EV/dmesg.txt" || true)
     [[ "$n" == 1 ]] || { echo "FAIL expected 1 deferred release, saw $n"; exit 1; }
+fi
+if [[ "$MODE" == multi || "$MODE" == multi-reset ]]; then
+    # The DST controller resets prove the quarantined sessions' commands stopped.
+    q=$(grep -cE 'xdev_ext_mech: session [0-9]+ quarantined, ' "$EV/dmesg.txt" || true)
+    l=$(grep -cE 'xdev_ext_mech: session [0-9]+ leaves quarantine: ' "$EV/dmesg.txt" || true)
+    printf 'quarantined=%s left_quarantine=%s\n' "$q" "$l" >"$EV/quarantine-counts.txt"
+    [[ "$q" == "$l" ]] || { echo "FAIL $q sessions quarantined but $l left quarantine"; exit 1; }
 fi
 if grep -E 'WARNING:|BUG:|Oops|KASAN|UBSAN|circular locking|inconsistent lock|RCU stall|soft lockup|hung task|blocked for more than|quarantined|deferred drain' "$EV/dmesg.txt" | \
     grep -v 'KernelAddressSanitizer initialized' | grep -vE "$allowed"; then
@@ -247,9 +268,13 @@ if [[ "$MODE" == multi ]]; then
     python3 -I "$TEST_DIR/window_validate.py" --multi "$OUT/source-before.raw" "$OUT/destination.raw" \
         "$OUT/aux.raw" "$kill_min" >"$EV/whole-disk.json" || true
 elif [[ "$MODE" == multi-reset ]]; then
-    # Diagnostic: the guest reports per-tenant end states and window exactness.
+    # Per-tenant end states; innocents that STOPped cleanly must be exact.
     grep '^XDEV_EXT_WINDOW_RESET_DIAG' "$EV/guest.log" >"$EV/reset-diagnostic.txt"
-    printf '{"state": "PASS", "note": "diagnostic mode: no whole-disk gate"}\n' >"$EV/whole-disk.json"
+    # Serial console lines end in CR LF.
+    exact=$(sed -n 's/^XDEV_EXT_WINDOW_RESET_EXACT tenants=\([-0-9,]*\).*/\1/p' "$EV/guest.log" | tail -1)
+    [[ -n "$exact" ]] || { echo 'FAIL no exact-tenant list reported'; exit 1; }
+    python3 -I "$TEST_DIR/window_validate.py" --reset "$OUT/source-before.raw" "$OUT/destination.raw" \
+        "$OUT/aux.raw" "$exact" >"$EV/whole-disk.json" || true
 else
     python3 -I "$TEST_DIR/window_validate.py" "$OUT/source-before.raw" "$OUT/destination.raw" >"$EV/whole-disk.json" || true
 fi
