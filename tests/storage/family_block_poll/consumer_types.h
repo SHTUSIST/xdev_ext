@@ -10,6 +10,7 @@
 #define BLK_MQ_REQ_NOWAIT 1
 #define NVME_REQ_USERCMD 1U
 #define NVME_REQ_XDEV_EXT_PEER 2U
+#define NVME_REQ_XDEV_EXT_EPOCH 64U
 #define NVME_REQ_CANCELLED 4U
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_CTRL_LIVE 1
@@ -93,6 +94,7 @@ struct nvme_request {struct nvme_command *cmd;unsigned flags;int status;union {u
 #define BLK_MQ_REQ_NOWAIT 1
 #define NVME_REQ_USERCMD 1U
 #define NVME_REQ_XDEV_EXT_PEER 2U
+#define NVME_REQ_XDEV_EXT_EPOCH 64U
 #define NVME_REQ_CANCELLED 4U
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_CTRL_LIVE 1

@@ -30,6 +30,7 @@ def artifact(name, content):
 
 CONTEXT = r'''
 #define NVME_REQ_XDEV_EXT_PEER 32
+#define NVME_REQ_XDEV_EXT_EPOCH 64
 #define U64_MAX UINT64_MAX
 struct xdev_ext_peer_lease { void *mapping; u64 ticket,dma_address; u32 len; };
 struct xdev_ext_peer_fd_lease { struct xdev_ext_peer_lease lease; void *file; };

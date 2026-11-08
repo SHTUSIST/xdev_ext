@@ -19,7 +19,6 @@ typedef struct { int counter; } atomic_t;
 #define kcalloc(n, s, f) calloc(n, s)
 #define DIV_ROUND_UP(n, d) (((n) + (d) - 1) / (d))
 #define min_t(t, a, b) ((t)(a) < (t)(b) ? (t)(a) : (t)(b))
-#define max(a, b) ((a) > (b) ? (a) : (b))
 #define WRITE_ONCE(x, v) ((x) = (v))
 #define READ_ONCE(x) (x)
 #define le64_to_cpu(x) (x)

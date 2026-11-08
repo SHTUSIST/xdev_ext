@@ -195,9 +195,7 @@ static bool xdev_ext_storfam_host_resources_free(struct xdev_ext_stor_stage *p)
 		kfree(slot->bio);
 	}
 	kfree(p->slots);
-	kfree(p->host_native);
 	p->slots = NULL;
-	p->host_native = NULL;
 	p->pool.free = NULL;
 	p->nr_slots = 0;
 	return true;
@@ -224,20 +222,17 @@ static int xdev_ext_storfam_host_resources_init(struct xdev_ext_stor_stage *p)
 	if (!pieces)
 		return -EINVAL;
 	p->nr_vecs = min_t(u64, pieces, BIO_MAX_INLINE_VECS);
-	p->slots = kcalloc(p->nr_slots, sizeof(*p->slots), GFP_KERNEL);
+	/* One allocation: the slots, then each slot's member state (its
+	 * per-command DMA-stop record, read by dev->peer_evidence). */
+	p->slots = kcalloc(p->nr_slots, sizeof(*p->slots) + p->dev->host_native_bytes,
+			   GFP_KERNEL);
 	if (!p->slots)
 		return -ENOMEM;
-	/* The member's per-command DMA-stop record (dev->peer_evidence). */
-	if (p->dev->host_native_bytes) {
-		p->host_native = kcalloc(p->nr_slots, p->dev->host_native_bytes, GFP_KERNEL);
-		if (!p->host_native)
-			goto fail;
-	}
 	for (i = 0; i < p->nr_slots; i++) {
 		struct xdev_ext_stor_io *slot = &p->slots[i];
 
-		if (p->host_native)
-			slot->peer_native = (char *)p->host_native +
+		if (p->dev->host_native_bytes)
+			slot->peer_native = (char *)&p->slots[p->nr_slots] +
 					    (size_t)i * p->dev->host_native_bytes;
 		slot->bio = bio_kmalloc(p->nr_vecs, GFP_KERNEL);
 		if (!slot->bio)
@@ -486,7 +481,9 @@ int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss)
 		if (!slot->runtime.busy || !slot->done.uncertain)
 			continue;
 		xdev_ext_storfam_peer_evidence(ss, slot, &rq, &epoch);
-		worst = max(worst, xdev_ext_peer_requester_evidence(rq, epoch));
+		e = xdev_ext_peer_requester_evidence(rq, epoch);
+		if (e > worst)
+			worst = e;
 	}
 	for (i = 0; res && i < res->nr_slots; i++) {
 		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);

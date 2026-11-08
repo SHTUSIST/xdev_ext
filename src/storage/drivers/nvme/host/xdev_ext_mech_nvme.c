@@ -79,6 +79,9 @@ static_assert(sizeof(struct nvme_xdev_ext_peer_slot) ==
 	sizeof(struct xdev_ext_stor_peer_io) + sizeof(struct nvme_xdev_ext_peer_trace));
 static_assert(sizeof(struct nvme_xdev_ext_peer_slot) %
 	__alignof__(struct nvme_xdev_ext_peer_trace) == 0);
+/* Host slots: the family places one trace per slot after the slot array. */
+static_assert(sizeof(struct xdev_ext_stor_io) %
+	__alignof__(struct nvme_xdev_ext_peer_trace) == 0);
 
 #define NVME_XDEV_EXT_PEER_MAX_PIECES 256U
 

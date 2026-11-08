@@ -131,7 +131,8 @@ struct xdev_ext_stor_dev_ops {
 	__u32 peer_slot_bytes;
 	__u32 peer_native_offset;
 	/* Native-request host-page slots: bytes of member state per slot, at
-	 * io->peer_native; 0 for none (no evidence for those slots). */
+	 * io->peer_native, a multiple of 8; 0 for none (no evidence for those
+	 * slots). */
 	__u32 host_native_bytes;
 	int (*poll)(void *member, const struct xdev_ext_stor_poll_view *views,
 		__u32 nr_views);
@@ -168,8 +169,7 @@ struct xdev_ext_stor_stage {
 	struct xdev_ext_stor_geometry geometry;
 	atomic_t dead;
 	struct xdev_ext_stor_poll_view poll_views[2];
-	struct xdev_ext_stor_io *slots;
-	void *host_native;	/* nr_slots * dev->host_native_bytes, or NULL */
+	struct xdev_ext_stor_io *slots;	/* then nr_slots * dev->host_native_bytes */
 	struct xdev_ext_stor_pool pool;
 	__u32 nr_slots;
 	__u16 nr_vecs;

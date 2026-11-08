@@ -183,6 +183,7 @@ int main(void)
 
 NVME_PREFIX = r"""
 #define NVME_REQ_XDEV_EXT_PEER 32
+#define NVME_REQ_XDEV_EXT_EPOCH 64
 struct nvme_xdev_ext_peer_trace;
 #define NVME_REQ_XDEV_EXT_ZC 16
 #define NVME_REQ_USERCMD 2

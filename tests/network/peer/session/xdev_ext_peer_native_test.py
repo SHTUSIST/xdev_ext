@@ -90,6 +90,7 @@ enum nvme_ctrl_state { NVME_CTRL_LIVE = 1, NVME_CTRL_RESETTING = 2 };
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_REQ_USERCMD 2
 #define NVME_REQ_XDEV_EXT_PEER /* ACTUAL_PEER_FLAG */
+#define NVME_REQ_XDEV_EXT_EPOCH (1U << 6)
 #define REQ_FAILFAST_MASK 0x700
 #define IS_ERR(p) (!(p))
 #define PTR_ERR(p) (-ENOMEM)
