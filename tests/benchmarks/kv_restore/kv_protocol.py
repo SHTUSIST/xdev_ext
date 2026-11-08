@@ -85,6 +85,41 @@ def prefix_go_line(run, ordinal, prefix, dst_frame0, seed=0, verify=False):
             f'seed={seed} verify={1 if verify else 0}\n')
 
 
+def check_sender_done(text, run, plan=None):
+    """Validate a successful sender verdict; original run/status wire supported."""
+    if not isinstance(text, str) or len(text) >= 1024 or any(
+            ord(c) < 32 and c not in '\t\r' for c in text):
+        raise ProtocolError('invalid DONE line')
+    words = text.split()
+    if not words or words.pop(0) != 'DONE':
+        raise ProtocolError('not a DONE line')
+    fields = {}
+    allowed = {'run', 'ok', 'err', 'ordinal', 'first_seq', 'groups', 'wait_ns',
+               'done', 'abort', 'sequestered', 'last_err'}
+    for word in words:
+        key, sep, value = word.partition('=')
+        if not sep or not value or key not in allowed or key in fields:
+            raise ProtocolError('invalid or duplicate DONE field')
+        fields[key] = value
+    if fields.get('run') != run or fields.get('ok') != '1' or fields.get('err') != '0':
+        raise ProtocolError('DONE does not prove this sender succeeded')
+    for key, value in fields.items():
+        if key in ('run', 'ok', 'err'):
+            continue
+        if not re.fullmatch(r'[0-9]+', value) or int(value) > (1 << 64) - 1:
+            raise ProtocolError('invalid DONE integer')
+        if key in ('abort', 'sequestered', 'last_err') and int(value):
+            raise ProtocolError('DONE contradicts success')
+    keys = {'ordinal', 'first_seq', 'groups'}
+    if keys & fields.keys():
+        if not keys <= fields.keys():
+            raise ProtocolError('partial DONE request tuple')
+        if plan is not None and any(int(fields[k]) != plan[k] for k in
+                                    ('first_seq', 'groups') if k in plan):
+            raise ProtocolError('DONE request tuple mismatch')
+    return fields
+
+
 def check_result(body, run):
     for key in ('run', 'ok', 'error', 'bytes', 't0_ns', 't1_ns', 'latency_ns'):
         if key not in body:
@@ -96,6 +131,8 @@ def check_result(body, run):
     for key in ('bytes', 't0_ns', 't1_ns', 'latency_ns'):
         _uint(body[key], key)
     if body['ok']:
+        if 'host1' in body:
+            check_sender_done(body['host1'], run, body.get('plan'))
         if body['error']:
             raise ProtocolError('KV_RESULT ok with a nonzero error')
         if body['t1_ns'] < body['t0_ns'] or body['latency_ns'] != body['t1_ns'] - body['t0_ns']:

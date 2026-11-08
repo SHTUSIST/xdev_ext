@@ -118,7 +118,7 @@ int main(int argc, char **argv)
 		if (!strcmp(argv[3], "peer")) {
 			wk.o.role = ROLE_RESTORE;
 			wk.o.dst = DST_PEER;
-			if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) || write(sv[1], "DONE\n", 5) != 5)
+			if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) || send_line(sv[1], "DONE run=verify ok=1 err=0\n"))
 				return 7;
 			wk.sock = sv[0];
 		}
