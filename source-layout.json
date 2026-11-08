@@ -4075,6 +4075,14 @@
       "logical_path": "tests/compute/tp/batch_pipeline_test.py"
     },
     {
+      "source": "tests/compute/tp/frames_boundary.cc",
+      "logical_path": "tests/compute/tp/frames_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frames_test.py",
+      "logical_path": "tests/compute/tp/frames_test.py"
+    },
+    {
       "source": "tests/compute/tp/collective_behavior.py",
       "logical_path": "tests/eval/tp/tests/collective_behavior.py"
     },
