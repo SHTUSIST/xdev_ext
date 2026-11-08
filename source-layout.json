@@ -4155,6 +4155,10 @@
       "logical_path": "tests/compute/tp/eval/test_driver_process.py"
     },
     {
+      "source": "tests/compute/tp/eval/test_driver_frames.py",
+      "logical_path": "tests/compute/tp/eval/test_driver_frames.py"
+    },
+    {
       "source": "tests/compute/tp/eval/test_early_trace.py",
       "logical_path": "tests/compute/tp/eval/test_early_trace.py"
     },
