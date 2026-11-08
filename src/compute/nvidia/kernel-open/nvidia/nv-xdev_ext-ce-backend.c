@@ -68,6 +68,17 @@ MODULE_PARM_DESC(xdev_ext_ce_poll_us, "XDEV_EXT native CE progress polling base 
 static unsigned int nv_xdev_ext_ce_poll_base(void)
 { return clamp_t(unsigned int, READ_ONCE(nv_xdev_ext_ce_poll_us), 1, 100); }
 #endif
+/*
+ * Measurement only (evaluation E5, level 4): 0, the default, sends a batch's
+ * plan to RM in one call with adjacent entries merged; k > 0 sends k plan
+ * entries per call, unmerged across calls.  Ownership, the request slot and
+ * the AMBIGUOUS classification stay per batch; the last call's token
+ * completes it.  Production configurations leave it at 0.
+ */
+static unsigned int nv_xdev_ext_ce_entries_per_submit;
+module_param_named(xdev_ext_ce_entries_per_submit, nv_xdev_ext_ce_entries_per_submit, uint, 0644);
+MODULE_PARM_DESC(xdev_ext_ce_entries_per_submit,
+                 "XDEV_EXT CE plan entries per RM submission (0: whole plan; measurement only)");
 struct nv_xdev_ext_ce_request {
     struct xdev_ext_ce_xfer x[NV_XDEV_EXT_CE_MAX_XFERS];
     u32 n;
@@ -98,6 +109,7 @@ struct nv_xdev_ext_ce_host {
     struct nv_xdev_ext_ce_request requests[NV_XDEV_EXT_CE_REQUEST_SLOTS];
     struct nv_xdev_ext_ce_request completed[NV_XDEV_EXT_CE_REQUEST_SLOTS];
     unsigned long deadlines[NV_XDEV_EXT_CE_REQUEST_SLOTS];
+    struct nv_xdev_ext_ce_span entries[NV_XDEV_EXT_CE_MAX_XFERS];
     struct nv_xdev_ext_ce_span spans[NV_XDEV_EXT_CE_MAX_XFERS];
     nv_p2p_umem_xfer_t xfers[NV_XDEV_EXT_CE_MAX_XFERS];
 };
@@ -483,11 +495,11 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     struct nv_xdev_ext_ce_host *h = host;
     struct nv_xdev_ext_ce_async_slot *slot;
     enum nv_xdev_ext_ce_outcome outcome;
-    NvBool issued = NV_FALSE;
+    int issued = 0;
     NvU64 token = 0, bytes = 0;
-    NV_STATUS status;
+    NV_STATUS status = NV_OK;
     NvU32 rm_dir;
-    u32 i, m = 0;
+    u32 i, m, start = 0, per_submit = READ_ONCE(nv_xdev_ext_ce_entries_per_submit);
     int rc;
     struct nv_xdev_ext_ce_request *saved;
 
@@ -513,12 +525,10 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     saved->n = n;
     memcpy(saved->x, x, n * sizeof(*x));
     /* One entry per frame; adjacent frames reach RM as one transfer. */
-    for (i = 0; i < n; i++)
-        nv_xdev_ext_ce_span_add(h->spans, &m, x[i].host_byte_off, x[i].gpu_off, x[i].len);
-    for (i = 0; i < m; i++) {
-        h->xfers[i].umemOffset = h->spans[i].host_off;
-        h->xfers[i].gpuOffset = h->spans[i].gpu_off;
-        h->xfers[i].size = h->spans[i].len;
+    for (i = 0; i < n; i++) {
+        h->entries[i].host_off = x[i].host_byte_off;
+        h->entries[i].gpu_off = x[i].gpu_off;
+        h->entries[i].len = x[i].len;
     }
     rc = nv_down_read_interruptible(&nv_system_pm_lock);
     if (rc < 0) {
@@ -526,7 +536,20 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
         goto unlock;
     }
     nv_xdev_ext_ce_sync(h, saved, false);
-    status = nv_p2p_ce_async_submit(h->rm, h->xfers, m, rm_dir, &issued, &token);
+    /* One RM call for the plan, or per_submit entries per call (measurement). */
+    while ((m = nv_xdev_ext_ce_plan_next(h->entries, n, per_submit, &start, h->spans))) {
+        NvBool call_issued = NV_FALSE;
+        NvU64 call_token = 0;
+
+        for (i = 0; i < m; i++) {
+            h->xfers[i].umemOffset = h->spans[i].host_off;
+            h->xfers[i].gpuOffset = h->spans[i].gpu_off;
+            h->xfers[i].size = h->spans[i].len;
+        }
+        status = nv_p2p_ce_async_submit(h->rm, h->xfers, m, rm_dir, &call_issued, &call_token);
+        if (!nv_xdev_ext_ce_plan_fold(status, call_issued == NV_TRUE, call_token, &issued, &token))
+            break;
+    }
     up_read(&nv_system_pm_lock);
     outcome = nv_xdev_ext_ce_async_submitted(&h->pool, slot, status, issued, token);
     if (outcome == NV_XDEV_EXT_CE_OK) {

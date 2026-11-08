@@ -1746,6 +1746,50 @@ static void case_merge_adjacent(void)
 	common_checks();
 }
 
+/*
+ * E5 level 4 measurement switch: with xdev_ext_ce_entries_per_submit 1 the
+ * same plan reaches RM as one call per plan entry (no merging), the batch
+ * still owns one request slot and completes once, with all its bytes, only
+ * when the last call's token completes.
+ */
+static void case_entries_per_submit(void)
+{
+	struct xdev_ext_ce_xfer x[6];
+	struct fixture fx;
+	unsigned int before;
+	u32 i;
+	memset(x, 0, sizeof(x));
+	for (i = 0; i < 6; i++) {
+		x[i].host_byte_off = (2 + i) * 4096;
+		x[i].gpu_off = i * 4096;
+		x[i].len = 4096;
+#if HARNESS_OWNER_API
+		x[i].owner = H.frame_owner[2 + i];
+		x[i].generation = H.frame_generation[2 + i];
+#endif
+	}
+	H.dma_mode = 0;
+	REQUIRE(bind(&fx, 16) == 0, "bind");
+	nv_xdev_ext_ce_entries_per_submit = 1;
+	H.expected_ticket[1] = 1;
+	before = H.rm_submit;
+	REQUIRE(ops->submit(&fx.r, fx.host, XDEV_EXT_MECH_DIR_TO_DEVICE, x, 6, &cookies[1], 1) == 0,
+		"submit");
+	CHECK(H.rm_submit - before == 6, "6 entries reached RM in %u calls, expected 6",
+	      H.rm_submit - before);
+	CHECK(H.last_n == 1 && H.last_x[0].host == 7 * 4096 && H.last_x[0].size == 4096,
+	      "last call carried %u transfers at %llx", H.last_n,
+	      (unsigned long long)H.last_x[0].host);
+	deliver(H.rm_last - 1);
+	CHECK(H.done[1].count == 0, "batch completed before its last call's token");
+	deliver(H.rm_last);
+	CHECK(H.done[1].count == 1 && H.done[1].status == 0 && H.done[1].bytes == 6 * 4096,
+	      "completion count %u status %d bytes %llu", H.done[1].count, H.done[1].status,
+	      (unsigned long long)H.done[1].bytes);
+	nv_xdev_ext_ce_entries_per_submit = 0;
+	common_checks();
+}
+
 static int synced_exactly(const unsigned char *map, u32 first, u32 last, u32 nr)
 {
 	u32 i;
@@ -2035,6 +2079,7 @@ static const struct named_case cases[] = {
 	{ "sync-scattered", case_sync_scattered },
 	{ "sync-pool-walk", case_sync_pool_walk },
 	{ "merge-adjacent", case_merge_adjacent },
+	{ "entries-per-submit", case_entries_per_submit },
 	{ "region-unbind-fail", case_region_unbind_fail },
     { "host-released-region-failed", case_host_released_region_failed },
 	{ "race", case_race },

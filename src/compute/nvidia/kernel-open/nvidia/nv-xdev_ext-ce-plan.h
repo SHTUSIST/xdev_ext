@@ -96,4 +96,73 @@ static inline void nv_xdev_ext_ce_span_add(struct nv_xdev_ext_ce_span *s,
 	(*m)++;
 }
 
+/*
+ * How a batch's n validated plan entries e[] become RM calls.  per_submit 0
+ * (the default) is one call with adjacent entries merged; per_submit k > 0 is
+ * the measurement-only per-entry mode (module parameter
+ * xdev_ext_ce_entries_per_submit): k entries per call, in plan order, merged
+ * only within a call.  nv_xdev_ext_ce_plan_next() builds the next call into
+ * spans (at least n slots) and returns its transfer count, 0 when the plan is
+ * done; nv_xdev_ext_ce_plan_fold() folds one call's result into the batch's
+ * and says whether to continue.  Calls go out in order on one channel, so the
+ * last call's token completes the whole batch.  A failed call stops the plan;
+ * *issued stays set when an earlier call issued work, so the caller's
+ * batch-level classification sees an ambiguous outcome, never a clean
+ * pre-submit failure.  *token is the last token of issued work.
+ */
+static inline nv_xdev_ext_gpu_u32 nv_xdev_ext_ce_plan_next(const struct nv_xdev_ext_ce_span *e,
+	nv_xdev_ext_gpu_u32 n, nv_xdev_ext_gpu_u32 per_submit, nv_xdev_ext_gpu_u32 *start,
+	struct nv_xdev_ext_ce_span *spans)
+{
+	nv_xdev_ext_gpu_u32 k = per_submit && per_submit < n ? per_submit : n;
+	nv_xdev_ext_gpu_u32 end, m = 0, i;
+
+	if (*start >= n)
+		return 0;
+	end = n - *start > k ? *start + k : n;
+	for (i = *start; i < end; i++)
+		nv_xdev_ext_ce_span_add(spans, &m, e[i].host_off, e[i].gpu_off, e[i].len);
+	*start = end;
+	return m;
+}
+
+static inline int nv_xdev_ext_ce_plan_fold(nv_xdev_ext_gpu_u32 status, int call_issued,
+	nv_xdev_ext_gpu_u64 call_token, int *issued, nv_xdev_ext_gpu_u64 *token)
+{
+	if (call_issued || status == 0)
+		*issued = 1;
+	if (status == 0)
+		*token = call_token;
+	return status == 0;
+}
+
+/* One RM call: 0 or an RM status; *issued if it issued work. */
+typedef nv_xdev_ext_gpu_u32 (*nv_xdev_ext_ce_submit_fn)(void *ctx,
+		const struct nv_xdev_ext_ce_span *s, nv_xdev_ext_gpu_u32 m,
+		int *issued, nv_xdev_ext_gpu_u64 *token);
+
+/* The loop nv_xdev_ext_ce_submit() runs, with the RM call as a callback. */
+static inline nv_xdev_ext_gpu_u32 nv_xdev_ext_ce_submit_plan(
+	const struct nv_xdev_ext_ce_span *e, nv_xdev_ext_gpu_u32 n,
+	nv_xdev_ext_gpu_u32 per_submit, struct nv_xdev_ext_ce_span *spans,
+	nv_xdev_ext_ce_submit_fn submit, void *ctx, int *issued,
+	nv_xdev_ext_gpu_u64 *token, nv_xdev_ext_gpu_u32 *calls)
+{
+	nv_xdev_ext_gpu_u32 start = 0, status = 0, m;
+
+	*issued = 0;
+	*token = 0;
+	*calls = 0;
+	while ((m = nv_xdev_ext_ce_plan_next(e, n, per_submit, &start, spans))) {
+		nv_xdev_ext_gpu_u64 t = 0;
+		int iss = 0;
+
+		status = submit(ctx, spans, m, &iss, &t);
+		(*calls)++;
+		if (!nv_xdev_ext_ce_plan_fold(status, iss, t, issued, token))
+			break;
+	}
+	return status;
+}
+
 #endif /* _NV_XDEV_EXT_CE_PLAN_H_ */
