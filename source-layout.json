@@ -1462,6 +1462,11 @@
       "native_path": "tools/xdev_ext_mech/lib/libxdev_ext_peer_message.h"
     },
     {
+      "source": "src/lib/libxdev_ext_frame_endpoint.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/libxdev_ext_frame_endpoint.h"
+    },
+    {
       "source": "src/lib/xdev_ext_link.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/lib/xdev_ext_link.c"
@@ -1470,6 +1475,11 @@
       "source": "src/lib/xdev_ext_peer_message.c",
       "component": "linux",
       "native_path": "tools/xdev_ext_mech/lib/xdev_ext_peer_message.c"
+    },
+    {
+      "source": "src/lib/xdev_ext_frame_endpoint.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/xdev_ext_frame_endpoint.c"
     },
     {
       "source": "src/lib/xdev_ext_prog.c",
@@ -4798,6 +4808,16 @@
       "source": "tests/core/library/peer_endpoint_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_lib/peer_endpoint_test.py"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.c"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.py"
     },
     {
       "source": "tests/core/library/peer_message_test.c",
