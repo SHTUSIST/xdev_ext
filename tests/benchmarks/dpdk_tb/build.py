@@ -40,6 +40,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[2]
@@ -85,8 +86,10 @@ def vdev_arg(iface, xdp_prog=None):
 
 
 def bpf_command(src, obj):
-    return ["clang", "-O2", "-g", "-Wall", "-Werror", "-target", "bpf", "-c", str(src),
-            "-o", str(obj)]
+    # -target bpf drops the host's multiarch include dir, where asm/types.h lives
+    multiarch = sysconfig.get_config_var("MULTIARCH") or "x86_64-linux-gnu"
+    return ["clang", "-O2", "-g", "-Wall", "-Werror", "-target", "bpf",
+            "-I/usr/include/" + multiarch, "-c", str(src), "-o", str(obj)]
 
 
 def check_dir(path):
