@@ -22,7 +22,8 @@ for f in "/sys/kernel/debug/$disk/fault_inject/times" /sys/kernel/debug/fail_io_
 	"/sys/class/nvme/$src/reset_controller" "/sys/class/nvme/$other/reset_controller"; do
 	if [ ! -e "$f" ]; then echo "not ok - kernel interface missing: $f"; exit 1; fi
 done
-insmod ./xdev_ext_peer_sw.ko guest_only=1
+# host_backing: the session case needs requester admission of the host-RAM fixture.
+insmod ./xdev_ext_peer_sw.ko guest_only=1 host_backing=1
 if [ ! -c /dev/xdev_ext_peer_sw ]; then
 	minor=$(cut -d: -f2 /sys/class/misc/xdev_ext_peer_sw/dev)
 	mknod /dev/xdev_ext_peer_sw c 10 "$minor"

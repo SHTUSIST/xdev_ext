@@ -116,7 +116,10 @@ controller reset (`fail_io_timeout`). Each case is its own process:
   as ZOMBIE) and the allocation stays pinned and mapped through closing every
   fd, a completed reset of the other controller (stage 1's device) and a wait;
   the source controller's completed reset releases the session (STATS
-  `-ENOENT`) and every provider reference once.
+  `-ENOENT`) and every provider reference once. The provider is loaded with
+  `host_backing=1` so that it describes its allocation as what it is (host
+  RAM with struct pages) and the session's NVMe requester admission accepts
+  it; without a description CREATE refuses the pool (`-EXDEV`).
 
 The provider must then unload. `reset_validate.py` checks every case verdict
 and its exact check count, the unload, the exit status and the kernel console
