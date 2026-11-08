@@ -75,15 +75,17 @@ cat > "$root/init" <<EOF
 export PATH=/bin:/sbin LIBXDP_OBJECT_PATH=/lib/bpf
 mount -t proc proc /proc; mount -t sysfs sys /sys; mount -t devtmpfs dev /dev
 mount -t bpf bpf /sys/fs/bpf
+mkdir -p /var/run /run /tmp
 mkdir -p /dev/hugepages; mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages
 echo 512 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 echo "TB_VM hugepages=\$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages) kernel=\$(cat /proc/sys/kernel/osrelease)"
-for m in veth dummy macvlan; do insmod /lib/modules/\$m.ko; done
+for m in veth dummy macvlan; do insmod /lib/modules/\$m.ko || echo "TB_VM insmod \$m failed"; done
 ip link add tba type veth peer name tbb
 ip link add tbd type dummy
 ip link add link tbd name tbm1 type macvlan mode bridge
 ip link add link tbd name tbm2 type macvlan mode bridge
 for i in tba tbb tbd tbm1 tbm2; do ip link set \$i up; done
+ip -o link | sed 's/^/TB_VM link /'
 eal() { echo "--no-pci --no-telemetry --huge-dir /dev/hugepages --file-prefix \$1 -l \$2 --vdev net_af_xdp0,iface=\$3,start_queue=0,queue_count=1"; }
 run() { # link a b mode
 	tag=\$1-\$4
