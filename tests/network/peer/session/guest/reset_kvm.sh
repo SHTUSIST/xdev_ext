@@ -1,16 +1,17 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-2.0
-# Focused KVM correctness run of the reset-recovery guest test, never a
-# performance benchmark. QEMU NVMe performs the DMA into host RAM standing in
-# for device memory; the UNKNOWN outcomes come from the kernel's own fault
-# injection. It reuses a prebuilt kernel O= directory and the provider module
-# built against it, and builds only the static guest test program from an
-# assembled Linux tree. All writes stay in --scratch (private 0700 directory).
-#   bash reset_kvm.sh --scratch DIR --linux ASSEMBLED_TREE --build O_DIR --module KO
+# Focused KVM correctness run of the reset-recovery guest tests (fd path and
+# mechanism-session path), never a performance benchmark. QEMU NVMe performs
+# the DMA into host RAM standing in for device memory; the UNKNOWN outcomes
+# come from the kernel's own fault injection. It reuses a prebuilt kernel O=
+# directory, the provider module built against it and the nvme_s0.bpf.o built
+# against its BTF (--tools), and builds only the two guest test programs from
+# an assembled Linux tree. All writes stay in --scratch (private 0700 directory).
+#   bash reset_kvm.sh --scratch DIR --linux ASSEMBLED_TREE --build O_DIR --module KO --tools DIR
 # The kernel needs CONFIG_FAULT_INJECTION_DEBUG_FS and CONFIG_FAIL_IO_TIMEOUT.
 set -euo pipefail
 umask 077
-SCRATCH='' LINUX='' BUILD='' MODULE=''
+SCRATCH='' LINUX='' BUILD='' MODULE='' TOOLS=''
 QEMU=${QEMU:-/usr/local/bin/qemu-system-x86_64}
 CC=${CC:-gcc-14}
 TIMEOUT_SECONDS=${TIMEOUT_SECONDS:-900}
@@ -20,10 +21,11 @@ while (($#)); do
 	--linux) LINUX=$2; shift 2 ;;
 	--build) BUILD=$2; shift 2 ;;
 	--module) MODULE=$2; shift 2 ;;
+	--tools) TOOLS=$2; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
-[[ -n "$SCRATCH" && -n "$LINUX" && -n "$BUILD" && -n "$MODULE" ]] || { echo 'missing option' >&2; exit 2; }
+[[ -n "$SCRATCH" && -n "$LINUX" && -n "$BUILD" && -n "$MODULE" && -n "$TOOLS" ]] || { echo 'missing option' >&2; exit 2; }
 [[ -d "$SCRATCH" && ! -L "$SCRATCH" && $(stat -c %a "$SCRATCH") == 700 && $(stat -c %u "$SCRATCH") == $(id -u) ]] || {
 	echo 'FAIL scratch must be an existing private 0700 directory' >&2; exit 1; }
 SCRATCH=$(cd "$SCRATCH" && pwd -P)
@@ -34,13 +36,14 @@ rm -f -- "$EV/result.json" "$EV/verdict.txt"
 exec > >(tee -a "$EV/runner.log") 2>&1
 
 for symbol in MODULES MODULE_UNLOAD XDEV_EXT_MECH BLK_DEV_NVME BLK_DEV_INITRD DEVTMPFS DEBUG_FS \
-	FAULT_INJECTION FAULT_INJECTION_DEBUG_FS FAIL_IO_TIMEOUT PCI_MSI SERIAL_8250_CONSOLE; do
+	FAULT_INJECTION FAULT_INJECTION_DEBUG_FS FAIL_IO_TIMEOUT PCI_MSI SERIAL_8250_CONSOLE \
+	IO_URING BPF_SYSCALL DEBUG_INFO_BTF; do
 	grep -Fxq "CONFIG_$symbol=y" "$BUILD/.config" || { echo "FAIL kernel requires CONFIG_$symbol=y" >&2; exit 1; }
 done
 release=$(cat "$BUILD/include/config/kernel.release")
 [[ $(modinfo -F vermagic "$MODULE" | cut -d' ' -f1) == "$release" ]]
 for artifact in "$BUILD/arch/x86/boot/bzImage" "$MODULE" "$GUEST/peer_reset_e2e.c" "$GUEST/run-reset-guest.sh" \
-	"$GUEST/reset_validate.py"; do [[ -s "$artifact" ]]; done
+	"$GUEST/peer_reset_session_e2e.c" "$TOOLS/nvme_s0.bpf.o" "$GUEST/reset_validate.py"; do [[ -s "$artifact" ]]; done
 [[ -c /dev/kvm && -w /dev/kvm && -x "$QEMU" ]]
 {
 	printf 'date_utc=%s\nhost=%s\nclaim=KVM correctness only; QEMU NVMe; host RAM stands in for device memory; no timing; no physical DMA claim\n' \
@@ -49,17 +52,20 @@ for artifact in "$BUILD/arch/x86/boot/bzImage" "$MODULE" "$GUEST/peer_reset_e2e.
 		"$LINUX/.xdev-ext-source.json" 2>/dev/null || echo unknown)
 	printf 'linux=%s\nlinux_canonical_root=%s\nlinux_canonical_commit=%s\n' "$LINUX" "$canonical" \
 		"$(git -C "$canonical" rev-parse HEAD 2>/dev/null || echo unknown)"
-	printf 'build=%s\nbuild_commit=%s\nmodule=%s\nkernel_release=%s\n' \
-		"$BUILD" "$(cat "$BUILD/xdev-ext-source.commit" 2>/dev/null || echo unknown)" "$MODULE" "$release"
+	printf 'build=%s\nbuild_commit=%s\nmodule=%s\ntools=%s\nkernel_release=%s\n' \
+		"$BUILD" "$(cat "$BUILD/xdev-ext-source.commit" 2>/dev/null || echo unknown)" "$MODULE" "$TOOLS" "$release"
 	grep -E '^CONFIG_(KASAN|PROVE_LOCKING|DEBUG_ATOMIC_SLEEP|DETECT_HUNG_TASK|FAULT_INJECTION|FAULT_INJECTION_DEBUG_FS|FAIL_IO_TIMEOUT|IOMMU_DEFAULT_DMA_LAZY)=' "$BUILD/.config" || true
 } >"$EV/provenance.txt"
 
-# Only the static guest program is built here.
+# Only the two guest programs are built here: fd path static, session path
+# dynamic (libbpf), with its libraries copied into the initramfs below.
 mkdir -p "$OUT/build"
-cp "$GUEST/"{Makefile,peer_reset_e2e.c,sw_provider_uapi.h} "$OUT/build/"
+cp "$GUEST/"{Makefile,peer_reset_e2e.c,peer_reset_session_e2e.c,sw_provider_uapi.h} "$OUT/build/"
 nice -n 10 make -C "$OUT/build" KERNEL_SRC="$LINUX" CC="$CC" LDFLAGS=-static peer_reset_e2e >"$EV/test-build.log" 2>&1
-sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$MODULE" "$OUT/build/peer_reset_e2e" \
-	"$GUEST/peer_reset_e2e.c" "$GUEST/run-reset-guest.sh" "$GUEST/reset_validate.py" >"$EV/artifacts.sha256"
+nice -n 10 make -C "$OUT/build" KERNEL_SRC="$LINUX" CC="$CC" peer_reset_session_e2e >>"$EV/test-build.log" 2>&1
+sha256sum "$BUILD/.config" "$BUILD/arch/x86/boot/bzImage" "$MODULE" "$TOOLS/nvme_s0.bpf.o" \
+	"$OUT/build/peer_reset_e2e" "$OUT/build/peer_reset_session_e2e" "$GUEST/peer_reset_e2e.c" \
+	"$GUEST/peer_reset_session_e2e.c" "$GUEST/run-reset-guest.sh" "$GUEST/reset_validate.py" >"$EV/artifacts.sha256"
 
 rm -rf -- "$ROOT"
 mkdir -p "$ROOT"/{bin,dev,proc,sys,tmp,opt/peer_reset}
@@ -67,7 +73,13 @@ cp /bin/busybox "$ROOT/bin/busybox"
 for app in sh mount cat echo poweroff dmesg sed cut basename mknod insmod rmmod sync test [; do
 	ln -sf busybox "$ROOT/bin/$app"
 done
-cp "$OUT/build/peer_reset_e2e" "$MODULE" "$GUEST/run-reset-guest.sh" "$ROOT/opt/peer_reset/"
+cp "$OUT/build/peer_reset_e2e" "$OUT/build/peer_reset_session_e2e" "$TOOLS/nvme_s0.bpf.o" "$MODULE" \
+	"$GUEST/run-reset-guest.sh" "$ROOT/opt/peer_reset/"
+ldd "$OUT/build/peer_reset_session_e2e" | awk '/=> \/|^[[:space:]]*\// { for (i=1;i<=NF;i++) if ($i ~ /^\//) print $i }' |
+	sort -u >"$EV/guest-libraries.txt"
+while IFS= read -r lib; do
+	mkdir -p "$ROOT$(dirname "$lib")"; cp -L "$lib" "$ROOT$lib"
+done <"$EV/guest-libraries.txt"
 cat >"$ROOT/init" <<'GUESTINIT'
 #!/bin/sh
 export PATH=/bin

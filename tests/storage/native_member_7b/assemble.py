@@ -132,6 +132,19 @@ def namespace_native(source,bd,namespace_file,out):
   'case_preparation':'unchanged; required requester state must come from actual CREATE'},indent=2)+'\n')
  return b.no_includes(projected)
 
+def evidence_boundary(header):
+ """Actual epoch/evidence constants; the UNKNOWN release records like the
+ existing release boundary (an unbound requester proves nothing)."""
+ none=re.search(r'^#define XDEV_EXT_PEER_EPOCH_NONE [^\n]*\n',header,re.M)
+ enum=re.search(r'^enum xdev_ext_peer_evidence \{.*?^\};\n',header,re.M|re.S)
+ if not none or not enum:raise b.Setup('actual peer evidence declarations missing')
+ return (none.group(0)+enum.group(0)+'#ifndef max\n#define max(a,b) ((a)>(b)?(a):(b))\n#endif\n'
+  'struct xdev_ext_peer_requester;\n'
+  'static int xdev_ext_peer_release_unknown(void *vp,u64 ticket,struct xdev_ext_peer_requester *rq,u64 epoch,bool *q)\n'
+  '{ (void)rq;(void)epoch;if(q)*q=false;return xdev_ext_peer_release(vp,ticket,false); }\n'
+  'static int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq,u64 epoch)\n'
+  '{ return !rq||epoch==XDEV_EXT_PEER_EPOCH_NONE?XDEV_EXT_PEER_EVIDENCE_NEVER:XDEV_EXT_PEER_EVIDENCE_PENDING; }\n')
+
 def assemble(root,out,config,mutation=None):
  paths=[NATIVE,BLOCK,RUNTIME,REQ,FD,RC,CORE,TRACE,old.NVME,old.MECH,*REQUESTER_SOURCES]
  src={p:(root/p).read_text() for p in paths}
@@ -157,6 +170,7 @@ def assemble(root,out,config,mutation=None):
  c='#include "boundary.h"\n'
  c+=old.declaration(src[old.MECH],'struct xdev_ext_mech_class_ops {')
  c+=function(src[REQ],'xdev_ext_peer_lease_split')+requester_code+function(src[FD],'xdev_ext_peer_fd_release')
+ c+=evidence_boundary(src[PH])+function(src[FD],'xdev_ext_peer_fd_release_unknown')
  c+=b.no_includes(src[TRACE])
  c+=function(src[old.NVME],'nvme_req_op')+function(src[CORE],'nvme_clear_nvme_request')+function(src[CORE],'nvme_init_request')
  if 'nvme_xdev_ext_peer_build_cmd(' in function(src[NATIVE],'nvme_xdev_ext_member_encode_dptr'):

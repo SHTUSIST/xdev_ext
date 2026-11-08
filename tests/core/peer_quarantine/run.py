@@ -98,7 +98,12 @@ def run_unit(source, directory, name='recovery'):
             return 'SETUP', '\n'.join(log), checks
         env = dict(os.environ, ASAN_OPTIONS='detect_leaks=0:abort_on_error=0',
                    UBSAN_OPTIONS='print_stacktrace=1:halt_on_error=1')
-        result = subprocess.run([str(binary)], capture_output=True, text=True, env=env, timeout=60)
+        try:
+            result = subprocess.run([str(binary)], capture_output=True, text=True, env=env, timeout=60)
+        except subprocess.TimeoutExpired as expired:
+            # A unit that never finishes is a behavioural failure, not a pass.
+            log.append('# profile %s timed out after 60 s\n%s' % (profile, expired.stdout or ''))
+            return 'FAIL', '\n'.join(log), checks
         log.append('# profile ' + profile + ' exit ' + str(result.returncode) + '\n' +
                    result.stdout + result.stderr)
         plan = re.findall(r'^1\.\.(\d+)$', result.stdout, re.M)

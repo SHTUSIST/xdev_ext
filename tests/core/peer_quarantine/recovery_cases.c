@@ -482,6 +482,20 @@ static void case_storage_unknown_command(void)
 	CHECK(unmaps == base.unmaps + 1 && unpins == base.unpins + 1,
 	      "and its region releases at owner close without another reset");
 
+	/* A covered epoch of another PCI function does not cover this mapping. */
+	owner_open(&o); m = owner_map(&o, &nvme_a); fd_lease(&o, m, &h[0]);
+	e = xdev_ext_peer_requester_epoch(b);
+	proven_reset(b); drain();
+	CHECK(!xdev_ext_stor_leases_retire_unknown(h, 1, b, e) && !h[0].file &&
+	      xdev_ext_peer_drainable(o.region) == -EIO,
+	      "a lease mapped for one controller is not quiesced by another controller's proof");
+
+	/* A command's own resources (its SGL list) follow the command, not its leases. */
+	e = xdev_ext_peer_requester_epoch(a);
+	CHECK(!xdev_ext_stor_leases_retire_unknown(NULL, 0, a, e) &&
+	      xdev_ext_stor_leases_retire_unknown(NULL, 0, a, e - 1),
+	      "a command without leases is quiesced only when its epoch is covered");
+
 	/* Never submitted to a queue: no epoch binds it. */
 	owner_open(&o); m = owner_map(&o, &nvme_a); fd_lease(&o, m, &h[0]);
 	CHECK(!xdev_ext_stor_leases_retire_unknown(h, 1, a, XDEV_EXT_PEER_EPOCH_NONE) && !h[0].file,
@@ -498,9 +512,6 @@ int main(void)
 	setbuf(stdout, NULL);
 	puts("TAP version 13");
 	assert(!xdev_ext_peer_provider_register(&fx_ops));
-	case_evidence_of_a_retained_command();
-	case_watchers_follow_each_pass();
-	case_storage_unknown_command();
 	case_no_requester_api_is_inert();
 	case_no_evidence_keeps_everything();
 	case_proof_must_postdate_submission();
@@ -514,6 +525,9 @@ int main(void)
 	case_stale_and_duplicate_releases();
 	case_teardown_failure_is_permanent();
 	case_orphan_after_concurrent_recovery();
+	case_evidence_of_a_retained_command();
+	case_watchers_follow_each_pass();
+	case_storage_unknown_command();
 	printf("1..%u\n", checks);
 	return 0;
 }
