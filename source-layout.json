@@ -2519,6 +2519,26 @@
       "logical_path": "tests/eval/hft/test_strict_trial_accounting.py"
     },
     {
+      "source": "tests/benchmarks/isolation/README.md",
+      "logical_path": "tests/eval/isolation/README.md"
+    },
+    {
+      "source": "tests/benchmarks/isolation/Makefile",
+      "logical_path": "tests/eval/isolation/Makefile"
+    },
+    {
+      "source": "tests/benchmarks/isolation/tenants.py",
+      "logical_path": "tests/eval/isolation/tenants.py"
+    },
+    {
+      "source": "tests/benchmarks/isolation/test_tenants.py",
+      "logical_path": "tests/eval/isolation/test_tenants.py"
+    },
+    {
+      "source": "tests/benchmarks/isolation/uring_tenant.c",
+      "logical_path": "tests/eval/isolation/uring_tenant.c"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/README.md",
       "logical_path": "tests/eval/kv_restore/README.md"
     },
