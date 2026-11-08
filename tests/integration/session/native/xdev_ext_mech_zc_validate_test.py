@@ -40,7 +40,7 @@ def iaa_console_fixture():
     return "\n".join(lines) + "\n"
 
 
-def console_fixture(*, fault="none", ce_sim=True, delay_us=100000, rx_ce=False):
+def console_fixture(*, fault="none", ce_sim=True, delay_us=100000, rx_ce=False, include_d2h=True):
     """Public line protocol, including the receiver's own labelled stats."""
     drop = fault == "drop-middle"
     done = 1 if drop else GROUPS
@@ -89,6 +89,9 @@ def console_fixture(*, fault="none", ce_sim=True, delay_us=100000, rx_ce=False):
         ])
     if ce_sim:
         lines.extend(iaa_console_fixture().splitlines())
+        if include_d2h:
+            from xdev_ext_mech_ce_d2h_fixtures import d2h_fixture
+            lines.extend(d2h_fixture(delay_us).splitlines())
     lines.append("XDEV_EXT_ZC_GUEST_EXIT=0")
     return "\n".join(lines) + "\n"
 

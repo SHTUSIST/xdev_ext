@@ -1690,6 +1690,30 @@ static __u8 ctl_pattern(__u32 frame, __u32 off)
 	return (__u8)(frame * 131U + off * 7U + 0x5aU);
 }
 
+/* Full pattern observation, including bytes outside each payload. */
+static void ctl_pattern_check(const __u8 *base, __u32 nr,
+                              const struct xdev_ext_mech_layout *l,
+                              __u64 *payload_bad, __u64 *guard_bad)
+{
+	__u32 frames = (l->group_bytes - 1) / l->seg_len + 1;
+	__u32 i, j;
+
+	*payload_bad = *guard_bad = 0;
+	for (i = 0; i < nr; i++) {
+		__u32 left = l->group_bytes - (i % frames) * l->seg_len;
+		__u32 len = left < l->seg_len ? left : l->seg_len;
+
+		for (j = 0; j < l->frame_size; j++) {
+			if (base[(size_t)i * l->frame_size + j] == ctl_pattern(i, j))
+				continue;
+			if (j >= l->hdr_room && j - l->hdr_room < len)
+				(*payload_bad)++;
+			else
+				(*guard_bad)++;
+		}
+	}
+}
+
 /*
  * Device window of CE chains a and d (xdev_ext_mech_ctl_ce_window_check()):
  * poisoned before START, read back after the session.
@@ -1711,6 +1735,7 @@ struct ctl_source {
 	__u64 window_groups;
 	bool iou_umem;			/* pool: the ring's XDEV_EXT UMEM */
 	bool user_pattern;		/* chain d: user fills and compares */
+	__u64 user_payload_bad, user_guard_bad, user_checked_bytes;
 	struct ctl_ce_window *ce_window;	/* chains a and d */
 	bool started;			/* distinguishes runtime from setup failure */
 	__u32 nic_path;
@@ -2010,10 +2035,12 @@ static int ctl_run_source(struct ctl_source *src, struct xdev_ext_mech_stats *s,
 		if (o->expect_unbind)
 			ret = 0;
 	}
-	for (i = 0; !ret && src->user_pattern && i < nr_user; i++)
-		for (j = 0; *frames_ok && j < XDEV_EXT_MECH_CTL_FRAME_SIZE; j++)
-			*frames_ok = ((__u8 *)umem)[(size_t)i *
-				XDEV_EXT_MECH_CTL_FRAME_SIZE + j] == ctl_pattern(i, j);
+	if (!ret && src->user_pattern) {
+		ctl_pattern_check(umem, nr_user, &l, &src->user_payload_bad,
+		                  &src->user_guard_bad);
+		src->user_checked_bytes = (__u64)nr_user * l.frame_size;
+		*frames_ok = !src->user_payload_bad && !src->user_guard_bad;
+	}
 	if (!ret && src->ce_window)
 		src->ce_window->result = ctl_ce_window_verify(src->ce_window, o, &l,
 							      src->user_pattern, nr_user);
@@ -2279,6 +2306,12 @@ static int cmd_ce_chain(struct ctl_opts *o)
 		verdict = src.started ? CTL_FAIL : CTL_SETUP;
 		goto out;
 	}
+	if (src.user_pattern)
+		printf("XDEV_EXT_MECH_CE_HOST_DATA chain=d payload_bytes=%llu checked_bytes=%llu mismatches=%llu guard_mismatches=%llu\n",
+		       (unsigned long long)(src.window_groups * o->group_bytes),
+		       (unsigned long long)src.user_checked_bytes,
+		       (unsigned long long)src.user_payload_bad,
+		       (unsigned long long)src.user_guard_bad);
 	if (src.ce_window)
 		frames_ok = ctl_report(xdev_ext_mech_ctl_report_ce_window(
 			line, sizeof(line), window.result, o->chain, window.written,

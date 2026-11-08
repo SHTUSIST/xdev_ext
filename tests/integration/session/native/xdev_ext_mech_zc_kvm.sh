@@ -1043,6 +1043,7 @@ fi
 if (( CE_SIM )); then
 	for app in insmod rmmod; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
 	cp "$CE_SIM_OUT/xdev_ext_ce_sim.ko" "$TOOLS/ce_plan.bpf.o" "$ROOT/opt/xdev_ext/"
+    cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_guest.sh" "$ROOT/opt/xdev_ext/"
     mkdir -p "$ROOT/opt/xdev_ext/provider"
     cp "$DMA_SIM_OUT/"{xdev_ext_dma_provider_sim.ko,dma_provider_runtime,dma_provider_pair.bpf.o,run-guest.sh} "$ROOT/opt/xdev_ext/provider/"
     if [[ "$PROVIDER_CASE" == normal ]]; then
@@ -1411,6 +1412,10 @@ if [ "$ce_sim" = 1 ]; then
         rmmod xdev_ext_ce_sim
         echo 'XDEV_EXT_COMPAT_GUEST=PASS ce_module_unloaded=1'
     fi
+    D2H_POLL_ROUNDS="$((200 * timeout_factor))" sh /opt/xdev_ext/xdev_ext_mech_ce_d2h_guest.sh \
+        "$ctl" /opt/xdev_ext/xdev_ext_ce_sim.ko /opt/xdev_ext/ce_plan.bpf.o \
+        "$source_ng" "$source_block" "$destination_ng" "$destination_block" \
+        "$source_slba" "$ce_slba" "$ce_delay_us" "$cli_timeout_ms"
 	insmod /opt/xdev_ext/xdev_ext_ce_sim.ko fail_mode=none delay_us="$ce_delay_us"
 	test -c /dev/xdev_ext_ce_sim
 	test "$(cat /sys/module/xdev_ext_ce_sim/parameters/fail_mode)" = none

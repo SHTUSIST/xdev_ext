@@ -48,5 +48,16 @@ into the copy loop; only explicit assertion failures count as detections.
 Run `python3 tests/support/ce_sim/copy_contract.py --mutations --output build/ce-copy`.
 The existing CE roundtrip Python entry also runs this regression through the
 source view. Host success does not certify a kernel module build, KVM runtime,
-actual GPU DMA or performance. The KVM harness does not yet execute the new
-single-group diagnostic lifecycle.
+actual GPU DMA or performance. The `--ce-sim` KVM harness also runs a separate single-group diagnostic
+before the ordinary campaign. Each a/d normal/skip_d2h case loads a fresh
+module, captures raw CLI records and parameters, requires exactly two CE
+commands, detaches the plan, drains owners, and unloads before a summary.
+The host console validator requires all four raw case blocks; a summary
+alone is rejected. Chain a compares its independent NVMe source/sink;
+chain d reports full Host payload and guard mismatch counts. A skipped D2H
+must leave exactly 8192 wrong payload bytes and no wrong guard bytes.
+
+`xdev_ext_mech_ce_d2h_test.py` executes the actual POSIX guest script under
+sh and BusyBox sh with OS/CLI boundaries represented by host fixtures,
+and attacks missing, duplicate and inconsistent raw evidence. These are
+host fixtures, not a claim that a KVM guest or module was actually run.
