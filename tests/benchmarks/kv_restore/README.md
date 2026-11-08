@@ -365,3 +365,10 @@ and retained-session ownership rules still determine final resource release.
 boundaries and uses temporary loopback TCP sockets. It covers real restore
 verdicts, total deadlines, interrupted half lines, queued stdin commands and DONE
 send failure. It is a host correctness test, without GPU, DMA or timing results.
+
+The Python protocol wrapper supplies the caller's original ordinal to validate
+an extended DONE tuple; it does not infer it from response fields or geometry.
+`Worker.go` and `go_prefix` pass that request context automatically. Callers
+using `submit`/`collect` must provide `collect(..., run=run, ordinal=ordinal)`
+for extended tuples; lacking trustworthy context is a protocol error. Legacy
+DONE and other workers without host1 retain their existing interface.

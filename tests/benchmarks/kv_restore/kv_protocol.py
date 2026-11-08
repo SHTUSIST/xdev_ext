@@ -85,7 +85,7 @@ def prefix_go_line(run, ordinal, prefix, dst_frame0, seed=0, verify=False):
             f'seed={seed} verify={1 if verify else 0}\n')
 
 
-def check_sender_done(text, run, plan=None):
+def check_sender_done(text, run, plan=None, *, ordinal=None):
     """Validate a successful sender verdict; original run/status wire supported."""
     if not isinstance(text, str) or len(text) >= 1024 or any(
             ord(c) < 32 and c not in '\t\r' for c in text):
@@ -114,13 +114,19 @@ def check_sender_done(text, run, plan=None):
     if keys & fields.keys():
         if not keys <= fields.keys():
             raise ProtocolError('partial DONE request tuple')
-        if plan is not None and any(int(fields[k]) != plan[k] for k in
-                                    ('first_seq', 'groups') if k in plan):
+        if ordinal is None:
+            raise ProtocolError('DONE tuple lacks trusted request ordinal')
+        _uint(ordinal, 'request ordinal', 1)
+        if int(fields['ordinal']) != ordinal:
+            raise ProtocolError('DONE request ordinal mismatch')
+        if not isinstance(plan, dict) or not {'first_seq', 'groups'} <= plan.keys():
+            raise ProtocolError('DONE tuple lacks result plan')
+        if any(int(fields[k]) != plan[k] for k in ('first_seq', 'groups')):
             raise ProtocolError('DONE request tuple mismatch')
     return fields
 
 
-def check_result(body, run):
+def check_result(body, run, *, ordinal=None):
     for key in ('run', 'ok', 'error', 'bytes', 't0_ns', 't1_ns', 'latency_ns'):
         if key not in body:
             raise ProtocolError(f'KV_RESULT lacks {key}')
@@ -132,7 +138,7 @@ def check_result(body, run):
         _uint(body[key], key)
     if body['ok']:
         if 'host1' in body:
-            check_sender_done(body['host1'], run, body.get('plan'))
+            check_sender_done(body['host1'], run, body.get('plan'), ordinal=ordinal)
         if body['error']:
             raise ProtocolError('KV_RESULT ok with a nonzero error')
         if body['t1_ns'] < body['t0_ns'] or body['latency_ns'] != body['t1_ns'] - body['t0_ns']:
@@ -198,23 +204,26 @@ class Worker:
         kind, body = self._next(timeout, ('KV_RESULT', 'KV_ERROR'))
         if kind == 'KV_ERROR':
             raise WorkerError(f'worker refused GO: {body}')
-        return check_result(body, run)
+        return check_result(body, run, ordinal=ordinal)
 
     def go_prefix(self, run, ordinal, prefix, dst_frame0, seed=0, verify=False, timeout=600.0):
         self.submit(prefix_go_line(run, ordinal, prefix, dst_frame0, seed, verify))
         kind, body = self._next(timeout, ('KV_RESULT', 'KV_ERROR'))
         if kind == 'KV_ERROR':
             raise WorkerError(f'worker refused GO: {body}')
-        return check_result(body, run)
+        return check_result(body, run, ordinal=ordinal)
 
     def submit(self, text):
         """Write protocol lines without waiting; collect() reads the results in order."""
         self.proc.stdin.write(text)
         self.proc.stdin.flush()
 
-    def collect(self, timeout=600.0):
+    def collect(self, timeout=600.0, *, run=None, ordinal=None):
         _, body = self._next(timeout, ('KV_RESULT',))
-        return check_result(body, body.get('run'))
+        # New DONE tuples require the caller's original request context.
+        # Legacy replies and workers without host1 keep their old interface.
+        return check_result(body, body.get('run') if run is None else run,
+                            ordinal=None if run is None else ordinal)
 
     def quit(self, timeout=120.0):
         self.proc.stdin.write('QUIT\n')

@@ -134,5 +134,92 @@ class WorkerProcess(unittest.TestCase):
         self.assertIsNotNone(w.returncode)
 
 
+
+# A deliberately untrusted external worker. The production Worker object and
+# subprocess/line protocol are real; only the peer result is controlled here.
+TUPLE_WORKER = textwrap.dedent('''
+    import json, sys
+    print('KV_READY {"role":"restore"}', flush=True)
+    for line in sys.stdin:
+        if line.startswith('QUIT'):
+            print('KV_BYE {"error":0}', flush=True)
+            break
+        f = dict(x.split('=', 1) for x in line.split()[1:])
+        request_ordinal = int(f['ordinal'])
+        reported_ordinal = 999 if sys.argv[1] == 'wrong' else request_ordinal
+        host1 = 'DONE run=' + f['run'] + ' ok=1 err=0'
+        if sys.argv[1] != 'legacy':
+            host1 += ' ordinal=' + str(reported_ordinal) + ' first_seq=16 groups=1'
+        body = dict(run=f['run'], ok=True, error=0, bytes=4096,
+                    t0_ns=1, t1_ns=2, latency_ns=1, host1=host1,
+                    ordinal=reported_ordinal, plan=dict(first_seq=16, groups=1, slots=16))
+        print('KV_RESULT ' + json.dumps(body), flush=True)
+''')
+
+
+class SenderRequestContext(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='kv-request-context-')
+        self.addCleanup(self.tmp.cleanup)
+        self.script = Path(self.tmp.name) / 'peer.py'
+        self.script.write_text(TUPLE_WORKER)
+
+    def worker(self, mode):
+        worker = kp.Worker([sys.executable, self.script, mode], ready_timeout=3)
+        self.addCleanup(worker.kill)
+        return worker
+
+    def body(self, ordinal):
+        return dict(run='r', ok=True, error=0, bytes=4096, t0_ns=1, t1_ns=2,
+                    latency_ns=1, ordinal=ordinal,
+                    host1=f'DONE run=r ok=1 err=0 ordinal={ordinal} first_seq=16 groups=1',
+                    plan=dict(first_seq=16, groups=1, slots=16))
+
+    def test_tuple_without_request_context_is_refused(self):
+        # Neither a response ordinal nor first_seq/slots is trusted context.
+        with self.assertRaises(kp.ProtocolError):
+            kp.check_result(self.body(999), 'r')
+
+    def test_actual_go_rejects_wrong_sender_ordinal(self):
+        worker = self.worker('wrong')
+        with self.assertRaises(kp.ProtocolError):
+            worker.go('r', 1, 2048, 4096, 0, timeout=3)
+
+    def test_actual_prefix_go_rejects_wrong_sender_ordinal(self):
+        worker = self.worker('wrong')
+        with self.assertRaises(kp.ProtocolError):
+            worker.go_prefix('r', 1, 'ab' * 32, 0, timeout=3)
+
+    def test_actual_go_and_prefix_preserve_valid_tuple_and_legacy(self):
+        for mode in ('valid', 'legacy'):
+            with self.subTest(mode=mode):
+                worker = self.worker(mode)
+                self.assertTrue(worker.go('r', 1, 2048, 4096, 0, timeout=3)['ok'])
+                self.assertTrue(worker.go_prefix('next', 2, 'ab' * 32, 0, timeout=3)['ok'])
+                self.assertEqual(worker.quit(3)['error'], 0)
+
+    def test_actual_collect_refuses_tuple_without_context(self):
+        worker = self.worker('valid')
+        worker.submit(kp.go_line('r', 1, 2048, 4096, 0))
+        with self.assertRaises(kp.ProtocolError):
+            worker.collect(3)
+
+    def test_actual_collect_checks_explicit_request_context(self):
+        for mode in ('valid', 'wrong'):
+            with self.subTest(mode=mode):
+                worker = self.worker(mode)
+                worker.submit(kp.go_line('r', 1, 2048, 4096, 0))
+                if mode == 'valid':
+                    self.assertTrue(worker.collect(3, run='r', ordinal=1)['ok'])
+                else:
+                    with self.assertRaises(kp.ProtocolError):
+                        worker.collect(3, run='r', ordinal=1)
+
+    def test_actual_collect_legacy_remains_compatible(self):
+        worker = self.worker('legacy')
+        worker.submit(kp.go_line('r', 1, 2048, 4096, 0))
+        self.assertTrue(worker.collect(3)['ok'])
+
+
 if __name__ == '__main__':
     unittest.main()
