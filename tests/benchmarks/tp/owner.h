@@ -4,6 +4,7 @@
 #include "options.h"
 #include "../../../src/compute/collectives/xdev_tp.h"
 #include "../../../src/compute/cuda/peer_endpoint_owner.h"
+#include "../../../src/compute/cuda/frame_endpoint_owner.h"
 #include <cstdio>
 #include <stdexcept>
 #include <string>
@@ -21,6 +22,7 @@ inline void cuda_check(CUresult rc,const char *what) {
 #define NATIVE(call) native_check((call),#call)
 struct tp_eval_owner {
  xdev_ext_cuda_peer_owner *bootstrap=nullptr;
+ xdev_ext_cuda_frame_owner *frames=nullptr; // --frames host
  CUcontext context=nullptr;
  CUstream stream=nullptr;
  CUmodule oracle=nullptr;
@@ -30,6 +32,7 @@ struct tp_eval_owner {
  std::vector<CUdeviceptr> inputs,outputs,bad;
  void open(const tp_eval_options &o,const char *node,const char *bpf,const char *user_bpf,const char *oracle_ptx,const char *tp_ptx,
            const xdev_ext_cuda_peer_programs_opts *programs=nullptr) {
+  if(o.frames){open_frames(o,node,bpf,oracle_ptx,tp_ptx);return;}
   xdev_ext_cuda_peer_owner_opts options{};
   options.size=sizeof(options);options.version=1;options.mode=o.mode;
   options.context_mode=XDEV_EXT_CUDA_PEER_CREATE_OWN;options.device=o.device;
@@ -63,6 +66,51 @@ struct tp_eval_owner {
   }
   NATIVE(xdev_ext_cuda_peer_owner_start(bootstrap));
  }
+ // Host frames plus the GPU copy engine (GPU without GPUDirect RDMA): the
+ // owner creates both host-frame endpoints; each collective posts its own
+ // batches, so there is no START here.
+ void open_frames(const tp_eval_options &o,const char *node,const char *bpf,const char *oracle_ptx,const char *tp_ptx) {
+  xdev_ext_cuda_frame_owner_opts options{};
+  options.size=sizeof(options);options.version=XDEV_EXT_CUDA_FRAME_OWNER_VERSION;
+  options.context_mode=XDEV_EXT_CUDA_PEER_CREATE_OWN;options.device=o.device;
+  options.nvidia_node=node;options.bpf_object=bpf;options.ce_bpf_object=o.ce_bpf_object;
+  options.link_token=o.link;options.timeout_ns=o.timeout_ns;options.group_bytes=o.group_bytes;
+  options.receive_groups=1;options.endpoint_flags=o.early_cts?XDEV_EXT_FRAME_ENDPOINT_F_EARLY:0;
+  int rc=xdev_ext_cuda_frame_owner_open(&options,&frames);
+  started=frames!=nullptr; // Retain a partial owner as well as accepted work.
+  NATIVE(rc);
+  xdev_ext_cuda_frame_owner_view view{};view.size=sizeof(view);
+  NATIVE(xdev_ext_cuda_frame_owner_get_view(frames,&view));
+  context=view.context;stream=view.stream;
+  CU(cuModuleLoad(&oracle,oracle_ptx));
+  CU(cuModuleGetFunction(&fill,oracle,"tp_eval_fill"));
+  CU(cuModuleGetFunction(&check,oracle,"tp_eval_check"));
+  xdev_tp_config c{};c.size=sizeof(c);c.version=XDEV_TP_ABI_VERSION;c.rank=o.rank;c.world_size=2;
+  c.mode=o.mode;c.context=context;c.flags=XDEV_TP_F_HOST_FRAMES;c.tx_frames=view.tx_frames;c.rx_frames=view.rx_frames;
+  c.tx_va=view.tx_va;c.rx_va=view.rx_va;c.tx_bytes=view.tx_bytes;c.rx_bytes=view.rx_bytes;c.frame_size=4096;
+  c.logical_depth=o.depth;c.max_payload_bytes=o.payload_bytes;c.first_sequence=o.first_sequence;
+  c.communicator_id=o.communicator;c.epoch=o.epoch;c.timeout_ns=o.timeout_ns;c.ptx_path=tp_ptx;
+  c.trace_capacity=o.trace_capacity;
+  NATIVE(xdev_tp_create(&c,&comm));
+  CUdeviceptr in=0,out=0,mismatch=0;
+  CU(cuMemAlloc(&in,o.payload_bytes?o.payload_bytes:1));inputs.push_back(in);
+  CU(cuMemAlloc(&out,o.payload_bytes?(o.operation==1?o.payload_bytes:2*o.payload_bytes):1));outputs.push_back(out);
+  CU(cuMemAlloc(&mismatch,sizeof(unsigned)));bad.push_back(mismatch);
+ }
+ // Session identities recorded in the run metadata, after CREATE.
+ void session_ids(tp_eval_options &o) {
+  if(frames) {
+   xdev_ext_cuda_frame_owner_view view{};view.size=sizeof(view);
+   NATIVE(xdev_ext_cuda_frame_owner_get_view(frames,&view));
+   o.tx_session_id=xdev_ext_session_id(xdev_ext_frame_endpoint_session(view.tx_frames));
+   o.rx_session_id=xdev_ext_session_id(xdev_ext_frame_endpoint_session(view.rx_frames));
+  } else {
+   xdev_ext_cuda_peer_owner_view identity{};identity.size=sizeof(identity);
+   NATIVE(xdev_ext_cuda_peer_owner_get_view(bootstrap,&identity));
+   o.tx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.tx_endpoint));
+   o.rx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.rx_endpoint));
+  }
+ }
  void fill_inputs(const tp_eval_options &o,uint64_t iteration) {
   for(unsigned j=0;j<o.depth;++j) {
    uint64_t n=o.rows*o.elements,seed=iteration+j;
@@ -91,7 +139,8 @@ struct tp_eval_owner {
   for(auto p:outputs)CU(cuMemFree(p));
   for(auto p:bad)CU(cuMemFree(p));
   CU(cuModuleUnload(oracle));oracle=nullptr;
-  NATIVE(xdev_ext_cuda_peer_owner_close(&bootstrap));
+  if(frames)NATIVE(xdev_ext_cuda_frame_owner_close(&frames));
+  else NATIVE(xdev_ext_cuda_peer_owner_close(&bootstrap));
   started=false;
  }
 };

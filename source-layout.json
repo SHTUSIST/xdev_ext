@@ -10019,6 +10019,70 @@
       "source": "tests/core/memory/umem/fake_include/rsrc.h",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_umem/fake_include/rsrc.h"
+    },
+    {
+      "source": "src/compute/cuda/frame_endpoint_owner.cc",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.cc"
+    },
+    {
+      "source": "src/compute/cuda/frame_endpoint_owner.h",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.h"
+    },
+    {
+      "source": "src/lib/libxdev_ext_frame_endpoint.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/libxdev_ext_frame_endpoint.h"
+    },
+    {
+      "source": "src/lib/xdev_ext_frame_endpoint.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/xdev_ext_frame_endpoint.c"
+    },
+    {
+      "source": "tests/benchmarks/tp/test_tp_ce_bpf.c",
+      "logical_path": "tests/benchmarks/tp/test_tp_ce_bpf.c"
+    },
+    {
+      "source": "tests/benchmarks/tp/tp_ce_place.bpf.c",
+      "logical_path": "tests/benchmarks/tp/tp_ce_place.bpf.c"
+    },
+    {
+      "source": "tests/compute/tp/frames_boundary.cc",
+      "logical_path": "tests/compute/tp/frames_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frames_test.py",
+      "logical_path": "tests/compute/tp/frames_test.py"
+    },
+    {
+      "source": "tests/compute/tp/ce_place_test.py",
+      "logical_path": "tests/compute/tp/ce_place_test.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_driver_frames.py",
+      "logical_path": "tests/compute/tp/eval/test_driver_frames.py"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_boundary.cc",
+      "logical_path": "tests/compute/tp/frame_owner_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_test.py",
+      "logical_path": "tests/compute/tp/frame_owner_test.py"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.c"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.py"
+    },
+    {
+      "source": "tests/compute/tp/placement_contract_boundary.c",
+      "logical_path": "tests/compute/tp/placement_contract_boundary.c"
     }
   ]
 }

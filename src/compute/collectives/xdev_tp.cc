@@ -26,6 +26,7 @@ struct xdev_tp_comm {
  CUfunction result_begin=nullptr,result_payload=nullptr,result_commit=nullptr;
  CUfunction terminal_begin=nullptr,release=nullptr;
  uint64_t next_cookie=1;
+ uint64_t rx_ticket=0; // host-frame receive deliveries
  CUstream stream=nullptr;
  bool bound=false;
  int stable_error=0;
@@ -234,6 +235,71 @@ static int eager(xdev_tp_work *w) {
  c->stats.wire_tx_bytes+=tx;c->stats.wire_rx_bytes+=rx;
  return 0;
 }
+static bool host_frames(const xdev_tp_comm *c) { return c->cfg.flags&XDEV_TP_F_HOST_FRAMES; }
+/* The group of @sequence in one copy-engine window, as one span. */
+static int frame_span(xdev_ext_frame_endpoint *e,CUdeviceptr va,uint64_t window,uint64_t sequence,
+ uint64_t wire_bytes,Span *span) {
+ __u64 offset=0;__u32 bytes=0;
+ int rc=xdev_ext_frame_endpoint_place(e,sequence,&offset,&bytes);
+ if(rc)return rc;
+ if(!bytes || offset>window || bytes>window-offset)return -EPROTO;
+ if(bytes<wire_bytes)return -EMSGSIZE;
+ *span={va+offset,bytes};
+ return 0;
+}
+static int frame_post(xdev_tp_work *w,bool tx) {
+ auto *c=w->comm;++c->stats.host_control_calls;
+ return xdev_ext_frame_endpoint_post(tx?c->cfg.tx_frames:c->cfg.rx_frames,w->image.shape.sequence);
+}
+static int frame_wait(xdev_tp_work *w,bool tx) {
+ auto *c=w->comm;++c->stats.host_control_calls;
+ uint64_t ns=c->cfg.timeout_ns;
+ int ms=ns?int(std::min<uint64_t>((ns+999999)/1000000,INT32_MAX)):-1;
+ return xdev_ext_frame_endpoint_wait(tx?c->cfg.tx_frames:c->cfg.rx_frames,w->image.shape.sequence,ms);
+}
+/* Host-frame d1 exchange. The receive batch is posted first; the GPU packs
+ * into the send window; the send batch then copies it (CE D2H) into host
+ * frames and XDOMAIN transmits them; the receive batch lands the peer's
+ * group (XDOMAIN RX, CE H2D) in the receive window before the result
+ * kernels read it. The CPU copies no payload byte. Once a batch is posted
+ * the work is accepted and any failure is retained, never retried. */
+static int eager_frames(xdev_tp_work *w) {
+ auto *c=w->comm;auto &shape=w->image.shape;
+ int rc=frame_span(c->cfg.tx_frames,c->cfg.tx_va,c->cfg.tx_bytes,shape.sequence,shape.wire_bytes,&w->image.tx[0]);
+ if(!rc)rc=frame_span(c->cfg.rx_frames,c->cfg.rx_va,c->cfg.rx_bytes,shape.sequence,shape.wire_bytes,&w->image.rx[0]);
+ if(rc)return rc;
+ w->image.tx_count=w->image.rx_count=1;
+ if((rc=frame_post(w,false)))return rc;
+ w->accepted=true;
+ if((rc=begin_invocation(&c->runtime,&w->image.core,shape.sequence)))return retain(w,rc);
+ trace(c,w,XDEV_TP_TRACE_SLOT_ACQUIRED);
+ rc=upload(w);
+ if(!rc)rc=pack_kernels(w);
+ if(!rc)rc=complete_event(w);
+ if(!rc)rc=drv(cuMemcpyDtoH(&w->image,w->device,sizeof(w->image)));
+ if(!rc && w->image.core.error)rc=w->image.core.error;
+ if(!rc)rc=frame_post(w,true);
+ if(rc)return retain(w,rc);
+ advance(&c->runtime,&w->image.core,2,0);trace(c,w,XDEV_TP_TRACE_TX_PRODUCED);
+ if((rc=frame_wait(w,false)))return retain(w,rc);
+ if((rc=receive(&c->runtime,&w->image.core,shape.sequence,++c->rx_ticket)))return retain(w,rc);
+ trace(c,w,XDEV_TP_TRACE_RX_DELIVERED);++c->stats.rx_delivered;
+ rc=upload(w);
+ if(!rc)rc=result_kernels(w);
+ if(!rc)rc=complete_event(w);
+ if(!rc)rc=drv(cuMemcpyDtoH(&w->image,w->device,sizeof(w->image)));
+ if(!rc)rc=drv(cuMemcpyDtoH(&c->runtime,c->device_runtime,sizeof(Runtime)));
+ if(!rc && w->image.core.error)rc=w->image.core.error;
+ if(rc)return retain(w,rc);
+ trace(c,w,XDEV_TP_TRACE_RESULT_READY);++c->stats.last_use_released;
+ if((rc=frame_wait(w,true)))return retain(w,rc);
+ ++c->stats.tx_done;advance(&c->runtime,&w->image.core,5,0);
+ trace(c,w,XDEV_TP_TRACE_LAST_USE_RELEASED);
+ w->image.invocations=1;w->image.completed=1;w->image.first_sequence=w->image.last_sequence=w->image.core.sequence;
+ c->stats.payload_tx_bytes+=shape.payload_bytes;c->stats.payload_rx_bytes+=shape.payload_bytes;
+ c->stats.wire_tx_bytes+=w->image.tx[0].bytes;c->stats.wire_rx_bytes+=w->image.rx[0].bytes;
+ return 0;
+}
 static xdev_ext_cuda_message *device_message(xdev_tp_work *w,size_t offset) {
  return reinterpret_cast<xdev_ext_cuda_message *>(w->device+offset);
 }
@@ -291,24 +357,35 @@ static int gpu(xdev_tp_work *work,CUstreamCaptureStatus capture) {
 }
 extern "C" int xdev_tp_create(const xdev_tp_config *caller,xdev_tp_comm **out) {
  if(out)*out=nullptr;
- if(!out || !caller || (caller->size!=sizeof(*caller) && caller->size!=XDEV_TP_CONFIG_SIZE_V1_BASE))return -EINVAL;
- /* An original-ABI caller's struct ends before template_capacity. */
+ if(!out || !caller || (caller->size!=sizeof(*caller) && caller->size!=XDEV_TP_CONFIG_SIZE_V1_BASE &&
+    caller->size!=XDEV_TP_CONFIG_SIZE_V1_GRAPH))return -EINVAL;
+ /* Only copy the known caller prefix; absent capacity/endpoints stay zero. */
  xdev_tp_config copy{};std::memcpy(&copy,caller,caller->size);
  const xdev_tp_config *cfg=&copy;
  if(cfg->reserved || cfg->template_capacity>XDEV_TP_TEMPLATE_CAPACITY_MAX)return -EINVAL;
  const uint32_t capacity=cfg->template_capacity?cfg->template_capacity:XDEV_TP_TEMPLATE_CAPACITY;
- if(cfg->version!=1 || cfg->flags ||
- cfg->rank>1 || cfg->world_size!=2 || !cfg->context || !cfg->tx_endpoint || !cfg->rx_endpoint ||
- cfg->tx_endpoint==cfg->rx_endpoint || !cfg->first_sequence || !cfg->communicator_id || !cfg->epoch ||
+ bool frames=cfg && (cfg->flags&XDEV_TP_F_HOST_FRAMES);
+ /* Exactly one transport: PEER endpoints, or host frames without d2 controls. */
+ bool transport=cfg && (frames?!cfg->tx_endpoint && !cfg->rx_endpoint && cfg->tx_frames && cfg->rx_frames &&
+  cfg->tx_frames!=cfg->rx_frames && !cfg->d2_tx_producer && !cfg->d2_tx_terminal && !cfg->d2_rx_consumer:
+  cfg->tx_endpoint && cfg->rx_endpoint && cfg->tx_endpoint!=cfg->rx_endpoint && !cfg->tx_frames && !cfg->rx_frames);
+ if(cfg->version!=1 || (cfg->flags&~XDEV_TP_F_HOST_FRAMES) ||
+ cfg->rank>1 || cfg->world_size!=2 || !cfg->context || !transport ||
+ !cfg->first_sequence || !cfg->communicator_id || !cfg->epoch ||
  !cfg->logical_depth || cfg->logical_depth>XDEV_EXT_USER_RING_MAX || !cfg->frame_size ||
  !cfg->tx_bytes || !cfg->rx_bytes || cfg->max_payload_bytes>UINT32_MAX ||
  cfg->max_payload_bytes>UINT64_MAX-64 || cfg->max_payload_bytes+64>std::min(cfg->tx_bytes,cfg->rx_bytes) ||
  !cfg->ptx_path || !*cfg->ptx_path || (cfg->mode!=1 && cfg->mode!=2))return -EINVAL;
+ if(frames && cfg->mode!=XDEV_TP_D1_EAGER)return -EOPNOTSUPP; // host-driven START/wait only
  if(cfg->mode==1 && cfg->logical_depth!=1)return -EOPNOTSUPP;
  if(cfg->mode==2 && (!cfg->d2_tx_producer || !cfg->d2_rx_consumer || !cfg->d2_tx_terminal))return -EINVAL;
  int rc=context_check(cfg->context);MemoryFacts tx{},rx{};
- if(!rc)rc=memory_facts(cfg->tx_va,cfg->tx_bytes,cfg->context,&tx);
- if(!rc)rc=memory_facts(cfg->rx_va,cfg->rx_bytes,cfg->context,&rx);
+ /* Host-frame windows are the frame owner's CUDA VMM mappings, attached to
+  * the CE device; they carry no allocation context to qualify here. */
+ if(!rc && !frames)rc=memory_facts(cfg->tx_va,cfg->tx_bytes,cfg->context,&tx);
+ if(!rc && !frames)rc=memory_facts(cfg->rx_va,cfg->rx_bytes,cfg->context,&rx);
+ if(!rc && frames && (!cfg->tx_va || !cfg->rx_va || cfg->tx_va>UINT64_MAX-cfg->tx_bytes ||
+    cfg->rx_va>UINT64_MAX-cfg->rx_bytes))rc=-EINVAL;
  if(!rc && cfg->tx_va<cfg->rx_va+cfg->rx_bytes && cfg->rx_va<cfg->tx_va+cfg->tx_bytes)rc=-EINVAL;
  if(rc)return rc;
  xdev_tp_comm *c=new(std::nothrow) xdev_tp_comm;
@@ -381,7 +458,7 @@ static int submit(xdev_tp_comm *c,CUdeviceptr input,CUdeviceptr output,Shape sha
  if(!c->bound){unsigned long long id;rc=drv(cuStreamGetId(stream,&id));if(!rc){c->bound=true;c->stream=stream;c->stream_id=id;}}
  if(rc){cuEventDestroy(w->event);delete w;return rc;}
  w->slot=take_slot(c);w->device=c->arena+uint64_t(w->slot)*sizeof(DeviceWork);track(c,w);
- if(c->cfg.mode==1)rc=eager(w);
+ if(c->cfg.mode==1)rc=host_frames(c)?eager_frames(w):eager(w);
  else {
   // Set fixed mode once, outside captured graph nodes. The pool was allocated
   // and zeroed at communicator creation; only this field needs setup.

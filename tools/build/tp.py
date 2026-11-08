@@ -36,7 +36,8 @@ def main():
                             sdk/'targets/x86_64-linux/lib/stubs/libcuda.so']
                  if q.is_file()), None)
     c_sources = [lib / f'xdev_ext_{n}.c' for n in
-                 ['session', 'user', 'prog', 'run', 'link', 'peer_message']]
+                 ['session', 'user', 'prog', 'run', 'link', 'peer_message',
+                  'frame_endpoint']]
     # Session receive configuration owns the shared RX/steering lifecycle; a
     # transmit-only zero-copy session owns its XDP mode (redirect helper).
     c_sources += [tools/'xdev_ext_xsk_shared.c', tools/'xdev_ext_xsk_steer.c',
@@ -44,7 +45,8 @@ def main():
     cuda_sources = [lib/'libxdev_ext_cuda.cc', lib/'libxdev_ext_cuda_kernels.cu',
                     examples/'peer_message.cc', examples/'peer_message_owner.cu']
     headers = [lib/n for n in ['libxdev_ext.h', 'libxdev_ext_internal.h',
-                               'libxdev_ext_peer_message.h', 'libxdev_ext_cuda.h',
+                               'libxdev_ext_peer_message.h', 'libxdev_ext_frame_endpoint.h',
+                               'libxdev_ext_cuda.h',
                                'libxdev_ext_cuda_device.h']]
     headers += [tools/'include'/n for n in ['xdev_ext_xsk_shared.h',
                   'xdev_ext_xsk_shared_prog.h', 'xdev_ext_xsk_steer.h',

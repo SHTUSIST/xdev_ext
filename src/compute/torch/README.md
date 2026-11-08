@@ -35,6 +35,12 @@ Optional `early_cts` (0 or 1, default 0) opens both endpoints with
 or `xdev_ext_cuda_peer_owner_open_programs`. Both ranks must request the same
 value; the agreement check rejects a mismatch before either owner opens.
 
+Optional `frames` (`peer` or `host`, default `peer`) chooses the transport.
+`host` opens `xdev_ext_cuda_frame_owner` (`src/compute/cuda/frame_endpoint_owner.h`)
+on the current context and stream instead of the PEER owner and creates the
+communicator with `XDEV_TP_F_HOST_FRAMES`; it is d1 only and needs
+`ce_bpf_object`. Both ranks must request the same value.
+
 Optional `tx_program_pins` and `rx_program_pins` arrays select existing PRIVATE
 struct_ops link pins per stage. TX has three entries: USER producer, XDOMAIN
 TX, USER terminal. RX has two: XDOMAIN RX, USER consumer. A null entry keeps
@@ -72,6 +78,12 @@ sets the native template pool; absent or zero keeps 256. In GPU mode the keys `d
 `d2_tx_terminal` and `d2_rx_consumer` supply the borrowed CUDA control pointers.
 Pointers are process-local handles from actual admission, never serialized
 handles from another process. Numeric pointers alone do not prove authority.
+
+The native ABI remains version 1 with append-only configuration fields. Both
+the original prefix (`XDEV_TP_CONFIG_SIZE_V1_BASE`) and the graph-cap prefix
+(`XDEV_TP_CONFIG_SIZE_V1_GRAPH`) remain accepted; fields after the caller's
+declared size are zero-filled. Host-frame endpoint pointers follow the graph
+capacity fields, so a pre-host-frame caller keeps its requested template pool.
 
 The Python adapter obtains `torch.cuda.current_stream(tensor.device).cuda_stream`
 inside the tensor's device context. The Driver library independently qualifies

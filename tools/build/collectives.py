@@ -52,7 +52,9 @@ def main():
         'xdev_tp_algorithms.h', 'xdev_tp_device.h',
     )]
     owner = root / 'src/compute/cuda/peer_endpoint_owner.cc'
-    inputs += [owner, owner.with_suffix('.h')]
+    frame_owner = root / 'src/compute/cuda/frame_endpoint_owner.cc'
+    inputs += [owner, owner.with_suffix('.h'), frame_owner, frame_owner.with_suffix('.h'),
+               root / 'src/cli/include/xdev_ext_nv_p2p_ioctl.h']
     inputs += [root / 'tools/layout.py', root / 'source-layout.json',
                Path(__file__).resolve(), sdk / 'include/cuda.h']
     inputs += [Path(value) for value in dependencies.values() if value]
@@ -134,6 +136,7 @@ def main():
     include = ['-I' + str(sdk / 'include'), '-I' + str(lib),
                '-I' + str(view / 'kernel/include/uapi'), '-I' + str(source),
                '-I' + str(root / 'src/compute/cuda'), '-I' + str(root / 'src/lib'),
+               '-I' + str(root / 'src/cli/include'),
                '-I' + str(root / 'src/core/include/uapi'), *bpf_flags]
     for compiler in (args.host_cxx, nvcc):
         if run([compiler, '--version']):
@@ -151,11 +154,15 @@ def main():
     owner_obj = out / 'peer_endpoint_owner.o'
     if run([args.host_cxx, *common, *include, '-c', owner, '-o', owner_obj]):
         return finish('failed', 1, 'Actual duplex owner compilation failed')
+    frame_owner_obj = out / 'frame_endpoint_owner.o'
+    if run([args.host_cxx, *common, *include, '-c', frame_owner, '-o', frame_owner_obj]):
+        return finish('failed', 1, 'Actual host-frame owner compilation failed')
     shared = out / 'libxdev_tp.so'
     # The CUDA stub is only a link input, never a runtime search directory.
     link = ['-L' + str(base), '-lxdev_ext_cuda', str(base / 'libxdev_ext.a'),
             '-L' + str(stub.parent), '-lcuda', *bpf_link, '-lelf', '-lz', '-ldl']
-    if run([args.host_cxx, '-shared', '-Wl,--no-undefined', obj, owner_obj, *link, '-o', shared]):
+    if run([args.host_cxx, '-shared', '-Wl,--no-undefined', obj, owner_obj, frame_owner_obj, *link,
+            '-o', shared]):
         return finish('failed', 1, 'Actual collective shared-library link failed')
     receipt['artifacts']['shared'] = str(shared)
     for name, consumer in (('link_test', public), ('abi_link_test', other_public)):

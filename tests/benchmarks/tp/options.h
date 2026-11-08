@@ -12,6 +12,10 @@ struct tp_eval_options {
  uint64_t payload_bytes=0, allocation_bytes=0;
  uint64_t tx_session_id=0, rx_session_id=0; // Observed after native CREATE.
  int poll_completions=-1; // Observed NHI completion polling: -1 unknown, 0, 1.
+ // 0: PEER frames in GPU memory (GPUDirect RDMA). 1: host frames plus the GPU
+ // copy engine, for a GPU without GPUDirect RDMA (d1 collectives only).
+ unsigned frames=0;
+ const char *ce_bpf_object=nullptr; // tp_ce_place.bpf.o, host frames only
 };
 static inline const char *tp_eval_poll_json(const tp_eval_options &o) {
  return o.poll_completions<0 ? "null" : o.poll_completions ? "true" : "false";
@@ -23,6 +27,8 @@ static inline int tp_eval_geometry(tp_eval_options &o) {
      o.operation<1 || o.operation>4 || (o.operation==4 && o.depth!=1) || !o.timeout_ns || o.device>INT_MAX)
   return -EINVAL;
  if (o.operation==1 && o.rows!=1) return -EINVAL;
+ if (o.frames>1) return -EINVAL;
+ if (o.frames && (o.mode!=1 || o.operation==4)) return -EOPNOTSUPP;
  uint64_t item=o.dtype==3 ? 4:2;
  if (o.rows && o.elements>UINT64_MAX/o.rows) return -EOVERFLOW;
  uint64_t n=o.rows*o.elements;

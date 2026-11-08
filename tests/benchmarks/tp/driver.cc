@@ -79,7 +79,7 @@ static std::string handshake(const tp_eval_options &o) {
  char text[512];snprintf(text,sizeof(text),"%016llx:%016llx:%016llx:%016llx:%016llx:%08x:%08x:%08x:%08x:%08x:%016llx",
   (unsigned long long)o.communicator,(unsigned long long)o.epoch,(unsigned long long)o.first_sequence,
   (unsigned long long)o.iterations,(unsigned long long)o.elements,o.rows>UINT_MAX?UINT_MAX:unsigned(o.rows),
-  o.mode|(o.early_cts?0x80000000U:0),o.depth,o.dtype,o.operation,(unsigned long long)o.rows);
+  o.mode|(o.early_cts?0x80000000U:0)|(o.frames?0x40000000U:0),o.depth,o.dtype,o.operation,(unsigned long long)o.rows);
  return text;
 }
 int main(int argc,char **argv) {
@@ -95,6 +95,8 @@ int main(int argc,char **argv) {
    if(key=="--rank"){o.rank=small(v);have_rank=true;}
    else if(key=="--mode") {if(!strcmp(v,"d1"))o.mode=1;else if(!strcmp(v,"d2"))o.mode=2;else throw std::runtime_error("mode must be d1/d2");}
    else if(key=="--early-cts")o.early_cts=small(v);
+   else if(key=="--frames") {if(!strcmp(v,"peer"))o.frames=0;else if(!strcmp(v,"host"))o.frames=1;else throw std::runtime_error("frames must be peer/host");}
+   else if(key=="--ce-bpf-object")o.ce_bpf_object=v;
    else if(key=="--depth")o.depth=small(v);
    else if(key=="--dtype") {if(!strcmp(v,"f16"))o.dtype=1;else if(!strcmp(v,"bf16"))o.dtype=2;else if(!strcmp(v,"f32"))o.dtype=3;else throw std::runtime_error("dtype");}
    else if(key=="--operation") {if(!strcmp(v,"sum"))o.operation=1;else if(!strcmp(v,"all-gather"))o.operation=3;else if(!strcmp(v,"echo"))o.operation=4;else throw std::runtime_error("operation must be sum/all-gather/echo");}
@@ -130,16 +132,15 @@ int main(int argc,char **argv) {
   NATIVE(tp_eval_geometry(o));
   o.poll_completions=poll_completions_observation();
   bool need_xdomain=!programs.tx_stage_pins[1] || !programs.rx_stage_pins[0];
-  bool need_user=!programs.tx_stage_pins[0] || !programs.tx_stage_pins[2] || !programs.rx_stage_pins[1];
+  bool need_user=!o.frames && (!programs.tx_stage_pins[0] || !programs.tx_stage_pins[2] || !programs.rx_stage_pins[1]);
+  if(o.frames && (selected_programs || !o.ce_bpf_object))
+   throw std::runtime_error("host frames take --ce-bpf-object and no PEER stage pins");
   if(!have_rank || !o.link || !node || (need_xdomain && !bpf) || (need_user && !user_bpf) || !tp_ptx || !oracle || !address || !port ||
      o.timeout_ns/1000000>INT_MAX || o.timeout_ns<1000000)throw std::runtime_error("missing or invalid runtime prerequisites");
   // This socket only coordinates barriers. Payload never enters it.
   control.open(o.rank,address,port,o.timeout_ns);control.exchange(handshake(o));
   owner.open(o,node,bpf,user_bpf,oracle,tp_ptx,selected_programs?&programs:nullptr);works.resize(o.depth,nullptr);
-  xdev_ext_cuda_peer_owner_view identity{};identity.size=sizeof(identity);
-  NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&identity));
-  o.tx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.tx_endpoint));
-  o.rx_session_id=xdev_ext_session_id(xdev_ext_peer_endpoint_session(identity.rx_endpoint));
+  owner.session_ids(o);
   if(!o.tx_session_id || !o.rx_session_id || o.tx_session_id==o.rx_session_id)
    throw std::runtime_error("native session identity missing or aliased");
   if(o.operation==4) {
@@ -155,8 +156,8 @@ int main(int argc,char **argv) {
     printf("{\"record\":\"validation\",\"sequence\":%llu,\"rank\":%u,\"direction\":\"rx\",\"payload_bytes\":%u,\"valid\":%s}\n",
       (unsigned long long)(o.first_sequence+iteration),o.rank,o.group_bytes,valid?"true":"false");fflush(stdout);
    }
-   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u,\"requested_depth\":%u,\"frame_count\":%u,\"frame_size\":4096,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
-     o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes,o.depth,o.frame_count,
+   printf("{\"record\":\"metadata\",\"execution_kind\":\"echo\",\"frames\":\"%s\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"rank\":%u,\"clock\":1,\"completed\":%llu,\"communicator\":%llu,\"epoch\":%llu,\"group_bytes\":%u,\"requested_depth\":%u,\"frame_count\":%u,\"frame_size\":4096,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
+     o.frames?"host":"peer",o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),o.rank,(unsigned long long)o.iterations,(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.group_bytes,o.depth,o.frame_count,
      o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,(unsigned long long)o.iterations,
      (unsigned long long)o.first_sequence,(unsigned long long)o.payload_bytes,(unsigned long long)o.timeout_ns,
      (unsigned long long)o.tx_session_id,(unsigned long long)o.rx_session_id);fflush(stdout);
@@ -187,9 +188,12 @@ int main(int argc,char **argv) {
    } else CU(cuGraphLaunch(exec,owner.stream));
    CU(cuStreamSynchronize(owner.stream));
    for(auto w:works)NATIVE(xdev_tp_work_wait(w,o.timeout_ns));
-   xdev_ext_cuda_peer_owner_view completed_view{};completed_view.size=sizeof(completed_view);
-   NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&completed_view));
-   tp_eval_echo::wait_native_complete(completed_view,(iteration+1)*o.depth,o.timeout_ns);
+   // Host frames: the collective itself waited for both batches to finish.
+   if(!o.frames) {
+    xdev_ext_cuda_peer_owner_view completed_view{};completed_view.size=sizeof(completed_view);
+    NATIVE(xdev_ext_cuda_peer_owner_get_view(owner.bootstrap,&completed_view));
+    tp_eval_echo::wait_native_complete(completed_view,(iteration+1)*o.depth,o.timeout_ns);
+   }
    uint64_t end=now_ns();
    printf("{\"record\":\"interval\",\"start\":%llu,\"end\":%llu,\"rank\":%u,\"clock\":1,\"kind\":\"%s\",\"completed\":true,\"custody_released\":true}\n",
     (unsigned long long)start,(unsigned long long)end,o.rank,o.depth>1?"batch":(o.operation==1?"allreduce":"all_gather"));
@@ -212,8 +216,8 @@ int main(int argc,char **argv) {
      stats.rx_delivered!=stats.completed)throw std::runtime_error("native final accounting incomplete");
   std::vector<xdev_tp_trace_record> traces(o.trace_capacity);size_t written=0;
   NATIVE(xdev_tp_trace_read(owner.comm,traces.data(),traces.size(),&written));
-  printf("{\"record\":\"metadata\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
-   o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
+  printf("{\"record\":\"metadata\",\"frames\":\"%s\",\"native_mode\":%u,\"handoff_mode\":\"%s\",\"early_cts_requested\":%s,\"xdomain_poll_completions\":%s,\"communicator\":%llu,\"epoch\":%llu,\"rank\":%u,\"clock\":%u,\"trace_dropped\":%llu,\"requested_depth\":%u,\"native_high_water\":%llu,\"group_bytes\":%u,\"frame_count\":%u,\"frame_size\":4096,\"wire_header_bytes\":64,\"completed\":%llu,\"gpu_invocations\":%llu,\"host_control_calls\":%llu,\"operation\":%u,\"dtype\":%u,\"elements\":%llu,\"rows\":%llu,\"iterations\":%llu,\"first_sequence\":%llu,\"payload_bytes\":%llu,\"timeout_ns\":%llu,\"completion_boundary\":\"kernel-end-prefix\",\"tx_session_id\":%llu,\"rx_session_id\":%llu}\n",
+   o.frames?"host":"peer",o.mode,o.mode==1?"cpu":"gpu",o.early_cts?"true":"false",tp_eval_poll_json(o),(unsigned long long)o.communicator,(unsigned long long)o.epoch,o.rank,o.mode==1?1:2,
    (unsigned long long)stats.trace_dropped,o.depth,(unsigned long long)stats.logical_inflight_high_water,
    o.group_bytes,o.frame_count,(unsigned long long)stats.completed,(unsigned long long)stats.gpu_invocations,
    (unsigned long long)stats.host_control_calls,o.operation,o.dtype,(unsigned long long)o.elements,(unsigned long long)o.rows,

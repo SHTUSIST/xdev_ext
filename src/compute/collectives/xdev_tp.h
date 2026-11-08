@@ -5,6 +5,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "libxdev_ext_peer_message.h"
+#include "libxdev_ext_frame_endpoint.h"
 #include "libxdev_ext_cuda.h"
 #include "xdev_tp_wire.h"
 #ifdef __cplusplus
@@ -18,6 +19,10 @@ extern "C" {
  * zeroed at creation, never during stream capture. */
 #define XDEV_TP_TEMPLATE_CAPACITY 256U
 #define XDEV_TP_TEMPLATE_CAPACITY_MAX (1U << 20)
+/* Host frames for a GPU without GPUDirect RDMA: the exchange moves through
+ * tx_frames/rx_frames (libxdev_ext_frame_endpoint.h) instead of the PEER
+ * endpoints; tx_va/rx_va are the copy-engine windows. d1 only. */
+#define XDEV_TP_F_HOST_FRAMES 1U
 typedef struct xdev_tp_comm xdev_tp_comm;
 typedef struct xdev_tp_work xdev_tp_work;
 enum xdev_tp_dtype { XDEV_TP_F16 = 1, XDEV_TP_BF16 = 2, XDEV_TP_F32 = 3 };
@@ -55,13 +60,17 @@ struct xdev_tp_config {
 	const char *ptx_path;
 	/* Open/attach before endpoint_create; required in d2, NULL in d1. */
 	struct xdev_ext_cuda_user *d2_tx_producer, *d2_tx_terminal, *d2_rx_consumer;
-	uint32_t trace_capacity, flags; /* flags=0; trace_capacity0 disables tracing */
-	/* Appended in ABI 1. A caller passing size == XDEV_TP_CONFIG_SIZE_V1_BASE
-	 * (the struct without these two fields) gets the default capacity. */
+	uint32_t trace_capacity, flags; /* flags: XDEV_TP_F_*; trace_capacity0 disables tracing */
+	/* Appended in ABI 1. The original prefix ends before these fields;
+	 * callers passing XDEV_TP_CONFIG_SIZE_V1_BASE get default capacity. */
 	uint32_t template_capacity; /* 0 = XDEV_TP_TEMPLATE_CAPACITY; <= _MAX */
 	uint32_t reserved; /* must be 0 */
+	/* Borrowed host-frame endpoints, with XDEV_TP_F_HOST_FRAMES only; the
+	 * PEER endpoints and d2 controls are then NULL. */
+	struct xdev_ext_frame_endpoint *tx_frames, *rx_frames;
 };
 #define XDEV_TP_CONFIG_SIZE_V1_BASE offsetof(struct xdev_tp_config, template_capacity)
+#define XDEV_TP_CONFIG_SIZE_V1_GRAPH offsetof(struct xdev_tp_config, tx_frames)
 struct xdev_tp_stats {
 	size_t size;
 	uint32_t version, rank;
