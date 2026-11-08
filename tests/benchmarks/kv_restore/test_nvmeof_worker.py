@@ -115,6 +115,40 @@ class Worker(unittest.TestCase):
         self.assertTrue(r['ok'] and r['verified'], r)
         d.quit(timeout=30)
 
+    def test_uring_engine_reads_the_range_at_depth(self):
+        """E5 level 1: io_uring O_DIRECT READ_FIXED of chunk-sized reads, depth in
+        flight, each chunk copied to its destination offset when it completes."""
+        try:
+            os.close(os.open(self.device, os.O_RDONLY | os.O_DIRECT))
+        except OSError:
+            self.skipTest('this filesystem refuses O_DIRECT (tmpfs)')
+        w = self.worker('--engine', 'uring', '--depth', 4, '--io', 'direct',
+                        '--host-memory', 'registered', '--chunk-bytes', 64 * KIB)
+        self.assertEqual((w.ready['engine'], w.ready['depth'], w.ready['host_memory']),
+                         ('uring', 4, 'registered'))
+        r = w.go(run='u1', ordinal=1, object_slba=self.slba, bytes=MIB, dst_frame0=3,
+                 seed=self.seed, verify=True, timeout=30)
+        self.assertTrue(r['ok'] and r['verified'], r)
+        self.assertEqual(r['chunks'], MIB // (64 * KIB))
+        self.assertEqual(int(r['digest'], 16), fnv1a(kl.pattern_bytes(self.seed, 0, MIB)))
+        r = w.go(run='u2', ordinal=2, object_slba=4 * MIB // 512 - 8, bytes=MIB, dst_frame0=0,
+                 timeout=30)
+        self.assertEqual(r['error'], -5, 'short read past the device end')
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_uring_engine_arguments(self):
+        for extra in (['--engine', 'uring', '--io', 'buffered'],
+                      ['--engine', 'uring', '--io', 'direct', '--depth', '0'],
+                      ['--engine', 'uring', '--io', 'direct', '--depth', '257'],
+                      ['--depth', '4'], ['--engine', 'aio'],
+                      ['--host-memory', 'registered']):
+            with self.subTest(extra=extra):
+                r = subprocess.run([str(self.bin), '--device', str(self.device), '--lba-bytes',
+                                    '512', '--frame-bytes', str(128 * KIB), '--pool-bytes',
+                                    str(2 * MIB), '--test-host-destination'] + extra,
+                                   capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 2, (extra, r.stdout))
+
     @unittest.skipIf(ctypes.util.find_library('cuda'), 'a CUDA driver is installed here')
     def test_without_cuda_setup_fails_cleanly(self):
         with self.assertRaises(kp.WorkerError):

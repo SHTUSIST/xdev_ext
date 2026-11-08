@@ -207,6 +207,12 @@ def worker_argv(args, m):
         argv = [args.worker_bin or str(HERE / 'build/nvmeof_worker'), '--device', args.device,
                 '--lba-bytes', m.lba_bytes, '--frame-bytes', g.frame_bytes,
                 '--pool-bytes', args.pool_bytes, '--gpu-bdf', args.gpu_bdf]
+        if getattr(args, 'step', None) == 'L1':
+            # E5 level 1: the shared io_uring+cudaMemcpy baseline, K-KV geometry
+            # (group-sized reads, depth in flight); plain nvmeof keeps the
+            # worker's untuned defaults for the appendix row.
+            argv += ['--engine', 'uring', '--depth', g.depth, '--chunk-bytes', g.group_bytes,
+                     '--io', 'direct', '--host-memory', 'registered']
     else:
         argv = [sys.executable, '-I', str(HERE / 'mooncake_worker.py'), 'host2-restore',
                 '--manifest', args.manifest, '--local-hostname', args.local_hostname,

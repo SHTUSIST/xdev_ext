@@ -129,7 +129,7 @@ level whose arm or destination differs from its definition is refused:
 
 | Level | Configuration | What it adds |
 | --- | --- | --- |
-| L1 | `--arm nvmeof` (or a custom worker) on the NVMe-oF/TCP namespace | ordinary path |
+| L1 | `--arm nvmeof` on the NVMe-oF/TCP namespace; `--step L1` adds `--engine uring --depth D --chunk-bytes G --io direct --host-memory registered` | ordinary path: io_uring READ_FIXED into registered buffers, `cuMemcpyHtoDAsync` per chunk, same group size and depth as L2-L5 |
 | L2 | `--arm xdev-ext --dst user-copy` | XDOMAIN ring; USER stage; CPU memcpy into pinned staging, `cuMemcpyHtoDAsync` |
 | L3 | `--arm xdev-ext --dst user-direct` | the received frames, registered once with `cuMemHostRegister`, are the copy source (no CPU copy) |
 | L4 | `--arm xdev-ext --dst ce-vmm`, module switch 1 | kernel continuation to the CE stage, one CE submission per copy entry |
@@ -218,7 +218,10 @@ HOST1_TB0 -s 4420 -n NQN`, then `run.py run --arm nvmeof --device /dev/nvmeXnY`
 with the same manifest. The namespace is the same device, so the arm reads the
 same LBAs. The worker's defaults are untuned: buffered reads into pageable
 memory, one thread, 1 MiB chunks, one `cuCtxSynchronize` before the clock
-stops.
+stops. `--engine uring --depth N --io direct --host-memory registered` is the
+E5 level-1 form: N O_DIRECT READ_FIXED reads in flight into buffers registered
+with io_uring and `cuMemHostRegister`, each completed chunk copied with
+`cuMemcpyHtoDAsync`, a buffer reused only after its copy completed.
 
 `mooncake`: build Mooncake d01447808d10af78011e9203d53796a15a032a03 with the
 store enabled; on host 1 start `mooncake_master -enable_offload=true` and

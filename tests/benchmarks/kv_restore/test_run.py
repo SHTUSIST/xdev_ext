@@ -340,6 +340,15 @@ class AblationSteps(Base):
                                     *self.CE)), 'the switch belongs to a level'
         self.assertIsNone(kr.step_check(self.args(*good['L2'])), 'no level: an ordinary run')
 
+    def test_level1_uses_the_shared_io_uring_geometry(self):
+        m = kl.load_manifest(self.manifest)
+        argv = kr.worker_argv(self.args('--step', 'L1', '--arm', 'nvmeof', '--device', '/dev/nvme1n1'), m)
+        for flag, value in (('--engine', 'uring'), ('--depth', '32'), ('--chunk-bytes', str(128 * 1024)),
+                            ('--io', 'direct'), ('--host-memory', 'registered')):
+            self.assertEqual(argv[argv.index(flag) + 1], value, flag)
+        plain = kr.worker_argv(self.args('--arm', 'nvmeof', '--device', '/dev/nvme1n1'), m)
+        self.assertNotIn('--engine', plain, 'the appendix variant keeps the worker defaults')
+
     def test_ce_submit_setting_is_read_back(self):
         param = self.dir / 'xdev_ext_ce_entries_per_submit'
         a4 = self.args('--step', 'L4', '--arm', 'xdev-ext', '--ce-param', str(param), *self.CE)
