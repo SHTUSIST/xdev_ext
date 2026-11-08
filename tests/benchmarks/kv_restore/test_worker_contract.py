@@ -244,12 +244,25 @@ class CeVmmDestination(unittest.TestCase):
         self.assertEqual(r['plan']['host2_start_frames'], 32 * 32)
         self.assertEqual(w.quit(timeout=30)['error'], 0)
 
+    def test_ready_names_the_staging_export(self):
+        # The vLLM connector maps the staging allocation through KV_READY's
+        # vmm_export_fd and vmm_bytes; a dry run has no allocation (-1, 0).
+        for role, extra in (('restore', RESTORE + CE),
+                            ('local-verify', ['--nvme', '/dev/null', '--nvme-prog', '/dev/null',
+                                              '--pool-bytes', str(64 << 20)] + CE)):
+            with self.subTest(role=role):
+                w = self.worker(role, extra)
+                self.assertEqual((w.ready['dst'], w.ready['vmm_export_fd'], w.ready['vmm_bytes']),
+                                 ('ce-vmm', -1, 0))
+                self.assertEqual(w.quit(timeout=30)['error'], 0)
+
     def test_defaults_unchanged(self):
         w = kp.Worker([BIN, 'restore', '--dry-run'] + WINDOW + [
             '--gpu-bdf', '0000:00:00.0', '--gpu-node', '/dev/null', '--pool-bytes',
             str(5 * GIB), '--peer', '127.0.0.1:9', '--link-token', '5'], ready_timeout=30,
             log=Path(self.tmp.name) / 'peer.log')
         self.assertEqual(w.ready['dst'], 'peer')
+        self.assertEqual((w.ready['vmm_export_fd'], w.ready['vmm_bytes']), (-1, 0))
         r = w.go(run='p', ordinal=1, object_slba=2048, bytes=8 * 256 * KIB, dst_frame0=0,
                  timeout=30)
         self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),

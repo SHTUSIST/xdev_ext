@@ -131,17 +131,22 @@ The index is a text file read by `kv_layout.py` (`load_index`) and by the C
 worker (`kv_index.h`):
 
 ```
-xdev-kv-index 1
+xdev-kv-index 2 dtype=bfloat16
 prefix HASH object=NAME slba=2048 offset=0 bytes=603979776 tokens=4096 fnv1a=0x...
 ```
 
 HASH chains SHA-256 over whole blocks of token ids, seeded with the model
-name and the block layout (`prefix_hashes`). So the hashes of a P-token
+name, canonical tensor dtype and block layout (`prefix_hashes`, domain v2). So the hashes of a P-token
 prefix are the first P / block_size hashes of any longer prompt that starts
 with it. `PrefixIndex.longest_match` hashes a prompt once and returns the
 longest stored prefix. `fnv1a` is the FNV-1a 64 of the prefix bytes. `pack`
 writes one entry for each requested length up to each prompt's length, and
-one for the whole prompt.
+one for the whole prompt, provided it is whole restore groups. Actual dump
+cache dtypes must match resolved model/cache configuration. Typed sidecars
+and index-v2 headers record that dtype. Legacy raw index-v1 readers remain
+supported, but the vLLM connector rejects untyped indexes and asks for a new
+checked dump/repack. It never infers BF16 from two-byte cells or rewrites
+original files.
 
 `kv_restore restore|local-verify --index kv.index` accepts `GO run=ID
 ordinal=R prefix=HASH dst_frame0=D verify=0|1` in place of `object_slba` and
@@ -217,7 +222,10 @@ write its batch's ring slot, which does not keep the KV contiguous.
 
 Every worker sets up once and then talks line by line on stdin/stdout:
 `KV_READY {json}` after setup (`KV_ERROR {json}` and a nonzero exit if setup
-fails); `GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X
+fails; with `--dst ce-vmm`, `vmm_export_fd` and `vmm_bytes` name the staging
+allocation's POSIX fd export, so the vLLM connector in
+`src/compute/vllm/kv_connector` can map the bytes the copy engine writes;
+otherwise they are -1 and 0); `GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X
 verify=0|1` answered by one `KV_RESULT {json}`; `QUIT` answered by
 `KV_BYE {json}`. A worker refuses a GO whose keys do not exceed the keys it
 already used. With `verify=1` the worker compares the destination with the

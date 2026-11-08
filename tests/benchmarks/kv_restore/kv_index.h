@@ -5,7 +5,8 @@
  * The K-KV prefix index as the C worker reads it (same file kv_layout.py
  * writes; test_plan_crosscheck.py compares the two parsers):
  *
- *   xdev-kv-index 1
+ *   xdev-kv-index 1                         (legacy raw/pattern indexes)
+ *   xdev-kv-index 2 dtype=bfloat16          (typed producer indexes)
  *   prefix HASH object=NAME slba=N offset=N bytes=N tokens=N [fnv1a=0xN]
  *
  * HASH is kv_layout.prefix_hashes()'s 64 lowercase hex digits; slba is the
@@ -13,7 +14,9 @@
  * bytes its length, fnv1a the FNV-1a 64 of the prefix bytes.  The checks
  * against a manifest (object exists, whole vLLM blocks, inside the extent)
  * are kv_layout.py's when it writes or loads the file; this parser checks the
- * syntax, repeats and the LBA arithmetic of the restore request.
+ * syntax, repeats and the LBA arithmetic of the restore request. The worker
+ * treats HASH as opaque; the connector separately requires typed v2 and
+ * recomputes its dtype-specific domain before selecting an entry.
  */
 #include <errno.h>
 #include <stdbool.h>
@@ -149,8 +152,12 @@ static inline int kv_index_load(FILE *f, struct kv_index *ix)
 
 	ix->v = NULL;
 	ix->n = 0;
-	if (!fgets(line, sizeof(line), f) || strcspn(line, "\r\n") != strlen(KV_INDEX_HEADER) ||
-	    strncmp(line, KV_INDEX_HEADER, strlen(KV_INDEX_HEADER)))
+	if (!fgets(line, sizeof(line), f))
+		return -EINVAL;
+	line[strcspn(line, "\r\n")] = 0;
+	if (strcmp(line, KV_INDEX_HEADER) && strcmp(line, "xdev-kv-index 2 dtype=bfloat16") &&
+	    strcmp(line, "xdev-kv-index 2 dtype=float16") &&
+	    strcmp(line, "xdev-kv-index 2 dtype=float32") && strcmp(line, "xdev-kv-index 2 dtype=uint8"))
 		return -EINVAL;
 	while (!ret && fgets(line, sizeof(line), f)) {
 		struct kv_index_entry e;
