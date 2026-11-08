@@ -2177,6 +2177,14 @@
       "logical_path": "tests/benchmarks/chains/test_user_continuation_independent.py"
     },
     {
+      "source": "tests/benchmarks/chains/test_two_session.py",
+      "logical_path": "tests/eval/chains/test_two_session.py"
+    },
+    {
+      "source": "tests/benchmarks/chains/two_session_boundary_fixture.c.in",
+      "logical_path": "tests/eval/chains/two_session_boundary_fixture.c.in"
+    },
+    {
       "source": "tests/benchmarks/chains/uring_min.h",
       "logical_path": "tests/eval/chains/uring_min.h"
     },
@@ -4225,6 +4233,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/run-guest.sh"
     },
     {
+      "source": "tests/compute/user_stage/guest/sharedpool_session_guest.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/sharedpool_session_guest.c"
+    },
+    {
+      "source": "tests/compute/user_stage/guest/sharedpool_session.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/sharedpool_session.md"
+    },
+    {
       "source": "tests/compute/user_stage/guest/user_stage_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/user_stage_e2e.c"
@@ -4300,6 +4318,10 @@
       "source": "tests/compute/user_stage/wiring_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py"
+    },
+    {
+      "source": "tests/compute/user_stage/test_sharedpool_session.py",
+      "logical_path": "tests/compute/user_stage/test_sharedpool_session.py"
     },
     {
       "source": "tests/core/admission_report/CONTRACT.md",

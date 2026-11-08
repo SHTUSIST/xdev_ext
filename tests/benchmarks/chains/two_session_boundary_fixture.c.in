@@ -1,0 +1,222 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Device/syscall boundary only. Actual coordinator, cs_mech, CREATE_REPORT
+ * delivery validator and existing GPU byte oracle are appended by the test.
+ * Synthetic custody below is a boundary assertion, not a replacement kernel. */
+static const char *scenario;
+static unsigned depth, rings, umems, creates, ring_closes, unmaps, cuda_closes;
+static unsigned plan_closes, gpu_reads, violations, bad_cleanup, next_efd;
+static int waiting_side=-1;
+static unsigned char reference[6*4096], gpu[64*4096], custody[512];
+static unsigned char *fixture_pool;
+static size_t fixture_pool_len;
+struct fixture_side {
+    uint64_t id, done, published, first, target, publish_target;
+    uint32_t indices[512], nr, q;
+    unsigned starts, stops, waits;
+    int efd;
+    bool pending, unknown, stopped;
+};
+static struct fixture_side sides[2];
+static bool is_case(const char *value) { return !strcmp(scenario,value); }
+static int side_index(uint64_t id)
+{
+    if (id==7001) return 0;
+    if (id==7009) return 1;
+    violations++; return -1;
+}
+static int fixture_register(int fd,unsigned opcode,void *arg)
+{
+    if (fd!=400) { violations++; return -EINVAL; }
+    if (opcode==IORING_REGISTER_XDEV_EXT_UMEM) {
+        struct io_uring_xdev_ext_umem_reg *reg=arg;
+        umems++;
+        if ((void *)(uintptr_t)reg->addr!=fixture_pool || reg->size!=fixture_pool_len || reg->frame_size!=4096)
+            violations++;
+        return 0;
+    }
+    if (opcode!=IORING_REGISTER_XDEV_EXT_MECH) { violations++; return -EINVAL; }
+    struct io_uring_xdev_ext_mech *op=arg;
+    if (op->op==XDEV_EXT_MECH_OP_CREATE_REPORT) {
+        struct xdev_ext_mech_create_with_report *e=(void *)(uintptr_t)op->arg;
+        unsigned i=creates++;
+        if (i>1) { violations++; return -EINVAL; }
+        if (e->create.session_id || e->create.nr_stages!=1 ||
+            e->create.pool_kind!=XDEV_EXT_MECH_POOL_IOU_UMEM || e->create.pool_fd!=-1 ||
+            e->create.depth!=depth || e->create.layout.frame_size!=4096 ||
+            e->create.layout.group_bytes!=4096 || e->create.eventfd!=(int)(410+i) ||
+            e->create.st[0].class_id!=(i?XDEV_EXT_MECH_CLASS_CE:XDEV_EXT_MECH_CLASS_NVME) ||
+            e->create.st[0].direction!=(i?XDEV_EXT_MECH_DIR_TO_DEVICE:XDEV_EXT_MECH_DIR_FROM_DEVICE))
+            violations++;
+        if ((!i && (e->create.st[0].fd!=420 || e->create.st[0].arg0!=2048 || e->create.st[0].arg1!=48)) ||
+            (i && (e->create.st[0].fd!=421 || e->create.st[0].arg0!=0x200000 || e->create.st[0].arg1!=depth*4096)))
+            violations++;
+        sides[i].id=i?7009:7001;
+        sides[i].efd=e->create.eventfd;
+        if (i && is_case("create-uncertain")) return -EINTR;
+        memset(&e->report,0,sizeof(e->report));
+        e->report.size=sizeof(e->report); e->report.version=XDEV_EXT_MECH_CREATE_REPORT_VERSION;
+        e->report.failed_stage=UINT32_MAX;
+        if (i && is_case("create-retained")) {
+            e->report.result=-EIO; e->report.phase=XDEV_EXT_MECH_CREATE_CLASS_BIND;
+            e->report.cleanup=XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED;
+            return 0;
+        }
+        e->create.session_id=sides[i].id; e->report.session_id=sides[i].id;
+        return 0;
+    }
+    if (op->op==XDEV_EXT_MECH_OP_NOTIFY_ARM) {
+        struct xdev_ext_mech_notify_arm *a=(void *)(uintptr_t)op->arg;
+        int i=side_index(a->session_id); if (i<0) return -EINVAL;
+        sides[i].target=a->batches_target; sides[i].publish_target=a->published_target;
+        return 0;
+    }
+    if (op->op==XDEV_EXT_MECH_OP_START) {
+        struct xdev_ext_mech_start *st=(void *)(uintptr_t)op->arg;
+        int i=side_index(st->session_id); if (i<0) return -EINVAL;
+        struct fixture_side *s=&sides[i]; s->starts++;
+        if (st->flags!=(XDEV_EXT_MECH_START_F_USER_FRAMES|XDEV_EXT_MECH_START_F_ORDERED_FRAMES) ||
+            st->nr_batches>depth || !st->nr_batches || st->nr_user_frames!=st->nr_batches ||
+            s->pending || st->first_seq!=s->done+1 || st->first_seq+st->nr_batches>7 ||
+            s->target!=s->done+st->nr_batches || s->publish_target!=s->published+st->nr_user_frames)
+            violations++;
+        if (!i && sides[1].starts && gpu_reads<sides[1].starts) violations++;
+        s->first=st->first_seq; s->q=st->nr_batches; s->nr=st->nr_user_frames;
+        const uint32_t *indices=(void *)(uintptr_t)st->user_frames;
+        if (s->nr>512) { violations++; return -EINVAL; }
+        for (unsigned k=0;k<s->nr;k++) {
+            s->indices[k]=indices[k];
+            if (indices[k]>=512 || custody[indices[k]]) { violations++; return -EBUSY; }
+            for (unsigned j=0;j<k;j++) if (indices[j]==indices[k]) violations++;
+            custody[indices[k]]=i+1;
+            if (!i) {
+                memcpy(fixture_pool+(size_t)indices[k]*4096,reference+(s->first-1+k)*4096,4096);
+            } else {
+                if (k>=sides[0].nr || indices[k]!=sides[0].indices[k] || s->first!=sides[0].first)
+                    violations++;
+                /* CE slots need not have key order; reverse each full window. */
+                memcpy(gpu+(s->q-1-k)*4096,fixture_pool+(size_t)indices[k]*4096,4096);
+            }
+        }
+        if (i && is_case("corrupt-first-window") && s->starts==1)
+            gpu[(s->q-1)*4096+1023]^=0x80;
+        if (i && is_case("stale-first-window") && s->starts==1)
+            memcpy(gpu+(s->q-1)*4096,reference+5*4096,4096);
+        s->pending=true;
+        if (!i && is_case("start-uncertain")) { s->unknown=true; return -EINTR; }
+        if (waiting_side>=0) violations++; /* a prior accepted START's wait was omitted */
+        waiting_side=i;
+        return 0;
+    }
+    if (op->op==XDEV_EXT_MECH_OP_STATS) {
+        struct xdev_ext_mech_stats *out=(void *)(uintptr_t)op->arg;
+        int i=side_index(out->session_id); if (i<0) return -EINVAL;
+        struct fixture_side *s=&sides[i];
+        if (s->pending && !s->unknown) {
+            s->done+=s->q; s->published+=s->nr;
+            for (unsigned k=0;k<s->nr;k++) custody[s->indices[k]]=0;
+            s->pending=false;
+        }
+        memset(out,0,sizeof(*out)); out->session_id=s->id;
+        out->state=s->unknown?XDEV_EXT_MECH_SESSION_ZOMBIE:XDEV_EXT_MECH_SESSION_ACTIVE;
+        out->batches_done=s->done; out->published=s->published;
+        out->submitted[0]=out->completed[0]=s->done;
+        if (s->unknown) { out->inflight=1; out->sequestered=1; }
+        if (!i) {
+            if (is_case("n-published-short")) out->published--;
+            if (is_case("n-done-short")) out->batches_done--;
+            if (is_case("n-inflight")) out->inflight=1;
+            if (is_case("n-error")) out->last_err=-EIO;
+            if (is_case("n-abort")) out->batches_abort=1;
+            if (is_case("n-sequester")) out->sequestered=1;
+        }
+        return 0;
+    }
+    if (op->op==XDEV_EXT_MECH_OP_STOP_REPORT) {
+        struct xdev_ext_mech_stop_report *r=(void *)(uintptr_t)op->arg;
+        int i=side_index(r->session_id); if (i<0) return -EINVAL;
+        struct fixture_side *s=&sides[i]; s->stops++;
+        if (s->unknown || (i && is_case("stop-unknown"))) { s->unknown=true; return -EBUSY; }
+        s->stopped=true;
+        r->stats.session_id=s->id; r->stats.state=XDEV_EXT_MECH_SESSION_STOPPED;
+        r->stats.batches_done=s->done; r->stats.published=s->published;
+        r->transport.v3.v2.v1.size=sizeof(r->transport);
+        r->transport.v3.v2.v1.version=XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4;
+        r->transport.v3.v2.v1.session_id=s->id;
+        return 0;
+    }
+    /* Legacy CREATE/STOP, guessed IDs or per-session ring closure are defects. */
+    violations++; return -EINVAL;
+}
+long fixture_syscall(long number,...)
+{
+    va_list ap; va_start(ap,number); int ret;
+    if (number==__NR_io_uring_setup) { rings++; ret=400; }
+    else if (number==__NR_io_uring_register) {
+        int fd=va_arg(ap,int); unsigned opcode=va_arg(ap,unsigned);
+        void *arg=va_arg(ap,void *); ret=fixture_register(fd,opcode,arg);
+    } else { violations++; ret=-EINVAL; }
+    va_end(ap); if (ret<0) { errno=-ret; return -1; } return ret;
+}
+int xdev_ext__uring_register(int fd,unsigned int opcode,void *arg)
+{ return fixture_register(fd,opcode,arg); }
+int fixture_eventfd(unsigned int init,int flags)
+{ (void)init; (void)flags; return 410+(int)next_efd++; }
+int fixture_open(const char *path,int flags,...)
+{
+    (void)flags;
+    if (!strcmp(path,"/dev/ng_fixture")) return 420;
+    if (!strcmp(path,"/dev/nvidia0")) return 421;
+    violations++; errno=ENOENT; return -1;
+}
+static void cleanup_check(void)
+{
+    if ((sides[0].id && !sides[0].stopped) ||
+        (creates>1 && (!sides[1].stopped || is_case("create-retained") || is_case("create-uncertain"))))
+        bad_cleanup++;
+}
+int fixture_close(int fd)
+{ cleanup_check(); if (fd==400) ring_closes++; return 0; }
+void *fixture_mmap(void *addr,size_t len,int prot,int flags,int fd,off_t off)
+{
+    (void)addr; (void)prot; (void)flags; (void)fd; (void)off;
+    fixture_pool=calloc(1,len); fixture_pool_len=len; return fixture_pool?fixture_pool:MAP_FAILED;
+}
+int fixture_munmap(void *addr,size_t len)
+{ (void)len; cleanup_check(); unmaps++; free(addr); fixture_pool=NULL; return 0; }
+uint64_t cb_now_ns(void) { static uint64_t now; now+=100000000ULL; return now; }
+int cs_wait(int efd,uint64_t deadline,uint64_t *syscalls,uint64_t *count)
+{
+    (void)deadline; (*syscalls)++;
+    if (waiting_side<0 || efd!=sides[waiting_side].efd) {
+        violations++; return -EINVAL;
+    }
+    sides[waiting_side].waits++;
+    waiting_side=-1;
+    *count=1;
+    return 0;
+}
+int cs_plans_open(const struct chain_spec *s,struct cs_plans *p,struct chain_result *r)
+{ (void)s; (void)r; memset(p,0,sizeof(*p)); return 0; }
+void cs_plans_close(struct cs_plans *p) { (void)p; plan_closes++; }
+int cs_native_bind(const struct chain_spec *s,uint64_t id,bool rx)
+{ (void)s; (void)rx; return side_index(id)<0?-EINVAL:0; }
+uint8_t *chain_read_reference(const struct chain_spec *s,size_t *len,struct chain_result *r)
+{ (void)s; (void)r; *len=sizeof(reference); uint8_t *p=malloc(*len); if(p) memcpy(p,reference,*len); return p; }
+int cs_ce_open_alloc(const struct chain_spec *s,struct cs_ce *ce)
+{ (void)s; ce->va=0x200000; ce->cuda.lib=(void *)1; return 0; }
+int cs_ce_access(const struct chain_spec *s,struct cs_ce *ce,uint64_t off,void *buf,size_t len,bool write)
+{
+    (void)s; (void)ce;
+    if (off>sizeof(gpu) || len>sizeof(gpu)-off) return -ERANGE;
+    if(write) memcpy(gpu+off,buf,len);
+    else { gpu_reads++; memcpy(buf,gpu+off,len); }
+    return 0;
+}
+int xdev_ext_mech_cuda_close(struct xdev_ext_mech_cuda *cuda)
+{ (void)cuda; cleanup_check(); cuda_closes++; return 0; }
+#define syscall(...) fixture_syscall(__VA_ARGS__)
+#define eventfd(...) fixture_eventfd(__VA_ARGS__)
+#define open(...) fixture_open(__VA_ARGS__)
+#define close(...) fixture_close(__VA_ARGS__)
+#define mmap(...) fixture_mmap(__VA_ARGS__)
+#define munmap(...) fixture_munmap(__VA_ARGS__)

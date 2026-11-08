@@ -115,8 +115,9 @@ identical. A campaign without an explicit seed chooses one seed for all arms.
 For `nvme-gpu`, the new staged composition ends after H2D and GPU completion,
 without a D2H return. The USER and session variants use one io_uring UMEM
 pool and one session each; no cross-session pool permission is assumed.
-The separate two-single-stage-session handoff on one ring remains unqualified;
-the USER stage in this arm does not establish that cross-session handoff.
+The separate two-single-stage-session handoff on one ring has an untimed
+qualification entry below; the USER stage in this arm does not establish that
+cross-session handoff.
 All variants retain the final GPU-window oracle. The USER arm additionally
 requires `ready_batches == completed_batches == warmup + batches`, with
 zero USER failure. Missing acknowledgements at terminal completion report a
@@ -133,6 +134,38 @@ unchanged. CUDA process initialization runs after valid parsing and before any
 owned session resources; the final FD check covers every fd acquired after that
 baseline. `--check` does not initialize CUDA. This selection establishes a path
 to qualify, not a device or performance result.
+
+### Untimed two-session qualification
+
+```sh
+.build/chain_bench --two-session-correctness nvme-gpu-correctness.json
+```
+
+This entry takes an existing `chain: "nvme-gpu"`, `arm: "session"`,
+`mode: "correctness"`, closed-load spec with a `ce-window` oracle and its
+reference file. It creates one NVMe READ session and one CE H2D session on
+the same ring and registered IOU UMEM. Both use the spec's original devices,
+layout and depth. Each window lends at most depth groups to NVMe using explicit
+ordered frame indices without RECYCLE, waits for its own terminal and complete
+published-frame count, and lends the same indices to CE. Every CE window must
+contain all that window's required input versions, with full byte checks,
+before another NVMe window may reuse the frames. Destination slots remain the
+kernel's choice; a missing version fails qualification.
+
+Each session has its own eventfd, cumulative targets and synchronous
+STOP_REPORT. Shared resources have one owner and are closed once after both
+sessions release successfully. Uncertain delivery or teardown preserves that
+owner and fails qualification. CUDA runtime initialization and the final
+complete owned-FD check use the existing entry/exit boundaries.
+
+Stdout contains `TWO_SESSION_QUALIFICATION=PASS` only after successful cleanup
+and the FD check, or `TWO_SESSION_QUALIFICATION=FAIL`; stderr carries setup,
+session and failure diagnostics. No ordinary benchmark result row or timing is
+produced, and `out` is not used by this qualification entry. The existing
+`--spec`/`--check` paths and arms retain their behavior. This entry qualifies
+depth=1 handoff and specified-depth whole windows only. It does not provide
+sustained per-batch pipelining or a throughput comparison, and software or
+mixed-device correctness does not establish physical NVMe performance.
 
 Comparable session and USER results label raw `cost.syscalls` as
 `syscalls_scope: main-thread-explicit`. The library's USER helper syscalls
