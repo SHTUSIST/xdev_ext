@@ -569,8 +569,16 @@
       "logical_path": "src/compute/cuda/peer_endpoint_owner.cc"
     },
     {
+      "source": "src/compute/cuda/frame_endpoint_owner.cc",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.cc"
+    },
+    {
       "source": "src/compute/cuda/peer_endpoint_owner.h",
       "logical_path": "src/compute/cuda/peer_endpoint_owner.h"
+    },
+    {
+      "source": "src/compute/cuda/frame_endpoint_owner.h",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.h"
     },
     {
       "source": "src/compute/drivers/gpu/nvidia-p2p/README.md",
@@ -4241,6 +4249,14 @@
     {
       "source": "tests/compute/tp/owner_lifetime_boundary.cc",
       "logical_path": "tests/compute/tp/owner_lifetime_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_boundary.cc",
+      "logical_path": "tests/compute/tp/frame_owner_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_test.py",
+      "logical_path": "tests/compute/tp/frame_owner_test.py"
     },
     {
       "source": "tests/compute/tp/owner_lifetime_test.py",
