@@ -624,6 +624,13 @@ struct xdev_ext_stor_stage; struct xdev_ext_stor_io;
     cases = cases.replace(old_pass, new_pass)
     cases = cases.replace('nvme_xdev_ext_poll_capable(', 'xdev_ext_stor_block_poll_capable(')
     bio_boundary = FAMILY_BIO_BOUNDARY if bio_path else ''
+    if 'XDEV_EXT_PEER_EPOCH_NONE' in code and 'define XDEV_EXT_PEER_EPOCH_NONE' not in types:
+        # The actual "no submission epoch" value the session path starts from.
+        epoch = re.search(r'^#define XDEV_EXT_PEER_EPOCH_NONE [^\n]*\n',
+                          source('include/linux/xdev_ext_peer.h'), re.M)
+        if not epoch:
+            raise AssertionError('actual XDEV_EXT_PEER_EPOCH_NONE missing')
+        types = epoch[0] + types
     return (prefix + setup + types + '\n' + recorders + boundary + bio_boundary + code + ops +
             HELPERS['worker_fixture_init']() + '\n' + cases)
 

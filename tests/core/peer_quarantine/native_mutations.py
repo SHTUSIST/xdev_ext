@@ -52,6 +52,8 @@ MUTANTS = (
     ('UNKNOWN release without the controller',
      replace('xdev_ext_peer_fd_release_unknown(&handle, dev->peer_requester,',
              'xdev_ext_peer_fd_release_unknown(&handle, NULL,')),
+    ('submit snapshot without its requester record',
+     replace('\t\tctx->requester = dev->peer_requester;\n', '')),
     ('UNKNOWN release with an earlier epoch',
      replace('                                              trace.submit_epoch);',
              '                                              0);')),

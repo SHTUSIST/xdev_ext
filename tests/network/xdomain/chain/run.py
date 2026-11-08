@@ -534,6 +534,8 @@ def xdomain_units(kernel, build, root, pool='provider'):
 PEER_RENAMES = ['-Dxdev_ext_peer_file_claim=chain_real_peer_file_claim',
                 '-Dxdev_ext_peer_file_acquire=chain_real_peer_file_acquire',
                 '-Dxdev_ext_peer_fd_release=chain_real_peer_fd_release',
+                '-Dxdev_ext_peer_fd_release_unknown=chain_real_peer_fd_release_unknown',
+                '-Dxdev_ext_peer_requester_evidence=chain_real_peer_requester_evidence',
                 '-Dxdev_ext_peer_control_file=chain_real_peer_control_file']
 REQUESTER_RENAMES = ['-Dxdev_ext_requester_bind=chain_real_requester_bind',
                      '-Dxdev_ext_requester_unbind=chain_real_requester_unbind']

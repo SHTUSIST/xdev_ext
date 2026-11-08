@@ -294,6 +294,17 @@ def generate(mutation=None):
                      "xdev_ext_mech_session_release_report")
         after.insert(after.index("xdev_ext_mech_session_destroy"),
                      "xdev_ext_mech_session_destroy_report")
+    # A parked session's settle step kicks the evidence recovery queue; the
+    # host boundary counts the kick and never runs the queue.
+    if "static void xdev_ext_mech_quarantine_settled(" in core:
+        after.insert(after.index("xdev_ext_mech_quarantine") + 1,
+                     "xdev_ext_mech_quarantine_settled")
+        anchor = "static DEFINE_MUTEX(xdev_ext_mech_quarantine_lock);"
+        if template.count(anchor) != 1:
+            raise RuntimeError("SETUP quarantine lock anchor")
+        template = template.replace(anchor, anchor + "\nstatic unsigned recovery_kicks;\n"
+            "static struct work_struct xdev_ext_mech_recovery_work;\n#define system_unbound_wq NULL\n"
+            "static void queue_work(void *wq,struct work_struct *w){(void)wq;(void)w;recovery_kicks++;}")
         after[0:0] = ["xdev_ext_mech_stats_fill", "xdev_ext_mech_transport_stats_fill"]
     if "static void xdev_ext_mech_start_queue_free(" in core:
         after.insert(0, "xdev_ext_mech_start_queue_free")

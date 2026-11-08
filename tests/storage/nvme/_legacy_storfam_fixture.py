@@ -560,8 +560,20 @@ class LegacySelection:
             if 'nvme_xdev_ext_peer_build_cmd(' in self.definition(
                     N, 'nvme_xdev_ext_member_encode_dptr', purpose='profile-inspection-only'):
                 items.append(('drivers/nvme/host/core.c', 'nvme_xdev_ext_peer_build_cmd'))
-            if 'xdev_ext_stor_leases_retire(' in self.definition(B, 'xdev_ext_storfam_peer_put'):
+            peer_put = self.definition(B, 'xdev_ext_storfam_peer_put', purpose='profile-inspection-only')
+            if 'xdev_ext_stor_leases_retire(' in peer_put:
                 items.append((R, 'xdev_ext_stor_leases_retire'))
+            if 'xdev_ext_stor_leases_retire_unknown(' in peer_put:
+                items.append((R, 'xdev_ext_stor_leases_retire_unknown'))
+                # The actual UNKNOWN-release vocabulary, unless the whole
+                # peer header is already part of this probe.
+                peer_api = self.read('include/linux/xdev_ext_peer.h')
+                epoch = re.search(r'^#define XDEV_EXT_PEER_EPOCH_NONE [^\n]*', peer_api, re.M)
+                enum = re.search(r'^enum xdev_ext_peer_evidence \{.*?^\};', peer_api, re.M | re.S)
+                if not epoch or not enum:
+                    raise ValueError('SETUP actual peer evidence vocabulary missing')
+                extra.append('#ifndef _LINUX_XDEV_EXT_PEER_H\nstruct xdev_ext_peer_requester;\n' +
+                             epoch[0] + '\n' + enum[0] + '\n#endif')
             items += [(R, n) for n in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                                       'xdev_ext_stor_slot_put', 'xdev_ext_stor_done')]
             items += [(Q, 'xdev_ext_peer_lease_split'), (I, 'nvme_xdev_ext_capture_identity')]
@@ -571,10 +583,13 @@ class LegacySelection:
                 'xdev_ext_stor_block_poll_check', 'xdev_ext_stor_block_poll_arm',
                 'xdev_ext_storfam_host_get', 'xdev_ext_storfam_host_put',
                 'xdev_ext_storfam_peer_io', 'xdev_ext_storfam_peer_get',
+                'xdev_ext_storfam_peer_evidence',
                 'xdev_ext_storfam_peer_put', 'xdev_ext_storfam_peer_map',
                 'xdev_ext_storfam_host_map', 'xdev_ext_storfam_submit_check',
                 'xdev_ext_storfam_submit', 'xdev_ext_storfam_host_ready',
-                'xdev_ext_storfam_consume')]
+                'xdev_ext_storfam_consume')
+                if n != 'xdev_ext_storfam_peer_evidence' or
+                'xdev_ext_storfam_peer_evidence(' in peer_put]
             # New family routes still compile their whole real callees, even
             # when these original NVMe cases select the native-request route.
             for caller, callee in (
@@ -588,9 +603,12 @@ class LegacySelection:
                 'nvme_xdev_ext_member_identity', 'nvme_xdev_ext_member_encode',
                 'nvme_xdev_ext_member_encode_dptr', 'nvme_xdev_ext_member_request_init',
                 'nvme_xdev_ext_member_post', 'nvme_xdev_ext_member_retire_peer',
+                'nvme_xdev_ext_member_peer_evidence',
                 'nvme_xdev_ext_class_complete', 'nvme_xdev_ext_class_end_io',
                 'nvme_xdev_ext_peer_complete', 'nvme_xdev_ext_peer_end_io',
-                'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_stage_fill_cqe')]
+                'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_stage_fill_cqe')
+                if n != 'nvme_xdev_ext_member_peer_evidence' or
+                'xdev_ext_storfam_peer_evidence(' in peer_put]
             items += [(T, 'nvme_xdev_ext_peer_trace_release'),
                       (H, 'xdev_ext_stor_block_poll_opf')]
             bounce = self._bounce() if group != 'poll' else ''
@@ -644,6 +662,8 @@ class LegacySelection:
             initializer = self.definition(N, 'nvme_xdev_ext_member_ops', 'object')
             fields = ('identity', 'requester', 'queue', 'decode', 'encode', 'encode_dptr',
                       'request_init', 'post', 'retire_peer', 'peer_slot_bytes', 'peer_native_offset')
+            if '.peer_evidence = ' in initializer:
+                fields += ('peer_evidence',)
             selected_fields = []
             for field in fields:
                 matches = re.findall(r'^\s*\.' + field + r' = [^\n]+,$', initializer, re.M)
@@ -866,6 +886,10 @@ int xdev_ext_peer_file_acquire(struct file *f,struct pci_dev *p,u64 gen,u64 off,
 { (void)f;(void)p;(void)gen;(void)off;(void)len;(void)dir;(void)lease;abort(); }
 void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *l,bool q)
 { (void)l;(void)q;abort(); }
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *l,struct xdev_ext_peer_requester *rq,u64 e)
+{ (void)l;(void)rq;(void)e;abort(); }
+int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq,u64 e)
+{ (void)rq;(void)e;abort(); }
 struct file *xdev_ext_peer_mech_pool_file(struct xdev_ext_mech_pool *p)
 { (void)p;abort(); }
 u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p)
@@ -1306,6 +1330,11 @@ u64 xdev_ext_peer_mech_pool_generation(struct xdev_ext_mech_pool *p){(void)p;ret
 int xdev_ext_peer_file_acquire(struct file *f,struct pci_dev *p,u64 gen,u64 off,u32 len,enum dma_data_direction dir,struct xdev_ext_peer_fd_lease *l)
 {(void)p;(void)gen;(void)dir;if(map_error)return map_error;*l=(struct xdev_ext_peer_fd_lease){.file=f,.lease={.dma_address=0x40000+off,.len=len}};return 0;}
 void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *l,bool q){(void)q;l->file=NULL;l->lease.mapping=NULL;}
+/* No requester record reaches these cases: an UNKNOWN release is unbound. */
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *l,struct xdev_ext_peer_requester *rq,u64 e)
+{(void)rq;(void)e;xdev_ext_peer_fd_release(l,false);return false;}
+int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq,u64 e)
+{return !rq||e==XDEV_EXT_PEER_EPOCH_NONE?XDEV_EXT_PEER_EVIDENCE_NEVER:XDEV_EXT_PEER_EVIDENCE_PENDING;}
 static bool trace_native_event_enabled(void){return false;}
 static void trace_native_event(const struct xdev_ext_native_event *e){(void)e;abort();}
 '''

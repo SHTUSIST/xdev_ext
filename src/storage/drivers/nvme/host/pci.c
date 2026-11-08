@@ -1232,8 +1232,10 @@ static void nvme_pci_peer_note_submit(struct nvme_dev *dev, struct request *req)
 	struct nvme_xdev_ext_peer_trace *ctx = nvme_req(req)->peer_trace;
 
 	if ((nvme_req(req)->flags & NVME_REQ_XDEV_EXT_PEER) && ctx &&
-	    ctx->cookie == (u64)(unsigned long)req)
+	    ctx->cookie == (u64)(unsigned long)req) {
+		ctx->requester = dev->peer_requester;
 		ctx->submit_epoch = xdev_ext_peer_requester_epoch(dev->peer_requester);
+	}
 }
 #else
 static inline u64 nvme_pci_peer_quiesce_begin(struct nvme_dev *dev) { return 0; }

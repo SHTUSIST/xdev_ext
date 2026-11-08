@@ -7504,6 +7504,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_e2e.c"
     },
     {
+      "source": "tests/network/peer/session/guest/peer_reset_session_e2e.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_session_e2e.c"
+    },
+    {
       "source": "tests/network/peer/session/guest/peer_session_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_e2e.c"

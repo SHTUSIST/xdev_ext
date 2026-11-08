@@ -183,6 +183,9 @@ static int nvme_execute_rq(struct request *r, bool head)
   assert((r->nr.flags & (NVME_REQ_USERCMD|NVME_REQ_XDEV_EXT_PEER))==(NVME_REQ_USERCMD|NVME_REQ_XDEV_EXT_PEER));
   const struct nvme_xdev_ext_peer_trace *trace=r->nr.peer_trace;
   assert(trace && trace->cookie==(u64)(uintptr_t)r && trace->nr_leases==1 && trace->bytes==4096 && !strcmp(trace->origin,"U"));
+  /* The record that proves this controller's stops travels with the epoch. */
+  assert(trace->requester==submit_dev->peer_requester &&
+         trace->submit_epoch==xdev_ext_peer_requester_epoch(submit_dev->peer_requester));
   assert(trace->leases->file && trace->leases->lease.mapping && trace->leases->lease.len==trace->bytes);
   command=*r->nr.cmd; executed++; return during_execute ? during_execute() : execute_result; }
 static void blk_mq_free_request(struct request *r)
