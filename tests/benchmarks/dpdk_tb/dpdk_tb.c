@@ -332,8 +332,8 @@ static void send_message(struct tb *t, const uint8_t *src, uint32_t len, uint8_t
 	for (uint32_t i = 0; i < n; i++) {
 		struct tb_hdr h = { .magic = TB_MAGIC, .type = TB_DATA, .msg_id = t->tx_msg_id,
 				    .msg_len = len, .run_id = t->run_id };
-		uint16_t plen;
-		int last;
+		uint16_t plen = 0;
+		int last = 0;
 
 		while (!tb_tx_can_send(&t->tx)) {
 			if (k) {
@@ -343,7 +343,8 @@ static void send_message(struct tb *t, const uint8_t *src, uint32_t len, uint8_t
 			poll_rx(t);
 			check_stall(t, "waiting for window credit");
 		}
-		tb_frag_at(len, t->fp, i, &h.frag_off, &plen, &last);
+		if (tb_frag_at(len, t->fp, i, &h.frag_off, &plen, &last))
+			fatal("frame %u of a %u-byte message", i, len);
 		h.payload_len = plen;
 		h.seq = t->tx.next_seq;
 		h.flags = (uint8_t)(flags & TB_F_VERIFY);
