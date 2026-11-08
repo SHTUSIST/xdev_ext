@@ -55,7 +55,61 @@ On real QEMU NVMe PCI with a kernel built from the commit under test
   (`window_validate.py`, which checks itself first with
   `window_validate_test.py`).
 
+## Multi-tenant mode (`--mode multi`, `window_multi.h`)
+
+Four tenants share one namespace at the same time, each running its own
+program, and one of them fails. The DST controller has two namespaces: ns1 is
+the shared destination, ns2 a private source of the failing tenant (filled
+with 0x3c, so nothing read from it may ever appear on ns1). Four rounds, four
+tenant processes each. Every tenant loads its own BPF object (the guest checks
+that the four struct_ops maps, build programs and links are distinct), sets
+up its ring as root, receives a read and a write handle over `SCM_RIGHTS`,
+drops to uid 65534, CREATEs, closes its handle fds and STARTs when the holder
+says go. Tenant 0 fails; tenants 1 to 3 must complete 8/8 batches with no
+abort, reject, timeout or sequester, STOP with 0 and be released, and their
+windows must hold exactly their source windows:
+
+- `kill`: tenant 0 is SIGKILLed after two batches completed, with more of its
+  batches still to run; its range is free once the kernel released the
+  session, and each of its groups is its own source group or guard;
+- `escape`: tenant 0's write stage runs `escape_ops`, which aims odd keys at
+  tenant 1's window and even keys across its own window end: every batch is
+  refused with `-ERANGE` and no write is submitted;
+- `unknown`: tenant 0 reads ns2 with the kernel's nvme `fault_inject` setting
+  an error status on commands QEMU completed: its batches are sequestered,
+  STOP quarantines the session (`-EBUSY`) and its range stays reserved;
+- `timeout`: tenant 0 reads ns2 with `fail_io_timeout` swallowing every
+  completion: STOP passes the 5 s drain bound with commands in flight
+  (`-EBUSY`, release deferred) and its range stays reserved. After this last
+  round, with nothing else running, the holder resets the DST controller so
+  the guest can power off; the session is then quarantined.
+
+The runner boots with `nvme_core.io_timeout=600`, so no command timeout fires
+on its own and no controller reset happens while innocent tenants run; the
+faults touch ns2 only. The kernel log must show exactly two quarantined
+sessions and one deferred release. `window_validate.py --multi` repeats the
+whole-disk oracle on the host. Each round prints how its innocent tenants'
+run overlapped the fault and requires at least one of them to be still
+running when the fault began.
+
+A controller reset is a different fault. It aborts every in-flight command of
+every tenant on that controller, and the NVMe class treats an error or
+cancelled completion of a host-page command as uncertain (`class_complete` in
+`xdev_ext_mech_nvme.c`), so an innocent tenant's batch in flight at a reset is
+sequestered. A command timeout that nobody bounds escalates to such a reset
+(abort, then reset on the second expiry). This mode keeps resets out of the
+innocent tenants' runs and does not cover that case.
+
 ## Host tests (no kernel, no device)
+
+- `host_tenant_matrix_test.py [ROOT]` compiles `host_tenant_matrix.c` against
+  the unmodified product headers (`xdev_ext_storfam_core.h`,
+  `nvme_xdev_ext_passthru.h`) under gcc and UBSan: four tenants with adjacent
+  writable handles and overlapping read-only source handles on one namespace;
+  the registry, bind admission of every tenant at every window, and the
+  per-descriptor check of every group-sized SQE of every tenant from below
+  tenant 0 to past tenant 3, plus the fields C owns. Each listed mutant of
+  those headers must make it fail.
 
 - `host_window_test.py [ROOT]` checks that the ioctl has its own `'N'` number
   in the product UAPI and outside the upstream-registered ranges, pastes the
@@ -70,7 +124,7 @@ On real QEMU NVMe PCI with a kernel built from the commit under test
 On a host with KVM, from a clean checkout of the commit under test:
 
     bash tests/storage/nvme/window_handle/window_kvm.sh --scratch DIR \
-        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD
+        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi]
 
 `DIR` must be an existing private 0700 directory. The kernel build needs the
 config symbols listed in the runner. A kernel from another commit is accepted

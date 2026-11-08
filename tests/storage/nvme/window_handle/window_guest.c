@@ -33,6 +33,7 @@
  * everything it does afterwards uses handles.
  *
  * Usage: window_guest SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR
+ *        window_guest ... BPF_DIR multi AUX_BLOCK AUX_NG   (window_multi.h)
  */
 #define _GNU_SOURCE
 #include <errno.h>
@@ -635,6 +636,8 @@ static void check_destination(const unsigned char *source, const unsigned char *
 	free(expect);
 }
 
+#include "window_multi.h"
+
 static pid_t fork_tenant(int *sock, int (*body)(int, const char *, const char *, const char *),
 			 char **argv, const char *what)
 {
@@ -670,8 +673,11 @@ int main(int argc, char **argv)
 	setvbuf(stdout, NULL, _IOLBF, 0);
 	setrlimit(RLIMIT_MEMLOCK, &lim);
 	puts("TAP version 13\n# NVMe LBA window handles: QEMU NVMe, correctness only, no timing");
+	if (argc == 9 && !strcmp(argv[6], "multi"))
+		return multi_main(argv);
 	if (argc != 6) {
-		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR\n", argv[0]);
+		fprintf(stderr, "usage: %s SRC_BLOCK SRC_NG DST_BLOCK DST_NG BPF_DIR [multi AUX_BLOCK AUX_NG]\n",
+			argv[0]);
 		return 2;
 	}
 	CHECK(getenv("XDEV_EXT_WINDOW_GUEST") && !strcmp(getenv("XDEV_EXT_WINDOW_GUEST"), "1"),
