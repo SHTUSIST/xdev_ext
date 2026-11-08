@@ -299,7 +299,7 @@ jobs:
           python3 tests/compute/user_stage/test_sharedpool_session.py
           make -C kernel/tools/testing/selftests/xdev_ext_umem run
           make -C kernel/tools/testing/selftests/xdev_ext_mech/user_stage/guest \
-            KERNEL_SRC="$PWD/kernel" SHAREDPOOL_LIBXDEV="$RUNNER_TEMP/xdev-ext-lib/libxdev_ext.a" \
+            KERNEL_SRC="$PWD/kernel" SHAREDPOOL_LIBXDEV="$RUNNER_TEMP/xdev-ext-lib/lib/libxdev_ext.a" \
             SHAREDPOOL_COMMON="$PWD/tests/eval/common" sharedpool_session_guest
       - name: Socket NIC copy fallback and accounting contracts
         shell: bash
