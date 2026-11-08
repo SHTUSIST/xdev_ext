@@ -46,7 +46,8 @@ if [ "${1:-}" = --summarize ]; then
 	summarize "$2"; exit $?
 fi
 
-SRC= SCRATCH=/workspaces/xdev-ext-tb-check/scratch OUT= NHI=0000:00:0d.2 BUILD=0 POLL=0
+# The harness accepts only an existing 0700 /tmp/xdev-ext-e2e.<alnum> directory.
+SRC= SCRATCH=/tmp/xdev-ext-e2e.labvfiotb OUT= NHI=0000:00:0d.2 BUILD=0 POLL=0
 while [ $# -gt 0 ]; do
 	case $1 in
 	--source) SRC=${2:-}; shift 2 ;;
@@ -63,9 +64,10 @@ done
 [[ $POLL =~ ^[0-9]{1,3}$ ]] && (( 10#$POLL <= 300 )) || { echo "bad --poll: $POLL (0-300 seconds)" >&2; exit 2; }
 HARNESS=$SRC/tests/integration/session/native/xdev_ext_mech_zc_kvm.sh
 [ -r "$HARNESS" ] || { echo "harness not found: $HARNESS" >&2; exit 2; }
-[ -n "$OUT" ] || OUT=$(dirname "$SCRATCH")/run-$(date -u +%Y%m%dT%H%M%SZ)
+[ -n "$OUT" ] || OUT=/workspaces/xdev-ext-tb-check/run-$(date -u +%Y%m%dT%H%M%SZ)
 umask 077
-mkdir -p "$OUT" "$(dirname "$SCRATCH")"
+mkdir -p "$OUT"
+[ -d "$SCRATCH" ] || mkdir -m 700 "$SCRATCH" || { echo "cannot create scratch $SCRATCH" >&2; exit 2; }
 export XDEV_EXT_QEMU=${XDEV_EXT_QEMU:-/usr/bin/qemu-system-x86_64}
 FLAGS=(--scratch "$SCRATCH" --source "$SRC" --debug-locking --tb-nhi "$NHI" --tb-nhi-enumerate --tb-nhi-cycles 0)
 (( 10#$POLL )) && FLAGS+=(--tb-nhi-poll "$((10#$POLL))")
