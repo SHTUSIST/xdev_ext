@@ -4169,6 +4169,14 @@
       "logical_path": "tests/compute/tp/framework/test_worker_shutdown.py"
     },
     {
+      "source": "tests/compute/tp/graph_template_capacity_boundary.cc",
+      "logical_path": "tests/compute/tp/graph_template_capacity_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/graph_template_capacity_test.py",
+      "logical_path": "tests/compute/tp/graph_template_capacity_test.py"
+    },
+    {
       "source": "tests/compute/tp/gpu_trace_capability_test.py",
       "logical_path": "tests/compute/tp/gpu_trace_capability_test.py"
     },

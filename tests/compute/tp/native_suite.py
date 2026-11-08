@@ -19,6 +19,7 @@ ENTRIES=(('algorithms','algorithm_resume_test.py',()),
          ('ready-custody','library_boundary_regressions.py',()),
          ('retired-stats','work_stats_retirement_test.py',()),
          ('unused-template','work_never_replayed_test.py',()),
+         ('graph-capacity','graph_template_capacity_test.py',()),
          ('batch','batch_pipeline_test.py',()),
          ('trace','gpu_trace_runtime_test.py',()),
          ('owner','owner_lifetime_test.py',()))

@@ -67,7 +67,8 @@ and CUDA controls from the `owner`. The config keys match `xdev_tp_config`:
 `rx_va`, `tx_bytes`, `rx_bytes`, `frame_size`, `logical_depth`,
 `max_payload_bytes`, `first_sequence`, `communicator_id`, `epoch`, `timeout_ns`
 and `ptx_path`. `device_index` identifies the associated PyTorch CUDA device.
-`trace_capacity` defaults to zero. In GPU mode the keys `d2_tx_producer`,
+`trace_capacity` defaults to zero. `template_capacity` (1 to 1,048,576)
+sets the native template pool; absent or zero keeps 256. In GPU mode the keys `d2_tx_producer`,
 `d2_tx_terminal` and `d2_rx_consumer` supply the borrowed CUDA control pointers.
 Pointers are process-local handles from actual admission, never serialized
 handles from another process. Numeric pointers alone do not prove authority.
@@ -99,8 +100,18 @@ of the finite START count (`nr_batches`). The only rejected all-reduce geometry
 is a `max_payload_bytes` smaller than one element. Gather and all-gather remain
 exactly one message and are rejected when larger.
 
-Each accepted range holds one of the communicator's 256 native work templates
-until it completes and is destroyed. Outside capture, the adapter reserves
+Each accepted range holds one of the communicator's native work templates
+until it completes and is destroyed. The pool has `template_capacity` templates
+(default 256, at most 1,048,576), each 4,984 bytes of device memory allocated
+and zeroed when the communicator is created, never during capture. CUDA graph
+capture keeps every captured range's template while the graph lives, so size
+the pool for every graph kept at once: `xdev_tp_torch.policy.capture_template_budget`
+computes it from the capture sizes, hidden size, all-reduces per forward and
+`max_payload_bytes`. With vLLM 0.10.2 defaults on a 32 GB GPU (67 piecewise
+capture sizes 1, 2, 4, 8..512; 131,008-byte messages) Qwen3-32B (129 all-reduces
+per forward) needs 172,731 templates (about 861 MB per rank) and Qwen3-30B-A3B
+(97 per forward) needs 54,611 (about 272 MB); one batch-1 forward alone needs
+129 and 97, and one batch-16 Qwen3-32B forward 258. Outside capture, the adapter reserves
 templates before each window; in eager d2 this waits until earlier accepted work
 on the stream has completed. During CUDA graph capture every range keeps its
 template while the graph lives, so a split all-reduce whose range count exceeds

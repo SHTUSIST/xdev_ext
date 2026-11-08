@@ -12,7 +12,10 @@ _PATHS = {'nvidia_node', 'ptx_path'}
 _OBJECT_PATHS = {'bpf_object', 'user_bpf_object'}
 _PIN_COUNTS = {'tx_program_pins': 3, 'rx_program_pins': 2}
 _ALLOWED = (_NUMBERS | _PATHS | _OBJECT_PATHS | set(_PIN_COUNTS) |
-            {'control_ptx_path', 'trace_capacity', 'early_cts'})
+            {'control_ptx_path', 'trace_capacity', 'early_cts', 'template_capacity'})
+# Native work templates; mirrors XDEV_TP_TEMPLATE_CAPACITY and _MAX in xdev_tp.h.
+TEMPLATE_CAPACITY_DEFAULT = 256
+TEMPLATE_CAPACITY_MAX = 1 << 20
 _AGREEMENT = ('version', 'world_size', 'mode', 'allocation_bytes', 'group_bytes',
               'depth', 'nr_batches', 'first_sequence', 'timeout_ns',
               'communicator_id', 'epoch', 'max_payload_bytes')
@@ -52,6 +55,11 @@ def validate_options(options, *, rank, device_index, environ=None):
     if 'early_cts' in data and (type(data['early_cts']) is not int or
                                 data['early_cts'] not in (0, 1)):
         raise ValueError('early_cts must be 0 or 1')
+    # Optional native template pool size (TODO.54). Each captured collective
+    # keeps one template while its CUDA graph lives; zero is not a request.
+    if 'template_capacity' in data and (type(data['template_capacity']) is not int or
+            not 1 <= data['template_capacity'] <= TEMPLATE_CAPACITY_MAX):
+        raise ValueError(f'template_capacity must be an int in 1..{TEMPLATE_CAPACITY_MAX}')
     for key in _NUMBERS | ({'trace_capacity'} & set(data)):
         value = data[key]
         if type(value) is not int or value < 0 or value > (1 << 64) - 1:
@@ -103,4 +111,6 @@ def load_options(path, *, rank, group, device_index, environ=None):
 def agreement_key(options):
     key = {name: options[name] for name in _AGREEMENT}
     key['early_cts'] = options.get('early_cts', 0)
+    # Both ranks capture the same graphs, so both need the same template pool.
+    key['template_capacity'] = options.get('template_capacity', TEMPLATE_CAPACITY_DEFAULT)
     return key

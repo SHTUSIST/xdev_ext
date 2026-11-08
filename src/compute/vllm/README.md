@@ -29,7 +29,10 @@ Required JSON keys are `version` (1), `rank`, `world_size` (2), `device_index`,
 `mode` (1 eager or 2 GPU), `nvidia_node`,
 `ptx_path`, `link_token`, `allocation_bytes`, `group_bytes`, `depth`,
 `nr_batches`, `first_sequence`, `timeout_ns`, `communicator_id`, `epoch` and
-`max_payload_bytes`. `trace_capacity` is optional. Optional `early_cts` (0 or 1,
+`max_payload_bytes`. `trace_capacity` is optional. Optional `template_capacity`
+(1 to 1,048,576, default 256) sizes the native template pool; it is an agreement
+field. Default vLLM CUDA graph capture keeps one graph per capture size alive,
+so it needs far more than 256 templates; see the torch README for the budget. Optional `early_cts` (0 or 1,
 default 0) requests EARLY receiver CTS endpoints; it is an agreement field, so
 both ranks must use the same value. The request alone is not evidence that
 EARLY ran; use the EARLY trace procedure in the TP benchmark README. d1 requires depth 1. d2 also

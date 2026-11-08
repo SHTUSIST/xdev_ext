@@ -94,6 +94,24 @@ class BootstrapConfigTests(unittest.TestCase):
         self.assertEqual(off, module.agreement_key(self.options(early_cts=0)))
         self.assertNotEqual(off, module.agreement_key(self.options(early_cts=1)))
 
+    def test_template_capacity_is_optional_bounded_and_agreed(self):
+        # TODO.54 G0-f: one captured vLLM decode graph can need more than the
+        # 256 native templates the library used to fix at compile time.
+        module = self.module()
+        self.assertNotIn('template_capacity',
+                         module.validate_options(self.options(), rank=0, device_index=1, environ={}))
+        for value in (1, 300, 172731, 1 << 20):
+            got = module.validate_options(self.options(template_capacity=value), rank=0,
+                                          device_index=1, environ={})
+            self.assertEqual(got['template_capacity'], value)
+        for value in (0, (1 << 20) + 1, -1, True, 2.0, '300', None):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                module.validate_options(self.options(template_capacity=value), rank=0,
+                                        device_index=1, environ={})
+        default = module.agreement_key(self.options())
+        self.assertEqual(default, module.agreement_key(self.options(template_capacity=256)))
+        self.assertNotEqual(default, module.agreement_key(self.options(template_capacity=4096)))
+
 
 class DefaultWorkerFactoryTests(unittest.TestCase):
     def test_actual_factory_agrees_before_native_owner_bootstrap(self):

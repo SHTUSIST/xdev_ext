@@ -12,7 +12,6 @@
 using namespace xdev_tp_native;
 struct GraphLifetime { std::atomic<bool> released{false}; };
 namespace {
-constexpr unsigned template_capacity=XDEV_TP_TEMPLATE_CAPACITY;
 void CUDA_CB graph_release(void *p) { static_cast<GraphLifetime *>(p)->released.store(true,std::memory_order_release); }
 uint64_t now_ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 int drv(CUresult rc) { return rc==CUDA_SUCCESS?0:rc==CUDA_ERROR_NOT_SUPPORTED || rc==CUDA_ERROR_NO_DEVICE || rc==CUDA_ERROR_STUB_LIBRARY?-EOPNOTSUPP:-EIO; }
@@ -33,14 +32,18 @@ struct xdev_tp_comm {
  uint64_t stream_id=0;
  xdev_tp_stats stats{};
  std::mutex mutex;
+ /* capacity templates; all host bookkeeping is sized once at creation. */
+ uint32_t capacity=0;
  std::vector<xdev_tp_work *> works;
- bool occupied[template_capacity]{};
- uint64_t retired_cookie[template_capacity]{};
+ std::vector<unsigned> free_slots; /* LIFO stack of free slots; starts at slot 0 */
+ std::vector<bool> occupied;
+ std::vector<uint64_t> retired_cookie;
  std::deque<xdev_tp_trace_record> trace;
 };
 struct xdev_tp_work {
  xdev_tp_comm *comm=nullptr;
  unsigned slot=0;
+ size_t index=0; /* position in comm->works */
  uint64_t owner_cookie=0;
  DeviceWork image{};
  CUdeviceptr device=0;
@@ -54,6 +57,15 @@ static int context_check(CUcontext expected) {
  CUcontext current=nullptr;
  int rc=drv(cuCtxGetCurrent(&current));
  return rc?rc:current!=expected?-EINVAL:0;
+}
+/* O(1) template take/return: a captured decode step can hold 10^5 templates. */
+static unsigned take_slot(xdev_tp_comm *c) {
+ unsigned slot=c->free_slots.back();c->free_slots.pop_back();c->occupied[slot]=true;return slot;
+}
+static void track(xdev_tp_comm *c,xdev_tp_work *w) {w->index=c->works.size();c->works.push_back(w);}
+static void untrack(xdev_tp_comm *c,xdev_tp_work *w) {
+ auto *last=c->works.back();c->works[w->index]=last;last->index=w->index;c->works.pop_back();
+ c->occupied[w->slot]=false;c->free_slots.push_back(w->slot);
 }
 static int stream_check(xdev_tp_comm *c, CUstream stream, CUstreamCaptureStatus *capture) {
  int rc=context_check(c->cfg.context);CUcontext owner=nullptr;
@@ -277,9 +289,15 @@ static int gpu(xdev_tp_work *work,CUstreamCaptureStatus capture) {
  if(!rc)rc=gpu_terminal(work);
  return rc;
 }
-extern "C" int xdev_tp_create(const xdev_tp_config *cfg,xdev_tp_comm **out) {
+extern "C" int xdev_tp_create(const xdev_tp_config *caller,xdev_tp_comm **out) {
  if(out)*out=nullptr;
- if(!out || !cfg || cfg->size!=sizeof(*cfg) || cfg->version!=1 || cfg->flags ||
+ if(!out || !caller || (caller->size!=sizeof(*caller) && caller->size!=XDEV_TP_CONFIG_SIZE_V1_BASE))return -EINVAL;
+ /* An original-ABI caller's struct ends before template_capacity. */
+ xdev_tp_config copy{};std::memcpy(&copy,caller,caller->size);
+ const xdev_tp_config *cfg=&copy;
+ if(cfg->reserved || cfg->template_capacity>XDEV_TP_TEMPLATE_CAPACITY_MAX)return -EINVAL;
+ const uint32_t capacity=cfg->template_capacity?cfg->template_capacity:XDEV_TP_TEMPLATE_CAPACITY;
+ if(cfg->version!=1 || cfg->flags ||
  cfg->rank>1 || cfg->world_size!=2 || !cfg->context || !cfg->tx_endpoint || !cfg->rx_endpoint ||
  cfg->tx_endpoint==cfg->rx_endpoint || !cfg->first_sequence || !cfg->communicator_id || !cfg->epoch ||
  !cfg->logical_depth || cfg->logical_depth>XDEV_EXT_USER_RING_MAX || !cfg->frame_size ||
@@ -295,8 +313,13 @@ extern "C" int xdev_tp_create(const xdev_tp_config *cfg,xdev_tp_comm **out) {
  if(rc)return rc;
  xdev_tp_comm *c=new(std::nothrow) xdev_tp_comm;
  if(!c)return -ENOMEM;
- c->cfg=*cfg;c->runtime.next_sequence=cfg->first_sequence;
- try { c->works.reserve(template_capacity); }
+ c->cfg=*cfg;c->cfg.size=sizeof(c->cfg);c->cfg.template_capacity=capacity;
+ c->capacity=capacity;c->runtime.next_sequence=cfg->first_sequence;
+ try {
+  c->works.reserve(capacity);c->occupied.assign(capacity,false);c->retired_cookie.assign(capacity,0);
+  c->free_slots.resize(capacity);
+  for(uint32_t i=0;i<capacity;++i)c->free_slots[i]=capacity-1-i;
+ }
  catch(const std::bad_alloc &) { delete c;return -ENOMEM; }
  c->stats.size=sizeof(c->stats);c->stats.version=1;c->stats.rank=cfg->rank;
  rc=drv(cuModuleLoad(&c->module,cfg->ptx_path));
@@ -309,13 +332,13 @@ extern "C" int xdev_tp_create(const xdev_tp_config *cfg,xdev_tp_comm **out) {
  if(!rc)rc=drv(cuModuleGetFunction(&c->terminal_begin,c->module,"xdev_tp_terminal_begin"));
  if(!rc)rc=drv(cuModuleGetFunction(&c->release,c->module,"xdev_tp_release"));
  if(!rc)rc=drv(cuMemAlloc(&c->device_runtime,sizeof(Runtime)));
- if(!rc)rc=drv(cuMemAlloc(&c->arena,sizeof(DeviceWork)*template_capacity));
+ if(!rc)rc=drv(cuMemAlloc(&c->arena,sizeof(DeviceWork)*capacity));
  if(!rc && cfg->mode==XDEV_TP_D2_GPU && cfg->trace_capacity) {
   rc=drv(cuMemAlloc(&c->device_trace,uint64_t(cfg->trace_capacity)*sizeof(TraceRecord)));
   if(!rc){c->runtime.trace_address=c->device_trace;c->runtime.trace_capacity=cfg->trace_capacity;}
  }
  if(!rc)rc=drv(cuMemcpyHtoD(c->device_runtime,&c->runtime,sizeof(Runtime)));
- if(!rc)rc=drv(cuMemsetD8(c->arena,0,sizeof(DeviceWork)*template_capacity));
+ if(!rc)rc=drv(cuMemsetD8(c->arena,0,sizeof(DeviceWork)*capacity));
  if(rc) {
   if(c->device_trace)cuMemFree(c->device_trace);
   if(c->arena)cuMemFree(c->arena);
@@ -345,20 +368,19 @@ static int submit(xdev_tp_comm *c,CUdeviceptr input,CUdeviceptr output,Shape sha
  bool needs=shape.operation!=2 || shape.rank==shape.dst_rank;
  if(!rc)rc=memory_facts(output,needs || output?shape.output_bytes:0,c->cfg.context,&q.output);
  if(!rc)rc=qualify(&shape,q);
- unsigned slot=0;while(slot<template_capacity && c->occupied[slot])++slot;
- if(!rc && slot==template_capacity)rc=-ENOSPC;
+ if(!rc && c->free_slots.empty())rc=-ENOSPC;
  if(!rc && c->next_cookie==UINT64_MAX)rc=-EOVERFLOW;
  if(rc){++c->stats.preflight_rejected;return rc;}
  auto *w=new(std::nothrow) xdev_tp_work;
  if(!w)return -ENOMEM;
- w->owner_cookie=c->next_cookie++;w->comm=c;w->slot=slot;w->device=c->arena+slot*sizeof(DeviceWork);w->stream=stream;
+ w->owner_cookie=c->next_cookie++;w->comm=c;w->stream=stream;
  w->image.shape=shape;w->image.input=input;w->image.output=output;w->image.mode=c->cfg.mode;
  w->image.owner_cookie=w->owner_cookie;
  rc=drv(cuEventCreate(&w->event,CU_EVENT_DISABLE_TIMING));
  if(rc){delete w;return rc;}
  if(!c->bound){unsigned long long id;rc=drv(cuStreamGetId(stream,&id));if(!rc){c->bound=true;c->stream=stream;c->stream_id=id;}}
  if(rc){cuEventDestroy(w->event);delete w;return rc;}
- c->occupied[slot]=true;c->works.push_back(w);
+ w->slot=take_slot(c);w->device=c->arena+uint64_t(w->slot)*sizeof(DeviceWork);track(c,w);
  if(c->cfg.mode==1)rc=eager(w);
  else {
   // Set fixed mode once, outside captured graph nodes. The pool was allocated
@@ -367,7 +389,7 @@ static int submit(xdev_tp_comm *c,CUdeviceptr input,CUdeviceptr output,Shape sha
   rc=gpu(w,capture);
  }
  if(!w->accepted && !w->graph) {
-  c->works.pop_back();c->occupied[slot]=false;cuEventDestroy(w->event);delete w;
+  untrack(c,w);cuEventDestroy(w->event);delete w;
   if(rc)++c->stats.preflight_rejected;
   return rc;
  }
@@ -386,7 +408,7 @@ extern "C" int xdev_tp_logits_gather(xdev_tp_comm *c,CUdeviceptr input,CUdevicep
 }
 extern "C" int xdev_tp_submit_batch(xdev_tp_comm *c,const xdev_tp_request *requests,
  size_t count,CUstream stream,uint64_t first,xdev_tp_work **out) {
- if(!c || !requests || !out || !count || count>template_capacity)return -EINVAL;
+ if(!c || !requests || !out || !count || count>c->capacity)return -EINVAL;
  for(size_t i=0;i<count;++i)out[i]=nullptr;
  std::lock_guard<std::mutex> lock(c->mutex);
  ++c->stats.api_attempts;
@@ -398,9 +420,7 @@ extern "C" int xdev_tp_submit_batch(xdev_tp_comm *c,const xdev_tp_request *reque
  CUstreamCaptureStatus capture=CU_STREAM_CAPTURE_STATUS_NONE;
  int rc=stream_check(c,stream,&capture);
  if(rc)return reject(rc);
- unsigned free_slots=0;
- for(unsigned i=0;i<template_capacity;++i)free_slots+=!c->occupied[i];
- if(free_slots<count)return reject(-ENOSPC);
+ if(c->free_slots.size()<count)return reject(-ENOSPC);
  if(c->next_cookie>UINT64_MAX-count)return reject(-EOVERFLOW);
  std::vector<Shape> shapes;
  std::vector<xdev_tp_work *> prepared;
@@ -442,21 +462,20 @@ extern "C" int xdev_tp_submit_batch(xdev_tp_comm *c,const xdev_tp_request *reque
   }
  }
  auto drop=[&](xdev_tp_work *work){
-  cuEventDestroy(work->event);c->occupied[work->slot]=false;
-  c->works.erase(std::find(c->works.begin(),c->works.end(),work));delete work;
+  cuEventDestroy(work->event);untrack(c,work);delete work;
  };
  for(size_t i=0;i<count;++i) {
-  unsigned slot=0;while(slot<template_capacity && c->occupied[slot])++slot;
   auto *work=new(std::nothrow) xdev_tp_work;
   if(!work){rc=-ENOMEM;break;}
-  work->comm=c;work->slot=slot;work->stream=stream;
-  work->owner_cookie=c->next_cookie++;work->device=c->arena+slot*sizeof(DeviceWork);
+  work->comm=c;work->stream=stream;
+  work->owner_cookie=c->next_cookie++;
   work->image.shape=shapes[i];work->image.input=requests[i].input;
   work->image.output=requests[i].output;work->image.mode=c->cfg.mode;
   work->image.owner_cookie=work->owner_cookie;
   rc=drv(cuEventCreate(&work->event,CU_EVENT_DISABLE_TIMING));
   if(rc){delete work;break;}
-  c->occupied[slot]=true;c->works.push_back(work);prepared.push_back(work);
+  work->slot=take_slot(c);work->device=c->arena+uint64_t(work->slot)*sizeof(DeviceWork);
+  track(c,work);prepared.push_back(work);
  }
  if(rc){for(auto *work:prepared)drop(work);return reject(rc);}
  if(!c->bound){unsigned long long id=0;rc=drv(cuStreamGetId(stream,&id));
@@ -608,7 +627,7 @@ extern "C" int xdev_tp_work_destroy(xdev_tp_work *w) {
   add_runtime_totals(&c->stats,w->image);
   c->retired_cookie[w->slot]=w->owner_cookie;
  }
- c->occupied[w->slot]=false;c->works.erase(std::find(c->works.begin(),c->works.end(),w));delete w->graph;delete w;return 0;
+ untrack(c,w);delete w->graph;delete w;return 0;
 }
 extern "C" int xdev_tp_destroy(xdev_tp_comm *c,uint64_t timeout) {
  if(!c)return -EINVAL;
@@ -644,4 +663,9 @@ extern "C" int xdev_tp_destroy(xdev_tp_comm *c,uint64_t timeout) {
  if(rc)return rc;
  delete c;
  return 0;
+}
+extern "C" int xdev_tp_get_template_usage(xdev_tp_comm *c,uint32_t *capacity,uint32_t *in_use) {
+ if(!c || !capacity || !in_use)return -EINVAL;
+ std::lock_guard<std::mutex> lock(c->mutex);
+ *capacity=c->capacity;*in_use=uint32_t(c->works.size());return 0;
 }
