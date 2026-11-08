@@ -106,7 +106,12 @@ a gate: the same four tenants, with the holder resetting the DST controller
 while the three innocent tenants still have commands in flight; the guest
 prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant (batches done,
 aborted, sequestered, STOP result, window exact) and the runner gates only on
-the run and the kernel log.
+the run and the kernel log. Observed on a strict-debug guest (2026-11-08): the reset
+quarantined two of the three innocent tenants (their in-flight batches came
+back as error completions with residual bytes and were sequestered, STOP
+returned -EBUSY, their window ranges stay reserved); the third finished exact.
+Isolation therefore does not yet hold across a shared-controller reset, and
+any tenant's command timeout escalates to such a reset.
 
 ## Host tests (no kernel, no device)
 

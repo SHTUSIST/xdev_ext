@@ -504,8 +504,8 @@ static int multi_main(char **argv)
 		}
 		if (r == R_TIMEOUT) {
 			/* Its swallowed READs are still accepted; nothing else runs now.
-			 * A reset cancels them so the guest can power off, and the
-			 * deferred release then quarantines the session. */
+			 * A reset ends them definitely so the guest can power off, and
+			 * the deferred release then frees the session. */
 			m_reset_controller(disk);
 			for (i = 0; i < 3000 && (fd = issue(dstng, win(m_win(r, 0)), WIN_NLB, RDWR, 0)) == -EBUSY; i++)
 				usleep(10000);
