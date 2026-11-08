@@ -89,7 +89,7 @@ finally:
     restore_modules(_saved)
 kl = kd.kl
 
-LAYOUT = kl.BlockLayout.for_model('qwen3-8b-bf16', 16)
+LAYOUT = kl.BlockLayout.for_model('qwen3-8b-bf16', 16, dtype='bfloat16')
 LAYER_NAMES = [f'model.layers.{i}.self_attn.attn' for i in range(LAYOUT.layers)]
 
 
@@ -104,6 +104,7 @@ class FakeLayerCache:
 
     def __init__(self):
         self.pages = {}
+        self.dtype = 'bfloat16'
 
 
 def read_fake_page(cache, block_id):
@@ -127,7 +128,8 @@ class Engine:
     def __init__(self, out_dir, model='qwen3-8b-bf16'):
         transfer = ns(kv_role='kv_producer', is_kv_producer=True,
                       kv_connector_extra_config={'out_dir': str(out_dir), 'model': model})
-        config = ns(kv_transfer_config=transfer, cache_config=ns(block_size=16))
+        config = ns(kv_transfer_config=transfer, cache_config=ns(block_size=16, cache_dtype='auto'),
+                    model_config=ns(dtype='bfloat16'))
         self.sched = kd.XdevExtDumpConnector(config, kd.KVConnectorRole.SCHEDULER, None)
         self.work = kd.XdevExtDumpConnector(config, kd.KVConnectorRole.WORKER, None)
         self.work.read_page = read_fake_page
@@ -266,6 +268,24 @@ class Connector(unittest.TestCase):
 
 
 class Pack(unittest.TestCase):
+    def test_dtype_sidecar_cannot_be_relabelled_without_changing_its_domain(self):
+        for path in self.out.glob('*.json'):
+            meta = json.loads(path.read_text())
+            meta['kv']['dtype'] = 'float16'
+            path.write_text(json.dumps(meta))
+        with self.assertRaisesRegex(kl.LayoutError, 'dtype|prefix hash'):
+            kd.pack([self.out], self.root / 'kv.json', self.root / 'kv.index',
+                    window_slba=2048, window_nlb=1 << 24, lba_bytes=512,
+                    group_bytes=128 * KIB, prefixes=[16])
+    def test_legacy_dump_dtype_is_not_inferred_from_byte_width(self):
+        for path in self.out.glob('*.json'):
+            meta = json.loads(path.read_text())
+            meta['kv'].pop('dtype', None)
+            path.write_text(json.dumps(meta))
+        with self.assertRaisesRegex(kl.LayoutError, 'dtype'):
+            kd.pack([self.out], self.root / 'kv.json', self.root / 'kv.index',
+                    window_slba=2048, window_nlb=1 << 24, lba_bytes=512,
+                    group_bytes=128 * KIB, prefixes=[16])
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix='kv-pack-')
         self.root = Path(self.tmp.name)
@@ -341,6 +361,31 @@ class Pack(unittest.TestCase):
             kd.pack([self.out], self.root / 'kv.json', self.root / 'kv.index', window_slba=2048,
                     window_nlb=LAYOUT.block_bytes * 4 // 512, lba_bytes=512,
                     group_bytes=128 * KIB, prefixes=[])
+
+
+class ProducerDtypes(unittest.TestCase):
+    def test_actual_cache_dtype_must_match_resolved_layout(self):
+        with tempfile.TemporaryDirectory(prefix='kv-dump-dtype-') as tmp:
+            e = Engine(tmp)
+            e.caches[LAYER_NAMES[0]].dtype = 'float16'
+            with self.assertRaisesRegex(kl.LayoutError, 'dtype'):
+                e.work.register_kv_caches(e.caches)
+            e.caches[LAYER_NAMES[0]].dtype = None
+            with self.assertRaisesRegex(kl.LayoutError, 'dtype'):
+                e.work.register_kv_caches(e.caches)
+
+    def test_unknown_auto_model_dtype_and_wrong_request_are_refused(self):
+        with tempfile.TemporaryDirectory(prefix='kv-dump-dtype-') as tmp:
+            for actual, requested in ((None, None), ('bfloat16', 'float16'),
+                                      ('mystery', None)):
+                transfer = ns(kv_connector_extra_config={'out_dir': tmp,
+                              'model': 'qwen3-8b-bf16', 'kv_dtype': requested})
+                config = ns(kv_transfer_config=transfer,
+                            cache_config=ns(block_size=16, cache_dtype='auto'),
+                            model_config=ns(dtype=actual))
+                with self.subTest(actual=actual, requested=requested), \
+                        self.assertRaisesRegex(kl.LayoutError, 'dtype'):
+                    kd.XdevExtDumpConnector(config, kd.KVConnectorRole.WORKER, None)
 
 
 class Digests(unittest.TestCase):

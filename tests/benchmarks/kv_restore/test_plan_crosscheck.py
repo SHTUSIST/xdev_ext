@@ -163,6 +163,10 @@ class CrossCheck(unittest.TestCase):
                 kl.IndexEntry('cd' * 32, 'conv-b', 7, 2359296, 147456 * 16, 16, None)]
         cases = {
             'good': (good, True),
+            'typed BF16': ('xdev-kv-index 2 dtype=bfloat16\n' + good[0].line() + '\n', True),
+            'typed FP16': ('xdev-kv-index 2 dtype=float16\n' + good[0].line() + '\n', True),
+            'unknown dtype': ('xdev-kv-index 2 dtype=mystery\n' + good[0].line() + '\n', False),
+            'untyped v2': ('xdev-kv-index 2\n' + good[0].line() + '\n', False),
             'leading zeros and hex': ('xdev-kv-index 1\nprefix ' + 'ef' * 32 +
                                       ' object=x slba=007 offset=0x10 bytes=1 tokens=1\n', True),
             'repeat': (good + good[:1], False),
