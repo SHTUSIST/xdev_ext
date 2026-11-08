@@ -2659,6 +2659,34 @@
       "logical_path": "tests/eval/kv_restore/kv_restore.c"
     },
     {
+      "source": "tests/benchmarks/kv_restore/kv_index.h",
+      "logical_path": "tests/eval/kv_restore/kv_index.h"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_dump.py",
+      "logical_path": "tests/eval/kv_restore/kv_dump.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_kv_dump.py",
+      "logical_path": "tests/eval/kv_restore/test_kv_dump.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_kv_index.py",
+      "logical_path": "tests/eval/kv_restore/test_kv_index.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/worker_verify_boundary.c",
+      "logical_path": "tests/eval/kv_restore/worker_verify_boundary.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/worker_verify_cuda_boundary.c",
+      "logical_path": "tests/eval/kv_restore/worker_verify_cuda_boundary.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_worker_verify.py",
+      "logical_path": "tests/eval/kv_restore/test_worker_verify.py"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/kv_nvme_read.bpf.c",
       "logical_path": "tests/eval/kv_restore/kv_nvme_read.bpf.c"
     },

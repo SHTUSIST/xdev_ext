@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 sys.dont_write_bytecode = True
@@ -264,6 +265,162 @@ class CeVmmDestination(unittest.TestCase):
         self.assertEqual((r['dst'], r['payload_path'], r['cpu_copy_bytes']),
                          ('dmabuf', 'nvme-read>dmabuf-frame', 0))
         self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+
+KV = dict(order='block-layer', block_size=16, layers=36, heads=8, state_bytes=512)
+Q8_SLBA = 2048 + 6 * GIB // 512
+
+
+@unittest.skipUnless(BIN, 'needs libbpf >= 1.0 to build kv_restore (or KV_RESTORE_BIN)')
+class PrefixIndexGo(unittest.TestCase):
+    """GO prefix=HASH: the worker resolves the restore from the prefix index."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='kv-index-go-')
+        self.manifest = kl.parse_manifest({
+            'schema': 1, 'kind': 'kv-layout', 'lba_bytes': 512,
+            'window': {'slba': 2048, 'nlb': 40 * GIB // 512},
+            'objects': [{'name': 'q8', 'model': 'qwen3-8b-bf16', 'tokens': 32768, 'seed': 9,
+                         'slba': Q8_SLBA, 'nlb': 9 * GIB // 2 // 512, 'kv': KV}]})
+        layout = kl.BlockLayout(16, 36, 8, 512)
+        h = dict(kl.prefix_hashes('qwen3-8b-bf16', layout, list(range(32768))))
+        self.h4k, self.h16k = h[4096], h[16384]
+        self.index = Path(self.tmp.name) / 'kv.index'
+        kl.write_index(self.index, [
+            kl.IndexEntry(self.h4k, 'q8', Q8_SLBA, 0, 4096 * 147456, 4096, 0xfeed),
+            kl.IndexEntry(self.h16k, 'q8', Q8_SLBA, 0, 16384 * 147456, 16384, None)])
+        kl.load_index(self.index, self.manifest)
+        self.geometry = kl.Geometry(256 * KIB, 128 * KIB, 32, 32, True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def worker(self, extra=()):
+        return kp.Worker([BIN, 'restore', '--dry-run'] + WINDOW + [
+            '--gpu-bdf', '0000:00:00.0', '--gpu-node', '/dev/null', '--pool-bytes', str(5 * GIB),
+            '--peer', '127.0.0.1:9', '--link-token', '5'] + list(extra), ready_timeout=30,
+            log=Path(self.tmp.name) / 'restore.log')
+
+    def test_prefix_resolves_like_python(self):
+        w = self.worker(['--index', str(self.index)])
+        self.assertEqual(w.ready['index_entries'], 2)
+        for ordinal, digest, tokens in ((1, self.h16k, 16384), (2, self.h4k, 4096)):
+            w.submit(kp.prefix_go_line(f'p{ordinal}', ordinal, digest, 0))
+            r = w.collect(30)
+            self.assertTrue(r['ok'], r)
+            want = kl.plan_restore(self.manifest, 'q8', tokens, self.geometry, ordinal, 0,
+                                   5 * GIB // (128 * KIB)).to_json()
+            for key in ('groups', 'first_seq', 'slot0', 'host2_frames'):
+                self.assertEqual(r['plan'][key], want[key], key)
+            self.assertEqual((r['prefix'], r['tokens'], r['object_slba'], r['bytes']),
+                             (digest, tokens, Q8_SLBA, tokens * 147456))
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_prefix_refusals(self):
+        w = self.worker(['--index', str(self.index)])
+        w.submit(kp.prefix_go_line('miss', 1, '00' * 32, 0))
+        r = w.collect(30)
+        self.assertEqual((r['ok'], r['error'], r['started']), (False, -errno.ENOENT, False))
+        w.submit(kp.prefix_go_line('after', 1, self.h4k, 0))
+        self.assertTrue(w.collect(30)['ok'], 'an unknown prefix consumes no keys')
+        w.submit(f'GO run=both ordinal=2 prefix={self.h4k} object_slba={Q8_SLBA} '
+                 f'bytes=131072 dst_frame0=0\n')
+        kind, body = w._next(30, ('KV_RESULT', 'KV_ERROR'))
+        self.assertEqual((kind, body['where']), ('KV_ERROR', 'GO arguments'))
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+        w = self.worker()
+        w.submit(kp.prefix_go_line('noindex', 1, self.h4k, 0))
+        self.assertEqual(w.collect(30)['error'], -errno.ENOENT, 'no index loaded')
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_bad_index_fails_setup(self):
+        bad = Path(self.tmp.name) / 'bad.index'
+        bad.write_text('xdev-kv-index 1\nprefix zz object=q8 slba=1 offset=0 bytes=1 tokens=1\n')
+        for path, err in ((bad, -errno.EINVAL), (Path(self.tmp.name) / 'none', -errno.ENOENT)):
+            with self.subTest(path=path.name):
+                r = subprocess.run([str(BIN), 'restore', '--dry-run'] + WINDOW + [
+                    '--gpu-bdf', 'x', '--gpu-node', 'y', '--pool-bytes', str(GIB), '--peer',
+                    'h:1', '--link-token', '1', '--index', str(path)],
+                    capture_output=True, text=True, timeout=30)
+                self.assertEqual(r.returncode, 1, r.stdout)
+                kind, body = kp.parse_line(r.stdout.strip().splitlines()[-1])
+                self.assertEqual((kind, body['where'], body['error']),
+                                 ('KV_ERROR', 'setup: index', err))
+
+
+@unittest.skipUnless(BIN, 'needs libbpf >= 1.0 to build kv_restore (or KV_RESTORE_BIN)')
+class FifoQueue(unittest.TestCase):
+    """Several GO lines queue on one session and run in arrival order.
+
+    --dry-run-hold-ms holds each dry-run GO as if a restore were in flight, so
+    the queue's timestamps can be checked without a device.
+    """
+    HOLD = 300
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='kv-fifo-')
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def worker(self, extra):
+        return kp.Worker([BIN, 'restore', '--dry-run'] + WINDOW + [
+            '--gpu-bdf', '0000:00:00.0', '--gpu-node', '/dev/null', '--pool-bytes', str(5 * GIB),
+            '--peer', '127.0.0.1:9', '--link-token', '5'] + list(extra), ready_timeout=30,
+            log=Path(self.tmp.name) / 'restore.log')
+
+    @staticmethod
+    def go(run, ordinal):
+        return kp.go_line(run, ordinal, Q8_SLBA, 8 * 256 * KIB, 0)
+
+    def test_requests_queue_in_arrival_order(self):
+        w = self.worker(['--dry-run-hold-ms', str(self.HOLD)])
+        self.assertEqual(w.ready['queue_depth'], 64)
+        w.submit(''.join(self.go(f'r{i}', i) for i in (1, 2, 3)))
+        rs = [w.collect(30) for _ in range(3)]
+        self.assertEqual([r['run'] for r in rs], ['r1', 'r2', 'r3'])
+        self.assertTrue(all(r['ok'] for r in rs), rs)
+        q = [r['queue'] for r in rs]
+        self.assertEqual([x['ahead'] for x in q], [0, 1, 2])
+        hold = self.HOLD * 1_000_000
+        self.assertLess(q[0]['queue_ns'], hold // 2)
+        self.assertGreaterEqual(q[1]['queue_ns'], hold * 8 // 10)
+        self.assertGreaterEqual(q[2]['queue_ns'], 2 * hold * 8 // 10)
+        # Stamped when read, not when started: all three arrived together.
+        self.assertLess(max(x['enqueue_ns'] for x in q) - min(x['enqueue_ns'] for x in q),
+                        hold // 2)
+        for x in q:
+            self.assertEqual(x['start_ns'] - x['enqueue_ns'], x['queue_ns'])
+        bye = w.quit(timeout=30)
+        self.assertEqual((bye['error'], bye['restores']), (0, 3))
+
+    def test_full_queue_refuses_at_once(self):
+        w = self.worker(['--dry-run-hold-ms', str(self.HOLD), '--queue-depth', '1'])
+        w.submit(self.go('r1', 1))
+        time.sleep(0.1)                       # r1 leaves the queue and runs
+        w.submit(self.go('r2', 2) + self.go('r3', 3))
+        first = w.collect(30)
+        self.assertEqual((first['run'], first['ok'], first['error'], first['started']),
+                         ('r3', False, -errno.EBUSY, False))
+        self.assertEqual([w.collect(30)['run'] for _ in range(2)], ['r1', 'r2'])
+        self.assertEqual(w.quit(timeout=30)['restores'], 2)
+
+    def test_quit_drains_queued_requests(self):
+        w = self.worker(['--dry-run-hold-ms', str(self.HOLD)])
+        w.submit(self.go('r1', 1) + self.go('r2', 2) + 'QUIT\n')
+        self.assertEqual([w.collect(30)['run'] for _ in range(2)], ['r1', 'r2'])
+        _, bye = w._next(30, ('KV_BYE',))
+        self.assertEqual((bye['error'], bye['restores']), (0, 2))
+
+    def test_queue_options_refused(self):
+        base = ['restore'] + WINDOW + ['--gpu-bdf', 'x', '--gpu-node', 'y', '--pool-bytes',
+                                       str(GIB), '--peer', 'h:1', '--link-token', '1']
+        for extra in (['--dry-run-hold-ms', '10'], ['--dry-run', '--queue-depth', '0'],
+                      ['--dry-run', '--queue-depth', '100000']):
+            with self.subTest(extra=extra):
+                r = subprocess.run([str(BIN)] + base + extra, capture_output=True, text=True,
+                                   timeout=30)
+                self.assertEqual(r.returncode, 2, r.stdout)
 
 
 if __name__ == '__main__':

@@ -80,6 +80,82 @@ class PrepareNvme(Base):
         self.assertEqual(data[:2048 * 512], bytes(2048 * 512), 'nothing outside the objects')
 
 
+KV = dict(order='block-layer', block_size=16, layers=36, heads=8, state_bytes=512)
+
+
+class RealKv(Base):
+    """Objects dumped from vLLM: prepare-nvme writes the payload file, a run
+    names each prefix by its index entry so the worker can check its digest."""
+
+    def setUp(self):
+        super().setUp()
+        self.payload = self.dir / 'q8.kv'
+        self.data = bytes((i * 131 + 17) & 255 for i in range(32 * 147456))
+        self.payload.write_bytes(self.data)
+        import hashlib
+        m = json.loads(json.dumps(MANIFEST))
+        m['objects'][1].update(kv=KV, payload={'file': 'q8.kv',
+                                               'sha256': hashlib.sha256(self.data).hexdigest()})
+        self.manifest.write_text(json.dumps(m))
+        self.m = kl.load_manifest(self.manifest)
+        o = self.m.object('q8')
+        layout = kl.BlockLayout(16, 36, 8, 512)
+        hashes = dict(kl.prefix_hashes('qwen3-8b-bf16', layout, list(range(32))))
+        self.index = self.dir / 'kv.index'
+        kl.write_index(self.index, [
+            kl.IndexEntry(hashes[n], 'q8', o.slba, 0, n * 147456, n,
+                          kl.fnv1a64(self.data[:n * 147456])) for n in (16, 32)])
+        self.hashes = hashes
+
+    def test_payload_lands_at_its_lbas(self):
+        dev = self.dir / 'disk.img'
+        dev.write_bytes(bytes(32 * MIB))
+        self.assertEqual(kr.main(['prepare-nvme', '--manifest', str(self.manifest), '--device',
+                                  str(dev), '--i-understand-this-overwrites']), 0)
+        data = dev.read_bytes()
+        o = self.m.object('q8')
+        self.assertEqual(data[o.slba * 512:o.slba * 512 + o.bytes], self.data)
+        p = self.m.object('q14')
+        self.assertEqual(data[p.slba * 512:p.slba * 512 + p.bytes],
+                         kl.pattern_bytes(p.seed, 0, p.bytes), 'pattern objects unchanged')
+
+    def test_changed_payload_refused_before_writing(self):
+        self.payload.write_bytes(b'\0' + self.data[1:])
+        dev = self.dir / 'disk.img'
+        dev.write_bytes(bytes(32 * MIB))
+        with self.assertRaises(SystemExit):
+            kr.main(['prepare-nvme', '--manifest', str(self.manifest), '--device', str(dev),
+                     '--i-understand-this-overwrites'])
+        self.assertEqual(dev.read_bytes(), bytes(32 * MIB))
+
+    def run_args(self, *extra):
+        return ['run', '--arm', 'xdev-ext', '--manifest', str(self.manifest), '--object', 'q8',
+                '--prefixes', '16,32', '--repetitions', '1', '--host1-agent', '127.0.0.1:1',
+                '--token-file', '/dev/null', '--output', str(self.dir / 'out'),
+                '--gpu-bdf', '0000:01:00.0', '--gpu-node', '/dev/nvidia0',
+                '--pool-bytes', str(1 << 30), '--peer', '10.0.0.1:7700', '--link-token', '5',
+                '--group-bytes', str(128 << 10), *extra]
+
+    def test_run_names_prefixes_by_index(self):
+        import contextlib
+        import io
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            self.assertEqual(kr.main(self.run_args('--index', str(self.index), '--dry-run')), 0)
+        out = json.loads(buf.getvalue())
+        argv = out['worker_argv']
+        self.assertEqual(argv[argv.index('--index') + 1], str(self.index))
+        self.assertEqual({i['prefix_tokens']: i['prefix'] for i in out['schedule']},
+                         {16: self.hashes[16], 32: self.hashes[32]})
+
+    def test_real_kv_needs_the_index(self):
+        with self.assertRaises(SystemExit):
+            kr.main(self.run_args('--dry-run'))
+        with self.assertRaises(SystemExit):     # no entry for 32 tokens
+            kl.write_index(self.index, [kl.load_index(self.index, self.m).entries[0]])
+            kr.main(self.run_args('--index', str(self.index), '--dry-run'))
+
+
 class NvmeofTarget(Base):
     def test_up_and_down_are_the_nvmet_configfs_steps(self):
         root = self.dir / 'configfs'

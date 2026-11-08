@@ -197,4 +197,79 @@ static inline __u64 kv_plan_xdomain_arg1(const struct kv_geometry *g)
 	return (__u64)g->window << XDEV_EXT_XDOMAIN_WINDOW_SHIFT;
 }
 
+/*
+ * vLLM block order of a KV object (kv_layout.BlockLayout): page (b, l) is
+ * layer l of vLLM block b, the layer's [H, N, C] page as vLLM 0.33.0 views it,
+ * at byte (b * layers + l) * page_bytes of the object.
+ */
+struct kv_block_layout {
+	uint32_t block_size, layers, heads, state_bytes;
+};
+
+/* One piece of a restore group: a page or the part of one inside the group. */
+struct kv_page_piece {
+	uint64_t block;
+	uint32_t layer;
+	uint64_t page_off, len, group_off;
+};
+
+static inline uint64_t kv_page_bytes(const struct kv_block_layout *b)
+{
+	return (uint64_t)b->heads * b->block_size * b->state_bytes;
+}
+
+static inline uint64_t kv_block_bytes(const struct kv_block_layout *b)
+{
+	return (uint64_t)b->layers * kv_page_bytes(b);
+}
+
+/* A group never splits a page, and a block is whole groups or a group whole blocks. */
+static inline int kv_block_layout_check(const struct kv_block_layout *b, uint32_t group_bytes)
+{
+	uint64_t p, blk, g = group_bytes;
+
+	if (!b->block_size || !b->layers || !b->heads || !b->state_bytes || !g ||
+	    b->block_size > (1u << 20) || b->layers > (1u << 20) || b->heads > (1u << 20) ||
+	    b->state_bytes > (1u << 20))
+		return -EINVAL;
+	p = kv_page_bytes(b);
+	blk = kv_block_bytes(b);
+	if ((g % p && p % g) || (g % blk && blk % g))
+		return -EINVAL;
+	return 0;
+}
+
+static inline int kv_page_offset(const struct kv_block_layout *b, uint64_t block, uint32_t layer,
+				 uint64_t *off)
+{
+	uint64_t page = kv_page_bytes(b);
+
+	if (layer >= b->layers || block > (UINT64_MAX / page - layer) / b->layers)
+		return -ERANGE;
+	*off = (block * b->layers + layer) * page;
+	return 0;
+}
+
+/* Pieces of group @group (after kv_block_layout_check); count or -ENOSPC. */
+static inline int kv_group_pages(const struct kv_block_layout *b, uint64_t group,
+				 uint32_t group_bytes, struct kv_page_piece *out, unsigned cap)
+{
+	uint64_t page = kv_page_bytes(b), start = group * group_bytes, at = start;
+	unsigned n = 0;
+
+	while (at < start + group_bytes) {
+		uint64_t idx = at / page, off = at % page;
+		uint64_t len = page - off < start + group_bytes - at ? page - off
+								     : start + group_bytes - at;
+
+		if (n == cap)
+			return -ENOSPC;
+		out[n++] = (struct kv_page_piece){ .block = idx / b->layers,
+			.layer = (uint32_t)(idx % b->layers), .page_off = off, .len = len,
+			.group_off = at - start };
+		at += len;
+	}
+	return (int)n;
+}
+
 #endif /* KV_RESTORE_PLAN_H */
