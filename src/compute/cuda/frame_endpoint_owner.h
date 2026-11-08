@@ -23,7 +23,7 @@ struct xdev_ext_cuda_frame_owner_opts {
  size_t size;
  uint32_t version, context_mode, device; /* context_mode: enum xdev_ext_cuda_peer_context_mode values */
  CUcontext context;
- CUstream stream;
+ CUstream stream;          /* borrowed mode: NULL is the CUDA default stream */
  const char *nvidia_node;   /* CE device, opened once per CE stage */
  const char *bpf_object;    /* XDOMAIN program object, map xdomain_peer_ops */
  const char *ce_bpf_object; /* tp_ce_place.bpf.o, map tp_ce_ops (PRIVATE) */

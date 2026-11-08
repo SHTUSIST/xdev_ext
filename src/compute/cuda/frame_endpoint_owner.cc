@@ -24,7 +24,7 @@ struct xdev_ext_cuda_frame_owner {
  CUcontext context=nullptr;
  CUstream stream=nullptr;
  CUevent last_use=nullptr;
- bool own_context=false,own_stream=false;
+ bool own_context=false,own_stream=false,stream_bound=false;
  int control=-1;
  window win[2]; // 0: send, 1: receive
  uint64_t window_bytes[2]{};
@@ -84,7 +84,7 @@ static int prepare(xdev_ext_cuda_frame_owner *o) {
   if((rc=driver(cuCtxCreate(&o->context,nullptr,0,device))))return rc;
   o->own_context=true;
   if((rc=driver(cuStreamCreate(&o->stream,CU_STREAM_NON_BLOCKING))))return rc;
-  o->own_stream=true;
+  o->own_stream=true;o->stream_bound=true;
  } else {
   o->context=c.context;o->stream=c.stream;
   if((rc=current(o)))return rc;
@@ -94,6 +94,7 @@ static int prepare(xdev_ext_cuda_frame_owner *o) {
   CUdevice actual,requested;
   if((rc=driver(cuCtxGetDevice(&actual))) || (rc=driver(cuDeviceGet(&requested,int(c.device)))))return rc;
   if(actual!=requested)return -EXDEV;
+  o->stream_bound=true; // NULL is a valid, qualified borrowed default stream.
  }
  o->window_bytes[0]=c.group_bytes;
  o->window_bytes[1]=uint64_t(c.group_bytes)*c.receive_groups;
@@ -151,7 +152,7 @@ extern "C" int xdev_ext_cuda_frame_owner_get_view(xdev_ext_cuda_frame_owner *o,
 extern "C" int xdev_ext_cuda_frame_owner_close(xdev_ext_cuda_frame_owner **pointer) {
  if(!pointer || !*pointer)return -EINVAL;
  auto *o=*pointer;int rc;
- if(o->context && o->stream) {
+ if(o->stream_bound) {
   if((rc=current(o)))return rc;
   CUstreamCaptureStatus capture;
   if((rc=driver(cuStreamIsCapturing(o->stream,&capture))))return rc;
@@ -166,7 +167,7 @@ extern "C" int xdev_ext_cuda_frame_owner_close(xdev_ext_cuda_frame_owner **point
  if(o->control>=0){int fd=o->control;o->control=-1;if(::close(fd))return -errno;}
  for(auto &w:o->win)if((rc=window_close(w)))return rc;
  if(o->last_use){if((rc=driver(cuEventDestroy(o->last_use))))return rc;o->last_use=nullptr;}
- if(o->own_stream){if((rc=driver(cuStreamDestroy(o->stream))))return rc;o->own_stream=false;}
+ if(o->own_stream){if((rc=driver(cuStreamDestroy(o->stream))))return rc;o->own_stream=false;o->stream_bound=false;o->stream=nullptr;}
  if(o->own_context){if((rc=driver(cuCtxDestroy(o->context))))return rc;o->own_context=false;}
  delete o;*pointer=nullptr;return 0;
 }

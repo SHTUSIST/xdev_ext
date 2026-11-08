@@ -58,20 +58,22 @@ static int owner_os_ioctl(int fd,unsigned long request,...){
 }
 // ---- CUDA ---------------------------------------------------------------
 static unsigned live_handles,live_reservations,live_maps;
+static bool destroyed_stream;
+static CUstream recorded_stream;
 static CUdeviceptr next_va=0x7f0000000000ULL;
 CUresult cuInit(unsigned){return CUDA_SUCCESS;}
 CUresult cuDeviceGet(CUdevice *d,int o){*d=o;return CUDA_SUCCESS;}
 CUresult cuCtxCreate(CUcontext *c,void *,unsigned,CUdevice){*c=reinterpret_cast<void *>(0x51);note("ctx-create");return CUDA_SUCCESS;}
-CUresult cuCtxDestroy(CUcontext){note("ctx-destroy");return CUDA_SUCCESS;}
-CUresult cuCtxGetCurrent(CUcontext *c){*c=reinterpret_cast<void *>(0x51);return CUDA_SUCCESS;}
-CUresult cuCtxGetDevice(CUdevice *d){*d=0;return CUDA_SUCCESS;}
-CUresult cuStreamCreate(CUstream *s,unsigned){*s=reinterpret_cast<void *>(0x61);return CUDA_SUCCESS;}
-CUresult cuStreamDestroy(CUstream){note("stream-destroy");return CUDA_SUCCESS;}
-CUresult cuStreamGetCtx(CUstream,CUcontext *c){*c=reinterpret_cast<void *>(0x51);return CUDA_SUCCESS;}
-CUresult cuStreamIsCapturing(CUstream,CUstreamCaptureStatus *s){*s=CU_STREAM_CAPTURE_STATUS_NONE;return CUDA_SUCCESS;}
-CUresult cuEventCreate(CUevent *e,unsigned){*e=reinterpret_cast<void *>(0x71);return CUDA_SUCCESS;}
-CUresult cuEventRecord(CUevent,CUstream){note("event-record");return CUDA_SUCCESS;}
-CUresult cuEventSynchronize(CUevent){note("event-sync");return CUDA_SUCCESS;}
+CUresult cuCtxDestroy(CUcontext){note("ctx-destroy");return fault("ctx-destroy")?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
+CUresult cuCtxGetCurrent(CUcontext *c){*c=reinterpret_cast<void *>(fault("wrong-context")?0x52:0x51);return CUDA_SUCCESS;}
+CUresult cuCtxGetDevice(CUdevice *d){*d=0;return fault("device-query")?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
+CUresult cuStreamCreate(CUstream *s,unsigned){note("stream-create");if(fault("stream-create"))return CUDA_ERROR_UNKNOWN;*s=reinterpret_cast<void *>(0x61);return CUDA_SUCCESS;}
+CUresult cuStreamDestroy(CUstream){note("stream-destroy");destroyed_stream=true;return CUDA_SUCCESS;}
+CUresult cuStreamGetCtx(CUstream,CUcontext *c){*c=reinterpret_cast<void *>(0x51);return fault("stream-getctx")?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
+CUresult cuStreamIsCapturing(CUstream,CUstreamCaptureStatus *s){note("capture-query");*s=fault("capturing")?CU_STREAM_CAPTURE_STATUS_ACTIVE:CU_STREAM_CAPTURE_STATUS_NONE;return fault("capture-query")||destroyed_stream?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
+CUresult cuEventCreate(CUevent *e,unsigned){if(fault("event-create"))return CUDA_ERROR_UNKNOWN;*e=reinterpret_cast<void *>(0x71);return CUDA_SUCCESS;}
+CUresult cuEventRecord(CUevent,CUstream stream){note("event-record");recorded_stream=stream;return fault("event-record")?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
+CUresult cuEventSynchronize(CUevent){note("event-sync");return fault("event-sync")?CUDA_ERROR_UNKNOWN:CUDA_SUCCESS;}
 CUresult cuEventDestroy(CUevent){return CUDA_SUCCESS;}
 static std::vector<CUmemAllocationProp> props;
 CUresult cuMemGetAllocationGranularity(size_t *g,const CUmemAllocationProp *,CUmemAllocationGranularity_flags){*g=2u<<20;return CUDA_SUCCESS;}
@@ -108,7 +110,7 @@ extern "C" int xdev_ext_frame_endpoint_close(xdev_ext_frame_endpoint *e){
  note(e->o.direction==XDEV_EXT_MECH_DIR_TO_DEVICE?"endpoint-close:tx":"endpoint-close:rx");delete e;return 0;}
 
 static void reset(){events.clear();fds.clear();attaches.clear();props.clear();access_seen.clear();endpoint_opts.clear();selectors.clear();
- fail_at.clear();live_handles=live_reservations=live_maps=0;}
+ fail_at.clear();live_handles=live_reservations=live_maps=0;destroyed_stream=false;recorded_stream=reinterpret_cast<void *>(1);}
 static xdev_ext_cuda_frame_owner_opts options(){
  xdev_ext_cuda_frame_owner_opts o{};o.size=sizeof(o);o.version=XDEV_EXT_CUDA_FRAME_OWNER_VERSION;
  o.context_mode=2;o.device=0;o.nvidia_node="/dev/nvidia0";o.bpf_object="xdomain_rts_cts.bpf.o";
@@ -194,10 +196,64 @@ static void test_partial_failure_is_owned(){
  EQ(fds.size(),0);EQ(live_handles,0);EQ(live_reservations,0);EQ(live_maps,0);
 }
 
+static xdev_ext_cuda_frame_owner_opts borrowed(CUstream stream=nullptr){
+ auto o=options();o.context_mode=1;o.context=reinterpret_cast<void *>(0x51);o.stream=stream;return o;
+}
+static void test_borrowed_streams(){
+ // CUDA's NULL/default stream is a valid borrowed stream, not absence of one.
+ for(CUstream stream:{CUstream(nullptr),reinterpret_cast<void *>(0x61)}){
+  reset();auto o=borrowed(stream);xdev_ext_cuda_frame_owner *owner=nullptr;
+  EQ(xdev_ext_cuda_frame_owner_open(&o,&owner),0);EQ(owner!=nullptr,1);
+  EQ(xdev_ext_cuda_frame_owner_close(&owner),0);
+  EQ(count("event-record"),1);EQ(count("event-sync"),1);
+  EQ(find("event-sync")>=0 && find("event-sync")<find("endpoint-close:tx"),1);
+  EQ(owner==nullptr,1);EQ(recorded_stream==stream,1);
+  EQ(count("stream-destroy"),0);EQ(count("ctx-destroy"),0);
+  EQ(fds.size(),0);EQ(live_maps,0);
+ }
+}
+// A NULL stream may also return an implicit-capture Driver error; a failed
+// capture query must retain the owner before inspecting its output status.
+static void test_borrowed_close_refusals(){
+ for(const char *failure:{"wrong-context","capturing","capture-query","event-create","event-record","event-sync"}){
+  reset();auto o=borrowed();xdev_ext_cuda_frame_owner *owner=nullptr;
+  EQ(xdev_ext_cuda_frame_owner_open(&o,&owner),0);auto *same=owner;size_t open_fds=fds.size();
+  fail_at=failure;
+  int expected=fail_at=="wrong-context"?-EXDEV:fail_at=="capturing"?-EBUSY:-EIO;
+  EQ(xdev_ext_cuda_frame_owner_close(&owner),expected);EQ(owner==same,1);
+  EQ(count("endpoint-close:"),0);EQ(count("unmap"),0);EQ(live_maps,2);EQ(fds.size(),open_fds);
+  fail_at.clear();EQ(xdev_ext_cuda_frame_owner_close(&owner),0);EQ(owner==nullptr,1);
+  EQ(count("stream-destroy"),0);EQ(count("ctx-destroy"),0);EQ(live_maps,0);EQ(fds.size(),0);
+ }
+}
+static void test_unbound_setup_cleanup(){
+ for(const char *failure:{"stream-create","stream-getctx","device-query"}){
+  reset();auto o=std::string(failure)=="stream-create"?options():borrowed();
+  xdev_ext_cuda_frame_owner *owner=nullptr;fail_at=failure;
+  EQ(xdev_ext_cuda_frame_owner_open(&o,&owner),-EIO);EQ(owner!=nullptr,1);
+  fail_at.clear();EQ(xdev_ext_cuda_frame_owner_close(&owner),0);EQ(owner==nullptr,1);
+  EQ(count("capture-query"),0);EQ(count("event-record"),0);EQ(count("event-sync"),0);
+  EQ(count("stream-destroy"),0);EQ(count("ctx-destroy"),std::string(failure)=="stream-create"?1:0);
+  EQ(fds.size(),0);EQ(live_maps,0);
+ }
+}
+static void test_owned_context_close_retry(){
+ reset();auto o=options();xdev_ext_cuda_frame_owner *owner=nullptr;
+ EQ(xdev_ext_cuda_frame_owner_open(&o,&owner),0);fail_at="ctx-destroy";
+ EQ(xdev_ext_cuda_frame_owner_close(&owner),-EIO);EQ(owner!=nullptr,1);
+ EQ(count("stream-destroy"),1);EQ(count("event-sync"),1);EQ(live_maps,0);
+ fail_at.clear();EQ(xdev_ext_cuda_frame_owner_close(&owner),0);EQ(owner==nullptr,1);
+ EQ(count("stream-destroy"),1);EQ(count("event-sync"),1);EQ(count("ctx-destroy"),2);
+}
+
 int main(){
  test_refuses_bad_options();
  test_open_view_close();
  test_partial_failure_is_owned();
+ test_borrowed_streams();
+ test_borrowed_close_refusals();
+ test_unbound_setup_cleanup();
+ test_owned_context_close_retry();
  std::printf("%s 1 - host-frame endpoint owner (%u checks, %u failures)\n",failures?"not ok":"ok",checks,failures);
  std::fflush(stdout);
  return failures!=0;
