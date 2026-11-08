@@ -16,7 +16,7 @@ recommends for applications.  net_af_xdp needs libxdp >= 1.2.2 and libbpf
 skips the driver, so the build checks that librte_net_af_xdp.a exists.
 
 It also compiles tb_xsk_redirect.bpf.c into DIR/tb_xsk_redirect.o (clang
--target bpf), the xdp_prog= object that devices without native XDP, such
+-target bpf; CLANG overrides the compiler), the xdp_prog= object that devices without native XDP, such
 as thunderbolt-net, need (see that file).
 
 `--gpu none` replaces the CUDA copies with host memcpy into an ordinary
@@ -88,7 +88,7 @@ def vdev_arg(iface, xdp_prog=None):
 def bpf_command(src, obj):
     # -target bpf drops the host's multiarch include dir, where asm/types.h lives
     multiarch = sysconfig.get_config_var("MULTIARCH") or "x86_64-linux-gnu"
-    return ["clang", "-O2", "-g", "-Wall", "-Werror", "-target", "bpf",
+    return [os.environ.get("CLANG", "clang"), "-O2", "-g", "-Wall", "-Werror", "-target", "bpf",
             "-I/usr/include/" + multiarch, "-c", str(src), "-o", str(obj)]
 
 
@@ -203,8 +203,9 @@ def execute(p, args):
             if run_step({"argv": argv, "full_env": env}, log):
                 raise Refusal(1, "dpdk_tb failed to compile, see %s" % log)
         elif name == "bpf":
-            if not shutil.which("clang"):
-                raise Refusal(4, "missing tool: clang (for tb_xsk_redirect.o)")
+            if not shutil.which(step["argv"][0]):
+                raise Refusal(4, "missing tool: %s (for tb_xsk_redirect.o; set CLANG)"
+                              % step["argv"][0])
             if run_step(step, log):
                 raise Refusal(1, "tb_xsk_redirect.bpf.c failed to compile, see %s" % log)
     out = Path(p["output"])
