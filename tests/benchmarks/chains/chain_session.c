@@ -41,10 +41,12 @@
 #include <linux/if_xdp.h>
 
 #include "../../../kernel/include/uapi/linux/io_uring.h"
+#include "../../../kernel/include/uapi/linux/xdev_ext_policy.h"
 #include "../../../kernel/tools/include/xdev_ext_xsk_redirect.h"
 #include "../../../kernel/tools/include/xdev_ext_gpu_identity.h"
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "chain_bench.h"
+#include "../nvme_gpu/eval_session.h"
 #include "../../../kernel/tools/xdev_ext_mech/lib/libxdev_ext.h"
 #include "../common/native_process.h"
 #include "chain_cuda.h"
@@ -469,6 +471,44 @@ struct cs_ce {
 	uint64_t va;
 };
 
+/* Allocate once; all already-opened CE stage files bind the same export. */
+static int cs_ce_open_alloc(const struct chain_spec *s, struct cs_ce *ce)
+{
+	unsigned int i;
+	int first = -1, ret;
+
+	ce->va = s->ce_va;
+	if (!s->ce_native && !s->ce_vmm)
+		return 0;
+	for (i = 0; i < s->nr_stages; i++) {
+		char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
+
+		if (ce->fd[i] < 0)
+			continue;
+		ret = xdev_ext_gpu_identity_from_opened(ce->fd[i], s->ce_dev,
+				XDEV_EXT_GPU_IDENTITY_ANY_MINOR, first < 0 ? ce->bdf : bdf);
+		if (!ret && first >= 0 && strcasecmp(ce->bdf, bdf))
+			ret = -EXDEV;
+		if (ret)
+			return ret;
+		first = (int)i;
+	}
+	ret = s->ce_vmm ? xdev_ext_mech_cuda_open_vmm(&ce->cuda, ce->bdf, s->ce_len) :
+			  xdev_ext_mech_cuda_open(&ce->cuda, ce->bdf, s->ce_len);
+	if (ret)
+		return ret;
+	ce->va = ce->cuda.va;
+	if (s->ce_vmm)
+		for (i = 0; i < s->nr_stages; i++) {
+			if (ce->fd[i] < 0)
+				continue;
+			ret = es_ce_attach(&ce->cuda, ce->fd[i]);
+			if (ret)
+				return ret;
+		}
+	return 0;
+}
+
 /* CE window read or write outside every window (oracle, pristine fill). */
 static int cs_ce_access(const struct chain_spec *s, struct cs_ce *ce, uint64_t off,
 			void *buf, size_t len, bool write)
@@ -476,7 +516,7 @@ static int cs_ce_access(const struct chain_spec *s, struct cs_ce *ce, uint64_t o
 	int fd = -1, i;
 	ssize_t n;
 
-	if (s->ce_native)
+	if (s->ce_native || s->ce_vmm)
 		return write ? chain_cuda_fill(ce->bdf, ce->va + off, buf, len) :
 			       chain_cuda_readback(ce->bdf, ce->va + off, buf, len);
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES && fd < 0; i++)
@@ -697,7 +737,8 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 	atomic_init(&continuation.stop, false);
 	r->ce_backend = !chain_has(s, CH_CE) ? "none" :
 			strstr(s->ce_dev, "xdev_ext_ce_sim") ? "ce-sim-cpu-standin" :
-			s->ce_native ? "gpu-native-allocation" : "gpu-given-window";
+			s->ce_native ? "gpu-native-allocation" :
+			s->ce_vmm ? "gpu-vmm-allocation" : "gpu-given-window";
 	if (sustained) {
 		r->rec_ns = malloc(chain_records(s) * sizeof(*r->rec_ns));
 		if (!r->rec_ns)
@@ -817,33 +858,11 @@ int chain_run_session(const struct chain_spec *s, struct chain_result *r)
 			goto out;
 		}
 	}
-	ce.va = s->ce_va;
-	if (s->ce_native) {
-		int first = -1;
-
-		for (i = 0; i < s->nr_stages; i++) {
-			char bdf[XDEV_EXT_GPU_PCI_BDF_SIZE];
-
-			if (ce.fd[i] < 0)
-				continue;
-			ret = xdev_ext_gpu_identity_from_opened(ce.fd[i], s->ce_dev,
-					XDEV_EXT_GPU_IDENTITY_ANY_MINOR, first < 0 ? ce.bdf : bdf);
-			if (!ret && first >= 0 && strcasecmp(ce.bdf, bdf))
-				ret = -EXDEV;
-			if (ret) {
-				cb_fail(r, CB_NOT_RUN, "GPU identity of %s: %s", s->ce_dev,
-					strerror(-ret));
-				goto out;
-			}
-			first = (int)i;
-		}
-		ret = xdev_ext_mech_cuda_open(&ce.cuda, ce.bdf, s->ce_len);
-		if (ret) {
-			cb_fail(r, CB_NOT_RUN, "CUDA allocation on %s: %s", ce.bdf,
-				strerror(-ret));
-			goto out;
-		}
-		ce.va = ce.cuda.va;
+	ret = cs_ce_open_alloc(s, &ce);
+	if (ret) {
+		cb_fail(r, CB_NOT_RUN, "CE allocation/attachment on %s: %s", s->ce_dev,
+			strerror(-ret));
+		goto out;
 	}
 	if (s->oracle == CH_ORACLE_CE) {
 		size_t bytes = (size_t)s->depth * s->group_bytes;
@@ -1197,7 +1216,7 @@ out:
 	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
 		if (fds[i] >= 0 && (i >= s->nr_stages || s->st[i].cls != CH_USER))
 			close(fds[i]);
-	if (s->ce_native && xdev_ext_mech_cuda_close(&ce.cuda) && !r->status)
+	if ((s->ce_native || s->ce_vmm) && xdev_ext_mech_cuda_close(&ce.cuda) && !r->status)
 		cb_fail(r, CB_FAIL, "CUDA allocation cleanup failed");
 	cs_xsk_close(&x);
 	if (pool)
@@ -1206,6 +1225,258 @@ out:
 	cs_plans_close(&plans);
 	if (!r->status && started && s->oracle == CH_ORACLE_FILE)
 		chain_oracle_file(s, r);
+	free(ref);
+	return r->status;
+}
+
+/* The ring, UMEM, devices and CUDA allocation have one outer owner. */
+struct cs_two_session {
+	__u64 id, batches, published;
+	int efd;
+};
+
+static int cs_two_create(int ring, const struct xdev_ext_mech_create *create,
+			struct cs_two_session *side, bool *unsafe)
+{
+	struct xdev_ext_mech_create_report report = { 0 };
+	int ret = xdev_ext_create_report_read(ring, create, &report);
+
+	if (ret) {
+		/* No ID can be guessed after uncertain delivery or retained rollback. */
+		if (report.size != sizeof(report) ||
+		    report.cleanup == XDEV_EXT_MECH_CREATE_CLEANUP_RETAINED)
+			*unsafe = true;
+		return ret;
+	}
+	/* The raw helper validates the report; its const CREATE stays unchanged. */
+	side->id = report.session_id;
+	return 0;
+}
+
+static int cs_two_window(int ring, struct cs_two_session *side, const __u32 *indices,
+			 __u32 nr_indices, __u64 batches, __u64 first_seq,
+			 __u64 timeout_ms, uint64_t *syscalls, bool *unsafe)
+{
+	struct xdev_ext_mech_notify_arm arm = {
+		.session_id = side->id,
+		.batches_target = side->batches + batches,
+		.published_target = side->published + nr_indices,
+	};
+	struct xdev_ext_mech_start start = {
+		.session_id = side->id, .nr_batches = batches, .first_seq = first_seq,
+		.flags = XDEV_EXT_MECH_START_F_USER_FRAMES | XDEV_EXT_MECH_START_F_ORDERED_FRAMES,
+		.nr_user_frames = nr_indices, .user_frames = (uintptr_t)indices,
+	};
+	struct xdev_ext_mech_stats stats = { .session_id = side->id };
+	uint64_t count;
+	int ret;
+
+	ret = cs_mech(ring, XDEV_EXT_MECH_OP_NOTIFY_ARM, (uintptr_t)&arm, syscalls);
+	if (ret)
+		return ret;
+	ret = cs_mech(ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start, syscalls);
+	if (ret) {
+		/* A returned error alone cannot prove that the loan was refused. */
+		*unsafe = true;
+		return ret;
+	}
+	side->batches = arm.batches_target;
+	side->published = arm.published_target;
+	ret = cs_wait(side->efd, cb_now_ns() + timeout_ms * 1000000ULL, syscalls, &count);
+	if (!ret)
+		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&stats, syscalls);
+	if (!ret)
+		ret = xdev_ext_mech_ctl_notify_result(&stats, side->batches);
+	if (!ret && (stats.published != side->published || stats.rejects || stats.protocol_err ||
+		     stats.timeouts || stats.submitted[0] != stats.completed[0] ||
+		     stats.completed[0] < side->batches))
+		ret = -EIO;
+	return ret;
+}
+
+/* Untimed custody qualification only, not a sustained pipeline/performance arm. */
+int chain_run_two_session_correctness(const struct chain_spec *s, struct chain_result *r)
+{
+	struct cs_two_session side[2] = { { .efd = -1 }, { .efd = -1 } };
+	struct cs_plans plans = { .iaa_counts_fd = -1 };
+	struct cs_ce ce = { .fd = { -1, -1, -1, -1 } };
+	struct chain_iou_plan iou;
+	struct chain_err error = { { 0 } };
+	struct xdev_ext_mech_stage_uapi stages[XDEV_EXT_MECH_MAX_STAGES];
+	int fds[XDEV_EXT_MECH_MAX_STAGES] = { -1, -1, -1, -1 };
+	uint64_t required[CHAIN_MAX_DEPTH], first = 1, total = s->warmup + s->batches;
+	__u32 *indices = NULL, i, q;
+	uint8_t *ref = NULL, *fill;
+	size_t ref_len = 0, pool_bytes = 0, window_bytes;
+	void *pool = NULL;
+	int ring = -1, ret;
+	bool unsafe = false;
+
+	if (s->mode != CH_CORRECTNESS || s->arm != CH_SESSION ||
+	    strcmp(s->chain, "nvme-gpu") || s->load != CH_LOAD_CLOSED ||
+	    s->nr_stages != 2 || s->st[0].cls != CH_NVME || s->st[0].dir != CH_FROM ||
+	    s->st[1].cls != CH_CE || s->st[1].dir != CH_TO || s->oracle != CH_ORACLE_CE)
+		return cb_fail(r, CB_INVALID, "two-session qualification needs a closed correctness "
+			       "nvme-gpu session spec with a ce-window oracle");
+	if (chain_iou_layout(s, &iou, &error))
+		return cb_fail(r, CB_INVALID, "%s", error.msg);
+	r->ce_backend = strstr(s->ce_dev, "xdev_ext_ce_sim") ? "ce-sim-cpu-standin" :
+			s->ce_vmm ? "gpu-vmm-allocation" :
+			s->ce_native ? "gpu-native-allocation" : "gpu-given-window";
+	ref = chain_read_reference(s, &ref_len, r);
+	if (!ref)
+		return r->status;
+	if (total > ref_len / s->group_bytes) {
+		cb_fail(r, CB_INVALID, "reference does not cover every two-session batch");
+		goto out;
+	}
+	if (cs_plans_open(s, &plans, r))
+		goto out;
+	ring = (int)syscall(__NR_io_uring_setup, 8, &(struct io_uring_params){ 0 });
+	if (ring < 0) {
+		cb_fail(r, CB_NOT_RUN, "two-session io_uring: %s", strerror(errno));
+		goto out;
+	}
+	for (i = 0; i < 2; i++) {
+		side[i].efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
+		if (side[i].efd < 0) {
+			cb_fail(r, CB_NOT_RUN, "two-session eventfd: %s", strerror(errno));
+			goto out;
+		}
+	}
+	pool_bytes = (size_t)iou.pool_frames * s->frame_size;
+	pool = mmap(NULL, pool_bytes, PROT_READ | PROT_WRITE,
+		    MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE |
+		    (s->hugepage ? MAP_HUGETLB : 0), -1, 0);
+	if (pool == MAP_FAILED) {
+		pool = NULL;
+		cb_fail(r, CB_NOT_RUN, "two-session UMEM: %s", strerror(errno));
+		goto out;
+	}
+	{
+		struct io_uring_xdev_ext_umem_reg reg = {
+			.addr = (uintptr_t)pool, .size = pool_bytes, .frame_size = s->frame_size,
+		};
+
+		r->syscalls++;
+		if (syscall(__NR_io_uring_register, ring, IORING_REGISTER_XDEV_EXT_UMEM, &reg, 1) < 0) {
+			cb_fail(r, CB_NOT_RUN, "two-session UMEM register: %s", strerror(errno));
+			goto out;
+		}
+	}
+	indices = calloc((size_t)s->depth * iou.src_frames, sizeof(*indices));
+	if (!indices) {
+		cb_fail(r, CB_NOT_RUN, "two-session indices: %s", strerror(ENOMEM));
+		goto out;
+	}
+	for (i = 0; i < s->depth * iou.src_frames; i++)
+		indices[i] = i;
+	fds[0] = open(s->st[0].dev, O_RDONLY | O_CLOEXEC);
+	fds[1] = ce.fd[1] = open(s->ce_dev, O_RDWR | O_CLOEXEC);
+	if (fds[0] < 0 || fds[1] < 0) {
+		cb_fail(r, CB_NOT_RUN, "two-session device open: %s", strerror(errno));
+		goto out;
+	}
+	ret = cs_ce_open_alloc(s, &ce);
+	if (ret) {
+		cb_fail(r, CB_NOT_RUN, "two-session CE allocation/attach: %s", strerror(-ret));
+		goto out;
+	}
+	window_bytes = (size_t)s->depth * s->group_bytes;
+	fill = malloc(window_bytes);
+	ret = fill ? 0 : -ENOMEM;
+	if (fill) {
+		memset(fill, CS_PRISTINE, window_bytes);
+		ret = cs_ce_access(s, &ce, 0, fill, window_bytes, true);
+		free(fill);
+	}
+	if (ret) {
+		cb_fail(r, CB_NOT_RUN, "two-session pristine fill: %s", strerror(-ret));
+		goto out;
+	}
+	chain_stage_uapi(s, fds, -1, ce.va, iou.iaa_first, stages);
+	for (i = 0; i < 2; i++) {
+		struct xdev_ext_mech_create create = {
+			.abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 1,
+			.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1,
+			.layout = iou.l, .depth = s->depth, .eventfd = side[i].efd,
+			.st = { stages[i] },
+		};
+
+		ret = cs_two_create(ring, &create, &side[i], &unsafe);
+		if (ret) {
+			cb_fail(r, CB_NOT_RUN, "two-session CREATE_REPORT side %u: %s", i, strerror(-ret));
+			goto out;
+		}
+		ret = cs_native_bind(s, side[i].id, false);
+		if (ret) {
+			cb_fail(r, CB_NOT_RUN, "two-session native binding: %s", strerror(-ret));
+			goto out;
+		}
+	}
+	fprintf(stderr, "TWO_SESSION_READY nvme=%llu ce=%llu depth=%u\n",
+		(unsigned long long)side[0].id, (unsigned long long)side[1].id, s->depth);
+	while (first <= total) {
+		q = (__u32)(total - first + 1 < s->depth ? total - first + 1 : s->depth);
+		for (i = 0; i < 2; i++) {
+			ret = cs_two_window(ring, &side[i], indices, q * iou.src_frames, q, first,
+					    s->timeout_ms, &r->syscalls, &unsafe);
+			if (ret) {
+				cb_fail(r, CB_FAIL, "two-session window %llu side %u: %s",
+					(unsigned long long)first, i, strerror(-ret));
+				goto out;
+			}
+		}
+		/* Require every version from this window, before any slot is reused. */
+		for (i = 0; i < q; i++)
+			required[i] = first - 1 + i;
+		ret = cs_ce_oracle(s, &ce, ref, ref_len, required, q, r);
+		if (ret) {
+			r->oracle_verdict = "fail";
+			cb_fail(r, CB_FAIL, "two-session window bytes at %llu: %s",
+				(unsigned long long)first, strerror(-ret));
+			goto out;
+		}
+		r->windows_done++;
+		r->batches_done += q;
+		first += q;
+	}
+	r->oracle_verdict = "pass";
+out:
+	for (i = 0; i < 2; i++) {
+		struct xdev_ext_mech_stop_report stop = {
+			.size = sizeof(stop), .version = XDEV_EXT_MECH_STOP_REPORT_VERSION,
+			.session_id = side[i].id,
+		};
+
+		if (!side[i].id)
+			continue;
+		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STOP_REPORT, (uintptr_t)&stop, &r->syscalls);
+		fprintf(stderr, "TWO_SESSION_STOP side=%u result=%d\n", i, ret);
+		if (ret) {
+			unsafe = true;
+			cb_fail(r, CB_FAIL, "two-session STOP_REPORT side %u: %s", i, strerror(-ret));
+		}
+	}
+	if (unsafe) {
+		fprintf(stderr, "chain_bench: two-session owner retained after uncertain setup/teardown\n");
+		free(ref);
+		return r->status;
+	}
+	if (ring >= 0)
+		close(ring);
+	for (i = 0; i < 2; i++) {
+		if (side[i].efd >= 0)
+			close(side[i].efd);
+		if (fds[i] >= 0)
+			close(fds[i]);
+	}
+	if ((s->ce_native || s->ce_vmm) && xdev_ext_mech_cuda_close(&ce.cuda))
+		cb_fail(r, CB_FAIL, "two-session CUDA cleanup failed");
+	if (pool)
+		munmap(pool, pool_bytes);
+	free(indices);
+	cs_plans_close(&plans);
 	free(ref);
 	return r->status;
 }

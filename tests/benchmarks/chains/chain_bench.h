@@ -75,6 +75,7 @@ int cb_fail(struct chain_result *r, int status, const char *fmt, ...)
 	__attribute__((format(printf, 3, 4)));
 int chain_run_session(const struct chain_spec *s, struct chain_result *r);
 int chain_run_staged(const struct chain_spec *s, struct chain_result *r);
+int chain_run_two_session_correctness(const struct chain_spec *s, struct chain_result *r);
 /* Post-campaign readback of a file/block window against the reference. */
 int chain_oracle_file(const struct chain_spec *s, struct chain_result *r);
 /* Read the whole reference file; caller frees. */

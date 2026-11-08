@@ -2161,6 +2161,10 @@
       "logical_path": "tests/eval/chains/test_chain_spec.c"
     },
     {
+      "source": "tests/benchmarks/chains/test_ce_vmm.py",
+      "logical_path": "tests/eval/chains/test_ce_vmm.py"
+    },
+    {
       "source": "tests/benchmarks/chains/test_cpu_timer_contract.py",
       "logical_path": "tests/eval/chains/test_cpu_timer_contract.py"
     },
@@ -2171,6 +2175,14 @@
     {
       "source": "tests/benchmarks/chains/test_user_continuation_independent.py",
       "logical_path": "tests/benchmarks/chains/test_user_continuation_independent.py"
+    },
+    {
+      "source": "tests/benchmarks/chains/test_two_session.py",
+      "logical_path": "tests/eval/chains/test_two_session.py"
+    },
+    {
+      "source": "tests/benchmarks/chains/two_session_boundary_fixture.c.in",
+      "logical_path": "tests/eval/chains/two_session_boundary_fixture.c.in"
     },
     {
       "source": "tests/benchmarks/chains/uring_min.h",
@@ -4221,6 +4233,16 @@
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/run-guest.sh"
     },
     {
+      "source": "tests/compute/user_stage/guest/sharedpool_session_guest.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/sharedpool_session_guest.c"
+    },
+    {
+      "source": "tests/compute/user_stage/guest/sharedpool_session.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/sharedpool_session.md"
+    },
+    {
       "source": "tests/compute/user_stage/guest/user_stage_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/guest/user_stage_e2e.c"
@@ -4296,6 +4318,10 @@
       "source": "tests/compute/user_stage/wiring_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py"
+    },
+    {
+      "source": "tests/compute/user_stage/test_sharedpool_session.py",
+      "logical_path": "tests/compute/user_stage/test_sharedpool_session.py"
     },
     {
       "source": "tests/core/admission_report/CONTRACT.md",
@@ -9869,6 +9895,16 @@
     {"source":"tests/integration/nvme_ce_random/Makefile","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/Makefile"},
     {"source":"tests/integration/nvme_ce_random/test_native_bounds.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_native_bounds.py"},
     {"source":"tests/integration/nvme_ce_random/key_end_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/key_end_test.c"},
-    {"source":"tests/integration/nvme_ce_random/test_generator.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"}
+    {"source":"tests/integration/nvme_ce_random/test_generator.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"},
+    {
+      "source": "tests/storage/nvme/blocktable/guest/parallel.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/parallel.h"
+    },
+    {
+      "source": "tests/storage/nvme/blocktable/guest/parallel_oracle_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/parallel_oracle_test.c"
+    }
   ]
 }

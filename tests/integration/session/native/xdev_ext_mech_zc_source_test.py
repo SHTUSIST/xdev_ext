@@ -98,6 +98,8 @@ class SourceGate(unittest.TestCase):
                 'src/core/include/uapi/', 'src/bpf/',
             )) or f['source'] in (
                 'tests/benchmarks/nvme_gpu/session_nvme_ce.c',
+                'tests/benchmarks/nvme_gpu/eval_session.h',
+                'tests/benchmarks/nvme_gpu/nvme_gpu_core.h',
                 'tests/benchmarks/gpu_nic/session_gpu_nic.c',
             )]
         files += [dict(source=name, logical_path=name)

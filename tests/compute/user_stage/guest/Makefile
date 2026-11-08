@@ -8,6 +8,9 @@ CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -pthread
 LIBBPF_CFLAGS ?=
 LIBBPF_LIBS ?= -lbpf
+# Optional sharedpool qualification reuses an existing built library/archive.
+SHAREDPOOL_LIBXDEV ?= $(LIBDIR)/.xdev_ext-lib-build/libxdev_ext.a
+SHAREDPOOL_COMMON ?= $(abspath $(KERNEL_SRC)/../tests/eval/common)
 SHARED_SOURCES := $(KERNEL_SRC)/tools/xdev_ext_xsk_shared.c $(KERNEL_SRC)/tools/xdev_ext_xsk_steer.c \
 	$(KERNEL_SRC)/tools/xdev_ext_xsk_redirect.c
 .PHONY: all clean
@@ -22,6 +25,12 @@ ordered_frames_guest: ordered_frames_guest.c $(KERNEL_SRC)/include/uapi/linux/xd
                 $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h \
                 ../../../xdev_ext_peer/guest/sw_provider_uapi.h
 	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi $< $(LDFLAGS) -o $@ -lbpf -lelf -lz -pthread
+sharedpool_session_guest: sharedpool_session_guest.c $(SHAREDPOOL_LIBXDEV) $(LIBDIR)/libxdev_ext.h \
+                $(SHAREDPOOL_COMMON)/fd_check.h $(KERNEL_SRC)/include/uapi/linux/io_uring.h \
+                $(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h $(KERNEL_SRC)/include/uapi/linux/xdev_ext_policy.h
+	$(CC) $(CPPFLAGS) $(CFLAGS) $(LIBBPF_CFLAGS) -iquote $(KERNEL_SRC)/include/uapi \
+		-I$(LIBDIR) -I$(SHAREDPOOL_COMMON) $< $(SHAREDPOOL_LIBXDEV) $(LDFLAGS) \
+		-o $@ $(LIBBPF_LIBS) -lelf -lz -pthread
 # Optional test-only address policy; the runner selects this target explicitly.
 # Build in its private guest copy and use the actual tested kernel's BTF.
 CLANG ?= clang
@@ -37,4 +46,4 @@ ordered_frames_nvme.bpf.o: ordered_frames_nvme.bpf.c vmlinux.h \
 		$(KERNEL_SRC)/tools/xdev_ext_mech/xdev_ext_mech_kfunc.h
 	$(CLANG) $(BPF_CFLAGS) -I. -I$(KERNEL_SRC)/tools/xdev_ext_mech -c $< -o $@
 clean:
-	$(RM) user_stage_e2e ordered_frames_guest ordered_frames_nvme.bpf.o vmlinux.h vmlinux.h.tmp
+	$(RM) user_stage_e2e ordered_frames_guest sharedpool_session_guest ordered_frames_nvme.bpf.o vmlinux.h vmlinux.h.tmp
