@@ -333,5 +333,48 @@ class UringTenant(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
 
 
+def guest_line(n, t, ops=10, vf=0, cpus=(0, 1), ge=0, hist_ops=None):
+    hist = [0] * 32
+    hist[4] = ops if hist_ops is None else hist_ops
+    ready = json.dumps(dict(pid=100 + t, ready_ns=5, cpus=list(cpus), depth=4, io_bytes=4096))
+    res = json.dumps(dict(ops=ops, bytes_ok=(ops - vf) * 4096, verify_fail=vf, errors=0, ge_1ms=ge,
+                          measured_ns=10**9, go_ns=10, hist_log2_us=hist, verify=True))
+    return [f'E8_GUEST n={n} t={t} TENANT_READY {ready}', f'E8_GUEST n={n} t={t} TENANT_RESULT {res}',
+            f'E8_GUEST n={n} t={t} EXIT 0']
+
+
+class GuestLog(unittest.TestCase):
+    """KVM functional check: the guest runs uring_tenant xN under one CPU set
+    with a GO barrier; the host validates every tenant of every N."""
+
+    def log(self, *chunks):
+        lines = ['E8_GUEST_BEGIN', 'E8_GUEST_FACT cpus=0,1']
+        for c in chunks:
+            lines += c
+        return '\n'.join(lines + ['E8_GUEST_END']) + '\n'
+
+    def test_pass(self):
+        text = self.log(*(guest_line(n, t) for n in (1, 3) for t in range(n)))
+        r = tn.validate_guest(text, counts=[1, 3], cpus=[0, 1])
+        self.assertEqual(r['verdict'], 'PASS', r)
+        self.assertEqual([p['n'] for p in r['points']], [1, 3])
+        self.assertEqual(r['points'][1]['aggregate']['ops'], 30)
+        self.assertEqual(r['performance_claim'], 'none')
+
+    def test_failures(self):
+        cases = {
+            'missing tenant': self.log(guest_line(1, 0), guest_line(2, 0)),
+            'payload mismatch': self.log(guest_line(1, 0, vf=2)),
+            'wrong CPU set': self.log(guest_line(1, 0, cpus=(0, 1, 2))),
+            'histogram does not cover ops': self.log(guest_line(1, 0, hist_ops=9)),
+            'no end marker': self.log(guest_line(1, 0)).replace('E8_GUEST_END', ''),
+        }
+        counts = {'missing tenant': [1, 2]}
+        for name, text in cases.items():
+            with self.subTest(name):
+                r = tn.validate_guest(text, counts=counts.get(name, [1]), cpus=[0, 1])
+                self.assertEqual(r['verdict'], 'FAIL', r)
+
+
 if __name__ == '__main__':
     unittest.main()

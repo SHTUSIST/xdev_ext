@@ -9,6 +9,9 @@
              together; one row per (repetition, N) in results.jsonl
   prepare    write the position-encoding payload over the region (uring
              tenant --write-pattern); overwrites it
+  validate-guest  host-side check of a KVM functional run (guest/e8_kvm.sh):
+             every tenant of every N reported, on the expected CPU set, with
+             verified payload and a histogram covering every request
   summarize  per N: median, min and max over repetitions of the aggregate
              throughput (verified bytes only) and of the share of requests
              that took >= 1 ms
@@ -350,6 +353,49 @@ def cmd_prepare(args):
     return subprocess.run(argv).returncode
 
 
+def validate_guest(text, counts, cpus):
+    """KVM functional check of uring_tenant xN under one CPU set (no timing claim)."""
+    errors, tenants = [], {}
+    if 'E8_GUEST_BEGIN' not in text or 'E8_GUEST_END' not in text:
+        errors.append('guest begin/end markers missing')
+    for line in text.splitlines():
+        if not line.startswith('E8_GUEST n='):
+            continue
+        head, _, rest = line.partition(' TENANT_') if ' TENANT_' in line else (line, '', '')
+        fields = dict(f.split('=', 1) for f in head.split()[1:3])
+        key = (int(fields['n']), int(fields['t']))
+        entry = tenants.setdefault(key, {})
+        if rest:
+            kind, body = parse_line('TENANT_' + rest)
+            entry[kind] = body
+        elif ' EXIT ' in line:
+            entry['exit'] = int(line.rsplit(' ', 1)[1])
+    points = []
+    for n in counts:
+        results = []
+        for t in range(n):
+            e = tenants.get((n, t), {})
+            ready, res = e.get('TENANT_READY'), e.get('TENANT_RESULT')
+            where = f'n={n} t={t}'
+            if not ready or not res:
+                errors.append(f'{where}: no READY/RESULT')
+                continue
+            if e.get('exit') != 0:
+                errors.append(f'{where}: exit {e.get("exit")}')
+            if ready.get('cpus') != cpus:
+                errors.append(f'{where}: CPUs {ready.get("cpus")} != {cpus}')
+            if not res.get('verify') or res.get('verify_fail') or res.get('errors'):
+                errors.append(f'{where}: payload check failed or off')
+            if not res.get('ops') or sum(res.get('hist_log2_us', [])) != res['ops']:
+                errors.append(f'{where}: histogram does not cover every request')
+            if res.get('bytes_ok') != res.get('ops', 0) * ready.get('io_bytes', 0):
+                errors.append(f'{where}: unverified bytes counted')
+            results.append(res)
+        points.append(dict(n=n, aggregate=aggregate(results) if len(results) == n else None))
+    return dict(schema=1, kind='e8-kvm-functional', performance_claim='none', cpus=cpus,
+                counts=counts, verdict='FAIL' if errors else 'PASS', errors=errors, points=points)
+
+
 def describe(values):
     if not values:
         return None
@@ -418,6 +464,11 @@ def parser():
     p.add_argument('--tenant-bin')
     p.add_argument('--i-understand-this-overwrites', action='store_true')
     p.add_argument('--dry-run', action='store_true')
+    p = sub.add_parser('validate-guest')
+    p.add_argument('--log', required=True)
+    p.add_argument('--counts', required=True, help='comma-separated N the guest ran')
+    p.add_argument('--cpus', required=True)
+    p.add_argument('--result', help='write the verdict JSON here')
     p = sub.add_parser('summarize')
     p.add_argument('dirs', nargs='+')
     return top
@@ -425,6 +476,14 @@ def parser():
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.cmd == 'validate-guest':
+        r = validate_guest(Path(args.log).read_text(errors='replace'),
+                           [int(v) for v in args.counts.split(',')], parse_cpus(args.cpus))
+        text = json.dumps(r, indent=2, sort_keys=True) + '\n'
+        if args.result:
+            Path(args.result).write_text(text)
+        print(text, end='')
+        return 0 if r['verdict'] == 'PASS' else 1
     if args.cmd == 'summarize':
         print(json.dumps(summarize(args.dirs), indent=2, sort_keys=True))
         return 0

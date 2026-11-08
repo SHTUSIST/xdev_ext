@@ -2539,6 +2539,10 @@
       "logical_path": "tests/eval/isolation/uring_tenant.c"
     },
     {
+      "source": "tests/benchmarks/isolation/guest/e8_kvm.sh",
+      "logical_path": "tests/eval/isolation/guest/e8_kvm.sh"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/README.md",
       "logical_path": "tests/eval/kv_restore/README.md"
     },
