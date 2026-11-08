@@ -66,6 +66,48 @@ class Refusals(unittest.TestCase):
         self.assertEqual(r.returncode, 2)
         self.assertIn("bad --nhi", r.stderr)
 
+    def test_bad_poll(self):
+        with tempfile.TemporaryDirectory() as d:
+            for value in ("x", "301", ""):
+                with self.subTest(value=value):
+                    r = run("--source", d, "--poll", value)
+                    self.assertEqual(r.returncode, 2)
+                    self.assertIn("bad --poll", r.stderr)
+
+    def test_poll_reaches_the_harness_and_its_report_is_kept(self):
+        with open(SCRIPT) as f:
+            text = f.read()
+        self.assertIn('(( 10#$POLL )) && FLAGS+=(--tb-nhi-poll "$((10#$POLL))")', text)
+        self.assertIn('cp -a "$SCRATCH/evidence/tb-nhi-poll.txt" "$OUT/"', text)
+
+    def test_default_scratch_is_one_the_harness_accepts(self):
+        # The harness only accepts an existing 0700 directory matching
+        # ^/tmp/xdev-ext-e2e\.[A-Za-z0-9]+$ (xdev_ext_mech_zc_kvm.sh); the
+        # default used to be a /workspaces path the harness always refused.
+        import re, stat
+        with tempfile.TemporaryDirectory() as d:
+            native = os.path.join(d, "tests/integration/session/native")
+            os.makedirs(native)
+            seen = os.path.join(d, "args")
+            with open(os.path.join(native, "xdev_ext_mech_zc_kvm.sh"), "w") as f:
+                f.write('printf "%s\\n" "$@" > "%s"\n' % ("%s", seen))
+            out = os.path.join(d, "out")
+            default = "/tmp/xdev-ext-e2e.labvfiotb"
+            existed = os.path.exists(default)
+            try:
+                r = run("--source", d, "--out", out)
+                self.assertEqual(r.returncode, 4, r.stdout + r.stderr)
+                with open(seen) as f:
+                    args = f.read().split("\n")
+                scratch = args[args.index("--scratch") + 1]
+                self.assertRegex(scratch, r"^/tmp/xdev-ext-e2e\.[A-Za-z0-9]+$")
+                st = os.stat(scratch)
+                self.assertTrue(stat.S_ISDIR(st.st_mode))
+                self.assertEqual(stat.S_IMODE(st.st_mode), 0o700)
+            finally:
+                if not existed and os.path.isdir(default):
+                    os.rmdir(default)
+
     def test_unknown_option(self):
         r = run("--forcepower")
         self.assertEqual(r.returncode, 2)

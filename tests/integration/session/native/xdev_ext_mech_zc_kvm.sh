@@ -53,6 +53,7 @@ TB_NHI_CYCLES=3
 TB_NHI_CYCLES_SET=0
 TB_NHI_ENUMERATE=0
 TB_NHI_SELFLOOP_ECHO=0
+TB_NHI_POLL=0
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -89,6 +90,7 @@ while (($#)); do
  --tb-nhi-cycles) TB_NHI_CYCLES=$2; TB_NHI_CYCLES_SET=1; shift 2 ;;
  --tb-nhi-enumerate) TB_NHI_ENUMERATE=1; shift ;;
  --tb-nhi-selfloop-echo) TB_NHI_SELFLOOP_ECHO=1; shift ;;
+ --tb-nhi-poll) TB_NHI_POLL=$2; shift 2 ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -120,7 +122,8 @@ if (( ${GPU:-0} )); then
     (( gpu_listed )) || VFIO_DEVICES+=("$GPU_BDF")
 fi
 # A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles;
-# --tb-nhi-enumerate adds a read-only topology report before the cycles.
+# --tb-nhi-enumerate adds a read-only topology report before the cycles;
+# --tb-nhi-poll N then samples port and NHI registers once per second for N s.
 # --tb-nhi-selfloop-echo: when that report shows a cable joining two ports of
 # this host, load the XDOMAIN module in its self_loop_test mode and report the
 # startup data exchange through the cable (functional/DMA check, no timing).
@@ -129,6 +132,13 @@ if (( ! TB_NHI )) && (( TB_NHI_CYCLES_SET || TB_NHI_ENUMERATE || TB_NHI_SELFLOOP
 fi
 if (( ${TB_NHI_SELFLOOP_ECHO:-0} && ! TB_NHI_ENUMERATE )); then
     echo '--tb-nhi-selfloop-echo requires --tb-nhi-enumerate' >&2; exit 2
+fi
+if [[ ! "$TB_NHI_POLL" =~ ^[0-9]{1,3}$ ]] || (( 10#$TB_NHI_POLL > 300 )); then
+    echo 'invalid --tb-nhi-poll (expected 0-300 seconds)' >&2; exit 2
+fi
+TB_NHI_POLL=$((10#$TB_NHI_POLL))
+if (( TB_NHI_POLL && ! TB_NHI_ENUMERATE )); then
+    echo '--tb-nhi-poll requires --tb-nhi-enumerate' >&2; exit 2
 fi
 if [[ ! "$TB_NHI_CYCLES" =~ ^[0-9]$ ]]; then
     echo 'invalid --tb-nhi-cycles (expected 0-9)' >&2; exit 2
@@ -175,6 +185,7 @@ if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then QEMU_TIMEOUT_SECONDS=$MECHANISM_
 # GPU guests boot GSP firmware, CUDA and four real-GPU cases before the
 # normal campaign; give them their own bounded budget.
 if (( ${GPU:-0} )); then QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + 450)); fi
+QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + TB_NHI_POLL))
 # Campaign length is independent of the bounded in-flight pool/window.
 [[ "$GROUP_COUNT" =~ ^[1-9][0-9]{0,3}$ && "$GROUP_COUNT" -le 1024 ]]
 [[ -n "$DEPTH" ]] || DEPTH=$((RELIABLE ? 8 : (GROUP_COUNT < 64 ? GROUP_COUNT : 64)))
@@ -733,7 +744,7 @@ printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/prove
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
-printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" >>"$EV/provenance.txt"
+printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\ntb_nhi_poll=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" "$TB_NHI_POLL" >>"$EV/provenance.txt"
 printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
@@ -1093,7 +1104,7 @@ if (( ${TB_NHI:-0} )); then
     grep -Fxq CONFIG_USB4=y "$BUILD/.config" || { echo 'FAIL tb-nhi requires CONFIG_USB4=y; rebuild' >&2; exit 1; }
     mkdir -p "$ROOT/opt/xdev_ext/tb"
     cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh" "$ROOT/opt/xdev_ext/tb/"
-    for app in seq tr; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+    for app in seq tr od; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
     if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
         cp "$TB_SELFLOOP_MODULE" "$ROOT/opt/xdev_ext/tb/"
         for app in insmod rmmod; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
@@ -1119,6 +1130,7 @@ printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_enumerate=%s\n' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'tb_nhi_poll=%s\n' "$TB_NHI_POLL" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -1346,7 +1358,7 @@ fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
 if [ "${tb_nhi:-0}" = 1 ]; then
-	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" "${tb_nhi_selfloop_echo:-0}"
+	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" "${tb_nhi_selfloop_echo:-0}" "${tb_nhi_poll:-0}"
 fi
 if [ "${gpu:-0}" = 1 ]; then
 	# Destination CE window: the host image oracle expects the source bytes.
@@ -2085,6 +2097,7 @@ if (( ${TB_NHI:-0} )); then
     grep -E '^XDEV_EXT_TB_NHI(=|_CYCLE=|_STATE )' "$EV/guest.log" | tee "$EV/tb-nhi-result.txt"
     grep -E '^XDEV_EXT_TB_NHI_ENUM ' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true
     grep -E '^XDEV_EXT_TB_SELFLOOP_ECHO' "$EV/guest.log" >"$EV/tb-selfloop-echo.txt" || true
+    grep -E '^XDEV_EXT_TB_NHI_POLL ' "$EV/guest.log" >"$EV/tb-nhi-poll.txt" || true
     grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
     if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
         grep -Eq '^XDEV_EXT_TB_SELFLOOP_ECHO=(PASS|NOT_RUN)( |$)' "$EV/guest.log"
