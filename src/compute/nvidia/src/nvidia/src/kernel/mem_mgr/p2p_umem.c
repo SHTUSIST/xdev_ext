@@ -787,6 +787,7 @@ _p2pXdevExtCeMapHost(P2P_UMEM_CE_HOST *h, NvU64 *dma, NvU32 count, NvU32 pageSiz
     OBJCHANNEL *channel = h->pCeUtils->pChannel;
     VAS_ALLOC_FLAGS allocFlags = {0};
     NvU32 first = 0;
+    NvU64 reserveBytes;
     NvU32 flags = DRF_DEF(OS46, _FLAGS, _DMA_UNICAST_REUSE_ALLOC, _TRUE) |
                   DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE);
     NV_STATUS status;
@@ -802,7 +803,11 @@ _p2pXdevExtCeMapHost(P2P_UMEM_CE_HOST *h, NvU64 *dma, NvU32 count, NvU32 pageSiz
     h->pHostRuns = portMemAllocNonPaged((NvU64)count * sizeof(*h->pHostRuns));
     if (h->pHostRuns == NULL) return NV_ERR_NO_MEMORY;
     portMemSet(h->pHostRuns, 0, (NvU64)count * sizeof(*h->pHostRuns));
-    status = vaspaceAlloc(h->pHostVAS, h->bytes, RM_PAGE_SIZE_2M,
+    /* Page-table level locks require both ends of the reservation to be
+     * aligned. Padding stays unmapped and is never part of h->bytes. The
+     * whole-page count above bounds bytes below 2^44, so rounding cannot wrap. */
+    reserveBytes = (h->bytes + RM_PAGE_SIZE_2M - 1) & ~((NvU64)RM_PAGE_SIZE_2M - 1);
+    status = vaspaceAlloc(h->pHostVAS, reserveBytes, RM_PAGE_SIZE_2M,
                  NV_MAX(vaspaceGetVaStart(h->pHostVAS), RM_PAGE_SIZE),
                  vaspaceGetVaLimit(h->pHostVAS),
                  RM_PAGE_SIZE | RM_PAGE_SIZE_64K | RM_PAGE_SIZE_2M,
