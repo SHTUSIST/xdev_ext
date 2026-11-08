@@ -6918,6 +6918,31 @@
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_source_test.py"
     },
     {
+      "source": "tests/integration/session/native/xdev_ext_mech_ce_d2h_boundary.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_boundary.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_ce_d2h_fixtures.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_fixtures.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_ce_d2h_guest.sh",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_guest.sh"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_ce_d2h_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_test.py"
+    },
+    {
+      "source": "tests/integration/session/native/xdev_ext_mech_ce_d2h_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_ce_d2h_validate.py"
+    },
+    {
       "source": "tests/integration/session/native/xdev_ext_mech_zc_validate.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_integration/xdev_ext_mech_zc_validate.py"
@@ -9523,6 +9548,16 @@
       "source": "tests/support/ce_sim/README",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/simulate/README"
+    },
+    {
+      "source": "tests/support/ce_sim/copy_contract.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/simulate/copy_contract.c"
+    },
+    {
+      "source": "tests/support/ce_sim/copy_contract.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/simulate/copy_contract.py"
     },
     {
       "source": "tests/support/ce_sim/xdev_ext_ce_sim.c",
