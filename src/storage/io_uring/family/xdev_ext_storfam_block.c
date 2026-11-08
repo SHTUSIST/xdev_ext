@@ -195,7 +195,9 @@ static bool xdev_ext_storfam_host_resources_free(struct xdev_ext_stor_stage *p)
 		kfree(slot->bio);
 	}
 	kfree(p->slots);
+	kfree(p->host_native);
 	p->slots = NULL;
+	p->host_native = NULL;
 	p->pool.free = NULL;
 	p->nr_slots = 0;
 	return true;
@@ -225,9 +227,18 @@ static int xdev_ext_storfam_host_resources_init(struct xdev_ext_stor_stage *p)
 	p->slots = kcalloc(p->nr_slots, sizeof(*p->slots), GFP_KERNEL);
 	if (!p->slots)
 		return -ENOMEM;
+	/* The member's per-command DMA-stop record (dev->peer_evidence). */
+	if (p->dev->host_native_bytes) {
+		p->host_native = kcalloc(p->nr_slots, p->dev->host_native_bytes, GFP_KERNEL);
+		if (!p->host_native)
+			goto fail;
+	}
 	for (i = 0; i < p->nr_slots; i++) {
 		struct xdev_ext_stor_io *slot = &p->slots[i];
 
+		if (p->host_native)
+			slot->peer_native = (char *)p->host_native +
+					    (size_t)i * p->dev->host_native_bytes;
 		slot->bio = bio_kmalloc(p->nr_vecs, GFP_KERNEL);
 		if (!slot->bio)
 			goto fail;
@@ -420,7 +431,7 @@ static void xdev_ext_storfam_peer_evidence(struct xdev_ext_stor_stage *ss,
 {
 	*rq = NULL;
 	*epoch = XDEV_EXT_PEER_EPOCH_NONE;
-	if (ss->dev->peer_evidence)
+	if (ss->dev->peer_evidence && io->peer_native)
 		ss->dev->peer_evidence(ss->member, io, rq, epoch);
 }
 
@@ -463,10 +474,20 @@ int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss)
 	u64 epoch;
 	u32 i;
 
-	/* A retained host-page slot has no requester evidence. */
-	for (i = 0; ss->slots && i < ss->nr_slots; i++)
-		if (ss->slots[i].runtime.busy)
-			return XDEV_EXT_PEER_EVIDENCE_NEVER;
+	/*
+	 * A host-page slot retained after an UNKNOWN outcome is bound like a
+	 * peer command: to the controller that received it and the epoch it was
+	 * prepared in.  One kept after a definite completion (a ZOMBIE session's
+	 * consumption keeps it) needs no proof.
+	 */
+	for (i = 0; ss->slots && i < ss->nr_slots; i++) {
+		struct xdev_ext_stor_io *slot = &ss->slots[i];
+
+		if (!slot->runtime.busy || !slot->done.uncertain)
+			continue;
+		xdev_ext_storfam_peer_evidence(ss, slot, &rq, &epoch);
+		worst = max(worst, xdev_ext_peer_requester_evidence(rq, epoch));
+	}
 	for (i = 0; res && i < res->nr_slots; i++) {
 		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);
 
@@ -494,6 +515,19 @@ int xdev_ext_storfam_evidence_release(struct xdev_ext_stor_stage *ss)
 
 	if (xdev_ext_storfam_evidence(ss) != XDEV_EXT_PEER_EVIDENCE_COVERED)
 		return -EBUSY;
+	/* The proven stop includes every retained host-page command. */
+	for (i = 0; ss->slots && i < ss->nr_slots; i++) {
+		struct xdev_ext_stor_io *slot = &ss->slots[i];
+
+		if (!slot->runtime.busy)
+			continue;
+		if (slot->bio_live) {
+			bio_uninit(slot->bio);
+			slot->bio_live = false;
+		}
+		slot->done.uncertain = false;
+		xdev_ext_stor_slot_put(&ss->pool, &slot->runtime, false);
+	}
 	for (i = 0; res && i < res->nr_slots; i++) {
 		struct xdev_ext_stor_io *io = xdev_ext_storfam_peer_io(ss, i);
 		bool quiesced = true;

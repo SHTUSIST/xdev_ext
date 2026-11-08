@@ -523,6 +523,8 @@ static int nvme_xdev_ext_class_complete(struct xdev_ext_mech_batch *b,
 static enum rq_end_io_ret nvme_xdev_ext_class_end_io(struct request *req,
 						 blk_status_t err)
 {
+	nvme_req(req)->flags &= ~NVME_REQ_XDEV_EXT_EPOCH;
+	nvme_req(req)->peer_trace = NULL;
 	xdev_ext_stor_done(req->end_io_data, blk_status_to_errno(err), req,
 			   nvme_xdev_ext_class_complete, xdev_ext_storfam_host_ready);
 	return RQ_END_IO_FREE;
@@ -673,12 +675,24 @@ static void nvme_xdev_ext_member_post(void *member, struct request *req,
 		nvme_req(req)->flags |= NVME_REQ_USERCMD | NVME_REQ_XDEV_EXT_PEER;
 		req->end_io = nvme_xdev_ext_peer_end_io;
 	} else {
+		struct nvme_xdev_ext_peer_trace *trace = io->peer_native;
+
 #ifdef NVME_XDEV_EXT_MECH_BOUNCE_AVAILABLE
 		if (sb->bounce) {
 			atomic64_inc(&nvme_xdev_ext_mech_bounces);
 			pr_warn_once("nvme: XDEV_EXT mechanism batches are bounced (CONFIG_XDEV_EXT_MECH_KVM_BOUNCE)\n");
 		}
 #endif
+		/* The slot's DMA-stop record only: nvme-pci writes the
+		 * controller and epoch when it prepares the SQ entry. */
+		if (trace) {
+			*trace = (struct nvme_xdev_ext_peer_trace) {
+				.cookie = (u64)(unsigned long)req,
+				.submit_epoch = XDEV_EXT_PEER_EPOCH_NONE,
+			};
+			nvme_req(req)->peer_trace = trace;
+			nvme_req(req)->flags |= NVME_REQ_XDEV_EXT_EPOCH;
+		}
 		req->end_io = nvme_xdev_ext_class_end_io;
 	}
 	req->end_io_data = &io->done;
@@ -752,6 +766,7 @@ static const struct xdev_ext_stor_dev_ops nvme_xdev_ext_member_ops = {
 	.peer_evidence = nvme_xdev_ext_member_peer_evidence,
 	.peer_slot_bytes = sizeof(struct nvme_xdev_ext_peer_slot),
 	.peer_native_offset = offsetof(struct nvme_xdev_ext_peer_slot, trace),
+	.host_native_bytes = sizeof(struct nvme_xdev_ext_peer_trace),
 	.poll = nvme_xdev_ext_member_poll,
 };
 

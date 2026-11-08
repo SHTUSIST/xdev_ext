@@ -1224,14 +1224,15 @@ static void nvme_pci_peer_quiesce_end(struct nvme_dev *dev, u64 epoch, bool rese
 
 /*
  * Last preparation step, inside the dispatch section that the quiesce above
- * waits for and before the SQ copy: the epoch this peer command becomes
- * visible to the controller in.
+ * waits for and before the SQ copy: the epoch this peer or mechanism
+ * host-page command becomes visible to the controller in.
  */
 static void nvme_pci_peer_note_submit(struct nvme_dev *dev, struct request *req)
 {
 	struct nvme_xdev_ext_peer_trace *ctx = nvme_req(req)->peer_trace;
 
-	if ((nvme_req(req)->flags & NVME_REQ_XDEV_EXT_PEER) && ctx &&
+	if ((nvme_req(req)->flags &
+	     (NVME_REQ_XDEV_EXT_PEER | NVME_REQ_XDEV_EXT_EPOCH)) && ctx &&
 	    ctx->cookie == (u64)(unsigned long)req) {
 		ctx->requester = dev->peer_requester;
 		ctx->submit_epoch = xdev_ext_peer_requester_epoch(dev->peer_requester);

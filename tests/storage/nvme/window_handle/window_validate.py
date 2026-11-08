@@ -17,6 +17,14 @@ are exact copies of the same source windows; the killed tenant's window
 guard, and at least KILL_MIN exact groups; the other faulty windows and every
 byte past window 15 are guard; AUX, the faulty tenant's private namespace,
 still holds only 0x3c.
+
+window_validate.py --reset SOURCE_BEFORE DESTINATION AUX EXACT: the reset
+round of window_multi.h (tenant i at destination window 16 + i). Each 4 KiB
+group of an innocent window (i >= 1) is its own source group or guard (a
+write the controller reset aborted may or may not have landed); the
+innocents listed in EXACT (comma separated, '-' for none: those that STOPped
+with 0 after all their batches) hold their whole source window; the faulty
+window and every other byte are guard; AUX still holds only 0x3c.
 Prints one JSON object; exit 0 only for PASS.
 """
 import json
@@ -33,6 +41,7 @@ GROUP = 4096
 AUX_FILL = 0x3c
 ROUNDS = ('kill', 'escape', 'unknown', 'timeout')
 TENANTS = 4
+RESET_ROUND = 4
 
 
 def expected_source(seed, span=SPAN):
@@ -110,15 +119,61 @@ def validate_multi(source, destination, aux, kill_min):
             'kill_min': kill_min, 'rounds': list(ROUNDS)}
 
 
+def validate_reset(source, destination, aux, exact):
+    if len(source) != SPAN or len(destination) != SPAN or len(aux) != SPAN:
+        return {'state': 'FAIL', 'reason': 'image size'}
+    seed = struct.unpack_from('<I', source, 4)[0]
+    if bytes(expected_source(seed)) != bytes(source):
+        return {'state': 'FAIL', 'reason': 'source is not the position-unique image of its seed',
+                'seed': '0x%08x' % seed}
+    if bytes(aux) != bytes([AUX_FILL]) * SPAN:
+        return {'state': 'FAIL', 'reason': 'the faulty tenant namespace changed'}
+    guard_group = bytes([GUARD]) * GROUP
+    first = TENANTS * RESET_ROUND
+    exact_groups = {}
+    for i in range(TENANTS):
+        w = first + i
+        got = _window(destination, w)
+        if not i:
+            if got != bytes([GUARD]) * WIN_BYTES:
+                return {'state': 'FAIL', 'reason': 'faulty window is not guard', 'window': w}
+            continue
+        want = _window(source, w)
+        exact_groups[i] = []
+        for g in range(WIN_BYTES // GROUP):
+            piece = got[g * GROUP:(g + 1) * GROUP]
+            if piece == want[g * GROUP:(g + 1) * GROUP]:
+                exact_groups[i].append(g)
+            elif piece != guard_group:
+                return {'state': 'FAIL', 'reason': 'innocent group is neither exact nor guard',
+                        'tenant': i, 'window': w, 'group': g}
+        if i in exact and got != want:
+            return {'state': 'FAIL', 'reason': 'innocent that STOPped cleanly is not its exact source window',
+                    'tenant': i, 'window': w, 'exact_groups': exact_groups[i]}
+    if bytes(destination[:first * WIN_BYTES]) != bytes([GUARD]) * (first * WIN_BYTES):
+        return {'state': 'FAIL', 'reason': 'bytes before the reset round windows are not guard'}
+    tail = (first + TENANTS) * WIN_BYTES
+    if bytes(destination[tail:]) != bytes([GUARD]) * (SPAN - tail):
+        return {'state': 'FAIL', 'reason': 'bytes past the reset round windows are not guard'}
+    return {'state': 'PASS', 'seed': '0x%08x' % seed, 'exact_tenants': sorted(exact),
+            'innocent_exact_groups': {str(i): g for i, g in exact_groups.items()}}
+
+
 def main(argv):
+    if len(argv) == 6 and argv[1] == '--reset':
+        exact = set() if argv[5] == '-' else {int(t) for t in argv[5].split(',')}
+        with open(argv[2], 'rb') as s, open(argv[3], 'rb') as d, open(argv[4], 'rb') as a:
+            result = validate_reset(s.read(), d.read(), a.read(), exact)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result['state'] == 'PASS' else 1
     if len(argv) == 6 and argv[1] == '--multi':
         with open(argv[2], 'rb') as s, open(argv[3], 'rb') as d, open(argv[4], 'rb') as a:
             result = validate_multi(s.read(), d.read(), a.read(), int(argv[5]))
         print(json.dumps(result, sort_keys=True))
         return 0 if result['state'] == 'PASS' else 1
     if len(argv) != 3:
-        print('usage: window_validate.py SOURCE_BEFORE DESTINATION | --multi SOURCE DESTINATION AUX KILL_MIN',
-              file=sys.stderr)
+        print('usage: window_validate.py SOURCE_BEFORE DESTINATION | --multi SOURCE DESTINATION AUX KILL_MIN'
+              ' | --reset SOURCE DESTINATION AUX EXACT', file=sys.stderr)
         return 2
     with open(argv[1], 'rb') as s, open(argv[2], 'rb') as d:
         result = validate(s.read(), d.read())

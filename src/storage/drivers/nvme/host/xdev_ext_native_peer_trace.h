@@ -16,7 +16,9 @@
  * the controller's requester record and its DMA-stop epoch at each SQ
  * preparation; an owner that reads them after completion initializes the
  * epoch to XDEV_EXT_PEER_EPOCH_NONE. The record lives as long as the
- * controller, which the owner's namespace reference pins.
+ * controller, which the owner's namespace reference pins. A mechanism
+ * host-page command carries only that record (no leases, no observation),
+ * guarded by NVME_REQ_XDEV_EXT_EPOCH instead.
  */
 struct nvme_xdev_ext_peer_trace {
 	const struct xdev_ext_peer_fd_lease *leases;
