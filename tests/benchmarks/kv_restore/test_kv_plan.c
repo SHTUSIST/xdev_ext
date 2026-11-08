@@ -17,6 +17,7 @@
 #include "io_uring/xdev_ext_mech_step.h"
 #include "io_uring/xdomain/xdev_ext_xdomain_early.h"
 #include "kv_plan.h"
+#include "kv_index.h"
 
 static unsigned checks, failures;
 #define EXPECT(c, why) do { checks++; if (!(c)) { failures++; \
@@ -268,6 +269,99 @@ static void test_pattern(void)
 	EXPECT_EQ(kv_pattern_check(7, 100, a + 100, 4096 - 100, &bad), 0, "unaligned start");
 }
 
+/* vLLM block order: page (b, l) at (b * layers + l) * page_bytes. */
+static void test_block_layout(void)
+{
+	const struct kv_block_layout q8 = { .block_size = 16, .layers = 36, .heads = 8,
+		.state_bytes = 512 };
+	const struct kv_block_layout big = { .block_size = 64, .layers = 36, .heads = 8,
+		.state_bytes = 512 };
+	struct kv_block_layout bad = q8;
+	struct kv_page_piece pc[4];
+	uint64_t off = 0;
+
+	EXPECT_EQ(kv_page_bytes(&q8), 65536, "H * N * C");
+	EXPECT_EQ(kv_block_bytes(&q8), 36 * 65536ULL, "layers pages per block");
+	EXPECT_EQ(kv_block_layout_check(&q8, 128 * KIB), 0, "64 KiB pages in 128 KiB groups");
+	EXPECT_EQ(kv_block_layout_check(&big, 128 * KIB), 0, "half a 256 KiB page per group");
+	bad.heads = 5;
+	EXPECT_EQ(kv_block_layout_check(&bad, 128 * KIB), -EINVAL, "40 KiB pages split by groups");
+	bad = q8;
+	bad.layers = 0;
+	EXPECT_EQ(kv_block_layout_check(&bad, 128 * KIB), -EINVAL, "no layers");
+	bad = (struct kv_block_layout){ .block_size = 16, .layers = 3, .heads = 1, .state_bytes = 512 };
+	EXPECT_EQ(kv_block_layout_check(&bad, 128 * KIB), -EINVAL, "24 KiB blocks not tiled");
+	EXPECT_EQ(kv_page_offset(&q8, 3, 2, &off), 0, "page offset");
+	EXPECT_EQ(off, (3 * 36 + 2) * 65536ULL, "block 3 layer 2");
+	EXPECT_EQ(kv_page_offset(&q8, 0, 36, &off), -ERANGE, "layer past the model");
+	EXPECT_EQ(kv_group_pages(&q8, 18, 128 * KIB, pc, 4), 2, "two pages per group");
+	EXPECT_EQ(pc[0].block, 1, "group 18 starts block 1");
+	EXPECT_EQ(pc[1].layer, 1, "second page is layer 1");
+	EXPECT_EQ(pc[1].group_off, 65536, "second page at 64 KiB");
+	EXPECT_EQ(kv_group_pages(&big, 3, 128 * KIB, pc, 4), 1, "one piece");
+	EXPECT_EQ(pc[0].layer, 1, "group 3 is layer 1");
+	EXPECT_EQ(pc[0].page_off, 128 * KIB, "second half of the page");
+	EXPECT_EQ(kv_group_pages(&q8, 0, 128 * KIB, pc, 1), -ENOSPC, "too few pieces");
+}
+
+static void test_index(void)
+{
+	const char *h = "abababababababababababababababababababababababababababababababab";
+	char line[512], text[2048];
+	struct kv_index_entry e;
+	struct kv_index ix = { 0 };
+	uint64_t slba = 0, bytes = 0;
+	FILE *f;
+
+	snprintf(line, sizeof(line), "prefix %s object=conv-a slba=2048 offset=2359296 "
+		 "bytes=603979776 tokens=4096 fnv1a=0x0000000000001234\n", h);
+	EXPECT_EQ(kv_index_parse_line(line, &e), 0, "entry parses");
+	EXPECT(!strcmp(e.hash, h) && !strcmp(e.object, "conv-a"), "hash and object");
+	EXPECT_EQ(e.slba, 2048, "slba");
+	EXPECT_EQ(e.offset, 2359296, "offset");
+	EXPECT_EQ(e.tokens, 4096, "tokens");
+	EXPECT(e.has_fnv1a && e.fnv1a == 0x1234, "fnv1a");
+	EXPECT_EQ(kv_index_resolve(&e, 512, &slba, &bytes), 0, "resolve");
+	EXPECT_EQ(slba, 2048 + 2359296 / 512, "restore starts at the offset");
+	EXPECT_EQ(bytes, 603979776, "restore bytes");
+	EXPECT_EQ(kv_index_resolve(&e, 4096 * 1024, &slba, &bytes), -EINVAL, "offset not whole LBAs");
+	EXPECT_EQ(kv_index_parse_line("# note\n", &e), 1, "comment skipped");
+	EXPECT_EQ(kv_index_parse_line("   \n", &e), 1, "blank skipped");
+	{
+		static const char *const bad[] = {
+			"prefix xyz object=a slba=1 offset=0 bytes=1 tokens=1",
+			"suffix abababababababababababababababababababababababababababababababab object=a slba=1 offset=0 bytes=1 tokens=1",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=1 offset=0 bytes=1",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=x offset=0 bytes=1 tokens=1",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=1 offset=0 bytes=1 tokens=1 color=red",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=1 slba=1 offset=0 bytes=1 tokens=1",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=1 offset=0 bytes=1 tokens=0",
+			"prefix abababababababababababababababababababababababababababababababab object=a slba=-1 offset=0 bytes=1 tokens=1",
+			"prefix ABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABABAB object=a slba=1 offset=0 bytes=1 tokens=1",
+		};
+		for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++)
+			EXPECT_EQ(kv_index_parse_line(bad[i], &e), -EINVAL, bad[i]);
+	}
+	snprintf(text, sizeof(text), "xdev-kv-index 1\n# c\n%s"
+		 "prefix cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd object=b "
+		 "slba=4096 offset=0 bytes=10 tokens=16\n", line);
+	f = fmemopen(text, strlen(text), "r");
+	EXPECT_EQ(kv_index_load(f, &ix), 0, "file loads");
+	fclose(f);
+	EXPECT_EQ(ix.n, 2, "two entries");
+	EXPECT(kv_index_find(&ix, h) && kv_index_find(&ix, h)->slba == 2048, "find first");
+	EXPECT(!kv_index_find(&ix, "00"), "unknown hash");
+	kv_index_free(&ix);
+	f = fmemopen(line, strlen(line), "r");
+	EXPECT_EQ(kv_index_load(f, &ix), -EINVAL, "header required");
+	fclose(f);
+	snprintf(text, sizeof(text), "xdev-kv-index 1\n%s%s", line, line);
+	f = fmemopen(text, strlen(text), "r");
+	EXPECT_EQ(kv_index_load(f, &ix), -EEXIST, "repeated prefix refused");
+	fclose(f);
+	EXPECT_EQ(ix.n, 0, "nothing kept after a refusal");
+}
+
 int main(void)
 {
 	test_mapping();
@@ -276,6 +370,8 @@ int main(void)
 	test_kernel_rules();
 	test_host2_ring();
 	test_pattern();
+	test_block_layout();
+	test_index();
 	printf("kv_plan: %u checks, %u failures\n", checks, failures);
 	return failures ? 1 : 0;
 }

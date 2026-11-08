@@ -26,7 +26,7 @@ all: driver
 $(BUILD):
 	mkdir -p $@
 
-$(BUILD)/test_kv_plan: test_kv_plan.c kv_plan.h | $(BUILD)
+$(BUILD)/test_kv_plan: test_kv_plan.c kv_plan.h kv_index.h | $(BUILD)
 	$(CC) $(WARN) $(SAN) -I$(KERNEL) $< -o $@
 
 $(BUILD)/test_kv_bpf: test_kv_bpf.c kv_nvme_read.bpf.c | $(BUILD)
@@ -35,7 +35,7 @@ $(BUILD)/test_kv_bpf: test_kv_bpf.c kv_nvme_read.bpf.c | $(BUILD)
 $(BUILD)/test_kv_ce_bpf: test_kv_ce_bpf.c kv_ce_place.bpf.c kv_ce_place.h | $(BUILD)
 	$(CC) $(WARN) $(SAN) -I$(HOST) -I$(KERNEL) -I$(MECH) -I. $< -o $@
 
-$(BUILD)/kv_plan_cli: kv_plan_cli.c kv_plan.h | $(BUILD)
+$(BUILD)/kv_plan_cli: kv_plan_cli.c kv_plan.h kv_index.h | $(BUILD)
 	$(CC) $(WARN) $(CFLAGS) $< -o $@
 
 $(BUILD)/nvmeof_worker: nvmeof_worker.c kv_plan.h | $(BUILD)
@@ -44,8 +44,8 @@ $(BUILD)/nvmeof_worker: nvmeof_worker.c kv_plan.h | $(BUILD)
 $(BUILD)/lib/libxdev_ext.a: | $(BUILD)
 	$(MAKE) -C $(MECH)/lib BUILD_DIR=$(abspath $(BUILD))/lib CC=$(CC)
 
-$(BUILD)/kv_restore: kv_restore.c kv_plan.h $(BUILD)/lib/libxdev_ext.a | $(BUILD)
-	$(CC) $(WARN) $(CFLAGS) $< -o $@ $(BUILD)/lib/libxdev_ext.a -lbpf -lelf -lz -ldl
+$(BUILD)/kv_restore: kv_restore.c kv_plan.h kv_index.h $(BUILD)/lib/libxdev_ext.a | $(BUILD)
+	$(CC) $(WARN) $(CFLAGS) -pthread $< -o $@ $(BUILD)/lib/libxdev_ext.a -lbpf -lelf -lz -ldl
 
 driver: $(BUILD)/kv_restore $(BUILD)/nvmeof_worker $(BUILD)/kv_plan_cli
 

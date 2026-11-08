@@ -8,7 +8,7 @@ stands in for the block device and --test-host-destination replaces the GPU
 copy with a host copy: this checks the read loop and the protocol only, never
 NVMe/TCP, a GPU or any timing.
 """
-import ctypes.util
+import ctypes
 import importlib.util
 import os
 from pathlib import Path
@@ -32,6 +32,15 @@ def load(name):
 kl, kp = load('kv_layout'), load('kv_protocol')
 CC = shutil.which(os.environ.get('CC', 'cc'))
 KIB, MIB = 1 << 10, 1 << 20
+
+
+def cuda_loader_available():
+    """A file named libcuda is insufficient when the loader cannot open it."""
+    try:
+        ctypes.CDLL('libcuda.so.1')
+    except OSError:
+        return False
+    return True
 
 
 def fnv1a(data):
@@ -115,7 +124,7 @@ class Worker(unittest.TestCase):
         self.assertTrue(r['ok'] and r['verified'], r)
         d.quit(timeout=30)
 
-    @unittest.skipIf(ctypes.util.find_library('cuda'), 'a CUDA driver is installed here')
+    @unittest.skipIf(cuda_loader_available(), 'a CUDA driver is installed here')
     def test_without_cuda_setup_fails_cleanly(self):
         with self.assertRaises(kp.WorkerError):
             kp.Worker([self.bin, '--device', self.device, '--lba-bytes', 512, '--frame-bytes',

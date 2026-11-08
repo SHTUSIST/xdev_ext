@@ -69,6 +69,22 @@ def go_line(run, ordinal, object_slba, bytes, dst_frame0, seed=0, verify=False):
             f'dst_frame0={dst_frame0} seed={seed} verify={1 if verify else 0}\n')
 
 
+PREFIX_RE = re.compile(r'[0-9a-f]{64}')
+
+
+def prefix_go_line(run, ordinal, prefix, dst_frame0, seed=0, verify=False):
+    """GO naming a prefix of the worker's --index instead of object_slba and bytes."""
+    if not isinstance(run, str) or not RUN_RE.match(run):
+        raise ProtocolError(f'run id must match {RUN_RE.pattern}: {run!r}')
+    _uint(ordinal, 'ordinal', 1)
+    if not isinstance(prefix, str) or not PREFIX_RE.fullmatch(prefix):
+        raise ProtocolError(f'prefix must be 64 lowercase hex digits: {prefix!r}')
+    _uint(dst_frame0, 'dst_frame0')
+    _uint(seed, 'seed')
+    return (f'GO run={run} ordinal={ordinal} prefix={prefix} dst_frame0={dst_frame0} '
+            f'seed={seed} verify={1 if verify else 0}\n')
+
+
 def check_result(body, run):
     for key in ('run', 'ok', 'error', 'bytes', 't0_ns', 't1_ns', 'latency_ns'):
         if key not in body:
@@ -146,6 +162,22 @@ class Worker:
         if kind == 'KV_ERROR':
             raise WorkerError(f'worker refused GO: {body}')
         return check_result(body, run)
+
+    def go_prefix(self, run, ordinal, prefix, dst_frame0, seed=0, verify=False, timeout=600.0):
+        self.submit(prefix_go_line(run, ordinal, prefix, dst_frame0, seed, verify))
+        kind, body = self._next(timeout, ('KV_RESULT', 'KV_ERROR'))
+        if kind == 'KV_ERROR':
+            raise WorkerError(f'worker refused GO: {body}')
+        return check_result(body, run)
+
+    def submit(self, text):
+        """Write protocol lines without waiting; collect() reads the results in order."""
+        self.proc.stdin.write(text)
+        self.proc.stdin.flush()
+
+    def collect(self, timeout=600.0):
+        _, body = self._next(timeout, ('KV_RESULT',))
+        return check_result(body, body.get('run'))
 
     def quit(self, timeout=120.0):
         self.proc.stdin.write('QUIT\n')

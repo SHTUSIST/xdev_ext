@@ -138,6 +138,75 @@ class CrossCheck(unittest.TestCase):
                 want = fnv1a(kl.pattern_bytes(seed, offset, length))
                 self.assertEqual(int(json.loads(r.stdout)['fnv1a'], 16), want)
 
+    def test_block_pages_agree(self):
+        layouts = [kl.BlockLayout(16, 36, 8, 512), kl.BlockLayout(64, 36, 8, 512),
+                   kl.BlockLayout(16, 40, 8, 512), kl.BlockLayout(16, 36, 5, 512),
+                   kl.BlockLayout(16, 3, 1, 512), kl.BlockLayout(32, 2, 2, 1024)]
+        for b, group in itertools.product(layouts, (64 * KIB, 128 * KIB, 256 * KIB)):
+            try:
+                b.validate(group)
+                ok = True
+            except kl.LayoutError:
+                ok = False
+            for gi in (0, 1, 17, 18, 37):
+                with self.subTest(b=b, group=group, gi=gi):
+                    r = subprocess.run([str(self.cli), 'pages', str(b.block_size), str(b.layers),
+                                        str(b.heads), str(b.state_bytes), str(group), str(gi)],
+                                       capture_output=True, text=True)
+                    self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
+                    if ok:
+                        got = [tuple(x) for x in json.loads(r.stdout)['pieces']]
+                        self.assertEqual(got, b.group_pages(gi, group))
+
+    def test_index_parsers_agree(self):
+        good = [kl.IndexEntry('ab' * 32, 'conv-a', 2048, 0, 4096 * 147456, 4096, 0x1234),
+                kl.IndexEntry('cd' * 32, 'conv-b', 7, 2359296, 147456 * 16, 16, None)]
+        cases = {
+            'good': (good, True),
+            'leading zeros and hex': ('xdev-kv-index 1\nprefix ' + 'ef' * 32 +
+                                      ' object=x slba=007 offset=0x10 bytes=1 tokens=1\n', True),
+            'repeat': (good + good[:1], False),
+            'bad number': ('xdev-kv-index 1\nprefix ' + 'ef' * 32 +
+                           ' object=x slba=1e3 offset=0 bytes=1 tokens=1\n', False),
+            'missing tokens': ('xdev-kv-index 1\nprefix ' + 'ef' * 32 +
+                               ' object=x slba=1 offset=0 bytes=1\n', False),
+            'no header': ('prefix ' + 'ef' * 32 + ' object=x slba=1 offset=0 bytes=1 tokens=1\n',
+                          False),
+        }
+        for name, (content, ok) in cases.items():
+            with self.subTest(name):
+                path = Path(self.tmp.name) / 'kv.index'
+                if isinstance(content, str):
+                    path.write_text(content)
+                else:
+                    path.write_text('\n'.join([kl.INDEX_HEADER] + [e.line() for e in content])
+                                    + '\n')
+                try:
+                    py = kl.parse_index_text(path.read_text())
+                except kl.LayoutError:
+                    py = None
+                self.assertEqual(py is not None, ok, name)
+                r = subprocess.run([str(self.cli), 'index', str(path)], capture_output=True,
+                                   text=True)
+                self.assertEqual(r.returncode, 0 if ok else 1, r.stdout + r.stderr)
+                if ok:
+                    c = [kl.IndexEntry(e['hash'], e['object'], e['slba'], e['offset'], e['bytes'],
+                                       e['tokens'], int(e['fnv1a'], 16) if e['fnv1a'] else None)
+                         for e in json.loads(r.stdout)['entries']]
+                    self.assertEqual(c, py)
+    def test_prefix_digest_tool_agrees(self):
+        spec = importlib.util.spec_from_file_location('kv_dump', HERE / 'kv_dump.py')
+        kd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(kd)
+        path = Path(self.tmp.name) / 'obj'
+        data = bytes((i * 31 + 7) & 255 for i in range(300000))
+        path.write_bytes(data)
+        lengths = [1, 4096, 131072, 299999, 300000]
+        self.assertEqual(kd.prefix_fnv1a(path, lengths, self.cli), kd.prefix_fnv1a(path, lengths))
+        r = subprocess.run([str(self.cli), 'fnv', str(path), '300001'], capture_output=True,
+                           text=True)
+        self.assertEqual(r.returncode, 1, 'past the end of the file')
+
 
 if __name__ == '__main__':
     unittest.main()
