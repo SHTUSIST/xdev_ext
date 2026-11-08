@@ -18,7 +18,7 @@ BPF_CFLAGS ?= -O2 -g -Wall -Wextra -Werror -target bpf -D__TARGET_ARCH_x86
 .PHONY: all clean
 all: window_guest window_nvme.bpf.o
 
-window_guest: window_guest.c $(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h \
+window_guest: window_guest.c window_multi.h $(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h \
 		$(KERNEL_SRC)/include/uapi/linux/io_uring.h \
 		$(KERNEL_SRC)/include/uapi/linux/nvme_ioctl.h
 	$(CC) $(CPPFLAGS) $(CFLAGS) $(LIBBPF_CFLAGS) -iquote $(KERNEL_SRC)/include/uapi \

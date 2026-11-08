@@ -286,6 +286,7 @@ jobs:
           python3 tests/storage/family_window_grant/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant-mutants"
           python3 tests/storage/nvme/window_handle/host_window_test.py "$GITHUB_WORKSPACE"
           python3 -I tests/storage/nvme/window_handle/window_validate_test.py
+          python3 tests/storage/nvme/window_handle/host_tenant_matrix_test.py "$GITHUB_WORKSPACE"
       - name: Block table mechanism and responsibility facts
         working-directory: .
         run: |
