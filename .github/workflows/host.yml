@@ -33,9 +33,9 @@ jobs:
           python3 tools/layout.py view
           echo "XDEV_EXT_CANONICAL_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "XDEV_EXT_SOURCE_VIEW=$GITHUB_WORKSPACE/build/source-view" >> "$GITHUB_ENV"
-      - name: Kernel switch planning and recovery boundaries
+      - name: Kernel switch planning, recovery boundaries and bare-metal bring-up
         working-directory: .
-        run: python3 -m unittest discover -s tests/integration/boot -p 'test_kernel_switch.py' -v
+        run: python3 -m unittest discover -s tests/integration/boot -p 'test_*.py' -v
       - name: TP host algorithms and native custody contracts
         working-directory: .
         run: python3 tests/compute/tp/native_suite.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-native-contracts"
