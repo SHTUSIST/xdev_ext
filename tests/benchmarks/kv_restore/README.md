@@ -132,6 +132,17 @@ already used. With `verify=1` the worker compares the destination with the
 pattern after the clock stopped. `kv_restore --dry-run` opens no device and
 answers GO with the plan only.
 
+`KV_READY` of `kv_restore` also carries `setup_ns`, the CLOCK_MONOTONIC
+duration in nanoseconds of each set-up step for the E7 overhead table:
+`control_open`; for each loaded program (`nvme_prog`, `xdomain_prog`,
+`ce_prog`) `_open`, `_load_verify` (`bpf_object__load()`, including the
+kernel verifier) and `_attach`; `cuda_alloc`, `ce_device_open`,
+`ce_vmm_attach`, `memory_register`, `session_open` (UMEM or PEER pool),
+`xdomain_link_discover`, `create`, `peer_connect` (includes waiting for the
+peer) and `total`. A step the role or destination does not perform, and
+every step of a dry run, is `null`. XDOMAIN login happens in the kernel when
+the cable comes up and is not in this list.
+
 `kv_restore restore` starts its receive batches, sends `RESTORE` to host 1's
 `serve` over TCP, and waits for the session's final notification. Host 1
 recomputes the plan from its own window and refuses a request whose keys or

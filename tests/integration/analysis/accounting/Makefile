@@ -7,3 +7,5 @@ check:
 	$(PYTHON) test_cpu_account.py
 	$(PYTHON) test_iommu_receipt.py
 	$(PYTHON) test_check_eval_data_provenance.py
+	$(PYTHON) test_machine_cpu.py
+	$(PYTHON) test_link_check.py

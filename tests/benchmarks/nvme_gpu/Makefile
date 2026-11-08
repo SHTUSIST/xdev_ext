@@ -15,6 +15,7 @@ check:
 	$(PYTHON) -B test_ce_submit_diag.py -v
 	$(PYTHON) -B test_session_timing.py -v
 	$(PYTHON) -B test_delegate_build.py -v
+	$(PYTHON) -B test_fio_ceiling.py -v
 
 probe:
 	mkdir -p $(BUILD_DIR)

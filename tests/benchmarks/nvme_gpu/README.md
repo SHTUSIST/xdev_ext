@@ -302,3 +302,22 @@ macro workloads.
 The shared [session guest driver](../session_guest/README.md) builds this arm
 for the existing correctness-only KVM suite, with independent byte/guard
 oracles and strict counts, STOP and descriptor checks.
+
+## fio read ceiling (control C1)
+
+`fio_ceiling.py` gives the grey fio line of E3(a): every cell reads the same
+window of the same file as the arms, once per run, with `--direct=1
+--ioengine=io_uring --rw=read --numjobs=1` at the cell's size and queue
+depth; repeats go round-robin over the grid. `--sweep` adds 4 MiB reads at
+iodepth 1..256, numjobs 1/2/4 (window split between jobs) and engines
+io_uring/libaio and reports the best median, the single number the text
+cites. A file with a hole in the window is refused (`--fill` writes it
+first), the binary must report fio-3.x, fio's JSON of every run is kept
+under `DIR/raw`, and `DIR/summary.json` has the fio version and exact argv
+of every run. Nothing is tuned for the arms.
+
+```sh
+python3 tests/eval/nvme_gpu/fio_ceiling.py --file DIR/window.bin --window-bytes 1073741824 \
+  --sizes 4096,8192,16384,32768,65536,131072,262144,524288,1048576,2097152,4194304 \
+  --qd 1,32 --repeats 5 --sweep --out CEILING_DIR
+```

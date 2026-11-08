@@ -50,6 +50,13 @@ Store SSD-offload arm share one KV layout, worker protocol and CPU accounting.
 the storage half and the destination placement; neither is a performance
 result.
 
+The [E4 VRAM-to-VRAM tools](xdomain_gpu/README.md) measure GPU memory to
+GPU memory ping-pong latency and streaming bandwidth between two hosts over
+one Thunderbolt/USB4 cable: the xdev_ext XDOMAIN session with host frames
+and the copy engine, TCP over thunderbolt-net plus cudaMemcpy, and NCCL
+send/recv over NET/Socket. `make -C tests/eval/xdomain_gpu check` runs host
+checks only; nothing there has run on two hosts.
+
 The [SPDK NVMe->TCP pipeline](spdk/README.md) is the native SPDK arm: queue
 depth 1 raw reads with the official user-space NVMe driver, sent over loopback
 TCP. `make -C tests/eval spdk-check` runs its host contract and native-arm

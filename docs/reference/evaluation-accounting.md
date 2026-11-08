@@ -117,6 +117,36 @@ the exact perf commands and needs none of these. The host tests include an
 end-to-end run with a fake perf and a fake `/proc` in which a matched kthread
 appears during the run; its runtime reaches `cores_charged`.
 
+## Machine-wide CPU minus an idle window: `machine_cpu.py`
+
+The CPU figure of E1, E5, E6 and E8 is the aggregate `cpu` line of
+`/proc/stat`: busy = user + nice + system + irq + softirq + steal, which
+includes every process, kernel thread, kworker, interrupt and busy poll.
+`machine_cpu.py --arm NAME --idle-s S -- HARNESS ...` measures an idle
+window first (background rate `idle_cores`), then brackets the harness, and
+reports `net_core_seconds = busy - idle_cores x wall` and `net_cores`; a
+negative value is reported, not clamped. `--idle-after` adds a second idle
+window and `--max-idle-drift-cores` rejects a run whose background changed.
+`--remote HOST:PORT --remote-token-file F` brackets the same windows on the
+other host through the `kv_cpu.py agent`. The parsing is `kv_cpu.py`'s. The
+record notes whether the kernel has `CONFIG_IRQ_TIME_ACCOUNTING=y`. A
+virtual machine is refused unless `--allow-vm`, and then the record says
+`performance_claim: none`. Exit 0 accounted, 1 harness failure or drift,
+2 usage, 4 refused.
+
+## Link speed and width: `link_check.py`
+
+E3 and E4 discard runs on a degraded link. `link_check.py --pci BDF=LABEL
+... [--xdomain auto|DEV] [--netdev IF] [-- HARNESS ...]` compares each PCIe
+device's `current_link_speed`/`current_link_width` with its maximum; with a
+harness the links are sampled every `--interval-ms` while it runs, and every
+sample after `--warmup-ms` must be at the maximum (an idle GPU downshifts,
+so an idle snapshot is not judged). For the XDomain it reads `rx_speed`,
+`tx_speed`, `rx_lanes` and `tx_lanes`, requires `--min-xdomain-lanes` (2,
+bonded) and optionally `--min-xdomain-gbps`, and records the line rate
+`rx_speed x rx_lanes`; `--netdev` records the MTU. Exit 0 all at maximum,
+1 below maximum, unreadable or harness failure, 2 usage, 4 missing device.
+
 ## IOMMU mode receipt: `iommu_receipt.py`
 
 ```sh
