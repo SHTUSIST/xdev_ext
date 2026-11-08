@@ -2,7 +2,8 @@
 # SPDX-License-Identifier: GPL-2.0
 # Functional check of dpdk_tb in one QEMU/KVM guest; correctness only.
 #
-#   vm_check.sh --work DIR --bin BIN [--kernel VMLINUZ] [--sizes SPEC] [--iters N]
+#   vm_check.sh --work DIR --bin BIN --xdp-prog OBJ [--kernel VMLINUZ] [--sizes SPEC]
+#               [--iters N]
 #
 # BIN is a `build.py --gpu none` build (host-memory stand-in for the GPU).
 # The guest boots the given kernel (default: this host's /boot/vmlinuz) with
@@ -14,6 +15,8 @@
 #            ndo_bpf, so XDP attaches in generic (skb) mode, as on
 #            thunderbolt-net.  (macvlan is no substitute: on 7.0 kernels it
 #            forwards ndo_bpf to its lower device and native attach fails.)
+#            The PMD gets xdp_prog=OBJ (tb_xsk_redirect.o from build.py)
+#            here, as it must on thunderbolt-net.
 # On each link the client runs --mode pingpong and --mode stream with
 # --verify all, so every message is compared byte for byte after its copy.
 # Records land in DIR/results; DIR/verdict.json says PASS only if all four
@@ -22,20 +25,21 @@
 # nothing on the host besides DIR and one QEMU process.
 set -euo pipefail
 
-work= bin= kernel=/boot/vmlinuz-$(uname -r) sizes=64..4194304 iters=20
+work= bin= prog= kernel=/boot/vmlinuz-$(uname -r) sizes=64..4194304 iters=20
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--work) work=$2; shift 2 ;;
 	--bin) bin=$2; shift 2 ;;
+	--xdp-prog) prog=$2; shift 2 ;;
 	--kernel) kernel=$2; shift 2 ;;
 	--sizes) sizes=$2; shift 2 ;;
 	--iters) iters=$2; shift 2 ;;
 	*) echo "vm_check.sh: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$work" ] && [ -n "$bin" ] || { sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ -n "$work" ] && [ -n "$bin" ] && [ -n "$prog" ] || { sed -n '3,25p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 case "$work" in /*) ;; *) echo "--work must be absolute" >&2; exit 2 ;; esac
-[ -x "$bin" ] && [ -r "$kernel" ] || { echo "missing $bin or $kernel" >&2; exit 2; }
+[ -x "$bin" ] && [ -r "$prog" ] && [ -r "$kernel" ] || { echo "missing $bin, $prog or $kernel" >&2; exit 2; }
 mkdir -p -m 0700 "$work"
 root=$work/initramfs
 rm -rf "$root" "$work/results"
@@ -66,6 +70,7 @@ for o in /usr/lib/x86_64-linux-gnu/bpf/xsk_def_xdp_prog*.o /usr/local/lib/bpf/xs
 	 /usr/lib/x86_64-linux-gnu/bpf/xdp-dispatcher.o /usr/local/lib/bpf/xdp-dispatcher.o; do
 	[ -e "$o" ] && cp "$o" "$root/lib/bpf/"
 done
+cp "$prog" "$root/lib/bpf/tb_xsk_redirect.o"
 kver=$(basename "$kernel" | sed 's/^vmlinuz-//')
 for m in veth e1000; do
 	src=$(modinfo -k "$kver" -n "$m")
@@ -99,14 +104,14 @@ ip link add tba type veth peer name tbb
 for i in tba tbb tbe1 tbe2; do ip link set \$i up; done
 sleep 3
 ip -o link | sed 's/^/TB_VM link /'
-eal() { echo "--no-pci --no-telemetry --huge-dir /dev/hugepages --file-prefix \$1 -l \$2 --vdev net_af_xdp0,iface=\$3,start_queue=0,queue_count=1"; }
-run() { # link a b mode
+eal() { echo "--no-pci --no-telemetry --huge-dir /dev/hugepages --file-prefix \$1 -l \$2 --vdev net_af_xdp0,iface=\$3,start_queue=0,queue_count=1\$4"; }
+run() { # link a b mode [vdev suffix]
 	tag=\$1-\$4
-	timeout 600 dpdk_tb \$(eal srv-\$tag 1 \$3) -- --role server --max-size 4194304 \
+	timeout 600 dpdk_tb \$(eal srv-\$tag 1 \$3 \$5) -- --role server --max-size 4194304 \
 		> /tmp/\$tag.server.json 2> /tmp/\$tag.server.err &
 	spid=\$!
 	sleep 2
-	timeout 600 dpdk_tb \$(eal cli-\$tag 2 \$2) -- --role client --mode \$4 --sizes $sizes \
+	timeout 600 dpdk_tb \$(eal cli-\$tag 2 \$2 \$5) -- --role client --mode \$4 --sizes $sizes \
 		--iters $iters --warmup 2 --verify all --stream-min-bytes 0 --timeout-ms 5000 \
 		> /tmp/\$tag.client.json 2> /tmp/\$tag.client.err
 	crc=\$?
@@ -119,8 +124,8 @@ run() { # link a b mode
 }
 run veth tba tbb pingpong
 run veth tba tbb stream
-run e1000 tbe1 tbe2 pingpong
-run e1000 tbe1 tbe2 stream
+run e1000 tbe1 tbe2 pingpong ,xdp_prog=/lib/bpf/tb_xsk_redirect.o
+run e1000 tbe1 tbe2 stream ,xdp_prog=/lib/bpf/tb_xsk_redirect.o
 echo TB_VM_DONE
 poweroff -f
 EOF

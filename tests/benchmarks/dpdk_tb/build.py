@@ -15,6 +15,10 @@ recommends for applications.  net_af_xdp needs libxdp >= 1.2.2 and libbpf
 (doc/guides/nics/af_xdp.rst of the release); without them meson silently
 skips the driver, so the build checks that librte_net_af_xdp.a exists.
 
+It also compiles tb_xsk_redirect.bpf.c into DIR/tb_xsk_redirect.o (clang
+-target bpf), the xdp_prog= object that devices without native XDP, such
+as thunderbolt-net, need (see that file).
+
 `--gpu none` replaces the CUDA copies with host memcpy into an ordinary
 buffer.  That build is for correctness runs on machines without a GPU (VM
 guests); its records say gpu="none" and are never performance data.
@@ -48,6 +52,7 @@ DPDK_TOPDIR = "dpdk-stable-%s" % DPDK_VERSION
 DRIVERS = "net/af_xdp,mempool/ring,bus/vdev"
 WARN = ("-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror")
 IFACE_RE = re.compile(r"^[A-Za-z0-9_.-]{1,15}$")
+PROG_RE = re.compile(r"^/[A-Za-z0-9_./-]+$")
 
 
 class Refusal(Exception):
@@ -62,11 +67,26 @@ def meson_options():
             "-Denable_docs=false", "--libdir=lib"]
 
 
-def vdev_arg(iface):
-    """The EAL --vdev value: one AF_XDP socket on queue 0, every other PMD option default."""
+def vdev_arg(iface, xdp_prog=None):
+    """The EAL --vdev value: one AF_XDP socket on queue 0, every other PMD option default.
+
+    xdp_prog (absolute path of tb_xsk_redirect.o) is for devices without
+    native XDP, such as thunderbolt-net: see tb_xsk_redirect.bpf.c for why
+    the PMD's default program cannot attach there.
+    """
     if not IFACE_RE.match(iface):
         raise ValueError("bad interface name %r" % iface)
-    return "net_af_xdp0,iface=%s,start_queue=0,queue_count=1" % iface
+    arg = "net_af_xdp0,iface=%s,start_queue=0,queue_count=1" % iface
+    if xdp_prog is not None:
+        if not PROG_RE.match(xdp_prog):
+            raise ValueError("xdp_prog must be an absolute path without commas: %r" % xdp_prog)
+        arg += ",xdp_prog=" + xdp_prog
+    return arg
+
+
+def bpf_command(src, obj):
+    return ["clang", "-O2", "-g", "-Wall", "-Werror", "-target", "bpf", "-c", str(src),
+            "-o", str(obj)]
 
 
 def check_dir(path):
@@ -116,9 +136,12 @@ def plan(args):
          "pkg_config": ["pkg-config", "--static", "--cflags", "--libs", "libdpdk"],
          "env": {"PKG_CONFIG_PATH": str(install / "lib" / "pkgconfig")},
          "extra_libs": extra_libs + ["-lbpf"]},
+        {"step": "bpf", "argv": bpf_command(HERE / "tb_xsk_redirect.bpf.c",
+                                            d / "tb_xsk_redirect.o")},
     ]
     return {"dpdk_version": DPDK_VERSION, "url": DPDK_URL, "sha256": DPDK_SHA256,
-            "gpu": args.gpu, "output": str(output), "steps": steps}
+            "gpu": args.gpu, "output": str(output), "xdp_prog": str(d / "tb_xsk_redirect.o"),
+            "steps": steps}
 
 
 def sha256(path):
@@ -176,9 +199,15 @@ def execute(p, args):
             argv = step["argv"] + shlex.split(pc.stdout) + step["extra_libs"]
             if run_step({"argv": argv, "full_env": env}, log):
                 raise Refusal(1, "dpdk_tb failed to compile, see %s" % log)
+        elif name == "bpf":
+            if not shutil.which("clang"):
+                raise Refusal(4, "missing tool: clang (for tb_xsk_redirect.o)")
+            if run_step(step, log):
+                raise Refusal(1, "tb_xsk_redirect.bpf.c failed to compile, see %s" % log)
     out = Path(p["output"])
     return {"built": str(out), "sha256": sha256(out), "dpdk_version": DPDK_VERSION,
-            "dpdk_sha256": DPDK_SHA256, "gpu": p["gpu"], "log": str(log)}
+            "dpdk_sha256": DPDK_SHA256, "gpu": p["gpu"], "xdp_prog": p["xdp_prog"],
+            "log": str(log)}
 
 
 def main():

@@ -2313,6 +2313,10 @@
       "logical_path": "tests/eval/dpdk_tb/tb_wire.h"
     },
     {
+      "source": "tests/benchmarks/dpdk_tb/tb_xsk_redirect.bpf.c",
+      "logical_path": "tests/eval/dpdk_tb/tb_xsk_redirect.bpf.c"
+    },
+    {
       "source": "tests/benchmarks/dpdk_tb/test_contract.py",
       "logical_path": "tests/eval/dpdk_tb/test_contract.py"
     },

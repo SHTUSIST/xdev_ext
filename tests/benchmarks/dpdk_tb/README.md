@@ -10,16 +10,31 @@ are not performance data.
 
 thunderbolt-net has no DPDK poll-mode driver. The only DPDK port that works on
 it is `net_af_xdp`, which opens an AF_XDP socket on the kernel interface.
-thunderbolt-net has no `ndo_bpf`, so the XDP program attaches in generic (skb)
-mode and the socket binds in copy mode. The interface also has a single queue.
-The program records what actually happened in every record (`xdp_attach_mode`,
+thunderbolt-net has no `ndo_bpf`, so XDP can only run there in generic (skb)
+mode, and the socket binds in copy mode. The interface also has a single
+queue. Every record says what actually happened (`xdp_attach_mode`,
 `xsk_zerocopy`) instead of assuming it.
+
+The PMD's default XDP program cannot attach to such a device when DPDK is
+built against libxdp. The PMD passes only `XDP_FLAGS_UPDATE_IF_NOEXIST`
+(DPDK 24.11.8 `rte_eth_af_xdp.c`), and libxdp v1.6.2 turns "no mode flag"
+into native mode (`lib/libxdp/xsk.c`, `xsk_convert_xdp_flags`). The kernel
+then refuses with "Underlying driver does not support XDP in native mode".
+This was observed in a guest on e1000, which also has no `ndo_bpf`. The
+documented PMD option `xdp_prog=` takes the other path: the PMD attaches the
+given object with libbpf's `bpf_xdp_attach` and the same single flag, and
+the kernel picks generic mode by itself. `tb_xsk_redirect.bpf.c` is that
+object. It behaves like libxdp's default program: a 64-entry XSKMAP named
+`xsks_map`, each frame redirected to the socket of its RX queue or passed to
+the kernel when none is bound. So on thunderbolt-net the vdev carries
+`xdp_prog=`; on a NIC with native XDP it does not.
 
 ## What runs
 
 | Piece | File |
 | --- | --- |
 | program (client and server) | `dpdk_tb.c` |
+| XDP redirect program for devices without native XDP | `tb_xsk_redirect.bpf.c` |
 | frame format, fragmentation, reassembly, window, arguments | `tb_wire.h` (checked by `test_wire.c`) |
 | GPU copies: CUDA runtime | `tb_gpu_cuda.c` |
 | GPU copies: host-memory stand-in, no GPU, correctness only | `tb_gpu_host.c` |
@@ -49,7 +64,8 @@ The program records what actually happened in every record (`xdp_attach_mode`,
   progress for `--timeout-ms`, ends the run with exit status 1 and the frame
   counters. Every record therefore comes from a run without loss.
 - **Defaults.** EAL `--vdev net_af_xdp0,iface=IF,start_queue=0,queue_count=1`,
-  with no other PMD option (no `force_copy`, `busy_budget` or `xdp_prog`).
+  plus `xdp_prog=` only where the device has no native XDP (see above), and
+  no other PMD option (no `force_copy` or `busy_budget`).
   `struct rte_eth_conf` is all zero, the RX and TX rings take the PMD default
   (0 descriptors requested), the mbuf pool uses `RTE_MBUF_DEFAULT_BUF_SIZE`,
   there is one lcore, and the burst size is 32. The program never sets the
@@ -79,7 +95,9 @@ DPDK 24.11.8 (LTS) from https://fast.dpdk.org/rel/dpdk-24.11.8.tar.xz,
 SHA-256 `f3dbfac841b2db8e53a97d68a5e14ebc943327a955f0afb97f8c14f544fbc4aa`.
 net_af_xdp needs libxdp >= 1.2.2 and libbpf (the release's
 `doc/guides/nics/af_xdp.rst`). The build also needs meson, ninja,
-pyelftools and pkg-config.
+pyelftools, pkg-config, and clang with the libbpf headers for
+`tb_xsk_redirect.o`, which lands next to the program in the build
+directory.
 
 ```sh
 python3 tests/eval/dpdk_tb/build.py --build-dir /abs/dir --gpu cuda --cuda-root /usr/local/cuda
@@ -93,8 +111,7 @@ On both hosts, as root:
 
 ```sh
 tests/eval/dpdk_tb/hugepages.sh            # 512 x 2 MiB at /dev/hugepages-tb
-export LIBXDP_OBJECT_PATH=/usr/lib/x86_64-linux-gnu/bpf   # where libxdp put xsk_def_xdp_prog.o
-EAL="-l 2 --no-pci --huge-dir /dev/hugepages-tb --vdev net_af_xdp0,iface=thunderbolt0,start_queue=0,queue_count=1"
+EAL="-l 2 --no-pci --huge-dir /dev/hugepages-tb --vdev net_af_xdp0,iface=thunderbolt0,start_queue=0,queue_count=1,xdp_prog=/abs/dir/tb_xsk_redirect.o"
 host1$ /abs/dir/dpdk_tb $EAL -- --role server
 host2$ /abs/dir/dpdk_tb $EAL -- --role client --mode pingpong > pingpong.jsonl
 host1$ /abs/dir/dpdk_tb $EAL -- --role server
@@ -108,10 +125,12 @@ step is needed. Use the same EAL core list for every arm that is compared.
 
 ## Functional check without the testbed
 
-`vm_check.sh --work DIR --bin DIR/dpdk_tb-host` boots one KVM guest and runs
+`vm_check.sh --work DIR --bin B/dpdk_tb-host --xdp-prog B/tb_xsk_redirect.o`
+boots one KVM guest and runs
 client and server over a veth pair (XDP in native mode) and over two
 emulated e1000 NICs joined by a QEMU hub (e1000 has no XDP support, so XDP
-attaches in generic mode, as on thunderbolt-net). Each link
+attaches in generic mode, as on thunderbolt-net, and the PMD gets
+`xdp_prog=`). Each link
 gets a pingpong run and a stream run, both with `--verify all`. It writes
 `DIR/verdict.json`. It checks correctness only.
 

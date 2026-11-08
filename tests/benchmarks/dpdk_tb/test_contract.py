@@ -66,6 +66,31 @@ class BuildScriptTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             BUILD.vdev_arg("eth0,force_copy=1")
 
+    def test_devices_without_native_xdp_get_the_redirect_program(self):
+        # libxdp turns "no mode flag" into native mode; a device without
+        # ndo_bpf (thunderbolt-net) needs the PMD's xdp_prog path instead.
+        self.assertEqual(
+            BUILD.vdev_arg("thunderbolt0", xdp_prog="/opt/tb/tb_xsk_redirect.o"),
+            "net_af_xdp0,iface=thunderbolt0,start_queue=0,queue_count=1,"
+            "xdp_prog=/opt/tb/tb_xsk_redirect.o")
+        for bad in ("relative.o", "/a,b.o", "/a b.o"):
+            with self.assertRaises(ValueError):
+                BUILD.vdev_arg("thunderbolt0", xdp_prog=bad)
+
+    def test_plan_builds_the_redirect_program(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = subprocess.run([sys.executable, str(HERE / "build.py"), "--print-commands",
+                                  "--build-dir", str(Path(tmp) / "b"), "--gpu", "none"],
+                                 capture_output=True, text=True)
+            plan = json.loads(out.stdout)
+            bpf = [s for s in plan["steps"] if s["step"] == "bpf"]
+            self.assertEqual(len(bpf), 1)
+            argv = bpf[0]["argv"]
+            self.assertIn("-target", argv)
+            self.assertEqual(argv[argv.index("-target") + 1], "bpf")
+            self.assertTrue(argv[-1].endswith("tb_xsk_redirect.o"))
+            self.assertEqual(plan["xdp_prog"], argv[-1])
+
     def test_print_commands_is_side_effect_free(self):
         with tempfile.TemporaryDirectory() as tmp:
             target = Path(tmp) / "absent"
@@ -79,12 +104,13 @@ class BuildScriptTest(unittest.TestCase):
             self.assertEqual(plan["dpdk_version"], "24.11.8")
             steps = [s["step"] for s in plan["steps"]]
             self.assertEqual(steps, ["download", "verify", "extract", "meson", "ninja",
-                                     "compile"])
+                                     "compile", "bpf"])
             last = plan["steps"][-1]
+            last = plan["steps"][-2]
             compile_cmd = " ".join(last["argv"] + last["extra_libs"])
             self.assertIn("tb_gpu_cuda.c", compile_cmd)
             self.assertIn("-lcudart", compile_cmd)
-            self.assertIn("--static", " ".join(plan["steps"][-1]["pkg_config"]))
+            self.assertIn("--static", " ".join(plan["steps"][-2]["pkg_config"]))
 
     def test_host_stand_in_build_is_labelled(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -93,7 +119,7 @@ class BuildScriptTest(unittest.TestCase):
                                  capture_output=True, text=True)
             self.assertEqual(out.returncode, 0, out.stderr)
             plan = json.loads(out.stdout)
-            last = plan["steps"][-1]
+            last = plan["steps"][-2]
             compile_cmd = " ".join(last["argv"] + last["extra_libs"])
             self.assertIn("tb_gpu_host.c", compile_cmd)
             self.assertNotIn("cudart", compile_cmd)
@@ -180,6 +206,33 @@ class VmCheckScriptTest(unittest.TestCase):
         self.assertIn("--vdev net_af_xdp0,iface=\\$3,start_queue=0,queue_count=1", text)
         self.assertIn("--verify all", text)
         self.assertIn("correctness only", text)
+
+
+class RedirectProgramTest(unittest.TestCase):
+    SRC = HERE / "tb_xsk_redirect.bpf.c"
+
+    def test_same_behaviour_as_the_libxdp_default(self):
+        # libxdp v1.6.2 lib/libxdp/xsk_def_xdp_prog.c: XSKMAP of 64 queue ids,
+        # redirect by rx_queue_index, XDP_PASS when no socket is bound.
+        text = strip_c_comments(self.SRC.read_text())
+        self.assertIn("BPF_MAP_TYPE_XSKMAP", text)
+        self.assertRegex(text, r"max_entries,\s*64")
+        self.assertRegex(text, r"\}\s*xsks_map\s+SEC\(\"\.maps\"\)")
+        self.assertIn('SEC("xdp")', text)
+        self.assertIn("bpf_redirect_map(&xsks_map, ctx->rx_queue_index, XDP_PASS)", text)
+        self.assertIn('SEC("license")', text)
+
+    @unittest.skipUnless(shutil.which("clang") and Path("/usr/include/bpf/bpf_helpers.h").exists(),
+                         "needs clang and libbpf headers")
+    def test_compiles_to_an_xdp_object_with_the_map(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            obj = Path(tmp) / "p.o"
+            subprocess.run(BUILD.bpf_command(self.SRC, obj), check=True)
+            dump = subprocess.run(["llvm-objdump", "-h", "-t", str(obj)], capture_output=True,
+                                  text=True, check=True).stdout
+            self.assertRegex(dump, r"\sxdp\s")
+            self.assertIn(".maps", dump)
+            self.assertIn("xsks_map", dump)
 
 
 if __name__ == "__main__":
