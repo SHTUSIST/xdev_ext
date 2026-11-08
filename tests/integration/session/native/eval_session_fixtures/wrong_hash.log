@@ -28,6 +28,28 @@ XDEV_EXT_EVAL_ARM=nvme_gpu:save-s65536-q4-seed14/main EVAL_STOP=PASS result=0
 XDEV_EXT_EVAL_ARM=nvme_gpu:save-s65536-q4-seed14/main EVAL_FD_CHECK=PASS before=3 after=3
 XDEV_EXT_EVAL_SESSION_CHECKS=nvme_gpu:save-s65536-q4-seed14 guards=pass ce_refs=0
 XDEV_EXT_EVAL_SESSION=nvme_gpu:save-s65536-q4-seed14 PASS bytes=262144 sha256=3c36733a995d9263b7f819f35a8354354bd3fe235726adb35172303d8498054a
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q1-n8-seed15/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=8 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=8,8,0,0 completed=8,8,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q1-n8-seed15/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q1-n8-seed15/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=8 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=8,8,0,0 completed=8,8,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q1-n8-seed15/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q1-n8-seed15/main EVAL_FD_CHECK=PASS before=3 after=3
+XDEV_EXT_EVAL_SESSION_CHECKS=nvme_gpu_rand:load-s8192-q1-n8-seed15 guards=pass ce_refs=0
+XDEV_EXT_EVAL_SESSION=nvme_gpu_rand:load-s8192-q1-n8-seed15 PASS bytes=8192 sha256=9f4c1871e151aa66d40582265ac0b5c6aff57a066342dee1c9ff48734e5bc6e6
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q4-n4-seed16/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=4,4,0,0 completed=4,4,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q4-n4-seed16/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q4-n4-seed16/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=4,4,0,0 completed=4,4,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q4-n4-seed16/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:load-s8192-q4-n4-seed16/main EVAL_FD_CHECK=PASS before=3 after=3
+XDEV_EXT_EVAL_SESSION_CHECKS=nvme_gpu_rand:load-s8192-q4-n4-seed16 guards=pass ce_refs=0
+XDEV_EXT_EVAL_SESSION=nvme_gpu_rand:load-s8192-q4-n4-seed16 PASS bytes=32768 sha256=30f455940a6113a8517d8544e20f0dc8fd1a527411bcc3cb955406281af61584
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:save-s8192-q4-n4-seed17/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=4,4,0,0 completed=4,4,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:save-s8192-q4-n4-seed17/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:save-s8192-q4-n4-seed17/main XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=4,4,0,0 completed=4,4,0,0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:save-s8192-q4-n4-seed17/main EVAL_STOP=PASS result=0
+XDEV_EXT_EVAL_ARM=nvme_gpu_rand:save-s8192-q4-n4-seed17/main EVAL_FD_CHECK=PASS before=3 after=3
+XDEV_EXT_EVAL_SESSION_CHECKS=nvme_gpu_rand:save-s8192-q4-n4-seed17 guards=pass ce_refs=0
+XDEV_EXT_EVAL_SESSION=nvme_gpu_rand:save-s8192-q4-n4-seed17 PASS bytes=32768 sha256=4eb18506b8894259d683fb906dc888365ddadcdf201b2e3cb00258d46df3c455
+XDEV_EXT_EVAL_SESSION_LIMIT=PASS max_hw_bytes=524288 at_max=pass above_max=refused
 XDEV_EXT_EVAL_ARM=gpu_nic:egress-ingest-s4096-d4-seed21/tx XDEV_EXT_MECH_STATS session=1 state=ACTIVE last_err=0 batches_done=4 batches_abort=0 rejects=0 recycled=0 held=0 sequestered=0 timeouts=0 inflight=0 native_publish=0 protocol_err=0 published=0 submitted=4,4,0,0 completed=4,4,0,0
 XDEV_EXT_EVAL_ARM=gpu_nic:egress-ingest-s4096-d4-seed21/tx EVAL_STOP=PASS result=0
 XDEV_EXT_EVAL_ARM=gpu_nic:egress-ingest-s4096-d4-seed21/tx EVAL_FD_CHECK=PASS before=3 after=3
@@ -113,4 +135,4 @@ XDEV_EXT_EVAL_ARM=chains:nvme-iaa-gpu-sustained-r65536-seed44/main EVAL_FD_CHECK
 XDEV_EXT_EVAL_SESSION_CHECKS=chains:nvme-iaa-gpu-sustained-r65536-seed44 guards=pass ce_refs=0
 XDEV_EXT_EVAL_SESSION=chains:nvme-iaa-gpu-sustained-r65536-seed44 PASS bytes=65536 sha256=33be865a19727b4436af0b41a08b2f194cc93e8674bec700c1ebc649f8ab2ea9
 XDEV_EXT_EVAL_SESSION_SCRATCH=restored source_sha256=0000000000000000000000000000000000000000000000000000000000000000 destination_sha256=1111111111111111111111111111111111111111111111111111111111111111
-XDEV_EXT_EVAL_SESSION_DONE=16/16
+XDEV_EXT_EVAL_SESSION_DONE=19/19

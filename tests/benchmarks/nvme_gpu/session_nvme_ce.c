@@ -20,11 +20,17 @@
  * each pass.
  *
  * Each pass is one session of window/size batches, START to terminal wake
- * timed.  Batch k reads or writes LBA slba + k*size/lba (the nxp_nvme_ops
- * plan of nxp_mech.bpf.o with nvme_mode=0 and key_base=1); its CE copy uses
- * window slot (batch object) s of depth slots (ce_plan_ops of ce_plan.bpf.o).
- * Both struct_ops programs must be attached.  The plan is linear, so only
- * --pattern seq runs; rand and qd > 64 (XDEV_EXT_MECH_MAX_DEPTH) exit 4.
+ * timed.  The attached NVMe plan program picks the block of batch k:
+ *   --pattern seq   nxp_nvme_ops of nxp_mech.bpf.o (nvme_mode=0, key_base=1):
+ *                   LBA slba + k*size/lba;
+ *   --pattern rand  nvme_rand_ops of nvme_rand.bpf.o (key_base=1, rand_seed =
+ *                   --seed): block xg_block(g, 0, k), the baselines' rand
+ *                   schedule of pass 0.  Every pass repeats it, since each
+ *                   pass is a new session starting at key 1.
+ * Its CE copy uses window slot (batch object) s of depth slots (ce_plan_ops
+ * of ce_plan.bpf.o).  Both struct_ops programs must be attached; qd > 64
+ * (XDEV_EXT_MECH_MAX_DEPTH) exits 4.  CREATE refuses a group larger than one
+ * NVMe transfer of the namespace (max_hw_sectors) with EMSGSIZE: exit 4.
  *
  * The device side is a ring of qd slots (destination slot-ring); the
  * baselines of run.py use the same layout.  ce_validate (kernel
@@ -35,7 +41,9 @@
  * Oracle, outside the timed region (window/size >= qd, so every slot is
  * used):
  *   load  every slot holds one whole, distinct block image of the window
- *         (all of the window's blocks when window/size == qd).
+ *         (all of the window's blocks when window/size == qd).  With qd 1
+ *         the one slot holds the block of the last batch, which the order
+ *         of --pattern names, so a plan program of the other order fails.
  *   save  every group of the file window is overwritten by an exact image
  *         of one device slot, and every slot's image appears; the slots
  *         were seeded with blocks 0..qd-1.
@@ -74,7 +82,7 @@ static void sn_usage(FILE *f)
 	fprintf(f,
 "usage: session_nvme_ce --direction load|save --ng /dev/ngXnY --slba N --lba-size N\n"
 "         --file PATH [--file-offset N] --ce-dev DEV (--ce-va N | --ce-alloc | --ce-vmm)\n"
-"         --size N --qd N --window-bytes N [--passes N] [--pattern seq]\n"
+"         --size N --qd N --window-bytes N [--passes N] [--pattern seq|rand]\n"
 "         [--seed N] [--frame-size N] [--timeout-ms N]\n");
 }
 
@@ -265,9 +273,18 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 		.fd = ce->fd[0], .arg0 = ce->va, .arg1 = ce->len,
 	};
 	ret = es_create(&r, &c, n);
+	if (ret == -EMSGSIZE) {
+		fprintf(stderr, "SKIP: CREATE: a group of %llu bytes exceeds one NVMe transfer of "
+			"%s (/sys/block/<namespace>/queue/max_hw_sectors_kb)\n",
+			(unsigned long long)o->g.size, o->ng);
+		ret = XG_EXIT_UNAVAILABLE;
+		goto out;
+	}
 	if (ret) {
 		ret = sn_capability_errno(ret) ?
-		      sn_unavailable("CREATE (kernel, attached nxp_nvme_ops/ce_plan_ops, devices)", ret) :
+		      sn_unavailable(o->g.pattern == XG_SEQ ?
+				     "CREATE (kernel, attached nxp_nvme_ops/ce_plan_ops, devices)" :
+				     "CREATE (kernel, attached nvme_rand_ops/ce_plan_ops, devices)", ret) :
 		      XG_EXIT_FAIL;
 		goto out;
 	}
@@ -327,6 +344,14 @@ static int sn_check_load(const struct sn_opts *o, struct es_ce *ce,
 		if (ret)
 			return ret;
 		ret = xg_identify(buf, o->g.size, n, o->g.seed, &block);
+		if (!ret && o->g.qd == 1 && block != xg_block(&o->g, 0, n - 1)) {
+			fprintf(stderr, "slot 0 holds block %llu; the %s order ends at block %llu: "
+				"is the attached NVMe plan program the one of --pattern %s?\n",
+				(unsigned long long)block, o->g.pattern == XG_SEQ ? "seq" : "rand",
+				(unsigned long long)xg_block(&o->g, 0, n - 1),
+				o->g.pattern == XG_SEQ ? "seq" : "rand");
+			return -EBADMSG;
+		}
 		if (!ret) {
 			if (seen[block]++)
 				return -EEXIST;
@@ -412,10 +437,6 @@ int main(int argc, char **argv)
 			fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=init code=%d\n", error);
 	}
 	atexit(endpoint_timer_cleanup);
-	if (o.g.pattern != XG_SEQ) {
-		fprintf(stderr, "SKIP: session NVMe plan is linear in the batch key; rand needs another plan program\n");
-		return XG_EXIT_UNAVAILABLE;
-	}
 	if (o.g.qd > SN_MAX_SESSION_DEPTH) {
 		fprintf(stderr, "SKIP: session depth is limited to %llu batches\n",
 			(unsigned long long)SN_MAX_SESSION_DEPTH);
@@ -505,7 +526,7 @@ out:
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\","
 	       "\"route\":\"%s\",\"execution\":\"%s\",\"performance_claim\":\"%s\","
 	       "\"destination\":\"slot-ring\",\"completion_wait\":\"block\","
-	       "\"size\":%llu,\"qd\":%llu,\"pattern\":\"seq\",\"window_bytes\":%llu,"
+	       "\"size\":%llu,\"qd\":%llu,\"pattern\":\"%s\",\"window_bytes\":%llu,"
 	       "\"passes\":%llu,\"operations\":%llu,\"io_bytes\":%llu,"
 	       "\"verified_bytes\":%llu,\"slots_used\":%llu,\"oracle\":\"%s\","
 	       "\"io_ns\":%llu,\"cpu_us\":%llu,\"host_busy_us\":%llu,\"status\":\"pass\"}\n",
@@ -515,7 +536,7 @@ out:
 	       ce.sim ? "kvm-ce-sim" : "physical-gpu-ce",
 	       ce.sim ? "none" : "physical",
 	       (unsigned long long)o.g.size, (unsigned long long)o.g.qd,
-	       (unsigned long long)o.g.window, (unsigned long long)o.g.passes,
+	       o.g.pattern == XG_SEQ ? "seq" : "rand", (unsigned long long)o.g.window, (unsigned long long)o.g.passes,
 	       (unsigned long long)(xg_blocks(&o.g) * o.g.passes),
 	       (unsigned long long)(o.g.window * o.g.passes),
 	       (unsigned long long)total.verified_bytes, (unsigned long long)slots_used,

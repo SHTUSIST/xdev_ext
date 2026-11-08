@@ -17,6 +17,7 @@ CE stand-in; nothing here is performance data.
   python3 xdev_ext_eval_session_validate.py GUEST_LOG
 """
 import hashlib
+import math
 from pathlib import Path
 import re
 import sys
@@ -34,6 +35,12 @@ CASES = (
     ('nvme_gpu', 'load', 65536, 4, 12),
     ('nvme_gpu', 'save', 8192, 4, 13),
     ('nvme_gpu', 'save', 65536, 4, 14),
+    # nvme_rand_ops (rand_seed = seed): direction, size, qd, window blocks, seed.
+    # Seed 15 over 8 blocks ends at block 0, so the qd-1 slot holds block 0
+    # only in the rand order (the linear order ends at block 7).
+    ('nvme_gpu_rand', 'load', 8192, 1, 8, 15),
+    ('nvme_gpu_rand', 'load', 8192, 4, 4, 16),
+    ('nvme_gpu_rand', 'save', 8192, 4, 4, 17),
     ('gpu_nic', 4096, 4, 21),
     ('gpu_nic', 16384, 4, 22),
     ('chains', 'pair', 'nvme-nic', 'nic-nvme', 'closed', 4096, 31),
@@ -51,6 +58,8 @@ CASES = (
 MARKER = re.compile(r'^XDEV_EXT_EVAL_SESSION=(\S+?):(\S+) (PASS|FAIL) bytes=(\d+) sha256=([0-9a-f]{64})$')
 DONE = re.compile(r'^XDEV_EXT_EVAL_SESSION_DONE=(\d+)/(\d+)$')
 BACKEND = 'XDEV_EXT_EVAL_SESSION_BACKEND=CPU-memcpy-standin gpu=none performance_claim=none'
+# One NVMe transfer: a group of max_hw_sectors runs, a larger one is refused at CREATE.
+LIMIT = re.compile(r'^XDEV_EXT_EVAL_SESSION_LIMIT=PASS max_hw_bytes=\d+ at_max=pass above_max=refused$')
 SCRATCH = re.compile(r'^XDEV_EXT_EVAL_SESSION_SCRATCH=restored source_sha256=[0-9a-f]{64} '
                      r'destination_sha256=[0-9a-f]{64}$')
 
@@ -58,6 +67,8 @@ SCRATCH = re.compile(r'^XDEV_EXT_EVAL_SESSION_SCRATCH=restored source_sha256=[0-
 def case_id(c):
     if c[0] == 'nvme_gpu':
         return 'nvme_gpu:%s-s%d-q%d-seed%d' % c[1:]
+    if c[0] == 'nvme_gpu_rand':
+        return 'nvme_gpu_rand:%s-s%d-q%d-n%d-seed%d' % c[1:]
     if c[0] == 'gpu_nic':
         return 'gpu_nic:egress-ingest-s%d-d%d-seed%d' % c[1:]
     if c[1] == 'pair':
@@ -69,6 +80,8 @@ def guest_call(c):
     """The line of the guest script that runs case @c."""
     if c[0] == 'nvme_gpu':
         return 'nvme_gpu_case %s %d %d %d' % c[1:]
+    if c[0] == 'nvme_gpu_rand':
+        return 'nvme_gpu_rand_case %s %d %d %d %d' % c[1:]
     if c[0] == 'gpu_nic':
         return 'gpu_nic_case %d %d %d' % c[1:]
     if c[1] == 'pair':
@@ -91,6 +104,18 @@ def xg_payload(seed, length, offset=0):
     key = xg_mix64(seed & 0xffffffff)
     return b''.join((((w ^ key) * XG_WORD_MUL) & M64).to_bytes(8, 'little')
                     for w in range(offset // 8, (offset + length) // 8))
+
+
+def xg_rand_block(n, seed, i):
+    """xg_block() of nvme_gpu_core.h for the rand pattern in pass 0."""
+    if n <= 2:
+        a = 1
+    else:
+        a = 2 + xg_mix64((seed & 0xffffffff) << 32) % (n - 2)
+        while math.gcd(a, n) != 1:
+            a = a + 1 if a + 1 < n else 2
+    b = xg_mix64(((seed & 0xffffffff) << 32) ^ 0x5bd1e995) % n
+    return (a * i + b) % n
 
 
 # --- payload of tests/eval/chains/chain_oracle.h --------------------------------
@@ -142,6 +167,10 @@ def canonical(c):
     if c[0] == 'nvme_gpu':
         _, _, size, qd, seed = c
         return xg_payload(seed, size * qd)
+    if c[0] == 'nvme_gpu_rand':
+        # blocks == qd, or qd 1 with the rand order ending at block 0.
+        _, _, size, qd, _, seed = c
+        return xg_payload(seed, size * qd)
     if c[0] == 'gpu_nic':
         _, size, depth, seed = c
         return xg_payload(seed, size * depth)
@@ -165,6 +194,8 @@ def arm_shapes(c):
     """role -> (batches per session, stages, RX-first, sessions)."""
     if c[0] == 'nvme_gpu':
         return {'main': (c[3], 2, False, 2)}
+    if c[0] == 'nvme_gpu_rand':
+        return {'main': (c[4], 2, False, 2)}
     if c[0] == 'gpu_nic':
         return {'tx': (c[2], 2, False, 1), 'rx': (c[2], 2, True, 1)}
     if c[1] == 'pair':
@@ -262,6 +293,9 @@ def validate(text):
             done = (int(m.group(1)), int(m.group(2)))
     if lines.count(BACKEND) != 1:
         raise ValueError('XDEV_EXT_EVAL_SESSION_BACKEND line missing or repeated')
+    if sum(1 for line in lines if line.startswith('XDEV_EXT_EVAL_SESSION_LIMIT=')) != 1 or \
+            sum(1 for line in lines if LIMIT.fullmatch(line)) != 1:
+        raise ValueError('XDEV_EXT_EVAL_SESSION_LIMIT transfer-limit line missing, failed or repeated')
     if sum(1 for line in lines if SCRATCH.fullmatch(line)) != 1:
         raise ValueError('XDEV_EXT_EVAL_SESSION_SCRATCH restore line missing or repeated')
     for name, c in want.items():

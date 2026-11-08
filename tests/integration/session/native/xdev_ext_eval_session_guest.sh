@@ -11,7 +11,8 @@
 #
 # EVAL_DIR   chain_bench, chain_plan.bpf.o, session_nvme_ce, session_gpu_nic,
 #            eval_session_oracle
-# XDEV_DIR   xdev_ext_mech_ctl, nxp_mech.bpf.o, ce_plan.bpf.o, xdev_ext_ce_sim.ko
+# XDEV_DIR   xdev_ext_mech_ctl, nxp_mech.bpf.o, nvme_rand.bpf.o, ce_plan.bpf.o,
+#            xdev_ext_ce_sim.ko
 # SRC_*/DST_* the guest's source and destination NVMe namespaces (block and
 #            generic character devices); eth0 and eth1 are linked AF_XDP NICs
 #            with MACs 02:00:00:00:00:01 and 02:00:00:00:00:02.
@@ -78,7 +79,8 @@ sectors_of() {
 for f in "$oracle" "$bench" "$eval_dir/session_nvme_ce" "$eval_dir/session_gpu_nic" "$ctl"; do
 	test -x "$f"
 done
-for f in "$eval_dir/chain_plan.bpf.o" "$opt/nxp_mech.bpf.o" "$opt/ce_plan.bpf.o" "$opt/xdev_ext_ce_sim.ko"; do
+for f in "$eval_dir/chain_plan.bpf.o" "$opt/nxp_mech.bpf.o" "$opt/nvme_rand.bpf.o" "$opt/ce_plan.bpf.o" \
+	"$opt/xdev_ext_ce_sim.ko"; do
 	test -r "$f"
 done
 test -b "$src_block" && test -c "$src_ng" && test -b "$dst_block" && test -c "$dst_ng"
@@ -161,6 +163,7 @@ guard_prepare() {
 	src_used=0 dst_used=0 ce0_used=0 ce1_used=0
 	case $1 in
 	nvme_gpu_body) dst_used=$(($3 * $4)); ce0_used=$dst_used ;;
+	nvme_gpu_rand_body) dst_used=$(($3 * $5)); ce0_used=$(($3 * $4)) ;;
 	gpu_nic_body) ce0_used=$(($2 * $3)); ce1_used=$ce0_used ;;
 	chain_pair_body)
 		src_used=$(((records + warmup) * $5)); dst_used=$src_used
@@ -259,6 +262,74 @@ nvme_gpu_body() {
 
 nvme_gpu_case() {
 	run_case "nvme_gpu:$1-s$2-q$3-seed$4" nvme_gpu_body "$@"
+}
+
+# The NVMe class plan at the eval-session-nvme pin: OBJECT MAP GLOBAL.
+nvme_plan() {
+	"$ctl" detach --pin /sys/fs/bpf/eval-session-nvme &&
+	"$ctl" attach --obj "$opt/$1" --map "$2" --pin /sys/fs/bpf/eval-session-nvme --set "$3"
+}
+
+# --- nvme_gpu rand: nvme_rand_ops (rand_seed = the arm's --seed) reads the
+# window in the baselines' rand order; blocks = window/size.  With qd 1 the
+# arm's own oracle names the block of the last batch, and the case's seed
+# makes that block 0, which the slot oracle below requires.
+nvme_gpu_rand_body() {
+	direction=$1 size=$2 qd=$3 blocks=$4 seed=$5
+	rec=$work/nvme-gpu.json err=$work/nvme-gpu.err
+	nvme_plan nvme_rand.bpf.o nvme_rand_ops "rand_seed=$seed" >&2 || return 1
+	status=0
+	"$eval_dir/session_nvme_ce" --direction "$direction" --ng "$dst_ng" --slba "$slba" \
+		--lba-size "$lba" --file "$dst_block" --file-offset "$scratch_offset" --ce-dev "$ce" \
+		--ce-va 0 --size "$size" --qd "$qd" --window-bytes "$((size * blocks))" --passes 2 \
+		--pattern rand --seed "$seed" --timeout-ms "$timeout_ms" >"$rec" 2>"$err" || status=$?
+	nvme_plan nxp_mech.bpf.o nxp_nvme_ops nvme_mode=0 >&2 || return 1
+	[ "$status" = 0 ] && standin_pass "$rec" && grep -q '"pattern":"rand"' "$rec" ||
+		{ show "$rec" "$err" >&2; return 1; }
+	audit_arm main "$err" 2 || return 1
+	if [ "$direction" = load ]; then
+		"$oracle" xg-slots --ce "$ce" --va 0 --size "$size" --slots "$qd" --seed "$seed"
+	else
+		"$oracle" xg-file --dev "$dst_block" --offset "$scratch_offset" --size "$size" \
+			--groups "$qd" --slots "$qd" --seed "$seed"
+	fi
+}
+
+nvme_gpu_rand_case() {
+	run_case "nvme_gpu_rand:$1-s$2-q$3-n$4-seed$5" nvme_gpu_rand_body "$@"
+}
+
+# One NVMe transfer: a group of the namespace's max_hw_sectors runs (seq, qd 1)
+# and twice that is refused at CREATE (exit 4, EMSGSIZE named), both inside
+# the scratch span.  Prints XDEV_EXT_EVAL_SESSION_LIMIT=PASS|FAIL.
+nvme_gpu_limit() {
+	max=$(( $(cat "/sys/block/$(basename "$dst_block")/queue/max_hw_sectors_kb") * 1024 ))
+	over=$((max * 2))
+	at=fail above=ran
+	if [ "$over" -le "$scratch_len" ] && [ "$over" -le 4194304 ] && [ $((max % 4096)) = 0 ]; then
+		for size in "$max" "$over"; do
+			status=0
+			"$eval_dir/session_nvme_ce" --direction load --ng "$dst_ng" --slba "$slba" \
+				--lba-size "$lba" --file "$dst_block" --file-offset "$scratch_offset" \
+				--ce-dev "$ce" --ce-va 0 --size "$size" --qd 1 --window-bytes "$size" \
+				--seed 18 --timeout-ms "$timeout_ms" >"$work/limit.json" 2>"$work/limit.err" ||
+				status=$?
+			if [ "$size" = "$max" ]; then
+				[ "$status" = 0 ] && standin_pass "$work/limit.json" && at=pass
+			else
+				[ "$status" = 4 ] && [ ! -s "$work/limit.json" ] &&
+					grep -q 'exceeds one NVMe transfer' "$work/limit.err" && above=refused
+			fi
+			[ "$at" = pass ] || break
+		done
+	fi
+	if [ "$at" = pass ] && [ "$above" = refused ]; then
+		echo "XDEV_EXT_EVAL_SESSION_LIMIT=PASS max_hw_bytes=$max at_max=pass above_max=refused"
+	else
+		show "$work/limit.json" "$work/limit.err" >&2
+		echo "XDEV_EXT_EVAL_SESSION_LIMIT=FAIL max_hw_bytes=$max at_max=$at above_max=$above"
+		return 1
+	fi
 }
 
 # --- gpu_nic: egress [CE D2H, AF_XDP TX] on eth0 feeds ingest [AF_XDP RX, CE H2D] on eth1
@@ -433,6 +504,10 @@ nvme_gpu_case load 8192 4 11
 nvme_gpu_case load 65536 4 12
 nvme_gpu_case save 8192 4 13
 nvme_gpu_case save 65536 4 14
+nvme_gpu_rand_case load 8192 1 8 15
+nvme_gpu_rand_case load 8192 4 4 16
+nvme_gpu_rand_case save 8192 4 4 17
+nvme_gpu_limit
 gpu_nic_case 4096 4 21
 gpu_nic_case 16384 4 22
 chain_pair_case nvme-nic nic-nvme closed 4096 31

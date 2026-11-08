@@ -157,6 +157,10 @@ def arguments(argv=None):
         parser.error("--window-bytes must hold max(qd) blocks of the largest size")
     if not args.build_only and not args.dry_run and (args.directory is None or not args.directory.is_dir()):
         parser.error("--directory must name an existing directory")
+    if "session" in args.arms and len(args.pattern) > 1:
+        # The attached NVMe plan program fixes the order: nxp_nvme_ops for seq,
+        # nvme_rand_ops (rand_seed = --seed of the arms, 1) for rand.
+        parser.error("the session arm runs one --pattern per invocation (one attached NVMe plan)")
     if "session" in args.arms and not args.build_only and not args.dry_run and not (args.ng and args.ce_dev):
         parser.error("the session arm needs --ng and --ce-dev")
     return args
@@ -412,16 +416,19 @@ def arm_command(arm, binary, args, direction, size, qd, pattern, path, window, l
             "--directory", str(Path(path).parent), "--cuda-root", str(args.cuda_root)]
 
 
-def mapping_verified(binary, args, path, lba):
+def mapping_verified(binary, args, path, lba, pattern="seq"):
     """A small read-only session load through --ng must read the file's own bytes.
 
     The session arm seeds --file through the filesystem and the load oracle
     checks what NVMe READ returned, so a wrong slba or namespace fails here
-    before any save cell writes raw LBAs.
+    before any save cell writes raw LBAs.  At qd 1 the oracle also names the
+    block of the last batch, so the probe runs the campaign's pattern and
+    fails when the attached NVMe plan program follows the other order.  128
+    KiB is one transfer of nvme-pci under an IOMMU DMA domain.
     """
-    size = 1 << 20
-    command = arm_command("session", binary, args, "load", size, 1, "seq", path,
-                          min(args.window_bytes, 4 * size), lba)
+    size = 128 << 10
+    command = arm_command("session", binary, args, "load", size, 1, pattern, path,
+                          min(args.window_bytes, 8 * size), lba)
     command[command.index("--passes") + 1] = "1"
     result = subprocess.run(command, text=True, capture_output=True,
                             timeout=args.timeout_ms / 1000 + 600)
@@ -429,8 +436,8 @@ def mapping_verified(binary, args, path, lba):
     if result.returncode:
         return False
     try:
-        validate(parse_record(result.stdout), "session", "load", size, 1, "seq",
-                 min(args.window_bytes, 4 * size), 1)
+        validate(parse_record(result.stdout), "session", "load", size, 1, pattern,
+                 min(args.window_bytes, 8 * size), 1)
     except ValueError:
         return False
     return True
@@ -439,8 +446,8 @@ def mapping_verified(binary, args, path, lba):
 def cell_supported(arm, qd, pattern, destination):
     if arm == "session" and destination != "slot-ring":
         return "the session lands blocks in a ring of qd device slots only"
-    if arm == "session" and (pattern != "seq" or qd > SESSION_MAX_DEPTH):
-        return "session plan is linear with depth <= 64"
+    if arm == "session" and qd > SESSION_MAX_DEPTH:
+        return "session depth is limited to 64 batches"
     if arm == "gds-batch" and qd > 1 and qd % 2:
         return "two ceil(qd/2) batch waves can admit qd+1 I/Os; not an equal-QD cell"
     if arm == "gds-direct" and destination != "window":
@@ -493,7 +500,8 @@ def main(argv=None):
                 except (OSError, ValueError) as error:
                     skip("session: " + str(error))
                     binaries.pop("session")
-            if "session" in binaries and not mapping_verified(binaries["session"], args, path, lba):
+            if "session" in binaries and not mapping_verified(binaries["session"], args, path, lba,
+                                                              args.pattern[0]):
                 # A wrong LBA window would make a raw NVMe WRITE land outside the file.
                 skip("session: the read-only load probe did not confirm the LBA window; "
                      "no session cell runs")

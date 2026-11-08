@@ -645,6 +645,82 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_nvme_slba(__u64 window_slba, __u64 window_nlb
 }
 
 /*
+ * Affine group order of the NVMe<->GPU evaluation's rand pattern
+ * (tests/eval/nvme_gpu/nvme_gpu_core.h, xg_block() of pass 0): position i
+ * of a window of n groups names group (mul * (i mod n) + add) mod n, with
+ * mul the first value coprime to n from a seeded start, so every group is
+ * named once per n positions.  n < 2^32 keeps every product below 2^64.
+ */
+#define XDEV_EXT_MP_AFFINE_GCD_STEPS	48U	/* Lame: operands < 2^32 need <= 46 */
+#define XDEV_EXT_MP_AFFINE_TRIES	64U	/* gap to the next coprime; n - 1 always is */
+
+XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_mix64(__u64 x)
+{
+	/* splitmix64 finaliser, as xg_mix64() */
+	x += 0x9e3779b97f4a7c15ULL;
+	x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+	x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+	return x ^ (x >> 31);
+}
+
+/* gcd(@a, @b) of operands below 2^32; 0 if Euclid has not ended. */
+XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_gcd32(__u64 a, __u64 b)
+{
+	__u32 i;
+
+	for (i = 0; i < XDEV_EXT_MP_AFFINE_GCD_STEPS; i++) {
+		__u64 t;
+
+		if (!b)
+			return a;
+		t = a % b;
+		a = b;
+		b = t;
+	}
+	return b ? 0 : a;
+}
+
+/* xg_rand_mul(@n, @seed, 0): 1 for n <= 2, otherwise in [2, n). */
+XDEV_EXT_MP_INLINE int xdev_ext_mp_affine_mul(__u64 n, __u32 seed, __u64 *mul)
+{
+	__u64 a;
+	__u32 i;
+
+	if (!n)
+		return -EINVAL;
+	if (n >> 32)
+		return -EOVERFLOW;
+	if (n <= 2) {
+		*mul = 1;
+		return 0;
+	}
+	a = 2 + xdev_ext_mp_mix64((__u64)seed << 32) % (n - 2);
+	for (i = 0; i < XDEV_EXT_MP_AFFINE_TRIES; i++) {
+		if (xdev_ext_mp_gcd32(a, n) == 1) {
+			*mul = a;
+			return 0;
+		}
+		a = a + 1 < n ? a + 1 : 2;
+	}
+	return -ERANGE;
+}
+
+/* The offset xg_block() adds in pass 0; @n > 0. */
+XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_affine_add(__u64 n, __u32 seed)
+{
+	return xdev_ext_mp_mix64(((__u64)seed << 32) ^ 0x5bd1e995ULL) % n;
+}
+
+XDEV_EXT_MP_INLINE int xdev_ext_mp_affine_group(__u64 n, __u64 mul, __u64 add,
+				      __u64 index, __u64 *group)
+{
+	if (!n || n >> 32 || !mul || (mul >= n && n > 1) || add >= n)
+		return -EINVAL;
+	*group = (mul * (index % n) + add) % n;
+	return 0;
+}
+
+/*
  * S0 at the uring_cmd callsite: slot @request_id mod the window's slots of
  * @bytes, placed as xdev_ext_mp_nvme_slba() places a batch index.
  */
