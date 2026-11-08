@@ -49,6 +49,10 @@ jobs:
           python3 tests/compute/cuda/early_selection/test_selection.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/cuda-early-owner-contracts"
           python3 tests/compute/cuda/early_selection/test_driver.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-early-selection-contracts"
           python3 tests/compute/tp/echo_gpu_mutations_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-echo-gpu-mutations"
+      - name: vLLM KV connector rules and the K-KV restore worker contract
+        run: |
+          python3 -B -m unittest discover -s tests/compute/vllm/kv_connector -p 'test_*.py' -v
+          python3 -B -m unittest discover -s tests/eval/kv_restore -p 'test_worker_contract.py' -v
       - name: NVIDIA dma-buf descriptor and module ownership
         working-directory: .
         run: python3 -I tests/compute/nvidia/nv_xdev_ext_dmabuf_test.py

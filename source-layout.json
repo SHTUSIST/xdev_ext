@@ -907,6 +907,50 @@
       "logical_path": "src/compute/vllm/README.md"
     },
     {
+      "source": "src/compute/vllm/kv_connector/README.md",
+      "logical_path": "src/compute/vllm/kv_connector/README.md"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/pyproject.toml",
+      "logical_path": "src/compute/vllm/kv_connector/pyproject.toml"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/__init__.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/__init__.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/connector.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/connector.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/core.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/core.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/index.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/index.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/layout.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/layout.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/restore.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/restore.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/scatter.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/scatter.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/staging.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/staging.py"
+    },
+    {
+      "source": "src/compute/vllm/kv_connector/xdev_kv_vllm/verify.py",
+      "logical_path": "src/compute/vllm/kv_connector/xdev_kv_vllm/verify.py"
+    },
+    {
       "source": "src/compute/vllm/pyproject.toml",
       "logical_path": "src/compute/vllm/pyproject.toml"
     },
@@ -4318,6 +4362,50 @@
       "source": "tests/compute/user_stage/wiring_test.py",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_mech/user_stage/wiring_test.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/_paths.py",
+      "logical_path": "tests/compute/vllm/kv_connector/_paths.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/fake_restore_worker.py",
+      "logical_path": "tests/compute/vllm/kv_connector/fake_restore_worker.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_connector_api.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_connector_api.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_core.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_core.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_index.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_index.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_layout.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_layout.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_restore.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_restore.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_scatter.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_scatter.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_staging.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_staging.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/test_verify.py",
+      "logical_path": "tests/compute/vllm/kv_connector/test_verify.py"
+    },
+    {
+      "source": "tests/compute/vllm/kv_connector/vllm_stub.py",
+      "logical_path": "tests/compute/vllm/kv_connector/vllm_stub.py"
     },
     {
       "source": "tests/compute/user_stage/test_sharedpool_session.py",
