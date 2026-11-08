@@ -74,6 +74,7 @@ typedef uint64_t NvU64; typedef uint32_t NvU32; typedef uint8_t NvBool;
 typedef int NV_STATUS; typedef NvU64 RmPhysAddr;
 #define NV_TRUE 1
 #define NV_FALSE 0
+#define NV_U64_MAX UINT64_MAX
 #define NV_OK 0
 #define NV_ERR_INVALID_ARGUMENT 0x1f
 #define NV_ERR_BUSY_RETRY 0x3
@@ -87,7 +88,7 @@ typedef int NV_STATUS; typedef NvU64 RmPhysAddr;
 typedef void (*ChannelCompletionCallback)(void *);
 typedef enum { AT_GPU = 1 } ADDRESS_TRANSLATION;
 #define FORCE_VMMU_TRANSLATION(md, at) (at)
-enum { ADDR_SYSMEM = 1, ADDR_FBMEM = 2 };
+enum { ADDR_SYSMEM = 1, ADDR_FBMEM = 2, ADDR_VIRTUAL = 3 };
 typedef struct { int unused; } OBJGPU;
 typedef struct { OBJGPU *pGpu; } OBJCHANNEL;
 typedef struct CeUtils { OBJCHANNEL *pChannel; NvU64 lastSubmittedPayload; } CeUtils;
@@ -126,13 +127,14 @@ typedef struct {
     NvU64 srcAddr, dstAddr; NvU32 size;
 } CHANNEL_PB_INFO;
 #define MAX_CHUNKS 256
-static struct { NvU64 src, dst; NvU32 size; NvBool finish, pipelined; } chunk[MAX_CHUNKS];
+static struct { NvU64 src, dst; NvU32 size; NvBool finish, pipelined; NvU32 srcSpace, dstSpace; } chunk[MAX_CHUNKS];
 static unsigned nchunks;
 static NV_STATUS _ceutilsSubmitPushBuffer(CeUtils *c, NvBool pipelined, NvBool finish,
                                           CHANNEL_PB_INFO *info)
 {
     (void)c;
     if (nchunks == MAX_CHUNKS) return NV_ERR_INVALID_ARGUMENT;
+    chunk[nchunks].srcSpace = info->srcAddressSpace; chunk[nchunks].dstSpace = info->dstAddressSpace;
     chunk[nchunks].src = info->srcAddr; chunk[nchunks].dst = info->dstAddr;
     chunk[nchunks].size = info->size; chunk[nchunks].finish = finish;
     chunk[nchunks].pipelined = pipelined; nchunks++;
@@ -233,6 +235,47 @@ static void run(const char *name, MEMORY_DESCRIPTOR *src, NvU64 src_off,
     }
 }
 
+static void virtual_host(int reverse)
+{
+    const char *name = reverse ? "virtual-host-d2h" : "virtual-host-h2d";
+    MEMORY_DESCRIPTOR host, vid;
+    static const unsigned every[] = { 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,0 };
+    static const unsigned device_break[] = { 8,0 };
+    NvU64 base = 0x8000000000ULL, done = 0;
+    CEUTILS_MEMCOPY_PARAMS p = {0};
+    fill(&host, ADDR_SYSMEM, 0x40000000ULL, 16, every, 0x10000ULL);
+    fill(&vid, ADDR_FBMEM, 0x200000000ULL, 16, device_break, 0x200000ULL);
+    p.pSrcMemDesc = reverse ? &vid : &host; p.pDstMemDesc = reverse ? &host : &vid;
+    p.srcOffset = reverse ? 300 : 100; p.dstOffset = reverse ? 100 : 300;
+    p.length = 10 * PAGE; p.flags = NV0050_CTRL_MEMCOPY_FLAGS_ASYNC;
+    p.bCoalescePhysRuns = NV_TRUE;
+    if (reverse) p.dstGpuVA = base; else p.srcGpuVA = base;
+    nchunks = 0;
+    NV_STATUS status = ceutilsMemcopy_IMPL(&ce, &p);
+    CHECK(status == NV_OK && nchunks == 2, "virtual host ignores its physical run boundaries; status=%d chunks=%u", status, nchunks);
+    for (unsigned i = 0; i < nchunks; i++) {
+        NvU64 physical = memdescGetPtePhysAddr(&vid, AT_GPU, 300 + done);
+        CHECK((reverse ? chunk[i].dst : chunk[i].src) == base + 100 + done,
+              "host address is mapped base plus logical offset");
+        CHECK((reverse ? chunk[i].src : chunk[i].dst) == physical, "GPU operand remains physical");
+        CHECK((reverse ? chunk[i].dstSpace : chunk[i].srcSpace) == ADDR_VIRTUAL,
+              "host command requests virtual addressing");
+        CHECK((reverse ? chunk[i].srcSpace : chunk[i].dstSpace) == ADDR_FBMEM,
+              "GPU command retains FB physical aperture");
+        CHECK(chunk[i].finish == (i + 1 == nchunks), "only final command carries completion");
+        done += chunk[i].size;
+    }
+    CHECK(done == p.length, "exact copy coverage across host DMA runs");
+    p.srcGpuVA = reverse ? base : 0; p.dstGpuVA = reverse ? 0 : base;
+    nchunks = 0;
+    CHECK(ceutilsMemcopy_IMPL(&ce, &p) == NV_ERR_INVALID_ARGUMENT && nchunks == 0,
+          "virtual override on FB descriptor rejected before any push");
+    p.srcGpuVA = reverse ? 0 : NV_U64_MAX - PAGE; p.dstGpuVA = reverse ? NV_U64_MAX - PAGE : 0;
+    nchunks = 0;
+    CHECK(ceutilsMemcopy_IMPL(&ce, &p) == NV_ERR_INVALID_ARGUMENT && nchunks == 0,
+          "overflowing virtual base rejected before any push");
+}
+
 int main(void)
 {
     MEMORY_DESCRIPTOR host, vid;
@@ -317,6 +360,7 @@ int main(void)
     run("interleaved-breaks", &host, 0, &vid, 0, 16 * PAGE, 1, 7,
         (const NvU32[]){ 2 * PAGE, PAGE, 3 * PAGE, 2 * PAGE, 4 * PAGE, 2 * PAGE, 2 * PAGE });
 
+    virtual_host(0); virtual_host(1);
     printf("checks=%u failures=%u\n", checks, failures);
     return failures ? 1 : 0;
 }

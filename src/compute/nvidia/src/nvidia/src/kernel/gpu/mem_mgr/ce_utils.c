@@ -805,11 +805,19 @@ ceutilsMemcopy_IMPL
         return NV_ERR_INVALID_ARGUMENT;
     }
 
+    /* Only an already-mapped host descriptor may override an operand. The
+     * other operand retains its physical address and aperture. */
+    if ((pParams->srcGpuVA && (memdescGetAddressSpace(pSrcMemDesc) != ADDR_SYSMEM ||
+                             pParams->srcGpuVA > NV_U64_MAX - srcSize)) ||
+        (pParams->dstGpuVA && (memdescGetAddressSpace(pDstMemDesc) != ADDR_SYSMEM ||
+                             pParams->dstGpuVA > NV_U64_MAX - dstSize)))
+        return NV_ERR_INVALID_ARGUMENT;
+
     channelPbInfo.bCeMemcopy = NV_TRUE;
     channelPbInfo.payload = (NvU32)++pCeUtils->lastSubmittedPayload;
 
-    channelPbInfo.srcAddressSpace = memdescGetAddressSpace(pSrcMemDesc);
-    channelPbInfo.dstAddressSpace = memdescGetAddressSpace(pDstMemDesc);
+    channelPbInfo.srcAddressSpace = pParams->srcGpuVA ? ADDR_VIRTUAL : memdescGetAddressSpace(pSrcMemDesc);
+    channelPbInfo.dstAddressSpace = pParams->dstGpuVA ? ADDR_VIRTUAL : memdescGetAddressSpace(pDstMemDesc);
 
     channelPbInfo.srcCpuCacheAttrib = pSrcMemDesc->_cpuCacheAttrib;
     channelPbInfo.dstCpuCacheAttrib = pDstMemDesc->_cpuCacheAttrib;
@@ -826,8 +834,8 @@ ceutilsMemcopy_IMPL
     dstPageGranularity = pDstMemDesc->pageArrayGranularity;
     srcAddrTranslation = FORCE_VMMU_TRANSLATION(pSrcMemDesc, AT_GPU);
     dstAddrTranslation = FORCE_VMMU_TRANSLATION(pDstMemDesc, AT_GPU);
-    bSrcContig = memdescGetContiguity(pSrcMemDesc, srcAddrTranslation);
-    bDstContig = memdescGetContiguity(pDstMemDesc, dstAddrTranslation);
+    bSrcContig = pParams->srcGpuVA || memdescGetContiguity(pSrcMemDesc, srcAddrTranslation);
+    bDstContig = pParams->dstGpuVA || memdescGetContiguity(pDstMemDesc, dstAddrTranslation);
 
     copyLength = length;
 
@@ -840,8 +848,10 @@ ceutilsMemcopy_IMPL
         // Use the memdesc phys addr for calculations, but the pte address for the value
         // programmed into CE
         //
-        NvU64 srcAddr = memdescGetPhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
-        NvU64 dstAddr = memdescGetPhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
+        NvU64 srcAddr = pParams->srcGpuVA ? pParams->srcGpuVA + srcOffset :
+                        memdescGetPhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
+        NvU64 dstAddr = pParams->dstGpuVA ? pParams->dstGpuVA + dstOffset :
+                        memdescGetPhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
         NvU64 maxContigSizeSrc = bSrcContig ? copyLength : (srcPageGranularity - srcAddr % srcPageGranularity);
         NvU64 maxContigSizeDst = bDstContig ? copyLength : (dstPageGranularity - dstAddr % dstPageGranularity);
         NvU32 copySizeContig = pParams->bCoalescePhysRuns ?
@@ -853,8 +863,10 @@ ceutilsMemcopy_IMPL
         NV_PRINTF(LEVEL_INFO, "CeUtils Memcopy dstAddr: %llx, srcAddr: %llx, size: %x\n",
                   dstAddr, srcAddr, copySizeContig);
 
-        channelPbInfo.srcAddr = memdescGetPtePhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
-        channelPbInfo.dstAddr = memdescGetPtePhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
+        channelPbInfo.srcAddr = pParams->srcGpuVA ? srcAddr :
+                                memdescGetPtePhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
+        channelPbInfo.dstAddr = pParams->dstGpuVA ? dstAddr :
+                                memdescGetPtePhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
         channelPbInfo.size = copySizeContig;
         status = _ceutilsSubmitPushBuffer(pCeUtils, bPipelined, copySizeContig == copyLength, &channelPbInfo);
         if (status != NV_OK)

@@ -1053,7 +1053,11 @@ channelPushMemoryProperties
 
         NV_PUSH_INC_1U(RM_SUBCHANNEL, NVB0B5_SET_SRC_PHYS_MODE, data);
 
-        if (pChannel->bUseVasForCeCopy && srcAddressSpace == ADDR_FBMEM)
+        if (srcAddressSpace == ADDR_VIRTUAL)
+        {
+            retVal |= DRF_DEF(B0B5, _LAUNCH_DMA, _SRC_TYPE, _VIRTUAL);
+        }
+        else if (pChannel->bUseVasForCeCopy && srcAddressSpace == ADDR_FBMEM)
         {
             srcAddr = srcAddr + pChannel->fbAliasVA - pChannel->startFbOffset;
             retVal |= DRF_DEF(B0B5, _LAUNCH_DMA, _SRC_TYPE, _VIRTUAL);
@@ -1084,7 +1088,11 @@ channelPushMemoryProperties
 
     NV_PUSH_INC_1U(RM_SUBCHANNEL, NVB0B5_SET_DST_PHYS_MODE, data);
 
-    if (pChannel->bUseVasForCeCopy && dstAddressSpace == ADDR_FBMEM)
+    if (dstAddressSpace == ADDR_VIRTUAL)
+    {
+        retVal |= DRF_DEF(B0B5, _LAUNCH_DMA, _DST_TYPE, _VIRTUAL);
+    }
+    else if (pChannel->bUseVasForCeCopy && dstAddressSpace == ADDR_FBMEM)
     {
         dstAddr = dstAddr + pChannel->fbAliasVA - pChannel->startFbOffset;
         retVal |= DRF_DEF(B0B5, _LAUNCH_DMA, _DST_TYPE, _VIRTUAL);
