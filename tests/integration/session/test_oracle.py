@@ -248,7 +248,8 @@ class SlotRing(Base):
 class AgreesWithValidator(unittest.TestCase):
     def test_every_case_kind_is_covered(self):
         kinds = {c[0] if c[0] != 'chains' else c[1] for c in ev.CASES}
-        self.assertEqual(kinds, {'nvme_gpu', 'gpu_nic', 'pair', 'iaa'})
+        # nvme_gpu_rand reads back with the nvme_gpu oracles (xg-slots, xg-file).
+        self.assertEqual(kinds, {'nvme_gpu', 'nvme_gpu_rand', 'gpu_nic', 'pair', 'iaa'})
 
 
 if __name__ == '__main__':

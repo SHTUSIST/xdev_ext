@@ -111,9 +111,31 @@ every step of every group and the CPU copies no payload.
 - The struct_ops programs `nxp_nvme_ops` (`nxp_mech.bpf.o`, `nvme_mode=0`,
   `key_base` 1) and `ce_plan_ops` (`ce_plan.bpf.o`) must be attached;
   otherwise CREATE fails and the arm exits 4.
-- Batch `k` reads or writes LBA `slba + k*size/lba` (the plan is linear in the
-  batch key), so only `--pattern seq` runs; `rand` exits 4. The session depth
-  limit `XDEV_EXT_MECH_MAX_DEPTH` is 64, so `qd > 64` exits 4.
+- The attached NVMe plan program picks the order. `nxp_nvme_ops` reads or
+  writes batch `k` at LBA `slba + k*size/lba` (`--pattern seq`). For
+  `--pattern rand`, attach `nvme_rand_ops` of `nvme_rand.bpf.o` instead, with
+  `rand_seed` equal to the arm's `--seed` (1 unless given):
+  `xdev_ext_mech_ctl attach --obj nvme_rand.bpf.o --map nvme_rand_ops --pin P
+  --set rand_seed=1`. It reads batch `k` at block `xg_block(g, 0, k)`, the
+  baselines' rand schedule of pass 0; the multiplier and offset are computed
+  in the program from the window and the seed (`xdev_ext_mp_affine_*` in
+  `xdev_ext_mech_prog.h`). START numbers batches from key 1 in every pass,
+  so the session binary and runner require `--passes 1` for `rand`: later
+  baseline passes use different orders that this attached plan cannot
+  represent. Sequential multi-pass sessions and the baselines' existing
+  random multi-pass support remain available. At `qd 1` the load oracle
+  checks that the one slot holds the last block in the order of `--pattern`,
+  so a plan program of the other
+  order fails the cell (unless both orders end at the same block). The
+  session depth limit `XDEV_EXT_MECH_MAX_DEPTH` is 64, so `qd > 64` exits 4.
+  `run.py` takes one `--pattern` per invocation when the session arm runs.
+- One batch is one NVMe command; the storage family does not split a group.
+  CREATE refuses a group larger than the namespace's `max_hw_sectors`
+  (`/sys/block/<ns>/queue/max_hw_sectors_kb`) with `EMSGSIZE`, and the arm
+  exits 4 naming the limit. nvme-pci caps that at `dma_opt_mapping_size`,
+  128 KiB under an IOMMU DMA domain, and at the controller's MDTS. The block
+  layer splits the baselines' larger reads; the session cells above the limit
+  are `not_run`.
 - Kernel gap: a CE stage can only copy within its batch's window slot.
   `xdev_ext_ce_validate()` (`kernel/io_uring/xdev_ext_mech_ce.c`, lines
   404-436) computes the slot's offset with `xdev_ext_mech_window_offset()`
@@ -138,12 +160,16 @@ every step of every group and the CPU copies no payload.
   regular file whose window is one physically contiguous extent run.
   `run.py` derives the LBA window from FIEMAP and the partition offset and
   refuses a file it cannot map. Before any session cell it runs one small
-  read-only load through `--ng`; unless that reads back the file's own bytes,
-  no session cell runs, so a wrong window never receives a raw NVMe WRITE.
+  read-only load through `--ng` (128 KiB, `qd 1`, eight blocks, the
+  campaign's pattern); unless that reads back the file's own bytes in the
+  expected order, no session cell runs, so a wrong window never receives a raw
+  NVMe WRITE and a plan program of the other order is caught first.
 - With `/dev/xdev_ext_ce_sim` (the CPU copy-engine stand-in) a record says
   `execution=kvm-ce-sim`, `performance_claim=none`. `guest_correctness.sh`
-  runs both directions in an xdev_ext KVM guest with that stand-in; it is not
-  run by the host checks.
+  runs both directions and both patterns in an xdev_ext KVM guest with that
+  stand-in; it is not run by the host checks. The KVM harness's eval-session
+  mode (`xdev_ext_eval_session_guest.sh`) runs rand cases and the transfer
+  limit too.
 
 
 ## Untimed VMM CE acceptance
@@ -263,10 +289,14 @@ make -C tests/eval/nvme_gpu check      # host contract tests
 make -C tests/eval/nvme_gpu cuda-build CUDA_ROOT=/usr/local/cuda   # needs an official SDK
 
 python3 tests/eval/nvme_gpu/run.py --arms gds-direct,gds-batch,gds-async,uring-cuda,session \
-  --sizes 4096..4194304 --qd 1,32,256 --pattern seq,rand --pairs 5 \
+  --sizes 4096..4194304 --qd 1,32,256 --pattern seq --pairs 5 \
   --window-bytes 1073741824 --destination slot-ring --completion-wait block \
   --directory DIR --cuda-root /usr/local/cuda --ng /dev/ng0n1 --ce-dev /dev/nvidia0 --ce-alloc
 ```
+
+For random reads, run a second campaign with `--pattern rand` after replacing
+`nxp_nvme_ops` with `nvme_rand_ops` (`rand_seed=1`, see the session arm
+specifics above).
 
 `--window-bytes` must hold `max(qd)` blocks of the largest size (here
 256 x 4 MiB = 1 GiB). With `--destination slot-ring`, `gds-direct` is
@@ -277,8 +307,8 @@ turn leaves the session `not_run`.
 session, staged and batch/async arms, runs every cell `--pairs` times in
 alternating arm order, validates each record against an independent schema
 and count oracle, and prints the
-records. Cells an arm cannot run (session with `rand`, `qd > 64` or
-`window`; batch with odd `qd > 1`; `gds-direct` beyond qd 1 sequential or
+records. Cells an arm cannot run (session with `qd > 64`, `window` or a
+size above one NVMe transfer; batch with odd `qd > 1`; `gds-direct` beyond qd 1 sequential or
 with `slot-ring`) are reported as `not_run`. Without an
 NVIDIA control device the CUDA arms are `not_run`; nothing ran means exit 4.
 The synchronous `gds-direct` delegate instead creates an independent file and

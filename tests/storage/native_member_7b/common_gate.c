@@ -75,4 +75,10 @@ static void test_common_peer(void){
  /* test-only cleanup after retained-state proof; no recovery claim */
  io->runtime.busy=false;nvme_xdev_ext_mech_class.unbind(&gst);GE("common_retained_teardown_balance",live_allocs,0);
 }
-int main(void){test_common_layout();test_common_host();test_common_peer();printf("PASS STOR7B common ownership and wiring %u assertions\n",common_checks);return 0;}
+/* CREATE refuses a group larger than one native transfer (max_hw_sectors 128 = 64 KiB). */
+static void test_common_group_limit(void){
+ gfixture(false);gs.layout.group_bytes=65536+4096;gst.arg1=1024;GE("common_HOST_group_over_max_hw_EMSGSIZE",xdev_ext_storfam_bind(&gst,&gu,&go),-EMSGSIZE);GE("common_HOST_group_over_native_bound_once",binds,1);GE("common_HOST_group_over_native_unbound",unbinds,1);GE("common_HOST_group_over_no_priv",gst.priv,NULL);GE("common_HOST_group_over_no_allocations",live_allocs,0);
+ gfixture(true);gs.layout.group_bytes=65536+4096;gst.arg1=1024;GE("common_PEER_group_over_max_hw_EMSGSIZE",xdev_ext_storfam_bind(&gst,&gu,&go),-EMSGSIZE);GE("common_PEER_group_over_native_unbound",unbinds,1);GE("common_PEER_group_over_no_allocations",live_allocs,0);
+ gfixture(false);gs.layout.group_bytes=65536;gst.arg1=1024;GE("common_HOST_group_at_max_hw_bind0",xdev_ext_storfam_bind(&gst,&gu,&go),0);nvme_xdev_ext_mech_class.unbind(&gst);GE("common_HOST_group_at_max_unbind",unbinds,1);GE("common_HOST_group_at_max_balanced",live_allocs,0);
+}
+int main(void){test_common_layout();test_common_host();test_common_peer();test_common_group_limit();printf("PASS STOR7B common ownership and wiring %u assertions\n",common_checks);return 0;}

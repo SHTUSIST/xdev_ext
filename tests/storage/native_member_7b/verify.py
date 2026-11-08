@@ -19,7 +19,7 @@ COHORT_OUTPUTS = {
     'disabled': 'PASS STOR7B literal assertions 599\n',
     'golden-gcc': 'PASS native_member_7a candidate 558 literal assertions\n',
     'golden-ubsan': 'PASS native_member_7a candidate 558 literal assertions\n',
-    'common': ('PASS STOR7B common ownership and wiring 82 assertions\n'
+    'common': ('PASS STOR7B common ownership and wiring 96 assertions\n'
                'PASS STOR7B additional custom hook assertions 34\n'),
 }
 REVERSE_LABELS = Counter({'golden/assertions.c': 6, 'assertions_7b.c': 6,

@@ -99,16 +99,55 @@ class Built(unittest.TestCase):
                                           "--passes", "2", "--timeout-ms", "60000")
                     self.assertEqual(result.returncode, 4, result.stderr)
                     self.assertIn("O_DIRECT", result.stderr)
-        refusal = re.search(r'--size (\d+) --qd (\d+) --window-bytes (\d+) --pattern rand', script)
-        self.assertIsNotNone(refusal)
-        result = self.session("--size", refusal.group(1), "--qd", refusal.group(2),
-                              "--window-bytes", refusal.group(3), "--pattern", "rand")
+        rand = re.search(r'for case in ((?:"[0-9 ]+" ?)+); do\n(?:.*\n){0,12}?.*--pattern rand',
+                         script)
+        self.assertIsNotNone(rand, "rand case loop of guest_correctness.sh")
+        self.assertIn("--obj \"$dir/nvme_rand.bpf.o\" --map nvme_rand_ops", script)
+        rand_cases = [tuple(int(v) for v in c.split())
+                      for c in re.findall(r'"([0-9 ]+)"', rand.group(1))]
+        # qd 1 lets the load oracle name the block of the last batch exactly.
+        self.assertIn(1, [q for s, q, w in rand_cases])
+        for size, qd, window in rand_cases:
+            for direction in ("load", "save"):
+                with self.subTest(size=size, qd=qd, window=window, rand=direction):
+                    result = self.session("--direction", direction, "--size", str(size),
+                                          "--qd", str(qd), "--window-bytes", str(window),
+                                          "--pattern", "rand", "--passes", "1")
+                    self.assertEqual(result.returncode, 4, result.stderr)
+                    self.assertIn("O_DIRECT", result.stderr)
+
+    def test_session_rand_reaches_the_device_check(self):
+        """rand is a plan-program choice (nvme_rand_ops), not a refusal of the arm."""
+        result = self.session("--pattern", "rand")
         self.assertEqual(result.returncode, 4, result.stderr)
-        self.assertIn("linear", result.stderr)
+        self.assertNotIn("linear", result.stderr)
+        self.assertIn("O_DIRECT", result.stderr)
+
+    def test_session_rand_multiple_passes_are_refused_before_device_setup(self):
+        """Repeating pass-0 is not the baselines' pass-dependent random workload."""
+        for direction in ("load", "save"):
+            for passes in (2, 1000):
+                with self.subTest(direction=direction, passes=passes):
+                    result = self.session("--pattern", "rand", "--direction", direction,
+                                          "--passes", str(passes))
+                    self.assertEqual(result.returncode, 4, result.stderr)
+                    self.assertIn("--passes 1", result.stderr)
+                    self.assertNotIn("O_DIRECT", result.stderr)
+
+    def test_session_sequential_multiple_passes_remain_supported(self):
+        result = self.session("--pattern", "seq", "--passes", "2")
+        self.assertEqual(result.returncode, 4, result.stderr)
+        self.assertIn("O_DIRECT", result.stderr)
+
+    def test_session_names_the_transfer_limit_at_create(self):
+        """CREATE refuses a group above max_hw_sectors with EMSGSIZE: exit 4, named."""
+        source = (HERE / "session_nvme_ce.c").read_text()
+        create = function_body(source, "static int sn_session(")
+        self.assertIn("-EMSGSIZE", create)
+        self.assertIn("max_hw_sectors_kb", create)
 
     def test_session_capability_refusals(self):
-        for extra, text in ((["--pattern", "rand"], "linear"),
-                            (["--qd", "65", "--window-bytes", "1048576"], "depth"),
+        for extra, text in ((["--qd", "65", "--window-bytes", "1048576"], "depth"),
                             ([], "O_DIRECT")):
             with self.subTest(extra=extra):
                 result = self.session(*extra)
@@ -306,10 +345,30 @@ class RunnerPure(unittest.TestCase):
                 self.assertFalse(RUN.mapping_verified(shutil.which(program), Args, "/nonexistent",
                                                       (0, 512)))
 
+    def test_mapping_probe_follows_the_campaign_pattern(self):
+        """The qd-1 probe runs the attached plan's order and a size one native transfer takes."""
+        class Args:
+            ng, ce_dev, ce_alloc, passes, timeout_ms, window_bytes = \
+                "/dev/ng0n1", "/dev/xdev_ext_ce_sim", False, 2, 1000, 8 << 20
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "arm"
+            fake.write_text("#!/bin/sh\necho \"$@\" > %s/argv\nexit 1\n" % tmp)
+            fake.chmod(0o755)
+            for pattern in ("seq", "rand"):
+                with self.subTest(pattern=pattern):
+                    self.assertFalse(RUN.mapping_verified(str(fake), Args, "/nonexistent",
+                                                          (0, 512), pattern))
+                    argv = (Path(tmp) / "argv").read_text().split()
+                    self.assertEqual(argv[argv.index("--pattern") + 1], pattern)
+                    self.assertEqual(argv[argv.index("--qd") + 1], "1")
+                    self.assertLessEqual(int(argv[argv.index("--size") + 1]), 131072)
+
     def test_cell_support(self):
         self.assertIsNone(RUN.cell_supported("session", 64, "seq", "slot-ring"))
         self.assertIsNotNone(RUN.cell_supported("session", 128, "seq", "slot-ring"))
-        self.assertIsNotNone(RUN.cell_supported("session", 1, "rand", "slot-ring"))
+        self.assertIsNone(RUN.cell_supported("session", 1, "rand", "slot-ring"))
+        self.assertIsNone(RUN.cell_supported("session", 64, "rand", "slot-ring"))
+        self.assertIsNotNone(RUN.cell_supported("session", 65, "rand", "slot-ring"))
         self.assertIsNotNone(RUN.cell_supported("session", 1, "seq", "window"))
         self.assertIsNotNone(RUN.cell_supported("gds-direct", 32, "seq", "window"))
         self.assertIsNotNone(RUN.cell_supported("gds-direct", 1, "seq", "slot-ring"))
@@ -347,13 +406,40 @@ class RunnerCLI(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertIn("gds-batch", result.stdout)
 
+    def test_session_rand_multiple_passes_refused_by_runner(self):
+        for arms in ("session", "session,uring-cuda"):
+            for passes in (2, 1000):
+                with self.subTest(arms=arms, passes=passes):
+                    result = self.invoke("--arms", arms, "--sizes", "4096", "--qd", "1",
+                                         "--pattern", "rand", "--passes", str(passes), "--dry-run")
+                    self.assertEqual(result.returncode, 2, result.stderr)
+                    self.assertEqual(result.stdout, "")
+                    self.assertIn("--passes 1", result.stderr)
+
+    def test_baselines_keep_their_multiple_random_passes(self):
+        result = self.invoke("--arms", "uring-cuda,gds-batch", "--sizes", "4096", "--qd", "1",
+                             "--pattern", "rand", "--passes", "2", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('"status": "planned"', result.stdout)
+        args = RUN.arguments(["--arms", "uring-cuda,gds-batch", "--sizes", "4096", "--qd", "1",
+                              "--pattern", "rand", "--passes", "2", "--dry-run"])
+        self.assertEqual(args.passes, 2)
+
+    def test_session_rand_one_pass_is_supported_by_runner(self):
+        result = self.invoke("--arms", "session", "--sizes", "4096", "--qd", "1",
+                             "--pattern", "rand", "--passes", "1", "--dry-run")
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_usage_errors(self):
         for args in ([], ["--arms", "uring-cuda", "--sizes", "4097", "--qd", "1", "--build-only"],
                      ["--arms", "cpu", "--sizes", "4096", "--qd", "1", "--build-only"],
                      ["--arms", "uring-cuda", "--sizes", "4096", "--qd", "1"],
                      ["--arms", "session", "--sizes", "4096", "--qd", "1", "--directory", "/"],
                      ["--arms", "uring-cuda", "--sizes", "4194304", "--qd", "256",
-                      "--window-bytes", "4194304", "--build-only"]):
+                      "--window-bytes", "4194304", "--build-only"],
+                     # One attached NVMe plan program fixes the session's order.
+                     ["--arms", "session", "--sizes", "4096", "--qd", "1",
+                      "--pattern", "seq,rand", "--build-only"]):
             with self.subTest(args=args):
                 result = self.invoke(*args)
                 self.assertEqual(result.returncode, 2, result.stderr)

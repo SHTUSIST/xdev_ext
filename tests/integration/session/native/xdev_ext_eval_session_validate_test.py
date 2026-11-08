@@ -152,15 +152,44 @@ class Rules(unittest.TestCase):
 class CaseTable(unittest.TestCase):
     def test_guest_script_runs_exactly_the_validated_cases(self):
         text = GUEST.read_text()
-        calls = re.findall(r'^(nvme_gpu_case|gpu_nic_case|chain_pair_case|chain_iaa_case) (.+)$',
+        calls = re.findall(r'^(nvme_gpu_case|nvme_gpu_rand_case|gpu_nic_case|chain_pair_case|'
+                           r'chain_iaa_case) (.+)$',
                            text, re.M)
         self.assertEqual([' '.join((f, a)) for f, a in calls], [ev.guest_call(c) for c in ev.CASES])
 
     def test_case_ids_are_unique(self):
         ids = [ev.case_id(c) for c in ev.CASES]
         self.assertEqual(len(ids), len(set(ids)))
-        for arm in ('chains', 'nvme_gpu', 'gpu_nic'):
+        for arm in ('chains', 'nvme_gpu', 'nvme_gpu_rand', 'gpu_nic'):
             self.assertTrue(any(i.startswith(arm + ':') for i in ids))
+
+    def test_rand_cases_tell_the_orders_apart(self):
+        """A qd-1 rand load whose oracle (block 0 in the one slot) fails under the linear plan."""
+        rand = [c for c in ev.CASES if c[0] == 'nvme_gpu_rand']
+        self.assertIn('save', [c[1] for c in rand])
+        telling = [c for c in rand if c[1] == 'load' and c[3] == 1 and c[4] > 1]
+        self.assertTrue(telling)
+        for _, _, size, qd, blocks, seed in telling:
+            self.assertEqual(ev.xg_rand_block(blocks, seed, blocks - 1), 0)
+            self.assertNotEqual(blocks - 1, 0)
+        for _, _, size, qd, blocks, seed in rand:
+            # The xg-slots/xg-file oracles name blocks 0..qd-1 only.
+            self.assertTrue(blocks == qd or (qd == 1 and ev.xg_rand_block(blocks, seed, blocks - 1) == 0))
+            self.assertLessEqual(size * blocks, 1 << 20, 'inside the 1 MiB scratch span')
+
+    def test_transfer_limit_line_required(self):
+        lines = (FIXTURES / 'pass.log').read_text().splitlines()
+        limit = [l for l in lines if l.startswith('XDEV_EXT_EVAL_SESSION_LIMIT=')]
+        self.assertEqual(len(limit), 1)
+        text = '\n'.join(lines) + '\n'
+        for bad in ('', limit[0].replace('above_max=refused', 'above_max=ran'),
+                    limit[0].replace('at_max=pass', 'at_max=fail'),
+                    limit[0] + '\n' + limit[0]):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'LIMIT'):
+                ev.validate(text.replace(limit[0], bad, 1))
+        guest = GUEST.read_text()
+        self.assertIn('max_hw_sectors_kb', guest)
+        self.assertIn('exceeds one NVMe transfer', guest)
 
     def test_guest_script_records_no_timing(self):
         text = GUEST.read_text()
@@ -200,6 +229,26 @@ int main(int argc, char **argv) {
                     data = subprocess.run([str(binary), str(length), str(seed)], capture_output=True,
                                           check=True).stdout
                     self.assertEqual(data, ev.xg_payload(seed, length))
+
+    def test_rand_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = compile_dump(r'''
+#include <stdio.h>
+#include <stdlib.h>
+#include "nvme_gpu_core.h"
+int main(int argc, char **argv) {
+    struct xg_geometry g = { .size = 4096, .qd = 1, .passes = 1, .pattern = XG_RAND };
+    unsigned long long n = strtoull(argv[1], 0, 10);
+    g.window = n * 4096; g.seed = (unsigned)strtoul(argv[2], 0, 10);
+    for (unsigned long long i = 0; i < n; i++) printf("%llu\n", (unsigned long long)xg_block(&g, 0, i));
+    return 0; }
+''', tmp)
+            for n, seed in ((8, 15), (4, 16), (100, 1), (4096, 7), (1, 3), (2, 9)):
+                with self.subTest(n=n, seed=seed):
+                    out = subprocess.run([str(binary), str(n), str(seed)], capture_output=True,
+                                         check=True, text=True).stdout.split()
+                    self.assertEqual([int(x) for x in out],
+                                     [ev.xg_rand_block(n, seed, i) for i in range(n)])
 
     def test_chain_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
