@@ -713,7 +713,10 @@ def ce_units(root, kernel, build, mutation=None):
     names = ('xdev_ext_ce_sim_bind_region', 'xdev_ext_ce_sim_unbind_region',
              'xdev_ext_ce_sim_bind_host', 'xdev_ext_ce_sim_unbind_host',
              'xdev_ext_ce_sim_in', 'xdev_ext_ce_sim_copy')
-    selected = []
+    fail_modes = re.search(r'^enum xdev_ext_ce_sim_fail \{\n.*?^\};', simulator, re.M | re.S)
+    if not fail_modes:
+        raise Setup('CE simulator failure modes missing')
+    selected = [fail_modes[0]]
     for name in ('xdev_ext_ce_sim_host', 'xdev_ext_ce_sim_req'):
         match = re.search(r'^struct ' + name + r' \{\n.*?^\};', simulator, re.M | re.S)
         if not match:
