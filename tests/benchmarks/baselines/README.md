@@ -69,15 +69,27 @@ server argv. The helper CLI defaults to dry-run; `--execute` is required to
 launch the child. No prefix-cache flag or prompt-prefix modification is used.
 
 The helper owns its Popen child/session, serializes this tool's use of the port
-with a project/UID/port flock, and proves the listening socket inode belongs to
-that child process group via Linux `/proc`. Missing ownership evidence refuses
-the request. Only a health GET precedes the one inference POST. The request
+with a project/UID/port flock. Before sending any health or inference bytes it
+connects explicitly, finds that connection's reverse ESTABLISHED TCP tuple in
+Linux `/proc/net/tcp`, and proves its server-side inode is held by a process
+in that anchored child session/group. It sends once on the same connection;
+automatic reconnects, redirects and proxies are disabled. A listener snapshot
+alone cannot qualify the peer. Missing ownership evidence refuses the request.
+Only a health GET precedes the one inference POST. The request
 file's bytes are sent unchanged. Every reported `cached_tokens` must be numeric
 zero; when the field is absent, the result says the counter was not reported
 and preserves the fresh-process evidence separately.
 
 Startup, health readiness and final owned-group cleanup are outside the timer.
 The result's `elapsed_ns` measures the complete HTTP response, **not TTFT**.
+The HTTP operation includes its connection ownership check; this helper does
+not certify model performance or a long-running workload. Startup and health
+checks remain outside that interval. Catchable TERM/INT/HUP cancellation in the
+CLI runs owned-group cleanup, including cancellation during spawn or cleanup.
+The unreaped direct child anchors group signaling. SIGKILL cannot run cleanup;
+descendants that deliberately leave the owned session/group are outside this
+group-only guarantee. Library callers of `run_request` must arrange their own
+signal policy; the helper CLI installs and restores its temporary handlers.
 The helper always terminates and waits for its owned group; it never reads a
 serialized PID to choose a process to stop. Recompute's `down` phase therefore
 has no persistent service to signal. This per-request entry does not certify

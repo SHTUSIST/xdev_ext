@@ -2058,6 +2058,10 @@
       "logical_path": "tests/benchmarks/baselines/test_cold_request.py"
     },
     {
+      "source": "tests/benchmarks/baselines/test_cold_ownership.py",
+      "logical_path": "tests/benchmarks/baselines/test_cold_ownership.py"
+    },
+    {
       "source": "tests/benchmarks/baselines/test_qualification.py",
       "logical_path": "tests/benchmarks/baselines/test_qualification.py"
     },

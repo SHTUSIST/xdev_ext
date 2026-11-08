@@ -6,18 +6,20 @@ Linux /proc ownership evidence is mandatory. No cached PID state is read.
 The interval is full HTTP response time; startup/health/shutdown are excluded.
 """
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import fcntl
+import http.client
 import json
 import math
 import os
 from pathlib import Path
 import signal
+import socket
 import stat
+import struct
 import subprocess
 import time
 import urllib.error
-import urllib.request
 
 LOCK_ROOT = Path('/tmp') / f'xdev-ext-cold-request-{os.getuid()}'
 
@@ -64,8 +66,7 @@ def group_members(pgid):
     return members
 
 
-def assert_owned_listener(child, port):
-    inodes = listener_inodes(port)
+def owned_socket_inodes(child):
     owned = set()
     for pid in group_members(child.pid):
         try:
@@ -74,12 +75,119 @@ def assert_owned_listener(child, port):
                     target = os.readlink(fd)
                     if target.startswith('socket:[') and target.endswith(']'):
                         owned.add(target[8:-1])
-                except OSError:
+                except FileNotFoundError:
                     continue
-        except OSError:
-            continue
+        except OSError as exc:
+            raise OwnershipError('cannot inspect fresh child socket FDs') from exc
+    return owned
+
+
+def assert_owned_listener(child, port):
+    inodes = listener_inodes(port)
+    owned = owned_socket_inodes(child)
     if not inodes or not inodes <= owned:
         raise OwnershipError('listener is not proven to belong to this fresh child group')
+
+
+def assert_owned_connection(child, sock, timeout):
+    """Prove the accepted peer of this connected IPv4 socket before sending.
+
+    /proc/net/tcp gives local/remote tuples, state and socket inode; the
+    reversed ESTABLISHED row must name an FD of the anchored PGID/SID. An
+    unaccepted socket can temporarily have inode 0, so wait without sending.
+    Never reconnect based on this observation.
+    """
+    def endpoint(pair):
+        return f'{struct.unpack("=I", socket.inet_aton(pair[0]))[0]:08X}:{pair[1]:04X}'
+
+    local, peer = endpoint(sock.getsockname()), endpoint(sock.getpeername())
+    deadline = time.monotonic() + timeout
+    while True:
+        if child_exited(child):
+            raise OwnershipError('owned service exited before connection proof')
+        found = set()
+        try:
+            for row in Path('/proc/net/tcp').read_text().splitlines()[1:]:
+                fields = row.split()
+                if fields[1] == peer and fields[2] == local and fields[3] == '01':
+                    found.add(fields[9])
+        except (OSError, ValueError, IndexError) as exc:
+            raise OwnershipError('cannot inspect connected peer in /proc/net/tcp') from exc
+        owned = owned_socket_inodes(child)
+        if found and '0' not in found:
+            if not found <= owned:
+                raise OwnershipError('connected HTTP peer is outside this fresh child group')
+            return
+        if time.monotonic() >= deadline:
+            raise OwnershipError('connected HTTP peer has no proven owned socket FD')
+        time.sleep(.005)
+
+
+def owned_http(child, port, method, path, body, timeout):
+    """One explicit connection and one request, no proxy, redirect or reconnect."""
+    connection = http.client.HTTPConnection('127.0.0.1', port, timeout=timeout)
+    connection.auto_open = 0
+    try:
+        connection.connect()
+        assert_owned_connection(child, connection.sock, timeout)
+        connection.request(method, path, body=body,
+                           headers={'Content-Type': 'application/json'} if body is not None else {})
+        with connection.getresponse() as response:
+            if 300 <= response.status < 400:
+                raise ColdError('HTTP redirects are refused for owned cold requests')
+            if method == 'POST' and response.status != 200:
+                raise urllib.error.HTTPError(f'http://127.0.0.1:{port}{path}', response.status,
+                                             response.reason, response.headers, None)
+            return response.status, response.read()
+    finally:
+        # Close this verified/unverified connection before any owned cleanup.
+        connection.close()
+
+
+class _Cancelled(BaseException):
+    def __init__(self, signum):
+        self.signum = signum
+
+
+class _Cancellation:
+    def __init__(self):
+        self.depth, self.pending = 0, None
+        self.cleaning = self.raised = False
+
+    def handler(self, signum, frame):
+        if self.depth or self.cleaning or self.raised:
+            self.pending = self.pending or signum
+        else:
+            self.raised = True
+            raise _Cancelled(signum)
+
+    @contextmanager
+    def deferred(self):
+        # Do not block the OS signal mask: Popen children must inherit ordinary
+        # termination semantics. Only defer Python exceptions across assignment
+        # and cleanup, so no child is lost and cleanup cannot be reentered.
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+            if not self.depth and self.pending is not None:
+                signum, self.pending = self.pending, None
+                self.raised = True
+                raise _Cancelled(signum)
+
+
+@contextmanager
+def cli_cancellation():
+    cancellation = _Cancellation()
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    try:
+        for sig in previous:
+            signal.signal(sig, cancellation.handler)
+        yield cancellation
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
 
 
 @contextmanager
@@ -143,7 +251,7 @@ def cached_tokens(value):
 
 
 def run_request(server_argv, body, port, startup_timeout=1800, request_timeout=300,
-                cleanup_timeout=10):
+                cleanup_timeout=10, _cancellation=None):
     if not isinstance(port, int) or isinstance(port, bool) or not 1 <= port <= 65535:
         raise ValueError('an explicit port in 1..65535 is required')
     if (not isinstance(server_argv, (list, tuple)) or not server_argv
@@ -158,11 +266,12 @@ def run_request(server_argv, body, port, startup_timeout=1800, request_timeout=3
     with port_lock(port):
         if listener_inodes(port):
             raise OwnershipError('port has an existing listener; it will not be stopped')
-        child = subprocess.Popen(server_argv, start_new_session=True,
-                                 stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        child = None
         result = None
         try:
-            http = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with _cancellation.deferred() if _cancellation else nullcontext():
+                child = subprocess.Popen(server_argv, start_new_session=True,
+                                         stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
             deadline = time.monotonic() + startup_timeout
             while True:
                 if child_exited(child):
@@ -170,9 +279,9 @@ def run_request(server_argv, body, port, startup_timeout=1800, request_timeout=3
                 if listener_inodes(port):
                     assert_owned_listener(child, port)
                     try:
-                        with http.open(f'http://127.0.0.1:{port}/health', timeout=1) as reply:
-                            if reply.status == 200:
-                                break
+                        status, _ = owned_http(child, port, 'GET', '/health', None, 1)
+                        if status == 200:
+                            break
                     except (OSError, urllib.error.URLError):
                         pass
                 if time.monotonic() >= deadline:
@@ -181,11 +290,8 @@ def run_request(server_argv, body, port, startup_timeout=1800, request_timeout=3
             assert_owned_listener(child, port)
             if child_exited(child):
                 raise ColdError('owned service exited before request')
-            request = urllib.request.Request(f'http://127.0.0.1:{port}/v1/completions',
-                                             data=body, headers={'Content-Type': 'application/json'})
             started = time.perf_counter_ns()
-            with http.open(request, timeout=request_timeout) as reply:
-                response = reply.read()
+            _, response = owned_http(child, port, 'POST', '/v1/completions', body, request_timeout)
             elapsed = time.perf_counter_ns() - started
             parsed = json.loads(response)
             hits = cached_tokens(parsed)
@@ -195,8 +301,17 @@ def run_request(server_argv, body, port, startup_timeout=1800, request_timeout=3
                           timing_scope='http-full-response', reported_cached_tokens=hits,
                           cache_counter='zero' if hits else 'not-reported', response=parsed,
                           scope='one-request-fresh-process', performance_claim='none')
+        except BaseException:
+            if _cancellation:
+                _cancellation.cleaning = True
+            raise
+        else:
+            if _cancellation:
+                _cancellation.cleaning = True
         finally:
-            cleaned = cleanup(child, cleanup_timeout)
+            if child is not None:
+                with _cancellation.deferred() if _cancellation else nullcontext():
+                    cleaned = cleanup(child, cleanup_timeout)
         result['owned_group_cleaned'] = cleaned
         return result
 
@@ -216,7 +331,13 @@ def main(argv=None):
                               port=args.port, scope='one-request-fresh-process',
                               timing_scope='http-full-response', performance_claim='none')))
         return 0
-    print(json.dumps(run_request(command, body, args.port, startup_timeout=args.startup_timeout)))
+    try:
+        with cli_cancellation() as cancellation:
+            print(json.dumps(run_request(command, body, args.port,
+                                         startup_timeout=args.startup_timeout,
+                                         _cancellation=cancellation)))
+    except _Cancelled as cancelled:
+        return 128 + cancelled.signum
     return 0
 
 
