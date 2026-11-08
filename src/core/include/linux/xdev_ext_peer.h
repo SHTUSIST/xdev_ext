@@ -176,7 +176,7 @@ int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *, u64 epoch
  * peer lock held; it must not watch or unwatch.  Owners of other state bound
  * to requester epochs re-check it there. */
 struct xdev_ext_peer_recovery_watch {
- struct list_head node;
+ struct xdev_ext_peer_recovery_watch *next; /* the core's list */
  void (*recovered)(struct xdev_ext_peer_recovery_watch *);
 };
 void xdev_ext_peer_recovery_watch(struct xdev_ext_peer_recovery_watch *);

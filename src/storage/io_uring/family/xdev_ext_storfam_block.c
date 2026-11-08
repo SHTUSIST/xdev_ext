@@ -458,7 +458,7 @@ static void xdev_ext_storfam_peer_put(struct xdev_ext_stor_stage *ss,
 int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss)
 {
 	struct xdev_ext_stor_peer_resources *res = ss->peer;
-	int worst = XDEV_EXT_PEER_EVIDENCE_COVERED;
+	int worst = XDEV_EXT_PEER_EVIDENCE_COVERED, e;
 	struct xdev_ext_peer_requester *rq;
 	u64 epoch;
 	u32 i;
@@ -476,7 +476,9 @@ int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss)
 		if (io->nr_leases && !io->done.uncertain)
 			continue;
 		xdev_ext_storfam_peer_evidence(ss, io, &rq, &epoch);
-		worst = max(worst, xdev_ext_peer_requester_evidence(rq, epoch));
+		e = xdev_ext_peer_requester_evidence(rq, epoch);
+		if (e > worst)
+			worst = e;
 	}
 	return worst;
 }

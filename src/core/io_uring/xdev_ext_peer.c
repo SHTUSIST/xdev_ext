@@ -365,7 +365,7 @@ static DEFINE_MUTEX(xdev_ext_peer_quarantine_lock);
 static LIST_HEAD(xdev_ext_peer_quarantined);
 /* Called after each recovery pass, no other peer lock held. */
 static DEFINE_MUTEX(xdev_ext_peer_watch_lock);
-static LIST_HEAD(xdev_ext_peer_watchers);
+static struct xdev_ext_peer_recovery_watch *xdev_ext_peer_watchers;
 static void xdev_ext_peer_recovery_work(struct work_struct *work);
 static DECLARE_WORK(xdev_ext_peer_recovery, xdev_ext_peer_recovery_work);
 struct xdev_ext_peer_requester *xdev_ext_peer_requester_register(struct pci_dev *pdev)
@@ -435,14 +435,17 @@ EXPORT_SYMBOL_GPL(xdev_ext_peer_requester_evidence);
 void xdev_ext_peer_recovery_watch(struct xdev_ext_peer_recovery_watch *w)
 {
  mutex_lock(&xdev_ext_peer_watch_lock);
- list_add_tail(&w->node, &xdev_ext_peer_watchers);
+ w->next = xdev_ext_peer_watchers; xdev_ext_peer_watchers = w;
  mutex_unlock(&xdev_ext_peer_watch_lock);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_recovery_watch);
 void xdev_ext_peer_recovery_unwatch(struct xdev_ext_peer_recovery_watch *w)
 {
+ struct xdev_ext_peer_recovery_watch **cursor;
  mutex_lock(&xdev_ext_peer_watch_lock);
- list_del(&w->node);
+ for (cursor = &xdev_ext_peer_watchers; *cursor && *cursor != w; cursor = &(*cursor)->next) { }
+ if (*cursor) *cursor = w->next;
+ w->next = NULL;
  mutex_unlock(&xdev_ext_peer_watch_lock);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_recovery_unwatch);
@@ -546,7 +549,7 @@ static void xdev_ext_peer_recovery_work(struct work_struct *work)
  }
  /* Holders of other evidence-bound state re-check after this pass. */
  mutex_lock(&xdev_ext_peer_watch_lock);
- list_for_each_entry(w, &xdev_ext_peer_watchers, node)
+ for (w = xdev_ext_peer_watchers; w; w = w->next)
   w->recovered(w);
  mutex_unlock(&xdev_ext_peer_watch_lock);
 }
