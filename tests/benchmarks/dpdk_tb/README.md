@@ -110,7 +110,8 @@ step is needed. Use the same EAL core list for every arm that is compared.
 
 `vm_check.sh --work DIR --bin DIR/dpdk_tb-host` boots one KVM guest and runs
 client and server over a veth pair (XDP in native mode) and over two
-macvlans on a dummy device (generic mode, as on thunderbolt-net). Each link
+emulated e1000 NICs joined by a QEMU hub (e1000 has no XDP support, so XDP
+attaches in generic mode, as on thunderbolt-net). Each link
 gets a pingpong run and a stream run, both with `--verify all`. It writes
 `DIR/verdict.json`. It checks correctness only.
 

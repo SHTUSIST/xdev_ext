@@ -10,8 +10,10 @@
 # libxdp's BPF objects.  Inside it two dpdk_tb processes (separate EAL file
 # prefixes and cores) talk over a virtual link through net_af_xdp:
 #   veth     a veth pair: XDP attaches in native (drv) mode
-#   macvlan  two bridge-mode macvlans on a dummy device: no ndo_bpf, so XDP
-#            attaches in generic (skb) mode, as on thunderbolt-net
+#   e1000    two emulated e1000 NICs joined by a QEMU hub: e1000 has no
+#            ndo_bpf, so XDP attaches in generic (skb) mode, as on
+#            thunderbolt-net.  (macvlan is no substitute: on 7.0 kernels it
+#            forwards ndo_bpf to its lower device and native attach fails.)
 # On each link the client runs --mode pingpong and --mode stream with
 # --verify all, so every message is compared byte for byte after its copy.
 # Records land in DIR/results; DIR/verdict.json says PASS only if all four
@@ -31,7 +33,7 @@ while [ $# -gt 0 ]; do
 	*) echo "vm_check.sh: unknown argument $1" >&2; exit 2 ;;
 	esac
 done
-[ -n "$work" ] && [ -n "$bin" ] || { sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
+[ -n "$work" ] && [ -n "$bin" ] || { sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
 case "$work" in /*) ;; *) echo "--work must be absolute" >&2; exit 2 ;; esac
 [ -x "$bin" ] && [ -r "$kernel" ] || { echo "missing $bin or $kernel" >&2; exit 2; }
 mkdir -p -m 0700 "$work"
@@ -65,7 +67,7 @@ for o in /usr/lib/x86_64-linux-gnu/bpf/xsk_def_xdp_prog*.o /usr/local/lib/bpf/xs
 	[ -e "$o" ] && cp "$o" "$root/lib/bpf/"
 done
 kver=$(basename "$kernel" | sed 's/^vmlinuz-//')
-for m in veth dummy macvlan; do
+for m in veth e1000; do
 	src=$(modinfo -k "$kver" -n "$m")
 	case "$src" in
 	*.zst) zstd -q -d -c "$src" > "$root/lib/modules/$m.ko" ;;
@@ -83,14 +85,19 @@ mkdir -p /var/run /run /tmp
 mkdir -p /dev/hugepages; mount -t hugetlbfs -o pagesize=2M nodev /dev/hugepages
 echo 512 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 echo "TB_VM hugepages=\$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages) kernel=\$(cat /proc/sys/kernel/osrelease)"
-for m in veth dummy macvlan; do insmod /lib/modules/\$m.ko || echo "TB_VM insmod \$m failed"; done
+for m in veth e1000; do insmod /lib/modules/\$m.ko || echo "TB_VM insmod \$m failed"; done
+sleep 1
+for n in /sys/class/net/*; do
+	case "\$(cat \$n/address)" in
+	52:54:00:7b:00:01) ip link set \$(basename \$n) name tbe1 ;;
+	52:54:00:7b:00:02) ip link set \$(basename \$n) name tbe2 ;;
+	esac
+done
 ip link add tba type veth peer name tbb
 # this iproute2 build has been seen naming the peer veth0; rename it then
 [ -e /sys/class/net/tbb ] || ip link set veth0 name tbb
-ip link add tbd type dummy
-ip link add link tbd name tbm1 type macvlan mode bridge
-ip link add link tbd name tbm2 type macvlan mode bridge
-for i in tba tbb tbd tbm1 tbm2; do ip link set \$i up; done
+for i in tba tbb tbe1 tbe2; do ip link set \$i up; done
+sleep 3
 ip -o link | sed 's/^/TB_VM link /'
 eal() { echo "--no-pci --no-telemetry --huge-dir /dev/hugepages --file-prefix \$1 -l \$2 --vdev net_af_xdp0,iface=\$3,start_queue=0,queue_count=1"; }
 run() { # link a b mode
@@ -112,8 +119,8 @@ run() { # link a b mode
 }
 run veth tba tbb pingpong
 run veth tba tbb stream
-run macvlan tbm1 tbm2 pingpong
-run macvlan tbm1 tbm2 stream
+run e1000 tbe1 tbe2 pingpong
+run e1000 tbe1 tbe2 stream
 echo TB_VM_DONE
 poweroff -f
 EOF
@@ -122,7 +129,9 @@ chmod +x "$root/init"
 
 log=$work/console.log
 timeout 2700 qemu-system-x86_64 -accel kvm -cpu host -smp 4 -m 3072 -name claude194-dpdk-tb \
-	-kernel "$kernel" -initrd "$work/initramfs.gz" -nic none -nographic -no-reboot \
+	-kernel "$kernel" -initrd "$work/initramfs.gz" -nographic -no-reboot \
+	-netdev hubport,id=tbh1,hubid=7 -device e1000,netdev=tbh1,mac=52:54:00:7b:00:01 \
+	-netdev hubport,id=tbh2,hubid=7 -device e1000,netdev=tbh2,mac=52:54:00:7b:00:02 \
 	-append "console=ttyS0 panic=-1 quiet" -serial "file:$log" -monitor none \
 	-display none > "$work/qemu.out" 2>&1 || true
 
@@ -143,7 +152,7 @@ m = re.search(r"TB_VM hugepages=(\d+) kernel=(\S+)", text)
 if m:
     verdict["hugepages"], verdict["kernel"] = int(m.group(1)), m.group(2)
 ok = verdict["done"]
-for tag in ("veth-pingpong", "veth-stream", "macvlan-pingpong", "macvlan-stream"):
+for tag in ("veth-pingpong", "veth-stream", "e1000-pingpong", "e1000-stream"):
     e = re.search(r"TB_VM_EXIT %s client=(\d+) server=(\d+)" % tag, text)
     recs = {"client": [], "server": []}
     for side in recs:
@@ -154,7 +163,6 @@ for tag in ("veth-pingpong", "veth-stream", "macvlan-pingpong", "macvlan-stream"
                 recs[side].append({"unparsed": line})
         (Path(work) / "results" / ("%s.%s.jsonl" % (tag, side))).write_text(
             "".join(json.dumps(r) + "\n" for r in recs[side]))
-    mode = tag.split("-")[1]
     sizes_seen = [r.get("size") for r in recs["client"]]
     per_size = iters + 2
     run = {"client_exit": int(e.group(1)) if e else None,
