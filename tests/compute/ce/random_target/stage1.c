@@ -437,6 +437,57 @@ static void xdomain(void)
 	check_ce_rule("NVMe pair keeps its pool-independent CE rule", &c, 0, 0);
 }
 
+/* ASK.91: the CE range rule reads a capability the partner class declares
+ * once, not the partner's class id. Rows: NVMe fills before (READ) and drains
+ * after (WRITE); XDOMAIN fills before on the ring's host-page UMEM only; every
+ * other class declares nothing. A hypothetical class row shows that a new
+ * class is admitted by its own declaration alone.
+ */
+static void capability(void)
+{
+	struct xdev_ext_mech_create c = xdomain_request();
+	__u32 id;
+
+	for (id = 0; id < XDEV_EXT_MECH_CLASS_MAX; id++) {
+		__u32 want = id == XDEV_EXT_MECH_CLASS_NVME ?
+			XDEV_EXT_CE_RANGE_FILLS_BEFORE | XDEV_EXT_CE_RANGE_DRAINS_AFTER :
+			id == XDEV_EXT_MECH_CLASS_XDOMAIN ?
+			XDEV_EXT_CE_RANGE_FILLS_BEFORE | XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY : 0;
+
+		expect("class declares its CE range capability",
+			xdev_ext_mech_class_desc(id)->ce_range_partner, want);
+	}
+	/* Hypothetical producer class: DMA id, capability from the test row. */
+	c.st[0].class_id = XDEV_EXT_MECH_CLASS_DMA;
+	expect("new FILLS_BEFORE producer admitted",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1], XDEV_EXT_CE_RANGE_FILLS_BEFORE), 0);
+	expect("no capability refused",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1], 0), -EOPNOTSUPP);
+	expect("DRAINS_AFTER alone cannot produce",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1], XDEV_EXT_CE_RANGE_DRAINS_AFTER), -EOPNOTSUPP);
+	c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
+	expect("FILLS_BEFORE without UMEM_ONLY keeps any pool",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1], XDEV_EXT_CE_RANGE_FILLS_BEFORE), 0);
+	expect("UMEM_ONLY refuses PEER pool",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1],
+			XDEV_EXT_CE_RANGE_FILLS_BEFORE | XDEV_EXT_CE_RANGE_FILL_UMEM_ONLY), -EOPNOTSUPP);
+	c.st[0].direction = XDEV_EXT_MECH_DIR_TO_DEVICE;
+	c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM;
+	expect("FILLS_BEFORE needs a FROM_DEVICE producer",
+		xdev_ext_ce_range_partner_ok(&c, 1, &c.st[1], XDEV_EXT_CE_RANGE_FILLS_BEFORE), -EOPNOTSUPP);
+	/* Hypothetical consumer class after a CE FROM range at stage 0. */
+	c = request(true);
+	c.st[0].flags = TARGET_RANGE;
+	c.st[1].class_id = XDEV_EXT_MECH_CLASS_DMA;
+	expect("new DRAINS_AFTER consumer admitted",
+		xdev_ext_ce_range_partner_ok(&c, 0, &c.st[0], XDEV_EXT_CE_RANGE_DRAINS_AFTER), 0);
+	expect("FILLS_BEFORE alone cannot consume",
+		xdev_ext_ce_range_partner_ok(&c, 0, &c.st[0], XDEV_EXT_CE_RANGE_FILLS_BEFORE), -EOPNOTSUPP);
+	c.st[1].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	expect("DRAINS_AFTER needs a TO_DEVICE consumer",
+		xdev_ext_ce_range_partner_ok(&c, 0, &c.st[0], XDEV_EXT_CE_RANGE_DRAINS_AFTER), -EOPNOTSUPP);
+}
+
 static void capacity(void)
 {
 	static const __u32 counts[] = { 33, 48, 64 };
@@ -487,8 +538,10 @@ int main(int argc, char **argv)
 		topology();
 	else if (!strcmp(argv[1], "capacity"))
 		capacity();
-	else if (!strcmp(argv[1], "xdomain"))
+	else if (!strcmp(argv[1], "xdomain")) {
 		xdomain();
+		capability();
+	}
 	else
 		return 2;
 	printf("stage1 %s: %u checks, %u failures\n", argv[1], checks, failures);
