@@ -51,7 +51,8 @@ class DiagCommandLine(unittest.TestCase):
         result = self.run_diag("--help")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         for option in ("--ce-dev", "--sizes", "--batches", "--depth", "--reps",
-                       "--frame-bytes", "--dir", "--kprobe-profile", "--link-bdf"):
+                       "--frame-bytes", "--dir", "--kprobe-profile", "--link-bdf",
+                       "--host-huge"):
             self.assertIn(option, result.stdout)
         self.assertIn("never a paper result", result.stdout)
 

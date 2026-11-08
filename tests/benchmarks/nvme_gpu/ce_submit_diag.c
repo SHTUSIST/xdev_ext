@@ -14,7 +14,9 @@
  *
  * Optional per phase: hit deltas of tracefs kprobe events (--kprobe-profile)
  * and the minimum/maximum PCIe link speed and width read from the GPU's Link
- * Status register while the phase runs (--link-bdf).
+ * Status register while the phase runs (--link-bdf).  --host-huge backs the
+ * UMEM with 2 MiB hugetlb pages (reserved by the caller), so host frames are
+ * physically contiguous; by default they are ordinary 4 KiB pages.
  *
  * Every result line carries diagnostic=internal: these numbers explain the
  * submission path and are never paper results.  A periodic-pattern check of
@@ -47,7 +49,7 @@ struct csd_opts {
 	uint64_t sizes[CSD_MAX_SIZES];
 	unsigned int nr_sizes;
 	uint64_t batches, depth, reps, timeout_ms, frame_bytes;
-	bool d2h;
+	bool d2h, host_huge;
 };
 
 struct csd_cuda {
@@ -218,9 +220,10 @@ static void csd_result(const char *method, uint64_t size, uint64_t frame,
 {
 	double bytes = (double)size * (double)o->batches;
 
-	printf("CE_SUBMIT_DIAG method=%s dir=%s size=%llu frame=%llu batches=%llu depth=%llu "
+	printf("CE_SUBMIT_DIAG method=%s dir=%s host=%s size=%llu frame=%llu batches=%llu depth=%llu "
 	       "rep=%u ns=%llu gbps=%.3f us_per_copy=%.3f diagnostic=internal\n",
-	       method, o->d2h ? "d2h" : "h2d", (unsigned long long)size,
+	       method, o->d2h ? "d2h" : "h2d", o->host_huge ? "huge2m" : "4k",
+	       (unsigned long long)size,
 	       (unsigned long long)frame, (unsigned long long)o->batches,
 	       (unsigned long long)o->depth, rep, (unsigned long long)ns,
 	       ns ? bytes / (double)ns : 0.0,
@@ -235,7 +238,7 @@ static void csd_result(const char *method, uint64_t size, uint64_t frame,
 static int csd_ce_session(const struct csd_opts *o, struct es_ce *ce, uint64_t size,
 			  unsigned int rep, struct csd_link *link, bool *fatal)
 {
-	uint64_t frame = csd_frame(o, size), frames, i, t0, t1, deadline;
+	uint64_t frame = csd_frame(o, size), frames, i, t0, t1, deadline, mapped = 0;
 	struct io_uring_xdev_ext_umem_reg reg = { 0 };
 	struct xdev_ext_mech_create c;
 	struct xdev_ext_mech_stats s;
@@ -257,8 +260,12 @@ static int csd_ce_session(const struct csd_opts *o, struct es_ce *ce, uint64_t s
 	frames = (uint64_t)ret;
 	reg.frame_size = (__u32)frame;
 	reg.size = o->depth * frames * frame;
-	umem = mmap(NULL, reg.size, PROT_READ | PROT_WRITE,
-		    MAP_PRIVATE | MAP_ANONYMOUS | MAP_POPULATE, -1, 0);
+	mapped = o->host_huge ? (reg.size + (2ULL << 20) - 1) & ~((2ULL << 20) - 1) : reg.size;
+	umem = mmap(NULL, mapped, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS |
+		    MAP_POPULATE | (o->host_huge ? MAP_HUGETLB : 0), -1, 0);
+	if (umem == MAP_FAILED && o->host_huge)
+		fprintf(stderr, "hugetlb UMEM of %llu bytes: %s (reserve vm.nr_hugepages)\n",
+			(unsigned long long)mapped, strerror(errno));
 	user = calloc(o->depth * frames, sizeof(*user));
 	buf = malloc(o->depth * size);
 	if (umem == MAP_FAILED || !user || !buf) {
@@ -373,7 +380,7 @@ out:
 	free(user);
 	free(buf);
 	if (umem != MAP_FAILED)
-		munmap(umem, reg.size);
+		munmap(umem, mapped);
 	return ret;
 }
 
@@ -494,6 +501,7 @@ static void csd_usage(FILE *f)
 	fprintf(f, "usage: ce_submit_diag [--ce-dev /dev/nvidiaN] [--sizes 4096,...,4194304]\n"
 		"       [--batches N] [--depth N] [--reps N] [--frame-bytes N] [--dir h2d|d2h]\n"
 		"       [--timeout-ms N] [--kprobe-profile PATH] [--link-bdf DDDD:BB:DD.F]\n"
+		"       [--host-huge]\n"
 		"Internal diagnostic: CE session vs pinned cuMemcpy; never a paper result.\n");
 }
 
@@ -529,6 +537,7 @@ static int csd_parse(int argc, char **argv, struct csd_opts *o)
 		{ "timeout-ms", required_argument, NULL, 't' },
 		{ "kprobe-profile", required_argument, NULL, 'k' },
 		{ "link-bdf", required_argument, NULL, 'l' },
+		{ "host-huge", no_argument, NULL, 'H' },
 		{ "help", no_argument, NULL, 'h' },
 		{ NULL, 0, NULL, 0 }
 	};
@@ -557,6 +566,7 @@ static int csd_parse(int argc, char **argv, struct csd_opts *o)
 		case 't': bad |= xg_parse_u64(optarg, 600000, &o->timeout_ms) || !o->timeout_ms; break;
 		case 'k': o->kprobe_profile = optarg; break;
 		case 'l': o->link_bdf = optarg; break;
+		case 'H': o->host_huge = true; break;
 		case 'h': csd_usage(stdout); return -1;
 		default: return XG_EXIT_USAGE;
 		}
