@@ -414,6 +414,9 @@ jobs:
             --source "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/src/kernel/gpu/mem_mgr/channel_utils.c" \
             --sdk-include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/sdk/nvidia/inc" \
             --include "$GITHUB_WORKSPACE/build/assembled/nvidia/src/common/inc"
+          python3 "$GITHUB_WORKSPACE/tests/compute/nvidia/nv_xdev_ext_ce_memcopy_runs_test.py" \
+            --source "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/src/kernel/gpu/mem_mgr/ce_utils.c" \
+            --params-header "$GITHUB_WORKSPACE/src/compute/nvidia/src/nvidia/generated/g_ce_utils_nvoc.h"
       - name: Reliable control admission and map teardown regressions
         shell: bash
         run: |

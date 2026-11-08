@@ -679,6 +679,32 @@ ceutilsMemset_IMPL
     return status;
 }
 
+//
+// Bytes from offset that one CE command can cover in a non-contiguous
+// pMemDesc: the rest of the current page plus every following page whose
+// programmed (PTE) address continues the run, at most limit.
+//
+static NvU64
+_ceutilsPhysRunLength
+(
+    MEMORY_DESCRIPTOR  *pMemDesc,
+    ADDRESS_TRANSLATION addressTranslation,
+    NvU64               offset,
+    NvU64               limit
+)
+{
+    NvU64 granularity = pMemDesc->pageArrayGranularity;
+    NvU64 start = memdescGetPtePhysAddr(pMemDesc, addressTranslation, offset);
+    NvU64 run = granularity - (memdescGetPhysAddr(pMemDesc, addressTranslation, offset) % granularity);
+
+    while (run < limit &&
+           memdescGetPtePhysAddr(pMemDesc, addressTranslation, offset + run) == start + run)
+    {
+        run += granularity;
+    }
+    return NV_MIN(run, limit);
+}
+
 NV_STATUS
 ceutilsMemcopy_IMPL
 (
@@ -772,8 +798,12 @@ ceutilsMemcopy_IMPL
         //
         NvU64 srcAddr = memdescGetPhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
         NvU64 dstAddr = memdescGetPhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
-        NvU64 maxContigSizeSrc = bSrcContig ? copyLength : (srcPageGranularity - srcAddr % srcPageGranularity);
-        NvU64 maxContigSizeDst = bDstContig ? copyLength : (dstPageGranularity - dstAddr % dstPageGranularity);
+        NvU64 maxContigSizeSrc = bSrcContig ? copyLength :
+            pParams->bCoalescePhysRuns ? _ceutilsPhysRunLength(pSrcMemDesc, srcAddrTranslation, srcOffset, copyLength) :
+            (srcPageGranularity - srcAddr % srcPageGranularity);
+        NvU64 maxContigSizeDst = bDstContig ? copyLength :
+            pParams->bCoalescePhysRuns ? _ceutilsPhysRunLength(pDstMemDesc, dstAddrTranslation, dstOffset, copyLength) :
+            (dstPageGranularity - dstAddr % dstPageGranularity);
         NvU32 copySizeContig = (NvU32)NV_MIN(NV_MIN(copyLength, NV_MIN(maxContigSizeSrc, maxContigSizeDst)), CE_MAX_BYTES_PER_LINE);
 
         NV_PRINTF(LEVEL_INFO, "CeUtils Memcopy dstAddr: %llx, srcAddr: %llx, size: %x\n",
