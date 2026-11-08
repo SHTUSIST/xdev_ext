@@ -666,6 +666,21 @@ void xdev_ext_peer_fd_release(struct xdev_ext_peer_fd_lease *h, bool quiesced)
 }
 #endif
 
+/* No requester record reaches the chain model: an UNKNOWN storage outcome
+ * is an unbound release, recorded like every other unquiesced one. */
+bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *h,
+				      struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+	(void)rq; (void)epoch;
+	xdev_ext_peer_fd_release(h, false);
+	return false;
+}
+int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq, u64 epoch)
+{
+	return !rq || epoch == XDEV_EXT_PEER_EPOCH_NONE ? XDEV_EXT_PEER_EVIDENCE_NEVER :
+	       XDEV_EXT_PEER_EVIDENCE_PENDING;
+}
+
 /* ---- --pool host: IOU_UMEM pages, the real requester, DMA API --------- */
 unsigned chain_host_map_violations;
 bool chain_host_mode(void)

@@ -82,6 +82,47 @@ int main(void)
 	EXPECT_EQ(-EIO, nv_xdev_ext_gpu_normalize_status(0x55, 5));
 	EXPECT_EQ(-EIO, nv_xdev_ext_gpu_normalize_status(0x55, -5000));
 
+	/*
+	 * RM transfers of a plan: an entry adjacent to the previous one in both
+	 * the host pages and the window extends it; any gap starts a new one;
+	 * one transfer never exceeds RM's 32-bit size.
+	 */
+	{
+		struct nv_xdev_ext_ce_span sp[8];
+		nv_xdev_ext_gpu_u32 m = 0;
+
+		nv_xdev_ext_ce_span_add(sp, &m, KB(8), 0, 4096);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(12), KB(4), 4096);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(16), KB(8), 2048);
+		EXPECT_EQ(1, m);
+		EXPECT_EQ(KB(8), sp[0].host_off);
+		EXPECT_EQ(0, sp[0].gpu_off);
+		EXPECT_EQ(10240, sp[0].len);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(40), KB(10), 4096);	/* host gap */
+		EXPECT_EQ(2, m);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(44), KB(20), 4096);	/* window gap */
+		EXPECT_EQ(3, m);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(48), KB(24), 4096);
+		EXPECT_EQ(3, m);
+		EXPECT_EQ(8192, sp[2].len);
+		/* Same host, earlier window: never merged backwards or overlapping. */
+		nv_xdev_ext_ce_span_add(sp, &m, KB(52), KB(24), 4096);
+		EXPECT_EQ(4, m);
+		nv_xdev_ext_ce_span_add(sp, &m, KB(52), KB(28), 4096);	/* overlaps host */
+		EXPECT_EQ(5, m);
+		/* 32-bit size limit: the next adjacent entry starts a new transfer. */
+		m = 0;
+		nv_xdev_ext_ce_span_add(sp, &m, 0, 0, 0xffffe000U);
+		nv_xdev_ext_ce_span_add(sp, &m, 0xffffe000ULL, 0xffffe000ULL, 0x1000);
+		EXPECT_EQ(1, m);
+		EXPECT_EQ(0xfffff000ULL, sp[0].len);
+		nv_xdev_ext_ce_span_add(sp, &m, 0xfffff000ULL, 0xfffff000ULL, 0x1000);
+		EXPECT_EQ(2, m);
+		EXPECT_EQ(0xfffff000ULL, sp[0].len);
+		EXPECT_EQ(0x1000, sp[1].len);
+		EXPECT_EQ(0xfffff000ULL, sp[1].host_off);
+	}
+
 	printf("nv_xdev_ext_ce_plan_test: %u checks, %u failures\n", checks,
 	       failures);
 	return failures != 0;

@@ -158,6 +158,15 @@ class BackendHarness(unittest.TestCase):
     def test_g3_dma_sync_before_device_read_and_cpu_publish(self):
         self.run_cases(("sync",), ("event+iova", "poll+iova"))
 
+    def test_g3_sync_covers_only_the_request_pages(self):
+        self.run_cases(("sync-scattered",), ("event+iova", "poll+iova"))
+
+    def test_adjacent_plan_entries_reach_rm_as_one_transfer(self):
+        self.run_cases(("merge-adjacent",))
+
+    def test_sync_cost_independent_of_pool_segments(self):
+        self.run_cases(("sync-pool-walk",), ("event+iova", "poll+iova"))
+
     # G12 composed at the backend: failed window unbind keeps the owner
     def test_g12_failed_window_unbind_retains_owner(self):
         self.run_cases(("region-unbind-fail", "host-released-region-failed"))

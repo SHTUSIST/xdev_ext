@@ -193,7 +193,7 @@ run's plan. Detach only the pin created for this acceptance. A timeout or any
 nonzero result leaves the suite unqualified; process exit does not recover
 UNKNOWN work or prove that kernel references were released.
 
-Each successful case executes one batch at depth 1 with two 2048-byte host
+Each successful small case executes one batch at depth 1 with two 2048-byte host
 payload spans. Each selected 4096-byte host frame has 1024-byte head and tail
 guards; two additional unselected frames are guards. Every byte of the host
 mapping and the entire rounded VMM allocation is checked, including all
@@ -206,12 +206,28 @@ unwritten GPU windows and allocation rounding slack.
 | `multi` | Two stage FDs share one VMM export. Disjoint GPU window A goes through D2H into host, then H2D into GPU window B. Host and B start poisoned, so omitting either transfer fails. |
 | `close-export` | Attach both stage FDs, close only the caller's exported FD **before CREATE**, clear that FD's cleanup ownership, then execute the same two-stage route. CUDA mapping and allocation remain owned. |
 | `partial-attach` | First attach succeeds; a second real CE FD is passed a closed, nonnegative export FD. Require a driver-returned nonzero NVIDIA status, with no CREATE/START for this setup. Close the partial setup, check process FD scope, then require a fresh two-stage transfer. |
+| `large-huge` | The `multi` route with one 2 MiB group: 32 frames of 64 KiB, no head room, frames 16-47 of a 4 MiB host pool backed by two 2 MiB hugetlb pages, GPU window A at offset 0 and B at 2.5 MiB of an 8 MiB allocation. Frames adjacent in the pool and the window reach RM as one transfer per stage, so the CE needs one command per physically adjacent run of pages: multi-page commands. Needs `vm.nr_hugepages` >= 2. |
+| `large-4k` | The same group on a host pool of ordinary 4 KiB pages (`MADV_NOHUGEPAGE`) whose pages are faulted alternately with a filler mapping, so neighbouring pool pages do not get adjacent frames and the CE needs about one command per page while the GPU side stays one long run. A pool faulted in order came out physically contiguous on a freshly booted guest. |
+
+The large cases check the whole 4 MiB host pool and the whole allocation
+like the small ones, with a position-dependent pattern over the 2 MiB, so a
+skipped, repeated or misplaced page fails. Each also prints
+`CE_VMM_HOST_LAYOUT ... host_runs=N diagnostic=internal`: the number of
+physically adjacent runs the pinned group pages form, from
+`/proc/self/pagemap` (needs CAP_SYS_ADMIN; `unknown` otherwise). With
+`--kprobe-profile /sys/kernel/tracing/kprobe_profile` and kprobes the caller
+created, the probe prints `CE_VMM_KPROBE case=... event=... hits=N
+diagnostic=internal` deltas from START to the terminal wake; the RM core
+flushes the write-combine buffer twice per pushed CE command
+(`os_flush_cpu_write_combine_buffer` in `channelFillGpFifo`), which gives the
+command count. Neither line is part of the PASS decision.
 
 The probe uses the same `es_ce_open` / CUDA VMM helper as the NVMe/GPU
 session arm. It uses reported CREATE admission, terminal eventfd notification,
 STATS settlement, and STOP_REPORT before any oracle readback. A success requires
 exactly one submitted/completed command per used stage, one completed batch,
-two published frames, zero errors/rejects/inflight/sequestered work, an ACTIVE
+every frame of the group published (two, or 32 in the large cases), zero
+errors/rejects/inflight/sequestered work, an ACTIVE
 settlement, and a STOPPED final report. Two payload descriptors within a stage
 count as one stage command.
 
@@ -234,8 +250,8 @@ count exit 4 as a PASS.
 The earlier helper-only `CE_VMM_QUALIFICATION` marker is superseded: its
 CUDA seeding/readback did not execute a kernel session. Host tests of this
 probe validate the acceptance decisions and build/CLI behavior; they do not
-execute or qualify physical CE DMA. A physical PASS covers this small CE
-configuration only. NVMe/NIC route correctness, production queue depths,
+execute or qualify physical CE DMA. A physical PASS covers these CE
+configurations only (one batch at depth 1; the large cases one 2 MiB group). NVMe/NIC route correctness, production queue depths,
 native GDS path counters, equal output placement and completion semantics
 remain separate requirements before a performance comparison.
 

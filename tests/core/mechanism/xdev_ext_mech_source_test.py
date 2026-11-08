@@ -748,7 +748,7 @@ class UbrMechSourceTest(unittest.TestCase):
                         stop.index("xdev_ext_mech_settle_locked(s);"))
         self.assertNotIn("XDEV_EXT_MECH_SESSION_ACTIVE", stop)
 
-    def test_quarantine_never_gives_references_back(self):
+    def test_quarantine_gives_references_back_only_by_evidence(self):
         path = ROOT / "io_uring/xdev_ext_mech.c"
         text = path.read_text(encoding="utf-8")
         park = function_body(path, "static void xdev_ext_mech_quarantine(")
@@ -757,8 +757,28 @@ class UbrMechSourceTest(unittest.TestCase):
             self.assertNotIn(word, park, word)
         self.assertIn("list_add_tail(&s->quarantine_node, "
                       "&xdev_ext_mech_quarantined);", park)
-        # Nothing ever takes a session off the quarantine list.
-        self.assertEqual(text.count("quarantine_node"), 2)
+        # Only the evidence recovery takes a session off the quarantine
+        # list, and only after the pure rule returned RELEASE for it.
+        users = [function_body(path, f) for f in (
+            "static void xdev_ext_mech_quarantine(",
+            "static void xdev_ext_mech_repark(",
+            "static void xdev_ext_mech_recovery_fn(")]
+        self.assertEqual(text.count("quarantine_node"),
+                         1 + sum(body.count("quarantine_node") for body in users))
+        self.assertNotIn("list_del", users[1])
+        recovery = users[2]
+        self.assertEqual(recovery.count("list_move_tail(&s->quarantine_node, &ready);"), 1)
+        self.assertLess(recovery.index("if (fate != XDEV_EXT_MECH_REFS_RELEASE)"),
+                        recovery.index("list_move_tail(&s->quarantine_node, &ready);"))
+        self.assertLess(recovery.index("if (!s->ss.q.settled)"),
+                        recovery.index("xdev_ext_mech_recovery_fate(s)"))
+        fate = function_body(path, "static int xdev_ext_mech_recovery_fate(")
+        self.assertEqual(fate.count("xdev_ext_mech_sess_recovery(&ss, &ss.q, evidence)"), 2)
+        recover = function_body(path, "static void xdev_ext_mech_recover(")
+        self.assertLess(recover.index("->evidence_release(&s->st[i])"),
+                        recover.index("xdev_ext_peer_file_drainable(authority)"))
+        self.assertLess(recover.index("xdev_ext_peer_file_drainable(authority)"),
+                        recover.index("xdev_ext_mech_session_release(s);"))
         destroy = function_body(path, "static int xdev_ext_mech_session_destroy_report(")
         self.assertIn("if (fate != XDEV_EXT_MECH_REFS_RELEASE || !last) {",
                       destroy)
@@ -771,7 +791,8 @@ class UbrMechSourceTest(unittest.TestCase):
                           "kthread_cancel_delayed_work_sync",
                           "kthread_cancel_delayed_work_sync",
                           "kthread_cancel_delayed_work_sync",
-                          "synchronize_rcu", "kthread_destroy_worker"])
+                          "synchronize_rcu", "kthread_destroy_worker",
+                          "xdev_ext_mech_quarantine_settled"])
         self.assertIn("kthread_cancel_delayed_work_sync(&s->poll_work);", reap)
         self.assertIn("kthread_destroy_worker(s->worker);", reap)
 
