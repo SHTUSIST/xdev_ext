@@ -31,6 +31,7 @@
  * protocol of kv_protocol.py on stdin/stdout:
  *   -> KV_READY {json}            setup done (or KV_ERROR {json}, exit 1)
  *   <- GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X verify=0|1
+ *   <- GO run=ID ordinal=R prefix=HASH dst_frame0=D [seed=X] verify=0|1
  *   -> KV_RESULT {json}           one restore (restore, local-verify)
  *   <- QUIT                       -> KV_BYE {json}: STOP's result (the session's
  *                                    final error) and whether resources were released;
@@ -41,6 +42,19 @@
  * the plan only.  The restore latency is CLOCK_MONOTONIC from just before
  * host 2's START to the return of its final wait; host CPU accounting is the
  * orchestrator's (run.py, kv_cpu.py).
+ *
+ * GO prefix=HASH names an entry of --index (kv_index.h, written by
+ * kv_layout.py/kv_dump.py): the worker restores that entry's object_slba and
+ * bytes, and with verify=1 compares the destination with the entry's fnv1a
+ * when it has one (real KV), else with the pattern of seed.
+ *
+ * Restore and local-verify queue requests FIFO on their one session: a reader
+ * thread stamps each line with CLOCK_MONOTONIC when it arrives and queues it
+ * (at most --queue-depth waiting; a GO beyond that is refused at once with
+ * -EBUSY); the main thread runs them one at a time in arrival order. Each
+ * KV_RESULT reports "queue": arrival, start, the wait between them and how
+ * many requests were ahead. QUIT (or EOF) ends the queue after the requests
+ * already in it.
  */
 #define _GNU_SOURCE
 #include <arpa/inet.h>
@@ -54,6 +68,7 @@
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -75,6 +90,7 @@
 #include "../../../kernel/tools/xdev_ext_mech/xdev_ext_mech_cuda.h"
 #include "../../../kernel/tools/include/xdev_ext_nv_p2p_ioctl.h"
 #include "kv_plan.h"
+#include "kv_index.h"
 #include "kv_ce_place.h"
 
 #define LINE_MAX_BYTES	1024
@@ -93,8 +109,10 @@ struct opts {
 	struct kv_geometry g;
 	const char *nvme, *nvme_prog, *xdomain_prog, *xdomain_map, *service, *sysfs_root;
 	const char *listen, *peer, *gpu_bdf, *gpu_node, *token, *ce_dev, *ce_prog;
+	const char *index;		/* prefix index file (restore, local-verify) */
 	enum dst dst;
-	uint64_t link_token, pool_bytes;
+	uint64_t link_token, pool_bytes, hold_ms;
+	uint32_t queue_depth;
 	int timeout_ms;
 	bool dry_run;
 };
@@ -104,8 +122,25 @@ struct prog {
 	struct bpf_link *link;
 };
 
+/* One line read from stdin, stamped when it arrived. */
+struct queued {
+	char text[LINE_MAX_BYTES];
+	uint64_t enq_ns;
+	uint32_t ahead;			/* requests waiting or running when it arrived */
+};
+
+struct fifo {
+	pthread_mutex_t mu;
+	pthread_cond_t cv;
+	struct queued *ring;
+	uint32_t cap, head, count;
+	bool busy, closed;
+};
+
 struct worker {
 	struct opts o;
+	struct kv_index index;
+	struct fifo q;
 	struct xdev_ext_session *s;
 	struct prog nvme, xd, ce;
 	struct bpf_map *ce_target;	/* kv_ce_place.bpf.c .bss: struct kv_ce_target */
@@ -150,12 +185,14 @@ static void jstr(FILE *f, const char *s)
 
 static void emit_error(const char *where, int err)
 {
+	flockfile(stdout);
 	printf("KV_ERROR {\"where\": ");
 	jstr(stdout, where);
 	printf(", \"error\": %d, \"strerror\": ", err);
 	jstr(stdout, strerror(err < 0 ? -err : err));
 	printf("}\n");
 	fflush(stdout);
+	funlockfile(stdout);
 }
 
 static int parse_u64(const char *s, uint64_t *v)
@@ -366,8 +403,20 @@ static int poison_fn(void *map, uint64_t len, void *arg)
 
 struct check {
 	uint64_t seed, offset, bytes, first_bad, digest, outside_bad;
+	uint64_t source_offset;		/* prefix byte offset inside the stored object */
+	uint64_t want;			/* expected FNV-1a of the KV bytes (expect) */
+	bool expect;			/* compare the digest, not the pattern */
 	int result;
 };
+
+/* Digest mode: the KV bytes are real KV, known only by their FNV-1a. */
+static void check_expect(struct check *c)
+{
+	if (c->expect) {
+		c->result = c->digest != c->want;
+		c->first_bad = 0;
+	}
+}
 
 /* Pattern inside [offset, offset+bytes), poison everywhere else. */
 static int check_fn(void *map, uint64_t len, void *arg)
@@ -375,8 +424,10 @@ static int check_fn(void *map, uint64_t len, void *arg)
 	struct check *c = arg;
 	const uint8_t *p = map;
 
-	c->result = kv_pattern_check(c->seed, 0, p + c->offset, c->bytes, &c->first_bad);
+	c->result = c->expect ? 0 : kv_pattern_check(c->seed, c->source_offset, p + c->offset, c->bytes,
+						      &c->first_bad);
 	c->digest = kv_fnv1a(KV_FNV_OFFSET, p + c->offset, c->bytes);
+	check_expect(c);
 	c->outside_bad = UINT64_MAX;
 	for (uint64_t i = 0; i < len; i++) {
 		if (i == c->offset) {
@@ -419,10 +470,13 @@ static int cuda_verify(struct worker *wk, uint64_t offset, uint64_t bytes, uint6
 			ret = -EIO;
 			break;
 		}
-		c->result = kv_pattern_check(seed, done, buf, n, &c->first_bad);
+		c->result = c->expect ? 0 : kv_pattern_check(seed, c->source_offset + done, buf, n,
+							&c->first_bad);
 		c->digest = kv_fnv1a(c->digest, buf, n);
 		done += n;
 	}
+	if (!ret)
+		check_expect(c);
 	if (wk->cuda.ctx_set(previous))
 		ret = ret ? ret : -EIO;
 	free(buf);
@@ -482,8 +536,9 @@ static int cuda_whole(struct worker *wk, bool write, struct check *c)
 			uint64_t hi = at + n < c->offset + c->bytes ? at + n : c->offset + c->bytes;
 			uint64_t bad = 0;
 
-			if (!c->result && kv_pattern_check(c->seed, lo - c->offset, buf + (lo - at),
-							   hi - lo, &bad)) {
+			if (!c->expect && !c->result &&
+			    kv_pattern_check(c->seed, c->source_offset + lo - c->offset,
+					     buf + (lo - at), hi - lo, &bad)) {
 				c->result = 1;
 				c->first_bad = bad;
 			}
@@ -491,6 +546,8 @@ static int cuda_whole(struct worker *wk, bool write, struct check *c)
 		}
 		at += n;
 	}
+	if (!write && !ret)
+		check_expect(c);
 	if (wk->cuda.ctx_set(previous))
 		ret = ret ? ret : -EIO;
 	free(buf);
@@ -714,6 +771,17 @@ static int setup(struct worker *wk, const char **where)
 	len = wk->pool_frames * o->g.frame_bytes;
 	if (o->dst == DST_CE)
 		wk->ring_frames = o->g.depth * (o->g.group_bytes / o->g.frame_bytes);
+	if (o->index) {
+		FILE *f = fopen(o->index, "re");
+
+		*where = "index";
+		if (!f)
+			return -errno;
+		ret = kv_index_load(f, &wk->index);
+		fclose(f);
+		if (ret)
+			return ret;
+	}
 	if (o->dry_run)
 		return 0;
 	*where = "open /dev/xdev_ext_peer";
@@ -897,11 +965,14 @@ static void plan_json(FILE *f, const struct kv_plan *p)
 		p->host2_start_frames);
 }
 
-/* GO for restore and local-verify. */
-static void handle_go(struct worker *wk, const struct kv_line *l)
+/* GO for restore and local-verify; @q: when it arrived, when it started. */
+static void handle_go(struct worker *wk, const struct kv_line *l, const struct queued *q,
+		      uint64_t start_ns)
 {
-	const char *run = line_get(l, "run");
-	uint64_t ordinal, slba, bytes, dst0, seed = 0, verify = 0, t0 = 0, t1 = 0, c0 = 0, c1 = 0;
+	const char *run = line_get(l, "run"), *prefix = line_get(l, "prefix");
+	const struct kv_index_entry *ent = NULL;
+	uint64_t ordinal, slba = 0, bytes = 0, dst0, seed = 0, verify = 0, t0 = 0, t1 = 0, c0 = 0,
+		c1 = 0;
 	struct xdev_ext_mech_stats st = { 0 };
 	struct check chk = { .result = 1, .outside_bad = UINT64_MAX };
 	char line[LINE_MAX_BYTES], reply[LINE_MAX_BYTES] = "";
@@ -912,19 +983,34 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 	bool planned = false, started = false, good;
 	struct kv_plan p;
 
-	if (!run_id_ok(run) || line_u64(l, "ordinal", &ordinal) || line_u64(l, "object_slba", &slba) ||
-	    line_u64(l, "bytes", &bytes) || line_u64(l, "dst_frame0", &dst0) || dst0 > UINT32_MAX ||
+	if (!run_id_ok(run) || line_u64(l, "ordinal", &ordinal) ||
+	    (prefix ? !kv_index_hash_ok(prefix) || line_get(l, "object_slba") || line_get(l, "bytes")
+		    : line_u64(l, "object_slba", &slba) || line_u64(l, "bytes", &bytes)) ||
+	    line_u64(l, "dst_frame0", &dst0) || dst0 > UINT32_MAX ||
 	    (line_get(l, "seed") && line_u64(l, "seed", &seed)) ||
 	    (line_get(l, "verify") && (line_u64(l, "verify", &verify) || verify > 1))) {
 		emit_error("GO arguments", -EINVAL);
 		return;
 	}
-	ret = wk->dirty ? -ESTALE : plan_claim(wk, ordinal, slba, bytes, (uint32_t)dst0, &p);
+	ret = 0;
+	if (prefix) {
+		ent = kv_index_find(&wk->index, prefix);
+		ret = ent ? kv_index_resolve(ent, wk->o.w.lba_bytes, &slba, &bytes) : -ENOENT;
+	}
+	if (!ret)
+		ret = wk->dirty ? -ESTALE : plan_claim(wk, ordinal, slba, bytes, (uint32_t)dst0, &p);
 	planned = !ret;
 	if (ret)
 		goto report;
 	if (wk->o.dry_run) {
 		wk->next_key = p.first_seq + p.groups;
+		if (wk->o.hold_ms) {
+			struct timespec ts = { .tv_sec = (time_t)(wk->o.hold_ms / 1000),
+				.tv_nsec = (long)(wk->o.hold_ms % 1000) * 1000000L };
+
+			while (nanosleep(&ts, &ts) && errno == EINTR)
+				;
+		}
 		goto report;
 	}
 	if (wk->o.role == ROLE_LOCAL) {
@@ -968,7 +1054,10 @@ static void handle_go(struct worker *wk, const struct kv_line *l)
 		uint64_t off = (uint64_t)p.host2_dst_frame0 * wk->o.g.frame_bytes;
 
 		chk = (struct check){ .seed = seed, .offset = off, .bytes = bytes,
-				      .outside_bad = UINT64_MAX };
+				      .source_offset = ent ? ent->offset : 0,
+				      .outside_bad = UINT64_MAX,
+				      .expect = ent && ent->has_fnv1a,
+				      .want = ent ? ent->fnv1a : 0 };
 		if (wk->o.role == ROLE_LOCAL && wk->o.dst == DST_CE)
 			verify_err = cuda_whole(wk, false, &chk);
 		else if (wk->o.role == ROLE_LOCAL)
@@ -981,6 +1070,7 @@ report:
 	wk->restores++;
 	good = !ret && !verify_err && (!verify || wk->o.dry_run ||
 				      (!chk.result && chk.outside_bad == UINT64_MAX));
+	flockfile(stdout);
 	printf("KV_RESULT {\"run\": ");
 	jstr(stdout, run);
 	printf(", \"role\": \"%s\", \"ok\": %s, \"error\": %d, \"dry_run\": %s, \"bytes\": %" PRIu64,
@@ -988,6 +1078,13 @@ report:
 	       ret ? ret : verify_err, wk->o.dry_run ? "true" : "false", good ? bytes : 0);
 	printf(", \"dst\": \"%s\", \"payload_path\": \"%s\", \"cpu_copy_bytes\": %" PRIu64,
 	       dst_names[wk->o.dst], payload_path(wk), cpu_copy_bytes);
+	if (prefix)
+		printf(", \"prefix\": \"%s\", \"tokens\": %" PRIu64 ", \"object_slba\": %" PRIu64
+		       ", \"expect_fnv1a\": %s", prefix, ent ? ent->tokens : 0, slba,
+		       ent && ent->has_fnv1a ? "true" : "false");
+	printf(", \"queue\": {\"enqueue_ns\": %" PRIu64 ", \"start_ns\": %" PRIu64
+	       ", \"queue_ns\": %" PRIu64 ", \"ahead\": %u, \"depth\": %u}", q->enq_ns, start_ns,
+	       start_ns - q->enq_ns, q->ahead, wk->q.cap);
 	if (planned) {
 		printf(", \"plan\": ");
 		plan_json(stdout, &p);
@@ -1014,6 +1111,7 @@ report:
 	}
 	printf("}\n");
 	fflush(stdout);
+	funlockfile(stdout);
 }
 
 /* RESTORE from host 2: same plan on this side, one START, one wait, DONE. */
@@ -1104,6 +1202,125 @@ static int serve_loop(struct worker *wk)
 	}
 }
 
+/* ---- FIFO of requests on the one session -------------------------------- */
+
+/* A GO beyond --queue-depth waiting requests: refused at once, never queued. */
+static void refuse_full(struct worker *wk, const char *text, uint64_t t)
+{
+	struct kv_line l;
+	const char *run;
+
+	if (line_split(&l, text) || strcmp(l.key[0], "GO") || !run_id_ok(run = line_get(&l, "run"))) {
+		emit_error("queue full", -EBUSY);
+		return;
+	}
+	flockfile(stdout);
+	printf("KV_RESULT {\"run\": ");
+	jstr(stdout, run);
+	printf(", \"role\": \"%s\", \"ok\": false, \"error\": %d, \"dry_run\": %s, \"bytes\": 0"
+	       ", \"dst\": \"%s\", \"payload_path\": \"%s\", \"cpu_copy_bytes\": 0"
+	       ", \"queue\": {\"enqueue_ns\": %" PRIu64 ", \"start_ns\": 0, \"queue_ns\": 0"
+	       ", \"ahead\": %u, \"depth\": %u, \"refused\": true}"
+	       ", \"started\": false, \"t0_ns\": 0, \"t1_ns\": 0, \"latency_ns\": 0"
+	       ", \"worker_cpu_us\": 0, \"wait_err\": 0, \"verified\": null}\n",
+	       wk->o.role == ROLE_LOCAL ? "local-verify" : "restore", -EBUSY,
+	       wk->o.dry_run ? "true" : "false", dst_names[wk->o.dst], payload_path(wk), t,
+	       wk->q.cap + 1, wk->q.cap);
+	fflush(stdout);
+	funlockfile(stdout);
+}
+
+/* Reader thread: stamp and queue each stdin line; QUIT or EOF closes the queue. */
+static void *reader_main(void *arg)
+{
+	struct worker *wk = arg;
+	struct fifo *q = &wk->q;
+	char buf[LINE_MAX_BYTES];
+
+	for (;;) {
+		struct kv_line l;
+		bool quit = !fgets(buf, sizeof(buf), stdin) ||
+			    (!line_split(&l, buf) && !strcmp(l.key[0], "QUIT"));
+		uint64_t t = now_ns();
+
+		pthread_mutex_lock(&q->mu);
+		if (quit) {
+			q->closed = true;
+			pthread_cond_signal(&q->cv);
+			pthread_mutex_unlock(&q->mu);
+			return NULL;
+		}
+		if (q->count == q->cap) {
+			pthread_mutex_unlock(&q->mu);
+			refuse_full(wk, buf, t);
+			continue;
+		}
+		{
+			struct queued *slot = &q->ring[(q->head + q->count) % q->cap];
+
+			memcpy(slot->text, buf, sizeof(buf));
+			slot->enq_ns = t;
+			slot->ahead = q->count + (q->busy ? 1 : 0);
+		}
+		q->count++;
+		pthread_cond_signal(&q->cv);
+		pthread_mutex_unlock(&q->mu);
+	}
+}
+
+/* Main thread: one request at a time, in arrival order, on the one session. */
+static int run_queue(struct worker *wk)
+{
+	struct fifo *q = &wk->q;
+	pthread_t reader;
+	int ret;
+
+	q->cap = wk->o.queue_depth;
+	q->ring = calloc(q->cap, sizeof(*q->ring));
+	if (!q->ring)
+		return -ENOMEM;
+	pthread_mutex_init(&q->mu, NULL);
+	pthread_cond_init(&q->cv, NULL);
+	ret = -pthread_create(&reader, NULL, reader_main, wk);
+	if (ret)
+		goto out;
+	for (;;) {
+		struct queued item;
+		struct kv_line l;
+		uint64_t start;
+
+		pthread_mutex_lock(&q->mu);
+		while (!q->count && !q->closed)
+			pthread_cond_wait(&q->cv, &q->mu);
+		if (!q->count) {
+			pthread_mutex_unlock(&q->mu);
+			break;
+		}
+		item = q->ring[q->head];
+		q->head = (q->head + 1) % q->cap;
+		q->count--;
+		q->busy = true;
+		pthread_mutex_unlock(&q->mu);
+		start = now_ns();
+		if (line_split(&l, item.text))
+			emit_error("protocol line", -EINVAL);
+		else if (strcmp(l.key[0], "GO"))
+			emit_error("unknown command", -EINVAL);
+		else
+			handle_go(wk, &l, &item, start);
+		pthread_mutex_lock(&q->mu);
+		q->busy = false;
+		pthread_mutex_unlock(&q->mu);
+	}
+	pthread_join(reader, NULL);
+out:
+	pthread_cond_destroy(&q->cv);
+	pthread_mutex_destroy(&q->mu);
+	free(q->ring);
+	q->ring = NULL;
+	return ret;
+}
+
 /* STOP's own result (the session's final error) is reported apart from the
  * release of this process's resources. */
 static int teardown(struct worker *wk, bool *retained, int *stop_error)
@@ -1159,6 +1376,8 @@ static void usage(void)
 		"  restore: --gpu-bdf BDF --gpu-node /dev/nvidiaN --pool-bytes N --peer HOST:PORT\n"
 		"          (--service NAME [--sysfs-root DIR] | --link-token N) [--xdomain-prog OBJ]\n"
 		"  local-verify: --nvme /dev/ngXnY --nvme-prog kv_nvme_read.bpf.o --pool-bytes N\n"
+		"  restore, local-verify: [--index FILE] [--queue-depth N (1..4096, default 64)]\n"
+		"     [--dry-run-hold-ms N: with --dry-run, hold each GO N ms]\n"
 		"  --dst peer|dmabuf|ce-vmm: restore defaults to peer, local-verify to dmabuf;\n"
 		"     ce-vmm: --gpu-bdf BDF --ce-dev /dev/nvidiaN --ce-prog kv_ce_place.bpf.o\n"
 		"     --frame-bytes 4096, no --gpu-node; --pool-bytes sizes the CUDA VMM allocation\n");
@@ -1175,7 +1394,8 @@ static int parse(int argc, char **argv, struct opts *o)
 		{ "sysfs-root", 1, 0, 16 }, { "link-token", 1, 0, 17 }, { "listen", 1, 0, 18 },
 		{ "peer", 1, 0, 19 }, { "gpu-bdf", 1, 0, 20 }, { "gpu-node", 1, 0, 21 },
 		{ "pool-bytes", 1, 0, 22 }, { "dry-run", 0, 0, 23 }, { "dst", 1, 0, 24 },
-		{ "ce-dev", 1, 0, 25 }, { "ce-prog", 1, 0, 26 }, { 0, 0, 0, 0 } };
+		{ "ce-dev", 1, 0, 25 }, { "ce-prog", 1, 0, 26 }, { "index", 1, 0, 27 },
+		{ "queue-depth", 1, 0, 28 }, { "dry-run-hold-ms", 1, 0, 29 }, { 0, 0, 0, 0 } };
 	uint64_t timeout = 120000;
 	int c, bad = 0;
 
@@ -1188,6 +1408,7 @@ static int parse(int argc, char **argv, struct opts *o)
 	o->sysfs_root = "/sys/bus/thunderbolt/devices";
 	o->xdomain_map = "xdomain_peer_ops";
 	o->token = "kv";
+	o->queue_depth = 64;
 	optind = 2;
 	while ((c = getopt_long(argc, argv, "", lo, NULL)) != -1) {
 		switch (c) {
@@ -1221,6 +1442,9 @@ static int parse(int argc, char **argv, struct opts *o)
 			break;
 		case 25: o->ce_dev = optarg; break;
 		case 26: o->ce_prog = optarg; break;
+		case 27: o->index = optarg; break;
+		case 28: bad |= parse_u32(optarg, &o->queue_depth); break;
+		case 29: bad |= parse_u64(optarg, &o->hold_ms); break;
 		default: return -EINVAL;
 		}
 	}
@@ -1228,6 +1452,9 @@ static int parse(int argc, char **argv, struct opts *o)
 		return -EINVAL;
 	o->timeout_ms = (int)timeout;
 	if (kv_geometry_check(&o->g, o->w.lba_bytes) || !o->w.nlb)
+		return -EINVAL;
+	if (!o->queue_depth || o->queue_depth > 4096 || o->hold_ms > 60000 ||
+	    (o->hold_ms && !o->dry_run) || (o->role == ROLE_SERVE && o->index))
 		return -EINVAL;
 	if (o->role != ROLE_RESTORE && (!o->nvme || !o->nvme_prog))
 		return -EINVAL;
@@ -1258,7 +1485,7 @@ int main(int argc, char **argv)
 {
 	struct worker wk = { .ctl = -1, .allocation = -1, .dmabuf = -1, .gpu = -1, .lsock = -1,
 			     .sock = -1, .ce_fd = -1, .next_key = 1 };
-	char buf[LINE_MAX_BYTES], where[96];
+	char where[96];
 	const char *step = "options";
 	bool retained = false;
 	int ret, stop_error = 0;
@@ -1277,38 +1504,27 @@ int main(int argc, char **argv)
 		snprintf(where, sizeof(where), "setup: %s", step);
 		emit_error(where, ret);
 		teardown(&wk, &retained, &stop_error);
+		kv_index_free(&wk.index);
 		return 1;
 	}
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
 	       "\"pool_frames\": %" PRIu64 ", \"frame_bytes\": %u, \"group_bytes\": %u, "
 	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s, "
-	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u}\n",
+	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u, "
+	       "\"queue_depth\": %u, \"index_entries\": %zu}\n",
 	       argv[1], wk.o.dry_run ? "true" : "false",
 	       wk.s ? (unsigned long long)xdev_ext_session_id(wk.s) : 0ULL, wk.pool_frames,
 	       wk.o.g.frame_bytes, wk.o.g.group_bytes, wk.o.g.depth, wk.o.g.window,
 	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes(),
-	       dst_names[wk.o.dst], wk.ring_frames);
+	       dst_names[wk.o.dst], wk.ring_frames, wk.o.queue_depth, wk.index.n);
 	fflush(stdout);
 	if (wk.o.role == ROLE_SERVE) {
 		ret = serve_loop(&wk);
 	} else {
-		while (fgets(buf, sizeof(buf), stdin)) {
-			struct kv_line l;
-
-			if (line_split(&l, buf)) {
-				emit_error("protocol line", -EINVAL);
-				continue;
-			}
-			if (!strcmp(l.key[0], "QUIT"))
-				break;
-			if (strcmp(l.key[0], "GO")) {
-				emit_error("unknown command", -EINVAL);
-				continue;
-			}
-			handle_go(&wk, &l);
-		}
+		ret = run_queue(&wk);
 	}
 	ret = teardown(&wk, &retained, &stop_error) ?: ret;
+	kv_index_free(&wk.index);
 	printf("KV_BYE {\"error\": %d, \"stop_error\": %d, \"retained\": %s, \"restores\": %"
 	       PRIu64 "}\n", ret, stop_error, retained ? "true" : "false", wk.restores);
 	fflush(stdout);

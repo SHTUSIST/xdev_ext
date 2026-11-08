@@ -3,7 +3,8 @@
 """K-KV orchestrator: one command per experiment step, every step recorded.
 
   plan           restore plans of objects/prefixes (no device)
-  prepare-nvme   host 1: write each KV object's pattern to its LBAs (overwrites!)
+  prepare-nvme   host 1: write each KV object's pattern, or its payload file (real
+                 KV from kv_dump.py), to its LBAs (overwrites!)
   nvmeof-target  host 1: kernel NVMe-oF/TCP target up/down through nvmet configfs
   run            host 2: start one arm's worker once, then per restore: drop
                  caches, host-1 and host-2 CPU markers, optional perf memory
@@ -15,6 +16,7 @@
 interprets a guest or fixture record as a performance result.
 """
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -78,10 +80,40 @@ def cmd_plan(args):
 
 # ---- prepare-nvme ---------------------------------------------------------------
 
+def payload_path(manifest_path, obj):
+    p = Path(obj.payload.file)
+    return p if p.is_absolute() else Path(manifest_path).resolve().parent / p
+
+
+def object_bytes(manifest_path, obj, offset, length):
+    """Bytes [offset, offset + length) of an object: its payload file or the pattern."""
+    if not obj.payload:
+        return kl.pattern_bytes(obj.seed, offset, length)
+    with open(payload_path(manifest_path, obj), 'rb') as f:
+        f.seek(offset)
+        data = f.read(length)
+    if len(data) != length:
+        raise SystemExit(f'payload of {obj.name} is shorter than {offset + length} bytes')
+    return data
+
+
 def cmd_prepare_nvme(args):
     m = kl.load_manifest(args.manifest)
-    extents = [dict(object=o.name, slba=o.slba, bytes=o.bytes, offset=o.slba * m.lba_bytes)
+    extents = [dict(object=o.name, slba=o.slba, bytes=o.bytes, offset=o.slba * m.lba_bytes,
+                    payload=str(payload_path(args.manifest, o)) if o.payload else None)
                for o in m.objects]
+    # Every payload must be the dumped file, whole, before anything is written.
+    for o in m.objects:
+        if o.payload:
+            p = payload_path(args.manifest, o)
+            if not p.is_file() or p.stat().st_size != o.bytes:
+                raise SystemExit(f'payload {p} of {o.name} must be a file of {o.bytes} bytes')
+            h = hashlib.sha256()
+            with open(p, 'rb') as f:
+                for chunk in iter(lambda: f.read(WRITE_CHUNK), b''):
+                    h.update(chunk)
+            if h.hexdigest() != o.payload.sha256:
+                raise SystemExit(f'payload {p} of {o.name} differs from the manifest SHA-256')
     if args.dry_run:
         print(json.dumps(dict(device=args.device, writes=extents), indent=2))
         return 0
@@ -93,7 +125,7 @@ def cmd_prepare_nvme(args):
         for o in m.objects:
             base = o.slba * m.lba_bytes
             for off in range(0, o.bytes, WRITE_CHUNK):
-                data = kl.pattern_bytes(o.seed, off, min(WRITE_CHUNK, o.bytes - off))
+                data = object_bytes(args.manifest, o, off, min(WRITE_CHUNK, o.bytes - off))
                 if os.pwrite(fd, data, base + off) != len(data):
                     raise SystemExit(f'short write at {base + off}')
         os.fsync(fd)
@@ -105,7 +137,7 @@ def cmd_prepare_nvme(args):
             base = o.slba * m.lba_bytes
             for off in sorted({0, max(0, o.bytes - 4096)}):
                 n = min(4096, o.bytes - off)
-                if os.pread(fd, n, base + off) != kl.pattern_bytes(o.seed, off, n):
+                if os.pread(fd, n, base + off) != object_bytes(args.manifest, o, off, n):
                     raise SystemExit(f'read-back mismatch in {o.name} at {off}')
     finally:
         os.close(fd)
@@ -185,6 +217,8 @@ def worker_argv(args, m):
         argv += ['--service', args.service] if args.service else ['--link-token', args.link_token]
         if args.xdomain_prog:
             argv += ['--xdomain-prog', args.xdomain_prog]
+        if args.index:
+            argv += ['--index', args.index]
         if g.early:
             argv.append('--early')
     elif args.arm == 'nvmeof':
@@ -255,14 +289,38 @@ class Perf:
         return counts
 
 
+def index_entries(args, m, obj):
+    """prefix tokens -> index entry of obj (GO prefix=), or None without --index.
+
+    Real KV (a payload object) is verified against an entry's FNV-1a, so it
+    needs --index; only the xdev-ext worker (and a custom one) reads it.
+    """
+    if not args.index:
+        if obj.payload:
+            raise SystemExit(f'{obj.name} holds real KV: pass --index so the worker can verify it')
+        return None
+    if args.arm not in ('xdev-ext', 'custom'):
+        raise SystemExit('--index is read by the xdev-ext worker only')
+    idx = kl.load_index(args.index, m)
+    by_tokens = {e.tokens: e for e in idx.entries if e.object == obj.name and e.offset == 0}
+    missing = [t for t in args.prefixes if t not in by_tokens]
+    if missing:
+        raise SystemExit(f'the index has no entry for {obj.name} prefixes {missing}')
+    return by_tokens
+
+
 def cmd_run(args):
     m = kl.load_manifest(args.manifest)
     obj = m.object(args.object)
     for t in args.prefixes:
         if t > obj.tokens or kl.kv_bytes(obj.model, t) % args.group_bytes:
             raise SystemExit(f'prefix {t} is not whole groups of object {obj.name}')
+    entries = index_entries(args, m, obj)
     argv = worker_argv(args, m)
     plan = schedule(args.prefixes, args.repetitions, args.seed, args.first_ordinal)
+    if entries:
+        for item in plan:
+            item['prefix'] = entries[item['prefix_tokens']].hash
     if args.dry_run:
         print(json.dumps(dict(worker_argv=argv, schedule=plan), indent=2))
         return 0
@@ -299,10 +357,16 @@ def cmd_run(args):
             if perf:
                 perf.enable()
             try:
-                result = worker.go(run, item['ordinal'], obj.slba,
-                                   kl.kv_bytes(obj.model, item['prefix_tokens']), args.dst_frame0,
-                                   obj.seed, item['verify'] or args.verify_every,
-                                   timeout=args.run_timeout)
+                verify = item['verify'] or args.verify_every
+                if entries:
+                    result = worker.go_prefix(run, item['ordinal'], item['prefix'],
+                                              args.dst_frame0, obj.seed, verify,
+                                              timeout=args.run_timeout)
+                else:
+                    result = worker.go(run, item['ordinal'], obj.slba,
+                                       kl.kv_bytes(obj.model, item['prefix_tokens']),
+                                       args.dst_frame0, obj.seed, verify,
+                                       timeout=args.run_timeout)
                 error = None
             except (kp.WorkerError, kp.ProtocolError) as e:
                 result, error = None, str(e)
@@ -438,6 +502,7 @@ def parser():
     p.add_argument('--service')
     p.add_argument('--link-token')
     p.add_argument('--xdomain-prog')
+    p.add_argument('--index', help='prefix index (kv_dump.py pack); GO names prefixes by hash')
     p.add_argument('--request-token', default='kv')
     p.add_argument('--device', help='nvmeof: the connected NVMe-oF namespace on host 2')
     p.add_argument('--local-hostname', help="mooncake: host 2's thunderbolt0 address")

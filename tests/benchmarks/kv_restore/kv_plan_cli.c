@@ -5,6 +5,9 @@
  *       --bytes N --group-bytes N --frame-bytes N --depth N --window N --ordinal N
  *       [--dst-frame0 N] [--pool-frames N] [--early] [--host2-ring]
  *   kv_plan_cli pattern SEED OFFSET LENGTH
+ *   kv_plan_cli pages BLOCK_SIZE LAYERS HEADS STATE_BYTES GROUP_BYTES GROUP
+ *   kv_plan_cli index FILE
+ *   kv_plan_cli fnv FILE LEN...   FNV-1a 64 of the first LEN bytes (ascending LENs)
  * Prints one JSON object; a refused plan prints {"error": -errno} and exits 1.
  */
 #include <errno.h>
@@ -15,6 +18,7 @@
 
 #include "../../../kernel/include/uapi/linux/xdev_ext_mech.h"
 #include "kv_plan.h"
+#include "kv_index.h"
 
 static int u64(const char *s, uint64_t *v)
 {
@@ -112,12 +116,112 @@ static int pattern(int argc, char **argv)
 	return 0;
 }
 
+static int pages(int argc, char **argv)
+{
+	struct kv_block_layout b;
+	struct kv_page_piece pc[64];
+	uint32_t group_bytes;
+	uint64_t group;
+	int n;
+
+	if (argc != 6 || u32(argv[0], &b.block_size) || u32(argv[1], &b.layers) ||
+	    u32(argv[2], &b.heads) || u32(argv[3], &b.state_bytes) || u32(argv[4], &group_bytes) ||
+	    u64(argv[5], &group))
+		return 2;
+	if (kv_block_layout_check(&b, group_bytes)) {
+		printf("{\"error\": %d}\n", -EINVAL);
+		return 1;
+	}
+	n = kv_group_pages(&b, group, group_bytes, pc, 64);
+	if (n < 0) {
+		printf("{\"error\": %d}\n", n);
+		return 1;
+	}
+	printf("{\"pieces\": [");
+	for (int i = 0; i < n; i++)
+		printf("%s[%" PRIu64 ", %u, %" PRIu64 ", %" PRIu64 ", %" PRIu64 "]", i ? ", " : "",
+		       pc[i].block, pc[i].layer, pc[i].page_off, pc[i].len, pc[i].group_off);
+	printf("]}\n");
+	return 0;
+}
+
+static int index_cmd(int argc, char **argv)
+{
+	struct kv_index ix;
+	FILE *f;
+	int ret;
+
+	if (argc != 1 || !(f = fopen(argv[0], "r")))
+		return 2;
+	ret = kv_index_load(f, &ix);
+	fclose(f);
+	if (ret) {
+		printf("{\"error\": %d}\n", ret);
+		return 1;
+	}
+	printf("{\"entries\": [");
+	for (size_t i = 0; i < ix.n; i++) {
+		const struct kv_index_entry *e = &ix.v[i];
+
+		printf("%s{\"hash\": \"%s\", \"object\": \"%s\", \"slba\": %" PRIu64
+		       ", \"offset\": %" PRIu64 ", \"bytes\": %" PRIu64 ", \"tokens\": %" PRIu64,
+		       i ? ", " : "", e->hash, e->object, e->slba, e->offset, e->bytes, e->tokens);
+		if (e->has_fnv1a)
+			printf(", \"fnv1a\": \"0x%016" PRIx64 "\"}", e->fnv1a);
+		else
+			printf(", \"fnv1a\": null}");
+	}
+	printf("]}\n");
+	kv_index_free(&ix);
+	return 0;
+}
+
+static int fnv_cmd(int argc, char **argv)
+{
+	static uint8_t buf[1 << 20];
+	uint64_t h = KV_FNV_OFFSET, pos = 0, want, prev = 0;
+	FILE *f;
+	int ret = 0;
+
+	if (argc < 2 || !(f = fopen(argv[0], "rb")))
+		return 2;
+	printf("{\"fnv1a\": [");
+	for (int i = 1; i < argc && !ret; i++) {
+		if (u64(argv[i], &want) || want < prev) {
+			ret = 2;
+			break;
+		}
+		prev = want;
+		while (pos < want) {
+			size_t n = want - pos < sizeof(buf) ? (size_t)(want - pos) : sizeof(buf);
+
+			if (fread(buf, 1, n, f) != n) {
+				ret = 1;
+				break;
+			}
+			h = kv_fnv1a(h, buf, n);
+			pos += n;
+		}
+		if (!ret)
+			printf("%s\"0x%016" PRIx64 "\"", i > 1 ? ", " : "", h);
+	}
+	printf("]}\n");
+	fclose(f);
+	return ret;
+}
+
 int main(int argc, char **argv)
 {
 	if (argc >= 2 && !strcmp(argv[1], "plan"))
 		return plan(argc - 2, argv + 2);
 	if (argc >= 2 && !strcmp(argv[1], "pattern"))
 		return pattern(argc - 2, argv + 2);
-	fprintf(stderr, "usage: kv_plan_cli plan OPTIONS | pattern SEED OFFSET LENGTH\n");
+	if (argc >= 2 && !strcmp(argv[1], "pages"))
+		return pages(argc - 2, argv + 2);
+	if (argc >= 2 && !strcmp(argv[1], "index"))
+		return index_cmd(argc - 2, argv + 2);
+	if (argc >= 2 && !strcmp(argv[1], "fnv"))
+		return fnv_cmd(argc - 2, argv + 2);
+	fprintf(stderr, "usage: kv_plan_cli plan OPTIONS | pattern SEED OFFSET LENGTH | pages B L H C G I | index FILE | fnv FILE LEN...\n");
 	return 2;
 }
