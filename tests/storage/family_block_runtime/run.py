@@ -94,6 +94,12 @@ try:
    peer_path=root/'src/core/include/linux/xdev_ext_peer.h';peer=peer_path.read_text()
    captured+=required(r'^struct xdev_ext_peer_lease\s*\{.*?^\};',peer)
    captured+=required(r'^struct xdev_ext_peer_fd_lease\s*\{.*?^\};',peer)
+   if 'xdev_ext_peer_requester_evidence(' in common:
+    # The UNKNOWN release vocabulary the common peer consumption uses.
+    captured+=required(r'^#define XDEV_EXT_PEER_EPOCH_NONE [^\n]*',peer)
+    captured+='struct xdev_ext_peer_requester;\n'
+    captured+=required(r'^enum xdev_ext_peer_evidence\s*\{.*?^\};',peer)
+    captured+=required(r'^int xdev_ext_peer_requester_evidence\([^;{}]*\);',peer)
    declarations.append(str(peer_path))
    requester_path=root/'src/core/include/linux/xdev_ext_requester.h'
    requester_core_path=root/'src/core/include/linux/xdev_ext_requester_core.h'

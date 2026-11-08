@@ -22,7 +22,15 @@ def console(cases=oracle.CASES):
 
 class ResetOracle(unittest.TestCase):
     def test_complete_console_passes(self):
-        self.assertEqual(oracle.check_log(console())['checks'], 47)
+        self.assertEqual(oracle.check_log(console())['checks'], 73)
+
+    def test_session_path_case_is_required(self):
+        self.assertEqual(oracle.CASES[-1], ('session-error-status', 26))
+        self.rejects(console(oracle.CASES[:-1]))
+
+    def test_session_case_not_released(self):
+        self.rejects(console().replace('ok 26 - session-error-status: check 26',
+                                       'not ok 26 - session-error-status: check 26', 1))
 
     def rejects(self, text):
         with self.assertRaises(ValueError):

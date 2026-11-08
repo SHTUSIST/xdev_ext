@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""Host-side oracle for the guest reset-recovery test (peer_reset_e2e).
+"""Host-side oracle for the guest reset-recovery tests (peer_reset_e2e and
+peer_reset_session_e2e).
 
 Keeps its own copy of the case plan: every case must report PASS with its
 exact check count, numbered without gaps, with no not-ok/skip line, and the
@@ -14,9 +15,11 @@ from pathlib import Path
 import re
 import sys
 
-# Case -> check count, kept in step with peer_reset_e2e.c: five common
-# checks (opt-in, devices, observer, two liveness waits) plus the case's own.
-CASES = (('control', 10), ('error-status', 15), ('timeout-cancel', 11), ('owner-open', 11))
+# Case -> check count, kept in step with peer_reset_e2e.c (fd path) and
+# peer_reset_session_e2e.c (session path): five common checks (opt-in,
+# devices, observer, two liveness waits) plus the case's own.
+CASES = (('control', 10), ('error-status', 15), ('timeout-cancel', 11), ('owner-open', 11),
+         ('session-error-status', 26))
 UNLOAD_MARKER = 'XDEV_EXT_PEER_RESET_UNLOAD=PASS module=xdev_ext_peer_sw'
 EXIT_RE = re.compile(r'^XDEV_EXT_RESET_GUEST_EXIT=(\d+)$', re.M)
 CASE_RE = re.compile(r'^XDEV_EXT_PEER_RESET_CASE=(\S+) (PASS|FAIL)(?: checks=(\d+))?$')

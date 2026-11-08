@@ -399,10 +399,57 @@ static void login_tests(void)
  l = valid_login();
  EQ("zero offered maximum", xdev_ext_xd_login_check(&l, 120, 0), -EPROTO);
 }
+/* Who sends the startup PING first (requirement 2026-11-07: a cable joining
+ * two ports of one host must be able to carry a real XDOMAIN exchange in an
+ * explicit, off-by-default test mode; the default still refuses a peer with
+ * this host's own UUID). */
+static struct xdev_ext_xd_end loop_end(const void *nhi, __u64 route, __u64 inc)
+{
+ struct xdev_ext_xd_end e = { .nhi = nhi, .route = route, .inc = inc };
+ memset(e.local_uuid, 0x5a, 16);
+ memset(e.remote_uuid, 0x5a, 16);
+ return e;
+}
+static void peer_order_tests(void)
+{
+ static const int nhi0 = 0, nhi1 = 1;
+ struct xdev_ext_xd_end a = loop_end(&nhi0, 0x1, 0x1111), b = loop_end(&nhi0, 0x3, 0x2222);
+ struct xdev_ext_xd_end h = loop_end(&nhi0, 0x1, 0x1111), peer;
+ /* Two different hosts: the larger UUID sends first, test mode or not. */
+ h.remote_uuid[0] = 0x10;
+ EQ("different hosts: larger local UUID first", xdev_ext_xd_peer_order(&h, 0x2222, NULL, false), 1);
+ EQ("different hosts: test mode changes nothing", xdev_ext_xd_peer_order(&h, 0x2222, &b, true), 1);
+ h.remote_uuid[0] = 0x60;
+ EQ("different hosts: smaller local UUID second", xdev_ext_xd_peer_order(&h, 0x2222, NULL, false), 0);
+ EQ("different hosts: smaller local UUID, test mode", xdev_ext_xd_peer_order(&h, 0x2222, &b, true), 0);
+ h.remote_uuid[0] = 0x5a; h.remote_uuid[15] = 0x5b;
+ EQ("different hosts: last UUID byte counts", xdev_ext_xd_peer_order(&h, 0x2222, NULL, false), 0);
+ /* Default: a peer with this host's own UUID is refused, with or without a loop end. */
+ EQ("default refuses same UUID", xdev_ext_xd_peer_order(&a, 0x2222, NULL, false), -EPROTO);
+ EQ("default refuses same UUID even with the other port present", xdev_ext_xd_peer_order(&a, 0x2222, &b, false), -EPROTO);
+ /* Test mode: the other end must be another port of the same NHI. */
+ EQ("test mode, no other end found", xdev_ext_xd_peer_order(&a, 0x2222, NULL, true), -EPROTO);
+ EQ("test mode, smaller incarnation sends second", xdev_ext_xd_peer_order(&a, 0x2222, &b, true), 0);
+ EQ("test mode, larger incarnation sends first", xdev_ext_xd_peer_order(&b, 0x1111, &a, true), 1);
+ peer = b; peer.nhi = &nhi1;
+ EQ("test mode, other end on another NHI", xdev_ext_xd_peer_order(&a, 0x2222, &peer, true), -EPROTO);
+ peer = b; peer.route = a.route;
+ EQ("test mode, same port is not a loop between two ports", xdev_ext_xd_peer_order(&a, 0x2222, &peer, true), -EPROTO);
+ EQ("test mode, the link itself is not its other end", xdev_ext_xd_peer_order(&a, 0x1111, &a, true), -EPROTO);
+ peer = b; peer.inc = 0x3333;
+ EQ("test mode, LOGIN incarnation is not the other port's", xdev_ext_xd_peer_order(&a, 0x2222, &peer, true), -EPROTO);
+ peer = b; peer.inc = a.inc;
+ EQ("test mode, equal incarnations cannot be ordered", xdev_ext_xd_peer_order(&a, a.inc, &peer, true), -EPROTO);
+ peer = b; peer.local_uuid[7] ^= 1;
+ EQ("test mode, other end's local UUID differs", xdev_ext_xd_peer_order(&a, 0x2222, &peer, true), -EPROTO);
+ peer = b; peer.remote_uuid[15] ^= 1;
+ EQ("test mode, other end's remote UUID differs", xdev_ext_xd_peer_order(&a, 0x2222, &peer, true), -EPROTO);
+ EQ("test mode, zero peer incarnation", xdev_ext_xd_peer_order(&a, 0, &b, true), -EPROTO);
+}
 int main(void)
 {
  wire_tests(); invalid_message_tests(); identity_tests(); rx_tests();
- budget_layout_tests(); login_tests();
+ budget_layout_tests(); login_tests(); peer_order_tests();
  printf("%s 1 - XDOMAIN pure rules checks=%u failures=%u hardware=none\n",
         failures ? "not ok" : "ok", checks, failures);
  return failures ? 1 : 0;

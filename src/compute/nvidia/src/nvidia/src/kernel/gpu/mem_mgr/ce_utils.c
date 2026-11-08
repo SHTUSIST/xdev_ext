@@ -679,6 +679,76 @@ ceutilsMemset_IMPL
     return status;
 }
 
+//
+// Bytes from srcOffset and dstOffset that one CE command can cover:
+// min(source run, destination run, limit), where a run of a non-contiguous
+// memdesc is the rest of the current page plus every following page whose
+// programmed (PTE) address continues it, and a contiguous memdesc runs to
+// limit.  The two runs grow together, the shorter one by one page at a time,
+// so the walk stops where the command ends: it looks up only pages this
+// command uses plus the one page that ends a run, never the rest of the
+// longer side's run.  limit must not exceed the bytes left in either memdesc.
+//
+static NvU64
+_ceutilsPhysRunLength
+(
+    MEMORY_DESCRIPTOR  *pSrcMemDesc,
+    ADDRESS_TRANSLATION srcAddrTranslation,
+    NvBool              bSrcContig,
+    NvU64               srcOffset,
+    MEMORY_DESCRIPTOR  *pDstMemDesc,
+    ADDRESS_TRANSLATION dstAddrTranslation,
+    NvBool              bDstContig,
+    NvU64               dstOffset,
+    NvU64               limit
+)
+{
+    NvU64 srcGranularity = pSrcMemDesc->pageArrayGranularity;
+    NvU64 dstGranularity = pDstMemDesc->pageArrayGranularity;
+    NvU64 srcStart = 0, dstStart = 0;
+    NvU64 srcRun = limit, dstRun = limit;
+
+    if (!bSrcContig)
+    {
+        srcStart = memdescGetPtePhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset);
+        srcRun = srcGranularity -
+                 (memdescGetPhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset) % srcGranularity);
+    }
+    if (!bDstContig)
+    {
+        dstStart = memdescGetPtePhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
+        dstRun = dstGranularity -
+                 (memdescGetPhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset) % dstGranularity);
+    }
+
+    //
+    // A side whose run is below limit is non-contiguous.  The page checked
+    // starts below offset + limit, so it lies inside the memdesc.
+    //
+    while (NV_MIN(srcRun, dstRun) < limit)
+    {
+        if (srcRun <= dstRun)
+        {
+            if (memdescGetPtePhysAddr(pSrcMemDesc, srcAddrTranslation, srcOffset + srcRun) !=
+                srcStart + srcRun)
+            {
+                break;
+            }
+            srcRun += srcGranularity;
+        }
+        else
+        {
+            if (memdescGetPtePhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset + dstRun) !=
+                dstStart + dstRun)
+            {
+                break;
+            }
+            dstRun += dstGranularity;
+        }
+    }
+    return NV_MIN(NV_MIN(srcRun, dstRun), limit);
+}
+
 NV_STATUS
 ceutilsMemcopy_IMPL
 (
@@ -774,7 +844,11 @@ ceutilsMemcopy_IMPL
         NvU64 dstAddr = memdescGetPhysAddr(pDstMemDesc, dstAddrTranslation, dstOffset);
         NvU64 maxContigSizeSrc = bSrcContig ? copyLength : (srcPageGranularity - srcAddr % srcPageGranularity);
         NvU64 maxContigSizeDst = bDstContig ? copyLength : (dstPageGranularity - dstAddr % dstPageGranularity);
-        NvU32 copySizeContig = (NvU32)NV_MIN(NV_MIN(copyLength, NV_MIN(maxContigSizeSrc, maxContigSizeDst)), CE_MAX_BYTES_PER_LINE);
+        NvU32 copySizeContig = pParams->bCoalescePhysRuns ?
+            (NvU32)_ceutilsPhysRunLength(pSrcMemDesc, srcAddrTranslation, bSrcContig, srcOffset,
+                                         pDstMemDesc, dstAddrTranslation, bDstContig, dstOffset,
+                                         NV_MIN(copyLength, CE_MAX_BYTES_PER_LINE)) :
+            (NvU32)NV_MIN(NV_MIN(copyLength, NV_MIN(maxContigSizeSrc, maxContigSizeDst)), CE_MAX_BYTES_PER_LINE);
 
         NV_PRINTF(LEVEL_INFO, "CeUtils Memcopy dstAddr: %llx, srcAddr: %llx, size: %x\n",
                   dstAddr, srcAddr, copySizeContig);

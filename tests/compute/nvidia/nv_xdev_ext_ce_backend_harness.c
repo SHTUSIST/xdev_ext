@@ -146,10 +146,12 @@ static struct harness {
 	void *event_arg;
 	unsigned int events_fired;
 	u32 last_n, last_dir;
+	struct { u64 host, gpu, size; } last_x[64];
 	int submit_saw_dev_sync_gap;
 	unsigned int dma_map, dma_unmap, sg_alloc, sg_free, dma_bad_dir;
 	void *dma_dev;
-	int dma_mode;               /* 0 merged, 1 split, 2 fail */
+	int dma_mode;               /* 0 merged, 1 split, 2 fail, 3 one scattered segment per page */
+	unsigned int sg_walk;       /* sg_next() calls: scatterlist entries walked */
 	u64 page_iova[MAX_PAGES];
 	unsigned char synced_cpu[MAX_PAGES], synced_dev[MAX_PAGES];
 	unsigned int hrtimer_starts, timer_arms;
@@ -636,7 +638,11 @@ struct sg_table { struct scatterlist *sgl; unsigned int nents, orig_nents; };
 #define sg_dma_address(sg) ((sg)->dma_address)
 #define sg_dma_len(sg) ((sg)->dma_length)
 #define sg_page(sg) ((sg)->page)
-static struct scatterlist *sg_next(struct scatterlist *sg) { return sg->last ? NULL : sg + 1; }
+static struct scatterlist *sg_next(struct scatterlist *sg)
+{
+	__atomic_add_fetch(&H.sg_walk, 1, __ATOMIC_SEQ_CST);
+	return sg->last ? NULL : sg + 1;
+}
 #define for_each_sg(sglist, sg, nr, i) \
 	for ((i) = 0, (sg) = (sglist); (i) < (nr); (i)++, (sg) = sg_next(sg))
 #define for_each_sgtable_sg(sgt, sg, i) for_each_sg((sgt)->sgl, sg, (sgt)->orig_nents, i)
@@ -691,7 +697,15 @@ static int dma_map_sgtable(struct device *dev, struct sg_table *sgt,
 	if (H.dma_mode == 2)
 		return -ENOMEM;
 	/* IOVAs differ from the CPU physical addresses on purpose. */
-	if (H.dma_mode == 1 && n >= 2) {
+	if (H.dma_mode == 3) {
+		/* No two pages adjacent: every page is its own DMA segment. */
+		for (i = 0; i < n; i++) {
+			sgt->sgl[i].dma_address = 0xC00000000ULL + (u64)(n - 1 - i) * 0x10000ULL;
+			sgt->sgl[i].dma_length = PAGE_SIZE;
+			H.page_iova[i] = sgt->sgl[i].dma_address;
+		}
+		sgt->nents = n;
+	} else if (H.dma_mode == 1 && n >= 2) {
 		sgt->sgl[0].dma_address = 0xA00000000ULL;
 		sgt->sgl[0].dma_length = (n - 1) * PAGE_SIZE;
 		sgt->sgl[1].dma_address = 0xB00000000ULL;
@@ -938,6 +952,11 @@ static NV_STATUS nv_p2p_ce_async_submit(nv_p2p_ce_host_t *h,
 	H.rm_submit++;
 	H.last_n = n;
 	H.last_dir = dir;
+	for (i = 0; i < n && i < 64; i++) {
+		H.last_x[i].host = x[i].umemOffset;
+		H.last_x[i].gpu = x[i].gpuOffset;
+		H.last_x[i].size = x[i].size;
+	}
 	/* RM direction 1: host pages are read by the CE. */
 	if (dir == 1)
 		for (i = 0; i < n; i++) {
@@ -1680,6 +1699,113 @@ static void case_sync(void)
 #endif
 }
 
+/*
+ * A plan writes one entry per frame.  Consecutive entries adjacent in both
+ * the host pages and the window reach RM as one transfer, so RM can cover
+ * them with one CE command; any gap on either side keeps them apart.
+ */
+static void case_merge_adjacent(void)
+{
+	static const struct { u64 page, gpu; } e[] = {
+		{ 2, 0 }, { 3, 4096 }, { 4, 8192 },	/* adjacent on both sides */
+		{ 10, 12288 },				/* host gap */
+		{ 11, 20480 },				/* window gap */
+		{ 12, 24576 },				/* adjacent to the previous */
+	};
+	struct xdev_ext_ce_xfer x[6];
+	struct fixture fx;
+	u32 i;
+	memset(x, 0, sizeof(x));
+	for (i = 0; i < 6; i++) {
+		x[i].host_byte_off = e[i].page * 4096;
+		x[i].gpu_off = e[i].gpu;
+		x[i].len = 4096;
+#if HARNESS_OWNER_API
+		x[i].owner = H.frame_owner[e[i].page];
+		x[i].generation = H.frame_generation[e[i].page];
+#endif
+	}
+	H.dma_mode = 0;
+	REQUIRE(bind(&fx, 16) == 0, "bind");
+	H.expected_ticket[1] = 1;
+	REQUIRE(ops->submit(&fx.r, fx.host, XDEV_EXT_MECH_DIR_TO_DEVICE, x, 6, &cookies[1], 1) == 0,
+		"submit");
+	CHECK(H.last_n == 3, "a 6-entry plan reached RM as %u transfers, expected 3", H.last_n);
+	CHECK(H.last_x[0].host == 2 * 4096 && H.last_x[0].gpu == 0 &&
+	      H.last_x[0].size == 3 * 4096, "first transfer %llx/%llx/%llx",
+	      (unsigned long long)H.last_x[0].host, (unsigned long long)H.last_x[0].gpu,
+	      (unsigned long long)H.last_x[0].size);
+	CHECK(H.last_x[1].host == 10 * 4096 && H.last_x[1].gpu == 12288 &&
+	      H.last_x[1].size == 4096, "host gap merged");
+	CHECK(H.last_x[2].host == 11 * 4096 && H.last_x[2].gpu == 20480 &&
+	      H.last_x[2].size == 2 * 4096, "window gap or trailing merge wrong");
+	deliver(H.rm_last);
+	CHECK(H.done[1].count == 1 && H.done[1].status == 0 && H.done[1].bytes == 6 * 4096,
+	      "completion count %u status %d bytes %llu", H.done[1].count, H.done[1].status,
+	      (unsigned long long)H.done[1].bytes);
+	common_checks();
+}
+
+static int synced_exactly(const unsigned char *map, u32 first, u32 last, u32 nr)
+{
+	u32 i;
+	for (i = 0; i < nr; i++)
+		if (!!map[i] != (i >= first && i <= last))
+			return 0;
+	return 1;
+}
+
+/* Scattered segments: each request syncs exactly the pages its entry covers. */
+static void case_sync_scattered(void)
+{
+#if VARIANT_IOVA
+	struct fixture fx;
+	H.dma_mode = 3;
+	REQUIRE(bind(&fx, 32) == 0, "bind");
+	memset(H.synced_cpu, 0, sizeof(H.synced_cpu));
+	memset(H.synced_dev, 0, sizeof(H.synced_dev));
+	/* [5*4096 + 100, + 2*4096) lies in pages 5, 6 and 7 */
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 5 * 4096 + 100, 2 * 4096) == 0,
+		"to device");
+	CHECK(!H.submit_saw_dev_sync_gap, "G3: device sync missing before submission");
+	CHECK(synced_exactly(H.synced_dev, 5, 7, 32),
+	      "device sync must cover pages 5..7 only");
+	deliver(H.rm_last);
+	REQUIRE(H.done[1].count == 1 && H.done[1].status == 0, "to-device completion");
+	memset(H.synced_cpu, 0, sizeof(H.synced_cpu));
+	/* [20*4096, + 4096) is page 20 alone */
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_FROM_DEVICE, 20 * 4096, 4096) == 0,
+		"from device");
+	deliver(H.rm_last);
+	REQUIRE(H.done[2].count == 1 && H.done[2].status == 0, "from-device completion");
+	CHECK(synced_exactly(H.done[2].synced_cpu, 20, 20, 32),
+	      "CPU sync before completion must cover page 20 only");
+	common_checks();
+#endif
+}
+
+/*
+ * Cost of one request does not grow with the pool: a one-page request in a
+ * 32-segment pool walks no scatterlist on submit or completion (the former
+ * nv_xdev_ext_ce_sync() visited every DMA segment, twice per batch).
+ */
+static void case_sync_pool_walk(void)
+{
+#if VARIANT_IOVA
+	struct fixture fx;
+	H.dma_mode = 3;
+	REQUIRE(bind(&fx, 32) == 0, "bind");
+	H.sg_walk = 0;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 9 * 4096, 4096) == 0, "submit");
+	deliver(H.rm_last);
+	REQUIRE(H.done[1].count == 1 && H.done[1].status == 0, "completion");
+	CHECK(H.sg_walk <= 2,
+	      "a one-page request walked %u scatterlist entries of a 32-segment pool",
+	      H.sg_walk);
+	common_checks();
+#endif
+}
+
 static void case_host_released_region_failed(void)
 {
     struct fixture fx;
@@ -1906,6 +2032,9 @@ static const struct named_case cases[] = {
 	{ "iova-rm-bind-fail", case_iova_rm_bind_fail },
 	{ "phys-identity", case_phys_identity },
 	{ "sync", case_sync },
+	{ "sync-scattered", case_sync_scattered },
+	{ "sync-pool-walk", case_sync_pool_walk },
+	{ "merge-adjacent", case_merge_adjacent },
 	{ "region-unbind-fail", case_region_unbind_fail },
     { "host-released-region-failed", case_host_released_region_failed },
 	{ "race", case_race },

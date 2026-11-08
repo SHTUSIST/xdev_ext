@@ -921,6 +921,9 @@ def extract_common(source, selected):
     if not limit:
         raise AssertionError('SETUP actual peer span limit missing')
     declarations.append(limit[0])
+    peer_put = definition(block, 'xdev_ext_storfam_peer_put')
+    # The actual peer header supplies the epoch/evidence vocabulary.
+    evidence_bound = 'xdev_ext_stor_leases_retire_unknown(' in peer_put
     declarations.append(record('drivers/nvme/host/xdev_ext_native_peer_trace.h',
                                'nvme_xdev_ext_peer_trace', True))
     for name in ('nvme_xdev_ext_mech_stage', 'nvme_xdev_ext_mech_batch',
@@ -949,8 +952,18 @@ def extract_common(source, selected):
         code.append(record(peer_header, name))
     if shared_builder:
         code.append(record('drivers/nvme/host/core.c', 'nvme_xdev_ext_peer_build_cmd'))
-    if 'xdev_ext_stor_leases_retire(' in definition(block, 'xdev_ext_storfam_peer_put'):
+    if 'xdev_ext_stor_leases_retire(' in peer_put:
         code.append(record('io_uring/family/xdev_ext_storfam.c', 'xdev_ext_stor_leases_retire'))
+    if evidence_bound:
+        # No requester record reaches this fixture (no nvme-pci preparation):
+        # an UNKNOWN release is unbound, as the core decides for it.
+        code.append('int xdev_ext_peer_requester_evidence(struct xdev_ext_peer_requester *rq, u64 epoch)\n'
+                    '{ return !rq || epoch == XDEV_EXT_PEER_EPOCH_NONE ? XDEV_EXT_PEER_EVIDENCE_NEVER : '
+                    'XDEV_EXT_PEER_EVIDENCE_PENDING; }\n'
+                    'bool xdev_ext_peer_fd_release_unknown(struct xdev_ext_peer_fd_lease *h, '
+                    'struct xdev_ext_peer_requester *rq, u64 epoch)\n'
+                    '{ (void)rq; (void)epoch; xdev_ext_peer_fd_release(h, false); return false; }')
+        code.append(record('io_uring/family/xdev_ext_storfam.c', 'xdev_ext_stor_leases_retire_unknown'))
     for name in ('xdev_ext_stor_slot_add', 'xdev_ext_stor_slot_get',
                  'xdev_ext_stor_slot_put', 'xdev_ext_stor_done'):
         code.append(record('io_uring/family/xdev_ext_storfam.c', name))
@@ -963,7 +976,10 @@ def extract_common(source, selected):
                  'xdev_ext_storfam_host_get', 'xdev_ext_storfam_host_put',
                  'xdev_ext_storfam_peer_io', 'xdev_ext_storfam_peer_resources_free',
                  'xdev_ext_storfam_peer_resources_init', 'xdev_ext_storfam_peer_get',
-                 'xdev_ext_storfam_peer_put', 'xdev_ext_storfam_peer_map'):
+                 'xdev_ext_storfam_peer_evidence', 'xdev_ext_storfam_peer_put',
+                 'xdev_ext_storfam_peer_map'):
+        if name == 'xdev_ext_storfam_peer_evidence' and not evidence_bound:
+            continue
         if name == 'xdev_ext_stor_block_append' and 'xdev_ext_stor_block_fill(' in definition(block, name):
             code.append(record(block_path, 'xdev_ext_stor_block_fill'))
         code.append(record(block_path, name))
@@ -990,7 +1006,10 @@ def extract_common(source, selected):
                  'nvme_xdev_ext_peer_end_io', 'nvme_xdev_ext_member_encode',
                  'nvme_xdev_ext_member_encode_dptr', 'nvme_xdev_ext_member_request_init',
                  'nvme_xdev_ext_member_post', 'nvme_xdev_ext_member_retire_peer',
+                 'nvme_xdev_ext_member_peer_evidence',
                  'nvme_xdev_ext_class_submit', 'nvme_xdev_ext_stage_fill_cqe'):
+        if name == 'nvme_xdev_ext_member_peer_evidence' and not evidence_bound:
+            continue
         code.append(record(RELATIVE, name))
     # This suite bypasses CREATE/poll/validate. Select only the actual member
     # initializer fields reached by submit/consume; never invent a callback.
@@ -1001,7 +1020,7 @@ def extract_common(source, selected):
     fields = []
     for field in ('identity', 'requester', 'queue', 'encode', 'encode_dptr',
                   'request_init', 'post', 'retire_peer', 'peer_slot_bytes',
-                  'peer_native_offset'):
+                  'peer_native_offset') + (('peer_evidence',) if evidence_bound else ()):
         lines = re.findall(r'^\s*\.' + field + r' = [^\n]+,$', ops[0], re.M)
         if len(lines) != 1:
             raise AssertionError('SETUP member initializer field missing: ' + field)
@@ -1377,8 +1396,8 @@ def common_mutation_requester_shared_v2(code, name):
         'accepted failure published as an ordinary completion': ('xdev_ext_stor_done',
             'xdev_ext_mech_batch_completion_publish(b, done->ticket, status, done->uncertain);',
             'xdev_ext_mech_batch_completion_publish(b, done->ticket, status, false);'),
-        'uncertain lease released quiesced': ('xdev_ext_stor_leases_retire',
-            'xdev_ext_peer_fd_release(&leases[i], quiesced);',
+        'uncertain lease released quiesced': ('xdev_ext_stor_leases_retire_unknown',
+            'quiesced &= xdev_ext_peer_fd_release_unknown(&leases[i], rq, epoch);',
             'xdev_ext_peer_fd_release(&leases[i], true);'),
         'GPU subspan offset omitted': ('xdev_ext_storfam_peer_map',
             'off = f.umem_addr + f.data_off', 'off = f.umem_addr'),

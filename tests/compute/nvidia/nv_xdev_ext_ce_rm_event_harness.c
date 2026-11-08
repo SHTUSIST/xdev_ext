@@ -156,6 +156,7 @@ static NvBool ceutilsIsSubmissionPaused(CeUtils *c) { return c->paused; }
 static struct {
 	NvU64 alloc_flags;
 	unsigned int created, deleted, pushes, callbacks_set, last_callback_push;
+	unsigned int coalesce_requests;
 	unsigned int resolve_calls, fail_resolve, memcopy_fail_at, async_pushes;
 	void *last_callback_arg;
 	NV_STATUS resolve_status;
@@ -195,6 +196,8 @@ static NV_STATUS ceutilsMemcopy(CeUtils *c, CEUTILS_MEMCOPY_PARAMS *p)
 	R.pushes++;
 	if (p->flags & NV0050_CTRL_MEMCOPY_FLAGS_ASYNC)
 		R.async_pushes++;
+	if (p->bCoalescePhysRuns)
+		R.coalesce_requests++;
 	if (R.memcopy_fail_at && R.pushes == R.memcopy_fail_at)
 		return NV_ERR_GENERIC;
 	pb.payload = (NvU32)++c->lastSubmittedPayload;
@@ -326,6 +329,21 @@ static void case_one_callback_per_plan(void)
 	CHECK(RmP2PUmemCeHostUnbind(h) == NV_OK, "unbind polled");
 }
 
+/* Page-granular host pool and window: every entry asks for one CE command
+ * per physically adjacent run (TODO.63), not one per 4 KiB page. */
+static void case_coalesce_requested(void)
+{
+	P2P_UMEM_CE_HOST *h;
+	NvU64 token = 0;
+	REQUIRE(bind(&h, 1) == NV_OK, "bind");
+	REQUIRE(submit(h, 3, &token) == NV_OK, "submit");
+	CHECK(R.pushes == 3 && R.coalesce_requests == 3,
+	      "%u of %u plan entries asked CeUtils to coalesce adjacent pages",
+	      R.coalesce_requests, R.pushes);
+	hw_complete(h, token);
+	CHECK(RmP2PUmemCeHostUnbind(h) == NV_OK, "unbind");
+}
+
 static void case_event_forward(void)
 {
 	P2P_UMEM_CE_HOST *h;
@@ -444,6 +462,7 @@ struct named_case { const char *name; void (*fn)(void); };
 static const struct named_case cases[] = {
 	{ "bind-flags", case_bind_flags },
 	{ "one-callback-per-plan", case_one_callback_per_plan },
+	{ "coalesce-requested", case_coalesce_requested },
 	{ "event-forward", case_event_forward },
 	{ "event-poisoned", case_event_poisoned },
 	{ "event-unbind-pending", case_event_unbind_pending },
