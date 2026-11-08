@@ -282,4 +282,43 @@ xdev_ext_xd_login_check(const struct xdev_ext_xd_login *l, __u32 size,
 	return 0;
 }
 
+/*
+ * One end of an XDOMAIN link as the startup data challenge sees it: the local
+ * NHI, the route of the local port the link uses, both host router UUIDs and
+ * the link's current incarnation.
+ */
+struct xdev_ext_xd_end {
+	const void *nhi;
+	__u64 route, inc;
+	__u8 local_uuid[16], remote_uuid[16];
+};
+
+/*
+ * Which end sends the startup PING first: 1 for this end, 0 for the peer,
+ * -EPROTO when the two ends cannot be ordered. Different host UUIDs: the
+ * larger UUID. A peer that carries this host's own UUID is refused, unless
+ * the self_loop_test module parameter is set and loop_peer is the other end
+ * of a cable joining two ports of this host: another link on the same NHI,
+ * on a different local port, with the same UUID pair, whose incarnation is
+ * the one the accepted LOGIN carried. The larger incarnation then sends first.
+ */
+static inline int xdev_ext_xd_peer_order(const struct xdev_ext_xd_end *self, __u64 peer_inc,
+		const struct xdev_ext_xd_end *loop_peer, bool self_loop_test)
+{
+	unsigned int i;
+
+	for (i = 0; i < 16; i++)
+		if (self->local_uuid[i] != self->remote_uuid[i])
+			return self->local_uuid[i] > self->remote_uuid[i];
+	if (!self_loop_test || !loop_peer || loop_peer->nhi != self->nhi ||
+	    loop_peer->route == self->route || !peer_inc || loop_peer->inc != peer_inc ||
+	    self->inc == peer_inc)
+		return -EPROTO;
+	for (i = 0; i < 16; i++)
+		if (loop_peer->local_uuid[i] != self->local_uuid[i] ||
+		    loop_peer->remote_uuid[i] != self->remote_uuid[i])
+			return -EPROTO;
+	return self->inc > peer_inc;
+}
+
 #endif

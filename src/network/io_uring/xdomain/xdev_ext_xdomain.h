@@ -58,6 +58,12 @@ struct xdev_ext_xd_link {
 	u64 early_bind_next; /* link lifetime; zero means exhausted, never reset */
 	u64 route, token;			/* token never reused */
 	uuid_t local_uuid, remote_uuid;		/* copies taken at probe */
+	/* Test mode for a cable joining two ports of this host: the
+	 * self_loop_test module parameter snapshot (immutable), and under
+	 * ctl_mutex the local link that sent the LOGIN being accepted.
+	 */
+	bool self_loop_test, loop_peer_found;
+	struct xdev_ext_xd_end loop_peer;
 	spinlock_t lock;			/* up, closing flags, local/remote_inc, chan counters,
 						 * control TX buffers, posting, down_err/down_local_inc */
 	struct mutex ctl_mutex;			/* login state, accepted/response_inc, rings, paths */

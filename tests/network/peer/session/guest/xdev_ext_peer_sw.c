@@ -13,11 +13,15 @@
 #include <linux/slab.h>
 #include <linux/uaccess.h>
 #include <linux/xdev_ext_peer.h>
+#include <uapi/linux/xdev_ext_mech.h>
 #include "sw_provider_uapi.h"
 
 static bool guest_only;
 module_param(guest_only, bool, 0400);
 MODULE_PARM_DESC(guest_only, "explicit guest-only opt-in; never load on the host");
+static bool host_backing;
+module_param(host_backing, bool, 0400);
+MODULE_PARM_DESC(host_backing, "describe the allocation as what it is (host RAM with struct pages)");
 static atomic64_t opens, closes, pins, unpins, maps, unmaps, live_pins, live_maps;
 struct sw_allocation {
 	struct mutex lock;
@@ -149,9 +153,20 @@ static int sw_unmap(void *allocation, struct pci_dev *peer, struct xdev_ext_peer
 	mutex_unlock(&a->lock); atomic64_inc(&unmaps); atomic64_dec(&live_maps);
 	return 0;
 }
+/* Requester admission of a POOL_PEER mechanism session asks for the backing;
+ * without host_backing the fixture stays undescribed, as before. */
+static int sw_describe(void *allocation, struct pci_dev *requester,
+		       struct xdev_ext_peer_backing *out)
+{
+	if (!host_backing) return -EOPNOTSUPP;
+	*out = (struct xdev_ext_peer_backing){
+		.flags = XDEV_EXT_PEER_BACKING_HOST_SYSTEM | XDEV_EXT_PEER_BACKING_STRUCT_PAGE,
+	};
+	return 0;
+}
 static const struct xdev_ext_peer_provider_ops sw_ops = {
 	.owner = THIS_MODULE, .fops = &sw_fops, .pin = sw_pin, .unpin = sw_unpin,
-	.map = sw_map, .unmap = sw_unmap,
+	.map = sw_map, .unmap = sw_unmap, .describe = sw_describe,
 };
 static struct miscdevice sw_device = {
 	.minor = MISC_DYNAMIC_MINOR, .name = "xdev_ext_peer_sw", .mode = 0600, .fops = &sw_fops,

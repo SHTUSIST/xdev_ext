@@ -108,16 +108,31 @@ controller reset (`fail_io_timeout`). Each case is its own process:
   at owner close, with no further reset.
 - `owner-open`: a region recovered while its owner holds it admits no new
   command (`-ESTALE`) and is released by the owner close.
+- `session-error-status` (`peer_reset_session_e2e`, the mechanism-session
+  path): a POOL_PEER session reads from the source controller into the
+  allocation and writes to the other controller. The read gets an injected
+  error status, the batch is sequestered and STOP quarantines the session
+  (`-EBUSY`). The session stays parked (another ring's STATS still finds it
+  as ZOMBIE) and the allocation stays pinned and mapped through closing every
+  fd, a completed reset of the other controller (stage 1's device) and a wait;
+  the source controller's completed reset releases the session (STATS
+  `-ENOENT`) and every provider reference once. The provider is loaded with
+  `host_backing=1` so that it describes its allocation as what it is (host
+  RAM with struct pages) and the session's NVMe requester admission accepts
+  it; without a description CREATE refuses the pool (`-EXDEV`).
 
 The provider must then unload. `reset_validate.py` checks every case verdict
 and its exact check count, the unload, the exit status and the kernel console
 for the debug report families `xdev_ext_mech_zc_debug.py` rejects;
 `python3 -I reset_validate_test.py` checks that it rejects single-defect
-consoles. `reset_kvm.sh` builds only the static guest program from an
-assembled Linux tree:
+consoles. `reset_kvm.sh` builds only the two guest programs from an
+assembled Linux tree (the fd program static, the session program dynamic,
+with its libraries copied into the initramfs); `--tools` names a directory
+with `nvme_s0.bpf.o` built against the same kernel's BTF:
 
     bash reset_kvm.sh --scratch PRIVATE_0700_DIR --linux ASSEMBLED_TREE \
-        --build KERNEL_O_DIR --module KERNEL_O_DIR_MATCHED/xdev_ext_peer_sw.ko
+        --build KERNEL_O_DIR --module KERNEL_O_DIR_MATCHED/xdev_ext_peer_sw.ko \
+        --tools DIR_WITH_NVME_S0_BPF_O
 
 This certifies the software release state machine against a QEMU controller
 reset. It does not show that a physical controller stops DMA at reset, nor

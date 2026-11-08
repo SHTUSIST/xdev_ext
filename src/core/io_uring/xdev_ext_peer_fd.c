@@ -117,6 +117,14 @@ int xdev_ext_peer_file_info(struct file *file, u64 *len, u64 *generation)
  return xdev_ext_peer_info(a->parent->region, len, generation, false);
 }
 EXPORT_SYMBOL_GPL(xdev_ext_peer_file_info);
+int xdev_ext_peer_file_drainable(struct file *file)
+{
+ struct xdev_ext_peer_authority *a;
+ if (!file || file->f_op != &xdev_ext_peer_authority_fops) return -EINVAL;
+ a = file->private_data;
+ return xdev_ext_peer_drainable(a->parent->region);
+}
+EXPORT_SYMBOL_GPL(xdev_ext_peer_file_drainable);
 int xdev_ext_peer_file_describe(struct file *file, struct pci_dev *requester,
                                struct xdev_ext_peer_backing *out)
 {

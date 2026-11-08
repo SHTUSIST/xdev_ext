@@ -877,6 +877,9 @@ NV_STATUS RmP2PUmemCeAsyncSubmit(void *host, const P2P_UMEM_XFER *x,
         p.dstOffset = direction ? h->pBinding->offset + x[i].gpuOffset : x[i].umemOffset;
         p.length = x[i].size;
         p.flags = NV0050_CTRL_MEMCOPY_FLAGS_ASYNC;
+        /* Host pool and window are page-granular memdescs: one CE command
+         * per physically adjacent run, not per 4 KiB page. */
+        p.bCoalescePhysRuns = NV_TRUE;
         if (h->event != NULL && i == n - 1)
         {
             p.pCompletionCallback = _p2pXdevExtCeEvent;
