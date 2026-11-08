@@ -136,10 +136,21 @@ main() {
     verb=$(cat /opt/window/mode)
     if [ "$verb" = multi ] || [ "$verb" = reset ]; then
         mount -t debugfs debugfs /sys/kernel/debug || return 1
-        ls -l "/dev/${dst}n2" "/dev/ng${dst#nvme}n2" || return 1
+        # Disk names follow namespace discovery order, not the NSID:
+        # pick the shared (NSID 1) and the private (NSID 2) namespace.
+        shared= private=
+        for b in /sys/block/${dst}n*; do
+            case "$(cat "$b/nsid" 2>/dev/null)" in
+            1) shared=${b##*/} ;;
+            2) private=${b##*/} ;;
+            esac
+        done
+        [ -n "$shared" ] && [ -n "$private" ] || { echo 'FAIL DST namespaces 1 and 2 not found'; return 1; }
+        echo "XDEV_EXT_WINDOW_NAMESPACES shared=$shared private=$private"
+        ls -l "/dev/$shared" "/dev/ng${shared#nvme}" "/dev/$private" "/dev/ng${private#nvme}" || return 1
         /opt/window/window_guest "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
-            "/dev/${dst}n1" "/dev/ng${dst#nvme}n1" /opt/window "$verb" \
-            "/dev/${dst}n2" "/dev/ng${dst#nvme}n2"
+            "/dev/$shared" "/dev/ng${shared#nvme}" /opt/window "$verb" \
+            "/dev/$private" "/dev/ng${private#nvme}"
         return
     fi
     /opt/window/window_guest "/dev/${src}n1" "/dev/ng${src#nvme}n1" \
