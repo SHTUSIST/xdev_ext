@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "checked": "2026-11-08",
+  "lmcache": {
+    "repo": "https://github.com/LMCache/LMCache.git",
+    "tag": "v0.5.7",
+    "commit": "236f3eec32a2d330662a1795d90a01a1e0782c49",
+    "why_source": "prebuilt wheels lack the optional lmcache.lmcache_mooncake extension that the mooncake_store L2 adapter needs (Mooncake docs, vllmv1-lmcache-mp-integration.md)"
+  },
+  "mooncake": {
+    "repo": "https://github.com/kvcache-ai/Mooncake.git",
+    "tag": "v0.3.14",
+    "commit": "e1ea5d31bb5e46ff2df9f90e7c2fbaf52fcdee8c",
+    "wheel": "mooncake-transfer-engine-cuda13==0.3.14",
+    "why_wheel_variant": "default wheel targets CUDA 12.1-12.9; cuda13 variant for CUDA 13.x (quick-start.md); LMCache v0.5.7 and vLLM 0.33.0 install cu13 torch"
+  },
+  "vllm_e1": {
+    "version": "0.33.0",
+    "commit": "4ba787ec9959e566d3b587a796dff07673324da5",
+    "python": "python3.12"
+  },
+  "vllm_e2": {
+    "version": "0.10.2",
+    "commit": "01efc7ef781391e744ed08c3292817a773d654e6",
+    "python": "python3.12",
+    "why": "src/compute/vllm (xdev_tp_vllm) accepts exactly vLLM 0.10.2; all three E2 arms use it"
+  },
+  "ray": {
+    "version": "2.48.0",
+    "why": "vLLM 0.10.2 requirements/cuda.txt: ray[cgraph]>=2.48.0; docs/serving/parallelism_scaling.md: multi-node vLLM deployments require Ray"
+  }
+}
