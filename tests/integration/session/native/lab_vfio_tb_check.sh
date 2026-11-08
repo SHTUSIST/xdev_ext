@@ -10,14 +10,21 @@
 #
 # Usage:
 #   lab_vfio_tb_check.sh --source <checkout> [--scratch DIR] [--out DIR]
-#                        [--nhi BDF] [--build]
+#                        [--nhi BDF] [--build] [--selfloop-echo]
 #   lab_vfio_tb_check.sh --summarize <tb-nhi-enum.txt>
+#   lab_vfio_tb_check.sh --summarize-echo <tb-nhi-enum.txt> <tb-selfloop-echo.txt>
 #
 # --source must be a clean checkout of a pushed commit (clone it from GitHub);
 # --build builds the guest first (stops before QEMU); later runs reuse it.
+# --selfloop-echo: when the guest sees a cable joining the NHI's two ports
+# (SELF_LOOP), it loads the XDOMAIN module with self_loop_test=1 and each end
+# sends one 128-byte PING and one 4096-byte PONG through the cable; the
+# receiving end compares every byte. This moves payload through the NHI rings
+# (still no timing). Other topologies print TB_SELFLOOP_ECHO result=NOT_RUN.
 # Final line: TB_LOOP_CHECK result=<PEER|SELF_LOOP|NO_LINK|UNKNOWN> ...
 # Exit 0 when the check completed (whatever the topology), 2 on usage error,
-# 3 when a precondition refused the launch, 4 when the guest run failed.
+# 3 when a precondition refused the launch, 4 when the guest run failed,
+# 5 when a requested self-loop echo failed.
 set -u
 
 summarize() {
@@ -38,12 +45,34 @@ summarize() {
 	echo "TB_LOOP_CHECK result=$result routers=$routers xdomains=$xdomains same_uuid_xdomains=$same port_links=${links:-none}"
 }
 
+# Echo verdict for --selfloop-echo: runs only on a SELF_LOOP topology.
+summarize_echo() {
+	local enum=$1 echo_file=$2 topology line
+	topology=$(summarize "$enum" | sed -n 's/^TB_LOOP_CHECK result=\([A-Z_]*\).*/\1/p')
+	if [ "$topology" != SELF_LOOP ]; then
+		echo "TB_SELFLOOP_ECHO result=NOT_RUN topology=${topology:-UNKNOWN}"
+		return 0
+	fi
+	line=$(sed -n 's/^XDEV_EXT_TB_SELFLOOP_ECHO=//p' "$echo_file" 2>/dev/null | tail -n 1)
+	case $line in
+	PASS*) echo "TB_SELFLOOP_ECHO result=PASS topology=SELF_LOOP${line#PASS}"; return 0 ;;
+	FAIL*) echo "TB_SELFLOOP_ECHO result=FAIL topology=SELF_LOOP${line#FAIL}" ;;
+	NOT_RUN*) echo "TB_SELFLOOP_ECHO result=FAIL topology=SELF_LOOP reason=echo-not-run" ;;
+	*) echo "TB_SELFLOOP_ECHO result=FAIL topology=SELF_LOOP reason=no-echo-report" ;;
+	esac
+	return 1
+}
+
+if [ "${1:-}" = --summarize-echo ]; then
+	[ $# -eq 3 ] || { echo "usage: $0 --summarize-echo <tb-nhi-enum.txt> <tb-selfloop-echo.txt>" >&2; exit 2; }
+	summarize_echo "$2" "$3"; exit $?
+fi
 if [ "${1:-}" = --summarize ]; then
 	[ $# -eq 2 ] || { echo "usage: $0 --summarize <tb-nhi-enum.txt>" >&2; exit 2; }
 	summarize "$2"; exit $?
 fi
 
-SRC= SCRATCH=/workspaces/xdev-ext-tb-check/scratch OUT= NHI=0000:00:0d.2 BUILD=0
+SRC= SCRATCH=/workspaces/xdev-ext-tb-check/scratch OUT= NHI=0000:00:0d.2 BUILD=0 ECHO=0
 while [ $# -gt 0 ]; do
 	case $1 in
 	--source) SRC=${2:-}; shift 2 ;;
@@ -51,6 +80,7 @@ while [ $# -gt 0 ]; do
 	--out) OUT=${2:-}; shift 2 ;;
 	--nhi) NHI=${2:-}; shift 2 ;;
 	--build) BUILD=1; shift ;;
+	--selfloop-echo) ECHO=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -63,7 +93,13 @@ umask 077
 mkdir -p "$OUT" "$(dirname "$SCRATCH")"
 export XDEV_EXT_QEMU=${XDEV_EXT_QEMU:-/usr/bin/qemu-system-x86_64}
 FLAGS=(--scratch "$SCRATCH" --source "$SRC" --debug-locking --tb-nhi "$NHI" --tb-nhi-enumerate --tb-nhi-cycles 0)
+[ "$ECHO" = 1 ] && FLAGS+=(--tb-nhi-selfloop-echo)
 
+# An echo run needs a guest build that contains the XDOMAIN module.
+if [ "$ECHO" = 1 ] && [ -s "$SCRATCH/build/xdev-ext-artifacts.sha256" ] &&
+	! grep -q 'xdev_ext_xdomain.ko$' "$SCRATCH/build/xdev-ext-artifacts.sha256"; then
+	BUILD=1
+fi
 if [ "$BUILD" = 1 ] || [ ! -s "$SCRATCH/build/xdev-ext-artifacts.sha256" ]; then
 	echo "building guest into $SCRATCH (stops before QEMU)"
 	XDEV_EXT_QEMU=/nonexistent-build-only-stop bash "$HARNESS" "${FLAGS[@]}" >"$OUT/build.log" 2>&1
@@ -94,7 +130,14 @@ rc=$?
 echo "$rc" >"$OUT/run.exit"
 state >"$OUT/state-after.txt"
 cp -a "$SCRATCH/evidence/tb-nhi-enum.txt" "$OUT/" 2>/dev/null
+cp -a "$SCRATCH/evidence/tb-selfloop-echo.txt" "$OUT/" 2>/dev/null
 grep -E 'XDEV_EXT_(TB_NHI|MECH_LOCKDEP|ZC_KVM)' "$OUT/run.log" | tail -n 4
+echo_rc=0
+if [ "$ECHO" = 1 ]; then
+	summarize_echo "$OUT/tb-nhi-enum.txt" "$OUT/tb-selfloop-echo.txt" | tee "$OUT/echo-summary.txt"
+	echo_rc=${PIPESTATUS[0]}
+fi
 summarize "$OUT/tb-nhi-enum.txt" | tee "$OUT/summary.txt"
 [ "$rc" -eq 0 ] || { echo "guest run failed (exit $rc), see $OUT/run.log" >&2; exit 4; }
+[ "$echo_rc" -eq 0 ] || { echo "self-loop echo failed, see $OUT/tb-selfloop-echo.txt" >&2; exit 5; }
 exit 0

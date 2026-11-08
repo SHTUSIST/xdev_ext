@@ -35,6 +35,10 @@ static bool poll_on_interrupt;
 module_param(poll_on_interrupt, bool, 0444);
 MODULE_PARM_DESC(poll_on_interrupt, "receive ring interrupts start bounded process-context polling; transmit completions stay interrupt driven (default false, exclusive with poll_completions)");
 
+static bool self_loop_test;
+module_param(self_loop_test, bool, 0444);
+MODULE_PARM_DESC(self_loop_test, "test only: accept a peer that carries this host's own UUID when it is another port of the same NHI, i.e. a cable joining two ports of one host (default false refuses it)");
+
 static struct tb_property_dir *xdev_ext_xd_dir;
 static DEFINE_MUTEX(xdev_ext_xd_links_lock);
 static LIST_HEAD(xdev_ext_xd_links);
@@ -65,6 +69,41 @@ struct xdev_ext_xd_link *xdev_ext_xd_link_get(u64 token)
 		}
 	mutex_unlock(&xdev_ext_xd_links_lock);
 	return found;
+}
+
+/* ctl_mutex held. Test mode only, and only when the far end carries this
+ * host's own UUID: snapshot the local link whose incarnation the accepted
+ * LOGIN carried. xdev_ext_xd_peer_order() decides whether it is the other end
+ * of a cable between two ports of the same NHI. Lock order: ctl_mutex,
+ * xdev_ext_xd_links_lock, then the other link's spinlock (the packet handler
+ * also takes a link spinlock under xdev_ext_xd_links_lock).
+ */
+static void xdev_ext_xd_find_loop_peer(struct xdev_ext_xd_link *xl, u64 peer_inc)
+{
+	struct xdev_ext_xd_link *other;
+	u64 inc;
+
+	lockdep_assert_held(&xl->ctl_mutex);
+	xl->loop_peer_found = false;
+	if (!xl->self_loop_test || !uuid_equal(&xl->local_uuid, &xl->remote_uuid))
+		return;
+	mutex_lock(&xdev_ext_xd_links_lock);
+	list_for_each_entry(other, &xdev_ext_xd_links, node) {
+		if (other == xl)
+			continue;
+		spin_lock_irq(&other->lock);
+		inc = other->local_inc;
+		spin_unlock_irq(&other->lock);
+		if (inc != peer_inc)
+			continue;
+		xl->loop_peer = (struct xdev_ext_xd_end){ .nhi = other->nhi_pdev,
+			.route = other->route, .inc = inc };
+		memcpy(xl->loop_peer.local_uuid, other->local_uuid.b, 16);
+		memcpy(xl->loop_peer.remote_uuid, other->remote_uuid.b, 16);
+		xl->loop_peer_found = true;
+		break;
+	}
+	mutex_unlock(&xdev_ext_xd_links_lock);
 }
 
 /* xdomain login begin */
@@ -551,6 +590,7 @@ static void xdev_ext_xd_connect_work(struct work_struct *work)
 	ret = xdev_ext_xd_rings_start(xl);
 	if (ret)
 		goto fail;			/* rings_start stopped what it started */
+	xdev_ext_xd_find_loop_peer(xl, l.incarnation);
 	ret = xdev_ext_xd_probe_prepare(xl, &l);
 	if (ret)
 		goto fail;
@@ -788,6 +828,7 @@ static int xdev_ext_xd_probe(struct tb_service *svc, const struct tb_service_id 
 	xl->poll_completions = poll_completions;
 	spin_lock_init(&xl->poll_irq_lock);
 	xl->poll_on_interrupt = poll_on_interrupt;
+	xl->self_loop_test = self_loop_test;
 	INIT_DELAYED_WORK(&xl->poll_work, xdev_ext_xd_poll_work);
 	xl->svc = svc;
 	xl->xd = xd;

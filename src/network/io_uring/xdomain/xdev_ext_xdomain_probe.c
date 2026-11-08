@@ -144,15 +144,22 @@ static int xdev_ext_xd_probe_post(struct xdev_ext_xd_link *xl, u32 channel, u32 
 int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *xl, const struct xdev_ext_xd_login *peer)
 {
 	struct xdev_ext_xd_probe *p = xl->probe;
+	struct xdev_ext_xd_end self;
 	unsigned long flags;
 	u64 epoch;
 	u32 c, i;
 	int direction, ret;
 
 	lockdep_assert_held(&xl->ctl_mutex);
-	direction = memcmp(xl->local_uuid.b, xl->remote_uuid.b, 16);
-	if (!direction)
-		return -EPROTO;
+	self = (struct xdev_ext_xd_end){ .nhi = xl->nhi_pdev, .route = xl->route,
+					 .inc = xl->local_inc };
+	memcpy(self.local_uuid, xl->local_uuid.b, 16);
+	memcpy(self.remote_uuid, xl->remote_uuid.b, 16);
+	direction = xdev_ext_xd_peer_order(&self, peer->incarnation,
+					   xl->loop_peer_found ? &xl->loop_peer : NULL,
+					   xl->self_loop_test);
+	if (direction < 0)
+		return direction;
 	if (!p) {
 		p = kzalloc(sizeof(*p), GFP_KERNEL);
 		if (!p)
@@ -171,7 +178,7 @@ int xdev_ext_xd_probe_prepare(struct xdev_ext_xd_link *xl, const struct xdev_ext
 	p->channels = xl->channels;
 	p->local_inc = xl->local_inc;
 	p->remote_inc = peer->incarnation;
-	p->direction = direction > 0;
+	p->direction = direction;
 	p->deadline = 0;
 	p->closed = false;
 	p->control_ready = false;

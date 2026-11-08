@@ -118,9 +118,14 @@ class ModeRefusals(unittest.TestCase):
                               self.refuse('--tb-nhi', '0000:00:0d.2', '--tb-nhi-cycles', value))
 
     def test_tb_nhi_suboptions_require_the_tb_nhi_mode(self):
-        for extra in (('--tb-nhi-cycles', '0'), ('--tb-nhi-enumerate',)):
+        for extra in (('--tb-nhi-cycles', '0'), ('--tb-nhi-enumerate',), ('--tb-nhi-selfloop-echo',)):
             with self.subTest(extra=extra):
                 self.assertIn('require --tb-nhi', self.refuse(*extra))
+
+
+    def test_selfloop_echo_needs_the_topology_report(self):
+        self.assertIn('--tb-nhi-selfloop-echo requires --tb-nhi-enumerate',
+                      self.refuse('--tb-nhi', '0000:00:0d.2', '--tb-nhi-selfloop-echo'))
 
 
 class BusyboxAppletCheck(unittest.TestCase):
@@ -190,6 +195,37 @@ class GuestGpuWiring(unittest.TestCase):
         # The report is saved before the verdict can stop the harness.
         self.assertLess(self.script.index(keep),
                         self.script.index('grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES"'))
+
+    def test_selfloop_echo_is_off_by_default(self):
+        self.assertRegex(self.script, r'(?m)^TB_NHI_SELFLOOP_ECHO=0$')
+        self.assertIn('--tb-nhi-selfloop-echo) TB_NHI_SELFLOOP_ECHO=1; shift ;;', self.script)
+
+    def test_selfloop_echo_builds_the_xdomain_module_and_reaches_the_guest(self):
+        # Only the echo build has loadable modules; the read-only check is unchanged.
+        self.assertIn('if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi',
+                      self.script)
+        self.assertIn('grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"', self.script)
+        self.assertIn('TB_SELFLOOP_MODULE=$BUILD/io_uring/xdomain/xdev_ext_xdomain.ko', self.script)
+        self.assertIn('sha256sum "$TB_SELFLOOP_MODULE" >>"$BUILD/xdev-ext-artifacts.sha256"', self.script)
+        self.assertIn('cp "$TB_SELFLOOP_MODULE" "$ROOT/opt/xdev_ext/tb/"', self.script)
+        self.assertIn('printf \'tb_nhi_selfloop_echo=%s\\n\' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"',
+                      self.script)
+        self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" '
+                      '"${tb_nhi_selfloop_echo:-0}"', self.script)
+
+    def test_run_only_refuses_a_build_without_the_echo_module(self):
+        self.assertIn("verify_tb_selfloop_identity", self.script)
+        body = function(self.script, 'verify_tb_selfloop_identity')
+        self.assertIn('CONFIG_XDEV_EXT_MECH_XDOMAIN=m', body)
+        self.assertIn('$TB_SELFLOOP_MODULE', body)
+        self.assertIn('if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then verify_tb_selfloop_identity; fi', self.script)
+
+    def test_selfloop_echo_report_is_kept_and_a_failure_fails_the_run(self):
+        keep = 'grep -E \'^XDEV_EXT_TB_SELFLOOP_ECHO\' "$EV/guest.log" >"$EV/tb-selfloop-echo.txt" || true'
+        self.assertIn(keep, self.script)
+        verdict = 'grep -Eq \'^XDEV_EXT_TB_SELFLOOP_ECHO=(PASS|NOT_RUN)( |$)\' "$EV/guest.log"'
+        self.assertIn(verdict, self.script)
+        self.assertLess(self.script.index(keep), self.script.index(verdict))
 
     def test_finish_reports_driver_counters_of_every_wire_port(self):
         finish = re.search(r'(?ms)^finish\(\) \{\n.*?^\}', self.script).group()
@@ -1019,6 +1055,73 @@ class TbNhiGuestEnumeration(unittest.TestCase):
                             line.endswith(' same_uuid_as_host=no') for line in lines), lines)
         self.assertEqual(lines[-1], 'XDEV_EXT_TB_NHI_ENUM summary routers=1 xdomains=1 '
                                     'same_uuid_xdomains=0')
+
+    def service(self, name, local_inc, remote_inc, verified=1, required=1, phase=4, error=0,
+                ping=1, pong=1, up=1):
+        self.node('bus/thunderbolt/devices/' + name,
+                  xdev_ext_link_state=f'version=1 token=1 local_inc={local_inc} remote_inc={remote_inc} '
+                                      f'up={up} closing=0 nhi_gone=0 channels=1',
+                  xdev_ext_data_state=f'version=1 control_ready={up} data_verified_mask={verified} '
+                                      f'required_mask={required} phase={phase} error={error} '
+                                      f'backing_qualified=not_queried local_inc={local_inc} '
+                                      f'remote_inc={remote_inc} startup_successes={1 if verified else 0} '
+                                      'startup_failures=0 stale=0\n'
+                                      'channel=0 rx0_actual_len=128 rx0_flags=0 rx0_canceled=0 '
+                                      'rx1_actual_len=4096 rx1_flags=0 rx1_canceled=0 '
+                                      f'rx_ping_ok={ping} rx_pong_ok={pong} tx_ping_submitted_len=128 '
+                                      'tx_pong_submitted_len=4096 tx_ping_complete=1 tx_pong_complete=1')
+
+    def echo(self, same, insmod='insmod() { echo "LOADED $*"; }'):
+        program = ('set -u\n'
+                   f'sysfs={self.sys}\nsame={same}\necho_max=2\n'
+                   'sleep() { :; }\n' + insmod + '\nrmmod() { echo "UNLOADED $*"; }\n' +
+                   function(self.script, 'echo_state') + function(self.script, 'selfloop_echo') +
+                   'selfloop_echo\n')
+        run = subprocess.run(['sh', '-c', program], capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        return run.stdout.splitlines()
+
+    def test_echo_does_not_run_without_a_self_loop(self):
+        lines = self.echo(0)
+        self.assertEqual(lines, ['XDEV_EXT_TB_SELFLOOP_ECHO=NOT_RUN reason=no-self-loop same_uuid_xdomains=0'])
+
+    def test_echo_loads_the_module_in_test_mode_and_passes_when_both_ends_verified(self):
+        self.service('0-1.1', 11, 22)
+        self.service('0-3.1', 22, 11)
+        lines = self.echo(2)
+        self.assertEqual(lines[0], 'LOADED /opt/xdev_ext/tb/xdev_ext_xdomain.ko self_loop_test=1')
+        self.assertTrue(any(l.startswith('XDEV_EXT_TB_SELFLOOP_ECHO end=0-1.1 version=1 control_ready=1 ')
+                            for l in lines), lines)
+        self.assertTrue(any(l.startswith('XDEV_EXT_TB_SELFLOOP_ECHO end=0-3.1 channel=0 ') for l in lines), lines)
+        self.assertIn('UNLOADED xdev_ext_xdomain', lines)
+        self.assertEqual(lines[-1], 'XDEV_EXT_TB_SELFLOOP_ECHO=PASS ends=2 channels=1 '
+                                    'bytes_each_way=4224 compare=in-kernel-pattern-crc-nonce')
+
+    def test_echo_fails_when_an_end_did_not_verify_its_bytes(self):
+        self.service('0-1.1', 11, 22)
+        self.service('0-3.1', 22, 11, verified=0, phase=5, error=-74, pong=0)
+        self.assertEqual(self.echo(2)[-1], 'XDEV_EXT_TB_SELFLOOP_ECHO=FAIL reason=end-not-verified end=0-3.1')
+
+    def test_echo_fails_when_the_two_ends_are_not_each_other(self):
+        self.service('0-1.1', 11, 22)
+        self.service('0-3.1', 33, 11)
+        self.assertEqual(self.echo(2)[-1], 'XDEV_EXT_TB_SELFLOOP_ECHO=FAIL reason=ends-not-paired')
+
+    def test_echo_fails_with_only_one_end(self):
+        self.service('0-1.1', 11, 22)
+        self.assertEqual(self.echo(2)[-1], 'XDEV_EXT_TB_SELFLOOP_ECHO=FAIL reason=ends ends=1')
+
+    def test_echo_fails_when_the_module_does_not_load(self):
+        lines = self.echo(2, insmod='insmod() { return 1; }')
+        self.assertEqual(lines, ['XDEV_EXT_TB_SELFLOOP_ECHO=FAIL reason=insmod'])
+
+    def test_echo_runs_after_enumeration_and_before_rebind_cycles(self):
+        self.assertIn('echo_mode=${3:-0}', self.script)
+        self.assertIn('if [ "$echo_mode" = 1 ] && [ "$result" = PASS ]; then', self.script)
+        self.assertLess(self.script.index('then\n\tenumerate\nfi'),
+                        self.script.index('then\n\tselfloop_echo\nfi'))
+        self.assertLess(self.script.index('then\n\tselfloop_echo\nfi'),
+                        self.script.index('while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]'))
 
     def test_rebind_cycles_stay_the_default_path(self):
         self.assertIn('enumerate_mode=${2:-0}', self.script)

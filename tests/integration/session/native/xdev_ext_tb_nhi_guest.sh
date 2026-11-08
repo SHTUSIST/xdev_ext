@@ -7,7 +7,7 @@
 # interrupt throttling of drivers/thunderbolt/nhi.c) on the real controller.
 # CYCLES unbind/bind cycles repeat ring teardown and re-initialisation.
 #
-#   xdev_ext_tb_nhi_guest.sh CYCLES [ENUMERATE]
+#   xdev_ext_tb_nhi_guest.sh CYCLES [ENUMERATE [ECHO]]
 #
 # Prints XDEV_EXT_TB_NHI_STATE per pass, XDEV_EXT_TB_NHI_CYCLE per cycle and
 # one XDEV_EXT_TB_NHI verdict; raw kernel lines are prefixed XDEV_EXT_TB_NHI_LOG.
@@ -15,9 +15,14 @@
 # (XDEV_EXT_TB_NHI_ENUM lines): bus devices, USB4 port links, any XDomain
 # and whether it carries the host router's own UUID (a cable between two
 # ports of this host), and the host router adapters' registers.
+# ECHO=1 (needs ENUMERATE=1) then, only when that report shows such a cable,
+# loads the XDOMAIN service in its self_loop_test mode and reports the startup
+# data exchange through the cable (XDEV_EXT_TB_SELFLOOP_ECHO lines).
 set -u
 cycles=$1
 enumerate_mode=${2:-0}
+echo_mode=${3:-0}
+echo_max=60
 sysfs=/sys
 # Link training and the XDomain UUID/property exchange finish after the host
 # router appears; wait until the topology has not changed for a while.
@@ -124,6 +129,80 @@ enumerate() {
 	echo "XDEV_EXT_TB_NHI_ENUM summary routers=$routers xdomains=$xdomains same_uuid_xdomains=$same"
 }
 
+# Value of KEY in the first line of FILE (KEY=value words).
+echo_state() {
+	sed -n "1s/.* $2=\([^ ]*\).*/\1/p" "$1" 2>/dev/null
+}
+# With a cable joining two ports of this host (an XDomain that carries the
+# host's own UUID), load the XDOMAIN service in its self_loop_test mode. The
+# startup data challenge of each end then sends one 128-byte PING and one
+# 4096-byte PONG per channel through the cable, and the receiving end checks
+# every byte against the pattern, CRC and nonces the sender used. PASS needs
+# exactly two ends, each verified, each naming the other's incarnation.
+# Reads sysfs only; the module is unloaded again afterwards.
+selfloop_echo() {
+	if [ "${same:-0}" -lt 1 ]; then
+		echo "XDEV_EXT_TB_SELFLOOP_ECHO=NOT_RUN reason=no-self-loop same_uuid_xdomains=${same:-0}"
+		return 0
+	fi
+	insmod /opt/xdev_ext/tb/xdev_ext_xdomain.ko self_loop_test=1 || {
+		echo 'XDEV_EXT_TB_SELFLOOP_ECHO=FAIL reason=insmod'
+		return 0
+	}
+	waited=0
+	while :; do
+		ends=0
+		verified=0
+		for state in "$sysfs"/bus/thunderbolt/devices/*/xdev_ext_data_state; do
+			[ -r "$state" ] || continue
+			ends=$((ends + 1))
+			mask=$(echo_state "$state" data_verified_mask)
+			[ "${mask:-0}" != 0 ] && [ "$mask" = "$(echo_state "$state" required_mask)" ] &&
+				verified=$((verified + 1))
+		done
+		[ "$ends" -ge 2 ] && [ "$verified" = "$ends" ] && break
+		[ "$waited" -ge "$echo_max" ] && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	echo "XDEV_EXT_TB_SELFLOOP_ECHO waited=$waited"
+	verdict=
+	ends=0
+	channels=0
+	for state in "$sysfs"/bus/thunderbolt/devices/*/xdev_ext_data_state; do
+		[ -r "$state" ] || continue
+		end=${state%/xdev_ext_data_state}
+		end=${end##*/}
+		ends=$((ends + 1))
+		sed "s|^|XDEV_EXT_TB_SELFLOOP_ECHO end=$end |" "$state"
+		[ -r "${state%/*}/xdev_ext_link_state" ] &&
+			sed "s|^|XDEV_EXT_TB_SELFLOOP_ECHO end=$end link |" "${state%/*}/xdev_ext_link_state"
+		mask=$(echo_state "$state" data_verified_mask)
+		if [ -z "$verdict" ] && { [ "${mask:-0}" = 0 ] ||
+			[ "$mask" != "$(echo_state "$state" required_mask)" ] ||
+			[ "$(echo_state "$state" phase)" != 4 ] || [ "$(echo_state "$state" error)" != 0 ] ||
+			grep -Eq 'rx_ping_ok=0|rx_pong_ok=0|tx_ping_complete=0|tx_pong_complete=0' "$state"; }; then
+			verdict="reason=end-not-verified end=$end"
+		fi
+		channels=$(grep -c '^channel=' "$state")
+		eval "local_$ends=\$(echo_state \"\$state\" local_inc)"
+		eval "remote_$ends=\$(echo_state \"\$state\" remote_inc)"
+	done
+	if [ -z "$verdict" ] && [ "$ends" != 2 ]; then
+		verdict="reason=ends ends=$ends"
+	fi
+	if [ -z "$verdict" ] && { [ -z "$local_1" ] || [ "$local_1" != "$remote_2" ] ||
+		[ "$local_2" != "$remote_1" ]; }; then
+		verdict=reason=ends-not-paired
+	fi
+	rmmod xdev_ext_xdomain || echo 'XDEV_EXT_TB_SELFLOOP_ECHO_LOG rmmod failed'
+	if [ -z "$verdict" ]; then
+		echo "XDEV_EXT_TB_SELFLOOP_ECHO=PASS ends=2 channels=$channels bytes_each_way=$((channels * 4224)) compare=in-kernel-pattern-crc-nonce"
+	else
+		echo "XDEV_EXT_TB_SELFLOOP_ECHO=FAIL $verdict"
+	fi
+}
+
 result=PASS
 if wait_router; then
 	state 0
@@ -135,6 +214,9 @@ fi
 first_id=$(cat "$router/unique_id" 2>/dev/null)
 if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then
 	enumerate
+fi
+if [ "$echo_mode" = 1 ] && [ "$result" = PASS ]; then
+	selfloop_echo
 fi
 cycle=1
 while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]; do

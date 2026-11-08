@@ -52,6 +52,7 @@ TB_NHI_BDF=''
 TB_NHI_CYCLES=3
 TB_NHI_CYCLES_SET=0
 TB_NHI_ENUMERATE=0
+TB_NHI_SELFLOOP_ECHO=0
 while (($#)); do
 	case "$1" in
 	--scratch) SCRATCH=$2; shift 2 ;;
@@ -87,6 +88,7 @@ while (($#)); do
  --tb-nhi) TB_NHI=1; TB_NHI_BDF=$2; shift 2 ;;
  --tb-nhi-cycles) TB_NHI_CYCLES=$2; TB_NHI_CYCLES_SET=1; shift 2 ;;
  --tb-nhi-enumerate) TB_NHI_ENUMERATE=1; shift ;;
+ --tb-nhi-selfloop-echo) TB_NHI_SELFLOOP_ECHO=1; shift ;;
 	*) echo "unknown option: $1" >&2; exit 2 ;;
 	esac
 done
@@ -119,8 +121,14 @@ if (( ${GPU:-0} )); then
 fi
 # A physical Thunderbolt NHI: built-in USB4 driver, probe and rebind cycles;
 # --tb-nhi-enumerate adds a read-only topology report before the cycles.
-if (( ! TB_NHI )) && (( TB_NHI_CYCLES_SET || TB_NHI_ENUMERATE )); then
-    echo '--tb-nhi-cycles and --tb-nhi-enumerate require --tb-nhi' >&2; exit 2
+# --tb-nhi-selfloop-echo: when that report shows a cable joining two ports of
+# this host, load the XDOMAIN module in its self_loop_test mode and report the
+# startup data exchange through the cable (functional/DMA check, no timing).
+if (( ! TB_NHI )) && (( TB_NHI_CYCLES_SET || TB_NHI_ENUMERATE || TB_NHI_SELFLOOP_ECHO )); then
+    echo '--tb-nhi-cycles, --tb-nhi-enumerate and --tb-nhi-selfloop-echo require --tb-nhi' >&2; exit 2
+fi
+if (( ${TB_NHI_SELFLOOP_ECHO:-0} && ! TB_NHI_ENUMERATE )); then
+    echo '--tb-nhi-selfloop-echo requires --tb-nhi-enumerate' >&2; exit 2
 fi
 if [[ ! "$TB_NHI_CYCLES" =~ ^[0-9]$ ]]; then
     echo 'invalid --tb-nhi-cycles (expected 0-9)' >&2; exit 2
@@ -403,6 +411,7 @@ print(*(layout[key] for key in ('source_slba', 'rx_slba', 'ce_slba', 'image_byte
 PYLAYOUT
 )"
 BUILD=$SCRATCH/build
+TB_SELFLOOP_MODULE=$BUILD/io_uring/xdomain/xdev_ext_xdomain.ko
 EV=$SCRATCH/evidence
 ROOT=$SCRATCH/initroot
 TOOLS=$SCRATCH/tools
@@ -478,6 +487,14 @@ verify_compat_identity() {
             echo 'FAIL compatibility artifact identity absent; rebuild exact source' >&2; return 1;
         }
     done
+}
+# A run-only self-loop echo needs a build that contains the XDOMAIN module.
+verify_tb_selfloop_identity() {
+    grep -Fxq 'CONFIG_XDEV_EXT_MECH_XDOMAIN=m' "$BUILD/.config" &&
+        [[ -s "$TB_SELFLOOP_MODULE" ]] &&
+        awk -v target="$TB_SELFLOOP_MODULE" '$2 == target { found=1 } END { exit !found }' "$BUILD/xdev-ext-artifacts.sha256" || {
+        echo 'FAIL self-loop echo build absent; rebuild with --tb-nhi-selfloop-echo' >&2; return 1;
+    }
 }
 verify_peer_identity() {
     local symbol artifact
@@ -695,6 +712,7 @@ if (( RUN_ONLY )); then
     verify_socket_config
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     if (( ${GPU:-0} )); then verify_gpu_identity; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then verify_tb_selfloop_identity; fi
     python3 "$DEBUG_HELPER" p2pdma "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
@@ -716,6 +734,7 @@ printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" >>"$EV/provenance.txt"
+printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
@@ -789,6 +808,7 @@ if (( ! RUN_ONLY )); then
     if (( ${GPU:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -e XDEV_EXT_MECH_CE -e XDEV_EXT_MECH_DMA -e DMA_SHARED_BUFFER -e XDEV_EXT_PEER_DMABUF -e HOTPLUG_CPU; fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then cfg -e NET_VENDOR_INTEL -e IGB -e HOTPLUG_CPU; fi
     if (( ${TB_NHI:-0} )); then cfg -e USB4; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi
     if (( DEBUG_LOCKING )); then
         for symbol in DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do cfg -e "$symbol"; done
         cfg -d KASAN_KUNIT_TEST
@@ -828,6 +848,7 @@ if (( ! RUN_ONLY )); then
     fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then grep -Fxq CONFIG_IGB=y "$BUILD/.config"; grep -Fxq CONFIG_HOTPLUG_CPU=y "$BUILD/.config"; fi
     if (( ${TB_NHI:-0} )); then grep -Fxq CONFIG_USB4=y "$BUILD/.config"; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"; fi
 	if (( PREPARE_ONLY )); then echo XDEV_EXT_ZC_CONFIG=PASS; exit 0; fi
     if (( FENCE_CHECK )); then
         # Full link + modules produces genuine Module.symvers for this vmlinux.
@@ -862,6 +883,10 @@ if (( ! RUN_ONLY )); then
 		build_gpu_modules
 	elif (( ! XDOMAIN )); then
 		kmake bzImage >"$EV/kernel-build.log" 2>&1
+		if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
+			kmake modules >"$EV/tb-selfloop-module-build.log" 2>&1
+			[[ -s "$TB_SELFLOOP_MODULE" ]]
+		fi
 	fi
     if (( FENCE_CHECK )); then
         # Original tree location retains lifecycle_core.h's actual production
@@ -954,6 +979,9 @@ if (( ! RUN_ONLY )); then
     if (( ${GPU:-0} )); then
         sha256sum "$GPU_OUT/"{nvidia.ko,nvidia-uvm.ko,nvidia-modeset.ko,nvidia-drm.ko,nvidia-peermem.ko,release,xdev_ext_gpu_dmabuf} \
             "$TOOLS/xdev_ext_peer_chain" $(gpu_userspace_files "$(cat "$GPU_OUT/release")") >>"$BUILD/xdev-ext-artifacts.sha256"
+    fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
+        sha256sum "$TB_SELFLOOP_MODULE" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
 fi
@@ -1066,6 +1094,10 @@ if (( ${TB_NHI:-0} )); then
     mkdir -p "$ROOT/opt/xdev_ext/tb"
     cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh" "$ROOT/opt/xdev_ext/tb/"
     for app in seq tr; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
+        cp "$TB_SELFLOOP_MODULE" "$ROOT/opt/xdev_ext/tb/"
+        for app in insmod rmmod; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
+    fi
 fi
 mkdir -p "$ROOT/opt/xdev_ext/verifier"
 cp "$TOOLS/verifier/"*.bpf.o \
@@ -1086,6 +1118,7 @@ printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FE
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_enumerate=%s\n' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -1313,7 +1346,7 @@ fi
 $ctl attach --obj /opt/xdev_ext/nxp_mech.bpf.o --map nxp_nvme_ops \
 	--pin /sys/fs/bpf/zc-nvme --set nvme_mode=0
 if [ "${tb_nhi:-0}" = 1 ]; then
-	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}"
+	sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" "${tb_nhi_selfloop_echo:-0}"
 fi
 if [ "${gpu:-0}" = 1 ]; then
 	# Destination CE window: the host image oracle expects the source bytes.
@@ -2051,7 +2084,11 @@ if (( ${GPU:-0} )); then (( gpu_status == 0 )); fi
 if (( ${TB_NHI:-0} )); then
     grep -E '^XDEV_EXT_TB_NHI(=|_CYCLE=|_STATE )' "$EV/guest.log" | tee "$EV/tb-nhi-result.txt"
     grep -E '^XDEV_EXT_TB_NHI_ENUM ' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true
+    grep -E '^XDEV_EXT_TB_SELFLOOP_ECHO' "$EV/guest.log" >"$EV/tb-selfloop-echo.txt" || true
     grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
+        grep -Eq '^XDEV_EXT_TB_SELFLOOP_ECHO=(PASS|NOT_RUN)( |$)' "$EV/guest.log"
+    fi
 fi
 python3 - "$SRC" "$SCRATCH" "$GROUP_COUNT" "$CE_SIM" "$CE_DELAY_US" "$FAULT" "$RX_CE" "$RELIABLE" "$DEPTH" "$CE_SLOTS" "${GPU:-0}" <<'PYVALIDATE'
 import json, pathlib, sys
