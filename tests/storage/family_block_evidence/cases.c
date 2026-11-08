@@ -176,6 +176,23 @@ static void case_outcome_before_a_later_reset(void)
 	      "a later proven reset of the same controller releases it");
 }
 
+static void case_prepared_while_the_reset_quiesces(void)
+{
+	struct fixture f;
+	struct cmd a;
+	u64 k;
+
+	stage_up(&f, &actual_member_ops, 1);
+	k = reset_begin(&dst);
+	post(&f, &a, &dst, 1);		/* a dispatch the quiesce waits for */
+	complete(&a, SC_ABORT_SQ_DELETION, BYTES, false);
+	consume(&f, &a);
+	CHECK(evidence(&f) == XDEV_EXT_PEER_EVIDENCE_PENDING, "no proof yet");
+	reset_end(&dst, k);
+	CHECK(evidence(&f) == XDEV_EXT_PEER_EVIDENCE_COVERED && release(&f) == 0 && stage_down(&f),
+	      "a command dispatched after the reset began but before the queues stopped is covered");
+}
+
 static void case_prepared_after_the_reset_began_stays(void)
 {
 	struct fixture f;
@@ -184,13 +201,13 @@ static void case_prepared_after_the_reset_began_stays(void)
 
 	stage_up(&f, &actual_member_ops, 1);
 	k = reset_begin(&dst);
-	post(&f, &a, NULL, 1);		/* queued while the reset quiesces the queues */
+	post(&f, &a, NULL, 1);		/* held back while the reset quiesces the queues */
 	reset_end(&dst, k);
 	dispatch(&dst, &a.req);		/* prepared once the queues run again */
 	complete(&a, SC_ABORT_SQ_DELETION, BYTES, false);
 	consume(&f, &a);
 	CHECK(evidence(&f) == XDEV_EXT_PEER_EVIDENCE_PENDING,
-	      "a reset that began before the command was prepared does not cover it");
+	      "a command prepared after the reset, on the restarted queues, is not covered by it");
 	CHECK(release(&f) == -EBUSY && a.io->runtime.busy && a.io->bio_live,
 	      "so its slot stays retained");
 	proven_reset(&dst);
@@ -359,6 +376,7 @@ int main(void)
 	case_reset_causes_the_outcome();
 	case_outcome_after_the_proof();
 	case_outcome_before_a_later_reset();
+	case_prepared_while_the_reset_quiesces();
 	case_prepared_after_the_reset_began_stays();
 	case_other_controller_stays();
 	case_unproven_resets_prove_nothing();

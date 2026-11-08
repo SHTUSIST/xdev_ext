@@ -113,12 +113,13 @@ innocent tenants may still have commands in flight. A write the reset aborts
 that innocent's STOP quarantines it (`-EBUSY`). nvme-pci records, when it
 prepares each host-page mechanism command for the SQ, the controller and its
 DMA-stop epoch (`nvme_pci_peer_note_submit`); the reset begins a new epoch
-before it quiesces the queues and proves it once CC.EN=0 completed with Bus
-Master Enable read back clear. That proof covers every command prepared
-before the reset began, so the storage stage reports the retained slots as
-covered and the quarantined session is released with its range; a command
-prepared after the reset began, or sent to another controller, keeps it
-parked. The guest prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant
+before it quiesces the queues, and once CC.EN=0 completed with Bus Master
+Enable read back clear it begins the next one while the queues are still
+quiesced and proves that. The proof covers every command prepared before
+the queues stopped, including a dispatch the quiesce waited for, so the
+storage stage reports the retained slots as covered and the quarantined
+session is released with its range; a command prepared on the restarted
+queues, or sent to another controller, keeps it parked. The guest prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant
 (batches done, aborted, sequestered, STOP result, window exact) and the
 polls until each range was free; it requires every innocent to STOP with 0
 after all its batches with its exact window, or to be released, and every
