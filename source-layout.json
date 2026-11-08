@@ -2321,6 +2321,10 @@
       "logical_path": "tests/eval/dpdk_tb/test_contract.py"
     },
     {
+      "source": "tests/benchmarks/dpdk_tb/test_gpu_backend.c",
+      "logical_path": "tests/eval/dpdk_tb/test_gpu_backend.c"
+    },
+    {
       "source": "tests/benchmarks/dpdk_tb/test_wire.c",
       "logical_path": "tests/eval/dpdk_tb/test_wire.c"
     },

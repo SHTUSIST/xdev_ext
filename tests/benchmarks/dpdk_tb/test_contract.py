@@ -42,6 +42,19 @@ class WireTest(unittest.TestCase):
             self.assertIn("dpdk_tb wire: PASS", out.stdout)
 
 
+class GpuBackendTest(unittest.TestCase):
+    def test_host_backend_round_trip(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            binary = Path(tmp) / "test_gpu_backend"
+            subprocess.run([CC, "-std=gnu11", "-O2", "-Wall", "-Wextra", "-Werror",
+                            "-fsanitize=undefined", "-fno-sanitize-recover=undefined",
+                            str(HERE / "test_gpu_backend.c"), str(HERE / "tb_gpu_host.c"),
+                            "-o", str(binary)], check=True)
+            out = subprocess.run([str(binary)], capture_output=True, text=True)
+            self.assertEqual(out.returncode, 0, out.stderr)
+            self.assertIn("PASS gpu=none", out.stdout)
+
+
 class BuildScriptTest(unittest.TestCase):
     def test_pinned_release(self):
         self.assertEqual(BUILD.DPDK_VERSION, "24.11.8")

@@ -34,6 +34,7 @@ the kernel when none is bound. So on thunderbolt-net the vdev carries
 | Piece | File |
 | --- | --- |
 | program (client and server) | `dpdk_tb.c` |
+| GPU backend round-trip check | `test_gpu_backend.c` |
 | XDP redirect program for devices without native XDP | `tb_xsk_redirect.bpf.c` |
 | frame format, fragmentation, reassembly, window, arguments | `tb_wire.h` (checked by `test_wire.c`) |
 | GPU copies: CUDA runtime | `tb_gpu_cuda.c` |
@@ -107,7 +108,16 @@ python3 tests/eval/dpdk_tb/build.py --build-dir /abs/dir --print-commands
 
 ## Run on the two-host Thunderbolt testbed
 
-On both hosts, as root:
+First check the CUDA side alone on each host (registered staging buffers,
+copies of every size, byte comparison):
+
+```sh
+cc -std=gnu11 -O2 -Itests/eval/dpdk_tb tests/eval/dpdk_tb/test_gpu_backend.c \
+   tests/eval/dpdk_tb/tb_gpu_cuda.c -I/usr/local/cuda/include \
+   -L/usr/local/cuda/lib64 -lcudart -o /abs/dir/test_gpu_backend && /abs/dir/test_gpu_backend
+```
+
+Then, on both hosts, as root:
 
 ```sh
 tests/eval/dpdk_tb/hugepages.sh            # 512 x 2 MiB at /dev/hugepages-tb
