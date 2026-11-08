@@ -341,3 +341,27 @@ restore must abort at BUILD with no native command and every later request
 must be refused. The guest run exercises
 neither XDOMAIN, nor GPU memory, nor Thunderbolt; the two-host XDOMAIN chain
 is composed only in the host fixture `tests/network/xdomain/chain`.
+
+### TCP completion and cancellation
+
+A real restore accepts success only after a `DONE` line for its `run` with
+`ok=1 err=0`. Duplicate, missing, unknown and invalid fields, negative sender
+completion and a conflicting request tuple fail the restore and prevent further
+GO on that session. Updated senders echo `ordinal`, `first_seq` and `groups`;
+the receiver requires the complete matching tuple if any of these fields is
+present. Original peers containing only `run`, `ok` and `err` remain supported.
+That legacy format correlates by run name only; it cannot disambiguate identical
+reused run names independently of the existing single-request FIFO contract.
+
+Each TCP input line has one monotonic `--timeout-ms` deadline; received bytes and
+signals do not refresh it. A partial request is discarded on timeout or server
+control input. Serve reads stdin incrementally so a queued `QUIT` reaches normal
+teardown even when the peer holds an incomplete TCP line. Accepted socket writes
+are also bounded by the configured socket timeout. Failed DONE delivery is
+reported as a failed served request and leaves the session dirty. Existing STOP
+and retained-session ownership rules still determine final resource release.
+
+`test_worker_control.py` compiles the actual C worker with session START/wait
+boundaries and uses temporary loopback TCP sockets. It covers real restore
+verdicts, total deadlines, interrupted half lines, queued stdin commands and DONE
+send failure. It is a host correctness test, without GPU, DMA or timing results.

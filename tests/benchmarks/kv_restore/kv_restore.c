@@ -622,15 +622,38 @@ static int send_line(int fd, const char *text)
 	return 0;
 }
 
-/* One '\n'-terminated line, byte by byte (lines are short and rare). */
-static int recv_line(int fd, char *buf, size_t cap)
+/* A total deadline, including trickled bytes and interrupted polls. A ready
+ * server control fd yields before consuming more network input, so QUIT can
+ * reach the normal teardown path without waiting for the peer's newline. */
+static int recv_line(int fd, char *buf, size_t cap, int timeout_ms, int control)
 {
+	uint64_t end = now_ns() + (uint64_t)timeout_ms * 1000000;
 	size_t used = 0;
 
+	buf[0] = 0;
 	while (used + 1 < cap) {
-		ssize_t n = recv(fd, buf + used, 1, 0);
+		struct pollfd pf[2] = { { .fd = fd, .events = POLLIN },
+			{ .fd = control, .events = POLLIN } };
+		uint64_t now = now_ns(), ms;
+		ssize_t n;
+		int ret;
 
-		if (n < 0 && errno == EINTR)
+		if (now >= end)
+			return -ETIMEDOUT;
+		ms = (end - now + 999999) / 1000000;
+		ret = poll(pf, control >= 0 ? 2 : 1, ms > INT32_MAX ? INT32_MAX : (int)ms);
+		if (ret < 0 && errno == EINTR)
+			continue;
+		if (ret < 0)
+			return -errno;
+		if (!ret)
+			continue;
+		if (control >= 0 && pf[1].revents)
+			return -ECANCELED;
+		if (pf[0].revents & POLLNVAL)
+			return -EBADF;
+		n = recv(fd, buf + used, 1, MSG_DONTWAIT);
+		if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK))
 			continue;
 		if (n <= 0)
 			return n < 0 ? -errno : -ECONNRESET;
@@ -638,9 +661,69 @@ static int recv_line(int fd, char *buf, size_t cap)
 			buf[used] = 0;
 			return 0;
 		}
+		if ((unsigned char)buf[used] < 32 && buf[used] != '\t' && buf[used] != '\r')
+			return -EPROTO;
 		used++;
+		buf[used] = 0;
 	}
 	return -E2BIG;
+}
+
+/* DONE is a control verdict, not a diagnostic string. The original wire
+ * requires run/ok/err. New senders also echo the whole request-key tuple;
+ * accept old peers, but never accept a partial or conflicting tuple. */
+static int done_status(const char *text, const char *run, uint64_t ordinal,
+		       const struct kv_plan *plan)
+{
+	static const char *const keys[] = { "run", "ok", "err", "ordinal", "first_seq",
+		"groups", "wait_ns", "done", "abort", "sequestered", "last_err" };
+	struct kv_line l;
+	uint64_t tuple[3] = { 0 };
+	unsigned seen = 0;
+	long error = 0;
+
+	if (line_split(&l, text) || l.val[0] || strcmp(l.key[0], "DONE"))
+		return -EPROTO;
+	for (unsigned i = 1; i < l.n; i++) {
+		unsigned k;
+		char *end;
+		for (k = 0; k < sizeof(keys) / sizeof(keys[0]); k++)
+			if (!strcmp(l.key[i], keys[k])) break;
+		if (k == sizeof(keys) / sizeof(keys[0]) || (seen & (1U << k)))
+			return -EPROTO;
+		seen |= 1U << k;
+		if (!l.val[i] || !*l.val[i]) return -EPROTO;
+		if (!k) {
+			if (!run_id_ok(l.val[i]) || strcmp(l.val[i], run)) return -EPROTO;
+		} else if (k == 1) {
+			if (strcmp(l.val[i], "0") && strcmp(l.val[i], "1")) return -EPROTO;
+		} else {
+			const char *digits = l.val[i];
+			bool signed_value = k == 2 || k == 10;
+			if (signed_value && *digits == '-') digits++;
+			if (!*digits) return -EPROTO;
+			for (const char *c = digits; *c; c++)
+				if (*c < '0' || *c > '9') return -EPROTO;
+			errno = 0;
+			if (signed_value) {
+				long n = strtol(l.val[i], &end, 10);
+				if (errno || *end || n < INT32_MIN || n > 0) return -EPROTO;
+				if (k == 2) error = n;
+				else if (n) return -EPROTO;
+			} else {
+				unsigned long long n = strtoull(l.val[i], &end, 10);
+				if (errno || *end) return -EPROTO;
+				if (k >= 3 && k <= 5) tuple[k - 3] = n;
+				if ((k == 8 || k == 9) && n) return -EPROTO;
+			}
+		}
+	}
+	if ((seen & 7U) != 7U) return -EPROTO;
+	if ((seen & 56U) && ((seen & 56U) != 56U || tuple[0] != ordinal ||
+			      tuple[1] != plan->first_seq || tuple[2] != plan->groups))
+		return -EPROTO;
+	if (strcmp(line_get(&l, "ok"), "1")) return error ? (int)error : -EPROTO;
+	return error ? -EPROTO : 0;
 }
 
 /* ---- session ------------------------------------------------------------ */
@@ -1047,10 +1130,14 @@ static void handle_go(struct worker *wk, const struct kv_line *l, const struct q
 	if (ret)
 		wk->dirty = true;
 	if (wk->o.role == ROLE_RESTORE) {
-		int r = recv_line(wk->sock, reply, sizeof(reply));
+		int r = recv_line(wk->sock, reply, sizeof(reply), wk->o.timeout_ms, -1);
 
-		if (r && !ret)
-			ret = r;
+		if (!r)
+			r = done_status(reply, run, ordinal, &p);
+		if (r) {
+			wk->dirty = true;
+			if (!ret) ret = r;
+		}
 	}
 	if (!ret && verify) {
 		uint64_t off = (uint64_t)p.host2_dst_frame0 * wk->o.g.frame_bytes;
@@ -1117,7 +1204,7 @@ report:
 }
 
 /* RESTORE from host 2: same plan on this side, one START, one wait, DONE. */
-static void serve_request(struct worker *wk, const char *text)
+static int serve_request(struct worker *wk, const char *text)
 {
 	uint64_t ordinal, slba, bytes, first, groups, t0, t1;
 	struct xdev_ext_mech_stats st = { 0 };
@@ -1134,9 +1221,9 @@ static void serve_request(struct worker *wk, const char *text)
 	    strcmp(token, wk->o.token) || line_u64(&l, "ordinal", &ordinal) ||
 	    line_u64(&l, "object_slba", &slba) || line_u64(&l, "bytes", &bytes) ||
 	    line_u64(&l, "first_seq", &first) || line_u64(&l, "groups", &groups)) {
-		send_line(wk->sock, "DONE ok=0 err=-22\n");
+		int sent = send_line(wk->sock, "DONE ok=0 err=-22\n");
 		emit_error("RESTORE request", -EINVAL);
-		return;
+		return sent;
 	}
 	ret = wk->dirty ? -ESTALE : plan_claim(wk, ordinal, slba, bytes, 0, &p);
 	/* Both hosts must derive the same keys from the same window. */
@@ -1153,11 +1240,16 @@ static void serve_request(struct worker *wk, const char *text)
 			wk->dirty = true;
 	}
 	t1 = now_ns();
-	snprintf(reply, sizeof(reply), "DONE run=%s ok=%d err=%d wait_ns=%" PRIu64
-		 " done=%llu abort=%llu sequestered=%llu last_err=%d\n", run, !ret, ret, t1 - t0,
+	snprintf(reply, sizeof(reply), "DONE run=%s ok=%d err=%d ordinal=%" PRIu64 " first_seq=%" PRIu64
+		 " groups=%" PRIu64 " wait_ns=%" PRIu64
+		 " done=%llu abort=%llu sequestered=%llu last_err=%d\n", run, !ret, ret, ordinal, first, groups, t1 - t0,
 		 (unsigned long long)st.batches_done, (unsigned long long)st.batches_abort,
 		 (unsigned long long)st.sequestered, st.last_err);
-	send_line(wk->sock, reply);
+	int sent = send_line(wk->sock, reply);
+	if (sent) {
+		wk->dirty = true;
+		if (!ret) ret = sent;
+	}
 	printf("KV_SERVED {\"run\": ");
 	jstr(stdout, run);
 	printf(", \"ok\": %s, \"error\": %d, \"t0_ns\": %" PRIu64 ", \"t1_ns\": %" PRIu64
@@ -1166,11 +1258,14 @@ static void serve_request(struct worker *wk, const char *text)
 	stats_json(stdout, &st);
 	printf("}\n");
 	fflush(stdout);
+	return sent;
 }
 
 static int serve_loop(struct worker *wk)
 {
-	char buf[LINE_MAX_BYTES];
+	char buf[LINE_MAX_BYTES], control[LINE_MAX_BYTES];
+	size_t control_used = 0;
+	bool control_long = false;
 
 	for (;;) {
 		struct pollfd pf[2] = { { .fd = 0, .events = POLLIN },
@@ -1182,9 +1277,28 @@ static int serve_loop(struct worker *wk)
 		if (n < 0)
 			return -errno;
 		if (pf[0].revents) {
-			if (!fgets(buf, sizeof(buf), stdin) || !strncmp(buf, "QUIT", 4))
-				return 0;
-			emit_error("serve takes only QUIT on stdin", -EINVAL);
+			char c;
+			ssize_t nread = read(STDIN_FILENO, &c, 1);
+			if (!nread) return 0;
+			if (nread < 0) {
+				if (errno == EINTR) continue;
+				return -errno;
+			}
+			if (c == '\n') {
+				struct kv_line command;
+				control[control_used] = 0;
+				if (!control_long && !line_split(&command, control) &&
+				    command.n == 1 && !command.val[0] &&
+				    !strcmp(command.key[0], "QUIT")) return 0;
+				emit_error("serve takes only QUIT on stdin", -EINVAL);
+				control_used = 0;
+				control_long = false;
+			} else if (control_used + 1 < sizeof(control)) {
+				if (!c) control_long = true;
+				control[control_used++] = c;
+			} else {
+				control_long = true;
+			}
 			continue;
 		}
 		if (!pf[1].revents)
@@ -1193,14 +1307,21 @@ static int serve_loop(struct worker *wk)
 			wk->sock = accept4(wk->lsock, NULL, NULL, SOCK_CLOEXEC);
 			if (wk->sock < 0)
 				return -errno;
+			struct timeval tv = { .tv_sec = wk->o.timeout_ms / 1000,
+				.tv_usec = (wk->o.timeout_ms % 1000) * 1000 };
+			if (setsockopt(wk->sock, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)))
+				return -errno;
 			continue;
 		}
-		if (recv_line(wk->sock, buf, sizeof(buf))) {
+		if (recv_line(wk->sock, buf, sizeof(buf), wk->o.timeout_ms, STDIN_FILENO)) {
 			close(wk->sock);
 			wk->sock = -1;
 			continue;
 		}
-		serve_request(wk, buf);
+		if (serve_request(wk, buf)) {
+			close(wk->sock);
+			wk->sock = -1;
+		}
 	}
 }
 

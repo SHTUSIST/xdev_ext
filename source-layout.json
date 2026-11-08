@@ -2724,6 +2724,14 @@
       "logical_path": "tests/eval/kv_restore/test_kv_index.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/test_worker_control.py",
+      "logical_path": "tests/eval/kv_restore/test_worker_control.py"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/worker_control_boundary.c",
+      "logical_path": "tests/eval/kv_restore/worker_control_boundary.c"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/worker_verify_boundary.c",
       "logical_path": "tests/eval/kv_restore/worker_verify_boundary.c"
     },
