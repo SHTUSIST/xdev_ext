@@ -39,7 +39,8 @@ def validate_options(options, *, rank, device_index, environ=None):
     rx = data.get('rx_program_pins', [None] * 2)
     # Host frames plus the GPU copy engine (GPU without GPUDirect RDMA): d1
     # only, no USER stages and no PEER stage pins; the CE program is required.
-    frames = data.setdefault('frames', 'peer')
+    # Absent means peer; legacy inputs are returned unchanged.
+    frames = data.get('frames', 'peer')
     if frames not in ('peer', 'host'):
         raise ValueError('frames must be peer or host')
     host = frames == 'host'
@@ -123,7 +124,7 @@ def load_options(path, *, rank, group, device_index, environ=None):
 def agreement_key(options):
     key = {name: options[name] for name in _AGREEMENT}
     key['early_cts'] = options.get('early_cts', 0)
-    key['frames'] = options.get('frames', 'peer')
-    if key['frames'] == 'host':
+    if options.get('frames', 'peer') == 'host':
+        key['frames'] = 'host'
         key['receive_groups'] = options.get('receive_groups', 1)
     return key
