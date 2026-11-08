@@ -155,6 +155,11 @@ def layer_order(names):
 def dump_object(out_dir, model, layout, layer_names, caches, read_page, block_ids, token_ids,
                 vllm_version):
     """Write one object (whole blocks of token_ids) and its sidecar; returns the sidecar."""
+    if layout.dtype is None:
+        raise kl.LayoutError('dump needs an explicit, validated KV dtype')
+    for name in layer_names:
+        if kl.canonical_dtype(getattr(caches[name], 'dtype', None)) != layout.dtype:
+            raise kl.LayoutError(f'{name}: actual tensor dtype disagrees with dump layout dtype')
     nblocks = len(token_ids) // layout.block_size
     tokens = token_ids[:nblocks * layout.block_size]
     digest = kl.prefix_hashes(model, layout, tokens)[-1][1]
@@ -217,8 +222,11 @@ if KVConnectorBase_V1 is not None:
             extra = vllm_config.kv_transfer_config.kv_connector_extra_config or {}
             self.out_dir = Path(extra['out_dir'])
             self.model = extra['model']
+            dtype = kl.resolved_dtype(vllm_config, extra.get('kv_dtype'))
+            if dtype not in ('bfloat16', 'float16'):
+                raise kl.LayoutError(f'the approved model layout needs BF16 or FP16, got {dtype}')
             self.layout = kl.BlockLayout.for_model(self.model,
-                                                   vllm_config.cache_config.block_size)
+                                                   vllm_config.cache_config.block_size, dtype)
             self.layout.check()
             self.read_page = torch_page_bytes
             self._track = {}
@@ -271,6 +279,10 @@ if KVConnectorBase_V1 is not None:
             if len(names) != self.layout.layers:
                 raise kl.LayoutError(f'{len(names)} attention layers, {self.model} has '
                                      f'{self.layout.layers}')
+            for name in names:
+                if kl.canonical_dtype(getattr(kv_caches[name], 'dtype', None)) != self.layout.dtype:
+                    raise kl.LayoutError(f'{name}: cache tensor dtype disagrees with resolved '
+                                         f'{self.layout.dtype}')
             self._caches, self._layers = kv_caches, names
 
         def start_load_kv(self, forward_context, **kwargs):
@@ -308,6 +320,9 @@ def _load_dump(path):
     tokens = read_tokens(Path(path).parent / meta['tokens_file'])
     if len(tokens) != meta['tokens']:
         raise kl.LayoutError(f'{path}: token file holds {len(tokens)} ids')
+    hashes = dict(kl.prefix_hashes(model, layout, tokens))
+    if meta.get('prefix_hash') != hashes.get(meta['tokens']):
+        raise kl.LayoutError(f'{path}: prefix hash disagrees with tokens/layout/dtype metadata')
     return meta, layout, f, tokens
 
 
@@ -328,6 +343,11 @@ def pack(dump_dirs, manifest_path, index_path, window_slba, window_nlb, lba_byte
     cur, end = window_slba, window_slba + window_nlb
     objects, entries = [], []
     for meta, layout, f, tokens in dumps:
+        if layout.dtype is None:
+            raise kl.LayoutError('legacy dump missing KV dtype; re-dump with dtype validation; '
+                                 'keep the original files')
+        if objects and layout.dtype != objects[0]['kv']['dtype']:
+            raise kl.LayoutError('one typed index cannot mix KV dtypes')
         layout.validate(group_bytes)
         if meta['bytes'] % group_bytes:
             raise kl.LayoutError(f'{meta["name"]}: whole prompt must be whole restore groups '
@@ -354,7 +374,7 @@ def pack(dump_dirs, manifest_path, index_path, window_slba, window_nlb, lba_byte
     tmp.write_text(json.dumps(data, indent=1) + '\n')
     tmp.replace(manifest_path)
     m = kl.load_manifest(manifest_path)
-    kl.write_index(index_path, entries)
+    kl.write_index(index_path, entries, kv_dtype=objects[0]['kv']['dtype'])
     kl.load_index(index_path, m)
     return m
 
@@ -383,19 +403,21 @@ def cmd_vllm(args):
     out = Path(args.out)
     out.mkdir(mode=0o700, parents=True, exist_ok=True)
     prompts = read_prompts(args.prompts)
-    layout = kl.BlockLayout.for_model(args.model, args.block_size)
+    layout = kl.BlockLayout.for_model(args.model, args.block_size, args.kv_dtype)
     names = {name: f'{args.model}-{kl.prefix_hashes(args.model, layout, ids)[-1][1][:16]}'
              for name, ids in prompts if len(ids) >= args.block_size}
     (out / 'prompts.json').write_text(json.dumps(names, indent=1) + '\n')
     os.environ['PYTHONPATH'] = os.pathsep.join(
         [str(HERE)] + [p for p in os.environ.get('PYTHONPATH', '').split(os.pathsep) if p])
     sys.path.insert(0, str(HERE))
-    llm = LLM(model=args.hf_model, block_size=args.block_size, enable_prefix_caching=False,
+    llm = LLM(model=args.hf_model, dtype=args.kv_dtype, kv_cache_dtype=args.kv_dtype,
+              block_size=args.block_size, enable_prefix_caching=False,
               max_model_len=args.max_model_len,
               kv_transfer_config=KVTransferConfig(
                   kv_connector='XdevExtDumpConnector', kv_connector_module_path='kv_dump',
                   kv_role='kv_producer',
-                  kv_connector_extra_config={'out_dir': str(out.resolve()), 'model': args.model}))
+                  kv_connector_extra_config={'out_dir': str(out.resolve()), 'model': args.model,
+                                             'kv_dtype': args.kv_dtype}))
     llm.generate([{'prompt_token_ids': ids} for _, ids in prompts],
                  SamplingParams(max_tokens=1, temperature=0.0))
     missing = [n for n, obj in names.items() if not (out / f'{obj}.json').is_file()]
@@ -427,6 +449,7 @@ def main(argv=None):
     v.add_argument('--prompts', required=True, help='JSONL: {"name": ..., "token_ids": [...]}')
     v.add_argument('--out', required=True)
     v.add_argument('--block-size', type=int, default=16)
+    v.add_argument('--kv-dtype', choices=('bfloat16', 'float16'), default='bfloat16')
     v.add_argument('--max-model-len', type=int, default=None)
     k = sub.add_parser('pack')
     k.add_argument('--dumps', nargs='+', required=True)

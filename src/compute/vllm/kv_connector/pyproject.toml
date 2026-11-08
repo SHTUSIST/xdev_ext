@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xdev-kv-vllm"
+version = "0.1.0"
+description = "xdev_ext KV connector for vLLM 0.33.0: restore a stored KV prefix over xdev_ext"
+requires-python = ">=3.10"
+dependencies = ["vllm==0.33.0"]
+
+[tool.setuptools]
+packages = ["xdev_kv_vllm"]

@@ -62,6 +62,26 @@ ARCH = {
     'qwen3-8b-bf16': KVArch(36, 8, 128, 2),
 }
 
+DTYPE_BYTES = {'bfloat16': 2, 'float16': 2, 'float32': 4, 'uint8': 1}
+
+
+def canonical_dtype(value):
+    name = str(value).removeprefix('torch.')
+    name = {'bf16': 'bfloat16', 'half': 'float16', 'fp16': 'float16',
+            'float': 'float32', 'fp32': 'float32'}.get(name, name)
+    if name not in DTYPE_BYTES:
+        raise LayoutError(f'unknown KV dtype {value!r}')
+    return name
+
+
+def resolved_dtype(config, requested=None):
+    cache = getattr(config.cache_config, 'cache_dtype', 'auto')
+    value = getattr(config.model_config, 'dtype', None) if cache == 'auto' else cache
+    dtype = canonical_dtype(value)
+    if requested is not None and canonical_dtype(requested) != dtype:
+        raise LayoutError(f'configured KV dtype {requested!r} disagrees with resolved {dtype}')
+    return dtype
+
 BLOCK = 4096                       # pattern block and NHI frame size
 NHI_FRAME = 4096                   # XDEV_EXT_XDOMAIN_MAX_FRAME
 NHI_MAX_ELEMS = 64                 # XDEV_EXT_XDOMAIN_MAX_ELEMS
@@ -102,13 +122,19 @@ class BlockLayout:
     layers: int          # attention layers, in model order
     heads: int           # H: KV head slots of the page
     state_bytes: int     # C: bytes per (head, token) cell, K and V together
+    dtype: str = None    # None only for legacy raw/pattern layouts
+
+    def __post_init__(self):
+        if self.dtype is not None:
+            object.__setattr__(self, 'dtype', canonical_dtype(self.dtype))
 
     @classmethod
-    def for_model(cls, model, block_size):
+    def for_model(cls, model, block_size, dtype=None):
         if model not in ARCH:
             raise LayoutError(f'no architecture for model {model!r}; known: {sorted(ARCH)}')
         a = ARCH[model]
-        return cls(block_size, a.layers, a.kv_heads, 2 * a.head_size * a.dtype_bytes)
+        return cls(block_size, a.layers, a.kv_heads, 2 * a.head_size * a.dtype_bytes,
+                   canonical_dtype(dtype) if dtype is not None else None)
 
     @property
     def page_bytes(self):
@@ -125,6 +151,8 @@ class BlockLayout:
     def check(self):
         for what in ('block_size', 'layers', 'heads', 'state_bytes'):
             _int(getattr(self, what), what, 1, 1 << 20)
+        if self.dtype is not None and self.state_bytes % DTYPE_BYTES[canonical_dtype(self.dtype)]:
+            raise LayoutError('KV cell does not contain whole dtype elements')
 
     def validate(self, group_bytes):
         """A restore group never splits a page and a block is whole groups (or v.v.)."""
@@ -152,8 +180,11 @@ class BlockLayout:
         return out
 
     def to_json(self):
-        return dict(order='block-layer', block_size=self.block_size, layers=self.layers,
-                    heads=self.heads, state_bytes=self.state_bytes)
+        out = dict(order='block-layer', block_size=self.block_size, layers=self.layers,
+                   heads=self.heads, state_bytes=self.state_bytes)
+        if self.dtype is not None:
+            out['dtype'] = canonical_dtype(self.dtype)
+        return out
 
 
 class Payload(NamedTuple):
@@ -205,11 +236,12 @@ def _keys(obj, allowed, what, optional=()):
 
 
 def _parse_kv(raw, model, what):
-    _keys(raw, ('order', 'block_size', 'layers', 'heads', 'state_bytes'), what)
+    _keys(raw, ('order', 'block_size', 'layers', 'heads', 'state_bytes'), what, ('dtype',))
     if raw['order'] != 'block-layer':
         raise LayoutError(f'{what}: order must be "block-layer"')
     kv = BlockLayout(*(_int(raw[k], f'{what}.{k}', 1, 1 << 20)
-                       for k in ('block_size', 'layers', 'heads', 'state_bytes')))
+                       for k in ('block_size', 'layers', 'heads', 'state_bytes')),
+                     canonical_dtype(raw['dtype']) if 'dtype' in raw else None)
     if kv.bytes_per_token != MODELS[model]:
         raise LayoutError(f'{what}: {kv.bytes_per_token} bytes per token, '
                           f'model {model} has {MODELS[model]}')
@@ -448,8 +480,10 @@ U32 = (1 << 32) - 1
 def prefix_hashes(model, layout, token_ids):
     """(tokens, hex) after each whole block of token_ids.
 
-    h0 = SHA-256(b'xdev-kv-prefix\\0' b'1\\0' model b'\\0' le32(block_size, layers,
-    heads, state_bytes)); h(i+1) = SHA-256(h(i) || le32 token ids of block i).
+    Typed domain v2 includes canonical dtype after the model name and before
+    the four layout integers. Untyped legacy raw layouts retain the v1
+    domain; the connector refuses those indexes rather than guessing dtype.
+    h(i+1) chains h(i) with the next block of u32 token ids.
     A partial last block has no hash: vLLM blocks are restored whole.
     """
     layout.check()
@@ -457,7 +491,12 @@ def prefix_hashes(model, layout, token_ids):
     for t in token_ids:
         if type(t) is not int or t < 0 or t > U32:
             raise LayoutError(f'token ids must be integers in [0, {U32}]: {t!r}')
-    h = hashlib.sha256(PREFIX_DOMAIN + model.encode() + b'\x00' +
+    domain = PREFIX_DOMAIN
+    dtype = b''
+    if layout.dtype is not None:
+        domain = b'xdev-kv-prefix\x002\x00'
+        dtype = canonical_dtype(layout.dtype).encode() + b'\x00'
+    h = hashlib.sha256(domain + model.encode() + b'\x00' + dtype +
                        struct.pack('<4I', bs, layout.layers, layout.heads,
                                    layout.state_bytes)).digest()
     out = []
@@ -571,10 +610,11 @@ def _index_line(text, lineno):
                       nums['tokens'], nums.get('fnv1a'))
 
 
-def write_index(path, entries):
+def write_index(path, entries, kv_dtype=None):
     p = Path(path)
     tmp = p.with_name(p.name + '.tmp')
-    tmp.write_text('\n'.join([INDEX_HEADER] + [e.line() for e in entries]) + '\n')
+    header = INDEX_HEADER if kv_dtype is None else 'xdev-kv-index 2 dtype=' + canonical_dtype(kv_dtype)
+    tmp.write_text('\n'.join([header] + [e.line() for e in entries]) + '\n')
     tmp.replace(p)
 
 
@@ -582,14 +622,31 @@ def load_index(path, manifest):
     p = Path(path)
     if not p.is_file() or p.is_symlink() or p.stat().st_size > MAX_INDEX_BYTES:
         raise LayoutError(f'index must be a regular file of at most 16 MiB: {p}')
-    return PrefixIndex(parse_index_text(p.read_text()), manifest)
+    text = p.read_text()
+    dtype = index_dtype(text.splitlines()[0])
+    result = PrefixIndex(parse_index_text(text), manifest)
+    if dtype is not None and any(manifest.object(e.object).kv.dtype != dtype for e in result.entries):
+        raise LayoutError('typed index dtype disagrees with object metadata')
+    return result
+
+
+def index_dtype(header):
+    if header.rstrip('\r') == INDEX_HEADER:
+        return None
+    prefix = 'xdev-kv-index 2 dtype='
+    if header.startswith(prefix):
+        dtype = canonical_dtype(header[len(prefix):])
+        if header == prefix + dtype:
+            return dtype
+    raise LayoutError('index needs version 1 (legacy) or version 2 with canonical dtype')
 
 
 def parse_index_text(text):
     """Entries of an index file, syntax and repeats only (kv_index.h's checks)."""
     lines = text.splitlines()
-    if not lines or lines[0].rstrip('\r') != INDEX_HEADER:
+    if not lines:
         raise LayoutError(f'index must start with {INDEX_HEADER!r}')
+    index_dtype(lines[0])
     entries = [_index_line(line, n) for n, line in enumerate(lines[1:], 2)
                if line.strip() and not line.lstrip().startswith('#')]
     if len({e.hash for e in entries}) != len(entries):
