@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "io_uring/xdev_ext_mech_step.h"
+#include "include/linux/xdev_ext_family_core.h"
 #include "io_uring/xdomain/xdev_ext_xdomain_early.h"
 #include "kv_plan.h"
 
@@ -251,6 +252,76 @@ static void test_host2_ring(void)
 	EXPECT_EQ(idx[0], 7, "PEER indices start at the destination");
 }
 
+/* CREATE of a two-stage ring session as kv_restore builds it (IOU_UMEM pool). */
+static struct xdev_ext_mech_create ring_create(const struct kv_geometry *g, __u32 stage0_class)
+{
+	struct xdev_ext_mech_create c = { .abi_version = XDEV_EXT_MECH_ABI_VERSION, .nr_stages = 2,
+		.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM, .pool_fd = -1, .depth = g->depth,
+		.eventfd = -1 };
+
+	kv_plan_layout(g, &c.layout);
+	c.st[0] = (struct xdev_ext_mech_stage_uapi){ .class_id = stage0_class,
+		.direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .fd = 4 };
+	if (stage0_class == XDEV_EXT_MECH_CLASS_XDOMAIN)
+		c.st[0].arg1 = kv_plan_xdomain_arg1(g);
+	else
+		c.st[0].arg1 = 256;
+	kv_plan_user_stage(&c.st[1], 5, 120000);
+	return c;
+}
+
+/*
+ * E5 levels 2/3 (--dst user-copy/user-direct): host 2 receives into the
+ * recycled ring of host frames like ce-vmm, and a USER stage hands every
+ * group to the worker thread, which copies it to the GPU with CUDA calls
+ * and returns the frames.  The kernel's own CREATE rules decide which
+ * compositions exist: [XDOMAIN RX, USER] and [NVMe READ, USER] on the
+ * ring's UMEM are admitted; a lone XDOMAIN RX is admitted too but has no
+ * hand-off point (frames recycle when the batch ends); a USER stage between
+ * XDOMAIN RX and a range-target CE is refused.
+ */
+static void test_user_stage(void)
+{
+	const struct kv_geometry g = { .group_bytes = 128 * KIB, .frame_bytes = 4096,
+		.depth = 32, .window = 32, .early = true };
+	struct xdev_ext_mech_create c;
+	struct xdev_ext_mech_stage_uapi u;
+	__u32 frames = 0;
+
+	kv_plan_user_stage(&u, 7, 120000);
+	EXPECT_EQ(u.class_id, XDEV_EXT_MECH_CLASS_USER, "USER class");
+	EXPECT_EQ(u.direction, XDEV_EXT_MECH_DIR_TO_DEVICE, "USER stages are TO_DEVICE");
+	EXPECT_EQ(u.fd, 7, "user stage fd");
+	EXPECT_EQ(u.arg0, 120000, "per-batch deadline in ms");
+	EXPECT_EQ(u.arg1, 0, "no length change: the group is copied whole");
+	EXPECT_EQ(u.flags, 0, "no VARLEN, no STRICT_ASYNC (host frames)");
+	kv_plan_user_stage(&u, 7, 0);
+	EXPECT_EQ(u.arg0, 1, "deadline at least 1 ms");
+	kv_plan_user_stage(&u, 7, 2000000);
+	EXPECT_EQ(u.arg0, XDEV_EXT_USER_DEADLINE_MAX_MS, "deadline clamped to the kernel maximum");
+
+	c = ring_create(&g, XDEV_EXT_MECH_CLASS_XDOMAIN);
+	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), 0, "[XDOMAIN RX, USER] admitted on UMEM");
+	EXPECT_EQ(frames, 32, "32 host frames per group");
+	c.nr_stages = 1;
+	memset(&c.st[1], 0, sizeof(c.st[1]));
+	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), 0, "a lone XDOMAIN RX is admitted");
+	c = ring_create(&g, XDEV_EXT_MECH_CLASS_NVME);
+	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), 0, "[NVMe READ, USER] admitted (local-verify)");
+	c = ring_create(&g, XDEV_EXT_MECH_CLASS_XDOMAIN);
+	c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
+	c.pool_fd = 3;
+	EXPECT(xdev_ext_mech_create_check(&c, &frames) != 0,
+	       "negative control: a USER stage without STRICT_ASYNC on a PEER pool is refused");
+	c = ring_create(&g, XDEV_EXT_MECH_CLASS_XDOMAIN);
+	c.nr_stages = 3;
+	c.st[2] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_CE,
+		.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 6,
+		.flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE, .arg0 = 1ULL << 40, .arg1 = 1ULL << 30 };
+	EXPECT_EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP,
+		  "[XDOMAIN RX, USER, CE range] refused: levels 3->4 change two things");
+}
+
 static void test_pattern(void)
 {
 	uint8_t a[4096], b[4096];
@@ -275,6 +346,7 @@ int main(void)
 	test_refusals();
 	test_kernel_rules();
 	test_host2_ring();
+	test_user_stage();
 	test_pattern();
 	printf("kv_plan: %u checks, %u failures\n", checks, failures);
 	return failures ? 1 : 0;

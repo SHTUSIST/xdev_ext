@@ -1287,6 +1287,15 @@ bool xdev_ext_session_retained(const struct xdev_ext_session *s)
 	return s && s->retained;
 }
 
+void *xdev_ext_session_umem(const struct xdev_ext_session *s, size_t *bytes)
+{
+	bool iou = s && s->pool_kind == XDEV_EXT_MECH_POOL_IOU_UMEM && s->umem;
+
+	if (bytes)
+		*bytes = iou ? s->umem_size : 0;
+	return iou ? s->umem : NULL;
+}
+
 /* --- library-internal, for the one-call runner ---------------------------- */
 
 int xdev_ext__session_own_fd(struct xdev_ext_session *s, int fd)

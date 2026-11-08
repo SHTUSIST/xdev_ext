@@ -116,6 +116,7 @@ int xdev_ext_session_close(struct xdev_ext_session *s);
 
 int   xdev_ext_session_eventfd(const struct xdev_ext_session *s);
 int   xdev_ext_session_ring_fd(const struct xdev_ext_session *s);
+void *xdev_ext_session_umem(const struct xdev_ext_session *s, size_t *bytes); /* IOU_UMEM mapping or NULL */
 int   xdev_ext_session_xsk_fd(const struct xdev_ext_session *s);  /* -1 unless XSK */
 __u64 xdev_ext_session_id(const struct xdev_ext_session *s);      /* 0 before CREATE */
 bool  xdev_ext_session_zero_copy(const struct xdev_ext_session *s);

@@ -2634,6 +2634,14 @@
       "logical_path": "tests/eval/kv_restore/test_kv_layout.py"
     },
     {
+      "source": "tests/benchmarks/kv_restore/test_kv_user.c",
+      "logical_path": "tests/eval/kv_restore/test_kv_user.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/kv_user.h",
+      "logical_path": "tests/eval/kv_restore/kv_user.h"
+    },
+    {
       "source": "tests/benchmarks/mechanism_variants/Makefile",
       "logical_path": "tests/eval/mechanism_variants/Makefile"
     },

@@ -279,6 +279,98 @@ class Runs(Base):
         self.assertFalse(out.exists())
 
 
+class AblationSteps(Base):
+    """E5: each run is one cumulative level L1..L5 of the K-KV restore path.
+    The level fixes the arm and host-2 destination (L1 ordinary path, L2
+    user-copy, L3 user-direct, L4 ce-vmm with one CE submission per copy entry,
+    L5 ce-vmm with the default batch submission); run.json and every row carry
+    the level, and L4/L5 record the NVIDIA module's per-submit setting read back
+    from sysfs.  A level whose configuration does not match is refused before
+    anything runs."""
+
+    def args(self, *extra):
+        return kr.parser().parse_args([
+            'run', '--manifest', str(self.manifest), '--object', 'q8', '--prefixes', '32',
+            '--repetitions', '1', '--host1-agent', '127.0.0.1:1', '--token-file', '/dev/null',
+            '--output', str(self.dir / 'o'), '--worker-bin', '/opt/kv_restore',
+            '--gpu-bdf', '0000:65:00.0', '--peer', '10.9.0.1:7700', '--service', 'xdevext-1',
+            '--pool-bytes', str(64 * MIB)] + list(extra))
+
+    CE = ('--dst', 'ce-vmm', '--ce-dev', '/dev/nvidia1', '--ce-prog', '/opt/p.o',
+          '--frame-bytes', '4096')
+
+    def test_user_destinations_argv(self):
+        m = kl.load_manifest(self.manifest)
+        for dst in ('user-copy', 'user-direct'):
+            argv = kr.worker_argv(self.args('--arm', 'xdev-ext', '--dst', dst,
+                                            '--frame-bytes', '4096'), m)
+            self.assertEqual(argv[argv.index('--dst') + 1], dst)
+            for absent in ('--gpu-node', '--ce-dev', '--ce-prog'):
+                self.assertNotIn(absent, argv)
+            for bad in (('--gpu-node', '/dev/nvidia0'), ('--ce-dev', 'd'), ('--ce-prog', 'p')):
+                with self.subTest(dst=dst, bad=bad), self.assertRaises(SystemExit):
+                    kr.worker_argv(self.args('--arm', 'xdev-ext', '--dst', dst,
+                                             '--frame-bytes', '4096', *bad), m)
+
+    def test_step_must_match_its_configuration(self):
+        good = {
+            'L1': ('--arm', 'nvmeof', '--device', '/dev/nvme1n1'),
+            'L2': ('--arm', 'xdev-ext', '--dst', 'user-copy', '--frame-bytes', '4096'),
+            'L3': ('--arm', 'xdev-ext', '--dst', 'user-direct', '--frame-bytes', '4096'),
+            'L4': ('--arm', 'xdev-ext') + self.CE,
+            'L5': ('--arm', 'xdev-ext') + self.CE,
+        }
+        for step, extra in good.items():
+            with self.subTest(step=step):
+                self.assertEqual(kr.step_check(self.args('--step', step, *extra)), step)
+        bad = {
+            'L1 is not xdev-ext': ('L1', good['L2']),
+            'L2 is user-copy': ('L2', good['L3']),
+            'L3 is user-direct': ('L3', good['L2']),
+            'L4 is ce-vmm': ('L4', good['L3']),
+            'L5 is not nvmeof': ('L5', good['L1']),
+            'L5 is batch submission': ('L5', good['L5'] + ('--ce-entries-per-submit', '1')),
+            'L4 is per-entry submission': ('L4', good['L4'] + ('--ce-entries-per-submit', '0')),
+        }
+        for name, (step, extra) in bad.items():
+            with self.subTest(name), self.assertRaises(SystemExit):
+                kr.step_check(self.args('--step', step, *extra))
+        with self.assertRaises(SystemExit):
+            kr.step_check(self.args('--arm', 'xdev-ext', '--ce-entries-per-submit', '1',
+                                    *self.CE)), 'the switch belongs to a level'
+        self.assertIsNone(kr.step_check(self.args(*good['L2'])), 'no level: an ordinary run')
+
+    def test_ce_submit_setting_is_read_back(self):
+        param = self.dir / 'xdev_ext_ce_entries_per_submit'
+        a4 = self.args('--step', 'L4', '--arm', 'xdev-ext', '--ce-param', str(param), *self.CE)
+        a5 = self.args('--step', 'L5', '--arm', 'xdev-ext', '--ce-param', str(param), *self.CE)
+        with self.assertRaises(SystemExit) as e:
+            kr.ce_submit_setting(a4)
+        self.assertIn('module parameter', str(e.exception), 'L4 needs the switch in the module')
+        self.assertIsNone(kr.ce_submit_setting(a5), 'L5 without the switch: batch is all there is')
+        param.write_text('0\n')
+        self.assertEqual(kr.ce_submit_setting(a4), 1, 'L4 sets one entry per submission')
+        self.assertEqual(param.read_text().strip(), '1')
+        self.assertEqual(kr.ce_submit_setting(a5), 0, 'L5 restores batch submission')
+        self.assertEqual(param.read_text().strip(), '0')
+
+    def test_rows_and_run_json_carry_the_step(self):
+        address, token, _ = Runs.agent(self)
+        fake = self.dir / 'fake_worker.py'
+        fake.write_text(FAKE_WORKER)
+        out = self.dir / 'results'
+        rc = kr.main(['run', '--arm', 'custom', '--step', 'L1', '--manifest', str(self.manifest),
+                      '--object', 'q14', '--prefixes', '16', '--repetitions', '2',
+                      '--host1-agent', address, '--token-file', str(token), '--output', str(out),
+                      '--idle-seconds', '0', '--group-bytes', str(128 * 1024),
+                      '--worker-argv', json.dumps([sys.executable, '-I', str(fake)])])
+        self.assertEqual(rc, 0)
+        rows = [json.loads(l) for l in (out / 'results.jsonl').read_text().splitlines()]
+        self.assertEqual([r['step'] for r in rows], ['L1', 'L1'])
+        meta = json.loads((out / 'run.json').read_text())
+        self.assertEqual((meta['step'], meta['ce_entries_per_submit']), ('L1', None))
+
+
 class Recompute(Base):
     def test_times_the_operator_command(self):
         out = self.dir / 'rc'

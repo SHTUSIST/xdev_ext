@@ -400,6 +400,8 @@ jobs:
           for family in chains nvme_gpu gpu_nic nvme_nic gds userspace_orchestrator; do
             python3 -m unittest discover -s "tests/eval/$family" -p 'test_cpu_timer_contract.py' -v
           done
+      - name: K-KV restore plan, user-continuation and ablation contracts
+        run: make -C tests/eval/kv_restore check BUILD="$RUNNER_TEMP/kv-restore"
       - name: Eval session image and run-only wiring contracts
         run: python3 kernel/tools/testing/selftests/xdev_ext_integration/xdev_ext_eval_session_harness_test.py -v
       - name: IAA syscall and lifetime contracts

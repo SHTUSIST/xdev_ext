@@ -266,5 +266,104 @@ class CeVmmDestination(unittest.TestCase):
         self.assertEqual(w.quit(timeout=30)['error'], 0)
 
 
+USER_BASE = ['--gpu-bdf', '0000:01:00.0']
+
+
+@unittest.skipUnless(BIN, 'needs libbpf >= 1.0 to build kv_restore (or KV_RESTORE_BIN)')
+class UserDestinations(unittest.TestCase):
+    """E5 levels 2 and 3: --dst user-copy / user-direct.  Host 2 receives into the
+    ring of host frames like ce-vmm; a USER stage hands every group to the worker,
+    which copies it to a CUDA allocation (user-copy through a pinned staging slot,
+    user-direct straight from the registered frames).  cpu_copy_bytes is the
+    worker's counted memcpy bytes, not a property of the code."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix='kv-user-')
+        self.manifest = kl.parse_manifest({
+            'schema': 1, 'kind': 'kv-layout', 'lba_bytes': 512,
+            'window': {'slba': 2048, 'nlb': 40 * GIB // 512},
+            'objects': [{'name': 'q14', 'model': 'qwen3-14b', 'tokens': 32768, 'seed': 9,
+                         'slba': 2048, 'nlb': 5 * GIB // 512}]})
+        self.geometry = kl.Geometry(128 * KIB, 4 * KIB, 32, 32, True)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def worker(self, role, extra):
+        return kp.Worker([BIN, role, '--dry-run'] + CE_WINDOW + extra, ready_timeout=30,
+                         log=Path(self.tmp.name) / f'{role}.log')
+
+    def refused(self, argv):
+        r = subprocess.run([str(BIN)] + argv, capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 2, r.stdout)
+        kind, body = kp.parse_line(r.stdout.strip().splitlines()[-1])
+        self.assertEqual((kind, body['where']), ('KV_ERROR', 'arguments'))
+
+    def test_arguments_refused(self):
+        restore = ['restore', '--dry-run'] + CE_WINDOW + RESTORE
+        for dst in ('user-copy', 'user-direct'):
+            cases = {
+                'no GPU BDF': restore + ['--dst', dst],
+                'no PEER registration node': restore + USER_BASE + ['--dst', dst,
+                                                                    '--gpu-node', '/dev/nvidia0'],
+                'no CE device': restore + USER_BASE + ['--dst', dst, '--ce-dev', '/dev/null'],
+                'no CE program': restore + USER_BASE + ['--dst', dst, '--ce-prog', '/dev/null'],
+                'host frames are 4096 bytes': ['restore', '--dry-run'] + CE_WINDOW[:8] + [
+                    '--frame-bytes', str(128 * KIB)] + CE_WINDOW[10:] + RESTORE + USER_BASE + [
+                    '--dst', dst],
+                'serve has no destination': ['serve', '--dry-run'] + CE_WINDOW + [
+                    '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--listen',
+                    '127.0.0.1:0', '--link-token', '5', '--dst', dst],
+                'local-verify needs a GPU BDF': ['local-verify', '--dry-run'] + CE_WINDOW + [
+                    '--nvme', '/dev/null', '--nvme-prog', '/dev/null', '--pool-bytes',
+                    str(64 << 20), '--dst', dst],
+            }
+            for name, argv in cases.items():
+                with self.subTest(dst=dst, case=name):
+                    self.refused(argv)
+
+    def test_restore_plans_a_ring(self):
+        obj = self.manifest.object('q14')
+        want = kl.plan_restore(self.manifest, 'q14', 32768, self.geometry, 1, 8,
+                               6 * GIB // 4096, host2_ring=True).to_json()
+        for dst, path in (('user-copy', 'xdomain-rx>host-frame>cpu-memcpy>pinned-staging>cuda-h2d'),
+                          ('user-direct', 'xdomain-rx>host-frame>cuda-h2d')):
+            with self.subTest(dst=dst):
+                w = self.worker('restore', RESTORE + USER_BASE + ['--dst', dst])
+                self.assertEqual((w.ready['dst'], w.ready['ring_frames']), (dst, 32 * 32))
+                r = w.go(run='big', ordinal=1, object_slba=obj.slba,
+                         bytes=kl.kv_bytes(obj.model, 32768), dst_frame0=8, timeout=30)
+                self.assertTrue(r['ok'], r)
+                for key in ('groups', 'first_seq', 'host2_frames', 'host2_dst_frame0',
+                            'host2_start_frames'):
+                    self.assertEqual(r['plan'][key], want[key], key)
+                self.assertIs(r['plan']['host2_ring'], True)
+                self.assertEqual((r['dst'], r['payload_path']), (dst, path))
+                # Dry run: nothing copied; the count is measured, not by construction.
+                self.assertEqual((r['cpu_copy_bytes'], r['cpu_copy_basis']), (0, 'counted'))
+                self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_local_verify_user_modes(self):
+        for dst, path in (('user-copy', 'nvme-read>host-frame>cpu-memcpy>pinned-staging>cuda-h2d'),
+                          ('user-direct', 'nvme-read>host-frame>cuda-h2d')):
+            with self.subTest(dst=dst):
+                w = self.worker('local-verify', ['--nvme', '/dev/null', '--nvme-prog', '/dev/null',
+                                                 '--pool-bytes', str(64 << 20)] + USER_BASE +
+                                ['--dst', dst])
+                r = w.go(run='lv', ordinal=1, object_slba=2048, bytes=40 * 128 * KIB,
+                         dst_frame0=3, timeout=30)
+                self.assertTrue(r['ok'], r)
+                self.assertEqual((r['dst'], r['payload_path']), (dst, path))
+                self.assertEqual(r['plan']['host2_start_frames'], 32 * 32)
+                self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+    def test_other_destinations_report_by_construction(self):
+        w = self.worker('restore', RESTORE + CE)
+        r = w.go(run='c', ordinal=1, object_slba=2048, bytes=8 * 128 * KIB, dst_frame0=0,
+                 timeout=30)
+        self.assertEqual((r['cpu_copy_bytes'], r['cpu_copy_basis']), (0, 'by_construction'))
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
+
+
 if __name__ == '__main__':
     unittest.main()

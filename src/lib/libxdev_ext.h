@@ -207,6 +207,9 @@ int xdev_ext_session_xsk_fd(const struct xdev_ext_session *s);
 __u64 xdev_ext_session_id(const struct xdev_ext_session *s);
 bool xdev_ext_session_zero_copy(const struct xdev_ext_session *s);
 bool xdev_ext_session_retained(const struct xdev_ext_session *s);
+/* IOU_UMEM pool: the library's mapping of the ring's UMEM (frame i at byte
+ * i * XDEV_EXT_FRAME_SIZE) and its length, valid until close; else NULL. */
+void *xdev_ext_session_umem(const struct xdev_ext_session *s, size_t *bytes);
 
 /* --- USER stage (SPEC.md section 8) --- */
 

@@ -121,6 +121,45 @@ first_key + k only while both hosts use the same first_seq and group count;
 the RESTORE line checks that. A CE stage without the range flag can only
 write its batch's ring slot, which does not keep the KV contiguous.
 
+## E5 ablation levels
+
+`run.py run --step L1..L5` labels a run as one cumulative level of the E5
+ablation of the restore path; run.json and every row carry the level, and a
+level whose arm or destination differs from its definition is refused:
+
+| Level | Configuration | What it adds |
+| --- | --- | --- |
+| L1 | `--arm nvmeof` (or a custom worker) on the NVMe-oF/TCP namespace | ordinary path |
+| L2 | `--arm xdev-ext --dst user-copy` | XDOMAIN ring; USER stage; CPU memcpy into pinned staging, `cuMemcpyHtoDAsync` |
+| L3 | `--arm xdev-ext --dst user-direct` | the received frames, registered once with `cuMemHostRegister`, are the copy source (no CPU copy) |
+| L4 | `--arm xdev-ext --dst ce-vmm`, module switch 1 | kernel continuation to the CE stage, one CE submission per copy entry |
+| L5 | `--arm xdev-ext --dst ce-vmm`, module switch 0 or absent | batched CE submission (the full system) |
+
+`--dst user-copy` and `--dst user-direct` (restore and local-verify) receive
+into the same recycled ring of host frames as ce-vmm (`--frame-bytes 4096`)
+and end the session with a USER stage instead of the CE stage, so host 2 is
+`[XDOMAIN RX, USER]` (local-verify `[NVMe READ, USER]`); the kernel's CREATE
+rules admit both, while `[XDOMAIN RX, USER, CE range]` is refused
+(`test_kv_plan.c`), which is why L3 to L4 changes both who continues and who
+issues the GPU copy. A lone XDOMAIN RX session is admitted too, but its frames
+recycle when the batch ends, so it has no point where a user thread could
+read them. The destination is a `cuMemAlloc` allocation of `--pool-bytes`;
+`kv_user.h` keeps up to depth groups in flight, reuses a staging slot or
+returns a frame only after its copy completed, and blocks on the oldest copy
+when nothing new is ready (`test_kv_user.c`). Their `KV_RESULT` reports
+`cpu_copy_bytes` with `cpu_copy_basis: counted` (the bytes the worker really
+copied); every other destination reports `by_construction`.
+
+L4 and L5 write and read back the NVIDIA module parameter
+`xdev_ext_ce_entries_per_submit` (`--ce-param`); L4 is refused while the
+module has no such parameter. `analyze.py` reports labelled runs only under
+`ablation`: per level the restore-time median, min and max, the ratio to the
+previous present level and to L1, and per-restore core-seconds on both hosts,
+raw and minus each campaign's own idle rate times the restore time. It refuses
+rows of another level in a level's directory and one level from two
+configurations. None of this has run on hardware; the user modes need a GPU
+and the two-host pair.
+
 ## Worker protocol
 
 Every worker sets up once and then talks line by line on stdin/stdout:

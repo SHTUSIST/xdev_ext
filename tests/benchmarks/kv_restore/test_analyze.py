@@ -39,11 +39,14 @@ def rows(arm, latencies, cpu1, cpu2, prefix=4096, bytes_=671088640, ok=True, per
     return out
 
 
-def write_arm(base, arm, records, idle=(0.0, 0.0), dst=None, name=None):
+def write_arm(base, arm, records, idle=(0.0, 0.0), dst=None, name=None, step=None,
+              ce_entries=None):
     d = Path(base) / (name or arm)
     d.mkdir()
     (d / 'results.jsonl').write_text(''.join(json.dumps(r) + '\n' for r in records))
     extra = {} if dst is None else dict(dst=dst)
+    if step is not None:
+        extra.update(step=step, ce_entries_per_submit=ce_entries)
     (d / 'run.json').write_text(json.dumps(dict(schema=1, arm=arm, performance_claim='none', **extra, idle=dict(
         host1=dict(busy_core_seconds=idle[0], wall_seconds=1.0),
         host2=dict(busy_core_seconds=idle[1], wall_seconds=1.0)))))
@@ -203,6 +206,104 @@ class Host2Criterion(unittest.TestCase):
             with self.assertRaises(SystemExit) as e:
                 ka.analyze(dirs, resamples=100, seed=1)
             self.assertIn('dst', str(e.exception))
+
+
+def stepped(step, latencies, cpu1, cpu2, **kw):
+    out = rows('nvmeof' if step == 'L1' else 'xdev-ext', latencies, cpu1, cpu2, **kw)
+    for r in out:
+        r['step'] = step
+    return out
+
+
+STEP_ARM = {'L1': ('nvmeof', None, None), 'L2': ('xdev-ext', 'user-copy', None),
+            'L3': ('xdev-ext', 'user-direct', None), 'L4': ('xdev-ext', 'ce-vmm', 1),
+            'L5': ('xdev-ext', 'ce-vmm', 0)}
+
+
+class Ablation(unittest.TestCase):
+    """E5: one bar per cumulative level, the restore-time median with the min and
+    max of its runs, the ratio to the previous level and to L1, and per-restore
+    CPU core-seconds on both hosts raw and minus the idle rate times the restore
+    time.  Levels are never pooled with each other or with unlabelled arms."""
+
+    def write(self, tmp, step, records, idle=(0.0, 0.0)):
+        arm, dst, ce = STEP_ARM[step]
+        return write_arm(tmp, arm, records, idle=idle, dst=dst, name=step, step=step,
+                         ce_entries=ce)
+
+    def test_levels_ratios_and_core_seconds(self):
+        lat = {'L1': 4.0, 'L2': 2.0, 'L3': 1.6, 'L4': 1.6, 'L5': 1.0}
+        with tempfile.TemporaryDirectory(prefix='kv-ab-') as tmp:
+            dirs = [self.write(tmp, st, stepped(st, [v * 0.9, v, v * 1.2] + [v] * 7, 1.0, 2.0),
+                               idle=(0.05, 0.1)) for st, v in lat.items()]
+            rep = ka.analyze(dirs, resamples=100, seed=1)
+        self.assertEqual(rep['arms'], [], 'levels are reported only in the ablation')
+        (point,) = rep['ablation']
+        self.assertEqual((point['model'], point['prefix_tokens']), ('qwen3-14b', 4096))
+        levels = point['levels']
+        self.assertEqual([l['step'] for l in levels], ['L1', 'L2', 'L3', 'L4', 'L5'])
+        l2 = levels[1]
+        self.assertEqual((l2['arm'], l2['dst'], l2['n_ok']), ('xdev-ext', 'user-copy', 10))
+        self.assertAlmostEqual(l2['latency_s']['median'], 2.0)
+        self.assertAlmostEqual(l2['latency_s']['min'], 1.8)
+        self.assertAlmostEqual(l2['latency_s']['max'], 2.4)
+        self.assertAlmostEqual(l2['speedup_vs_previous'], 2.0)
+        self.assertAlmostEqual(levels[4]['speedup_vs_l1'], 4.0)
+        self.assertAlmostEqual(levels[3]['speedup_vs_previous'], 1.0)
+        self.assertIsNone(levels[0]['speedup_vs_previous'])
+        self.assertEqual(levels[3]['ce_entries_per_submit'], 1)
+        # Per restore: busy = cpu * bytes / GB; net = busy - idle_rate * wall.
+        b = 671088640 / GB
+        h2 = l2['host2_core_seconds']
+        self.assertAlmostEqual(h2['raw'], 2.0 * b)
+        self.assertEqual(h2['idle_rate_core_seconds_per_second'], [0.1])
+        self.assertAlmostEqual(h2['minus_idle'], 2.0 * b - 0.1 * 2.0)
+        self.assertFalse(l2['insufficient_runs'])
+
+    def test_each_campaign_subtracts_its_own_idle_rate(self):
+        # Levels alternate between campaigns (1..5, 5..1); each directory has
+        # its own idle window, and its runs subtract that window's rate.
+        with tempfile.TemporaryDirectory(prefix='kv-ab-') as tmp:
+            a = write_arm(tmp, 'xdev-ext', stepped('L5', [1.0] * 5, 1, 1), idle=(0, 0.0),
+                          dst='ce-vmm', name='a', step='L5', ce_entries=0)
+            b = write_arm(tmp, 'xdev-ext', stepped('L5', [1.0] * 6, 1, 1), idle=(0, 0.2),
+                          dst='ce-vmm', name='b', step='L5', ce_entries=0)
+            rep = ka.analyze([a, b], resamples=100, seed=1)
+        h2 = rep['ablation'][0]['levels'][0]['host2_core_seconds']
+        busy = 671088640 / GB
+        self.assertAlmostEqual(h2['raw'], busy)
+        self.assertAlmostEqual(h2['minus_idle'], busy - 0.2, msg='6 of 11 runs subtract 0.2')
+        self.assertEqual(h2['idle_rate_core_seconds_per_second'], [0.0, 0.2])
+
+    def test_missing_level_and_too_few_runs(self):
+        with tempfile.TemporaryDirectory(prefix='kv-ab-') as tmp:
+            dirs = [self.write(tmp, 'L1', stepped('L1', [4.0] * 10, 1, 1)),
+                    self.write(tmp, 'L3', stepped('L3', [2.0] * 4, 1, 1))]
+            rep = ka.analyze(dirs, resamples=100, seed=1)
+        l1, l3 = rep['ablation'][0]['levels']
+        self.assertIsNone(l3['speedup_vs_previous'], 'L2 absent: no previous level')
+        self.assertAlmostEqual(l3['speedup_vs_l1'], 2.0)
+        self.assertTrue(l3['insufficient_runs'])
+
+    def test_refuses_mixed_levels(self):
+        cases = {
+            'a row of another level': lambda tmp: [self.write(
+                tmp, 'L2', stepped('L2', [1.0] * 9, 1, 1) + stepped('L3', [1.0], 1, 1))],
+            'one level from two configurations': lambda tmp: [
+                self.write(tmp, 'L2', stepped('L2', [1.0] * 10, 1, 1)),
+                write_arm(tmp, 'xdev-ext', stepped('L2', [1.0] * 10, 1, 1), dst='user-direct',
+                          name='L2b', step='L2')],
+            'a level with the wrong destination': lambda tmp: [
+                write_arm(tmp, 'xdev-ext', stepped('L4', [1.0] * 10, 1, 1), dst='user-copy',
+                          name='x', step='L4', ce_entries=1)],
+            'L4 without per-entry submission': lambda tmp: [
+                write_arm(tmp, 'xdev-ext', stepped('L4', [1.0] * 10, 1, 1), dst='ce-vmm',
+                          name='x', step='L4', ce_entries=0)],
+        }
+        for name, make in cases.items():
+            with self.subTest(name), tempfile.TemporaryDirectory(prefix='kv-ab-') as tmp:
+                with self.assertRaises(SystemExit):
+                    ka.analyze(make(tmp), resamples=100, seed=1)
 
 
 if __name__ == '__main__':

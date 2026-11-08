@@ -7,7 +7,8 @@
   nvmeof-target  host 1: kernel NVMe-oF/TCP target up/down through nvmet configfs
   run            host 2: start one arm's worker once, then per restore: drop
                  caches, host-1 and host-2 CPU markers, optional perf memory
-                 counters, one GO, one KV_RESULT line in results.jsonl
+                 counters, one GO, one KV_RESULT line in results.jsonl;
+                 --step L1..L5 labels the run as one level of the E5 ablation
   recompute      host 2: time an operator-provided prefill command per prefix
 
 `run` and `recompute` write raw records only; analyze.py derives metrics.
@@ -42,6 +43,17 @@ def _load(name):
 kl, kp, kc = _load('kv_layout'), _load('kv_protocol'), _load('kv_cpu')
 KIB, MIB = 1 << 10, 1 << 20
 WRITE_CHUNK = 64 * MIB
+
+# E5 cumulative levels of the restore path (evaluation plan, RQ3/E5):
+#   L1 ordinary path: NVMe-oF/TCP namespace read by a host-2 user program
+#   L2 XDOMAIN ring, USER stage: CPU memcpy to pinned staging + CUDA copy
+#   L3 + shared host frames: CUDA copies straight from the registered frames
+#   L4 + kernel continuation: CE stage, one CE submission per copy entry
+#   L5 + batched CE submission (the full system)
+STEPS = ('L1', 'L2', 'L3', 'L4', 'L5')
+STEP_DST = {'L2': 'user-copy', 'L3': 'user-direct', 'L4': 'ce-vmm', 'L5': 'ce-vmm'}
+STEP_CE_ENTRIES = {'L4': 1, 'L5': 0}
+CE_PARAM = '/sys/module/nvidia/parameters/xdev_ext_ce_entries_per_submit'
 
 
 def _prefixes(text):
@@ -178,6 +190,10 @@ def worker_argv(args, m):
             if not args.ce_dev or not args.ce_prog or args.gpu_node:
                 raise SystemExit('--dst ce-vmm needs --ce-dev and --ce-prog and no --gpu-node')
             argv += ['--ce-dev', args.ce_dev, '--ce-prog', args.ce_prog]
+        elif args.dst in ('user-copy', 'user-direct'):
+            # Host frames, a USER stage and the worker's own CUDA copies (E5 L2/L3).
+            if args.gpu_node or args.ce_dev or args.ce_prog:
+                raise SystemExit(f'--dst {args.dst} takes no --gpu-node, --ce-dev or --ce-prog')
         else:
             if not args.gpu_node or args.ce_dev or args.ce_prog:
                 raise SystemExit('--dst peer needs --gpu-node and no --ce-dev/--ce-prog')
@@ -198,6 +214,47 @@ def worker_argv(args, m):
                 '--gpu-bdf', args.gpu_bdf, '--frame-bytes', g.frame_bytes]
     argv += json.loads(args.worker_extra)
     return [str(a) for a in argv]
+
+
+def step_check(args):
+    """The E5 level fixes the arm, the host-2 destination and the CE submission switch."""
+    step = getattr(args, 'step', None)
+    entries = getattr(args, 'ce_entries_per_submit', None)
+    if step is None:
+        if entries is not None:
+            raise SystemExit('--ce-entries-per-submit belongs to --step L4 or L5')
+        return None
+    if step == 'L1':
+        if args.arm not in ('nvmeof', 'custom'):
+            raise SystemExit('--step L1 is the ordinary path: --arm nvmeof or a custom worker')
+    elif args.arm != 'xdev-ext' or args.dst != STEP_DST[step]:
+        raise SystemExit(f'--step {step} is --arm xdev-ext --dst {STEP_DST[step]}')
+    if entries is not None and entries != STEP_CE_ENTRIES.get(step):
+        raise SystemExit(f'--step {step} does not take --ce-entries-per-submit {entries}')
+    return step
+
+
+def ce_submit_setting(args):
+    """L4/L5: write and read back the NVIDIA module's per-submission entry count.
+
+    L4 needs the measurement-only switch (1: one CE submission per copy entry);
+    L5 sets 0 (whole batch), or records None when the module has no switch, in
+    which case batch submission is the only behaviour.
+    """
+    want = STEP_CE_ENTRIES.get(getattr(args, 'step', None))
+    if want is None:
+        return None
+    param = Path(args.ce_param)
+    if not param.exists():
+        if want:
+            raise SystemExit(f'--step L4 needs the NVIDIA module parameter {param} '
+                             '(one CE submission per copy entry); it is absent')
+        return None
+    param.write_text(f'{want}\n')
+    got = int(param.read_text().strip())
+    if got != want:
+        raise SystemExit(f'{param} reads {got} after writing {want}')
+    return got
 
 
 def schedule(prefixes, repetitions, seed, first_ordinal):
@@ -261,17 +318,20 @@ def cmd_run(args):
     for t in args.prefixes:
         if t > obj.tokens or kl.kv_bytes(obj.model, t) % args.group_bytes:
             raise SystemExit(f'prefix {t} is not whole groups of object {obj.name}')
+    step = step_check(args)
     argv = worker_argv(args, m)
     plan = schedule(args.prefixes, args.repetitions, args.seed, args.first_ordinal)
     if args.dry_run:
-        print(json.dumps(dict(worker_argv=argv, schedule=plan), indent=2))
+        print(json.dumps(dict(worker_argv=argv, schedule=plan, step=step), indent=2))
         return 0
+    ce_entries = ce_submit_setting(args)
     token = Path(args.token_file).read_text().strip()
     out = new_output(args.output)
     agent = kc.AgentClient(kc.parse_address(args.host1_agent), token=token, timeout=args.agent_timeout)
     agent.ping()
     meta = dict(schema=1, arm=args.arm, performance_claim='none', worker_argv=argv,
-                dst=args.dst if args.arm == 'xdev-ext' else None,
+                dst=args.dst if args.arm == 'xdev-ext' else None, step=step,
+                ce_entries_per_submit=ce_entries,
                 manifest=json.loads(Path(args.manifest).read_text()), object=obj.name,
                 geometry=geometry(args).__dict__, prefixes=args.prefixes,
                 repetitions=args.repetitions, schedule=plan, host2=dict(
@@ -310,7 +370,7 @@ def cmd_run(args):
                 perf.disable()
             after = kc.snapshot()
             host1 = agent.end(run)
-            row = dict(run=run, arm=args.arm, object=obj.name, model=obj.model,
+            row = dict(run=run, arm=args.arm, step=step, object=obj.name, model=obj.model,
                        prefix_tokens=item['prefix_tokens'], rep=item['rep'],
                        ordinal=item['ordinal'], bytes=kl.kv_bytes(obj.model, item['prefix_tokens']),
                        ok=bool(result and result['ok']), latency_ns=result['latency_ns'] if result else 0,
@@ -429,8 +489,14 @@ def parser():
     p.add_argument('--worker-bin')
     p.add_argument('--gpu-bdf')
     p.add_argument('--gpu-node')
-    p.add_argument('--dst', choices=('peer', 'ce-vmm'), default='peer',
-                   help='xdev-ext: GPU frames (PEER pool) or host frames + GPU copy engine')
+    p.add_argument('--dst', choices=('peer', 'ce-vmm', 'user-copy', 'user-direct'), default='peer',
+                   help='xdev-ext: GPU frames (PEER pool), host frames + GPU copy engine, or '
+                        'host frames + the worker\'s own CUDA copies (E5 L2/L3)')
+    p.add_argument('--step', choices=STEPS, help='E5 ablation level of this run')
+    p.add_argument('--ce-entries-per-submit', type=int,
+                   help='L4/L5 check: 1 for L4, 0 for L5 (set by --step)')
+    p.add_argument('--ce-param', default=CE_PARAM,
+                   help='NVIDIA module parameter written for L4/L5')
     p.add_argument('--ce-dev', help='xdev-ext --dst ce-vmm: the GPU node /dev/nvidiaN')
     p.add_argument('--ce-prog', help='xdev-ext --dst ce-vmm: kv_ce_place.bpf.o')
     p.add_argument('--pool-bytes', type=int)

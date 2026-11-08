@@ -197,4 +197,22 @@ static inline __u64 kv_plan_xdomain_arg1(const struct kv_geometry *g)
 	return (__u64)g->window << XDEV_EXT_XDOMAIN_WINDOW_SHIFT;
 }
 
+/*
+ * USER stage of the E5 user modes (--dst user-copy/user-direct): stage 1 after
+ * the receiving stage on the ring's host frames.  Each group goes whole to the
+ * worker thread (no length change, no VARLEN); host frames need no
+ * STRICT_ASYNC.  The per-batch deadline is the worker timeout clamped to the
+ * kernel's range.
+ */
+static inline void kv_plan_user_stage(struct xdev_ext_mech_stage_uapi *st, int fd,
+				      uint64_t deadline_ms)
+{
+	if (deadline_ms < 1)
+		deadline_ms = 1;
+	if (deadline_ms > XDEV_EXT_USER_DEADLINE_MAX_MS)
+		deadline_ms = XDEV_EXT_USER_DEADLINE_MAX_MS;
+	*st = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_USER,
+		.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = fd, .arg0 = deadline_ms };
+}
+
 #endif /* KV_RESTORE_PLAN_H */

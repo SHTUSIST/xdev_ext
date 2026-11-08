@@ -35,6 +35,9 @@ $(BUILD)/test_kv_bpf: test_kv_bpf.c kv_nvme_read.bpf.c | $(BUILD)
 $(BUILD)/test_kv_ce_bpf: test_kv_ce_bpf.c kv_ce_place.bpf.c kv_ce_place.h | $(BUILD)
 	$(CC) $(WARN) $(SAN) -I$(HOST) -I$(KERNEL) -I$(MECH) -I. $< -o $@
 
+$(BUILD)/test_kv_user: test_kv_user.c kv_user.h | $(BUILD)
+	$(CC) $(WARN) $(SAN) -I$(MECH) -I. $< -o $@
+
 $(BUILD)/kv_plan_cli: kv_plan_cli.c kv_plan.h | $(BUILD)
 	$(CC) $(WARN) $(CFLAGS) $< -o $@
 
@@ -44,13 +47,14 @@ $(BUILD)/nvmeof_worker: nvmeof_worker.c kv_plan.h | $(BUILD)
 $(BUILD)/lib/libxdev_ext.a: | $(BUILD)
 	$(MAKE) -C $(MECH)/lib BUILD_DIR=$(abspath $(BUILD))/lib CC=$(CC)
 
-$(BUILD)/kv_restore: kv_restore.c kv_plan.h $(BUILD)/lib/libxdev_ext.a | $(BUILD)
+$(BUILD)/kv_restore: kv_restore.c kv_plan.h kv_user.h $(BUILD)/lib/libxdev_ext.a | $(BUILD)
 	$(CC) $(WARN) $(CFLAGS) $< -o $@ $(BUILD)/lib/libxdev_ext.a -lbpf -lelf -lz -ldl
 
 driver: $(BUILD)/kv_restore $(BUILD)/nvmeof_worker $(BUILD)/kv_plan_cli
 
-check: $(BUILD)/test_kv_plan $(BUILD)/test_kv_bpf $(BUILD)/test_kv_ce_bpf
+check: $(BUILD)/test_kv_plan $(BUILD)/test_kv_bpf $(BUILD)/test_kv_ce_bpf $(BUILD)/test_kv_user
 	$(BUILD)/test_kv_plan
+	$(BUILD)/test_kv_user
 	$(BUILD)/test_kv_bpf
 	$(BUILD)/test_kv_ce_bpf
 	$(PYTHON) -m unittest discover -s . -p 'test_*.py'

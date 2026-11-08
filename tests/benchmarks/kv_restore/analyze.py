@@ -19,6 +19,16 @@ CPU copies no payload byte on host 2 (host2_cpu_copy_bytes of every
 successful run is 0; a run without the count gives not_measured) and host-2
 CPU core-seconds per GB at most half of the baseline's (10 runs per arm).
 Thresholds are those of the K-KV design; the report states no claim itself.
+
+E5 ablation (run.py --step L1..L5): a result directory labelled with a level
+goes only into report['ablation'], one entry per model and prefix with one
+row per level: restore time median, min and max over the successful runs,
+the median ratio to the previous present level and to L1 ("x faster"), and
+per-restore CPU core-seconds on each host, raw and minus the idle rate times
+the restore's wall time (raw values and idle rates are kept). A directory
+whose rows carry another level, two configurations of one level, or a level
+whose arm, destination or CE submission setting differs from its definition
+is refused, so levels are never pooled.
 """
 import argparse
 import json
@@ -32,6 +42,9 @@ MIN_RUNS = 10
 LAT_BAND = 0.10
 CPU_FACTOR = 2.0
 MEM_LIMIT = 0.1
+STEPS = ('L1', 'L2', 'L3', 'L4', 'L5')
+STEP_DST = {'L2': 'user-copy', 'L3': 'user-direct', 'L4': 'ce-vmm', 'L5': 'ce-vmm'}
+STEP_CE_ENTRIES = {'L4': (1,), 'L5': (0, None)}
 
 
 def quantile(sorted_values, q):
@@ -135,15 +148,100 @@ def latency_verdict(ratio):
     return 'within_10pct'
 
 
+def step_config(d, meta, records):
+    """Check one labelled directory against its level's definition."""
+    step = meta['step']
+    if step not in STEPS:
+        raise SystemExit(f'{d}: unknown level {step!r}')
+    if step == 'L1':
+        ok = meta.get('arm') in ('nvmeof', 'custom')
+    else:
+        ok = meta.get('arm') == 'xdev-ext' and meta.get('dst') == STEP_DST[step]
+    if not ok or (step in STEP_CE_ENTRIES and
+                  meta.get('ce_entries_per_submit') not in STEP_CE_ENTRIES[step]):
+        raise SystemExit(f'{d}: arm {meta.get("arm")} dst {meta.get("dst")} ce_entries_per_submit '
+                         f'{meta.get("ce_entries_per_submit")} is not level {step}')
+    other = {r.get('step') for r in records} - {step}
+    if other:
+        raise SystemExit(f'{d}: rows of level(s) {sorted(map(str, other))} in a level {step} run')
+    return (meta.get('arm'), meta.get('dst'), meta.get('ce_entries_per_submit'))
+
+
+def idle_rate(idle, host):
+    if idle and idle.get(host) and idle[host].get('wall_seconds'):
+        return idle[host]['busy_core_seconds'] / idle[host]['wall_seconds']
+    return None
+
+
+def per_restore_cpu(records, host):
+    """records: (row, idle of its directory); each run subtracts its own idle rate."""
+    raw, net, rates = [], [], []
+    for r, idle in records:
+        rate = idle_rate(idle, host)
+        if rate is not None and rate not in rates:
+            rates.append(rate)
+        cpu = r.get(f'{host}_cpu') or {}
+        if 'busy_core_seconds' not in cpu:
+            continue
+        raw.append(cpu['busy_core_seconds'])
+        if rate is not None:
+            net.append(cpu['busy_core_seconds'] - rate * cpu['wall_seconds'])
+    return dict(raw=statistics.median(raw) if raw else None,
+                minus_idle=statistics.median(net) if net else None,
+                idle_rate_core_seconds_per_second=rates)
+
+
+def ablation(levels):
+    """levels: step -> dict(config, records=[(row, idle of its directory)])."""
+    points = {}
+    for step, lv in levels.items():
+        for r, idle in lv['records']:
+            points.setdefault((r['model'], r['prefix_tokens']), {}).setdefault(step, []).append(
+                (r, idle))
+    out = []
+    for (model, prefix), by_step in sorted(points.items()):
+        rows_, prev, first = [], None, None
+        for step in STEPS:
+            recs = by_step.get(step)
+            if recs is None:
+                prev = None if step != 'L1' else prev
+                continue
+            ok = [(r, idle) for r, idle in recs if r.get('ok')]
+            lat = sorted(r['latency_ns'] / 1e9 for r, _ in ok)
+            arm, dst, ce = levels[step]['config']
+            med = statistics.median(lat) if lat else None
+            row = dict(step=step, arm=arm, dst=dst, ce_entries_per_submit=ce,
+                       n_total=len(recs), n_ok=len(ok), insufficient_runs=len(ok) < MIN_RUNS,
+                       latency_s=dict(median=med, min=lat[0], max=lat[-1]) if lat else None,
+                       speedup_vs_previous=prev / med if prev and med else None,
+                       speedup_vs_l1=first / med if first and med else None)
+            for host in ('host1', 'host2'):
+                row[f'{host}_core_seconds'] = per_restore_cpu(ok, host)
+            if step == 'L1':
+                first = med
+            prev = med
+            rows_.append(row)
+        out.append(dict(model=model, prefix_tokens=prefix, levels=rows_))
+    return out
+
+
 def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
-    arms, recompute = {}, []
+    arms, recompute, levels = {}, [], {}
     inputs = []
     for d in dirs:
         meta, records = load_dir(d)
         inputs.append(dict(dir=str(d), arm=meta.get('arm', meta.get('kind')),
-                           performance_claim=meta.get('performance_claim')))
+                           step=meta.get('step'), performance_claim=meta.get('performance_claim')))
         if meta.get('kind') == 'recompute':
             recompute.extend(records)
+            continue
+        if meta.get('step') is not None:
+            config = step_config(d, meta, records)
+            lv = levels.setdefault(meta['step'], dict(config=config, records=[]))
+            if lv['config'] != config:
+                raise SystemExit(f'level {meta["step"]} from two configurations: '
+                                 f'{lv["config"]} and {config}')
+            lv['records'].extend((r, meta.get('idle')) for r in records)
             continue
         arm = arms.setdefault(meta['arm'], dict(idle=meta.get('idle'), records=[],
                                                 dst=meta.get('dst')))
@@ -153,7 +251,8 @@ def analyze(dirs, resamples=10000, seed=1, bytes_per_count=None):
         arm['records'].extend(records)
     report = dict(schema=1, inputs=inputs, thresholds=dict(min_runs=MIN_RUNS, latency_band=LAT_BAND,
                                                           cpu_factor=CPU_FACTOR, memory_limit=MEM_LIMIT),
-                  arms=[], comparisons=[], recompute=[], host2_criterion=[])
+                  arms=[], comparisons=[], recompute=[], host2_criterion=[],
+                  ablation=ablation(levels))
     points = {}
     for name, arm in sorted(arms.items()):
         groups = {}
