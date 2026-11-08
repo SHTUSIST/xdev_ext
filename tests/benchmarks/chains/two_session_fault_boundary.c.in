@@ -1,0 +1,46 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+static unsigned frame_checks;
+
+static int two_frame_start(int side, const struct xdev_ext_mech_start *start)
+{
+    /* Deliberately fixed expected schedule, independent of coordinator math:
+     * six 8 KiB groups at depth four use 8 frames, then reuse only 4. */
+    const unsigned count = sides[side].starts ? 4 : 8;
+    const uint64_t first = sides[side].starts ? 5 : 1;
+    const __u32 *indices = (const void *)(uintptr_t)start->user_frames;
+
+    if (depth != 4 || sides[side].starts > 1 || start->first_seq != first ||
+        start->nr_batches != count / 2 || start->nr_user_frames != count) {
+        violations++;
+        return -EINVAL;
+    }
+    for (unsigned k = 0; k < count; k++) {
+        if (indices[k] != k) {
+            violations++;
+            return -EINVAL;
+        }
+        frame_checks++;
+    }
+    return 0;
+}
+
+static int fixture_register(int fd, unsigned opcode, void *arg)
+{
+    struct io_uring_xdev_ext_mech *op = arg;
+    if (opcode == IORING_REGISTER_XDEV_EXT_MECH && op->op == XDEV_EXT_MECH_OP_START &&
+        FIXTURE_FRAMES_PER_GROUP == 2) {
+        const struct xdev_ext_mech_start *start = (const void *)(uintptr_t)op->arg;
+        int side = side_index(start->session_id);
+        if (side < 0) return -EINVAL;
+        int ret = two_frame_start(side, start);
+        if (ret) return ret;
+    }
+    int ret = fixture_register_base(fd, opcode, arg);
+    if (!ret && FIXTURE_FRAMES_PER_GROUP == 2 &&
+        opcode == IORING_REGISTER_XDEV_EXT_MECH && op->op == XDEV_EXT_MECH_OP_START) {
+        const struct xdev_ext_mech_start *start = (const void *)(uintptr_t)op->arg;
+        if (start->session_id == 7009 && sides[1].starts == 1 &&
+            is_case("two-frame-corrupt-tail")) gpu[4*8192-1] ^= 0x80;
+    }
+    return ret;
+}

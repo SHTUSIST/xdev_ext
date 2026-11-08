@@ -9969,6 +9969,20 @@
       "source": "tests/storage/nvme/blocktable/guest/parallel_oracle_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/parallel_oracle_test.c"
+    },
+    {
+      "source": "tests/benchmarks/chains/two_session_fault_boundary.c.in",
+      "logical_path": "tests/eval/chains/two_session_fault_boundary.c.in"
+    },
+    {
+      "source": "tests/core/memory/umem/fake_include/io_uring.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_umem/fake_include/io_uring.h"
+    },
+    {
+      "source": "tests/core/memory/umem/fake_include/rsrc.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_umem/fake_include/rsrc.h"
     }
   ]
 }

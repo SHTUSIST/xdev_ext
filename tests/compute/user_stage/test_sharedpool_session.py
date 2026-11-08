@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: GPL-2.0
-"""RED for actual sharedpool utility observation verdicts, no kernel model.
+"""Actual sharedpool utility observation verdicts, no kernel model.
 
 These are pure verdict components over public USER observations. The actual
 two-session cases must subsequently run through real io_uring/libxdev_ext in
@@ -8,6 +8,7 @@ the project kernel. No syscall, ioctl or device is replaced in this test.
 """
 from pathlib import Path
 import re
+import subprocess
 import sys
 import unittest
 
@@ -39,8 +40,51 @@ def actual_verdicts():
     # Only the utility's scalar layout constants, never another verdict.
     for match in re.finditer(r"(?m)^#define\s+SP_[A-Z0-9_]+[^\n]*", source):
         text += match.group() + "\n"
-    text += structure(source, "sp_hold_snapshot") + "\n" + valid + "\n" + equal + "\n"
+    grant = function(source, "sp_grant_equal", optional=True) or ""
+    text += structure(source, "sp_hold_snapshot") + "\n" + valid + "\n" + grant + "\n" + equal + "\n"
     return Compiled(text + MAIN)
+
+
+def actual_adversarial_verdicts():
+    source = (ROOT / "tests/compute/user_stage/guest/sharedpool_session_guest.c").read_text()
+    names = ("sp_start_race_valid", "sp_drain_valid", "sp_replay_valid")
+    bodies = [function(source, name, optional=True) for name in names]
+    if not all(bodies):
+        return None
+    text = COMMON.replace("#define XDEV_EXT_MECH_MAX_FRAMES 32U", "")
+    text += '#include "' + str(ROOT / "src/core/include/uapi/linux/xdev_ext_mech.h") + '"\n'
+    for match in re.finditer(r"(?m)^#define\s+SP_[A-Z0-9_]+[^\n]*", source):
+        text += match.group() + "\n"
+    return Compiled(text + "\n".join(bodies) + ADVERSARIAL_MAIN)
+
+
+def actual_stop_result():
+    source = (ROOT / "tests/compute/user_stage/guest/sharedpool_session_guest.c").read_text()
+    text = COMMON.replace("#define XDEV_EXT_MECH_MAX_FRAMES 32U", "")
+    text += '#include "' + str(ROOT / "src/core/include/uapi/linux/xdev_ext_policy.h") + '"\n'
+    # Only the owner's cleanup bookkeeping is shimmed; execute the real verdict.
+    text += "struct sp_side { __u64 id; int stop_error; bool released; };\n"
+    text += "struct sp_owner { bool unsafe; };\n"
+    text += function(source, "sp_stop_result") + "\n"
+    text += r'''int main(void) {
+        for (int mode=0; mode<3; mode++) {
+            struct sp_owner o={0}; struct sp_side s={.id=7001};
+            struct xdev_ext_mech_stop_report r={0}; r.stats.session_id=s.id;
+            if (mode==1) r.stats.session_id++;
+            int ret=sp_stop_result(&o,&s,mode==2?-EIO:0,&r);
+            printf("%d %d %d\n",ret,s.released,o.unsafe);
+        }
+        return 0;
+    }'''
+    return Compiled(text)
+
+
+class ActualStopCleanup(unittest.TestCase):
+    def test_successful_release_survives_bad_observation_but_error_retains_owner(self):
+        actual = actual_stop_result()
+        self.addCleanup(actual.close)
+        run = subprocess.run([str(actual.binary)], text=True, capture_output=True, check=True)
+        self.assertEqual(run.stdout.splitlines(), ["0 1 0", "-71 1 0", "-5 0 1"])
 
 
 MAIN = r'''
@@ -122,6 +166,93 @@ int main(void)
     return 0;
 }
 '''
+
+
+ADVERSARIAL_MAIN = r"""
+int main(void)
+{
+    int outcomes[]={0,-EBUSY,-EIO,-ETIMEDOUT};
+    unsigned races=0,races_correct=0,drains=0,drains_correct=0;
+    unsigned replay_checks=0,replay_rejected=0;
+    struct xdev_ext_mech_stats a={0},b,c,d;
+    for (unsigned i=0;i<4;i++) for (unsigned j=0;j<4;j++) {
+        int want=(i==0 && j==1)||(i==1 && j==0);
+        races++;
+        if (sp_start_race_valid(outcomes[i],outcomes[j])==want) races_correct++;
+    }
+    const unsigned flags=XDEV_EXT_USER_K_DRAINING|XDEV_EXT_USER_K_STOPPED;
+#define DRAIN(e,t,f,s,r,w) do { drains++; \
+    if (sp_drain_valid(e,t,f,s,r)==(w)) drains_correct++; } while (0)
+    DRAIN(17,17,flags,false,-EBUSY,1);
+    DRAIN(17,17,flags|XDEV_EXT_USER_K_NEED_KICK,false,-EBUSY,1);
+    DRAIN(0,0,flags,false,-EBUSY,0);
+    DRAIN(17,0,flags,false,-EBUSY,0);
+    DRAIN(17,18,flags,false,-EBUSY,0);
+    DRAIN(17,17,XDEV_EXT_USER_K_STOPPED,false,-EBUSY,0);
+    DRAIN(17,17,XDEV_EXT_USER_K_DRAINING,false,-EBUSY,0);
+    DRAIN(17,17,flags,true,-EBUSY,0);
+    DRAIN(17,17,flags,false,0,0);
+    DRAIN(17,17,flags,false,-EIO,0);
+    DRAIN(17,17,flags,false,-ETIMEDOUT,0);
+#undef DRAIN
+    a.session_id=7001; a.state=XDEV_EXT_MECH_SESSION_ACTIVE;
+    a.batches_done=1; a.published=2; a.submitted[0]=a.completed[0]=1;
+    b=a;b.rejects=1;
+    int replay_control=sp_replay_valid(&a,&b,2,2,0);
+#define REPLAY(expr,p,cns,t) do { c=a;d=b;expr;replay_checks++; \
+    if (!sp_replay_valid(&c,&d,p,cns,t)) replay_rejected++; } while (0)
+    REPLAY(d.rejects=0,2,2,0); REPLAY(d.rejects=2,2,2,0);
+    REPLAY(c.rejects=1,2,2,0);
+    REPLAY(d.session_id++,2,2,0); REPLAY(c.session_id=d.session_id=0,2,2,0);
+    REPLAY(d.batches_done++,2,2,0); REPLAY(d.batches_abort++,2,2,0);
+    REPLAY(d.inflight++,2,2,0); REPLAY(d.sequestered++,2,2,0);
+    REPLAY(d.published++,2,2,0); REPLAY(d.last_err=-EIO,2,2,0);
+    REPLAY(d.protocol_err++,2,2,0); REPLAY(d.timeouts++,2,2,0);
+    REPLAY(d.recycled++,2,2,0); REPLAY(d.held++,2,2,0);
+    REPLAY(d.native_publish++,2,2,0);
+    REPLAY(d.state=XDEV_EXT_MECH_SESSION_STOPPED,2,2,0);
+    for (unsigned i=0;i<XDEV_EXT_MECH_MAX_STAGES;i++) {
+        REPLAY(d.submitted[i]++,2,2,0); REPLAY(d.completed[i]++,2,2,0);
+    }
+    REPLAY((void)0,1,1,0); REPLAY((void)0,2,1,0);
+    REPLAY((void)0,3,3,0); REPLAY((void)0,2,2,17);
+    REPLAY(c.batches_done=0,2,2,0); REPLAY(c.inflight=1,2,2,0);
+#undef REPLAY
+    printf("{\"races\":%u,\"races_correct\":%u,\"drains\":%u,"
+           "\"drains_correct\":%u,\"replay_control\":%d,"
+           "\"replay_checks\":%u,\"replay_rejected\":%u}\n",
+           races,races_correct,drains,drains_correct,replay_control,
+           replay_checks,replay_rejected);
+    return 0;
+}
+"""
+
+
+class ActualAdversarialVerdicts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.actual = actual_adversarial_verdicts()
+        cls.record = cls.actual.run() if cls.actual is not None else None
+        if cls.actual is not None:
+            cls.addClassCleanup(cls.actual.close)
+
+    def observation(self):
+        self.assertIsNotNone(self.record, "missing actual sharedpool adversarial verdicts: feature RED")
+        return self.record
+
+    def test_concurrent_start_requires_exactly_one_success_and_one_busy(self):
+        r = self.observation()
+        self.assertEqual((r["races"], r["races_correct"]), (16, 16))
+
+    def test_strict_stop_requires_live_original_ticket_before_quiescence(self):
+        r = self.observation()
+        self.assertEqual((r["drains"], r["drains_correct"]), (11, 11))
+
+    def test_replay_requires_consumed_reject_and_no_second_completion(self):
+        r = self.observation()
+        self.assertEqual(r["replay_control"], 1)
+        self.assertGreaterEqual(r["replay_checks"], 25)
+        self.assertEqual(r["replay_rejected"], r["replay_checks"])
 
 
 class ActualSharedpoolVerdicts(unittest.TestCase):

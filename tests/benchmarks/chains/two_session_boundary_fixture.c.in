@@ -18,6 +18,8 @@ struct fixture_side {
 };
 static struct fixture_side sides[2];
 static bool is_case(const char *value) { return !strcmp(scenario,value); }
+static bool side_case(int side, const char *value)
+{ return scenario[0]==(side?'c':'n') && scenario[1]=='-' && !strcmp(scenario+2,value); }
 static int side_index(uint64_t id)
 {
     if (id==7001) return 0;
@@ -89,12 +91,14 @@ static int fixture_register(int fd,unsigned opcode,void *arg)
             for (unsigned j=0;j<k;j++) if (indices[j]==indices[k]) violations++;
             custody[indices[k]]=i+1;
             if (!i) {
-                memcpy(fixture_pool+(size_t)indices[k]*4096,reference+(s->first-1+k)*4096,4096);
+                size_t bytes=is_case("n-short-payload") && s->starts==1 && !k?4095:4096;
+                memcpy(fixture_pool+(size_t)indices[k]*4096,reference+(s->first-1+k)*4096,bytes);
             } else {
                 if (k>=sides[0].nr || indices[k]!=sides[0].indices[k] || s->first!=sides[0].first)
                     violations++;
                 /* CE slots need not have key order; reverse each full window. */
-                memcpy(gpu+(s->q-1-k)*4096,fixture_pool+(size_t)indices[k]*4096,4096);
+                size_t bytes=is_case("c-short-payload") && s->starts==1 && !k?4095:4096;
+                memcpy(gpu+(s->q-1-k)*4096,fixture_pool+(size_t)indices[k]*4096,bytes);
             }
         }
         if (i && is_case("corrupt-first-window") && s->starts==1)
@@ -103,6 +107,8 @@ static int fixture_register(int fd,unsigned opcode,void *arg)
             memcpy(gpu+(s->q-1)*4096,reference+5*4096,4096);
         s->pending=true;
         if (!i && is_case("start-uncertain")) { s->unknown=true; return -EINTR; }
+        if (side_case(i,"start-uncertain")) { s->unknown=true; return -EINTR; }
+        if (side_case(i,"unknown")) s->unknown=true;
         if (waiting_side>=0) violations++; /* a prior accepted START's wait was omitted */
         waiting_side=i;
         return 0;
@@ -111,7 +117,10 @@ static int fixture_register(int fd,unsigned opcode,void *arg)
         struct xdev_ext_mech_stats *out=(void *)(uintptr_t)op->arg;
         int i=side_index(out->session_id); if (i<0) return -EINVAL;
         struct fixture_side *s=&sides[i];
-        if (s->pending && !s->unknown) {
+        bool early=side_case(i,"early-wake") ||
+            (side_case(i,"stale-wake") && s->starts==2);
+        if (side_case(i,"stats-fail")) return -EIO;
+        if (s->pending && !s->unknown && !early) {
             s->done+=s->q; s->published+=s->nr;
             for (unsigned k=0;k<s->nr;k++) custody[s->indices[k]]=0;
             s->pending=false;
@@ -120,15 +129,25 @@ static int fixture_register(int fd,unsigned opcode,void *arg)
         out->state=s->unknown?XDEV_EXT_MECH_SESSION_ZOMBIE:XDEV_EXT_MECH_SESSION_ACTIVE;
         out->batches_done=s->done; out->published=s->published;
         out->submitted[0]=out->completed[0]=s->done;
+        if (s->pending) out->inflight=1;
         if (s->unknown) { out->inflight=1; out->sequestered=1; }
-        if (!i) {
-            if (is_case("n-published-short")) out->published--;
-            if (is_case("n-done-short")) out->batches_done--;
-            if (is_case("n-inflight")) out->inflight=1;
-            if (is_case("n-error")) out->last_err=-EIO;
-            if (is_case("n-abort")) out->batches_abort=1;
-            if (is_case("n-sequester")) out->sequestered=1;
-        }
+        if (side_case(i,"published-short")) out->published--;
+        if (side_case(i,"published-extra")) out->published++;
+        if (side_case(i,"done-short")) out->batches_done--;
+        if (side_case(i,"done-extra")) out->batches_done++;
+        if (side_case(i,"wrong-session")) out->session_id=sides[!i].id;
+        if (side_case(i,"inflight")) out->inflight=1;
+        if (side_case(i,"error")) out->last_err=-EIO;
+        if (side_case(i,"abort")) out->batches_abort=1;
+        if (side_case(i,"sequester")) out->sequestered=1;
+        if (side_case(i,"reject")) out->rejects=1;
+        if (side_case(i,"protocol-error")) out->protocol_err=1;
+        if (side_case(i,"timeout")) out->timeouts=1;
+        if (side_case(i,"stopping")) out->state=XDEV_EXT_MECH_SESSION_STOPPING;
+        if (side_case(i,"native-mismatch")) out->submitted[0]++;
+        if (side_case(i,"native-extra")) out->submitted[0]=out->completed[0]=s->done+1;
+        if (side_case(i,"recycled")) out->recycled=1;
+        if (side_case(i,"native-short")) out->submitted[0]=out->completed[0]=s->done-1;
         return 0;
     }
     if (op->op==XDEV_EXT_MECH_OP_STOP_REPORT) {
@@ -136,12 +155,38 @@ static int fixture_register(int fd,unsigned opcode,void *arg)
         int i=side_index(r->session_id); if (i<0) return -EINVAL;
         struct fixture_side *s=&sides[i]; s->stops++;
         if (s->unknown || (i && is_case("stop-unknown"))) { s->unknown=true; return -EBUSY; }
+        /* A successful synchronous STOP proves the accepted commands drained. */
+        for (unsigned k=0;s->pending && k<s->nr;k++) custody[s->indices[k]]=0;
+        s->pending=false;
         s->stopped=true;
         r->stats.session_id=s->id; r->stats.state=XDEV_EXT_MECH_SESSION_STOPPED;
         r->stats.batches_done=s->done; r->stats.published=s->published;
+        r->stats.submitted[0]=r->stats.completed[0]=s->done;
         r->transport.v3.v2.v1.size=sizeof(r->transport);
         r->transport.v3.v2.v1.version=XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4;
         r->transport.v3.v2.v1.session_id=s->id;
+        if (side_case(i,"stop-envelope-session")) r->session_id=sides[!i].id;
+        if (side_case(i,"stop-envelope-version")) r->version++;
+        if (side_case(i,"stop-envelope-size")) r->size--;
+        if (side_case(i,"stop-transport-size")) r->transport.v3.v2.v1.size--;
+        if (side_case(i,"stop-native-extra")) r->stats.submitted[0]=r->stats.completed[0]=s->done+1;
+        if (side_case(i,"stop-abort")) r->stats.batches_abort=1;
+        if (side_case(i,"stop-reject")) r->stats.rejects=1;
+        if (side_case(i,"stop-timeout")) r->stats.timeouts=1;
+        if (side_case(i,"stop-recycled")) r->stats.recycled=1;
+        if (side_case(i,"stop-native-controls")) r->transport.v3.v2.v1.native_controls=1;
+        if (side_case(i,"stop-pending-acks")) r->transport.v3.v2.v1.pending_acks=1;
+        if (side_case(i,"stop-uncertain-controls")) r->transport.v3.v2.v1.uncertain_controls=1;
+        if (side_case(i,"stop-wrong-session")) r->stats.session_id=sides[!i].id;
+        if (side_case(i,"stop-done-short")) r->stats.batches_done--;
+        if (side_case(i,"stop-published-extra")) r->stats.published++;
+        if (side_case(i,"stop-error")) r->stats.last_err=-EIO;
+        if (side_case(i,"stop-protocol-error")) r->stats.protocol_err=1;
+        if (side_case(i,"stop-native-mismatch")) r->stats.submitted[0]++;
+        if (side_case(i,"stop-inflight")) r->stats.inflight=1;
+        if (side_case(i,"stop-sequester")) r->stats.sequestered=1;
+        if (side_case(i,"stop-transport-session")) r->transport.v3.v2.v1.session_id=sides[!i].id;
+        if (side_case(i,"stop-transport-version")) r->transport.v3.v2.v1.version--;
         return 0;
     }
     /* Legacy CREATE/STOP, guessed IDs or per-session ring closure are defects. */
@@ -190,8 +235,11 @@ int cs_wait(int efd,uint64_t deadline,uint64_t *syscalls,uint64_t *count)
     if (waiting_side<0 || efd!=sides[waiting_side].efd) {
         violations++; return -EINVAL;
     }
-    sides[waiting_side].waits++;
+    int i=waiting_side;
+    sides[i].waits++;
     waiting_side=-1;
+    if (side_case(i,"wait-timeout")) return -ETIMEDOUT;
+    if (side_case(i,"wait-unknown")) { sides[i].unknown=true; return -ETIMEDOUT; }
     *count=1;
     return 0;
 }

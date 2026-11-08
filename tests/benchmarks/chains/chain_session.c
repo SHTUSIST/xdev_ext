@@ -1235,6 +1235,33 @@ struct cs_two_session {
 	int efd;
 };
 
+/* Each side has one stage and no accepted-command retry. These are core
+ * stage submissions, not the device's internal split descriptors or CE runs. */
+static bool cs_two_stats_valid(const struct xdev_ext_mech_stats *stats,
+			       const struct cs_two_session *side, __u32 state)
+{
+	return stats->session_id == side->id && stats->state == state &&
+		stats->batches_done == side->batches && stats->published == side->published &&
+		!stats->batches_abort && !stats->last_err && !stats->inflight &&
+		!stats->sequestered && !stats->rejects && !stats->protocol_err &&
+		!stats->timeouts && !stats->recycled &&
+		stats->submitted[0] == side->batches && stats->completed[0] == side->batches;
+}
+
+static bool cs_two_stop_valid(const struct xdev_ext_mech_stop_report *stop,
+			      const struct cs_two_session *side)
+{
+	const struct xdev_ext_mech_transport_stats *transport = &stop->transport.v3.v2.v1;
+
+	return stop->size == sizeof(*stop) && stop->version == XDEV_EXT_MECH_STOP_REPORT_VERSION &&
+		stop->session_id == side->id &&
+		cs_two_stats_valid(&stop->stats, side, XDEV_EXT_MECH_SESSION_STOPPED) &&
+		transport->size == sizeof(stop->transport) &&
+		transport->version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 &&
+		transport->session_id == side->id && !transport->native_controls &&
+		!transport->pending_acks && !transport->uncertain_controls;
+}
+
 static int cs_two_create(int ring, const struct xdev_ext_mech_create *create,
 			struct cs_two_session *side, bool *unsafe)
 {
@@ -1287,9 +1314,8 @@ static int cs_two_window(int ring, struct cs_two_session *side, const __u32 *ind
 		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&stats, syscalls);
 	if (!ret)
 		ret = xdev_ext_mech_ctl_notify_result(&stats, side->batches);
-	if (!ret && (stats.published != side->published || stats.rejects || stats.protocol_err ||
-		     stats.timeouts || stats.submitted[0] != stats.completed[0] ||
-		     stats.completed[0] < side->batches))
+	/* A notification alone cannot prove that this exact window was returned. */
+	if (!ret && !cs_two_stats_valid(&stats, side, XDEV_EXT_MECH_SESSION_ACTIVE))
 		ret = -EIO;
 	return ret;
 }
@@ -1456,6 +1482,10 @@ out:
 		if (ret) {
 			unsafe = true;
 			cb_fail(r, CB_FAIL, "two-session STOP_REPORT side %u: %s", i, strerror(-ret));
+		} else if (!cs_two_stop_valid(&stop, &side[i])) {
+			/* The syscall succeeded, so synchronous release permits cleanup.
+			 * A contradictory final snapshot still fails qualification. */
+			cb_fail(r, CB_FAIL, "two-session final report side %u is inconsistent", i);
 		}
 	}
 	if (unsafe) {

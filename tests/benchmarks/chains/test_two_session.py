@@ -98,13 +98,41 @@ def actual_helpers(text, source, ctl):
     return text
 
 
-def coordinator():
+def coordinator(frames_per_group=1):
     text, source, ctl = base()
     actual = function(source, "chain_run_two_session_correctness", optional=True)
     if not actual:
         return None
     text = actual_helpers(text, source, ctl)
-    text += (HERE / "two_session_boundary_fixture.c.in").read_text()
+    assert frames_per_group in (1, 2)
+    text += f"#define FIXTURE_FRAMES_PER_GROUP {frames_per_group}U\n"
+    text += "#define FIXTURE_GROUP_BYTES (FIXTURE_FRAMES_PER_GROUP * 4096U)\n"
+    # Extend only the boundary fixture. Keep production coordinator bytes intact.
+    # Its transport entry points call this forward declaration, while the old
+    # fixture body is the passthrough implementation used by the fault wrapper.
+    fixture = (HERE / "two_session_boundary_fixture.c.in").read_text()
+    # Parameterize fixture geometry only: each group occupies one or two
+    # contiguous 4 KiB frames. CE reverses group slots, preserving frame order
+    # inside each group. Exact source matches make boundary-fixture drift fail.
+    for old, replacement in (
+        ("reference[6*4096]", "reference[6*FIXTURE_GROUP_BYTES]"),
+        ("e->create.layout.group_bytes!=4096", "e->create.layout.group_bytes!=FIXTURE_GROUP_BYTES"),
+        ("e->create.st[0].arg1!=48", "e->create.st[0].arg1!=6*FIXTURE_GROUP_BYTES/512"),
+        ("e->create.st[0].arg1!=depth*4096", "e->create.st[0].arg1!=depth*FIXTURE_GROUP_BYTES"),
+        ("st->nr_user_frames!=st->nr_batches", "st->nr_user_frames!=st->nr_batches*FIXTURE_FRAMES_PER_GROUP"),
+        ("reference+(s->first-1+k)*4096", "reference+(s->first-1)*FIXTURE_GROUP_BYTES+k*4096"),
+        ("gpu+(s->q-1-k)*4096", "gpu+(s->q-1-k/FIXTURE_FRAMES_PER_GROUP)*FIXTURE_GROUP_BYTES+(k%FIXTURE_FRAMES_PER_GROUP)*4096"),
+        ("gpu[(s->q-1)*4096+1023]", "gpu[(s->q-1)*FIXTURE_GROUP_BYTES+1023]"),
+        ("memcpy(gpu+(s->q-1)*4096,reference+5*4096,4096)",
+         "memcpy(gpu+(s->q-1)*FIXTURE_GROUP_BYTES,reference+5*FIXTURE_GROUP_BYTES,FIXTURE_GROUP_BYTES)"),
+    ):
+        assert fixture.count(old) == 1, old
+        fixture = fixture.replace(old, replacement, 1)
+    old = "static int fixture_register(int fd,unsigned opcode,void *arg)"
+    assert fixture.count(old) == 1
+    text += "static int fixture_register(int fd,unsigned opcode,void *arg);\n"
+    text += fixture.replace(old, old.replace("fixture_register(", "fixture_register_base("), 1)
+    text += (HERE / "two_session_fault_boundary.c.in").read_text()
     # Keep the real raw transport and CREATE_REPORT validation intact.
     text += function(source, "cs_mech") + "\n"
     lib = (ROOT / "src/lib/xdev_ext_session.c").read_text()
@@ -131,15 +159,15 @@ int main(int argc, char **argv)
     struct chain_spec s={0}; struct chain_result r={0};
     strcpy(s.chain,"nvme-gpu"); s.arm=CH_SESSION; s.mode=CH_CORRECTNESS;
     s.load=CH_LOAD_CLOSED; s.start_per=CH_START_BATCH; s.plan=CH_PLAN_BPF;
-    s.group_bytes=4096; s.frame_size=4096; s.depth=depth; s.burst=1;
-    s.batches=6; s.timeout_ms=1000; s.ce_vmm=true; s.ce_len=depth*4096;
+    s.group_bytes=FIXTURE_GROUP_BYTES; s.frame_size=4096; s.depth=depth; s.burst=1;
+    s.batches=6; s.timeout_ms=1000; s.ce_vmm=true; s.ce_len=depth*FIXTURE_GROUP_BYTES;
     s.oracle=CH_ORACLE_CE; s.nr_stages=2;
     strcpy(s.reference,"fixture-reference"); strcpy(s.ce_dev,"/dev/nvidia0");
     s.st[0].cls=CH_NVME; s.st[0].dir=CH_FROM;
-    strcpy(s.st[0].dev,"/dev/ng_fixture"); s.st[0].slba=2048; s.st[0].nlb=48;
+    strcpy(s.st[0].dev,"/dev/ng_fixture"); s.st[0].slba=2048; s.st[0].nlb=6*FIXTURE_GROUP_BYTES/512;
     s.st[1].cls=CH_CE; s.st[1].dir=CH_TO;
-    for (unsigned g=0;g<6;g++) for (unsigned b=0;b<4096;b++)
-        reference[g*4096+b]=b<8?(unsigned char)((uint64_t)g>>(8*b)):
+    for (unsigned g=0;g<6;g++) for (unsigned b=0;b<FIXTURE_GROUP_BYTES;b++)
+        reference[g*FIXTURE_GROUP_BYTES+b]=b<8?(unsigned char)((uint64_t)g>>(8*b)):
             (unsigned char)((g+1)*17+b*29+(b>>8));
     memset(gpu,CS_PRISTINE,sizeof(gpu));
     int ret=chain_run_two_session_correctness(&s,&r);
@@ -147,12 +175,15 @@ int main(int argc, char **argv)
            "\"nstarts\":%u,\"cstarts\":%u,\"nwaits\":%u,\"cwaits\":%u,\"nstop\":%u,\"cstop\":%u,"
            "\"ring_closes\":%u,\"unmaps\":%u,\"cuda_closes\":%u,\"plan_closes\":%u,"
            "\"reads\":%u,\"violations\":%u,\"bad_cleanup\":%u,"
-           "\"done_n\":%llu,\"done_c\":%llu,\"oracle_bytes\":%llu}\n",
+           "\"done_n\":%llu,\"done_c\":%llu,\"published_n\":%llu,\"published_c\":%llu,"
+           "\"frame_checks\":%u,\"oracle_detail\":%lld,\"oracle_bytes\":%llu}\n",
            ret,r.status,rings,umems,creates,sides[0].starts,sides[1].starts,
            sides[0].waits,sides[1].waits,
            sides[0].stops,sides[1].stops,ring_closes,unmaps,cuda_closes,plan_closes,
            gpu_reads,violations,bad_cleanup,(unsigned long long)sides[0].done,
-           (unsigned long long)sides[1].done,(unsigned long long)r.oracle_bytes);
+           (unsigned long long)sides[1].done,(unsigned long long)sides[0].published,
+           (unsigned long long)sides[1].published,frame_checks,(long long)r.oracle_detail,
+           (unsigned long long)r.oracle_bytes);
     return 0;
 }
 '''
@@ -254,7 +285,7 @@ class TwoSessionCoordinator(unittest.TestCase):
         return self.actual.run(case,depth)
 
     def test_single_owner_two_validated_report_ids_and_exact_nonrecycle_frame_handoff(self):
-        for depth in (1,2,3):
+        for depth in (1,2,3,4,5):
             with self.subTest(depth=depth):
                 r=self.run_case(depth=depth)
                 self.assertEqual((r["rc"],r["status"],r["violations"],r["bad_cleanup"]),(0,0,0,0))
@@ -275,6 +306,58 @@ class TwoSessionCoordinator(unittest.TestCase):
                 self.assertNotEqual(r["rc"] or r["status"],0)
                 self.assertEqual(r["cstarts"],0)
                 self.assertEqual(r["violations"],0)
+
+    def test_both_sides_require_the_exact_session_and_batch_total(self):
+        for side in ("n","c"):
+            for fault in ("wrong-session","done-extra"):
+                with self.subTest(side=side,fault=fault):
+                    r=self.run_case(side+"-"+fault)
+                    self.assertNotEqual(r["rc"] or r["status"],0,
+                                        "another session or an extra batch is not this window's completion")
+                    self.assertEqual((r["nstarts"],r["cstarts"]),(1,int(side=="c")))
+                    self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
+    def test_both_sides_reject_incomplete_native_and_error_snapshots_before_reuse(self):
+        faults=("published-short","published-extra","done-short","inflight","error",
+                "abort","sequester","reject","protocol-error","timeout","stopping",
+                "native-mismatch","native-short","native-extra","recycled","stats-fail","early-wake")
+        for side in ("n","c"):
+            for fault in faults:
+                with self.subTest(side=side,fault=fault):
+                    r=self.run_case(side+"-"+fault)
+                    self.assertNotEqual(r["rc"] or r["status"],0)
+                    self.assertEqual((r["nstarts"],r["cstarts"]),(1,int(side=="c")))
+                    self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
+    def test_delayed_old_wake_never_authorizes_the_next_window(self):
+        for side in ("n","c"):
+            with self.subTest(side=side):
+                r=self.run_case(side+"-stale-wake")
+                self.assertNotEqual(r["rc"] or r["status"],0)
+                self.assertEqual((r["nstarts"],r["cstarts"]),(2,1+int(side=="c")))
+                self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
+    def test_timeout_allows_cleanup_only_after_both_synchronous_stops(self):
+        for side in ("n","c"):
+            with self.subTest(side=side):
+                r=self.run_case(side+"-wait-timeout")
+                self.assertNotEqual(r["rc"] or r["status"],0)
+                self.assertEqual((r["nstarts"],r["cstarts"]),(1,int(side=="c")))
+                self.assertEqual((r["nstop"],r["cstop"],r["ring_closes"],r["unmaps"],
+                                  r["cuda_closes"],r["plan_closes"]),(1,1,1,1,1,1))
+                self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
+    def test_unknown_outcome_or_wait_retains_every_shared_resource_on_either_side(self):
+        for side in ("n","c"):
+            for fault in ("unknown","wait-unknown","start-uncertain"):
+                with self.subTest(side=side,fault=fault):
+                    r=self.run_case(side+"-"+fault)
+                    self.assertNotEqual(r["rc"] or r["status"],0)
+                    self.assertEqual((r["nstarts"],r["cstarts"]),(1,int(side=="c")))
+                    self.assertEqual((r["nstop"],r["cstop"]),(1,1))
+                    self.assertEqual((r["ring_closes"],r["unmaps"],r["cuda_closes"],
+                                      r["plan_closes"]),(0,0,0,0))
+                    self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
 
     def test_retained_or_uncertain_second_create_preserves_shared_owner(self):
         for case in ("create-retained","create-uncertain"):
@@ -300,6 +383,32 @@ class TwoSessionCoordinator(unittest.TestCase):
         self.assertEqual((r["ring_closes"],r["unmaps"],r["cuda_closes"]),(0,0,0))
         self.assertEqual(r["bad_cleanup"],0)
 
+    def test_successful_stop_must_not_hide_a_bad_final_observation(self):
+        faults=("wrong-session","done-short","published-extra","error","protocol-error",
+                "native-mismatch","native-extra","inflight","sequester","transport-session","transport-version",
+                "envelope-session","envelope-version","envelope-size","transport-size",
+                "abort","reject","timeout","recycled","native-controls","pending-acks","uncertain-controls")
+        for side in ("n","c"):
+            for fault in faults:
+                with self.subTest(side=side,fault=fault):
+                    r=self.run_case(side+"-stop-"+fault)
+                    self.assertNotEqual(r["rc"] or r["status"],0,
+                                        "synchronous release success alone must not pass an invalid final observation")
+                    self.assertEqual((r["done_n"],r["done_c"]),(6,6))
+                    self.assertEqual((r["nstop"],r["cstop"]),(1,1))
+                    self.assertEqual((r["ring_closes"],r["unmaps"],r["cuda_closes"],
+                                      r["plan_closes"]),(1,1,1,1),
+                                     "a bad observation must not revoke successful synchronous release")
+                    self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
+    def test_success_counters_with_short_payload_fail_byte_oracle_before_slot_reuse(self):
+        for side in ("n","c"):
+            with self.subTest(side=side):
+                r=self.run_case(side+"-short-payload")
+                self.assertNotEqual(r["rc"] or r["status"],0)
+                self.assertEqual((r["nstarts"],r["cstarts"]),(1,1))
+                self.assertEqual((r["violations"],r["bad_cleanup"]),(0,0))
+
     def test_first_window_last_version_middle_byte_corruption_cannot_hide_in_final_ring(self):
         for depth in (1,2,3):
             with self.subTest(depth=depth):
@@ -315,6 +424,54 @@ class TwoSessionCoordinator(unittest.TestCase):
                 self.assertNotEqual(r["rc"] or r["status"],0,
                                     "a valid different input version cannot replace a required current output")
                 self.assertEqual((r["nstarts"],r["cstarts"]),(1,1))
+
+
+class TwoFrameCoordinator(unittest.TestCase):
+    """Fixed independent schedule: [frames 0..7], then [frames 0..3]."""
+    @classmethod
+    def setUpClass(cls):
+        cls.actual = coordinator(frames_per_group=2)
+        if cls.actual is not None:
+            cls.addClassCleanup(cls.actual.close)
+
+    def run_case(self, case="ok"):
+        self.assertIsNotNone(self.actual,
+                             "missing actual chain_run_two_session_correctness: feature RED")
+        return self.actual.run(case, 4)
+
+    def test_two_frames_per_batch_exact_publication_and_short_final_window(self):
+        r = self.run_case()
+        self.assertEqual((r["rc"], r["status"], r["violations"], r["bad_cleanup"]), (0, 0, 0, 0))
+        self.assertEqual((r["rings"], r["umems"], r["creates"]), (1, 1, 2))
+        self.assertEqual((r["nstarts"], r["cstarts"], r["nwaits"], r["cwaits"]), (2, 2, 2, 2))
+        self.assertEqual((r["done_n"], r["done_c"]), (6, 6))
+        self.assertEqual((r["published_n"], r["published_c"]), (12, 12),
+                         "publication counts frames; each successful batch returns two")
+        self.assertEqual(r["frame_checks"], 24,
+                         "both sides must use indices 0..7 then 0..3 exactly")
+        # Both windows check all four GPU slots, including valid old slots
+        # left by the short final window: this is checked data, not DMA bytes.
+        self.assertEqual((r["reads"], r["oracle_detail"], r["oracle_bytes"]), (2, 0, 8*8192))
+        self.assertEqual((r["nstop"], r["cstop"], r["ring_closes"], r["unmaps"],
+                          r["cuda_closes"], r["plan_closes"]), (1, 1, 1, 1, 1, 1))
+
+    def test_last_byte_of_second_frame_must_fail_before_another_window(self):
+        r = self.run_case("two-frame-corrupt-tail")
+        self.assertNotEqual(r["rc"] or r["status"], 0)
+        self.assertEqual((r["nstarts"], r["cstarts"], r["reads"]), (1, 1, 1))
+        self.assertEqual((r["done_n"], r["done_c"], r["published_n"], r["published_c"]), (4, 4, 8, 8))
+        self.assertEqual((r["frame_checks"], r["violations"], r["bad_cleanup"]), (16, 0, 0))
+        self.assertEqual(r["oracle_detail"], 4,
+                         "full-byte oracle must reject slot 3 despite its valid group header and first frame")
+
+    def test_one_unpublished_frame_prevents_handoff_even_when_all_batches_are_done(self):
+        for side, starts in (("n", (1, 0)), ("c", (1, 1))):
+            with self.subTest(side=side):
+                r = self.run_case(f"{side}-published-short")
+                self.assertNotEqual(r["rc"] or r["status"], 0)
+                self.assertEqual((r["nstarts"], r["cstarts"]), starts)
+                self.assertEqual(r["reads"], 0, "the byte oracle also waits for every published frame")
+                self.assertEqual((r["violations"], r["bad_cleanup"]), (0, 0))
 
 
 class ActualCLI(unittest.TestCase):

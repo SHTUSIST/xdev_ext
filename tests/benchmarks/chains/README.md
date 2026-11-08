@@ -152,11 +152,36 @@ contain all that window's required input versions, with full byte checks,
 before another NVMe window may reuse the frames. Destination slots remain the
 kernel's choice; a missing version fails qualification.
 
+An eventfd wake is only a notification. Each handoff also requires a STATS
+snapshot for the exact session, exactly the submitted cumulative batch and
+published-frame totals, no error or outstanding work, and matching native
+stage submission/completion totals. Each side has one stage and no accepted
+command retry, so these core totals equal its batch total; internal NVMe
+descriptor splitting or CE physical runs do not increment these totals.
+A stale wake, partial completion, UNKNOWN
+outcome or failed wait cannot start the next session or reuse the next window.
+If a device falsely reports full success after a short payload transfer, the
+downstream CE may start; the full-byte oracle must detect the missing bytes
+before any subsequent window reuses the frames. Counters alone do not prove
+the payload was transferred.
+
 Each session has its own eventfd, cumulative targets and synchronous
 STOP_REPORT. Shared resources have one owner and are closed once after both
-sessions release successfully. Uncertain delivery or teardown preserves that
-owner and fails qualification. CUDA runtime initialization and the final
-complete owned-FD check use the existing entry/exit boundaries.
+sessions release successfully. Uncertain delivery or teardown skips explicit
+close, unmap and CUDA cleanup and fails qualification. The command then exits;
+these checks do not establish a long-lived userspace recovery owner. Kernel
+and provider lifetime protection across process exit requires separate
+validation. CUDA runtime initialization and the final complete owned-FD check
+use the existing entry/exit boundaries.
+
+A successful STOP_REPORT syscall proves synchronous release; its final
+observation must also have the expected session identity, report format,
+completed campaign counters and no outstanding work before qualification may
+pass. An inconsistent final observation fails qualification even when both
+synchronous releases succeeded. An error from STOP_REPORT grants no cleanup
+permission. The host test executes the actual coordinator and checks these
+failure decisions at simulated syscall/device boundaries; it does not execute
+kernel frame custody, software CE or physical NVMe/GPU DMA.
 
 Stdout contains `TWO_SESSION_QUALIFICATION=PASS` only after successful cleanup
 and the FD check, or `TWO_SESSION_QUALIFICATION=FAIL`; stderr carries setup,

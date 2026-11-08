@@ -214,6 +214,8 @@ static void test_separate_umems_keep_both_interfaces(void)
 	/* Several sessions may share one session UMEM and its words. */
 	EXPECT_EQ(io_xdev_ext_umem_mech_pool_bind(&pool2, &mech_ctx2, &layout), 0);
 	EXPECT_TRUE(pool.state == pool2.state);
+	EXPECT_TRUE(pool.life == pool2.life);
+	EXPECT_TRUE(pool.life == mech_ctx.xdev_ext_umem->frames);
 	if (umem)
 		io_xdev_ext_umem_put(umem);
 	umem = legacy_get(&legacy_ctx);
@@ -229,12 +231,76 @@ static void test_separate_umems_keep_both_interfaces(void)
 	EXPECT_EQ(atomic_load(&mm.mm_count), 1);
 }
 
+/* Removing the UMEM registration and releasing A's provider cannot release
+ * B's shared pins or reset B's lifecycle. This does not execute ring exit.
+ * It tests the real registry/provider translation unit; native completion and
+ * the per-frame custody primitive are boundaries.
+ */
+static void test_second_pool_outlives_umem_unregister_and_first_pool(void)
+{
+	struct io_uring_xdev_ext_umem_reg reg = reg_at(0x800000);
+	struct xdev_ext_mech_pool a, b;
+	struct xdev_ext_mech_frame unused = { .index = 0 };
+	struct xdev_ext_mech_life held;
+	struct io_ring_ctx ctx = {};
+	struct task_struct task = {};
+	struct mm_struct mm;
+	__u64 producer = 0, consumer = 0;
+	bool payload_ok = true;
+
+	use_mm(&task, &mm, 44);
+	EXPECT_EQ(io_xdev_ext_umem_register(&ctx, &reg), 0);
+	EXPECT_EQ(io_xdev_ext_umem_mech_pool_bind(&a, &ctx, &layout), 0);
+	EXPECT_EQ(io_xdev_ext_umem_mech_pool_bind(&b, &ctx, &layout), 0);
+	EXPECT_TRUE(a.priv != b.priv);
+	EXPECT_TRUE(a.state == b.state && a.life == b.life);
+	EXPECT_TRUE(a.pages == b.pages && a.vaddr == b.vaddr);
+	EXPECT_TRUE(b.life == ctx.xdev_ext_umem->frames);
+	EXPECT_EQ(ctx.xdev_ext_umem->frame_pool.nr_frames, NR_FRAMES);
+	EXPECT_TRUE(ctx.xdev_ext_umem->frame_pool.frames == b.life);
+	EXPECT_EQ(xdev_ext_mech_frame_move(&a.state[0], XDEV_EXT_MECH_F_USER,
+					  XDEV_EXT_MECH_F_K_FREE), 0);
+	a.ops->recycle(&a, &unused);
+	EXPECT_EQ(xdev_ext_mech_frame_move(&b.state[1], XDEV_EXT_MECH_F_USER,
+					  XDEV_EXT_MECH_F_HELD), 0);
+	EXPECT_EQ(xdev_ext_mech_life_claim(&b.life[1], 0, &producer), 0);
+	EXPECT_EQ(xdev_ext_mech_life_publish(&b.life[1], producer, 1, PAGE_SIZE), 0);
+	EXPECT_EQ(xdev_ext_mech_life_acquire(&b.life[1], 0,
+				XDEV_EXT_MECH_L_ACQ_EXCLUSIVE, &consumer), 0);
+	held = b.life[1];
+	memset(b.vaddr, 0xa7, NR_FRAMES * PAGE_SIZE);
+	test_watched_umem = ctx.xdev_ext_umem;
+	atomic_store(&test_watched_free_count, 0);
+	EXPECT_EQ(io_xdev_ext_umem_unregister(&ctx), 0);
+	a.ops->release(&a);
+	EXPECT_EQ(atomic_load(&test_watched_free_count), 0);
+	EXPECT_EQ(b.state[0], XDEV_EXT_MECH_F_USER);
+	EXPECT_EQ(b.state[1], XDEV_EXT_MECH_F_HELD);
+	EXPECT_EQ(b.life[1].ctrl, held.ctrl);
+	EXPECT_EQ(b.life[1].valid_len, held.valid_len);
+	for (u32 i = 0; i < NR_FRAMES * PAGE_SIZE; i++)
+		if (((unsigned char *)b.vaddr)[i] != 0xa7)
+			payload_ok = false;
+	EXPECT_TRUE(payload_ok);
+	/* A definite last use permits B to retire before its final pool put. */
+	EXPECT_EQ(xdev_ext_mech_life_republish(&b.life[1], consumer, 0, PAGE_SIZE), 0);
+	EXPECT_EQ(xdev_ext_mech_life_release(&b.life[1],
+					 xdev_ext_mech_life_gen(&b.life[1])), 0);
+	EXPECT_EQ(xdev_ext_mech_frame_move(&b.state[1], XDEV_EXT_MECH_F_HELD,
+					  XDEV_EXT_MECH_F_USER), 0);
+	b.ops->release(&b);
+	EXPECT_EQ(atomic_load(&test_watched_free_count), 1);
+	test_watched_umem = NULL;
+	EXPECT_EQ(atomic_load(&mm.mm_count), 1);
+}
+
 int main(void)
 {
 	test_legacy_op_refused_after_session_binds();
 	test_shared_umem_refuses_legacy_on_other_ring();
 	test_session_refused_on_legacy_umem();
 	test_separate_umems_keep_both_interfaces();
+	test_second_pool_outlives_umem_unregister_and_first_pool();
 
 	if (failures) {
 		fprintf(stderr, "FAIL: %u/%u checks failed\n", failures, checks);
