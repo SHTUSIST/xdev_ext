@@ -8038,6 +8038,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_shared_receive/socket_identity.c"
     },
     {
+      "source": "tests/network/shared_receive/steer_location_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/steer_location_test.c"
+    },
+    {
       "source": "tests/network/shared_receive_native/README.md",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_shared_receive_native/README.md"
