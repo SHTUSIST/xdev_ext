@@ -23,8 +23,11 @@ round of window_multi.h (tenant i at destination window 16 + i). Each 4 KiB
 group of an innocent window (i >= 1) is its own source group or guard (a
 write the controller reset aborted may or may not have landed); the
 innocents listed in EXACT (comma separated, '-' for none: those that STOPped
-with 0 after all their batches) hold their whole source window; the faulty
-window and every other byte are guard; AUX still holds only 0x3c.
+with 0 after all their batches) hold their whole source window. Each group
+of the faulty window is guard or its own AUX group: the reset ends its
+swallowed READs, the fault is lifted, and its later batches copy its private
+namespace into its own window. Every other byte is guard; AUX still holds
+only 0x3c.
 Prints one JSON object; exit 0 only for PASS.
 """
 import json
@@ -135,8 +138,12 @@ def validate_reset(source, destination, aux, exact):
         w = first + i
         got = _window(destination, w)
         if not i:
-            if got != bytes([GUARD]) * WIN_BYTES:
-                return {'state': 'FAIL', 'reason': 'faulty window is not guard', 'window': w}
+            own = _window(aux, w)
+            for g in range(WIN_BYTES // GROUP):
+                piece = got[g * GROUP:(g + 1) * GROUP]
+                if piece != guard_group and piece != own[g * GROUP:(g + 1) * GROUP]:
+                    return {'state': 'FAIL', 'reason': 'faulty group is neither guard nor its own private group',
+                            'window': w, 'group': g}
             continue
         want = _window(source, w)
         exact_groups[i] = []

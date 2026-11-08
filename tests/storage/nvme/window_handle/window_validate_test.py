@@ -204,9 +204,19 @@ class ResetRoundOracle(unittest.TestCase):
         dest[17 * WIN:17 * WIN + GROUP] = source[18 * WIN:18 * WIN + GROUP]
         self.assertEqual(self.state(source, dest, aux, exact=()), 'FAIL')
 
-    def test_faulty_window_must_stay_guard(self):
+    def test_faulty_groups_copied_from_its_private_namespace_pass(self):
+        source, dest, aux = reset_images()
+        dest[16 * WIN + 4 * GROUP:17 * WIN] = aux[16 * WIN + 4 * GROUP:17 * WIN]
+        self.assertEqual(self.state(source, dest, aux), 'PASS')
+
+    def test_faulty_group_from_the_shared_source_fails(self):
         source, dest, aux = reset_images()
         dest[16 * WIN:16 * WIN + GROUP] = source[16 * WIN:16 * WIN + GROUP]
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_torn_faulty_group_fails(self):
+        source, dest, aux = reset_images()
+        dest[16 * WIN + GROUP:16 * WIN + GROUP + 512] = aux[16 * WIN:16 * WIN + 512]
         self.assertEqual(self.state(source, dest, aux), 'FAIL')
 
     def test_earlier_round_windows_must_stay_guard(self):

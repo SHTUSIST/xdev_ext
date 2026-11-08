@@ -259,7 +259,8 @@ if [[ "$MODE" == multi ]]; then
 elif [[ "$MODE" == multi-reset ]]; then
     # Per-tenant end states; innocents that STOPped cleanly must be exact.
     grep '^XDEV_EXT_WINDOW_RESET_DIAG' "$EV/guest.log" >"$EV/reset-diagnostic.txt"
-    exact=$(sed -n 's/^XDEV_EXT_WINDOW_RESET_EXACT tenants=\([-0-9,]*\)$/\1/p' "$EV/guest.log" | tail -1)
+    # Serial console lines end in CR LF.
+    exact=$(sed -n 's/^XDEV_EXT_WINDOW_RESET_EXACT tenants=\([-0-9,]*\).*/\1/p' "$EV/guest.log" | tail -1)
     [[ -n "$exact" ]] || { echo 'FAIL no exact-tenant list reported'; exit 1; }
     python3 -I "$TEST_DIR/window_validate.py" --reset "$OUT/source-before.raw" "$OUT/destination.raw" \
         "$OUT/aux.raw" "$exact" >"$EV/whole-disk.json" || true
