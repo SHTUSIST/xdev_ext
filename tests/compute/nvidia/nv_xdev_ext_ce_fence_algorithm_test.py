@@ -158,6 +158,7 @@ typedef struct {
 #define P2P_UMEM_MAX_XFERS 1024
 #define NV0050_CTRL_MEMCOPY_FLAGS_ASYNC 1
 static unsigned int pushes;
+static NvU64 last_src_va, last_dst_va;
 static NV_STATUS _p2pXdevExtCeValid(P2P_UMEM_CE_HOST *h) { (void)h; return NV_OK; }
 static NV_STATUS RmP2PUmemVidmemResolve(P2P_UMEM_BINDING *b, OBJGPU *g,
     MEMORY_DESCRIPTOR **md) {
@@ -170,7 +171,8 @@ static int nvP2PVidmemXferOffset(NvU64 base, NvU64 len, NvU64 off,
     *out = base + off; return 1;
 }
 static NV_STATUS ceutilsMemcopy(CeUtils *c, CEUTILS_MEMCOPY_PARAMS *p) {
-    ++pushes; p->submittedWorkId = ++c->lastSubmittedPayload; return NV_OK;
+    ++pushes; last_src_va = p->srcGpuVA; last_dst_va = p->dstGpuVA;
+    p->submittedWorkId = ++c->lastSubmittedPayload; return NV_OK;
 }
 '''
 
@@ -299,6 +301,22 @@ static void test_guard(void) {
         "real submit: 64-bit token overflow rejected before push");
     guard_case(0xffffffffULL, 0xfffffffeULL, 2, NV_OK,
         "real submit: post-wrap full token returned without truncation");
+    for (NvU32 dir = 0; dir < 2; dir++) {
+        CeUtils ce = {0};
+        P2P_UMEM_BINDING binding = { .pGpu = &gpu, .length = 4096 };
+        P2P_UMEM_CE_HOST host = { .pBinding = &binding, .pCeUtils = &ce,
+            .bytes = 4096, .hostMapped = 1, .hostVA = 0x8000000000ULL };
+        P2P_UMEM_XFER x = { .size = 8 };
+        NvBool issued = 0; NvU64 token = 0;
+        check(RmP2PUmemCeAsyncSubmit(&host, &x, 1, dir, &issued, &token) == NV_OK &&
+              last_src_va == (dir ? host.hostVA : 0) &&
+              last_dst_va == (dir ? 0 : host.hostVA),
+              "real submit: only host operand uses its bound VA in either direction");
+        host.hostMapped = 0;
+        check(RmP2PUmemCeAsyncSubmit(&host, &x, 1, dir, &issued, &token) == NV_OK &&
+              last_src_va == 0 && last_dst_va == 0,
+              "real submit: physical fallback passes no virtual override");
+    }
 }
 '''
 
