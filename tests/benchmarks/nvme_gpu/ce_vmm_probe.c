@@ -7,8 +7,8 @@
  * so the frames are adjacent in the host pool and the window and one RM
  * transfer covers a whole stage; the CE then needs one command per run of
  * physically adjacent pages.  large-huge backs the pool with 2 MiB hugetlb
- * pages (multi-page commands), large-4k with ordinary 4 KiB pages (as many
- * commands as the pages are scattered).  Optional kprobe hit deltas around
+ * pages (multi-page commands), large-4k with ordinary 4 KiB pages scattered
+ * on purpose (about one command per page against one long GPU run).  Optional kprobe hit deltas around
  * START..terminal and the host run count from /proc/self/pagemap are
  * diagnostics, never part of the PASS decision.
  */
@@ -125,6 +125,23 @@ static void cvp_hits_print(const struct cvp_hits *a, const struct cvp_hits *b,
 static int cvp_no_thp(void *p, size_t n)
 {
 	return madvise(p, n, MADV_NOHUGEPAGE) && errno != EINVAL ? -errno : 0;
+}
+
+/*
+ * Faults the 4 KiB pages of @pool and @filler alternately, so whichever order
+ * the page allocator hands out frames in, two neighbouring pool pages never
+ * get consecutive ones from it.  On a freshly booted guest a pool touched in
+ * order came out physically contiguous.
+ */
+static void cvp_scatter(unsigned char *pool, unsigned char *filler, size_t bytes)
+{
+	volatile unsigned char *p = pool, *f = filler;
+	size_t off;
+
+	for (off = 0; off < bytes; off += 4096U) {
+		p[off] = 0;
+		f[off] = 0;
+	}
 }
 
 /* Physically adjacent runs of the pinned host bytes [off, off + len). */
@@ -359,7 +376,7 @@ static int cvp_run(const struct cvp_options *o)
 	struct xdev_ext_mech_stats stats;
 	struct cvp_hits before, after;
 	unsigned char *payload = NULL, *expected_host = NULL;
-	unsigned char *host = MAP_FAILED, *gpu = NULL, *expected_gpu = NULL;
+	unsigned char *host = MAP_FAILED, *filler = MAP_FAILED, *gpu = NULL, *expected_gpu = NULL;
 	__u32 frames[CVP_LARGE_FRAMES];
 	const char *phase = "allocation/attach";
 	bool released = true, complete = false, created = false;
@@ -396,9 +413,18 @@ static int cvp_run(const struct cvp_options *o)
 		goto out;
 	}
 	if (host != MAP_FAILED && large && !huge) {
+		filler = mmap(NULL, g->host_bytes, PROT_READ | PROT_WRITE,
+			      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+		if (filler == MAP_FAILED) {
+			ret = XG_EXIT_FAIL;
+			goto out;
+		}
 		ret = cvp_no_thp(host, g->host_bytes);
+		if (!ret)
+			ret = cvp_no_thp(filler, g->host_bytes);
 		if (ret)
 			goto out;
+		cvp_scatter(host, filler, g->host_bytes);
 	}
 	if (!gpu || !expected_gpu || !payload || !expected_host || host == MAP_FAILED) {
 		ret = XG_EXIT_FAIL;
@@ -521,6 +547,8 @@ out:
 	if (es_ce_close(&ce))
 		ret = XG_EXIT_FAIL;
 	if (host != MAP_FAILED && munmap(host, g->host_bytes))
+		ret = XG_EXIT_FAIL;
+	if (filler != MAP_FAILED && munmap(filler, g->host_bytes))
 		ret = XG_EXIT_FAIL;
 	free(gpu);
 	free(expected_gpu);

@@ -207,7 +207,7 @@ unwritten GPU windows and allocation rounding slack.
 | `close-export` | Attach both stage FDs, close only the caller's exported FD **before CREATE**, clear that FD's cleanup ownership, then execute the same two-stage route. CUDA mapping and allocation remain owned. |
 | `partial-attach` | First attach succeeds; a second real CE FD is passed a closed, nonnegative export FD. Require a driver-returned nonzero NVIDIA status, with no CREATE/START for this setup. Close the partial setup, check process FD scope, then require a fresh two-stage transfer. |
 | `large-huge` | The `multi` route with one 2 MiB group: 32 frames of 64 KiB, no head room, frames 16-47 of a 4 MiB host pool backed by two 2 MiB hugetlb pages, GPU window A at offset 0 and B at 2.5 MiB of an 8 MiB allocation. Frames adjacent in the pool and the window reach RM as one transfer per stage, so the CE needs one command per physically adjacent run of pages: multi-page commands. Needs `vm.nr_hugepages` >= 2. |
-| `large-4k` | The same group on a host pool of ordinary 4 KiB pages (`MADV_NOHUGEPAGE`), so the commands follow however the pinned pages happen to be scattered. |
+| `large-4k` | The same group on a host pool of ordinary 4 KiB pages (`MADV_NOHUGEPAGE`) whose pages are faulted alternately with a filler mapping, so neighbouring pool pages do not get adjacent frames and the CE needs about one command per page while the GPU side stays one long run. A pool faulted in order came out physically contiguous on a freshly booted guest. |
 
 The large cases check the whole 4 MiB host pool and the whole allocation
 like the small ones, with a position-dependent pattern over the 2 MiB, so a

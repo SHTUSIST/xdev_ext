@@ -775,5 +775,80 @@ class TransparentHugePagesOff(unittest.TestCase):
                 self.assertEqual(self.outcome(-1, error), -error)
 
 
+# On a freshly booted guest the 4 MiB pool of ordinary 4 KiB pages came out
+# physically contiguous (host_runs=1), so large-4k did not exercise scattered
+# pages.  cvp_scatter() faults pool and filler pages alternately; the
+# allocator then cannot give two neighbouring pool pages adjacent frames in
+# either allocation order.  Checked here on the host's real allocator through
+# /proc/self/pagemap, which shows frame numbers only to CAP_SYS_ADMIN.
+SCATTER_FIXTURE = r'''
+#define _GNU_SOURCE
+#include <errno.h>
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <linux/xdev_ext_policy.h>
+#include "ce_vmm_probe_check.h"
+'''
+SCATTER_MAIN = r'''
+int main(void)
+{
+    const size_t bytes = 4U << 20, pages = bytes / 4096U;
+    static uint64_t entry[1024];
+    unsigned char *pool = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    unsigned char *filler = mmap(NULL, bytes, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    int fd;
+
+    if (pool == MAP_FAILED || filler == MAP_FAILED) return 97;
+    madvise(pool, bytes, MADV_NOHUGEPAGE);
+    madvise(filler, bytes, MADV_NOHUGEPAGE);
+    cvp_scatter(pool, filler, bytes);
+    fd = open("/proc/self/pagemap", O_RDONLY);
+    if (fd < 0 || pread(fd, entry, pages * 8, (off_t)((uintptr_t)pool / 4096U * 8)) !=
+        (ssize_t)(pages * 8)) return 97;
+    printf("%u %zu\n", cvp_phys_runs(entry, pages), pages);
+    return 0;
+}
+'''
+
+
+class ScatteredHostPages(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "tests/support/benchmarks"))
+        from ce_vmm_contract import function
+        build = ROOT / "build"
+        build.mkdir(exist_ok=True)
+        cls.temp = tempfile.TemporaryDirectory(prefix="ce-probe-scatter-", dir=build)
+        cls.addClassCleanup(cls.temp.cleanup)
+        work = Path(cls.temp.name)
+        actual = (HERE / "ce_vmm_probe.c").read_text()
+        source = work / "scatter.c"
+        try:
+            source.write_text(SCATTER_FIXTURE + function(actual, "cvp_scatter") + "\n" +
+                              SCATTER_MAIN)
+        except AssertionError as error:
+            cls.build_failure = str(error)
+            return
+        cls.binary = work / "scatter"
+        cls.build_failure = compile_c(source, cls.binary, "-I", ROOT / "src/core/include/uapi",
+                                      "-I", HERE)
+
+    def test_neighbouring_pool_pages_get_frames_that_are_not_adjacent(self):
+        self.assertIsNone(self.build_failure, self.build_failure)
+        run = subprocess.run([str(self.binary)], capture_output=True, text=True, timeout=30)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        runs, pages = map(int, run.stdout.split())
+        if runs == 0:
+            self.skipTest("pagemap frame numbers need CAP_SYS_ADMIN")
+        # Contiguous would be 1; allow a few coincidences from other allocations.
+        self.assertGreaterEqual(runs, pages * 9 // 10, run.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()
