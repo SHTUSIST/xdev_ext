@@ -45,6 +45,8 @@
 #include "gpu/mem_mgr/mem_desc.h"
 #include "gpu/mem_mgr/ce_utils.h"
 #include "gpu/bus/kern_bus.h"
+#include "mem_mgr/vaspace.h"
+#include "gpu/mem_mgr/virt_mem_allocator.h"
 
 // Buffer type enumeration (must match nv-p2p.c)
 typedef enum {
@@ -731,6 +733,11 @@ typedef struct P2P_UMEM_CE_HOST {
     P2P_UMEM_VIDMEM_BINDING *pBinding;
     MEMORY_DESCRIPTOR *pHostMemDesc;
     CeUtils *pCeUtils;
+    OBJVASPACE *pHostVAS;
+    MEMORY_DESCRIPTOR **pHostRuns;
+    NvU32 hostRunCount;
+    NvU64 hostVA;
+    NvBool hostMapped;
     NvU64 bytes;
     NvBool poisoned;
     P2P_UMEM_CE_EVENT event;
@@ -746,6 +753,99 @@ void RmP2PUmemCeInvalidate(OBJGPU *pGpu)
     for (h = g_pXdevExtCeHosts; h != NULL; h = h->pNext)
         if (h->pBinding->pGpu == pGpu)
             h->poisoned = NV_TRUE;
+}
+
+/* Keep a single run, and pools made only of long runs, on the original
+ * physical path. The decision is made once at bind, never per submission. */
+static NvBool
+_p2pXdevExtCeUsesHostVa(NvU64 *dma, NvU32 count, NvU32 pageSize)
+{
+    NvU32 first = 0, runs = 0;
+    NvBool shortRun = NV_FALSE;
+    while (first < count)
+    {
+        NvU32 end = first + 1;
+        while (end < count && dma[end - 1] <= NV_U64_MAX - pageSize &&
+               dma[end] == dma[end - 1] + pageSize)
+            end++;
+        shortRun |= (NvU64)(end - first) * pageSize < RM_PAGE_SIZE_2M;
+        runs++;
+        first = end;
+    }
+    return runs > 1 && shortRun;
+}
+
+/* No DMA API operation here: dma[] already contains this GPU's IOVA handles.
+ * dmaAllocMapping consumes the descriptor PTE array directly. Reserve one
+ * contiguous VA and map each DMA run into its logical offset, allowing large
+ * GPU PTEs where both addresses and the run length have the required alignment.
+ */
+static NV_STATUS
+_p2pXdevExtCeMapHost(P2P_UMEM_CE_HOST *h, NvU64 *dma, NvU32 count, NvU32 pageSize)
+{
+    OBJGPU *g = h->pBinding->pGpu;
+    OBJCHANNEL *channel = h->pCeUtils->pChannel;
+    VAS_ALLOC_FLAGS allocFlags = {0};
+    NvU32 first = 0;
+    NvU32 flags = DRF_DEF(OS46, _FLAGS, _DMA_UNICAST_REUSE_ALLOC, _TRUE) |
+                  DRF_DEF(OS46, _FLAGS, _CACHE_SNOOP, _ENABLE);
+    NV_STATUS status;
+
+    /* The kernel backend supplies whole native pages. Preserve other internal
+     * callers' legacy physical behavior rather than overmap a partial page. */
+    if (pageSize != RM_PAGE_SIZE || h->bytes != (NvU64)count * pageSize ||
+        !_p2pXdevExtCeUsesHostVa(dma, count, pageSize))
+        return NV_OK;
+    status = vaspaceGetByHandleOrDeviceDefault(channel->pRsClient,
+                 channel->deviceId, channel->hVASpaceId, &h->pHostVAS);
+    if (status != NV_OK) return status;
+    h->pHostRuns = portMemAllocNonPaged((NvU64)count * sizeof(*h->pHostRuns));
+    if (h->pHostRuns == NULL) return NV_ERR_NO_MEMORY;
+    portMemSet(h->pHostRuns, 0, (NvU64)count * sizeof(*h->pHostRuns));
+    status = vaspaceAlloc(h->pHostVAS, h->bytes, RM_PAGE_SIZE_2M,
+                 NV_MAX(vaspaceGetVaStart(h->pHostVAS), RM_PAGE_SIZE),
+                 vaspaceGetVaLimit(h->pHostVAS),
+                 RM_PAGE_SIZE | RM_PAGE_SIZE_64K | RM_PAGE_SIZE_2M,
+                 allocFlags, &h->hostVA);
+    if (status != NV_OK) return status;
+    h->hostMapped = NV_TRUE;
+    while (first < count)
+    {
+        NvU32 end = first + 1;
+        NvU64 bytes, offset, va, alignment;
+        MEMORY_DESCRIPTOR *md = NULL;
+        while (end < count && dma[end - 1] <= NV_U64_MAX - pageSize &&
+               dma[end] == dma[end - 1] + pageSize)
+            end++;
+        bytes = (NvU64)(end - first) * pageSize;
+        offset = (NvU64)first * pageSize;
+        alignment = dma[first] | offset | bytes;
+        alignment = NV_IS_ALIGNED64(alignment, RM_PAGE_SIZE_2M) ? RM_PAGE_SIZE_2M :
+                    NV_IS_ALIGNED64(alignment, RM_PAGE_SIZE_64K) ? RM_PAGE_SIZE_64K : RM_PAGE_SIZE;
+        status = memdescCreate(&md, g, bytes, 0, NV_TRUE,
+                              ADDR_SYSMEM, NV_MEMORY_CACHED, MEMDESC_FLAGS_NONE);
+        if (status != NV_OK) return status;
+        h->pHostRuns[h->hostRunCount++] = md;
+        memdescDescribe(md, ADDR_SYSMEM, dma[first], bytes);
+        memdescSetPageSize(md, AT_GPU, alignment);
+        va = h->hostVA + offset;
+        status = dmaAllocMapping_HAL(g, GPU_GET_DMA(g), h->pHostVAS, md,
+                     &va, flags, 0, NULL, KMIGMGR_SWIZZID_INVALID);
+        if (status != NV_OK) return status;
+        if (va != h->hostVA + offset) return NV_ERR_INVALID_STATE;
+        first = end;
+    }
+    return NV_OK;
+}
+
+/* Only after checked VA release, or after destroying a channel that never
+ * submitted host accesses (bind failure). Descriptors outlive their mappings. */
+static void
+_p2pXdevExtCeDestroyHostRuns(P2P_UMEM_CE_HOST *h)
+{
+    NvU32 i;
+    for (i = 0; i < h->hostRunCount; i++) memdescDestroy(h->pHostRuns[i]);
+    portMemFree(h->pHostRuns);
 }
 
 NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *b,
@@ -795,11 +895,14 @@ NV_STATUS RmP2PUmemCeHostBind(P2P_UMEM_VIDMEM_BINDING *b,
         status = NV_ERR_NOT_SUPPORTED;
         goto fail;
     }
+    status = _p2pXdevExtCeMapHost(h, phys, count, pageSize);
+    if (status != NV_OK) goto fail;
     h->pNext = g_pXdevExtCeHosts; g_pXdevExtCeHosts = h;
     *out = h;
     return NV_OK;
 fail:
     if (h->pCeUtils != NULL) objDelete(h->pCeUtils);
+    _p2pXdevExtCeDestroyHostRuns(h);
     if (h->pHostMemDesc != NULL) memdescDestroy(h->pHostMemDesc);
     portMemFree(h);
     return status;
@@ -876,6 +979,11 @@ NV_STATUS RmP2PUmemCeAsyncSubmit(void *host, const P2P_UMEM_XFER *x,
         p.srcOffset = direction ? x[i].umemOffset : h->pBinding->offset + x[i].gpuOffset;
         p.dstOffset = direction ? h->pBinding->offset + x[i].gpuOffset : x[i].umemOffset;
         p.length = x[i].size;
+        if (h->hostMapped)
+        {
+            if (direction) p.srcGpuVA = h->hostVA;
+            else p.dstGpuVA = h->hostVA;
+        }
         p.flags = NV0050_CTRL_MEMCOPY_FLAGS_ASYNC;
         /* Host pool and window are page-granular memdescs: one CE command
          * per physically adjacent run, not per 4 KiB page. */
@@ -919,11 +1027,18 @@ NV_STATUS RmP2PUmemCeHostUnbind(void *host)
     NV_STATUS status = RmP2PUmemCeProgress(h, &watermark);
     if (status != NV_OK) return status;
     if (watermark != h->pCeUtils->lastSubmittedPayload) return NV_ERR_BUSY_RETRY;
+    if (h->hostMapped)
+    {
+        status = vaspaceFree(h->pHostVAS, h->hostVA);
+        if (status != NV_OK) { h->poisoned = NV_TRUE; return status; }
+        h->hostMapped = NV_FALSE;
+    }
     for (link = &g_pXdevExtCeHosts; *link != NULL; link = &(*link)->pNext)
         if (*link == h) { *link = h->pNext; break; }
     h->event = NULL;
     /* Already drained: the CeUtils destructor's legacy wait observes completion. */
     objDelete(h->pCeUtils);
+    _p2pXdevExtCeDestroyHostRuns(h);
     memdescDestroy(h->pHostMemDesc);
     portMemFree(h);
     return NV_OK;

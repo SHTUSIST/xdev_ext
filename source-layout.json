@@ -4038,6 +4038,11 @@
       "native_path": "tests/nv_xdev_ext_ce_launch_test.py"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_host_va_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_host_va_test.py"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_memcopy_runs_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_memcopy_runs_test.py"

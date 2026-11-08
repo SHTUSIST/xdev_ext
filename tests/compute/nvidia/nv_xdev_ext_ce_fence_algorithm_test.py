@@ -140,8 +140,8 @@ typedef struct {
     P2P_UMEM_BINDING *pBinding;
     CeUtils *pCeUtils;
     MEMORY_DESCRIPTOR *pHostMemDesc;
-    NvU64 bytes;
-    NvBool poisoned;
+    NvU64 bytes, hostVA;
+    NvBool poisoned, hostMapped;
     void (*event)(void *, NvU64);
     void *eventArg;
 } P2P_UMEM_CE_HOST;
@@ -153,6 +153,7 @@ typedef struct {
     ChannelCompletionCallback pCompletionCallback;
     void *pCompletionCallbackArg;
     NvBool bCoalescePhysRuns;
+    NvU64 srcGpuVA, dstGpuVA;
 } CEUTILS_MEMCOPY_PARAMS;
 #define P2P_UMEM_MAX_XFERS 1024
 #define NV0050_CTRL_MEMCOPY_FLAGS_ASYNC 1

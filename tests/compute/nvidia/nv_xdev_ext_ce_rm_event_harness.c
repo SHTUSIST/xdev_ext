@@ -40,6 +40,17 @@
 #define NV0050_CEUTILS_FLAGS_ENABLE_COMPLETION_CB 6:6
 #define NV0050_CEUTILS_FLAGS_ENABLE_COMPLETION_CB_FALSE (0x00000000)
 #define NV0050_CEUTILS_FLAGS_ENABLE_COMPLETION_CB_TRUE (0x00000001)
+#define NVOS46_FLAGS_DMA_UNICAST_REUSE_ALLOC 0:0
+#define NVOS46_FLAGS_DMA_UNICAST_REUSE_ALLOC_TRUE 1
+#define NVOS46_FLAGS_CACHE_SNOOP 1:1
+#define NVOS46_FLAGS_CACHE_SNOOP_ENABLE 1
+#define RM_PAGE_SIZE 4096ULL
+#define RM_PAGE_SIZE_64K 65536ULL
+#define RM_PAGE_SIZE_2M 2097152ULL
+#define KMIGMGR_SWIZZID_INVALID 0xffffffffU
+#define NV_IS_ALIGNED64(v,a) (((v)&((a)-1))==0)
+#define NV_MAX(a,b) ((a)>(b)?(a):(b))
+#define GPU_GET_DMA(g) (g)
 #define NV0050_CTRL_MEMCOPY_FLAGS_ASYNC (1u << 1)
 typedef struct { NvU64 flags; NvU32 forceCeId; NvHandle hVaspace; } NV0050_ALLOCATION_PARAMETERS;
 
@@ -90,6 +101,8 @@ static void memdescFillPages(MEMORY_DESCRIPTOR *m, NvU32 start, RmPhysAddr *pa, 
 	m->count = n;
 	m->pageSize = (NvU32)ps;
 }
+static void memdescDescribe(MEMORY_DESCRIPTOR *m, int space, NvU64 base, NvU64 bytes)
+{ (void)space; m->pages[0] = base; m->size = bytes; }
 static void memdescSetPageSize(MEMORY_DESCRIPTOR *m, int at, NvU64 ps) { (void)at; m->pageSize = (NvU32)ps; }
 static void memdescDestroy(MEMORY_DESCRIPTOR *m) { if (m) { m->live = 0; free(m); md_destroyed++; } }
 #define portMemAllocNonPaged(n) calloc(1, (n))
@@ -103,9 +116,28 @@ typedef struct { void *prev, *next; } ListNode;
 typedef struct { CeUtilsCallback *head, *tail; } CeUtilsCallbackList;
 typedef struct {
 	NvU32 sema;   /* low 32 bits written by the semaphore release */
-	void *pbCpuVA, *pControlGPFifo, *pTokenFromNotifier;
+	void *pbCpuVA, *pControlGPFifo, *pTokenFromNotifier, *pRsClient;
+	NvHandle deviceId, hVASpaceId;
 	NvBool bUseDoorbellRegister;
 } OBJCHANNEL;
+/* These existing event cases bind a single contiguous host run. A VA
+ * boundary call is an unexpected path here; fragmented mappings are exercised
+ * by nv_xdev_ext_ce_host_va_test.py using the actual same RM bodies. */
+typedef struct { int unused; } OBJVASPACE;
+typedef struct { int unused; } VAS_ALLOC_FLAGS;
+static NV_STATUS vaspaceGetByHandleOrDeviceDefault(void *client, NvHandle dev,
+    NvHandle handle, OBJVASPACE **out)
+{ (void)client; (void)dev; (void)handle; (void)out; abort(); }
+static NvU64 vaspaceGetVaStart(OBJVASPACE *v) { (void)v; return 4096; }
+static NvU64 vaspaceGetVaLimit(OBJVASPACE *v) { (void)v; return 1ULL << 48; }
+static NV_STATUS vaspaceAlloc(OBJVASPACE *v, NvU64 bytes, NvU64 align, NvU64 lo,
+    NvU64 hi, NvU64 mask, VAS_ALLOC_FLAGS flags, NvU64 *out)
+{ (void)v; (void)bytes; (void)align; (void)lo; (void)hi; (void)mask; (void)flags; (void)out; abort(); }
+static NV_STATUS vaspaceFree(OBJVASPACE *v, NvU64 base)
+{ (void)v; (void)base; abort(); }
+static NV_STATUS dmaAllocMapping_HAL(OBJGPU *g, void *dma, OBJVASPACE *v,
+    MEMORY_DESCRIPTOR *md, NvU64 *va, NvU32 flags, NvU32 flags2, void *info, NvU32 swizz)
+{ (void)g; (void)dma; (void)v; (void)md; (void)va; (void)flags; (void)flags2; (void)info; (void)swizz; abort(); }
 typedef struct {
 	OBJCHANNEL *pChannel;
 	NvU64 lastSubmittedPayload, lastCompletedPayload;

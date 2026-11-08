@@ -81,6 +81,9 @@ typedef struct
     NvU64 encryptIvAddr; // IV value that was used for ecryption, requirements are the same as for authTagAddr. Required
 
     NvBool bCoalescePhysRuns; // One CE command per run of physically adjacent pages of a non-contiguous memdesc, not per page
+    // Optional already-mapped host operand bases; zero keeps physical mode.
+    NvU64 srcGpuVA;
+    NvU64 dstGpuVA;
 
 } CEUTILS_MEMCOPY_PARAMS;
 
