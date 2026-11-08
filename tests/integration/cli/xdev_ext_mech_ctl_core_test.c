@@ -316,6 +316,20 @@ static void test_negative_arms(void)
 	s.state = XDEV_EXT_MECH_SESSION_STOPPING;
 	EXPECT_FALSE(xdev_ext_mech_ctl_report_ring_exit(line, sizeof(line), &s));
 
+	/*
+	 * After the ring closed, a STOPPED session may still be freed before its
+	 * NIC accounting is read on a fresh ring: -ENOENT then means freed, not
+	 * failure; any other error still fails.
+	 */
+	{
+		bool freed = false;
+
+		EXPECT_TRUE(xdev_ext_mech_ctl_exit_accounting(0, &freed) == 0 && !freed);
+		EXPECT_TRUE(xdev_ext_mech_ctl_exit_accounting(-ENOENT, &freed) == 0 && freed);
+		freed = false;
+		EXPECT_TRUE(xdev_ext_mech_ctl_exit_accounting(-EBADF, &freed) == -EBADF && !freed);
+	}
+
 	s = (struct xdev_ext_mech_stats) {
 		.state = XDEV_EXT_MECH_SESSION_STOPPED, .last_err = -ENXIO,
 		.batches_abort = 1,

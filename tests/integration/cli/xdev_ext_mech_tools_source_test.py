@@ -333,6 +333,18 @@ class CtlSourceTest(unittest.TestCase):
         # A READ stage never needs to write its namespace.
         self.assertRegex(self.ctl, r"open\(o->src_ng, O_RDONLY")
 
+    def test_ring_exit_accounting_does_not_use_the_closed_ring(self):
+        # --close-inflight closes the session's ring (r.ring = -1) and polls on
+        # a fresh one; a session still STOPPED there must have its NIC
+        # accounting read on a fresh ring too, never on the closed descriptor.
+        ctl = strip_comments((TOOLS / "xdev_ext_mech_ctl.c").read_text())
+        self.assertNotIn("ctl_nic_accounting(r.ring, r.session, &accounting)", ctl)
+        self.assertIn("ctl_nic_accounting_any_ring(", ctl)
+        helper = ctl[ctl.index("static int ctl_nic_accounting_any_ring("):]
+        helper = helper[:helper.index("\n}\n")]
+        self.assertIn("ctl_ring_open()", helper)
+        self.assertIn("xdev_ext_mech_ctl_exit_accounting(", helper)
+
     def test_makefile_contract(self):
         for var in ("BUILD_DIR", "VMLINUX_BTF", "CC", "CLANG", "BPFTOOL"):
             self.assertRegex(self.make, rf"(?m)^{var} \?=", var)
