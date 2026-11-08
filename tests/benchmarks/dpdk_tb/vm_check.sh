@@ -55,6 +55,10 @@ done
 copy_with_libs "$(command -v ip)" sbin/ip
 copy_with_libs "$bin" bin/dpdk_tb
 mkdir -p "$root/lib64"
+# glibc dlopens libgcc_s for pthread_cancel (EAL cleanup); ldd does not list it
+for g in /lib/x86_64-linux-gnu/libgcc_s.so.1 /usr/lib/x86_64-linux-gnu/libgcc_s.so.1; do
+	[ -e "$g" ] && { mkdir -p "$root$(dirname "$g")"; cp -L "$g" "$root$g"; }
+done
 cp -L /lib64/ld-linux-x86-64.so.2 "$root/lib64/" 2>/dev/null || true
 for o in /usr/lib/x86_64-linux-gnu/bpf/xsk_def_xdp_prog*.o /usr/local/lib/bpf/xsk_def_xdp_prog*.o \
 	 /usr/lib/x86_64-linux-gnu/bpf/xdp-dispatcher.o /usr/local/lib/bpf/xdp-dispatcher.o; do
@@ -81,6 +85,8 @@ echo 512 > /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages
 echo "TB_VM hugepages=\$(cat /sys/kernel/mm/hugepages/hugepages-2048kB/nr_hugepages) kernel=\$(cat /proc/sys/kernel/osrelease)"
 for m in veth dummy macvlan; do insmod /lib/modules/\$m.ko || echo "TB_VM insmod \$m failed"; done
 ip link add tba type veth peer name tbb
+# this iproute2 build has been seen naming the peer veth0; rename it then
+[ -e /sys/class/net/tbb ] || ip link set veth0 name tbb
 ip link add tbd type dummy
 ip link add link tbd name tbm1 type macvlan mode bridge
 ip link add link tbd name tbm2 type macvlan mode bridge
