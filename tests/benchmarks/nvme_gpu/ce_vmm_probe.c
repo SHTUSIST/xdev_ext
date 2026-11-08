@@ -117,6 +117,16 @@ static void cvp_hits_print(const struct cvp_hits *a, const struct cvp_hits *b,
 				       name, b->name[i], b->hits[i] - a->hits[j]);
 }
 
+/*
+ * Keeps transparent huge pages out of [p, p + n).  A kernel built without
+ * them rejects MADV_NOHUGEPAGE with EINVAL; its anonymous pages are 4 KiB
+ * already.  0 or a negative errno.
+ */
+static int cvp_no_thp(void *p, size_t n)
+{
+	return madvise(p, n, MADV_NOHUGEPAGE) && errno != EINVAL ? -errno : 0;
+}
+
 /* Physically adjacent runs of the pinned host bytes [off, off + len). */
 static unsigned int cvp_host_runs(const unsigned char *host, size_t off, size_t len)
 {
@@ -385,9 +395,10 @@ static int cvp_run(const struct cvp_options *o)
 		ret = XG_EXIT_UNAVAILABLE;
 		goto out;
 	}
-	if (host != MAP_FAILED && large && !huge && madvise(host, g->host_bytes, MADV_NOHUGEPAGE)) {
-		ret = -errno;
-		goto out;
+	if (host != MAP_FAILED && large && !huge) {
+		ret = cvp_no_thp(host, g->host_bytes);
+		if (ret)
+			goto out;
 	}
 	if (!gpu || !expected_gpu || !payload || !expected_host || host == MAP_FAILED) {
 		ret = XG_EXIT_FAIL;

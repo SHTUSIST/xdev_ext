@@ -699,5 +699,81 @@ class ExitClassification(unittest.TestCase):
                     self.assertEqual(self.code(value, created), value)
 
 
+# large-4k turns transparent huge pages off for its pool.  A kernel built
+# without them rejects MADV_NOHUGEPAGE with EINVAL; that pool is already made
+# of 4 KiB pages, so only other errors may stop the case.
+THP_FIXTURE = r'''
+#include <errno.h>
+#include <stddef.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#define MADV_NOHUGEPAGE 15
+static int madvise_result, madvise_errno, madvise_calls, madvise_advice;
+static size_t madvise_len;
+static int madvise(void *p, size_t n, int advice)
+{
+    (void)p;
+    madvise_calls++;
+    madvise_len = n;
+    madvise_advice = advice;
+    errno = madvise_errno;
+    return madvise_result;
+}
+'''
+THP_MAIN = r'''
+int main(int argc, char **argv)
+{
+    char page[8192];
+    int ret;
+    if (argc != 3) return 97;
+    madvise_result = atoi(argv[1]);
+    madvise_errno = atoi(argv[2]);
+    ret = cvp_no_thp(page, sizeof(page));
+    printf("%d %d %zu %d\n", ret, madvise_calls, madvise_len, madvise_advice);
+    return 0;
+}
+'''
+
+
+class TransparentHugePagesOff(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        sys.path.insert(0, str(ROOT / "tests/support/benchmarks"))
+        from ce_vmm_contract import function
+        build = ROOT / "build"
+        build.mkdir(exist_ok=True)
+        cls.temp = tempfile.TemporaryDirectory(prefix="ce-probe-thp-", dir=build)
+        cls.addClassCleanup(cls.temp.cleanup)
+        work = Path(cls.temp.name)
+        actual = (HERE / "ce_vmm_probe.c").read_text()
+        source = work / "thp.c"
+        try:
+            source.write_text(THP_FIXTURE + function(actual, "cvp_no_thp") + "\n" + THP_MAIN)
+        except AssertionError as error:
+            cls.build_failure = str(error)
+            return
+        cls.binary = work / "thp"
+        cls.build_failure = compile_c(source, cls.binary)
+
+    def outcome(self, result, error):
+        self.assertIsNone(self.build_failure, self.build_failure)
+        run = subprocess.run([str(self.binary), str(result), str(error)],
+                             capture_output=True, text=True, timeout=5)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        ret, calls, length, advice = map(int, run.stdout.split())
+        self.assertEqual((calls, length, advice), (1, 8192, 15))
+        return ret
+
+    def test_success_and_kernel_without_thp_continue(self):
+        self.assertEqual(self.outcome(0, 0), 0)
+        self.assertEqual(self.outcome(-1, 22), 0)  # EINVAL
+
+    def test_other_errors_stop_the_case(self):
+        for error in (12, 1, 14):  # ENOMEM, EPERM, EFAULT
+            with self.subTest(errno=error):
+                self.assertEqual(self.outcome(-1, error), -error)
+
+
 if __name__ == "__main__":
     unittest.main()
