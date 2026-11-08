@@ -2,9 +2,12 @@
 # SPDX-License-Identifier: GPL-2.0-only
 """Host regressions for the real CUDA-VMM -> CE acceptance probe.
 
-Requirement: PASS requires two published frames, exactly one completed command
+Requirement: PASS requires every frame of the one group published (two for
+the small cases, 32 for the 2 MiB large cases), exactly one completed command
 per active stage, no residual/error counters, a drained STOP_REPORT, and exact
 host/GPU contents including guards. A simulator can never establish this PASS.
+The large cases report how many physically adjacent runs their host frames
+form, counted from /proc/self/pagemap entries.
 
 These tests call production decision helpers with hand-authored observations;
 they do not emulate DMA or infer device correctness from a host-only run.
@@ -136,30 +139,46 @@ static int memory_case(const char *mutation, unsigned index)
     return 0;
 }
 
+static int runs_case(int argc, char **argv)
+{
+    uint64_t entry[64];
+    int i;
+
+    if (argc - 2 > 64) return 97;
+    for (i = 2; i < argc; i++)
+        entry[i - 2] = strtoull(argv[i], NULL, 0);
+    printf("%u\n", cvp_phys_runs(argc > 2 ? entry : NULL, (size_t)(argc - 2)));
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     struct xdev_ext_mech_stats s;
     struct xdev_ext_mech_stop_report report;
     uint64_t session = SESSION, value;
-    unsigned stages, index;
+    unsigned stages, index, frames;
     uint32_t state;
     const char *field;
 
     if (argc == 4 && !strcmp(argv[1], "memory"))
         return memory_case(argv[2], (unsigned)strtoul(argv[3], NULL, 0));
-    if (argc != 7) return 97;
+    if (argc >= 2 && !strcmp(argv[1], "runs"))
+        return runs_case(argc, argv);
+    if (argc != 7 && argc != 8) return 97;
     stages = (unsigned)strtoul(argv[2], NULL, 0);
     field = argv[3];
     value = strtoull(argv[4], NULL, 0);
     index = (unsigned)strtoul(argv[5], NULL, 0);
     state = (uint32_t)strtoul(argv[6], NULL, 0);
+    frames = argc == 8 ? (unsigned)strtoul(argv[7], NULL, 0) : 2;
     s = stages == 1 ? one_stage : two_stages;
     s.state = state;
+    s.published = frames;
 
     if (!strcmp(argv[1], "stats")) {
         if (!strcmp(field, "expected-session")) session = value;
         else if (!change_stats(&s, field, value, index)) return 97;
-        printf("%d\n", cvp_check_stats(&s, session, stages, state));
+        printf("%d\n", cvp_check_stats(&s, session, stages, state, frames));
         return 0;
     }
     if (strcmp(argv[1], "stop")) return 97;
@@ -176,7 +195,7 @@ int main(int argc, char **argv)
     else if (!strcmp(field, "report-session")) report.session_id = value;
     else if (!strcmp(field, "expected-session")) session = value;
     else if (!change_stats(&report.stats, field, value, index)) return 97;
-    printf("%d\n", cvp_check_stop(&report, session, stages));
+    printf("%d\n", cvp_check_stop(&report, session, stages, frames));
     return 0;
 }
 '''
@@ -222,12 +241,13 @@ class DecisionChecks(unittest.TestCase):
         self.assertIsNone(self.build_failure, self.build_failure)
 
     def decision(self, mode, stages=2, field="none", value=0, index=0,
-                 state=ACTIVE):
+                 state=ACTIVE, frames=None):
         if self.build_failure:
             self.skipTest("acceptance helper unavailable; see compile regression")
         command = ([str(self.binary), "memory", field, str(index)] if mode == "memory"
                    else [str(self.binary), mode, str(stages), field, str(value),
-                         str(index), str(state)])
+                         str(index), str(state)] +
+                   ([] if frames is None else [str(frames)]))
         result = subprocess.run(command, capture_output=True, text=True, timeout=5)
         self.assertEqual(result.returncode, 0,
                          "host fixture crashed or rejected its input: " + result.stderr)
@@ -281,6 +301,56 @@ class DecisionChecks(unittest.TestCase):
         for state in (0, 2, 3, 5, 99):
             with self.subTest(requested_state=state):
                 self.assertNotEqual(self.decision("stats", state=state), 0)
+
+    def test_large_group_requires_every_frame_published(self):
+        for stages in (1, 2):
+            for state in (ACTIVE, STOPPED):
+                with self.subTest(stages=stages, state=state):
+                    self.assertEqual(self.decision("stats", stages, state=state, frames=32), 0)
+            with self.subTest(stages=stages, report="stop"):
+                self.assertEqual(self.decision("stop", stages, frames=32), 0)
+            for value in (0, 2, 31, 33):
+                with self.subTest(stages=stages, published=value):
+                    self.assertNotEqual(
+                        self.decision("stats", stages, "published", value, frames=32), 0)
+                    self.assertNotEqual(
+                        self.decision("stop", stages, "published", value, frames=32), 0)
+
+    def test_frame_count_must_fit_one_group(self):
+        for frames in (0, 33):
+            with self.subTest(frames=frames):
+                self.assertNotEqual(self.decision("stats", frames=frames), 0)
+                self.assertNotEqual(self.decision("stop", frames=frames), 0)
+
+    def runs(self, *entries):
+        if self.build_failure:
+            self.skipTest("acceptance helper unavailable; see compile regression")
+        result = subprocess.run([str(self.binary), "runs", *map(hex, entries)],
+                                capture_output=True, text=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertRegex(result.stdout, r"^\d+\n$")
+        return int(result.stdout)
+
+    def test_phys_runs_counts_breaks_between_adjacent_frames(self):
+        present = 1 << 63
+        def page(pfn, flags=0):
+            return present | flags | pfn
+        self.assertEqual(self.runs(page(0x100)), 1)
+        self.assertEqual(self.runs(*[page(0x200 + i) for i in range(32)]), 1)
+        self.assertEqual(self.runs(page(0x100), page(0x101), page(0x400), page(0x401)), 2)
+        # Descending or repeated frames are not adjacent.
+        self.assertEqual(self.runs(page(0x101), page(0x100)), 2)
+        self.assertEqual(self.runs(page(0x100), page(0x100)), 2)
+        self.assertEqual(self.runs(*[page(0x1000 + 2 * i) for i in range(8)]), 8)
+        # Soft-dirty, exclusive and file/shared flag bits are not frame bits.
+        self.assertEqual(self.runs(page(0x100, 1 << 55), page(0x101, 1 << 56),
+                                   page(0x102, 1 << 61)), 1)
+
+    def test_phys_runs_unknown_when_a_page_is_absent_or_its_frame_hidden(self):
+        present = 1 << 63
+        self.assertEqual(self.runs(), 0)
+        self.assertEqual(self.runs(present | 0x100, 0x101), 0)
+        self.assertEqual(self.runs(present | 0x100, present), 0)
 
     def test_memory_accepts_exact_bytes_for_both_buffers(self):
         self.assertEqual(self.decision("memory"), 0)
@@ -360,7 +430,8 @@ class RealProbeCommandLine(unittest.TestCase):
     def test_help_succeeds_without_gpu_or_kernel_setup(self):
         result = self.run_probe("--help")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        for option in ("--case", "--ce-dev", "--timeout-ms"):
+        for option in ("--case", "--ce-dev", "--timeout-ms", "--kprobe-profile",
+                       "large-huge", "large-4k"):
             self.assertIn(option, result.stdout + result.stderr)
 
     def test_unknown_case_is_rejected_as_usage_error(self):
@@ -369,9 +440,11 @@ class RealProbeCommandLine(unittest.TestCase):
         self.assertNotRegex(result.stdout + result.stderr, r"\bPASS\b")
 
     def test_simulator_cannot_satisfy_real_vmm_acceptance(self):
-        result = self.run_probe("--ce-dev", "/dev/xdev_ext_ce_sim", "--case", "multi")
-        self.assertIn(result.returncode, (2, 4), result.stdout + result.stderr)
-        self.assertNotRegex(result.stdout + result.stderr, r"\bPASS\b")
+        for case in ("multi", "large-huge", "large-4k"):
+            with self.subTest(case=case):
+                result = self.run_probe("--ce-dev", "/dev/xdev_ext_ce_sim", "--case", case)
+                self.assertIn(result.returncode, (2, 4), result.stdout + result.stderr)
+                self.assertNotRegex(result.stdout + result.stderr, r"\bPASS\b")
 
 # These wrappers decide whether the caller may explicitly release CUDA objects.
 # Only the kernel control boundary is replaced; the actual wrappers execute.
@@ -472,7 +545,7 @@ int main(int argc, char **argv)
         rc = cvp_create(&r, &c, &released);
     } else {
         released = false; r.session = SESSION;
-        rc = cvp_stop(&r, 2, argc == 2 || atoi(argv[2]) != 0, &released);
+        rc = cvp_stop(&r, 2, CVP_FRAMES, argc == 2 || atoi(argv[2]) != 0, &released);
     }
     printf("{\"rc\":%d,\"released\":%d,\"session\":%llu,"
            "\"creates\":%u,\"stops\":%u,\"notifies\":%u,\"bad_calls\":%u,"
