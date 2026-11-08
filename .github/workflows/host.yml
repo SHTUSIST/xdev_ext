@@ -53,6 +53,13 @@ jobs:
         run: |
           python3 -B -m unittest discover -s tests/compute/vllm/kv_connector -p 'test_*.py' -v
           python3 -B -m unittest discover -s tests/eval/kv_restore -p 'test_worker_contract.py' -v
+      - name: TP host-frame route for GPUs without GPUDirect RDMA
+        working-directory: .
+        run: |
+          python3 tests/core/library/frame_endpoint_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-frame-endpoint"
+          python3 tests/compute/tp/frames_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-frames"
+          python3 tests/compute/tp/ce_place_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-ce-place"
+          python3 tests/compute/tp/frame_owner_test.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/tp-frame-owner"
       - name: NVIDIA dma-buf descriptor and module ownership
         working-directory: .
         run: python3 -I tests/compute/nvidia/nv_xdev_ext_dmabuf_test.py

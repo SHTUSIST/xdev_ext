@@ -61,4 +61,25 @@ CUresult cuMemFree(CUdeviceptr);
 CUresult cuModuleUnload(CUmodule);
 CUresult cuEventCreate(CUevent *,unsigned);
 CUresult cuEventDestroy(CUevent);
+/* Virtual memory management subset (host-frame owner windows). */
+typedef unsigned long long CUmemGenericAllocationHandle;
+typedef int CUmemAllocationHandleType;
+typedef int CUmemAllocationGranularity_flags;
+typedef struct {int type,id;} CUmemLocation;
+typedef struct {
+ int type,requestedHandleTypes;CUmemLocation location;void *win32HandleMetaData;
+ struct {unsigned char compressionType,gpuDirectRDMACapable;unsigned short usage;unsigned char reserved[4];} allocFlags;
+} CUmemAllocationProp;
+typedef struct {CUmemLocation location;int flags;} CUmemAccessDesc;
+enum {CU_MEM_ALLOCATION_TYPE_PINNED=1,CU_MEM_HANDLE_TYPE_POSIX_FILE_DESCRIPTOR=1,
+ CU_MEM_LOCATION_TYPE_DEVICE=1,CU_MEM_ACCESS_FLAGS_PROT_READWRITE=3,CU_MEM_ALLOC_GRANULARITY_MINIMUM=0};
+CUresult cuMemGetAllocationGranularity(size_t *,const CUmemAllocationProp *,CUmemAllocationGranularity_flags);
+CUresult cuMemCreate(CUmemGenericAllocationHandle *,size_t,const CUmemAllocationProp *,unsigned long long);
+CUresult cuMemAddressReserve(CUdeviceptr *,size_t,size_t,CUdeviceptr,unsigned long long);
+CUresult cuMemMap(CUdeviceptr,size_t,size_t,CUmemGenericAllocationHandle,unsigned long long);
+CUresult cuMemSetAccess(CUdeviceptr,size_t,const CUmemAccessDesc *,size_t);
+CUresult cuMemExportToShareableHandle(void *,CUmemGenericAllocationHandle,CUmemAllocationHandleType,unsigned long long);
+CUresult cuMemUnmap(CUdeviceptr,size_t);
+CUresult cuMemAddressFree(CUdeviceptr,size_t);
+CUresult cuMemRelease(CUmemGenericAllocationHandle);
 #endif

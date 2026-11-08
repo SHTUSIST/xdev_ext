@@ -148,6 +148,10 @@ extern "C" int xdev_ext_peer_endpoint_next(xdev_ext_peer_endpoint *ep,int,xdev_e
 }
 extern "C" int xdev_ext_peer_endpoint_complete(xdev_ext_peer_endpoint *,const xdev_ext_peer_message *,int){boundary::completes++;return 0;}
 extern "C" int xdev_ext_peer_endpoint_close(xdev_ext_peer_endpoint *){boundary::closed++;return 0;}
+// The PEER route never touches host-frame endpoints (frames_test.py covers them).
+extern "C" int xdev_ext_frame_endpoint_place(const xdev_ext_frame_endpoint *,__u64,__u64 *,__u32 *){std::abort();}
+extern "C" int xdev_ext_frame_endpoint_post(xdev_ext_frame_endpoint *,__u64){std::abort();}
+extern "C" int xdev_ext_frame_endpoint_wait(xdev_ext_frame_endpoint *,__u64,int){std::abort();}
 #include TP_PEER_SPAN_SOURCE
 extern "C" int xdev_ext_cuda_host_receive_visible(CUcontext){return 0;}
 extern "C" int xdev_ext_cuda_user_wait(xdev_ext_cuda_user *u,CUstream s,xdev_ext_cuda_message *m){

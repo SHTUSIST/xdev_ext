@@ -228,6 +228,20 @@ int limits() {
    check(xdev_tp_destroy(comm,1)==0,"legacy communicator shutdown");}
  }
  {
+  /* A caller compiled with graph-cap fields but no host endpoints keeps
+   * its requested capacity. Poisoned appended pointers are never read. */
+  Fixture f(300);
+  const size_t graph_size=offsetof(xdev_tp_config,tx_frames);
+  auto buffer=std::make_unique<unsigned char[]>(sizeof(xdev_tp_config));
+  std::memset(buffer.get(),0xff,sizeof(xdev_tp_config));
+  std::memcpy(buffer.get(),&f.cfg,graph_size);
+  auto *legacy=reinterpret_cast<xdev_tp_config *>(buffer.get());legacy->size=graph_size;
+  xdev_tp_comm *comm=nullptr;int rc=xdev_tp_create(legacy,&comm);
+  check(rc==0&&comm,"graph-size config is accepted (rc="+std::to_string(rc)+")");
+  if(comm){uint32_t in_use=0;check(usage(comm,&in_use)==300&&in_use==0,"graph-size config keeps its requested capacity");
+   check(xdev_tp_destroy(comm,1)==0,"graph-size communicator shutdown");}
+ }
+ {
   Fixture f(0);f.cfg.size=XDEV_TP_CONFIG_SIZE_V1_BASE+4;xdev_tp_comm *comm=nullptr;
   check(xdev_tp_create(&f.cfg,&comm)==-EINVAL&&!comm,"unknown config size is refused");
  }

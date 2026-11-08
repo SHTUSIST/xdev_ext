@@ -19,6 +19,7 @@ def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--source-root', type=Path, required=True)
     p.add_argument('--output', type=Path, required=True)
+    p.add_argument('--source-view', type=Path, help='reuse one validated source view serially')
     a = p.parse_args()
     root, out = a.source_root.resolve(), a.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
@@ -29,7 +30,7 @@ def main():
         sys.modules[spec.name] = m
         spec.loader.exec_module(m)
         layout = m.load_layout(root)
-        view = m.materialize_view(root, out / 'source-view')
+        view = m.materialize_view(root, a.source_view or out / 'source-view')
         spec = importlib.util.spec_from_file_location('graph_capacity_span', root / 'tests/core/admission_report/run.py')
         extract = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(extract)

@@ -12,14 +12,16 @@ BUILD_DIR ?= .xdev_ext-lib-build
 CFLAGS ?= -O2 -g
 CFLAGS += -std=gnu11 -Wall -Wextra -Werror -fPIC
 
-SRCS := xdev_ext_session.c xdev_ext_prog.c xdev_ext_run.c xdev_ext_user.c xdev_ext_link.c xdev_ext_peer_message.c
+SRCS := xdev_ext_session.c xdev_ext_prog.c xdev_ext_run.c xdev_ext_user.c xdev_ext_link.c xdev_ext_peer_message.c \
+	xdev_ext_frame_endpoint.c
 OBJS := $(SRCS:%.c=$(BUILD_DIR)/%.o)
 # The XSK redirect helper gives a transmit-only zero-copy session XDP mode.
 SHARED := xdev_ext_xsk_shared xdev_ext_xsk_steer xdev_ext_xsk_redirect
 OBJS += $(SHARED:%=$(BUILD_DIR)/%.o)
 HDRS := ../../include/xdev_ext_xsk_shared.h ../../include/xdev_ext_xsk_shared_prog.h ../../include/xdev_ext_xsk_steer.h \
 	../../include/xdev_ext_xsk_redirect.h ../../include/xdev_ext_xsk_redirect_prog.h \
-	libxdev_ext.h libxdev_ext_internal.h libxdev_ext_peer_message.h ../xdev_ext_mech_ctl_core.h \
+	libxdev_ext.h libxdev_ext_internal.h libxdev_ext_peer_message.h libxdev_ext_frame_endpoint.h \
+	../xdev_ext_mech_ctl_core.h \
 	../xdev_ext_mech_prog.h ../../../include/uapi/linux/xdev_ext_mech.h \
 	../../../include/uapi/linux/io_uring.h
 

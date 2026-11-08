@@ -104,7 +104,9 @@ def main(argv=None):
         inputs += list((root/'src/compute/vllm/xdev_tp_vllm').glob('*.py'))
         inputs += list((root/'src/compute/collectives').glob('*.h'))
         inputs += [root/'src/compute/cuda/peer_endpoint_owner.h',
-                   root/'src/compute/cuda/peer_endpoint_owner.cc']
+                   root/'src/compute/cuda/peer_endpoint_owner.cc',
+                   root/'src/compute/cuda/frame_endpoint_owner.h',
+                   root/'src/compute/cuda/frame_endpoint_owner.cc']
         # Record the unchanged native headers' canonical origins, never claim
         # that an ordinary generated view is a separate Git source checkout.
         headers = list((view.root/'kernel/tools/xdev_ext_mech/lib').glob('*.h'))

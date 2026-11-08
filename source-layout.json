@@ -10223,33 +10223,141 @@
       "source": "tests/network/count_fifo/typed-data-v1.inverse.stdout",
       "logical_path": "tests/network/count_fifo/typed-data-v1.inverse.stdout"
     },
-    {"source":"tests/compute/ce/random_target/README.md","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/README.md"},
-    {"source":"tests/compute/ce/random_target/stage1.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/stage1.c"},
-    {"source":"tests/compute/ce/random_target/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/run.py"},
-    {"source":"tests/compute/ce/random_target/runtime_validate.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.c"},
-    {"source":"tests/compute/ce/random_target/runtime_validate.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.py"},
-    {"source":"tests/compute/ce/random_target/range_lease.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.c"},
-    {"source":"tests/compute/ce/random_target/range_lease.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/range_lease.py"},
-    {"source":"tests/compute/ce/random_target/actual_entry.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.c"},
-    {"source":"tests/compute/ce/random_target/actual_entry.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.py"},
-    {"source":"tests/compute/ce/random_target/request_builders.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.c"},
-    {"source":"tests/compute/ce/random_target/request_builders.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_builders.py"},
-    {"source":"tests/compute/ce/random_target/request_prepare.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/random_target/request_prepare.c"},
-    {"source":"tests/integration/nvme_ce_random/contract_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract_test.c"},
-    {"source":"tests/integration/nvme_ce_random/control_test.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/control_test.py"},
-    {"source":"tests/integration/nvme_ce_random/test_expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_expected.py"},
-    {"source":"tests/integration/nvme_ce_random/contract.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract.h"},
-    {"source":"tests/integration/nvme_ce_random/expected.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/expected.py"},
-    {"source":"tests/integration/nvme_ce_random/private_loader.h","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.h"},
-    {"source":"tests/integration/nvme_ce_random/private_loader.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.c"},
-    {"source":"tests/integration/nvme_ce_random/loader_check.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/loader_check.c"},
-    {"source":"tests/integration/nvme_ce_random/driver.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/driver.c"},
-    {"source":"tests/integration/nvme_ce_random/build.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/build.py"},
-    {"source":"tests/integration/nvme_ce_random/run.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/run.py"},
-    {"source":"tests/integration/nvme_ce_random/Makefile","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/Makefile"},
-    {"source":"tests/integration/nvme_ce_random/test_native_bounds.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_native_bounds.py"},
-    {"source":"tests/integration/nvme_ce_random/key_end_test.c","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/key_end_test.c"},
-    {"source":"tests/integration/nvme_ce_random/test_generator.py","component":"linux","native_path":"tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"},
+    {
+      "source": "tests/compute/ce/random_target/README.md",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/README.md"
+    },
+    {
+      "source": "tests/compute/ce/random_target/stage1.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/stage1.c"
+    },
+    {
+      "source": "tests/compute/ce/random_target/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/run.py"
+    },
+    {
+      "source": "tests/compute/ce/random_target/runtime_validate.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.c"
+    },
+    {
+      "source": "tests/compute/ce/random_target/runtime_validate.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/runtime_validate.py"
+    },
+    {
+      "source": "tests/compute/ce/random_target/range_lease.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/range_lease.c"
+    },
+    {
+      "source": "tests/compute/ce/random_target/range_lease.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/range_lease.py"
+    },
+    {
+      "source": "tests/compute/ce/random_target/actual_entry.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.c"
+    },
+    {
+      "source": "tests/compute/ce/random_target/actual_entry.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/actual_entry.py"
+    },
+    {
+      "source": "tests/compute/ce/random_target/request_builders.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/request_builders.c"
+    },
+    {
+      "source": "tests/compute/ce/random_target/request_builders.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/request_builders.py"
+    },
+    {
+      "source": "tests/compute/ce/random_target/request_prepare.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/random_target/request_prepare.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/contract_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract_test.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/control_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/control_test.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/test_expected.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_expected.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/contract.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/contract.h"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/expected.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/expected.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/private_loader.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.h"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/private_loader.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/private_loader.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/loader_check.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/loader_check.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/driver.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/driver.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/build.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/build.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/run.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/run.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/Makefile",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/Makefile"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/test_native_bounds.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_native_bounds.py"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/key_end_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/key_end_test.c"
+    },
+    {
+      "source": "tests/integration/nvme_ce_random/test_generator.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_mech/nvme_ce_random/test_generator.py"
+    },
     {
       "source": "tests/storage/nvme/blocktable/guest/parallel.h",
       "component": "linux",
@@ -10293,6 +10401,70 @@
     {
       "source": "tests/core/lifecycle/recovery/mutations.py",
       "logical_path": "tests/core/lifecycle/recovery/mutations.py"
+    },
+    {
+      "source": "src/compute/cuda/frame_endpoint_owner.cc",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.cc"
+    },
+    {
+      "source": "src/compute/cuda/frame_endpoint_owner.h",
+      "logical_path": "src/compute/cuda/frame_endpoint_owner.h"
+    },
+    {
+      "source": "src/lib/libxdev_ext_frame_endpoint.h",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/libxdev_ext_frame_endpoint.h"
+    },
+    {
+      "source": "src/lib/xdev_ext_frame_endpoint.c",
+      "component": "linux",
+      "native_path": "tools/xdev_ext_mech/lib/xdev_ext_frame_endpoint.c"
+    },
+    {
+      "source": "tests/benchmarks/tp/test_tp_ce_bpf.c",
+      "logical_path": "tests/benchmarks/tp/test_tp_ce_bpf.c"
+    },
+    {
+      "source": "tests/benchmarks/tp/tp_ce_place.bpf.c",
+      "logical_path": "tests/benchmarks/tp/tp_ce_place.bpf.c"
+    },
+    {
+      "source": "tests/compute/tp/frames_boundary.cc",
+      "logical_path": "tests/compute/tp/frames_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frames_test.py",
+      "logical_path": "tests/compute/tp/frames_test.py"
+    },
+    {
+      "source": "tests/compute/tp/ce_place_test.py",
+      "logical_path": "tests/compute/tp/ce_place_test.py"
+    },
+    {
+      "source": "tests/compute/tp/eval/test_driver_frames.py",
+      "logical_path": "tests/compute/tp/eval/test_driver_frames.py"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_boundary.cc",
+      "logical_path": "tests/compute/tp/frame_owner_boundary.cc"
+    },
+    {
+      "source": "tests/compute/tp/frame_owner_test.py",
+      "logical_path": "tests/compute/tp/frame_owner_test.py"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.c"
+    },
+    {
+      "source": "tests/core/library/frame_endpoint_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_lib/frame_endpoint_test.py"
+    },
+    {
+      "source": "tests/compute/tp/placement_contract_boundary.c",
+      "logical_path": "tests/compute/tp/placement_contract_boundary.c"
     }
   ]
 }

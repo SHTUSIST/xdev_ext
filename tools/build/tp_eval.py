@@ -31,6 +31,8 @@ def main(argv=None):
     inputs += list((root/'src/compute/collectives').glob('*.h'))
     inputs += [root/'src/compute/cuda/peer_endpoint_owner.h',
                root/'src/compute/cuda/peer_endpoint_owner.cc',root/'src/lib/libxdev_ext.h',root/'src/lib/libxdev_ext_peer_message.h',
+               root/'src/compute/cuda/frame_endpoint_owner.h',root/'src/compute/cuda/frame_endpoint_owner.cc',
+               root/'src/lib/libxdev_ext_frame_endpoint.h',source/'tp_ce_place.bpf.c',
                root/'src/compute/cuda/libxdev_ext_cuda.h',sdk/'include/cuda.h']
     inputs += list((root/'src/core/include/uapi/linux').glob('xdev_ext*.h'))
     def run(command):
