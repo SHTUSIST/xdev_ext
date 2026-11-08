@@ -200,9 +200,9 @@ class GuestGpuWiring(unittest.TestCase):
         # Positional order in the guest: CYCLES ENUMERATE ECHO POLL.
         self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" '
                       '"${tb_nhi_selfloop_echo:-0}" "${tb_nhi_poll:-0}"', self.script)
-        self.assertIn('printf \'tb_nhi_poll=%s\\n\' "$TB_NHI_POLL" >>"$ROOT/opt/xdev_ext/zc.env"', self.script)
+        self.assertIn('printf \'tb_nhi_poll=%s\\n\' "${TB_NHI_POLL:-0}" >>"$ROOT/opt/xdev_ext/zc.env"', self.script)
         # The poll lengthens the guest; the QEMU limit grows with it.
-        self.assertIn('QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + TB_NHI_POLL))', self.script)
+        self.assertIn('QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + ${TB_NHI_POLL:-0}))', self.script)
         self.assertIn('for app in seq tr od; do ln -sf /bin/busybox "$ROOT/bin/$app"; done', self.script)
         keep = 'grep -E \'^XDEV_EXT_TB_NHI_ENUM \' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true'
         self.assertIn(keep, self.script)

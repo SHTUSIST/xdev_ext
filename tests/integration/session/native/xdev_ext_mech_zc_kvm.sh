@@ -185,7 +185,7 @@ if [[ -n "$MECHANISM_VARIANTS_TIMEOUT" ]]; then QEMU_TIMEOUT_SECONDS=$MECHANISM_
 # GPU guests boot GSP firmware, CUDA and four real-GPU cases before the
 # normal campaign; give them their own bounded budget.
 if (( ${GPU:-0} )); then QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + 450)); fi
-QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + TB_NHI_POLL))
+QEMU_TIMEOUT_SECONDS=$((QEMU_TIMEOUT_SECONDS + ${TB_NHI_POLL:-0}))
 # Campaign length is independent of the bounded in-flight pool/window.
 [[ "$GROUP_COUNT" =~ ^[1-9][0-9]{0,3}$ && "$GROUP_COUNT" -le 1024 ]]
 [[ -n "$DEPTH" ]] || DEPTH=$((RELIABLE ? 8 : (GROUP_COUNT < 64 ? GROUP_COUNT : 64)))
@@ -744,7 +744,7 @@ printf 'lifecycle=%s\nfence_check=%s\n' "$LIFECYCLE" "$FENCE_CHECK" >>"$EV/prove
 printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
-printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\ntb_nhi_poll=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" "$TB_NHI_POLL" >>"$EV/provenance.txt"
+printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\ntb_nhi_poll=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" "${TB_NHI_POLL:-0}" >>"$EV/provenance.txt"
 printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
@@ -1130,7 +1130,7 @@ printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_enumerate=%s\n' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
-printf 'tb_nhi_poll=%s\n' "$TB_NHI_POLL" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'tb_nhi_poll=%s\n' "${TB_NHI_POLL:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
