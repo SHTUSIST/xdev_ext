@@ -2976,8 +2976,16 @@
       "logical_path": "tests/eval/nvme_gpu/ce_vmm_probe_check.h"
     },
     {
+      "source": "tests/benchmarks/nvme_gpu/ce_submit_diag.c",
+      "logical_path": "tests/eval/nvme_gpu/ce_submit_diag.c"
+    },
+    {
       "source": "tests/benchmarks/nvme_gpu/test_ce_probe.py",
       "logical_path": "tests/eval/nvme_gpu/test_ce_probe.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_submit_diag.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_submit_diag.py"
     },
     {
       "source": "tests/benchmarks/nvme_nic/Makefile",
