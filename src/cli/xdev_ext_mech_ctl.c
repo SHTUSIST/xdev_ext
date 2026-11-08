@@ -733,6 +733,24 @@ static int ctl_nic_accounting(int ring, __u64 session,
 	};
 	return ctl_mech(ring, XDEV_EXT_MECH_OP_TRANSPORT_STATS, (uintptr_t)stats);
 }
+/*
+ * --close-inflight closed the session's own ring (ring < 0): read the
+ * accounting on a fresh ring, and treat a session freed meanwhile as freed.
+ */
+static int ctl_nic_accounting_any_ring(int ring, __u64 session,
+				       struct xdev_ext_mech_transport_stats_v3 *stats,
+				       bool *freed)
+{
+	int fresh = ring >= 0 ? ring : ctl_ring_open();
+	int ret;
+
+	if (fresh < 0)
+		return fresh;
+	ret = ctl_nic_accounting(fresh, session, stats);
+	if (fresh != ring)
+		close(fresh);
+	return ring >= 0 ? ret : xdev_ext_mech_ctl_exit_accounting(ret, freed);
+}
 static void ctl_print_nic_accounting(__u32 path,
 				     const struct xdev_ext_mech_transport_stats_v3 *s)
 {
@@ -1629,12 +1647,14 @@ static int cmd_nic_nvme(struct ctl_opts *o)
 		ctl_print_stats(&s);
 	if (!freed) {
 		if (!o->reliable) {
-			if (ctl_nic_accounting(r.ring, r.session, &accounting)) {
+			if (ctl_nic_accounting_any_ring(r.ring, r.session, &accounting,
+							&freed)) {
 				verdict = CTL_FAIL;
 				goto out;
 			}
 		}
-		ctl_print_nic_accounting(path, &accounting);
+		if (!freed)
+			ctl_print_nic_accounting(path, &accounting);
 	}
 out:
 	if (xdev_ext_xsk_redirect_is_active(&redirect))

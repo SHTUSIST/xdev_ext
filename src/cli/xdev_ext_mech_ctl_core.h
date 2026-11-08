@@ -715,6 +715,19 @@ static inline bool xdev_ext_mech_ctl_report_ring_exit(char *buf, size_t size,
 		s ? xdev_ext_mech_ctl_state_name(s->state) : "FREED");
 }
 
+/*
+ * NIC accounting read after the session's ring closed: the session may be
+ * freed in between, which is the same outcome as freed before the read.
+ */
+static inline int xdev_ext_mech_ctl_exit_accounting(int ret, bool *freed)
+{
+	if (ret == -ENOENT) {
+		*freed = true;
+		return 0;
+	}
+	return ret;
+}
+
 /* The TX device went away under the session: it stopped with -ENXIO. */
 static inline bool xdev_ext_mech_ctl_report_unbind(char *buf, size_t size,
 					      const struct xdev_ext_mech_stats *s)
