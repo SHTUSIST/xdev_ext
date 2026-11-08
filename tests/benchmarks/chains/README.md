@@ -167,6 +167,75 @@ depth=1 handoff and specified-depth whole windows only. It does not provide
 sustained per-batch pipelining or a throughput comparison, and software or
 mixed-device correctness does not establish physical NVMe performance.
 
+#### Shared-pool acceptance contract
+
+A successful window must report the expected session ID and exact cumulative
+`batches_done`, `published`, `submitted[0]` and `completed[0]` counts. It must
+remain ACTIVE with no inflight, aborted or sequestered work and no errors,
+rejects, protocol errors, timeouts or recycling. An eventfd wake by itself is
+not a handoff: STOP and errors can also wake a waiter. The two single-stage
+sessions admit no other work, which makes exact counts appropriate here.
+
+Cleanup requires both successful synchronous STOP_REPORT calls and valid
+report size/version, matching envelope/statistics/transport identities,
+STOPPED state and zero inflight/sequestered work. A failed call or contradictory
+report is insufficient permission to close shared resources. The qualification
+fails and retains its owner on uncertain delivery or teardown; this conservative
+policy does not infer safety from a later notification or timeout.
+
+The ownership protocol is A returning explicitly selected frames to USER and
+B borrowing those indices with another START. It has no atomic transfer to a
+designated receiver. A third session can win the intervening borrow; frame
+indices alone also carry no producer generation or data provenance. This
+coordinator supplies exclusive admission, exact window accounting and byte
+validation. Host zero-copy here means reusing the same registered host pages
+without CPU staging; H2D still transfers their bytes into GPU memory.
+
+Keep the following evidence layers separate in every acceptance record:
+
+| Layer and entry | Passing establishes | Outside its scope |
+|---|---|---|
+| CPU bounded lifecycle model, `tests/core/lifecycle/model/run.sh` | Explored lifecycle/custody transitions and detection of its seeded defects | Unbounded executions, kernel scheduling, syscalls, devices |
+| CPU actual-source fixtures, `ordered_frames_worker_test.py`, UMEM `make run`, `test_two_session.py` | Real extracted worker/coordinator decisions, actual UMEM provider/reference code and lifecycle helpers at controlled boundaries | Real pinning, USER grants, kernel locks, asynchronous DMA and visibility |
+| KVM kernel USER guest, [sharedpool_session_guest](../../compute/user_stage/guest/sharedpool_session.md) | Real same-ring borrowing, grants, rejection, reborrow and STOP isolation with exact metadata and payload/guard oracles | NVMe/CE data movement; the non-strict USER cases also exclude writers continuing after cancellation |
+| KVM software CE plus the two-session entry | Runtime handoff and copied bytes through the declared software or emulated device path | Physical NVMe or GPU DMA, hardware coherency and performance |
+| Physical NVMe plus native GPU CE, the same two-session entry | Exact GPU readback for each required input version on the recorded hardware/bindings | Untested reset/late-DMA faults, other coherency platforms, sustained pipeline throughput |
+
+The CPU suites can run from the canonical checkout:
+
+```sh
+python3 tools/run.py --cwd tests/core/lifecycle/model sh run.sh
+python3 tools/test.py tests/core/lifecycle/runtime/ordered_frames_worker_test.py
+python3 tools/run.py --cwd tests/core/memory/umem make run
+python3 tools/test.py tests/compute/user_stage/test_sharedpool_session.py
+python3 tools/run.py --cwd tests/benchmarks/chains python3 test_two_session.py -v
+```
+
+The worker fixtures include cross-session returned-template STOP, duplicate
+indices, a busy loan after a free prefix, and UNKNOWN quarantine with a disjoint
+session still running. The UMEM fixture checks shared custody/lifecycle identity
+and B retaining its pool after UMEM unregister and A's provider release; it does
+not execute ring exit. The coordinator fixture injects incomplete/excess and
+wrong-session completion reports, uncertain START, late completion at cleanup,
+UNKNOWN/failed STOP and malformed successful STOP reports. Its simulated device
+copy and counter updates are not a native completion or kernel custody proof.
+
+A hardware acceptance record must identify the kernel and test revisions,
+NVMe namespace and GPU/CE binding, actual backend, geometry, frame lists and
+input/reference bytes. Run depth one, multiple outstanding groups and a shorter
+final window; check every required version and every byte before reuse. Record
+each side's exact completion/publication counts and synchronous release outcome.
+An emulated, software, mixed, unavailable or skipped device must remain labeled
+as such. Fault-injection runs must additionally show that UNKNOWN pages stay
+unavailable and that a late completion cannot publish into a new owner.
+
+Sustained per-batch operation additionally needs addressable batch completion
+records (frame list, generation, valid length and outcome), incremental
+admission, cross-session credits and a last-consumer boundary before reuse.
+Receiver reservation or explicitly exclusive userspace scheduling must close
+the A-to-USER-to-B gap. Quarantine capacity and device-reset recovery require a
+separate policy; a timeout cannot turn uncertain DMA into a reusable frame.
+
 Comparable session and USER results label raw `cost.syscalls` as
 `syscalls_scope: main-thread-explicit`. The library's USER helper syscalls
 are not included, and a whole-arm syscall count is not provided. This count

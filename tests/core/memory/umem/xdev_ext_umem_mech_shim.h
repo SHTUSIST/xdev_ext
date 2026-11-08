@@ -78,6 +78,7 @@ struct xdev_ext_mech_pool {
 	const struct xdev_ext_mech_pool_ops *ops;
 	void *priv;
 	u8 *state;
+	struct xdev_ext_mech_life *life;
 	struct page **pages;
 	void *vaddr;
 	u64 size;

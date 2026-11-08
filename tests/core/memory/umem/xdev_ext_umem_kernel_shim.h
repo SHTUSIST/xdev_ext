@@ -15,6 +15,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
+#include "../../../../io_uring/xdev_ext_mech_life_pool.h"
+#endif
+
 #define __user
 #define GFP_KERNEL 0
 #define PAGE_SIZE 4096UL
@@ -302,6 +306,12 @@ static inline void *kvmalloc_array(size_t count, size_t size, int flags)
 	return calloc(count, size);
 }
 
+static inline void *kvcalloc(size_t count, size_t size, int flags)
+{
+	(void)flags;
+	return calloc(count, size);
+}
+
 static inline void kvfree(void *ptr)
 {
 	(void)ptr;
@@ -372,6 +382,10 @@ struct io_xdev_ext_umem {
 #ifdef CONFIG_XDEV_EXT_MECH
 	u8 *mech_state;
 	bool legacy_used;
+#endif
+#if defined(XDEV_EXT_LIFECYCLE_SM) || defined(CONFIG_XDEV_EXT_MECH)
+	struct xdev_ext_mech_life_pool frame_pool;
+	struct xdev_ext_mech_life *frames;
 #endif
 };
 

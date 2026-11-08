@@ -4,6 +4,7 @@
 #include <errno.h>
 #include <getopt.h>
 #include <poll.h>
+#include <pthread.h>
 #include <sched.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -36,6 +37,7 @@
 struct sp_hold_snapshot {
 	struct xdev_ext_user_batch batch;
 	struct xdev_ext_mech_stats stats;
+	__u32 expected_indices[SP_NR_FRAMES];
 	__u32 ready_prod, ready_cons, done_prod, done_cons;
 	__u64 live_ticket;
 	unsigned char frame_bytes[SP_HOLD_BYTES];
@@ -61,7 +63,9 @@ static bool sp_hold_valid(const struct sp_hold_snapshot *s)
 	for (i = 0; i < SP_NR_FRAMES; i++) {
 		const struct xdev_ext_user_frame *f = &s->batch.f[i];
 
-		if (f->umem_addr != (i ? 4ULL : 1ULL) * SP_FRAME_SIZE ||
+		if (s->expected_indices[i] >= SP_POOL_FRAMES ||
+		    s->expected_indices[0] == s->expected_indices[1] ||
+		    f->umem_addr != (__u64)s->expected_indices[i] * SP_FRAME_SIZE ||
 		    f->data_off != SP_HDR_ROOM || f->capacity != SP_SEG_LEN ||
 		    f->data_len != (i ? SP_GROUP_BYTES - SP_SEG_LEN : SP_SEG_LEN) ||
 		    f->out_len != f->data_len || !s->batch.data[i])
@@ -89,6 +93,7 @@ static bool sp_held_equal(const struct sp_hold_snapshot *a, const struct sp_hold
 		SAME(stats.submitted[i]); SAME(stats.completed[i]);
 	}
 	for (i = 0; i < SP_NR_FRAMES; i++) {
+		SAME(expected_indices[i]);
 		SAME(batch.f[i].umem_addr); SAME(batch.f[i].data_off);
 		SAME(batch.f[i].data_len); SAME(batch.f[i].capacity);
 		SAME(batch.f[i].out_len); SAME(batch.data[i]);
@@ -99,11 +104,13 @@ static bool sp_held_equal(const struct sp_hold_snapshot *a, const struct sp_hold
 
 struct sp_side {
 	__u64 id;
+	__u32 indices[SP_NR_FRAMES];
 	int efd;
 	struct xdev_ext_user_stage *user;
 	void *control;
 	struct xdev_ext_user_ring_offsets off;
 	struct xdev_ext_user_batch batch;
+	struct xdev_ext_mech_stats stop_stats;
 	uint64_t hold_end;
 	bool holding, released, stop_attempted;
 	int stop_error;
@@ -219,6 +226,8 @@ static int sp_setup(struct sp_owner *o, const char *obj_path)
 		 * A global link fd must never be passed as a PRIVATE selector. */
 		int selectors[1] = { -1 };
 
+		s->indices[0] = 1;
+		s->indices[1] = 4;
 		s->efd = eventfd(0, EFD_CLOEXEC | EFD_NONBLOCK);
 		if (s->efd < 0)
 			return -errno;
@@ -250,14 +259,13 @@ static int sp_setup(struct sp_owner *o, const char *obj_path)
 
 static int sp_start(struct sp_owner *o, struct sp_side *s)
 {
-	const __u32 indices[SP_NR_FRAMES] = { 1, 4 };
 	struct xdev_ext_mech_notify_arm arm = {
 		.session_id = s->id, .batches_target = 1, .published_target = SP_NR_FRAMES,
 	};
 	struct xdev_ext_mech_start start = {
 		.session_id = s->id, .nr_batches = 1, .first_seq = 1,
 		.flags = XDEV_EXT_MECH_START_F_USER_FRAMES | XDEV_EXT_MECH_START_F_ORDERED_FRAMES,
-		.nr_user_frames = SP_NR_FRAMES, .user_frames = (uintptr_t)indices,
+		.nr_user_frames = SP_NR_FRAMES, .user_frames = (uintptr_t)s->indices,
 	};
 	int ret = sp_remaining(o, NULL);
 
@@ -267,7 +275,8 @@ static int sp_start(struct sp_owner *o, struct sp_side *s)
 	if (!ret) {
 		ret = sp_mech(o, XDEV_EXT_MECH_OP_START, (uintptr_t)&start);
 		if (ret && ret != -EBUSY)
-			o->unsafe = true; /* cannot infer refusal from uncertain delivery */
+			/* The concurrent START case has two control threads. */
+			__atomic_store_n(&o->unsafe, true, __ATOMIC_RELAXED);
 	}
 	return ret;
 }
@@ -282,6 +291,7 @@ static int sp_observe(const struct sp_owner *o, const struct sp_side *s,
 
 	memset(out, 0, sizeof(*out));
 	out->batch = s->batch;
+	memcpy(out->expected_indices, s->indices, sizeof(out->expected_indices));
 	for (;;) {
 		ret = sp_remaining(o, s);
 		if (ret < 0)
@@ -440,8 +450,13 @@ static int sp_stop(struct sp_owner *o, struct sp_side *s)
 	fprintf(stderr, "SHAREDPOOL_STOP id=%llu result=%d\n", (unsigned long long)s->id, ret);
 	if (ret)
 		o->unsafe = true;
-	else
+	else {
+		s->stop_stats = report.stats;
 		s->released = true;
+		/* Non-strict USER STOP revokes the grant, not raw CPU mappings.
+		 * Every caller must have stopped payload access before STOP. */
+		s->holding = false;
+	}
 	return ret;
 }
 
@@ -484,11 +499,126 @@ static int sp_cleanup(struct sp_owner *o)
 	return ret;
 }
 
-static int sp_case(const char *obj_path, bool busy_start)
+enum sp_case_kind {
+	SP_RETURNED_STOP,
+	SP_BUSY_START,
+	SP_DUPLICATE_START,
+	SP_CONCURRENT_START,
+	SP_STALE_COMPLETION,
+	SP_EARLY_STOP,
+	SP_CASE_COUNT,
+};
+
+static const char *const sp_case_names[SP_CASE_COUNT] = {
+	"returned-stop", "busy-start", "duplicate-start", "concurrent-start",
+	"stale-completion", "early-stop",
+};
+
+struct sp_start_thread {
+	struct sp_owner *owner;
+	struct sp_side *side;
+	int *go;
+	int result;
+};
+
+static void *sp_start_thread(void *arg)
+{
+	struct sp_start_thread *t = arg;
+	int go;
+
+	while (!(go = __atomic_load_n(t->go, __ATOMIC_ACQUIRE)))
+		sched_yield();
+	t->result = go < 0 ? -ECANCELED : sp_start(t->owner, t->side);
+	return NULL;
+}
+
+/* The winning grant remains held until both START syscalls have returned.
+ * Scheduling order may vary; exactly one success and one EBUSY is mandatory. */
+static int sp_start_pair(struct sp_owner *o, unsigned int *winner)
+{
+	pthread_t thread[2];
+	int go = 0, ret = 0, error;
+	unsigned int nr = 0;
+	struct sp_start_thread args[2] = {
+		{ .owner = o, .side = &o->side[0], .go = &go },
+		{ .owner = o, .side = &o->side[1], .go = &go },
+	};
+
+	for (nr = 0; nr < 2; nr++) {
+		error = pthread_create(&thread[nr], NULL, sp_start_thread, &args[nr]);
+		if (error) {
+			ret = -error;
+			break;
+		}
+	}
+	__atomic_store_n(&go, ret ? -1 : 1, __ATOMIC_RELEASE);
+	for (unsigned int i = 0; i < nr; i++) {
+		error = pthread_join(thread[i], NULL);
+		if (error && !ret)
+			ret = -error;
+	}
+	if (ret)
+		return ret;
+	fprintf(stderr, "SHAREDPOOL_START_PAIR a=%d b=%d\n", args[0].result, args[1].result);
+	if (!args[0].result && args[1].result == -EBUSY)
+		*winner = 0;
+	else if (!args[1].result && args[0].result == -EBUSY)
+		*winner = 1;
+	else
+		return -EPROTO;
+	return 0;
+}
+
+/* A duplicate completion is deliberately sent to A's own USER stage. A
+ * completion ticket is scoped to its stage fd, not a cross-session token. */
+static int sp_stale_completion(struct sp_owner *o, struct sp_side *a)
+{
+	const struct xdev_ext_user_ring_hdr *hdr = (void *)((char *)a->control + a->off.hdr);
+	struct xdev_ext_mech_stats stats;
+	uint64_t count;
+	int ret;
+
+	/* The original completion must have left this one-entry ring. */
+	while (__atomic_load_n(&hdr->done_cons, __ATOMIC_ACQUIRE) != 1) {
+		if (sp_remaining(o, NULL) < 0)
+			return -ETIMEDOUT;
+		sched_yield();
+	}
+	ret = xdev_ext_user_stage_complete(a->user, &a->batch, 0);
+	if (ret)
+		return ret;
+	for (;;) {
+		if (sp_remaining(o, NULL) < 0)
+			return -ETIMEDOUT;
+		ret = sp_stats(o, a, &stats);
+		if (ret)
+			return ret;
+		if ((stats.rejects && __atomic_load_n(&hdr->done_cons, __ATOMIC_ACQUIRE) == 2) ||
+		    stats.state != XDEV_EXT_MECH_SESSION_ACTIVE || stats.last_err || stats.sequestered)
+			break;
+		sched_yield();
+	}
+	if (stats.rejects != 1 || stats.state != XDEV_EXT_MECH_SESSION_ACTIVE ||
+	    stats.inflight || stats.batches_done != 1 || stats.batches_abort ||
+	    stats.published != SP_NR_FRAMES || stats.last_err || stats.sequestered ||
+	    stats.protocol_err || stats.timeouts || stats.submitted[0] != 1 ||
+	    stats.completed[0] != 1 ||
+	    __atomic_load_n(&sp_slot(a)->ticket, __ATOMIC_ACQUIRE) ||
+	    __atomic_load_n(&hdr->done_prod, __ATOMIC_ACQUIRE) != 2 ||
+	    __atomic_load_n(&hdr->done_cons, __ATOMIC_ACQUIRE) != 2)
+		return -EPROTO;
+	/* A's terminal notification was already consumed by sp_finish(). */
+	if (read(a->efd, &count, sizeof(count)) != -1 || errno != EAGAIN)
+		return -EPROTO;
+	return 0;
+}
+
+static int sp_case(const char *obj_path, enum sp_case_kind kind)
 {
 	struct sp_owner o = { .ring = -1, .side = { { .efd = -1 }, { .efd = -1 } } };
 	struct sp_side *a = &o.side[0], *b = &o.side[1];
 	struct sp_hold_snapshot before, after;
+	unsigned int winner;
 	int fd_before = eval_fd_count(), ret, cleanup;
 	uint64_t now;
 
@@ -503,17 +633,27 @@ static int sp_case(const char *obj_path, bool busy_start)
 		goto out;
 	}
 	o.case_end = now + SP_CASE_BUDGET_MS;
-	ret = sp_start(&o, a);
+	if (kind == SP_CONCURRENT_START) {
+		ret = sp_start_pair(&o, &winner);
+		if (!ret) {
+			a = &o.side[winner];
+			b = &o.side[winner ^ 1U];
+		}
+	} else {
+		ret = sp_start(&o, a);
+	}
 	if (!ret)
 		ret = sp_take(&o, a, &before);
 	if (ret)
 		goto out;
-	if (busy_start) {
-		ret = sp_start(&o, b);
+	if (kind == SP_BUSY_START || kind == SP_DUPLICATE_START) {
+		ret = sp_start(&o, kind == SP_DUPLICATE_START ? a : b);
 		if (ret != -EBUSY) {
 			ret = -EPROTO;
 			goto out;
 		}
+	}
+	if (kind == SP_BUSY_START || kind == SP_DUPLICATE_START || kind == SP_CONCURRENT_START) {
 		ret = sp_idle(&o, b);
 		if (!ret)
 			ret = sp_observe(&o, a, &after);
@@ -522,6 +662,28 @@ static int sp_case(const char *obj_path, bool busy_start)
 		if (ret)
 			goto out;
 	}
+	if (kind == SP_EARLY_STOP) {
+		/* A's CPU owner is this thread and has stopped all payload access.
+		 * B holds a disjoint grant; STOP must cancel A without touching B. */
+		b->indices[0] = 2;
+		b->indices[1] = 5;
+		ret = sp_start(&o, b);
+		if (!ret)
+			ret = sp_take(&o, b, &before);
+		if (!ret)
+			ret = sp_stop(&o, a);
+		if (!ret && (a->stop_stats.batches_done || a->stop_stats.batches_abort != 1 ||
+			     a->stop_stats.published != SP_NR_FRAMES ||
+			     __atomic_load_n(&sp_slot(a)->ticket, __ATOMIC_ACQUIRE)))
+			ret = -EPROTO;
+		if (!ret)
+			ret = sp_observe(&o, b, &after);
+		if (!ret && !sp_held_equal(&before, &after))
+			ret = -EPROTO;
+		if (!ret)
+			ret = sp_finish(&o, b);
+		goto out;
+	}
 	ret = sp_finish(&o, a);
 	if (!ret)
 		ret = sp_start(&o, b);
@@ -529,10 +691,10 @@ static int sp_case(const char *obj_path, bool busy_start)
 		ret = sp_take(&o, b, &before);
 	if (ret)
 		goto out;
-	if (!busy_start) {
+	if (kind == SP_RETURNED_STOP || kind == SP_STALE_COMPLETION) {
 		ret = sp_remaining(&o, b);
 		if (ret > 0)
-			ret = sp_stop(&o, a);
+			ret = kind == SP_RETURNED_STOP ? sp_stop(&o, a) : sp_stale_completion(&o, a);
 		if (!ret)
 			ret = sp_observe(&o, b, &after);
 		if (!ret && !sp_held_equal(&before, &after))
@@ -552,7 +714,7 @@ out:
 	if (!ret && o.case_end && sp_remaining(&o, NULL) < 0)
 		ret = -ETIMEDOUT;
 	fprintf(stderr, "SHAREDPOOL_CASE case=%s result=%d\n",
-		busy_start ? "busy-start" : "returned-stop", ret);
+		sp_case_names[kind], ret);
 	return ret;
 }
 
@@ -564,7 +726,7 @@ int main(int argc, char **argv)
 		{ NULL, 0, NULL, 0 },
 	};
 	const char *which = NULL, *obj_path = NULL;
-	int opt, ret = 0;
+	int opt, ret = 0, first = 0, last = SP_CASE_COUNT;
 
 	while ((opt = getopt_long(argc, argv, "", options, NULL)) != -1) {
 		if (opt == 'c')
@@ -574,15 +736,19 @@ int main(int argc, char **argv)
 		else
 			return 2;
 	}
-	if (!which || !obj_path || optind != argc ||
-	    (strcmp(which, "all") && strcmp(which, "returned-stop") && strcmp(which, "busy-start"))) {
-		fprintf(stderr, "usage: sharedpool_session_guest --case returned-stop|busy-start|all --plan-obj PATH\n");
+	if (which && strcmp(which, "all")) {
+		for (first = 0; first < SP_CASE_COUNT; first++)
+			if (!strcmp(which, sp_case_names[first]))
+				break;
+		last = first + 1;
+	}
+	if (!which || !obj_path || optind != argc || first >= SP_CASE_COUNT) {
+		fprintf(stderr, "usage: sharedpool_session_guest --case returned-stop|busy-start|duplicate-start|"
+			"concurrent-start|stale-completion|early-stop|all --plan-obj PATH\n");
 		return 2;
 	}
-	if (!strcmp(which, "all") || !strcmp(which, "returned-stop"))
-		ret = sp_case(obj_path, false);
-	if (!ret && (!strcmp(which, "all") || !strcmp(which, "busy-start")))
-		ret = sp_case(obj_path, true);
+	for (int i = first; i < last && !ret; i++)
+		ret = sp_case(obj_path, i);
 	printf("SHAREDPOOL_KERNEL_QUALIFICATION=%s case=%s\n", ret ? "FAIL" : "PASS", which);
 	return ret ? 1 : 0;
 }
