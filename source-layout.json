@@ -744,6 +744,11 @@
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
     },
     {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-sync.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-sync.h"
+    },
+    {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-memory.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-memory.h"
@@ -3813,6 +3818,11 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_plan_test.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_sync_test.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_sync_test.c"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",

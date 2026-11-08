@@ -30,6 +30,7 @@
 #include "nv-xdev_ext-ce-backend.h"
 #include "nv-xdev_ext-ce-classify.h"
 #include "nv-xdev_ext-ce-plan.h"
+#include "nv-xdev_ext-ce-sync.h"
 #include "nv-xdev_ext-ce-async.h"
 #include "nv-xdev_ext-ce-memory.h"
 
@@ -88,6 +89,8 @@ struct nv_xdev_ext_ce_host {
     struct { u64 late, stale; } stats;
 #ifndef NV_XDEV_EXT_CE_PHYS_ADDR
     struct sg_table sgt;
+    struct nv_xdev_ext_ce_seg *segs;    /* the DMA segments of sgt, in order */
+    u32 nsegs;
 #endif
     struct nv_xdev_ext_ce_async_pool pool;
     struct nv_xdev_ext_ce_async_slot slots[NV_XDEV_EXT_CE_REQUEST_SLOTS];
@@ -127,28 +130,26 @@ static void nv_xdev_ext_ce_event(void *arg, NvU64 watermark)
 #endif
 
 /* A streaming mapping's original segment base is the DMA API handle. Sync
- * only the touched ranges, so disjoint in-flight batches keep their ownership. */
+ * only the touched ranges, so disjoint in-flight batches keep their ownership;
+ * the segments are found by lookup, never by walking the whole mapping. */
 static void nv_xdev_ext_ce_sync(struct nv_xdev_ext_ce_host *h,
     const struct nv_xdev_ext_ce_request *request, bool cpu)
 {
 #ifndef NV_XDEV_EXT_CE_PHYS_ADDR
-    struct scatterlist *sg;
-    u32 i, j;
-    u64 base = 0;
-    for_each_sgtable_dma_sg(&h->sgt, sg, i) {
-        u64 end = base + sg_dma_len(sg);
-        for (j = 0; j < request->n; j++) {
-            u64 start = max(base, request->x[j].host_byte_off);
-            u64 stop = min(end, request->x[j].host_byte_off + request->x[j].len);
-            if (start >= stop) continue;
+    struct nv_xdev_ext_ce_piece p;
+    u32 j;
+    for (j = 0; j < request->n; j++) {
+        u64 off = request->x[j].host_byte_off;
+        u64 stop = off + request->x[j].len;   /* entry_ok bounded both */
+        u32 seg = nv_xdev_ext_ce_seg_first(h->segs, h->nsegs, off);
+        while (nv_xdev_ext_ce_seg_next(h->segs, h->nsegs, &seg, &off, stop, &p)) {
             if (cpu)
-                dma_sync_single_range_for_cpu(h->region->dev, sg_dma_address(sg),
-                    start - base, stop - start, DMA_BIDIRECTIONAL);
+                dma_sync_single_range_for_cpu(h->region->dev, h->segs[p.seg].dma,
+                    p.seg_off, p.len, DMA_BIDIRECTIONAL);
             else
-                dma_sync_single_range_for_device(h->region->dev, sg_dma_address(sg),
-                    start - base, stop - start, DMA_BIDIRECTIONAL);
+                dma_sync_single_range_for_device(h->region->dev, h->segs[p.seg].dma,
+                    p.seg_off, p.len, DMA_BIDIRECTIONAL);
         }
-        base = end;
     }
 #else
     (void)h; (void)request; (void)cpu;
@@ -382,6 +383,8 @@ static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **
     if (rc) goto free_arrays;
     rc = dma_map_sgtable(region->dev, &h->sgt, DMA_BIDIRECTIONAL, 0);
     if (rc) goto free_sg;
+    h->segs = kvmalloc_array(h->sgt.nents, sizeof(*h->segs), GFP_KERNEL);
+    if (!h->segs) { rc = -ENOMEM; goto unmap; }
     for_each_sgtable_dma_sg(&h->sgt, sg, i) {
         u64 off;
         if ((sg_dma_address(sg) | sg_dma_len(sg)) & (PAGE_SIZE - 1)) {
@@ -391,7 +394,10 @@ static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **
             if (page >= nr) { rc = -EINVAL; goto unmap; }
             phys[page++] = sg_dma_address(sg) + off;
         }
+        h->segs[i].dma = sg_dma_address(sg);
+        h->segs[i].end = (u64)page << PAGE_SHIFT;
     }
+    h->nsegs = h->sgt.nents;
     if (page != nr) { rc = -EINVAL; goto unmap; }
     dma_sync_sgtable_for_cpu(region->dev, &h->sgt, DMA_BIDIRECTIONAL);
 #endif
@@ -420,6 +426,7 @@ static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **
     return 0;
 unmap:
 #ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    kvfree(h->segs);
     dma_unmap_sgtable(region->dev, &h->sgt, DMA_BIDIRECTIONAL, 0);
 free_sg:
     sg_free_table(&h->sgt);
@@ -459,6 +466,7 @@ static int nv_xdev_ext_ce_unbind_host(void *host)
 #endif
     cancel_work_sync(&h->progress);
 #ifndef NV_XDEV_EXT_CE_PHYS_ADDR
+    kvfree(h->segs);
     dma_unmap_sgtable(h->region->dev, &h->sgt, DMA_BIDIRECTIONAL, 0);
     sg_free_table(&h->sgt);
 #endif

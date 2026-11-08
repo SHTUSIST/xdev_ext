@@ -149,7 +149,8 @@ static struct harness {
 	int submit_saw_dev_sync_gap;
 	unsigned int dma_map, dma_unmap, sg_alloc, sg_free, dma_bad_dir;
 	void *dma_dev;
-	int dma_mode;               /* 0 merged, 1 split, 2 fail */
+	int dma_mode;               /* 0 merged, 1 split, 2 fail, 3 one scattered segment per page */
+	unsigned int sg_walk;       /* sg_next() calls: scatterlist entries walked */
 	u64 page_iova[MAX_PAGES];
 	unsigned char synced_cpu[MAX_PAGES], synced_dev[MAX_PAGES];
 	unsigned int hrtimer_starts, timer_arms;
@@ -636,7 +637,11 @@ struct sg_table { struct scatterlist *sgl; unsigned int nents, orig_nents; };
 #define sg_dma_address(sg) ((sg)->dma_address)
 #define sg_dma_len(sg) ((sg)->dma_length)
 #define sg_page(sg) ((sg)->page)
-static struct scatterlist *sg_next(struct scatterlist *sg) { return sg->last ? NULL : sg + 1; }
+static struct scatterlist *sg_next(struct scatterlist *sg)
+{
+	__atomic_add_fetch(&H.sg_walk, 1, __ATOMIC_SEQ_CST);
+	return sg->last ? NULL : sg + 1;
+}
 #define for_each_sg(sglist, sg, nr, i) \
 	for ((i) = 0, (sg) = (sglist); (i) < (nr); (i)++, (sg) = sg_next(sg))
 #define for_each_sgtable_sg(sgt, sg, i) for_each_sg((sgt)->sgl, sg, (sgt)->orig_nents, i)
@@ -691,7 +696,15 @@ static int dma_map_sgtable(struct device *dev, struct sg_table *sgt,
 	if (H.dma_mode == 2)
 		return -ENOMEM;
 	/* IOVAs differ from the CPU physical addresses on purpose. */
-	if (H.dma_mode == 1 && n >= 2) {
+	if (H.dma_mode == 3) {
+		/* No two pages adjacent: every page is its own DMA segment. */
+		for (i = 0; i < n; i++) {
+			sgt->sgl[i].dma_address = 0xC00000000ULL + (u64)(n - 1 - i) * 0x10000ULL;
+			sgt->sgl[i].dma_length = PAGE_SIZE;
+			H.page_iova[i] = sgt->sgl[i].dma_address;
+		}
+		sgt->nents = n;
+	} else if (H.dma_mode == 1 && n >= 2) {
 		sgt->sgl[0].dma_address = 0xA00000000ULL;
 		sgt->sgl[0].dma_length = (n - 1) * PAGE_SIZE;
 		sgt->sgl[1].dma_address = 0xB00000000ULL;
@@ -1680,6 +1693,66 @@ static void case_sync(void)
 #endif
 }
 
+static int synced_exactly(const unsigned char *map, u32 first, u32 last, u32 nr)
+{
+	u32 i;
+	for (i = 0; i < nr; i++)
+		if (!!map[i] != (i >= first && i <= last))
+			return 0;
+	return 1;
+}
+
+/* Scattered segments: each request syncs exactly the pages its entry covers. */
+static void case_sync_scattered(void)
+{
+#if VARIANT_IOVA
+	struct fixture fx;
+	H.dma_mode = 3;
+	REQUIRE(bind(&fx, 32) == 0, "bind");
+	memset(H.synced_cpu, 0, sizeof(H.synced_cpu));
+	memset(H.synced_dev, 0, sizeof(H.synced_dev));
+	/* [5*4096 + 100, + 2*4096) lies in pages 5, 6 and 7 */
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 5 * 4096 + 100, 2 * 4096) == 0,
+		"to device");
+	CHECK(!H.submit_saw_dev_sync_gap, "G3: device sync missing before submission");
+	CHECK(synced_exactly(H.synced_dev, 5, 7, 32),
+	      "device sync must cover pages 5..7 only");
+	deliver(H.rm_last);
+	REQUIRE(H.done[1].count == 1 && H.done[1].status == 0, "to-device completion");
+	memset(H.synced_cpu, 0, sizeof(H.synced_cpu));
+	/* [20*4096, + 4096) is page 20 alone */
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_FROM_DEVICE, 20 * 4096, 4096) == 0,
+		"from device");
+	deliver(H.rm_last);
+	REQUIRE(H.done[2].count == 1 && H.done[2].status == 0, "from-device completion");
+	CHECK(synced_exactly(H.done[2].synced_cpu, 20, 20, 32),
+	      "CPU sync before completion must cover page 20 only");
+	common_checks();
+#endif
+}
+
+/*
+ * Cost of one request does not grow with the pool: a one-page request in a
+ * 32-segment pool walks no scatterlist on submit or completion (the former
+ * nv_xdev_ext_ce_sync() visited every DMA segment, twice per batch).
+ */
+static void case_sync_pool_walk(void)
+{
+#if VARIANT_IOVA
+	struct fixture fx;
+	H.dma_mode = 3;
+	REQUIRE(bind(&fx, 32) == 0, "bind");
+	H.sg_walk = 0;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 9 * 4096, 4096) == 0, "submit");
+	deliver(H.rm_last);
+	REQUIRE(H.done[1].count == 1 && H.done[1].status == 0, "completion");
+	CHECK(H.sg_walk <= 2,
+	      "a one-page request walked %u scatterlist entries of a 32-segment pool",
+	      H.sg_walk);
+	common_checks();
+#endif
+}
+
 static void case_host_released_region_failed(void)
 {
     struct fixture fx;
@@ -1906,6 +1979,8 @@ static const struct named_case cases[] = {
 	{ "iova-rm-bind-fail", case_iova_rm_bind_fail },
 	{ "phys-identity", case_phys_identity },
 	{ "sync", case_sync },
+	{ "sync-scattered", case_sync_scattered },
+	{ "sync-pool-walk", case_sync_pool_walk },
 	{ "region-unbind-fail", case_region_unbind_fail },
     { "host-released-region-failed", case_host_released_region_failed },
 	{ "race", case_race },
