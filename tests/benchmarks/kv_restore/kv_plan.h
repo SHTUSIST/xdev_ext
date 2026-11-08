@@ -215,12 +215,24 @@ struct kv_page_piece {
 
 static inline uint64_t kv_page_bytes(const struct kv_block_layout *b)
 {
-	return (uint64_t)b->heads * b->block_size * b->state_bytes;
+	uint64_t p = b->heads;
+
+	/* Zero is an invalid size, never a wrapped product. */
+	if (!b->block_size || !b->state_bytes || p > UINT64_MAX / b->block_size)
+		return 0;
+	p *= b->block_size;
+	if (p > UINT64_MAX / b->state_bytes)
+		return 0;
+	return p * b->state_bytes;
 }
 
 static inline uint64_t kv_block_bytes(const struct kv_block_layout *b)
 {
-	return (uint64_t)b->layers * kv_page_bytes(b);
+	uint64_t page = kv_page_bytes(b);
+
+	if (!b->layers || page > UINT64_MAX / b->layers)
+		return 0;
+	return b->layers * page;
 }
 
 /* A group never splits a page, and a block is whole groups or a group whole blocks. */
@@ -234,6 +246,8 @@ static inline int kv_block_layout_check(const struct kv_block_layout *b, uint32_
 		return -EINVAL;
 	p = kv_page_bytes(b);
 	blk = kv_block_bytes(b);
+	if (!p || !blk)
+		return -EINVAL;
 	if ((g % p && p % g) || (g % blk && blk % g))
 		return -EINVAL;
 	return 0;
@@ -244,7 +258,8 @@ static inline int kv_page_offset(const struct kv_block_layout *b, uint64_t block
 {
 	uint64_t page = kv_page_bytes(b);
 
-	if (layer >= b->layers || block > (UINT64_MAX / page - layer) / b->layers)
+	if (!page || !kv_block_bytes(b) || layer >= b->layers ||
+	    layer > UINT64_MAX / page || block > (UINT64_MAX / page - layer) / b->layers)
 		return -ERANGE;
 	*off = (block * b->layers + layer) * page;
 	return 0;
@@ -254,13 +269,21 @@ static inline int kv_page_offset(const struct kv_block_layout *b, uint64_t block
 static inline int kv_group_pages(const struct kv_block_layout *b, uint64_t group,
 				 uint32_t group_bytes, struct kv_page_piece *out, unsigned cap)
 {
-	uint64_t page = kv_page_bytes(b), start = group * group_bytes, at = start;
+	uint64_t page = kv_page_bytes(b), start, end, at;
 	unsigned n = 0;
 
-	while (at < start + group_bytes) {
+	if (kv_block_layout_check(b, group_bytes))
+		return -EINVAL;
+	if (group > UINT64_MAX / group_bytes)
+		return -ERANGE;
+	start = group * group_bytes;
+	if (start > UINT64_MAX - group_bytes)
+		return -ERANGE;
+	end = start + group_bytes;
+	at = start;
+	while (at < end) {
 		uint64_t idx = at / page, off = at % page;
-		uint64_t len = page - off < start + group_bytes - at ? page - off
-								     : start + group_bytes - at;
+		uint64_t len = page - off < end - at ? page - off : end - at;
 
 		if (n == cap)
 			return -ENOSPC;

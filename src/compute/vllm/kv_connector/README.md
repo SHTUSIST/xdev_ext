@@ -153,6 +153,17 @@ before START keeps the worker. When `KV_BYE` reports `retained` (the kernel
 does not know who owns the DMA), the connector keeps that staging mapping until
 the process exits.
 
+An exception from a scatter launch or completion event can leave GPU work
+in flight. Before reporting a recoverable load failure or issuing another GO,
+the connector synchronizes the device, covering partial side-stream launches
+and sync-mode scatters on the caller's stream. If completion cannot be proven,
+it disables further restores, retains the service, staging and GPU owners, and
+raises a fatal error from the worker hooks. It cannot safely request recompute
+while a previous kernel may still write those cache blocks. A failed fence
+record follows the same retained-ownership rule. Shutdown keeps those owners
+when its background-thread join times out; a later shutdown can retire them
+only after the thread exits and GPU drain succeeds.
+
 The copy kernel (`scatter.py`, Triton) runs one program per 16 tokens and per
 KV head. It addresses vLLM's layer view through the view's own strides, so
 every vLLM KV cache layout works; offsets are 64-bit. `layout.py` defines the
