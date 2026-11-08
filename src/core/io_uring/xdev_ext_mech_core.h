@@ -222,6 +222,7 @@ struct xdev_ext_mech_bstate {
 	__u8 stage;		/* stage index while READY or IN_FLIGHT */
 	__u8 nr_stages;
 	__u8 retries;		/* RETRY edges taken at this stage */
+	__u8 native_sequester;	/* sequestered by the native outcome alone */
 };
 
 static inline void xdev_ext_mech_bstate_init(struct xdev_ext_mech_bstate *b,
@@ -231,6 +232,7 @@ static inline void xdev_ext_mech_bstate_init(struct xdev_ext_mech_bstate *b,
 	b->stage = 0;
 	b->nr_stages = nr_stages > 255 ? 255 : (__u8)nr_stages;
 	b->retries = 0;
+	b->native_sequester = 0;
 }
 
 /* Returns 0 after a legal step, -EINVAL and no change otherwise. */
@@ -514,6 +516,34 @@ static inline bool xdev_ext_mech_group_full(const struct xdev_ext_mech_group *g)
 }
 
 /*
+ * DMA-stop evidence a stage keeps for the native commands it retained after
+ * UNKNOWN outcomes, worst first wins (the values of enum xdev_ext_peer_evidence):
+ * COVERED  the device that received each retained command proved a later stop,
+ *          or the command completed definitely;
+ * PENDING  bound to a device that has not proved one yet;
+ * NEVER    a retained command nothing can prove stopped.
+ */
+#define XDEV_EXT_MECH_EVIDENCE_COVERED	0
+#define XDEV_EXT_MECH_EVIDENCE_PENDING	1
+#define XDEV_EXT_MECH_EVIDENCE_NEVER	2
+
+/*
+ * Why a quarantined session is parked.  evidence counts the sequestered
+ * batches whose only cause was their native outcome, stages the stage
+ * indexes they were sequestered at (each must keep DMA-stop evidence);
+ * unrecoverable records any other cause (a custody failure, a native control
+ * reference, a START handoff, a failed checked unbind).  settled: no worker,
+ * timer or native callback can reach the session any more.
+ */
+struct xdev_ext_mech_qrecovery {
+	__u32 evidence;
+	__u32 stages;		/* bit per stage index */
+	__u32 objects, frames;	/* this session's share of the parked totals */
+	bool unrecoverable;
+	bool settled;
+};
+
+/*
  * Session reference and teardown rules.  The creator holds one reference and
  * every batch in flight one more.  Only ACTIVE admits new batches.  A stop
  * never waits for the device under a lock: it moves to STOPPING, and drain
@@ -527,6 +557,7 @@ struct xdev_ext_mech_sess {
 	__u32 refs;
 	__u32 inflight;
 	__u32 sequestered;	/* batches */
+	struct xdev_ext_mech_qrecovery q;	/* why a ZOMBIE session is parked */
 };
 
 enum xdev_ext_mech_ref_fate {
@@ -541,6 +572,7 @@ static inline void xdev_ext_mech_sess_init(struct xdev_ext_mech_sess *s)
 	s->refs = 1;
 	s->inflight = 0;
 	s->sequestered = 0;
+	s->q = (struct xdev_ext_mech_qrecovery){ 0 };
 }
 
 static inline bool xdev_ext_mech_sess_admits(const struct xdev_ext_mech_sess *s)
@@ -655,41 +687,16 @@ static inline void xdev_ext_mech_quarantine_sub(struct xdev_ext_mech_quarantine 
 	q->frames = q->frames > frames ? q->frames - frames : 0;
 }
 
-/*
- * DMA-stop evidence a stage keeps for the native commands it retained after
- * UNKNOWN outcomes, worst first wins (the values of enum xdev_ext_peer_evidence):
- * COVERED  the device that received each retained command proved a later stop,
- *          or the command completed definitely;
- * PENDING  bound to a device that has not proved one yet;
- * NEVER    a retained command nothing can prove stopped.
- */
-#define XDEV_EXT_MECH_EVIDENCE_COVERED	0
-#define XDEV_EXT_MECH_EVIDENCE_PENDING	1
-#define XDEV_EXT_MECH_EVIDENCE_NEVER	2
-
-/*
- * Why a quarantined session is parked.  evidence counts the sequestered
- * batches whose only cause was their native outcome at a stage that keeps
- * DMA-stop evidence; unrecoverable records any other cause (a custody
- * failure, a stage without evidence, a native control reference, a START
- * handoff, a failed checked unbind).  settled: no worker, timer or native
- * callback can reach the session any more.
- */
-struct xdev_ext_mech_qrecovery {
-	__u32 evidence;
-	__u32 objects, frames;	/* this session's share of the parked totals */
-	bool unrecoverable;
-	bool settled;
-};
-
-/* A batch was sequestered: by its native outcome at an evidence stage, or not. */
+/* A batch was sequestered at @stage: by its native outcome alone, or not. */
 static inline void xdev_ext_mech_qrecovery_note(struct xdev_ext_mech_qrecovery *q,
-					     bool evidence)
+					     bool native, __u32 stage)
 {
-	if (evidence && q->evidence != XDEV_EXT_MECH_U32_MAX)
+	if (native && stage < 32 && q->evidence != XDEV_EXT_MECH_U32_MAX) {
 		q->evidence++;
-	else
+		q->stages |= 1U << stage;
+	} else {
 		q->unrecoverable = true;
+	}
 }
 
 /*

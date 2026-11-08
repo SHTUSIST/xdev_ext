@@ -770,10 +770,10 @@ class UbrMechSourceTest(unittest.TestCase):
         self.assertEqual(recovery.count("list_move_tail(&s->quarantine_node, &ready);"), 1)
         self.assertLess(recovery.index("if (fate != XDEV_EXT_MECH_REFS_RELEASE)"),
                         recovery.index("list_move_tail(&s->quarantine_node, &ready);"))
-        self.assertLess(recovery.index("if (!s->q.settled)"),
+        self.assertLess(recovery.index("if (!s->ss.q.settled)"),
                         recovery.index("xdev_ext_mech_recovery_fate(s)"))
         fate = function_body(path, "static int xdev_ext_mech_recovery_fate(")
-        self.assertEqual(fate.count("xdev_ext_mech_sess_recovery(&ss, &q, evidence)"), 2)
+        self.assertEqual(fate.count("xdev_ext_mech_sess_recovery(&ss, &ss.q, evidence)"), 2)
         recover = function_body(path, "static void xdev_ext_mech_recover(")
         self.assertLess(recover.index("->evidence_release(&s->st[i])"),
                         recover.index("xdev_ext_peer_file_drainable(authority)"))

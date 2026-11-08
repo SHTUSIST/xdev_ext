@@ -743,17 +743,32 @@ static void test_quarantine(void)
  */
 static void test_quarantine_recovery(void)
 {
+	struct xdev_ext_mech_bstate bs = { .native_sequester = 1 };
 	struct xdev_ext_mech_sess s = {
 		.state = XDEV_EXT_MECH_SESSION_ZOMBIE, .sequestered = 1,
 	};
 	struct xdev_ext_mech_qrecovery q = { 0 };
 
+	xdev_ext_mech_bstate_init(&bs, 2);
+	EXPECT_EQ(bs.native_sequester, 0);
 	EXPECT_EQ(XDEV_EXT_MECH_EVIDENCE_COVERED, 0);
 	EXPECT_TRUE(XDEV_EXT_MECH_EVIDENCE_PENDING > XDEV_EXT_MECH_EVIDENCE_COVERED);
 	EXPECT_TRUE(XDEV_EXT_MECH_EVIDENCE_NEVER > XDEV_EXT_MECH_EVIDENCE_PENDING);
-	xdev_ext_mech_qrecovery_note(&q, true);
+	xdev_ext_mech_qrecovery_note(&q, true, 2);
 	EXPECT_EQ(q.evidence, 1);
+	EXPECT_EQ(q.stages, 1U << 2);
 	EXPECT_FALSE(q.unrecoverable);
+	/* A fresh session starts with no recorded cause. */
+	{
+		struct xdev_ext_mech_sess fresh;
+
+		memset(&fresh, 0xff, sizeof(fresh));
+		xdev_ext_mech_sess_init(&fresh);
+		EXPECT_EQ(fresh.q.evidence, 0);
+		EXPECT_EQ(fresh.q.stages, 0);
+		EXPECT_FALSE(fresh.q.unrecoverable);
+		EXPECT_FALSE(fresh.q.settled);
+	}
 	/* Still reachable: wait, whatever the evidence says. */
 	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
 		  XDEV_EXT_MECH_REFS_KEEP);
@@ -781,9 +796,10 @@ static void test_quarantine_recovery(void)
 		  XDEV_EXT_MECH_REFS_QUARANTINE);
 	s.sequestered = 1;
 	/* Any other recorded cause (custody failure, native control, START). */
-	xdev_ext_mech_qrecovery_note(&q, false);
+	xdev_ext_mech_qrecovery_note(&q, false, 0);
 	EXPECT_TRUE(q.unrecoverable);
 	EXPECT_EQ(q.evidence, 1);
+	EXPECT_EQ(q.stages, 1U << 2);
 	EXPECT_EQ(xdev_ext_mech_sess_recovery(&s, &q, XDEV_EXT_MECH_EVIDENCE_COVERED),
 		  XDEV_EXT_MECH_REFS_QUARANTINE);
 	/* Quarantined without any sequestered batch: never by evidence. */
