@@ -2619,6 +2619,14 @@
       "logical_path": "tests/eval/xdomain_gpu/test_runtime.py"
     },
     {
+      "source": "tests/benchmarks/xdomain_gpu/test_session_cleanup.py",
+      "logical_path": "tests/eval/xdomain_gpu/test_session_cleanup.py"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/test_session_cleanup.c",
+      "logical_path": "tests/eval/xdomain_gpu/test_session_cleanup.c"
+    },
+    {
       "source": "tests/benchmarks/xdomain_gpu/test_xdomain_runtime.c",
       "logical_path": "tests/eval/xdomain_gpu/test_xdomain_runtime.c"
     },

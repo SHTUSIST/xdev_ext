@@ -319,9 +319,40 @@ static int close_dir_session(struct dir *d)
 	r = xdev_ext_session_close(d->s);
 	if (r && !ret)
 		ret = r;
-	if (xdev_ext_session_retained(d->s))
-		ret = ret ? ret : -EBUSY;
-	d->s = NULL;
+	/* close(0) freed the handle; every failed close leaves it owned and
+	 * retryable, including -EAGAIN without a retained flag. */
+	if (!r)
+		d->s = NULL;
+	return ret;
+}
+
+static int close_resources(struct run *r)
+{
+	int ret = 0, closed;
+
+	for (int i = 0; i < 2; i++) {
+		struct dir *d = i ? &r->rx : &r->tx;
+
+		closed = close_dir_session(d);
+		if (closed && !ret)
+			ret = closed;
+		if (d->s)
+			continue; /* accepted DMA may still own its CE/CUDA window */
+		if (d->ce_fd >= 0) {
+			close(d->ce_fd);
+			d->ce_fd = -1;
+		}
+		if (d->cuda.lib) {
+			closed = xdev_ext_mech_cuda_close(&d->cuda);
+			if (closed && !ret)
+				ret = closed;
+		}
+	}
+	/* The stage borrows this control authority until its session closes. */
+	if (!r->tx.s && !r->rx.s && r->ctl >= 0) {
+		close(r->ctl);
+		r->ctl = -1;
+	}
 	return ret;
 }
 
@@ -612,21 +643,11 @@ int main(int argc, char **argv)
 	}
 	ret = ret == -ENOSYS ? XDG_EXIT_UNAVAILABLE : ret ? XDG_EXIT_FAIL : XDG_EXIT_PASS;
 out:
-	closed = close_dir_session(&r.tx) | close_dir_session(&r.rx);
-	if (closed && ret == XDG_EXIT_PASS)
-		ret = XDG_EXIT_FAIL;
 	if (r.fd >= 0)
 		close(r.fd);
-	for (i = 0; i < 2; i++) {
-		struct dir *d = i ? &r.rx : &r.tx;
-
-		if (d->ce_fd >= 0)
-			close(d->ce_fd);
-		if (d->cuda.lib && xdev_ext_mech_cuda_close(&d->cuda) && ret == XDG_EXIT_PASS)
-			ret = XDG_EXIT_FAIL;
-	}
-	if (r.ctl >= 0)
-		close(r.ctl);
+	closed = close_resources(&r);
+	if (closed && ret == XDG_EXIT_PASS)
+		ret = XDG_EXIT_FAIL;
 	free(r.scratch);
 	return ret;
 }

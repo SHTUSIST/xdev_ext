@@ -69,6 +69,16 @@ completion and the control peer. It checks stale data across successive
 sizes, poison failures and final-window accounting. This host test supplies
 no GPU, CE, Thunderbolt or throughput evidence.
 
+Session close returning zero invalidates its handle. A failed close preserves
+the handle for retry, even when the retained flag is false (`-EAGAIN`). Final
+cleanup keeps that direction's borrowed CE fd and CUDA window while its
+session remains live, and keeps the shared control fd until both directions
+close. Cleanup errors still make the process fail. CUDA close errors preserve
+the helper's remaining window state for retry. `test_session_cleanup.py` runs
+the actual libxdev_ext allocation/close/free path with ASan/UBSan, substituting
+only kernel registration and CUDA entry points; it establishes host ownership
+behavior and supplies no device or DMA evidence.
+
 The `[CE D2H, XDOMAIN TX]` CREATE has not been run (TODO.74); the CE class
 admission rule applies only the file check to a CE stage without the target
 range flag. A refused CREATE exits 4 with the kernel's CREATE report.
