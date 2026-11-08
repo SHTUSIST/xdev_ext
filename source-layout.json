@@ -2550,6 +2550,62 @@
       "logical_path": "tests/eval/kv_restore/kv_cpu.py"
     },
     {
+      "source": "tests/benchmarks/xdomain_gpu/Makefile",
+      "logical_path": "tests/eval/xdomain_gpu/Makefile"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/README.md",
+      "logical_path": "tests/eval/xdomain_gpu/README.md"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/xdg_core.h",
+      "logical_path": "tests/eval/xdomain_gpu/xdg_core.h"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/xdg_gpu.h",
+      "logical_path": "tests/eval/xdomain_gpu/xdg_gpu.h"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/xdg_net.h",
+      "logical_path": "tests/eval/xdomain_gpu/xdg_net.h"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/test_xdg_core.c",
+      "logical_path": "tests/eval/xdomain_gpu/test_xdg_core.c"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/tcp_cuda.c",
+      "logical_path": "tests/eval/xdomain_gpu/tcp_cuda.c"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/nccl_pingpong.c",
+      "logical_path": "tests/eval/xdomain_gpu/nccl_pingpong.c"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/xdomain_gpu.c",
+      "logical_path": "tests/eval/xdomain_gpu/xdomain_gpu.c"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/nccl_tests.py",
+      "logical_path": "tests/eval/xdomain_gpu/nccl_tests.py"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/run.py",
+      "logical_path": "tests/eval/xdomain_gpu/run.py"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/test_tools.py",
+      "logical_path": "tests/eval/xdomain_gpu/test_tools.py"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/test_nccl_tests.py",
+      "logical_path": "tests/eval/xdomain_gpu/test_nccl_tests.py"
+    },
+    {
+      "source": "tests/benchmarks/xdomain_gpu/test_run.py",
+      "logical_path": "tests/eval/xdomain_gpu/test_run.py"
+    },
+    {
       "source": "tests/benchmarks/kv_restore/kv_pattern.h",
       "logical_path": "tests/eval/kv_restore/kv_pattern.h"
     },
@@ -2937,6 +2993,14 @@
     {
       "source": "tests/benchmarks/nvme_gpu/run.py",
       "logical_path": "tests/eval/nvme_gpu/run.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/fio_ceiling.py",
+      "logical_path": "tests/eval/nvme_gpu/fio_ceiling.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_fio_ceiling.py",
+      "logical_path": "tests/eval/nvme_gpu/test_fio_ceiling.py"
     },
     {
       "source": "tests/benchmarks/nvme_gpu/session_nvme_ce.c",
@@ -5963,6 +6027,14 @@
     {
       "source": "tests/integration/analysis/accounting/test_cpu_account.py",
       "logical_path": "tests/eval/common/test_cpu_account.py"
+    },
+    {
+      "source": "tests/integration/analysis/accounting/test_machine_cpu.py",
+      "logical_path": "tests/eval/common/test_machine_cpu.py"
+    },
+    {
+      "source": "tests/integration/analysis/accounting/test_link_check.py",
+      "logical_path": "tests/eval/common/test_link_check.py"
     },
     {
       "source": "tests/integration/analysis/accounting/test_iommu_receipt.py",
@@ -9621,6 +9693,14 @@
     {
       "source": "tools/analysis/cpu_account.py",
       "logical_path": "tests/eval/common/cpu_account.py"
+    },
+    {
+      "source": "tools/analysis/machine_cpu.py",
+      "logical_path": "tests/eval/common/machine_cpu.py"
+    },
+    {
+      "source": "tools/analysis/link_check.py",
+      "logical_path": "tests/eval/common/link_check.py"
     },
     {
       "source": "tools/analysis/iommu_receipt.py",

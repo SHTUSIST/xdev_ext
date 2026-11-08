@@ -104,6 +104,30 @@ struct prog {
 	struct bpf_link *link;
 };
 
+/*
+ * E7 set-up steps.  Each is the CLOCK_MONOTONIC duration of one call in
+ * setup(), printed in KV_READY setup_ns; a step that did not run (role,
+ * destination or --dry-run) stays -1 and prints null.  BPF load_verify is
+ * bpf_object__load(), which includes the kernel verifier; attach is the
+ * struct_ops link.  XDOMAIN login itself happens in the kernel when the
+ * cable comes up and is not timed here: xdomain_link_discover only reads
+ * the service's sysfs records.  peer_connect is the TCP control connection
+ * (listen on host 1), which includes waiting for the peer.
+ */
+enum setup_step {
+	SS_CONTROL_OPEN, SS_NVME_OPEN, SS_NVME_LOAD, SS_NVME_ATTACH, SS_XD_OPEN, SS_XD_LOAD,
+	SS_XD_ATTACH, SS_CE_OPEN, SS_CE_LOAD, SS_CE_ATTACH, SS_CUDA_ALLOC, SS_CE_DEVICE_OPEN,
+	SS_CE_VMM_ATTACH, SS_MEMORY_REGISTER, SS_SESSION_OPEN, SS_LINK_DISCOVER, SS_CREATE,
+	SS_PEER_CONNECT, SS_TOTAL, SS_NR
+};
+static const char *const setup_step_names[SS_NR] = {
+	"control_open", "nvme_prog_open", "nvme_prog_load_verify", "nvme_prog_attach",
+	"xdomain_prog_open", "xdomain_prog_load_verify", "xdomain_prog_attach", "ce_prog_open",
+	"ce_prog_load_verify", "ce_prog_attach", "cuda_alloc", "ce_device_open", "ce_vmm_attach",
+	"memory_register", "session_open", "xdomain_link_discover", "create", "peer_connect",
+	"total",
+};
+
 struct worker {
 	struct opts o;
 	struct xdev_ext_session *s;
@@ -113,6 +137,7 @@ struct worker {
 	int ctl, allocation, dmabuf, gpu, lsock, sock, ce_fd;
 	uint32_t ring_frames;		/* ce-vmm: host frames of the UMEM ring */
 	uint64_t pool_frames, next_key, restores, prev_done, prev_ce;
+	int64_t setup_ns[SS_NR];	/* -1: step not run */
 	bool dirty;
 };
 
@@ -122,6 +147,11 @@ static uint64_t now_ns(void)
 
 	clock_gettime(CLOCK_MONOTONIC, &t);
 	return (uint64_t)t.tv_sec * 1000000000ULL + (uint64_t)t.tv_nsec;
+}
+
+static void step_done(struct worker *wk, enum setup_step step, uint64_t t0)
+{
+	wk->setup_ns[step] = (int64_t)(now_ns() - t0);
 }
 
 static uint64_t cpu_us(void)
@@ -244,8 +274,9 @@ static int run_id_ok(const char *id)
 
 /* Load one struct_ops map as a PRIVATE instance; flags resolved through BTF. */
 static int load_private(const char *path, const char *map_name, const char *type_name,
-			struct prog *p)
+			struct prog *p, struct worker *wk, enum setup_step first)
 {
+	uint64_t t0 = now_ns();
 	struct bpf_map *map, *m;
 	const struct btf_type *t;
 	struct btf *btf;
@@ -290,15 +321,20 @@ static int load_private(const char *path, const char *map_name, const char *type
 	}
 	if (!found)
 		return -EPROTO;
+	step_done(wk, first, t0);
+	t0 = now_ns();
 	err = bpf_object__load(p->obj);
 	if (err)
 		return err;
+	step_done(wk, first + 1, t0);
+	t0 = now_ns();
 	p->link = bpf_map__attach_struct_ops(map);
 	err = (int)libbpf_get_error(p->link);
 	if (err) {
 		p->link = NULL;
 		return err;
 	}
+	step_done(wk, first + 2, t0);
 	return 0;
 }
 
@@ -625,7 +661,7 @@ static int create_session(struct worker *wk)
 	struct xdev_ext_peer_pool_opts pool = { .sz = sizeof(pool), .allocation_fd = wk->allocation };
 	const struct opts *o = &wk->o;
 	int fds[3] = { -1, -1, -1 }, nvme = -1, ret;
-	uint64_t token = 0;
+	uint64_t token = 0, t0 = now_ns();
 	__u32 xd = o->g.early ? XDEV_EXT_XDOMAIN_F_EARLY : 0, i = 0;
 
 	if (o->dst == DST_CE) {
@@ -638,6 +674,7 @@ static int create_session(struct worker *wk)
 	}
 	if (ret)
 		return ret;
+	step_done(wk, SS_SESSION_OPEN, t0);
 	c.group_bytes = o->g.group_bytes;
 	c.depth = o->g.depth;
 	kv_plan_layout(&o->g, &c.layout);
@@ -651,7 +688,10 @@ static int create_session(struct worker *wk)
 		fds[i++] = prog_fd(&wk->nvme);
 	}
 	if (o->role != ROLE_LOCAL) {
+		t0 = now_ns();
 		ret = link_token(o, &token);
+		if (!ret)
+			step_done(wk, SS_LINK_DISCOVER, t0);
 		if (!ret)
 			ret = xdev_ext_stage_xdomain(&c.st[i], wk->ctl, token,
 				o->role == ROLE_SERVE ? XDEV_EXT_MECH_DIR_TO_DEVICE
@@ -673,7 +713,10 @@ static int create_session(struct worker *wk)
 		fds[i++] = prog_fd(&wk->ce);
 	}
 	c.nr_stages = i;
+	t0 = now_ns();
 	ret = xdev_ext_session_create_programs(wk->s, &c, fds, i, &report);
+	if (!ret)
+		step_done(wk, SS_CREATE, t0);
 	/* The session keeps its own namespace reference after CREATE. */
 	if (nvme >= 0)
 		close(nvme);
@@ -703,10 +746,23 @@ static long long memlock_bytes(void)
 	return lim.rlim_cur == RLIM_INFINITY ? -1 : (long long)lim.rlim_cur;
 }
 
+static int setup_steps(struct worker *wk, const char **where);
+
+/* All set-up steps; total covers them when every step succeeded. */
 static int setup(struct worker *wk, const char **where)
 {
+	uint64_t t0 = now_ns();
+	int ret = setup_steps(wk, where);
+
+	if (!ret && !wk->o.dry_run)
+		step_done(wk, SS_TOTAL, t0);
+	return ret;
+}
+
+static int setup_steps(struct worker *wk, const char **where)
+{
 	const struct opts *o = &wk->o;
-	uint64_t len;
+	uint64_t len, t0;
 	int ret;
 
 	wk->pool_frames = o->role == ROLE_SERVE ? (uint64_t)o->g.depth *
@@ -717,19 +773,22 @@ static int setup(struct worker *wk, const char **where)
 	if (o->dry_run)
 		return 0;
 	*where = "open /dev/xdev_ext_peer";
+	t0 = now_ns();
 	wk->ctl = open("/dev/xdev_ext_peer", O_RDWR | O_CLOEXEC);
 	if (wk->ctl < 0)
 		return -errno;
+	step_done(wk, SS_CONTROL_OPEN, t0);
 	if (o->role != ROLE_RESTORE) {
 		*where = "load NVMe program";
-		ret = load_private(o->nvme_prog, "kv_nvme_ops", "xdev_ext_nvme_mech_ops", &wk->nvme);
+		ret = load_private(o->nvme_prog, "kv_nvme_ops", "xdev_ext_nvme_mech_ops", &wk->nvme,
+				   wk, SS_NVME_OPEN);
 		if (ret)
 			return ret;
 	}
 	if (o->role != ROLE_LOCAL && o->xdomain_prog) {
 		*where = "load XDOMAIN program";
 		ret = load_private(o->xdomain_prog, o->xdomain_map, "xdev_ext_xdomain_mech_ops",
-				   &wk->xd);
+				   &wk->xd, wk, SS_XD_OPEN);
 		if (ret)
 			return ret;
 	}
@@ -738,7 +797,8 @@ static int setup(struct worker *wk, const char **where)
 		size_t size = 0;
 
 		*where = "load CE program";
-		ret = load_private(o->ce_prog, "kv_ce_ops", "xdev_ext_ce_mech_ops", &wk->ce);
+		ret = load_private(o->ce_prog, "kv_ce_ops", "xdev_ext_ce_mech_ops", &wk->ce,
+				   wk, SS_CE_OPEN);
 		if (ret)
 			return ret;
 		wk->ce_target = bpf_object__find_map_by_name(wk->ce.obj, ".bss");
@@ -746,41 +806,55 @@ static int setup(struct worker *wk, const char **where)
 		    size != sizeof(struct kv_ce_target))
 			return -EPROTO;
 		*where = "CUDA VMM allocation";
+		t0 = now_ns();
 		ret = xdev_ext_mech_cuda_open_vmm(&wk->cuda, o->gpu_bdf, len);
 		if (ret)
 			return ret;
+		step_done(wk, SS_CUDA_ALLOC, t0);
 		*where = "open CE device";
+		t0 = now_ns();
 		wk->ce_fd = open(o->ce_dev, O_RDWR | O_CLOEXEC);
 		if (wk->ce_fd < 0)
 			return -errno;
+		step_done(wk, SS_CE_DEVICE_OPEN, t0);
 		/* CREATE claims the VRAM through this attached export. */
 		*where = "attach CUDA export to the CE device";
 		attach = (struct xdev_ext_nv_ce_attach_memory){ .mem_fd = wk->cuda.export_fd,
 			.gpu_va = wk->cuda.va, .size = wk->cuda.vmm_bytes };
+		t0 = now_ns();
 		if (xdev_ext_nv_ce_attach_memory(wk->ce_fd, &attach)) {
 			ret = errno ? -errno : -EIO;
 			fprintf(stderr, "kv_restore: CE attach status 0x%x\n", attach.status);
 			return ret;
 		}
+		step_done(wk, SS_CE_VMM_ATTACH, t0);
 	} else if (o->role == ROLE_RESTORE) {
 		*where = "CUDA allocation";
+		t0 = now_ns();
 		ret = xdev_ext_mech_cuda_open(&wk->cuda, o->gpu_bdf, len);
 		if (ret)
 			return ret;
+		step_done(wk, SS_CUDA_ALLOC, t0);
 		*where = "open GPU node";
 		wk->gpu = open(o->gpu_node, O_RDWR | O_CLOEXEC);
 		if (wk->gpu < 0)
 			return -errno;
 		*where = "register GPU memory";
+		t0 = now_ns();
 		wk->allocation = peer_register(wk->ctl, wk->gpu, 0, wk->cuda.va, len);
+		if (wk->allocation >= 0)
+			step_done(wk, SS_MEMORY_REGISTER, t0);
 	} else {
 		*where = "system heap allocation";
 		wk->dmabuf = heap_alloc(len);
 		if (wk->dmabuf < 0)
 			return wk->dmabuf;
 		*where = "register dma-buf";
+		t0 = now_ns();
 		wk->allocation = peer_register(wk->ctl, wk->dmabuf, XDEV_EXT_PEER_REGISTER_F_DMABUF,
 					       0, len);
+		if (wk->allocation >= 0)
+			step_done(wk, SS_MEMORY_REGISTER, t0);
 	}
 	/* PEER and dma-buf register an allocation; ce-vmm attached its export above. */
 	if (o->dst != DST_CE && wk->allocation < 0)
@@ -791,13 +865,21 @@ static int setup(struct worker *wk, const char **where)
 		return ret;
 	if (o->role == ROLE_SERVE) {
 		*where = "listen";
+		t0 = now_ns();
 		wk->lsock = tcp_open(o->listen, true, o->timeout_ms);
-		return wk->lsock < 0 ? wk->lsock : 0;
+		if (wk->lsock < 0)
+			return wk->lsock;
+		step_done(wk, SS_PEER_CONNECT, t0);
+		return 0;
 	}
 	if (o->role == ROLE_RESTORE) {
 		*where = "connect to host 1";
+		t0 = now_ns();
 		wk->sock = tcp_open(o->peer, false, o->timeout_ms);
-		return wk->sock < 0 ? wk->sock : 0;
+		if (wk->sock < 0)
+			return wk->sock;
+		step_done(wk, SS_PEER_CONNECT, t0);
+		return 0;
 	}
 	return 0;
 }
@@ -1264,6 +1346,8 @@ int main(int argc, char **argv)
 	int ret, stop_error = 0;
 
 	signal(SIGPIPE, SIG_IGN);
+	for (int i = 0; i < SS_NR; i++)
+		wk.setup_ns[i] = -1;
 	ret = parse(argc, argv, &wk.o);
 	if (ret) {
 		usage();
@@ -1282,12 +1366,21 @@ int main(int argc, char **argv)
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
 	       "\"pool_frames\": %" PRIu64 ", \"frame_bytes\": %u, \"group_bytes\": %u, "
 	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s, "
-	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u}\n",
+	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u, "
+	       "\"setup_clock\": \"CLOCK_MONOTONIC\", \"setup_ns\": {",
 	       argv[1], wk.o.dry_run ? "true" : "false",
 	       wk.s ? (unsigned long long)xdev_ext_session_id(wk.s) : 0ULL, wk.pool_frames,
 	       wk.o.g.frame_bytes, wk.o.g.group_bytes, wk.o.g.depth, wk.o.g.window,
 	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes(),
 	       dst_names[wk.o.dst], wk.ring_frames);
+	for (int i = 0; i < SS_NR; i++) {
+		if (wk.setup_ns[i] < 0)
+			printf("%s\"%s\": null", i ? ", " : "", setup_step_names[i]);
+		else
+			printf("%s\"%s\": %" PRId64, i ? ", " : "", setup_step_names[i],
+			       wk.setup_ns[i]);
+	}
+	printf("}}\n");
 	fflush(stdout);
 	if (wk.o.role == ROLE_SERVE) {
 		ret = serve_loop(&wk);

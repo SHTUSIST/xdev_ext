@@ -29,6 +29,12 @@ def load(name):
 
 kl, kp = load('kv_layout'), load('kv_protocol')
 KIB, GIB = 1 << 10, 1 << 30
+# E7 set-up steps kv_restore times and prints in KV_READY setup_ns.
+SETUP_STEPS = {'control_open', 'nvme_prog_open', 'nvme_prog_load_verify', 'nvme_prog_attach',
+               'xdomain_prog_open', 'xdomain_prog_load_verify', 'xdomain_prog_attach',
+               'ce_prog_open', 'ce_prog_load_verify', 'ce_prog_attach', 'cuda_alloc',
+               'ce_device_open', 'ce_vmm_attach', 'memory_register', 'session_open',
+               'xdomain_link_discover', 'create', 'peer_connect', 'total'}
 WINDOW = ['--window-slba', '2048', '--window-nlb', str(40 * GIB // 512), '--lba-bytes', '512',
           '--group-bytes', str(256 * KIB), '--frame-bytes', str(128 * KIB), '--depth', '32',
           '--window', '32', '--early']
@@ -118,6 +124,16 @@ class DryRun(unittest.TestCase):
         bye = w.quit(timeout=30)
         self.assertEqual((bye['error'], bye['retained']), (0, False))
         self.assertEqual(w.returncode, 0)
+
+    def test_ready_reports_each_setup_step(self):
+        # E7: one duration per set-up step (CLOCK_MONOTONIC ns); a dry run
+        # performs none of them, so every step is null rather than zero.
+        w = self.restore_worker(5 * GIB)
+        self.assertEqual(w.ready['setup_clock'], 'CLOCK_MONOTONIC')
+        steps = w.ready['setup_ns']
+        self.assertEqual(set(steps), SETUP_STEPS)
+        self.assertTrue(all(v is None for v in steps.values()), steps)
+        self.assertEqual(w.quit(timeout=30)['error'], 0)
 
     @unittest.skipIf(os.path.exists('/dev/xdev_ext_peer'), 'this host runs the xdev_ext kernel')
     def test_setup_failure_names_its_step(self):
