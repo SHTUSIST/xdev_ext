@@ -47,6 +47,7 @@ GPU_TESTS = (
     'nv_xdev_ext_ce_classify_test', 'nv_xdev_ext_vidmem_offset_test',
     'nv_xdev_ext_ce_plan_test', 'nv_xdev_ext_ce_async_test',
     'nv_xdev_ext_peer_backing_test', 'nv_xdev_ext_ce_memory_test',
+    'nv_xdev_ext_ce_sync_test',
 )
 
 
@@ -85,6 +86,9 @@ def main():
         preload = ROOT/'kernel/tools/testing/selftests/xdev_ext_preload'
         for name in ('xdev_ext_preload_copy_batch_test', 'xdev_ext_preload_fallback_core_test'):
             cases.append((preload/(name+'.c'), ['-std=gnu11', '-I'+str(ROOT/'kernel/tools')]))
+        cases.append((ROOT/'kernel/tools/testing/selftests/xdev_ext_shared_receive'/
+                      'steer_location_test.c',
+                      ['-std=gnu11', '-I'+str(ROOT/'kernel/tools')]))
         cases.append((folder/'model'/'life_explore.c',
                       ['-std=gnu11', '-I'+str(folder/'model'/'shim'), '-I'+str(ROOT/'kernel')]))
     if args.component in ('all', 'gpu'):

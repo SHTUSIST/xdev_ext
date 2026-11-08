@@ -97,6 +97,10 @@
       "logical_path": "docs/guides/kernel-switch.md"
     },
     {
+      "source": "docs/guides/baremetal.md",
+      "logical_path": "docs/guides/baremetal.md"
+    },
+    {
       "source": "docs/guides/testing.md",
       "logical_path": "docs/testing.md"
     },
@@ -742,6 +746,11 @@
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-plan.h",
       "component": "nvidia",
       "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-plan.h"
+    },
+    {
+      "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-sync.h",
+      "component": "nvidia",
+      "native_path": "kernel-open/nvidia/nv-xdev_ext-ce-sync.h"
     },
     {
       "source": "src/compute/nvidia/kernel-open/nvidia/nv-xdev_ext-ce-memory.h",
@@ -2983,8 +2992,16 @@
       "logical_path": "tests/eval/nvme_gpu/ce_vmm_probe_check.h"
     },
     {
+      "source": "tests/benchmarks/nvme_gpu/ce_submit_diag.c",
+      "logical_path": "tests/eval/nvme_gpu/ce_submit_diag.c"
+    },
+    {
       "source": "tests/benchmarks/nvme_gpu/test_ce_probe.py",
       "logical_path": "tests/eval/nvme_gpu/test_ce_probe.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_submit_diag.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_submit_diag.py"
     },
     {
       "source": "tests/benchmarks/nvme_nic/Makefile",
@@ -3827,6 +3844,11 @@
       "native_path": "tests/nv_xdev_ext_ce_plan_test.c"
     },
     {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_sync_test.c",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_sync_test.c"
+    },
+    {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_memory_test.c",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_memory_test.c"
@@ -3865,6 +3887,11 @@
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_launch_test.py",
       "component": "nvidia",
       "native_path": "tests/nv_xdev_ext_ce_launch_test.py"
+    },
+    {
+      "source": "tests/compute/nvidia/nv_xdev_ext_ce_memcopy_runs_test.py",
+      "component": "nvidia",
+      "native_path": "tests/nv_xdev_ext_ce_memcopy_runs_test.py"
     },
     {
       "source": "tests/compute/nvidia/nv_xdev_ext_ce_variant_source_test.py",
@@ -6001,6 +6028,10 @@
       "logical_path": "tests/integration/boot/test_kernel_switch.py"
     },
     {
+      "source": "tests/integration/boot/test_baremetal.py",
+      "logical_path": "tests/integration/boot/test_baremetal.py"
+    },
+    {
       "source": "tests/integration/build/kvm_layout/contracts.py",
       "logical_path": "tests/integration/build/kvm_layout/contracts.py"
     },
@@ -7504,6 +7535,11 @@
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_e2e.c"
     },
     {
+      "source": "tests/network/peer/session/guest/peer_reset_session_e2e.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_reset_session_e2e.c"
+    },
+    {
       "source": "tests/network/peer/session/guest/peer_session_e2e.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_peer/guest/peer_session_e2e.c"
@@ -8008,6 +8044,11 @@
       "source": "tests/network/shared_receive/socket_identity.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_shared_receive/socket_identity.c"
+    },
+    {
+      "source": "tests/network/shared_receive/steer_location_test.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xdev_ext_shared_receive/steer_location_test.c"
     },
     {
       "source": "tests/network/shared_receive_native/README.md",
@@ -9637,6 +9678,14 @@
     {
       "source": "tools/boot/kernel_switch.py",
       "logical_path": "tools/boot/kernel_switch.py"
+    },
+    {
+      "source": "tools/build/baremetal.config",
+      "logical_path": "tools/build/baremetal.config"
+    },
+    {
+      "source": "tools/build/baremetal.py",
+      "logical_path": "tools/build/baremetal.py"
     },
     {
       "source": "tools/build/collectives.py",

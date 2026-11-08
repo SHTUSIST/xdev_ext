@@ -66,6 +66,7 @@ struct xdev_ext_stor_stage;
 struct xdev_ext_stor_io;
 struct xdev_ext_stor_peer_resources;
 struct xdev_ext_peer_fd_lease;
+struct xdev_ext_peer_requester;
 struct page;
 
 struct xdev_ext_stor_command {
@@ -119,6 +120,12 @@ struct xdev_ext_stor_dev_ops {
 	/* Worker, after handle retirement and before clearing nr_leases. */
 	void (*retire_peer)(void *member, struct xdev_ext_stor_io *io,
 		bool quiesced);
+	/* Optional; after the command's completion was consumed: the requester
+	 * record and the DMA-stop epoch the command became visible to the device
+	 * in.  NULL and XDEV_EXT_PEER_EPOCH_NONE when it never reached a queue.
+	 * Without it an UNKNOWN peer command can never be released. */
+	void (*peer_evidence)(void *member, const struct xdev_ext_stor_io *io,
+		struct xdev_ext_peer_requester **rq, __u64 *epoch);
 	__u32 peer_slot_bytes;
 	__u32 peer_native_offset;
 	int (*poll)(void *member, const struct xdev_ext_stor_poll_view *views,
@@ -191,6 +198,12 @@ int xdev_ext_storfam_submit(struct xdev_ext_stor_stage *ss,
 void xdev_ext_storfam_consume(struct xdev_ext_stor_stage *ss,
 		struct xdev_ext_mech_batch *batch, struct xdev_ext_stor_batch *sb);
 bool xdev_ext_storfam_unbind(struct xdev_ext_stor_stage *ss);
+/* Process context, quarantined session, nothing in flight and no worker:
+ * the worst enum xdev_ext_peer_evidence over the slots retained after
+ * UNKNOWN outcomes, and, once COVERED, their return (0, or -errno while
+ * any stays retained). */
+int xdev_ext_storfam_evidence(struct xdev_ext_stor_stage *ss);
+int xdev_ext_storfam_evidence_release(struct xdev_ext_stor_stage *ss);
 void xdev_ext_storfam_host_ready(struct xdev_ext_mech_batch *batch,
 		int status, bool uncertain);
 int xdev_ext_storfam_poll(struct xdev_ext_stor_stage *ss);

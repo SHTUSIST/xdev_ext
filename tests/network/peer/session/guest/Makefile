@@ -13,6 +13,10 @@ peer_nvme_e2e: peer_nvme_e2e.c sw_provider_uapi.h $(KERNEL_SRC)/include/uapi/lin
 # Reset recovery test: UNKNOWN outcomes released by a proven controller reset.
 peer_reset_e2e: peer_reset_e2e.c sw_provider_uapi.h $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h
 	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi $< $(LDFLAGS) -o $@
+# Session-path reset recovery: dynamically linked (libbpf loads nvme_s0).
+peer_reset_session_e2e: peer_reset_session_e2e.c sw_provider_uapi.h $(KERNEL_SRC)/include/uapi/linux/xdev_ext_peer.h \
+		$(KERNEL_SRC)/include/uapi/linux/xdev_ext_mech.h $(KERNEL_SRC)/include/uapi/linux/io_uring.h
+	$(CC) $(CFLAGS) -iquote $(KERNEL_SRC)/include/uapi $< $(SESSION_LDFLAGS) -o $@ -lbpf -lelf -lz
 # Session test: dynamically linked like the product controller it executes.
 EPOCH_HELPER_DIR ?= $(abspath $(KERNEL_SRC)/../tests/eval/xdomain)
 EPOCH_HELPER_INPUTS := $(addprefix $(EPOCH_HELPER_DIR)/,epoch_control.c epoch_control.h check_contract.c check_contract.h)
@@ -24,7 +28,7 @@ peer_session_e2e: peer_session_e2e.c sw_provider_uapi.h $(KERNEL_SRC)/include/ua
 modules:
 	$(MAKE) -C $(KDIR) M=$(CURDIR) modules
 clean:
-	$(RM) peer_nvme_e2e peer_session_e2e peer_reset_e2e
+	$(RM) peer_nvme_e2e peer_session_e2e peer_reset_e2e peer_reset_session_e2e
 	$(MAKE) -C $(KDIR) M=$(CURDIR) clean
 .PHONY: all modules clean
 endif

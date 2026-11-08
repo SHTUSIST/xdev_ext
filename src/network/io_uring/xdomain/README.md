@@ -142,6 +142,17 @@ Successful startup hands over the same native rings and HopIDs without a reset.
 Failed startup closes admission and stops through the existing native barriers;
 unknown scratch DMA retains the entire allocation in the requester quota.
 
+The end with the larger host router UUID sends its PING first. A peer that
+carries this host's own UUID is refused with `-EPROTO`. The read-only module
+parameter `self_loop_test` (default false) is for testing only: it accepts such
+a peer when it is the other end of a cable joining two ports of the same NHI,
+that is, another link of this module on the same NHI, on a different local
+port, with the same UUID pair, whose incarnation the accepted LOGIN carried.
+The end with the larger incarnation then sends first. Any other same-UUID peer
+is still refused. With such a cable the startup exchange above moves real
+bytes through the NHI rings of both ports; it is a functional DMA check, not
+a timing measurement.
+
 A stage may also use the ring's IOU_UMEM pool (host pages) instead of a PEER
 allocation, for TX and for RX at stage 0. At bind the requester maps every
 pool page for the NHI, in the stage's DMA direction. A pool that does not

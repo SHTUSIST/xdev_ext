@@ -72,8 +72,37 @@ static bool overlap(const struct ethtool_rx_flow_spec *a,
 		 ((ah->tos ^ bh->tos) & am->tos & bm->tos));
 }
 
+/*
+ * Lowest location below the advertised table size that no listed rule uses.
+ * Drivers without RX_CLS_LOC_SPECIAL (ice, igb, mlx5) need an explicit
+ * location and treat an occupied one as a replacement of that rule.
+ */
+static int free_location(const struct ethtool_rxnfc *all, uint32_t *location)
+{
+	uint32_t size = all->data, i;
+	unsigned char *taken;
+	if (!size)
+		return -EOPNOTSUPP;
+	if (size > 65536)
+		size = 65536;
+	taken = calloc(size, 1);
+	if (!taken)
+		return -ENOMEM;
+	for (i = 0; i < all->rule_cnt; i++)
+		if (all->rule_locs[i] < size)
+			taken[all->rule_locs[i]] = 1;
+	for (i = 0; i < size && taken[i]; i++)
+		;
+	free(taken);
+	if (i == size)
+		return -ENOSPC;
+	*location = i;
+	return 0;
+}
+
 static int admit_rules(int fd, const char *ifname, uint32_t expected_ifindex,
-		       const struct ethtool_rx_flow_spec *wanted)
+		       const struct ethtool_rx_flow_spec *wanted,
+		       uint32_t *location)
 {
 	unsigned int attempt;
 	for (attempt = 0; attempt < 3; attempt++) {
@@ -83,8 +112,6 @@ static int admit_rules(int fd, const char *ifname, uint32_t expected_ifindex,
 		int ret = eth(fd, ifname, expected_ifindex, &cnt);
 		if (ret)
 			return ret;
-		if (!(cnt.data & RX_CLS_LOC_SPECIAL))
-			return -EOPNOTSUPP;
 		count = cnt.rule_cnt;
 		if (count > 65536)
 			return -E2BIG;
@@ -113,6 +140,11 @@ static int admit_rules(int fd, const char *ifname, uint32_t expected_ifindex,
 				ret = -EADDRINUSE;
 				break;
 			}
+		}
+		if (!ret) {
+			*location = RX_CLS_LOC_ANY;
+			if (!(cnt.data & RX_CLS_LOC_SPECIAL))
+				ret = free_location(all, location);
 		}
 		free(all);
 		return ret;
@@ -149,7 +181,6 @@ int xdev_ext_xsk_steer_add(const char *ifname, uint32_t expected_ifindex,
 	memset(&req, 0, sizeof(req));
 	req.cmd = ETHTOOL_SRXCLSRLINS;
 	req.fs.flow_type = UDP_V4_FLOW;
-	req.fs.location = RX_CLS_LOC_ANY;
 	req.fs.ring_cookie = queue;
 	req.fs.h_u.udp_ip4_spec.ip4dst = htonl(filter->dst_ipv4);
 	req.fs.m_u.udp_ip4_spec.ip4dst = UINT32_MAX;
@@ -163,7 +194,8 @@ int xdev_ext_xsk_steer_add(const char *ifname, uint32_t expected_ifindex,
 		req.fs.h_u.udp_ip4_spec.psrc = htons(filter->src_port);
 		req.fs.m_u.udp_ip4_spec.psrc = UINT16_MAX;
 	}
-	ret = admit_rules(fd, ifname, expected_ifindex, &req.fs);
+	ret = admit_rules(fd, ifname, expected_ifindex, &req.fs,
+			  &req.fs.location);
 	if (ret)
 		goto unsupported;
 	ret = eth(fd, ifname, expected_ifindex, &req);
@@ -196,7 +228,50 @@ out:
 		  "no ethtool mutation was performed"
 	    : ret == -ERANGE
 		? "Requested queue is outside the interface RX queue count"
+	    : ret == -ENOSPC
+		? "Hardware RX rule table is full; no session rule was "
+		  "inserted"
 		: "Cannot install the session's hardware RX rule");
+}
+
+/*
+ * 1 when GRXCLSRLALL lists @location, 0 when it does not, -errno on failure.
+ * ice answers GRXCLSRULE on an empty location with -EINVAL rather than
+ * -ENOENT (ice_get_ethtool_fdir_entry), so -EINVAL alone cannot tell an
+ * absent rule from a refused request.
+ */
+static int location_listed(int fd, const char *ifname,
+			   uint32_t expected_ifindex, uint32_t location)
+{
+	unsigned int attempt;
+	for (attempt = 0; attempt < 3; attempt++) {
+		struct ethtool_rxnfc cnt = {.cmd = ETHTOOL_GRXCLSRLCNT};
+		struct ethtool_rxnfc *all;
+		uint32_t i, count;
+		int ret = eth(fd, ifname, expected_ifindex, &cnt);
+		if (ret)
+			return ret;
+		count = cnt.rule_cnt;
+		if (count > 65536)
+			return -E2BIG;
+		all =
+		    calloc(1, sizeof(*all) + (size_t)count * sizeof(uint32_t));
+		if (!all)
+			return -ENOMEM;
+		all->cmd = ETHTOOL_GRXCLSRLALL;
+		all->rule_cnt = count;
+		ret = eth(fd, ifname, expected_ifindex, all);
+		if (ret == -EMSGSIZE || (!ret && all->rule_cnt > count)) {
+			free(all);
+			continue;
+		}
+		if (!ret)
+			for (i = 0; i < all->rule_cnt && !ret; i++)
+				ret = all->rule_locs[i] == location;
+		free(all);
+		return ret;
+	}
+	return -EAGAIN;
 }
 
 int xdev_ext_xsk_steer_remove(const char *ifname, uint32_t expected_ifindex,
@@ -215,6 +290,15 @@ int xdev_ext_xsk_steer_remove(const char *ifname, uint32_t expected_ifindex,
 				 "Cannot open ethtool control socket");
 	req.fs.location = owned->location;
 	ret = eth(fd, ifname, expected_ifindex, &req);
+	if (ret == -EINVAL) {
+		int listed = location_listed(fd, ifname, expected_ifindex,
+					     owned->location);
+		if (!listed)
+			ret = -ENOENT;
+		else if (listed < 0 && listed != -EOPNOTSUPP &&
+			 listed != -EINVAL)
+			ret = listed;
+	}
 	if (ret == -ENOENT)
 		ret = 0;
 	else if (!ret) {
