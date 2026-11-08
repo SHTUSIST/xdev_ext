@@ -127,7 +127,7 @@ fi
 if (( ! TB_NHI )) && (( TB_NHI_CYCLES_SET || TB_NHI_ENUMERATE || TB_NHI_SELFLOOP_ECHO )); then
     echo '--tb-nhi-cycles, --tb-nhi-enumerate and --tb-nhi-selfloop-echo require --tb-nhi' >&2; exit 2
 fi
-if (( TB_NHI_SELFLOOP_ECHO && ! TB_NHI_ENUMERATE )); then
+if (( ${TB_NHI_SELFLOOP_ECHO:-0} && ! TB_NHI_ENUMERATE )); then
     echo '--tb-nhi-selfloop-echo requires --tb-nhi-enumerate' >&2; exit 2
 fi
 if [[ ! "$TB_NHI_CYCLES" =~ ^[0-9]$ ]]; then
@@ -712,7 +712,7 @@ if (( RUN_ONLY )); then
     verify_socket_config
     if (( EVAL_SESSION )); then verify_eval_session_identity; fi
     if (( ${GPU:-0} )); then verify_gpu_identity; fi
-    if (( TB_NHI_SELFLOOP_ECHO )); then verify_tb_selfloop_identity; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then verify_tb_selfloop_identity; fi
     python3 "$DEBUG_HELPER" p2pdma "$BUILD/.config" /dev/null "$DEBUG_LOCKING"
     python3 "$DEBUG_HELPER" reuse "$BUILD/.config" "$BUILD/xdev-ext-debug-profile.json" "$DEBUG_LOCKING"
     cp "$BUILD/.config" "$EV/kernel.config"
@@ -734,7 +734,7 @@ printf 'peer=%s\n' "$PEER" >>"$EV/provenance.txt"
 printf 'gpu=%s\ngpu_bdf=%s\nnvidia_userspace=%s\nvfio_devices=%s\nnic_model=%s\ntb_nhi=%s\nqemu=%s\n' "${GPU:-0}" "${GPU_BDF:-}" "${NVIDIA_USERSPACE:-}" "${VFIO_DEVICES[*]:-}" "${NIC_MODEL:-virtio}" "${TB_NHI_BDF:-}" "${QEMU:-}" >>"$EV/provenance.txt"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$EV/provenance.txt"
 printf 'tb_nhi_cycles=%s\ntb_nhi_enumerate=%s\n' "${TB_NHI_CYCLES:-3}" "${TB_NHI_ENUMERATE:-0}" >>"$EV/provenance.txt"
-printf 'tb_nhi_selfloop_echo=%s\n' "$TB_NHI_SELFLOOP_ECHO" >>"$EV/provenance.txt"
+printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$EV/provenance.txt"
 printf 'viommu=%s\n' "$VIOMMU" >>"$EV/provenance.txt"
 printf 'debug_locking=%s\ntimeout_factor=%s\ncli_timeout_ms=%s\nrx_timeout_ms=%s\nqemu_timeout_seconds=%s\n' \
     "$DEBUG_LOCKING" "$TIMEOUT_FACTOR" "$CLI_TIMEOUT_MS" "$RX_TIMEOUT_MS" "$QEMU_TIMEOUT_SECONDS" >>"$EV/provenance.txt"
@@ -808,7 +808,7 @@ if (( ! RUN_ONLY )); then
     if (( ${GPU:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -e XDEV_EXT_MECH_CE -e XDEV_EXT_MECH_DMA -e DMA_SHARED_BUFFER -e XDEV_EXT_PEER_DMABUF -e HOTPLUG_CPU; fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then cfg -e NET_VENDOR_INTEL -e IGB -e HOTPLUG_CPU; fi
     if (( ${TB_NHI:-0} )); then cfg -e USB4; fi
-    if (( TB_NHI_SELFLOOP_ECHO )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi
     if (( DEBUG_LOCKING )); then
         for symbol in DEBUG_KERNEL PROVE_LOCKING DEBUG_ATOMIC_SLEEP KASAN KASAN_GENERIC DETECT_HUNG_TASK; do cfg -e "$symbol"; done
         cfg -d KASAN_KUNIT_TEST
@@ -848,7 +848,7 @@ if (( ! RUN_ONLY )); then
     fi
     if [[ "${NIC_MODEL:-virtio}" == igb ]]; then grep -Fxq CONFIG_IGB=y "$BUILD/.config"; grep -Fxq CONFIG_HOTPLUG_CPU=y "$BUILD/.config"; fi
     if (( ${TB_NHI:-0} )); then grep -Fxq CONFIG_USB4=y "$BUILD/.config"; fi
-    if (( TB_NHI_SELFLOOP_ECHO )); then grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"; fi
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"; fi
 	if (( PREPARE_ONLY )); then echo XDEV_EXT_ZC_CONFIG=PASS; exit 0; fi
     if (( FENCE_CHECK )); then
         # Full link + modules produces genuine Module.symvers for this vmlinux.
@@ -883,7 +883,7 @@ if (( ! RUN_ONLY )); then
 		build_gpu_modules
 	elif (( ! XDOMAIN )); then
 		kmake bzImage >"$EV/kernel-build.log" 2>&1
-		if (( TB_NHI_SELFLOOP_ECHO )); then
+		if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
 			kmake modules >"$EV/tb-selfloop-module-build.log" 2>&1
 			[[ -s "$TB_SELFLOOP_MODULE" ]]
 		fi
@@ -980,7 +980,7 @@ if (( ! RUN_ONLY )); then
         sha256sum "$GPU_OUT/"{nvidia.ko,nvidia-uvm.ko,nvidia-modeset.ko,nvidia-drm.ko,nvidia-peermem.ko,release,xdev_ext_gpu_dmabuf} \
             "$TOOLS/xdev_ext_peer_chain" $(gpu_userspace_files "$(cat "$GPU_OUT/release")") >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
-    if (( TB_NHI_SELFLOOP_ECHO )); then
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
         sha256sum "$TB_SELFLOOP_MODULE" >>"$BUILD/xdev-ext-artifacts.sha256"
     fi
     printf '%s\n' "$SOURCE_COMMIT" >"$BUILD/xdev-ext-source.commit"
@@ -1094,7 +1094,7 @@ if (( ${TB_NHI:-0} )); then
     mkdir -p "$ROOT/opt/xdev_ext/tb"
     cp "$SRC/tools/testing/selftests/xdev_ext_integration/xdev_ext_tb_nhi_guest.sh" "$ROOT/opt/xdev_ext/tb/"
     for app in seq tr; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
-    if (( TB_NHI_SELFLOOP_ECHO )); then
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
         cp "$TB_SELFLOOP_MODULE" "$ROOT/opt/xdev_ext/tb/"
         for app in insmod rmmod; do ln -sf /bin/busybox "$ROOT/bin/$app"; done
     fi
@@ -1118,7 +1118,7 @@ printf 'lifecycle=%s\nfence_check=%s\nfence_nonce_prefix=%s\n' "$LIFECYCLE" "$FE
 printf 'compat=%s\n' "$COMPAT" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'gpu=%s\nnic_model=%s\ntb_nhi=%s\ntb_nhi_cycles=%s\n' "${GPU:-0}" "${NIC_MODEL:-virtio}" "${TB_NHI:-0}" "${TB_NHI_CYCLES:-3}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'tb_nhi_enumerate=%s\n' "${TB_NHI_ENUMERATE:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
-printf 'tb_nhi_selfloop_echo=%s\n' "$TB_NHI_SELFLOOP_ECHO" >>"$ROOT/opt/xdev_ext/zc.env"
+printf 'tb_nhi_selfloop_echo=%s\n' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'peer=%s\n' "$PEER" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'eval_session=%s\n' "$EVAL_SESSION" >>"$ROOT/opt/xdev_ext/zc.env"
 printf 'mechanism_variants=%s\n' "$MECHANISM_VARIANTS" >>"$ROOT/opt/xdev_ext/zc.env"
@@ -2086,7 +2086,7 @@ if (( ${TB_NHI:-0} )); then
     grep -E '^XDEV_EXT_TB_NHI_ENUM ' "$EV/guest.log" >"$EV/tb-nhi-enum.txt" || true
     grep -E '^XDEV_EXT_TB_SELFLOOP_ECHO' "$EV/guest.log" >"$EV/tb-selfloop-echo.txt" || true
     grep -Fxq "XDEV_EXT_TB_NHI=PASS cycles=$TB_NHI_CYCLES" "$EV/guest.log"
-    if (( TB_NHI_SELFLOOP_ECHO )); then
+    if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then
         grep -Eq '^XDEV_EXT_TB_SELFLOOP_ECHO=(PASS|NOT_RUN)( |$)' "$EV/guest.log"
     fi
 fi

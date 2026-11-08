@@ -202,13 +202,13 @@ class GuestGpuWiring(unittest.TestCase):
 
     def test_selfloop_echo_builds_the_xdomain_module_and_reaches_the_guest(self):
         # Only the echo build has loadable modules; the read-only check is unchanged.
-        self.assertIn('if (( TB_NHI_SELFLOOP_ECHO )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi',
+        self.assertIn('if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then cfg -e MODULES -e MODULE_UNLOAD -m XDEV_EXT_MECH_XDOMAIN; fi',
                       self.script)
         self.assertIn('grep -Fxq CONFIG_XDEV_EXT_MECH_XDOMAIN=m "$BUILD/.config"', self.script)
         self.assertIn('TB_SELFLOOP_MODULE=$BUILD/io_uring/xdomain/xdev_ext_xdomain.ko', self.script)
         self.assertIn('sha256sum "$TB_SELFLOOP_MODULE" >>"$BUILD/xdev-ext-artifacts.sha256"', self.script)
         self.assertIn('cp "$TB_SELFLOOP_MODULE" "$ROOT/opt/xdev_ext/tb/"', self.script)
-        self.assertIn('printf \'tb_nhi_selfloop_echo=%s\\n\' "$TB_NHI_SELFLOOP_ECHO" >>"$ROOT/opt/xdev_ext/zc.env"',
+        self.assertIn('printf \'tb_nhi_selfloop_echo=%s\\n\' "${TB_NHI_SELFLOOP_ECHO:-0}" >>"$ROOT/opt/xdev_ext/zc.env"',
                       self.script)
         self.assertIn('sh /opt/xdev_ext/tb/xdev_ext_tb_nhi_guest.sh "$tb_nhi_cycles" "${tb_nhi_enumerate:-0}" '
                       '"${tb_nhi_selfloop_echo:-0}"', self.script)
@@ -218,7 +218,7 @@ class GuestGpuWiring(unittest.TestCase):
         body = function(self.script, 'verify_tb_selfloop_identity')
         self.assertIn('CONFIG_XDEV_EXT_MECH_XDOMAIN=m', body)
         self.assertIn('$TB_SELFLOOP_MODULE', body)
-        self.assertIn('if (( TB_NHI_SELFLOOP_ECHO )); then verify_tb_selfloop_identity; fi', self.script)
+        self.assertIn('if (( ${TB_NHI_SELFLOOP_ECHO:-0} )); then verify_tb_selfloop_identity; fi', self.script)
 
     def test_selfloop_echo_report_is_kept_and_a_failure_fails_the_run(self):
         keep = 'grep -E \'^XDEV_EXT_TB_SELFLOOP_ECHO\' "$EV/guest.log" >"$EV/tb-selfloop-echo.txt" || true'
