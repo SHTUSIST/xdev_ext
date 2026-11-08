@@ -222,6 +222,8 @@ class BringUp(unittest.TestCase):
         for lib in ('libcuda', 'libnvidia-ml', 'libnvidia-ptxjitcompiler'):
             (self.package / f'{lib}.so.{release}').write_text(lib)
         (self.package / 'nvidia-smi').write_text('smi')
+        (self.package / 'nvidia-modprobe').write_text('modprobe')
+        (self.package / 'nvidia-modprobe').chmod(0o4755)
 
     def run_tool(self, *extra, env_extra=None):
         env = dict(os.environ, PATH=f'{self.bin}:{os.environ["PATH"]}', FAKE_LOG=str(self.log),
@@ -246,7 +248,8 @@ class BringUp(unittest.TestCase):
         for needle in ('olddefconfig', 'check-config', 'bzImage', 'modules_install',
                        'XDEV_EXT_ENABLE_GPU_CE_DMA=1', f'lib/firmware/nvidia/{NV_RELEASE}',
                        f'libcuda.so.{NV_RELEASE}', 'update-initramfs', 'custom.cfg',
-                       'kernel_switch.py plan'):
+                       'kernel_switch.py plan', 'usr/bin/nvidia-modprobe',
+                       'etc/udev/rules.d/60-xdev-ext-nvidia.rules'):
             self.assertIn(needle, out)
         self.assertFalse([l for l in out.splitlines() if l.startswith('RUN ')])
 
@@ -272,6 +275,27 @@ class BringUp(unittest.TestCase):
         self.assertFalse(any(c.startswith(('update-initramfs', 'ldconfig')) for c in calls))
         self.assertIn('SKIP', result.stdout)
         self.assertIn('--apply', result.stdout)
+
+    def test_build_stages_nvidia_modprobe_and_a_device_node_udev_rule(self):
+        result = self.run_tool()
+        self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+        root = self.staging / 'root'
+        helper = root / 'usr/bin/nvidia-modprobe'
+        self.assertEqual(helper.read_text(), 'modprobe')
+        # Executable, but never staged setuid: the udev rule runs it as root.
+        self.assertEqual(helper.stat().st_mode & 0o7777, 0o755)
+        rule = (root / 'etc/udev/rules.d/60-xdev-ext-nvidia.rules').read_text()
+        lines = [l for l in rule.splitlines() if l and not l.startswith('#')]
+        self.assertEqual(len(lines), 1, rule)
+        self.assertIn('ACTION=="add"', lines[0])
+        self.assertIn('DEVPATH=="/bus/pci/drivers/nvidia"', lines[0])
+        self.assertIn('RUN+="/usr/bin/nvidia-modprobe -c0 -u"', lines[0])
+
+    def test_refuses_a_package_without_nvidia_modprobe(self):
+        (self.package / 'nvidia-modprobe').unlink()
+        result = self.run_tool('--dry-run')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('nvidia-modprobe', result.stderr)
 
     def test_build_stops_when_kconfig_drops_a_required_symbol(self):
         result = self.run_tool(env_extra={'FAKE_DROP': 'ICE'})
@@ -405,6 +429,55 @@ class DayOne(unittest.TestCase):
     def test_msix_table_size_from_config_space(self):
         self.assertEqual(bm.msix_table_size(config_space(16)), 16)
         self.assertIsNone(bm.msix_table_size(config_space(16)[:0x40]))
+
+    @staticmethod
+    def pci_device(devices, name, vendor, device, klass, config=None, driver=None):
+        path = devices / name
+        path.mkdir(parents=True)
+        for key, value in (('vendor', vendor), ('device', device), ('class', klass)):
+            (path / key).write_text(value + '\n')
+        if config is not None:
+            (path / 'config').write_bytes(config)
+        if driver:
+            target = devices.parent / 'drivers' / driver
+            target.mkdir(parents=True, exist_ok=True)
+            (path / 'driver').symlink_to(target)
+        return path
+
+    def test_msix_table_size_explains_a_non_root_64_byte_read(self):
+        with tempfile.TemporaryDirectory(prefix='bm-day1-') as tmp:
+            devices = Path(tmp) / 'sys/bus/pci/devices'
+            # sysfs returns only the 64-byte header to a non-root reader.
+            self.pci_device(devices, '0000:00:0d.2', '0x8086', '0x7ec2', '0x0c0340',
+                            config=config_space(16)[:0x40], driver='thunderbolt')
+            facts = bm.day_one_facts(Path(tmp), lambda argv: '{}')
+        record = facts['thunderbolt_nhi'][0]
+        self.assertIsNone(record['msix_table_size'])
+        self.assertEqual(record['msix_table_size_unreadable'], 'unreadable: rerun as root')
+
+    def test_full_config_read_has_no_unreadable_field(self):
+        with tempfile.TemporaryDirectory(prefix='bm-day1-') as tmp:
+            devices = Path(tmp) / 'sys/bus/pci/devices'
+            self.pci_device(devices, '0000:00:0d.2', '0x8086', '0x7ec2', '0x0c0340',
+                            config=config_space(16))
+            facts = bm.day_one_facts(Path(tmp), lambda argv: '{}')
+        record = facts['thunderbolt_nhi'][0]
+        self.assertEqual(record['msix_table_size'], 16)
+        self.assertNotIn('msix_table_size_unreadable', record)
+
+    def test_detects_an_unbound_thunderbolt3_nhi_of_class_system_other(self):
+        with tempfile.TemporaryDirectory(prefix='bm-day1-') as tmp:
+            devices = Path(tmp) / 'sys/bus/pci/devices'
+            # Titan Ridge 4C NHI reports class 0x088000, not the USB4 class.
+            self.pci_device(devices, '0000:05:00.0', '0x8086', '0x15eb', '0x088000',
+                            config=config_space(16))
+            # Another Intel 0x088000 function that is not an NHI.
+            self.pci_device(devices, '0000:00:08.0', '0x8086', '0x1911', '0x088000',
+                            config=config_space(4))
+            facts = bm.day_one_facts(Path(tmp), lambda argv: '{}')
+        self.assertEqual([r['pci'] for r in facts['thunderbolt_nhi']], ['0000:05:00.0'])
+        self.assertIsNone(facts['thunderbolt_nhi'][0]['driver'])
+        self.assertEqual(facts['thunderbolt_nhi'][0]['msix_table_size'], 16)
 
     def test_facts_from_sysfs_tree(self):
         with tempfile.TemporaryDirectory(prefix='bm-day1-') as tmp:

@@ -50,11 +50,30 @@ the staging directory, which must be absent or empty:
    kernel with `XDEV_EXT_ENABLE_GPU_CE_DMA=1`, require a matching vermagic, and
    stage them under `lib/modules/<release>/extra/nvidia`;
 4. stage the GSP firmware, `libcuda`, `libnvidia-ml`,
-   `libnvidia-ptxjitcompiler` and `nvidia-smi` of the package, which must be
-   the release named in the open modules' `version.mk`, plus a modprobe file
-   that blacklists nouveau. The GPU CE DMA provider still needs
-   `NVreg_EnableXdevExtCeDma=1` when `nvidia.ko` is loaded; the staged file
-   leaves that option commented out.
+   `libnvidia-ptxjitcompiler`, `nvidia-smi` and `nvidia-modprobe` of the
+   package, which must be the release named in the open modules'
+   `version.mk`, plus a modprobe file that blacklists nouveau and a udev rule,
+   `etc/udev/rules.d/60-xdev-ext-nvidia.rules`. The GPU CE DMA provider still
+   needs `NVreg_EnableXdevExtCeDma=1` when `nvidia.ko` is loaded; the staged
+   file leaves that option commented out.
+
+`nvidia.ko` does not create the `/dev/nvidia*` device nodes. On a host with a
+distribution NVIDIA package, that package's `nvidia-modprobe` or udev rules
+create them; on a host without one, nothing would, and CUDA programs fail to
+open the GPU. The staged udev rule runs
+`/usr/bin/nvidia-modprobe -c0 -u` as root when the `nvidia` PCI driver
+registers: `-c0` creates `/dev/nvidiactl` and `/dev/nvidia0`, and `-u` loads
+`nvidia-uvm` and creates `/dev/nvidia-uvm` and `/dev/nvidia-uvm-tools`.
+`nvidia-modprobe` is staged with mode 0755, not setuid, so it does not create
+nodes for unprivileged callers. The rule covers GPU minor 0 only; on a host
+with more GPUs, or if udev did not pick up the new rule, run the same command
+as root after loading the driver, adding `-c1`, `-c2`, ... per extra GPU:
+
+```bash
+modprobe nvidia NVreg_EnableXdevExtCeDma=1
+nvidia-modprobe -c0 -u
+ls -l /dev/nvidiactl /dev/nvidia0 /dev/nvidia-uvm
+```
 
 The install steps are printed as skipped. `--lsmod FILE` trims the base
 configuration to the modules in an `lsmod` listing before the fragment is
@@ -91,3 +110,9 @@ NHI, the MSI-X table size read from PCI configuration space and the number of
 allocated vectors; the IOMMU units, vendor, IOMMU-related kernel parameters and
 the IOMMU group type of each of these devices; and the current and maximum PCIe
 link speed and width of each NVIDIA display device. The command only reads.
+NHIs are found by the USB4 class 0x0c0340, by a bound `thunderbolt` driver,
+or, for an unbound Intel Thunderbolt 1-3 or Ice Lake NHI, by class 0x088000
+together with one of the device IDs that `drivers/thunderbolt/nhi.c` matches.
+Without root, sysfs returns only the first 64 bytes of configuration space,
+which hold no capability list; the NHI record then has `msix_table_size: null`
+and `msix_table_size_unreadable: "unreadable: rerun as root"`.

@@ -61,6 +61,25 @@ blacklist nouveau
 # The GPU CE DMA provider is off unless nvidia.ko is loaded with it:
 # options nvidia NVreg_EnableXdevExtCeDma=1
 '''
+# nvidia.ko does not create /dev/nvidia*; without a distribution NVIDIA package
+# nothing else would.  udev runs nvidia-modprobe as root when the nvidia PCI
+# driver registers: -c0 creates /dev/nvidiactl and /dev/nvidia0, -u loads
+# nvidia-uvm and creates /dev/nvidia-uvm{,-tools}.
+UDEV_RULE_PATH = 'etc/udev/rules.d/60-xdev-ext-nvidia.rules'
+UDEV_RULE = '''# Installed by tools/build/baremetal.py.
+# Creates /dev/nvidiactl, /dev/nvidia0 and /dev/nvidia-uvm* once nvidia.ko binds.
+ACTION=="add", DEVPATH=="/bus/pci/drivers/nvidia", RUN+="/usr/bin/nvidia-modprobe -c0 -u"
+'''
+USB4_NHI_CLASS = '0x0c0340'
+# Intel Thunderbolt 1-3 and Ice Lake NHIs report PCI_CLASS_SYSTEM_OTHER
+# (0x088000) and are matched by device ID in drivers/thunderbolt/nhi.c.
+LEGACY_NHI_CLASS = '0x088000'
+LEGACY_INTEL_NHI_IDS = frozenset((
+    '0x1513', '0x1547', '0x156a', '0x156c',                       # Thunderbolt 1/2
+    '0x1575', '0x1577', '0x15bf', '0x15d2', '0x15d9', '0x15dc',   # Alpine Ridge
+    '0x15dd', '0x15de', '0x15e8', '0x15eb',                       # Alpine/Titan Ridge
+    '0x8a0d', '0x8a17'))                                          # Ice Lake
+MSIX_UNREADABLE = 'unreadable: rerun as root'
 
 
 class BringupError(Exception):
@@ -109,7 +128,7 @@ def nvidia_release(nvidia_src):
 def package_files(package, release):
     files = [package / 'firmware' / name for name in GSP_FIRMWARE]
     files += [package / f'{lib}.so.{release}' for lib in USER_LIBS]
-    files.append(package / 'nvidia-smi')
+    files += [package / 'nvidia-smi', package / 'nvidia-modprobe']
     return files
 
 
@@ -327,11 +346,17 @@ def bringup_plan(options, mode):
                 symlink('stage', f'{lib}.so.{nv_release}', root / LIBDIR / f'{lib}.so.1')
             symlink('stage', 'libcuda.so.1', root / LIBDIR / 'libcuda.so')
             copy('stage', package / 'nvidia-smi', root / 'usr/bin/nvidia-smi')
+            helper = root / 'usr/bin/nvidia-modprobe'
+            copy('stage', package / 'nvidia-modprobe', helper)
+            helper.chmod(0o755)      # never setuid; the udev rule runs it as root
             write('stage', root / 'etc/modprobe.d/xdev-ext-nvidia.conf', MODPROBE_CONF)
+            write('stage', root / UDEV_RULE_PATH, UDEV_RULE)
         plan.add('stage', 'nvidia-userspace',
                  f'cp {",".join(f"{lib}.so.{nv_release}" for lib in USER_LIBS)} (+ .so.1 links) -> '
-                 f'{root}/{LIBDIR}/; nvidia-smi -> {root}/usr/bin/; blacklist nouveau -> '
-                 f'{root}/etc/modprobe.d/xdev-ext-nvidia.conf', stage_userspace)
+                 f'{root}/{LIBDIR}/; nvidia-smi -> {root}/usr/bin/nvidia-smi; '
+                 f'nvidia-modprobe (0755) -> {root}/usr/bin/nvidia-modprobe; '
+                 f'blacklist nouveau -> {root}/etc/modprobe.d/xdev-ext-nvidia.conf; '
+                 f'device-node rule -> {root}/{UDEV_RULE_PATH}', stage_userspace)
 
     def manifest():
         write('stage', staging / 'bringup.json', json.dumps({
@@ -498,12 +523,20 @@ def day_one_facts(root=Path('/'), runner=None):
         driver = (device / 'driver').resolve().name if (device / 'driver').exists() else None
         if klass is None:
             continue
-        if klass == '0x0c0340' or driver == 'thunderbolt':
-            record = {'pci': device.name, 'device': _read(device / 'device'), 'driver': driver}
+        device_id = _read(device / 'device')
+        if (klass == USB4_NHI_CLASS or driver == 'thunderbolt'
+                or (klass == LEGACY_NHI_CLASS and vendor == '0x8086' and device_id in LEGACY_INTEL_NHI_IDS)):
+            record = {'pci': device.name, 'device': device_id, 'driver': driver}
             try:
-                record['msix_table_size'] = msix_table_size((device / 'config').read_bytes())
+                config = (device / 'config').read_bytes()
+                record['msix_table_size'] = msix_table_size(config)
+                # sysfs gives a non-root reader only the 64-byte header, which
+                # holds no capability list.
+                if record['msix_table_size'] is None and len(config) <= 0x40:
+                    record['msix_table_size_unreadable'] = MSIX_UNREADABLE
             except OSError as error:
                 record['msix_table_size'] = None
+                record['msix_table_size_unreadable'] = MSIX_UNREADABLE
                 record['error'] = str(error)
             irqs = device / 'msi_irqs'
             record['allocated_vectors'] = len(list(irqs.iterdir())) if irqs.is_dir() else 0
