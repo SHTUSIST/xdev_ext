@@ -29,7 +29,9 @@
  *
  * Each role creates its session once at start-up and talks the worker line
  * protocol of kv_protocol.py on stdin/stdout:
- *   -> KV_READY {json}            setup done (or KV_ERROR {json}, exit 1)
+ *   -> KV_READY {json}            setup done (or KV_ERROR {json}, exit 1); with
+ *                                    ce-vmm vmm_export_fd/vmm_bytes name the staging
+ *                                    allocation's fd export (-1/0 otherwise)
  *   <- GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X verify=0|1
  *   -> KV_RESULT {json}           one restore (restore, local-verify)
  *   <- QUIT                       -> KV_BYE {json}: STOP's result (the session's
@@ -1261,7 +1263,7 @@ int main(int argc, char **argv)
 	char buf[LINE_MAX_BYTES], where[96];
 	const char *step = "options";
 	bool retained = false;
-	int ret, stop_error = 0;
+	int ret, stop_error = 0, vmm_fd;
 
 	signal(SIGPIPE, SIG_IGN);
 	ret = parse(argc, argv, &wk.o);
@@ -1279,15 +1281,20 @@ int main(int argc, char **argv)
 		teardown(&wk, &retained, &stop_error);
 		return 1;
 	}
+	/* ce-vmm: the staging allocation's POSIX fd export, so a consumer in another
+	 * process (the vLLM connector) can map the bytes the copy engine writes. */
+	vmm_fd = wk.o.dst == DST_CE && wk.cuda.exported ? wk.cuda.export_fd : -1;
 	printf("KV_READY {\"role\": \"%s\", \"dry_run\": %s, \"session_id\": %llu, "
 	       "\"pool_frames\": %" PRIu64 ", \"frame_bytes\": %u, \"group_bytes\": %u, "
 	       "\"depth\": %u, \"window\": %u, \"early\": %s, \"private_xdomain\": %s, "
-	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u}\n",
+	       "\"memlock_bytes\": %lld, \"dst\": \"%s\", \"ring_frames\": %u, "
+	       "\"vmm_export_fd\": %d, \"vmm_bytes\": %" PRIu64 "}\n",
 	       argv[1], wk.o.dry_run ? "true" : "false",
 	       wk.s ? (unsigned long long)xdev_ext_session_id(wk.s) : 0ULL, wk.pool_frames,
 	       wk.o.g.frame_bytes, wk.o.g.group_bytes, wk.o.g.depth, wk.o.g.window,
 	       wk.o.g.early ? "true" : "false", wk.xd.link ? "true" : "false", memlock_bytes(),
-	       dst_names[wk.o.dst], wk.ring_frames);
+	       dst_names[wk.o.dst], wk.ring_frames, vmm_fd,
+	       vmm_fd >= 0 ? wk.cuda.vmm_bytes : (uint64_t)0);
 	fflush(stdout);
 	if (wk.o.role == ROLE_SERVE) {
 		ret = serve_loop(&wk);

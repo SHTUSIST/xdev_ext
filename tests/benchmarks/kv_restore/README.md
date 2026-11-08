@@ -125,7 +125,10 @@ write its batch's ring slot, which does not keep the KV contiguous.
 
 Every worker sets up once and then talks line by line on stdin/stdout:
 `KV_READY {json}` after setup (`KV_ERROR {json}` and a nonzero exit if setup
-fails); `GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X
+fails; with `--dst ce-vmm`, `vmm_export_fd` and `vmm_bytes` name the staging
+allocation's POSIX fd export, so the vLLM connector in
+`src/compute/vllm/kv_connector` can map the bytes the copy engine writes;
+otherwise they are -1 and 0); `GO run=ID ordinal=R object_slba=S bytes=B dst_frame0=D seed=X
 verify=0|1` answered by one `KV_RESULT {json}`; `QUIT` answered by
 `KV_BYE {json}`. A worker refuses a GO whose keys do not exceed the keys it
 already used. With `verify=1` the worker compares the destination with the
