@@ -193,6 +193,102 @@ class Plan(unittest.TestCase):
         self.assertEqual(j['host2_frames'], p.groups * p.frames_per_group)
 
 
+class BlockLayout(unittest.TestCase):
+    """KV objects in vLLM block order: one page per (vLLM block, attention layer).
+
+    vLLM 0.33.0 views each layer's KV cache as [B, H, N, C] (blocks, KV heads,
+    tokens of a block, C = (head_size + head_size_v) * dtype bytes;
+    vllm/v1/kv_cache_interface.py compute_layer_kv_cache_shape_bytes,
+    AttentionSpec.state_content_size_bytes), so one layer's page of one block is
+    H * N * C bytes. The object stores block 0's pages for layers 0..L-1, then
+    block 1's, so a P-token prefix (P a multiple of the block size) is still the
+    first P * bytes_per_token bytes and a group never splits a page.
+    """
+
+    def test_architectures_match_bytes_per_token(self):
+        # Hugging Face config.json of Qwen/Qwen3-8B and Qwen/Qwen3-14B.
+        self.assertEqual(kl.ARCH['qwen3-8b-bf16'], kl.KVArch(36, 8, 128, 2))
+        self.assertEqual(kl.ARCH['qwen3-14b'], kl.KVArch(40, 8, 128, 2))
+        for model, arch in kl.ARCH.items():
+            self.assertEqual(arch.bytes_per_token, kl.MODELS[model], model)
+
+    def test_pages_and_blocks(self):
+        b = kl.BlockLayout.for_model('qwen3-8b-bf16', 16)
+        self.assertEqual(b, kl.BlockLayout(16, 36, 8, 512))
+        self.assertEqual((b.page_bytes, b.block_bytes, b.bytes_per_token),
+                         (65536, 36 * 65536, 147456))
+        self.assertEqual(b.page_offset(0, 0), 0)
+        self.assertEqual(b.page_offset(0, 35), 35 * 65536)
+        self.assertEqual(b.page_offset(1, 0), 36 * 65536)
+        self.assertEqual(b.page_offset(3, 2), (3 * 36 + 2) * 65536)
+        for bad in ((-1, 0), (0, 36), (0, -1)):
+            with self.assertRaises(kl.LayoutError):
+                b.page_offset(*bad)
+
+    def test_group_pages(self):
+        b = kl.BlockLayout.for_model('qwen3-8b-bf16', 16)
+        # Two 64 KiB pages per 128 KiB group; 18 groups per block.
+        self.assertEqual(b.group_pages(0, 128 * KIB), [(0, 0, 0, 65536, 0), (0, 1, 0, 65536, 65536)])
+        self.assertEqual(b.group_pages(18, 128 * KIB),
+                         [(1, 0, 0, 65536, 0), (1, 1, 0, 65536, 65536)])
+        # Pages of 256 KiB (64-token blocks): a group is half a page.
+        big = kl.BlockLayout.for_model('qwen3-8b-bf16', 64)
+        self.assertEqual(big.page_bytes, 256 * KIB)
+        self.assertEqual(big.group_pages(3, 128 * KIB), [(0, 1, 128 * KIB, 128 * KIB, 0)])
+
+    def test_group_must_not_split_a_page(self):
+        kl.BlockLayout(16, 36, 8, 512).validate(128 * KIB)
+        kl.BlockLayout(64, 36, 8, 512).validate(128 * KIB)
+        for bad in (kl.BlockLayout(16, 36, 5, 512),     # 40 KiB pages
+                    kl.BlockLayout(16, 3, 1, 512),      # 24 KiB blocks
+                    kl.BlockLayout(0, 36, 8, 512), kl.BlockLayout(16, 0, 8, 512)):
+            with self.subTest(bad=bad), self.assertRaises(kl.LayoutError):
+                bad.validate(128 * KIB)
+
+    def kv_manifest(self, **kv):
+        layout = dict(order='block-layer', block_size=16, layers=36, heads=8, state_bytes=512)
+        layout.update(kv)
+        m = manifest()
+        m['objects'][1]['kv'] = layout
+        return m
+
+    def test_manifest_kv_layout(self):
+        m = kl.parse_manifest(self.kv_manifest())
+        self.assertEqual(m.object('q8-a').kv, kl.BlockLayout(16, 36, 8, 512))
+        self.assertIsNone(m.object('q14-a').kv)
+        for bad in (dict(order='layer-block'), dict(layers=40), dict(heads=4),
+                    dict(block_size=0), dict(extra=1)):
+            with self.subTest(bad=bad), self.assertRaises(kl.LayoutError):
+                kl.parse_manifest(self.kv_manifest(**bad))
+        odd = self.kv_manifest()
+        odd['objects'][1]['tokens'] = 32760
+        with self.assertRaises(kl.LayoutError):
+            kl.parse_manifest(odd)
+
+    def test_restore_moves_whole_blocks(self):
+        m = kl.parse_manifest(self.kv_manifest())
+        g = geometry(group_bytes=128 * KIB, frame_bytes=4 * KIB)
+        p = kl.plan_restore(m, 'q8-a', 4096, g, 1, host2_ring=True)
+        self.assertEqual(p.groups, 4096 // 16 * 18)
+        self.assertEqual(p.to_json()['kv_blocks'], 256)
+        with self.assertRaises(kl.LayoutError):
+            kl.plan_restore(m, 'q8-a', 4096 + 8, g, 1, host2_ring=True)
+        with self.assertRaises(kl.LayoutError):   # pages of 40 KiB never fit 128 KiB groups
+            bad = self.kv_manifest(heads=5, layers=36, state_bytes=512)
+            kl.parse_manifest(bad)
+
+    def test_payload_file(self):
+        m = self.kv_manifest()
+        m['objects'][1]['payload'] = {'file': 'q8-a.kv', 'sha256': 'ab' * 32}
+        o = kl.parse_manifest(m).object('q8-a')
+        self.assertEqual(o.payload, kl.Payload('q8-a.kv', 'ab' * 32))
+        for bad in ({'file': '', 'sha256': 'ab' * 32}, {'file': 'x', 'sha256': 'AB' * 32},
+                    {'file': 'x', 'sha256': 'ab' * 31}, {'file': 'x'}):
+            m['objects'][1]['payload'] = bad
+            with self.subTest(bad=bad), self.assertRaises(kl.LayoutError):
+                kl.parse_manifest(m)
+
+
 class Pattern(unittest.TestCase):
     def test_splitmix64_reference_value(self):
         # First output of the reference SplitMix64 generator with state 0.

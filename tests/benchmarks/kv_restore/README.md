@@ -22,9 +22,13 @@ the KVM run below check correctness only and produce no performance number.
 
 ## Files
 
-- `kv_layout.py`: models, the KV manifest, restore plans and the payload pattern.
-- `kv_plan.h`, `kv_pattern.h`: the same plan and pattern in C for the workers;
-  `kv_plan_cli.c` exposes them to `test_plan_crosscheck.py`.
+- `kv_layout.py`: models, the KV manifest, the vLLM block layout, restore
+  plans, the prefix index and the payload pattern.
+- `kv_plan.h`, `kv_pattern.h`, `kv_index.h`: the same plan, block layout,
+  pattern and index parser in C for the workers; `kv_plan_cli.c` exposes them
+  to `test_plan_crosscheck.py`.
+- `kv_dump.py`: real KV from a vLLM run into the block layout (a vLLM
+  connector), and `pack`, which writes the manifest and the prefix index.
 - `kv_nvme_read.bpf.c`: host 1's NVMe program (key-based READ, PRIVATE).
 - `kv_ce_place.bpf.c`, `kv_ce_place.h`: host 2's copy-engine program for the
   CE VMM destination (below).
@@ -74,6 +78,94 @@ XDOMAIN window of 32 groups (`arg1 = window << 32`). A group may carry up to
 IOMMU DMA domain (`iova_rcache_range()`, drivers/iommu/iova.c). With larger
 groups on such a host the NVMe program refuses every batch (`max_nlb`) and the
 first restore aborts at BUILD; the KVM run below checks that case.
+
+## vLLM block layout
+
+An object may carry `"kv"`: its bytes are then in vLLM block order. vLLM
+0.33.0 views each attention layer's cache as `[B, H, N, C]`: B blocks, H KV
+heads, N tokens per block, C = (head_size + head_size_v) x dtype bytes
+(`compute_layer_kv_cache_shape_bytes` and `AttentionSpec` in
+vllm/v1/kv_cache_interface.py). One layer's page of one block is H x N x C
+bytes. The object stores block 0's pages for layers 0 to L-1, then block 1's,
+and so on, so page (b, l) starts at byte (b x L + l) x page_bytes
+(`BlockLayout.page_offset`, `kv_page_offset`).
+
+```json
+{"name": "qwen3-8b-bf16-1f2e...", "model": "qwen3-8b-bf16", "tokens": 4096, "seed": 0,
+ "slba": 2048, "nlb": 1179648,
+ "kv": {"order": "block-layer", "block_size": 16, "layers": 36, "heads": 8, "state_bytes": 512},
+ "payload": {"file": "dumps/qwen3-8b-bf16-1f2e....kv", "sha256": "..."}}
+```
+
+For Qwen3-8B with 16-token blocks a page is 64 KiB and a block 2.25 MiB, so
+a 128 KiB group holds two whole pages and a block is 18 groups. A P-token
+prefix with P a multiple of the block size is still the first
+P x bytes_per_token bytes. The plan refuses a prefix that is not whole
+blocks, and a geometry whose groups would split a page or not tile a block
+(`BlockLayout.validate`, `kv_block_layout_check`). `group_pages` and
+`kv_group_pages` list the (block, layer, offset) pieces of one group, which
+the scatter into vLLM's paged buffer copies. The manifest checks
+`layers x heads x state_bytes` against the model's bytes per token. Objects
+without `"kv"` keep the token-order layout and the pattern.
+
+## Real KV and the prefix index
+
+`kv_dump.py vllm --hf-model Qwen/Qwen3-8B --model qwen3-8b-bf16 --prompts
+p.jsonl --out dumps` runs vLLM 0.33.0 offline, one output token per prompt,
+with `XdevExtDumpConnector` (`kv_role` `kv_producer`, loaded through
+`kv_connector_module_path`). Each line of `p.jsonl` is `{"name": ..., "token_ids":
+[...]}`. Once a prompt is prefilled, the connector writes its whole blocks
+as `NAME.kv` in block order, `NAME.tokens` (u32 token ids) and `NAME.json`
+(model, layout, layer names, SHA-256). It refuses a page whose size is not
+H x N x C. The tool refuses any other vLLM version. `prompts.json` maps each
+prompt name to its object name.
+
+`kv_dump.py pack --dumps dumps --manifest kv.json --index kv.index
+--window-slba 2048 --window-nlb N --prefixes 4096,8192,16384,32768
+--fnv-tool build/kv_plan_cli` places each object on a group slot of the
+window and writes the manifest and the prefix index. `run.py prepare-nvme`
+then writes each payload file to its LBAs. It checks the SHA-256 of every
+payload before it writes anything.
+
+The index is a text file read by `kv_layout.py` (`load_index`) and by the C
+worker (`kv_index.h`):
+
+```
+xdev-kv-index 1
+prefix HASH object=NAME slba=2048 offset=0 bytes=603979776 tokens=4096 fnv1a=0x...
+```
+
+HASH chains SHA-256 over whole blocks of token ids, seeded with the model
+name and the block layout (`prefix_hashes`). So the hashes of a P-token
+prefix are the first P / block_size hashes of any longer prompt that starts
+with it. `PrefixIndex.longest_match` hashes a prompt once and returns the
+longest stored prefix. `fnv1a` is the FNV-1a 64 of the prefix bytes. `pack`
+writes one entry for each requested length up to each prompt's length, and
+one for the whole prompt.
+
+`kv_restore restore|local-verify --index kv.index` accepts `GO run=ID
+ordinal=R prefix=HASH dst_frame0=D verify=0|1` in place of `object_slba` and
+`bytes`. An unknown prefix fails that GO with -ENOENT and uses no keys. With
+`verify=1` the worker compares the destination with the entry's `fnv1a`
+when it has one, else with the pattern. `run.py run --index kv.index` names
+every prefix this way. Without `--index` it refuses objects that hold real
+KV, and only the xdev-ext worker reads an index.
+
+## Request queue
+
+`kv_restore restore` and `local-verify` run requests first in, first out on
+their one session. A reader thread stamps each stdin line with
+CLOCK_MONOTONIC when it arrives and queues it. The main thread runs the
+queued requests one at a time. At most `--queue-depth` requests wait (default
+64). A GO beyond that gets an immediate `KV_RESULT` with -EBUSY and is not
+queued. Every `KV_RESULT` reports `"queue": {"enqueue_ns", "start_ns",
+"queue_ns", "ahead", "depth"}`: when the line arrived, when its restore
+started, the wait between them, and how many requests were waiting or
+running when it arrived. QUIT, or the end of stdin, ends the queue after the
+requests already in it. The ordinals must still grow in arrival order.
+`--dry-run-hold-ms N` (with `--dry-run` only) holds each GO for N ms so that
+the host tests can check the queue. Several sessions sharing one cable are a
+different matter and need TODO.27.
 
 ## CE VMM destination (GPUs without GPUDirect RDMA)
 
@@ -209,7 +301,12 @@ and prefix for a latency verdict.
 
 `make check` runs the C plan test against the kernel's own CREATE, START and
 XDOMAIN rules, the BPF callbacks with the production SQE admission helper,
-and the Python tests. Those tests use regular files, a fake configfs tree, a
+and the Python tests. The Python tests include the block layout, the prefix
+index and its C parser, the request queue (dry run), and `kv_dump.py`. The
+`kv_dump.py` tests use a fake model and a fake `vllm` module, so they show
+that the dump code puts each page where the layout says. They do not show
+that vLLM 0.33.0 calls the connector this way or that its caches have this
+shape; no vLLM run has dumped KV yet. Those tests use regular files, a fake configfs tree, a
 recording stand-in of `mooncake.store`, a fake worker and a loopback agent.
 `test_worker_contract.py` builds `kv_restore` (libbpf >= 1.0) and checks its
 dry-run plans against `kv_layout.py`.

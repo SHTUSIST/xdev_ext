@@ -379,6 +379,8 @@ jobs:
           python3 -B tests/benchmarks/mooncake/regression/publication_interrupt/test_publication_interrupt.py
       - name: Reviewer-driven evaluation harness contracts
         run: make -C tests/eval reviewer-eval-check
+      - name: K-KV restore plan, block layout, prefix index, request queue and KV dump contracts
+        run: make -C tests/eval/kv_restore check BUILD="$RUNNER_TEMP/kv-restore"
       - name: Storage block poll runtime and native consumers
         working-directory: .
         run: |

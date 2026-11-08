@@ -57,6 +57,16 @@ class Lines(unittest.TestCase):
         with self.assertRaises(kp.ProtocolError):
             kp.go_line(run='r', ordinal=0, object_slba=0, bytes=1, dst_frame0=0)
 
+    def test_prefix_go_line(self):
+        h = 'ab' * 32
+        self.assertEqual(kp.prefix_go_line('r-2', 4, h, 7, verify=True),
+                         f'GO run=r-2 ordinal=4 prefix={h} dst_frame0=7 seed=0 verify=1\n')
+        for bad in ('AB' * 32, 'ab' * 31, 'xyz', None):
+            with self.subTest(bad=bad), self.assertRaises(kp.ProtocolError):
+                kp.prefix_go_line('r', 1, bad, 0)
+        with self.assertRaises(kp.ProtocolError):
+            kp.prefix_go_line('r', 0, h, 0)
+
     def test_parse_known_kinds_only(self):
         kind, body = kp.parse_line('KV_READY {"role": "restore"}')
         self.assertEqual((kind, body['role']), ('KV_READY', 'restore'))
