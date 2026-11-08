@@ -115,12 +115,24 @@ identical. A campaign without an explicit seed chooses one seed for all arms.
 For `nvme-gpu`, the new staged composition ends after H2D and GPU completion,
 without a D2H return. The USER and session variants use one io_uring UMEM
 pool and one session each; no cross-session pool permission is assumed.
+The separate two-single-stage-session handoff on one ring remains unqualified;
+the USER stage in this arm does not establish that cross-session handoff.
 All variants retain the final GPU-window oracle. The USER arm additionally
 requires `ready_batches == completed_batches == warmup + batches`, with
 zero USER failure. Missing acknowledgements at terminal completion report a
 negative USER failure without extending the timer or retrying during cleanup.
 The USER deadline is 1..600000 ms; the original arms keep their prior timeout
 domain. A USER acknowledgement alone is not terminal completion.
+
+For the session and USER GPU variants, rig `ce.alloc: "vmm"` explicitly uses
+the existing CUDA VMM helper and attaches the same exported allocation to every
+CE stage file before CREATE. `ce.alloc: "native"` retains the native allocation
+path; `"given"` retains the supplied window (including simulator offsets).
+VMM results report `ce_backend: "gpu-vmm-allocation"`. The staged CUDA path is
+unchanged. CUDA process initialization runs after valid parsing and before any
+owned session resources; the final FD check covers every fd acquired after that
+baseline. `--check` does not initialize CUDA. This selection establishes a path
+to qualify, not a device or performance result.
 
 Comparable session and USER results label raw `cost.syscalls` as
 `syscalls_scope: main-thread-explicit`. The library's USER helper syscalls

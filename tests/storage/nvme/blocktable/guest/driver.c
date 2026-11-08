@@ -25,14 +25,16 @@
 #define LOG_BYTES (8U * 1024U * 1024U)
 struct options { const char *object, *device, *expected, *output; uint64_t slba, nlb; bool guest, have_slba; };
 struct program { struct bpf_object *object; struct bpf_link *link; int blocks; };
-struct session { int ring; uint64_t id, done; unsigned char *memory; const unsigned char *want; const char *name; };
+struct session { int ring; uint64_t id, done, device_rdev; unsigned char *memory; const unsigned char *want; const char *name; };
 static struct options opt;
 static FILE *events;
 static unsigned cases, checks;
+#ifndef BLOCKTABLE_PRIVATE_PARALLEL
 static const unsigned slots[3][8] = {
     {0,1,2,3,4,5,6,7}, {7,6,5,4,3,2,1,0}, {3,0,6,1,7,4,2,5}
 };
 static const char *names[3] = {"ordinary", "reverse", "shuffled"};
+#endif
 static unsigned char expected[8 * BT_GROUP];
 
 static void verdict(int code, const char *reason)
@@ -183,6 +185,7 @@ static struct session create(struct program *p, const char *name)
     SETUP(!syscall(__NR_io_uring_register,s.ring,IORING_REGISTER_XDEV_EXT_UMEM,&reg,1));
     int device = open(opt.device, O_RDONLY|O_CLOEXEC); SETUP(device >= 0);
     struct stat ds; SETUP(!fstat(device, &ds) && S_ISCHR(ds.st_mode));
+    s.device_rdev = (uint64_t)ds.st_rdev;
     struct xdev_ext_mech_create_programs e = {.size=sizeof(e), .version=XDEV_EXT_MECH_CREATE_PROGRAMS_VERSION,
         .program_fds={bpf_link__fd(p->link), -1, -1, -1}};
     e.request.size = sizeof(e.request); e.request.version = XDEV_EXT_MECH_CREATE_REPORT_VERSION;
@@ -275,8 +278,14 @@ static void withdraw_stats(const struct xdev_ext_mech_stats *before,
     ASSERT(after->native_publish==before->native_publish);
     ASSERT(after->last_err==-ECANCELED);
 }
+#ifdef BLOCKTABLE_PRIVATE_PARALLEL
+#include "parallel.h"
+#endif
 static void runtime(void)
 {
+#ifdef BLOCKTABLE_PRIVATE_PARALLEL
+    parallel_runtime();
+#else
     struct program p=load(); uint64_t old_session=0;
     for (unsigned run=0;run<3;run++) {
         struct session s=create(&p,names[run]);
@@ -308,6 +317,7 @@ static void runtime(void)
     stop(&owner,-ECANCELED); cases++;
     bpf_link__destroy(p.link); bpf_object__close(p.object);
     verdict(0,"eight-cases-actual-kernel");
+#endif
 }
 static uint64_t number(const char *text)
 {

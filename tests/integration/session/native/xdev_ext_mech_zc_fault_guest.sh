@@ -33,6 +33,10 @@ finish_fault() {
 trap finish_fault EXIT
 
 pins() {
+    if ! cat /proc/sys/vm/stat_refresh >/dev/null; then
+        echo 'FAIL pin statistics refresh failed' >&2
+        return 1
+    fi
     pin_a= pin_r= pin_m=
     while read -r pin_key pin_value pin_rest; do
         case "$pin_key" in

@@ -32,8 +32,11 @@ LIBDIR := $(KERNEL)/tools/xdev_ext_mech/lib
 LIBBUILD := $(abspath $(BUILD))/lib
 LIBXDEV := $(LIBBUILD)/libxdev_ext.a
 
-HEADERS := ../common/cpu_timer.h ../common/native_process.h chain_json.h chain_spec.h chain_check.h chain_crc.h chain_timing.h chain_oracle.h chain_bench.h chain_cuda.h chain_nxp.h \
-	uring_min.h $(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h
+HEADERS := ../common/cpu_timer.h ../common/native_process.h ../common/fd_check.h \
+	../nvme_gpu/eval_session.h ../nvme_gpu/nvme_gpu_core.h \
+	chain_json.h chain_spec.h chain_check.h chain_crc.h chain_timing.h chain_oracle.h chain_bench.h chain_cuda.h chain_nxp.h \
+	uring_min.h $(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_ctl_core.h \
+	$(KERNEL)/tools/xdev_ext_mech/xdev_ext_mech_cuda.h $(KERNEL)/tools/include/xdev_ext_nv_p2p_ioctl.h
 SOURCES := chain_bench.c chain_session.c chain_staged.c \
 	$(KERNEL)/tools/xdev_ext_xsk_redirect.c $(KERNEL)/tools/xdev_ext_gpu_identity.c
 
@@ -63,6 +66,7 @@ check: test
 	$(BUILD)/test_chain_spec
 	$(PYTHON) test_run.py -v
 	$(PYTHON) test_bpf_headers.py -v
+	$(PYTHON) test_ce_vmm.py -v
 
 clean:
 	rm -rf $(BUILD)
