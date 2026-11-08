@@ -82,6 +82,9 @@ class FakeService:
         self.staging[staging_offset:staging_offset + nbytes] = self.disk.data[a:a + nbytes]
         return RestoreOutcome(True, 0, '', 1000, {})
 
+    def start(self):
+        pass
+
     def close(self):
         return []
 
