@@ -651,8 +651,18 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_nvme_slba(__u64 window_slba, __u64 window_nlb
  * mul the first value coprime to n from a seeded start, so every group is
  * named once per n positions.  n < 2^32 keeps every product below 2^64.
  */
-#define XDEV_EXT_MP_AFFINE_GCD_STEPS	48U	/* Lame: operands < 2^32 need <= 46 */
-#define XDEV_EXT_MP_AFFINE_TRIES	64U	/* gap to the next coprime; n - 1 always is */
+#define XDEV_EXT_MP_AFFINE_GCD_STEPS	48	/* Lame: operands < 2^32 need <= 46 */
+#define XDEV_EXT_MP_AFFINE_TRIES	64	/* gap to the next coprime; n - 1 always is */
+/*
+ * An open-coded iterator in a BPF object (bpf_for() of bpf_helpers.h), so the
+ * verifier checks each body once; nested counted loops passed its 1M
+ * instruction limit.  A counted loop elsewhere.  @i is a declared int.
+ */
+#ifdef bpf_for
+#define XDEV_EXT_MP_FOR(i, n)	bpf_for(i, 0, n)
+#else
+#define XDEV_EXT_MP_FOR(i, n)	for ((i) = 0; (i) < (n); (i)++)
+#endif
 
 XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_mix64(__u64 x)
 {
@@ -666,9 +676,9 @@ XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_mix64(__u64 x)
 /* gcd(@a, @b) of operands below 2^32; 0 if Euclid has not ended. */
 XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_gcd32(__u64 a, __u64 b)
 {
-	__u32 i;
+	int i;
 
-	for (i = 0; i < XDEV_EXT_MP_AFFINE_GCD_STEPS; i++) {
+	XDEV_EXT_MP_FOR(i, XDEV_EXT_MP_AFFINE_GCD_STEPS) {
 		__u64 t;
 
 		if (!b)
@@ -684,7 +694,7 @@ XDEV_EXT_MP_INLINE __u64 xdev_ext_mp_gcd32(__u64 a, __u64 b)
 XDEV_EXT_MP_INLINE int xdev_ext_mp_affine_mul(__u64 n, __u32 seed, __u64 *mul)
 {
 	__u64 a;
-	__u32 i;
+	int i;
 
 	if (!n)
 		return -EINVAL;
@@ -695,7 +705,7 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_affine_mul(__u64 n, __u32 seed, __u64 *mul)
 		return 0;
 	}
 	a = 2 + xdev_ext_mp_mix64((__u64)seed << 32) % (n - 2);
-	for (i = 0; i < XDEV_EXT_MP_AFFINE_TRIES; i++) {
+	XDEV_EXT_MP_FOR(i, XDEV_EXT_MP_AFFINE_TRIES) {
 		if (xdev_ext_mp_gcd32(a, n) == 1) {
 			*mul = a;
 			return 0;

@@ -297,6 +297,17 @@ class RandOrder(unittest.TestCase):
         self.assertRegex(source, r"struct xdev_ext_nvme_mech_ops nvme_rand_ops = \{")
         self.assertIn("return xdev_ext_mp_nvme_next(mctx->callsite, cqe->status, cqe->err);",
                       source)
+        # The KVM verifier rejected nested counted loops (1M instructions,
+        # -E2BIG at load); the helpers loop through bpf_for() in BPF.
+        helpers = (KERNEL / "tools/xdev_ext_mech/xdev_ext_mech_prog.h").read_text()
+        self.assertIn("#define XDEV_EXT_MP_FOR(i, n)\tbpf_for(i, 0, n)", helpers)
+        for name in ("xdev_ext_mp_gcd32", "xdev_ext_mp_affine_mul"):
+            body = helpers[helpers.index(name + "("):]
+            body = body[:body.index("\n}\n")]
+            self.assertIn("XDEV_EXT_MP_FOR(i, ", body)
+            self.assertNotIn("for (", body)
+        self.assertLess(source.index("#include <bpf/bpf_helpers.h>"),
+                        source.index('#include "xdev_ext_mech_prog.h"'))
         makefile = (KERNEL / "tools/xdev_ext_mech/Makefile").read_text()
         self.assertRegex(makefile, r"BPF_NAMES :=.*\bnvme_rand\b")
 
