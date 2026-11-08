@@ -90,6 +90,7 @@ enum nvme_ctrl_state { NVME_CTRL_LIVE = 1, NVME_CTRL_RESETTING = 2 };
 #define NVME_CMD_SGL_METABUF 0x40
 #define NVME_REQ_USERCMD 2
 #define NVME_REQ_XDEV_EXT_PEER /* ACTUAL_PEER_FLAG */
+#define NVME_REQ_XDEV_EXT_EPOCH (1U << 6)
 #define REQ_FAILFAST_MASK 0x700
 #define IS_ERR(p) (!(p))
 #define PTR_ERR(p) (-ENOMEM)
@@ -323,12 +324,14 @@ int main(void)
  puts("ok 7 - failed CSTS.RDY wait, Bus Master left set, shutdown, dead controller, config error response and another controller's reset prove nothing");
  e0=xdev_ext_peer_requester_epoch(dev.peer_requester);
  command_register=PCI_COMMAND_MASTER; nvme_dev_disable(&dev,false);
- assert(epoch_at_quiesce==e0+1 && proven_at_cancel==e0+1);
+ assert(epoch_at_quiesce==e0+1 && proven_at_cancel==e0+2);
+ assert(xdev_ext_peer_requester_evidence(dev.peer_requester,e0+1)==XDEV_EXT_PEER_EVIDENCE_COVERED &&
+        xdev_ext_peer_requester_evidence(dev.peer_requester,e0+2)==XDEV_EXT_PEER_EVIDENCE_PENDING);
  assert(regions[0]->quarantined && drain()==1 && !regions[0]->quarantined && regions[0]->invalid);
  unmaps0=memory_unmaps; unpins0=memory_unpins; file0=provider_file.refs; owner0=memory_owner.refs;
  assert(xdev_ext_peer_unmap(mappings[0])==0 && xdev_ext_peer_unpin(regions[0])==0);
  assert(memory_unmaps==unmaps0+1 && memory_unpins==unpins0+1 && provider_file.refs==file0-1 && memory_owner.refs==owner0-1);
- puts("ok 8 - completed Controller Reset with Bus Master clear: epoch begun before quiesce, proven before cancel, region released once, still invalid until then");
+ puts("ok 8 - completed Controller Reset with Bus Master clear: epoch begun before quiesce, the next one begun and proven while still quiesced and before cancel (covering dispatches the quiesce waited for), region released once, still invalid until then");
  during_execute=cancel_during_reset;
  assert(nvme_pci_peer_rw(&ns,&u,&f,NULL)==-EINTR && last_quiesced && f.refs==1);
  during_execute=NULL;

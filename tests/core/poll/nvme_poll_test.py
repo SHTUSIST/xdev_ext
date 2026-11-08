@@ -68,6 +68,7 @@ typedef unsigned int blk_opf_t; typedef int blk_status_t; typedef u64 dma_addr_t
 #define NVME_REQ_CANCELLED (1U << 0)
 #define NVME_REQ_USERCMD (1U << 1)
 #define NVME_REQ_XDEV_EXT_PEER (1U << 5)
+#define NVME_REQ_XDEV_EXT_EPOCH (1U << 6)
 #define NVME_CMD_SGL_METABUF (1U << 6)
 #define GFP_KERNEL 0
 #define NVME_XDEV_EXT_PEER_MAX_SPANS 4

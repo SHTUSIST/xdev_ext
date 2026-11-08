@@ -10,8 +10,9 @@ direction, and admits every command the stage's program builds only inside
 the stage window. Handles of one namespace that share an LBA are refused
 unless both are read-only. A handle's range stays reserved until its last
 reference goes; a session holds its stage file until it is released, and a
-quarantined session keeps it for good, so a range is not issued again while
-its previous owner may still write it.
+quarantined session keeps it until a verified reset of the controller proves
+its retained commands stopped (for good without such a proof), so a range is
+not issued again while its previous owner may still write it.
 
 Tenants are isolated from each other only when they receive handles and never
 the namespace node: an fd of the node itself still binds any window and keeps
@@ -77,18 +78,22 @@ windows must hold exactly their source windows:
   refused with `-ERANGE` and no write is submitted;
 - `unknown`: tenant 0 reads ns2 with the kernel's nvme `fault_inject` setting
   an error status on commands QEMU completed: its batches are sequestered,
-  STOP quarantines the session (`-EBUSY`) and its range stays reserved;
+  STOP quarantines the session (`-EBUSY`) and its range stays reserved
+  while no reset has proven those commands stopped;
 - `timeout`: tenant 0 reads ns2 with `fail_io_timeout` swallowing every
   completion: STOP passes the 5 s drain bound with commands in flight
   (`-EBUSY`, release deferred) and its range stays reserved. After this last
   round, with nothing else running, the holder resets the DST controller:
   the reset cancels those commands, they end, and the deferred release frees
-  the session and its range (so the guest can also power off).
+  the session and its range (so the guest can also power off). The same
+  reset's DMA-stop proof covers the `unknown` round's retained commands, so
+  that quarantined session is released too and its range becomes free.
 
 The runner boots with `nvme_core.io_timeout=600`, so no command timeout fires
 on its own and no controller reset happens while innocent tenants run; the
 faults touch ns2 only. The kernel log must show exactly one quarantined
-session (the `unknown` round) and one deferred release (the `timeout` round). `window_validate.py --multi` repeats the
+session (the `unknown` round), one deferred release (the `timeout` round)
+and that session leaving quarantine. `window_validate.py --multi` repeats the
 whole-disk oracle on the host. Each round prints how its innocent tenants'
 run overlapped the fault and requires at least one of them to be still
 running when the fault began.
@@ -101,17 +106,30 @@ as uncertain only when the request still carries residual bytes, so the
 outcome depends on how the completion arrives: in the `timeout` round a
 command cancelled by the reset ended as a definite failure, while the
 `unknown` round's error status was sequestered. The `multi` mode keeps resets
-out of the innocent tenants' runs. `--mode multi-reset` is a diagnostic, not
-a gate: the same four tenants, with the holder resetting the DST controller
-while the three innocent tenants still have commands in flight; the guest
-prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant (batches done,
-aborted, sequestered, STOP result, window exact) and the runner gates only on
-the run and the kernel log. Observed on a strict-debug guest (2026-11-08): the reset
-quarantined two of the three innocent tenants (their in-flight batches came
-back as error completions with residual bytes and were sequestered, STOP
-returned -EBUSY, their window ranges stay reserved); the third finished exact.
-Isolation therefore does not yet hold across a shared-controller reset, and
-any tenant's command timeout escalates to such a reset.
+out of the innocent tenants' runs. `--mode multi-reset` puts one in: the same
+four tenants, with the holder resetting the DST controller while the three
+innocent tenants may still have commands in flight. A write the reset aborts
+(SQ deletion) comes back as an error with residual bytes, is sequestered, and
+that innocent's STOP quarantines it (`-EBUSY`). nvme-pci records, when it
+prepares each host-page mechanism command for the SQ, the controller and its
+DMA-stop epoch (`nvme_pci_peer_note_submit`); the reset begins a new epoch
+before it quiesces the queues, and once CC.EN=0 completed with Bus Master
+Enable read back clear it begins the next one while the queues are still
+quiesced and proves that. The proof covers every command prepared before
+the queues stopped, including a dispatch the quiesce waited for, so the
+storage stage reports the retained slots as covered and the quarantined
+session is released with its range; a command prepared on the restarted
+queues, or sent to another controller, keeps it parked. The guest prints one `XDEV_EXT_WINDOW_RESET_DIAG` line per tenant
+(batches done, aborted, sequestered, STOP result, window exact) and the
+polls until each range was free; it requires every innocent to STOP with 0
+after all its batches with its exact window, or to be released, and every
+range to be free. The runner requires each quarantined session to leave
+quarantine and runs `window_validate.py --reset` (each innocent group exact
+or guard, a cleanly stopped innocent exact, everything else guard). An
+aborted write's data may or may not have landed; the batches that ended
+UNKNOWN are not retried. A strict-debug guest at b9d83bb (before this
+release) showed the gap: the reset quarantined innocent tenants in two of
+four runs and their ranges stayed reserved.
 
 ## Host tests (no kernel, no device)
 
@@ -132,12 +150,40 @@ any tenant's command timeout escalates to such a reset.
 - `../../family_window_grant/run.sh ROOT OUT` and `mutate.py ROOT OUT` check
   the pure grant rules in `xdev_ext_storfam_core.h`.
 
+## Same-frame reuse after reset (`--mode frame-reuse`)
+
+`window_reuse.h` registers A's pool and a keeper ring with exactly the same
+address, size and frame size. The keeper holds only a registration while A
+runs. A borrows frame 0 for one source W0 READ and destination W0 WRITE;
+NVMe fault injection on the destination makes the WRITE end UNKNOWN. The
+test requires one failed batch, one sequestered frame, no outstanding I/O,
+and STOP returning `-EBUSY`. It clears the fault, resets DST, and queries A
+through the keeper until A is released. It then creates C on that same
+keeper registration and borrows the original frame 0 for one W1 READ/WRITE.
+No CPU write, unmap or re-registration of that pool occurs between A and C.
+
+C must finish one batch without abort and STOP with 0; frame 0 must contain
+the different W1 source bytes and frames 1..7 retain their original guards.
+Both guest and host oracles allow only the first W0 group to be its old
+source or guard, require the first W1 group to match its new source, and
+require every other destination byte, the source and AUX to stay unchanged.
+The BPF program maps key 1 to group 0 of each bound window; no whole-window
+allowance is made. A's failed I/O is never retried or counted as successful.
+
+Run the independent host oracle cases with:
+
+    python3 -I tests/storage/nvme/window_handle/window_reuse_validate_test.py
+
+The actual guest mode needs `CONFIG_FAULT_INJECTION_DEBUG_FS=y` in addition to
+the runner's other required configuration. Host oracle and compiler checks
+do not establish that the actual kernel can reuse the frame.
+
 ## Running the guest test
 
 On a host with KVM, from a clean checkout of the commit under test:
 
     bash tests/storage/nvme/window_handle/window_kvm.sh --scratch DIR \
-        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi|multi-reset]
+        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi|multi-reset|frame-reuse]
 
 `DIR` must be an existing private 0700 directory. The kernel build needs the
 config symbols listed in the runner. A kernel from another commit is accepted

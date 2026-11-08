@@ -9112,6 +9112,18 @@
       "logical_path": "tests/network/xsk_zc_tx_callers/zc_tx_rule_test.c"
     },
     {
+      "source": "tests/storage/family_block_evidence/cases.c",
+      "logical_path": "tests/storage/family_block_evidence/cases.c"
+    },
+    {
+      "source": "tests/storage/family_block_evidence/run.py",
+      "logical_path": "tests/storage/family_block_evidence/run.py"
+    },
+    {
+      "source": "tests/storage/family_block_evidence/shim.h",
+      "logical_path": "tests/storage/family_block_evidence/shim.h"
+    },
+    {
       "source": "tests/storage/family_block_poll/README.md",
       "logical_path": "tests/storage/family_block_poll/README.md"
     },
@@ -9412,6 +9424,16 @@
       "source": "tests/storage/nvme/window_handle/window_multi.h",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_multi.h"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_reuse_validate_test.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_reuse_validate_test.py"
+    },
+    {
+      "source": "tests/storage/nvme/window_handle/window_reuse.h",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/nvme_xdev_ext/window_handle/window_reuse.h"
     },
     {
       "source": "tests/storage/nvme/window_handle/window_nvme.bpf.c",
@@ -10019,6 +10041,26 @@
       "source": "tests/core/memory/umem/fake_include/rsrc.h",
       "component": "linux",
       "native_path": "tools/testing/selftests/xdev_ext_umem/fake_include/rsrc.h"
+    },
+    {
+      "source": "tests/core/lifecycle/recovery/README.md",
+      "logical_path": "tests/core/lifecycle/recovery/README.md"
+    },
+    {
+      "source": "tests/core/lifecycle/recovery/boundary.c",
+      "logical_path": "tests/core/lifecycle/recovery/boundary.c"
+    },
+    {
+      "source": "tests/core/lifecycle/recovery/cases.c",
+      "logical_path": "tests/core/lifecycle/recovery/cases.c"
+    },
+    {
+      "source": "tests/core/lifecycle/recovery/run.py",
+      "logical_path": "tests/core/lifecycle/recovery/run.py"
+    },
+    {
+      "source": "tests/core/lifecycle/recovery/mutations.py",
+      "logical_path": "tests/core/lifecycle/recovery/mutations.py"
     }
   ]
 }

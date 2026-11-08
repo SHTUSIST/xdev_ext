@@ -2,7 +2,7 @@
   "schema": 1,
   "provenance": {
     "kind": "independent frozen host characterization",
-    "golden": "six existing sibling native_member_7a files reused byte-for-byte; boundary.h has an explicit BIO iterator OS declaration qualification, with original members/behavior and numeric assertions unchanged",
+    "golden": "six existing sibling native_member_7a files reused byte-for-byte; boundary.h has an explicit BIO iterator OS declaration qualification and the NVMe DMA-stop epoch request flag, with original members/behavior and numeric assertions unchanged",
     "literals": "assertions_7b.c, boundary_ext.h, common_gate.c, mutations.py and extra_common.c preserved byte-for-byte",
     "adaptations": "assembly/import paths, opened-namespace-file projection of separate window-handle region, real requester dependency closure, fixture/common-owner access paths and selected source/input snapshots; positional fixture edits retain exact reverse proof",
     "source_policy": "explicit --source-root selects canonical source; record all selected hashes before/after without a historical candidate SHA gate"
@@ -20,7 +20,7 @@
     "verify.py": "1e4c9adca78e3c58be6729a671badd2d99978618d48eda9e350e7fb0baa77700",
     "../native_member_7a/README.md": "fa414ab8eb4bab2254eb77b3daf966d4b067c587a6d0bef56456d1de31d44376",
     "../native_member_7a/assertions.c": "425edfea370912402626d36c33c63532242a1c469ec3f3f50b2e2fc581b3f4b3",
-    "../native_member_7a/boundary.h": "676382e74fd344d1598a237e5b75ceba16b6f91656ed0bd86583e5c4581aea37",
+    "../native_member_7a/boundary.h": "f295b3e812533e66a91a3b4ee73f5d5f8f7bb3da602977a1a7ab5df35a9d2219",
     "../native_member_7a/candidate.c.in": "ea49ac2d7f685f7fe2e2c1375a730966b05110aa83bfb0bc37e01f3a13778631",
     "../native_member_7a/candidate_adapter.h": "0ebbc9f199e5177418abc09970509d66dc00598bb8855646051a2c5c4cf72331",
     "../native_member_7a/run.py": "df758e5fb7dd7da0cba4d0a44051559671426f2c510b6e05cb804b38f2a2d650",

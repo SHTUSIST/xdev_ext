@@ -164,5 +164,101 @@ class MultiTenantOracle(unittest.TestCase):
         self.assertEqual(self.state(source, dest, aux), 'FAIL')
 
 
+def reset_images(aborted=None):
+    """The reset round at windows 16..19: tenant 0 faulty, 1..3 innocent.
+    aborted maps an innocent to the groups its aborted writes never wrote."""
+    source = V['expected_source'](SEED)
+    dest = bytearray([V['GUARD']]) * V['SPAN']
+    for i in range(1, 4):
+        w = 16 + i
+        dest[w * WIN:(w + 1) * WIN] = source[w * WIN:(w + 1) * WIN]
+        for g in (aborted or {}).get(i, ()):
+            dest[w * WIN + g * GROUP:w * WIN + (g + 1) * GROUP] = bytes([V['GUARD']]) * GROUP
+    aux = bytes([V['AUX_FILL']]) * V['SPAN']
+    return source, dest, aux
+
+
+class ResetRoundOracle(unittest.TestCase):
+    def state(self, source, dest, aux, exact=(1, 2, 3)):
+        return V['validate_reset'](bytes(source), bytes(dest), bytes(aux), set(exact))['state']
+
+    def test_every_innocent_exact_passes(self):
+        self.assertEqual(self.state(*reset_images()), 'PASS')
+
+    def test_aborted_groups_left_guard_pass_for_a_released_innocent(self):
+        source, dest, aux = reset_images({3: (4, 5, 6, 7), 2: (0,)})
+        self.assertEqual(self.state(source, dest, aux, exact=(1,)), 'PASS')
+
+    def test_innocent_that_stopped_cleanly_must_be_exact(self):
+        source, dest, aux = reset_images({2: (7,)})
+        self.assertEqual(self.state(source, dest, aux, exact=(1, 2)), 'FAIL')
+
+    def test_torn_innocent_group_fails(self):
+        source, dest, aux = reset_images()
+        w = 18
+        dest[w * WIN + GROUP:w * WIN + GROUP + 512] = bytes([V['GUARD']]) * 512
+        self.assertEqual(self.state(source, dest, aux, exact=()), 'FAIL')
+
+    def test_group_from_another_window_fails(self):
+        source, dest, aux = reset_images()
+        dest[17 * WIN:17 * WIN + GROUP] = source[18 * WIN:18 * WIN + GROUP]
+        self.assertEqual(self.state(source, dest, aux, exact=()), 'FAIL')
+
+    def test_faulty_groups_copied_from_its_private_namespace_pass(self):
+        source, dest, aux = reset_images()
+        dest[16 * WIN + 4 * GROUP:17 * WIN] = aux[16 * WIN + 4 * GROUP:17 * WIN]
+        self.assertEqual(self.state(source, dest, aux), 'PASS')
+
+    def test_faulty_group_from_the_shared_source_fails(self):
+        source, dest, aux = reset_images()
+        dest[16 * WIN:16 * WIN + GROUP] = source[16 * WIN:16 * WIN + GROUP]
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_torn_faulty_group_fails(self):
+        source, dest, aux = reset_images()
+        dest[16 * WIN + GROUP:16 * WIN + GROUP + 512] = aux[16 * WIN:16 * WIN + 512]
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_earlier_round_windows_must_stay_guard(self):
+        source, dest, aux = reset_images()
+        dest[5 * WIN + 9] = 0
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_write_past_the_reset_windows_fails(self):
+        source, dest, aux = reset_images()
+        dest[20 * WIN] = 0
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_private_namespace_changed_fails(self):
+        source, dest, aux = reset_images()
+        aux = bytearray(aux)
+        aux[16 * WIN] = 0
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_source_off_formula_fails(self):
+        source, dest, aux = reset_images()
+        source[8 * 513] ^= 0x80
+        self.assertEqual(self.state(source, dest, aux), 'FAIL')
+
+    def test_command_line_reads_the_exact_tenants(self):
+        import subprocess
+        import sys
+        import tempfile
+        source, dest, aux = reset_images({3: (1,)})
+        with tempfile.TemporaryDirectory() as d:
+            paths = []
+            for name, image in (('s', source), ('d', dest), ('a', aux)):
+                paths.append(str(Path(d) / name))
+                Path(paths[-1]).write_bytes(bytes(image))
+            script = str(Path(__file__).with_name('window_validate.py'))
+            ok = subprocess.run([sys.executable, '-I', script, '--reset', *paths, '1,2'],
+                                capture_output=True, text=True)
+            bad = subprocess.run([sys.executable, '-I', script, '--reset', *paths, '1,2,3'],
+                                 capture_output=True, text=True)
+            none = subprocess.run([sys.executable, '-I', script, '--reset', *paths, '-'],
+                                  capture_output=True, text=True)
+        self.assertEqual((ok.returncode, bad.returncode, none.returncode), (0, 1, 0), ok.stdout + bad.stdout)
+
+
 if __name__ == '__main__':
     unittest.main()
