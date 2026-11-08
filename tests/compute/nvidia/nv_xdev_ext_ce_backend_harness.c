@@ -146,6 +146,7 @@ static struct harness {
 	void *event_arg;
 	unsigned int events_fired;
 	u32 last_n, last_dir;
+	struct { u64 host, gpu, size; } last_x[64];
 	int submit_saw_dev_sync_gap;
 	unsigned int dma_map, dma_unmap, sg_alloc, sg_free, dma_bad_dir;
 	void *dma_dev;
@@ -951,6 +952,11 @@ static NV_STATUS nv_p2p_ce_async_submit(nv_p2p_ce_host_t *h,
 	H.rm_submit++;
 	H.last_n = n;
 	H.last_dir = dir;
+	for (i = 0; i < n && i < 64; i++) {
+		H.last_x[i].host = x[i].umemOffset;
+		H.last_x[i].gpu = x[i].gpuOffset;
+		H.last_x[i].size = x[i].size;
+	}
 	/* RM direction 1: host pages are read by the CE. */
 	if (dir == 1)
 		for (i = 0; i < n; i++) {
@@ -1693,6 +1699,53 @@ static void case_sync(void)
 #endif
 }
 
+/*
+ * A plan writes one entry per frame.  Consecutive entries adjacent in both
+ * the host pages and the window reach RM as one transfer, so RM can cover
+ * them with one CE command; any gap on either side keeps them apart.
+ */
+static void case_merge_adjacent(void)
+{
+	static const struct { u64 page, gpu; } e[] = {
+		{ 2, 0 }, { 3, 4096 }, { 4, 8192 },	/* adjacent on both sides */
+		{ 10, 12288 },				/* host gap */
+		{ 11, 20480 },				/* window gap */
+		{ 12, 24576 },				/* adjacent to the previous */
+	};
+	struct xdev_ext_ce_xfer x[6];
+	struct fixture fx;
+	u32 i;
+	memset(x, 0, sizeof(x));
+	for (i = 0; i < 6; i++) {
+		x[i].host_byte_off = e[i].page * 4096;
+		x[i].gpu_off = e[i].gpu;
+		x[i].len = 4096;
+#if HARNESS_OWNER_API
+		x[i].owner = H.frame_owner[e[i].page];
+		x[i].generation = H.frame_generation[e[i].page];
+#endif
+	}
+	H.dma_mode = 0;
+	REQUIRE(bind(&fx, 16) == 0, "bind");
+	H.expected_ticket[1] = 1;
+	REQUIRE(ops->submit(&fx.r, fx.host, XDEV_EXT_MECH_DIR_TO_DEVICE, x, 6, &cookies[1], 1) == 0,
+		"submit");
+	CHECK(H.last_n == 3, "a 6-entry plan reached RM as %u transfers, expected 3", H.last_n);
+	CHECK(H.last_x[0].host == 2 * 4096 && H.last_x[0].gpu == 0 &&
+	      H.last_x[0].size == 3 * 4096, "first transfer %llx/%llx/%llx",
+	      (unsigned long long)H.last_x[0].host, (unsigned long long)H.last_x[0].gpu,
+	      (unsigned long long)H.last_x[0].size);
+	CHECK(H.last_x[1].host == 10 * 4096 && H.last_x[1].gpu == 12288 &&
+	      H.last_x[1].size == 4096, "host gap merged");
+	CHECK(H.last_x[2].host == 11 * 4096 && H.last_x[2].gpu == 20480 &&
+	      H.last_x[2].size == 2 * 4096, "window gap or trailing merge wrong");
+	deliver(H.rm_last);
+	CHECK(H.done[1].count == 1 && H.done[1].status == 0 && H.done[1].bytes == 6 * 4096,
+	      "completion count %u status %d bytes %llu", H.done[1].count, H.done[1].status,
+	      (unsigned long long)H.done[1].bytes);
+	common_checks();
+}
+
 static int synced_exactly(const unsigned char *map, u32 first, u32 last, u32 nr)
 {
 	u32 i;
@@ -1981,6 +2034,7 @@ static const struct named_case cases[] = {
 	{ "sync", case_sync },
 	{ "sync-scattered", case_sync_scattered },
 	{ "sync-pool-walk", case_sync_pool_walk },
+	{ "merge-adjacent", case_merge_adjacent },
 	{ "region-unbind-fail", case_region_unbind_fail },
     { "host-released-region-failed", case_host_released_region_failed },
 	{ "race", case_race },

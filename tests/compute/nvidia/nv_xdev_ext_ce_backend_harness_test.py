@@ -161,6 +161,9 @@ class BackendHarness(unittest.TestCase):
     def test_g3_sync_covers_only_the_request_pages(self):
         self.run_cases(("sync-scattered",), ("event+iova", "poll+iova"))
 
+    def test_adjacent_plan_entries_reach_rm_as_one_transfer(self):
+        self.run_cases(("merge-adjacent",))
+
     def test_sync_cost_independent_of_pool_segments(self):
         self.run_cases(("sync-pool-walk",), ("event+iova", "poll+iova"))
 

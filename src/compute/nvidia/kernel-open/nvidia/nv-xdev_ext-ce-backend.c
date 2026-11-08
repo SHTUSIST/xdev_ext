@@ -98,6 +98,7 @@ struct nv_xdev_ext_ce_host {
     struct nv_xdev_ext_ce_request requests[NV_XDEV_EXT_CE_REQUEST_SLOTS];
     struct nv_xdev_ext_ce_request completed[NV_XDEV_EXT_CE_REQUEST_SLOTS];
     unsigned long deadlines[NV_XDEV_EXT_CE_REQUEST_SLOTS];
+    struct nv_xdev_ext_ce_span spans[NV_XDEV_EXT_CE_MAX_XFERS];
     nv_p2p_umem_xfer_t xfers[NV_XDEV_EXT_CE_MAX_XFERS];
 };
 
@@ -486,7 +487,7 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     NvU64 token = 0, bytes = 0;
     NV_STATUS status;
     NvU32 rm_dir;
-    u32 i;
+    u32 i, m = 0;
     int rc;
     struct nv_xdev_ext_ce_request *saved;
 
@@ -511,10 +512,13 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     saved = &h->requests[slot - h->slots];
     saved->n = n;
     memcpy(saved->x, x, n * sizeof(*x));
-    for (i = 0; i < n; i++) {
-        h->xfers[i].umemOffset = x[i].host_byte_off;
-        h->xfers[i].gpuOffset = x[i].gpu_off;
-        h->xfers[i].size = x[i].len;
+    /* One entry per frame; adjacent frames reach RM as one transfer. */
+    for (i = 0; i < n; i++)
+        nv_xdev_ext_ce_span_add(h->spans, &m, x[i].host_byte_off, x[i].gpu_off, x[i].len);
+    for (i = 0; i < m; i++) {
+        h->xfers[i].umemOffset = h->spans[i].host_off;
+        h->xfers[i].gpuOffset = h->spans[i].gpu_off;
+        h->xfers[i].size = h->spans[i].len;
     }
     rc = nv_down_read_interruptible(&nv_system_pm_lock);
     if (rc < 0) {
@@ -522,7 +526,7 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
         goto unlock;
     }
     nv_xdev_ext_ce_sync(h, saved, false);
-    status = nv_p2p_ce_async_submit(h->rm, h->xfers, n, rm_dir, &issued, &token);
+    status = nv_p2p_ce_async_submit(h->rm, h->xfers, m, rm_dir, &issued, &token);
     up_read(&nv_system_pm_lock);
     outcome = nv_xdev_ext_ce_async_submitted(&h->pool, slot, status, issued, token);
     if (outcome == NV_XDEV_EXT_CE_OK) {
