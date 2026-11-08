@@ -85,6 +85,38 @@ int main(void)
 	frames = UINT32_MAX;
 	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
 	EQ(frames, 2);
+	/* TODO.74, TP host frames, send side: the GPU copy engine moves a batch
+	 * from its slot of the device window into the ring's UMEM frames (CE
+	 * FROM_DEVICE, flags 0), then XDOMAIN transmits those frames. */
+	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM; c.pool_fd = -1;
+	c.st[0] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_CE,
+		.direction = XDEV_EXT_MECH_DIR_FROM_DEVICE, .fd = 6,
+		.arg0 = 0x7f0000000000ULL, .arg1 = 262144 };
+	frames = UINT32_MAX;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	EQ(frames, 2);
+	EQ(xdev_ext_mech_stage_role(&c.st[0]), XDEV_EXT_MECH_ROLE_PRODUCER);
+	EQ(xdev_ext_mech_stage_role(&c.st[1]), XDEV_EXT_MECH_ROLE_CONSUMER);
+	/* A range target is not the send side: CE D2H with TARGET_RANGE still
+	 * needs an NVMe WRITE after it. */
+	c.st[0].flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE;
+	EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP);
+	/* The send pair needs host frames: refused on a PEER or an XSK pool. */
+	c.st[0].flags = 0; c.pool_kind = XDEV_EXT_MECH_POOL_PEER; c.pool_fd = 3;
+	EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP);
+	c.pool_kind = XDEV_EXT_MECH_POOL_XSK;
+	EQ(xdev_ext_mech_create_check(&c, &frames), -EOPNOTSUPP);
+	/* TP host frames, receive side: XDOMAIN RX into UMEM frames, then the CE
+	 * range target writes the whole group into the device window. */
+	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM; c.pool_fd = -1;
+	c.st[0] = request().st[1]; c.st[0].direction = XDEV_EXT_MECH_DIR_FROM_DEVICE;
+	c.st[1] = (struct xdev_ext_mech_stage_uapi){ .class_id = XDEV_EXT_MECH_CLASS_CE,
+		.direction = XDEV_EXT_MECH_DIR_TO_DEVICE, .fd = 6,
+		.flags = XDEV_EXT_CE_STAGE_F_TARGET_RANGE,
+		.arg0 = 0x7f0000000000ULL, .arg1 = 262144 };
+	frames = UINT32_MAX;
+	EQ(xdev_ext_mech_create_check(&c, &frames), 0);
+	EQ(frames, 2);
 	/* The generic UMEM rule still applies: the UMEM is not an fd. */
 	c = request(); c.pool_kind = XDEV_EXT_MECH_POOL_IOU_UMEM; c.pool_fd = 3;
 	EQ(xdev_ext_mech_create_check(&c, &frames), -EINVAL);
