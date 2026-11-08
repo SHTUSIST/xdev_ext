@@ -2018,6 +2018,54 @@
       "logical_path": "tests/eval/apps/test_mixed_hft.py"
     },
     {
+      "source": "tests/benchmarks/baselines/README.md",
+      "logical_path": "tests/benchmarks/baselines/README.md"
+    },
+    {
+      "source": "tests/benchmarks/baselines/baseline_plan.py",
+      "logical_path": "tests/benchmarks/baselines/baseline_plan.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/lmcache_mooncake.py",
+      "logical_path": "tests/benchmarks/baselines/lmcache_mooncake.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/mooncake_store.py",
+      "logical_path": "tests/benchmarks/baselines/mooncake_store.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/pins.json",
+      "logical_path": "tests/benchmarks/baselines/pins.json"
+    },
+    {
+      "source": "tests/benchmarks/baselines/pp2_nccl.py",
+      "logical_path": "tests/benchmarks/baselines/pp2_nccl.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/recompute.py",
+      "logical_path": "tests/benchmarks/baselines/recompute.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/test_baselines.py",
+      "logical_path": "tests/benchmarks/baselines/test_baselines.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/cold_request.py",
+      "logical_path": "tests/benchmarks/baselines/cold_request.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/test_cold_request.py",
+      "logical_path": "tests/benchmarks/baselines/test_cold_request.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/test_qualification.py",
+      "logical_path": "tests/benchmarks/baselines/test_qualification.py"
+    },
+    {
+      "source": "tests/benchmarks/baselines/tp2_nccl.py",
+      "logical_path": "tests/benchmarks/baselines/tp2_nccl.py"
+    },
+    {
       "source": "tests/benchmarks/bam/BaM-LICENSE",
       "logical_path": "tests/eval/bam/BaM-LICENSE"
     },

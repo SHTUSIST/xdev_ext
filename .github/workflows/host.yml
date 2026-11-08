@@ -383,6 +383,9 @@ jobs:
           python3 tests/benchmarks/mooncake/fixtures/test_cli_assertions.py
           python3 -B tests/benchmarks/mooncake/regression/capture_control/test_capture_control.py
           python3 -B tests/benchmarks/mooncake/regression/publication_interrupt/test_publication_interrupt.py
+      - name: Baseline deployment commands (E1/E2, defaults only)
+        working-directory: .
+        run: python3 -I -m unittest discover -s tests/benchmarks/baselines -p 'test_*.py' -v
       - name: Reviewer-driven evaluation harness contracts
         run: make -C tests/eval reviewer-eval-check
       - name: Storage block poll runtime and native consumers
