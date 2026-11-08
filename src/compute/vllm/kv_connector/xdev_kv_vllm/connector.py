@@ -174,8 +174,8 @@ class XdevExtConnector(KVConnectorBase_V1, SupportsHMA):
 
     def shutdown(self):
         if self._worker is not None:
-            worker, self._worker = self._worker, None
-            worker.shutdown()
+            if self._worker.shutdown():
+                self._worker = None
 
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config):

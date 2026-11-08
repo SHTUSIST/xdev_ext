@@ -124,6 +124,10 @@ class FakeDevice:
     def wait_host(self, token):
         self.log.append(('wait', token))
 
+    def drain(self):
+        # This fixture's scatter is synchronous Python; no outstanding GPU work.
+        self.log.append(('drain',))
+
     def _scatter(self, staging, spec, layer):
         if self.fail_scatter:
             raise RuntimeError('scatter failed')

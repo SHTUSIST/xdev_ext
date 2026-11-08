@@ -39,6 +39,10 @@ from .restore import RestoreConfig
 PREFIX = 'xdev_ext.'
 MODES = ('async', 'sync')
 
+# Strong ownership while a thread or GPU may still use staging/cache tensors.
+# A stopped Python caller must not turn uncertain GPU ownership into GC/release.
+_RETAINED_WORKERS = []
+
 
 class ConfigError(ValueError):
     pass
@@ -246,12 +250,45 @@ class WorkerSide:
         self._stats = open(cfg.stats_file, 'a', buffering=1) if cfg.stats_file else None
         self._wait_timeout = (cfg.restore.go_timeout * 2 + 60) if cfg.restore else 1260.0
         self._release_now = service.release
+        self._unsafe_reason = ''
+        self._stopping = self._closed = False
         if not self.asynchronous:
             service.release = self._release_later
         self._thread = threading.Thread(target=self._run, name='xdev-kv-restore', daemon=True)
         self._thread.start()
 
     # ---- background thread -------------------------------------------------
+    def _retain(self):
+        if not any(worker is self for worker in _RETAINED_WORKERS):
+            _RETAINED_WORKERS.append(self)
+
+    def _quarantine(self, reason):
+        self._unsafe_reason = f'GPU completion unknown: {reason}'
+        self.service.disabled = True
+        self._retain()
+
+    def _check_gpu_safe(self):
+        if self._unsafe_reason:
+            # Recompute is unsafe too: a previously submitted kernel may still
+            # be writing the same paged cache. Abort the caller, never report a
+            # finished/failed receive until GPU completion has been proven.
+            raise RuntimeError(self._unsafe_reason)
+
+    def _drain(self, reason):
+        try:
+            self.device.drain()
+            return True
+        except Exception as error:  # noqa: BLE001 - no completion proof
+            self._quarantine(f'{reason}; drain: {type(error).__name__}: {error}')
+            return False
+
+    def _fence(self):
+        try:
+            return self.device.fence()
+        except Exception as error:  # noqa: BLE001
+            self._quarantine(f'fence: {type(error).__name__}: {error}')
+            self._check_gpu_safe()
+
     def _release_later(self, staging):
         self._deferred.append(staging)
         self._have_deferred.set()
@@ -275,7 +312,13 @@ class WorkerSide:
                 return
             kind = job[0]
             if kind == 'fence':
-                self.device.wait_host(job[1])
+                if self._unsafe_reason:
+                    continue
+                try:
+                    self.device.wait_host(job[1])
+                except Exception as error:  # noqa: BLE001
+                    if not self._drain(f'fence wait: {error}'):
+                        continue
                 deferred, self._deferred = self._deferred, []
                 self._have_deferred.clear()
                 for staging in deferred:
@@ -293,6 +336,11 @@ class WorkerSide:
                         self.device.wait_host(self.device.scatter_async(staging, spec, fence))
                     except Exception as error:  # noqa: BLE001
                         ok, reason = False, f'scatter: {type(error).__name__}: {error}'
+                        # scatter_async can raise after submitting only some
+                        # layers or before returning its completion event.
+                        if not self._drain(reason):
+                            self._record(spec, False, self._unsafe_reason, t0, t1, self.clock())
+                            continue
                 self._record(spec, ok, reason, t0, t1, self.clock())
                 self._done.put((spec.req_id, ok))
 
@@ -307,16 +355,19 @@ class WorkerSide:
 
     # ---- vLLM worker hooks ---------------------------------------------------
     def start_loads(self, specs):
+        self._check_gpu_safe()
+        if self._stopping:
+            raise RuntimeError('restore worker is shutting down')
         if self.asynchronous:
             if specs:
-                fence = self.device.fence()
+                fence = self._fence()
                 for spec in specs:
                     self._jobs.put(('async', spec, fence))
             return
         if self._step:
             self.load_error_blocks()
         if specs or self._have_deferred.is_set():
-            self._jobs.put(('fence', self.device.fence()))
+            self._jobs.put(('fence', self._fence()))
         for spec in specs:
             future = _Future()
             self._step.append(_StepLoad(spec, future, t0=self.clock()))
@@ -327,6 +378,7 @@ class WorkerSide:
         self._errors |= item.spec.loaded_blocks(self.block_size)
 
     def wait_layer(self, layer_name):
+        self._check_gpu_safe()
         layer = self.layer_index.get(layer_name)
         if layer is None or self.asynchronous:
             return
@@ -344,9 +396,12 @@ class WorkerSide:
                 self.device.scatter_now(staging, item.spec, layer)
                 item.layers.add(layer)
             except Exception as error:  # noqa: BLE001
+                if not self._drain(f'sync scatter: {error}'):
+                    self._check_gpu_safe()
                 self._fail(item, f'scatter: {type(error).__name__}: {error}')
 
     def load_error_blocks(self):
+        self._check_gpu_safe()
         for item in self._step:
             if not item.failed and len(item.layers) < len(self.layer_index):
                 self._fail(item, f'{len(item.layers)} of {len(self.layer_index)} layers scattered')
@@ -357,6 +412,7 @@ class WorkerSide:
         return errors
 
     def transfer_results(self, finished_req_ids):
+        self._check_gpu_safe()
         finished, failed = set(), set()
         while True:
             try:
@@ -368,9 +424,19 @@ class WorkerSide:
                 failed.add(req_id)
 
     def shutdown(self, timeout=30.0):
+        if self._closed:
+            return True
+        self._retain()
+        self._stopping = True
         if self._thread.is_alive():
             self._jobs.put(None)
             self._thread.join(timeout)
+        if self._thread.is_alive():
+            return False
+        # Sync scatter may outlive its Python call; thread termination alone is
+        # insufficient. Failed synchronize keeps all owners for a later retry.
+        if not self._drain('shutdown'):
+            return False
         try:
             self.service.close()
         finally:
@@ -380,3 +446,6 @@ class WorkerSide:
             if self._stats:
                 self._stats.close()
                 self._stats = None
+        self._closed = True
+        _RETAINED_WORKERS[:] = [worker for worker in _RETAINED_WORKERS if worker is not self]
+        return True
