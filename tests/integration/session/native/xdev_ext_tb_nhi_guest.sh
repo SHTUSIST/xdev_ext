@@ -15,8 +15,9 @@
 # (XDEV_EXT_TB_NHI_ENUM lines): bus devices, USB4 port links, any XDomain
 # and whether it carries the host router's own UUID (a cable between two
 # ports of this host), and the host router adapters' registers.
-# POLL=N (with ENUMERATE=1) then samples, once per second for N seconds and
-# read-only, what could reveal a cable: XDEV_EXT_TB_NHI_POLL lines.
+# POLL=N (with ENUMERATE=1) first samples, once per second for N seconds and
+# read-only, what could reveal a cable (XDEV_EXT_TB_NHI_POLL lines); it starts
+# as soon as the host router exists so that early link events are seen.
 set -u
 cycles=$1
 enumerate_mode=${2:-0}
@@ -150,7 +151,8 @@ poll() {
 	sample=0
 	while [ "$sample" -lt "$poll_seconds" ]; do
 		sample=$((sample + 1))
-		echo "XDEV_EXT_TB_NHI_POLL t=$sample nhi_runtime=$(cat "$nhi_path/power/runtime_status" 2>/dev/null)" \
+		echo "XDEV_EXT_TB_NHI_POLL t=$sample uptime=$(cut -d' ' -f1 "$sysfs/../proc/uptime" 2>/dev/null)" \
+			"nhi_runtime=$(cat "$nhi_path/power/runtime_status" 2>/dev/null)" \
 			"vs_cap_9=0x$(config_dword "$nhi_path" 200) vs_cap_22=0x$(config_dword "$nhi_path" 252)" \
 			"topology=$(topology | tr ' ' ',')"
 		full=
@@ -185,8 +187,8 @@ else
 fi
 first_id=$(cat "$router/unique_id" 2>/dev/null)
 if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then
-	enumerate
 	[ "$poll_seconds" -gt 0 ] && poll
+	enumerate
 fi
 cycle=1
 while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]; do

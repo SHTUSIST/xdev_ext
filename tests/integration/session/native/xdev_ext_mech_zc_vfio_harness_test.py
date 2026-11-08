@@ -1041,7 +1041,7 @@ class TbNhiGuestEnumeration(unittest.TestCase):
         self.assertIn('enumerate_mode=${2:-0}', self.script)
         self.assertIn('poll_seconds=${3:-0}', self.script)
         self.assertIn('if [ "$enumerate_mode" = 1 ] && [ "$result" = PASS ]; then', self.script)
-        self.assertLess(self.script.index('then\n\tenumerate\n\t[ "$poll_seconds" -gt 0 ] && poll\nfi'),
+        self.assertLess(self.script.index('then\n\t[ "$poll_seconds" -gt 0 ] && poll\n\tenumerate\nfi'),
                         self.script.index('while [ "$result" = PASS ] && [ "$cycle" -le "$cycles" ]'))
 
     def nhi_config(self, vs_cap_9, vs_cap_22):
@@ -1051,6 +1051,9 @@ class TbNhiGuestEnumeration(unittest.TestCase):
         config[0xfc:0x100] = vs_cap_22.to_bytes(4, 'little')
         (nhi / 'config').write_bytes(bytes(config))
         self.node('bus/pci/devices/0000:00:0d.2/power', runtime_status='active')
+        proc = self.sys.parent / 'proc'
+        proc.mkdir(exist_ok=True)
+        (proc / 'uptime').write_text('2.71 9.80\n')
 
     def poll(self, seconds, sleep='sleep() { :; }\n'):
         program = ('set -u\n'
@@ -1081,7 +1084,7 @@ class TbNhiGuestEnumeration(unittest.TestCase):
         lines = self.poll(3)
         self.assertEqual(before, self.snapshot(), 'poll must not write below sysfs')
         first = [line for line in lines if line.startswith('XDEV_EXT_TB_NHI_POLL t=1 ')]
-        self.assertTrue(first[0].startswith('XDEV_EXT_TB_NHI_POLL t=1 nhi_runtime=active '
+        self.assertTrue(first[0].startswith('XDEV_EXT_TB_NHI_POLL t=1 uptime=2.71 nhi_runtime=active '
                                             'vs_cap_9=0x80000000 vs_cap_22=0x22000002 topology='), first)
         self.assertIn('0-0:usb4_port1=none:usb4_port3=none', first[0])
         self.assertIn('XDEV_EXT_TB_NHI_POLL t=1 regs 0-0 port1 0x0037    1 0x01 0x00 0x5c18001c', lines)
