@@ -654,13 +654,13 @@ XDEV_EXT_MP_INLINE int xdev_ext_mp_nvme_slba(__u64 window_slba, __u64 window_nlb
 #define XDEV_EXT_MP_AFFINE_GCD_STEPS	48	/* Lame: operands < 2^32 need <= 46 */
 #define XDEV_EXT_MP_AFFINE_TRIES	64	/* gap to the next coprime; n - 1 always is */
 /*
- * An open-coded iterator in a BPF object (bpf_for() of bpf_helpers.h), so the
- * verifier checks each body once; nested counted loops passed its 1M
- * instruction limit.  A counted loop elsewhere.  @i is a declared int.
+ * Loop of the helpers below; @i is a declared int.  A BPF object that calls
+ * them defines XDEV_EXT_MP_FOR as bpf_for(i, 0, n) before including this
+ * header (nvme_rand.bpf.c), so the verifier checks each body once: nested
+ * counted loops passed its 1M instruction limit.  Includers without
+ * struct bpf_iter_num (vmlinux.h) get the counted loop.
  */
-#ifdef bpf_for
-#define XDEV_EXT_MP_FOR(i, n)	bpf_for(i, 0, n)
-#else
+#ifndef XDEV_EXT_MP_FOR
 #define XDEV_EXT_MP_FOR(i, n)	for ((i) = 0; (i) < (n); (i)++)
 #endif
 

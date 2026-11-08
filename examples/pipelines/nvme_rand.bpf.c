@@ -20,6 +20,8 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 
+/* Open-coded iterator loops for the affine helpers (see xdev_ext_mech_prog.h). */
+#define XDEV_EXT_MP_FOR(i, n)	bpf_for(i, 0, n)
 #include "xdev_ext_mech_prog.h"
 #include "xdev_ext_mech_kfunc.h"
 
