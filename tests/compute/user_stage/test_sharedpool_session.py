@@ -39,7 +39,14 @@ def actual_verdicts():
     # Only the utility's scalar layout constants, never another verdict.
     for match in re.finditer(r"(?m)^#define\s+SP_[A-Z0-9_]+[^\n]*", source):
         text += match.group() + "\n"
-    text += structure(source, "sp_hold_snapshot") + "\n" + valid + "\n" + equal + "\n"
+    snapshot = structure(source, "sp_hold_snapshot")
+    text += snapshot + "\n" + valid + "\n" + equal + "\n"
+    # Old utility versions have only the fixed {1,4} oracle. Keep them
+    # executable so the disjoint-layout regression fails as an assertion.
+    if "expected_indices" in snapshot:
+        text += "#define EXPECT_INDICES(s, x, y) do { (s).expected_indices[0]=(x); (s).expected_indices[1]=(y); } while (0)\n"
+    else:
+        text += "#define EXPECT_INDICES(s, x, y) do { (void)(s); } while (0)\n"
     return Compiled(text + MAIN)
 
 
@@ -51,6 +58,7 @@ int main(void)
     unsigned invalid_checks=0, invalid_rejected=0;
     a.batch.slot=0; a.batch.nr_frames=2; a.batch.ticket=17;
     a.batch.batch_id=99; a.batch.key=1;
+    EXPECT_INDICES(a,1,4);
     a.batch.f[0].umem_addr=4096; a.batch.f[1].umem_addr=4*4096;
     for (unsigned i=0;i<2;i++) {
         a.batch.f[i].data_off=64;
@@ -67,6 +75,13 @@ int main(void)
         a.frame_bytes[i]=(unsigned char)(i*73+(i>>5)+0x5a);
     b=a;
     int initial_valid=sp_hold_valid(&a), equal_control=sp_held_equal(&a,&b);
+    b.batch.f[0].umem_addr=2*4096; b.batch.f[1].umem_addr=5*4096;
+    b.batch.data[0]=(void *)(uintptr_t)(0x100000+2*4096+64);
+    b.batch.data[1]=(void *)(uintptr_t)(0x100000+5*4096+64);
+    EXPECT_INDICES(b,2,5);
+    int disjoint_valid=sp_hold_valid(&b), disjoint_equal=sp_held_equal(&b,&b);
+    EXPECT_INDICES(b,1,4);
+    int wrong_layout_rejected=!sp_hold_valid(&b);
     for (size_t i=0;i<sizeof(a.frame_bytes);i++) {
         b=a; b.frame_bytes[i]^=0x80; byte_checks++;
         if (!sp_held_equal(&a,&b)) byte_rejected++;
@@ -113,11 +128,13 @@ int main(void)
     INVALID(b.stats.batches_abort=1);
     INVALID(b.stats.state=XDEV_EXT_MECH_SESSION_STOPPED);
 #undef INVALID
-    printf("{\"valid\":%d,\"equal\":%d,\"frame_bytes\":%zu,"
+    printf("{\"valid\":%d,\"equal\":%d,\"disjoint_valid\":%d,"
+           "\"disjoint_equal\":%d,\"wrong_layout_rejected\":%d,\"frame_bytes\":%zu,"
            "\"byte_checks\":%u,\"byte_rejected\":%u,"
            "\"metadata_checks\":%u,\"metadata_rejected\":%u,"
            "\"invalid_checks\":%u,\"invalid_rejected\":%u}\n",
-           initial_valid,equal_control,sizeof(a.frame_bytes),byte_checks,byte_rejected,
+           initial_valid,equal_control,disjoint_valid,disjoint_equal,wrong_layout_rejected,
+           sizeof(a.frame_bytes),byte_checks,byte_rejected,
            metadata_checks,metadata_rejected,invalid_checks,invalid_rejected);
     return 0;
 }
@@ -144,6 +161,11 @@ class ActualSharedpoolVerdicts(unittest.TestCase):
     def test_every_payload_and_guard_byte_is_compared(self):
         r=self.observation()
         self.assertEqual((r["frame_bytes"],r["byte_checks"],r["byte_rejected"]),(8192,8192,8192))
+
+    def test_disjoint_live_grant_requires_its_exact_requested_indices(self):
+        r=self.observation()
+        self.assertEqual((r["disjoint_valid"],r["disjoint_equal"]),(1,1))
+        self.assertEqual(r["wrong_layout_rejected"],1)
 
     def test_batch_frame_live_ticket_ready_and_stats_changes_are_rejected(self):
         r=self.observation()

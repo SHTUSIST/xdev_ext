@@ -1287,11 +1287,28 @@ static int cs_two_window(int ring, struct cs_two_session *side, const __u32 *ind
 		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STATS, (uintptr_t)&stats, syscalls);
 	if (!ret)
 		ret = xdev_ext_mech_ctl_notify_result(&stats, side->batches);
-	if (!ret && (stats.published != side->published || stats.rejects || stats.protocol_err ||
-		     stats.timeouts || stats.submitted[0] != stats.completed[0] ||
-		     stats.completed[0] < side->batches))
+	/* Each side is private to this qualification and has one stage. An
+	 * excess completion is just as invalid as a short window; neither a
+	 * different session's counts nor recycling proves this exact handoff. */
+	if (!ret && (stats.session_id != side->id || stats.batches_done != side->batches ||
+		     stats.published != side->published || stats.rejects || stats.protocol_err ||
+		     stats.timeouts || stats.recycled || stats.submitted[0] != side->batches ||
+		     stats.completed[0] != side->batches))
 		ret = -EIO;
 	return ret;
+}
+
+static bool cs_two_stop_valid(const struct xdev_ext_mech_stop_report *stop, __u64 id)
+{
+	const struct xdev_ext_mech_transport_stats *transport = &stop->transport.v3.v2.v1;
+
+	return stop->size == sizeof(*stop) && stop->version == XDEV_EXT_MECH_STOP_REPORT_VERSION &&
+		stop->session_id == id && stop->stats.session_id == id &&
+		stop->stats.state == XDEV_EXT_MECH_SESSION_STOPPED &&
+		!stop->stats.inflight && !stop->stats.sequestered &&
+		transport->size == sizeof(stop->transport) &&
+		transport->version == XDEV_EXT_MECH_TRANSPORT_STATS_VERSION_4 &&
+		transport->session_id == id;
 }
 
 /* Untimed custody qualification only, not a sustained pipeline/performance arm. */
@@ -1452,6 +1469,10 @@ out:
 		if (!side[i].id)
 			continue;
 		ret = cs_mech(ring, XDEV_EXT_MECH_OP_STOP_REPORT, (uintptr_t)&stop, &r->syscalls);
+		/* Success promises synchronous release. A contradictory response is
+		 * still a failed qualification, never permission to reuse backing. */
+		if (!ret && !cs_two_stop_valid(&stop, side[i].id))
+			ret = -EPROTO;
 		fprintf(stderr, "TWO_SESSION_STOP side=%u result=%d\n", i, ret);
 		if (ret) {
 			unsafe = true;

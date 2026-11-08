@@ -1,0 +1,133 @@
+/* SPDX-License-Identifier: GPL-2.0 */
+/* Faults at the existing syscall/device boundary, around fixture_register_base.
+ * This does not replace the production coordinator or claim kernel custody.
+ * Names use n/c for the independent NVMe/CE sessions, respectively. */
+static bool side_case(int side, const char *suffix)
+{
+    return scenario[0] == (side ? 'c' : 'n') && scenario[1] == '-' &&
+           !strcmp(scenario + 2, suffix);
+}
+
+static unsigned frame_checks;
+
+static int two_frame_start(int side, const struct xdev_ext_mech_start *start)
+{
+    /* Deliberately fixed expected schedule, independent of coordinator math:
+     * six 8 KiB groups at depth four use 8 frames, then reuse only 4. */
+    const unsigned count = sides[side].starts ? 4 : 8;
+    const uint64_t first = sides[side].starts ? 5 : 1;
+    const __u32 *indices = (const void *)(uintptr_t)start->user_frames;
+
+    if (depth != 4 || sides[side].starts > 1 || start->first_seq != first ||
+        start->nr_batches != count / 2 || start->nr_user_frames != count) {
+        violations++;
+        return -EINVAL;
+    }
+    for (unsigned k = 0; k < count; k++) {
+        if (indices[k] != k) {
+            violations++;
+            return -EINVAL;
+        }
+        frame_checks++;
+    }
+    return 0;
+}
+
+static int fixture_register(int fd, unsigned opcode, void *arg)
+{
+    struct io_uring_xdev_ext_mech *op = arg;
+    int side = -1;
+    if (opcode == IORING_REGISTER_XDEV_EXT_MECH) {
+        const void *request = (const void *)(uintptr_t)op->arg;
+        __u64 id = 0;
+
+        switch (op->op) {
+        case XDEV_EXT_MECH_OP_START:
+            id = ((const struct xdev_ext_mech_start *)request)->session_id;
+            break;
+        case XDEV_EXT_MECH_OP_STATS:
+            id = ((const struct xdev_ext_mech_stats *)request)->session_id;
+            break;
+        case XDEV_EXT_MECH_OP_STOP_REPORT:
+            id = ((const struct xdev_ext_mech_stop_report *)request)->session_id;
+            break;
+        }
+        side = id == 7001 ? 0 : id == 7009 ? 1 : -1;
+    }
+    if (FIXTURE_FRAMES_PER_GROUP == 2 && side >= 0 &&
+        op->op == XDEV_EXT_MECH_OP_START) {
+        int ret = two_frame_start(side, (const void *)(uintptr_t)op->arg);
+        if (ret) return ret;
+    }
+    if (side >= 0 && op->op == XDEV_EXT_MECH_OP_STOP_REPORT) {
+        if (side_case(side, "stop-unknown")) sides[side].unknown = true;
+        if (side_case(side, "start-uncertain-late")) {
+            /* Completion arrives only during STOP, after START delivery was
+             * ambiguous. Synchronous STOP can establish release, but must
+             * never turn the failed qualification into a new handoff. */
+            struct fixture_side *s = &sides[side];
+            if (s->pending) {
+                s->done += s->q;
+                s->published += s->nr;
+                for (unsigned k = 0; k < s->nr; k++) custody[s->indices[k]] = 0;
+                s->pending = false;
+            }
+            s->unknown = false;
+        }
+    }
+    int ret = fixture_register_base(fd, opcode, arg);
+    if (ret || side < 0) return ret;
+    if (FIXTURE_FRAMES_PER_GROUP == 2 && side == 1 &&
+        op->op == XDEV_EXT_MECH_OP_START && sides[side].starts == 1 &&
+        is_case("two-frame-corrupt-tail")) {
+        /* Keep the version header and first frame correct. Flip only the
+         * final byte of group 0's second frame in the last CE slot. */
+        gpu[4*8192-1] ^= 0x80;
+    }
+    if (op->op == XDEV_EXT_MECH_OP_START &&
+        (side_case(side, "start-uncertain") ||
+         side_case(side, "start-uncertain-late"))) {
+        sides[side].unknown = true;
+        return -EINTR;
+    }
+    if (op->op == XDEV_EXT_MECH_OP_STATS) {
+        struct xdev_ext_mech_stats *s = (void *)(uintptr_t)op->arg;
+        /* Only alter the first window. Later successful work cannot repair a
+         * handoff made from an unproven first completion. */
+        if (sides[side].starts != 1) return ret;
+        if (side && side_case(side, "published-short")) s->published--;
+        if (side && side_case(side, "done-short")) s->batches_done--;
+        if (side && side_case(side, "inflight")) s->inflight = 1;
+        if (side && side_case(side, "error")) s->last_err = -EIO;
+        if (side && side_case(side, "abort")) s->batches_abort = 1;
+        if (side && side_case(side, "sequester")) s->sequestered = 1;
+        if (side_case(side, "state-error")) s->state = XDEV_EXT_MECH_SESSION_ERROR;
+        if (side_case(side, "state-stopping")) s->state = XDEV_EXT_MECH_SESSION_STOPPING;
+        if (side_case(side, "state-zombie")) s->state = XDEV_EXT_MECH_SESSION_ZOMBIE;
+        if (side_case(side, "state-invalid")) s->state = UINT32_MAX;
+        if (side_case(side, "published-excess")) s->published++;
+        if (side_case(side, "done-excess")) s->batches_done++;
+        if (side_case(side, "native-incomplete")) s->completed[0]--;
+        if (side_case(side, "native-excess")) { s->submitted[0]++; s->completed[0]++; }
+        if (side_case(side, "submitted-excess")) s->submitted[0]++;
+        if (side_case(side, "protocol-error")) s->protocol_err = 1;
+        if (side_case(side, "timeouts")) s->timeouts = 1;
+        if (side_case(side, "recycled")) s->recycled = 1;
+        if (side_case(side, "wrong-session")) s->session_id = sides[1-side].id;
+    }
+    if (op->op == XDEV_EXT_MECH_OP_STOP_REPORT) {
+        struct xdev_ext_mech_stop_report *s = (void *)(uintptr_t)op->arg;
+        if (side_case(side, "stop-delivery-uncertain")) return -EFAULT;
+        if (side_case(side, "stop-wrong-session")) s->session_id = sides[1-side].id;
+        if (side_case(side, "stop-wrong-stats-session")) s->stats.session_id = sides[1-side].id;
+        if (side_case(side, "stop-wrong-transport-session")) s->transport.v3.v2.v1.session_id = sides[1-side].id;
+        if (side_case(side, "stop-state-active")) s->stats.state = XDEV_EXT_MECH_SESSION_ACTIVE;
+        if (side_case(side, "stop-inflight")) s->stats.inflight = 1;
+        if (side_case(side, "stop-sequester")) s->stats.sequestered = 1;
+        if (side_case(side, "stop-version-invalid")) s->version++;
+        if (side_case(side, "stop-size-short")) s->size--;
+        if (side_case(side, "stop-transport-version-invalid")) s->transport.v3.v2.v1.version++;
+        if (side_case(side, "stop-transport-size-short")) s->transport.v3.v2.v1.size--;
+    }
+    return ret;
+}

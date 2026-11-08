@@ -6,6 +6,9 @@ Only batch-object slots, work queues, and pool resolve are OS boundaries.
 The IOU frame allocator is production code, instrumented so any ordered-path
 fallback is a failure. Lifecycle claims/puts are the unchanged core rules.
 The native stage boundary holds each whole batch until the test completes it.
+Two-session cases share custody/lifecycle storage but keep separate queues and
+session counters. Their UNKNOWN injection begins at the native landing boundary;
+this host fixture does not execute USER grants, real kernel locks, or DMA.
 """
 from pathlib import Path
 import re
@@ -185,6 +188,94 @@ static int worker_scenario(const char*mode){
 }
 '''
 
+SHARED_SCENARIO = r'''
+static void shared_setup(struct xdev_ext_mech_session*s,struct io_xdev_ext_umem_mech*m,__u8*state){
+ setup_n(s,m,state,0,2,12);
+ s->pool.kind=XDEV_EXT_MECH_POOL_IOU_UMEM;s->pool.frame_size=4096;s->pool.ops=&worker_ops;
+ s->frames=2;s->depth=2;s->start_left=0;s->start_recycle=false;s->start_return_pending=false;
+ s->st[0].cls=&quiet_cls;
+ s->plan[0]=(struct xdev_ext_mech_stage_uapi){.class_id=XDEV_EXT_MECH_CLASS_USER,.direction=XDEV_EXT_MECH_DIR_TO_DEVICE};
+ s->layout=(struct xdev_ext_mech_layout){.frame_size=4096,.seg_len=4096,.group_bytes=8192};
+}
+static int shared_start(struct xdev_ext_mech_session*s,u32*indices,u32 nr){
+ /* Handle lookup and work scheduling are OS boundaries in this fixture. */
+ struct io_ring_ctx ctx={0};event_session=s;
+ struct xdev_ext_mech_start req={.session_id=1,.nr_batches=nr/2,.first_seq=101,
+  .flags=XDEV_EXT_MECH_START_F_ORDERED_FRAMES|XDEV_EXT_MECH_START_F_USER_FRAMES,
+  .nr_user_frames=nr,.user_frames=(uintptr_t)indices};
+ return xdev_ext_mech_start(&ctx,&req);
+}
+static int shared_scenario(const char*mode){
+ struct xdev_ext_mech_session a,b;struct io_xdev_ext_umem_mech ma,mb;
+ __u8 state[12],unused[12],before[12];struct xdev_ext_mech_life life_before[12];
+ u32 ai[]={7,3,9,1},bi[]={9,7};int bad=0;
+ bool returned=!strcmp(mode,"shared_returned_stop"),unknown=!strcmp(mode,"shared_unknown");
+ bool duplicate=!strcmp(mode,"shared_duplicate");
+ shared_setup(&a,&ma,state);shared_setup(&b,&mb,unused);
+ free(b.life);b.life=a.life;b.pool.state=a.pool.state;
+ assert(a.pool.priv!=b.pool.priv&&a.transform_owner!=b.transform_owner);
+ if(shared_start(&a,ai,returned?4:2))return check(false,"A START rejected");
+ event_session=&a;xdev_ext_mech_start_more(&a);
+ if(admitted!=(returned?2U:1U))return check(false,"A did not bind exact templates");
+ if(returned){
+  /* Keep A's second template active, so its returned first template still
+   * exists when B borrows it and A's STOP drains the old loan table. */
+  finish_message(&a,observed[0]);bi[0]=7;bi[1]=3;
+  if(shared_start(&b,bi,2))return check(false,"B could not borrow A's returned template");
+  bad|=check(state[7]==XDEV_EXT_MECH_F_HELD&&state[3]==XDEV_EXT_MECH_F_HELD,"B START did not reserve exact frames");
+  memcpy(before,state,sizeof(state));memcpy(life_before,a.life,sizeof(life_before));
+  event_session=&a;xdev_ext_mech_session_stop(&a,0);
+  xdev_ext_mech_stop_work(&a.stop_work);xdev_ext_mech_stop_work(&a.stop_work);
+  bad|=check(!memcmp(before,state,sizeof(state))&&!memcmp(life_before,a.life,sizeof(life_before)),"A STOP reclaimed B's prepared loan");
+  bad|=check(a.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==2&&!a.ss.sequestered&&!a.last_err,"A STOP revisited its returned template");
+  event_session=&b;xdev_ext_mech_start_more(&b);
+  if(admitted!=3)return check(false,"B loan could not run after A STOP")|bad;
+  memcpy(before,state,sizeof(state));memcpy(life_before,b.life,sizeof(life_before));
+  event_session=&a;xdev_ext_mech_stop_work(&a.stop_work);
+  bad|=check(!memcmp(before,state,sizeof(state))&&!memcmp(life_before,b.life,sizeof(life_before)),"A repeated STOP changed B's inflight lifecycle");
+  finish_message(&a,observed[1]);xdev_ext_mech_stop_work(&a.stop_work);
+  for(unsigned i=0;i<2;i++)bad|=check(state[bi[i]]==XDEV_EXT_MECH_F_INFLIGHT&&
+   !memcmp(&life_before[bi[i]],&b.life[bi[i]],sizeof(b.life[0])),"A final completion changed B's generation or custody");
+  bad|=check(!b.done&&!b.aborted&&!b.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]&&b.ss.inflight==1,"A teardown changed B's completion accounting");
+  event_session=&b;finish_message(&b,observed[2]);
+  for(unsigned i=0;i<12;i++)bad|=check(state[i]==XDEV_EXT_MECH_F_USER,"completed A/B loans did not return exactly once");
+  bad|=check(a.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==4&&b.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]==2,"A/B publish counts crossed sessions");
+ }else{
+  if(unknown){
+   struct xdev_ext_mech_batch*held=observed[0];
+   memcpy(life_before,a.life,sizeof(life_before));
+   for(unsigned i=0;i<2;i++)assert(!xdev_ext_mech_pool_frame_move(&a.pool,ai[i],XDEV_EXT_MECH_F_INFLIGHT,XDEV_EXT_MECH_F_SEQUESTERED));
+   held->sequester=true;held->bs.state=XDEV_EXT_MECH_B_SEQUESTERED;
+   xdev_ext_mech_end(&a,held,XDEV_EXT_MECH_END_SEQUESTER,-ETIMEDOUT);
+   bad|=check(!memcmp(life_before,a.life,sizeof(life_before)),"UNKNOWN dropped producer/consumer refs or generation");
+  }
+  if(duplicate)bi[1]=9;
+  memcpy(before,state,sizeof(state));memcpy(life_before,a.life,sizeof(life_before));
+  bad|=check(shared_start(&b,bi,2)==(duplicate?-EINVAL:-EBUSY),"B duplicate or unfinished loan was accepted");
+  bad|=check(!memcmp(before,state,sizeof(state))&&!memcmp(life_before,a.life,sizeof(life_before)),"B failed START did not roll back its free prefix or changed A");
+  bad|=check(!b.start_queue&&!b.start_left&&!b.start_preparing&&!mb.nr&&!b.ss.inflight,"B failed START retained work or allocator entries");
+  event_session=&a;
+  if(unknown){
+   xdev_ext_mech_session_stop(&a,0);xdev_ext_mech_stop_work(&a.stop_work);xdev_ext_mech_stop_work(&a.stop_work);
+   bad|=check(!memcmp(before,state,sizeof(state))&&!memcmp(life_before,a.life,sizeof(life_before)),"STOP revived UNKNOWN frames");
+   bad|=check(!a.cnt[XDEV_EXT_MECH_CNT_PUBLISHED]&&a.ss.sequestered==1&&worker_used[observed[0]-worker_batches],"UNKNOWN returned frames or discarded retained batch storage");
+   /* Quarantine is per frame/session; B's disjoint exact loan still works. */
+   bi[0]=9;bi[1]=1;
+   if(shared_start(&b,bi,2))return check(false,"A UNKNOWN blocked B's disjoint frames")|bad;
+   xdev_ext_mech_start_more(&b);
+   if(admitted!=2)return check(false,"B disjoint loan did not run")|bad;
+   finish_message(&b,observed[1]);
+   bad|=check(state[7]==XDEV_EXT_MECH_F_SEQUESTERED&&state[3]==XDEV_EXT_MECH_F_SEQUESTERED&&
+    !memcmp(&life_before[7],&a.life[7],sizeof(a.life[0]))&&!memcmp(&life_before[3],&a.life[3],sizeof(a.life[0])),"B completion revived A UNKNOWN frame");
+   bad|=check(state[9]==XDEV_EXT_MECH_F_USER&&state[1]==XDEV_EXT_MECH_F_USER&&b.done==1,"B disjoint completion did not return exact frames");
+  }else finish_message(&a,observed[0]);
+ }
+ bad|=check(!allocator_calls,"ordered shared sessions fell back to arbitrary IOU allocation");
+ if(!bad)printf("PASS %s (actual START/END/custody, simulated native landing)\n",mode);
+ return bad;
+}
+'''
+
 def adapt(fixture, core):
     fixture=fixture.replace('#define WARN_ON_ONCE(x) (!!(x))', 'static bool test_warn(bool x){return x;}\n#define WARN_ON_ONCE(x) test_warn(!!(x))')
     # END must use the actual state-sensitive core latch. The legacy recycle
@@ -206,8 +297,8 @@ def adapt(fixture, core):
     # Bodies are compiled verbatim; no source-shape assertions determine success.
     worker_names=('xdev_ext_mech_start_more',) if (ROOT/'io_uring/xdev_ext_mech_start_queue.h').exists() else ('xdev_ext_mech_start_publication','xdev_ext_mech_start_more')
     worker='\n'.join(function(core,n) for n in worker_names)
-    fixture=fixture.replace('static int ordered_scenario(',worker+'\n'+SCENARIO+'\nstatic int ordered_scenario(',1)
-    fixture=fixture.replace('return ordered_scenario(argv[1]);','return worker_scenario(argv[1]);',1)
+    fixture=fixture.replace('static int ordered_scenario(',worker+'\n'+SCENARIO+'\n'+SHARED_SCENARIO+'\nstatic int ordered_scenario(',1)
+    fixture=fixture.replace('return ordered_scenario(argv[1]);','return !strncmp(argv[1],"shared_",7)?shared_scenario(argv[1]):worker_scenario(argv[1]);',1)
     return fixture
 
 class OrderedWorker(unittest.TestCase):
@@ -224,6 +315,10 @@ class OrderedWorker(unittest.TestCase):
     def test_first_active_ordered_failure_still_closes_admission(self):self.probe('active_error')
     def test_real_error_already_latched_after_stop_survives_end(self):self.probe('stop_error')
     def test_unknown_after_stop_retains_custody_and_error(self):self.probe('stop_unknown')
+    def test_shared_returned_template_stop_preserves_new_session(self):self.probe('shared_returned_stop')
+    def test_shared_busy_start_rolls_back_free_prefix(self):self.probe('shared_busy_prefix')
+    def test_shared_duplicate_start_changes_neither_session(self):self.probe('shared_duplicate')
+    def test_shared_unknown_refuses_reborrow_but_allows_disjoint_session(self):self.probe('shared_unknown')
     def probe(self,mode):
         run=subprocess.run([str(self.binary),mode],capture_output=True,text=True,timeout=10)
         self.assertEqual(run.returncode,0,run.stdout+run.stderr)
