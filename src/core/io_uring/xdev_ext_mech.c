@@ -3517,6 +3517,100 @@ static void xdev_ext_mech_repark(struct xdev_ext_mech_session *s, bool never)
 	mutex_unlock(&xdev_ext_mech_quarantine_lock);
 }
 
+/* Recovery worker only, after every native obligation has a DMA-stop proof.
+ * The shared UMEM outlives this session: retire its saved claims, never reset
+ * the pool's lifecycle array. Ordinary custody moves still cannot escape
+ * SEQUESTERED. Validate the complete retained set before changing any claim.
+ */
+static int xdev_ext_mech_recover_frames(struct xdev_ext_mech_session *s)
+{
+	u32 i, pos, retained = 0;
+	int err;
+
+	if (s->pool.kind != XDEV_EXT_MECH_POOL_IOU_UMEM)
+		return 0;
+	for (i = 0; i < s->depth; i++) {
+		struct xdev_ext_mech_batch *b = &s->batches[i];
+
+		if (b->bs.state != XDEV_EXT_MECH_B_SEQUESTERED)
+			continue;
+		if (!b->bs.native_sequester || b->parent || b->transform.active ||
+		    !b->nr_frames || b->nr_frames > XDEV_EXT_MECH_MAX_FRAMES ||
+		    !b->present || b->life_active != b->present)
+			return -EIO;
+		retained++;
+		for (pos = 0; pos < b->nr_frames; pos++) {
+			struct xdev_ext_mech_life *l;
+			u64 claim = b->life_token[pos];
+			u32 index = b->f[pos].index;
+
+			if (!(b->present & BIT(pos)))
+				continue;
+			if (index >= s->pool.nr_frames ||
+			    xdev_ext_mech_pool_frame_state(&s->pool, index) !=
+				XDEV_EXT_MECH_F_SEQUESTERED)
+				return -EIO;
+			l = &s->life[index];
+			if (!xdev_ext_mech_life_matches(READ_ONCE(l->ctrl), claim) ||
+			    b->producing != ((claim & XDEV_EXT_MECH_L_STATE_MASK) ==
+					    XDEV_EXT_MECH_L_CLAIM_PRODUCE))
+				return -ESTALE;
+			/* A separate active consumer is not this session's to retire. */
+			if (!b->producing && xdev_ext_mech_life_busy(l) !=
+			    BIT(xdev_ext_mech_life_claim_owner(claim)))
+				return -EBUSY;
+		}
+	}
+	if (retained != s->ss.sequestered)
+		return -EIO;
+	/* An unmap/synchronization failure still retains all UMEM custody.
+	 * Checked unbind is idempotent; the final destructor checks it again. */
+	err = xdev_ext_mech_unbind_checked(s);
+	if (err)
+		return err;
+	for (i = 0; i < s->depth; i++) {
+		struct xdev_ext_mech_batch *b = &s->batches[i];
+
+		if (b->bs.state != XDEV_EXT_MECH_B_SEQUESTERED)
+			continue;
+		for (pos = 0; pos < b->nr_frames; pos++) {
+			struct xdev_ext_mech_life *l;
+
+			if (!(b->life_active & BIT(pos)))
+				continue;
+			l = &s->life[b->f[pos].index];
+			err = b->producing ?
+				xdev_ext_mech_life_fail_produce(l, b->life_token[pos]) :
+				xdev_ext_mech_life_fail_put(l, b->life_token[pos]);
+			if (err < 0)
+				return err;
+			b->life_active &= ~BIT(pos);
+		}
+	}
+	for (i = 0; i < s->depth; i++) {
+		struct xdev_ext_mech_batch *b = &s->batches[i];
+
+		if (b->bs.state != XDEV_EXT_MECH_B_SEQUESTERED)
+			continue;
+		for (pos = 0; pos < b->nr_frames; pos++) {
+			u32 index;
+			u8 old = XDEV_EXT_MECH_F_SEQUESTERED;
+			u8 to;
+
+			if (!(b->present & BIT(pos)))
+				continue;
+			index = b->f[pos].index;
+			to = s->transform_owner[index] ?
+				XDEV_EXT_MECH_F_HELD : XDEV_EXT_MECH_F_USER;
+			if (xdev_ext_mech_life_phase(&s->life[index]) !=
+			    XDEV_EXT_MECH_L_FREE ||
+			    !XDEV_EXT_MECH_CAS_U8(&s->pool.state[index], &old, to))
+				return -EIO;
+		}
+	}
+	return 0;
+}
+
 /* Off the list, evidence COVERED: give the retained resources and then
  * every reference back, as a release after a clean STOP would. */
 static void xdev_ext_mech_recover(struct xdev_ext_mech_session *s)
@@ -3537,6 +3631,11 @@ static void xdev_ext_mech_recover(struct xdev_ext_mech_session *s)
 	 * or in the next one: until then the pool keeps its authority. */
 	if (authority && xdev_ext_peer_file_drainable(authority)) {
 		xdev_ext_mech_repark(s, false);
+		return;
+	}
+	err = xdev_ext_mech_recover_frames(s);
+	if (err) {
+		xdev_ext_mech_repark(s, true);
 		return;
 	}
 	pr_info("xdev_ext_mech: session %llu leaves quarantine: DMA-stop evidence covers its %u sequestered batches\n",

@@ -150,12 +150,40 @@ four runs and their ranges stayed reserved.
 - `../../family_window_grant/run.sh ROOT OUT` and `mutate.py ROOT OUT` check
   the pure grant rules in `xdev_ext_storfam_core.h`.
 
+## Same-frame reuse after reset (`--mode frame-reuse`)
+
+`window_reuse.h` registers A's pool and a keeper ring with exactly the same
+address, size and frame size. The keeper holds only a registration while A
+runs. A borrows frame 0 for one source W0 READ and destination W0 WRITE;
+NVMe fault injection on the destination makes the WRITE end UNKNOWN. The
+test requires one failed batch, one sequestered frame, no outstanding I/O,
+and STOP returning `-EBUSY`. It clears the fault, resets DST, and queries A
+through the keeper until A is released. It then creates C on that same
+keeper registration and borrows the original frame 0 for one W1 READ/WRITE.
+No CPU write, unmap or re-registration of that pool occurs between A and C.
+
+C must finish one batch without abort and STOP with 0; frame 0 must contain
+the different W1 source bytes and frames 1..7 retain their original guards.
+Both guest and host oracles allow only the first W0 group to be its old
+source or guard, require the first W1 group to match its new source, and
+require every other destination byte, the source and AUX to stay unchanged.
+The BPF program maps key 1 to group 0 of each bound window; no whole-window
+allowance is made. A's failed I/O is never retried or counted as successful.
+
+Run the independent host oracle cases with:
+
+    python3 -I tests/storage/nvme/window_handle/window_reuse_validate_test.py
+
+The actual guest mode needs `CONFIG_FAULT_INJECTION_DEBUG_FS=y` in addition to
+the runner's other required configuration. Host oracle and compiler checks
+do not establish that the actual kernel can reuse the frame.
+
 ## Running the guest test
 
 On a host with KVM, from a clean checkout of the commit under test:
 
     bash tests/storage/nvme/window_handle/window_kvm.sh --scratch DIR \
-        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi|multi-reset]
+        --source CANON --native ASSEMBLED_LINUX --build KERNEL_BUILD [--mode multi|multi-reset|frame-reuse]
 
 `DIR` must be an existing private 0700 directory. The kernel build needs the
 config symbols listed in the runner. A kernel from another commit is accepted

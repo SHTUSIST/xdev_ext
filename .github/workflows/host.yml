@@ -124,6 +124,12 @@ jobs:
         run: |
           python3 -I tests/core/peer_dmabuf/undescribed_mutants.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/dmabuf-undescribed-mutants"
           python3 -I tests/core/peer_dmabuf/undescribed_dma/validate_test.py
+      - name: UMEM original-frame recovery and assertion mutants
+        working-directory: .
+        if: matrix.cc == 'gcc'
+        run: |
+          python3 -I tests/core/lifecycle/recovery/run.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/umem-recovery"
+          python3 -I tests/core/lifecycle/recovery/mutations.py --source-root "$GITHUB_WORKSPACE" --output "$RUNNER_TEMP/umem-recovery-mutants"
       - name: UNKNOWN peer DMA quarantine recovery
         working-directory: .
         if: matrix.cc == 'gcc'
@@ -287,6 +293,7 @@ jobs:
           python3 tests/storage/family_window_grant/mutate.py "$GITHUB_WORKSPACE" "$RUNNER_TEMP/storage-window-grant-mutants"
           python3 tests/storage/nvme/window_handle/host_window_test.py "$GITHUB_WORKSPACE"
           python3 -I tests/storage/nvme/window_handle/window_validate_test.py
+          python3 -I tests/storage/nvme/window_handle/window_reuse_validate_test.py
           python3 tests/storage/nvme/window_handle/host_tenant_matrix_test.py "$GITHUB_WORKSPACE"
       - name: Block table mechanism and responsibility facts
         working-directory: .

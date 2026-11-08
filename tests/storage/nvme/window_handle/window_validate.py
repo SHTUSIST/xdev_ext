@@ -28,6 +28,13 @@ of the faulty window is guard or its own AUX group: the reset ends its
 swallowed READs, the fault is lifted, and its later batches copy its private
 namespace into its own window. Every other byte is guard; AUX still holds
 only 0x3c.
+
+window_validate.py --frame-reuse SOURCE_BEFORE DESTINATION AUX: one old
+UNKNOWN write at W0 group 0 is exact source W0 group 0 or guard; the new
+session's one write at W1 group 0 is exact source W1 group 0. Every other
+destination byte is guard; AUX stays unchanged. The guest independently
+checks source preservation, frame 0's new bytes and guards on frames 1..7;
+the runner compares SOURCE_BEFORE against the post-run source disk.
 Prints one JSON object; exit 0 only for PASS.
 """
 import json
@@ -166,7 +173,39 @@ def validate_reset(source, destination, aux, exact):
             'innocent_exact_groups': {str(i): g for i, g in exact_groups.items()}}
 
 
+def validate_reuse(source, destination, aux):
+    """Two STARTs, key 1 each: only group 0 of bound windows W0 and W1.
+
+    A's UNKNOWN write may have landed before reset; C must copy W1 exactly.
+    Allowing a whole window here would hide unintended batches/offsets.
+    """
+    if len(source) != SPAN or len(destination) != SPAN or len(aux) != SPAN:
+        return {'state': 'FAIL', 'reason': 'image size'}
+    seed = struct.unpack_from('<I', source, 4)[0]
+    if bytes(expected_source(seed)) != bytes(source):
+        return {'state': 'FAIL', 'reason': 'source is not the position-unique image of its seed'}
+    if bytes(aux) != bytes([AUX_FILL]) * SPAN:
+        return {'state': 'FAIL', 'reason': 'the unused auxiliary namespace changed'}
+    guard_group = bytes([GUARD]) * GROUP
+    old = bytes(destination[:GROUP])
+    if old != guard_group and old != bytes(source[:GROUP]):
+        return {'state': 'FAIL', 'reason': 'old write group is neither its own source nor guard'}
+    if bytes(destination[WIN_BYTES:WIN_BYTES + GROUP]) != bytes(source[WIN_BYTES:WIN_BYTES + GROUP]):
+        return {'state': 'FAIL', 'reason': 'reused frame did not write the new source group'}
+    for start, end in ((GROUP, WIN_BYTES), (WIN_BYTES + GROUP, SPAN)):
+        if bytes(destination[start:end]) != bytes([GUARD]) * (end - start):
+            return {'state': 'FAIL', 'reason': 'destination outside the two first groups changed',
+                    'range_start': start, 'range_end': end}
+    return {'state': 'PASS', 'seed': '0x%08x' % seed, 'old_write_landed': old != guard_group,
+            'old_group_byte': 0, 'reused_group_byte': WIN_BYTES, 'group_bytes': GROUP}
+
+
 def main(argv):
+    if len(argv) == 5 and argv[1] == '--frame-reuse':
+        with open(argv[2], 'rb') as s, open(argv[3], 'rb') as d, open(argv[4], 'rb') as a:
+            result = validate_reuse(s.read(), d.read(), a.read())
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result['state'] == 'PASS' else 1
     if len(argv) == 6 and argv[1] == '--reset':
         exact = set() if argv[5] == '-' else {int(t) for t in argv[5].split(',')}
         with open(argv[2], 'rb') as s, open(argv[3], 'rb') as d, open(argv[4], 'rb') as a:
@@ -180,7 +219,7 @@ def main(argv):
         return 0 if result['state'] == 'PASS' else 1
     if len(argv) != 3:
         print('usage: window_validate.py SOURCE_BEFORE DESTINATION | --multi SOURCE DESTINATION AUX KILL_MIN'
-              ' | --reset SOURCE DESTINATION AUX EXACT', file=sys.stderr)
+              ' | --reset SOURCE DESTINATION AUX EXACT | --frame-reuse SOURCE DESTINATION AUX', file=sys.stderr)
         return 2
     with open(argv[1], 'rb') as s, open(argv[2], 'rb') as d:
         result = validate(s.read(), d.read())
