@@ -294,7 +294,7 @@ static void test_user_stage(void)
 	EXPECT_EQ(u.fd, 7, "user stage fd");
 	EXPECT_EQ(u.arg0, 120000, "per-batch deadline in ms");
 	EXPECT_EQ(u.arg1, 0, "no length change: the group is copied whole");
-	EXPECT_EQ(u.flags, 0, "no VARLEN, no STRICT_ASYNC (host frames)");
+	EXPECT_EQ(u.flags, XDEV_EXT_USER_F_STRICT_ASYNC, "external source custody");
 	kv_plan_user_stage(&u, 7, 0);
 	EXPECT_EQ(u.arg0, 1, "deadline at least 1 ms");
 	kv_plan_user_stage(&u, 7, 2000000);
@@ -311,6 +311,7 @@ static void test_user_stage(void)
 	c = ring_create(&g, XDEV_EXT_MECH_CLASS_XDOMAIN);
 	c.pool_kind = XDEV_EXT_MECH_POOL_PEER;
 	c.pool_fd = 3;
+	c.st[1].flags &= ~XDEV_EXT_USER_F_STRICT_ASYNC;
 	EXPECT(xdev_ext_mech_create_check(&c, &frames) != 0,
 	       "negative control: a USER stage without STRICT_ASYNC on a PEER pool is refused");
 	c = ring_create(&g, XDEV_EXT_MECH_CLASS_XDOMAIN);

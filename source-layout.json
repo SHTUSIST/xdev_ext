@@ -10001,6 +10001,10 @@
       "source": "tests/storage/nvme/blocktable/guest/parallel_oracle_test.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/nvme_xdev_ext/blocktable/guest/parallel_oracle_test.c"
+    },
+    {
+      "source": "tests/benchmarks/kv_restore/test_user_stage_source_lifetime.py",
+      "logical_path": "tests/eval/kv_restore/test_user_stage_source_lifetime.py"
     }
   ]
 }
