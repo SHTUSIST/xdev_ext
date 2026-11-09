@@ -10470,6 +10470,46 @@
     {
       "source": "tests/compute/tp/placement_contract_boundary.c",
       "logical_path": "tests/compute/tp/placement_contract_boundary.c"
+    },
+    {
+      "source": "tests/README.md",
+      "logical_path": "tests/README.md"
+    },
+    {
+      "source": "tests/network/performance/README.md",
+      "logical_path": "tests/network/performance/README.md"
+    },
+    {
+      "source": "tests/network/performance/af_xdp_native_completion_cost.c",
+      "logical_path": "tests/network/performance/af_xdp_native_completion_cost.c"
+    },
+    {
+      "source": "tests/network/performance/test_af_xdp_completion_cost.py",
+      "logical_path": "tests/network/performance/test_af_xdp_completion_cost.py"
+    },
+    {
+      "source": "tests/storage/nvme/performance/README.md",
+      "logical_path": "tests/storage/nvme/performance/README.md"
+    },
+    {
+      "source": "tests/storage/nvme/performance/nvme_peer_lease_retirement_harness.c",
+      "logical_path": "tests/storage/nvme/performance/nvme_peer_lease_retirement_harness.c"
+    },
+    {
+      "source": "tests/storage/nvme/performance/test_nvme_peer_lease_retirement_cost.py",
+      "logical_path": "tests/storage/nvme/performance/test_nvme_peer_lease_retirement_cost.py"
+    },
+    {
+      "source": "tests/test_catalog/entries.json",
+      "logical_path": "tests/test_catalog/entries.json"
+    },
+    {
+      "source": "tests/test_catalog/test_catalog.py",
+      "logical_path": "tests/test_catalog/test_catalog.py"
+    },
+    {
+      "source": "tools/test_catalog.py",
+      "logical_path": "tools/test_catalog.py"
     }
   ]
 }

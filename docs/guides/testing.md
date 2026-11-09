@@ -1,5 +1,9 @@
 # Testing
 
+Use the [test code search index](../../tests/README.md) to find tracked tests
+by subsystem, source description, role, canonical path or known logical path.
+The index does not execute tests or infer their results.
+
 Performance comparisons follow the [evaluation policy](../reference/performance-policy.md).
 
 Tests have different requirements and establish different properties. Record the project revision, configuration, command, complete output, exit status and relevant tool versions for each run.

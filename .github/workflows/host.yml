@@ -33,6 +33,26 @@ jobs:
           python3 tools/layout.py view
           echo "XDEV_EXT_CANONICAL_ROOT=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
           echo "XDEV_EXT_SOURCE_VIEW=$GITHUB_WORKSPACE/build/source-view" >> "$GITHUB_ENV"
+      - name: Test-code catalog and targeted NIC/NVMe interface costs
+        working-directory: .
+        run: |
+          python3 tests/test_catalog/test_catalog.py -v
+          python3 tools/test_catalog.py check
+          python3 tests/network/performance/test_af_xdp_completion_cost.py --out "$RUNNER_TEMP/af-xdp-completion-cost"
+          python3 tests/storage/nvme/performance/test_nvme_peer_lease_retirement_cost.py --out "$RUNNER_TEMP/nvme-peer-lease-retirement-cost"
+      - name: Preserve targeted component cost receipts and diagnostics
+        if: always()
+        working-directory: .
+        shell: python
+        run: |
+          import os
+          from pathlib import Path
+          for name in ("af-xdp-completion-cost", "nvme-peer-lease-retirement-cost"):
+              directory = Path(os.environ["RUNNER_TEMP"]) / name
+              for path in sorted(directory.rglob("*")):
+                  if path.is_file() and path.suffix in (".log", ".json"):
+                      print(str(path.relative_to(directory)))
+                      print(path.read_bytes()[:16384].decode("utf-8", errors="replace"))
       - name: Kernel switch planning, recovery boundaries and bare-metal bring-up
         working-directory: .
         run: python3 -m unittest discover -s tests/integration/boot -p 'test_*.py' -v

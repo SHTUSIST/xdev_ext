@@ -1,0 +1,26 @@
+[
+  {
+    "canonical_path": "tests/network/performance/test_af_xdp_completion_cost.py",
+    "role": "entry",
+    "title": "AF_XDP completion FIFO: capacity and DONE-hole cost bounds",
+    "title_source": "tests/network/performance/README.md"
+  },
+  {
+    "canonical_path": "tests/network/performance/af_xdp_native_completion_cost.c",
+    "role": "fixture",
+    "title": "AF_XDP completion CPU cycle without lookup instrumentation",
+    "title_source": "tests/network/performance/README.md"
+  },
+  {
+    "canonical_path": "tests/storage/nvme/performance/test_nvme_peer_lease_retirement_cost.py",
+    "role": "entry",
+    "title": "NVMe peer lease retirement: traversal cost and lifetime balance",
+    "title_source": "tests/storage/nvme/performance/README.md"
+  },
+  {
+    "canonical_path": "tests/storage/nvme/performance/nvme_peer_lease_retirement_harness.c",
+    "role": "fixture",
+    "title": "NVMe lease lifecycle OS-boundary harness",
+    "title_source": "tests/storage/nvme/performance/README.md"
+  }
+]
