@@ -38,6 +38,7 @@ jobs:
         run: |
           python3 tests/test_catalog/test_catalog.py -v
           python3 tools/test_catalog.py check
+          XDEV_EXT_TEST_TMPDIR="$RUNNER_TEMP" python3 tests/network/xsk/test_legacy_rx_batch_completion_wakeup.py -v
           python3 tests/network/performance/test_af_xdp_completion_cost.py --out "$RUNNER_TEMP/af-xdp-completion-cost"
           python3 tests/storage/nvme/performance/test_nvme_peer_lease_retirement_cost.py --out "$RUNNER_TEMP/nvme-peer-lease-retirement-cost"
       - name: Preserve targeted component cost receipts and diagnostics
