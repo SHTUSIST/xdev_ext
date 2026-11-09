@@ -10510,6 +10510,16 @@
     {
       "source": "tools/test_catalog.py",
       "logical_path": "tools/test_catalog.py"
+    },
+    {
+      "source": "tests/network/xsk/test_legacy_rx_batch_completion_wakeup.py",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xsk_xdev_ext/test_legacy_rx_batch_completion_wakeup.py"
+    },
+    {
+      "source": "tests/network/xsk/legacy_rx_batch_completion_wakeup_fixture.c",
+      "component": "linux",
+      "native_path": "tools/testing/selftests/xsk_xdev_ext/legacy_rx_batch_completion_wakeup_fixture.c"
     }
   ]
 }

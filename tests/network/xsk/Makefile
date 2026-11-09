@@ -7,8 +7,8 @@ TEST_GEN_PROGS := xsk_xdev_ext_core_test xsk_xdev_ext_fake_driver_test \
 		  xsk_xdev_ext_mech_zc_fifo_test \
 		  xdev_ext_xsk_redirect_test xdev_ext_xsk_redirect_testrun
 TEST_PROGS := xsk_xdev_ext_mech_reliable_submit_test.py xsk_xdev_ext_mech_reliable_packet_test.py
-TEST_PROGS += xsk_xdev_ext_mech_backlog_test.py
-TEST_FILES += xsk_xdev_ext_mech_backlog_fixture.c
+TEST_PROGS += xsk_xdev_ext_mech_backlog_test.py test_legacy_rx_batch_completion_wakeup.py
+TEST_FILES += xsk_xdev_ext_mech_backlog_fixture.c legacy_rx_batch_completion_wakeup_fixture.c
 TEST_PROGS += xsk_xdev_ext_mech_publication_test.py xsk_xdev_ext_source_test.py xsk_xdev_ext_mech_source_test.py
 
 LOCAL_HDRS += $(abspath ../../../../net/xdp/xsk_xdev_ext_core.h)

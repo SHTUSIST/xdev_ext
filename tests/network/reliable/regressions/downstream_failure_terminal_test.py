@@ -39,6 +39,7 @@ FIXTURE = r'''
 typedef uint64_t u64; typedef uint32_t u32;
 #include "include/linux/xdev_ext_mech_reliable_core.h"
 #define XDEV_EXT_MECH_DIR_FROM_DEVICE 1
+#define READ_ONCE(x) (x)
 #define spin_lock_irqsave(l,f) ((void)(l),(void)((f)=0))
 #define spin_unlock_irqrestore(l,f) ((void)(l),(void)(f))
 enum { ACTIVE = 1, STOPPING = 3 };
@@ -48,7 +49,7 @@ struct xsk_mech_reliable { struct xdev_ext_rel_tx tx; struct xdev_ext_rel_rx rx;
 struct xsk_xdev_ext_mech_provider { int tx_lock; };
 struct xdev_ext_mech_pool { struct xsk_xdev_ext_mech_provider *priv; };
 struct xdev_ext_mech_session { struct xdev_ext_mech_pool pool; int state, stop_err; };
-struct xsk_xdev_ext_mech_stage { struct xsk_mech_reliable *rel; };
+struct xsk_xdev_ext_mech_stage { struct xsk_mech_reliable *rel; struct { u32 count; } pending; };
 struct xdev_ext_mech_stage { void *priv; struct xdev_ext_mech_session *s; u32 direction;
  const struct xdev_ext_mech_class_ops *cls; int dead; };
 struct xdev_ext_mech_batch { u64 key; struct xdev_ext_mech_stage *at; };

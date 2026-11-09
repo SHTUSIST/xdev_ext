@@ -42,7 +42,7 @@ struct xdev_ext_mech_frame {u64 umem_addr;u32 index,data_off,data_len;void *kadd
 struct xdev_ext_mech_batch {u64 key; struct xdev_ext_mech_stage *st;};
 struct xsk_rel_rx_intent {u64 group;u32 index,attempt;u8 calls,valid;};
 struct xsk_mech_reliable {struct xsk_rel_rx_intent rx_intent; struct xdev_ext_rel_policy policy; struct xdev_ext_rel_tx tx;struct xdev_ext_rel_rx rx;u64 ack_pending[32],owed_since[32],nr_groups;u8 owed_dup[32];bool build_must;};
-struct xsk_xdev_ext_mech_stage {struct xdp_sock *xs;struct socket *sock;struct {int lock;u32 capacity;int *entries;}pending;u32 mtu,tx_nr_sent;int *tx_sent;struct xsk_mech_reliable *rel;struct xdev_ext_afxdp_reliable_info rx_info;};
+struct xsk_xdev_ext_mech_stage {struct xdp_sock *xs;struct socket *sock;struct {int lock;u32 capacity,count;int *entries;}pending;u32 mtu,tx_nr_sent;int *tx_sent;struct xsk_mech_reliable *rel;struct xdev_ext_afxdp_reliable_info rx_info;};
 struct xsk_xdev_ext_mech_provider {struct xdp_sock *xs;bool zc;u32 source_first;int tx_lock;};
 /* ACTUAL_CALL_STRUCTS */
 static const int xsk_xdev_ext_mech_pool_ops;

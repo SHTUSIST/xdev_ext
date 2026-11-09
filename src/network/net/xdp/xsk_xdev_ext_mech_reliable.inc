@@ -706,7 +706,16 @@ static void xsk_rel_batch_end(struct xdev_ext_mech_stage *st,struct xdev_ext_mec
  u64 group=xdev_ext_mech_batch_key(b);
  unsigned long flags;
  int action;
- if (!xst->rel || st->direction!=XDEV_EXT_MECH_DIR_FROM_DEVICE) return;
+ if (!xst->rel) {
+  /* On the session worker, progress runs after the terminal end path
+   * has returned any reusable batch to the free list.
+   */
+  if (st->direction==XDEV_EXT_MECH_DIR_FROM_DEVICE &&
+      READ_ONCE(xst->pending.count))
+   xdev_ext_mech_stage_kick(st);
+  return;
+ }
+ if (st->direction!=XDEV_EXT_MECH_DIR_FROM_DEVICE) return;
  spin_lock_irqsave(&p->tx_lock,flags);
  action=xdev_ext_rel_rx_finish(&xst->rel->rx,group,err);
  if (action==XDEV_EXT_REL_REPLAY_ACK) {
