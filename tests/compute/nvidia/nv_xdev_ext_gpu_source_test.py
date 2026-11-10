@@ -665,17 +665,38 @@ assert "dma_map_sgtable(region->dev" in bind_host
 for pin in ("pin_user_pages", "NV_PIN_USER_PAGES", "get_page("):
     assert pin not in BACKEND, pin
 
-# submit: validate before native async RM admission. Success is completed by
-# progress, while an ambiguous submit completes once and parks the region.
+# submit: validate before native async RM admission. Verified ready success
+# may complete inline; other accepted work still uses progress. An ambiguous
+# submit has its separate once-only, zero-byte completion and parks the region.
 submit_ce = function_body(BACKEND, "static int nv_xdev_ext_ce_submit(")
 entry = submit_ce.index("nv_xdev_ext_ce_entry_ok(")
 request = submit_ce.index("nv_p2p_ce_async_submit(")
 park = submit_ce.index("outcome == NV_XDEV_EXT_CE_AMBIGUOUS")
 complete = submit_ce.index("xdev_ext_ce_complete(ck,")
-assert submit_ce.count("xdev_ext_ce_complete(") == 1
+success_ce = function_body(submit_ce, "if (outcome == NV_XDEV_EXT_CE_OK)")
+ambiguous_ce = function_body(submit_ce, "else if (outcome == NV_XDEV_EXT_CE_AMBIGUOUS)")
+inline_ce = function_body(success_ce, "if (nv_xdev_ext_ce_async_ready(")
+assert submit_ce.count("xdev_ext_ce_complete(") == 2
+assert success_ce.count("xdev_ext_ce_complete(") == 1
+assert ambiguous_ce.count("xdev_ext_ce_complete(") == 1
 assert submit_ce.index("nv_xdev_ext_ce_rm_direction(") < entry < request < park < complete
 assert "nv_xdev_ext_ce_async_submitted(&h->pool, slot, status, issued, token)" in submit_ce
-assert "NV_TRUE, 0);" in submit_ce[complete:]
+assert "struct nv_xdev_ext_ce_async_completion completed;" in submit_ce
+assert success_ce.index("nv_xdev_ext_ce_sync(h, saved, true)") < \
+    success_ce.index("nv_xdev_ext_ce_async_ready(")
+inline_complete = inline_ce.index("xdev_ext_ce_complete(")
+assert inline_ce.index("queue_work(") < inline_ce.index("mutex_unlock(&h->lock)") < inline_complete
+assert "xdev_ext_ce_complete(completed.cookie,completed.ticket,0,NV_TRUE,completed.bytes);" in \
+    re.sub(r"\s+", "", inline_ce)
+inline_call_end = inline_ce.index(");", inline_complete) + 2
+assert re.match(r"\s*return\s+0\s*;", inline_ce[inline_call_end:])
+assert "h->" not in inline_ce[inline_call_end:]
+assert "h->completed[" not in success_ce
+assert ambiguous_ce.index("mutex_unlock(&h->lock)") < \
+    ambiguous_ce.index("xdev_ext_ce_owners_valid(ck, ticket") < \
+    ambiguous_ce.index("xdev_ext_ce_complete(ck,")
+assert "xdev_ext_ce_complete(ck,ticket,status?nv_p2p_umem_errno(status):-EIO,NV_TRUE,0);" in \
+    re.sub(r"\s+", "", ambiguous_ce)
 assert "queue_work(system_unbound_wq, &h->progress)" in submit_ce
 progress_ce = function_body(BACKEND, "static void nv_xdev_ext_ce_progress(")
 assert "nv_p2p_ce_progress(h->rm, &watermark)" in progress_ce
