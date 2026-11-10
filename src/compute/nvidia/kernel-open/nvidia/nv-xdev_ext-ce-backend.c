@@ -490,6 +490,7 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     u32 i, m = 0;
     int rc;
     struct nv_xdev_ext_ce_request *saved;
+    struct nv_xdev_ext_ce_async_completion completed;
 
     if (!h || h->region != r->priv || !ck || !x) return -EINVAL;
     rc = nv_xdev_ext_ce_rm_direction(dir, &rm_dir);
@@ -530,11 +531,49 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
     up_read(&nv_system_pm_lock);
     outcome = nv_xdev_ext_ce_async_submitted(&h->pool, slot, status, issued, token);
     if (outcome == NV_XDEV_EXT_CE_OK) {
+        NvU64 watermark = 0;
+        unsigned long flags;
+        bool failed;
+
         h->deadlines[slot - h->slots] = jiffies + NV_XDEV_EXT_CE_TIMEOUT;
         h->submitted = token;
 #ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
         h->backoff = nv_xdev_ext_ce_poll_base();
 #endif
+        /* One progress read, after the submit wrapper released its RM locks.
+         * It may wait for CPU locks, but never waits for this GPU ticket. */
+        down_read(&nv_system_pm_lock);
+        status = nv_p2p_ce_progress(h->rm, &watermark);
+        up_read(&nv_system_pm_lock);
+        failed = status != NV_OK || watermark > h->submitted;
+        for (i = 0; i < NV_XDEV_EXT_CE_REQUEST_SLOTS; i++)
+            if (h->slots[i].state == NV_XDEV_EXT_CE_ASYNC_PENDING &&
+                time_after_eq(jiffies, h->deadlines[i])) failed = true;
+#ifndef NV_XDEV_EXT_CE_POLL_COMPLETION
+        spin_lock_irqsave(&h->event_lock, flags);
+        if (h->watermark > h->submitted) failed = true;
+        spin_unlock_irqrestore(&h->event_lock, flags);
+#else
+        (void)flags;
+#endif
+        if (!failed && watermark >= token &&
+            !xdev_ext_ce_owners_valid(ck, ticket, saved->x, saved->n))
+            failed = true;
+        if (failed) {
+            h->pool.quarantined = h->pool.stopping = 1;
+            WRITE_ONCE(h->region->ambiguous, NV_TRUE);
+        } else if (watermark >= token) {
+            /* Keep the saved transfer and binding private until sync is done.
+             * Only the small completion survives slot reuse after unlock. */
+            nv_xdev_ext_ce_sync(h, saved, true);
+            if (nv_xdev_ext_ce_async_ready(&h->pool, slot, watermark, &completed)) {
+                queue_work(system_unbound_wq, &h->progress);
+                mutex_unlock(&h->lock);
+                xdev_ext_ce_complete(completed.cookie, completed.ticket, 0,
+                                    NV_TRUE, completed.bytes);
+                return 0; /* The callback may have released h. */
+            }
+        }
         queue_work(system_unbound_wq, &h->progress);
         rc = 0;
     } else if (outcome == NV_XDEV_EXT_CE_AMBIGUOUS) {

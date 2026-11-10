@@ -124,6 +124,21 @@ class BackendHarness(unittest.TestCase):
     def test_g1_event_raised_before_submit_returns(self):
         self.run_cases(("complete-in-submit",), ("event+iova", "event+phys"))
 
+    def test_ready_ticket_retires_before_deferred_work(self):
+        self.run_cases(("inline-ready",))
+
+    def test_inline_callback_lifetime_reuse_and_other_pending(self):
+        self.run_cases(("inline-late-event-and-reuse", "inline-callback-releases-context",
+                        "inline-other-pending", "inline-older-deadline"))
+
+    def test_inline_progress_refuses_errors_future_deadline_and_stale_owner(self):
+        self.run_cases(("inline-query-failure", "inline-future", "inline-deadline",
+                        "inline-owner-stale"))
+
+    def test_inline_early_irq_does_not_double_notify(self):
+        self.run_cases(("inline-early-event", "inline-future-event"),
+                       ("event+iova", "event+phys"))
+
     def test_g1_g3_late_duplicate_and_impossible_events(self):
         self.run_cases(("event-regress", "event-impossible"), ("event+iova", "event+phys"))
 

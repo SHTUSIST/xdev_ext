@@ -138,6 +138,9 @@ static struct harness {
 	NV_STATUS rm_bind_status, rm_unbind_status, rm_progress_status;
 	NV_STATUS submit_status;
 	int submit_issued, submit_zero_token, fire_in_submit, fire_in_unbind;
+	int ready_in_submit;
+	int future_progress, stale_owner_in_progress, future_event_in_submit;
+	unsigned long progress_advance;
 	u64 rm_last, rm_completed;
 	u64 bound_addrs[MAX_PAGES];
 	u32 bound_count, bound_page_size;
@@ -149,6 +152,7 @@ static struct harness {
 	struct { u64 host, gpu, size; } last_x[64];
 	int submit_saw_dev_sync_gap;
 	unsigned int dma_map, dma_unmap, sg_alloc, sg_free, dma_bad_dir;
+	unsigned int cpu_sync_calls;
 	void *dma_dev;
 	int dma_mode;               /* 0 merged, 1 split, 2 fail, 3 one scattered segment per page */
 	unsigned int sg_walk;       /* sg_next() calls: scatterlist entries walked */
@@ -162,6 +166,7 @@ static struct harness {
 	u64 frame_owner[MAX_PAGES], frame_generation[MAX_PAGES];
 	unsigned int owner_validations, owner_rejections;
 } H = { .big = PTHREAD_MUTEX_INITIALIZER };
+static void (*completion_hook)(void);
 
 static void order(const char *what)
 {
@@ -742,7 +747,7 @@ static void mark_sync(unsigned char *map, dma_addr_t addr, size_t len)
 }
 static void dma_sync_single_for_cpu(struct device *d, dma_addr_t a, size_t l,
 				    enum dma_data_direction dir)
-{ (void)d; (void)dir; mark_sync(H.synced_cpu, a, l); }
+{ (void)d; (void)dir; H.cpu_sync_calls++; mark_sync(H.synced_cpu, a, l); }
 static void dma_sync_single_for_device(struct device *d, dma_addr_t a, size_t l,
 				       enum dma_data_direction dir)
 { (void)d; (void)dir; mark_sync(H.synced_dev, a, l); }
@@ -975,12 +980,12 @@ static NV_STATUS nv_p2p_ce_async_submit(nv_p2p_ce_host_t *h,
 	*issued = NV_TRUE;
 	H.rm_last += n;
 	t = H.rm_last;
-	if (H.fire_in_submit)
+	if (H.fire_in_submit || H.ready_in_submit)
 		H.rm_completed = t;
 	pthread_mutex_unlock(&H.big);
 	/* The CE may finish and raise its event before this call returns. */
 	if (H.fire_in_submit)
-		fire_event(t);
+		fire_event(t + (H.future_event_in_submit ? 1 : 0));
 	*token = H.submit_zero_token ? 0 : t;
 	return NV_OK;
 }
@@ -990,7 +995,10 @@ static NV_STATUS nv_p2p_ce_progress(nv_p2p_ce_host_t *h, NvU64 *watermark)
 	might_sleep_check("nv_p2p_ce_progress");
 	pthread_mutex_lock(&H.big);
 	H.rm_progress++;
-	*watermark = H.rm_completed;
+	*watermark = H.future_progress ? H.rm_last + 1 : H.rm_completed;
+	jiffies += H.progress_advance;
+	if (H.stale_owner_in_progress)
+		H.frame_generation[0]++;
 	pthread_mutex_unlock(&H.big);
 	return H.rm_progress_status;
 }
@@ -1051,6 +1059,8 @@ static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int 
 	memcpy(c->synced_cpu, H.synced_cpu, sizeof(c->synced_cpu));
 	__atomic_add_fetch(&H.total_completions, 1, __ATOMIC_SEQ_CST);
 	pthread_mutex_unlock(&H.big);
+	if (completion_hook)
+		completion_hook();
 }
 
 /* ------------------------------------------- the actual production body */
@@ -1259,6 +1269,174 @@ static void case_complete_in_submit(void)
 		ops->unbind_host(fx.host);
 		ops->unbind_region(&fx.r);
 	}
+	common_checks();
+#endif
+}
+
+/* A completed hardware token must retire without running the workqueue. */
+static void case_inline_ready(void)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	H.ready_in_submit = 1;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+	CHECK(H.done[1].count == 1 && H.done[1].status == 0 &&
+	      H.done[1].hw && H.done[1].bytes == 4096,
+	      "ready ticket waited for deferred retirement (count=%u)", H.done[1].count);
+	CHECK(H.rm_progress == 1, "submit made %u progress reads instead of one", H.rm_progress);
+#if VARIANT_IOVA
+	CHECK(H.done[1].synced_cpu[0], "inline publication preceded CPU sync");
+	CHECK(H.cpu_sync_calls == 1, "inline ticket CPU synced %u times", H.cpu_sync_calls);
+#endif
+	run_deferred(4);
+	CHECK(H.done[1].count == 1, "deferred retirement notified inline ticket twice");
+#if VARIANT_IOVA
+	CHECK(H.cpu_sync_calls == 1, "deferred work repeated inline CPU sync");
+#endif
+	ops->unbind_host(fx.host);
+	ops->unbind_region(&fx.r);
+	common_checks();
+}
+
+static struct fixture *inline_callback_fixture;
+static int inline_release_in_callback;
+static void inline_callback(void)
+{
+	struct fixture *fx = inline_callback_fixture;
+	struct nv_xdev_ext_ce_host *h = fx->host;
+	CHECK(!h->lock.held, "completion callback held the submission mutex");
+	if (inline_release_in_callback) {
+		completion_hook = NULL;
+		CHECK(ops->unbind_host(fx->host) == 0, "callback could not release drained host");
+		fx->host = NULL;
+		CHECK(ops->unbind_region(&fx->r) == 0, "callback could not release region");
+	}
+}
+
+static void case_inline_late_event_and_reuse(void)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	inline_callback_fixture = &fx;
+	completion_hook = inline_callback;
+	H.ready_in_submit = 1;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_FROM_DEVICE, 4096, 4096) == 0, "reuse");
+	CHECK(H.done[1].count == 1 && H.done[2].count == 1,
+	      "reused slot lost inline completion or immutable ticket");
+	completion_hook = NULL;
+#if VARIANT_EVENT
+	fire_event(1);
+	fire_event(2);
+#endif
+	run_deferred(8);
+	CHECK(H.done[1].count == 1 && H.done[2].count == 1, "late event double notified");
+	ops->unbind_host(fx.host);
+	ops->unbind_region(&fx.r);
+	common_checks();
+}
+
+static void case_inline_callback_releases_context(void)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	inline_callback_fixture = &fx;
+	inline_release_in_callback = 1;
+	completion_hook = inline_callback;
+	H.ready_in_submit = 1;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+	CHECK(H.done[1].count == 1 && fx.host == NULL && H.rm_unbind == 1,
+	      "inline callback did not own the final context use");
+	run_deferred(8);
+	CHECK(H.done[1].count == 1, "callback teardown left duplicate completion work");
+	common_checks();
+}
+
+static void case_inline_other_pending(void)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "pending");
+	CHECK(H.done[1].count == 0 && H.cpu_sync_calls == 0,
+	      "unfinished ticket published or CPU synced early");
+	H.ready_in_submit = 1;
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "ready");
+	CHECK(H.done[2].count == 1, "ready ticket waited for older pending work");
+#if VARIANT_EVENT
+	fire_event(2);
+#endif
+	run_deferred(8);
+	CHECK(H.done[1].count == 1 && H.done[2].count == 1,
+	      "inline completion starved older pending work or double notified");
+	ops->unbind_host(fx.host);
+	ops->unbind_region(&fx.r);
+	common_checks();
+}
+
+static void case_inline_older_deadline(void)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "older");
+	jiffies += NV_XDEV_EXT_CE_TIMEOUT;
+	H.ready_in_submit = 1;
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "newer");
+	CHECK(H.done[2].count == 0 && H.cpu_sync_calls == 0,
+	      "newer ready ticket bypassed an older expired deadline");
+	run_deferred(8);
+	CHECK(H.done[1].count == 1 && H.done[2].count == 1 &&
+	      H.done[1].status != 0 && H.done[2].status != 0,
+	      "expired pool did not preserve deferred uncertain outcomes");
+	CHECK(ops->unbind_host(fx.host) == -EBUSY && H.dma_unmap == 0,
+	      "expired older ticket released uncertain mapping");
+	common_checks();
+}
+
+static void inline_refusal(int reason)
+{
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	H.ready_in_submit = 1;
+	if (reason == 0) H.rm_progress_status = NV_ERR_INVALID_STATE;
+	if (reason == 1) H.future_progress = 1;
+	if (reason == 2) H.progress_advance = NV_XDEV_EXT_CE_TIMEOUT;
+	if (reason == 3) H.stale_owner_in_progress = 1;
+	if (reason == 4) H.fire_in_submit = H.future_event_in_submit = 1;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0,
+	        "issued failure falsely returned a pre-submit error");
+	CHECK(H.done[1].count == 0 && H.cpu_sync_calls == 0,
+	      "invalid progress published successful ownership");
+	run_deferred(4);
+	if (reason != 3)
+		CHECK(H.done[1].count == 1 && H.done[1].status != 0 && H.done[1].hw,
+		      "progress failure did not use deferred AMBIGUOUS completion");
+	else
+		CHECK(H.done[1].count == 0, "stale owner received completion");
+	CHECK(((struct nv_xdev_ext_ce_region *)fx.r.priv)->ambiguous,
+	      "invalid progress did not quarantine the binding");
+	CHECK(ops->unbind_host(fx.host) == -EBUSY, "quarantined host released");
+	CHECK(H.rm_unbind == 0 && H.dma_unmap == 0, "uncertain DMA ownership released");
+	common_checks();
+}
+static void case_inline_query_failure(void) { inline_refusal(0); }
+static void case_inline_future(void) { inline_refusal(1); }
+static void case_inline_deadline(void) { inline_refusal(2); }
+static void case_inline_owner_stale(void) { inline_refusal(3); }
+static void case_inline_future_event(void) { inline_refusal(4); }
+
+static void case_inline_early_event(void)
+{
+#if VARIANT_EVENT
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	H.fire_in_submit = 1;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+	CHECK(H.done[1].count == 1, "early event still needed retirement worker");
+	fire_event(H.rm_last);
+	run_deferred(8);
+	CHECK(H.done[1].count == 1, "early event double notified inline ticket");
+	ops->unbind_host(fx.host);
+	ops->unbind_region(&fx.r);
 	common_checks();
 #endif
 }
@@ -2011,6 +2189,17 @@ static const struct named_case cases[] = {
 	{ "complete-once", case_complete_once },
 	{ "complete-partial", case_complete_partial },
 	{ "complete-in-submit", case_complete_in_submit },
+	{ "inline-ready", case_inline_ready },
+	{ "inline-late-event-and-reuse", case_inline_late_event_and_reuse },
+	{ "inline-callback-releases-context", case_inline_callback_releases_context },
+	{ "inline-other-pending", case_inline_other_pending },
+	{ "inline-older-deadline", case_inline_older_deadline },
+	{ "inline-query-failure", case_inline_query_failure },
+	{ "inline-future", case_inline_future },
+	{ "inline-deadline", case_inline_deadline },
+	{ "inline-owner-stale", case_inline_owner_stale },
+	{ "inline-early-event", case_inline_early_event },
+	{ "inline-future-event", case_inline_future_event },
 	{ "event-regress", case_event_regress },
 	{ "event-impossible", case_event_impossible },
 	{ "ambiguous-submit", case_ambiguous_submit },
