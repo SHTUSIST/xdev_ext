@@ -10536,6 +10536,10 @@
     {
       "source": "tests/benchmarks/nvme_gpu/test_ce_worker_accounting.py",
       "logical_path": "tests/eval/nvme_gpu/test_ce_worker_accounting.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_request_latency.py",
+      "logical_path": "tests/eval/nvme_gpu/test_request_latency.py"
     }
   ]
 }

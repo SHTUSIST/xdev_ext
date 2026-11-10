@@ -36,5 +36,7 @@ static void es_print_stats(struct xdev_ext_mech_stats*s){(void)s;}
 static int es_close(struct es_run*r){(void)r;closed++;return 0;}
 static bool sn_capability_errno(int e){(void)e;return false;}
 static int sn_unavailable(const char*msg,int e){(void)msg;(void)e;return 4;}
+static int sn_request_campaign(const struct sn_opts*o,const struct es_ce*c,struct es_run*r,const __u32*u,struct sn_pass*p){(void)o;(void)c;(void)r;(void)u;(void)p;return 1;}
+static int sn_request_close(struct es_run*r){return es_close(r);}
 @SN_SESSION@
 int main(int argc,char**argv){if(argc!=3)return 2;settle_failure=atoi(argv[2]);struct sn_opts o={.direction=atoi(argv[1])?XG_SAVE:XG_LOAD,.lba_size=512,.frame_size=4096,.timeout_ms=1000,.g={.size=4096,.qd=2,.window=16384,.passes=1}};struct es_ce ce={.fd={44,-1},.len=8192};struct sn_pass p={0};int rc=sn_session(&o,&ce,45,&p);printf("{\"rc\":%d,\"io_ns\":%llu,\"cpu_us\":%llu,\"host_busy_us\":%llu,\"settled\":%u,\"closed\":%u}\n",rc,(unsigned long long)p.io_ns,(unsigned long long)p.cpu_us,(unsigned long long)p.host_busy_us,settled,closed);return 0;}

@@ -67,11 +67,15 @@ static void endpoint_timer_cleanup(void) { cpu_timer_destroy(&endpoint_timer); }
 #include "eval_session.h"
 
 #define SN_MAX_SESSION_DEPTH	64ULL	/* XDEV_EXT_MECH_MAX_DEPTH */
+#ifndef E3_REQUEST_QUALIFICATION
+#define E3_REQUEST_QUALIFICATION 0
+#endif
+
 #define SN_IO_ALIGN		4096ULL
 
 struct sn_opts {
 	uint32_t direction;
-	const char *ng, *file, *ce_dev;
+	const char *ng, *file, *ce_dev, *request_log;
 	uint64_t slba, lba_size, file_offset, frame_size, timeout_ms, ce_va;
 	bool ce_alloc, ce_vmm;
 	struct xg_geometry g;
@@ -83,13 +87,14 @@ static void sn_usage(FILE *f)
 "usage: session_nvme_ce --direction load|save --ng /dev/ngXnY --slba N --lba-size N\n"
 "         --file PATH [--file-offset N] --ce-dev DEV (--ce-va N | --ce-alloc | --ce-vmm)\n"
 "         --size N --qd N --window-bytes N [--passes N] [--pattern seq|rand]\n"
-"         [--seed N] [--frame-size N] [--timeout-ms N]\n");
+"         [--seed N] [--frame-size N] [--timeout-ms N]\n"
+"         [--diagnostic-request-latency FILE]\n");
 }
 
 static int sn_parse(int argc, char **argv, struct sn_opts *o)
 {
 	enum { O_DIR = 1, O_NG, O_SLBA, O_LBA, O_FILE, O_FOFF, O_CE, O_VA, O_ALLOC, O_VMM,
-	       O_SIZE, O_QD, O_WIN, O_PASS, O_PAT, O_SEED, O_FRAME, O_TMO, O_HELP };
+	       O_SIZE, O_QD, O_WIN, O_PASS, O_PAT, O_SEED, O_FRAME, O_TMO, O_REQUEST, O_HELP };
 	static const struct option opts[] = {
 		{ "direction", required_argument, NULL, O_DIR },
 		{ "ng", required_argument, NULL, O_NG },
@@ -109,6 +114,7 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 		{ "seed", required_argument, NULL, O_SEED },
 		{ "frame-size", required_argument, NULL, O_FRAME },
 		{ "timeout-ms", required_argument, NULL, O_TMO },
+		{ "diagnostic-request-latency", required_argument, NULL, O_REQUEST },
 		{ "help", no_argument, NULL, O_HELP },
 		{ NULL, 0, NULL, 0 },
 	};
@@ -140,6 +146,7 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 		case O_SEED: bad |= xg_parse_u64(optarg, UINT32_MAX, &seed); break;
 		case O_FRAME: bad |= xg_parse_u64(optarg, 1ULL << 22, &o->frame_size); break;
 		case O_TMO: bad |= xg_parse_u64(optarg, 3600000, &o->timeout_ms); break;
+		case O_REQUEST: o->request_log = optarg; break;
 		case O_HELP: sn_usage(stdout); exit(0);
 		default: bad = 1; break;
 		}
@@ -161,6 +168,16 @@ static int sn_parse(int argc, char **argv, struct sn_opts *o)
 	}
 	if ((o->g.size + o->frame_size - 1) / o->frame_size > XDEV_EXT_MECH_MAX_FRAMES)
 		return XG_EXIT_USAGE;
+	if (o->request_log && (o->direction != XG_LOAD || o->g.qd != 1 ||
+	    o->g.size != 4096 || o->frame_size != 4096 || o->g.passes != 1 ||
+	    o->g.pattern != XG_SEQ || o->g.seed != 1 || o->lba_size != 512 ||
+	    o->slba || o->file_offset || xg_blocks(&o->g) > 4096 || o->timeout_ms > 10000))
+		return XG_EXIT_USAGE;
+
+#if E3_REQUEST_QUALIFICATION
+	if (!o->request_log || xg_blocks(&o->g) != 32)
+		return XG_EXIT_USAGE;
+#endif
 	return XG_EXIT_PASS;
 }
 
@@ -210,10 +227,150 @@ static int sn_file_fill(int fd, const struct sn_opts *o, unsigned char *buf,
 	return fsync(fd) ? -errno : 0;
 }
 
-struct sn_pass {
-	uint64_t io_ns, cpu_us, host_busy_us, verified_bytes, slots_used;
+struct sn_request_row {
+	uint64_t pos, key, slba, control_ns, t0_ns, terminal_ns, settled_ns;
 	struct xdev_ext_mech_stats stats;
 };
+
+struct sn_pass {
+	struct sn_request_row *rows;
+	uint64_t io_ns, cpu_us, host_busy_us, verified_bytes, slots_used, setup_ns, resource_setup_ns, seed_ns;
+	struct xdev_ext_mech_stats stats;
+};
+
+/* Only the diagnostic profile uses cumulative single-request counters. */
+static int sn_request_valid(const struct xdev_ext_mech_stats *s, uint64_t sid, uint64_t done)
+{
+	unsigned int i;
+	if (s->session_id != sid || s->state != XDEV_EXT_MECH_SESSION_ACTIVE ||
+	    s->batches_done != done || s->published != done || s->last_err ||
+	    s->batches_abort || s->rejects || s->held || s->sequestered || s->timeouts ||
+	    s->inflight || s->native_publish || s->protocol_err)
+		return -EIO;
+	for (i = 0; i < XDEV_EXT_MECH_MAX_STAGES; i++)
+		if (s->submitted[i] != (i < 2 ? done : 0) || s->completed[i] != (i < 2 ? done : 0))
+			return -EIO;
+	return 0;
+}
+
+static int sn_request_arm(const struct es_run *r, uint64_t target)
+{
+	struct xdev_ext_mech_notify_arm arm = {
+		.session_id = r->session, .batches_target = target, .published_target = target,
+	};
+	uint64_t count;
+	ssize_t n;
+	int ret;
+	do { n = read(r->efd, &count, sizeof(count)); }
+	while (n == sizeof(count) || (n < 0 && errno == EINTR));
+	if (n >= 0 || errno != EAGAIN)
+		return n < 0 ? -errno : -EIO;
+	ret = es_mech(r->ring, XDEV_EXT_MECH_OP_NOTIFY_ARM, (uintptr_t)&arm);
+	if (ret)
+		return ret;
+	do { n = read(r->efd, &count, sizeof(count)); } while (n < 0 && errno == EINTR);
+	return n < 0 && errno == EAGAIN ? 0 : -EIO;
+}
+
+/* A failed STOP cannot authorize releasing a possibly loaned UMEM/window. */
+static int sn_request_close(struct es_run *r)
+{
+	int ret = 0;
+	if (r->ring >= 0 && r->session) {
+		ret = es_mech(r->ring, XDEV_EXT_MECH_OP_STOP, r->session);
+		fprintf(stderr, "EVAL_STOP=%s result=%d\n", ret ? "FAIL" : "PASS", ret);
+		if (ret) {
+			fprintf(stderr, "E3_REQUEST_DIAGNOSTIC=FAIL release=withheld\n");
+			_exit(XG_EXIT_FAIL);
+		}
+	}
+	if (r->ring >= 0 && close(r->ring)) ret = -errno;
+	if (r->efd >= 0 && close(r->efd)) ret = -errno;
+	r->ring = r->efd = -1;
+	r->session = 0;
+	return ret;
+}
+
+static int sn_request_campaign(const struct sn_opts *o, const struct es_ce *ce,
+			       struct es_run *r, const __u32 *user, struct sn_pass *p)
+{
+	uint64_t n = xg_blocks(&o->g), pos, whole, deadline;
+	uint64_t cpu0, busy0;
+	(void)ce;
+	p->rows = calloc(n, sizeof(*p->rows));
+	if (!p->rows) return XG_EXIT_FAIL;
+	whole = es_now_ns();
+	if (!whole) return XG_EXIT_FAIL;
+	deadline = whole + o->timeout_ms * 1000000ULL;
+	cpu0 = es_cpu_us(); busy0 = xg_host_busy_us();
+	for (pos = 0; pos < n; pos++) {
+		struct sn_request_row *row = &p->rows[pos];
+		struct xdev_ext_mech_start start = {
+			.session_id = r->session, .nr_batches = 1, .first_seq = pos + 1,
+			.flags = XDEV_EXT_MECH_START_F_USER_FRAMES | XDEV_EXT_MECH_START_F_RECYCLE,
+			.nr_user_frames = 1, .user_frames = (uintptr_t)user,
+		};
+		row->pos = pos; row->key = pos + 1; row->slba = o->slba + pos * (o->g.size / o->lba_size);
+		row->control_ns = es_now_ns();
+		if (!row->control_ns || row->control_ns >= deadline ||
+		    es_stats(r, &p->stats) || sn_request_valid(&p->stats, r->session, pos) ||
+		    sn_request_arm(r, pos + 1)) return XG_EXIT_FAIL;
+		row->t0_ns = es_now_ns();
+		if (!row->t0_ns || row->t0_ns < row->control_ns || row->t0_ns >= deadline ||
+		    es_mech(r->ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start) ||
+		    es_wait_terminal(r, deadline)) return XG_EXIT_FAIL;
+		row->terminal_ns = es_now_ns();
+		if (es_settle(r, pos + 1, deadline, &p->stats)) return XG_EXIT_FAIL;
+		row->settled_ns = es_now_ns();
+		if (row->terminal_ns <= row->t0_ns || row->settled_ns < row->terminal_ns ||
+		    row->settled_ns >= deadline || sn_request_valid(&p->stats, r->session, pos + 1))
+			return XG_EXIT_FAIL;
+		row->stats = p->stats;
+#if E3_REQUEST_QUALIFICATION
+		{
+			unsigned char bytes[4096];
+			if (es_ce_access((struct es_ce *)ce, false, 0, bytes, sizeof(bytes)) ||
+			    xg_compare(bytes, pos * o->g.size, sizeof(bytes), o->g.seed) >= 0)
+				return XG_EXIT_FAIL;
+		}
+#endif
+	}
+	p->io_ns = p->rows[n - 1].settled_ns - whole;
+	p->cpu_us = es_cpu_us() - cpu0;
+	p->host_busy_us = xg_host_busy_us() - busy0;
+	cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, whole, p->rows[n - 1].settled_ns);
+	es_print_stats(&p->stats);
+	return XG_EXIT_PASS;
+}
+
+static int sn_request_export(const struct sn_opts *o, const struct sn_pass *p)
+{
+	int fd = open(o->request_log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600), bad = 0;
+	FILE *f;
+	uint64_t i;
+	if (fd < 0) return XG_EXIT_FAIL;
+	f = fdopen(fd, "w");
+	if (!f) { close(fd); unlink(o->request_log); return XG_EXIT_FAIL; }
+	if (fprintf(f, "# E3_REQUEST_DIAGNOSTIC arm=session profile=%s clock=CLOCK_MONOTONIC size=4096 qd=1 n=%llu whole_span_ns=%llu session_setup_ns=%llu resource_setup_ns=%llu seed_ns=%llu final_oracle_bytes=4096\n",
+		E3_REQUEST_QUALIFICATION ? "qualification-only" : "measurement", (unsigned long long)xg_blocks(&o->g),
+		(unsigned long long)p->io_ns, (unsigned long long)p->setup_ns, (unsigned long long)p->resource_setup_ns, (unsigned long long)p->seed_ns) < 0 ||
+	    fprintf(f, "pos,key,slba,control_ns,t0_ns,terminal_ns,settled_ns,done,published,sub0,comp0,sub1,comp1,held,inflight,native_publish,error\n") < 0) bad = 1;
+	for (i = 0; i < xg_blocks(&o->g); i++) {
+		const struct sn_request_row *r = &p->rows[i];
+		const struct xdev_ext_mech_stats *s = &r->stats;
+		if (fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%d\n",
+#define SN_U(v) (unsigned long long)(v)
+		    SN_U(r->pos), SN_U(r->key), SN_U(r->slba), SN_U(r->control_ns), SN_U(r->t0_ns), SN_U(r->terminal_ns), SN_U(r->settled_ns),
+		    SN_U(s->batches_done), SN_U(s->published), SN_U(s->submitted[0]), SN_U(s->completed[0]), SN_U(s->submitted[1]),
+		    SN_U(s->completed[1]), SN_U(s->held), SN_U(s->inflight), SN_U(s->native_publish), s->last_err) < 0) bad = 1;
+#undef SN_U
+	}
+	if (fclose(f)) bad = 1;
+	if (bad) { unlink(o->request_log); return XG_EXIT_FAIL; }
+	printf("E3_REQUEST_DIAGNOSTIC=PASS arm=session profile=%s rows=%llu final_oracle_bytes=4096\n",
+	       E3_REQUEST_QUALIFICATION ? "qualification-only" : "measurement", (unsigned long long)xg_blocks(&o->g));
+	return fflush(stdout) ? XG_EXIT_FAIL : XG_EXIT_PASS;
+}
 
 /* One pass: a fresh ring, UMEM and session; START to terminal wake is timed. */
 static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
@@ -227,6 +384,7 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 	__u32 *user = NULL;
 	void *umem = MAP_FAILED;
 	__u64 t0, t1, cpu0, busy0, deadline;
+	uint64_t setup_start = o->request_log ? es_now_ns() : 0;
 	int ret, nvme = o->direction == XG_LOAD ? 0 : 1, cei = 1 - nvme, closed;
 
 	memset(&c, 0, sizeof(c));
@@ -288,6 +446,13 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 		      XG_EXIT_FAIL;
 		goto out;
 	}
+	if (o->request_log) {
+		uint64_t end = es_now_ns();
+		if (!setup_start || end < setup_start) { ret = XG_EXIT_FAIL; goto out; }
+		p->setup_ns = end - setup_start;
+		ret = sn_request_campaign(o, ce, &r, user, p);
+		goto out;
+	}
 	deadline = es_now_ns() + o->timeout_ms * 1000000ULL;
 	cpu0 = es_cpu_us();
 	busy0 = xg_host_busy_us();
@@ -319,14 +484,14 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 	p->io_ns = t1 - t0;
 	ret = XG_EXIT_PASS;
 out:
-	closed = es_close(&r);
+	closed = o->request_log ? sn_request_close(&r) : es_close(&r);
 	if (closed && ret == XG_EXIT_PASS) {
 		fprintf(stderr, "STOP: %s\n", strerror(-closed));
 		ret = XG_EXIT_FAIL;
 	}
 	free(user);
 	if (umem != MAP_FAILED)
-		munmap(umem, reg.size);
+		if (munmap(umem, reg.size) && o->request_log) ret = XG_EXIT_FAIL;
 	return ret < 0 ? XG_EXIT_FAIL : ret;
 }
 
@@ -416,10 +581,10 @@ int main(int argc, char **argv)
 	int fd_before;
 	struct sn_opts o;
 	struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
-	struct sn_pass p, total = { 0 };
+	struct sn_pass p = { 0 }, total = { 0 };
 	unsigned char *buf = NULL, *seen = NULL;
 	struct stat st;
-	uint64_t pass, slots_used = 0;
+	uint64_t pass, slots_used = 0, resource_start = 0, resource_setup = 0, seed_start = 0, seed_span = 0;
 	int ret, fd = -1, ng = -1, closed;
 
 	setvbuf(stdout, NULL, _IOFBF, 1 << 16);
@@ -431,6 +596,10 @@ int main(int argc, char **argv)
 	if (o.g.pattern == XG_RAND && o.g.passes > 1) {
 		fprintf(stderr, "SKIP: session rand requires --passes 1; its attached plan uses the pass-0 order\n");
 		return XG_EXIT_UNAVAILABLE;
+	}
+	if (o.request_log) {
+		resource_start = es_now_ns();
+		if (!resource_start) return XG_EXIT_FAIL;
 	}
 	ret = es_ce_runtime_begin(o.ce_dev, &fd_before);
 	if (ret)
@@ -473,7 +642,13 @@ int main(int argc, char **argv)
 		ret = XG_EXIT_FAIL;
 		goto out;
 	}
+	if (o.request_log) {
+		uint64_t end = es_now_ns();
+		if (!end || end <= resource_start) { ret = XG_EXIT_FAIL; goto out; }
+		resource_setup = end - resource_start;
+	}
 	for (pass = 0; pass < o.g.passes; pass++) {
+		if (o.request_log) seed_start = es_now_ns();
 		/* Seeding is outside the timed region and repeated per pass. */
 		ret = sn_file_fill(fd, &o, buf, o.direction == XG_LOAD ? o.g.seed : ~o.g.seed);
 		if (!ret)
@@ -483,7 +658,13 @@ int main(int argc, char **argv)
 			ret = XG_EXIT_FAIL;
 			goto out;
 		}
+		if (o.request_log) {
+			uint64_t end = es_now_ns();
+			if (!seed_start || end <= seed_start) { ret = XG_EXIT_FAIL; goto out; }
+			seed_span = end - seed_start;
+		}
 		memset(&p, 0, sizeof(p));
+		p.resource_setup_ns = resource_setup; p.seed_ns = seed_span;
 		ret = sn_session(&o, &ce, ng, &p);
 		if (ret)
 			goto out;
@@ -517,14 +698,19 @@ out:
 	/* Idempotent: a closed window has no fd and no driver handle left. */
 	if (es_ce_close(&ce) && ret == XG_EXIT_PASS)
 		ret = XG_EXIT_FAIL;
-	if (ng >= 0)
-		close(ng);
-	if (fd >= 0)
-		close(fd);
+	if (ng >= 0 && close(ng) && o.request_log)
+		ret = XG_EXIT_FAIL;
+	if (fd >= 0 && close(fd) && o.request_log)
+		ret = XG_EXIT_FAIL;
 	free(buf);
 	free(seen);
 	if (eval_fd_check(fd_before) && ret == XG_EXIT_PASS)
 		ret = XG_EXIT_FAIL;
+	if (o.request_log) {
+		if (ret == XG_EXIT_PASS) ret = sn_request_export(&o, &p);
+		free(p.rows);
+		return ret;
+	}
 	if (ret != XG_EXIT_PASS)
 		return ret;
 	printf("{\"schema_version\":1,\"arm\":\"session\",\"direction\":\"%s\","

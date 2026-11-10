@@ -44,6 +44,10 @@
 #include "../common/cpu_timer.h"
 static struct cpu_timer endpoint_timer;
 static void endpoint_timer_cleanup() { cpu_timer_destroy(&endpoint_timer); }
+#include "../common/fd_check.h"
+#ifndef E3_REQUEST_QUALIFICATION
+#define E3_REQUEST_QUALIFICATION 0
+#endif
 #include <cuda_runtime_api.h>
 #include <liburing.h>
 
@@ -99,7 +103,7 @@ int skip(const char *why)
 struct Options {
     uint32_t direction = XG_LOAD;
     bool ring = true, block = true;   /* --destination slot-ring, --completion-wait block */
-    const char *file = nullptr;
+    const char *file = nullptr, *request_log = nullptr;
     uint64_t file_offset = 0, streams = 2, timeout_ms = 60000;
     xg_geometry g{};
 };
@@ -110,13 +114,14 @@ void usage(FILE *f)
         "usage: bench_uring_cuda --direction load|save --file PATH [--file-offset N]\n"
         "         --size N --qd N --window-bytes N [--passes N] [--pattern seq|rand]\n"
         "         [--seed N] [--streams N] [--timeout-ms N]\n"
-        "         [--destination slot-ring|window] [--completion-wait block|poll]\n");
+        "         [--destination slot-ring|window] [--completion-wait block|poll]\n"
+        "         [--diagnostic-request-latency FILE]\n");
 }
 
 int parse(int argc, char **argv, Options &o)
 {
     enum { O_DIR = 1, O_FILE, O_FOFF, O_SIZE, O_QD, O_WIN, O_PASS, O_PAT, O_SEED,
-           O_STREAMS, O_TMO, O_DEST, O_WAIT, O_HELP };
+           O_STREAMS, O_TMO, O_DEST, O_WAIT, O_REQUEST, O_HELP };
     static const option opts[] = {
         {"direction", required_argument, nullptr, O_DIR},
         {"file", required_argument, nullptr, O_FILE},
@@ -131,6 +136,7 @@ int parse(int argc, char **argv, Options &o)
         {"timeout-ms", required_argument, nullptr, O_TMO},
         {"destination", required_argument, nullptr, O_DEST},
         {"completion-wait", required_argument, nullptr, O_WAIT},
+        {"diagnostic-request-latency", required_argument, nullptr, O_REQUEST},
         {"help", no_argument, nullptr, O_HELP},
         {nullptr, 0, nullptr, 0},
     };
@@ -163,6 +169,7 @@ int parse(int argc, char **argv, Options &o)
             else if (!std::strcmp(optarg, "poll")) o.block = false;
             else bad = 1;
             break;
+        case O_REQUEST: o.request_log = optarg; break;
         case O_HELP: usage(stdout); std::exit(0);
         default: bad = 1; break;
         }
@@ -171,6 +178,15 @@ int parse(int argc, char **argv, Options &o)
     if (bad || optind != argc || !have_dir || !o.file || !o.streams || !o.timeout_ms ||
         o.file_offset % 4096 || xg_geometry_check(&o.g))
         return XG_EXIT_USAGE;
+    if (o.request_log && (o.direction != XG_LOAD || !o.ring || !o.block || o.streams != 2 ||
+        o.g.qd != 1 || o.g.size != 4096 || o.g.passes != 1 || o.g.pattern != XG_SEQ ||
+        o.g.seed != 1 || o.file_offset || xg_blocks(&o.g) > 4096 || o.timeout_ms > 10000))
+        return XG_EXIT_USAGE;
+
+#if E3_REQUEST_QUALIFICATION
+    if (!o.request_log || xg_blocks(&o.g) != 32)
+        return XG_EXIT_USAGE;
+#endif
     return XG_EXIT_PASS;
 }
 
@@ -195,9 +211,15 @@ struct Slot {
     enum State { FREE, NVME, COPY, READY } state = FREE;
 };
 
+struct RequestRow {
+    uint64_t pos = 0, block = 0, slba = 0, slot = 0, stream = 0;
+    uint64_t t0_ns = 0, nvme_cqe_ns = 0, retired_ns = 0, bytes = 0;
+    unsigned status = 0;
+};
+
 struct Run {
     Options o;
-    int fd = -1;
+    int fd = -1, fd_before = -1;
     io_uring ring{};
     bool ring_ok = false, files_ok = false, bufs_ok = false;
     unsigned char *host = nullptr;     /* 2*qd slots, one allocation */
@@ -210,6 +232,8 @@ struct Run {
     unsigned char *check = nullptr;    /* oracle buffer of check_bytes */
     uint64_t check_bytes = 0;
     uint64_t nvme_ns = 0, copy_ns = 0;
+    std::vector<RequestRow> rows; /* separate from Slot.started and its reuse */
+    uint64_t drain_ns = 0, setup_ns = 0, seed_ns = 0;
 
     bool close()
     {
@@ -300,6 +324,58 @@ int wait_oldest(Run &r, uint64_t deadline)
     return ret == -ETIME ? -ETIMEDOUT : ret;
 }
 
+bool device_copy(Run &r, bool to_device, uint64_t off, uint64_t n);
+
+/* Observation only: no extra credits, queue operations or copy in measurement. */
+bool request_begin(Run &r, const Slot &s, unsigned i)
+{
+    auto &row = r.rows[s.pos];
+    if (row.t0_ns) return false;
+    row.pos = s.pos; row.block = s.block; row.slba = s.block * (r.o.g.size / 512);
+    row.slot = i; row.stream = i % r.streams.size(); row.t0_ns = now_ns();
+    return row.t0_ns != 0;
+}
+
+bool request_retire(Run &r, const Slot &s, unsigned i)
+{
+    auto &row = r.rows[s.pos];
+    row.retired_ns = now_ns();
+    if (row.status || row.slot != i || row.block != s.block || !row.t0_ns ||
+        row.nvme_cqe_ns < row.t0_ns || row.retired_ns <= row.nvme_cqe_ns) return false;
+    row.bytes = r.o.g.size; row.status = 1;
+#if E3_REQUEST_QUALIFICATION
+    if (!device_copy(r, false, 0, r.o.g.size) ||
+        xg_compare(r.check, s.pos * r.o.g.size, r.o.g.size, r.o.g.seed) >= 0) return false;
+#endif
+    return true;
+}
+
+int request_export(const Run &r)
+{
+    int fd = ::open(r.o.request_log, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+    if (fd < 0) return XG_EXIT_FAIL;
+    FILE *f = fdopen(fd, "w");
+    if (!f) { ::close(fd); unlink(r.o.request_log); return XG_EXIT_FAIL; }
+    bool bad = std::fprintf(f, "# E3_REQUEST_DIAGNOSTIC arm=uring-cuda profile=%s clock=CLOCK_MONOTONIC size=4096 qd=1 n=%zu drain_ns=%llu setup_ns=%llu seed_ns=%llu final_oracle_bytes=4096\n",
+        E3_REQUEST_QUALIFICATION ? "qualification-only" : "measurement", r.rows.size(),
+        (unsigned long long)r.drain_ns, (unsigned long long)r.setup_ns, (unsigned long long)r.seed_ns) < 0;
+    if (std::fprintf(f, "pos,block,slba,slot,stream,t0_ns,nvme_cqe_ns,retired_ns,bytes,status\n") < 0) bad = true;
+    for (const auto &row : r.rows) {
+        if (row.status != 1 || !row.t0_ns || row.nvme_cqe_ns < row.t0_ns ||
+            row.retired_ns <= row.nvme_cqe_ns || row.bytes != r.o.g.size) bad = true;
+        if (std::fprintf(f, "%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu,%u\n",
+#define B_U(v) (unsigned long long)(v)
+            B_U(row.pos), B_U(row.block), B_U(row.slba), B_U(row.slot), B_U(row.stream),
+            B_U(row.t0_ns), B_U(row.nvme_cqe_ns), B_U(row.retired_ns), B_U(row.bytes), row.status) < 0) bad = true;
+#undef B_U
+    }
+    if (std::fclose(f)) bad = true;
+    if (bad) { unlink(r.o.request_log); return XG_EXIT_FAIL; }
+    std::printf("E3_REQUEST_DIAGNOSTIC=PASS arm=uring-cuda profile=%s rows=%zu final_oracle_bytes=4096\n",
+        E3_REQUEST_QUALIFICATION ? "qualification-only" : "measurement", r.rows.size());
+    return std::fflush(stdout) ? XG_EXIT_FAIL : XG_EXIT_PASS;
+}
+
 /*
  * One pass over the window.  load: FREE -> NVME (read) -> COPY (H2D) -> FREE;
  * save: FREE -> COPY (D2H) -> READY -> NVME (write) -> FREE.  At most qd NVMe
@@ -327,6 +403,7 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
             if (gate) r.dev_busy[xg_ring_slot(&r.o.g, s.pos)] = 1;
             progress = true;
             if (load) {
+                if (r.o.request_log && !request_begin(r, s, i)) return -EPROTO;
                 if (submit_nvme(r, i)) return -EBUSY;
                 nvme_inflight++;
                 pending_sqes++;
@@ -344,6 +421,7 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
                 r.copy_ns += now_ns() - s.started;
                 progress = true;
                 if (load) {
+                    if (r.o.request_log && !request_retire(r, s, i)) return -EPROTO;
                     if (gate) r.dev_busy[xg_ring_slot(&r.o.g, s.pos)] = 0;
                     s.state = Slot::FREE;
                     retired++;
@@ -373,6 +451,12 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
                 std::fprintf(stderr, "NVMe I/O of block %llu returned %d\n",
                              (unsigned long long)r.slots[i].block, res);
                 return res < 0 ? res : -EIO;
+            }
+            if (r.o.request_log) {
+                auto &row = r.rows[r.slots[i].pos];
+                if (row.nvme_cqe_ns || row.status) return -EPROTO;
+                row.nvme_cqe_ns = now_ns();
+                if (!row.nvme_cqe_ns || row.nvme_cqe_ns < row.t0_ns) return -EIO;
             }
             nvme_inflight--;
             progress = true;
@@ -473,11 +557,14 @@ int verify_window(Run &r, uint64_t p)
 
 int execute(Run &r)
 {
+    uint64_t setup_start = r.o.request_log ? now_ns() : 0;
     const Options &o = r.o;
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count < 1)
         return skip("no CUDA device available");
     if (!cuda_ok(cudaSetDevice(0), "select device")) return XG_EXIT_FAIL;
+    /* Runtime-owned descriptors precede the diagnostic resource baseline. */
+    if (o.request_log && (r.fd_before = eval_fd_count()) < 0) return XG_EXIT_FAIL;
 
     r.fd = ::open(o.file, O_RDWR | O_DIRECT | O_CLOEXEC);
     struct stat st{};
@@ -521,6 +608,13 @@ int execute(Run &r)
     r.check_bytes = o.g.window < kCheckChunk ? o.g.window : kCheckChunk / o.g.size * o.g.size;
     if (posix_memalign(reinterpret_cast<void **>(&r.check), 4096, r.check_bytes))
         return XG_EXIT_FAIL;
+    if (o.request_log) {
+        r.rows.resize(xg_blocks(&o.g));
+        uint64_t end = now_ns();
+        if (!setup_start || end <= setup_start) return XG_EXIT_FAIL;
+        r.setup_ns = end - setup_start;
+    }
+    uint64_t seed_start = o.request_log ? now_ns() : 0;
     /* The source holds the payload once; every pass reads the same bytes. */
     if (fill_window(r, o.direction == XG_SAVE, o.g.seed)) return XG_EXIT_FAIL;
 
@@ -529,6 +623,11 @@ int execute(Run &r)
         uint64_t span = 0;
         /* The destination starts every pass as the complemented-seed sentinel. */
         if (fill_window(r, o.direction == XG_LOAD, ~o.g.seed)) return XG_EXIT_FAIL;
+        if (o.request_log) {
+            uint64_t end = now_ns();
+            if (!seed_start || end <= seed_start) return XG_EXIT_FAIL;
+            r.seed_ns = end - seed_start;
+        }
         uint64_t c0 = cpu_us(), b0 = xg_host_busy_us();
         ret = pass(r, p, span);
         cpu += cpu_us() - c0;
@@ -537,12 +636,18 @@ int execute(Run &r)
             std::fprintf(stderr, "pass %llu: %s\n", (unsigned long long)p, std::strerror(-ret));
             return XG_EXIT_FAIL;
         }
-        if (!cuda_ok(cudaDeviceSynchronize(), "drain") || verify_window(r, p)) return XG_EXIT_FAIL;
+        if (!cuda_ok(cudaDeviceSynchronize(), "drain")) return XG_EXIT_FAIL;
+        if (o.request_log) {
+            r.drain_ns = now_ns();
+            if (!r.drain_ns || r.drain_ns < r.rows.back().retired_ns) return XG_EXIT_FAIL;
+        }
+        if (verify_window(r, p)) return XG_EXIT_FAIL;
         io_ns += span;
         verified += o.ring && o.direction == XG_LOAD ? r.dev_bytes : o.g.window;
     }
     const uint64_t nvme_ns = r.nvme_ns, copy_ns = r.copy_ns;
     if (!r.close()) return XG_EXIT_FAIL;
+    if (o.request_log) return XG_EXIT_PASS;
     std::printf("{\"schema_version\":1,\"arm\":\"uring-cuda\",\"direction\":\"%s\","
         "\"route\":\"%s\",\"execution\":\"physical-cuda\",\"performance_claim\":\"physical\","
         "\"destination\":\"%s\",\"completion_wait\":\"%s\","
@@ -592,6 +697,10 @@ int main(int argc, char **argv)
         cpu_error = cpu_timer_publish(&endpoint_timer);
         if (cpu_error)
             std::fprintf(stderr, "XDEV_EXT_CPU_TIMER_REFUSED phase=publish code=%d\n", cpu_error);
+    }
+    if (r.o.request_log) {
+        if (eval_fd_check(r.fd_before)) ret = XG_EXIT_FAIL;
+        if (ret == XG_EXIT_PASS) ret = request_export(r);
     }
     return ret;
 }
