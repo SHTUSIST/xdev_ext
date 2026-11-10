@@ -130,6 +130,7 @@ def extract_runtime(root,out,mech,generated):
         for suffix in (['lease_bind','lease_bind_ready','lease_get','batch_release','lease_cleanup_begin','lease_unbind'] if cls=='ce' else ['lease_bind','lease_get','batch_release','lease_unbind','lease_cleanup','lease_busy']):
             generated.append(block(text,'xdev_ext_'+cls+'_'+suffix))
     generated.append('#include "boundary_impl.h"\n')
+    generated.append(block((root/CE).read_text(),'xdev_ext_ce_progress_kick'))
     # Keep every actual common function body, including registry, completion,
     # polling and cleanup, in the compiled TU. Only kernel include directives
     # are replaced with the real extracted declarations plus OS boundaries.

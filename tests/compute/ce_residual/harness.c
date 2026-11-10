@@ -81,6 +81,7 @@ static int xdev_ext_mech_batch_frame_claim(const struct xdev_ext_mech_batch*b,u3
 static bool xdev_ext_mech_batch_ce_owners_valid(const struct xdev_ext_mech_batch*b,u64 t,const struct xdev_ext_ce_xfer*x,u32 n){return t==b->ticket;}
 static int xdev_ext_mech_batch_completion_claim(struct xdev_ext_mech_batch*b,u64 t){return t==b->ticket?0:-ESTALE;}
 static void xdev_ext_mech_batch_completion_publish(struct xdev_ext_mech_batch*b,u64 t,int e,bool q){}
+static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st){(void)st;}
 #include "actual-ce.c"
 #ifdef IO_URING_XDEV_EXT_COMPFAM_COPY_LEASE_H
 #define xdev_ext_ce_lease_lock xdev_ext_ce_lease_domain.lock
@@ -110,18 +111,18 @@ static int forged,zero_len,hook_kind,hook_seen,hook_expected,hook_before_native;
 static struct xdev_ext_mech_stage *hook_stage;static struct xdev_ext_mech_batch *hook_batch;
 static void nested_hook(int kind){if(kind!=hook_kind)return;hook_seen++;int before=native_calls;int r=xdev_ext_ce_submit(hook_stage,hook_batch);printf("observe %s hook=%d B_errno=%d native_delta=%d\n",case_name,kind,r,native_calls-before);CHECK(r==hook_expected,"nested B admission errno");CHECK(native_calls==before,"nested B no native submit");hook_before_native=before;if(r==0)xdev_ext_ce_complete((void*)hook_batch->cookie,hook_batch->ticket,0,true,64);}
 static int native_bind(struct file*f,u64 start,u64 len,struct xdev_ext_ce_region*r){CHECK(!xdev_ext_ce_lease_lock.locked&&!CE_REGISTRY_LOCK.locked,"bind outside locks");bind_calls++;native_entered=1;r->priv=(void*)(uintptr_t)(f->id+1);r->len=zero_len?0:len;if(forged)r->ops=forged==2?NULL:&ops_b;nested_hook(1);return bind_errno;}
-static int native_host(struct xdev_ext_ce_region*r,struct page**p,u32 n,void**h){host_calls++;*h=r->priv;return host_errno;}
+static int native_host(struct xdev_ext_ce_region*r,struct page**p,u32 n,void(*kick)(void*),void*arg,void**h){host_calls++;*h=r->priv;return host_errno;}
 static int native_unhost(void*h){CHECK(!xdev_ext_ce_lease_lock.locked&&!CE_REGISTRY_LOCK.locked,"host unmap outside locks");CHECK(module_a.refs+module_b.refs>0,"host unmap with module pin");unhost_calls++;nested_hook(2);return unhost_errno;}
 static int native_unregion(struct xdev_ext_ce_region*r){CHECK(!xdev_ext_ce_lease_lock.locked&&!CE_REGISTRY_LOCK.locked,"region unmap outside locks");CHECK(module_a.refs+module_b.refs>0,"region unmap with module pin");CHECK(CE_STATE(container_of(r,struct xdev_ext_ce_stage,region)).host==NULL,"host clears before region unmap");unregion_calls++;nested_hook(3);return unregion_errno;}
 static int native_submit(struct xdev_ext_ce_region*r,void*h,u32 d,const struct xdev_ext_ce_xfer*x,u32 n,struct xdev_ext_ce_cookie*ck,u64 t){CHECK(n==1&&x[0].len==64&&x[0].owner==91&&x[0].generation==92,"literal typed native transfer");native_calls++;return 0;}
-static const struct xdev_ext_ce_backend_ops ops_a={&module_a,&fops_a,native_bind,native_unregion,native_host,native_unhost,native_submit};
-static const struct xdev_ext_ce_backend_ops ops_b={&module_b,&fops_b,native_bind,native_unregion,native_host,native_unhost,native_submit};
+static const struct xdev_ext_ce_backend_ops ops_a={.owner=&module_a,.fops=&fops_a,.bind_region=native_bind,.unbind_region=native_unregion,.bind_host=native_host,.unbind_host=native_unhost,.submit=native_submit,.progress=NULL};
+static const struct xdev_ext_ce_backend_ops ops_b={.owner=&module_b,.fops=&fops_b,.bind_region=native_bind,.unbind_region=native_unregion,.bind_host=native_host,.unbind_host=native_unhost,.submit=native_submit,.progress=NULL};
 static const struct xdev_ext_mech_class_ops class_ops={xdev_ext_ce_unbind};
 static void reset(void){INIT_LIST_HEAD(&xdev_ext_ce_lease_groups);memset(xdev_ext_ce_backends,0,sizeof(xdev_ext_ce_backends));
 #if CE_SHARED_RUNTIME
 INIT_LIST_HEAD(&xdev_ext_ce_registry.members);
 #endif
-module_a=(struct module){0};module_b=(struct module){0};bind_errno=host_errno=unhost_errno=unregion_errno=native_calls=bind_calls=host_calls=unhost_calls=unregion_calls=0;forged=zero_len=hook_kind=hook_seen=0;hook_stage=NULL;alloc_calls=fail_alloc_at=native_entered=late_allocs=0;CHECK(!xdev_ext_ce_backend_register(&ops_a),"register actual backend A");CHECK(!xdev_ext_ce_backend_register(&ops_b),"register actual backend B");}
+module_a=(struct module){0};module_b=(struct module){0};bind_errno=host_errno=unhost_errno=unregion_errno=native_calls=bind_calls=host_calls=unhost_calls=unregion_calls=0;forged=zero_len=hook_kind=hook_seen=0;hook_stage=NULL;alloc_calls=fail_alloc_at=native_entered=late_allocs=0;CHECK(!xdev_ext_ce_backend_register_v2(&ops_a,sizeof(ops_a)),"register actual backend A");CHECK(!xdev_ext_ce_backend_register_v2(&ops_b,sizeof(ops_b)),"register actual backend B");}
 static void init(struct fixture*f,int ops){memset(f,0,sizeof(*f));f->pages[0]=&f->page;f->s=(struct xdev_ext_mech_session){.pool={f->pages,1,0,64,1},.layout={.group_bytes=64},.depth=2,.st=f->st};for(int i=0;i<4;i++){f->file[i]=(struct file){ops?&fops_b:&fops_a,i};f->st[i]=(struct xdev_ext_mech_stage){&f->s,&f->file[i],NULL,XDEV_EXT_MECH_DIR_TO_DEVICE,0,&class_ops};}}
 static int bind_stage(struct fixture*f,int i,u64 start){struct xdev_ext_mech_stage_uapi u={.arg0=start,.arg1=256};native_entered=0;int r=xdev_ext_ce_bind(&f->st[i],&u);native_entered=0;if(!r||f->st[i].priv)f->s.nr_bound++;return r;}
 static void batch_init(struct xdev_ext_mech_batch*b,u64 id,u32 slot){memset(b,0,sizeof(*b));b->id=id;b->ticket=id+100;b->slot=slot;}

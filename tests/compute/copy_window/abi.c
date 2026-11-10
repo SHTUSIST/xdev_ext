@@ -15,7 +15,7 @@ static void abi(void) {
 #define XFER(t,dev) TYPE(t); FIELD(t,owner); FIELD(t,generation); FIELD(t,host_byte_off); FIELD(t,dev); FIELD(t,len); FIELD(t,flags)
  XFER(xdev_ext_ce_xfer,gpu_off); XFER(xdev_ext_dma_xfer,device_off);
 #define OPS(t) TYPE(t); FIELD(t,owner); FIELD(t,fops); FIELD(t,bind_region); FIELD(t,unbind_region); FIELD(t,bind_host); FIELD(t,unbind_host); FIELD(t,submit)
- OPS(xdev_ext_ce_backend_ops); OPS(xdev_ext_dma_provider_ops); FIELD(xdev_ext_dma_provider_ops,poll);
+ OPS(xdev_ext_ce_backend_ops); FIELD(xdev_ext_ce_backend_ops,progress); OPS(xdev_ext_dma_provider_ops); FIELD(xdev_ext_dma_provider_ops,poll);
 #define BPFOPS(t) TYPE(t); FIELD(t,abi_version); FIELD(t,flags); FIELD(t,prepare); FIELD(t,build); FIELD(t,complete); FIELD(t,compute)
  BPFOPS(xdev_ext_ce_mech_ops); BPFOPS(xdev_ext_dma_mech_ops);
  printf("ABI versions=%u,%u,%u class=%u,%u\n",XDEV_EXT_MECH_ABI_VERSION,XDEV_EXT_CE_MECH_ABI_VERSION,XDEV_EXT_DMA_MECH_ABI_VERSION,XDEV_EXT_MECH_CLASS_CE,XDEV_EXT_MECH_CLASS_DMA);

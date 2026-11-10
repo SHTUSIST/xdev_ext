@@ -768,9 +768,12 @@ struct xdev_ext_ce_backend_ops {
 			    struct xdev_ext_ce_region *out);
 	/* process context, may sleep; never after an AMBIGUOUS outcome */
 	int  (*unbind_region)(struct xdev_ext_ce_region *r);
-	/* CREATE, process context: pool pages, already pinned by their UMEM */
+	/* CREATE, process context: pool pages, already pinned by their UMEM.
+	 * Copy kick/arg before enabling a producer. kick is any-context,
+	 * enqueue-only; arg stays live through producer disconnect in unbind.
+	 * Accepted work must keep notifying throughout STOPPING. */
 	int  (*bind_host)(struct xdev_ext_ce_region *r, struct page **pages, u32 nr,
-			  void **host);
+			  void (*kick)(void *arg), void *arg, void **host);
 	/* process context */
 	int  (*unbind_host)(void *host);
 	/* session worker, may sleep; dir is enum xdev_ext_mech_dir. Retain ticket
@@ -778,12 +781,18 @@ struct xdev_ext_ce_backend_ops {
 	int  (*submit)(struct xdev_ext_ce_region *r, void *host, u32 dir,
 		       const struct xdev_ext_ce_xfer *x, u32 n,
 		       struct xdev_ext_ce_cookie *ck, u64 ticket);
+	/* Optional bounded pass on the session worker, may sleep. Never run
+	 * concurrently with another pass or with checked unbind. */
+	void (*progress)(void *host);
 };
 
-/* Module init, process context: -EBUSY if ops->fops is already registered. */
-int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *ops);
+/* Module init, process context: -EBUSY if ops->fops is already registered.
+ * v2 rejects a wrong ops_size before reading ops. Old exports are absent:
+ * changed bind_host/progress ABI must not resolve against an old module. */
+int xdev_ext_ce_backend_register_v2(const struct xdev_ext_ce_backend_ops *ops,
+				   size_t ops_size);
 /* Module exit, process context; sessions pin ops->owner, so none is left. */
-void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops);
+void xdev_ext_ce_backend_unregister_v2(const struct xdev_ext_ce_backend_ops *ops);
 /*
  * Any context, once per accepted submit.  hw_submitted: GPPut or a doorbell
  * was written.  status 0 is OK; a failure is PRE_SUBMIT_FAILED without

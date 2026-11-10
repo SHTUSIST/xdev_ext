@@ -286,6 +286,12 @@ bool xdev_ext_mech_batch_dma_owners_valid(const struct xdev_ext_mech_batch*,u64,
 static bool xdev_ext_mech_batch_copy_owner_valid(const struct xdev_ext_mech_batch*b,u64 owner,u64 generation,u64 host,u32 len){
     return b->owners_valid&&owner==21&&generation==55&&host==272&&len==128;
 }
+/* Core scheduler OS boundary: notify enqueues, never runs a CE hook inline. */
+static unsigned int core_kicks;
+static struct xdev_ext_mech_stage *last_kicked;
+static void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st) {
+    core_kicks++; last_kicked=st;
+}
 static int xdev_ext_mech_class_register(const struct xdev_ext_mech_class_ops*c){
     return 0;
 }

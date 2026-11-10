@@ -40,7 +40,7 @@ static char events[256];static unsigned evn;
 static void ev(char c){OK(evn<sizeof(events)-1);events[evn++]=c;events[evn]=0;}
 static void native_boundary(void){EQ(held,0);OK(native_mod.refs>0);}
 static int ce_br(struct file*f,u64 start,u64 len,struct xdev_ext_ce_region*r){native_boundary();binds++;ev('R');r->priv=r;r->len=len;r->seg_size=4096;r->max_entry_len=4096;return fail_region;}
-static int ce_bh(struct xdev_ext_ce_region*r,struct page**p,u32 n,void**h){native_boundary();hosts++;ev('H');*h=r;return fail_host;}
+static int ce_bh(struct xdev_ext_ce_region*r,struct page**p,u32 n,void(*kick)(void*),void*arg,void**h){native_boundary();hosts++;ev('H');*h=r;return fail_host;}
 static int ce_uh(void*h){native_boundary();unhosts++;ev('h');return fail_uh;}
 static int ce_ur(struct xdev_ext_ce_region*r){native_boundary();unregions++;ev('r');if(!fail_ur && watch_stage)watch_end=true;return fail_ur;}
 static int ce_sub(struct xdev_ext_ce_region*r,void*h,u32 dir,const struct xdev_ext_ce_xfer*x,u32 n,struct xdev_ext_ce_cookie*ck,u64 ticket){native_boundary();ev('S');submits++;EQ(n,1);EQ(x[0].owner,17);EQ(x[0].generation,23);EQ(x[0].host_byte_off,0);EQ(x[0].gpu_off,0);EQ(x[0].len,64);EQ(ticket,9001);memcpy(device_payload+x[0].gpu_off,host_payload+x[0].host_byte_off,x[0].len);xdev_ext_ce_complete(ck,ticket,0,true,64);return 0;}
@@ -202,12 +202,15 @@ void __attribute__((no_instrument_function)) __cyg_profile_func_exit(void *fn,vo
 static void observe_common_lock(struct mutex*m){if(m==&xdev_ext_ce_registry.lock||m==&xdev_ext_dma_registry.lock)return;OK(shared_depth>0);OK(m==&ce_domain->lock||m==&dm_domain->lock);EQ(predicate_depth,0);}
 static void bootstrap_domains(void){struct xdev_ext_mech_session s;struct xdev_ext_mech_stage st;session(&s,2);stage(&st,&s);EQ(xdev_ext_ce_bind(&st,&u),0);ce_domain=((struct xdev_ext_ce_stage*)st.priv)->lease.domain;EQ(xdev_ext_ce_unbind(&st),0);stage(&st,&s);EQ(xdev_ext_dma_bind(&st,&u),0);dm_domain=((struct xdev_ext_dma_stage*)st.priv)->lease.domain;EQ(xdev_ext_dma_unbind(&st),0);OK(ce_domain!=dm_domain);OK(&ce_domain->lock!=&dm_domain->lock);OK(ce_domain->policy!=dm_domain->policy);}
 #endif
-int main(void){test_name="registry";EQ(xdev_ext_ce_backend_register(&ceops),0);EQ(xdev_ext_ce_backend_register(&ceops2),0);EQ(xdev_ext_dma_provider_register(&dmops),0);
+int main(void){test_name="registry";EQ(xdev_ext_ce_backend_register_v2(&ceops,sizeof(ceops)),0);EQ(xdev_ext_ce_backend_register_v2(&ceops2,sizeof(ceops2)),0);EQ(xdev_ext_dma_provider_register(&dmops),0);
 #ifdef LEASE_SHARED
 bootstrap_domains();lock_observer=observe_common_lock;
 #endif
-unlock_observer=observe_unlock;free_observer=observe_free;ce_state_cases();ce_serial_cases();ce_scan_cases();ce_quarantine_cases();dma_keys_cases();dma_order_state();separate_domains();invalid_finish();live_cases(false);live_cases(true);rollback_cases(false);rollback_cases(true);scoped_lifetime();xdev_ext_ce_backend_unregister(&ceops);xdev_ext_ce_backend_unregister(&ceops2);xdev_ext_dma_provider_unregister(&dmops);EQ(held,0);EQ(native_mod.refs,0);
+unlock_observer=observe_unlock;free_observer=observe_free;ce_state_cases();ce_serial_cases();ce_scan_cases();ce_quarantine_cases();dma_keys_cases();dma_order_state();separate_domains();invalid_finish();live_cases(false);live_cases(true);rollback_cases(false);rollback_cases(true);scoped_lifetime();xdev_ext_ce_backend_unregister_v2(&ceops);xdev_ext_ce_backend_unregister_v2(&ceops2);xdev_ext_dma_provider_unregister(&dmops);EQ(held,0);EQ(native_mod.refs,0);
 #ifdef LEASE_SHARED
 for(unsigned i=0;i<7;i++)OK(shared_hits[i]>0);
 #endif
 printf("PASS independent lease assertions=%u allocations=%u frees=%u warnings=%u\n",checks,allocs,frees,warnings);return 0;}
+
+/* OS queue boundary only; this lease cohort supplies no progress consumer. */
+void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st) { (void)st; }

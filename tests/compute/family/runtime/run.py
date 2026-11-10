@@ -278,6 +278,17 @@ def main():
                         print('SETUP target-range ABI delta does not match frozen baseline');return 2
                     expected[0]=delta['after']
                     print('CE target-range private batch layout: 1296 -> 2576; all other observables frozen')
+                public=(a.source_root/'src/core/include/linux/xdev_ext_mech.h').read_text()
+                if 'xdev_ext_ce_backend_register_v2(' in public:
+                    # One additional internal ops function pointer on this frozen
+                    # 64-bit host ABI. UAPI/private batch/DMA observables stay exact;
+                    # the historical baseline file is never rewritten.
+                    before='ABI CE cookie=40 batch=2576 desc=24 info=568 cqe=24 ops=56; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64'
+                    after='ABI CE cookie=40 batch=2576 desc=24 info=568 cqe=24 ops=64; DMA cookie=40 batch=1296 desc=24 info=576 cqe=24 ops=64'
+                    if expected[0]!=before:
+                        print('SETUP v2 internal ops ABI delta has an unexpected base');return 2
+                    expected[0]=after
+                    print('CE v2 internal ops ABI: 56 -> 64; all other observables frozen')
                 for name,result in results.items():
                     actual=[line for line in pathlib.Path(result['log']).read_text().splitlines() if line.startswith(('OBS ','CQE ','ABI ','XFER '))]
                     same=actual==expected

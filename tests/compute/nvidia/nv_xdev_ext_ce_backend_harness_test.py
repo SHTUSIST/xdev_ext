@@ -116,6 +116,21 @@ class BackendHarness(unittest.TestCase):
                                 f"{variant} {case}\n{result.stdout[-3000:]}\n"
                                 f"{result.stderr[-3000:]}")
 
+    def test_irq_retirement_uses_only_the_session_worker(self):
+        self.run_cases(("irq-core-route",), ("event+iova", "event+phys"))
+
+    def test_core_worker_producers_and_unchanged_poll(self):
+        self.run_cases(("core-producers",))
+
+    def test_irq_during_publication_requeues_and_preserves_recycled_slot_scratch(self):
+        self.run_cases(("core-irq-during-pass",), ("event+iova", "event+phys"))
+
+    def test_core_worker_keeps_all_pending_deadlines(self):
+        self.run_cases(("core-deadlines",), ("event+iova", "event+phys"))
+
+    def test_core_notification_ready_before_native_bind(self):
+        self.run_cases(("bind-core-early", "bind-core-missing"), ("event+iova", "event+phys"))
+
     # G1 + exactly-once in both completion variants
     def test_g1_completion_exactly_once(self):
         self.run_cases(("complete-once", "complete-partial", "token-zero",

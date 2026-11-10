@@ -8,7 +8,7 @@ static bool native_clear_polled;
 static void event(int n) { assert(nevents<16); events[nevents++]=n; }
 static int ce_region(struct file *f,u64 off,u64 len,struct xdev_ext_ce_region *r) { event(1); r->len=len; r->seg_size=0; r->max_entry_len=4096; return region_error; }
 static int dma_region(struct file *f,u64 off,u64 len,struct xdev_ext_dma_region *r) { event(1); r->len=len; r->segment_size=0; r->max_entry_len=4096; r->alignment=native_alignment; r->directions=native_directions; if(native_clear_polled)r->polled=false; return region_error; }
-static int ce_host(struct xdev_ext_ce_region *r,struct page **p,u32 n,void **out) { event(2); *out=(void *)1; return host_error; }
+static int ce_host(struct xdev_ext_ce_region *r,struct page **p,u32 n,void (*kick)(void *),void *arg,void **out) { event(2); *out=(void *)1; return host_error; }
 static int dma_host(struct xdev_ext_dma_region *r,struct page **p,u32 n,void **out) { event(2); *out=(void *)1; return host_error; }
 #ifdef HAVE_RUNTIME
 static int native_unbind_host(void *host) { (void)host; return 0; }
@@ -78,3 +78,6 @@ static int traced_transfer(const struct xdev_ext_comp_copy_plan *p,u64 id,u32 sl
 #define xdev_ext_comp_copy_validate(...) traced_validate(__VA_ARGS__)
 #define xdev_ext_comp_copy_transfer(...) traced_transfer(__VA_ARGS__)
 #endif
+
+/* OS queue boundary; this admission fixture has no backend progress hook. */
+void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st) { (void)st; }

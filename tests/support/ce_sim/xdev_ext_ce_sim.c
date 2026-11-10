@@ -4,7 +4,7 @@
  *
  * Test infrastructure, kept apart from the real backend: the "device memory"
  * is a vmalloc window and the "copy engine" is memcpy() in a workqueue.  It
- * registers through xdev_ext_ce_backend_register() like the real driver, so CE
+ * registers through xdev_ext_ce_backend_register_v2() like the real driver, so CE
  * stages, plan validation, completion classification and sequestering run
  * unchanged.  The completion comes from the workqueue, or from an hrtimer
  * (non-process context) when delay_us is set.  fail_mode injects a failure
@@ -159,10 +159,13 @@ static int xdev_ext_ce_sim_unbind_region(struct xdev_ext_ce_region *r)
 }
 
 static int xdev_ext_ce_sim_bind_host(struct xdev_ext_ce_region *r, struct page **pages,
-				u32 nr, void **host)
+				u32 nr, void (*kick)(void *arg), void *arg, void **host)
 {
 	struct xdev_ext_ce_sim_host *h = kzalloc(sizeof(*h), GFP_KERNEL);
 
+	/* This simulator retains its original independent async completion. */
+	(void)kick;
+	(void)arg;
 	if (!h)
 		return -ENOMEM;
 	h->vaddr = vmap(pages, nr, VM_MAP, PAGE_KERNEL);
@@ -357,6 +360,7 @@ static const struct xdev_ext_ce_backend_ops xdev_ext_ce_sim_backend = {
 	.bind_host	= xdev_ext_ce_sim_bind_host,
 	.unbind_host	= xdev_ext_ce_sim_unbind_host,
 	.submit		= xdev_ext_ce_sim_submit,
+	.progress	= NULL,
 };
 
 static int __init xdev_ext_ce_sim_init(void)
@@ -376,7 +380,7 @@ static int __init xdev_ext_ce_sim_init(void)
 	err = misc_register(&xdev_ext_ce_sim_dev);
 	if (err)
 		goto free_wq;
-	err = xdev_ext_ce_backend_register(&xdev_ext_ce_sim_backend);
+	err = xdev_ext_ce_backend_register_v2(&xdev_ext_ce_sim_backend, sizeof(xdev_ext_ce_sim_backend));
 	if (err)
 		goto deregister;
 	return 0;
@@ -398,7 +402,7 @@ free_window:
  */
 static void __exit xdev_ext_ce_sim_exit(void)
 {
-	xdev_ext_ce_backend_unregister(&xdev_ext_ce_sim_backend);
+	xdev_ext_ce_backend_unregister_v2(&xdev_ext_ce_sim_backend);
 	misc_deregister(&xdev_ext_ce_sim_dev);
 	destroy_workqueue(xdev_ext_ce_sim_wq);
 	synchronize_rcu();

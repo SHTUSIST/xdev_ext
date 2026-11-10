@@ -84,10 +84,15 @@ class CeClassSourceTest(unittest.TestCase):
                          r"(?m)^obj-\$\(CONFIG_XDEV_EXT_MECH_CE\)\s*\+= xdev_ext_mech_ce\.o$")
 
     def test_module_entry_points_are_gpl_exports(self):
-        for name in ("xdev_ext_ce_backend_register", "xdev_ext_ce_backend_unregister",
+        for name in ("xdev_ext_ce_backend_register_v2", "xdev_ext_ce_backend_unregister_v2",
                      "xdev_ext_ce_complete"):
             self.assertIn(f"EXPORT_SYMBOL_GPL({name});", self.text)
         self.assertNotRegex(self.text, r"EXPORT_SYMBOL\(")
+
+    def test_changed_backend_abi_has_no_legacy_registration_entry(self):
+        self.assertNotRegex(self.text, r'\bxdev_ext_ce_backend_(?:register|unregister)\s*\(')
+        header=(ROOT / 'src/core/include/linux/xdev_ext_mech.h').read_text()
+        self.assertNotRegex(header, r'\bxdev_ext_ce_backend_(?:register|unregister)\s*\(')
 
     def test_class_has_no_silent_c_plan(self):
         table = re.search(r"struct xdev_ext_mech_class_ops xdev_ext_ce_class = {(.*?)};",
@@ -337,9 +342,9 @@ class CeSimulateTest(unittest.TestCase):
         self.assertIn(".fops\t\t= &xdev_ext_ce_sim_fops,", table.group(1))
         ordered(self, body(self.sim, "xdev_ext_ce_sim_init"), "vzalloc(",
                 "alloc_workqueue(", "misc_register(",
-                "xdev_ext_ce_backend_register(&xdev_ext_ce_sim_backend)")
+                "xdev_ext_ce_backend_register_v2(&xdev_ext_ce_sim_backend, sizeof(xdev_ext_ce_sim_backend))")
         ordered(self, body(self.sim, "xdev_ext_ce_sim_exit"),
-                "xdev_ext_ce_backend_unregister(&xdev_ext_ce_sim_backend)",
+                "xdev_ext_ce_backend_unregister_v2(&xdev_ext_ce_sim_backend)",
                 "misc_deregister(", "destroy_workqueue(", "synchronize_rcu(",
                 "vfree(")
 

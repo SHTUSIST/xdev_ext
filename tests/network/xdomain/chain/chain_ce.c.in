@@ -118,7 +118,7 @@ int chain_ce_init_class(void)
 	if (!xdev_ext_ce_sim_window)
 		return -ENOMEM;
 	chain_ce_poison(CHAIN_CE_POISON);
-	err = xdev_ext_ce_backend_register(&chain_ce_backend);
+	err = xdev_ext_ce_backend_register_v2(&chain_ce_backend, sizeof(chain_ce_backend));
 	return err ? err : xdev_ext_mech_ce_init();
 }
 struct file *chain_ce_file(void) { return &chain_ce_handle; }

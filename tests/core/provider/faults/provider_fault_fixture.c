@@ -146,8 +146,8 @@ static void kthread_queue_work(struct kthread_worker *w,struct kthread_work *wor
 }
 static void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *w) {(void)w;}
 static void kthread_destroy_worker(struct kthread_worker *w) {(void)w;destroyed_workers++;}
-/* These legacy callers pass NULL; report capture must stay unreachable. */
-static void kthread_flush_worker(struct kthread_worker *w) {(void)w;assert(!"unexpected report capture on legacy STOP");}
+/* Final release flushes worker users independently of report capture. */
+static void kthread_flush_worker(struct kthread_worker *w) {(void)w;}
 static void timer_shutdown_sync(struct timer_list *t) {(void)t;}
 static void (*wait_hook)(void);
 #define wait_event_timeout(w,c,t) do {(void)(w);(void)(t);if(!(c)&&wait_hook)wait_hook();(void)(c);}while(0)
@@ -162,6 +162,9 @@ struct xdev_ext_dma_cookie;
 struct xdev_ext_ce_cookie;
 struct xdev_ext_dma_provider_ops;
 /* PRODUCTION_STRUCTURES */
+/* Only an enqueue boundary here; teardown_test substitutes the actual core
+ * kick/worker bodies when proving the progress consumer lifetime. */
+void xdev_ext_mech_stage_kick(struct xdev_ext_mech_stage *st) {(void)st;queued_work++;}
 /* PRODUCTION_COPY_DECLS */
 
 static LIST_HEAD(xdev_ext_mech_quarantined);
@@ -538,6 +541,43 @@ static int ce_native_submit(struct xdev_ext_ce_region *r,void *host,u32 dir,
  ce_pending_cookie=cookie;ce_pending_ticket=ticket;return 0;
 }
 static const struct xdev_ext_ce_backend_ops ce_native_ops={.submit=ce_native_submit};
+
+#if FIXTURE_CE_ABI_V2
+static void *ce_notify_arg;
+static unsigned ce_notify_calls;
+static void ce_test_kick(void *arg) {assert(arg==ce_notify_arg);ce_notify_calls++;}
+static int ce_test_bind_region(struct file *f,u64 off,u64 len,struct xdev_ext_ce_region *r) {
+ (void)f;(void)off;r->len=len;return 0;
+}
+static int ce_test_unbind_region(struct xdev_ext_ce_region *r) {(void)r;return 0;}
+static int ce_test_bind_host(struct xdev_ext_ce_region *r,struct page **p,u32 n,
+                             void (*kick)(void *),void *arg,void **host) {
+ (void)r;assert(p==pages&&n==2);assert(kick==ce_test_kick&&arg==ce_notify_arg);
+ *host=arg;kick(arg);return 0;
+}
+static int ce_test_unbind_host(void *host) {assert(host==ce_notify_arg);return 0;}
+static int test_ce_v2_boundary(void) {
+ struct xdev_ext_ce_backend_ops ops={.owner=&owner,.fops=&fops,
+  .bind_region=ce_test_bind_region,.unbind_region=ce_test_unbind_region,
+  .bind_host=ce_test_bind_host,.unbind_host=ce_test_unbind_host,.submit=ce_native_submit,
+  .progress=NULL};
+ struct xdev_ext_ce_region region={0};void *host=NULL;int context;
+ ce_notify_arg=&context;
+ EQ(xdev_ext_ce_backend_register_v2(&ops,sizeof(ops)-1),-EINVAL,"v2 rejects short ops before use");
+ EQ(xdev_ext_ce_backend_register_v2(NULL,sizeof(ops)),-EINVAL,"v2 rejects NULL ops");
+ EQ(xdev_ext_ce_backend_register_v2(&ops,sizeof(ops)),0,"optional NULL progress simulator registers");
+ EQ(xdev_ext_ce_backend_get(&device),&ops,"exact registry identity and module pin");
+ EQ(owner.refs,1,"v2 lookup pins module");
+ EQ(ops.bind_host(&region,pages,2,ce_test_kick,&context,&host),0,"typed six argument bind boundary");
+ EQ(host,&context,"bind returns host independently of callback context");
+ EQ(ce_notify_calls,1,"bind early kick retains supplied stable context");
+ xdev_ext_ce_backend_unregister_v2(&ops);
+ EQ(xdev_ext_ce_backend_get(&device),NULL,"unregistered backend not newly discoverable");
+ EQ(owner.refs,1,"unregister preserves existing user module pin");
+ EQ(ops.unbind_host(host),0,"native host boundary releases");
+ module_put(&owner);EQ(owner.refs,0,"existing user finally drops pin");return 0;
+}
+#endif
 static const struct xdev_ext_mech_class_ops ce_test_class={.class_id=XDEV_EXT_MECH_CLASS_CE,
  .decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_CE],.submit=xdev_ext_ce_submit,
 #if FIXTURE_CE_CONFIGURED_EXCLUSION
@@ -787,6 +827,9 @@ int main(int argc,char **argv) {
  else if(!strcmp(m,"region_unmap_retention"))bad=test_unmap_retention(true);
  else if(!strcmp(m,"registry"))bad=test_registry();
  else if(!strcmp(m,"registry_capacity"))bad=test_registry_capacity();
+#if FIXTURE_CE_ABI_V2
+ else if(!strcmp(m,"ce_v2_boundary"))bad=test_ce_v2_boundary();
+#endif
  else if(!strcmp(m,"bind_rollback"))bad=test_bind_rollback();
  else if(!strcmp(m,"directions_and_bounds"))bad=test_directions_and_bounds();
  else if(!strcmp(m,"preaccept_eagain"))bad=test_preaccept();

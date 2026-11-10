@@ -137,7 +137,7 @@ static struct harness {
 	unsigned int rm_bind, rm_unbind, rm_submit, rm_progress;
 	NV_STATUS rm_bind_status, rm_unbind_status, rm_progress_status;
 	NV_STATUS submit_status;
-	int submit_issued, submit_zero_token, fire_in_submit, fire_in_unbind;
+	int submit_issued, submit_zero_token, fire_in_submit, fire_in_unbind, fire_in_bind;
 	u64 rm_last, rm_completed;
 	u64 bound_addrs[MAX_PAGES];
 	u32 bound_count, bound_page_size;
@@ -532,6 +532,8 @@ static int hrtimer_cancel(struct hrtimer *t)
 
 /* Run what is due once; hrtimers fire regardless of time (microsecond scale),
  * jiffies timers and delayed work only once expired. */
+static unsigned int core_pump(void);
+
 static unsigned int run_deferred_once(void)
 {
 	unsigned int i, ran = 0;
@@ -595,6 +597,7 @@ static unsigned int run_deferred_once(void)
 			ran++;
 		}
 	}
+	ran += core_pump();
 	return ran;
 }
 static void run_deferred(unsigned int rounds)
@@ -898,6 +901,11 @@ static NV_STATUS nv_p2p_ce_host_bind(nv_p2p_vidmem_binding_t *b, NvU64 *addrs,
 #if HARNESS_EVENT_API
 	H.event_fn = event;
 	H.event_arg = event_arg;
+	if (H.fire_in_bind && event) {
+		tls_atomic_depth++;
+		event(event_arg, 0);
+		tls_atomic_depth--;
+	}
 #endif
 	*out = &harness_rm_host;
 	return NV_OK;
@@ -1027,10 +1035,11 @@ static bool xdev_ext_ce_owners_valid(struct xdev_ext_ce_cookie *ck, u64 ticket,
 	return valid;
 }
 static const struct xdev_ext_ce_backend_ops *registered_ops;
-static int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *ops)
-{ registered_ops = ops; return 0; }
-static void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops)
+static int xdev_ext_ce_backend_register_v2(const struct xdev_ext_ce_backend_ops *ops, size_t ops_size)
+{ CHECK(ops_size == sizeof(*ops), "v2 register passed the wrong ops size"); registered_ops = ops; return 0; }
+static void xdev_ext_ce_backend_unregister_v2(const struct xdev_ext_ce_backend_ops *ops)
 { (void)ops; registered_ops = NULL; }
+static void (*completion_hook)(u64 ticket);
 static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
 				 bool hw_submitted, u64 bytes_done)
 {
@@ -1051,6 +1060,7 @@ static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int 
 	memcpy(c->synced_cpu, H.synced_cpu, sizeof(c->synced_cpu));
 	__atomic_add_fetch(&H.total_completions, 1, __ATOMIC_SEQ_CST);
 	pthread_mutex_unlock(&H.big);
+	if (completion_hook) completion_hook(ticket);
 }
 
 /* ------------------------------------------- the actual production body */
@@ -1067,11 +1077,44 @@ static const struct xdev_ext_ce_backend_ops *ops;
 static struct page *page_ptrs[MAX_PAGES];
 static struct xdev_ext_ce_cookie cookies[MAX_TICKETS];
 
-struct fixture { struct xdev_ext_ce_region r; void *host; };
+struct fixture { struct xdev_ext_ce_region r; void *host; int core_pending; unsigned int kicks, passes; };
+/* OS boundary: one session worker serializes the complete hook, not only h->lock. */
+static pthread_mutex_t core_worker_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct fixture *core_pending[MAX_DEFERRED];
+static void core_kick(void *arg)
+{
+    struct fixture *fx = arg;
+    pthread_mutex_lock(&deferred_lock);
+    fx->kicks++;
+    fx->core_pending = 1;
+    add_unique((void **)core_pending, fx);
+    pthread_mutex_unlock(&deferred_lock);
+}
+static unsigned int core_pump(void)
+{
+    unsigned int i, ran = 0;
+    pthread_mutex_lock(&core_worker_lock);
+    for (i = 0; i < MAX_DEFERRED; i++) {
+        struct fixture *fx;
+        pthread_mutex_lock(&deferred_lock);
+        fx = core_pending[i];
+        core_pending[i] = NULL;
+        if (fx) fx->core_pending = 0;
+        pthread_mutex_unlock(&deferred_lock);
+        if (fx && fx->host) {
+            fx->passes++;
+            ops->progress(fx->host);
+            ran++;
+        }
+    }
+    pthread_mutex_unlock(&core_worker_lock);
+    return ran;
+}
 
 static void harness_init(void)
 {
 	unsigned int i;
+	(void)system_unbound_wq; /* IRQ intentionally never queues this OS boundary. */
 	for (i = 0; i < MAX_PAGES; i++) {
 		host_pages[i].index = i;
 		page_ptrs[i] = &host_pages[i];
@@ -1099,7 +1142,7 @@ static int bind(struct fixture *fx, u32 nr)
 		printf("note: bind_region rc=%d\n", rc);
 		return rc;
 	}
-	rc = ops->bind_host(&fx->r, page_ptrs, nr, &fx->host);
+	rc = ops->bind_host(&fx->r, page_ptrs, nr, core_kick, fx, &fx->host);
 	if (rc)
 		printf("note: bind_host rc=%d with %s IOMMU domain%s\n", rc,
 		       H.translated ? "a translating" : "an identity",
@@ -1180,6 +1223,157 @@ static void case_bind_unbind_clean(void)
 	CHECK(H.dma_map == 0 && H.sg_alloc == 0, "PHYS build used the DMA API");
 #endif
 	common_checks();
+}
+
+/* Requirement: IRQ completion must use the session worker, never unbound work. */
+static void case_irq_core_route(void)
+{
+#if VARIANT_EVENT
+    struct fixture fx;
+    REQUIRE(bind(&fx, 4) == 0, "bind");
+    REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+    struct nv_xdev_ext_ce_host *h = fx.host;
+    CHECK(!h->progress.pending, "IRQ accepted submit queued an unbound retirement consumer");
+    fire_event(H.rm_last);
+    CHECK(!h->progress.pending, "IRQ event queued an unbound retirement consumer");
+    run_deferred(4);
+    CHECK(H.done[1].count == 1, "one actual retirement was not delivered");
+    ops->unbind_host(fx.host);
+    ops->unbind_region(&fx.r);
+    common_checks();
+#endif
+}
+
+static void case_core_producers(void)
+{
+    struct fixture fx;
+    REQUIRE(bind(&fx, 8) == 0, "bind");
+    REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+    struct nv_xdev_ext_ce_host *h = fx.host;
+#if VARIANT_EVENT
+    CHECK(fx.kicks == 1 && fx.core_pending, "accepted submit did not kick core");
+    core_pump();
+    CHECK(h->watchdog.armed && H.done[1].count == 0, "seed pass lost watchdog");
+    unsigned int before = fx.kicks;
+    /* Timer callback itself must only enqueue a sleepable consumer. */
+    tls_atomic_depth++;
+    nv_xdev_ext_ce_deadline(&h->watchdog);
+    tls_atomic_depth--;
+    CHECK(fx.kicks == before + 1 && !h->progress.pending, "deadline routed outside core");
+    core_pump();
+    before = fx.kicks;
+    H.submit_status = NV_ERR_INVALID_STATE; H.submit_issued = 1;
+    CHECK(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "ambiguous accepted");
+    CHECK(fx.kicks == before + 1 && !h->progress.pending, "ambiguous did not kick other pending");
+    CHECK(H.done[2].count == 1 && H.done[1].count == 0, "ambiguous changed other pending");
+    H.submit_status = NV_OK;
+    deliver(H.rm_last);
+    CHECK(H.done[1].count == 1 && H.done[2].count == 1, "other accepted work was stranded");
+#else
+    CHECK(fx.kicks == 0 && h->progress.pending, "POLL no longer uses original unbound work");
+    unsigned int before = H.rm_progress;
+    ops->progress(fx.host);
+    CHECK(H.rm_progress == before && H.done[1].count == 0, "POLL core hook consumed work");
+    deliver(H.rm_last);
+    CHECK(H.rm_progress > before && H.done[1].count == 1, "POLL original getter stopped");
+    ops->unbind_host(fx.host); ops->unbind_region(&fx.r);
+#endif
+    common_checks();
+}
+#if VARIANT_EVENT
+static struct fixture *in_pass_fixture;
+static void kick_from_completion(u64 ticket)
+{
+    if (ticket != 1) return;
+    /* A freed slot is reused while immutable callback scratch is still live. */
+    completion_hook = NULL;
+    CHECK(submit1(in_pass_fixture, 3, XDEV_EXT_MECH_DIR_TO_DEVICE, 8192, 4096) == 0,
+          "callback-time producer could not reuse freed slot");
+    fire_event(H.rm_last);
+}
+#endif
+static void case_core_irq_during_pass(void)
+{
+#if VARIANT_EVENT
+    struct fixture fx;
+    REQUIRE(bind(&fx, 8) == 0, "bind");
+    REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+    REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_FROM_DEVICE, 4096, 4096) == 0, "submit2");
+    memset(H.synced_cpu, 0, sizeof(H.synced_cpu)); /* Exclude bind-time whole-pool sync. */
+    fire_event(2);
+    in_pass_fixture = &fx;
+    completion_hook = kick_from_completion;
+    core_pump();
+    CHECK(H.done[1].count == 1 && H.done[2].count == 1 && H.done[3].count == 0,
+          "slot reuse corrupted immutable scratch or recursively ran a second consumer");
+    CHECK(fx.core_pending && !((struct nv_xdev_ext_ce_host*)fx.host)->progress.pending,
+          "IRQ during publish lost requeue or scheduled a second unbound consumer");
+    core_pump();
+    CHECK(H.done[3].count == 1 && H.done[3].bytes == 4096, "requeued pass lost reused slot");
+    CHECK(H.total_completions == 3 && H.owner_rejections == 0, "duplicate/stale callback");
+#if VARIANT_IOVA
+    CHECK(H.done[1].synced_cpu[0] && H.done[2].synced_cpu[1] && H.done[3].synced_cpu[2],
+          "callback-time reuse lost the original CPU sync request");
+#endif
+    ops->unbind_host(fx.host); ops->unbind_region(&fx.r);
+    common_checks();
+#endif
+}
+
+static void case_core_deadlines(void)
+{
+#if VARIANT_EVENT
+    struct fixture fx;
+    REQUIRE(bind(&fx, 8) == 0, "bind");
+    REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+    core_pump();
+    struct nv_xdev_ext_ce_host *h = fx.host;
+    unsigned long old = h->watchdog.expires;
+    jiffies += HZ;
+    REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "submit2");
+    core_pump();
+    CHECK(h->watchdog.expires == old, "new pending extended earliest old deadline");
+    deliver(1);
+    CHECK(H.done[1].count == 1 && H.done[2].count == 0, "partial completion wrong");
+    CHECK(h->watchdog.expires == old + HZ, "remaining pending deadline changed");
+    jiffies = old + HZ;
+    run_deferred(4);
+    CHECK(H.done[2].count == 1 && H.done[2].status < 0 && h->pool.quarantined,
+          "watchdog failed to retire pending as UNKNOWN");
+    CHECK(!h->progress.pending && H.rm_progress == 0, "IRQ deadline used work/getter");
+    common_checks();
+#endif
+}
+static void case_bind_core_early(void)
+{
+#if VARIANT_EVENT
+    struct fixture fx;
+    H.fire_in_bind = 1;
+    REQUIRE(bind(&fx, 4) == 0, "bind with early event");
+    H.fire_in_bind = 0;
+    CHECK(fx.kicks == 1 && fx.core_pending && fx.passes == 0,
+          "bind callback lacked initialized notification or retired before publication");
+    core_pump();
+    CHECK(fx.passes == 1 && H.total_completions == 0, "early bind event fabricated a completion");
+    ops->unbind_host(fx.host); ops->unbind_region(&fx.r);
+    common_checks();
+#endif
+}
+static void case_bind_core_missing(void)
+{
+#if VARIANT_EVENT
+    struct fixture fx = {0};
+    fx.r.ops = ops;
+    REQUIRE(ops->bind_region(&gpu_file, 0x7f0000000000ULL, 1ULL << 24, &fx.r) == 0, "region");
+    unsigned int allocs = H.alloc_calls;
+    CHECK(ops->bind_host(&fx.r, page_ptrs, 4, NULL, &fx, &fx.host) == -EINVAL,
+          "IRQ accepted missing notify");
+    CHECK(ops->bind_host(&fx.r, page_ptrs, 4, core_kick, NULL, &fx.host) == -EINVAL,
+          "IRQ accepted missing stable context");
+    CHECK(!fx.host && H.rm_bind == 0 && H.alloc_calls == allocs, "invalid notify had native effects");
+    ops->unbind_region(&fx.r);
+    common_checks();
+#endif
 }
 
 static void case_complete_once(void)
@@ -1617,7 +1811,7 @@ static void case_iova_map_fail(void)
 		"bind_region");
 	live = H.live_count;
 	H.dma_mode = 2;
-	rc = ops->bind_host(&fx.r, page_ptrs, 4, &fx.host);
+	rc = ops->bind_host(&fx.r, page_ptrs, 4, core_kick, &fx, &fx.host);
 	CHECK(rc < 0, "G2: bind_host succeeded although DMA mapping failed");
 	CHECK(H.dma_map == 1, "G2: dma_map_sgtable not attempted (%u)", H.dma_map);
 	CHECK(H.rm_bind == 0, "RM bound unmapped pages");
@@ -1641,7 +1835,7 @@ static void case_iova_rm_bind_fail(void)
 		"bind_region");
 	live = H.live_count;
 	H.rm_bind_status = NV_ERR_NOT_SUPPORTED;
-	rc = ops->bind_host(&fx.r, page_ptrs, 4, &fx.host);
+	rc = ops->bind_host(&fx.r, page_ptrs, 4, core_kick, &fx, &fx.host);
 	CHECK(rc < 0, "bind_host succeeded although RM refused");
 	CHECK(H.dma_map == 1 && H.dma_unmap == 1,
 	      "G2: failed RM bind must unmap exactly once (map=%u unmap=%u)", H.dma_map,
@@ -2008,6 +2202,12 @@ static const struct named_case cases[] = {
 	{ "bind-attached-window", case_bind_attached_window },
 	{ "bind-attached-outside", case_bind_attached_outside },
 	{ "bind-attached-failure", case_bind_attached_failure },
+	{ "irq-core-route", case_irq_core_route },
+	{ "core-producers", case_core_producers },
+	{ "core-deadlines", case_core_deadlines },
+	{ "core-irq-during-pass", case_core_irq_during_pass },
+	{ "bind-core-early", case_bind_core_early },
+	{ "bind-core-missing", case_bind_core_missing },
 	{ "complete-once", case_complete_once },
 	{ "complete-partial", case_complete_partial },
 	{ "complete-in-submit", case_complete_in_submit },

@@ -84,9 +84,9 @@ def build():
     code = code.replace('#include "include/uapi/linux/xdev_ext_mech.h"',
                         '#include "include/uapi/linux/xdev_ext_mech.h"\n#include "include/uapi/linux/xdev_ext_policy.h"')
     # The shared extractor supplies the clock and real report helper bodies.
-    # Replace its legacy-only flush trap with this report test's observable OS
+    # Replace its flush shim with this report test's observable OS
     # boundary instead of adding a second function definition.
-    flush = 'static void kthread_flush_worker(struct kthread_worker *w) {(void)w;assert(!"unexpected report capture on legacy STOP");}'
+    flush = 'static void kthread_flush_worker(struct kthread_worker *w) {(void)w;}'
     if code.count(flush) != 1:
         raise RuntimeError('missing shared legacy flush boundary')
     code = code.replace(flush,

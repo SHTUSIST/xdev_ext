@@ -3194,22 +3194,23 @@ static int xdev_ext_mech_session_release_disposition(struct xdev_ext_mech_sessio
 	u32 i;
 	int final_err;
 
+	/* The final release decision has closed admission. Synchronize every
+	 * worker hook before checked unbind can free its borrowed stage context,
+	 * including legacy close and failed CREATE without a report. Accepted
+	 * deferred drain has not reached this final-release path yet. Keep the
+	 * worker allocated until checked unbind succeeds, so failures retain it.
+	 */
+	spin_lock_irqsave(&s->lock, flags);
+	s->worker_gone = true;
+	spin_unlock_irqrestore(&s->lock, flags);
+	if (s->worker) {
+		kthread_cancel_delayed_work_sync(&s->retry_work);
+		kthread_cancel_delayed_work_sync(&s->progress_work);
+		kthread_cancel_delayed_work_sync(&s->poll_work);
+		synchronize_rcu();
+		kthread_flush_worker(s->worker);
+	}
 	if (report) {
-		/* The destroy decision holds the final reference and has closed
-		 * admission. Flush queued completion work before observing live
-		 * provider counters. Keep the worker allocated until checked
-		 * unbind succeeds, as on the legacy quarantine path.
-		 */
-		spin_lock_irqsave(&s->lock, flags);
-		s->worker_gone = true;
-		spin_unlock_irqrestore(&s->lock, flags);
-		if (s->worker) {
-			kthread_cancel_delayed_work_sync(&s->retry_work);
-			kthread_cancel_delayed_work_sync(&s->progress_work);
-			kthread_cancel_delayed_work_sync(&s->poll_work);
-			synchronize_rcu();
-			kthread_flush_worker(s->worker);
-		}
 		timer_shutdown_sync(&s->group_timer);
 		xdev_ext_mech_stats_fill(s, &report->stats);
 		xdev_ext_mech_transport_stats_fill(s, &report->transport,
@@ -3243,16 +3244,8 @@ static int xdev_ext_mech_session_release_disposition(struct xdev_ext_mech_sessio
 	 * meanwhile (T-UNBIND after a failed CREATE) must not queue on the
 	 * worker freed here.
 	 */
-	spin_lock_irqsave(&s->lock, flags);
-	s->worker_gone = true;
-	spin_unlock_irqrestore(&s->lock, flags);
-	if (s->worker) {
-		kthread_cancel_delayed_work_sync(&s->retry_work);
- kthread_cancel_delayed_work_sync(&s->progress_work);
-		kthread_cancel_delayed_work_sync(&s->poll_work);
-		synchronize_rcu();
+	if (s->worker)
 		kthread_destroy_worker(s->worker);
-	}
 	timer_shutdown_sync(&s->group_timer);
 	for (i = s->nr_bound; i-- > 0;)
 		if (s->st[i].cls->unbind)

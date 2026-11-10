@@ -231,7 +231,7 @@ class UbrMechSourceTest(unittest.TestCase):
                             re.S)
         self.assertIsNotNone(backend)
         for field in ("*owner", "*fops", "(*bind_region)", "(*unbind_region)",
-                      "(*bind_host)", "(*unbind_host)", "(*submit)"):
+                      "(*bind_host)", "(*unbind_host)", "(*progress)", "(*submit)"):
             self.assertIn(field, backend.group(1))
         self.assertRegex(
             text, r"void xdev_ext_ce_complete\(struct xdev_ext_ce_cookie \*ck, u64 ticket, int status,"
@@ -258,7 +258,7 @@ class UbrMechSourceTest(unittest.TestCase):
                      "xdev_ext_mech_stage_get_cmd", "xdev_ext_mech_stage_put",
                      "xdev_ext_mech_stage_dead", "xdev_ext_mech_class_kfunc_filter",
                      "xsk_xdev_ext_mech_pool_bind", "io_xdev_ext_umem_mech_pool_bind",
-                     "xdev_ext_ce_backend_register", "xdev_ext_ce_backend_unregister",
+                     "xdev_ext_ce_backend_register_v2", "xdev_ext_ce_backend_unregister_v2",
                      "xdev_ext_ce_complete", "io_xdev_ext_mech_register",
                      "io_xdev_ext_mech_ring_exit"):
             self.assertIn(name, names)
@@ -578,19 +578,20 @@ class UbrMechSourceTest(unittest.TestCase):
         # frees the worker, and the stages are unbound after that.
         path = ROOT / "io_uring/xdev_ext_mech.c"
         release = release_body(path)
-        # L11: checked unbind can quarantine under an earlier lock; the worker
-        # gate must be inside its own critical section before destruction.
-        # Select the shared post-unbind gate: the optional report snapshot
-        # has a separate earlier gate, absent on the legacy NULL-report path.
-        gone = release.index("s->worker_gone = true;",
-                             release.index("return final_err;"))
+        # A sleepable class progress hook may borrow a stage without a batch
+        # reference. Final release synchronizes it for report and legacy paths
+        # before checked unbind; teardown_test exercises the actual interleave.
+        gone = release.index("s->worker_gone = true;")
         lock = release.rindex("spin_lock_irqsave(&s->lock, flags);", 0, gone)
         unlock = release.index("spin_unlock_irqrestore(&s->lock, flags);", gone)
         checked = release.index("xdev_ext_mech_unbind_checked(s)")
         quarantine = release.index("xdev_ext_mech_quarantine(s)")
         self.assertLess(checked, quarantine)
         self.assertLess(quarantine, release.index("return final_err;"))
-        self.assertLess(release.index("return final_err;"), gone)
+        flush = release.index("kthread_flush_worker(s->worker);")
+        report = release.index("if (report) {")
+        self.assertEqual([lock, gone, unlock, flush, report, checked],
+                         sorted([lock, gone, unlock, flush, report, checked]))
         destroy = release.index("kthread_destroy_worker(s->worker);")
         unbind = release.index("s->st[i].cls->unbind(&s->st[i]);")
         self.assertEqual([lock, gone, unlock, destroy, unbind],

@@ -111,9 +111,16 @@ static int dma_unbind_region(struct xdev_ext_dma_region*r){
     event("region-");
     return unbind_region_errno;
 }
-static int ce_bind_host(struct xdev_ext_ce_region*r,struct page**p,u32 n,void**h){
+static void (*bound_ce_kick)(void *);
+static void *bound_ce_arg;
+static unsigned int native_progress_calls;
+static void ce_native_progress(void *host) { CHECK(host==(void*)0x200); native_progress_calls++; }
+static int ce_bind_host(struct xdev_ext_ce_region*r,struct page**p,u32 n,
+                        void (*kick)(void *),void *arg,void**h){
     CHECK(!lock_depth&&active_stage->priv);
     ce_configured_observer(true);
+    CHECK(kick && arg == active_stage);
+    bound_ce_kick=kick; bound_ce_arg=arg;
     CHECK(r->ops==((struct xdev_ext_ce_stage*)active_stage->priv)->ops);
     *h=(void*)0x200;
     event("host+");
@@ -218,10 +225,10 @@ static void setup_ops(void){
 static void registry(void){
     runtime_consumer=0;
     int a=allocations;
-    CHECK(xdev_ext_ce_backend_register(NULL)==-EINVAL);
-    for(int i=0;i<4;i++)CHECK(!xdev_ext_ce_backend_register(&ce_ops[i]));
-    CHECK(xdev_ext_ce_backend_register(&ce_ops[0])==-EBUSY);
-    CHECK(xdev_ext_ce_backend_register(&ce_ops[4])==-ENOSPC);
+    CHECK(xdev_ext_ce_backend_register_v2(NULL, sizeof(struct xdev_ext_ce_backend_ops))==-EINVAL);
+    for(int i=0;i<4;i++)CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[i], sizeof(struct xdev_ext_ce_backend_ops)));
+    CHECK(xdev_ext_ce_backend_register_v2(&ce_ops[0], sizeof(struct xdev_ext_ce_backend_ops))==-EBUSY);
+    CHECK(xdev_ext_ce_backend_register_v2(&ce_ops[4], sizeof(struct xdev_ext_ce_backend_ops))==-ENOSPC);
     CHECK(allocations==a);
     struct file f={
         &fops[0]
@@ -231,11 +238,11 @@ static void registry(void){
     CHECK(xdev_ext_ce_backend_get(&f)==&ce_ops[0]);
     expect_registry_pin=false;
     CHECK(native_module.refs==1);
-    xdev_ext_ce_backend_unregister(&ce_ops[0]);
+    xdev_ext_ce_backend_unregister_v2(&ce_ops[0]);
     CHECK(native_module.refs==1);
-    CHECK(!xdev_ext_ce_backend_register(&ce_ops[4]));
+    CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[4], sizeof(struct xdev_ext_ce_backend_ops)));
     module_put(&native_module);
-    for(int i=1;i<5;i++)xdev_ext_ce_backend_unregister(&ce_ops[i]);
+    for(int i=1;i<5;i++)xdev_ext_ce_backend_unregister_v2(&ce_ops[i]);
     runtime_consumer=1;
     for(int i=0;i<6;i++)CHECK(!xdev_ext_dma_provider_register(&dma_ops[i]));
     allocation_fail=1;
@@ -1080,7 +1087,7 @@ static void ce_v2_cleanup_exclusion(void) {
     conflict_stage=NULL;ce_check_exclusion=false;CHECK(!xdev_ext_ce_lease_get(b.st.priv,&b.batch));release_fixture(&b,false);CHECK(!native_module.refs);
     printf("CEV2 D6.3/D6.4 cleanup holds exclude same-batch submit before arm; refusal/retry preserves handles and record\n");
     /* A disjoint requested interval and a different native backend remain independent. */
-    CHECK(!xdev_ext_ce_backend_register(&ce_ops[1]));
+    CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[1], sizeof(struct xdev_ext_ce_backend_ops)));
     for(int different_ops=0;different_ops<2;different_ops++) {
         defaults();init_fixture(&a,false);init_fixture(&b,false);CHECK(!bind_fixture(&a,false));
         if(different_ops)b.file.f_op=&fops[1];else bind_u.arg0=8192;
@@ -1092,23 +1099,23 @@ static void ce_v2_cleanup_exclusion(void) {
         if(!different_ops)bind_u.arg0=8192;
         CHECK(!unbind_fixture(&b,false));bind_u.arg0=4096;
     }
-    xdev_ext_ce_backend_unregister(&ce_ops[1]);
+    xdev_ext_ce_backend_unregister_v2(&ce_ops[1]);
     printf("CEV2 D6.3 disjoint requested intervals and distinct selected native ops stay independent\n");
 }
 /* Supplement derived from the old executable registry, separate from frozen330. */
 static void null_unregister_supplement(void) {
     int before=warnings;runtime_consumer=0;
-    xdev_ext_ce_backend_unregister(NULL);CHECK(warnings==before);
+    xdev_ext_ce_backend_unregister_v2(NULL);CHECK(warnings==before);
     puts("SUPP NULL CE empty warning_condition=0 pins=0");
-    for(int i=0;i<4;i++)CHECK(!xdev_ext_ce_backend_register(&ce_ops[i]));
-    before=warnings;xdev_ext_ce_backend_unregister(NULL);CHECK(warnings==before+1);
+    for(int i=0;i<4;i++)CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[i], sizeof(struct xdev_ext_ce_backend_ops)));
+    before=warnings;xdev_ext_ce_backend_unregister_v2(NULL);CHECK(warnings==before+1);
     for(int i=0;i<4;i++){struct file f={&fops[i]};CHECK(xdev_ext_ce_backend_get(&f)==&ce_ops[i]);module_put(&native_module);}
     puts("SUPP NULL CE full warning_condition=1 registered=4 pins=0");
-    xdev_ext_ce_backend_unregister(&ce_ops[0]);before=warnings;
-    xdev_ext_ce_backend_unregister(NULL);CHECK(warnings==before);
-    CHECK(!xdev_ext_ce_backend_register(&ce_ops[4]));
+    xdev_ext_ce_backend_unregister_v2(&ce_ops[0]);before=warnings;
+    xdev_ext_ce_backend_unregister_v2(NULL);CHECK(warnings==before);
+    CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[4], sizeof(struct xdev_ext_ce_backend_ops)));
     puts("SUPP NULL CE freed_slot warning_condition=0 reusable=1");
-    for(int i=1;i<5;i++)xdev_ext_ce_backend_unregister(&ce_ops[i]);
+    for(int i=1;i<5;i++)xdev_ext_ce_backend_unregister_v2(&ce_ops[i]);
     runtime_consumer=1;before=warnings;xdev_ext_dma_provider_unregister(NULL);CHECK(warnings==before+1);
     puts("SUPP NULL DMA empty warning_condition=1 pins=0");
     for(int i=0;i<5;i++)CHECK(!xdev_ext_dma_provider_register(&dma_ops[i]));
@@ -1118,12 +1125,52 @@ static void null_unregister_supplement(void) {
     for(int i=0;i<5;i++)xdev_ext_dma_provider_unregister(&dma_ops[i]);
     CHECK(!native_module.refs);
 }
+static void ce_worker_contract(void) {
+    size_t page_size=(size_t)sysconf(_SC_PAGESIZE);
+    unsigned char *mapping=mmap(NULL,page_size*2,PROT_READ|PROT_WRITE,
+                                MAP_PRIVATE|MAP_ANONYMOUS,-1,0);
+    CHECK(mapping!=MAP_FAILED && !mprotect(mapping+page_size,page_size,PROT_NONE));
+    size_t old_size=sizeof(struct xdev_ext_ce_backend_ops)-sizeof(ce_ops[0].progress);
+    const struct xdev_ext_ce_backend_ops *old=(const void *)(mapping+page_size-old_size);
+    /* Wrong size must reject even before reading a field from a guard page. */
+    CHECK(xdev_ext_ce_backend_register_v2(old,old_size)==-EINVAL);
+    CHECK(xdev_ext_ce_backend_register_v2((const void *)(mapping+page_size),0)==-EINVAL);
+    CHECK(xdev_ext_ce_backend_register_v2(&ce_ops[0],sizeof(ce_ops[0])+1)==-EINVAL);
+    CHECK(!munmap(mapping,page_size*2));
+    for (int missing=0; missing<6; missing++) {
+        struct xdev_ext_ce_backend_ops bad=ce_ops[0];
+        if (missing==0) bad.fops=NULL;
+        else if (missing==1) bad.bind_region=NULL;
+        else if (missing==2) bad.unbind_region=NULL;
+        else if (missing==3) bad.bind_host=NULL;
+        else if (missing==4) bad.unbind_host=NULL;
+        else bad.submit=NULL;
+        CHECK(xdev_ext_ce_backend_register_v2(&bad,sizeof(bad))==-EINVAL);
+    }
+    struct fixture a; defaults(); init_fixture(&a,false);
+    CHECK(a.st.cls->progress && a.st.cls->progress(&a.st)==0); /* partial bind */
+    active_stage=&a.st; active_dma=false; runtime_consumer=0;
+    CHECK(!a.st.cls->bind(&a.st,&bind_u));
+    unsigned int kicks=core_kicks, passes=native_progress_calls;
+    CHECK(bound_ce_arg==&a.st && bound_ce_kick);
+    bound_ce_kick(bound_ce_arg);
+    CHECK(core_kicks==kicks+1 && last_kicked==&a.st && native_progress_calls==passes);
+    CHECK(a.st.cls->progress(&a.st)==0 && native_progress_calls==passes); /* simulator NULL */
+    ce_ops[0].progress=ce_native_progress;
+    CHECK(a.st.cls->progress(&a.st)==0 && native_progress_calls==passes+1);
+    CHECK(!a.st.cls->unbind_checked(&a.st));
+    CHECK(a.st.cls->progress(&a.st)==0 && native_progress_calls==passes+1);
+    ce_ops[0].progress=NULL;
+    puts("F3 v2 size guard/notify enqueue/partial bind/optional core progress PASS");
+}
+
 int main(void){
     printf("ABI CE cookie=%zu batch=%zu desc=%zu info=%zu cqe=%zu ops=%zu; DMA cookie=%zu batch=%zu desc=%zu info=%zu cqe=%zu ops=%zu\n",xdev_ext_ce_class.batch_cookie_size+0UL,xdev_ext_ce_class.batch_priv_size+0UL,xdev_ext_ce_class.desc_size+0UL,xdev_ext_ce_class.info_size+0UL,xdev_ext_ce_class.cqe_size+0UL,sizeof(struct xdev_ext_ce_backend_ops),xdev_ext_dma_class.batch_cookie_size+0UL,xdev_ext_dma_class.batch_priv_size+0UL,xdev_ext_dma_class.desc_size+0UL,xdev_ext_dma_class.info_size+0UL,xdev_ext_dma_class.cqe_size+0UL,sizeof(struct xdev_ext_dma_provider_ops));
     setup_ops();
     registry();
-    CHECK(!xdev_ext_ce_backend_register(&ce_ops[0]));
+    CHECK(!xdev_ext_ce_backend_register_v2(&ce_ops[0], sizeof(struct xdev_ext_ce_backend_ops)));
     CHECK(!xdev_ext_dma_provider_register(&dma_ops[0]));
+    ce_worker_contract();
     binds();
     bind_error_order();
     preparation();
@@ -1140,7 +1187,7 @@ int main(void){
     puts("V2-ADDITIONAL-BEGIN");
     ce_v2_bind_and_identity();
     ce_v2_cleanup_exclusion();
-    xdev_ext_ce_backend_unregister(&ce_ops[0]);
+    xdev_ext_ce_backend_unregister_v2(&ce_ops[0]);
     xdev_ext_dma_provider_unregister(&dma_ops[0]);
     null_unregister_supplement();
     CHECK(!native_module.refs&&!scope_module.refs&&!lock_depth&&allocations==frees+failed_allocations);

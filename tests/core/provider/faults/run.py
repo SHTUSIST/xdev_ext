@@ -212,7 +212,8 @@ def generate(mutation=None):
         template = re.sub(r'xdev_ext_dma_lease_get\((cs),([^()]*)\)', r'xdev_ext_dma_copy_lease_get(&\1->copy,\2)', template)
 
     template = template.replace("/* PRODUCTION_CLASS_FLAGS */",
-                                re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0])
+                                re.search(r"^#define XDEV_EXT_MECH_CLASS_F_TRANSFORM .*", abi, re.M)[0] +
+                                "\n#define FIXTURE_CE_ABI_V2 " + str(int("int xdev_ext_ce_backend_register_v2(" in ce)))
     # Historical void callbacks are adapted only at the fixture boundary so the
     # old implementation executes and fails ownership assertions, not compilation.
     if 'void (*unbind_region)(struct xdev_ext_dma_region *r)' in abi:
@@ -390,6 +391,10 @@ CASES = [
     "callback_then_error", "stop_idle", "stop_pending", "stop_delayed",
     "stop_ambiguous", "ambiguous_unbind", "unregister_bound", "registry_capacity",
 ]
+
+
+if "int xdev_ext_ce_backend_register_v2(" in source("io_uring/xdev_ext_mech_ce.c"):
+    CASES.append("ce_v2_boundary")
 
 
 class ProviderFaults(unittest.TestCase):

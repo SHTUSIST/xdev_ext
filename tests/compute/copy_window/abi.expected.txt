@@ -104,7 +104,7 @@ ABI xdev_ext_dma_xfer.host_byte_off=16
 ABI xdev_ext_dma_xfer.device_off=24
 ABI xdev_ext_dma_xfer.len=32
 ABI xdev_ext_dma_xfer.flags=36
-ABI xdev_ext_ce_backend_ops.size=56 align=8
+ABI xdev_ext_ce_backend_ops.size=64 align=8
 ABI xdev_ext_ce_backend_ops.owner=0
 ABI xdev_ext_ce_backend_ops.fops=8
 ABI xdev_ext_ce_backend_ops.bind_region=16
@@ -112,6 +112,7 @@ ABI xdev_ext_ce_backend_ops.unbind_region=24
 ABI xdev_ext_ce_backend_ops.bind_host=32
 ABI xdev_ext_ce_backend_ops.unbind_host=40
 ABI xdev_ext_ce_backend_ops.submit=48
+ABI xdev_ext_ce_backend_ops.progress=56
 ABI xdev_ext_dma_provider_ops.size=64 align=8
 ABI xdev_ext_dma_provider_ops.owner=0
 ABI xdev_ext_dma_provider_ops.fops=8

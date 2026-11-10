@@ -75,11 +75,14 @@ static struct xdev_ext_comp_copy_registry xdev_ext_ce_registry = {
 	.capacity = XDEV_EXT_CE_MAX_BACKENDS,
 };
 
-int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *ops)
+int xdev_ext_ce_backend_register_v2(const struct xdev_ext_ce_backend_ops *ops,
+				   size_t ops_size)
 {
 	struct xdev_ext_comp_copy_member member;
 
-	if (!ops || !ops->fops || !ops->bind_region || !ops->unbind_region ||
+	if (!ops || ops_size != sizeof(*ops))
+		return -EINVAL;
+	if (!ops->fops || !ops->bind_region || !ops->unbind_region ||
 	    !ops->bind_host || !ops->unbind_host || !ops->submit)
 		return -EINVAL;
 	member = (struct xdev_ext_comp_copy_member){
@@ -89,13 +92,13 @@ int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *ops)
 	};
 	return xdev_ext_comp_copy_registry_register(&xdev_ext_ce_registry, &member);
 }
-EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_register);
+EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_register_v2);
 
-void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops)
+void xdev_ext_ce_backend_unregister_v2(const struct xdev_ext_ce_backend_ops *ops)
 {
 	WARN_ON_ONCE(!xdev_ext_comp_copy_registry_unregister(&xdev_ext_ce_registry, ops));
 }
-EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_unregister);
+EXPORT_SYMBOL_GPL(xdev_ext_ce_backend_unregister_v2);
 
 /* CREATE, process context: the backend of @file, its module pinned. */
 static const struct xdev_ext_ce_backend_ops *xdev_ext_ce_backend_get(struct file *file)
@@ -277,6 +280,23 @@ static const struct xdev_ext_comp_copy_legacy_ops xdev_ext_ce_copy_ops = {
 	.warn = xdev_ext_ce_copy_warn,
 };
 
+/* Native callbacks only enqueue. The stage outlives producer disconnect. */
+static void xdev_ext_ce_progress_kick(void *arg)
+{
+	xdev_ext_mech_stage_kick(arg);
+}
+
+/* The core serializes the whole pass, including post-h-lock publication,
+ * and quiesces this hook before checked unbind can release host or stage. */
+static unsigned long xdev_ext_ce_progress(struct xdev_ext_mech_stage *st)
+{
+	struct xdev_ext_ce_stage *cs = st->priv;
+
+	if (cs && cs->copy.host && cs->ops->progress)
+		cs->ops->progress(cs->copy.host);
+	return 0; /* Native deadline timers, not periodic core polling. */
+}
+
 static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 		       const struct xdev_ext_mech_stage_uapi *u)
 {
@@ -336,7 +356,8 @@ static int xdev_ext_ce_bind(struct xdev_ext_mech_stage *st,
 			xdev_ext_mech_session_layout(st->s)->group_bytes);
 	if (err)
 		return err;
-	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages, &cs->copy.host);
+	err = cs->ops->bind_host(&cs->region, pool->pages, pool->nr_pages,
+				xdev_ext_ce_progress_kick, st, &cs->copy.host);
 	if (err)
 		return err;
 	xdev_ext_comp_copy_lease_hold(&cs->lease, false);
@@ -458,6 +479,7 @@ static const struct xdev_ext_mech_class_ops xdev_ext_ce_class = {
 	.batch_cookie_size = sizeof(struct xdev_ext_comp_copy_cookie),
 	.owner		= THIS_MODULE,
 	.bind		= xdev_ext_ce_bind,
+	.progress	= xdev_ext_ce_progress,
 	.unbind_checked	= xdev_ext_ce_unbind,
 	.fill_info	= xdev_ext_ce_fill_info,
 	.validate	= xdev_ext_ce_validate,

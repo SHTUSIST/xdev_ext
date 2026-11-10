@@ -517,7 +517,7 @@ assert len(release_calls) == 2
 assert all(guarded(NV, pos, GATE) for pos in release_calls)
 for source_path in sorted((ROOT / "kernel-open/nvidia").glob("*.c")):
     source = source_path.read_text()
-    for m in re.finditer(r"\bxdev_ext_ce_backend_register\(", source):
+    for m in re.finditer(r"\bxdev_ext_ce_backend_register_v2\(", source):
         assert guarded(source, m.start(), GATE), source_path.name
         fn_start = source.rindex("\n{\n", 0, m.start())
         assert "NVreg_EnableXdevExtCeDma" in source[fn_start:m.start()], \
@@ -590,7 +590,7 @@ assert "ifeq ($(XDEV_EXT_ENABLE_GPU_CE_DMA),1)\n ifeq ($(CONFIG_XDEV_EXT_MECH_CE
 assert NV_KBUILD.index("NVIDIA_SOURCES += nvidia/nv-xdev_ext-ce-backend.c") < \
     NV_KBUILD.index("nvidia-y := $(NVIDIA_OBJECTS)")
 assert BOTH in BACKEND and BOTH in BACKEND_H
-assert guarded(BACKEND, BACKEND.index("xdev_ext_ce_backend_register("), GATE)
+assert guarded(BACKEND, BACKEND.index("xdev_ext_ce_backend_register_v2("), GATE)
 for symbol in ("void nv_xdev_ext_ce_backend_init(", "void nv_xdev_ext_ce_backend_exit("):
     assert guarded(BACKEND_H, BACKEND_H.index(symbol), GATE), symbol
 
@@ -607,9 +607,9 @@ assert module_exit.index("nv_xdev_ext_ce_backend_exit();") < \
 binit = function_body(BACKEND, "void nv_xdev_ext_ce_backend_init(")
 assert binit.index("NVreg_EnableXdevExtCeDma == 0") < \
     binit.index("nv_xdev_ext_ce_backend.fops = fops;") < \
-    binit.index("xdev_ext_ce_backend_register(&nv_xdev_ext_ce_backend)")
+    binit.index("xdev_ext_ce_backend_register_v2(&nv_xdev_ext_ce_backend, sizeof(nv_xdev_ext_ce_backend))")
 bexit = function_body(BACKEND, "void nv_xdev_ext_ce_backend_exit(")
-assert "xdev_ext_ce_backend_unregister(&nv_xdev_ext_ce_backend)" in bexit
+assert "xdev_ext_ce_backend_unregister_v2(&nv_xdev_ext_ce_backend)" in bexit
 assert re.search(r"\.owner\s*=\s*THIS_MODULE,", BACKEND)
 
 # bind_region: an actual GPU fd; the window is the CREATE caller's vidmem
@@ -676,8 +676,9 @@ assert submit_ce.count("xdev_ext_ce_complete(") == 1
 assert submit_ce.index("nv_xdev_ext_ce_rm_direction(") < entry < request < park < complete
 assert "nv_xdev_ext_ce_async_submitted(&h->pool, slot, status, issued, token)" in submit_ce
 assert "NV_TRUE, 0);" in submit_ce[complete:]
-assert "queue_work(system_unbound_wq, &h->progress)" in submit_ce
-progress_ce = function_body(BACKEND, "static void nv_xdev_ext_ce_progress(")
+assert submit_ce.count("nv_xdev_ext_ce_kick(h)") == 2
+assert "queue_work(" not in submit_ce
+progress_ce = function_body(BACKEND, "static void nv_xdev_ext_ce_retire(")
 assert "nv_p2p_ce_progress(h->rm, &watermark)" in progress_ce
 assert "nv_xdev_ext_ce_async_ready(" in progress_ce
 assert "xdev_ext_ce_complete(c->cookie, c->ticket" in progress_ce
