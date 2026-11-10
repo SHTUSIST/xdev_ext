@@ -45,6 +45,12 @@ static int session_case(const char *name)
   e.request.create.pool_kind=0;ret=dispatch_selected(&e);
   CHECK(ret==0&&e.request.report.result==-EINVAL&&!describes&&!prepares);
  } else return 2;
+ /* A failed CREATE/copyout uses legacy NULL-report release too. The OS
+  * flush is mandatory before checked unbind without changing report fields. */
+ CHECK(worker_flushes==(!strcmp(name,"prepare_report") ||
+                         !strcmp(name,"unknown_retention") ||
+                         !strcmp(name,"copyout_failure")));
+ CHECK(!bad_worker_flush_order);
  printf("SESSION_CORE_ASSERTIONS %s 4\n",name);return 0;
 }
 int main(int argc,char **argv)

@@ -125,6 +125,8 @@ static struct pci_dev owner,requester;
 static struct file authority,stage_file;
 static struct xdev_ext_mech_session *allocated,*retained;
 static unsigned describes,premaps,refs,pci_puts,pool_frees,session_frees,quarantines,prepares,queues,copyouts;
+static unsigned worker_flushes;
+static bool worker_flush_ready,bad_worker_flush_order;
 static bool bad_report_publication,freed_with_custody;
 static bool publication_probe,stop_during_copyout;
 static unsigned admission_attempts,admission_accepted,publication_steps,refs_at_free,inflight_at_free;
@@ -158,7 +160,11 @@ static int class_bind(struct xdev_ext_mech_stage *st,const struct xdev_ext_mech_
 { int saved=distance; if((int)st->index==refuse_stage)distance=-1;
  int ret=xdev_ext_requester_bind(&st->rq,st,&requester,u->flags);distance=saved;
  st->priv=&st->rq; observed_caps=st->caps;return ret; }
-static int class_unbind_checked(struct xdev_ext_mech_stage *st) { (void)st;return checked_err; }
+static int class_unbind_checked(struct xdev_ext_mech_stage *st) {
+ if(!worker_flush_ready || st->s!=allocated || !st->s->worker_gone)bad_worker_flush_order=true;
+ if(checked_err)worker_flush_ready=false; /* Failed attempt may be retried while retained. */
+ return checked_err;
+}
 static void class_unbind(struct xdev_ext_mech_stage *st) { xdev_ext_requester_unbind(&st->rq);if(late_err)st->s->last_err=late_err; }
 static const struct xdev_ext_mech_class_ops net_class={ .class_id=XDEV_EXT_MECH_CLASS_NET,.decl=&xdev_ext_mech_class_decls[XDEV_EXT_MECH_CLASS_NET],
  .bind=class_bind,.unbind_checked=class_unbind_checked,.unbind=class_unbind };
@@ -198,8 +204,17 @@ static void xdev_ext_mech_stats_fill(struct xdev_ext_mech_session *s,struct xdev
 static void xdev_ext_mech_transport_stats_fill(struct xdev_ext_mech_session *s,struct xdev_ext_mech_transport_stats_v4 *o,u32 v) { (void)s;(void)o;(void)v;abort(); }
 static void kthread_cancel_delayed_work_sync(void *w) { (void)w; }
 static void synchronize_rcu(void) {}
-static void kthread_flush_worker(void *w) { (void)w;abort(); }
-static void kthread_destroy_worker(void *w) { (void)w; }
+/* No host worker thread is queued here; validate the real final-release
+ * boundary instead of treating its mandatory quiesce as an unsupported call. */
+static void kthread_flush_worker(void *w) {
+ assert(allocated && w==allocated->worker && w==&token && allocated->worker_gone);
+ assert(!worker_flush_ready);worker_flush_ready=true;worker_flushes++;
+}
+static void kthread_destroy_worker(void *w) {
+ assert(allocated && w==allocated->worker && w==&token);
+ if(!worker_flush_ready || !allocated->worker_gone)bad_worker_flush_order=true;
+ worker_flush_ready=false;
+}
 static void timer_shutdown_sync(void *t) { (void)t; }
 static void fput(struct file *f) { (void)f; }
 static void xdev_ext_mech_class_put(const struct xdev_ext_mech_class_ops *c) { (void)c; }
@@ -282,6 +297,7 @@ static struct xdev_ext_mech_create request(void)
 static void reset(void)
 {
  assert(!allocated && !retained && !refs);
+ worker_flushes=0;worker_flush_ready=false;
  INIT_LIST_HEAD(&ring.xdev_ext_mech_sessions);INIT_LIST_HEAD(&xdev_ext_mech_all);INIT_LIST_HEAD(&xdev_ext_mech_live);
  retention_samples=decisions=describes=premaps=pci_puts=pool_frees=session_frees=quarantines=prepares=queues=copyouts=0;bad_report_publication=freed_with_custody=publication_probe=stop_during_copyout=bad_partial_admission=false;admission_attempts=admission_accepted=publication_steps=refs_at_free=inflight_at_free=0;copyout_admission_ret=0;
  distance=3;describe_err=premap_err=checked_err=late_err=0;prepare_stage=refuse_stage=-1;
@@ -547,15 +563,20 @@ static int abi_compatibility(void)
  puts("PASS ABI old CREATE/caps and independent v1 envelope sizes/offsets");
  return 0;
 }
+static int worker_checked_result(int result)
+{
+ if(bad_worker_flush_order){fputs("not ok final release flush must precede checked unbind\n",stderr);return 1;}
+ return result;
+}
 int main(int argc,char **argv)
 {
  if(argc!=2)return 2;
- if(!strcmp(argv[1],"controls"))return controls();
- if(!strcmp(argv[1],"legacy_value_gap"))return legacy_value_gap();
- if(!strcmp(argv[1],"legacy_publication"))return legacy_publication();
- if(!strncmp(argv[1],"publication_",12))return publication_case(argv[1]+12);
- if(!strcmp(argv[1],"report_schema"))return report_schema();
- if(!strncmp(argv[1],"report_",7))return report_case(argv[1]+7);
- if(!strcmp(argv[1],"abi"))return abi_compatibility();
+ if(!strcmp(argv[1],"controls"))return worker_checked_result(controls());
+ if(!strcmp(argv[1],"legacy_value_gap"))return worker_checked_result(legacy_value_gap());
+ if(!strcmp(argv[1],"legacy_publication"))return worker_checked_result(legacy_publication());
+ if(!strncmp(argv[1],"publication_",12))return worker_checked_result(publication_case(argv[1]+12));
+ if(!strcmp(argv[1],"report_schema"))return worker_checked_result(report_schema());
+ if(!strncmp(argv[1],"report_",7))return worker_checked_result(report_case(argv[1]+7));
+ if(!strcmp(argv[1],"abi"))return worker_checked_result(abi_compatibility());
  return 2;
 }
