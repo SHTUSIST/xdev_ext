@@ -73,11 +73,17 @@ static int inject;
 static const char *replace_stat;
 static ssize_t audited_read(int fd, void *buf, size_t len) {
  char link[64], path[4096]={0}; ssize_t n;
- static unsigned int sched_reads;
+ static unsigned int sched_reads, comm_reads;
  snprintf(link,sizeof(link),"/proc/self/fd/%d",fd);
  n=readlink(link,path,sizeof(path)-1);
  if(n>=0) {
   path[n]=0;
+  if(strstr(path,"/45/comm")) {
+   comm_reads++;
+   if(inject==5 && comm_reads>1) { errno=EIO;return -1; }
+   if(inject==7 && comm_reads==1) { errno=EINTR;return -1; }
+  }
+  if(inject==6 && strstr(path,"/comm") && len>2)len=2;
   if(strstr(path,"/schedstat")) {
    sched_reads++;
    if(inject==1 || (inject==4 && sched_reads>1)) { errno=EIO;return -1; }
@@ -107,6 +113,7 @@ int main(int argc,char **argv) {
   if(!ret)printf("raw=%llu,%llu,%llu\n",(unsigned long long)a.runtime_ns,(unsigned long long)a.run_delay_ns,(unsigned long long)a.pcount);
  } else if(!strcmp(argv[1],"discover")) {
   if(argc>3)sid=strtoull(argv[3],NULL,10);
+  if(argc>4)inject=atoi(argv[4]);
   ret=cwa_discover(argv[2],sid,&id);
   if(!ret)printf("identity=%llu,%d,%llu,%s\n",(unsigned long long)id.session_id,id.pid,(unsigned long long)id.start_ticks,id.comm);
  } else if(!strcmp(argv[1],"snapshot")) {
@@ -154,6 +161,22 @@ int main(int argc,char **argv) {
         root=self.proc();self.assertIn('identity=2,44,77,xdev_ext_mech/2',self.call('discover',root))
         self.call('discover',root,10,valid=False)
         self.task(root,45,'xdev_ext_mech/2',88,'1 2 3\n');self.call('discover',root,valid=False)
+    def test_unrelated_full_kthread_names_do_not_block_unique_worker(self):
+        for comm in ['unrelated_kernel_worker','kworker/0:0H-events_highpri','xdev_ext_mech/2-not-the-target','xdev_ext_mech/2\nnot-the-worker','w'*64]:
+            with self.subTest(comm=comm):
+                root=self.proc();self.task(root,45,comm,88,'1 2 3\n')
+                self.assertIn('identity=2,44,77,xdev_ext_mech/2',self.call('discover',root))
+    def test_discovery_full_eof_bounds_errors_and_strict_target(self):
+        root=self.proc();self.task(root,45,'unrelated_kernel_worker',88,'1 2 3\n')
+        for inject in [6,7]:
+            self.assertIn('identity=2,44,77,xdev_ext_mech/2',self.call('discover',root,2,inject))
+        self.assertIn('error=-5',self.call('discover',root,2,5,valid=False))
+        for data in ['w'*65+'\n','unrelated_kernel_worker','bad\0comm\n']:
+            with self.subTest(data=data):
+                root=self.proc();self.task(root,45,'ignored',88,'1 2 3\n');(root/'45'/'comm').write_text(data)
+                self.call('discover',root,valid=False)
+        root=self.proc(comm='unrelated_kernel_worker')
+        self.assertIn('error=-22',self.call('snapshot',root,valid=False))
     def test_no_prefix_or_missing_worker(self):
         root=self.proc(comm='xdev_ext_mech/3');self.call('discover',root,valid=False)
         (root/'44'/'comm').write_text('xdev_ext_mech/\n');self.call('discover',root,valid=False)

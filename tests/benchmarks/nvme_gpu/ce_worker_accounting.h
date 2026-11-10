@@ -168,21 +168,23 @@ static inline int cwa_same(const struct cwa_identity *a, const struct cwa_identi
 static inline int cwa_discover(const char *root, uint64_t sid, struct cwa_identity *out)
 {
  struct cwa_identity found = {.session_id = sid};
- char name[16], comm[16];
+ /* Locked proc_task_name formats at most64 bytes, followed by one LF. */
+ char name[16], comm[66];
  struct dirent *entry; DIR *dir;
  int matches = 0, ret = cwa_name(sid, name);
  if (ret) return ret;
  dir = opendir(root); if (!dir) return -errno;
  for (;;) {
-  uint64_t pid;
+  uint64_t pid; size_t len;
   errno = 0; entry = readdir(dir);
   if (!entry) { ret = errno ? -errno : 0; break; }
   if (cwa_uint(entry->d_name, strlen(entry->d_name), &pid) || !pid || pid > INT_MAX)
    continue;
-  ret = cwa_comm(root, (int)pid, comm);
+  ret = cwa_read(root, (int)pid, "comm", comm, sizeof(comm), &len);
   if (ret == -ENOENT || ret == -ESRCH) continue; /* unrelated task exited */
   if (ret) break;
-  if (strcmp(comm, name)) continue;
+  if (comm[len - 1] != '\n') { ret = -EINVAL; break; }
+  if (len != strlen(name) + 1 || memcmp(comm, name, len - 1)) continue;
   if (++matches > 1) { ret = -EEXIST; break; }
   ret = cwa_identity_read(root, (int)pid, name, &found);
   if (ret) break;
