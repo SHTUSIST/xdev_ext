@@ -234,6 +234,7 @@ struct Run {
     uint64_t nvme_ns = 0, copy_ns = 0;
     std::vector<RequestRow> rows; /* separate from Slot.started and its reuse */
     uint64_t drain_ns = 0, setup_ns = 0, seed_ns = 0;
+    uint64_t clock_ns = 0, pass_end_ns = 0, deadline_ns = 0;
 
     bool close()
     {
@@ -326,6 +327,14 @@ int wait_oldest(Run &r, uint64_t deadline)
 
 bool device_copy(Run &r, bool to_device, uint64_t off, uint64_t n);
 
+/* Diagnostic clocks must stay in one ordered interval; never repair a sample. */
+bool request_clock(Run &r, uint64_t now)
+{
+    if (!now || now < r.clock_ns) return false;
+    r.clock_ns = now;
+    return true;
+}
+
 /* Observation only: no extra credits, queue operations or copy in measurement. */
 bool request_begin(Run &r, const Slot &s, unsigned i)
 {
@@ -333,14 +342,15 @@ bool request_begin(Run &r, const Slot &s, unsigned i)
     if (row.t0_ns) return false;
     row.pos = s.pos; row.block = s.block; row.slba = s.block * (r.o.g.size / 512);
     row.slot = i; row.stream = i % r.streams.size(); row.t0_ns = now_ns();
-    return row.t0_ns != 0;
+    return request_clock(r, row.t0_ns) && (!s.pos ||
+        (r.rows[s.pos - 1].status == 1 && r.rows[s.pos - 1].retired_ns <= row.t0_ns));
 }
 
 bool request_retire(Run &r, const Slot &s, unsigned i)
 {
     auto &row = r.rows[s.pos];
     row.retired_ns = now_ns();
-    if (row.status || row.slot != i || row.block != s.block || !row.t0_ns ||
+    if (!request_clock(r, row.retired_ns) || row.status || row.slot != i || row.block != s.block || !row.t0_ns ||
         row.nvme_cqe_ns < row.t0_ns || row.retired_ns <= row.nvme_cqe_ns) return false;
     row.bytes = r.o.g.size; row.status = 1;
 #if E3_REQUEST_QUALIFICATION
@@ -388,6 +398,11 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
     bool load = r.o.direction == XG_LOAD, gate = load && r.o.ring;
     uint64_t t0 = now_ns(), deadline = t0 + r.o.timeout_ms * 1000000ULL;
 
+    if (r.o.request_log) {
+        if (!request_clock(r, t0) || t0 > UINT64_MAX - r.o.timeout_ms * 1000000ULL)
+            return -EIO;
+        r.deadline_ns = deadline;
+    }
     while (retired < n) {
         unsigned pending_sqes = 0;
         bool progress = false;
@@ -405,6 +420,7 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
             if (load) {
                 if (r.o.request_log && !request_begin(r, s, i)) return -EPROTO;
                 if (submit_nvme(r, i)) return -EBUSY;
+                if (r.o.request_log && !request_clock(r, s.started)) return -EIO;
                 nvme_inflight++;
                 pending_sqes++;
             } else if (!start_copy(r, i)) {
@@ -418,7 +434,11 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
                 cudaError_t e = cudaEventQuery(s.done);
                 if (e == cudaErrorNotReady) continue;
                 if (!cuda_ok(e, "event query")) return -EIO;
-                r.copy_ns += now_ns() - s.started;
+                if (r.o.request_log) {
+                    uint64_t end = now_ns();
+                    if (!request_clock(r, end) || end < s.started) return -EIO;
+                    r.copy_ns += end - s.started;
+                } else r.copy_ns += now_ns() - s.started;
                 progress = true;
                 if (load) {
                     if (r.o.request_log && !request_retire(r, s, i)) return -EPROTO;
@@ -456,13 +476,18 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
                 auto &row = r.rows[r.slots[i].pos];
                 if (row.nvme_cqe_ns || row.status) return -EPROTO;
                 row.nvme_cqe_ns = now_ns();
-                if (!row.nvme_cqe_ns || row.nvme_cqe_ns < row.t0_ns) return -EIO;
+                if (!request_clock(r, row.nvme_cqe_ns) || row.nvme_cqe_ns < row.t0_ns) return -EIO;
             }
             nvme_inflight--;
             progress = true;
-            r.nvme_ns += now_ns() - r.slots[i].started;
+            if (r.o.request_log) {
+                uint64_t end = now_ns();
+                if (!request_clock(r, end) || end < r.slots[i].started) return -EIO;
+                r.nvme_ns += end - r.slots[i].started;
+            } else r.nvme_ns += now_ns() - r.slots[i].started;
             if (load) {
                 if (!start_copy(r, unsigned(i))) return -EIO;
+                if (r.o.request_log && !request_clock(r, r.slots[i].started)) return -EIO;
             } else {
                 r.slots[i].state = Slot::FREE;
                 retired++;
@@ -472,10 +497,19 @@ int pass(Run &r, uint64_t p, uint64_t &io_ns)
             int ret = wait_oldest(r, deadline);
             if (ret) return ret;
         }
-        if (now_ns() >= deadline) return -ETIMEDOUT;
+        if (r.o.request_log) {
+            uint64_t now = now_ns();
+            if (!request_clock(r, now)) return -EIO;
+            if (now >= deadline) return -ETIMEDOUT;
+        } else if (now_ns() >= deadline) return -ETIMEDOUT;
     }
     uint64_t t1 = now_ns();
     if (!t0 || t1 <= t0) return -EIO;
+    if (r.o.request_log) {
+        if (!request_clock(r, t1) || t1 < r.rows.back().retired_ns || t1 >= deadline)
+            return -EIO;
+        r.pass_end_ns = t1;
+    }
     cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, t0, t1);
     io_ns = t1 - t0;
     return 0;
@@ -559,6 +593,7 @@ int execute(Run &r)
 {
     uint64_t setup_start = r.o.request_log ? now_ns() : 0;
     const Options &o = r.o;
+    if (o.request_log && !request_clock(r, setup_start)) return XG_EXIT_FAIL;
     int count = 0;
     if (cudaGetDeviceCount(&count) != cudaSuccess || count < 1)
         return skip("no CUDA device available");
@@ -611,10 +646,11 @@ int execute(Run &r)
     if (o.request_log) {
         r.rows.resize(xg_blocks(&o.g));
         uint64_t end = now_ns();
-        if (!setup_start || end <= setup_start) return XG_EXIT_FAIL;
+        if (!request_clock(r, end) || end <= setup_start) return XG_EXIT_FAIL;
         r.setup_ns = end - setup_start;
     }
     uint64_t seed_start = o.request_log ? now_ns() : 0;
+    if (o.request_log && !request_clock(r, seed_start)) return XG_EXIT_FAIL;
     /* The source holds the payload once; every pass reads the same bytes. */
     if (fill_window(r, o.direction == XG_SAVE, o.g.seed)) return XG_EXIT_FAIL;
 
@@ -625,7 +661,7 @@ int execute(Run &r)
         if (fill_window(r, o.direction == XG_LOAD, ~o.g.seed)) return XG_EXIT_FAIL;
         if (o.request_log) {
             uint64_t end = now_ns();
-            if (!seed_start || end <= seed_start) return XG_EXIT_FAIL;
+            if (!request_clock(r, end) || end <= seed_start) return XG_EXIT_FAIL;
             r.seed_ns = end - seed_start;
         }
         uint64_t c0 = cpu_us(), b0 = xg_host_busy_us();
@@ -639,7 +675,7 @@ int execute(Run &r)
         if (!cuda_ok(cudaDeviceSynchronize(), "drain")) return XG_EXIT_FAIL;
         if (o.request_log) {
             r.drain_ns = now_ns();
-            if (!r.drain_ns || r.drain_ns < r.rows.back().retired_ns) return XG_EXIT_FAIL;
+            if (!request_clock(r, r.drain_ns) || r.drain_ns < r.pass_end_ns || r.drain_ns >= r.deadline_ns) return XG_EXIT_FAIL;
         }
         if (verify_window(r, p)) return XG_EXIT_FAIL;
         io_ns += span;

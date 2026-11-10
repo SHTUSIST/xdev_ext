@@ -88,6 +88,17 @@ class SessionRequests(unittest.TestCase):
             self.assertEqual(r.returncode,0,r.stderr)
             self.assertEqual(json.loads(r.stdout)['rc'],1)
 
+    def test_review_s1_campaign_and_cross_row_clock_fail_closed(self):
+        for fault in (20,21,22,23,24):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory(prefix='e3-clock-output-') as d:
+                path=Path(d)/'rows'
+                r=subprocess.run([str(self.out/'case'),str(fault),str(path)],capture_output=True,text=True)
+                self.assertEqual(r.returncode,0,r.stderr)
+                self.assertEqual(json.loads(r.stdout.splitlines()[-1])['rc'],1)
+                self.assertIn('EVAL_STOP=PASS',r.stderr)
+                self.assertNotIn('E3_REQUEST_DIAGNOSTIC=PASS',r.stdout)
+                self.assertFalse(path.exists())
+
     def test_stop_error_withholds_release(self):
         r=self.run_case(12)
         self.assertEqual(r.returncode,1)
@@ -101,7 +112,9 @@ SESSION_API = r"""
 static uint64_t tick=100, done;
 static unsigned starts,arms,creates,closed,reads;
 static int fault;
-static __u64 es_now_ns(void){return fault==7?0:tick;}
+/* Review S1: exact cross-row(8..11) and pre-campaign(>=4) injections. */
+static unsigned clock_calls;
+static __u64 es_now_ns(void){clock_calls++;if(fault==7)return 0;if(fault==20&&clock_calls>=8&&clock_calls<=11)return tick-200;if(fault==21&&clock_calls>=4)return tick-10000;if(fault==22&&clock_calls==16)return tick-500;if(fault==24&&clock_calls==6)return 0;return tick;}
 static __u64 es_cpu_us(void){return tick;}
 static __u64 test_busy_us(void){return tick;}
 #define xg_host_busy_us test_busy_us
@@ -130,7 +143,7 @@ static bool sn_capability_errno(int e){(void)e;return false;}
 static int sn_unavailable(const char*msg,int e){(void)msg;(void)e;return 4;}
 """
 SESSION_MAIN = r"""
-int main(int argc,char**argv){if(argc<2||argc>3)return 2;fault=atoi(argv[1]);struct sn_opts o={.request_log="unused",.direction=XG_LOAD,.lba_size=512,.frame_size=4096,.timeout_ms=1000,.g={.size=4096,.qd=1,.window=(E3_REQUEST_QUALIFICATION?32:3)*4096,.passes=1,.seed=1}};struct es_ce ce={.fd={44,-1},.len=4096};struct sn_pass p={0};int rc=sn_session(&o,&ce,45,&p);if(argc==3&&rc==0){o.request_log=argv[2];rc=sn_request_export(&o,&p);}fprintf(stderr,"readbacks=%u\n",reads);printf("{\"rc\":%d,\"starts\":%u,\"arms\":%u,\"creates\":%u,\"closed\":%u,\"span\":%llu,\"rows\":[",rc,starts,arms,creates,closed,(unsigned long long)p.io_ns);for(unsigned i=0;i<3&&p.rows;i++){struct sn_request_row*r=&p.rows[i];printf("%s[%llu,%llu,%llu,%llu,%llu,%llu]",i?",":"",(unsigned long long)r->pos,(unsigned long long)r->key,(unsigned long long)r->slba,(unsigned long long)r->t0_ns,(unsigned long long)r->terminal_ns,(unsigned long long)r->settled_ns);}puts("]}");free(p.rows);return 0;}
+int main(int argc,char**argv){if(argc<2||argc>3)return 2;fault=atoi(argv[1]);if(fault==21)tick=1000000;if(fault==23)tick=UINT64_MAX-100;struct sn_opts o={.request_log="unused",.direction=XG_LOAD,.lba_size=512,.frame_size=4096,.timeout_ms=1000,.g={.size=4096,.qd=1,.window=(E3_REQUEST_QUALIFICATION?32:3)*4096,.passes=1,.seed=1}};struct es_ce ce={.fd={44,-1},.len=4096};struct sn_pass p={0};int rc=sn_session(&o,&ce,45,&p);if(argc==3&&rc==0){o.request_log=argv[2];rc=sn_request_export(&o,&p);}fprintf(stderr,"readbacks=%u\n",reads);printf("{\"rc\":%d,\"starts\":%u,\"arms\":%u,\"creates\":%u,\"closed\":%u,\"span\":%llu,\"rows\":[",rc,starts,arms,creates,closed,(unsigned long long)p.io_ns);for(unsigned i=0;i<3&&p.rows;i++){struct sn_request_row*r=&p.rows[i];printf("%s[%llu,%llu,%llu,%llu,%llu,%llu]",i?",":"",(unsigned long long)r->pos,(unsigned long long)r->key,(unsigned long long)r->slba,(unsigned long long)r->t0_ns,(unsigned long long)r->terminal_ns,(unsigned long long)r->settled_ns);}puts("]}");free(p.rows);return 0;}
 """
 
 
@@ -143,10 +156,10 @@ class BaselineRequests(unittest.TestCase):
         (cls.out/'cuda_runtime_api.h').write_text(CUDA_API)
         (cls.out/'liburing.h').write_text(URING_API)
         result=subprocess.run([os.environ.get('CXX','g++'),'-std=c++17','-O1','-Wall','-Wextra','-Werror',
-            '-fsanitize=undefined','-fno-sanitize-recover=undefined','-I',str(cls.out),str(HERE/'bench_uring_cuda.cc'),'-o',str(cls.out/'staged')],capture_output=True,text=True)
+            '-fsanitize=undefined','-fno-sanitize-recover=undefined','-I',str(cls.out),str(HERE/'bench_uring_cuda.cc'),'-Wl,--wrap=clock_gettime','-o',str(cls.out/'staged')],capture_output=True,text=True)
         if result.returncode:raise AssertionError(result.stderr)
         command=[os.environ.get('CXX','g++'),'-std=c++17','-O1','-Wall','-Wextra','-Werror',
-            '-DE3_REQUEST_QUALIFICATION=1','-I',str(cls.out),str(HERE/'bench_uring_cuda.cc'),'-o',str(cls.out/'qualified')]
+            '-DE3_REQUEST_QUALIFICATION=1','-I',str(cls.out),str(HERE/'bench_uring_cuda.cc'),'-Wl,--wrap=clock_gettime','-o',str(cls.out/'qualified')]
         r=subprocess.run(command,capture_output=True,text=True)
         if r.returncode:raise AssertionError(r.stderr)
 
@@ -211,6 +224,21 @@ class BaselineRequests(unittest.TestCase):
                 r,rows,_=self.run_case(failure=api)
                 self.assertEqual(r.returncode,1,r.stderr);self.assertIsNone(rows)
 
+    def test_review_s1_row_pass_and_drain_clock_fail_closed(self):
+        for mode in ('clock-row','clock-before-pass','clock-pass-end','clock-drain','clock-zero'):
+            with self.subTest(mode=mode):
+                r,rows,_=self.run_case(failure=mode)
+                self.assertEqual(r.returncode,1,r.stderr)
+                self.assertIsNone(rows);self.assertNotIn('E3_REQUEST_DIAGNOSTIC=PASS',r.stdout)
+        r,rows,_=self.run_case(failure='clock-equal')
+        self.assertEqual(r.returncode,0,r.stderr)
+        import csv,io
+        table=list(csv.DictReader(io.StringIO('\n'.join(rows.splitlines()[1:]))))
+        self.assertEqual(table[0]['retired_ns'],table[1]['t0_ns'])
+        r,rows,_=self.run_case(failure='clock-pass-equal')
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertIsNotNone(rows)
+
     def test_default_scheduler_transcript_unchanged(self):
         plain,_,_=self.run_case(False)
         diag,_,_=self.run_case(True)
@@ -241,6 +269,7 @@ using cudaStream_t=int*;
 constexpr int cudaSuccess=0,cudaErrorNotReady=34,cudaMemcpyHostToDevice=1,cudaMemcpyDeviceToHost=2;
 constexpr unsigned cudaHostRegisterDefault=0,cudaEventDisableTiming=2,cudaEventBlockingSync=1,cudaStreamNonBlocking=1;
 static int e3_stream_id,e3_destroyed_events,e3_copies;
+static bool first_event_success,last_event_success;
 inline bool fail(const char*s){const char*f=std::getenv("E3_FAKE_FAILURE");return f&&!std::strcmp(f,s);}
 inline const char*cudaGetErrorString(int){return "test API injected failure";}
 inline int cudaGetDeviceCount(int*n){*n=1;return 0;}
@@ -256,9 +285,31 @@ inline int cudaStreamDestroy(int*p){delete p;return fail("StreamDestroy");}
 inline int cudaMemcpy(void*d,const void*s,size_t n,int kind){if(kind==cudaMemcpyDeviceToHost)std::fprintf(stderr,"API readback\n");std::memcpy(d,s,n);return 0;}
 inline int cudaMemcpyAsync(void*d,const void*s,size_t n,int,int*stream){std::fprintf(stderr,"API copy %zu stream=%d\n",n,*stream);std::memcpy(d,s,n);e3_copies++;if((fail("bad-first")&&e3_copies==1)||(fail("bad-last")&&e3_copies==32))static_cast<unsigned char*>(d)[fail("bad-last")?n-1:0]^=1;return 0;}
 inline int cudaEventRecord(int*e,int*){*e=1;return 0;}
-inline int cudaEventQuery(int*e){if(fail("EventQuery"))return 1;if(*e==1){*e=2;return cudaErrorNotReady;}return 0;}
+inline int cudaEventQuery(int*e){if(fail("EventQuery"))return 1;if(*e==1){*e=2;return cudaErrorNotReady;}if(e3_copies==1)first_event_success=true;if(e3_copies==3)last_event_success=true;return 0;}
 inline int cudaEventSynchronize(int*){return 0;}
 inline int cudaDeviceSynchronize(){std::fprintf(stderr,"API sync phase=%s\n",e3_destroyed_events?"cleanup":"live");return fail("final-drain")&&e3_destroyed_events>0;}
+/* S1 uses the reviewer's link-time clock boundary, never product clock code. */
+#include <time.h>
+extern "C" int __real_clock_gettime(clockid_t,struct timespec*);
+extern "C" int __wrap_clock_gettime(clockid_t id,struct timespec *ts) {
+ if(id!=CLOCK_MONOTONIC)return __real_clock_gettime(id,ts);
+ static unsigned long long ns=1000000000ULL;
+ static unsigned post,last_post,calls;
+ ns+=100;calls++;
+ if(first_event_success)post++;
+ if(last_event_success)last_post++;
+ unsigned long long value=ns;
+ if(fail("clock-row")&&e3_copies==1&&post>=3)value-=5000;
+ if(fail("clock-before-pass")&&calls==6)value-=2000;
+ if(fail("clock-pass-end")&&last_post==4)value-=500;
+ if(fail("clock-drain")&&last_post==5)value-=200;
+ if(fail("clock-pass-equal")&&last_post>=3&&last_post<=5)value-=(last_post-2)*100;
+ if(fail("clock-zero")&&post==3)value=0;
+ if(fail("clock-equal")&&post==3)value-=100;
+ if(fail("clock-equal")&&post==4)value-=200;
+ ts->tv_sec=value/1000000000ULL;ts->tv_nsec=value%1000000000ULL;return 0;
+}
+
 """
 URING_API = r"""
 #pragma once

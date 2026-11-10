@@ -234,7 +234,7 @@ struct sn_request_row {
 
 struct sn_pass {
 	struct sn_request_row *rows;
-	uint64_t io_ns, cpu_us, host_busy_us, verified_bytes, slots_used, setup_ns, resource_setup_ns, seed_ns;
+	uint64_t io_ns, cpu_us, host_busy_us, verified_bytes, slots_used, setup_ns, resource_setup_ns, seed_ns, clock_ns;
 	struct xdev_ext_mech_stats stats;
 };
 
@@ -294,13 +294,14 @@ static int sn_request_close(struct es_run *r)
 static int sn_request_campaign(const struct sn_opts *o, const struct es_ce *ce,
 			       struct es_run *r, const __u32 *user, struct sn_pass *p)
 {
-	uint64_t n = xg_blocks(&o->g), pos, whole, deadline;
+	uint64_t n = xg_blocks(&o->g), pos, whole, whole_end, deadline;
 	uint64_t cpu0, busy0;
 	(void)ce;
 	p->rows = calloc(n, sizeof(*p->rows));
 	if (!p->rows) return XG_EXIT_FAIL;
 	whole = es_now_ns();
-	if (!whole) return XG_EXIT_FAIL;
+	if (!whole || whole < p->clock_ns ||
+	    whole > UINT64_MAX - o->timeout_ms * 1000000ULL) return XG_EXIT_FAIL;
 	deadline = whole + o->timeout_ms * 1000000ULL;
 	cpu0 = es_cpu_us(); busy0 = xg_host_busy_us();
 	for (pos = 0; pos < n; pos++) {
@@ -312,7 +313,8 @@ static int sn_request_campaign(const struct sn_opts *o, const struct es_ce *ce,
 		};
 		row->pos = pos; row->key = pos + 1; row->slba = o->slba + pos * (o->g.size / o->lba_size);
 		row->control_ns = es_now_ns();
-		if (!row->control_ns || row->control_ns >= deadline ||
+		if (!row->control_ns || row->control_ns < (pos ? p->rows[pos - 1].settled_ns : whole) ||
+		    row->control_ns >= deadline ||
 		    es_stats(r, &p->stats) || sn_request_valid(&p->stats, r->session, pos) ||
 		    sn_request_arm(r, pos + 1)) return XG_EXIT_FAIL;
 		row->t0_ns = es_now_ns();
@@ -335,10 +337,14 @@ static int sn_request_campaign(const struct sn_opts *o, const struct es_ce *ce,
 		}
 #endif
 	}
-	p->io_ns = p->rows[n - 1].settled_ns - whole;
+	whole_end = es_now_ns();
+	if (!whole_end || whole_end < p->rows[n - 1].settled_ns || whole_end >= deadline)
+		return XG_EXIT_FAIL;
+	p->clock_ns = whole_end;
+	p->io_ns = whole_end - whole;
 	p->cpu_us = es_cpu_us() - cpu0;
 	p->host_busy_us = xg_host_busy_us() - busy0;
-	cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, whole, p->rows[n - 1].settled_ns);
+	cpu_timer_store(&endpoint_timer, "io_ns", endpoint_timer.count, whole, whole_end);
 	es_print_stats(&p->stats);
 	return XG_EXIT_PASS;
 }
@@ -387,6 +393,8 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 	uint64_t setup_start = o->request_log ? es_now_ns() : 0;
 	int ret, nvme = o->direction == XG_LOAD ? 0 : 1, cei = 1 - nvme, closed;
 
+	if (o->request_log && (!setup_start || setup_start < p->clock_ns))
+		return XG_EXIT_FAIL;
 	memset(&c, 0, sizeof(c));
 	c.layout = (struct xdev_ext_mech_layout) {
 		.frame_size = (__u32)o->frame_size, .hdr_room = 0,
@@ -450,6 +458,7 @@ static int sn_session(const struct sn_opts *o, const struct es_ce *ce, int ng,
 		uint64_t end = es_now_ns();
 		if (!setup_start || end < setup_start) { ret = XG_EXIT_FAIL; goto out; }
 		p->setup_ns = end - setup_start;
+		p->clock_ns = end;
 		ret = sn_request_campaign(o, ce, &r, user, p);
 		goto out;
 	}
@@ -584,7 +593,7 @@ int main(int argc, char **argv)
 	struct sn_pass p = { 0 }, total = { 0 };
 	unsigned char *buf = NULL, *seen = NULL;
 	struct stat st;
-	uint64_t pass, slots_used = 0, resource_start = 0, resource_setup = 0, seed_start = 0, seed_span = 0;
+	uint64_t pass, slots_used = 0, resource_start = 0, resource_setup = 0, seed_start = 0, seed_span = 0, diagnostic_clock = 0;
 	int ret, fd = -1, ng = -1, closed;
 
 	setvbuf(stdout, NULL, _IOFBF, 1 << 16);
@@ -646,9 +655,13 @@ int main(int argc, char **argv)
 		uint64_t end = es_now_ns();
 		if (!end || end <= resource_start) { ret = XG_EXIT_FAIL; goto out; }
 		resource_setup = end - resource_start;
+		diagnostic_clock = end;
 	}
 	for (pass = 0; pass < o.g.passes; pass++) {
-		if (o.request_log) seed_start = es_now_ns();
+		if (o.request_log) {
+			seed_start = es_now_ns();
+			if (!seed_start || seed_start < diagnostic_clock) { ret = XG_EXIT_FAIL; goto out; }
+		}
 		/* Seeding is outside the timed region and repeated per pass. */
 		ret = sn_file_fill(fd, &o, buf, o.direction == XG_LOAD ? o.g.seed : ~o.g.seed);
 		if (!ret)
@@ -662,9 +675,10 @@ int main(int argc, char **argv)
 			uint64_t end = es_now_ns();
 			if (!seed_start || end <= seed_start) { ret = XG_EXIT_FAIL; goto out; }
 			seed_span = end - seed_start;
+			diagnostic_clock = end;
 		}
 		memset(&p, 0, sizeof(p));
-		p.resource_setup_ns = resource_setup; p.seed_ns = seed_span;
+		p.resource_setup_ns = resource_setup; p.seed_ns = seed_span; p.clock_ns = diagnostic_clock;
 		ret = sn_session(&o, &ce, ng, &p);
 		if (ret)
 			goto out;
