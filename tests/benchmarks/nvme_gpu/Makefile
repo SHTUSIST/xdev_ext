@@ -2,12 +2,12 @@ PYTHON ?= python3
 CUDA_ROOT ?= /usr/local/cuda
 BUILD_DIR ?= build
 
-.PHONY: all check probe repeat-start-probe cuda-build clean
+.PHONY: all check worker-accounting-check probe repeat-start-probe cuda-build clean
 # Host build of the session arm; the CUDA arms need an official SDK.
 all:
 	$(PYTHON) run.py --arms session --sizes 4096 --qd 1 --build-only
 
-check:
+check: worker-accounting-check
 	$(PYTHON) test_contract.py -v
 	$(PYTHON) -B test_ce_vmm.py -v
 	$(PYTHON) -B test_ce_runtime.py -v
@@ -17,6 +17,9 @@ check:
 	$(PYTHON) -B test_session_timing.py -v
 	$(PYTHON) -B test_delegate_build.py -v
 	$(PYTHON) -B test_session_rand.py -v
+
+worker-accounting-check:
+	$(PYTHON) -B test_ce_worker_accounting.py -v
 
 probe:
 	mkdir -p $(BUILD_DIR)

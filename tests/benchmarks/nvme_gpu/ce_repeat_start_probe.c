@@ -5,6 +5,7 @@
 #define _GNU_SOURCE
 #include <stdlib.h>
 #include "eval_session.h"
+#include "ce_worker_accounting.h"
 #ifndef CE_REPEAT_SOURCE
 #define CE_REPEAT_SOURCE "unqualified"
 #endif
@@ -118,10 +119,71 @@ static void rp_report(bool aba, unsigned int round, __u64 session,
          (unsigned long long)(s->batches_done - before), (unsigned long long)(t1 - t0));
 }
 
+
+static void rp_worker_snapshot(unsigned int round, uint64_t sid, const char *edge,
+                               const struct cwa_identity *id,
+                               const struct cwa_snapshot *sample, int error)
+{
+ printf("CE_WORKER_ACCOUNTING_SNAPSHOT SOURCE=%s session=%llu round=%u edge=%s status=%s error=%d ",
+        CE_REPEAT_SOURCE, (unsigned long long)sid, round, edge, error ? "HOLD" : "VALID", error);
+ if (id->pid > 0)
+  printf("pid=%d start_ticks=%llu comm=%s", id->pid,
+         (unsigned long long)id->start_ticks, id->comm);
+ else
+  fputs("pid=UNKNOWN start_ticks=UNKNOWN comm=UNKNOWN", stdout);
+ if (!error)
+  printf(" runtime_ns=%llu run_delay_ns=%llu pcount=%llu read_begin_ns=%llu read_end_ns=%llu",
+         (unsigned long long)sample->runtime_ns, (unsigned long long)sample->run_delay_ns,
+         (unsigned long long)sample->pcount, (unsigned long long)sample->read_begin_ns,
+         (unsigned long long)sample->read_end_ns);
+ putchar('\n');
+}
+
+static int rp_worker_report(unsigned int round, uint64_t sid,
+                             const struct cwa_identity *id,
+                             const struct cwa_snapshot *pre, const struct cwa_snapshot *post,
+                             int discovery, int pre_error, int post_error, int prior_error,
+                             uint64_t t0, uint64_t t1)
+{
+ struct cwa_delta delta = {0};
+ const char *reason = "none";
+ int error = 0, have_delta = 0;
+ rp_worker_snapshot(round, sid, "pre", id, pre, pre_error);
+ rp_worker_snapshot(round, sid, "post", id, post, post_error);
+ if (discovery) { error = discovery; reason = "discovery"; }
+ else if (pre_error) { error = pre_error; reason = error == -ESTALE ? "identity" : "pre-read"; }
+ else if (post_error) { error = post_error; reason = error == -ESTALE ? "identity" : "post-read"; }
+ else {
+  error = prior_error ? prior_error : cwa_delta(pre, post, &delta);
+  if (error == -ESTALE) reason = "identity";
+  else if (error == -ERANGE) reason = "counter-regression";
+  else if (error == -EINVAL) reason = "read-order";
+  else {
+   if (pre->read_end_ns > t0 || t0 >= t1 || t1 > post->read_begin_ns) {
+    error = -EINVAL; reason = "read-order";
+   } else {
+    have_delta = 1;
+    if (error) reason = "no-progress";
+   }
+  }
+ }
+ printf("CE_WORKER_ACCOUNTING SOURCE=%s session=%llu round=%u status=%s reason=%s "
+        "timed_begin_ns=%llu timed_end_ns=%llu scope=guest-worker-outer-read-settle",
+        CE_REPEAT_SOURCE, (unsigned long long)sid, round, error ? "HOLD" : "VALID", reason,
+        (unsigned long long)t0, (unsigned long long)t1);
+ if (have_delta)
+  printf(" runtime_delta_ns=%llu run_delay_delta_ns=%llu pcount_delta=%llu outer_begin_ns=%llu outer_end_ns=%llu",
+         (unsigned long long)delta.runtime_ns, (unsigned long long)delta.run_delay_ns,
+         (unsigned long long)delta.pcount, (unsigned long long)pre->read_begin_ns,
+         (unsigned long long)post->read_end_ns);
+ putchar('\n');
+ return error != 0;
+}
+
 int main(int argc, char **argv)
 {
  const char *dev = "/dev/nvidia0";
- bool wait_aba = false;
+ bool wait_aba = false, worker_accounting = false;
  struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
  struct es_run r = { .ring = -1, .efd = -1 };
  struct xdev_ext_mech_create c = { 0 };
@@ -129,18 +191,26 @@ int main(int argc, char **argv)
  struct io_uring_xdev_ext_umem_reg reg = { .size = RP_BYTES, .frame_size = RP_FRAME };
  unsigned char *umem = MAP_FAILED, *buf = NULL;
  __u32 user[RP_FRAMES];
+ struct cwa_identity worker = {0};
+ struct cwa_snapshot worker_last = {0};
+ int worker_last_valid = 0;
+ __u64 accounting_session = 0;
+ unsigned int worker_valid = 0, worker_hold = 0;
+ int worker_discovery = 0;
  unsigned int round, i;
  int fd_before, ret, stop;
  if (argc == 2 && !strcmp(argv[1], "--help")) {
-  puts("usage: ce_repeat_start_probe [--ce-dev /dev/nvidiaN] [--wait-aba]\n"
+  puts("usage: ce_repeat_start_probe [--ce-dev /dev/nvidiaN] [--wait-aba|--worker-accounting]\n"
        "fixed 64KiB/F4KiB/D4/N32/7START; --wait-aba BLOCK7/SPIN7/BLOCK7; internal only, never a paper result");
   return XG_EXIT_PASS;
  }
  for (i = 1; i < (unsigned int)argc; i++) {
   if (!strcmp(argv[i], "--wait-aba") && !wait_aba) wait_aba = true;
+  else if (!strcmp(argv[i], "--worker-accounting") && !worker_accounting) worker_accounting = true;
   else if (!strcmp(argv[i], "--ce-dev") && i + 1 < (unsigned int)argc) dev = argv[++i];
   else return XG_EXIT_USAGE;
  }
+ if (worker_accounting && wait_aba) return XG_EXIT_USAGE;
  if (es_ce_is_sim(dev) || !strcmp(CE_REPEAT_SOURCE, "unqualified"))
   return XG_EXIT_USAGE;
  ret = es_ce_runtime_begin(dev, &fd_before);
@@ -173,7 +243,13 @@ int main(int argc, char **argv)
  if (!ret)
   ret = es_stats(&r, &s);
  if (ret) { ret = XG_EXIT_FAIL; goto out; }
+ if (worker_accounting) {
+  accounting_session = r.session;
+  worker_discovery = cwa_discover("/proc", r.session, &worker);
+ }
  for (round = 0; round < rp_rounds(wait_aba); round++) {
+  struct cwa_snapshot worker_pre = {0}, worker_post = {0};
+  int worker_pre_error = 0, worker_post_error = 0, worker_prior_error = 0;
   __u64 before = (__u64)round * RP_BATCHES, target = before + RP_BATCHES;
   __u64 published = (__u64)round * RP_FRAMES, t0, t1, deadline, cpu0 = 0, cpu1 = 0;
   struct xdev_ext_mech_start start = {
@@ -192,6 +268,8 @@ int main(int argc, char **argv)
   }
   deadline = es_now_ns() + 10000000000ULL;
   if (wait_aba && !(cpu0 = rp_cpu_ns())) { ret = XG_EXIT_FAIL; break; }
+  if (worker_accounting)
+   worker_pre_error = worker_discovery ? worker_discovery : cwa_snapshot("/proc", &worker, &worker_pre);
   t0 = es_now_ns();
   ret = es_mech(r.ring, XDEV_EXT_MECH_OP_START, (uintptr_t)&start);
   if (!ret)
@@ -202,12 +280,26 @@ int main(int argc, char **argv)
    ret = es_settle(&r, target, deadline, &s);
   else
    (void)es_stats(&r, &s);
+  if (worker_accounting)
+   worker_post_error = worker_discovery ? worker_discovery : ret ? -ECANCELED : cwa_snapshot("/proc", &worker, &worker_post);
   es_print_stats(&s);
   if (ret || !t0 || t1 <= t0 || (wait_aba && (!cpu1 || cpu1 < cpu0)) || rp_valid(&s, r.session, target, published + RP_FRAMES) ||
       es_ce_access(&ce, false, 0, buf, RP_BYTES) || rp_check(buf, round)) {
    ret = XG_EXIT_FAIL; break;
   }
   rp_report(wait_aba, round, r.session, &s, t0, t1, cpu1 - cpu0);
+  if (worker_accounting) {
+   if (worker_last_valid && !worker_pre_error) {
+    struct cwa_delta gap;
+    worker_prior_error = cwa_delta(&worker_last, &worker_pre, &gap);
+    if (worker_prior_error == -ENODATA) worker_prior_error = 0;
+   }
+   if (rp_worker_report(round, r.session, &worker, &worker_pre, &worker_post,
+                        worker_discovery, worker_pre_error, worker_post_error, worker_prior_error, t0, t1))
+    worker_hold++;
+   else worker_valid++;
+   if (!worker_post_error) { worker_last = worker_post; worker_last_valid = 1; }
+  }
  }
  if (wait_aba && ret)
   fprintf(stderr, "CE_WAIT_ABA_FAILURE global_round=%u phase=%u mode=%s error=%d\n",
@@ -233,5 +325,10 @@ int main(int argc, char **argv)
  printf("%s result=%s rounds=%u diagnostic=internal "
         "scope=session-local-not-channel-causality\n", wait_aba ? "CE_WAIT_ABA_DONE" : "CE_REPEAT_START_DONE",
         ret ? "FAIL" : "PASS", ret ? 0 : rp_rounds(wait_aba));
+ if (worker_accounting)
+  fprintf(stderr, "CE_WORKER_ACCOUNTING_DONE SOURCE=%s session=%llu observations=%u valid=%u hold=%u "
+          "status=%s data=%s scope=guest-worker-outer-read-settle\n", CE_REPEAT_SOURCE,
+          (unsigned long long)accounting_session, worker_valid + worker_hold, worker_valid, worker_hold,
+          !ret && worker_valid == RP_ROUNDS && !worker_hold ? "VALID" : "HOLD", ret ? "FAIL" : "PASS");
  return ret ? (ret == XG_EXIT_UNAVAILABLE ? ret : XG_EXIT_FAIL) : XG_EXIT_PASS;
 }
