@@ -10520,6 +10520,14 @@
       "source": "tests/network/xsk/legacy_rx_batch_completion_wakeup_fixture.c",
       "component": "linux",
       "native_path": "tools/testing/selftests/xsk_xdev_ext/legacy_rx_batch_completion_wakeup_fixture.c"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/ce_repeat_start_probe.c",
+      "logical_path": "tests/eval/nvme_gpu/ce_repeat_start_probe.c"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_repeat_start.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_repeat_start.py"
     }
   ]
 }
