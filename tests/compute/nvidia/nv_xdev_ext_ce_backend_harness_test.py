@@ -116,6 +116,13 @@ class BackendHarness(unittest.TestCase):
                                 f"{variant} {case}\n{result.stdout[-3000:]}\n"
                                 f"{result.stderr[-3000:]}")
 
+    def test_successful_submit_watchdog_without_redundant_irq_kick(self):
+        self.run_cases(("submit-watchdog",))
+
+    def test_irq_deadlines_stale_expiry_stop_and_active_event(self):
+        self.run_cases(("watchdog-deadlines", "watchdog-stale-stop", "event-active-pass"),
+                       ("event+iova", "event+phys"))
+
     # G1 + exactly-once in both completion variants
     def test_g1_completion_exactly_once(self):
         self.run_cases(("complete-once", "complete-partial", "token-zero",

@@ -534,8 +534,10 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
         h->submitted = token;
 #ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
         h->backoff = nv_xdev_ext_ce_poll_base();
-#endif
         queue_work(system_unbound_wq, &h->progress);
+#else
+        timer_reduce(&h->watchdog, h->deadlines[slot - h->slots]);
+#endif
         rc = 0;
     } else if (outcome == NV_XDEV_EXT_CE_AMBIGUOUS) {
         WRITE_ONCE(h->region->ambiguous, NV_TRUE);

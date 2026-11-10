@@ -492,6 +492,21 @@ static int mod_timer(struct timer_list *t, unsigned long expires)
 	pthread_mutex_unlock(&deferred_lock);
 	return was;
 }
+/* Kernel-service boundary: arm inactive, never extend an earlier expiry. */
+static int timer_reduce(struct timer_list *t, unsigned long expires)
+{
+	int was;
+	pthread_mutex_lock(&deferred_lock);
+	was = t->armed;
+	if (!was || time_before(expires, t->expires)) {
+		H.timer_arms++;
+		t->armed = 1;
+		t->expires = expires;
+		add_unique((void **)pending_timer, t);
+	}
+	pthread_mutex_unlock(&deferred_lock);
+	return was;
+}
 #define add_timer(t) ((void)mod_timer(t, (t)->expires))
 #define timer_delete harness_timer_delete
 static int timer_delete(struct timer_list *t)
@@ -1031,6 +1046,7 @@ static int xdev_ext_ce_backend_register(const struct xdev_ext_ce_backend_ops *op
 { registered_ops = ops; return 0; }
 static void xdev_ext_ce_backend_unregister(const struct xdev_ext_ce_backend_ops *ops)
 { (void)ops; registered_ops = NULL; }
+static u64 event_after_completion; /* One-shot boundary hook, no backend rewrite. */
 static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int status,
 				 bool hw_submitted, u64 bytes_done)
 {
@@ -1051,6 +1067,10 @@ static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int 
 	memcpy(c->synced_cpu, H.synced_cpu, sizeof(c->synced_cpu));
 	__atomic_add_fetch(&H.total_completions, 1, __ATOMIC_SEQ_CST);
 	pthread_mutex_unlock(&H.big);
+	if (event_after_completion == ticket) {
+		event_after_completion = 0;
+		fire_event(H.rm_last);
+	}
 }
 
 /* ------------------------------------------- the actual production body */
@@ -1182,6 +1202,127 @@ static void case_bind_unbind_clean(void)
 	common_checks();
 }
 
+/* These cases run the complete production submit/progress/teardown bodies. */
+static void case_submit_watchdog(void)
+{
+	struct fixture fx;
+	struct nv_xdev_ext_ce_host *h;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	h = fx.host;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+#if VARIANT_EVENT
+	CHECK(!h->progress.pending, "normal IRQ submit redundantly queued progress");
+	CHECK(h->watchdog.armed && h->watchdog.expires == h->deadlines[0],
+	      "normal IRQ submit did not immediately arm its exact deadline");
+#else
+	CHECK(h->progress.pending, "POLL submit lost its initial progress queue");
+#endif
+	deliver(H.rm_last);
+	CHECK(H.done[1].count == 1, "submit did not complete exactly once");
+	ops->unbind_host(fx.host);
+	ops->unbind_region(&fx.r);
+	CHECK(H.rm_unbind == 1, "drained submit failed unbind");
+	common_checks();
+}
+
+static void case_watchdog_deadlines(void)
+{
+#if VARIANT_EVENT
+	struct fixture fx;
+	struct nv_xdev_ext_ce_host *h;
+	unsigned long first, second;
+	/* Native unsigned-long width and existing wrap-aware time comparisons. */
+	jiffies = ~0UL - NV_XDEV_EXT_CE_TIMEOUT / 2;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	h = fx.host;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+	first = h->deadlines[0];
+	CHECK(h->watchdog.armed && h->watchdog.expires == first, "inactive watchdog not armed");
+	jiffies += 10;
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "submit2");
+	second = h->deadlines[1];
+	CHECK(h->watchdog.expires == first, "newer request postponed the oldest deadline");
+	/* A later preexisting expiry must shorten; an earlier one must stay. */
+	mod_timer(&h->watchdog, second + 100);
+	REQUIRE(submit1(&fx, 3, XDEV_EXT_MECH_DIR_TO_DEVICE, 8192, 4096) == 0, "submit3");
+	CHECK(h->watchdog.expires == second, "later watchdog was not reduced");
+	mod_timer(&h->watchdog, first - 1);
+	REQUIRE(submit1(&fx, 4, XDEV_EXT_MECH_DIR_TO_DEVICE, 12288, 4096) == 0, "submit4");
+	CHECK(h->watchdog.expires == first - 1, "earlier watchdog was extended");
+	deliver(1);
+	CHECK(H.done[1].count == 1 && H.done[2].count == 0, "partial event retirement");
+	CHECK(h->watchdog.expires == second, "progress did not select next remaining deadline");
+	jiffies = second - 1;
+	run_deferred(2);
+	CHECK(H.done[2].count == 0, "timeout before deadline");
+	jiffies = second;
+	run_deferred(4);
+	CHECK(H.done[2].count == 1 && H.done[2].status < 0 && H.done[3].count == 1 &&
+	      H.done[4].count == 1, "lost timeout across jiffies wrap");
+	CHECK(H.done[1].count == 1, "retired request completed again");
+	ops->unbind_host(fx.host);
+	CHECK(H.rm_unbind == 0 && harness_is_live(h), "quarantined host released");
+	common_checks();
+#endif
+}
+
+static void case_watchdog_stale_and_stop(void)
+{
+#if VARIANT_EVENT
+	struct fixture fx;
+	struct nv_xdev_ext_ce_host *h;
+	struct timer_list *timer;
+	unsigned long old, next;
+	unsigned int arms, submits, i;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	h = fx.host; timer = &h->watchdog;
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+	old = h->deadlines[0];
+	deliver(H.rm_last);
+	CHECK(timer->armed && timer->expires == old, "drain unexpectedly canceled watchdog");
+	jiffies += 10;
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit2");
+	next = h->deadlines[0];
+	CHECK(timer->expires == old, "stale earlier expiry extended on new submit");
+	jiffies = old;
+	run_deferred(2);
+	CHECK(H.done[2].count == 0 && timer->expires == next, "stale expiry lost/failed pending work");
+	deliver(H.rm_last);
+	mutex_lock(&h->lock); h->pool.stopping = 1; mutex_unlock(&h->lock);
+	submits = H.rm_submit; arms = H.timer_arms;
+	CHECK(submit1(&fx, 3, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) < 0 &&
+	      H.rm_submit == submits, "stopped pool accepted submission");
+	fire_event(H.rm_last); run_deferred(2);
+	CHECK(H.timer_arms == arms, "stopped/FREE worker rearmed timer");
+	ops->unbind_host(fx.host);
+	CHECK(H.rm_unbind == 1 && !harness_is_live(h), "stopped drained host not released");
+	for (i = 0; i < MAX_DEFERRED; i++)
+		CHECK(pending_timer[i] != timer && !pending_work[i], "timer/work retained after release");
+	ops->unbind_region(&fx.r);
+	common_checks();
+#endif
+}
+
+static void case_event_active_pass(void)
+{
+#if VARIANT_EVENT
+	struct fixture fx;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit1");
+	REQUIRE(submit1(&fx, 2, XDEV_EXT_MECH_DIR_TO_DEVICE, 4096, 4096) == 0, "submit2");
+	event_after_completion = 1; /* After this pass's watermark snapshot. */
+	fire_event(1);
+	run_deferred_once();
+	CHECK(H.done[1].count == 1 && H.done[2].count == 0 &&
+	      ((struct nv_xdev_ext_ce_host *)fx.host)->progress.pending,
+	      "event during active pass did not preserve next pass");
+	run_deferred(4);
+	CHECK(H.done[1].count == 1 && H.done[2].count == 1, "active-pass event lost/duplicated completion");
+	ops->unbind_host(fx.host); ops->unbind_region(&fx.r);
+	common_checks();
+#endif
+}
+
 static void case_complete_once(void)
 {
 	struct fixture fx;
@@ -1249,6 +1390,7 @@ static void case_complete_in_submit(void)
 	H.fire_in_submit = 1;
 	REQUIRE(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
 	H.fire_in_submit = 0;
+	CHECK(((struct nv_xdev_ext_ce_host *)fx.host)->progress.pending, "early IRQ did not queue progress");
 	run_deferred(4);
 	CHECK(H.done[1].count == 1,
 	      "G1: event raised before submit returned its token was lost (count=%u); "
@@ -1335,6 +1477,7 @@ static void case_ambiguous_submit(void)
 	CHECK(H.done[1].count == 1 && H.done[1].status < 0 && H.done[1].hw == 1,
 	      "AMBIGUOUS completion count=%u status=%d hw=%d", H.done[1].count,
 	      H.done[1].status, H.done[1].hw);
+	CHECK(((struct nv_xdev_ext_ce_host *)fx.host)->progress.pending, "AMBIGUOUS lost progress queue");
 	H.submit_status = NV_OK;
 	deliver(H.rm_last + 1);
 	CHECK(H.done[1].count == 1, "AMBIGUOUS ticket completed again (%u)", H.done[1].count);
@@ -1357,6 +1500,7 @@ static void case_pre_submit_failure(void)
 	CHECK(submit1(&fx, 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) < 0,
 	      "pre-submit failure must return an error");
 	CHECK(H.done[1].count == 0, "pre-submit failure completed");
+	CHECK(H.timer_arms == 0 && !((struct nv_xdev_ext_ce_host *)fx.host)->progress.pending, "pre-submit failure armed or queued");
 #if VARIANT_IOVA
 	CHECK(H.synced_cpu[0], "pre-submit refusal did not return streaming ownership to CPU");
 #endif
@@ -2004,6 +2148,10 @@ static void case_bind_attached_failure(void)
 }
 
 static const struct named_case cases[] = {
+	{ "submit-watchdog", case_submit_watchdog },
+	{ "watchdog-deadlines", case_watchdog_deadlines },
+	{ "watchdog-stale-stop", case_watchdog_stale_and_stop },
+	{ "event-active-pass", case_event_active_pass },
 	{ "bind-unbind-clean", case_bind_unbind_clean },
 	{ "bind-attached-window", case_bind_attached_window },
 	{ "bind-attached-outside", case_bind_attached_outside },
