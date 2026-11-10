@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /* Included after the existing stack environment, never in production code. */
-static unsigned checks, destroyed, queued_at_destroy;
+static unsigned checks, destroyed, queued_at_destroy, flushed;
 static bool inject_at_destroy;
 static struct xdev_ext_mech_session *receiving;
 unsigned b4_raw_queued(struct xdev_ext_mech_stage *);
@@ -46,9 +46,20 @@ int kthread_mod_delayed_work(void *worker,struct delayed_work *work,unsigned lon
 static bool kthread_cancel_delayed_work_sync(struct delayed_work *work)
 { (void)work;return false; }
 static void synchronize_rcu(void) { }
-static void kthread_flush_worker(void *worker) { (void)worker;abort(); }
+static void kthread_flush_worker(void *worker)
+{
+ B4_CHECK(worker==receiving&&receiving->worker==worker&&receiving->worker_gone,
+          "flush owns the quiesced receiver worker");
+ B4_CHECK(!flushed&&!destroyed,"exactly one flush precedes destruction");
+ B4_CHECK(receiving->st[0].priv&&link(1)->chan[0].ep[1],
+          "flush precedes endpoint unbind");
+ B4_CHECK(!receiving->native_controls&&!receiving->ss.inflight&&
+          !receiving->ss.sequestered,"flush has no accepted payload");
+ flushed++;
+}
 static void kthread_destroy_worker(void *worker)
 {
+ B4_CHECK(flushed==1,"destruction requires its one completed flush");
  B4_CHECK(worker==receiving&&receiving->worker_gone,
           "actual release marked worker_gone before destroying worker");
  B4_CHECK(!xdev_ext_mech_session_admits(receiving),"admission is already closed");

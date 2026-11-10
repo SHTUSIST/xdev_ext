@@ -111,6 +111,9 @@ int xsk_xdev_ext_mech_pool_bind(struct xdev_ext_mech_pool *pool, struct file *f,
 #define CHAIN_QUEUED 256
 static struct kthread_worker chain_workers[CHAIN_WORKERS];
 static unsigned chain_nr_workers;
+static struct xdev_ext_mech_session *chain_creating;
+static struct xdev_ext_mech_session *chain_worker_sessions[CHAIN_WORKERS];
+static unsigned chain_worker_flushes[CHAIN_WORKERS];
 static struct kthread_work *chain_queue[CHAIN_QUEUED];
 static unsigned chain_nr_queued;
 static unsigned long long chain_order;
@@ -120,6 +123,8 @@ struct kthread_worker *kthread_run_worker(unsigned flags, const char *fmt, ...)
 {
 	(void)flags; (void)fmt;
 	assert(chain_nr_workers < CHAIN_WORKERS);
+	assert(chain_creating);
+	chain_worker_sessions[chain_nr_workers] = chain_creating;
 	chain_workers[chain_nr_workers].id = chain_nr_workers + 1;
 	return &chain_workers[chain_nr_workers++];
 }
@@ -169,11 +174,24 @@ void kthread_cancel_delayed_work_sync(struct kthread_delayed_work *d)
 }
 void kthread_flush_worker(struct kthread_worker *w)
 {
-	(void)w;
-	abort(); /* STOP reports are outside this fixture; CREATE passes NULL */
+	unsigned i;
+	for (i = 0; i < chain_nr_workers && w != &chain_workers[i]; i++) { }
+	assert(i < chain_nr_workers);
+	assert(chain_worker_sessions[i]->worker == w);
+	assert(chain_worker_sessions[i]->worker_gone);
+	assert(!chain_worker_flushes[i] && chain_running != w);
+	/* This fixture only releases failed CREATE's empty worker. Never
+	 * discard a queued callback in place of actually executing a flush. */
+	for (unsigned j = 0; j < chain_nr_queued; j++)
+		assert(chain_queue[j]->worker != w);
+	chain_worker_flushes[i]++;
 }
 void kthread_destroy_worker(struct kthread_worker *w)
 {
+	unsigned i;
+	for (i = 0; i < chain_nr_workers && w != &chain_workers[i]; i++) { }
+	assert(i < chain_nr_workers && chain_worker_flushes[i] == 1);
+	assert(chain_worker_sessions[i]->worker == w && chain_worker_sessions[i]->worker_gone);
 	/* CREATE rollback cancels its delayed work before destruction. An
 	 * outstanding callback needs a real flush, not a silent queue discard. */
 	assert(chain_running != w);
@@ -244,7 +262,9 @@ struct xdev_ext_mech_session *chain_session_create(const struct xdev_ext_mech_cr
 		return NULL;
 	}
 	xdev_ext_mech_session_init(s, NULL, c, frames);
+	chain_creating = s;
 	ret = xdev_ext_mech_session_bind(s, c, NULL);
+	chain_creating = NULL;
 	if (!ret)
 		ret = xdev_ext_mech_sess_activate(&s->ss);
 	if (ret) {
