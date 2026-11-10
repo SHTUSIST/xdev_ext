@@ -16,6 +16,8 @@ class Repeat(unittest.TestCase):
   if not C.exists():raise AssertionError('new repeat-START production helper is missing')
   cls.runs=[];cls.output=os.environ.get("CE_REPEAT_TEST_OUTPUT");cls.source=C.read_text();build=ROOT/'build';build.mkdir(exist_ok=True);cls.tmp=tempfile.TemporaryDirectory(prefix='repeat-host-',dir=build);cls.addClassCleanup(cls.tmp.cleanup);work=Path(cls.tmp.name)
   es=Path(__file__).with_name('eval_session.h').read_text();a=es.index('struct es_run {');b=es.index('};',a)+2
+  header=next((ROOT/name for name in ('src/core/include/uapi/linux/xdev_ext_mech.h','kernel/include/uapi/linux/xdev_ext_mech.h') if (ROOT/name).is_file()),None)
+  if header is None:raise AssertionError('real xdev_ext_mech.h missing from both canonical/native UAPI layouts')
   prefix='''#define _GNU_SOURCE
 #include <errno.h>
 #include <stdint.h>
@@ -26,7 +28,7 @@ class Repeat(unittest.TestCase):
 #include <unistd.h>
 #include <sys/eventfd.h>
 #include "UAPI"
-'''.replace('UAPI',str(ROOT/'src/core/include/uapi/linux/xdev_ext_mech.h'))
+'''.replace('UAPI',str(header))
   prefix+='\n'.join(l for l in cls.source.splitlines() if l.startswith('#define RP_'))+'\n'+es[a:b]+'''
 static struct xdev_ext_mech_notify_arm seen;
 static int observed_fd, inject, calls;
