@@ -388,10 +388,12 @@ class ObservedChildQualification(unittest.TestCase):
 
     def test_actual_observed_software_child_journal_can_qualify(self):
         module = load()
-        child_source = """import json,os,time
+        child_source = """import json,os,sys,time
 from pathlib import Path
 config=json.loads(Path(os.environ['XDEV_EXT_EVAL_CPU_OWNER']).read_text())
 start_ticks=int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])
+if sys.stdin.read(1) != 'G':
+    raise SystemExit('identity observation ACK missing')
 t0=time.monotonic_ns()
 time.sleep(.025)
 t1=time.monotonic_ns()
@@ -405,7 +407,7 @@ print(json.dumps(dict(duration=t1-t0,pid=os.getpid(),start_ticks=start_ticks)))
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, self.clean_environment(), clear=True):
             with module.TimerCpuRun(Path(tmp)/'owner') as owner:
                 done = owner.run([sys.executable, '-c', child_source],
-                                 capture_output=True, text=True, check=True, timeout=3)
+                                 input='G', capture_output=True, text=True, check=True, timeout=3)
                 actual = json.loads(done.stdout)
             result = owner.measurement([dict(arm='uring-cuda', identity={'test': 'actual-child'},
                                       metric='io_ns', keys=[0], expected_duration_ns=actual['duration'],
