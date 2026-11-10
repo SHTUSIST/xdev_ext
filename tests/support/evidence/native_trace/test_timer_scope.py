@@ -1,4 +1,5 @@
 """Software-only timer replay; literal clocks/durations and actual owner lifecycle."""
+import ast
 import copy
 import importlib.util
 import json
@@ -13,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -502,10 +504,13 @@ class NestedHandshake:
         self.samples = queue.Queue(maxsize=512)
         self.sample_offset, self.sample_sequence = 0, 0
         self.latest = self.before_start = None
-        self.ready = self.span = None
+        self.parent_ready = self.ready = self.span = None
         self.start_probe = self.start_ack = self.started = False
         self.end_probe = self.end_held = self.end_ack = self.old_checked = False
         self.child_exiting = False
+        self.ready_event = threading.Event()
+        self.original_watch = owner.watch_child
+        self.startup_read = self.startup_write = None
         self.finished = threading.Event()
         self.stopping = threading.Event()
         self.error = None
@@ -518,12 +523,47 @@ class NestedHandshake:
         owner.sampler.sample_callback = self.sample_callback
         self.thread = threading.Thread(target=self.coordinate, name='nested-identity-handshake')
         try:
+            self.startup_read, self.startup_write = os.pipe()
             self.thread.start()
         except BaseException:
             owner.sampler.sample_callback = self.original_callback
             for endpoint in (self.control, self.child_socket, self.wake_read, self.wake_write):
                 endpoint.close()
+            for fd in (self.startup_read, self.startup_write):
+                if fd is not None:
+                    os.close(fd)
             raise
+
+    def watch_parent(self, process, command):
+        # Popen inherited these endpoints. Root copies must not hide startup EOF.
+        self.child_socket.close()
+        for name in ('startup_read', 'startup_write'):
+            fd = getattr(self, name)
+            if fd is not None:
+                os.close(fd)
+                setattr(self, name, None)
+        remaining = self.protocol_deadline-time.monotonic()
+        if remaining <= 0 or not self.ready_event.wait(remaining):
+            raise TimeoutError('nested parent startup deadline')
+        if self.error is not None:
+            raise self.error
+        if time.monotonic() >= self.protocol_deadline:
+            raise TimeoutError('nested parent startup deadline')
+        if self.parent_ready['pid'] != process.pid:
+            raise ValueError('nested READY does not name the owned parent')
+        receipt = self.original_watch(process, command)
+        if receipt.get('observation_error'):
+            return receipt  # Never acknowledge an incomplete actual observation.
+        if (receipt['pid'] != self.parent_ready['pid'] or
+                receipt['process_start_ticks'] != self.parent_ready['start']):
+            raise ValueError('nested parent startup differs from actual observation')
+        if time.monotonic() >= self.protocol_deadline:
+            raise TimeoutError('nested parent startup deadline')
+        data = json.dumps(dict(phase='PARENT_ACK', nonce=self.nonce,
+                               pid=receipt['pid'], start=receipt['process_start_ticks'])).encode()
+        if self.control.send(data) != len(data):
+            raise ValueError('nested parent startup short ACK')
+        return receipt
 
     def remaining(self):
         remaining = self.deadline - time.monotonic()
@@ -541,6 +581,7 @@ class NestedHandshake:
         with self.error_lock:
             if self.error is None:
                 self.error = error
+        self.ready_event.set()  # Wake startup waiters; error is checked before observation.
         self.wake()
 
     def sample_callback(self):
@@ -639,8 +680,17 @@ class NestedHandshake:
                 type(message.get('start')) is not int or message['start'] <= 0):
             raise ValueError('nested handshake child nonce/identity invalid')
         phase = message.get('phase')
+        if phase == 'PARENT_READY':
+            if (self.parent_ready is not None or self.ready is not None or
+                    type(message.get('ppid')) is not int or message['ppid'] <= 0):
+                raise ValueError('nested invalid/duplicate parent startup')
+            self.parent_ready = message
+            self.ready_event.set()
+            return
         if self.ready is None:
-            if phase != 'READY' or type(message.get('ppid')) is not int or message['ppid'] <= 0:
+            if (self.parent_ready is None or phase != 'READY' or
+                    type(message.get('ppid')) is not int or message['ppid'] <= 0 or
+                    message.get('ppid') != self.parent_ready['pid']):
                 raise ValueError('nested handshake first phase is not READY')
             self.ready = message
             self.child_socket.close()  # Parent and post-exec child inherited it.
@@ -779,14 +829,120 @@ class NestedHandshake:
         # This runs after the original owner sampler joins, including final sample.
         self.thread.join(max(0, self.deadline - time.monotonic()))
         self.owner.sampler.sample_callback = self.original_callback
+        self.owner.watch_child = self.original_watch
         for endpoint in (self.control, self.child_socket, self.wake_read, self.wake_write):
             endpoint.close()
+        for fd in (self.startup_read, self.startup_write):
+            if fd is not None:
+                os.close(fd)
         if self.thread.is_alive():
             raise AssertionError('nested handshake coordinator leaked during cleanup')
         if self.cleanup_error is not None:
             raise RuntimeError('nested handshake control shutdown failed') from self.cleanup_error
         if self.error is not None and not self.error_reported:
             raise self.error
+
+
+class NestedStartupOrdering(unittest.TestCase):
+    """Unit checks for the fixture gate; the real nested cases prove identity."""
+    def gate(self, events, deadline):
+        class Ready:
+            def wait(self, timeout):
+                events.append('READY')
+                return True
+        def watch(process, command):
+            events.append('watch')
+            return receipt
+        receipt = {'pid': 123, 'process_start_ticks': 456}
+        handshake = NestedHandshake.__new__(NestedHandshake)
+        handshake.ready_event = Ready()
+        handshake.child_socket = SimpleNamespace(close=lambda: None)
+        handshake.startup_read = handshake.startup_write = None
+        handshake.parent_ready = {'pid': 123, 'start': 456}
+        handshake.nonce = 'unit-startup'
+        def send(data):
+            events.append(json.loads(data)['phase'])
+            return len(data)
+        handshake.control = SimpleNamespace(send=send)
+        handshake.protocol_deadline = deadline
+        handshake.owner = SimpleNamespace(watch_child=watch)
+        handshake.original_watch = watch
+        handshake.error = None
+        return handshake, watch, receipt
+
+    def test_original_watch_follows_ready_without_replacing_its_receipt(self):
+        events = []
+        handshake, old_watch, receipt = self.gate(events, time.monotonic()+1)
+        watch = getattr(handshake, 'watch_parent', old_watch)
+        self.assertIs(watch(SimpleNamespace(pid=123), ['child']), receipt)
+        self.assertEqual(events, ['READY', 'watch', 'PARENT_ACK'])
+        events = []
+        handshake, _, receipt = self.gate(events, time.monotonic()+1)
+        receipt['observation_error'] = 'actual argv mismatch'
+        self.assertIs(handshake.watch_parent(SimpleNamespace(pid=123), ['child']), receipt)
+        self.assertEqual(events, ['READY', 'watch'], 'failed actual observation received ACK')
+        self.check_startup_failure('parent')
+
+    def test_expired_startup_does_not_observe_or_extend_deadline(self):
+        events = []
+        handshake, old_watch, _ = self.gate(events, time.monotonic()-1)
+        watch = getattr(handshake, 'watch_parent', old_watch)
+        with self.assertRaisesRegex(TimeoutError, 'nested parent startup deadline'):
+            watch(SimpleNamespace(pid=123), ['child'])
+        self.assertEqual(events, [])
+        self.check_startup_failure('child')
+
+    def check_startup_failure(self, stage):
+        # Actual processes exit before their startup signal. The original run
+        # must reap them; a coordinator EOF cannot masquerade as readiness.
+        case = ActualNestedProcessOwnership()
+        original = ActualNestedProcessOwnership.nested_program
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_path = Path(tmp)/'failed-startup.json'
+            child_watch_path = Path(tmp)/'child-observed'
+            failure = ("import json,os,sys\nfrom pathlib import Path\n"
+                       "start=int(Path('/proc/self/stat').read_text().rsplit(')',1)[1].split()[19])\n"
+                       "Path("+repr(str(pid_path))+").write_text(json.dumps(dict(pid=os.getpid(),start=start)))\n"
+                       "sys.exit(23)\n")
+            def program(instance, *args, **kwargs):
+                parent = original(instance, *args, **kwargs)
+                if stage == 'parent':
+                    return failure+parent
+                counter = ("    actual_watch=attached.watch_child\n"
+                           "    def counted_watch(process,command):\n"
+                           "        Path("+repr(str(child_watch_path))+").write_text('observed')\n"
+                           "        return actual_watch(process,command)\n"
+                           "    attached.watch_child=counted_watch\n")
+                parent = parent.replace('    remaining=', counter+'    remaining=', 1)
+                tree = ast.parse(parent)
+                command = next(n for n in ast.walk(tree) if isinstance(n, ast.Assign) and
+                               any(isinstance(t, ast.Name) and t.id == 'command' for t in n.targets))
+                child = ast.literal_eval(command.value.elts[2])
+                return parent.replace(repr(child), repr(failure+child), 1)
+            watched = []
+            original_load = load
+            def observed_load():
+                module = original_load()
+                original_watch = module.TimerCpuRun.watch_child
+                def watch(owner, process, command):
+                    watched.append(process.pid)
+                    return original_watch(owner, process, command)
+                module.TimerCpuRun.watch_child = watch
+                return module
+            with patch.object(ActualNestedProcessOwnership, 'nested_program', program), \
+                    patch.dict(globals(), {'load': observed_load}):
+                with self.assertRaisesRegex(ValueError, 'nested handshake EOF/oversized child control message'):
+                    case.nested(True)
+            actual = json.loads(pid_path.read_text())
+            self.assertEqual(len(watched), 0 if stage == 'parent' else 1)
+            self.assertNotIn(actual['pid'], watched, 'startup failure reached original watch')
+            self.assertFalse(child_watch_path.exists(), 'child EOF reached original watch')
+            stat = Path('/proc/%d/stat' % actual['pid'])
+            if stat.exists():
+                self.assertNotEqual(int(stat.read_text().rsplit(')',1)[1].split()[19]), actual['start'],
+                                    'failed startup process was not reaped')
+            self.assertFalse(any(t.name in ('native-cpu-sampler', 'nested-identity-handshake')
+                                 for t in threading.enumerate()))
 
 
 class ActualNestedProcessOwnership(unittest.TestCase):
@@ -836,10 +992,14 @@ def wait_ack(phase):
         if message.get('phase')!='PROBE_'+phase: raise ValueError('nested child unexpected ACK phase')
         send('HELD_'+phase)
     raise ValueError('nested child ACK count exceeds bound')
+startup=json.dumps(dict(nonce=nonce,pid=os.getpid(),start=start_ticks)).encode()+bytes([10])
+if os.write(STARTUP_WRITE,startup)!=len(startup): raise ValueError('nested child startup short write')
+os.close(STARTUP_WRITE)
 send('READY',ppid=os.getppid())
 START_WAIT
 send('STARTING')
-""".replace('CONTROL_FD', str(handshake.child_fd)).replace('CONTROL_NONCE', repr(handshake.nonce)).replace(
+""".replace('STARTUP_WRITE', str(handshake.startup_write)).replace(
+                'CONTROL_FD', str(handshake.child_fd)).replace('CONTROL_NONCE', repr(handshake.nonce)).replace(
                 'CONTROL_DEADLINE', repr(handshake.protocol_deadline)).replace(
                 'START_WAIT', '' if handshake.semantic_mutant == 'skip-start-wait' else "wait_ack('START')")
             ending = "send('SPAN_CLOSED',t0=t0,t1=t1)\n"
@@ -864,16 +1024,60 @@ print(json.dumps(dict(child=actual,child_returncode=done.returncode,pending=resu
 """
         if observe:
             parent = parent.replace('import importlib.util,json,subprocess,sys',
-                                    'import importlib.util,json,os,subprocess,sys,time', 1)
+                                    'import importlib.util,json,os,select,socket,subprocess,sys,time', 1)
+            startup_watch = """    remaining=STARTUP_DEADLINE-time.monotonic()
+    if remaining<=0: raise TimeoutError('nested parent startup deadline')
+    parent_start=attached.observer['process_start_ticks']
+    with socket.socket(fileno=os.dup(CONTROL_FD)) as startup_control:
+        startup_control.settimeout(remaining)
+        data=json.dumps(dict(phase='PARENT_READY',nonce=STARTUP_NONCE,
+            pid=os.getpid(),start=parent_start,ppid=os.getppid())).encode()
+        if startup_control.send(data)!=len(data): raise ValueError('nested parent startup short write')
+        data,_,flags,_=startup_control.recvmsg(4096)
+        if not data or flags&socket.MSG_TRUNC: raise ValueError('nested parent startup EOF/oversize')
+        ack=json.loads(data)
+        if (not isinstance(ack,dict) or ack.get('phase')!='PARENT_ACK' or
+                ack.get('nonce')!=STARTUP_NONCE or ack.get('pid')!=os.getpid() or
+                ack.get('start')!=parent_start): raise ValueError('nested parent startup ACK identity mismatch')
+    if time.monotonic()>=STARTUP_DEADLINE: raise TimeoutError('nested parent startup deadline')
+    startup_writer=os.fdopen(STARTUP_WRITE,'wb',buffering=0)
+    original_watch=attached.watch_child
+    def watch_child_ready(process,command):
+        startup_writer.close()  # Child now owns the only remaining pipe writer.
+        remaining=STARTUP_DEADLINE-time.monotonic()
+        if remaining<=0 or not select.select([STARTUP_READ],[],[],remaining)[0]:
+            raise TimeoutError('nested child startup deadline')
+        data=os.read(STARTUP_READ,4097)
+        if len(data)>4096 or not data.endswith(bytes([10])):
+            raise ValueError('nested child startup EOF/oversize/incomplete')
+        ready=json.loads(data)
+        if (not isinstance(ready,dict) or ready.get('nonce')!=STARTUP_NONCE or
+                type(ready.get('pid')) is not int or ready['pid']!=process.pid or
+                type(ready.get('start')) is not int or ready['start']<=0):
+            raise ValueError('nested child startup identity mismatch')
+        if time.monotonic()>=STARTUP_DEADLINE: raise TimeoutError('nested child startup deadline')
+        receipt=original_watch(process,command)
+        if receipt['pid']!=ready['pid'] or receipt['process_start_ticks']!=ready['start']:
+            raise ValueError('nested child startup differs from actual observation')
+        return receipt
+    attached.watch_child=watch_child_ready
+"""
+            parent = parent.replace('    command=', startup_watch+'    command=', 1)
             parent = parent.replace(
                 '    done=RUN_CHILD(command,capture_output=True,text=True,check=False)',
                 "    try:\n"
                 "        remaining=PARENT_DEADLINE-time.monotonic()\n"
                 "        if remaining<=0: raise TimeoutError('nested parent deadline')\n"
                 "        done=RUN_CHILD(command,capture_output=True,text=True,check=False,\n"
-                "                       pass_fds=(CONTROL_FD,),timeout=remaining)\n"
+                "                       pass_fds=(CONTROL_FD,STARTUP_WRITE),timeout=remaining)\n"
                 "    finally:\n"
-                "        os.close(CONTROL_FD)")
+                "        os.close(CONTROL_FD)\n"
+                "        os.close(STARTUP_READ)\n"
+                "        startup_writer.close()")
+            parent = parent.replace('STARTUP_READ', str(handshake.startup_read)).replace(
+                'STARTUP_WRITE', str(handshake.startup_write)).replace(
+                'STARTUP_DEADLINE', repr(handshake.protocol_deadline)).replace(
+                'STARTUP_NONCE', repr(handshake.nonce))
             parent = parent.replace('CONTROL_FD', str(handshake.child_fd)).replace(
                 'PARENT_DEADLINE', repr(handshake.deadline - .25))
         if mutate_receipt:
@@ -908,12 +1112,14 @@ path.write_text(json.dumps(receipt)+'\\n')
                     self.assertEqual(len(sampler_threads), 1)
                     if observe:
                         handshake = NestedHandshake(owner, module, semantic_mutant)
+                        owner.watch_child = handshake.watch_parent
                     command_error = None
                     try:
                         command = [sys.executable, '-c', self.nested_program(observe, child_exit, mutate_receipt, handshake)]
                         kwargs = dict(capture_output=True, text=True, check=True, timeout=5)
                         if handshake is not None:
-                            kwargs.update(pass_fds=(handshake.child_fd,), timeout=handshake.remaining())
+                            kwargs.update(pass_fds=(handshake.child_fd, handshake.startup_read,
+                                                   handshake.startup_write), timeout=handshake.remaining())
                         done = owner.run(command, **kwargs)
                     except BaseException as error:
                         command_error = error
