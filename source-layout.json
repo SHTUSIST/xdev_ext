@@ -10528,6 +10528,14 @@
     {
       "source": "tests/benchmarks/nvme_gpu/test_ce_repeat_start.py",
       "logical_path": "tests/eval/nvme_gpu/test_ce_repeat_start.py"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/ce_worker_accounting.h",
+      "logical_path": "tests/eval/nvme_gpu/ce_worker_accounting.h"
+    },
+    {
+      "source": "tests/benchmarks/nvme_gpu/test_ce_worker_accounting.py",
+      "logical_path": "tests/eval/nvme_gpu/test_ce_worker_accounting.py"
     }
   ]
 }
