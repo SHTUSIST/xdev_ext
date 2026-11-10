@@ -1074,6 +1074,10 @@ static void xdev_ext_ce_complete(struct xdev_ext_ce_cookie *ck, u64 ticket, int 
 }
 
 /* ------------------------------------------- the actual production body */
+/* Absence fallback is fixture state only: old backend never reads it. */
+#if VARIANT_EVENT && !HARNESS_DIAG_POLICY_API
+static bool nv_xdev_ext_ce_diag_old_kick;
+#endif
 #include "nv-xdev_ext-ce-backend-actual.c"
 
 /* ================================================================ cases */
@@ -1203,6 +1207,31 @@ static void case_bind_unbind_clean(void)
 }
 
 /* These cases run the complete production submit/progress/teardown bodies. */
+static void case_policy_same_binding(void)
+{
+#if VARIANT_EVENT
+	struct fixture fx;
+	struct nv_xdev_ext_ce_host *h;
+	unsigned int phase;
+	REQUIRE(bind(&fx, 4) == 0, "bind");
+	h = fx.host;
+	CHECK(!nv_xdev_ext_ce_diag_old_kick, "private default must retain af13 policy");
+	for (phase = 0; phase < 3; phase++) {
+		bool old = phase != 1;
+		nv_xdev_ext_ce_diag_old_kick = old;
+		REQUIRE(submit1(&fx, phase + 1, XDEV_EXT_MECH_DIR_TO_DEVICE, 0, 4096) == 0, "submit");
+		CHECK(!!h->progress.pending == old, "policy phase%u did not select expected kick", phase);
+		if (!old) CHECK(h->watchdog.armed, "direct policy did not seed watchdog");
+		deliver(H.rm_last);
+		CHECK(H.done[phase + 1].count == 1 && H.done[phase + 1].status == 0,
+		      "policy completion lost/failed");
+		CHECK(fx.host == h && H.rm_bind == 1 && H.vidmem_bind == 1,
+		      "policy control changed binding");
+	}
+	ops->unbind_host(fx.host);ops->unbind_region(&fx.r);common_checks();
+#endif
+}
+
 static void case_submit_watchdog(void)
 {
 	struct fixture fx;
@@ -2148,6 +2177,7 @@ static void case_bind_attached_failure(void)
 }
 
 static const struct named_case cases[] = {
+	{ "policy-same-binding", case_policy_same_binding },
 	{ "submit-watchdog", case_submit_watchdog },
 	{ "watchdog-deadlines", case_watchdog_deadlines },
 	{ "watchdog-stale-stop", case_watchdog_stale_and_stop },
@@ -2198,6 +2228,12 @@ int main(int argc, char **argv)
 		return 2;
 	}
 	harness_init();
+#if VARIANT_EVENT
+	if (!strncmp(argv[1], "old-policy:", 11)) {
+		nv_xdev_ext_ce_diag_old_kick = true;
+		argv[1] += 11;
+	}
+#endif
 	(void)nv_live_before;
 	for (i = 0; i < ARRAY_SIZE(cases); i++)
 		if (!strcmp(argv[1], cases[i].name)) {

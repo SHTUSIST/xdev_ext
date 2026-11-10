@@ -74,6 +74,7 @@ class BackendHarness(unittest.TestCase):
             cls.build.write("linux/" + name, "/* provided by the host harness */\n")
         cls.build.write("nv_xdev_ext_ce_backend_types.h", types_header())
         event, unbind = contract_switches()
+        diag_policy = int("module_param_named(xdev_ext_ce_diag_old_kick," in source)
         xfer = ex.struct(MECH_H.read_text(), "xdev_ext_ce_xfer")
         owners = int(bool(re.search(r"\bowner\b", xfer) and re.search(r"\bgeneration\b", xfer)))
         print(f"actual {BACKEND} sha256={ex.sha(source)} event_api={event} "
@@ -87,6 +88,7 @@ class BackendHarness(unittest.TestCase):
                     FIXTURE, out,
                     defines=("XDEV_EXT_ENABLE_GPU_CE_DMA", "CONFIG_XDEV_EXT_MECH_CE",
                              f"HARNESS_EVENT_API={event}",
+                             f"HARNESS_DIAG_POLICY_API={diag_policy}",
                              f"HARNESS_OWNER_API={owners}",
                              f"HARNESS_UNBIND_STATUS={unbind}") + defines,
                     extra=("-I", str(ex.GPU / "kernel-open/nvidia")),
@@ -115,6 +117,13 @@ class BackendHarness(unittest.TestCase):
                                 result.returncode, 0,
                                 f"{variant} {case}\n{result.stdout[-3000:]}\n"
                                 f"{result.stderr[-3000:]}")
+
+    def test_private_policy_same_binding_and_old_policy_edges(self):
+        self.run_cases(("policy-same-binding", "old-policy:complete-in-submit",
+                        "old-policy:complete-once", "old-policy:complete-partial",
+                        "old-policy:timeout", "old-policy:unbind-pending",
+                        "old-policy:unbind-order", "old-policy:ambiguous-submit",
+                        "old-policy:event-active-pass"), ("event+iova", "event+phys"))
 
     def test_successful_submit_watchdog_without_redundant_irq_kick(self):
         self.run_cases(("submit-watchdog",))

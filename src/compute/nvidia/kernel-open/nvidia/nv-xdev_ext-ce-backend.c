@@ -67,6 +67,11 @@ module_param_named(xdev_ext_ce_poll_us, nv_xdev_ext_ce_poll_us, uint, 0644);
 MODULE_PARM_DESC(xdev_ext_ce_poll_us, "XDEV_EXT native CE progress polling base in us (1-100)");
 static unsigned int nv_xdev_ext_ce_poll_base(void)
 { return clamp_t(unsigned int, READ_ONCE(nv_xdev_ext_ce_poll_us), 1, 100); }
+#else
+/* Private diagnostic branch only: default is the af13 direct watchdog policy. */
+static bool nv_xdev_ext_ce_diag_old_kick;
+module_param_named(xdev_ext_ce_diag_old_kick, nv_xdev_ext_ce_diag_old_kick, bool, 0600);
+MODULE_PARM_DESC(xdev_ext_ce_diag_old_kick, "PRIVATE IRQ submit policy diagnostic; never a main ABI");
 #endif
 struct nv_xdev_ext_ce_request {
     struct xdev_ext_ce_xfer x[NV_XDEV_EXT_CE_MAX_XFERS];
@@ -536,7 +541,10 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
         h->backoff = nv_xdev_ext_ce_poll_base();
         queue_work(system_unbound_wq, &h->progress);
 #else
-        timer_reduce(&h->watchdog, h->deadlines[slot - h->slots]);
+        if (READ_ONCE(nv_xdev_ext_ce_diag_old_kick))
+            queue_work(system_unbound_wq, &h->progress);
+        else
+            timer_reduce(&h->watchdog, h->deadlines[slot - h->slots]);
 #endif
         rc = 0;
     } else if (outcome == NV_XDEV_EXT_CE_AMBIGUOUS) {

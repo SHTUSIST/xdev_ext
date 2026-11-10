@@ -75,6 +75,27 @@ static int rp_arm(const struct es_run *r, __u64 done, __u64 published)
  return n < 0 && errno == EAGAIN ? 0 : (n < 0 ? -errno : -EIO);
 }
 
+/* Linux param_get_bool returns exactly Y\n/N\n; no ordinary-file 1 readback. */
+static int rp_policy(unsigned int round)
+{
+ const char *path = "/sys/module/nvidia/parameters/xdev_ext_ce_diag_old_kick";
+ char got[4], want = round / RP_ROUNDS == 1 ? 'N' : 'Y';
+ FILE *f;
+ int ret = 0;
+ if (round % RP_ROUNDS) return 0;
+ f = fopen(path, "w");
+ if (!f) return -errno;
+ if (fputc(want, f) == EOF || fputc('\n', f) == EOF) ret = -EIO;
+ if (fclose(f) && !ret) ret = -EIO;
+ if (ret) return ret;
+ f = fopen(path, "r");
+ if (!f) return -errno;
+ if (fread(got, 1, sizeof(got), f) != 2 || got[0] != want || got[1] != '\n' || !feof(f))
+  ret = -EIO;
+ if (fclose(f) && !ret) ret = -EIO;
+ return ret;
+}
+
 static unsigned int rp_rounds(bool aba) { return RP_ROUNDS * (aba ? 3U : 1U); }
 static bool rp_is_spin(bool aba, unsigned int round) { return aba && round / RP_ROUNDS == 1; }
 
@@ -96,11 +117,16 @@ static __u64 rp_cpu_ns(void)
  return clock_gettime(CLOCK_THREAD_CPUTIME_ID, &ts) ? 0 :
         (__u64)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
-static void rp_report(bool aba, unsigned int round, __u64 session,
+static void rp_report(bool aba, bool policy, unsigned int round, __u64 session,
                       const struct xdev_ext_mech_stats *s, __u64 t0, __u64 t1, __u64 cpu)
 {
  __u64 before = (__u64)round * RP_BATCHES, target = before + RP_BATCHES;
- if (aba)
+ if (policy)
+  printf("CE_POLICY_ABA phase=%u policy=%s readback=%c readback_scope=phase-boundary "
+         "mode=block local_round=%u global_round=%u caller_cpu=NOT_MEASURED ",
+         round / RP_ROUNDS, round / RP_ROUNDS == 1 ? "direct-watchdog" : "old-kick",
+         round / RP_ROUNDS == 1 ? 'N' : 'Y', round % RP_ROUNDS, round);
+ else if (aba)
   printf("CE_WAIT_ABA phase=%u mode=%s local_round=%u global_round=%u "
          "start_ns=%llu terminal_ns=%llu caller_cpu_ns=%llu "
          "caller_cpu_scope=guest-thread-before-t0_after-t1 ", round / RP_ROUNDS,
@@ -121,7 +147,7 @@ static void rp_report(bool aba, unsigned int round, __u64 session,
 int main(int argc, char **argv)
 {
  const char *dev = "/dev/nvidia0";
- bool wait_aba = false;
+ bool wait_aba = false, policy_aba = false;
  struct es_ce ce = { .fd = { -1, -1 }, .sim = true };
  struct es_run r = { .ring = -1, .efd = -1 };
  struct xdev_ext_mech_create c = { 0 };
@@ -132,15 +158,18 @@ int main(int argc, char **argv)
  unsigned int round, i;
  int fd_before, ret, stop;
  if (argc == 2 && !strcmp(argv[1], "--help")) {
-  puts("usage: ce_repeat_start_probe [--ce-dev /dev/nvidiaN] [--wait-aba]\n"
-       "fixed 64KiB/F4KiB/D4/N32/7START; --wait-aba BLOCK7/SPIN7/BLOCK7; internal only, never a paper result");
+  puts("usage: ce_repeat_start_probe [--ce-dev /dev/nvidiaN] [--wait-aba | --submit-policy-aba]\n"
+       "fixed 64KiB/F4KiB/D4/N32/7START; --wait-aba BLOCK7/SPIN7/BLOCK7; internal only, never a paper result\n"
+       "--submit-policy-aba: PRIVATE same-binding21BLOCK old-kick/direct-watchdog/old-kick");
   return XG_EXIT_PASS;
  }
  for (i = 1; i < (unsigned int)argc; i++) {
   if (!strcmp(argv[i], "--wait-aba") && !wait_aba) wait_aba = true;
+  else if (!strcmp(argv[i], "--submit-policy-aba") && !policy_aba) policy_aba = true;
   else if (!strcmp(argv[i], "--ce-dev") && i + 1 < (unsigned int)argc) dev = argv[++i];
   else return XG_EXIT_USAGE;
  }
+ if (wait_aba && policy_aba) return XG_EXIT_USAGE;
  if (es_ce_is_sim(dev) || !strcmp(CE_REPEAT_SOURCE, "unqualified"))
   return XG_EXIT_USAGE;
  ret = es_ce_runtime_begin(dev, &fd_before);
@@ -173,7 +202,7 @@ int main(int argc, char **argv)
  if (!ret)
   ret = es_stats(&r, &s);
  if (ret) { ret = XG_EXIT_FAIL; goto out; }
- for (round = 0; round < rp_rounds(wait_aba); round++) {
+ for (round = 0; round < rp_rounds(wait_aba || policy_aba); round++) {
   __u64 before = (__u64)round * RP_BATCHES, target = before + RP_BATCHES;
   __u64 published = (__u64)round * RP_FRAMES, t0, t1, deadline, cpu0 = 0, cpu1 = 0;
   struct xdev_ext_mech_start start = {
@@ -188,6 +217,9 @@ int main(int argc, char **argv)
    umem[i] = rp_pattern(round, i % RP_FRAME);
   memset(buf, 0xa5 ^ round, RP_BYTES);
   if (es_ce_access(&ce, true, 0, buf, RP_BYTES) || rp_arm(&r, before, published)) {
+   ret = XG_EXIT_FAIL; break;
+  }
+  if (policy_aba && !(round % RP_ROUNDS) && (s.native_publish || rp_policy(round))) {
    ret = XG_EXIT_FAIL; break;
   }
   deadline = es_now_ns() + 10000000000ULL;
@@ -207,11 +239,14 @@ int main(int argc, char **argv)
       es_ce_access(&ce, false, 0, buf, RP_BYTES) || rp_check(buf, round)) {
    ret = XG_EXIT_FAIL; break;
   }
-  rp_report(wait_aba, round, r.session, &s, t0, t1, cpu1 - cpu0);
+  rp_report(wait_aba, policy_aba, round, r.session, &s, t0, t1, cpu1 - cpu0);
  }
  if (wait_aba && ret)
   fprintf(stderr, "CE_WAIT_ABA_FAILURE global_round=%u phase=%u mode=%s error=%d\n",
           round, round / RP_ROUNDS, rp_is_spin(wait_aba, round) ? "spin" : "block", ret);
+ if (policy_aba && ret)
+  fprintf(stderr, "CE_POLICY_ABA_FAILURE global_round=%u phase=%u mode=block error=%d\n",
+          round, round / RP_ROUNDS, ret);
  out:
  if (r.session) {
   stop = es_mech(r.ring, XDEV_EXT_MECH_OP_STOP, r.session);
@@ -231,7 +266,7 @@ int main(int argc, char **argv)
  if (eval_fd_check(fd_before))
   ret = XG_EXIT_FAIL;
  printf("%s result=%s rounds=%u diagnostic=internal "
-        "scope=session-local-not-channel-causality\n", wait_aba ? "CE_WAIT_ABA_DONE" : "CE_REPEAT_START_DONE",
-        ret ? "FAIL" : "PASS", ret ? 0 : rp_rounds(wait_aba));
+        "scope=session-local-not-channel-causality\n", policy_aba ? "CE_POLICY_ABA_DONE" : (wait_aba ? "CE_WAIT_ABA_DONE" : "CE_REPEAT_START_DONE"),
+        ret ? "FAIL" : "PASS", ret ? 0 : rp_rounds(wait_aba || policy_aba));
  return ret ? (ret == XG_EXIT_UNAVAILABLE ? ret : XG_EXIT_FAIL) : XG_EXIT_PASS;
 }
