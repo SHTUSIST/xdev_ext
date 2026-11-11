@@ -15,7 +15,7 @@
  * offset in the attached VA range (nv_p2p_vidmem_bind_export(): the same
  * binding, no GPUDirect RDMA registration needed);
  * bind_host maps the already pinned pool for the GPU DMA device. CeUtils
- * semaphore events kick session-worker retirement, which validates the saved frame
+ * semaphore events queue retirement work, which validates the saved frame
  * claims and reports each ticket once through xdev_ext_ce_complete().  After an AMBIGUOUS outcome the class never
  * unbinds the stage, so the window, the host mapping and the module
  * reference the class took stay held for good.
@@ -77,9 +77,7 @@ struct nv_xdev_ext_ce_host {
     nv_p2p_ce_host_t *rm;
     NvU64 bytes;
     struct mutex lock;
-    struct work_struct progress; /* POLL consumer only; IRQ uses session worker. */
-    void (*kick)(void *arg);
-    void *kick_arg;
+    struct work_struct progress;
 #ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
     struct hrtimer timer;
     unsigned int backoff;
@@ -104,28 +102,18 @@ struct nv_xdev_ext_ce_host {
     nv_p2p_umem_xfer_t xfers[NV_XDEV_EXT_CE_MAX_XFERS];
 };
 
-/* Only enqueue here: event/timer callbacks cannot sleep or reenter RM. */
-static void nv_xdev_ext_ce_kick(struct nv_xdev_ext_ce_host *h)
-{
-#ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
-    queue_work(system_unbound_wq, &h->progress);
-#else
-    h->kick(h->kick_arg);
-#endif
-}
-
 #ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
 static enum hrtimer_restart nv_xdev_ext_ce_poll_timer(struct hrtimer *timer)
 {
     struct nv_xdev_ext_ce_host *h = container_of(timer, struct nv_xdev_ext_ce_host, timer);
-    nv_xdev_ext_ce_kick(h);
+    queue_work(system_unbound_wq, &h->progress);
     return HRTIMER_NORESTART;
 }
 #else
 static void nv_xdev_ext_ce_deadline(struct timer_list *timer)
 {
     struct nv_xdev_ext_ce_host *h = timer_container_of(h, timer, watchdog);
-    nv_xdev_ext_ce_kick(h);
+    queue_work(system_unbound_wq, &h->progress);
 }
 
 /* No mutex/RM reentry: this can run before submit publishes its token. The
@@ -138,7 +126,7 @@ static void nv_xdev_ext_ce_event(void *arg, NvU64 watermark)
     if (watermark <= h->watermark) h->stats.late++;
     else h->watermark = watermark;
     spin_unlock_irqrestore(&h->event_lock, flags);
-    nv_xdev_ext_ce_kick(h);
+    queue_work(system_unbound_wq, &h->progress);
 }
 #endif
 
@@ -169,10 +157,11 @@ static void nv_xdev_ext_ce_sync(struct nv_xdev_ext_ce_host *h,
 #endif
 }
 
-/* One consumer serializes retirement. Save complete immutable requests
+/* Single work item serializes retirement. Save complete immutable requests
  * separately before releasing slots; a new submit cannot overwrite callbacks. */
-static void nv_xdev_ext_ce_retire(struct nv_xdev_ext_ce_host *h)
+static void nv_xdev_ext_ce_progress(struct work_struct *work)
 {
+    struct nv_xdev_ext_ce_host *h = container_of(work, struct nv_xdev_ext_ce_host, progress);
     NvU64 watermark = 0;
     unsigned int i, count = 0, pending = 0;
     unsigned long earliest = 0, flags;
@@ -251,22 +240,6 @@ static void nv_xdev_ext_ce_retire(struct nv_xdev_ext_ce_host *h)
         xdev_ext_ce_complete(c->cookie, c->ticket, failed ? -EIO : 0,
                             NV_TRUE, failed ? 0 : c->bytes);
     }
-}
-
-/* The original unbound consumer remains the compiled POLL path. */
-static void nv_xdev_ext_ce_progress(struct work_struct *work)
-{
-    struct nv_xdev_ext_ce_host *h = container_of(work, struct nv_xdev_ext_ce_host, progress);
-    nv_xdev_ext_ce_retire(h);
-}
-
-static void nv_xdev_ext_ce_progress_host(void *host)
-{
-#ifndef NV_XDEV_EXT_CE_POLL_COMPLETION
-    nv_xdev_ext_ce_retire(host);
-#else
-    (void)host; /* POLL retains its original work/getter/hrtimer consumer. */
-#endif
 }
 
 /* CREATE caller's process context. */
@@ -382,7 +355,8 @@ static int nv_xdev_ext_ce_unbind_region(struct xdev_ext_ce_region *r)
 
 /* CREATE, process context: UMEM owns and pins these ordinary cached pages. */
 static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **pages,
-                               u32 nr, void (*kick)(void *arg), void *arg, void **host)
+                               u32 nr, void (*unused_kick)(void *), void *unused_arg,
+                               void **host)
 {
     struct nv_xdev_ext_ce_region *region = r->priv;
     struct nv_xdev_ext_ce_host *h;
@@ -396,9 +370,6 @@ static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **
 #endif
     if (!nr || !pages || !host) return -EINVAL;
     *host = NULL;
-#ifndef NV_XDEV_EXT_CE_POLL_COMPLETION
-    if (!kick || !arg) return -EINVAL;
-#endif
 #ifdef NV_XDEV_EXT_CE_PHYS_ADDR
     if (!nv_p2p_umem_iommu_untranslated(region->dev)) return -EOPNOTSUPP;
 #endif
@@ -407,7 +378,6 @@ static int nv_xdev_ext_ce_bind_host(struct xdev_ext_ce_region *r, struct page **
     phys = kvmalloc_array(nr, sizeof(*phys), GFP_KERNEL);
     if (!phys) { kvfree(h); return -ENOMEM; }
     h->region = region; h->bytes = (NvU64)nr << PAGE_SHIFT;
-    h->kick = kick; h->kick_arg = arg;
 #ifdef NV_XDEV_EXT_CE_PHYS_ADDR
     for (i = 0; i < nr; i++) phys[i] = page_to_phys(pages[i]);
 #else
@@ -482,9 +452,8 @@ static int nv_xdev_ext_ce_unbind_host(void *host)
         return -EBUSY;
     }
     mutex_unlock(&h->lock);
-    /* Core quiesces its IRQ retirement hook before checked unbind. RM may
-     * still run a final enqueue-only callback while h and its stage are live.
-     * POLL disconnects its producer before the original work drain below. */
+    /* Producer disconnect precedes the final worker drain: RM teardown may
+     * run one last already queued CeUtils callback while h is still live. */
     down_read(&nv_system_pm_lock);
     status = nv_p2p_ce_host_unbind(h->rm);
     up_read(&nv_system_pm_lock);
@@ -567,12 +536,12 @@ static int nv_xdev_ext_ce_submit(struct xdev_ext_ce_region *r, void *host, u32 d
 #ifdef NV_XDEV_EXT_CE_POLL_COMPLETION
         h->backoff = nv_xdev_ext_ce_poll_base();
 #endif
-        nv_xdev_ext_ce_kick(h);
+        queue_work(system_unbound_wq, &h->progress);
         rc = 0;
     } else if (outcome == NV_XDEV_EXT_CE_AMBIGUOUS) {
         WRITE_ONCE(h->region->ambiguous, NV_TRUE);
         /* The failed slot completes here; progress retires other accepted work. */
-        nv_xdev_ext_ce_kick(h);
+        queue_work(system_unbound_wq, &h->progress);
         mutex_unlock(&h->lock);
         if (xdev_ext_ce_owners_valid(ck, ticket, saved->x, saved->n))
             xdev_ext_ce_complete(ck, ticket, status ? nv_p2p_umem_errno(status) : -EIO,
@@ -595,7 +564,7 @@ static struct xdev_ext_ce_backend_ops nv_xdev_ext_ce_backend = {
     .bind_host     = nv_xdev_ext_ce_bind_host,
     .unbind_host   = nv_xdev_ext_ce_unbind_host,
     .submit        = nv_xdev_ext_ce_submit,
-    .progress      = nv_xdev_ext_ce_progress_host,
+    .progress      = NULL,
 };
 
 static NvBool nv_xdev_ext_ce_backend_registered;
@@ -608,7 +577,8 @@ void nv_xdev_ext_ce_backend_init(const struct file_operations *fops)
         return;
 
     nv_xdev_ext_ce_backend.fops = fops;
-    rc = xdev_ext_ce_backend_register_v2(&nv_xdev_ext_ce_backend, sizeof(nv_xdev_ext_ce_backend));
+    rc = xdev_ext_ce_backend_register_v2(&nv_xdev_ext_ce_backend,
+                                           sizeof(nv_xdev_ext_ce_backend));
     if (rc != 0)
     {
         nv_printf(NV_DBG_ERRORS,
